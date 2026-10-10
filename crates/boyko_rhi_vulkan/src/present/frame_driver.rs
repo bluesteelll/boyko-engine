@@ -11,10 +11,11 @@ use crate::device::{DeviceFns, SwapchainDeviceFns, VulkanContext};
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
 
-use super::graph_bridge::GbufferPassPlan;
+use super::graph_bridge::{ForwardPassPlan, GbufferPassPlan, VbPassPlan};
+use super::passes::vb::VbRecordProbe;
 use super::scene_types::{GBufferScene, SampledComposite, Scene, UiPass};
 use super::swapchain::swapchain_image_for;
-use super::targets::{GBufferFrame, GBufferTargets};
+use super::targets::{GBufferFrame, GBufferTargets, TargetsProfile};
 use super::{FRAMES_IN_FLIGHT, Surface, Swapchain, SwapchainError};
 
 /// Per-frame-in-flight CPU↔GPU sync: an acquire semaphore + an in-flight fence.
@@ -47,6 +48,13 @@ pub struct Renderer<'ctx> {
     pub(crate) render_finished: Vec<VkSemaphore>,
     /// The current frame-in-flight slot (round-robin).
     pub(crate) frame_index: usize,
+    /// Total committed submits (`vkQueueSubmit` calls that reached the ring
+    /// advance below) — the fence clock the asset-retire gate (F6) is keyed on.
+    /// Increments 1:1 with `frame_index` at the SAME site (below); unlike
+    /// `frame_index` it is NOT reset by [`recreate`](Self::recreate) (it stays
+    /// monotonic across swapchain rebuilds — `recreate`'s `device_wait_idle`
+    /// already backstops the fence horizon for any in-flight retire).
+    submission_epoch: u64,
     /// The in-house Render Dependency Graph. Re-declared PER FRAME over the WHOLE
     /// G-buffer frame in [`render_gbuffer_frame`](Self::render_gbuffer_frame) (a
     /// zero-alloc `reset`+re-declare+`compile`) and stored as the resulting
@@ -59,7 +67,29 @@ pub struct Renderer<'ctx> {
     /// [`render_gbuffer_frame`](Self::render_gbuffer_frame). Optional members are
     /// `None` when their pass was config-gated off this frame, so `record_gbuffer`
     /// records that pass's graph barriers only when it also records the pass body.
+    /// `Some` only on a `Deferred`-resolved frame (`declare_deferred_graph`'s output);
+    /// `None` on a `Forward`-resolved frame (see [`Self::forward_pass_plan`]).
     pub(crate) gbuffer_pass_plan: Option<GbufferPassPlan>,
+    /// Multi-paradigm render-path plan, rung R4b-b: the `Forward` sibling of
+    /// [`Self::gbuffer_pass_plan`] — re-declared PER FRAME by `declare_forward_graph` over the
+    /// SAME shared [`Self::frame_graph`] (see [`super::graph_bridge::ForwardPassPlan`]'s doc for
+    /// why this is a decoupled, private ResId space rather than an extension of
+    /// [`GbufferPassPlan`]). `Some` only on a `Forward`-resolved frame; `None` on a
+    /// `Deferred`-resolved frame.
+    pub(crate) forward_pass_plan: Option<ForwardPassPlan>,
+    /// Multi-paradigm render-path plan, rung R8: the `VisibilityBuffer` sibling of
+    /// [`Self::forward_pass_plan`] — re-declared PER FRAME by `declare_vb_graph` over the SAME
+    /// shared [`Self::frame_graph`] (see [`super::graph_bridge::VbPassPlan`]'s doc for why this
+    /// is its OWN decoupled, private ResId space). `Some` only on a `VisibilityBuffer`-resolved
+    /// frame; `None` otherwise.
+    pub(crate) vb_pass_plan: Option<VbPassPlan>,
+    /// Dynamic-materials DM1: this frame's recorder-site material-upload counts
+    /// ([`super::MaterialUploadProbe`]). Reset at the top of every
+    /// [`render_gbuffer_frame`](Self::render_gbuffer_frame) and incremented by the three
+    /// recorders (`&self`) where they record the `material_upload` pass — a `Cell` because the
+    /// recorders borrow the renderer shared, not because anything else touches it (one thread
+    /// records).
+    material_upload_probe: core::cell::Cell<super::MaterialUploadProbe>,
 }
 
 impl<'ctx> Renderer<'ctx> {
@@ -163,7 +193,15 @@ impl<'ctx> Renderer<'ctx> {
         // hand path emits: the 3 color images UNDEFINED→COLOR_ATTACHMENT_OPTIMAL at
         // TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT, then depth UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL
         // at TOP_OF_PIPE→(EARLY|LATE)_FRAGMENT_TESTS.
-        let mut frame_graph = crate::framegraph::FrameGraph::with_capacity(16, 16, 64);
+        //
+        // Particles P0 raised this from `(16, 16, 64)` to `(48, 32, 192)`. The reserve is a
+        // FIRST-FRAME ALLOCATION HINT, not a bound — `Vec::with_capacity` grows on demand — so an
+        // undersized one costs a reallocation on the frame that overflows it and nothing else. It
+        // was already undersized before this rung (`declare_vb_graph` alone declares 33
+        // resources), and the particle tail adds ten more resources, five more passes and ~25 more
+        // accesses on an armed frame. The new numbers cover the widest declarator with the tail
+        // armed, with room left so the next append does not re-open the question.
+        let mut frame_graph = crate::framegraph::FrameGraph::with_capacity(48, 32, 192);
         let albedo = frame_graph.add_image("albedo");
         let normal = frame_graph.add_image("normal");
         let material = frame_graph.add_image("material");
@@ -209,9 +247,33 @@ impl<'ctx> Renderer<'ctx> {
             frames,
             render_finished,
             frame_index: 0,
+            submission_epoch: 0,
             frame_graph,
             gbuffer_pass_plan: None,
+            forward_pass_plan: None,
+            vb_pass_plan: None,
+            material_upload_probe: core::cell::Cell::new(super::MaterialUploadProbe::default()),
         })
+    }
+
+    /// Dynamic-materials DM1: what the recorder did with the LAST
+    /// [`render_gbuffer_frame`](Self::render_gbuffer_frame)'s material upload — counted at the
+    /// record sites ([`super::MaterialUploadProbe`]). All-zero after a frame that recorded
+    /// nothing (an idle frame, or a call that returned before recording).
+    #[inline]
+    pub fn material_upload_probe(&self) -> super::MaterialUploadProbe {
+        self.material_upload_probe.get()
+    }
+
+    /// Records one `material_upload` pass that handed `regions` regions to `vkCmdCopyBuffer` —
+    /// called by the three recorders at the site that records the pass.
+    #[inline]
+    pub(crate) fn note_material_upload(&self, regions: u32) {
+        let p = self.material_upload_probe.get();
+        self.material_upload_probe.set(super::MaterialUploadProbe {
+            passes: p.passes + 1,
+            regions: p.regions + regions,
+        });
     }
 
     /// The frame-in-flight slot index the NEXT [`present_sampled`](Self::present_sampled)
@@ -225,6 +287,19 @@ impl<'ctx> Renderer<'ctx> {
     #[inline]
     pub fn frame_index(&self) -> usize {
         self.frame_index
+    }
+
+    /// Total committed submits so far — the monotonic fence clock. Advances
+    /// exactly once per successful `vkQueueSubmit` (the same site that advances
+    /// [`frame_index`](Self::frame_index)), and only there: a pre-acquire
+    /// out-of-date recreate returns before either counter moves. Used by the
+    /// asset-retire gate: a resource enqueued at epoch `N` is safe to free once
+    /// the host has observed epoch `>= N + FRAMES_IN_FLIGHT` (its last possible
+    /// submit, `N`, is then guaranteed GPU-complete by the ring's own fence
+    /// discipline).
+    #[inline]
+    pub fn submission_epoch(&self) -> u64 {
+        self.submission_epoch
     }
 
     /// Blocks until the CURRENT [`frame_index`](Self::frame_index) slot's in-flight
@@ -458,6 +533,9 @@ impl<'ctx> Renderer<'ctx> {
         let present_result = VkResult::from_raw(raw);
 
         self.frame_index = (self.frame_index + 1) % FRAMES_IN_FLIGHT;
+        // Counts committed submits exactly (see `submission_epoch` doc); `u64`
+        // never wraps in practice (~585 years at 1000 submits/s).
+        self.submission_epoch = self.submission_epoch.wrapping_add(1);
 
         if present_result == VkResult::ERROR_OUT_OF_DATE_KHR
             || present_result == VkResult::SUBOPTIMAL_KHR
@@ -719,12 +797,27 @@ impl<'ctx> Renderer<'ctx> {
     /// on-screen golden readback path — proving the image-based composite reached the
     /// swapchain); the steady present path passes `None`.
     ///
+    /// `vb_id_readback` is the VG-R0 rung R0c density census's SECOND, INDEPENDENT staging: a
+    /// `Some` copies the VB path's `vb_id` image into it on THIS frame. Read by the `VisibilityBuffer`
+    /// recorder alone — the Deferred and Forward paths own no `vb_id` and never see it. The two
+    /// readbacks are deliberately separate parameters rather than one: they hash different images,
+    /// at different extents (`extent` vs `present_extent`) and different texel widths (4 B vs 8 B),
+    /// and the census is armed on frames the golden dump is not.
+    ///
     /// `present_extent` is the composite's native size for the top-left 1:1 present
     /// (`min(swapchain_extent, present_extent)` clamps the present viewport/scissor, so
     /// the per-texel golden is exact regardless of the WSI extent clamp — the same
     /// 1:1-top-left contract [`SampledComposite`] uses). Pass the extent the marcher
     /// dispatched at (the clamped swapchain extent the caller sized `frame`'s targets
     /// + `scene.camera_uniform` + `scene.dispatch_group_count_x` to).
+    ///
+    /// `aa_extent` (SSAA) is the BOOT-FIXED native extent `aa_out` is sized to under
+    /// `AaMode::Ssaa` (`host.native_extent`, NOT the live `width`/`height` — which track
+    /// window resizes while the swapchain-only resize contract leaves `aa_out` fixed,
+    /// exactly like `present_extent` already stays fixed under a resize). For
+    /// Off/Fxaa/Smaa this SHOULD equal `present_extent` (byte-identical to before SSAA
+    /// existed); the caller is responsible for that equality (this fn does not enforce
+    /// it, since `aa_extent` is read only when `scene.ssaa.is_some()`).
     ///
     /// `token` is this frame's [`FrameWriteToken`] (minted by
     /// [`wait_frame_in_flight`](Self::wait_frame_in_flight)), consumed BY VALUE:
@@ -742,7 +835,16 @@ impl<'ctx> Renderer<'ctx> {
     /// [`GBufferTargets::sync_gbuffer`] when needed), and both
     /// `scene.dispatch_group_count_x` and `scene.camera_uniform`'s `count` were sized to
     /// that extent. Any readback buffer is host-visible and at least
-    /// `swapchain.extent` * 4 bytes (4 B/texel).
+    /// `swapchain.extent` * 4 bytes (4 B/texel); any `vb_id_readback` buffer is host-visible and
+    /// at least `present_extent` * 8 bytes (`R32G32_UINT`, 8 B/texel — a DIFFERENT extent and a
+    /// DIFFERENT texel width from the swapchain readback's, which is why the two contracts are
+    /// stated separately).
+    ///
+    /// VG R3 piece 2 step P2-6: `vb_record_probe` is gate G2's count sink
+    /// ([`VbRecordProbe`](super::VbRecordProbe)) — host memory, no device resource, no contract
+    /// beyond "the borrow outlives the call". It reaches only the `VisibilityBuffer` arm below;
+    /// the Deferred/Forward recorders have no second raster scope to report and are handed
+    /// nothing. `None` (every steady/golden/interactive frame) records byte-identical commands.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn render_gbuffer_frame(
         &mut self,
@@ -756,7 +858,10 @@ impl<'ctx> Renderer<'ctx> {
         height: u32,
         clear: [f32; 4],
         present_extent: VkExtent2D,
+        aa_extent: VkExtent2D,
         readback: Option<&BoundBuffer>,
+        vb_id_readback: Option<&BoundBuffer>,
+        vb_record_probe: Option<&mut VbRecordProbe>,
     ) -> Result<bool, SwapchainError> {
         debug_assert_eq!(
             token.slot(),
@@ -765,6 +870,8 @@ impl<'ctx> Renderer<'ctx> {
         );
         // The by-value consume ends this frame's host-write window (R0b).
         let _ = token;
+        // Dynamic-materials DM1: a call that returns before recording reports nothing.
+        self.material_upload_probe.set(super::MaterialUploadProbe::default());
         // Thin adapter over the shared [`drive_frame`](Self::drive_frame) skeleton, with
         // `frame` (the G-buffer targets) threaded as the payload: pre-record syncs the
         // targets, the record body re-declares the whole-frame graph then records the
@@ -790,7 +897,21 @@ impl<'ctx> Renderer<'ctx> {
                 // sibling slots. (The first call creates them.) The descriptor sets are
                 // written ONCE per composite extent.
                 |_this, frame| {
-                    GBufferTargets::sync_gbuffer(&mut frame.targets, ctx, scene, present_extent)
+                    // SSAA: `aa_out` is sized to the caller-supplied `aa_extent` (BOOT-FIXED
+                    // native, not `present_extent` — 2× under SSAA) — see
+                    // `GBufferTargets::sync_gbuffer`'s doc. For Off/Fxaa/Smaa,
+                    // `aa_extent == present_extent` (byte-identical to before SSAA existed).
+                    // Multi-paradigm render-path plan, rung R2: `TargetsProfile::from_scene`
+                    // derives the (today: always-`DeferredFull`) profile the R3+ path-conditional
+                    // allocation seam threads through.
+                    GBufferTargets::sync_gbuffer(
+                        &mut frame.targets,
+                        ctx,
+                        scene,
+                        present_extent,
+                        aa_extent,
+                        TargetsProfile::from_scene(scene),
+                    )
                 },
                 |this, frame, cmd, image, view, extent| {
                     // The framegraph drives the frame: re-declare the WHOLE G-buffer
@@ -798,30 +919,95 @@ impl<'ctx> Renderer<'ctx> {
                     // the resulting `GbufferPassPlan` — BEFORE the `&self`
                     // `record_gbuffer` borrow, which then reads the compiled per-pass
                     // barrier plan through it. Zero-alloc (`reset` retains capacity); a
-                    // per-frame `compile` is cheap for a ~11-pass line.
-                    this.declare_gbuffer_graph(scene);
+                    // per-frame `compile` is cheap for a ~11-pass line. Multi-paradigm
+                    // render-path plan, rung R2: dispatches through `declare_frame_graph`,
+                    // which selects the per-path declarator from `scene.resolved_render_path
+                    // .path` (today: always the `Deferred` arm, `declare_deferred_graph`).
+                    this.declare_frame_graph(scene);
 
                     let targets = frame.targets.as_ref().expect(
                         "invariant: sync_gbuffer made the targets present before record",
                     );
 
-                    this.record_gbuffer(
-                        cmd,
-                        image,
-                        view,
-                        extent,
-                        present_extent,
-                        clear,
-                        scene,
-                        targets,
-                        readback,
-                        // HW-RT rung R2a-3: the AS command table (for the per-frame TLAS build),
-                        // resolved from `ctx` — `None` on a non-RT device (the recorder then skips
-                        // the tlas block even if `scene.tlas` were somehow `Some`). Gated so the
-                        // `not(hwrt)` signature is unchanged.
-                        #[cfg(feature = "hwrt")]
-                        ctx.accel_fns_opt(),
-                    )
+                    // Multi-paradigm render-path plan, rung R4b-b: mirrors
+                    // `declare_frame_graph`'s dispatch (`scene.path_is_forward()` is the SAME
+                    // predicate that fn's caller — `declare_forward_graph` vs
+                    // `declare_deferred_graph` — used, the W1 single-predicate discipline). A
+                    // `Forward`-resolved frame records `record_forward` instead of
+                    // `record_gbuffer`; the two are mutually exclusive per boot (Decision 1).
+                    if scene.path_is_vb() {
+                        // Multi-paradigm render-path plan, rung R8: mirrors the `path_is_forward()`
+                        // dispatch immediately below (the SAME W1 single-predicate discipline) — a
+                        // `VisibilityBuffer`-resolved frame records `record_vb` instead of
+                        // `record_forward`/`record_gbuffer`; the three are mutually exclusive per
+                        // boot (Decision 1). VB REUSES `ForwardTargets` (depth ring + Set-1 shadow
+                        // set) alongside its OWN `VbTargets` (`vb_id` ring) — `VbTargets`'s doc.
+                        let fwd = targets.forward.as_ref().expect(
+                            "invariant: TargetsProfile::VbMesh built ForwardTargets before record",
+                        );
+                        let vb = targets.vb.as_ref().expect(
+                            "invariant: TargetsProfile::VbMesh built VbTargets before record",
+                        );
+                        this.record_vb(
+                            cmd,
+                            image,
+                            view,
+                            extent,
+                            present_extent,
+                            aa_extent,
+                            clear,
+                            scene,
+                            targets,
+                            fwd,
+                            vb,
+                            readback,
+                            vb_id_readback,
+                            // VG R3 piece 2 step P2-6: gate G2's count sink, moved in (the record
+                            // closure is `FnOnce`). The VB arm is the only one that can report a
+                            // second raster scope, so this is the only arm it reaches.
+                            vb_record_probe,
+                            // Rung R9d: the AS command table (for the VB split's own per-frame
+                            // TLAS build), the SAME resolve `record_gbuffer`'s own call uses
+                            // below.
+                            #[cfg(feature = "hwrt")]
+                            ctx.accel_fns_opt(),
+                        )
+                    } else if scene.path_is_forward() {
+                        let fwd = targets.forward.as_ref().expect(
+                            "invariant: TargetsProfile::ForwardMesh built ForwardTargets before record",
+                        );
+                        this.record_forward(
+                            cmd,
+                            image,
+                            view,
+                            extent,
+                            present_extent,
+                            clear,
+                            scene,
+                            targets,
+                            fwd,
+                            readback,
+                        )
+                    } else {
+                        this.record_gbuffer(
+                            cmd,
+                            image,
+                            view,
+                            extent,
+                            present_extent,
+                            aa_extent,
+                            clear,
+                            scene,
+                            targets,
+                            readback,
+                            // HW-RT rung R2a-3: the AS command table (for the per-frame TLAS build),
+                            // resolved from `ctx` — `None` on a non-RT device (the recorder then skips
+                            // the tlas block even if `scene.tlas` were somehow `Some`). Gated so the
+                            // `not(hwrt)` signature is unchanged.
+                            #[cfg(feature = "hwrt")]
+                            ctx.accel_fns_opt(),
+                        )
+                    }
                 },
             )
         }

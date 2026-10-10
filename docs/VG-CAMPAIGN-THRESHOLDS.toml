@@ -1,0 +1,813 @@
+# VG campaign thresholds — AUTHOR-FROZEN. This file never changes.
+#
+# WHY THIS FILE IS SEPARATE FROM docs/VG-CAMPAIGN-CLAIM.toml.
+#
+# Rev 2 put both halves in one hashed unit and the freeze died on contact with its own schedule.
+# The claim file contains owner VALUES calls that the ladder REQUIRES to be filled — R0b cannot
+# author CORPUS.toml until `corpus.arrangement` is answered. Filling it changes the file's sha256,
+# so the hash recorded at R0a is guaranteed to break before the first rung that asserts it. Once
+# "the hash moved again, re-record it" is a routine event, the tripwire has no signal left: any
+# re-record can carry a simultaneous edit to a K1 threshold and every rung stays green.
+#
+# So the two halves are split by their update discipline, not by their subject:
+#
+#   * THIS file  — author-set, decision-bearing, frozen at authoring time, **never edited**. Its
+#                  sha256 is recorded once by R0a and re-asserted by the one test whose only job is
+#                  to re-hash it ([hash_assertion].hash_tripwire_test). A change here is a new plan
+#                  revision with a dated amendment in the plan's §11, and it reds that test until
+#                  the recorded hash is deliberately updated in the same act.
+#                  ⚠️ This line read "re-asserted by R0c/R0d/R0e/R0f ... reds four rungs" through
+#                  Rev 7. All four were GPU- or corpus-dependent tests that do not run here, so the
+#                  count was of rungs that would never fire. Naming one test that does is worth
+#                  more than naming four that do not.
+#   * CLAIM file — owner VALUES calls, PENDING until answered, filled exactly once. Not hashed;
+#                  gated instead by a sentinel rule (a rung that needs a field asserts it is not
+#                  PENDING), which is the discipline goldens/PINS.toml already uses.
+#
+# Nothing in this file was tuned against a measurement: it is authored before the ingest path, the
+# census instrument, the census run, the harness and the reference capture exist.
+
+# ⚠️ These two fields exist so a pre-R0a edit is VISIBLE, and they were stale through Rev 4, Rev 5
+# and Rev 7 -- the third occurrence caught by an adversarial pass rather than by the fields
+# themselves, in the very revision whose slogan was about fixes that do not land. They are updated
+# here in the same act as the edit, which is the whole of their job.
+schema_version = 29
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 39"
+frozen_date = "2026-08-01"
+
+# THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
+# header said "never edited" and the plan's amendment table read "No amendment yet."
+#
+# The freeze BEGINS when R0a records this file's sha256. R0a has not run and no code exists, so
+# every edit so far is AUTHORING, not amendment -- legitimate, but it must be visible, which is
+# what schema_version and frozen_at_revision are for. Both were stale through Rev 4 and Rev 5.
+#
+# After R0a records the hash: no in-place edits. A change is a new plan revision plus a dated entry
+# in the plan's section 11.1, and the recorded hash is updated in the same commit, deliberately.
+freeze_begins_at = "R0a records the sha256"
+pre_r0a_edits_are_authoring_not_amendment = true
+
+# REV 39 -- THE SECOND AMENDMENT. Two acts, both forced by R0d's own measurement rather than chosen:
+#   (1) APPEND a fifth ladder rung, 5120x2880 -- the disposition on_not_converged_fire_direction's
+#       own note names for a ladder that has not converged, and R0d measured residuals of 0.3545 and
+#       0.2444 against a 0.05 margin on the two committed paths;
+#   (2) RE-DERIVE d_est_ceiling 4.0 -> 7.1111, because it is a FUNCTION of the top rung. Amendment 2
+#       is the rule that catches this, and a stale derived value is a defect class this file has
+#       shipped before.
+# Owner-delegated 2026-08-01 ("choose the best option yourself"). Dated row in the plan's 11.1.
+#
+# ⚠️ REV 38 IS THE FIRST AMENDMENT AFTER THE FREEZE, and it is the first edit to this file that is
+# NOT authoring. The freeze began 2026-07-31 when R0a recorded the digest; every edit before that was
+# authoring, every edit after it needs a dated row in the plan's section 11.1, and this one has it.
+# Owner-authorised 2026-08-01. Three acts, in one commit with the recorded hash update:
+#   (1) ADD k1_fire_aggregation -- a fold that did not exist while k1_decision_rule had no FIRE
+#       branch, frozen BEFORE any upper-bound instrument exists;
+#   (2) SUBTRACT "(the frustum+backface survivor counter)" from the firing paragraph an implementer
+#       greps -- it named a candidate its own refutation rejects, and R11 adds a third, engine-
+#       specific refutation: this engine backface-culls NOWHERE in its scene passes;
+#   (3) SUBTRACT "monotonically increasing" from the visible_tris derivation -- the plan's own
+#       section 5.7 stated the opposite, and non-nested sample lattices make the strict claim false.
+# (2) and (3) are SUBTRACTIONS, which is this campaign's only repair class with an unbroken record;
+# each had a sibling statement in the plan and BOTH texts move in this commit, because a repair that
+# reaches one of two stating texts is the Rev 31 defect by name.
+#
+# REV 31 -- no threshold changes; the review loop closes (plan Status). The extent question this
+# block's entries track is now MEASURED: crates/boyko_rhi_vulkan/tests/vg_extent_probe.rs, with
+# the grant table and the per-rung route it decides recorded in the plan's section 9.1.
+#
+# REV 29 -- no threshold changes; the extent limit moved from the plan section 11 (whose charter
+# is that nothing reads it) to section 9.1, and a headless offscreen route is recorded that may
+# remove the OS client area from the critical path entirely. ⚠️ REV 31: the second clause is
+# withdrawn -- Rev 30 established the route does not exist (the cited file records a CLEAR, not a
+# raster, and the shipped chain's only constructor requires a swapchain-derived format), and this
+# entry kept asserting it in the present indicative, in the one file R0a hashes: the repair reached
+# 1 of its 2 stating texts. The extent limit stands in section 9.1, measured.
+#
+# REV 28 -- no threshold changes. R0c now names the PER-RUNG EXTENT ROUTE that
+# assert_achieved_extent below has always gated (which client extent per rung, and whether the
+# 2x SSAA composite is the route to it, with arming ASSERTED rather than trusted -- the probe
+# degrades to Off silently). The plan's section 9.1 carries the display-extent limit as an UNMEASURED
+# precondition. ⚠️ REV 30: that read "the plan's section 11 records the display extent as an
+# UNMEASURED precondition: it is the one environment row that gates a rung rather than informing a
+# design decision" -- a claim that section 11 gates a rung, in a file whose own charter is that
+# section 11 gates nothing. The limit lives in section 9.1; section 11 keeps a pointer.
+#
+# ---------------------------------------------------------------------------------------------
+# [census] — the resolution ladder. Frozen because density scales as 1/resolution^2, which makes
+# resolution the parameter most able to decide K1 silently.
+# ---------------------------------------------------------------------------------------------
+[census]
+# The census runs the whole ladder and reports a CURVE. 512x512 is not a free choice — it is the
+# existing DUMP_EXTENT (crates/boyko_app/tests/sv0_scene/mod.rs:162), the extent every VB fixture
+# and golden pin already uses.
+# ⚠️ REV 39 APPENDS TWO RUNGS, 5120x2880 and 7680x4320, and it is this field's OWN pre-registered
+# disposition
+# rather than a convenience. R0d measured visible_tris as NOT CONVERGED on either committed path
+# (residuals 0.3545 and 0.2444 against ladder_convergence_margin = 0.05), and
+# on_not_converged_fire_direction's note says in its own words: "The disposition is to extend the
+# ladder upward (a new plan revision), NOT to adjudicate on an underestimate." This is that revision.
+#
+# NEITHER RUNG IS A FREE CHOICE: they are 4 x 1280x720 and 4 x 1920x1080, and the plan's section 9.1
+# grant table records BOTH those client extents as ones THIS BOX GRANTS EXACTLY. 7680x4320 is the
+# LARGEST rung any route on this box reaches -- the admitted SSAA set tops out at 4x and 1920x1080 is
+# the largest granted client -- so the ladder is now EXHAUSTED here, and that is the stopping rule.
+#
+# ⚠️ THE STOPPING RULE IS PRE-COMMITTED, AND IT MATTERS MORE THAN THE RUNGS. Extending a ladder until
+# a number crosses a threshold would be the defect this file exists to prevent. What makes it sound
+# here is the DIRECTION: D_est is a LOWER bound (d_est_bound_direction), so a further rung can only
+# move it TOWARD the truth, never away. Crossing d_est_min at ANY rung is therefore a sound proof
+# that the true density is at or above it; never crossing proves nothing. That asymmetry is what
+# separates tightening a bound from tuning a result -- and the ladder stops at the hardware limit,
+# not at the first favourable reading.
+#
+# MEASURED before this file was amended to include it: the fifth rung reads D_est(orbit_mid) = 0.9364,
+# short of 1.0. The extrapolation that motivated it predicted 14.4 Mpx would suffice and was WRONG --
+# the growth exponent kept decaying (0.640 -> 0.540 -> 0.403). That is why the rung was measured
+# rather than the prediction published. approach_close's own arithmetic says 320 Mpx and a 42 GB heap,
+# which no consumer GPU has; that path is expected to stay far below and to keep the MIN with it.
+resolution_ladder = [[512, 512], [1920, 1080], [2560, 1440], [3840, 2160], [5120, 2880], [7680, 4320]]
+
+# The resolution at which K1 is adjudicated. 1920x1080: the modal PC gaming resolution, and the
+# one at which a performance claim would be made. Choosing 2160p here would flatter the campaign
+# (denser pixels reach micro-polygon sooner); choosing 512x512 would refute it unfairly.
+decision_resolution = [1920, 1080]
+
+# The census must ASSERT the achieved extent equals the requested rung, per rung. This is not
+# paranoia: the sibling harness already carries the same check at 512x512
+# (sv0_deferred_term_bench.rs:297-299, "an OS-clamped window would silently measure a different
+# per-pixel workload"), and this engine's extent is a real OS window client area
+# (crates/boyko_rhi_vulkan/src/window.rs:252, AdjustWindowRectEx at :310). A display that clamps
+# 1440p and 2160p produces three plausible rows and a fabricated curve.
+assert_achieved_extent = true
+
+# The readback is streamed and hashed, never retained. At 3840x2160 x 8 B = 66.4 MB per censused
+# frame, and the plan's SS11 records this volume at 16 GB free with target/ at 58 GB, retention
+# would reproduce this project's standing hazard of disk exhaustion surfacing as mingw linker
+# errors.
+readback_retention = "stream_and_hash"
+
+# Cross-run gate. See [k1_instrument].ladder_convergence_margin for the other self-check.
+# NOTE: "byte_identical" is a HYPOTHESIS to be tested by R0c, not an assumption. Rev 2 justified it
+# by the 24 golden pins, which is invalid: the pins hash an 8-bit shaded BMP and this project has
+# MEASURED them blind below ~2^-16 relative. Two adjacent triangles of a smooth mesh can shade
+# identically to 8 bits and carry different vb_id. R0c must MEASURE cross-process vb_id identity
+# before R0d relies on it. If it does not hold, the non-determinism is itself a finding about the
+# raster path and R0d runs in its SECOND SHAPE (plan section 8 R0d): the finding is entered in the
+# plan's section 11.1 by name and date FIRST, and only then does the fallback below become gate
+# (a). ⚠️ REV 31 carries the plan's two conditions into this comment, which said "the fallback
+# below applies" unconditionally -- the fallback NAMES NO STATISTIC yet (a hash has no spread) and
+# is NOT usable until that dated amendment names its quantity (per-pixel disagreement fraction, or
+# the spread of the derived statistics); 0.05 is a placeholder magnitude, not a licensed bound.
+cross_run_gate = "byte_identical"
+cross_run_spread_fallback = 0.05
+
+# How many separate PROCESSES R0d reproduces the census across.
+#
+# REV 8 -- this value used to live in [decidability] as `sessions`, which left with the decidability
+# apparatus. R0d's cross-run gate is a genuine R0 dependency and would have been left citing a
+# deleted field, so the value moves to the table that actually reads it. Same number, and the same
+# provenance: it is the sibling harness's SV0_BENCH_SESSIONS, a pre-registered protocol count fixed
+# by a rung that had never heard of virtual geometry -- reused rather than minted, so it cannot be
+# chosen by whoever measures against it.
+#
+# ⚠️ It is a PROTOCOL constant, not a measurement. The distinction is this campaign's central
+# discipline and Rev 3/Rev 4 broke it here by calling three such constants "measured on this exact
+# box", which launders an authored number as evidence in the sentence claiming rigour.
+cross_run_sessions = 3
+
+# ---------------------------------------------------------------------------------------------
+# [k1_instrument] — how screen-space triangle density is estimated. THIS IS THE PART REV 2 GOT
+# WRONG, and the reasoning is recorded because the error is instructive.
+#
+# Rev 2's decisive statistic was `submitted_per_covered_pixel` = all submitted triangles / covered
+# pixels, adopted as the "generous end of a bracket" so that a mis-set threshold would err toward
+# keeping the campaign alive.
+#
+# It IS a valid upper bound (submitted triangles are a superset of visible ones). It is also so
+# loose as to be useless: it counts back-face-culled and off-screen geometry, so it conflates "the
+# triangles are small" with "the level contains a lot of geometry". Firing K1 requires
+# submitted/covered < 1.0 — i.e. the whole frame submits fewer triangles than the screen has
+# covered pixels.
+#
+# ⚠️ REV 25 -- THE PRECLUSION THIS PARAGRAPH RESTED ON IS FALSE. It read: "while R0b's own gate
+# requires the corpus to carry published high-poly counts. A corpus that satisfies R0b can never
+# satisfy K1's decisive conjunct. The kill was self-satisfied out of existence." R0b(b) asserts
+# decoded count EQUALS published count -- an equality, never a magnitude -- so NO gate part anywhere
+# floors the corpus's triangle count, and a corpus of 1e5 triangles total satisfies R0b while
+# submitted/covered < 1.0 holds. The statistic is retired on the argument that survives and was
+# always the stronger one, stated two lines above: it counts back-face-culled and off-screen
+# geometry, so it conflates "the triangles are small" with "the level contains a lot of geometry".
+#
+# THE REPLACEMENT USES THE LADDER, WHICH COSTS NOTHING NEW.
+#
+# For a fixed camera and fixed geometry, a triangle's screen-space area scales exactly with pixel
+# count. A triangle covering 4 px at 2160p covers 1 px at 1080p. So:
+#
+#   * visible_tris(R) — the count of distinct (instance_id, local_tri) in the readback at
+#     resolution R — RISES with R, because raising resolution lets smaller triangles win coverage
+#     races that they lost before. ⚠️ REV 38 SUBTRACTS "monotonically increasing", which this file
+#     stated as a property while the plan's section 5.7 stated the opposite 170 lines from where the
+#     plan repeated it: sample lattices between rungs are NOT NESTED, so a sliver holding one coarse
+#     centre and no fine centre DISAPPEARS at higher resolution, and depth-test tie-breaking can flip
+#     a triangle from visible to invisible as resolution rises. The claim was true of R0's measured
+#     rows (69517 -> 103819 -> 176397 and 146965 -> 185065 -> 234094, both paths rising at every
+#     rung) and false as a theorem, and it is the sentence any extrapolation proposal cites. The
+#     ARGUMENT below is unaffected — it needs the tendency, never strict monotonicity;
+#   * it converges, as R grows, to the true count of front-facing, unoccluded triangles in view;
+#   * measuring at the TOP rung therefore reveals exactly the sub-pixel population that the
+#     decision resolution hides, which is the population this campaign is about.
+#
+# The uncapped density estimate at the decision resolution is then
+#
+#     D_est = visible_tris(top rung) / covered_pixels(decision_resolution)
+#
+# — unbounded above, unlike the saturating per-resolution ratio, and TIGHT, unlike submitted/covered.
+#
+# AND IT VALIDATES ITSELF. The ladder gives four points on a convergence curve. If the top two
+# rungs still differ by more than the margin below, visible_tris has NOT converged, D_est is an
+# underestimate of unknown size, and the census reports "density not resolved" — K1 is NOT
+# adjudicated. That is the plan's own section 9 clause 3 discipline (the instrument is blind, not the
+# effect absent) applied before the fact instead of after it.
+# ---------------------------------------------------------------------------------------------
+#
+# REV 4 CORRECTION — the Rev 3 text above calls D_est uncapped and treats it as fit to FIRE K1.
+# Both are false, one line of arithmetic each:
+#
+#   CEILING. visible_tris(R) counts distinct pairs in a readback holding ONE pair per texel, so
+#   visible_tris(2160p) <= 3840*2160. At a common covered fraction,
+#   D_est <= (3840*2160)/(1920*1080) = 4.0 EXACTLY. That is Rev 1's construction defect with the
+#   ceiling raised from 1 to 4 by this ladder's own area ratio. d_est_min = 1.0 therefore sits at a
+#   quarter of the instrument's ceiling — a fine place for a threshold, reached by accident.
+#
+#   DIRECTION. Sub-pixel triangles that win no sample are absent from visible_tris, so
+#   D_est <= true density: a LOWER bound. Rev 3 fired a campaign-refuting kill on it. A lower bound
+#   cannot refute. It can only CONFIRM.
+#
+# The asymmetry that follows is good news, not a dead end:
+#   (Both lines below state a DIRECTION, never the whole rule: k1_decision_rule's preconditions --
+#   the domain floor, then non-degeneracy -- bind first. Rev 15 added that qualifier to the [k1]
+#   copy of this sentence and missed this one, 118 lines above it, in the same file.)
+#   D_est >= 1.0  PROVES density >= 1 tri/pixel  =>  K1 DEAD, and the cheap census (usage bit +
+#                 Option-threaded copy, zero new .spv, zero re-bless) closed the question.
+#   D_est <  1.0  is indistinguishable from "the instrument hit its ceiling" seen from below.
+#                 Refuting the premise needs an UPPER bound; every vb_id statistic is capped by
+#                 one-winner-per-texel, so it must come from OUTSIDE vb_id — a counter of triangles
+#                 surviving frustum+backface in the raster path. That edits vb_raster.fs.hlsl and
+#                 moves the blast radius the census was designed to avoid, so it is a SEPARATE and
+#                 CONDITIONAL rung with its own re-bless budget.
+#
+[k1_instrument]
+# Bound direction and ceiling as DATA, so no later rung re-derives them from prose.
+# ceiling = (top ladder rung pixels) / (decision resolution pixels).
+# ⚠️ REV 39 RE-DERIVES THIS, because it is a FUNCTION of the ladder's top rung and Rev 39 appended
+# one. 4.0 was (3840x2160)/(1920x1080); the fifth rung makes it (5120x2880)/(1920x1080) = 7.1111.
+# Amendment 2 -- "a repair changing a measured INPUT must re-derive every number that is a function
+# of it" -- is the rule that catches this, and it is exactly the class of stale derived value this
+# file has shipped before. Note the direction: RAISING the ceiling weakens nothing, because the
+# ceiling is the reason D_est cannot fire K1, and a HIGHER ceiling only widens the band in which a
+# lower bound is uninformative. The threshold it is compared against (d_est_min = 1.0) is unmoved.
+d_est_bound_direction = "lower"
+d_est_ceiling = 16.0
+d_est_may_fire_k1 = false
+d_est_may_refute_k1 = true
+
+# Non-degeneracy precondition — ABSENT in Rev 3 and required. On a sentinel-only readback
+# visible_tris = 0 at both top rungs: the convergence check reads 0 <= 0 (CONVERGED) and
+# D_est = 0 < 1.0, so K1 fires on an empty frame. covered_pixels == 0 is an explicit failure,
+# never a division.
+min_covered_pixels = 1024
+min_visible_tris = 1024
+
+# ⚠️ REV 10 -- THESE ARE EMPTY-FRAME GUARDS AND NOT REPRESENTATIVENESS FLOORS, and Rev 9's plan
+# text recruited them to the second job. 1024 px is ~0.05% of the decision resolution, and at the
+# rule's own boundary (covered = visible = 1024) D_est is exactly 1.0, so K1 refutes from a frame
+# covering that much. D_est is scale-free -- shrink the covered region and both terms shrink -- so
+# no floor on this axis can carry representativeness at any value. A floor on covered FRACTION
+# could, and R0 does not have one: it is recorded UNSOLVED rather than given an authored number
+# here, because a value nobody can justify yet is the pre-registration defect this file exists to
+# prevent.
+representativeness_floor_status = "UNSOLVED -- needs a covered-fraction floor, not a pixel count"
+
+# The histogram scaling law. Rev 3 froze "exactly two buckets between adjacent rungs" and that gate
+# was RED BY CONSTRUCTION — two buckets is 4x area (2x linear) and this ladder has no such step:
+# 512^2->1080p = 7.910x (2.98 buckets), 1080p->1440p = 1.778x (0.83), 1440p->2160p = 2.250x (1.17).
+# Modal-bucket indices are integers over powers of two, so 0.83 is not even expressible as a shift.
+# REV 8 replaced the two-bucket constant with the per-pair log2 of the ACTUAL area ratio and
+# claimed "the residual reported rather than an integer asserted". REV 9: that claim was FALSE of
+# the rule it described, and the rule is no longer a gate.
+#
+# The measured shift is a difference of INTEGER bucket indices. The targets are 0.830075 and
+# 1.169925. A tolerance of 0.35 around each admits exactly one integer -- 1 -- on both pairs, so an
+# integer WAS asserted, wearing a tolerance. Worse, the two targets sum to exactly 2.000
+# (3840/1920 = 2160/1080 = 2), so both splits a correct instrument can produce -- (1,1) and (0,2)
+# -- satisfy the scaling law, and which one occurs is set by the sub-bucket phase of the corpus's
+# modal triangle size: a property of the ASSETS, not of the instrument. And the histogram is
+# left-censored at one covered pixel, so in the micro-polygon regime the census exists to serve
+# every newly visible triangle enters at bucket 0 and pushes the mode the wrong way -- the check
+# would red hardest exactly where the campaign's premise is most strongly confirmed.
+#
+# So it is MEASURED AND RECORDED, never asserted (plan section 8 R0d). The tolerance below is the
+# margin the reported residual is compared against for the reader's benefit; no gate part reads it.
+# Re-arming this requires a statistic that is not re-binned onto the same integer lattice at both
+# rungs -- the log2 ratio of a fixed quantile of covered-pixel counts is the obvious candidate --
+# and that is a new instrument, not a retuned tolerance.
+histogram_shift_rule = "per_pair_log2_area_ratio_REPORTED_NOT_ASSERTED"
+histogram_shift_tolerance_buckets = 0.35
+
+# Rung 0 (512^2) is EXCLUDED from the scaling check -- rungs are 0-INDEXED into
+# [census].resolution_ladder, which is the index the value below names. ⚠️ REV 31: this comment
+# and the plan's section 5.7 both said "Rung 1" against a value of [0] -- two bases for one
+# referent, and an implementer reading [0] as 1-based would exclude nothing. 512^2 is 1:1 while
+# the other three rungs are 16:9, so the projection is a DIFFERENT FRUSTUM, not a rescaling — the
+# visible triangle set differs and the "area scales with pixel count" premise does not hold across
+# 512^2 -> 1080p at all. Rung 0 keeps its one job: the CPU-oracle cross-check.
+histogram_shift_excludes_rungs = [0]
+
+# The relative gap between the top two ladder rungs' visible_tris below which the count is
+# treated as converged. 0.05: a 5% residual on a curve that is flattening, chosen for the same
+# reason the sibling harness's spread gate is 0.10 — tight enough to mean something, loose enough
+# not to red on ordinary variation.
+ladder_convergence_margin = 0.05
+
+# If the ladder has not converged, K1 is not adjudicated and the campaign is neither refuted nor
+# confirmed by density. The disposition is to extend the ladder upward (a new plan revision), NOT
+# to adjudicate on an underestimate.
+# REV 6 CORRECTION -- Rev 5 made this unconditional and it contradicted the plan's own section 5.6.
+# Non-convergence means visible_tris is still RISING, i.e. D_est UNDERSTATES. An understatement
+# already at or above 1.0 still proves density >= 1. Convergence is a precondition for FIRING,
+# never for REFUTING -- and since Rev 6 makes K1 refutation-only at R0 (see [k1]), the unconditional
+# form would have blocked the ONLY outcome R0 can produce. That is a frozen file vetoing its own
+# plan's decisive case, which is the doc-rot class this campaign spent a session repairing.
+on_not_converged_refute_direction = "still_valid"   # regardless of CONVERGENCE, not of k1_decision_rule's preconditions
+on_not_converged_fire_direction = "k1_not_adjudicated"
+
+# ---------------------------------------------------------------------------------------------
+# [k1] — the "no content, no mechanism" kill. Two conjuncts, BOTH pointing the same way.
+#
+# Rev 2 had three, and its `rule = "all_three_below"` inverted the third: `modal_bucket_max_pixels`
+# is a MAX while the other two are MINs, so on the canonical no-mechanism scene (a few giant flat
+# quads) the first two conjuncts held and the third did not, and K1 did not fire on the exact
+# scene it was written to catch. An implementer coding from the frozen TOML would have written
+# `modal < 16` and produced a kill that fires when triangles are SMALL — i.e. when the campaign's
+# premise is confirmed.
+# ---------------------------------------------------------------------------------------------
+[k1]
+# Conjunct 1. D_est (see [k1_instrument]) below 1.0 at the decision resolution. Not a tuned value:
+# 1.0 IS the definition of the regime cluster LOD exists to serve.
+d_est_min = 1.0
+
+# REV 8 -- CONJUNCT 2 AND THE TWO-CONJUNCT RULE ARE DELETED, not annotated.
+#
+# What stood here: `modal_bucket_pixels_above_which_k1_holds = 16`, and a `rule` field whose value
+# had already been reduced to the string "SUPERSEDED_BY_k1_decision_rule_below". Their history is
+# worth exactly one paragraph, because it is three instruments failing the same way.
+#
+# Rev 2's `rule = "all_three_below"` put a _max among two _mins, so K1 did not fire on the very
+# scene it was written to catch. Rev 4's two-conjunct replacement was REDUNDANT -- modal > 16 px at
+# 1080p implies visible_tris <~ covered_px/16, hence D_est <~ 0.06 << 1.0, so conjunct 1 held
+# automatically whenever conjunct 2 did. And the modal bucket's cross-rung derivation, cited in the
+# deleted comment as "the exact power-of-two shift the scaling law gives (2 buckets per 2x
+# resolution step), which the ladder's own four points check", is FALSE of this ladder: its
+# adjacent-pair shifts are 2.98, 0.83 and 1.17 buckets, and none of them is 2.
+#
+# A superseded field left in place with a comment saying so is still a field an implementer greps
+# for and codes from -- the [k1].k1_fire_rule dangling-name lesson pointed the other way round.
+# The live rule is k1_decision_rule below, and it is the only one.
+
+# What the CHEAP census (usage bit + Option-threaded copy, zero new .spv) can decide, soundly:
+#   D_est >= d_est_min  =>  K1 REFUTED. Density is genuinely >= 1 tri/pixel; the mechanism exists.
+#   (Sufficient only INSIDE k1_decision_rule's preconditions -- the domain floor first, then
+#   non-degeneracy. This line states the direction, never the whole rule; four texts restated it as
+#   though it were the whole rule and had to be re-derived when the rule gained a clause.)
+# It can decide nothing else. Everything below d_est_min is indistinguishable from the instrument's
+# own ceiling seen from underneath.
+# REV 9 -- THE NON-DEGENERACY CONJUNCT IS PART OF THE RULE, not a separate precondition, and
+# omitting it gave one input three different dispositions. Substitute covered_pixels(1080p) = 500
+# and visible_tris(2160p) = 600 -- a corpus asset framed small, exactly what the min_* floors exist
+# for. D_est = 1.2 >= d_est_min, so the Rev 8 string said K1 REFUTED (the campaign-favourable
+# direction) on a 500-pixel frame; the plan's outcome table said UNDECIDED; and the rung's own gate
+# said the rung reds. Three codeable texts, three answers, and this string is the one both
+# documents nominate as the only live rule.
+# REV 11 -- THE AGGREGATION OVER CAMERA PATHS, absent until now and decision-bearing.
+#
+# The census is quantified over committed camera paths: "All statistics are reported per camera
+# path" (plan section 5.7). K1 is ONE decision. Nothing said how the per-path readings combine, so
+# whoever chose the aggregation chose the answer -- max over paths refutes K1 whenever any single
+# framing is dense enough, min requires all of them, and no text picked.
+#
+# MIN, and the direction is the argument rather than the convention. Refutation is the
+# campaign-FAVOURABLE outcome: it declares the premise proven and sends the ladder to R1. A
+# favourable verdict must therefore clear the bar on the WEAKEST committed path, not the strongest,
+# or "faster than Nanite on ANY scene" is being adjudicated on the one scene that suits it. This is
+# the same asymmetry that makes D_est refute-only: the cheap instrument is allowed to prove
+# density, never to deny it.
+#
+# Adding a favourable path cannot flip a MIN from below the threshold to above it; under MAX it
+# could, and the paths are authored. That much is true and it is why MIN rather than MAX.
+#
+# ⚠️ REV 12 WITHDRAWS THE SENTENCE THAT FOLLOWED IT: "It also removes the cheapest remaining tuning
+# lever." FALSE, and it was a superlative volunteered by a repair -- the class of claim this file
+# has been wrong about three times. MIN is monotone under set inclusion, min(S') >= min(S) for
+# S' subset of S, so it closes the ADD lever and OPENS the OMIT lever, which is cheaper still: an
+# uncommitted path leaves no diff and produces no census row. What makes MIN sound is therefore not
+# the reduction, it is the DOMAIN -- see committed_paths_rule below and the gate part that asserts
+# it. The reduction stays MIN; only the claim about it is withdrawn.
+k1_path_aggregation = "min_over_committed_camera_paths"
+
+# THE DOMAIN OF THAT MIN, asserted rather than assumed. Rev 11 froze the reduction and left the set
+# it reduces over defined nowhere, counted nowhere and authored in the same act as the measurement
+# -- which is the condition the two-file split at the head of this document exists to prevent.
+#
+# The plan's R0d(d) is the reader. Note what it does and does not buy: it bounds the MEASUREMENT
+# (every committed path was censused, and an omission is visible), not the CHOICE (which paths are
+# committed is settled one rung earlier at R0b). The residual is enumerated in plan section 9.1
+# beside the covered-fraction floor, which is the same unsolved axis reached from the domain side.
+# REV 13 -- SET EQUALITY, not a per-path universal, and the recorded digest is EVIDENCE not an
+# assertion. Rev 12 wrote "exactly one census row per enumerated path", which is
+# `forall p in enum: |rows(p)| = 1`; a census emitting rows for paths NOT in the enumeration
+# satisfies that predicate, so the two are INCOMPARABLE rather than one strengthening the other:
+# set equality gains the extra-row direction and gives up the per-path multiplicity the universal
+# had. Both directions red. And nothing compares the recorded enumeration sha256 against an
+# earlier one, because no earlier one exists at R0d -- it is recorded so a later rung can, which is
+# the honest status; calling it an assertion would make it the fourth field in this file frozen
+# without a reader.
+#
+# ⚠️ REV 15 -- THE EXTRA-ROW HALF IS KEPT AND ITS JUSTIFICATION IS WRITTEN FOR THE THIRD TIME,
+# because the first two were each refuted by this file. The rule was never in doubt; only the
+# reason. Both failures are recorded rather than overwritten, since they are the same defect twice
+# and the pattern is the point.
+#
+# Rev 13 said the per-path universal let "cherry-picking from the additive side" pass. Refuted:
+# under `k1_path_aggregation` the min's domain IS the enumeration, so an unenumerated row is inert.
+#
+# Rev 14 said the two must denote the same set or the downstream quantifiers "range over something
+# no text names", and volunteered "No additive row can produce a favourable verdict". Refuted on
+# BOTH halves. (i) The harm named is a property of the MISSING-row direction only: with
+# enum = {A,B} and rows = {A,B,C}, `degenerate(p)`, the MIN and R0d(c) are all indexed over {A,B},
+# which two texts name -- the consequence does not occur in the direction the reason was written
+# for. (ii) The universal is FALSE under the second of the two arms Rev 14 itself invoked. Evaluate
+# the WHOLE rule rows-based, which is what "rows-based" means to an implementer: S = {a} with
+# d_est = 1.60 hits clause 1 (|S| = 1 < 2) -> NOT ADJUDICATED, explicitly not favourable; add x
+# with d_est = 1.40 and |S'| = 2 clears the floor, min = 1.40 >= 1.0 -> REFUTED, favourable. An
+# additive row moved not-favourable to favourable. `min` is monotone DECREASING under insertion and
+# `|.|` is monotone INCREASING, and Rev 14 made the favourable branch reachable only after `|.|`
+# clears a floor -- it did the algebra for one monotonicity while the same commit, four keys away,
+# introduced the other.
+#
+# THE REASON THAT SURVIVES, and it is about evidence rather than about domains: the row set is the
+# only observable record of WHICH SOURCE THE RUN ITERATED. The enumeration and the test constants
+# are two authored lists that can disagree, and a run driven by the wrong one is invisible in every
+# other artefact -- the plan's own Rev 12 post-mortem on (d)'s deleted disjunct is the worked case.
+# Set equality is what makes the run's actual domain observable at all. No universal is claimed
+# here about what an additive row can or cannot do to the verdict; that question is decided by
+# `k1_decision_rule`, and this half exists to make the input to that rule checkable.
+# ⚠️ REV 16 -- THIS FIELD'S VALUE WAS FALSIFIED BY REV 15'S OWN DEFINITION, three lines below the
+# prose Rev 15 wrote about it. It said "SET EQUALITY between the census ROW SET and the
+# enumeration". A row is a (camera path, ladder rung) pair, so the row set has |P| x |ladder|
+# members against an enumeration of |P| path ids; set equality forces 4|P| = |P|, i.e. |P| = 0 --
+# contradicting committed_paths_min = 2 in the same sentence. The comparand is the PROJECTION of
+# the rows onto their path component.
+#
+# THE RULE THIS FIELD PROVES, stated as a SET OBLIGATION rather than a cardinality claim. Rev 16
+# wrote "a definition has STRICTLY MORE dependents than a claim" and that is FALSE as a universal
+# over counts -- a definition with no uses has zero dependents, a fact restated in three texts has
+# three -- and it is a superlative of exactly the class this campaign has already withdrawn twice.
+# The operative content is not a count and does not need one:
+#
+#   CHANGING A DEFINITION OBLIGES A GREP OVER EVERY TEXT *USING* THE DEFINED TERM, AND THAT IS A
+#   DIFFERENT GREP FROM OBLIGATION (a)'s, WHICH COVERS EVERY TEXT *STATING* A FACT. Neither set
+#   contains the other, so discharging one does not discharge the other.
+#
+# This field is the demonstration: Rev 15 repaired the two prose sites STATING the row's shape and
+# left the codeable one USING it.
+committed_paths_rule = "committed camera paths are enumerated in assets/vg_corpus/CORPUS.toml at R0b; a CENSUS ROW is one reading at one (camera path, ladder rung) pair, so the census emits |P| x |ladder| rows; R0b(e) asserts |P| >= committed_paths_min at the rung that AUTHORS the set, and R0d(d) asserts SET EQUALITY between the PROJECTION of the census rows onto their path component and the enumeration, plus the same floor, at the rung that CONSUMES it (a missing path, an extra path and an undersized enumeration all red); R0d(d) RECORDS the sha256 of the enumeration beside the readback hashes as evidence, not as an assertion; R0 does not assert the set is representative, and (d) cannot see an edit to the enumeration made before the run"
+
+# REV 24 -- no threshold changes; the ingest ceiling gains an owner field and a gating row in the
+# claim file, so the precondition Rev 23 established finally has a consumer.
+#
+# REV 23 -- no threshold changes; plan section 3.4 re-derived: the corpus cannot be ingested on
+# the current allocator (one 64 MiB host block), so the staging path is a PRECONDITION of R0b.
+#
+# REV 22 -- no threshold changes; two limits recorded in the plan sections 3.4 and 9.1.
+#
+# REV 21 -- no threshold changes; R0c(a) recorded as an assertion with no available red.
+#
+# REV 20 -- no threshold changes; the plan-side sibling of this file moved (R0c mutation siting).
+#
+# REV 19 -- the definition-change obligation is restated as a SET obligation, not a cardinality
+# claim (see committed_paths_rule); the superlative it replaced was false as a universal.
+#
+# REV 18 -- camera paths are a TOP-LEVEL enumeration in CORPUS.toml, not a per-asset column;
+# the census runs the whole corpus at every committed path (plan section 4.3). committed_paths_rule
+# below is unchanged in effect -- the enumeration is still where |P| is read -- but the quantity
+# carriers-per-id it used to depend on no longer exists.
+#
+# REV 14 -- THE CARDINALITY FLOOR, absent until now and the one input on which EVERY R0d gate part
+# is vacuously green at once.
+#
+# Substitute P = the empty set. (c) is `forall p in P, ...` -> TRUE. (d)'s set equality is
+# `{} = {}` -> TRUE. (a) hashes three identical empty readbacks -> TRUE. (b) is a universal over
+# (path, rung) pairs, and an empty P makes that product empty -> TRUE. ⚠️ REV 17: this sentence
+# read "(b) is quantified over ladder rungs" and quoted the plan saying (b) "catches a path
+# measured at too few rungs and never a path that was never measured at all". Rev 16 changed (b)'s
+# quantifier to pairs and swept ONE of the two texts in this file that are functions of it; both
+# the quantifier and the quoted consequence were stale here, in the file R0a hashes. The
+# CONCLUSION is unchanged -- every part is green on an empty domain either way, which is why the
+# floor exists -- but the reason (b) is green changed from "blind by construction" to "vacuous over
+# an empty product", and a derivation that states the wrong reason for the right answer is the
+# thing this campaign has spent sixteen revisions learning to distrust.
+# Then this file's own decision rule: "ANY p in P degenerate" is
+# false vacuously, so control reaches the min, and min over the empty set is +inf under the natural
+# fold-with-identity => K1 REFUTED, the campaign-FAVOURABLE verdict, from a census that measured
+# nothing. This is the empty-frame defect that `min_covered_pixels` exists to close, one quantifier
+# up, on an axis nothing guarded.
+#
+# It was REACHABLE, not hypothetical. AS OF REV 13 the plan enumerated R0b's five gate parts and
+# showed that none of them read the camera-path column -- an enumeration written to withdraw a
+# different claim, so the proof was on the page and its consequence was not drawn. ⚠️ REV 15
+# re-derives that sentence rather than carrying it: R0b has SIX parts since Rev 14 and the sixth,
+# (e), reads exactly that column. Rev 14 changed the measured input this evidence is a function of
+# and left the evidence standing here, in the file R0a freezes and in the plan -- amendment 2
+# breached in the commit that restated amendment 2. The CONCLUSION is unaffected: (e) bounds the
+# set's cardinality, which is not the same as pinning its membership, so the reachability argument
+# above stands on the five parts that predate it.
+#
+# THE VALUE IS DERIVED, NOT PICKED. At |P| = 1 the MIN is the identity, so `min` and `max` coincide
+# and the soundness argument for choosing MIN -- "a favourable verdict must clear the bar on the
+# WEAKEST committed path rather than the strongest" -- is not merely weak but ABSENT: there is no
+# weakest and strongest to distinguish. Two is the smallest cardinality at which the reduction this
+# campaign froze does any work at all. A larger floor would be an authored number about
+# representativeness, which is the axis `representativeness_floor_status` records as UNSOLVED and
+# which this field deliberately does not pretend to close.
+committed_paths_min = 2
+
+# ⚠️ REV 12 -- THE RULE IS NOW INDEXED BY CAMERA PATH, because it was scalar while the census it
+# consumes is per-path. Both documents nominate this string as the only live rule (see the note
+# above), so a scalar rule and a min-over-paths aggregation two lines apart were two codeable texts
+# at different arities: substitute paths A = (1.5e6 px, 2.4e6 tri) -> D = 1.60 and B = (2.0e6 px,
+# 2.9e5 tri) -> D = 0.145, both clearing the 1024/1024 floors. A reader of the aggregation gets
+# min = 0.145 -> UNDECIDED; an implementer of the scalar rule gets row A -> 1.60 >= 1.0 -> K1 dead.
+# One census, opposite dispositions. The composition order is stated here rather than left to the
+# reader: non-degeneracy is per path and EVERY path must clear it, then the MIN is taken over
+# d_est. Non-degeneracy is not min'd -- a MIN over covered_pixels and a MIN over visible_tris taken
+# separately would recombine into a d_est that belongs to no measured path at all.
+# ⚠️ REV 14 MAKES THE RULE TOTAL. Rev 12 indexed it over P and left it with no value on |P| = 0 --
+# the branch order sends an empty domain past a vacuously-false guard into a min over nothing. The
+# undersized case is now the FIRST clause and it is an INSTRUMENT FAILURE, not a finding about
+# content: the same disposition, and for the same reason, as a frame that fails non-degeneracy.
+k1_decision_rule = "cheap_census_may_only_REFUTE, evaluated over the committed camera paths P of committed_paths_rule: |P| < committed_paths_min => NOT ADJUDICATED and R0d reds (an instrument failure, never UNDECIDED and never a favourable verdict; the min is not evaluated); degenerate(p) := covered_pixels(p) < min_covered_pixels OR visible_tris(p) < min_visible_tris; ANY p in P degenerate => UNDECIDED, escalate (and R0d reds, which takes precedence); else min over p in P of d_est(p) >= d_est_min => K1 dead; min over p in P of d_est(p) < d_est_min => UNDECIDED, escalate"
+
+# FIRING K1 requires an upper-bound instrument, which is a separate conditional rung. Its threshold
+# is pre-registered HERE, before that instrument exists, for the same reason everything else in this
+# file is: so it cannot be chosen by whoever measures against it. Same value, because 1.0 IS the
+# definition of the regime — but now applied to a statistic that can soundly sit below it.
+#
+# ⚠️ REV 38 SUBTRACTS the parenthetical "(the frustum+backface survivor counter)" that stood here.
+# This paragraph is the one an implementer greps, and it named a candidate that the paragraph's OWN
+# refutation five lines below rejects and that k1_fire_instrument_status calls UNSOLVED — the exact
+# defect this file condemns at [k1]'s note on the deleted `rule` field ("a superseded field left in
+# place with a comment saying so is still a field an implementer greps for and codes from"). The
+# candidate now has a THIRD and engine-specific refutation, recorded in
+# docs/VG-R11-UPPER-BOUND-INSTRUMENT.md: this engine performs NO backface culling in any scene pass
+# (vb_raster_pipeline is built cull_mode: CullMode::None; the only two non-None sites in the tree are
+# CullMode::Front in the CSM passes), so a BACKFACE conjunct in the numerator is UNSOUND here — back
+# faces win vb_id texels and R0's own visible_tris contains them. Removing that conjunct collapses
+# the candidate onto submitted/covered, refuted above. Seven candidate families are now adjudicated
+# and all seven are dead; the sibling repair is in the plan's section 5.6.
+# REV 6 -- K1 IS REFUTATION-ONLY AT R0, and this is a scope decision, not a deferral.
+#
+# Rev 5 named a "frustum+backface survivor counter in vb_raster.fs.hlsl" as the firing instrument.
+# It is wrong twice, and the second reason is fatal to the idea rather than to the site:
+#
+#   (a) WRONG STAGE. A fragment shader runs for fragments that survived rasterisation and (with
+#       early-Z) the depth test -- i.e. approximately the VISIBLE set, the very quantity vb_id
+#       already caps. Frustum- and backface-culled triangles never reach it. And the plan's own
+#       section 2 records that the per-primitive lane "is not independently reachable" without a
+#       mesh shader, one draw per meshlet, or a software rasteriser.
+#
+#   (b) PROBABLY INERT ANYWAY. Apply section 5.4's own killing argument to the replacement:
+#       survivors include every OCCLUDED in-frustum front-facing triangle, and depth complexity on
+#       a multi-million-triangle corpus is exactly where the count lives. A 5M-triangle asset in
+#       frame yields ~2.5M survivors against ~2.07M covered pixels at 1080p, so
+#       survivors/covered < 1.0 cannot hold -- K1 could not fire whatever the visible triangle
+#       size. That is `submitted/covered`'s self-satisfaction again with a 2-4x constant removed.
+#
+# So R0 does not fire K1. It can REFUTE it, cheaply and soundly, and that is R0's whole claim.
+# Firing requires an upper bound on VISIBLE density that is shown to be NON-SATURATING -- a design
+# problem, not a scheduling one. ⚠️ REV 27: Rev 26 substituted the tail of this sentence and left
+# its governing "NOT to be" standing, producing "shown NOT to be NOT saturating" = SHOWN
+# SATURATING -- a requirement that SELECTS FOR the defect: `visible_tri_per_covered_pixel`
+# (capped at 1) and `D_est` (capped at 4.0) would both satisfy it while `submitted/covered`, the
+# one genuinely non-saturating bound, would fail. A careless replace inverted the requirement in
+# the file whoever builds the firing instrument codes from, and the field's own value five lines
+# below never agreed with it. ⚠️ REV 26: this read "not precluded by
+# R0b's own high-poly corpus gate", which states the requirement in terms of a preclusion that does
+# not exist. R0b(b) is an equality (decoded == published) and floors no triangle count, so R0b
+# precludes nothing, and a requirement phrased against it cannot be discharged or refuted, and out
+# of R0's scope until someone solves it.
+k1_fire_at_r0 = false
+# REV 25 -- this value stated its requirement in terms of the preclusion withdrawn above.
+k1_fire_instrument_status = "UNSOLVED -- needs a non-saturating upper bound on VISIBLE density; R0b floors no triangle count, so the corpus constrains it neither way"
+
+# REV 38 -- THE FIRING AGGREGATION, absent until now, and its absence was a live hole rather than a
+# tidiness one. k1_path_aggregation above is justified EXPLICITLY AND ONLY for refutation, and
+# k1_decision_rule has NO FIRE BRANCH AT ALL, so the fold a firing instrument reduces by was going to
+# be chosen by whoever first measured against it. That is precisely the condition the two-file split
+# at the head of this document exists to prevent, and it is frozen here BEFORE any upper-bound
+# instrument exists -- which is the only moment at which freezing it means anything.
+#
+# MAX, and the direction is an argument rather than a symmetry. K1 is stated as a UNIVERSAL over
+# framings (plan section 6: "The corpus NEVER approaches ~1 triangle/pixel"), so establishing it
+# requires the DENSEST committed framing to sit below the bar. This is the mirror of MIN's own
+# reasoning and not its negation: a favourable-to-the-campaign verdict must clear the bar on the
+# WEAKEST framing (MIN, refute), and an UNfavourable one must clear it on the STRONGEST (MAX, fire).
+# Both folds put the burden on the side that would benefit.
+#
+# MAX is monotone INCREASING under insertion, so adding a flattering (sparse) path cannot flip a
+# non-firing verdict to firing -- the additive lever is closed by the reduction itself. The OMIT
+# lever, which MIN leaves open and which R0d(d)'s set equality closes, is closed here by the same
+# part, unchanged: the census row set is still the only observable record of which source the run
+# iterated.
+#
+# ⚠️ WHAT THIS FIELD DOES *NOT* DO, stated because a frozen value that quietly decides an outcome is
+# this file's signature defect. Under MAX, K1 CANNOT FIRE on the corpus R0 measured, and that is a
+# THEOREM from R0's own rows rather than a consequence of this choice: winning a texel proves
+# visibility, so d_est is a LOWER bound (d_est_bound_direction above), and orbit_mid measured
+# d_est = 176397/167573 = 1.052658 > 1.0, so D_true(orbit_mid) >= 1.052658 and EVERY sound upper
+# bound reads at least that on that path. MIN would not rescue the fire branch honestly either -- it
+# would let K1 fire on approach_close (0.5090) while orbit_mid is PROVEN dense, a verdict
+# contradicting a proof on the same census. The owner answered this field on 2026-08-01 knowing that
+# consequence, which is why the answer is recorded as a values call and not derived here.
+# Full derivation and the seven adjudicated candidate deaths: docs/VG-R11-UPPER-BOUND-INSTRUMENT.md.
+k1_fire_aggregation = "max_over_committed_camera_paths"
+
+# The modal-bucket conjunct is RETIRED from the decision. It is redundant against D_est, its
+# cross-rung derivation is unsupported by this ladder, and its direction was inverted in Rev 3.
+# It stays as a reported statistic.
+modal_bucket_role = "report_only"
+
+# Reported alongside, and deliberately NOT part of the rule: the saturating per-resolution ratio
+# (distinct visible triangles / covered pixels, capped at 1 by construction because vb_id is one
+# R32G32_UINT texel per pixel) and submitted_per_covered_pixel. The first is the raw reading, the
+# second is a cull-efficiency reading. Neither adjudicates K1; both are on the page so the
+# instrument's own behaviour is visible.
+report_only = ["visible_tri_per_covered_pixel", "submitted_per_covered_pixel"]
+
+# The census renders at FULL detail — this engine has no LOD, so there is no error target to hold.
+# That makes the censused density the CEILING of the mechanism available to any LOD scheme: a
+# cluster hierarchy can only reduce triangles below it. If the ceiling does not reach the regime,
+# no LOD scheme reaches it either. K1 is decidable without an error target, and this is why.
+measured_at = "full_detail_no_lod"
+
+# ---------------------------------------------------------------------------------------------
+# REV 8 -- THE DECIDABILITY APPARATUS WAS REMOVED FROM THIS FILE, AND THAT REMOVAL IS THE REVISION.
+#
+# Four tables stood here -- [decidability], [absolute_mode], [scope], [ordering] -- plus three
+# [pre_registered] fields for R0e. Together they froze the ONE gate, the campaign's comparative
+# performance claim, and its pre-registration ordering.
+#
+# They are gone because the gate they froze HAS NO LEFT-HAND SIDE. `our_floor` needs the ARMED
+# PAIRED DELTA as its denominator, and R0's arm is not merely unstated: it is UNCONSTRUCTED. R0
+# lands no meshlet, no cluster and no LOD, so there is nothing to contrast against and no measurand
+# for the floor. Rev 7's adversarial review returned eight blocking P0s and five were downstream of
+# that single over-reach -- pre-registering a comparative claim before the thing being claimed
+# exists.
+#
+# A frozen value with no reader is WORSE than prose: it manufactures the appearance of
+# pre-registration while binding nothing. Measured rather than argued -- tests/vg_symbol_reachability.rs
+# found 32 unbound symbols across this file and the claim file, 20 of them in exactly these four
+# tables. The sharpest specimen is `absolute_effective_floor_rule`, which Rev 7 added to embody its
+# own slogan ("a fix that lands only in the frozen file has not landed") and which `absolute_gate_rule`
+# never names, so the operative floor stayed the superseded one in BOTH documents.
+#
+# NOTHING IS LOST. The specification, the two denominators, the two-sided absolute gate form, the
+# ABBA harness contract and the eight P0s that refuted the previous attempt all move to the plan's
+# section 14, as requirements on whoever freezes them AT THE RUNG THAT LANDS AN ARM. They are
+# cheaper and stronger there: the arm, the denominator and the floor are all defined at one rung.
+#
+# Do not restore these tables here. Re-authoring them at their own rung IS the plan.
+# ---------------------------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------------------------
+# [pre_registered] — a threshold that would otherwise be set by whoever measures against it.
+#
+# REV 5 created this table for two such thresholds. REV 8 keeps the one a surviving rung reads.
+# The three R0e fields (r0e_ci_max_fraction, r0e_min_pairs, r0e_min_quads) left with the
+# decidability apparatus above, and they earned a line of history on the way out: they were the
+# clearest case for the removal. No R0e gate part ever read any of them, so the mutation the plan
+# listed as DEMONSTRATED -- "halve the sample count -> the CI widens past the pre-registered bound
+# -> red" -- still named a right-hand side that did not exist, inside the very table created to end
+# that condition. Freezing a value is not the same act as reading one.
+# ---------------------------------------------------------------------------------------------
+[pre_registered]
+# R0c gate (c): the census's covered-pixel total vs sv0_oracle::rasterize's covered_count on the
+# procedural fixture at 512^2. Not zero: the oracle is a host mirror with its own sample-point rule,
+# so exact agreement would be a coincidence, not a check.
+r0c_oracle_coverage_tolerance = 0.02
+
+# ---------------------------------------------------------------------------------------------
+# [k2_probe] — REV 9. The legal values of the rig record's `reason` field, and which of them the
+# machine re-derives.
+#
+# Rev 8 conditioned R0a's negative-branch re-derivation on `reason == "no_engine_registered"` and
+# enumerated the legal values NOWHERE. That traded Rev 7's cannot-go-green for a cannot-go-red: an
+# author writing any other string switched the only machine check off in the same act as recording
+# the negative, while the surviving assertions (four non-PENDING fields, and a hash of a docs file)
+# carry no information about UE5 at all. The rung's own stated purpose is "that a negative be the
+# machine's, honestly bounded, rather than the author's".
+#
+# Section 6.2 fires K2 if ANY of three prerequisites fails, and exactly one of the three is
+# machine-checkable from this box. So the values are enumerated, the checkable one is named, and
+# the gate asserts the RIGHT thing per value instead of nothing.
+# ---------------------------------------------------------------------------------------------
+[k2_probe]
+# The closed set. A `reason` outside it reds R0a — an unrecognised string is a typo or a new cause
+# that has not been thought through, and both must stop the rung rather than disarm it.
+reason_values = ["no_engine_registered", "insufficient_disk", "no_importable_project", "no_capture_protocol"]
+
+# The one value whose truth the test can establish itself, by consulting the documented authorities
+# (the launcher manifest and the registry hives that record launcher and source builds).
+machine_rederived_reason = "no_engine_registered"
+
+# What the gate asserts for the other three: the authorities DO report an engine. That is not a
+# weaker check, it is the correct one -- those three causes presuppose an install, so a record
+# claiming them while no engine is registered is self-contradictory and must red. Every value in
+# the set is therefore checked against something, and no value switches the branch off.
+non_rederived_reasons_require_engine_present = true
+
+# REV 10 -- `reason` IS A SCALAR AND MORE THAN ONE VALUE CAN BE TRUE AT ONCE. Section 11 measures
+# this box as BOTH "no installation present" AND "a UE5 install plus project plus DDC does not fit
+# on D: today". Two values hold, the field takes one, and which one is written selects which
+# assertion runs -- one green, three red. A gate whose verdict is chosen by the author's phrasing
+# is the defect this table was added to remove, one level up.
+#
+# The precedence is therefore frozen, and it is ordered by what the machine can settle: the
+# re-derivable cause outranks the others, because it is the only one an assertion can confirm
+# against the documented authorities rather than take on trust.
+#
+# ⚠️ REV 12 WITHDRAWS "Ties below it are impossible -- the remaining three are distinguished by
+# which prerequisite the operator could not supply." FALSE: a box with no importable project and no
+# capture protocol holds both, and nothing distinguishes them. The list orders ALL FOUR, ties
+# included, and that is its whole content.
+reason_precedence = ["no_engine_registered", "insufficient_disk", "no_importable_project", "no_capture_protocol"]
+
+# ⚠️ REV 12 -- WHAT READS THE LIST, stated because Rev 11 put it in a gate part where it could not
+# fire, and this file's signature defect is a frozen value that binds nothing.
+#
+# Rev 11's R0a (a') required the recorded `reason` to be the first holding value this list names.
+# Enumerate the gate's eight inputs (four legal `reason` values x authorities report engine
+# present/absent): the verdict is identical to (b')'s on all eight, and permuting this list moves no
+# row. The antecedent "where more than one holds" is not machine-establishable -- only
+# no_engine_registered has an oracle, no_importable_project and no_capture_protocol have none, and
+# the disk cause is retracted by name in the plan's R0a ("free disk is recorded as evidence and is
+# deliberately NOT an assertion"). Asserting it would require minting a required_free_gb this
+# campaign has retracted twice on the same evidence.
+#
+# So it is an AUTHORING convention and is deliberately not asserted -- the same disposition R0c(e)
+# and free disk already carry. The substantive hazard it was frozen to close (the author selecting
+# which assertion runs) is closed by (b'), which asserts something for EVERY legal value. The
+# residual limit is enumerated in the plan's section 9.1, not claimed away here.
+reason_precedence_status = "AUTHORING CONVENTION -- deliberately NOT gate-asserted; no machine oracle exists for three of the four reason_values, so no assertion over this list can fire"
+
+# ⚠️ THE ONE INPUT THIS RULE CANNOT SERVE, recorded rather than discovered later. The plan's R0a
+# already states that a hand-placed engine outside both documented authorities is invisible to
+# them. Combine that with short disk: the honest `insufficient_disk` reds (the authorities report
+# no engine, so the require-engine-present clause fails), and the only value that greens is
+# `no_engine_registered`, which is FALSE of that box. The rung then forces a choice between a red
+# gate and a false record.
+#
+# This is the intended cost of a bounded search rather than an unbounded volume walk -- Rev 4's
+# "enumerate fixed volumes" was retracted for being untestable -- but it is a cannot-go-green on a
+# real configuration and naming it is the whole discipline. The disposition is that R0a reds and
+# the operator registers the engine with one of the authorities before re-running. A search that
+# admits what it cannot see is stronger than one that claims to see everything; a search that also
+# admits what it MISJUDGES is what this line adds.
+hand_placed_engine_plus_short_disk_reds = true
+
+# ---------------------------------------------------------------------------------------------
+# [hash_assertion] — where this file's sha256 is actually checked.
+#
+# Rev 4 avoided Rev 2's "guaranteed to break" failure and created its mirror image: GUARANTEED NOT
+# TO FIRE. Every rung that was supposed to re-assert the hash was a skipped or #[ignore]d GPU or
+# corpus-dependent test, on a box whose CI never exercises the GPU path. A tripwire wired only into
+# tests that do not run is not a tripwire.
+#
+# REV 6 added the flag below and gave it no rung and no file, so it described an intention nobody
+# implements -- the same defect one level up. REV 8 names the deliverable and the rung that lands
+# it, and the plan's section 8 R0a carries it as a gate part with its own red mutation.
+# ---------------------------------------------------------------------------------------------
+[hash_assertion]
+# At least one assertion must live where `cargo test --workspace` executes it with no GPU, no dxc
+# and no corpus. That test does nothing but re-hash this file against the value R0a recorded.
+must_run_in_plain_workspace_test = true
+
+# The deliverable, landed by R0a. `boyko_render` is in the workspace's `default-members`, so the
+# bare command form reaches it, and `crates/boyko_render/src/smaa_luts.rs` already carries an
+# in-house `sha256_hex` -- no new dependency, no GPU, no dxc, no corpus.
+#
+# The GPU rungs may re-assert the hash opportunistically; none of them IS the mechanism. Stating
+# which rungs re-assert is deliberately NOT done here: the previous attempt named a four-rung set
+# and every member was unreachable in a plain test run, which is how a tripwire came to be
+# described as firing in four places while firing in none.
+hash_tripwire_test = "crates/boyko_render/tests/vg_thresholds_freeze.rs"
+hash_tripwire_landed_by_rung = "R0a"

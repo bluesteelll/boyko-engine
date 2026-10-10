@@ -1,0 +1,37 @@
+# leg (7) snapshots of commit A (engine = trunk c1e9f1db), seam-census, taken at c2756e82
+# the snapshots themselves (3.6 MB / 1.4 MB) stay in the B3 scratch; this file pins them by digest
+boyko_demo  sha256 47fd5fdd14cb2b9c27f92241103ffc225dcfc61b52e80cd07c8c3f17737775bc  bytes 3630394
+# tree         D:\wt\lighttable (HEAD c2756e8273211c19f1018fce2b975ee75ad5873a, 0 uncommitted path(s))
+# object sha   10e35717bb9fdd77f4201c0238ce80b775f23c78ff608ce22b6f78a0207d6232
+# image sha    5d025e3b0a29d6925584eb03440c505cab5075f063ac46f52af35483ac76c055
+[b] defined multiset (object): 32265 distinct, 55177 symbols; count\tclass\tsize\tname
+[c] coff exports (image): 0
+[a] llvm-size -A (image)
+.text	8546242
+.rdata	3384572
+.data	272384
+.pdata	234552
+.reloc	26504
+Total	12464254
+clear  sha256 7027d80e8951559ad60f4d37b6e4d68910139de2552eaff874ea3b822e4b9c62  bytes 1372579
+# tree         D:\wt\lighttable (HEAD c2756e8273211c19f1018fce2b975ee75ad5873a, 0 uncommitted path(s))
+# object sha   2bd9be0fa4aa454507cfd9539c8073478c6f7bc38e06ae611c512271778b533a
+# image sha    d4a4f9c76eaaabb81925af824fb559b78d04b69bcd0825c5ca4cc5dcb19aa634
+[b] defined multiset (object): 7268 distinct, 12183 symbols; count\tclass\tsize\tname
+[c] coff exports (image): 0
+[a] llvm-size -A (image)
+.text	1956051
+.rdata	3022594
+.data	386048
+.pdata	48180
+.reloc	6236
+Total	5419109
+
+# seam-census vs release, same tree (ug15 leg7 compare A eq-release)
+leg (7) compare: parent <scratch>/leg7/leg7-boyko_demo-A.snap (55177 symbols), child <scratch>/leg7/eq-boyko_demo-release.snap, rename entries 0
+  (a) sections: parent [(".text", 8546242), (".rdata", 3384572), (".data", 272384), (".pdata", 234552), (".reloc", 26504), ("Total", 12464254)] / child [(".text", 8546242), (".rdata", 3384572), (".data", 272384), (".pdata", 234552), (".reloc", 26508), ("Total", 12464258)]
+  (b) child only ×1: r 98 <anon-data>
+  (b) parent only ×1: r 102 <anon-data>
+RED [mismatch]: leg (7): 3 difference(s) between <scratch>/leg7/leg7-boyko_demo-A.snap and <scratch>/leg7/eq-boyko_demo-release.snap
+leg (7) compare: parent <scratch>/leg7/leg7-clear-A.snap (12183 symbols), child <scratch>/leg7/eq-clear-release.snap, rename entries 0
+leg (7): (a), (b) and (c) identical

@@ -1,0 +1,16 @@
+ crates/boyko_physics/src/solver/contact.rs         |   2 +-
+ crates/boyko_physics/src/systems.rs                |  33 +-
+ 10 files changed, 381 insertions(+), 158 deletions(-)
+ crates/boyko_physics/src/body_set.rs               |   5 +-
+ crates/boyko_physics/src/broadphase_tree/tests.rs  |  26 +-
+ crates/boyko_physics/src/narrowphase/axis_cache.rs |   7 +-
+ crates/boyko_physics/src/plugin.rs                 |   3 +-
+ crates/boyko_physics/src/resources.rs              |  18 +-
+ crates/boyko_physics/src/resources_tests.rs        |  12 +-
+ crates/boyko_physics/src/row_identity.rs           | 400 +++++++++++++++------
+ crates/boyko_physics/src/scratch_ids.rs            |  33 +-
+ crates/boyko_physics/src/solver/contact.rs         |   2 +-
+ crates/boyko_physics/src/systems.rs                |  33 +-
+ 10 files changed, 381 insertions(+), 158 deletions(-)
+ crates/boyko_physics/src/broadphase_tree/tests.rs | 26 ++++++++++++++++++-----
+ 1 file changed, 21 insertions(+), 5 deletions(-)

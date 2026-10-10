@@ -280,26 +280,26 @@ heap allocation — every buffer is preallocated at plugin build.
 - [Systems](../concepts/systems.md) — how a system takes `Res<ActionState<A>>`
 - [Resources](../concepts/resources.md) — `ActionState<A>` and `InputMap<A>` are per-`A` resources
 - [`Time` / fixed timestep](time.md) — the frame structure behind the `fixed_*` accessors
-- Source: [`boyko_input`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/lib.rs),
-  [`actionlike.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/action/actionlike.rs),
-  [`state.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/action/state.rs),
-  [`map.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/action/map.rs),
-  [`plugin.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/plugin.rs)
+- Source: [`boyko_input`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/lib.rs),
+  [`actionlike.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/action/actionlike.rs),
+  [`state.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/action/state.rs),
+  [`map.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/action/map.rs),
+  [`plugin.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/plugin.rs)
 
-[`Actionlike`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/action/actionlike.rs#L45
-[`ActionState`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/action/state.rs#L42
-[`ActionState<A>`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/action/state.rs#L42
-[`InputMap`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/action/map.rs#L132
-[`InputMap<A>`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/action/map.rs#L132
-[`BindSpec`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/action/map.rs#L55
-[`InputRef`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/action/map.rs#L32
-[`AxisMode::DigitalNormalized`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/action/map.rs#L40
-[`ClashStrategy::PrioritizeLongest`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/action/map.rs#L118
-[`InputPlugin`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/plugin.rs#L56
-[`GameplaySet`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/plugin.rs#L37
-[`RawInputEvent`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/raw/event.rs#L18
-[`RawInputQueue`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/raw/queue.rs
-[`PhysicalInput`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/raw/queue.rs
-[`RebindSession`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/action/rebind.rs#L37
-[`RebindOutcome`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_input/src/action/rebind.rs#L20
-[`BitSet256`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_utils/src/bit_mask/bit_set_256.rs
+[`Actionlike`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/action/actionlike.rs
+[`ActionState`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/action/state.rs
+[`ActionState<A>`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/action/state.rs
+[`InputMap`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/action/map.rs
+[`InputMap<A>`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/action/map.rs
+[`BindSpec`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/action/map.rs
+[`InputRef`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/action/map.rs
+[`AxisMode::DigitalNormalized`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/action/map.rs
+[`ClashStrategy::PrioritizeLongest`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/action/map.rs
+[`InputPlugin`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/plugin.rs
+[`GameplaySet`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/plugin.rs
+[`RawInputEvent`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/raw/event.rs
+[`RawInputQueue`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/raw/queue.rs
+[`PhysicalInput`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/raw/queue.rs
+[`RebindSession`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/action/rebind.rs
+[`RebindOutcome`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_input/src/action/rebind.rs
+[`BitSet256`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_utils/src/bit_mask/bit_set_256.rs

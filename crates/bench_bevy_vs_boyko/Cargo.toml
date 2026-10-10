@@ -3,7 +3,7 @@ name = "bench-bevy-vs-boyko"
 version = "0.1.0"
 edition = "2024"
 publish = false
-
+license.workspace = true
 [lib]
 path = "src/lib.rs"
 
@@ -86,3 +86,6 @@ harness = false
 # compiles on nightly with the `nightly` feature enabled. Excluded from the
 # stable `--all-targets` build to keep `cargo clippy --workspace` green.
 required-features = ["nightly"]
+
+[lints]
+workspace = true

@@ -1,0 +1,214 @@
+# VG-R0 CORPUS MANIFEST — tracked; the payload it describes is gitignored.
+#
+# The arrangement is the owner's answer to `corpus.arrangement`: fetched + gitignored + pinned by
+# content hash, permanent. A high-poly corpus is not small by any definition that keeps this repo
+# cloneable, there is no `.gitattributes` (so no Git LFS seam), and git history is immutable — a
+# corpus committed once is carried forever by every clone. The counterpart `.gitignore` rule mirrors
+# the `assets/materials/` precedent exactly: `/assets/vg_corpus/*` with `!CORPUS.toml` and
+# `!README.md` escapes.
+#
+# A PROCEDURAL corpus was rejected for a reason worth restating here, because it is the campaign's
+# most-repeated defect: a generator has a density knob, so a density census run against it can
+# always be cranked past ~1 triangle/pixel, which makes K1 UNFALSIFIABLE BY CONSTRUCTION. Procedural
+# geometry is confined to the census instrument's own sensitivity control (plan section 8 R0c).
+schema_version = 1
+authored_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 36"
+
+# ---------------------------------------------------------------------------------------------
+# CAMERA PATHS — a TOP-LEVEL enumeration, deliberately not a per-asset column.
+#
+# The census runs the WHOLE corpus at EVERY committed path. Through Rev 17 each asset carried "the
+# camera-path id it is censused under", which licensed a PARTITION of assets over paths — and MIN
+# over a partition is a MIN over DIFFERENT SCENES, which conflates framing with content and makes
+# "clear the bar on the weakest committed path" mean nothing. MIN over paths is meant to find the
+# weakest FRAMING OF ONE SCENE.
+#
+# What lives here is the ID; the path's DEFINITION is a test constant (plan section 5.7). That split
+# is a recorded exposure rather than an oversight: no digest in R0 hashes the definitions, so
+# RE-AIMING a committed path is neither a membership change nor a row-count change and no R0 gate
+# part sees it (plan section 9.1). What IS gated is membership and cardinality — R0b(e) asserts the
+# floor at the rung that AUTHORS this set, and R0d(d) asserts set equality against the census rows'
+# path projection at the rung that CONSUMES it.
+#
+# Two paths, chosen to span framings rather than to flatter: a mid-distance orbit is the canonical
+# viewing distance a density claim is about, and a close approach is where screen-space density is
+# highest. Under MIN the orbit is expected to be the binding one, which is the honest direction —
+# the floor must be cleared by the WEAKEST framing, not the most favourable.
+#
+# The set may only GROW by a committed edit to this file, and R0d(d) reds if the census visits a
+# path this list does not name, or fails to visit one it does.
+camera_paths = ["orbit_mid", "approach_close"]
+
+# ---------------------------------------------------------------------------------------------
+# ASSETS — per-entry schema, with every field REQUIRED:
+#
+#   id                = stable slug, used in log lines and census rows
+#   source_url        = where the archive is fetched from
+#   licence           = SPDX-style identifier (CC0-1.0 / CC-BY-4.0 / ...)
+#   licence_url       = the licence text for THIS asset, as published
+#   attribution       = the credit line the licence requires, verbatim
+#   archive_sha256    = sha256 of the downloaded archive, pinned before extraction
+#   glb               = path of the extracted `.glb`, relative to this directory
+#   glb_sha256        = sha256 of that extracted `.glb`
+#   published_triangles = the triangle count AS PUBLISHED by the source
+#
+# `published_triangles` is an EXTERNAL datum on purpose: R0b(b) asserts the decoded count EQUALS it,
+# which is a cross-check of our decoder against the publisher's own number. It is an equality and
+# floors nothing — it does not, and is not meant to, certify that the corpus is high-poly.
+#
+# ⚠️ **THE ENTRIES BELOW ARE A PIPELINE SEED, NOT THE CENSUS CORPUS**, and the distinction is
+# load-bearing rather than modest. The largest of them is 18 324 triangles, orders of magnitude below the regime
+# K1 is about. They are here because they are REAL, licence-clean content that exercises the ingest
+# path end to end — and they earned their place immediately: decoding them exposed two decoder
+# defects no synthetic fixture could. The first was a hand-written `glTF` magic constant with a
+# lowercase `t`, which rejected every real `.glb` while every fixture passed, because the test's own
+# container builder repeated the same constant — the fixture agreed with the bug. The second was the
+# Rev 33 rule refusing any non-identity node transform, which refused all real content.
+#
+# **ADJUDICATING K1 ON CONTENT THIS SIZE WOULD BE THE `rescope_corpus` ROUTE THE PLAN FORECLOSES
+# EVERYWHERE ELSE.** Before R0d runs, high-poly entries must join or replace these. R0b(b)'s
+# equality is what ties each decode to its published count; it floors no magnitude, so nothing here
+# certifies that the corpus is high-poly and nothing is meant to.
+
+[[asset]]
+id = "avocado"
+source_url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Avocado/glTF-Binary/Avocado.glb"
+licence = "CC0-1.0"
+licence_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+attribution = "Microsoft - CC0 1.0, via Khronos glTF-Sample-Assets"
+archive_sha256 = "ccc9c3ce56423720b09399c2351537207cd5a65f859f9e6e2f30922762f3abd4"
+glb = "khronos/avocado.glb"
+glb_sha256 = "ccc9c3ce56423720b09399c2351537207cd5a65f859f9e6e2f30922762f3abd4"
+published_triangles = 682
+
+[[asset]]
+id = "damaged_helmet"
+source_url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/DamagedHelmet/glTF-Binary/DamagedHelmet.glb"
+licence = "CC-BY-4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "ctxwing / theblueturtle_ - CC BY 4.0, via Khronos glTF-Sample-Assets"
+archive_sha256 = "a1e3b04de97b11de564ce6e53b95f02954a297f0008183ac63a4f5974f6b32d8"
+glb = "khronos/damaged_helmet.glb"
+glb_sha256 = "a1e3b04de97b11de564ce6e53b95f02954a297f0008183ac63a4f5974f6b32d8"
+published_triangles = 15452
+
+[[asset]]
+id = "corset"
+source_url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Corset/glTF-Binary/Corset.glb"
+licence = "CC0-1.0"
+licence_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+attribution = "Microsoft - CC0 1.0, via Khronos glTF-Sample-Assets"
+archive_sha256 = "9582c0dc0dee813be77f60e6ddf7213987c7e11497bf3cc66fd7b18957ae0d26"
+glb = "khronos/corset.glb"
+glb_sha256 = "9582c0dc0dee813be77f60e6ddf7213987c7e11497bf3cc66fd7b18957ae0d26"
+published_triangles = 18324
+
+
+[[asset]]
+id = "dragon_attenuation"
+source_url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/DragonAttenuation/glTF-Binary/DragonAttenuation.glb"
+licence = "CC-BY-4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "Khronos / Wayne Cochran - CC BY 4.0, via Khronos glTF-Sample-Assets"
+archive_sha256 = "ec97df715d4207c0e39b60c329db43032872794df60e1279b7652314cf0a999e"
+glb = "khronos/dragon_attenuation.glb"
+glb_sha256 = "ec97df715d4207c0e39b60c329db43032872794df60e1279b7652314cf0a999e"
+published_triangles = 134995
+[[asset]]
+id = "toy_car"
+source_url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/ToyCar/glTF-Binary/ToyCar.glb"
+licence = "CC0-1.0"
+licence_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+attribution = "Microsoft - CC0 1.0, via Khronos glTF-Sample-Assets"
+archive_sha256 = "01a60862de55cd4b9f3acfab0b0def86451800f9c42467fcd61052c16cb9838c"
+glb = "khronos/toy_car.glb"
+glb_sha256 = "01a60862de55cd4b9f3acfab0b0def86451800f9c42467fcd61052c16cb9838c"
+published_triangles = 108936
+
+
+[[asset]]
+id = "a_beautiful_game"
+source_url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/ABeautifulGame/glTF-Binary/ABeautifulGame.glb"
+licence = "CC-BY-4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "Guido Odendahl / Khronos - CC BY 4.0, via Khronos glTF-Sample-Assets"
+archive_sha256 = "bd7133b4b322aae97c589b8839dae8155ad2546acb35ae32a127e722a959d007"
+glb = "khronos/a_beautiful_game.glb"
+glb_sha256 = "bd7133b4b322aae97c589b8839dae8155ad2546acb35ae32a127e722a959d007"
+published_triangles = 1499072
+[[asset]]
+id = "metal_rough_spheres"
+source_url = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/MetalRoughSpheres/glTF-Binary/MetalRoughSpheres.glb"
+licence = "CC-BY-4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "Ed Mackey / Khronos - CC BY 4.0, via Khronos glTF-Sample-Assets"
+archive_sha256 = "450c05557b0823a10835e32c05caf77a7b175eba94516555c1c9bb084f563f01"
+glb = "khronos/metal_rough_spheres.glb"
+glb_sha256 = "450c05557b0823a10835e32c05caf77a7b175eba94516555c1c9bb084f563f01"
+published_triangles = 501776
+
+# ---------------------------------------------------------------------------------------------
+# MEASURED 2026-07-31, in three rounds, and every round corrected the one before it. All three are
+# kept, because what went stale is as instructive as what is true now.
+#
+# ROUND 1 found that every genuinely high-poly sample asset is multi-primitive or hierarchical,
+# so the decoder's "exactly one mesh, one primitive" rule capped this corpus at ~18 k triangles --
+# three orders of magnitude below the regime K1 is about. Real content splits primitives BY
+# MATERIAL and groups them under nodes; the rule selected for toy assets.
+#
+# ROUND 2 concatenated primitives and root nodes. ROUND 3 composed hierarchies too, on the
+# argument that a parent transform multiplied into a child's still yields the geometry THIS FILE
+# describes, in its own space -- placing assets relative to ONE ANOTHER is the census's job, and
+# the decoder never does it. What stays refused is a graph that reaches one node twice, since this
+# decoder emits each mesh exactly once.
+#
+# ⚠️ ROUND 3 ALSO EXPOSED A WRONG NUMBER IN THIS FILE. `a_beautiful_game` was recorded at 573 952
+# triangles -- the sum over UNIQUE meshes -- while the decoder produced 1 499 072, because the
+# scene INSTANCES those meshes (a chess set: many pieces, few distinct meshes). The rendered total
+# is 2.6x the unique total, and the rendered total is what a density census sees. The field now
+# carries the instance-weighted count. Any future entry must be counted the same way, or R0b(b)'s
+# equality reds for a reason that has nothing to do with the decoder.
+#
+#   a_beautiful_game   1 499 072 tris   hierarchy + instancing   ACCEPTED since Rev 39
+#   metal_rough_spheres  501 776 tris   hierarchy                ACCEPTED since Rev 39
+#   dragon_attenuation   134 995 tris   2 meshes                 ACCEPTED since Rev 38
+#   toy_car              108 936 tris   3 meshes                 ACCEPTED since Rev 38
+#   corset                18 324 tris   1 mesh
+#   damaged_helmet        15 452 tris   1 mesh
+#   avocado                  682 tris   1 mesh
+#
+# CORPUS TOTAL: 2 279 237 triangles across seven assets -- into the multi-million-triangle regime
+# the premise is about, from 682 at the start of the day. R0b(b)'s equality (decoded == published)
+# holds on all seven and is what keeps each addition honest.
+#
+# ---------------------------------------------------------------------------------------------
+# R0b' -- THE RECOMPOSITION, 2026-08-01. NO ASSET ROW ABOVE CHANGES.
+#
+# The owner's answer to the K1-UNDECIDED disposition was "change the corpus and re-run R0b-R0d". What
+# changed is the ARRANGEMENT and the two camera poses, not the content: the seven rows above, their
+# hashes and their published counts are untouched, so R0b(b)'s decoded-equals-published equality
+# still holds on the same 2 279 237 triangles.
+#
+# WHY THE CONTENT DID NOT CHANGE. Swapping in sparser assets would make K1 fire by construction and
+# denser ones would make it refute by construction -- the vacuous-selection defect this campaign
+# refuses everywhere else. The defect R0 actually had was on a different axis: its arrangement was
+# one FLAT LAYER of seven assets in a void, covering 8.1% and 22.2% of the frame with NO inter-asset
+# occlusion at all. That is not what a rendered frame looks like, and the plan's own section 9.1
+# records the covered-fraction axis as UNSOLVED.
+#
+# THE NEW ARRANGEMENT: three staggered depth layers, five columns by three rows each, framed to fill
+# the view. Instancing makes it free -- the seven MESHES are registered once and placed 45 times, so
+# vertex and index memory are unchanged. Measured: 53.6% and 77.4% covered.
+#
+# ⚠️ AND IT MOVED THE READING AGAINST THE CAMPAIGN, which is recorded here rather than only in the
+# machine-written census. D_est fell from 1.0527 to 0.7425 on orbit_mid and from 0.5090 to 0.2829 on
+# approach_close, because the same assets magnified to fill the frame carry LARGER triangles and
+# therefore fewer triangles per covered pixel. The 8%-covered reading OVERSTATED density. The verdict
+# is unchanged (UNDECIDED -- a lower bound below the threshold decides nothing either way), but the
+# proof that one committed framing was dense is withdrawn: see docs/VG-R11-UPPER-BOUND-INSTRUMENT.md
+# section 3.1.
+#
+# The camera poses were set from the arrangement's geometry and from the stated goal of FILLING THE
+# FRAME, before any density was read. Section 9.1 records that re-aiming a committed path is invisible
+# to every R0 gate part, so what constrains it is commit ordering and the fact that both readings are
+# published -- not a check. The path IDs are unchanged, so R0d(d)'s set equality is unaffected.

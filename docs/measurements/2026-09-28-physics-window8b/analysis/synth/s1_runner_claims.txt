@@ -1,0 +1,382 @@
+# Runner claims, synthesis re-derivation (ruling 1; LETTER = kmin 3, K2 = kmin 2); window [0,500) unless named
+
+## S7-AB (P = s7p = trunk 16191fda, T = s7t = a3adc827); cut.md section 5 C1/C2/C3
+
+### C1-JT T(8) vs T(16): T(16) not claimed slower  [wall0..500]
+  A ('S7-JT', 's7t', 8): 1.8112 [1.8003-1.8536] n=9 (IQR 0.51 %, SE 0.46 %, range 2.94 %)
+  B ('S7-JT', 's7t', 16): 2.1902 [2.1816-2.2341] n=9 (IQR 0.46 %, SE 0.30 %, range 2.40 %)
+  LETTER: B/A 1.2092 (+20.92 %, B-A +0.3790) pooled YYY (bars i 1.37 / s 1.10 / r 7.59 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => FAILS (B claimed slower)
+  K2    : B/A 1.2092 (+20.92 %, B-A +0.3790) pooled YYY (bars i 1.37 / s 1.10 / r 7.59 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => FAILS (B claimed slower)
+
+### C1-JA T(8) vs T(16)  [wall0..500]
+  A ('S7-JA', 's7t', 8): 5.3040 [5.2953-5.4035] n=9 (IQR 0.27 %, SE 0.26 %, range 2.04 %)
+  B ('S7-JA', 's7t', 16): 5.8658 [5.8421-5.9646] n=9 (IQR 0.20 %, SE 0.25 %, range 2.09 %)
+  LETTER: B/A 1.1059 (+10.59 %, B-A +0.5617) pooled YYY (bars i 0.67 / s 0.73 / r 5.84 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => FAILS (B claimed slower)
+  K2    : B/A 1.1059 (+10.59 %, B-A +0.5617) pooled YYY (bars i 0.67 / s 0.73 / r 5.84 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => FAILS (B claimed slower)
+
+### C2-JT P(8) vs T(8): T(8) not claimed slower  [wall0..500]
+  A ('S7-JT', 's7p', 8): 1.8152 [1.7989-1.8491] n=9 (IQR 0.87 %, SE 0.36 %, range 2.77 %)
+  B ('S7-JT', 's7t', 8): 1.8112 [1.8003-1.8536] n=9 (IQR 0.51 %, SE 0.46 %, range 2.94 %)
+  LETTER: B/A 0.9978 (-0.22 %, B-A -0.0040) pooled nnn (bars i 2.01 / s 1.16 / r 8.08 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+  K2    : B/A 0.9978 (-0.22 %, B-A -0.0040) pooled nnn (bars i 2.01 / s 1.16 / r 8.08 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+
+### C2-JA P(8) vs T(8)  [wall0..500]
+  A ('S7-JA', 's7p', 8): 5.3081 [5.2750-5.3216] n=9 (IQR 0.21 %, SE 0.11 %, range 0.88 %)
+  B ('S7-JA', 's7t', 8): 5.3040 [5.2953-5.4035] n=9 (IQR 0.27 %, SE 0.26 %, range 2.04 %)
+  LETTER: B/A 0.9992 (-0.08 %, B-A -0.0040) pooled nnn (bars i 0.69 / s 0.57 / r 4.44 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+  K2    : B/A 0.9992 (-0.08 %, B-A -0.0040) pooled nnn (bars i 0.69 / s 0.57 / r 4.44 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+
+### C3-JT P(16) vs T(16): T faster by >= 0.105 ms, claimed  [wall0..500]
+  A ('S7-JT', 's7p', 16): 2.0502 [2.0393-2.0659] n=9 (IQR 0.53 %, SE 0.17 %, range 1.30 %)
+  B ('S7-JT', 's7t', 16): 2.1902 [2.1816-2.2341] n=9 (IQR 0.46 %, SE 0.30 %, range 2.40 %)
+  LETTER: B/A 1.0683 (+6.83 %, B-A +0.1400) pooled YYY (bars i 1.39 / s 0.69 / r 5.45 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => REFUTED (B claimed slower) STRONG
+  K2    : B/A 1.0683 (+6.83 %, B-A +0.1400) pooled YYY (bars i 1.39 / s 0.69 / r 5.45 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => REFUTED (B claimed slower) STRONG
+
+### post hoc: J-A P(16) vs T(16)  [wall0..500]
+  A ('S7-JA', 's7p', 16): 5.2079 [5.1945-5.3156] n=9 (IQR 0.38 %, SE 0.31 %, range 2.33 %)
+  B ('S7-JA', 's7t', 16): 5.8658 [5.8421-5.9646] n=9 (IQR 0.20 %, SE 0.25 %, range 2.09 %)
+  LETTER: B/A 1.1263 (+12.63 %, B-A +0.6579) pooled YYY (bars i 0.85 / s 0.80 / r 6.25 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => REFUTED (B claimed slower) STRONG
+  K2    : B/A 1.1263 (+12.63 %, B-A +0.6579) pooled YYY (bars i 0.85 / s 0.80 / r 6.25 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => REFUTED (B claimed slower) STRONG
+
+### optional W1 pair P(1) vs T(1)  [wall0..500]
+  A ('S7-JT-W1', 's7p', 1): 4.4167 [4.3957-4.5564] n=9 (IQR 0.84 %, SE 0.49 %, range 3.64 %)
+  B ('S7-JT-W1', 's7t', 1): 4.4551 [4.4037-4.5598] n=9 (IQR 1.50 %, SE 0.54 %, range 3.50 %)
+  LETTER: B/A 1.0087 (+0.87 %, B-A +0.0384) pooled nnn (bars i 3.44 / s 1.46 / r 10.10 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+  K2    : B/A 1.0087 (+0.87 %, B-A +0.0384) pooled nnn (bars i 3.44 / s 1.46 / r 10.10 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+
+### ladder8 F0.5 (injected 0.03 ms) vs S7-JT#s7p@W8  [wall0..500]
+  A ('S7-JT', 's7p', 8): 1.8152 [1.7989-1.8491] n=9 (IQR 0.87 %, SE 0.36 %, range 2.77 %)
+  B ('S7-ladder8-F0.5', 's7p', 8): 1.8489 [1.8293-1.8736] n=9 (IQR 1.23 %, SE 0.33 %, range 2.39 %)
+  LETTER: B/A 1.0186 (+1.86 %, B-A +0.0337) pooled nYn (bars i 3.02 / s 0.97 / r 7.32 %); passes p0:YYn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => NOT SEEN
+  K2    : B/A 1.0186 (+1.86 %, B-A +0.0337) pooled nYn (bars i 3.02 / s 0.97 / r 7.32 %); passes p0:YYn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => NOT SEEN
+
+### ladder8 F1 (injected 0.06 ms) vs S7-JT#s7p@W8  [wall0..500]
+  A ('S7-JT', 's7p', 8): 1.8152 [1.7989-1.8491] n=9 (IQR 0.87 %, SE 0.36 %, range 2.77 %)
+  B ('S7-ladder8-F1', 's7p', 8): 1.8812 [1.8677-1.8897] n=9 (IQR 0.43 %, SE 0.15 %, range 1.17 %)
+  LETTER: B/A 1.0363 (+3.63 %, B-A +0.0660) pooled YYn (bars i 1.94 / s 0.77 / r 6.01 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYn(K3/3) -> CLAIMED [B>A] => SEEN
+  K2    : B/A 1.0363 (+3.63 %, B-A +0.0660) pooled YYn (bars i 1.94 / s 0.77 / r 6.01 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYn(K3/3) -> CLAIMED [B>A] => SEEN
+
+### ladder8 F1.5 (injected 0.09 ms) vs S7-JT#s7p@W8  [wall0..500]
+  A ('S7-JT', 's7p', 8): 1.8152 [1.7989-1.8491] n=9 (IQR 0.87 %, SE 0.36 %, range 2.77 %)
+  B ('S7-ladder8-F1.5', 's7p', 8): 1.9063 [1.8865-1.9368] n=9 (IQR 0.89 %, SE 0.34 %, range 2.64 %)
+  LETTER: B/A 1.0502 (+5.02 %, B-A +0.0911) pooled YYn (bars i 2.49 / s 0.99 / r 7.65 %); passes p0:YYn(K3/3) p1:YYY(K3/3) p2:YYn(K3/3) -> CLAIMED [B>A] => SEEN
+  K2    : B/A 1.0502 (+5.02 %, B-A +0.0911) pooled YYn (bars i 2.49 / s 0.99 / r 7.65 %); passes p0:YYn(K3/3) p1:YYY(K3/3) p2:YYn(K3/3) -> CLAIMED [B>A] => SEEN
+
+### ladder8 F2 (injected 0.12 ms) vs S7-JT#s7p@W8  [wall0..500]
+  A ('S7-JT', 's7p', 8): 1.8152 [1.7989-1.8491] n=9 (IQR 0.87 %, SE 0.36 %, range 2.77 %)
+  B ('S7-ladder8-F2', 's7p', 8): 1.9410 [1.9266-1.9669] n=9 (IQR 0.91 %, SE 0.30 %, range 2.07 %)
+  LETTER: B/A 1.0693 (+6.93 %, B-A +0.1257) pooled YYY (bars i 2.51 / s 0.93 / r 6.92 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => SEEN STRONG
+  K2    : B/A 1.0693 (+6.93 %, B-A +0.1257) pooled YYY (bars i 2.51 / s 0.93 / r 6.92 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => SEEN STRONG
+
+### ladder16 F0.5 (injected 0.0525 ms) vs S7-JT#s7p@W16  [wall0..500]
+  A ('S7-JT', 's7p', 16): 2.0502 [2.0393-2.0659] n=9 (IQR 0.53 %, SE 0.17 %, range 1.30 %)
+  B ('S7-ladder16-F0.5', 's7p', 16): 2.1047 [2.0960-2.1129] n=9 (IQR 0.29 %, SE 0.10 %, range 0.80 %)
+  LETTER: B/A 1.0266 (+2.66 %, B-A +0.0545) pooled YYn (bars i 1.20 / s 0.39 / r 3.05 %); passes p0:YYn(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED [B>A] => SEEN
+  K2    : B/A 1.0266 (+2.66 %, B-A +0.0545) pooled YYn (bars i 1.20 / s 0.39 / r 3.05 %); passes p0:YYn(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED [B>A] => SEEN
+
+### ladder16 F1 (injected 0.105 ms) vs S7-JT#s7p@W16  [wall0..500]
+  A ('S7-JT', 's7p', 16): 2.0502 [2.0393-2.0659] n=9 (IQR 0.53 %, SE 0.17 %, range 1.30 %)
+  B ('S7-ladder16-F1', 's7p', 16): 2.1641 [2.1541-2.1929] n=9 (IQR 1.11 %, SE 0.28 %, range 1.79 %)
+  LETTER: B/A 1.0556 (+5.56 %, B-A +0.1139) pooled YYY (bars i 2.45 / s 0.65 / r 4.42 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => SEEN STRONG
+  K2    : B/A 1.0556 (+5.56 %, B-A +0.1139) pooled YYY (bars i 2.45 / s 0.65 / r 4.42 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => SEEN STRONG
+
+### ladder16 F1.5 (injected 0.1575 ms) vs S7-JT#s7p@W16  [wall0..500]
+  A ('S7-JT', 's7p', 16): 2.0502 [2.0393-2.0659] n=9 (IQR 0.53 %, SE 0.17 %, range 1.30 %)
+  B ('S7-ladder16-F1.5', 's7p', 16): 2.2101 [2.2010-2.2294] n=9 (IQR 0.46 %, SE 0.16 %, range 1.28 %)
+  LETTER: B/A 1.0780 (+7.80 %, B-A +0.1599) pooled YYY (bars i 1.39 / s 0.46 / r 3.65 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => SEEN STRONG
+  K2    : B/A 1.0780 (+7.80 %, B-A +0.1599) pooled YYY (bars i 1.39 / s 0.46 / r 3.65 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => SEEN STRONG
+
+### ladder16 F2 (injected 0.21 ms) vs S7-JT#s7p@W16  [wall0..500]
+  A ('S7-JT', 's7p', 16): 2.0502 [2.0393-2.0659] n=9 (IQR 0.53 %, SE 0.17 %, range 1.30 %)
+  B ('S7-ladder16-F2', 's7p', 16): 2.2648 [2.2529-2.2952] n=9 (IQR 0.55 %, SE 0.23 %, range 1.87 %)
+  LETTER: B/A 1.1047 (+10.47 %, B-A +0.2146) pooled YYY (bars i 1.52 / s 0.58 / r 4.55 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => SEEN STRONG
+  K2    : B/A 1.1047 (+10.47 %, B-A +0.2146) pooled YYY (bars i 1.52 / s 0.58 / r 4.55 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => SEEN STRONG
+
+### J-A rung W16 F1 (0.105 ms)  [wall0..500]
+  A ('S7-JA', 's7p', 16): 5.2079 [5.1945-5.3156] n=9 (IQR 0.38 %, SE 0.31 %, range 2.33 %)
+  B ('S7-JA-ladder16-F1', 's7p', 16): 5.3174 [5.2999-5.3854] n=9 (IQR 0.68 %, SE 0.22 %, range 1.61 %)
+  LETTER: B/A 1.0210 (+2.10 %, B-A +0.1095) pooled YYn (bars i 1.56 / s 0.76 / r 5.66 %); passes p0:nnn(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> NOT CLAIMED [B>A] => NOT SEEN
+  K2    : B/A 1.0210 (+2.10 %, B-A +0.1095) pooled YYn (bars i 1.56 / s 0.76 / r 5.66 %); passes p0:nnn(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> NOT CLAIMED [B>A] => NOT SEEN
+  ladder8 rungs seen (LETTER): ['F1', 'F1.5', 'F2']
+  ladder16 rungs seen (LETTER): ['F0.5', 'F1', 'F1.5', 'F2']
+
+## S4-AB (A = PARENT s4off, B = TIP 16191fda)
+
+### S4 W8 wall: TIP faster by >= 0.060 ms  [wall0..500]
+  A ('S4-JT', 'parent', 8): 1.9859 [1.9780-2.0244] n=9 (IQR 0.36 %, SE 0.35 %, range 2.34 %)
+  B ('S4-JT', 'tip', 8): 1.8154 [1.7937-1.8472] n=9 (IQR 1.27 %, SE 0.39 %, range 2.94 %)
+  LETTER: B/A 0.9142 (-8.58 %, B-A -0.1705) pooled YYY (bars i 2.64 / s 1.04 / r 7.52 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+  K2    : B/A 0.9142 (-8.58 %, B-A -0.1705) pooled YYY (bars i 2.64 / s 1.04 / r 7.52 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### S4 W8 span phys_solve_build: gain >= 0.060 ms  [phys_solve_build_ns0..500]
+  A ('S4-JT-a', 'parent', 8): 0.3038 [0.2999-0.3119] n=9 (IQR 0.45 %, SE 0.45 %, range 3.97 %)
+  B ('S4-JT-a', 'tip', 8): 0.1144 [0.1137-0.1155] n=9 (IQR 0.51 %, SE 0.19 %, range 1.59 %)
+  LETTER: B/A 0.3766 (-62.34 %, B-A -0.1894) pooled YYY (bars i 1.35 / s 0.97 / r 8.55 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+  K2    : B/A 0.3766 (-62.34 %, B-A -0.1894) pooled YYY (bars i 1.35 / s 0.97 / r 8.55 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### context: P-c fill phys_sb_pc W8  [phys_sb_pc_ns0..500]
+  A ('S4-JT-a', 'parent', 8): 0.2615 [0.2580-0.2698] n=9 (IQR 0.51 %, SE 0.51 %, range 4.54 %)
+  B ('S4-JT-a', 'tip', 8): 0.0706 [0.0703-0.0713] n=9 (IQR 0.43 %, SE 0.18 %, range 1.41 %)
+  LETTER: B/A 0.2701 (-72.99 %, B-A -0.1909) pooled YYY (bars i 1.34 / s 1.09 / r 9.51 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+  K2    : B/A 0.2701 (-72.99 %, B-A -0.1909) pooled YYY (bars i 1.34 / s 1.09 / r 9.51 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### S4 rung 0.060 ms at W8 (R_8 in-block)  [wall0..500]
+  A ('S4-JT', 'tip', 8): 1.8154 [1.7937-1.8472] n=9 (IQR 1.27 %, SE 0.39 %, range 2.94 %)
+  B ('S4-rung', 'tip', 8): 1.8629 [1.8588-1.8876] n=9 (IQR 0.74 %, SE 0.23 %, range 1.55 %)
+  LETTER: B/A 1.0262 (+2.62 %, B-A +0.0475) pooled nYn (bars i 2.94 / s 0.90 / r 6.65 %); passes p0:nnn(K3/3) p1:YYY(K3/3) p2:YYn(K3/3) -> NOT CLAIMED [B>A] => NOT SEEN
+  K2    : B/A 1.0262 (+2.62 %, B-A +0.0475) pooled nYn (bars i 2.94 / s 0.90 / r 6.65 %); passes p0:nnn(K3/3) p1:YYY(K3/3) p2:YYn(K3/3) -> NOT CLAIMED [B>A] => NOT SEEN
+
+### S4 zone canary N30000 span  [phys_solve_build_ns0..500]
+  A ('S4-JT-a', 'tip', 8): 0.1144 [0.1137-0.1155] n=9 (IQR 0.51 %, SE 0.19 %, range 1.59 %)
+  B ('S4-zone-N30000', 'tip', 8): 0.1447 [0.1439-0.1473] n=9 (IQR 1.08 %, SE 0.34 %, range 2.34 %)
+  LETTER: B/A 1.2648 (+26.48 %, B-A +0.0303) pooled YYY (bars i 2.38 / s 0.78 / r 5.67 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => SEEN STRONG
+  K2    : B/A 1.2648 (+26.48 %, B-A +0.0303) pooled YYY (bars i 2.38 / s 0.78 / r 5.67 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => SEEN STRONG
+
+### S4 zone canary N60000 span  [phys_solve_build_ns0..500]
+  A ('S4-JT-a', 'tip', 8): 0.1144 [0.1137-0.1155] n=9 (IQR 0.51 %, SE 0.19 %, range 1.59 %)
+  B ('S4-zone-N60000', 'tip', 8): 0.1749 [0.1733-0.1759] n=9 (IQR 0.87 %, SE 0.22 %, range 1.47 %)
+  LETTER: B/A 1.5283 (+52.83 %, B-A +0.0604) pooled YYY (bars i 2.01 / s 0.59 / r 4.33 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => SEEN STRONG
+  K2    : B/A 1.5283 (+52.83 %, B-A +0.0604) pooled YYY (bars i 2.01 / s 0.59 / r 4.33 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => SEEN STRONG
+
+### S4 no-slower W1  [wall0..500]
+  A ('S4-JT', 'parent', 1): 4.4217 [4.3833-4.5336] n=9 (IQR 2.08 %, SE 0.53 %, range 3.40 %)
+  B ('S4-JT', 'tip', 1): 4.4500 [4.3918-4.5231] n=9 (IQR 0.78 %, SE 0.37 %, range 2.95 %)
+  LETTER: B/A 1.0064 (+0.64 %, B-A +0.0283) pooled nnn (bars i 4.45 / s 1.30 / r 9.00 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+  K2    : B/A 1.0064 (+0.64 %, B-A +0.0283) pooled nnn (bars i 4.45 / s 1.30 / r 9.00 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+
+### S4 no-slower W2  [wall0..500]
+  A ('S4-JT', 'parent', 2): 3.0807 [3.0534-3.2259] n=9 (IQR 1.20 %, SE 0.76 %, range 5.60 %)
+  B ('S4-JT', 'tip', 2): 2.9998 [2.9650-3.0208] n=9 (IQR 0.43 %, SE 0.25 %, range 1.86 %)
+  LETTER: B/A 0.9738 (-2.62 %, B-A -0.0808) pooled YYn (bars i 2.55 / s 1.60 / r 11.80 %); passes p0:YYn(K3/3) p1:YYn(K3/3) p2:YYn(K3/3) -> CLAIMED [B<A] => HOLDS (B claimed faster)
+  K2    : B/A 0.9738 (-2.62 %, B-A -0.0808) pooled YYn (bars i 2.55 / s 1.60 / r 11.80 %); passes p0:YYn(K3/3) p1:YYn(K3/3) p2:YYn(K3/3) -> CLAIMED [B<A] => HOLDS (B claimed faster)
+
+### S4 no-slower W4  [wall0..500]
+  A ('S4-JT', 'parent', 4): 2.3529 [2.3376-2.4170] n=9 (IQR 0.99 %, SE 0.47 %, range 3.37 %)
+  B ('S4-JT', 'tip', 4): 2.1981 [2.1857-2.2100] n=9 (IQR 0.72 %, SE 0.18 %, range 1.11 %)
+  LETTER: B/A 0.9342 (-6.58 %, B-A -0.1549) pooled YYn (bars i 2.46 / s 1.01 / r 7.10 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED [B<A] => HOLDS (B claimed faster)
+  K2    : B/A 0.9342 (-6.58 %, B-A -0.1549) pooled YYn (bars i 2.46 / s 1.01 / r 7.10 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED [B<A] => HOLDS (B claimed faster)
+
+### S4 no-slower W16  [wall0..500]
+  A ('S4-JT', 'parent', 16): 2.2203 [2.2104-2.4401] n=9 (IQR 1.49 %, SE 1.37 %, range 10.34 %)
+  B ('S4-JT', 'tip', 16): 2.0502 [2.0357-2.0744] n=9 (IQR 0.75 %, SE 0.24 %, range 1.89 %)
+  LETTER: B/A 0.9234 (-7.66 %, B-A -0.1700) pooled YYn (bars i 3.34 / s 2.79 / r 21.03 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:nYn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+  K2    : B/A 0.9234 (-7.66 %, B-A -0.1700) pooled YYn (bars i 3.34 / s 2.79 / r 21.03 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:nYn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+  per manifold [100,500) S4-JT#parent@W8: 434.9 ns [433.2-444.4] n=9
+  per manifold [100,500) S4-JT#tip@W8: 397.0 ns [392.2-403.0] n=9
+
+## F3 (tip 16191fda; A = leaflist, B = leaflist-kd); armed spans = median over steps [100,500), us
+
+### R1 t_q(kd) TD-armed W1 <= 186 us  [t_q]
+  cell ('F3-TD-armed-kd', 'tip', 1): 167.88 [164.17-169.45] n=9 (IQR 1.03 %, SE 0.41 %, range 3.14 %); constant bar 186.0
+  LETTER: B/A 0.9026 (-9.74 %, B-A -18.12) pooled YYY (bars i 2.06 / s 0.82 / r 6.28 %); passes p0:YYY(KNone/3) p1:YYY(KNone/3) p2:YYY(KNone/3) -> CLAIMED STRONG [B<A] => CLAIMED below STRONG
+  K2    : B/A 0.9026 (-9.74 %, B-A -18.12) pooled YYY (bars i 2.06 / s 0.82 / r 6.28 %); passes p0:YYY(KNone/3) p1:YYY(KNone/3) p2:YYY(KNone/3) -> CLAIMED STRONG [B<A] => CLAIMED below STRONG
+
+### R2 t_q kd < leaflist W1  [t_q]
+  A ('F3-TD-armed-leaflist', 'tip', 1): 201.98 [198.97-205.39] n=8 (IQR 1.40 %, SE 0.48 %, range 3.18 %)
+  B ('F3-TD-armed-kd', 'tip', 1): 167.88 [164.17-169.45] n=9 (IQR 1.03 %, SE 0.41 %, range 3.14 %)
+  LETTER: B/A 0.8312 (-16.88 %, B-A -34.10) pooled YYY (bars i 3.48 / s 1.27 / r 8.94 %); passes p0:YYY(K3/3) p1:nnn(K2/3) p2:YYY(K3/3) -> NOT CLAIMED [B<A] => NOT CLAIMED
+  K2    : B/A 0.8312 (-16.88 %, B-A -34.10) pooled YYY (bars i 3.48 / s 1.27 / r 8.94 %); passes p0:YYY(K3/3) p1:YYY(K2/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### R3a t_qb kd < leaflist W1  [t_qb]
+  A ('F3-TD-armed-leaflist', 'tip', 1): 225.26 [221.89-229.11] n=8 (IQR 2.02 %, SE 0.53 %, range 3.21 %)
+  B ('F3-TD-armed-kd', 'tip', 1): 218.81 [214.01-220.85] n=9 (IQR 1.04 %, SE 0.41 %, range 3.13 %)
+  LETTER: B/A 0.9714 (-2.86 %, B-A -6.45) pooled nYn (bars i 4.55 / s 1.34 / r 8.96 %); passes p0:nYn(K3/3) p1:nnn(K2/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => NOT CLAIMED
+  K2    : B/A 0.9714 (-2.86 %, B-A -6.45) pooled nYn (bars i 4.55 / s 1.34 / r 8.96 %); passes p0:nYn(K3/3) p1:YYn(K2/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => NOT CLAIMED
+
+### R3b t_qb kd not slower W8  [t_qb]
+  A ('F3-TD-armed-leaflist', 'tip', 8): 230.62 [225.27-236.66] n=9 (IQR 1.62 %, SE 0.64 %, range 4.94 %)
+  B ('F3-TD-armed-kd', 'tip', 8): 229.22 [220.00-234.14] n=9 (IQR 2.23 %, SE 0.86 %, range 6.17 %)
+  LETTER: B/A 0.9940 (-0.60 %, B-A -1.39) pooled nnn (bars i 5.51 / s 2.14 / r 15.80 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+  K2    : B/A 0.9940 (-0.60 %, B-A -1.39) pooled nnn (bars i 5.51 / s 2.14 / r 15.80 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+
+### context t_q W1  [t_q]
+  A ('F3-TD-armed-leaflist', 'tip', 1): 201.98 [198.97-205.39] n=8 (IQR 1.40 %, SE 0.48 %, range 3.18 %)
+  B ('F3-TD-armed-kd', 'tip', 1): 167.88 [164.17-169.45] n=9 (IQR 1.03 %, SE 0.41 %, range 3.14 %)
+  LETTER: B/A 0.8312 (-16.88 %, B-A -34.10) pooled YYY (bars i 3.48 / s 1.27 / r 8.94 %); passes p0:YYY(K3/3) p1:nnn(K2/3) p2:YYY(K3/3) -> NOT CLAIMED [B<A] => NOT CLAIMED
+  K2    : B/A 0.8312 (-16.88 %, B-A -34.10) pooled YYY (bars i 3.48 / s 1.27 / r 8.94 %); passes p0:YYY(K3/3) p1:YYY(K2/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### context t_b W1  [t_b]
+  A ('F3-TD-armed-leaflist', 'tip', 1): 22.87 [22.45-24.23] n=8 (IQR 5.23 %, SE 1.34 %, range 7.80 %)
+  B ('F3-TD-armed-kd', 'tip', 1): 50.92 [49.62-51.83] n=9 (IQR 1.66 %, SE 0.60 %, range 4.34 %)
+  LETTER: B/A 2.2263 (+122.63 %, B-A +28.05) pooled YYY (bars i 10.98 / s 2.93 / r 17.86 %); passes p0:YYY(K3/3) p1:nnn(K2/3) p2:YYY(K3/3) -> NOT CLAIMED [B>A] => NOT CLAIMED
+  K2    : B/A 2.2263 (+122.63 %, B-A +28.05) pooled YYY (bars i 10.98 / s 2.93 / r 17.86 %); passes p0:YYY(K3/3) p1:YYY(K2/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => REFUTED (B claimed slower) STRONG
+
+### context t_q W8  [t_q]
+  A ('F3-TD-armed-leaflist', 'tip', 8): 206.93 [203.91-212.53] n=9 (IQR 1.30 %, SE 0.56 %, range 4.16 %)
+  B ('F3-TD-armed-kd', 'tip', 8): 174.63 [170.09-177.25] n=9 (IQR 1.53 %, SE 0.57 %, range 4.10 %)
+  LETTER: B/A 0.8439 (-15.61 %, B-A -32.29) pooled YYY (bars i 4.02 / s 1.59 / r 11.69 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+  K2    : B/A 0.8439 (-15.61 %, B-A -32.29) pooled YYY (bars i 4.02 / s 1.59 / r 11.69 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### context t_b W8  [t_b]
+  A ('F3-TD-armed-leaflist', 'tip', 8): 22.29 [21.28-23.98] n=9 (IQR 6.23 %, SE 1.72 %, range 12.12 %)
+  B ('F3-TD-armed-kd', 'tip', 8): 54.37 [49.95-56.74] n=9 (IQR 4.23 %, SE 1.78 %, range 12.51 %)
+  LETTER: B/A 2.4388 (+143.88 %, B-A +32.08) pooled YYY (bars i 15.05 / s 4.94 / r 34.82 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => REFUTED (B claimed slower) STRONG
+  K2    : B/A 2.4388 (+143.88 %, B-A +32.08) pooled YYY (bars i 15.05 / s 4.94 / r 34.82 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A] => REFUTED (B claimed slower) STRONG
+
+### R3c JT W1 wall kd not slower  [wall0..500]
+  A ('F3-JT-leaflist', 'tip', 1): 4.6355 [4.5423-4.9419] n=9 (IQR 2.25 %, SE 1.21 %, range 8.62 %)
+  B ('F3-JT-kd', 'tip', 1): 4.6265 [4.5241-4.7269] n=9 (IQR 1.34 %, SE 0.56 %, range 4.38 %)
+  LETTER: B/A 0.9981 (-0.19 %, B-A -0.0090) pooled nnn (bars i 5.23 / s 2.67 / r 19.34 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+  K2    : B/A 0.9981 (-0.19 %, B-A -0.0090) pooled nnn (bars i 5.23 / s 2.67 / r 19.34 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+
+### R3c JT W2 wall kd not slower  [wall0..500]
+  A ('F3-JT-leaflist', 'tip', 2): 3.1561 [3.1181-3.2263] n=8 (IQR 1.64 %, SE 0.55 %, range 3.43 %)
+  B ('F3-JT-kd', 'tip', 2): 3.1630 [3.0883-3.3566] n=9 (IQR 3.06 %, SE 1.14 %, range 8.48 %)
+  LETTER: B/A 1.0022 (+0.22 %, B-A +0.0068) pooled nnn (bars i 6.94 / s 2.54 / r 18.30 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K2/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+  K2    : B/A 1.0022 (+0.22 %, B-A +0.0068) pooled nnn (bars i 6.94 / s 2.54 / r 18.30 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K2/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+
+### R3c JT W4 wall kd not slower  [wall0..500]
+  A ('F3-JT-leaflist', 'tip', 4): 2.3694 [2.2676-2.3830] n=8 (IQR 1.39 %, SE 0.84 %, range 4.87 %)
+  B ('F3-JT-kd', 'tip', 4): 2.3556 [2.2581-2.3874] n=8 (IQR 0.74 %, SE 0.74 %, range 5.49 %)
+  LETTER: B/A 0.9942 (-0.58 %, B-A -0.0138) pooled nnn (bars i 3.14 / s 2.23 / r 14.67 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K2/2) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+  K2    : B/A 0.9942 (-0.58 %, B-A -0.0138) pooled nnn (bars i 3.14 / s 2.23 / r 14.67 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K2/2) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+
+### R3c JT W8 wall kd not slower  [wall0..500]
+  A ('F3-JT-leaflist', 'tip', 8): 2.0089 [1.8899-2.0782] n=8 (IQR 3.27 %, SE 1.29 %, range 9.37 %)
+  B ('F3-JT-kd', 'tip', 8): 2.0245 [1.9133-2.0504] n=9 (IQR 3.11 %, SE 0.95 %, range 6.77 %)
+  LETTER: B/A 1.0078 (+0.78 %, B-A +0.0156) pooled nnn (bars i 9.02 / s 3.19 / r 23.13 %); passes p0:nnn(K3/3) p1:nnn(K2/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+  K2    : B/A 1.0078 (+0.78 %, B-A +0.0156) pooled nnn (bars i 9.02 / s 3.19 / r 23.13 %); passes p0:nnn(K3/3) p1:nnn(K2/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+
+### R3c JT W16 wall kd not slower  [wall0..500]
+  A ('F3-JT-leaflist', 'tip', 16): 2.2193 [2.1369-2.3560] n=8 (IQR 3.27 %, SE 1.35 %, range 9.87 %)
+  B ('F3-JT-kd', 'tip', 16): 2.1925 [2.1438-2.3276] n=8 (IQR 2.93 %, SE 1.21 %, range 8.39 %)
+  LETTER: B/A 0.9879 (-1.21 %, B-A -0.0268) pooled nnn (bars i 8.77 / s 3.62 / r 25.91 %); passes p0:nnn(K3/3) p1:nnn(K2/2) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+  K2    : B/A 0.9879 (-1.21 %, B-A -0.0268) pooled nnn (bars i 8.77 / s 3.62 / r 25.91 %); passes p0:nnn(K3/3) p1:nnn(K2/2) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+
+### R3c RT W1 wall kd not slower  [wall0..500]
+  A ('F3-RT-leaflist', 'tip', 1): 6.6893 [6.5791-6.8027] n=8 (IQR 2.24 %, SE 0.58 %, range 3.34 %)
+  B ('F3-RT-kd', 'tip', 1): 6.6679 [6.4759-7.1256] n=9 (IQR 2.45 %, SE 1.27 %, range 9.74 %)
+  LETTER: B/A 0.9968 (-0.32 %, B-A -0.0214) pooled nnn (bars i 6.64 / s 2.79 / r 20.60 %); passes p0:nnn(K2/3) p1:nnn(K3/3) p2:nYn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+  K2    : B/A 0.9968 (-0.32 %, B-A -0.0214) pooled nnn (bars i 6.64 / s 2.79 / r 20.60 %); passes p0:nnn(K2/3) p1:nnn(K3/3) p2:nYn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+
+### R3c RT W2 wall kd not slower  [wall0..500]
+  A ('F3-RT-leaflist', 'tip', 2): 4.5406 [4.4326-4.6610] n=9 (IQR 1.73 %, SE 0.66 %, range 5.03 %)
+  B ('F3-RT-kd', 'tip', 2): 4.5018 [4.4620-4.5491] n=8 (IQR 1.30 %, SE 0.34 %, range 1.94 %)
+  LETTER: B/A 0.9914 (-0.86 %, B-A -0.0388) pooled nnn (bars i 4.33 / s 1.49 / r 10.78 %); passes p0:nnn(K3/2) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+  K2    : B/A 0.9914 (-0.86 %, B-A -0.0388) pooled nnn (bars i 4.33 / s 1.49 / r 10.78 %); passes p0:nnn(K3/2) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+
+### R3c RT W4 wall kd not slower  [wall0..500]
+  A ('F3-RT-leaflist', 'tip', 4): 3.3191 [3.2629-3.4161] n=9 (IQR 1.22 %, SE 0.55 %, range 4.62 %)
+  B ('F3-RT-kd', 'tip', 4): 3.2806 [3.2445-3.3999] n=8 (IQR 1.41 %, SE 0.68 %, range 4.74 %)
+  LETTER: B/A 0.9884 (-1.16 %, B-A -0.0385) pooled nnn (bars i 3.73 / s 1.74 / r 13.23 %); passes p0:nnn(K3/2) p1:nYn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+  K2    : B/A 0.9884 (-1.16 %, B-A -0.0385) pooled nnn (bars i 3.73 / s 1.74 / r 13.23 %); passes p0:nnn(K3/2) p1:nYn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+
+### R3c RT W8 wall kd not slower  [wall0..500]
+  A ('F3-RT-leaflist', 'tip', 8): 2.8138 [2.6738-3.0713] n=8 (IQR 4.08 %, SE 1.92 %, range 14.13 %)
+  B ('F3-RT-kd', 'tip', 8): 2.7933 [2.6764-2.8604] n=8 (IQR 2.29 %, SE 0.91 %, range 6.59 %)
+  LETTER: B/A 0.9927 (-0.73 %, B-A -0.0205) pooled nnn (bars i 9.35 / s 4.25 / r 31.18 %); passes p0:nnn(K2/2) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+  K2    : B/A 0.9927 (-0.73 %, B-A -0.0205) pooled nnn (bars i 9.35 / s 4.25 / r 31.18 %); passes p0:nnn(K2/2) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A] => HOLDS (no resolved difference)
+
+### R3c RT W16 wall kd not slower  [wall0..500]
+  A ('F3-RT-leaflist', 'tip', 16): 3.1190 [3.0887-3.4281] n=9 (IQR 0.67 %, SE 1.43 %, range 10.88 %)
+  B ('F3-RT-kd', 'tip', 16): 3.1957 [3.0858-3.2864] n=7 (IQR 5.49 %, SE 1.37 %, range 6.28 %)
+  LETTER: B/A 1.0246 (+2.46 %, B-A +0.0767) pooled nnn (bars i 11.07 / s 3.96 / r 25.12 %); passes p0:nnn(K3/2) p1:nnn(K3/3) p2:nnn(K3/2) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+  K2    : B/A 1.0246 (+2.46 %, B-A +0.0767) pooled nnn (bars i 11.07 / s 3.96 / r 25.12 %); passes p0:nnn(K3/2) p1:nnn(K3/3) p2:nnn(K3/2) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+  R3c verdicts (LETTER): ['HOLDS (no resolved difference)', 'HOLDS (no resolved difference)', 'HOLDS (no resolved difference)', 'HOLDS (no resolved difference)', 'HOLDS (no resolved difference)', 'HOLDS (no resolved difference)', 'HOLDS (no resolved difference)', 'HOLDS (no resolved difference)', 'HOLDS (no resolved difference)', 'HOLDS (no resolved difference)']
+
+## J-Son-T (tip 16191fda, cfg a, tree; A = sleeping OFF, B = ON)
+
+### JST-AW-W1 [0,100) ON not slower  [wall0..100]
+  A ('JSoffT', 'tip', 1): 15.8843 [15.8007-15.9408] n=8 (IQR 0.27 %, SE 0.12 %, range 0.88 %)
+  B ('JSonT', 'tip', 1): 15.9107 [15.7714-16.0471] n=9 (IQR 0.78 %, SE 0.22 %, range 1.73 %)
+  LETTER: B/A 1.0017 (+0.17 %, B-A +0.0264) pooled nnn (bars i 1.65 / s 0.50 / r 3.89 %); passes p0:nnn(K2/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+  K2    : B/A 1.0017 (+0.17 %, B-A +0.0264) pooled nnn (bars i 1.65 / s 0.50 / r 3.89 %); passes p0:nnn(K2/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+
+### JST-G-W1 [100,500) ON faster  [wall100..500]
+  A ('JSoffT', 'tip', 1): 14.7501 [14.6881-15.0911] n=8 (IQR 0.71 %, SE 0.45 %, range 2.73 %)
+  B ('JSonT', 'tip', 1): 6.5164 [6.4901-6.5343] n=9 (IQR 0.28 %, SE 0.09 %, range 0.68 %)
+  LETTER: B/A 0.4418 (-55.82 %, B-A -8.2338) pooled YYY (bars i 1.54 / s 0.93 / r 5.63 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> NOT CLAIMED [B<A] => NOT CLAIMED
+  K2    : B/A 0.4418 (-55.82 %, B-A -8.2338) pooled YYY (bars i 1.54 / s 0.93 / r 5.63 %); passes p0:YYY(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### JST-F-W1 [274,500) ON faster  [wall274..500]
+  A ('JSoffT', 'tip', 1): 14.6145 [14.5637-14.9805] n=8 (IQR 0.92 %, SE 0.51 %, range 2.85 %)
+  B ('JSonT', 'tip', 1): 0.1254 [0.1223-0.1349] n=9 (IQR 5.23 %, SE 1.39 %, range 10.04 %)
+  LETTER: B/A 0.0086 (-99.14 %, B-A -14.4891) pooled YYY (bars i 10.62 / s 2.95 / r 20.87 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> NOT CLAIMED [B<A] => NOT CLAIMED
+  K2    : B/A 0.0086 (-99.14 %, B-A -14.4891) pooled YYY (bars i 10.62 / s 2.95 / r 20.87 %); passes p0:YYY(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### JST-AW-W1-a [0,100) ON not slower  [wall0..100]
+  A ('JSoffT-a', 'tip', 1): 15.9196 [15.8153-15.9895] n=9 (IQR 0.62 %, SE 0.16 %, range 1.09 %)
+  B ('JSonT-a', 'tip', 1): 15.9363 [15.8338-16.1450] n=9 (IQR 0.59 %, SE 0.25 %, range 1.95 %)
+  LETTER: B/A 1.0011 (+0.11 %, B-A +0.0167) pooled nnn (bars i 1.70 / s 0.60 / r 4.48 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+  K2    : B/A 1.0011 (+0.11 %, B-A +0.0167) pooled nnn (bars i 1.70 / s 0.60 / r 4.48 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+
+### JST-G-W1-a [100,500) ON faster  [wall100..500]
+  A ('JSoffT-a', 'tip', 1): 14.7674 [14.7382-15.0432] n=9 (IQR 0.43 %, SE 0.34 %, range 2.07 %)
+  B ('JSonT-a', 'tip', 1): 6.5397 [6.5208-6.6667] n=9 (IQR 0.45 %, SE 0.29 %, range 2.23 %)
+  LETTER: B/A 0.4429 (-55.71 %, B-A -8.2276) pooled YYY (bars i 1.25 / s 0.90 / r 6.08 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+  K2    : B/A 0.4429 (-55.71 %, B-A -8.2276) pooled YYY (bars i 1.25 / s 0.90 / r 6.08 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### JST-F-W1-a [274,500) ON faster  [wall274..500]
+  A ('JSoffT-a', 'tip', 1): 14.6551 [14.6263-14.9638] n=9 (IQR 0.75 %, SE 0.39 %, range 2.30 %)
+  B ('JSonT-a', 'tip', 1): 0.1277 [0.1237-0.1334] n=9 (IQR 3.72 %, SE 1.06 %, range 7.55 %)
+  LETTER: B/A 0.0087 (-99.13 %, B-A -14.5275) pooled YYY (bars i 7.59 / s 2.27 / r 15.79 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+  K2    : B/A 0.0087 (-99.13 %, B-A -14.5275) pooled YYY (bars i 7.59 / s 2.27 / r 15.79 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### JST-AW-W8 [0,100) ON not slower  [wall0..100]
+  A ('JSoffT', 'tip', 8): 4.0971 [3.8807-4.1347] n=8 (IQR 4.26 %, SE 1.12 %, range 6.20 %)
+  B ('JSonT', 'tip', 8): 4.1235 [3.8187-4.1790] n=9 (IQR 4.86 %, SE 1.35 %, range 8.74 %)
+  LETTER: B/A 1.0065 (+0.65 %, B-A +0.0265) pooled nnn (bars i 12.93 / s 3.51 / r 21.43 %); passes p0:nnn(K2/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+  K2    : B/A 1.0065 (+0.65 %, B-A +0.0265) pooled nnn (bars i 12.93 / s 3.51 / r 21.43 %); passes p0:nnn(K2/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+
+### JST-G-W8 [100,500) ON faster  [wall100..500]
+  A ('JSoffT', 'tip', 8): 3.8260 [3.7364-3.9122] n=8 (IQR 2.88 %, SE 0.80 %, range 4.60 %)
+  B ('JSonT', 'tip', 8): 1.7127 [1.6680-1.8061] n=9 (IQR 6.76 %, SE 1.49 %, range 8.06 %)
+  LETTER: B/A 0.4476 (-55.24 %, B-A -2.1134) pooled YYY (bars i 14.70 / s 3.38 / r 18.56 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> NOT CLAIMED [B<A] => NOT CLAIMED
+  K2    : B/A 0.4476 (-55.24 %, B-A -2.1134) pooled YYY (bars i 14.70 / s 3.38 / r 18.56 %); passes p0:YYY(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### JST-F-W8 [274,500) ON faster  [wall274..500]
+  A ('JSoffT', 'tip', 8): 3.8594 [3.6371-3.9422] n=8 (IQR 2.99 %, SE 1.16 %, range 7.91 %)
+  B ('JSonT', 'tip', 8): 0.1337 [0.1246-0.1395] n=9 (IQR 5.48 %, SE 1.52 %, range 11.09 %)
+  LETTER: B/A 0.0346 (-96.54 %, B-A -3.7257) pooled YYY (bars i 12.48 / s 3.82 / r 27.24 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> NOT CLAIMED [B<A] => NOT CLAIMED
+  K2    : B/A 0.0346 (-96.54 %, B-A -3.7257) pooled YYY (bars i 12.48 / s 3.82 / r 27.24 %); passes p0:YYY(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### JST-AW-W8-a [0,100) ON not slower  [wall0..100]
+  A ('JSoffT-a', 'tip', 8): 4.2259 [3.9162-4.3020] n=9 (IQR 6.73 %, SE 1.50 %, range 9.13 %)
+  B ('JSonT-a', 'tip', 8): 4.2392 [3.9497-4.2935] n=9 (IQR 2.29 %, SE 1.27 %, range 8.11 %)
+  LETTER: B/A 1.0032 (+0.32 %, B-A +0.0134) pooled nnn (bars i 14.22 / s 3.93 / r 24.42 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+  K2    : B/A 1.0032 (+0.32 %, B-A +0.0134) pooled nnn (bars i 14.22 / s 3.93 / r 24.42 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A] => HOLDS (no resolved difference)
+
+### JST-G-W8-a [100,500) ON faster  [wall100..500]
+  A ('JSoffT-a', 'tip', 8): 3.9420 [3.8701-4.1038] n=9 (IQR 2.76 %, SE 0.83 %, range 5.93 %)
+  B ('JSonT-a', 'tip', 8): 1.7813 [1.7151-1.8543] n=9 (IQR 5.35 %, SE 1.30 %, range 7.81 %)
+  LETTER: B/A 0.4519 (-54.81 %, B-A -2.1607) pooled YYY (bars i 12.03 / s 3.08 / r 19.62 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+  K2    : B/A 0.4519 (-54.81 %, B-A -2.1607) pooled YYY (bars i 12.03 / s 3.08 / r 19.62 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### JST-F-W8-a [274,500) ON faster  [wall274..500]
+  A ('JSoffT-a', 'tip', 8): 3.9985 [3.7288-4.0900] n=9 (IQR 5.06 %, SE 1.37 %, range 9.03 %)
+  B ('JSonT-a', 'tip', 8): 0.1334 [0.1242-0.1371] n=9 (IQR 7.87 %, SE 1.68 %, range 9.68 %)
+  LETTER: B/A 0.0334 (-96.66 %, B-A -3.8651) pooled YYY (bars i 18.71 / s 4.33 / r 26.48 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+  K2    : B/A 0.0334 (-96.66 %, B-A -3.8651) pooled YYY (bars i 18.71 / s 4.33 / r 26.48 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+## Reading-dependence: comparisons whose verdict differs between LETTER and K2
+  R2: LETTER NOT CLAIMED | K2 CLAIMED STRONG
+  F3-t_q-W1: LETTER NOT CLAIMED | K2 CLAIMED STRONG
+  F3-t_b-W1: LETTER NOT CLAIMED | K2 REFUTED (B claimed slower) STRONG
+  G1: LETTER NOT CLAIMED | K2 CLAIMED STRONG
+  F1: LETTER NOT CLAIMED | K2 CLAIMED STRONG
+  G8: LETTER NOT CLAIMED | K2 CLAIMED STRONG
+  F8: LETTER NOT CLAIMED | K2 CLAIMED STRONG
+  7 of 56 comparisons differ
+
+## Our trunk walls per W (J-T, tip = s7p = 16191fda, disarmed, [0,500) and [100,500); no Jolt in this window)
+  S4-AB TIP W 1: [0,500) 4.4500 [4.3918-4.5231] n=9 (IQR 0.78 %, SE 0.37 %, range 2.95 %); [100,500) 4.2159; 943.6 ns/manifold
+  S4-AB TIP W 2: [0,500) 2.9998 [2.9650-3.0208] n=9 (IQR 0.43 %, SE 0.25 %, range 1.86 %); [100,500) 2.8747; 643.4 ns/manifold
+  S4-AB TIP W 4: [0,500) 2.1981 [2.1857-2.2100] n=9 (IQR 0.72 %, SE 0.18 %, range 1.11 %); [100,500) 2.1280; 476.3 ns/manifold
+  S4-AB TIP W 8: [0,500) 1.8154 [1.7937-1.8472] n=9 (IQR 1.27 %, SE 0.39 %, range 2.94 %); [100,500) 1.7737; 397.0 ns/manifold
+  S4-AB TIP W16: [0,500) 2.0502 [2.0357-2.0744] n=9 (IQR 0.75 %, SE 0.24 %, range 1.89 %); [100,500) 2.0124; 450.4 ns/manifold
+  S7-AB s7p  S7-JT-W1@W 1: [0,500) 4.4167 [4.3957-4.5564] n=9 (IQR 0.84 %, SE 0.49 %, range 3.64 %)
+  S7-AB s7p  S7-JT@W 8: [0,500) 1.8152 [1.7989-1.8491] n=9 (IQR 0.87 %, SE 0.36 %, range 2.77 %)
+  S7-AB s7p  S7-JT@W16: [0,500) 2.0502 [2.0393-2.0659] n=9 (IQR 0.53 %, SE 0.17 %, range 1.30 %)
+
+## Post hoc: the same binary and the same effective config across blocks ([0,500) cell medians, ms; no claim)
+  W 1: S4-AB S4-JT#tip 4.4500 (n=9) vs F3 F3-JT-leaflist#tip 4.6355 (n=9): F3/S4 1.0417; F3 min 4.5423 vs S4 max 4.5231
+  W 2: S4-AB S4-JT#tip 2.9998 (n=9) vs F3 F3-JT-leaflist#tip 3.1561 (n=8): F3/S4 1.0521; F3 min 3.1181 vs S4 max 3.0208
+  W 4: S4-AB S4-JT#tip 2.1981 (n=9) vs F3 F3-JT-leaflist#tip 2.3694 (n=8): F3/S4 1.0779; F3 min 2.2676 vs S4 max 2.2100
+  W 8: S4-AB S4-JT#tip 1.8154 (n=9) vs F3 F3-JT-leaflist#tip 2.0089 (n=8): F3/S4 1.1066; F3 min 1.8899 vs S4 max 1.8472
+  W16: S4-AB S4-JT#tip 2.0502 (n=9) vs F3 F3-JT-leaflist#tip 2.2193 (n=8): F3/S4 1.0824; F3 min 2.1369 vs S4 max 2.0744
+  W 1: S4-AB S4-JT#tip 4.4500 vs S7-AB S7-JT-W1#s7p 4.4167: 0.9925
+  W 8: S4-AB S4-JT#tip 1.8154 vs S7-AB S7-JT#s7p 1.8152: 0.9999
+  W16: S4-AB S4-JT#tip 2.0502 vs S7-AB S7-JT#s7p 2.0502: 1.0000
+  W 1: S4-AB S4-JT#parent 4.4217 vs SPLIT SPLIT-J-T#parent 4.3986: 0.9948
+  W 8: S4-AB S4-JT#parent 1.9859 vs SPLIT SPLIT-J-T#parent 1.9909: 1.0025
+  W16: S4-AB S4-JT#parent 2.2203 vs SPLIT SPLIT-J-T#parent 2.2239: 1.0016

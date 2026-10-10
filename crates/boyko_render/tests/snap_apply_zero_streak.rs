@@ -16,6 +16,11 @@
 //!   Main-issued / 0-substep case). The real-teleport chain test exercises exactly
 //!   that stale-`curr` path.
 
+// Test harness, not an engine path: `Arc<Mutex<Option<Entity>>>` is the established probe that
+// carries the spawned `Entity` out of a one-shot `run_system` closure back to the assertions.
+// Test-only scaffolding on the harness thread, never linked into a shipping build.
+#![allow(clippy::disallowed_types)]
+
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;

@@ -1,0 +1,41 @@
+DRY RUN: every number below is a rehearsal artefact, NOT a measurement
+H6: head dbd859771b4d7aee5f560c7d3cbceccd0f1af179 (dirty paths 0), host x86_64-pc-windows-msvc (msvc True), profile parity, ancestors {'S5': True, 'KE16': True, 'B1': True, 'L1': True}
+  jolt v530: 29b23ad1cfc38b7f v5.3.0-dirty repo patch True (c++.exe (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r4) 16.1.0)
+  jolt v530_release: de00c882c5b667ab v5.3.0-dirty repo patch True (c++.exe (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r4) 16.1.0)
+  jolt v560: 918fd2b70ecc634c v5.6.0-dirty repo patch True (c++.exe (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r4) 16.1.0)
+  boyko tip: ef9325efa9a27727
+  boyko pre_instrument: b7c4233425d0d4a9
+  boyko pre_l1: a0da832f14157fad
+  boyko shipping: fdcac07f8e576e63
+passes [1, 2]; runs 103; nonzero exits 0; contaminated 103; build checks 0
+anti-vacuity: 0 void boyko runs
+determinism (boyko): 7 simulation groups, 0 with more than one pose
+H7 (cfg-B asserted against cfg-A by the runner): [('J-B', 8, 1, 'match'), ('J-B', 1, 1, 'match'), ('J-B', 1, 2, 'match'), ('J-B', 8, 2, 'match')]
+determinism (Jolt, per binary+flags+W across passes): 16 groups, 0 differ
+closure: stop=False; waves differ across W in []
+  W=1: u_bad False g_bad False sys>wall False drops [0, 0]
+  W=2: u_bad False g_bad False sys>wall False drops [0, 0]
+  W=4: u_bad False g_bad False sys>wall False drops [0, 0]
+  W=8: u_bad False g_bad False sys>wall False drops [0, 0]
+  W=16: u_bad False g_bad False sys>wall False drops [0, 0]
+A/A1 W=1: pass True
+A/A1 W=2: pass True
+A/A1 W=4: pass False
+A/A1 W=8: pass True
+A/A1 W=16: pass True
+A/A2 W=1: pass True
+A/A2 W=8: pass True
+canary W=1: span_ok True rise_ok True gate_fails False -> pass False
+canary W=8: span_ok True rise_ok False gate_fails True -> pass False
+L1 gate: pass True
+R-S void: []; first frozen step: [(8, 1, None), (1, 1, None), (1, 2, None), (8, 2, None)]
+H8: window [2, 12]; per-manifold figure needed: False
+O5 W=1: all asleep from boyko None, jolt None
+O5 W=8: all asleep from boyko None, jolt None
+threads W=1: boyko 1 workers + 1 dispatcher (solve on dispatcher, steps per pass: [0, 0]); Jolt 0 job threads + calling thread (printed [1, 1])
+threads W=2: boyko 2 workers + 1 dispatcher (solve on dispatcher, steps per pass: [0, 0]); Jolt 1 job threads + calling thread (printed [2, 2])
+threads W=4: boyko 4 workers + 1 dispatcher (solve on dispatcher, steps per pass: [0, 0]); Jolt 3 job threads + calling thread (printed [4, 4])
+threads W=8: boyko 8 workers + 1 dispatcher (solve on dispatcher, steps per pass: [0, 0]); Jolt 7 job threads + calling thread (printed [8, 8])
+threads W=16: boyko 16 workers + 1 dispatcher (solve on dispatcher, steps per pass: [0, 0]); Jolt 15 job threads + calling thread (printed [16, 16])
+headline rows present at W: [1, 2, 4, 8, 16]; A/A0 void flags computed: [1, 2, 4, 8, 16]
+identity terms computed at W: [1, 2, 4, 8, 16]

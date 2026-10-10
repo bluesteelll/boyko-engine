@@ -1,0 +1,16 @@
+J-As     W= 1 steps=  500 parent exit 0 pose 0x32d5e235342b4143 | tip exit 0 pose 0x32d5e235342b4143 expect_pose match | task-expected 0x32d5e235342b4143 | config-equal True | OK
+  red control: tip 501 steps vs parent 500-step pose: exit 4 expect_pose mismatch: 64480 vs 64480 bytes, first differing body Some(0) pose 0x9336b30a06a7d8af -> OK (red as required)
+J-As     W= 8 steps=  500 parent exit 0 pose 0x32d5e235342b4143 | tip exit 0 pose 0x32d5e235342b4143 expect_pose match | task-expected 0x32d5e235342b4143 | config-equal True | OK
+J-A      W= 1 steps=  500 parent exit 0 pose 0x32d5e235342b4143 | tip exit 0 pose 0x32d5e235342b4143 expect_pose match | task-expected 0x32d5e235342b4143 | config-equal True | OK
+J-A      W= 8 steps=  500 parent exit 0 pose 0x32d5e235342b4143 | tip exit 0 pose 0x32d5e235342b4143 expect_pose match | task-expected 0x32d5e235342b4143 | config-equal True | OK
+R        W= 1 steps= 1100 parent exit 0 pose 0x87e561d20589d4a5 | tip exit 0 pose 0x87e561d20589d4a5 expect_pose match | task-expected 0x87e561d20589d4a5 | config-equal True | OK
+R        W= 8 steps= 1100 parent exit 0 pose 0x87e561d20589d4a5 | tip exit 0 pose 0x87e561d20589d4a5 expect_pose match | task-expected 0x87e561d20589d4a5 | config-equal True | OK
+R-S      W= 1 steps=  800 parent exit 0 pose 0x2a2b7926a48aab00 | tip exit 0 pose 0x2a2b7926a48aab00 expect_pose match | task-expected 0x2a2b7926a48aab00 | config-equal True | OK
+R-S      W= 8 steps=  800 parent exit 0 pose 0x2a2b7926a48aab00 | tip exit 0 pose 0x2a2b7926a48aab00 expect_pose match | task-expected 0x2a2b7926a48aab00 | config-equal True | OK
+S16      W= 1 steps=  300 parent exit 0 pose 0x8877dbb1192e9b92 | tip exit 0 pose 0x8877dbb1192e9b92 expect_pose match | task-expected 0x8877dbb1192e9b92 | config-equal True | OK
+S16      W= 8 steps=  300 parent exit 0 pose 0x8877dbb1192e9b92 | tip exit 0 pose 0x8877dbb1192e9b92 expect_pose match | task-expected 0x8877dbb1192e9b92 | config-equal True | OK
+J-As-a   W= 1 steps=  500 parent exit 0 pose 0x32d5e235342b4143 | tip exit 0 pose 0x32d5e235342b4143 expect_pose match | task-expected 0x32d5e235342b4143 | config-equal True | OK
+J-As-a   W= 8 steps=  500 parent exit 0 pose 0x32d5e235342b4143 | tip exit 0 pose 0x32d5e235342b4143 expect_pose match | task-expected 0x32d5e235342b4143 | config-equal True | OK
+J-C      W= 1 steps=  500 parent exit 0 pose 0x32d5e235342b4143 | tip exit 0 pose 0x32d5e235342b4143 expect_pose match | task-expected 0x32d5e235342b4143 | config-equal True | OK
+J-C      W= 8 steps=  500 parent exit 0 pose 0x32d5e235342b4143 | tip exit 0 pose 0x32d5e235342b4143 expect_pose match | task-expected 0x32d5e235342b4143 | config-equal True | OK
+POSE GATE OK

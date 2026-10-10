@@ -1,0 +1,118 @@
+# DM1 verifier: 30 timed records (24 originals, 6 re-runs)
+validity problems: 0; unclean processes: 8
+  unclean (1, 'original', ['witness 2.24'], ['claude.exe'])
+  unclean (8, 'original', ['witness 2.08'], ['claude.exe'])
+  unclean (11, 'original', ['after 5.06'], ['claude.exe'])
+  unclean (13, 'original', ['witness 2.32'], ['claude.exe'])
+  unclean (20, 'original', ['after 5.26', 'witness 2.15'], ['claude.exe'])
+  unclean (22, 'original', ['witness 2.1'], ['claude.exe'])
+  unclean (8, 'rerun', ['witness 2.1'], ['claude.exe'])
+  unclean (22, 'rerun', ['after 5.36'], ['claude.exe'])
+slots 24, used 22; dropped seqs [8, 22]; re-runs used [1, 11, 13, 20]
+
+## dm-vb-1920x1080-idle (seq 1..8; A B B A A B B A)
+  [USED] zone  4 VB_EARLY_CULL          A0   783.01 B1   778.85 B2   780.10 A3   797.01 | A4   781.79 B5   774.85 B6   776.77 A7    --    us
+       pair diffs B-A [-4.16, -16.91, -6.94, None]; B faster in 3 of 3
+       H1: d -10.54 us (-1.34 % of mean A), band 14.00 us (1.8 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       H2: d -6.94 us (-0.88 % of mean A), band 1.92 us (0.2 % of zone), pairs 1, A 1, B 2 -> B<=A (d<=0)
+       POOL: d -6.94 us (-0.88 % of mean A), band 15.22 us (2.0 % of zone), pairs 3, A 3, B 4 -> B<=A (d<=0)
+  [USED] zone  9 VB_RUN                 A0   851.97 B1   848.90 B2   848.90 A3   867.33 | A4   849.92 B5   843.78 B6   845.31 A7    --    us
+       pair diffs B-A [-3.07, -18.43, -6.14, None]; B faster in 3 of 3
+       H1: d -10.75 us (-1.26 % of mean A), band 15.36 us (1.8 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       H2: d -6.14 us (-0.72 % of mean A), band 1.54 us (0.2 % of zone), pairs 1, A 1, B 2 -> B<=A (d<=0)
+       POOL: d -6.14 us (-0.72 % of mean A), band 17.41 us (2.1 % of zone), pairs 3, A 3, B 4 -> B<=A (d<=0)
+  [USED] zone  2 VB_SHADE               A0   328.70 B1   305.66 B2   309.25 A3   261.12 | A4   332.29 B5   307.20 B6   309.25 A7    --    us
+       pair diffs B-A [-23.04, 48.13, -25.09, None]; B faster in 2 of 3
+       H1: d +12.54 us (+4.08 % of mean A), band 67.58 us (21.9 % of zone), pairs 2, A 2, B 2 -> B<=A (inside band)
+       H2: d -25.09 us (-8.16 % of mean A), band 2.05 us (0.7 % of zone), pairs 1, A 1, B 2 -> B<=A (d<=0)
+       POOL: d -23.04 us (-7.50 % of mean A), band 71.17 us (23.0 % of zone), pairs 3, A 3, B 4 -> B<=A (d<=0)
+  [USED] zone 14 VB_PRODUCE_NET         A0   329.73 B1   305.66 B2   310.27 A3   261.12 | A4   333.31 B5   308.22 B6   310.27 A7    --    us
+       pair diffs B-A [-24.06, 49.15, -25.09, None]; B faster in 2 of 3
+       H1: d +12.54 us (+4.07 % of mean A), band 68.61 us (22.1 % of zone), pairs 2, A 2, B 2 -> B<=A (inside band)
+       H2: d -25.09 us (-8.14 % of mean A), band 2.05 us (0.7 % of zone), pairs 1, A 1, B 2 -> B<=A (d<=0)
+       POOL: d -24.06 us (-7.81 % of mean A), band 72.19 us (23.3 % of zone), pairs 3, A 3, B 4 -> B<=A (d<=0)
+  [ALLORIG] zone  4 VB_EARLY_CULL          A0   795.60 B1   778.85 B2   780.10 A3   797.01 | A4   781.79 B5   774.85 B6   776.77 A7   800.00 us
+       pair diffs B-A [-16.75, -16.91, -6.94, -23.23]; B faster in 4 of 4
+       H1: d -16.83 us (-2.12 % of mean A), band 1.41 us (0.2 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       H2: d -15.09 us (-1.90 % of mean A), band 18.21 us (2.3 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       POOL: d -16.83 us (-2.12 % of mean A), band 18.21 us (2.3 % of zone), pairs 4, A 4, B 4 -> B<=A (d<=0)
+  [ALLORIG] zone  9 VB_RUN                 A0   864.26 B1   848.90 B2   848.90 A3   867.33 | A4   849.92 B5   843.78 B6   845.31 A7   869.89 us
+       pair diffs B-A [-15.36, -18.43, -6.14, -24.58]; B faster in 4 of 4
+       H1: d -16.90 us (-1.96 % of mean A), band 3.07 us (0.4 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       H2: d -15.36 us (-1.78 % of mean A), band 19.97 us (2.4 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       POOL: d -16.90 us (-1.96 % of mean A), band 19.97 us (2.4 % of zone), pairs 4, A 4, B 4 -> B<=A (d<=0)
+  [ALLORIG] zone  2 VB_SHADE               A0   259.58 B1   305.66 B2   309.25 A3   261.12 | A4   332.29 B5   307.20 B6   309.25 A7   268.29 us
+       pair diffs B-A [46.08, 48.13, -25.09, 40.96]; B faster in 1 of 4
+       H1: d +47.10 us (+16.80 % of mean A), band 3.58 us (1.2 % of zone), pairs 2, A 2, B 2 -> RED (above band)
+       H2: d +7.94 us (+2.83 % of mean A), band 64.00 us (20.9 % of zone), pairs 2, A 2, B 2 -> B<=A (inside band)
+       POOL: d +43.52 us (+15.53 % of mean A), band 72.70 us (23.7 % of zone), pairs 4, A 4, B 4 -> B<=A (inside band)
+  [ALLORIG] zone 14 VB_PRODUCE_NET         A0   260.10 B1   305.66 B2   310.27 A3   261.12 | A4   333.31 B5   308.22 B6   310.27 A7   268.29 us
+       pair diffs B-A [45.57, 49.15, -25.09, 41.98]; B faster in 1 of 4
+       H1: d +47.36 us (+16.87 % of mean A), band 4.61 us (1.5 % of zone), pairs 2, A 2, B 2 -> RED (above band)
+       H2: d +8.45 us (+3.01 % of mean A), band 65.02 us (21.2 % of zone), pairs 2, A 2, B 2 -> B<=A (inside band)
+       POOL: d +43.78 us (+15.60 % of mean A), band 73.22 us (23.9 % of zone), pairs 4, A 4, B 4 -> B<=A (inside band)
+
+## dm-deferred-1920x1080-idle (seq 9..16; A B B A A B B A)
+  [USED] zone 17 GBUF_DEFERRED_RESOLVE  A0   592.38 B1   570.37 B2   569.86 A3   594.94 | A4   594.94 B5   444.42 B6   440.32 A7   593.92 us
+       pair diffs B-A [-22.02, -25.09, -150.53, -153.6]; B faster in 4 of 4
+       H1: d -23.55 us (-3.96 % of mean A), band 2.56 us (0.4 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       H2: d -152.06 us (-25.60 % of mean A), band 4.10 us (0.7 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       POOL: d -87.81 us (-14.78 % of mean A), band 130.05 us (22.4 % of zone), pairs 4, A 4, B 4 -> B<=A (d<=0)
+  [ALLORIG] zone 17 GBUF_DEFERRED_RESOLVE  A0   592.38 B1   570.37 B2   445.44 A3   594.94 | A4   594.94 B5   444.42 B6   440.32 A7   593.92 us
+       pair diffs B-A [-22.02, -149.5, -150.53, -153.6]; B faster in 4 of 4
+       H1: d -85.76 us (-14.44 % of mean A), band 124.93 us (21.5 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       H2: d -152.06 us (-25.60 % of mean A), band 4.10 us (0.7 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       POOL: d -150.02 us (-25.25 % of mean A), band 130.05 us (22.4 % of zone), pairs 4, A 4, B 4 -> B<=A (d<=0)
+
+## dm-vb-1920x1080-edit100 (seq 17..24; A B B A A B B A)
+  [USED] zone  4 VB_EARLY_CULL          A0   781.78 B1   793.79 B2   775.60 A3   782.67 | A4   798.21 B5    --    B6   798.61 A7   796.19 us
+       pair diffs B-A [12.02, -7.07, None, 2.42]; B faster in 1 of 3
+       H1: d +2.47 us (+0.31 % of mean A), band 18.19 us (2.3 % of zone), pairs 2, A 2, B 2 -> B<=A (inside band)
+       H2: d +2.42 us (+0.31 % of mean A), band 2.02 us (0.3 % of zone), pairs 1, A 2, B 1 -> RED (above band)
+       POOL: d +2.42 us (+0.31 % of mean A), band 23.01 us (2.9 % of zone), pairs 3, A 4, B 3 -> B<=A (inside band)
+  [USED] zone  9 VB_RUN                 A0   852.48 B1   864.26 B2   845.31 A3   852.99 | A4   868.86 B5    --    B6   868.35 A7   866.30 us
+       pair diffs B-A [11.78, -7.68, None, 2.05]; B faster in 1 of 3
+       H1: d +2.05 us (+0.24 % of mean A), band 18.94 us (2.2 % of zone), pairs 2, A 2, B 2 -> B<=A (inside band)
+       H2: d +2.05 us (+0.24 % of mean A), band 2.56 us (0.3 % of zone), pairs 1, A 2, B 1 -> B<=A (inside band)
+       POOL: d +2.05 us (+0.24 % of mean A), band 23.04 us (2.7 % of zone), pairs 3, A 4, B 3 -> B<=A (inside band)
+  [USED] zone  2 VB_SHADE               A0   334.85 B1   249.86 B2   308.22 A3   332.80 | A4   268.29 B5    --    B6   262.14 A7   259.07 us
+       pair diffs B-A [-84.99, -24.58, None, 3.07]; B faster in 2 of 3
+       H1: d -54.78 us (-18.34 % of mean A), band 58.37 us (21.8 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       H2: d +3.07 us (+1.03 % of mean A), band 9.22 us (3.4 % of zone), pairs 1, A 2, B 1 -> B<=A (inside band)
+       POOL: d -24.58 us (-8.23 % of mean A), band 75.78 us (28.2 % of zone), pairs 3, A 4, B 3 -> B<=A (d<=0)
+  [USED] zone 14 VB_PRODUCE_NET         A0   334.85 B1   250.88 B2   308.22 A3   333.82 | A4   268.80 B5    --    B6   263.17 A7   259.07 us
+       pair diffs B-A [-83.97, -25.6, None, 4.1]; B faster in 2 of 3
+       H1: d -54.78 us (-18.31 % of mean A), band 57.34 us (21.3 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       H2: d +4.10 us (+1.37 % of mean A), band 9.73 us (3.6 % of zone), pairs 1, A 2, B 1 -> B<=A (inside band)
+       POOL: d -25.60 us (-8.56 % of mean A), band 75.78 us (28.2 % of zone), pairs 3, A 4, B 3 -> B<=A (d<=0)
+  [ALLORIG] zone  4 VB_EARLY_CULL          A0   781.78 B1   793.79 B2   775.60 A3   785.26 | A4   798.21 B5   783.52 B6   798.61 A7   796.19 us
+       pair diffs B-A [12.02, -9.66, -14.69, 2.42]; B faster in 2 of 4
+       H1: d +1.18 us (+0.15 % of mean A), band 18.19 us (2.3 % of zone), pairs 2, A 2, B 2 -> B<=A (inside band)
+       H2: d -6.14 us (-0.78 % of mean A), band 15.09 us (1.9 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       POOL: d -3.62 us (-0.46 % of mean A), band 23.01 us (2.9 % of zone), pairs 4, A 4, B 4 -> B<=A (d<=0)
+  [ALLORIG] zone  9 VB_RUN                 A0   852.48 B1   864.26 B2   845.31 A3   856.06 | A4   868.86 B5   855.04 B6   868.35 A7   866.30 us
+       pair diffs B-A [11.78, -10.75, -13.82, 2.05]; B faster in 2 of 4
+       H1: d +0.51 us (+0.06 % of mean A), band 18.94 us (2.2 % of zone), pairs 2, A 2, B 2 -> B<=A (inside band)
+       H2: d -5.89 us (-0.68 % of mean A), band 13.31 us (1.5 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       POOL: d -4.35 us (-0.51 % of mean A), band 23.04 us (2.7 % of zone), pairs 4, A 4, B 4 -> B<=A (d<=0)
+  [ALLORIG] zone  2 VB_SHADE               A0   334.85 B1   249.86 B2   308.22 A3   328.70 | A4   268.29 B5   310.27 B6   262.14 A7   259.07 us
+       pair diffs B-A [-84.99, -20.48, 41.98, 3.07]; B faster in 2 of 4
+       H1: d -52.74 us (-17.71 % of mean A), band 58.37 us (20.2 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       H2: d +22.53 us (+7.57 % of mean A), band 48.13 us (16.7 % of zone), pairs 2, A 2, B 2 -> B<=A (inside band)
+       POOL: d -8.70 us (-2.92 % of mean A), band 75.78 us (26.3 % of zone), pairs 4, A 4, B 4 -> B<=A (d<=0)
+  [ALLORIG] zone 14 VB_PRODUCE_NET         A0   334.85 B1   250.88 B2   308.22 A3   329.22 | A4   268.80 B5   310.27 B6   263.17 A7   259.07 us
+       pair diffs B-A [-83.97, -20.99, 41.47, 4.1]; B faster in 2 of 4
+       H1: d -52.48 us (-17.61 % of mean A), band 57.34 us (19.9 % of zone), pairs 2, A 2, B 2 -> B<=A (d<=0)
+       H2: d +22.78 us (+7.65 % of mean A), band 47.10 us (16.3 % of zone), pairs 2, A 2, B 2 -> B<=A (inside band)
+       POOL: d -8.45 us (-2.84 % of mean A), band 75.78 us (26.3 % of zone), pairs 4, A 4, B 4 -> B<=A (d<=0)
+
+## post hoc: ruling-1 i/s/r on DM1 (single block), USED slots
+  dm-vb-1920x1080-idle VB_EARLY_CULL: A med 783.01 K3 B med 777.81 K4 B/A-1 -0.66 % bars r 4.11 i 2.08 s 1.61 -> r/i/s nnn
+  dm-vb-1920x1080-idle VB_RUN: A med 851.97 K3 B med 847.10 K4 B/A-1 -0.57 % bars r 4.26 i 2.25 s 1.66 -> r/i/s nnn
+  dm-vb-1920x1080-idle VB_SHADE: A med 328.70 K3 B med 308.22 K4 B/A-1 -6.23 % bars r 43.36 i 21.71 s 17.67 -> r/i/s nnn
+  dm-vb-1920x1080-idle VB_PRODUCE_NET: A med 329.73 K3 B med 309.25 K4 B/A-1 -6.21 % bars r 43.89 i 21.96 s 17.88 -> r/i/s nnn
+  dm-deferred-1920x1080-idle GBUF_DEFERRED_RESOLVE: A med 594.43 K4 B med 507.14 K4 B/A-1 -14.69 % bars r 51.29 i 49.93 s 18.23 -> r/i/s nnn
+  dm-vb-1920x1080-edit100 VB_EARLY_CULL: A med 789.43 K4 B med 793.79 K3 B/A-1 +0.55 % bars r 7.14 i 4.63 s 2.61 -> r/i/s nnn
+  dm-vb-1920x1080-edit100 VB_RUN: A med 859.65 K4 B med 864.26 K3 B/A-1 +0.54 % bars r 6.55 i 4.22 s 2.41 -> r/i/s nnn
+  dm-vb-1920x1080-edit100 VB_SHADE: A med 300.54 K4 B med 262.14 K3 B/A-1 -12.78 % bars r 67.27 i 50.03 s 24.01 -> r/i/s nnn
+  dm-vb-1920x1080-edit100 VB_PRODUCE_NET: A med 301.31 K4 B med 263.17 K3 B/A-1 -12.66 % bars r 66.55 i 49.95 s 23.75 -> r/i/s nnn

@@ -85,17 +85,13 @@ impl PlannedBarrier {
     }
 }
 
-/// The widened superset of every pipeline stage the foundation's GPU systems
-/// can occupy (D6): `COMPUTE_SHADER | TRANSFER`. Used when the
-/// producer/consumer stage is ambiguous — over-synchronising is sound, a missed
-/// barrier is not (MF-8: only constants that EXIST, no `ALL_COMMANDS`).
-///
-/// A free `fn` (not a `const`) because `boyko_rhi`'s `BitOr` is a trait impl,
-/// not a `const fn` — the OR is folded at the cold build-time call site.
-#[inline]
-fn wide_stage() -> BarrierStage {
-    BarrierStage::COMPUTE_SHADER | BarrierStage::TRANSFER
-}
+// ⚠️ `wide_stage()` — the `COMPUTE_SHADER | TRANSFER` stage superset — was DELETED at
+// virtual-geometry rung R1, not merely left unused. Its only caller was `stage_of`'s `Indirect`
+// arm, which existed because `BarrierStage::DRAW_INDIRECT` did not; R1 adds the constant and the
+// arm becomes exact, so the helper has no reader. A widening helper kept "in case" is a thing an
+// implementer greps for and reaches for, which is the defect class this campaign has repeatedly
+// found in its own texts. `wide_access()` below survives because it still has one honest caller:
+// Vulkan defines no indirect WRITE access, so that arm genuinely cannot be narrowed.
 
 /// The widened superset of every buffer access the foundation's GPU systems can
 /// perform (D6): `SHADER_READ | SHADER_WRITE | TRANSFER_READ | TRANSFER_WRITE`.
@@ -110,17 +106,21 @@ fn wide_access() -> BarrierAccess {
 
 /// Maps an abstract [`GpuStage`] to its concrete `boyko_rhi` [`BarrierStage`].
 ///
-/// Cold (build time). `Indirect` has no dedicated foundation stage constant
-/// (`VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT` is a Phase-6 seam), so it widens to
-/// the full [`wide_stage`] superset — sound over-synchronisation (D6).
+/// Cold (build time).
+///
+/// ⚠️ **Virtual-geometry rung R1 NARROWED `Indirect`, and the widening it replaces was never a
+/// design choice.** This arm returned the whole [`wide_stage`] superset *because
+/// `BarrierStage::DRAW_INDIRECT` did not exist* — MF-8 forbids naming a constant the foundation does
+/// not define, so widening was the only sound response available. R1 adds the constant, and the arm
+/// becomes the one-line mapping it always should have been. Over-synchronisation was sound but not
+/// free: it made every indirect-argument barrier wait on and block the entire compute+transfer
+/// stage range, which is exactly the cost a GPU-decided cut exists to avoid.
 #[inline]
 fn stage_of(stage: GpuStage) -> BarrierStage {
     match stage {
         GpuStage::Compute => BarrierStage::COMPUTE_SHADER,
         GpuStage::Transfer => BarrierStage::TRANSFER,
-        // No `DRAW_INDIRECT` constant exists in the foundation enum set (Phase-6
-        // seam) — widen rather than omit (D6).
-        GpuStage::Indirect => wide_stage(),
+        GpuStage::Indirect => BarrierStage::DRAW_INDIRECT,
     }
 }
 
@@ -130,7 +130,15 @@ fn stage_of(stage: GpuStage) -> BarrierStage {
 ///
 /// Cold (build time). The access family is chosen by the stage: a `Transfer`
 /// stage uses the `TRANSFER_*` access bits, a `Compute` stage the `SHADER_*`
-/// bits. `Indirect` (no foundation constant) widens to [`wide_access`] (D6).
+/// bits.
+///
+/// ⚠️ **Rung R1 narrowed `(Indirect, Read)` and deliberately LEFT `(Indirect, Write)` widened.**
+/// The asymmetry is Vulkan's, not this function's: `VK_ACCESS_INDIRECT_COMMAND_READ_BIT` has **no
+/// write counterpart**, because an indirect-argument buffer is *written* by a compute shader or a
+/// transfer and only *read* by the `DRAW_INDIRECT` stage. So an `(Indirect, Write)` declaration is
+/// incoherent — it names a stage that cannot write — and the sound response is still to widen rather
+/// than to invent a bit or to silently substitute `SHADER_WRITE`, which would under-synchronise if
+/// the producer was in fact a transfer.
 #[inline]
 fn access_of(stage: GpuStage, access: GpuAccess) -> BarrierAccess {
     match (stage, access) {
@@ -138,8 +146,9 @@ fn access_of(stage: GpuStage, access: GpuAccess) -> BarrierAccess {
         (GpuStage::Compute, GpuAccess::Write) => BarrierAccess::SHADER_WRITE,
         (GpuStage::Transfer, GpuAccess::Read) => BarrierAccess::TRANSFER_READ,
         (GpuStage::Transfer, GpuAccess::Write) => BarrierAccess::TRANSFER_WRITE,
-        // No dedicated `Indirect` access bits exist — widen rather than omit.
-        (GpuStage::Indirect, _) => wide_access(),
+        (GpuStage::Indirect, GpuAccess::Read) => BarrierAccess::INDIRECT_COMMAND_READ,
+        // See the note above: Vulkan has no indirect WRITE access, so this arm stays widened.
+        (GpuStage::Indirect, GpuAccess::Write) => wide_access(),
     }
 }
 
@@ -348,30 +357,57 @@ mod tests {
         assert_eq!(b.dst_stage, BarrierStage::COMPUTE_SHADER);
     }
 
+    /// **Virtual-geometry rung R1 replaced `indirect_stage_widens_to_full_superset`, and the
+    /// replacement is a pair rather than an inversion.**
+    ///
+    /// The retired test froze `Indirect` widening BOTH stage and access to the whole
+    /// `COMPUTE_SHADER | TRANSFER` × `SHADER|TRANSFER read/write` superset. That behaviour was
+    /// sound and was never a design choice: `BarrierStage::DRAW_INDIRECT` did not exist, and MF-8
+    /// forbids naming a constant the foundation does not define, so widening was the only response
+    /// available. R1 adds the constant; the read arm becomes exact.
+    ///
+    /// What the pair asserts that a single inverted test would not: the **asymmetry survives**. The
+    /// write arm still widens, because Vulkan has no indirect-write access bit at all — an
+    /// indirect-argument buffer is written by compute or transfer and only read by `DRAW_INDIRECT`.
+    /// Substituting `SHADER_WRITE` there would UNDER-synchronise whenever the real producer was a
+    /// transfer, which is the one direction a barrier may never be wrong in.
     #[test]
-    fn indirect_stage_widens_to_full_superset() {
-        // An `Indirect`-stage intent (no dedicated foundation constant) widens
-        // both the stage and the access to the full existing-bits superset (D6),
-        // never omitting them.
+    fn indirect_read_is_exact_and_indirect_write_still_widens() {
+        // READ: the arm R1 narrowed. Exactly the indirect fetch stage and its one access bit.
         let mut producer = GpuAccessIntent::new(GpuStage::Indirect);
         producer.push(DeviceColumnHandle(5), GpuAccess::Read);
-
         let edges = [edge(0, 1, producer, compute_read(5))];
-        let plans = lower_barriers(edges.into_iter(), key_for_all);
-
-        let b = plans[0].1[0];
+        let b = lower_barriers(edges.into_iter(), key_for_all)[0].1[0];
         assert_eq!(
             b.src_stage,
-            BarrierStage::COMPUTE_SHADER | BarrierStage::TRANSFER,
-            "Indirect stage widens to COMPUTE_SHADER | TRANSFER"
+            BarrierStage::DRAW_INDIRECT,
+            "an Indirect READ is exactly the DRAW_INDIRECT stage -- no superset"
         );
         assert_eq!(
             b.src_access,
+            BarrierAccess::INDIRECT_COMMAND_READ,
+            "an Indirect READ is exactly INDIRECT_COMMAND_READ -- no superset"
+        );
+        // ...and the narrowing is real, not a relabelling: the old superset is strictly wider.
+        assert_ne!(
+            b.src_stage,
+            BarrierStage::COMPUTE_SHADER | BarrierStage::TRANSFER,
+            "the pre-R1 stage superset must no longer be produced"
+        );
+
+        // WRITE: the arm R1 deliberately LEFT widened, because Vulkan offers nothing narrower.
+        let mut writer = GpuAccessIntent::new(GpuStage::Indirect);
+        writer.push(DeviceColumnHandle(6), GpuAccess::Write);
+        let edges = [edge(0, 1, writer, compute_read(6))];
+        let w = lower_barriers(edges.into_iter(), key_for_all)[0].1[0];
+        assert_eq!(
+            w.src_access,
             BarrierAccess::SHADER_READ
                 | BarrierAccess::SHADER_WRITE
                 | BarrierAccess::TRANSFER_READ
                 | BarrierAccess::TRANSFER_WRITE,
-            "Indirect access widens to the full SHADER|TRANSFER read/write superset"
+            "an Indirect WRITE is incoherent in Vulkan's model, so it still widens rather than \
+             guessing between SHADER_WRITE and TRANSFER_WRITE"
         );
     }
 

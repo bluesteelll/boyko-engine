@@ -178,7 +178,7 @@ Exact bind + reconstruction:
   // per point/spot light: posToLight = L.pos - P; ...
   ```
 - **R32_SFLOAT storage support (W2):** before creating the `gViewT` image, fail-fast at device-caps
-  validation. Extend `DeviceCaps` (`boyko_rhi_vulkan/src/device.rs:1838-1841`, today
+  validation. Extend `DeviceCaps` (`boyko_rhi_vulkan/src/device.rs:1850-1853`, today
   `{ bindless_capable, gbuffer_storage_format_ok }`) with `viewt_storage_format_ok: bool`, and extend
   `query_device_caps` (`:1819-1842`) to query `VK_FORMAT_R32_SFLOAT` for
   `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` via the same `get_physical_device_format_properties` call on
@@ -798,7 +798,7 @@ lit = (lit_direct + ambient + m.emissive.rgb) * H.exposure;
 | `crates/boyko_rhi_vulkan/shaders/light_table.hlsli` | **NEW** — shared `GpuLight`/`LightHeaderGpu` std430 struct decls + `HEADER_BASE` + `unpack_cones` + kind consts (included by resolve + cull; ONE source of truth, like `ray_gen.hlsli`). |
 | `crates/boyko_rhi_vulkan/src/swapchain.rs` | create `gViewT` image (L0b) + transition/barrier loops; create `light_table` SSBO (L0a, like `material_table`); add resolve-set bindings (`light_table`, then `gViewT @6`); (L0-r0, C3) wire the per-frame staging→`light_table` `cmd_copy_buffer` + TRANSFER_WRITE→SHADER_READ barrier into `render_gbuffer_frame` (`:2008`), recorded only on a dirty frame, before the marcher dispatch (`:2531`); (L1) create `cluster_grid`/`light_index` + the cull dispatch + its barrier. `GBufferScene`/`GBufferTargets` gain the new handles. |
 | `crates/boyko_render/src/gpu_column.rs` | **(NEW, C3)** add a `record_upload(encoder, handle, bytes)`-style recorder that records a staging→device `cmd_copy_buffer` + a TRANSFER_WRITE→SHADER_READ buffer barrier into a caller-supplied encoder (NO fence) — distinct from the setup-only fence-waited `upload_initial` (`:833`) and the fence-waited `dispatch_compute` (`:576`). (Alternative: do the copy+barrier inline in `render_gbuffer_frame` against the scene's `light_table` `BoundBuffer` + a manager-owned staging buffer.) Mint the staging buffer at setup; set a "dirty" flag from `collect_lights` so the copy records ONLY on a changed frame. |
-| `crates/boyko_rhi_vulkan/src/device.rs` | **(W2)** extend `DeviceCaps` (`:1838-1841`) with `viewt_storage_format_ok: bool` and `query_device_caps` (`:1819-1842`) to query `VK_FORMAT_R32_SFLOAT` for `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` (OPTIMAL tiling, same `get_physical_device_format_properties` pattern as `gbuffer_storage_format_ok`); fail-fast at the same caps-validation site before the `gViewT` image is created (L0b). |
+| `crates/boyko_rhi_vulkan/src/device.rs` | **(W2)** extend `DeviceCaps` (`:1850-1853`) with `viewt_storage_format_ok: bool` and `query_device_caps` (`:1831-1854`) to query `VK_FORMAT_R32_SFLOAT` for `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` (OPTIMAL tiling, same `get_physical_device_format_properties` pattern as `gbuffer_storage_format_ok`); fail-fast at the same caps-validation site before the `gViewT` image is created (L0b). |
 | `crates/boyko_rhi/src/device.rs`, `crates/boyko_rhi_vulkan/src/rhi_impl.rs` | **(C1)** raise `MAX_BIND_GROUP_BINDINGS` 8 → 12 (the two literal consts `boyko_rhi/src/device.rs:22` + `rhi_impl.rs:74`, const-asserted equal at `rhi_impl.rs:80`) + update the agnostic docstring (`boyko_rhi/src/device.rs:17-22`). Everything else (`entries[..]` field, inline arrays, debug_asserts, clamps) scales via the named const; the pool histogram (`KIND_COUNT=5`) is untouched. See the C1 exhaustive touch-list in Decision 1. |
 | `crates/boyko_rhi_vulkan/src/compute.rs` | host oracle: `golden_deferred_resolve` loops the table + applies exposure (op-order pinned, W1); `golden_composite_pixel_ex` writes `gViewT`; POD fingerprints for `GpuLight`/`LightHeaderGpu`/`ClusterCell` mirrored host-side; L1 host cull oracle. |
 
@@ -1044,8 +1044,8 @@ runtime change without a frame stall (do NOT ship static-only). Deliverables:
   (`compute.rs:1863-1876`) op-order — accumulator from `0.0`, `(diff+spec)*(nol*shadow)*color`, `*
   exposure` literally last; identity at exposure==1.0 → bit-identical OFF path. No reassociation allowed;
   bit-exact OFF-path regression added.
-- **W2 (R32_SFLOAT caps check).** Extend `DeviceCaps` (`boyko_rhi_vulkan/src/device.rs:1838-1841`) with
-  `viewt_storage_format_ok` + `query_device_caps` (`:1819-1842`) to check `VK_FORMAT_R32_SFLOAT` /
+- **W2 (R32_SFLOAT caps check).** Extend `DeviceCaps` (`boyko_rhi_vulkan/src/device.rs:1850-1853`) with
+  `viewt_storage_format_ok` + `query_device_caps` (`:1831-1854`) to check `VK_FORMAT_R32_SFLOAT` /
   `STORAGE_IMAGE` (OPTIMAL tiling), mirroring `gbuffer_storage_format_ok`; fail-fast before the `gViewT`
   image at L0b.
 - **W3 (folded into C1).** The old "@8 still ≤ cap" falsehood is corrected by the cap raise to 12.

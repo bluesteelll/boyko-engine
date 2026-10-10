@@ -1,0 +1,11 @@
+error: duplicate handler for `E` in state `A`
+  --> tests/ui/machine_duplicate_handler.rs:11:13
+   |
+11 |             on E => A;
+   |             ^^
+
+error: the first handler is here
+  --> tests/ui/machine_duplicate_handler.rs:10:13
+   |
+10 |             on E => A;
+   |             ^^

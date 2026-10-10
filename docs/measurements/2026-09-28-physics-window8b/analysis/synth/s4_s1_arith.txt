@@ -1,0 +1,41 @@
+# S1 arithmetic on window 8b inputs (post hoc, arith.; no claim)
+n: SPLIT-J-T-a PARENT W1 9, W8 9; S4-JT-a TIP W8 9
+PARENT W8 [100,500): waves/step 96.00, colour scopes/step 96.00; L_wide 319.5 us; omega(8) 3.328 us; ramp 60.8, join 26.3, tail 95.2, first ramp 4.12, pass ramps 35.5 us/step; warm 0.3079 ms; integ group 0.1218 ms; setup 0.2988 ms
+TIP W8 [100,500): waves/step 97.00, colour scopes/step 96.00; L_wide (wide(1) from PARENT W1, an estimate) 308.2 us; omega(8) 3.210 us; ramp 63.8, join 27.3, first 4.07 us/step; warm 0.3081; integ 0.1236; setup 0.1127 ms
+T(8) disarmed S4-JT (S4-AB): parent [0,500) 1.9859, parent [100,500) 1.9428, tip [0,500) 1.8154, tip [100,500) 1.7737
+w (net omega_b v2, P8, b=1P) over routes x helpers: 0.346-0.416 us
+w (net omega_b v2, P8, b=2P) over routes x helpers: 0.502-0.679 us
+w (net omega_b v2, P8, b=4P) over routes x helpers: 0.857-1.073 us
+colour tasks per scope W8 [100,500): PARENT 23.36, TIP 23.36 = 2.92 blocks per participant at P8
+
+SPLIT dispatch target (ramp + join - first ramp): 83.0 us/step (PARENT); TIP 87.1
+
+## PARENT inputs (S4 off, the design baseline); T(8) [0,500) = 1.9859 ms; 5 % build-if = 0.0993 ms
+  w 0.346-0.416 (b=1P): wide formula 0.184..0.190, wide SPLIT +0.043..+0.050, S2 0.214..0.217, S3 0.085..0.086 ms; bundle formula 0.483..0.493 = 24.3-24.8 %; bundle SPLIT-wide 0.342..0.352 = 17.2-17.7 %
+  w 0.502-0.679 (b=2P): wide formula 0.158..0.175, wide SPLIT +0.018..+0.035, S2 0.205..0.211, S3 0.083..0.084 ms; bundle formula 0.446..0.471 = 22.4-23.7 %; bundle SPLIT-wide 0.305..0.330 = 15.4-16.6 %
+  w 0.857-1.073 (b=4P): wide formula 0.120..0.141, wide SPLIT -0.020..+0.001, S2 0.190..0.198, S3 0.079..0.081 ms; bundle formula 0.390..0.420 = 19.6-21.2 %; bundle SPLIT-wide 0.249..0.280 = 12.6-14.1 %
+  S2i 0.108 ms, S3i (by analogy) 0.059 ms, S2i + S3i 0.167 ms = 8.4 %
+  S1 bundle (SPLIT-wide) minus S2i + S3i at b=1P: +0.175..+0.185 ms = +8.8..+9.3 % of T(8)
+  S1 bundle (SPLIT-wide) minus S2i + S3i at b=2P: +0.138..+0.163 ms = +7.0..+8.2 % of T(8)
+  S1 bundle (SPLIT-wide) minus S2i + S3i at b=4P: +0.082..+0.113 ms = +4.2..+5.7 % of T(8)
+  dispatch-only per-wave cost d = (ramp + join)/scopes = 0.907 us; omega(8) = 3.328 us; in-wave remainder + imbalance per wave = 2.420 us
+  S2i_d 0.196 ms, S3i_d 0.081 ms, sum 0.277 ms = 13.9 %
+  S1 bundle (SPLIT-wide) minus S2i_d + S3i_d at b=1P: +0.065..+0.075 ms = +3.3..+3.8 % of T(8)
+  S1 bundle (SPLIT-wide) minus S2i_d + S3i_d at b=2P: +0.028..+0.053 ms = +1.4..+2.7 % of T(8)
+  S1 bundle (SPLIT-wide) minus S2i_d + S3i_d at b=4P: -0.027..+0.003 ms = -1.4..+0.1 % of T(8)
+  RAW slope b=4P 3.144-3.369 us (pre-registered input, not like-for-like): bundle formula 0.065..0.097 ms = 3.3-4.9 %; bundle SPLIT-wide -0.075..-0.044 ms = -3.8--2.2 %
+
+## TIP inputs (trunk 16191fda, S4 on); T(8) [0,500) = 1.8154 ms; 5 % build-if = 0.0908 ms
+  w 0.346-0.416 (b=1P): wide formula 0.172..0.179, wide SPLIT +0.047..+0.054, S2 0.214..0.217, S3 0.086..0.087 ms; bundle formula 0.473..0.483 = 26.0-26.6 %; bundle SPLIT-wide 0.348..0.358 = 19.2-19.7 %
+  w 0.502-0.679 (b=2P): wide formula 0.147..0.164, wide SPLIT +0.022..+0.039, S2 0.205..0.211, S3 0.084..0.086 ms; bundle formula 0.436..0.461 = 24.0-25.4 %; bundle SPLIT-wide 0.311..0.336 = 17.1-18.5 %
+  w 0.857-1.073 (b=4P): wide formula 0.109..0.130, wide SPLIT -0.016..+0.005, S2 0.190..0.198, S3 0.080..0.082 ms; bundle formula 0.380..0.411 = 20.9-22.6 %; bundle SPLIT-wide 0.255..0.285 = 14.0-15.7 %
+  S2i 0.113 ms, S3i (by analogy) 0.061 ms, S2i + S3i 0.174 ms = 9.6 %
+  S1 bundle (SPLIT-wide) minus S2i + S3i at b=1P: +0.174..+0.184 ms = +9.6..+10.1 % of T(8)
+  S1 bundle (SPLIT-wide) minus S2i + S3i at b=2P: +0.137..+0.162 ms = +7.5..+8.9 % of T(8)
+  S1 bundle (SPLIT-wide) minus S2i + S3i at b=4P: +0.081..+0.112 ms = +4.5..+6.2 % of T(8)
+  dispatch-only per-wave cost d = (ramp + join)/scopes = 0.949 us; omega(8) = 3.210 us; in-wave remainder + imbalance per wave = 2.261 us
+  S2i_d 0.195 ms, S3i_d 0.082 ms, sum 0.276 ms = 15.2 %
+  S1 bundle (SPLIT-wide) minus S2i_d + S3i_d at b=1P: +0.071..+0.081 ms = +3.9..+4.5 % of T(8)
+  S1 bundle (SPLIT-wide) minus S2i_d + S3i_d at b=2P: +0.034..+0.059 ms = +1.9..+3.3 % of T(8)
+  S1 bundle (SPLIT-wide) minus S2i_d + S3i_d at b=4P: -0.022..+0.009 ms = -1.2..+0.5 % of T(8)
+  RAW slope b=4P 3.144-3.369 us (pre-registered input, not like-for-like): bundle formula 0.055..0.087 ms = 3.0-4.8 %; bundle SPLIT-wide -0.070..-0.038 ms = -3.9--2.1 %

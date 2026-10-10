@@ -240,6 +240,8 @@ fn vertex_buffer_mvp_triangle_golden_round_trip() {
             dimension: boyko_rhi::TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("offscreen color texture");
 
@@ -362,8 +364,16 @@ fn vertex_buffer_mvp_triangle_golden_round_trip() {
         depth: None,
     });
     encoder.bind_graphics_pipeline(&pipeline);
-    // Push the MVP to the pipeline's VERTEX-stage range, then bind the vertex buffer.
-    encoder.push_graphics_constants(&pipeline, ShaderStage::VERTEX, 0, &mvp_bytes());
+    // Push the MVP to the pipeline's push range. `build_graphics_pipeline` widens every
+    // graphics layout's push range to VERTEX|FRAGMENT unconditionally (device.rs), so a
+    // VERTEX-only push leaves the range's FRAGMENT bit undeclared, tripping
+    // VUID-vkCmdPushConstants-offset-01796.
+    encoder.push_graphics_constants(
+        &pipeline,
+        ShaderStage::VERTEX | ShaderStage::FRAGMENT,
+        0,
+        &mvp_bytes(),
+    );
     encoder.bind_vertex_buffer(&vertex_buffer, 0, 0);
     encoder.set_viewport(&Viewport {
         x: 0.0,

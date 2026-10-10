@@ -1,0 +1,72 @@
+== pyramid_sleeping_off: timed window [31+W, 30+W+N]; mean points/step A, B, B/A (same window)
+  W= 127 N=100 steps 158-257: A  15050.1  B  22944.4  B/A 1.5245
+  W= 127 N=210 steps 158-367: A  14981.1  B  22957.6  B/A 1.5324
+  W= 127 N=420 steps 158-577: A  14860.4  B  22963.3  B/A 1.5453
+  W= 127 N=630 steps 158-787: A  14764.0  B  22965.7  B/A 1.5555
+  W= 127 N=840 steps 158-997: A  14696.7  B  22964.5  B/A 1.5626
+  W= 255 N=100 steps 286-385: A  14886.7  B  22973.2  B/A 1.5432
+  W= 255 N=210 steps 286-495: A  14844.8  B  22969.1  B/A 1.5473
+  W= 255 N=420 steps 286-705: A  14734.0  B  22972.2  B/A 1.5591
+  W= 255 N=630 steps 286-915: A  14664.8  B  22968.6  B/A 1.5662
+  W= 255 N=840 steps 286-1125: A  14612.9  B  22962.0  B/A 1.5713
+  W= 511 N=100 steps 542-641: A  14617.2  B  22979.2  B/A 1.5721
+  W= 511 N=210 steps 542-751: A  14601.3  B  22973.5  B/A 1.5734
+  W= 511 N=420 steps 542-961: A  14554.1  B  22967.5  B/A 1.5781
+  W= 511 N=630 steps 542-1171: A  14523.0  B  22957.5  B/A 1.5808
+  W= 511 N=840 steps 542-1381: A  14513.2  B  22948.5  B/A 1.5812
+  W=1023 N=100 steps 1054-1153: A  14500.9  B  22933.7  B/A 1.5815
+  W=1023 N=210 steps 1054-1263: A  14497.7  B  22930.9  B/A 1.5817
+  W=1023 N=420 steps 1054-1473: A  14480.1  B  22924.7  B/A 1.5832
+  W=1023 N=630 steps 1054-1683: A  14452.7  B  22917.5  B/A 1.5857
+  W=1023 N=840 steps 1054-1893: A  14423.4  B  22915.1  B/A 1.5887
+== pyramid_awake_sleeping_on: timed window [31+W, 30+W+N]; mean points/step A, B, B/A (same window)
+  W= 127 N=100 steps 158-257: A  13322.3  B  17112.9  B/A 1.2845
+  W= 127 N=210 steps 158-367: A  13359.3  B  17131.0  B/A 1.2823
+  W= 127 N=420 steps 158-577: A  13446.6  B  17148.6  B/A 1.2753
+  W= 127 N=630 steps 158-787: A  13473.3  B  17160.9  B/A 1.2737
+  W= 127 N=840 steps 158-997: A  13482.1  B  17172.8  B/A 1.2738
+  W= 255 N=100 steps 286-385: A  13356.8  B  17151.7  B/A 1.2841
+  W= 255 N=210 steps 286-495: A  13428.2  B  17159.3  B/A 1.2779
+  W= 255 N=420 steps 286-705: A  13510.2  B  17167.6  B/A 1.2707
+  W= 255 N=630 steps 286-915: A  13490.1  B  17178.0  B/A 1.2734
+  W= 255 N=840 steps 286-1125: A  13528.4  B  17190.1  B/A 1.2707
+  W= 511 N=100 steps 542-641: A  13624.9  B  17173.8  B/A 1.2605
+  W= 511 N=210 steps 542-751: A  13563.5  B  17180.9  B/A 1.2667
+  W= 511 N=420 steps 542-961: A  13518.7  B  17192.6  B/A 1.2718
+  W= 511 N=630 steps 542-1171: A  13556.7  B  17205.7  B/A 1.2692
+  W= 511 N=840 steps 542-1381: A  13580.1  B  17218.4  B/A 1.2679
+  W=1023 N=100 steps 1054-1153: A  13625.6  B  17235.0  B/A 1.2649
+  W=1023 N=210 steps 1054-1263: A  13632.8  B  17240.8  B/A 1.2647
+  W=1023 N=420 steps 1054-1473: A  13639.5  B  17255.0  B/A 1.2651
+  W=1023 N=630 steps 1054-1683: A  13631.5  B  17265.0  B/A 1.2665
+  W=1023 N=840 steps 1054-1893: A  13598.4  B  17270.7  B/A 1.2700
+== full_step/1: every sample from a fresh world, timed steps 21..20+i; mean points/timed step
+  linear   1 (N= 210) steps 21-40: A  16338.1  B  17359.1  B/A 1.0625
+  linear   2 (N= 420) steps 21-60: A  15532.7  B  17499.4  B/A 1.1266
+  linear   3 (N= 630) steps 21-80: A  14853.5  B  17489.8  B/A 1.1775
+  linear   4 (N= 840) steps 21-100: A  14371.9  B  17482.6  B/A 1.2164
+  linear   6 (N=1260) steps 21-140: A  13823.5  B  17486.4  B/A 1.2650
+  linear   8 (N=1680) steps 21-180: A  13575.1  B  17463.1  B/A 1.2864
+  linear  12 (N=2520) steps 21-260: A  13402.9  B  17394.3  B/A 1.2978
+  linear  16 (N=3360) steps 21-340: A  13361.6  B  17344.2  B/A 1.2981
+  linear  24 (N=5040) steps 21-500: A  13345.7  B  17287.2  B/A 1.2953
+  flat     3 (N=  60) steps 21-23: A  17695.7  B  17750.3  B/A 1.0031
+  flat     5 (N= 100) steps 21-25: A  17109.2  B  17295.8  B/A 1.0109
+  flat     8 (N= 160) steps 21-28: A  16646.6  B  17005.1  B/A 1.0215
+  flat    12 (N= 240) steps 21-32: A  16420.8  B  17323.0  B/A 1.0549
+== full_step/4: every sample from a fresh world, timed steps 21..20+i; mean points/timed step
+  linear   1 (N= 210) steps 21-40: A  16338.1  B  17359.1  B/A 1.0625
+  linear   2 (N= 420) steps 21-60: A  15532.7  B  17499.4  B/A 1.1266
+  linear   3 (N= 630) steps 21-80: A  14853.5  B  17489.8  B/A 1.1775
+  linear   4 (N= 840) steps 21-100: A  14371.9  B  17482.6  B/A 1.2164
+  linear   6 (N=1260) steps 21-140: A  13823.5  B  17486.4  B/A 1.2650
+  linear   8 (N=1680) steps 21-180: A  13575.1  B  17463.1  B/A 1.2864
+  linear  12 (N=2520) steps 21-260: A  13402.9  B  17394.3  B/A 1.2978
+  linear  16 (N=3360) steps 21-340: A  13361.6  B  17344.2  B/A 1.2981
+  linear  24 (N=5040) steps 21-500: A  13345.7  B  17287.2  B/A 1.2953
+  flat     3 (N=  60) steps 21-23: A  17695.7  B  17750.3  B/A 1.0031
+  flat     5 (N= 100) steps 21-25: A  17109.2  B  17295.8  B/A 1.0109
+  flat     8 (N= 160) steps 21-28: A  16646.6  B  17005.1  B/A 1.0215
+  flat    12 (N= 240) steps 21-32: A  16420.8  B  17323.0  B/A 1.0549
+awake_sleeping_on series == full_step/1 series (steps 1..3000): A True B True
+full_step/4 series == full_step/1 series (steps 1..3000): A True B True

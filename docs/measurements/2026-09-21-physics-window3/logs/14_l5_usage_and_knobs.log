@@ -1,0 +1,14 @@
+### usage text at de06b6c9 (bad flag):
+jolt_parity_pyramid: unknown argument "--bogus"
+usage: jolt_parity_pyramid --scene jolt|rest|s16 [--workers W] [--steps N] [--window A..B] [--gap G] [--solver colored|reference] [--cfg a|b|default] [--parallel-solve] [--parallel-np on|off] [--sleeping] [--threshold T] [--frozen-by K] [--arm-profiler] [--canary-frac F --canary-ref-ns T] [--csv PATH] [--pose-out PATH] [--expect-pose PATH] [--label TEXT]
+exit=2
+
+### --parallel-np spelling check: --parallel-np off, 12 steps, W=8
+jolt_parity_pyramid: scene jolt gap 0.5 friction 0.2 bodies 1240 workers 8 solver Colored cfg Default profile dev armed false
+steps 12 window 0..12 final manifolds 4054 pairs 9570 top_y 35.79971 pose_hash 0x6976399d3f4d3199
+SUMMARY {"runner":"jolt_parity_pyramid fixed-window runner v1","label":"npoff","profile_name":"dev","zones_compiled":true,"system_zones_compiled":true,"debug_assertions":false,"target_env":"msvc","scene":"jolt","gap":0.5,"friction":0.20000000298023224,"bodies":1240,"workers":8,"solver":"colored","cfg":"default","config":{"substeps":4,"relax_iterations":2,"broadphase":"AllPairs","broadphase_select":"Manual","simd":true,"simd_solve":true,"parallel_solve":true,"parallel_broadphase":false,"parallel_narrowphase":false,"sleeping":false,"sleep_threshold":0.00009999999747378752,"sleep_frames":60,"colored":true,"contact_hertz":30,"contact_damping":10},"armed":false,"canary_ns":null,"steps":12,"window":[0,12],"window_mean_ns":9676125,"window_steps_per_s":103.3471560154504,"pose_hash":"0x6976399d3f4d3199","pose_bytes":64480,"expect_pose":"none","final_manifolds":4054,"final_pairs":9570,"final_top_y
+exit=0
+
+### --cfg default, 12 steps, W=1 and W=8: printed knobs
+"target_env":"msvc" "workers":1 "config":{"substeps":4,"relax_iterations":2,"broadphase":"AllPairs","broadphase_select":"Manual","simd":true,"simd_solve":true,"parallel_solve":true,"parallel_broadphase":false,"parallel_narrowphase":true,"sleeping":false,"sleep_threshold":0.00009999999747378752,"sleep_frames":60,"colored":true,"contact_hertz":30,"contact_damping":10} "pose_hash":"0x6976399d3f4d3199" "void_steps":0  exit=0
+"target_env":"msvc" "workers":8 "config":{"substeps":4,"relax_iterations":2,"broadphase":"AllPairs","broadphase_select":"Manual","simd":true,"simd_solve":true,"parallel_solve":true,"parallel_broadphase":false,"parallel_narrowphase":true,"sleeping":false,"sleep_threshold":0.00009999999747378752,"sleep_frames":60,"colored":true,"contact_hertz":30,"contact_damping":10} "pose_hash":"0x6976399d3f4d3199" "void_steps":0  exit=0

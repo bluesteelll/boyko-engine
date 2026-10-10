@@ -199,6 +199,8 @@ fn render_sampled(device: &VulkanContext) -> Vec<u8> {
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("source texture T (COLOR_ATTACHMENT | SAMPLED)");
 
@@ -213,6 +215,8 @@ fn render_sampled(device: &VulkanContext) -> Vec<u8> {
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("output texture O (COLOR_ATTACHMENT | TRANSFER_SRC)");
 

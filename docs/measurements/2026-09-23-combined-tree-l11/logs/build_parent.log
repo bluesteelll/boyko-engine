@@ -1,0 +1,95 @@
+    Updating crates.io index
+     Locking 444 packages to latest Rust 1.98.1 compatible versions
+      Adding bevy_ecs v0.18.1 (available: v0.19.1)
+      Adding criterion v0.5.1 (available: v0.8.2)
+      Adding eframe v0.34.3 (available: v0.36.2)
+      Adding getrandom v0.3.4 (available: v0.4.3)
+      Adding rand v0.9.5 (available: v0.10.3)
+      Adding syn v2.0.119 (available: v3.0.6)
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling crossbeam-utils v0.8.23
+   Compiling cfg-if v1.0.5
+   Compiling windows-link v0.2.1
+   Compiling windows-sys v0.61.2
+   Compiling crossbeam-epoch v0.9.21
+   Compiling crossbeam-deque v0.8.8
+   Compiling zerocopy v0.8.57
+   Compiling boyko-diag v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\scratchpad\win5\parent_tree\crates\boyko_diag)
+   Compiling serde_core v1.0.229
+   Compiling getrandom v0.3.4
+   Compiling syn v2.0.119
+   Compiling autocfg v1.5.1
+   Compiling boyko-log v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\scratchpad\win5\parent_tree\crates\boyko_log)
+   Compiling syn v3.0.6
+   Compiling zmij v1.0.23
+   Compiling num-traits v0.2.19
+   Compiling getrandom v0.4.3
+   Compiling serde v1.0.229
+   Compiling rand_core v0.9.5
+   Compiling crossbeam-queue v0.3.14
+   Compiling boyko-threadpool v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\scratchpad\win5\parent_tree\crates\boyko_threadpool)
+   Compiling rayon-core v1.13.0
+   Compiling either v1.18.0
+   Compiling static_assertions v1.1.0
+   Compiling fixedbitset v0.5.7
+   Compiling boyko-utils v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\scratchpad\win5\parent_tree\crates\boyko_utils)
+   Compiling regex-syntax v0.8.11
+   Compiling once_cell v1.21.4
+   Compiling serde_json v1.0.151
+   Compiling boyko-ecs v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\scratchpad\win5\parent_tree\crates\boyko_ecs)
+   Compiling serde_derive v1.0.229
+   Compiling winapi-util v0.1.11
+   Compiling plotters-backend v0.3.7
+   Compiling anstyle v1.0.14
+   Compiling ciborium-io v0.2.2
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.3
+   Compiling fastrand v2.5.0
+   Compiling zerocopy-derive v0.8.57
+   Compiling boyko-macros v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\scratchpad\win5\parent_tree\crates\boyko_macros)
+   Compiling clap_lex v1.1.1
+   Compiling clap_builder v4.6.7
+   Compiling regex-automata v0.4.18
+   Compiling tempfile v3.27.0
+   Compiling plotters-svg v0.3.7
+   Compiling same-file v1.0.6
+   Compiling itertools v0.10.5
+   Compiling boyko-input v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\scratchpad\win5\parent_tree\crates\boyko_input)
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling ppv-lite86 v0.2.21
+   Compiling fnv v1.0.7
+   Compiling wait-timeout v0.2.1
+   Compiling quick-error v1.2.3
+   Compiling bit-vec v0.8.0
+   Compiling boyko-math v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\scratchpad\win5\parent_tree\crates\boyko_math)
+   Compiling cast v0.3.0
+   Compiling boyko_shaderdsl v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\scratchpad\win5\parent_tree\crates\boyko_shaderdsl)
+   Compiling boyko-scene v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\scratchpad\win5\parent_tree\crates\boyko_scene)
+   Compiling criterion-plot v0.5.0
+   Compiling bit-set v0.8.0
+   Compiling rand_chacha v0.9.0
+   Compiling boyko_sdf_math v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\scratchpad\win5\parent_tree\crates\boyko_sdf_math)
+   Compiling rusty-fork v0.3.1
+   Compiling ciborium v0.2.2
+   Compiling regex v1.13.1
+   Compiling rayon v1.12.0
+   Compiling walkdir v2.5.0
+   Compiling plotters v0.3.7
+   Compiling tinytemplate v1.2.1
+   Compiling clap v4.6.7
+   Compiling rand v0.9.5
+   Compiling rand_xorshift v0.4.0
+   Compiling is-terminal v0.4.17
+   Compiling bitflags v2.13.2
+   Compiling unarray v0.1.4
+   Compiling anes v0.1.6
+   Compiling oorandom v11.1.5
+   Compiling proptest v1.11.0
+   Compiling boyko-physics v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\scratchpad\win5\parent_tree\crates\boyko_physics)
+   Compiling criterion v0.5.1
+    Finished `parity` profile [optimized] target(s) in 43.52s
+  Executable benches\jolt_parity_pyramid.rs (D:/wt/_targets/l11-parent-msvc\parity\deps\jolt_parity_pyramid-39550833a2ead4ba.exe)
+exit=0

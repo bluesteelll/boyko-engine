@@ -1,0 +1,7 @@
+# UG-02 heap-head vocabulary ADDITIONS (runtime data ledger rev 5). The baseline heads live in gate
+# code (BASELINE_HEADS in tests/ledger_scan_support/mod.rs) and cannot be removed by editing data;
+# this file may only add. An `own` head must name a type defined in a scanned crate (checked).
+# origin: std | third-party | own.
+head	origin	reason
+RawBlob	own	boyko_ecs clone/prefab.rs: a hand-rolled std::alloc byte arena behind a raw pointer; its uses own heap the syntax cannot see (rev 4 rowed its definition)
+InternerState	own	boyko_scene identity.rs: the name interner's state behind OnceLock<Mutex<..>>; the static that owns it is a row (rev 4)

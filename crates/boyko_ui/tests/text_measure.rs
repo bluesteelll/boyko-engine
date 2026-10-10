@@ -24,6 +24,13 @@
 //! query item never bumps the changed tick, so the relayout gate (`Changed<ContentSize>`)
 //! would never fire and the node would re-measure invisibly.
 
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` / a `UiParseReport` out of the `Send + Sync` one-shot
+// system closure, and a file-static `Mutex<()>` serializes tests that arm a process-global
+// (the counting allocator, the watch-poll counters). Not engine code — the whole file is
+// compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 mod common;
 
 use std::sync::{Arc, Mutex};

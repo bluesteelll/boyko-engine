@@ -1,0 +1,11 @@
+error: states `A.BC` and `AB.C` both flatten to `ABC` — flattening concatenates the state path, so they would emit one name; rename one
+  --> tests/ui/machine_flattened_name_collision.rs:17:19
+   |
+17 |             state C {}
+   |                   ^
+
+error: the first state flattening to this name is here
+  --> tests/ui/machine_flattened_name_collision.rs:13:19
+   |
+13 |             state BC {}
+   |                   ^^

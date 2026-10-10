@@ -28,12 +28,34 @@
 //! The owner screenshot command (one line, RTX 3060):
 //!
 //! ```text
-//! RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu CARGO_BUILD_TARGET=x86_64-pc-windows-gnu \
+//! RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc \
 //!   cargo test -p boyko_render --test ui_hud_screenshot \
 //!   p6b_hud_screenshot -- --ignored --test-threads=1 --nocapture
 //! ```
 //!
 //! Output image: `D:\claude\BoykoEngine\target\screenshots\p6b_hud.bmp`
+//!
+//! The line also carried `CARGO_BUILD_TARGET=x86_64-pc-windows-gnu` until 2026-09-10, when
+//! this tree's Windows recipes moved to `stable-x86_64-pc-windows-msvc`. It was the only
+//! `CARGO_BUILD_TARGET` in the tree and was already redundant -- the named toolchain's own
+//! host triple was gnu -- but after the switch it would have been worse than redundant: an
+//! explicit gnu `--target` under an msvc toolchain is a CROSS-COMPILE, needing the gnu std
+//! and the machine-global MinGW linker trio, and it also stops cargo applying
+//! `[target.*].rustflags` to build scripts. Dropped rather than re-spelled, because the
+//! toolchain already selects the host triple.
+
+// clippy 1.98's `chunks_exact_to_as_chunks` fires on the RGBA readback loops below.
+// Left as `chunks_exact` DELIBERATELY: every site here sits inside a `zip` / `filter` /
+// `enumerate` chain where `as_chunks().0` changes the item type from `&[u8]` to
+// `&[u8; N]`, so the rewrite is semantic rather than textual - and these targets need a
+// GPU, so the edit could not be verified by running them on this headless box. The
+// LIBRARY code this lint flagged was converted properly; this is the test-only remainder.
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
+// Test harness, not an engine path: `Arc<Mutex<..>>` carries the spawned `Entity` out of a
+// one-shot `run_system` closure, and a `Mutex<Option<FnOnce>>` lets a once-only readback
+// closure be called from a `Fn` system. Test-only scaffolding, never linked into a shipping build.
+#![allow(clippy::disallowed_types)]
 
 mod common;
 
@@ -301,6 +323,8 @@ fn glyph_quad(x: f32, y: f32, w: f32, h: f32, color: u32, uv: [f32; 4]) -> UiIns
             border_width: [0.0; 4],
             clip: None,
             text_uv: Some(uv),
+            image: None,
+            nine_slice: None,
         },
         1.0,
     )
@@ -418,7 +442,7 @@ fn write_bmp(path: &Path, rgba: &[u8], w: u32, h: u32) -> std::io::Result<()> {
     buf.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
     buf.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
     // --- pixel data: RGBA -> BGRA (the ONLY channel swap; no row flip) ---
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         buf.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
     }
 
@@ -632,9 +656,17 @@ fn hud_glyph_packing_golden() {
             "char {c:?}: emitter UV {shaped:?} must match the atlas cell UV {expected:?}"
         );
 
-        // The GPU pack lane carries that same UV verbatim into the `corner_radius` alias.
+        // The GPU pack lane carries that same UV verbatim into the record's own `uv`
+        // field (UI-ADVANCED S2: the `corner_radius` alias is retired — a glyph now
+        // packs the radius ZERO, and this test is the lockstep site the S2 plan's
+        // ten-site list missed, found by the full-suite gate).
         let inst = glyph_quad(X0 + i as f32 * GADV, Y0, GW, GH, FG, expected);
-        assert_eq!(inst.corner_radius, expected, "char {c:?} packs its atlas cell UV");
+        assert_eq!(inst.uv, expected, "char {c:?} packs its atlas cell UV");
+        assert_eq!(
+            inst.corner_radius,
+            [0.0; 4],
+            "char {c:?}: a glyph's corner_radius is zero — the alias is retired"
+        );
         assert_eq!(inst.size_px, [GW, GH], "char {c:?} packs the fixed glyph quad size");
     }
 }
@@ -802,6 +834,8 @@ fn msdf_hud_instances(text: &str, font: &BakedFont) -> Vec<UiInstance> {
                     border_width: [0.0; 4],
                     clip: None,
                     text_uv: Some(g.uv),
+                    image: None,
+                    nine_slice: None,
                 },
                 1.0,
             )
@@ -880,7 +914,9 @@ mod gpu {
             boyko_render::ui_rect_vs_spirv(),
             boyko_render::ui_rect_fs_spirv(),
             4,
-            font,
+            Some(font),
+            boyko_render::UiSamplerMode::Smooth,
+            None,
         )
         .expect("ui_setup (UI pipeline + atlas upload + per-FIF rings)");
 
@@ -900,6 +936,9 @@ mod gpu {
         let (pipeline, bind_group) = rhi
             .ui_handles(plan.frame_index)
             .expect("ui_handles after ui_setup");
+        // UI-ADVANCED S3: set 1 — the sprite lane. Resolved through the SAME accessor
+        // the on-screen `ui_pass` reads (S-D9), so both recorders bind one set.
+        let sprite_group = rhi.ui_sprite_group().expect("ui_sprite_group after ui_setup");
 
         let device = rhi.context();
         let queue = device.rhi_queue();
@@ -913,6 +952,8 @@ mod gpu {
                 dimension: TextureDimension::D2,
                 usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
                 array_layers: 1,
+                mip_levels: 1,
+                view_format: None,
             })
             .expect("offscreen output texture");
 
@@ -984,7 +1025,7 @@ mod gpu {
         // bind-group layout (binding 0 SSBO, binding 1 atlas, binding 2 UBO) and a
         // 16-byte VERTEX push range.
         unsafe {
-            record_ui_rects(&mut encoder, &full, &plan, pipeline, bind_group);
+            record_ui_rects(&mut encoder, &full, &plan, pipeline, bind_group, sprite_group);
         }
         encoder.end_rendering();
 
@@ -1049,7 +1090,7 @@ mod gpu {
     /// validation messages, then writes the BMP. `#[ignore]`d — Vulkan boot can hang a
     /// headless run; the orchestrator runs it on the RTX (see the module header).
     #[test]
-    #[ignore = "boots Vulkan on the GPU; owner-run on the RTX (see module header)"]
+    #[ignore = "gpu: boots Vulkan on the GPU; owner-run on the RTX (see module header)"]
     fn p6b_hud_screenshot() {
         let Some(ctx) = boot_or_skip("p6b_hud_screenshot") else {
             return;
@@ -1125,7 +1166,7 @@ mod gpu {
     /// coverage is continuous and font-dependent); the proof is the eyeballed image +
     /// a zero-validation-message GPU run. `#[ignore]`d for the same Vulkan-boot reason.
     #[test]
-    #[ignore = "boots Vulkan on the GPU; owner-run on the RTX (see module header)"]
+    #[ignore = "gpu: boots Vulkan on the GPU; owner-run on the RTX (see module header)"]
     fn p6b_hud_screenshot_msdf() {
         let Some(ctx) = boot_or_skip("p6b_hud_screenshot_msdf") else {
             return;

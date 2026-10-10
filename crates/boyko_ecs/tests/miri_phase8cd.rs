@@ -1,7 +1,7 @@
 //! Phase 8c+8d Step 12 — Miri test suite for the `Command` / `CommandQueue`
 //! / `Bundle` / `FunctionSystem` subsystem.
 //!
-//! These tests are written to be run under `cargo +nightly miri test`. They
+//! These tests are written to be run under `cargo +nightly-x86_64-pc-windows-msvc miri test`. They
 //! exercise the unsafe code paths added in Steps 6, 7, and the apply/glue
 //! pipeline; they assert that no UB (uninit reads, retag failures, double-
 //! frees, aliased mutable references, padded-bytes / packed-reference
@@ -63,6 +63,13 @@
 //! The few tests that share a static counter acquire a per-file
 //! `Mutex<()>` so parallel test execution does not interleave Drop
 //! invocations. The pattern mirrors `tests/command_queue_panic_recovery.rs`.
+
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
 
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -347,7 +354,7 @@ fn miri_command_queue_padded_command_no_uninit_ub() {
 ///
 /// Miri's Tree Borrows + Stacked Borrows models would surface such a
 /// regression as a retag failure on the `&mut C` mint. The success of
-/// this test under `cargo +nightly miri test` is the CQ-PACK1 lock-down.
+/// this test under `cargo +nightly-x86_64-pc-windows-msvc miri test` is the CQ-PACK1 lock-down.
 #[test]
 fn miri_command_queue_no_packed_reference_creation() {
     let _serial = acquire_test_lock();

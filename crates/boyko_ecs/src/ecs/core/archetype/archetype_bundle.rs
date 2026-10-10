@@ -19,6 +19,7 @@ use static_assertions::assert_impl_all;
 
 use crate::ecs::core::archetype::archetype::{Archetype, Column};
 use crate::ecs::core::archetype::archetype_signature::ArchetypeSignature;
+use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
 use crate::ecs::core::component::component_registry::{self, MAX_COMPONENTS};
@@ -499,7 +500,15 @@ impl ArchetypeBundle {
             // Start empty; the OR-compute over the registered components runs
             // in the `register_component_inplace` loop below (Wave 2).
             addr_of_mut!((*slot_ptr).flags).write(ArchetypeFlags::empty());
-            addr_of_mut!((*slot_ptr).component_ids).write(component_ids.to_vec());
+            // KE14 D1: BOTH id lists must be initialised on the in-place slab
+            // path (U13) or the slot is partially uninit (UB). The raw
+            // declaration record is written wholesale; the pool-bearing
+            // subsequence starts empty and is filled by the
+            // `register_component_inplace` walk below, which is the only place
+            // that already knows each id's storage kind.
+            addr_of_mut!((*slot_ptr).all_component_ids).write(component_ids.to_vec());
+            addr_of_mut!((*slot_ptr).table_component_ids)
+                .write(Vec::with_capacity(component_ids.len()));
             // F1: the entity-id column is now a `VmColumn` (address-stable, on
             // one VM reservation) sized to the `u32` `unit_index` ceiling — the
             // in-place slab path must construct it here (U13) or the slot is
@@ -507,6 +516,12 @@ impl ArchetypeBundle {
             // no commit until the first push).
             addr_of_mut!((*slot_ptr).entity_ids)
                 .write(VmColumn::new("Archetype.entity_ids", POOL_MAX_ROWS));
+            // KE6: the `ArchAdded` structural stamp must be initialised on the
+            // in-place slab path too (U13) or the slot is partially uninit.
+            // A fresh archetype holds no rows, so "never stamped" is the honest
+            // start; `Archetype::has_structural_add_since` gates on
+            // `entity_count() != 0` so the sentinel is never interpreted.
+            addr_of_mut!((*slot_ptr).arch_added).write(Tick::ZERO);
         }
 
         // All fields are now initialised; promote the raw pointer to a
@@ -549,6 +564,10 @@ impl ArchetypeBundle {
         if saw_gpu && saw_non_gpu {
             crate::ecs::core::archetype::archetype::residency_conflict_panic(component_ids);
         }
+        // KE14 D1: the two id lists, the signature mask and the pool bundle must
+        // agree before this slot is published. This is the LIVE mint funnel, so
+        // a tripwire only on `create_by_ids` would be dark here.
+        archetype.debug_assert_id_lists_agree();
 
         // Set the occupancy bit only after full initialisation.
         let word = (slot_idx as usize) / 64;
@@ -1042,7 +1061,7 @@ impl IndexMut<ArchetypeId> for ArchetypeBundle {
 mod miri_tests {
     //! Miri-targeted tests for Phase 7 Step 4 invariants. Compiled in normal
     //! `cargo test` runs (acting as smoke tests) and exercised under
-    //! `cargo +nightly miri test` for UB / retag detection.
+    //! `cargo +nightly-x86_64-pc-windows-msvc miri test` for UB / retag detection.
 
     use super::*;
     use crate::ecs::core::component::component_registry;
@@ -1294,7 +1313,7 @@ mod miri_tests {
         // Drop the bundle: the bitset walk must hit only id1's and id3's
         // slots. Miri's pointer-validity check trips on `drop_in_place` of
         // an uninitialised slot, so if the walk were to visit id2's freed
-        // slot, this test would fail under `cargo +nightly miri test`.
+        // slot, this test would fail under `cargo +nightly-x86_64-pc-windows-msvc miri test`.
         drop(bundle);
     }
 

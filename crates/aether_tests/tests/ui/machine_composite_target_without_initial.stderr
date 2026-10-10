@@ -1,0 +1,5 @@
+error: target `Playing` is a composite state with no `initial` — add `initial <leaf>;` or target a leaf (`Playing.Running`)
+  --> tests/ui/machine_composite_target_without_initial.rs:10:22
+   |
+10 |             on Go => Playing;
+   |                      ^^^^^^^

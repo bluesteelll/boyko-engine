@@ -1,0 +1,392 @@
+[
+ {
+  "row": "omega2-worker",
+  "exit": 0,
+  "summaries": 36,
+  "calibration_lines": 1,
+  "micro_notes": {
+   "park": [
+    {
+     "key": "P2/stages36/bpp1/gap0/worker",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P2/stages36/bpp2/gap0/worker",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P2/stages36/bpp4/gap0/worker",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P2/stages72/bpp1/gap0/worker",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P2/stages72/bpp2/gap0/worker",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P2/stages72/bpp4/gap0/worker",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P4/stages36/bpp1/gap0/worker",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P4/stages36/bpp2/gap0/worker",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P4/stages36/bpp4/gap0/worker",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P4/stages72/bpp1/gap0/worker",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P4/stages72/bpp2/gap0/worker",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P4/stages72/bpp4/gap0/worker",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P8/stages36/bpp1/gap0/worker",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P8/stages36/bpp2/gap0/worker",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P8/stages36/bpp4/gap0/worker",
+     "gap_us": 0,
+     "parks": 2
+    },
+    {
+     "key": "P8/stages72/bpp1/gap0/worker",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P8/stages72/bpp2/gap0/worker",
+     "gap_us": 0,
+     "parks": 2
+    },
+    {
+     "key": "P8/stages72/bpp4/gap0/worker",
+     "gap_us": 0,
+     "parks": 2
+    }
+   ],
+   "no_park_taken": [
+    "P2/stages36/bpp1/gap0/worker",
+    "P2/stages36/bpp2/gap0/worker",
+    "P2/stages36/bpp4/gap0/worker",
+    "P2/stages72/bpp1/gap0/worker",
+    "P2/stages72/bpp2/gap0/worker",
+    "P2/stages72/bpp4/gap0/worker",
+    "P4/stages36/bpp1/gap0/worker",
+    "P4/stages36/bpp2/gap0/worker",
+    "P4/stages36/bpp4/gap0/worker",
+    "P4/stages72/bpp1/gap0/worker",
+    "P4/stages72/bpp2/gap0/worker",
+    "P4/stages72/bpp4/gap0/worker",
+    "P8/stages36/bpp1/gap0/worker",
+    "P8/stages36/bpp2/gap0/worker",
+    "P8/stages72/bpp1/gap0/worker"
+   ],
+   "no_park_at_gap": []
+  },
+  "no_park_taken_reported": [
+   "P2/stages36/bpp1/gap0/worker",
+   "P2/stages36/bpp2/gap0/worker",
+   "P2/stages36/bpp4/gap0/worker",
+   "P2/stages72/bpp1/gap0/worker",
+   "P2/stages72/bpp2/gap0/worker",
+   "P2/stages72/bpp4/gap0/worker",
+   "P4/stages36/bpp1/gap0/worker",
+   "P4/stages36/bpp2/gap0/worker",
+   "P4/stages36/bpp4/gap0/worker",
+   "P4/stages72/bpp1/gap0/worker",
+   "P4/stages72/bpp2/gap0/worker",
+   "P4/stages72/bpp4/gap0/worker",
+   "P8/stages36/bpp1/gap0/worker",
+   "P8/stages36/bpp2/gap0/worker",
+   "P8/stages72/bpp1/gap0/worker"
+  ],
+  "wall_s_for_schedule": 4.19,
+  "fail": []
+ },
+ {
+  "row": "omega2-external",
+  "exit": 0,
+  "summaries": 36,
+  "calibration_lines": 1,
+  "micro_notes": {
+   "park": [
+    {
+     "key": "P2/stages36/bpp1/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P2/stages36/bpp2/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P2/stages36/bpp4/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P2/stages72/bpp1/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P2/stages72/bpp2/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P2/stages72/bpp4/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P4/stages36/bpp1/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P4/stages36/bpp2/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P4/stages36/bpp4/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P4/stages72/bpp1/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P4/stages72/bpp2/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P4/stages72/bpp4/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P8/stages36/bpp1/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P8/stages36/bpp2/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P8/stages36/bpp4/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P8/stages72/bpp1/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P8/stages72/bpp2/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    },
+    {
+     "key": "P8/stages72/bpp4/gap0/external",
+     "gap_us": 0,
+     "parks": 0
+    }
+   ],
+   "no_park_taken": [
+    "P2/stages36/bpp1/gap0/external",
+    "P2/stages36/bpp2/gap0/external",
+    "P2/stages36/bpp4/gap0/external",
+    "P2/stages72/bpp1/gap0/external",
+    "P2/stages72/bpp2/gap0/external",
+    "P2/stages72/bpp4/gap0/external",
+    "P4/stages36/bpp1/gap0/external",
+    "P4/stages36/bpp2/gap0/external",
+    "P4/stages36/bpp4/gap0/external",
+    "P4/stages72/bpp1/gap0/external",
+    "P4/stages72/bpp2/gap0/external",
+    "P4/stages72/bpp4/gap0/external",
+    "P8/stages36/bpp1/gap0/external",
+    "P8/stages36/bpp2/gap0/external",
+    "P8/stages36/bpp4/gap0/external",
+    "P8/stages72/bpp1/gap0/external",
+    "P8/stages72/bpp2/gap0/external",
+    "P8/stages72/bpp4/gap0/external"
+   ],
+   "no_park_at_gap": []
+  },
+  "no_park_taken_reported": [
+   "P2/stages36/bpp1/gap0/external",
+   "P2/stages36/bpp2/gap0/external",
+   "P2/stages36/bpp4/gap0/external",
+   "P2/stages72/bpp1/gap0/external",
+   "P2/stages72/bpp2/gap0/external",
+   "P2/stages72/bpp4/gap0/external",
+   "P4/stages36/bpp1/gap0/external",
+   "P4/stages36/bpp2/gap0/external",
+   "P4/stages36/bpp4/gap0/external",
+   "P4/stages72/bpp1/gap0/external",
+   "P4/stages72/bpp2/gap0/external",
+   "P4/stages72/bpp4/gap0/external",
+   "P8/stages36/bpp1/gap0/external",
+   "P8/stages36/bpp2/gap0/external",
+   "P8/stages36/bpp4/gap0/external",
+   "P8/stages72/bpp1/gap0/external",
+   "P8/stages72/bpp2/gap0/external",
+   "P8/stages72/bpp4/gap0/external"
+  ],
+  "wall_s_for_schedule": 3.994,
+  "fail": []
+ },
+ {
+  "row": "omega2-gap-worker",
+  "exit": 0,
+  "summaries": 8,
+  "calibration_lines": 1,
+  "micro_notes": {
+   "park": [
+    {
+     "key": "P8/stages36/bpp4/gap20/worker",
+     "gap_us": 20,
+     "parks": 251
+    },
+    {
+     "key": "P8/stages36/bpp4/gap80/worker",
+     "gap_us": 80,
+     "parks": 252
+    },
+    {
+     "key": "P8/stages72/bpp4/gap20/worker",
+     "gap_us": 20,
+     "parks": 502
+    },
+    {
+     "key": "P8/stages72/bpp4/gap80/worker",
+     "gap_us": 80,
+     "parks": 504
+    }
+   ],
+   "no_park_taken": [],
+   "no_park_at_gap": []
+  },
+  "no_park_taken_reported": [],
+  "wall_s_for_schedule": 25.157,
+  "fail": []
+ },
+ {
+  "row": "omega2-gap-external",
+  "exit": 0,
+  "summaries": 8,
+  "calibration_lines": 1,
+  "micro_notes": {
+   "park": [
+    {
+     "key": "P8/stages36/bpp4/gap20/external",
+     "gap_us": 20,
+     "parks": 252
+    },
+    {
+     "key": "P8/stages36/bpp4/gap80/external",
+     "gap_us": 80,
+     "parks": 252
+    },
+    {
+     "key": "P8/stages72/bpp4/gap20/external",
+     "gap_us": 20,
+     "parks": 502
+    },
+    {
+     "key": "P8/stages72/bpp4/gap80/external",
+     "gap_us": 80,
+     "parks": 504
+    }
+   ],
+   "no_park_taken": [],
+   "no_park_at_gap": []
+  },
+  "no_park_taken_reported": [],
+  "wall_s_for_schedule": 24.916,
+  "fail": []
+ },
+ {
+  "row": "omega1-s36-worker",
+  "exit": 0,
+  "summaries": 4,
+  "calibration_lines": 0,
+  "micro_notes": {},
+  "no_park_taken_reported": [],
+  "wall_s_for_schedule": 0.846,
+  "fail": []
+ },
+ {
+  "row": "omega1-s36-external",
+  "exit": 0,
+  "summaries": 4,
+  "calibration_lines": 0,
+  "micro_notes": {},
+  "no_park_taken_reported": [],
+  "wall_s_for_schedule": 0.81,
+  "fail": []
+ },
+ {
+  "row": "omega1-s72-worker",
+  "exit": 0,
+  "summaries": 4,
+  "calibration_lines": 0,
+  "micro_notes": {},
+  "no_park_taken_reported": [],
+  "wall_s_for_schedule": 1.513,
+  "fail": []
+ },
+ {
+  "row": "omega1-s72-external",
+  "exit": 0,
+  "summaries": 4,
+  "calibration_lines": 0,
+  "micro_notes": {},
+  "no_park_taken_reported": [],
+  "wall_s_for_schedule": 1.685,
+  "fail": []
+ }
+]

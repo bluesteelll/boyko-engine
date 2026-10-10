@@ -1,0 +1,426 @@
+# Window 7: the analyst's reduction (tools/analyze7.py), recomputed from raw/
+
+## 0. Selection and input checks
+- 542 records = 530 processes ({'warmup': 12, 'original': 450, 'rerun': 68}) + 12 pass markers
+- passes done: 12; run tags per pass: P1A-jolt-p0=['010216'], P1A-jolt-p1=['024553'], P1B-jolt-p0=['024553'], P1B-jolt-p1=['024553'], P2-L9GTW-p0=['024553'], P2-L9GTW-p1=['024553'], P3-G9JA-p0=['024553'], P3-G9JA-p1=['024553'], P4-trkspans-p0=['024553'], P4-trkspans-p1=['024553'], P5-joltprof-p0=['024553'], P5-joltprof-p1=['024553']
+- voided pass records: 0
+- 518 non-warm-up processes recomputed; validity problems in 0: none
+- against the driver's per-process fields: every valid flag, clean flag, mean_ms and cols value reproduces
+- build / lane presence at any receipt or during any process: 0
+- receipts (distinct, every process incl. warm-ups and the pass openings): 628; median 1.92 %, p90 5.68 %, max 21.98 %, 88 over 5 % (top process in those: {'claude.exe': 29, 'browser.exe': 55, 'Taskmgr.exe': 4})
+- slots 450: used 431 (49 by their re-run), dropped 19 (both attempts hot):
+  - P1A-jolt p0 r0 H-trk-ap trk W4
+  - P1A-jolt p0 r0 H-trk-tree trk W2
+  - P1A-jolt p0 r1 H-trk-ap trk W2
+  - P1A-jolt p0 r1 H-trk-tree trk W1
+  - P1A-jolt p0 r1 H-trk-tree trk W16
+  - P1A-jolt p0 r2 H-trk-ap trk W1
+  - P1A-jolt p0 r2 H-trk-ap trk W8
+  - P1A-jolt p0 r2 H-trk-ap trk W16
+  - P1A-jolt p0 r2 H-trk-tree trk W4
+  - P1A-jolt p1 r0 H-trk-ap trk W4
+  - P1A-jolt p1 r0 H-trk-tree trk W8
+  - P1A-jolt p1 r1 H-trk-tree trk W16
+  - P1A-jolt p1 r2 H-jolt56 j56 W4
+  - P1A-jolt p1 r2 H-trk-ap trk W4
+  - P1A-jolt p1 r2 H-trk-tree trk W2
+  - P2-L9GTW p0 r0 L9-R-off c4 W1
+  - P2-L9GTW p0 r1 L9-JA-a-off c4 W8
+  - P2-L9GTW p0 r1 L9-JD-on c4 W4
+  - P2-L9GTW p0 r1 L9-R-off c4 W8
+- the during-process witness (others_busy_pct), used set, by pass: median / p90 / max; the top "other" process
+  - P1A-jolt-p0 (01:09:43-01:29:04, n=36): 0.82 / 1.41 / 2.98 %; top [('Taskmgr.exe', 29), ('claude.exe', 7)]
+  - P1A-jolt-p1 (02:55:45-03:11:07, n=39): 2.28 / 6.05 / 8.87 %; top [('browser.exe', 35), ('Taskmgr.exe', 2)]
+  - P2-L9GTW-p0 (03:14:55-04:00:04, n=101): 1.90 / 4.10 / 5.61 %; top [('browser.exe', 54), ('Taskmgr.exe', 44)]
+  - P2-L9GTW-p1 (04:02:44-04:20:03, n=105): 0.65 / 0.97 / 1.64 %; top [('Taskmgr.exe', 102), ('claude.exe', 1)]
+  - P3-G9JA-p0 (04:22:47-04:25:58, n=18): 0.65 / 0.83 / 0.96 %; top [('Taskmgr.exe', 18)]
+  - P3-G9JA-p1 (04:32:09-04:34:48, n=18): 0.61 / 0.98 / 1.00 %; top [('Taskmgr.exe', 18)]
+  - P4-trkspans-p0 (04:37:23-04:38:00, n=6): 0.54 / 6.34 / 6.34 %; top [('Taskmgr.exe', 5), ('ms-teamsupdate.exe', 1)]
+  - P4-trkspans-p1 (04:40:33-04:41:08, n=6): 0.66 / 0.90 / 0.90 %; top [('Taskmgr.exe', 5), ('claude.exe', 1)]
+  - P5-joltprof-p0 (04:43:44-04:44:33, n=6): 0.73 / 1.17 / 1.17 %; top [('Taskmgr.exe', 6)]
+  - P5-joltprof-p1 (04:47:08-04:47:53, n=6): 0.60 / 1.22 / 1.22 %; top [('Taskmgr.exe', 6)]
+  - P1B-jolt-p0 (04:50:32-04:55:54, n=45): 0.63 / 1.12 / 1.37 %; top [('Taskmgr.exe', 42), ('claude.exe', 1)]
+  - P1B-jolt-p1 (04:58:28-05:03:49, n=45): 0.63 / 0.86 / 1.13 %; top [('Taskmgr.exe', 41), ('bash.exe', 3)]
+
+## 1. P1: the Jolt headline (H-trk-tree / H-trk-ap on trk 93b2615b against H-jolt56, Jolt v5.6.0 918fd2b7)
+- Jolt receipt (gate, untimed), recomputed from receipt_discrete_thW.csv: manifolds [100,500) W1 8489.0000, W8 8489.0000 (json 8489.0); points 31111.9575; frame 0: 4495 manifolds, 11890 points
+- ours, per process over [100,500) (every used H-trk-* and S-trk-tree-a process): manifolds [4519.2575], points (armed rows) [17020.4975]
+  - Jolt/ours: manifolds 1.8784x, points 1.8279x; points per manifold ours 3.7662, Jolt 3.6650
+
+### W=1
+- H-trk-tree [0,500): A 6.2917 [6.1973-6.6359] K=5 (6.97/4.61/1.72); B 5.9565 [5.9353-6.0435] K=6 (1.82/1.13/0.40); pooled 6.0435 [5.9353-6.6359] K=11 (11.59/5.26/1.55)
+- H-trk-ap   [0,500): A 7.9549 [7.8298-8.0316] K=5 (2.54/1.77/0.62); B 7.6677 [7.6368-7.7412] K=6 (1.36/0.70/0.27); pooled 7.7412 [7.6368-8.0316] K=11 (5.10/3.07/0.72)
+- H-jolt56   [0,500): A 11.1250 [10.2366-13.3711] K=6 (28.18/10.43/5.25); B 9.6040 [9.4890-10.7011] K=6 (12.62/2.73/2.45); pooled 10.3816 [9.4890-13.3711] K=12 (37.39/13.85/4.08)
+- per pass medians: H-trk-tree: 1Ap0 6.227(K2), 1Ap1 6.547(K3), 1Bp0 5.970(K3), 1Bp1 5.943(K3) | H-trk-ap: 1Ap0 7.843(K2), 1Ap1 7.997(K3), 1Bp0 7.665(K3), 1Bp1 7.717(K3) | H-jolt56: 1Ap0 10.527(K3), 1Ap1 11.968(K3), 1Bp0 9.611(K3), 1Bp1 9.552(K3)
+- H-trk-tree/Jolt [0..500): A 0.5655 (-43.45 %, -4.8333); bars 58.05/22.81/11.06 %; n/Y/Y | B 0.6202 (-37.98 %, -3.6475); bars 25.50/5.90/4.96 %; Y/Y/Y CLAIMED | pooled 0.5821 (-41.79 %, -4.3381); bars 78.30/29.63/8.74 %; n/Y/Y
+- H-trk-tree/Jolt [100..500): A 0.5636 (-43.64 %, -4.8339); bars 60.09/19.88/11.32 %; n/Y/Y | B 0.6274 (-37.26 %, -3.5391); bars 28.63/6.77/5.55 %; Y/Y/Y CLAIMED | pooled 0.5858 (-41.42 %, -4.2794); bars 82.23/30.81/8.90 %; n/Y/Y
+- H-trk-tree/Jolt [0..100): A 0.5731 (-42.69 %, -4.8309); bars 50.37/35.17/11.32 %; n/Y/Y | B 0.5934 (-40.66 %, -4.0774); bars 13.93/2.94/2.76 %; Y/Y/Y CLAIMED | pooled 0.5707 (-42.93 %, -4.5212); bars 63.89/25.80/8.62 %; n/Y/Y
+  - **two-block rule [0,500): A 0.5655 n/Y/Y, B 0.6202 Y/Y/Y, pooled 0.5821 n/Y/Y -> does NOT hold**
+  - per manifold [100,500) (ours /4519.2575, Jolt /8489.0): A 1.3815 vs 1.3049 us = 1.059x; B 1.3185 vs 1.1188 us = 1.178x; pooled 1.3391 vs 1.2170 us = 1.100x; per point pooled 355.6 vs 332.1 ns = 1.071x
+- H-trk-ap/Jolt [0..500): A 0.7150 (-28.50 %, -3.1701); bars 56.58/21.17/10.58 %; n/Y/Y | B 0.7984 (-20.16 %, -1.9363); bars 25.39/5.63/4.93 %; n/Y/Y | pooled 0.7457 (-25.43 %, -2.6404); bars 75.48/28.38/8.29 %; n/n/Y
+- H-trk-ap/Jolt [100..500): A 0.7171 (-28.29 %, -3.1339); bars 58.66/17.60/10.78 %; n/Y/Y | B 0.8068 (-19.32 %, -1.8351); bars 28.49/6.42/5.51 %; n/Y/Y | pooled 0.7492 (-25.08 %, -2.5906); bars 79.53/29.98/8.48 %; n/n/Y
+- H-trk-ap/Jolt [0..100): A 0.6993 (-30.07 %, -3.4031); bars 49.80/34.39/11.12 %; n/n/Y | B 0.7662 (-23.38 %, -2.3451); bars 14.10/2.90/2.77 %; Y/Y/Y CLAIMED | pooled 0.7353 (-26.47 %, -2.7878); bars 62.07/21.58/8.12 %; n/Y/Y
+  - **two-block rule [0,500): A 0.7150 n/Y/Y, B 0.7984 n/Y/Y, pooled 0.7457 n/n/Y -> does NOT hold**
+  - per manifold [100,500) (ours /4519.2575, Jolt /8489.0): A 1.7577 vs 1.3049 us = 1.347x; B 1.6956 vs 1.1188 us = 1.515x; pooled 1.7128 vs 1.2170 us = 1.407x; per point pooled 454.8 vs 332.1 ns = 1.370x
+- tree vs allpairs [0,500): pooled 0.7807 (-21.93 %, -1.6977); bars 25.33/12.17/3.42 %; n/Y/Y | B 0.7768 (-22.32 %, -1.7112); bars 4.54/2.65/0.96 %; Y/Y/Y CLAIMED
+- block term B vs A, H-trk-tree: 0.9467 (-5.33 %, -0.3352); bars 14.41/9.48/3.53 %; n/n/Y
+- block term B vs A, H-trk-ap: 0.9639 (-3.61 %, -0.2872); bars 5.76/3.81/1.35 %; n/n/Y
+- block term B vs A, H-jolt56: 0.8633 (-13.67 %, -1.5210); bars 61.75/21.57/11.59 %; n/n/Y
+- window term (context): Jolt this window / window 3 9.8282: B 0.9772, pooled 1.0563
+
+### W=2
+- H-trk-tree [0,500): A 4.1263 [4.0934-4.1775] K=4 (2.04/0.76/0.53); B 3.9187 [3.8712-4.0649] K=6 (4.94/2.17/0.96); pooled 4.0303 [3.8712-4.1775] K=10 (7.60/4.94/1.11)
+- H-trk-ap   [0,500): A 6.1655 [5.9096-6.5902] K=5 (11.04/0.41/2.23); B 5.6787 [5.6466-5.8691] K=6 (3.92/2.40/0.89); pooled 5.8691 [5.6466-6.5902] K=11 (16.08/8.22/1.92)
+- H-jolt56   [0,500): A 6.1113 [5.9318-6.9120] K=6 (16.04/3.93/2.98); B 5.7442 [5.6812-5.8628] K=6 (3.16/1.46/0.62); pooled 5.8973 [5.6812-6.9120] K=12 (20.87/5.99/2.13)
+- per pass medians: H-trk-tree: 1Ap0 4.155(K2), 1Ap1 4.106(K2), 1Bp0 3.889(K3), 1Bp1 3.929(K3) | H-trk-ap: 1Ap0 6.033(K2), 1Ap1 6.183(K3), 1Bp0 5.681(K3), 1Bp1 5.676(K3) | H-jolt56: 1Ap0 6.088(K3), 1Ap1 6.134(K3), 1Bp0 5.835(K3), 1Bp1 5.739(K3)
+- H-trk-tree/Jolt [0..500): A 0.6752 (-32.48 %, -1.9849); bars 32.34/8.00/6.06 %; Y/Y/Y CLAIMED | B 0.6822 (-31.78 %, -1.8255); bars 11.73/5.23/2.28 %; Y/Y/Y CLAIMED | pooled 0.6834 (-31.66 %, -1.8669); bars 44.42/15.53/4.80 %; n/Y/Y
+- H-trk-tree/Jolt [100..500): A 0.6670 (-33.30 %, -2.0448); bars 38.57/6.94/7.21 %; n/Y/Y | B 0.6827 (-31.73 %, -1.8178); bars 10.50/6.18/2.21 %; Y/Y/Y CLAIMED | pooled 0.6808 (-31.92 %, -1.8815); bars 51.17/15.92/5.33 %; n/Y/Y
+- H-trk-tree/Jolt [0..100): A 0.6980 (-30.20 %, -1.8106); bars 20.41/7.77/4.34 %; Y/Y/Y CLAIMED | B 0.6771 (-32.29 %, -1.8750); bars 19.61/2.61/3.91 %; Y/Y/Y CLAIMED | pooled 0.6856 (-31.44 %, -1.8477); bars 30.93/15.13/4.00 %; Y/Y/Y CLAIMED
+  - **two-block rule [0,500): A 0.6752 Y/Y/Y, B 0.6822 Y/Y/Y, pooled 0.6834 n/Y/Y -> does NOT hold**
+  - per manifold [100,500) (ours /4519.2575, Jolt /8489.0): A 0.9063 vs 0.7233 us = 1.253x; B 0.8653 vs 0.6748 us = 1.282x; pooled 0.8880 vs 0.6944 us = 1.279x; per point pooled 235.8 vs 189.5 ns = 1.244x
+- H-trk-ap/Jolt [0..500): A 1.0089 (+0.89 %, +0.0543); bars 38.94/7.90/7.45 %; n/n/n | B 0.9886 (-1.14 %, -0.0656); bars 10.07/5.62/2.17 %; n/n/n | pooled 0.9952 (-0.48 %, -0.0282); bars 52.69/20.35/5.74 %; n/n/n
+- H-trk-ap/Jolt [100..500): A 1.0052 (+0.52 %, +0.0318); bars 43.47/6.51/8.14 %; n/n/n | B 0.9911 (-0.89 %, -0.0512); bars 11.33/6.45/2.48 %; n/n/n | pooled 0.9980 (-0.20 %, -0.0119); bars 56.99/21.36/6.09 %; n/n/n
+- H-trk-ap/Jolt [0..100): A 1.0289 (+2.89 %, +0.1735); bars 32.18/6.11/6.91 %; n/n/n | B 0.9789 (-2.11 %, -0.1228); bars 5.47/2.28/1.03 %; n/n/Y | pooled 0.9797 (-2.03 %, -0.1195); bars 47.68/16.75/5.35 %; n/n/n
+  - **two-block rule [0,500): A 1.0089 n/n/n, B 0.9886 n/n/n, pooled 0.9952 n/n/n -> does NOT hold**
+  - per manifold [100,500) (ours /4519.2575, Jolt /8489.0): A 1.3658 vs 0.7233 us = 1.888x; B 1.2562 vs 0.6748 us = 1.862x; pooled 1.3017 vs 0.6944 us = 1.875x; per point pooled 345.6 vs 189.5 ns = 1.824x
+- tree vs allpairs [0,500): pooled 0.6867 (-31.33 %, -1.8388); bars 35.57/19.19/4.45 %; n/Y/Y | B 0.6901 (-30.99 %, -1.7600); bars 12.61/6.47/2.62 %; Y/Y/Y CLAIMED
+- block term B vs A, H-trk-tree: 0.9497 (-5.03 %, -0.2077); bars 10.69/4.59/2.20 %; n/Y/Y
+- block term B vs A, H-trk-ap: 0.9210 (-7.90 %, -0.4869); bars 23.43/4.87/4.80 %; n/Y/Y
+- block term B vs A, H-jolt56: 0.9399 (-6.01 %, -0.3671); bars 32.70/8.38/6.10 %; n/n/n
+- window term (context): Jolt this window / window 3 5.7705: B 0.9954, pooled 1.0220
+
+### W=4
+- H-trk-tree [0,500): A 3.0390 [2.9068-3.3550] K=5 (14.75/11.81/3.81); B 2.7684 [2.7559-2.7824] K=6 (0.95/0.61/0.21); pooled 2.7824 [2.7559-3.3550] K=11 (21.53/7.78/2.97)
+- H-trk-ap   [0,500): A 4.8118 [4.7667-4.8252] K=3 (1.22/0.61/0.46); B 4.5547 [4.5484-4.5691] K=6 (0.46/0.17/0.08); pooled 4.5600 [4.5484-4.8252] K=9 (6.07/4.68/1.13)
+- H-jolt56   [0,500): A 3.8928 [3.7579-4.0694] K=5 (8.00/3.41/1.83); B 3.6533 [3.5250-3.9810] K=6 (12.48/3.18/2.31); pooled 3.7579 [3.5250-4.0694] K=11 (14.49/6.41/1.78)
+- per pass medians: H-trk-tree: 1Ap0 2.919(K2), 1Ap1 3.289(K3), 1Bp0 2.776(K3), 1Bp1 2.761(K3) | H-trk-ap: 1Ap0 4.789(K2), 1Ap1 4.825(K1), 1Bp0 4.560(K3), 1Bp1 4.553(K3) | H-jolt56: 1Ap0 3.893(K3), 1Ap1 3.916(K2), 1Bp0 3.646(K3), 1Bp1 3.660(K3)
+- H-trk-tree/Jolt [0..500): A 0.7807 (-21.93 %, -0.8537); bars 33.56/24.59/8.45 %; n/n/Y | B 0.7578 (-24.22 %, -0.8848); bars 25.04/6.48/4.65 %; n/Y/Y | pooled 0.7404 (-25.96 %, -0.9755); bars 51.90/20.16/6.93 %; n/Y/Y
+- H-trk-tree/Jolt [100..500): A 0.7722 (-22.78 %, -0.8930); bars 36.44/24.45/8.91 %; n/n/Y | B 0.7477 (-25.23 %, -0.9303); bars 28.96/7.54/5.41 %; n/Y/Y | pooled 0.7375 (-26.25 %, -0.9879); bars 54.34/21.11/7.25 %; n/Y/Y
+- H-trk-tree/Jolt [0..100): A 0.8208 (-17.92 %, -0.6741); bars 31.42/21.49/7.58 %; n/n/Y | B 0.8050 (-19.50 %, -0.6805); bars 8.89/5.20/1.81 %; Y/Y/Y CLAIMED | pooled 0.7953 (-20.47 %, -0.7281); bars 46.53/19.27/6.21 %; n/Y/Y
+  - **two-block rule [0,500): A 0.7807 n/n/Y, B 0.7578 n/Y/Y, pooled 0.7404 n/Y/Y -> does NOT hold**
+  - per manifold [100,500) (ours /4519.2575, Jolt /8489.0): A 0.6698 vs 0.4618 us = 1.450x; B 0.6101 vs 0.4344 us = 1.404x; pooled 0.6141 vs 0.4433 us = 1.385x; per point pooled 163.1 vs 121.0 ns = 1.348x
+- H-trk-ap/Jolt [0..500): A 1.2361 (+23.61 %, +0.9190); bars 16.19/6.93/3.78 %; Y/Y/Y CLAIMED | B 1.2468 (+24.68 %, +0.9015); bars 24.98/6.37/4.63 %; n/Y/Y | pooled 1.2135 (+21.35 %, +0.8022); bars 31.42/15.88/4.22 %; n/Y/Y
+- H-trk-ap/Jolt [100..500): A 1.2247 (+22.47 %, +0.8807); bars 17.98/9.22/4.26 %; Y/Y/Y CLAIMED | B 1.2339 (+23.39 %, +0.8624); bars 28.91/7.45/5.40 %; n/Y/Y | pooled 1.2094 (+20.94 %, +0.7879); bars 31.99/15.69/4.42 %; n/Y/Y
+- H-trk-ap/Jolt [0..100): A 1.3035 (+30.35 %, +1.1416); bars 16.95/8.36/4.30 %; Y/Y/Y CLAIMED | B 1.3144 (+31.44 %, +1.0970); bars 8.82/5.11/1.79 %; Y/Y/Y CLAIMED | pooled 1.2925 (+29.25 %, +1.0405); bars 32.63/14.79/4.40 %; n/Y/Y
+  - **two-block rule [0,500): A 1.2361 Y/Y/Y, B 1.2468 n/Y/Y, pooled 1.2135 n/Y/Y -> does NOT hold**
+  - per manifold [100,500) (ours /4519.2575, Jolt /8489.0): A 1.0623 vs 0.4618 us = 2.300x; B 1.0068 vs 0.4344 us = 2.318x; pooled 1.0070 vs 0.4433 us = 2.272x; per point pooled 267.4 vs 121.0 ns = 2.211x
+- tree vs allpairs [0,500): pooled 0.6102 (-38.98 %, -1.7777); bars 44.74/18.15/6.36 %; n/Y/Y | B 0.6078 (-39.22 %, -1.7863); bars 2.11/1.27/0.44 %; Y/Y/Y CLAIMED
+- block term B vs A, H-trk-tree: 0.9110 (-8.90 %, -0.2706); bars 29.56/23.66/7.63 %; n/n/Y
+- block term B vs A, H-trk-ap: 0.9466 (-5.34 %, -0.2570); bars 2.60/1.26/0.94 %; Y/Y/Y CLAIMED
+- block term B vs A, H-jolt56: 0.9385 (-6.15 %, -0.2395); bars 29.66/9.33/5.90 %; n/n/Y
+- window term (context): Jolt this window / window 3 3.5814: B 1.0201, pooled 1.0493
+
+### W=8
+- H-trk-tree [0,500): A 2.4529 [2.3290-2.9626] K=5 (25.83/2.75/5.73); B 2.1878 [2.1850-2.2027] K=6 (0.81/0.08/0.15); pooled 2.2027 [2.1850-2.9626] K=11 (35.30/10.99/4.05)
+- H-trk-ap   [0,500): A 4.3273 [4.2040-4.4244] K=5 (5.09/2.20/1.13); B 3.9764 [3.9711-3.9923] K=6 (0.53/0.29/0.11); pooled 3.9923 [3.9711-4.4244] K=11 (11.35/7.64/1.68)
+- H-jolt56   [0,500): A 2.9357 [2.8382-3.2679] K=6 (14.64/3.56/2.72); B 2.5085 [2.4711-2.5936] K=6 (4.88/1.87/0.93); pooled 2.7159 [2.4711-3.2679] K=12 (29.34/14.84/3.49)
+- per pass medians: H-trk-tree: 1Ap0 2.407(K3), 1Ap1 2.708(K2), 1Bp0 2.187(K3), 1Bp1 2.190(K3) | H-trk-ap: 1Ap0 4.220(K2), 1Ap1 4.331(K3), 1Bp0 3.976(K3), 1Bp1 3.977(K3) | H-jolt56: 1Ap0 2.905(K3), 1Ap1 2.981(K3), 1Bp0 2.478(K3), 1Bp1 2.528(K3)
+- H-trk-tree/Jolt [0..500): A 0.8355 (-16.45 %, -0.4829); bars 59.38/8.99/12.69 %; n/Y/Y | B 0.8721 (-12.79 %, -0.3207); bars 9.90/3.74/1.88 %; Y/Y/Y CLAIMED | pooled 0.8111 (-18.89 %, -0.5132); bars 91.81/36.93/10.70 %; n/n/Y
+- H-trk-tree/Jolt [100..500): A 0.7952 (-20.48 %, -0.6182); bars 68.27/9.96/15.04 %; n/Y/Y | B 0.8523 (-14.77 %, -0.3777); bars 10.17/4.29/2.00 %; Y/Y/Y CLAIMED | pooled 0.7876 (-21.24 %, -0.5898); bars 100.70/36.99/11.56 %; n/n/Y
+- H-trk-tree/Jolt [0..100): A 0.9703 (-2.97 %, -0.0778); bars 35.21/16.79/7.51 %; n/n/n | B 0.9683 (-3.17 %, -0.0733); bars 9.99/5.31/1.99 %; n/n/Y | pooled 0.9209 (-7.91 %, -0.1948); bars 66.02/33.29/8.36 %; n/n/n
+  - **two-block rule [0,500): A 0.8355 n/Y/Y, B 0.8721 Y/Y/Y, pooled 0.8111 n/n/Y -> does NOT hold**
+  - per manifold [100,500) (ours /4519.2575, Jolt /8489.0): A 0.5311 vs 0.3555 us = 1.494x; B 0.4821 vs 0.3011 us = 1.601x; pooled 0.4838 vs 0.3270 us = 1.479x; per point pooled 128.5 vs 89.2 ns = 1.440x
+- H-trk-ap/Jolt [0..500): A 1.4740 (+47.40 %, +1.3916); bars 31.00/8.37/5.90 %; Y/Y/Y CLAIMED | B 1.5851 (+58.51 %, +1.4679); bars 9.82/3.78/1.87 %; Y/Y/Y CLAIMED | pooled 1.4700 (+47.00 %, +1.2764); bars 62.92/33.38/7.75 %; n/Y/Y
+- H-trk-ap/Jolt [100..500): A 1.4045 (+40.45 %, +1.2210); bars 33.07/9.95/6.38 %; Y/Y/Y CLAIMED | B 1.5529 (+55.29 %, +1.4133); bars 10.20/4.27/2.01 %; Y/Y/Y CLAIMED | pooled 1.4393 (+43.93 %, +1.2197); bars 65.93/34.01/8.04 %; n/Y/Y
+- H-trk-ap/Jolt [0..100): A 1.6479 (+64.79 %, +1.7001); bars 33.49/6.21/6.63 %; Y/Y/Y CLAIMED | B 1.7344 (+73.44 %, +1.6966); bars 8.94/3.37/1.64 %; Y/Y/Y CLAIMED | pooled 1.6362 (+63.62 %, +1.5673); bars 58.83/28.54/6.98 %; Y/Y/Y CLAIMED
+  - **two-block rule [0,500): A 1.4740 Y/Y/Y, B 1.5851 Y/Y/Y, pooled 1.4700 n/Y/Y -> does NOT hold**
+  - per manifold [100,500) (ours /4519.2575, Jolt /8489.0): A 0.9380 vs 0.3555 us = 2.638x; B 0.8784 vs 0.3011 us = 2.917x; pooled 0.8842 vs 0.3270 us = 2.704x; per point pooled 234.8 vs 89.2 ns = 2.631x
+- tree vs allpairs [0,500): pooled 0.5518 (-44.82 %, -1.7895); bars 74.17/26.77/8.78 %; n/Y/Y | B 0.5502 (-44.98 %, -1.7886); bars 1.94/0.61/0.38 %; Y/Y/Y CLAIMED
+- block term B vs A, H-trk-tree: 0.8919 (-10.81 %, -0.2651); bars 51.69/5.49/11.47 %; n/Y/n
+- block term B vs A, H-trk-ap: 0.9189 (-8.11 %, -0.3509); bars 10.24/4.44/2.27 %; n/Y/Y
+- block term B vs A, H-jolt56: 0.8545 (-14.55 %, -0.4272); bars 30.86/8.04/5.76 %; n/Y/Y
+- window term (context): Jolt this window / window 3 2.5693: B 0.9764, pooled 1.0571
+
+### W=16
+- H-trk-tree [0,500): A 2.7452 [2.6322-2.9531] K=4 (11.69/6.82/3.33); B 2.3628 [2.3507-2.5798] K=6 (9.69/6.22/2.34); pooled 2.5665 [2.3507-2.9531] K=10 (23.47/11.73/3.26)
+- H-trk-ap   [0,500): A 4.6552 [4.5748-4.8962] K=5 (6.91/1.44/1.47); B 4.1251 [4.1139-4.3143] K=6 (4.86/0.45/0.97); pooled 4.3143 [4.1139-4.8962] K=11 (18.13/12.10/2.60)
+- H-jolt56   [0,500): A 3.1752 [2.8904-5.3684] K=6 (78.04/12.51/15.11); B 2.4075 [2.3421-2.4624] K=6 (5.00/2.57/0.99); pooled 2.6764 [2.3421-5.3684] K=12 (113.07/25.73/11.52)
+- per pass medians: H-trk-tree: 1Ap0 2.653(K2), 1Ap1 2.885(K2), 1Bp0 2.363(K3), 1Bp1 2.362(K3) | H-trk-ap: 1Ap0 4.615(K2), 1Ap1 4.706(K3), 1Bp0 4.130(K3), 1Bp1 4.120(K3) | H-jolt56: 1Ap0 2.968(K3), 1Ap1 3.412(K3), 1Bp0 2.436(K3), 1Bp1 2.379(K3)
+- H-trk-tree/Jolt [0..500): A 0.8646 (-13.54 %, -0.4300); bars 157.82/28.49/30.95 %; n/n/n | B 0.9814 (-1.86 %, -0.0448); bars 21.81/13.46/5.08 %; n/n/n | pooled 0.9589 (-4.11 %, -0.1099); bars 230.97/56.56/23.95 %; n/n/n
+- H-trk-tree/Jolt [100..500): A 0.8178 (-18.22 %, -0.6069); bars 173.01/33.68/33.67 %; n/n/n | B 0.9513 (-4.87 %, -0.1200); bars 24.49/16.73/6.01 %; n/n/n | pooled 0.9428 (-5.72 %, -0.1571); bars 254.10/60.54/26.35 %; n/n/n
+- H-trk-tree/Jolt [0..100): A 1.1087 (+10.87 %, +0.2773); bars 84.98/8.09/17.86 %; n/Y/n | B 1.1175 (+11.75 %, +0.2562); bars 11.54/5.55/2.34 %; Y/Y/Y CLAIMED | pooled 1.0532 (+5.32 %, +0.1256); bars 130.72/42.92/14.25 %; n/n/n
+  - **two-block rule [0,500): A 0.8646 n/n/n, B 0.9814 n/n/n, pooled 0.9589 n/n/n -> does NOT hold**
+  - per manifold [100,500) (ours /4519.2575, Jolt /8489.0): A 0.6028 vs 0.3924 us = 1.536x; B 0.5184 vs 0.2901 us = 1.787x; pooled 0.5729 vs 0.3235 us = 1.771x; per point pooled 152.1 vs 88.3 ns = 1.723x
+- H-trk-ap/Jolt [0..500): A 1.4661 (+46.61 %, +1.4800); bars 156.69/25.18/30.37 %; n/Y/Y | B 1.7134 (+71.34 %, +1.7176); bars 13.94/5.22/2.77 %; Y/Y/Y CLAIMED | pooled 1.6120 (+61.20 %, +1.6379); bars 229.04/56.87/23.62 %; n/Y/Y
+- H-trk-ap/Jolt [100..500): A 1.4033 (+40.33 %, +1.3433); bars 172.10/30.03/33.11 %; n/Y/Y | B 1.6710 (+67.10 %, +1.6523); bars 13.82/5.70/2.72 %; Y/Y/Y CLAIMED | pooled 1.5582 (+55.82 %, +1.5329); bars 252.88/61.64/26.11 %; n/n/Y
+- H-trk-ap/Jolt [0..100): A 1.8478 (+84.78 %, +2.1630); bars 82.62/5.26/16.72 %; Y/Y/Y CLAIMED | B 1.9136 (+91.36 %, +1.9916); bars 15.80/5.49/3.26 %; Y/Y/Y CLAIMED | pooled 1.8868 (+88.68 %, +2.0940); bars 122.67/38.53/12.87 %; n/Y/Y
+  - **two-block rule [0,500): A 1.4661 n/Y/Y, B 1.7134 Y/Y/Y, pooled 1.6120 n/Y/Y -> does NOT hold**
+  - per manifold [100,500) (ours /4519.2575, Jolt /8489.0): A 1.0344 vs 0.3924 us = 2.636x; B 0.9105 vs 0.2901 us = 3.139x; pooled 0.9468 vs 0.3235 us = 2.927x; per point pooled 251.4 vs 88.3 ns = 2.848x
+- tree vs allpairs [0,500): pooled 0.5949 (-40.51 %, -1.7478); bars 59.32/33.70/8.34 %; n/Y/Y | B 0.5728 (-42.72 %, -1.7624); bars 21.69/12.47/5.05 %; Y/Y/Y CLAIMED
+- block term B vs A, H-trk-tree: 0.8607 (-13.93 %, -0.3824); bars 30.37/18.45/8.14 %; n/n/Y
+- block term B vs A, H-trk-ap: 0.8861 (-11.39 %, -0.5301); bars 16.89/3.02/3.52 %; n/Y/Y
+- block term B vs A, H-jolt56: 0.7582 (-24.18 %, -0.7677); bars 156.40/25.54/30.29 %; n/n/n
+- window term (context): Jolt this window / window 3 2.3885: B 1.0080, pooled 1.1205
+
+### Scaling T(1)/T(W) [0,500) (efficiency T(1)/(W T(W)) in brackets)
+- A      H-trk-tree W1 1.000 (1.00), W2 1.525 (0.76), W4 2.070 (0.52), W8 2.565 (0.32), W16 2.292 (0.14)
+- A      H-trk-ap   W1 1.000 (1.00), W2 1.290 (0.65), W4 1.653 (0.41), W8 1.838 (0.23), W16 1.709 (0.11)
+- A      H-jolt56   W1 1.000 (1.00), W2 1.820 (0.91), W4 2.858 (0.71), W8 3.790 (0.47), W16 3.504 (0.22)
+- B      H-trk-tree W1 1.000 (1.00), W2 1.520 (0.76), W4 2.152 (0.54), W8 2.723 (0.34), W16 2.521 (0.16)
+- B      H-trk-ap   W1 1.000 (1.00), W2 1.350 (0.68), W4 1.683 (0.42), W8 1.928 (0.24), W16 1.859 (0.12)
+- B      H-jolt56   W1 1.000 (1.00), W2 1.672 (0.84), W4 2.629 (0.66), W8 3.829 (0.48), W16 3.989 (0.25)
+- pooled H-trk-tree W1 1.000 (1.00), W2 1.500 (0.75), W4 2.172 (0.54), W8 2.744 (0.34), W16 2.355 (0.15)
+- pooled H-trk-ap   W1 1.000 (1.00), W2 1.319 (0.66), W4 1.698 (0.42), W8 1.939 (0.24), W16 1.794 (0.11)
+- pooled H-jolt56   W1 1.000 (1.00), W2 1.760 (0.88), W4 2.763 (0.69), W8 3.823 (0.48), W16 3.879 (0.24)
+
+## 2. P2: L9 C4 G-TW on c4 989ca0f0, --contact-reuse off vs on (on against off)
+- JA W1 [0..500): off 18.3854 [18.3518-18.9680] K=6 (3.35/1.72/0.74); on 16.6838 [16.6192-16.9076] K=6 (1.73/0.28/0.31); 0.9075 (-9.25 %, -1.7016); bars 7.54/3.49/1.61 %; Y/Y/Y CLAIMED
+- JA W1 [0..100): off 18.2703 [18.0867-18.9076] K=6 (4.49/0.65/0.81); on 17.4609 [17.3689-17.6349] K=6 (1.52/0.38/0.26); 0.9557 (-4.43 %, -0.8093); bars 9.49/1.50/1.71 %; n/Y/Y
+- JA W1 [100..500): off 18.4127 [18.3856-18.9831] K=6 (3.24/2.37/0.82); on 16.4753 [16.4125-16.7739] K=6 (2.19/0.41/0.41); 0.8948 (-10.52 %, -1.9374); bars 7.83/4.81/1.84 %; Y/Y/Y CLAIMED
+- JA W2 [0..500): off 11.2753 [11.1869-12.2819] K=6 (9.71/4.35/2.04); on 10.5342 [10.2629-11.1881] K=6 (8.78/4.81/1.78); 0.9343 (-6.57 %, -0.7412); bars 26.19/12.97/5.41 %; n/n/Y
+- JA W2 [0..100): off 11.2230 [11.1660-12.2503] K=6 (9.66/2.43/1.93); on 10.9218 [10.7868-11.6185] K=6 (7.62/4.45/1.67); 0.9732 (-2.68 %, -0.3013); bars 24.60/10.15/5.11 %; n/n/n
+- JA W2 [100..500): off 11.2915 [11.1791-12.2898] K=6 (9.84/4.80/2.08); on 10.4373 [10.1319-11.0804] K=6 (9.09/4.90/1.82); 0.9243 (-7.57 %, -0.8543); bars 26.78/13.73/5.53 %; n/n/Y
+- JA W4 [0..500): off 7.6776 [7.5668-8.3523] K=6 (10.23/5.15/2.15); on 7.1691 [7.1298-7.9901] K=6 (12.00/8.20/2.96); 0.9338 (-6.62 %, -0.5086); bars 31.54/19.37/7.32 %; n/n/n
+- JA W4 [0..100): off 7.5859 [7.5433-8.4399] K=6 (11.82/6.91/2.74); on 7.4306 [7.4138-8.3126] K=6 (12.10/7.91/2.97); 0.9795 (-2.05 %, -0.1553); bars 33.82/21.02/8.09 %; n/n/n
+- JA W4 [100..500): off 7.7088 [7.5639-8.3304] K=6 (9.94/4.82/2.02); on 7.1037 [7.0589-7.9380] K=6 (12.38/7.98/2.97); 0.9215 (-7.85 %, -0.6051); bars 31.75/18.63/7.18 %; n/n/Y
+- JA W8 [0..500): off 5.7742 [5.7649-6.8497] K=6 (18.79/9.34/4.23); on 5.7694 [5.6087-6.4809] K=6 (15.12/8.49/3.20); 0.9992 (-0.08 %, -0.0048); bars 48.23/25.24/10.61 %; n/n/n
+- JA W8 [0..100): off 5.8041 [5.7549-6.9815] K=6 (21.13/6.92/4.35); on 5.7982 [5.7027-7.1615] K=6 (25.16/14.99/5.83); 0.9990 (-0.10 %, -0.0059); bars 65.72/33.03/14.54 %; n/n/n
+- JA W8 [100..500): off 5.7693 [5.7622-6.8168] K=6 (18.28/9.93/4.23); on 5.7622 [5.5852-6.3108] K=6 (12.59/6.96/2.65); 0.9988 (-0.12 %, -0.0071); bars 44.39/24.26/9.98 %; n/n/n
+- JA W16 [0..500): off 5.6599 [5.6409-6.9361] K=6 (22.88/9.00/4.88); on 5.5780 [5.5243-6.5378] K=6 (18.17/11.76/4.35); 0.9855 (-1.45 %, -0.0819); bars 58.44/29.62/13.08 %; n/n/n
+- JA W16 [0..100): off 5.7207 [5.6813-6.7839] K=6 (19.27/8.92/4.21); on 5.6708 [5.6288-6.7443] K=6 (19.67/14.64/5.09); 0.9913 (-0.87 %, -0.0498); bars 55.08/34.30/13.21 %; n/n/n
+- JA W16 [100..500): off 5.6501 [5.6211-6.9742] K=6 (23.95/9.07/5.06); on 5.5601 [5.4973-6.4874] K=6 (17.81/11.18/4.17); 0.9841 (-1.59 %, -0.0900); bars 59.69/28.79/13.11 %; n/n/n
+- JD W1 [0..500): off 7.7922 [7.6252-8.1873] K=6 (7.21/1.95/1.31); on 6.1390 [6.0491-6.7890] K=6 (12.05/1.98/2.32); 0.7878 (-21.22 %, -1.6532); bars 28.09/5.56/5.32 %; n/Y/Y
+- JD W1 [0..100): off 7.7323 [7.6473-8.1195] K=6 (6.11/1.05/1.16); on 6.9682 [6.9334-7.3781] K=6 (6.38/0.51/1.25); 0.9012 (-9.88 %, -0.7641); bars 17.67/2.34/3.41 %; n/Y/Y
+- JD W1 [100..500): off 7.8058 [7.6197-8.2042] K=6 (7.49/2.19/1.35); on 5.9283 [5.8281-6.6417] K=6 (13.73/2.54/2.64); 0.7595 (-24.05 %, -1.8775); bars 31.27/6.70/5.93 %; n/Y/Y
+- JD W2 [0..500): off 5.6928 [5.6613-6.1519] K=6 (8.62/2.27/1.72); on 4.8305 [4.8010-5.5631] K=6 (15.78/1.79/3.18); 0.8485 (-15.15 %, -0.8623); bars 35.96/5.78/7.23 %; n/Y/Y
+- JD W2 [0..100): off 5.6869 [5.6698-6.1701] K=6 (8.80/0.32/1.79); on 5.3358 [5.2922-6.2622] K=6 (18.18/1.33/3.66); 0.9383 (-6.17 %, -0.3511); bars 40.39/2.73/8.15 %; n/Y/n
+- JD W2 [100..500): off 5.6922 [5.6574-6.1473] K=6 (8.61/2.87/1.74); on 4.7047 [4.6762-5.3884] K=6 (15.14/1.91/3.05); 0.8265 (-17.35 %, -0.9875); bars 34.82/6.88/7.02 %; n/Y/Y
+- JD W4 [0..500): off 4.7130 [4.5380-5.1835] K=6 (13.70/9.94/3.12); on 4.1112 [4.1058-4.9760] K=5 (21.17/10.98/5.32); 0.8723 (-12.77 %, -0.6019); bars 50.43/29.62/12.33 %; n/n/Y
+- JD W4 [0..100): off 4.7792 [4.5693-5.5752] K=6 (21.05/10.61/4.30); on 4.4187 [4.4006-4.9052] K=5 (11.42/7.44/2.96); 0.9246 (-7.54 %, -0.3605); bars 47.89/25.92/10.43 %; n/n/n
+- JD W4 [100..500): off 4.6965 [4.5301-5.0889] K=6 (11.90/9.72/2.86); on 4.0362 [4.0276-5.0351] K=5 (24.96/10.85/6.14); 0.8594 (-14.06 %, -0.6602); bars 55.31/29.13/13.55 %; n/n/Y
+- JD W8 [0..500): off 4.1624 [3.9901-4.7813] K=6 (19.01/11.33/4.07); on 3.9741 [3.7638-4.2370] K=6 (11.91/10.92/3.05); 0.9548 (-4.52 %, -0.1883); bars 44.86/31.47/10.18 %; n/n/n
+- JD W8 [0..100): off 4.1744 [4.0205-4.5556] K=6 (12.82/9.30/2.92); on 4.1034 [3.9016-4.3295] K=6 (10.43/9.30/2.66); 0.9830 (-1.70 %, -0.0711); bars 33.05/26.30/7.89 %; n/n/n
+- JD W8 [100..500): off 4.1616 [3.9769-4.8377] K=6 (20.68/11.79/4.37); on 3.9345 [3.7264-4.2175] K=6 (12.48/11.42/3.18); 0.9454 (-5.46 %, -0.2271); bars 48.32/32.83/10.81 %; n/n/n
+- JD W16 [0..500): off 4.2442 [4.1501-4.9031] K=6 (17.74/9.86/3.89); on 4.0247 [3.9643-5.0217] K=6 (26.27/10.07/5.43); 0.9483 (-5.17 %, -0.2195); bars 63.40/28.18/13.36 %; n/n/n
+- JD W16 [0..100): off 4.2445 [4.1955-4.9445] K=6 (17.65/6.52/3.62); on 4.3345 [4.1054-5.2841] K=6 (27.19/9.10/5.33); 1.0212 (+2.12 %, +0.0899); bars 64.83/22.39/12.88 %; n/n/n
+- JD W16 [100..500): off 4.2444 [4.1339-4.8927] K=6 (17.88/10.79/3.99); on 3.9488 [3.9290-4.9561] K=6 (26.01/10.37/5.54); 0.9304 (-6.96 %, -0.2955); bars 63.12/29.93/13.65 %; n/n/n
+- R W1 [600..1100): off 10.7594 [10.7508-10.8667] K=5 (1.08/0.80/0.29); on 7.8482 [7.8048-8.5022] K=6 (8.89/1.24/1.76); 0.7294 (-27.06 %, -2.9113); bars 17.90/2.96/3.57 %; Y/Y/Y CLAIMED
+- R W2 [600..1100): off 7.4940 [7.3729-8.3190] K=6 (12.62/2.07/2.44); on 6.5523 [6.1217-6.9655] K=6 (12.88/9.05/2.85); 0.8743 (-12.57 %, -0.9417); bars 36.07/18.57/7.51 %; n/n/Y
+- R W4 [600..1100): off 6.2568 [5.8187-6.9797] K=6 (18.56/13.50/4.16); on 5.2840 [5.0916-6.1540] K=6 (20.11/13.71/4.57); 0.8445 (-15.55 %, -0.9728); bars 54.72/38.48/12.36 %; n/n/Y
+- R W8 [600..1100): off 4.9790 [4.8844-5.5367] K=5 (13.10/3.11/3.05); on 5.0100 [4.5892-5.5989] K=6 (20.15/17.02/4.81); 1.0062 (+0.62 %, +0.0311); bars 48.08/34.61/11.39 %; n/n/n
+- R W16 [600..1100): off 5.0840 [5.0653-6.2804] K=6 (23.90/0.68/4.93); on 4.9601 [4.8769-6.2402] K=6 (27.49/4.84/5.43); 0.9756 (-2.44 %, -0.1239); bars 72.85/9.77/14.66 %; n/n/n
+
+- G-TW resolution: the smallest on/off effect each cell could claim (the bar = 2*hypot of the two spreads), r / s:
+  - JA: W1 7.5 / 1.6 % (effect -9.3), W2 26.2 / 5.4 % (effect -6.6), W4 31.5 / 7.3 % (effect -6.6), W8 48.2 / 10.6 % (effect -0.1), W16 58.4 / 13.1 % (effect -1.4)
+  - JD: W1 28.1 / 5.3 % (effect -21.2), W2 36.0 / 7.2 % (effect -15.1), W4 50.4 / 12.3 % (effect -12.8), W8 44.9 / 10.2 % (effect -4.5), W16 63.4 / 13.4 % (effect -5.2)
+  - R: W1 17.9 / 3.6 % (effect -27.1), W2 36.1 / 7.5 % (effect -12.6), W4 54.7 / 12.4 % (effect -15.5), W8 48.1 / 11.4 % (effect +0.6), W16 72.8 / 14.7 % (effect -2.4)
+- **claimed regressions (on slower, claimed) at any W and window: none**
+- **realized gain: dT(1)[100,500) on J-A = 18.4127 - 16.4753 = 1.9374 ms (-10.52 %, Y/Y/Y) against the bar 0.6 x 1.4994 = 0.8997 ms: PASS; 2.15x the bar; worst pairing min(off) - max(on) = +1.6117; against the prediction [1.4994, 1.6782]: 1.292x / 1.154x**
+- poses (used processes, from SUMMARY): L9-JA-off ['0x32d5e235342b4143'] over W [1, 2, 4, 8, 16]; L9-JA-on ['0x30c5438bc6ad9ffa'] over W [1, 2, 4, 8, 16]; L9-JD-off ['0x32d5e235342b4143'] over W [1, 2, 4, 8, 16]; L9-JD-on ['0x30c5438bc6ad9ffa'] over W [1, 2, 4, 8, 16]; L9-R-off ['0x87e561d20589d4a5'] over W [1, 2, 4, 8, 16]; L9-R-on ['0xc8bbe34cf6a8afc6'] over W [1, 2, 4, 8, 16]; L9-JA-a-off ['0x32d5e235342b4143'] over W [1, 8]; L9-JA-a-on ['0x30c5438bc6ad9ffa'] over W [1, 8]; L9-JC ['0x30c5438bc6ad9ffa'] over W [1]
+
+### 2.1 The armed per-contact table (J-A, [100,500); reading A = per-process mean, median over K; own counts)
+- W1: manifolds off 4519.26 / on 4467.66; pairs 9559.22 / 9545.12; reused on 4457.51, full on 46.67, sep hits on 5040.94
+  | stage | off ms | on ms | on vs off | off us/manifold | on us/manifold | off ns/pair | on ns/pair |
+  |---|---|---|---|---|---|---|---|
+  | wall | 18.4703 | 16.4320 | -11.04 % n/Y/Y | 4.0870 | 3.6780 | 1932.2 | 1721.5 |
+  | sys_sum | 18.3795 | 16.3363 | -11.12 % n/Y/Y | 4.0669 | 3.6566 | 1922.7 | 1711.5 |
+  | bp | 2.0838 | 2.0781 | -0.27 % n/n/n | 0.4611 | 0.4651 | 218.0 | 217.7 |
+  | np | 2.6112 | 0.7511 | -71.23 % Y/Y/Y | 0.5778 | 0.1681 | 273.2 | 78.7 |
+  | graph | 0.1426 | 0.1195 | -16.20 % n/n/n | 0.0316 | 0.0268 | 14.9 | 12.5 |
+  | solve (system) | 13.4960 | 13.3327 | -1.21 % n/n/n | 2.9863 | 2.9843 | 1411.8 | 1396.8 |
+  |   setup = solve_build | 0.3686 | 0.3211 | -12.90 % n/n/n | 0.0816 | 0.0719 | 38.6 | 33.6 |
+  |   warm_apply | 0.5364 | 0.5263 | -1.89 % n/n/n | 0.1187 | 0.1178 | 56.1 | 55.1 |
+  |   colours wide | 12.4500 | 12.2095 | -1.93 % n/n/Y | 2.7549 | 2.7329 | 1302.4 | 1279.1 |
+  |   colours narrow | 0.0277 | 0.1788 | +546.37 % Y/Y/Y | 0.0061 | 0.0400 | 2.9 | 18.7 |
+  |   store | 0.0327 | 0.0261 | -20.23 % n/n/n | 0.0072 | 0.0058 | 3.4 | 2.7 |
+  |   integrate | 0.0666 | 0.0658 | -1.23 % n/n/n | 0.0147 | 0.0147 | 7.0 | 6.9 |
+  | gather | 0.0306 | 0.0303 | -0.92 % n/n/n | 0.0068 | 0.0068 | 3.2 | 3.2 |
+  | apply | 0.0144 | 0.0143 | -1.31 % n/n/n | 0.0032 | 0.0032 | 1.5 | 1.5 |
+- W8: manifolds off 4519.26 / on 4467.66; pairs 9559.22 / 9545.12; reused on 4457.51, full on 46.67, sep hits on 5040.94
+  | stage | off ms | on ms | on vs off | off us/manifold | on us/manifold | off ns/pair | on ns/pair |
+  |---|---|---|---|---|---|---|---|
+  | wall | 5.8149 | 5.6127 | -3.48 % n/n/n | 1.2867 | 1.2563 | 608.3 | 588.0 |
+  | sys_sum | 5.7819 | 5.5801 | -3.49 % n/n/n | 1.2794 | 1.2490 | 604.8 | 584.6 |
+  | bp | 1.9614 | 1.9644 | +0.15 % n/n/n | 0.4340 | 0.4397 | 205.2 | 205.8 |
+  | np | 0.4526 | 0.1591 | -64.84 % n/Y/Y | 0.1002 | 0.0356 | 47.3 | 16.7 |
+  | graph | 0.1200 | 0.1158 | -3.54 % n/n/n | 0.0266 | 0.0259 | 12.6 | 12.1 |
+  | solve (system) | 3.2090 | 3.3015 | +2.88 % n/n/n | 0.7101 | 0.7390 | 335.7 | 345.9 |
+  |   setup = solve_build | 0.3469 | 0.3049 | -12.10 % n/n/n | 0.0768 | 0.0682 | 36.3 | 31.9 |
+  |   warm_apply | 0.5430 | 0.5286 | -2.65 % n/n/n | 0.1201 | 0.1183 | 56.8 | 55.4 |
+  |   colours wide | 2.1630 | 2.1471 | -0.73 % n/n/n | 0.4786 | 0.4806 | 226.3 | 224.9 |
+  |   colours narrow | 0.0299 | 0.1925 | +543.32 % Y/Y/Y | 0.0066 | 0.0431 | 3.1 | 20.2 |
+  |   store | 0.0350 | 0.0266 | -24.14 % n/n/n | 0.0077 | 0.0059 | 3.7 | 2.8 |
+  |   integrate | 0.0806 | 0.0799 | -0.77 % n/n/n | 0.0178 | 0.0179 | 8.4 | 8.4 |
+  | gather | 0.0296 | 0.0294 | -0.64 % n/n/n | 0.0066 | 0.0066 | 3.1 | 3.1 |
+  | apply | 0.0111 | 0.0111 | -0.10 % n/n/n | 0.0025 | 0.0025 | 1.2 | 1.2 |
+
+### 2.2 The canary (L9-JC against its reference L9-JA-a-on, W1, [0,500) wall)
+- reference 16.6508 [16.4962-17.1805] K=6 (4.11/2.30/0.89); canary row 17.5469 [17.4890-18.1249] K=6 (3.62/1.94/0.80); injected 0.8447 [0.8248-0.8590] K=6 (4.05/2.97/0.94); span 0.8450 [0.8251-0.8596] K=6 (4.08/3.00/0.95)
+- per-process span/injected: [1.0003, 1.0004, 1.0004, 1.0005, 1.0006, 1.0007]; canary_ref_ns used: [16496221, 16625462, 16651826, 17134303, 17134303, 17180532]
+- step rise +0.8961 ms = 106.1 % of the injection; 1.0538 (+5.38 %, +0.8961); bars 10.96/6.01/2.40 %; n/n/Y -> NOT SEEN under the two-spread rule; SE alone seen
+- resolution model: sigma_rel ref 1.75 %, canary row 1.57 %; hypot 2.35 %. Expected bars at K: r = 2 d2(K) hypot, s = 2 x 1.2533 hypot / sqrt(K):
+  - K=3: r-bar 7.94 %, s-bar 3.40 %
+  - K=6: r-bar 11.89 %, s-bar 2.40 %
+  - K=12: r-bar 15.29 %, s-bar 1.70 %
+  - K=24: r-bar 18.28 %, s-bar 1.20 %
+- the injected effect 5.07 % of the reference (observed rise 5.38 %); the observed r-bar 10.96 % -> a canary is seen under r at these spreads only above ~11.0 % of the step (canary_frac >= 0.116 allowing the 6 % over-read seen here), i.e. >= 1.82 ms at W1
+  - L9-JA-a-on W1 processes (pass, round, start, wall ms, others_busy %): p0r0 03:17:42 17.181 4.13; p0r1 03:27:29 16.496 0.62; p0r2 03:41:30 17.134 3.32; p1r0 04:06:52 16.625 0.58; p1r1 04:12:43 16.652 0.75; p1r2 04:18:34 16.650 0.56
+  - L9-JC W1 processes (pass, round, start, wall ms, others_busy %): p0r0 03:17:56 17.972 2.53; p0r1 03:27:42 17.489 0.59; p0r2 03:41:44 18.125 2.66; p1r0 04:06:38 17.522 0.60; p1r1 04:12:29 17.555 0.60; p1r2 04:18:20 17.539 0.75
+- P2 pass 0 vs pass 1 (the witness differs): L9-JA-off@W1 p0 18.791 / p1 18.374; L9-JA-on@W1 p0 16.700 / p1 16.668; L9-JA-a-on@W1 p0 17.134 / p1 16.650; L9-JC@W1 p0 17.972 / p1 17.539; L9-JA-off@W8 p0 6.486 / p1 5.769; L9-JA-on@W8 p0 6.199 / p1 5.630; L9-JD-off@W8 p0 4.531 / p1 4.005; L9-JD-on@W8 p0 4.228 / p1 3.767
+- diagnostic, NOT the protocol cell: pass 1 only (04:02-04:20, witness median 0.65 %), K=3 per arm, on vs off, [0,500) / [600,1100):
+  - JA: W1 -9.29 % (-1.706 ms; bars 1.2/0.4; Y/Y/Y); W2 -8.22 % (-0.923 ms; bars 4.0/1.5; Y/Y/Y); W4 -5.54 % (-0.420 ms; bars 3.9/1.6; Y/Y/Y); W8 -2.42 % (-0.139 ms; bars 10.2/4.1; n/n/n); W16 -1.93 % (-0.109 ms; bars 1.1/0.4; Y/Y/Y)
+  - JD: W1 -20.54 % (-1.592 ms; bars 7.1/2.6; Y/Y/Y); W2 -15.67 % (-0.892 ms; bars 7.7/3.0; Y/Y/Y); W4 -10.12 % (-0.463 ms; bars 1.8/0.7; Y/Y/Y); W8 -5.95 % (-0.238 ms; bars 2.0/0.8; Y/Y/Y); W16 -6.26 % (-0.265 ms; bars 7.0/2.8; n/Y/Y)
+  - R: W1 -26.81 % (-2.884 ms; bars 3.2/1.2; Y/Y/Y); W2 -16.95 % (-1.266 ms; bars 8.4/3.0; Y/Y/Y); W4 -13.17 % (-0.773 ms; bars 17.5/7.0; n/Y/Y); W8 -7.65 % (-0.381 ms; bars 10.7/4.2; n/Y/Y); W16 -3.01 % (-0.153 ms; bars 14.1/5.4; n/n/n)
+  - canary, pass 1 only: reference 16.6498 [16.6255-16.6518] K=3 (0.16/0.08/0.06), canary row 17.5392 [17.5225-17.5546] K=3 (0.18/0.09/0.07); rise +0.8894 ms, 1.0534 (+5.34 %, +0.8894); bars 0.48/0.24/0.18 %; Y/Y/Y CLAIMED
+
+## 3. P3: L11 G9 remainder, J-A at W 2/4/16, tip cbd86a65 against parent 0ca312bd
+- W2: parent 11.5423 [11.5165-11.6217] K=6 (0.91/0.49/0.19); tip 11.5580 [11.5423-11.6426] K=6 (0.87/0.57/0.20); tip vs parent 1.0014 (+0.14 %, +0.0157); bars 2.52/1.50/0.56 %; n/n/n
+- W4: parent 7.7408 [7.7238-7.8875] K=6 (2.12/0.16/0.41); tip 7.7424 [7.7278-7.7728] K=6 (0.58/0.33/0.12); tip vs parent 1.0002 (+0.02 %, +0.0017); bars 4.39/0.73/0.86 %; n/n/n
+- W16: parent 5.6993 [5.6905-5.8470] K=6 (2.75/0.28/0.54); tip 5.6984 [5.6670-5.9873] K=6 (5.62/0.59/1.09); tip vs parent 0.9998 (-0.02 %, -0.0009); bars 12.51/1.30/2.44 %; n/n/n
+- **not claimed slower at any of W 2/4/16: yes**
+
+## 4. P4: our per-stage spans, trunk 93b2615b default row (--cfg default --broadphase tree, reuse off), [100,500)
+Reading B = per-process median over steps, reading A = per-process mean; per cell the median over K.
+### W=1
+- wall_ns                          B 5.9920 [5.9582-6.0625]  A 6.0239 ms  A per manifold 1332.9 ns
+- sys_sum_ns                       B 5.9578 [5.9250-6.0299]  A 5.9892 ms  A per manifold 1325.3 ns
+- g_ns                             B 0.0334 [0.0324-0.0340]  A 0.0345 ms  A per manifold 7.6 ns
+- phys_bp_assemble_ns              B 0.0284 [0.0282-0.0285]  A 0.0289 ms  A per manifold 6.4 ns
+- phys_bp_build_ns                 B 0.0214 [0.0213-0.0217]  A 0.0219 ms  A per manifold 4.8 ns
+- phys_bp_query_ns                 B 0.2043 [0.2034-0.2051]  A 0.2084 ms  A per manifold 46.1 ns
+- phys_bp_verify_ns                B 0.0064 [0.0064-0.0065]  A 0.0064 ms  A per manifold 1.4 ns
+- phys_color_narrow_ns             B 0.0091 [0.0090-0.0094]  A 0.0096 ms  A per manifold 2.1 ns
+- phys_color_wide_ns               B 2.4291 [2.4117-2.5002]  A 2.4340 ms  A per manifold 538.6 ns
+- phys_gravity_ns                  B 0.0073 [0.0072-0.0075]  A 0.0075 ms  A per manifold 1.7 ns
+- phys_integrate_ns                B 0.0656 [0.0652-0.0659]  A 0.0660 ms  A per manifold 14.6 ns
+- phys_pass_biased_ns              B 0.8197 [0.8140-0.8427]  A 0.8217 ms  A per manifold 181.8 ns
+- phys_pass_relax_ns               B 1.6214 [1.6099-1.6701]  A 1.6246 ms  A per manifold 359.5 ns
+- phys_restitution_ns              B 0.0029 [0.0029-0.0029]  A 0.0030 ms  A per manifold 0.7 ns
+- phys_solve_build_ns              B 0.2764 [0.2720-0.2822]  A 0.2841 ms  A per manifold 62.9 ns
+- phys_store_ns                    B 0.0206 [0.0204-0.0213]  A 0.0218 ms  A per manifold 4.8 ns
+- phys_warm_apply_ns               B 0.2975 [0.2948-0.3004]  A 0.2990 ms  A per manifold 66.2 ns
+- phys_write_back_ns               B 0.0025 [0.0025-0.0025]  A 0.0025 ms  A per manifold 0.6 ns
+- r_ns                             B 0.0026 [0.0026-0.0027]  A 0.0027 ms  A per manifold 0.6 ns
+- sys_physics_apply_ns             B 0.0108 [0.0100-0.0116]  A 0.0109 ms  A per manifold 2.4 ns
+- sys_physics_broadphase_ns        B 0.2606 [0.2598-0.2616]  A 0.2656 ms  A per manifold 58.8 ns
+- sys_physics_build_graph_ns       B 0.1135 [0.1127-0.1151]  A 0.1153 ms  A per manifold 25.5 ns
+- sys_physics_gather_ns            B 0.0274 [0.0269-0.0278]  A 0.0279 ms  A per manifold 6.2 ns
+- sys_physics_narrowphase_ns       B 2.4158 [2.4132-2.4208]  A 2.4274 ms  A per manifold 537.1 ns
+- sys_physics_solve_colored_ns     B 3.1224 [3.0966-3.1946]  A 3.1376 ms  A per manifold 694.3 ns
+- sys_select_broadphase_ns         B 0.0001 [0.0000-0.0001]  A 0.0001 ms  A per manifold 0.0 ns
+- u_ns                             B 0.0011 [0.0011-0.0011]  A 0.0011 ms  A per manifold 0.2 ns
+### W=8
+- wall_ns                          B 2.1942 [2.1816-2.2583]  A 2.2187 ms  A per manifold 490.9 ns
+- sys_sum_ns                       B 2.1636 [2.1508-2.2256]  A 2.1879 ms  A per manifold 484.1 ns
+- g_ns                             B 0.0307 [0.0304-0.0316]  A 0.0311 ms  A per manifold 6.9 ns
+- phys_bp_assemble_ns              B 0.0295 [0.0294-0.0302]  A 0.0309 ms  A per manifold 6.8 ns
+- phys_bp_build_ns                 B 0.0218 [0.0217-0.0229]  A 0.0221 ms  A per manifold 4.9 ns
+- phys_bp_query_ns                 B 0.2057 [0.2051-0.2132]  A 0.2088 ms  A per manifold 46.2 ns
+- phys_bp_verify_ns                B 0.0065 [0.0065-0.0067]  A 0.0064 ms  A per manifold 1.4 ns
+- phys_color_narrow_ns             B 0.0104 [0.0102-0.0116]  A 0.0111 ms  A per manifold 2.5 ns
+- phys_color_wide_ns               B 0.6097 [0.6036-0.6155]  A 0.6193 ms  A per manifold 137.0 ns
+- phys_gravity_ns                  B 0.0124 [0.0123-0.0127]  A 0.0125 ms  A per manifold 2.8 ns
+- phys_integrate_ns                B 0.0801 [0.0798-0.0807]  A 0.0808 ms  A per manifold 17.9 ns
+- phys_np_axis_commit_ns           B 0.0046 [0.0046-0.0047]  A 0.0047 ms  A per manifold 1.0 ns
+- phys_np_compact_ns               B 0.0188 [0.0185-0.0192]  A 0.0190 ms  A per manifold 4.2 ns
+- phys_np_dispatch_ns              B 0.3436 [0.3429-0.3540]  A 0.3475 ms  A per manifold 76.9 ns
+- phys_pass_biased_ns              B 0.2185 [0.2168-0.2210]  A 0.2217 ms  A per manifold 49.0 ns
+- phys_pass_relax_ns               B 0.4065 [0.4014-0.4102]  A 0.4125 ms  A per manifold 91.3 ns
+- phys_restitution_ns              B 0.0030 [0.0030-0.0031]  A 0.0033 ms  A per manifold 0.7 ns
+- phys_solve_build_ns              B 0.3067 [0.3057-0.3247]  A 0.3122 ms  A per manifold 69.1 ns
+- phys_store_ns                    B 0.0249 [0.0248-0.0272]  A 0.0256 ms  A per manifold 5.7 ns
+- phys_warm_apply_ns               B 0.3043 [0.3037-0.3081]  A 0.3080 ms  A per manifold 68.2 ns
+- phys_write_back_ns               B 0.0026 [0.0026-0.0028]  A 0.0027 ms  A per manifold 0.6 ns
+- r_ns                             B 0.0037 [0.0034-0.0038]  A 0.0038 ms  A per manifold 0.8 ns
+- sys_physics_apply_ns             B 0.0108 [0.0102-0.0111]  A 0.0109 ms  A per manifold 2.4 ns
+- sys_physics_broadphase_ns        B 0.2635 [0.2626-0.2739]  A 0.2684 ms  A per manifold 59.4 ns
+- sys_physics_build_graph_ns       B 0.1149 [0.1138-0.1165]  A 0.1166 ms  A per manifold 25.8 ns
+- sys_physics_gather_ns            B 0.0281 [0.0280-0.0283]  A 0.0288 ms  A per manifold 6.4 ns
+- sys_physics_integrate_ns         B 0.0000 [0.0000-0.0001]  A 0.0001 ms  A per manifold 0.0 ns
+- sys_physics_narrowphase_ns       B 0.3783 [0.3780-0.3887]  A 0.3823 ms  A per manifold 84.6 ns
+- sys_physics_solve_colored_ns     B 1.3668 [1.3549-1.3946]  A 1.3829 ms  A per manifold 306.0 ns
+- sys_select_broadphase_ns         B 0.0000 [0.0000-0.0001]  A 0.0001 ms  A per manifold 0.0 ns
+- u_ns                             B 0.0011 [0.0011-0.0013]  A 0.0012 ms  A per manifold 0.3 ns
+
+## 5. P5: Jolt v5.6.0 per-stage profile (profiled build j56p; frames 100/200/300/400; own parser)
+Stage = the nearest job ancestor, with FindCollidingPairs and NotifyBodiesAABBChanged moved to bp, "Add Constraint From Cached Manifold" to np_cached, WarmStart* to warm, SortContacts/SplitIsland to solve_prep, Check Sleeping to integrate. cpu = sum over threads of exclusive time; wall = union of the intervals in which a thread's innermost scope is in the stage.
+### W=1 (K=6)
+- Update scope 12.9235 [12.6118-13.2375] K=6 (4.84/2.10/0.93) ms; the harness's Time at the same frames 12.9229 [12.6112-13.2371] K=6 (4.84/2.10/0.93); the profiled [100,500) mean 13.0149 [12.6070-13.1625] K=6 (4.27/1.68/0.82); samples per frame 22852
+| stage | cpu ms | share of cpu | wall (union) ms | wall partition ms | share of Update | samples |
+|---|---|---|---|---|---|---|
+| bp | 0.6600 | 5.12 % | 0.6600 | 0.6600 | 5.11 % | 237 |
+| np_rest | 2.2875 | 17.74 % | 2.2875 | 2.2875 | 17.70 % | 4 |
+| np_cached | 1.1806 | 9.15 % | 1.1806 | 1.1806 | 9.14 % | 8488 |
+| np_collide | 0.0011 | 0.01 % | 0.0011 | 0.0011 | 0.01 % | 1 |
+| islands | 0.0168 | 0.13 % | 0.0168 | 0.0168 | 0.13 % | 21 |
+| setup | 0.0005 | 0.00 % | 0.0005 | 0.0005 | 0.00 % | 2 |
+| warm | 0.2350 | 1.82 % | 0.2350 | 0.2350 | 1.82 % | 1078 |
+| solve_prep | 0.5538 | 4.29 % | 0.5538 | 0.5538 | 4.29 % | 2 |
+| solve_vel | 6.9997 | 54.28 % | 6.9997 | 6.9997 | 54.16 % | 10784 |
+| solve_pos | 0.8991 | 6.97 % | 0.8991 | 0.8991 | 6.96 % | 2159 |
+| integrate | 0.0460 | 0.36 % | 0.0460 | 0.0460 | 0.36 % | 11 |
+| other | 0.0044 | 0.03 % | 0.0044 | 0.0044 | 0.03 % | 9 |
+| frame | 0.0120 | 0.09 % | 0.0120 | 0.0000 | 0.00 % | 56 |
+| sched (no thread in a stage) | | | | 0.0120 | 0.09 % | |
+| total (exclusive, all threads) | 12.8965 | | | 12.8965 | | |
+- jobs (inclusive): UpdateBroadPhasePrepare wall 0.0552 cpu 0.0552; FindCollisions wall 3.9982 cpu 3.9982; ApplyGravity wall 0.0200 cpu 0.0200; SetupVelocityConstraints wall 0.0005 cpu 0.0005; SolveVelocityConstraints wall 7.7896 cpu 7.7896; SolvePositionConstraints wall 0.9557 cpu 0.9557; IntegrateVelocity wall 0.0113 cpu 0.0113; FinalizeIslands wall 0.0113 cpu 0.0113
+- scopes (inclusive cpu): FindCollidingPairs 0.5609; Add Constraint From Cached Manifold 1.1806; sCollideConvexVsConvex 0.0011; SolveVelocityConstraints 5.5033; WarmStartVelocityConstraints 0.2303; SolvePositionConstraints 0.6336
+- calls per frame: Add Constraint From Cached Manifold 8488; sCollideConvexVsConvex 1; SolveVelocityConstraints 5390
+### W=8 (K=6)
+- Update scope 3.0352 [2.9044-3.1180] K=6 (7.04/3.33/1.38) ms; the harness's Time at the same frames 3.0355 [2.9046-3.1185] K=6 (7.05/3.32/1.38); the profiled [100,500) mean 3.0043 [2.9259-3.0952] K=6 (5.64/5.06/1.43); samples per frame 23004
+| stage | cpu ms | share of cpu | wall (union) ms | wall partition ms | share of Update | samples |
+|---|---|---|---|---|---|---|
+| bp | 0.8289 | 3.57 % | 0.1537 | 0.1423 | 4.69 % | 237 |
+| np_rest | 2.9531 | 12.71 % | 0.7341 | 0.3700 | 12.19 % | 11 |
+| np_cached | 2.8131 | 12.11 % | 0.7194 | 0.3517 | 11.59 % | 8488 |
+| np_collide | 0.0018 | 0.01 % | 0.0018 | 0.0002 | 0.01 % | 1 |
+| islands | 0.0234 | 0.10 % | 0.0230 | 0.0184 | 0.60 % | 21 |
+| setup | 0.0002 | 0.00 % | 0.0002 | 0.0000 | 0.00 % | 2 |
+| warm | 0.5062 | 2.18 % | 0.0943 | 0.0633 | 2.08 % | 1078 |
+| solve_prep | 0.5801 | 2.50 % | 0.5801 | 0.0725 | 2.39 % | 2 |
+| solve_vel | 13.9897 | 60.23 % | 1.8646 | 1.7494 | 57.64 % | 10791 |
+| solve_pos | 1.2796 | 5.51 % | 0.1650 | 0.1636 | 5.39 % | 2166 |
+| integrate | 0.0903 | 0.39 % | 0.0466 | 0.0427 | 1.41 % | 28 |
+| other | 0.0072 | 0.03 % | 0.0052 | 0.0026 | 0.08 % | 9 |
+| frame | 0.1546 | 0.67 % | 0.1068 | 0.0000 | 0.00 % | 169 |
+| sched (no thread in a stage) | | | | 0.0144 | 0.47 % | |
+| total (exclusive, all threads) | 23.2283 | | | 2.9910 | | |
+- jobs (inclusive): UpdateBroadPhasePrepare wall 0.0719 cpu 0.0719; FindCollisions wall 0.8207 cpu 6.4884; ApplyGravity wall 0.0098 cpu 0.0295; SetupVelocityConstraints wall 0.0002 cpu 0.0002; SolveVelocityConstraints wall 1.8850 cpu 15.0697; SolvePositionConstraints wall 0.2330 cpu 1.3490; IntegrateVelocity wall 0.0057 cpu 0.0282; FinalizeIslands wall 0.0158 cpu 0.0158
+- scopes (inclusive cpu): FindCollidingPairs 0.7152; Add Constraint From Cached Manifold 2.8131; sCollideConvexVsConvex 0.0018; SolveVelocityConstraints 6.2784; WarmStartVelocityConstraints 0.5014; SolvePositionConstraints 0.6934
+- calls per frame: Add Constraint From Cached Manifold 8488; sCollideConvexVsConvex 1; SolveVelocityConstraints 5390
+
+## 6. Stage by stage, per manifold: ours (P4, reading A) against Jolt (P5 shares, scaled to the unprofiled step)
+- W1: unprofiled Jolt [100,500): B 9.4978, pooled 10.3311; profiled Update 12.9235 -> profiler overhead 36.1 % (vs B)
+- W8: unprofiled Jolt [100,500): B 2.5562, pooled 2.7762; profiled Update 3.0352 -> profiler overhead 18.7 % (vs B)
+
+### W=1: ours wall 6.0239 ms (sum of the stage spans 5.9747); Jolt partition sum 12.8965 ms (Update 12.9235), model U scale 0.7365; model M: c_max = 139.1 ns/sample (the value that zeroes the tightest high-call stage), 3.178 ms of the 3.399 ms overhead per sample, scale 0.9773
+| stage | ours ms | ours ns/manifold | ours reuse-on ns/manifold (arith.) | Jolt ms (U) | Jolt ns/manifold (U) | Jolt ns/manifold (M) | ours - Jolt (off) | ours - Jolt (on) |
+|---|---|---|---|---|---|---|---|---|
+| bp | 0.2656 | 58.8 | 59.4 | 0.4861 | 57.3 | 72.2 | +1.5 | +2.2 |
+| np | 2.4274 | 537.1 | 156.3 | 2.5549 | 301.0 | 263.4 | +236.2 | -144.7 |
+| setup | 0.2841 | 62.9 | 63.6 | 0.0004 | 0.0 | 0.0 | +62.8 | +63.6 |
+| warm | 0.2990 | 66.2 | 66.9 | 0.1731 | 20.4 | 9.8 | +45.8 | +46.5 |
+| solve | 2.4466 | 541.4 | 547.6 | 6.2250 | 733.3 | 765.8 | -191.9 | -185.7 |
+| islands | 0.1153 | 25.5 | 25.8 | 0.0124 | 1.5 | 1.6 | +24.0 | +24.3 |
+| integrate | 0.0978 | 21.6 | 21.9 | 0.0338 | 4.0 | 5.1 | +17.7 | +17.9 |
+| other | 0.0389 | 8.6 | 8.7 | 0.0121 | 1.4 | 0.9 | +7.2 | +7.3 |
+| sum | 5.9747 | 1322.1 | 950.3 | 9.4978 | 1118.8 | 1118.8 | +203.2 | -168.5 |
+- the step per manifold [100,500): block B ours 1318.5 ns, Jolt 1118.8 ns (1.178x); pooled ours 1339.1, Jolt 1217.0 (1.100x)
+- np + setup + warm combined (the boundary differs: Jolt builds a contact constraint inside its cached-manifold add): ours off 666.2, on 286.8, Jolt U 321.4, M 273.2 ns/manifold
+- Jolt sub-split (U, ns/manifold): np_rest 198.4, np_cached 102.4, np_collide 0.1; solve_prep 48.0, solve_vel 607.3, solve_pos 78.0; sched 1.0
+- ours sub-split (ns/manifold): colours wide 538.6 (biased 181.8, relax 359.5); bp query 46.1, assemble 6.4, build 4.8, verify 1.4
+
+### W=8: ours wall 2.2187 ms (sum of the stage spans 2.1827); Jolt partition sum 2.9910 ms (Update 3.0352), model U scale 0.8546
+| stage | ours ms | ours ns/manifold | ours reuse-on ns/manifold (arith.) | Jolt ms (U) | Jolt ns/manifold (U) | ours - Jolt (off) | ours - Jolt (on) |
+|---|---|---|---|---|---|---|---|
+| bp | 0.2684 | 59.4 | 60.1 | 0.1216 | 14.3 | +45.1 | +45.8 |
+| np | 0.3823 | 84.6 | 30.1 | 0.6169 | 72.7 | +11.9 | -42.6 |
+| setup | 0.3122 | 69.1 | 69.9 | 0.0000 | 0.0 | +69.1 | +69.9 |
+| warm | 0.3080 | 68.2 | 68.9 | 0.0541 | 6.4 | +61.8 | +62.6 |
+| solve | 0.6337 | 140.2 | 141.9 | 1.6968 | 199.9 | -59.7 | -58.0 |
+| islands | 0.1166 | 25.8 | 26.1 | 0.0157 | 1.8 | +24.0 | +24.3 |
+| integrate | 0.1216 | 26.9 | 27.2 | 0.0365 | 4.3 | +22.6 | +22.9 |
+| other | 0.0398 | 8.8 | 8.9 | 0.0145 | 1.7 | +7.1 | +7.2 |
+| sum | 2.1827 | 483.0 | 433.1 | 2.5562 | 301.1 | +181.9 | +132.0 |
+- the step per manifold [100,500): block B ours 482.1 ns, Jolt 301.1 ns (1.601x); pooled ours 483.8, Jolt 327.0 (1.479x)
+- np + setup + warm combined (the boundary differs: Jolt builds a contact constraint inside its cached-manifold add): ours off 221.8, on 168.9, Jolt U 79.1 ns/manifold
+- Jolt sub-split (U, ns/manifold): np_rest 37.2, np_cached 35.4, np_collide 0.0; solve_prep 7.3, solve_vel 176.1, solve_pos 16.5; sched 1.5
+- ours sub-split (ns/manifold): colours wide 137.0 (biased 49.0, relax 91.3); bp query 46.2, assemble 6.8, build 4.9, verify 1.4
+- Jolt W8 cpu (all threads, exclusive, profiled) per group, ms: bp 0.8289; np 5.7680; setup 0.0002; warm 0.5062; solve 15.8494; islands 0.0234; integrate 0.0903; other 0.1618
+
+- our stage spans W1 -> W8 (reading A, ms; ratio): bp 0.2656 -> 0.2684 (0.99x); np 2.4274 -> 0.3823 (6.35x); setup 0.2841 -> 0.3122 (0.91x); warm 0.2990 -> 0.3080 (0.97x); solve 2.4466 -> 0.6337 (3.86x); islands 0.1153 -> 0.1166 (0.99x); integrate 0.0978 -> 0.1216 (0.80x); other 0.0389 -> 0.0398 (0.98x)
+- Jolt stage partitions W1 -> W8 (profiled, ms; ratio): bp 0.6600 -> 0.1423 (4.64x); np 3.4692 -> 0.7219 (4.81x); setup 0.0005 -> 0.0000 (11.21x); warm 0.2350 -> 0.0633 (3.71x); solve 8.4525 -> 1.9854 (4.26x); islands 0.0168 -> 0.0184 (0.91x); integrate 0.0460 -> 0.0427 (1.08x); other 0.0165 -> 0.0170 (0.97x)
+
+## 7. Against the driver's raw/reduction.json
+- cells compared by key: 151 equal, 0 differ
+- comparisons compared by key: 124 equal (ratio and all three claim flags), 0 differ

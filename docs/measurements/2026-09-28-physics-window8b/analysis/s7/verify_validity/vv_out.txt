@@ -1,0 +1,303 @@
+S7-AB records 179: processes 176 (timed 173: originals 171, re-runs 2; warm-ups 3; other 0); pass_done 3; voided_pass 0; r4 0
+S7 rows recorded outside block S7-AB: 0
+S7-AB processes carrying a "void" key: 0; "aborted": 0
+pass_done records: [(0, 0, '2026-09-29T17:53:37.439+03:00'), (1, 0, '2026-09-29T18:04:32.797+03:00'), (2, 0, '2026-09-29T18:13:53.210+03:00')]
+pass_attempt values over processes: [(0, 176)]
+
+## Binary identity
+s7p: bin/runner_tip_16191fda.exe sha256 now aa34fadff73923bcc69daa3e517bbbf1de693f01659ab86900460f84e0a371a1 pin aa34fadff73923bcc69daa3e517bbbf1de693f01659ab86900460f84e0a371a1 match True; commit 16191fda; s7 label uncapped
+s7t: bin/runner_s7_tip_a3adc827.exe sha256 now c4232eaed89e8afc7edd2bf51fa7504acde772d1ff43a1c0ad9c91f42323ace8 pin c4232eaed89e8afc7edd2bf51fa7504acde772d1ff43a1c0ad9c91f42323ace8 match True; commit a3adc827; s7 label capped
+SHA256SUMS: s7p path aa34fadff73923bcc69daa3e517bbbf1de693f01659ab86900460f84e0a371a1 ; s7t path c4232eaed89e8afc7edd2bf51fa7504acde772d1ff43a1c0ad9c91f42323ace8
+fixtures.json hashes: JT500 0x30c5438bc6ad9ffa, JA500 0x30c5438bc6ad9ffa; JT500.pose == JA500.pose bytes: True
+
+## Per-process validity (all timed S7-AB processes, originals and re-runs)
+invalid (my checks): 0
+driver valid flag disagrees with my checks: 0 []
+driver contaminated flag disagrees with my clean rule: 0 []
+distinct per-step manifold sequences: JA500 1, JT500 1; JT == JA sequence: True
+build-identity fields in SUMMARY (profile_name, debug_assertions, zones, system_zones, runner) by key: {'s7p': [('dev', False, True, True, 'jolt_parity_pyramid fixed-window runner v1')], 's7t': [('dev', False, True, True, 'jolt_parity_pyramid fixed-window runner v1')]}
+not clean: 2
+  HOT (1, 0, 6, 'original', 'S7-JA', 's7t', 8, ['witness 2.29'])
+  HOT (2, 0, 18, 'original', 'S7-JT-W1', 's7t', 1, ['receipt after 6.5', 'witness 3.95'])
+timed S7-AB span: 2026-09-29T17:47:16.120+03:00 .. 2026-09-29T18:13:48.173+03:00
+
+## Slot rule
+slots 171; slots with != 1 original or > 1 re-run: []
+used 171; dropped 0 []; re-runs used 2
+  RERUN USED ((1, 0, 'S7-JA', 's7t', 8), ['witness 2.29'], '2026-09-29T17:58:38.385+03:00', '2026-09-29T18:04:25.044+03:00', 0.07, 1.18, 0.56)
+  RERUN USED ((2, 0, 'S7-JT-W1', 's7t', 1), ['receipt after 6.5', 'witness 3.95'], '2026-09-29T18:08:51.730+03:00', '2026-09-29T18:13:45.826+03:00', 0.26, 1.31, 0.45)
+re-runs NOT used: []
+K per cell: [(9, 19)]; K per (cell, pass): [(3, 57)]
+cells: 19
+
+## Placement receipts (recorded, never used to drop)
+used processes: no placement object 0; no top3 0; no main_cycle_frac 0; main_share_top_est null 11
+  share-null: p0 r0 S7-JT#s7t@W16 main_cpu_s 0.0 main_cycle_frac 0.0046 top3 [[10, 76.1], [12, 43.7], [1, 43.7]]
+  share-null: p0 r0 S7-JT-W1#s7p@W1 main_cpu_s 0.0 main_cycle_frac 0.015 top3 [[10, 95.2], [12, 4.8], [2, 2.7]]
+  share-null: p0 r2 S7-ladder8-F0.5#s7p@W8 main_cpu_s 0.0 main_cycle_frac 0.0103 top3 [[10, 86.9], [12, 46.7], [14, 41.0]]
+  share-null: p1 r0 S7-JA#s7p@W16 main_cpu_s 0.0 main_cycle_frac 0.0021 top3 [[10, 82.2], [12, 58.9], [14, 53.5]]
+  share-null: p1 r2 S7-JT#s7t@W16 main_cpu_s 0.0 main_cycle_frac 0.0046 top3 [[10, 77.5], [12, 54.9], [14, 46.5]]
+  share-null: p2 r0 S7-ladder16-F2#s7p@W16 main_cpu_s 0.0 main_cycle_frac 0.0049 top3 [[10, 90.7], [0, 60.8], [14, 59.5]]
+  share-null: p2 r0 S7-JT#s7t@W16 main_cpu_s 0.0 main_cycle_frac 0.0047 top3 [[10, 66.7], [12, 65.3], [14, 59.7]]
+  share-null: p2 r0 S7-ladder8-F2#s7p@W8 main_cpu_s 0.0 main_cycle_frac 0.0103 top3 [[10, 87.3], [12, 50.8], [14, 47.6]]
+  share-null: p2 r1 S7-JT#s7t@W8 main_cpu_s 0.0 main_cycle_frac 0.0099 top3 [[10, 82.0], [12, 54.2], [7, 54.1]]
+  share-null: p2 r2 S7-ladder16-F1.5#s7p@W16 main_cpu_s 0.0 main_cycle_frac 0.005 top3 [[10, 72.6], [14, 54.8], [0, 54.2]]
+  share-null: p2 r2 S7-JT-W1#s7p@W1 main_cpu_s 0.0 main_cycle_frac 0.0156 top3 [[10, 98.6], [14, 0.7], [15, 0.0]]
+all timed (incl. unused originals): main_share_top_est null 11
+
+## Launch order and P/T adjacency (originals)
+p0 r0: order == expected reversed cell_order: True; S7-JT@W8:Tfirst,adj=True S7-JT@W16:Tfirst,adj=True S7-JA@W8:Tfirst,adj=True S7-JA@W16:Tfirst,adj=True S7-JT-W1@W1:Tfirst,adj=True
+p0 r1: order == expected reversed cell_order: True; S7-JT@W8:Tfirst,adj=True S7-JT@W16:Tfirst,adj=True S7-JA@W8:Tfirst,adj=True S7-JA@W16:Tfirst,adj=True S7-JT-W1@W1:Tfirst,adj=True
+p0 r2: order == expected reversed cell_order: True; S7-JT@W8:Tfirst,adj=True S7-JT@W16:Tfirst,adj=True S7-JA@W8:Tfirst,adj=True S7-JA@W16:Tfirst,adj=True S7-JT-W1@W1:Tfirst,adj=True
+p1 r0: order == expected forward cell_order: True; S7-JT@W8:Pfirst,adj=True S7-JT@W16:Pfirst,adj=True S7-JA@W8:Pfirst,adj=True S7-JA@W16:Pfirst,adj=True S7-JT-W1@W1:Pfirst,adj=True
+p1 r1: order == expected forward cell_order: True; S7-JT@W8:Pfirst,adj=True S7-JT@W16:Pfirst,adj=True S7-JA@W8:Pfirst,adj=True S7-JA@W16:Pfirst,adj=True S7-JT-W1@W1:Pfirst,adj=True
+p1 r2: order == expected forward cell_order: True; S7-JT@W8:Pfirst,adj=True S7-JT@W16:Pfirst,adj=True S7-JA@W8:Pfirst,adj=True S7-JA@W16:Pfirst,adj=True S7-JT-W1@W1:Pfirst,adj=True
+p2 r0: order == expected reversed cell_order: True; S7-JT@W8:Tfirst,adj=True S7-JT@W16:Tfirst,adj=True S7-JA@W8:Tfirst,adj=True S7-JA@W16:Tfirst,adj=True S7-JT-W1@W1:Tfirst,adj=True
+p2 r1: order == expected reversed cell_order: True; S7-JT@W8:Tfirst,adj=True S7-JT@W16:Tfirst,adj=True S7-JA@W8:Tfirst,adj=True S7-JA@W16:Tfirst,adj=True S7-JT-W1@W1:Tfirst,adj=True
+p2 r2: order == expected reversed cell_order: True; S7-JT@W8:Tfirst,adj=True S7-JT@W16:Tfirst,adj=True S7-JA@W8:Tfirst,adj=True S7-JA@W16:Tfirst,adj=True S7-JT-W1@W1:Tfirst,adj=True
+
+## Claims [slot rule: clean re-runs replace hot originals]
+-- window [0,500)
+C1-JT T8->T16: A 1.8112 [1.8003-1.8536] K=9 IQR 0.0093 SE 0.0083 | B 2.1902 [2.1816-2.2341] K=9 IQR 0.0100 SE 0.0067 | B/A 1.2092 (B-A +0.3790 ms) pooled Y/Y/Y bars r/i/s 7.59/1.37/1.10 %; passes p0 1.2088 Y/Y/Y p1 1.2115 Y/Y/Y p2 1.2109 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 3.27 % = 0.0593 ms
+   => FAILS/REFUTED (B slower claimed STRONG)
+C1-JA T8->T16: A 5.3040 [5.2953-5.4035] K=9 IQR 0.0144 SE 0.0139 | B 5.8658 [5.8421-5.9646] K=9 IQR 0.0116 SE 0.0148 | B/A 1.1059 (B-A +0.5617 ms) pooled Y/Y/Y bars r/i/s 5.84/0.67/0.73 %; passes p0 1.1059 Y/Y/Y p1 1.1050 Y/Y/Y p2 1.1048 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 2.09 % = 0.1107 ms
+   => FAILS/REFUTED (B slower claimed STRONG)
+C2-JT P8->T8: A 1.8152 [1.7989-1.8491] K=9 IQR 0.0158 SE 0.0064 | B 1.8112 [1.8003-1.8536] K=9 IQR 0.0093 SE 0.0083 | B/A 0.9978 (B-A -0.0040 ms) pooled n/n/n bars r/i/s 8.08/2.01/1.16 %; passes p0 0.9985 n/n/n p1 0.9946 n/n/n p2 0.9902 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 3.48 % = 0.0631 ms
+   => HOLDS (B slower not claimed)
+C2-JA P8->T8: A 5.3081 [5.2750-5.3216] K=9 IQR 0.0114 SE 0.0058 | B 5.3040 [5.2953-5.4035] K=9 IQR 0.0144 SE 0.0139 | B/A 0.9992 (B-A -0.0040 ms) pooled n/n/n bars r/i/s 4.44/0.69/0.57 %; passes p0 0.9984 n/n/n p1 1.0017 n/n/n p2 1.0007 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 2.06 % = 0.1096 ms
+   => HOLDS (B slower not claimed)
+C3-JT P16->T16: A 2.0502 [2.0393-2.0659] K=9 IQR 0.0108 SE 0.0034 | B 2.1902 [2.1816-2.2341] K=9 IQR 0.0100 SE 0.0067 | B/A 1.0683 (B-A +0.1400 ms) pooled Y/Y/Y bars r/i/s 5.45/1.39/0.69 %; passes p0 1.0659 Y/Y/Y p1 1.0633 Y/Y/Y p2 1.0734 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 2.63 % = 0.0540 ms
+   => REFUTED (T slower claimed STRONG), P16-T16 = -0.1400 ms
+W1 P1->T1 (optional): A 4.4167 [4.3957-4.5564] K=9 IQR 0.0373 SE 0.0217 | B 4.4551 [4.4037-4.5598] K=9 IQR 0.0667 SE 0.0240 | B/A 1.0087 (B-A +0.0384 ms) pooled n/n/n bars r/i/s 10.10/3.44/1.46 %; passes p0 0.9847 n/n/n p1 1.0067 n/n/n p2 1.0117 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s False; binding 4.70 % = 0.2074 ms
+   => HOLDS (B slower not claimed)
+   ladder8 S7-ladder8-F0.5 inj 0.0300: rise +0.0337 ms (x1.12) pooled n/n/Y p0 n/Y/Y p1 n/n/n p2 n/n/n -> not seen
+   ladder8 S7-ladder8-F1 inj 0.0600: rise +0.0660 ms (x1.10) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/Y/Y -> SEEN
+   ladder8 S7-ladder8-F1.5 inj 0.0900: rise +0.0911 ms (x1.01) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 n/Y/Y -> SEEN
+   ladder8 S7-ladder8-F2 inj 0.1200: rise +0.1257 ms (x1.05) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder8: R = 0.06
+   ladder16 S7-ladder16-F0.5 inj 0.0525: rise +0.0545 ms (x1.04) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1 inj 0.1050: rise +0.1139 ms (x1.09) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1.5 inj 0.1575: rise +0.1599 ms (x1.02) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F2 inj 0.2100: rise +0.2146 ms (x1.02) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16: R = 0.0525
+   JA-rung16 S7-JA-ladder16-F1 inj 0.1050: rise +0.1095 ms (x1.04) pooled n/Y/Y p0 n/n/n p1 Y/Y/Y p2 Y/Y/Y -> not seen
+   JA-rung16: R = None
+-- window [0,100)
+C1-JT T8->T16: A 1.9740 [1.9632-2.0034] K=9 IQR 0.0086 SE 0.0063 | B 2.3317 [2.3240-2.3552] K=9 IQR 0.0024 SE 0.0036 | B/A 1.1812 (B-A +0.3576 ms) pooled Y/Y/Y bars r/i/s 4.87/0.90/0.71 %; passes p0 1.1857 Y/Y/Y p1 1.1809 Y/Y/Y p2 1.1647 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 2.01 % = 0.0397 ms
+   => FAILS/REFUTED (B slower claimed STRONG)
+C1-JA T8->T16: A 5.4386 [5.4165-5.4734] K=9 IQR 0.0110 SE 0.0068 | B 5.9839 [5.9606-6.0614] K=9 IQR 0.0120 SE 0.0121 | B/A 1.1003 (B-A +0.5453 ms) pooled Y/Y/Y bars r/i/s 3.97/0.57/0.47 %; passes p0 1.1008 Y/Y/Y p1 1.1004 Y/Y/Y p2 1.1001 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 1.56 % = 0.0850 ms
+   => FAILS/REFUTED (B slower claimed STRONG)
+C2-JT P8->T8: A 1.9829 [1.9579-2.0197] K=9 IQR 0.0276 SE 0.0084 | B 1.9740 [1.9632-2.0034] K=9 IQR 0.0086 SE 0.0063 | B/A 0.9955 (B-A -0.0089 ms) pooled n/n/n bars r/i/s 7.45/2.92/1.06 %; passes p0 0.9934 n/n/n p1 0.9955 n/n/n p2 0.9939 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 2.92 % = 0.0578 ms
+   => HOLDS (B slower not claimed)
+C2-JA P8->T8: A 5.4397 [5.4085-5.4594] K=9 IQR 0.0115 SE 0.0060 | B 5.4386 [5.4165-5.4734] K=9 IQR 0.0110 SE 0.0068 | B/A 0.9998 (B-A -0.0011 ms) pooled n/n/n bars r/i/s 2.81/0.59/0.33 %; passes p0 0.9989 n/n/n p1 1.0011 n/n/n p2 0.9989 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 1.19 % = 0.0650 ms
+   => HOLDS (B slower not claimed)
+C3-JT P16->T16: A 2.2008 [2.1875-2.2137] K=9 IQR 0.0057 SE 0.0032 | B 2.3317 [2.3240-2.3552] K=9 IQR 0.0024 SE 0.0036 | B/A 1.0595 (B-A +0.1308 ms) pooled Y/Y/Y bars r/i/s 3.58/0.55/0.42 %; passes p0 1.0611 Y/Y/Y p1 1.0566 Y/Y/Y p2 1.0610 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 1.20 % = 0.0263 ms
+   => REFUTED (T slower claimed STRONG), P16-T16 = -0.1308 ms
+W1 P1->T1 (optional): A 5.3374 [5.2911-5.5668] K=9 IQR 0.1075 SE 0.0388 | B 5.3754 [5.3065-5.4661] K=9 IQR 0.0786 SE 0.0247 | B/A 1.0071 (B-A +0.0380 ms) pooled n/n/n bars r/i/s 11.92/4.98/1.72 %; passes p0 0.9702 n/n/n p1 1.0099 n/n/n p2 1.0079 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s False; binding 5.42 % = 0.2893 ms
+   => HOLDS (B slower not claimed)
+   ladder8 S7-ladder8-F0.5 inj 0.0300: rise +0.0379 ms (x1.26) pooled n/n/Y p0 n/Y/Y p1 n/Y/Y p2 n/n/n -> not seen
+   ladder8 S7-ladder8-F1 inj 0.0600: rise +0.0705 ms (x1.17) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/n/n -> not seen
+   ladder8 S7-ladder8-F1.5 inj 0.0900: rise +0.0943 ms (x1.05) pooled n/Y/Y p0 n/n/Y p1 Y/Y/Y p2 n/Y/Y -> not seen
+   ladder8 S7-ladder8-F2 inj 0.1200: rise +0.1284 ms (x1.07) pooled n/Y/Y p0 Y/Y/Y p1 n/n/Y p2 Y/Y/Y -> not seen
+   ladder8: R = None
+   ladder16 S7-ladder16-F0.5 inj 0.0525: rise +0.0591 ms (x1.13) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1 inj 0.1050: rise +0.1273 ms (x1.21) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1.5 inj 0.1575: rise +0.1683 ms (x1.07) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F2 inj 0.2100: rise +0.2197 ms (x1.05) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16: R = 0.0525
+   JA-rung16 S7-JA-ladder16-F1 inj 0.1050: rise +0.1008 ms (x0.96) pooled n/Y/Y p0 n/n/n p1 Y/Y/Y p2 Y/Y/Y -> not seen
+   JA-rung16: R = None
+-- window [100,500)
+C1-JT T8->T16: A 1.7638 [1.7589-1.8165] K=9 IQR 0.0111 SE 0.0098 | B 2.1552 [2.1458-2.2038] K=9 IQR 0.0124 SE 0.0075 | B/A 1.2219 (B-A +0.3914 ms) pooled Y/Y/Y bars r/i/s 8.47/1.70/1.31 %; passes p0 1.2165 Y/Y/Y p1 1.2201 Y/Y/Y p2 1.2242 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 3.99 % = 0.0703 ms
+   => FAILS/REFUTED (B slower claimed STRONG)
+C1-JA T8->T16: A 5.2713 [5.2617-5.3960] K=9 IQR 0.0158 SE 0.0173 | B 5.8369 [5.8124-5.9404] K=9 IQR 0.0143 SE 0.0155 | B/A 1.1073 (B-A +0.5656 ms) pooled Y/Y/Y bars r/i/s 6.72/0.78/0.84 %; passes p0 1.1076 Y/Y/Y p1 1.1058 Y/Y/Y p2 1.1059 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 2.59 % = 0.1364 ms
+   => FAILS/REFUTED (B slower claimed STRONG)
+C2-JT P8->T8: A 1.7746 [1.7583-1.8064] K=9 IQR 0.0138 SE 0.0062 | B 1.7638 [1.7589-1.8165] K=9 IQR 0.0111 SE 0.0098 | B/A 0.9939 (B-A -0.0108 ms) pooled n/n/n bars r/i/s 8.49/2.00/1.31 %; passes p0 0.9989 n/n/n p1 0.9943 n/n/n p2 0.9890 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 3.69 % = 0.0654 ms
+   => HOLDS (B slower not claimed)
+C2-JA P8->T8: A 5.2737 [5.2417-5.2891] K=9 IQR 0.0171 SE 0.0061 | B 5.2713 [5.2617-5.3960] K=9 IQR 0.0158 SE 0.0173 | B/A 0.9995 (B-A -0.0024 ms) pooled n/n/n bars r/i/s 5.40/0.88/0.69 %; passes p0 0.9978 n/n/n p1 1.0022 n/n/n p2 1.0019 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 2.57 % = 0.1355 ms
+   => HOLDS (B slower not claimed)
+C3-JT P16->T16: A 2.0115 [2.0022-2.0327] K=9 IQR 0.0120 SE 0.0040 | B 2.1552 [2.1458-2.2038] K=9 IQR 0.0124 SE 0.0075 | B/A 1.0714 (B-A +0.1437 ms) pooled Y/Y/Y bars r/i/s 6.18/1.66/0.80 %; passes p0 1.0678 Y/Y/Y p1 1.0652 Y/Y/Y p2 1.0768 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 3.05 % = 0.0613 ms
+   => REFUTED (T slower claimed STRONG), P16-T16 = -0.1437 ms
+W1 P1->T1 (optional): A 4.1817 [4.1647-4.3254] K=9 IQR 0.0327 SE 0.0207 | B 4.2213 [4.1753-4.3332] K=9 IQR 0.0614 SE 0.0240 | B/A 1.0095 (B-A +0.0396 ms) pooled n/n/n bars r/i/s 10.73/3.30/1.51 %; passes p0 0.9951 n/n/n p1 1.0124 n/Y/Y p2 1.0119 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s False; binding 4.93 % = 0.2062 ms
+   => HOLDS (B slower not claimed)
+   ladder8 S7-ladder8-F0.5 inj 0.0300: rise +0.0274 ms (x0.91) pooled n/n/Y p0 n/Y/Y p1 n/n/n p2 n/n/n -> not seen
+   ladder8 S7-ladder8-F1 inj 0.0600: rise +0.0590 ms (x0.98) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/Y/Y -> SEEN
+   ladder8 S7-ladder8-F1.5 inj 0.0900: rise +0.0898 ms (x1.00) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder8 S7-ladder8-F2 inj 0.1200: rise +0.1188 ms (x0.99) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder8: R = 0.06
+   ladder16 S7-ladder16-F0.5 inj 0.0525: rise +0.0540 ms (x1.03) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1 inj 0.1050: rise +0.1116 ms (x1.06) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1.5 inj 0.1575: rise +0.1588 ms (x1.01) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F2 inj 0.2100: rise +0.2144 ms (x1.02) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16: R = 0.0525
+   JA-rung16 S7-JA-ladder16-F1 inj 0.1050: rise +0.1083 ms (x1.03) pooled n/Y/Y p0 n/n/Y p1 n/Y/Y p2 Y/Y/Y -> not seen
+   JA-rung16: R = None
+
+## Claims [post hoc sensitivity: originals only (hot originals kept)]
+-- window [0,500)
+C1-JT T8->T16: A 1.8112 [1.8003-1.8536] K=9 IQR 0.0093 SE 0.0083 | B 2.1902 [2.1816-2.2341] K=9 IQR 0.0100 SE 0.0067 | B/A 1.2092 (B-A +0.3790 ms) pooled Y/Y/Y bars r/i/s 7.59/1.37/1.10 %; passes p0 1.2088 Y/Y/Y p1 1.2115 Y/Y/Y p2 1.2109 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 3.27 % = 0.0593 ms
+   => FAILS/REFUTED (B slower claimed STRONG)
+C1-JA T8->T16: A 5.3145 [5.2953-5.4035] K=9 IQR 0.0246 SE 0.0140 | B 5.8658 [5.8421-5.9646] K=9 IQR 0.0116 SE 0.0148 | B/A 1.1037 (B-A +0.5513 ms) pooled Y/Y/Y bars r/i/s 5.83/1.01/0.73 %; passes p0 1.1059 Y/Y/Y p1 1.0997 Y/Y/Y p2 1.1048 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 2.09 % = 0.1109 ms
+   => FAILS/REFUTED (B slower claimed STRONG)
+C2-JT P8->T8: A 1.8152 [1.7989-1.8491] K=9 IQR 0.0158 SE 0.0064 | B 1.8112 [1.8003-1.8536] K=9 IQR 0.0093 SE 0.0083 | B/A 0.9978 (B-A -0.0040 ms) pooled n/n/n bars r/i/s 8.08/2.01/1.16 %; passes p0 0.9985 n/n/n p1 0.9946 n/n/n p2 0.9902 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 3.48 % = 0.0631 ms
+   => HOLDS (B slower not claimed)
+C2-JA P8->T8: A 5.3081 [5.2750-5.3216] K=9 IQR 0.0114 SE 0.0058 | B 5.3145 [5.2953-5.4035] K=9 IQR 0.0246 SE 0.0140 | B/A 1.0012 (B-A +0.0064 ms) pooled n/n/n bars r/i/s 4.43/1.02/0.57 %; passes p0 0.9984 n/n/n p1 1.0064 n/n/n p2 1.0007 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s False; binding 2.06 % = 0.1096 ms
+   => HOLDS (B slower not claimed)
+C3-JT P16->T16: A 2.0502 [2.0393-2.0659] K=9 IQR 0.0108 SE 0.0034 | B 2.1902 [2.1816-2.2341] K=9 IQR 0.0100 SE 0.0067 | B/A 1.0683 (B-A +0.1400 ms) pooled Y/Y/Y bars r/i/s 5.45/1.39/0.69 %; passes p0 1.0659 Y/Y/Y p1 1.0633 Y/Y/Y p2 1.0734 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 2.63 % = 0.0540 ms
+   => REFUTED (T slower claimed STRONG), P16-T16 = -0.1400 ms
+W1 P1->T1 (optional): A 4.4167 [4.3957-4.5564] K=9 IQR 0.0373 SE 0.0217 | B 4.4551 [4.4037-5.2124] K=9 IQR 0.0667 SE 0.1075 | B/A 1.0087 (B-A +0.0384 ms) pooled n/n/n bars r/i/s 37.03/3.44/4.93 %; passes p0 0.9847 n/n/n p1 1.0067 n/n/n p2 1.0117 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s False; binding 18.01 % = 0.7954 ms
+   => HOLDS (B slower not claimed)
+   ladder8 S7-ladder8-F0.5 inj 0.0300: rise +0.0337 ms (x1.12) pooled n/n/Y p0 n/Y/Y p1 n/n/n p2 n/n/n -> not seen
+   ladder8 S7-ladder8-F1 inj 0.0600: rise +0.0660 ms (x1.10) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/Y/Y -> SEEN
+   ladder8 S7-ladder8-F1.5 inj 0.0900: rise +0.0911 ms (x1.01) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 n/Y/Y -> SEEN
+   ladder8 S7-ladder8-F2 inj 0.1200: rise +0.1257 ms (x1.05) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder8: R = 0.06
+   ladder16 S7-ladder16-F0.5 inj 0.0525: rise +0.0545 ms (x1.04) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1 inj 0.1050: rise +0.1139 ms (x1.09) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1.5 inj 0.1575: rise +0.1599 ms (x1.02) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F2 inj 0.2100: rise +0.2146 ms (x1.02) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16: R = 0.0525
+   JA-rung16 S7-JA-ladder16-F1 inj 0.1050: rise +0.1095 ms (x1.04) pooled n/Y/Y p0 n/n/n p1 Y/Y/Y p2 Y/Y/Y -> not seen
+   JA-rung16: R = None
+-- window [0,100)
+C1-JT T8->T16: A 1.9740 [1.9632-2.0034] K=9 IQR 0.0086 SE 0.0063 | B 2.3317 [2.3240-2.3552] K=9 IQR 0.0024 SE 0.0036 | B/A 1.1812 (B-A +0.3576 ms) pooled Y/Y/Y bars r/i/s 4.87/0.90/0.71 %; passes p0 1.1857 Y/Y/Y p1 1.1809 Y/Y/Y p2 1.1647 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 2.01 % = 0.0397 ms
+   => FAILS/REFUTED (B slower claimed STRONG)
+C1-JA T8->T16: A 5.4336 [5.4154-5.4734] K=9 IQR 0.0111 SE 0.0076 | B 5.9839 [5.9606-6.0614] K=9 IQR 0.0120 SE 0.0121 | B/A 1.1013 (B-A +0.5503 ms) pooled Y/Y/Y bars r/i/s 3.99/0.57/0.49 %; passes p0 1.1008 Y/Y/Y p1 1.1049 Y/Y/Y p2 1.1001 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 1.56 % = 0.0849 ms
+   => FAILS/REFUTED (B slower claimed STRONG)
+C2-JT P8->T8: A 1.9829 [1.9579-2.0197] K=9 IQR 0.0276 SE 0.0084 | B 1.9740 [1.9632-2.0034] K=9 IQR 0.0086 SE 0.0063 | B/A 0.9955 (B-A -0.0089 ms) pooled n/n/n bars r/i/s 7.45/2.92/1.06 %; passes p0 0.9934 n/n/n p1 0.9955 n/n/n p2 0.9939 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 2.92 % = 0.0578 ms
+   => HOLDS (B slower not claimed)
+C2-JA P8->T8: A 5.4397 [5.4085-5.4594] K=9 IQR 0.0115 SE 0.0060 | B 5.4336 [5.4154-5.4734] K=9 IQR 0.0111 SE 0.0076 | B/A 0.9989 (B-A -0.0061 ms) pooled n/n/n bars r/i/s 2.84/0.59/0.35 %; passes p0 0.9989 n/n/n p1 0.9970 n/n/n p2 0.9989 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 1.21 % = 0.0661 ms
+   => HOLDS (B slower not claimed)
+C3-JT P16->T16: A 2.2008 [2.1875-2.2137] K=9 IQR 0.0057 SE 0.0032 | B 2.3317 [2.3240-2.3552] K=9 IQR 0.0024 SE 0.0036 | B/A 1.0595 (B-A +0.1308 ms) pooled Y/Y/Y bars r/i/s 3.58/0.55/0.42 %; passes p0 1.0611 Y/Y/Y p1 1.0566 Y/Y/Y p2 1.0610 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 1.20 % = 0.0263 ms
+   => REFUTED (T slower claimed STRONG), P16-T16 = -0.1308 ms
+W1 P1->T1 (optional): A 5.3374 [5.2911-5.5668] K=9 IQR 0.1075 SE 0.0388 | B 5.3754 [5.3065-5.4540] K=9 IQR 0.0732 SE 0.0202 | B/A 1.0071 (B-A +0.0380 ms) pooled n/n/n bars r/i/s 11.70/4.86/1.64 %; passes p0 0.9702 n/n/n p1 1.0099 n/n/n p2 1.0079 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s False; binding 5.42 % = 0.2893 ms
+   => HOLDS (B slower not claimed)
+   ladder8 S7-ladder8-F0.5 inj 0.0300: rise +0.0379 ms (x1.26) pooled n/n/Y p0 n/Y/Y p1 n/Y/Y p2 n/n/n -> not seen
+   ladder8 S7-ladder8-F1 inj 0.0600: rise +0.0705 ms (x1.17) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/n/n -> not seen
+   ladder8 S7-ladder8-F1.5 inj 0.0900: rise +0.0943 ms (x1.05) pooled n/Y/Y p0 n/n/Y p1 Y/Y/Y p2 n/Y/Y -> not seen
+   ladder8 S7-ladder8-F2 inj 0.1200: rise +0.1284 ms (x1.07) pooled n/Y/Y p0 Y/Y/Y p1 n/n/Y p2 Y/Y/Y -> not seen
+   ladder8: R = None
+   ladder16 S7-ladder16-F0.5 inj 0.0525: rise +0.0591 ms (x1.13) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1 inj 0.1050: rise +0.1273 ms (x1.21) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1.5 inj 0.1575: rise +0.1683 ms (x1.07) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F2 inj 0.2100: rise +0.2197 ms (x1.05) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16: R = 0.0525
+   JA-rung16 S7-JA-ladder16-F1 inj 0.1050: rise +0.1008 ms (x0.96) pooled n/Y/Y p0 n/n/n p1 Y/Y/Y p2 Y/Y/Y -> not seen
+   JA-rung16: R = None
+-- window [100,500)
+C1-JT T8->T16: A 1.7638 [1.7589-1.8165] K=9 IQR 0.0111 SE 0.0098 | B 2.1552 [2.1458-2.2038] K=9 IQR 0.0124 SE 0.0075 | B/A 1.2219 (B-A +0.3914 ms) pooled Y/Y/Y bars r/i/s 8.47/1.70/1.31 %; passes p0 1.2165 Y/Y/Y p1 1.2201 Y/Y/Y p2 1.2242 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 3.99 % = 0.0703 ms
+   => FAILS/REFUTED (B slower claimed STRONG)
+C1-JA T8->T16: A 5.2836 [5.2617-5.3960] K=9 IQR 0.0222 SE 0.0175 | B 5.8369 [5.8124-5.9404] K=9 IQR 0.0143 SE 0.0155 | B/A 1.1047 (B-A +0.5534 ms) pooled Y/Y/Y bars r/i/s 6.71/0.97/0.85 %; passes p0 1.1076 Y/Y/Y p1 1.1014 Y/Y/Y p2 1.1059 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 2.59 % = 0.1367 ms
+   => FAILS/REFUTED (B slower claimed STRONG)
+C2-JT P8->T8: A 1.7746 [1.7583-1.8064] K=9 IQR 0.0138 SE 0.0062 | B 1.7638 [1.7589-1.8165] K=9 IQR 0.0111 SE 0.0098 | B/A 0.9939 (B-A -0.0108 ms) pooled n/n/n bars r/i/s 8.49/2.00/1.31 %; passes p0 0.9989 n/n/n p1 0.9943 n/n/n p2 0.9890 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 3.69 % = 0.0654 ms
+   => HOLDS (B slower not claimed)
+C2-JA P8->T8: A 5.2737 [5.2417-5.2891] K=9 IQR 0.0171 SE 0.0061 | B 5.2836 [5.2617-5.3960] K=9 IQR 0.0222 SE 0.0175 | B/A 1.0019 (B-A +0.0099 ms) pooled n/n/n bars r/i/s 5.39/1.06/0.70 %; passes p0 0.9978 n/n/n p1 1.0062 n/n/n p2 1.0019 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s False; binding 2.57 % = 0.1355 ms
+   => HOLDS (B slower not claimed)
+C3-JT P16->T16: A 2.0115 [2.0022-2.0327] K=9 IQR 0.0120 SE 0.0040 | B 2.1552 [2.1458-2.2038] K=9 IQR 0.0124 SE 0.0075 | B/A 1.0714 (B-A +0.1437 ms) pooled Y/Y/Y bars r/i/s 6.18/1.66/0.80 %; passes p0 1.0678 Y/Y/Y p1 1.0652 Y/Y/Y p2 1.0768 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 3.05 % = 0.0613 ms
+   => REFUTED (T slower claimed STRONG), P16-T16 = -0.1437 ms
+W1 P1->T1 (optional): A 4.1817 [4.1647-4.3254] K=9 IQR 0.0327 SE 0.0207 | B 4.2213 [4.1753-5.1711] K=9 IQR 0.0614 SE 0.1332 | B/A 1.0095 (B-A +0.0396 ms) pooled n/n/n bars r/i/s 47.80/3.30/6.39 %; passes p0 0.9951 n/n/n p1 1.0124 n/Y/Y p2 1.0119 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s False; binding 23.33 % = 0.9756 ms
+   => HOLDS (B slower not claimed)
+   ladder8 S7-ladder8-F0.5 inj 0.0300: rise +0.0274 ms (x0.91) pooled n/n/Y p0 n/Y/Y p1 n/n/n p2 n/n/n -> not seen
+   ladder8 S7-ladder8-F1 inj 0.0600: rise +0.0590 ms (x0.98) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/Y/Y -> SEEN
+   ladder8 S7-ladder8-F1.5 inj 0.0900: rise +0.0898 ms (x1.00) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder8 S7-ladder8-F2 inj 0.1200: rise +0.1188 ms (x0.99) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder8: R = 0.06
+   ladder16 S7-ladder16-F0.5 inj 0.0525: rise +0.0540 ms (x1.03) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1 inj 0.1050: rise +0.1116 ms (x1.06) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1.5 inj 0.1575: rise +0.1588 ms (x1.01) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F2 inj 0.2100: rise +0.2144 ms (x1.02) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16: R = 0.0525
+   JA-rung16 S7-JA-ladder16-F1 inj 0.1050: rise +0.1083 ms (x1.03) pooled n/Y/Y p0 n/n/Y p1 n/Y/Y p2 Y/Y/Y -> not seen
+   JA-rung16: R = None
+
+K per pass of cells that lose a process if share-null processes were dropped: [(('S7-JA', 's7p', 16), [3, 2, 3]), (('S7-JT', 's7t', 8), [3, 3, 2]), (('S7-JT', 's7t', 16), [2, 2, 2]), (('S7-JT-W1', 's7p', 1), [2, 3, 2]), (('S7-ladder16-F1.5', 's7p', 16), [3, 3, 2]), (('S7-ladder16-F2', 's7p', 16), [3, 3, 2]), (('S7-ladder8-F0.5', 's7p', 8), [2, 3, 3]), (('S7-ladder8-F2', 's7p', 8), [3, 3, 2])]
+
+## Claims [post hoc: share-null processes dropped (NOT the protocol; receipts never drop)]
+-- window [0,500)
+C1-JT T8->T16: A 1.8075 [1.8003-1.8536] K=8 IQR 0.0179 SE 0.0093 | B 2.1870 [2.1816-2.2341] K=6 IQR 0.0112 SE 0.0103 | B/A 1.2099 (B-A +0.3794 ms) pooled Y/Y/Y bars r/i/s 7.60/2.23/1.40 %; passes p0 1.2190 n/n/n p1 1.2110 n/n/n p2 1.2002 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s True; binding 3.67 % = 0.0663 ms
+   => HOLDS (B slower not claimed)
+C1-JA T8->T16: A 5.3040 [5.2953-5.4035] K=9 IQR 0.0144 SE 0.0139 | B 5.8658 [5.8421-5.9646] K=9 IQR 0.0116 SE 0.0148 | B/A 1.1059 (B-A +0.5617 ms) pooled Y/Y/Y bars r/i/s 5.84/0.67/0.73 %; passes p0 1.1059 Y/Y/Y p1 1.1050 Y/Y/Y p2 1.1048 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 2.09 % = 0.1107 ms
+   => FAILS/REFUTED (B slower claimed STRONG)
+C2-JT P8->T8: A 1.8152 [1.7989-1.8491] K=9 IQR 0.0158 SE 0.0064 | B 1.8075 [1.8003-1.8536] K=8 IQR 0.0179 SE 0.0093 | B/A 0.9958 (B-A -0.0077 ms) pooled n/n/n bars r/i/s 8.09/2.63/1.25 %; passes p0 0.9985 n/n/n p1 0.9946 n/n/n p2 0.9986 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 3.89 % = 0.0707 ms
+   => HOLDS (B slower not claimed)
+C2-JA P8->T8: A 5.3081 [5.2750-5.3216] K=9 IQR 0.0114 SE 0.0058 | B 5.3040 [5.2953-5.4035] K=9 IQR 0.0144 SE 0.0139 | B/A 0.9992 (B-A -0.0040 ms) pooled n/n/n bars r/i/s 4.44/0.69/0.57 %; passes p0 0.9984 n/n/n p1 1.0017 n/n/n p2 1.0007 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 2.06 % = 0.1096 ms
+   => HOLDS (B slower not claimed)
+C3-JT P16->T16: A 2.0502 [2.0393-2.0659] K=9 IQR 0.0108 SE 0.0034 | B 2.1870 [2.1816-2.2341] K=6 IQR 0.0112 SE 0.0103 | B/A 1.0667 (B-A +0.1368 ms) pooled Y/Y/Y bars r/i/s 5.45/1.46/1.00 %; passes p0 1.0749 n/n/n p1 1.0628 n/n/n p2 1.0729 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s True; binding 3.05 % = 0.0625 ms
+   => NOT CLAIMED, P16-T16 = -0.1368 ms
+W1 P1->T1 (optional): A 4.4070 [4.3957-4.4770] K=7 IQR 0.0337 SE 0.0140 | B 4.4551 [4.4037-4.5598] K=9 IQR 0.0667 SE 0.0240 | B/A 1.0109 (B-A +0.0481 ms) pooled n/n/n bars r/i/s 7.92/3.36/1.25 %; passes p0 0.9925 n/n/n p1 1.0067 n/n/n p2 1.0118 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s False; binding 3.66 % = 0.1613 ms
+   => HOLDS (B slower not claimed)
+   ladder8 S7-ladder8-F0.5 inj 0.0300: rise +0.0329 ms (x1.10) pooled n/n/Y p0 n/n/n p1 n/n/n p2 n/n/n -> not seen
+   ladder8 S7-ladder8-F1 inj 0.0600: rise +0.0660 ms (x1.10) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/Y/Y -> SEEN
+   ladder8 S7-ladder8-F1.5 inj 0.0900: rise +0.0911 ms (x1.01) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 n/Y/Y -> SEEN
+   ladder8 S7-ladder8-F2 inj 0.1200: rise +0.1267 ms (x1.06) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/n/n -> not seen
+   ladder8: R = None
+   ladder16 S7-ladder16-F0.5 inj 0.0525: rise +0.0545 ms (x1.04) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1 inj 0.1050: rise +0.1139 ms (x1.09) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1.5 inj 0.1575: rise +0.1590 ms (x1.01) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/n/n -> not seen
+   ladder16 S7-ladder16-F2 inj 0.2100: rise +0.2122 ms (x1.01) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/n/n -> not seen
+   ladder16: R = None
+   JA-rung16 S7-JA-ladder16-F1 inj 0.1050: rise +0.1034 ms (x0.98) pooled n/Y/Y p0 n/n/n p1 n/n/n p2 Y/Y/Y -> not seen
+   JA-rung16: R = None
+-- window [0,100)
+C1-JT T8->T16: A 1.9714 [1.9632-2.0019] K=8 IQR 0.0084 SE 0.0054 | B 2.3306 [2.3240-2.3552] K=6 IQR 0.0023 SE 0.0056 | B/A 1.1822 (B-A +0.3593 ms) pooled Y/Y/Y bars r/i/s 4.75/0.88/0.73 %; passes p0 1.1905 n/n/n p1 1.1791 n/n/n p2 1.1759 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s True; binding 2.45 % = 0.0483 ms
+   => HOLDS (B slower not claimed)
+C1-JA T8->T16: A 5.4386 [5.4165-5.4734] K=9 IQR 0.0110 SE 0.0068 | B 5.9839 [5.9606-6.0614] K=9 IQR 0.0120 SE 0.0121 | B/A 1.1003 (B-A +0.5453 ms) pooled Y/Y/Y bars r/i/s 3.97/0.57/0.47 %; passes p0 1.1008 Y/Y/Y p1 1.1004 Y/Y/Y p2 1.1001 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 1.56 % = 0.0850 ms
+   => FAILS/REFUTED (B slower claimed STRONG)
+C2-JT P8->T8: A 1.9829 [1.9579-2.0197] K=9 IQR 0.0276 SE 0.0084 | B 1.9714 [1.9632-2.0019] K=8 IQR 0.0084 SE 0.0054 | B/A 0.9942 (B-A -0.0115 ms) pooled n/n/n bars r/i/s 7.37/2.91/1.01 %; passes p0 0.9934 n/n/n p1 0.9955 n/n/n p2 0.9843 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 2.95 % = 0.0585 ms
+   => HOLDS (B slower not claimed)
+C2-JA P8->T8: A 5.4397 [5.4085-5.4594] K=9 IQR 0.0115 SE 0.0060 | B 5.4386 [5.4165-5.4734] K=9 IQR 0.0110 SE 0.0068 | B/A 0.9998 (B-A -0.0011 ms) pooled n/n/n bars r/i/s 2.81/0.59/0.33 %; passes p0 0.9989 n/n/n p1 1.0011 n/n/n p2 0.9989 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 1.19 % = 0.0650 ms
+   => HOLDS (B slower not claimed)
+C3-JT P16->T16: A 2.2008 [2.1875-2.2137] K=9 IQR 0.0057 SE 0.0032 | B 2.3306 [2.3240-2.3552] K=6 IQR 0.0023 SE 0.0056 | B/A 1.0590 (B-A +0.1298 ms) pooled Y/Y/Y bars r/i/s 3.58/0.55/0.56 %; passes p0 1.0654 n/n/n p1 1.0550 n/n/n p2 1.0608 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s True; binding 1.41 % = 0.0310 ms
+   => NOT CLAIMED, P16-T16 = -0.1298 ms
+W1 P1->T1 (optional): A 5.3374 [5.2911-5.5668] K=7 IQR 0.0686 SE 0.0458 | B 5.3754 [5.3065-5.4661] K=9 IQR 0.0786 SE 0.0247 | B/A 1.0071 (B-A +0.0380 ms) pooled n/n/n bars r/i/s 11.92/3.89/1.95 %; passes p0 0.9776 n/n/n p1 1.0099 n/n/n p2 1.0089 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s False; binding 6.29 % = 0.3358 ms
+   => HOLDS (B slower not claimed)
+   ladder8 S7-ladder8-F0.5 inj 0.0300: rise +0.0370 ms (x1.23) pooled n/n/Y p0 n/n/n p1 n/Y/Y p2 n/n/n -> not seen
+   ladder8 S7-ladder8-F1 inj 0.0600: rise +0.0705 ms (x1.17) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/n/n -> not seen
+   ladder8 S7-ladder8-F1.5 inj 0.0900: rise +0.0943 ms (x1.05) pooled n/Y/Y p0 n/n/Y p1 Y/Y/Y p2 n/Y/Y -> not seen
+   ladder8 S7-ladder8-F2 inj 0.1200: rise +0.1278 ms (x1.07) pooled n/Y/Y p0 Y/Y/Y p1 n/n/Y p2 n/n/n -> not seen
+   ladder8: R = None
+   ladder16 S7-ladder16-F0.5 inj 0.0525: rise +0.0591 ms (x1.13) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1 inj 0.1050: rise +0.1273 ms (x1.21) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1.5 inj 0.1575: rise +0.1677 ms (x1.06) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/n/n -> not seen
+   ladder16 S7-ladder16-F2 inj 0.2100: rise +0.2188 ms (x1.04) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/n/n -> not seen
+   ladder16: R = None
+   JA-rung16 S7-JA-ladder16-F1 inj 0.1050: rise +0.0995 ms (x0.95) pooled n/Y/Y p0 n/n/n p1 n/n/n p2 Y/Y/Y -> not seen
+   JA-rung16: R = None
+-- window [100,500)
+C1-JT T8->T16: A 1.7665 [1.7589-1.8165] K=8 IQR 0.0222 SE 0.0109 | B 2.1511 [2.1458-2.2038] K=6 IQR 0.0133 SE 0.0115 | B/A 1.2177 (B-A +0.3846 ms) pooled Y/Y/Y bars r/i/s 8.47/2.80/1.63 %; passes p0 1.2282 n/n/n p1 1.2199 n/n/n p2 1.2070 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s True; binding 4.06 % = 0.0716 ms
+   => HOLDS (B slower not claimed)
+C1-JA T8->T16: A 5.2713 [5.2617-5.3960] K=9 IQR 0.0158 SE 0.0173 | B 5.8369 [5.8124-5.9404] K=9 IQR 0.0143 SE 0.0155 | B/A 1.1073 (B-A +0.5656 ms) pooled Y/Y/Y bars r/i/s 6.72/0.78/0.84 %; passes p0 1.1076 Y/Y/Y p1 1.1058 Y/Y/Y p2 1.1059 Y/Y/Y | CLAIMED True (B slower) STRONG True (pooled-r reading True); pooled-only i&s True; binding 2.59 % = 0.1364 ms
+   => FAILS/REFUTED (B slower claimed STRONG)
+C2-JT P8->T8: A 1.7746 [1.7583-1.8064] K=9 IQR 0.0138 SE 0.0062 | B 1.7665 [1.7589-1.8165] K=8 IQR 0.0222 SE 0.0109 | B/A 0.9954 (B-A -0.0082 ms) pooled n/n/n bars r/i/s 8.48/2.95/1.42 %; passes p0 0.9989 n/n/n p1 0.9943 n/n/n p2 1.0026 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 4.21 % = 0.0746 ms
+   => HOLDS (B slower not claimed)
+C2-JA P8->T8: A 5.2737 [5.2417-5.2891] K=9 IQR 0.0171 SE 0.0061 | B 5.2713 [5.2617-5.3960] K=9 IQR 0.0158 SE 0.0173 | B/A 0.9995 (B-A -0.0024 ms) pooled n/n/n bars r/i/s 5.40/0.88/0.69 %; passes p0 0.9978 n/n/n p1 1.0022 n/n/n p2 1.0019 n/n/n | CLAIMED False (B faster) STRONG False (pooled-r reading False); pooled-only i&s False; binding 2.57 % = 0.1355 ms
+   => HOLDS (B slower not claimed)
+C3-JT P16->T16: A 2.0115 [2.0022-2.0327] K=9 IQR 0.0120 SE 0.0040 | B 2.1511 [2.1458-2.2038] K=6 IQR 0.0133 SE 0.0115 | B/A 1.0694 (B-A +0.1395 ms) pooled Y/Y/Y bars r/i/s 6.19/1.72/1.14 %; passes p0 1.0781 n/n/n p1 1.0650 n/n/n p2 1.0762 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s True; binding 3.50 % = 0.0704 ms
+   => NOT CLAIMED, P16-T16 = -0.1395 ms
+W1 P1->T1 (optional): A 4.1809 [4.1647-4.2123] K=7 IQR 0.0217 SE 0.0085 | B 4.2213 [4.1753-4.3332] K=9 IQR 0.0614 SE 0.0240 | B/A 1.0097 (B-A +0.0404 ms) pooled n/n/n bars r/i/s 7.82/3.09/1.21 %; passes p0 0.9979 n/n/n p1 1.0124 n/Y/Y p2 1.0127 n/n/n | CLAIMED False (B slower) STRONG False (pooled-r reading False); pooled-only i&s False; binding 3.58 % = 0.1496 ms
+   => HOLDS (B slower not claimed)
+   ladder8 S7-ladder8-F0.5 inj 0.0300: rise +0.0253 ms (x0.84) pooled n/n/Y p0 n/n/n p1 n/n/n p2 n/n/n -> not seen
+   ladder8 S7-ladder8-F1 inj 0.0600: rise +0.0590 ms (x0.98) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/Y/Y -> SEEN
+   ladder8 S7-ladder8-F1.5 inj 0.0900: rise +0.0898 ms (x1.00) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder8 S7-ladder8-F2 inj 0.1200: rise +0.1208 ms (x1.01) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/n/n -> not seen
+   ladder8: R = None
+   ladder16 S7-ladder16-F0.5 inj 0.0525: rise +0.0540 ms (x1.03) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1 inj 0.1050: rise +0.1116 ms (x1.06) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> SEEN
+   ladder16 S7-ladder16-F1.5 inj 0.1575: rise +0.1567 ms (x1.00) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/n/n -> not seen
+   ladder16 S7-ladder16-F2 inj 0.2100: rise +0.2115 ms (x1.01) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/n/n -> not seen
+   ladder16: R = None
+   JA-rung16 S7-JA-ladder16-F1 inj 0.1050: rise +0.1030 ms (x0.98) pooled n/Y/Y p0 n/n/Y p1 n/n/n p2 Y/Y/Y -> not seen
+   JA-rung16: R = None
+
+## Verdict agreement across selections ([0,500))
+C1-JT T8->T16: main FAILS/REFUTED (B slower claimed STRONG) | originals FAILS/REFUTED (B slower claimed STRONG) | share-drop HOLDS (B slower not claimed)
+C1-JA T8->T16: main FAILS/REFUTED (B slower claimed STRONG) | originals FAILS/REFUTED (B slower claimed STRONG) | share-drop FAILS/REFUTED (B slower claimed STRONG)
+C2-JT P8->T8: main HOLDS (B slower not claimed) | originals HOLDS (B slower not claimed) | share-drop HOLDS (B slower not claimed)
+C2-JA P8->T8: main HOLDS (B slower not claimed) | originals HOLDS (B slower not claimed) | share-drop HOLDS (B slower not claimed)
+C3-JT P16->T16: main REFUTED (T slower claimed STRONG), P16-T16 = -0.1400 ms | originals REFUTED (T slower claimed STRONG), P16-T16 = -0.1400 ms | share-drop NOT CLAIMED, P16-T16 = -0.1368 ms
+W1 P1->T1 (optional): main HOLDS (B slower not claimed) | originals HOLDS (B slower not claimed) | share-drop HOLDS (B slower not claimed)
+ladder8: main 0.06 | originals 0.06 | share-drop None
+ladder16: main 0.0525 | originals 0.0525 | share-drop None
+JA-rung16: main None | originals None | share-drop None
+-- [0,100): C1-JT T8->T16: FAILS/REFUTED (B slower claimed STRONG); C1-JA T8->T16: FAILS/REFUTED (B slower claimed STRONG); C2-JT P8->T8: HOLDS (B slower not claimed); C2-JA P8->T8: HOLDS (B slower not claimed); C3-JT P16->T16: REFUTED (T slower claimed STRONG), P16-T16 = -0.1308 ms; W1 P1->T1 (optional): HOLDS (B slower not claimed); ladder8: None; ladder16: 0.0525; JA-rung16: None
+-- [100,500): C1-JT T8->T16: FAILS/REFUTED (B slower claimed STRONG); C1-JA T8->T16: FAILS/REFUTED (B slower claimed STRONG); C2-JT P8->T8: HOLDS (B slower not claimed); C2-JA P8->T8: HOLDS (B slower not claimed); C3-JT P16->T16: REFUTED (T slower claimed STRONG), P16-T16 = -0.1437 ms; W1 P1->T1 (optional): HOLDS (B slower not claimed); ladder8: 0.06; ladder16: 0.0525; JA-rung16: None

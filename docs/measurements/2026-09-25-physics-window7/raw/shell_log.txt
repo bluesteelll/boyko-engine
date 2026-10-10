@@ -1,0 +1,6 @@
+2026-09-25 01:02:16 run_window.sh start: --cutoff 10:00
+2026-09-25 01:59:51 driver exit 3
+2026-09-25 01:59:51 WINDOW_DONE written: exit 3 STOP before P1A-jolt-p1: idle rule not met in 30 min (wait_idle exit 1); last finished: P1A-jolt-p0 r2 H-trk-ap#trk@W16 
+2026-09-25 02:45:53 run_window.sh start: --cutoff 10:30 --resume
+2026-09-25 05:03:57 driver exit 0
+2026-09-25 05:03:58 WINDOW_DONE written: exit 0 complete 

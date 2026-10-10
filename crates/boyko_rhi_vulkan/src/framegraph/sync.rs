@@ -89,6 +89,91 @@ impl SubRange {
             layer_count: layers,
         }
     }
+
+    /// A whole-MIP-CHAIN COLOR range over `[0, mips)`, one array layer — the range a pass
+    /// that touches an entire mipped image declares (VG R3: the HZB depth pyramid, whose
+    /// build seeds mip 0 and whose consumers sample the chain). The mip analogue of
+    /// [`color_layers`](Self::color_layers) — and the first constructor here that varies
+    /// `mip_count` at all; every other range in this module pins it to 1.
+    ///
+    /// Since VG R3 P1-5a the sync state is keyed `(ResId, mip)`, so a whole-chain range is no
+    /// longer copied verbatim into ONE barrier:
+    /// [`FrameGraph::compile`](super::graph::FrameGraph::compile) advances each mip's state
+    /// separately and emits one barrier per maximal RUN of adjacent mips whose derived
+    /// transition is identical. A chain whose mips are all in the same state therefore still
+    /// emits exactly one barrier over `[0, mips)` — the pre-P1-5a shape — while a chain whose
+    /// mips diverged (mip 0 sampled, the rest still written) emits one barrier per run.
+    /// `aspect`/`base_layer`/`layer_count` are still copied verbatim; only the mip span is
+    /// derived.
+    ///
+    /// The declared span must lie inside the mip count the resource was DECLARED with
+    /// ([`FrameGraph::add_image_mipped`](super::graph::FrameGraph::add_image_mipped) — plain
+    /// [`add_image`](super::graph::FrameGraph::add_image) means one). `image_access` checks
+    /// that in EVERY profile, because the barrier path itself bounds nothing.
+    #[inline]
+    pub const fn color_mips(mips: u32) -> Self {
+        Self {
+            aspect: VK_IMAGE_ASPECT_COLOR_BIT,
+            base_mip: 0,
+            mip_count: mips,
+            base_layer: 0,
+            layer_count: 1,
+        }
+    }
+
+    /// `true` iff `self` and `other` select the same ARRAY-LAYER span — equal
+    /// `(base_layer, layer_count)`.
+    ///
+    /// This is the LIVE predicate behind `INVARIANT SUBRESOURCE-LAYER-UNIFORM` in
+    /// [`FrameGraph::compile`](super::graph::FrameGraph::compile). The MIP fields are
+    /// deliberately NOT compared: since VG R3 P1-5a the sync state is keyed `(ResId, mip)`,
+    /// so two accesses naming different mips of one image are tracked separately and there is
+    /// no single layout for them to disagree about. Layers are still uniform-by-requirement —
+    /// one `ResSync` block per resource covers ALL its layers — so that axis keeps its guard.
+    ///
+    /// `aspect` is not compared either: it selects which PLANES a barrier covers, a separate
+    /// axis this predicate makes no claim about (today no resource declares two aspects —
+    /// color images use [`COLOR`](Self::COLOR)/[`color_layers`](Self::color_layers)/
+    /// [`color_mips`](Self::color_mips), depth images
+    /// [`DEPTH`](Self::DEPTH)/[`depth_layers`](Self::depth_layers), and buffers always the
+    /// `COLOR` placeholder).
+    ///
+    /// `cfg(debug_assertions)` + `pub(crate)`: its only caller is the debug-only invariant
+    /// check, so it is not permanent public API. A `pub` spelling would have made it one
+    /// forever in exchange for silencing a dead-code warning that this attribute removes at
+    /// the source.
+    #[cfg(debug_assertions)]
+    #[inline]
+    pub(crate) const fn same_layers(&self, other: &Self) -> bool {
+        self.base_layer == other.base_layer && self.layer_count == other.layer_count
+    }
+
+    /// `true` iff `self` and `other` select the SAME set of subresources — equal
+    /// `(base_mip, mip_count, base_layer, layer_count)`.
+    ///
+    /// **FROZEN-REFERENCE ONLY, and that is why it survives the P1-5a narrowing.** Its sole
+    /// caller is
+    /// [`FrameGraph::compile_per_resource_reference`](super::graph::FrameGraph::compile_per_resource_reference),
+    /// the verbatim commit-C1 copy of the per-`ResId` state machine that the P1-5a
+    /// differential diffs the live `compile` against. That body is NEVER PATCHED — a frozen
+    /// copy that drifts still looks like evidence — so it keeps calling the predicate it was
+    /// frozen with, and this function is kept alive for it rather than the body being edited
+    /// to call [`same_layers`](Self::same_layers). Over the single-mip regime the differential
+    /// runs in, the two predicates are the same function anyway; over a mipped graph they are
+    /// not, and it is the frozen body's job to keep answering as the OLD machine did.
+    ///
+    /// `cfg(all(test, debug_assertions))` is exactly the cfg of its one caller: the reference
+    /// is `#[cfg(test)]` and its call sits inside a `#[cfg(debug_assertions)]` block, so this
+    /// spelling leaves no dead code in any other profile. It is deleted together with the
+    /// reference and the differential at the end of piece 1 of P1-5a.
+    #[cfg(all(test, debug_assertions))]
+    #[inline]
+    pub(crate) const fn same_span(&self, other: &Self) -> bool {
+        self.base_mip == other.base_mip
+            && self.mip_count == other.mip_count
+            && self.base_layer == other.base_layer
+            && self.layer_count == other.layer_count
+    }
 }
 
 /// A derived image-memory barrier (Vk-valued, resource-logical). Lowered to a

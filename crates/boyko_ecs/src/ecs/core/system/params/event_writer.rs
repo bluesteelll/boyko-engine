@@ -186,6 +186,8 @@ impl<E: Event> EventWriter<'_, E> {
 //   - SP4: `init_state` reads `R::event_id()` and `EventDispatcher::buffer_ptr`
 //     — both are pure reads with respect to archetype/resource registries.
 unsafe impl<E: Event> SystemParam for EventWriter<'_, E> {
+    const HAS_DEFERRED: bool = false;
+
     type State = EventWriterState<E>;
     type Item<'w, 's> = EventWriter<'s, E>;
 

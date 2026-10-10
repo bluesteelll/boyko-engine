@@ -102,7 +102,7 @@ The colored solve REORDERS the contact sweep vs the shipped manifold-order sweep
 
 ### Decision 7 (NEW, from C3): The colored/SIMD path is a SEPARATE `RigidSolver` impl, selected by config — `SoftStepSolver` is byte-untouched
 
-**What:** Introduce `ColoredSoftStepSolver` as a distinct `RigidSolver` implementation. The shipped `SoftStepSolver` (and its AoS `PointConstraint` layout, soft_step.rs:475-601) is **byte-untouched** — it remains the default and the 0%-gate reference. The colored solver owns its own SoA `ContactColumns` layout internally and is selected via `add_physics_parallel`/`PhysicsConfig`.
+**What:** Introduce `ColoredSoftStepSolver` as a distinct `RigidSolver` implementation. The shipped `SoftStepSolver` (and its AoS `PointConstraint` layout, soft_step.rs:475-601) is **byte-untouched** — it remains the default and the 0%-gate reference (it stayed the default until 2026-09-18, when the owner made the colored solve the default world, `DefaultRigidSolver`; `SoftStepSolver` is still byte-untouched and is the reference oracle). The colored solver owns its own SoA `ContactColumns` layout internally and is selected via `add_physics_parallel`/`PhysicsConfig`.
 
 **Why (resolves the C3 self-contradiction):** The draft simultaneously claimed "SoA-restructure `PointConstraint`" AND "scalar path byte-identical" — impossible, because the scalar Gauss-Seidel reads that struct. Two solvers cleanly separate concerns: the scalar reference solver keeps its AoS layout and stays the bit-baseline; the colored solver is free to use SoA columns, coloring, threads, and SIMD without touching the reference. The cost is two solvers to maintain — accepted, because it is the ONLY way to keep a true 0%-gate AND a swappable backend (the existing `RigidSolver` seam principle).
 
@@ -168,7 +168,7 @@ pub struct IslandSleep {
 
 **W2 resolution (no-per-step-alloc):** every data-dependent-count dimension (colors, islands, candidate pairs) is **CSR-flattened to a single flat `Vec` + offsets** (the same pattern the grid already uses for `cell_bodies`/`cell_start`). The ONLY nested `Vec` is the per-worker grid scratch, whose **outer length is the FIXED worker count** (a `Box<[Vec<_>]>` allocated once at setup, inner Vecs cleared-not-dropped) — so it never reallocates per frame. The `color_occ` bitset matrix is a flat `Vec<u64>` indexed `color*words_per_color + word`, grown by `reserve` and `clear`-ed (capacity reused). The debug alloc-counter gate (below) therefore holds even as color/island counts fluctuate.
 
-`PhysicsConfig` additions (all defaulted to current behavior so the 0%-gate holds): `broadphase: BroadphaseKind` (`AllPairs` default = byte-identical today, `Grid` opt-in), `parallel_solve: bool` (false), `simd_solve: bool` (false), `sleeping: bool` (false), `sleep_threshold: f32`, `sleep_frames: u16`, `spatial_sort: bool` (false). Each is a single runtime `test/jz` (the one-branch floor); when off, the asm is the existing scalar path.
+`PhysicsConfig` additions (all defaulted to current behavior so the 0%-gate holds): `broadphase: BroadphaseKind` (`AllPairs` default = byte-identical today, `Grid` opt-in), `parallel_solve: bool` (false), `simd_solve: bool` (false; flipped to `true` on 2026-09-18 by owner decision, bit-identical to the scalar colored oracle), `sleeping: bool` (false), `sleep_threshold: f32`, `sleep_frames: u16`, `spatial_sort: bool` (false). Each is a single runtime `test/jz` (the one-branch floor); when off, the asm is the existing scalar path.
 
 ```rust
 // O7: SoA contact columns OWNED BY ColoredSoftStepSolver (NOT a restructure of
@@ -344,7 +344,7 @@ The single highest-risk transition is **O5** (the only converged-value change). 
 The physics path is production-scale-ready when ALL hold:
 - **Correctness:** O2's post-filter grid pairs == all-pairs bit-identical on 1000 random scenes; O4's coloring/island invariants hold on 1000 random graphs.
 - **Determinism:** {1,N}-thread AND {SIMD-on/off} bit-identical on a forced-collision dense scene (C2); `solver_is_deterministic` + `static_body_unmoved_under_tgs` green across all phases; the IM-2b canonical warm-store proven.
-- **0%-gate:** the default world (`AllPairs`, single-thread, SIMD-off, the byte-untouched `SoftStepSolver`) is byte-identical to today; every new path is opt-in.
+- **0%-gate:** the default world (`AllPairs`, single-thread, SIMD-off, the byte-untouched `SoftStepSolver`) is byte-identical to today; every new path is opt-in. *(Superseded by owner decisions: `simd` defaults on since 2026-09-03; since 2026-09-18 the default world is the colored solve with `simd_solve` on, and `SoftStepSolver` — still byte-untouched — is selected by naming it.)*
 - **Scale wins (criterion-measured, not asserted here):** broadphase shows a real measured crossover and a large reduction at 10k+; the colored+SIMD solve shows ≥1.8× (SIMD) atop the parallel scaling on a 10k pyramid; a 10k resting scene with sleeping costs ≤5% of an awake step.
 - **IM-1 intact:** the `physics_apply` desync assert never fires under any feature (incl. sleeping — C1); warm-start un-thrashed on slept scenes.
 - **Soundness:** no new `unsafe` outside the SIMD kernels, each `// SAFETY:`-documented with a differential scalar oracle; Miri clean on all scalar paths.

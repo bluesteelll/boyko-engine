@@ -1,0 +1,5 @@
+row_identity_churn/burst_despawn/sleeping_off_tree
+                        time:   [9.6362 ms 9.6575 ms 9.6761 ms]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

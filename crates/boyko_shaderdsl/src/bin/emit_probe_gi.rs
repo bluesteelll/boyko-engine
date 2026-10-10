@@ -14,7 +14,11 @@
 //! 0%-gate risk, plan §1.1). The remaining structure (the STORAGE decls, the include contract,
 //! the probe-index→world-position glue, the round-robin subset gate, the classification
 //! read/write, the Fibonacci ray fetch, the per-ray direct-light shade loop, the groupshared
-//! cooperative thread mapping) is hand-authored HLSL glue per plan §1.6 / §2.
+//! cooperative thread mapping, and — SDFDDGI I7 — the octahedral tile BORDER-COPY
+//! (`border_copy_index` + the per-atlas border-fill loops run after each atlas's interior write,
+//! behind a `DeviceMemoryBarrierWithGroupSync`) is hand-authored HLSL glue per plan §1.6 / §2. I7
+//! is a texel-COPY index map, not marcher/field math, so it is glue here rather than a new eDSL
+//! leaf — it does not touch the frozen `oct_decode`/`probe_march`/`probe_blend` spans.
 //!
 //! Run: `cargo run -p boyko_shaderdsl --features emit --bin emit_probe_gi`
 //!
@@ -189,6 +193,12 @@ static const uint  DDGI_DEPTH_VALID_EXTENT = 14u; // the valid interior extent (
 static const uint  DDGI_TILE_BORDER      = 1u;    // the 1-texel border inset
 static const float DDGI_MIN_SUM_WEIGHT   = 1.0e-6; // the resolve-side cosine-sum divide guard
 
+// SDFDDGI I7: the octahedral tile border-RING texel counts (the 1-texel ring around the valid
+// interior — `tile_edge^2 - valid_extent^2 == 4*(tile_edge-1)`), the loop bound the border-copy
+// pass below iterates over. Symbolic, mirroring the valid-extent/tile-edge pair per atlas.
+static const uint  DDGI_IRR_BORDER_COUNT   = 4u * (DDGI_IRR_TILE_EDGE - 1u);   // 28
+static const uint  DDGI_DEPTH_BORDER_COUNT = 4u * (DDGI_DEPTH_TILE_EDGE - 1u); // 60
+
 // The classification bits (plan §4).
 static const uint DDGI_CLASS_ACTIVE    = 1u;      // bit0: probe not inside geometry
 static const uint DDGI_CLASS_CONVERGED = 2u;      // bit1: first successful tile write done
@@ -202,18 +212,48 @@ static const float GI_INSIDE_EPS       = 0.0;     // `field_distance(probe) < ep
 static const float GI_ROT_SPIN    = 0.2393; // primary spin per frame (rad), constant angular vel
 static const float GI_ROT_PRECESS = 0.0409; // slow axis precession per frame (rad), incommensurate
 static const float GI_ROT_TILT    = 0.9553; // precession cone half-angle (~54.7 deg, even coverage)
-// Firefly clamp on ONE ray's shaded radiance (anti a lone bright hit freezing into the EMA for
-// ~1/(1-alpha) frames). Generous — a sunlit Lambert surface is O(1), so 16 never clips real signal.
-static const float DDGI_MAX_RADIANCE = 16.0;
+// Firefly clamp on ONE ray's INCIDENT irradiance (anti a lone bright hit freezing into the EMA
+// for ~1/(1-alpha) frames). Generous — a sunlit Lambert surface is O(1), so 16 never clips real
+// signal. SDFDDGI D-A renamed it from `DDGI_MAX_RADIANCE` and moved its application INTO
+// `shade_hit`, AHEAD of the new rho/PI factor, so the set of rays it clips stays bit-identical to
+// the pre-D-A behaviour (which clamped `lit * 1.0` — the same irradiance this clamps). Left on the
+// post-BRDF radiance at the same numeric 16 it would silently have LOOSENED by PI/rho instead.
+static const float DDGI_MAX_HIT_IRRADIANCE = 16.0;
 // Depth two-moment distance clamp (x spacing): a sky-miss ray writes GI_T_MAX (10); left raw it
 // blows up E[d^2] -> a huge Chebyshev variance -> light leak. 1.5*spacing (the RTXGI rule) keeps the
 // moments inside the resolve's probe-neighbourhood query range.
 static const float GI_DEPTH_CLAMP_SCALE = 1.5;
-// A single constant standing in for the diffuse bounce reflectance the update shade omits (the
-// update set binds NO material table, so `shade_hit` returns the hit's incident light, not
-// rho/pi * E). 1.0 = the I3 behaviour (white bounce, no per-hit albedo tint — colored bleeding is a
-// follow-up needing the material table in the update set); tuned from the owner-eval picture.
-static const float GI_BOUNCE_SCALE = 1.0;
+// --- SDFDDGI D-A: the Lambertian bounce — transport and look kept APART ----------------------
+// `shade_hit` accumulates the IRRADIANCE E arriving at a ray's hit point. What a probe ray must
+// carry back is that point's OUTGOING RADIANCE, which for a Lambertian bouncer is
+// `L_o = (rho / PI) * E`. Up to and including I7 that BRDF factor was absent altogether: the
+// bounce shipped E itself, so every bounce was PI/rho too strong — 3.926991x at the engine-default
+// albedo, and still 3.1416x even at a perfectly white bouncer, so the omission was never a tint
+// but the whole BRDF normalisation.
+//
+// The READ side needs no matching change, and that was checked rather than assumed: `probe_blend`
+// divides by `sum_w`, i.e. stores a cosine-WEIGHTED MEAN radiance (E/PI for a constant field), and
+// the resolve's `ambient += diffuse_color * gi * ao_final` (`deferred_pbr.hlsl`) applies the
+// RECEIVER's albedo with no further 1/PI — correct precisely because `gi` is already E/PI. Exactly
+// ONE factor of rho/PI was missing from the chain, and it was missing here.
+//
+// The two constants below are deliberately separate, because they answer different questions:
+//
+//   * GI_BOUNCE_ALBEDO is PHYSICS. The update bind-set carries no material table, so the per-hit
+//     reflectance cannot be looked up here; this stands in for it, at the engine's OWN default
+//     material base colour (`boyko_render::material::MaterialGpu::default` = 0.8; that default is
+//     a non-metal, so the resolve's `diffuse_color = base * (1 - metallic)` is 0.8 as well). It
+//     is a stand-in for a MEASURABLE quantity, not a brightness preference. Per-hit albedo
+//     (coloured bleeding) needs the material table in the update set — a follow-up.
+//   * GI_BOUNCE_INTENSITY is the ARTISTIC knob, and the ONLY dial here that expresses a look
+//     preference. 1.0 means "no artistic scaling", i.e. physically-correct transport, and it is
+//     left at 1.0 ON PURPOSE rather than pre-set to whatever reproduces the old picture: that
+//     picture was an ARTEFACT of the missing BRDF factor, so choosing the new brightness is an
+//     owner call, not the fix's. `GI_BOUNCE_INTENSITY = PI / GI_BOUNCE_ALBEDO = 3.926991`
+//     reproduces the pre-D-A picture — to within float rounding of the product, not bit-exactly.
+static const float GI_BOUNCE_ALBEDO    = 0.8;
+static const float GI_INV_PI           = 0.318309886;
+static const float GI_BOUNCE_INTENSITY = 1.0;
 
 // The groupshared cooperative ray cache (plan §2.4): one thread-block per active probe; the 64
 // threads cooperatively march the rays into LDS, sync, then cooperatively gather the texels.
@@ -258,6 +298,77 @@ uint3 tile_origin(uint3 c, uint tile_edge) {{
     return uint3(c.y, c.x * tile_edge, c.z * tile_edge);
 }}
 
+// SDFDDGI I7 — the octahedral tile BORDER-COPY index map. Maps a border-ring texel index `bt`
+// (in [0, 4*(tile_edge-1))) to its LOCAL destination texel `dst` (in the full [0,tile_edge)^2
+// tile) and its LOCAL source INTERIOR texel `src` (in [0,valid_extent)^2) to copy from. The
+// interior occupies local [DDGI_TILE_BORDER, DDGI_TILE_BORDER + valid_extent - 1]^2; the border
+// ring is the outermost 1-texel edge. Filling it is what lets a LINEAR SampleLevel tap straddling
+// a tile edge read the octahedrally-continuous neighbour instead of the boot-clear 0 (closing the
+// I3 resolve's seam-bleed / depth-leak at `ddgi_irr_uv`/`ddgi_depth_uv`'s oct-UV extremes).
+//
+// SDFDDGI D-B — THE RULE, AND WHAT IT REPLACES.
+//
+// The octahedral square folds each edge ONTO ITSELF, reversed. The right edge `(1, s)` decodes to
+// `normalize(1 - |s|, 0, -|s|)`, which does not depend on `sign(s)`: `(1, s)` and `(1, -s)` ARE
+// the same direction, so a path leaving through the right edge re-enters through the RIGHT edge
+// at the mirrored row. A border texel's continuation is therefore the REFLECTION of its own
+// position about the edge it crossed, with the TANGENTIAL coordinate negated:
+//
+//     sx >  1  =>  sx = 2 - sx,  sy = -sy        sy >  1  =>  sy = 2 - sy,  sx = -sx
+//     sx < -1  =>  sx = -2 - sx, sy = -sy        sy < -1  =>  sy = -2 - sy, sx = -sx
+//
+// So an EDGE texel copies from the interior row/column it TOUCHES, tangential index reversed —
+// NOT from the opposite side of the tile. At a CORNER both reflections compose (in either order,
+// they commute) and the source IS the diagonally-opposite interior corner, which is why the four
+// corner arms below are unchanged from I7.
+//
+// The pre-D-B map generalised the CORNER rule to the EDGES, and its comment stated that wrong
+// rule in as many words ("the OPPOSITE interior row"), so comment and code agreed with each other
+// and both were wrong: 24 of the irradiance tile's 28 border texels, and 56 of the depth tile's
+// 60, held a direction from the far side of the sphere. A receiver normal that encodes onto a
+// tile edge (+-x, +-y — every floor and every upward-facing face among them) draws 50% of its
+// LINEAR tap from that ring, so those normals read half of the WRONG hemisphere; on the depth
+// tile the same error feeds Chebyshev, so it was a leak term as well as a colour term.
+//
+// Gated on the HOST, with no device, by `boyko_rhi_vulkan/tests/ddgi_oct_border_host_oracle.rs`:
+// it decodes what each border POSITION stands for through this same continuation rule and the
+// tree's own `oct_decode`, and requires the named source to hold that direction.
+void border_copy_index(uint bt, uint tile_edge, uint valid_extent, out uint2 dst, out uint2 src) {{
+    uint v = valid_extent;
+    if (bt < tile_edge) {{
+        // Top row (local y = 0); bt is the local x (column).
+        uint bx = bt;
+        dst = uint2(bx, 0u);
+        if (bx == 0u) {{ src = uint2(v - 1u, v - 1u); return; }}          // top-left <- bottom-right interior
+        if (bx == tile_edge - 1u) {{ src = uint2(0u, v - 1u); return; }}  // top-right <- bottom-left interior
+        uint cx = bx - DDGI_TILE_BORDER;
+        src = uint2(v - 1u - cx, 0u);                                    // TOP interior row (adjacent), column reversed
+        return;
+    }}
+    bt -= tile_edge;
+    if (bt < tile_edge) {{
+        // Bottom row (local y = tile_edge - 1); bt is the local x (column).
+        uint bx = bt;
+        dst = uint2(bx, tile_edge - 1u);
+        if (bx == 0u) {{ src = uint2(v - 1u, 0u); return; }}              // bottom-left <- top-right interior
+        if (bx == tile_edge - 1u) {{ src = uint2(0u, 0u); return; }}      // bottom-right <- top-left interior
+        uint cx = bx - DDGI_TILE_BORDER;
+        src = uint2(v - 1u - cx, v - 1u);                                 // BOTTOM interior row (adjacent), column reversed
+        return;
+    }}
+    bt -= tile_edge;
+    if (bt < v) {{
+        // Left col (local x = 0), corners excluded; bt is the local y offset within the interior span.
+        dst = uint2(0u, bt + DDGI_TILE_BORDER);
+        src = uint2(0u, v - 1u - bt);                                    // LEFT interior col (adjacent), row reversed
+        return;
+    }}
+    bt -= v;
+    // Right col (local x = tile_edge - 1), corners excluded; bt is the local y offset.
+    dst = uint2(tile_edge - 1u, bt + DDGI_TILE_BORDER);
+    src = uint2(v - 1u, v - 1u - bt);                                    // RIGHT interior col (adjacent), row reversed
+}}
+
 // The valid-interior texel (tx, ty) -> the [0,1]^2 tile UV oct_decode remaps to [-1,1]^2. The
 // texel CENTER maps through `(tx + 0.5) / VALID_EXTENT` (mirrors the I0b host oracle
 // `goldens::ddgi_texel_dir`). This tile-UV chain is I2's business; the I3 remap lives OUTSIDE
@@ -299,9 +410,12 @@ float3 shade_hit(float3 hit_pos, float3 n) {{
         // Diffuse only: `e.color` already carries `color × illuminance` (no double-count).
         lit += e.color * (NoL * vis);
     }}
-    // SDFDDGI I4: the single-constant bounce-reflectance stand-in (GI_BOUNCE_SCALE; 1.0 = white
-    // bounce — the update set binds no material table, so no per-hit albedo tint yet).
-    return lit * GI_BOUNCE_SCALE;
+    // SDFDDGI D-A firefly clamp — applied HERE, to the incident irradiance, because that is the
+    // quantity the pre-D-A code clamped (`lit * 1.0`). Clipping the SAME set of rays is what keeps
+    // this a pure TRANSPORT fix: the only downstream difference is the constant factor below.
+    lit = min(lit, float3(DDGI_MAX_HIT_IRRADIANCE, DDGI_MAX_HIT_IRRADIANCE, DDGI_MAX_HIT_IRRADIANCE));
+    // The Lambertian bounce: outgoing radiance = (rho / PI) * E, then the artistic intensity knob.
+    return lit * (GI_BOUNCE_ALBEDO * GI_INV_PI) * GI_BOUNCE_INTENSITY;
 }}
 
 // SDFDDGI I4 — the per-frame ray-set rotation. A smoothly-advancing DETERMINISTIC rotation (NOT a
@@ -379,9 +493,11 @@ void main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {{
             // `sdf_field_edsl_sync`; NOT the coarse `-rd`, P1-2). Its ~6 field taps/hit are a
             // real part of the `ddgi_probe_gi_cost` bench (cost-honesty).
             float3 n = sdf_normal(hit_pos);
+            // `shade_hit` returns the hit's OUTGOING RADIANCE (rho/PI * E, times the artistic
+            // intensity knob) and applies the DDGI_MAX_HIT_IRRADIANCE firefly clamp internally, on
+            // the IRRADIANCE — see that constant's comment for why the clamp sits ahead of the BRDF
+            // factor rather than after it (SDFDDGI D-A).
             L = shade_hit(hit_pos, n);
-            // SDFDDGI I4 firefly clamp: a lone bright hit would otherwise freeze into the EMA.
-            L = min(L, float3(DDGI_MAX_RADIANCE, DDGI_MAX_RADIANCE, DDGI_MAX_RADIANCE));
         }} else {{
             hit_t = GI_T_MAX;
         }}
@@ -419,6 +535,24 @@ void main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {{
         gIrrOut[dst] = float4(lerp(irr, prev_irr, blend_a), 1.0);
     }}
 
+    // SDFDDGI I7: publish this dispatch's irradiance interior writes to the whole group before the
+    // border-copy reads them — a border-copy thread may read an interior texel a DIFFERENT thread
+    // just wrote in the loop above (a cross-thread UAV read-after-write within this threadgroup).
+    DeviceMemoryBarrierWithGroupSync();
+
+    // (2b) Cooperatively fill the irradiance tile's 1-texel border (SDFDDGI I7 — the octahedral
+    // wrap-with-flip copy, `border_copy_index`). Without this the border stays at the boot-clear 0,
+    // and the I3 resolve's LINEAR `SampleLevel` (`ddgi_irr_uv`) lands exactly on the border/interior
+    // boundary at the oct-UV extremes (e == 0 or e == 1), blending 50% with that 0 — a real
+    // darkened seam at every probe tile edge.
+    for (uint ib = lid.x; ib < DDGI_IRR_BORDER_COUNT; ib += 64u) {{
+        uint2 dst2, src2;
+        border_copy_index(ib, DDGI_IRR_TILE_EDGE, DDGI_IRR_VALID_EXTENT, dst2, src2);
+        uint3 dst_texel = uint3(irr_org.y + dst2.x, irr_org.z + dst2.y, irr_org.x);
+        uint3 src_texel = uint3(irr_org.y + DDGI_TILE_BORDER + src2.x, irr_org.z + DDGI_TILE_BORDER + src2.y, irr_org.x);
+        gIrrOut[dst_texel] = gIrrOut[src_texel];
+    }}
+
     // (3) Cooperatively gather the depth texels (14x14 valid) — the two-moment tile.
     uint3 depth_org = tile_origin(c, DDGI_DEPTH_TILE_EDGE);
     uint depth_valid = DDGI_DEPTH_VALID_EXTENT * DDGI_DEPTH_VALID_EXTENT;
@@ -444,6 +578,23 @@ void main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {{
         // to the true moments, so the Chebyshev variance E[d^2]-E[d]^2 self-heals). Same `blend_a`.
         float2 prev_m = gDepthOut[dst];
         gDepthOut[dst] = lerp(moments, prev_m, blend_a);
+    }}
+
+    // SDFDDGI I7: publish this dispatch's depth interior writes before the border-copy reads them
+    // (the same cross-thread UAV read-after-write hazard as the irradiance tile above).
+    DeviceMemoryBarrierWithGroupSync();
+
+    // (3b) Cooperatively fill the depth tile's 1-texel border (SDFDDGI I7 — the same octahedral
+    // wrap-with-flip copy, parameterized by the depth tile geometry). Closes the SAME seam-bleed
+    // hazard for the Chebyshev two-moment tap (`ddgi_depth_uv`) — an uncopied border would blend a
+    // valid moment with the boot-clear (0,0), skewing `var`/`mean` at tile edges (a depth-leak, not
+    // just a color darkening).
+    for (uint db = lid.x; db < DDGI_DEPTH_BORDER_COUNT; db += 64u) {{
+        uint2 dst2, src2;
+        border_copy_index(db, DDGI_DEPTH_TILE_EDGE, DDGI_DEPTH_VALID_EXTENT, dst2, src2);
+        uint3 dst_texel = uint3(depth_org.y + dst2.x, depth_org.z + dst2.y, depth_org.x);
+        uint3 src_texel = uint3(depth_org.y + DDGI_TILE_BORDER + src2.x, depth_org.z + DDGI_TILE_BORDER + src2.y, depth_org.x);
+        gDepthOut[dst_texel] = gDepthOut[src_texel];
     }}
 
     // (4) One thread stamps the converged-once bit (+ keeps active set): the tile is written.

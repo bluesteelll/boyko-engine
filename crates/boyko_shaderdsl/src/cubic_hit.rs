@@ -18,7 +18,7 @@
 //! eval sweep: the cmp-`.spv` is the SOLE byte-identity gate (precedented by Inc 5a's
 //! `unreachable!`-on-Eval level/pc hooks). EVERY new array/call/resource facet's `EvalCf` impl is
 //! `unreachable!` (the honest-panic discipline, like [`Cf::call1`]). The body is generic over `C`
-//! purely so the Emit recorder ([`crate::emit::emit_hlsl_m2_brick_cubic_hit`]) drives it.
+//! purely so the Emit recorder (`crate::emit::emit_hlsl_m2_brick_cubic_hit`) drives it.
 //!
 //! # The four new FACET GROUPS (Increment 5c)
 //!
@@ -31,8 +31,8 @@
 //!      `m2_jcgt_cubic_coeffs(s, ...)` (a by-name array arg, [`Cf::call_coeffs`]),
 //!      `m2_marmitt_root` ([`Cf::call_marmitt`]), `(int)m2_clamp_index(g_entry)`
 //!      ([`Cf::call_clamp_index_int`]).
-//!   3. INT CASTS/ARITH — `(uint)max(cell[0], 0)` ([`Cf::smax`]/[`Cf::uint_from_int`]), `(float)(c0
-//!      + 1)` ([`Cf::sadd`]/[`Cf::float_from_int`]), `W - 2u` ([`Cf::usub`]/[`Cf::captured_uint`]),
+//!   3. INT CASTS/ARITH — `(uint)max(cell[0], 0)` ([`Cf::smax`]/[`Cf::uint_from_int`]),
+//!      `(float)(c0 + 1)` ([`Cf::sadd`]/[`Cf::float_from_int`]), `W - 2u` ([`Cf::usub`]/[`Cf::captured_uint`]),
 //!      `step[axis] == 0` ([`Cf::sint_eq`]), `cell[axis] < 0` ([`Cf::slt`]).
 //!   4. MISC — the nested `uint` axis-select ([`Cf::select_uint`]), the dynamic `rd_v[axis]` index
 //!      ([`Cf::vec3_dyn_index`]), the `float3(...)` scalar ctor ([`Cf::vec3_from_scalars`]), the

@@ -700,6 +700,192 @@ pub fn emit_hlsl_ssao() -> String {
     })
 }
 
+/// Generates the HLSL SSAO À-TROUS TAP span — ONE bilateral neighbour's depth-gate + weight +
+/// accumulate (`float dz = z_t - z_c - dz_pred; if (abs(dz) > SSAO_BLUR_DEPTH_TOL) { continue; }
+/// float depth_sigma2 = SSAO_BLUR_DEPTH_SIGMA * SSAO_BLUR_DEPTH_SIGMA; float w_depth =
+/// clamp01(1.0 - dz*dz/depth_sigma2); float w = h_weight * w_depth; ssao_sum = ssao_sum + w*s;
+/// ssao_wsum = ssao_wsum + w;`) — by tracing the generic [`crate::ssao::ssao_blur_tap_body`]
+/// over the [`EmitCf`] backend, and returns ONLY the span (NOT a wrapped function).
+///
+/// The SSAO denoise MOVED OUT of the resolve into the dedicated à-trous compute chain
+/// (`ssao_atrous.comp.hlsl`); this span is the renamed/repurposed former
+/// `emit_hlsl_ssao_blur_tap` — the SAME [`crate::ssao::ssao_blur_tap_body`] graph, with its
+/// `vt`/`view_t`/`w_spatial` inputs now carrying LINEAR-Z taps + the B3-spline kernel weight
+/// instead of raw `view_t` + a radial polynomial (a NAME-only reinterpretation — see that
+/// function's doc).
+///
+/// Framing (b), mirroring [`emit_hlsl_ssao`]: a SPAN, not a whole function, and NOT the
+/// enclosing loop. The fixed 5x5 (`-2..=2`) neighbourhood WALK, the coordinate-clamped
+/// `gViewT`/`gAoIn` `Load` calls + `linear_view_z` reconstruct, and the per-tap kernel weight
+/// (`h_weight`, which reads `ox`/`oy` the eDSL span never sees) stay HAND-WRITTEN inline in
+/// `ssao_atrous.comp.hlsl` (around the `// === GENERATED ssao_atrous_tap BEGIN/END ===`
+/// sentinels). The hand-written glue pre-binds `float s = gAoIn.Load(tcoord);` and `float
+/// h_weight = ...;` (mirroring how the SSAO horizon-step seam pre-binds `float3 Pp = ...;`) so
+/// the generated span reads `z_t`/`z_c`/`s`/`h_weight`/`dz_pred` by NAME; all five are already
+/// named locals in the committed glue.
+///
+/// The span prints at DEPTH 3 (12-space indent; the committed site nests
+/// `main`→`for (oy)`→`for (ox)`→this tap body, mirroring `shadow_atrous.comp.hlsl`'s own 3-deep
+/// tap nest).
+///
+/// The `ssao_atrous_edsl_sync` sync-pin test (`boyko_rhi_vulkan/tests/`) pins the committed
+/// splice to this output; a hand-edit of the span fails CI.
+pub fn emit_hlsl_ssao_atrous_tap() -> String {
+    use crate::ssao;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's inputs:
+    //   sum/wsum  → suppressed-decl params "ssao_sum"/"ssao_wsum" (declared by the hand-written
+    //               preamble `float ssao_sum = 0.0; float ssao_wsum = 0.0;` ABOVE the loop)
+    //   z_t       → Input(0) (float_in[0] = "z_t")       — the tap's reconstructed linear-Z
+    //   z_c       → Input(1) (float_in[1] = "z_c")       — the center pixel's linear-Z
+    //   s         → Input(2) (float_in[2] = "s")         — the pre-bound `float s = gAoIn.Load(tcoord);`
+    //   h_weight  → Input(3) (float_in[3] = "h_weight")  — the pre-bound B3-spline kernel weight
+    //   dz_pred   → Input(4) (float_in[4] = "dz_pred")   — the pre-bound SVGF step-scaled
+    //               predicted linear-Z offset (`dzdx*(ox*step) + dzdy*(oy*step)`)
+    let sum = EmitCf::decl_param("ssao_sum", Emit::lit(0.0));
+    let wsum = EmitCf::decl_param("ssao_wsum", Emit::lit(0.0));
+    let z_t = Emit::input(0);
+    let z_c = Emit::input(1);
+    let s = Emit::input(2);
+    let h_weight = Emit::input(3);
+    let dz_pred = Emit::input(4);
+
+    let _ = ssao::ssao_blur_tap_body::<EmitCf>(&sum, &wsum, z_t, z_c, s, h_weight, dz_pred);
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in = ["z_t", "z_c", "s", "h_weight", "dz_pred"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: NO_VEC_INPUTS,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // DEPTH 3 (12-space indent) — see the doc above.
+        print_block(&body_block, &arena, names, 3, &mut span);
+        span
+    })
+}
+
+/// Generates the HLSL SSAO BLUR COMBINE span — the resolve's TAIL fold (`float ao_class =
+/// (view_t >= 1.0e30) ? 1.0 : ao; ao_final = min(ao_class, ssao_blurred);`) — by tracing the
+/// generic [`crate::ssao::ssao_blur_combine_body`] over the [`EmitCf`] backend, and returns ONLY
+/// the span (NOT a wrapped function).
+///
+/// Since the SSAO denoise moved OUT of the resolve, `ssao_blurred` is now a single pre-bound
+/// `gSsao.Load(coord).r` (the à-trous chain's final filtered lane) rather than a `sum/wsum`
+/// reduction over a resolve-local loop — see [`crate::ssao::ssao_blur_combine_body`]'s doc.
+///
+/// Framing (b): a SPAN, spliced inside `if (ssao_mode != SSAO_MODE_OFF) { ... }`, AFTER the
+/// hand-written `float ssao_blurred = gSsao.Load(coord).r;` pre-bind. `ao_final` is a
+/// suppressed-decl param (declared earlier in the resolve as `float ao_final = ao;` — this
+/// span's tail is a BARE assignment, not a redecl).
+///
+/// The span prints at DEPTH 3 (12-space indent; the committed site nests `main`→`if (is_sdf_lit)`
+/// (the outer resolve block)→`if (ssao_mode != OFF)`→this combine tail).
+///
+/// The `ssao_atrous_edsl_sync` sync-pin test pins the committed splice to this output.
+pub fn emit_hlsl_ssao_blur_combine() -> String {
+    use crate::ssao;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's inputs:
+    //   ssao_blurred → Input(0) (float_in[0] = "ssao_blurred") — the pre-bound gSsao.Load result
+    //   view_t       → Input(1) (float_in[1] = "view_t")
+    //   ao           → Input(2) (float_in[2] = "ao")
+    //   ao_final     → suppressed-decl param "ao_final" (declared earlier in the resolve)
+    let ssao_blurred = Emit::input(0);
+    let view_t = Emit::input(1);
+    let ao = Emit::input(2);
+    let ao_final = EmitCf::decl_param("ao_final", Emit::lit(0.0));
+
+    let result = ssao::ssao_blur_combine_body::<EmitCf>(ssao_blurred, view_t, ao);
+    EmitCf::set_var(&ao_final, result);
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in = ["ssao_blurred", "view_t", "ao"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: NO_VEC_INPUTS,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // DEPTH 3 (12-space indent) — see the doc above.
+        print_block(&body_block, &arena, names, 3, &mut span);
+        span
+    })
+}
+
 /// Generates the WHOLE HLSL `sdf_soft_shadow_ranged(float3 p, float3 n, float3 L, float
 /// t_max)` function — the P6 R1 `t_max`-RANGED soft-shadow leaf consumed ONLY by the
 /// deferred RESOLVE (`deferred_pbr.hlsl`). It traces [`crate::shadow::
@@ -2315,4 +2501,850 @@ pub fn emit_hlsl_m2_brick_cubic_hit() -> String {
         print_block(&body_block, &arena, names, 1, &mut span);
         span
     })
+}
+
+// ---- Rung E: the particle-leaf prerequisite FACET PROBES (docs/PARTICLES-PLAN.md) ---------
+//
+// One emitter per [`crate::particle_facets`] probe body. Unlike every emitter above, these
+// spans are spliced into NO shader (no sentinel pair references them and no `.spv` depends on
+// their text) — they are the EMIT half of each rung-E facet pin, the Eval half being the same
+// body over `EvalCf`. They share [`emit_facet_probe`], which is the same reset/seed/pop/print
+// harness the other emitters spell inline.
+
+/// The shared reset/seed/pop/print harness for the rung-E facet probes. `float_in` / `uint_in`
+/// / `vec_in` are the probe's parameter-name tables (every other name table is empty — a probe
+/// declares no vars, calls no frozen function, reads no push-constant or level field, and
+/// declares no array); `body` records the probe's statements into the freshly-seeded function
+/// block. Returns the span printed at DEPTH 1 (4-space indent), like every other body span.
+fn emit_facet_probe<F: FnOnce()>(
+    float_in: &[&str],
+    uint_in: &[&str],
+    vec_in: &[&str],
+    body: F,
+) -> String {
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    body();
+
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in,
+        uint_in,
+        vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: NO_NAMED_LITS,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        print_block(&body_block, &arena, names, 1, &mut span);
+        span
+    })
+}
+
+/// Generates the **E1** bitwise/shift facet span by tracing
+/// [`crate::particle_facets::e1_bit_mix_body`] over `EmitCf` — the PCG-shaped fold over all
+/// five `uint` bit ops (`>>`, `^`, `<<`, `&`, `|`).
+///
+/// ```text
+///     uint rot = state >> 28u;
+///     uint word = state ^ (state << 13u);
+///     uint tail = word & 65535u;
+///     return tail | rot;
+/// ```
+///
+/// The parenthesized `(state << 13u)` is the printer's precedence rule made visible: a
+/// bitwise/shift node WRAPS inside an infix parent.
+pub fn emit_hlsl_e1_bit_mix() -> String {
+    use crate::particle_facets;
+
+    emit_facet_probe(&[], &["state"], &[], || {
+        // state → UintInput(0) (uint_in[0] = "state") — the probe's only input.
+        let state = Emit::uint_input(0);
+        let ret_out = RetCell;
+        let _ = particle_facets::e1_bit_mix_body::<EmitCf>(state, &ret_out);
+    })
+}
+
+/// Generates the **E2 encode** facet span by tracing
+/// [`crate::particle_facets::e2_pack_half2_body`] over `EmitCf` — two `f32tof16` narrows packed
+/// into one `uint`.
+///
+/// ```text
+///     uint lo = f32tof16(x);
+///     uint hi = f32tof16(y);
+///     return lo | (hi << 16u);
+/// ```
+pub fn emit_hlsl_e2_pack_half2() -> String {
+    use crate::particle_facets;
+
+    emit_facet_probe(&["x", "y"], &[], &[], || {
+        let x = Emit::input(0);
+        let y = Emit::input(1);
+        let ret_out = RetCell;
+        let _ = particle_facets::e2_pack_half2_body::<EmitCf>(x, y, &ret_out);
+    })
+}
+
+/// Generates the **E2 decode** facet span by tracing
+/// [`crate::particle_facets::e2_unpack_half2_body`] over `EmitCf` — the `f16tof32` widen of both
+/// halves of a packed `uint`.
+///
+/// ```text
+///     float lo = f16tof32(packed & 65535u);
+///     float hi = f16tof32(packed >> 16u);
+///     return lo + hi;
+/// ```
+///
+/// The un-parenthesized `packed & 65535u` inside the call is correct: a function-call ARGUMENT
+/// is at [`OperandPos::Root`], where nothing wraps.
+pub fn emit_hlsl_e2_unpack_half2() -> String {
+    use crate::particle_facets;
+
+    emit_facet_probe(&[], &["packed"], &[], || {
+        let packed = Emit::uint_input(0);
+        let ret_out = RetCellF;
+        let _ = particle_facets::e2_unpack_half2_body::<EmitCf>(packed, &ret_out);
+    })
+}
+
+/// Generates the **E2 bit-cast** facet span by tracing
+/// [`crate::particle_facets::e2_bitcast_sign_flip_body`] over `EmitCf` — the
+/// `asuint` → sign-bit XOR → `asfloat` round trip.
+///
+/// ```text
+///     uint bits = asuint(x);
+///     uint flipped = bits ^ 2147483648u;
+///     return asfloat(flipped);
+/// ```
+pub fn emit_hlsl_e2_bitcast_sign_flip() -> String {
+    use crate::particle_facets;
+
+    emit_facet_probe(&["x"], &[], &[], || {
+        let x = Emit::input(0);
+        let ret_out = RetCellF;
+        let _ = particle_facets::e2_bitcast_sign_flip_body::<EmitCf>(x, &ret_out);
+    })
+}
+
+/// Generates the **E3** `dot` facet span by tracing [`crate::particle_facets::e3_dot_body`]
+/// over `EmitCf` — the intrinsic spelled once as a named temp and once inline under a `*`.
+///
+/// ```text
+///     float vn = dot(v, n);
+///     return vn * dot(v, v);
+/// ```
+pub fn emit_hlsl_e3_dot() -> String {
+    use crate::particle_facets;
+
+    emit_facet_probe(&[], &[], &["v", "n"], || {
+        // v/n → Vec3Param(0)/Vec3Param(1) — WHOLE `float3` params (passed to `dot`, never
+        // indexed), so they spell their names.
+        let v = Emit(push(Node::Vec3Param(0)));
+        let n = Emit(push(Node::Vec3Param(1)));
+        let ret_out = RetCellF;
+        let _ = particle_facets::e3_dot_body::<EmitCf>(v, n, &ret_out);
+    })
+}
+
+/// Generates the **E4** trig facet span by tracing [`crate::particle_facets::e4_trig_body`]
+/// over `EmitCf` — `sin`/`cos` on the control-flow axis, printed by the SAME
+/// [`Node::Sin`]/[`Node::Cos`] arms the `InterpBackend` recorder feeds.
+///
+/// ```text
+///     float s = sin(theta);
+///     float c = cos(theta);
+///     return s * s + c * c;
+/// ```
+pub fn emit_hlsl_e4_trig() -> String {
+    use crate::particle_facets;
+
+    emit_facet_probe(&["theta"], &[], &[], || {
+        let theta = Emit::input(0);
+        let ret_out = RetCellF;
+        let _ = particle_facets::e4_trig_body::<EmitCf>(theta, &ret_out);
+    })
+}
+
+/// Generates the **E5** renormalization facet span by tracing
+/// [`crate::particle_facets::e5_renorm_body`] over `EmitCf` — the `rsqrt` that rescales a
+/// stored `(cos, sin)` rotation pair back onto the unit circle.
+///
+/// ```text
+///     float len_sq = c * c + s * s;
+///     float inv_len = rsqrt(len_sq);
+///     return c * inv_len;
+/// ```
+pub fn emit_hlsl_e5_renorm() -> String {
+    use crate::particle_facets;
+
+    emit_facet_probe(&["c", "s"], &[], &[], || {
+        let c = Emit::input(0);
+        let s = Emit::input(1);
+        let ret_out = RetCellF;
+        let _ = particle_facets::e5_renorm_body::<EmitCf>(c, s, &ret_out);
+    })
+}
+
+// ---- The P0 PARTICLE LEAVES (docs/PARTICLES-PLAN.md rung E's leaf table) ------------------
+//
+// One emitter per [`crate::particle`] body. Unlike the rung-E probes above, these spans ARE
+// spliced: `boyko_shaderdsl/src/bin/emit_particles.rs` owns all five particle `.hlsl` files as
+// `format!` templates and drops each span between its own
+// `// === GENERATED <name> BEGIN/END ===` sentinel pair, so `particle_edsl_sync` can pin the
+// committed text to the generator and the committed `.spv` to a re-DXC of that text.
+//
+// They share [`emit_particle_leaf`], which is [`emit_facet_probe`] plus an `out_in` name table —
+// three of the six leaves write `out` parameters (a `float3` velocity / world position, a `float`
+// lifetime) rather than returning, because `Cf` has no `float3` return facet.
+
+/// The shared reset/seed/pop/print harness for the P0 particle leaves. `float_in` / `uint_in` /
+/// `vec_in` / `out_in` are the leaf's parameter-name tables (a leaf declares no vars beyond its
+/// own suppressed-decl `inout` params, calls no frozen function, reads no push-constant or level
+/// field, and declares no array); `body` records the leaf's statements into the freshly-seeded
+/// function block. Returns the span printed at DEPTH 1 (4-space indent), like every other body
+/// span.
+///
+/// The ONLY difference from [`emit_facet_probe`] is `out_in`: both [`OutParam`] (a `float3` out)
+/// and [`OutFloatParam`] (a `float` out) index that one table, so a leaf with both — as
+/// `particle_spawn_state` has — numbers them `0` and `1` in a single sequence.
+fn emit_particle_leaf<F: FnOnce()>(
+    float_in: &[&str],
+    uint_in: &[&str],
+    vec_in: &[&str],
+    out_in: &[&str],
+    body: F,
+) -> String {
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    body();
+
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in,
+        uint_in,
+        vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in,
+        named_lit: NO_NAMED_LITS,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        print_block(&body_block, &arena, names, 1, &mut span);
+        span
+    })
+}
+
+/// Generates the **`particle_integrate`** span by tracing
+/// [`crate::particle::particle_integrate_body`] over `EmitCf` — one explicit-Euler substep over
+/// the sim's `inout` state.
+///
+/// ```text
+///     vel = (vel + gravity * dt) * damping;
+///     pos = pos + vel * dt;
+///     life = life - dt;
+/// ```
+///
+/// `pos`/`vel`/`life` are SUPPRESSED-DECL params (the wrapper spells them `inout`), so the span
+/// assigns them by name and declares nothing. The `Vec3Param`/`Input` seeds below are discarded
+/// by `decl_param_vec3`/`decl_param` — a parameter is already bound by name — and exist only so
+/// the name tables read as the generated signature does.
+pub fn emit_hlsl_particle_integrate() -> String {
+    use crate::particle;
+
+    emit_particle_leaf(
+        &["life", "damping", "dt"],
+        &[],
+        &["pos", "vel", "gravity"],
+        &[],
+        || {
+            let pos = EmitCf::decl_param_vec3("pos", Emit(push(Node::Vec3Param(0))));
+            let vel = EmitCf::decl_param_vec3("vel", Emit(push(Node::Vec3Param(1))));
+            let life = EmitCf::decl_param("life", Emit::input(0));
+            let gravity = Emit(push(Node::Vec3Param(2)));
+            let damping = Emit::input(1);
+            let dt = Emit::input(2);
+            let _ = particle::particle_integrate_body::<EmitCf>(
+                &pos, &vel, &life, gravity, damping, dt,
+            );
+        },
+    )
+}
+
+/// Generates the **`particle_rng`** span by tracing [`crate::particle::particle_rng_body`] over
+/// `EmitCf` — the 32-bit PCG hash (LCG advance + xorshift-multiply-xorshift permutation).
+///
+/// ```text
+///     uint s = state * 747796405u + 2891336453u;
+///     uint shift = (s >> 28u) + 4u;
+///     uint word = ((s >> shift) ^ s) * 277803737u;
+///     return (word >> 22u) ^ word;
+/// ```
+pub fn emit_hlsl_particle_rng() -> String {
+    use crate::particle;
+
+    emit_particle_leaf(&[], &["state"], &[], &[], || {
+        let state = Emit::uint_input(0);
+        let ret_out = RetCell;
+        let _ = particle::particle_rng_body::<EmitCf>(state, &ret_out);
+    })
+}
+
+/// Generates the **`particle_spawn_state`** span by tracing
+/// [`crate::particle::particle_spawn_state_body`] over `EmitCf` — the trig-free cone velocity
+/// (square → unit disc → spherical cap) plus the sampled lifetime.
+///
+/// Writes TWO out-parameters, `velocity` (`out_in[0]`, a `float3`) and `life` (`out_in[1]`, a
+/// `float`), so this is the emitter that exercises the mixed [`OutParam`]/[`OutFloatParam`]
+/// numbering [`emit_particle_leaf`]'s doc describes.
+pub fn emit_hlsl_particle_spawn_state() -> String {
+    use crate::particle;
+
+    emit_particle_leaf(
+        &["cone_cos", "speed_min", "speed_max", "life_min", "life_max"],
+        &["r_dir_x", "r_dir_y", "r_speed", "r_life"],
+        &["basis_x", "basis_y", "basis_z"],
+        &["velocity", "life"],
+        || {
+            let basis_x = Emit(push(Node::Vec3Param(0)));
+            let basis_y = Emit(push(Node::Vec3Param(1)));
+            let basis_z = Emit(push(Node::Vec3Param(2)));
+            let cone_cos = Emit::input(0);
+            let speed_min = Emit::input(1);
+            let speed_max = Emit::input(2);
+            let life_min = Emit::input(3);
+            let life_max = Emit::input(4);
+            let r_dir_x = Emit::uint_input(0);
+            let r_dir_y = Emit::uint_input(1);
+            let r_speed = Emit::uint_input(2);
+            let r_life = Emit::uint_input(3);
+            let velocity_out = OutParam(0);
+            let life_out = OutFloatParam(1);
+            let _ = particle::particle_spawn_state_body::<EmitCf>(
+                basis_x,
+                basis_y,
+                basis_z,
+                cone_cos,
+                speed_min,
+                speed_max,
+                life_min,
+                life_max,
+                r_dir_x,
+                r_dir_y,
+                r_speed,
+                r_life,
+                &velocity_out,
+                &life_out,
+            );
+        },
+    )
+}
+
+/// Generates the **`particle_curve_eval`** span by tracing
+/// [`crate::particle::particle_curve_eval_body`] over `EmitCf` — the branch-free 4-key
+/// piecewise-linear ramp over two packed binary16 pairs.
+///
+/// ```text
+///     float k0 = f16tof32(keys_lo & 65535u);
+///     …
+///     return lerp(v1, k3, w2);
+/// ```
+pub fn emit_hlsl_particle_curve_eval() -> String {
+    use crate::particle;
+
+    emit_particle_leaf(&["t"], &["keys_lo", "keys_hi"], &[], &[], || {
+        let keys_lo = Emit::uint_input(0);
+        let keys_hi = Emit::uint_input(1);
+        let t = Emit::input(0);
+        let ret_out = RetCellF;
+        let _ = particle::particle_curve_eval_body::<EmitCf>(keys_lo, keys_hi, t, &ret_out);
+    })
+}
+
+/// Generates the **`particle_billboard_corner`** span by tracing
+/// [`crate::particle::particle_billboard_corner_body`] over `EmitCf` — the VS's corner placement
+/// (camera basis × rotated, size-scaled corner offset), with the snorm16 rotation decode inline.
+pub fn emit_hlsl_particle_billboard_corner() -> String {
+    use crate::particle;
+
+    emit_particle_leaf(
+        &["cx", "cy", "size"],
+        &["rot_cs"],
+        &["center", "cam_right", "cam_up"],
+        &["world_pos"],
+        || {
+            let center = Emit(push(Node::Vec3Param(0)));
+            let cam_right = Emit(push(Node::Vec3Param(1)));
+            let cam_up = Emit(push(Node::Vec3Param(2)));
+            let cx = Emit::input(0);
+            let cy = Emit::input(1);
+            let size = Emit::input(2);
+            let rot_cs = Emit::uint_input(0);
+            let world_out = OutParam(0);
+            let _ = particle::particle_billboard_corner_body::<EmitCf>(
+                center, cam_right, cam_up, cx, cy, size, rot_cs, &world_out,
+            );
+        },
+    )
+}
+
+/// Generates the **`particle_rot_advance`** span by tracing
+/// [`crate::particle::particle_rot_advance_body`] over `EmitCf` — the complex multiply against
+/// the host-precomputed `(cos ω·timestep, sin ω·timestep)` pair, re-quantized to snorm16.
+///
+/// Plan gate #14 asserts this span carries **zero `OpFDiv`**: the snorm16 scale/inverse are
+/// literal MULTIPLIES and the renormalization is deliberately absent (plan M7/K1).
+pub fn emit_hlsl_particle_rot_advance() -> String {
+    use crate::particle;
+
+    emit_particle_leaf(&["mul_cos", "mul_sin"], &["rot_cs"], &[], &[], || {
+        let rot_cs = Emit::uint_input(0);
+        let mul_cos = Emit::input(0);
+        let mul_sin = Emit::input(1);
+        let ret_out = RetCell;
+        let _ = particle::particle_rot_advance_body::<EmitCf>(
+            rot_cs, mul_cos, mul_sin, &ret_out,
+        );
+    })
+}
+
+/// Generates the **`particle_sdf_response`** span by tracing
+/// [`crate::particle::particle_sdf_response_body`] over `EmitCf` — rung P1's contact resolution
+/// (plan D9's `p += n·(radius − d)` and `v' = (v − v_n)(1 − friction) − v_n·restitution`).
+///
+/// ```text
+///     float vn = dot(vel, normal);
+///     float3 v_n = normal * vn;
+///     pos = pos + normal * (radius - d);
+///     vel = (vel - v_n) * (1.0 - friction) - v_n * restitution;
+/// ```
+///
+/// `pos`/`vel` are SUPPRESSED-DECL params exactly as [`emit_hlsl_particle_integrate`]'s are — the
+/// wrapper spells them `inout`, so the span assigns them by name and declares nothing. This span is
+/// spliced ONLY into the `-D SDF_COLLIDE` arm of `particle_sim.comp.hlsl`; the base compile does
+/// not carry it.
+pub fn emit_hlsl_particle_sdf_response() -> String {
+    use crate::particle;
+
+    emit_particle_leaf(
+        &["d", "radius", "restitution", "friction"],
+        &[],
+        &["pos", "vel", "normal"],
+        &[],
+        || {
+            let pos = EmitCf::decl_param_vec3("pos", Emit(push(Node::Vec3Param(0))));
+            let vel = EmitCf::decl_param_vec3("vel", Emit(push(Node::Vec3Param(1))));
+            let normal = Emit(push(Node::Vec3Param(2)));
+            let d = Emit::input(0);
+            let radius = Emit::input(1);
+            let restitution = Emit::input(2);
+            let friction = Emit::input(3);
+            let _ = particle::particle_sdf_response_body::<EmitCf>(
+                &pos,
+                &vel,
+                normal,
+                d,
+                radius,
+                restitution,
+                friction,
+            );
+        },
+    )
+}
+
+// ---- UI-ADVANCED S1: the `ui_rect` leaf emitters (`docs/UI-PLAN-SPRITES-S0-S2.md` rung S1) ----
+
+/// The shared UI-leaf recorder harness — the [`emit_particle_leaf`] idiom with the `vec4_in`
+/// name table added (the UI leaves are the first to take `float4` parameters). Clears the
+/// recorder state, seeds the function-body block, runs the tracing closure, and prints the
+/// BODY span at depth 1 (4-space indent). NO function-signature wrap — the signature line and
+/// the closing `}` are spelled by `emit_ui.rs`'s templates, exactly as the particle bin
+/// spells its leaves' signatures around [`emit_particle_leaf`]'s spans.
+fn emit_ui_leaf<F: FnOnce()>(
+    float_in: &[&str],
+    uint_in: &[&str],
+    vec_in: &[&str],
+    vec4_in: &[&str],
+    body: F,
+) -> String {
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    body();
+
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    // UI-ADVANCED S5: `ui_tile_uv` spells FLAG_TILED / UI_TILE_*_SHIFT / UI_TILE_MASK as
+    // INTERNED SYMBOLS (`Cf::named_uint_val`), so the symbol table has to reach the printer.
+    // It was `NO_NAMED_LITS` while the six S1 leaves spelled only bare literals -- and an
+    // empty table under a symbol node is an index-out-of-bounds panic AT GENERATION, which
+    // is how this was caught rather than shipped.
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in,
+        uint_in,
+        vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        print_block(&body_block, &arena, names, 1, &mut span);
+        span
+    })
+}
+
+/// Generates the **`ui_unpack_rgba8`** BODY span by tracing
+/// [`crate::ui::ui_unpack_rgba8_body`] over `EmitCf` — the premultiplied RGBA8 unpack.
+///
+/// ```text
+///     return float4((float)(c & 255u), (float)(c >> 8u & 255u), (float)(c >> 16u & 255u),
+///                   (float)(c >> 24u & 255u)) * (1.0 / 255.0);
+/// ```
+pub fn emit_hlsl_ui_unpack_rgba8() -> String {
+    use crate::ui;
+
+    emit_ui_leaf(&[], &["c"], &[], &[], || {
+        let c = Emit::uint_input(0);
+        let ret_out = RetCellV4;
+        let _ = ui::ui_unpack_rgba8_body::<EmitCf>(c, &ret_out);
+    })
+}
+
+/// Generates the **`ui_sd_rounded_box`** BODY span by tracing
+/// [`crate::ui::ui_sd_rounded_box_body`] over `EmitCf` — the Quilez/Bevy per-corner
+/// rounded-box SDF (quadrant radius select + corner distance).
+pub fn emit_hlsl_ui_sd_rounded_box() -> String {
+    use crate::ui;
+
+    emit_ui_leaf(&[], &[], &["p", "half_size"], &["r"], || {
+        let p = Emit(push(Node::Vec2Param(0)));
+        let half_size = Emit(push(Node::Vec2Param(1)));
+        let r = Emit(push(Node::Vec4Param(0)));
+        let ret_out = RetCellF;
+        let _ = ui::ui_sd_rounded_box_body::<EmitCf>(p, half_size, r, &ret_out);
+    })
+}
+
+/// Generates the **`ui_clip_coverage`** BODY span by tracing
+/// [`crate::ui::ui_clip_coverage_body`] over `EmitCf` — the separable anti-aliased clip-AABB
+/// coverage.
+pub fn emit_hlsl_ui_clip_coverage() -> String {
+    use crate::ui;
+
+    emit_ui_leaf(&["fw"], &[], &["pos"], &["clip"], || {
+        let pos = Emit(push(Node::Vec2Param(0)));
+        let clip = Emit(push(Node::Vec4Param(0)));
+        let fw = Emit::input(0);
+        let ret_out = RetCellF;
+        let _ = ui::ui_clip_coverage_body::<EmitCf>(pos, clip, fw, &ret_out);
+    })
+}
+
+/// Generates the **`ui_median3`** BODY span by tracing [`crate::ui::ui_median3_body`] over
+/// `EmitCf` — the canonical Chlumsky MSDF per-channel median.
+pub fn emit_hlsl_ui_median3() -> String {
+    use crate::ui;
+
+    emit_ui_leaf(&["r", "g", "b"], &[], &[], &[], || {
+        let r = Emit::input(0);
+        let g = Emit::input(1);
+        let b = Emit::input(2);
+        let ret_out = RetCellF;
+        let _ = ui::ui_median3_body::<EmitCf>(r, g, b, &ret_out);
+    })
+}
+
+/// Generates the **`ui_screen_px_range`** BODY span by tracing
+/// [`crate::ui::ui_screen_px_range_body`] over `EmitCf` — the MSDF texel→screen-px range
+/// fold. The atlas-UBO reads spell VERBATIM as the printer input names
+/// (`g_atlas_ubo.px_range` / `g_atlas_ubo.atlas_size`), so the leaf's HLSL signature takes
+/// only `uv` and the span reads the globals directly — the committed shape.
+pub fn emit_hlsl_ui_screen_px_range() -> String {
+    use crate::ui;
+
+    emit_ui_leaf(
+        &["g_atlas_ubo.px_range"],
+        &[],
+        &["g_atlas_ubo.atlas_size", "uv"],
+        &[],
+        || {
+            let px_range = Emit::input(0);
+            let atlas_size = Emit(push(Node::Vec2Param(0)));
+            let uv = Emit(push(Node::Vec2Param(1)));
+            let ret_out = RetCellF;
+            let _ = ui::ui_screen_px_range_body::<EmitCf>(px_range, atlas_size, uv, &ret_out);
+        },
+    )
+}
+
+/// Generates the **`ui_premultiplied_over`** BODY span by tracing
+/// [`crate::ui::ui_premultiplied_over_body`] over `EmitCf` — the premultiplied
+/// border-over-fill composite.
+pub fn emit_hlsl_ui_premultiplied_over() -> String {
+    use crate::ui;
+
+    emit_ui_leaf(
+        &["border_cov", "inner_cov"],
+        &[],
+        &[],
+        &["bc", "fill"],
+        || {
+            let bc = Emit(push(Node::Vec4Param(0)));
+            let fill = Emit(push(Node::Vec4Param(1)));
+            let border_cov = Emit::input(0);
+            let inner_cov = Emit::input(1);
+            let ret_out = RetCellV4;
+            let _ = ui::ui_premultiplied_over_body::<EmitCf>(
+                bc, border_cov, fill, inner_cov, &ret_out,
+            );
+        },
+    )
+}
+
+/// Generates the **`ui_tile_uv`** BODY span by tracing [`crate::ui::ui_tile_uv_body`] over
+/// `EmitCf` — UI-ADVANCED S5's whole sprite-`uv` computation (the untiled `lerp` and the
+/// `FLAG_TILED` `frac`-in-sub-rect wrap).
+///
+/// This leaf exists in part to CLOSE A HOLE: `emit_ui.rs` owns the whole file as a `format!`
+/// template, `ui_rect_edsl_sync` compares only the sentinel spans, and `ui_rect_spv_sync`
+/// compares the committed `.hlsl` to the committed `.spv` — so nothing in the workspace
+/// compares the generator's `main` template to the committed `main`. The S3 sprite branch's
+/// UV line lived there, ungated. Moving the mechanism into a leaf puts it under the gate that
+/// already exists (S-D15 (4)).
+pub fn emit_hlsl_ui_tile_uv() -> String {
+    use crate::ui;
+
+    emit_ui_leaf(&[], &["flags"], &["local_uv"], &["uv"], || {
+        let uv = Emit(push(Node::Vec4Param(0)));
+        let local_uv = Emit(push(Node::Vec2Param(0)));
+        let flags = Emit::uint_input(0);
+        let ret_out = RetCellV2;
+        let _ = ui::ui_tile_uv_body::<EmitCf>(uv, local_uv, flags, &ret_out);
+    })
+}
+
+/// The `UiInstance` byte layout as GENERATOR INPUTS (`docs/UI-PLAN-SPRITES-DECISIONS.md` S-D10): the
+/// field offsets, the stride, and the three flag-bit indices. `emit_ui.rs` spells them as
+/// literals mirroring `boyko_render::ui::instance`; `ui_rect_edsl_sync` re-derives them from
+/// the HOST's own `offset_of!`/`size_of` and pins the committed mirror span to that — so a
+/// struct that moves on either side reds the sync test, and no committed shader ever spells a
+/// byte offset that a host `offset_of!` also spells.
+#[derive(Clone, Copy)]
+pub struct UiInstanceLayout {
+    /// `size_of::<UiInstance>()` — the std430 stride.
+    pub size: u32,
+    /// `offset_of!(UiInstance, min_px)`.
+    pub min_px: u32,
+    /// `offset_of!(UiInstance, size_px)`.
+    pub size_px: u32,
+    /// `offset_of!(UiInstance, clip)`.
+    pub clip: u32,
+    /// `offset_of!(UiInstance, corner_radius)`.
+    pub corner_radius: u32,
+    /// `offset_of!(UiInstance, uv)` — the normalized UV rect that retired the
+    /// `corner_radius` text-lane alias (UI-ADVANCED S2 / architecture D1).
+    pub uv: u32,
+    /// `offset_of!(UiInstance, color)`.
+    pub color: u32,
+    /// `offset_of!(UiInstance, border_color)`.
+    pub border_color: u32,
+    /// `offset_of!(UiInstance, border_width)`.
+    pub border_width: u32,
+    /// `offset_of!(UiInstance, flags)`.
+    pub flags: u32,
+    /// `FLAG_BORDER_ANY.trailing_zeros()` — bit 0 today.
+    pub flag_border_any_bit: u32,
+    /// `FLAG_CLIP_PRESENT.trailing_zeros()` — bit 1 today.
+    pub flag_clip_present_bit: u32,
+    /// `FLAG_TEXT.trailing_zeros()` — bit 2 today.
+    pub flag_text_bit: u32,
+    /// `FLAG_TEXTURED.trailing_zeros()` — bit 3 (UI-ADVANCED S3's sprite lane, S-D2).
+    pub flag_textured_bit: u32,
+    /// `UI_SLOT_SHIFT` — the bindless-slot field's LOW bit inside `flags` (20; S-D2).
+    pub slot_shift: u32,
+    /// `UI_SLOT_BITS` — the bindless-slot field's WIDTH in bits (12; S-D2: slots
+    /// `0..4095`, EXACTLY `BINDLESS_TEXTURE_CAPACITY`'s range, zero headroom).
+    pub slot_bits: u32,
+    /// `FLAG_TILED.trailing_zeros()` — bit 5 (UI-ADVANCED S5's tiled nine-slice lane,
+    /// S-D15).
+    pub flag_tiled_bit: u32,
+    /// `UI_TILE_X_SHIFT` — the LOW bit of the X repeat-count field (6; bits 6..=12).
+    pub tile_x_shift: u32,
+    /// `UI_TILE_Y_SHIFT` — the LOW bit of the Y repeat-count field (13; bits 13..=19).
+    pub tile_y_shift: u32,
+    /// `UI_TILE_BITS` — each repeat-count field's WIDTH in bits (7; counts `1..=127`).
+    pub tile_bits: u32,
+}
+
+/// Generates the `UiInstance` STRUCT MIRROR span — the std430 record both `ui_rect` stages
+/// re-declare — from the [`UiInstanceLayout`] generator inputs. One printer, two splice sites
+/// (the `.vs` and `.fs` files carry the SAME span), which is S1's dividend at the S2 widening:
+/// the mirror is one edit, not two.
+pub fn emit_hlsl_ui_instance_mirror(l: &UiInstanceLayout) -> String {
+    format!(
+        "\
+// The std430 UiInstance record -- the byte-layout mirror of the Rust
+// #[repr(C, align(16))] UiInstance (stride {size} B). The offsets below are emit_ui
+// GENERATOR INPUTS, pinned to the host offset_of! constants by ui_rect_edsl_sync.
+struct UiInstance {{
+    float2 min_px;        // @{min_px}
+    float2 size_px;       // @{size_px}
+    float4 clip;          // @{clip}  (min.xy, max.xy; valid iff CLIP_PRESENT)
+    float4 corner_radius; // @{corner_radius}  (tl, tr, br, bl) -- ALWAYS the radius (the alias is retired)
+    float4 uv;            // @{uv}  normalized (u0, v0, u1, v1) -- glyphs AND sprites
+    uint   color;         // @{color}  premultiplied RGBA8
+    uint   border_color;  // @{border_color}  premultiplied RGBA8
+    float  border_width;  // @{border_width}  uniform, physical px
+    uint   flags;         // @{flags}  bit{b0} BORDER_ANY, bit{b1} CLIP_PRESENT, bit{b2} TEXT, bit{b3} TEXTURED,
+                          //      bit{b5} TILED, bits {tx_lo}..{ty_hi} the two 7-bit repeat counts,
+                          //      bits {slot_lo}..{slot_hi} the bindless sprite slot
+}};
+",
+        size = l.size,
+        min_px = l.min_px,
+        size_px = l.size_px,
+        clip = l.clip,
+        corner_radius = l.corner_radius,
+        uv = l.uv,
+        color = l.color,
+        border_color = l.border_color,
+        border_width = l.border_width,
+        flags = l.flags,
+        b0 = l.flag_border_any_bit,
+        b1 = l.flag_clip_present_bit,
+        b2 = l.flag_text_bit,
+        b3 = l.flag_textured_bit,
+        b5 = l.flag_tiled_bit,
+        tx_lo = l.tile_x_shift,
+        ty_hi = l.tile_y_shift + l.tile_bits - 1,
+        slot_lo = l.slot_shift,
+        slot_hi = l.slot_shift + l.slot_bits - 1,
+    )
+}
+
+/// Generates the FLAG-BIT + SLOT-FIELD constants span (`ui_rect.fs.hlsl` only — the VS never
+/// reads `flags`) from the [`UiInstanceLayout`] generator inputs.
+///
+/// The slot mask is DERIVED from `slot_bits` rather than spelled: S-D2's field has zero
+/// headroom over `BINDLESS_TEXTURE_CAPACITY`, so a hand-written `0xFFF` here and a widened
+/// host constant there would make a UI quad sample a different texture with nothing to say so.
+pub fn emit_hlsl_ui_flag_consts(l: &UiInstanceLayout) -> String {
+    format!(
+        "\
+static const uint FLAG_BORDER_ANY   = 1u << {b0};
+static const uint FLAG_CLIP_PRESENT = 1u << {b1};
+static const uint FLAG_TEXT         = 1u << {b2};
+static const uint FLAG_TEXTURED     = 1u << {b3};
+static const uint FLAG_TILED        = 1u << {b5};
+// The two 7-bit nine-slice REPEAT COUNTS ride flags bits {tx_lo}..{tx_hi} / {ty_lo}..{ty_hi}
+// (counts 1..{max_tile}); FLAG_TILED is set only when a count exceeds 1, so an untiled record
+// leaves the flag AND both fields zero and is byte-identical to its Stretch record (S-D15).
+static const uint UI_TILE_X_SHIFT   = {tx_lo}u;
+static const uint UI_TILE_Y_SHIFT   = {ty_lo}u;
+static const uint UI_TILE_MASK      = 0x{tile_mask:X}u;
+// The bindless sprite slot rides flags bits {slot_lo}..{slot_hi} ({bits} bits, slots 0..{max_slot}).
+static const uint UI_SLOT_SHIFT     = {slot_lo}u;
+static const uint UI_SLOT_MASK      = 0x{mask:X}u;
+",
+        b0 = l.flag_border_any_bit,
+        b1 = l.flag_clip_present_bit,
+        b2 = l.flag_text_bit,
+        b3 = l.flag_textured_bit,
+        b5 = l.flag_tiled_bit,
+        tx_lo = l.tile_x_shift,
+        tx_hi = l.tile_x_shift + l.tile_bits - 1,
+        ty_lo = l.tile_y_shift,
+        ty_hi = l.tile_y_shift + l.tile_bits - 1,
+        max_tile = (1u32 << l.tile_bits) - 1,
+        tile_mask = (1u32 << l.tile_bits) - 1,
+        slot_lo = l.slot_shift,
+        slot_hi = l.slot_shift + l.slot_bits - 1,
+        bits = l.slot_bits,
+        max_slot = (1u32 << l.slot_bits) - 1,
+        mask = (1u32 << l.slot_bits) - 1,
+    )
 }

@@ -129,7 +129,10 @@ fn assert_grid_bit_identical(
 #[test]
 fn dirty_pointer_grid_equals_full_over_random_sequences() {
     let grid = default_grid();
-    let n_seeds = 240usize; // >= 200 sequences (per the matrix)
+    // >= 200 sequences (per the matrix) natively; under Miri one sequence of 24 steps, which still
+    // draws every mutation kind, because every step re-bakes the full grid as its oracle: 240
+    // sequences, and even 4, ran past 3 min of interpretation (MEASURED 2026-10-10).
+    let n_seeds = if cfg!(miri) { 1usize } else { 240usize };
     let steps_per_seed = 24usize;
 
     for s in 0..n_seeds {

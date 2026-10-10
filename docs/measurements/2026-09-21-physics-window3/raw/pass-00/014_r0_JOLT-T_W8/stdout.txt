@@ -1,0 +1,5 @@
+Single precision x86 64-bit with instructions: SSE2 SSE4.1 SSE4.2 AVX AVX2 F16C LZCNT TZCNT FMADD (16-bit ObjectLayer) (ObjectStream) 
+Running scene: Pyramid
+boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=0
+Motion Quality, Thread Count, Steps / Second, Hash
+Discrete, 8, 213.078948, 0xee15b89965ec747

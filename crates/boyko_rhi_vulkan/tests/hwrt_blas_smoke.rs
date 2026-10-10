@@ -113,7 +113,7 @@ fn make_triangle(ctx: &VulkanContext) -> (BoundBuffer, BoundBuffer) {
 /// R2a-2 GPU smoke: build 2 BLAS + 1 TLAS on real hardware; assert every device address is
 /// non-zero and teardown is device-lost-free.
 #[test]
-#[ignore = "requires a real RT GPU (run: --features hwrt -- --ignored --test-threads=1)"]
+#[ignore = "feature+gpu-cap: requires a real RT GPU (run: --features hwrt -- --ignored --test-threads=1)"]
 fn hwrt_blas_tlas_smoke() {
     let Some(ctx) = boot_or_skip("hwrt_blas_tlas_smoke") else {
         return;
@@ -206,7 +206,7 @@ fn hwrt_blas_tlas_smoke() {
 /// validation is clean. The pack-written 64-B records are the only reflection-unverified surface,
 /// so this smoke is their oracle.
 #[test]
-#[ignore = "requires a real RT GPU (run: --features hwrt -- --ignored --test-threads=1)"]
+#[ignore = "feature+gpu-cap: requires a real RT GPU (run: --features hwrt -- --ignored --test-threads=1)"]
 fn hwrt_tlas_pack_build_smoke() {
     let Some(ctx) = boot_or_skip("hwrt_tlas_pack_build_smoke") else {
         return;
@@ -470,7 +470,7 @@ fn hwrt_tlas_pack_build_smoke() {
 /// validation error. This is the ONLY oracle for the R2a-4a AS-descriptor `p_next` write (the
 /// silent-FFI UAF class `abi_guard`/Miri cannot see).
 #[test]
-#[ignore = "requires a real RT GPU (run: --features hwrt -- --ignored --test-threads=1)"]
+#[ignore = "feature+gpu-cap: requires a real RT GPU (run: --features hwrt -- --ignored --test-threads=1)"]
 fn hwrt_as_descriptor_smoke() {
     let Some(ctx) = boot_or_skip("hwrt_as_descriptor_smoke") else {
         return;

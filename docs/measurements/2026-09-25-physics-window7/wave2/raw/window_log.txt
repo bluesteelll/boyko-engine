@@ -1,0 +1,296 @@
+2026-09-25T06:07:48.327+03:00 WINDOW START cutoff 2026-09-25T11:45:00 blocks ['Q1C', 'Q2C', 'Q3', 'Q4', 'Q2D', 'Q1D'] test False resume False
+2026-09-25T06:07:48.488+03:00 Q1C-p0: idle rule (wait_idle7.ps1, up to 30 polls)
+2026-09-25T06:11:59.027+03:00 Q1C-p0: idle reached; {'time': '2026-09-25T06:11:59.027+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T06:12:09.086+03:00 Q1C-p0: opening receipt 1.8% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T06:12:15.326+03:00   Q1C-p0 warm-up H-trk-tree#trk W=8 (untimed): stat 2.3430 ms pose 0x32d5e235342b4143 expect match rb 1.8% ra 2.41% others 0.66% cpu_s 4.844 wall 1.182s waited 0.0s
+2026-09-25T06:12:21.778+03:00   Q1C-p0 r0 [  1] H-trk-tree#trk W=4: stat 2.7708 ms pose 0x32d5e235342b4143 expect match rb 2.41% ra 1.18% others 0.5% cpu_s 3.406 wall 1.394s waited 0.0s
+2026-09-25T06:12:28.646+03:00   Q1C-p0 r0 [  2] H-jolt56#j56 W=4: stat 3.5965 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 1.18% ra 2.19% others 0.6% cpu_s 7.188 wall 1.813s waited 0.0s
+2026-09-25T06:12:35.982+03:00   Q1C-p0 r0 [  3] H-trk-ap#trk W=4: stat 4.5459 ms pose 0x32d5e235342b4143 expect match rb 2.19% ra 0.78% others 0.6% cpu_s 4.641 wall 2.282s waited 0.0s
+2026-09-25T06:12:42.148+03:00   Q1C-p0 r0 [  4] H-trk-tree#trk W=8: stat 2.1963 ms pose 0x32d5e235342b4143 expect match rb 0.78% ra 2.82% others 0.89% cpu_s 5.047 wall 1.107s waited 0.0s
+2026-09-25T06:12:48.488+03:00   Q1C-p0 r0 [  5] H-jolt56#j56 W=8: stat 2.5413 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 2.82% ra 1.29% others 0.53% cpu_s 9.922 wall 1.286s waited 0.0s
+2026-09-25T06:12:55.535+03:00   Q1C-p0 r0 [  6] H-trk-ap#trk W=8: stat 3.9659 ms pose 0x32d5e235342b4143 expect match rb 1.29% ra 1.01% others 0.69% cpu_s 4.406 wall 1.992s waited 0.0s
+2026-09-25T06:13:01.783+03:00   Q1C-p0 r0 [  7] H-trk-tree#trk W=16: stat 2.3635 ms pose 0x32d5e235342b4143 expect match rb 1.01% ra 1.43% others 0.41% cpu_s 7.875 wall 1.191s waited 0.0s
+2026-09-25T06:13:08.033+03:00   Q1C-p0 r0 [  8] H-jolt56#j56 W=16: stat 2.3611 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 1.43% ra 1.4% others 0.49% cpu_s 17.891 wall 1.195s waited 0.0s
+2026-09-25T06:13:15.180+03:00   Q1C-p0 r0 [  9] H-trk-ap#trk W=16: stat 4.1606 ms pose 0x32d5e235342b4143 expect match rb 1.4% ra 3.65% others 0.7% cpu_s 9.172 wall 2.09s waited 0.0s
+2026-09-25T06:13:21.644+03:00   Q1C-p0 r1 [ 10] H-trk-tree#trk W=4: stat 2.7862 ms pose 0x32d5e235342b4143 expect match rb 3.65% ra 0.76% others 0.28% cpu_s 4.0 wall 1.402s waited 0.0s
+2026-09-25T06:13:28.478+03:00   Q1C-p0 r1 [ 11] H-jolt56#j56 W=4: stat 3.5342 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 0.76% ra 0.96% others 0.6% cpu_s 7.062 wall 1.781s waited 0.0s
+2026-09-25T06:13:35.808+03:00   Q1C-p0 r1 [ 12] H-trk-ap#trk W=4: stat 4.5357 ms pose 0x32d5e235342b4143 expect match rb 0.96% ra 0.71% others 0.52% cpu_s 4.531 wall 2.277s waited 0.0s
+2026-09-25T06:13:41.973+03:00   Q1C-p0 r1 [ 13] H-trk-tree#trk W=8: stat 2.1972 ms pose 0x32d5e235342b4143 expect match rb 0.71% ra 0.86% others 0.53% cpu_s 4.328 wall 1.108s waited 0.0s
+2026-09-25T06:13:48.400+03:00   Q1C-p0 r1 [ 14] H-jolt56#j56 W=8: stat 2.7015 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 0.86% ra 1.61% others 1.07% cpu_s 10.438 wall 1.371s waited 0.0s
+2026-09-25T06:13:55.451+03:00   Q1C-p0 r1 [ 15] H-trk-ap#trk W=8: stat 3.9722 ms pose 0x32d5e235342b4143 expect match rb 1.61% ra 0.72% others 0.54% cpu_s 6.031 wall 1.995s waited 0.0s
+2026-09-25T06:14:01.688+03:00   Q1C-p0 r1 [ 16] H-trk-tree#trk W=16: stat 2.3497 ms pose 0x32d5e235342b4143 expect match rb 0.72% ra 1.1% others 0.66% cpu_s 7.781 wall 1.184s waited 0.0s
+2026-09-25T06:14:07.959+03:00   Q1C-p0 r1 [ 17] H-jolt56#j56 W=16: stat 2.4067 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 1.1% ra 1.56% others 0.56% cpu_s 18.031 wall 1.219s waited 0.0s
+2026-09-25T06:14:15.086+03:00   Q1C-p0 r1 [ 18] H-trk-ap#trk W=16: stat 4.1295 ms pose 0x32d5e235342b4143 expect match rb 1.56% ra 3.3% others 0.52% cpu_s 11.984 wall 2.074s waited 0.0s
+2026-09-25T06:14:21.537+03:00   Q1C-p0 r2 [ 19] H-trk-tree#trk W=4: stat 2.7765 ms pose 0x32d5e235342b4143 expect match rb 3.3% ra 1.0% others 0.63% cpu_s 3.656 wall 1.397s waited 0.0s
+2026-09-25T06:14:28.379+03:00   Q1C-p0 r2 [ 20] H-jolt56#j56 W=4: stat 3.5549 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 1.0% ra 0.78% others 0.66% cpu_s 6.844 wall 1.791s waited 0.0s
+2026-09-25T06:14:35.720+03:00   Q1C-p0 r2 [ 21] H-trk-ap#trk W=4: stat 4.5450 ms pose 0x32d5e235342b4143 expect match rb 0.78% ra 1.27% others 0.56% cpu_s 4.703 wall 2.281s waited 0.0s
+2026-09-25T06:14:41.884+03:00   Q1C-p0 r2 [ 22] H-trk-tree#trk W=8: stat 2.1989 ms pose 0x32d5e235342b4143 expect match rb 1.27% ra 0.89% others 0.62% cpu_s 4.062 wall 1.109s waited 0.0s
+2026-09-25T06:14:48.191+03:00   Q1C-p0 r2 [ 23] H-jolt56#j56 W=8: stat 2.4736 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 0.89% ra 2.94% others 0.7% cpu_s 9.422 wall 1.253s waited 0.0s
+2026-09-25T06:14:55.244+03:00   Q1C-p0 r2 [ 24] H-trk-ap#trk W=8: stat 3.9716 ms pose 0x32d5e235342b4143 expect match rb 2.94% ra 0.84% others 0.59% cpu_s 5.25 wall 1.994s waited 0.0s
+2026-09-25T06:15:01.486+03:00   Q1C-p0 r2 [ 25] H-trk-tree#trk W=16: stat 2.3509 ms pose 0x32d5e235342b4143 expect match rb 0.84% ra 1.75% others 0.91% cpu_s 7.109 wall 1.185s waited 0.0s
+2026-09-25T06:15:07.763+03:00   Q1C-p0 r2 [ 26] H-jolt56#j56 W=16: stat 2.4195 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 1.75% ra 1.7% others 0.72% cpu_s 17.375 wall 1.224s waited 0.0s
+2026-09-25T06:15:14.895+03:00   Q1C-p0 r2 [ 27] H-trk-ap#trk W=16: stat 4.1335 ms pose 0x32d5e235342b4143 expect match rb 1.7% ra 0.76% others 0.38% cpu_s 8.203 wall 2.076s waited 0.0s
+2026-09-25T06:15:14.895+03:00 Q1C-p0: done
+2026-09-25T06:15:14.897+03:00 Q1C-p1: idle rule (wait_idle7.ps1, up to 30 polls)
+2026-09-25T06:17:25.386+03:00 Q1C-p1: idle reached; {'time': '2026-09-25T06:17:25.386+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T06:17:35.445+03:00 Q1C-p1: opening receipt 0.71% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T06:17:41.605+03:00   Q1C-p1 warm-up H-trk-tree#trk W=8 (untimed): stat 2.1906 ms pose 0x32d5e235342b4143 expect match rb 0.71% ra 0.74% others 0.27% cpu_s 4.438 wall 1.105s waited 0.0s
+2026-09-25T06:17:48.727+03:00   Q1C-p1 r0 [  1] H-trk-ap#trk W=16: stat 4.1145 ms pose 0x32d5e235342b4143 expect match rb 0.74% ra 1.36% others 0.57% cpu_s 9.453 wall 2.067s waited 0.0s
+2026-09-25T06:17:55.000+03:00   Q1C-p1 r0 [  2] H-jolt56#j56 W=16: stat 2.4126 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 1.36% ra 3.86% others 1.13% cpu_s 18.141 wall 1.222s waited 0.0s
+2026-09-25T06:18:01.254+03:00   Q1C-p1 r0 [  3] H-trk-tree#trk W=16: stat 2.3713 ms pose 0x32d5e235342b4143 expect match rb 3.86% ra 1.09% others 0.65% cpu_s 7.281 wall 1.195s waited 0.0s
+2026-09-25T06:18:08.304+03:00   Q1C-p1 r0 [  4] H-trk-ap#trk W=8: stat 3.9736 ms pose 0x32d5e235342b4143 expect match rb 1.09% ra 1.27% others 0.59% cpu_s 5.453 wall 1.996s waited 0.0s
+2026-09-25T06:18:14.631+03:00   Q1C-p1 r0 [  5] H-jolt56#j56 W=8: stat 2.5288 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 1.27% ra 0.72% others 1.08% cpu_s 9.609 wall 1.278s waited 0.0s
+2026-09-25T06:18:20.802+03:00   Q1C-p1 r0 [  6] H-trk-tree#trk W=8: stat 2.1969 ms pose 0x32d5e235342b4143 expect match rb 0.72% ra 0.94% others 1.15% cpu_s 4.797 wall 1.107s waited 0.0s
+2026-09-25T06:18:28.233+03:00   Q1C-p1 r0 [  7] H-trk-ap#trk W=4: stat 4.7342 ms pose 0x32d5e235342b4143 expect match rb 0.94% ra 0.89% others 0.74% cpu_s 5.344 wall 2.376s waited 0.0s
+2026-09-25T06:18:35.065+03:00   Q1C-p1 r0 [  8] H-jolt56#j56 W=4: stat 3.5388 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 0.89% ra 0.8% others 0.99% cpu_s 6.984 wall 1.783s waited 0.0s
+2026-09-25T06:18:41.534+03:00   Q1C-p1 r0 [  9] H-trk-tree#trk W=4: stat 2.7927 ms pose 0x32d5e235342b4143 expect match rb 0.8% ra 0.74% others 0.63% cpu_s 3.578 wall 1.405s waited 0.0s
+2026-09-25T06:18:48.654+03:00   Q1C-p1 r1 [ 10] H-trk-ap#trk W=16: stat 4.1124 ms pose 0x32d5e235342b4143 expect match rb 0.74% ra 1.41% others 0.62% cpu_s 11.391 wall 2.066s waited 0.0s
+2026-09-25T06:18:54.928+03:00   Q1C-p1 r1 [ 11] H-jolt56#j56 W=16: stat 2.4114 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 1.41% ra 3.79% others 0.8% cpu_s 17.203 wall 1.221s waited 0.0s
+2026-09-25T06:19:01.174+03:00   Q1C-p1 r1 [ 12] H-trk-tree#trk W=16: stat 2.3620 ms pose 0x32d5e235342b4143 expect match rb 3.79% ra 1.27% others 0.33% cpu_s 8.547 wall 1.191s waited 0.0s
+2026-09-25T06:19:08.213+03:00   Q1C-p1 r1 [ 13] H-trk-ap#trk W=8: stat 3.9495 ms pose 0x32d5e235342b4143 expect match rb 1.27% ra 0.57% others 0.44% cpu_s 5.422 wall 1.984s waited 0.0s
+2026-09-25T06:19:14.523+03:00   Q1C-p1 r1 [ 14] H-jolt56#j56 W=8: stat 2.4836 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 0.57% ra 1.07% others 0.86% cpu_s 9.359 wall 1.258s waited 0.0s
+2026-09-25T06:19:20.678+03:00   Q1C-p1 r1 [ 15] H-trk-tree#trk W=8: stat 2.1827 ms pose 0x32d5e235342b4143 expect match rb 1.07% ra 0.83% others 0.72% cpu_s 4.422 wall 1.101s waited 0.0s
+2026-09-25T06:19:28.017+03:00   Q1C-p1 r1 [ 16] H-trk-ap#trk W=4: stat 4.5479 ms pose 0x32d5e235342b4143 expect match rb 0.83% ra 3.92% others 0.61% cpu_s 4.703 wall 2.283s waited 0.0s
+2026-09-25T06:19:34.847+03:00   Q1C-p1 r1 [ 17] H-jolt56#j56 W=4: stat 3.5357 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 3.92% ra 0.93% others 0.66% cpu_s 6.922 wall 1.781s waited 0.0s
+2026-09-25T06:19:41.287+03:00   Q1C-p1 r1 [ 18] H-trk-tree#trk W=4: stat 2.7479 ms pose 0x32d5e235342b4143 expect match rb 0.93% ra 1.15% others 0.5% cpu_s 3.469 wall 1.383s waited 0.0s
+2026-09-25T06:19:48.409+03:00   Q1C-p1 r2 [ 19] H-trk-ap#trk W=16: stat 4.1162 ms pose 0x32d5e235342b4143 expect match rb 1.15% ra 1.76% others 0.71% cpu_s 10.688 wall 2.068s waited 0.0s
+2026-09-25T06:19:54.652+03:00   Q1C-p1 r2 [ 20] H-jolt56#j56 W=16: stat 2.3479 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 1.76% ra 2.41% others 0.99% cpu_s 17.422 wall 1.189s waited 0.0s
+2026-09-25T06:20:00.934+03:00   Q1C-p1 r2 [ 21] H-trk-tree#trk W=16: stat 2.4315 ms pose 0x32d5e235342b4143 expect match rb 2.41% ra 1.41% others 0.95% cpu_s 8.812 wall 1.225s waited 0.0s
+2026-09-25T06:20:07.984+03:00   Q1C-p1 r2 [ 22] H-trk-ap#trk W=8: stat 3.9697 ms pose 0x32d5e235342b4143 expect match rb 1.41% ra 1.25% others 0.64% cpu_s 5.453 wall 1.994s waited 0.0s
+2026-09-25T06:20:14.310+03:00   Q1C-p1 r2 [ 23] H-jolt56#j56 W=8: stat 2.5223 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 1.25% ra 1.0% others 0.61% cpu_s 9.719 wall 1.276s waited 0.0s
+2026-09-25T06:20:20.464+03:00   Q1C-p1 r2 [ 24] H-trk-tree#trk W=8: stat 2.1843 ms pose 0x32d5e235342b4143 expect match rb 1.0% ra 1.11% others 0.89% cpu_s 3.531 wall 1.101s waited 0.0s
+2026-09-25T06:20:27.813+03:00   Q1C-p1 r2 [ 25] H-trk-ap#trk W=4: stat 4.5647 ms pose 0x32d5e235342b4143 expect match rb 1.11% ra 3.21% others 0.6% cpu_s 4.891 wall 2.291s waited 0.0s
+2026-09-25T06:20:34.649+03:00   Q1C-p1 r2 [ 26] H-jolt56#j56 W=4: stat 3.5354 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 3.21% ra 0.71% others 0.55% cpu_s 7.047 wall 1.781s waited 0.0s
+2026-09-25T06:20:41.098+03:00   Q1C-p1 r2 [ 27] H-trk-tree#trk W=4: stat 2.7700 ms pose 0x32d5e235342b4143 expect match rb 0.71% ra 1.79% others 0.85% cpu_s 3.703 wall 1.394s waited 0.0s
+2026-09-25T06:20:41.099+03:00 Q1C-p1: done
+2026-09-25T06:20:41.100+03:00 Q2C-p0: idle rule (wait_idle7.ps1, up to 30 polls)
+2026-09-25T06:22:51.564+03:00 Q2C-p0: idle reached; {'time': '2026-09-25T06:22:51.564+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T06:23:01.662+03:00 Q2C-p0: opening receipt 6.0% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T06:23:40.392+03:00   Q2C-p0 warm-up C3b-TA-armed#tip W=1 (untimed): stat 17.1414 ms pose 0x32d5e235342b4143 expect match rb 1.18% ra 0.9% others 0.66% cpu_s 8.562 wall 8.625s waited 25.0s
+2026-09-25T06:23:54.128+03:00   Q2C-p0 r0 [  1] C3b-TA-armed#par W=1: stat 17.1922 ms pose 0x32d5e235342b4143 expect match rb 0.9% ra 0.73% others 0.53% cpu_s 8.672 wall 8.648s waited 0.0s
+2026-09-25T06:24:07.829+03:00   Q2C-p0 r0 [  2] C3b-TA-armed#tip W=1: stat 17.1267 ms pose 0x32d5e235342b4143 expect match rb 0.73% ra 1.07% others 0.74% cpu_s 8.578 wall 8.616s waited 0.0s
+2026-09-25T06:24:21.537+03:00   Q2C-p0 r0 [  3] C3b-TA-pad06#par W=1: stat 17.1637 ms pose 0x32d5e235342b4143 expect match rb 1.07% ra 0.88% others 0.61% cpu_s 8.594 wall 8.632s waited 0.0s
+2026-09-25T06:24:35.149+03:00   Q2C-p0 r0 [  4] C3b-TA-pad06#tip W=1: stat 16.9708 ms pose 0x32d5e235342b4143 expect match rb 0.88% ra 3.4% others 0.51% cpu_s 8.547 wall 8.535s waited 0.0s
+2026-09-25T06:24:43.643+03:00   Q2C-p0 r0 [  5] C3b-TD-armed#par W=1: stat 6.7407 ms pose 0x32d5e235342b4143 expect match rb 3.4% ra 0.75% others 0.46% cpu_s 3.453 wall 3.417s waited 0.0s
+2026-09-25T06:24:52.077+03:00   Q2C-p0 r0 [  6] C3b-TD-armed#tip W=1: stat 6.6265 ms pose 0x32d5e235342b4143 expect match rb 0.75% ra 0.65% others 0.7% cpu_s 3.375 wall 3.359s waited 0.0s
+2026-09-25T06:24:59.335+03:00   Q2C-p0 r0 [  7] C3b-TA-armed#par W=8: stat 4.2702 ms pose 0x32d5e235342b4143 expect match rb 0.65% ra 1.11% others 0.72% cpu_s 11.859 wall 2.181s waited 0.0s
+2026-09-25T06:25:06.520+03:00   Q2C-p0 r0 [  8] C3b-TA-armed#tip W=8: stat 4.1220 ms pose 0x32d5e235342b4143 expect match rb 1.11% ra 3.07% others 0.47% cpu_s 10.297 wall 2.107s waited 0.0s
+2026-09-25T06:25:20.284+03:00   Q2C-p0 r1 [  9] C3b-TA-armed#par W=1: stat 17.2731 ms pose 0x32d5e235342b4143 expect match rb 3.07% ra 1.28% others 0.5% cpu_s 8.672 wall 8.686s waited 0.0s
+2026-09-25T06:25:33.909+03:00   Q2C-p0 r1 [ 10] C3b-TA-armed#tip W=1: stat 16.9797 ms pose 0x32d5e235342b4143 expect match rb 1.28% ra 0.9% others 0.61% cpu_s 8.5 wall 8.54s waited 0.0s
+2026-09-25T06:25:47.714+03:00   Q2C-p0 r1 [ 11] C3b-TA-pad06#par W=1: stat 17.3325 ms pose 0x32d5e235342b4143 expect match rb 0.9% ra 1.06% others 0.86% cpu_s 8.703 wall 8.718s waited 0.0s
+2026-09-25T06:26:01.335+03:00   Q2C-p0 r1 [ 12] C3b-TA-pad06#tip W=1: stat 16.9849 ms pose 0x32d5e235342b4143 expect match rb 1.06% ra 1.1% others 0.56% cpu_s 8.516 wall 8.543s waited 0.0s
+2026-09-25T06:26:09.850+03:00   Q2C-p0 r1 [ 13] C3b-TD-armed#par W=1: stat 6.7869 ms pose 0x32d5e235342b4143 expect match rb 1.1% ra 2.83% others 0.68% cpu_s 3.422 wall 3.44s waited 0.0s
+2026-09-25T06:26:18.287+03:00   Q2C-p0 r1 [ 14] C3b-TD-armed#tip W=1: stat 6.6266 ms pose 0x32d5e235342b4143 expect match rb 2.83% ra 1.31% others 0.44% cpu_s 3.391 wall 3.36s waited 0.0s
+2026-09-25T06:26:25.541+03:00   Q2C-p0 r1 [ 15] C3b-TA-armed#par W=8: stat 4.2617 ms pose 0x32d5e235342b4143 expect match rb 1.31% ra 1.31% others 0.77% cpu_s 11.688 wall 2.177s waited 0.0s
+2026-09-25T06:26:32.706+03:00   Q2C-p0 r1 [ 16] C3b-TA-armed#tip W=8: stat 4.0811 ms pose 0x32d5e235342b4143 expect match rb 1.31% ra 0.86% others 0.9% cpu_s 10.094 wall 2.087s waited 0.0s
+2026-09-25T06:26:46.493+03:00   Q2C-p0 r2 [ 17] C3b-TA-armed#par W=1: stat 17.3188 ms pose 0x32d5e235342b4143 expect match rb 0.86% ra 0.82% others 0.8% cpu_s 8.672 wall 8.712s waited 0.0s
+2026-09-25T06:27:00.115+03:00   Q2C-p0 r2 [ 18] C3b-TA-armed#tip W=1: stat 16.9961 ms pose 0x32d5e235342b4143 expect match rb 0.82% ra 1.07% others 0.71% cpu_s 8.516 wall 8.548s waited 0.0s
+2026-09-25T06:27:13.886+03:00   Q2C-p0 r2 [ 19] C3b-TA-pad06#par W=1: stat 17.2901 ms pose 0x32d5e235342b4143 expect match rb 1.07% ra 1.47% others 0.89% cpu_s 8.719 wall 8.696s waited 0.0s
+2026-09-25T06:27:27.505+03:00   Q2C-p0 r2 [ 20] C3b-TA-pad06#tip W=1: stat 16.9807 ms pose 0x32d5e235342b4143 expect match rb 1.47% ra 2.58% others 0.55% cpu_s 8.531 wall 8.54s waited 0.0s
+2026-09-25T06:27:36.050+03:00   Q2C-p0 r2 [ 21] C3b-TD-armed#par W=1: stat 6.8363 ms pose 0x32d5e235342b4143 expect match rb 2.58% ra 0.67% others 0.48% cpu_s 3.484 wall 3.465s waited 0.0s
+2026-09-25T06:27:44.576+03:00   Q2C-p0 r2 [ 22] C3b-TD-armed#tip W=1: stat 6.8044 ms pose 0x32d5e235342b4143 expect match rb 0.67% ra 1.08% others 1.14% cpu_s 3.438 wall 3.451s waited 0.0s
+2026-09-25T06:27:51.833+03:00   Q2C-p0 r2 [ 23] C3b-TA-armed#par W=8: stat 4.2706 ms pose 0x32d5e235342b4143 expect match rb 1.08% ra 0.66% others 0.91% cpu_s 10.328 wall 2.181s waited 0.0s
+2026-09-25T06:27:59.002+03:00   Q2C-p0 r2 [ 24] C3b-TA-armed#tip W=8: stat 4.0745 ms pose 0x32d5e235342b4143 expect match rb 0.66% ra 0.88% others 0.76% cpu_s 10.938 wall 2.083s waited 0.0s
+2026-09-25T06:27:59.002+03:00 Q2C-p0: done
+2026-09-25T06:27:59.004+03:00 Q2C-p1: idle rule (wait_idle7.ps1, up to 30 polls)
+2026-09-25T06:30:09.490+03:00 Q2C-p1: idle reached; {'time': '2026-09-25T06:30:09.490+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T06:30:19.548+03:00 Q2C-p1: opening receipt 2.12% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T06:30:33.153+03:00   Q2C-p1 warm-up C3b-TA-armed#tip W=1 (untimed): stat 16.9596 ms pose 0x32d5e235342b4143 expect match rb 2.12% ra 1.07% others 0.63% cpu_s 8.5 wall 8.53s waited 0.0s
+2026-09-25T06:30:40.318+03:00   Q2C-p1 r0 [  1] C3b-TA-armed#tip W=8: stat 4.0697 ms pose 0x32d5e235342b4143 expect match rb 1.07% ra 1.19% others 0.76% cpu_s 11.375 wall 2.08s waited 0.0s
+2026-09-25T06:30:47.579+03:00   Q2C-p1 r0 [  2] C3b-TA-armed#par W=8: stat 4.2665 ms pose 0x32d5e235342b4143 expect match rb 1.19% ra 2.87% others 0.58% cpu_s 11.344 wall 2.179s waited 0.0s
+2026-09-25T06:30:55.995+03:00   Q2C-p1 r0 [  3] C3b-TD-armed#tip W=1: stat 6.5893 ms pose 0x32d5e235342b4143 expect match rb 2.87% ra 0.65% others 0.7% cpu_s 3.328 wall 3.34s waited 0.0s
+2026-09-25T06:31:04.532+03:00   Q2C-p1 r0 [  4] C3b-TD-armed#par W=1: stat 6.8304 ms pose 0x32d5e235342b4143 expect match rb 0.65% ra 1.86% others 0.79% cpu_s 3.484 wall 3.461s waited 0.0s
+2026-09-25T06:31:18.147+03:00   Q2C-p1 r0 [  5] C3b-TA-pad06#tip W=1: stat 16.9814 ms pose 0x32d5e235342b4143 expect match rb 1.86% ra 2.97% others 0.72% cpu_s 8.469 wall 8.54s waited 0.0s
+2026-09-25T06:31:31.860+03:00   Q2C-p1 r0 [  6] C3b-TA-pad06#par W=1: stat 17.1806 ms pose 0x32d5e235342b4143 expect match rb 2.97% ra 0.76% others 0.83% cpu_s 8.609 wall 8.639s waited 0.0s
+2026-09-25T06:31:45.457+03:00   Q2C-p1 r0 [  7] C3b-TA-armed#tip W=1: stat 16.9454 ms pose 0x32d5e235342b4143 expect match rb 0.76% ra 0.76% others 0.49% cpu_s 8.516 wall 8.522s waited 0.0s
+2026-09-25T06:31:59.219+03:00   Q2C-p1 r0 [  8] C3b-TA-armed#par W=1: stat 17.2744 ms pose 0x32d5e235342b4143 expect match rb 0.76% ra 1.72% others 0.79% cpu_s 8.734 wall 8.688s waited 0.0s
+2026-09-25T06:32:06.393+03:00   Q2C-p1 r1 [  9] C3b-TA-armed#tip W=8: stat 4.1088 ms pose 0x32d5e235342b4143 expect match rb 1.72% ra 1.02% others 0.42% cpu_s 11.297 wall 2.1s waited 0.0s
+2026-09-25T06:32:13.719+03:00   Q2C-p1 r1 [ 10] C3b-TA-armed#par W=8: stat 4.4095 ms pose 0x32d5e235342b4143 expect match rb 1.02% ra 2.89% others 0.43% cpu_s 11.391 wall 2.25s waited 0.0s
+2026-09-25T06:32:22.141+03:00   Q2C-p1 r1 [ 11] C3b-TD-armed#tip W=1: stat 6.6001 ms pose 0x32d5e235342b4143 expect match rb 2.89% ra 3.18% others 0.5% cpu_s 3.328 wall 3.345s waited 0.0s
+2026-09-25T06:32:30.679+03:00   Q2C-p1 r1 [ 12] C3b-TD-armed#par W=1: stat 6.8348 ms pose 0x32d5e235342b4143 expect match rb 3.18% ra 1.04% others 0.99% cpu_s 3.453 wall 3.463s waited 0.0s
+2026-09-25T06:32:44.332+03:00   Q2C-p1 r1 [ 13] C3b-TA-pad06#tip W=1: stat 17.0566 ms pose 0x32d5e235342b4143 expect match rb 1.04% ra 0.76% others 0.65% cpu_s 8.609 wall 8.577s waited 0.0s
+2026-09-25T06:32:58.127+03:00   Q2C-p1 r1 [ 14] C3b-TA-pad06#par W=1: stat 17.3410 ms pose 0x32d5e235342b4143 expect match rb 0.76% ra 1.77% others 0.82% cpu_s 8.75 wall 8.721s waited 0.0s
+2026-09-25T06:33:11.763+03:00   Q2C-p1 r1 [ 15] C3b-TA-armed#tip W=1: stat 17.0228 ms pose 0x32d5e235342b4143 expect match rb 1.77% ra 0.87% others 0.62% cpu_s 8.5 wall 8.56s waited 0.0s
+2026-09-25T06:33:25.556+03:00   Q2C-p1 r1 [ 16] C3b-TA-armed#par W=1: stat 17.3322 ms pose 0x32d5e235342b4143 expect match rb 0.87% ra 0.88% others 0.62% cpu_s 8.703 wall 8.717s waited 0.0s
+2026-09-25T06:33:32.723+03:00   Q2C-p1 r2 [ 17] C3b-TA-armed#tip W=8: stat 4.0898 ms pose 0x32d5e235342b4143 expect match rb 0.88% ra 0.96% others 0.56% cpu_s 11.062 wall 2.09s waited 0.0s
+2026-09-25T06:33:39.987+03:00   Q2C-p1 r2 [ 18] C3b-TA-armed#par W=8: stat 4.2820 ms pose 0x32d5e235342b4143 expect match rb 0.96% ra 0.8% others 0.4% cpu_s 11.234 wall 2.186s waited 0.0s
+2026-09-25T06:33:48.408+03:00   Q2C-p1 r2 [ 19] C3b-TD-armed#tip W=1: stat 6.5986 ms pose 0x32d5e235342b4143 expect match rb 0.8% ra 1.23% others 0.47% cpu_s 3.344 wall 3.344s waited 0.0s
+2026-09-25T06:33:56.999+03:00   Q2C-p1 r2 [ 20] C3b-TD-armed#par W=1: stat 6.9354 ms pose 0x32d5e235342b4143 expect match rb 1.23% ra 1.17% others 0.67% cpu_s 3.547 wall 3.515s waited 0.0s
+2026-09-25T06:34:10.647+03:00   Q2C-p1 r2 [ 21] C3b-TA-pad06#tip W=1: stat 17.0410 ms pose 0x32d5e235342b4143 expect match rb 1.17% ra 1.36% others 0.62% cpu_s 8.578 wall 8.569s waited 0.0s
+2026-09-25T06:34:24.406+03:00   Q2C-p1 r2 [ 22] C3b-TA-pad06#par W=1: stat 17.2707 ms pose 0x32d5e235342b4143 expect match rb 1.36% ra 3.09% others 0.64% cpu_s 8.703 wall 8.684s waited 0.0s
+2026-09-25T06:34:38.057+03:00   Q2C-p1 r2 [ 23] C3b-TA-armed#tip W=1: stat 17.0472 ms pose 0x32d5e235342b4143 expect match rb 3.09% ra 0.92% others 0.58% cpu_s 8.547 wall 8.573s waited 0.0s
+2026-09-25T06:34:51.784+03:00   Q2C-p1 r2 [ 24] C3b-TA-armed#par W=1: stat 17.1936 ms pose 0x32d5e235342b4143 expect match rb 0.92% ra 1.51% others 0.71% cpu_s 8.641 wall 8.646s waited 0.0s
+2026-09-25T06:34:51.784+03:00 Q2C-p1: done
+2026-09-25T06:34:51.785+03:00 Q3-p0: idle rule (wait_idle7.ps1, up to 30 polls)
+2026-09-25T06:37:02.313+03:00 Q3-p0: idle reached; {'time': '2026-09-25T06:37:02.313+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T06:37:12.375+03:00 Q3-p0: opening receipt 0.83% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T06:37:12.376+03:00   Q3-p0: no warm-up (block has none)
+2026-09-25T06:47:18.717+03:00   Q3-p0 r0 [  1] G4-refine#g4r W=1: stat 0.0023 ms rb 0.83% ra 3.36% others 0.63% cpu_s 604.844 wall 601.285s waited 0.0s
+2026-09-25T06:57:21.531+03:00   Q3-p0 r1 [  2] G4-refine#g4r W=1: stat 0.0023 ms rb 3.36% ra 1.84% others 0.61% cpu_s 599.828 wall 597.762s waited 0.0s
+2026-09-25T07:07:17.860+03:00   Q3-p0 r2 [  3] G4-refine#g4r W=1: stat 0.0023 ms rb 1.84% ra 0.78% others 0.62% cpu_s 593.734 wall 591.277s waited 0.0s
+2026-09-25T07:07:17.861+03:00 Q3-p0: done
+2026-09-25T07:07:17.862+03:00 Q4-p0: idle rule (wait_idle7.ps1, up to 30 polls)
+2026-09-25T07:09:28.323+03:00 Q4-p0: idle reached; {'time': '2026-09-25T07:09:28.323+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T07:09:38.381+03:00 Q4-p0: opening receipt 1.59% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T07:09:51.764+03:00   Q4-p0 warm-up L9-JA-on#c4 W=1 (untimed): stat 16.6240 ms pose 0x30c5438bc6ad9ffa expect match rb 1.59% ra 0.86% others 0.53% cpu_s 8.328 wall 8.329s waited 0.0s
+2026-09-25T07:10:05.166+03:00   Q4-p0 r0 [  1] L9-JA-on#c4 W=1: stat 16.6657 ms pose 0x30c5438bc6ad9ffa expect match rb 0.86% ra 1.52% others 0.81% cpu_s 8.344 wall 8.348s waited 0.0s
+2026-09-25T07:10:18.855+03:00   Q4-p0 r0 [  2] L9-JC-r050#c4 W=1: stat 17.2430 ms pose 0x30c5438bc6ad9ffa expect match rb 1.52% ra 0.85% others 0.59% cpu_s 8.625 wall 8.636s waited 0.0s
+2026-09-25T07:10:32.834+03:00   Q4-p0 r0 [  3] L9-JC-r100#c4 W=1: stat 17.8242 ms pose 0x30c5438bc6ad9ffa expect match rb 0.85% ra 3.98% others 0.71% cpu_s 8.938 wall 8.926s waited 0.0s
+2026-09-25T07:10:47.176+03:00   Q4-p0 r0 [  4] L9-JC-r150#c4 W=1: stat 18.5432 ms pose 0x30c5438bc6ad9ffa expect match rb 3.98% ra 1.99% others 1.29% cpu_s 9.297 wall 9.286s waited 0.0s
+2026-09-25T07:11:01.844+03:00   Q4-p0 r0 [  5] L9-JC-r200#c4 W=1: stat 19.1911 ms pose 0x30c5438bc6ad9ffa expect match rb 1.99% ra 3.26% others 0.62% cpu_s 9.594 wall 9.611s waited 0.0s
+2026-09-25T07:11:15.317+03:00   Q4-p0 r1 [  6] L9-JA-on#c4 W=1: stat 16.8070 ms pose 0x30c5438bc6ad9ffa expect match rb 3.26% ra 0.7% others 0.51% cpu_s 8.422 wall 8.419s waited 0.0s
+2026-09-25T07:11:29.015+03:00   Q4-p0 r1 [  7] L9-JC-r050#c4 W=1: stat 17.2500 ms pose 0x30c5438bc6ad9ffa expect match rb 0.7% ra 1.47% others 0.79% cpu_s 8.672 wall 8.639s waited 0.0s
+2026-09-25T07:11:43.042+03:00   Q4-p0 r1 [  8] L9-JC-r100#c4 W=1: stat 17.9171 ms pose 0x30c5438bc6ad9ffa expect match rb 1.47% ra 0.86% others 0.67% cpu_s 9.0 wall 8.973s waited 0.0s
+2026-09-25T07:11:57.368+03:00   Q4-p0 r1 [  9] L9-JC-r150#c4 W=1: stat 18.5159 ms pose 0x30c5438bc6ad9ffa expect match rb 0.86% ra 0.92% others 0.68% cpu_s 9.266 wall 9.273s waited 0.0s
+2026-09-25T07:12:12.035+03:00   Q4-p0 r1 [ 10] L9-JC-r200#c4 W=1: stat 19.1964 ms pose 0x30c5438bc6ad9ffa expect match rb 0.92% ra 0.78% others 0.83% cpu_s 9.578 wall 9.613s waited 0.0s
+2026-09-25T07:12:25.421+03:00   Q4-p0 r2 [ 11] L9-JA-on#c4 W=1: stat 16.6303 ms pose 0x30c5438bc6ad9ffa expect match rb 0.78% ra 3.37% others 0.57% cpu_s 8.375 wall 8.33s waited 0.0s
+2026-09-25T07:12:39.160+03:00   Q4-p0 r2 [ 12] L9-JC-r050#c4 W=1: stat 17.3411 ms pose 0x30c5438bc6ad9ffa expect match rb 3.37% ra 0.94% others 0.87% cpu_s 8.672 wall 8.685s waited 0.0s
+2026-09-25T07:12:53.172+03:00   Q4-p0 r2 [ 13] L9-JC-r100#c4 W=1: stat 17.8835 ms pose 0x30c5438bc6ad9ffa expect match rb 0.94% ra 0.82% others 0.52% cpu_s 9.0 wall 8.957s waited 0.0s
+2026-09-25T07:13:07.497+03:00   Q4-p0 r2 [ 14] L9-JC-r150#c4 W=1: stat 18.5118 ms pose 0x30c5438bc6ad9ffa expect match rb 0.82% ra 3.51% others 0.7% cpu_s 9.266 wall 9.27s waited 0.0s
+2026-09-25T07:13:22.141+03:00   Q4-p0 r2 [ 15] L9-JC-r200#c4 W=1: stat 19.1454 ms pose 0x30c5438bc6ad9ffa expect match rb 3.51% ra 1.52% others 0.6% cpu_s 9.547 wall 9.587s waited 0.0s
+2026-09-25T07:13:22.142+03:00 Q4-p0: done
+2026-09-25T07:13:22.143+03:00 Q4-p1: idle rule (wait_idle7.ps1, up to 30 polls)
+2026-09-25T07:15:32.653+03:00 Q4-p1: idle reached; {'time': '2026-09-25T07:15:32.653+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T07:15:42.717+03:00 Q4-p1: opening receipt 2.38% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T07:15:56.101+03:00   Q4-p1 warm-up L9-JA-on#c4 W=1 (untimed): stat 16.6287 ms pose 0x30c5438bc6ad9ffa expect match rb 2.38% ra 1.13% others 0.53% cpu_s 8.297 wall 8.329s waited 0.0s
+2026-09-25T07:16:10.711+03:00   Q4-p1 r0 [  1] L9-JC-r200#c4 W=1: stat 19.0810 ms pose 0x30c5438bc6ad9ffa expect match rb 1.13% ra 3.31% others 0.67% cpu_s 9.531 wall 9.555s waited 0.0s
+2026-09-25T07:16:25.004+03:00   Q4-p1 r0 [  2] L9-JC-r150#c4 W=1: stat 18.4440 ms pose 0x30c5438bc6ad9ffa expect match rb 3.31% ra 0.92% others 0.43% cpu_s 9.234 wall 9.237s waited 0.0s
+2026-09-25T07:16:39.038+03:00   Q4-p1 r0 [  3] L9-JC-r100#c4 W=1: stat 17.9153 ms pose 0x30c5438bc6ad9ffa expect match rb 0.92% ra 1.11% others 0.73% cpu_s 8.984 wall 8.972s waited 0.0s
+2026-09-25T07:16:52.747+03:00   Q4-p1 r0 [  4] L9-JC-r050#c4 W=1: stat 17.2816 ms pose 0x30c5438bc6ad9ffa expect match rb 1.11% ra 1.18% others 0.71% cpu_s 8.656 wall 8.655s waited 0.0s
+2026-09-25T07:17:06.118+03:00   Q4-p1 r0 [  5] L9-JA-on#c4 W=1: stat 16.6066 ms pose 0x30c5438bc6ad9ffa expect match rb 1.18% ra 2.3% others 0.59% cpu_s 8.266 wall 8.318s waited 0.0s
+2026-09-25T07:17:20.738+03:00   Q4-p1 r1 [  6] L9-JC-r200#c4 W=1: stat 19.1024 ms pose 0x30c5438bc6ad9ffa expect match rb 2.3% ra 4.2% others 0.57% cpu_s 9.578 wall 9.566s waited 0.0s
+2026-09-25T07:17:35.062+03:00   Q4-p1 r1 [  7] L9-JC-r150#c4 W=1: stat 18.5122 ms pose 0x30c5438bc6ad9ffa expect match rb 4.2% ra 0.74% others 0.64% cpu_s 9.219 wall 9.271s waited 0.0s
+2026-09-25T07:17:49.073+03:00   Q4-p1 r1 [  8] L9-JC-r100#c4 W=1: stat 17.8887 ms pose 0x30c5438bc6ad9ffa expect match rb 0.74% ra 1.37% others 0.7% cpu_s 9.0 wall 8.959s waited 0.0s
+2026-09-25T07:18:02.769+03:00   Q4-p1 r1 [  9] L9-JC-r050#c4 W=1: stat 17.2566 ms pose 0x30c5438bc6ad9ffa expect match rb 1.37% ra 1.83% others 0.37% cpu_s 8.656 wall 8.643s waited 0.0s
+2026-09-25T07:18:16.152+03:00   Q4-p1 r1 [ 10] L9-JA-on#c4 W=1: stat 16.6282 ms pose 0x30c5438bc6ad9ffa expect match rb 1.83% ra 3.28% others 0.55% cpu_s 8.344 wall 8.329s waited 0.0s
+2026-09-25T07:18:30.757+03:00   Q4-p1 r2 [ 11] L9-JC-r200#c4 W=1: stat 19.0715 ms pose 0x30c5438bc6ad9ffa expect match rb 3.28% ra 1.15% others 0.59% cpu_s 9.594 wall 9.55s waited 0.0s
+2026-09-25T07:18:45.053+03:00   Q4-p1 r2 [ 12] L9-JC-r150#c4 W=1: stat 18.4488 ms pose 0x30c5438bc6ad9ffa expect match rb 1.15% ra 2.36% others 0.49% cpu_s 9.234 wall 9.239s waited 0.0s
+2026-09-25T07:18:59.038+03:00   Q4-p1 r2 [ 13] L9-JC-r100#c4 W=1: stat 17.8221 ms pose 0x30c5438bc6ad9ffa expect match rb 2.36% ra 1.7% others 0.72% cpu_s 8.938 wall 8.925s waited 0.0s
+2026-09-25T07:19:12.729+03:00   Q4-p1 r2 [ 14] L9-JC-r050#c4 W=1: stat 17.2378 ms pose 0x30c5438bc6ad9ffa expect match rb 1.7% ra 1.17% others 0.56% cpu_s 8.656 wall 8.633s waited 0.0s
+2026-09-25T07:19:26.133+03:00   Q4-p1 r2 [ 15] L9-JA-on#c4 W=1: stat 16.6657 ms pose 0x30c5438bc6ad9ffa expect match rb 1.17% ra 0.97% others 0.73% cpu_s 8.328 wall 8.347s waited 0.0s
+2026-09-25T07:19:26.134+03:00 Q4-p1: done
+2026-09-25T07:19:26.136+03:00 Q2D-p0: idle rule (wait_idle7.ps1, up to 30 polls)
+2026-09-25T07:21:36.600+03:00 Q2D-p0: idle reached; {'time': '2026-09-25T07:21:36.600+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T07:21:46.657+03:00 Q2D-p0: opening receipt 1.71% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T07:22:00.286+03:00   Q2D-p0 warm-up C3b-TA-armed#tip W=1 (untimed): stat 17.0083 ms pose 0x32d5e235342b4143 expect match rb 1.71% ra 0.96% others 0.66% cpu_s 8.516 wall 8.555s waited 0.0s
+2026-09-25T07:22:14.020+03:00   Q2D-p0 r0 [  1] C3b-TA-armed#par W=1: stat 17.2211 ms pose 0x32d5e235342b4143 expect match rb 0.96% ra 0.98% others 0.52% cpu_s 8.641 wall 8.66s waited 0.0s
+2026-09-25T07:22:27.660+03:00   Q2D-p0 r0 [  2] C3b-TA-armed#tip W=1: stat 17.0212 ms pose 0x32d5e235342b4143 expect match rb 0.98% ra 3.06% others 0.69% cpu_s 8.516 wall 8.561s waited 0.0s
+2026-09-25T07:22:41.445+03:00   Q2D-p0 r0 [  3] C3b-TA-pad06#par W=1: stat 17.3175 ms pose 0x32d5e235342b4143 expect match rb 3.06% ra 1.58% others 0.65% cpu_s 8.672 wall 8.709s waited 0.0s
+2026-09-25T07:22:55.119+03:00   Q2D-p0 r0 [  4] C3b-TA-pad06#tip W=1: stat 17.0969 ms pose 0x32d5e235342b4143 expect match rb 1.58% ra 2.89% others 0.47% cpu_s 8.531 wall 8.598s waited 0.0s
+2026-09-25T07:23:03.667+03:00   Q2D-p0 r0 [  5] C3b-TD-armed#par W=1: stat 6.8320 ms pose 0x32d5e235342b4143 expect match rb 2.89% ra 2.62% others 0.71% cpu_s 3.469 wall 3.461s waited 0.0s
+2026-09-25T07:23:12.100+03:00   Q2D-p0 r0 [  6] C3b-TD-armed#tip W=1: stat 6.6227 ms pose 0x32d5e235342b4143 expect match rb 2.62% ra 1.17% others 0.91% cpu_s 3.344 wall 3.357s waited 0.0s
+2026-09-25T07:23:19.358+03:00   Q2D-p0 r0 [  7] C3b-TA-armed#par W=8: stat 4.2706 ms pose 0x32d5e235342b4143 expect match rb 1.17% ra 1.25% others 0.45% cpu_s 9.844 wall 2.18s waited 0.0s
+2026-09-25T07:23:26.521+03:00   Q2D-p0 r0 [  8] C3b-TA-armed#tip W=8: stat 4.0713 ms pose 0x32d5e235342b4143 expect match rb 1.25% ra 3.08% others 0.38% cpu_s 11.75 wall 2.081s waited 0.0s
+2026-09-25T07:23:40.268+03:00   Q2D-p0 r1 [  9] C3b-TA-armed#par W=1: stat 17.2202 ms pose 0x32d5e235342b4143 expect match rb 3.08% ra 1.86% others 0.73% cpu_s 8.625 wall 8.659s waited 0.0s
+2026-09-25T07:23:53.925+03:00   Q2D-p0 r1 [ 10] C3b-TA-armed#tip W=1: stat 17.0503 ms pose 0x32d5e235342b4143 expect match rb 1.86% ra 1.92% others 0.65% cpu_s 8.516 wall 8.575s waited 0.0s
+2026-09-25T07:24:07.736+03:00   Q2D-p0 r1 [ 11] C3b-TA-pad06#par W=1: stat 17.3562 ms pose 0x32d5e235342b4143 expect match rb 1.92% ra 1.22% others 0.63% cpu_s 8.688 wall 8.731s waited 0.0s
+2026-09-25T07:24:21.379+03:00   Q2D-p0 r1 [ 12] C3b-TA-pad06#tip W=1: stat 17.0299 ms pose 0x32d5e235342b4143 expect match rb 1.22% ra 0.86% others 0.88% cpu_s 8.516 wall 8.566s waited 0.0s
+2026-09-25T07:24:29.879+03:00   Q2D-p0 r1 [ 13] C3b-TD-armed#par W=1: stat 6.7469 ms pose 0x32d5e235342b4143 expect match rb 0.86% ra 3.27% others 0.66% cpu_s 3.406 wall 3.419s waited 0.0s
+2026-09-25T07:24:38.329+03:00   Q2D-p0 r1 [ 14] C3b-TD-armed#tip W=1: stat 6.6529 ms pose 0x32d5e235342b4143 expect match rb 3.27% ra 1.59% others 0.7% cpu_s 3.359 wall 3.373s waited 0.0s
+2026-09-25T07:24:45.587+03:00   Q2D-p0 r1 [ 15] C3b-TA-armed#par W=8: stat 4.2679 ms pose 0x32d5e235342b4143 expect match rb 1.59% ra 0.99% others 0.63% cpu_s 9.766 wall 2.18s waited 0.0s
+2026-09-25T07:24:52.748+03:00   Q2D-p0 r1 [ 16] C3b-TA-armed#tip W=8: stat 4.0732 ms pose 0x32d5e235342b4143 expect match rb 0.99% ra 1.33% others 0.47% cpu_s 11.094 wall 2.083s waited 0.0s
+2026-09-25T07:25:06.543+03:00   Q2D-p0 r2 [ 17] C3b-TA-armed#par W=1: stat 17.3333 ms pose 0x32d5e235342b4143 expect match rb 1.33% ra 1.91% others 0.85% cpu_s 8.703 wall 8.718s waited 0.0s
+2026-09-25T07:25:20.180+03:00   Q2D-p0 r2 [ 18] C3b-TA-armed#tip W=1: stat 17.0232 ms pose 0x32d5e235342b4143 expect match rb 1.91% ra 0.82% others 0.75% cpu_s 8.578 wall 8.562s waited 0.0s
+2026-09-25T07:25:33.968+03:00   Q2D-p0 r2 [ 19] C3b-TA-pad06#par W=1: stat 17.3199 ms pose 0x32d5e235342b4143 expect match rb 0.82% ra 1.87% others 0.81% cpu_s 8.703 wall 8.711s waited 0.0s
+2026-09-25T07:25:47.582+03:00   Q2D-p0 r2 [ 20] C3b-TA-pad06#tip W=1: stat 16.9771 ms pose 0x32d5e235342b4143 expect match rb 1.87% ra 0.89% others 0.52% cpu_s 8.469 wall 8.538s waited 0.0s
+2026-09-25T07:25:56.095+03:00   Q2D-p0 r2 [ 21] C3b-TD-armed#par W=1: stat 6.7836 ms pose 0x32d5e235342b4143 expect match rb 0.89% ra 0.85% others 0.6% cpu_s 3.438 wall 3.438s waited 0.0s
+2026-09-25T07:26:04.625+03:00   Q2D-p0 r2 [ 22] C3b-TD-armed#tip W=1: stat 6.8115 ms pose 0x32d5e235342b4143 expect match rb 0.85% ra 1.15% others 0.99% cpu_s 3.438 wall 3.454s waited 0.0s
+2026-09-25T07:26:11.899+03:00   Q2D-p0 r2 [ 23] C3b-TA-armed#par W=8: stat 4.3006 ms pose 0x32d5e235342b4143 expect match rb 1.15% ra 1.02% others 0.85% cpu_s 10.469 wall 2.196s waited 0.0s
+2026-09-25T07:26:19.067+03:00   Q2D-p0 r2 [ 24] C3b-TA-armed#tip W=8: stat 4.0817 ms pose 0x32d5e235342b4143 expect match rb 1.02% ra 0.74% others 0.33% cpu_s 11.109 wall 2.086s waited 0.0s
+2026-09-25T07:26:19.067+03:00 Q2D-p0: done
+2026-09-25T07:26:19.069+03:00 Q2D-p1: idle rule (wait_idle7.ps1, up to 30 polls)
+2026-09-25T07:28:29.550+03:00 Q2D-p1: idle reached; {'time': '2026-09-25T07:28:29.550+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T07:28:39.608+03:00 Q2D-p1: opening receipt 2.15% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T07:28:53.214+03:00   Q2D-p1 warm-up C3b-TA-armed#tip W=1 (untimed): stat 16.9585 ms pose 0x32d5e235342b4143 expect match rb 2.15% ra 0.99% others 0.55% cpu_s 8.516 wall 8.53s waited 0.0s
+2026-09-25T07:29:00.375+03:00   Q2D-p1 r0 [  1] C3b-TA-armed#tip W=8: stat 4.0773 ms pose 0x32d5e235342b4143 expect match rb 0.99% ra 1.08% others 0.75% cpu_s 11.141 wall 2.084s waited 0.0s
+2026-09-25T07:29:07.630+03:00   Q2D-p1 r0 [  2] C3b-TA-armed#par W=8: stat 4.2683 ms pose 0x32d5e235342b4143 expect match rb 1.08% ra 3.6% others 0.72% cpu_s 11.359 wall 2.18s waited 0.0s
+2026-09-25T07:29:16.081+03:00   Q2D-p1 r0 [  3] C3b-TD-armed#tip W=1: stat 6.6484 ms pose 0x32d5e235342b4143 expect match rb 3.6% ra 1.9% others 0.44% cpu_s 3.375 wall 3.37s waited 0.0s
+2026-09-25T07:29:24.620+03:00   Q2D-p1 r0 [  4] C3b-TD-armed#par W=1: stat 6.8366 ms pose 0x32d5e235342b4143 expect match rb 1.9% ra 0.88% others 0.88% cpu_s 3.484 wall 3.464s waited 0.0s
+2026-09-25T07:29:38.240+03:00   Q2D-p1 r0 [  5] C3b-TA-pad06#tip W=1: stat 16.9896 ms pose 0x32d5e235342b4143 expect match rb 0.88% ra 3.64% others 0.53% cpu_s 8.516 wall 8.543s waited 0.0s
+2026-09-25T07:29:51.989+03:00   Q2D-p1 r0 [  6] C3b-TA-pad06#par W=1: stat 17.2512 ms pose 0x32d5e235342b4143 expect match rb 3.64% ra 0.98% others 0.63% cpu_s 8.609 wall 8.674s waited 0.0s
+2026-09-25T07:30:05.606+03:00   Q2D-p1 r0 [  7] C3b-TA-armed#tip W=1: stat 16.9746 ms pose 0x32d5e235342b4143 expect match rb 0.98% ra 1.73% others 0.63% cpu_s 8.516 wall 8.536s waited 0.0s
+2026-09-25T07:30:19.395+03:00   Q2D-p1 r0 [  8] C3b-TA-armed#par W=1: stat 17.3221 ms pose 0x32d5e235342b4143 expect match rb 1.73% ra 0.85% others 0.72% cpu_s 8.688 wall 8.711s waited 0.0s
+2026-09-25T07:30:26.546+03:00   Q2D-p1 r1 [  9] C3b-TA-armed#tip W=8: stat 4.0580 ms pose 0x32d5e235342b4143 expect match rb 0.85% ra 0.88% others 0.67% cpu_s 11.344 wall 2.074s waited 0.0s
+2026-09-25T07:30:33.802+03:00   Q2D-p1 r1 [ 10] C3b-TA-armed#par W=8: stat 4.2677 ms pose 0x32d5e235342b4143 expect match rb 0.88% ra 0.81% others 1.0% cpu_s 11.344 wall 2.179s waited 0.0s
+2026-09-25T07:30:42.360+03:00   Q2D-p1 r1 [ 11] C3b-TD-armed#tip W=1: stat 6.8460 ms pose 0x32d5e235342b4143 expect match rb 0.81% ra 1.19% others 0.65% cpu_s 3.484 wall 3.47s waited 0.0s
+2026-09-25T07:30:50.899+03:00   Q2D-p1 r1 [ 12] C3b-TD-armed#par W=1: stat 6.8357 ms pose 0x32d5e235342b4143 expect match rb 1.19% ra 1.65% others 0.74% cpu_s 3.438 wall 3.464s waited 0.0s
+2026-09-25T07:31:04.501+03:00   Q2D-p1 r1 [ 13] C3b-TA-pad06#tip W=1: stat 16.9552 ms pose 0x32d5e235342b4143 expect match rb 1.65% ra 1.24% others 0.65% cpu_s 8.516 wall 8.527s waited 0.0s
+2026-09-25T07:31:18.282+03:00   Q2D-p1 r1 [ 14] C3b-TA-pad06#par W=1: stat 17.2942 ms pose 0x32d5e235342b4143 expect match rb 1.24% ra 0.81% others 0.65% cpu_s 8.672 wall 8.697s waited 0.0s
+2026-09-25T07:31:31.904+03:00   Q2D-p1 r1 [ 15] C3b-TA-armed#tip W=1: stat 17.0004 ms pose 0x32d5e235342b4143 expect match rb 0.81% ra 1.09% others 0.58% cpu_s 8.5 wall 8.549s waited 0.0s
+2026-09-25T07:31:45.696+03:00   Q2D-p1 r1 [ 16] C3b-TA-armed#par W=1: stat 17.3332 ms pose 0x32d5e235342b4143 expect match rb 1.09% ra 1.03% others 0.88% cpu_s 8.688 wall 8.717s waited 0.0s
+2026-09-25T07:31:52.860+03:00   Q2D-p1 r2 [ 17] C3b-TA-armed#tip W=8: stat 4.0877 ms pose 0x32d5e235342b4143 expect match rb 1.03% ra 0.98% others 0.52% cpu_s 11.469 wall 2.089s waited 0.0s
+2026-09-25T07:32:00.114+03:00   Q2D-p1 r2 [ 18] C3b-TA-armed#par W=8: stat 4.2678 ms pose 0x32d5e235342b4143 expect match rb 0.98% ra 1.05% others 1.13% cpu_s 11.016 wall 2.179s waited 0.0s
+2026-09-25T07:32:08.538+03:00   Q2D-p1 r2 [ 19] C3b-TD-armed#tip W=1: stat 6.6060 ms pose 0x32d5e235342b4143 expect match rb 1.05% ra 1.84% others 0.62% cpu_s 3.328 wall 3.348s waited 0.0s
+2026-09-25T07:32:17.184+03:00   Q2D-p1 r2 [ 20] C3b-TD-armed#par W=1: stat 7.0402 ms pose 0x32d5e235342b4143 expect match rb 1.84% ra 0.94% others 0.83% cpu_s 3.562 wall 3.566s waited 0.0s
+2026-09-25T07:32:30.897+03:00   Q2D-p1 r2 [ 21] C3b-TA-pad06#tip W=1: stat 17.1623 ms pose 0x32d5e235342b4143 expect match rb 0.94% ra 1.07% others 0.67% cpu_s 8.609 wall 8.635s waited 0.0s
+2026-09-25T07:32:44.691+03:00   Q2D-p1 r2 [ 22] C3b-TA-pad06#par W=1: stat 17.3336 ms pose 0x32d5e235342b4143 expect match rb 1.07% ra 3.01% others 0.68% cpu_s 8.672 wall 8.716s waited 0.0s
+2026-09-25T07:32:58.342+03:00   Q2D-p1 r2 [ 23] C3b-TA-armed#tip W=1: stat 17.0482 ms pose 0x32d5e235342b4143 expect match rb 3.01% ra 2.08% others 0.65% cpu_s 8.562 wall 8.573s waited 0.0s
+2026-09-25T07:33:12.112+03:00   Q2D-p1 r2 [ 24] C3b-TA-armed#par W=1: stat 17.2776 ms pose 0x32d5e235342b4143 expect match rb 2.08% ra 2.52% others 0.63% cpu_s 8.656 wall 8.688s waited 0.0s
+2026-09-25T07:33:12.112+03:00 Q2D-p1: done
+2026-09-25T07:33:12.114+03:00 Q1D-p0: idle rule (wait_idle7.ps1, up to 30 polls)
+2026-09-25T07:35:22.614+03:00 Q1D-p0: idle reached; {'time': '2026-09-25T07:35:22.614+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T07:35:32.673+03:00 Q1D-p0: opening receipt 0.77% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T07:35:38.830+03:00   Q1D-p0 warm-up H-trk-tree#trk W=8 (untimed): stat 2.1828 ms pose 0x32d5e235342b4143 expect match rb 0.77% ra 1.09% others 0.45% cpu_s 4.406 wall 1.102s waited 0.0s
+2026-09-25T07:35:45.278+03:00   Q1D-p0 r0 [  1] H-trk-tree#trk W=4: stat 2.7661 ms pose 0x32d5e235342b4143 expect match rb 1.09% ra 1.05% others 0.7% cpu_s 3.75 wall 1.392s waited 0.0s
+2026-09-25T07:35:52.224+03:00   Q1D-p0 r0 [  2] H-jolt56#j56 W=4: stat 3.7492 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 1.05% ra 1.86% others 1.3% cpu_s 7.297 wall 1.895s waited 0.0s
+2026-09-25T07:35:59.558+03:00   Q1D-p0 r0 [  3] H-trk-ap#trk W=4: stat 4.5394 ms pose 0x32d5e235342b4143 expect match rb 1.86% ra 1.16% others 0.6% cpu_s 4.875 wall 2.279s waited 0.0s
+2026-09-25T07:36:05.726+03:00   Q1D-p0 r0 [  4] H-trk-tree#trk W=8: stat 2.2034 ms pose 0x32d5e235342b4143 expect match rb 1.16% ra 0.84% others 0.26% cpu_s 3.781 wall 1.11s waited 0.0s
+2026-09-25T07:36:12.028+03:00   Q1D-p0 r0 [  5] H-jolt56#j56 W=8: stat 2.4602 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 0.84% ra 0.68% others 1.19% cpu_s 9.484 wall 1.245s waited 0.0s
+2026-09-25T07:36:19.095+03:00   Q1D-p0 r0 [  6] H-trk-ap#trk W=8: stat 3.9810 ms pose 0x32d5e235342b4143 expect match rb 0.68% ra 3.33% others 0.44% cpu_s 5.812 wall 1.999s waited 0.0s
+2026-09-25T07:36:25.344+03:00   Q1D-p0 r0 [  7] H-trk-tree#trk W=16: stat 2.3680 ms pose 0x32d5e235342b4143 expect match rb 3.33% ra 0.9% others 0.25% cpu_s 9.156 wall 1.194s waited 0.0s
+2026-09-25T07:36:31.620+03:00   Q1D-p0 r0 [  8] H-jolt56#j56 W=16: stat 2.4244 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.9% ra 0.71% others 0.56% cpu_s 18.953 wall 1.227s waited 0.0s
+2026-09-25T07:36:38.744+03:00   Q1D-p0 r0 [  9] H-trk-ap#trk W=16: stat 4.1221 ms pose 0x32d5e235342b4143 expect match rb 0.71% ra 0.86% others 0.62% cpu_s 11.844 wall 2.07s waited 0.0s
+2026-09-25T07:36:45.205+03:00   Q1D-p0 r1 [ 10] H-trk-tree#trk W=4: stat 2.7930 ms pose 0x32d5e235342b4143 expect match rb 0.86% ra 1.46% others 0.63% cpu_s 3.75 wall 1.406s waited 0.0s
+2026-09-25T07:36:52.083+03:00   Q1D-p0 r1 [ 11] H-jolt56#j56 W=4: stat 3.6270 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 1.46% ra 3.49% others 0.75% cpu_s 6.953 wall 1.827s waited 0.0s
+2026-09-25T07:36:59.424+03:00   Q1D-p0 r1 [ 12] H-trk-ap#trk W=4: stat 4.5565 ms pose 0x32d5e235342b4143 expect match rb 3.49% ra 0.7% others 0.64% cpu_s 4.672 wall 2.287s waited 0.0s
+2026-09-25T07:37:05.580+03:00   Q1D-p0 r1 [ 13] H-trk-tree#trk W=8: stat 2.1869 ms pose 0x32d5e235342b4143 expect match rb 0.7% ra 1.07% others 0.45% cpu_s 3.984 wall 1.102s waited 0.0s
+2026-09-25T07:37:11.905+03:00   Q1D-p0 r1 [ 14] H-jolt56#j56 W=8: stat 2.5195 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 1.07% ra 0.68% others 0.93% cpu_s 9.703 wall 1.275s waited 0.0s
+2026-09-25T07:37:18.957+03:00   Q1D-p0 r1 [ 15] H-trk-ap#trk W=8: stat 3.9722 ms pose 0x32d5e235342b4143 expect match rb 0.68% ra 1.05% others 0.54% cpu_s 6.234 wall 1.995s waited 0.0s
+2026-09-25T07:37:25.325+03:00   Q1D-p0 r1 [ 16] H-trk-tree#trk W=16: stat 2.6038 ms pose 0x32d5e235342b4143 expect match rb 1.05% ra 2.84% others 2.02% cpu_s 9.125 wall 1.312s waited 0.0s
+2026-09-25T07:37:31.567+03:00   Q1D-p0 r1 [ 17] H-jolt56#j56 W=16: stat 2.3547 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 2.84% ra 0.78% others 1.07% cpu_s 17.625 wall 1.192s waited 0.0s
+2026-09-25T07:37:38.703+03:00   Q1D-p0 r1 [ 18] H-trk-ap#trk W=16: stat 4.1292 ms pose 0x32d5e235342b4143 expect match rb 0.78% ra 1.39% others 0.33% cpu_s 10.312 wall 2.074s waited 0.0s
+2026-09-25T07:37:45.156+03:00   Q1D-p0 r2 [ 19] H-trk-tree#trk W=4: stat 2.7782 ms pose 0x32d5e235342b4143 expect match rb 1.39% ra 1.51% others 0.7% cpu_s 3.625 wall 1.398s waited 0.0s
+2026-09-25T07:37:51.993+03:00   Q1D-p0 r2 [ 20] H-jolt56#j56 W=4: stat 3.5274 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 1.51% ra 3.46% others 0.67% cpu_s 6.906 wall 1.777s waited 0.0s
+2026-09-25T07:37:59.339+03:00   Q1D-p0 r2 [ 21] H-trk-ap#trk W=4: stat 4.5605 ms pose 0x32d5e235342b4143 expect match rb 3.46% ra 0.64% others 0.81% cpu_s 4.703 wall 2.289s waited 0.0s
+2026-09-25T07:38:05.505+03:00   Q1D-p0 r2 [ 22] H-trk-tree#trk W=8: stat 2.1967 ms pose 0x32d5e235342b4143 expect match rb 0.64% ra 16.88% others 0.62% cpu_s 3.688 wall 1.107s waited 0.0s CONTAMINATED-after(16.88%)
+2026-09-25T07:38:36.839+03:00   Q1D-p0 r2 [ 23] H-jolt56#j56 W=8: stat 2.4749 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 0.97% ra 1.49% others 1.26% cpu_s 9.844 wall 1.254s waited 25.0s
+2026-09-25T07:38:43.886+03:00   Q1D-p0 r2 [ 24] H-trk-ap#trk W=8: stat 3.9634 ms pose 0x32d5e235342b4143 expect match rb 1.49% ra 1.36% others 0.44% cpu_s 6.141 wall 1.99s waited 0.0s
+2026-09-25T07:38:50.128+03:00   Q1D-p0 r2 [ 25] H-trk-tree#trk W=16: stat 2.3532 ms pose 0x32d5e235342b4143 expect match rb 1.36% ra 0.66% others 0.33% cpu_s 8.359 wall 1.186s waited 0.0s
+2026-09-25T07:38:56.422+03:00   Q1D-p0 r2 [ 26] H-jolt56#j56 W=16: stat 2.4507 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.66% ra 2.97% others 0.95% cpu_s 17.719 wall 1.242s waited 0.0s
+2026-09-25T07:39:03.547+03:00   Q1D-p0 r2 [ 27] H-trk-ap#trk W=16: stat 4.1206 ms pose 0x32d5e235342b4143 expect match rb 2.97% ra 1.02% others 0.38% cpu_s 9.688 wall 2.069s waited 0.0s
+2026-09-25T07:39:03.548+03:00 Q1D-p0: re-running 1 process(es) at the end of the pass: [(22, 2, 'H-trk-tree', 'trk', 8, 'contaminated')]
+2026-09-25T07:39:09.711+03:00   Q1D-p0 r2 [ 22] H-trk-tree#trk W=8 RERUN (contaminated): stat 2.1938 ms pose 0x32d5e235342b4143 expect match rb 1.02% ra 1.07% others 1.44% cpu_s 4.406 wall 1.106s waited 0.0s
+2026-09-25T07:39:09.711+03:00 Q1D-p0: done
+2026-09-25T07:39:09.713+03:00 Q1D-p1: idle rule (wait_idle7.ps1, up to 30 polls)
+2026-09-25T07:41:20.216+03:00 Q1D-p1: idle reached; {'time': '2026-09-25T07:41:20.216+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T07:41:30.278+03:00 Q1D-p1: opening receipt 2.9% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T07:41:36.449+03:00   Q1D-p1 warm-up H-trk-tree#trk W=8 (untimed): stat 2.2102 ms pose 0x32d5e235342b4143 expect match rb 2.9% ra 0.61% others 0.26% cpu_s 4.344 wall 1.114s waited 0.0s
+2026-09-25T07:41:43.571+03:00   Q1D-p1 r0 [  1] H-trk-ap#trk W=16: stat 4.1175 ms pose 0x32d5e235342b4143 expect match rb 0.61% ra 0.84% others 0.33% cpu_s 9.812 wall 2.068s waited 0.0s
+2026-09-25T07:41:49.849+03:00   Q1D-p1 r0 [  2] H-jolt56#j56 W=16: stat 2.4262 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.84% ra 0.89% others 0.96% cpu_s 19.0 wall 1.229s waited 0.0s
+2026-09-25T07:41:56.101+03:00   Q1D-p1 r0 [  3] H-trk-tree#trk W=16: stat 2.3722 ms pose 0x32d5e235342b4143 expect match rb 0.89% ra 0.68% others 0.65% cpu_s 7.703 wall 1.195s waited 0.0s
+2026-09-25T07:42:03.202+03:00   Q1D-p1 r0 [  4] H-trk-ap#trk W=8: stat 4.0712 ms pose 0x32d5e235342b4143 expect match rb 0.68% ra 2.39% others 0.72% cpu_s 5.188 wall 2.045s waited 0.0s
+2026-09-25T07:42:09.572+03:00   Q1D-p1 r0 [  5] H-jolt56#j56 W=8: stat 2.6055 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 2.39% ra 1.09% others 0.81% cpu_s 10.0 wall 1.321s waited 0.0s
+2026-09-25T07:42:15.747+03:00   Q1D-p1 r0 [  6] H-trk-tree#trk W=8: stat 2.2210 ms pose 0x32d5e235342b4143 expect match rb 1.09% ra 0.75% others 1.14% cpu_s 5.219 wall 1.12s waited 0.0s
+2026-09-25T07:42:23.085+03:00   Q1D-p1 r0 [  7] H-trk-ap#trk W=4: stat 4.5515 ms pose 0x32d5e235342b4143 expect match rb 0.75% ra 1.61% others 0.52% cpu_s 4.641 wall 2.285s waited 0.0s
+2026-09-25T07:42:30.025+03:00   Q1D-p1 r0 [  8] H-jolt56#j56 W=4: stat 3.7372 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 1.61% ra 4.04% others 1.66% cpu_s 7.219 wall 1.885s waited 0.0s
+2026-09-25T07:42:36.507+03:00   Q1D-p1 r0 [  9] H-trk-tree#trk W=4: stat 2.8176 ms pose 0x32d5e235342b4143 expect match rb 4.04% ra 0.64% others 0.63% cpu_s 3.297 wall 1.417s waited 0.0s
+2026-09-25T07:42:43.633+03:00   Q1D-p1 r1 [ 10] H-trk-ap#trk W=16: stat 4.1230 ms pose 0x32d5e235342b4143 expect match rb 0.64% ra 0.89% others 0.38% cpu_s 9.562 wall 2.071s waited 0.0s
+2026-09-25T07:42:49.914+03:00   Q1D-p1 r1 [ 11] H-jolt56#j56 W=16: stat 2.4276 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.89% ra 0.89% others 1.04% cpu_s 18.5 wall 1.231s waited 0.0s
+2026-09-25T07:42:56.188+03:00   Q1D-p1 r1 [ 12] H-trk-tree#trk W=16: stat 2.4179 ms pose 0x32d5e235342b4143 expect match rb 0.89% ra 0.97% others 0.56% cpu_s 9.75 wall 1.219s waited 0.0s
+2026-09-25T07:43:03.239+03:00   Q1D-p1 r1 [ 13] H-trk-ap#trk W=8: stat 3.9744 ms pose 0x32d5e235342b4143 expect match rb 0.97% ra 3.26% others 0.34% cpu_s 5.016 wall 1.996s waited 0.0s
+2026-09-25T07:43:09.602+03:00   Q1D-p1 r1 [ 14] H-jolt56#j56 W=8: stat 2.5946 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 3.26% ra 1.04% others 0.37% cpu_s 10.266 wall 1.312s waited 0.0s
+2026-09-25T07:43:15.757+03:00   Q1D-p1 r1 [ 15] H-trk-tree#trk W=8: stat 2.1792 ms pose 0x32d5e235342b4143 expect match rb 1.04% ra 0.97% others 0.45% cpu_s 4.375 wall 1.099s waited 0.0s
+2026-09-25T07:43:23.099+03:00   Q1D-p1 r1 [ 16] H-trk-ap#trk W=4: stat 4.5545 ms pose 0x32d5e235342b4143 expect match rb 0.97% ra 1.66% others 0.68% cpu_s 5.188 wall 2.286s waited 0.0s
+2026-09-25T07:43:29.976+03:00   Q1D-p1 r1 [ 17] H-jolt56#j56 W=4: stat 3.6166 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 1.66% ra 0.94% others 0.87% cpu_s 7.172 wall 1.822s waited 0.0s
+2026-09-25T07:43:36.507+03:00   Q1D-p1 r1 [ 18] H-trk-tree#trk W=4: stat 2.9320 ms pose 0x32d5e235342b4143 expect match rb 0.94% ra 1.01% others 1.99% cpu_s 3.75 wall 1.475s waited 0.0s
+2026-09-25T07:43:43.623+03:00   Q1D-p1 r2 [ 19] H-trk-ap#trk W=16: stat 4.1058 ms pose 0x32d5e235342b4143 expect match rb 1.01% ra 0.96% others 0.48% cpu_s 10.359 wall 2.062s waited 0.0s
+2026-09-25T07:43:49.870+03:00   Q1D-p1 r2 [ 20] H-jolt56#j56 W=16: stat 2.3583 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.96% ra 0.97% others 1.65% cpu_s 17.375 wall 1.194s waited 0.0s
+2026-09-25T07:43:56.114+03:00   Q1D-p1 r2 [ 21] H-trk-tree#trk W=16: stat 2.3610 ms pose 0x32d5e235342b4143 expect match rb 0.97% ra 0.98% others 0.58% cpu_s 10.156 wall 1.19s waited 0.0s
+2026-09-25T07:44:03.162+03:00   Q1D-p1 r2 [ 22] H-trk-ap#trk W=8: stat 3.9674 ms pose 0x32d5e235342b4143 expect match rb 0.98% ra 2.99% others 0.44% cpu_s 5.969 wall 1.993s waited 0.0s
+2026-09-25T07:44:09.500+03:00   Q1D-p1 r2 [ 23] H-jolt56#j56 W=8: stat 2.5369 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 2.99% ra 1.81% others 0.38% cpu_s 9.656 wall 1.284s waited 0.0s
+2026-09-25T07:44:16.142+03:00   Q1D-p1 r2 [ 24] H-trk-tree#trk W=8: stat 3.1487 ms pose 0x32d5e235342b4143 expect match rb 1.81% ra 2.18% others 14.25% cpu_s 5.0 wall 1.584s waited 0.0s
+2026-09-25T07:44:23.482+03:00   Q1D-p1 r2 [ 25] H-trk-ap#trk W=4: stat 4.5477 ms pose 0x32d5e235342b4143 expect match rb 2.18% ra 1.35% others 0.39% cpu_s 4.906 wall 2.285s waited 0.0s
+2026-09-25T07:44:30.353+03:00   Q1D-p1 r2 [ 26] H-jolt56#j56 W=4: stat 3.6169 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 1.35% ra 1.0% others 0.27% cpu_s 7.25 wall 1.823s waited 0.0s
+2026-09-25T07:44:36.793+03:00   Q1D-p1 r2 [ 27] H-trk-tree#trk W=4: stat 2.7509 ms pose 0x32d5e235342b4143 expect match rb 1.0% ra 3.0% others 0.72% cpu_s 3.984 wall 1.384s waited 0.0s
+2026-09-25T07:44:36.793+03:00 Q1D-p1: done
+2026-09-25T07:44:36.819+03:00 WINDOW END exit 0: complete; counters {'timed': 238, 'rerun': 1, 'warm': 10, 'voided_processes': 0}; binaries after all match

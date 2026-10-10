@@ -19,6 +19,11 @@
 
 #![cfg(not(miri))]
 
+// clippy 1.98.0 false positive: this file's `thread_local!` initialisers already
+// use the `const { … }` form the lint asks for (all 63 in the workspace do).
+// See this crate's lib.rs for the full account and the delete condition.
+#![allow(clippy::missing_const_for_thread_local)]
+
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::system::into_system::IntoSystem;

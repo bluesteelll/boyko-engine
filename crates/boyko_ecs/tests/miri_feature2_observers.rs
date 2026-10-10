@@ -4,7 +4,7 @@
 //! Run via:
 //! ```powershell
 //! $env:MIRIFLAGS="-Zmiri-tree-borrows"
-//! cargo +nightly miri test -p boyko-ecs --test miri_feature2_observers
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_feature2_observers
 //! ```
 //!
 //! Per the 14a/14b lesson — Miri-TB caught soundness bugs that critic +

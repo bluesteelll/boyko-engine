@@ -7,7 +7,7 @@ you constrain them explicitly: `.before(key)`, `.after(key)`, and `.in_set(set)`
 add ordering edges; `configure_set` orders whole groups at once.
 
 These constraints are not a runtime cost. They are consumed once, at
-[`ScheduleBuilder::build`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs#L313),
+[`ScheduleBuilder::build`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs),
 and baked into a topological order. At frame time the executor already knows the
 layout — there is no per-frame sorting, no dynamic dependency check.
 
@@ -40,9 +40,9 @@ correct" — which is the fast path. Add edges deliberately.
 ## The `SystemKey` handle
 
 `ScheduleBuilder::add_system` returns a
-[`SystemConfig`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/system_config.rs#L41),
+[`SystemConfig`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/system_config.rs),
 a single-use fluent handle for the system you just registered. Call
-[`.key()`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/system_config.rs#L55)
+[`.key()`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/system_config.rs)
 to extract that system's `SystemKey` — a stable, opaque pre-build id you pass into
 a *sibling's* `.before(...)` / `.after(...)`.
 
@@ -120,7 +120,7 @@ passing a key into the wrong builder is rejected at build with `boyko-B9005`.
 A **system set** is a named group. Instead of wiring N×M pairwise edges between
 two phases, you order the *sets* and let `build` expand the membership into the
 concrete edges for you. A set is any `Send + Sync + 'static` type that implements
-[`SystemSet`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/system_set.rs#L56);
+[`SystemSet`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/system_set.rs);
 the ergonomic way to make one is `#[derive(SystemSet)]`.
 
 ### Defining sets with `#[derive(SystemSet)]`
@@ -181,9 +181,9 @@ inherits the constraint.
 
 ### Ordering sets with `configure_set`
 
-[`configure_set(set)`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs#L206)
+[`configure_set(set)`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs)
 returns a
-[`ConfigureSet`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs#L708)
+[`ConfigureSet`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs)
 handle to order one set relative to another (`.before` / `.after`), nest it in a
 parent (`.in_set`), or gate the whole set with a
 [run condition](run-conditions.md) (`.run_if`). All targets are taken **by value**,
@@ -292,7 +292,7 @@ by your logic needlessly serializes two systems that could have overlapped.
 ## Build-time validation
 
 `build` panics on a malformed schedule; `try_build` returns a
-[`ScheduleBuildError`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs#L339)
+[`ScheduleBuildError`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs)
 instead. These are author errors caught up front, never at frame time:
 
 | Error | Code | Meaning |
@@ -330,6 +330,6 @@ so you don't have to trace the graph by hand.
 - [States](states.md) — `OnEnter` / `OnExit` set ordering built on this layer.
 - [Plugins & App](../app/plugins.md) — where `add_systems_cfg` lives.
 - Source:
-  [system_config.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/system_config.rs),
-  [system_set.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/system_set.rs),
-  [schedule_builder.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs).
+  [system_config.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/system_config.rs),
+  [system_set.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/system_set.rs),
+  [schedule_builder.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs).

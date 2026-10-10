@@ -1,9 +1,10 @@
 # Shader eDSL
 
 `boyko_shaderdsl` is the in-house Rust shader embedded DSL that lets the engine
-author the SDF *field math* — and the SDF *marcher control flow* — **once** and run
-it in two places: on the CPU as plain `f32` machine code, and on the GPU as
-generated HLSL, with a guarantee that the two can never silently drift apart.
+author shader math — the SDF *field math*, the SDF *marcher control flow*, and the
+leaves of several other passes — **once** and run it in two places: on the CPU as
+plain `f32` machine code, and on the GPU as generated HLSL, with a guarantee that
+the two can never silently drift apart.
 
 The field math (sphere/box distances, the polynomial smooth-min/-max, the CSG
 fold) is the geometric source of truth shared by the [SDF renderer](sdf.md), the
@@ -18,18 +19,20 @@ The eDSL kills the duplication at the root. There is **one** generic field body.
 You instantiate it over a `f32` backend to get the CPU field, or over an `Emit`
 backend to *print* the HLSL. Same source, two outputs.
 
-> **Status.** Two stages ship today, both enforced in CI. **Stage 1 — the FIELD
+> **Status.** The eDSL started with the SDF field and the marcher, and it now
+> authors leaves across the renderer; the table in
+> [What the eDSL authors today](#what-the-edsl-authors-today) lists them. **The FIELD
 > math** (`smin`/`smax`, the primitive distances, the CSG fold) is the foundation:
 > one generic body, an Eval (`f32`) instantiation and an Emit (HLSL) instantiation.
-> **The marcher control-flow stage** is also shipped — a `cf` control-flow backend
-> (`cf::{Cf, EvalCf, Flow, LoopOp}`) drives generated runtime-`[loop]` GPU spans
+> **The marcher control-flow stage** adds a `cf` control-flow backend
+> (`cf::{Cf, EvalCf, Flow, LoopOp}`) that drives generated runtime-`[loop]` GPU spans
 > for the soft-shadow penumbra march, the surface-hit refine, the brick-exit
 > empty-skip, the regula-falsi root refine, the B1 over-relaxation spans, the
-> clip-map level selector, and the brick-AABB ray-span clip. Every one of those
-> spans is checked verbatim against the committed shader by a per-leaf drift test.
-> The one piece that stays deliberately hand-written is the **host-side** marchers
-> (the "firewall" — see [What is in scope](#what-is-in-scope--and-what-is-not-honesty));
-> only the GPU spans are generated from the eDSL.
+> clip-map level selector, and the brick-AABB ray-span clip. Every generated span is
+> checked against the committed shader by a sync test. The one piece that stays
+> deliberately hand-written is the **host-side** marchers (the "firewall" — see
+> [What is in scope](#what-is-in-scope--and-what-is-not-honesty)); only the GPU spans
+> are generated from the eDSL.
 
 ## The core idea: dual instantiation, no transpiler
 
@@ -54,13 +57,13 @@ flowchart TD
 ```
 
 The single source is
-[`crates/boyko_shaderdsl/src/field.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/src/field.rs).
+[`crates/boyko_shaderdsl/src/field.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/src/field.rs).
 The frozen GPU reference it reproduces is
-[`crates/boyko_rhi_vulkan/shaders/sdf_field.hlsli`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/sdf_field.hlsli).
+[`crates/boyko_rhi_vulkan/shaders/sdf_field.hlsli`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/sdf_field.hlsli).
 
 ## The `FieldScalar` backend
 
-[`scalar::FieldScalar`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/src/scalar.rs#L36)
+[`scalar::FieldScalar`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/src/scalar.rs)
 is the scalar abstraction the field body is written against. It exposes *exactly*
 the op-set the SDF edit-list field needs — no general-purpose math library, just
 the ops the frozen field folds: `add`/`sub`/`mul`/`div`/`neg`, `min`/`max`,
@@ -97,7 +100,7 @@ collapse to the hand-written code on the Eval side — the zero-cost guarantee.
 
 ### The Eval backend (`S = f32`)
 
-[`impl FieldScalar for f32`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/src/scalar.rs#L214)
+[`impl FieldScalar for f32`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/src/scalar.rs)
 is a literal byte-mirror of the frozen field arithmetic. `add` is `self + rhs`;
 `min` is `f32::min`; `clamp01` is `self.clamp(0.0, 1.0)`; `lerp` is
 `self + (a - self) * h` — the exact two-rounding form the frozen `smin` writes.
@@ -115,7 +118,7 @@ physics field are literally this code.
 
 ### The Emit backend (`S = Emit`)
 
-[`emit::Emit`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/src/emit.rs#L372)
+[`emit::Emit`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/src/emit/mod.rs)
 is a `#[repr(transparent)]` `u32` — a handle into a build-time SSA arena. Each
 `FieldScalar` op pushes one `Node` (e.g. `Node::Add(a, b)`, `Node::Lerp(s, a, h)`)
 and returns its arena index, so the arena is a topologically-ordered DAG (a node
@@ -140,14 +143,14 @@ cargo run -p boyko_shaderdsl --features emit --bin emit_field
 ```
 
 The control-flow spans are traced over a second backend,
-[`cf::Cf`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/src/cf.rs),
+[`cf::Cf`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/src/cf.rs),
 which records loops, breaks, continues, and early returns the same way
 `FieldScalar` records arithmetic: `EvalCf` runs them on the CPU, `EmitCf` prints
 them as HLSL `[loop]`/`[unroll]` control flow. The host-side marchers stay
 hand-written behind that seam (see [What is in scope](#what-is-in-scope--and-what-is-not-honesty)).
 
 For example, the generic `smin`
-([`field::smin`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/src/field.rs#L76)) —
+([`field::smin`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/src/field.rs)) —
 
 ```rust,ignore
 // hh = clamp(0.5 + 0.5 * (b - a) / k, 0, 1)
@@ -175,13 +178,41 @@ float smin(float a, float b, float k) {
 }
 ```
 
-The generated bodies are pasted between `// === GENERATED FIELD MATH BEGIN/END ===`
-sentinels in the header. The bin only **prints** — it does not splice or
-recompile any `.spv`; a developer re-splices and re-runs DXC.
+The generated bodies are pasted between `// === GENERATED <name> BEGIN/END ===`
+sentinels: each generated span has its own pair (`FIELD MATH`, `NORMAL`, and so on),
+and the sync tests re-run the generator and compare every span. Generated HLSL is
+**never hand-edited**: change the eDSL, re-emit, re-splice. `emit_field` only
+**prints** — it does not splice or recompile any `.spv`; a developer re-splices and
+re-runs DXC.
+
+## What the eDSL authors today
+
+| Leaf modules (`boyko_shaderdsl`) | Generated into | Sync test | Emit bin |
+|---|---|---|---|
+| `field`, `normal`, `brick`, `cubic_hit`, and the marcher spans (`shadow`, `surface`, `refine`, `remarch`, `sor`, `decl`, `levels`, `marcher`) | `sdf_field.hlsli`, `sdf_gbuffer_composite.hlsl` | `sdf_field_edsl_sync`, plus a per-leaf `emit_*` test in `boyko_shaderdsl/tests/` for each marcher span | `emit_field` |
+| `oct`, `pack` (G-buffer normal and material packing) | `gbuffer_mrt.fs.hlsl` and the marcher | `gbuffer_mrt_edsl_sync` | `emit_field` |
+| `interp` (per-instance pose interpolation) | `interp_instances.comp.hlsl` | `interp_edsl_sync` | `emit_field` |
+| `ssao` (the horizon reducer and the à-trous denoise) | `sdf_ssao.comp.hlsl` and its quality variants, `ssao_atrous.comp.hlsl` | `ssao_edsl_sync`, `ssao_atrous_edsl_sync` | `emit_field`; `emit_ssao_variants` writes the variants |
+| `probe_march`, `probe_blend` (SDF DDGI) | `sdf_probe_update.comp.hlsl` | `emit_probe_gi` (in `boyko_shaderdsl/tests/`), `ddgi_probe_update_spv_sync` | `emit_probe_gi` |
+| `particle`, `particle_facets` | the eight GPU-particle shaders | `particle_edsl_sync` | `emit_particles` |
+| `ui` (rounded box, border, MSDF text, clip) | `ui_rect.vs.hlsl`, `ui_rect.fs.hlsl` | `ui_rect_edsl_sync` (in `boyko_render`) | `emit_ui` |
+| `vb` (Visibility Buffer barycentrics and attribute interpolation) | `vb_geom_fetch.hlsli` | `vb_bary_edsl_sync` | `emit_vb` |
+
+The sync tests live in `crates/boyko_rhi_vulkan/tests/` unless noted. Beside them,
+`*_spv_sync` tests re-run each shader's DXC recipe and compare the committed `.spv`
+byte for byte (for example `marcher_spv_sync`, `cluster_cull_spv_sync`,
+`hzb_build_spv_sync`).
+
+**Compilation is offline and hermetic.** Each shader's header records its exact
+`dxc` command line, and the `.spv` is committed; the engine never compiles HLSL at
+run time. One source may compile to several `.spv` files through `-D` defines, and
+every such variant has a row in
+[`docs/SHADER-VARIANT-MANIFEST.md`](https://github.com/bluesteelll/boyko-engine/blob/master/docs/SHADER-VARIANT-MANIFEST.md).
 
 ## What is in scope — and what is not (honesty)
 
-The CI-enforced generated surface spans both stages:
+On the SDF side, the CI-enforced generated surface spans both stages (the other
+leaves are in the [table above](#what-the-edsl-authors-today)):
 
 - **Field math** — `smin` and `smax` (and `combine`'s calls to them). These are
   byte-identical to the committed `sdf_field.hlsli`.
@@ -195,7 +226,7 @@ The CI-enforced generated surface spans both stages:
   `select_level`, and `m2_brick_span`.
 
 Each of those is asserted against the committed shader by its own drift test in
-[`sdf_field_edsl_sync.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/tests/sdf_field_edsl_sync.rs)
+[`sdf_field_edsl_sync.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/tests/sdf_field_edsl_sync.rs)
 (the `*_matches_edsl_emit` tests).
 
 Some deliberate exclusions remain:
@@ -237,13 +268,13 @@ flowchart LR
 ```
 
 1. **Eval byte-identity** —
-   [`tests/eval_byte_identity.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/tests/eval_byte_identity.rs)
+   [`tests/eval_byte_identity.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/tests/eval_byte_identity.rs)
    snapshots the pre-refactor `boyko_sdf_math` field verbatim and asserts the
    generic `field::sdf_field_body::<f32>` is byte-identical to it across empty/
    full/over-cap edit lists, every op, hard and smooth blends, and non-finite
    inputs. It fails on a one-ULP divergence.
 2. **Emit text-sync** —
-   [`crates/boyko_rhi_vulkan/tests/sdf_field_edsl_sync.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/tests/sdf_field_edsl_sync.rs)
+   [`crates/boyko_rhi_vulkan/tests/sdf_field_edsl_sync.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/tests/sdf_field_edsl_sync.rs)
    re-runs the generator and asserts the committed shaders still contain each
    generated body verbatim — one `*_matches_edsl_emit` test per leaf, covering the
    `smin`/`smax` field math, the `sdf_normal` leaf, the brick decode/cubic leaves,
@@ -262,7 +293,7 @@ generator.
 
 The crate is structured so a physics build never pulls in codegen machinery. Two
 features, both off by default
-([`Cargo.toml`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/Cargo.toml)):
+([`Cargo.toml`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/Cargo.toml)):
 
 - **`nightly`** — the Eval path (`scalar` + `field`) is the physics leaf and is
   `#![no_std]`-clean. The one op stable `core` lacks is `sqrt`. With `nightly`
@@ -285,5 +316,5 @@ in keeping with the engine's in-house, no-FFI-in-the-seam stance.
   sphere-trace marcher, the `field_distance` gateway, the brick backend).
 - [Rendering overview](overview.md) — the CPU-orchestrate / GPU-execute,
   zero-readback rendering model.
-- [Simulation: SDF math](../simulation/math.md) — `boyko_sdf_math`, whose host
-  field delegates to the eDSL's Eval backend (the same field physics evaluates).
+- [SDF rendering](sdf.md) — `boyko_sdf_math`, whose host field delegates to the
+  eDSL's Eval backend (the same field physics evaluates).

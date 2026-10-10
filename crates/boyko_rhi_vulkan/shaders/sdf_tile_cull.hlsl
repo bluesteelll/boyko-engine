@@ -21,7 +21,12 @@
 //     when `d/L - r <= EPS_COARSE` RECORD near_t = t and STOP (do NOT over-step at
 //     grazing). The `/L` corrects smin's super-Lipschitz under-report.
 //   * D5 far_t = min(MAX over the 8x8 depth texels of depth->t, T_MAX); a cleared /
-//     out-of-range texel -> T_MAX. MAX_IT_COARSE exhaustion -> NON-empty, near_t = 0.
+//     out-of-range texel -> T_MAX. The mesh-depth->t decode is CAMERA-AWARE (mirrors
+//     the fine marcher's `mesh_norm`, `sdf_gbuffer_composite.hlsl`): PERSPECTIVE uses
+//     MESH_DEPTH_T_MAX (64), ORTHO uses T_MAX (10) — using T_MAX unconditionally
+//     under-decodes perspective depth (~6.4x too shallow), truncating far_t short of
+//     real SDF surfaces and culling their tile (a HOLE). MAX_IT_COARSE exhaustion ->
+//     NON-empty, near_t = 0.
 //   * The proof (enclosure-with-margin + non-skipping step) is in the design.
 //
 // # The vocabulary set (set 0 — written ONCE at setup)
@@ -93,6 +98,13 @@ static const float CAM_Z        = 2.0;
 static const float HALF_EXTENT  = 1.0;
 static const float T_MAX        = 10.0;
 static const float DEPTH_CLEAR  = 1.0;
+// The PERSPECTIVE mesh-depth normalizer — DECOUPLED from the march `T_MAX` so raster
+// mesh geometry can stand far past the SDF ray-miss horizon (a long floor / back wall)
+// without its depth saturating to the no-mesh clear. A perspective mesh pixel decodes
+// `t_mesh = md * MESH_DEPTH_T_MAX` (the normalizer cancels the `gbuffer_mrt.fs` encode
+// -> `t_mesh == length(eye_rel)`). The ORTHO arm keeps `md * T_MAX` (the ortho MVP
+// bakes T_MAX). Mirrors `compute::MESH_DEPTH_T_MAX` / `sdf_gbuffer_composite.hlsl`.
+static const float MESH_DEPTH_T_MAX = 64.0;
 
 // P4b coarse-cull tuning (mirrored host-side as compute.rs consts).
 static const uint  TILE_SIZE       = 8u;
@@ -175,7 +187,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
     }
 
     // --- D5: far_t = min(MAX over the 8x8 depth texels of depth->t, T_MAX). A cleared
-    // (>= DEPTH_CLEAR) or out-of-range texel decodes to T_MAX (conservative). ---
+    // (>= DEPTH_CLEAR) or out-of-range texel decodes to T_MAX (conservative). The
+    // covered-texel decode is CAMERA-AWARE (matches the fine marcher's `mesh_norm`). ---
+    float mesh_norm = (camera_mode == CAM_PERSPECTIVE) ? MESH_DEPTH_T_MAX : T_MAX;
     float max_t_mesh = 0.0;
     [loop]
     for (uint dy = 0u; dy < TILE_SIZE; ++dy) {
@@ -187,7 +201,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 t_mesh = T_MAX; // out-of-range (partial-edge tile): conservative T_MAX.
             } else {
                 float md = gDepth.Load(int3((int)px, (int)py, 0)).r;
-                t_mesh = (md < DEPTH_CLEAR) ? (md * T_MAX) : T_MAX;
+                t_mesh = (md < DEPTH_CLEAR) ? (md * mesh_norm) : T_MAX;
             }
             max_t_mesh = max(max_t_mesh, t_mesh);
         }

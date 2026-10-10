@@ -194,6 +194,10 @@ fn vec3_axis_reads_component() {
     assert_eq!(v.axis(2), 9.0, "axis 2 = z");
 }
 
+// `cfg(debug_assertions)`: the guard IS a `debug_assert!`, so in a release test binary the
+// call correctly does not panic and `should_panic` reports a failure that is not one. CI runs
+// `cargo test --workspace --all-targets --release`, so this leg was RED without it.
+#[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "axis index must be 0..3")]
 fn vec3_axis_out_of_range_panics_in_debug() {

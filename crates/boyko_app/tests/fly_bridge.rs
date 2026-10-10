@@ -12,6 +12,11 @@
 //!     held `W` recomposes the camera's `GlobalTransform` to the JUST-FLOWN pose
 //!     the SAME frame (no one-frame lag), in both add-orders.
 
+// Test harness, not an engine path: `Arc<Mutex<Option<Entity>>>` is the established probe that
+// carries the spawned camera `Entity` out of a one-shot `run_system` closure back to the
+// assertions. Test-only scaffolding on the harness thread, never linked into a shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

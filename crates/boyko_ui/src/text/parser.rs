@@ -11,6 +11,11 @@
 //! construct is recorded in the [`UiParseReport`] with `(line, col, reason)` and
 //! skipped; the rest parses.
 
+// `.ui` source parsing runs at asset load / hot-reload only (the watch system reaches
+// `parse_ui` solely after a confirmed mtime+size change), never on a per-frame path. The
+// duplicate-`#name` dedup set is a per-parse scratch structure over owned `String` keys,
+// discarded when the transient `ParsedTree` is consumed.
+#[allow(clippy::disallowed_types)]
 use std::collections::HashSet;
 
 use crate::components::UiName;
@@ -37,6 +42,8 @@ struct StackFrame {
 
 /// Parse `.ui` source into a transient tree + a recoverable error report.
 /// Never fails at the file level (Decision 6).
+// Load / hot-reload path only; `seen_names` is per-parse scratch (see the `use` above).
+#[allow(clippy::disallowed_types)]
 pub fn parse_ui(src: &str) -> ParsedTree {
     let mut nodes: Vec<ParsedNode> = Vec::new();
     let mut roots: Vec<usize> = Vec::new();
@@ -241,6 +248,8 @@ fn link(nodes: &mut [ParsedNode], roots: &mut Vec<usize>, parent_index: usize, c
 /// Splits a `#name [rest]` head into the (optional, validated) name and the
 /// trailing component text. Demotes a duplicate or over-CAP name to anonymous
 /// (Decision 6), recording the error.
+// Borrows `parse_ui`'s per-parse dedup scratch; load / hot-reload path only.
+#[allow(clippy::disallowed_types)]
 fn split_name<'a>(
     body: &'a str,
     line_no: usize,

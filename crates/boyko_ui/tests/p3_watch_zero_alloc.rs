@@ -19,6 +19,13 @@
 //! — proving the tree-read path (which allocates a `query_entities` `Vec` + a
 //! `UiTreeView` + the parse) is gated out of the no-change path.
 
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` / a `UiParseReport` out of the `Send + Sync` one-shot
+// system closure, and a file-static `Mutex<()>` serializes tests that arm a process-global
+// (the counting allocator, the watch-poll counters). Not engine code — the whole file is
+// compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 mod p3_common;
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -77,13 +84,26 @@ fn count_allocs(f: impl FnOnce()) -> usize {
 
 /// Builds a finished `App` with a `UiPlugin` watching a temp file (1 ms poll).
 fn build(tag: &str, src: &str) -> (App, TempUi) {
+    build_with_interval(tag, src, Duration::from_millis(1))
+}
+
+/// As [`build`], with an explicit poll interval.
+///
+/// The 1 ms default is right for tests that want the throttle to CLEAR quickly. It is wrong for the
+/// one test that asserts a tick IS throttled: the budget between `last_poll` being stamped and the
+/// second tick reading it is a few hundred nanoseconds of straight-line code, and a single OS
+/// preemption inside that window pushes `elapsed()` past 1 ms. The tick then runs for real,
+/// `metadata()` allocates (already noted below as allocating on windows-gnu), and a `== 0`
+/// assertion fails for a reason that has nothing to do with what it is testing. That test passes a
+/// generous interval instead.
+fn build_with_interval(tag: &str, src: &str, poll: Duration) -> (App, TempUi) {
     let temp = TempUi::new(tag, src);
     let mut app = App::with_threads(1);
     app.add_plugin(
         UiPlugin::new()
             .with_ui_path(temp.path)
             .with_hot_reload(true)
-            .with_poll_interval(Duration::from_millis(1)),
+            .with_poll_interval(poll),
     );
     app.finish();
     (app, temp)
@@ -99,7 +119,9 @@ version=1
 #[test]
 fn watch_throttled_tick_allocates_nothing() {
     let _arm = lock_arm();
-    let (mut app, _temp) = build("throttle", DOC);
+    // A 5 s interval, not the 1 ms default: "an immediate second tick is throttled" must not be
+    // hostage to one scheduler preemption. See `build_with_interval`.
+    let (mut app, _temp) = build_with_interval("throttle", DOC, Duration::from_secs(5));
     // First direct tick polls (the resource seeds last_poll in the past) and sets
     // last_poll = now. An IMMEDIATE second tick is throttled → returns before any
     // syscall or alloc.
@@ -126,10 +148,22 @@ fn watch_nochange_path_is_tiny_and_far_below_reload() {
     let (mut app2, temp2) = build("reload_witness", DOC);
     ui_hot_reload_system(app2.world_mut());
     // Change the file, then settle (two observations of the new signature).
+    // ⚠️ THE REWRITE MUST CHANGE THE FILE'S **SIZE**, NOT ONLY ITS BYTES. The watcher's signature
+    // is `(mtime, size)`, and the previous fixture wrote `Px(77)` over `Px(40)` — the same byte
+    // length, so detection rested entirely on the filesystem clock. MEASURED: on this box the
+    // 3 ms sleep is inside the mtime granularity, so the second tick saw an unchanged signature,
+    // never reconciled, and the test failed with `nochange 1, reload 1` — the reconcile path
+    // reporting the no-change path's cost because it WAS the no-change path.
+    //
+    // `4956420c` already diagnosed this class once ("the hot-reload flake was the FILESYSTEM
+    // CLOCK, not shared state") and lengthened the sleeps. A longer sleep buys margin against a
+    // granularity nobody measured; a different SIZE removes the dependence on it, so the detect
+    // step is deterministic on any filesystem. Four extra digits, chosen to be visibly not a
+    // typo of the original.
     temp2.write("\
 version=1
 #root  UiLayout { layout_type: Column, width: Px(100), height: Px(100) }
-    #a  UiLayout { layout_type: Column, width: Px(77), height: Px(40) }
+    #a  UiLayout { layout_type: Column, width: Px(777777), height: Px(40) }
     #b  UiLayout { layout_type: Column, width: Px(40), height: Px(40) }
 ");
     std::thread::sleep(Duration::from_millis(3));

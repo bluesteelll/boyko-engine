@@ -59,13 +59,40 @@ The enable seam (iter.rs:233, EnableTermCols::passes enable_terms.rs:182-205) is
 
 ## W1–W4 / O1–O2 (RESOLVED)
 - **W1**: dense ALWAYS `ResidencyKind::Cpu` (component_registry.rs:518-545; set_residency_class write-once); derive emits `set_residency_class(id, Cpu)`; reject `storage="dense"`+gpu (debug-assert + derive compile error). `seed_from_candidates` GPU assert (query_state.rs:341) then holds.
-- **W2**: 32 fire sites enumerated; `spawn_batch`/clone-materialize/hierarchy-cascade fire NOTHING today → dense routing adds NEW fire paths. Sites: spawn (ecs_master.rs:718/723/732/737), spawn_at (:862/867/876/881), insert (migration_helpers.rs:750-799 ×10), remove (:969-985 ×6), despawn (ecs_master.rs:1139-1182 ×7), spawn_batch (spawn_batch_*: none today), clone-materialize (materialize.rs:235: none), hierarchy cascade (rides despawn). D2 gate = per-API fire-COUNT tests + 0%-gate archetypal counts (Phase 14a/14b lesson).
+- **W2**: 32 fire sites enumerated; `spawn_batch`/clone-materialize/hierarchy-cascade fire NOTHING today → dense routing adds NEW fire paths. Sites: spawn (ecs_master.rs:718/723/732/737), spawn_at (:862/867/876/881), insert (migration_helpers.rs:764-813 ×10), remove (:983-999 ×6), despawn (ecs_master.rs:1139-1182 ×7), spawn_batch (spawn_batch_*: none today), clone-materialize (materialize.rs:235: none), hierarchy cascade (rides despawn). D2 gate = per-API fire-COUNT tests + 0%-gate archetypal counts (Phase 14a/14b lesson).
 - **W3**: `ComponentPool::row_ptr` (component_pool.rs:645) is BOUNDS-only (no liveness). Add `live: BitSet` to `DenseStore` (O(1) oracle + iteration skip + read-only during solve); `DenseSolveView::row_ptr` debug_asserts `live.test(slot)` via a pub(crate) liveness-checked accessor.
 - **W4**: Stage P scope = BodyState/RigidBody* across broadphase (resources.rs:824/866/1130/690 + EmitPtrs *const wrapper :1488-1567) + narrowphase + solver. Tombstones poison naive as_slice → DEFAULT: compact at the fixed point → contiguous column for broadphase; the dense→`ScratchColumn` re-gather is the AVX DEFAULT (scattered row_ptr risks regression vs contiguous gather — colored.rs:641). 0%-regression covers broadphase.
 - **O1/O2**: `StorageKind::Dense=2`; relationships=3 (doc at component_registry.rs:393-394 updated). Dense draws from the shared MAX_COMPONENTS=512 id budget.
 
 ## Data structures
 `DenseStore { column: ComponentPool, e2s: SparseMap<u32>, s2e: Vec<EntityId>, live: BitSet, free: Vec<u32>, arch_presence: ArchetypeBitSet, id }`. `DenseBuildView<'a>{ store: &'a mut DenseStore }` !Send. `DenseSolveView<'a>{ base: *mut u8, stride, len, live: *const BitSetWords }` Copy+Send+Sync 32B — `row_ptr(slot)=base.add(slot*stride)` + live debug_assert; NO `as_mut_slice`/`DerefMut`.
+
+### The archetype's TWO id lists (KE14 D1, 2026-09-10)
+
+A dense id is filtered out of the archetype **signature** but RETAINED in the
+mint-time id list — deliberately, because KE10's attach-flag walk has to reach
+poolless declarers. That retention is a **declaration record**, and treating it
+as a membership oracle is its own defect class:
+
+| list | accessor | what it is |
+|---|---|---|
+| declaration record | `Archetype::all_component_ids()` | every id the archetype was minted from, poolless ones included. **Race-dependent**: identity keys on the FILTERED signature, so two id lists differing only in dense / bitset ids collapse onto ONE archetype and whichever minted it first decides what is recorded. |
+| pool-bearing subsequence | `Archetype::table_component_ids()` | the signature-storage ids, in the same canonical order. Every member owns a `ComponentPool` — debug-asserted at all three mint funnels by `Archetype::debug_assert_id_lists_agree`. |
+
+⚠ **Rule: never resolve a `ComponentPool` out of the declaration record.** KE14
+D1 was four loops that did, and the panic was reachable from plain Rust in three
+steps (spawn a wide bundle carrying a `#[require]`d dense id, spawn a narrow one,
+insert into the narrow entity — the dedup hands back the wide archetype's
+declaration list). The rename is the audit: `component_ids()` no longer exists,
+so every call site had to be re-classified rather than silently keep the old
+meaning.
+
+⚠ **`arch_presence` has no false negatives only because somebody maintains it.**
+Every `mark_arch_present` caller is a value-WRITING site, so a dense member
+merely RETAINED across a migration used to leave the destination unmarked and
+stop being enumerated while still living in its store (KE14 D2). All four
+migration paths now end with `migration_helpers::reseed_dense_presence`, which
+re-seeds from the authoritative `e2s` membership.
 
 ## Staged build plan + gates
 - **D0**: `Dense=2` + reader Dense arm (C1 #0) + `is_signature_storage` + rewrite C1 sites #1,2,4,6,7,8 + widen #9 + #3; derive dense arm (`STORAGE_IS_DENSE` + `set_storage_kind` + `set_residency_class` Cpu). Gate: asm-diff byte-identical Table/Bitset hot loops; test `storage_kind(dense)==Dense` + signature-excluded; reject dense+gpu.

@@ -1,0 +1,39 @@
+error[E0277]: `#[component(reflect)]` bakes `default_in_place` from `Default`, and `NoDefaultImpl` does not implement it
+  --> tests/reflect_compile_fail/missing_default_rejected.rs:36:12
+   |
+36 | pub struct NoDefaultImpl {
+   |            ^^^^^^^^^^^^^ add `#[derive(Default)]`, write an impl, or opt out with `#[reflect(no_default)]`
+   |
+   = help: the trait `Default` is not implemented for `NoDefaultImpl`
+   = note: required for `NoDefaultImpl` to implement `ReflectDefault`
+note: required by a bound in `__reflect_default_in_place`
+  --> tests/reflect_compile_fail/missing_default_rejected.rs:34:10
+   |
+34 | #[derive(Component)]
+   |          ^^^^^^^^^ required by this bound in `__reflect_default_in_place`
+   = note: this error originates in the derive macro `Component` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `NoDefaultImpl` with `#[derive(Default)]`
+   |
+36 + #[derive(Default)]
+37 | pub struct NoDefaultImpl {
+   |
+
+error[E0277]: `#[component(reflect)]` bakes `default_in_place` from `Default`, and `NoDefaultImpl` does not implement it
+  --> tests/reflect_compile_fail/missing_default_rejected.rs:36:12
+   |
+36 | pub struct NoDefaultImpl {
+   |            ^^^^^^^^^^^^^ add `#[derive(Default)]`, write an impl, or opt out with `#[reflect(no_default)]`
+   |
+   = help: the trait `Default` is not implemented for `NoDefaultImpl`
+   = note: required for `NoDefaultImpl` to implement `ReflectDefault`
+note: required by a bound in `__assert_reflect_default`
+  --> tests/reflect_compile_fail/missing_default_rejected.rs:34:10
+   |
+34 | #[derive(Component)]
+   |          ^^^^^^^^^ required by this bound in `__assert_reflect_default`
+   = note: this error originates in the derive macro `Component` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `NoDefaultImpl` with `#[derive(Default)]`
+   |
+36 + #[derive(Default)]
+37 | pub struct NoDefaultImpl {
+   |

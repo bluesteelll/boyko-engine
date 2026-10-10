@@ -53,21 +53,28 @@
 
 #![cfg(windows)]
 
+// clippy 1.98's `chunks_exact_to_as_chunks` fires on the RGBA readback loops below.
+// Left as `chunks_exact` DELIBERATELY: every site here sits inside a `zip` / `filter` /
+// `enumerate` chain where `as_chunks().0` changes the item type from `&[u8]` to
+// `&[u8; N]`, so the rewrite is semantic rather than textual - and these targets need a
+// GPU, so the edit could not be verified by running them on this headless box. The
+// LIBRARY code this lint flagged was converted properly; this is the test-only remainder.
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 mod common;
 use common::*;
 
-use core::ptr::NonNull;
 
 use boyko_rhi::enums::{AddressMode, DescriptorKind, Filter, IndexType};
 use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
     BufferUsage, CompareOp, ComputePipelineDesc, DepthBias, Format, CullMode, GraphicsPipelineDesc,
     ImageUsage, MemoryLocation, MipMode,
-    PrimitiveTopology, QueryPoolDesc, RhiDevice, SamplerDesc, ShaderStage, TextureDesc,
+    PrimitiveTopology, RhiDevice, SamplerDesc, ShaderStage, TextureDesc,
     TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
-use boyko_rhi_vulkan::compute::{B5_CAMERA_UBO_BYTES_M4, B5_CAMERA_UBO_BYTES_MESH_SDF, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, CompositePushConstants, csm_depth_fs_spirv, csm_depth_vs_spirv, punctual_depth_fs_spirv, punctual_depth_vs_spirv, EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GOLDEN_LIGHT_KIND_DIRECTIONAL, GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SPOT, INTERP_INSTANCES_PUSH_BYTES, interp_instances_spirv, LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET, MESH_SDF_PARAMS_OFFSET, MeshSdfParams, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera, encode_edit_list, deferred_pbr_spirv, composite_pixel_ray, DEFAULT_MARCHER_OMEGA, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z, sdf_gbuffer_composite_spirv, sdf_op, sdf_ssao_spirv_variant, sdf_tile_cull_spirv, tile_grid_extent, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH};
-use boyko_rhi_vulkan::goldens::{GoldenLight, GoldenLightHeader, golden_composite_pixel_ex, golden_deferred_resolve, golden_marcher_attributes, GoldenMaterial};
+use boyko_rhi_vulkan::compute::{B5_CAMERA_UBO_BYTES_M4, B5_CAMERA_UBO_BYTES_MESH_SDF, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, CompositePushConstants, csm_depth_fs_spirv, csm_depth_vs_spirv, punctual_depth_fs_spirv, punctual_depth_vs_spirv, EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GOLDEN_LIGHT_KIND_DIRECTIONAL, GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SPOT, INTERP_INSTANCES_PUSH_BYTES, interp_instances_spirv, LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET, MESH_SDF_PARAMS_OFFSET, MeshSdfParams, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera, encode_edit_list, deferred_pbr_spirv, composite_pixel_ray, DEFAULT_MARCHER_OMEGA, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z, sdf_gbuffer_composite_spirv, sdf_op, sdf_ssao_spirv_variant, sdf_tile_cull_spirv, tile_grid_extent, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH, viewt_from_depth_spirv};
+use boyko_rhi_vulkan::goldens::{GoldenLight, GoldenLightHeader, golden_deferred_resolve, golden_marcher_attributes, GoldenMaterial};
 use boyko_rhi_vulkan::mesh_sdf_texture::MeshSdfTexture;
 use boyko_sdf_math::mesh_sdf::{BakeMesh, MeshSdfField};
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
@@ -79,7 +86,7 @@ use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_rhi_vulkan::rhi_impl::{
     ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline,
-    VulkanQueryPool, VulkanSampler,
+    VulkanSampler,
 };
 use boyko_rhi_vulkan::texture::{MAX_TEXTURE_LAYERS, VulkanTexture};
 use boyko_rhi_vulkan::ffi::{
@@ -88,8 +95,9 @@ use boyko_rhi_vulkan::ffi::{
 use boyko_rhi_vulkan::swapchain::{
     BrickActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
     GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferFrame,
-    GBufferMeshDraw, GBufferScene, InterpActivation, PASS_COUNT, PunctualDepthActivation, Renderer,
-    SsaoActivation, Surface, Swapchain, TimestampCollector,
+    GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation, Renderer,
+    ResolvedRenderPathGpu, SsaoActivation, Surface, Swapchain,
+    ViewtFromDepthActivation,
 };
 use boyko_rhi_vulkan::window::{CapturedMsg, Window};
 
@@ -103,7 +111,7 @@ use boyko_sdf_math::brick::{BRICK_LEVELS, PointerGrid};
 /// resolution*, so a larger extent keeps the SAME framing (the r=0.5 sphere stays centered,
 /// occupying the central ~half of the view, with the mesh quad over the left part) and only
 /// raises the sample density. The golden is recomputed at this extent via the extent-aware
-/// `golden_*` oracles (`golden_composite_pixel_ex` / `golden_marcher_attributes`), so it
+/// `golden_*` oracles (`golden_deferred_resolve` / `golden_marcher_attributes`), so it
 /// re-blesses automatically — the frozen field, the offscreen tests, and the brick path are
 /// all untouched (this test simply marches the same field at a finer grid). 512×512 is large
 /// enough for the owner to evaluate the brick-ON vs analytic A/B by eye; the whole sphere is
@@ -205,8 +213,11 @@ const CSM_SHADOW_DIM: u32 = 2048;
 /// the demo fit array + the host golden are sized from one source.
 const CSM_MAX_CASCADES: usize = boyko_rhi_vulkan::texture::MAX_CASCADES;
 /// CSM Increment 1b: the byte size of the host cascade UBO — a `ResolvedCsm` mirror (336 B:
-/// `[CascadeData; 4]` + `active_count` + `csm_mode_word` + pad). The resolve reads
-/// `gCascades[0].view_proj` from it; the depth pass pushes the SAME matrix.
+/// `[CascadeData; 4]` + `active_count` + `csm_mode_word` + `pcf_kernel_word` + pad). The
+/// resolve reads `gCascades[0].view_proj` from it; the depth pass pushes the SAME matrix.
+/// `Self::upload` never writes `pcf_kernel_word` — the zero-initialized `bytes` array leaves
+/// it `0` (`CsmPcfKernel::Tent13`, rung E1's load-bearing default), so this harness renders
+/// with the crawl-free kernel unconditionally.
 const CSM_UBO_BYTES: u64 = 336;
 /// CSM Increment 1b: the host-side normal-bias FACTOR — MUST equal the resolve shader's
 /// `CSM_NORMAL_BIAS` (`deferred_pbr.hlsl`) so the host matrix golden reprojects EXACTLY as the
@@ -298,6 +309,8 @@ impl CsmSceneResources {
                 // 4 layers (== MAX_CASCADES) so the 2D_ARRAY sample view exists; Rung A renders
                 // only layer 0.
                 array_layers: 4,
+                mip_levels: 1,
+                view_format: None,
             },
         )
         .expect("CSM cascade array texture");
@@ -333,11 +346,12 @@ impl CsmSceneResources {
         // The depth-only pipeline: EMPTY color_formats, D32 depth, FRONT cull (Rung A casts the
         // BACK faces so the receiver's front face is unbiased — the standard shadow-map config),
         // a slope+constant depth bias (the acne fix), the set-0 instance layout + the 88-byte
-        // VERTEX push (the SAME shape the gbuffer raster pipeline declares).
+        // push (the SAME shape the gbuffer raster pipeline declares). POSITION-ONLY input: the
+        // depth VS consumes location 0 alone; declaring the unconsumed normal/color attributes
+        // trips the validation layer's "vertex attribute not consumed" warning (the messenger
+        // oracle counts warnings). The stride still spans the full 40-byte mesh vertex.
         let attributes = [
             VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
-            VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
-            VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
         ];
         let depth_pipeline = RhiDevice::create_graphics_pipeline(
             device,
@@ -374,6 +388,8 @@ impl CsmSceneResources {
                 dimension: TextureDimension::D2,
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
                 array_layers: SPOT_ATLAS_SLOTS,
+                mip_levels: 1,
+                view_format: None,
             },
         )
         .expect("shadow-atlas array texture");
@@ -1544,7 +1560,7 @@ fn write_bmp(path: &str, rgba: &[u8], w: u32, h: u32) -> std::io::Result<()> {
     buf.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
     buf.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
     // --- pixel data: RGBA -> BGRA (the ONLY channel swap; no row flip) ---
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         buf.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
     }
 
@@ -1557,7 +1573,7 @@ fn write_bmp(path: &str, rgba: &[u8], w: u32, h: u32) -> std::io::Result<()> {
 /// byte-comparable to each other.
 fn readback_to_rgba(readback: &[u8], w: u32, h: u32, is_bgra: bool) -> Vec<u8> {
     let mut out = vec![0u8; (w * h * 4) as usize];
-    for (dst, src) in out.chunks_exact_mut(4).zip(readback.chunks_exact(4)) {
+    for (dst, src) in out.as_chunks_mut::<4>().0.iter_mut().zip(readback.as_chunks::<4>().0) {
         let texel = [src[0], src[1], src[2], src[3]];
         let rgb = readback_rgb(texel, is_bgra);
         dst[0] = rgb[0] as u8;
@@ -1716,16 +1732,16 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         .expect("invariant: some pixel must be over neither (background)");
 
     let depth_at = |px, py| expected_mesh_depth(px, py);
-    // The mesh-occludes (a) + background (d) texels are mask == 0 PASS-THROUGH arms — the
-    // resolve emits `base` byte-identically (the 0%-gate), so the old inline composite is
-    // still the truth there. PBR MVP-2 only changed the SDF-LIT arm.
-    // Live-computed at the COMPOSITE extent via the extent-aware ORTHO oracle, so the golden
-    // re-blesses automatically at 512×512 (the frozen 64×64 `golden_composite_pixel` is the
-    // `_ex` forwarder at `(SDF_IMG_W, SDF_IMG_H)`; here we forward at `(COMPOSITE_W, COMPOSITE_H)`).
-    // Render P5: a_want (mesh-occludes) is now a RASTER-PBR producer (mask == 1) — computed below
-    // alongside b_want via the PBR oracle, NOT the old flat MESH_COLOR pass-through.
-    let d_want =
-        golden_composite_pixel_ex(&sdf, depth_at(dx, dy), dx, dy, COMPOSITE_W, COMPOSITE_H, CompositeCamera::Ortho);
+    // PBR MVP-2 (commit 8e48f7f) + Render P5: EVERY discriminator texel is now a deferred-PBR
+    // producer, so all three goldens come from the SAME oracle the windowed present dispatches
+    // (`golden_deferred_resolve ∘ golden_marcher_attributes`, lighting ON, default light, default
+    // omega): a (mesh-occludes) is a raster-PBR mask==1 surface, b (SDF) is full Cook-Torrance,
+    // and d (background, mask==0) is the analytic PBR SKY the resolve paints on a miss. The old
+    // flat `SDF_BACKGROUND` is NO LONGER the truth here — this windowed path dispatches
+    // `deferred_pbr.hlsl` (which paints the sky whenever the table carries a SKY entry, and
+    // `DEGENERATE_LIGHT_TABLE` does), not the standalone `sdf_depth_composite.hlsl` that still
+    // emits the flat background. Live-computed at the COMPOSITE extent so the goldens re-bless
+    // automatically at 512×512. `d_want` is computed alongside a/b below.
     // The SDF-LIT texel (b) is now FULL Cook-Torrance (the owner-acknowledged behavioral
     // change, PBR plan call F), NOT the old `base*vis` composite — so its golden comes from
     // the PBR oracle (`golden_deferred_resolve ∘ golden_marcher_attributes`) with the SAME
@@ -1748,6 +1764,17 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         DEFAULT_MARCHER_OMEGA, b_flags, DEFAULT_LIGHT_DIR,
     );
     let a_want = golden_deferred_resolve(a_attrs, a_rd, &materials);
+
+    // d (background) is a mask==0 miss: the resolve paints the analytic PBR sky. The degenerate
+    // table's sky == the constant path's, so `golden_deferred_resolve`'s no-table sky matches the
+    // GPU's table-driven sky within the store quant (the same equivalence
+    // `lighting_l0_host_oracle::degenerate_table_is_byte_identical_to_the_constant_path` proves).
+    let (_, d_rd) = composite_pixel_ray(dx, dy, COMPOSITE_W, COMPOSITE_H, CompositeCamera::Ortho);
+    let d_attrs = golden_marcher_attributes(
+        &sdf, &materials, depth_at(dx, dy), dx, dy, COMPOSITE_W, COMPOSITE_H, CompositeCamera::Ortho,
+        DEFAULT_MARCHER_OMEGA, b_flags, DEFAULT_LIGHT_DIR,
+    );
+    let d_want = golden_deferred_resolve(d_attrs, d_rd, &materials);
     assert!(
         !goldens_close(a_want, b_want),
         "invariant: the raster-PBR mesh and the SDF lit color must differ beyond +/-{CHANNEL_TOL}"
@@ -2162,6 +2189,11 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        // Textured-PBR T6a (the critic's C1 fix): the SOFTWARE-ONLY `gPbr` STORAGE image @19.
+        // `GBufferTargets::create` now allocates `gPbr` UNCONDITIONALLY (both feature legs) and
+        // `DeferredSets::build`'s software resolve-set loop appends it past the shared 19 —
+        // the layout MUST declare it too, or `create_bind_group`'s entry-count check trips (P1a).
+        BindGroupLayoutEntry { binding: 19, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -2238,6 +2270,8 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
 
     let mvp = ortho_mvp_bytes();
     let mut scene = GBufferScene {
+        // Particles P0: disarmed in every windowed fixture — no ResId, no pass, no command.
+        particle: None,
         raster_pipeline: &raster_pipeline,
         vertex_buffer: &vertex_buffer,
         vertex_count: vertices.len() as u32,
@@ -2249,6 +2283,95 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
         camera_ring: &camera_ring,
+        // Multi-paradigm render-path plan, rung R4b-b: `None` — this fixture never resolves
+        // `RenderPath::Forward` (`GBufferScene::forward_pipeline`'s doc: `Option` exists so a
+        // non-Forward test can say so honestly instead of threading a semantically-wrong
+        // placeholder like `&raster_pipeline`/`&vocab_layout`).
+        forward_pipeline: None,
+        forward_sky_pipeline: None,
+        forward_layout0: None,
+        forward_layout1: None,
+        forward_instance_ring: None,
+        forward_instance_material_ring: None,
+        forward_prepass_pipeline: None,
+        // Multi-paradigm render-path plan, rung R-SDFFWD: `None` — this harness never resolves
+        // `sdf_forward_marched` (`GBufferScene::sdf_forward_march_pipeline`'s doc: `Option` exists
+        // so a non-Forward-SDF test can say so honestly instead of threading a
+        // semantically-wrong placeholder).
+        sdf_forward_march_pipeline: None,
+        sdf_forward_march_sdfonly_pipeline: None,
+        sdf_forward_march_viewt_pipeline: None,
+        sdf_forward_march_sdfonly_viewt_pipeline: None,
+        sdf_forward_march_layout: None,
+        vb_geo_pipeline: None,
+        vb_shade_split_pipeline: None,
+        vb_shade_split_tex_pipeline: None,
+        vb_geo_aux_layout: None,
+        vb_split_layout1: None,
+        ssao_vb_pipeline: None,
+        vb_ssao_layout: None,
+        // Rung R9d: `None` — this harness never resolves the VB hardware shadow chain (same
+        // "Option lets a non-armed fixture say so honestly" rationale as the VB fields above).
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_layout: None,
+        #[cfg(feature = "hwrt")]
+        vb_geo_mv_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_hwrt_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_tex_hwrt_pipeline: None,
+        brick_levels_ubo: None,
+        sdf_forward_view_z_a: 0.0,
+        sdf_forward_view_z_b: 0.0,
+        // Multi-paradigm render-path plan, rung R8: this harness never resolves
+        // `VisibilityBuffer` (it independently re-implements boot/scene assembly, `forward_mesh
+        // .rs`'s doc) — `None` for every VB field, the same "Option lets a non-VB fixture say so
+        // honestly" rationale as the Forward fields above.
+        vb_raster_pipeline: None,
+        vb_sky_pipeline: None,
+        vb_resolve_pipeline: None,
+        vb_classify_count_pipeline: None,
+        vb_classify_scan_pipeline: None,
+        vb_classify_scatter_pipeline: None,
+        vb_shade_pipeline: None,
+        sdf_mesh_shadow_pipeline: None,
+        sdf_mesh_shadow_layout0: None,
+        vb_sdf_mesh_mode: 0,
+        vb_layout0: None,
+        vb_instance_ring: None,
+        vb_indirect: None,
+        vb_cull_planes: None,
+        vb_batch_desc: None,
+        vb_cull_visible: None,
+        vb_cull_count: None,
+        // VG rung R2d-2: unread by this harness (never resolves VB, the same rationale as the VB
+        // fields above). `vb_visible_instance` is MANDATORY on a real boot but this fixture builds
+        // no VB Set-0 at all, and `vb_mesh_bounds` is armed only by a live `MeshGeometryTable`,
+        // which this fixture never creates.
+        vb_visible_instance: None,
+        vb_mesh_bounds: None,
+        vb_cull_readback: None,
+        vb_batch_cull_pipeline: None,
+        vb_cull_layout: None,
+        vb_geometry_set: None,
+        // VB-P2 classification plan, rung P2b: unread by this harness (never resolves VB, the
+        // same rationale as the VB fields above) — `0` is the `MaterialTable::new()` default.
+        vb_classify_material_count: 0,
+        // VB-P2 classification plan, rung P2c: unread by this harness (never resolves VB) —
+        // `false` (the fused `vb_resolve` default) is the honest value for a non-VB fixture.
+        vb_use_classified: false,
+        // Textured-PBR rung TV0: unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above).
+        vb_shade_tex_pipeline: None,
+        // VB-P1a ("dark infra"): unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above) — `None` since the froxel arm is never built.
+        vb_layout0_froxel: None,
+        vb_resolve_froxel_pipeline: None,
+        vb_shade_froxel_pipeline: None,
+        vb_shade_tex_froxel_pipeline: None,
+        vb_tex_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         // Brick bindings 9..=14: the ACTIVATED clip-map's REAL per-level resources. Level 0's grid +
         // atlas at @9/@10, level 1 at @11/@12, level 2 at @13/@14 — the genuine 3-level cache (NOT the
@@ -2276,11 +2399,19 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // on-change re-upload this run, so the recorder records NO copy/barrier (the
         // command stream is byte-identical to before L0-r0).
         light_dirty: false,
+        // DM1: this harness host-seeds its own material table; it never uploads one per frame.
+        material_upload: None,
         // Lighting L1 is OFF for the on-screen demo (no cluster cull wired): the cull
         // pipeline + cluster SSBOs are absent, so the recorder skips the cull pass entirely
-        // and the resolve's `clusters_enabled` header gate (0) loops the flat table — the L1
-        // OFF / 0%-gate. The resolve set's @8/@9 bind the light table as a harmless valid
-        // placeholder (never read on the OFF path; see GBufferTargets::create).
+        // and the resolve loops the flat table — the L1 OFF / 0%-gate. Its `use_clusters` is
+        // THREE terms since VB-P1k (`clusters_enabled != 0 && cluster_count != 0 &&
+        // cluster_count <= grid_capacity`, the capacity read off the BOUND `ClusterGrid`
+        // descriptor with `GetDimensions`); this body uploads `DEGENERATE_LIGHT_TABLE`, whose
+        // `cluster_params` words are all zero, so the ENABLED BIT short-circuits the gate here —
+        // the dims term reads 0 too, but is never the one consulted. The resolve set's @8/@9 bind
+        // the light table as a harmless valid placeholder (never read on the OFF path; see
+        // GBufferTargets::create). The terms past the enabled bit are an out-of-bounds guard, not
+        // style: `robustBufferAccess` is OFF here and no GPU-assisted validation runs.
         cluster_cull: None,
         cull_layout: None,
         cluster_grid: None,
@@ -2288,6 +2419,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         light_index_alloc: None,
         cluster_cull_push: [0u8; 16],
         cluster_count: 0,
+        cluster_cull_hier: None,
         resolve_pipeline: &resolve_pipeline,
         resolve_layout: &resolve_layout,
         #[cfg(feature = "hwrt")]
@@ -2327,6 +2459,32 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // Render P7: SSAO OFF (the default) — NO SSAO pass recorded, byte-identical to the pre-P7
         // stream (the 0%-gate). These golden/cull-comparison presents assert the existing stream.
         ssao: None,
+        // Multi-paradigm render-path plan, rung R3b: this harness's `resolved_render_path` is
+        // `ResolvedRenderPathGpu::default()` (`Deferred × Both`), so the marcher itself is the
+        // sole `gViewT` producer — `viewt_from_depth` stays `None` (the 0%-gate).
+        viewt_from_depth: None,
+        // TAA-under-VB: this harness never resolves `VisibilityBuffer × Mesh`, so the
+        // `viewt_from_depth_rz` producer stays `None` (the 0%-gate).
+        viewt_from_vb_depth: None,
+        // The SSAO à-trous denoise chain's stable boot pipelines/layout — not wired by this
+        // harness (it never dispatches à-trous).
+        ssao_atrous_read8_pipeline: None,
+        ssao_atrous_interior_pipeline: None,
+        ssao_atrous_write8_pipeline: None,
+        ssao_atrous_layout: None,
+        // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit` directly,
+        // byte-identical to the pre-AA stream (the 0%-gate).
+        aa: None,
+        // AA Stage 2: OFF (the default) — NO SMAA pass recorded, byte-identical to the pre-AA
+        // stream (the 0%-gate).
+        smaa: None,
+        // AA Stage 3: OFF (the default) — NO SSAA pass recorded, `aa_out` stays sized to
+        // `present_extent` (native here), byte-identical to the pre-SSAA stream (the 0%-gate).
+        ssaa: None,
+        // AA Stage 4: OFF (the default) — NO TAA resolve pass recorded, `aa_out`/`taa_hist`
+        // stay unallocated, byte-identical to the pre-TAA stream (the 0%-gate).
+        taa: None,
+        rcas: None,
         // M3: the LEGACY merged draw (no instanced mesh — an EMPTY batch slice) —
         // `record_gbuffer` keeps `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the
         // pre-M2 stream.
@@ -2371,8 +2529,9 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // Pillar B B3: the interpolation pre-pass is OFF for every dump/offscreen golden — the
         // raster VS reads the hand-affine SSBO directly (byte-identical command stream + pixels).
         interp: None,
-        // HW-RT rung R0: GPU timing OFF (byte-identical command stream).
-        gpu_timing: None,
+        // VB-P1d: this harness never resolves `VisibilityBuffer` (byte-identical command stream).
+        gpu_zone: None,
+        vb_cmd_witness: None,
         // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
         #[cfg(feature = "hwrt")]
         tlas: None,
@@ -2396,6 +2555,11 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         raster_pipeline_mv: None,
         #[cfg(feature = "hwrt")]
         mv_bind_group: None,
+        // F8-mv: the combined MV+PM mesh path — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        raster_pipeline_mvpm: None,
+        #[cfg(feature = "hwrt")]
+        mvpm_bind_group: None,
         // Rung-3b step 5b: the SDF motion-vector VIS path — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         vis_mv_pipeline: None,
@@ -2406,6 +2570,62 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // Rung-3b step 6: the temporal reproject layout — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         temporal_layout: None,
+        // Asset-streaming plan F8: PER_INSTANCE_MATERIAL is OFF in this low-level RHI harness
+        // (no ECS gather / material store exists here) — byte-identical to the pre-F8 stream.
+        pm_enabled: false,
+        raster_pipeline_pm: None,
+        pm_bind_group: None,
+        // Textured-PBR T6c: TEXTURED is OFF in this low-level RHI harness (no ECS gather /
+        // texture asset store exists here) — byte-identical to the pre-T6c stream.
+        tex_enabled: false,
+        raster_pipeline_tex: None,
+        tex_bind_group: None,
+        bindless_set: None,
+        // Multi-paradigm render-path plan: this harness has no ECS `ResolvedRenderPath` to
+        // convert, so it carries the byte-identity default (Deferred + Both, every derived flag
+        // off). NOT inert — the label "dead-but-threaded" that stood here stopped being true at
+        // R2: the declarator dispatch matches on this value's `path`, so the default is exactly
+        // what keeps these fixtures on the Deferred declarator they were pinned against.
+        resolved_render_path: ResolvedRenderPathGpu::default(),
+        // VG R3 piece 1 step P1-2: no depth pyramid — the `HzbMode::Off` 0%-gate, and the only
+        // honest value here (this harness has no `HzbConfig` and no `boyko_render` to derive a
+        // plan with). `None` ⇒ no image, no per-mip views, no build passes ⇒ byte-identical.
+        hzb: None,
+        // VG R3 piece 1 step P1-4: no `hzb_build` pipeline or layout either. This harness mints
+        // its own pipelines rather than booting `GpuSceneBundles` (which is what mints those two
+        // unconditionally in production), and with `hzb: None` above no descriptor set would be
+        // built against them anyway — the arm is ONE predicate, and it is `hzb`.
+        hzb_build_layout: None,
+        hzb_build_pipeline: None,
+        // VG R3 piece 1 step P1-6: the `BOYKO_HZB_DUMP` probe is unarmed here, as it is on every
+        // golden and every non-probe boot — no dump pass is declared and no copy is recorded.
+        hzb_dump: None,
+        // VG R3 piece 2 step P2-3: no LATE indirect record array and no marked instance. This
+        // harness never resolves VB (the same rationale as the VB fields above), so
+        // `path_vb_occlusion_split()` is `false` here through its FIRST conjunct already —
+        // `vb_occlusion_instances: 0` is the honest value for a fixture with no ECS gather
+        // behind it, not a second gate.
+        // VG R3 piece 4 rung P4-4: `vb_occlusion: None` is the OWNER half — this harness boots no
+        // `World` and therefore no `OcclusionConfig`, which is the same answer the default `Off`
+        // gives. It is now the predicate's first conjunct.
+        vb_indirect_late: None,
+        vb_occlusion_instances: 0,
+        vb_occlusion: None,
+        // VG R3 piece 3 step P3-2: the occlusion split's three buffers and its flag word.
+        // `None`/`0` for the SAME reason every VB field above is: this harness mints its own
+        // pipelines instead of booting `GpuSceneBundles` (which is what allocates these
+        // unconditionally in production), and it never resolves VB, so nothing here would
+        // bind them. `vb_occ_flags: 0` is the disarmed word — no bit set means the cull may
+        // defer nothing.
+        vb_late_visible: None,
+        vb_late_count: None,
+        vb_cull_uniform: None,
+        vb_occ_flags: 0,
+        // VG R3 piece 3 step P3-3: the engine frame index. `0` is the honest value for a harness
+        // that renders ONE frame per fixture rather than a stand-in — the counter it mirrors starts
+        // at 0 and this is that frame. Nothing here reads it: it reaches the device only through
+        // `VbCullUniform`, which is filled inside the `vb_batch_cull` arm this harness never takes.
+        engine_frame_index: 0,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -2471,7 +2691,9 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         let presented = unsafe {
             renderer.render_gbuffer_frame(
                 token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                window.width(), window.height(), clear, present_extent, Some(&staging),
+                window.width(), window.height(), clear, present_extent, present_extent, Some(&staging),
+                None,
+                None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
             )
         }
         .unwrap_or_else(|e| panic!("brick dump frame ({path}) failed: {e:?}"));
@@ -2494,7 +2716,9 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
             let _ = unsafe {
                 renderer.render_gbuffer_frame(
                     token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                    window.width(), window.height(), clear, present_extent, None,
+                    window.width(), window.height(), clear, present_extent, present_extent, None,
+                    None,
+                    None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
                 )
             }
             .unwrap_or_else(|e| panic!("brick dump drain frame ({path}) failed: {e:?}"));
@@ -2616,7 +2840,10 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
                 window.height(),
                 clear,
                 present_extent,
+                present_extent,
                 rb,
+                None,
+                None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
             )
         }
         .unwrap_or_else(|e| panic!("gbuffer present frame {i} failed: {e:?}"));
@@ -2770,7 +2997,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
 /// test` skips it (the harness still compiles it, proving the OFF caller + the new `coarse` field +
 /// the coarse-pipeline creation type-check).
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU"]
 fn p0_windowed_coarse_cull_matches_uncull() {
     with_windowed_present(
         "boyko_rhi_vulkan P0 coarse-cull window",
@@ -3098,6 +3325,11 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        // Textured-PBR T6a (the critic's C1 fix): the SOFTWARE-ONLY `gPbr` STORAGE image @19.
+        // `GBufferTargets::create` now allocates `gPbr` UNCONDITIONALLY (both feature legs) and
+        // `DeferredSets::build`'s software resolve-set loop appends it past the shared 19 —
+        // the layout MUST declare it too, or `create_bind_group`'s entry-count check trips (P1a).
+        BindGroupLayoutEntry { binding: 19, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -3172,6 +3404,8 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
 
     let mvp = ortho_mvp_bytes();
     let mut scene = GBufferScene {
+        // Particles P0: disarmed in every windowed fixture — no ResId, no pass, no command.
+        particle: None,
         raster_pipeline: &raster_pipeline,
         vertex_buffer: &vertex_buffer,
         vertex_count: vertices.len() as u32,
@@ -3183,6 +3417,95 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
         camera_ring: &camera_ring,
+        // Multi-paradigm render-path plan, rung R4b-b: `None` — this fixture never resolves
+        // `RenderPath::Forward` (`GBufferScene::forward_pipeline`'s doc: `Option` exists so a
+        // non-Forward test can say so honestly instead of threading a semantically-wrong
+        // placeholder like `&raster_pipeline`/`&vocab_layout`).
+        forward_pipeline: None,
+        forward_sky_pipeline: None,
+        forward_layout0: None,
+        forward_layout1: None,
+        forward_instance_ring: None,
+        forward_instance_material_ring: None,
+        forward_prepass_pipeline: None,
+        // Multi-paradigm render-path plan, rung R-SDFFWD: `None` — this harness never resolves
+        // `sdf_forward_marched` (`GBufferScene::sdf_forward_march_pipeline`'s doc: `Option` exists
+        // so a non-Forward-SDF test can say so honestly instead of threading a
+        // semantically-wrong placeholder).
+        sdf_forward_march_pipeline: None,
+        sdf_forward_march_sdfonly_pipeline: None,
+        sdf_forward_march_viewt_pipeline: None,
+        sdf_forward_march_sdfonly_viewt_pipeline: None,
+        sdf_forward_march_layout: None,
+        vb_geo_pipeline: None,
+        vb_shade_split_pipeline: None,
+        vb_shade_split_tex_pipeline: None,
+        vb_geo_aux_layout: None,
+        vb_split_layout1: None,
+        ssao_vb_pipeline: None,
+        vb_ssao_layout: None,
+        // Rung R9d: `None` — this harness never resolves the VB hardware shadow chain (same
+        // "Option lets a non-armed fixture say so honestly" rationale as the VB fields above).
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_layout: None,
+        #[cfg(feature = "hwrt")]
+        vb_geo_mv_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_hwrt_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_tex_hwrt_pipeline: None,
+        brick_levels_ubo: None,
+        sdf_forward_view_z_a: 0.0,
+        sdf_forward_view_z_b: 0.0,
+        // Multi-paradigm render-path plan, rung R8: this harness never resolves
+        // `VisibilityBuffer` (it independently re-implements boot/scene assembly, `forward_mesh
+        // .rs`'s doc) — `None` for every VB field, the same "Option lets a non-VB fixture say so
+        // honestly" rationale as the Forward fields above.
+        vb_raster_pipeline: None,
+        vb_sky_pipeline: None,
+        vb_resolve_pipeline: None,
+        vb_classify_count_pipeline: None,
+        vb_classify_scan_pipeline: None,
+        vb_classify_scatter_pipeline: None,
+        vb_shade_pipeline: None,
+        sdf_mesh_shadow_pipeline: None,
+        sdf_mesh_shadow_layout0: None,
+        vb_sdf_mesh_mode: 0,
+        vb_layout0: None,
+        vb_instance_ring: None,
+        vb_indirect: None,
+        vb_cull_planes: None,
+        vb_batch_desc: None,
+        vb_cull_visible: None,
+        vb_cull_count: None,
+        // VG rung R2d-2: unread by this harness (never resolves VB, the same rationale as the VB
+        // fields above). `vb_visible_instance` is MANDATORY on a real boot but this fixture builds
+        // no VB Set-0 at all, and `vb_mesh_bounds` is armed only by a live `MeshGeometryTable`,
+        // which this fixture never creates.
+        vb_visible_instance: None,
+        vb_mesh_bounds: None,
+        vb_cull_readback: None,
+        vb_batch_cull_pipeline: None,
+        vb_cull_layout: None,
+        vb_geometry_set: None,
+        // VB-P2 classification plan, rung P2b: unread by this harness (never resolves VB, the
+        // same rationale as the VB fields above) — `0` is the `MaterialTable::new()` default.
+        vb_classify_material_count: 0,
+        // VB-P2 classification plan, rung P2c: unread by this harness (never resolves VB) —
+        // `false` (the fused `vb_resolve` default) is the honest value for a non-VB fixture.
+        vb_use_classified: false,
+        // Textured-PBR rung TV0: unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above).
+        vb_shade_tex_pipeline: None,
+        // VB-P1a ("dark infra"): unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above) — `None` since the froxel arm is never built.
+        vb_layout0_froxel: None,
+        vb_resolve_froxel_pipeline: None,
+        vb_shade_froxel_pipeline: None,
+        vb_shade_tex_froxel_pipeline: None,
+        vb_tex_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),
@@ -3202,6 +3525,8 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         light_staging: &light_staging,
         light_upload_bytes: light_table_bytes,
         light_dirty: false,
+        // DM1: this harness host-seeds its own material table; it never uploads one per frame.
+        material_upload: None,
         cluster_cull: None,
         cull_layout: None,
         cluster_grid: None,
@@ -3209,6 +3534,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         light_index_alloc: None,
         cluster_cull_push: [0u8; 16],
         cluster_count: 0,
+        cluster_cull_hier: None,
         resolve_pipeline: &resolve_pipeline,
         resolve_layout: &resolve_layout,
         #[cfg(feature = "hwrt")]
@@ -3250,6 +3576,32 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // Render P7: SSAO OFF (the default) — NO SSAO pass recorded, byte-identical to the pre-P7
         // stream (the 0%-gate). These golden/cull-comparison presents assert the existing stream.
         ssao: None,
+        // Multi-paradigm render-path plan, rung R3b: this harness's `resolved_render_path` is
+        // `ResolvedRenderPathGpu::default()` (`Deferred × Both`), so the marcher itself is the
+        // sole `gViewT` producer — `viewt_from_depth` stays `None` (the 0%-gate).
+        viewt_from_depth: None,
+        // TAA-under-VB: this harness never resolves `VisibilityBuffer × Mesh`, so the
+        // `viewt_from_depth_rz` producer stays `None` (the 0%-gate).
+        viewt_from_vb_depth: None,
+        // The SSAO à-trous denoise chain's stable boot pipelines/layout — not wired by this
+        // harness (it never dispatches à-trous).
+        ssao_atrous_read8_pipeline: None,
+        ssao_atrous_interior_pipeline: None,
+        ssao_atrous_write8_pipeline: None,
+        ssao_atrous_layout: None,
+        // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit` directly,
+        // byte-identical to the pre-AA stream (the 0%-gate).
+        aa: None,
+        // AA Stage 2: OFF (the default) — NO SMAA pass recorded, byte-identical to the pre-AA
+        // stream (the 0%-gate).
+        smaa: None,
+        // AA Stage 3: OFF (the default) — NO SSAA pass recorded, `aa_out` stays sized to
+        // `present_extent` (native here), byte-identical to the pre-SSAA stream (the 0%-gate).
+        ssaa: None,
+        // AA Stage 4: OFF (the default) — NO TAA resolve pass recorded, `aa_out`/`taa_hist`
+        // stay unallocated, byte-identical to the pre-TAA stream (the 0%-gate).
+        taa: None,
+        rcas: None,
         // M3: the LEGACY merged draw (no instanced mesh — an EMPTY batch slice) —
         // `record_gbuffer` keeps `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the
         // pre-M2 stream.
@@ -3292,8 +3644,9 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         atlas_punctual: None,
         // Pillar B B3: the interpolation pre-pass is OFF for every dump/offscreen golden.
         interp: None,
-        // HW-RT rung R0: GPU timing OFF (byte-identical command stream).
-        gpu_timing: None,
+        // VB-P1d: this harness never resolves `VisibilityBuffer` (byte-identical command stream).
+        gpu_zone: None,
+        vb_cmd_witness: None,
         // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
         #[cfg(feature = "hwrt")]
         tlas: None,
@@ -3317,6 +3670,11 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         raster_pipeline_mv: None,
         #[cfg(feature = "hwrt")]
         mv_bind_group: None,
+        // F8-mv: the combined MV+PM mesh path — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        raster_pipeline_mvpm: None,
+        #[cfg(feature = "hwrt")]
+        mvpm_bind_group: None,
         // Rung-3b step 5b: the SDF motion-vector VIS path — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         vis_mv_pipeline: None,
@@ -3327,6 +3685,62 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // Rung-3b step 6: the temporal reproject layout — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         temporal_layout: None,
+        // Asset-streaming plan F8: PER_INSTANCE_MATERIAL is OFF in this low-level RHI harness
+        // (no ECS gather / material store exists here) — byte-identical to the pre-F8 stream.
+        pm_enabled: false,
+        raster_pipeline_pm: None,
+        pm_bind_group: None,
+        // Textured-PBR T6c: TEXTURED is OFF in this low-level RHI harness (no ECS gather /
+        // texture asset store exists here) — byte-identical to the pre-T6c stream.
+        tex_enabled: false,
+        raster_pipeline_tex: None,
+        tex_bind_group: None,
+        bindless_set: None,
+        // Multi-paradigm render-path plan: this harness has no ECS `ResolvedRenderPath` to
+        // convert, so it carries the byte-identity default (Deferred + Both, every derived flag
+        // off). NOT inert — the label "dead-but-threaded" that stood here stopped being true at
+        // R2: the declarator dispatch matches on this value's `path`, so the default is exactly
+        // what keeps these fixtures on the Deferred declarator they were pinned against.
+        resolved_render_path: ResolvedRenderPathGpu::default(),
+        // VG R3 piece 1 step P1-2: no depth pyramid — the `HzbMode::Off` 0%-gate, and the only
+        // honest value here (this harness has no `HzbConfig` and no `boyko_render` to derive a
+        // plan with). `None` ⇒ no image, no per-mip views, no build passes ⇒ byte-identical.
+        hzb: None,
+        // VG R3 piece 1 step P1-4: no `hzb_build` pipeline or layout either. This harness mints
+        // its own pipelines rather than booting `GpuSceneBundles` (which is what mints those two
+        // unconditionally in production), and with `hzb: None` above no descriptor set would be
+        // built against them anyway — the arm is ONE predicate, and it is `hzb`.
+        hzb_build_layout: None,
+        hzb_build_pipeline: None,
+        // VG R3 piece 1 step P1-6: the `BOYKO_HZB_DUMP` probe is unarmed here, as it is on every
+        // golden and every non-probe boot — no dump pass is declared and no copy is recorded.
+        hzb_dump: None,
+        // VG R3 piece 2 step P2-3: no LATE indirect record array and no marked instance. This
+        // harness never resolves VB (the same rationale as the VB fields above), so
+        // `path_vb_occlusion_split()` is `false` here through its FIRST conjunct already —
+        // `vb_occlusion_instances: 0` is the honest value for a fixture with no ECS gather
+        // behind it, not a second gate.
+        // VG R3 piece 4 rung P4-4: `vb_occlusion: None` is the OWNER half — this harness boots no
+        // `World` and therefore no `OcclusionConfig`, which is the same answer the default `Off`
+        // gives. It is now the predicate's first conjunct.
+        vb_indirect_late: None,
+        vb_occlusion_instances: 0,
+        vb_occlusion: None,
+        // VG R3 piece 3 step P3-2: the occlusion split's three buffers and its flag word.
+        // `None`/`0` for the SAME reason every VB field above is: this harness mints its own
+        // pipelines instead of booting `GpuSceneBundles` (which is what allocates these
+        // unconditionally in production), and it never resolves VB, so nothing here would
+        // bind them. `vb_occ_flags: 0` is the disarmed word — no bit set means the cull may
+        // defer nothing.
+        vb_late_visible: None,
+        vb_late_count: None,
+        vb_cull_uniform: None,
+        vb_occ_flags: 0,
+        // VG R3 piece 3 step P3-3: the engine frame index. `0` is the honest value for a harness
+        // that renders ONE frame per fixture rather than a stand-in — the counter it mirrors starts
+        // at 0 and this is that frame. Nothing here reads it: it reaches the device only through
+        // `VbCullUniform`, which is filled inside the `vb_batch_cull` arm this harness never takes.
+        engine_frame_index: 0,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -3373,7 +3787,9 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         let presented = unsafe {
             renderer.render_gbuffer_frame(
                 token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                window.width(), window.height(), clear, present_extent, Some(&staging),
+                window.width(), window.height(), clear, present_extent, present_extent, Some(&staging),
+                None,
+                None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
             )
         }
         .unwrap_or_else(|e| panic!("p0 cull readback frame (cull_on={cull_on}) failed: {e:?}"));
@@ -3395,7 +3811,9 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
             let _ = unsafe {
                 renderer.render_gbuffer_frame(
                     token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                    window.width(), window.height(), clear, present_extent, None,
+                    window.width(), window.height(), clear, present_extent, present_extent, None,
+                    None,
+                    None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
                 )
             }
             .unwrap_or_else(|e| panic!("p0 cull drain frame (cull_on={cull_on}) failed: {e:?}"));
@@ -3446,7 +3864,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
             );
             let mut mismatches = 0usize;
             let mut worst = (0u32, 0u32, 0i32);
-            for (i, (o, n)) in off_rgba.chunks_exact(4).zip(on_rgba.chunks_exact(4)).enumerate() {
+            for (i, (o, n)) in off_rgba.as_chunks::<4>().0.iter().zip(on_rgba.as_chunks::<4>().0).enumerate() {
                 let mut bad = false;
                 for c in 0..3 {
                     let d = (o[c] as i32 - n[c] as i32).abs();
@@ -3983,7 +4401,7 @@ fn showcase_config(ssao_quality: Option<usize>) -> ShowcaseConfig {
 /// (broken-on-this-box) validation layer does not crash the process; the screenshot is the
 /// deliverable, not a golden assertion.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the screenshot"]
 fn engine_showcase_512_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine showcase 512",
@@ -4001,7 +4419,7 @@ fn engine_showcase_512_screenshot_dump() {
 ///
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the SSAO screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the SSAO screenshot"]
 fn engine_ssao_512_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine SSAO 512",
@@ -4029,7 +4447,7 @@ fn engine_ssao_512_screenshot_dump() {
 ///
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the mesh-floor SSAO screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the mesh-floor SSAO screenshot"]
 fn engine_ssao_mesh_512_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine SSAO mesh floor 512",
@@ -4054,7 +4472,7 @@ fn engine_ssao_mesh_512_screenshot_dump() {
 ///
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the SSAO quality ladder"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the SSAO quality ladder"]
 fn engine_ssao_ladder_off_dump() {
     // ONE window/context per process: a windowed boot only survives the FIRST showcase dump in a
     // process (later boots hit "swapchain kept recreating"), so each ladder rung is its OWN test —
@@ -4064,21 +4482,21 @@ fn engine_ssao_ladder_off_dump() {
 
 /// SSAO ladder rung — LOW (2x3). See [`engine_ssao_ladder_off_dump`] for the one-per-process note.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU"]
 fn engine_ssao_ladder_low_dump() {
     run_showcase_dump("boyko_engine SSAO ladder LOW", SSAO_LADDER_LOW_BMP, mesh_ssao_config(Some(SSAO_QUALITY_LOW)), false);
 }
 
 /// SSAO ladder rung — MEDIUM (2x4, == today). See [`engine_ssao_ladder_off_dump`].
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU"]
 fn engine_ssao_ladder_medium_dump() {
     run_showcase_dump("boyko_engine SSAO ladder MEDIUM", SSAO_LADDER_MEDIUM_BMP, mesh_ssao_config(Some(SSAO_QUALITY_MEDIUM)), false);
 }
 
 /// SSAO ladder rung — HIGH (3x6). See [`engine_ssao_ladder_off_dump`].
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU"]
 fn engine_ssao_ladder_high_dump() {
     run_showcase_dump("boyko_engine SSAO ladder HIGH", SSAO_LADDER_HIGH_BMP, mesh_ssao_config(Some(SSAO_QUALITY_HIGH)), false);
 }
@@ -4092,7 +4510,7 @@ fn engine_ssao_ladder_high_dump() {
 ///
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the hybrid-room screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the hybrid-room screenshot"]
 fn engine_hybrid_room_512_screenshot_dump() {
     run_showcase_dump("boyko_engine hybrid room 512", HYBRID_BMP, hybrid_room_config(), false);
 }
@@ -4405,7 +4823,7 @@ fn instanced_persp_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the instanced screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the instanced screenshot"]
 fn engine_instanced_persp_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine instanced perspective 512",
@@ -4922,7 +5340,7 @@ fn csm_shadow_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the CSM shadow screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the CSM shadow screenshot"]
 fn engine_csm_shadow_512_screenshot_dump() {
     run_showcase_dump("boyko_engine CSM shadow 512", CSM_SHADOW_BMP, csm_shadow_config(), false);
 }
@@ -5105,7 +5523,7 @@ fn spot_shadow_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the spot shadow screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the spot shadow screenshot"]
 fn engine_spot_shadow_512_screenshot_dump() {
     run_showcase_dump("boyko_engine spot shadow 512", SPOT_SHADOW_BMP, spot_shadow_config(), false);
 }
@@ -5281,7 +5699,7 @@ fn point_shadow_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the point shadow screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the point shadow screenshot"]
 fn engine_point_shadow_512_screenshot_dump() {
     run_showcase_dump("boyko_engine point shadow 512", POINT_SHADOW_BMP, point_shadow_config(), false);
 }
@@ -5555,7 +5973,7 @@ fn grand_showcase_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the grand showcase screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the grand showcase screenshot"]
 fn engine_grand_showcase_512_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine grand showcase 512",
@@ -5564,6 +5982,133 @@ fn engine_grand_showcase_512_screenshot_dump() {
         false,
     );
 }
+
+/// Multi-paradigm render-path plan, rung R3 (§E leg-disable / O2 audit) — the `Deferred × Sdf`
+/// leg-disable golden: the SAME [`grand_showcase_config`] room, but with the resolved render
+/// path's `mesh_leg` forced OFF (`GeometryLegs::Sdf`). The mesh raster gbuffer pass (boxes/
+/// walls/floor) is skipped, and so are EVERY mesh-shadow producer it feeds — CSM cascade depth,
+/// the punctual spot/point atlas depth, and (under `hwrt`) the TLAS pack/build + the
+/// shadow_vis/à-trous/temporal denoise chain (mesh-shadow producers are mesh-leg-owned; the SDF
+/// leg's shadow is the marcher's own baked soft march, unaffected — in production the gate is
+/// `ResolvedRenderPath::mesh_shadow_producers()` in `boyko_render`'s `resolve_csm_cascades` /
+/// `resolve_shadow_atlas`; this hand-built fixture applies the same predicate itself, below).
+/// Only the two SDF spheres remain, composited by the byte-UNCHANGED marcher against the new
+/// `mesh_depth_neutral_clear` pass's far-plane depth (see `graph_bridge.rs`'s doc for why no
+/// `HAS_MESH` shader variant was needed). Dumps a TRUE 512×512 BMP to [`DEFERRED_SDF_ONLY_BMP`]
+/// for the owner's RTX visual sign-off.
+const DEFERRED_SDF_ONLY_BMP: &str = r"D:\tmp\deferred_sdf_only.bmp";
+
+/// Multi-paradigm render-path plan, rung R3 (code-review P2-2) — a hand mirror of
+/// `boyko_app::gpu_scene::to_gpu_resolved_render_path` (private to that crate, so this
+/// low-level RHI test cannot call it directly; see
+/// `boyko_app::gpu_scene::tests::to_gpu_resolved_render_path_round_trips_a_non_default_carrier`
+/// for the AUTHORITATIVE field-for-field round-trip that pin covers). Field-for-field copy into
+/// the plain-POD [`ResolvedRenderPathGpu`], same discriminant/`bits()` encoding
+/// `boyko_render::RenderPath`/`GeometryLegs`/`DepthKind`/`ThinAuxMask`/`ShadowSources` already
+/// use as their `#[repr(u32)]`/`#[repr(transparent)]` wire form.
+fn resolved_render_path_gpu_from(r: &boyko_render::ResolvedRenderPath) -> ResolvedRenderPathGpu {
+    ResolvedRenderPathGpu {
+        path: r.path as u32,
+        legs: r.legs as u32,
+        mesh_leg: r.mesh_leg,
+        sdf_leg: r.sdf_leg,
+        sdf_forward_marched: r.sdf_forward_marched,
+        needs_depth_prepass: r.needs_depth_prepass,
+        prepass_writes_motion: r.prepass_writes_motion,
+        mesh_geo_shade_split: r.mesh_geo_shade_split,
+        sdf_geo_shade_split: r.sdf_geo_shade_split,
+        sdf_surface_cache: r.sdf_surface_cache,
+        vb_geometry_table: r.vb_geometry_table,
+        depth_kind: r.depth_kind as u32,
+        thin_aux: r.thin_aux.bits(),
+        shadow: r.shadow.bits(),
+        froxel_light_cull: r.froxel_light_cull,
+        vb_sdf_mesh_armable: r.vb_sdf_mesh_armable(),
+    }
+}
+
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
+/// orchestrator runs it on the GPU to dump the screenshot.
+#[test]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the deferred-sdf-only leg-disable screenshot"]
+fn engine_deferred_sdf_only_512_screenshot_dump() {
+    // Multi-paradigm render-path plan, rung R3 (code-review P2-2): drive the REAL boot resolver
+    // (`boyko_render::resolve_render_path`) instead of hand-building the carrier, so this golden
+    // covers the config -> resolver -> carrier -> frame seam end-to-end (`boyko-render` is a
+    // dev-only back-edge dependency added for exactly this — see this crate's `Cargo.toml`).
+    let cfg = boyko_render::RenderPathConfig {
+        path: boyko_render::RenderPath::Deferred,
+        legs: boyko_render::GeometryLegs::Sdf,
+    };
+    let (resolved, degrades) = boyko_render::resolve_render_path(
+        &cfg,
+        boyko_render::RenderPathConsumers::default(),
+        boyko_render::RenderPathDeviceCaps::default(),
+    );
+    assert!(degrades.is_clean(), "Deferred x Sdf must resolve clean at rung R3 (no degrade)");
+    assert!(!resolved.mesh_leg && resolved.sdf_leg, "invariant: GeometryLegs::Sdf resolves mesh_leg=false");
+    let resolved_render_path = resolved_render_path_gpu_from(&resolved);
+
+    run_showcase_dump_with_render_path(
+        "boyko_engine deferred sdf-only 512",
+        DEFERRED_SDF_ONLY_BMP,
+        grand_showcase_config(),
+        resolved_render_path,
+    );
+}
+
+/// Multi-paradigm render-path plan, rung R3b (§E leg-disable / the R3 audit finding (a)) — the
+/// `Deferred × Mesh` leg-disable golden: the SAME [`grand_showcase_config`] room, but with the
+/// resolved render path's `sdf_leg` forced OFF (`GeometryLegs::Mesh`). The SDF marcher is not
+/// dispatched at all (`GBufferScene::marcher` pass is `None`), so the two SDF spheres are ABSENT
+/// and NO marcher dispatch runs; the new `viewt_from_depth` compute pass reproduces the marcher's
+/// mesh-depth → `gViewT` conversion for every pixel instead, so the resolve's `P = ro +
+/// rd*view_t` reconstruction and SSAO's mesh/SDF classification see the REAL mesh surface exactly
+/// as they would under `Both` (the R3 audit's "gViewT wholly unwritten" bug this rung closes).
+/// Mesh-shadow producers (CSM, the punctual atlas, and under `hwrt` the TLAS/shadow-vis chain)
+/// stay ON — they are mesh-leg-owned and `mesh_leg` is `true` here (the mirror-image of
+/// `engine_deferred_sdf_only_512_screenshot_dump`'s suppression under `!mesh_leg`). Dumps a TRUE
+/// 512×512 BMP to [`DEFERRED_MESH_ONLY_BMP`] for the owner's RTX visual sign-off.
+const DEFERRED_MESH_ONLY_BMP: &str = r"D:\tmp\deferred_mesh_only.bmp";
+
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
+/// orchestrator runs it on the GPU to dump the screenshot.
+#[test]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the deferred-mesh-only leg-disable screenshot"]
+fn engine_deferred_mesh_only_512_screenshot_dump() {
+    // Multi-paradigm render-path plan, rung R3b: drive the REAL boot resolver
+    // (`boyko_render::resolve_render_path`) instead of hand-building the carrier, so this golden
+    // covers the config -> resolver -> carrier -> frame seam end-to-end (mirrors the sibling
+    // `engine_deferred_sdf_only_512_screenshot_dump` golden exactly, `Sdf` -> `Mesh`).
+    let cfg = boyko_render::RenderPathConfig {
+        path: boyko_render::RenderPath::Deferred,
+        legs: boyko_render::GeometryLegs::Mesh,
+    };
+    let (resolved, degrades) = boyko_render::resolve_render_path(
+        &cfg,
+        boyko_render::RenderPathConsumers::default(),
+        boyko_render::RenderPathDeviceCaps::default(),
+    );
+    assert!(degrades.is_clean(), "Deferred x Mesh must resolve clean at rung R3b (no degrade)");
+    assert!(resolved.mesh_leg && !resolved.sdf_leg, "invariant: GeometryLegs::Mesh resolves sdf_leg=false");
+    let resolved_render_path = resolved_render_path_gpu_from(&resolved);
+
+    run_showcase_dump_with_render_path(
+        "boyko_engine deferred mesh-only 512",
+        DEFERRED_MESH_ONLY_BMP,
+        grand_showcase_config(),
+        resolved_render_path,
+    );
+}
+
+// Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh-only golden used to live
+// here as `engine_forward_mesh_512_screenshot_dump`. Code-review re-route: this harness's
+// `run_showcase_body` independently re-implements boot + scene assembly (it does NOT go through
+// `boyko_app::gpu_scene`), so it could never actually exercise `RenderPath::Forward` with real
+// resources. The golden moved to `crates/boyko_app/tests/forward_mesh.rs`
+// (`forward_mesh_screenshot_dump`), which boots through the REAL production
+// `boyko_app::runner`/`gpu_scene::GpuSceneBundles` path — see `goldens/PINS.toml`'s
+// `[forward_mesh]` pin (`crate = "boyko-app"`).
 
 /// The GRAND flagship showcase screenshot with SDFDDGI **GI ON** — the FIRST render (rung I4) that
 /// arms the live probe-update pass AND the resolve's GI-injection gate. The warm sun drives the
@@ -5582,11 +6127,11 @@ const GRAND_SHOWCASE_DDGI_BMP: &str = r"D:\tmp\engine_grand_showcase_ddgi.bmp";
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the DDGI GI-ON showcase screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the DDGI GI-ON showcase screenshot"]
 fn engine_grand_showcase_512_ddgi_screenshot_dump() {
     with_windowed_present("boyko_engine grand showcase DDGI 512", "engine_showcase_512", |bp| {
         // `gpu_timing = None`: ZERO extra commands, byte-identical to the pre-R0 golden.
-        run_showcase_body_ddgi(bp, GRAND_SHOWCASE_DDGI_BMP, grand_showcase_config(), false, None)
+        run_showcase_body_ddgi(bp, GRAND_SHOWCASE_DDGI_BMP, grand_showcase_config(), false)
     });
 }
 
@@ -5873,7 +6418,10 @@ fn ab_present_one<'ctx>(
             window.height(),
             clear,
             present_extent,
+            present_extent,
             readback,
+            None,
+            None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
         )
     };
     matches!(r, Ok(true))
@@ -5923,7 +6471,7 @@ fn ab_capture<'ctx>(
 fn ab_compare(label: &str, a: &[u8], b: &[u8]) -> (usize, u32) {
     let mut n_diff = 0usize;
     let mut max_d = 0u32;
-    for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+    for (pa, pb) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
         let d = pa
             .iter()
             .zip(pb)
@@ -5945,7 +6493,7 @@ fn ab_compare(label: &str, a: &[u8], b: &[u8]) -> (usize, u32) {
 /// A ×8-amplified per-channel |a−b| RGBA diff map (alpha forced opaque) for visual inspection.
 fn ab_diff_map(a: &[u8], b: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; a.len()];
-    for ((pa, pb), po) in a.chunks_exact(4).zip(b.chunks_exact(4)).zip(out.chunks_exact_mut(4)) {
+    for ((pa, pb), po) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0).zip(out.as_chunks_mut::<4>().0) {
         for c in 0..3 {
             let d = (i32::from(pa[c]) - i32::from(pb[c])).unsigned_abs() * 8;
             po[c] = d.min(255) as u8;
@@ -6492,7 +7040,7 @@ fn run_interp_smoke<'ctx, 's>(
 /// the static 3 mrad micro-yaw pair then quantifies edge requantization). Prints `[shadow-ab]`
 /// verdict lines and dumps BMPs + ×8 diff maps to `D:\tmp\shadow_ab_*.bmp`.
 #[test]
-#[ignore = "needs a real RTX windowed device; scripted shadow-motion A/B capture protocol"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; scripted shadow-motion A/B capture protocol"]
 fn shadow_motion_ab_dump() {
     // SAFETY: set before any other thread reads the environment (the test body is the process's
     // first activity under `--test-threads=1`, the only supported way to run windowed dumps).
@@ -6512,7 +7060,7 @@ fn shadow_motion_ab_dump() {
 /// forced to a SINGLE cascade. A luminance flip at the split boundary that vanishes in the
 /// single-cascade run convicts the cascade select / layer contents.
 #[test]
-#[ignore = "needs a real RTX windowed device; scripted camera-dolly shadow diagnostic"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; scripted camera-dolly shadow diagnostic"]
 fn shadow_dolly_dump() {
     // SAFETY: set before any other thread reads the environment (the test body is the process's
     // first activity under `--test-threads=1`, the only supported way to run windowed dumps).
@@ -6534,7 +7082,7 @@ fn shadow_dolly_dump() {
 /// identical pose. Nonzero diff = camera-lag-class defect (stale ring slot / mapped-write race /
 /// intra-frame camera inconsistency); all-zero = the lag lives in viewer-loop-only writes.
 #[test]
-#[ignore = "needs a real RTX windowed device; in-motion vs settled same-pose byte comparison"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; in-motion vs settled same-pose byte comparison"]
 fn shadow_lag_dump() {
     // SAFETY: set before any other thread reads the environment (the test body is the process's
     // first activity under `--test-threads=1`, the only supported way to run windowed dumps).
@@ -6636,7 +7184,7 @@ fn csm_cascades_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the CSM cascades screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the CSM cascades screenshot"]
 fn engine_csm_cascades_512_screenshot_dump() {
     run_showcase_dump("boyko_engine CSM cascades 512", CSM_CASCADES_BMP, csm_cascades_config(), false);
 }
@@ -6835,7 +7383,7 @@ fn multimesh_persp_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the multi-mesh screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the multi-mesh screenshot"]
 fn engine_multimesh_persp_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine multi-mesh perspective 512",
@@ -6915,7 +7463,7 @@ fn nonuniform_normals_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the non-uniform-normals screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the non-uniform-normals screenshot"]
 fn engine_nonuniform_normals_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine non-uniform normals 512",
@@ -7075,7 +7623,7 @@ fn capsule_character_config(contact_shadow: bool) -> ShowcaseConfig {
 /// (broken-on-this-box) validation layer does not crash the process; the screenshot is the
 /// deliverable, not a golden assertion.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the capsule-character screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the capsule-character screenshot"]
 fn engine_capsule_character_512_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine capsule character 512",
@@ -7099,7 +7647,7 @@ fn engine_capsule_character_512_screenshot_dump() {
 /// `#[ignore]`: needs a real RTX windowed device. SPLIT into two ONE-render-per-process tests —
 /// a second windowed render in the same process trips the swapchain-recreate path and never dumps.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator dumps the contact-shadow OFF screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator dumps the contact-shadow OFF screenshot"]
 fn engine_contact_shadow_off_512_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine contact shadow OFF 512",
@@ -7110,7 +7658,7 @@ fn engine_contact_shadow_off_512_screenshot_dump() {
 }
 
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator dumps the contact-shadow ON screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator dumps the contact-shadow ON screenshot"]
 fn engine_contact_shadow_on_512_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine contact shadow ON 512",
@@ -7196,7 +7744,7 @@ fn mdf_shadow_config() -> ShowcaseConfig {
 /// (broken-on-this-box) validation layer does not crash the process; the screenshot is the
 /// deliverable, not a golden assertion.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the MDF-shadow screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the MDF-shadow screenshot"]
 fn engine_mdf_shadow_512_screenshot_dump() {
     run_showcase_dump("boyko_engine MDF shadow 512", MDF_SHADOW_BMP, mdf_shadow_config(), false);
 }
@@ -7207,7 +7755,21 @@ fn engine_mdf_shadow_512_screenshot_dump() {
 /// `cfg` builder arms `ssao_mode == 1`; `scene.ssao = Some(..)` records the pass that writes it).
 fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, interactive: bool) {
     with_windowed_present(window_title, "engine_showcase_512", |bp| {
-        run_showcase_body(bp, bmp_path, cfg, interactive)
+        run_showcase_body(bp, bmp_path, cfg, interactive, ResolvedRenderPathGpu::default())
+    });
+}
+
+/// Multi-paradigm render-path plan, rung R3: sibling of [`run_showcase_dump`] that forces the
+/// scene fixture's [`ResolvedRenderPathGpu`] instead of the byte-identity default — the R3
+/// leg-disable golden tests thread `Deferred × Sdf` (mesh raster leg off) through here.
+fn run_showcase_dump_with_render_path(
+    window_title: &str,
+    bmp_path: &str,
+    cfg: ShowcaseConfig,
+    resolved_render_path: ResolvedRenderPathGpu,
+) {
+    with_windowed_present(window_title, "engine_showcase_512", |bp| {
+        run_showcase_body(bp, bmp_path, cfg, false, resolved_render_path)
     });
 }
 
@@ -7230,7 +7792,6 @@ fn run_showcase_body_ddgi(
     bmp_path: &str,
     cfg: ShowcaseConfig,
     interactive: bool,
-    gpu_timing: Option<&TimestampCollector>,
 ) {
     let BootPresent { window, ctx, surface, mut swapchain, mut renderer, is_bgra, swap_color_format } =
         bp;
@@ -7618,6 +8179,11 @@ fn run_showcase_body_ddgi(
         BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        // Textured-PBR T6a (the critic's C1 fix): the SOFTWARE-ONLY `gPbr` STORAGE image @19.
+        // `GBufferTargets::create` now allocates `gPbr` UNCONDITIONALLY (both feature legs) and
+        // `DeferredSets::build`'s software resolve-set loop appends it past the shared 19 —
+        // the layout MUST declare it too, or `create_bind_group`'s entry-count check trips (P1a).
+        BindGroupLayoutEntry { binding: 19, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -7885,6 +8451,10 @@ fn run_showcase_body_ddgi(
                     base_instance: b.base_instance,
                     instance_count: b.instance_count,
                     casts_shadow: b.casts_shadow,
+                    // VG rung R2c: this fixture path carries no mesh bounds, so the cull keeps
+                    // every batch (UNBOUNDED corners survive every plane) — the conservative
+                    // fallback, not a special case.
+                    world_aabb: None,
                 })
                 .collect()
         })
@@ -7892,6 +8462,8 @@ fn run_showcase_body_ddgi(
 
     let mvp = cfg.mvp;
     let scene = GBufferScene {
+        // Particles P0: disarmed in every windowed fixture — no ResId, no pass, no command.
+        particle: None,
         raster_pipeline: &raster_pipeline,
         vertex_buffer: &vertex_buffer,
         vertex_count: vertices.len() as u32,
@@ -7903,6 +8475,95 @@ fn run_showcase_body_ddgi(
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
         camera_ring: &camera_ring,
+        // Multi-paradigm render-path plan, rung R4b-b: `None` — this fixture never resolves
+        // `RenderPath::Forward` (`GBufferScene::forward_pipeline`'s doc: `Option` exists so a
+        // non-Forward test can say so honestly instead of threading a semantically-wrong
+        // placeholder like `&raster_pipeline`/`&vocab_layout`).
+        forward_pipeline: None,
+        forward_sky_pipeline: None,
+        forward_layout0: None,
+        forward_layout1: None,
+        forward_instance_ring: None,
+        forward_instance_material_ring: None,
+        forward_prepass_pipeline: None,
+        // Multi-paradigm render-path plan, rung R-SDFFWD: `None` — this harness never resolves
+        // `sdf_forward_marched` (`GBufferScene::sdf_forward_march_pipeline`'s doc: `Option` exists
+        // so a non-Forward-SDF test can say so honestly instead of threading a
+        // semantically-wrong placeholder).
+        sdf_forward_march_pipeline: None,
+        sdf_forward_march_sdfonly_pipeline: None,
+        sdf_forward_march_viewt_pipeline: None,
+        sdf_forward_march_sdfonly_viewt_pipeline: None,
+        sdf_forward_march_layout: None,
+        vb_geo_pipeline: None,
+        vb_shade_split_pipeline: None,
+        vb_shade_split_tex_pipeline: None,
+        vb_geo_aux_layout: None,
+        vb_split_layout1: None,
+        ssao_vb_pipeline: None,
+        vb_ssao_layout: None,
+        // Rung R9d: `None` — this harness never resolves the VB hardware shadow chain (same
+        // "Option lets a non-armed fixture say so honestly" rationale as the VB fields above).
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_layout: None,
+        #[cfg(feature = "hwrt")]
+        vb_geo_mv_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_hwrt_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_tex_hwrt_pipeline: None,
+        brick_levels_ubo: None,
+        sdf_forward_view_z_a: 0.0,
+        sdf_forward_view_z_b: 0.0,
+        // Multi-paradigm render-path plan, rung R8: this harness never resolves
+        // `VisibilityBuffer` (it independently re-implements boot/scene assembly, `forward_mesh
+        // .rs`'s doc) — `None` for every VB field, the same "Option lets a non-VB fixture say so
+        // honestly" rationale as the Forward fields above.
+        vb_raster_pipeline: None,
+        vb_sky_pipeline: None,
+        vb_resolve_pipeline: None,
+        vb_classify_count_pipeline: None,
+        vb_classify_scan_pipeline: None,
+        vb_classify_scatter_pipeline: None,
+        vb_shade_pipeline: None,
+        sdf_mesh_shadow_pipeline: None,
+        sdf_mesh_shadow_layout0: None,
+        vb_sdf_mesh_mode: 0,
+        vb_layout0: None,
+        vb_instance_ring: None,
+        vb_indirect: None,
+        vb_cull_planes: None,
+        vb_batch_desc: None,
+        vb_cull_visible: None,
+        vb_cull_count: None,
+        // VG rung R2d-2: unread by this harness (never resolves VB, the same rationale as the VB
+        // fields above). `vb_visible_instance` is MANDATORY on a real boot but this fixture builds
+        // no VB Set-0 at all, and `vb_mesh_bounds` is armed only by a live `MeshGeometryTable`,
+        // which this fixture never creates.
+        vb_visible_instance: None,
+        vb_mesh_bounds: None,
+        vb_cull_readback: None,
+        vb_batch_cull_pipeline: None,
+        vb_cull_layout: None,
+        vb_geometry_set: None,
+        // VB-P2 classification plan, rung P2b: unread by this harness (never resolves VB, the
+        // same rationale as the VB fields above) — `0` is the `MaterialTable::new()` default.
+        vb_classify_material_count: 0,
+        // VB-P2 classification plan, rung P2c: unread by this harness (never resolves VB) —
+        // `false` (the fused `vb_resolve` default) is the honest value for a non-VB fixture.
+        vb_use_classified: false,
+        // Textured-PBR rung TV0: unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above).
+        vb_shade_tex_pipeline: None,
+        // VB-P1a ("dark infra"): unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above) — `None` since the froxel arm is never built.
+        vb_layout0_froxel: None,
+        vb_resolve_froxel_pipeline: None,
+        vb_shade_froxel_pipeline: None,
+        vb_shade_tex_froxel_pipeline: None,
+        vb_tex_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),
@@ -7923,6 +8584,8 @@ fn run_showcase_body_ddgi(
         light_staging: &light_staging,
         light_upload_bytes: light_table_bytes,
         light_dirty: false,
+        // DM1: this harness host-seeds its own material table; it never uploads one per frame.
+        material_upload: None,
         cluster_cull: None,
         cull_layout: None,
         cluster_grid: None,
@@ -7930,6 +8593,7 @@ fn run_showcase_body_ddgi(
         light_index_alloc: None,
         cluster_cull_push: [0u8; 16],
         cluster_count: 0,
+        cluster_cull_hier: None,
         resolve_pipeline: &resolve_pipeline,
         resolve_layout: &resolve_layout,
         #[cfg(feature = "hwrt")]
@@ -7955,7 +8619,33 @@ fn run_showcase_body_ddgi(
         light_dir: marcher_light_dir(&cfg.light_elems),
         ssao: cfg
             .ssao_quality
-            .map(|_| SsaoActivation { pipeline: &ssao_pipeline, layout: &ssao_layout }),
+            .map(|_| SsaoActivation { pipeline: &ssao_pipeline, layout: &ssao_layout, atrous_levels: 0 }),
+        // The SSAO à-trous denoise chain's stable boot pipelines/layout — not wired by this
+        // harness (it never dispatches à-trous).
+        ssao_atrous_read8_pipeline: None,
+        ssao_atrous_interior_pipeline: None,
+        ssao_atrous_write8_pipeline: None,
+        ssao_atrous_layout: None,
+        // Multi-paradigm render-path plan, rung R3b: this DDGI harness's `resolved_render_path`
+        // is `ResolvedRenderPathGpu::default()` (`Deferred × Both`), so the marcher itself is the
+        // sole `gViewT` producer — `viewt_from_depth` stays `None` (the 0%-gate).
+        viewt_from_depth: None,
+        // TAA-under-VB: this harness never resolves `VisibilityBuffer × Mesh`, so the
+        // `viewt_from_depth_rz` producer stays `None` (the 0%-gate).
+        viewt_from_vb_depth: None,
+        // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit`
+        // directly, byte-identical to the pre-AA stream (the 0%-gate).
+        aa: None,
+        // AA Stage 2: OFF (the default) — NO SMAA pass recorded, byte-identical to the
+        // pre-AA stream (the 0%-gate).
+        smaa: None,
+        // AA Stage 3: OFF (the default) — NO SSAA pass recorded, `aa_out` stays sized to
+        // `present_extent` (native here), byte-identical to the pre-SSAA stream (the 0%-gate).
+        ssaa: None,
+        // AA Stage 4: OFF (the default) — NO TAA resolve pass recorded, `aa_out`/`taa_hist`
+        // stay unallocated, byte-identical to the pre-TAA stream (the 0%-gate).
+        taa: None,
+        rcas: None,
         mesh_draw: &mesh_draws,
         csm_cascade_texture: &csm.cascade,
         csm_compare_sampler: &csm.sampler,
@@ -8004,12 +8694,9 @@ fn run_showcase_body_ddgi(
             },
         ),
         interp: None,
-        // HW-RT rung R0: the caller's GPU timestamp collector. `None` for the byte-identical
-        // BMP dump (`engine_grand_showcase_512_ddgi_screenshot_dump`) — ZERO extra commands, so
-        // the golden stays byte-identical. `Some(&collector)` for the
-        // `engine_grand_showcase_512_gpu_pass_cost` timing test, which brackets the four
-        // software-ray passes on this real combined frame.
-        gpu_timing,
+        // VB-P1d: this harness never resolves `VisibilityBuffer` (byte-identical command stream).
+        gpu_zone: None,
+        vb_cmd_witness: None,
         // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
         #[cfg(feature = "hwrt")]
         tlas: None,
@@ -8033,6 +8720,11 @@ fn run_showcase_body_ddgi(
         raster_pipeline_mv: None,
         #[cfg(feature = "hwrt")]
         mv_bind_group: None,
+        // F8-mv: the combined MV+PM mesh path — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        raster_pipeline_mvpm: None,
+        #[cfg(feature = "hwrt")]
+        mvpm_bind_group: None,
         // Rung-3b step 5b: the SDF motion-vector VIS path — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         vis_mv_pipeline: None,
@@ -8043,6 +8735,62 @@ fn run_showcase_body_ddgi(
         // Rung-3b step 6: the temporal reproject layout — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         temporal_layout: None,
+        // Asset-streaming plan F8: PER_INSTANCE_MATERIAL is OFF in this low-level RHI harness
+        // (no ECS gather / material store exists here) — byte-identical to the pre-F8 stream.
+        pm_enabled: false,
+        raster_pipeline_pm: None,
+        pm_bind_group: None,
+        // Textured-PBR T6c: TEXTURED is OFF in this low-level RHI harness (no ECS gather /
+        // texture asset store exists here) — byte-identical to the pre-T6c stream.
+        tex_enabled: false,
+        raster_pipeline_tex: None,
+        tex_bind_group: None,
+        bindless_set: None,
+        // Multi-paradigm render-path plan: this harness has no ECS `ResolvedRenderPath` to
+        // convert, so it carries the byte-identity default (Deferred + Both, every derived flag
+        // off). NOT inert — the label "dead-but-threaded" that stood here stopped being true at
+        // R2: the declarator dispatch matches on this value's `path`, so the default is exactly
+        // what keeps these fixtures on the Deferred declarator they were pinned against.
+        resolved_render_path: ResolvedRenderPathGpu::default(),
+        // VG R3 piece 1 step P1-2: no depth pyramid — the `HzbMode::Off` 0%-gate, and the only
+        // honest value here (this harness has no `HzbConfig` and no `boyko_render` to derive a
+        // plan with). `None` ⇒ no image, no per-mip views, no build passes ⇒ byte-identical.
+        hzb: None,
+        // VG R3 piece 1 step P1-4: no `hzb_build` pipeline or layout either. This harness mints
+        // its own pipelines rather than booting `GpuSceneBundles` (which is what mints those two
+        // unconditionally in production), and with `hzb: None` above no descriptor set would be
+        // built against them anyway — the arm is ONE predicate, and it is `hzb`.
+        hzb_build_layout: None,
+        hzb_build_pipeline: None,
+        // VG R3 piece 1 step P1-6: the `BOYKO_HZB_DUMP` probe is unarmed here, as it is on every
+        // golden and every non-probe boot — no dump pass is declared and no copy is recorded.
+        hzb_dump: None,
+        // VG R3 piece 2 step P2-3: no LATE indirect record array and no marked instance. This
+        // harness never resolves VB (the same rationale as the VB fields above), so
+        // `path_vb_occlusion_split()` is `false` here through its FIRST conjunct already —
+        // `vb_occlusion_instances: 0` is the honest value for a fixture with no ECS gather
+        // behind it, not a second gate.
+        // VG R3 piece 4 rung P4-4: `vb_occlusion: None` is the OWNER half — this harness boots no
+        // `World` and therefore no `OcclusionConfig`, which is the same answer the default `Off`
+        // gives. It is now the predicate's first conjunct.
+        vb_indirect_late: None,
+        vb_occlusion_instances: 0,
+        vb_occlusion: None,
+        // VG R3 piece 3 step P3-2: the occlusion split's three buffers and its flag word.
+        // `None`/`0` for the SAME reason every VB field above is: this harness mints its own
+        // pipelines instead of booting `GpuSceneBundles` (which is what allocates these
+        // unconditionally in production), and it never resolves VB, so nothing here would
+        // bind them. `vb_occ_flags: 0` is the disarmed word — no bit set means the cull may
+        // defer nothing.
+        vb_late_visible: None,
+        vb_late_count: None,
+        vb_cull_uniform: None,
+        vb_occ_flags: 0,
+        // VG R3 piece 3 step P3-3: the engine frame index. `0` is the honest value for a harness
+        // that renders ONE frame per fixture rather than a stand-in — the counter it mirrors starts
+        // at 0 and this is that frame. Nothing here reads it: it reaches the device only through
+        // `VbCullUniform`, which is filled inside the `vb_batch_cull` arm this harness never takes.
+        engine_frame_index: 0,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -8069,29 +8817,20 @@ fn run_showcase_body_ddgi(
     let ddgi_ubo_ptr = RhiDevice::buffer_mapped_ptr(device, &ddgi_update_ubo)
         .expect("host-visible DDGI update UBO is mapped");
 
-    // HW-RT rung R0: the GPU-pass-cost TIMING path. When a collector is threaded in, the
-    // recorder brackets the four software-ray passes on every frame (`scene.gpu_timing` is
-    // `Some`). Run `>= 200` measured frames, reading each frame's pool AFTER a `wait_idle` (the
-    // simplest offline discipline — the recorded slot is `renderer.frame_index()` captured
-    // BEFORE the submit that then rotates it), accumulate a `[f64; PASS_COUNT]` sample per
-    // frame, discard the first 20, and report median + p95 + stddev (ns) per pass + ns/ray.
-    // This whole block is skipped on the `None` (BMP dump) path — byte-identical golden.
-    if let Some(collector) = gpu_timing {
-        run_gpu_pass_cost_timing(
-            window,
-            ctx,
-            surface,
-            &mut swapchain,
-            &mut renderer,
-            &scene,
-            &mut frame,
-            &clear,
-            present_extent,
-            alloc_extent,
-            ddgi_ubo_ptr,
-            collector,
-        );
-    } else {
+    // The BMP dump path — the only path, since profiling rung 7 step 6c retired
+    // `engine_grand_showcase_512_gpu_pass_cost`. This function used to fork here: a threaded-in
+    // `TimestampCollector` selected a 220-frame per-pass timing loop, `None` selected the dump
+    // below and left the command stream byte-identical.
+    //
+    // The owner's call was to RETIRE rather than port the timing leg. Porting it to the zone
+    // recorder needed `open_frame`/`retire` (`&mut`) to alternate with the shared borrow that lives
+    // in `GBufferScene<'a>::gpu_zone` for the whole loop — a borrow whose lifetime is in the type,
+    // so assigning `None` between frames does not release it. `boyko_app`'s runner never meets this
+    // because it rebuilds the scene each frame; this fixture holds one 230-line literal.
+    //
+    // The braces stay so the dump path's locals keep their scope and the body keeps its
+    // indentation — a de-indent of 120 lines would bury the deletion in whitespace.
+    {
 
     let mut dumped: Option<(Vec<u8>, u32, u32)> = None;
     let mut converge_ok = true;
@@ -8127,7 +8866,9 @@ fn run_showcase_body_ddgi(
         let presented = unsafe {
             renderer.render_gbuffer_frame(
                 token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                window.width(), window.height(), clear, present_extent, staging_arg,
+                window.width(), window.height(), clear, present_extent, present_extent, staging_arg,
+                None,
+                None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
             )
         }
         .unwrap_or_else(|e| panic!("showcase DDGI converge frame failed: {e:?}"));
@@ -8152,7 +8893,9 @@ fn run_showcase_body_ddgi(
             let _ = unsafe {
                 renderer.render_gbuffer_frame(
                     token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                    window.width(), window.height(), clear, present_extent, None,
+                    window.width(), window.height(), clear, present_extent, present_extent, None,
+                    None,
+                    None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
                 )
             }
             .unwrap_or_else(|e| panic!("showcase DDGI drain frame failed: {e:?}"));
@@ -8212,7 +8955,7 @@ fn run_showcase_body_ddgi(
         }
     }
 
-    } // end of the `None`-gpu_timing (BMP dump) path.
+    } // end of the BMP dump path.
 
     drop(renderer);
     // SAFETY: the renderer was dropped above (its `Drop` waits the device idle), so no submission
@@ -8269,272 +9012,40 @@ fn run_showcase_body_ddgi(
     // surface / ctx / window are owned by `with_windowed_present` and dropped in-order at its frame end.
 }
 
-// === HW-RT rung R0 — the GPU-pass-cost timing loop + its `#[ignore]` entry point. ===
-
-/// The reported per-pass GPU timing summary (all in nanoseconds, GPU wall-clock).
-#[derive(Clone, Copy, Debug, Default)]
-struct GpuPassSummary {
-    median_ns: f64,
-    p95_ns: f64,
-    stddev_ns: f64,
-}
-
-/// Summarizes a slice of ns samples to a `GpuPassSummary` (median + p95 + stddev). Sorts a copy
-/// for the percentiles; `samples` must be non-empty.
-fn summarize_gpu_pass(samples_ns: &[f64]) -> GpuPassSummary {
-    let mut s = samples_ns.to_vec();
-    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = s.len();
-    let median_ns = s[n / 2];
-    let p95_idx = ((n as f64) * 0.95).ceil() as usize;
-    let p95_ns = s[p95_idx.min(n - 1)];
-    let mean = s.iter().sum::<f64>() / n as f64;
-    let var = s.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n as f64;
-    GpuPassSummary { median_ns, p95_ns, stddev_ns: var.sqrt() }
-}
-
-/// The number of measured frames the GPU-pass-cost timing loop presents (`>= 200`, plan Part C).
-const GPU_PASS_COST_FRAMES: u32 = 220;
-/// The warm-up frames discarded from the front (shader compile + GPU clock ramp + atlas ramp).
-const GPU_PASS_COST_WARMUP: usize = 20;
-
-/// Drives the GPU-pass-cost timing loop (HW-RT rung R0): presents `GPU_PASS_COST_FRAMES` real
-/// combined frames with `scene.gpu_timing == Some(collector)` (so the recorder resets the pool
-/// at the frame top + brackets the four software-ray passes), reads each frame's pool AFTER a
-/// `wait_idle` for `PASS_COUNT` pairs, accumulates a `[f64; PASS_COUNT]` sample per frame,
-/// discards the first `GPU_PASS_COST_WARMUP`, and prints the plan §C.3 table (median / p95 /
-/// stddev per pass + ns/ray attribution).
-///
-/// `fi` (the pool slot the recorder used) is `renderer.frame_index()` captured BEFORE the
-/// submit — `drive_frame` rotates `frame_index` at its END, so the pre-submit index IS the slot
-/// `record_gbuffer`'s internal `let fi = self.frame_index` wrote. A `wait_idle` after each frame
-/// (the simplest offline discipline) guarantees that slot's pool is readable before the next
-/// frame reuses it.
-#[allow(clippy::too_many_arguments)]
-fn run_gpu_pass_cost_timing<'ctx>(
-    window: &mut Window,
-    ctx: &'ctx VulkanContext,
-    surface: &Surface<'ctx>,
-    swapchain: &mut Swapchain<'ctx>,
-    renderer: &mut Renderer<'ctx>,
-    scene: &GBufferScene<'_>,
-    frame: &mut GBufferFrame,
-    clear: &[f32; 4],
-    present_extent: VkExtent2D,
-    alloc_extent: VkExtent2D,
-    ddgi_ubo_ptr: NonNull<u8>,
-    collector: &TimestampCollector,
+/// Multi-paradigm render-path plan, rung R3: `resolved_render_path` is threaded through so the
+/// R3 leg-disable golden tests (`engine_deferred_sdf_only_512_screenshot_dump`) can force the
+/// scene fixture's [`ResolvedRenderPathGpu`] to a non-default leg set without duplicating this
+/// whole body. `run_showcase_dump` passes [`ResolvedRenderPathGpu::default()`] (Deferred + Both,
+/// the byte-identity anchor) — every existing showcase test is untouched.
+fn run_showcase_body(
+    bp: BootPresent<'_, '_>,
+    bmp_path: &str,
+    cfg: ShowcaseConfig,
+    interactive: bool,
+    resolved_render_path: ResolvedRenderPathGpu,
 ) {
-    let device: &VulkanContext = ctx;
-    // W1 precondition: the `read_query_pool_ns` below reads ALL `PASS_COUNT` (begin,end) pairs with
-    // `VK_QUERY_RESULT_WAIT_BIT`, so EVERY bracketed pass must be recorded (its two queries written)
-    // each frame — an unwritten query never becomes available and would HANG the read forever. The
-    // grand_showcase GI-ON scene activates all four passes (DDGI update + the always-on deferred
-    // resolve + CSM cascade depth + punctual atlas depth); assert it so a future scene config that
-    // drops a pass fails LOUDLY here instead of deadlocking on the GPU.
-    assert!(
-        scene.ddgi_update.is_some() && scene.csm.is_some() && scene.atlas_punctual.is_some(),
-        "gpu_pass_cost timing requires the DDGI-update + CSM + punctual passes all ACTIVE (else the \
-         WAIT_BIT timestamp readback hangs on an unwritten query)"
-    );
-    // One `[f64; PASS_COUNT]` sample per measured frame.
-    let mut samples: Vec<[f64; PASS_COUNT as usize]> = Vec::with_capacity(GPU_PASS_COST_FRAMES as usize);
-    let mut scratch = [0u64; (2 * PASS_COUNT) as usize];
-    let mut out_ns = [0.0f64; PASS_COUNT as usize];
-
-    for f in 0..GPU_PASS_COST_FRAMES {
-        if !window.pump_events() {
-            eprintln!("NOTE gpu_pass_cost: window closed during timing — reporting partial samples");
-            break;
-        }
-        window.refresh_size();
-        let live = swapchain.extent();
-        if live.width != alloc_extent.width || live.height != alloc_extent.height {
-            eprintln!("NOTE gpu_pass_cost: extent changed during timing — reporting partial samples");
-            break;
-        }
-        // Rotate the I4 ray set per frame (as the dump path does) so the DDGI-update cost reflects
-        // the shipped per-frame ray rotation, not a degenerate fixed ray set.
-        // SAFETY: `ddgi_update_ubo` is `DDGI_UBO_BYTES` (48) host-coherent mapped bytes; offset 32
-        // is the `frame_index` u32 (`DdgiUpdateUbo` word 8). The prior frame's slot fence was
-        // re-waited by `wait_frame_in_flight` below (and a `wait_idle` runs each iteration), so no
-        // in-flight GPU read of this UBO overlaps the write. The write precedes the consuming submit.
-        unsafe {
-            ddgi_ubo_ptr.as_ptr().add(32).cast::<u32>().write_unaligned(f);
-        }
-
-        // The pool slot the recorder will write is the CURRENT frame_index (captured BEFORE the
-        // submit that rotates it inside `drive_frame`).
-        let fi = renderer.frame_index();
-        let token = renderer
-            .wait_frame_in_flight()
-            .expect("invariant: the frame slot fence wait precedes the submit");
-        // SAFETY: `ctx`/`surface`/`swapchain`/`renderer` share one device; every `scene` resource
-        // is live; `present_extent` + `scene.dispatch_group_count_x` + the camera UBO `count` cover
-        // the composite extent; NO readback buffer (the timing path reads timestamps, not pixels).
-        let presented = unsafe {
-            renderer.render_gbuffer_frame(
-                token, ctx, surface, swapchain, scene, frame,
-                window.width(), window.height(), *clear, present_extent, None,
-            )
-        }
-        .unwrap_or_else(|e| panic!("gpu_pass_cost frame failed: {e:?}"));
-        if !presented {
-            eprintln!("NOTE gpu_pass_cost: swapchain recreated during timing — reporting partial samples");
-            break;
-        }
-
-        // Offline discipline: wait the device idle so the just-submitted frame's timestamp writes
-        // are complete + readable before we read (and before the slot is reused two frames on).
-        device.wait_idle().expect("wait_idle");
-        // Read the four (begin,end) pairs of THIS frame's pool (`fi`), masked + period-scaled to ns.
-        device
-            .read_query_pool_ns(collector.pool(fi), PASS_COUNT, &mut scratch, &mut out_ns)
-            .expect("read_query_pool_ns");
-        samples.push(out_ns);
-    }
-
-    if ctx.validation_enabled() {
-        let state = ctx
-            .debug_state()
-            .expect("validation enabled => a debug-messenger state is present");
-        assert_eq!(
-            state.total(),
-            0,
-            "validation layer reported {} message(s) during the GPU-pass-cost timing — see the [vk-validation] log",
-            state.total()
-        );
-    }
-
-    if samples.len() <= GPU_PASS_COST_WARMUP {
-        eprintln!(
-            "NOTE gpu_pass_cost: only {} frame(s) measured (<= {GPU_PASS_COST_WARMUP} warm-up) — no stats reported",
-            samples.len()
-        );
-        return;
-    }
-    let kept = &samples[GPU_PASS_COST_WARMUP..];
-
-    // Per-pass columns for the summary.
-    let pass_names = ["DdgiUpdate", "DeferredResolve", "CsmDepth", "PunctualDepth"];
-    let mut per_pass: [Vec<f64>; PASS_COUNT as usize] =
-        core::array::from_fn(|_| Vec::with_capacity(kept.len()));
-    for sample in kept {
-        for (p, &ns) in sample.iter().enumerate() {
-            per_pass[p].push(ns);
-        }
-    }
-    let summaries: Vec<GpuPassSummary> = per_pass.iter().map(|c| summarize_gpu_pass(c)).collect();
-
-    // ns/ray attribution (plan Part C):
-    //  - DdgiUpdate  = DDGI_PROBE_COUNT * DDGI_UPDATE_RAYS rays.
-    //  - DeferredResolve = shaded-pixel count (ns/px; the SDF soft-shadow march is INCLUSIVE).
-    //  - CsmDepth / PunctualDepth = n/a (no clean ray count — depth-only passes).
-    const DDGI_UPDATE_RAYS: u32 = 64; // the showcase's I4 ray count (subset_n = 1 → one block/probe).
-    let ddgi_rays = (DDGI_PROBE_COUNT * DDGI_UPDATE_RAYS) as f64;
-    // The resolve dispatches one thread per composite pixel (the marcher's 1:1 grid).
-    let shaded_px = (COMPOSITE_W * COMPOSITE_H) as f64;
-
-    println!(
-        "engine_grand_showcase_512_gpu_pass_cost on: {} (kept {}/{} frames, GI ON — all four software-ray passes)",
-        ctx.device_name(),
-        kept.len(),
-        samples.len()
-    );
-    println!(
-        "  DDGI update rays = {DDGI_PROBE_COUNT} probes * {DDGI_UPDATE_RAYS} rays = {} rays; resolve shaded px = {}x{} = {}",
-        ddgi_rays as u64, COMPOSITE_W, COMPOSITE_H, shaded_px as u64
-    );
-    println!(
-        "  {:<16} {:>14} {:>14} {:>14} {:>16}",
-        "pass", "median_ns", "p95_ns", "stddev_ns", "per-ray/px"
-    );
-    for (p, name) in pass_names.iter().enumerate() {
-        let s = summaries[p];
-        let attribution = match p {
-            0 => format!("{:.3} ns/ray", s.median_ns / ddgi_rays),
-            1 => format!("{:.3} ns/px*", s.median_ns / shaded_px),
-            _ => "n/a".to_string(),
-        };
-        println!(
-            "  {:<16} {:>14.1} {:>14.1} {:>14.1} {:>16}",
-            name, s.median_ns, s.p95_ns, s.stddev_ns, attribution
-        );
-    }
-    println!(
-        "  * DeferredResolve ns/px is the WHOLE resolve dispatch, INCLUDING the inline SDF soft-shadow \
-         march (R0 brackets passes, not shader sections)."
-    );
-    println!(
-        "  NOTE: TOP/BOTTOM brackets each pass's wall-clock (inclusive of pipeline overlap), not \
-         isolated kernel time; the median/p95 are over {} kept frames.",
-        kept.len()
-    );
-}
-
-/// HW-RT rung R0 — the four-pass GPU-pass-cost timing test on the REAL combined showcase frame
-/// (`#[ignore]`, plan `docs/RENDER-R0-INSTRUMENT-PLAN.md` Part C).
-///
-/// Reuses `run_showcase_body_ddgi`'s GI-ON scene setup VERBATIM (so all four software-ray passes
-/// run: DDGI probe-update, deferred resolve incl. the inline SDF shadow march, CSM cascade depth,
-/// punctual atlas depth), threading a [`TimestampCollector`] so the recorder brackets each pass.
-/// Graceful-skip when the device cannot be timed (`!timestamps_usable()`). Reports per-pass
-/// GPU wall-clock (median / p95 / stddev, ns) + ns/ray attribution.
-///
-/// Named `..._gpu_pass_cost` (NOT `..._time_setup`): "cost"/"pass"/"baseline" are safe substrings;
-/// "time"/"update"/"setup"/"install"/"patch" trigger Windows os-error-740 (UAC) on the box.
-///
-/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1` +
-/// `--nocapture --test-threads=1` (the orchestrator runs it on the GPU).
-#[test]
-#[ignore = "GPU-timestamp pass-cost measurement; needs a real RTX windowed device (--nocapture --test-threads=1); the orchestrator runs it"]
-fn engine_grand_showcase_512_gpu_pass_cost() {
-    with_windowed_present("boyko_engine grand showcase GPU pass cost 512", "engine_showcase_512", |bp| {
-        // Graceful-skip BEFORE any resource setup: a device with no valid timestamp bits or an
-        // implausible period cannot be measured — print a skip line + return (no panic).
-        let caps = bp.ctx.device_caps();
-        if !caps.timestamps_usable() {
-            println!(
-                "SKIP engine_grand_showcase_512_gpu_pass_cost: GPU timestamps unusable \
-                 (valid_bits={}, period={} ns/tick)",
-                caps.timestamp_valid_bits, caps.timestamp_period
-            );
-            return;
-        }
-        println!(
-            "engine_grand_showcase_512_gpu_pass_cost: timestamps OK (valid_bits={}, period={} ns/tick, mask=0x{:x})",
-            caps.timestamp_valid_bits, caps.timestamp_period, caps.timestamp_mask()
-        );
-
-        // Create the R0 collector: one `2 * PASS_COUNT`-query TIMESTAMP pool per in-flight frame.
-        let device: &VulkanContext = bp.ctx;
-        let pools: [VulkanQueryPool; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
-            RhiDevice::create_query_pool(device, &QueryPoolDesc { count: 2 * PASS_COUNT })
-                .expect("timestamp query pool")
-        });
-        let collector = TimestampCollector::new(pools);
-
-        // Drive the GI-ON showcase with the collector — `run_showcase_body_ddgi` sets
-        // `scene.gpu_timing = Some(&collector)` and takes its timing branch (>= 200 frames,
-        // per-pass readback, stats print), leaving the BMP-dump path byte-identical when `None`.
-        // Its shared teardown waits the device idle before it returns, so the pools are safe to
-        // destroy below.
-        run_showcase_body_ddgi(bp, GRAND_SHOWCASE_DDGI_BMP, grand_showcase_config(), false, Some(&collector));
-
-        // SAFETY: `run_showcase_body_ddgi` dropped its `Renderer` (its `Drop` waits the device
-        // idle) before returning, so no submission references the pools; each pool was created on
-        // `device` and is destroyed exactly once (the by-value move out of the collector).
-        unsafe {
-            for pool in collector.into_pools() {
-                RhiDevice::destroy_query_pool(device, pool);
-            }
-        }
-    });
-}
-
-fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfig, interactive: bool) {
     let BootPresent { window, ctx, surface, mut swapchain, mut renderer, is_bgra, swap_color_format } =
         bp;
+
+    // Multi-paradigm render-path plan, rung R3: mirror the production gate -- CSM cascade depth
+    // + the punctual spot/point atlas depth are MESH-LEG-OWNED mesh-shadow producers (they
+    // rasterize MESH casters only; the SDF leg gets its shadows from the marcher's baked soft
+    // march). In production the gate is `boyko_render`'s
+    // `ResolvedRenderPath::mesh_shadow_producers()` (`== mesh_leg`), applied in the per-frame
+    // plan: `resolve_csm_cascades` / `resolve_shadow_atlas` publish DISABLED fits, so the host
+    // arms neither pass NOR either light-header bit. This hand-assembled fixture has no plan,
+    // so it applies the same predicate HERE, before ANY use of `cfg.csm`/`cfg.spot_atlas` in
+    // this fn -- including the light-header `with_csm_mode`/`with_punctual_shadow_mode` bits
+    // below, which would otherwise claim a shadow pass ran that this gate never records (the
+    // header/pass mismatch the production defect was). `declare_deferred_graph`'s
+    // `debug_assert!` checks this fixture. `Deferred × Both`/`Mesh` keep `mesh_leg == true` ⇒
+    // `.filter(|_| true)` is the identity ⇒ byte-identical to every pre-R3 showcase test.
+    let mesh_leg = resolved_render_path.mesh_leg;
+    let cfg = ShowcaseConfig {
+        csm: cfg.csm.filter(|_| mesh_leg),
+        spot_atlas: cfg.spot_atlas.filter(|_| mesh_leg),
+        ..cfg
+    };
 
     let device: &VulkanContext = ctx;
     let sdf = &cfg.sdf;
@@ -8988,6 +9499,11 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        // Textured-PBR T6a (the critic's C1 fix): the SOFTWARE-ONLY `gPbr` STORAGE image @19.
+        // `GBufferTargets::create` now allocates `gPbr` UNCONDITIONALLY (both feature legs) and
+        // `DeferredSets::build`'s software resolve-set loop appends it past the shared 19 —
+        // the layout MUST declare it too, or `create_bind_group`'s entry-count check trips (P1a).
+        BindGroupLayoutEntry { binding: 19, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -9080,10 +9596,40 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
     )
     .expect("Render P7 SSAO compute pipeline");
 
+    // Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully off): the
+    // `viewt_from_depth` compute pass (dedicated 2-binding set { SAMPLED depth @0, STORAGE
+    // `gViewT` @1 }). It reproduces the marcher's own mesh-depth → `gViewT` conversion for every
+    // pixel, standing in for the (undispatched) marcher on a mesh-only frame. Always created
+    // (harmless when unused — mirrors the SSAO pipeline above); `scene.viewt_from_depth` below is
+    // armed ONLY when `resolved_render_path` resolves `mesh_leg && !sdf_leg`.
+    let viewt_from_depth_entries = [
+        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+    ];
+    let viewt_from_depth_layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc { entries: &viewt_from_depth_entries },
+    )
+    .expect("viewt_from_depth bind-group layout");
+    let viewt_from_depth_cs = RhiDevice::create_shader_module(device, viewt_from_depth_spirv())
+        .expect("viewt_from_depth compute shader module");
+    let viewt_from_depth_pipeline = RhiDevice::create_compute_pipeline(
+        device,
+        &ComputePipelineDesc {
+            module: &viewt_from_depth_cs,
+            entry: c"main",
+            push_constant_bytes: boyko_rhi_vulkan::compute::VIEWT_FROM_DEPTH_PUSH_BYTES,
+            bind_group_layout: Some(&viewt_from_depth_layout),
+            spec_constants: &[],
+        },
+    )
+    .expect("viewt_from_depth compute pipeline");
+
     // The shader modules are consumed by pipeline creation; destroy them now.
     // SAFETY: every module was created on `ctx` above + is no longer needed once its pipeline
     // is created; each is destroyed exactly once.
     unsafe {
+        RhiDevice::destroy_shader_module(device, viewt_from_depth_cs);
         RhiDevice::destroy_shader_module(device, sample_fs);
         RhiDevice::destroy_shader_module(device, sample_vs);
         RhiDevice::destroy_shader_module(device, ssao_cs);
@@ -9175,6 +9721,10 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
                     base_instance: b.base_instance,
                     instance_count: b.instance_count,
                     casts_shadow: b.casts_shadow,
+                    // VG rung R2c: this fixture path carries no mesh bounds, so the cull keeps
+                    // every batch (UNBOUNDED corners survive every plane) — the conservative
+                    // fallback, not a special case.
+                    world_aabb: None,
                 })
                 .collect()
         })
@@ -9182,6 +9732,8 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
 
     let mvp = cfg.mvp;
     let mut scene = GBufferScene {
+        // Particles P0: disarmed in every windowed fixture — no ResId, no pass, no command.
+        particle: None,
         raster_pipeline: &raster_pipeline,
         vertex_buffer: &vertex_buffer,
         vertex_count: vertices.len() as u32,
@@ -9197,6 +9749,95 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
         camera_ring: &camera_ring,
+        // Multi-paradigm render-path plan, rung R4b-b: `None` — this fixture never resolves
+        // `RenderPath::Forward` (`GBufferScene::forward_pipeline`'s doc: `Option` exists so a
+        // non-Forward test can say so honestly instead of threading a semantically-wrong
+        // placeholder like `&raster_pipeline`/`&vocab_layout`).
+        forward_pipeline: None,
+        forward_sky_pipeline: None,
+        forward_layout0: None,
+        forward_layout1: None,
+        forward_instance_ring: None,
+        forward_instance_material_ring: None,
+        forward_prepass_pipeline: None,
+        // Multi-paradigm render-path plan, rung R-SDFFWD: `None` — this harness never resolves
+        // `sdf_forward_marched` (`GBufferScene::sdf_forward_march_pipeline`'s doc: `Option` exists
+        // so a non-Forward-SDF test can say so honestly instead of threading a
+        // semantically-wrong placeholder).
+        sdf_forward_march_pipeline: None,
+        sdf_forward_march_sdfonly_pipeline: None,
+        sdf_forward_march_viewt_pipeline: None,
+        sdf_forward_march_sdfonly_viewt_pipeline: None,
+        sdf_forward_march_layout: None,
+        vb_geo_pipeline: None,
+        vb_shade_split_pipeline: None,
+        vb_shade_split_tex_pipeline: None,
+        vb_geo_aux_layout: None,
+        vb_split_layout1: None,
+        ssao_vb_pipeline: None,
+        vb_ssao_layout: None,
+        // Rung R9d: `None` — this harness never resolves the VB hardware shadow chain (same
+        // "Option lets a non-armed fixture say so honestly" rationale as the VB fields above).
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_layout: None,
+        #[cfg(feature = "hwrt")]
+        vb_geo_mv_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_hwrt_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_tex_hwrt_pipeline: None,
+        brick_levels_ubo: None,
+        sdf_forward_view_z_a: 0.0,
+        sdf_forward_view_z_b: 0.0,
+        // Multi-paradigm render-path plan, rung R8: this harness never resolves
+        // `VisibilityBuffer` (it independently re-implements boot/scene assembly, `forward_mesh
+        // .rs`'s doc) — `None` for every VB field, the same "Option lets a non-VB fixture say so
+        // honestly" rationale as the Forward fields above.
+        vb_raster_pipeline: None,
+        vb_sky_pipeline: None,
+        vb_resolve_pipeline: None,
+        vb_classify_count_pipeline: None,
+        vb_classify_scan_pipeline: None,
+        vb_classify_scatter_pipeline: None,
+        vb_shade_pipeline: None,
+        sdf_mesh_shadow_pipeline: None,
+        sdf_mesh_shadow_layout0: None,
+        vb_sdf_mesh_mode: 0,
+        vb_layout0: None,
+        vb_instance_ring: None,
+        vb_indirect: None,
+        vb_cull_planes: None,
+        vb_batch_desc: None,
+        vb_cull_visible: None,
+        vb_cull_count: None,
+        // VG rung R2d-2: unread by this harness (never resolves VB, the same rationale as the VB
+        // fields above). `vb_visible_instance` is MANDATORY on a real boot but this fixture builds
+        // no VB Set-0 at all, and `vb_mesh_bounds` is armed only by a live `MeshGeometryTable`,
+        // which this fixture never creates.
+        vb_visible_instance: None,
+        vb_mesh_bounds: None,
+        vb_cull_readback: None,
+        vb_batch_cull_pipeline: None,
+        vb_cull_layout: None,
+        vb_geometry_set: None,
+        // VB-P2 classification plan, rung P2b: unread by this harness (never resolves VB, the
+        // same rationale as the VB fields above) — `0` is the `MaterialTable::new()` default.
+        vb_classify_material_count: 0,
+        // VB-P2 classification plan, rung P2c: unread by this harness (never resolves VB) —
+        // `false` (the fused `vb_resolve` default) is the honest value for a non-VB fixture.
+        vb_use_classified: false,
+        // Textured-PBR rung TV0: unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above).
+        vb_shade_tex_pipeline: None,
+        // VB-P1a ("dark infra"): unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above) — `None` since the froxel arm is never built.
+        vb_layout0_froxel: None,
+        vb_resolve_froxel_pipeline: None,
+        vb_shade_froxel_pipeline: None,
+        vb_shade_tex_froxel_pipeline: None,
+        vb_tex_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),
@@ -9220,8 +9861,10 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         light_staging: &light_staging,
         light_upload_bytes: light_table_bytes,
         light_dirty: false,
-        // L1 cluster cull OFF (NON-CLUSTERED): the frozen `cluster_cull.hlsl` drops a
-        // shadow-flagged punctual, so the multi-light SDF-shadow path runs on the flat-table
+        // DM1: this harness host-seeds its own material table; it never uploads one per frame.
+        material_upload: None,
+        // L1 cluster cull OFF (NON-CLUSTERED): a deliberate harness choice, not a cull-drop
+        // workaround — this showcase runs the multi-light SDF-shadow path on the flat-table
         // (non-clustered) resolve — exactly `p6_r1_multi_light_sdf_shadows_match_oracle`'s path.
         cluster_cull: None,
         cull_layout: None,
@@ -9230,6 +9873,7 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         light_index_alloc: None,
         cluster_cull_push: [0u8; 16],
         cluster_count: 0,
+        cluster_cull_hier: None,
         resolve_pipeline: &resolve_pipeline,
         resolve_layout: &resolve_layout,
         #[cfg(feature = "hwrt")]
@@ -9267,7 +9911,41 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         // pass + `ssao_mode == 0` (the byte-identical 0%-gate `_off` reference for the quality ladder).
         ssao: cfg
             .ssao_quality
-            .map(|_| SsaoActivation { pipeline: &ssao_pipeline, layout: &ssao_layout }),
+            .map(|_| SsaoActivation { pipeline: &ssao_pipeline, layout: &ssao_layout, atrous_levels: 0 }),
+        // The SSAO à-trous denoise chain's stable boot pipelines/layout — not wired by this
+        // harness (it never dispatches à-trous).
+        ssao_atrous_read8_pipeline: None,
+        ssao_atrous_interior_pipeline: None,
+        ssao_atrous_write8_pipeline: None,
+        ssao_atrous_layout: None,
+        // Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully off):
+        // armed exactly when the REAL boot-resolved legs are `GeometryLegs::Mesh` (`mesh_leg &&
+        // !sdf_leg`) — the marcher is not dispatched then, so this pass is the sole `gViewT`
+        // producer. `mesh_view_t_norm` mirrors the marcher's own `mesh_norm` selection for THIS
+        // harness's camera (`cfg.camera.camera_mode`, the SAME camera the marcher/resolve/SSAO
+        // read from the b5 UBO). `Deferred × Both`/`Sdf` keep this `None` (the marcher itself
+        // writes `gViewT`) — byte-identical to every pre-R3b showcase.
+        viewt_from_depth: (mesh_leg && !resolved_render_path.sdf_leg).then(|| ViewtFromDepthActivation {
+            pipeline: &viewt_from_depth_pipeline,
+            layout: &viewt_from_depth_layout,
+            mesh_view_t_norm: boyko_render::mesh_view_t_norm(cfg.camera.camera_mode),
+        }),
+        // TAA-under-VB: this harness only ever resolves `Deferred × {Both,Mesh,Sdf}` (never
+        // `VisibilityBuffer`), so the `viewt_from_depth_rz` producer stays `None` (the 0%-gate).
+        viewt_from_vb_depth: None,
+        // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit`
+        // directly, byte-identical to the pre-AA stream (the 0%-gate).
+        aa: None,
+        // AA Stage 2: OFF (the default) — NO SMAA pass recorded, byte-identical to the
+        // pre-AA stream (the 0%-gate).
+        smaa: None,
+        // AA Stage 3: OFF (the default) — NO SSAA pass recorded, `aa_out` stays sized to
+        // `present_extent` (native here), byte-identical to the pre-SSAA stream (the 0%-gate).
+        ssaa: None,
+        // AA Stage 4: OFF (the default) — NO TAA resolve pass recorded, `aa_out`/`taa_hist`
+        // stay unallocated, byte-identical to the pre-TAA stream (the 0%-gate).
+        taa: None,
+        rcas: None,
         // M3: when the config carried instanced meshes, pass A runs the batch loop — one
         // INSTANCED INDEXED draw per registered mesh, each at its `base_instance` bucket
         // (the `use_model_matrix == 1` arm — `cfg.mvp` set its byte 84). Every legacy scene
@@ -9337,8 +10015,9 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         // identical command stream). The INTERACTIVE branch below rebuilds `scene.interp =
         // Some(..)` per frame with the current-slot draw-SSBO set + this frame's overstep alpha.
         interp: None,
-        // HW-RT rung R0: GPU timing OFF (the golden/interactive showcase; byte-identical).
-        gpu_timing: None,
+        // VB-P1d: this harness never resolves `VisibilityBuffer` (byte-identical command stream).
+        gpu_zone: None,
+        vb_cmd_witness: None,
         // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
         #[cfg(feature = "hwrt")]
         tlas: None,
@@ -9362,6 +10041,11 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         raster_pipeline_mv: None,
         #[cfg(feature = "hwrt")]
         mv_bind_group: None,
+        // F8-mv: the combined MV+PM mesh path — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        raster_pipeline_mvpm: None,
+        #[cfg(feature = "hwrt")]
+        mvpm_bind_group: None,
         // Rung-3b step 5b: the SDF motion-vector VIS path — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         vis_mv_pipeline: None,
@@ -9372,6 +10056,54 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         // Rung-3b step 6: the temporal reproject layout — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         temporal_layout: None,
+        // Asset-streaming plan F8: PER_INSTANCE_MATERIAL is OFF in this low-level RHI harness
+        // (no ECS gather / material store exists here) — byte-identical to the pre-F8 stream.
+        pm_enabled: false,
+        raster_pipeline_pm: None,
+        pm_bind_group: None,
+        // Textured-PBR T6c: TEXTURED is OFF in this low-level RHI harness (no ECS gather /
+        // texture asset store exists here) — byte-identical to the pre-T6c stream.
+        tex_enabled: false,
+        raster_pipeline_tex: None,
+        tex_bind_group: None,
+        bindless_set: None,
+        // Multi-paradigm render-path plan, rung R3: threaded from this fn's own parameter --
+        // `run_showcase_dump` passes the byte-identity default (Deferred + Both, every
+        // derived flag off); `run_showcase_dump_with_render_path` forces the R3
+        // leg-disable goldens' `Deferred x Sdf` carrier.
+        resolved_render_path,
+        // VG R3 piece 1 step P1-2: no depth pyramid — the `HzbMode::Off` 0%-gate (see the sibling
+        // fixtures). `None` ⇒ no image, no per-mip views, no build passes ⇒ byte-identical.
+        hzb: None,
+        // VG R3 piece 1 step P1-4: and therefore no `hzb_build` layout/pipeline — see the sibling
+        // fixtures. The arm is ONE predicate, and it is `hzb`.
+        hzb_build_layout: None,
+        hzb_build_pipeline: None,
+        // VG R3 piece 1 step P1-6: the `BOYKO_HZB_DUMP` probe is unarmed here — no dump pass, no
+        // copy (see the sibling fixtures).
+        hzb_dump: None,
+        // VG R3 piece 2 step P2-3: no LATE indirect record array, no marked instance — see the
+        // sibling fixtures. `path_vb_occlusion_split()` is `false` here through `path_is_vb()`
+        // already, and since VG R3 piece 4 rung P4-4 through `vb_occlusion: None` (the OWNER half)
+        // before that — this harness boots no `World` and therefore no `OcclusionConfig`.
+        vb_indirect_late: None,
+        vb_occlusion_instances: 0,
+        vb_occlusion: None,
+        // VG R3 piece 3 step P3-2: the occlusion split's three buffers and its flag word.
+        // `None`/`0` for the SAME reason every VB field above is: this harness mints its own
+        // pipelines instead of booting `GpuSceneBundles` (which is what allocates these
+        // unconditionally in production), and it never resolves VB, so nothing here would
+        // bind them. `vb_occ_flags: 0` is the disarmed word — no bit set means the cull may
+        // defer nothing.
+        vb_late_visible: None,
+        vb_late_count: None,
+        vb_cull_uniform: None,
+        vb_occ_flags: 0,
+        // VG R3 piece 3 step P3-3: the engine frame index. `0` is the honest value for a harness
+        // that renders ONE frame per fixture rather than a stand-in — the counter it mirrors starts
+        // at 0 and this is that frame. Nothing here reads it: it reaches the device only through
+        // `VbCullUniform`, which is filled inside the `vb_batch_cull` arm this harness never takes.
+        engine_frame_index: 0,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -9497,6 +10229,8 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
             RhiDevice::destroy_bind_group_layout(device, present_layout);
             RhiDevice::destroy_compute_pipeline(device, ssao_pipeline);
             RhiDevice::destroy_bind_group_layout(device, ssao_layout);
+            RhiDevice::destroy_compute_pipeline(device, viewt_from_depth_pipeline);
+            RhiDevice::destroy_bind_group_layout(device, viewt_from_depth_layout);
             RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
             RhiDevice::destroy_bind_group_layout(device, resolve_layout);
             RhiDevice::destroy_compute_pipeline(device, marcher);
@@ -9561,7 +10295,9 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
             let presented = unsafe {
                 renderer.render_gbuffer_frame(
                     token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                    window.width(), window.height(), clear, present_extent, Some(&staging),
+                    window.width(), window.height(), clear, present_extent, present_extent, Some(&staging),
+                    None,
+                    None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
                 )
             }
             .unwrap_or_else(|e| panic!("showcase readback frame failed: {e:?}"));
@@ -9582,7 +10318,9 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
                     let _ = unsafe {
                         renderer.render_gbuffer_frame(
                             token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                            window.width(), window.height(), clear, present_extent, None,
+                            window.width(), window.height(), clear, present_extent, present_extent, None,
+                            None,
+                            None, // vb_record_probe (VG R3 P2-6): only gate G2's own frames ask for counts
                         )
                     }
                     .unwrap_or_else(|e| panic!("showcase drain frame failed: {e:?}"));
@@ -9659,6 +10397,8 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         RhiDevice::destroy_bind_group_layout(device, present_layout);
         RhiDevice::destroy_compute_pipeline(device, ssao_pipeline);
         RhiDevice::destroy_bind_group_layout(device, ssao_layout);
+        RhiDevice::destroy_compute_pipeline(device, viewt_from_depth_pipeline);
+        RhiDevice::destroy_bind_group_layout(device, viewt_from_depth_layout);
         RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
         RhiDevice::destroy_bind_group_layout(device, resolve_layout);
         RhiDevice::destroy_compute_pipeline(device, marcher);

@@ -14,6 +14,13 @@
 //! 103..=127 band below `MAX_COMPONENTS = 512` (no collision with the
 //! authoritative used-id survey).
 
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -374,10 +381,21 @@ mod property {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig { cases: 200, ..ProptestConfig::default() })]
+        // Under Miri, two cases of 16..48 ops: every op kind is drawn per op, and 200 interpreted
+        // cases ran past 16 min (MEASURED 2026-10-10).
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 2 } else { 200 },
+            // No failure file under Miri: proptest finds it through the cwd, which Miri's
+            // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+            #[cfg(miri)]
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
 
         #[test]
-        fn random_op_sequence_preserves_invariant(ops in proptest::collection::vec(op_strategy(), 0..80)) {
+        fn random_op_sequence_preserves_invariant(
+            ops in proptest::collection::vec(op_strategy(), if cfg!(miri) { 16..48 } else { 0..80 })
+        ) {
             register();
             let mut store = DenseStore::new(POS_ID, 256);
             // Mirror model: which entity ids are currently present.

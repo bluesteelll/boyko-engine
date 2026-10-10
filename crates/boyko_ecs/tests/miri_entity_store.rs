@@ -11,7 +11,7 @@
 //! Run:
 //! ```powershell
 //! $env:MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-ecs --test miri_entity_store
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_entity_store
 //! ```
 //! `-Zmiri-ignore-leaks` is required: `spawn_batch` routes through the
 //! command machinery whose bounded `Box::leak` (#53, triaged NOT-A-BUG in

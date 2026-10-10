@@ -1,0 +1,19 @@
+== ug15 tools
+tree         D:\wt\lighttable (HEAD c2756e8273211c19f1018fce2b975ee75ad5873a, 0 uncommitted path(s))
+target dir   D:/wt/_targets/vkval-msvc
+host         x86_64-pc-windows-msvc (msvc)
+rustc -vV    rustc 1.98.1 (48a229cea 2026-09-01)
+rustc -vV    binary: rustc
+rustc -vV    commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
+rustc -vV    commit-date: 2026-09-01
+rustc -vV    host: x86_64-pc-windows-msvc
+rustc -vV    release: 1.98.1
+rustc -vV    LLVM version: 22.1.8
+llvm-nm          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-nm.exe
+llvm-objdump     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-objdump.exe
+llvm-readobj     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-readobj.exe
+llvm-size        LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-size.exe
+llvm-ar          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-ar.exe
+llvm-symbolizer  LLVM version 21.0.0git [msvc build tools] C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\llvm-symbolizer.exe
+msvc symbolizers found: 1
+  [14, 44, 35207] C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\llvm-symbolizer.exe

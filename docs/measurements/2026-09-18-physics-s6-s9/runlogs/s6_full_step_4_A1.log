@@ -1,0 +1,12 @@
+Gnuplot not found, using plotters backend
+Benchmarking jolt_parity_pyramid/full_step/4
+Benchmarking jolt_parity_pyramid/full_step/4: Warming up for 3.0000 s
+
+Completed 511 iterations in 5429024700 nanoseconds, estimated execution time is 10624314.481409002 ns
+Benchmarking jolt_parity_pyramid/full_step/4: Collecting 20 samples in estimated 6.6933 s (630 iterations)
+Benchmarking jolt_parity_pyramid/full_step/4: Analyzing
+Criterion.rs DEBUG: Bootstrapping the absolute statistics. took 10.871 ms
+Criterion.rs DEBUG: Bootstrapped linear regression took 1.9201 ms
+jolt_parity_pyramid/full_step/4
+                        time:   [11.083 ms 11.303 ms 11.498 ms]
+

@@ -1,5 +1,11 @@
 //! The cross-frame warm-start impulse cache (P2 W3 — the C3 rebuild-each-frame
-//! flat table).
+//! flat table) of the reference [`SoftStepSolver`](super::SoftStepSolver).
+//!
+//! Since L11 C1 the colored solver keeps its own warm store — one record per
+//! manifold in stream order, found by a merge-join, in `solver/warm_records.rs` —
+//! and no longer probes or refills this table. The table stays as the reference
+//! solver's store and as the oracle the colored records are checked against
+//! (`colored_tests.rs`, `g2_records`).
 //!
 //! TGS-Soft is a velocity-level sequential-impulse solver: each frame it must
 //! re-converge every contact's accumulated impulse from a seed. Zero-seeding
@@ -22,6 +28,10 @@
 //!    FRESHLY-ZEROED `write` table, in deterministic manifold order;
 //! 3. swaps `read` ↔ `write` at frame end.
 //!
+//! The reference solver has no sleep path, so every entry it stores is a solved
+//! contact's. (The colored solver's B1 carry of a frozen island's impulses lives
+//! with its records, `warm_records.rs`.)
+//!
 //! Because the write table is a pure function of *this frame's* contact set
 //! (cleared then refilled in manifold order, no insertion history carried over),
 //! it is bit-deterministic regardless of the previous frame's occupancy — the
@@ -30,15 +40,22 @@
 //! history, breaking determinism); a contact that vanished last frame simply has
 //! no entry this frame.
 //!
-//! # Keying (the dense-row assumption, OQ-2)
+//! # Keying (row keys, translated across row moves)
 //!
-//! W3 keys on the dense [`BodyIndex`] row indices,
-//! which are stable frame-to-frame for a stable scene (no spawn/despawn between
-//! frames — the stacking case). A structural change reshuffles the dense rows,
-//! so the matched keys differ for one frame: that is a warm-start MISS (a
-//! one-frame convergence cost), never a determinism break or a soundness issue.
-//! Entity-id keying for robustness across structural changes is the architect's
-//! OQ-2 refinement, deliberately deferred past W3.
+//! W3 keys on the dense [`BodyIndex`] row indices. Rows are not stable: a despawn
+//! swap-removes, a spawn appends, and a component insert or remove migrates a body
+//! and shifts every later row. An untranslated row-keyed lookup after such a change
+//! is therefore a WRONG HIT, not a miss — it reads another body's impulses. On a resting
+//! cube, before lookups were translated, the moved cube left the next step 2.57e-5 m/s
+//! from the control run's velocity, 1.26e4× the control's resting noise (measured by
+//! `warm_start_survivor_moved_into_a_deleted_row_matches_control_velocity` in
+//! `tests/row_keyed_state_defect_a.rs`, whose failure message reports both). The
+//! solver translates each lookup through the gather's row identity map
+//! (`row_identity.rs`, interim; U7's `PairCache` replaces it): stored keys stay in
+//! current rows, and a lookup uses the
+//! rows the pair held when the table was written. A pair whose row order flipped, or
+//! that names a new body, misses for one step — never a determinism break or a
+//! soundness issue.
 //!
 //! # Capacity
 //!
@@ -48,7 +65,11 @@
 //! clears and (only if needed) grows the backing `Vec`, never allocating in the
 //! steady state (principle 5).
 
+use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
+use boyko_ecs::ecs::identifiers::primitives::ComponentId;
+
 use crate::manifold::{BodyIndex, SDF_SENTINEL};
+use crate::scratch_ids::{register_scratch_layouts, scratch_reserve_rows};
 
 /// The empty-slot sentinel key. A real packed key can never equal it: [`pack`]
 /// lays out `body_a:24 | body_b:24 | feature_id:16`, so `u64::MAX` would require
@@ -197,14 +218,22 @@ fn shift_for(len: usize) -> u32 {
 /// One side of the double buffer (the solver owns a `read` + a `write`). The
 /// backing `Vec` capacity is reused across frames; [`rebuild`](Self::rebuild)
 /// clears and resizes it (growing only when the contact count rises), so the
-/// steady state allocates nothing. Probing is a pure function of the key
-/// (Fibonacci-hashed linear probe), so a fixed key set lands in fixed slots
-/// regardless of insertion order — the determinism property.
-#[derive(Default)]
+/// steady state allocates nothing. The home slot is a pure function of the key
+/// (Fibonacci hash) and collisions are resolved by a linear probe, so two
+/// properties hold for a fixed set of DISTINCT keys: the value a lookup returns
+/// depends only on the key set, not on the insertion order, while the slot each
+/// key lands in depends on the insertion SEQUENCE (a colliding key takes the next
+/// free slot, which an earlier insert may have filled). Bit-identical slot
+/// contents therefore need a deterministic insertion sequence, which the solver's
+/// manifold-order store provides — the determinism property.
 pub struct WarmStartTable {
     /// The slots; length is always a power of two (`mask = len - 1`). Empty
-    /// slots carry the [`EMPTY`] sentinel key.
-    slots: Vec<WarmEntry>,
+    /// slots carry the [`EMPTY`] sentinel key. Backed by a [`ScratchColumn`]
+    /// (engine storage, address-stable) rather than a `std::Vec` side allocation
+    /// (audit Stage 4); each INSTANCE is built under its own reserved
+    /// [`ComponentId`], because two tables sharing one id would share a
+    /// `pool_base_stagger` and land slot `i` of both in the same L1/L2 set.
+    slots: ScratchColumn<WarmEntry>,
     /// `slots.len() - 1` — the power-of-two index mask for the probe.
     mask: usize,
     /// `64 - log2(len)` — the Fibonacci-hash right-shift, cached alongside `mask` so
@@ -213,12 +242,24 @@ pub struct WarmStartTable {
 }
 
 impl WarmStartTable {
-    /// Builds an empty table pre-sized for up to `contacts` contact points (no
-    /// later realloc until the contact count exceeds twice this).
-    pub fn with_capacity(contacts: usize) -> Self {
+    /// Builds an empty table pre-sized for up to `contacts` contact points,
+    /// backed by the kernel column registered under `id`.
+    ///
+    /// `id` must be this table instance's OWN reserved scratch id (see
+    /// [`warm_table_id`](crate::scratch_ids::warm_table_id)). Registers the
+    /// scratch layouts (idempotent) before creating the column.
+    pub fn with_capacity(id: ComponentId, contacts: usize) -> Self {
+        register_scratch_layouts();
         let len = next_pow2(2 * contacts.max(1));
+        // The reserve is a HARD ceiling for a `ScratchColumn`, and `rebuild` grows
+        // the table to `next_pow2(2 * contacts)` as the scene does, so the floor is
+        // the same budget every other scratch column gets rather than this frame's
+        // length.
+        let reserve = len.max(scratch_reserve_rows(size_of::<WarmEntry>()));
+        let mut slots = ScratchColumn::new(id, reserve);
+        slots.build_view().resize(len, WarmEntry::empty());
         Self {
-            slots: vec![WarmEntry::empty(); len],
+            slots,
             mask: len - 1,
             shift: shift_for(len),
         }
@@ -233,19 +274,39 @@ impl WarmStartTable {
     /// avoid churn), then fills every slot with the [`EMPTY`] sentinel. After
     /// this the table is empty and ready for in-manifold-order [`insert`s](Self::insert).
     pub fn rebuild(&mut self, contacts: usize) {
-        let len = next_pow2(2 * contacts.max(1));
-        if len > self.slots.len() {
-            // Grow to the new power-of-two length (reusing the allocation when
-            // the `Vec` already has the capacity).
-            self.slots.resize(len, WarmEntry::empty());
+        // Grow only, never shrink: the live length is the larger of what this frame
+        // needs and what the table already has.
+        let len = next_pow2(2 * contacts.max(1)).max(self.slots.len());
+        {
+            // `clear` + `resize` is the whole rebuild: it zeroes EVERY slot,
+            // including the slack past the needed length that `mask` still covers,
+            // and grows only (the `max` above is what keeps it from shrinking).
+            let mut view = self.slots.build_view();
+            view.clear();
+            view.resize(len, WarmEntry::empty());
         }
-        self.mask = self.slots.len() - 1;
-        self.shift = shift_for(self.slots.len());
-        // Zero every live slot (the whole buffer, including any slack past `len`
-        // — `mask` covers the full current length).
-        for slot in &mut self.slots {
-            *slot = WarmEntry::empty();
-        }
+        self.mask = len - 1;
+        self.shift = shift_for(len);
+    }
+
+    /// The table's slot count (a power of two). A table holding `n` entries is
+    /// within its design load `≤ 0.5` while `2 · n ≤ slot_len()`.
+    #[inline]
+    pub fn slot_len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Test hook: every slot, empty ones included, in slot order, so a gate can
+    /// compare two tables' layouts bit for bit.
+    #[cfg(test)]
+    pub fn raw_slots(&self) -> &[WarmEntry] {
+        self.slots.as_read_slice()
+    }
+
+    /// Test hook: the number of occupied (non-[`EMPTY`]) slots.
+    #[cfg(test)]
+    pub fn occupied(&self) -> usize {
+        self.slots.as_read_slice().iter().filter(|e| e.key != EMPTY).count()
     }
 
     /// The first probe slot for `key` — `(key · GOLDEN_64) >> shift`. The linear
@@ -270,8 +331,9 @@ impl WarmStartTable {
     /// Linear-probes from the `home` slot to the first empty slot (or an
     /// existing entry for the same key, which it overwrites). Because the table
     /// is freshly zeroed each frame and the caller inserts each live key exactly
-    /// once in a fixed order, the resulting occupancy is a pure function of the
-    /// key set — independent of any previous frame.
+    /// once in a fixed order, the resulting slot layout is a pure function of that
+    /// insertion sequence, independent of any previous frame's occupancy; the
+    /// value a lookup returns is a function of the key set alone.
     ///
     /// # Panics (debug only)
     ///
@@ -281,22 +343,27 @@ impl WarmStartTable {
     #[inline]
     pub fn insert(&mut self, key: u64, normal_impulse: f32, tangent_impulse: [f32; 2]) {
         debug_assert_ne!(key, EMPTY, "invariant: a real contact key cannot be EMPTY");
+        // The probe geometry goes into locals BEFORE the refill view is taken:
+        // `home` borrows all of `&self`, while the view holds `&mut self.slots`.
         let mut i = self.home(key);
+        let mask = self.mask;
+        let mut view = self.slots.build_view();
+        let slots = view.as_mut_slice();
         // Bounded by the table length: with load ≤ 0.5 an empty slot is always
         // found well within `len` probes. The `debug_assert` guards a sizing bug.
         let mut probes = 0usize;
         loop {
-            let slot = &mut self.slots[i];
+            let slot = &mut slots[i];
             if slot.key == EMPTY || slot.key == key {
                 slot.key = key;
                 slot.normal_impulse = normal_impulse;
                 slot.tangent_impulse = tangent_impulse;
                 return;
             }
-            i = (i + 1) & self.mask;
+            i = (i + 1) & mask;
             probes += 1;
             debug_assert!(
-                probes <= self.mask,
+                probes <= mask,
                 "invariant: warm-start table is full (load > 1); size it for load ≤ 0.5"
             );
         }
@@ -313,9 +380,10 @@ impl WarmStartTable {
     pub fn get(&self, key: u64) -> Option<WarmEntry> {
         debug_assert_ne!(key, EMPTY, "invariant: a real contact key cannot be EMPTY");
         let mut i = self.home(key);
+        let slots = self.slots.as_read_slice();
         let mut probes = 0usize;
         loop {
-            let slot = self.slots[i];
+            let slot = slots[i];
             if slot.key == key {
                 return Some(slot);
             }
@@ -341,7 +409,14 @@ mod tests {
     //! rebuild-each-frame zero, and the order-independence (determinism)
     //! property. Run native and under Miri (zero `unsafe` here).
 
+    // Test-oracle model: the std `HashSet` is the REFERENCE collision detector the
+    // hand-rolled `pack` / `pack_sdf` key packing is differentially verified against.
+    // Compiled out of every shipping build; the solver itself keys into its own
+    // open-addressed VM-native table.
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
+    use crate::scratch_ids::warm_table_id;
 
     #[test]
     fn pack_is_injective_for_distinct_pairs() {
@@ -435,7 +510,7 @@ mod tests {
 
     #[test]
     fn insert_get_round_trip() {
-        let mut t = WarmStartTable::with_capacity(8);
+        let mut t = WarmStartTable::with_capacity(warm_table_id(0), 8);
         t.rebuild(8);
         let key = pack(BodyIndex(3), BodyIndex(7), 0);
         t.insert(key, 1.25, [0.5, -0.25]);
@@ -446,7 +521,7 @@ mod tests {
 
     #[test]
     fn miss_returns_none() {
-        let mut t = WarmStartTable::with_capacity(8);
+        let mut t = WarmStartTable::with_capacity(warm_table_id(0), 8);
         t.rebuild(8);
         t.insert(pack(BodyIndex(0), BodyIndex(1), 0), 1.0, [0.0, 0.0]);
         // A key that was never inserted misses (→ zero seed).
@@ -456,14 +531,14 @@ mod tests {
     #[test]
     fn home_is_deterministic_for_a_key() {
         // The probe home slot is a pure function of the key + table length.
-        let t = WarmStartTable::with_capacity(16);
+        let t = WarmStartTable::with_capacity(warm_table_id(0), 16);
         let key = pack(BodyIndex(5), BodyIndex(9), 0);
         assert_eq!(t.home(key), t.home(key), "same key → same home slot");
     }
 
     #[test]
     fn rebuild_clears_previous_occupancy() {
-        let mut t = WarmStartTable::with_capacity(8);
+        let mut t = WarmStartTable::with_capacity(warm_table_id(0), 8);
         t.rebuild(8);
         let key = pack(BodyIndex(1), BodyIndex(2), 0);
         t.insert(key, 9.0, [1.0, 2.0]);
@@ -484,13 +559,13 @@ mod tests {
             (pack(BodyIndex(1), BodyIndex(9), 0), 4.0, [0.7, 0.8]),
         ];
 
-        let mut forward = WarmStartTable::with_capacity(keys.len());
+        let mut forward = WarmStartTable::with_capacity(warm_table_id(0), keys.len());
         forward.rebuild(keys.len());
         for &(k, n, t) in &keys {
             forward.insert(k, n, t);
         }
 
-        let mut reverse = WarmStartTable::with_capacity(keys.len());
+        let mut reverse = WarmStartTable::with_capacity(warm_table_id(1), keys.len());
         reverse.rebuild(keys.len());
         for &(k, n, t) in keys.iter().rev() {
             reverse.insert(k, n, t);
@@ -512,7 +587,7 @@ mod tests {
         // Fill the table to its design load (≤ 0.5) and confirm every insert +
         // lookup terminates (no infinite probe) and every key round-trips.
         let count = 64usize;
-        let mut t = WarmStartTable::with_capacity(count);
+        let mut t = WarmStartTable::with_capacity(warm_table_id(0), count);
         t.rebuild(count);
         for i in 0..count {
             let key = pack(BodyIndex(i as u32), BodyIndex((i + 1000) as u32), 0);
@@ -530,7 +605,7 @@ mod tests {
     #[test]
     fn overwrite_same_key_updates_value() {
         // Inserting the same key twice overwrites (last write wins), not duplicates.
-        let mut t = WarmStartTable::with_capacity(8);
+        let mut t = WarmStartTable::with_capacity(warm_table_id(0), 8);
         t.rebuild(8);
         let key = pack(BodyIndex(4), BodyIndex(6), 0);
         t.insert(key, 1.0, [0.0, 0.0]);

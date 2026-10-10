@@ -16,6 +16,13 @@
 
 #![allow(dead_code)]
 
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` / a `UiParseReport` out of the `Send + Sync` one-shot
+// system closure, and a file-static `Mutex<()>` serializes tests that arm a process-global
+// (the counting allocator, the watch-poll counters). Not engine code — the whole file is
+// compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -47,7 +54,7 @@ pub fn discover_ui_roots(world: &EcsMaster) -> Vec<Entity> {
 
 use boyko_ui::components::{
     ComputedClip, ComputedRect, ContentSize, StackIndex, UiAbsolute, UiAlign, UiLayout, UiName,
-    UiRoot, UiSpacing,
+    UiNineSlice, UiRoot, UiSpacing, UiSpriteAnim, UiSpriteSheet,
 };
 use boyko_ui::reload::tree_view::UiTreeView;
 use boyko_ui::text::{parse_ui, spawn_ui_tree};
@@ -98,6 +105,15 @@ fn presence_vector(world: &EcsMaster, e: Entity) -> Vec<(&'static str, bool)> {
         ("ComputedClip", world.has_component(e, ComputedClip::component_id())),
         ("UiRoot", world.has_component(e, UiRoot::component_id())),
         ("UiName", world.has_component(e, UiName::component_id())),
+        // UI-ADVANCED S6 — the sprite vocabulary. One of the TWO hand lists a new
+        // `.ui` component has to join; the other is `p6a_equivalence`'s local
+        // `pres!`/`valeq!`, and a name in one is not in the other. `UiSpriteCursor`
+        // is deliberately absent: it is not authorable, and the `on_add` hook puts
+        // it on BOTH sides alike, so it is not a divergence either comparator
+        // could report.
+        ("UiNineSlice", world.has_component(e, UiNineSlice::component_id())),
+        ("UiSpriteSheet", world.has_component(e, UiSpriteSheet::component_id())),
+        ("UiSpriteAnim", world.has_component(e, UiSpriteAnim::component_id())),
     ]
 }
 
@@ -131,6 +147,12 @@ fn assert_same_values(world: &EcsMaster, a: Entity, b: Entity, what: &str) {
     eqc!(StackIndex);
     eqc!(ComputedClip);
     eqc!(UiName);
+    // UI-ADVANCED S6 — the sprite vocabulary's VALUES. Presence alone is not
+    // enough: two nodes can both carry a `UiSpriteSheet` and disagree on which
+    // frame it names.
+    eqc!(UiNineSlice);
+    eqc!(UiSpriteSheet);
+    eqc!(UiSpriteAnim);
 }
 
 /// Reads a node's `UiName` string, if present.
@@ -220,12 +242,26 @@ impl TempUi {
         Self { path }
     }
 
-    /// Rewrites the file contents. The mtime advances; the watch settle needs the
-    /// SAME (mtime,size) twice, so the driver below sleeps past one interval and
-    /// ticks twice.
+    /// Rewrites the file contents.
+    ///
+    /// ⚠️ The mtime does NOT reliably advance: file timestamps are quantised (0.5-7.6 ms measured
+    /// on this box), so two writes inside one quantum share a stamp. Callers that need the change
+    /// to be OBSERVABLE must wait on [`file_signature`] rather than on a clock — see
+    /// [`ReloadWorld::reload`].
     pub fn write(&self, contents: &str) {
         std::fs::write(self.path, contents).expect("rewrite temp .ui");
     }
+}
+
+/// The file signature the hot-reload watch keys on: `(mtime, size)`. `None` if the file cannot be
+/// stat'd.
+///
+/// This mirrors `ui_hot_reload_system`'s own `read_signature` deliberately: a harness that waited
+/// on some OTHER property could report "the write landed" for a change the watch will never see,
+/// which is precisely the failure mode being fixed.
+pub fn file_signature(path: &str) -> Option<(std::time::SystemTime, u64)> {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
 }
 
 /// A hot-reload test world driven through the PUBLIC `UiPlugin` + `App` path
@@ -273,9 +309,39 @@ impl ReloadWorld {
     /// `pending`; tick 2 confirms the same `(mtime,size)` → reconciles (two-phase
     /// with a drain barrier, all inside the watch system).
     pub fn reload(&mut self, contents: &str) {
+        // ⚠️ WAIT FOR THE SIGNATURE TO MOVE — DO NOT GO BACK TO A FIXED SLEEP.
+        //
+        // `ui_hot_reload_system` early-returns whenever `(mtime, size)` equals what it stored, and
+        // MOST rewrites in these tests are SIZE-PRESERVING (`Px(40)` -> `Px(80)`, `#old` ->
+        // `#new`, two lines reordered). Detection therefore rests on the mtime alone — and file
+        // timestamps on this box were MEASURED quantised to 0.5-7.6 ms steps (400 back-to-back
+        // writes, 116 distinct stamps), with the Windows system tick able to coarsen to ~15.6 ms
+        // when the machine is otherwise quiet. A fixed `sleep(8 ms)` is a coin flip against that,
+        // and when it loses the watch never fires, the reload never happens, and the assertions
+        // fail with no trace of a timing cause. That is the intermittent
+        // "passes alone, fails under a full run" failure this harness used to produce.
+        //
+        // Waiting on the OBSERVED signature is immune to the quantum's size, and equally immune to
+        // a loaded box (which only makes the wait shorter). Re-writing inside the loop is what
+        // eventually advances the stamp when the content length cannot.
+        let before = file_signature(self.temp.path);
         self.temp.write(contents);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while file_signature(self.temp.path) == before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "invariant: the .ui rewrite must become observable to the watch — the (mtime, size) \
+                 signature of {} never moved in 2 s, so no poll interval could have detected it",
+                self.temp.path
+            );
+            std::thread::sleep(Duration::from_millis(1));
+            self.temp.write(contents);
+        }
+        // The signature has moved and is now stable (no further writes). The watch needs the SAME
+        // `(mtime, size)` observed across TWO polls to reconcile, and the plugin's interval is
+        // 1 ms, so a short real sleep between ticks lets the throttle clear.
         for _ in 0..4 {
-            std::thread::sleep(Duration::from_millis(8));
+            std::thread::sleep(Duration::from_millis(2));
             self.app.update();
         }
         self.refresh_roots();

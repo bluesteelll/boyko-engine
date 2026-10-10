@@ -1,5 +1,5 @@
 //! View wiring (S3): the conversion seam from the engine-derived
-//! [`ViewUniform`](boyko_scene::ViewUniform) to the backend-specific view forms.
+//! [`ViewUniform`] to the backend-specific view forms.
 //!
 //! Before S3 each backend hand-fed its own camera: the marcher's
 //! [`CompositePushConstants`] perspective basis (eye + orthonormal basis + FOV)
@@ -53,6 +53,147 @@ use boyko_scene::ViewUniform;
 
 use boyko_math::Mat4;
 
+use crate::taa_jitter::NdcJitter;
+
+/// TAA rung C1: the b5 camera-basis SHEAR — the marcher/resolve/SSAO/CSM/froxel-shared b5
+/// forward basis, perturbed so `generate_ray`'s (the marcher's) reconstructed ray samples the
+/// EXACT SAME final-NDC sub-pixel position the raster jitter
+/// (`crate::taa_jitter::NdcJitter`, `row0 += jx*row3; row1 += jy*row3` in
+/// [`marcher_view_proj_rows_jittered`]) already shifts to — lifting the C1 cut
+/// (`crate::taa_jitter`'s module doc) under
+/// [`JitterScope::RasterAndBasis`](crate::taa_config::JitterScope::RasterAndBasis). See
+/// `docs/TAA-PLAN.md` Decision 1 for the architecture-level derivation this fn implements.
+///
+/// # The shear (derivation)
+///
+/// `ray_gen.hlsli`'s PERSPECTIVE branch (`generate_ray`) computes
+/// `dir = fwd + right·(ndc_x·aspect·tan) + up·(ndc_y·tan)`. This is LINEAR in `(ndc_x, ndc_y)`,
+/// so for any constant offset `(dx, dy)`:
+///
+/// ```text
+/// dir(fwd, ndc + (dx, dy)) = dir(fwd, ndc) + right·(dx·aspect·tan) + up·(dy·tan)
+///                           = dir(fwd + right·(dx·aspect·tan) + up·(dy·tan), ndc)
+/// ```
+///
+/// i.e. shearing `fwd` by `right·(dx·aspect·tan) + up·(dy·tan)` is EXACTLY equivalent, in real
+/// arithmetic, to shifting `ray_gen.hlsli`'s own `ndc` by `(dx, dy)` (IEEE re-association gives
+/// a few-ULP difference in practice — see this module's tests for the measured bound).
+///
+/// `ray_gen.hlsli`'s `ndc_x` matches the raster's final NDC.x directly (both increase
+/// rightward, no flip: `NDC.x_raster = right·(P-eye)/(view_z·aspect·tan) == ndc_x_raygen`), but
+/// its `ndc_y` is the NEGATION of the raster's final NDC.y: Vulkan clip.y+ points down
+/// (`sy = -1/tan` in [`marcher_view_proj_rows_jittered`]), while `ray_gen.hlsli`'s own `ndc_y`
+/// flips AGAIN to keep "up" pointing up (`float ndc_y = -(...)`), so
+/// `NDC.y_raster == -ndc_y_raygen`. A raster shift of `(jx, jy)` — the SAME [`NdcJitter`] the
+/// raster consumers apply — therefore corresponds to a ray-gen-space shift of `(jx, -jy)`:
+///
+/// ```text
+/// fwd' = fwd + right * (jx * aspect * tan_half_fov) - up * (jy * tan_half_fov)
+/// ```
+///
+/// which is exactly `docs/TAA-PLAN.md` Decision 1's `fwd' = fwd + right·(2jx/w·aspect·tanHalfFov)
+/// + up·(-2jy/h·tanHalfFov)` — [`NdcJitter::jx`]/[`NdcJitter::jy`] already ARE `2jx/w`/`2jy/h`
+/// ([`crate::taa_jitter::ndc_jitter`]'s own formula).
+///
+/// # Structural zero (not an arithmetic identity)
+///
+/// `ndc_jitter == None` returns `view.cam_forward` completely UNTOUCHED — a structural skip, not
+/// a `+ right*0.0 - up*0.0` computation (which can flip a `-0.0` sign bit and byte-change the
+/// UBO — the SAME discipline [`crate::taa_jitter::ndc_jitter`]'s module doc documents for the
+/// raster jitter). `Some([0.0, 0.0])` is therefore NOT an equivalent substitute for `None`; a
+/// caller intending the OFF path must pass `None`. The host call site
+/// (`boyko_app::runner`) gates on `JitterScope::RasterAndBasis` AND the frame's TAA-armed state,
+/// producing `None` when either is false.
+///
+/// Only `.xyz` is sheared — `cam_forward.w` (`tan(fovY/2)`) and `cam_right.w` (`aspect`) are
+/// untouched (set by [`CompositePushConstants::perspective`] from `fov_y`/`w`/`h`, unrelated to
+/// the shear).
+#[inline]
+pub fn composite_perspective_from_view_sheared(
+    view: &ViewUniform,
+    w: u32,
+    h: u32,
+    ndc_jitter: Option<[f32; 2]>,
+) -> CompositePushConstants {
+    let eye = view.camera_pos;
+    let right = view.cam_right;
+    let up = view.cam_up;
+    let (fwd_x, fwd_y, fwd_z) = match ndc_jitter {
+        None => (view.cam_forward.x, view.cam_forward.y, view.cam_forward.z),
+        Some([jx, jy]) => {
+            let tan_half_fov = (view.fov_y * 0.5).tan();
+            // Extent-derived, matching every other bridge fn in this module -- NOT `view.aspect`.
+            let aspect = (w as f32) / (h as f32);
+            let sx = jx * aspect * tan_half_fov;
+            let sy = jy * tan_half_fov;
+            (
+                view.cam_forward.x + right.x * sx - up.x * sy,
+                view.cam_forward.y + right.y * sx - up.y * sy,
+                view.cam_forward.z + right.z * sx - up.z * sy,
+            )
+        }
+    };
+    CompositePushConstants::perspective(
+        [eye.x, eye.y, eye.z],
+        [fwd_x, fwd_y, fwd_z],
+        [right.x, right.y, right.z],
+        [up.x, up.y, up.z],
+        view.fov_y,
+        w,
+        h,
+    )
+}
+
+/// The ray-gen forward that makes `ray_gen.hlsli`'s `generate_ray` pass through the sub-pixel
+/// position the JITTERED raster sampled at every pixel — the HWRT resolve's `SHADOW_RASTER_FWD`
+/// (lane fix/hwrt-shadow-ray-origin; `boyko_render::upload::RayShadowFrame`).
+///
+/// # Derivation
+///
+/// [`marcher_view_proj_rows_jittered`] shifts the raster's final NDC by `+j` (`row0 += jx*row3;
+/// row1 += jy*row3`, `row2 == row3`), so the image moves by `+j` and pixel `q` holds the world
+/// point whose UNJITTERED raster NDC is `q - j`. `ray_gen.hlsli`'s `ndc_y` is the NEGATION of the
+/// raster's final NDC.y (the y-flip [`composite_perspective_from_view_sheared`]'s doc derives:
+/// `NDC.y_raster == -ndc_y_raygen`), so the ray that produced pixel `q`'s depth is the ray-gen
+/// ray through `(ndc_x - jx, ndc_y + jy)`. By the shear identity (linear in `ndc`) that is
+/// `dir(fwd_r, ndc)` with
+///
+/// ```text
+/// fwd_r = fwd - right * (jx * aspect * tan_half_fov) + up * (jy * tan_half_fov)
+/// ```
+///
+/// For a raster-owned Deferred pixel the depth is the Euclidean eye distance
+/// (`gbuffer_mrt.fs.hlsl`: `length(eye_rel) / 64`), so `eye + normalize(dir(fwd_r, ndc)) * gViewT`
+/// is the rasterised surface point up to the rasteriser's own sub-pixel snap and fp rounding —
+/// <= ~0.05 mm at 10 m / 512 px, >= 30x under the trace's 1.82 mm self-hit guard (bias + TMin) —
+/// the shadow-ray origin the HWRT resolve needs. Derived from the UNJITTERED `view` (never from the b5 push), so it is the same
+/// under `JitterScope::RasterOnly` and `RasterAndBasis`.
+///
+/// NOTE: this is NOT the sign [`composite_perspective_from_view_sheared`] applies (`+ right*sx
+/// - up*sy`): that shear points the b5 ray through raster-NDC `q + j`, the raster samples `q - j`
+/// — the two producers under `RasterAndBasis` sample sub-pixel positions `2j` apart. Pinned by
+/// `basis_shear_mirrors_the_raster_jitter_pinned_until_owner_ruling` below; resolving it is
+/// `docs/OPEN-QUESTIONS.md`'s D2 item (an owner decision — it moves two software goldens).
+///
+/// PERSPECTIVE-only (`fov_y > 0`, debug-asserted); `aspect` is extent-derived like every other
+/// bridge fn here. A `{0, 0}` jitter returns the unjittered forward up to an additive zero.
+#[inline]
+pub fn raster_ray_forward(view: &ViewUniform, w: u32, h: u32, jitter: NdcJitter) -> [f32; 3] {
+    debug_assert!(view.fov_y > 0.0, "invariant: the raster-ray forward is PERSPECTIVE-only (fov_y > 0)");
+    debug_assert!(w > 0 && h > 0, "invariant: the composite extent is non-zero");
+    let tan_half_fov = (view.fov_y * 0.5).tan();
+    // Extent-derived, matching every other bridge fn in this module -- NOT `view.aspect`.
+    let aspect = (w as f32) / (h as f32);
+    let sx = jitter.jx * aspect * tan_half_fov;
+    let sy = jitter.jy * tan_half_fov;
+    let (fwd, right, up) = (view.cam_forward, view.cam_right, view.cam_up);
+    [
+        fwd.x - right.x * sx + up.x * sy,
+        fwd.y - right.y * sx + up.y * sy,
+        fwd.z - right.z * sx + up.z * sy,
+    ]
+}
+
 /// Builds the marcher's PERSPECTIVE [`CompositePushConstants`] from a resolved
 /// [`ViewUniform`] and a `w × h` extent.
 ///
@@ -67,21 +208,40 @@ use boyko_math::Mat4;
 /// For the prior forward camera this is byte-identical to the old hand-fed
 /// `CompositePushConstants::perspective([0,0,3], [0,0,-1], [1,0,0], [0,1,0],
 /// FRAC_PI_3, w, h)`.
+///
+/// Delegates to [`composite_perspective_from_view_sheared`] with `ndc_jitter = None` — a
+/// structural skip (not an arithmetic identity), so this stays byte-identical to the
+/// pre-C1-lift formula. The single construction site both the sheared and unsheared
+/// PERSPECTIVE b5 pushes share (mirrors [`marcher_view_proj_rows`]/
+/// [`marcher_view_proj_rows_jittered`]'s shape).
 #[inline]
 pub fn composite_perspective_from_view(view: &ViewUniform, w: u32, h: u32) -> CompositePushConstants {
-    let eye = view.camera_pos;
-    let fwd = view.cam_forward;
-    let right = view.cam_right;
-    let up = view.cam_up;
-    CompositePushConstants::perspective(
-        [eye.x, eye.y, eye.z],
-        [fwd.x, fwd.y, fwd.z],
-        [right.x, right.y, right.z],
-        [up.x, up.y, up.z],
-        view.fov_y,
-        w,
-        h,
-    )
+    composite_perspective_from_view_sheared(view, w, h, None)
+}
+
+/// [`composite_from_view`] with an optional TAA rung-C1 b5 camera-basis shear — routes ORTHO vs
+/// PERSPECTIVE exactly as [`composite_from_view`] does; `ndc_jitter` is IGNORED on the ORTHO
+/// branch (TAA is perspective-only — `docs/TAA-PLAN.md`: "Ortho cameras cannot be sheared"), so
+/// an orthographic camera's push is identical regardless of the jitter argument. A perspective
+/// camera routes to [`composite_perspective_from_view_sheared`].
+#[inline]
+pub fn composite_from_view_sheared(
+    view: &ViewUniform,
+    w: u32,
+    h: u32,
+    ndc_jitter: Option<[f32; 2]>,
+) -> CompositePushConstants {
+    // `fov_y == 0.0` is the orthographic sentinel (perspective FOVs are > 0). The
+    // ORTHO fixture is camera-basis-free (the shader ignores it), so the frozen
+    // `ortho(w, h)` layout is emitted verbatim — the golden stays byte-exact,
+    // regardless of `ndc_jitter` (TAA is perspective-only).
+    if view.fov_y == 0.0 {
+        let pc = CompositePushConstants::ortho(w, h);
+        debug_assert_eq!(pc.camera_mode, CAM_MODE_ORTHO);
+        pc
+    } else {
+        composite_perspective_from_view_sheared(view, w, h, ndc_jitter)
+    }
 }
 
 /// Builds the marcher's [`CompositePushConstants`] from a resolved
@@ -93,18 +253,12 @@ pub fn composite_perspective_from_view(view: &ViewUniform, w: u32, h: u32) -> Co
 /// bit-frozen [`CompositePushConstants::ortho`] golden path so an ORTHO golden
 /// stays byte-exact. A perspective camera routes to
 /// [`composite_perspective_from_view`].
+///
+/// Delegates to [`composite_from_view_sheared`] with `ndc_jitter = None` — the structural skip,
+/// byte-identical to today.
 #[inline]
 pub fn composite_from_view(view: &ViewUniform, w: u32, h: u32) -> CompositePushConstants {
-    // `fov_y == 0.0` is the orthographic sentinel (perspective FOVs are > 0). The
-    // ORTHO fixture is camera-basis-free (the shader ignores it), so the frozen
-    // `ortho(w, h)` layout is emitted verbatim — the golden stays byte-exact.
-    if view.fov_y == 0.0 {
-        let pc = CompositePushConstants::ortho(w, h);
-        debug_assert_eq!(pc.camera_mode, CAM_MODE_ORTHO);
-        pc
-    } else {
-        composite_perspective_from_view(view, w, h)
-    }
+    composite_from_view_sheared(view, w, h, None)
 }
 
 /// The marcher-aligned proj·view matrix (ROW-MAJOR math rows) from a resolved
@@ -133,9 +287,33 @@ pub fn composite_from_view(view: &ViewUniform, w: u32, h: u32) -> CompositePushC
 ///   reconstruction — the static form of the motion-shadow class).
 ///
 /// PERSPECTIVE-only: an orthographic view (`fov_y == 0`) is debug-asserted out.
+///
+/// [`marcher_view_proj_rows`] is this function called with [`NdcJitter::default`] (the
+/// exact-zero offset) — the SINGLE construction site both the jittered and non-jittered raster
+/// projections share, so OFF byte-identity is provable (a zero jitter is an additive zero, not
+/// a separately-derived "unjittered" formula that could drift from this one).
+///
+/// # TAA raster-only jitter (C1)
+///
+/// `row2 == row3 == [fx, fy, fz, -tz]` (clip.z == clip.w — the perspective-divide row), so
+/// `row0 += jitter.jx * row3; row1 += jitter.jy * row3` is EXACT post-divide NDC jitter:
+/// dividing the perturbed `clip.xy` by the UNCHANGED `clip.w` shifts `ndc.xy` by exactly
+/// `jitter`. This is a purely host-side perturbation of a push-constant matrix — it does not
+/// touch the raster VS `.spv` or the frozen eDSL SDF marcher (the marcher stays UNjittered by
+/// DEFAULT in v1 — see [`crate::taa_jitter`]'s module docs for the C1 rationale: the b5 UBO
+/// `cam_forward` this bridge's `forward` lane feeds is shared, raw, with deferred PBR / SSAO /
+/// CSM / froxel view-z reconstruction, so perturbing it unconditionally would corrupt those).
+/// Rung C1 adds an OPT-IN sibling that DOES perturb that shared basis exactly, via a linear
+/// shear rather than the `+ jitter*row3` trick above — see
+/// [`composite_perspective_from_view_sheared`]'s doc.
 #[rustfmt::skip]
 #[inline]
-pub fn marcher_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[f32; 4]; 4] {
+pub fn marcher_view_proj_rows_jittered(
+    view: &ViewUniform,
+    width: u32,
+    height: u32,
+    jitter: NdcJitter,
+) -> [[f32; 4]; 4] {
     debug_assert!(
         view.fov_y > 0.0,
         "invariant: the marcher-aligned view-proj bridge is PERSPECTIVE-only (fov_y > 0)"
@@ -162,12 +340,203 @@ pub fn marcher_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[
     let (rx, ry, rz) = (right[0], right[1], right[2]);
     let (ux, uy, uz) = (up[0], up[1], up[2]);
     let (fx, fy, fz) = (forward[0], forward[1], forward[2]);
+    let row3 = [fx, fy, fz, -tz]; // clip.z == clip.w (perspective divide row)
     [
-        [sx * rx, sx * ry, sx * rz, sx * tx], // clip.x
-        [sy * ux, sy * uy, sy * uz, sy * ty], // clip.y (marcher y-flip)
-        [fx,      fy,      fz,      -tz],     // clip.z = forward·(P − eye)
-        [fx,      fy,      fz,      -tz],     // clip.w (perspective divide)
+        [
+            sx * rx + jitter.jx * row3[0],
+            sx * ry + jitter.jx * row3[1],
+            sx * rz + jitter.jx * row3[2],
+            sx * tx + jitter.jx * row3[3],
+        ], // clip.x, jittered
+        [
+            sy * ux + jitter.jy * row3[0],
+            sy * uy + jitter.jy * row3[1],
+            sy * uz + jitter.jy * row3[2],
+            sy * ty + jitter.jy * row3[3],
+        ], // clip.y (marcher y-flip), jittered
+        row3, // clip.z = forward·(P − eye)
+        row3, // clip.w (perspective divide) — UNCHANGED, so the jitter above is exact post-divide
     ]
+}
+
+/// PERSPECTIVE-only: an orthographic view (`fov_y == 0`) is debug-asserted out (delegates to
+/// [`marcher_view_proj_rows_jittered`]'s assert).
+///
+/// Delegates to [`marcher_view_proj_rows_jittered`] with [`NdcJitter::default`] — an exact
+/// `{0.0, 0.0}` offset, so `row0 += 0.0 * row3[k]` / `row1 += 0.0 * row3[k]` is an additive
+/// zero: byte-identical to the pre-TAA formula.
+#[inline]
+pub fn marcher_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[f32; 4]; 4] {
+    marcher_view_proj_rows_jittered(view, width, height, NdcJitter::default())
+}
+
+/// Multi-paradigm render-path plan, rung R4b (Forward render path v1, Decision 4): the FORWARD
+/// raster's REVERSE-Z projection — a row-major proj·view matrix in the SAME (right/up/forward)
+/// basis convention as [`marcher_view_proj_rows`] (identical clip.x/clip.y rows: extent-derived
+/// aspect, the marcher y-flip — screen x/y placement matches Deferred's raster exactly), but with
+/// a REAL depth row instead of Deferred's `clip.z == clip.w` convention (Deferred's raster FS
+/// overwrites `SV_Depth` with a custom-linear encode, so its vertex-shader clip.z is a throwaway
+/// `1.0` after the divide — see [`marcher_view_proj_rows_jittered`]'s doc). Forward's `depth`
+/// image is standard HARDWARE reverse-Z (no `SV_Depth` write, early-Z stays live), so the vertex
+/// shader's clip.z must carry a real, monotonic depth this time — this function is that encode's
+/// SINGLE construction site, kept separate from (and never touching) the Deferred one above.
+///
+/// # Reverse-Z depth encode
+///
+/// Standard Vulkan depth range `[0,1]`, REVERSED so `view_z == near` maps to `depth == 1` and
+/// `view_z == far` maps to `depth == 0` (the numerically superior float-depth distribution —
+/// precision concentrates near the camera, matching the eye's own float32 mantissa density).
+/// Solving `depth(view_z) = A + B / view_z` for the two anchor points:
+///
+/// ```text
+/// A + B/near = 1      A = -near / (far - near)
+/// A + B/far  = 0   =>  B =  near * far / (far - near)
+/// ```
+///
+/// Expressed against WORLD `P` (since `view_z = dot(forward, P) - tz` is itself the row-major dot
+/// `row3 · [P, 1]`), `clip.z`'s row is `A · row3 + [0, 0, 0, B]`. `clip.w` stays `row3` (`view_z`)
+/// — the SAME standard perspective-divide row [`marcher_view_proj_rows`] uses, unchanged. The
+/// matching pipeline state (Forward's boot-time depth-stencil state) is `VK_COMPARE_OP_GREATER`
+/// (a nearer fragment has a LARGER stored depth) with a `0.0` depth CLEAR (the "nothing drawn yet"
+/// sentinel — farther, in reverse-Z terms, than any real `depth ∈ (0, 1]`).
+///
+/// PERSPECTIVE-only (mirrors [`marcher_view_proj_rows`]'s `fov_y > 0` invariant); `view.near > 0.0`
+/// and `view.far > view.near` are debug-asserted (a degenerate frustum divides by zero in `A`/`B`
+/// above). `width`/`height` are the render EXTENT (not `ViewUniform::aspect`), matching every
+/// other bridge fn in this module (the extent-derived-aspect precedent — see
+/// [`gbuffer_push_from_view_jittered`]'s doc for why an authored aspect is deliberately not
+/// consulted).
+///
+/// Delegates to [`forward_view_proj_rows_jittered`] with [`NdcJitter::default`] — an exact
+/// `{0.0, 0.0}` offset, so `row0 += 0.0 * row3[k]` / `row1 += 0.0 * row3[k]` is an additive
+/// zero: byte-identical to the pre-TAA formula (the single-construction-site discipline
+/// [`marcher_view_proj_rows`] established).
+#[inline]
+pub fn forward_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[f32; 4]; 4] {
+    forward_view_proj_rows_jittered(view, width, height, NdcJitter::default())
+}
+
+/// TAA-under-VB: the jittered sibling of [`forward_view_proj_rows`], mirroring
+/// [`marcher_view_proj_rows_jittered`]'s `jitter.jx * row3` / `jitter.jy * row3` pattern —
+/// still EXACT post-divide NDC jitter here, because `row3` (the perspective-divide row) is
+/// byte-identical to the Deferred construction and stays UNCHANGED. Critically, `row2` (the
+/// reverse-Z depth encode) is also byte-UNTOUCHED: perturbing it would corrupt the hardware
+/// `GREATER` depth test and zero every `vb_id` write (the R8 lesson — a wrong z-row renders
+/// nothing, silently).
+#[rustfmt::skip]
+#[inline]
+pub fn forward_view_proj_rows_jittered(
+    view: &ViewUniform,
+    width: u32,
+    height: u32,
+    jitter: NdcJitter,
+) -> [[f32; 4]; 4] {
+    debug_assert!(
+        view.fov_y > 0.0,
+        "invariant: the forward reverse-Z projection is PERSPECTIVE-only (fov_y > 0)"
+    );
+    debug_assert!(width > 0 && height > 0, "invariant: the composite extent is non-zero");
+    debug_assert!(
+        view.near > 0.0 && view.far > view.near,
+        "invariant: a valid reverse-Z frustum needs 0 < near < far"
+    );
+
+    let eye = [view.camera_pos.x, view.camera_pos.y, view.camera_pos.z];
+    let forward = [view.cam_forward.x, view.cam_forward.y, view.cam_forward.z];
+    let right = [view.cam_right.x, view.cam_right.y, view.cam_right.z];
+    let up = [view.cam_up.x, view.cam_up.y, view.cam_up.z];
+    let tan = (view.fov_y * 0.5).tan();
+    // Extent-derived, matching `marcher_view_proj_rows` exactly — NOT `view.aspect`.
+    let aspect = (width as f32) / (height as f32);
+
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let tx = -dot(right, eye);
+    let ty = -dot(up, eye);
+    let tz = dot(forward, eye); // in-front view depth: view_z = forward·P − tz
+
+    let sx = 1.0 / (aspect * tan);
+    let sy = -1.0 / tan;
+    let (rx, ry, rz) = (right[0], right[1], right[2]);
+    let (ux, uy, uz) = (up[0], up[1], up[2]);
+    let (fx, fy, fz) = (forward[0], forward[1], forward[2]);
+    let row3 = [fx, fy, fz, -tz]; // clip.w = view_z = dot(forward, P) − tz
+
+    // Reverse-Z depth encode (this fn's doc): clip.z = A * view_z + B, expressed against `row3`.
+    let range = view.far - view.near;
+    let a = -view.near / range;
+    let b = view.near * view.far / range;
+    let row2 = [a * row3[0], a * row3[1], a * row3[2], a * row3[3] + b];
+
+    [
+        [
+            sx * rx + jitter.jx * row3[0],
+            sx * ry + jitter.jx * row3[1],
+            sx * rz + jitter.jx * row3[2],
+            sx * tx + jitter.jx * row3[3],
+        ], // clip.x, jittered (exact post-divide: row3 — the divide row — is unchanged)
+        [
+            sy * ux + jitter.jy * row3[0],
+            sy * uy + jitter.jy * row3[1],
+            sy * uz + jitter.jy * row3[2],
+            sy * ty + jitter.jy * row3[3],
+        ], // clip.y (marcher y-flip), jittered
+        row2, // clip.z (reverse-Z depth) — byte-UNTOUCHED (the R8 hard rule)
+        row3, // clip.w (perspective divide) — UNCHANGED, so the jitter above is exact
+    ]
+}
+
+/// Multi-paradigm render-path plan, rung R-SDFFWD (Decision 4's consumer half): inverts
+/// [`forward_view_proj_rows`]'s reverse-Z depth encode back to view-space depth
+/// (`view_z = dot(forward, P) − tz`, the SAME `view_z` that fn's `row3 · [P, 1]` computes before
+/// the perspective divide) from a SAMPLED `depth ∈ [0, 1]` (HW reverse-Z) and the SAME
+/// `near`/`far` the encode used.
+///
+/// # The exact inverse
+///
+/// [`forward_view_proj_rows`]'s doc derives `depth(view_z) = A + B / view_z` with
+/// `A = −near / (far − near)`, `B = near · far / (far − near)`. Solving for `view_z`:
+///
+/// ```text
+/// depth = A + B / view_z
+/// depth − A = B / view_z
+/// view_z = B / (depth − A)
+/// ```
+///
+/// `A < 0` (since `0 < near < far`) and `depth ≥ 0`, so `depth − A ≥ −A = near / (far − near) > 0`
+/// strictly — the divide never sees zero for any `depth` in the valid `[0, 1]` range (including
+/// the Forward `depth` CLEAR sentinel `0.0`, the "nothing drawn yet" background, which recovers
+/// `view_z == far` — the farthest a reconstructed pixel can be, so a background pixel never wins
+/// the SDF-forward-march ownership gate's `z_sdf < z_mesh_view` test by construction).
+///
+/// This is a DIFFERENT reconstruction from the deferred marcher's — Deferred's `depth` is
+/// custom-linear (`gbuffer_mrt.fs.hlsl`'s `MESH_DEPTH_T_MAX`/`GBUFFER_T_MAX`-normalized encode,
+/// read directly as a Euclidean `t`), while Forward/ForwardPlus write standard HARDWARE
+/// reverse-Z depth (Decision 4) — a pixel here must invert THIS encode, never the marcher's.
+///
+/// PERSPECTIVE-only (mirrors [`forward_view_proj_rows`]'s `near > 0`/`far > near` invariants,
+/// debug-asserted here identically since the caller reconstructs against the SAME frustum that
+/// wrote the sampled depth).
+#[inline]
+pub fn forward_view_z_from_depth(depth: f32, near: f32, far: f32) -> f32 {
+    debug_assert!(near > 0.0 && far > near, "invariant: a valid reverse-Z frustum needs 0 < near < far");
+    let range = far - near;
+    let a = -near / range;
+    let b = near * far / range;
+    b / (depth - a)
+}
+
+/// Multi-paradigm render-path plan, rung R-SDFFWD: precomputes [`forward_view_z_from_depth`]'s
+/// `A`/`B` reverse-Z decode coefficients (`A = -near/(far-near)`, `B = near*far/(far-near)`) for a
+/// host caller that needs to push them into a shader instead of calling that fn per-pixel — the
+/// `sdf_forward_march` compute pass's `SdfForwardMarchPush::has_mesh` contract
+/// (`boyko_rhi_vulkan::compute::SdfForwardMarchPush`): the shader reads `view_z = B / (depth -
+/// A)`, [`forward_view_z_from_depth`]'s own body, ported to HLSL so the pass needs no `near`/`far`
+/// fields of its own.
+#[inline]
+pub fn forward_view_z_coeffs(near: f32, far: f32) -> (f32, f32) {
+    debug_assert!(near > 0.0 && far > near, "invariant: a valid reverse-Z frustum needs 0 < near < far");
+    let range = far - near;
+    (-near / range, near * far / range)
 }
 
 /// Builds the 88-byte gbuffer-raster VERTEX push (`{ float4x4 view_proj; float4
@@ -212,18 +581,26 @@ pub fn marcher_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[
 /// PERSPECTIVE-only: an orthographic view (`fov_y == 0`) is debug-asserted out
 /// — the ortho raster path is tied to the frozen SDF fixture constants and is
 /// not a host bridge (v1 scope).
+///
+/// # TAA raster-only jitter (C1)
+///
+/// `jitter` flows straight into [`marcher_view_proj_rows_jittered`] — the ONLY perturbed lane
+/// is this 88-byte VERTEX push's leading `view_proj` (bytes 0..64); `cam_eye` and the trailing
+/// selectors are untouched. [`gbuffer_push_from_view`] delegates here with
+/// [`NdcJitter::default`] (byte-identical to the pre-TAA push).
 #[rustfmt::skip]
-pub fn gbuffer_push_from_view(
+pub fn gbuffer_push_from_view_jittered(
     view: &ViewUniform,
     width: u32,
     height: u32,
     instanced: bool,
+    jitter: NdcJitter,
 ) -> [u8; GBUFFER_PUSH_BYTES] {
     let eye = [view.camera_pos.x, view.camera_pos.y, view.camera_pos.z];
     // The marcher-aligned proj·view (ROW-MAJOR math rows) — the SINGLE source of
     // the raster projection convention, shared with the Rung-3b `MotionCam`
-    // (see `marcher_view_proj_rows`).
-    let pv = marcher_view_proj_rows(view, width, height);
+    // (see `marcher_view_proj_rows_jittered`).
+    let pv = marcher_view_proj_rows_jittered(view, width, height, jitter);
 
     let mut out = [0u8; GBUFFER_PUSH_BYTES];
     for col in 0..4 {
@@ -239,6 +616,84 @@ pub fn gbuffer_push_from_view(
     }
     // Trailing selectors: base_instance (@80) stays 0 (the recorder overwrites it
     // per batch); use_model_matrix (@84) selects the instanced VS arm.
+    if instanced {
+        out[84..88].copy_from_slice(&1u32.to_le_bytes());
+    }
+    out
+}
+
+/// Delegates to [`gbuffer_push_from_view_jittered`] with [`NdcJitter::default`] — an exact
+/// `{0.0, 0.0}` offset, so the emitted push is byte-identical to the pre-TAA formula (the
+/// single construction site both the jittered and non-jittered pushes share).
+#[inline]
+pub fn gbuffer_push_from_view(
+    view: &ViewUniform,
+    width: u32,
+    height: u32,
+    instanced: bool,
+) -> [u8; GBUFFER_PUSH_BYTES] {
+    gbuffer_push_from_view_jittered(view, width, height, instanced, NdcJitter::default())
+}
+
+/// Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh raster's 88-byte VERTEX
+/// push, built from [`forward_view_proj_rows`] (the reverse-Z projection) instead of
+/// [`marcher_view_proj_rows`] — the SAME byte layout [`gbuffer_push_from_view`] emits (`{
+/// float4x4 view_proj; float4 cam_eye; uint base_instance; uint use_model_matrix }`,
+/// [`GBUFFER_PUSH_BYTES`]), consumed by `forward_opaque.vs.hlsl` (byte-identical push contract
+/// to `gbuffer_mrt.vs.hlsl`'s, per that shader's doc — "ONLY the matrix CONTENT differs").
+///
+/// Delegates to [`forward_gbuffer_push_from_view_jittered`] with [`NdcJitter::default`] — an
+/// exact `{0.0, 0.0}` offset, byte-identical to the pre-TAA formula (the same
+/// single-construction-site shape [`gbuffer_push_from_view`] uses for the Deferred push).
+///
+/// PERSPECTIVE-only (delegates to [`forward_view_proj_rows`]'s `fov_y > 0` / `near`/`far`
+/// invariants — debug-asserted there). `boyko_app::runner` selects this fn instead of
+/// [`gbuffer_push_from_view`] at the SAME `mvp` assembly site, branching on the boot-committed
+/// `ResolvedRenderPath::path == RenderPath::Forward` (a cold, boot-resolved host-side branch —
+/// the two paths are mutually exclusive per boot, Decision 1).
+#[inline]
+pub fn forward_gbuffer_push_from_view(
+    view: &ViewUniform,
+    width: u32,
+    height: u32,
+    instanced: bool,
+) -> [u8; GBUFFER_PUSH_BYTES] {
+    forward_gbuffer_push_from_view_jittered(view, width, height, instanced, NdcJitter::default())
+}
+
+/// TAA-under-VB: the jittered sibling of [`forward_gbuffer_push_from_view`], mirroring
+/// [`gbuffer_push_from_view_jittered`] — the SAME 88-byte push layout, built from
+/// [`forward_view_proj_rows_jittered`] (rows 0/1 carry the exact post-divide NDC jitter; the
+/// reverse-Z `row2` and the divide `row3` stay byte-untouched). `vb_raster.vs` AND
+/// `vb_resolve`/`vb_shade` consume this SAME push (`pc.view_proj`), so the raster's sample
+/// position and the resolve's geometry reconstruction stay at the same sub-pixel offset by
+/// construction — no second injection site exists to drift.
+#[inline]
+pub fn forward_gbuffer_push_from_view_jittered(
+    view: &ViewUniform,
+    width: u32,
+    height: u32,
+    instanced: bool,
+    jitter: NdcJitter,
+) -> [u8; GBUFFER_PUSH_BYTES] {
+    let eye = [view.camera_pos.x, view.camera_pos.y, view.camera_pos.z];
+    let pv = forward_view_proj_rows_jittered(view, width, height, jitter);
+
+    let mut out = [0u8; GBUFFER_PUSH_BYTES];
+    for col in 0..4 {
+        for row in 0..4 {
+            let b = pv[row][col].to_le_bytes();
+            out[(col * 4 + row) * 4..(col * 4 + row) * 4 + 4].copy_from_slice(&b);
+        }
+    }
+    // cam_eye push lane (bytes 64..80): xyz = eye, w = 1.0 (perspective mode) — byte-identical
+    // shape to `gbuffer_push_from_view_jittered`'s.
+    let cam_eye = [eye[0], eye[1], eye[2], 1.0_f32];
+    for (i, f) in cam_eye.iter().enumerate() {
+        out[64 + i * 4..64 + i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+    }
+    // Trailing selectors: base_instance (@80) stays 0 (the recorder overwrites it per batch);
+    // use_model_matrix (@84) selects the instanced VS arm.
     if instanced {
         out[84..88].copy_from_slice(&1u32.to_le_bytes());
     }
@@ -341,6 +796,68 @@ mod tests {
         );
     }
 
+    /// TAA-under-VB MotionCam validity tripwire: rows 0/1/3 of the MARCHER projection
+    /// ([`marcher_view_proj_rows`], the MotionCam UBO's construction) must equal the FORWARD
+    /// reverse-Z projection's ([`forward_view_proj_rows`], what `vb_raster` rasterizes with) —
+    /// the TAA resolve's reprojection uses only clip x/y/w (`clip_to_uv`), so row-0/1/3
+    /// equality is exactly the condition under which the marcher-convention MotionCam
+    /// matrices are valid for VB-rasterized geometry. If a future edit ever splits these
+    /// constructions, this test fails LOUDLY instead of TAA acquiring a constant per-pixel
+    /// history-uv bias (the months-long-subtle-blur C2 class).
+    #[test]
+    fn marcher_and_forward_projections_agree_on_rows_0_1_3() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let m = marcher_view_proj_rows(&view, 640, 360);
+        let f = forward_view_proj_rows(&view, 640, 360);
+        for row in [0usize, 1, 3] {
+            assert_eq!(
+                m[row], f[row],
+                "marcher vs forward view-proj row {row} diverged — the MotionCam UBO is no \
+                 longer valid for VB TAA reprojection (see forward_view_proj_rows_jittered)"
+            );
+        }
+    }
+
+    /// TAA-under-VB zero-jitter identity: the jittered forward sibling with the exact-zero
+    /// [`NdcJitter::default`] is BYTE-identical to the unjittered formula, for both the raw
+    /// rows and the 88-byte push — the OFF-path byte-identity proof (the same discipline
+    /// [`marcher_view_proj_rows`]'s delegation established for Deferred).
+    #[test]
+    fn forward_jittered_siblings_are_byte_identical_at_zero_jitter() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        assert_eq!(
+            forward_view_proj_rows_jittered(&view, 512, 512, NdcJitter::default()),
+            forward_view_proj_rows(&view, 512, 512),
+        );
+        assert_eq!(
+            forward_gbuffer_push_from_view_jittered(&view, 512, 512, true, NdcJitter::default()),
+            forward_gbuffer_push_from_view(&view, 512, 512, true),
+        );
+    }
+
+    /// TAA-under-VB jitter shape: a non-zero jitter perturbs ONLY rows 0/1 of the forward
+    /// projection — `row2` (the reverse-Z depth encode) and `row3` (the perspective divide)
+    /// stay byte-untouched (the R8 hard rule: a perturbed z-row kills the `GREATER` depth
+    /// test and silently zeroes every `vb_id` write).
+    #[test]
+    fn forward_jitter_leaves_depth_and_divide_rows_untouched() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let base = forward_view_proj_rows(&view, 512, 512);
+        let jit = forward_view_proj_rows_jittered(
+            &view,
+            512,
+            512,
+            NdcJitter { jx: 0.25, jy: -0.125 },
+        );
+        assert_ne!(jit[0], base[0], "jx must perturb the clip.x row");
+        assert_ne!(jit[1], base[1], "jy must perturb the clip.y row");
+        assert_eq!(jit[2], base[2], "the reverse-Z depth row must stay byte-untouched (R8)");
+        assert_eq!(jit[3], base[3], "the perspective-divide row must stay byte-untouched");
+    }
+
     /// S3: an orthographic camera carries the `fov_y == 0.0` sentinel and routes
     /// [`composite_from_view`] to the bit-frozen ORTHO golden, byte-identical to
     /// [`CompositePushConstants::ortho`] — the ORTHO golden stays untouched.
@@ -409,5 +926,516 @@ mod tests {
     fn default_view_bridges_to_identity_matrix() {
         let cols = demo_view_proj_from_view(&ViewUniform::default());
         assert_eq!(cols, view_proj_columns(Mat4::IDENTITY));
+    }
+
+    /// TAA W2 (mandatory): [`marcher_view_proj_rows`] must be byte-identical to
+    /// [`marcher_view_proj_rows_jittered`] called with [`NdcJitter::default`] — the OFF
+    /// byte-identity proof (zero jitter = additive zero), checked at the bit level (`to_bits`)
+    /// so a `+0.0`/`-0.0` divergence would be caught, not masked by `==`'s zero-equivalence.
+    #[test]
+    fn marcher_view_proj_rows_matches_jittered_default() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let plain = marcher_view_proj_rows(&view, 640, 480);
+        let jittered_default =
+            marcher_view_proj_rows_jittered(&view, 640, 480, NdcJitter::default());
+        for row in 0..4 {
+            for col in 0..4 {
+                assert_eq!(
+                    plain[row][col].to_bits(),
+                    jittered_default[row][col].to_bits(),
+                    "row {row} col {col}: NdcJitter::default() must be an exact-zero delta"
+                );
+            }
+        }
+    }
+
+    /// TAA W2 (mandatory): a nonzero jitter DOES perturb the projection (guards against the
+    /// jittered fn silently ignoring `jitter`).
+    #[test]
+    fn marcher_view_proj_rows_jittered_perturbs_row0_row1_only() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let plain = marcher_view_proj_rows(&view, 640, 480);
+        let jitter = NdcJitter { jx: 0.01, jy: -0.02 };
+        let jittered = marcher_view_proj_rows_jittered(&view, 640, 480, jitter);
+        assert_ne!(plain[0], jittered[0], "row0 (clip.x) must be perturbed by jx");
+        assert_ne!(plain[1], jittered[1], "row1 (clip.y) must be perturbed by jy");
+        // row2/row3 (the perspective-divide row) stay UNCHANGED — the jitter is exact
+        // post-divide NDC jitter, not a re-derived projection.
+        assert_eq!(plain[2], jittered[2], "row2 (clip.z) must be untouched by raster jitter");
+        assert_eq!(plain[3], jittered[3], "row3 (clip.w) must be untouched by raster jitter");
+    }
+
+    /// TAA W2 (mandatory): [`gbuffer_push_from_view`] must be byte-identical to
+    /// [`gbuffer_push_from_view_jittered`] called with [`NdcJitter::default`].
+    #[test]
+    fn gbuffer_push_from_view_matches_jittered_default() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let plain = gbuffer_push_from_view(&view, 640, 480, true);
+        let jittered_default =
+            gbuffer_push_from_view_jittered(&view, 640, 480, true, NdcJitter::default());
+        assert_eq!(plain, jittered_default);
+    }
+
+    /// TAA W2: a nonzero jitter perturbs the emitted push's leading `view_proj` bytes (0..64)
+    /// but leaves `cam_eye` (64..80) and the trailing selectors (80..88) untouched.
+    #[test]
+    fn gbuffer_push_from_view_jittered_perturbs_only_view_proj_bytes() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let plain = gbuffer_push_from_view(&view, 640, 480, true);
+        let jitter = NdcJitter { jx: 0.01, jy: -0.02 };
+        let jittered = gbuffer_push_from_view_jittered(&view, 640, 480, true, jitter);
+        assert_ne!(&plain[0..64], &jittered[0..64], "the view_proj lane must be perturbed");
+        assert_eq!(&plain[64..88], &jittered[64..88], "cam_eye + selectors must be untouched");
+    }
+
+    // ---- rung R4b: `forward_view_proj_rows` (the Forward reverse-Z projection) -----------
+
+    /// Applies a row-major proj·view `m` (as returned by [`marcher_view_proj_rows`] /
+    /// [`forward_view_proj_rows`]) to a world point, returning `(ndc, clip_w)`.
+    fn apply_row_major(m: [[f32; 4]; 4], p: [f32; 3]) -> ([f32; 3], f32) {
+        let ph = [p[0], p[1], p[2], 1.0];
+        let clip: [f32; 4] = core::array::from_fn(|row| {
+            m[row][0] * ph[0] + m[row][1] * ph[1] + m[row][2] * ph[2] + m[row][3] * ph[3]
+        });
+        ([clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3]], clip[3])
+    }
+
+    /// The forward reverse-Z projection maps `view_z == near` to `depth == 1.0` and
+    /// `view_z == far` to `depth == 0.0` — the reversed Vulkan `[0,1]` depth range this fn's doc
+    /// derives, checked against two points on the camera's forward axis (`clip.w == view_z` by
+    /// construction, so placing a point at `eye + view_z * forward` gives an exact `view_z`).
+    #[test]
+    fn forward_view_proj_rows_reverse_z_depth_at_near_and_far() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let m = forward_view_proj_rows(&view, 640, 480);
+
+        let eye = view.camera_pos;
+        let fwd = view.cam_forward;
+        let near_point = [eye.x + fwd.x * view.near, eye.y + fwd.y * view.near, eye.z + fwd.z * view.near];
+        let far_point = [eye.x + fwd.x * view.far, eye.y + fwd.y * view.far, eye.z + fwd.z * view.far];
+
+        let (ndc_near, w_near) = apply_row_major(m, near_point);
+        let (ndc_far, w_far) = apply_row_major(m, far_point);
+
+        assert!((w_near - view.near).abs() <= 1e-4, "clip.w must equal view_z at the near point");
+        assert!((w_far - view.far).abs() <= 1e-2, "clip.w must equal view_z at the far point");
+        assert!((ndc_near[2] - 1.0).abs() <= 1e-4, "reverse-Z: near maps to depth 1.0, got {}", ndc_near[2]);
+        assert!(ndc_far[2].abs() <= 1e-4, "reverse-Z: far maps to depth 0.0, got {}", ndc_far[2]);
+    }
+
+    /// Depth is MONOTONIC DECREASING in `view_z` under reverse-Z (a nearer fragment has a
+    /// LARGER stored depth — the `VK_COMPARE_OP_GREATER` pipeline state this fn's doc pins).
+    #[test]
+    fn forward_view_proj_rows_reverse_z_is_monotonic_decreasing() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let m = forward_view_proj_rows(&view, 640, 480);
+        let eye = view.camera_pos;
+        let fwd = view.cam_forward;
+
+        let mut prev_depth = f32::INFINITY;
+        let steps = 8;
+        for i in 0..=steps {
+            let t = view.near + (view.far - view.near) * (i as f32 / steps as f32);
+            let p = [eye.x + fwd.x * t, eye.y + fwd.y * t, eye.z + fwd.z * t];
+            let (ndc, _) = apply_row_major(m, p);
+            assert!(ndc[2] <= prev_depth + 1e-6, "depth must not increase as view_z grows (t={t})");
+            prev_depth = ndc[2];
+        }
+    }
+
+    /// clip.x / clip.y (screen placement) and clip.w (the perspective-divide row) are IDENTICAL
+    /// to [`marcher_view_proj_rows`]'s — only clip.z (the depth row) differs. This is the
+    /// screen-alignment invariant Forward's raster needs to place geometry at the same pixels
+    /// Deferred would (Decision 4 changes ONLY the depth contract, never x/y).
+    #[test]
+    fn forward_view_proj_rows_shares_xy_and_w_rows_with_marcher() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let marcher = marcher_view_proj_rows(&view, 640, 480);
+        let forward_rz = forward_view_proj_rows(&view, 640, 480);
+
+        assert_eq!(forward_rz[0], marcher[0], "clip.x row must match Deferred's raster exactly");
+        assert_eq!(forward_rz[1], marcher[1], "clip.y row must match Deferred's raster exactly");
+        assert_eq!(forward_rz[3], marcher[3], "clip.w row must match Deferred's raster exactly");
+        assert_ne!(forward_rz[2], marcher[2], "clip.z (depth) must differ -- reverse-Z vs custom-linear");
+    }
+
+    // ---- rung R-SDFFWD: `forward_view_z_from_depth` (the SDF-forward-march ownership gate's
+    // ---- view-Z reconstruction) round-trips against `forward_view_proj_rows`'s own encode -----
+
+    /// Round-trip: for a point at `eye + t * forward` (so `view_z == t` exactly, by
+    /// [`forward_view_proj_rows`]'s `clip.w == view_z` construction), encoding through the real
+    /// GPU-bound matrix and dividing by `clip.w` reproduces the depth a fragment shader would
+    /// sample; [`forward_view_z_from_depth`] must recover the ORIGINAL `t` from that depth alone
+    /// (plus `near`/`far`) -- proving the inverse is the exact algebraic mirror of the encode this
+    /// module's own construction site emits, not an independently-derived approximation.
+    #[test]
+    fn forward_view_z_from_depth_round_trips_forward_view_proj_rows() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let m = forward_view_proj_rows(&view, 640, 480);
+        let eye = view.camera_pos;
+        let fwd = view.cam_forward;
+
+        let steps = 16;
+        for i in 0..=steps {
+            let t = view.near + (view.far - view.near) * (i as f32 / steps as f32);
+            let p = [eye.x + fwd.x * t, eye.y + fwd.y * t, eye.z + fwd.z * t];
+            let (ndc, clip_w) = apply_row_major(m, p);
+            assert!((clip_w - t).abs() <= 1e-2, "clip.w must equal view_z == t at t={t}, got {clip_w}");
+
+            let recovered = forward_view_z_from_depth(ndc[2], view.near, view.far);
+            let tol = t.abs() * 1e-3 + 1e-3;
+            assert!(
+                (recovered - t).abs() <= tol,
+                "round-trip failed at t={t}: depth={}, recovered={recovered}",
+                ndc[2]
+            );
+        }
+    }
+
+    /// The two anchor points [`forward_view_proj_rows_reverse_z_depth_at_near_and_far`] pins
+    /// (`depth(near) == 1.0`, `depth(far) == 0.0`) must invert back to `near`/`far` exactly --
+    /// the closed-form check that does not depend on marching the matrix at all.
+    #[test]
+    fn forward_view_z_from_depth_recovers_near_and_far_anchors() {
+        let near = 0.1_f32;
+        let far = 100.0_f32;
+        assert!(
+            (forward_view_z_from_depth(1.0, near, far) - near).abs() <= 1e-4,
+            "depth == 1.0 (reverse-Z near sentinel) must recover view_z == near"
+        );
+        assert!(
+            (forward_view_z_from_depth(0.0, near, far) - far).abs() <= 1e-2,
+            "depth == 0.0 (reverse-Z far sentinel, ALSO the FORWARD_DEPTH_CLEAR background) \
+             must recover view_z == far"
+        );
+    }
+
+    // ---- TAA rung C1: `composite_perspective_from_view_sheared` (the b5 camera-basis shear) --
+
+    /// TAA W2-mirroring OFF-gate: [`composite_perspective_from_view`] must be byte-identical
+    /// (bit-level, `to_bits`) to [`composite_perspective_from_view_sheared`] called with `None`
+    /// -- the structural-skip proof (a computed `-0.0` sign flip would be caught here, not
+    /// masked by `==`'s zero-equivalence).
+    #[test]
+    fn composite_perspective_from_view_sheared_none_matches_unsheared() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let plain = composite_perspective_from_view(&view, 640, 480);
+        let sheared_none = composite_perspective_from_view_sheared(&view, 640, 480, None);
+        assert_eq!(plain.count, sheared_none.count);
+        assert_eq!(plain.img_w, sheared_none.img_w);
+        assert_eq!(plain.img_h, sheared_none.img_h);
+        assert_eq!(plain.camera_mode, sheared_none.camera_mode);
+        for i in 0..4 {
+            assert_eq!(plain.cam_eye[i].to_bits(), sheared_none.cam_eye[i].to_bits());
+            assert_eq!(plain.cam_forward[i].to_bits(), sheared_none.cam_forward[i].to_bits());
+            assert_eq!(plain.cam_right[i].to_bits(), sheared_none.cam_right[i].to_bits());
+            assert_eq!(plain.cam_up[i].to_bits(), sheared_none.cam_up[i].to_bits());
+        }
+    }
+
+    /// A nonzero shear perturbs ONLY `cam_forward.xyz` -- `cam_forward.w` (`tan(fovY/2)`),
+    /// `cam_eye`, `cam_right`, `cam_up`, and the scalar header fields are all untouched (the
+    /// shear is a pure basis perturbation, not a re-derivation of the whole push). Uses the
+    /// YAWED (non-axis-aligned) camera fixture -- the axis-aligned `forward_perspective_camera`
+    /// has `right.z == up.z == 0`, so `forward.z` is legitimately UNPERTURBED for that fixture
+    /// (the shear only adds multiples of `right`/`up`); a genuinely oblique basis is needed to
+    /// exercise all three components.
+    #[test]
+    fn composite_perspective_from_view_sheared_perturbs_only_cam_forward_xyz() {
+        let (global, projection) = yawed_perspective_camera(0.7, FRAC_PI_3);
+        let view = ViewUniform::from_camera(global, projection);
+        let plain = composite_perspective_from_view(&view, 640, 480);
+        let sheared = composite_perspective_from_view_sheared(&view, 640, 480, Some([0.01, -0.02]));
+
+        assert_ne!(plain.cam_forward[0], sheared.cam_forward[0], "forward.x must be perturbed");
+        assert_ne!(plain.cam_forward[1], sheared.cam_forward[1], "forward.y must be perturbed");
+        assert_ne!(plain.cam_forward[2], sheared.cam_forward[2], "forward.z must be perturbed");
+        assert_eq!(plain.cam_forward[3], sheared.cam_forward[3], "tan(fovY/2) must be untouched");
+        assert_eq!(plain.cam_eye, sheared.cam_eye, "cam_eye must be untouched");
+        assert_eq!(plain.cam_right, sheared.cam_right, "cam_right (incl. aspect) must be untouched");
+        assert_eq!(plain.cam_up, sheared.cam_up, "cam_up must be untouched");
+        assert_eq!(plain.count, sheared.count);
+        assert_eq!(plain.img_w, sheared.img_w);
+        assert_eq!(plain.img_h, sheared.img_h);
+        assert_eq!(plain.camera_mode, sheared.camera_mode);
+    }
+
+    /// TAA is perspective-only (`docs/TAA-PLAN.md`: "Ortho cameras cannot be sheared"):
+    /// [`composite_from_view_sheared`] on an orthographic view emits the SAME bit-frozen
+    /// `CompositePushConstants::ortho` golden regardless of the jitter argument.
+    #[test]
+    fn composite_from_view_sheared_ortho_ignores_jitter() {
+        let view = ViewUniform::from_camera(
+            Affine3A::IDENTITY,
+            Projection::Orthographic { half_height: 1.0, aspect: 1.0, near: 0.0, far: 100.0 },
+        );
+        let none = composite_from_view_sheared(&view, 64, 64, None);
+        let some = composite_from_view_sheared(&view, 64, 64, Some([0.3, -0.4]));
+        assert_eq!(none, some);
+        assert_eq!(none, CompositePushConstants::ortho(64, 64));
+    }
+
+    // ---- Gate 1: a CPU mirror of `ray_gen.hlsli`'s PERSPECTIVE branch, asserting the shear
+    // ---- identity `dir(fwd', ndc) == dir(fwd, ndc + delta)` (first-order exact; a few-ULP
+    // ---- IEEE re-association error, NOT bit-identity -- see the derivation in
+    // ---- `composite_perspective_from_view_sheared`'s doc). ------------------------------------
+
+    /// A bit-faithful Rust mirror of `ray_gen.hlsli`'s PERSPECTIVE `generate_ray` DIRECTION
+    /// (the shear never touches the ORIGIN, which is just `cam_eye`): `dir = fwd +
+    /// right*(ndc_x*aspect*tan) + up*(ndc_y*tan)`, normalized. Plain component-wise IEEE ops,
+    /// same operation ORDER as the shader (`ray_gen.hlsli:63-65`) -- mirrors that file's own
+    /// "no rsqrt/fast-math" determinism discipline.
+    fn ray_gen_dir_mirror(
+        fwd: [f32; 3],
+        right: [f32; 3],
+        up: [f32; 3],
+        ndc_x: f32,
+        ndc_y: f32,
+        aspect: f32,
+        tan_half_fov: f32,
+    ) -> [f32; 3] {
+        let sx = ndc_x * aspect * tan_half_fov;
+        let sy = ndc_y * tan_half_fov;
+        let d = [
+            fwd[0] + right[0] * sx + up[0] * sy,
+            fwd[1] + right[1] * sx + up[1] * sy,
+            fwd[2] + right[2] * sx + up[2] * sy,
+        ];
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        [d[0] / len, d[1] / len, d[2] / len]
+    }
+
+    /// `ray_gen.hlsli:59-60`'s pixel-to-NDC map (PERSPECTIVE branch), reproduced verbatim.
+    fn pixel_to_ndc(px: u32, py: u32, w: u32, h: u32) -> (f32, f32) {
+        let ndc_x = ((px as f32 + 0.5) / w as f32) * 2.0 - 1.0;
+        let ndc_y = -(((py as f32 + 0.5) / h as f32) * 2.0 - 1.0);
+        (ndc_x, ndc_y)
+    }
+
+    /// A rotated (non-axis-aligned) perspective camera -- a yaw around world-Y by `theta`
+    /// radians -- so Gate 1 exercises a genuinely oblique orthonormal basis, not just the
+    /// axis-aligned fixture every other test in this module uses.
+    fn yawed_perspective_camera(theta: f32, fov_y: f32) -> (Affine3A, Projection) {
+        let (s, c) = theta.sin_cos();
+        // Row-major world = R * local (see `Mat3::from_columns`'s doc: `mul_vec(e_x) == column
+        // 0`), a standard right-handed rotation about +Y.
+        let matrix3 = Mat3::from_rows(
+            Vec3::new(c, 0.0, s),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-s, 0.0, c),
+        );
+        let global = Affine3A { matrix3, translation: Vec3::new(1.5, -0.5, 2.0) };
+        let projection = Projection::Perspective { fov_y, aspect: 1.0, near: 0.1, far: 100.0 };
+        (global, projection)
+    }
+
+    /// Gate 1 (the strongest gate; host-only, no GPU): asserts the shear identity
+    /// `normalize(dir(fwd', ndc_p)) ~= normalize(dir(fwd, ndc_p + (jx, -jy)))` for a spread of
+    /// pixels x jitters x aspects x FOVs x camera orientations, via the REAL shipped
+    /// [`composite_perspective_from_view_sheared`] (not a re-implementation of the shear).
+    ///
+    /// # Tolerance
+    ///
+    /// The identity is EXACT in real arithmetic (see that fn's doc derivation) but NOT
+    /// bit-exact in IEEE: `(fwd + right*dx*a*t) + right*(ndc_x*a*t)` (the sheared-basis path)
+    /// and `fwd + right*((ndc_x+dx)*a*t)` (the shifted-ndc path) differ by float
+    /// re-association -- a few-ULP-scale error on EACH of the 3 components going into
+    /// `normalize`, not an exact match. `TOL = 1e-5` (absolute, on unit-length normalized
+    /// components) is chosen as ~1e2 ULP of f32 (`f32::EPSILON ~= 1.19e-7`) -- generous enough
+    /// to absorb the sqrt/div in `normalize` and the widest FOV/aspect cases below, while still
+    /// being far tighter than any perceptible (sub-ULP-of-a-pixel) visual error. MEASURED worst
+    /// case across this exact sweep (all pixels/jitters/extents/FOVs/yaws below):
+    /// `max_err == 1.1920929e-7` -- EXACTLY 1 ULP of `f32::EPSILON`, ~84x tighter than `TOL`. On
+    /// any regression the panic message reports the actual measured value.
+    #[test]
+    fn sheared_b5_forward_matches_shifted_ndc_ray_gen_within_tolerance() {
+        const TOL: f32 = 1e-5;
+        let mut max_err = 0.0_f32;
+
+        let jitters = [[0.0_f32, 0.0_f32], [0.001, -0.0015], [0.01, 0.02], [-0.03, 0.015], [0.02, -0.02]];
+        let extents = [(640_u32, 480_u32), (1920, 1080), (256, 1024), (64, 64)];
+        let fovs = [0.35_f32, core::f32::consts::FRAC_PI_3, 1.9]; // ~20deg / 60deg / ~109deg
+        let yaws = [0.0_f32, 0.7, -1.2];
+
+        for &yaw in &yaws {
+            for &fov_y in &fovs {
+                let (global, projection) = yawed_perspective_camera(yaw, fov_y);
+                let view = ViewUniform::from_camera(global, projection);
+                let tan_half_fov = (fov_y * 0.5).tan();
+
+                for &(w, h) in &extents {
+                    let aspect = w as f32 / h as f32;
+                    for &[jx, jy] in &jitters {
+                        let pc = composite_perspective_from_view_sheared(&view, w, h, Some([jx, jy]));
+                        let sheared_fwd = [pc.cam_forward[0], pc.cam_forward[1], pc.cam_forward[2]];
+                        let right = [pc.cam_right[0], pc.cam_right[1], pc.cam_right[2]];
+                        let up = [pc.cam_up[0], pc.cam_up[1], pc.cam_up[2]];
+                        let unsheared_fwd = [view.cam_forward.x, view.cam_forward.y, view.cam_forward.z];
+
+                        // A spread of pixels across the frame (corners + center + off-center).
+                        let pixels = [
+                            (0, 0),
+                            (w - 1, 0),
+                            (0, h - 1),
+                            (w - 1, h - 1),
+                            (w / 2, h / 2),
+                            (w / 4, 3 * h / 4),
+                        ];
+                        for &(px, py) in &pixels {
+                            let (ndc_x, ndc_y) = pixel_to_ndc(px, py, w, h);
+
+                            let dir_sheared = ray_gen_dir_mirror(
+                                sheared_fwd, right, up, ndc_x, ndc_y, aspect, tan_half_fov,
+                            );
+                            // Delta-ndc-y sign flip -- see `composite_perspective_from_view_sheared`'s
+                            // doc: a raster/NdcJitter shift of `(jx, jy)` is a ray-gen-space shift of
+                            // `(jx, -jy)`.
+                            let dir_shifted = ray_gen_dir_mirror(
+                                unsheared_fwd, right, up, ndc_x + jx, ndc_y - jy, aspect, tan_half_fov,
+                            );
+
+                            for k in 0..3 {
+                                let err = (dir_sheared[k] - dir_shifted[k]).abs();
+                                max_err = max_err.max(err);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            max_err <= TOL,
+            "Gate 1: sheared-basis vs shifted-ndc ray direction diverges by {max_err} (> TOL {TOL}) \
+             across the pixel/jitter/aspect/FOV/orientation sweep"
+        );
+        // A non-negative finite measurement -- guards against a vacuous sweep (e.g. every case
+        // skipped) silently passing at `max_err == 0.0`.
+        assert!(max_err.is_finite());
+    }
+
+    // ---- Lane fix/hwrt-shadow-ray-origin: `raster_ray_forward` (Gate 1b) + the D2 pin. -------
+
+    /// The Gate 1 sweep (yaws x FOVs x extents x jitters x pixels) with the jitters in NDC
+    /// units, as `NdcJitter`.
+    fn gate1_sweep() -> impl Iterator<Item = (ViewUniform, u32, u32, NdcJitter)> {
+        let jitters = [[0.0_f32, 0.0_f32], [0.001, -0.0015], [0.01, 0.02], [-0.03, 0.015], [0.02, -0.02]];
+        let extents = [(640_u32, 480_u32), (1920, 1080), (256, 1024), (64, 64)];
+        let fovs = [0.35_f32, core::f32::consts::FRAC_PI_3, 1.9];
+        let yaws = [0.0_f32, 0.7, -1.2];
+        yaws.into_iter().flat_map(move |yaw| {
+            fovs.into_iter().flat_map(move |fov_y| {
+                let (global, projection) = yawed_perspective_camera(yaw, fov_y);
+                let view = ViewUniform::from_camera(global, projection);
+                extents.into_iter().flat_map(move |(w, h)| {
+                    jitters.into_iter().map(move |[jx, jy]| (view, w, h, NdcJitter { jx, jy }))
+                })
+            })
+        })
+    }
+
+    /// Gate 1b (the raster <-> ray consistency Gate 1 is not; `docs/TAA-PLAN.md`'s Decision 1
+    /// risk mitigation "assert marcher-sample-pos == raster-sample-pos"): for a world point `Q`
+    /// on each pixel's UNJITTERED ray at `t in {1, 5, 20}`, project `Q` through the JITTERED
+    /// raster rows (`marcher_view_proj_rows_jittered`) to raster NDC `(x_r, y_r)`, feed
+    /// `(x_r, -y_r)` (the ray-gen y-flip) to the ray-gen mirror with `raster_ray_forward`'s
+    /// forward, and the direction must be `normalize(Q - eye)` within `1e-5` per component (the
+    /// shear's own measured ~1-ULP class, the Gate 1 tolerance). I.e. the ray through the pixel
+    /// the raster put `Q` at, generated with `fwd_r`, points back at `Q` -- the exactness the
+    /// HWRT shadow-ray origin `eye + rd_r * gViewT` rests on.
+    #[test]
+    fn raster_ray_forward_passes_through_the_raster_sample() {
+        const TOL: f32 = 1e-5;
+        let mut max_err = 0.0_f32;
+        let mut cases = 0usize;
+
+        for (view, w, h, jitter) in gate1_sweep() {
+            let tan_half_fov = (view.fov_y * 0.5).tan();
+            let aspect = w as f32 / h as f32;
+            let eye = [view.camera_pos.x, view.camera_pos.y, view.camera_pos.z];
+            let fwd = [view.cam_forward.x, view.cam_forward.y, view.cam_forward.z];
+            let right = [view.cam_right.x, view.cam_right.y, view.cam_right.z];
+            let up = [view.cam_up.x, view.cam_up.y, view.cam_up.z];
+            let fwd_r = raster_ray_forward(&view, w, h, jitter);
+            let rows = marcher_view_proj_rows_jittered(&view, w, h, jitter);
+
+            let pixels = [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1), (w / 2, h / 2), (w / 4, 3 * h / 4)];
+            for &(px, py) in &pixels {
+                let (ndc_x, ndc_y) = pixel_to_ndc(px, py, w, h);
+                let rd = ray_gen_dir_mirror(fwd, right, up, ndc_x, ndc_y, aspect, tan_half_fov);
+                for t in [1.0_f32, 5.0, 20.0] {
+                    let q = [eye[0] + rd[0] * t, eye[1] + rd[1] * t, eye[2] + rd[2] * t];
+                    // Where the JITTERED raster puts Q (final NDC, y-down).
+                    let (ndc_r, _clip_w) = apply_row_major(rows, q);
+                    // The ray-gen ray through that raster position, generated with fwd_r.
+                    let dir = ray_gen_dir_mirror(fwd_r, right, up, ndc_r[0], -ndc_r[1], aspect, tan_half_fov);
+                    let to_q = [q[0] - eye[0], q[1] - eye[1], q[2] - eye[2]];
+                    let len = (to_q[0] * to_q[0] + to_q[1] * to_q[1] + to_q[2] * to_q[2]).sqrt();
+                    for k in 0..3 {
+                        let err = (dir[k] - to_q[k] / len).abs();
+                        max_err = max_err.max(err);
+                    }
+                    cases += 1;
+                }
+            }
+        }
+
+        assert!(cases > 0, "Gate 1b: the sweep is empty");
+        assert!(
+            max_err <= TOL,
+            "Gate 1b: the fwd_r ray through the jittered raster's pixel misses the rasterised point \
+             by {max_err} (> TOL {TOL}) across {cases} cases"
+        );
+        assert!(max_err.is_finite());
+    }
+
+    /// The D2 pin (`docs/OPEN-QUESTIONS.md`, lane fix/hwrt-shadow-ray-origin): the b5 basis
+    /// shear `composite_perspective_from_view_sheared(.., Some([jx, jy]))` equals
+    /// `raster_ray_forward` at the NEGATED jitter, i.e. it points the b5 ray through raster-NDC
+    /// `q + j` while the raster samples `q - j` (the two producers under `RasterAndBasis` sample
+    /// sub-pixel positions `2j` apart). This test RECORDS the current sign; it must be EDITED by
+    /// the D2 fix (which makes the shear call `raster_ray_forward` and re-blesses the two
+    /// software basis pins) -- an owner decision, not this lane's.
+    #[test]
+    fn basis_shear_mirrors_the_raster_jitter_pinned_until_owner_ruling() {
+        const TOL: f32 = 1e-6;
+        let mut max_err = 0.0_f32;
+        let mut cases = 0usize;
+        for (view, w, h, jitter) in gate1_sweep() {
+            let pc = composite_perspective_from_view_sheared(&view, w, h, Some([jitter.jx, jitter.jy]));
+            let negated = raster_ray_forward(&view, w, h, NdcJitter { jx: -jitter.jx, jy: -jitter.jy });
+            for (sheared, mirrored) in pc.cam_forward.iter().zip(negated.iter()) {
+                max_err = max_err.max((sheared - mirrored).abs());
+            }
+            cases += 1;
+        }
+        assert!(cases > 0);
+        assert!(
+            max_err <= TOL,
+            "D2 pin: the b5 shear no longer equals raster_ray_forward at the negated jitter \
+             (max err {max_err}) -- if the shear sign was deliberately fixed, delete this pin and \
+             fold `composite_perspective_from_view_sheared` onto `raster_ray_forward` (OPEN-QUESTIONS D2)"
+        );
+    }
+
+    /// A zero jitter returns the unjittered forward (an additive zero, bit-identical for a basis
+    /// with no `-0.0` lanes), and a nonzero one perturbs all three lanes of an oblique basis.
+    #[test]
+    fn raster_ray_forward_zero_jitter_is_the_unjittered_forward() {
+        let (global, projection) = yawed_perspective_camera(0.7, FRAC_PI_3);
+        let view = ViewUniform::from_camera(global, projection);
+        let zero = raster_ray_forward(&view, 640, 480, NdcJitter::default());
+        assert_eq!(zero, [view.cam_forward.x, view.cam_forward.y, view.cam_forward.z]);
+        let some = raster_ray_forward(&view, 640, 480, NdcJitter { jx: 0.01, jy: -0.02 });
+        assert!(some.iter().zip(zero.iter()).all(|(a, b)| a != b), "every lane of an oblique basis moves");
     }
 }

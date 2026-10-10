@@ -1,0 +1,30 @@
+Window 7 wave 2 binaries (2026-09-25). SHA256SUMS in this directory lists every exe by the exact spelling rows7b.json
+uses; the driver re-checks them before every pass and at the end.
+
+Reused, run IN PLACE (the same exe path as the window they are compared with), sha256 re-checked against that window's
+own SHA256SUMS by tools/mkrows7b.py:
+  trk  win7/bin/runner_93b2615b.exe  24d52719...  trunk integ/unified 93b2615b (= window 7 blocks A and B)
+  c4   win7/bin/runner_989ca0f0.exe  c4a75f82...  u/phys-l9-c4 989ca0f0 (= window 7 P2)
+  j56  D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe  918fd2b7...  Jolt v5.6.0, P0's Distribution build
+  par  win6/bin/runner_6dd1f916.exe  228f3514...  C3b's parent (RowWalk) (= window 6 P3/P5g)
+  tip  win6/bin/runner_983480a9.exe  f93e5fec...  C3b's tip (LeafList) (= window 6 P3/P5g)
+
+Built here (a MEASUREMENT INSTRUMENT, never committed):
+  g4r  bin/bpbench_g4ref_93b2615b.exe  f96a9c11...
+       tree: git -C D:/wt/lighttable archive 93b2615bcea4873e2d3af6b560c6e7997740f67f | tar -x -C win7b/trees/<sha>_g4ref/
+       lock: D:/wt/joltab/Cargo.lock copied in (LF sha256 5f8de754... = the archived trunk lock; unchanged after the build)
+       ONE line changed (variant/g4ref.diff; `git archive | tar -d` reports only this file, variant/tree_compare.txt):
+         crates/boyko_physics/benches/broadphase.rs:299
+         - const G4_SIZES: [usize; 7] = [17, 64, 128, 256, 1_000, 10_000, 100_000];
+         + const G4_SIZES: [usize; 27] = [17, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152,
+                                          160, 168, 176, 184, 192, 208, 224, 240, 256];
+         (the recipe's own remedy, g4_g5_recipe.md:131: "add the sizes between them to G4_SIZES (a one-line edit)")
+       build: PATH="$HOME/.cargo/bin:$PATH" RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc CARGO_INCREMENTAL=0
+              CARGO_BUILD_JOBS=8 TMP/TEMP=D:/wt/_targets/tmp CARGO_TARGET_DIR=D:/wt/_targets/win7b-g4ref, RUSTFLAGS unset,
+              cargo bench --no-run -p boyko-physics --bench broadphase (the `bench` profile, as window 6's bpbench_983480a9)
+       log: logs/build_g4ref_broadphase.log ('Compiling boyko-physics v0.1.0 (...\win7b\trees\93b2615b..._g4ref\crates\
+            boyko_physics)', 'Finished `bench` profile [optimized]', exit 0); copied from
+            D:/wt/_targets/win7b-g4ref/release/deps/broadphase-feaf22adb9abc4a9.exe
+       TREE_BRUTE_MAX_ROWS (broadphase_tree/mod.rs:144) is NOT changed: the G4 arms force the tree path with
+       set_brute_max_rows(0) (benches/broadphase.rs:406, :436), so the constant is the recipe's OUTPUT, not an input;
+       AUTO_TREE_LO/HI do not exist in code yet (MEASUREMENT-QUEUE.md:1102-1107: "commit only after the refinement run").

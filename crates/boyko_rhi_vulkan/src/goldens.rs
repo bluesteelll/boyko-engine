@@ -21,17 +21,24 @@ use boyko_sdf_math::{
     MAX_SDF_EDITS, SDF_GRAD_H, SDF_IMG_H, SDF_IMG_W, SdfEdit, SdfEditField, edit_distance,
     sdf_edit_list, sdf_edit_list_normal, v_dot, v_len, v_normalize, v_sub,
 };
+// GOLDEN-EDSL P0: the eDSL's `f32` Eval backend + the preset-taking SSAO estimate body, for
+// the DERIVED oracle `golden_ssao_attributes_derived`. Reachable ONLY under the `goldens`
+// feature (the optional DIRECT `boyko_shaderdsl` edge in `Cargo.toml`); the shipped `compute`
+// surface never names the eDSL. The eDSL's own `SsaoParams` is aliased apart from the host
+// `compute::SsaoParams` imported below (same five fields, converted field-by-field).
+use boyko_shaderdsl::cf::EvalCf;
+use boyko_shaderdsl::ssao::{SsaoParams as EdslSsaoParams, ssao_estimate_body_params};
 
 use crate::compute::{
     ALPHA_MARGIN, AO_FALLOFF, AO_STEP, AO_STRENGTH, BRICK_CLASS_EMPTY_OUTSIDE, BrickLevelParams,
     CompositeCamera, DEFAULT_LIGHT_DIR, EPS_COARSE, FIELD_LIPSCHITZ_L, GOLDEN_ATLAS_SLOT_MASK, GOLDEN_ATLAS_SLOT_SHIFT,
     GOLDEN_LIGHT_FLAG_CASTS_SHADOW, GOLDEN_LIGHT_KIND_DIRECTIONAL, GOLDEN_LIGHT_KIND_MASK, GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SKY, GOLDEN_LIGHT_KIND_SPOT,
-    GOLDEN_SLOT_NONE, GOLDEN_SPOT_COS_OUTER_MAX, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, M2_GRID_DIM, M2_REFINE_ITERS, M2_REFINE_RELAX, M4GridParams, MAX_IT_COARSE, MAX_SDF_SHADOW_CASTERS_PER_PIXEL,
-    MESH_COLOR, MESH_DEPTH_CLEAR, MESH_RASTER_ALBEDO, PBR_FAR, PBR_LIGHT_COLOR, PBR_LIGHT_DIR,
+    GOLDEN_SLOT_NONE, GOLDEN_SLOT_NONE_FIELD, GOLDEN_SPOT_COS_OUTER_MAX, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, M2_GRID_DIM, M2_REFINE_ITERS, M2_REFINE_RELAX, M4GridParams, MAX_IT_COARSE, MAX_SDF_SHADOW_CASTERS_PER_PIXEL,
+    MESH_COLOR, MESH_DEPTH_CLEAR, MESH_DEPTH_T_MAX, MESH_RASTER_ALBEDO, PBR_FAR, PBR_LIGHT_COLOR, PBR_LIGHT_DIR,
     PBR_SKY_DIFFUSE, PBR_SKY_SPEC, SDF_CAM_Z, SDF_EPS, SDF_HALF_EXTENT, SDF_MAX_IT,
     SDF_T_MAX, SHADOW_HIT_EPS, SHADOW_K, SHADOW_MINT, SHADOW_MINT_STEP, SHADOW_NDOTL_EPS,
-    SHADOW_NORMAL_BIAS, SSAO_BLUR_DEPTH_TOL, SSAO_BLUR_R, SSAO_HILBERT_W, SSAO_R2_ALPHA1, SSAO_R2_ALPHA2, SSAO_RADIUS_PIX_MAX, SSAO_RADIUS_PIX_MIN,
-    SSAO_ROT, SSAO_ROT_N, SSAO_VIEWT_BG,
+    SHADOW_NORMAL_BIAS, SKY_SUN_EXPONENT, SSAO_ATROUS_H, SSAO_ATROUS_W_EPS, SSAO_BLUR_DEPTH_SIGMA, SSAO_BLUR_DEPTH_TOL, SSAO_BLUR_GRAD_CLAMP, SSAO_HILBERT_W, SSAO_R2_ALPHA1, SSAO_R2_ALPHA2, SSAO_RADIUS_PIX_MAX, SSAO_RADIUS_PIX_MIN,
+    SSAO_ROT, SSAO_ROT_N, SSAO_VIEWT_BG, SUN_ENV_WEIGHT, SUN_KERNEL_EXPONENT_MAX, SUN_KERNEL_EXPONENT_MIN,
     SsaoParams, TILE_FLAG_EMPTY, TILE_SIZE, TileBound, composite_ray, depth_to_t,
     golden_f16_from_f32, pack_rgba, sdf_sphere,
 };
@@ -105,7 +112,12 @@ pub(crate) fn host_soft_shadow<F: Fn([f32; 3]) -> f32>(
 /// march range: the light DISTANCE for a punctual caster, `SDF_T_MAX` for an extra
 /// directional) instead of the hardcoded `SDF_T_MAX`. The multi-light shadow term is
 /// consumer-side (±2/255), not bit-exact. `field` is the FROZEN field gateway.
-pub(crate) fn host_soft_shadow_ranged<F: Fn([f32; 3]) -> f32>(
+///
+/// `pub` rather than `pub(crate)` because `tests/sdf_shadow_leaf_oracle.rs`'s layer 3a diffs this
+/// mirror against the eDSL body that GENERATES the shipped HLSL, and an integration test is a
+/// separate crate. The whole module is already `#[cfg(any(test, feature = "goldens"))]`, so this
+/// widens no shipping surface.
+pub fn host_soft_shadow_ranged<F: Fn([f32; 3]) -> f32>(
     p: [f32; 3],
     n: [f32; 3],
     l: [f32; 3],
@@ -136,7 +148,11 @@ pub(crate) fn host_soft_shadow_ranged<F: Fn([f32; 3]) -> f32>(
 /// surface normal `n` from `p`, accumulating the `(h - d)` field-deficit weighted by
 /// `AO_FALLOFF^i`, and returning an occlusion factor in `[0, 1]` (1 = unoccluded).
 /// Mirrors the shader within ±3/255. `field` is the FROZEN field gateway.
-pub(crate) fn host_ao<F: Fn([f32; 3]) -> f32>(p: [f32; 3], n: [f32; 3], field: &F) -> f32 {
+///
+/// `pub` for the same reason as [`host_soft_shadow_ranged`]: `tests/sdf_shadow_leaf_oracle.rs`'s
+/// layer 3b is an integration test, i.e. a separate crate. The module is
+/// `#[cfg(any(test, feature = "goldens"))]`, so no shipping build gains anything.
+pub fn host_ao<F: Fn([f32; 3]) -> f32>(p: [f32; 3], n: [f32; 3], field: &F) -> f32 {
     let mut occ = 0.0_f32;
     for i in 1..=5u32 {
         let h = (i as f32) * AO_STEP;
@@ -1246,6 +1262,16 @@ impl Default for GoldenMaterial {
     }
 }
 
+/// Textured-PBR T6a: a host mirror of `boyko_render::MATERIAL_FLAG_TEXTURED` — a bit in
+/// [`GoldenMaterial::mrr`]'s bitcast `flags` lane (`mrr[3]`), set iff the material carries a
+/// texture sidecar. The vulkan crate cannot depend on `boyko_render` (the dependency runs the
+/// other way; see [`GoldenMaterial`]'s doc), so this is a SEPARATE literal, cross-checked
+/// against the real constant by a `boyko_render`-side test (which CAN see both crates via its
+/// `boyko_rhi_vulkan` dev-dependency). [`GoldenMaterial::new`] never sets this bit (`mrr[3]`
+/// stays `0.0`), so every EXISTING golden input is inert under
+/// [`golden_deferred_resolve_with_pbr`]'s flag-gated override.
+pub const GOLDEN_MATERIAL_FLAG_TEXTURED: u32 = 1;
+
 /// A host light-table element mirroring `boyko_render::light::GpuLight` (3 std430 `vec4`
 /// lanes, 48 B). The vulkan crate cannot depend on `boyko_render`, so the golden carries
 /// its own POD mirror; the layout is the SAME the shader's `GpuLight` reads. LINEAR.
@@ -1286,12 +1312,13 @@ impl GoldenLight {
     /// A point light (mirrors `GpuLight::from_point`, Lighting L0b): position + range in
     /// `pos_range`, the baked intensity `I = Φ / (4π)` premultiplied into the color lane.
     /// `power` is the luminous power `Φ`. The L0b resolve oracle consumes `pos_range` (the
-    /// world position + the cull radius) + the baked color.
+    /// world position + the cull radius) + the baked color. The kind word carries
+    /// [`GOLDEN_SLOT_NONE_FIELD`] (no atlas map) until [`Self::with_atlas_slot`] assigns one.
     #[inline]
     pub fn point(position: [f32; 3], color: [f32; 3], power: f32, range: f32) -> Self {
         let i = power / (4.0 * core::f32::consts::PI);
         Self {
-            dir_kind: [0.0, 0.0, 0.0, f32::from_bits(GOLDEN_LIGHT_KIND_POINT)],
+            dir_kind: [0.0, 0.0, 0.0, f32::from_bits(GOLDEN_LIGHT_KIND_POINT | GOLDEN_SLOT_NONE_FIELD)],
             pos_range: [position[0], position[1], position[2], range],
             color_cone: [color[0] * i, color[1] * i, color[2] * i, 0.0],
         }
@@ -1302,7 +1329,9 @@ impl GoldenLight {
     /// `I = Φ / (2π(1 − cos(outer)))` premultiplied into the color lane, and the cone
     /// cosines packed (two f16) into `color_cone.w`. `inner_deg`/`outer_deg` are cone
     /// half-angles in degrees; `cos(outer)` is clamped to `SPOT_COS_OUTER_MAX` (0.9999) so
-    /// the intensity stays bounded — mirroring the host constructor's release safety net.
+    /// the intensity stays bounded — mirroring the host constructor's release safety net. The
+    /// kind word carries [`GOLDEN_SLOT_NONE_FIELD`] (no atlas map) until
+    /// [`Self::with_atlas_slot`] assigns one.
     #[inline]
     pub fn spot(
         position: [f32; 3],
@@ -1319,7 +1348,7 @@ impl GoldenLight {
         let i = power / denom;
         let d = v_normalize(direction);
         Self {
-            dir_kind: [d[0], d[1], d[2], f32::from_bits(GOLDEN_LIGHT_KIND_SPOT)],
+            dir_kind: [d[0], d[1], d[2], f32::from_bits(GOLDEN_LIGHT_KIND_SPOT | GOLDEN_SLOT_NONE_FIELD)],
             pos_range: [position[0], position[1], position[2], range],
             color_cone: [
                 color[0] * i,
@@ -1359,7 +1388,10 @@ impl GoldenLight {
     /// host mirror of `boyko_render::shadow_atlas::pack_atlas_slot` (the SAME bit layout the resolve
     /// reads via `light_table.hlsli::light_atlas_slot`). The kind tag (bits 0..16) is preserved; a
     /// real slot (`slot != GOLDEN_SLOT_NONE`) also sets [`GOLDEN_LIGHT_FLAG_CASTS_SHADOW`] (bit 16),
-    /// so the resolve branches onto the map sample. `slot` MUST be `< 16` (the layer budget) or
+    /// as the host does. The resolve branches onto the map sample on the header's punctual bit and
+    /// the slot field alone (`light_atlas_slot(kind) != SLOT_NONE`), never on bit 16, which is why
+    /// [`Self::point`] / [`Self::spot`] build the field as [`GOLDEN_SLOT_NONE_FIELD`] and this
+    /// builder replaces it. `slot` MUST be `< 16` (the layer budget) or
     /// exactly [`GOLDEN_SLOT_NONE`]; a debug build asserts it. The demo hand-builds the light table,
     /// so it stamps the slot directly with this builder; the real-app path is the
     /// `resolve_shadow_atlas` → light-table-assembly seam (`boyko_render::shadow_atlas`).
@@ -1442,6 +1474,9 @@ pub(crate) fn golden_f16_to_f32(h: u16) -> f32 {
 
 /// A host light-table header mirroring `boyko_render::light::LightHeaderGpu` (4 std430
 /// `vec4` lanes, 64 B). Carries the split counts + exposure (Decision 3 / O3).
+///
+/// See `boyko_render::light`'s "Light-header word 7 bit budget" table for the full bit
+/// map this type's `with_*_mode` builders below pack into (word 7 / `sky_diffuse.w`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GoldenLightHeader {
     /// `[bitcast(light_count), exposure, bitcast(l0a_count), bitcast(point_spot_count)]`.
@@ -1762,10 +1797,181 @@ pub(crate) fn env_brdf_approx(roughness: f32, nov: f32) -> [f32; 2] {
     [-1.04 * a004 + r[2], 1.04 * a004 + r[3]]
 }
 
+/// HLSL `reflect(i, n)` intrinsic mirror (PBR P0-B): `i - 2.0 * dot(i, n) * n`, the reference
+/// formula every DXC target lowers to. `d = dot(i, n) * 2.0` is a scalar op computed ONCE (the
+/// scalar-then-vector grouping, not `2.0 * (dot(i,n) * n)`), matching the HLSL expression order.
+#[inline]
+pub(crate) fn v_reflect(i: [f32; 3], n: [f32; 3]) -> [f32; 3] {
+    let d = v_dot(i, n) * 2.0;
+    [i[0] - n[0] * d, i[1] - n[1] * d, i[2] - n[2] * d]
+}
+
+/// PBR P0-D multi-scatter energy compensation (mirrors the resolve's hoisted
+/// `energy_comp` term): `Ess = max(dfg.x + dfg.y, 1e-4)` (the Fdez-Aguera scale+bias energy
+/// estimate — NOT `1/dfg.y`), `energy_comp = 1 + f0 * (1/Ess - 1)`. `dfg` is
+/// [`env_brdf_approx`]`(roughness, NoV)`, computed ONCE per pixel by the caller and reused at
+/// every specular site (direct + ambient).
+#[inline]
+pub(crate) fn multi_scatter_energy_comp(dfg: [f32; 2], f0: [f32; 3]) -> [f32; 3] {
+    let ess = (dfg[0] + dfg[1]).max(1e-4);
+    let inv_ess_m1 = 1.0 / ess - 1.0;
+    [
+        1.0 + f0[0] * inv_ess_m1,
+        1.0 + f0[1] * inv_ess_m1,
+        1.0 + f0[2] * inv_ess_m1,
+    ]
+}
+
+/// PBR metal fix: decoupled specular occlusion (mirrors the resolve's hoisted `spec_ao`
+/// term — Filament `SpecularAO_Lagarde` == Bevy deferred `specular_occlusion`):
+/// `saturate(pow(NoV + ao, exp2(-16*roughness - 1)) - 1 + ao)`. Diffuse AO (`ao`/`ao_final`)
+/// correctly darkens Lambert ambient, but a metal has `diffuse == 0` — its ambient SPECULAR
+/// is its ENTIRE appearance, so multiplying that by diffuse AO reads as "AO-darkened matte
+/// paint", not metal. `spec_ao` stays ~1 for smooth/metal surfaces and only gently occludes
+/// rough+cavity surfaces, matching every competitor's diffuse/specular AO split. Computed
+/// ONCE per pixel by the caller (NoV + roughness + ao only) and reused at every ambient-
+/// specular site.
+#[inline]
+pub(crate) fn specular_ao(nov: f32, roughness: f32, ao: f32) -> f32 {
+    let exponent = (-16.0 * roughness - 1.0).exp2();
+    ((nov + ao).powf(exponent) - 1.0 + ao).clamp(0.0, 1.0)
+}
+
+/// PBR P1: the Blinn-Phong-equivalent specular exponent from the GGX alpha (roughness^2) —
+/// mirrors the resolve's `sun_kernel_exponent`. `n = 2/alpha^2 - 2` (the standard Phong<->GGX
+/// exponent conversion) blows up as `alpha -> 0` (a mirror-smooth surface), so it is clamped
+/// to [`SUN_KERNEL_EXPONENT_MIN`, `SUN_KERNEL_EXPONENT_MAX`]: a smooth metal (low alpha) gets a
+/// tight, sharp sun disc; a rough metal (`alpha -> 1`) gets a broad, soft glint (`n -> 0`,
+/// floored at 1).
+#[inline]
+pub(crate) fn sun_kernel_exponent(alpha: f32) -> f32 {
+    let n = 2.0 / (alpha * alpha).max(1e-6) - 2.0;
+    n.clamp(SUN_KERNEL_EXPONENT_MIN, SUN_KERNEL_EXPONENT_MAX)
+}
+
+/// PBR P1: the analytic HDR sun-disc kernel — mirrors the resolve's `sun_kernel`:
+/// `pow(saturate(dot(dir, sun_dir)), sun_kernel_exponent(alpha))`. `dir` is the REFLECTION
+/// vector `R`; `sun_dir` is the directional light's unit direction `l`.
+#[inline]
+pub(crate) fn sun_kernel(dir: [f32; 3], sun_dir: [f32; 3], alpha: f32) -> f32 {
+    let c = v_dot(dir, sun_dir).clamp(0.0, 1.0);
+    c.powf(sun_kernel_exponent(alpha))
+}
+
+/// The 3x3 matrices of the Stephen Hill ACES-fitted tonemap (PBR P0-C), byte-mirroring the
+/// resolve's `ACES_IN` — row-major as written, `mul(M, v)`-style (row i dotted with `v`).
+const ACES_IN: [[f32; 3]; 3] = [
+    [0.59719, 0.35458, 0.04823],
+    [0.07600, 0.90834, 0.01566],
+    [0.02840, 0.13383, 0.83777],
+];
+
+/// The output-side matrix of the Hill ACES fit (PBR P0-C), byte-mirroring the resolve's
+/// `ACES_OUT`.
+const ACES_OUT: [[f32; 3]; 3] = [
+    [1.60475, -0.53108, -0.07367],
+    [-0.10208, 1.10813, -0.00605],
+    [-0.00327, -0.07276, 1.07602],
+];
+
+/// `mul(m, v)` mirror (row-major `m`, row `i` dotted with `v`, accumulated in column order
+/// 0,1,2 — no reassociation) — the exact op-order the resolve's `aces_fitted` uses for both
+/// `ACES_IN` and `ACES_OUT`.
+#[inline]
+fn mat3_mul_vec3(m: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
+    [
+        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+    ]
+}
+
+/// The Stephen Hill ACES-fitted filmic tonemap (PBR P0-C), byte-mirroring the resolve's
+/// `aces_fitted`: `c = mul(ACES_IN, c); a = c*(c+0.0245786)-0.000090537; b =
+/// c*(0.983729*c+0.432951)+0.238081; return saturate(mul(ACES_OUT, a/b));` — SAME op order,
+/// no reassociation.
+#[inline]
+pub(crate) fn aces_fitted(c: [f32; 3]) -> [f32; 3] {
+    let c = mat3_mul_vec3(&ACES_IN, c);
+    let a = [
+        c[0] * (c[0] + 0.0245786) - 0.000090537,
+        c[1] * (c[1] + 0.0245786) - 0.000090537,
+        c[2] * (c[2] + 0.0245786) - 0.000090537,
+    ];
+    let b = [
+        c[0] * (0.983729 * c[0] + 0.432_951) + 0.238081,
+        c[1] * (0.983729 * c[1] + 0.432_951) + 0.238081,
+        c[2] * (0.983729 * c[2] + 0.432_951) + 0.238081,
+    ];
+    let ratio = [a[0] / b[0], a[1] / b[1], a[2] / b[2]];
+    let out = mat3_mul_vec3(&ACES_OUT, ratio);
+    [out[0].clamp(0.0, 1.0), out[1].clamp(0.0, 1.0), out[2].clamp(0.0, 1.0)]
+}
+
+/// The resolve's OUTPUT stage (PBR P0-C): the Hill ACES-fitted tonemap applied to the
+/// exposed linear radiance, THEN the manual gamma-2.2 OETF (`gLit`/the swapchain are linear
+/// UNORM end to end — no hardware sRGB encode; see the resolve's `aces_fitted` doc comment for
+/// the OETF verification). Byte-mirrors `lit = aces_fitted(lit); lit = pow(lit, 1.0/2.2);`
+/// EXACTLY (same op order, same two-step sequence).
+#[inline]
+pub(crate) fn tonemap_and_oetf(lit: [f32; 3]) -> [f32; 3] {
+    const OETF_GAMMA_EXP: f32 = 1.0 / 2.2;
+    let t = aces_fitted(lit);
+    [
+        t[0].powf(OETF_GAMMA_EXP),
+        t[1].powf(OETF_GAMMA_EXP),
+        t[2].powf(OETF_GAMMA_EXP),
+    ]
+}
+
+/// The resolve's PROCEDURAL SKY BACKGROUND (mask == 0 pixels): mirrors the shader's
+/// background branch op-order EXACTLY — scan the light table's L0a front block for a SKY
+/// entry (`kind == Sky`, the SAME block the LIT arm's ambient loop reads) and fold in every
+/// DIRECTIONAL light's fixed-exponent sun disc (`pow(saturate(dot(rd, l)), SKY_SUN_EXPONENT)`,
+/// accumulated in TABLE order), then `sky = lerp(ground, sky, saturate(dot(rd, UP)*0.5+0.5));
+/// sky += sun_disc; sky *= header.exposure();` (the FINAL multiply, O3), then
+/// [`tonemap_and_oetf`]. Returns `None` when the table carries NO sky entry — the caller keeps
+/// the dark pass-through (a scene without a SkyLight has no sky to render), matching the
+/// shader's `has_sky` gate.
+fn golden_sky_background(rd: [f32; 3], header: &GoldenLightHeader, lights: &[GoldenLight]) -> Option<u32> {
+    let count = header.l0a_count() as usize;
+    let mut sky_color: Option<[f32; 3]> = None;
+    let mut ground_color = [0.0_f32; 3];
+    let mut sun_disc = [0.0_f32; 3];
+    for li in lights.iter().take(count) {
+        match li.kind() {
+            GOLDEN_LIGHT_KIND_SKY => {
+                sky_color = Some([li.color_cone[0], li.color_cone[1], li.color_cone[2]]);
+                ground_color = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
+            }
+            GOLDEN_LIGHT_KIND_DIRECTIONAL => {
+                let l = v_normalize([li.dir_kind[0], li.dir_kind[1], li.dir_kind[2]]);
+                let k = v_dot(rd, l).clamp(0.0, 1.0).powf(SKY_SUN_EXPONENT);
+                sun_disc[0] += li.color_cone[0] * k;
+                sun_disc[1] += li.color_cone[1] * k;
+                sun_disc[2] += li.color_cone[2] * k;
+            }
+            _ => {}
+        }
+    }
+    let sky_color = sky_color?;
+    const UP: [f32; 3] = [0.0, 1.0, 0.0];
+    let hemi = (v_dot(rd, UP) * 0.5 + 0.5).clamp(0.0, 1.0);
+    let exposure = header.exposure();
+    let sky = [
+        (ground_color[0] + (sky_color[0] - ground_color[0]) * hemi + sun_disc[0]) * exposure,
+        (ground_color[1] + (sky_color[1] - ground_color[1]) * hemi + sun_disc[1]) * exposure,
+        (ground_color[2] + (sky_color[2] - ground_color[2]) * hemi + sun_disc[2]) * exposure,
+    ];
+    Some(pack_rgba(tonemap_and_oetf(sky)))
+}
+
 /// The per-pixel G-buffer attributes the PBR MVP-2 marcher writes, modelling the EXACT GPU
 /// UNORM pack so [`golden_deferred_resolve`] can re-decode them and run the host BRDF
 /// within ±2/255 of the GPU. On the mask == 0 arms (mesh / background / empty) `base_rgb`
-/// round-trips byte-identically (the 0%-gate).
+/// is the RAW quantized base — a table WITHOUT a SKY entry keeps the byte-identical
+/// pass-through of this field (the 0%-gate); with a SKY entry the resolve renders the
+/// procedural sky over it instead (see [`golden_deferred_resolve`]'s doc).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MarcherAttributes {
     /// gAlbedo R8G8B8: the RAW LINEAR base color (the picked material's `base_color.rgb`
@@ -2218,6 +2424,13 @@ pub(crate) fn ssao_r2(index: u32, alpha: u32) -> u32 {
 /// The arithmetic is UNCHANGED: feeding [`SsaoParams::default`] (== `SSAO_PARAMS[SSAO_QUALITY_MEDIUM]`
 /// == today's shipped consts) reproduces the pre-Q2 golden BIT-FOR-BIT. Feed `SSAO_PARAMS[q]` to
 /// mirror the variant `q` `.spv`.
+///
+/// GOLDEN-EDSL P0 (step 1-3): this hand mirror now has an eDSL-DERIVED twin,
+/// [`golden_ssao_attributes_derived`], which instantiates the same generic body the HLSL is
+/// emitted from over the `f32` Eval backend. `tests/ssao_golden_derived.rs` is the equivalence
+/// gate (derived == hand, bit-for-bit, over the GPU golden's inputs). This function stays the
+/// oracle the GPU golden (`ssao_variants_match_host`) pins until the retirement step (step 5 of
+/// `docs/GOLDEN-EDSL-MIGRATION-PLAN.md`), which is its own commit — per the circularity guardrail.
 pub fn golden_ssao_attributes(
     gbuf: &[MarcherAttributes],
     px: u32,
@@ -2280,10 +2493,12 @@ pub fn golden_ssao_attributes(
         }
     };
 
-    // The Hilbert+R2 rotation slot (bit-exact vs HLSL: ONE 64x64 Hilbert index drives two R2
-    // channels). `slot = (r2 * SSAO_ROT_N) >> 24` maps the Q0.24 fraction into [0, ROT_N) by an
-    // integer scale (a power-of-two table). R2 is low-discrepancy, so adjacent pixels get well-
-    // spread (not random) slots — the dither lives in HIGH frequencies the blur removes cleanly.
+    // The Hilbert+R2 rotation slot (bit-exact vs HLSL — INTEGER pick, no div): ONE 64x64
+    // Hilbert index drives two R2 channels; `slot = (r2 * SSAO_ROT_N) >> 24` maps the Q0.24
+    // fraction into [0, ROT_N). The table is 64 entries (was 16): an even-slice axis set has
+    // only `SSAO_ROT_N / slices` EFFECTIVE dither classes (rotating the set by its slice
+    // spacing maps it onto itself) — 16 entries left 2 classes at 8 slices, whose coherent
+    // layout read as un-blurrable streaks; 64 keeps >= 8 classes at a 2.8125° step.
     let hindex = ssao_hilbert(SSAO_HILBERT_W, px & (SSAO_HILBERT_W - 1), py & (SSAO_HILBERT_W - 1));
     let slot = ((ssao_r2(hindex, SSAO_R2_ALPHA1).wrapping_mul(SSAO_ROT_N)) >> 24) as usize;
     let rot = SSAO_ROT[slot];
@@ -2318,12 +2533,18 @@ pub fn golden_ssao_attributes(
     let steps_f = params.steps as f32;
     let mut occ = 0.0_f32;
     for sl in 0..params.slices {
-        // The base slice axis: slice 0 -> (1,0), EVERY other slice -> (0,1) before rotation —
-        // the EXACT `(sl == 0u) ? float2(1,0) : float2(0,1)` the shader bakes (so the High
-        // variant's slices 1 & 2 both start from (0,1), differing only by the per-pixel `rot`,
-        // matching the GPU bit-for-bit). The 2D screen axis picks the neighbour PIXEL (the tap
-        // offset); the horizon math measures elevation against the center normal, NOT this axis.
-        let base = if sl == 0 { (1.0_f32, 0.0) } else { (0.0, 1.0) };
+        // The base slice axis (Change A): slice `s` at angle `s*(pi/N)` == `SSAO_ROT[s*STRIDE]`,
+        // the EXACT `SSAO_ROT[sl * (SSAO_ROT_N / SSAO_SLICES)]` the shader bakes (evenly-spaced
+        // real slices; the pre-A code hardcoded only 2 axes). `SSAO_SLICES` must divide
+        // `SSAO_ROT_N` for exact spacing (asserted). The 2D screen axis picks the neighbour PIXEL
+        // (the tap offset); the horizon math measures elevation against the center normal, NOT this.
+        debug_assert_eq!(
+            SSAO_ROT_N % params.slices,
+            0,
+            "invariant: SSAO_SLICES ({}) must divide SSAO_ROT_N ({SSAO_ROT_N}) for even slice spacing",
+            params.slices
+        );
+        let base = SSAO_ROT[(sl * (SSAO_ROT_N / params.slices)) as usize];
         let sdir2 = (
             base.0 * rot.0 - base.1 * rot.1,
             base.0 * rot.1 + base.1 * rot.0,
@@ -2357,66 +2578,295 @@ pub fn golden_ssao_attributes(
     ao * ao
 }
 
-/// Render P7 POLISH — the EXACT host mirror of the resolve's inline SSAO depth-aware box blur
-/// (`deferred_pbr.hlsl`, inside the `ssao_mode != 0` combine). Given the RAW per-pixel SSAO
-/// byte image (`ssao` — exactly what the GPU `gSsao` R8_UNORM holds; the C2 host builds it via
-/// [`golden_ssao_attributes`] quantized to `u8` by `(x * 255).round()`) and the host G-buffer
-/// (`gbuf`, for the per-pixel `view_t` depth gate), returns the blurred AO factor `[0,1]` at
-/// `(px, py)`.
+/// GOLDEN-EDSL P0 (step 1): the eDSL-DERIVED SSAO oracle — the same contract and signature as
+/// the hand mirror [`golden_ssao_attributes`] (so the retirement step is a call-site rename),
+/// but the horizon reduction is NOT re-derived by hand: it is
+/// `boyko_shaderdsl::ssao::ssao_estimate_body_params::<EvalCf>` — the SAME generic body
+/// `emit_hlsl_ssao` traces into the GENERATED span of `sdf_ssao.comp.hlsl` — instantiated over
+/// `f32`. The eDSL owns the slice loop, the two half-slice step loops, the per-tap horizon
+/// step, the `1 - strength*occ/slices` complement, `clamp01`, and the `ao*ao` square; `params`
+/// selects the variant exactly as the hand mirror's `params` does.
 ///
-/// The gather is the byte-for-byte mirror of the shader: average the `(2*R+1)²` neighbour taps
-/// (`R == `[`SSAO_BLUR_R`]) whose `gbuf[c].view_t` is within [`SSAO_BLUR_DEPTH_TOL`] of the
-/// center's, bounds-clamped to the image; the center always passes its own gate so the count is
-/// `≥ 1` (no divide-by-zero). The op-set is integer / `abs` / compare / the same
-/// `byte / 255.0` UNORM decode — NO transcendental — so the host average rounds bit-identically
-/// to the GPU's. The depth gate is the silhouette guard: a neighbour across the mesh↔SDF edge
-/// has a far `view_t` and is rejected, so the blur never bleeds AO over the silhouette.
-pub fn golden_ssao_blur(
-    ssao: &[u8],
+/// What remains hand-written here is the SEAM the shader also writes by hand (its `main()`
+/// glue around the generated span): the center-lit gate, the `P = ro + rd*view_t` reconstruct,
+/// the `oct_decode` of the center normal, the `pix_radius` band, the Hilbert+R2 rotation slot
+/// and radial phase, the per-slice `sdir2` rotation, the per-step `advance`, and the
+/// bounds/mask-checked forward neighbour reconstruct. That glue is a TRANSCRIPTION of the hand
+/// mirror's, deliberately NOT shared with it: `tests/ssao_golden_derived.rs` proves the two
+/// oracles bit-identical over the GPU golden's inputs, and a shared helper would make the glue
+/// half of that proof vacuous. The hand copy is retired in its own later commit (plan step 5);
+/// until then the GPU golden keeps pinning the hand mirror — the circularity guardrail.
+pub fn golden_ssao_attributes_derived(
     gbuf: &[MarcherAttributes],
     px: u32,
     py: u32,
     img_w: u32,
     img_h: u32,
+    camera: CompositeCamera,
+    params: &SsaoParams,
 ) -> f32 {
-    let w = img_w as i32;
-    let h = img_h as i32;
-    debug_assert_eq!(
-        ssao.len(),
-        (img_w as usize) * (img_h as usize),
-        "invariant: SSAO blur raw image length must equal img_w * img_h"
-    );
     debug_assert_eq!(
         gbuf.len(),
         (img_w as usize) * (img_h as usize),
-        "invariant: SSAO blur gbuf length must equal img_w * img_h"
+        "invariant: SSAO gbuf length must equal img_w * img_h"
     );
+    // The center pixel's class: a non-lit pixel carries no surface — the neutral factor.
+    let center = gbuf[(py as usize) * (img_w as usize) + (px as usize)];
+    let center_lit = center.mask > 0 && center.view_t < SSAO_VIEWT_BG;
+    if !center_lit {
+        return 1.0;
+    }
 
-    // The center's `view_t` (the gate reference) — the SAME `gViewT.Load(coord)` the resolve
-    // reads. The center always passes `|view_t - view_t| == 0 <= tol`, so `cnt >= 1`.
-    let center_view_t = gbuf[(py as i32 * w + px as i32) as usize].view_t;
+    // P = ro + rd * view_t via the shared ray-gen.
+    let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
+    let view_t = center.view_t;
+    let p = [
+        ro[0] + rd[0] * view_t,
+        ro[1] + rd[1] * view_t,
+        ro[2] + rd[2] * view_t,
+    ];
 
-    let mut sum = 0.0_f32;
-    let mut cnt = 0.0_f32;
-    // Mirror the shader's nested `for (dy) for (dx)` order/bounds/gate EXACTLY.
-    for dy in -SSAO_BLUR_R..=SSAO_BLUR_R {
-        for dx in -SSAO_BLUR_R..=SSAO_BLUR_R {
-            let cx = px as i32 + dx;
-            let cy = py as i32 + dy;
-            if cx < 0 || cy < 0 || cx >= w || cy >= h {
-                continue; // bounds
+    // The center surface normal — the elevation reference, CONSTANT across all taps.
+    let center_n = oct_decode([
+        center.oct_rg[0] as f32 / 255.0,
+        center.oct_rg[1] as f32 / 255.0,
+    ]);
+
+    // The screen-pixel march radius (clamped band on PERSPECTIVE; the fixed ortho span).
+    let pix_radius = match camera {
+        CompositeCamera::Perspective {
+            forward,
+            tan_half_fov,
+            ..
+        } => {
+            let z_view = rd[0] * forward[0] + rd[1] * forward[1] + rd[2] * forward[2];
+            let z = (z_view * view_t).max(1.0e-3);
+            let pr = params.radius * ((img_h as f32) * 0.5) / (z * tan_half_fov);
+            pr.clamp(SSAO_RADIUS_PIX_MIN, SSAO_RADIUS_PIX_MAX)
+        }
+        CompositeCamera::Ortho => params.radius * ((img_h as f32) * 0.5) / SDF_HALF_EXTENT,
+    };
+
+    // The Hilbert+R2 rotation slot and the radial step-phase (integer picks, bit-exact).
+    let hindex = ssao_hilbert(SSAO_HILBERT_W, px & (SSAO_HILBERT_W - 1), py & (SSAO_HILBERT_W - 1));
+    let slot = ((ssao_r2(hindex, SSAO_R2_ALPHA1).wrapping_mul(SSAO_ROT_N)) >> 24) as usize;
+    let rot = SSAO_ROT[slot];
+    let r2_rad = ssao_r2(hindex, SSAO_R2_ALPHA2);
+    let radial_phase = ((r2_rad >> 16) + 1) as f32 / 256.0;
+
+    // The forward neighbour reconstruct (the hand-written seam): offset in SCREEN pixels along
+    // `sdir2 * sign`, round, bounds-check, mask-check, reconstruct Pp = nro + nrd * nview_t;
+    // else Pp = P (a skipped tap contributes nothing — the eDSL carries no per-tap branch).
+    let reconstruct = |sdir2: (f32, f32), advance: f32, sign: f32| -> [f32; 3] {
+        let npx = ((px as f32) + sign * sdir2.0 * advance).round() as i32;
+        let npy = ((py as f32) + sign * sdir2.1 * advance).round() as i32;
+        if npx >= 0 && npy >= 0 && npx < (img_w as i32) && npy < (img_h as i32) {
+            let n = gbuf[(npy as usize) * (img_w as usize) + (npx as usize)];
+            if n.mask > 0 && n.view_t < SSAO_VIEWT_BG {
+                let (nro, nrd) = composite_ray(npx as u32, npy as u32, img_w, img_h, camera);
+                return [
+                    nro[0] + nrd[0] * n.view_t,
+                    nro[1] + nrd[1] * n.view_t,
+                    nro[2] + nrd[2] * n.view_t,
+                ];
             }
-            let idx = (cy * w + cx) as usize;
-            let vt = gbuf[idx].view_t;
-            if (vt - center_view_t).abs() > SSAO_BLUR_DEPTH_TOL {
-                continue; // silhouette gate (far-depth neighbour)
+        }
+        p
+    };
+
+    // The `tap(slice, step, neg)` seam the eDSL body indexes: the slice's rotated screen axis
+    // and the step's advance are pure functions of `(slice, step)`, so recomputing them per tap
+    // yields the same bits as a per-slice hoist.
+    let steps_f = params.steps as f32;
+    let tap = |sl: usize, sp: usize, neg: bool| -> [f32; 3] {
+        debug_assert_eq!(
+            SSAO_ROT_N % params.slices,
+            0,
+            "invariant: SSAO_SLICES ({}) must divide SSAO_ROT_N ({SSAO_ROT_N}) for even slice spacing",
+            params.slices
+        );
+        let base = SSAO_ROT[((sl as u32) * (SSAO_ROT_N / params.slices)) as usize];
+        let sdir2 = (
+            base.0 * rot.0 - base.1 * rot.1,
+            base.0 * rot.1 + base.1 * rot.0,
+        );
+        let advance = (sp as f32 + radial_phase) * pix_radius / steps_f;
+        reconstruct(sdir2, advance, if neg { -1.0 } else { 1.0 })
+    };
+
+    // The variant preset, handed to the eDSL as ITS `SsaoParams` (the host struct re-states the
+    // same five scalars; the shipped `compute` must not name the eDSL type).
+    let edsl = EdslSsaoParams {
+        radius: params.radius,
+        slices: params.slices,
+        steps: params.steps,
+        strength: params.strength,
+        eps: params.eps,
+    };
+
+    // The eDSL owns everything from here: slices x (2 half-slices x steps) horizon taps,
+    // the complement, the clamp, the square.
+    ssao_estimate_body_params::<EvalCf, _>(p, center_n, &tap, &edsl)
+}
+
+/// Quantizes `v` (clamped to `[0,1]`) to an R16_UNORM code point — `(v * 65535).round()`,
+/// matching the SSAO à-trous chain's INTERIOR ping-pong storage. Shared by [`golden_ssao_atrous`],
+/// the GPU-vs-host test harness, and the `ssao_atrous_edsl_sync` Track-1 sync test (ONE
+/// quantization convention — see the SSAO à-trous plan's "inter-pass precision" note). Round-half-up
+/// matches NVIDIA/Vulkan UNORM store rounding on the non-negative `[0,1]` domain.
+#[inline]
+pub fn quantize_r16_unorm(v: f32) -> u16 {
+    (v.clamp(0.0, 1.0) * 65535.0).round() as u16
+}
+
+/// Decodes an R16_UNORM code point back to `[0,1]` — the GPU's `Load` decode of an R16_UNORM
+/// storage image (the SSAO à-trous chain's interior ping-pong read).
+#[inline]
+pub fn decode_r16_unorm(code: u16) -> f32 {
+    f32::from(code) / 65535.0
+}
+
+/// Quantizes `v` (clamped to `[0,1]`) to an R8_UNORM code point — `(v * 255).round()`, matching
+/// the SSAO à-trous chain's TWO FROZEN ENDPOINTS (the raw `sdf_ssao` gather output, the final
+/// filtered `gSsao` the resolve reads). Shared with [`golden_ssao_attributes`]'s quantization
+/// convention (byte-identical rounding).
+#[inline]
+pub fn quantize_r8_unorm(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// Linear view-Z for a pixel, reconstructed BIT-CONSISTENT with `ssao_atrous.comp.hlsl` /
+/// `shadow_atrous.comp.hlsl`'s `linear_view_z`: PERSPECTIVE `dot(rd, cam_forward) * view_t`,
+/// ORTHO `view_t` (a verbatim no-op — the bit-exact SSAO test fixtures are all ORTHO, so this
+/// switch from the raw ray-param `view_t` gate is numerically free there). `rd` is the pixel's
+/// own ray direction (`composite_ray`'s second return) — NOT the center pixel's, for a
+/// neighbour tap.
+#[inline]
+pub fn linear_view_z(camera: CompositeCamera, rd: [f32; 3], view_t: f32) -> f32 {
+    match camera {
+        CompositeCamera::Perspective { forward, .. } => {
+            let z_view = rd[0] * forward[0] + rd[1] * forward[1] + rd[2] * forward[2];
+            z_view * view_t
+        }
+        CompositeCamera::Ortho => view_t,
+    }
+}
+
+/// ONE SSAO à-trous pass over the WHOLE image — the host oracle mirror of
+/// `ssao_atrous.comp.hlsl`'s `main()` for a single dispatch (`step = 1 << level`). `cur` is the
+/// previous pass's DECODED `[0,1]` buffer (row-major, `img_w * img_h`); `gbuf` supplies each
+/// pixel's `view_t` for the linear-Z reconstruct. Returns the RAW (unquantized) filtered buffer —
+/// [`golden_ssao_atrous`] applies the inter-pass quantization convention around each call.
+fn ssao_atrous_pass(
+    cur: &[f32],
+    gbuf: &[MarcherAttributes],
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    step: i32,
+) -> Vec<f32> {
+    let w = img_w as i32;
+    let h = img_h as i32;
+    let idx_of = |x: i32, y: i32| -> usize { (y * w + x) as usize };
+    let z_at = |x: i32, y: i32| -> f32 {
+        let (_, rd) = composite_ray(x as u32, y as u32, img_w, img_h, camera);
+        linear_view_z(camera, rd, gbuf[idx_of(x, y)].view_t)
+    };
+
+    let mut out = vec![0.0_f32; cur.len()];
+    for py in 0..h {
+        for px in 0..w {
+            let s_c = cur[idx_of(px, py)];
+            let z_c = z_at(px, py);
+
+            // The slope-aware (plane-fit) depth-gate gradient — min-magnitude ONE-SIDED
+            // linear-Z differences at the FIXED ±1 pixel offset (coordinate-clamped: an
+            // image-edge "neighbour" reuses the border pixel — the shader's clamp).
+            let cx = |dx: i32| (px + dx).clamp(0, w - 1);
+            let cy = |dy: i32| (py + dy).clamp(0, h - 1);
+            let z_xp = z_at(cx(1), py);
+            let z_xm = z_at(cx(-1), py);
+            let z_yp = z_at(px, cy(1));
+            let z_ym = z_at(px, cy(-1));
+            let min_mag = |a: f32, b: f32| -> f32 { if a.abs() > b.abs() { b } else { a } };
+            let dzdx = min_mag(z_xp - z_c, z_c - z_xm)
+                .clamp(-SSAO_BLUR_GRAD_CLAMP, SSAO_BLUR_GRAD_CLAMP);
+            let dzdy = min_mag(z_yp - z_c, z_c - z_ym)
+                .clamp(-SSAO_BLUR_GRAD_CLAMP, SSAO_BLUR_GRAD_CLAMP);
+
+            let depth_sigma2 = SSAO_BLUR_DEPTH_SIGMA * SSAO_BLUR_DEPTH_SIGMA;
+            let mut sum = 0.0_f32;
+            let mut wsum = 0.0_f32;
+            for oy in -2..=2i32 {
+                for ox in -2..=2i32 {
+                    let tx = (px + ox * step).clamp(0, w - 1);
+                    let ty = (py + oy * step).clamp(0, h - 1);
+                    let s = cur[idx_of(tx, ty)];
+                    let z_t = z_at(tx, ty);
+                    let h_weight = SSAO_ATROUS_H[(ox + 2) as usize] * SSAO_ATROUS_H[(oy + 2) as usize];
+                    let dz_pred = dzdx * (ox * step) as f32 + dzdy * (oy * step) as f32;
+                    let dz = z_t - z_c - dz_pred;
+                    if dz.abs() > SSAO_BLUR_DEPTH_TOL {
+                        continue; // silhouette gate — HARD reject
+                    }
+                    let w_depth = (1.0 - dz * dz / depth_sigma2).clamp(0.0, 1.0);
+                    let weight = h_weight * w_depth;
+                    sum += weight * s;
+                    wsum += weight;
+                }
             }
-            // The GPU reads `gSsao.Load(c).r` — the R8_UNORM decode of the raw byte.
-            sum += ssao[idx] as f32 / 255.0;
-            cnt += 1.0;
+            out[idx_of(px, py)] = if wsum > SSAO_ATROUS_W_EPS { sum / wsum } else { s_c };
         }
     }
-    sum / cnt.max(1.0)
+    out
+}
+
+/// The multi-pass SSAO à-trous edge-avoiding denoise chain — the host oracle mirror of the
+/// SHIPPED `ssao_atrous.comp.hlsl` dispatched `levels` times (mirrors
+/// `shadow_atrous.comp.hlsl`'s Dammertz filter, transcendental-free — the depth gate is the SAME
+/// plane-fit residual + polynomial falloff the RETIRED inline resolve blur used, now gating
+/// LINEAR-Z (see [`linear_view_z`]) instead of the raw `gViewT` ray-param). `raw_ssao` is the R8
+/// gather output ([`golden_ssao_attributes`] quantized via [`quantize_r8_unorm`]); `levels == 0`
+/// returns `raw_ssao` UNCHANGED (the denoise-off byte-identical path).
+///
+/// INTER-PASS QUANTIZATION (research-specified, ONE shared convention — see [`quantize_r16_unorm`]
+/// / [`quantize_r8_unorm`]): every pass except the LAST rounds its output to R16_UNORM (the
+/// interior ping-pong ring's physical format); the LAST pass rounds to R8_UNORM (the frozen
+/// `gSsao` endpoint). This mirrors the actual GPU store/load precision loss between dispatches,
+/// so the host and GPU results agree within the existing SSAO tolerance band.
+pub fn golden_ssao_atrous(
+    raw_ssao: &[u8],
+    gbuf: &[MarcherAttributes],
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    levels: u32,
+) -> Vec<u8> {
+    let n = (img_w as usize) * (img_h as usize);
+    debug_assert_eq!(raw_ssao.len(), n, "invariant: raw_ssao length must equal img_w * img_h");
+    debug_assert_eq!(gbuf.len(), n, "invariant: gbuf length must equal img_w * img_h");
+
+    if levels == 0 {
+        return raw_ssao.to_vec();
+    }
+
+    let mut cur: Vec<f32> = raw_ssao.iter().map(|&b| f32::from(b) / 255.0).collect();
+    for level in 0..levels {
+        let step = 1i32 << level;
+        let raw_next = ssao_atrous_pass(&cur, gbuf, img_w, img_h, camera, step);
+        let is_last = level + 1 == levels;
+        cur = raw_next
+            .into_iter()
+            .map(|v| {
+                if is_last {
+                    f32::from(quantize_r8_unorm(v)) / 255.0
+                } else {
+                    decode_r16_unorm(quantize_r16_unorm(v))
+                }
+            })
+            .collect();
+    }
+    cur.iter().map(|&v| quantize_r8_unorm(v)).collect()
 }
 
 /// The CPU mirror of the `deferred_pbr` RESOLVE (PBR MVP-2): given the marcher's
@@ -2427,13 +2877,35 @@ pub fn golden_ssao_blur(
 /// resolve loads them back (UNORM decode), decodes the oct normal + 16-bit id, fetches
 /// `materials[id]`, and runs the SAME Cook-Torrance the resolve runs (GGX D + height-
 /// correlated Smith V + Schlick F + Lambert + EnvBRDFApprox ambient; shadow modulates the
-/// direct term, ao the ambient), then re-quantizes via [`pack_rgba`]. On the mask == 0
-/// arms it round-trips `base` byte-identically (the 0%-gate). `rd` is the pixel's ray
-/// direction (the view dir is `-rd`); supply the SAME `composite_ray` the marcher used.
+/// direct term. PBR metal fix: AO is DECOUPLED — diffuse ambient by `ao`, specular ambient
+/// by the roughness-aware [`specular_ao`]), then re-quantizes via [`pack_rgba`]. On the mask == 0 arms
+/// it renders the PROCEDURAL SKY BACKGROUND along `rd` (the constant-path defaults — one
+/// directional + `ground == sky`, exposure 1.0 — reproduce
+/// [`golden_deferred_resolve_table`]'s background arm fed the degenerate 0%-gate table
+/// BYTE-FOR-BYTE). `rd` is the pixel's ray direction (the view dir is `-rd`); supply the
+/// SAME `composite_ray` the marcher used.
 pub fn golden_deferred_resolve(
     attrs: MarcherAttributes,
     rd: [f32; 3],
     materials: &[GoldenMaterial],
+) -> u32 {
+    golden_deferred_resolve_with_pbr(attrs, rd, materials, None)
+}
+
+/// Textured-PBR T6a: [`golden_deferred_resolve`] PLUS an OPTIONAL `gPbr` texel sample
+/// (`[metallic, roughness, ao_modulation, emissive_modulation]`), mirroring the SOFTWARE
+/// resolve's `MATERIAL_FLAG_TEXTURED_BIT` override (`deferred_pbr.hlsl`'s `#if !HWRT` block:
+/// `metallic`/`roughness` are REPLACED, `ao` is MULTIPLIED, `emissive` is MULTIPLIED). The
+/// override applies ONLY when BOTH `gpbr` is `Some` AND `mat.mrr[3]`'s bitcast flags carry
+/// [`GOLDEN_MATERIAL_FLAG_TEXTURED`]. [`golden_deferred_resolve`] is a thin `None`-forwarding
+/// wrapper, so EVERY existing call site is untouched; every EXISTING [`GoldenMaterial`] leaves
+/// `mrr[3] == 0.0` ([`GoldenMaterial::new`]), so this override is a bit-identical no-op for
+/// every current oracle input (the flag=0 byte-identity invariant T6a requires).
+pub fn golden_deferred_resolve_with_pbr(
+    attrs: MarcherAttributes,
+    rd: [f32; 3],
+    materials: &[GoldenMaterial],
+    gpbr: Option<[f32; 4]>,
 ) -> u32 {
     let base = [
         attrs.base_rgb[0] as f32 / 255.0,
@@ -2441,8 +2913,21 @@ pub fn golden_deferred_resolve(
         attrs.base_rgb[2] as f32 / 255.0,
     ];
     if attrs.mask != 1 {
-        // mesh / background / empty: pass the base through byte-identically (the 0%-gate).
-        return pack_rgba(base);
+        // mesh / background / empty: render the SAME analytic sky the LIT arm's ambient
+        // samples (PBR sky background) — the constant-path's degenerate defaults
+        // (`ground == sky == PBR_SKY_DIFFUSE`) fold the hemisphere lerp to a flat no-op
+        // (the SAME fold `golden_deferred_resolve_table`'s LIT-arm ambient uses, see its doc
+        // comment), so only the sun disc varies with `rd`. No exposure multiply (this path's
+        // implicit exposure is 1.0, matching `golden_deferred_resolve_table`'s degenerate
+        // 0%-gate table — `x * 1.0 == x` exactly).
+        let l = v_normalize(PBR_LIGHT_DIR);
+        let sun_k = v_dot(rd, l).clamp(0.0, 1.0).powf(SKY_SUN_EXPONENT);
+        let sky = [
+            PBR_SKY_DIFFUSE[0] + PBR_LIGHT_COLOR[0] * sun_k,
+            PBR_SKY_DIFFUSE[1] + PBR_LIGHT_COLOR[1] * sun_k,
+            PBR_SKY_DIFFUSE[2] + PBR_LIGHT_COLOR[2] * sun_k,
+        ];
+        return pack_rgba(tonemap_and_oetf(sky));
     }
 
     // Decode the world normal from the oct RG bytes (the SAME UNORM round-trip the GPU did).
@@ -2452,9 +2937,31 @@ pub fn golden_deferred_resolve(
         .copied()
         .unwrap_or_default();
 
-    let metallic = mat.mrr[0];
-    let roughness = mat.mrr[1].clamp(0.045, 1.0);
+    let mut metallic = mat.mrr[0];
+    let mut roughness = mat.mrr[1].clamp(0.045, 1.0);
     let reflectance = mat.mrr[2];
+    let shadow = attrs.shadow as f32 / 255.0;
+    let mut ao = attrs.ao as f32 / 255.0;
+    let mut emissive = mat.emissive;
+
+    // Textured-PBR T6a: mirrors `deferred_pbr.hlsl`'s `#if !HWRT` `MATERIAL_FLAG_TEXTURED_BIT`
+    // override — `reflectance` is left UNTOUCHED (no texture channel carries it yet);
+    // `metallic`/`roughness`/`ao`/`emissive` are REASSIGNED, matching the shader's override
+    // exactly (`roughness` re-clamped to the SAME `[0.045, 1.0]` floor). `gpbr.is_none()` (every
+    // [`golden_deferred_resolve`] call) or `mrr[3]`'s flag bit unset (every EXISTING
+    // [`GoldenMaterial`]) makes this a no-op — the values below are then bit-for-bit copies of
+    // their pre-branch assignment (the flag=0 byte-identity invariant).
+    if let Some(pbr) = gpbr
+        && mat.mrr[3].to_bits() & GOLDEN_MATERIAL_FLAG_TEXTURED != 0
+    {
+        metallic = pbr[0];
+        roughness = pbr[1].clamp(0.045, 1.0);
+        ao *= pbr[2];
+        for e in emissive.iter_mut().take(3) {
+            *e *= pbr[3];
+        }
+    }
+
     let a = roughness * roughness;
 
     // f0: dielectric reflectance lerped toward base by metallic; diffuse killed by metallic.
@@ -2478,29 +2985,58 @@ pub fn golden_deferred_resolve(
     let noh = v_dot(n, hvec).clamp(0.0, 1.0);
     let loh = v_dot(l, hvec).clamp(0.0, 1.0);
 
-    let shadow = attrs.shadow as f32 / 255.0;
-    let ao = attrs.ao as f32 / 255.0;
+    // PBR P0-D: the SAME per-pixel term the resolve hoists before its light loop, reused at
+    // both the direct and ambient specular sites below.
+    let dfg = env_brdf_approx(roughness, nov);
+    let energy_comp = multi_scatter_energy_comp(dfg, f0);
+
+    // PBR P1: the reflection vector, hoisted once (mirrors the resolve's hoisted `R`). Unlike
+    // the sky gradient below (which folds to a flat no-op since `PBR_SKY_DIFFUSE ==
+    // PBR_SKY_SPEC`), the sun-disc kernel is NOT degenerate in `r` — it must be computed.
+    let r = v_reflect(rd, n);
+    let sun_k = sun_kernel(r, l, a);
 
     // Direct term: (Lambert diffuse + D*V*F specular) * NoL * shadow * light color.
     let d_term = d_ggx(noh, a);
     let v_term = v_smith_ggx_correlated(nov, nol, a);
     let f_term = f_schlick(loh, f0);
     let pi = core::f32::consts::PI;
+    // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
+    // `specular_ao`'s doc) and reused at both ambient-specular sites below.
+    let spec_ao = specular_ao(nov, roughness, ao);
     let mut lit = [0.0_f32; 3];
     for c in 0..3 {
-        let spec = d_term * v_term * f_term[c];
+        let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
         let diff = diffuse_color[c] * (1.0 / pi);
         let direct = (diff + spec) * (nol * shadow) * PBR_LIGHT_COLOR[c];
 
-        // Ambient: EnvBRDFApprox specular against the sky + hemisphere diffuse, * ao.
-        let dfg = env_brdf_approx(roughness, nov);
-        let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * PBR_SKY_SPEC[c];
-        let diff_ambient = diffuse_color[c] * PBR_SKY_DIFFUSE[c];
-        let ambient = (spec_ambient + diff_ambient) * ao;
+        // Ambient accumulator, mirroring the table oracle's `ambient[c]` (zero-initialized,
+        // the directional's PBR P1 sun disc added first, the sky term second — the SAME
+        // per-light iteration order as the degenerate 2-entry table).
+        let mut ambient = 0.0_f32;
 
-        lit[c] = direct + ambient + mat.emissive[c];
+        // PBR P1: the HDR sun disc — a SECOND, roughness-widened specular response from the
+        // SAME directional light, sampled along `r` instead of `l`. NOT shadow-modulated
+        // (AO-gated only, mirroring the sky ambient's own AO gate). PBR metal fix: a
+        // SPECULAR term, decoupled onto `spec_ao` (not the diffuse `ao`).
+        let sun_spec = (f0[c] * dfg[0] + dfg[1]) * PBR_LIGHT_COLOR[c] * sun_k * energy_comp[c] * SUN_ENV_WEIGHT;
+        ambient += sun_spec * spec_ao;
+
+        // Ambient: EnvBRDFApprox specular against the sky + hemisphere diffuse. PBR P0-B's
+        // reflection-vector gradient reduces to the FLAT `PBR_SKY_SPEC` here because this
+        // degenerate table's sky == ground (`PBR_SKY_DIFFUSE == PBR_SKY_SPEC`, see
+        // `golden_deferred_resolve_table`'s doc): `lerp(ground, sky, refl_hemi) == sky` for
+        // any `refl_hemi` when ground == sky, so the reflect/hemi/steepen computation is a
+        // byte-identical no-op and is skipped. PBR metal fix: diffuse ambient stays on the
+        // diffuse `ao`; specular ambient (a metal's ENTIRE appearance) decouples onto
+        // `spec_ao`.
+        let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * PBR_SKY_SPEC[c] * energy_comp[c];
+        let diff_ambient = diffuse_color[c] * PBR_SKY_DIFFUSE[c];
+        ambient += diff_ambient * ao + spec_ambient * spec_ao;
+
+        lit[c] = direct + ambient + emissive[c];
     }
-    pack_rgba(lit)
+    pack_rgba(tonemap_and_oetf(lit))
 }
 
 /// The host mirror of the resolve's Render P7 SSAO ambient-AO combine (`deferred_pbr.hlsl`):
@@ -2541,13 +3077,16 @@ pub(crate) fn ssao_combine(ssao_mode: u32, ao: f32, view_t: f32, ssao: f32) -> f
 ///
 /// # W1 byte-identity op-order (HARD requirement)
 /// The per-light direct expression is `(diff + spec) * (nol * shadow) * color` with the
-/// accumulator initialized to `0.0`; the sky ambient is `(spec_ambient + diff_ambient) *
-/// ao` accumulated from `0.0`; the FINAL `* exposure` is literally last. Because
-/// `0.0 + x == x` and `x * 1.0 == x` are exact, a degenerate table — one directional
-/// (dir = +Z, color = white, illuminance = 1.0) + one sky (`sky == ground ==`
-/// [`PBR_SKY_DIFFUSE`]) with exposure 1.0 — reproduces [`golden_deferred_resolve`]
-/// BYTE-FOR-BYTE (the directional matches `LIGHT_DIR`/`LIGHT_COLOR`; the sky `lerp` folds
-/// since sky == ground). No reassociation is permitted.
+/// accumulator initialized to `0.0`; the sky ambient is `diff_ambient * ao + spec_ambient *
+/// spec_ao` (PBR metal fix: decoupled diffuse/specular AO) accumulated from `0.0`; the
+/// FINAL `* exposure` is literally last. Because `0.0 + x == x` and `x * 1.0 == x` are
+/// exact, a degenerate table — one directional (dir = +Z, color = white, illuminance = 1.0)
+/// plus one sky (`sky == ground ==` [`PBR_SKY_DIFFUSE`]) with exposure 1.0 — reproduces
+/// [`golden_deferred_resolve`] BYTE-FOR-BYTE (the directional matches
+/// `LIGHT_DIR`/`LIGHT_COLOR`; the sky `lerp` folds since sky == ground). No reassociation is
+/// permitted. This BYTE-FOR-BYTE equivalence covers the mask == 0 arm too:
+/// `golden_deferred_resolve`'s background sky uses the SAME degenerate defaults (see its
+/// doc), so the mask == 0 sweep folds identically.
 #[allow(clippy::too_many_arguments)]
 pub fn golden_deferred_resolve_table(
     attrs: MarcherAttributes,
@@ -2588,8 +3127,10 @@ pub fn golden_deferred_resolve_table_ssao(
         attrs.base_rgb[2] as f32 / 255.0,
     ];
     if attrs.mask != 1 {
-        // mesh / background / empty: pass the base through byte-identically (the 0%-gate).
-        return pack_rgba(base);
+        // mesh / background / empty: render the PROCEDURAL SKY along the view ray (mirrors
+        // the resolve's background branch) when the table carries a SKY entry; otherwise
+        // keep the byte-identical dark pass-through (the 0%-gate: no SkyLight, no sky).
+        return golden_sky_background(rd, header, lights).unwrap_or_else(|| pack_rgba(base));
     }
 
     let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
@@ -2627,6 +3168,17 @@ pub fn golden_deferred_resolve_table_ssao(
     // The hemisphere "up" the sky lerp interpolates against (world up).
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
     let hemi = v_dot(n, UP) * 0.5 + 0.5;
+    // PBR P0-D: the SAME per-pixel term the resolve hoists before its light loop, reused at
+    // every specular site below (direct directional/point/spot + sky ambient).
+    let dfg_v = env_brdf_approx(roughness, nov);
+    let energy_comp = multi_scatter_energy_comp(dfg_v, f0);
+    // PBR P1: the reflection vector, hoisted ONCE (mirrors the resolve's hoisted `R`) — feeds
+    // BOTH the sky-gradient ambient specular below AND the per-directional HDR sun-disc term.
+    // reflect(-v, n) == reflect(rd, n) since v == -rd (double negation is exact).
+    let r = v_reflect(rd, n);
+    // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
+    // `specular_ao`'s doc) and reused at every ambient-specular site below.
+    let spec_ao = specular_ao(nov, roughness, ao_final);
 
     let mut lit_direct = [0.0_f32; 3];
     let mut ambient = [0.0_f32; 3];
@@ -2642,22 +3194,40 @@ pub fn golden_deferred_resolve_table_ssao(
                 let d_term = d_ggx(noh, a);
                 let v_term = v_smith_ggx_correlated(nov, nol, a);
                 let f_term = f_schlick(loh, f0);
+                // PBR P1: the HDR sun-disc kernel for THIS directional light, sampled along
+                // `r` (not `l`) — the analytic environment's bright-sun response.
+                let sun_k = sun_kernel(r, l, a);
                 for c in 0..3 {
-                    let spec = d_term * v_term * f_term[c];
+                    let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
                     let diff = diffuse_color[c] * (1.0 / pi);
                     lit_direct[c] += (diff + spec) * (nol * shadow) * li.color_cone[c];
+                    // PBR P1: a SECOND, roughness-widened specular response from this SAME
+                    // light, added to the ambient — NOT shadow-modulated (AO-gated only,
+                    // mirroring the sky ambient specular's own AO gate below).
+                    let sun_spec = (f0[c] * dfg_v[0] + dfg_v[1]) * li.color_cone[c] * sun_k * energy_comp[c] * SUN_ENV_WEIGHT;
+                    ambient[c] += sun_spec * spec_ao;
                 }
             }
             GOLDEN_LIGHT_KIND_SKY => {
+                // PBR P0-B: the ambient specular samples the sky/ground gradient along the
+                // REFLECTION vector `R` (PBR P1: hoisted above the loop as `r`; a metal must
+                // mirror its surroundings), while the diffuse hemisphere stays along `n`
+                // (Lambert integrates the whole hemisphere).
                 let sky = [li.color_cone[0], li.color_cone[1], li.color_cone[2]];
                 let ground = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
-                let dfg = env_brdf_approx(roughness, nov);
+                let refl_hemi_lin = v_dot(r, UP) * 0.5 + 0.5;
+                // PBR metal fix: steepen the reflected hemisphere (smoothstep) so a metal
+                // sweeps a real bright-cap -> dark-belly gradient instead of a flat mid-tone.
+                // The DIFFUSE `hemi` above stays LINEAR — only the specular lobe steepens.
+                let refl_hemi = refl_hemi_lin * refl_hemi_lin * (3.0 - 2.0 * refl_hemi_lin);
                 for c in 0..3 {
-                    // hemisphere diffuse = lerp(ground, sky, hemi); spec = EnvBRDFApprox.
+                    // hemisphere diffuse = lerp(ground, sky, hemi); spec = EnvBRDFApprox
+                    // against lerp(ground, sky, refl_hemi), P0-D energy-compensated.
                     let hemi_c = ground[c] + (sky[c] - ground[c]) * hemi;
-                    let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * sky[c];
+                    let refl_c = ground[c] + (sky[c] - ground[c]) * refl_hemi;
+                    let spec_ambient = (f0[c] * dfg_v[0] + dfg_v[1]) * refl_c * energy_comp[c];
                     let diff_ambient = diffuse_color[c] * hemi_c;
-                    ambient[c] += (spec_ambient + diff_ambient) * ao_final;
+                    ambient[c] += diff_ambient * ao_final + spec_ambient * spec_ao;
                 }
             }
             // Point/spot (kinds 1/2) are the L0b block (handled after this loop).
@@ -2716,7 +3286,7 @@ pub fn golden_deferred_resolve_table_ssao(
         let v_term = v_smith_ggx_correlated(nov, nol, a);
         let f_term = f_schlick(loh, f0);
         for c in 0..3 {
-            let spec = d_term * v_term * f_term[c];
+            let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
             let diff = diffuse_color[c] * (1.0 / pi);
             lit_direct[c] += (diff + spec) * (nol * shadow) * atten * li.color_cone[c];
         }
@@ -2727,7 +3297,7 @@ pub fn golden_deferred_resolve_table_ssao(
     for c in 0..3 {
         lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
     }
-    pack_rgba(lit)
+    pack_rgba(tonemap_and_oetf(lit))
 }
 
 /// The P6 R1 MULTI-LIGHT SDF-shadow CPU mirror of the `deferred_pbr` resolve — the
@@ -2786,7 +3356,10 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
         attrs.base_rgb[2] as f32 / 255.0,
     ];
     if attrs.mask != 1 {
-        return pack_rgba(base);
+        // mesh / background / empty: render the PROCEDURAL SKY along the view ray (mirrors
+        // the resolve's background branch) when the table carries a SKY entry; otherwise
+        // keep the byte-identical dark pass-through (the 0%-gate: no SkyLight, no sky).
+        return golden_sky_background(rd, header, lights).unwrap_or_else(|| pack_rgba(base));
     }
 
     let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
@@ -2821,6 +3394,17 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
     let pi = core::f32::consts::PI;
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
     let hemi = v_dot(n, UP) * 0.5 + 0.5;
+    // PBR P0-D: the SAME per-pixel term the resolve hoists before its light loop, reused at
+    // every specular site below (direct directional/point/spot + sky ambient).
+    let dfg_v = env_brdf_approx(roughness, nov);
+    let energy_comp = multi_scatter_energy_comp(dfg_v, f0);
+    // PBR P1: the reflection vector, hoisted ONCE (mirrors the resolve's hoisted `R`) — feeds
+    // BOTH the sky-gradient ambient specular below AND the per-directional HDR sun-disc term.
+    // reflect(-v, n) == reflect(rd, n) since v == -rd (double negation is exact).
+    let r = v_reflect(rd, n);
+    // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
+    // `specular_ao`'s doc) and reused at every ambient-specular site below.
+    let spec_ao = specular_ao(nov, roughness, ao_final);
 
     // P6 R1: the shadow_mode gate + the surface world position `P` (hoisted, mirroring the
     // shader) + the dominant-N march counter.
@@ -2868,21 +3452,37 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
                 let d_term = d_ggx(noh, a);
                 let v_term = v_smith_ggx_correlated(nov, nol, a);
                 let f_term = f_schlick(loh, f0);
+                // PBR P1: the HDR sun-disc kernel for THIS directional light, sampled along
+                // `r` (not `l`) — the analytic environment's bright-sun response.
+                let sun_k = sun_kernel(r, l, a);
                 for c in 0..3 {
-                    let spec = d_term * v_term * f_term[c];
+                    let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
                     let diff = diffuse_color[c] * (1.0 / pi);
                     lit_direct[c] += (diff + spec) * (nol * vis) * li.color_cone[c];
+                    // PBR P1: a SECOND, roughness-widened specular response from this SAME
+                    // light, added to the ambient — NOT shadow-modulated (AO-gated only,
+                    // mirroring the sky ambient specular's own AO gate below).
+                    let sun_spec = (f0[c] * dfg_v[0] + dfg_v[1]) * li.color_cone[c] * sun_k * energy_comp[c] * SUN_ENV_WEIGHT;
+                    ambient[c] += sun_spec * spec_ao;
                 }
             }
             GOLDEN_LIGHT_KIND_SKY => {
+                // PBR P0-B: ambient specular samples the sky/ground gradient along `R` (PBR
+                // P1: hoisted above the loop as `r`) instead of the flat sky color; diffuse
+                // stays along n.
                 let sky = [li.color_cone[0], li.color_cone[1], li.color_cone[2]];
                 let ground = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
-                let dfg = env_brdf_approx(roughness, nov);
+                let refl_hemi_lin = v_dot(r, UP) * 0.5 + 0.5;
+                // PBR metal fix: steepen the reflected hemisphere (smoothstep) so a metal
+                // sweeps a real bright-cap -> dark-belly gradient instead of a flat mid-tone.
+                // The DIFFUSE `hemi` above stays LINEAR — only the specular lobe steepens.
+                let refl_hemi = refl_hemi_lin * refl_hemi_lin * (3.0 - 2.0 * refl_hemi_lin);
                 for c in 0..3 {
                     let hemi_c = ground[c] + (sky[c] - ground[c]) * hemi;
-                    let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * sky[c];
+                    let refl_c = ground[c] + (sky[c] - ground[c]) * refl_hemi;
+                    let spec_ambient = (f0[c] * dfg_v[0] + dfg_v[1]) * refl_c * energy_comp[c];
                     let diff_ambient = diffuse_color[c] * hemi_c;
-                    ambient[c] += (spec_ambient + diff_ambient) * ao_final;
+                    ambient[c] += diff_ambient * ao_final + spec_ambient * spec_ao;
                 }
             }
             _ => {}
@@ -2937,7 +3537,7 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
             marched += 1;
         }
         for c in 0..3 {
-            let spec = d_term * v_term * f_term[c];
+            let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
             let diff = diffuse_color[c] * (1.0 / pi);
             lit_direct[c] += (diff + spec) * (nol * vis) * atten * li.color_cone[c];
         }
@@ -2948,7 +3548,7 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
     for c in 0..3 {
         lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
     }
-    pack_rgba(lit)
+    pack_rgba(tonemap_and_oetf(lit))
 }
 
 /// The host cluster-cull config (mirrors `boyko_render::light::ClusterConfig`). The vulkan
@@ -3046,7 +3646,13 @@ pub(crate) fn golden_slice_view_z(k: u32, cfg: &GoldenClusterConfig) -> f32 {
 }
 
 /// Squared distance from a point to an AABB (0 inside) — mirrors the shader's
-/// `sq_dist_point_aabb` (the canonical clustered-cull sphere-vs-AABB test).
+/// `sq_dist_point_aabb` (the canonical clustered-cull sphere-vs-AABB test). Since H1.6
+/// (`docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` D10) the shader computes this exact sum through
+/// explicit, `NoContraction`-decorated `OpFSub`/`OpFMul`/`OpFAdd` rather than `dot()`, in the
+/// identical `((dx^2+dy^2)+dz^2)` association this loop accumulates — Rust `f32` never fuses
+/// `a*b+c` by default, so the two sides are now bit-exact BY CONSTRUCTION, not by accident of a
+/// particular driver's `OpDot` lowering (the same argument `shaders/ddgi_resolve.hlsli:136-141`
+/// already carries for DDGI).
 #[inline]
 pub(crate) fn golden_sq_dist_point_aabb(c: [f32; 3], aabb_min: [f32; 3], aabb_max: [f32; 3]) -> f32 {
     let mut s = 0.0_f32;
@@ -3055,6 +3661,45 @@ pub(crate) fn golden_sq_dist_point_aabb(c: [f32; 3], aabb_min: [f32; 3], aabb_ma
         s += d * d;
     }
     s
+}
+
+/// Builds one froxel's world-space AABB from its screen-tile corners at the slice's near/far
+/// view-z (mirrors `cluster_cull.hlsl`'s phase-0 unprojection — the SAME `composite_ray` the
+/// resolve uses). Shared verbatim by [`golden_cluster_cull`] and [`golden_cluster_cull_hier`]
+/// so the two host mirrors' phase 0 is bit-identical BY CONSTRUCTION rather than by
+/// re-derivation — exactly the property the hierarchical design's D2 relies on (the coarse AABB
+/// is a reduction over values already computed here, never a second geometric computation).
+pub fn golden_froxel_aabb(
+    x: u32,
+    y: u32,
+    z: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    cfg: &GoldenClusterConfig,
+) -> ([f32; 3], [f32; 3]) {
+    // The tile's inclusive corner pixels (mirror the cull's px0/py0/px1/py1).
+    let px0 = (x * img_w) / cfg.dim_x;
+    let py0 = (y * img_h) / cfg.dim_y;
+    let px1 = (((x + 1) * img_w) / cfg.dim_x).saturating_sub(1).max(px0);
+    let py1 = (((y + 1) * img_h) / cfg.dim_y).saturating_sub(1).max(py0);
+    let corners = [(px0, py0), (px1, py0), (px0, py1), (px1, py1)];
+    let vz_near = golden_slice_view_z(z, cfg);
+    let vz_far = golden_slice_view_z(z + 1, cfg);
+    let mut aabb_min = [1.0e30_f32; 3];
+    let mut aabb_max = [-1.0e30_f32; 3];
+    for &(cx, cy) in &corners {
+        let (ro, rd) = composite_ray(cx, cy, img_w, img_h, camera);
+        for &vz in &[vz_near, vz_far] {
+            let t = golden_view_z_to_t(vz, rd, camera);
+            let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+            for i in 0..3 {
+                aabb_min[i] = aabb_min[i].min(p[i]);
+                aabb_max[i] = aabb_max[i].max(p[i]);
+            }
+        }
+    }
+    (aabb_min, aabb_max)
 }
 
 /// The host clustered froxel light cull (mirrors `cluster_cull.hlsl`). For each froxel it
@@ -3067,6 +3712,17 @@ pub(crate) fn golden_sq_dist_point_aabb(c: [f32; 3], aabb_min: [f32; 3], aabb_ma
 /// The cull is geometric + deterministic; the resolve's per-froxel sum is order-stable
 /// (table order), so a froxel whose set contains every in-range light reproduces the
 /// brute-force resolve bit-for-bit.
+///
+/// `inject_nan_froxel`, when `Some(fi)`, overwrites froxel `fi`'s own AABB to an all-NaN box
+/// (bit pattern [`GOLDEN_QUIET_NAN_BITS`], matching HLSL's `asfloat(0x7FC00000u)`) immediately
+/// after phase 0 — the "base module" leg of H3 mutation (vii)'s two-sided, three-implementation
+/// fault injection (plan §8.3 "Mutation (vii) in full", §8.10 item 5: "mirrored in the HIER
+/// module, the base module AND the host mirror"). Mirrors [`golden_cluster_cull_hier`]'s own
+/// `inject_nan_froxel` parameter so the SAME poisoned froxel can be compared between the flat
+/// oracle and the hierarchical mirror's mitigated arm (§5 Case B's corollary: froxel `fi`'s own
+/// fine test computes the identical all-NaN `sq_dist` in both, so an equally-poisoned flat arm is
+/// required for the comparison to mean anything). `None` performs no injection — every existing
+/// call site.
 pub fn golden_cluster_cull(
     img_w: u32,
     img_h: u32,
@@ -3074,36 +3730,24 @@ pub fn golden_cluster_cull(
     cfg: &GoldenClusterConfig,
     header: &GoldenLightHeader,
     lights: &[GoldenLight],
+    inject_nan_froxel: Option<u32>,
 ) -> Vec<Vec<u32>> {
     let count = cfg.cluster_count() as usize;
     let mut grid: Vec<Vec<u32>> = vec![Vec::new(); count];
     let l0a = header.l0a_count();
     let total = header.light_count();
+    let nan = f32::from_bits(GOLDEN_QUIET_NAN_BITS);
     for y in 0..cfg.dim_y {
         for x in 0..cfg.dim_x {
-            // The tile's inclusive corner pixels (mirror the cull's px0/py0/px1/py1).
-            let px0 = (x * img_w) / cfg.dim_x;
-            let py0 = (y * img_h) / cfg.dim_y;
-            let px1 = (((x + 1) * img_w) / cfg.dim_x).saturating_sub(1).max(px0);
-            let py1 = (((y + 1) * img_h) / cfg.dim_y).saturating_sub(1).max(py0);
-            let corners = [(px0, py0), (px1, py0), (px0, py1), (px1, py1)];
             for z in 0..cfg.dim_z {
-                let vz_near = golden_slice_view_z(z, cfg);
-                let vz_far = golden_slice_view_z(z + 1, cfg);
-                let mut aabb_min = [1.0e30_f32; 3];
-                let mut aabb_max = [-1.0e30_f32; 3];
-                for &(cx, cy) in &corners {
-                    let (ro, rd) = composite_ray(cx, cy, img_w, img_h, camera);
-                    for &vz in &[vz_near, vz_far] {
-                        let t = golden_view_z_to_t(vz, rd, camera);
-                        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
-                        for i in 0..3 {
-                            aabb_min[i] = aabb_min[i].min(p[i]);
-                            aabb_max[i] = aabb_max[i].max(p[i]);
-                        }
-                    }
+                let fi = golden_cluster_index(x, y, z, cfg.dim_x, cfg.dim_z);
+                let (mut aabb_min, mut aabb_max) =
+                    golden_froxel_aabb(x, y, z, img_w, img_h, camera, cfg);
+                if inject_nan_froxel == Some(fi) {
+                    aabb_min = [nan; 3];
+                    aabb_max = [nan; 3];
                 }
-                let cell = &mut grid[golden_cluster_index(x, y, z, cfg.dim_x, cfg.dim_z) as usize];
+                let cell = &mut grid[fi as usize];
                 for i in l0a..total {
                     let li = &lights[i as usize];
                     let kind = li.kind();
@@ -3122,6 +3766,344 @@ pub fn golden_cluster_cull(
         }
     }
     grid
+}
+
+/// Host mirror of the HIER shader's group width (VB-P1e design §4,
+/// `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md`) — `[numthreads(HIER_TPG, 1, 1)]` under `-D HIER=1`
+/// (`cluster_cull.hlsl:176`, `#define HIER_TPG 256u`, `cluster_cull.hlsl:147`). Rung H2 shipped the
+/// GPU-side pin: `cluster_cull.hlsl`'s `#if (HIER_TPG) != 256u` → `#error` (`cluster_cull.hlsl:157`)
+/// keeps the shader's own literal from silently drifting off this value, and
+/// `cluster_cull_hier_dis_gate.rs`'s gate (h) independently pins the emitted
+/// `OpExecutionMode %main LocalSize 256 1 1` on the committed `.spv` itself, since neither the
+/// `#error` guard nor the source-level `numthreads`/`HIER_TPG` tie protects a stale or
+/// hand-crafted artifact.
+pub const HIER_GROUP_THREADS: u32 = 256;
+
+/// Host mirror of `HIER_MASK_WORDS` (VB-P1e design D6): `MAX_LIGHTS / 32`
+/// (`cluster_cull.hlsl:148`, `#define HIER_MASK_WORDS 32u`). `boyko_render::light.rs:51`
+/// (`pub const MAX_LIGHTS: u32 = 1024`) carries no cross-check with THIS mirror today — the vulkan
+/// crate cannot depend on `boyko_render` (see [`GoldenClusterConfig`]'s own doc comment), so this
+/// stays a separately mirrored literal, not a shared constant. Rung H2 shipped the equivalent
+/// compile-time pin on the `boyko_render` side instead: `boyko_render::light.rs:65-69`
+/// (`const _: () = assert!(MAX_LIGHTS == HIER_MASK_WORDS * 32, ..)`, against `light.rs`'s own
+/// `HIER_MASK_WORDS` at `light.rs:56`) enforces the equality D6 requires at the one call site that
+/// CAN see both constants.
+pub const HIER_MASK_WORDS: u32 = 32;
+
+/// Host mirror of `HIER_MASK_BITS` (`HIER_MASK_WORDS * 32`) — equal to `MAX_LIGHTS` (1024) by
+/// D6's pinned equality, and the bound D7's `ps_room` clamp is derived from.
+pub const HIER_MASK_BITS: u32 = HIER_MASK_WORDS * 32;
+
+/// `gps` — HIER groups per z-slice (D3): `max(1, ceil(dim_x * dim_y / HIER_GROUP_THREADS))`.
+/// The host mirror of the shader's `uint gps = max(1u, (bdx*bdy+255u)/256u)`, in the SAME
+/// arithmetic form D11's `ClusterConfig::hier_group_count` uses — checkable by eye against the
+/// shader, not merely equivalent to it (Rev 5 P2-4).
+// The `+ HIER_GROUP_THREADS - 1) / HIER_GROUP_THREADS` form is `div_ceil` written out, kept
+// deliberately: D11's own Rev 5 P2-4 fix rejects `.div_ceil()` here — its const-stability is "a
+// separate question this plan should not depend on" — and the written-out form is the shader's
+// `(bdx*bdy+255u)/256u` TOKEN-FOR-TOKEN, which is the whole point (a reviewer checks it by eye
+// against the HLSL, not by trusting an equivalence proof).
+#[allow(clippy::manual_div_ceil)]
+#[inline]
+pub const fn golden_hier_groups_per_slice(dim_x: u32, dim_y: u32) -> u32 {
+    let gps = (dim_x * dim_y + HIER_GROUP_THREADS - 1) / HIER_GROUP_THREADS;
+    if gps == 0 { 1 } else { gps }
+}
+
+/// Pure-arithmetic replica of the HIER shader's thread-to-froxel map for one `(group_id, lane)`
+/// pair — D3's `gps`/`slice`/`s`/`x`/`y`/`z`/`fi` plus D8's three-term `valid` predicate.
+/// Returns `(x, y, z, fi, valid)`.
+///
+/// **Scope (H1 assertion 7, §8.6).** This is a Rust RE-IMPLEMENTATION of the shader's walk, not
+/// a pin on the HLSL — if the shader and this mirror drift, only H3 (device) sees it. It exists
+/// so degenerate/non-64-aligned dims matrices (`16x9x23`, `1x1x1`, `0x0x0`, `255x255x255`) can be
+/// swept with no camera, no lights and no GPU.
+// The `if dim_x != 0 { .. } else { 0 }` guards are the shader's own D8-obligation ternaries
+// (`x = (bdx != 0u) ? (s % bdx) : 0u;`, `y = (bdx != 0u) ? (s / bdx) : 0u;`) written out
+// token-for-token rather than as `checked_div`/`checked_rem` — a reviewer checks this function
+// against the HLSL by eye (§8.6 assertion 7's own stated scope), and a `checked_*` idiom would
+// break that direct correspondence.
+#[allow(clippy::manual_checked_ops)]
+#[inline]
+pub fn golden_hier_thread_map(
+    group_id: u32,
+    lane: u32,
+    dim_x: u32,
+    dim_y: u32,
+    dim_z: u32,
+    capacity: u32,
+) -> (u32, u32, u32, u32, bool) {
+    let gps = golden_hier_groups_per_slice(dim_x, dim_y);
+    let slice = group_id / gps;
+    let s = (group_id % gps) * HIER_GROUP_THREADS + lane;
+    let x = if dim_x != 0 { s % dim_x } else { 0 };
+    let y = if dim_x != 0 { s / dim_x } else { 0 };
+    let z = slice;
+    let fi = golden_cluster_index(x, y, z, dim_x, dim_z);
+    let valid = s < dim_x * dim_y && slice < dim_z && fi < capacity;
+    (x, y, z, fi, valid)
+}
+
+/// Host mirror of the BASE cull arm's group width — `cluster_cull.hlsl`'s `[numthreads(64,1,1)]`
+/// on the no-`-D` compile, and the divisor every dispatch site uses
+/// (`scene.cluster_count.div_ceil(LIGHT_CULL_LOCAL_SIZE_X)` in `passes/{vb,gbuffer,forward}.rs`).
+/// Mirrors [`HIER_GROUP_THREADS`]'s role for the `-D HIER=1` arm.
+pub const BASE_GROUP_THREADS: u32 = 64;
+
+/// Pure-arithmetic replica of the BASE cull arm's thread-to-froxel map for one dispatch thread
+/// — `cluster_cull.hlsl`'s `#else` prologue: the VB-P1j capacity-clamped `cluster_count`, the
+/// `fi >= cluster_count` early return, and the `(x, y, z)` delinearization behind it. Returns
+/// `(x, y, z, fi, valid)`, the SAME shape [`golden_hier_thread_map`] returns for the other arm.
+///
+/// `capacity` is `ClusterGrid`'s own element count — the buffer's BOOT size, which the shader
+/// reads back with `GetDimensions` (SPIR-V `OpArrayLength`) rather than from any push word.
+/// `dim_x`/`dim_y`/`dim_z` are the LIVE light-table header's dims, which
+/// `sync_cluster_light_gate` republishes every frame from the LIVE `ClusterConfig` and which a
+/// post-boot edit can therefore move away from `capacity`. The VB-P1j clamp is exactly the `min`
+/// below: without it, `valid` holds for `fi` up to `live_cc - 1`, which exceeds `capacity - 1`
+/// whenever the live dims grow — the out-of-bounds device write this mirror exists to pin.
+///
+/// **Scope (mirrors [`golden_hier_thread_map`]'s own stated scope).** This is a Rust
+/// RE-IMPLEMENTATION of the shader's prologue, not a pin on the HLSL: if the shader and this
+/// mirror drift, only a device run sees it. The artifact-level pin that the clamp is PRESENT in
+/// the committed `.spv` is `cluster_cull_spv_sync.rs`'s census (`op_array_length`), which counts
+/// the emitted `OpArrayLength` on the real module.
+// The delinearization is written out in the shader's own `% dim_z` / `/ dim_z` / `% dim_x` /
+// `/ dim_x` form rather than via a helper, for the same reason `golden_hier_thread_map` writes
+// its ternaries out: a reviewer checks this function against the HLSL by eye.
+#[inline]
+pub fn golden_base_thread_map(
+    tid: u32,
+    dim_x: u32,
+    dim_y: u32,
+    dim_z: u32,
+    capacity: u32,
+) -> (u32, u32, u32, u32, bool) {
+    // `uint cluster_count = min(cp.dim_x * cp.dim_y * cp.dim_z, grid_capacity);`
+    let cluster_count = (dim_x * dim_y * dim_z).min(capacity);
+    let fi = tid;
+    if fi >= cluster_count {
+        // `if (fi >= cluster_count) { return; }` — nothing below the early return executes, so
+        // the delinearization (which divides by `dim_z`/`dim_x`) is never reached on a
+        // degenerate all-zero-dims header either.
+        return (0, 0, 0, fi, false);
+    }
+    let z = fi % dim_z;
+    let xy = fi / dim_z;
+    let x = xy % dim_x;
+    let y = xy / dim_x;
+    (x, y, z, fi, true)
+}
+
+/// Aggregate pair-count diagnostics [`golden_cluster_cull_hier`] returns alongside its
+/// per-froxel index grid — the raw numerator H1's selectivity gate
+/// (`pairs_hier() as f64 / (capacity * ps_n) as f64 <= 1.0/8.0`, §8.6 assertion 5) is computed
+/// from.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HierCullStats {
+    /// Groups dispatched (`gps * dim_z`, D3).
+    pub groups: u32,
+    /// The point/spot scan range after D7's clamp: `min(ps_total, ps_room)`. Group-uniform —
+    /// evaluated once from the header, identical for every group in the dispatch.
+    pub ps_n: u32,
+    /// Total `valid` `(group, lane)` pairs across the whole dispatch — the count H1 assertion
+    /// 2's second clause pins against `capacity` (§8.2(B1): totality + this count together
+    /// derive device exactly-once).
+    pub valid_lanes: u32,
+    /// Coarse (froxel-GROUP, light) pair tests — phase 4. Exactly `groups * ps_n`, since `ps_n`
+    /// is group-uniform and phase 4 tests it once per group (D7).
+    pub pairs_coarse: u64,
+    /// Fine (froxel, light) pair tests — phase 5. Summed over every VALID froxel's own
+    /// coarse-accepted candidate count (the group's coarse-mask population, shared by every
+    /// froxel of that group — D8 review item 6).
+    pub pairs_fine: u64,
+    /// Per-group coarse-accept count (phase 4's popcount of the group's coarse mask), indexed by
+    /// `group_id` in `[0, groups)` — deliverable 8 (plan §8.6, Rev 6). This is a PRECONDITION
+    /// SOURCE, not a diagnostic: H3 mutation (vii)'s rig requirement needs "group 0's coarse box
+    /// rejects >= 1 punctual light" (`group_coarse_accept[0] < ps_n`) asserted from the
+    /// `inject_nan_froxel: None` run *before* the arm comparison is evaluated, so a vacuous run
+    /// (the coarse box already accepts everything) is reported as invalid rather than a pass
+    /// (plan §8.3 "Mutation (vii) in full", §8.10 item 5b). Not a new gate: `pairs_fine` is
+    /// already the sum of these counts over valid froxels, so assertion 5's selectivity number is
+    /// unchanged — this only exposes the per-group decomposition already computed.
+    pub group_coarse_accept: Vec<u32>,
+}
+
+impl HierCullStats {
+    /// Total (coarse + fine) pair tests the hierarchical arm performs — the selectivity gate's
+    /// numerator.
+    #[inline]
+    pub const fn pairs_hier(&self) -> u64 {
+        self.pairs_coarse + self.pairs_fine
+    }
+}
+
+/// The IEEE-754 quiet-NaN bit pattern matching HLSL's `asfloat(0x7FC00000u)` literal — used by
+/// [`golden_cluster_cull_hier`]'s `inject_nan_froxel` poison (§8.3 "Mutation (vii) in full":
+/// "NOT `0.0/0.0`, which is a constant expression a compiler may fold or reject").
+const GOLDEN_QUIET_NAN_BITS: u32 = 0x7FC0_0000;
+
+/// The host mirror of the `-D HIER=1` block-decomposed cull (VB-P1e design; §4/§5/D2/D3/D7/D8/D9,
+/// `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` §8.6 rung H1). Builds the SAME per-froxel AABB as
+/// [`golden_cluster_cull`] (phase 0, shared via [`golden_froxel_aabb`] so the two host mirrors
+/// cannot drift from each other), partitions froxels into [`HIER_GROUP_THREADS`]-lane groups per
+/// D3's `gps`/`slice`/`s` map ([`golden_hier_thread_map`] — the FULL form, not the degenerate
+/// `slice = gid; s = lane` collapse the default 16x9x24 grid happens to reduce to), folds each
+/// group's lanes into ONE coarse AABB — the componentwise min/max of the lanes' OWN
+/// already-computed (and already-substituted) AABBs, never a recomputation from block geometry
+/// (D2) — tests the point/spot light table against that coarse box once per group (phase 4), and
+/// re-walks only the coarse-accepted candidates, ASCENDING (table order), with the
+/// token-identical fine test for every valid froxel (phase 5).
+///
+/// D8's two-constant substitution, applied per lane before the fold:
+/// - `!valid` (no froxel): the min/max IDENTITY `(+1e30, -1e30)` — contributes nothing to the
+///   fold, so padding lanes never widen the coarse box;
+/// - `valid && !finite` (some component of the lane's own AABB has `abs > 1e30` — true for NaN
+///   and for `+-inf`, since an ordered compare is false for both): the ABSORBING
+///   `(-f32::MAX, +f32::MAX)` — forces the coarse box to the universe, so the WHOLE group
+///   degrades to exactly the flat arm's walk (§5 Case B). **`f32::MAX`, not `1e30`** — the Rev 5
+///   fix; `1e30` is the finiteness THRESHOLD classifying the lane, a different constant serving a
+///   different purpose, and is never the value a poisoned lane stores;
+/// - `valid && finite`: the lane's own AABB, unmodified.
+///
+/// `inject_nan_froxel`, when `Some(fi)`, overwrites froxel `fi`'s OWN (pre-substitution) AABB to
+/// an all-NaN box on all six components (bit pattern [`GOLDEN_QUIET_NAN_BITS`], matching HLSL's
+/// `asfloat(0x7FC00000u)`) immediately after phase 0 — the host leg of mutation (vii)'s
+/// two-sided, three-implementation fault injection (§8.3 "Mutation (vii) in full": mirrored
+/// identically in the HIER module, the base module and this host mirror). `None` performs no
+/// injection — every existing call site.
+///
+/// Returns the per-froxel index grid — same shape and ordering contract as
+/// [`golden_cluster_cull`] (flat-indexed by [`golden_cluster_index`], ascending table order,
+/// clamped to `cfg.max_lights_per_cluster`) — alongside [`HierCullStats`] for the selectivity
+/// gate. `header`/`cfg` describe a BOOT-sourced dispatch with no boot/live skew (D11's skew class
+/// is H3's concern, on device; this mirror always uses `cfg.cluster_count()` as the write-bound
+/// `capacity`, matching a well-formed, non-skewed frame).
+pub fn golden_cluster_cull_hier(
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    cfg: &GoldenClusterConfig,
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+    inject_nan_froxel: Option<u32>,
+) -> (Vec<Vec<u32>>, HierCullStats) {
+    let capacity = cfg.cluster_count();
+    let mut grid: Vec<Vec<u32>> = vec![Vec::new(); capacity as usize];
+
+    let ps_begin = header.l0a_count();
+    let ps_room = HIER_MASK_BITS.saturating_sub(ps_begin);
+    let ps_total = header.light_count().saturating_sub(ps_begin);
+    let ps_n = ps_total.min(ps_room);
+
+    let gps = golden_hier_groups_per_slice(cfg.dim_x, cfg.dim_y);
+    let groups = gps * cfg.dim_z;
+    let mut stats = HierCullStats {
+        groups,
+        ps_n,
+        valid_lanes: 0,
+        pairs_coarse: u64::from(groups) * u64::from(ps_n),
+        pairs_fine: 0,
+        group_coarse_accept: Vec::with_capacity(groups as usize),
+    };
+
+    let nan = f32::from_bits(GOLDEN_QUIET_NAN_BITS);
+    let mut own_min = [[0.0_f32; 3]; HIER_GROUP_THREADS as usize];
+    let mut own_max = [[0.0_f32; 3]; HIER_GROUP_THREADS as usize];
+    let mut lane_valid = [false; HIER_GROUP_THREADS as usize];
+    let mut lane_fi = [0_u32; HIER_GROUP_THREADS as usize];
+    let mut coarse_mask = [false; HIER_MASK_BITS as usize];
+
+    for group_id in 0..groups {
+        // Phase 0/1: every lane's own AABB (or the injected poison), then D8's substitution,
+        // folded in place into the group's coarse box — fold order is irrelevant (D2/D9).
+        let mut coarse_min = [1.0e30_f32; 3];
+        let mut coarse_max = [-1.0e30_f32; 3];
+        for lane in 0..HIER_GROUP_THREADS {
+            let (x, y, z, fi, valid) =
+                golden_hier_thread_map(group_id, lane, cfg.dim_x, cfg.dim_y, cfg.dim_z, capacity);
+            let li = lane as usize;
+            lane_valid[li] = valid;
+            lane_fi[li] = fi;
+
+            let (store_min, store_max) = if valid {
+                stats.valid_lanes += 1;
+                let (mut amin, mut amax) = golden_froxel_aabb(x, y, z, img_w, img_h, camera, cfg);
+                if inject_nan_froxel == Some(fi) {
+                    amin = [nan; 3];
+                    amax = [nan; 3];
+                }
+                own_min[li] = amin;
+                own_max[li] = amax;
+                let finite = amin.iter().chain(amax.iter()).all(|c| c.abs() <= 1.0e30);
+                if finite { (amin, amax) } else { ([-f32::MAX; 3], [f32::MAX; 3]) }
+            } else {
+                ([1.0e30_f32; 3], [-1.0e30_f32; 3])
+            };
+
+            for i in 0..3 {
+                coarse_min[i] = coarse_min[i].min(store_min[i]);
+                coarse_max[i] = coarse_max[i].max(store_max[i]);
+            }
+        }
+
+        // Phase 4: the coarse scan is group-uniform, so it runs once per group, not once per
+        // lane (striping across 256 lanes is a parallelism detail with no effect on the result).
+        let ps_n_usize = ps_n as usize;
+        for slot in coarse_mask.iter_mut().take(ps_n_usize) {
+            *slot = false;
+        }
+        let mut e_coarse = 0_u64;
+        for j in 0..ps_n {
+            let i = ps_begin + j;
+            let lgt = &lights[i as usize];
+            let kind = lgt.kind();
+            if kind != GOLDEN_LIGHT_KIND_POINT && kind != GOLDEN_LIGHT_KIND_SPOT {
+                continue;
+            }
+            let pos = [lgt.pos_range[0], lgt.pos_range[1], lgt.pos_range[2]];
+            let r = lgt.pos_range[3];
+            if golden_sq_dist_point_aabb(pos, coarse_min, coarse_max) <= r * r {
+                coarse_mask[j as usize] = true;
+                e_coarse += 1;
+            }
+        }
+        debug_assert!(e_coarse <= u64::from(ps_n), "invariant: e_coarse cannot exceed ps_n");
+        stats.group_coarse_accept.push(e_coarse as u32);
+
+        // Phase 5/6: every VALID lane walks the SAME coarse mask, ascending, against its own
+        // (pre-substitution) AABB — table order, identical to the flat arm's range.
+        let mut valid_count = 0_u64;
+        for lane in 0..HIER_GROUP_THREADS {
+            let li = lane as usize;
+            if !lane_valid[li] {
+                continue;
+            }
+            valid_count += 1;
+            let cell = &mut grid[lane_fi[li] as usize];
+            for j in 0..ps_n {
+                if !coarse_mask[j as usize] {
+                    continue;
+                }
+                let i = ps_begin + j;
+                let lgt = &lights[i as usize];
+                let kind = lgt.kind();
+                if kind != GOLDEN_LIGHT_KIND_POINT && kind != GOLDEN_LIGHT_KIND_SPOT {
+                    continue;
+                }
+                let pos = [lgt.pos_range[0], lgt.pos_range[1], lgt.pos_range[2]];
+                let r = lgt.pos_range[3];
+                if golden_sq_dist_point_aabb(pos, own_min[li], own_max[li]) <= r * r
+                    && (cell.len() as u32) < cfg.max_lights_per_cluster
+                {
+                    cell.push(i);
+                }
+            }
+        }
+        stats.pairs_fine += valid_count * e_coarse;
+    }
+
+    (grid, stats)
 }
 
 /// The CPU mirror of the L1 CLUSTERED `deferred_pbr` resolve. Identical to
@@ -3184,6 +4166,17 @@ pub fn golden_deferred_resolve_clustered(
     let pi = core::f32::consts::PI;
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
     let hemi = v_dot(n, UP) * 0.5 + 0.5;
+    // PBR P0-D: the SAME per-pixel term the resolve hoists before its light loop, reused at
+    // every specular site below (direct directional/point/spot + sky ambient).
+    let dfg_v = env_brdf_approx(roughness, nov);
+    let energy_comp = multi_scatter_energy_comp(dfg_v, f0);
+    // PBR P1: the reflection vector, hoisted ONCE (mirrors the resolve's hoisted `R`) — feeds
+    // BOTH the sky-gradient ambient specular below AND the per-directional HDR sun-disc term.
+    // reflect(-v, n) == reflect(rd, n) since v == -rd (double negation is exact).
+    let r = v_reflect(rd, n);
+    // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
+    // `specular_ao`'s doc) and reused at every ambient-specular site below.
+    let spec_ao = specular_ao(nov, roughness, ao);
 
     // The no-`P` front block (directionals + sky) is GLOBAL — identical to the table resolve.
     let mut lit_direct = [0.0_f32; 3];
@@ -3200,21 +4193,37 @@ pub fn golden_deferred_resolve_clustered(
                 let d_term = d_ggx(noh, a);
                 let v_term = v_smith_ggx_correlated(nov, nol, a);
                 let f_term = f_schlick(loh, f0);
+                // PBR P1: the HDR sun-disc kernel for THIS directional light, sampled along
+                // `r` (not `l`) — the analytic environment's bright-sun response.
+                let sun_k = sun_kernel(r, l, a);
                 for c in 0..3 {
-                    let spec = d_term * v_term * f_term[c];
+                    let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
                     let diff = diffuse_color[c] * (1.0 / pi);
                     lit_direct[c] += (diff + spec) * (nol * shadow) * li.color_cone[c];
+                    // PBR P1: a SECOND, roughness-widened specular response from this SAME
+                    // light, added to the ambient — NOT shadow-modulated (AO-gated only,
+                    // mirroring the sky ambient specular's own AO gate below).
+                    let sun_spec = (f0[c] * dfg_v[0] + dfg_v[1]) * li.color_cone[c] * sun_k * energy_comp[c] * SUN_ENV_WEIGHT;
+                    ambient[c] += sun_spec * spec_ao;
                 }
             }
             GOLDEN_LIGHT_KIND_SKY => {
+                // PBR P0-B: ambient specular samples the sky/ground gradient along `R` (PBR
+                // P1: hoisted above the loop as `r`) instead of the flat sky color; diffuse
+                // stays along n.
                 let sky = [li.color_cone[0], li.color_cone[1], li.color_cone[2]];
                 let ground = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
-                let dfg = env_brdf_approx(roughness, nov);
+                let refl_hemi_lin = v_dot(r, UP) * 0.5 + 0.5;
+                // PBR metal fix: steepen the reflected hemisphere (smoothstep) so a metal
+                // sweeps a real bright-cap -> dark-belly gradient instead of a flat mid-tone.
+                // The DIFFUSE `hemi` above stays LINEAR — only the specular lobe steepens.
+                let refl_hemi = refl_hemi_lin * refl_hemi_lin * (3.0 - 2.0 * refl_hemi_lin);
                 for c in 0..3 {
                     let hemi_c = ground[c] + (sky[c] - ground[c]) * hemi;
-                    let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * sky[c];
+                    let refl_c = ground[c] + (sky[c] - ground[c]) * refl_hemi;
+                    let spec_ambient = (f0[c] * dfg_v[0] + dfg_v[1]) * refl_c * energy_comp[c];
                     let diff_ambient = diffuse_color[c] * hemi_c;
-                    ambient[c] += (spec_ambient + diff_ambient) * ao;
+                    ambient[c] += diff_ambient * ao + spec_ambient * spec_ao;
                 }
             }
             _ => {}
@@ -3267,7 +4276,7 @@ pub fn golden_deferred_resolve_clustered(
         let v_term = v_smith_ggx_correlated(nov, nol, a);
         let f_term = f_schlick(loh, f0);
         for c in 0..3 {
-            let spec = d_term * v_term * f_term[c];
+            let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
             let diff = diffuse_color[c] * (1.0 / pi);
             lit_direct[c] += (diff + spec) * (nol * shadow) * atten * li.color_cone[c];
         }
@@ -3278,7 +4287,7 @@ pub fn golden_deferred_resolve_clustered(
     for c in 0..3 {
         lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
     }
-    pack_rgba(lit)
+    pack_rgba(tonemap_and_oetf(lit))
 }
 
 /// The P6 R1 MULTI-LIGHT SDF-shadow CPU mirror of the L1 CLUSTERED `deferred_pbr` resolve —
@@ -3287,13 +4296,13 @@ pub fn golden_deferred_resolve_clustered(
 /// rule + ranged march + dominant-N cap + NoL skip as [`golden_deferred_resolve_table_shadowed`]).
 /// When clusters are OFF (or a non-lit pixel) this DELEGATES to the flat shadowed table oracle.
 ///
-/// # Limitation (the cull does NOT mask the flag in R1)
-/// `golden_cluster_cull` (frozen) compares the RAW `li.kind()` — wait, the host `kind()` now
-/// masks the flag, so the HOST cull correctly includes a shadow-flagged point. The GPU
-/// `cluster_cull.hlsl` compares the raw `e.kind` (unmasked), so a shadow-flagged punctual is
-/// dropped by the GPU cull until a follow-up masks it there too. R1's multi-light shadow GPU
-/// golden therefore uses the NON-clustered path; this clustered oracle exists for parity
-/// (casting DIRECTIONALS + non-casting clustered punctual lights match).
+/// # VB-P1-0: the host + GPU cull now agree
+/// `golden_cluster_cull` masks via `GoldenLight::kind()`, and (since VB-P1-0) `cluster_cull.hlsl`
+/// masks via `light_kind()` too, so a shadow-flagged / atlas-slotted punctual SURVIVES both culls
+/// identically. R1's multi-light shadow GPU golden still exercises the NON-clustered path (a
+/// harness-structure choice — its runner never dispatches `cluster_cull.hlsl`, not a cull-drop
+/// workaround); this clustered oracle exists for parity (casting DIRECTIONALS + non-casting
+/// clustered punctual lights match).
 #[allow(clippy::too_many_arguments)]
 pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
     attrs: MarcherAttributes,
@@ -3349,6 +4358,17 @@ pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
     let pi = core::f32::consts::PI;
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
     let hemi = v_dot(n, UP) * 0.5 + 0.5;
+    // PBR P0-D: the SAME per-pixel term the resolve hoists before its light loop, reused at
+    // every specular site below (direct directional/point/spot + sky ambient).
+    let dfg_v = env_brdf_approx(roughness, nov);
+    let energy_comp = multi_scatter_energy_comp(dfg_v, f0);
+    // PBR P1: the reflection vector, hoisted ONCE (mirrors the resolve's hoisted `R`) — feeds
+    // BOTH the sky-gradient ambient specular below AND the per-directional HDR sun-disc term.
+    // reflect(-v, n) == reflect(rd, n) since v == -rd (double negation is exact).
+    let r = v_reflect(rd, n);
+    // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
+    // `specular_ao`'s doc) and reused at every ambient-specular site below.
+    let spec_ao = specular_ao(nov, roughness, ao);
 
     let multi_light = header.shadow_mode() != 0;
     let p = [
@@ -3391,21 +4411,37 @@ pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
                 let d_term = d_ggx(noh, a);
                 let v_term = v_smith_ggx_correlated(nov, nol, a);
                 let f_term = f_schlick(loh, f0);
+                // PBR P1: the HDR sun-disc kernel for THIS directional light, sampled along
+                // `r` (not `l`) — the analytic environment's bright-sun response.
+                let sun_k = sun_kernel(r, l, a);
                 for c in 0..3 {
-                    let spec = d_term * v_term * f_term[c];
+                    let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
                     let diff = diffuse_color[c] * (1.0 / pi);
                     lit_direct[c] += (diff + spec) * (nol * vis) * li.color_cone[c];
+                    // PBR P1: a SECOND, roughness-widened specular response from this SAME
+                    // light, added to the ambient — NOT shadow-modulated (AO-gated only,
+                    // mirroring the sky ambient specular's own AO gate below).
+                    let sun_spec = (f0[c] * dfg_v[0] + dfg_v[1]) * li.color_cone[c] * sun_k * energy_comp[c] * SUN_ENV_WEIGHT;
+                    ambient[c] += sun_spec * spec_ao;
                 }
             }
             GOLDEN_LIGHT_KIND_SKY => {
+                // PBR P0-B: ambient specular samples the sky/ground gradient along `R` (PBR
+                // P1: hoisted above the loop as `r`) instead of the flat sky color; diffuse
+                // stays along n.
                 let sky = [li.color_cone[0], li.color_cone[1], li.color_cone[2]];
                 let ground = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
-                let dfg = env_brdf_approx(roughness, nov);
+                let refl_hemi_lin = v_dot(r, UP) * 0.5 + 0.5;
+                // PBR metal fix: steepen the reflected hemisphere (smoothstep) so a metal
+                // sweeps a real bright-cap -> dark-belly gradient instead of a flat mid-tone.
+                // The DIFFUSE `hemi` above stays LINEAR — only the specular lobe steepens.
+                let refl_hemi = refl_hemi_lin * refl_hemi_lin * (3.0 - 2.0 * refl_hemi_lin);
                 for c in 0..3 {
                     let hemi_c = ground[c] + (sky[c] - ground[c]) * hemi;
-                    let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * sky[c];
+                    let refl_c = ground[c] + (sky[c] - ground[c]) * refl_hemi;
+                    let spec_ambient = (f0[c] * dfg_v[0] + dfg_v[1]) * refl_c * energy_comp[c];
                     let diff_ambient = diffuse_color[c] * hemi_c;
-                    ambient[c] += (spec_ambient + diff_ambient) * ao;
+                    ambient[c] += diff_ambient * ao + spec_ambient * spec_ao;
                 }
             }
             _ => {}
@@ -3461,7 +4497,7 @@ pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
             marched += 1;
         }
         for c in 0..3 {
-            let spec = d_term * v_term * f_term[c];
+            let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
             let diff = diffuse_color[c] * (1.0 / pi);
             lit_direct[c] += (diff + spec) * (nol * vis) * atten * li.color_cone[c];
         }
@@ -3472,7 +4508,7 @@ pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
     for c in 0..3 {
         lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
     }
-    pack_rgba(lit)
+    pack_rgba(tonemap_and_oetf(lit))
 }
 
 /// Reconstructs the `(ray_origin, ray_dir)` for the coarse ray through tile
@@ -3632,7 +4668,10 @@ pub(crate) fn perspective_alpha_tile(tx: u32, ty: u32, img_w: u32, img_h: u32, c
 ///   1. `coarse_ray` (D1) → the tile-center axis.
 ///   2. `far_t = min(max over the depths of depth→t, T_MAX)` (D5: a cleared /
 ///      out-of-range texel decodes to `T_MAX`, so a partial-edge tile bounds at
-///      `T_MAX`, not clamp-to-edge).
+///      `T_MAX`, not clamp-to-edge). The covered-texel decode is CAMERA-AWARE:
+///      PERSPECTIVE uses [`MESH_DEPTH_T_MAX`] (64, decoupled from `T_MAX` so far
+///      raster geometry doesn't saturate to no-mesh), ORTHO uses `T_MAX` (its MVP
+///      bakes it).
 ///   3. The cone-aware march (D4): at `t`, `d = field`, cone radius `r(t)` (ortho:
 ///      `r_const`; perspective: `t · tan(alpha_safe)`); budget `= d/L − r(t)`. When
 ///      the budget `<= EPS_COARSE` RECORD `near_t = t` and STOP (cone-entry). Else
@@ -3654,10 +4693,17 @@ pub fn golden_tile_bound(
     let (ro, rd) = coarse_ray(tx, ty, img_w, img_h, camera);
 
     // far_t = min(max over the 8×8 depth texels of depth→t, T_MAX). A cleared
-    // (>= MESH_DEPTH_CLEAR) texel decodes to T_MAX (conservative: no mesh bound).
+    // (>= MESH_DEPTH_CLEAR) texel decodes to T_MAX (conservative: no mesh bound). The
+    // covered-texel decode is CAMERA-AWARE (mirrors the shader's `mesh_norm` /
+    // `sdf_gbuffer_composite.hlsl`'s `mesh_norm`): PERSPECTIVE uses [`MESH_DEPTH_T_MAX`]
+    // (64), ORTHO uses [`depth_to_t`] (`d * SDF_T_MAX`, its MVP bakes `SDF_T_MAX`).
+    let mesh_norm = match camera {
+        CompositeCamera::Perspective { .. } => MESH_DEPTH_T_MAX,
+        CompositeCamera::Ortho => SDF_T_MAX,
+    };
     let mut max_t_mesh = 0.0_f32;
     for &md in tile_depths {
-        let t_mesh = if md < MESH_DEPTH_CLEAR { depth_to_t(md) } else { SDF_T_MAX };
+        let t_mesh = if md < MESH_DEPTH_CLEAR { md * mesh_norm } else { SDF_T_MAX };
         if t_mesh > max_t_mesh {
             max_t_mesh = t_mesh;
         }
@@ -4226,4 +5272,213 @@ pub fn probe_sample(
     }
     let inv = 1.0 / sum_w;
     [sum_irr[0] * inv, sum_irr[1] * inv, sum_irr[2] * inv]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A SDF-lit `MarcherAttributes` (mask == 1) with plausible mid-range G-buffer bytes and a
+    /// finite `view_t` — enough to exercise the full Cook-Torrance path in
+    /// [`golden_deferred_resolve_with_pbr`] without any shadow/GI-mode header wiring (the
+    /// zero-`LightHeader` default this oracle's degenerate-table siblings use).
+    fn lit_attrs() -> MarcherAttributes {
+        MarcherAttributes {
+            base_rgb: [180, 120, 90],
+            oct_rg: [140, 160],
+            mat_id: 0,
+            shadow: 255,
+            ao: 200,
+            mask: 1,
+            view_t: 4.0,
+        }
+    }
+
+    const RD: [f32; 3] = [0.0, 0.0, -1.0];
+
+    /// Textured-PBR T6a: [`GoldenMaterial::new`] never sets the `mrr[3]` flag bit (every
+    /// EXISTING oracle input), so [`golden_deferred_resolve_with_pbr`]'s override must be inert
+    /// REGARDLESS of what `gpbr` sample is supplied — matching [`golden_deferred_resolve`]'s
+    /// `None`-forwarding output exactly. This is the flag=0 byte-identity invariant T6a requires.
+    #[test]
+    fn textured_override_is_inert_when_flag_bit_unset() {
+        let attrs = lit_attrs();
+        let mats = [GoldenMaterial::new([0.6, 0.3, 0.2, 1.0], 0.2, 0.4, 0.5, [0.0, 0.0, 0.0])];
+        assert_eq!(mats[0].mrr[3].to_bits() & GOLDEN_MATERIAL_FLAG_TEXTURED, 0);
+
+        let without_pbr = golden_deferred_resolve(attrs, RD, &mats);
+        // A deliberately DIFFERENT-looking sample: if the flag gate were broken (always-live),
+        // this would visibly change the packed output.
+        let with_pbr_but_flag_unset =
+            golden_deferred_resolve_with_pbr(attrs, RD, &mats, Some([0.95, 0.05, 0.1, 3.0]));
+
+        assert_eq!(
+            without_pbr, with_pbr_but_flag_unset,
+            "an Option::Some gPbr sample must be a no-op when mrr[3]'s flag bit is unset"
+        );
+    }
+
+    /// The converse of the inertness test: WITH the flag bit set AND a `gpbr` sample supplied,
+    /// the override must actually change the output relative to the unmodulated material — proof
+    /// the gate is live, not merely always-false-by-construction.
+    #[test]
+    fn textured_override_changes_output_when_flag_bit_set_and_sample_supplied() {
+        let attrs = lit_attrs();
+        let mut textured = GoldenMaterial::new([0.6, 0.3, 0.2, 1.0], 0.2, 0.4, 0.5, [0.1, 0.05, 0.02]);
+        textured.mrr[3] = f32::from_bits(GOLDEN_MATERIAL_FLAG_TEXTURED);
+        let mats = [textured];
+
+        let unmodulated = golden_deferred_resolve_with_pbr(attrs, RD, &mats, None);
+        let modulated =
+            golden_deferred_resolve_with_pbr(attrs, RD, &mats, Some([0.95, 0.05, 0.2, 4.0]));
+
+        assert_ne!(
+            unmodulated, modulated,
+            "a live gPbr sample on a flag-set material must change the packed LIT output"
+        );
+    }
+
+    /// `None` is a pure notational shorthand for "no sample" — passing it through
+    /// `golden_deferred_resolve_with_pbr` directly must match the [`golden_deferred_resolve`]
+    /// convenience wrapper bit-for-bit, on EVERY mask arm (lit + background).
+    #[test]
+    fn golden_deferred_resolve_is_exactly_the_none_wrapper() {
+        let mats = [GoldenMaterial::default()];
+        for attrs in [lit_attrs(), MarcherAttributes { mask: 0, ..lit_attrs() }] {
+            assert_eq!(
+                golden_deferred_resolve(attrs, RD, &mats),
+                golden_deferred_resolve_with_pbr(attrs, RD, &mats, None)
+            );
+        }
+    }
+
+    /// W4 (VB-P1e H1 code review, plan §5 Case B / §8.3 "Mutation (vii) in full"): pins that
+    /// Rust's `f32::max` reproduces GLSL.std.450 `NMax`'s non-NaN-preferring semantics EXACTLY
+    /// for the all-NaN AABB the exactness proof's Case B depends on — "Rust's `f32::max` returns
+    /// the non-NaN operand exactly as `NMax` does" was previously a plan-text review item, not a
+    /// pin. Every axis of `sq_dist_point_aabb` computes `(min - c).max(c - max).max(0.0)`: with
+    /// `min == max == NaN`, both `min - c` and `c - max` are NaN, `NaN.max(NaN)` returns NaN (no
+    /// non-NaN operand exists), and `NaN.max(0.0)` returns the non-NaN operand `0.0` — so every
+    /// axis contributes exactly `0.0`, and `F(d) == 0.0` for ANY finite center, matching `NMax`'s
+    /// device semantics bit-for-bit (`golden_cluster_cull_hier`'s mitigated-arm equality claim,
+    /// and this crate's `hier_cull_mutation_vii_host_leg_mitigated_arm_matches_flat`, rest on
+    /// this holding).
+    #[test]
+    fn sq_dist_point_aabb_all_nan_aabb_matches_the_nmax_semantics_case_b_needs() {
+        let nan = f32::from_bits(GOLDEN_QUIET_NAN_BITS); // asfloat(0x7FC00000u) -- the shader's bit pattern.
+        assert_eq!(
+            golden_sq_dist_point_aabb([1.5, -2.25, 100.0], [nan; 3], [nan; 3]),
+            0.0,
+            "an all-NaN AABB must give sq_dist == 0.0 for this finite center (§5 Case B's \
+             absorbing element) -- if this pin moves, Rust's f32::max no longer agrees with NMax \
+             and the mitigated-arm equality claim is unsound"
+        );
+        // A second, very different finite center: Case B claims this for EVERY finite center,
+        // not merely a convenient one.
+        assert_eq!(
+            golden_sq_dist_point_aabb([-1.0e6, 0.0, 42.5], [nan; 3], [nan; 3]),
+            0.0,
+            "an all-NaN AABB must give sq_dist == 0.0 for ANY finite center, not just one sample"
+        );
+    }
+
+    // ========================================================================================
+    // P1-4 (VB-P1e H4, adversarial review): the production hierarchical-cull dispatch-shape
+    // parity pin. `boyko_render::ClusterConfig::hier_group_count`/`hier_group_threads` (the
+    // formula `GpuSceneBundles::build_froxel_light_cull` actually feeds `cmd_dispatch`) is a
+    // THIRD independent copy of `cluster_cull.hlsl`'s own `gps` alongside this module's
+    // `golden_hier_groups_per_slice`/`HIER_GROUP_THREADS` (H3's device-proven mirror) — nothing
+    // previously asserted the two agree. `use boyko_render::ClusterConfig` is scoped to THIS
+    // `#[cfg(test)]` module deliberately (not the `goldens` module above, which also compiles
+    // under `feature = "goldens"` for external dependents): `boyko-render` is a dev-dependency
+    // BACK-EDGE of this crate (`Cargo.toml`'s own comment on that entry), live only when
+    // `boyko_rhi_vulkan` itself is under test.
+    // ========================================================================================
+    use boyko_render::ClusterConfig;
+
+    /// One grid config in the parity matrix, dims-only (group-count parity does not depend on
+    /// the camera or the light rig).
+    struct ParityCase {
+        dim_x: u32,
+        dim_y: u32,
+        dim_z: u32,
+        label: &'static str,
+    }
+
+    /// The SAME grid matrix H3's device oracle sweeps
+    /// (`lighting_l1_host_oracle.rs`'s `hier_matrix_cases`, M1/M2 collapsed to one entry since
+    /// both share dims `16x9x24` and group-count parity is camera-independent): `gps=1`
+    /// (M1/M2, the shipped default), `gps=1`-from-above (E1, `dim_x*dim_y == 256` exactly),
+    /// `gps=2`-exact (E2), `gps=2`-ragged (E3, the guard-tail config), `gps=3`-exact (E4).
+    fn well_formed_matrix() -> [ParityCase; 5] {
+        [
+            ParityCase { dim_x: 16, dim_y: 9, dim_z: 24, label: "M1/M2 16x9x24 gps=1" },
+            ParityCase { dim_x: 16, dim_y: 16, dim_z: 24, label: "E1 16x16x24 gps=1-from-above" },
+            ParityCase { dim_x: 32, dim_y: 16, dim_z: 24, label: "E2 32x16x24 gps=2-exact" },
+            ParityCase { dim_x: 16, dim_y: 17, dim_z: 24, label: "E3 16x17x24 gps=2-ragged" },
+            ParityCase { dim_x: 32, dim_y: 24, dim_z: 24, label: "E4 32x24x24 gps=3-exact" },
+        ]
+    }
+
+    /// P1-4: pins [`ClusterConfig::hier_group_threads`]/[`ClusterConfig::hier_group_count`] —
+    /// the PRODUCTION dispatch shape — against [`HIER_GROUP_THREADS`]/
+    /// [`golden_hier_groups_per_slice`] — H3's own device-proven oracle — over the exact grid
+    /// matrix H3 sweeps. If this ever fails, H3's on-hardware proof no longer covers the shape
+    /// production actually dispatches.
+    #[test]
+    fn production_hier_dispatch_shape_matches_h3_device_oracle() {
+        assert_eq!(
+            ClusterConfig::hier_group_threads(),
+            HIER_GROUP_THREADS,
+            "invariant: the production workgroup width must equal H3's device-proven width"
+        );
+        for case in well_formed_matrix() {
+            let cfg = ClusterConfig {
+                dim_x: case.dim_x,
+                dim_y: case.dim_y,
+                dim_z: case.dim_z,
+                ..ClusterConfig::default()
+            };
+            let golden_groups = golden_hier_groups_per_slice(case.dim_x, case.dim_y) * case.dim_z;
+            assert_eq!(
+                cfg.hier_group_count(),
+                golden_groups,
+                "{}: production hier_group_count() diverges from H3's \
+                 golden_hier_groups_per_slice() * dim_z",
+                case.label,
+            );
+        }
+    }
+
+    /// P1-4 follow-up: the degenerate `dim_x * dim_y == 0` case is a KNOWN, DOCUMENTED,
+    /// INTENTIONAL divergence, not a bug — see [`ClusterConfig::hier_group_count`]'s own doc
+    /// (D11/Rev 5 P2). Production dispatches ZERO groups (`cluster_count() == 0` means there is
+    /// nothing to cull — every `ClusterGrid` write would be out of bounds anyway, so skipping
+    /// the dispatch entirely is strictly safer than dispatching phantom work); the golden
+    /// mirrors the SHADER's own `max(1, gps)` totality clamp (a D8 obligation for the shader's
+    /// per-group math, independent of whether any lane's work is `valid`). This test PINS the
+    /// divergence explicitly (STOP AND REPORT territory, per the adversarial review) so a
+    /// future change that makes one side match the other is a deliberate, reviewed decision,
+    /// not an accidental drift this suite would otherwise miss.
+    #[test]
+    fn degenerate_zero_dim_diverges_from_the_shader_totality_clamp_by_design() {
+        let cfg = ClusterConfig { dim_x: 0, dim_y: 9, dim_z: 24, ..ClusterConfig::default() };
+        let golden_groups = golden_hier_groups_per_slice(cfg.dim_x, cfg.dim_y) * cfg.dim_z;
+        assert_eq!(
+            cfg.hier_group_count(),
+            0,
+            "invariant: production dispatches zero groups when cluster_count() == 0"
+        );
+        assert_eq!(
+            golden_groups, cfg.dim_z,
+            "invariant: the golden's max(1, gps) clamp yields dim_z phantom groups"
+        );
+        assert_ne!(
+            cfg.hier_group_count(),
+            golden_groups,
+            "P1-4: the degenerate-dims divergence is intentional (see \
+             ClusterConfig::hier_group_count's own doc) -- if this now holds, the clamp \
+             behavior changed and this pin must be re-reviewed, not deleted"
+        );
+    }
 }

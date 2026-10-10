@@ -1,0 +1,5 @@
+error: duplicate schedule clause; a system runs on exactly one schedule
+ --> tests/ui/duplicate_on_schedule.rs:7:29
+  |
+7 |     system tick() on update on fixed {}
+  |                             ^^

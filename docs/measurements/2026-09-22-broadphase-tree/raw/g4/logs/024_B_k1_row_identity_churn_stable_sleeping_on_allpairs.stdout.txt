@@ -1,0 +1,5 @@
+row_identity_churn/stable/sleeping_on_allpairs
+                        time:   [6.2546 ms 6.3042 ms 6.3541 ms]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

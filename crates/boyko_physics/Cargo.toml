@@ -3,7 +3,7 @@ name = "boyko-physics"
 version = "0.1.0"
 edition = "2024"
 publish = false
-
+license.workspace = true
 [lib]
 name = "boyko_physics"
 path = "src/lib.rs"
@@ -28,6 +28,13 @@ boyko_sdf_math = { path = "../boyko_sdf_math" }
 # exact sqrt, no FMA), and `boyko_physics::math` now re-exports them so the
 # public API and every `crate::math::{..}` call site stay UNCHANGED.
 boyko-math = { path = "../boyko_math" }
+# Rung L8a: the diagnostic seam. `soft/self_collision.rs` had three `eprintln!`s whose comments
+# each read "no `log` crate dependency (architect SCOPE call)" -- a call made when the only
+# alternative was a third-party facade. `boyko_log` is neither third-party nor a facade, and it is
+# already in this graph through `boyko_ecs`, so the SCOPE call's premise no longer holds. Two of
+# the three conditions also stop being debug-only here; the third stays gated, because its
+# condition needs an O(constraints) scan a release build does not otherwise perform.
+boyko-log = { path = "../boyko_log" }
 # S5: the spatial vocabulary. The physics ⇄ Transform pose-sync systems
 # (`sync_transform_to_body` / `sync_body_to_transform`) read/write the engine's
 # canonical `Transform` component, so the world pose lives in ONE datum
@@ -35,23 +42,113 @@ boyko-math = { path = "../boyko_math" }
 # depends only on `boyko_ecs` + `boyko_math` + `boyko_macros` + `boyko_utils` —
 # never on `boyko_physics` — so `boyko_physics -> boyko_scene` adds no cycle.
 boyko-scene = { path = "../boyko_scene" }
+# The physics step's own profiling zones (`src/profiling.rs`): `declare_zone!` / `zone!` and the
+# counter push the per-stage profile of the Jolt parity campaign reads. NOT a new node in the
+# graph -- `boyko-ecs` above already depends on `boyko_diag`, which has an empty `[dependencies]`,
+# so this edge makes the use visible here rather than adding a crate to the build.
+boyko-diag = { path = "../boyko_diag" }
+
+# Alloc A/B — optional bench-only global allocator, gated behind the
+# `bench-alloc` feature (OFF by default), mirroring `boyko_ecs`'s Phase X.E
+# arm. Cargo forbids `optional = true` on dev-dependencies, so the bench
+# allocator lives here as a normal optional dependency; because nothing
+# enables `bench-alloc` by default, it is NEVER compiled in the default
+# build/test/bench graph. Enabled via `cargo bench --features bench-alloc`.
+# The one consumer is `benches/jolt_parity_pyramid.rs`, whose `#[cfg]`'d
+# `#[global_allocator]` is a DIAGNOSTIC: it asks whether the heap traffic of a
+# parallel step costs time. Measured 2026-09-10 on this tree: no effect at any
+# worker count (docs/OPEN-QUESTIONS.md, "the system heap against mimalloc").
+# See docs/BENCHMARKING.md.
+mimalloc = { version = "0.1", optional = true }
+
+[features]
+default = []
+# Alloc A/B — opt-in low-variance bench allocator. OFF by default so the normal
+# `cargo bench` keeps the production system heap (honest absolutes); enable via
+# `cargo bench --features bench-alloc` to swap in mimalloc for A/B signal
+# extraction. See docs/BENCHMARKING.md.
+bench-alloc = ["dep:mimalloc"]
+# C3b of the tree broadphase (the query-cost investigation, section 8 of
+# docs/measurements/2026-09-22-broadphase-tree/analysis.md): per-query walk counters in
+# `PackedBvh8::query` and the tree-shape receipts of `broadphase_tree::counts`. OFF by default
+# and enabled by no crate in the workspace; with it off the counting statements do not exist, so
+# the default build's code is the uncounted kernel. Its one consumer is
+# `tests/bp_query_counts.rs`: `cargo test -p boyko-physics --features bp-query-counts --test
+# bp_query_counts -- --nocapture`.
+bp-query-counts = []
+# The thin-box fix (the box-box edge fallback's face bound): counts of the fallback's decisions in
+# `narrowphase::box_box::fallback_census` - its calls, the phantom answers (every edge axis
+# claiming more than the best face allows), the edge hints the bound refused, the empty-clip
+# corner backstop, the largest accepted edge excess, and the edge-record refreshes the bound turned
+# stale. OFF by default and enabled by no crate in the workspace; with it off the counting
+# statements do not exist. Its consumers are `tests/narrowphase_census.rs` (the positive control),
+# the census epilogues of the pinned targets and the `jolt_parity_pyramid` runner's summary:
+# `cargo test -p boyko-physics --features narrowphase-counts --test narrowphase_census`.
+narrowphase-counts = []
 
 [dev-dependencies]
+# Rung L8a: `boyko_log::probe`'s record observers, for the `#[cfg(test)] mod` blocks that assert
+# a migrated site reports ONCE and not once per frame. A dev-dependency, so the feature reaches
+# this crate's test and bench targets and never a shipping build.
+boyko-log = { path = "../boyko_log", features = ["test-probe"] }
 proptest.workspace = true
 # Workspace-pinned criterion 0.5 (same major as every other crate's bench).
 criterion.workspace = true
 
+[[test]]
+# The frame allocation census and its gate. `harness = false` is load-bearing,
+# not stylistic: the binary installs a PROCESS-GLOBAL counting allocator, and
+# libtest's own main thread allocates while a test runs (its "has been running
+# for over 60 seconds" notice, measured as 2 OTHER in one census frame on a long
+# run). Without libtest there is no second thread for the counter to see, at any
+# duration. The file's `main` keeps libtest's CLI contract (filters, `--list`,
+# `--ignored`, `--nocapture`, exit 101 on failure). See its header.
+name = "alloc_frame_census"
+path = "tests/alloc_frame_census.rs"
+harness = false
+
+[[test]]
+# The census's attribution binary — the same counter, so the same reason.
+name = "alloc_frame_attribution"
+path = "tests/alloc_frame_attribution.rs"
+harness = false
+
+[[test]]
+# The physics profiling zones' exact per-step counts. `harness = false` is load-bearing: the arm
+# mask, the lane rings, the zone accumulators and the profiler's world bind are process-wide, so
+# the test must be the only thing in its process (libtest would run other physics tests beside
+# it and inflate the exact counts), and the bind admits one world per process.
+name = "profiling_zone_counts"
+path = "tests/profiling_zone_counts.rs"
+harness = false
+
+[[test]]
+# Arming the profiler changes no simulation bit, with armed samples > 0 and disarmed pushes = 0.
+# Its own process for the same reason as `profiling_zone_counts`, plus one more: the disarmed
+# run must happen while nothing in the process has ever armed.
+name = "profiling_bit_identity"
+path = "tests/profiling_bit_identity.rs"
+harness = false
+
 [[bench]]
 # O2 A/B: the grid broadphase vs the shipped all-pairs loop at {100, 1k, 10k}
 # bodies — reports the measured crossover (the plan promises only "expect
-# O(100s)", not a number).
+# O(100s)", not a number). Plus gate G4 of the tree broadphase design (the
+# `bp_g4_*` groups, commit C3): all_pairs / grid_w1 / grid_w8 / tree at the
+# design's sizes over uniform, size-disparity and in-scene (J, J snapshot, 10k,
+# 100k) bodies, and the maintenance arms at 1 240 / 10k / 100k members
+# (build from empty, admission of 64, eviction filter, one-row shift, compaction,
+# ruling W1's high jumper). Its constants (TREE_BRUTE_MAX_ROWS, ADMIT_BUILD_RATIO,
+# AUTO_TREE_LO/HI) are read off this bench in the quiet window (C4).
 name = "broadphase"
 harness = false
 
 [[bench]]
 # O1 A/B: scalar vs AVX2 in-solver `refresh_inertia` + integrate on a 10k-body
-# substep — reports the width-only speed-up (build the AVX2 arm with
-# RUSTFLAGS="-C target-feature=+avx2"). The SIMD path is bit-identical to scalar.
+# substep — reports the width-only speed-up. The SIMD path is bit-identical to
+# scalar. ⚠ NO `RUSTFLAGS` recipe: it REPLACES `target.<triple>.rustflags` and
+# would delete the ISA baseline and the linker flags; `x86-64-v3` already carries
+# AVX2. See the bench header.
 name = "simd_o1"
 harness = false
 
@@ -82,8 +179,10 @@ harness = false
 # O9 A/B: the box-vs-SDF narrowphase (`box_sdf_manifold`) scalar build vs the
 # `+avx2` batched-kernel build, at SDF edit counts {1,2,4,8,16}. Two BUILDS of the
 # same public entry (the kernel is cfg-gated, not runtime-switched); the
-# scalar->avx2 delta is the O9 speed-up. Build the AVX2 arm with
-# RUSTFLAGS="-C target-feature=+avx2".
+# scalar->avx2 delta is the O9 speed-up. ⚠ NO `RUSTFLAGS` recipe — the bench
+# header already retracted it, and this comment is the copy a reader skims. It
+# REPLACES `target.<triple>.rustflags`, deleting the ISA baseline and the linker
+# flags; `x86-64-v3` already carries AVX2.
 name = "sdf_narrowphase_o9"
 harness = false
 
@@ -93,6 +192,18 @@ harness = false
 # (the slept steady state, must be <= ~5% of (1)), (3) fully-awake sleeping-ON (the
 # always-on bookkeeping overhead, must be a small over-(1) cost, no regression).
 name = "sleeping"
+harness = false
+
+[[bench]]
+# A4 / MEASUREMENT-QUEUE.md §8: what wake-on-contact-change costs on the real colored
+# schedule over Jolt's pyramid - an exactly touching pile with sleeping OFF (`begin_step`
+# never runs, so any movement is a leak), a never-latching pile with sleeping ON (the key
+# loop's store-only path), and a frozen pile whose frozen state is reachable identically on
+# a tree without A4, which is what lets the two trees' frozen steps be compared.
+# Anti-vacuity: the frozen arm's receipt carries the step's manifold count (> 0) and island
+# count, because a CONTACT-FREE pile satisfies its freeze step, its zero `contact_wakes` and
+# its unmoved poses just as well.
+name = "sleeping_pipeline"
 harness = false
 
 [[bench]]
@@ -116,4 +227,62 @@ harness = false
 # colored-{2,4,8}-worker (the wall-clock win at the larger sizes). Reports per-step
 # time; not a pass/fail gate.
 name = "soft_colored_sp4"
+harness = false
+
+[lints]
+workspace = true
+
+[[bench]]
+# KE16: the physics consumer measured on BOTH dispatch routes. `parallel_solve`
+# and `colored_solve` both drive `solve_colored` from the bench thread (the
+# healthy path: `install` labels it WORKER_ID_DISPATCHER, so the solver's
+# `pool.scope` tasks reach `injector_global`). Production reaches the same call
+# from `physics_solve_colored`, a scheduled system whose body runs ON A WORKER,
+# where the tasks reach `injector_local[wid]` that no sibling polls. This bench
+# runs the identical warmed 10k-contact pyramid step down both routes, plus an
+# empty-schedule control that prices `Schedule::run` itself and the O5
+# single-threaded reference. See benches/ke16_solve_in_system.rs.
+name = "ke16_solve_in_system"
+harness = false
+
+[[bench]]
+# O1 END-TO-END: the gap MEASUREMENT-QUEUE.md §4 names — no bench prices `simd`
+# through a WHOLE `SoftStepSolver` step, so every figure quoted for the switch is a
+# kernel ratio. Runtime-switched A/B (`simd` is a PhysicsConfig field, read per call,
+# so both arms live in ONE binary and there is no between-build drift) over the ~10k
+# pyramid, plus a `o1_widened_fraction` group that measures what fraction of the step
+# the two gated passes actually occupy. Do NOT reconcile its ratio against the
+# circulating 3.8x — that is a kernel number and this is not.
+name = "simd_end_to_end"
+harness = false
+
+[[bench]]
+name = "jolt_parity_pyramid"
+harness = false
+
+[[bench]]
+# W8S (docs/physics/perf-campaign/levers/scaling/01-DESIGN.md §7): the ω_b stage-barrier
+# microbench (a bench-only copy of the S1 region protocol) and ω(W, gap), a zero-work scope after
+# a serial gap, on the worker and external routes. Custom main: without `--bench` it runs an
+# untimed functional self-check of the protocol; the timed modes are run in a quiet window only.
+name = "omega_b_region"
+harness = false
+
+[[bench]]
+# L9 C0: the narrowphase class bench (levers/L9-contact-reuse/02-DESIGN-REV1.md) - J and R
+# snapshots at step 300 and a moving rain scene, every candidate pair classed separated /
+# touching / fast with structural asserts (closure, a SAT replica, the step's manifold count, the
+# design's J counts), and each class's ns per pair, read in a quiet window only. Custom main like
+# the parity runner: without `--bench` it runs a small self-check.
+name = "narrowphase_classes"
+harness = false
+
+[[bench]]
+# Defect A (interim): what the row identity map costs per kind of structural change, on the
+# real colored schedule over the Jolt pyramid plus two sphere churn pools — stable /
+# swap_churn / archetype_shift / first_archetype_spawn / burst_despawn / burst_migrate, each
+# × sleeping {off, on} × broadphase {allpairs, tree} (the tree broadphase design's G4 churn
+# row, commit C3). Only `Schedule::run` is timed; the structural change between steps is
+# not. docs/MEASUREMENT-QUEUE.md §6 holds the arms and the rules (R2, R3).
+name = "row_identity_churn"
 harness = false

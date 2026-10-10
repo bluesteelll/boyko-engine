@@ -7,37 +7,119 @@
 //! (Phase-9.1 C1 discipline) through the `#[doc(hidden)]`
 //! `term_list::test_exports` shims (one forward call each). Under `--cfg loom`,
 //! `term_list.rs` aliases its `AtomicPtr` / `Ordering` to `loom::sync::atomic`,
-//! so loom's model checker observes the genuine `compare_exchange` (Release /
-//! Acquire), `retired.swap` (AcqRel), `retired.swap(null)` (Acquire), and the
-//! real `Box::from_raw` frees across every permitted interleaving. The
-//! `ArchetypeMaster` / `QueryState` the build walks use non-loom internals —
-//! loom only intercepts the protocol's own atomics, which is exactly the
-//! surface under test.
+//! so loom's model checker schedules the genuine `compare_exchange` (Release /
+//! Acquire), `retired.swap` (AcqRel), `retired.swap(null)` (Acquire) and the
+//! real `Box::from_raw` frees across every permitted interleaving. It SCHEDULES
+//! them; what it also CHECKS is a strictly smaller set — see
+//! §"What these models DO and DO NOT gate" before citing this file as a proof.
 //!
 //! # Run
 //!
 //! ```bash
-//! RUSTFLAGS="--cfg loom" cargo test --release -p boyko-ecs --test loom_term_list
-//! LOOM_MAX_PREEMPTIONS=3 RUSTFLAGS="--cfg loom" \
-//!   cargo test --release -p boyko-ecs --test loom_term_list
+//! # Debug profile, one model per process. Measured 2026-09-17 on the
+//! # x86_64-pc-windows-msvc and x86_64-pc-windows-gnu toolchains; on Linux the
+//! # key would be target."cfg(unix)" (not measured). Do not set RUSTFLAGS.
+//! cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' \
+//!   test -p boyko-ecs --test loom_term_list -- --list
+//! cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' \
+//!   test -p boyko-ecs --test loom_term_list -- --exact <model> --test-threads=1 --nocapture
 //! ```
+//!
+//! `--list` must print the four `loom_gate11…: test` lines before a run counts:
+//! without `--cfg loom` this file compiles to nothing and the binary exits 0
+//! having run nothing. Each `<model>` run must print `running 1 test`, a
+//! `[loom model]` line and a `[loom receipt]` line; a filter that matches nothing
+//! also exits 0. One model per process, because a model that dies (§ "Model body
+//! stack") takes every later model in the process with it.
+//!
+//! **Why debug.** Three production `debug_assert!`s on the modelled path are
+//! oracles here, and a release build compiles them out: the O1 check at the top of
+//! `rebuild_publish` (the state is synced before a rebuild), the `P2 violation`
+//! check after the retire swap, and the `P1 violation` check on the list a CAS
+//! loser adopts. The release profile also passes, and checks strictly less.
+//! MEASURED 2026-09-17 (msvc): with `TermList::matches` forced to `false`, debug
+//! turns three models red on the `P1 violation` and `P2 violation` asserts (the
+//! sequential constrained model stays green) while release passes all four. No
+//! mutation has exercised the O1 check yet.
+//!
+//! ⚠️ **Two earlier spellings of this recipe built nothing that ran, each on
+//! the toolchain named in its bullet.**
+//!
+//! * `RUSTFLAGS="--cfg loom"` (until 2026-09-03). A `RUSTFLAGS` environment
+//!   variable REPLACES `target.<triple>.rustflags` instead of joining it, so it
+//!   drops the repository's ISA baseline (`-C target-cpu=x86-64-v3`, from
+//!   `.cargo/config.toml`) and, on a windows-gnu toolchain, the machine-local
+//!   `-Cdlltool` / `-L` / `-Clink-arg=-B` trio that toolchain needs to link at all.
+//!   No `--cfg loom` build of this file succeeded with it on windows-gnu
+//!   (recorded 2026-09-03). On msvc it was not measured; the baseline is dropped
+//!   there too, so whatever it runs is not the configured build.
+//! * `--config 'target.x86_64-pc-windows-gnu.rustflags=…'` (until 2026-09-17).
+//!   That key reaches rustc only on the gnu toolchain: on an msvc host `--list`
+//!   printed `0 tests, 0 benchmarks` and exited 0 (measured 2026-09-17).
+//!
+//! `target."cfg(windows)"` matches both Windows toolchains, and cargo joins it with
+//! the `[target.<triple>]` array: the rustc line carries
+//! `-C target-cpu=x86-64-v3 --cfg loom` on both (measured 2026-09-17). Do NOT
+//! move the flag to `[build] rustflags`: cargo ignores that key outright
+//! whenever a `[target.*]` one matches, and `.cargo/config.toml` defines one
+//! for both Windows triples — the same vacuous green by a third route.
+//!
+//! # Model body stack
+//!
+//! loom 0.7.2 runs every model thread as a generator 0.8 coroutine, and the
+//! model's own thread always gets generator's default stack of `0x1000` words,
+//! 32 KiB on x86_64; `loom::model::Builder` has no stack setting. In the debug
+//! profile none of the four bodies fits. MEASURED 2026-09-17: they peak at
+//! 43,888–48,624 B (42.9–47.5 KiB, msvc), most of it the fixture —
+//! `ArchetypeMaster::new` → `EnablePresence::new` → `core::array::from_fn` over
+//! 512 loom `AtomicPtr`s, which costs one 12,360 B frame on both toolchains. On
+//! the default stack every model died, in three ways that are one overflow:
+//!
+//! * `0xC0000005`: MSVC's `__chkstk` WRITES its probe into generator's
+//!   `PAGE_READONLY | PAGE_GUARD` page. Under gdb that write raised a plain access
+//!   violation and left the guard bit set, and generator's handler reacts only to
+//!   `0xC00000FD`, so the process died with no message.
+//! * `0xC00000FD`: with less stack left, the exception dispatcher's own frame
+//!   overflows too (traced on msvc; also seen on gnu, not traced there).
+//! * generator's `coroutine … has overflowed its stack`, exit 101: gnu's
+//!   `___chkstk_ms` READS the page, which raises the overflow the handler knows.
+//!
+//! Which of the three a run gets depends on the model and on the headroom left,
+//! not on the protocol. The release profile fits (4/4); its margin is unmeasured.
+//!
+//! [`model`] therefore runs each body, in both profiles, on one extra loom thread
+//! with [`MODEL_BODY_STACK_WORDS`] of stack. The unit is WORDS: loom's
+//! `thread::Builder::stack_size` says bytes but passes the value to generator,
+//! which multiplies it by `size_of::<usize>()`. The threads a body spawns keep the
+//! default stack (measured peak 9,176 B, 9.0 KiB), and the largest model now uses
+//! four of loom's five threads. MEASURED on both toolchains in debug: with the
+//! extra thread the models explore gate 11a 486, constrained 1, steady-state 81
+//! and unconstrained 9 executions, the counts in the section below.
+//! `BOYKO_LOOM_BODY_STACK_WORDS=4096` restores loom's default size and is the
+//! control: every model dies again, on both toolchains (measured 2026-09-17).
 //!
 //! # Two gates (matching the architecture plan §"Metrics and validation")
 //!
 //! * **GATE 11a** (`loom_gate11a_*`): two threads resolve from the same null
 //!   `current`; the single-publish CAS lets exactly one win; the loser frees
 //!   its own candidate (`Box::from_raw`) and adopts the winner. loom explores
-//!   every CAS-vs-CAS ordering proving no double-free / no leak / no UAF and
-//!   that the loser never spins (lock-free, P1).
+//!   every CAS-vs-CAS ordering (486 executions) and proves the loser never
+//!   spins (lock-free, P1) — an unbounded spin exhausts the branch budget.
+//!   ⚠️ It does NOT prove "no double-free / no leak / no UAF", which this
+//!   bullet claimed until 2026-09-03: loom's leak and UB checkers see only
+//!   loom-instrumented allocations, and both candidates are plain `Box`es.
+//!   Those three are the Miri-TB oracle's, and remain so.
 //!
 //! * **GATE 11b** (`loom_gate11b_*`): the reclaim-vs-read race the critic-round
 //!   -2 MAJOR flagged. TWO variants make the distinction explicit:
 //!   - `..._constrained_clean`: the reader's borrow ENDS (the resolve returns +
 //!     a stack-local read completes) BEFORE the dispatcher thread runs
 //!     `reclaim`. This mirrors the Phase-9 apply-window ordering (invariant
-//!     (a)+(b)). loom must report it CLEAN — this is the case that has to hold
-//!     for production soundness, and it is the proof that the atomics are
-//!     correct GIVEN the scheduler invariants.
+//!     (a)+(b)). loom reports it CLEAN. ⚠️ It is NOT "the proof that the
+//!     atomics are correct GIVEN the scheduler invariants", which this bullet
+//!     claimed until 2026-09-03: the ordering it encodes admits exactly ONE
+//!     execution (measured), so there is nothing for loom to explore and the
+//!     model would stay green with the atomics removed entirely.
 //!   - `..._unconstrained_documents_why_invariants_load_bearing`: reclaim is
 //!     allowed to interleave WHILE a reader still holds the old pointer. The
 //!     comment documents that the protocol's atomics do NOT by themselves
@@ -46,18 +128,54 @@
 //!     window do. See the test body for how it is expressed without
 //!     re-implementing the safe `&mut` funnel.
 //!
-//! # Environment note (Phase 22.1 tester)
+//! # What these models DO and DO NOT gate — measured 2026-09-03
 //!
-//! As of authoring, loom CANNOT be compiled on this machine: loom 0.7.2 pulls
-//! `tracing-subscriber -> windows-sys -> windows-result`, whose build invokes
-//! `dlltool.exe` for raw-dylib import libs; that binary is absent from the
-//! `*-pc-windows-gnu` toolchains here (the same failure hits the Phase-9.1
-//! precedent `boyko_threadpool` loom build today). This file is therefore
-//! authored correct-against-the-precedent and gated `#![cfg(loom)]`; it will
-//! run unchanged once `dlltool` is on PATH. The Miri-TB harness carries the
-//! gate-11b soundness claim in the interim (the brief's documented fallback).
+//! Stated because the header above states more than the harness can deliver,
+//! and a claim that outruns its gate is the failure this repository has
+//! measured most often. All four figures below come from mutation probes run
+//! on this checkout on 2026-09-03, with that day's release recipe and before
+//! the body thread of § "Model body stack", unless a bullet gives a later date.
+//!
+//! * **They drive the real production code.** Making `TermList::build` push
+//!   each surviving id twice turns ALL FOUR models red (`left: 2, right: 1`).
+//!   The `test_exports` shims are not a copy — the Phase-9.1 C1 lesson holds.
+//!   Re-read 2026-09-17 in debug with the body thread (msvc): all four red
+//!   again, each on its `left: 2, right: 1` assertion.
+//! * **They enumerate real interleavings — for two of the four.** loom reports
+//!   `Completed in N iterations`: gate 11a **486**, steady-state **81**,
+//!   unconstrained **9**, and constrained **1**. The constrained model is
+//!   SEQUENTIAL by construction (thread R is joined before `reclaim` runs), so
+//!   it has exactly one execution and carries no interleaving evidence at all.
+//!   Its value is as an executable statement of the apply-window ordering; the
+//!   gate-11b soundness claim rests on the Miri-TB oracle, not on this model.
+//! * **They do NOT gate the ordering table in `term_list.rs`.** Downgrading
+//!   EVERY synchronising ordering in the protocol to `Relaxed` — the fast-path
+//!   `current.load`, both halves of the publish CAS, `retired.swap` and the
+//!   reclaim swap — leaves all four models GREEN. loom detects a causality
+//!   violation only on loom-instrumented data, and the published payload is a
+//!   plain `Box<TermList>` with plain fields: the POINTER is tracked, the
+//!   POINTEE is not. Gating the Release/Acquire pairing would require the
+//!   `ids` array to sit behind `loom::cell::UnsafeCell` (an architecture
+//!   change to production code, not to this harness).
+//!
+//! # Branch budget
+//!
+//! loom's default is 1000 branches per execution and these models need just
+//! over it — not because the protocol is branchy, but because `cfg(loom)`
+//! aliases `enable_presence.rs` too, and every `ArchetypeMaster` embeds an
+//! `EnablePresence` holding `[AtomicPtr; MAX_COMPONENTS]` = 512 loom cells
+//! whose `Drop` loads all 512. Those loads are incidental to the term
+//! prefilter but loom counts them. MEASURED 2026-09-03 (release, before the
+//! body thread): 1000 fails, 1100 passes; with `enable_presence.rs` temporarily
+//! de-loom'd all four fit inside the default. The body thread adds one spawn
+//! and one join per execution; with it all four pass at [`MODEL_MAX_BRANCHES`]
+//! in debug on msvc and windows-gnu and in release on msvc (2026-09-17). Hence
+//! [`MODEL_MAX_BRANCHES`] — an explicit `LOOM_MAX_BRANCHES` still wins.
 
 #![cfg(loom)]
+
+use std::sync::Arc as StdArc;
+use std::sync::atomic::{AtomicUsize as StdAtomicUsize, Ordering as StdOrdering};
 
 use loom::sync::Arc;
 use loom::sync::atomic::{AtomicUsize, Ordering};
@@ -71,23 +189,125 @@ use boyko_ecs::ecs::core::iters::query::term_list::test_exports::{
 const TAG: usize = 372;
 const UNREL: usize = 373;
 
+/// Branch budget per loom execution: ~4x both the default (1000) and the
+/// measured need (>1000, <=1100). Sized with headroom for the 512 incidental
+/// `EnablePresence` cells rather than trimmed to today's number, so a modest
+/// growth of `MAX_COMPONENTS` does not silently turn these models red. Still
+/// bounded, so a genuine spin — the thing loom's budget exists to catch, and
+/// exactly what P1's "losers never spin" claims cannot happen — is unbounded
+/// and still trips it.
+const MODEL_MAX_BRANCHES: usize = 4096;
+
+/// Stack of the loom thread each model body runs on, in WORDS (8 bytes each on
+/// x86_64): 0x4000 = 128 KiB. MEASURED 2026-09-17 in debug: the smallest size
+/// that passed all four models was 0x1a00 (52 KiB) on msvc; on windows-gnu
+/// 0x1800 (48 KiB) failed and 0x1c00 (56 KiB) passed, and 0x1a00 was not run
+/// there. The largest peak was 48,624 B (47.5 KiB, msvc). The margin absorbs
+/// growth of `MAX_COMPONENTS`, whose 512-slot construction dominates the peak,
+/// and changes in rustc's debug frame layout. It does not absorb an observer:
+/// registering one reaches debug frames of 61,496 B (`ObserverLists::default`)
+/// and 184,392 B (`array::try_from_fn` over 512 `Vec`s) in the windows-gnu
+/// binary, so a body that registers one needs a larger size. Even on purpose:
+/// an odd count makes generator (0.8.8 and 0.8.9 alike) fill the whole stack
+/// with a marker on every execution.
+/// [`BODY_STACK_ENV`] overrides it.
+const MODEL_BODY_STACK_WORDS: usize = 0x4000;
+
+const _: () = assert!(
+    MODEL_BODY_STACK_WORDS.is_multiple_of(2),
+    "an odd word count makes generator fill the whole body stack on every execution"
+);
+
+/// Environment variable whose decimal word count replaces
+/// [`MODEL_BODY_STACK_WORDS`]. `4096` is the stack loom gives a model's own
+/// thread, so a run with it is the control of the body thread.
+const BODY_STACK_ENV: &str = "BOYKO_LOOM_BODY_STACK_WORDS";
+
+/// Runs `body` under loom with [`MODEL_MAX_BRANCHES`] instead of loom's default,
+/// on one extra loom thread whose stack is [`MODEL_BODY_STACK_WORDS`] words, or
+/// the count in [`BODY_STACK_ENV`] (module header, § "Model body stack").
+///
+/// An explicit `LOOM_MAX_BRANCHES` in the environment takes precedence: an
+/// operator narrowing the budget to hunt a spin must not be silently overruled
+/// by the harness.
+///
+/// Prints a `[loom model]` line before the run and a `[loom receipt]` line after
+/// it (visible with `--nocapture`), and panics if loom ran fewer than
+/// `min_executions` executions.
+fn model(name: &'static str, min_executions: usize, body: impl Fn() + Sync + Send + 'static) {
+    let mut builder = loom::model::Builder::new();
+    if std::env::var_os("LOOM_MAX_BRANCHES").is_none() {
+        builder.max_branches = MODEL_MAX_BRANCHES;
+    }
+    // Parsed before `check`, so a bad value panics before any execution starts,
+    // outside every coroutine, and before the `[loom model]` line.
+    let words = std::env::var_os(BODY_STACK_ENV).map_or(MODEL_BODY_STACK_WORDS, |value| {
+        value
+            .to_str()
+            .and_then(|text| text.parse::<usize>().ok())
+            .expect("invariant: BOYKO_LOOM_BODY_STACK_WORDS is a decimal word count")
+    });
+    // Printed before the run because a stack overflow kills the process before
+    // the receipt, and this line is then the only record of the size in force.
+    eprintln!(
+        "[loom model] {name}: body stack {words} words ({} B)",
+        words.saturating_mul(size_of::<usize>())
+    );
+
+    let body = StdArc::new(body);
+    let executions = StdArc::new(StdAtomicUsize::new(0));
+    let counter = StdArc::clone(&executions);
+    builder.check(move || {
+        // Relaxed: loom runs every model thread as a coroutine on this one OS
+        // thread, so the counter never sees a concurrent writer.
+        counter.fetch_add(1, StdOrdering::Relaxed);
+        let body = StdArc::clone(&body);
+        // `stack_size` reaches generator as a WORD count, not the bytes loom's
+        // doc names; see `MODEL_BODY_STACK_WORDS`.
+        thread::Builder::new()
+            .stack_size(words)
+            .spawn(move || body())
+            .expect("invariant: loom 0.7.2's Builder::spawn always returns Ok")
+            .join()
+            .expect(
+                "invariant: loom 0.7.2's join never returns Err; a body panic unwinds \
+                 through the scheduler",
+            );
+    });
+
+    let ran = executions.load(StdOrdering::Relaxed);
+    eprintln!(
+        "[loom receipt] {name}: executions={ran} body_stack_words={words} max_branches={} \
+         preemption_bound={:?}",
+        builder.max_branches, builder.preemption_bound
+    );
+    assert!(
+        ran >= min_executions,
+        "{name}: loom ran {ran} execution(s), fewer than the {min_executions} this model \
+         explores — the body wrapper or an exploration bound collapsed it"
+    );
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // GATE 11a — concurrent first-resolve, single publish.
 //
 // Two loom threads call the REAL `resolve_term_filtered` against a null
 // `current`. Each builds a candidate and races the publish CAS. Across every
-// interleaving loom enumerates:
-//   - exactly one CAS succeeds (P1) -> `current` ends non-null, one published
-//     list;
-//   - the loser's `Box::from_raw(raw)` frees its own never-published candidate
-//     EXACTLY once (no double-free; loom's leak/UB checker enforces it);
-//   - both threads return a length-1 slice (same epoch, identical content).
-// `retired` stays null throughout (first publish, nothing to retire).
+// interleaving loom enumerates (486 executions), both threads return a
+// length-1 slice: the winner its own published list, the loser the winner's
+// after freeing its candidate. `retired` stays null throughout (first publish,
+// nothing to retire).
+//
+// The length-1 assertion is what makes this model fall over on a corrupted
+// build (probe-verified, see the module header). It does NOT by itself
+// distinguish "one publish" from "two publishes", since either candidate has
+// length 1 — the single-publish claim (P1) is carried by the `compare_exchange`
+// being the only writer of `current`, and its UB consequences by Miri-TB.
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn loom_gate11a_concurrent_first_resolve_single_publish() {
-    loom::model(|| {
+    model("loom_gate11a_concurrent_first_resolve_single_publish", 2, || {
         let tag = test_exports::register_tag_layout(TAG);
         let master = Arc::new(test_exports::master_with_tag_archetype(tag));
         let state = Arc::new(test_exports::synced_state(&master, tag));
@@ -119,9 +339,13 @@ fn loom_gate11a_concurrent_first_resolve_single_publish() {
         assert_eq!(len1.load(Ordering::SeqCst), 1, "resolver 1 saw the published list");
         assert_eq!(len2.load(Ordering::SeqCst), 1, "resolver 2 saw the published list");
 
-        // Drop frees the single published `current` exactly once (P4).
-        drop(h1);
-        drop(h2);
+        // The scratch's `Drop` frees the single published `current` exactly
+        // once (P4). Dropping it HERE rather than at end-of-closure is what
+        // makes the free part of the modelled execution: both joins have
+        // already retired the worker Arc clones, so this is the last strong
+        // reference and `TermScratch::drop` runs inside the model, where loom
+        // still observes the `current`/`retired` loads.
+        drop(scratch);
     });
 }
 
@@ -140,7 +364,8 @@ fn loom_gate11a_concurrent_first_resolve_single_publish() {
 
 #[test]
 fn loom_gate11b_constrained_reclaim_after_borrow_ends_clean() {
-    loom::model(|| {
+    // 1: sequential by construction, see the module header.
+    model("loom_gate11b_constrained_reclaim_after_borrow_ends_clean", 1, || {
         let tag = test_exports::register_tag_layout(TAG);
         let unrel = test_exports::register_tag_layout(UNREL);
         let mut master = test_exports::master_with_tag_archetype(tag);
@@ -148,7 +373,8 @@ fn loom_gate11b_constrained_reclaim_after_borrow_ends_clean() {
         let terms = test_exports::one_with_term(tag);
         let scratch = Arc::new(TestScratch::new());
 
-        // E0 publish (current = L0, retired = null) on the model's main thread.
+        // E0 publish (current = L0, retired = null) on the body thread, before R
+        // is spawned.
         {
             let ids = scratch.resolve(&terms, &master, &state);
             assert_eq!(test_exports::list_len(ids), 1);
@@ -191,14 +417,14 @@ fn loom_gate11b_constrained_reclaim_after_borrow_ends_clean() {
 
 #[test]
 fn loom_gate11b_steady_state_concurrent_fastpath_clean() {
-    loom::model(|| {
+    model("loom_gate11b_steady_state_concurrent_fastpath_clean", 2, || {
         let tag = test_exports::register_tag_layout(TAG);
         let master = Arc::new(test_exports::master_with_tag_archetype(tag));
         let state = Arc::new(test_exports::synced_state(&master, tag));
         let terms = test_exports::one_with_term(tag);
         let scratch = Arc::new(TestScratch::new());
 
-        // Prime the memo on the main thread.
+        // Prime the memo on the body thread, before the readers are spawned.
         {
             let ids = scratch.resolve(&terms, &master, &state);
             assert_eq!(test_exports::list_len(ids), 1);
@@ -250,7 +476,7 @@ fn loom_gate11b_steady_state_concurrent_fastpath_clean() {
 
 #[test]
 fn loom_gate11b_unconstrained_documents_why_invariants_load_bearing() {
-    loom::model(|| {
+    model("loom_gate11b_unconstrained_documents_why_invariants_load_bearing", 2, || {
         let tag = test_exports::register_tag_layout(TAG);
         let unrel = test_exports::register_tag_layout(UNREL);
         let mut master = test_exports::master_with_tag_archetype(tag);

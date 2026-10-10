@@ -1,0 +1,3 @@
+﻿# wait_idle8b.ps1 start 2026-09-28T16:19:48.1111086+03:00; poll every 1 s, max 1 polls; quiet = build procs 0 AND lane-target procs 0 AND cpu10 < 5 % AND 100 <= proc count <= 999; need 3 consecutive
+poll   1 2026-09-28T16:19:48.1210349+03:00 cpu10=11.48% procs=264 build_procs=2 [cargo(3300),cargo(15424)] lane_target_procs=1 [broadphase-4771394b1f8d4752(10832)] D_free_GB=66.91 quiet=False streak=0 top3(cpu s in ~10s): broadphase-4771394b1f8d4752(10832)=10.36s claude(18536)=1.84s python(9536)=1.31s
+# TIMEOUT: never idle after 1 polls at 2026-09-28T16:19:59.0775485+03:00

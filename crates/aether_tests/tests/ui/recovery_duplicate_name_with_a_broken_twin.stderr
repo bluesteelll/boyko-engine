@@ -1,0 +1,17 @@
+error: `metallic` takes an expression
+  --> tests/ui/recovery_duplicate_name_with_a_broken_twin.rs:17:54
+   |
+17 |     material gold { base: (0.1, 0.1, 0.1), metallic: }
+   |                                                      ^
+
+error: duplicate material `gold` — each material expands to a builder fn of its own name, and two of one name is one fn defined twice
+  --> tests/ui/recovery_duplicate_name_with_a_broken_twin.rs:17:14
+   |
+17 |     material gold { base: (0.1, 0.1, 0.1), metallic: }
+   |              ^^^^
+
+error: the first `material` of this name is here
+  --> tests/ui/recovery_duplicate_name_with_a_broken_twin.rs:15:14
+   |
+15 |     material gold { base: (1.0, 0.72, 0.30) }
+   |              ^^^^

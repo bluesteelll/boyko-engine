@@ -1,0 +1,5 @@
+error: scene names are lowercase — they expand to spawn fns, not types (rename `Lab` to `lab`)
+ --> tests/ui/scene_name_is_lowercase.rs:6:11
+  |
+6 |     scene Lab {
+  |           ^^^

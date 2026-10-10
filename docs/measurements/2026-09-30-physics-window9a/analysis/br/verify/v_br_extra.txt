@@ -1,0 +1,31 @@
+== clock witness (PDH _Total, 1-s samples over the process life)
+seq 1 g4rT   n 162 median 129.05 mean 125.04 min 97.0; samples < 120 %: 39 (24 %)
+seq 2 g4r8b  n 164 median 128.90 mean 126.04 min 109.9; samples < 120 %: 34 (21 %)
+seq 3 g4r7   n 165 median 129.10 mean 126.32 min 110.9; samples < 120 %: 27 (16 %)
+seq 4 g4rT   n 170 median 129.00 mean 123.99 min 84.3; samples < 120 %: 39 (23 %)
+seq 5 g4r8b  n 169 median 129.10 mean 125.65 min 108.7; samples < 120 %: 41 (24 %)
+seq 6 g4r7   n 162 median 129.20 mean 126.37 min 112.8; samples < 120 %: 27 (17 %)
+seq 7 g4rT   n 164 median 128.75 mean 125.62 min 97.7; samples < 120 %: 36 (22 %)
+seq 8 g4r8b  n 163 median 129.00 mean 125.63 min 110.1; samples < 120 %: 34 (21 %)
+seq 9 g4r7   n 166 median 129.00 mean 126.11 min 106.0; samples < 120 %: 28 (17 %)
+
+== startup scene set (stderr kernel receipts) and criterion base==new
+seq 1 g4rT   uniform sizes 28 (max 1000), LeafListKd receipts 60, base==new True
+seq 2 g4r8b  uniform sizes 28 (max 1000), LeafListKd receipts 60, base==new True
+seq 3 g4r7   uniform sizes 27 (max 256), LeafListKd receipts 0, base==new True
+seq 4 g4rT   uniform sizes 28 (max 1000), LeafListKd receipts 60, base==new True
+seq 5 g4r8b  uniform sizes 28 (max 1000), LeafListKd receipts 60, base==new True
+seq 6 g4r7   uniform sizes 27 (max 256), LeafListKd receipts 0, base==new True
+seq 7 g4rT   uniform sizes 28 (max 1000), LeafListKd receipts 60, base==new True
+seq 8 g4r8b  uniform sizes 28 (max 1000), LeafListKd receipts 60, base==new True
+seq 9 g4r7   uniform sizes 27 (max 256), LeafListKd receipts 0, base==new True
+
+== static placement of all_pairs_into (tree-c4/m9/place.py apinto_16191fda.dis e0 192 <exe>)
+broadphase_g4rT_50e31f1a.exe: hits ['0xab080'] loop head mod64 32, 64-B lines 4, jcc on/across 32 B 0
+broadphase_g4ref_16191fda.exe: hits ['0xab080'] loop head mod64 32, 64-B lines 4, jcc on/across 32 B 0
+bpbench_g4ref_93b2615b.exe: hits ['0x92da0'] loop head mod64 0, 64-B lines 3, jcc on/across 32 B 0
+M9 record place_apinto.json (incl. M9 rebuilds without the G4-sizes patch):
+  bin/bpbench_g4ref_93b2615b.exe: hits ['0x92da0'] loop head mod64 0, 64-B lines 3, jcc on/across 32 B 0
+  bin/broadphase_g4ref_16191fda.exe: hits ['0xab080'] loop head mod64 32, 64-B lines 4, jcc on/across 32 B 0
+  93b2615b/broadphase-feaf22adb9abc4a9.exe: hits ['0x92d80'] loop head mod64 32, 64-B lines 4, jcc on/across 32 B 0
+  16191fda/broadphase-f2515a6f878ca59a.exe: hits ['0xab070'] loop head mod64 16, 64-B lines 4, jcc on/across 32 B 2

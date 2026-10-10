@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use boyko_math::{Affine3A, Mat3, Vec3};
 use boyko_render::gpu_transform3d::GpuTransform3D;
 use boyko_render::instance_model::InstanceModelCol;
-use boyko_render::mesh_draw::MeshRenderScratch;
+use boyko_render::mesh_draw::{MeshRenderScratch, PerInstanceMaterial};
 use boyko_render::{
     gbuffer_push_from_view, upload_camera_ring, upload_instance_models, upload_pair_out_slot,
     upload_pair_ring,
@@ -82,6 +82,7 @@ fn fake_slot(storage: &mut Vec<u8>) -> BoundBuffer {
         offset: 0,
         size: storage.len() as u64,
         mapped: core::ptr::NonNull::new(storage.as_mut_ptr()),
+        block: 0,
     }
 }
 
@@ -135,15 +136,19 @@ fn frame_helpers_allocate_zero_after_warmup() {
             GpuTransform3D::from_transform(&Transform::from_translation(Vec3::new(i as f32, 0.0, 0.0)))
         })
         .collect();
-    let inputs: Vec<(u32, &InstanceModelCol, Option<&GpuTransform3D>)> = records
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            let pair = if i % 4 == 0 { Some(&pairs[i]) } else { None };
-            ((i as u32) % 2, r, pair)
-        })
-        .collect();
-    let meta = |_mesh: u32| (36u32, IndexType::Uint16);
+    // The 5th element (VG R3 piece 2 step P2-2) is the row's occlusion-culling capability.
+    // `false` here, and the Principle-5 budget is unchanged either way: `inst_flags` is a
+    // `ScratchColumn` reused across frames, so the steady state still allocates zero.
+    let inputs: Vec<(u32, &InstanceModelCol, Option<&GpuTransform3D>, PerInstanceMaterial, bool)> =
+        records
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let pair = if i % 4 == 0 { Some(&pairs[i]) } else { None };
+                ((i as u32) % 2, r, pair, PerInstanceMaterial::default(), false)
+            })
+            .collect();
+    let meta = |_mesh: u32| Some((36u32, IndexType::Uint16));
 
     // SAFETY: no GPU work exists in this process (no device was booted), so no
     // submitted work can reference the fake slots — the `forge_unfenced` setup
@@ -200,11 +205,11 @@ fn frame_helpers_allocate_zero_after_warmup() {
     // Sanity: the uploads actually wrote — the instance slot's leading bytes
     // equal the gathered ring's first record, and the out-slot slot's first
     // entry equals the first dynamic row's ring slot.
-    let expect: &[u8] = bytemuck::bytes_of(&scratch.ring[0]);
+    let expect: &[u8] = bytemuck::bytes_of(&scratch.ring.as_read_slice()[0]);
     assert_eq!(&inst_storage[..48], expect, "the instance memcpy landed");
     let first_out_slot = u32::from_le_bytes(out_slot_storage[..4].try_into().unwrap());
     assert_eq!(
-        first_out_slot, scratch.pair_out_slot[0],
+        first_out_slot, scratch.pair_out_slot.as_read_slice()[0],
         "the out-slot memcpy landed (first dynamic row's ring slot)"
     );
 }

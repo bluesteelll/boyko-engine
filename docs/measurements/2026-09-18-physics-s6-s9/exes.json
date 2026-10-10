@@ -1,0 +1,170 @@
+{
+  "generated": "2026-09-18, tester prepare step; nothing timed",
+  "toolchain": "stable-x86_64-pc-windows-msvc, rustc 1.98.1 (48a229cea 2026-09-01); profile bench (codegen-units=1, lto=false); RUSTFLAGS unset; target-cpu=x86-64-v3 from .cargo/config.toml",
+  "invoke": "cd <worktree>; CARGO_TARGET_DIR=<target_dir> <exe> --bench [criterion filter]. WITHOUT --bench criterion runs TEST mode (one iteration, no timing).",
+  "entries": {
+    "s6": {
+      "A": "d5782d43",
+      "B": "b74f7ee8",
+      "benches": {
+        "jolt_parity_pyramid": "A,B: full_step/1, full_step/4",
+        "row_identity_churn": "B only"
+      }
+    },
+    "s7": {
+      "A": "d552be05",
+      "B": "a56007ab",
+      "benches": {
+        "jolt_parity_pyramid": "full_step/1, full_step/4",
+        "row_identity_churn": "stable",
+        "soft_step_sp2": "soft_step_sp2/coupled"
+      }
+    },
+    "s8": {
+      "A": "d552be05 (ported sleeping_pipeline, contact_wakes body = 0)",
+      "B": "a56007ab",
+      "benches": {
+        "sleeping_pipeline": "all three arms",
+        "jolt_parity_pyramid": "full_step/1"
+      }
+    },
+    "s9": {
+      "A": "08fe7b9f",
+      "B": "8d656ad8",
+      "benches": {
+        "sleeping_pipeline": "pyramid_sleeping_off, pyramid_awake_sleeping_on",
+        "jolt_parity_pyramid": "full_step/1, full_step/4"
+      }
+    }
+  },
+  "arms": {
+    "d5782d43": {
+      "commit": "d5782d43e58d01a966e43be21daa791c8360e7d9",
+      "worktree": "D:/wt/mq-d5782d43",
+      "target_dir": "D:/wt/_targets/mq-d5782d43",
+      "tree_state": "clean at commit",
+      "benches": {
+        "jolt_parity_pyramid": {
+          "exe": "D:/wt/_targets/mq-d5782d43/release/deps/jolt_parity_pyramid-43b10ef74d0e3f27.exe",
+          "sha256": "9dff38a51a5e5dc558764deed1b0afa20318675deda94d42d879162a4420d1ae",
+          "fresh_on_rebuild": true
+        }
+      }
+    },
+    "b74f7ee8": {
+      "commit": "b74f7ee89609acd4a54e52a86f13c02cb30067ec",
+      "worktree": "D:/wt/mq-b74f7ee8",
+      "target_dir": "D:/wt/_targets/mq-b74f7ee8",
+      "tree_state": "clean at commit",
+      "benches": {
+        "jolt_parity_pyramid": {
+          "exe": "D:/wt/_targets/mq-b74f7ee8/release/deps/jolt_parity_pyramid-43b10ef74d0e3f27.exe",
+          "sha256": "3bbbd97325e1aa21fe4bd45c4dff599d285a03aabee2893c8cb6290a6849a365",
+          "fresh_on_rebuild": true
+        },
+        "row_identity_churn": {
+          "exe": "D:/wt/_targets/mq-b74f7ee8/release/deps/row_identity_churn-a5d5ed5921338d69.exe",
+          "sha256": "bf089a1f9cc50392b9d0f9f8a6ce4ffd166f133eafa281ea05c12d2b46e9234e",
+          "fresh_on_rebuild": true
+        }
+      }
+    },
+    "d552be05": {
+      "commit": "d552be05be4b4f063b6cb39ddfd63eb4688f83fd",
+      "worktree": "D:/wt/mq-d552be05",
+      "target_dir": "D:/wt/_targets/mq-d552be05",
+      "tree_state": "commit + s8 arm-A port (untracked benches/sleeping_pipeline.rs, modified crates/boyko_physics/Cargo.toml; see s8_armA_port.diff). jolt_parity_pyramid/row_identity_churn/soft_step_sp2 were built BEFORE the port and are byte-identical after it (sha256 unchanged).",
+      "benches": {
+        "jolt_parity_pyramid": {
+          "exe": "D:/wt/_targets/mq-d552be05/release/deps/jolt_parity_pyramid-43b10ef74d0e3f27.exe",
+          "sha256": "aa70f3e266f0055e727b1d1e6a8a88cf4c5ea9c6d68a681fb723f52b62ef9a4a",
+          "fresh_on_rebuild": true
+        },
+        "row_identity_churn": {
+          "exe": "D:/wt/_targets/mq-d552be05/release/deps/row_identity_churn-a5d5ed5921338d69.exe",
+          "sha256": "6e37d7db2cb3110bd126fbc28eba624d626726ea86212ed8ea73783d3a6f13d6",
+          "fresh_on_rebuild": true
+        },
+        "sleeping_pipeline": {
+          "exe": "D:/wt/_targets/mq-d552be05/release/deps/sleeping_pipeline-b79088505f0ef46b.exe",
+          "sha256": "e9ec0a2eb67ae10b35ecd0020009b9f041cdc5cf152176aa49c39241d2fb6718",
+          "fresh_on_rebuild": true
+        },
+        "soft_step_sp2": {
+          "exe": "D:/wt/_targets/mq-d552be05/release/deps/soft_step_sp2-5eb4eb9741068bd6.exe",
+          "sha256": "086758fe0bef689fe8455c9c610a1b11e196f20a10f161c82792bfd832d5ce37",
+          "fresh_on_rebuild": true
+        }
+      }
+    },
+    "a56007ab": {
+      "commit": "a56007ab6fd31c7aa0abbe144ad2c7655ff04915",
+      "worktree": "D:/wt/mq-a56007ab",
+      "target_dir": "D:/wt/_targets/mq-a56007ab",
+      "tree_state": "clean at commit",
+      "benches": {
+        "jolt_parity_pyramid": {
+          "exe": "D:/wt/_targets/mq-a56007ab/release/deps/jolt_parity_pyramid-43b10ef74d0e3f27.exe",
+          "sha256": "662a96852d1d44a2e8865566c717b920f25233d73589b3f741f1e5031c4e897f",
+          "fresh_on_rebuild": true
+        },
+        "row_identity_churn": {
+          "exe": "D:/wt/_targets/mq-a56007ab/release/deps/row_identity_churn-a5d5ed5921338d69.exe",
+          "sha256": "48e71cca5e94674b4995e3e3b09efbf0808affafd6d74f58bf2e99a4c70de4c7",
+          "fresh_on_rebuild": true
+        },
+        "sleeping_pipeline": {
+          "exe": "D:/wt/_targets/mq-a56007ab/release/deps/sleeping_pipeline-b79088505f0ef46b.exe",
+          "sha256": "ec3ff6ee8ee16db13428742d6cedd5f757f7933f21e004ab2eda01f9b1c396e4",
+          "fresh_on_rebuild": true
+        },
+        "soft_step_sp2": {
+          "exe": "D:/wt/_targets/mq-a56007ab/release/deps/soft_step_sp2-5eb4eb9741068bd6.exe",
+          "sha256": "cc01bda69891e974491c4d5087ea99f9696dfe8dd43566298a834e25ca53077e",
+          "fresh_on_rebuild": true
+        }
+      }
+    },
+    "08fe7b9f": {
+      "commit": "08fe7b9fd88302791db1105992f3218c0b9deed5",
+      "worktree": "D:/wt/mq-08fe7b9f",
+      "target_dir": "D:/wt/_targets/mq-08fe7b9f",
+      "tree_state": "clean at commit",
+      "benches": {
+        "jolt_parity_pyramid": {
+          "exe": "D:/wt/_targets/mq-08fe7b9f/release/deps/jolt_parity_pyramid-43b10ef74d0e3f27.exe",
+          "sha256": "c78a9ffe77a9bf0ca0286799b94c126c4c05cc207d427402fb72c748d6fae86f",
+          "fresh_on_rebuild": true
+        },
+        "sleeping_pipeline": {
+          "exe": "D:/wt/_targets/mq-08fe7b9f/release/deps/sleeping_pipeline-b79088505f0ef46b.exe",
+          "sha256": "fe421ad35d6c893bfb102f0caf007a896c47446739adfe1c34e35649cbc76344",
+          "fresh_on_rebuild": true
+        }
+      }
+    },
+    "8d656ad8": {
+      "commit": "8d656ad825a8d3ee4eb3ea90ff2c4796b3630f3e",
+      "worktree": "D:/wt/mq-8d656ad8",
+      "target_dir": "D:/wt/_targets/mq-8d656ad8",
+      "tree_state": "clean at commit",
+      "benches": {
+        "jolt_parity_pyramid": {
+          "exe": "D:/wt/_targets/mq-8d656ad8/release/deps/jolt_parity_pyramid-43b10ef74d0e3f27.exe",
+          "sha256": "80142a730beaa1c388f9992977623d03b493dbd9dd7690cca135881a94954c14",
+          "fresh_on_rebuild": true
+        },
+        "sleeping_pipeline": {
+          "exe": "D:/wt/_targets/mq-8d656ad8/release/deps/sleeping_pipeline-b79088505f0ef46b.exe",
+          "sha256": "225b355d7bb1ba37c231c305b99075ef0008ab804c142a3286ff8d265acc8913",
+          "fresh_on_rebuild": true
+        }
+      }
+    }
+  },
+  "do_not_use": {
+    "D:/wt/_targets/mq-d552be05/release/deps/sleeping_pipeline-892ed66c006bb282.exe": "release-profile (fat LTO) TEST build from the structural receipt, not the bench-profile binary",
+    "D:/wt/_targets/mq-a56007ab/release/deps/sleeping_pipeline-892ed66c006bb282.exe": "same",
+    "D:/wt/_targets/mq-probe-*": "probe builds (s9_probe.diff); never time these"
+  }
+}

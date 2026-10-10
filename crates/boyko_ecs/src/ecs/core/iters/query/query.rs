@@ -17,8 +17,10 @@
 
 use std::marker::PhantomData;
 
+use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::component::component_registry::{EnableTagId, TagId};
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
+use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::iters::query::chunk_iter;
 use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
@@ -27,13 +29,17 @@ use crate::ecs::core::iters::query::dense_iter::{
 };
 use crate::ecs::core::iters::query::enable_terms::EnableTerms;
 use crate::ecs::core::iters::query::filter::{ArchetypalQueryFilter, QueryFilter};
+use crate::ecs::core::iters::query::filter_enable::query_view_enable_passes;
 use crate::ecs::core::iters::query::iter::{
     QueryIter, QueryIterEntities, QueryIterEntitiesMut, QueryIterMut,
 };
 use crate::ecs::core::iters::query::par_chunk;
 use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, ParQuery, ParQueryMut};
+use crate::ecs::core::iters::query::point_filter;
 use crate::ecs::core::iters::query::state::QueryDataState;
-use crate::ecs::core::iters::query::tag_terms::{TagTerms, any_term_matched, count_term_matched};
+use crate::ecs::core::iters::query::tag_terms::{
+    TagTerms, any_term_matched, archetype_passes_tag_terms, count_term_matched,
+};
 use crate::ecs::core::system::filtered_access_set::FilteredAccessSet;
 use crate::ecs::core::system::system_meta::SystemMeta;
 use crate::ecs::core::system::system_param::SystemParam;
@@ -88,8 +94,14 @@ pub struct Query<'w, 's, D: QueryData, F: QueryFilter = ()> {
     /// byte-identical cursor fast path (0%-gate).
     enable_terms: EnableTerms,
 
-    /// Invariance over `D` and `F`. `fn() -> (D, F)` keeps the marker
-    /// `Send + Sync` regardless of `D`/`F` bounds.
+    /// Type carrier for `D` and `F`. `fn() -> (D, F)` owns nothing, so the
+    /// marker is `Send + Sync` regardless of `D`/`F` bounds — that decoupling
+    /// is the whole reason for the `fn` shape.
+    ///
+    /// NOT invariance, which this comment used to claim: a `fn` **return**
+    /// position is covariant (invariance would need `fn(D, F) -> (D, F)`).
+    /// Nothing here depends on either — `D` and `F` are bounded `+ 'static` at
+    /// every use site, so neither carries a lifetime for variance to act on.
     _marker: PhantomData<fn() -> (D, F)>,
 }
 
@@ -116,6 +128,31 @@ pub const fn assert_dense_iter_no_enable<D: DenseQueryData, F: QueryFilter>() {
     assert!(
         !F::CONTAINS_ENABLE_TERM,
         "dense_iter cannot honor an enable term — use iter_mut()"
+    );
+}
+
+/// KE3 — [`Query::contains`]'s dense-`D` refusal, factored out for exactly the
+/// reason [`assert_dense_iter_no_enable`] above is: an inline `const { … }` in a
+/// generic body is a CODEGEN-time trigger, and the `compile_fail` suite runs
+/// `cargo check`. Written only in the body, the refusal had no fixture that
+/// could fire, so a regression to a silent (and *different*) answer would have
+/// passed every gate in the tree.
+///
+/// The refusal itself: for a dense `D`, membership in the result set also depends
+/// on membership in the `DenseStore`, and answering that needs a data fetch —
+/// which `set_table_readonly` refuses to build for a `&mut T` `D` (QD4). Answering
+/// a different question from [`Query::get`] in silence is the failure mode this
+/// forbids; `get(e).is_some()` is the supported spelling.
+///
+/// Same coverage caveat as its neighbour, stated rather than implied: the fixture
+/// pins that THIS FUNCTION rejects a dense `D`, not that `contains`'s body still
+/// calls it. The body's `const {}` is the load-bearing guard at codegen.
+pub const fn assert_contains_not_dense<D: QueryData>() {
+    assert!(
+        !D::HAS_DENSE,
+        "Query::contains cannot answer for a dense `D` — dense-store \
+         membership needs a data fetch. Use get(e).is_some() / \
+         get_mut(e).is_some()."
     );
 }
 
@@ -347,9 +384,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   archetype's entity-id column (distinct from every component column).
         //   Phase 22.1 Area A: the id slice is resolved once here.
         let ids = self.driver_ids();
-        unsafe {
-            QueryIterEntities::new(self.state, ids, self.world, self.meta, self.enable_terms)
-        }
+        unsafe { QueryIterEntities::new(self.state, ids, self.world, self.meta, self.enable_terms) }
     }
 
     /// Returns a mutable iterator yielding `(EntityId, D::Item<'_>)` for every
@@ -431,7 +466,12 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     where
         D: DenseQueryData + ReadOnlyQueryData,
     {
-        const { assert!(D::HAS_DENSE, "Query::dense_iter requires a dense `D` (storage = \"dense\")") };
+        const {
+            assert!(
+                D::HAS_DENSE,
+                "Query::dense_iter requires a dense `D` (storage = \"dense\")"
+            )
+        };
         // Dense-enable plan D0 — reject an enable-bearing `F` at monomorphization
         // (the dense fast path is archetype-agnostic and cannot honor a per-row
         // enable term). Mirrors `par_iter`'s dense const-reject and
@@ -457,7 +497,12 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     where
         D: DenseQueryData,
     {
-        const { assert!(D::HAS_DENSE, "Query::dense_iter_mut requires a dense `D` (storage = \"dense\")") };
+        const {
+            assert!(
+                D::HAS_DENSE,
+                "Query::dense_iter_mut requires a dense `D` (storage = \"dense\")"
+            )
+        };
         // Dense-enable plan D0 — reject an enable-bearing `F` (the `&mut` leak the
         // fix closes: today this would write EVERY live slot, disabled rows
         // included). Use `iter_mut()` — its per-row `filter_fetch` enforces the
@@ -681,6 +726,428 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
             );
         }
     }
+
+    // ── Random access (Aether v2 KE2/KE3, rung R1) ──────────────────────────
+
+    /// Resolves `entity` to the `(archetype, row)` this query would visit it
+    /// at, applying every **archetype-level** gate: liveness, generation match,
+    /// matched-set membership, and the dynamic tag terms.
+    ///
+    /// Shared by [`Self::get`], [`Self::get_mut`] and [`Self::contains`] so the
+    /// three cannot drift apart on the cheap half of the predicate.
+    ///
+    /// Returns the archetype pointer with its original write-capable
+    /// provenance; `get` / `contains` immediately downgrade it to `*const`.
+    #[inline]
+    fn resolve_point(&self, entity: Entity) -> Option<(*mut Archetype, usize)> {
+        // SAFETY (U_C2): shared read mint — `world()` yields `&EcsMaster`
+        //   scoped to this statement; no `&mut` access occurs through it (the
+        //   same pattern `archetype_count` / `driver_ids_term_slow` use).
+        let ecs = unsafe { self.world.world() };
+        let inland = *ecs.entity_master.entities_inland.get(entity.id().0)?;
+        if inland.is_null() {
+            return None;
+        }
+        // A recycled id whose generation moved on is NOT this entity. Without
+        // this test a stale handle would silently address a different entity's
+        // row.
+        if inland.generation() != entity.generation() {
+            return None;
+        }
+        // SAFETY (U1, U2, U11, U14, F1): the inland-cached `archetype_ptr` was
+        //   minted with write-capable, interior-mutable (`SharedReadWrite`,
+        //   F4-rooted) provenance via the bundle's `UnsafeCell::raw_get` helper
+        //   at register time (Phase 7 W7); the slab address is stable for `'w`
+        //   and the pointer survives sibling structural writes under TB/SB.
+        let arch_ptr: *mut Archetype = inland.archetype_ptr();
+        // SAFETY (U1, U2): shared reborrow scoped to this block; the read-only
+        //   probe materialises no `&mut Archetype`.
+        let arch_ref: &Archetype = unsafe { &*arch_ptr };
+        // Membership — the bitset is the dedup-mirror of `matched_ids`.
+        if !self
+            .state
+            .archetype_state
+            .matched_archetypes_bitset()
+            .contains(arch_ref.id().0)
+        {
+            return None;
+        }
+        // Phase 22 D4: per-entity dynamic-tag test on the in-hand archetype ref
+        // — ≤ 8 signature bit tests; `len == 0` is one predicted branch.
+        if !archetype_passes_tag_terms(&self.terms, arch_ref) {
+            return None;
+        }
+        Some((arch_ptr, inland.unit_index() as usize))
+    }
+
+    /// Applies the per-row **enable** gates — the typed `Enabled<T>` /
+    /// `Disabled<T>` term in `F` and any dynamic `with_enabled` /
+    /// `without_enabled` term.
+    ///
+    /// Both read the enable bit **shared**, regardless of the caller's
+    /// mutability, so a `*const Archetype` is the correct read surface on every
+    /// path (the rationale `QueryView::get_mut` already records).
+    ///
+    /// # Safety
+    ///
+    /// * `arch_ptr` must be the live, matched, slab-stable archetype pointer
+    ///   returned by [`Self::resolve_point`].
+    /// * `row` must be `< arch.entity_count()` — the fast store's `unit_index`
+    ///   invariant.
+    #[inline]
+    unsafe fn point_enable_passes(&self, arch_ptr: *const Archetype, row: usize) -> bool {
+        // Typed term: gated behind `const { F::CONTAINS_ENABLE_TERM }` so the
+        // call is emitted ONLY for enable-bearing filters — a no-enable point
+        // lookup is byte-identical (the 0%-gate).
+        if const { F::CONTAINS_ENABLE_TERM } {
+            // SAFETY (ENBL-PT): forwarded from this function's own contract —
+            //   `arch_ptr` is live and matched, `row < entity_count`. The helper
+            //   caches the enable column and tests the row bit.
+            if !unsafe { query_view_enable_passes::<F>(&self.state.filter_state, arch_ptr, row) } {
+                return false;
+            }
+        }
+        // Dynamic per-row terms: one predicted `is_empty()` branch when unused.
+        if !self.enable_terms.is_empty() {
+            // SAFETY (ENBL-9): `arch_ref` is the live, matched archetype and
+            //   `row < entity_count` (this function's contract). `resolve`
+            //   scans the archetype's `EnableStore` through a shared borrow.
+            let arch_ref: &Archetype = unsafe { &*arch_ptr };
+            let cols = self.enable_terms.resolve(arch_ref);
+            // SAFETY (ENBL-9): `cols` was resolved for this archetype; `row` is
+            //   in range.
+            if !unsafe { cols.passes(row) } {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Applies `F`'s per-row predicate at `row`, so `get` / `get_mut` /
+    /// `contains` answer what `iter()` answers.
+    ///
+    /// The body lives in [`point_filter::point_filter_passes`] because
+    /// [`QueryView`](super::query_view::QueryView) needs the identical
+    /// predicate, and a second copy there is what KE13 was: `QueryView::get`
+    /// grew the `D`-side `resolve_dense` mirror and never grew the `F`-side
+    /// one. Generic over `F` alone, so it also monomorphises once per filter
+    /// rather than once per `(D, F)` pair.
+    ///
+    /// Const-folds away entirely for `F::IS_ARCHETYPAL` (every archetypal
+    /// filter), which is the 0%-gate the common point lookup takes.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::point_enable_passes`].
+    #[inline]
+    unsafe fn point_filter_passes(&self, arch_ptr: *const Archetype, row: usize) -> bool {
+        // SAFETY: forwarded verbatim from this function's own contract —
+        //   `arch_ptr` is live, matched and slab-stable; `row < entity_count`;
+        //   `self.meta` is the active system's `SystemMeta`, which is what makes
+        //   the NCD arm legal here (unlike on `QueryView`).
+        unsafe {
+            point_filter::point_filter_passes::<F>(
+                &self.state.filter_state,
+                self.world,
+                arch_ptr,
+                row,
+                self.meta,
+            )
+        }
+    }
+
+    /// Returns the row `entity` occupies, or `None` if it is dead, stale, or
+    /// filtered out.
+    ///
+    /// The answer agrees with [`Self::iter`] row for row: matched-set
+    /// membership, dynamic tag terms, enable terms, `F`'s per-row predicate and
+    /// a dense `D`'s store membership are all applied. `D` must be
+    /// [`ReadOnlyQueryData`]; for the mutable variant use [`Self::get_mut`].
+    ///
+    /// # Cost
+    ///
+    /// O(1): one entity-fast-store lookup, one `ArchetypeBitSet::contains`, one
+    /// archetype dispatch. Every optional gate is behind a `const` fold or a
+    /// predicted branch.
+    pub fn get(&self, entity: Entity) -> Option<D::Item<'_>>
+    where
+        D: ReadOnlyQueryData,
+    {
+        let (arch_ptr, row) = self.resolve_point(entity)?;
+        let arch_ptr_const: *const Archetype = arch_ptr;
+        // SAFETY (ENBL-PT, QF1): `resolve_point` returned a live, matched
+        //   archetype and the fast store's `unit_index`, which is `<
+        //   entity_count` by the register/migrate contract.
+        if !unsafe { self.point_enable_passes(arch_ptr_const, row) } {
+            return None;
+        }
+        // SAFETY: same contract.
+        if !unsafe { self.point_filter_passes(arch_ptr_const, row) } {
+            return None;
+        }
+
+        let mut data_fetch = <D as QueryData>::init_fetch(&self.state.data_state);
+        // Dense plan D3: a dense `D` needs its global `DenseStore` pointer
+        // resolved before `fetch`, else the dense gather dereferences NULL.
+        // 0%-gate: `HAS_DENSE` folds `false` for a table `D`.
+        if const { <D as QueryData>::HAS_DENSE } {
+            // SAFETY (D3): the cell is scoped to `'w`; the resolved store
+            //   pointer is address-stable for that lifetime.
+            unsafe {
+                <D as QueryData>::resolve_dense(
+                    &mut data_fetch,
+                    &self.state.data_state,
+                    self.world,
+                );
+            }
+        }
+        // NCD6 const-fold dispatcher — the `Query` half of the reason this
+        // method is NOT a verbatim port of `QueryView::get`: `Query` holds the
+        // live `SystemMeta`, so `Ref<T>` / `Mut<T>` read the system's real
+        // `(last_run, this_run]` window instead of `SystemMeta::dummy()`'s
+        // `Tick::ZERO`.
+        //
+        // SAFETY (QD3, QD4): read-only dispatch — `D: ReadOnlyQueryData`
+        //   forbids the `&mut T` impl that traps in `set_table_readonly`. The
+        //   archetype was matched by `D::matches_component_set`, so every
+        //   cached column is non-null; `row` is the live `unit_index`.
+        unsafe {
+            if const { <D as QueryData>::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION } {
+                <D as QueryData>::set_table_readonly(
+                    &mut data_fetch,
+                    &self.state.data_state,
+                    arch_ptr_const,
+                    self.meta,
+                );
+            } else {
+                <D as QueryData>::set_table_readonly_no_meta(
+                    &mut data_fetch,
+                    &self.state.data_state,
+                    arch_ptr_const,
+                );
+            }
+        }
+        // Dense membership (D3): the matched-archetype bitset is a CONSERVATIVE
+        // over-approximation (seeded from `arch_presence`), so a matched
+        // archetype may host an entity that is NOT a live dense-store member.
+        // 0%-gate for a table `D`.
+        if const { <D as QueryData>::HAS_DENSE } {
+            // SAFETY (D3): `resolve_dense` + `set_table_readonly` populated
+            //   `fetch.dense` / `fetch.entity_ids`; `row < entity_count`.
+            if !unsafe { <D as QueryData>::dense_row_passes(&data_fetch, row) } {
+                return None;
+            }
+        }
+        // SAFETY (QD2, QD3): the column pointers are cached and `row` is in
+        //   range per the fast-store invariant.
+        Some(unsafe { <D as QueryData>::fetch(&data_fetch, row) })
+    }
+
+    /// Mutable twin of [`Self::get`] — accepts any `D: QueryData`.
+    ///
+    /// # The changed tick is stamped from THIS system's meta
+    ///
+    /// `Query` uniquely holds the running system's [`SystemMeta`]; the
+    /// direct-API [`QueryView`](super::query_view::QueryView) does not, and
+    /// passes `SystemMeta::dummy()` (whose `this_run` is `Tick::ZERO`) instead.
+    /// Ported verbatim, that would make a `Mut<T>` obtained here stamp an
+    /// ancient tick on `DerefMut`: the write lands in the column and **no
+    /// `Changed<T>` reader ever sees it**. The `meta` threaded through the
+    /// `set_table_mut` calls below is what closes that hole; it is pinned by
+    /// `tests/ke3_query_random_access.rs::get_mut_stamps_the_changed_tick_from_the_system_meta`.
+    ///
+    /// The `&mut self` borrow gates uniqueness (Q3), exactly as `iter_mut` does.
+    pub fn get_mut(&mut self, entity: Entity) -> Option<D::Item<'_>> {
+        let (arch_ptr, row) = self.resolve_point(entity)?;
+        // SAFETY (ENBL-PT, QF1): `resolve_point` returned a live, matched
+        //   archetype and an in-range row. Both gates read shared, so the
+        //   `*const` downgrade is the correct read surface.
+        if !unsafe { self.point_enable_passes(arch_ptr, row) } {
+            return None;
+        }
+        // SAFETY: same contract.
+        if !unsafe { self.point_filter_passes(arch_ptr, row) } {
+            return None;
+        }
+
+        let mut data_fetch = <D as QueryData>::init_fetch(&self.state.data_state);
+        if const { <D as QueryData>::HAS_DENSE } {
+            // SAFETY (D3): the cell carries write-capable provenance and is
+            //   scoped to `'w`; `resolve_dense` reads the store pointer SHARED.
+            unsafe {
+                <D as QueryData>::resolve_dense(
+                    &mut data_fetch,
+                    &self.state.data_state,
+                    self.world,
+                );
+            }
+        }
+        // SAFETY (QD3, QD4): write-capable mint; the archetype is matched and
+        //   `row` is the live `unit_index`. `self.meta` is the ACTIVE system's
+        //   meta — see this method's doc comment for why that matters.
+        unsafe {
+            if const { <D as QueryData>::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION } {
+                <D as QueryData>::set_table_mut(
+                    &mut data_fetch,
+                    &self.state.data_state,
+                    arch_ptr,
+                    self.meta,
+                );
+            } else {
+                <D as QueryData>::set_table_mut_no_meta(
+                    &mut data_fetch,
+                    &self.state.data_state,
+                    arch_ptr,
+                );
+            }
+        }
+        if const { <D as QueryData>::HAS_DENSE } {
+            // SAFETY (D3): `resolve_dense` + `set_table_mut` populated the dense
+            //   fetch fields; `row < entity_count`.
+            if !unsafe { <D as QueryData>::dense_row_passes(&data_fetch, row) } {
+                return None;
+            }
+        }
+        // SAFETY (QD2, QD3): columns cached, `row` in range.
+        Some(unsafe { <D as QueryData>::fetch(&data_fetch, row) })
+    }
+
+    /// Returns `true` iff `entity` is a member of this query's result set —
+    /// alive, generation-current, in a matched archetype, and passing every
+    /// term.
+    ///
+    /// **Not a liveness test.** An entity that is alive but sits outside the
+    /// matched archetype set answers `false`; that is the case the API exists
+    /// for, and the one
+    /// `tests/ke3_query_random_access.rs::contains_is_false_for_an_alive_but_unmatched_entity`
+    /// pins. `contains` and [`Self::get`] must agree row for row.
+    ///
+    /// Unlike `get`, `contains` needs no `D: ReadOnlyQueryData` bound: it never
+    /// builds a data fetch, and a filter's per-row read is shared regardless of
+    /// `D`'s mutability.
+    ///
+    /// # Dense `D` is refused at compile time
+    ///
+    /// For a dense `D`, membership in the query's result set also depends on
+    /// membership in the `DenseStore`, and answering that needs a data fetch —
+    /// which `set_table_readonly` refuses to build for a `&mut T` `D` (QD4).
+    /// Rather than answer a *different* question from `get` in silence, this
+    /// method const-refuses a dense `D`. Use `get(e).is_some()` /
+    /// `get_mut(e).is_some()` there.
+    ///
+    /// The refusal lives in the shared [`assert_contains_not_dense`] so the
+    /// `compile_fail` suite can fire it from a `const ITEM` under `cargo check`;
+    /// the `const {}` below is the codegen-time trigger for real callers.
+    #[inline]
+    pub fn contains(&self, entity: Entity) -> bool {
+        const { assert_contains_not_dense::<D>() };
+        let Some((arch_ptr, row)) = self.resolve_point(entity) else {
+            return false;
+        };
+        let arch_ptr_const: *const Archetype = arch_ptr;
+        // SAFETY (ENBL-PT, QF1): `resolve_point` returned a live, matched
+        //   archetype and an in-range row; both gates read shared.
+        unsafe {
+            self.point_enable_passes(arch_ptr_const, row)
+                && self.point_filter_passes(arch_ptr_const, row)
+        }
+    }
+
+    /// Returns the first row this query yields, or `None` if it yields none.
+    ///
+    /// # The order is STATED, not inherited
+    ///
+    /// `first()` **is** `iter().next()`: matched archetypes in the driver's
+    /// order, then ascending row index inside each. `QueryView` defines no
+    /// order for a point lookup, so KE3 chooses one, and chooses the only one
+    /// that cannot drift — the body below literally calls `iter().next()`, so
+    /// `first` and `iter` cannot disagree even if the driver order changes.
+    ///
+    /// What that order is **not**: it is not lowest-`EntityId`-first, and it is
+    /// not stable across structural change (a spawn, a despawn's swap-remove, or
+    /// a new matched archetype can move it). Callers that need a deterministic
+    /// element must sort, or query for a key.
+    ///
+    /// Differs from [`Self::single`] in the empty and many cases: `first`
+    /// returns `None` for empty and the first of many, where `single` panics on
+    /// both.
+    #[inline]
+    pub fn first(&self) -> Option<D::Item<'_>>
+    where
+        D: ReadOnlyQueryData,
+    {
+        self.iter().next()
+    }
+
+    /// Returns the single matched row, panicking unless the query yields
+    /// exactly one.
+    ///
+    /// `D` must be [`ReadOnlyQueryData`]; for the mutable variant use
+    /// [`Self::single_mut`]. Use [`Self::first`] when zero or many rows is a
+    /// legal outcome.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the query yields zero rows or more than one. Cold path — no
+    /// overhead on the success path beyond the iteration itself.
+    #[inline]
+    pub fn single(&self) -> D::Item<'_>
+    where
+        D: ReadOnlyQueryData,
+    {
+        let mut iter = self.iter();
+        let first = iter
+            .next()
+            .unwrap_or_else(|| query_single_panic_empty::<D, F>());
+        if iter.next().is_some() {
+            query_single_panic_many::<D, F>();
+        }
+        first
+    }
+
+    /// Mutable twin of [`Self::single`] — accepts any `D: QueryData`. The
+    /// `&mut self` borrow gates cursor uniqueness (Q3).
+    ///
+    /// # Panics
+    ///
+    /// Same contract as [`Self::single`].
+    #[inline]
+    pub fn single_mut(&mut self) -> D::Item<'_> {
+        let mut iter = self.iter_mut();
+        let first = iter
+            .next()
+            .unwrap_or_else(|| query_single_panic_empty::<D, F>());
+        if iter.next().is_some() {
+            query_single_panic_many::<D, F>();
+        }
+        first
+    }
+}
+
+/// Cold panic site for [`Query::single`] / [`Query::single_mut`] when the query
+/// yields zero rows. `#[cold] + #[inline(never)]` so it lives outside the hot
+/// path's instruction cache.
+#[cold]
+#[inline(never)]
+fn query_single_panic_empty<D: QueryData, F: QueryFilter>() -> ! {
+    panic!(
+        "Query::single<{}, {}>(): query yielded zero rows; expected exactly one",
+        std::any::type_name::<D>(),
+        std::any::type_name::<F>(),
+    );
+}
+
+/// Cold panic site for [`Query::single`] / [`Query::single_mut`] when the query
+/// yields more than one row.
+#[cold]
+#[inline(never)]
+fn query_single_panic_many<D: QueryData, F: QueryFilter>() -> ! {
+    panic!(
+        "Query::single<{}, {}>(): query yielded more than one row; \
+         expected exactly one",
+        std::any::type_name::<D>(),
+        std::any::type_name::<F>(),
+    );
 }
 
 // ── IntoIterator impls (C1) ─────────────────────────────────────────────────
@@ -745,6 +1212,8 @@ where
     D: QueryData + 'static,
     F: QueryFilter + 'static,
 {
+    const HAS_DEFERRED: bool = false;
+
     type State = QueryDataState<D, F>;
     type Item<'w, 's> = Query<'w, 's, D, F>;
 
@@ -998,7 +1467,11 @@ mod tests {
             _marker: PhantomData,
         };
 
-        assert_eq!(q.archetype_count(), 2, "both CompA archetypes must be matched");
+        assert_eq!(
+            q.archetype_count(),
+            2,
+            "both CompA archetypes must be matched"
+        );
         assert!(!q.is_empty(), "two archetypes matched ⇒ not empty");
         // Sanity: matched_ids contains exactly the two CompA archetypes.
         let ids = state.archetype_state.matched_ids_pre_terms();
@@ -1042,14 +1515,13 @@ mod tests {
 
         // Driver: build a Query<&CompA>, count archetypes, and sum
         // component values. Both are returned through the closure output.
-        let (arch_n, value_sum) = ecs
-            .run_closure_once(|q: Query<'_, '_, &CompA>| {
-                let mut sum = 0u32;
-                for a in &q {
-                    sum += a.0;
-                }
-                (q.archetype_count(), sum)
-            });
+        let (arch_n, value_sum) = ecs.run_closure_once(|q: Query<'_, '_, &CompA>| {
+            let mut sum = 0u32;
+            for a in &q {
+                sum += a.0;
+            }
+            (q.archetype_count(), sum)
+        });
 
         assert_eq!(arch_n, 2, "Query<&CompA> must match both CompA archetypes");
         assert_eq!(value_sum, 60, "iter must yield 10 + 20 + 30 = 60");

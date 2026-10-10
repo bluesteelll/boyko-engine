@@ -1,0 +1,3 @@
+others_busy_pct == others_cpu_s/(wall_s*16)*100 within 0.005 pp over 379 processes
+runner: median process wall 1.958 s -> 2 % witness = 627 ms of other-process CPU (= 63 % of one logical CPU over the run)
+jolt: median process wall 1.852 s -> 2 % witness = 593 ms of other-process CPU (= 59 % of one logical CPU over the run)

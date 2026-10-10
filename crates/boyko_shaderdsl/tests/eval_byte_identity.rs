@@ -7,6 +7,11 @@
 //! so the diff is real: the test fails if the generic body diverges by even one
 //! ULP from the frozen reference.
 //!
+//! The comparison is bit-for-bit with exactly ONE carve-out — two NaNs match whatever
+//! their sign and payload, because those bits are unobservable to the program and the
+//! optimiser moves them. `±0.0` is NOT part of that carve-out and stays distinguished.
+//! `bits_equal` states the predicate and what the gate consequently cannot claim.
+//!
 //! Coverage: empty (n=0), full (n=16), n>16 (clamp), each op (UNION/SUBTRACT/
 //! INTERSECT), hard (k=0) and smooth (k>0), and non-finite inputs (NaN/Inf/MAX/
 //! MIN/subnormal) at the points AND in the edit params. A deterministic LCG sweeps
@@ -172,12 +177,43 @@ fn refactored(edits: &[FrozenEdit], p: [f32; 3]) -> f32 {
     field::sdf_field_body::<f32>(&views, p)
 }
 
-/// Byte-identity assertion: the two `f32`s must have the SAME bit pattern (NaN
-/// payloads included — a reordered op would shift the payload or the value).
+/// The identity predicate this whole file compares with: bit-for-bit, with ONE
+/// exception — two NaNs count as equal regardless of SIGN and PAYLOAD.
+///
+/// WHY the exception exists. The sign of a zero and the sign of a NaN are exactly the
+/// two bits no `<` in a program can observe, which is why hardware and optimisers are
+/// free to move them. This campaign measured the same family twice: gate G3 caught a
+/// driver fusing a compare-and-select into a hardware `min` whose ±0 tie-break differs
+/// (`docs/VG-R3-P1-PYRAMID-PLAN.md` §10), and three sweeps here disagreed as
+/// `0xffc00000` against `0x7fc00000` — one quiet NaN and its negation — between the
+/// `-O0` and the `-O3` build of this test. A NaN is not even equal to itself as a
+/// value, and its sign is not a value at all; the contract the eDSL exists to enforce
+/// is about VALUES.
+///
+/// WHAT STAYS EXACT. The exception is narrow by construction, not a general slackening:
+/// * finite vs finite is still compared bit-for-bit, so `+0.0` vs `-0.0` still FAILS —
+///   the zero-sign case is deliberately NOT swallowed along with the NaN-sign one;
+/// * NaN vs anything non-NaN still FAILS: the NaN bit patterns are disjoint from every
+///   other pattern, so the fall-through `to_bits` comparison rejects such a pair;
+/// * `+Inf` vs `-Inf` still FAILS, as does any single-ULP finite drift.
+///
+/// WHAT THE GATE CAN NO LONGER CLAIM. It no longer proves that a reordering observable
+/// ONLY in a produced NaN's sign or payload is caught — e.g. a transform negating a
+/// `0.0/0.0`, or one changing which operand's payload survives a `min`. Everything
+/// observable in a finite result, and the finite / infinite / NaN classification itself,
+/// remains gated exactly.
+fn bits_equal(a: f32, b: f32) -> bool {
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
+    a.to_bits() == b.to_bits()
+}
+
+/// Identity assertion for one scalar (see [`bits_equal`] for the exact predicate: bit
+/// pattern, except that two NaNs match regardless of sign/payload).
 fn assert_bits(a: f32, b: f32, ctx: &str) {
-    assert_eq!(
-        a.to_bits(),
-        b.to_bits(),
+    assert!(
+        bits_equal(a, b),
         "{ctx}: refactored={a} (0x{:08x}) != frozen={b} (0x{:08x})",
         a.to_bits(),
         b.to_bits()
@@ -353,11 +389,11 @@ fn refactored_normal(edits: &[FrozenEdit], p: [f32; 3]) -> [f32; 3] {
     })
 }
 
+/// Per-lane identity assertion for a `float3` (the same [`bits_equal`] predicate).
 fn assert_vec_bits(a: [f32; 3], b: [f32; 3], ctx: &str) {
     for i in 0..3 {
-        assert_eq!(
-            a[i].to_bits(),
-            b[i].to_bits(),
+        assert!(
+            bits_equal(a[i], b[i]),
             "{ctx}[{i}]: refactored={} (0x{:08x}) != frozen={} (0x{:08x})",
             a[i],
             a[i].to_bits(),
@@ -774,11 +810,11 @@ fn refactored_jcgt_cubic_coeffs(s: &[f32; 8], a: [f32; 3], b: [f32; 3]) -> [f32;
     boyko_shaderdsl::brick::jcgt_cubic_coeffs::<f32>(s, a, b)
 }
 
+/// Per-lane identity assertion for a `float4` (the same [`bits_equal`] predicate).
 fn assert_vec4_bits(a: [f32; 4], b: [f32; 4], ctx: &str) {
     for i in 0..4 {
-        assert_eq!(
-            a[i].to_bits(),
-            b[i].to_bits(),
+        assert!(
+            bits_equal(a[i], b[i]),
             "{ctx}[{i}]: refactored={} (0x{:08x}) != frozen={} (0x{:08x})",
             a[i],
             a[i].to_bits(),

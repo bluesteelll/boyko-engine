@@ -4,7 +4,7 @@
 //!
 //! ```powershell
 //! $env:MIRIFLAGS = "-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-ecs --test miri_phase17
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_phase17
 //! ```
 //!
 //! `-Zmiri-tree-borrows` is the workspace default (`.cargo/config.toml`);
@@ -33,7 +33,7 @@
 //! (`apply_state_transition`) is `pub(crate)`, so an external test crate cannot
 //! call it — its Miri-clean direct-drive validation lives in the in-crate unit
 //! tests (`src/ecs/core/state/transition_record.rs`, run via
-//! `cargo +nightly miri test --lib`). Here we validate the PUBLIC resource
+//! `cargo +nightly-x86_64-pc-windows-msvc miri test --lib`). Here we validate the PUBLIC resource
 //! surface the conditions + the pass read/write, single-threaded, no spawn.
 //!
 //! # Why `Schedule::run` is NOT used under Miri (Phase-9 deferral, NOT Phase 17)
@@ -86,7 +86,7 @@ impl States for NetState {}
 
 // =============================================================================
 // Miri-CLEAN tests — exercise the PUBLIC state resource surface WITHOUT spawn.
-// These run under both `cargo +nightly miri test` AND regular `cargo test`.
+// These run under both `cargo +nightly-x86_64-pc-windows-msvc miri test` AND regular `cargo test`.
 // =============================================================================
 
 /// `init_state` inserts the three backing resources; reading them back through

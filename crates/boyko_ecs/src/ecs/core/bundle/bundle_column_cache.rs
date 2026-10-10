@@ -375,9 +375,29 @@ impl BundleColumnCache {
     /// Returns `(required_missing, required_pool_ids)` — two parallel leaked
     /// `&'static` slices in the SAME order. Both are empty `&'static []` for a
     /// require-free bundle (the apply-time 0%-gate). The archetype hosts every
-    /// required id by construction (the expansion union ran at
+    /// TABLE required id by construction (the expansion union ran at
     /// `cold_register_bundle_archetype` / `merged_archetype_id` BEFORE the
-    /// archetype was resolved), so `pool_id_for` always succeeds.
+    /// archetype was resolved), so `pool_id_for` always succeeds for that arm.
+    ///
+    /// KE11 — the resolve is screened on storage kind, exactly as
+    /// [`Self::resolve_and_cache`] screens the bundle's OWN ids:
+    ///
+    /// * `Table` — resolve the archetype column (the pre-KE11 body, verbatim).
+    /// * `Dense` — a dense id owns NO per-archetype pool, so there is nothing to
+    ///   resolve. Its slot carries [`DENSE_POOL_SENTINEL`] and the value is
+    ///   constructed PER ENTITY at each apply site (`SpawnAtCommand` Step 7c /
+    ///   `SpawnBatchCommand` Step 5b-dense), which is where `&mut EcsMaster` —
+    ///   and therefore the `DenseStore` — is in hand. It cannot happen here:
+    ///   this fn holds only `&Archetype` and runs ONCE per `(B, world)`, while
+    ///   the construct must run once per entity.
+    /// * `Bitset` — refused (`required_bitset_panic`): a flag is a bit, and a
+    ///   `RequiredCtor` writes bytes.
+    ///
+    /// The sentinel — rather than a new `dense_mask`-style field — is what
+    /// carries the dense marking across: [`BundleColumnRecord`] is size-pinned at
+    /// 64 B, and `required_missing` is bounded by `MAX_MIGRATION_COLUMNS`, not by
+    /// the 32-slot ceiling a `u32` mask would impose. It disturbs no invariant:
+    /// the SBO-B2 sortedness assert reads `pool_ids`, never `required_pool_ids`.
     ///
     /// Cold path only — runs once per `(BundleTypeId, ArchetypeId)` per world.
     fn resolve_required_missing(
@@ -404,14 +424,26 @@ impl BundleColumnCache {
                 {
                     continue;
                 }
-                let inland = archetype
-                    .component_pools()
-                    .pool_id_for(entry.component_id)
-                    .expect(
-                        "invariant: the archetype was expanded with every required id at \
-                         cold_register_bundle_archetype / merged_archetype_id, so it hosts \
-                         every transitively-required component",
-                    );
+                // KE11: screen the storage kind BEFORE resolving a pool. Only a
+                // Table id has one.
+                let inland = match component_registry::storage_kind(entry.component_id.0) {
+                    component_registry::StorageKind::Table => archetype
+                        .component_pools()
+                        .pool_id_for(entry.component_id)
+                        .expect(
+                            "invariant: the archetype was expanded with every TABLE required \
+                             id at cold_register_bundle_archetype / merged_archetype_id, so it \
+                             hosts every transitively-required table component (dense is \
+                             sentinel-marked above, bitset is refused)",
+                        ),
+                    component_registry::StorageKind::Dense => DENSE_POOL_SENTINEL,
+                    component_registry::StorageKind::Bitset => {
+                        component_registry::required_bitset_panic(
+                            "BundleColumnCache::resolve_required_missing",
+                            entry.component_id,
+                        )
+                    }
+                };
                 missing.push(entry);
                 missing_pools.push(inland);
             }

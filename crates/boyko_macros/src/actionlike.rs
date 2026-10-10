@@ -1,13 +1,13 @@
 //! `#[derive(Actionlike)]` implementation.
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, Ident, parse_macro_input};
+use syn::{Data, DeriveInput, Fields, Ident};
 
 /// Implementation of `#[derive(Actionlike)]` (see the public entry in `lib.rs`).
-pub(crate) fn expand(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+pub(crate) fn actionlike_macro_impl(input: TokenStream) -> TokenStream {
+    let input = crate::common::parse2_or_compile_error!(input as DeriveInput);
     let name = input.ident.clone();
     let name_span = name.span();
 
@@ -18,8 +18,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             name_span,
             "Actionlike derive does not support generics (the action set must be a fixed enum)",
         )
-        .to_compile_error()
-        .into();
+        .to_compile_error();
     }
 
     let data = match &input.data {
@@ -29,8 +28,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 name_span,
                 "Actionlike can only be derived for a fieldless enum",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
     };
 
@@ -39,8 +37,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             name_span,
             "Actionlike enum must declare at least one variant (COUNT == 0 is unusable)",
         )
-        .to_compile_error()
-        .into();
+        .to_compile_error();
     }
 
     let count = data.variants.len();
@@ -56,8 +53,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 variant.ident.span(),
                 "Actionlike variants must be fieldless (no stable dense index otherwise)",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
 
         let variant_ident = &variant.ident;
@@ -66,7 +62,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
 
         let kind = match actionlike_variant_kind(variant) {
             Ok(k) => k,
-            Err(err) => return err.to_compile_error().into(),
+            Err(err) => return err.to_compile_error(),
         };
 
         index_arms.push(quote! { #name::#variant_ident => #idx });
@@ -118,7 +114,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         );
     };
 
-    expanded.into()
+    expanded
 }
 
 /// Parses the optional `#[actionlike(Button|Axis1D|Axis2D)]` attribute on a

@@ -1,0 +1,44 @@
+[package]
+name = "aether-tests"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+# The integration half of Decision A2: this crate is where the ENGINE dependency lives, so the
+# drift gate (Aether output compiling against the real `boyko_ecs`/`boyko_macros`) sits beside
+# the engine deps rather than inside the dependency-free language crates.
+
+[dependencies]
+
+[dev-dependencies]
+aether = { path = "../aether" }
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+# Rung A5: `material` emits `::boyko_render::Material` / `MaterialGpu` tokens, so the §8 R4
+# anti-drift gate for that construct is this dependency — the day `Material::new` gains a
+# parameter, the A5 tests stop compiling here, in-repo, instead of in a user's game. Vulkan is
+# loaded dynamically by `boyko_rhi_vulkan` (only `user32` is `#[link]`ed), so linking the render
+# crate into a test binary needs no GPU and no SDK.
+#
+# BLAST RADIUS, recorded so a reader debugging a red `aether-tests` looks at the right lane: this
+# pulls the whole render stack (`boyko_render` → `boyko_rhi_vulkan` → `boyko_rhi`) behind the
+# Aether gate. `cargo test -p aether-tests` now goes red when THAT lane is red, for reasons that
+# have nothing to do with the DSL, and a cold `cargo check -p aether-tests` went from ~1 s to
+# ~31.7 s (MEASURED). The alternative — emitting engine paths nobody compiles — is the drift R4
+# exists to prevent, so the cost is bought deliberately.
+boyko-render = { path = "../boyko_render" }
+# Rung A6: a `scene` names types from FOUR crates, because that is where the engine defines them —
+# `boyko_render` re-exports neither `Transform` (boyko_scene) nor `Vec3` (boyko_math), and the
+# device singleton a mesh binding needs (`GpuDevice`) is the HOST's. These edges are what make the
+# emitted paths compile in-repo instead of in a user's game (§8 R4 again).
+#
+# BLAST RADIUS, continued from the `boyko-render` note above: `boyko-app` pulls the host layer
+# (`boyko_input`, the windowed runner) behind the Aether gate. NOTHING here opens a window or
+# touches a device — the mesh half of `a6_scene` is a REGISTRATION gate (the spawn fn must be a
+# legal `IntoSystem`), never an `app.update()`, so the suite stays headless and GPU-free.
+boyko-app = { path = "../boyko_app" }
+boyko-scene = { path = "../boyko_scene" }
+boyko-math = { path = "../boyko_math" }
+trybuild = "1"
+
+[lints]
+workspace = true

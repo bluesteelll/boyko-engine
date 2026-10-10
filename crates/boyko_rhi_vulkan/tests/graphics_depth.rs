@@ -255,6 +255,8 @@ fn render_two_triangles(
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("offscreen color texture");
 
@@ -270,6 +272,8 @@ fn render_two_triangles(
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("offscreen depth texture");
 
@@ -404,7 +408,15 @@ fn render_two_triangles(
         }),
     });
     encoder.bind_graphics_pipeline(&pipeline);
-    encoder.push_graphics_constants(&pipeline, ShaderStage::VERTEX, 0, &mvp_bytes());
+    // `RhiDevice::create_graphics_pipeline` declares its push range VERTEX|FRAGMENT
+    // (`GRAPHICS_PUSH_STAGES_DEFAULT`, rhi_impl/mod.rs), so a VERTEX-only push leaves the range's FRAGMENT bit
+    // undeclared, tripping VUID-vkCmdPushConstants-offset-01796.
+    encoder.push_graphics_constants(
+        &pipeline,
+        ShaderStage::VERTEX | ShaderStage::FRAGMENT,
+        0,
+        &mvp_bytes(),
+    );
     encoder.bind_vertex_buffer(&vertex_buffer, 0, 0);
     encoder.set_viewport(&Viewport {
         x: 0.0,

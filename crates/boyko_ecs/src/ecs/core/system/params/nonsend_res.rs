@@ -81,6 +81,8 @@ pub struct NonSendResState<R: NonSendResource> {
 //   - SP4: `init_state` mutates no registry structurally — it only mints /
 //     reads the per-`R` non-send id (an `OnceLock`-cached registry slot).
 unsafe impl<'a, R: NonSendResource> SystemParam for NonSendRes<'a, R> {
+    const HAS_DEFERRED: bool = false;
+
     type State = NonSendResState<R>;
     type Item<'w, 's> = NonSendRes<'w, R>;
 

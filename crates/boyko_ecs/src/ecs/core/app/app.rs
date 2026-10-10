@@ -21,6 +21,7 @@ use std::any::TypeId;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use boyko_log::codes::{B1801, B1802};
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use crate::ecs::core::app::app_exit::AppExit;
@@ -29,6 +30,10 @@ use crate::ecs::core::change_detection::{
     CHECK_TICK_PREEMPT_MARGIN, CHECK_TICK_THRESHOLD, MAX_CHANGE_AGE, run_check_ticks_scan,
 };
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
+// The frame driver's four zone sites. `zone!` matches a bare `ident` -- deliberately, so a site
+// cannot name a handle it did not import -- and one `use` brings in both items a `declare_zone!`
+// emits: the `static` in the value namespace and the `mod` companion in the type namespace.
+use crate::ecs::core::profiling::zones::{EVENTS, FIXED_STEP, FRAME, MAIN_RUN};
 use crate::ecs::core::resources::resource::Resource;
 use crate::ecs::core::schedule::schedule::Schedule;
 use crate::ecs::core::schedule::schedule_builder::ScheduleBuilder;
@@ -672,6 +677,23 @@ impl App {
         #[cfg(debug_assertions)]
         let frame_start_tick = self.world.current_tick().get();
 
+        // ⓪ Profiling fold (profiling A2/D16), BEFORE step ①.
+        //
+        // This is the single funnel both frame entry points share: the windowed host calls
+        // `update_with_delta` directly and never touches `update`, so a fold placed there would
+        // never run in the one configuration that has a GPU channel. It is also what puts the
+        // instrument outside its own primary number — the frame time the profiler reports does
+        // not include the cost of reporting it.
+        //
+        // With profiling off this is one `.bss` load and one predicted branch; the resource is not
+        // touched, and a world without a `Profiler` is a supported state.
+        crate::ecs::core::profiling::fold_frame(&mut self.world);
+
+        // `__frame` opens HERE, after the fold has returned — which is what puts the instrument
+        // outside its own primary number. Its guard lives to the end of this function, so the
+        // bracket is the frame minus the fold, by construction rather than by subtraction.
+        let _z_frame = boyko_diag::zone!(FRAME);
+
         // ① Advance the virtual clock (clamp → scale → pause, plan D4/★m5).
         self.world.resource_mut::<Time>().advance_with(raw);
 
@@ -692,6 +714,7 @@ impl App {
             || self.fixed.is_none()
             || self.fixed_steps_since_swap > 0
         {
+            let _z = boyko_diag::zone!(EVENTS);
             self.world.update_events();
             self.fixed_steps_since_swap = 0;
         }
@@ -700,15 +723,25 @@ impl App {
         // borrows `self.fixed`, the driver passes `self.world` — the same
         // dance `finish` uses.
         if let Some(fixed) = self.fixed.as_mut() {
-            let steps = fixed_advance(&mut self.world, |w| fixed.run(w));
+            // The bracket is around ONE substep, inside the catch-up loop, so a frame that runs N
+            // of them produces N samples. A bracket around the loop would produce one span whose
+            // `count` could never report N — and N is the number a reader needs to tell a slow
+            // substep from a frame that ran three of them.
+            let steps = fixed_advance(&mut self.world, |w| {
+                let _z = boyko_diag::zone!(FIXED_STEP);
+                fixed.run(w);
+            });
             self.fixed_steps_since_swap = self.fixed_steps_since_swap.saturating_add(steps);
         }
 
         // ⑤ Main run (the pre-Phase-20 frame body, unchanged).
-        self.schedule
-            .as_mut()
-            .expect("invariant: schedule is Some after finish()")
-            .run(&mut self.world);
+        {
+            let _z = boyko_diag::zone!(MAIN_RUN);
+            self.schedule
+                .as_mut()
+                .expect("invariant: schedule is Some after finish()")
+                .run(&mut self.world);
+        }
 
         #[cfg(debug_assertions)]
         {
@@ -852,7 +885,13 @@ impl Default for App {
 #[cold]
 #[inline(never)]
 fn duplicate_plugin_panic(name: &'static str) -> ! {
-    panic!("boyko-B1801: plugin '{name}' added more than once");
+    // L8b: the code is the IDENTIFIER, positionally. The rendered text is byte-identical to the
+    // literal it replaces (`PanicCode`'s `Display` prints `boyko-B1801`), which is what keeps
+    // every `#[should_panic(expected = ..)]` matching; what changed is that the registry's orphan
+    // check can now SEE the row, because it scans identifiers and a literal is invisible to it.
+    // Positional and never inline (`{B1801}`) -- an inline argument lives inside the string
+    // literal, so the walker's LIT stream would see it and its CODE stream would not.
+    panic!("{}: plugin '{}' added more than once", B1801, name);
 }
 
 /// Cold run-phase config panic: [`App::finish`] consumes the staged builders,
@@ -863,15 +902,24 @@ fn duplicate_plugin_panic(name: &'static str) -> ! {
 #[cold]
 #[inline(never)]
 fn config_after_finish_panic(method: &'static str) -> ! {
+    // As `duplicate_plugin_panic` above: the identifier, positionally, and the rendered bytes are
+    // unchanged -- five `#[should_panic(expected = "boyko-B1802: App::…")]` cases below depend on
+    // exactly that.
     panic!(
-        "boyko-B1802: App::{method} called after finish() — the App is in the run phase; \
-         perform all configuration before the first finish()/update()/run() call"
+        "{}: App::{} called after finish() — the App is in the run phase; \
+         perform all configuration before the first finish()/update()/run() call",
+        B1802, method
     );
 }
 
 #[cfg(test)]
 #[cfg(not(miri))] // constructs a real ThreadPool — same gate as tests/app_plugin.rs
 mod tests {
+    // Test-only harness: `Rc`/`RefCell` are the single-threaded observation
+    // channel the assertions read plugin/schedule side effects through — the
+    // reference model, never engine data. Compiled out of every shipping build.
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
 
     /// One-variant state type for the post-finish routing panic test.

@@ -3,9 +3,10 @@
 //!
 //! `Query::par_iter().for_each(closure)` requires
 //! `closure: Fn(D::Item<'_>) + Send + Sync` (PAR1). `Commands<'s>` is `!Sync`
-//! (CQ-SEND2 — its inner `&'s mut CommandQueue` borrow forbids shared
-//! cross-thread observation). Capturing `&mut Commands` inside the `for_each`
-//! closure therefore must fail to compile.
+//! — since EM2′ through its `EntityCounter`'s `Cell` (the EXHAUSTED bit); the
+//! `&'s mut CommandQueue` field alone never made it so, because `CommandQueue`
+//! is auto-`Sync`. Capturing `&mut Commands` inside the `for_each` closure
+//! therefore must fail to compile, and now fails at the `Sync` bound.
 //!
 //! The trybuild test files live in `tests/par_iter_compile_fail/`. Each
 //! `.rs` file is compiled in isolation; its `.stderr` baseline is the

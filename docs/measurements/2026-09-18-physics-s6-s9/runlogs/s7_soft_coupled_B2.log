@@ -1,0 +1,35 @@
+Gnuplot not found, using plotters backend
+Benchmarking soft_step_sp2/coupled/64
+Benchmarking soft_step_sp2/coupled/64: Warming up for 3.0000 s
+
+Completed 65535 iterations in 5730315600 nanoseconds, estimated execution time is 87439.01121538109 ns
+Benchmarking soft_step_sp2/coupled/64: Collecting 100 samples in estimated 5.2988 s (61k iterations)
+Benchmarking soft_step_sp2/coupled/64: Analyzing
+Criterion.rs DEBUG: Bootstrapping the absolute statistics. took 35.396 ms
+Criterion.rs DEBUG: Bootstrapped linear regression took 7.2892 ms
+Criterion.rs DEBUG: Bootstrapping the T distribution took 7.7854 ms
+Criterion.rs DEBUG: Bootstrapping the relative statistics took 24.351 ms
+soft_step_sp2/coupled/64
+                        time:   [87.029 µs 87.174 µs 87.342 µs]
+                        change: [-0.1075% +0.0199% +0.1563%] (p = 0.77 > 0.05)
+                        No change in performance detected.
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking soft_step_sp2/coupled/256
+Benchmarking soft_step_sp2/coupled/256: Warming up for 3.0000 s
+
+Completed 16383 iterations in 5854205200 nanoseconds, estimated execution time is 357334.1390465727 ns
+Benchmarking soft_step_sp2/coupled/256: Collecting 100 samples in estimated 5.4136 s (15k iterations)
+Benchmarking soft_step_sp2/coupled/256: Analyzing
+Criterion.rs DEBUG: Bootstrapping the absolute statistics. took 33.706 ms
+Criterion.rs DEBUG: Bootstrapped linear regression took 6.1791 ms
+Criterion.rs DEBUG: Bootstrapping the T distribution took 8.5242 ms
+Criterion.rs DEBUG: Bootstrapping the relative statistics took 25.389 ms
+soft_step_sp2/coupled/256
+                        time:   [383.21 µs 383.71 µs 384.24 µs]
+                        change: [-0.1607% +0.1640% +0.4832%] (p = 0.32 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+

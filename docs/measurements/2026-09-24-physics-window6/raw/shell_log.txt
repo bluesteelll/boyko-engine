@@ -1,0 +1,3 @@
+2026-09-24 09:09:49 run_window.sh start: 
+2026-09-24 12:27:54 driver exit 0
+2026-09-24 12:27:54 WINDOW_DONE written: exit 0 complete 

@@ -1,0 +1,70 @@
+# UG-15 at the B3 review fix: W1's red-first mutations and every control re-run on the repaired gate.
+# The gate commit is 08569392 (leg (2)'s closed pin set, the library's echo sink, probe.rs -> probes.rs);
+# its data is 57b332e2 (pins/leg2-frozen.tsv). Parent of every run below: u/b3 @ e1ec9af8.
+# All mutations and controls ran on ONE local scratch branch, u/b3-ctl-r, cut from e1ec9af8 and never
+# merged: each is one commit (a mutation, or a cherry-pick of the stage-3 control branch u/b3-ctl-<n>),
+# then its runs, then `git revert`; after every revert `git diff --quiet u/b3 HEAD` held (23 of 23), and
+# the worktree returned to u/b3 with `git status --porcelain` empty. `$UG15` is the gate built at
+# e1ec9af8 (sha256 f26d2eba…); "old" is ug15 built at 761bb71d, u/b3 before the fix (sha256 ee114b2d…).
+# "leg1" and "M-b" are as in controls.txt. Full logs: the B3 scratch, fx/.
+
+== parent, e1ec9af8
+$UG15 leg2 check                                                        exit 0
+  pin set: 42 frozen pin(s); 5 pin file(s) hold exactly their frozen rows; every candidate is frozen or recorded absent
+  checked 42 pin(s): 0 absent, 0 moved unnamed, 0 moved named
+$UG15 leg7 snapshot boyko_demo / clear                                  exit 0 / 0
+  leg (7): all 7 leg-(2) pin(s) of boyko_demo present in (b); all 10 of clear
+  compare with commit A's snapshots and with the tester's 761bb71d snapshots: (a), (b) and (c) identical, both subjects
+instrument controls T (llvm, symbolizer), E (image), O, P2, M      RED [tool absent] x2, [empty census], [pair guard], [pair guard], [member count]
+  positives E (object), O-pre, P1, P-post, M-pos                    exit 0
+
+== W1 red-first: the pin set is closed (review W1)
+m1  one H-3 block (FunctionSystem<bench_schedule_two_disjoint::{closure#1}>::run_unsafe) cut from leg2-phase9_scheduler.pins with its body
+    new  $UG15 leg2 check                                               exit 1, before any build
+         RED [pin set]: leg2-phase9_scheduler.pins holds 13 pin(s), the frozen list 14: frozen but not in the file [H-3 `…{closure#1}…::run_unsafe` 13d7157385f8]
+    old  leg2 check --subjects phase9_scheduler                         exit 0
+         checked 13 pin(s): 0 absent, 0 moved unnamed, 0 moved named   <- the defect: a smaller green
+m2  leg2-phase9_scheduler.pins renamed aside (the file is gone)
+    new  $UG15 leg2 check                                               exit 1, before any build
+         RED [pin set]: leg2-phase9_scheduler.pins is missing and the frozen list holds 14 pin(s) of phase9_scheduler
+    new  $UG15 leg2 check --subjects query_dsl                          exit 1, the same RED (the data is one set; --subjects narrows builds)
+    old  leg2 check --subjects phase9_scheduler,query_dsl               exit 0
+         checked 6 pin(s): 0 absent, 0 moved unnamed, 0 moved named    <- the defect: the missing file is skipped
+m3  leg2-frozen.tsv renamed aside
+    new  $UG15 leg2 check                                               exit 1: RED [pin set] … leg2-frozen.tsv is missing
+m4  leg2-boyko_demo.pins renamed aside
+    new  $UG15 leg7 snapshot --subject boyko_demo                       exit 1, before its build (0 builds)
+         RED [pin set]: leg2-boyko_demo.pins is missing and the frozen list holds 7 pin(s) of boyko_demo
+    old  leg7 snapshot --subject boyko_demo                             exit 0, snapshot written, no presence line <- the defect
+m5  every H-3 block of phase9_scheduler cut from its pin file AND from the frozen list (a consistent edit)
+    new  $UG15 leg2 check                                               exit 1: RED [pin set] … ["H-3 in phase9_scheduler is neither frozen nor recorded absent"]
+m6  R-1 in clear, which is pinned, also written into leg2-absent.txt
+    new  $UG15 leg2 check                                               exit 1: RED [pin set] … ["R-1 in clear is both frozen and recorded absent"]
+m7  leg2-absent.txt renamed aside
+    new  $UG15 leg2 check                                               exit 1: RED [pin set] … leg2-absent.txt is missing
+not a mutation this gate can see: one name of a multi-name candidate cut from BOTH its pin file and the frozen
+list, with the candidate keeping another name. That is a deliberate two-file edit of frozen data, visible in
+review like a re-capture; the gate is against loss, not against an author.
+
+== the controls, (i)-(x) and A, K, F, S, N, on the repaired gate (each: cherry-pick of u/b3-ctl-<n>)
+(i)    leg2 check                                   exit 1  MOVED clear R-1 439B×3 -> 423B×3; 0 absent, 1 moved; 41 identical; UG15_CTL_I in the body: 0 lines (as at stage 3)
+(i-b)  leg2 check                                   exit 1  MOVED clear R-1 439B×3 -> 482B×3; 1 moved; `lea rax, [rip] ; REL32 …UG15_CTL_I` in the body
+       both: every moved pin lists component_registry/mod.rs in map (a) (moved_vs_map.py)
+(ii)   leg1                                         exit 101  counted: crates/boyko_ecs/src/lib.rs | ug15_ctl_ii | extern "C" fn | SynItem
+(iii)  leg1                                         exit 101  counted: crates/boyko_threadpool/src/lib.rs | ug15_ctl_iii | #[no_mangle] | SynItem
+(iv)   leg1                                         exit 101  counted: crates/boyko_utils/src/lib.rs | ug15_ctl_iv | extern "system" fn | SynItem
+(v)    leg1 / M-b                                   exit 101 / 101  leg1: component_macro_impl | #[used] | MacroTokens; M-b counted 34
+(vi)   leg1 / M-b                                   exit 0 / 101    leg1: 0 counted, 0 allowlisted; M-b counted 34
+(vii)  leg7 demo strict / --expect / leg1           exit 1 / 0 / 0  .text 8546242 -> 8546306; (b) child only t 20 boyko_ecs::ug15_ctl_vii; leg1 0 counted
+(viii) leg7 clear strict / --expect / leg1          exit 1 / 0 / 0  9 differences; child only r 8 boyko_ecs::UG15_CTL_VIII and t 30 boyko_ecs::ug15_ctl_viii_target; leg1 0 counted
+       --expect negative arm (parent vs itself)     exit 1  control FAILED: no child-only entry
+(ix)   leg2 / leg3 dev / leg3 release / probe i     exit 0 / 0 / 0 / 0  checked 42: 0 absent, 0 moved; object sha changed; delete_entity's Location vm_column.rs:281:9 -> 282:9
+(x)    leg2 --rename / leg2 without                 exit 0 / 1  with: 42, 0 moved; without: 4 moved (the probe-(i) callers), sizes equal
+A      leg2 check                                   exit 1  RED [symbol absent]: P29-1 ABSENT in boyko_demo and clear, 0 moved
+K      M-b                                          exit 101  keys_are_the_parsers_own FAILED (zzz_ug15_ctl_k)
+F      M-b                                          exit 101  corpus_covers_every_key FAILED (COMPONENT_KEYS::zzz_ug15_ctl_f)
+S      leg (5) test                                 exit 101  markers found: 5 (inventory: 4)
+N      legs (4)/(6) test                            exit 101  modding crate(s) ["boyko-mod-probe"] exist
+
+No control that must be red went green and none that must be green went red; every result equals stage 3's
+(controls.txt) on the figures both record.

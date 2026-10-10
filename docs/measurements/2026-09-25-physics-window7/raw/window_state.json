@@ -1,0 +1,20 @@
+{
+ "start": "2026-09-25T02:45:53.759+03:00",
+ "test": false,
+ "placement": "P-none (no affinity call)",
+ "voids": [],
+ "machine_before": {
+  "time": "2026-09-25T02:45:53.777+03:00",
+  "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)"
+ },
+ "last": "P1B-jolt-p1 r2 H-trk-tree#trk@W1",
+ "rounds_done": 3,
+ "end": "2026-09-25T05:03:57.627+03:00",
+ "status": "complete",
+ "exit": 0,
+ "timed": 454,
+ "rerun": 49,
+ "warm": 11,
+ "voided_processes": 0,
+ "binaries_after": "all match"
+}

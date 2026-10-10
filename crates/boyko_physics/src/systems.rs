@@ -7,8 +7,9 @@
 //!    `rot = rot.integrate(angvel, dt)` (first-order quaternion advance). The
 //!    only real-work stage in the foundation; a sound parallel pass over
 //!    disjoint rows (each body writes only its own row).
-//! 2. [`physics_gather`] — snapshots `(&RigidBody, &RigidBodyMass, &Collider)`
-//!    IN ROW ORDER into the dense
+//! 2. [`physics_gather`] — snapshots the rows
+//!    [`BodySetFilter`](crate::body_set::BodySetFilter) selects, reading `RigidBody`,
+//!    `RigidBodyMass` and `Collider`, IN ROW ORDER into the dense
 //!    [`SolverScratch::bodies`](crate::resources::SolverScratch), derives each
 //!    body's local + world inverse inertia, stamps the step `dt` into
 //!    [`PhysicsConfig`], and resets the touched mask (the seam's gather
@@ -19,11 +20,16 @@
 //!    so the seam is exercised end-to-end (OQ1).
 //! 4. [`physics_narrowphase`] — produces [`Manifold`]s (BodyIndex-keyed) into
 //!    [`Manifolds`] for the overlapping pairs.
-//! 5. [`physics_solve_step`] — `if solver.is_noop() { return }` else
-//!    `S::solve(..)` (the swappable seam, D2).
+//! 5. The solve, chosen by the solver type at wire-up:
+//!    [`physics_build_graph`] → [`physics_solve_colored`] for the default world's
+//!    [`ColoredSoftStepSolver`] (the O7 AVX2 cohort kernel on by default), or
+//!    [`physics_solve_step`] — `if solver.is_noop() { return }` else
+//!    `S::solve(..)` (the swappable seam, D2) — for any other solver, including the
+//!    reference [`SoftStepSolver`](crate::solver::SoftStepSolver).
 //! 6. [`physics_apply`] — writes the solved snapshot back through
-//!    `Mut<RigidBody>` for touched rows, under the "no structural change between
-//!    gather and apply" invariant (IM-1).
+//!    `Mut<RigidBody>` for touched rows, selected with [`BodyQuery`], the same rows the
+//!    gather snapshots, under the "no structural change between gather and apply"
+//!    invariant (IM-1).
 //!
 //! # Determinism precondition (IM-2)
 //!
@@ -55,27 +61,45 @@
 //!    would DOUBLE-INTEGRATE (the pipeline AND the solver each advance position +
 //!    orientation in the same step), corrupting the simulation.
 
-use boyko_ecs::ecs::core::iters::query::data::Mut;
 use boyko_ecs::ecs::core::iters::query::data_is_enabled::IsEnabled;
 use boyko_ecs::ecs::core::iters::query::query::Query;
-use boyko_ecs::ecs::core::system::{Res, ResMut};
+use boyko_ecs::ecs::core::system::{Entities, Res, ResMut};
 use boyko_ecs::ecs::core::time::FixedTime;
 
-use crate::components::{
-    Collider, ColliderShape, Kinematic, RigidBody, RigidBodyMass, Sensor, Simulated,
-};
+use crate::body_set::{BodyApplyData, BodyGatherData, BodyQuery};
+use crate::broadphase_tree::BroadphaseTree;
+use crate::components::{ColliderShape, RigidBody, RigidBodyMass, Simulated};
 use crate::manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 use crate::math::Vec3;
-use crate::narrowphase::box_box::box_box_contact;
+use crate::narrowphase::axis_cache::SAT_AXIS_COUNT;
+use crate::narrowphase::box_box::{BoxBoxContact, BoxBoxOutcome, Obb, box_box_classify_carried};
+use crate::narrowphase::carry::{CarryIn, PairTag};
+use crate::narrowphase::dispatch::try_parallel_sets;
 use crate::narrowphase::feature_vertex_face;
-use crate::narrowphase::sphere_box::sphere_box_contact;
+use crate::narrowphase::reuse::{
+    PairGeom, Prev, Refreshed, ReuseRecord, ReuseStep, RowFrame, build, criterion,
+    fill_row_frames, is_fast, refresh,
+};
+use crate::narrowphase::speculative::{SpecMargin, SpecStep, circumradius};
+use crate::narrowphase::sphere_box::sphere_box_contact_within;
+use crate::profiling::{
+    PHYS_BP_PAIRS, PHYS_NP_CHUNKS, PHYS_NP_FULL, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS,
+    PHYS_NP_REUSED, PHYS_NP_SEP_HITS, counter,
+};
 use crate::resources::{
     BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode,
-    IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
+    IslandSleep, Manifolds, PhysicsConfig, SdfNarrowphaseKernel, SleepSkip, SolverScratch,
 };
+use crate::row_identity::{RowIdentity, RowKey};
 use crate::sdf_query::{SdfField, sample_sdf};
+use crate::narrowphase::dispatch::debug_assert_computed;
+use crate::step_inputs::StepInputs;
+use crate::sleep_sets::{
+    Epilogue, HeldHint, NpCounts, NpSets, Prologue, Route, RowCls, SleepSets, mirror_held,
+    np_route,
+};
 use crate::solver::colored::ColoredSoftStepSolver;
-use crate::solver::contact::is_dynamic_row;
+use crate::solver::contact::{effective_inv_mass, is_dynamic_row};
 use crate::solver::RigidSolver;
 
 /// Minimum SDF gradient length for a usable contact normal (P2 W5, O3).
@@ -173,12 +197,18 @@ pub fn physics_integrate(
 /// Snapshots every body into the dense, row-indexed solver scratch and stamps
 /// the step `dt` (plan IM-1 / OQ-1, the gather boundary).
 ///
-/// Walks the bodies in archetype-row order via `iter()` (the same order
-/// [`physics_apply`] re-walks to write back), projecting the hot [`RigidBody`] +
-/// cold [`RigidBodyMass`] + [`Collider`] columns into [`BodyState`] rows
-/// (deriving each body's local + world inverse inertia from its shape, P2 W1).
+/// Walks the body set, the rows [`BodySetFilter`](crate::body_set::BodySetFilter)
+/// selects, in archetype-row order, projecting the hot [`RigidBody`] + cold
+/// [`RigidBodyMass`] + [`Collider`](crate::components::Collider) columns into
+/// [`BodyState`] rows (deriving each body's local + world inverse inertia from its
+/// shape, P2 W1). [`physics_apply`] and
+/// [`physics_soft_rigid_apply`](crate::soft::physics_soft_rigid_apply) take a
+/// [`BodyQuery`] with the same filter, so they re-walk the same rows in the same order
+/// to write back. The row set is the filter's, not a side effect of this stage's
+/// reads: dropping a read here moves no row, and a new required read that the filter
+/// does not name fails the wire-up check in [`crate::body_set`].
 /// The dense row index IS the [`BodyIndex`]. Resets the touched mask to the body
-/// count. The snapshot `Vec`s are cleared and refilled, capacity reused (no
+/// count. The snapshot columns are cleared and refilled, capacity reused (no
 /// per-step alloc).
 ///
 /// Before the per-body loop it stamps [`PhysicsConfig::dt`] from the fixed
@@ -186,27 +216,21 @@ pub fn physics_integrate(
 /// system, and the TGS solver later reads `h = dt / substeps`. The stamp is
 /// gather-time so a hand-set `cfg.dt` is overwritten.
 ///
-/// The row→entity projection (for the gameplay
-/// [`Contact`](crate::components::Contact) producer) is NOT gathered in the
-/// foundation: `Entity` is not a `QueryData` in the engine, so it is deferred to
-/// the Phase-10 `Contact` producer (the only consumer) — see [`SolverScratch`].
+/// It also records each row's [`RowKey`] — the entity's slot index AND generation, the
+/// latter read through [`Entities`] — and the rows whose `RigidBody` was added since the
+/// last gather into [`SolverScratch`]'s row identity map, so the row-keyed consumers can
+/// carry their state when rows move (defect A, interim) and a body on a recycled slot never
+/// inherits the dead body's state (hazard H-03). `Query::iter_entities` walks exactly the
+/// `iter()` order but yields the slot only. A row → entity projection for the gameplay
+/// [`Contact`](crate::components::Contact) producer is still not carried.
 //
 // `clippy::needless_pass_by_value`: `ResMut<_>` / `Res<_>` are by-value
 // `SystemParam`s mutated/read through reborrows — the same false-positive as the
 // demo's `ResMut` systems.
-// `clippy::type_complexity`: the gather `Query<D>` SystemParam type must be named
-// concretely in the fn signature; the 6-term tuple is the irreducible projection
-// the gather needs (Decision 3 added the two `IsEnabled<>` data terms).
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::needless_pass_by_value)]
 pub fn physics_gather(
-    query: Query<(
-        &RigidBody,
-        &RigidBodyMass,
-        &Collider,
-        Option<&Sensor>,
-        IsEnabled<Simulated>,
-        IsEnabled<Kinematic>,
-    )>,
+    query: BodyQuery<BodyGatherData>,
+    entities: Entities,
     mut scratch: ResMut<SolverScratch>,
     mut cfg: ResMut<PhysicsConfig>,
     fixed_time: Res<FixedTime>,
@@ -217,12 +241,12 @@ pub fn physics_gather(
     cfg.dt = fixed_time.delta_secs();
 
     let scratch = &mut *scratch;
-    scratch.vn_initial.clear();
+    scratch.vn_initial.build_view().clear();
     // Refill the gather column through its single-threaded build view: clear (no
     // free — the committed pages stay resident) then push one BodyState per row.
-    // Read-only `iter()` walks the rows in archetype-row order — the same order
-    // `physics_apply`'s mutable walk re-visits, so row `i` is the same body in
-    // both passes (the IM-1 gather/apply addressing invariant).
+    // The walk is a `BodyQuery`, whose filter `physics_apply` shares, so both walks
+    // visit the body set in the same archetype-row order and row `i` is the same body
+    // in both passes (the IM-1 gather/apply addressing invariant).
     //
     // S5: `Option<&Sensor>` is a NON-filtering query datum — it yields `Some` for
     // a sensor body and `None` otherwise, so the gathered row count and order are
@@ -236,56 +260,345 @@ pub fn physics_gather(
     // byte-identical to today (Encoding A; the same theorem as `Option<&Sensor>`).
     // The bits ride into `BodyState`, where the integrate/solve gates AND
     // `simulated` with the unchanged `is_dynamic_row` oracle.
-    let mut bodies = scratch.bodies_build();
-    bodies.clear();
-    for (body, mass, collider, sensor, simulated, kinematic) in query.iter() {
-        bodies.push(BodyState::from_columns(
-            body,
-            mass,
-            collider,
-            sensor.is_some(),
-            simulated,
-            kinematic,
-        ));
+    // The refill view is SCOPED: it publishes its frontier on `Drop`, so the borrow
+    // of `scratch.bodies` has to end before `scratch.touched` is reached.
+    //
+    // Defect A (interim): the same walk records each row's `RowKey` (slot + generation,
+    // through `Entities`: one 16 B fast-store slot load per row, whose address depends on
+    // the id alone, so it issues beside the column reads) and the rows whose `RigidBody`
+    // was added (`Ref` is a plain read and `Entities` declares no access, so the access
+    // set is unchanged), so `finish_gather` can tell where every body sat one gather ago.
+    // `iter_entities` yields exactly the `iter()` sequence.
+    scratch.rows.begin_gather();
+    // V2: every row's broadphase bounding sphere is inflated by half the speculative distance plus
+    // the row's own approach-velocity term (`SpecStep::bp_margin`), so every pair a narrowphase
+    // site could keep is a candidate. Read from the live configuration one stage before the
+    // broadphase latches it; nothing writes the configuration between the two stages of a step
+    // (the same argument as `dt`, stamped above, which is the term's `h`). Under the overlap-only
+    // rule the margin is `0.5 * 0.0 = +0.0`, which leaves every radius bit as it was.
+    let spec = SpecStep::new(cfg.speculative_distance, cfg.speculative_velocity_cap, cfg.dt);
+    // L10 D3 (design 04): under an active sleep-skip mode the previous step's post-solve
+    // snapshot is kept as the broadphase's resting baseline — the snapshot and the baseline
+    // swap, O(1), stamped with this gather — before the refill below clears the snapshot. Never
+    // under the default (sleeping off) nor on a world without the colored pipeline.
+    if cfg.colored && cfg.sleeping && cfg.sleep_skip != SleepSkip::Off {
+        scratch.keep_baseline();
     }
-    let n = bodies.len();
+    let n = {
+        let SolverScratch { bodies, rows, .. } = &mut *scratch;
+        let mut bodies = bodies.build_view();
+        bodies.clear();
+        let (mut ids, mut added) = rows.gather_views();
+        for (entity, (body, mass, collider, sensor, simulated, kinematic)) in query.iter_entities()
+        {
+            if body.is_added() {
+                added.push(bodies.len() as u32);
+            }
+            // The gather runs strictly after the apply window that registered every row's
+            // entity, so a row the body query yields is live.
+            let live = entities
+                .get(entity)
+                .expect("invariant: a row the body query yields is a live entity");
+            ids.push(RowKey::of(live));
+            let mut row = BodyState::from_columns(
+                &body,
+                mass,
+                collider,
+                sensor.is_some(),
+                simulated,
+                kinematic,
+            );
+            row.bp_margin = spec.bp_margin(&row);
+            bodies.push(row);
+        }
+        debug_assert_eq!(ids.len(), bodies.len(), "invariant: one entity id per gathered row");
+        bodies.len()
+    };
+    scratch.rows.finish_gather();
     debug_assert_eq!(n, query.iter().count(), "Encoding A: gather must not drop a row");
     scratch.touched.reset(n);
 }
 
 /// Fills [`ContactPairs`] with candidate `(BodyIndex, BodyIndex)` pairs in
-/// deterministic `(min, max)` order (plan D3 stage 2 / D4 / OQ1; O2 grid path).
+/// deterministic `(min, max)` order (plan D3 stage 2 / D4 / OQ1; O2 grid path;
+/// the tree broadphase).
 ///
 /// A pair is a candidate when the bodies' bounding spheres overlap
 /// (`delta.length_squared() <= (rA + rB)²`). Emitting `(min, max)` keeps the
 /// order content-defined and reproducible (float add is non-associative →
 /// contact iteration order must be deterministic, D4).
 ///
-/// Two interchangeable paths, selected by [`PhysicsConfig::broadphase`] (a single
-/// runtime branch — the one-branch floor):
+/// Three interchangeable paths, selected by [`PhysicsConfig::broadphase`] (a
+/// single runtime branch — the one-branch floor):
 ///
-/// - [`BroadphaseKind::AllPairs`] (DEFAULT): the shipped O(n²) double loop,
-///   byte-identical to before O2 (the campaign 0%-gate).
+/// - [`BroadphaseKind::AllPairs`]: the shipped O(n²) double loop, byte-identical to
+///   before O2 (cfg-A and every AllPairs pin run it).
 /// - [`BroadphaseKind::Grid`] (opt-in, O2): a uniform-grid CSR counting-sort
 ///   ([`BroadphaseGrid::build`]) that emits candidates then applies the SAME
 ///   sphere-bound predicate and sorts by `(min, max)`. Its pair set is
 ///   bit-identical to all-pairs.
+/// - [`BroadphaseKind::Tree`] (DEFAULT since its C4): the packed-BVH broadphase with a
+///   persistent static set ([`BroadphaseTree::step`]), serial, heap-free per step.
+///   Its pair set is all-pairs' exact set by construction (the same predicate on
+///   the same bits, one owner per pair, an integer-count assembly), so it is
+///   bit-identical too; at or below [`BroadphaseTree::brute_max_rows`] rows it
+///   runs [`all_pairs_into`](crate::broadphase_tree::all_pairs_into) instead.
+///   It reads the gather's row identity to carry its persistent sets through row
+///   changes, and opens the four `phys_bp_*` profiling spans on every tree-path
+///   step. Under L10's sleep-skip ([`physics_broadphase_colored`]) it also keeps a
+///   sleeper set, whose pairs it withholds from the stream (L10 C3c); this system
+///   runs it without one.
+///
+/// Before the arm runs, the previous step's list is kept as `pairs_prev` and the new list is
+/// stamped with this gather's sequence ([`ContactPairs::rotate`], L9 D9): the narrowphase's pair
+/// carry joins this step's pairs against it, reading the jumper bitset the rotation rebuilds on a
+/// step whose rows moved (L10 C0). All three arms fill the list the rotation hands them.
+///
+/// This is the reference pipeline's broadphase. A world wired with the colored pipeline runs
+/// [`physics_broadphase_colored`] instead, which adds L10's sleep-skip around the same arms.
+///
+/// # The step record (L10 D9b)
+///
+/// Every broadphase variant begins by latching [`PhysicsConfig`], the [`SdfField`] (when the world
+/// has one) and the wake request count into [`StepInputs`]; the kind arms and every later stage of
+/// the step read the record, so a write to either resource after this point takes effect at the
+/// next broadphase. This variant runs in worlds without `IslandSleep`, so it latches no request.
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_broadphase(
     scratch: Res<SolverScratch>,
     cfg: Res<PhysicsConfig>,
+    field: Option<Res<SdfField>>,
+    mut inputs: ResMut<StepInputs>,
     mut grid: ResMut<BroadphaseGrid>,
+    mut tree: ResMut<BroadphaseTree>,
     mut pairs: ResMut<ContactPairs>,
 ) {
-    let bodies = scratch.bodies();
-    let pairs = &mut pairs.pairs;
+    // L10 D9b: the step's one latch point, before anything reads an input.
+    inputs.latch(&cfg, field.as_deref(), scratch.rows.gather_seq(), 0);
+    let pairs = &mut *pairs;
+    // L9 D9: before the kind match, so every arm fills the swapped-in list. On a step whose
+    // rows moved it also rebuilds the carry's jumper bitset (L10 C0, design 06 Δ9).
+    pairs.rotate(&scratch.rows);
+    broadphase_arms(scratch.bodies(), &scratch.rows, inputs.config(), &mut grid, &mut tree, pairs, None);
+}
 
+/// The colored pipeline's broadphase (L10 design 04 D15, A1/A2): [`physics_broadphase`]'s
+/// rotation and kind arms, with L10's sleep-skip prologue before the arm and its epilogue after
+/// — registered where the colored SOLVE runs, whose warm store the sleep-skip reads and drains,
+/// while every other pipeline keeps [`physics_broadphase`].
+///
+/// The prologue records the step's sleep-skip mode — `Off` when sleeping is off, else
+/// [`PhysicsConfig::sleep_skip`] — classifies every row and restores the held islands whose inputs
+/// changed; the epilogue restores the islands this step's pairs disturb and moves the clean frozen
+/// ones in (`sleep_sets.rs`). With sleeping off it records the mode and returns, so the pair list
+/// is the reference broadphase's, bit for bit. A world with the SDF stage runs
+/// [`physics_broadphase_colored_sdf`], whose sleep epoch also covers the field.
+///
+/// Like every broadphase variant it first latches the step record ([`StepInputs`], L10 D9b):
+/// the configuration, the field when the world has one (the soft pipelines insert it for their
+/// soft step), and the `IslandSleep::wake_all` request count. The prologue, the epoch, the D6 test
+/// and every later stage read the record, so every decision that can differ between the sleep-skip
+/// modes is a function of the same latched values (design 10).
+//
+// `clippy::needless_pass_by_value`: see `physics_gather`. `too_many_arguments`: a system's
+// parameters are its access set.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+pub fn physics_broadphase_colored(
+    scratch: Res<SolverScratch>,
+    cfg: Res<PhysicsConfig>,
+    field: Option<Res<SdfField>>,
+    mut inputs: ResMut<StepInputs>,
+    mut grid: ResMut<BroadphaseGrid>,
+    mut tree: ResMut<BroadphaseTree>,
+    mut pairs: ResMut<ContactPairs>,
+    mut sets: ResMut<SleepSets>,
+    mut manifolds: ResMut<Manifolds>,
+    graph: Res<ConstraintGraph>,
+    sleep: Res<IslandSleep>,
+    mut solver: Option<ResMut<ColoredSoftStepSolver>>,
+) {
+    // L10 D9b: the step's one latch point, before anything reads an input.
+    inputs.latch(&cfg, field.as_deref(), scratch.rows.gather_seq(), sleep.wake_requests());
+    let stages = BroadphaseStages {
+        grid: &mut grid,
+        tree: &mut tree,
+        pairs: &mut pairs,
+        sets: &mut sets,
+        manifolds: &mut manifolds,
+        solver: solver.as_deref_mut(),
+    };
+    // No SDF stage in this world: the sleep epoch covers no field (design 04 D10).
+    broadphase_sets(&scratch, &inputs, stages, &graph, &sleep, false);
+}
+
+/// [`physics_broadphase_colored`] in a world with the SDF stage: the sleep epoch also covers the
+/// field's edit list and the kernel choice (design 04 D10), so an edit flushes every held island.
+/// The field the epoch covers is the one latched into the step record (L10 D9b), which the SDF
+/// stage then reads.
+//
+// `clippy::needless_pass_by_value`: see `physics_gather`. `too_many_arguments`: a system's
+// parameters are its access set.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+pub fn physics_broadphase_colored_sdf(
+    scratch: Res<SolverScratch>,
+    cfg: Res<PhysicsConfig>,
+    mut inputs: ResMut<StepInputs>,
+    mut grid: ResMut<BroadphaseGrid>,
+    mut tree: ResMut<BroadphaseTree>,
+    mut pairs: ResMut<ContactPairs>,
+    mut sets: ResMut<SleepSets>,
+    mut manifolds: ResMut<Manifolds>,
+    graph: Res<ConstraintGraph>,
+    sleep: Res<IslandSleep>,
+    mut solver: Option<ResMut<ColoredSoftStepSolver>>,
+    field: Res<SdfField>,
+) {
+    // L10 D9b: the step's one latch point, before anything reads an input.
+    inputs.latch(&cfg, Some(&field), scratch.rows.gather_seq(), sleep.wake_requests());
+    let stages = BroadphaseStages {
+        grid: &mut grid,
+        tree: &mut tree,
+        pairs: &mut pairs,
+        sets: &mut sets,
+        manifolds: &mut manifolds,
+        solver: solver.as_deref_mut(),
+    };
+    broadphase_sets(&scratch, &inputs, stages, &graph, &sleep, true);
+}
+
+/// The resources the sleep-skip broadphase writes.
+struct BroadphaseStages<'a> {
+    grid: &'a mut BroadphaseGrid,
+    tree: &'a mut BroadphaseTree,
+    pairs: &'a mut ContactPairs,
+    sets: &'a mut SleepSets,
+    manifolds: &'a mut Manifolds,
+    /// The colored solver, whose setup flag the sleep epoch reads — ANDed with the latched
+    /// `PhysicsConfig::warm_start` into the effective warm start (L10 D5b) — and a D-H flush
+    /// drains into; `None` in the graph-only pipeline (another solver), where the sleep-skip never
+    /// runs.
+    solver: Option<&'a mut ColoredSoftStepSolver>,
+}
+
+/// The body of both colored broadphase systems, after the latch: the rotation, L10's prologue
+/// (A1), the kind arm, L10's epilogue (A2) and the tree's release (A2.3, T4), and — on a D-H flush
+/// with the mode `Off` — the drain of the restored warm records into the solver's read side
+/// (ruling open question 2: L10's own system, never the solve). Every input it reads comes from
+/// `inputs`, the record its system just latched; `sdf_epoch` says whether the sleep epoch covers
+/// the latched field (the SDF pipeline only, design 04 D10).
+fn broadphase_sets(
+    scratch: &SolverScratch,
+    inputs: &StepInputs,
+    stages: BroadphaseStages<'_>,
+    graph: &ConstraintGraph,
+    sleep: &IslandSleep,
+    sdf_epoch: bool,
+) {
+    let BroadphaseStages { grid, tree, pairs, sets, manifolds, solver } = stages;
+    let cfg = inputs.config();
+    // L10 D5b: the step's effective warm start, once — the solver's setup flag AND the latched
+    // field. The epoch and the drain read it; `None` without the colored solver.
+    let warm = solver.as_deref().map(|s| s.warm_start_enabled() && cfg.warm_start);
+    // L9 D9 and L10 C0: the prologue reads the jumper bitset the rotation builds.
+    pairs.rotate(&scratch.rows);
+    let plan = {
+        let prologue = Prologue {
+            inputs,
+            rows: &scratch.rows,
+            bodies: scratch.bodies(),
+            baseline: scratch.baseline(),
+            sleep,
+            graph,
+            jumpers: pairs.jumper_bits(),
+            jumpers_valid: pairs.jumper_seq() == scratch.rows.gather_seq(),
+            carry: manifolds.pair_carry.peek(&scratch.rows),
+            warm,
+            field: if sdf_epoch { inputs.sdf_field() } else { None },
+        };
+        sets.prologue(&prologue, &mut manifolds.held)
+    };
+    // L10 C3c (design 04 T1, T2): on a `Sets` step with a sleeper the tree reads the
+    // classification the prologue just wrote; on any other step it runs without a hint, which
+    // dissolves its sleeper set. A `Sets` step with no sleeper would dissolve it too, so nothing
+    // is withheld there, and T2's `anchor_ok` — which exists for the withheld pairs (Invariant V)
+    // — would only evict the static set on a flush step, where nothing rests.
+    let hint = (plan.sets && plan.sleepers).then(|| sets.row_cls());
+    broadphase_arms(scratch.bodies(), &scratch.rows, cfg, grid, tree, pairs, hint);
+    if plan.sets {
+        sets.debug_withheld(pairs.withheld(), false);
+        // The LOGICAL pair count sizes the hysteresis table (design 04 A3, T3): the stream plus
+        // the pairs the tree withholds, which the release below only moves between the two.
+        let would_clear = manifolds.box_axis_cache.would_clear(pairs.pairs().len());
+        let Manifolds { held, manifolds: stream_prev, pair_carry, .. } = manifolds;
+        let epilogue = Epilogue {
+            bodies: scratch.bodies(),
+            rows: &scratch.rows,
+            graph,
+            stream: pairs.pairs_stream(),
+            pairs_prev: pairs.pairs_prev(),
+            written: pair_carry.written(pairs),
+            stream_prev: stream_prev.as_read_slice(),
+            would_clear,
+        };
+        sets.epilogue(&epilogue, plan, held);
+        // A2.3 (T4): the rows the epilogue restored leave the sleeper set now. Their withheld
+        // pairs are merged into the stream, where the narrowphase computes them from the restore
+        // source, or skips them when the partner is still held. The epilogue's D2 scan and D3
+        // decide those restores after the tree has withheld the pairs. The prologue's restores
+        // were never in the hint (T1), so the release, which reads `RESTORED` (set for both),
+        // finds only the epilogue's rows in Z.
+        // The epilogue reads the stream and the previous step's lists, never `withheld`: a
+        // withheld pair has two resting, non-sensor endpoints and no candidate
+        // (`debug_withheld`), so the D2 scan could neither restore on it nor list it as a cross
+        // pair (design 06 B3).
+        // The release runs only on a step that restored a record (T4), so a held pile's steady
+        // step never walks the sleeper set.
+        let released = if sets.stats().restored > 0 {
+            let cls = sets.row_cls();
+            tree.release(pairs, |r| cls[r as usize].flags & RowCls::RESTORED != 0)
+        } else {
+            0
+        };
+        sets.note_tree(pairs.withheld().len(), released);
+        sets.debug_withheld(pairs.withheld(), true);
+    }
+    if let Some(solver) = solver
+        && let Some(restore) = sets.take_drain()
+    {
+        solver.drain_restore(restore, warm.unwrap_or(false));
+    }
+}
+
+/// The broadphase's kind arms over the rotated list (the body of [`physics_broadphase`] after the
+/// rotation), shared by both pipelines' broadphase systems: the list's fill, its order assert and
+/// its counter. `hint` is L10's step classification on a `Sets` step with a sleeper (the tree's
+/// sleep hint, design 04 T1, T2), `None` on every other step.
+#[inline]
+fn broadphase_arms(
+    bodies: &[BodyState],
+    rows: &RowIdentity,
+    cfg: &PhysicsConfig,
+    grid: &mut BroadphaseGrid,
+    tree: &mut BroadphaseTree,
+    pairs: &mut ContactPairs,
+    hint: Option<&[RowCls]>,
+) {
+    // L10 C3c (design 04 T6): the tree's withheld pairs exist only after a tree-path step. Any
+    // other kind emits every pair itself, so the tree's sleeper set dissolves first. O(1) while
+    // it is empty.
+    if cfg.broadphase != BroadphaseKind::Tree {
+        tree.clear_sleepers(pairs);
+    }
     match cfg.broadphase {
-        // The shipped all-pairs loop, kept VERBATIM so the default path's asm is
-        // byte-identical to before O2 (the 0%-gate). DO NOT refactor this arm.
+        // The shipped all-pairs loop, kept VERBATIM: cfg-A (J-A) and every AllPairs pin run
+        // it, byte-identical to before O2 (the 0%-gate). DO NOT refactor this arm.
         BroadphaseKind::AllPairs => {
+            // The ONLY change to this arm is the receiver: `pairs` is the column's
+            // refill view instead of a `&mut Vec`. The bound test, the emit order
+            // and the loop shape below are untouched.
+            let mut pairs = pairs.pairs.build_view();
             pairs.clear();
             let n = bodies.len();
             for i in 0..n {
@@ -314,12 +627,31 @@ pub fn physics_broadphase(
                 grid.build(bodies, pairs);
             }
         }
+        // The tree broadphase: the exact set. The row identity is the gather's
+        // (`scratch.rows`), which the tree's verify uses to carry its persistent sets through
+        // a row change. With L10's hint it withholds the pairs of its sleeper set (design 04
+        // T3). S5's switch is mirrored into the tree on every Tree step, so the tree reads the
+        // configuration this step latched and a direct-drive harness keeps the tree's own
+        // default.
+        BroadphaseKind::Tree => {
+            tree.set_parallel_query(cfg.parallel_tree_query);
+            match hint {
+                Some(cls) => tree.step_hinted(bodies, rows, pairs, &HeldHint::new(cls)),
+                None => tree.step(bodies, rows, pairs),
+            }
+        }
     }
 
+    // Strict: the pairs are unique as well as sorted — over the LOGICAL view, the stream merged
+    // with the withheld pairs (design 04 T3), so the two are disjoint too. The narrowphase's
+    // hysteresis table is keyed by pair, and the parallel narrowphase's hint argument (Lemma 1
+    // in `narrowphase/axis_cache.rs`) needs every key to appear once per frame.
     debug_assert!(
-        pairs.windows(2).all(|w| w[0] <= w[1]),
-        "invariant: broadphase pairs must be emitted in sorted (min, max) order"
+        pairs.pairs().iter().zip(pairs.pairs().iter().skip(1)).all(|(a, b)| a < b),
+        "invariant: broadphase pairs must be emitted unique and in sorted (min, max) order"
     );
+    // The LOGICAL pair count (L10 design 04 runner O3): the stream plus the withheld pairs.
+    counter!(PHYS_BP_PAIRS, pairs.pairs().len() as u64);
 }
 
 /// Produces a [`Manifold`] for each overlapping pair into [`Manifolds`]
@@ -330,45 +662,275 @@ pub fn physics_broadphase(
 ///
 /// - **sphere-sphere**: inline single-point center-to-center contact (the W2
 ///   path).
-/// - **sphere-box** / **box-sphere**: [`sphere_box_contact`] — a single
+/// - **sphere-box** / **box-sphere**:
+///   [`sphere_box_contact`](crate::narrowphase::sphere_box::sphere_box_contact) — a single
 ///   closest-point contact (the box is an OBB: position + body rotation +
 ///   half-extents).
-/// - **box-box**: [`box_box_contact`] — 15-axis SAT + reference-face clip + a
-///   deterministic ≤4-point reduction, biased by the per-pair reference-axis
-///   hysteresis in [`Manifolds::box_axis_cache`] for stable feature ids on a
-///   resting stack (P2 W3/W4).
+/// - **box-box**: [`box_box_contact`](crate::narrowphase::box_box::box_box_contact)'s
+///   kernel — 15-axis SAT + reference-face clip + a deterministic ≤4-point reduction,
+///   biased by the per-pair reference-axis hysteresis in [`Manifolds::box_axis_cache`] for
+///   stable feature ids on a resting stack (P2 W3/W4) — on boxes built from the step's
+///   per-row orientation frames (L9 D2, filled at the entry of either path below).
 ///
 /// Every emitted manifold is keyed by the dense `(a, b)` rows in `(min, max)`
 /// order (IM-1 / D4) with its `normal` pointing A→B, regardless of which body was
 /// the sphere or the SAT reference — so the solver's sign handling is uniform.
 /// The buffer is cleared and refilled each step; the hysteresis cache persists in
 /// place across frames (capacity reused).
+///
+/// # The pair carry (L9 D9, `narrowphase/carry.rs`)
+///
+/// Every pair writes a tag, and the next step joins its pairs to those tags through the row
+/// identity: a box pair the SAT separated carries its separating axis, which the next step
+/// evaluates first, skipping the SAT while it still separates (L9a (ii), exact). The carry is
+/// classified before either path runs and stamped after, with the pair list its tags index.
+///
+/// # Contact reuse (L9b, `narrowphase/reuse.rs`)
+///
+/// With [`PhysicsConfig::contact_reuse`] on, a slow touching box pair writes a reuse record beside
+/// its tag, and the next step refreshes that record from the current poses instead of running the
+/// SAT and the clip while the relative motion stays within the reuse distance. On by default since
+/// L9 C4; with it off every pair takes the path above, bit for bit.
+///
+/// # The serial loop and the parallel chunks (L5)
+///
+/// With [`PhysicsConfig::parallel_narrowphase`] on (the default since L5 C4), the step
+/// first offers its pairs to the parallel narrowphase (`narrowphase/dispatch.rs`):
+/// contiguous chunks collided across the ambient pool's workers, joined back in pair
+/// order, with the box-box axis writes replayed serially in pair order. The dispatch
+/// declines — and this system runs
+/// [`narrowphase_serial`], today's loop — when the flag is off, when no pool of at least
+/// two workers is attached, or when the pairs make fewer than two chunks. Both paths
+/// collide a pair through the one [`collide_pair`], and the parallel path's manifold
+/// stream, sensor stream, pair tags and hysteresis table state equal the serial path's (the
+/// dispatch module's Lemma 3, the axis cache's Lemmas 1 and 2, and the carry's lemma L9-J).
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_narrowphase(
     scratch: Res<SolverScratch>,
     pairs: Res<ContactPairs>,
+    inputs: Res<StepInputs>,
     mut manifolds: ResMut<Manifolds>,
 ) {
+    // L10 D9b: the configuration the broadphase latched, never the live resource.
+    let cfg = inputs.for_gather(&scratch.rows).config();
+    let _ = narrowphase_step::<false>(&scratch, &pairs, cfg, &mut manifolds, NpSets::OFF);
+}
+
+/// The colored pipeline's narrowphase (L10 design 04 D15, 08 D1′/D-H): [`physics_narrowphase`]
+/// with its arm chosen by the step's [`SleepSets`] — the `Sets` arm when the broadphase said so,
+/// which skips the pairs of held islands, computes the pairs of restored ones from the restore
+/// source, and mirrors the held pairs' hysteresis keys; else the `Off` arm, which collides every
+/// pair as [`physics_narrowphase`] does. Registered only where the colored pipeline inserts
+/// [`SleepSets`].
+//
+// `clippy::needless_pass_by_value`: see `physics_gather`.
+#[allow(clippy::needless_pass_by_value)]
+pub fn physics_narrowphase_colored(
+    scratch: Res<SolverScratch>,
+    pairs: Res<ContactPairs>,
+    inputs: Res<StepInputs>,
+    mut manifolds: ResMut<Manifolds>,
+    mut sets: ResMut<SleepSets>,
+) {
+    // L10 D9b: the configuration the broadphase latched, never the live resource.
+    let cfg = inputs.for_gather(&scratch.rows).config();
+    if sets.np_sets() {
+        let (keys, tags, reuse) = sets.restore_pairs(&scratch.rows);
+        let np = NpSets { cls: sets.row_cls(), keys, tags, reuse };
+        let (counts, (mirrored, all)) =
+            narrowphase_step::<true>(&scratch, &pairs, cfg, &mut manifolds, np);
+        sets.note_np(pairs.pairs_stream().len(), counts);
+        sets.note_mirror(mirrored, all);
+    } else {
+        let _ = narrowphase_step::<false>(&scratch, &pairs, cfg, &mut manifolds, NpSets::OFF);
+    }
+}
+
+/// One step of the narrowphase on L10's arm `SETS` (the body of [`physics_narrowphase`]):
+/// the hysteresis table's frame, L10's axis mirror (`Sets` only), the pair carry's
+/// classification, the parallel chunks or the serial loop, the carry's stamp and the step's
+/// counters. Returns what the `Sets` arm counted and the mirror's `(keys, whole)`; zeros on the
+/// `Off` arm. `np` is L10's input, read on the `Sets` arm only.
+#[inline]
+fn narrowphase_step<const SETS: bool>(
+    scratch: &SolverScratch,
+    contact_pairs: &ContactPairs,
+    cfg: &PhysicsConfig,
+    manifolds: &mut Manifolds,
+    np: NpSets<'_>,
+) -> (NpCounts, (u32, bool)) {
     let bodies = scratch.bodies();
-    let manifolds = &mut *manifolds;
-    manifolds.manifolds.clear();
+    // The stream: the pairs this step collides, which its tags index (L10 design 06 D-D D2).
+    let pairs = contact_pairs.pairs_stream();
+    // Ensure the per-pair hysteresis cache can hold this frame's pairs; it is NOT
+    // cleared (a single in-place table — this frame reads last frame's axes). When the
+    // rows changed since the cache was last keyed, every box pair's previous axis is
+    // pre-read through the row identity map first, before any write of this step
+    // (defect A, interim). The table is sized by the LOGICAL pair count (L10 design 04 A3,
+    // T3): the stream plus the pairs the tree broadphase withholds for held islands.
+    let keys = manifolds.box_axis_cache.begin_frame_synced(
+        pairs,
+        contact_pairs.pairs().len(),
+        bodies,
+        &scratch.rows,
+    );
+    let prefetched = keys.prefetched;
+    debug_assert_eq!(
+        keys.any(),
+        manifolds.box_axis_cache.keys_changed(),
+        "invariant: the key change's causes union to the table's keys_changed"
+    );
+    // L10 (design 06 D-C, ruling W3 of rev 2): AFTER `begin_frame` — whose clear or grow would
+    // erase them — and before either path runs, the held pairs' keys are set serially, as `Off`'s
+    // computes of those pairs would set them this step.
+    let mirror = if SETS {
+        mirror_held(
+            &mut manifolds.box_axis_cache,
+            manifolds.held.view(),
+            keys,
+            scratch.rows.prev_row_map(),
+        )
+    } else {
+        (0, false)
+    };
+    // L9b: the step's reuse parameters, and whether a hit must re-key its hysteresis entry
+    // (ruling W1), which `begin_frame_synced` has just settled.
+    let reuse = ReuseStep::new(
+        cfg.contact_reuse,
+        cfg.contact_reuse_distance,
+        cfg.dt,
+        manifolds.box_axis_cache.keys_changed(),
+    )
+    .with_speculative(SpecStep::new(
+        cfg.speculative_distance,
+        cfg.speculative_velocity_cap,
+        cfg.dt,
+    ));
+    // L9 D9: how this step's pairs join the previous step's tags — classified here, before
+    // either path opens the carry, and stamped below, after the pair loop.
+    let carry = manifolds.pair_carry.source(contact_pairs, &scratch.rows).with_reuse(reuse);
+    // L5: the flag is a request; the dispatch returns 0 whenever it runs no chunk, and
+    // then the serial loop below produces the step's streams.
+    let (chunks, parallel_counts) = if cfg.parallel_narrowphase {
+        try_parallel_sets::<SETS>(manifolds, bodies, pairs, prefetched, carry, np)
+    } else {
+        (0, NpCounts::default())
+    };
+    let counts = if chunks == 0 {
+        narrowphase_serial_sets::<SETS>(manifolds, bodies, pairs, prefetched, carry, np)
+    } else {
+        parallel_counts
+    };
+    manifolds.pair_carry.stamp(contact_pairs, &scratch.rows);
+
+    // Profiling: the step's narrowphase work, counted after the loop from what it emitted,
+    // so the loop itself carries no instrument. The point sum walks the solver's manifolds
+    // only while the profiler is armed.
+    counter!(PHYS_NP_PAIRS, pairs.len() as u64);
+    counter!(PHYS_NP_MANIFOLDS, manifolds.solver_manifolds().len() as u64);
+    counter!(
+        PHYS_NP_POINTS,
+        manifolds.solver_manifolds().iter().map(|m| u64::from(m.count)).sum::<u64>()
+    );
+    counter!(PHYS_NP_CHUNKS, chunks as u64);
+    // L9: the step's pair classes, from the tags in one walk, only while the profiler is armed.
+    // `full + reused + sep_hits + non-box + held-skipped = pairs` (the closure a reader checks).
+    if boyko_diag::zone_enabled!(PHYS_NP_FULL) {
+        let classes = manifolds.pair_classes();
+        counter!(PHYS_NP_REUSED, classes.reused);
+        counter!(PHYS_NP_SEP_HITS, classes.sep_hits);
+        counter!(PHYS_NP_FULL, classes.full);
+    }
+    (counts, mirror)
+}
+
+/// [`narrowphase_serial_with`] with no pair carry and contact reuse off: every pair misses its
+/// join (and still writes its tag). For the tests' direct callers, which hold no `ContactPairs`;
+/// the next system step's carry is then a Reset.
+#[cfg(test)]
+pub(crate) fn narrowphase_serial(
+    manifolds: &mut Manifolds,
+    bodies: &[BodyState],
+    pairs: &[(BodyIndex, BodyIndex)],
+    prefetched: bool,
+) {
+    narrowphase_serial_with(manifolds, bodies, pairs, prefetched, CarryIn::NONE);
+}
+
+/// [`narrowphase_serial_sets`] on the `Off` arm: for the tests' direct callers.
+#[cfg(test)]
+pub(crate) fn narrowphase_serial_with(
+    manifolds: &mut Manifolds,
+    bodies: &[BodyState],
+    pairs: &[(BodyIndex, BodyIndex)],
+    prefetched: bool,
+    carry: CarryIn<'_>,
+) {
+    let _ = narrowphase_serial_sets::<false>(manifolds, bodies, pairs, prefetched, carry, NpSets::OFF);
+}
+
+/// The serial narrowphase loop: every candidate pair in `(min, max)` order, the
+/// manifold pushed into the solver buffer or the sensor-overlap buffer, the pair's tag
+/// and reuse record written (L9 D9), and a box-box pair's chosen axis written into the
+/// hysteresis table in the same iteration. The per-row orientation frames are filled and
+/// the pair carry opened first (L9 D2, D9).
+///
+/// The path a step takes whenever the parallel narrowphase does not dispatch, and the
+/// oracle that path's gates compare against. `prefetched` is what
+/// `BoxAxisCache::begin_frame_synced` returned for this frame; `carry` is what
+/// `PairCarry::source` returned for it.
+///
+/// `SETS` is L10's arm (design 08 D1′), with the parallel chunks' route predicate: on the
+/// `Sets` arm a non-sensor pair with a held endpoint is not collided — it writes the held-skip
+/// tag, no axis (the serial form of the chunks' `AXIS_NONE` commit) and no manifold — and a
+/// non-sensor pair with a restored endpoint is collided from the restore source through L9's
+/// join (ruling W2); the frames are filled under D-F's mask. On the `Off` arm (`np` unread)
+/// every pair is collided from the stream.
+pub(crate) fn narrowphase_serial_sets<const SETS: bool>(
+    manifolds: &mut Manifolds,
+    bodies: &[BodyState],
+    pairs: &[(BodyIndex, BodyIndex)],
+    prefetched: bool,
+    carry: CarryIn<'_>,
+    np: NpSets<'_>,
+) -> NpCounts {
+    // Disjoint field borrows of one `Manifolds`: two refill views, the hysteresis cache,
+    // the frame column and the pair carry. The views are taken once for the whole pair
+    // loop, not per push.
+    let Manifolds {
+        manifolds: solver_out,
+        sensor_overlaps,
+        box_axis_cache: axis_cache,
+        row_frames,
+        pair_carry,
+        ..
+    } = manifolds;
+    let mut out = solver_out.build_view();
+    out.clear();
     // S5: the sensor-overlap signal is rebuilt every step alongside the solver
     // buffer (capacity reused). Empty in any world with no `Sensor` id.
-    manifolds.sensor_overlaps.clear();
-    // Ensure the per-pair hysteresis cache can hold this frame's pairs; it is NOT
-    // cleared (a single in-place table — this frame reads last frame's axes).
-    manifolds.box_axis_cache.begin_frame(pairs.pairs.len());
-    let out = &mut manifolds.manifolds;
-    let sensor_out = &mut manifolds.sensor_overlaps;
-    let axis_cache = &mut manifolds.box_axis_cache;
+    let mut sensor_out = sensor_overlaps.build_view();
+    sensor_out.clear();
+    // L9 D2: every box row's frame, once, before the first pair (or `None`: the pairs build
+    // their frames per pair, the same bits). L10 D-F: under the `Sets` arm's mask.
+    let frames = fill_row_frames(row_frames, bodies, pairs.len(), carry.reuse().on, np.cls);
+    // L9 D9: the previous step's tags and records, joined pair by pair with one monotone cursor;
+    // L10 (ruling W2): the restore source through the same join.
+    let (join, tag_column, record_column) = pair_carry.open(carry, pairs.len());
+    let reuse = join.reuse();
+    let mut restore = join.restored(np.keys, np.tags, np.reuse).cursor();
+    let mut join = join.cursor();
+    let mut tag_view = tag_column.build_view();
+    let tags = tag_view.as_mut_slice();
+    let mut record_view = record_column.build_view();
+    let records = record_view.as_mut_slice();
+    let mut counts = NpCounts::default();
 
-    for &(a, b) in &pairs.pairs {
-        let ia = a.0 as usize;
-        let ib = b.0 as usize;
-        let ba = &bodies[ia];
-        let bb = &bodies[ib];
+    for (k, &(a, b)) in pairs.iter().enumerate() {
+        let ba = &bodies[a.0 as usize];
+        let bb = &bodies[b.0 as usize];
         // S5: a pair where EITHER body is a sensor is an OVERLAP, not a contact —
         // the manifold is generated identically (same geometry) but diverted to
         // `sensor_overlaps` below so the solver never resolves it. Computed once
@@ -377,42 +939,56 @@ pub fn physics_narrowphase(
         // the pre-S5 push).
         let is_overlap = ba.is_sensor || bb.is_sensor;
 
-        let manifold = match (ba.shape, bb.shape) {
-            (ColliderShape::Sphere { radius: ra }, ColliderShape::Sphere { radius: rb }) => {
-                sphere_sphere_manifold(a, b, ba, bb, ra, rb)
+        let PairOut { manifold, axis, tag, record } = match np_route::<SETS>(np.cls, a, b) {
+            // L10 (design 08 D1′): a held endpoint — the held-skip tag, no `set` (the mirror
+            // keys the held pair, design 06 D-C) and no manifold.
+            Route::Skip => {
+                counts.skips += 1;
+                PairOut::held_skip()
             }
-            (ColliderShape::Sphere { radius }, ColliderShape::Box { half_extents }) => {
-                // A is the sphere, B is the box: the generator already emits
-                // normal A→B with body_a = sphere, body_b = box.
-                sphere_box_contact(
-                    a, b, ba.position, radius, bb.position, bb.rotation, half_extents,
-                )
-            }
-            (ColliderShape::Box { half_extents }, ColliderShape::Sphere { radius }) => {
-                // A is the box, B is the sphere: call the generator with the
-                // sphere as A / box as B (keyed b, a), then remap to (a, b) order
-                // so the dense rows match and the normal runs A(box)→B(sphere).
-                sphere_box_contact(
-                    b, a, bb.position, radius, ba.position, ba.rotation, half_extents,
-                )
-                .map(flip_manifold)
-            }
-            (
-                ColliderShape::Box { half_extents: ha },
-                ColliderShape::Box { half_extents: hb },
-            ) => {
-                let last_axis = axis_cache.get(a, b);
-                box_box_contact(
-                    a, b, ba.position, ba.rotation, ha, bb.position, bb.rotation, hb, last_axis,
-                )
-                .map(|c| {
-                    // Persist this frame's chosen reference axis for next frame's
-                    // hysteresis bias (per body pair, deterministic).
-                    axis_cache.set(a, b, c.reference_axis);
-                    c.manifold
-                })
+            route @ (Route::Stream | Route::Restore) => {
+                if SETS {
+                    debug_assert_computed(np.cls, frames.is_some(), a, b, ba, bb);
+                }
+                let from_restore = route == Route::Restore;
+                let mut hit = false;
+                let out = collide_pair(
+                    a,
+                    b,
+                    ba,
+                    bb,
+                    frames,
+                    reuse,
+                    || {
+                        if from_restore {
+                            let prev = restore.prev(a, b);
+                            hit = prev.tag != PairTag::NONE;
+                            prev
+                        } else {
+                            join.prev(a, b)
+                        }
+                    },
+                    || axis_cache.read_hint(prefetched, k, a, b),
+                );
+                counts.restored += u32::from(from_restore);
+                counts.restore_hits += u32::from(hit);
+                out
             }
         };
+        if let Some(axis) = axis {
+            // Persist this frame's chosen reference axis for next frame's
+            // hysteresis bias (per body pair, deterministic).
+            axis_cache.set(a, b, axis);
+        }
+        // Past the tag column's reserve a pair goes untagged, and the carry's stamp stays
+        // invalid (`PairCarry::stamp`), so no later step reads a tag this step did not write.
+        if let Some(slot) = tags.get_mut(k) {
+            *slot = tag;
+        }
+        // A record exists only on a step that reuses, which `open` grew the column for.
+        if let Some(record) = record {
+            records[k] = record;
+        }
 
         if let Some(manifold) = manifold {
             debug_assert!(
@@ -432,10 +1008,349 @@ pub fn physics_narrowphase(
             }
         }
     }
+    counts
+}
+
+/// One candidate pair's collision (L9 D9): what both narrowphase paths store for it.
+pub(crate) struct PairOut {
+    /// The manifold, or `None` when the shapes do not touch (or every point of a reused face
+    /// lifted off, D6).
+    pub(crate) manifold: Option<Manifold>,
+    /// The SAT axis the hysteresis table stores for the pair this step, or `None` when it stores
+    /// nothing.
+    pub(crate) axis: Option<usize>,
+    /// The pair's tag.
+    pub(crate) tag: PairTag,
+    /// The reuse record the pair writes at its slot, iff its tag carries `REC` (L9b).
+    pub(crate) record: Option<ReuseRecord>,
+}
+
+impl PairOut {
+    /// The output of a pair whose generator ran on today's path: no record.
+    #[inline]
+    fn today(manifold: Option<Manifold>, axis: Option<usize>, tag: PairTag) -> Self {
+        Self { manifold, axis, tag, record: None }
+    }
+
+    /// The output of a non-box pair: its manifold and a tag that records only whether it was
+    /// emitted.
+    #[inline]
+    fn non_box(manifold: Option<Manifold>) -> Self {
+        let tag = PairTag::non_box(pushes(manifold.as_ref()));
+        Self::today(manifold, None, tag)
+    }
+
+    /// The output of a pair L10's sleep-skip did not collide because an endpoint is held
+    /// (design 08 D1′): no manifold, no axis, the held-skip tag, no record.
+    #[inline]
+    pub(crate) fn held_skip() -> Self {
+        Self::today(None, None, PairTag::HELD_SKIP)
+    }
+}
+
+/// Collides one candidate pair `(a, b)` by the two bodies' shapes (L9 D9): the manifold (or
+/// `None` when the shapes do not touch), the SAT axis the hysteresis table stores, the pair's tag
+/// and its reuse record.
+///
+/// A pure function of the two bodies, their frames, the step's reuse parameters, what the pair
+/// left in the previous step and the hint, which is what lets the parallel narrowphase run it per
+/// pair on any thread. `prev` (the tag and the record the pair's two bodies wrote in the previous
+/// step, through the join) and `hint` are called only for a box-box pair — the only generator that
+/// reads either — so they cost nothing on the other shape pairs, and `hint` is not called when the
+/// carried separating axis still separates the pair (L9a (ii)) or the pair reuses its record
+/// (L9b, D10). Both narrowphase paths call this one function.
+///
+/// `frames` is the step's per-row orientation frame column (L9 D2), or `None` on a step
+/// whose fill declined; a box pair then builds its two frames with the same
+/// [`RowFrame::axes_of`], so the result does not depend on which (`narrowphase/reuse.rs`).
+///
+/// Every pair type keeps a point while its separation is within the pair's speculative margin
+/// (V2: `reuse.speculative`'s `d` plus the approach-velocity term, [`SpecMargin`], built here once
+/// per pair from the two gathered bodies); a pair with a sensor on either side uses the
+/// overlap-only rule, so an overlap report is exact.
+///
+/// - **sphere-sphere**: inline single-point center-to-center contact (the W2 path).
+/// - **sphere-box**: [`sphere_box_contact_within`], which emits normal A→B with
+///   body_a = sphere, body_b = box.
+/// - **box-sphere**: the same generator with the sphere as A and the box as B (keyed
+///   `b, a`), remapped to `(a, b)` order so the dense rows match and the normal runs
+///   A(box)→B(sphere).
+/// - **box-box**: [`collide_box_pair`] — the carried separating axis, the reuse record
+///   (L9b), then the classifier biased by the hint.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn collide_pair<'r>(
+    a: BodyIndex,
+    b: BodyIndex,
+    ba: &BodyState,
+    bb: &BodyState,
+    frames: Option<&[RowFrame]>,
+    reuse: ReuseStep,
+    prev: impl FnOnce() -> Prev<'r>,
+    hint: impl FnOnce() -> Option<usize>,
+) -> PairOut {
+    // V2: a sensor pair keeps the overlap-only rule.
+    let spec = if ba.is_sensor || bb.is_sensor { SpecStep::OVERLAP } else { reuse.speculative };
+    match (ba.shape, bb.shape) {
+        (ColliderShape::Sphere { radius: ra }, ColliderShape::Sphere { radius: rb }) => {
+            PairOut::non_box(sphere_sphere_manifold(a, b, ba, bb, ra, rb, &spec.pair(ba, bb)))
+        }
+        (ColliderShape::Sphere { radius }, ColliderShape::Box { half_extents }) => {
+            PairOut::non_box(sphere_box_contact_within(
+                a,
+                b,
+                ba.position,
+                radius,
+                bb.position,
+                bb.rotation,
+                half_extents,
+                &spec.pair(ba, bb),
+            ))
+        }
+        (ColliderShape::Box { half_extents }, ColliderShape::Sphere { radius }) => {
+            PairOut::non_box(
+                sphere_box_contact_within(
+                    b,
+                    a,
+                    bb.position,
+                    radius,
+                    ba.position,
+                    ba.rotation,
+                    half_extents,
+                    // The generator's A is the sphere, `bb`.
+                    &spec.pair(bb, ba),
+                )
+                .map(flip_manifold),
+            )
+        }
+        (ColliderShape::Box { half_extents: ha }, ColliderShape::Box { half_extents: hb }) => {
+            let (oa, ob) = match frames {
+                Some(frames) => (
+                    Obb::from_frame(ba.position, &frames[a.0 as usize], ha),
+                    Obb::from_frame(bb.position, &frames[b.0 as usize], hb),
+                ),
+                None => (
+                    Obb::new(ba.position, ba.rotation, ha),
+                    Obb::new(bb.position, bb.rotation, hb),
+                ),
+            };
+            let radii = || match frames {
+                Some(frames) => (frames[a.0 as usize].radius, frames[b.0 as usize].radius),
+                None => (ha.length(), hb.length()),
+            };
+            // L10 B1′ (design 08): the settle bits are written from what the path produced and
+            // the hint its full collision read, outside the collision itself, so both paths and
+            // every outcome share the one rule (`PairTag::settled`).
+            let mut read_hint = None;
+            let sm = spec.pair(ba, bb);
+            let mut out = collide_box_pair(a, b, ba, bb, &oa, &ob, radii, reuse, &sm, prev(), || {
+                read_hint = hint();
+                read_hint
+            });
+            out.tag = out.tag.settled(read_hint);
+            // L9's axis commit is `PairTag::rekeys` (L10 C0, design 06 D-C): a pair writes its
+            // hysteresis axis only with a tag that re-keys and carries that axis, and on a step
+            // whose key set changed it writes one iff its tag re-keys.
+            debug_assert!(
+                out.axis.is_none_or(|axis| out.tag.rekeys() && out.tag.axis() == Some(axis as u8))
+                    && (!reuse.rekey || out.axis.is_some() == out.tag.rekeys()),
+                "invariant: a box pair's axis write is PairTag::rekeys: axis {:?}, tag {:#06x}, \
+                 rekey step {}",
+                out.axis,
+                out.tag.bits(),
+                reuse.rekey
+            );
+            out
+        }
+    }
+}
+
+/// The box-box arm of [`collide_pair`] on the boxes `(oa, ob)`:
+///
+/// 1. **The carried separating axis (L9a (ii)).** A `SEP` tag's axis is evaluated first; while it
+///    separates, the pair is separated and nothing else runs.
+/// 2. **The reuse record (L9b).** A `REC` tag's record, flipped into the current roles, is kept
+///    iff the pair is slow ([`slow_geom`]) and passes [`criterion`]: its [refresh](refresh) is the
+///    output, the record is copied to this step's slot, and the hysteresis table is written only on
+///    a step whose key set changed (ruling W1).
+/// 3. **The full collision** — the classifier biased by the hint. A slow pair builds a record from
+///    a contact and emits that record's refresh (D7); any other pair emits the contact, and so
+///    does every pair whose answer is the best face's own contact
+///    ([`BoxBoxOutcome::BestFace`], never recorded).
+///
+/// A `REC` tag never carries `SEP`, so at most one of 1 and 2 applies.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn collide_box_pair(
+    a: BodyIndex,
+    b: BodyIndex,
+    ba: &BodyState,
+    bb: &BodyState,
+    oa: &Obb,
+    ob: &Obb,
+    radii: impl Fn() -> (f32, f32),
+    reuse: ReuseStep,
+    sm: &SpecMargin,
+    prev: Prev<'_>,
+    hint: impl FnOnce() -> Option<usize>,
+) -> PairOut {
+    // The pair's reuse geometry, computed at most once: `None` until needed, then whether the pair
+    // is slow (`Some(Some(g))`) or takes today's path (`Some(None)`).
+    let mut geom = None;
+    if let Some(stored) = prev.record {
+        let slow = slow_geom(ba, bb, oa, ob, &radii, reuse);
+        geom = Some(slow);
+        if let Some(g) = slow {
+            let record = if prev.flipped { stored.flipped() } else { *stored };
+            if let Some(out) = reuse_record(&record, a, b, ba, bb, oa, ob, &g, prev.tag, reuse, sm) {
+                return out;
+            }
+        }
+    }
+    match box_box_classify_carried(oa, ob, a, b, prev.tag.sep_axis(), sm, hint) {
+        BoxBoxOutcome::Contact(c) => {
+            let slow = geom.unwrap_or_else(|| slow_geom(ba, bb, oa, ob, &radii, reuse));
+            match slow {
+                Some(g) => record_contact(c, a, b, ba, bb, oa, ob, &g, reuse, sm),
+                None => {
+                    let tag = PairTag::box_contact(c.reference_axis, c.manifold.count > 0);
+                    PairOut::today(Some(c.manifold), Some(c.reference_axis), tag)
+                }
+            }
+        }
+        // The best face's own contact for a pair whose every edge axis claims more than the face
+        // allows (the thinbox lane): emitted as a non-slow pair's contact is, and never recorded —
+        // a record of its speculative point would refresh to no manifold on its own poses.
+        BoxBoxOutcome::BestFace(c) => {
+            let tag = PairTag::box_contact(c.reference_axis, c.manifold.count > 0);
+            PairOut::today(Some(c.manifold), Some(c.reference_axis), tag)
+        }
+        BoxBoxOutcome::Separated(axis) => {
+            debug_assert!(
+                axis < SAT_AXIS_COUNT,
+                "invariant: a separating SAT axis is canonical 0..15"
+            );
+            PairOut::today(None, None, PairTag::box_separated(axis, false))
+        }
+        BoxBoxOutcome::StillSeparated(axis) => {
+            PairOut::today(None, None, PairTag::box_separated(axis, true))
+        }
+        BoxBoxOutcome::NoContact => PairOut::today(None, None, PairTag::BOX_NO_CONTACT),
+    }
+}
+
+/// The reuse geometry of a box pair that takes the reuse path this step (L9b D3, D8), or `None`
+/// when it takes today's: reuse off, a sensor on either side, τ_eff not positive (a degenerate
+/// box, or τ = 0), or a fast pair.
+#[inline]
+fn slow_geom(
+    ba: &BodyState,
+    bb: &BodyState,
+    oa: &Obb,
+    ob: &Obb,
+    radii: &impl Fn() -> (f32, f32),
+    reuse: ReuseStep,
+) -> Option<PairGeom> {
+    if !reuse.on || ba.is_sensor || bb.is_sensor {
+        return None;
+    }
+    let (ra, rb) = radii();
+    let g = PairGeom::new(oa, ob, ra, rb, reuse.tau);
+    (g.tau_eff > 0.0 && !is_fast(ba, bb, &g, reuse.dt2)).then_some(g)
+}
+
+/// A slow pair's record `record` (in the current roles) on this step's boxes: the hit's output,
+/// or `None` for a miss (the shapes changed, the criterion failed, the edge degenerated, or the
+/// edge claims more than the face allows). `tag` is
+/// the previous step's tag in the current roles, whose axis is the record's.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn reuse_record(
+    record: &ReuseRecord,
+    a: BodyIndex,
+    b: BodyIndex,
+    ba: &BodyState,
+    bb: &BodyState,
+    oa: &Obb,
+    ob: &Obb,
+    g: &PairGeom,
+    tag: PairTag,
+    reuse: ReuseStep,
+    sm: &SpecMargin,
+) -> Option<PairOut> {
+    debug_assert!(tag.axis().is_some(), "invariant: a REC tag carries its record's SAT axis");
+    let axis = usize::from(tag.axis()?);
+    if !criterion(record, oa, ob, ba.rotation, bb.rotation, g) {
+        return None;
+    }
+    match refresh(record, oa, ob, a, b, sm) {
+        Refreshed::Contact(m) => {
+            let pushed = m.count > 0;
+            Some(PairOut {
+                manifold: pushed.then_some(m),
+                // D10 and ruling W1: a hit writes no axis, except on a step whose key set changed,
+                // where it re-keys its entry with the axis its record was built on.
+                axis: reuse.rekey.then_some(axis),
+                tag: PairTag::box_recorded(axis, pushed, true),
+                record: Some(record.with_parity(reuse.parity)),
+            })
+        }
+        Refreshed::Separated(sep) => {
+            Some(PairOut::today(None, None, PairTag::box_separated_by_record(sep)))
+        }
+        Refreshed::Degenerate | Refreshed::Stale => None,
+    }
+}
+
+/// A slow pair's full collision `c`: the record built from it, and that record's refresh as the
+/// output (D7), so the output is a pure function of the record and the poses.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn record_contact(
+    c: BoxBoxContact,
+    a: BodyIndex,
+    b: BodyIndex,
+    ba: &BodyState,
+    bb: &BodyState,
+    oa: &Obb,
+    ob: &Obb,
+    g: &PairGeom,
+    reuse: ReuseStep,
+    sm: &SpecMargin,
+) -> PairOut {
+    let axis = c.reference_axis;
+    let record = build(&c, oa, ob, ba.rotation, bb.rotation, g, reuse.parity);
+    match refresh(&record, oa, ob, a, b, sm) {
+        Refreshed::Contact(m) => {
+            let pushed = m.count > 0;
+            PairOut {
+                manifold: pushed.then_some(m),
+                axis: Some(axis),
+                tag: PairTag::box_recorded(axis, pushed, false),
+                record: Some(record),
+            }
+        }
+        // An edge record re-evaluates the very axis the full collision chose, on the same
+        // boxes: it overlaps, exists and is within the face bound. Kept total rather than trusted.
+        Refreshed::Separated(_) | Refreshed::Degenerate | Refreshed::Stale => {
+            debug_assert!(false, "invariant: a record refreshes to a contact on the poses it was built on");
+            let tag = PairTag::box_contact(axis, c.manifold.count > 0);
+            PairOut::today(Some(c.manifold), Some(axis), tag)
+        }
+    }
+}
+
+/// Whether a generator's output is emitted: some manifold with at least one point (the loops'
+/// routing condition), which is the tag's `PUSHED` bit.
+#[inline]
+fn pushes(m: Option<&Manifold>) -> bool {
+    m.is_some_and(|m| m.count > 0)
 }
 
 /// Builds the single-point sphere-sphere manifold for the dense pair `(a, b)`, or
-/// `None` when the spheres do not overlap (the W2 path, kept inline).
+/// `None` when the spheres' surfaces are at least the pair's speculative margin apart (the W2
+/// path, kept inline; V2's `d_eff`, read at A's surface point along the A→B normal; the
+/// overlap-only rule's strict `>=` drops an exact touch).
 ///
 /// The normal runs A→B along the center-to-center direction; the lone contact
 /// point sits on A's surface. `feature_id` is `0` (a sphere has no distinguishing
@@ -449,20 +1364,29 @@ fn sphere_sphere_manifold(
     bb: &BodyState,
     ra: f32,
     rb: f32,
+    sm: &SpecMargin,
 ) -> Option<Manifold> {
     let delta = bb.position - ba.position;
     let dist = delta.length();
     let separation = dist - (ra + rb);
-    if separation >= 0.0 {
-        // Bounding-circle overlap without an actual shape contact.
+    let normal = || {
+        if dist > f32::MIN_POSITIVE {
+            delta * dist.recip()
+        } else {
+            // Coincident centers: pick a stable arbitrary normal.
+            Vec3::new(1.0, 0.0, 0.0)
+        }
+    };
+    if separation >= sm.d()
+        && (!sm.moving() || {
+            let n = normal();
+            separation >= sm.point(ba.position + n * ra, n)
+        })
+    {
+        // Bounding-circle overlap without an actual shape contact within the margin.
         return None;
     }
-    let normal = if dist > f32::MIN_POSITIVE {
-        delta * dist.recip()
-    } else {
-        // Coincident centers: pick a stable arbitrary normal.
-        Vec3::new(1.0, 0.0, 0.0)
-    };
+    let normal = normal();
     let contact = ba.position + normal * ra;
     let mut manifold = Manifold::new(a, b);
     manifold.normal = normal;
@@ -480,7 +1404,7 @@ fn sphere_sphere_manifold(
 /// `anchor_a`/`anchor_b`, and negates the normal so it still runs from the (new)
 /// A toward the (new) B (P2 W4).
 ///
-/// Used to remap a box-sphere pair: [`sphere_box_contact`] always keys the sphere
+/// Used to remap a box-sphere pair: [`sphere_box_contact_within`] always keys the sphere
 /// as A and the box as B, but the dense pair order is `(min, max)` by row, so when
 /// the box is the lower row the generated manifold must be flipped back to `(box,
 /// sphere)` = `(a, b)` order. `feature_id` / `separation` / `count` are unchanged
@@ -525,6 +1449,11 @@ fn flip_manifold(mut m: Manifold) -> Manifold {
 ///   `normal = −gradient`, anchor = the corner, and a stable per-corner
 ///   `feature_id`. The deepest ≤4 corners are kept (ties by lowest corner index)
 ///   so a box manifold never exceeds [`MAX_CONTACT_POINTS`](crate::math::MAX_CONTACT_POINTS).
+///   Which fold builds those corners is
+///   [`PhysicsConfig::sdf_narrowphase`](crate::resources::PhysicsConfig::sdf_narrowphase),
+///   read ONCE per step here, from the step record — default
+///   [`Scalar`](crate::resources::SdfNarrowphaseKernel::Scalar), the oracle the GPU
+///   goldens are blessed against.
 ///
 /// A sample whose gradient is shorter than [`SDF_NORMAL_EPS`] (the CSG-seam
 /// degeneracy, O3 — the leaf normalizes it to `Vec3::ZERO`) is SKIPPED: a
@@ -534,22 +1463,44 @@ fn flip_manifold(mut m: Manifold) -> Manifold {
 /// [`physics_solve_step`] (see [`add_physics_sdf`](crate::plugin::add_physics_sdf)),
 /// so the solver sees both contact kinds. This stage does NOT clear `Manifolds`
 /// (the body-body stage already cleared it this step); it only appends.
+///
+/// The field and the kernel choice are the ones this step's broadphase latched into
+/// [`StepInputs`] (L10 D9b), never the live resources: an edit made after the broadphase lands on
+/// the next step.
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_narrowphase_sdf(
     scratch: Res<SolverScratch>,
-    field: Res<SdfField>,
+    inputs: Res<StepInputs>,
     mut manifolds: ResMut<Manifolds>,
+    sets: Option<Res<SleepSets>>,
 ) {
+    let inputs = inputs.for_gather(&scratch.rows);
+    let field = inputs
+        .sdf_field()
+        .expect("invariant: the SDF pipeline inserts SdfField, which its broadphase latched");
     // Nothing to collide against an empty field (samples to +far everywhere).
     if field.is_empty() {
         return;
     }
+    // O9: which box kernel folds the field. Hoisted out of the body loop — one
+    // record read per step, not per body.
+    let kernel = inputs.config().sdf_narrowphase;
+    // V2's speculative parameters, read once like the kernel; a sensor body uses the overlap-only
+    // rule (below).
+    let spec = {
+        let cfg = inputs.config();
+        SpecStep::new(cfg.speculative_distance, cfg.speculative_velocity_cap, cfg.dt)
+    };
     let bodies = scratch.bodies();
+    // L10 A4 (design 04 D10): a held row's SDF manifold is kept in the held store, so the
+    // stage skips the row. Empty on a step the sleep-skip did not classify, and on a pipeline
+    // without it.
+    let cls = sets.as_deref().and_then(|sets| sets.cls_for(&scratch.rows)).unwrap_or(&[]);
     let manifolds = &mut *manifolds;
-    let out = &mut manifolds.manifolds;
-    let sensor_out = &mut manifolds.sensor_overlaps;
+    let mut out = manifolds.manifolds.build_view();
+    let mut sensor_out = manifolds.sensor_overlaps.build_view();
 
     for (row, body) in bodies.iter().enumerate() {
         // Only a SIMULATED dynamic body collides against the SDF (a parked /
@@ -561,20 +1512,25 @@ pub fn physics_narrowphase_sdf(
         if !body.simulated || !is_dynamic_row(body.inv_mass) {
             continue;
         }
+        if cls.get(row).is_some_and(|c| c.is_held()) {
+            continue;
+        }
         let a = BodyIndex(row as u32);
         // S5: a sensor body's SDF overlap is reported, not resolved — divert it to
         // the overlap buffer so the solver's one-sided wall push never fires on it
         // (the 0%-gate: `is_sensor` is `false` for every body in a sensor-free
         // world, so this always takes the `out` arm — byte-identical to pre-S5).
-        let dst: &mut Vec<Manifold> = if body.is_sensor { sensor_out } else { out };
+        let dst = if body.is_sensor { &mut sensor_out } else { &mut out };
+        // V2: a sensor's overlap report stays exact.
+        let sm = if body.is_sensor { SpecMargin::OVERLAP } else { spec.against_field(body) };
         match body.shape {
             ColliderShape::Sphere { radius } => {
-                if let Some(m) = sphere_sdf_manifold(a, body, radius, &field) {
+                if let Some(m) = sphere_sdf_manifold(a, body, radius, field, &sm) {
                     dst.push(m);
                 }
             }
             ColliderShape::Box { half_extents } => {
-                if let Some(m) = box_sdf_manifold(a, body, half_extents, &field) {
+                if let Some(m) = box_sdf_manifold(a, body, half_extents, field, kernel, &sm) {
                     dst.push(m);
                 }
             }
@@ -583,8 +1539,9 @@ pub fn physics_narrowphase_sdf(
 }
 
 /// Builds the single-point sphere-vs-SDF manifold for the dense row `a`, or `None`
-/// when the sphere does not penetrate the field / the contact normal is degenerate
-/// (P2 W5).
+/// when the sphere's surface is at least its speculative margin from the field / the contact
+/// normal is degenerate (P2 W5; V2's `d_eff`, read at the sphere's surface point along the A→surface
+/// normal, the field at rest; the overlap-only rule drops `separation >= 0`).
 ///
 /// Samples the field at the sphere center: the sphere penetrates when the center's
 /// signed distance minus the radius is negative. The manifold normal is the field
@@ -608,12 +1565,14 @@ fn sphere_sdf_manifold(
     body: &BodyState,
     radius: f32,
     field: &SdfField,
+    sm: &SpecMargin,
 ) -> Option<Manifold> {
     let center = body.position;
     let (d, gradient) = sample_sdf(field, center);
     let separation = d - radius;
-    if separation >= 0.0 {
-        // The sphere's surface clears the field — no contact.
+    if separation >= sm.d() && !sm.moving() {
+        // The sphere's surface clears the field by `d` or more — no contact. With the
+        // approach-velocity term on, the test waits for the normal (below).
         return None;
     }
     // O3: a degenerate (zero-length) gradient — the leaf normalizes a CSG-seam
@@ -630,6 +1589,11 @@ fn sphere_sdf_manifold(
     // The sphere surface point nearest the field = center along the gradient by the
     // radius = `center + normal·radius` (normal == −gradient).
     let anchor = center + normal * radius;
+    if sm.drops(separation, anchor, normal) {
+        // Past the margin at the anchor (only the velocity term reaches here: past `d` alone,
+        // the early return above fired).
+        return None;
+    }
     let mut m = Manifold::new(a, SDF_SENTINEL);
     m.normal = normal;
     m.points[0] = ContactPoint {
@@ -648,7 +1612,9 @@ fn sphere_sdf_manifold(
 /// corners, keeping the deepest ≤4 penetrating corners (P2 W5).
 ///
 /// Each corner is the body position plus the rotated local half-extent sign vector;
-/// a corner penetrates when its signed distance is negative. Penetrating corners
+/// a corner penetrates when its signed distance is negative, and is kept while its distance is
+/// below its speculative margin (V2's `d_eff` at the corner along the A→surface normal, the field
+/// at rest; the overlap-only rule keeps the penetrating corners only). Kept corners
 /// with a usable (non-degenerate) gradient become contacts (`separation = d`,
 /// `normal = −gradient` — A → surface, matching the sphere path + the code so the
 /// one-sided push ejects A, anchor = the corner, a per-corner `feature_id`). The
@@ -668,12 +1634,29 @@ fn sphere_sdf_manifold(
 /// the shallower corners inherit the deepest corner's direction, which is only
 /// approximate. Per-point SDF normals would need a different manifold shape and are
 /// DEFERRED (see `docs/PHYSICS-P2-PLAN.md`, W5 / Reserved).
+///
+/// # Kernel selection (O9) — why the default is SCALAR
+///
+/// `kernel` picks which fold builds the corner distances and gradients, and the
+/// DEFAULT [`SdfNarrowphaseKernel::Scalar`] is load-bearing, not inertia: the
+/// [`Avx2`](SdfNarrowphaseKernel::Avx2) fold diverges from the scalar oracle on the
+/// SIGN OF ZERO (`+0` where the oracle gives `-0`) at a `±0` tie, the fix is
+/// owner-deferred (2026-09-02), and the scalar fold is the CPU oracle the committed
+/// GPU goldens are blessed against. **Do not turn this back into a `cfg`.** It WAS
+/// one — the arm was chosen by `cfg(target_feature = "avx2")` alone until
+/// 2026-09-03, so setting the workspace ISA baseline to `x86-64-v3` moved every
+/// build onto the divergent arm with nothing at any layer able to say otherwise.
+/// The branch costs one predictable compare per box body per step, taken OUTSIDE
+/// the 8-corner loop; that is the price of a numeric choice being a decision
+/// somebody makes rather than a side effect of a build flag.
 #[inline]
 fn box_sdf_manifold(
     a: BodyIndex,
     body: &BodyState,
     half_extents: Vec3,
     field: &SdfField,
+    kernel: SdfNarrowphaseKernel,
+    sm: &SpecMargin,
 ) -> Option<Manifold> {
     let max_points = crate::math::MAX_CONTACT_POINTS;
     // The kept contacts, deepest-first (most negative separation). Fixed capacity,
@@ -682,61 +1665,42 @@ fn box_sdf_manifold(
         [(ContactPoint::default(), Vec3::ZERO); crate::math::MAX_CONTACT_POINTS];
     let mut kept_len = 0usize;
 
-    // ── O9 AVX2 batched arm (a `+avx2` build, never under Miri) ──────────────────
-    // Builds the 8 OBB corners' distances with ONE `sdf_edit_list_x8`, then each
-    // penetrating corner's central-difference gradient with ONE 6-offset
-    // `sdf_edit_list_x8` batch. The x8 kernel is bit-identical lane-for-lane to the
-    // scalar `sdf_edit_list`, the gradient differences are taken in the SAME order
-    // as `sdf_edit_list_normal`, and the FROZEN scalar `v_normalize` is reused — so
-    // this arm is `f32::to_bits`-identical to the scalar arm below.
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
-    {
-        box_sdf_manifold_avx2(
-            body,
-            half_extents,
-            field,
-            &mut kept,
-            &mut kept_len,
-            max_points,
-        );
-    }
-
-    // ── Scalar reference arm (default / non-AVX2 / Miri build) ───────────────────
-    // The VERBATIM frozen narrowphase loop — the bit-oracle the AVX2 arm mirrors.
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", not(miri))))]
-    {
-        // The 8 corners in a FIXED order (corner index = the 3-bit sign pattern), so
-        // both the feature ids and the tie-breaking are deterministic.
-        for corner in 0u32..8 {
-            let sx = if corner & 1 != 0 { 1.0 } else { -1.0 };
-            let sy = if corner & 2 != 0 { 1.0 } else { -1.0 };
-            let sz = if corner & 4 != 0 { 1.0 } else { -1.0 };
-            let local = half_extents.componentwise_mul(Vec3::new(sx, sy, sz));
-            let world = body.position + body.rotation.rotate(local);
-
-            let (d, gradient) = sample_sdf(field, world);
-            if d >= 0.0 {
-                continue;
-            }
-            // O3: skip a degenerate (zero-length) seam gradient — no usable normal.
-            // The `!is_finite()` arm is defense-in-depth (mirrors the sphere path):
-            // `NaN < eps²` is `false`, so without it a non-finite gradient would slip
-            // through and emit a NaN-normal contact.
-            if gradient.length_squared() < SDF_NORMAL_EPS * SDF_NORMAL_EPS || !gradient.is_finite() {
-                continue;
-            }
-            // A → B normal (B = the surface): the gradient (surface → A) negated.
-            let normal = gradient * -1.0;
-            let point = ContactPoint {
-                anchor_a: world,
-                anchor_b: world,
-                separation: d,
-                // A vertex-vs-field contact — tag it as the vertex-face class keyed by
-                // the corner index, so each corner warm-starts independently and a
-                // corner id never aliases a body-body box face/edge id.
-                feature_id: feature_vertex_face(corner),
-            };
-            insert_deepest(&mut kept, &mut kept_len, max_points, point, normal);
+    match kernel {
+        SdfNarrowphaseKernel::Scalar => {
+            box_sdf_manifold_scalar(
+                body,
+                half_extents,
+                field,
+                sm,
+                &mut kept,
+                &mut kept_len,
+                max_points,
+            );
+        }
+        SdfNarrowphaseKernel::Avx2 => {
+            // The kernel is x86-64 + AVX2 only and is never taken under Miri (no
+            // intrinsic support), so the variant degrades to the scalar fold rather
+            // than failing to build — selecting it is legal on every target.
+            #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+            box_sdf_manifold_avx2(
+                body,
+                half_extents,
+                field,
+                sm,
+                &mut kept,
+                &mut kept_len,
+                max_points,
+            );
+            #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", not(miri))))]
+            box_sdf_manifold_scalar(
+                body,
+                half_extents,
+                field,
+                sm,
+                &mut kept,
+                &mut kept_len,
+                max_points,
+            );
         }
     }
 
@@ -756,16 +1720,98 @@ fn box_sdf_manifold(
     Some(m)
 }
 
+/// The VERBATIM frozen scalar body of [`box_sdf_manifold`] — the bit-oracle every
+/// other arm is measured against, and the arm a default build runs.
+///
+/// Samples the 8 OBB corners one at a time through the frozen scalar leaf
+/// (`sample_sdf` → `sdf_edit_list` / `sdf_edit_list_normal`) and fills
+/// `kept` / `kept_len` with the penetrating corners' contacts, deepest-first.
+///
+/// Compiled on EVERY target: it is both the default arm and the fallback the
+/// [`Avx2`](SdfNarrowphaseKernel::Avx2) variant degrades to off x86-64 / under Miri.
+/// It folds through `sdf_edit_list`, which IS the sole CPU↔GPU oracle (the W4
+/// invariant: the x8 kernel is a CPU-only accelerator and is never a golden input),
+/// so a reordered or "simplified" operation here changes the number a committed
+/// golden is compared against. It changes only with the goldens.
+fn box_sdf_manifold_scalar(
+    body: &BodyState,
+    half_extents: Vec3,
+    field: &SdfField,
+    sm: &SpecMargin,
+    kept: &mut [(ContactPoint, Vec3); crate::math::MAX_CONTACT_POINTS],
+    kept_len: &mut usize,
+    max_points: usize,
+) {
+    // V2: a corner at or past `reach` (`d`, or with the approach-velocity term the bound no
+    // corner's `d_eff` exceeds) is skipped before its normal is read; one inside it is kept iff
+    // `sm.drops` says no at the corner along its normal. Under the overlap-only rule `reach` is
+    // `0` and `drops` never fires past the first test: `d >= 0.0`, the frozen skip.
+    let reach = sm.reach();
+    // The 8 corners in a FIXED order (corner index = the 3-bit sign pattern), so
+    // both the feature ids and the tie-breaking are deterministic.
+    for corner in 0u32..8 {
+        let sx = if corner & 1 != 0 { 1.0 } else { -1.0 };
+        let sy = if corner & 2 != 0 { 1.0 } else { -1.0 };
+        let sz = if corner & 4 != 0 { 1.0 } else { -1.0 };
+        let local = half_extents.componentwise_mul(Vec3::new(sx, sy, sz));
+        let world = body.position + body.rotation.rotate(local);
+
+        let (d, gradient) = sample_sdf(field, world);
+        if d >= reach {
+            continue;
+        }
+        // O3: skip a degenerate (zero-length) seam gradient — no usable normal.
+        // The `!is_finite()` arm is defense-in-depth (mirrors the sphere path):
+        // `NaN < eps²` is `false`, so without it a non-finite gradient would slip
+        // through and emit a NaN-normal contact.
+        if gradient.length_squared() < SDF_NORMAL_EPS * SDF_NORMAL_EPS || !gradient.is_finite() {
+            continue;
+        }
+        // A → B normal (B = the surface): the gradient (surface → A) negated.
+        let normal = gradient * -1.0;
+        if sm.drops(d, world, normal) {
+            continue;
+        }
+        let point = ContactPoint {
+            anchor_a: world,
+            anchor_b: world,
+            separation: d,
+            // A vertex-vs-field contact — tag it as the vertex-face class keyed by
+            // the corner index, so each corner warm-starts independently and a
+            // corner id never aliases a body-body box face/edge id.
+            feature_id: feature_vertex_face(corner),
+        };
+        insert_deepest(kept, kept_len, max_points, point, normal);
+    }
+}
+
 /// O9 — the AVX2 batched body of [`box_sdf_manifold`]: fills `kept` / `kept_len`
-/// with the penetrating corners' contacts, `f32::to_bits`-identical to the scalar
-/// arm.
+/// with the penetrating corners' contacts. Reached ONLY by an explicit
+/// [`SdfNarrowphaseKernel::Avx2`], never by a build flag.
+///
+/// ⚠ **The intended property is `f32::to_bits` identity with
+/// [`box_sdf_manifold_scalar`], and it does NOT hold.** Everything this function
+/// itself does is byte-identical to the scalar arm (see the per-pass notes below);
+/// the divergence is one level down, in
+/// [`sdf_edit_list_x8`](crate::sdf_simd::sdf_edit_list_x8), which returns `+0` where
+/// the scalar `sdf_edit_list` returns `-0` at a `±0` tie —
+/// `MAXPS`/`MINPS` take the second operand on such a tie where `f32::max`/`min` take
+/// the first, and `clamp01_x8`'s operand swap does not cover every tie site in the
+/// fold. Its standing gate is
+/// `sdf_simd::o9_kernel_tests::x8_bits_eq_scalar_bits_widened_proptest`, which is
+/// `#[ignore]`d and RED; the fix is owner-deferred (2026-09-02). The witness is
+/// adversarial and the manifold-level differential
+/// (`box_sdf_manifold_matches_scalar_oracle`) passes, but `+0 == -0` is exactly what
+/// a value comparison cannot see, which is why this arm is opt-in.
 ///
 /// Two batched passes share the one [`sdf_edit_list_x8`](crate::sdf_simd::sdf_edit_list_x8)
 /// kernel:
 ///
 /// 1. **Distances**: the 8 OBB corners (the SAME fixed sign-pattern order +
 ///    `position + rotation·local` world transform as the scalar arm) are evaluated
-///    in ONE 8-wide call — lane `i` == the scalar `sdf_edit_list(edits, corner_i)`.
+///    in ONE 8-wide call — lane `i` is the batched counterpart of the scalar
+///    `sdf_edit_list(edits, corner_i)`, and matches it bit-for-bit everywhere except
+///    the `±0` tie named above.
 /// 2. **Gradient** (per penetrating corner): the 6 central-difference offset points
 ///    (`±GRAD_H` on x, y, z) are packed into lanes 0..6 in the order
 ///    `sdf_edit_list_normal` reads them (`+x, -x, +y, -y, +z, -z`); lanes 6,7 are
@@ -775,7 +1821,7 @@ fn box_sdf_manifold(
 ///    order of `sdf_edit_list_normal`), then the FROZEN scalar `v_normalize` (the
 ///    bit-identical zero-length guard is REUSED, not re-emulated).
 ///
-/// Everything downstream — the `d >= 0` skip, the `length_squared < eps² ||
+/// Everything downstream — the `d >= reach` skip and the `drops` keep, the `length_squared < eps² ||
 /// !is_finite` seam-skip, the `−gradient` normal, the [`ContactPoint`] /
 /// [`feature_vertex_face`] / [`insert_deepest`] build — is byte-identical to the
 /// scalar arm.
@@ -784,6 +1830,7 @@ fn box_sdf_manifold_avx2(
     body: &BodyState,
     half_extents: Vec3,
     field: &SdfField,
+    sm: &SpecMargin,
     kept: &mut [(ContactPoint, Vec3); crate::math::MAX_CONTACT_POINTS],
     kept_len: &mut usize,
     max_points: usize,
@@ -829,10 +1876,12 @@ fn box_sdf_manifold_avx2(
     }
 
     // ── Pass 2: per penetrating corner, the central-difference gradient ──────────
+    // V2: the scalar arm's `reach` / `drops` keep, op for op.
+    let reach = sm.reach();
     let h = SDF_GRAD_H;
     for corner in 0usize..8 {
         let d = dist[corner];
-        if d >= 0.0 {
+        if d >= reach {
             continue;
         }
         let w = world[corner];
@@ -863,6 +1912,9 @@ fn box_sdf_manifold_avx2(
             continue;
         }
         let normal = gradient * -1.0;
+        if sm.drops(d, w, normal) {
+            continue;
+        }
         let point = ContactPoint {
             anchor_a: w,
             anchor_b: w,
@@ -917,13 +1969,14 @@ fn insert_deepest(
 /// Builds the [`ConstraintGraph`] from this step's manifolds — constraint islands
 /// + greedy graph coloring (plan O4, Decision 2 / Decision 7).
 ///
-/// Registered ONLY by [`add_physics_colored`](crate::plugin::add_physics_colored)
-/// (gated on [`PhysicsConfig::colored`]), AFTER narrowphase and BEFORE the solve,
-/// so the partition reflects the same manifold set the solver consumes. **O4
-/// produces the partition only — it does NOT change the solve**: the shipped
-/// [`SoftStepSolver`](crate::solver::SoftStepSolver) still solves in manifold
-/// order, so the simulation output is byte-identical whether this stage runs or
-/// not (the 0%-gate; a future O5 stage consumes the graph).
+/// Registered for every world whose solver is [`ColoredSoftStepSolver`] (the
+/// default — the colored solve consumes the partition) and by
+/// [`add_physics_colored`](crate::plugin::add_physics_colored) with any solver,
+/// AFTER narrowphase and BEFORE the solve, so the partition reflects the same
+/// manifold set the solver consumes. With the reference
+/// [`SoftStepSolver`](crate::solver::SoftStepSolver) on the `add_physics_colored`
+/// path the partition is NOT consumed — that solver still solves in manifold order,
+/// so its output is byte-identical whether this stage runs or not (the O4 0%-gate).
 ///
 /// A body row is DYNAMIC iff its gathered `inv_mass != 0.0` (a static / kinematic
 /// body has `inv_mass == 0`); the [`SDF_SENTINEL`](crate::manifold::SDF_SENTINEL)
@@ -940,38 +1993,78 @@ pub fn physics_build_graph(
     scratch: Res<SolverScratch>,
     manifolds: Res<Manifolds>,
     mut graph: ResMut<ConstraintGraph>,
+    sets: Res<SleepSets>,
 ) {
     let bodies = scratch.bodies();
     let n_dynamic = bodies.len();
-    // A row is dynamic iff it has a non-zero inverse mass (static/kinematic = 0).
-    // The sentinel `u32::MAX` (and any out-of-range row) is non-dynamic — ground.
-    //
-    // MT soundness: this MUST be the SAME predicate the colored solve's `*_movable`
-    // write guard uses — the coloring grants exclusive per-color ownership only to
-    // the rows it marks dynamic here, so the solve may write ONLY those rows. Both
-    // sites route through `is_dynamic_row` so they cannot drift (see its docs).
-    let is_dynamic = |row: u32| {
+    // L10 (design 04 A5): the classification, on a step whose broadphase wrote it.
+    let Some(cls) = sets.cls_for(&scratch.rows) else {
+        // A row is dynamic iff it has a non-zero inverse mass (static/kinematic = 0).
+        // The sentinel `u32::MAX` (and any out-of-range row) is non-dynamic — ground.
+        //
+        // MT soundness: this MUST be the SAME predicate the colored solve's `*_movable`
+        // write guard uses — the coloring grants exclusive per-color ownership only to
+        // the rows it marks dynamic here, so the solve may write ONLY those rows. Both
+        // sites route through `is_dynamic_row` so they cannot drift (see its docs), over the
+        // same `effective_inv_mass` of the same row (L10 D8, ruling W1); on a step the
+        // sleep-skip did not classify no row is held.
+        let is_dynamic = |row: u32| {
+            let i = row as usize;
+            i < bodies.len() && is_dynamic_row(effective_inv_mass(bodies[i].inv_mass, false))
+        };
+        graph.build(manifolds.solver_manifolds(), n_dynamic, is_dynamic);
+        return;
+    };
+    // The ids are assigned over every dynamic row, held ones included (the membership); the
+    // unions, the filing and the colouring use the movable rows — `effective_inv_mass` over
+    // the `HELD` flag the solve's write guards read (D8, ruling W1) — and the held islands are
+    // pre-rooted from the store, so every island keeps the id, the members and the count the
+    // sleep-skip off gives it (D7).
+    let is_member = |row: u32| {
         let i = row as usize;
         i < bodies.len() && is_dynamic_row(bodies[i].inv_mass)
     };
-    graph.build(&manifolds.manifolds, n_dynamic, is_dynamic);
+    let movable = |row: u32| {
+        let i = row as usize;
+        i < bodies.len() && is_dynamic_row(effective_inv_mass(bodies[i].inv_mass, cls[i].is_held()))
+    };
+    // Design 04 E5: the narrowphase and the SDF stage skip every held row, so no stream
+    // manifold names one — which is what keeps the colouring over movable rows exact.
+    debug_assert!(
+        manifolds.solver_manifolds().iter().all(|m| {
+            let held = |r: u32| cls.get(r as usize).is_some_and(|c| c.is_held());
+            !held(m.body_a.0) && (m.body_b == crate::manifold::SDF_SENTINEL || !held(m.body_b.0))
+        }),
+        "invariant: no stream manifold names a held row (design 04 E5)"
+    );
+    graph.build_with_held(
+        manifolds.solver_manifolds(),
+        n_dynamic,
+        &is_member,
+        &movable,
+        manifolds.held.view(),
+        true,
+    );
 }
 
 /// Runs the colored TGS-Soft solver for one step over the prebuilt
-/// [`ConstraintGraph`] (Phase O5, Decision 7) — the SINGLE-THREADED colored
-/// solve that REPLACES the default [`physics_solve_step`] under
-/// [`add_physics_colored`](crate::plugin::add_physics_colored).
+/// [`ConstraintGraph`] (Phase O5, Decision 7) — the default world's solve since
+/// 2026-09-18, registered in place of the generic [`physics_solve_step`] whenever
+/// the pipeline is wired with `S = `[`ColoredSoftStepSolver`]
+/// ([`DefaultRigidSolver`](crate::solver::DefaultRigidSolver)).
 ///
 /// Calls [`ColoredSoftStepSolver::solve_colored`](crate::solver::ColoredSoftStepSolver::solve_colored)
 /// directly (not through [`RigidSolver::solve`], whose signature carries no
-/// graph): the solver builds its SoA `ContactColumns` in color order, runs the
+/// graph): the solver builds its cohort tables (`CohortColumns`) in color order, runs the
 /// substep loop solving colors `0..n_colors` sequentially (a Gauss-Seidel sweep
-/// across colors), then stores the converged impulses in canonical order
-/// (IM-2b). Registered ONLY on the colored path, where it stands in for
-/// `physics_solve_step` — the default solver's stage is NOT registered, so the
-/// two never both run. A non-colored world never reaches this stage (the
-/// 0%-gate; the shipped [`SoftStepSolver`](crate::solver::SoftStepSolver) is
-/// byte-untouched).
+/// across colors), then stores the converged impulses by manifold index
+/// (`solver::warm_records`, L11 C1). Registered ONLY on the colored path, where it
+/// stands in for `physics_solve_step` — the generic step stage is NOT registered,
+/// so the two never both run. A world wired with the reference
+/// [`SoftStepSolver`](crate::solver::SoftStepSolver) never reaches this stage (that
+/// solver is byte-untouched). Per color the sweep runs the O7 AVX2 cohort kernel
+/// when [`PhysicsConfig::simd_solve`] is on (the default) and the scalar oracle
+/// otherwise; the two produce the same bits.
 ///
 /// The colored solve reorders the contact sweep vs the reference manifold-order
 /// sweep → DIFFERENT (but valid) converged values, validated against tolerance
@@ -980,13 +2073,22 @@ pub fn physics_build_graph(
 ///
 /// # O8 sleeping (plan O8 / Decision 5)
 ///
-/// When [`PhysicsConfig::sleeping`] is on, this stage drives
-/// [`ColoredSoftStepSolver::solve_colored_sleeping`](crate::solver::ColoredSoftStepSolver::solve_colored_sleeping),
-/// threading the [`IslandSleep`] resource so slept islands skip ONLY their SOLVE +
-/// INTEGRATE — `physics_gather` still walks every row (IM-1 intact). When off, it
-/// drives the byte-identical
+/// When [`PhysicsConfig::sleeping`] was on at this step's broadphase, this stage drives
+/// `ColoredSoftStepSolver::solve_colored_held` (crate-private: the public
+/// [`solve_colored_sleeping`](crate::solver::ColoredSoftStepSolver::solve_colored_sleeping)
+/// with L10's sleep-skip inputs), threading the [`IslandSleep`] resource so slept islands
+/// skip ONLY their SOLVE + INTEGRATE — `physics_gather` still walks every row (IM-1 intact).
+/// When off, it drives the byte-identical
 /// [`solve_colored`](crate::solver::ColoredSoftStepSolver::solve_colored) (the
 /// `IslandSleep` resource is read but untouched — the 0%-gate).
+///
+/// The configuration — the arm included — is the one this step's broadphase latched into
+/// [`StepInputs`] (L10 D9b), never the configuration as it stands at the solve: the narrowphase,
+/// the SDF stage and the graph already followed the broadphase's classification, so a write to
+/// `sleeping` between the broadphase and the solve would otherwise solve held rows at their raw
+/// inverse mass with their contacts skipped. Such a write takes effect on the next step. The
+/// sleeping arm serves exactly the `IslandSleep::wake_all` requests the record latched; a request
+/// raised after the broadphase is served by the next step, in every sleep-skip mode.
 //
 // `clippy::needless_pass_by_value`: `ResMut<_>` / `Res<_>` are by-value
 // `SystemParam`s used through reborrows — the same false-positive as the other
@@ -994,19 +2096,35 @@ pub fn physics_build_graph(
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_solve_colored(
     mut solver: ResMut<ColoredSoftStepSolver>,
-    cfg: Res<PhysicsConfig>,
+    inputs: Res<StepInputs>,
     manifolds: Res<Manifolds>,
     graph: Res<ConstraintGraph>,
     mut scratch: ResMut<SolverScratch>,
     mut sleep: ResMut<IslandSleep>,
+    mut sets: ResMut<SleepSets>,
 ) {
+    let inputs = inputs.for_gather(&scratch.rows);
+    let cfg = inputs.config();
     if cfg.sleeping {
-        solver.solve_colored_sleeping(&cfg, &manifolds.manifolds, &graph, &mut scratch, &mut sleep);
+        // L10 A6 (design 04, 06 A1–A3, 08 A1′): the held rows, the restore warm source and the
+        // move-in capture of the step the broadphase classified; nothing on a step it did not.
+        let held = sets.solve_inputs(&scratch.rows, manifolds.held.view());
+        solver.solve_colored_held(
+            cfg,
+            manifolds.solver_manifolds(),
+            &graph,
+            &mut scratch,
+            &mut sleep,
+            held,
+            inputs.wake_requests(),
+        );
     } else {
-        // Sleeping off: byte-identical to the O6/O7 colored path; `IslandSleep` is
-        // resolved (so the param exists) but never read or written.
-        let _ = &mut sleep;
-        solver.solve_colored(&cfg, &manifolds.manifolds, &graph, &mut scratch);
+        // Sleeping off at the broadphase: byte-identical to the O6/O7 colored path;
+        // `IslandSleep` and `SleepSets` are resolved (so the params exist) but never read or
+        // written — a D-H flush into this arm was drained by the broadphase (ruling on L10 rev
+        // 2.3, open question 2).
+        let _ = (&mut sleep, &mut sets);
+        solver.solve_colored(cfg, manifolds.solver_manifolds(), &graph, &mut scratch);
     }
 }
 
@@ -1017,42 +2135,55 @@ pub fn physics_solve_colored(
 /// (zero vtable, principle 1). A no-op solver (the foundation default
 /// [`NoopSolver`](crate::solver::NoopSolver)) returns before touching the
 /// scratch/manifolds (the 0%-gate). A real solver mutates `scratch.bodies` in
-/// place and flags `scratch.touched`.
+/// place and flags `scratch.touched`. The configuration it solves with is the one this step's
+/// broadphase latched into [`StepInputs`] (L10 D9b).
 //
 // `clippy::needless_pass_by_value`: `ResMut<S>` / `Res<_>` are by-value
 // `SystemParam`s; the body uses them through reborrows.
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_solve_step<S: RigidSolver>(
     mut solver: ResMut<S>,
-    cfg: Res<PhysicsConfig>,
+    inputs: Res<StepInputs>,
     manifolds: Res<Manifolds>,
     mut scratch: ResMut<SolverScratch>,
 ) {
     if solver.is_noop() {
         return;
     }
-    solver.solve(&cfg, &manifolds.manifolds, &mut scratch);
+    let cfg = inputs.for_gather(&scratch.rows).config();
+    solver.solve(cfg, manifolds.solver_manifolds(), &mut scratch);
 }
 
 /// Writes the solved snapshot back into the [`RigidBody`] column for touched
 /// rows (plan D3 stage 5 / IM-1).
 ///
-/// Re-walks the body rows in the same order [`physics_gather`] snapshotted them
-/// (`iter_mut().enumerate()` → row index `i` = [`BodyIndex`]). For each touched
-/// row the whole [`RigidBody`] is written back through the [`Mut`] guard, so
+/// Walks the body set with a [`BodyQuery`], the query type [`physics_gather`] also
+/// takes: the two stages' archetype selections are equal (checked once at wire-up, see
+/// [`crate::body_set`]) and both sweep the matched archetypes in ascending id order, so
+/// a manual row counter makes walk position `i` the snapshot row `i` = [`BodyIndex`].
+/// For each touched row the whole [`RigidBody`] is written back through the
+/// [`Mut`](boyko_ecs::ecs::core::iters::query::Mut) guard, so
 /// `Changed<RigidBody>` fires for moving bodies (MINOR-2: a documented
 /// whole-body choice; a later refinement may split position/velocity).
 ///
 /// Correct UNDER the "no structural change between gather and apply" invariant:
-/// the entire pipeline runs within one schedule pass and no stage spawns or
-/// despawns, so row `i` is the same body in both passes. A user inserting a
-/// structural command mid-pipeline is a documented misuse, caught here by the
-/// `debug_assert!`.
+/// no physics stage spawns, despawns or migrates an entity, so row `i` is the same
+/// body in both passes. Ordering alone does not uphold it for other systems: the
+/// executor applies each finished system's `Commands` in the apply window before it
+/// dispatches further systems, so a `Commands` system with no ordering against the
+/// physics block can land a structural change between the gather and this stage.
+/// Order such a system before the gather
+/// (`builder.add_system(spawner).before_set(PhysicsGatherSet)`, see
+/// [`PhysicsGatherSet`](crate::plugin::PhysicsGatherSet)); this crate offers no set
+/// for ordering after this stage. A violation is caught in debug builds by the
+/// `debug_assert!` below, which today blocks the process from a worker thread
+/// instead of failing it (lane A6); a release build can write solved state into the
+/// wrong entities.
 //
 // `clippy::needless_pass_by_value`: `Res<_>` is a by-value `SystemParam` read
 // via a `&*` reborrow — the same false-positive as the demo's `apply_ball_motion`.
 #[allow(clippy::needless_pass_by_value)]
-pub fn physics_apply(mut query: Query<Mut<RigidBody>>, scratch: Res<SolverScratch>) {
+pub fn physics_apply(mut query: BodyQuery<BodyApplyData>, scratch: Res<SolverScratch>) {
     let scratch = &*scratch;
     let bodies = scratch.bodies();
     let mut row = 0usize;
@@ -1095,34 +2226,44 @@ pub fn physics_apply(mut query: Query<Mut<RigidBody>>, scratch: Res<SolverScratc
 /// CANDIDATE regardless of its rotation. The broadphase proxy is intentionally
 /// shape-agnostic here; the precise per-pair narrowphase lives in
 /// [`physics_narrowphase`]'s shape dispatch (P2 W4).
+///
+/// Plus the row's [`bp_margin`](BodyState::bp_margin) (V2: half the speculative distance, so two
+/// bodies within it overlap as spheres), which every broadphase reads through this one function.
+/// At `0` the radius is the shape's, bit for bit (`r + 0.0 == r`).
 #[inline]
 pub fn body_bounding_radius(body: &BodyState) -> f32 {
-    match body.shape {
-        ColliderShape::Sphere { radius } => radius,
-        ColliderShape::Box { half_extents } => half_extents.length(),
-    }
+    circumradius(&body.shape) + body.bp_margin
 }
 
 #[cfg(test)]
 mod o9_manifold_tests {
     //! O9 full-`Manifold` differential gate for the box-vs-SDF narrowphase.
     //!
-    //! [`box_sdf_manifold`] is private + cfg-gated: a single build compiles ONLY one
-    //! arm (the AVX2 arm under `+avx2`, the verbatim scalar arm otherwise). This
-    //! module compares [`box_sdf_manifold`] (the COMPILED arm) against an INDEPENDENT
-    //! scalar reference ([`scalar_box_sdf_manifold`]) that folds the field through the
-    //! FROZEN scalar oracle [`sample_sdf`] / [`boyko_sdf_math::sdf_edit_list`] and
-    //! replays the SAME post-processing (corner build, `d >= 0` skip, the seam-skip,
-    //! `−gradient` normal, `feature_vertex_face`, [`insert_deepest`], deepest-first
-    //! order).
+    //! [`box_sdf_manifold`] is private and both arms now compile in every build; the
+    //! arm is chosen by the [`SdfNarrowphaseKernel`] argument. These cases pass
+    //! [`SdfNarrowphaseKernel::Avx2`] — the arm that needs watching — and compare the
+    //! result against an INDEPENDENT scalar reference ([`scalar_box_sdf_manifold`])
+    //! that folds the field through the FROZEN scalar oracle [`sample_sdf`] /
+    //! [`boyko_sdf_math::sdf_edit_list`] and replays the SAME post-processing (corner
+    //! build, `d >= 0` skip, the seam-skip, `−gradient` normal,
+    //! `feature_vertex_face`, [`insert_deepest`], deepest-first order).
     //!
     //! - In a `+avx2` build this is a TRUE scalar-oracle-vs-AVX2-arm differential:
-    //!   `box_sdf_manifold` runs [`box_sdf_manifold_avx2`], the reference runs the
-    //!   scalar leaf. Full-`Manifold` `to_bits` equality here PROVES the AVX2 arm is
-    //!   byte-identical to the scalar fold.
-    //! - In a default build both sides fold the same scalar leaf, so it degenerates
-    //!   to a self-consistency check of the reference (still useful: it pins the
-    //!   reference against the shipped scalar arm).
+    //!   the `Avx2` variant runs [`box_sdf_manifold_avx2`], the reference runs the
+    //!   scalar leaf.
+    //! - Off x86-64 / under Miri the `Avx2` variant degrades to the scalar fold, so
+    //!   both sides fold the same leaf and it becomes a self-consistency check of the
+    //!   reference (still useful: it pins the reference against the shipped scalar
+    //!   arm).
+    //!
+    //! ⚠ **A pass here is NOT bit-identity of the two folds.** These are manifold
+    //! shapes over ordinary scenes; the known `±0` divergence between the x8 and
+    //! scalar leaves lives in an adversarial tie palette and is invisible to a
+    //! `Manifold` comparison in either direction (`+0 == -0` compares equal, and
+    //! `to_bits` equality here only says no case in THIS generator hit the tie). The
+    //! gate that does see it is
+    //! `sdf_simd::o9_kernel_tests::x8_bits_eq_scalar_bits_widened_proptest`, and it is
+    //! RED. Read a green here as "the wrapper is faithful", never as "the arms agree".
     //!
     //! The generator includes scenes where SOME corners penetrate and some do not
     //! (the review's noted refinement — the AVX2 arm skips gradient work for
@@ -1170,6 +2311,7 @@ mod o9_manifold_tests {
         body: &BodyState,
         half_extents: Vec3,
         field: &SdfField,
+        speculative: f32,
     ) -> Option<Manifold> {
         let max_points = crate::math::MAX_CONTACT_POINTS;
         let mut kept: [(ContactPoint, Vec3); crate::math::MAX_CONTACT_POINTS] =
@@ -1187,7 +2329,7 @@ mod o9_manifold_tests {
             let w = [world.x, world.y, world.z];
 
             let d = boyko_sdf_math::sdf_edit_list(edits, w);
-            if d >= 0.0 {
+            if d >= speculative {
                 continue;
             }
             // Central difference in the leaf's EXACT read order, then the frozen
@@ -1289,6 +2431,7 @@ mod o9_manifold_tests {
             simulated: true,
             kinematic: false,
             is_sensor: false,
+            bp_margin: 0.0,
             shape: ColliderShape::Box { half_extents: half },
         }
     }
@@ -1341,6 +2484,8 @@ mod o9_manifold_tests {
         let mut scenes = 0usize;
         let mut produced_some = 0usize;
         let mut produced_mixed = 0usize;
+        let mut produced_speculative = 0usize;
+        let mut produced_velocity = 0usize;
 
         for _ in 0..2000 {
             let count = 1 + (rng.below(6)) as usize; // 1..=6 edits
@@ -1358,11 +2503,31 @@ mod o9_manifold_tests {
             );
             let body = box_state(pos, rot, half);
 
-            let got = box_sdf_manifold(a, &body, half, &field);
-            let want = scalar_box_sdf_manifold(a, &body, half, &field);
+            let got = box_sdf_manifold(a, &body, half, &field, SdfNarrowphaseKernel::Avx2, &SpecMargin::OVERLAP);
+            let want = scalar_box_sdf_manifold(a, &body, half, &field, 0.0);
 
             let scene = format!("pos={pos:?} half={half:?} edits={edits:?}");
             assert_manifold_bit_eq(&got, &want, &scene);
+            // V2 N4: the same scene at the owner's speculative distance; the AVX2 fold must keep
+            // the scalar's corners, speculative ones included.
+            let got_d = box_sdf_manifold(a, &body, half, &field, SdfNarrowphaseKernel::Avx2, &SpecMargin::fixed(0.02));
+            let want_d = scalar_box_sdf_manifold(a, &body, half, &field, 0.02);
+            assert_manifold_bit_eq(&got_d, &want_d, &format!("{scene} speculative 0.02"));
+            if got_d.is_some_and(|m| m.points[..usize::from(m.count)].iter().any(|p| p.separation > 0.0)) {
+                produced_speculative += 1;
+            }
+            // V2 NV (ruling 9): the same scene with the approach-velocity term on, the body moving
+            // and spinning; the AVX2 fold must keep exactly the production scalar fold's corners.
+            let mut moving = body;
+            moving.linear_velocity = Vec3::new(rng.f32_in(6.0), rng.f32_in(6.0), rng.f32_in(6.0));
+            moving.angular_velocity = Vec3::new(rng.f32_in(8.0), rng.f32_in(8.0), rng.f32_in(8.0));
+            let sm = SpecStep::new(0.02, 0.5, 1.0 / 60.0).against_field(&moving);
+            let got_v = box_sdf_manifold(a, &moving, half, &field, SdfNarrowphaseKernel::Avx2, &sm);
+            let want_v = box_sdf_manifold(a, &moving, half, &field, SdfNarrowphaseKernel::Scalar, &sm);
+            assert_manifold_bit_eq(&got_v, &want_v, &format!("{scene} moving {:?} {:?}", moving.linear_velocity, moving.angular_velocity));
+            if got_v.is_some_and(|m| m.points[..usize::from(m.count)].iter().any(|p| p.separation > 0.02)) {
+                produced_velocity += 1;
+            }
 
             scenes += 1;
             if let Some(m) = got {
@@ -1389,6 +2554,14 @@ mod o9_manifold_tests {
         // and the mixed (some-penetrate) path, not just the all-clear `None` case.
         assert!(scenes >= 1000, "differential must run >= 1000 scenes (ran {scenes})");
         assert!(
+            produced_speculative >= 20,
+            "V2 N4 anti-vacuity: too few scenes kept a speculative corner ({produced_speculative})"
+        );
+        assert!(
+            produced_velocity >= 20,
+            "V2 NV anti-vacuity: too few scenes kept a corner past d on its velocity term ({produced_velocity})"
+        );
+        assert!(
             produced_some >= 50,
             "anti-vacuity: too few contact-producing scenes ({produced_some}); the generator \
              never penetrates the field"
@@ -1406,8 +2579,9 @@ mod o9_manifold_tests {
     fn box_sdf_manifold_empty_field_is_none() {
         let field = SdfField::default();
         let body = box_state(Vec3::ZERO, Quat::IDENTITY, Vec3::new(1.0, 1.0, 1.0));
-        let got = box_sdf_manifold(BodyIndex(0), &body, Vec3::new(1.0, 1.0, 1.0), &field);
-        let want = scalar_box_sdf_manifold(BodyIndex(0), &body, Vec3::new(1.0, 1.0, 1.0), &field);
+        let got =
+            box_sdf_manifold(BodyIndex(0), &body, Vec3::new(1.0, 1.0, 1.0), &field, SdfNarrowphaseKernel::Avx2, &SpecMargin::OVERLAP);
+        let want = scalar_box_sdf_manifold(BodyIndex(0), &body, Vec3::new(1.0, 1.0, 1.0), &field, 0.0);
         assert_manifold_bit_eq(&got, &want, "empty field");
         assert!(got.is_none(), "empty field must produce no manifold");
     }
@@ -1426,8 +2600,8 @@ mod o9_manifold_tests {
         )]);
         let half = Vec3::new(1.0, 1.0, 1.0);
         let body = box_state(Vec3::new(0.1, -0.2, 0.3), Quat::IDENTITY, half);
-        let got = box_sdf_manifold(BodyIndex(0), &body, half, &field);
-        let want = scalar_box_sdf_manifold(BodyIndex(0), &body, half, &field);
+        let got = box_sdf_manifold(BodyIndex(0), &body, half, &field, SdfNarrowphaseKernel::Avx2, &SpecMargin::OVERLAP);
+        let want = scalar_box_sdf_manifold(BodyIndex(0), &body, half, &field, 0.0);
         assert_manifold_bit_eq(&got, &want, "all-corners-penetrate");
         // It must produce a manifold capped at MAX_CONTACT_POINTS.
         let m = got.expect("a fully-submerged box must produce a manifold");
@@ -1436,5 +2610,433 @@ mod o9_manifold_tests {
             "manifold must be capped at MAX_CONTACT_POINTS"
         );
     }
+
+    /// No-FMA / no-approx grep gate: `systems.rs` must contain ZERO fused
+    /// (`fmadd` / `fmsub` / `fnmadd` / `fnmsub` / `fmaddsub` / `fmsubadd`), ZERO
+    /// approximate (`rsqrt` / `rcp`) and ZERO `mul_add` / `algebraic_` CALL-SITES.
+    ///
+    /// The sibling of `sdf_simd::…::sdf_simd_has_no_fma_or_approx_callsites` and
+    /// `solver::simd::…::solver_simd_has_no_fma_or_approx_callsites`, with the same
+    /// needle list, the same comment skip and the same non-vacuity witness — a
+    /// deliberate copy, because the four must not diverge.
+    ///
+    /// **Why it did not exist until 2026-09-03:** this file's O9 kernel
+    /// ([`box_sdf_manifold_avx2`]) sits behind `cfg(target_feature = "avx2")`, and
+    /// nothing enabled AVX2 in this workspace until the `x86-64-v3` baseline landed
+    /// on 2026-09-02. A vectorised kernel that was never COMPILED was also never
+    /// CENSUSED, so the day it started building it became the one AVX2 file in the
+    /// crate with nothing keeping it clean. It is clean today; that is the property
+    /// this test freezes, not a claim about the past.
+    ///
+    /// The stake here is the same one the other two carry: this kernel feeds
+    /// `sdf_edit_list_x8`, whose fold is the CPU oracle the committed GPU goldens are
+    /// compared against. A fused op rounds ONCE where the scalar leaf rounds TWICE,
+    /// and `rsqrt`/`rcp` are ~12-bit approximations that differ between Intel and
+    /// AMD — either would move a golden without moving a line of shader code.
+    ///
+    /// Doc-comment prose naming the banned ops (this comment does) is allowed — only
+    /// NON-comment lines are scanned.
+    #[test]
+    fn systems_has_no_fma_or_approx_callsites() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("systems.rs");
+        let contents = std::fs::read_to_string(&path).expect("systems.rs must be readable");
+
+        // Match a CALL-SITE: each stem completed to a real `_ps(` invocation, over
+        // both vector widths. The needles are ASSEMBLED from fragments at runtime so
+        // no full call token appears as a string literal in THIS source — the census
+        // scans its own file, so a literal would flag the definition line.
+        let suffix = "_ps(";
+        let widths = ["_mm256_", "_mm_"];
+        let stems = ["fmadd", "fmsub", "fnmadd", "fnmsub", "fmaddsub", "fmsubadd", "rsqrt", "rcp"];
+        let mut banned: Vec<String> = Vec::with_capacity(widths.len() * stems.len() + 2);
+        for w in widths {
+            for s in stems {
+                banned.push(format!("{w}{s}{suffix}"));
+            }
+        }
+        // The safe-Rust route to the same single rounding — reachable without ever
+        // typing an intrinsic, which an intrinsic-only ban would never see.
+        banned.push(format!("{}{}", "mul_add", "("));
+        // `algebraic_mul` / `_add` / `_sub` / `_div` / `_rem` (stable 1.98): the
+        // sanctioned per-operation fast-math API, which permits exactly the two
+        // freedoms — contraction and reassociation — this crate's determinism rests
+        // on refusing. The stem alone is banned so a UFCS spelling cannot defeat it.
+        banned.push(format!("{}{}", "algebraic", "_"));
+
+        let mut hits = Vec::new();
+        for (i, line) in contents.lines().enumerate() {
+            let trimmed = line.trim_start();
+            // Skip doc / line comments — prose may name the banned ops to document
+            // the prohibition. `//!` starts with `//`, so one check covers both.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            for b in &banned {
+                if line.contains(b.as_str()) {
+                    hits.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "no-FMA/no-approx invariant violated: systems.rs has banned op call-sites (the O9 \
+             box-vs-SDF kernel feeds the CPU fold the GPU goldens are blessed against):\n{}",
+            hits.join("\n"),
+        );
+
+        // Non-vacuity: a census that scans the wrong text passes for the wrong
+        // reason. The witness is ASSEMBLED like the needles rather than written as a
+        // literal — a literal witness would be found in the census's own assertion
+        // line and the check would pass even over a file with no intrinsics left in
+        // it. `loadu` rather than `mul`: this file's kernel packs and stores lanes
+        // and delegates the arithmetic to `sdf_edit_list_x8`, so `_mm256_mul_ps(`
+        // never appears here and asserting it would fail on correct code.
+        let witness = format!("{}{}{}", "_mm256_", "loadu", suffix);
+        assert!(
+            contents.contains(&witness),
+            "census scanned {} but found no `{witness}` call-site — the file moved or was \
+             rewritten, so an empty hit list proves nothing",
+            path.display(),
+        );
+    }
 }
 
+
+#[cfg(test)]
+mod pair_tag_rekeys_tests {
+    //! L10 C0 (design 06 D-C; plan E3): `PairTag::rekeys` is L9's axis commit, extracted. Over
+    //! every outcome a box pair can reach — a full contact, a record built, a record hit, a
+    //! separation, a carried separation, a box pair with no contact, and the non-box pairs —
+    //! a pair writes its hysteresis axis only with a tag that re-keys and carries that axis,
+    //! and on a step whose key set changed it writes one iff its tag re-keys. Mutation
+    //! `rekeys = has(REC)` turns this red on the first full contact.
+
+    use super::*;
+    use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
+    use crate::math::{Mat3, Quat, Vec3};
+
+    /// xorshift64*: a seeded, dependency-free generator.
+    struct Rng(u64);
+
+    impl Rng {
+        fn unit(&mut self) -> f32 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40) as f32 / (1u64 << 24) as f32
+        }
+
+        fn range(&mut self, lo: f32, hi: f32) -> f32 {
+            lo + (hi - lo) * self.unit()
+        }
+    }
+
+    fn body(position: Vec3, rotation: Quat, shape: ColliderShape, v: Vec3, inv_mass: f32) -> BodyState {
+        let body = RigidBody { position, linear_velocity: v, rotation, angular_velocity: Vec3::ZERO };
+        let mass = RigidBodyMass { inv_inertia: Mat3::IDENTITY, inv_mass, restitution: 0.0, friction: 0.5 };
+        let collider = Collider { shape, layer: 1, mask: 1 };
+        BodyState::from_columns(&body, &mass, &collider, false, true, false)
+    }
+
+    /// A static slab, boxes of random orientation packed above it (most pairs touch, the
+    /// far ones separate), every third one fast, and two spheres among them.
+    fn scene(seed: u64) -> Vec<BodyState> {
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let slab = ColliderShape::Box { half_extents: Vec3::new(4.0, 0.5, 4.0) };
+        let mut bodies = vec![body(Vec3::new(0.0, -0.5, 0.0), Quat::IDENTITY, slab, Vec3::ZERO, 0.0)];
+        for i in 0..10 {
+            let q = Quat::new(rng.range(-0.3, 0.3), rng.range(-1.0, 1.0), rng.range(-0.3, 0.3), 1.0)
+                .normalize();
+            let p = Vec3::new(rng.range(-1.5, 1.5), rng.range(0.3, 1.6), rng.range(-1.5, 1.5));
+            let h = Vec3::new(rng.range(0.3, 0.6), rng.range(0.3, 0.6), rng.range(0.3, 0.6));
+            let v = if i % 3 == 0 { Vec3::new(0.0, -2.0, 0.0) } else { Vec3::ZERO };
+            bodies.push(body(p, q, ColliderShape::Box { half_extents: h }, v, 1.0));
+        }
+        for _ in 0..2 {
+            let p = Vec3::new(rng.range(-1.0, 1.0), rng.range(0.3, 1.2), rng.range(-1.0, 1.0));
+            bodies.push(body(p, Quat::IDENTITY, ColliderShape::Sphere { radius: 0.4 }, Vec3::ZERO, 1.0));
+        }
+        bodies
+    }
+
+    /// The outcome classes the scenes reached.
+    #[derive(Debug, Default)]
+    struct Seen {
+        full: u64,
+        built: u64,
+        hits: u64,
+        rekeyed_hits: u64,
+        separated: u64,
+        sep_hits: u64,
+        non_box: u64,
+    }
+
+    /// The commit rule on one output: `rekey` is whether the step's key set changed.
+    fn check(out: &PairOut, rekey: bool, seen: &mut Seen) {
+        let tag = out.tag;
+        if let Some(axis) = out.axis {
+            assert!(
+                tag.rekeys() && tag.axis() == Some(axis as u8),
+                "a pair wrote axis {axis} with tag {:#06x}: its tag must re-key and carry it",
+                tag.bits()
+            );
+        }
+        if rekey {
+            assert_eq!(
+                out.axis.is_some(),
+                tag.rekeys(),
+                "on a key-change step a pair writes an axis iff its tag re-keys: tag {:#06x}",
+                tag.bits()
+            );
+        }
+        if !tag.has(PairTag::BOX) {
+            seen.non_box += 1;
+        } else if tag.has(PairTag::REC | PairTag::HIT) {
+            seen.hits += 1;
+            seen.rekeyed_hits += u64::from(out.axis.is_some());
+        } else if tag.has(PairTag::REC) {
+            seen.built += 1;
+        } else if tag.has(PairTag::SEPHIT) {
+            seen.sep_hits += 1;
+        } else if tag.has(PairTag::SEP) {
+            seen.separated += 1;
+        } else if tag.axis().is_some() {
+            seen.full += 1;
+        }
+    }
+
+    #[test]
+    fn rekeys_is_the_axis_commit_of_every_box_outcome() {
+        let mut seen = Seen::default();
+        for seed in 0..24 {
+            let bodies = scene(seed);
+            let n = bodies.len() as u32;
+            for reuse_on in [false, true] {
+                for rekey in [false, true] {
+                    let step = |parity| ReuseStep {
+                        on: reuse_on,
+                        tau: 1.0e-3,
+                        dt2: 1.0 / 3600.0,
+                        rekey,
+                        parity,
+                        speculative: SpecStep::OVERLAP,
+                    };
+                    for a in 0..n {
+                        for b in a + 1..n {
+                            let (ia, ib) = (BodyIndex(a), BodyIndex(b));
+                            let (ba, bb) = (&bodies[a as usize], &bodies[b as usize]);
+                            // The pair's first step: no join, no hint.
+                            let first = collide_pair(ia, ib, ba, bb, None, step(false), || Prev::NONE, || None);
+                            check(&first, rekey, &mut seen);
+                            // Its next step at the same poses reads what the first left: a record
+                            // hits, a separating axis still separates, a contact reads its hint.
+                            let prev = Prev {
+                                tag: first.tag,
+                                record: first.record.as_ref().filter(|_| reuse_on),
+                                flipped: false,
+                            };
+                            let hint = first.axis;
+                            let next = collide_pair(ia, ib, ba, bb, None, step(true), || prev, || hint);
+                            check(&next, rekey, &mut seen);
+                        }
+                    }
+                }
+            }
+        }
+        println!("rekeys coverage: {seen:?}");
+        assert!(
+            seen.full > 0
+                && seen.built > 0
+                && seen.hits > 0
+                && seen.rekeyed_hits > 0
+                && seen.separated > 0
+                && seen.sep_hits > 0
+                && seen.non_box > 0,
+            "anti-vacuity: every outcome class must be reached: {seen:?}"
+        );
+    }
+}
+
+/// V2's narrowphase gates on the non-box pair types (`levers/V2-speculative/01-DESIGN.md`, C2, N3):
+/// sphere-sphere, sphere-box in both row orders, sphere-SDF and box-SDF keep one speculative point
+/// per contact feature while the surfaces are at most `d` apart, and none past it or at `d = 0`; a
+/// pair with a sensor on either side keeps the overlap-only rule.
+#[cfg(test)]
+mod v2_speculative_pair_tests {
+    use super::*;
+    use boyko_sdf_math::{SdfEdit, sdf_op};
+
+    use crate::components::{Collider, RigidBody, RigidBodyMass};
+    use crate::math::Quat;
+    use crate::narrowphase::reuse::Prev;
+
+    /// The owner's distance (V2b).
+    const D: f32 = 0.02;
+    /// The owner-ruled cap on the approach-velocity term (ruling 9).
+    const CAP: f32 = 0.5;
+    /// J-T's step length.
+    const H: f32 = 1.0 / 60.0;
+
+    fn body(position: Vec3, shape: ColliderShape, sensor: bool) -> BodyState {
+        let b = RigidBody { position, linear_velocity: Vec3::ZERO, rotation: Quat::IDENTITY, angular_velocity: Vec3::ZERO };
+        let m = RigidBodyMass { inv_inertia: crate::math::Mat3::ZERO, inv_mass: 1.0, restitution: 0.0, friction: 0.5 };
+        let c = Collider { shape, layer: 1, mask: 1 };
+        BodyState::from_columns(&b, &m, &c, sensor, true, false)
+    }
+
+    fn sphere(position: Vec3, sensor: bool) -> BodyState {
+        body(position, ColliderShape::Sphere { radius: 0.5 }, sensor)
+    }
+
+    fn cube(position: Vec3, sensor: bool) -> BodyState {
+        body(position, ColliderShape::Box { half_extents: Vec3::new(0.5, 0.5, 0.5) }, sensor)
+    }
+
+    /// The pair `(a, b)` collided at `d` with no carry.
+    fn collide(a: &BodyState, b: &BodyState, d: f32) -> Option<Manifold> {
+        let reuse = ReuseStep::OFF.with_speculative(SpecStep::fixed(d));
+        collide_pair(BodyIndex(0), BodyIndex(1), a, b, None, reuse, || Prev::NONE, || None).manifold
+    }
+
+    /// One speculative point at separation `s` (within 1e-5).
+    fn one_point_at(m: Option<Manifold>, s: f32, what: &str) {
+        let m = m.unwrap_or_else(|| panic!("{what}: a contact within d"));
+        assert_eq!(m.count, 1, "{what}: one point: {m:?}");
+        let got = m.points[0].separation;
+        assert!(got > 0.0 && (got - s).abs() < 1e-5, "{what}: s = {s}, got {got}");
+    }
+
+    #[test]
+    fn n3_every_body_pair_type_keeps_a_speculative_point_within_d() {
+        // Surfaces 10 mm apart (within d), then 30 mm (past it).
+        for (gap, within) in [(0.01f32, true), (0.03, false)] {
+            let pairs = [
+                ("sphere-sphere", sphere(Vec3::ZERO, false), sphere(Vec3::new(0.0, 1.0 + gap, 0.0), false)),
+                ("sphere-box", sphere(Vec3::new(0.0, 1.0 + gap, 0.0), false), cube(Vec3::ZERO, false)),
+                ("box-sphere", cube(Vec3::ZERO, false), sphere(Vec3::new(0.0, 1.0 + gap, 0.0), false)),
+            ];
+            for (what, a, b) in &pairs {
+                if within {
+                    one_point_at(collide(a, b, D), gap, what);
+                } else {
+                    assert!(collide(a, b, D).is_none(), "{what}: {gap} m is past d");
+                }
+                assert!(collide(a, b, 0.0).is_none(), "{what}: d = 0 keeps no gap");
+            }
+        }
+        // A sensor on either side: the overlap-only rule, so no report 10 mm early.
+        for (what, a, b) in [
+            ("sensor sphere-sphere", sphere(Vec3::ZERO, true), sphere(Vec3::new(0.0, 1.01, 0.0), false)),
+            ("sphere-sensor box", sphere(Vec3::new(0.0, 1.01, 0.0), false), cube(Vec3::ZERO, true)),
+            ("sensor box-box", cube(Vec3::ZERO, false), cube(Vec3::new(0.0, 1.01, 0.0), true)),
+        ] {
+            assert!(collide(&a, &b, D).is_none(), "{what}: a sensor pair keeps the overlap-only rule");
+        }
+        // And the same box pair without the sensor is a speculative patch: the sensor rule is what
+        // removed it.
+        let m = collide(&cube(Vec3::ZERO, false), &cube(Vec3::new(0.0, 1.01, 0.0), false), D).expect("box-box within d");
+        assert_eq!(m.count, 4, "box-box within d: a four-point speculative patch: {m:?}");
+    }
+
+    #[test]
+    fn n3_the_sdf_keeps_a_speculative_point_within_d() {
+        // A floor whose top face is y = 0.
+        let field = SdfField::from_edits(&[SdfEdit::box_shape([0.0, -20.0, 0.0], [20.0, 20.0, 20.0], sdf_op::UNION, 0.0)]);
+        let s = sphere(Vec3::new(0.0, 0.51, 0.0), false);
+        let m = sphere_sdf_manifold(BodyIndex(0), &s, 0.5, &field, &SpecMargin::fixed(D));
+        let got = m.map(|m| (m.count, m.points[0].separation));
+        assert!(matches!(got, Some((1, sep)) if sep > 0.0 && (sep - 0.01).abs() < 1e-4), "sphere-SDF within d: {got:?}");
+        assert!(sphere_sdf_manifold(BodyIndex(0), &s, 0.5, &field, &SpecMargin::OVERLAP).is_none(), "sphere-SDF at d = 0");
+        let far = sphere(Vec3::new(0.0, 0.53, 0.0), false);
+        assert!(sphere_sdf_manifold(BodyIndex(0), &far, 0.5, &field, &SpecMargin::fixed(D)).is_none(), "sphere-SDF past d");
+        let c = cube(Vec3::new(0.0, 0.51, 0.0), false);
+        let half = Vec3::new(0.5, 0.5, 0.5);
+        for kernel in [SdfNarrowphaseKernel::Scalar, SdfNarrowphaseKernel::Avx2] {
+            let m = box_sdf_manifold(BodyIndex(0), &c, half, &field, kernel, &SpecMargin::fixed(D)).expect("box-SDF within d");
+            assert_eq!(m.count, 4, "box-SDF within d ({kernel:?}): the four bottom corners: {m:?}");
+            for p in &m.points[..4] {
+                assert!(p.separation > 0.0 && (p.separation - 0.01).abs() < 1e-4, "box-SDF ({kernel:?}): {m:?}");
+            }
+            assert!(box_sdf_manifold(BodyIndex(0), &c, half, &field, kernel, &SpecMargin::OVERLAP).is_none(), "box-SDF at d = 0 ({kernel:?})");
+        }
+    }
+
+    /// `b` moving at `v`.
+    fn at(mut b: BodyState, v: Vec3) -> BodyState {
+        b.linear_velocity = v;
+        b
+    }
+
+    /// The pair `(a, b)` collided with the approach-velocity term on (the owner's cap, J-T's step).
+    fn collide_moving(a: &BodyState, b: &BodyState) -> Option<Manifold> {
+        let reuse = ReuseStep::OFF.with_speculative(SpecStep::new(D, CAP, H));
+        collide_pair(BodyIndex(0), BodyIndex(1), a, b, None, reuse, || Prev::NONE, || None).manifold
+    }
+
+    /// NV5 (ruling 9, every body pair type): surfaces 50 mm apart, past `d`, the upper body closing
+    /// at 3 m/s (`d_eff = d + 3 h = 70 mm`) — one point at `s = +50 mm` (a four-point patch for two
+    /// boxes); receding, or with the term off, none; a sensor on either side, none. Red under each
+    /// generator's velocity-blind keep (sphere-sphere, sphere-box, box-sphere) and under a sensor
+    /// rule that forgets the velocity term.
+    #[test]
+    fn nv5_every_body_pair_type_keeps_an_approaching_point_past_d() {
+        let gap = 0.05f32;
+        let (down, up) = (Vec3::new(0.0, -3.0, 0.0), Vec3::new(0.0, 3.0, 0.0));
+        let hi = Vec3::new(0.0, 1.0 + gap, 0.0);
+        for (v, closing) in [(down, true), (up, false)] {
+            let pairs = [
+                ("sphere-sphere", sphere(Vec3::ZERO, false), at(sphere(hi, false), v)),
+                ("sphere-box", at(sphere(hi, false), v), cube(Vec3::ZERO, false)),
+                ("box-sphere", cube(Vec3::ZERO, false), at(sphere(hi, false), v)),
+            ];
+            for (what, a, b) in &pairs {
+                if closing {
+                    one_point_at(collide_moving(a, b), gap, what);
+                } else {
+                    assert!(collide_moving(a, b).is_none(), "{what}: receding at 3 m/s keeps nothing past d");
+                }
+                assert!(collide(a, b, D).is_none(), "{what}: the term off keeps nothing past d");
+            }
+        }
+        let m = collide_moving(&cube(Vec3::ZERO, false), &at(cube(hi, false), down)).expect("box-box closing");
+        assert_eq!(m.count, 4, "box-box closing: a four-point speculative patch: {m:?}");
+        for (what, a, b) in [
+            ("sensor sphere-sphere", sphere(Vec3::ZERO, true), at(sphere(hi, false), down)),
+            ("sphere-sensor box", at(sphere(hi, false), down), cube(Vec3::ZERO, true)),
+            ("sensor box-box", cube(Vec3::ZERO, false), at(cube(hi, true), down)),
+        ] {
+            assert!(collide_moving(&a, &b).is_none(), "{what}: a sensor pair keeps the overlap-only rule");
+        }
+    }
+
+    /// NV6 (ruling 9, the SDF): a sphere and a box 50 mm above the field's floor, past `d`, closing
+    /// at 3 m/s: one point / the four bottom corners at `s = +50 mm`, on both box kernels;
+    /// receding, none. Red under the sphere's and each box kernel's velocity-blind keep.
+    #[test]
+    fn nv6_the_sdf_keeps_an_approaching_point_past_d() {
+        let field = SdfField::from_edits(&[SdfEdit::box_shape([0.0, -20.0, 0.0], [20.0, 20.0, 20.0], sdf_op::UNION, 0.0)]);
+        let step = SpecStep::new(D, CAP, H);
+        let (down, up) = (Vec3::new(0.0, -3.0, 0.0), Vec3::new(0.0, 3.0, 0.0));
+        let s = at(sphere(Vec3::new(0.0, 0.55, 0.0), false), down);
+        let m = sphere_sdf_manifold(BodyIndex(0), &s, 0.5, &field, &step.against_field(&s));
+        let got = m.map(|m| (m.count, m.points[0].separation));
+        assert!(matches!(got, Some((1, sep)) if (sep - 0.05).abs() < 1e-4), "sphere-SDF closing: {got:?}");
+        let s = at(s, up);
+        assert!(sphere_sdf_manifold(BodyIndex(0), &s, 0.5, &field, &step.against_field(&s)).is_none(), "sphere-SDF receding");
+        let half = Vec3::new(0.5, 0.5, 0.5);
+        for kernel in [SdfNarrowphaseKernel::Scalar, SdfNarrowphaseKernel::Avx2] {
+            let c = at(cube(Vec3::new(0.0, 0.55, 0.0), false), down);
+            let m = box_sdf_manifold(BodyIndex(0), &c, half, &field, kernel, &step.against_field(&c)).expect("box-SDF closing");
+            assert_eq!(m.count, 4, "box-SDF closing ({kernel:?}): the four bottom corners: {m:?}");
+            for p in &m.points[..4] {
+                assert!((p.separation - 0.05).abs() < 1e-4, "box-SDF closing ({kernel:?}): {m:?}");
+            }
+            let c = at(c, up);
+            assert!(box_sdf_manifold(BodyIndex(0), &c, half, &field, kernel, &step.against_field(&c)).is_none(), "box-SDF receding ({kernel:?})");
+        }
+    }
+}

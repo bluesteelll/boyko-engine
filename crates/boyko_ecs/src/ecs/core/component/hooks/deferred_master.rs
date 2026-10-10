@@ -24,7 +24,6 @@
 //! module-level blanket that Waves 1-3 used.
 
 use core::marker::PhantomData;
-use core::sync::atomic::Ordering;
 use std::ptr::NonNull;
 
 use crate::ecs::core::bundle::bundle::Bundle;
@@ -38,7 +37,6 @@ use crate::ecs::core::component::component::Component;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::resources::resource::Resource;
-use crate::ecs::identifiers::primitives::EntityId;
 
 /// Restricted READ-ONLY view of [`EcsMaster`] handed to lifecycle hooks (14a).
 ///
@@ -185,19 +183,22 @@ impl<'a> DeferredCommands<'a> {
         world.deferred_hook_queue.push(cmd);
     }
 
-    /// Reserves a fresh [`Entity`] via the world's atomic counter and enqueues
-    /// a `SpawnAtCommand<B>`. The entity is not yet live; it materialises at
-    /// the next outermost drain. Mirrors `Commands::spawn` minus the chaining
-    /// return (14a exposes a single-shot handle).
+    /// Reserves an [`Entity`] through the world's entity reservoir — a
+    /// recycled entity (its generation bumped) if one is claimable, otherwise
+    /// a fresh id — and enqueues a `SpawnAtCommand<B>`. The entity is not yet
+    /// live; it materialises at the next outermost drain. Mirrors
+    /// `Commands::spawn` minus the chaining return (14a exposes a single-shot
+    /// handle).
+    ///
+    /// A hook can fire inside an enclosing `delete_entity` BEFORE that delete
+    /// pushes its own id onto the recycled stack; the claim here and that push
+    /// meet on one thread, and the push settles the claim first (EM2′ plan D3).
     #[inline]
     pub fn spawn<B: Bundle>(&mut self, bundle: B) -> Entity {
         // SAFETY: exclusive world borrow per the apply-window contract.
         let world: &mut EcsMaster = unsafe { self.world.as_mut() };
-        // Reserve via the same atomic counter `Commands::spawn` uses
-        // (`fetch_add(1, Relaxed)` — uniqueness only; EM4).
-        let id = world.entity_master.next_id_atomic().fetch_add(1, Ordering::Relaxed);
-        debug_assert!(id < usize::MAX / 2, "EntityId counter near exhaustion");
-        let entity = Entity::new(EntityId(id), 0);
+        // The ungated claim: each hook spawn stands alone (EM2′ plan D8).
+        let entity = world.entity_master.reserve_entity();
         world.deferred_hook_queue.push(SpawnAtCommand { entity, bundle });
         entity
     }

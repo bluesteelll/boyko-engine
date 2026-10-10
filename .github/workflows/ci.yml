@@ -2,80 +2,706 @@ name: CI
 
 on:
   push:
-    branches: [master, ecs]
+    branches: [master]
   pull_request:
-    branches: [master, ecs]
+    branches: [master]
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  # `-C target-cpu=x86-64-v3` is NOT redundant with `.cargo/config.toml`, and leaving it
+  # out was a silent defect from 2026-09-02 until it was measured the same day. The
+  # `RUSTFLAGS` environment variable REPLACES `build.rustflags` and
+  # `target.<triple>.rustflags` from the config rather than appending to them (Cargo
+  # reference, "Environment variables that Cargo reads"). So every job below, which
+  # inherits this value, was dropping the engine's declared ISA baseline: measured on the
+  # gnu toolchain, `RUSTFLAGS="-D warnings"` gives 5 of 5 baseline features ABSENT.
+  #
+  # The consequence is not a slower build, it is a DIFFERENT one. Every
+  # `cfg(target_feature = "avx2")` arm compiles to nothing: boyko_physics's 8-wide colored
+  # solve, refresh_inertia, position_integrate, apply_gravity and the SDF narrowphase x8
+  # kernels, plus `sdf_simd`'s entire `o9_kernel_tests` module — which had therefore never
+  # compiled once, and whose tests had never run, until the baseline was turned on locally.
+  # Absent code cannot go red, so CI reported green over all of it.
+  #
+  # `tests/isa_baseline_census.rs` now fails loudly when the baseline does not reach rustc,
+  # so this class cannot go quiet again. If a job needs its own RUSTFLAGS, it must carry
+  # this flag too, or that census will say so.
+  #
+  # ⚠ Assumes the runner supports AVX2. GitHub-hosted `ubuntu-latest` runners are Intel
+  # Xeon (Skylake or newer) or AMD EPYC, all of which do; a runner without it would fail
+  # with an illegal instruction on the first vectorised kernel, not a build error. The jobs
+  # on `windows-latest` (since 2026-10-10, see the note above `jobs:`) make the same
+  # assumption of that image's hosts. It is NOT yet measured there: CI run 4 executed the
+  # vectorised kernels on `ubuntu-latest` only, so an illegal instruction in the first
+  # Windows run is this assumption failing, not a test.
+  RUSTFLAGS: "-D warnings -C target-cpu=x86-64-v3"
 
+# 2026-07 audit, P0 build-gate finding: EVERY job below used to run a bare
+# `cargo <cmd> --all-targets`. This workspace root is ALSO a package (`boyko-engine`,
+# the `src/main.rs` placeholder binary), so Cargo's default selection at the root was
+# THAT PACKAGE ALONE — the jobs compiled a `println!` in ~0.2 s and reported success
+# while every engine crate went unchecked. The root cause is fixed in `Cargo.toml`
+# (`default-members` now lists every member), and each job below ALSO says
+# `--workspace` explicitly so the intent survives a future manifest edit.
+#
+# The `boyko_demo` / `bench_bevy_vs_boyko` exclusions mirror `docs.yml`'s own
+# proven-on-this-runner set (eframe/wgpu and bevy are heavy third-party trees, not
+# engine surface); `bench-compile` deliberately KEEPS `bench_bevy_vs_boyko` — compiling
+# that crate's benches is the whole point of that job.
+#
+# WHERE EACH JOB RUNS — owner decision, 2026-10-10 (release PR #4). Every job that executes a test
+# binary runs on `windows-latest`: `test` (debug, release), `profile-census`, `reflect-on` (debug,
+# release), `reflect-census`, `reflect-dogfood`, `feature-count-tests` and `force-alloc-panic`.
+# Windows MSVC is the platform the engine is developed, measured and pinned on (allocation counts,
+# float bytes); its timing gates hold at a 4-vCPU runner's width. The jobs that only BUILD stay on
+# `ubuntu-latest` and stay blocking, so the engine keeps compiling for Linux: `check`, `clippy`,
+# `profile-legs`, `feature-legs` and `bench-compile` (and `docs.yml`'s `cargo doc`). So do the two
+# Python registry jobs. `miri` and `loom` run test binaries but stay on `ubuntu-latest`, where they
+# pass. `test-linux` runs the debug `test` selection there as information only (its header lists
+# run 4's reds). These jobs are the first to run `#[cfg(windows)]` tests on a clean image: a test
+# that checks a record of the author's own installation is `workstation`-ignored (vg_r0's probe).
+#
+# Every `windows-latest` job sets `defaults.run.shell: bash`, so its steps keep their bash
+# syntax (Git Bash on that image). Its toolchain step resolves to the msvc host there. Caches
+# are keyed per OS without a `key:` input: `Swatinem/rust-cache` puts the runner's OS and
+# architecture in every key it builds (run 4's log: `v0-rust-test-Linux-x64-089de5a9-…`).
 jobs:
+  # The suppression half of the hot-path type ban. `clippy.toml` + the denied
+  # `[workspace.lints.clippy] disallowed_types` stop a NEW `HashMap`/`Mutex`/`RefCell` from
+  # compiling, but clippy cannot police its own `#[allow]`s — and an `#[allow]` on a `mod`
+  # silences the ban for a whole subtree invisibly (measured 2026-07). This job forbids blanket
+  # suppression in production code and requires every remaining exception to carry a row in
+  # docs/HOT-PATH-EXCEPTIONS.md with a frequency class from a closed vocabulary of cold classes.
+  hot-path-exceptions:
+    name: hot-path exception registry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/check_hotpath_exceptions.py
+
+  # docs/diagnostics/ is a 22-file design corpus carved out of two plans that were each reviewed
+  # twice and passed, and which the first reader to hold them side by side found asserting
+  # CONTRADICTORY facts about the same object. Splitting them makes each piece reviewable and makes
+  # that failure more likely, not less — two documents can disagree in one way, twenty-two in many.
+  # Every file declares what it provides and assumes; this job walks the resulting graph so the
+  # question "do these documents agree?" stops needing a reviewer who has read all of them at once.
+  # The script exits 1 rather than passing quietly when the corpus is absent: a green gate with no
+  # subject is the failure mode this campaign has caught nine times.
+  doc-contracts:
+    name: diagnostics corpus contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/check_doc_contracts.py
+
   check:
     name: cargo check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-targets
+      - run: cargo check --locked --workspace --all-targets --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
 
+  # `--features boyko-ecs/profiling-analysis` is on every leg below that used to get it from
+  # `boyko_ecs`'s default list. Profiling rung 14 made that feature OPT-IN — measured: while it was
+  # default-on, no command line could turn it off, because nine sibling manifests depend on
+  # `boyko-ecs` without `default-features = false` and unification restored it, so the axis's
+  # `shipping` row would have been unenforceable.
+  #
+  # Passing it here is not a formality: SIX tests in `boyko_ecs`'s profiling suite are
+  # `#[cfg(feature = "profiling-analysis")]`, and without the flag they are not compiled and not
+  # run — a coverage loss that looks exactly like a green sweep. The feature-OFF side is covered by
+  # the `profile-legs` matrix below, which builds four profiles that refuse it outright.
+  #
+  # `components: rust-src` is load-bearing for the trybuild suites, and it is the environment their
+  # baselines were blessed in, not a Linux accommodation. rustc renders a source snippet for a span
+  # inside the standard library only when the library's source is installed; without `rust-src` it
+  # prints `= note: the failure occurred here` in place of the snippet. Fifteen `.stderr` files under
+  # `crates/boyko_ecs/tests/` (`enable_filter_compile_fail`, `query_change_detection_compile_fail`,
+  # `option_anyof_compile_fail`) carry such a `$RUST/core/src/...` snippet. MEASURED 2026-10-09:
+  # CI run 37922685029 failed 10 of 18 `enable_filter_compile_fail` cases on exactly that one
+  # difference, and the same rustc 1.98.1 on the Windows workstation, given a sysroot WITHOUT
+  # `rust-src`, printed all 10 actual outputs byte-identical to the Linux ones (with it: 18/18 ok).
+  # trybuild's own documentation ("Troubleshooting") prescribes this component for the same reason.
+  # It is per job, not in `rust-toolchain.toml`, because that file deliberately lists no components.
+  #
+  # `components: llvm-tools` for the same reason the two census jobs below carry it: this
+  # `--workspace --all-targets` selection runs `reflect_absence_census` and `profile_axis_census`
+  # too, and both panic without `llvm-nm` (tool absence is a RED, never a skip). MEASURED 2026-10-09:
+  # CI run 37922685029's `cargo test reflect ON (debug)` — the same toolchain step without the
+  # component — panicked at `reflect_absence_census.rs:484` with exactly that message, while the
+  # `reflect-census` job, the same test on the same runner image WITH it, is not among that run's
+  # four failed jobs. Here the trybuild failure above had stopped the run before either census.
+  #
+  # `--no-fail-fast` and `fail-fast: false` for the reason `CLAUDE.md` gives the flag: without it
+  # `cargo test` stops at the first failing target, so "green" means "green up to the first thing
+  # already known to be red". MEASURED 2026-10-09, CI run 37955724283: the debug leg stopped at
+  # `tests/reflect_ship_closure.rs`, target 407 of the 917 this selection builds, so the 510 behind
+  # it (every package after `boyko-engine`) have never run on Linux; and the matrix's default
+  # `fail-fast` then cancelled the release leg sixteen seconds later, before it reported anything.
+  #
+  # `windows-latest` since 2026-10-10, by the decision in the note above `jobs:`. CI run 4
+  # (38026578745, on ae9c1dc3) was the first to run all 917 targets on `ubuntu-latest`. The debug
+  # leg failed 1 target there and the release leg 7; `test-linux` below lists them. One of them,
+  # `--bench narrowphase_classes`, was red on the Windows MSVC dev host too and is fixed. The dev
+  # host's run of the debug step had no other red; the release step has not run there in full.
   test:
     name: cargo test (${{ matrix.profile }})
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     strategy:
+      fail-fast: false
       matrix:
         profile: [debug, release]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rust-src, llvm-tools
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (${{ matrix.profile }})
         run: |
           if [ "${{ matrix.profile }}" = "release" ]; then
-            cargo test --all-targets --release
+            cargo test --locked --workspace --all-targets --no-fail-fast --release --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
           else
-            cargo test --all-targets
+            cargo test --locked --workspace --all-targets --no-fail-fast --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
           fi
+
+  # INFORMATIONAL, NOT A GATE: `continue-on-error: true` on the job, so a red here never fails the
+  # workflow. This is the debug `test` selection, on `ubuntu-latest`. The suite's gating legs run on
+  # `windows-latest` (see the note above `jobs:`), and this job keeps a Linux test run visible.
+  #
+  # WHY IT CANNOT GATE. CI run 4 (38026578745, on ae9c1dc3) was the first run of all 917 targets on
+  # `ubuntu-latest`. It failed in three classes, plus one bench that was red on the Windows MSVC dev
+  # host as well and is fixed (below). Per leg: debug failed 1 target, release 7, and
+  # `force-alloc-panic` 7. These are the targets, as run 4 measured them:
+  #   * Counts pinned on Windows.
+  #     - The allocation censuses `boyko-app --test e1_engine_ui_alloc_census` (release: "a forced
+  #       pool registered 1 more epoch Locals"), `boyko-physics --test alloc_frame_attribution`
+  #       (`force-alloc-panic`: 0.016 OTHER-class acquisitions per frame) and
+  #       `boyko-render --test ui_no_realloc` (`force-alloc-panic`: 16 allocations in the per-frame
+  #       UI sort, where the pin is 0).
+  #     - NOT a platform pin, and fixed: `boyko-physics --bench narrowphase_classes` (75 touching
+  #       pairs against 140 manifolds) was red on the Windows MSVC dev host too. Its assert predated
+  #       V2's speculative contacts; it now runs the overlap-only rule (speculative_distance = 0).
+  #   * Float byte identity across C runtimes. `boyko_shaderdsl --test eval_byte_identity`
+  #     (`m2_brick_span_matches_host_on_random_sweep` computes 0 where the frozen value is -0) and
+  #     `boyko-render --lib` (`view::tests::perspective_bridge_reproduces_legacy_push_constants`:
+  #     0.5773503 against 0.57735026). Both failed in release and in `force-alloc-panic`.
+  #   * Timing and occupancy: runner width, not the OS (4 vCPUs here and on `windows-latest`), and
+  #     fixed. `boyko-threadpool --test ke16_nested_scope_occupancy`'s gate takes its floor from the
+  #     usable CPUs and its tests run one at a time, as `--test region_protocol`'s do (the
+  #     `fin_a_helper_advances` / batched-finisher "no helper advance" reds); `--test
+  #     a6_panic_propagation`'s detached-spawn test accepts the task's own panic text when the abort
+  #     beats its marker. Red under a 4-CPU affinity mask on the dev host before, green after.
+  # FIXING THEM IS A FOLLOW-UP, and it is not done here. Each pin has to be either measured on Linux
+  # as well or scoped to the platform it was taken on. Until then a red in this job is a finding
+  # to read, not a reason to weaken a pin, and its targets are not the only ones it can turn up.
+  # When the classes are closed, drop `continue-on-error` and this job becomes a gate.
+  test-linux:
+    name: cargo test (linux, informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rust-src, llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (linux, informational)
+        run: cargo test --locked --workspace --all-targets --no-fail-fast --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
+
+  # ---------------------------------------------------------------------------------------------
+  # The BOYKO_PROFILE axis — profiling rung 14 / logging L17, the joint rung J1
+  # ---------------------------------------------------------------------------------------------
+  #
+  # `crates/boyko_diag/build.rs` is the ONE build script in this workspace and the ONE reader of
+  # `BOYKO_PROFILE`. It sits at the bottom of the graph, so the variable changes the constants every
+  # crate above compiles against: the logging ceiling, the profiling tier, the sample-region
+  # capacity, the zone id space and the dynamic name arena. Five named profiles, of which `dev` is
+  # what every OTHER job in this file already builds (the variable is unset there, and unset means
+  # `dev`) — so this matrix is the **4 net new legs** `SEAM.md` §S9's arithmetic asks for, not five.
+  #
+  # `check` rather than `test`: the property these legs establish is that the workspace COMPILES in
+  # every profile, and that is where the axis's failures live — a `const` assertion whose two sides
+  # come from different rows, a `debug!` whose arguments go unused once the ceiling deletes it, a
+  # store stride that no longer fits its own bound. Running the suite four more times would not test
+  # the axis; it would test everything else four more times, and several suites assert `dev` values
+  # by design (`boyko_log`'s `the_dev_profile_admits_every_level` is named for it).
+  #
+  # `fail-fast: false` because a profile-specific break tells you WHICH profile, and killing the
+  # matrix at the first one throws that away. Per-leg `CARGO_TARGET_DIR` because two profiles in one
+  # directory rebuild each other on every alternation.
+  profile-legs:
+    name: cargo check (BOYKO_PROFILE=${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [editor, shipping, shipping-min, off]
+    env:
+      BOYKO_PROFILE: ${{ matrix.profile }}
+      CARGO_TARGET_DIR: target-${{ matrix.profile }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: profile-${{ matrix.profile }}
+      - run: cargo check --locked --workspace --all-targets --exclude boyko_demo --exclude bench-bevy-vs-boyko
+
+  # G14(a)/(b)/(c) and G16(a)/(b)/(c): the cross-profile symbol census and the two refusals.
+  #
+  # `SEAM.md` specifies these as a CI **step over two legs' artifacts, not a sixth leg**, and this is
+  # that step — with one deviation, taken because the alternative is worse. GitHub jobs do not share
+  # a filesystem, so "consume the other legs' artifacts" means uploading and downloading them, which
+  # makes the census depend on four jobs succeeding and on an artifact round-trip. The harness builds
+  # its own two legs instead: a 2-crate graph per leg, ~13 s for all five clauses on the author's
+  # box, hermetic, and runnable locally — which matters, because a gate only CI can run is a gate
+  # whose RED nobody has seen.
+  #
+  # `components: llvm-tools` is load-bearing and its absence is a RED, not a skip: without `llvm-nm`
+  # the census cannot tell a folded site from a present one, and a gate that passes on every machine
+  # lacking its tool is a gate that passes.
+  #
+  # `windows-latest`, as every test-running job is (the note above `jobs:`). On both hosts the
+  # census reads the post-LTO object, the linker's input, because an MSVC image carries no symbol
+  # table at all. `profile_axis_census.rs`'s header has the measurement.
+  profile-census:
+    name: cross-profile symbol census (G14/G16)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p profile-fixture --test profile_axis_census
+
+  # Reflection GATES G4 item 1 (docs/REFLECTION-PLAN-GATES.md D7): the feature-ON legs,
+  # debug AND release — §5's release-editor gap lives exactly where `debug_assert!`
+  # compiles out, so a debug-only ON leg never exercises the configuration the gap is
+  # about; the matrix mirrors the `test` job's. The OFF side is every other job: nothing
+  # in the workspace enables `reflect`, so the ship configuration is what they compile.
+  # Without this job, `boyko_reflect` is a package in the tree that never sees a compiler
+  # — the `default-members` vacuity in a new costume.
+  #
+  # The `pkg/feature` spelling is load-bearing: a bare `--features reflect` across a
+  # multi-package selection is ambiguous and is the form that silently selects nothing.
+  #
+  # BOYKO_REFLECT_LEG is the per-test non-vacuity marker (GATES G4 "non-vacuity inside
+  # each leg"): `reflect_leg_nonvacuity.rs` asserts `cfg!(feature = "reflect")` whenever
+  # this variable names a leg, and reds naming the leg if the feature is off — so
+  # dropping `--features` here cannot turn the leg into a no-op that reports green
+  # (`gj1_flag_cost`'s `flags_on()` precedent). The variable exists because an outer
+  # feature selection is UNOBSERVABLE from inside a test process (measured at G2: the
+  # test env is byte-identical under `--features …`), so the leg must name itself.
+  # `tests/reflect_ci_coverage.rs` pins the flag and the variable together.
+  #
+  # `rust-src`: this job runs trybuild suites too, so it gets the environment their baselines are
+  # blessed in — see the note on the `test` job. `llvm-tools`: `--all-targets` over
+  # `reflect-fixture` includes `reflect_absence_census`, which panics without `llvm-nm` (D6) — the
+  # failure of this job's debug leg in CI run 37922685029; the `reflect-census` job below is the
+  # census's dedicated leg, this is the same test reached through the package selection.
+  #
+  # This job, `reflect-census` and `reflect-dogfood` run on `windows-latest`, as every
+  # test-running job does (the note above `jobs:`).
+  reflect-on:
+    name: cargo test reflect ON (${{ matrix.profile }})
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix:
+        profile: [debug, release]
+    env:
+      BOYKO_REFLECT_LEG: reflect-on
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rust-src, llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test reflect ON (${{ matrix.profile }})
+        run: |
+          if [ "${{ matrix.profile }}" = "release" ]; then
+            cargo test --locked -p boyko-reflect -p reflect-fixture --all-targets --no-fail-fast --release \
+              --features reflect-fixture/reflect
+          else
+            cargo test --locked -p boyko-reflect -p reflect-fixture --all-targets --no-fail-fast \
+              --features reflect-fixture/reflect
+          fi
+
+  # Reflection GATES G4 item 2, mirroring `profile-census` above: `components: llvm-tools`
+  # is load-bearing and its absence is a RED, never a SKIP (GATES D6) — the census
+  # panics without `llvm-nm` rather than reporting a pass on a machine that cannot
+  # measure.
+  reflect-census:
+    name: reflect absence census (G3)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p reflect-fixture --test reflect_absence_census
+
+  # Reflection GATES G4 item 4 / D15: the ONLY CI leg that compiles an engine crate's
+  # `reflect` feature — the leg that makes D3's whole permission meaningful. Deliberately
+  # OUTSIDE Miri: this package reaches boyko_render -> boyko_rhi_vulkan, and Miri cannot
+  # execute FFI (F18). The feature selection legitimately reaches boyko_demo's closure
+  # through unification (F16); that is expected and is not the ship invocation — G2's
+  # harness takes its ship readings from its own feature-clean `cargo tree` spawns.
+  reflect-dogfood:
+    name: cargo test reflect dogfood
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p reflect-dogfood --all-targets --no-fail-fast --features reflect-dogfood/reflect
 
   clippy:
     name: cargo clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy
         # Phase 5a cleared boyko_utils (13 warnings); Phase 5d cleared boyko_ecs
         # (~43 warnings). Workspace is now clean: no || true workaround needed.
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko -- -D warnings
+
+  # ---------------------------------------------------------------------------------------------
+  # feature legs — the axis the standing gate cannot see
+  # ---------------------------------------------------------------------------------------------
+  #
+  # `--all-targets` IS NOT `--all-features`, and the two names invite precisely the confusion that
+  # cost this tree 32 days. `--all-targets` widens the TARGET set (lib, bins, tests, benches,
+  # examples); the cfg set those targets compile under stays the default one. So the standing gate —
+  # `cargo clippy --workspace --all-targets -- -D warnings`, the job directly above, which never
+  # passes `--features` — is STRUCTURALLY BLIND to every `#[cfg(feature = "…")]` item in the
+  # workspace. Not "weak on": blind. Such an item is not compiled at all, and rustc cannot go red
+  # over a span it never sees.
+  #
+  # MEASURED 2026-09-18: `cargo check -p boyko_rhi_vulkan --features hwrt --lib` failed with
+  # 10 × E0308, from two lines — `device.rs:3254` and `present/targets.rs:75` passed a `u16`
+  # (`.number()`) where `warn!` takes a typed `WarnCode`. Commit 718a5129 (2026-08-17) introduced
+  # that type and converted every site rustc showed it, INCLUDING both non-gated `W2102.number()`
+  # sites in the same three-function group in `device.rs`, and left the `#[cfg(feature = "hwrt")]`
+  # sibling sitting between them — because no build in this repository had ever compiled it. The
+  # feature was un-compilable for ~248 commits / 32 days, and what finally compiled it was a person
+  # running the GPU leg by hand.
+  #
+  # ⚠ THE ONE-FLAG ANSWER DOES NOT EXIST IN THIS TREE, by design rather than by neglect.
+  # `--all-features` turns on `boyko-threadpool/tb-neg-m2w`, whose crate root answers with a
+  # `compile_error!` unless `cfg(miri)` is set (it is the KE16 M2w deliberate-UB negative control),
+  # and three `nightly` features that are E0554 on the stable channel. MEASURED 2026-09-18:
+  # `cargo check --workspace --all-targets --all-features` dies on `boyko_shaderdsl`'s E0554 before
+  # reaching a single engine crate. Per-feature legs are the only form that can work here.
+  #
+  # WHAT THIS JOB COVERS IS DERIVED, NOT LISTED, and that is the whole design. The leg set is every
+  # feature `cargo metadata` reports MINUS the refusal table in the step below — so a feature added
+  # tomorrow is covered BY DEFAULT and has to be argued out in writing, one line, with a reason. A
+  # hand-written list of covered features has the opposite failure mode, and it is the exact one this
+  # job exists to stop: a check that covers one feature while reading as though it covered all.
+  #
+  # ⚠ A REFUSAL THAT OVERSTATES ITS REASON IS THIS JOB'S OWN FAILURE MODE, and the first review of
+  # the table below found one: `boyko-render` was refused as a crate that "does not compile for a
+  # non-Windows target at all", on a measurement of 2 errors. RE-MEASURED 2026-09-18 on the same
+  # triple, those 2 were ONE `error[E0601]` (`main` function not found in `orbit_cube_window`, which
+  # is `#![cfg(windows)]` as a whole crate) plus cargo's own summary line — the LIB compiles, and
+  # `cargo check -p boyko-render --features hwrt --lib --tests --target x86_64-unknown-linux-gnu`
+  # exits 0 in 10.8 s from clean. The false row excluded three legs and left 34
+  # `#[cfg(feature = "hwrt")]` sites under `crates/boyko_render/src` compiled by nothing: the exact
+  # class this job exists to close, one crate over from where it was found. Hence the scope table
+  # below — a leg whose LIB builds but whose example does not gets a NARROWER TARGET SET, never an
+  # exclusion. An exclusion is only for a crate whose lib itself cannot be compiled here.
+  #
+  # ⚠ WHAT IT DOES NOT COVER, stated plainly for the same reason:
+  #   * THE PLATFORM AXIS — the same blind spot on a different cfg, narrowed but not closed. These
+  #     legs run on `ubuntu-latest`, so no leg compiles a `#[cfg(windows)]` item. In `boyko-app`
+  #     those items are the `gpu_scene` module, the windowed runner's frame loop and the host
+  #     modules. Since 2026-10-10 the test-running jobs run on `windows-latest` (the note above
+  #     `jobs:`), and they compile those items at DEFAULT features. Two gaps remain. No job
+  #     compiles a `#[cfg(windows)]` item that also needs a feature. And `clippy` stays on
+  #     `ubuntu-latest`, so no clippy lint runs over any `#[cfg(windows)]` item. Until 2026-10-09
+  #     the hole was wider:
+  #     `boyko-app`'s LIB did not compile for a non-Windows target at all (2 × E0432, an unresolved
+  #     `crate::gpu_scene` import in `runner.rs` and `particle_readback.rs`, plus 3 × E0308 from
+  #     `codes::E3004.number()` in the `#[cfg(not(windows))]` reporter in `diag.rs`, which landed
+  #     2026-08-13 in b809041e and was invisible to the sweep that fixed its siblings for this exact
+  #     reason). That lib is in the target set of every `--workspace` job in this file, so none of
+  #     them could exit 0 on this runner, and three `boyko-app` legs were refused as "platform".
+  #     The repair is in `crates/boyko_app` (53d7c7a3, 4bea7413, c741cdfd). MEASURED 2026-10-09
+  #     from a Windows host with `--target x86_64-unknown-linux-gnu`, the CI `RUSTFLAGS` and
+  #     `--keep-going`: every cargo job in this file exits 0 at its own selection (`miri` by a
+  #     stable `check` of its packages, as that host has no Linux std for nightly), except the two
+  #     `bench-alloc` legs, which that host cannot build (`libmimalloc-sys`'s build script needs an
+  #     `x86_64-linux-gnu-gcc`, which this runner has and the host does not), and
+  #     `boyko-app/{hwrt,profiling-census}` exit 0 at `--all-targets`, so they are derived legs
+  #     now. That measurement is a compile (`check`/`clippy`/`doc`), not a run of any test.
+  #   * CLIPPY LINTS on the gated code. These legs are `cargo check`, so rustc warnings do fail them
+  #     (the top-level `RUSTFLAGS` carries `-D warnings`), but clippy-specific lints never run over
+  #     any `#[cfg(feature = …)]` item in the tree. That hole is narrowed here, not closed.
+  #   * The window loop of `crates/boyko_render/examples/orbit_cube_window.rs`. Since 2026-10-09
+  #     (3f2c88e6) the example has a `main` on every target; off Windows it prints a notice and
+  #     exits, so `--all-targets` builds it here and no `boyko-render` leg needs a narrowed scope
+  #     any more. The loop itself is `#[cfg(windows)] mod windowed`. Since 2026-10-10 the
+  #     `windows-latest` test jobs compile it at default features, because `--all-targets` builds
+  #     examples (none of them runs). With a feature on, it is compiled only by the by-hand
+  #     Windows recipe in `CLAUDE.md`.
+  #   * The six refused features, each carrying its reason at the site.
+  feature-legs:
+    name: cargo check (per-feature legs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: feature-legs
+      # The refusal table is one of this job's TWO hand-maintained lists (the scope table below is
+      # the other), and every row in either is a measured claim rather than a preference. A row whose
+      # `pkg/feature` no longer exists fails the step: an exclusion that outlives its subject is a
+      # coverage claim nobody re-reads.
+      - name: derive the legs from cargo metadata
+        shell: bash
+        run: |
+          cat > feature-refusals.txt <<'EOF'
+          bench-bevy-vs-boyko/bench-alloc|cost: the bevy tree is excluded from every other job in this file (see the note above `jobs:`); `bench-compile` is the one job that builds this crate, default-featured.
+          bench-bevy-vs-boyko/nightly|cost: the same bevy tree as the row above, which is the operative reason and is enough on its own. RE-MEASURED 2026-09-18: `#![cfg_attr(feature = "nightly", feature(float_algebraic))]` is NOT a crate-root attribute, it is at `benches/g6_for_each_chunk.rs:7` -- one bench target -- so the old `channel:` label overstated a per-target E0554 as a crate-wide one. Refused here on cost; the nightly-green claim was not re-measured (building the bevy tree twice is what "cost" means).
+          boyko-threadpool/tb-neg-m2w|by-design: `crates/boyko_threadpool/src/lib.rs:99` is a `compile_error!` refusing this feature whenever `cfg(miri)` is unset -- it is the KE16 M2w deliberate-UB negative control, and a native artifact built from it commits a Tree-Borrows violation on purpose. Its gate is `scripts/tb_neg_gate.{ps1,sh}` under Miri. VERIFIED 2026-09-18 at that line.
+          boyko_sdf_math/nightly|KNOWN-RED 2026-09-18, an open defect and NOT a coverage judgement: it forwards to `boyko_shaderdsl/nightly` (the row below) and dies INSIDE that dependency, so `boyko_sdf_math` itself is never compiled and the counts below are `boyko_shaderdsl`'s rather than this crate's. RE-MEASURED 2026-09-18, `--all-targets`: 9 errors in the `boyko_shaderdsl` lib on stable-msvc, 10 on nightly-msvc.
+          boyko_shaderdsl/nightly|KNOWN-RED 2026-09-18, an open defect and NOT a coverage judgement: the arm makes the crate `no_std` while `src/ssao.rs` uses `format!`/`String`, and it calls `core::intrinsics::{sinf32,cosf32}`, which current nightly no longer has. RE-MEASURED 2026-09-18 on the lib target, identical under `--lib` and `--all-targets`: 9 errors on stable-msvc (E0554 among them), 10 on nightly-msvc -- broken on BOTH channels, not merely channel-gated. `--all-targets` ALSO fails the lib-test unit, 8 errors stable / 9 nightly, so the lib count is not the whole command's. The earlier `11` was wrong at every scope. Covering it would make this job permanently red, and a permanently red job is one nobody reads.
+          boyko-app/profiling-alloc|KNOWN-RED 2026-10-09, an open defect and NOT a platform judgement: the feature installs a process-wide `#[global_allocator]` (`crates/boyko_app/src/profiling/alloc_shim.rs:145`), and the `harness = false` test `crates/boyko_app/tests/e1_engine_ui_alloc_census.rs:271` (5eab1d0b, 2026-09-23) installs its own in a binary that links `boyko_app`. A binary may declare only one, so `cargo check -p boyko-app --features profiling-alloc --all-targets` fails with exactly one error, "the `#[global_allocator]` in this crate conflicts with global allocator in: boyko_app" -- MEASURED 2026-10-09 with `--keep-going`, identically on `x86_64-unknown-linux-gnu` and on the Windows host. The by-hand Windows green of 2026-09-18 predates that test. `src/runner.rs`'s test module excludes its own allocator, and the test that reads it, under this feature for exactly this collision; the repair belongs in the e1 test file, not in this row.
+          EOF
+          # The SECOND hand-maintained list, and it exists because "covered" and "refused" are not
+          # the only two states a leg has. A crate whose lib builds on this runner but whose EXAMPLE
+          # does not is not a platform refusal; refusing it hides every gated item in the lib, which
+          # is this job's own failure mode. Such a leg gets a narrower TARGET SET here instead.
+          # A row naming something that is not a derived leg fails the step, exactly like a stale
+          # refusal: an override that outlives its subject is a coverage claim nobody re-reads.
+          # The table has no rows since 2026-10-09, and that is a measurement, not a lapse. Its three
+          # rows narrowed `boyko-render/{hwrt,profiling-census,test-readback}` to `--lib --tests`
+          # because `examples/orbit_cube_window.rs` had no `main` off Windows (E0601). 3f2c88e6 gave
+          # it one, and all three legs then exit 0 at `--all-targets` on `x86_64-unknown-linux-gnu`
+          # (MEASURED 2026-10-09). `test-readback` still adds no coverage of its own:
+          # `boyko-render`'s self-referential dev-dependency turns it on whenever test targets
+          # build. The mechanism stays for the next crate whose lib builds here and an example
+          # does not.
+          cat > feature-scopes.txt <<'EOF'
+          # No rows since 2026-10-09: see the comment above this heredoc.
+          EOF
+          python3 - <<'PY'
+          import json, subprocess, sys
+
+          done = subprocess.run(
+              ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+              capture_output=True,
+          )
+          if done.returncode != 0:
+              sys.stderr.write(done.stderr.decode("utf-8", "replace"))
+              sys.exit("::error::cargo metadata failed; the leg set cannot be derived")
+          meta = json.loads(done.stdout)
+
+          # `default` is not a leg: every other job in this file already compiles it.
+          declared = {
+              (pkg["name"], feat)
+              for pkg in meta["packages"]
+              for feat in pkg["features"]
+              if feat != "default"
+          }
+
+          def read_table(path, fields):
+              """Parse `pkg/feature|col|...` rows into {(pkg, feat): (col, ...)}."""
+              rows = {}
+              with open(path, encoding="utf-8") as handle:
+                  for line in handle:
+                      line = line.strip()
+                      if not line or line.startswith("#"):
+                          continue
+                      parts = line.split("|", fields)
+                      if len(parts) != fields + 1:
+                          sys.exit(f"::error::{path}: row {parts[0]!r} has {len(parts) - 1} "
+                                   f"`|`-separated columns, expected {fields}.")
+                      pkg, _, feat = parts[0].partition("/")
+                      rows[(pkg, feat)] = tuple(parts[1:])
+              return rows
+
+          refused = {key: cols[0] for key, cols in read_table("feature-refusals.txt", 1).items()}
+
+          stale = sorted(key for key in refused if key not in declared)
+          if stale:
+              for pkg, feat in stale:
+                  print(f"::error::feature-refusals.txt refuses {pkg}/{feat}, which no manifest "
+                        f"declares any more -- delete the row.")
+              sys.exit(1)
+
+          legs = sorted(declared - set(refused))
+
+          # The scope table is checked against the DERIVED leg set, not against `declared`: a row for
+          # a refused feature would silently do nothing, which is the same dead-claim defect as a
+          # stale refusal and is caught here the same way.
+          scopes = read_table("feature-scopes.txt", 2)
+          orphan = sorted(key for key in scopes if key not in set(legs))
+          if orphan:
+              for pkg, feat in orphan:
+                  print(f"::error::feature-scopes.txt narrows {pkg}/{feat}, which is not a derived "
+                        f"leg (undeclared, or refused outright) -- delete the row.")
+              sys.exit(1)
+
+          # A floor in the shape the `loom` job uses: it cannot stop the leg set from shrinking, it
+          # makes a shrink an EDIT someone has to justify. 15 is the count measured on 2026-09-18
+          # (23 non-default features across 11 packages, minus the 8 refusals the table held then).
+          # It was 12 until the false `boyko-render` platform refusal was re-measured and withdrawn.
+          MIN_LEGS = 15
+          print(f"[feature census] {len(declared)} non-default features declared, "
+                f"{len(refused)} refused, {len(legs)} legs to run "
+                f"({len(scopes)} of them at a narrowed target scope)")
+          for pkg, feat in legs:
+              scope, reason = scopes.get((pkg, feat), ("--all-targets", ""))
+              note = f" -- scoped: {reason}" if reason else ""
+              print(f"  leg: {pkg}/{feat} [{scope}]{note}")
+          for (pkg, feat), reason in sorted(refused.items()):
+              print(f"  refused: {pkg}/{feat} -- {reason}")
+          if len(legs) < MIN_LEGS:
+              sys.exit(f"::error::only {len(legs)} legs derived, floor is {MIN_LEGS}. A feature was "
+                       f"deleted or newly refused; both are fine, and both are an edit to this "
+                       f"number with a reason in the commit message.")
+
+          with open("feature-legs.txt", "w", encoding="utf-8") as handle:
+              for pkg, feat in legs:
+                  scope = scopes.get((pkg, feat), ("--all-targets", ""))[0]
+                  handle.write(f"{pkg} {feat} {scope}\n")
+          PY
+      # Every leg runs even after one fails, for the reason `CLAUDE.md` gives `--no-fail-fast`: one
+      # red leg must not shadow the legs ordered behind it. The executed count is compared against
+      # the derived count because a `while read` over an empty file runs nothing and exits 0 — the
+      # vacuous green this file already guards against in four other places.
+      - name: cargo check each derived leg
+        shell: bash
+        run: |
+          expected=$(wc -l < feature-legs.txt)
+          ran=0
+          failed=0
+          while read -r pkg feat scope; do
+            echo "::group::cargo check --locked -p $pkg --features $feat $scope"
+            # `$scope` is deliberately unquoted: it carries cargo's target-selection flags as
+            # SEPARATE words (`--lib --tests`), and quoting would hand cargo one argument spelled
+            # "--lib --tests", which it rejects. Its content is the scope table above, not input.
+            # shellcheck disable=SC2086
+            if cargo check --locked -p "$pkg" --features "$feat" $scope; then
+              echo "ok: $pkg/$feat"
+            else
+              echo "::error::$pkg/$feat does not compile -- a feature-gated item is compiled by this job and by nothing else in CI, so nothing else will say so."
+              failed=$((failed + 1))
+            fi
+            ran=$((ran + 1))
+            echo "::endgroup::"
+          done < feature-legs.txt
+          echo "feature legs: $ran of $expected ran, $failed failed"
+          if [ "$ran" -eq 0 ] || [ "$ran" -ne "$expected" ]; then
+            echo "::error::feature legs ran $ran of an expected $expected -- a run that checks no feature at all exits 0, which is what this comparison forbids."
+            exit 1
+          fi
+          # `exit "$failed"` rather than `exit 1` was the first form here, and it is a vacuous green
+          # waiting to happen: a shell exit status is taken mod 256, so 256 failing legs would exit 0.
+          # The count is already printed above; the status only has to be non-zero.
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
+
+  # The two physics count features gate test-only code. `feature-legs` above compiles it, but only
+  # `cargo test` runs it, and until this step existed nothing did: L9 C4's `bp_query_counts` red
+  # went unseen until a lane ran it by hand. Each target must report its own count, because
+  # `running 0 tests` from a feature that did not take effect is the vacuous green this file guards
+  # against. Both legs run even when the first fails, so the status is accumulated rather than left
+  # to `-e`. A red that shows only on this runner is a host-divergence finding for its own lane,
+  # never a reason to weaken the step (W8S cut, Q9).
+  #
+  # Until 2026-10-10 this was the last step of `feature-legs`, behind `if: ${{ !cancelled() }}` so
+  # that a red derived-leg compile could not skip it. It runs test binaries, so it moved with the
+  # other test-running jobs to `windows-latest` (the note above `jobs:`). Its counts were pinned on
+  # msvc. The `run:` text is unchanged. The `if:` is gone, because in a job of its own no
+  # `feature-legs` step can shadow it, and `shell: bash` now comes from the job's `defaults`.
+  feature-count-tests:
+    name: cargo test (physics count features)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test the physics count features (bp-query-counts, narrowphase-counts)
+        run: |
+          set +e
+          rc=0
+          cargo test --locked -p boyko-physics --features bp-query-counts --test bp_query_counts --no-fail-fast -- --nocapture 2>&1 | tee bpqc.log
+          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "::error::bp_query_counts failed"; rc=1; }
+          cargo test --locked -p boyko-physics --features narrowphase-counts --test narrowphase_census --no-fail-fast -- --nocapture 2>&1 | tee npc.log
+          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "::error::narrowphase_census failed"; rc=1; }
+          grep -qx 'running 2 tests' bpqc.log || { echo "::error::bp_query_counts did not run its 2 tests"; rc=1; }
+          grep -qx 'running 1 test' npc.log || { echo "::error::narrowphase_census did not run its 1 test"; rc=1; }
+          exit "$rc"
 
   bench-compile:
     name: cargo bench --no-run
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
-      - run: cargo bench --no-run
+      - run: cargo bench --locked --workspace --no-run --exclude boyko_demo
 
+  # `windows-latest` since 2026-10-10, as every test-running job is (the note above `jobs:`). On
+  # `ubuntu-latest` CI run 4 failed 7 of this job's targets, and the `test-linux` job lists them.
   force-alloc-panic:
     name: cargo test --release (force_alloc_panic)
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     env:
       # Phase 9 Wave 7 Step 24 (Round 3 O-NEW-1): escalate ALLOC1 to a
       # release-mode panic. Catches any regression that accidentally
       # allocates from `Arena` inside a System body. See
       # docs/PHASE-9-FORCE-ALLOC-PANIC.md.
-      RUSTFLAGS: "--cfg force_alloc_panic -D warnings"
+      # Carries `-C target-cpu=x86-64-v3` because this env REPLACES the top-level one; see
+      # the note on that value. Without it this job would silently test a scalar-fallback
+      # engine, which is not the engine being shipped.
+      RUSTFLAGS: "--cfg force_alloc_panic -D warnings -C target-cpu=x86-64-v3"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # `rust-src` and `llvm-tools`: the same `--workspace --all-targets` selection as the `test`
+      # job, trybuild suites and the two symbol censuses included — see the note on that job, which
+      # also says why `--no-fail-fast` (this job stopped at the same target 407 of 917 in run
+      # 37955724283).
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rust-src, llvm-tools
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all-targets --release
+      - run: cargo test --locked --workspace --all-targets --no-fail-fast --release --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
 
   miri:
     name: Miri
@@ -87,6 +713,17 @@ jobs:
     # UnsafeCell interior mutation — Stacked Borrows (SB) falsely rejects it.
     # Miri retag UB (Step 1) + EntityId leak (Step 4) jointly close Phase 3a.
     # continue-on-error removed from .github/workflows/ci.yml as per Phase 3a plan.
+    #
+    # This job deliberately does NOT carry `-C target-cpu=x86-64-v3`, unlike every other
+    # job. Miri interprets MIR rather than executing machine code, so the ISA baseline buys
+    # it nothing and would only ask the interpreter to model vector intrinsics. It hides no
+    # coverage: every `cfg(target_feature = "avx2")` site in the workspace is in
+    # `boyko_physics` (`solver/simd.rs`, `sdf_simd.rs`, `lib.rs`), and this job runs only
+    # `boyko-ecs` targets, which contain none. If a Miri step is ever pointed at
+    # `boyko_physics`, add the flag here and expect the AVX2 kernels to need intrinsic
+    # support from the interpreter.
+    env:
+      RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -96,8 +733,263 @@ jobs:
       - name: cargo miri setup
         run: cargo +nightly miri setup
       - name: cargo miri test (event_attribute — known clean)
-        run: cargo +nightly miri test --package boyko-ecs --test event_attribute
+        run: cargo +nightly miri test --locked --package boyko-ecs --test event_attribute
       - name: cargo miri test (drop_fn — known clean)
-        run: cargo +nightly miri test --package boyko-ecs --test drop_fn
-      - name: cargo miri test (full sweep)
-        run: cargo +nightly miri test --all-targets
+        run: cargo +nightly miri test --locked --package boyko-ecs --test drop_fn
+      # PC-24: the world-retag matrix (`unsafe_ecs_cell.rs`, `pc24_` tests) under STACKED Borrows.
+      # Every other Miri step runs Tree Borrows through `.cargo/config.toml`'s `[env]`, and TB is
+      # blind to a worker-side `&mut` over the world that only reads (TB: retag read vs retag read).
+      # An explicitly set MIRIFLAGS wins over `[env]` unless that entry is `force`d, so the step
+      # prints the flags and REDs on a forced entry rather than silently running TB. The force
+      # check asks cargo itself: `cargo config get env` merges every config file and prints any
+      # spelling of the entry (inline table, `[env.MIRIFLAGS]` sub-table, dotted keys) as one
+      # `env.MIRIFLAGS.force = true` line, where a text match on one spelling missed the others.
+      # An unresolvable config is RED too; only "`env` is not set" means nothing can be forced.
+      # The matrix is pool-free on purpose: crossbeam-epoch's own SB violation ends a pool-backed
+      # SB run first.
+      - name: cargo miri test (PC-24 world-retag matrix — Stacked Borrows leg)
+        shell: bash
+        env:
+          MIRIFLAGS: "-Zmiri-strict-provenance"
+        run: |
+          echo "MIRIFLAGS=$MIRIFLAGS"
+          if cfg_env=$(cargo +nightly -Zunstable-options config get env 2>&1); then
+            printf '%s\n' "$cfg_env"
+            if grep -qE '^env\.MIRIFLAGS\.force[[:space:]]*=[[:space:]]*true[[:space:]]*$' <<< "$cfg_env"; then
+              echo "RED: env.MIRIFLAGS is forced in cargo's config; this step would silently run Tree Borrows"; exit 1; fi
+          elif ! grep -qF 'config value `env` is not set' <<< "$cfg_env"; then
+            printf '%s\n' "$cfg_env"; echo "RED: cargo cannot resolve its [env] config"; exit 1
+          fi
+          cargo +nightly miri test --locked -p boyko-ecs --lib -- pc24_ 2>&1 | tee pc24_sb.log
+          grep -q 'running 7 tests' pc24_sb.log && grep -q 'test result: ok. 7 passed; 0 failed' pc24_sb.log
+      # PC-24's Tree-Borrows leg: the same matrix under the model the rest of this job runs. The
+      # module asks for BOTH legs (`unsafe_ecs_cell.rs`, the PC-24 header). Until 2026-10-10 this
+      # leg ran only inside the pure-compute sweep (`-p boyko-ecs`, Tree Borrows), so when the
+      # sweep moved to `miri-sweep.yml` it stopped blocking. It is spelled with the `pc24_` filter
+      # and MIRIFLAGS exactly as `.cargo/config.toml`'s `[env]` sets it, without the sweep's
+      # `-Zmiri-ignore-leaks`: this matrix passes with the leak check on, as the SB leg does. (The
+      # module's own TB line adds `-Zmiri-strict-provenance`; the SB leg above carries that flag.)
+      # TB reports a worker-side `&mut` retag over the world as a read that races the reservoir's
+      # atomic RMWs (T1). The guard is the SB leg's, turned around: this step RELIES on the config,
+      # so it asks cargo for the resolved entry and REDs unless `env.MIRIFLAGS` (plain, or the
+      # `.value` of a table spelling) carries `-Zmiri-tree-borrows`. It also REDs on an environment
+      # MIRIFLAGS, which replaces an unforced `[env]` entry. Either case would run Stacked Borrows
+      # under this step's name.
+      - name: cargo miri test (PC-24 world-retag matrix — Tree Borrows leg)
+        shell: bash
+        run: |
+          echo "MIRIFLAGS=${MIRIFLAGS-<unset>}"
+          if ! cfg_env=$(cargo +nightly -Zunstable-options config get env 2>&1); then
+            printf '%s\n' "$cfg_env"; echo "RED: cargo's [env] config is unset or unresolvable; this step would not run Tree Borrows"; exit 1; fi
+          printf '%s\n' "$cfg_env"
+          if ! grep -qE '^env\.MIRIFLAGS(\.value)?[[:space:]]*=[[:space:]]*"([^"]*[[:space:]])?-Zmiri-tree-borrows([[:space:]][^"]*)?"[[:space:]]*$' <<< "$cfg_env"; then
+            echo "RED: cargo's config does not set env.MIRIFLAGS to Tree Borrows; this step would run Stacked Borrows"; exit 1; fi
+          if [ -n "${MIRIFLAGS+set}" ] && ! grep -qE '^env\.MIRIFLAGS\.force[[:space:]]*=[[:space:]]*true[[:space:]]*$' <<< "$cfg_env"; then
+            echo "RED: MIRIFLAGS is set in the environment and replaces cargo's unforced [env] entry; this step would not run Tree Borrows"; exit 1; fi
+          cargo +nightly miri test --locked -p boyko-ecs --lib -- pc24_ 2>&1 | tee pc24_tb.log
+          grep -q 'running 7 tests' pc24_tb.log && grep -q 'test result: ok. 7 passed; 0 failed' pc24_tb.log
+      # The pure-compute sweep (every test target of the pure-compute packages under Miri) is NOT
+      # in this job: it lives in `.github/workflows/miri-sweep.yml`, weekly and on
+      # `workflow_dispatch` only, and it is not a merge gate. MEASURED 2026-10-10 it costs ~3-3.5 h
+      # sequential, which no blocking step can carry; that file's header says why and what
+      # finishing it takes. The steps above are the curated Miri gates, and they block.
+
+  # ---------------------------------------------------------------------------------------------
+  # loom — the permutation checker for the pool's wake protocol
+  # ---------------------------------------------------------------------------------------------
+  #
+  # `crates/boyko_threadpool/tests/loom_pool.rs` is where the pool's no-lost-wakeup property is
+  # PROVED rather than sampled: loom re-runs each model over every thread interleaving and every
+  # memory-model outcome its preemption bound admits, so a wake that is lost on one interleaving in
+  # a million — or only on a weakly-ordered CPU, never on x86 — is found by construction. Ordinary
+  # tests cannot establish that property at all. The whole file is `#![cfg(loom)]`, so a build
+  # WITHOUT `--cfg loom` links a test binary containing zero models; that is the exact vacuity this
+  # job's gate exists to make impossible (see the step's comment).
+  #
+  # WHY THIS JOB EXISTS: the models could not be run on the KE16 bench box for most of that
+  # campaign — every `--cfg loom` binary there died with STATUS_ACCESS_VIOLATION before `main`,
+  # even for `--help`. MEASURED 2026-09-02, that was never loom's fault and never `--cfg loom`'s:
+  # the `RUSTFLAGS` environment variable REPLACES `target.<triple>.rustflags` (the same rule the
+  # top-level `env:` block explains at length), and on that machine those config flags carry a
+  # `-Clink-arg=-B<lld>` that routes the mingw link through LLD. Spelling the loom flag as a bare
+  # `RUSTFLAGS="--cfg loom"` discarded it, binutils `ld` 2.42 then emitted a truncated import
+  # directory for the raw-dylib `kernel32.dll` descriptor that `generator` (loom's stack-switching
+  # dependency) needs — 4 symbols where LLD writes 40+, with `VirtualAlloc`, `VirtualProtect`,
+  # `GetSystemInfo` and `AddVectoredExceptionHandler` left unbound — and the mingw startup
+  # relocator faulted on them. Restoring that one flag makes every model build and pass locally, in
+  # both profiles. None of it applies to `ubuntu-latest`; this job is the durable, machine-
+  # independent home for the models regardless of what any developer box does to its linker.
+  #
+  # RUSTFLAGS: this job needs its own, and because the variable REPLACES rather than appends it has
+  # to repeat everything the tree relies on.
+  #   * `-D warnings` — repeated for the reason every other job repeats it. VERIFIED locally: the
+  #     crate and all six models compile clean under `--cfg loom -D warnings` (re-verified
+  #     2026-09-23, B3, when the sixth model joined the job).
+  #   * `-C target-cpu=x86-64-v3` — KEPT, unlike the `miri` job just above. Miri opts out because it
+  #     interprets MIR and never executes machine code, so the ISA buys it nothing; this job
+  #     executes a real binary, so the ISA baseline is a real property of the artifact under test.
+  #     It hides no coverage either way — `boyko_threadpool` contains no `cfg(target_feature)` arm,
+  #     every one in the workspace being in `boyko_physics` — but carrying it is what the top-level
+  #     note requires of any job that defines its own RUSTFLAGS, and it costs nothing here.
+  #
+  # PROFILE: release. Both profiles were built and run locally and both pass; release is ~4.8x
+  # faster on the models as they stand (0.96 s vs 4.63 s of model time) and is the profile the
+  # design's own invocation uses (`docs/threadpool/KE16-DESIGN-MEASUREMENT.md:388`). The engine's
+  # older note that "loom release binaries crash at startup" was the linker defect described above,
+  # not a property of the profile: release was re-verified green once the link flag was restored.
+  #
+  # LOOM_MAX_PREEMPTIONS=3 is the bound `docs/threadpool/KE16-DESIGN.md` §8 (the W-b row) and
+  # `KE16-DESIGN-MEASUREMENT.md:388` both specify. Measured wall time for the five models at that
+  # bound, release, on the bench box: ~1 s of model time after a ~75 s cold build (a 2026-09-02
+  # reading, taken before the sixth model joined).
+  loom:
+    name: loom (threadpool wake protocol)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--cfg loom -D warnings -C target-cpu=x86-64-v3"
+      LOOM_MAX_PREEMPTIONS: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: loom
+      # THE SIX MODEL NAMES ARE WRITTEN OUT **AND** THE COUNT IS PINNED, because neither half is
+      # sufficient on its own. Both vacuous forms were probed on 2026-09-02 and BOTH EXIT 0:
+      #   * built without `--cfg loom`, the harness prints `running 0 tests` and cargo exits 0;
+      #   * with one name in the `--exact` list renamed, the harness prints `running 4 tests` and
+      #     `1 filtered out`, and cargo STILL exits 0.
+      # So the run's own status is checked first, and then the two harness lines are pinned
+      # verbatim. `0 filtered out` is part of the pin deliberately: it goes red if the `--exact`
+      # list and the compiled model set stop being the same set, in EITHER direction.
+      #
+      # WHERE THE SIX CAME FROM: they are every `#[test]` in `tests/loom_pool.rs`, read off
+      # `loom_pool --list` on 2026-09-23 (B3). On 2026-09-02 the list held five: every model then
+      # not behind a KE16 tournament feature (`ke16-a5`, `ke16-w-gate`, `ke16-w-count`), kept out
+      # because `KE16-DESIGN.md` §4 deletes those switches once the verdict lands, and a permanent
+      # gate keyed to a temporary feature breaks on the commit that removes it. The verdict landed
+      # and Step App removed the features; the file's one surviving gated model,
+      # `loom_m1c_count_gated_completion_wakes_the_parked_worker_joiner`, is now unconditional. A
+      # default build therefore compiled six models while this job named five, and `0 filtered out`
+      # would have failed on the first run. The sixth is named here for that reason.
+      #
+      # ADDING A MODEL: add its name to the list AND bump both `6`s. Forgetting is not silent — an
+      # unlisted new model shows up as `1 filtered out`, and a listed one moves `running 6 tests` to
+      # `running 7 tests`; either way the pin fails. That friction IS the gate: it is what makes
+      # this job unable to pass while measuring nothing.
+      - name: cargo test --release --test loom_pool (6 models, count-pinned)
+        shell: bash
+        run: |
+          set +e
+          cargo test --locked --release -p boyko-threadpool --test loom_pool -- \
+            --test-threads=1 --exact \
+            loom_m1_fork_join_no_lost_wakeup \
+            loom_m2_idle_race_c_no_lost_wakeup \
+            loom_m2_calibration_no_producer_fence_is_lost \
+            loom_m2b_idle_cas_contention_exactly_one \
+            loom_m3_shutdown_handshake_worker_exits \
+            loom_m1c_count_gated_completion_wakes_the_parked_worker_joiner \
+            > loom.log 2>&1
+          status=$?
+          set -e
+          cat loom.log
+          if [ "$status" -ne 0 ]; then
+            echo "::error::loom models failed (cargo exit $status)"
+            exit "$status"
+          fi
+          if ! grep -qx "running 6 tests" loom.log; then
+            echo "::error::loom ran the wrong number of models -- expected the line 'running 6 tests'. A run that compiles the models and executes none exits 0; this is the check that forbids it."
+            exit 1
+          fi
+          if ! grep -q "^test result: ok\. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" loom.log; then
+            echo "::error::loom summary line did not match '6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' -- a model was ignored, filtered, or added without updating this job."
+            exit 1
+          fi
+          echo "loom: 6 models executed and passed at LOOM_MAX_PREEMPTIONS=$LOOM_MAX_PREEMPTIONS"
+      # loom_region: the SR region protocol's 34 models (`crates/boyko_threadpool/tests/loom_region.rs`,
+      # `docs/physics/perf-campaign/levers/scaling/02-SR-DESIGN.md` §1.5), added by ruling 17 (N5,
+      # 2026-10-05) with 15; CR-F0 (`docs/physics/perf-campaign/levers/CR-colour-passes/
+      # 01-CR-F-DESIGN.md`) restated them through the production role entries and added each one's
+      # `_fin` twin (the finisher advance) and LF1-LF4. Until ruling 17 they ran by hand only.
+      #
+      # HOW `--cfg loom` REACHES rustc HERE is not how the step above does it. The job's RUSTFLAGS
+      # REPLACES every config rustflags source, which is why that step has to repeat the ISA flag by
+      # hand. This step follows the tester's per-target loom recipe (`.claude/agents/tester.md`): it
+      # unsets RUSTFLAGS and passes the cfg through a `target."cfg(…)".rustflags` key, which Cargo
+      # JOINS with `.cargo/config.toml`'s `[target.x86_64-unknown-linux-gnu]` baseline instead of
+      # replacing it - and never through `build.rustflags`, which those per-triple entries override
+      # (measured 2026-09-17: every model then compiles to nothing, `running 0 tests`, exit 0). The
+      # key is `cfg(any(unix, windows))` rather than the recipe's per-host `cfg(windows)` /
+      # `cfg(unix)`, so that this exact command also runs on the owner's Windows box, where it was
+      # run green, against a red model, and without the cfg before it was committed. `-D warnings`
+      # rides in the same key, because the unset RUSTFLAGS was what carried it.
+      #
+      # PROFILE: debug, unlike the step above, because the file's header names it: M-R12's mutation
+      # and M-R13's M-W8 mutation are red only on debug assertions (the END-tag check, the open's
+      # claim check), so a release run would keep those two models green on the defects they exist
+      # for. BOUND: the job's LOOM_MAX_PREEMPTIONS=3. M-R1, M-R4, M-R15 and their `_fin` twins pin
+      # bound 1 inside the model (three participants gave no verdict at bound 2 in 12+ minutes); the
+      # other 28 run at 3. Measured 2026-10-07 (CR-F0), each model alone at bound 3, debug, windows
+      # msvc: the slowest is M-R6 at 52.7 s, the 34 sum to about 6 minutes.
+      #
+      # The names are written out AND the count is pinned, for the reasons the step above gives.
+      # ADDING A MODEL: add its name to the list AND bump all three `34`s.
+      - name: cargo test --test loom_region (34 models, count-pinned, debug)
+        shell: bash
+        run: |
+          unset RUSTFLAGS
+          set +e
+          cargo --config 'target."cfg(any(unix, windows))".rustflags=["--cfg","loom","-D","warnings"]' \
+            test --locked -p boyko-threadpool --test loom_region -- \
+            --test-threads=1 --exact \
+            m_r1_stage_writes_are_visible_to_the_next_stage \
+            m_r2_a_helper_that_only_sees_end_touches_nothing \
+            m_r3_the_orchestrator_alone_completes_the_region \
+            m_r4_each_block_is_claimed_exactly_once \
+            m_r5_late_helper_across_a_change_over \
+            m_r6_two_consecutive_regions_rebuild_after_the_join \
+            m_r7_batched_completion_orders_the_writes \
+            m_r8_home_lines_claim_each_block_exactly_once \
+            m_r9_ttas_never_admits_two_winners \
+            m_r10_an_orchestrator_unwind_releases_every_helper \
+            m_r11_epoch_claims \
+            m_r12_the_open_store_hides_the_previous_end \
+            m_r13_a_region_after_a_caught_poisoned_one_completes \
+            m_r14_a_hint_that_names_no_earlier_item_is_no_hint \
+            m_r15_the_poisoned_exit_end_carries_the_poison_to_a_third_participant \
+            m_r1_stage_writes_are_visible_to_the_next_stage_fin \
+            m_r2_a_helper_that_only_sees_end_touches_nothing_fin \
+            m_r3_the_orchestrator_alone_completes_the_region_fin \
+            m_r4_each_block_is_claimed_exactly_once_fin \
+            m_r5_late_helper_across_a_change_over_fin \
+            m_r6_two_consecutive_regions_rebuild_after_the_join_fin \
+            m_r7_batched_completion_orders_the_writes_fin \
+            m_r8_home_lines_claim_each_block_exactly_once_fin \
+            m_r9_ttas_never_admits_two_winners_fin \
+            m_r10_an_orchestrator_unwind_releases_every_helper_fin \
+            m_r11_epoch_claims_fin \
+            m_r12_the_open_store_hides_the_previous_end_fin \
+            m_r13_a_region_after_a_caught_poisoned_one_completes_fin \
+            m_r14_a_hint_that_names_no_earlier_item_is_no_hint_fin \
+            m_r15_the_poisoned_exit_end_carries_the_poison_to_a_third_participant_fin \
+            lf1_finisher_resets_before_publish \
+            lf2_inline_boundary_stays_on_participant_0 \
+            lf3_helper_panic_while_participant0_waits \
+            lf4_a_helper_advances \
+            > loom_region.log 2>&1
+          status=$?
+          set -e
+          cat loom_region.log
+          if [ "$status" -ne 0 ]; then
+            echo "::error::loom_region models failed (cargo exit $status)"
+            exit "$status"
+          fi
+          if ! grep -qx "running 34 tests" loom_region.log; then
+            echo "::error::loom_region ran the wrong number of models -- expected the line 'running 34 tests'. A build without --cfg loom compiles zero models and exits 0; this is the check that forbids it."
+            exit 1
+          fi
+          if ! grep -q "^test result: ok\. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" loom_region.log; then
+            echo "::error::loom_region summary line did not match '34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' -- a model was ignored, filtered, or added without updating this job."
+            exit 1
+          fi
+          echo "loom_region: 34 models executed and passed at LOOM_MAX_PREEMPTIONS=$LOOM_MAX_PREEMPTIONS"

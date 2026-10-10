@@ -3,7 +3,7 @@ name = "boyko_demo"
 version = "0.1.0"
 edition = "2024"
 publish = false
-
+license.workspace = true
 [[bin]]
 name = "boyko_demo"
 path = "src/main.rs"
@@ -15,6 +15,11 @@ path = "src/main.rs"
 # the native work-stealing pool that `Schedule::run` fans `par_iter_mut` across.
 boyko-ecs = { path = "../boyko_ecs" }
 boyko-macros = { path = "../boyko_macros" }
+# Profiling rung 15 — the game side of the two-region split. NOT a new node in the graph:
+# `boyko-ecs` above already depends on `boyko_diag`, so it is compiled either way. The edge exists
+# so this crate can write `profiling_partition!(User)` at its root and declare its own zones, which
+# is exactly what a title does.
+boyko-diag = { path = "../boyko_diag" }
 boyko-threadpool = { path = "../boyko_threadpool" }
 
 # eframe brings egui + winit + wgpu integration in one versioned bundle. Reach
@@ -25,11 +30,25 @@ boyko-threadpool = { path = "../boyko_threadpool" }
 # keep `wgpu` + `default_fonts`.
 eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts"] }
 bytemuck.workspace = true
-log = "0.4"
+# L8b: the engine's own logger replaces the third-party `log = "0.4"` facade that stood here, with
+# `env_logger` (native) and `console_log` (wasm) as its two backends. A tidy check now refuses any
+# DIRECT `log`/`tracing` declaration in a workspace manifest; it cannot refuse a transitive one,
+# and `log 0.4` is still in this crate's build graph through eframe/egui/wgpu regardless.
+#
+# TWO CONSEQUENCES, recorded rather than glossed:
+#
+# * NATIVE: wgpu and winit emit through the `log` facade, and `env_logger` was the only thing
+#   routing it anywhere. Adapter selection and wgpu validation messages now go nowhere. That is a
+#   real loss on the platform that works, and the replacement -- a `log`-facade bridge feeding
+#   `boyko_log` -- is not this rung's and does not exist yet.
+# * WASM: `console_log` was the only channel that reached the browser console, and `boyko_log`'s
+#   console sink writes to `stderr`, which is a no-op on `wasm32-unknown-unknown`. So `E3001` is
+#   emitted and unreachable there. It costs nothing TODAY because the wasm build is blocked
+#   upstream in `boyko_ecs` (32-bit const-eval on the layout asserts) and its CI leg is explicitly
+#   non-fatal -- but whoever unblocks wasm owes the console sink a `web_sys::console` arm, or the
+#   blank-canvas failure this site exists to explain goes back to being silent.
+boyko-log = { path = "../boyko_log" }
 rand = "0.9"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-env_logger = "0.11"
 
 # Native-only test/bench tooling (Phase 20.1 W4). Target-gated so the wasm32
 # check graph never resolves them: criterion drives `benches/gpu_pack.rs` (the
@@ -37,6 +56,15 @@ env_logger = "0.11"
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true
+# Rung B2, the id census and G-RES over the demo's world (`tests/g_res_id_census_demo_world.rs`):
+# the test builds a replica of `DemoApp::new`'s world half (the eframe half needs a window), and a
+# drift guard PARSES `src/app.rs` so the replica goes RED the moment the demo's world construction
+# changes. `quote` prints the parsed statements and `proc-macro2` names their token types. Not new
+# nodes in the graph: `boyko-macros` (a `[dependencies]` entry above) already pulls the same pinned
+# `syn`, `quote` and `proc-macro2`.
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
 
 # Phase 20.1 G2 — 16 B baseline vs 24 B interpolated pack mirror (★R1-4:
 # baseline measured FIRST; gate = 24 B <= 5 ns/row absolute if baseline <= 3,
@@ -56,8 +84,9 @@ harness = false
 #   eframe 0.34.3 re-exports `wasm_bindgen` + `web_sys` but NOT
 #   `wasm_bindgen_futures`, so it is declared here, pinned to eframe's `0.4`
 #   minor to keep a single version in the graph.
-# * `console_error_panic_hook` + `console_log` surface panics/logs in the
-#   browser devtools.
+# * `console_error_panic_hook` surfaces panics in the browser devtools.
+#   `console_log` went with the `log` facade at L8b -- see the note beside
+#   `boyko-log` above for what that costs and who owes the replacement.
 # * `getrandom`'s `wasm_js` feature wires `rand`'s entropy to the Web Crypto API.
 #   getrandom 0.3 ALSO requires the `--cfg getrandom_backend="wasm_js"` rustflag
 #   (set in `.cargo/config.toml`) — the feature alone is insufficient (it emits a
@@ -66,5 +95,7 @@ harness = false
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 console_error_panic_hook = "0.1"
-console_log = "1"
 getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[lints]
+workspace = true

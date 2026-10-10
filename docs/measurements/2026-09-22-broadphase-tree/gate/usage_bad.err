@@ -1,0 +1,2 @@
+jolt_parity_pyramid: --broadphase: expected allpairs|tree|grid, got Some("foo")
+usage: jolt_parity_pyramid --scene jolt|rest|s16 [--workers W] [--steps N] [--window A..B] [--gap G] [--solver colored|reference] [--cfg a|b|default] [--parallel-solve] [--parallel-np on|off] [--broadphase allpairs|tree|grid] [--sleeping] [--threshold T] [--frozen-by K] [--arm-profiler] [--canary-frac F --canary-ref-ns T] [--csv PATH] [--pose-out PATH] [--expect-pose PATH] [--label TEXT]

@@ -1,5 +1,7 @@
-//! The swappable solver seam — the [`RigidSolver`] trait + the default
-//! [`NoopSolver`] (plan D2), plus the real [`SoftStepSolver`] (P2 W2).
+//! The swappable solver seam — the [`RigidSolver`] trait + the foundation
+//! [`NoopSolver`] (plan D2), the reference [`SoftStepSolver`] (P2 W2), and the
+//! colored [`ColoredSoftStepSolver`] that the default world runs
+//! ([`DefaultRigidSolver`], 2026-09-18).
 //!
 //! # Static dispatch, deliberately NOT object-safe (D2)
 //!
@@ -32,6 +34,7 @@ pub mod colored;
 pub mod contact;
 pub mod simd;
 pub mod soft_step;
+pub(crate) mod warm_records;
 pub mod warm_start;
 
 use boyko_ecs::ecs::core::resources::resource::Resource;
@@ -42,6 +45,23 @@ use crate::resources::{PhysicsConfig, SolverScratch};
 
 pub use colored::ColoredSoftStepSolver;
 pub use soft_step::SoftStepSolver;
+pub use crate::row_identity::WarmSeedStats;
+
+/// The solver the default physics world runs: the colored TGS-Soft solve
+/// ([`ColoredSoftStepSolver`]) with the O7 AVX2 cohort kernel on
+/// ([`PhysicsConfig::simd_solve`] defaults to `true`). Owner decision, 2026-09-18.
+///
+/// Rust has no default type parameters on functions, so this alias is the single
+/// place the default is named: `add_physics_systems::<DefaultRigidSolver>` (or any
+/// other `add_physics_*` entry) wires the constraint graph and the colored solve
+/// stage, because the plugin selects the solve stage from the solver TYPE.
+///
+/// The previous default, [`SoftStepSolver`], stays in the tree as the reference
+/// oracle and is still selected by naming it: `add_physics_*::<SoftStepSolver>`.
+/// Its converged values differ from the colored solve's (a different, equally
+/// valid Gauss-Seidel sweep order), so the two are compared by tolerance, never by
+/// bits.
+pub type DefaultRigidSolver = ColoredSoftStepSolver;
 
 /// The swappable rigid-body solver seam (plan D2).
 ///
@@ -60,6 +80,15 @@ pub trait RigidSolver: Resource + 'static {
     ///
     /// `config` carries the global tunables (`substeps`, `dt`, the soft-constraint
     /// set); `manifolds` is the deterministic, dense contact buffer.
+    ///
+    /// A solver that warm-starts must honour [`PhysicsConfig::warm_start`]: it seeds a
+    /// step's contacts from stored impulses only when `config.warm_start` is `true`, and
+    /// solves the step cold otherwise (L10 D5b). This is documented, not enforced — the
+    /// pipeline cannot see inside the solve, so a solver that ignores the field keeps
+    /// warm-starting after `warm_start = false`. The pipeline passes the configuration this
+    /// step's broadphase latched (L10 D9b), so a write reaches the solve at the next
+    /// broadphase. The shipped [`ColoredSoftStepSolver`] and [`SoftStepSolver`] honour it
+    /// (each ANDs it with its own setup flag, `with_warm_start`).
     fn solve(
         &mut self,
         config: &PhysicsConfig,
@@ -69,7 +98,7 @@ pub trait RigidSolver: Resource + 'static {
 
     /// Returns `true` when this solver does no work — lets the step system
     /// early-out before touching the scratch/manifolds (the 0%-gate for the
-    /// foundation's default [`NoopSolver`]). Defaults to `false`.
+    /// foundation [`NoopSolver`]). Defaults to `false`.
     #[inline]
     fn is_noop(&self) -> bool {
         false
@@ -91,7 +120,7 @@ pub trait RigidSolver: Resource + 'static {
     }
 }
 
-/// The default no-op solver — proves the seam compiles + integrates without
+/// The foundation no-op solver — proves the seam compiles + integrates without
 /// shipping any real solve (plan D2).
 ///
 /// [`is_noop`](RigidSolver::is_noop) returns `true`, so

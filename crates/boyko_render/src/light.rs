@@ -22,6 +22,8 @@
 
 use core::f32::consts::PI;
 
+use boyko_ecs::ecs::core::system::{Res, ResMut};
+use boyko_log::codes::{OnceSite, W2207};
 use boyko_macros::{Component, Resource};
 use boyko_scene::{GlobalTransform, Transform};
 
@@ -35,6 +37,11 @@ pub const LIGHT_KIND_POINT: u32 = 1;
 pub const LIGHT_KIND_SPOT: u32 = 2;
 /// Tag value for a [`SkyLight`] (L0a resolve path — hemisphere ambient).
 pub const LIGHT_KIND_SKY: u32 = 3;
+/// The kind-tag bits of a [`GpuLight::dir_kind`]`.w` kind word — mirrors `light_table.hlsli`'s
+/// `LIGHT_KIND_MASK`. The tag lives in bits `0..16`; a point/spot row carries its shadow fields above
+/// them (bit 16 = the SDF-caster flag, bits `17..22` = the atlas slot), so every `kind ==` compare
+/// masks with this first, exactly as the shaders' `light_kind()` does.
+pub const LIGHT_KIND_MASK: u32 = 0xFFFF;
 
 // ---- L1 cluster constants (mirror docs/LIGHTING-L0-L1-PLAN.md Decision 6) -------------
 
@@ -48,6 +55,24 @@ pub const CLUSTER_DIM_Z: u32 = 24;
 pub const CLUSTER_COUNT: u32 = CLUSTER_DIM_X * CLUSTER_DIM_Y * CLUSTER_DIM_Z;
 /// Hard cap on the GPU light table (one `MAX_LIGHTS * 48 B` SSBO ≈ 48 KiB, L2-resident).
 pub const MAX_LIGHTS: u32 = 1024;
+
+/// VB-P1e H2 (design D6): the hierarchical cull's groupshared coarse mask, `HIER_MASK_WORDS`
+/// 32-bit words (`cluster_cull.hlsl`'s `#define HIER_MASK_WORDS 32u`), one bit per light-table
+/// row relative to `l0a_count`.
+pub const HIER_MASK_WORDS: u32 = 32;
+
+/// D6's load-bearing EQUALITY (not `<=`): the hier mask must cover the light table's point/spot
+/// capacity EXACTLY, because D7's single clamp `ps_n <= HIER_MASK_WORDS * 32` bounds BOTH the
+/// groupshared mask WRITE and the device table READ. Under `<=` (say a wider `MAX_LIGHTS` against
+/// the same 32 mask words) `ps_room` would exceed the table's row count and that one clamp would
+/// no longer bound the device read. A future `MAX_LIGHTS` change is therefore a compile error
+/// here, forcing a shader edit (widen `HIER_MASK_WORDS`) and a `.spv` re-bake — the intended price
+/// of one clamp covering two bounds (`docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` D6).
+const _: () = assert!(
+    MAX_LIGHTS == HIER_MASK_WORDS * 32,
+    "invariant: the hier mask covers the table EXACTLY — one clamp bounds both the groupshared \
+     write and the device read"
+);
 /// L1 per-froxel light-index cap (clamp-and-drop above this — Decision 6 / Algorithm D).
 pub const MAX_LIGHTS_PER_CLUSTER: u32 = 256;
 /// L1 flat light-index-list capacity (the `light_index` SSBO length, in `u32`s). The cull
@@ -84,7 +109,9 @@ pub const fn cluster_index(x: u32, y: u32, z: u32) -> u32 {
 ///
 /// - `dir_kind` (off 0): `xyz` = the light's world axis (DIRECTIONAL: the direction
 ///   TO the light, `dot(n, dir)`; SPOT: the SHINE axis, `dot(-l, dir)`) | unused
-///   (POINT); `w` = bit-cast `u32` kind tag ([`LIGHT_KIND_DIRECTIONAL`] etc.).
+///   (POINT); `w` = bit-cast `u32` kind WORD: the kind tag ([`LIGHT_KIND_DIRECTIONAL`] etc.) in
+///   bits `0..16`, and on a POINT/SPOT row the shadow-atlas fields above it — bit 16 set iff the
+///   row holds a real slot, the 5-bit slot in bits `17..22`, born [`SLOT_NONE_FIELD`].
 /// - `pos_range` (off 16): `xyz` = world position (POINT/SPOT) | unused (DIRECTIONAL);
 ///   `w` = cull-sphere radius (POINT/SPOT) | `+inf` (DIRECTIONAL).
 /// - `color_cone` (off 32): `rgb` = LINEAR color × baked intensity (directional =
@@ -95,7 +122,9 @@ pub const fn cluster_index(x: u32, y: u32, z: u32) -> u32 {
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GpuLight {
-    /// `xyz` = light world axis (DIRECTIONAL: to-light; SPOT: shine axis), `w` = bit-cast kind tag.
+    /// `xyz` = light world axis (DIRECTIONAL: to-light; SPOT: shine axis), `w` = bit-cast kind word
+    /// (the kind tag, plus the atlas-slot fields on a POINT/SPOT row — compare it as `to_bits()`,
+    /// never as an `f32`: the words are subnormal).
     pub dir_kind: [f32; 4],
     /// `xyz` = world position (POINT/SPOT), `w` = cull radius (`+inf` directional).
     pub pos_range: [f32; 4],
@@ -107,6 +136,22 @@ pub struct GpuLight {
 /// shader's `static const uint GPU_LIGHT_WORDS = 12u`; a desync is a build error
 /// host-side (the const-asserts below) and a documented pin shader-side.
 pub const GPU_LIGHT_WORDS: usize = core::mem::size_of::<GpuLight>() / 4;
+
+/// The atlas-slot field of a point/spot kind word holding the "no map" sentinel: `0x1F` in bits
+/// `17..22`, i.e. [`SLOT_NONE`](crate::shadow_atlas::SLOT_NONE)` <<
+/// `[`ATLAS_SLOT_SHIFT`](crate::shadow_atlas::ATLAS_SLOT_SHIFT) `== 0x003E_0000`. Bit 16 and the
+/// kind tag are clear.
+///
+/// Every point/spot row is BORN with it: [`GpuLight::from_point`] / [`GpuLight::from_spot`] OR it
+/// into the kind tag, and the light-table fold only ever overwrites it with a real assignment
+/// ([`pack_atlas_slot`](crate::shadow_atlas::pack_atlas_slot)). The shader samples the atlas by
+/// this field alone (header bit 3, then `light_atlas_slot(kind) != SLOT_NONE`), so a row built
+/// with `0` here would read as slot 0 — another light's layer — on an armed frame.
+///
+/// A literal here, so the row constructor does not depend on the shadow-policy module;
+/// [`shadow_atlas`](crate::shadow_atlas) pins it to `SLOT_NONE << ATLAS_SLOT_SHIFT` at compile
+/// time. The directional and sky rows keep a `0` field, which nothing reads.
+pub const SLOT_NONE_FIELD: u32 = 0x1F << 17;
 
 // ---- std430 / repr(C) layout fingerprint (mirrors the shader's GpuLight) -------------
 //
@@ -140,7 +185,9 @@ const _: () = assert!(GPU_LIGHT_WORDS == 12, "GPU_LIGHT_WORDS must equal the sha
 ///   point/spot rows that need `gViewT`/`P` (L0b).
 /// - `sky_diffuse` (off 16): ambient hemisphere diffuse `rgb` (replaces the resolve's
 ///   `SKY_DIFFUSE` constant), `w` unused.
-/// - `sky_spec` (off 32): ambient specular `rgb` (replaces `SKY_SPEC`), `w` unused.
+/// - `sky_spec` (off 32): ambient specular `rgb` (replaces `SKY_SPEC`), `w` = Render
+///   P7-Q2's `ssao_mode` gate (bit-cast `u32`, `0`/`1` — the resolve's SSAO-combine
+///   switch; see [`LightingConfig::ssao_mode`]).
 /// - `cluster_params` (off 48): L1 froxel dims `x/y/z` (bit-cast `u32`), `w` =
 ///   bit-cast `clusters_enabled` (`u32`; `0` ⇒ L1 OFF, loop the flat table). **Zero in
 ///   L0** (L1 fills these).
@@ -152,7 +199,7 @@ pub struct LightHeaderGpu {
     pub counts_exposure: [f32; 4],
     /// Ambient hemisphere diffuse `rgb`, `w` unused.
     pub sky_diffuse: [f32; 4],
-    /// Ambient specular `rgb`, `w` unused.
+    /// Ambient specular `rgb`, `w` = the Render P7-Q2 `ssao_mode` gate (bit-cast `u32`).
     pub sky_spec: [f32; 4],
     /// L1 cluster params (zero in L0): `[bitcast(dim_x), bitcast(dim_y), bitcast(dim_z),
     /// bitcast(clusters_enabled)]`.
@@ -362,6 +409,39 @@ pub enum ClusterSelectMode {
     Auto,
 }
 
+// ---- Light-header word 7 bit budget (the shared shadow/GI-gate + output-stage word) --
+//
+// Word 7 (`sky_diffuse.w` — the header lane NEVER read by the L0a sky ambient, which
+// only consumes `sky_diffuse.rgb`, words 4..6) is ONE spare std430 word repurposed to
+// carry every resolve-side boolean gate / small enum this crate has added since P6 R1,
+// rather than growing `LIGHT_HEADER_WORDS` (which would shift `LIGHT_HEADER_BASE` and
+// re-encode every golden). Each sub-field below is independently masked (the "BIT-N
+// INDEPENDENCE PIN" proven per-field in `light_table.hlsli`), so setting one never
+// perturbs another, and every sub-field defaults to `0` on a config that never touches
+// it — the shared 0%-gate anchor every pre-existing golden pins. THIS is the
+// authoritative map; the per-field detail (exact mask/shift, 0%-gate proof) lives at
+// each site named below.
+//
+//   bits     field                   owning Rust file
+//   0        shadow_mode             goldens.rs (`GoldenLightHeader`) — predates this
+//                                     type; no `LightingConfig` field owns it
+//   1        contact_shadow_mode     goldens.rs (`GoldenLightHeader`) — ditto
+//   2        csm_mode                this file: CSM_MODE_BIT / LightingConfig::csm_shadows
+//   3        punctual_shadow_mode    this file: PUNCTUAL_MODE_BIT / LightingConfig::punctual_shadows
+//   4        ddgi_mode               this file: DDGI_MODE_BIT / LightingConfig::ddgi_indirect
+//   5..6     vb_sdf_mesh (SV0)       this file: VB_SDF_MESH_MODE_SHIFT/_MASK /
+//                                     LightingConfig::vb_sdf_mesh_shadow (bit 5) +
+//                                     ::vb_sdf_mesh_ao (bit 6) — two INDEPENDENT terms
+//   7        (free)                  —
+//   8..11    tonemap operator        this file: TONEMAP_MODE_SHIFT/_MASK / LightingConfig::tonemapper
+//   12..19   terminator softening    this file: TERMINATOR_SOFT_SHIFT/_MASK / LightingConfig::terminator_softening
+//   20..31   (free)                  —
+//
+// Shader-side decode: `light_table.hlsli`'s `load_shadow_mode` / `load_contact_shadow_mode`
+// / `load_csm_mode` / `load_punctual_shadow_mode` / `load_ddgi_mode` / `load_tonemap_mode`
+// / `load_terminator_softening` cluster. Host packing of bits 0/1: `goldens.rs`'s
+// `GoldenLightHeader` (the P6 R1 / Shadow-Phase-3 literals, near its other word-7 writers).
+
 /// The bit position of the resolve's `csm_mode` gate inside light-header word 7
 /// (`sky_diffuse.w`, never read by the L0a sky ambient). Mirrors the shader's
 /// `load_csm_mode` (`light_table.hlsli`: `(LightBuf[7] >> 2) & 1`); bits 0/1/3 of the
@@ -386,10 +466,97 @@ pub const PUNCTUAL_MODE_BIT: u32 = 3;
 /// every pre-SDFDDGI scene ⇒ word 7 bit 4 stays 0, the byte-identical 0%-gate.
 pub const DDGI_MODE_BIT: u32 = 4;
 
+/// Word-7 sub-field for VB-SV0's SDF-on-mesh gate: bits 5..6 (2 bits). Bit 5 arms the SDF
+/// soft shadow, bit 6 the 5-tap contact AO, and they arm INDEPENDENTLY — SV0 is two terms,
+/// not one, and giving them separate bits is what lets each half's arming gate be shown to
+/// move pixels ON ITS OWN instead of hiding behind the other. Above the shadow/GI gate bits
+/// (0..4) and below the tonemap sub-field (8..11); bit 7 stays free. Mirrors the shader's
+/// `load_vb_sdf_mesh_mode` (`light_table.hlsli`: `(LightBuf[7] >> 5) & 3`). `0` on every
+/// pre-SV0 scene ⇒ both gated blocks are structurally skipped ⇒ byte-identical (the 0%-gate).
+pub const VB_SDF_MESH_MODE_SHIFT: u32 = 5;
+/// The 2-bit mask for the VB-SV0 sub-field (bits [`VB_SDF_MESH_MODE_SHIFT`]..+2).
+pub const VB_SDF_MESH_MODE_MASK: u32 = 0x3;
+/// Bit 5 within the [`VB_SDF_MESH_MODE_SHIFT`] sub-field — the SDF soft shadow on mesh.
+/// Mirrors the shader's `VB_SDF_MESH_SHADOW_BIT`.
+pub const VB_SDF_MESH_SHADOW_BIT: u32 = 1;
+/// Bit 6 within the [`VB_SDF_MESH_MODE_SHIFT`] sub-field — the 5-tap contact AO on mesh.
+/// Mirrors the shader's `VB_SDF_MESH_AO_BIT`.
+pub const VB_SDF_MESH_AO_BIT: u32 = 2;
+
+// The bit-position pin, at COMPILE time rather than in a `debug_assert!`. The idiom
+// `ddgi_config.rs:288-289` uses puts the pin at the single production writer, but SV0's writer
+// is rung S4's resolver and does not exist yet — and a `debug_assert!` would in any case be
+// compiled out of the release profile the goldens run under (the same trap the plan's R11
+// tripwire had to be re-sited out of). A `const` assertion holds in every profile and needs no
+// writer to exist. It reds the moment either the sub-field or a neighbour is moved onto it.
+const _: () = assert!(
+    VB_SDF_MESH_MODE_SHIFT == 5 && VB_SDF_MESH_MODE_MASK == 0x3,
+    "invariant: the VB-SV0 header gate is word-7 bits 5..6"
+);
+const _: () = assert!(
+    VB_SDF_MESH_MODE_SHIFT > DDGI_MODE_BIT
+        && VB_SDF_MESH_MODE_SHIFT + 2 <= TONEMAP_MODE_SHIFT,
+    "invariant: the VB-SV0 sub-field must sit strictly between the DDGI gate bit and the \
+     tonemap sub-field, with no overlap on either side"
+);
+
+/// The resolve's output-stage tonemap curve — packed into light-header word 7
+/// bits [`TONEMAP_MODE_SHIFT`..+4) by [`LightHeaderGpu::new`]. `#[repr(u32)]` so
+/// `self as u32` is the wire value. `Aces` = 0 ⇒ zero bits ⇒ word 7 byte-identical
+/// on every default scene (the 0%-gate). All curves are linear-in → linear-\[0,1\]-out;
+/// the shared manual OETF (`pow(x, 1/2.2)`) is applied after, unchanged.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Tonemapper {
+    /// Stephen Hill ACES-fitted (today's curve). The BYTE-IDENTICAL default.
+    #[default]
+    Aces = 0,
+    /// Khronos PBR Neutral — LUT-free, hue-preserving, gentle toe (no shadow crush).
+    Neutral = 1,
+    /// Reinhard-Jodie — cheap hybrid luminance/per-channel, hue-preserving.
+    ReinhardJodie = 2,
+}
+
+/// Word-7 sub-field for the tonemap mode: bits 8..11 (4 bits, 16 operators).
+/// Above the shadow/GI gate bits (0..4); bits 5..7 stay free.
+pub const TONEMAP_MODE_SHIFT: u32 = 8;
+/// The 4-bit mask for the tonemap sub-field (bits [`TONEMAP_MODE_SHIFT`]..+4).
+pub const TONEMAP_MODE_MASK: u32 = 0xF;
+
+/// Word-7 sub-field for the diffuse terminator-softening amount: bits 12..19 (8 bits,
+/// 0..255 = softening 0.0..1.0). Above the tonemap sub-field (8..11); bits 20..31 stay
+/// free. 0 ⇒ OFF ⇒ byte-identical (the 0%-gate).
+pub const TERMINATOR_SOFT_SHIFT: u32 = 12;
+/// The 8-bit mask for the terminator-softening sub-field (bits
+/// [`TERMINATOR_SOFT_SHIFT`]..+8).
+pub const TERMINATOR_SOFT_MASK: u32 = 0xFF;
+
 /// The global lighting config (Decision 3) — a `World`-singleton resource. `exposure`
 /// defaults to identity (`1.0`) and `sky_*` default to the resolve's old `SKY_*`
 /// constants, so a world that never inserts a non-default config reproduces today's
 /// image (the 0%-gate anchor).
+///
+/// # Field taxonomy
+///
+/// - **Output stage** (applied once, after all lighting is accumulated):
+///   [`exposure`](Self::exposure), [`tonemapper`](Self::tonemapper),
+///   [`terminator_softening`](Self::terminator_softening).
+/// - **Sky ambient** (the L0a hemisphere term): [`sky_diffuse`](Self::sky_diffuse),
+///   [`sky_spec`](Self::sky_spec).
+/// - **Cluster policy** (L1 froxel cull gate): [`clusters_enabled`](Self::clusters_enabled),
+///   [`cluster_select`](Self::cluster_select).
+/// - **Derived cluster geometry** (owner-set only in a harness that holds the lock-step
+///   contract; the production writer is
+///   [`sync_cluster_light_gate`](crate::light::sync_cluster_light_gate)):
+///   [`cluster_z_scale`](Self::cluster_z_scale), [`cluster_z_bias`](Self::cluster_z_bias),
+///   [`cluster_packed_dims`](Self::cluster_packed_dims).
+/// - **Derived gates** (owner-set only in a harness that holds their lock-step
+///   contract; production writers are the named sync systems, see each field's own
+///   doc): [`csm_shadows`](Self::csm_shadows), [`punctual_shadows`](Self::punctual_shadows),
+///   [`ddgi_indirect`](Self::ddgi_indirect).
+///
+/// See the "Light-header word 7 bit budget" table above this type for exactly which
+/// word-7 bits each packed field occupies.
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
 pub struct LightingConfig {
     /// Global exposure — the FINAL multiply on accumulated linear radiance. DEFAULT 1.0
@@ -406,6 +573,45 @@ pub struct LightingConfig {
     /// Who owns `clusters_enabled` (P1). DEFAULT [`ClusterSelectMode::Manual`] → the
     /// gate stays owner-controlled and the policy is a no-op (the 0%-gate).
     pub cluster_select: ClusterSelectMode,
+    /// The L1 exp-Z slice scale ([`ClusterConfig::z_scale`]), packed into light-header
+    /// `cluster_params[0]` by [`LightHeaderGpu::new`]. DEFAULT `0.0` (the byte-identical
+    /// 0%-gate — matches `LightHeaderGpu::new`'s pre-VB-P1b-0 hardcoded zero lane).
+    ///
+    /// # Single-writer / lock-step contract (VB-P1b-0, scoped by W1)
+    ///
+    /// DERIVED state, not owner state: its single production writer is
+    /// [`sync_cluster_light_gate`], which keeps this lane in lock-step with the LIVE
+    /// [`ClusterConfig`] the owner authored. **The invariant is "non-zero IFF the VB froxel
+    /// cull is boot-armed"** — gated on
+    /// [`ResolvedRenderPath::froxel_light_cull`](crate::render_path_config::ResolvedRenderPath::froxel_light_cull)
+    /// (`clusters_enabled && path == VisibilityBuffer`, resolved ONCE at boot), NOT on
+    /// [`Self::clusters_enabled`] alone: this lane is consumed by the VB `#ifdef FROXEL`
+    /// resolve (`vb_resolve.comp.hlsl`/`vb_shade.comp.hlsl`), AND ALSO — unconditionally in
+    /// `deferred_pbr.hlsl`, and at runtime in ForwardPlus's `forward_opaque_froxel.fs.hlsl` —
+    /// by the non-VB resolves, whose `ClusterGrid`/`LightIndexList` bindings fall back to the
+    /// light-table buffer as a placeholder whenever the real L1 cull buffers are not built
+    /// (true on every current Deferred/ForwardPlus boot). Gating on `froxel_light_cull` keeps
+    /// this lane's dims at `0` on every non-VB-armed path — the SAME pre-campaign state
+    /// (`LightHeaderGpu::new` hardcoded it to zero) — so a `clusters_enabled == true` world
+    /// under Deferred/ForwardPlus (an owner mistake, or `ClusterSelectMode::Auto` banding) is
+    /// STILL byte-identical to before this campaign, never a new OOB surface. Set this
+    /// manually only in a harness holding the SAME lock-step (the shadow/CSM/DDGI gates' own
+    /// discipline).
+    pub cluster_z_scale: f32,
+    /// The L1 exp-Z slice bias ([`ClusterConfig::z_bias`]), packed into light-header
+    /// `cluster_params[1]`. Same single-writer contract as [`Self::cluster_z_scale`]
+    /// (including the `froxel_light_cull`-scoped armed condition). DEFAULT `0.0` (the
+    /// 0%-gate).
+    pub cluster_z_bias: f32,
+    /// The L1 froxel grid dims, packed (`dim_x | dim_y<<8 | dim_z<<16`,
+    /// [`ClusterConfig::packed_dims`]) into light-header `cluster_params[2]`. Same
+    /// single-writer contract as [`Self::cluster_z_scale`] (including the
+    /// `froxel_light_cull`-scoped armed condition). DEFAULT `0` (the 0%-gate — a zero-dims
+    /// header reads as `dim_x == dim_y == dim_z == 0`; the VB `#ifdef FROXEL` resolve treats
+    /// this as unarmed by construction — see `LightHeaderGpu::new`'s doc — and a non-VB
+    /// resolve reading it while `clusters_enabled` happens to be `true` sees the SAME
+    /// zero-dims state it always has, pre-campaign).
+    pub cluster_packed_dims: u32,
     /// The resolve's CSM sample gate — packed into light-header word 7 bit
     /// [`CSM_MODE_BIT`] by [`LightHeaderGpu::new`]. DEFAULT `false` (word 7 stays 0.0 —
     /// the byte-identical 0%-gate).
@@ -414,15 +620,21 @@ pub struct LightingConfig {
     ///
     /// This is DERIVED state, not owner state: when the CSM composition is wired
     /// (`CsmPlugin` + the caster gather), its single writer is
-    /// [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate), which keeps the
-    /// header gate in lock-step with the depth-pass activation predicate ("a fitted sun
-    /// AND live casters exist") to within 1–2 frames. Layout soundness under that lag
-    /// does NOT come from timing (review R4-W1): the windowed host boot-transitions the
-    /// cascade map to `SHADER_READ_ONLY_OPTIMAL` once at scene boot (closing the
-    /// gate-ON-but-never-rendered class) and uploads the CURRENT `ResolvedCsm` UBO
-    /// every frame (a DISABLED fit early-outs the resolve) — see the sync system's
-    /// layout-soundness note. Set this manually only in hosts that hold the same two
-    /// guarantees (the showcase harness discipline).
+    /// [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate), which writes
+    /// [`ResolvedCsm::depth_pass_armed`](crate::csm_config::ResolvedCsm::depth_pass_armed)
+    /// — the host's own arming call — and so tracks the depth pass to within 1–2 frames, trailing
+    /// it OR leading it. A leg set without mesh-shadow producers never arms it (the fit itself is
+    /// DISABLED). Value soundness under the disagreement comes from the host, not from timing:
+    /// every frame whose pass is not recorded uploads the DISABLED cascade UBO, so the resolve
+    /// early-outs before reading a cascade (see the sync system's "The header can trail OR lead
+    /// the host" note). The boot layout seed only makes the binding's LAYOUT valid. A manual
+    /// write in a composed app stands until the sync system next runs and overwrites a value
+    /// that disagrees with the arming, so it can make the header LEAD the host for any frame
+    /// `collect_lights` packs before that: `taa_jitter_eval`'s hand-seed does exactly that on
+    /// frame 0 (measured 2026-09-18), and the DISABLED upload is what makes that frame defined.
+    /// Set this manually only in hosts that sample no cascade they did not render this frame
+    /// (the windowed runner guarantees it through that upload; the showcase harness by
+    /// discipline).
     pub csm_shadows: bool,
     /// The resolve's punctual (spot/point atlas) sample gate — packed into light-header
     /// word 7 bit [`PUNCTUAL_MODE_BIT`] by [`shadow_gate_word`](Self::shadow_gate_word).
@@ -433,11 +645,11 @@ pub struct LightingConfig {
     ///
     /// Like `csm_shadows`, this is DERIVED state: its single production writer is
     /// [`sync_punctual_light_gate`](crate::shadow_atlas::sync_punctual_light_gate), which
-    /// keeps the header gate in lock-step with the depth-pass activation predicate ("a
-    /// fitted atlas AND live casters exist") to within 1–2 frames. Layout soundness under
-    /// that lag rests on the SAME two host guarantees the CSM path documents (boot-transition
-    /// the atlas array to `SHADER_READ_ONLY_OPTIMAL` once + upload the CURRENT
-    /// `ResolvedShadowAtlas` UBO every frame), not on this system's timing.
+    /// writes [`ResolvedShadowAtlas::depth_pass_armed`](crate::shadow_atlas::ResolvedShadowAtlas::depth_pass_armed)
+    /// and so tracks the punctual depth pass to within 1–2 frames. What a sample can read
+    /// during that lag — including the one open point-light case — is spelled out in the
+    /// sync system's "What a punctual sample can read"; the boot layout seed only makes the
+    /// binding's LAYOUT valid and is not relied on for values.
     pub punctual_shadows: bool,
     /// The resolve's DDGI (SDF diffuse GI) sample gate — packed into light-header word 7
     /// bit [`DDGI_MODE_BIT`] by [`shadow_gate_word`](Self::shadow_gate_word). DEFAULT
@@ -453,6 +665,98 @@ pub struct LightingConfig {
     /// gated resolve block is EMPTY (no probe sample yet), so even an armed gate leaves the
     /// pixels byte-identical; later rungs (I3) wire the probe-irradiance injection.
     pub ddgi_indirect: bool,
+    /// The resolve's SSAO-combine gate — written into light-header word 11 (`sky_spec.w`,
+    /// the ambient-specular lane's otherwise-unused `w`) by [`LightHeaderGpu::new`].
+    /// Unlike `csm_shadows`/`punctual_shadows`/`ddgi_indirect` above (which share word 7's
+    /// bit-packed budget via [`Self::shadow_gate_word`]), this gate owns its OWN dedicated
+    /// word — no packing needed (Render P7-Q2's `ssao_mode` is a whole-word `0`/`1`, the
+    /// same shape `GoldenLightHeader::with_ssao_mode` pins). DEFAULT `false` (word 11 stays
+    /// `0.0` — the byte-identical 0%-gate, INDEPENDENT of every other gate).
+    ///
+    /// # Single-writer / lock-step contract (Render P7-Q2 live consumer)
+    ///
+    /// Like the shadow/GI gates, this is DERIVED state: its single production writer is
+    /// [`sync_ssao_light_gate`](crate::ssao_config::sync_ssao_light_gate), which keeps the
+    /// header gate in lock-step with the structural SSAO predicate
+    /// [`SsaoConfig::enabled`](crate::ssao_config::SsaoConfig::enabled) — mirrors
+    /// [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate)'s bridge shape (a
+    /// single cold config Resource, no caster dependency).
+    pub ssao_mode: bool,
+    /// VB-SV0: the VB lit-producer tails' SDF soft-shadow-on-mesh gate — packed into
+    /// light-header word 7 bit `VB_SDF_MESH_MODE_SHIFT + 0` (bit 5) by
+    /// [`shadow_gate_word`](Self::shadow_gate_word). DEFAULT `false` (bit 5 stays 0 — the
+    /// byte-identical 0%-gate, INDEPENDENT of every other gate including its own AO sibling).
+    ///
+    /// # Why this is a SEPARATE field from [`vb_sdf_mesh_ao`](Self::vb_sdf_mesh_ao)
+    ///
+    /// SV0 is two terms — a shadow and a contact AO — and every gate written against it as one
+    /// feature was satisfiable by the shadow half alone, which is how a structurally-dead AO
+    /// term could have shipped green. Two bits means each half can be armed on its own, and an
+    /// arming gate can require each half to move pixels on its own.
+    ///
+    /// # This field is the REQUEST; [`vb_sdf_mesh_shadow_armed`](Self::vb_sdf_mesh_shadow_armed)
+    /// is what the header packs (rung S4, code-review P2-c)
+    ///
+    /// The OWNER writes this one and nothing else reads it except rung S4's
+    /// [`sync_sv0_light_gate`], which ANDs it with
+    /// [`ResolvedRenderPath::vb_sdf_mesh_armable`](crate::render_path_config::ResolvedRenderPath::vb_sdf_mesh_armable)
+    /// — CONSUMING the already-resolved `SDF_SOFT_MARCH` bit rather than re-deriving the
+    /// predicate — and publishes the result into the `_armed` sibling.
+    ///
+    /// **Why the request and the resolved value are two fields and not one.** The first S4
+    /// revision clamped IN PLACE, writing the resolved value back over the owner's request. That
+    /// makes an owner who sets this field every frame (the ordinary way to drive a per-frame
+    /// toggle) pay a full light-table re-fold every frame on any boot that cannot carry SV0: the
+    /// gate clears the field, the owner re-sets it, the gate sees a change and re-dirties. With
+    /// the two separated, the gate's value comparison is against state only IT writes, so a
+    /// per-frame owner writer costs exactly nothing. This is also the shape every sibling gate
+    /// already has (`ssao_mode` ← `SsaoConfig`, `csm_shadows` ← the caster predicate): a DERIVED
+    /// field with one production writer, fed from a separate owner-facing input.
+    ///
+    /// DEFAULT `false`, and the resolve is monotone DOWNWARD (`request && capability`), so a
+    /// world that never opts in can never be armed by anything downstream — which is what makes
+    /// every pre-SV0 golden byte-identical by construction rather than by argument.
+    ///
+    /// Rung S2 shipped SV0 DARK — no writer existed at all, so the compiled-in shader blocks were
+    /// unreachable on every configuration.
+    pub vb_sdf_mesh_shadow: bool,
+    /// VB-SV0: the OWNER'S REQUEST for the contact-AO-on-mesh term — the AO sibling of
+    /// [`vb_sdf_mesh_shadow`](Self::vb_sdf_mesh_shadow), resolved into
+    /// [`vb_sdf_mesh_ao_armed`](Self::vb_sdf_mesh_ao_armed) by the same gate. DEFAULT `false`.
+    ///
+    /// See [`vb_sdf_mesh_shadow`](Self::vb_sdf_mesh_shadow) for why the two terms get separate
+    /// bits and for the request/resolved contract they share.
+    pub vb_sdf_mesh_ao: bool,
+    /// VB-SV0: the RESOLVED SDF soft-shadow-on-mesh gate — packed into light-header word 7 bit
+    /// `VB_SDF_MESH_MODE_SHIFT + 0` (bit 5) by [`shadow_gate_word`](Self::shadow_gate_word).
+    /// DEFAULT `false` (bit 5 stays 0 — the byte-identical 0%-gate, INDEPENDENT of every other
+    /// gate including its own AO sibling).
+    ///
+    /// # Single-writer contract
+    ///
+    /// DERIVED state with exactly ONE production writer, [`sync_sv0_light_gate`] — the same
+    /// contract `csm_shadows` / `punctual_shadows` / `ddgi_indirect` / `ssao_mode` carry. Setting
+    /// it by hand bypasses the capability clamp and arms a shader block on a boot whose producer
+    /// may not exist; the only legitimate direct writes are in this module's own unit tests,
+    /// which exercise the packing rather than the resolve.
+    pub vb_sdf_mesh_shadow_armed: bool,
+    /// VB-SV0: the RESOLVED contact-AO-on-mesh gate — packed into light-header word 7 bit
+    /// `VB_SDF_MESH_MODE_SHIFT + 1` (bit 6) by [`shadow_gate_word`](Self::shadow_gate_word).
+    /// DEFAULT `false`. Same single-writer contract as
+    /// [`vb_sdf_mesh_shadow_armed`](Self::vb_sdf_mesh_shadow_armed).
+    pub vb_sdf_mesh_ao_armed: bool,
+    /// The resolve's output-stage tonemap curve — packed into light-header word 7 bits
+    /// [`TONEMAP_MODE_SHIFT`..+4) by [`Self::tonemap_bits`]. DEFAULT [`Tonemapper::Aces`]
+    /// (word 7 bits 8..11 stay 0 — the byte-identical 0%-gate).
+    pub tonemapper: Tonemapper,
+    /// Softens the diffuse light terminator — the harsh `max(dot(N,L),0)` boundary that
+    /// turns normal-map bump slopes into hard dark islands under grazing light — into a
+    /// wrapped ramp (`nol_wrapped`, Valve/half-Lambert style), packed into light-header
+    /// word 7 bits [`TERMINATOR_SOFT_SHIFT`..+8) by [`Self::terminator_bits`]. DEFAULT
+    /// `0.0` (word 7 bits 12..19 stay 0 — the byte-identical 0%-gate, the physically-sharp
+    /// default); ~0.15-0.3 gives a soft film-like falloff. Applied ONLY to the diffuse NoL
+    /// of direct lights — specular NoL and the shadow-gating NoL comparisons are untouched.
+    pub terminator_softening: f32,
 }
 
 impl Default for LightingConfig {
@@ -465,23 +769,68 @@ impl Default for LightingConfig {
             sky_spec: [0.10, 0.10, 0.12],
             clusters_enabled: false,
             cluster_select: ClusterSelectMode::Manual,
+            cluster_z_scale: 0.0,
+            cluster_z_bias: 0.0,
+            cluster_packed_dims: 0,
             csm_shadows: false,
             punctual_shadows: false,
             ddgi_indirect: false,
+            ssao_mode: false,
+            vb_sdf_mesh_shadow: false,
+            vb_sdf_mesh_ao: false,
+            vb_sdf_mesh_shadow_armed: false,
+            vb_sdf_mesh_ao_armed: false,
+            tonemapper: Tonemapper::Aces,
+            terminator_softening: 0.0,
         }
     }
 }
 
 impl LightingConfig {
     /// Packs the header's word-7 shadow/GI-gate bits from this config: the CSM bit
-    /// ([`CSM_MODE_BIT`]), the punctual bit ([`PUNCTUAL_MODE_BIT`]), and the DDGI bit
-    /// ([`DDGI_MODE_BIT`]), each independent. A default config returns 0 (word 7 == 0.0 —
-    /// the 0%-gate anchor every pre-R4/pre-punctual/pre-SDFDDGI golden pins).
+    /// ([`CSM_MODE_BIT`]), the punctual bit ([`PUNCTUAL_MODE_BIT`]), the DDGI bit
+    /// ([`DDGI_MODE_BIT`]), and VB-SV0's 2-bit sub-field ([`VB_SDF_MESH_MODE_SHIFT`]), each
+    /// independent. A default config returns 0 (word 7 == 0.0 — the 0%-gate anchor every
+    /// pre-R4/pre-punctual/pre-SDFDDGI/pre-SV0 golden pins).
     #[inline]
     pub const fn shadow_gate_word(&self) -> u32 {
+        // VB-SV0's two bits are OR-ed as one sub-field so the shift/mask pair stays the single
+        // place the bit positions are spelled — the shader decodes with the same `>> 5 & 3`.
+        //
+        // The RESOLVED `_armed` pair, never the owner's request: the header must carry what the
+        // boot can actually execute, and routing the request straight through would arm a shader
+        // block on a producer that does not exist (code-review P2-c).
+        let sv0 = ((self.vb_sdf_mesh_shadow_armed as u32) * VB_SDF_MESH_SHADOW_BIT)
+            | ((self.vb_sdf_mesh_ao_armed as u32) * VB_SDF_MESH_AO_BIT);
         ((self.csm_shadows as u32) << CSM_MODE_BIT)
             | ((self.punctual_shadows as u32) << PUNCTUAL_MODE_BIT)
             | ((self.ddgi_indirect as u32) << DDGI_MODE_BIT)
+            | ((sv0 & VB_SDF_MESH_MODE_MASK) << VB_SDF_MESH_MODE_SHIFT)
+    }
+
+    /// Word-7 tonemap sub-field bits (0 for [`Tonemapper::Aces`] ⇒ the 0%-gate).
+    #[inline]
+    pub const fn tonemap_bits(&self) -> u32 {
+        (self.tonemapper as u32) << TONEMAP_MODE_SHIFT
+    }
+
+    /// Word-7 terminator-softening sub-field bits (0 for the 0.0 default ⇒ the 0%-gate).
+    #[inline]
+    pub const fn terminator_bits(&self) -> u32 {
+        // Hand-rolled clamp (const-fn parity with `tonemap_bits` — L1 review G3):
+        // `f32::clamp` is a trait-free inherent method but was not yet usable from a
+        // `const fn` on this toolchain when this was written; the plain if/else below
+        // is unconditionally const-evaluable.
+        let x = self.terminator_softening;
+        let clamped = if x < 0.0 {
+            0.0
+        } else if x > 1.0 {
+            1.0
+        } else {
+            x
+        };
+        let q = (clamped * 255.0 + 0.5) as u32;
+        (q & TERMINATOR_SOFT_MASK) << TERMINATOR_SOFT_SHIFT
     }
 }
 
@@ -501,7 +850,7 @@ pub const CLUSTER_FAR_DEFAULT: f32 = 50.0;
 /// The L1 cluster cull config (Decision 6) — a `World`-singleton resource. Carries the
 /// froxel grid dimensions, the per-froxel / flat-list capacities, and the exp-Z near/far
 /// the slice math derives its scale/bias from. The defaults reproduce the
-/// [`CLUSTER_DIM_*`] / [`MAX_LIGHTS_PER_CLUSTER`] / [`INDEX_LIST_CAP`] constants; a world
+/// `CLUSTER_DIM_*` / [`MAX_LIGHTS_PER_CLUSTER`] / [`INDEX_LIST_CAP`] constants; a world
 /// that never inserts a custom config uses them.
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
 pub struct ClusterConfig {
@@ -544,6 +893,33 @@ impl ClusterConfig {
         self.dim_x * self.dim_y * self.dim_z
     }
 
+    /// VB-P1e D11: the hierarchical cull's workgroup width — the host mirror of
+    /// `cluster_cull.hlsl`'s `#define HIER_TPG 256u`. A `const fn` rather than the
+    /// [`HIER_MASK_WORDS`]-style bare constant because it is paired 1:1 with
+    /// [`Self::hier_group_count`] at every call site (D9's radix-16 fold hardcodes this exact
+    /// width — see the shader's own `#error HIER_TPG != 256` guard).
+    #[inline]
+    pub const fn hier_group_threads() -> u32 {
+        256
+    }
+
+    /// VB-P1e D11: the hierarchical cull's 1D dispatch group count — one 256-wide group per
+    /// `ceil(dim_x * dim_y / 256)` screen block, repeated per `dim_z` slice
+    /// (`ceil(dim_x * dim_y / 256) * dim_z`) — the same value as the shader's own
+    /// `gps = (bdx * bdy + 255u) / 256u`. Rev 5 P2 wrote the host mirror as `(dim_x * dim_y +
+    /// 255) / 256` (the shader's own token-for-token form) rather than `.div_ceil()`, whose
+    /// const-stability the plan did not want to depend on; on this toolchain (`rustc 1.95`)
+    /// `u32::div_ceil` IS `const fn`, and `clippy::manual_div_ceil` (`-D warnings`) rejects the
+    /// hand-written form, so this fn uses `.div_ceil(256)` — arithmetically identical, `const
+    /// fn`-compatible here, and the clippy-mandated spelling. The shader's extra `max(1u, …)`
+    /// has no host counterpart on purpose — with `dim_x * dim_y == 0` this host dispatches ZERO
+    /// groups, so the shader's guard is unreachable from here (D8 obligation 3 keeps it for the
+    /// shader's own totality proof).
+    #[inline]
+    pub const fn hier_group_count(&self) -> u32 {
+        (self.dim_x * self.dim_y).div_ceil(256) * self.dim_z
+    }
+
     /// The exp-Z slice scale: `dim_z / ln(far / near)`. The resolve maps a view-space depth
     /// `view_z` to its froxel slice via `slice = ln(view_z / near) * z_scale` (Decision 6) —
     /// the inverse of `view_z = near * (far/near)^(slice/dim_z)`. The cull pass builds froxel
@@ -581,6 +957,237 @@ impl ClusterConfig {
             "invariant: cluster dims must each fit in 8 bits for the header pack"
         );
         self.dim_x | (self.dim_y << 8) | (self.dim_z << 16)
+    }
+}
+
+/// Bridges the [`ClusterConfig`] grid/near/far parameters and the [`LightingConfig`] header
+/// gate — the cluster analogue of
+/// [`sync_ssao_light_gate`](crate::ssao_config::sync_ssao_light_gate) (a single cold config
+/// Resource read directly, no caster dependency — unlike
+/// [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate)/
+/// [`sync_punctual_light_gate`](crate::shadow_atlas::sync_punctual_light_gate), which also
+/// gate on a live caster count). It is the SOLE production writer of
+/// [`LightingConfig::cluster_z_scale`]/[`LightingConfig::cluster_z_bias`]/
+/// [`LightingConfig::cluster_packed_dims`], keeping the header's L1 cluster lane
+/// ([`LightHeaderGpu::pack_cluster_params`]) in lock-step with the LIVE `ClusterConfig` the
+/// owner authored. Without this gate, `LightHeaderGpu::new`'s unconditional read of those
+/// three fields would pack whatever `LightingConfig` happened to carry from the last
+/// `ClusterConfig` edit — stale the moment the owner changes the grid/near/far without also
+/// touching a light (the SAME staleness class the CSM/DDGI/punctual/SSAO gates close for
+/// their own header bits).
+///
+/// # The armed condition is VB-froxel-boot-scoped, NOT `clusters_enabled` alone (W1 fix)
+///
+/// The dims/scale/bias are packed real ONLY when
+/// [`ResolvedRenderPath::froxel_light_cull`](crate::render_path_config::ResolvedRenderPath::froxel_light_cull)
+/// is `true` — the SAME boot-frozen bit [`boyko_app::gpu_scene::GpuSceneBundles::build_froxel_light_cull`]
+/// gates on (`clusters_enabled && path == VisibilityBuffer`, resolved ONCE at boot, never
+/// re-derived) — NOT on the live [`LightingConfig::clusters_enabled`] alone. This matters because
+/// `deferred_pbr.hlsl` (unconditionally) and `forward_opaque_froxel.fs.hlsl` (ForwardPlus's
+/// production shader) ALSO read this header lane, but their app-side `ClusterGrid`/
+/// `LightIndexList` bindings fall back to `scene.light_table` as a placeholder whenever the real
+/// L1 cull buffers are not built (`targets.rs`) — true on every current Deferred/ForwardPlus
+/// boot. Gating on `froxel_light_cull` (which is `false` for every non-VB path, and for a VB
+/// path whose `clusters_enabled` was `false` at BOOT, by construction) keeps this lane's dims
+/// at `0` on every path OTHER than a genuinely VB-froxel-armed one — exactly the pre-campaign
+/// state (`LightHeaderGpu::new` hardcoded the lane to all-zero) for Deferred/ForwardPlus, so
+/// VB-P1b-0 introduces ZERO new reachability for that pre-existing cross-path hazard. The
+/// cross-path shader-guard hardening this doc once deferred to a later rung LANDED in VB-P1k:
+/// all four `ClusterGrid` readers (`vb_resolve`/`vb_shade`/`deferred_pbr`/`forward_opaque`) now
+/// carry the SAME three-term gate — `clusters_enabled != 0 && cluster_count != 0 &&
+/// cluster_count <= grid_capacity`, the capacity read off the BOUND descriptor via
+/// `ClusterGrid.GetDimensions(...)` (SPIR-V `OpArrayLength`). Note what that means for THIS
+/// gate's interaction with the shaders. On the DEFAULT world — [`LightingConfig::clusters_enabled`]
+/// is `false`, and `boyko_app::EnginePlugins` seeds nothing else — word 15 is `0`, so the shaders'
+/// FIRST term short-circuits and the ENABLED BIT is what takes the flat branch; that covers every
+/// golden and every scene that never opts in. The case this gate exists for is the OTHER one:
+/// because word 15 is packed verbatim by [`LightHeaderGpu::new`] on every path while this gate
+/// holds the dims at `0`, a `clusters_enabled == true` Deferred/ForwardPlus world reaches those
+/// shaders with the bit SET and dims `0` — and there it is the `cluster_count != 0` term, not the
+/// enabled bit, that takes the flat branch. (On a VB boot the two move together, so an unarmed VB
+/// frame does not reach a `ClusterGrid` reader at all — the base, non-`FROXEL` compile has no such
+/// binding.) The extra terms are an out-of-bounds guard, not a style choice:
+/// `robustBufferAccess` is OFF in this engine with no GPU-assisted validation, so an out-of-range
+/// `ClusterGrid` read is real UB that no layer reports.
+///
+/// [`LightingConfig::clusters_enabled`] itself is NOT written here (it stays owner/
+/// [`ClusterSelectMode::Auto`]-policy-set, `select_lighting_cull`'s own concern) — this gate
+/// only derives the GEOMETRY the enabled bit's cluster path needs, zeroing it whenever the VB
+/// froxel cull is not boot-armed (mirrors [`Self::z_scale`](ClusterConfig::z_scale)'s own
+/// degenerate-config `0.0` fallback, so an armed-but-degenerate `ClusterConfig` never crashes,
+/// only culls nothing).
+///
+/// # Value-gated write
+///
+/// Written only on an actual change (any of the three derived scalars differs), so a static
+/// frame does zero work and never dirties the light table (mirrors the sibling gates' value-
+/// gate discipline).
+///
+/// # Registration — app-wired (matches `sync_ssao_light_gate` / `sync_ddgi_light_gate`)
+///
+/// NOT registered by [`LightingPlugin`](crate::light_plugin::LightingPlugin): `ClusterConfig`
+/// is seeded by the composing app (mirrors `LightingConfig` itself — see
+/// `boyko_app::plugins::EnginePlugins::build`), so this lives alongside the other
+/// `sync_*_light_gate` bridges in that SAME builder closure. UNLIKE the sibling gates it DOES
+/// carry an explicit `.before_set(LightCollectSet)` edge (VB-P1b-0 C1 — this gate feeds a GPU
+/// buffer INDEX, not merely a scalar bit, so a one-frame-stale header would be genuine GPU UB
+/// rather than a benign wrong bit).
+#[allow(clippy::needless_pass_by_value)]
+pub fn sync_cluster_light_gate(
+    cluster: Res<ClusterConfig>,
+    resolved_path: Res<crate::render_path_config::ResolvedRenderPath>,
+    mut cfg: ResMut<LightingConfig>,
+    mut dirty: ResMut<LightTableDirty>,
+) {
+    let (z_scale, z_bias, packed_dims) = if resolved_path.froxel_light_cull {
+        (cluster.z_scale(), cluster.z_bias(), cluster.packed_dims())
+    } else {
+        (0.0, 0.0, 0)
+    };
+    // Value gate BEFORE the `DerefMut`: flip-only write, flip-only table dirtying.
+    let changed = cfg.cluster_z_scale != z_scale
+        || cfg.cluster_z_bias != z_bias
+        || cfg.cluster_packed_dims != packed_dims;
+    if changed {
+        cfg.cluster_z_scale = z_scale;
+        cfg.cluster_z_bias = z_bias;
+        cfg.cluster_packed_dims = packed_dims;
+        dirty.0 = true;
+    }
+}
+
+/// `boyko-W2207`'s per-site `Once` latch — the VB-SV0 request-clamped report.
+///
+/// A module-level `static` rather than one tucked inside the reporter, for the reason
+/// `light_system.rs`'s [`W2201_SITE`](crate::light_system::W2201_SITE) gives: a `Once` latch is
+/// PROCESS state, so an observer must be able to reset it — otherwise a test's green only means
+/// "nothing else in this binary tripped the condition first". Several sibling tests in this file
+/// drive `sync_sv0_light_gate` over unarmable pairs for reasons of their own, and they do trip it.
+pub(crate) static W2207_SITE: OnceSite = OnceSite::new();
+
+/// Reports `boyko-W2207` — the first SV0 request this boot could not honour, and nothing after.
+///
+/// `#[cold]` + `#[inline(never)]` for the same reason as `light_system`'s
+/// `report_dropped_non_finite_light`: only the two compares of [`sync_sv0_light_gate`]'s
+/// capability test stay on the per-frame straight-line code.
+///
+/// Bounded at ONE per process by [`W2207_SITE`]. This was an unconditional `eprintln!` with a
+/// hand-rolled `AtomicBool` until the L8c print census reddened on it: the argument in its place
+/// ("it cannot be driven at frame rate, so it needs no build-profile gate") is about RATE, and rate
+/// is what `RatePolicy::Once` is for — it was never a reason to bypass the logger. `OnceSite::claim`
+/// short-circuits on a `Relaxed` load, so the steady state after the first report is one load.
+///
+/// # Why this is worth a diagnostic at all
+///
+/// A silently-cleared request renders a frame that is byte-identical to the unarmed one, which
+/// downstream reads as "the SV0 term moved zero pixels" — the failure and its symptom are the
+/// same image. Naming the clamp in the run log is what separates "SV0 is broken" from "this
+/// scene was never a VB x Both boot in the first place".
+#[cold]
+#[inline(never)]
+fn report_sv0_request_clamped(shadow: bool, ao: bool) {
+    if !W2207_SITE.claim() {
+        return;
+    }
+    boyko_log::warn!(
+        boyko_log::Render,
+        W2207,
+        "VB-SV0 was requested (shadow={}, ao={}) on a boot whose resolved render path cannot carry \
+         it (needs path == VisibilityBuffer, a mesh leg, ShadowSources::SDF_SOFT_MARCH, RG8-UNORM \
+         storage, and -- since DP6a -- the geo/shade split, whose geometry half is the term's only \
+         producer) -- both gate bits forced OFF for this run. NOTE: the split is resolved from a \
+         BOOT SNAPSHOT of this same request, so a request first raised AFTER boot is clamped for \
+         the process lifetime",
+        shadow,
+        ao
+    );
+}
+
+/// **VB-SV0 (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §S4, "arm"): the SOLE production writer of the
+/// light header's word-7 bits 5..6** — the SDF-soft-shadow-on-mesh and contact-AO-on-mesh gates
+/// the three VB lit-producer tails decode with `load_vb_sdf_mesh_mode`.
+///
+/// # Request in, capability-resolved value out
+///
+/// [`LightingConfig::vb_sdf_mesh_shadow`] / [`LightingConfig::vb_sdf_mesh_ao`] carry the OWNER's
+/// REQUEST (both DEFAULT `false` — the 0%-gate: a world that never opts in is byte-identical to
+/// every pre-SV0 pin). This gate ANDs each of them with
+/// [`ResolvedRenderPath::vb_sdf_mesh_armable`](crate::render_path_config::ResolvedRenderPath::vb_sdf_mesh_armable)
+/// and publishes the result into
+/// [`LightingConfig::vb_sdf_mesh_shadow_armed`] / [`LightingConfig::vb_sdf_mesh_ao_armed`], which
+/// is what [`LightingConfig::shadow_gate_word`] packs. So the header carries
+/// `request && capability`, and the owner's own field is never written.
+///
+/// **The resolve is monotone DOWNWARD and that is the load-bearing property.** `_armed` can only
+/// ever be `request && …`, never more, so no scene that has not asked for SV0 can be armed by
+/// this system — the "every existing golden stays byte-identical" guarantee is structural here,
+/// not an argument about which shipped fixtures happen to resolve `VB x Both`.
+///
+/// **DP6a strengthened the second half of that parenthetical and falsified its first half.** It
+/// used to read: "`[vb_both]`, `[vb_both_taa]` and the two S1 fixtures are all *capable*; what
+/// keeps them unarmed is that they do not ask." After DP6a they are **not capable** — none of them
+/// asks for the term and none arms a pre-light consumer, so all of them resolve FUSED, and
+/// `vb_sdf_mesh_armable()`'s `mesh_geo_shade_split` conjunct is `false` on every one. Not asking
+/// is now *why* they are incapable, not merely a second reason they stay dark.
+///
+/// # Why the request is not clamped IN PLACE (code-review P2-c)
+///
+/// An in-place clamp is invisible when the owner sets the field once at startup and pathological
+/// when they set it every frame — which is the ordinary way to drive a toggle. On a boot that
+/// cannot carry SV0 the gate would clear the request, the owner would re-set it, the gate would
+/// see a change and re-dirty [`LightTableDirty`], and the WHOLE light table would be re-packed
+/// and re-uploaded every frame, forever, with no visible symptom. Writing only state this system
+/// owns removes the cycle: the value comparison below is against the gate's own last output, so a
+/// per-frame owner writer is free.
+///
+/// # Why it CONSUMES `ResolvedRenderPath::shadow` instead of re-deriving the predicate
+///
+/// See [`ResolvedRenderPath::vb_sdf_mesh_armable`](crate::render_path_config::ResolvedRenderPath::vb_sdf_mesh_armable):
+/// the `sdf_leg && sdf_shadows_wanted && !hwrt_denoise_or_vis_on` rule lives in `resolve_rules`
+/// and nowhere else. A mirrored copy here would be a second truth to keep in sync, and the
+/// campaign's own record is that mirrored predicates drift.
+///
+/// # Registration — app-wired, WITH an ordering edge (code-review P2-b)
+///
+/// NOT registered by [`LightingPlugin`](crate::light_plugin::LightingPlugin): it bridges
+/// `RenderPathPlugin`'s [`ResolvedRenderPath`](crate::render_path_config::ResolvedRenderPath)
+/// and `LightingPlugin`'s [`LightingConfig`], so it lives in `boyko_app::plugins`' builder
+/// closure alongside the other `sync_*_light_gate` bridges.
+///
+/// It carries `.before_set(LightCollectSet)` — the edge `sync_cluster_light_gate` added at
+/// VB-P1b for the same reason and `sync_ssao_light_gate` does not need. `sync_ssao_light_gate`
+/// reads a config the owner sets and writes the bit that config implies, so an unordered first
+/// frame packs a value that is merely one frame late. THIS gate resolves a request against a
+/// CAPABILITY: unordered, the first armed frame packs whatever `_armed` held before the resolve
+/// ran. The residue is a one-frame WRONG-STATE header, not a late one — and on a fixture that
+/// dumps a small fixed number of frames, "one frame" can be the frame that gets measured.
+///
+/// # Value-gated write
+///
+/// Written only when the resolved pair actually moves, so an armed steady state does zero work
+/// and never re-dirties the light table (the sibling gates' discipline).
+#[allow(clippy::needless_pass_by_value)]
+pub fn sync_sv0_light_gate(
+    resolved_path: Res<crate::render_path_config::ResolvedRenderPath>,
+    mut cfg: ResMut<LightingConfig>,
+    mut dirty: ResMut<LightTableDirty>,
+) {
+    let armable = resolved_path.vb_sdf_mesh_armable();
+    let requested_shadow = cfg.vb_sdf_mesh_shadow;
+    let requested_ao = cfg.vb_sdf_mesh_ao;
+    let shadow = requested_shadow && armable;
+    let ao = requested_ao && armable;
+    // Value gate BEFORE the `DerefMut`: flip-only write, flip-only table dirtying.
+    if cfg.vb_sdf_mesh_shadow_armed != shadow || cfg.vb_sdf_mesh_ao_armed != ao {
+        cfg.vb_sdf_mesh_shadow_armed = shadow;
+        cfg.vb_sdf_mesh_ao_armed = ao;
+        dirty.0 = true;
+    }
+    // Keyed on REQUEST-vs-CAPABILITY, not on the write above: an honoured request also moves the
+    // value, and reporting that as a clamp would cry wolf on every armed boot. Two loads and a
+    // branch per frame on the straight-line path; the message itself is `#[cold]` and one-shot.
+    if !armable && (requested_shadow || requested_ao) {
+        report_sv0_request_clamped(requested_shadow, requested_ao);
     }
 }
 
@@ -737,12 +1344,13 @@ impl GpuLight {
 
     /// Folds a [`PointLight`] into a [`GpuLight`], baking `I = Φ / (4π)` (Decision 2,
     /// the point-source normalization) into `color_cone.rgb`. The L0b resolve consumes
-    /// `pos_range` + the baked intensity.
+    /// `pos_range` + the baked intensity. The kind word is `LIGHT_KIND_POINT | SLOT_NONE_FIELD`:
+    /// the row is born with no atlas map, and only the light-table fold assigns one.
     #[inline]
     pub fn from_point(l: &PointLight) -> Self {
         let intensity = l.power / (4.0 * PI);
         Self {
-            dir_kind: [0.0, 0.0, 0.0, f32::from_bits(LIGHT_KIND_POINT)],
+            dir_kind: [0.0, 0.0, 0.0, f32::from_bits(LIGHT_KIND_POINT | SLOT_NONE_FIELD)],
             pos_range: [l.position[0], l.position[1], l.position[2], l.range],
             color_cone: [
                 l.color[0] * intensity,
@@ -756,7 +1364,9 @@ impl GpuLight {
     /// Folds a [`SpotLight`] into a [`GpuLight`], baking `I = Φ / (2π(1 − cos(outer)))`
     /// (Decision 2, the reflector model) into `color_cone.rgb` and packing the cone
     /// cosines (`cos_inner`, `cos_outer`) into `color_cone.w`. `dir_kind.xyz` carries the
-    /// spot SHINE axis (un-negated). The L0b resolve consumes all three lanes.
+    /// spot SHINE axis (un-negated). The L0b resolve consumes all three lanes. The kind word is
+    /// `LIGHT_KIND_SPOT | SLOT_NONE_FIELD`: the row is born with no atlas map, and only the
+    /// light-table fold assigns one.
     #[inline]
     pub fn from_spot(l: &SpotLight) -> Self {
         let cos_inner = l.inner_deg.to_radians().cos();
@@ -765,7 +1375,7 @@ impl GpuLight {
         let intensity = l.power / denom;
         let d = normalize3(l.direction);
         Self {
-            dir_kind: [d[0], d[1], d[2], f32::from_bits(LIGHT_KIND_SPOT)],
+            dir_kind: [d[0], d[1], d[2], f32::from_bits(LIGHT_KIND_SPOT | SLOT_NONE_FIELD)],
             pos_range: [l.position[0], l.position[1], l.position[2], l.range],
             color_cone: [
                 l.color[0] * intensity,
@@ -796,15 +1406,28 @@ impl LightHeaderGpu {
     /// (directionals + sky) and `point_spot_count` is the L0b block, so the array is
     /// laid out `[no-P front block || point/spot]` and
     /// `light_count = l0a_count + point_spot_count`. `exposure` + `sky_*` come from
-    /// `cfg`. The L1 `cluster_params` are zero in L0 (`clusters_enabled` reflects `cfg`,
-    /// but the dims stay 0 until L1 mints the grid). Word 7 (`sky_diffuse.w`) carries
+    /// `cfg`. The L1 `cluster_params` lane is read verbatim from `cfg`'s derived
+    /// [`LightingConfig::cluster_z_scale`]/[`cluster_z_bias`](LightingConfig::cluster_z_bias)/
+    /// [`cluster_packed_dims`](LightingConfig::cluster_packed_dims) — single-writer
+    /// [`sync_cluster_light_gate`] keeps those `0.0`/`0.0`/`0` while
+    /// [`LightingConfig::clusters_enabled`] is `false` (the 0%-gate), so a world that never
+    /// arms clustering reproduces the pre-VB-P1b-0 all-zero lane exactly. Word 7 (`sky_diffuse.w`) carries
     /// the shadow-gate bits ([`LightingConfig::shadow_gate_word`] — CSM bit
-    /// [`CSM_MODE_BIT`]; 0 for a default config, the 0%-gate).
+    /// [`CSM_MODE_BIT`]; 0 for a default config, the 0%-gate) ORed with the tonemap
+    /// sub-field ([`LightingConfig::tonemap_bits`] — bits [`TONEMAP_MODE_SHIFT`]..+4)
+    /// ORed with the terminator-softening sub-field
+    /// ([`LightingConfig::terminator_bits`] — bits [`TERMINATOR_SOFT_SHIFT`]..+8). Word 11
+    /// (`sky_spec.w`) carries [`LightingConfig::ssao_mode`] verbatim (a whole-word `0`/`1`,
+    /// no packing — see that field's doc).
     #[inline]
     pub fn new(l0a_count: u32, point_spot_count: u32, cfg: &LightingConfig) -> Self {
         debug_assert!(cfg.exposure > 0.0 && cfg.exposure.is_finite(), "invariant: exposure > 0");
         let light_count = l0a_count + point_spot_count;
         debug_assert!(light_count <= MAX_LIGHTS, "invariant: light_count <= MAX_LIGHTS");
+        debug_assert!(
+            (cfg.tonemapper as u32) <= TONEMAP_MODE_MASK,
+            "invariant: tonemapper fits the 4-bit word-7 sub-field"
+        );
         Self {
             counts_exposure: [
                 f32::from_bits(light_count),
@@ -816,30 +1439,59 @@ impl LightHeaderGpu {
                 cfg.sky_diffuse[0],
                 cfg.sky_diffuse[1],
                 cfg.sky_diffuse[2],
-                f32::from_bits(cfg.shadow_gate_word()),
+                f32::from_bits(cfg.shadow_gate_word() | cfg.tonemap_bits() | cfg.terminator_bits()),
             ],
-            sky_spec: [cfg.sky_spec[0], cfg.sky_spec[1], cfg.sky_spec[2], 0.0],
-            // L0: clusters off (dims zero); `clusters_enabled` is reported for the resolve
-            // gate but the L1 grid is not minted until the L1 rung.
+            sky_spec: [
+                cfg.sky_spec[0],
+                cfg.sky_spec[1],
+                cfg.sky_spec[2],
+                // Render P7-Q2: the resolve's SSAO-combine gate (word 11, previously
+                // always 0.0 — `sky_spec.w` was otherwise unused). `false` (the default)
+                // keeps this lane `0.0`, byte-identical to every pre-P7-Q2 golden.
+                f32::from_bits(u32::from(cfg.ssao_mode)),
+            ],
+            // VB-P1b-0: the cluster lane is no longer hardcoded zero — `cfg.cluster_z_scale`/
+            // `cluster_z_bias`/`cluster_packed_dims` are DERIVED fields `sync_cluster_light_gate`
+            // (the single production writer) keeps at `0.0`/`0.0`/`0` while `clusters_enabled`
+            // is `false`, so this read is byte-identical to the old hardcoded-zero lane for
+            // every world that never arms clustering (the 0%-gate).
             cluster_params: [
-                0.0,
-                0.0,
-                0.0,
+                cfg.cluster_z_scale,
+                cfg.cluster_z_bias,
+                f32::from_bits(cfg.cluster_packed_dims),
                 f32::from_bits(u32::from(cfg.clusters_enabled)),
             ],
         }
     }
 
-    /// Builds the L1 header: identical to [`Self::new`] but the `cluster_params` lane carries
-    /// the exp-Z froxel-lookup factors instead of zeros. Lane 3 is
-    /// `[z_scale, z_bias, bitcast(packed_dims), bitcast(clusters_enabled)]` (Decision 6):
+    /// Packs `cluster`'s exp-Z slice scale/bias + froxel grid dims into this header's
+    /// `cluster_params` lanes 0..2, UNCONDITIONALLY — the caller gates on
+    /// [`LightingConfig::clusters_enabled`] beforehand (lane 3, the enabled bit, is left
+    /// untouched here; [`Self::new`]/[`Self::new_clustered`] already set it from `cfg`).
+    ///
+    /// `[z_scale, z_bias, bitcast(packed_dims)]` (Decision 6):
     /// - `z_scale` / `z_bias` — the affine exp-Z slice map `slice = ln(view_z) * z_scale +
     ///   z_bias` the resolve applies (the cull builds froxel AABBs from the same near/far);
     /// - `packed_dims` — `dim_x | dim_y<<8 | dim_z<<16` (the resolve unpacks to map a pixel
-    ///   to its `(x, y)` tile + clamp the slice);
-    /// - `clusters_enabled` — `1` gates the resolve onto the cluster path, `0` ⇒ the flat
-    ///   L0b loop (the L1 0%-gate). When `cfg.clusters_enabled` is `false` the lane stays all
-    ///   zero (byte-identical to [`Self::new`]'s L0 header — the 0%-gate anchor).
+    ///   to its `(x, y)` tile + clamp the slice).
+    ///
+    /// This is the SINGLE fn both [`Self::new_clustered`] (the test/host-oracle direct
+    /// constructor) and the production [`sync_cluster_light_gate`] derive their packed
+    /// values from — via [`ClusterConfig::z_scale`]/[`ClusterConfig::z_bias`]/
+    /// [`ClusterConfig::packed_dims`] — so the two paths can never disagree bit-for-bit.
+    #[inline]
+    pub fn pack_cluster_params(&mut self, cluster: &ClusterConfig) {
+        self.cluster_params[0] = cluster.z_scale();
+        self.cluster_params[1] = cluster.z_bias();
+        self.cluster_params[2] = f32::from_bits(cluster.packed_dims());
+    }
+
+    /// Builds the L1 header: identical to [`Self::new`] but the `cluster_params` lane 0..2
+    /// carries `cluster`'s REAL exp-Z froxel-lookup factors ([`Self::pack_cluster_params`])
+    /// instead of whatever `cfg` happened to carry — a direct, one-shot constructor for
+    /// tests/host oracles that do not want to pre-populate `cfg`'s derived cluster fields.
+    /// When `cfg.clusters_enabled` is `false` the lane stays exactly what [`Self::new`]
+    /// produced (byte-identical to the 0%-gate anchor).
     #[inline]
     pub fn new_clustered(
         l0a_count: u32,
@@ -849,12 +1501,7 @@ impl LightHeaderGpu {
     ) -> Self {
         let mut header = Self::new(l0a_count, point_spot_count, cfg);
         if cfg.clusters_enabled {
-            header.cluster_params = [
-                cluster.z_scale(),
-                cluster.z_bias(),
-                f32::from_bits(cluster.packed_dims()),
-                f32::from_bits(1),
-            ];
+            header.pack_cluster_params(cluster);
         }
         header
     }
@@ -902,6 +1549,16 @@ impl LightHeaderGpu {
     #[inline]
     pub fn ddgi_mode(&self) -> bool {
         (self.sky_diffuse[3].to_bits() >> DDGI_MODE_BIT) & 1 != 0
+    }
+
+    /// Whether the resolve's SSAO-combine gate is armed (word 11, bit-cast back from
+    /// `sky_spec.w`) — the host mirror of the shader's `load_ssao_mode`. Unlike
+    /// [`csm_mode`](Self::csm_mode)/[`punctual_mode`](Self::punctual_mode)/
+    /// [`ddgi_mode`](Self::ddgi_mode) (word 7 bits), this gate owns its own whole word —
+    /// no bit shift, mirrors [`Self::clusters_enabled`]'s shape.
+    #[inline]
+    pub fn ssao_mode(&self) -> bool {
+        self.sky_spec[3].to_bits() != 0
     }
 
     /// Whether the L1 cluster path is enabled (`cluster_params.w` bit-cast `!= 0`). `false`
@@ -974,8 +1631,14 @@ mod tests {
         assert!(!cfg.punctual_shadows);
         // The DDGI gate defaults OFF (the byte-identical 0%-gate).
         assert!(!cfg.ddgi_indirect);
+        // The tonemapper defaults to ACES (today's curve, the byte-identical 0%-gate).
+        assert_eq!(cfg.tonemapper, Tonemapper::Aces);
+        // Terminator softening defaults OFF (the physically-sharp, byte-identical 0%-gate).
+        assert_eq!(cfg.terminator_softening, 0.0);
         // Word 7 is exactly 0 for a default config (the 0%-gate anchor).
         assert_eq!(cfg.shadow_gate_word(), 0);
+        assert_eq!(cfg.tonemap_bits(), 0);
+        assert_eq!(cfg.terminator_bits(), 0);
     }
 
     #[test]
@@ -1015,6 +1678,187 @@ mod tests {
         );
     }
 
+    /// VB-SV0's two terms occupy word-7 bits 5 and 6 and are independently armable — of each
+    /// other and of every neighbouring sub-field. The independence of the two SV0 bits FROM EACH
+    /// OTHER is the load-bearing half: SV0 is two terms, and a packing that armed both from one
+    /// flag would make every downstream per-term gate satisfiable by the shadow half alone.
+    ///
+    /// Written against the RESOLVED `_armed` pair, because that is what the packer reads: this
+    /// test pins the PACKING, and `sv0_gate_*` below pins the resolve that feeds it.
+    #[test]
+    fn vb_sv0_gate_bits_are_independent() {
+        // Default: SV0 contributes nothing — the 0%-gate rung S2 ships under.
+        let base = LightingConfig::default();
+        assert!(!base.vb_sdf_mesh_shadow_armed);
+        assert!(!base.vb_sdf_mesh_ao_armed);
+        assert_eq!(base.shadow_gate_word(), 0);
+
+        // An owner REQUEST that no gate has resolved packs nothing — the request is not a value
+        // (code-review P2-c). Without this, a packer wired to the request would still pass every
+        // other assertion in this test.
+        let requested_only = LightingConfig {
+            vb_sdf_mesh_shadow: true,
+            vb_sdf_mesh_ao: true,
+            ..LightingConfig::default()
+        };
+        assert_eq!(
+            requested_only.shadow_gate_word(),
+            0,
+            "an unresolved request must not reach the header — only `sync_sv0_light_gate` arms SV0"
+        );
+
+        // Shadow alone: bit 5 only.
+        let sh = LightingConfig { vb_sdf_mesh_shadow_armed: true, ..LightingConfig::default() };
+        assert_eq!(sh.shadow_gate_word(), 1 << 5);
+        assert_eq!(
+            (sh.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT) & VB_SDF_MESH_MODE_MASK,
+            VB_SDF_MESH_SHADOW_BIT,
+            "the shader decodes `(word >> 5) & 3` and must see the shadow bit alone"
+        );
+
+        // AO alone: bit 6 only. NOT the same assertion as the shadow case wearing another name.
+        let ao = LightingConfig { vb_sdf_mesh_ao_armed: true, ..LightingConfig::default() };
+        assert_eq!(ao.shadow_gate_word(), 1 << 6);
+        assert_eq!(
+            (ao.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT) & VB_SDF_MESH_MODE_MASK,
+            VB_SDF_MESH_AO_BIT,
+            "the shader decodes `(word >> 5) & 3` and must see the AO bit alone"
+        );
+        assert_eq!(sh.shadow_gate_word() & ao.shadow_gate_word(), 0, "the two SV0 bits must not overlap");
+
+        // Both: the two bits OR together into the full sub-field.
+        let both = LightingConfig {
+            vb_sdf_mesh_shadow_armed: true,
+            vb_sdf_mesh_ao_armed: true,
+            ..LightingConfig::default()
+        };
+        assert_eq!(
+            (both.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT) & VB_SDF_MESH_MODE_MASK,
+            VB_SDF_MESH_SHADOW_BIT | VB_SDF_MESH_AO_BIT
+        );
+
+        // Neither SV0 bit touches a neighbouring sub-field, and no neighbour touches SV0's.
+        let sv0_mask = VB_SDF_MESH_MODE_MASK << VB_SDF_MESH_MODE_SHIFT;
+        let neighbours = (1 << CSM_MODE_BIT) | (1 << PUNCTUAL_MODE_BIT) | (1 << DDGI_MODE_BIT);
+        assert_eq!(both.shadow_gate_word() & neighbours, 0, "SV0 must not touch bits 2..4");
+        let all_neighbours = LightingConfig {
+            csm_shadows: true,
+            punctual_shadows: true,
+            ddgi_indirect: true,
+            tonemapper: Tonemapper::ReinhardJodie,
+            terminator_softening: 1.0,
+            ..LightingConfig::default()
+        };
+        let neighbour_word = all_neighbours.shadow_gate_word()
+            | all_neighbours.tonemap_bits()
+            | all_neighbours.terminator_bits();
+        assert_eq!(
+            neighbour_word & sv0_mask,
+            0,
+            "no neighbouring sub-field may write into word-7 bits 5..6"
+        );
+    }
+
+    #[test]
+    fn tonemapper_default_is_aces() {
+        assert_eq!(Tonemapper::default(), Tonemapper::Aces);
+    }
+
+    #[test]
+    fn tonemap_bits_zero_for_aces() {
+        let cfg = LightingConfig { tonemapper: Tonemapper::Aces, ..LightingConfig::default() };
+        assert_eq!(cfg.tonemap_bits(), 0);
+    }
+
+    #[test]
+    fn header_word7_is_zero_for_default_config() {
+        // The byte-identity anchor: a default config's header word 7 (sky_diffuse.w) is
+        // exactly 0.0 bits — no shadow/GI gate, no tonemap mode.
+        let h = LightHeaderGpu::new(1, 0, &LightingConfig::default());
+        assert_eq!(h.sky_diffuse[3].to_bits(), 0);
+    }
+
+    #[test]
+    fn tonemap_mode_bits_are_independent_of_the_shadow_gate_bits() {
+        let cfg = LightingConfig { tonemapper: Tonemapper::Neutral, ..LightingConfig::default() };
+        let h = LightHeaderGpu::new(1, 0, &cfg);
+        let word7 = h.sky_diffuse[3].to_bits();
+        assert_eq!(
+            (word7 >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK,
+            Tonemapper::Neutral as u32
+        );
+        // Bits 0..4 (shadow/contact/CSM/punctual/DDGI gates) must stay untouched.
+        assert_eq!(word7 & 0x1F, 0, "tonemap mode must not touch the shadow/GI gate bits 0..4");
+    }
+
+    #[test]
+    fn tonemap_mode_coexists_with_a_shadow_gate() {
+        let cfg = LightingConfig {
+            tonemapper: Tonemapper::Neutral,
+            csm_shadows: true,
+            ..LightingConfig::default()
+        };
+        let h = LightHeaderGpu::new(1, 0, &cfg);
+        let word7 = h.sky_diffuse[3].to_bits();
+        assert_eq!(
+            (word7 >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK,
+            Tonemapper::Neutral as u32
+        );
+        assert_ne!(word7 & (1 << CSM_MODE_BIT), 0, "the csm bit must still be armed");
+    }
+
+    #[test]
+    fn terminator_bits_zero_for_default() {
+        let cfg = LightingConfig { terminator_softening: 0.0, ..LightingConfig::default() };
+        assert_eq!(cfg.terminator_bits(), 0);
+    }
+
+    #[test]
+    fn terminator_softening_bits_are_independent_of_the_shadow_and_tonemap_bits() {
+        let cfg = LightingConfig { terminator_softening: 0.2, ..LightingConfig::default() };
+        let h = LightHeaderGpu::new(1, 0, &cfg);
+        let word7 = h.sky_diffuse[3].to_bits();
+        let expected = (0.2_f32 * 255.0).round() as u32;
+        assert_eq!((word7 >> TERMINATOR_SOFT_SHIFT) & TERMINATOR_SOFT_MASK, expected);
+        // Shadow/GI gate bits 0..4 must stay untouched.
+        assert_eq!(word7 & 0x1F, 0, "terminator softening must not touch the shadow/GI gate bits 0..4");
+        // The tonemap sub-field 8..11 must stay untouched (Aces default -> 0).
+        assert_eq!(
+            (word7 >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK,
+            0,
+            "terminator softening must not touch the tonemap sub-field 8..11"
+        );
+    }
+
+    #[test]
+    fn terminator_softening_coexists_with_a_tonemapper_and_a_shadow_gate() {
+        let cfg = LightingConfig {
+            terminator_softening: 0.2,
+            tonemapper: Tonemapper::Neutral,
+            csm_shadows: true,
+            ..LightingConfig::default()
+        };
+        let h = LightHeaderGpu::new(1, 0, &cfg);
+        let word7 = h.sky_diffuse[3].to_bits();
+        let expected = (0.2_f32 * 255.0).round() as u32;
+        assert_eq!((word7 >> TERMINATOR_SOFT_SHIFT) & TERMINATOR_SOFT_MASK, expected);
+        assert_eq!(
+            (word7 >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK,
+            Tonemapper::Neutral as u32,
+            "the tonemap sub-field must still carry Neutral"
+        );
+        assert_ne!(word7 & (1 << CSM_MODE_BIT), 0, "the csm bit must still be armed");
+    }
+
+    #[test]
+    fn terminator_bits_clamps_out_of_range_softening() {
+        let over = LightingConfig { terminator_softening: 1.5, ..LightingConfig::default() };
+        assert_eq!((over.terminator_bits() >> TERMINATOR_SOFT_SHIFT) & TERMINATOR_SOFT_MASK, 255);
+
+        let under = LightingConfig { terminator_softening: -1.0, ..LightingConfig::default() };
+        assert_eq!((under.terminator_bits() >> TERMINATOR_SOFT_SHIFT) & TERMINATOR_SOFT_MASK, 0);
+    }
+
     #[test]
     fn from_directional_premultiplies_color_by_illuminance() {
         let l = DirectionalLight::new([0.0, 0.0, 1.0], [1.0, 0.5, 0.25], 2.0);
@@ -1052,7 +1896,7 @@ mod tests {
         let phi = 100.0_f32;
         let l = PointLight::new([1.0, 2.0, 3.0], [1.0, 1.0, 1.0], phi, 10.0);
         let g = GpuLight::from_point(&l);
-        assert_eq!(g.dir_kind[3].to_bits(), LIGHT_KIND_POINT);
+        assert_eq!(g.dir_kind[3].to_bits(), LIGHT_KIND_POINT | SLOT_NONE_FIELD);
         let i = phi / (4.0 * PI);
         assert!(approx(g.color_cone[0], i));
         assert_eq!([g.pos_range[0], g.pos_range[1], g.pos_range[2]], [1.0, 2.0, 3.0]);
@@ -1065,7 +1909,7 @@ mod tests {
         let outer = 30.0_f32;
         let l = SpotLight::new([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 1.0], phi, 5.0, 15.0, outer);
         let g = GpuLight::from_spot(&l);
-        assert_eq!(g.dir_kind[3].to_bits(), LIGHT_KIND_SPOT);
+        assert_eq!(g.dir_kind[3].to_bits(), LIGHT_KIND_SPOT | SLOT_NONE_FIELD);
         let cos_outer = outer.to_radians().cos();
         let i = phi / (2.0 * PI * (1.0 - cos_outer));
         assert!(approx(g.color_cone[0], i), "expected I={i}, got {}", g.color_cone[0]);
@@ -1207,6 +2051,521 @@ mod tests {
         assert_eq!(d & 0xFF, CLUSTER_DIM_X);
         assert_eq!((d >> 8) & 0xFF, CLUSTER_DIM_Y);
         assert_eq!((d >> 16) & 0xFF, CLUSTER_DIM_Z);
+    }
+
+    /// VB-P1b-0 bit-exactness: the PRODUCTION path (`sync_cluster_light_gate` writing
+    /// `LightingConfig`'s derived cluster fields, then `LightHeaderGpu::new` reading them)
+    /// MUST produce the identical `cluster_params` lane the direct, test/oracle
+    /// `LightHeaderGpu::new_clustered` constructor produces for the SAME `ClusterConfig` — the
+    /// load-bearing invariant the cull (`cluster_cull.hlsl`) and the resolve
+    /// (`vb_resolve.comp.hlsl`) both rely on to build valid, in-range froxel indices.
+    #[test]
+    fn sync_cluster_light_gate_matches_new_clustered_bit_for_bit() {
+        use boyko_ecs::ecs::core::app::App;
+
+        use crate::render_path_config::{
+            GeometryLegs, RenderPath, RenderPathConfig, RenderPathConsumers, RenderPathDeviceCaps,
+            resolve_render_path,
+        };
+
+        let cluster = ClusterConfig::default();
+        // The REAL boot resolve of a VisibilityBuffer scene that wants clusters — the SAME
+        // production entry point `boyko_app::runner` calls, not a hand-built literal (W1 fix,
+        // code review): `sync_cluster_light_gate` now gates on `froxel_light_cull`, not
+        // `clusters_enabled` alone, so the test must arm the SAME resolved carrier.
+        let (resolved_path, _) = resolve_render_path(
+            &RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Mesh },
+            RenderPathConsumers { clusters_wanted: true, ..Default::default() },
+            RenderPathDeviceCaps::new(true),
+        );
+        assert!(
+            resolved_path.froxel_light_cull,
+            "test setup invariant: VisibilityBuffer + clusters_wanted must arm froxel_light_cull"
+        );
+
+        let mut app = App::new();
+        app.insert_resource(cluster);
+        app.insert_resource(resolved_path);
+        app.insert_resource(LightingConfig { clusters_enabled: true, ..LightingConfig::default() });
+        app.insert_resource(LightTableDirty(false));
+        app.world_mut().run_system(sync_cluster_light_gate);
+
+        let synced_cfg = *app.world().resource::<LightingConfig>();
+        let got = LightHeaderGpu::new(2, 1, &synced_cfg);
+
+        let direct_cfg = LightingConfig { clusters_enabled: true, ..LightingConfig::default() };
+        let want = LightHeaderGpu::new_clustered(2, 1, &direct_cfg, &cluster);
+        // Full-header equality (O3, code review): pins that the `new_clustered` ->
+        // `pack_cluster_params` refactor (and `sync_cluster_light_gate`'s production path)
+        // perturbs NOTHING outside the cluster lane — not just that lane in isolation.
+        assert_eq!(
+            got, want,
+            "sync_cluster_light_gate's packed header must equal new_clustered's bit-for-bit"
+        );
+
+        // Non-zero dims when VB-froxel-armed: `cluster_z_slice`/`cluster_linear_index`
+        // (light_table.hlsli) underflow to an out-of-range index when any dim is 0 — this is
+        // the exact regression VB-P1b-0 fixes (pre-fix, `LightHeaderGpu::new` always packed
+        // all-zero dims here).
+        let d = synced_cfg.cluster_packed_dims;
+        assert_ne!(d & 0xFF, 0, "dim_x must be nonzero when froxel_light_cull is armed");
+        assert_ne!((d >> 8) & 0xFF, 0, "dim_y must be nonzero when froxel_light_cull is armed");
+        assert_ne!((d >> 16) & 0xFF, 0, "dim_z must be nonzero when froxel_light_cull is armed");
+        assert_ne!(synced_cfg.cluster_z_scale, 0.0, "z_scale must be nonzero when froxel_light_cull is armed");
+    }
+
+    /// The 0%-gate half of the VB-P1b-0 contract: `sync_cluster_light_gate` must zero the
+    /// header's cluster lane regardless of what `ClusterConfig` carries, whenever
+    /// `froxel_light_cull` is unarmed (here: the never-resolved default carrier, `clusters_enabled
+    /// == false`) — a non-default `ClusterConfig` alone must never leak its geometry into the
+    /// header of an unarmed scene.
+    #[test]
+    fn sync_cluster_light_gate_zeroes_the_lane_when_disabled() {
+        use boyko_ecs::ecs::core::app::App;
+
+        use crate::render_path_config::ResolvedRenderPath;
+
+        // A deliberately NON-default grid, to prove the gate does not merely happen to zero
+        // the default — it actively zeroes REGARDLESS of `ClusterConfig`'s contents.
+        let cluster = ClusterConfig { dim_x: 8, dim_y: 4, dim_z: 12, ..ClusterConfig::default() };
+        let mut app = App::new();
+        app.insert_resource(cluster);
+        // `ResolvedRenderPath::default()` == Deferred + Both, no consumers armed —
+        // `froxel_light_cull == false` by construction.
+        app.insert_resource(ResolvedRenderPath::default());
+        app.insert_resource(LightingConfig::default()); // clusters_enabled == false
+        app.insert_resource(LightTableDirty(false));
+        app.world_mut().run_system(sync_cluster_light_gate);
+
+        let synced_cfg = *app.world().resource::<LightingConfig>();
+        assert_eq!(synced_cfg.cluster_z_scale, 0.0);
+        assert_eq!(synced_cfg.cluster_z_bias, 0.0);
+        assert_eq!(synced_cfg.cluster_packed_dims, 0);
+
+        let h = LightHeaderGpu::new(2, 1, &synced_cfg);
+        assert_eq!(h.cluster_params, [0.0, 0.0, 0.0, 0.0], "unarmed header stays the 0%-gate anchor");
+    }
+
+    /// The W1 regression guard (code review): a NON-VB path whose `LightingConfig::clusters_enabled`
+    /// is (mistakenly, or via `ClusterSelectMode::Auto` banding) `true` must STILL leave the
+    /// header's cluster dims at `0` — `sync_cluster_light_gate` gates the armed write on
+    /// `ResolvedRenderPath::froxel_light_cull`, which is `false` for every `RenderPath` other
+    /// than `VisibilityBuffer`, REGARDLESS of `clusters_enabled`. Without this, `deferred_pbr.hlsl`
+    /// (which reads this lane unconditionally) and ForwardPlus's `forward_opaque_froxel.fs.hlsl`
+    /// would compute a valid-looking-but-WRONG cluster index into their `ClusterGrid`/
+    /// `LightIndexList` bindings, which fall back to the light-table buffer as a placeholder on
+    /// every current Deferred/ForwardPlus boot (a separate, tracked hardening rung — this test
+    /// only pins that VB-P1b-0 does not make that pre-existing hazard MORE reachable).
+    #[test]
+    fn sync_cluster_light_gate_zeroes_the_lane_on_a_non_vb_path_even_when_clusters_enabled() {
+        use boyko_ecs::ecs::core::app::App;
+
+        use crate::render_path_config::{
+            GeometryLegs, RenderPath, RenderPathConfig, RenderPathConsumers, RenderPathDeviceCaps,
+            resolve_render_path,
+        };
+
+        let cluster = ClusterConfig::default();
+        // A Deferred scene that ALSO wants clusters (an owner mistake, or what Auto-banding
+        // would produce with no RenderPath awareness) — `froxel_light_cull` is VB-only by
+        // construction, so it stays `false` here regardless of `clusters_wanted`.
+        let (resolved_path, _) = resolve_render_path(
+            &RenderPathConfig { path: RenderPath::Deferred, legs: GeometryLegs::Both },
+            RenderPathConsumers { clusters_wanted: true, ..Default::default() },
+            RenderPathDeviceCaps::new(true),
+        );
+        assert!(
+            !resolved_path.froxel_light_cull,
+            "test setup invariant: Deferred must never arm froxel_light_cull, even with clusters_wanted"
+        );
+
+        let mut app = App::new();
+        app.insert_resource(cluster);
+        app.insert_resource(resolved_path);
+        app.insert_resource(LightingConfig { clusters_enabled: true, ..LightingConfig::default() });
+        app.insert_resource(LightTableDirty(false));
+        app.world_mut().run_system(sync_cluster_light_gate);
+
+        let synced_cfg = *app.world().resource::<LightingConfig>();
+        assert_eq!(synced_cfg.cluster_z_scale, 0.0, "non-VB path: z_scale must stay 0 despite clusters_enabled");
+        assert_eq!(synced_cfg.cluster_z_bias, 0.0, "non-VB path: z_bias must stay 0 despite clusters_enabled");
+        assert_eq!(
+            synced_cfg.cluster_packed_dims, 0,
+            "non-VB path: dims must stay 0 despite clusters_enabled"
+        );
+
+        // Word 15 (`clusters_enabled`) is STILL packed verbatim by `LightHeaderGpu::new` (that
+        // bit is not this gate's concern) — the dims-only scoping is what this test pins.
+        let h = LightHeaderGpu::new(2, 1, &synced_cfg);
+        assert_eq!(h.cluster_params, [0.0, 0.0, 0.0, f32::from_bits(1)]);
+    }
+
+    // ---- VB-SV0 §S4 arming gate ------------------------------------------------------------
+
+    /// A REAL boot resolve of the rung-S1 fixture configuration (`VisibilityBuffer × Both`, the
+    /// runner's hardwired `sdf_shadows_wanted: true`, no hwrt), plus the optional consumers the
+    /// §S4 variant rows need. Built through the production entry point rather than as a literal,
+    /// so a change to the arming rules reaches these tests instead of being mirrored past them.
+    /// **DP6a made `term_wanted` an explicit per-row axis rather than a helper-wide constant.**
+    /// `vb_sdf_mesh_armable()` now conjoins `mesh_geo_shade_split`, so a row that leaves the bit
+    /// false on a boot with no pre-light consumer resolves unarmable for a SECOND reason on top of
+    /// whichever one it meant to demonstrate. Each call site below therefore states the bit, and
+    /// the negative rows arm whatever else they need so that exactly ONE conjunct is the cause.
+    ///
+    /// The one row that cannot be made single-cause is `VB × Sdf`: `mesh_geo_shade_split ⇒
+    /// mesh_leg` by construction, so the missing mesh leg fails both conjuncts together. Said
+    /// there rather than papered over.
+    fn sv0_resolved(
+        legs: crate::render_path_config::GeometryLegs,
+        ssao_on: bool,
+        hwrt: bool,
+        term_wanted: bool,
+    ) -> crate::render_path_config::ResolvedRenderPath {
+        use crate::render_path_config::{
+            RenderPath, RenderPathConfig, RenderPathConsumers, RenderPathDeviceCaps,
+            resolve_render_path,
+        };
+        let (resolved, _) = resolve_render_path(
+            &RenderPathConfig { path: RenderPath::VisibilityBuffer, legs },
+            RenderPathConsumers {
+                sdf_shadows_wanted: true,
+                ssao_on,
+                sdf_mesh_term_wanted: term_wanted,
+                hwrt_denoise_or_vis_on: hwrt,
+                ..Default::default()
+            },
+            RenderPathDeviceCaps::new(true),
+        );
+        resolved
+    }
+
+    /// Runs `sync_sv0_light_gate` over one (`resolved`, request) pair and returns the resolved
+    /// config plus whether the light table was dirtied.
+    ///
+    /// Also asserts, on EVERY call, that the owner's two request fields came back untouched — the
+    /// code-review P2-c property. Placed here rather than in one dedicated test so no future case
+    /// can be added that quietly reintroduces the in-place clamp.
+    fn run_sv0_gate(
+        resolved: crate::render_path_config::ResolvedRenderPath,
+        request_shadow: bool,
+        request_ao: bool,
+    ) -> (LightingConfig, bool) {
+        use boyko_ecs::ecs::core::app::App;
+
+        // Every caller may drive an unarmable request, which SPENDS `W2207_SITE` — process state.
+        // Taken here, in the one funnel, so `sv0_gate_reports_the_clamp_once_as_w2207` cannot have
+        // its window emptied by a sibling running concurrently. Per CALL, not per test: the guard
+        // drops with this frame, so the three-call cases below do not self-deadlock.
+        let _observe = boyko_log::probe::observe_lock();
+
+        let mut app = App::new();
+        app.insert_resource(resolved);
+        app.insert_resource(LightingConfig {
+            vb_sdf_mesh_shadow: request_shadow,
+            vb_sdf_mesh_ao: request_ao,
+            ..LightingConfig::default()
+        });
+        app.insert_resource(LightTableDirty(false));
+        app.world_mut().run_system(sync_sv0_light_gate);
+        let cfg = *app.world().resource::<LightingConfig>();
+        assert_eq!(
+            (cfg.vb_sdf_mesh_shadow, cfg.vb_sdf_mesh_ao),
+            (request_shadow, request_ao),
+            "the gate must never write the OWNER's request fields — an in-place clamp makes a \
+             per-frame owner writer re-fold the whole light table every frame"
+        );
+        (cfg, app.world().resource::<LightTableDirty>().0)
+    }
+
+    /// **`boyko-W2207` is emitted on a clamp, exactly once per process, and NOT on an honoured
+    /// request.** The observing half of the site the L8c print census forced out of `eprintln!`.
+    ///
+    /// All three of the things an observer of a `Once` site needs are here, and each fixes a
+    /// different failure (`boyko_log::probe`'s module doc has the table): [`probe::watch`] counts
+    /// per thread and per code, [`OnceSite::reset`] undoes a latch an EARLIER test spent, and
+    /// `observe_lock` keeps a CONCURRENT sibling from spending it mid-window.
+    ///
+    /// The negative leg is the one that matters most. Keying the report on the value the gate
+    /// wrote instead of on request-vs-capability would make every armed boot report a clamp, and
+    /// a diagnostic that fires when nothing is wrong is one nobody reads by the third run.
+    #[test]
+    fn sv0_gate_reports_the_clamp_once_as_w2207() {
+        use boyko_ecs::ecs::core::app::App;
+
+        use crate::render_path_config::GeometryLegs;
+
+        let _observe = boyko_log::probe::observe_lock();
+        // Raise the `Render` ceiling: a `Warn` below it is never emitted at all. MEASURED while
+        // writing this test — without the arm the POSITIVE leg reads 0, which is exactly the
+        // "reporting `never emitted` as success" that `log_probe`'s own doc warns about. The
+        // positive leg is what caught it; a test of only the negative legs would have passed
+        // vacuously and pinned nothing.
+        crate::log_probe::arm();
+
+        // VB x Mesh with the term requested: unarmable, so the gate must clamp AND report.
+        let unarmable =
+            sv0_resolved(GeometryLegs::Mesh, /* ssao */ true, /* hwrt */ false, /* term */ true);
+        assert!(!unarmable.vb_sdf_mesh_armable(), "test setup: this boot must NOT be armable");
+
+        let drive = |resolved, shadow, ao| {
+            let mut app = App::new();
+            app.insert_resource(resolved);
+            app.insert_resource(LightingConfig {
+                vb_sdf_mesh_shadow: shadow,
+                vb_sdf_mesh_ao: ao,
+                ..LightingConfig::default()
+            });
+            app.insert_resource(LightTableDirty(false));
+            app.world_mut().run_system(sync_sv0_light_gate);
+        };
+
+        W2207_SITE.reset();
+        boyko_log::probe::watch(b'W', W2207.number());
+        drive(unarmable, true, true);
+        assert_eq!(
+            boyko_log::probe::watched(),
+            1,
+            "an unarmable boot with a live request must report the clamp"
+        );
+
+        // The latch is spent: a second frame on the same boot says nothing. Without this the site
+        // would report every frame, on the per-frame path, for the life of the process.
+        boyko_log::probe::watch(b'W', W2207.number());
+        drive(unarmable, true, true);
+        assert_eq!(boyko_log::probe::watched(), 0, "a spent latch emits nothing");
+
+        // The negative: an ARMABLE boot honours the request, so there is no clamp to report.
+        let armable =
+            sv0_resolved(GeometryLegs::Both, /* ssao */ false, /* hwrt */ false, /* term */ true);
+        assert!(armable.vb_sdf_mesh_armable(), "test setup: VB x Both must be SV0-armable");
+        W2207_SITE.reset();
+        boyko_log::probe::watch(b'W', W2207.number());
+        drive(armable, true, true);
+        assert_eq!(
+            boyko_log::probe::watched(),
+            0,
+            "an HONOURED request is not a clamp — reporting it would cry wolf on every armed boot"
+        );
+
+        // An unarmable boot that never asked for the term is also silent: the report is keyed on
+        // the REQUEST, not on the capability alone.
+        W2207_SITE.reset();
+        boyko_log::probe::watch(b'W', W2207.number());
+        drive(unarmable, false, false);
+        assert_eq!(
+            boyko_log::probe::watched(),
+            0,
+            "no request means no clamp — the 0%-gate boot must stay silent"
+        );
+    }
+
+    /// **Code-review P2-c, the cost the separation buys.** An owner who re-asserts the request
+    /// EVERY frame on a boot that cannot carry SV0 dirties the light table exactly zero times.
+    ///
+    /// With the request and the resolved value fused into one field this test cannot pass: the
+    /// gate clears the field, the owner re-sets it, and every subsequent frame sees a change and
+    /// re-folds + re-uploads the entire table — a silent per-frame cost whose only symptom is
+    /// throughput.
+    #[test]
+    fn sv0_gate_does_not_refold_under_a_per_frame_owner_writer() {
+        use boyko_ecs::ecs::core::app::App;
+
+        use crate::render_path_config::GeometryLegs;
+
+        // Drives the gate on an unarmable request, so it SPENDS `W2207_SITE` and joins the
+        // serialized set — see `run_sv0_gate`, which this test deliberately bypasses.
+        let _observe = boyko_log::probe::observe_lock();
+
+        // VB x Mesh: structurally unarmable, so the request can never be honoured — the exact
+        // configuration the fused design would have re-folded on forever.
+        //
+        // SSAO is armed so the SPLIT is present and the SOLE failing conjunct is the march: a red
+        // here then names "no SDF field", which is what this row is about, instead of leaving a
+        // reader to pick between two false conjuncts.
+        let resolved =
+            sv0_resolved(GeometryLegs::Mesh, /* ssao */ true, /* hwrt */ false, /* term */ true);
+        assert!(resolved.mesh_geo_shade_split, "test setup: the producer must be present");
+        assert!(
+            !resolved.shadow.contains(crate::render_path_config::ShadowSources::SDF_SOFT_MARCH),
+            "test setup: VB x Mesh has no SDF field to march — the ONE reason this row is unarmable"
+        );
+        assert!(!resolved.vb_sdf_mesh_armable(), "test setup: this boot must NOT be armable");
+
+        let mut app = App::new();
+        app.insert_resource(resolved);
+        app.insert_resource(LightingConfig::default());
+        app.insert_resource(LightTableDirty(false));
+
+        for frame in 0..8 {
+            // The owner's per-frame write, verbatim: re-assert the request, every frame.
+            app.world_mut().resource_mut::<LightingConfig>().vb_sdf_mesh_shadow = true;
+            app.world_mut().resource_mut::<LightingConfig>().vb_sdf_mesh_ao = true;
+            app.world_mut().run_system(sync_sv0_light_gate);
+            assert!(
+                !app.world().resource::<LightTableDirty>().0,
+                "frame {frame}: an unhonourable request must never dirty the light table"
+            );
+            let cfg = *app.world().resource::<LightingConfig>();
+            assert!(!cfg.vb_sdf_mesh_shadow_armed && !cfg.vb_sdf_mesh_ao_armed);
+            assert_eq!(cfg.shadow_gate_word(), 0);
+        }
+    }
+
+    /// **The 0%-gate, and the reason no shipped golden moves at rung S4.** An armable boot that
+    /// does NOT request SV0 keeps both bits clear and the header word at its pre-SV0 anchor.
+    ///
+    /// **DP6a corrects what this test's setup models.** It used to say `[vb_both]`,
+    /// `[vb_both_taa]` and both S1 fixtures "are all CAPABLE, and what keeps them unarmed is only
+    /// that they never set the request". After DP6a those fixtures are not capable at all — no
+    /// request and no pre-light consumer means no split, and no split means no producer. The
+    /// armable-but-unrequesting state this test pins is still REACHABLE, and it is a state
+    /// production really enters, twice over:
+    ///
+    /// * `BOYKO_SDF_MESH=host` (measurement arm B) sets the boot snapshot without setting either
+    ///   request bit — armable, unrequesting, mode 0, which is precisely what that arm needs;
+    /// * an owner who requested the term at boot and then withdrew it mid-run (the disarm test
+    ///   below drives exactly that transition).
+    #[test]
+    fn sv0_gate_leaves_an_unrequesting_armable_boot_at_the_zero_gate() {
+        use crate::render_path_config::GeometryLegs;
+
+        let resolved = sv0_resolved(GeometryLegs::Both, /* ssao */ false, /* hwrt */ false, /* term */ true);
+        assert!(
+            resolved.mesh_geo_shade_split,
+            "test setup: DP6a — the term request is what arms the split on this boot"
+        );
+        assert!(resolved.vb_sdf_mesh_armable(), "test setup: VB x Both must be SV0-armable");
+
+        let (cfg, dirty) = run_sv0_gate(resolved, false, false);
+        assert!(!cfg.vb_sdf_mesh_shadow_armed);
+        assert!(!cfg.vb_sdf_mesh_ao_armed);
+        assert_eq!(cfg.shadow_gate_word(), 0, "an unrequesting boot packs the pre-SV0 word");
+        assert!(!dirty, "a no-op resolve must not dirty the light table");
+    }
+
+    /// Each term arms ON ITS OWN. SV0 is two independently-gated terms and every gate written
+    /// against it as one feature was satisfiable by the shadow half alone — so the host gate is
+    /// required to pass each bit through without the other.
+    #[test]
+    fn sv0_gate_passes_each_requested_term_through_independently() {
+        use crate::render_path_config::GeometryLegs;
+
+        let resolved = sv0_resolved(GeometryLegs::Both, /* ssao */ false, /* hwrt */ false, /* term */ true);
+
+        let (shadow_only, _) = run_sv0_gate(resolved, true, false);
+        assert!(shadow_only.vb_sdf_mesh_shadow_armed);
+        assert!(!shadow_only.vb_sdf_mesh_ao_armed);
+        assert_eq!(
+            (shadow_only.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT) & VB_SDF_MESH_MODE_MASK,
+            VB_SDF_MESH_SHADOW_BIT,
+            "the shader must decode sv0_mode == VB_SDF_MESH_SHADOW_BIT (gate ii-a)"
+        );
+
+        let (ao_only, _) = run_sv0_gate(resolved, false, true);
+        assert!(!ao_only.vb_sdf_mesh_shadow_armed);
+        assert!(ao_only.vb_sdf_mesh_ao_armed);
+        assert_eq!(
+            (ao_only.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT) & VB_SDF_MESH_MODE_MASK,
+            VB_SDF_MESH_AO_BIT,
+            "the shader must decode sv0_mode == VB_SDF_MESH_AO_BIT (gate ii-b)"
+        );
+
+        let (both, dirty) = run_sv0_gate(resolved, true, true);
+        assert!(both.vb_sdf_mesh_shadow_armed && both.vb_sdf_mesh_ao_armed);
+        // An HONOURED request moves `_armed` false→true, so the table MUST be re-folded — the
+        // header is what carries the two bits to the shader, and a stale pack would render the
+        // armed frame unarmed.
+        assert!(dirty, "arming a term must dirty the light table so the header is re-packed");
+    }
+
+    /// The resolve clears BOTH bits on every structurally unarmable boot, including the hwrt
+    /// configuration that selects §S4's rows 9-10.
+    ///
+    /// The `dirty` assertion matters, and it is the OPPOSITE of the armed case: `_armed` starts
+    /// `false` and stays `false`, so nothing is written and the table is never re-folded. That is
+    /// the whole point of resolving into a separate field (code-review P2-c) — an unhonourable
+    /// request costs nothing, however often it is re-asserted.
+    #[test]
+    fn sv0_gate_clears_a_request_the_boot_cannot_carry() {
+        use crate::render_path_config::{GeometryLegs, ResolvedRenderPath, ShadowSources};
+
+        // Rows 9-10: `ssao_on` selects the split tail, the hwrt carrier selects its `_hwrt`
+        // variants — and displaces `SDF_SOFT_MARCH`, which is exactly why SV0 cannot ride them.
+        let hwrt = sv0_resolved(GeometryLegs::Both, /* ssao */ true, /* hwrt */ true, /* term */ true);
+        assert!(hwrt.shadow.contains(ShadowSources::HWRT_VIS), "test setup: the hwrt rows");
+        // Single-cause: SSAO arms the split, so the ONE failing conjunct is the displaced march.
+        assert!(hwrt.mesh_geo_shade_split, "test setup: ssao_on must arm the split tail");
+        assert!(!hwrt.vb_sdf_mesh_armable());
+        let (cfg, dirty) = run_sv0_gate(hwrt, true, true);
+        assert!(!cfg.vb_sdf_mesh_shadow_armed && !cfg.vb_sdf_mesh_ao_armed, "rows 9-10 never arm");
+        assert_eq!(cfg.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT & VB_SDF_MESH_MODE_MASK, 0);
+        assert!(!dirty, "a request that resolves to the already-published OFF state writes nothing");
+
+        // VB x Mesh (no field to march) and VB x Sdf (no mesh pixels to shade). SSAO is armed on
+        // both so each row fails for as few conjuncts as it structurally can:
+        //   * `Mesh` — the split IS armed, so the march is the single cause;
+        //   * `Sdf`  — `mesh_geo_shade_split ⇒ mesh_leg`, so the missing mesh leg fails the split
+        //     conjunct too, and this row cannot be made single-cause by any input. Stated, not
+        //     papered over.
+        for legs in [GeometryLegs::Mesh, GeometryLegs::Sdf] {
+            let resolved = sv0_resolved(legs, /* ssao */ true, /* hwrt */ false, /* term */ true);
+            assert_eq!(
+                resolved.mesh_geo_shade_split,
+                legs.has_mesh(),
+                "{legs:?}: the split follows the mesh leg, and that is why only one of these two \
+                 rows can name a single cause"
+            );
+            assert!(!resolved.vb_sdf_mesh_armable(), "{legs:?} must not be SV0-armable");
+            let (cfg, _) = run_sv0_gate(resolved, true, true);
+            assert!(
+                !cfg.vb_sdf_mesh_shadow_armed && !cfg.vb_sdf_mesh_ao_armed,
+                "{legs:?} must never arm"
+            );
+        }
+
+        // The never-resolved default carrier (Deferred + Both) — the state a world that never
+        // booted the windowed runner carries.
+        let (cfg, _) = run_sv0_gate(ResolvedRenderPath::default(), true, true);
+        assert!(
+            !cfg.vb_sdf_mesh_shadow_armed && !cfg.vb_sdf_mesh_ao_armed,
+            "Deferred must never arm SV0"
+        );
+    }
+
+    /// **The DISARM direction.** A boot whose capability goes away after a term was armed must
+    /// have the header bit cleared and the table re-folded — otherwise the shader keeps executing
+    /// a block whose producer is gone.
+    ///
+    /// Reachable state, not a hypothetical: `_armed` is `Resource` state that survives whatever
+    /// the owner does to the request, so an owner who withdraws the request mid-run lands here.
+    #[test]
+    fn sv0_gate_disarms_and_refolds_when_the_request_is_withdrawn() {
+        use boyko_ecs::ecs::core::app::App;
+
+        use crate::render_path_config::GeometryLegs;
+
+        let mut app = App::new();
+        app.insert_resource(sv0_resolved(GeometryLegs::Both, /* ssao */ false, /* hwrt */ false, /* term */ true));
+        app.insert_resource(LightingConfig {
+            vb_sdf_mesh_shadow: true,
+            vb_sdf_mesh_ao: true,
+            ..LightingConfig::default()
+        });
+        app.insert_resource(LightTableDirty(false));
+
+        app.world_mut().run_system(sync_sv0_light_gate);
+        assert!(app.world().resource::<LightingConfig>().vb_sdf_mesh_shadow_armed);
+        assert!(app.world().resource::<LightTableDirty>().0, "arming re-folds");
+
+        app.world_mut().resource_mut::<LightTableDirty>().0 = false;
+        app.world_mut().resource_mut::<LightingConfig>().vb_sdf_mesh_shadow = false;
+        app.world_mut().resource_mut::<LightingConfig>().vb_sdf_mesh_ao = false;
+        app.world_mut().run_system(sync_sv0_light_gate);
+
+        let cfg = *app.world().resource::<LightingConfig>();
+        assert!(!cfg.vb_sdf_mesh_shadow_armed && !cfg.vb_sdf_mesh_ao_armed);
+        assert_eq!(cfg.shadow_gate_word(), 0, "the header returns to the pre-SV0 anchor");
+        assert!(app.world().resource::<LightTableDirty>().0, "disarming must re-fold too");
     }
 
     #[test]

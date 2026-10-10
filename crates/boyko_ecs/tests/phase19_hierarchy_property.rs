@@ -16,6 +16,13 @@
 //! cycles — it only ever reparents to keep a forest (one parent per child, and
 //! despawn is the only structural removal of nodes).
 
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, Mutex};
 
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
@@ -124,7 +131,16 @@ proptest! {
     // Keep the case count modest: every case spins up a fresh EcsMaster + an
     // apply window per op (each op is a full schedule drain), so this is heavier
     // than a pure-CPU property.
-    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+    // Under Miri, two cases: every op kind is drawn per op, and 256 interpreted cases (each op a
+    // full schedule drain) ran past 3 min (MEASURED 2026-10-10).
+    #![proptest_config(ProptestConfig {
+        cases: if cfg!(miri) { 2 } else { 256 },
+        // No failure file under Miri: proptest finds it through the cwd, which Miri's
+        // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+        #[cfg(miri)]
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// Random op sequence; the invariant must hold after EVERY drain.
     #[test]

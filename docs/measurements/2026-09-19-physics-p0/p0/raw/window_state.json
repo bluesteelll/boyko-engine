@@ -1,0 +1,21 @@
+{
+ "window_start": "2026-09-19T05:22:15.259+03:00",
+ "machine_before": {
+  "powercfg_active": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+  "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n246"
+ },
+ "disk_free_gb_before": {
+  "C": 46.14057540893555,
+  "D": 2.5401344299316406
+ },
+ "window_end": "2026-09-19T05:46:52.939+03:00",
+ "machine_after": {
+  "powercfg_active": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+  "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n242"
+ },
+ "disk_free_gb_after": {
+  "C": 46.11229705810547,
+  "D": 2.5379714965820312
+ },
+ "status": "VOID: A/A0 band > 2 % at W ['2'] (B {'1': 0.003936258736052967, '2': 0.02310514851949197, '4': 0.007780329582348422, '8': 0.007862244849833777, '16': 0.00919421615969318}) (after pass 2)"
+}

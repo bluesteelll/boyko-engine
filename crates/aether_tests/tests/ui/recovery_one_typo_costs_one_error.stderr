@@ -1,0 +1,5 @@
+error: expected `:` after field `hp` (or a known item: requires / on_add / on_insert / on_replace / on_remove / no_bundle)
+  --> tests/ui/recovery_one_typo_costs_one_error.rs:25:24
+   |
+25 |     component Broken { hp f32 }
+   |                        ^^

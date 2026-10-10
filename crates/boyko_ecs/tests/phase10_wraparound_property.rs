@@ -8,7 +8,7 @@
 //! `proptest` materialises a `Strategy` machine that allocates and walks
 //! hundreds of cases per test. Under Miri the harness compiles for
 //! ~10× the runtime budget of a plain unit test; gating the entire file
-//! out of Miri keeps `cargo +nightly miri test` snappy. Miri coverage of
+//! out of Miri keeps `cargo +nightly-x86_64-pc-windows-msvc miri test` snappy. Miri coverage of
 //! the underlying `Tick` arithmetic is provided by the explicit Miri
 //! tests in `tests/miri_phase10.rs`.
 

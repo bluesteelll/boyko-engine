@@ -1,0 +1,12 @@
+2026-09-19T05:00:39+03:00
+   Compiling boyko-diag v0.1.0 (D:\wt\joltab\crates\boyko_diag)
+   Compiling boyko-log v0.1.0 (D:\wt\joltab\crates\boyko_log)
+   Compiling boyko-threadpool v0.1.0 (D:\wt\joltab\crates\boyko_threadpool)
+   Compiling boyko-ecs v0.1.0 (D:\wt\joltab\crates\boyko_ecs)
+   Compiling boyko-input v0.1.0 (D:\wt\joltab\crates\boyko_input)
+   Compiling boyko-scene v0.1.0 (D:\wt\joltab\crates\boyko_scene)
+   Compiling boyko-physics v0.1.0 (D:\wt\joltab\crates\boyko_physics)
+    Finished `parity` profile [optimized] target(s) in 21.66s
+  Executable benches\jolt_parity_pyramid.rs (D:/wt/_targets/joltab-msvc\parity\deps\jolt_parity_pyramid-804617a1205f3459.exe)
+exit 0
+2026-09-19T05:01:01+03:00

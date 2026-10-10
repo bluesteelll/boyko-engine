@@ -1,0 +1,172 @@
+== probe (v) survival under fat LTO and /OPT:REF (branch u/b3-ctl-0)
+tree         D:\wt\lighttable (HEAD 05cd7715fa02445ee61ffed3d47630046a4ebe8e, 2 uncommitted path(s))
+target dir   D:/wt/_targets/vkval-msvc
+host         x86_64-pc-windows-msvc (msvc)
+rustc -vV    rustc 1.98.1 (48a229cea 2026-09-01)
+rustc -vV    binary: rustc
+rustc -vV    commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
+rustc -vV    commit-date: 2026-09-01
+rustc -vV    host: x86_64-pc-windows-msvc
+rustc -vV    release: 1.98.1
+rustc -vV    LLVM version: 22.1.8
+llvm-nm          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-nm.exe
+llvm-objdump     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-objdump.exe
+llvm-readobj     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-readobj.exe
+llvm-size        LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-size.exe
+llvm-ar          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-ar.exe
+subject      boyko_demo (boyko_demo --bin boyko_demo)
+profile      seam-census
+object       D:/wt/_targets/vkval-msvc\seam-census\deps\boyko_demo.o
+object sha   bcddae825bfb71ada870cea7d9e0efc4868a9b3a3852912acc8c73f01e91c098
+image        D:/wt/_targets/vkval-msvc\seam-census\deps\boyko_demo.exe
+image sha    2de5f4fb15046be064cf54622df8e24e1bb1312499212eb21c68fda4387c2740
+pdb          D:/wt/_targets/vkval-msvc\seam-census\deps\boyko_demo.pdb
+map          D:/wt/_targets/vkval-msvc\ug15\maps\probe-v-boyko_demo.map
+link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\seam-census\\deps\\boyko_demo.boyko_demo.8595b65b38f0f039-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\seam-census\\deps\\rustco7YIpZ\\libgetrandom-5c5bfbeeb531b711.rlib" "D:/wt/_targets/vkval-msvc\\seam-census\\deps\\rustco7YIpZ\\libwindows_sys-580135e73d930774.rlib" "D:/wt/_targets/vkval-msvc\\seam-census\\deps\\rustco7YIpZ\\liblibloading-1e4c9da494d1298e.rlib" "D:/wt/_targets/vkval-msvc\\seam-census\\deps\\rustco7YIpZ\\libwindows-c19e306b3672b7ac.rlib" "D:/wt/_targets/vkval-msvc\\seam-census\\deps\\rustco7YIpZ\\libwindows_numerics-090b778de29f40e5.rlib" "D:/wt/_targets/vkval-msvc\\seam-census\\deps\\rustco7YIpZ\\libwindows_core-325392be9da29609.rlib" "D:/wt/_targets/vkval-msvc\\seam-census\\deps\\rustco7YIpZ\\libwindows_strings-9a201cfed9e48952.rlib" "D:/wt/_targets/vkval-msvc\\seam-census\\deps\\rustco7YIpZ\\libwindows_result-2af2fbf16144a430.rlib" "D:/wt/_targets/vkval-msvc\\seam-census\\deps\\rustco7YIpZ\\libparking_lot_core-ae66d183fa563878.rlib" "D:/wt/_targets/vkval-msvc\\seam-census\\deps\\rustco7YIpZ\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "shlwapi.lib" "kernel32.lib" "user32.lib" "shell32.lib" "gdi32.lib" "advapi32.lib" "C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.53.1\\lib\\windows.0.53.0.lib" "C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "opengl32.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/LIBPATH:C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib" "/LIBPATH:C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.53.1\\lib" "/OUT:D:/wt/_targets/vkval-msvc\\seam-census\\deps\\boyko_demo.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis" "/NATVIS:D:/wt/_targets/vkval-msvc\\seam-census\\deps\\rustco7YIpZ\\boyko_demo-0.natvis" "/NATVIS:D:/wt/_targets/vkval-msvc\\seam-census\\deps\\rustco7YIpZ\\boyko_demo-1.natvis" "/NATVIS:D:/wt/_targets/vkval-msvc\\seam-census\\deps\\rustco7YIpZ\\boyko_demo-2.natvis" "/MAP:D:/wt/_targets/vkval-msvc\\ug15\\maps\\probe-v-boyko_demo.map"
+final rustc  Running `C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name boyko_demo --edition=2024 'crates\boyko_demo\src\main.rs' --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C opt-level=3 -C lto=fat --warn=unexpected_cfgs '--allow=clippy::missing_const_for_thread_local' '--deny=clippy::disallowed_types' --check-cfg 'cfg(loom)' --check-cfg 'cfg(force_alloc_panic)' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=79f2aff1461f0635 --out-dir 'D:/wt/_targets/vkval-msvc\seam-census\deps' -C strip=debuginfo -L 'dependency=D:/wt/_targets/vkval-msvc\seam-census\deps' --extern 'boyko_diag=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_diag-b560511677c8eafc.rlib' --extern 'boyko_ecs=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_ecs-e93203faf86ba798.rlib' --extern 'boyko_log=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_log-d52904bfffa357e2.rlib' --extern 'boyko_macros=D:/wt/_targets/vkval-msvc\seam-census\deps\boyko_macros-f880e435a2f5fc23.dll' --extern 'boyko_threadpool=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_threadpool-a64270c06f5de4b0.rlib' --extern 'boyko_demo=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_demo-f431c4fa688002a0.rlib' --extern 'bytemuck=D:/wt/_targets/vkval-msvc\seam-census\deps\libbytemuck-8741d75d28ecc71d.rlib' --extern 'eframe=D:/wt/_targets/vkval-msvc\seam-census\deps\libeframe-f1933ccdd279a621.rlib' --extern 'rand=D:/wt/_targets/vkval-msvc\seam-census\deps\librand-987591a5f3bbc988.rlib' --emit=obj --print link-args -C 'link-arg=/MAP:D:/wt/_targets/vkval-msvc\ug15\maps\probe-v-boyko_demo.map' -C target-cpu=x86-64-v3 -L 'native=C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows_x86_64_msvc-0.52.6\lib' -L 'native=C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows_x86_64_msvc-0.53.1\lib'`
+link line has /OPT:REF: true ; /DEBUG: true
+boyko_demo ug15_probe_v_uncalled: object ["T ug15_probe_v_uncalled (raw ug15_probe_v_uncalled)"]; /MAP []
+boyko_demo UG15_PROBE_V_TABLE: object []; /MAP []
+boyko_demo ug15_probe_v_target: object []; /MAP []
+boyko_demo UG15_PROBE_V_LIVE: object []; /MAP []
+boyko_demo ug15_probe_v_live_target: object []; /MAP []
+boyko_demo exports: []
+boyko_demo leg-(7) diff against C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/b3/leg7\leg7-boyko_demo-A.snap (70 lines):
+  (a) sections: parent [(".text", 8546242), (".rdata", 3384572), (".data", 272384), (".pdata", 234552), (".reloc", 26504), ("Total", 12464254)] / child [(".text", 8546226), (".rdata", 3384572), (".data", 272384), (".pdata", 234552), (".reloc", 26508), ("Total", 12464242)]
+  (b) parent only ×1: t 204 $ehgcr_1026_21
+  (b) parent only ×1: t 37 $ehgcr_1026_9
+  (b) parent only ×1: t 79 $ehgcr_1028_15
+  (b) parent only ×1: t 52 $ehgcr_1028_26
+  (b) child only ×1: t 204 $ehgcr_1034_21
+  (b) child only ×1: t 37 $ehgcr_1034_9
+  (b) child only ×1: t 79 $ehgcr_1036_15
+  (b) child only ×1: t 52 $ehgcr_1036_26
+  (b) child only ×1: t 91 $ehgcr_1109_15
+  (b) parent only ×1: t 91 $ehgcr_1148_15
+  (b) parent only ×1: t 8 $ehgcr_1181_123
+  (b) parent only ×1: t 8 $ehgcr_1181_167
+  (b) parent only ×1: t 8 $ehgcr_1181_54
+  (b) parent only ×1: t 20 $ehgcr_1181_62
+  (b) parent only ×1: t 8 $ehgcr_1181_85
+  (b) child only ×1: t 8 $ehgcr_1182_123
+  (b) child only ×1: t 8 $ehgcr_1182_167
+  (b) child only ×1: t 8 $ehgcr_1182_54
+  (b) child only ×1: t 20 $ehgcr_1182_62
+  (b) child only ×1: t 8 $ehgcr_1182_85
+  (b) parent only ×1: t 18 $ehgcr_1185_11
+  (b) child only ×1: t 18 $ehgcr_1186_11
+  (b) parent only ×1: t 7 $ehgcr_1186_187
+  (b) parent only ×1: t 7 $ehgcr_1186_190
+  (b) parent only ×1: t 7 $ehgcr_1186_192
+  (b) parent only ×1: t 7 $ehgcr_1186_196
+  (b) parent only ×1: t 20 $ehgcr_1186_198
+  (b) parent only ×1: t 20 $ehgcr_1186_202
+  (b) child only ×1: t 7 $ehgcr_1187_187
+  (b) child only ×1: t 7 $ehgcr_1187_190
+  (b) child only ×1: t 7 $ehgcr_1187_192
+  (b) child only ×1: t 7 $ehgcr_1187_196
+  (b) child only ×1: t 20 $ehgcr_1187_198
+  (b) child only ×1: t 20 $ehgcr_1187_202
+  (b) parent only ×1: t 52 $ehgcr_1219_29
+  (b) child only ×1: t 52 $ehgcr_1220_29
+  (b) parent only ×1: t 30 $ehgcr_1224_8
+  (b) child only ×1: t 30 $ehgcr_1225_8
+  (b) parent only ×1: t 148 $ehgcr_1717_18
+  (b) child only ×1: t 148 $ehgcr_1718_18
+  (b) parent only ×1: t 63 $ehgcr_2827_6
+  (b) child only ×1: t 63 $ehgcr_2828_6
+  (b) parent only ×1: t 64 $ehgcr_5148_26
+  (b) child only ×1: t 64 $ehgcr_5149_26
+  (b) parent only ×1: t 25 $ehgcr_5153_8
+  (b) child only ×1: t 25 $ehgcr_5154_8
+  (b) parent only ×1: t 125 $ehgcr_5161_11
+  (b) parent only ×1: t 52 $ehgcr_5161_23
+  (b) parent only ×1: t 17 $ehgcr_5161_28
+  (b) child only ×1: t 125 $ehgcr_5162_11
+  (b) child only ×1: t 52 $ehgcr_5162_23
+  (b) child only ×1: t 17 $ehgcr_5162_28
+  (b) parent only ×1: t 52 $ehgcr_9067_29
+  (b) child only ×1: t 52 $ehgcr_9068_29
+  (b) parent only ×1: t 33 $ehgcr_9072_8
+  (b) child only ×1: t 33 $ehgcr_9073_8
+  (b) parent only ×1: t 147 $ehgcr_9221_20
+  (b) child only ×1: t 147 $ehgcr_9222_20
+  (b) parent only ×1: t 154 $ehgcr_9270_739
+subject      clear (boyko-app --example clear)
+profile      seam-census
+object       D:/wt/_targets/vkval-msvc\seam-census\examples\clear.o
+object sha   7861204eb9e2fb37a66f6145cbd02228519b4578c36dcc92601349609e545674
+image        D:/wt/_targets/vkval-msvc\seam-census\examples\clear.exe
+image sha    19bb0599f2b9dfa624d20d097fc8215210c9186af40a3f57a4f0086fdcd0b48e
+pdb          D:/wt/_targets/vkval-msvc\seam-census\examples\clear.pdb
+map          D:/wt/_targets/vkval-msvc\ug15\maps\probe-v-clear.map
+link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\seam-census\\examples\\clear.clear.e44d60cb4f5a059a-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\seam-census\\examples\\rustcBThySC\\libwindows_sys-438931091cde2c45.rlib" "D:/wt/_targets/vkval-msvc\\seam-census\\examples\\rustcBThySC\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "winmm.lib" "user32.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/OUT:D:/wt/_targets/vkval-msvc\\seam-census\\examples\\clear.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis" "/MAP:D:/wt/_targets/vkval-msvc\\ug15\\maps\\probe-v-clear.map"
+final rustc  Running `C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name clear --edition=2024 'crates\boyko_app\examples\clear.rs' --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C opt-level=3 -C lto=fat --warn=unexpected_cfgs '--allow=clippy::missing_const_for_thread_local' '--deny=clippy::disallowed_types' --check-cfg 'cfg(loom)' --check-cfg 'cfg(force_alloc_panic)' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("hwrt", "profiling-alloc", "profiling-census"))' -C metadata=3343a1334041dab7 --out-dir 'D:/wt/_targets/vkval-msvc\seam-census\examples' -C strip=debuginfo -L 'dependency=D:/wt/_targets/vkval-msvc\seam-census\deps' --extern 'boyko_app=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_app-039a09f70e2628bf.rlib' --extern 'boyko_diag=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_diag-b560511677c8eafc.rlib' --extern 'boyko_ecs=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_ecs-2f70a22dd5086947.rlib' --extern 'boyko_fontbake=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_fontbake-7bf6f040de063476.rlib' --extern 'boyko_input=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_input-8b753057ea004ccb.rlib' --extern 'boyko_log=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_log-64926abcbf6a9ab1.rlib' --extern 'boyko_macros=D:/wt/_targets/vkval-msvc\seam-census\deps\boyko_macros-f880e435a2f5fc23.dll' --extern 'boyko_math=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_math-691a90f099553bba.rlib' --extern 'boyko_physics=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_physics-9837b005f132116d.rlib' --extern 'boyko_render=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_render-f2096f6585ca22bf.rlib' --extern 'boyko_scene=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_scene-7fe78beeed6440a5.rlib' --extern 'boyko_rhi=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_rhi-8f04a45cab82b45e.rlib' --extern 'boyko_rhi_vulkan=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_rhi_vulkan-de8f5eeea3fd23ae.rlib' --extern 'boyko_sdf_math=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_sdf_math-33c564606409eae8.rlib' --extern 'boyko_shaderdsl=D:/wt/_targets/vkval-msvc\seam-census\deps\libboyko_shaderdsl-ad6ba3404cad468c.rlib' --extern 'bytemuck=D:/wt/_targets/vkval-msvc\seam-census\deps\libbytemuck-23c8285741eda9c3.rlib' --emit=obj --print link-args -C 'link-arg=/MAP:D:/wt/_targets/vkval-msvc\ug15\maps\probe-v-clear.map' -C target-cpu=x86-64-v3`
+link line has /OPT:REF: true ; /DEBUG: true
+clear ug15_probe_v_uncalled: object ["T ug15_probe_v_uncalled (raw ug15_probe_v_uncalled)"]; /MAP []
+clear UG15_PROBE_V_TABLE: object []; /MAP []
+clear ug15_probe_v_target: object []; /MAP []
+clear UG15_PROBE_V_LIVE: object ["r boyko_ecs::UG15_PROBE_V_LIVE (raw _RNvCs72QlCdEtGol_9boyko_ecs17UG15_PROBE_V_LIVE)"]; /MAP ["0002:00016cd0       _RNvCs72QlCdEtGol_9boyko_ecs17UG15_PROBE_V_LIVE 00000001401f6cd0     clear.clear.e44d60cb4f5a059a-cgu.0.rcgu.o"]
+clear ug15_probe_v_live_target: object ["t boyko_ecs::ug15_probe_v_live_target (raw _RNvCs72QlCdEtGol_9boyko_ecs24ug15_probe_v_live_target)"]; /MAP ["0001:000b3a80       _RNvCs72QlCdEtGol_9boyko_ecs24ug15_probe_v_live_target 00000001400b4a80 f   clear.clear.e44d60cb4f5a059a-cgu.0.rcgu.o"]
+clear exports: []
+clear leg-(7) diff against C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/b3/leg7\leg7-clear-A.snap (64 lines):
+  (a) sections: parent [(".text", 1956051), (".rdata", 3022594), (".data", 386048), (".pdata", 48180), (".reloc", 6236), ("Total", 5419109)] / child [(".text", 1959603), (".rdata", 3022482), (".data", 386048), (".pdata", 48228), (".reloc", 6244), ("Total", 5422605)]
+  (b) parent only ×1: t 84 $ehgcr_1078_25
+  (b) child only ×1: t 36 $ehgcr_1206_11
+  (b) child only ×1: t 199 $ehgcr_1209_6
+  (b) child only ×1: t 79 $ehgcr_1211_15
+  (b) child only ×1: t 52 $ehgcr_1211_26
+  (b) parent only ×1: t 52 $ehgcr_1360_29
+  (b) child only ×1: t 52 $ehgcr_1362_29
+  (b) parent only ×1: t 20 $ehgcr_1365_5
+  (b) child only ×1: t 20 $ehgcr_1367_5
+  (b) parent only ×1: t 8 $ehgcr_2562_123
+  (b) parent only ×1: t 8 $ehgcr_2562_167
+  (b) parent only ×1: t 8 $ehgcr_2562_54
+  (b) parent only ×1: t 20 $ehgcr_2562_62
+  (b) parent only ×1: t 8 $ehgcr_2562_85
+  (b) child only ×1: t 8 $ehgcr_2564_123
+  (b) child only ×1: t 8 $ehgcr_2564_167
+  (b) child only ×1: t 8 $ehgcr_2564_54
+  (b) child only ×1: t 20 $ehgcr_2564_62
+  (b) child only ×1: t 8 $ehgcr_2564_85
+  (b) parent only ×1: t 26 $ehgcr_2566_18
+  (b) parent only ×1: t 68 $ehgcr_2566_22
+  (b) parent only ×1: t 7 $ehgcr_2567_187
+  (b) parent only ×1: t 7 $ehgcr_2567_190
+  (b) parent only ×1: t 7 $ehgcr_2567_192
+  (b) parent only ×1: t 7 $ehgcr_2567_196
+  (b) parent only ×1: t 20 $ehgcr_2567_198
+  (b) parent only ×1: t 20 $ehgcr_2567_202
+  (b) child only ×1: t 26 $ehgcr_2568_18
+  (b) child only ×1: t 68 $ehgcr_2568_22
+  (b) child only ×1: t 7 $ehgcr_2569_187
+  (b) child only ×1: t 7 $ehgcr_2569_190
+  (b) child only ×1: t 7 $ehgcr_2569_192
+  (b) child only ×1: t 7 $ehgcr_2569_196
+  (b) child only ×1: t 20 $ehgcr_2569_198
+  (b) child only ×1: t 20 $ehgcr_2569_202
+  (b) parent only ×1: t 30 $ehgcr_2605_8
+  (b) child only ×1: t 30 $ehgcr_2607_8
+  (b) parent only ×1: t 60 $ehgcr_2968_29
+  (b) child only ×1: t 60 $ehgcr_2970_29
+  (b) parent only ×1: t 125 $ehgcr_2975_11
+  (b) parent only ×1: t 52 $ehgcr_2975_23
+  (b) parent only ×1: t 17 $ehgcr_2975_28
+  (b) child only ×1: t 125 $ehgcr_2977_11
+  (b) child only ×1: t 52 $ehgcr_2977_23
+  (b) child only ×1: t 17 $ehgcr_2977_28
+  (b) parent only ×1: t 36 $ehgcr_990_11
+  (b) child only ×1: t 84 $ehgcr_993_25
+  (b) parent only ×1: t 196 $ehgcr_993_6
+  (b) parent only ×1: t 79 $ehgcr_995_15
+  (b) parent only ×1: t 52 $ehgcr_995_26
+  (b) child only ×1: t 313 <boyko_ecs::ecs::core::commands::command_queue::CommandQueue>::apply_via_raw_twin
+  (b) parent only ×1: t 316 <boyko_ecs::ecs::core::commands::command_queue::CommandQueue>::apply_via_raw_twin
+  (b) parent only ×1: t 576 <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::new
+  (b) child only ×1: t 592 <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::new
+  (b) parent only ×1: t 512 <boyko_ecs::ecs::core::iters::query::state::QueryDataState<&boyko_ecs::ecs::core::profiling::ecs_control::ProfilingScope, boyko_ecs::ecs::core::iters::query::filter_enable::Enabled<boyko_ecs::ecs::core::profiling::ecs_control::ProfilingScopeEnabled>>>::update
+  (b) child only ×1: t 528 <boyko_ecs::ecs::core::iters::query::state::QueryDataState<&boyko_ecs::ecs::core::profiling::ecs_control::ProfilingScope, boyko_ecs::ecs::core::iters::query::filter_enable::Enabled<boyko_ecs::ecs::core::profiling::ecs_control::ProfilingScopeEnabled>>>::update
+  (b) child only ×1: r 8 boyko_ecs::UG15_PROBE_V_LIVE
+  (b) child only ×1: t 33 boyko_ecs::ug15_probe_v_live_target
+  (b) parent only ×1: t 362 core::slice::sort::unstable::heapsort::heapsort::<&str, <&str as core::cmp::PartialOrd>::lt>

@@ -74,7 +74,7 @@ fn find_dxc() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    if Command::new(bare).arg("--version").output().is_ok() {
+    if Command::new(bare).arg("--version").output_within(DXC_DEADLINE).is_ok() {
         return Some(PathBuf::from(bare));
     }
     None
@@ -83,7 +83,7 @@ fn find_dxc() -> Option<PathBuf> {
 /// Re-DXCs `hlsl_name` (relative to the shaders dir) under the EXACT frozen recipe into a
 /// fresh TEMP `.spv`, and returns the bytes. Never overwrites a committed artifact.
 fn redxc_to_bytes(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str) -> Vec<u8> {
-    let out_spv = std::env::temp_dir().join(format!("{hlsl_name}.redxc.spv"));
+    let out_spv = child_guard::scratch_path(&format!("{hlsl_name}.redxc.spv"));
     let status = Command::new(dxc)
         .current_dir(dir)
         .args([
@@ -97,7 +97,7 @@ fn redxc_to_bytes(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str) -> Vec<u8> {
             "-Fo",
         ])
         .arg(&out_spv)
-        .status()
+        .status_within(DXC_DEADLINE)
         .expect("invariant: dxc was located and must run");
     assert!(
         status.success(),
@@ -164,3 +164,9 @@ fn interp_spv_byte_identical() {
          -Fo interp_instances.comp.spv` and re-commit the .spv."
     );
 }
+
+// `status_within` / `output_within` (a deadline on each dxc this file spawns) and `scratch_path`
+// (a temp file no other run shares) live in `tests/child_guard/mod.rs`, whose module doc records
+// the hung-dxc stall behind them. Declared last so that no line an internal document cites moves.
+mod child_guard;
+use child_guard::{BoundedRun, DXC_DEADLINE};

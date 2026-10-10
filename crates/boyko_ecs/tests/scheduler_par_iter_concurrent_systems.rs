@@ -76,7 +76,9 @@ fn register_test_components() {
 static PAR_ITER_SUM: AtomicUsize = AtomicUsize::new(0);
 
 /// 4096 rows × value `i` sums to (0 + 1 + ... + 4095) = 4095 * 4096 / 2.
-const PAR_TEST_N: u32 = 4096;
+// Under Miri just past `MIN_ARCHETYPE_FOR_PARALLEL` (1024), so the system body still takes the
+// parallel path; the native 4 096 rows ran past 3 min of interpretation (MEASURED 2026-10-10).
+const PAR_TEST_N: u32 = if cfg!(miri) { 1100 } else { 4096 };
 const EXPECTED_SUM: usize = (PAR_TEST_N as usize) * ((PAR_TEST_N as usize) - 1) / 2;
 
 /// A scheduler system that calls `par_iter().for_each(...)` must not

@@ -56,7 +56,7 @@ its `gate_pick_resolves_to_anchor_root` test, the `resolve_anchor_point` refacto
 - `ui_world_visibility_system` (`crates/boyko_ui/src/world/visibility.rs:74`) — exclusive;
   reads `HoveredWorldEntity`, matches each anchor's `EntityAnchor(target)`, toggles
   `UiWorldHidden` (`visibility.rs:98-102`).
-- The layout-skip guard (`crates/boyko_ui/src/layout.rs:289-293`):
+- The layout-skip guard (`crates/boyko_ui/src/layout.rs:295-302`):
   `is_enabled::<UiWorldCulled>` / `is_enabled::<UiWorldHidden>` → `return` before any
   `ComputedRect` write.
 
@@ -576,10 +576,10 @@ would bloat the caller; principle 7).
 - Import (line ~66): add `UiWorldOccluded` to
   `use crate::world::components::{UiWorldAnchor, UiWorldCulled, UiWorldHidden,
   UiWorldProjection};` → `{..., UiWorldHidden, UiWorldOccluded, UiWorldProjection};`.
-- `layout_root` skip guard (`layout.rs:289-293`), insert one read + extend the OR:
+- `layout_root` skip guard (`layout.rs:295-302`), insert one read + extend the OR:
 ```rust
-let culled = world.is_enabled::<UiWorldCulled>(root);     // L289 (unchanged)
-let hidden = world.is_enabled::<UiWorldHidden>(root);     // L290 (unchanged)
+let culled = world.is_enabled::<UiWorldCulled>(root);     // L295 (unchanged)
+let hidden = world.is_enabled::<UiWorldHidden>(root);     // L296 (unchanged)
 let occluded = world.is_enabled::<UiWorldOccluded>(root); // NEW
 if !proj.visible || culled || hidden || occluded {        // EDIT: + `|| occluded`
     return;
@@ -588,7 +588,9 @@ if !proj.visible || culled || hidden || occluded {        // EDIT: + `|| occlude
 This reuses the IDENTICAL `is_enabled::<T>(root)` mechanism (confirmed: `enable` /
 `disable` / `is_enabled` on `&mut EcsMaster`, `enable_tag_api.rs:87/95/113`); a
 skipped root writes no `ComputedRect` for itself or its subtree (the `return`
-precedes `write_rect` at `layout.rs:305` and `position_node` at `layout.rs:306`), so
+precedes `write_rect` at `layout.rs:315` and `position_node` at `layout.rs:316` — both
+re-measured by CONTENT 2026-08-28; they read `:305` / `:306`, which are the two
+`proj.scale` multiplications three lines above the calls), so
 "occluded" == "not laid out" == "not emitted" (INVESTIGATE #3, proven below).
 
 ### 2.6 `boyko_ui` registration / scheduling (INVESTIGATE #4)

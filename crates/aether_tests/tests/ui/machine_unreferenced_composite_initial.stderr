@@ -1,0 +1,5 @@
+error: no state `Runing` in `Lonely`; states declared here: `Running` (did you mean `Running`?)
+  --> tests/ui/machine_unreferenced_composite_initial.rs:14:21
+   |
+14 |             initial Runing;
+   |                     ^^^^^^

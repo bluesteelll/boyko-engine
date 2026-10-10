@@ -276,7 +276,7 @@ impl<A: Actionlike> ActionState<A> {
     /// guarantees the next batch does not re-observe it (no-double-count).
     ///
     /// The frozen levels (`fixed_pressed`/value/axis2) are NOT touched: a level
-    /// is re-sampled wholesale by every [`freeze_fixed_snapshot`], so it carries
+    /// is re-sampled wholesale by every [`Self::freeze_fixed_snapshot`], so it carries
     /// no stale state.
     #[inline]
     pub fn clear_fixed_edges(&mut self) {

@@ -30,17 +30,6 @@ use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 /// to keep the partition signature readable (clippy::type_complexity).
 type ComponentEntry<'a> = (ComponentId, &'a [u8]);
 
-/// Dense plan D2 — `true` iff `cid` is a signature-storage (table) id. The
-/// structural-op fire loops iterate an archetype's RETAINED `component_ids`
-/// (which keeps non-signature ids since D0), so they skip a dense (or bitset) id
-/// via this predicate — dense is fired by the dedicated D2 routing, never the
-/// table `component_ids` machinery. For a table-only world this is always `true`
-/// (cold load + branch on an already-cold path; the 0%-gate).
-#[inline]
-fn is_signature_cid(cid: ComponentId) -> bool {
-    component_registry::is_signature_id(cid)
-}
-
 impl EcsMaster {
     /// Creates a new archetype with the specified component IDs
     /// Returns the ID of the created archetype
@@ -69,7 +58,9 @@ impl EcsMaster {
     /// 1. `has_archetype(archetype_id)` is checked first.
     /// 2. Only then is `allocate_entity` called.
     /// 3. If `create_entity` fails, `rewind_allocate` undoes the allocation
-    ///    (fresh-ID path) so the ID is not silently wasted.
+    ///    along the branch `allocate_entity_ticketed` recorded — a fresh id
+    ///    rolls the counter back, a recycled one returns to the recycled stack
+    ///    with its generation — so the ID is neither wasted nor revived.
     ///
     /// # W7 choreography (Phase 7)
     ///
@@ -179,8 +170,11 @@ impl EcsMaster {
         let (table_components, dense_components) =
             Self::partition_dense_components(components, &mut table_buf, &mut dense_buf);
 
-        // Step 2 of W7: allocate the entity id (fresh or recycled).
-        let entity = self.entity_master.allocate_entity();
+        // Step 2 of W7: allocate the entity id (fresh or recycled). The ticket
+        // records WHICH, so the rejection path below undoes exactly that
+        // (R1) — never guessing it from the id.
+        let ticket = self.entity_master.allocate_entity_ticketed();
+        let entity = ticket.entity();
 
         // Step 3 of W7: reborrow archetype_ptr as &mut Archetype inside a
         // tight scope so the &mut reference is dropped before any further
@@ -211,15 +205,13 @@ impl EcsMaster {
             // or the pool reserve ceiling (rows). Phase X.I: committed
             // capacity below the ceiling grows on demand inside the pools,
             // so a capacity rejection here means the archetype outgrew a
-            // pool's reserve_rows. Undo the allocation so the EntityId is
-            // not leaked.
-            let rewound = self.entity_master.rewind_allocate(entity);
-            if !rewound {
-                // rewind_allocate returns false for recycled IDs; fall back
-                // to the full deallocate path so the ID returns to the free
-                // list.
-                self.entity_master.deallocate_entity(entity);
-            }
+            // pool's reserve_rows. Undo the allocation along the branch the
+            // ticket records: a fresh id rolls the counter back, a recycled
+            // entity goes back on the recycled stack with its generation.
+            // Nothing touched the entity store since the allocation (no hook
+            // fires before this point), so the rewind restores; a refusal
+            // would leak the id rather than re-issue it (R1).
+            self.entity_master.rewind_allocate(ticket);
             return Err(EcsError::ArchetypeRejectedEntity { archetype_id });
         }
 
@@ -228,6 +220,15 @@ impl EcsMaster {
         // set_component_raw, and the typed get_component<T> /
         // get_component_mut<T> wrappers.
         self.entity_master.register_entity_with_ptr(entity, archetype_ptr, new_unit_index);
+
+        // KE10: apply the archetype's declared initial enable-bit states. Placed
+        // BEFORE the fires so an `on_add` hook observes the initial state and can
+        // override it — the flag is part of what the component arrives with, not
+        // a reaction to its arrival. On a fresh spawn every signature id is newly
+        // attached, so the whole-archetype form applies. Gated on
+        // `ArchetypeFlags::FLAGS_ON_ATTACH`: one `u16` test in a world that
+        // declares no `flags (…)`.
+        self.apply_attach_flags_all(entity);
 
         // Step 6 (Phase 14a §3.2): fire on_add / on_insert hooks. The Step-3
         // `&mut Archetype` was block-scoped (`let pushed = { ... }`) and is
@@ -253,40 +254,28 @@ impl EcsMaster {
             if flags.contains(ArchetypeFlags::ON_ADD_ANY) {
                 // SAFETY: `archetype_ptr` is a valid `*const Archetype`; the
                 //   shared slice is transient and not aliased by a live `&mut`.
-                let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
+                let ids = unsafe { (*archetype_ptr).table_component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         trigger_on_add(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         fire_on_add_observers(world_ptr, cid, entity);
                     }
                 }
             }
             if flags.contains(ArchetypeFlags::ON_INSERT_ANY) {
                 // SAFETY: same as the on_add slice read above.
-                let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
+                let ids = unsafe { (*archetype_ptr).table_component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         trigger_on_insert(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         fire_on_insert_observers(world_ptr, cid, entity);
                     }
                 }
@@ -415,6 +404,10 @@ impl EcsMaster {
         self.entity_master
             .register_entity_with_ptr(entity, archetype_ptr, new_unit_index);
 
+        // KE10: initial enable-bit states, before the fires (mirrors
+        // `create_entity` — see the rationale there).
+        self.apply_attach_flags_all(entity);
+
         // Phase 14a §3.2: fire on_add / on_insert hooks (mirrors `create_entity`).
         // The Step-3 `&mut Archetype` was block-scoped and is dead; only
         // `archetype_ptr` survives at the mint (SAFETY-1). P1: no fallible step
@@ -431,40 +424,28 @@ impl EcsMaster {
             // observers (mirrors `create_entity`, §5).
             if flags.contains(ArchetypeFlags::ON_ADD_ANY) {
                 // SAFETY: transient shared slice, not aliased by a live `&mut`.
-                let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
+                let ids = unsafe { (*archetype_ptr).table_component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         trigger_on_add(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         fire_on_add_observers(world_ptr, cid, entity);
                     }
                 }
             }
             if flags.contains(ArchetypeFlags::ON_INSERT_ANY) {
                 // SAFETY: same as the on_add slice read above.
-                let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
+                let ids = unsafe { (*archetype_ptr).table_component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         trigger_on_insert(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         fire_on_insert_observers(world_ptr, cid, entity);
                     }
                 }
@@ -709,17 +690,16 @@ impl EcsMaster {
             //   prior sibling structural write did not invalidate it.
             let arche = unsafe { &*archetype_ptr };
             // Dense plan D2: copy ONLY signature (table) ids into the fire buffer.
-            // The archetype's `component_ids` RETAINS non-signature ids (dense /
-            // bitset, since D0), but dense despawn fires are owned by the dedicated
-            // `dense_despawn_fire_and_tombstone` routing — so the table despawn
-            // loops below must skip them. For a table-only archetype this filter is
-            // a verbatim copy (every id is `Table`) — the 0%-gate.
+            // The archetype's DECLARATION record retains non-signature ids (dense
+            // / bitset, since D0), but dense despawn fires are owned by the
+            // dedicated `dense_despawn_fire_and_tombstone` routing — so the table
+            // despawn loops below must not see them. KE14 D1 replaced the
+            // per-turn `is_signature_cid` screen with `table_component_ids()`,
+            // which is that subsequence by mint invariant.
             let mut count = 0usize;
-            for &cid in arche.component_ids() {
-                if is_signature_cid(cid) {
-                    id_buf[count] = cid;
-                    count += 1;
-                }
+            for &cid in arche.table_component_ids() {
+                id_buf[count] = cid;
+                count += 1;
             }
             count
             // <-- `&Archetype` drops here.

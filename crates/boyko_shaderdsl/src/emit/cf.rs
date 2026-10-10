@@ -916,5 +916,162 @@ impl Cf for EmitCf {
         // `FieldScalar::select`'s `Select` (condition wrapped).
         Emit(push(Node::SelectBare(cond.0, t.0, e.0)))
     }
-}
 
+    // ---- Rung E: the particle-leaf prerequisite facets (recorder) ---------------------
+    // Every node below prints its operands at `OperandPos::BitSide` (the infix three) or at
+    // Root (the four intrinsic calls + `dot`), so the recorder itself carries no spelling
+    // decision — it only pushes the node.
+
+    fn ushl(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::Shl(a.0, b.0)))
+    }
+
+    fn uxor(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::Xor(a.0, b.0)))
+    }
+
+    fn uor(a: Emit, b: Emit) -> Emit {
+        // The BITWISE `|` over two `uint` values — DISTINCT from `or`'s `Or` node (the logical
+        // `||` over two Masks), which is why it is a separate node and not an overload.
+        Emit(push(Node::BitOr(a.0, b.0)))
+    }
+
+    fn asuint(x: Emit) -> Emit {
+        Emit(push(Node::AsUint(x.0)))
+    }
+
+    fn asfloat(u: Emit) -> Emit {
+        Emit(push(Node::AsFloat(u.0)))
+    }
+
+    fn f16tof32(u: Emit) -> Emit {
+        Emit(push(Node::F16ToF32(u.0)))
+    }
+
+    fn f32tof16(x: Emit) -> Emit {
+        Emit(push(Node::F32ToF16(x.0)))
+    }
+
+    fn vec3_dot(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::Vec3Dot(a.0, b.0)))
+    }
+
+    fn sin(x: Emit) -> Emit {
+        // The SAME `Node::Sin` the `InterpBackend` recorder pushes — one node, one printer arm,
+        // so the trig spells identically whichever backend axis authored the leaf.
+        Emit(push(Node::Sin(x.0)))
+    }
+
+    fn cos(x: Emit) -> Emit {
+        Emit(push(Node::Cos(x.0)))
+    }
+
+    fn rsqrt(x: Emit) -> Emit {
+        Emit(push(Node::Rsqrt(x.0)))
+    }
+
+    // ---- UI-ADVANCED S1: the `ui_rect` fragment-leaf facets ------------------------------
+
+    // The `float4` return cell — a ZST; the expression travels in the recorded `Stmt::Return`.
+    type RetCellV4 = RetCellV4;
+
+    fn ret_vec4(_cell: &RetCellV4, value: Emit) -> Flow {
+        // The `float4` return — a single `Stmt::Return(value)` (the hand-written
+        // `float4 ui_unpack_rgba8` / `float4 ui_premultiplied_over` signatures supply the
+        // return type). Fall through on Emit.
+        record_stmt(Stmt::Return(value.0));
+        Flow::Continue(())
+    }
+
+    fn vec2_sub(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::Vec2Sub(a.0, b.0)))
+    }
+
+    fn vec2_sub_scalar(v: Emit, s: Emit) -> Emit {
+        Emit(push(Node::Vec2SubScalar(v.0, s.0)))
+    }
+
+    fn vec2_max_scalar(v: Emit, s: Emit) -> Emit {
+        Emit(push(Node::Vec2MaxScalar(v.0, s.0)))
+    }
+
+    fn vec2_length(v: Emit) -> Emit {
+        Emit(push(Node::Vec2Length(v.0)))
+    }
+
+    fn vec2_dot(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::Vec2Dot(a.0, b.0)))
+    }
+
+    fn vec2_smoothstep(e0: Emit, e1: Emit, x: Emit) -> Emit {
+        Emit(push(Node::Vec2Smoothstep(e0.0, e1.0, x.0)))
+    }
+
+    fn vec2_fwidth(v: Emit) -> Emit {
+        Emit(push(Node::Vec2Fwidth(v.0)))
+    }
+
+    fn named_uint_val(sym: &'static str, val: u32) -> Emit {
+        // Interns into the SAME symbol table `named_lit` / `named_uint` use, but records a
+        // `NamedUint` node so `type_of` says `Uint` — which is what lets it be an operand of
+        // `and_u` / `shr_u` (both `chk` their operands `Uint`).
+        let sym_id = intern_named_lit(sym);
+        Emit(push(Node::NamedUint { sym_id, val }))
+    }
+
+    fn vec2_frac(v: Emit) -> Emit {
+        Emit(push(Node::Vec2Frac(v.0)))
+    }
+
+    fn vec2_lerp(a: Emit, b: Emit, t: Emit) -> Emit {
+        Emit(push(Node::Vec2Lerp(a.0, b.0, t.0)))
+    }
+
+    fn vec2_rdiv_scalar(s: Emit, v: Emit) -> Emit {
+        Emit(push(Node::Vec2RDivScalar(s.0, v.0)))
+    }
+
+    fn select_vec2(cond: EmitMask, t: Emit, e: Emit) -> Emit {
+        // The cond-wrapped, arms-bare `float2` ternary (`(p.x > 0.0) ? r.yz : r.xw`).
+        Emit(push(Node::SelectVec2(cond.0, t.0, e.0)))
+    }
+
+    fn vec4_xy(v: Emit) -> Emit {
+        // `clip.xy` — a `Vec4SwizzleV2` with mask 0 (`"xy"`), typed `Float2`.
+        Emit(push(Node::Vec4SwizzleV2(v.0, 0)))
+    }
+
+    fn vec4_zw(v: Emit) -> Emit {
+        Emit(push(Node::Vec4SwizzleV2(v.0, 1)))
+    }
+
+    fn vec4_yz(v: Emit) -> Emit {
+        Emit(push(Node::Vec4SwizzleV2(v.0, 2)))
+    }
+
+    fn vec4_xw(v: Emit) -> Emit {
+        Emit(push(Node::Vec4SwizzleV2(v.0, 3)))
+    }
+
+    fn vec4_alpha(v: Emit) -> Emit {
+        Emit(push(Node::Vec4Alpha(v.0)))
+    }
+
+    fn vec4_from_scalars(x: Emit, y: Emit, z: Emit, w: Emit) -> Emit {
+        Emit(push(Node::Vec4FromScalars(x.0, y.0, z.0, w.0)))
+    }
+
+    fn vec4_mul_scalar(v: Emit, s: Emit) -> Emit {
+        Emit(push(Node::Vec4MulScalar(v.0, s.0)))
+    }
+
+    fn vec4_add(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::Vec4Add(a.0, b.0)))
+    }
+
+    fn temp_vec2(name: &'static str, v: Emit) -> Emit {
+        // A NAMED `float2` temp (`float2 rx = ...;`). The `float4` analogue (`temp_vec4`)
+        // already exists above (the Increment-5c facet) and is reused by the UI leaves.
+        record_temp(Some(name), EmitTy::Float2, v)
+    }
+}

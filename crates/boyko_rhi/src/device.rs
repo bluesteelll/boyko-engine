@@ -9,12 +9,12 @@
 
 use crate::api::RhiApi;
 use crate::descriptor::{
-    AsBuildSizes, AsGeometryDesc, AsKind, BufferDesc, ComputePipelineDesc, GraphicsPipelineDesc,
-    QueryPoolDesc,
+    AsBuildSizes, AsGeometryDesc, AsKind, BufferDesc, ComputePipelineDesc, DeviceClockSample,
+    GraphicsPipelineDesc, QueryPoolDesc,
 };
 use crate::enums::{
     AddressMode, CompareOp, DescriptorKind, Filter, Format, ImageUsage, ShaderStage,
-    TextureDimension,
+    TextureDimension, TextureViewDimension,
 };
 use crate::error::RhiError;
 
@@ -66,7 +66,14 @@ use crate::error::RhiError;
 /// argument: only the 24-binding VIS-MV layout fills the two new tail slots, and it is bound solely
 /// when the temporal denoiser is active; every other set (software 19, RESOLVE_INLINE-hwrt 21, base
 /// VIS/DENOISED 22) is untouched.
-pub const MAX_BIND_GROUP_BINDINGS: usize = 24;
+///
+/// Lane fix/hwrt-shadow-ray-origin: raised 24 → 25 to INSERT binding 21 (`gDepthHw`, the raster
+/// depth image the HWRT resolve reads to tell a raster-owned pixel from an SDF-owned one before
+/// placing the shadow-ray origin on the raster's jittered ray) into every HWRT resolve-family set,
+/// renumbering `gShadowVis`/`MotionCamVis`/`gMotionVec` to 22/23/24. BYTE-NEUTRAL by the same
+/// argument: the software resolve still fills 19; the HWRT sets grow by one (RESOLVE_INLINE-hwrt
+/// 22, VIS/DENOISED 23, VIS-MV 25 = the cap), and the cap governs only the fixed inline arrays.
+pub const MAX_BIND_GROUP_BINDINGS: usize = 25;
 
 /// Parameters for [`RhiDevice::create_texture`] (Phase-6 S0 graphics surface).
 ///
@@ -98,14 +105,31 @@ pub struct TextureDesc {
     /// own layer) and one `VK_IMAGE_VIEW_TYPE_2D_ARRAY` SAMPLE view (the resolve
     /// samples `float3(uv, layer)`). Capped at the backend's `MAX_CASCADES`.
     pub array_layers: u32,
+    /// The number of mip levels in the image (textured-PBR T2). `1` (the default)
+    /// is today's single-level image — byte-identical to every existing texture. `>
+    /// 1` builds a full mip chain the caller fills via a mip-generating upload
+    /// (blit-based, see `boyko_render::texture::upload_texture_2d`); the caller's
+    /// full-subresource view then covers `[0, mip_levels)` so the sampler can select
+    /// any LOD.
+    pub mip_levels: u32,
+    /// The optional decoupled VIEW format (textured-PBR T2 Decision D2). `None` (the
+    /// default) makes the sampled view use `format` and creates the image WITHOUT
+    /// `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` — byte-identical to every existing
+    /// texture. `Some(f)` with `f != format` creates the image MUTABLE and the
+    /// sampled view in `f` while the image itself stays `format` — the sRGB-view
+    /// trick: an `R8G8B8A8Unorm` image (which has mandatory `BLIT_SRC`/`BLIT_DST`
+    /// optimal-tiling support, unlike `R8G8B8A8Srgb`) generates its mip chain by
+    /// blit, then is SAMPLED through an `R8G8B8A8Srgb` view so the sampler hardware
+    /// does the sRGB→linear decode on read.
+    pub view_format: Option<Format>,
 }
 
 impl Default for TextureDesc {
-    /// A single-layer (`array_layers == 1`) texture — the byte-identical default for
-    /// every non-array image. The extent/format/dimension/usage fields have no
-    /// universal default and MUST be set by the caller; this impl exists so a caller
-    /// can spread `..TextureDesc::default()` to pick up `array_layers: 1` (and so the
-    /// CSM array texture is the only site that overrides it).
+    /// A single-layer, single-mip (`array_layers == 1`, `mip_levels == 1`,
+    /// `view_format == None`) texture — the byte-identical default for every
+    /// pre-T2 image. The extent/format/dimension/usage fields have no universal
+    /// default and MUST be set by the caller; this impl exists so a caller can
+    /// spread `..TextureDesc::default()` to pick up the shared defaults.
     #[inline]
     fn default() -> Self {
         TextureDesc {
@@ -116,6 +140,96 @@ impl Default for TextureDesc {
             dimension: TextureDimension::D2,
             usage: ImageUsage::NONE,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
+        }
+    }
+}
+
+/// Parameters for [`RhiDevice::create_texture_view`] — one EXPLICIT image view over a
+/// SUB-RANGE of an already-created texture (VG R3 step S1).
+///
+/// `#[repr(C)]` POD with an explicit field order (the four `u32` range fields first,
+/// then the `i32` [`TextureViewDimension`] FFI seam, then the optional format) so a
+/// backend reads it without depending on Rust's default field reordering.
+///
+/// # Why this desc exists
+///
+/// Every view a texture creates FOR ITSELF is pinned to mip 0: the full-subresource
+/// view spans `[0, mip_levels)` and each per-layer view spans `[0, 1)`. There is no
+/// texture-owned view whose range starts at mip `k`. A GPU mip chain is built one level
+/// at a time — level `k` is written through a view whose range is exactly `[k, k+1)` —
+/// so that shape has to come from somewhere else. This desc is that somewhere.
+///
+/// # Vulkan mapping
+///
+/// The whole desc lowers to a single `VkImageViewCreateInfo`:
+///
+/// * `viewType` ← [`Self::dimension`] (identity `as i32`);
+/// * `format` ← [`Self::format`], or the texture's own view format when `None`;
+/// * `subresourceRange.baseMipLevel` ← [`Self::base_mip`];
+/// * `subresourceRange.levelCount` ← [`Self::mip_count`];
+/// * `subresourceRange.baseArrayLayer` ← [`Self::base_layer`];
+/// * `subresourceRange.layerCount` ← [`Self::layer_count`];
+/// * `subresourceRange.aspectMask` ← **the TEXTURE's** aspect (DEPTH for a
+///   depth-stencil-attachment image, COLOR otherwise), NOT a field here: an aspect that
+///   disagreed with the parent image is invalid usage, so it is derived exactly where
+///   the texture's own views derive it and cannot be spelled wrong at a call site;
+/// * `components` ← identity swizzle, and `flags` ← 0, matching the texture's own views.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureViewDesc {
+    /// The first mip level the view exposes → `VkImageSubresourceRange::baseMipLevel`.
+    /// Must be `<` the texture's [`TextureDesc::mip_levels`]. Mip `k` ALONE — the
+    /// pyramid-level shape — is `base_mip: k, mip_count: 1`.
+    pub base_mip: u32,
+    /// The number of mip levels the view exposes → `levelCount`. Must be `>= 1`, with
+    /// `base_mip + mip_count <=` the texture's [`TextureDesc::mip_levels`]. There is no
+    /// "remaining levels" sentinel (`VK_REMAINING_MIP_LEVELS`): the count is always
+    /// explicit, so a view's extent is readable at the call site without knowing the
+    /// texture's.
+    pub mip_count: u32,
+    /// The first array layer the view exposes → `baseArrayLayer`. `0` for a
+    /// single-layer image. Must be `<` the texture's [`TextureDesc::array_layers`].
+    pub base_layer: u32,
+    /// The number of array layers the view exposes → `layerCount`. Must be `>= 1`, with
+    /// `base_layer + layer_count <=` the texture's [`TextureDesc::array_layers`]. As
+    /// with [`Self::mip_count`] there is no "remaining layers" sentinel. A
+    /// [`TextureViewDimension::D2`] or [`TextureViewDimension::D3`] view takes exactly
+    /// `1`; `> 1` requires [`TextureViewDimension::D2Array`].
+    pub layer_count: u32,
+    /// The shape the view presents the range as → `VkImageViewCreateInfo::viewType`.
+    /// Must agree with both the parent image's type and [`Self::layer_count`] (see
+    /// [`TextureViewDimension`]).
+    pub dimension: TextureViewDimension,
+    /// The optional format REINTERPRETATION → `VkImageViewCreateInfo::format`.
+    ///
+    /// `None` inherits the format the texture's OWN views were created in — that is
+    /// [`TextureDesc::view_format`] when it is `Some`, else [`TextureDesc::format`] —
+    /// so a `None` view is spelled exactly like the views the texture already owns.
+    /// (The distinction only bites on a texture that declared a decoupled
+    /// `view_format`; for every other texture the two are the same value.)
+    ///
+    /// `Some(f)` reinterprets. `f` different from the inherited format requires the
+    /// image to have been created with `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`, which the
+    /// backend sets iff the texture declared a `view_format` — reinterpreting a
+    /// non-mutable image is invalid usage the validation layer rejects.
+    pub format: Option<Format>,
+}
+
+impl Default for TextureViewDesc {
+    /// The single-mip, single-layer 2D view of mip 0, in the texture's own format —
+    /// i.e. the narrowest possible view, so a caller spreading
+    /// `..TextureViewDesc::default()` states only the axis it actually moves.
+    #[inline]
+    fn default() -> Self {
+        TextureViewDesc {
+            base_mip: 0,
+            mip_count: 1,
+            base_layer: 0,
+            layer_count: 1,
+            dimension: TextureViewDimension::D2,
+            format: None,
         }
     }
 }
@@ -236,11 +350,32 @@ pub struct BindGroupLayoutDesc<'a> {
 /// mismatch). A sampled image (`CombinedImage`/`SampledImage`) MUST be in
 /// [`crate::enums::ImageLayout::ShaderReadOnlyOptimal`] and a `StorageImage` in
 /// [`crate::enums::ImageLayout::General`] before a draw/dispatch accesses it.
+///
+/// **THE KIND NAMES THE LAYOUT**: the layout a descriptor records is a property of the
+/// variant, never a parameter, so a caller cannot bind an image at a layout the backend
+/// did not sanction. [`Self::SampledImageAtGeneral`] is the ONE sampled-image kind that
+/// records [`crate::enums::ImageLayout::General`] — for an image the engine keeps in
+/// `GENERAL` for life (VG R3 step P3-1).
 pub enum BindGroupEntry<'a, A: RhiApi> {
     /// A `STORAGE_IMAGE` — a read/write image bound by view (no sampler).
     StorageImage {
         /// The texture whose image view is bound as the storage image.
         texture: &'a A::Texture,
+    },
+    /// A `STORAGE_IMAGE` bound through an EXPLICIT [`RhiApi::TextureView`] instead of
+    /// the texture's own implicit view (VG R3 step S1).
+    ///
+    /// Descriptor-IDENTICAL to [`Self::StorageImage`]: the same
+    /// [`DescriptorKind::StorageImage`], the same `GENERAL` image layout, the same NULL
+    /// sampler. The ONLY difference is which `VkImageView` handle the write names — and
+    /// that is the entire point, because a per-mip view is a shape no texture-owned view
+    /// can produce. The image must be in [`crate::enums::ImageLayout::General`] before a
+    /// dispatch accesses it, exactly as for [`Self::StorageImage`].
+    StorageImageView {
+        /// The explicit view bound as the storage image. Its parent texture must outlive
+        /// the view, and the view must outlive every submission binding this group — see
+        /// the ownership rule on [`RhiDevice::create_texture_view`].
+        view: &'a A::TextureView,
     },
     /// A `SAMPLED_IMAGE` — a sampled image with the sampler bound separately.
     SampledImage {
@@ -248,6 +383,33 @@ pub enum BindGroupEntry<'a, A: RhiApi> {
         texture: &'a A::Texture,
         /// The sampler bound (at this binding's separate sampler, backend-defined).
         sampler: &'a A::Sampler,
+    },
+    /// A `SAMPLED_IMAGE` an engine keeps in [`crate::enums::ImageLayout::General`] for
+    /// life, bound WITHOUT a sampler (VG R3 step P3-1).
+    ///
+    /// Descriptor-IDENTICAL to [`Self::SampledImage`] — the same
+    /// [`DescriptorKind::SampledImage`], the same texture-owned image view — except that
+    /// the recorded `image_layout` is `General` instead of `ShaderReadOnlyOptimal` and the
+    /// sampler slot is NULL. This is exactly the [`Self::StorageImage`] →
+    /// [`Self::StorageImageView`] relation already in this enum: one property differs, and
+    /// it is the property the variant is named for.
+    ///
+    /// It exists because the kind implies the layout (see this enum's doc). The HZB depth
+    /// pyramid is `GENERAL` from its boot clear onward — the framegraph seed asserts that
+    /// layout, and the build pass writes it as a storage image — so binding it as
+    /// [`Self::SampledImage`] would record a layout the image is NEVER in, a core-validation
+    /// error at every dispatch that binds the set.
+    ///
+    /// No sampler is needed because the reader this variant exists for fetches with
+    /// `.Load(int3(x, y, level))` — integer coordinates and an explicit mip, so there is no
+    /// filter to configure. A linear filter would in fact be UNSOUND over a min-reduced
+    /// pyramid: a bilinear blend of four reduced texels lies strictly between their min and
+    /// max, so it bounds the footprint from neither side.
+    SampledImageAtGeneral {
+        /// The texture whose image view is bound as the sampled image. It must be in
+        /// [`crate::enums::ImageLayout::General`] before a draw/dispatch accesses it —
+        /// unlike [`Self::SampledImage`], which requires `ShaderReadOnlyOptimal`.
+        texture: &'a A::Texture,
     },
     /// A `COMBINED_IMAGE_SAMPLER` — a sampled image bundled with its sampler.
     CombinedImage {
@@ -433,6 +595,84 @@ pub trait RhiDevice<A: RhiApi> {
         // Default seam: drop the value. A zero-sized `Texture` (Mock) drops to a
         // no-op; a backend with GPU-owned image objects overrides this.
         drop(texture);
+    }
+
+    /// Creates an EXPLICIT image view over a sub-range of `texture` (VG R3 step S1) —
+    /// the only way to name a single mip level, since every view a texture creates for
+    /// itself starts at mip 0.
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; a
+    /// backend with an image-view path (Vulkan) overrides it. Keeps the trait ABI stable
+    /// for a backend (e.g. the Mock) without one.
+    ///
+    /// # ⚠️ Ownership rule (mandatory, grep-enumerable)
+    ///
+    /// **A [`RhiApi::TextureView`] MUST be owned by the same struct that owns its
+    /// [`RhiApi::Texture`], and destroyed BEFORE it.**
+    ///
+    /// A view is a CHILD of the image: destroying the image first leaves the view naming
+    /// a dead `VkImage`, and destroying the image while any view of it is live is
+    /// `VUID-vkDestroyImage-image-01000`. Splitting the two across owners makes that
+    /// order unenforceable at the point where it matters, so the rule is structural
+    /// rather than a matter of care — co-ownership is what makes "before" expressible.
+    ///
+    /// It is enforced the way `// SAFETY:` is enforced: by a marker comment one grep
+    /// enumerates. Every field holding a view carries, on the line above it,
+    ///
+    /// ```text
+    /// // VIEW-OWNER: <the texture field this is a view OF>; destroyed before it in <teardown fn>.
+    /// ```
+    ///
+    /// and the census is
+    ///
+    /// ```text
+    /// rg "^\s*// VIEW-OWNER:" crates/
+    /// ```
+    ///
+    /// That pattern matches only real marker comments — a `///` doc line and a `//!`
+    /// module-doc line both fail it (the third `/` and the `!` break `// VIEW-OWNER:`),
+    /// so this documentation does not pollute its own census. As of the step that
+    /// introduced the verb the census is **empty**: S1 lands the capability and no owner.
+    ///
+    /// ⚠️ **The census enumerates owners; it cannot force one to enrol.** A field holding a
+    /// view without the marker is invisible to it, so the marker census alone would report a
+    /// clean sheet on exactly the code that broke the rule. Use it as a PAIR with the mint
+    /// census:
+    ///
+    /// ```text
+    /// rg "create_texture_view\(" crates/ --glob '!**/tests/**'
+    /// ```
+    ///
+    /// Every non-test call site must land in a field carrying the marker. The two lists
+    /// agreeing is the check; either alone is an assertion about the half it can see.
+    #[cold]
+    #[inline(never)]
+    fn create_texture_view(
+        &self,
+        _texture: &A::Texture,
+        _desc: &TextureViewDesc,
+    ) -> Result<A::TextureView, Self::Error> {
+        Err(RhiError::unsupported("create_texture_view").into())
+    }
+
+    /// Destroys `view`, consuming it (VG R3 step S1).
+    ///
+    /// The default body drops the value (a no-op for a backend whose `TextureView` is
+    /// zero-sized, e.g. the Mock); a backend whose view owns a GPU object (Vulkan)
+    /// overrides it. Keeps the trait ABI stable.
+    ///
+    /// # Safety
+    /// The GPU must no longer be using `view` (every submission binding it has completed
+    /// — fence-waited or `wait_idle`'d), and the texture it views MUST still be alive:
+    /// per the ownership rule on [`Self::create_texture_view`], this call precedes that
+    /// texture's [`Self::destroy_texture`]. The by-value move guarantees it is destroyed
+    /// at most once.
+    #[cold]
+    #[inline(never)]
+    unsafe fn destroy_texture_view(&self, view: A::TextureView) {
+        // Default seam: drop the value. A zero-sized `TextureView` (Mock) drops to a
+        // no-op; a backend with a GPU-owned `VkImageView` overrides this.
+        drop(view);
     }
 
     /// Creates a sampler (Phase-6 S0 rung 5: a `VkSampler` with the desc's
@@ -633,8 +873,16 @@ pub trait RhiDevice<A: RhiApi> {
     /// available, after the caller's `wait_fence`). `scratch` is the caller-owned raw-u64
     /// staging (length `>= 2 * pair_count`); `out_ns` receives `pair_count` values.
     ///
+    /// `scratch` is CLOBBERED — its contents after the call are unspecified staging, not the raw
+    /// timestamps. Read the results from `out_ns`.
+    ///
     /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the Vulkan
     /// backend overrides it (`vkGetQueryPoolResults`).
+    ///
+    /// **FROZEN (profiling rung 4) — no new callers.** Its `WAIT_BIT` contract makes an
+    /// unwritten pair a hang rather than an error. New code uses
+    /// [`Self::read_query_pool_pairs_available`], which reports availability instead of waiting
+    /// for it.
     #[cold]
     #[inline(never)]
     fn read_query_pool_ns(
@@ -645,6 +893,243 @@ pub trait RhiDevice<A: RhiApi> {
         _out_ns: &mut [f64],
     ) -> Result<(), Self::Error> {
         Err(RhiError::unsupported("read_query_pool_ns").into())
+    }
+
+    /// [`Self::read_query_pool_ns`]'s UNSCALED sibling: the same host-wait + read + mask, but
+    /// returning each pair's raw **tick** count instead of nanoseconds — `out_ticks[i]` =
+    /// `((t_end & mask).wrapping_sub(t_begin & mask) & mask)`, with NO `timestampPeriod`
+    /// multiply.
+    ///
+    /// # Why a caller would want ticks
+    ///
+    /// A GPU timestamp counter is a lattice: it advances in steps of some hardware granularity
+    /// `G >= 1` tick, so every measurable duration is a multiple of `G`. `G` is NOT reported by
+    /// any Vulkan limit — `timestampPeriod` is the ns-per-tick SCALE, not the STEP — so the only
+    /// way to learn it is to observe that every raw delta shares a common factor. That
+    /// observation must be made on the INTEGER ticks: recovering ticks by dividing a `f64`
+    /// nanosecond value back by the period would run the measurement through the very scale
+    /// factor being characterised, and a float round-trip cannot evidence an integer lattice.
+    ///
+    /// A bench that reports a statistic near the lattice step needs `G` to state its own
+    /// resolution honestly (VB-SV0 rung S1.5 — see
+    /// `crates/boyko_app/tests/sv0_deferred_term_bench.rs`).
+    ///
+    /// Same contract as [`Self::read_query_pool_ns`] otherwise: `WAIT_BIT` semantics (the caller
+    /// MUST only read WRITTEN `(begin, end)` pairs or this blocks forever), `scratch` is the
+    /// caller-owned raw staging of length `>= 2 * pair_count` and is CLOBBERED, `out_ticks`
+    /// receives `pair_count` values.
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the Vulkan
+    /// backend overrides it (`vkGetQueryPoolResults`).
+    ///
+    /// **FROZEN (profiling rung 4) — no new callers**, for
+    /// [`Self::read_query_pool_ns`]'s reason.
+    #[cold]
+    #[inline(never)]
+    fn read_query_pool_ticks(
+        &self,
+        _pool: &A::QueryPool,
+        _pair_count: u32,
+        _scratch: &mut [u64],
+        _out_ticks: &mut [u64],
+    ) -> Result<(), Self::Error> {
+        Err(RhiError::unsupported("read_query_pool_ticks").into())
+    }
+
+    /// [`Self::read_query_pool_ns`]'s UNCOMPACTED sibling (VG R3 piece 4 rung P4-1): the same
+    /// host-wait + read + mask, but returning BOTH halves of each pair — `out_dur_ns[i]` is
+    /// bit-for-bit the value [`Self::read_query_pool_ns`] produces, and `out_begin_ns[i]` is pair
+    /// `i`'s BEGIN stamp expressed as an offset from pair 0's BEGIN stamp.
+    ///
+    /// # Why a caller would want offsets
+    ///
+    /// A pair's DURATION cannot distinguish "this pass cost nothing" from "this pass was never
+    /// bracketed and a totality epilogue filled it at the frame end" — both read ~0. The begin
+    /// OFFSET can: a filled pair's offset is the frame's largest and out of record order. A
+    /// harness that cannot tell those apart reports fabricated zeros as measurements.
+    ///
+    /// # The base, and the wrap rule
+    ///
+    /// `base = scratch[0] & mask` — pair 0's begin stamp. Offsets use the SAME arithmetic as the
+    /// durations: `off_i = (begin_i & mask).wrapping_sub(base) & mask`, scaled by
+    /// `timestampPeriod`.
+    ///
+    /// CALLER CONTRACT: pair 0's begin must be the EARLIEST-recorded stamp of the frame, else
+    /// that pair's offset wraps to ~`2^timestampValidBits` instead of going negative. Vulkan
+    /// guarantees `timestampValidBits >= 36` on any queue that supports timestamps (≈68 s at
+    /// 1 ns/tick), so a genuine counter wrap inside one submitted frame is not reachable; a huge
+    /// offset means the contract was broken, and the caller is expected to reject the sample
+    /// rather than scale it.
+    ///
+    /// Same contract as the siblings otherwise: `WAIT_BIT` semantics (only WRITTEN pairs may be
+    /// requested — an unwritten one blocks forever), `scratch` is caller-owned staging of length
+    /// `>= 2 * pair_count` and is CLOBBERED, both out slices receive `pair_count` values.
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the Vulkan
+    /// backend overrides it (`vkGetQueryPoolResults`). Unlike its two siblings, this default
+    /// body IS pinned by a test (`handle.rs`'s `MockDevice` — the crate's first such test).
+    ///
+    /// **FROZEN (profiling rung 4) — no new callers**, for
+    /// [`Self::read_query_pool_ns`]'s reason.
+    #[cold]
+    #[inline(never)]
+    fn read_query_pool_pairs_ns(
+        &self,
+        _pool: &A::QueryPool,
+        _pair_count: u32,
+        _scratch: &mut [u64],
+        _out_begin_ns: &mut [f64],
+        _out_dur_ns: &mut [f64],
+    ) -> Result<(), Self::Error> {
+        Err(RhiError::unsupported("read_query_pool_pairs_ns").into())
+    }
+
+    // ===== PROFILING RUNG 4 — THE NON-BLOCKING QUERY SEAM (three verbs) =====
+    //
+    // The three readers above are FROZEN: **no new callers.** Every one of them takes
+    // `VK_QUERY_RESULT_WAIT_BIT`, which means the caller must have written every pair it asks
+    // about or the driver blocks forever — and "forever" is not a failure a test can show, it is
+    // a hang. That contract is why this engine grew three separate GPU-timing collectors, each
+    // arranging in its own way to only ever ask about pairs it knew were written.
+    //
+    // The verbs below replace the contract rather than working around it: availability is DATA,
+    // polled and reported per pair, so a pair the recorder never wrote is an answer instead of a
+    // deadlock. The existing three stay for their existing callers and are not deleted here —
+    // that is the single subtractive rung's job.
+
+    /// Reads `pair_count` consecutive `(begin, end)` timestamp pairs from `pool` **without ever
+    /// blocking**, reporting per pair whether both of its queries were actually available.
+    ///
+    /// # There is no flags parameter, and that is the design
+    ///
+    /// A backend's flag word is its own private `const`, const-asserted to exclude
+    /// `VK_QUERY_RESULT_WAIT_BIT`. A blocking read is therefore a **compile error** rather than
+    /// something a reviewer has to notice: no caller can pass the bit because no caller can pass
+    /// flags at all.
+    ///
+    /// # Slice contracts
+    ///
+    /// * `scratch` — caller-owned staging, length `>= 4 * pair_count`. Two `u64` per query
+    ///   (value, then availability) × two queries per pair. **CLOBBERED**, and deliberately not
+    ///   zeroed by the implementation: it is staging, and a memset of it on every read would be
+    ///   paid by every frame to tidy bytes nobody reads.
+    /// * `out_available` — one byte per pair, `1` iff **both** of that pair's queries were
+    ///   available, `0` otherwise.
+    /// * `out_begin_ticks` / `out_dur_ticks` — `pair_count` values each. **A pair whose
+    ///   `out_available` is `0` gets zeros**, never the driver's undefined bytes: an undefined
+    ///   value handed to a caller is how garbage becomes a measurement.
+    ///
+    /// # Not an error
+    ///
+    /// "Some queries are not ready yet" is the normal outcome and returns `Ok(())` with the
+    /// corresponding availability bytes clear (Vulkan's `VK_NOT_READY`).
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the Vulkan
+    /// backend overrides it.
+    #[cold]
+    #[inline(never)]
+    fn read_query_pool_pairs_available(
+        &self,
+        _pool: &A::QueryPool,
+        _pair_count: u32,
+        _scratch: &mut [u64],
+        _out_begin_ticks: &mut [u64],
+        _out_dur_ticks: &mut [u64],
+        _out_available: &mut [u8],
+    ) -> Result<(), Self::Error> {
+        Err(RhiError::unsupported("read_query_pool_pairs_available").into())
+    }
+
+    /// Resets `count` queries from `first` **on the host** — no command buffer, no queue
+    /// submission, no frame.
+    ///
+    /// # Caller obligation
+    ///
+    /// Legal only when [`Self::host_query_reset_supported`] returns `true`, and only while no
+    /// submitted command buffer may still be reading or writing those queries. A backend whose
+    /// device did not enable the feature returns `Unsupported` rather than calling into a driver
+    /// that would reject it.
+    ///
+    /// # Why it is optional rather than required
+    ///
+    /// The alternative is a recorded `vkCmdResetQueryPool` at the top of an armed frame, which
+    /// works everywhere and costs one frame of recycle latency on the pool. Host reset removes
+    /// that latency; nothing depends on it existing.
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`.
+    #[cold]
+    #[inline(never)]
+    fn reset_query_pool_host(
+        &self,
+        _pool: &A::QueryPool,
+        _first: u32,
+        _count: u32,
+    ) -> Result<(), Self::Error> {
+        Err(RhiError::unsupported("reset_query_pool_host").into())
+    }
+
+    /// Whether [`Self::reset_query_pool_host`] is callable on this device.
+    ///
+    /// The contract is **enabled**, not "advertised": a backend answers `true` only when the
+    /// feature was turned on at device creation, so a caller reading `true` needs no second
+    /// check. The default is `false`, which is the honest answer for a backend that has no
+    /// device.
+    #[inline]
+    fn host_query_reset_supported(&self) -> bool {
+        false
+    }
+
+    // ===== PROFILING RUNG 9 — THE CROSS-DOMAIN CLOCK SEAM (two verbs) =====
+    //
+    // Every GPU number this engine produces lives on the device tick axis, and every CPU number on
+    // `boyko_diag::clock`'s. D14 tier 1 declares the offset between them UNMEASURED and prints
+    // `cpu_gpu_offset = UNCORRELATED` rather than guessing, for a reason Khronos states plainly:
+    // core Vulkan timestamps "cannot be compared even across separate submits within the same run
+    // of an application, as power management events can reset the timer." An uncalibrated
+    // cross-domain offset is not an approximation, it is a fabrication.
+    //
+    // These two verbs are what make the offset measurable. Nothing else changes: a backend
+    // without the capability answers `false` and `Unsupported`, and the profiler keeps printing
+    // `UNCORRELATED`.
+
+    /// Whether [`Self::sample_device_clock`] is callable on this device.
+    ///
+    /// The contract is **enabled**, not "advertised" — [`Self::host_query_reset_supported`]'s
+    /// contract exactly. A backend answers `true` only when the capability was turned on at
+    /// device creation AND the device can sample its own clock domain, so a caller reading `true`
+    /// needs no second check. The default is `false`, the honest answer for a backend with no
+    /// device.
+    #[inline]
+    fn calibrated_timestamps_supported(&self) -> bool {
+        false
+    }
+
+    /// Samples the GPU's timestamp counter from the HOST, with the CPU clock read on both sides
+    /// of the sample, and reports all four numbers ([`DeviceClockSample`]).
+    ///
+    /// # This is not a query-pool read
+    ///
+    /// No command buffer, no submit, no fence — and that is the entire point. A timestamp written
+    /// by [`crate::encoder::RhiCommandEncoder::write_timestamp`] tells you when the GPU reached a
+    /// pipeline stage, on the GPU's axis; it can never tell you where that instant sits on the
+    /// CPU's, because everything between recording and retirement is unmeasured latency. This
+    /// verb reads the same counter *now*, next to a CPU reading, which is the only way to relate
+    /// the two axes without inventing the relation.
+    ///
+    /// # What the caller must still do
+    ///
+    /// One sample is not a calibration. The bracket `cpu_ticks_after - cpu_ticks_before` includes
+    /// any preemption that happened inside it, so a single wide sample is indistinguishable from
+    /// a bad clock. The consumer takes many and REJECTS the wide ones (D14 tier 2: 32 probes at
+    /// arm, acceptance threshold `min_deviation × 3/2`), and re-samples every fold, because two
+    /// free-running counters drift.
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the Vulkan
+    /// backend overrides it (`vkGetCalibratedTimestampsEXT`).
+    #[cold]
+    #[inline(never)]
+    fn sample_device_clock(&self) -> Result<DeviceClockSample, Self::Error> {
+        Err(RhiError::unsupported("sample_device_clock").into())
     }
 
     // ===== HW-RT ACCELERATION-STRUCTURE SEAM (rung R2a-1; default bodies keep Mock + ABI) =====

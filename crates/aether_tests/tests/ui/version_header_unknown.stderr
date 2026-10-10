@@ -1,0 +1,5 @@
+error: unknown aether syntax version `v2`; this aether speaks: v1 (did you mean `v1`?)
+ --> tests/ui/version_header_unknown.rs:9:12
+  |
+9 |     aether v2;
+  |            ^^

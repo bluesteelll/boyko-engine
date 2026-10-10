@@ -33,11 +33,16 @@
 //!
 //! # v1 scope
 //!
-//! v1 ships ONLY the `Vec<Entity>` one-to-many collection with
-//! [`RETAIN_EMPTY`](RelationshipTarget::RETAIN_EMPTY) `= true` MANDATORY. The
-//! `RETAIN_EMPTY = false` (remove-on-empty) branch and the 1:1 `Entity`
-//! collection + eviction path are RESERVED for v1.1 (W1/O3): both are new
-//! re-entrant edges that would double v1's Miri-TB audit surface.
+//! v1 ships BOTH cardinalities: the `Vec<Entity>` one-to-many collection AND the
+//! [`Exclusive`] 1:1 collection — production eviction (overwrite the slot, fire
+//! `OnUnlink{incumbent}` exactly once, defer the incumbent's FK clear) and the
+//! clone-time detach guard are implemented and audited (see [`collection`] and
+//! `LinkCommand::apply`). The ONLY remaining deferral is
+//! [`RETAIN_EMPTY`](RelationshipTarget::RETAIN_EMPTY) `= false` (remove-on-empty):
+//! v1 keeps it MANDATORY `true` for every collection, deferring the
+//! empty-collection removal branch — a new re-entrant edge (it would fire the
+//! target's own `on_replace` on emptying) that would double the audited
+//! Miri-TB surface — to v1.1/v1.2 (W1/O3).
 //!
 //! [`Entity`]: crate::ecs::core::entity::entity::Entity
 //! [`Command::apply`]: crate::ecs::core::commands::command::Command::apply

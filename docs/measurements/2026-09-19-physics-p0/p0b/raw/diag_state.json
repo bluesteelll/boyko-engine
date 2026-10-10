@@ -1,0 +1,14 @@
+{
+ "start": "2026-09-19T06:13:27.725+03:00",
+ "machine_before": {
+  "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+  "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n236"
+ },
+ "test": false,
+ "end": "2026-09-19T06:35:36.797+03:00",
+ "machine_after": {
+  "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+  "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n245"
+ },
+ "status": "complete"
+}

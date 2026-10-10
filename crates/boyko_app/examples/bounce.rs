@@ -53,7 +53,7 @@ fn main() {
 
 /// Spawns the scene: a floor, a bouncing cube (mesh + interpolation pair +
 /// velocity), a sun, and a camera. Startup runs WITH the device present.
-fn setup(mut commands: Commands, mut meshes: NonSendResMut<MeshRegistry>, dev: NonSendRes<GpuDevice>) {
+fn setup(mut commands: Commands, mut meshes: NonSendResMut<Assets<MeshGpu>>, dev: NonSendRes<GpuDevice>) {
     let floor = meshes.plane(dev.get(), 12.0);
     let cube = meshes.cube(dev.get(), 1.0);
 

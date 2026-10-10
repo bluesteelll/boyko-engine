@@ -116,9 +116,37 @@ pub struct FieldLayout {
     pub texel_em: f32,
 }
 
+/// Largest dimension, in texels, one glyph's field may occupy.
+///
+/// 2026-07 audit: `width`/`height` are derived from FONT-SUPPLIED bbox coordinates, and nothing
+/// bounded them. `generate_distance_field` then sizes its buffer with `w * h * 4` in `u32`
+/// arithmetic, so a malformed or hostile `.ttf` with a huge span wrapped that product to a small
+/// allocation while the generation loops still indexed by the full `width`/`height` — a
+/// guaranteed panic on parsed input, the same trust-boundary class as the `.bfont` extent
+/// mismatch. Rust's float→int casts saturate rather than wrap, so an infinite span arrives at
+/// the cast as `u32::MAX`; the clamp, not the cast, is what bounds it.
+///
+/// At [`PIXELS_PER_EM`] = 48 a full-em glyph is ~48 texels and the §T3 pad adds ~4 per side, so
+/// this cap is ~20 em — an order of magnitude past any real glyph, and it bounds one field at
+/// 1024 × 1024 × 4 `f32` = 16 MiB.
+pub const MAX_FIELD_DIM: u32 = 1024;
+
+/// Rounds a texel span up to at least 1 and at most [`MAX_FIELD_DIM`].
+///
+/// A non-finite span collapses to 1 rather than propagating: `NaN.ceil()` is `NaN`, and
+/// `f32::max` returns the non-`NaN` operand.
+#[inline]
+fn field_dim(span_texels: f32) -> u32 {
+    span_texels.ceil().max(1.0).min(MAX_FIELD_DIM as f32) as u32
+}
+
 /// Computes the expanded field layout for a colored outline: the tight bbox
 /// padded by `distance_range_texels / 2 + 1` texels on every side (§T3), so the
 /// AA transition band is fully represented in the field.
+///
+/// Both dimensions are clamped to [`MAX_FIELD_DIM`]. The clamp lives here, where the size is
+/// born, so the distance pass and the atlas packer — which both call this — cannot disagree
+/// about how large a glyph is.
 pub fn field_layout(colored: &ColoredOutline) -> FieldLayout {
     let texel_em = 1.0 / PIXELS_PER_EM;
     // Half the distance range, plus one texel of slack, in em.
@@ -127,8 +155,8 @@ pub fn field_layout(colored: &ColoredOutline) -> FieldLayout {
     let min = Vec2::new(colored.bbox_min.x - pad_em, colored.bbox_min.y - pad_em);
     let max = Vec2::new(colored.bbox_max.x + pad_em, colored.bbox_max.y + pad_em);
 
-    let width = ((max.x - min.x) * PIXELS_PER_EM).ceil().max(1.0) as u32;
-    let height = ((max.y - min.y) * PIXELS_PER_EM).ceil().max(1.0) as u32;
+    let width = field_dim((max.x - min.x) * PIXELS_PER_EM);
+    let height = field_dim((max.y - min.y) * PIXELS_PER_EM);
 
     FieldLayout {
         width,

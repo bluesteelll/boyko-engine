@@ -4,7 +4,8 @@
 //! This is the Principle-0 production caster-selection path: the CSM depth pass draws
 //! the casters of SPAWNED ENTITIES — every visible `(MeshHandle, InstanceModelCol)`
 //! that ALSO carries the structural [`ShadowCaster`](crate::csm_marker::ShadowCaster)
-//! marker — read through an ECS [`Query`], NOT a hand-built inline batch. It mirrors
+//! marker — read through an ECS [`Query`](boyko_ecs::ecs::core::iters::query::Query), NOT
+//! a hand-built inline batch. It mirrors
 //! the mesh foundation's main instance gather
 //! ([`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws)) exactly, with ONE
 //! structural difference: a `With<ShadowCaster>` term on the filter, so a non-caster
@@ -18,7 +19,8 @@
 //! the `With<ShadowCaster>`-filtered query passed as the
 //! re-iteration closure. [`CsmCasterScratch`] is a newtype over
 //! [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch) so the caster batches +
-//! ring live in a SEPARATE [`Resource`] from the main gather's (they must not collide:
+//! ring live in a SEPARATE [`Resource`](boyko_macros::Resource) from the main gather's
+//! (they must not collide:
 //! the main pass draws ALL visible meshes, the depth pass draws ONLY casters — a
 //! different bucket set with different `base_instance`s), while sharing the foundation's
 //! cleared-not-reallocated, grow-POW2 discipline (Principle 5) byte-for-byte.
@@ -55,30 +57,37 @@
 //! `debug_assert!` that no gathered caster also carries that marker (and the query a
 //! `Without<SdfOccluder>` term to make the exclusion structural, not just asserted).
 
-use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
+use boyko_ecs::ecs::core::asset::Assets;
+use boyko_ecs::ecs::core::iters::query::filter_enable::{Disabled, Enabled};
 use boyko_ecs::ecs::core::iters::query::{Query, With};
+use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
+use boyko_ecs::ecs::core::schedule::system_config::SystemConfig;
 use boyko_ecs::ecs::core::system::{NonSendRes, Res, ResMut};
-use boyko_macros::Resource;
+use boyko_macros::{Resource, SystemSet};
+use boyko_scene::ViewUniform;
 use boyko_scene::render_caps::{MeshHandle, RenderEnabled};
 
-use crate::csm_config::ResolvedCsm;
+use crate::asset_refcount::{AssetValidateSet, RenderStale};
+use crate::csm_config::{CsmCasterBounds, CsmConfig, CsmFitMode, ResolvedCsm};
 use crate::csm_marker::ShadowCaster;
 use crate::instance_model::InstanceModelCol;
 use crate::light::{LightTableDirty, LightingConfig};
-use crate::mesh_draw::{DrawBatch, MeshRenderScratch};
-use crate::mesh_registry::MeshRegistry;
+use crate::mesh::MeshGpu;
+use crate::mesh_assets::MeshAssetsExt;
+use crate::mesh_draw::{DrawBatch, MeshRenderScratch, PerInstanceMaterial};
+use crate::occlusion_marker::OcclusionCulling;
 
 /// The reused per-frame shadow-caster gather scratch (CSM Inc 2) — a SEPARATE
-/// [`Resource`] from the main [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch)
+/// [`Resource`] from the main [`MeshRenderScratch`]
 /// so the cascade depth-pass caster batches do not collide with the gbuffer pass's
 /// batches.
 ///
-/// A newtype over [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch): it REUSES
+/// A newtype over [`MeshRenderScratch`]: it REUSES
 /// the foundation's `gather_mixed_into` core, its per-mesh lanes + instance ring, and its
 /// cleared-not-reallocated grow-POW2 discipline (Principle 5) VERBATIM — only the
 /// resource IDENTITY differs (the ECS keys a `Resource` by type, so the wrapper gives
 /// the caster gather its own slot). The gather is filtered on
-/// [`ShadowCaster`](crate::csm_marker::ShadowCaster), so the batches + ring hold ONLY
+/// [`ShadowCaster`], so the batches + ring hold ONLY
 /// the structural casters.
 #[derive(Resource, Default)]
 pub struct CsmCasterScratch(pub MeshRenderScratch);
@@ -102,7 +111,7 @@ impl CsmCasterScratch {
     /// `vkCmdDrawIndexed` per batch into each cascade.
     #[inline]
     pub fn batches(&self) -> &[DrawBatch] {
-        &self.0.batches
+        self.0.batches.as_read_slice()
     }
 
     /// The contiguous caster instance ring — every gathered caster's 48-byte
@@ -111,23 +120,52 @@ impl CsmCasterScratch {
     /// list; the depth VS indexes `ring[base_instance + SV_InstanceID]`.
     #[inline]
     pub fn ring(&self) -> &[InstanceModelCol] {
-        &self.0.ring
+        self.0.ring.as_read_slice()
+    }
+}
+
+impl ResolvedCsm {
+    /// Whether this frame's cascade depth pass is armed: a live cascade fit
+    /// (`csm_mode_word == 1`) AND at least one caster batch.
+    ///
+    /// The formula's ONLY spelling. [`sync_csm_light_gate`] drives the light-header sample bit
+    /// with it, and the windowed host (`boyko_app::runner`) arms the depth pass and picks the
+    /// cascade UBO with it, so a term added here reaches both sides at once. The two used to be
+    /// two spellings, and a term added to one of them is how a mesh-less frame came to sample a
+    /// cascade nothing had rendered.
+    ///
+    /// The leg condition is deliberately NOT a term here: `resolve_csm_cascades` folds it into
+    /// `csm_mode_word` (it writes [`ResolvedCsm::DISABLED`] on a leg set without mesh-shadow
+    /// producers), so every reader of the fit inherits it.
+    ///
+    /// An inherent impl in THIS module rather than beside the type in `csm_config`, so
+    /// `csm_config` gains no edge to `csm_caster` (which already depends on it).
+    #[inline]
+    #[must_use]
+    pub fn depth_pass_armed(&self, casters: &CsmCasterScratch) -> bool {
+        self.csm_mode_word == 1 && casters.batch_count() > 0
     }
 }
 
 /// The ECS-native CSM Inc-2 shadow-caster gather SYSTEM: buckets every visible
 /// `(MeshHandle, InstanceModelCol)` entity that ALSO carries
-/// [`ShadowCaster`](crate::csm_marker::ShadowCaster) into per-caster-mesh
+/// [`ShadowCaster`] into per-caster-mesh
 /// [`DrawBatch`]es + the shared caster instance ring, reusing the [`CsmCasterScratch`]
 /// resource (Principle 0 — casters from spawned entities via the query, not an inline
 /// batch).
 ///
 /// # The structural filter
 ///
-/// The query filter is `(Enabled<RenderEnabled>, With<ShadowCaster>)` — a tuple-AND:
+/// The query filter is `(Enabled<RenderEnabled>, Disabled<RenderStale>, With<ShadowCaster>)`
+/// — a tuple-AND:
 /// - `Enabled<RenderEnabled>` is the `Visibility::Hidden` per-row gate (the SAME term
 ///   [`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws) uses), so a hidden caster
 ///   never enters a cascade bucket.
+/// - `Disabled<RenderStale>` is the asset-staleness gate (asset-streaming plan prereq (b),
+///   the SAME term the main gather uses): a caster whose mesh `validate_asset_refs` marked
+///   stale THIS frame never enters a bucket, independently of its visibility bit. Over a
+///   stale-free scene the bit page is absent and the test is always true — no row dropped,
+///   none reordered (the goldens' byte-identity argument).
 /// - `With<ShadowCaster>` is the structural caster term — a non-caster row is excluded at
 ///   iteration (capability-is-presence), so the depth pass draws ONLY casters. This is
 ///   the WHOLE difference from the main gather.
@@ -137,9 +175,9 @@ impl CsmCasterScratch {
 /// The count → prefix-sum → scatter is
 /// [`MeshRenderScratch::gather_mixed_into`](crate::mesh_draw::MeshRenderScratch::gather_mixed_into)
 /// called verbatim: the `With<ShadowCaster>`-filtered `q.iter()` is the re-iteration
-/// closure, the [`MeshRegistry`] supplies the mesh count (sizes the lanes, O2) + each
-/// batch's `(index_count, index_type)`. One `vkCmdDrawIndexed` per caster mesh
-/// (Principle 1).
+/// closure, the world's `Assets<MeshGpu>` table supplies the mesh count (sizes the
+/// lanes, O2) + each batch's `(index_count, index_type)`. One `vkCmdDrawIndexed` per
+/// caster mesh (Principle 1).
 ///
 /// # 0%-gate
 ///
@@ -147,81 +185,395 @@ impl CsmCasterScratch {
 /// matching rows, so the gather emits zero caster batches + an empty caster ring — the
 /// depth pass then draws nothing, byte-identical to a CSM-disabled frame.
 ///
-/// # Registration — unwired-API (matches `gather_mesh_draws`)
+/// # The occlusion-culling capability term (VG R3 piece 2 step P2-2)
+///
+/// The shared gather core scatters a per-instance occlusion-culling flags lane and folds a
+/// frame-level count, so this gather runs that fold on the CASTER scratch too. The query
+/// therefore carries `Option<&OcclusionCulling>` and the closure supplies each caster's REAL
+/// marker presence: a caster row supplies the same value the main gather would give that same
+/// entity. Hard-coding `false` here would put a LIE in the caster scratch's lane, and a lane
+/// that lies is worse than one that is redundant — `Option<&ZST>` is non-filtering and free,
+/// so truthfulness costs nothing and no caster row is dropped or reordered.
+///
+/// The caster count is REDUNDANT, never authoritative: the frame-level split predicate is
+/// read off the MAIN `MeshRenderScratch`. Reading `CsmCasterScratch.0.occlusion_instances()`
+/// would be a SECOND predicate that can disagree with the first, and that is a defect.
+///
+/// # Registration — through [`add_gather_shadow_casters`] only (matches `gather_mesh_draws`)
 ///
 /// This system is NOT registered in [`CsmPlugin`](crate::csm_plugin::CsmPlugin) (nor any
 /// plugin), exactly as
 /// [`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws) is an unwired exported API:
-/// it requires the `MeshRegistry` `NonSend` resource + the `InstanceModelCol`/`MeshHandle`
-/// columns the inline CSM demos do not yet spawn, and its output must be co-registered
+/// it requires the world's `Assets<MeshGpu>` `NonSend` resource + the
+/// `InstanceModelCol`/`MeshHandle` columns the inline CSM demos do not yet spawn, and
+/// its output must be co-registered
 /// `.before` the depth-pass consumer at the OWNING app's call site (so the
 /// `.before(record_csm_depth)` edge is expressible there — the same add-order discipline
 /// `CsmPlugin` documents for the resolve/consumer ordering). The app registers it
 /// alongside [`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws) and inserts the
-/// [`CsmCasterScratch`] resource when it wires the real CSM caster path.
+/// [`CsmCasterScratch`] resource when it wires the real CSM caster path — and it does so
+/// THROUGH [`add_gather_shadow_casters`], which pins the gather
+/// `.after_set(AssetValidateSet)` (asset-streaming plan prereq (c)) so the
+/// `Disabled<RenderStale>` term above reads THIS frame's verdict, not last frame's.
 // The `Query<D, F>` IS the declarative system signature; the `(Enabled<RenderEnabled>,
-// With<ShadowCaster>)` tuple-AND filter is the whole point of this gather (the structural
-// caster term), so factoring it behind a `type` alias would hide the load-bearing intent.
+// Disabled<RenderStale>, With<ShadowCaster>)` tuple-AND filter is the whole point of this
+// gather (the structural caster term), so factoring it behind a `type` alias would hide
+// the load-bearing intent.
 #[allow(clippy::type_complexity, clippy::needless_pass_by_value)]
 pub fn gather_shadow_casters(
-    q: Query<(&MeshHandle, &InstanceModelCol), (Enabled<RenderEnabled>, With<ShadowCaster>)>,
-    registry: NonSendRes<MeshRegistry>,
+    q: Query<
+        (&MeshHandle, &InstanceModelCol, Option<&OcclusionCulling>),
+        (Enabled<RenderEnabled>, Disabled<RenderStale>, With<ShadowCaster>),
+    >,
+    mesh_assets: NonSendRes<Assets<MeshGpu>>,
     mut scratch: ResMut<CsmCasterScratch>,
 ) {
-    let mesh_count = registry.len();
+    // asset-streaming plan F5: `high_water()`, not `len()` — a live `MeshHandle.0` can
+    // exceed the live COUNT once a hole exists; see `mesh_draw::gather_mesh_draws`'s
+    // identical fix for the full rationale.
+    let mesh_count = mesh_assets.high_water();
     // The caster gather is ALL-STATIC (the CSM depth pass reads the caster affines from
     // this scratch's `batches`, never an interpolated ring), so every row takes the
     // `None` pair branch of the unified gather — `pair_ring` / `pair_out_slot` stay empty
     // and inert on the caster scratch. Reuses the one gather core (refined-B).
     scratch.0.gather_mixed_into(
         mesh_count,
+        // INVARIANT (asset-streaming plan F6 FIX-2): never dereference a non-Loaded
+        // slot — see `mesh_draw::gather_mesh_draws`'s identical fix for the full
+        // rationale (a graceful skipped-batch, not a dependence on
+        // `validate_asset_refs` having caught this mesh's retire in time).
         |mesh_id| {
-            let m = registry.get(MeshHandle(mesh_id));
-            (m.index_count, m.index_type)
+            let m = mesh_assets.try_get(MeshHandle(mesh_id))?;
+            Some((m.index_count, m.index_type))
         },
-        || q.iter().map(|(h, col)| (h.0, col, None)),
+        // Slot resolved by index; a stale mesh is excluded by the `Disabled<RenderStale>`
+        // term (validate_asset_refs marked it earlier this frame — the `AssetValidateSet` edge).
+        // The caster gather has no material dimension (the CSM depth pass reads only
+        // `.batches`/`.ring`, never `.material_ids`) — a constant default payload feeds the
+        // shared gather core's material lane inertly (asset-streaming plan F8+). The
+        // occlusion capability is NOT constant-folded the same way: it is the row's real
+        // marker presence (see this fn's doc).
+        || {
+            q.iter().map(|(h, col, occ)| {
+                (h.0, col, None, PerInstanceMaterial::default(), occ.is_some())
+            })
+        },
+    );
+}
+
+/// Registers [`gather_shadow_casters`] pinned `.after_set(`[`AssetValidateSet`]`)` and hands
+/// the caller the `SystemConfig` to chain its own edges on (`.after(pack)`, `.key()` for the
+/// downstream `sync_csm_light_gate` / `reduce_caster_bounds` edges) — the twin of
+/// [`add_gather_mesh_draws`](crate::mesh_draw::add_gather_mesh_draws); see that helper's
+/// doc for why the validate → gather edge is a by-name set inside a consumer-side helper
+/// (asset-streaming plan prereq (c)).
+#[inline]
+pub fn add_gather_shadow_casters(builder: &mut ScheduleBuilder) -> SystemConfig<'_> {
+    builder.add_system(gather_shadow_casters).after_set(AssetValidateSet)
+}
+
+/// CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C2 — the cross-plugin ordering
+/// seam for [`reduce_caster_bounds`]. Mirrors
+/// [`DdgiResolveSet`](crate::ddgi_config::DdgiResolveSet) /
+/// [`PunctualResolveSet`](crate::shadow_atlas::PunctualResolveSet): a set-to-set edge
+/// pinned BY NAME holds regardless of plugin add-order, where a per-system `.after(key)`
+/// edge cannot cross a plugin boundary.
+///
+/// Dark this rung: nothing joins or orders against this set yet. A future fit (rung C3)
+/// pins its resolve `.after_set(CsmFitSet)`; the owning app (rung C5) puts
+/// [`reduce_caster_bounds`] `.in_set(CsmFitSet)` at its registration site.
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CsmFitSet;
+
+/// The pure, World-free core of the caster-bounds fold (`docs/CSM-AUTOFIT-PLAN.md`
+/// Decisions D4/D7, algorithm A) — unit-testable without an ECS, mirroring the
+/// closure-meta idiom [`gather_shadow_casters`] itself uses just above (`|mesh_id| {
+/// .. }`).
+///
+/// Folds `batches` + `ring` (a caster gather's OUTPUT — see [`CsmCasterScratch`]) into a
+/// [`CsmCasterBounds`]: the per-instance view-space depth extreme (`raw_far`) plus the
+/// union world AABB (`world_min`/`world_max`, kept only for a future sun-axis term, D5).
+/// A batch whose `mesh_aabb(mesh_id)` is `None` — the mesh has not resolved `Loaded` yet
+/// (the F6 never-deref invariant, mirrored from [`gather_shadow_casters`]'s own
+/// `try_get` above) — is SKIPPED and NOT counted as resolved. The SAME skip applies to a
+/// `Loaded` mesh whose local AABB is the INVERTED sentinel a zero-vertex `MeshGpu` folds
+/// to (`local_min[i] > local_max[i]` on every axis — see `MeshGpu::local_min`'s doc):
+/// its centre would compute to NaN, which must never poison `raw_far`/`world_min`/
+/// `world_max`, so it is treated exactly like a non-`Loaded` slot rather than dereferenced.
+///
+/// # D4 — per instance, never a projected union AABB
+///
+/// `raw_far` is the max, OVER INSTANCES, of that instance's own world-AABB extreme along
+/// `forward` — never the projection of the union AABB. Two casters at the same depth but
+/// opposite lateral extremes would otherwise inflate `raw_far` by their lateral
+/// separation (the union-AABB error D4 refutes: e.g. `world x = ±50` at `|fwd.x| = 0.5`
+/// would add ~25 of spurious depth). Each instance's world AABB is the Arvo abs-matrix
+/// transform of its mesh's local AABB through [`InstanceModelCol::rows`] (3×4
+/// row-major): `wc[r] = Σⱼ rows[r][j]·lc[j] + rows[r][3]`, `wh[r] = Σⱼ |rows[r][j]|·lh[j]`
+/// — exact for any linear map, including shear, and strictly dominates a
+/// bounding-sphere route (no sqrt, no √3 circumscription loss, and a sphere via
+/// max-column-norm underestimates under shear).
+///
+/// # Cost
+///
+/// O(instances + batches), cold, no allocation. One `Option`/inverted-box branch per
+/// BATCH; the per-instance inner loop is branch-free (`min`/`max`/`abs` only).
+/// The Arvo abs-matrix transform of a local AABB — centre `lc`, half-extent `lh` — through one
+/// instance's row-major 3×4 affine. Returns `(world_centre, world_half_extent)`.
+///
+/// `wc[r] = Σⱼ rows[r][j]·lc[j] + rows[r][3]` and `wh[r] = Σⱼ |rows[r][j]|·lh[j]`: exact for any
+/// linear map INCLUDING shear, and strictly better than a bounding-sphere route (no `sqrt`, no √3
+/// circumscription loss, and a sphere via max-column-norm underestimates under shear). Branch-free
+/// — `abs`/`+`/`*` only.
+///
+/// # Why this is a shared primitive
+///
+/// Two consumers now fold the SAME transform to different shapes: [`reduce_bounds_into`] unions it
+/// across every instance of every caster batch (and takes its depth extreme PER INSTANCE — the D4
+/// fix), while [`batch_world_aabb`] unions it within ONE batch for the VG rung-R2c draw cull. The
+/// FOLDS legitimately differ; the TRANSFORM must not. Two hand-copies of this arithmetic that drift
+/// by one `abs` would put the shadow fit and the draw cull on different geometry — a class this
+/// repository has already paid for elsewhere — so the arithmetic lives here once.
+#[inline]
+#[must_use]
+pub fn arvo_transform(rows: &[[f32; 4]; 3], lc: [f32; 3], lh: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    let mut wc = [0.0f32; 3];
+    let mut wh = [0.0f32; 3];
+    for r in 0..3 {
+        let row = rows[r];
+        wc[r] = row[0] * lc[0] + row[1] * lc[1] + row[2] * lc[2] + row[3];
+        wh[r] = row[0].abs() * lh[0] + row[1].abs() * lh[1] + row[2].abs() * lh[2];
+    }
+    (wc, wh)
+}
+
+/// VG rung R2c: ONE batch's world-space AABB — the union of [`arvo_transform`] over that batch's
+/// slice of the instance ring. `None` when the batch has no instances, or when `mesh_aabb` is the
+/// C0 zero-vertex sentinel (an INVERTED box, `min > max`), which is skipped for the same reason
+/// [`reduce_bounds_into`] skips it: its centre is NaN and it would poison the fold.
+///
+/// This is the DRAW cull's geometry, and its error direction is fixed by construction: the returned
+/// box CONTAINS every vertex the batch can rasterize, so a frustum test that rejects only a box
+/// wholly outside can never cull something visible. Over-inclusion costs a wasted draw.
+///
+/// # Panics / bounds
+///
+/// Debug-asserts that the batch's `[base_instance, base_instance + instance_count)` range fits
+/// `ring`; in release an out-of-range batch returns `None` rather than reading past the slice.
+#[must_use]
+pub fn batch_world_aabb(
+    batch: &DrawBatch,
+    ring: &[InstanceModelCol],
+    mesh_aabb: ([f32; 3], [f32; 3]),
+) -> Option<([f32; 3], [f32; 3])> {
+    let (mn, mx) = mesh_aabb;
+    if mn[0] > mx[0] || mn[1] > mx[1] || mn[2] > mx[2] {
+        return None;
+    }
+    let base = batch.base_instance as usize;
+    let count = batch.instance_count as usize;
+    debug_assert!(
+        base.saturating_add(count) <= ring.len(),
+        "batch_world_aabb: batch range [{base}, {}) exceeds the ring's {} instances",
+        base + count,
+        ring.len()
+    );
+    if count == 0 || base.saturating_add(count) > ring.len() {
+        return None;
+    }
+
+    let lc = [(mn[0] + mx[0]) * 0.5, (mn[1] + mx[1]) * 0.5, (mn[2] + mx[2]) * 0.5];
+    let lh = [(mx[0] - mn[0]) * 0.5, (mx[1] - mn[1]) * 0.5, (mx[2] - mn[2]) * 0.5];
+
+    let mut world_min = [f32::INFINITY; 3];
+    let mut world_max = [f32::NEG_INFINITY; 3];
+    for inst in &ring[base..base + count] {
+        let (wc, wh) = arvo_transform(&inst.rows, lc, lh);
+        for r in 0..3 {
+            world_min[r] = world_min[r].min(wc[r] - wh[r]);
+            world_max[r] = world_max[r].max(wc[r] + wh[r]);
+        }
+    }
+    Some((world_min, world_max))
+}
+
+pub fn reduce_bounds_into(
+    batches: &[DrawBatch],
+    ring: &[InstanceModelCol],
+    eye: [f32; 3],
+    forward: [f32; 3],
+    mesh_aabb: impl Fn(u32) -> Option<([f32; 3], [f32; 3])>,
+) -> CsmCasterBounds {
+    let total_batches = batches.len() as u32;
+    let mut resolved_batches: u32 = 0;
+    let mut raw_far = f32::NEG_INFINITY;
+    let mut world_min = [f32::INFINITY; 3];
+    let mut world_max = [f32::NEG_INFINITY; 3];
+
+    for batch in batches {
+        let Some((mn, mx)) = mesh_aabb(batch.mesh_id) else {
+            continue; // not yet Loaded (F6 invariant) — skip, do not count as resolved.
+        };
+        // C0's zero-vertex sentinel is an INVERTED box (min > max on every axis); its
+        // centre is NaN, so it is skipped exactly like a non-Loaded slot instead of
+        // poisoning the fold.
+        if mn[0] > mx[0] || mn[1] > mx[1] || mn[2] > mx[2] {
+            continue;
+        }
+        resolved_batches += 1;
+
+        let lc = [(mn[0] + mx[0]) * 0.5, (mn[1] + mx[1]) * 0.5, (mn[2] + mx[2]) * 0.5];
+        let lh = [(mx[0] - mn[0]) * 0.5, (mx[1] - mn[1]) * 0.5, (mx[2] - mn[2]) * 0.5];
+
+        let base = batch.base_instance as usize;
+        let count = batch.instance_count as usize;
+        debug_assert!(
+            base + count <= ring.len(),
+            "reduce_bounds_into: batch range [{base}, {}) exceeds the ring's {} instances",
+            base + count,
+            ring.len()
+        );
+
+        for inst in &ring[base..base + count] {
+            let (wc, wh) = arvo_transform(&inst.rows, lc, lh);
+
+            for r in 0..3 {
+                world_min[r] = world_min[r].min(wc[r] - wh[r]);
+                world_max[r] = world_max[r].max(wc[r] + wh[r]);
+            }
+
+            // The per-instance view-space depth extreme along `forward` — the D4 fix:
+            // this is `max`'d PER INSTANCE, so a laterally spread caster set can never
+            // inflate `raw_far` the way projecting the union AABB would.
+            let d_center = forward[0] * (wc[0] - eye[0])
+                + forward[1] * (wc[1] - eye[1])
+                + forward[2] * (wc[2] - eye[2]);
+            let d_half =
+                forward[0].abs() * wh[0] + forward[1].abs() * wh[1] + forward[2].abs() * wh[2];
+            raw_far = raw_far.max(d_center + d_half);
+        }
+    }
+
+    if resolved_batches == 0 {
+        return CsmCasterBounds { total_batches, ..CsmCasterBounds::EMPTY };
+    }
+
+    CsmCasterBounds { raw_far, world_min, world_max, resolved_batches, total_batches }
+}
+
+/// The cold caster-bounds fold SYSTEM (`docs/CSM-AUTOFIT-PLAN.md` rung C2/C3) — folds
+/// [`CsmCasterScratch`]'s `batches()` + `ring()` (the shadow-caster gather's OUTPUT, NOT
+/// a second query — D7) into [`CsmCasterBounds`] via [`reduce_bounds_into`].
+///
+/// # The `fit_mode` 0%-gate (algorithm A step 1, rung C3)
+///
+/// Under the default [`CsmFitMode::Fixed`] the fold never runs: `out` is written to
+/// [`CsmCasterBounds::EMPTY`] and the per-instance abs-matrix walk is skipped entirely —
+/// the same 0-ns default [`CsmConfig`] already guarantees for
+/// [`resolve_csm_cascades`](crate::csm_config::resolve_csm_cascades)'s side of the gate.
+///
+/// # Registration — unwired-API (matches [`gather_shadow_casters`])
+///
+/// This system is NOT registered in [`CsmPlugin`](crate::csm_plugin::CsmPlugin) (nor any
+/// plugin), exactly as [`gather_shadow_casters`] is an unwired exported API: it requires
+/// the world's `Assets<MeshGpu>` `NonSend` resource and [`CsmCasterScratch`] (itself
+/// unwired — the owning app inserts + populates it), so the owning app co-registers this
+/// system `.after(gather_shadow_casters)` and `.in_set(CsmFitSet)` when it wires the real
+/// CSM caster path (rung C5).
+///
+/// **Without registration, [`CsmCasterBounds`] never leaves the
+/// [`CsmPlugin`](crate::csm_plugin::CsmPlugin)-inserted [`CsmCasterBounds::EMPTY`]** —
+/// nothing folds it, so it can never become `is_usable()`, so the fit (rung C3) never
+/// latches, so every non-`Fixed` mode renders as `Fixed`: today's picture, silently, at
+/// zero cost.
+///
+/// # `NonSend`
+///
+/// Reads `NonSendRes<Assets<MeshGpu>>` (the same class [`gather_shadow_casters`] reads),
+/// so this system runs main-thread-only. The pin does NOT propagate to the fit: it reads
+/// only `Res<CsmCasterBounds>`, staying thread-agnostic (D7, `docs/CSM-AUTOFIT-PLAN.md`
+/// §7).
+#[allow(clippy::needless_pass_by_value)]
+pub fn reduce_caster_bounds(
+    cfg: Res<CsmConfig>,
+    view: Res<ViewUniform>,
+    scratch: Res<CsmCasterScratch>,
+    mesh_assets: NonSendRes<Assets<MeshGpu>>,
+    mut out: ResMut<CsmCasterBounds>,
+) {
+    if cfg.fit_mode == CsmFitMode::Fixed {
+        *out = CsmCasterBounds::EMPTY;
+        return;
+    }
+
+    let eye = view.camera_pos.xyz();
+    let forward = view.cam_forward.xyz();
+    *out = reduce_bounds_into(
+        scratch.batches(),
+        scratch.ring(),
+        [eye.x, eye.y, eye.z],
+        [forward.x, forward.y, forward.z],
+        // F6 invariant: never dereference a non-Loaded slot (mirrors
+        // gather_shadow_casters's own try_get above).
+        |mesh_id| {
+            let m = mesh_assets.try_get(MeshHandle(mesh_id))?;
+            Some((m.local_min, m.local_max))
+        },
     );
 }
 
 /// Keeps the light-header CSM sample gate ([`LightingConfig::csm_shadows`] → header
-/// word 7 bit [`CSM_MODE_BIT`](crate::light::CSM_MODE_BIT)) in LOCK-STEP with the
-/// cascade depth-pass activation predicate (host plan R4):
+/// word 7 bit [`CSM_MODE_BIT`](crate::light::CSM_MODE_BIT)) tracking the cascade depth-pass
+/// arming (host plan R4). On a flip the light table is marked dirty ([`LightTableDirty`]) so
+/// `collect_lights` rebuilds the header with the new gate word and the staged-table generation
+/// advances (the host re-uploads both ring slots).
 ///
-/// ```text
-/// gate = ResolvedCsm.csm_mode_word == 1  AND  CsmCasterScratch has >= 1 caster batch
-/// ```
+/// # One predicate, two readers
 ///
-/// which is EXACTLY the predicate the windowed host arms `GBufferScene::csm` with —
-/// one predicate, two consumers, no drift. On a flip the light table is marked dirty
-/// ([`LightTableDirty`]) so `collect_lights` rebuilds the header with the new gate word
-/// and the staged-table generation advances (the host re-uploads both ring slots).
+/// The bit is [`ResolvedCsm::depth_pass_armed`], the formula's only spelling; the windowed
+/// host arms `GBufferScene::csm` with the same call on the same two inputs. The leg condition
+/// is not a third term at either reader. It lives upstream, inside `csm_mode_word`:
+/// [`resolve_csm_cascades`](crate::csm_config::resolve_csm_cascades) writes
+/// [`ResolvedCsm::DISABLED`] whenever
+/// [`ResolvedRenderPath::mesh_shadow_producers`](crate::render_path_config::ResolvedRenderPath::mesh_shadow_producers)
+/// is `false`, so on a mesh-less leg set both readers are `false` from frame 0.
 ///
-/// # Why the lock-step is layout-sound under ordering staggers (review R4-W1)
+/// # The header can trail OR lead the host, and neither samples an unrendered cascade
 ///
 /// This system's ordering against `resolve_csm_cascades` / `collect_lights` is
-/// registration-site-dependent (cross-plugin edges are not expressible), so the header
-/// gate can lag the predicate by a frame in EITHER direction — and because this
-/// system's `ResolvedCsm` term can itself be one frame stale, a multi-coincidence
-/// exists (the sun unfits exactly as casters first appear, latching the gate ON from
-/// stale terms; then re-fits exactly as they vanish, inside the header-flip lag) in
-/// which the resolve sees the gate ON and an armed cascade UBO on a frame whose depth
-/// pass did not record — in the extreme, on a stream where it NEVER recorded.
-/// Soundness therefore does NOT rest on this system's timing; it rests on two host
-/// guarantees:
+/// registration-site-dependent (cross-plugin edges are not expressible), so for 1–2 frames the
+/// header bit can disagree with the host's arming in either direction. It can TRAIL an arming
+/// flip, and it can LEAD the host: carry ON before the host has ever armed. Measured 2026-09-18
+/// in `taa_jitter_eval`, which hand-seeds this derived field (`csm_shadows: true`) while this
+/// system runs one frame behind `collect_lights`: on frame 0 the header's CSM bit is ON and the
+/// host, with no caster batch yet, is unarmed; frame 1 is armed with the bit OFF; the two agree
+/// from frame 2. So a STATIC scene can have a header-ON, host-unarmed frame. The shadow design's
+/// premise that "in a static scene the header trails the host, so no static pin has such a
+/// frame" is refuted.
 ///
-/// 1. **The never-rendered class is closed by the BOOT LAYOUT**: the windowed host
-///    one-shot-transitions the cascade array (and shadow atlas) to
-///    `SHADER_READ_ONLY_OPTIMAL` at scene boot, so a gate-ON resolve on a stream
-///    where the depth pass never ran samples undefined VALUES at a DEFINED layout —
-///    a benign 1–2 frame shadow transient, never an invalid access.
-/// 2. **Stale divergence (1–2 frames) is benign**: the host uploads the CURRENT
-///    `ResolvedCsm` into the fenced cascade-UBO slot every frame, so a DISABLED fit
-///    reaches the resolve as `active_count == 0` (the shader's early-out — no sample
-///    at all), and a stale-armed fit samples a valid-layout cascade whose content is
-///    at worst one re-render old.
+/// * **Header OFF while the host is armed:** the depth pass is recorded and not sampled — one
+///   frame without CSM shadows.
+/// * **Header ON while the host is unarmed** (trailing a disarm, or leading the first arming):
+///   on every unarmed frame the host uploads [`ResolvedCsm::DISABLED`] into the cascade UBO
+///   (`boyko_app::runner` step 5d, through
+///   [`ResolvedCsm::frame_uniform`](crate::csm_config::ResolvedCsm::frame_uniform) — shadow gate
+///   SG4), so the resolve sees `gCsmActive == 0` and `csm_visibility` returns 1.0 before any
+///   texture read.
 ///
-/// The gate/dirty mechanics below therefore only bound WHEN the header bit flips
-/// (within 1–2 frames of the predicate), not the safety of any interleaving.
+/// No frame samples a cascade that the frame did not render. Before SG4 that was false for the
+/// leading frame: it uploaded the live fit and sampled a cascade no pass had written, so the
+/// pixel depended on memory nothing wrote (the poison gate proves such memory controls the
+/// pixel). SG4 made that frame defined, and TAA carries frame 0 into history, so four pins moved
+/// with it: `taa_armed`, `taa_armed_basis`, `taa_rcas` and `vb_both_taa` — 5 pixels, max delta
+/// 3/255, on the SDF sphere's upper rim (the three Deferred ones moved on the hwrt leg too).
+/// Reverting SG4 alone restores their earlier hashes. The new frames were ruled correct and
+/// blessed (2026-09-18), and the hand-seed in `taa_jitter_eval` stays as the only witness of a
+/// header-leads-host frame. The host's boot layout seed makes the descriptor's LAYOUT valid and
+/// defines no values; nothing relies on it for values.
+///
+/// Scope: under `hwrt` the same header bit also gates the directional TLAS trace in
+/// `deferred_pbr.hlsl`, which ignores `gCsmActive`. That trace is gated by the host's TLAS
+/// arming (conjoined with `mesh_shadow_producers`), not by this note.
 ///
 /// # Value-gated write
 ///
@@ -241,7 +593,7 @@ pub fn sync_csm_light_gate(
     mut cfg: ResMut<LightingConfig>,
     mut dirty: ResMut<LightTableDirty>,
 ) {
-    let on = resolved.csm_mode_word == 1 && casters.batch_count() > 0;
+    let on = resolved.depth_pass_armed(&casters);
     // Value gate BEFORE the `DerefMut`: flip-only write, flip-only table dirtying.
     if cfg.csm_shadows != on {
         cfg.csm_shadows = on;
@@ -269,13 +621,13 @@ mod tests {
     /// A fake registry `meta`: mesh `m` has `index_count = 6 * (m + 1)` and alternating
     /// index width — identical to the `mesh_draw` scaffold so the caster gather is proven
     /// to carry the same O3 mixed-width batch fields.
-    fn meta(mesh_id: u32) -> (u32, IndexType) {
+    fn meta(mesh_id: u32) -> Option<(u32, IndexType)> {
         let width = if mesh_id.is_multiple_of(2) {
             IndexType::Uint16
         } else {
             IndexType::Uint32
         };
-        (6 * (mesh_id + 1), width)
+        Some((6 * (mesh_id + 1), width))
     }
 
     /// One `(mesh_id, &InstanceModelCol)` input plus its `is_caster` structural flag —
@@ -293,7 +645,9 @@ mod tests {
     /// (casters have no interpolation pair), so every row takes the `None` branch.
     fn gather_casters(scratch: &mut CsmCasterScratch, mesh_count: usize, rows: &[Row]) {
         scratch.0.gather_mixed_into(mesh_count, meta, || {
-            rows.iter().filter(|r| r.is_caster).map(|r| (r.mesh_id, &r.col, None))
+            rows.iter()
+                .filter(|r| r.is_caster)
+                .map(|r| (r.mesh_id, &r.col, None, PerInstanceMaterial::default(), false))
         });
     }
 
@@ -402,11 +756,13 @@ mod tests {
 
         // The same inputs through the foundation's unified gather directly (no filter).
         let mut main = MeshRenderScratch::default();
-        main.gather_mixed_into(2, meta, || rows.iter().map(|r| (r.mesh_id, &r.col, None)));
+        main.gather_mixed_into(2, meta, || {
+            rows.iter().map(|r| (r.mesh_id, &r.col, None, PerInstanceMaterial::default(), false))
+        });
 
         assert_eq!(casters.batch_count(), main.batch_count());
-        assert_eq!(casters.batches(), main.batches.as_slice());
-        assert_eq!(casters.ring(), main.ring.as_slice());
+        assert_eq!(casters.batches(), main.batches.as_read_slice());
+        assert_eq!(casters.ring(), main.ring.as_read_slice());
     }
 
     /// Re-running the caster gather REUSES the scratch's capacity (Principle 5): a large
@@ -437,5 +793,238 @@ mod tests {
             scratch.0.ring.capacity() >= ring_cap_after_big,
             "the caster ring retains its reserved capacity across a smaller frame"
         );
+    }
+
+    // ---- reduce_bounds_into (rung C2, docs/CSM-AUTOFIT-PLAN.md) -----------------------
+
+    /// An identity-rotation, unit-scale instance at world translation `t` — the caster-
+    /// bounds analogue of [`affine`] (no mesh-id/ordinal encoding needed here; only the
+    /// world position matters).
+    fn identity_instance_at(t: [f32; 3]) -> InstanceModelCol {
+        InstanceModelCol {
+            rows: [
+                [1.0, 0.0, 0.0, t[0]],
+                [0.0, 1.0, 0.0, t[1]],
+                [0.0, 0.0, 1.0, t[2]],
+            ],
+        }
+    }
+
+    /// T13 — a batch whose mesh has not resolved `Loaded` (`mesh_aabb -> None`, the F6
+    /// invariant) is SKIPPED: it must not be counted as resolved, and the fold must not
+    /// panic.
+    #[test]
+    fn reduce_skips_non_loaded_mesh() {
+        let batches = [
+            DrawBatch {
+                mesh_id: 0,
+                index_count: 6,
+                index_type: IndexType::Uint16,
+                base_instance: 0,
+                instance_count: 1,
+            },
+            DrawBatch {
+                mesh_id: 1,
+                index_count: 6,
+                index_type: IndexType::Uint16,
+                base_instance: 1,
+                instance_count: 1,
+            },
+        ];
+        let ring = [
+            identity_instance_at([0.0, 0.0, 0.0]),
+            identity_instance_at([0.0, 0.0, 5.0]),
+        ];
+
+        // Mesh 0 resolves; mesh 1 simulates a mesh still streaming in (not yet Loaded).
+        let bounds = reduce_bounds_into(&batches, &ring, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], |mesh_id| {
+            if mesh_id == 0 {
+                Some(([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]))
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(bounds.total_batches, 2, "the gather emitted 2 batches this frame");
+        assert_eq!(
+            bounds.resolved_batches, 1,
+            "the non-Loaded mesh's batch must be skipped, not counted as resolved"
+        );
+        assert!(
+            !bounds.is_usable(),
+            "an incomplete fold (resolved < total) must not be usable as a fit input"
+        );
+    }
+
+    /// The C0 zero-vertex sentinel is an INVERTED box (`local_min = [+inf;3]`, `local_max
+    /// = [-inf;3]`) — its centre computes to NaN. `reduce_bounds_into` must treat it
+    /// EXACTLY like a non-Loaded slot (skip, do not count as resolved), never dereference
+    /// it into a NaN-poisoned fold. Reachable in practice: `tests/asset_streaming_f5_validation.rs`
+    /// constructs such a dummy `MeshGpu`.
+    #[test]
+    fn reduce_skips_inverted_box_like_non_loaded_mesh() {
+        let batches = [DrawBatch {
+            mesh_id: 0,
+            index_count: 6,
+            index_type: IndexType::Uint16,
+            base_instance: 0,
+            instance_count: 1,
+        }];
+        let ring = [identity_instance_at([1.0, 2.0, 3.0])];
+
+        let bounds = reduce_bounds_into(&batches, &ring, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], |_| {
+            Some(([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]))
+        });
+
+        assert_eq!(bounds.total_batches, 1);
+        assert_eq!(
+            bounds.resolved_batches, 0,
+            "an inverted (zero-vertex sentinel) box must be skipped, not resolved"
+        );
+        assert!(!bounds.is_usable());
+        assert_eq!(
+            bounds.raw_far, 0.0,
+            "an all-skipped fold must equal EMPTY, not a NaN-poisoned value"
+        );
+        assert!(bounds.raw_far.is_finite());
+        assert!(bounds.world_min.iter().all(|v| v.is_finite()));
+        assert!(bounds.world_max.iter().all(|v| v.is_finite()));
+    }
+
+    /// T20 — D4's exactness/conservativeness: a rotated, non-uniformly-scaled, AND
+    /// SHEARED instance (not a pure rotation/scale, so a bounding-sphere route would
+    /// underestimate). The abs-matrix (Arvo) transform must produce a world AABB that
+    /// contains all 8 manually-transformed local-box corners.
+    #[test]
+    fn reduce_matches_manual_transform_for_sheared_instance() {
+        let a = [[1.5_f32, 0.6, -0.3], [-0.2, 2.0, 0.4], [0.1, -0.5, 0.8]];
+        let t = [3.0_f32, -2.0, 5.0];
+
+        let inst = InstanceModelCol {
+            rows: [
+                [a[0][0], a[0][1], a[0][2], t[0]],
+                [a[1][0], a[1][1], a[1][2], t[1]],
+                [a[2][0], a[2][1], a[2][2], t[2]],
+            ],
+        };
+
+        let local_min = [-1.0_f32, -2.0, -0.5];
+        let local_max = [3.0_f32, 1.0, 2.0];
+
+        let batches = [DrawBatch {
+            mesh_id: 0,
+            index_count: 6,
+            index_type: IndexType::Uint16,
+            base_instance: 0,
+            instance_count: 1,
+        }];
+        let ring = [inst];
+
+        let bounds = reduce_bounds_into(&batches, &ring, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], |_| {
+            Some((local_min, local_max))
+        });
+
+        const EPS: f32 = 1.0e-4;
+        for &lx in &[local_min[0], local_max[0]] {
+            for &ly in &[local_min[1], local_max[1]] {
+                for &lz in &[local_min[2], local_max[2]] {
+                    let w = [
+                        a[0][0] * lx + a[0][1] * ly + a[0][2] * lz + t[0],
+                        a[1][0] * lx + a[1][1] * ly + a[1][2] * lz + t[1],
+                        a[2][0] * lx + a[2][1] * ly + a[2][2] * lz + t[2],
+                    ];
+                    for r in 0..3 {
+                        assert!(
+                            w[r] >= bounds.world_min[r] - EPS && w[r] <= bounds.world_max[r] + EPS,
+                            "corner ({lx},{ly},{lz}) world coord {w:?} axis {r} must land \
+                             inside [world_min, world_max] = [{:?}, {:?}]",
+                            bounds.world_min,
+                            bounds.world_max
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// T21 — the union-AABB error (D). Two caster instances at the SAME view-space depth
+    /// (~3) but opposite lateral extremes (`world x = +-50`), viewed along an oblique
+    /// `forward` with `|fwd.x| = 0.5`. Projecting a UNION AABB would add ~`0.5 * 50 = 25`
+    /// of spurious depth (raw_far -> ~28); the per-instance reduction must not.
+    #[test]
+    fn laterally_spread_casters_do_not_inflate_raw_far() {
+        let fwd = [0.5_f32, 0.0, -(0.75_f32).sqrt()];
+        let target_depth = 3.0_f32;
+        // Solve for the z that places each instance at exactly `target_depth` along `fwd`
+        // from the origin eye, so the ONLY thing that differs between the two instances
+        // is their lateral (x) position.
+        let z_for = |x: f32| (target_depth - fwd[0] * x) / fwd[2];
+
+        let xa = 50.0_f32;
+        let xb = -50.0_f32;
+        let inst_a = identity_instance_at([xa, 0.0, z_for(xa)]);
+        let inst_b = identity_instance_at([xb, 0.0, z_for(xb)]);
+
+        let batches = [
+            DrawBatch {
+                mesh_id: 0,
+                index_count: 6,
+                index_type: IndexType::Uint16,
+                base_instance: 0,
+                instance_count: 2,
+            },
+        ];
+        let ring = [inst_a, inst_b];
+        // A small local box so d_half is negligible next to the depth assertion's tolerance.
+        let local_min = [-0.05_f32; 3];
+        let local_max = [0.05_f32; 3];
+
+        let bounds =
+            reduce_bounds_into(&batches, &ring, [0.0, 0.0, 0.0], fwd, |_| Some((local_min, local_max)));
+
+        assert!(
+            (bounds.raw_far - target_depth).abs() < 0.5,
+            "raw_far ({}) must stay near the true per-instance depth (~{target_depth}), \
+             not the union-AABB error (~28)",
+            bounds.raw_far
+        );
+        assert!(
+            bounds.raw_far < 15.0,
+            "raw_far ({}) must not inflate toward the union-AABB projection (~28)",
+            bounds.raw_far
+        );
+    }
+
+    /// [`ResolvedCsm::depth_pass_armed`]'s truth table: mode word 0/1 × caster batches 0/2.
+    /// Exactly one row arms. The 2-batch scratch is built through the SAME gather core the
+    /// production system runs, and its batch count is asserted before it is used, so a gather
+    /// that emitted nothing cannot make every row read "unarmed" for the wrong reason.
+    #[test]
+    fn depth_pass_armed_needs_a_live_fit_and_casters() {
+        let empty = CsmCasterScratch::default();
+        let rows = [
+            Row { mesh_id: 0, col: affine(0, 0), is_caster: true },
+            Row { mesh_id: 1, col: affine(1, 0), is_caster: true },
+        ];
+        let mut two = CsmCasterScratch::default();
+        gather_casters(&mut two, 2, &rows);
+        assert_eq!((empty.batch_count(), two.batch_count()), (0, 2));
+
+        let live = ResolvedCsm { csm_mode_word: 1, active_count: 3, ..ResolvedCsm::DISABLED };
+        let cases = [
+            (ResolvedCsm::DISABLED, &empty, false),
+            (ResolvedCsm::DISABLED, &two, false),
+            (live, &empty, false),
+            (live, &two, true),
+        ];
+        for (resolved, casters, want) in cases {
+            assert_eq!(
+                resolved.depth_pass_armed(casters),
+                want,
+                "mode {} with {} caster batch(es) must arm = {want}",
+                resolved.csm_mode_word,
+                casters.batch_count()
+            );
+        }
     }
 }

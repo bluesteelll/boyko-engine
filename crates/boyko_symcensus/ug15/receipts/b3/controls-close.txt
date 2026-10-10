@@ -1,0 +1,62 @@
+# UG-15 at the B3 close: the retest's R1/R2/R5 closed, red-first, and every leg-(2) control re-run on the gate.
+# Gate commit c945dea8 (pins::contradicted, run by `check` on every built subject; the multiset diagnostic).
+# In-tree sweep bd46da52. Parent of every run: u/b3 @ 5d56641a, which is c945dea8 + bd46da52 + the ci.yml
+# loom fix, over the trunk sync a76a25fd (integ/unified 4db26681). "old" is ug15 built at a76a25fd, before the
+# fix (sha256 11396114...); "new" is ug15 built from the gate commit. Mutations were made in place and restored
+# from byte copies: every pin file's sha, and `git status`, were proven equal after each case. The controls'
+# diffs were applied in place (`git apply`) and reverse-applied; after each one the tree equalled HEAD with no
+# untracked file. Full logs: the B3 scratch, b3x/.
+
+== HEAD 5d56641a, no mutation
+new  leg2 check (all five subjects)                                     exit 0
+     pin set: 42 frozen pin(s); 5 pin file(s) hold exactly their frozen rows; every candidate is frozen or recorded absent
+     checked 42 pin(s): 0 absent, 0 moved unnamed, 0 moved named
+     dispositions re-verified against the objects: 6 recorded-absent pair(s); 0 contradiction(s)
+     object sha256 prefixes: boyko_demo 3f91d946, clear 0bfb4e01, swap_remove c6fead8d, query_dsl 89a3b8e4,
+     phase9_scheduler 7d7a5f2b (the same five as the retest's at 3ef9f7a6)
+leg7 snapshot boyko_demo / clear, compared with the retest's 3ef9f7a6 snapshots   (a), (b) and (c) identical, both
+leg7b boyko_demo                                                        GREEN, non-exempt hits 0
+leg1 census / deps; the symcensus tests; leg3 in release; M-b            exit 0 / 0; 18 passed; 1 passed; 6 passed
+
+== red-first through the binary (old = before the fix, new = the fix)
+b4   R-4/query_dsl moved into the absent list, consistently across all three files (the retest's R1 case)
+     old  leg2 check --subjects query_dsl       exit 0   pin set: 41 ...; checked 5 pin(s)          <- the defect
+     new  leg2 check --subjects query_dsl       exit 1   RED [pin set] recorded absent, but present: R-4 in query_dsl:
+                                                         ["...component_registry::register_layout::<query_dsl::Tag>"]
+b5   one H-1 block of query_dsl (Bencher::iter::<(), bench_query_ref_iter::{closure#0}::{closure#0}>) cut from the
+     pin file AND the frozen list (family C: one name of a multi-name candidate)
+     old                                        exit 0   checked 5 pin(s)                           <- the defect
+     new                                        exit 1   RED [pin set] located, but not frozen: H-1 in query_dsl: `<criterion::bencher::Bencher>::iter::<...>`
+b6b  H-2/swap_remove, the subject's only pinned pair, moved to absent AND leg2-swap_remove.pins removed
+     old  leg2 check --subjects swap_remove,query_dsl   exit 0   pin set: 37 ...; checked 6; swap_remove never built  <- the defect
+     new                                        exit 1   RED [pin set] recorded absent, but present: H-2 in swap_remove (5 names);
+                                                         swap_remove is built with no pin file
+     (b6, the same edit under --subjects swap_remove alone: old and new both RED [empty census], checked 0;
+      the new receipt also carries the contradiction)
+p1   #[inline(never)] on Schedule::run, a scratch source edit; the pin data untouched. H-3 is recorded absent in boyko_demo
+     old  leg2 check --subjects boyko_demo      exit 0   checked 7 pin(s)                           <- a codegen change leg (2) could not see
+     new                                        exit 1   RED [pin set] recorded absent, but present: H-3 in boyko_demo:
+                                                         ["<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run"]
+b0   no mutation, --subjects query_dsl          old exit 0, new exit 0 (checked 6; 0 contradictions)
+
+== the in-tree sweep, tests/ug15_leg2_pin_set_closure.rs (593 cases, 0 failures)
+family C (cut from pins AND frozen)       42: red at the read 18, red at the object 24 (was 24 residual greens)
+family E (pair moved to absent, 3 files)  21: red at the object 21                     (was 21 residual greens)
+family E2 (whole subject moved to absent, pin file deleted)   5: red at the object 5
+family P (an absent candidate given a symbol)                  6: red at the object 6
+family W (an earlier FirstWithPrefix instantiation; cut D5)    3: green, as the design requires
+family Q (vacuity: everything forged absent)                   1: red at the object (the binary's checked == 0 guard also REDs)
+family I (duplicated block)               42: red, and the RED now names the duplicated row (it read `[]; []` before)
+the sweep against pins.rs mutants (each run exit 101):
+  the (false, false) closure arm dropped          25 failures (C 18, D 6, R 1)
+  no absent re-location in `contradicted`         33 failures (E 21, E2 5, P 6, Q 1)
+  no located-but-not-frozen test                  24 failures (C 24)
+  the pre-fix membership diagnostic               42 failures (I 42)
+
+== the controls whose leg is (2), on the fixed gate (each: `git apply` of u/b3-ctl-<n>'s diff)
+(i)    leg2 check                     exit 1  RED [mismatch] MOVED clear R-1 439B×3 -> 423B×3; 41 identical; 0 contradictions
+(i-b)  leg2 check                     exit 1  RED [mismatch] MOVED clear R-1 439B×3 -> 482B×3; `lea rax, [rip] ; REL32 …UG15_CTL_I` in the body
+(ix)   leg2 check / leg3 dev / rel    exit 0 / 0 / 0  42 identical
+(x)    leg2 check --rename            exit 0  42 identical
+       leg2 check                     exit 1  RED [mismatch] 4 moved, sizes equal (clear H-3, swap_remove H-2 ×2, phase9 H-3)
+A      leg2 check                     exit 1  RED [symbol absent] P29-1 in boyko_demo and clear; 0 contradictions

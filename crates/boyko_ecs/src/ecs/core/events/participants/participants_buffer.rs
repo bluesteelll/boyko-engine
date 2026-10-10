@@ -37,12 +37,20 @@ mod tests {
 
     /// Same size as `ParticipantA` (16 bytes) but a different type —
     /// exactly the "size match but type mismatch" hazard Q-019 guards against.
+    ///
+    /// Carries its only consumer's `#[cfg(debug_assertions)]`: the Q-019 panic test
+    /// exists only where `debug_assert!` does, so in a release build this type has no
+    /// user and `-D warnings` reds on it. The cfg is structural — a future non-debug
+    /// consumer fails to compile and says so — where `allow(dead_code)` would just go
+    /// quiet and stay quiet.
+    #[cfg(debug_assertions)]
     #[derive(Clone, Copy, PartialEq, Debug)]
     struct ParticipantB {
         a: u64,
         b: u64,
     }
 
+    #[cfg(debug_assertions)]
     impl Participants for ParticipantB {
         fn participant_count() -> usize {
             1

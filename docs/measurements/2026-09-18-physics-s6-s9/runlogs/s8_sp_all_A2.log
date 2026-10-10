@@ -1,0 +1,50 @@
+Gnuplot not found, using plotters backend
+sleeping_pipeline/pyramid_frozen_sleeping_on: froze at step 61, manifolds 8555, islands 1
+sleeping_pipeline/pyramid_frozen_sleeping_on: contact_wakes 0
+Benchmarking sleeping_pipeline/pyramid_sleeping_off
+Benchmarking sleeping_pipeline/pyramid_sleeping_off: Warming up for 3.0000 s
+
+Completed 255 iterations in 4788495900 nanoseconds, estimated execution time is 18778415.29411765 ns
+Benchmarking sleeping_pipeline/pyramid_sleeping_off: Collecting 20 samples in estimated 7.8869 s (420 iterations)
+Benchmarking sleeping_pipeline/pyramid_sleeping_off: Analyzing
+Criterion.rs DEBUG: Bootstrapping the absolute statistics. took 12.297 ms
+Criterion.rs DEBUG: Bootstrapped linear regression took 2.0102 ms
+Criterion.rs DEBUG: Bootstrapping the T distribution took 2.4995 ms
+Criterion.rs DEBUG: Bootstrapping the relative statistics took 6.4848 ms
+sleeping_pipeline/pyramid_sleeping_off
+                        time:   [17.483 ms 17.603 ms 17.789 ms]
+                        change: [-1.0762% +0.5674% +2.2066%] (p = 0.50 > 0.05)
+                        No change in performance detected.
+Benchmarking sleeping_pipeline/pyramid_awake_sleeping_on
+Benchmarking sleeping_pipeline/pyramid_awake_sleeping_on: Warming up for 3.0000 s
+
+Completed 255 iterations in 4368993100 nanoseconds, estimated execution time is 17133306.274509802 ns
+Benchmarking sleeping_pipeline/pyramid_awake_sleeping_on: Collecting 20 samples in estimated 7.1960 s (420 iterations)
+Benchmarking sleeping_pipeline/pyramid_awake_sleeping_on: Analyzing
+Criterion.rs DEBUG: Bootstrapping the absolute statistics. took 12.901 ms
+Criterion.rs DEBUG: Bootstrapped linear regression took 2.4685 ms
+Criterion.rs DEBUG: Bootstrapping the T distribution took 3.2552 ms
+Criterion.rs DEBUG: Bootstrapping the relative statistics took 7.0633 ms
+sleeping_pipeline/pyramid_awake_sleeping_on
+                        time:   [16.955 ms 18.463 ms 20.251 ms]
+                        change: [+1.4759% +5.2367% +10.539%] (p = 0.02 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking sleeping_pipeline/pyramid_frozen_sleeping_on
+Benchmarking sleeping_pipeline/pyramid_frozen_sleeping_on: Warming up for 3.0000 s
+
+Completed 511 iterations in 3272416200 nanoseconds, estimated execution time is 6403945.596868885 ns
+Benchmarking sleeping_pipeline/pyramid_frozen_sleeping_on: Collecting 20 samples in estimated 5.3793 s (840 iterations)
+Benchmarking sleeping_pipeline/pyramid_frozen_sleeping_on: Analyzing
+Criterion.rs DEBUG: Bootstrapping the absolute statistics. took 12.283 ms
+Criterion.rs DEBUG: Bootstrapped linear regression took 1.5999 ms
+Criterion.rs DEBUG: Bootstrapping the T distribution took 2.5275 ms
+Criterion.rs DEBUG: Bootstrapping the relative statistics took 6.5130 ms
+sleeping_pipeline/pyramid_frozen_sleeping_on
+                        time:   [5.6069 ms 5.6440 ms 5.6990 ms]
+                        change: [+0.9402% +3.2374% +5.9639%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

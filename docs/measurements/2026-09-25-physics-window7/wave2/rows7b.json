@@ -1,0 +1,750 @@
+{
+ "protocol": {
+  "k_per_cell": 6,
+  "passes": 2,
+  "rounds_per_pass": 3,
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "rerun_contaminated_once_at_end_of_pass": true,
+  "void_pass_on_build_process": true,
+  "placement": "P-none",
+  "idle_rule": "tools/wait_idle7.ps1 (window 7's, verbatim): 0 build procs AND 0 procs under D:/wt/_targets or D:/wt/mq-* on 3 consecutive 60-s polls, 10-s cpu < 5 %; up to 30 polls per wait; a timeout STOPS the window",
+  "hard_stop_local": "11:45",
+  "stop_flag": "win7b/STOP",
+  "q3_k": 3,
+  "canary": {
+   "R_gtw": 0.07542383708085926,
+   "rise_over_injected": 1.0608500059192614
+  }
+ },
+ "binaries": {
+  "trk": {
+   "exe": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7/bin/runner_93b2615b.exe",
+   "commit": "93b2615bcea4873e2d3af6b560c6e7997740f67f",
+   "kind": "runner",
+   "note": "window 7's trunk runner, run in place (same exe path as blocks A and B)",
+   "sha256_earlier_window": "24d52719c5f86635312bb69d9f04af09565ce397432ddf5b7442482381534bb4"
+  },
+  "j56": {
+   "exe": "D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe",
+   "commit": "Jolt v5.6.0 (P0 build 918fd2b7)",
+   "kind": "jolt",
+   "note": "P0's Distribution build, run in place as windows 3 and 7",
+   "sha256_earlier_window": "918fd2b70ecc634cc0574cb676c56a3c929a46a51173cf9aa76fdd628e2ef0ad"
+  },
+  "par": {
+   "exe": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win6/bin/runner_6dd1f916.exe",
+   "commit": "6dd1f916d5399b7bbe80429bdfde4e5c0bd63848",
+   "kind": "runner",
+   "note": "window 6's C3b parent (RowWalk), run in place (same exe path as window 6)",
+   "sha256_earlier_window": "228f35140b1c207d04764f76df5cb1867de39c9b89c5e0db56fce60d55672c33"
+  },
+  "tip": {
+   "exe": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win6/bin/runner_983480a9.exe",
+   "commit": "983480a9a1aaf1d28e9c17b08c0c06821176cacf",
+   "kind": "runner",
+   "note": "window 6's C3b tip (LeafList), run in place (same exe path as window 6)",
+   "sha256_earlier_window": "f93e5fec1c1ec176bd86c1db21b4020ff2dbbda7bd7e0d12a0f8040c29821ebd"
+  },
+  "c4": {
+   "exe": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7/bin/runner_989ca0f0.exe",
+   "commit": "989ca0f0575e054b89bb9c288ad95569ce493734",
+   "kind": "runner",
+   "note": "window 7's L9 C4 runner, run in place",
+   "sha256_earlier_window": "c4a75f82bac71fc69f4a75f2cc9f7dfa2655fbef11b1ab46fcbdcafd54a01b57"
+  },
+  "g4r": {
+   "exe": "bin/bpbench_g4ref_93b2615b.exe",
+   "commit": "93b2615bcea4873e2d3af6b560c6e7997740f67f + G4_SIZES",
+   "kind": "criterion",
+   "note": "INSTRUMENT: benches/broadphase.rs of 93b2615b with only G4_SIZES changed (variant/g4ref.diff), bench profile; never committed"
+  }
+ },
+ "blocks": [
+  {
+   "name": "Q1C",
+   "item": "Q1",
+   "priority": 1,
+   "warmup": [
+    "H-trk-tree",
+    "trk",
+    8
+   ]
+  },
+  {
+   "name": "Q2C",
+   "item": "Q2",
+   "priority": 2,
+   "warmup": [
+    "C3b-TA-armed",
+    "tip",
+    1
+   ]
+  },
+  {
+   "name": "Q3",
+   "item": "Q3",
+   "priority": 3,
+   "warmup": null,
+   "passes": 1,
+   "rounds": 3
+  },
+  {
+   "name": "Q4",
+   "item": "Q4",
+   "priority": 4,
+   "warmup": [
+    "L9-JA-on",
+    "c4",
+    1
+   ]
+  },
+  {
+   "name": "Q2D",
+   "item": "Q2",
+   "priority": 2,
+   "warmup": [
+    "C3b-TA-armed",
+    "tip",
+    1
+   ]
+  },
+  {
+   "name": "Q1D",
+   "item": "Q1",
+   "priority": 1,
+   "warmup": [
+    "H-trk-tree",
+    "trk",
+    8
+   ]
+  }
+ ],
+ "rows": [
+  {
+   "id": "H-trk-tree",
+   "item": "Q1",
+   "blocks": [
+    "Q1C",
+    "Q1D"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "trk"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "broadphase": "Tree",
+   "cwd_len": {
+    "4": 163,
+    "8": 163,
+    "16": 164
+   },
+   "cmdline_ref": {
+    "4": 637,
+    "8": 637,
+    "16": 641
+   },
+   "cwd_len_source": "window 7's P1A/P1B original processes (win7/raw/runs.jsonl)",
+   "note": "window 7 P1's row, verbatim; blocks C (first) and D (last) join window 7's A and B",
+   "pose_ref": "J500",
+   "pose_path": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7/gate/fixtures/J500.pose"
+  },
+  {
+   "id": "H-jolt56",
+   "item": "Q1",
+   "blocks": [
+    "Q1C",
+    "Q1D"
+   ],
+   "kind": "jolt",
+   "binaries": [
+    "j56"
+   ],
+   "args": [
+    "-s=Pyramid",
+    "-q=Discrete",
+    "-f"
+   ],
+   "workers": [
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "broadphase": "AllPairs",
+   "cwd_len": {
+    "4": 161,
+    "8": 161,
+    "16": 162
+   },
+   "cmdline_ref": {
+    "4": 38,
+    "8": 38,
+    "16": 39
+   },
+   "cwd_len_source": "window 7's P1A/P1B original processes (win7/raw/runs.jsonl)",
+   "note": "window 7 P1's row, verbatim; blocks C (first) and D (last) join window 7's A and B",
+   "pose_ref": null,
+   "jolt_hash": "0xb8522b4e3fc62cfe"
+  },
+  {
+   "id": "H-trk-ap",
+   "item": "Q1",
+   "blocks": [
+    "Q1C",
+    "Q1D"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "trk"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "allpairs"
+   ],
+   "workers": [
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "broadphase": "AllPairs",
+   "cwd_len": {
+    "4": 161,
+    "8": 161,
+    "16": 162
+   },
+   "cmdline_ref": {
+    "4": 635,
+    "8": 635,
+    "16": 639
+   },
+   "cwd_len_source": "window 7's P1A/P1B original processes (win7/raw/runs.jsonl)",
+   "note": "window 7 P1's row, verbatim; blocks C (first) and D (last) join window 7's A and B",
+   "pose_ref": "J500",
+   "pose_path": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7/gate/fixtures/J500.pose"
+  },
+  {
+   "id": "C3b-TA-armed",
+   "item": "Q2",
+   "blocks": [
+    "Q2C",
+    "Q2D"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "par",
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "J500",
+   "pose_path": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win6/gate/fixtures/J500.pose",
+   "broadphase": "Tree",
+   "note": "window 6's C3b-TA-armed = T-A-tree-armed (c3b/design.md:222), plain layout = window 6's P3 block",
+   "cwd_len": {
+    "1": 163,
+    "8": 163
+   },
+   "cmdline_ref": {
+    "1": 648,
+    "8": 648
+   },
+   "cwd_len_source": "window 6's P3 layout (C3b-TA-armed: cwd 163, 648 chars)"
+  },
+  {
+   "id": "C3b-TA-pad06",
+   "item": "Q2",
+   "blocks": [
+    "Q2C",
+    "Q2D"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "par",
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "J500",
+   "pose_path": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win6/gate/fixtures/J500.pose",
+   "broadphase": "Tree",
+   "note": "the PADDED-PATH VARIANT: the same process with every path argument 3 characters longer (+6 on the command line), = window 6's P5g launch context, where t_q(W1) read 0.2354 against P3's 0.2102",
+   "cwd_len": {
+    "1": 166
+   },
+   "cmdline_ref": {
+    "1": 654
+   },
+   "cwd_len_source": "window 6's P5g layout (G5-TA-tree-a: cwd 166, 654 chars)"
+  },
+  {
+   "id": "C3b-TD-armed",
+   "item": "Q2",
+   "blocks": [
+    "Q2C",
+    "Q2D"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "par",
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "J500",
+   "pose_path": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win6/gate/fixtures/J500.pose",
+   "broadphase": "Tree",
+   "note": "the DEFAULT row armed: the C2 rule's letter reads 't_q(J, W=1) >= 0.235 ms on the default row' (c3b/design.md:231, :372); window 6 read t_q off the cfg-A armed row"
+  },
+  {
+   "id": "G4-refine",
+   "item": "Q3",
+   "blocks": [
+    "Q3"
+   ],
+   "kind": "criterion",
+   "binaries": [
+    "g4r"
+   ],
+   "args": [
+    "--bench",
+    "--noplot",
+    "^bp_g4_(uniform|disparity)/((all_pairs|tree)/(64|96|112|128|136|144|152|160|168|176|192|256)|tree_rowwalk/(64|128|256))$"
+   ],
+   "workers": [
+    1
+   ],
+   "expect": [
+    "bp_g4_uniform/all_pairs/64",
+    "bp_g4_uniform/tree/64",
+    "bp_g4_uniform/all_pairs/96",
+    "bp_g4_uniform/tree/96",
+    "bp_g4_uniform/all_pairs/112",
+    "bp_g4_uniform/tree/112",
+    "bp_g4_uniform/all_pairs/128",
+    "bp_g4_uniform/tree/128",
+    "bp_g4_uniform/all_pairs/136",
+    "bp_g4_uniform/tree/136",
+    "bp_g4_uniform/all_pairs/144",
+    "bp_g4_uniform/tree/144",
+    "bp_g4_uniform/all_pairs/152",
+    "bp_g4_uniform/tree/152",
+    "bp_g4_uniform/all_pairs/160",
+    "bp_g4_uniform/tree/160",
+    "bp_g4_uniform/all_pairs/168",
+    "bp_g4_uniform/tree/168",
+    "bp_g4_uniform/all_pairs/176",
+    "bp_g4_uniform/tree/176",
+    "bp_g4_uniform/all_pairs/192",
+    "bp_g4_uniform/tree/192",
+    "bp_g4_uniform/all_pairs/256",
+    "bp_g4_uniform/tree/256",
+    "bp_g4_disparity/all_pairs/64",
+    "bp_g4_disparity/tree/64",
+    "bp_g4_disparity/all_pairs/96",
+    "bp_g4_disparity/tree/96",
+    "bp_g4_disparity/all_pairs/112",
+    "bp_g4_disparity/tree/112",
+    "bp_g4_disparity/all_pairs/128",
+    "bp_g4_disparity/tree/128",
+    "bp_g4_disparity/all_pairs/136",
+    "bp_g4_disparity/tree/136",
+    "bp_g4_disparity/all_pairs/144",
+    "bp_g4_disparity/tree/144",
+    "bp_g4_disparity/all_pairs/152",
+    "bp_g4_disparity/tree/152",
+    "bp_g4_disparity/all_pairs/160",
+    "bp_g4_disparity/tree/160",
+    "bp_g4_disparity/all_pairs/168",
+    "bp_g4_disparity/tree/168",
+    "bp_g4_disparity/all_pairs/176",
+    "bp_g4_disparity/tree/176",
+    "bp_g4_disparity/all_pairs/192",
+    "bp_g4_disparity/tree/192",
+    "bp_g4_disparity/all_pairs/256",
+    "bp_g4_disparity/tree/256",
+    "bp_g4_uniform/tree_rowwalk/64",
+    "bp_g4_uniform/tree_rowwalk/128",
+    "bp_g4_uniform/tree_rowwalk/256",
+    "bp_g4_disparity/tree_rowwalk/64",
+    "bp_g4_disparity/tree_rowwalk/128",
+    "bp_g4_disparity/tree_rowwalk/256"
+   ],
+   "test_filter": "^bp_g4_uniform/tree/64$",
+   "test_expect": [
+    "bp_g4_uniform/tree/64"
+   ],
+   "note": "the recipe's refinement run (g4_g5_recipe.md:131-132; window 4 analysis 6.1/6.2): all_pairs vs tree on the uniform and disparity families at 12 sizes between 64 and 256, K = 3; plus the same-binary tree_rowwalk arm (C1's kernel) at window 4's grid points 64/128/256 as the bridge"
+  },
+  {
+   "id": "L9-JA-on",
+   "item": "Q4",
+   "blocks": [
+    "Q4"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "c4"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JAon500c4",
+   "pose_path": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7/gate/fixtures/JAon500c4.pose",
+   "broadphase": "AllPairs",
+   "note": "G-TW's own 'on' row (window 7 P2), unarmed: the canary's reference"
+  },
+  {
+   "id": "L9-JC-r050",
+   "item": "Q4",
+   "blocks": [
+    "Q4"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "c4"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JAon500c4",
+   "pose_path": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7/gate/fixtures/JAon500c4.pose",
+   "broadphase": "AllPairs",
+   "canary_of": "L9-JA-on",
+   "canary_frac": 0.036,
+   "canary_k": 0.5,
+   "note": "canary rung 0.5 x R: frac 0.036 = 0.5 x 0.07542 / 1.0609; expected step rise 3.77 % of the reference"
+  },
+  {
+   "id": "L9-JC-r100",
+   "item": "Q4",
+   "blocks": [
+    "Q4"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "c4"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JAon500c4",
+   "pose_path": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7/gate/fixtures/JAon500c4.pose",
+   "broadphase": "AllPairs",
+   "canary_of": "L9-JA-on",
+   "canary_frac": 0.071,
+   "canary_k": 1.0,
+   "note": "canary rung 1.0 x R: frac 0.071 = 1.0 x 0.07542 / 1.0609; expected step rise 7.54 % of the reference"
+  },
+  {
+   "id": "L9-JC-r150",
+   "item": "Q4",
+   "blocks": [
+    "Q4"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "c4"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JAon500c4",
+   "pose_path": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7/gate/fixtures/JAon500c4.pose",
+   "broadphase": "AllPairs",
+   "canary_of": "L9-JA-on",
+   "canary_frac": 0.107,
+   "canary_k": 1.5,
+   "note": "canary rung 1.5 x R: frac 0.107 = 1.5 x 0.07542 / 1.0609; expected step rise 11.31 % of the reference"
+  },
+  {
+   "id": "L9-JC-r200",
+   "item": "Q4",
+   "blocks": [
+    "Q4"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "c4"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JAon500c4",
+   "pose_path": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7/gate/fixtures/JAon500c4.pose",
+   "broadphase": "AllPairs",
+   "canary_of": "L9-JA-on",
+   "canary_frac": 0.142,
+   "canary_k": 2.0,
+   "note": "canary rung 2.0 x R: frac 0.142 = 2.0 x 0.07542 / 1.0609; expected step rise 15.08 % of the reference"
+  }
+ ]
+}

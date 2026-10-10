@@ -129,6 +129,15 @@ struct InputRing {
     len: usize,
     /// Count of drop-oldest evictions since the last drain (debug observability).
     dropped: usize,
+    /// Set by `window_proc`'s `WM_DESTROY` arm (through the `GWLP_USERDATA`
+    /// pointer, BEFORE the slot is cleared): the HWND is gone. [`Window::pump_events`]
+    /// reports it as the PER-WINDOW close signal (robust even when the
+    /// thread-global `WM_QUIT` is consumed by another window's lifetime on this
+    /// thread), and [`Window`]'s `Drop` reads it to SKIP its own `DestroyWindow`
+    /// — the dead HWND value may already have been recycled by the OS for an
+    /// unrelated window. Same-thread only (the proc runs inside
+    /// `DispatchMessageW` on the pump thread), so a plain `bool` needs no atomics.
+    closed: bool,
 }
 
 #[cfg(windows)]
@@ -146,6 +155,7 @@ impl InputRing {
             tail: 0,
             len: 0,
             dropped: 0,
+            closed: false,
         }
     }
 
@@ -249,10 +259,19 @@ impl Window {
             return Err(WindowError::NoModuleHandle);
         }
 
-        // A process-unique class name (UTF-16, NUL-terminated). The pointer is
-        // taken below and must stay valid for the `RegisterClassExW` call and for
-        // `UnregisterClassW` in `Drop`, so the `Vec` is owned by `self`.
-        let class_name = to_wide("boyko_rhi_vulkan_window_class");
+        // A genuinely unique class name PER WINDOW (a monotone counter suffix,
+        // UTF-16, NUL-terminated). The former FIXED name lived in the
+        // process-GLOBAL class table: a single leaked teardown (`UnregisterClassW`
+        // failing while a window still lived) poisoned EVERY later `open` in the
+        // process with `ClassRegistrationFailed`, and two simultaneous windows
+        // were impossible. A per-window name removes both failure modes with no
+        // fallback logic. Cold path — the one-time `format!` at window creation
+        // is not hot-loop code. The pointer is taken below and must stay valid
+        // for `RegisterClassExW` and for `UnregisterClassW` in `Drop`, so the
+        // `Vec` is owned by `self`.
+        static CLASS_COUNTER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let class_id = CLASS_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let class_name = to_wide(&format!("boyko_rhi_vulkan_window_class_{class_id}"));
         let title_wide = to_wide(title);
 
         // SAFETY: `LoadCursorW(null, IDC_ARROW)` loads the shared arrow cursor; a
@@ -320,11 +339,23 @@ impl Window {
             return Err(WindowError::WindowCreationFailed);
         }
 
-        // SAFETY: `hwnd` is the live window just created; `ShowWindow` +
-        // `UpdateWindow` are idempotent display calls.
-        unsafe {
-            os::ShowWindow(hwnd, os::SW_SHOW);
-            os::UpdateWindow(hwnd);
+        // Automated-run knob: `BOYKO_WIN_HIDDEN` (any value) keeps the window
+        // HIDDEN — never shown, never activated — so orchestrated windowed test
+        // sweeps do not flash or park windows on the desktop while they grind
+        // (e.g. a validation-ON dump test can hold its window open for minutes).
+        // A hidden (NON-minimized) window keeps its non-zero client extent, so
+        // Win32 surface + swapchain creation, rendering, present, and the
+        // host-readback dump all work unchanged — only desktop visibility
+        // differs. Default (unset): show + paint, exactly as before. The knob is
+        // read HERE (the single window constructor) so every windowed test and
+        // the app runner inherit it uniformly with zero per-call-site churn.
+        if std::env::var_os("BOYKO_WIN_HIDDEN").is_none() {
+            // SAFETY: `hwnd` is the live window just created; `ShowWindow` +
+            // `UpdateWindow` are idempotent display calls.
+            unsafe {
+                os::ShowWindow(hwnd, os::SW_SHOW);
+                os::UpdateWindow(hwnd);
+            }
         }
 
         // I6: allocate the captured-input ring on the heap (stable address) and
@@ -441,8 +472,15 @@ impl Window {
                 os::PeekMessageW(&mut msg, core::ptr::null_mut(), 0, 0, os::PM_REMOVE)
             };
             if got == 0 {
-                // Queue drained; the window is still alive.
-                return true;
+                // Queue drained. The ring's `closed` flag (set by the proc's
+                // `WM_DESTROY` arm) is the PER-WINDOW close signal — unlike the
+                // thread-global `WM_QUIT` below, it cannot be missed when a
+                // message for another window (or a prior window's stale quit)
+                // shuffles the queue.
+                // SAFETY: `input_ring` is the live box `open` installed (freed
+                // only in `Drop`); a shared same-thread read — the proc's `&mut`
+                // borrows ended with the dispatch calls above.
+                return !unsafe { (*self.input_ring).closed };
             }
             if msg.message == os::WM_QUIT {
                 return false;
@@ -492,22 +530,63 @@ impl Window {
 impl Drop for Window {
     fn drop(&mut self) {
         use crate::ffi::os;
-        // SAFETY: `hwnd` is the live window created in `open`, destroyed exactly
-        // once here; then the class (registered against `hinstance` with the
-        // owned `class_name`) is unregistered exactly once, in reverse order. The
-        // Vulkan surface that borrowed this `hwnd` is destroyed by the caller
-        // BEFORE the window is dropped (teardown order is the caller's contract).
-        // `DestroyWindow` synchronously dispatches `WM_DESTROY` to `window_proc`,
-        // which clears the `GWLP_USERDATA` slot, so no later message can
-        // dereference the ring pointer once `DestroyWindow` returns.
+        // Was the HWND already destroyed by the user-close path? `window_proc`'s
+        // `WM_CLOSE` arm destroys the window immediately (its `WM_DESTROY` set the
+        // ring's `closed` flag), so calling `DestroyWindow` again HERE would hand
+        // the OS a DEAD handle value it may have RECYCLED for an unrelated window
+        // — skip it. The normal path (`closed == false`) destroys exactly once.
+        // SAFETY: `input_ring` is the live box `open` installed (freed only below);
+        // a shared same-thread read with no `&mut` alive.
+        let already_destroyed = unsafe { (*self.input_ring).closed };
+        // SAFETY: on the normal path `hwnd` is the live window created in `open`,
+        // destroyed exactly once here (`DestroyWindow` synchronously dispatches
+        // `WM_DESTROY` to `window_proc`, which clears the `GWLP_USERDATA` slot, so
+        // no later message can dereference the ring pointer once it returns); on
+        // the user-close path the destroy is skipped (see above). The per-window
+        // class (registered against `hinstance` with the owned unique
+        // `class_name`) is unregistered exactly once, in reverse order. The Vulkan
+        // surface that borrowed this `hwnd` is destroyed by the caller BEFORE the
+        // window is dropped (teardown order is the caller's contract).
         unsafe {
-            os::DestroyWindow(self.hwnd);
+            if !already_destroyed {
+                os::DestroyWindow(self.hwnd);
+            }
             os::UnregisterClassW(self.class_name.as_ptr(), self.hinstance);
+        }
+        // Drain any stale `WM_QUIT` this window's destruction posted:
+        // `PostQuitMessage` targets the THREAD queue, not the window, so a
+        // leftover quit would spuriously close the FIRST pump of any later
+        // window opened on this same thread (the open→drop→open recreate
+        // pattern). Filtering `PeekMessageW` to exactly `WM_QUIT` removes only
+        // the quits.
+        // SAFETY: `&mut msg` is a valid out-pointer for the `#[repr(C)]` `MSG`;
+        // a null `hWnd` with the `WM_QUIT..=WM_QUIT` filter + `PM_REMOVE` pops
+        // only pending quit messages from this thread's queue.
+        unsafe {
+            let mut msg = os::MSG {
+                hwnd: core::ptr::null_mut(),
+                message: 0,
+                w_param: 0,
+                l_param: 0,
+                time: 0,
+                pt: os::POINT::default(),
+                l_private: 0,
+            };
+            while os::PeekMessageW(
+                &mut msg,
+                core::ptr::null_mut(),
+                os::WM_QUIT,
+                os::WM_QUIT,
+                os::PM_REMOVE,
+            ) != 0
+            {}
         }
         // SAFETY: `self.input_ring` was produced by `Box::into_raw` in `open` and
         // is owned solely by this `Window`; it has not been freed (only this
-        // `Drop` frees it). After `DestroyWindow` above, the OS has finished
-        // dispatching messages to `window_proc`, so no callback holds an aliasing
+        // `Drop` frees it). On BOTH paths `WM_DESTROY` has already run (the
+        // user-close path ran it when the proc destroyed the window; the normal
+        // path ran it synchronously inside `DestroyWindow` above), so the
+        // `GWLP_USERDATA` slot is cleared and no callback holds an aliasing
         // `&mut` to the ring. Reclaiming the box here drops it exactly once.
         unsafe {
             drop(Box::from_raw(self.input_ring));
@@ -544,6 +623,19 @@ unsafe extern "system" fn window_proc(
             0
         }
         os::WM_DESTROY => {
+            // Mark the ring CLOSED first: `pump_events` reads it as the
+            // per-window close signal, and `Window::drop` reads it to skip
+            // destroying an already-dead (possibly OS-recycled) HWND — the
+            // user-clicked-X path destroys the window HERE, long before `Drop`.
+            // SAFETY: the slot holds either 0 or the live ring `open` installed
+            // (freed only by `Window::drop`, which runs strictly after this
+            // dispatch returns); the `&mut`-free raw write is same-thread,
+            // inside the dispatch, overlapping no other borrow.
+            let ptr = unsafe { os::GetWindowLongPtrW(hwnd, os::GWLP_USERDATA) } as *mut InputRing;
+            if !ptr.is_null() {
+                // SAFETY: non-null ⇒ the live, exclusively-owned ring (see above).
+                unsafe { (*ptr).closed = true };
+            }
             // Clear the ring pointer BEFORE the window dies so no late-dispatched
             // message can dereference it (the box is freed by `Window::drop`,
             // which runs after `DestroyWindow` returns).
@@ -640,18 +732,27 @@ unsafe fn read_raw_mouse_delta(hrawinput: *mut c_void) -> Option<(i32, i32)> {
     if n == u32::MAX || n == 0 {
         return None;
     }
-    // SAFETY: `GetRawInputData` returned a non-error byte count, so it fully
-    // initialized the `RAWINPUTHEADER` + the device-specific arm. We read the
-    // header (always present) and, for a mouse, its relative-motion fields.
-    let raw = unsafe { raw.assume_init() };
-    if raw.header.dwType != os::RIM_TYPEMOUSE {
+    // 2026-07 audit: this used to `raw.assume_init()` the WHOLE `RAWINPUT` by value.
+    // `GetRawInputData` writes only `n` bytes — the header plus the device-specific arm —
+    // and for a mouse that arm is SMALLER than the union (whose size is dictated by the
+    // larger HID/keyboard arms), so the tail stays uninitialized. `assume_init()` on the
+    // full struct asserts EVERY byte is initialized, which the OS never promised. We instead
+    // project to each field through the `MaybeUninit` pointer and read only the bytes that
+    // were actually written.
+    let base = raw.as_ptr();
+    // SAFETY: `GetRawInputData` returned a non-error count, so the `RAWINPUTHEADER` (the
+    // first member, always present regardless of device type) is fully initialized. The
+    // projection stays inside the single `RAWINPUT` allocation; `read()` copies only the
+    // header's bytes, never the still-uninitialized union tail.
+    let header = unsafe { core::ptr::addr_of!((*base).header).read() };
+    if header.dwType != os::RIM_TYPEMOUSE {
         return None;
     }
-    // SAFETY: `RAWINPUT::data` is a C union (windows-sys `RAWINPUT_0`); the mouse
-    // arm is the active member because `dwType == RIM_TYPEMOUSE` was just checked.
-    // `GetRawInputData` initialized that arm, so reading `lLastX`/`lLastY` is a
-    // read of valid, initialized bytes of the correct union variant.
-    let mouse = unsafe { raw.data.mouse };
+    // SAFETY: `dwType == RIM_TYPEMOUSE` proves the OS wrote the `RAWMOUSE` arm of the
+    // `RAWINPUT_0` union, so those bytes are initialized. Projecting to `data.mouse` and
+    // `read()`-ing it copies exactly that arm — never asserting init for the other, larger
+    // union members the driver did not touch.
+    let mouse = unsafe { core::ptr::addr_of!((*base).data.mouse).read() };
     Some((mouse.lLastX, mouse.lLastY))
 }
 

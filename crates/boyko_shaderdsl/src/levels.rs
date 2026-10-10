@@ -48,7 +48,7 @@
 //!   through the closures). The eval sweep reproduces the committed `select_level` CONTROL FLOW —
 //!   the per-level containment scan, the boundary exclusion (`p == hi` excluded by `<`), the
 //!   `L >= brick_levels` skip — to-bits against a host mirror (an `i32`, so EXACT eq).
-//! - `<EmitCf>` — the HLSL recorder; the printer ([`crate::emit::emit_hlsl_select_level`]) walks
+//! - `<EmitCf>` — the HLSL recorder; the printer (`crate::emit::emit_hlsl_select_level`) walks
 //!   the STMT IR into the scan body (byte-identical to the committed `.comp.spv`, proven by the
 //!   cmp-`.spv`).
 //!

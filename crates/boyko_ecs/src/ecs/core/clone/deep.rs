@@ -252,7 +252,24 @@ pub(crate) fn remap_relink_generic_relations(
         //   id slice into the owned `ids` snapshot and is dropped before any `&mut`.
         let arch: &crate::ecs::core::archetype::archetype::Archetype =
             unsafe { &*inland.archetype_ptr() };
-        ids.extend_from_slice(arch.component_ids());
+        // KE14 D1: the declaration record, and it is the WRONG oracle here —
+        // recorded rather than repaired, see KE18.
+        //
+        // `get_component_raw_mut` answers `None` for a BITSET id (no pool, no
+        // dense store), so a poolless bitset id costs a miss and never a pool
+        // lookup. It does NOT answer `None` for a DENSE id: `component_api.rs`'s
+        // dense branch routes to `dense_registry.store(id)` + `slot_of(entity)`
+        // and returns `Some` for a member. So an entity-bearing dense component
+        // is remapped here IFF the clone's archetype declaration record happens
+        // to name the dense id — which is exactly the mint race
+        // `Archetype::all_component_ids` is documented never to be a membership
+        // oracle for. `materialize_dense_memberships` gives the clone the copy
+        // using the authoritative oracle (`dense_ids()` + `slot_of`), so on the
+        // losing side of the race the clone keeps a foreign key pointing at the
+        // SOURCE-side target. The fix is to walk dense memberships by that same
+        // oracle; it is a behaviour change on the clone path and is scoped as
+        // KE18 rather than folded into KE14's rung.
+        ids.extend_from_slice(arch.all_component_ids());
     }
 
     for id in ids {

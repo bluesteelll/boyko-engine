@@ -1,0 +1,11 @@
+error: duplicate state `Idle` — sibling states need distinct names
+  --> tests/ui/machine_duplicate_sibling_state.rs:10:15
+   |
+10 |         state Idle {}
+   |               ^^^^
+
+error: the first state flattening to this name is here
+ --> tests/ui/machine_duplicate_sibling_state.rs:9:15
+  |
+9 |         state Idle {}
+  |               ^^^^

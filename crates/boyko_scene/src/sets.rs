@@ -76,6 +76,53 @@ pub enum CameraSet {
     Resolve,
 }
 
+/// The three named phases of the `Main`-schedule draw-bit seam: the system that WRITES the
+/// [`RenderEnabled`](crate::render_caps::RenderEnabled) bit from authoring intent, the
+/// system that READS it and then WRITES it again (the asset-ref validation, which disables
+/// a stale mesh row), and every system that only READS it.
+///
+/// [`visibility_sync`](crate::visibility_sync::visibility_sync) sets the bit through a
+/// deferred command, so a reader sees this frame's bit only if it runs after that system's
+/// apply window. The validation clears it the same way, so a reader sees this frame's
+/// stale-row disable only if it also runs after the validation's apply window. The readers
+/// (the instance packs, the mesh and shadow-caster gathers) and the validation live in
+/// `boyko_render` and are registered by other plugins, so their `SystemKey`s are not
+/// co-visible with this crate's writer: the edges are pinned **by name**, set-to-set, like
+/// [`CameraSet`].
+///
+/// * [`visibility_sync`](crate::visibility_sync::visibility_sync) joins
+///   [`Sync`](VisibilitySet::Sync) (in [`CameraPlugin`](crate::camera_plugin::CameraPlugin)
+///   and [`TransformPlugin`](crate::plugin::TransformPlugin));
+/// * `validate_asset_refs` (`boyko_render`'s `AssetRefcountPlugin`) joins
+///   [`Validate`](VisibilitySet::Validate) — it walks the `Enabled<RenderEnabled>` rows AND
+///   disables the stale ones, so it is both a reader of `Sync` and a writer for `Read`;
+/// * every system that only filters on `Enabled<RenderEnabled>` joins
+///   [`Read`](VisibilitySet::Read);
+/// * the composing host configures `Validate.after(Sync)`, `Read.after(Validate)` and
+///   `Read.after(Sync)` (`boyko_app::EnginePlugins` does). A reader declares each of its
+///   writers; `Read.after(Sync)` is not left to the transitive path, which vanishes the day a
+///   membership changes.
+///
+/// A system may join only ONE of the three: the phases are ordered against each other, and a
+/// member shared by two ordered sets is rejected at build (`boyko-B9004`).
+///
+/// Unordered, each pair is decided by the executor's wave packing, which any unrelated edge
+/// can reshuffle: in the shipped host the mesh gather ran BEFORE `visibility_sync` and drew
+/// zero meshes on frame 0, which temporal AA then carried into its history.
+#[derive(boyko_macros::SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VisibilitySet {
+    /// The WRITER of the `RenderEnabled` bit from authoring intent: `visibility_sync`.
+    Sync,
+    /// The asset-ref validation, `validate_asset_refs`: reads the bit `Sync` set and clears it on
+    /// a stale mesh row, both through deferred commands. Register with
+    /// `.in_set(VisibilitySet::Validate)`; wired `.after(Sync)`.
+    Validate,
+    /// Every READER of the `RenderEnabled` bit — a system whose query filters on
+    /// `Enabled<RenderEnabled>` and writes it back nowhere. Register with
+    /// `.in_set(VisibilitySet::Read)`; wired `.after(Validate)` and `.after(Sync)`.
+    Read,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

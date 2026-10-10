@@ -18,7 +18,7 @@
 //!
 //! ```powershell
 //! $env:MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-ecs --test miri_d4_typed_write
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_d4_typed_write
 //! ```
 //!
 //! `-Zmiri-ignore-leaks` is set because the B4 partial-panic arm leaks the

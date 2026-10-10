@@ -48,7 +48,7 @@ impl EcsMaster {
     /// Gets the archetype ID containing the specified entity.
     ///
     /// Derives the id from the fast inland's slab pointer via
-    /// [`Archetype::id`] — no SparseMap traversal.
+    /// `Archetype::id` — no SparseMap traversal.
     #[inline]
     pub fn get_entity_archetype_id(&self, entity: Entity) -> Option<ArchetypeId> {
         let inland = self.entity_master.entities_inland.get(entity.id().0)?;

@@ -1,0 +1,65 @@
+== W16 S4-AB processes [0,500): wall ms, median step ms, frac > 1.2x median, span ms, witness, receipts
+  S4-JT parent p0 r0 original: wall 2.2203 med 2.1836 frac 0.014 span - wit 0.18 rb 0.43 ra 2.67
+  S4-JT parent p0 r1 original: wall 2.2199 med 2.1807 frac 0.022 span - wit 0.27 rb 1.20 ra 0.38
+  S4-JT parent p0 r2 original: wall 2.2147 med 2.1755 frac 0.038 span - wit 0.35 rb 1.31 ra 0.62
+  S4-JT parent p1 r0 original: wall 2.2478 med 2.1854 frac 0.046 span - wit 0.95 rb 0.70 ra 0.28
+  S4-JT parent p1 r1 original: wall 2.2288 med 2.1795 frac 0.030 span - wit 0.53 rb 0.76 ra 0.21
+  S4-JT parent p1 r2 original: wall 2.2104 med 2.1756 frac 0.018 span - wit 0.44 rb 0.45 ra 0.55
+  S4-JT parent p2 r0 original: wall 2.2146 med 2.1733 frac 0.030 span - wit 0.09 rb 0.30 ra 4.08
+  S4-JT parent p2 r1 original: wall 2.4401 med 2.3947 frac 0.034 span - wit 0.88 rb 0.91 ra 0.41
+  S4-JT parent p2 r2 original: wall 2.2669 med 2.2151 frac 0.028 span - wit 0.69 rb 0.91 ra 0.50
+  S4-JT tip p0 r0 original: wall 2.0357 med 2.0026 frac 0.020 span - wit 0.19 rb 1.09 ra 0.43
+  S4-JT tip p0 r1 original: wall 2.0533 med 2.0166 frac 0.024 span - wit 0.10 rb 0.53 ra 1.20
+  S4-JT tip p0 r2 original: wall 2.0502 med 2.0086 frac 0.024 span - wit 0.19 rb 0.30 ra 1.31
+  S4-JT tip p1 r0 original: wall 2.0466 med 2.0120 frac 0.022 span - wit 0.19 rb 0.28 ra 1.74
+  S4-JT tip p1 r1 original: wall 2.0744 med 2.0253 frac 0.036 span - wit 0.47 rb 0.21 ra 0.52
+  S4-JT tip p1 r2 original: wall 2.0410 med 2.0067 frac 0.030 span - wit 0.10 rb 0.55 ra 0.27
+  S4-JT tip p2 r0 original: wall 2.0433 med 2.0103 frac 0.024 span - wit 0.57 rb 1.14 ra 0.30
+  S4-JT tip p2 r1 original: wall 2.0595 med 2.0274 frac 0.028 span - wit 0.66 rb 1.11 ra 0.91
+  S4-JT tip p2 r2 original: wall 2.0587 med 2.0168 frac 0.032 span - wit 0.38 rb 0.76 ra 0.91
+  S4-JT-a parent p0 r0 original: wall 2.3167 med 2.2771 frac 0.020 span 0.3087 wit 0.48 rb 0.53 ra 1.09
+  S4-JT-a parent p0 r1 original: wall 2.3160 med 2.2732 frac 0.024 span 0.3067 wit 0.16 rb 0.41 ra 0.53
+  S4-JT-a parent p0 r2 original: wall 2.3415 med 2.2919 frac 0.026 span 0.3216 wit 0.00 rb 0.97 ra 0.30
+  S4-JT-a parent p1 r0 original: wall 2.3339 med 2.2900 frac 0.020 span 0.3110 wit 1.11 rb 1.74 ra 0.84
+  S4-JT-a parent p1 r1 rerun: wall 2.4484 med 2.4004 frac 0.036 span 0.4266 wit 0.23 rb 0.72 ra 0.37
+  S4-JT-a parent p1 r2 original: wall 2.3466 med 2.2952 frac 0.034 span 0.3142 wit 0.00 rb 0.27 ra 0.57
+  S4-JT-a parent p2 r0 original: wall 2.5028 med 2.4518 frac 0.032 span 0.4428 wit 0.37 rb 0.36 ra 1.14
+  S4-JT-a parent p2 r1 original: wall 2.3278 med 2.2840 frac 0.016 span 0.3072 wit 0.71 rb 0.59 ra 1.11
+  S4-JT-a parent p2 r2 original: wall 2.3262 med 2.2801 frac 0.024 span 0.3091 wit 0.95 rb 0.71 ra 0.76
+  S4-JT-a tip p0 r0 original: wall 2.1367 med 2.1028 frac 0.022 span 0.1157 wit 0.09 rb 0.45 ra 0.53
+  S4-JT-a tip p0 r1 original: wall 2.1390 med 2.1067 frac 0.018 span 0.1158 wit 0.09 rb 0.45 ra 0.41
+  S4-JT-a tip p0 r2 original: wall 2.1468 med 2.1159 frac 0.020 span 0.1161 wit 0.60 rb 0.91 ra 0.97
+  S4-JT-a tip p1 r0 original: wall 2.1633 med 2.1275 frac 0.022 span 0.1172 wit 0.17 rb 0.84 ra 0.75
+  S4-JT-a tip p1 r1 original: wall 2.1425 med 2.1082 frac 0.022 span 0.1159 wit 0.17 rb 1.08 ra 0.37
+  S4-JT-a tip p1 r2 original: wall 2.1529 med 2.1130 frac 0.026 span 0.1170 wit 0.77 rb 0.57 ra 0.72
+  S4-JT-a tip p2 r0 original: wall 2.1557 med 2.1199 frac 0.022 span 0.1164 wit 0.17 rb 0.51 ra 0.36
+  S4-JT-a tip p2 r1 original: wall 2.1531 med 2.1147 frac 0.036 span 0.1161 wit 0.09 rb 0.65 ra 0.59
+  S4-JT-a tip p2 r2 original: wall 2.1889 med 2.1373 frac 0.046 span 0.1196 wit 0.26 rb 0.34 ra 0.71
+
+== per-pass medians, S4-JT wall [0,500) (ms)
+  parent W1: p0 4.4217 p1 4.3837 p2 4.5070
+  parent W2: p0 3.0788 p1 3.0807 p2 3.1694
+  parent W4: p0 2.3403 p1 2.3438 p2 2.3869
+  parent W8: p0 1.9812 p1 1.9859 p2 2.0159
+  parent W16: p0 2.2199 p1 2.2288 p2 2.2669
+  tip W1: p0 4.4376 p1 4.4500 p2 4.4658
+  tip W2: p0 2.9961 p1 2.9998 p2 3.0032
+  tip W4: p0 2.2004 p1 2.1880 p2 2.2086
+  tip W8: p0 1.8262 p1 1.8118 p2 1.8348
+  tip W16: p0 2.0502 p1 2.0466 p2 2.0587
+
+== rung reference S4-JT tip W8 processes
+  p0 r0 wall 1.7937 frac>1.2med 0.050
+  p0 r1 wall 1.8262 frac>1.2med 0.048
+  p0 r2 wall 1.8472 frac>1.2med 0.094
+  p1 r0 wall 1.8118 frac>1.2med 0.050
+  p1 r1 wall 1.8154 frac>1.2med 0.064
+  p1 r2 wall 1.8055 frac>1.2med 0.046
+  p2 r0 wall 1.8125 frac>1.2med 0.050
+  p2 r1 wall 1.8348 frac>1.2med 0.050
+  p2 r2 wall 1.8352 frac>1.2med 0.060
+
+== placement receipts over the 207 used processes
+  top_cpu {10: 206, 0: 1}
+  main_cycle_frac all 0.0046-0.0310; W1 0.0150-0.0310
+  main_share_top_est values {1.0: 191, None: 16}

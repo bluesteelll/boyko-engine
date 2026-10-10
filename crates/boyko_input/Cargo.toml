@@ -3,7 +3,7 @@ name = "boyko-input"
 version = "0.1.0"
 edition = "2024"
 description = "Source-agnostic, rebindable action-mapping for boyko-engine. Turns raw keyboard/mouse events from any source into typed, rebindable ECS actions. NO windowing dependency on the engine path (winit/Win32/eframe live behind feature-gated edge adapters only)."
-
+license.workspace = true
 # INVIOLABLE dependency boundary (INPUT-SYSTEM-PLAN §4): the action core depends
 # on `boyko_ecs` (Resource), `boyko_utils` (BitSet256), and `boyko_macros` (the
 # `#[derive(Actionlike)]`). It must NOT depend on `boyko_rhi_vulkan`, winit, or
@@ -27,3 +27,6 @@ boyko-macros = { path = "../boyko_macros" }
 # local `features` addition is required here.
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
+
+[lints]
+workspace = true

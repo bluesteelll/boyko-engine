@@ -6,11 +6,15 @@
 //! public surface of [`crate::present`] unchanged.
 
 pub use crate::present::{
-    BrickActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
-    GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferFrame,
-    GBufferMeshDraw, GBufferScene, GBufferTargets, InterpActivation, PASS_COUNT,
-    PunctualDepthActivation, Renderer, SCENE_MVP_BYTES, SampledComposite, Scene, SsaoActivation,
-    Surface, Swapchain, SwapchainError, TimedPass, TimestampCollector, UiPass,
+    AaActivation, BrickActivation, ClusterCullHierDispatch, CsmDepthActivation, DdgiUpdateActivation,
+    FRAMES_IN_FLIGHT, FrameWriteToken, GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES,
+    GBUFFER_PUSH_BYTES, GBufferFrame, GBufferMeshDraw, GBufferScene, GBufferTargets,
+    InterpActivation, ParticleActivation, PunctualDepthActivation, RcasActivation, Renderer,
+    ResolvedRenderPathGpu, SCENE_MVP_BYTES, SampledComposite, Scene,
+    PresentModeConfig, SmaaActivation, SsaaActivation, SsaoActivation, Surface, Swapchain,
+    SwapchainError,
+    TaaActivation, UiPass,
+    ViewtFromDepthActivation, ViewtFromVbDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 pub use crate::present::{ShadowVisActivation, TlasBuildActivation};

@@ -127,7 +127,7 @@ schedule.run(&mut a); // OK — same world
 
 The check is a single `u64` compare, predicted-not-taken, with the panic body
 kept out of line (`#[cold]`). It costs effectively nothing on the hot path
-(measured at +0.06 ns on an empty 50-system run) and it is a **release-level**
+(one predicted-not-taken branch per `run`) and it is a **release-level**
 panic, not a `debug_assert!`. That is deliberate: a cross-world `run` would
 dereference cached pointers against the wrong world — a use-after-free surface —
 so it must fail loudly in every build. This matches Bevy, whose `Schedule::run`
@@ -239,10 +239,10 @@ across the boundary.
 - [Entities](../concepts/entities.md) — the entity model
 - [Scheduler](../scheduler.md) — how a `Schedule` runs systems
 - [Storage trade-offs](../architecture/storage-tradeoffs.md) — per-pool virtual-memory reservations
-- Source: [`ecs_master.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L148), [`primitives.rs` (`WorldId`)](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/identifiers/primitives.rs#L106), [`schedule.rs` (run gate)](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs#L230)
+- Source: [`ecs_master.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs), [`primitives.rs` (`WorldId`)](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/identifiers/primitives.rs), [`schedule.rs` (run gate)](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs)
 
-[`EcsMaster`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L148
-[`WorldId`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/identifiers/primitives.rs#L106
+[`EcsMaster`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs
+[`WorldId`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/identifiers/primitives.rs
 [`App`]: ./plugins.md
-[`App::with_pool`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/app/app.rs#L195
-[`ThreadPool`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_threadpool/src/thread_pool.rs
+[`App::with_pool`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/app/app.rs
+[`ThreadPool`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_threadpool/src/thread_pool.rs

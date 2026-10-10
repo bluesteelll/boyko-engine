@@ -1,10 +1,9 @@
-/// Virtual-memory commit granularity (Phase X.F, renamed from
-/// `ARENA_COMMIT_GRANULE` when Phase X.J retired the shared Arena): 64 KiB —
-/// the Windows reservation granularity, and a multiple of the 4 KiB
-/// commit/`mprotect` page size everywhere. Every `VmReservation` length is
-/// rounded up to this (`os_len = align_up(len, COMMIT_GRANULE)`) so a
-/// frontier commit can never overrun the kernel's page-rounded mapping.
-pub const COMMIT_GRANULE: usize = 64 * 1024;
+// The commit granularity (`COMMIT_GRANULE`, `COMMIT_PAGE`) and the slab bounds of the commit
+// ladders (`POOL_MIN_SLAB`, `POOL_MAX_SLAB`) moved to `boyko_memory` with the reservation
+// primitive at rung C1 (unified plan KC-01). Re-exported here so every
+// `boyko_ecs::ecs::constants::…` path keeps compiling; the pool policy that interprets them (the
+// stagger, the layout, the commit step) stays in this module.
+pub use boyko_memory::constants::{COMMIT_GRANULE, COMMIT_PAGE, POOL_MAX_SLAB, POOL_MIN_SLAB};
 
 /// Typical CPU cache line size in bytes
 /// Used for memory alignment to optimize cache usage
@@ -52,7 +51,10 @@ pub const SIMD_BUFFER_ALIGN: usize = 32;
 /// is +125 GiB VA — noise against the 3.4 TiB pool budget — plus ≤ 2
 /// VMAs/VADs per MATERIALIZED column (committed prefix + `PROT_NONE` tail)
 /// ⇒ +2,000, still ≥ 3× headroom under `vm.max_map_count`. Resident floor:
-/// one `POOL_MIN_SLAB` (64 KiB) commit per NON-EMPTY column — empty
+/// one `POOL_MIN_SLAB` (one `COMMIT_PAGE`, 4 KiB) commit per NON-EMPTY
+/// `VmColumn`, and one page per sub-region of a non-empty `ComponentPool` —
+/// 12 KiB tracked, 4 KiB untracked (packing plan D2; before it, 64 KiB per
+/// `VmColumn` and 192 / 384 KiB per tracked pool at σ = 0 / σ ≠ 0) — empty
 /// archetypes/stores commit nothing. The dense bookkeeping arrays stay small
 /// heap `Vec`s (F4: floor + amortized growth), so none of this eagerly
 /// commits resident memory on the syscall arms.
@@ -96,19 +98,6 @@ const _: () = assert!(POOL_MAX_ROWS < u32::MAX as usize);
 // representable on every arm.
 const _: () = assert!(POOL_MIN_ROWS <= POOL_MAX_ROWS && POOL_MIN_ROWS > 0);
 
-/// Minimum pool data-commit slab (Phase X.I D4): 64 KiB = one commit
-/// granule — the floor that keeps sparse archetypes cheap (a 1-row
-/// archetype commits 3 × 64 KiB per pool, not megabytes). Doubling from
-/// here reaches any real population in ≤ a dozen µs-scale events.
-pub const POOL_MIN_SLAB: usize = 64 * 1024;
-
-/// Maximum pool data-commit step (Phase X.I D4): 64 MiB — bounds
-/// commit-charge overshoot by one slab (the X.F overshoot-honesty bound);
-/// one max-step costs ≤ ~50 µs (the Phase X.F B4 envelope). A larger
-/// REQUEST is not clamped (the request-dominant `max` in
-/// `pool_commit_step` always covers it).
-pub const POOL_MAX_SLAB: usize = 64 * 1024 * 1024;
-
 // ── Phase X.I pure sizing / layout math (D1 + D2 + D4) ─────────────────────
 //
 // Consumed by `ComponentPool` (`memory/component_pool.rs`); kept next to the
@@ -124,12 +113,26 @@ pub(crate) const fn pool_align_up_granule(value: usize) -> usize {
     }
 }
 
+/// Checked page round-up — the twin of [`pool_align_up_granule`] for the
+/// commit ladders (packing plan D2): reservations round to the granule,
+/// commit frontiers to the page. Overflow panics loudly, like its twin.
+pub(crate) const fn pool_align_up_page(value: usize) -> usize {
+    match value.checked_add(COMMIT_PAGE - 1) {
+        Some(v) => v & !(COMMIT_PAGE - 1),
+        None => panic!("pool_align_up_page: overflow (value too close to usize::MAX)"),
+    }
+}
+
 /// Phase X.I D2 sizing formula: byte-targeted, row-clamped default ceiling.
 ///
 /// `reserve_rows(stride) = clamp(POOL_TARGET_DATA_BYTES / stride,
 /// POOL_MIN_ROWS, POOL_MAX_ROWS)`. Used by
-/// `ComponentPool::with_default_sizes` ONLY — the legacy explicit-ceiling
-/// constructor `ComponentPool::new` bypasses the clamp by design (★R1-9).
+/// `ComponentPool::with_default_sizes` (in-crate) and, cross-crate, by every
+/// `ScratchColumn<T>`-backed transient scratch (e.g.
+/// `boyko_render::mesh_draw::MeshRenderScratch`) that wants the SAME
+/// VA-reservation-class ceiling every other kernel column uses, instead of a
+/// bespoke fixed cap — the legacy explicit-ceiling constructor
+/// `ComponentPool::new` bypasses the clamp by design (★R1-9).
 ///
 /// Phase 22 D6 (ZST/tag pools): `stride == 0` routes straight to
 /// [`POOL_MAX_ROWS`] — row capacity is bounded by the tick sub-regions
@@ -139,7 +142,7 @@ pub(crate) const fn pool_align_up_granule(value: usize) -> usize {
 /// virtual address space per tag pool per hosting archetype** (2 MiB under
 /// the cfg-fallback `POOL_MAX_ROWS = 262_144`), with zero resident bytes
 /// until rows commit.
-pub(crate) const fn pool_reserve_rows(stride: usize) -> usize {
+pub const fn pool_reserve_rows(stride: usize) -> usize {
     if stride == 0 {
         return POOL_MAX_ROWS;
     }
@@ -159,7 +162,20 @@ pub(crate) const fn pool_reserve_rows(stride: usize) -> usize {
 /// cache line per `component_id` (mod 64) lands consecutive pools' element-`i`
 /// rows in 64 *different* L1 sets (and, since the stride is a cache line,
 /// 64 different L2 sets too).
-const POOL_STAGGER_LINES: usize = 64;
+pub const POOL_STAGGER_LINES: usize = 64;
+
+/// The span the per-pool stagger cycles through: 64 lines × 64 B = 4 KiB,
+/// the L1 set-index span (packing plan D4). A cache property, NOT the commit
+/// quantum — `pool_byte_layout` bounds the stagger by this, never by
+/// [`COMMIT_PAGE`], which only coincides with it on `x86_64`.
+pub const POOL_STAGGER_SPAN: usize = POOL_STAGGER_LINES * CACHE_LINE_SIZE;
+
+// Packing plan D4: the page-floor ladder (D2) takes each sub-region's floor
+// as `offset - stagger`, which is a page multiple only while the stagger stays
+// below one commit page. The quantum must be AT LEAST the cache-set span; it
+// must never define it. Raising `POOL_STAGGER_LINES` past 64 is therefore a
+// compile error on `x86_64` and still a valid layout on a granule-page arm.
+const _: () = assert!(POOL_STAGGER_SPAN <= COMMIT_PAGE);
 
 // The stagger granule must preserve the SIMD data-base alignment guarantee:
 // each step is a whole `CACHE_LINE_SIZE` (64 B) and the data sub-region starts
@@ -187,9 +203,30 @@ const _: () = assert!(
 /// The result is always a multiple of [`CACHE_LINE_SIZE`] (64 B), hence a
 /// multiple of [`SIMD_BUFFER_ALIGN`] (the const assert above pins this), so the
 /// staggered data base preserves the AVX2 alignment contract. It is strictly
-/// less than one page (`< 64 × 64 = 4096`), so it costs at most one extra
-/// lazily-committed page per pool.
-pub(crate) const fn pool_base_stagger(component_id: usize) -> usize {
+/// less than one page (`< POOL_STAGGER_SPAN = 64 × 64 = 4096 <= COMMIT_PAGE`),
+/// and it costs no extra committed page: the commit ladder measures every
+/// frontier from the sub-region's absolute page floor, so the pad sits inside
+/// the sub-region's first page (packing plan D2, D4). On the granule ladder
+/// this sentence was false — the pad cost a whole extra granule per sub-region.
+/// # Contract for a COHORT of columns (why this is `pub`)
+///
+/// The stagger is a pure function of `component_id % POOL_STAGGER_LINES`, so
+/// **two pools whose ids are congruent mod 64 get the SAME stagger** and their
+/// element `i` lands in the same L1/L2 set again — the exact conflict storm this
+/// function exists to prevent. A subsystem that sweeps many columns at index `i`
+/// in one hot loop (a "cohort") therefore has an obligation the kernel cannot
+/// discharge for it: **the cohort's ids must be pairwise distinct mod
+/// [`POOL_STAGGER_LINES`]**, and the cohort must be at most that many columns
+/// wide.
+///
+/// A CONTIGUOUS run of at most `POOL_STAGGER_LINES` ids satisfies this
+/// automatically, which is the cheapest way to hold the invariant — assert the
+/// run's width in a `const _: () = assert!(...)` at the id-allocation site and
+/// the property is checked at compile time. Both this function and
+/// `POOL_STAGGER_LINES` are exported so a cohort owner can state and test that
+/// invariant against the kernel's own definition instead of re-deriving the
+/// modulus (which would silently drift the day the constant changes).
+pub const fn pool_base_stagger(component_id: usize) -> usize {
     (component_id % POOL_STAGGER_LINES) * CACHE_LINE_SIZE
 }
 
@@ -262,8 +299,12 @@ pub(crate) const fn pool_byte_layout(
     // P2-CACHE-FIX: the stagger is a SIMD-aligned leading pad strictly below
     // one page; a value above it would defeat the per-page cost bound and
     // signal a caller computing it outside `pool_base_stagger`.
+    // The bound is the cache-set span (`POOL_STAGGER_SPAN`, 4096), named
+    // rather than literal. The message text is unchanged on purpose: an
+    // inlined panic passes its length as an immediate, which the UG-15
+    // codegen pins of the bodies this layout math inlines into would see.
     assert!(
-        stagger < 4096 && stagger.is_multiple_of(SIMD_BUFFER_ALIGN),
+        stagger < POOL_STAGGER_SPAN && stagger.is_multiple_of(SIMD_BUFFER_ALIGN),
         "pool_byte_layout: stagger must be SIMD-aligned and < one page"
     );
 
@@ -372,8 +413,42 @@ pub const INLAND_MAX_SLAB: usize = 16 * 1024 * 1024;
 //
 
 /// Maximum number of worker threads that can send events concurrently.
-/// Controls the number of per-type writer lanes in `EventBuffer<E>`.
-pub const MAX_EVENT_THREADS: u32 = 64;
+///
+/// A CEILING, not an allocation: `EventBuffer<E>` allocates exactly
+/// `EventConfig::thread_count` lanes, and this constant only bounds what
+/// `EventConfig::new` will accept. Raising it therefore costs a program that
+/// does not ask for the extra lane nothing at all — no wider array, no larger
+/// buffer, no extra branch.
+///
+/// KE8: **65, one more than [`boyko_threadpool::MAX_WORKERS`]**. Every pool
+/// worker can send, and so can the thread that is not a pool worker (the host /
+/// main thread, `WORKER_ID_UNATTACHED`), so a fully-saturated pool needs
+/// `MAX_WORKERS + 1` distinct lanes. At 64 the host thread had to share worker
+/// 0's lane. The const-assert below is what keeps the two constants from
+/// drifting apart again — it is the gate, and it was observed failing the build
+/// with the old value of 64 before this line was raised.
+///
+/// ⚠ Widening this to 65 does **not** by itself give the host thread its own
+/// lane; it only makes one representable. What the unattached sender maps to is
+/// owner ballot **AB-3**, and the `send(&self)` surface that needs it is rung
+/// R4. Nothing in the tree requests 65 lanes today.
+///
+/// [`boyko_threadpool::MAX_WORKERS`]: boyko_threadpool::MAX_WORKERS
+pub const MAX_EVENT_THREADS: u32 = 65;
+
+// KE8 — the lane budget must leave room for every pool worker PLUS one
+// non-worker sender. `MAX_WORKERS` lives in another crate and can be raised
+// there without any signal reaching this file; this assert is the signal.
+//
+// The plan states the property as `MAX_WORKERS + 1 <= MAX_EVENT_THREADS`; over
+// integers that is exactly the strict `<` below, which is the form
+// `clippy::int_plus_one` (a `-D warnings` lint here) accepts. The plan's
+// spelling is kept in this comment so a grep for it still lands.
+const _: () = assert!(
+    boyko_threadpool::MAX_WORKERS < MAX_EVENT_THREADS as usize,
+    "MAX_EVENT_THREADS must admit one lane per pool worker plus one for a \
+     non-worker (host / main-thread) sender: MAX_WORKERS + 1 <= MAX_EVENT_THREADS"
+);
 
 /// Maximum events per lane per frame in `EventBuffer<E>`.
 /// Bounds the per-lane write buffer allocation at preregister time.
@@ -613,10 +688,27 @@ mod tests {
 
     /// U-P1 — D4 step policy table: MIN floor, in-band doubling, MAX clamp,
     /// request-dominant, and the saturating belt.
+    ///
+    /// Packing plan S2 re-derivation of the first row (cut PC-3): it read
+    /// `pool_commit_step(0, G) == POOL_MIN_SLAB`, which held only while
+    /// `POOL_MIN_SLAB` WAS `G`. With `POOL_MIN_SLAB == COMMIT_PAGE` a first
+    /// request of one page is the floor case, and a first request of one
+    /// granule is request-dominant (`max(page, G) == G`); both are pinned.
     #[test]
     fn pool_commit_step_policy_table() {
         // Fresh pool (data_committed = 0): the MIN_SLAB floor.
-        assert_eq!(pool_commit_step(0, G), POOL_MIN_SLAB, "first grow = one granule");
+        assert_eq!(
+            pool_commit_step(0, COMMIT_PAGE),
+            POOL_MIN_SLAB,
+            "first grow of one page = the MIN_SLAB floor"
+        );
+        assert_eq!(pool_commit_step(0, G), G, "a first request of one granule is request-dominant");
+        // Plan D3: the ladder doubles (×2, not ×4) below the granule as well.
+        assert_eq!(
+            pool_commit_step(COMMIT_PAGE, 2 * COMMIT_PAGE),
+            COMMIT_PAGE,
+            "doubling below the granule"
+        );
         // In-band doubling: step equals the committed size.
         assert_eq!(pool_commit_step(4 * G, 5 * G), 4 * G, "doubling inside the band");
         assert_eq!(pool_commit_step(8 * MIB, 8 * MIB + G), 8 * MIB, "doubling at 8 MiB");

@@ -12,6 +12,12 @@
 //! `ChildOf` hand-mirror to the DERIVED `Likes` (the sole gate on the derive's
 //! serialize auto-emit path — the dev-dep cycle keeps `ChildOf` hand-written).
 
+// Test-harness probe: `Arc<Mutex<Vec<Entity>>>` is the sink a `run_system` closure
+// hands the freshly-spawned ids back to the test thread through — an assertion
+// channel around the world, never inside an engine path. Integration test, so it
+// is compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, Mutex};
 
 use boyko_ecs::ecs::core::component::component::Component;

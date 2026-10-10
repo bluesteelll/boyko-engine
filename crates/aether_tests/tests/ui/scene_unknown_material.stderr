@@ -1,0 +1,5 @@
+error: no material `gol` in this aether block (materials here: `gold`, `lamp`) (did you mean `gold`?)
+  --> tests/ui/scene_unknown_material.rs:10:28
+   |
+10 |         entity { material: gol }
+   |                            ^^^

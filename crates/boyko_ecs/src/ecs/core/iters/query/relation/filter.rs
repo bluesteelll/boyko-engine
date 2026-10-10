@@ -10,7 +10,8 @@
 //!   fixed entity. It reads the source row's OWN `R` column (no other-entity
 //!   access), so it is `par_iter`-safe.
 //!
-//! `R` is a [`Relationship`] (always a table-storage [`Component`] FK), so the
+//! `R` is a [`Relationship`] (always a table-storage
+//! [`Component`](crate::ecs::core::component::component::Component) FK), so the
 //! dense-storage arms the core filters carry are statically irrelevant here —
 //! these filters take the table-archetypal / table-per-row paths only.
 

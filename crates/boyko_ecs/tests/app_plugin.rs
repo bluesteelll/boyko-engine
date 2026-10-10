@@ -26,6 +26,13 @@
 //! Single-worker pools are used where firing-order / single-thread observation
 //! matters; the default pool is used where only the end-state is asserted.
 
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 #![cfg(not(miri))]
 
 use std::sync::atomic::{AtomicUsize, Ordering};

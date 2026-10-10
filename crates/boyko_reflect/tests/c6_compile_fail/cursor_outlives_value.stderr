@@ -1,0 +1,8 @@
+error[E0515]: cannot return value referencing local variable `value`
+  --> tests/c6_compile_fail/cursor_outlives_value.rs:88:14
+   |
+88 |     unsafe { NestedCursor::new(&value, &OUTER_TYPE_INFO) }
+   |              ^^^^^^^^^^^^^^^^^^------^^^^^^^^^^^^^^^^^^^
+   |              |                 |
+   |              |                 `value` is borrowed here
+   |              returns a value referencing data owned by the current function

@@ -28,16 +28,19 @@ fn main() {
 }
 ```
 
-That is the whole of [`examples/clear.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/examples/clear.rs).
-No Vulkan SDK is required — the runner does not request the validation layer, so
-an absent layer (the common case on end-user machines) cannot fail the boot.
+That is the whole of [`examples/clear.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/examples/clear.rs).
+No Vulkan SDK is required — the runner does not request the validation layer by
+default, so an absent layer (the common case on end-user machines) cannot fail the
+boot. Validation is opt-in: set `BOYKO_ENABLE_VALIDATION` and the runner requests
+`VK_LAYER_KHRONOS_validation`, which must then be installed (the boot fails without
+it rather than silently running unvalidated).
 
 From there, everything is spawns. Add a floor, four cubes, a sun, and a camera in
 a startup system and you have a rendered room. That is the hero example below.
 
 ## The hero example: a lit, shadowed room
 
-[`examples/room.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/examples/room.rs)
+[`examples/room.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/examples/room.rs)
 is the "~30-line scene" milestone: a floor plane, four shadow-casting cubes, a
 perspective camera, and ECS-owned lighting — an angled sun with cascaded shadow
 maps, a sky ambient fill, and a warm point accent. Everything is assembled
@@ -61,8 +64,8 @@ fn main() {
 }
 
 /// Startup runs WITH the device present, so meshes register straight through the
-/// world-resident GpuDevice + MeshRegistry.
-fn setup(mut commands: Commands, mut meshes: NonSendResMut<MeshRegistry>, dev: NonSendRes<GpuDevice>) {
+/// world-resident GpuDevice + Assets<MeshGpu> (`plane` / `cube` come from MeshAssetsExt).
+fn setup(mut commands: Commands, mut meshes: NonSendResMut<Assets<MeshGpu>>, dev: NonSendRes<GpuDevice>) {
     let floor = meshes.plane(dev.get(), 12.0);
     let cube = meshes.cube(dev.get(), 1.0);
 
@@ -135,9 +138,10 @@ cargo run -p boyko-app --example room
 - **The plugin + the CSM knob.** `EnginePlugins::window(..)` composes the frame
   stack. `CsmConfig` is inserted *after* `add_plugins` — the sun-shadow cascades
   ship disabled by default, and this one line arms them.
-- **Meshes.** `MeshRegistry` builds vertex/index buffers on the resident
-  `GpuDevice`; `plane` and `cube` return `MeshHandle`s. Startup runs with the
-  device present, so registration goes straight through.
+- **Meshes.** `Assets<MeshGpu>` is the world's mesh asset table (a non-`Send`
+  resource). The `MeshAssetsExt` methods `plane` and `cube` build vertex/index
+  buffers on the resident `GpuDevice` and return `MeshHandle`s. Startup runs with
+  the device present, so registration goes straight through.
 - **Drawables.** `MeshBundle::new(handle, transform)` makes an entity *drawn*.
   Adding `ShadowCaster` makes it *cast*. The floor omits the marker, so it only
   receives — it can never cast a spurious whole-plane shadow.
@@ -153,33 +157,48 @@ renderer" by an imperative call.
 ## `EnginePlugins::window(title, w, h)`
 
 `EnginePlugins` is the host composition plugin. Its
-[`window`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/src/plugins.rs#L103)
+[`window`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/src/plugins.rs)
 constructor takes a caption and a requested client size, and its `build`
-([`plugins.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/src/plugins.rs#L112))
-composes the default frame stack:
+([`plugins.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/src/plugins.rs))
+composes the default frame stack. It adds these 18 plugins, in this order:
 
-- **Scene** — transform propagation, active-camera resolution, and the visibility
-  bridge (via `CameraPlugin`).
-- **3D instancing** — packs each visible `GlobalTransform` into the GPU instance
-  column and buckets the draws (via `Render3dPlugin` + the mesh gather).
-- **Lighting** — light reconcile, the GPU light table, and the eviction hooks
-  (via `LightingPlugin`).
-- **Sun shadows** — cascaded shadow maps (via `CsmPlugin`, *disabled by default*).
-- **SDF** — the boot-static SDF edit path (via `SdfPlugin`); a scene with no
-  `SdfPrimitive` gathers zero edits and costs nothing.
-- **Fixed timestep** — the `FixedSet` ordering seam that snapshots poses for
-  interpolation.
-- **The runner** — the windowed G-buffer frame loop, installed via
-  `App::set_runner`.
+| Plugin | What it brings |
+|--------|----------------|
+| `ProfilerPlugin` | the profiler store, armed only by `BOYKO_PROFILE_ON` |
+| `LogPlugin` | the logger's in-frame drain; `BOYKO_LOG` turns logging on |
+| `CameraPlugin` | transform propagation, active-camera resolution, the visibility bridge |
+| `Render3dPlugin` | the 3D instance pack |
+| `AssetRefcountPlugin` | asset reference counting and validation |
+| `LightingPlugin` | light reconcile, the GPU light table, the eviction hooks |
+| `SsaoPlugin` | the SSAO config (off by default) |
+| `CsmPlugin` | cascaded sun shadows (off by default) |
+| `ShadowAtlasPlugin` | the spot/point shadow atlas (off by default) |
+| `DdgiPlugin` | SDF DDGI global illumination (off by default) |
+| `RayPlugin` | the ray-tracing backend selection (hardware rays only in `hwrt` builds) |
+| `ShadowDenoisePlugin` | the ray-traced shadow denoiser config (off by default) |
+| `AaPlugin` | anti-aliasing and the TAA config (off by default) |
+| `RenderPathPlugin` | the render-path config (Deferred + both legs by default) |
+| `HzbPlugin` | the depth-pyramid config (off by default) |
+| `OcclusionPlugin` | two-phase occlusion culling (off by default) |
+| `SdfPlugin` | the boot-static SDF edit path; a scene with no `SdfPrimitive` costs nothing |
+| `ParticlePlugin` | GPU particles (off by default) |
 
-Two capabilities are **opt-in** and NOT in the default set:
+It also inserts the light-table staging, the default `LightingConfig` /
+`ClusterConfig` and the render scratch resources, orders `FixedSet::Snapshot` after `FixedSet::Gameplay` (the seam
+that snapshots poses for interpolation), and finally installs the windowed frame
+loop with `App::set_runner`.
+
+Some capabilities are **opt-in** and NOT in the default set:
 
 - **`FlyCameraPlugin`** — interactive input and a fly camera. Add it alongside
   `EnginePlugins`. See the viewer scene below.
-- **The UI plugin** — ECS-native widgets. See [UI Overview](../ui/overview.md).
+- **`PhysicsPlugin`** — the in-house rigid-body solver, in the fixed schedule. See
+  [Physics](../simulation/physics.md) and the `playground` example.
+- **The UI plugins** — ECS-native widgets. The windowed host does not composite UI
+  yet; see the status note in [UI Overview](../ui/overview.md).
 
-Do not add `CameraPlugin`, `Render3dPlugin`, `LightingPlugin`, or `CsmPlugin`
-yourself — `EnginePlugins` already composes them, and a duplicate plugin panics.
+Do not add any of the 18 plugins above yourself — `EnginePlugins` already composes
+them, and adding a plugin twice panics (`boyko-B1801`).
 
 ## Capability is component presence
 
@@ -225,38 +244,86 @@ for you. You never mint a frame token, touch a swapchain, or record a barrier.
   to the camera frustum every frame and drives the depth pass over the live
   `ShadowCaster` set. You author the sun and the casters; the fit is automatic.
 
-For the deeper render story — the deferred G-buffer, the hybrid mesh↔SDF depth
+For the deeper render story — the render paths, the hybrid mesh↔SDF depth
 bound, and how a frame actually flows through the GPU — see
 [Rendering Overview](../rendering/overview.md). This page deliberately stops at
 the user-facing seam.
 
-## A tour of the five scenes
+## Configuring the renderer
 
-The `boyko_app` examples form a learning ladder. Each adds exactly one capability
-to the one before it.
+Each render feature is chosen by an owner-set resource. `EnginePlugins` inserts
+every one with its default, so you overwrite it **after** `add_plugins`; an insert
+before it is replaced by the default.
 
-- **`clear`** — a window cleared to a neutral color every frame. The smallest
-  possible host; proves the boot and teardown.
-  `cargo run -p boyko-app --example clear`
-- **`room`** — the hero scene above: floor, cubes, camera, sun, and CSM shadows,
-  all from spawns.
-  `cargo run -p boyko-app --example room`
-- **`bounce`** — a cube bouncing on the floor, driven by a fixed-timestep gameplay
-  system and drawn interpolated at the render rate. It carries the
-  `GpuTransform3D` pair and casts a moving sun shadow. This is the interpolation
-  milestone.
-  `cargo run -p boyko-app --example bounce`
-- **`viewer`** — the room made fly-able: a first-person WASD + mouse-look camera
-  driven by OS input through the ECS, added with `FlyCameraPlugin`.
-  `cargo run -p boyko-app --example viewer`
-- **`sdf_room`** — the room plus one live SDF sphere, authored ECS-natively and
-  composited into the same G-buffer as the raster cubes, lit by the same sun with
-  an analytic soft shadow. This is the hybrid mesh↔SDF path.
-  `cargo run -p boyko-app --example sdf_room`
+```rust,ignore
+use boyko_app::prelude::*;
+use boyko_render::{AaConfig, AaMode, GeometryLegs, RenderPath, RenderPathConfig};
+
+fn main() {
+    let mut app = App::new();
+    app.add_plugins(EnginePlugins::window("my game", 1280, 720));
+    // All of these come AFTER add_plugins.
+    app.insert_resource(RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Both });
+    app.insert_resource(AaConfig { mode: AaMode::Smaa });
+    app.insert_resource(CsmConfig { cascade_count: 3, ..CsmConfig::default() });
+    app.run();
+}
+```
+
+- **The render path is resolved once, at boot.** The runner reads
+  `RenderPathConfig` (`RenderPath::{Deferred, Forward, ForwardPlus,
+  VisibilityBuffer}` × `GeometryLegs::{Both, Mesh, Sdf}`) when it boots, and the
+  choice is fixed for the run; there is no live toggle. A request the device cannot
+  serve degrades with a logged reason. See [Render paths](../rendering/render-paths.md).
+- **A launch-time override.** `BOYKO_RENDER_PATH` (`deferred`, `forward`,
+  `forwardplus`, `vb`) and `BOYKO_GEOMETRY_LEGS` (`both`, `mesh`, `sdf`) override
+  the default path while the plugins build, so any example can run in any path
+  without an edit. An explicit `RenderPathConfig` inserted after `add_plugins`
+  still wins. An unrecognized value is reported and falls back to the default.
+- **SSAA is a boot-time choice too.** `EnginePlugins::window(..).with_ssaa_scale(2)`
+  requests 2× supersampling; only `2` is honored, and a device that cannot fit it
+  boots without it. With the scale left at its default, `BOYKO_AA=ssaa` requests it
+  from the environment.
+- **The other features are plain config overwrites:** `AaConfig` (FXAA, SMAA, TAA),
+  `SsaoConfig`, `CsmConfig`, `ShadowConfig` (spot/point shadows), `DdgiConfig`,
+  `ShadowDenoiseConfig` (`hwrt` builds), `OcclusionConfig`, `ParticleConfig`, and
+  `LightingConfig` (exposure, tonemapper, clustered culling). The defaults and what
+  each one turns on are tabled in
+  [Rendering Overview](../rendering/overview.md#what-ships-today).
+- **Present mode.** The windowed host presents with FIFO (v-synced) and exposes no
+  present-mode knob yet. The backend swapchain itself also supports Immediate and
+  Mailbox.
+- **Validation.** `BOYKO_ENABLE_VALIDATION` arms the Vulkan validation layer (see
+  above).
+
+The renderer has no frame-time benchmark yet; see [Benchmarks](../reference/benchmarks.md)
+for what is measured.
+
+## The examples
+
+The `boyko_app` examples run with `cargo run -p boyko-app --example <name>`. The first
+five form a learning ladder, each adding one capability to the one before it.
+
+| Example | What it shows |
+|---------|---------------|
+| `clear` | a window cleared to a neutral color every frame; the smallest possible host, proving boot and teardown |
+| `room` | the hero scene above: floor, cubes, camera, sun and CSM shadows, all from spawns |
+| `bounce` | a cube bouncing under fixed-timestep gameplay, drawn interpolated at the render rate (`GpuTransform3D`) |
+| `viewer` | the room made fly-able with `FlyCameraPlugin` (WASD + mouse look) |
+| `sdf_room` | the room plus one live SDF sphere composited into the same G-buffer: the hybrid mesh↔SDF path |
+| `punctual_room` | the room with the spot/point shadow atlas enabled (`CastsPunctualShadow`) |
+| `playground` | fly, shoot and knock a stack over: the in-house physics through `PhysicsPlugin` (run it with `--release`) |
+| `showcase` | a fly-around scene using meshes, an SDF sphere, CSM and both punctual shadow kinds at once |
+| `vb_lab` | a fly-around test bed for the Visibility Buffer path: varied meshes and PBR materials plus an SDF leg |
+| `paradigm_lab` | one scene that renders in every `RenderPath × GeometryLegs` cell; pick the cell at launch |
+| `shadow_denoise_eval` | an in-motion evaluation scene for the ray-traced shadow denoiser (`--features hwrt`) |
+
+`_hud_probe` is an internal copy of `playground`, not a learning example. `scripts/run-scene.ps1` launches any example in a chosen render path, for
+example `scripts\run-scene.ps1 -Scene paradigm_lab -Path vb -Legs both`.
 
 ### Interpolation: `bounce`
 
-[`examples/bounce.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/examples/bounce.rs)
+[`examples/bounce.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/examples/bounce.rs)
 puts the integrator in `FixedSet::Gameplay` and attaches the interpolation pair
 to the cube. The gameplay system writes `Transform` at 64 Hz; the host snapshots
 and lerps for the render frame:
@@ -301,7 +368,7 @@ the pose and snaps `prev = curr` for one frame (the `TeleportCommandsExt` sugar)
 
 ### Interactive input: `viewer`
 
-[`examples/viewer.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/examples/viewer.rs)
+[`examples/viewer.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/examples/viewer.rs)
 is the room made interactive. Add `FlyCameraPlugin` alongside `EnginePlugins` and
 spawn a `FlyCameraBundle` instead of a `CameraRig`:
 
@@ -321,7 +388,7 @@ fn main() {
 ```
 
 `FlyCameraPlugin`
-([`fly.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/src/fly.rs#L105))
+([`fly.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/src/fly.rs))
 composes the input ingest, registers the fly controller in `CameraSet::Control`
 (so the view recomposes the same frame — no input lag), and wires an ECS-native
 quit through the rebindable `FlyAction::Quit` (Escape by default). WASD flies,
@@ -330,7 +397,7 @@ quit through the rebindable `FlyAction::Quit` (Escape by default). WASD flies,
 
 ### Hybrid SDF: `sdf_room`
 
-[`examples/sdf_room.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/examples/sdf_room.rs)
+[`examples/sdf_room.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/examples/sdf_room.rs)
 adds one live SDF sphere to the room with a single spawn — no brick bake, no
 shader change:
 
@@ -373,12 +440,14 @@ are a derived view of your ECS data, never a parallel store you hand-manage.
   composition rules.
 - [Time & Fixed Timestep](time.md) — the fixed-sim clock behind interpolation.
 - [Input](input.md) — the action model `FlyCameraPlugin` uses.
-- [Rendering Overview](../rendering/overview.md) — the deferred G-buffer, the
-  hybrid mesh↔SDF path, and how a frame flows through the GPU.
+- [Rendering Overview](../rendering/overview.md) — the render paths, the
+  hybrid mesh↔SDF path, what ships, and how a frame flows through the GPU.
+- [Physics](../simulation/physics.md) — `PhysicsPlugin`, which the `playground`
+  example adds.
 - [Enable Tags](../concepts/enable-tags.md) and
   [Storage Trade-offs](../architecture/storage-tradeoffs.md) — capability as
   presence, and what each storage choice costs.
-- Source: [`plugins.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/src/plugins.rs#L81),
-  [`fly.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/src/fly.rs#L105),
-  [`prelude.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/src/prelude.rs#L1),
-  and the examples in [`crates/boyko_app/examples/`](https://github.com/bluesteelll/boyko-engine/tree/ecs/crates/boyko_app/examples).
+- Source: [`plugins.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/src/plugins.rs),
+  [`fly.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/src/fly.rs),
+  [`prelude.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/src/prelude.rs),
+  and the examples in [`crates/boyko_app/examples/`](https://github.com/bluesteelll/boyko-engine/tree/master/crates/boyko_app/examples).

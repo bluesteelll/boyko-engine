@@ -15,6 +15,23 @@
 //! `UiSourceOrder` (private), so the round-trip domain is the author-visible
 //! text-owned set minus `ComputedRect`. Inputs here avoid `ComputedRect` so the
 //! tree is a true serializer fixed point.
+//!
+//! # What this gate CANNOT see — read before extending it
+//!
+//! Byte-identity of `serialize -> parse -> serialize` is the CANONICAL-FORM
+//! property, and it is structurally blind to LOSS: a component the writer never
+//! writes is absent from both texts, so it never enters the comparison. This file
+//! was green while the writer dropped 12 of the 20 non-exempt members of its own
+//! parser's vocabulary. The loss property is gated by `p3_world_round_trip.rs`,
+//! which starts from a WORLD and compares two WORLDS. Neither file subsumes the
+//! other; adding a component here does not extend coverage there.
+
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` / a `UiParseReport` out of the `Send + Sync` one-shot
+// system closure, and a file-static `Mutex<()>` serializes tests that arm a process-global
+// (the counting allocator, the watch-poll counters). Not engine code — the whole file is
+// compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
 
 mod common;
 mod p3_common;

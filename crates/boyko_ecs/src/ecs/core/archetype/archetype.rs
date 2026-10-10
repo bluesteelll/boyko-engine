@@ -1,6 +1,6 @@
 use std::cell::UnsafeCell;
 
-use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
+use crate::ecs::constants::POOL_MAX_ROWS;
 use crate::ecs::core::archetype::archetype_signature::ArchetypeSignature;
 use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component_mask::ComponentMask;
@@ -11,7 +11,7 @@ use crate::ecs::core::component::component_registry::{
 use crate::ecs::core::component::enable::enable_store::{EnableColumn, EnableStore};
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::error::{EcsError, EcsResult};
-use crate::ecs::constants::POOL_MAX_ROWS;
+use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
 use crate::ecs::memory::vm_column::VmColumn;
 
 /// `MAX_COMPONENTS` as a `ComponentId` newtype for comparison against newtype-guarded IDs.
@@ -190,10 +190,37 @@ pub struct Archetype {
     /// `addr_of_mut!` and must initialise this one too.
     pub(crate) flags: ArchetypeFlags,
 
-    /// Set of component IDs in this archetype for efficient iteration.
+    /// EVERY id this archetype was minted from, non-signature ids INCLUDED.
+    /// Formerly `component_ids`.
+    ///
+    /// ⚠ **A DECLARATION RECORD, never a membership oracle, and it is
+    /// RACE-DEPENDENT.** Archetype identity keys on the FILTERED signature mask
+    /// (`ArchetypeMaster::get_or_create_archetype` → `find_exact_match`), so two
+    /// id lists differing only in dense / bitset ids collapse onto ONE archetype
+    /// and whichever list minted it first decides what is recorded here.
+    /// `spawn_at_command.rs` states the same race in its own words. Ask the
+    /// dense store (`e2s`) for dense membership and the `EnableStore` for a
+    /// bitset tag — never this list. Resolving a `ComponentPool` out of it is
+    /// KE14 D1, whose four faces were four such loops.
+    ///
+    /// Its ONE legitimate consumer is KE10's declaration walk
+    /// (`apply_attach_flags_all`), which must reach POOLLESS declarers — the
+    /// retention exists for it and `ke10_flags_direct_on_attach.rs` pins it.
     ///
     /// `pub(crate)` for in-place slab construction (Phase 7 U13).
-    pub(crate) component_ids: Vec<ComponentId>,
+    pub(crate) all_component_ids: Vec<ComponentId>,
+
+    /// The signature-storage subsequence of [`Self::all_component_ids`], in the
+    /// same canonical order.
+    ///
+    /// INVARIANT (debug-asserted at every mint funnel by
+    /// [`Self::debug_assert_id_lists_agree`]): its members are exactly the
+    /// signature mask's, and every one of them OWNS a `ComponentPool` in
+    /// `component_pools`. Those are the two facts every retained-copy and
+    /// pool-resolving loop depends on, so THIS is the list they walk.
+    ///
+    /// `pub(crate)` for in-place slab construction (Phase 7 U13).
+    pub(crate) table_component_ids: Vec<ComponentId>,
     /// Entity-id column, indexed by `unit_index`. Address-stable and growable
     /// on ONE `VmReservation` (kernel-memory audit F1) — replaces the former
     /// `Vec<EntityId>`, the last per-row hot column on a realloc-able `Vec`.
@@ -215,6 +242,36 @@ pub struct Archetype {
     ///
     /// `pub(crate)` for in-place slab construction (Phase 7 U13).
     pub(crate) entity_ids: VmColumn<EntityId>,
+
+    /// **`ArchAdded`** — the tick of the most recent *structural add* into this
+    /// archetype (kernel backlog **KE6**, ruling **D2**).
+    ///
+    /// A plain `Tick`, not an `AtomicU32`. D2 rejected the per-row value half of
+    /// the coarse-dirty-summary idea precisely because it would have put an
+    /// atomic on a line every worker hammers (`par_iter` splits one archetype's
+    /// rows across workers); the structural half survives because every write
+    /// site is a **cold, exclusive-access** row-add — see
+    /// [`stamp_arch_added`](Self::stamp_arch_added) for the enumerated census
+    /// and the race-freedom argument.
+    ///
+    /// Semantics: `arch_added` is `>=` (in the `Tick::is_newer_than` sense)
+    /// every per-row `added_tick` stored in this archetype's **table** columns.
+    /// It is deliberately conservative — a row-add always stamps the *current*
+    /// tick even when the row carries an older `added_tick` forward from a
+    /// migration source, so the stamp can be too new but never too old. Too-new
+    /// costs a consumer one non-skip; too-old would be a silent wrong answer.
+    ///
+    /// ⚠ **Table storage only.** A `StorageKind::Dense` component lives in the
+    /// global `DenseStore` and adding one to an entity moves no row and creates
+    /// no archetype row, so `DenseStore::insert`'s `added_tick` is invisible
+    /// here. A future `Added<C>` archetype-skip consumer MUST gate itself on
+    /// `!C::STORAGE_IS_DENSE`. This is the same storage-kind blindness class
+    /// that produced KE1, GK-2 and F4, written down at the source rather than
+    /// left for a reader to discover.
+    ///
+    /// `pub(crate)` for in-place slab construction (Phase 7 U13) — every field
+    /// is written via `addr_of_mut!` on the slab path and this one must be too.
+    pub(crate) arch_added: Tick,
 }
 
 // Phase 7 U5 / D4: the inline column table MUST be at offset 0 so the fast
@@ -260,8 +317,26 @@ const _: () = assert!(std::mem::offset_of!(Archetype, columns) == 0);
 // 64-bit ABI; gated to 64-bit (the engine's supported platform) — see CLAUDE.md
 // target platform. `offset_of(columns) == 0` above is width-independent (first
 // `#[repr(C)]` field) and stays unconditional.
+// KE6 adds `arch_added: Tick` (a `u32`). It landed inside the existing align-32
+// tail padding on both arms (raw 8680 → 8704 with 24 B of pad; raw 8696 → 8704
+// with 8 B) and cost nothing — the case this assertion exists to distinguish
+// from the next one.
+//
+// KE14 D1 splits the single `component_ids: Vec<ComponentId>` into the
+// declaration record `all_component_ids` plus the pool-bearing subsequence
+// `table_component_ids`. That is +24 B raw (one `Vec` header), and unlike KE6's
+// 4 bytes it does NOT fit the tail pad: raw 8704 / 8720 both round to **8736**
+// under align 32, so ONE unconditional pin still covers both arms — but the
+// struct really did grow by 32 B this time, and this line is the measurement
+// saying so rather than an estimate.
+//
+// The cost is per ARCHETYPE (a few hundred at most in a large world) and buys
+// the property KE14 D1 needed: a stored, debug-asserted list whose every member
+// owns a `ComponentPool`, so no consumer has to remember a per-turn
+// `is_signature_storage` screen — six such screens existed and the four
+// defective loops were precisely the ones that forgot.
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<Archetype>() == 8704);
+const _: () = assert!(std::mem::size_of::<Archetype>() == 8736);
 
 impl Archetype {
     /// Creates a new archetype with the given ID.
@@ -281,8 +356,11 @@ impl Archetype {
             // Phase 14a: no hooks until Wave 2 computes them from the `HOOKS`
             // table at `create_by_ids` / `register_component_inplace`.
             flags: ArchetypeFlags::empty(),
-            component_ids: Vec::new(),
+            all_component_ids: Vec::new(),
+            table_component_ids: Vec::new(),
             entity_ids: VmColumn::new("Archetype.entity_ids", POOL_MAX_ROWS),
+            // KE6: no rows yet, so no structural add has happened.
+            arch_added: Tick::ZERO,
         }
     }
 
@@ -314,8 +392,9 @@ impl Archetype {
     pub(crate) fn filtered_signature_mask(component_ids: &[ComponentId]) -> ComponentMask {
         let mut mask = ComponentMask::new();
         for &comp_id in component_ids {
-            if !component_registry::is_signature_storage(component_registry::storage_kind(comp_id.0))
-            {
+            if !component_registry::is_signature_storage(component_registry::storage_kind(
+                comp_id.0,
+            )) {
                 continue;
             }
             mask.set(comp_id);
@@ -343,8 +422,13 @@ impl Archetype {
             // Phase 14a: initialised empty; the OR-compute happens below once
             // the component pools are registered (Wave 2 wires `HOOKS`).
             flags: ArchetypeFlags::empty(),
-            component_ids: component_ids.to_vec(),
+            all_component_ids: component_ids.to_vec(),
+            // Filled by the per-id walk below, which is the only place that can
+            // decide signature membership without a second `storage_kind` pass.
+            table_component_ids: Vec::with_capacity(component_ids.len()),
             entity_ids: VmColumn::new("Archetype.entity_ids", POOL_MAX_ROWS),
+            // KE6: no rows yet, so no structural add has happened.
+            arch_added: Tick::ZERO,
         };
 
         // Create component pools for each component ID. Each successful
@@ -393,12 +477,19 @@ impl Archetype {
             // (D1) — at D0 that store does not exist yet, so a dense id simply
             // has no per-archetype column here, which is exactly the intended end
             // state (it never gets one).
-            if !component_registry::is_signature_storage(
-                component_registry::storage_kind(comp_id.0),
-            ) {
+            // KE10: the initial-flag-state gate is raised for EVERY id, ABOVE the
+            // storage screen below. `component_ids` retains poolless ids, so
+            // `apply_attach_flags_all` walks them; raising the gate only for
+            // pool-owning ids left a dense/bitset declarer's `flags (…)` group
+            // silently unapplied unless a table sibling happened to raise the bit.
+            flags.insert_from_flag_declarations(comp_id);
+            if !component_registry::is_signature_storage(component_registry::storage_kind(
+                comp_id.0,
+            )) {
                 Self::debug_assert_non_signature_premise(&archetype, comp_id);
                 continue;
             }
+            archetype.table_component_ids.push(comp_id);
             archetype.component_pools.add_pool(comp_id);
             archetype.refresh_column(comp_id);
             flags.insert_from_hooks(comp_id);
@@ -408,6 +499,7 @@ impl Archetype {
         }
         archetype.flags = flags;
 
+        archetype.debug_assert_id_lists_agree();
         archetype
     }
 
@@ -415,6 +507,20 @@ impl Archetype {
     #[inline]
     pub fn id(&self) -> ArchetypeId {
         self.id
+    }
+
+    /// This archetype's OR-computed [`ArchetypeFlags`] — the "which hook kinds,
+    /// observer kinds and attach actions does ANY component here declare?"
+    /// bitset, fixed at mint.
+    ///
+    /// A read-only accessor over the `pub(crate)` field, added by KE10 so an
+    /// INTEGRATION test can assert the `FLAGS_ON_ATTACH` gate bit is raised for
+    /// a declaring archetype and NOT raised otherwise. That bit is the whole
+    /// zero-when-unused argument for initial flag states, and a gate nothing can
+    /// observe is a gate nothing can falsify. Copies one `u16`.
+    #[inline]
+    pub fn flags(&self) -> ArchetypeFlags {
+        self.flags
     }
 
     /// Registers a component type by ID
@@ -425,9 +531,9 @@ impl Archetype {
         // D5 / D1 inv 3) — a bitset tag enters an archetype only via toggling; a
         // dense id lives in its OWN global `DenseStore`, never a signature
         // column.
-        if !component_registry::is_signature_storage(
-            component_registry::storage_kind(component_id.0),
-        ) {
+        if !component_registry::is_signature_storage(component_registry::storage_kind(
+            component_id.0,
+        )) {
             Self::debug_assert_non_signature_premise(self, component_id);
             return false;
         }
@@ -448,8 +554,19 @@ impl Archetype {
         new_mask.set(component_id);
         self.signature = ArchetypeSignature::new(new_mask);
 
-        // Add component ID to our list
-        self.component_ids.push(component_id);
+        // Both lists: the raw declaration record AND the table subsequence.
+        // This entry point is signature-only by construction — it early-returns
+        // on an id already in the mask and unconditionally mints a pool — so a
+        // non-signature id reaching it would break the `table_component_ids`
+        // invariant rather than merely being redundant.
+        debug_assert!(
+            component_registry::is_signature_storage(component_registry::storage_kind(
+                component_id.0
+            )),
+            "register_component: {component_id:?} owns no per-archetype pool              (bitset tag or dense component); it cannot enter a signature"
+        );
+        self.all_component_ids.push(component_id);
+        self.table_component_ids.push(component_id);
 
         true
     }
@@ -471,12 +588,22 @@ impl Archetype {
         // the bit out of the signature mask too; here we skip the pool so the id
         // never gains a per-archetype backing column (a bitset tag has none ever;
         // a dense id lives in its global `DenseStore` instead).
-        if !component_registry::is_signature_storage(
-            component_registry::storage_kind(component_id.0),
-        ) {
+        //
+        // KE10: the initial-flag-state gate is raised for EVERY id, ABOVE that
+        // screen — see `ArchetypeFlags::insert_from_flag_declarations`. This is
+        // the LIVE mint funnel, so a gate raised only below the screen was the
+        // reachable half of the defect.
+        self.flags.insert_from_flag_declarations(component_id);
+        if !component_registry::is_signature_storage(component_registry::storage_kind(
+            component_id.0,
+        )) {
             Self::debug_assert_non_signature_premise(self, component_id);
             return;
         }
+        // KE14 D1: the pool-bearing subsequence, appended in the SAME walk that
+        // mints the pool, so the two cannot fall out of step. The caller wrote
+        // `all_component_ids` wholesale; this is the screened half of it.
+        self.table_component_ids.push(component_id);
         self.component_pools.add_pool(component_id);
         self.refresh_column(component_id);
         // Phase 14a (plan §4.6): OR this single component's hook bits into the
@@ -492,6 +619,49 @@ impl Archetype {
         // there). One cold `residency_class` load.
         if component_registry::residency_class(component_id.0) == ResidencyKind::Gpu {
             self.flags.insert(ArchetypeFlags::GPU_RESIDENT);
+        }
+    }
+
+    /// KE14 D1 — debug-only tripwire that the archetype's TWO id lists agree
+    /// with each other, with the signature mask, and with the pool bundle.
+    ///
+    /// Called at every mint funnel. It is what makes
+    /// [`Self::table_component_ids`] usable as "the ids that own a pool"
+    /// without a per-consumer `is_signature_storage` screen — the four screens
+    /// KE14 D1's four faces each forgot. Compiles to nothing in release.
+    #[inline]
+    pub(crate) fn debug_assert_id_lists_agree(&self) {
+        #[cfg(debug_assertions)]
+        {
+            debug_assert_eq!(
+                Self::filtered_signature_mask(&self.all_component_ids),
+                *self.signature.mask(),
+                "archetype {:?}: the declaration record does not filter to the signature",
+                self.id
+            );
+            let expected: Vec<ComponentId> = self
+                .all_component_ids
+                .iter()
+                .copied()
+                .filter(|c| {
+                    component_registry::is_signature_storage(component_registry::storage_kind(c.0))
+                })
+                .collect();
+            debug_assert_eq!(
+                self.table_component_ids, expected,
+                "archetype {:?}: table_component_ids is not the signature-storage \
+                 subsequence of all_component_ids (order included — the canonical \
+                 order is load-bearing for create_entity_with_pool_ids)",
+                self.id
+            );
+            for &cid in &self.table_component_ids {
+                debug_assert!(
+                    self.component_pools.has_pool(cid),
+                    "archetype {:?}: table id {} owns no ComponentPool",
+                    self.id,
+                    cid.0
+                );
+            }
         }
     }
 
@@ -599,7 +769,8 @@ impl Archetype {
             // zero. `write_row_bit` already short-circuits the clear-no-column
             // case, but go through the column directly to avoid a redundant
             // scan when the column is absent.
-            self.enable_store.write_row_bit(tag, row, false, reserve_rows);
+            self.enable_store
+                .write_row_bit(tag, row, false, reserve_rows);
             return false;
         }
         let newly_allocated = self.enable_store.column(tag).is_none();
@@ -619,7 +790,9 @@ impl Archetype {
     fn refresh_column(&mut self, component_id: ComponentId) {
         debug_assert!(
             component_id.0 < MAX_COMPONENTS,
-            "component_id {} >= MAX_COMPONENTS ({})", component_id.0, MAX_COMPONENTS
+            "component_id {} >= MAX_COMPONENTS ({})",
+            component_id.0,
+            MAX_COMPONENTS
         );
         match self.component_pools.get_pool(component_id) {
             Some(pool) => {
@@ -824,30 +997,214 @@ impl Archetype {
             *col = Column::null();
         }
         // Clone the IDs out so the iteration does not hold a borrow of
-        // `self.component_ids` across the `refresh_column(...)` call, which
+        // `self.table_component_ids` across the `refresh_column(...)` call, which
         // needs `&mut self`.
-        let ids: Vec<ComponentId> = self.component_ids.clone();
+        let ids: Vec<ComponentId> = self.table_component_ids.clone();
         for cid in ids {
             self.refresh_column(cid);
         }
     }
 
-    /// Checks if this archetype contains a component with the given ID
+    /// Checks if this archetype has a COLUMN for the given ID — a signature
+    /// (`table_component_ids`) membership test, answered off the signature mask
+    /// in O(1).
+    ///
+    /// ⚠ This is the *storage* question, and a poolless (`Dense` / `Bitset`) id
+    /// answers `false` even when the archetype was minted from it: such an id is
+    /// filtered out of the signature by [`Self::filtered_signature_mask`]. For
+    /// the *declaration* question — "was this archetype minted from `cid`?", the
+    /// one the lifecycle-flag bits are about — use
+    /// [`Self::declares_component_id`].
     #[inline]
     pub fn has_component_id(&self, component_id: ComponentId) -> bool {
         self.signature.mask().contains(component_id)
     }
 
-    /// Gets the number of component types in this archetype
+    /// Checks whether this archetype was MINTED FROM `component_id` — a
+    /// [`Self::all_component_ids`] (declaration record) membership test, which
+    /// unlike [`Self::has_component_id`] answers `true` for a poolless
+    /// (`Dense` / `Bitset`) id.
+    ///
+    /// KE14 D1 fix: this is the predicate the `ON_*_OBSERVER` maintenance walks
+    /// need, because the two mint SEEDS
+    /// ([`ArchetypeFlags::insert_from_observers`](crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags::insert_from_observers)
+    /// at `create_archetype` and `add_existing_archetype`) OR over the full
+    /// declaration list. A walk asking `has_component_id` instead can never
+    /// match a dense declarer, so it leaves those archetypes in a state no mint
+    /// can produce — see `ArchetypeMaster::add_observer` / `remove_observer`.
+    ///
+    /// Linear over a short `Vec` rather than a mask test, because a poolless id
+    /// is by construction absent from every mask. Cold path (observer
+    /// registration / removal), so the scan is free of consequence.
+    #[inline]
+    pub fn declares_component_id(&self, component_id: ComponentId) -> bool {
+        self.all_component_ids.contains(&component_id)
+    }
+
+    /// The number of POOL-BEARING component types in this archetype — i.e.
+    /// `table_component_ids().len()`, which equals the signature's popcount and
+    /// the pool count.
+    ///
+    /// It deliberately does NOT count the declaration record's non-signature
+    /// ids: a caller asking "how many components" is asking about columns, and
+    /// a phantom dense id in the mint list is not one.
     #[inline]
     pub fn component_count(&self) -> usize {
-        self.component_ids.len()
+        self.table_component_ids.len()
     }
 
     /// Gets the number of entities in this archetype
     #[inline]
     pub fn entity_count(&self) -> usize {
         self.current_index
+    }
+
+    /// Records that a row was structurally added to this archetype at `tick`
+    /// — the single writer of the [`ArchAdded`](Self::arch_added) stamp
+    /// (kernel backlog **KE6**, ruling **D2**).
+    ///
+    /// `max`-free by construction: `tick` is always the world's *current* tick
+    /// at the calling site, and the world tick is monotonic within a run, so a
+    /// plain store cannot move the stamp backwards. (`check_tick`'s wraparound
+    /// clamp is the one exception, and it also only ever moves the stamp
+    /// forward — see [`clamp_arch_added`](Self::clamp_arch_added).)
+    ///
+    /// # Why a non-atomic store is race-free (D2)
+    ///
+    /// Every call site is a **row add**, and a row add is a structural edit:
+    /// it runs on the dispatcher inside the apply window with the world
+    /// exclusively borrowed, no worker live. That is what makes the stamp
+    /// free — the field is written on paths that were already cold and already
+    /// exclusive, so it adds one `u32` store to a path that is doing a memcpy
+    /// and a pool commit anyway, and it never touches a line a `par_iter` split
+    /// is hammering (the reason D2 rejected the per-row value half).
+    ///
+    /// # The write-site census — reproduce it, do not trust this list
+    ///
+    /// "A row was added" is mechanically "`current_index` advanced upward".
+    /// The producing command, from the repo root:
+    ///
+    /// ```text
+    /// grep -rn --include=*.rs "current_index += 1\|current_index = " crates/boyko_ecs/src
+    /// ```
+    ///
+    /// Nine production sites, each stamping here or through
+    /// [`stamp_arch_added_raw`](Self::stamp_arch_added_raw):
+    ///
+    /// | site | receiver |
+    /// |---|---|
+    /// | `Archetype::create_entity` | `&mut self` |
+    /// | `Archetype::create_entity_with_ticks` | `&mut self` |
+    /// | `Archetype::create_entity_with_pool_ids` | `&mut self` |
+    /// | `clone::materialize::materialize_clone_into` | confined `&mut Archetype` reborrow |
+    /// | `clone::prefab::Prefab::instantiate` | confined `&mut Archetype` reborrow |
+    /// | `commands::migration_helpers::migrate_entity_insert` | raw `addr_of_mut!` (Tree-Borrows discipline) |
+    /// | `commands::migration_helpers::migrate_entity_attach_ids` | `&mut Archetype` |
+    /// | `commands::spawn_at_command::SpawnAtCommand::apply` | `&mut Archetype` |
+    /// | `commands::spawn_batch_command::SpawnBatchCommand::apply` | `&mut Archetype` |
+    ///
+    /// **The fatal direction is under-stamping**, and only under-stamping: a
+    /// missed site would let a consumer skip an archetype that does hold a
+    /// fresh row — a silent wrong answer. Over-stamping costs one non-skip.
+    /// A new row-add path therefore MUST stamp; when in doubt, stamp.
+    ///
+    /// Row *removals* (`remove_entity` / `move_out_entity` / `pop`) do NOT
+    /// stamp: they write no `added_tick`. Neither does
+    /// `InsertCommand::apply_replace_in_place` (it stamps `changed`, never
+    /// `added` — verified by the absence of any `write_added_tick` /
+    /// `fill_ticks` call in `insert_command.rs`).
+    #[inline]
+    pub(crate) fn stamp_arch_added(&mut self, tick: Tick) {
+        self.arch_added = tick;
+    }
+
+    /// Raw-pointer twin of [`stamp_arch_added`](Self::stamp_arch_added), for
+    /// the one site that must not narrow an interior-mutable slab cell to a
+    /// `Unique` tag.
+    ///
+    /// `migrate_entity_insert` writes `current_index` through `addr_of_mut!`
+    /// rather than a place-assign for exactly that reason (a persistent
+    /// `Unique` on the slab cell makes the later `EcsMaster`-drop deallocation
+    /// of the bundle `Box` illegal under Tree Borrows). The stamp sits beside
+    /// that write and must use the same discipline; forming a
+    /// `&mut Archetype` here purely to store a `u32` would reintroduce the
+    /// narrowing the surrounding code exists to avoid.
+    ///
+    /// # Safety
+    ///
+    /// * `archetype_ptr` is a valid, write-capable pointer to a live
+    ///   [`Archetype`] slab slot, held under an exclusive `&mut EcsMaster` —
+    ///   the same precondition the neighbouring `current_index` write carries.
+    /// * No `&`/`&mut Archetype` is live across the call.
+    #[inline]
+    pub(crate) unsafe fn stamp_arch_added_raw(archetype_ptr: *mut Archetype, tick: Tick) {
+        // SAFETY: delegated to the caller's contract above — the pointer is
+        //   write-capable slab provenance under an exclusive world borrow, and
+        //   `addr_of_mut!` forms the field pointer WITHOUT materialising an
+        //   intermediate `&mut Archetype` (which a place-assign would).
+        unsafe {
+            core::ptr::addr_of_mut!((*archetype_ptr).arch_added).write(tick);
+        }
+    }
+
+    /// Returns the [`ArchAdded`](Self::arch_added) stamp verbatim.
+    ///
+    /// Prefer [`has_structural_add_since`](Self::has_structural_add_since),
+    /// which folds in the empty-archetype case; this accessor exists for the
+    /// wraparound-clamp pass and for tests.
+    #[inline]
+    pub fn arch_added(&self) -> Tick {
+        self.arch_added
+    }
+
+    /// Clamps the [`ArchAdded`](Self::arch_added) stamp against `current`, the
+    /// wraparound half of KE6's oracle.
+    ///
+    /// `Tick::is_newer_than` interprets a `wrapping_sub` difference as an
+    /// elapsed-tick count, and that reading is correct only while the stored
+    /// tick stays within `MAX_CHANGE_AGE` of the world's current tick. A stamp
+    /// on a long-dormant archetype (one that took a spawn burst and then never
+    /// changed again) is exactly the value that ages out, and if it did it
+    /// would flip from "very old" to "newer than now" — turning a permanent
+    /// skip into a permanent non-skip, or the reverse. `run_check_ticks_scan`
+    /// calls this for every archetype on the same cold pass that clamps the
+    /// per-row columns.
+    #[inline]
+    pub(crate) fn clamp_arch_added(&mut self, current: Tick) {
+        self.arch_added = self.arch_added.check_tick(current);
+    }
+
+    /// Returns `true` when this archetype may hold a row whose `added_tick`
+    /// falls in the window `(last_run, this_run]` — the consumer predicate
+    /// [`Added<C>`] would gate an archetype-wide skip on.
+    ///
+    /// Conservative in the safe direction: `false` means *no table row in this
+    /// archetype was added in the window*, which is a guarantee; `true` means
+    /// *maybe*, and the caller still has to check per row.
+    ///
+    /// The `entity_count() != 0` conjunct removes the never-stamped case from
+    /// the predicate entirely. An archetype that has never taken a row still
+    /// carries the `Tick::ZERO` sentinel, and `Tick::ZERO` is not a meaningful
+    /// point on the wrapping tick line — but such an archetype has no rows to
+    /// yield either, so the answer is `false` on the row count alone and the
+    /// sentinel is never interpreted.
+    ///
+    /// ⚠ Table storage only — see the field docs. A dense `Added<C>` consumer
+    /// must not call this.
+    ///
+    /// # Status
+    ///
+    /// **No consumer is wired in this rung.** KE6's stated oracle is the stamp
+    /// plus the check-ticks clamp; wiring the archetype-wide skip into the
+    /// query iterator's four archetype-advance sites is a change to the
+    /// kernel's hottest file whose correctness rests on the write-site census
+    /// above being exhaustive, and it deserves its own oracle over every add
+    /// path rather than riding this one.
+    ///
+    /// [`Added<C>`]: crate::ecs::core::iters::query::Added
+    #[inline]
+    pub fn has_structural_add_since(&self, last_run: Tick, this_run: Tick) -> bool {
+        self.entity_count() != 0 && self.arch_added.is_newer_than(last_run, this_run)
     }
 
     /// Creates a new entity in this archetype with the given components.
@@ -887,7 +1244,9 @@ impl Archetype {
         for (id, _) in components {
             debug_assert!(
                 *id < MAX_COMPONENTS_ID,
-                "component_id {} >= MAX_COMPONENTS ({})", id.0, MAX_COMPONENTS
+                "component_id {} >= MAX_COMPONENTS ({})",
+                id.0,
+                MAX_COMPONENTS
             );
             input_mask.set(*id);
         }
@@ -959,6 +1318,10 @@ impl Archetype {
 
         // Increment entity counter
         self.current_index += 1;
+
+        // KE6 write site 1/9 — `&mut self`, so the D2 exclusivity ground holds
+        // by the receiver alone.
+        self.stamp_arch_added(current_tick);
 
         true
     }
@@ -1041,7 +1404,11 @@ impl Archetype {
             .expect("invariant: last_unit_index < entity_ids.len() (archetype non-empty)");
 
         // Swap_remove in component pools.
-        if self.component_pools.swap_remove_unit(removed_unit_index.0).is_err() {
+        if self
+            .component_pools
+            .swap_remove_unit(removed_unit_index.0)
+            .is_err()
+        {
             return RemoveOutcome::PoolFailure;
         }
 
@@ -1061,7 +1428,9 @@ impl Archetype {
             );
         }
 
-        RemoveOutcome::Swapped { moved_entity: swapped_entity_id }
+        RemoveOutcome::Swapped {
+            moved_entity: swapped_entity_id,
+        }
     }
 
     /// Phase 11 (plan §7.2 / C5 / W-N2): releases the row at
@@ -1088,10 +1457,7 @@ impl Archetype {
     /// of those bytes (e.g. memcpy them into a different archetype before
     /// release). Both paths invoke the swap-remove dance over byte +
     /// tick storage identically.
-    pub(crate) fn move_out_entity(
-        &mut self,
-        removed_unit_index: InlandPoolId,
-    ) -> RemoveOutcome {
+    pub(crate) fn move_out_entity(&mut self, removed_unit_index: InlandPoolId) -> RemoveOutcome {
         let last_unit_index = InlandPoolId(self.current_index.saturating_sub(1));
 
         // EnableTag swap-remove fix (Decision O1-r7 / critic note 3): the SOURCE
@@ -1129,7 +1495,10 @@ impl Archetype {
         //   `count()` equals `current_index` by archetype invariant).
         //   `&mut self` ⇒ exclusive access; caller upholds the
         //   W-N2 PRECONDITION (bytes moved or dropped before this call).
-        unsafe { self.component_pools.swap_remove_unit_no_drop(removed_unit_index.0); }
+        unsafe {
+            self.component_pools
+                .swap_remove_unit_no_drop(removed_unit_index.0);
+        }
         self.entity_ids.swap_remove(removed_unit_index.0);
         self.current_index -= 1;
         // O1-r7 Swapped: READ-first fix-up at the same sequence point as the
@@ -1173,7 +1542,12 @@ impl Archetype {
         components: &[(ComponentId, &[u8], Tick, Tick)],
         current_tick: Tick,
     ) -> bool {
-        let _ = current_tick; // Reserved (Phase 12 OQ5).
+        // `current_tick` was "Reserved (Phase 12 OQ5)" — unused, because every
+        // per-component tick arrives explicitly in `components`. KE6 gives it a
+        // consumer: the per-row ticks carried forward from a migration source
+        // are OLD, but the *structural* add into THIS archetype happens now, so
+        // the stamp at the tail below uses the current tick, not the carried
+        // ones.
 
         // Build a mask of the input ids; signature subset check (mirrors
         // `create_entity`).
@@ -1181,7 +1555,9 @@ impl Archetype {
         for (id, _, _, _) in components {
             debug_assert!(
                 *id < MAX_COMPONENTS_ID,
-                "component_id {} >= MAX_COMPONENTS ({})", id.0, MAX_COMPONENTS
+                "component_id {} >= MAX_COMPONENTS ({})",
+                id.0,
+                MAX_COMPONENTS
             );
             input_mask.set(*id);
         }
@@ -1200,7 +1576,10 @@ impl Archetype {
             .iter()
             .map(|(id, bytes, _, _)| (*id, *bytes))
             .collect();
-        if !self.component_pools.can_push_entity_components(&component_bytes) {
+        if !self
+            .component_pools
+            .can_push_entity_components(&component_bytes)
+        {
             return false;
         }
 
@@ -1245,6 +1624,11 @@ impl Archetype {
 
         self.entity_ids.push(entity_id);
         self.current_index += 1;
+        // KE6 write site 2/9 — `&mut self`. Stamps `current_tick`, NOT the
+        // carried per-row `added_tick`s: the stamp records when a row entered
+        // THIS archetype, and is conservative by being too new rather than too
+        // old.
+        self.stamp_arch_added(current_tick);
         true
     }
 
@@ -1296,7 +1680,7 @@ impl Archetype {
         let row = self.current_index;
         for (canonical_idx, (component_id, bytes)) in components.iter().enumerate() {
             debug_assert_eq!(
-                self.component_ids[canonical_idx], *component_id,
+                self.table_component_ids[canonical_idx], *component_id,
                 "create_entity_with_pool_ids: canonical order mismatch at idx {}",
                 canonical_idx
             );
@@ -1310,9 +1694,7 @@ impl Archetype {
             //   * `bytes.len() == pool.component_layout.size()` by
             //     Bundle/macro contract.
             unsafe {
-                let pool = self
-                    .component_pools
-                    .pool_at_unchecked_mut(pool_idx);
+                let pool = self.component_pools.pool_at_unchecked_mut(pool_idx);
                 pool.write_at_unchecked_initialized(row, bytes);
                 pool.commit_units(row, 1);
                 pool.fill_ticks(row, 1, current_tick);
@@ -1320,6 +1702,8 @@ impl Archetype {
         }
         self.entity_ids.push(entity_id);
         self.current_index = row + 1;
+        // KE6 write site 3/9 — `&mut self`.
+        self.stamp_arch_added(current_tick);
         *new_unit_index = row as u32;
         true
     }
@@ -1393,25 +1777,38 @@ impl Archetype {
     pub fn component_pools_mut(&mut self) -> &mut ComponentPoolBundle {
         &mut self.component_pools
     }
-    
+
     /// Gets the archetype signature
     #[inline]
     pub fn signature(&self) -> &ArchetypeSignature {
         &self.signature
     }
-    
+
     /// Gets the component mask for this archetype
     #[inline]
     pub fn component_mask(&self) -> &ComponentMask {
         self.signature.mask()
     }
-    
-    /// Gets the slice of component IDs for this archetype
+
+    /// EVERY id this archetype was minted from — the DECLARATION RECORD.
+    ///
+    /// ⚠ Read [`Self::all_component_ids`]'s field doc before using it. It
+    /// retains non-signature (dense / bitset) ids, it is race-dependent, and a
+    /// `ComponentPool` must never be resolved out of it. For that use
+    /// [`Self::table_component_ids`].
     #[inline]
-    pub fn component_ids(&self) -> &[ComponentId] {
-        &self.component_ids
+    pub fn all_component_ids(&self) -> &[ComponentId] {
+        &self.all_component_ids
     }
-    
+
+    /// The signature-storage subsequence — every id here owns a
+    /// `ComponentPool`. This is the list every retained-copy, pool-resolving
+    /// and column walk wants.
+    #[inline]
+    pub fn table_component_ids(&self) -> &[ComponentId] {
+        &self.table_component_ids
+    }
+
     /// Checks if this archetype has all the specified component IDs
     pub fn matches_component_ids(&self, component_ids: &[ComponentId]) -> bool {
         // Check if this archetype contains all the requested components
@@ -1420,10 +1817,10 @@ impl Archetype {
                 return false;
             }
         }
-        
+
         true
     }
-    
+
     /// Removes the last entity from this archetype.
     ///
     /// Phase 7: generation bumping is moved out — the caller
@@ -1431,7 +1828,10 @@ impl Archetype {
     /// bump on its fast-store `EntityInland`. This method only mutates
     /// archetype-local state.
     pub fn pop(&mut self) -> bool {
-        debug_assert!(self.current_index > 0, "Attempting to pop from an empty archetype");
+        debug_assert!(
+            self.current_index > 0,
+            "Attempting to pop from an empty archetype"
+        );
 
         // C-008 fix: pop_entity() ran inside debug_assert!, so in release builds the
         // pools were never popped while `current_index` was still decremented — silent
@@ -1571,10 +1971,12 @@ mod tests {
         let bytes_a = vec![0u8; component_registry::get_component_size(COMP_A.0).unwrap()];
         let bytes_b = vec![0u8; component_registry::get_component_size(COMP_B.0).unwrap()];
         let mut new_unit_index: u32 = 0;
-        let ok = arch.create_entity(entity_id, &mut new_unit_index, &[
-            (COMP_A, bytes_a.as_slice()),
-            (COMP_B, bytes_b.as_slice()),
-        ], Tick::new(1));
+        let ok = arch.create_entity(
+            entity_id,
+            &mut new_unit_index,
+            &[(COMP_A, bytes_a.as_slice()), (COMP_B, bytes_b.as_slice())],
+            Tick::new(1),
+        );
         assert!(ok, "create_entity must succeed in setup helper");
         InlandPoolId(new_unit_index as usize)
     }
@@ -1615,7 +2017,10 @@ mod tests {
             &[(COMP_A, bytes_a.as_slice())],
             Tick::new(1),
         );
-        assert!(!ok, "create_entity must return false when a component is missing");
+        assert!(
+            !ok,
+            "create_entity must return false when a component is missing"
+        );
     }
 
     // --- pop (C-008 + Q-022 regression) ---
@@ -1694,7 +2099,11 @@ mod tests {
         let idx = add_entity(&mut arch, EntityId(55));
         // Removing the only entity — no swap needed.
         let result = arch.remove_entity(idx);
-        assert_eq!(result, RemoveOutcome::Last, "no swap expected for the last entity");
+        assert_eq!(
+            result,
+            RemoveOutcome::Last,
+            "no swap expected for the last entity"
+        );
         assert_eq!(arch.entity_count(), 0);
     }
 
@@ -1708,7 +2117,9 @@ mod tests {
         let result = arch.remove_entity(idx_first);
         assert_eq!(
             result,
-            RemoveOutcome::Swapped { moved_entity: EntityId(20) },
+            RemoveOutcome::Swapped {
+                moved_entity: EntityId(20)
+            },
             "swapped entity ID must be 20"
         );
         assert_eq!(arch.entity_count(), 1);
@@ -1736,7 +2147,12 @@ mod tests {
         add_entity(&mut arch, EntityId(30)); // last
 
         let result = arch.remove_entity(idx_0);
-        assert_eq!(result, RemoveOutcome::Swapped { moved_entity: EntityId(30) });
+        assert_eq!(
+            result,
+            RemoveOutcome::Swapped {
+                moved_entity: EntityId(30)
+            }
+        );
         // Entity 30 now occupies slot 0; slot 1 holds entity 20.
         assert_eq!(arch.get_entity_id_at(InlandPoolId(0)), Some(EntityId(30)));
         assert_eq!(arch.get_entity_id_at(InlandPoolId(1)), Some(EntityId(20)));
@@ -1751,7 +2167,12 @@ mod tests {
         add_entity(&mut arch, EntityId(200)); // becomes "last"
 
         let result = arch.remove_entity(idx_0);
-        assert_eq!(result, RemoveOutcome::Swapped { moved_entity: EntityId(200) });
+        assert_eq!(
+            result,
+            RemoveOutcome::Swapped {
+                moved_entity: EntityId(200)
+            }
+        );
         assert_eq!(arch.entity_count(), 1);
         assert_eq!(arch.get_entity_id_at(InlandPoolId(0)), Some(EntityId(200)));
     }
@@ -1807,20 +2228,34 @@ mod tests {
     const C16_B: ComponentId = ComponentId(411);
     // IDs 412-417 reserved for wide-mask test (8 components).
     const C16_WIDE: [ComponentId; 8] = [
-        ComponentId(410), ComponentId(411), ComponentId(412), ComponentId(413),
-        ComponentId(414), ComponentId(415), ComponentId(416), ComponentId(417),
+        ComponentId(410),
+        ComponentId(411),
+        ComponentId(412),
+        ComponentId(413),
+        ComponentId(414),
+        ComponentId(415),
+        ComponentId(416),
+        ComponentId(417),
     ];
 
     fn register_c16_components() {
         // Register each with a distinct struct type so TypeId differs.
-        #[repr(C)] struct C16CompA(u32);
-        #[repr(C)] struct C16CompB(u32);
-        #[repr(C)] struct C16CompC(u32);
-        #[repr(C)] struct C16CompD(u32);
-        #[repr(C)] struct C16CompE(u32);
-        #[repr(C)] struct C16CompF(u32);
-        #[repr(C)] struct C16CompG(u32);
-        #[repr(C)] struct C16CompH(u32);
+        #[repr(C)]
+        struct C16CompA(u32);
+        #[repr(C)]
+        struct C16CompB(u32);
+        #[repr(C)]
+        struct C16CompC(u32);
+        #[repr(C)]
+        struct C16CompD(u32);
+        #[repr(C)]
+        struct C16CompE(u32);
+        #[repr(C)]
+        struct C16CompF(u32);
+        #[repr(C)]
+        struct C16CompG(u32);
+        #[repr(C)]
+        struct C16CompH(u32);
         component_registry::register_layout::<C16CompA>(410);
         component_registry::register_layout::<C16CompB>(411);
         component_registry::register_layout::<C16CompC>(412);
@@ -1858,13 +2293,21 @@ mod tests {
             let bytes_c = vec![0u8; sz_c];
 
             let mut new_unit_index: u32 = 0;
-            let ok = arch.create_entity(EntityId(200), &mut new_unit_index, &[
-                (C16_A, bytes_a.as_slice()),
-                (C16_B, bytes_b.as_slice()),
-                (ComponentId(412), bytes_c.as_slice()), // extra: not in archetype pools
-            ], Tick::new(1));
+            let ok = arch.create_entity(
+                EntityId(200),
+                &mut new_unit_index,
+                &[
+                    (C16_A, bytes_a.as_slice()),
+                    (C16_B, bytes_b.as_slice()),
+                    (ComponentId(412), bytes_c.as_slice()), // extra: not in archetype pools
+                ],
+                Tick::new(1),
+            );
             // In release: bundle returns None for the unknown ID → create_entity returns false.
-            assert!(!ok, "create_entity must return false when bundle cannot accept the extra ID");
+            assert!(
+                !ok,
+                "create_entity must return false when bundle cannot accept the extra ID"
+            );
         }));
         // In debug: pool bundle debug_assert fires → panic is expected and acceptable.
         // In release: no panic, assertion inside closure must hold.
@@ -1881,12 +2324,16 @@ mod tests {
 
         // Build component data: 4 bytes each (all u32-sized).
         let bytes = [0u8; 4];
-        let components: Vec<(ComponentId, &[u8])> = C16_WIDE.iter()
-            .map(|&id| (id, bytes.as_slice()))
-            .collect();
+        let components: Vec<(ComponentId, &[u8])> =
+            C16_WIDE.iter().map(|&id| (id, bytes.as_slice())).collect();
 
         let mut new_unit_index: u32 = 0;
-        let ok = arch.create_entity(EntityId(300), &mut new_unit_index, &components, Tick::new(1));
+        let ok = arch.create_entity(
+            EntityId(300),
+            &mut new_unit_index,
+            &components,
+            Tick::new(1),
+        );
         assert!(ok, "create_entity must succeed for 8-component archetype");
         assert_eq!(arch.entity_count(), 1);
     }
@@ -1919,10 +2366,7 @@ mod tests {
         component_registry::register_layout::<Step4TableB>(STEP4_TABLE_B.0);
         component_registry::register_layout::<Step4Tag>(STEP4_TAG.0);
         // Classify the tag id as bitset storage (write-once / idempotent).
-        component_registry::set_storage_kind(
-            STEP4_TAG.0,
-            component_registry::StorageKind::Bitset,
-        );
+        component_registry::set_storage_kind(STEP4_TAG.0, component_registry::StorageKind::Bitset);
     }
 
     /// Adds one zero-filled entity to a `[STEP4_TABLE_A, STEP4_TABLE_B]`
@@ -1934,7 +2378,10 @@ mod tests {
         let ok = arch.create_entity(
             entity_id,
             &mut new_unit_index,
-            &[(STEP4_TABLE_A, bytes_a.as_slice()), (STEP4_TABLE_B, bytes_b.as_slice())],
+            &[
+                (STEP4_TABLE_A, bytes_a.as_slice()),
+                (STEP4_TABLE_B, bytes_b.as_slice()),
+            ],
             Tick::new(1),
         );
         assert!(ok, "create_entity must succeed in the Step-4 setup helper");
@@ -1947,13 +2394,17 @@ mod tests {
     fn bitset_id_never_in_signature_and_never_gets_a_pool() {
         register_step4_components();
         // Mix the tag in with two table components.
-        let arch = Archetype::create_by_ids(
-            ArchetypeId(1),
-            &[STEP4_TABLE_A, STEP4_TAG, STEP4_TABLE_B],
-        );
+        let arch =
+            Archetype::create_by_ids(ArchetypeId(1), &[STEP4_TABLE_A, STEP4_TAG, STEP4_TABLE_B]);
         // Table ids ARE in the signature; the bitset id is NOT.
-        assert!(arch.has_component_id(STEP4_TABLE_A), "table A must be in signature");
-        assert!(arch.has_component_id(STEP4_TABLE_B), "table B must be in signature");
+        assert!(
+            arch.has_component_id(STEP4_TABLE_A),
+            "table A must be in signature"
+        );
+        assert!(
+            arch.has_component_id(STEP4_TABLE_B),
+            "table B must be in signature"
+        );
         assert!(
             !arch.has_component_id(STEP4_TAG),
             "bitset tag must be filtered OUT of the signature (C1 premise)"
@@ -1966,7 +2417,10 @@ mod tests {
         assert!(arch.component_pools().get_pool(STEP4_TABLE_A).is_some());
         assert!(arch.component_pools().get_pool(STEP4_TABLE_B).is_some());
         // The bitset id never even enters the inline column table.
-        assert!(arch.columns[STEP4_TAG.0].is_null(), "bitset tag column must be null");
+        assert!(
+            arch.columns[STEP4_TAG.0].is_null(),
+            "bitset tag column must be null"
+        );
     }
 
     /// `register_component` refuses a bitset id (it cannot be a table component).
@@ -2051,12 +2505,18 @@ mod tests {
 
         // A clear into an absent column never allocates (returns false).
         assert!(!arch.set_enable_bit(STEP4_TAG, row.0, false));
-        assert!(arch.enable_column_ptr(STEP4_TAG).is_null(), "clear must not allocate");
+        assert!(
+            arch.enable_column_ptr(STEP4_TAG).is_null(),
+            "clear must not allocate"
+        );
 
         let newly = arch.set_enable_bit(STEP4_TAG, row.0, true);
         assert!(newly, "first set must report newly_allocated");
         let newly = arch.set_enable_bit(STEP4_TAG, row.0, true);
-        assert!(!newly, "second set of the same tag must NOT report newly_allocated");
+        assert!(
+            !newly,
+            "second set of the same tag must NOT report newly_allocated"
+        );
         assert!(!arch.enable_column_ptr(STEP4_TAG).is_null());
         assert!(arch.enable_store.column(STEP4_TAG).unwrap().test(row.0));
     }
@@ -2079,13 +2539,24 @@ mod tests {
 
         // Remove row0 (non-last) → row2's entity (EntityId 30) swaps into row0.
         let outcome = arch.remove_entity(row0);
-        assert_eq!(outcome, RemoveOutcome::Swapped { moved_entity: EntityId(30) });
+        assert_eq!(
+            outcome,
+            RemoveOutcome::Swapped {
+                moved_entity: EntityId(30)
+            }
+        );
 
         // The swapped entity's bit moved from `last` (row2) into row0, and the
         // popped `last` slot is clear.
         let col = arch.enable_store.column(STEP4_TAG).unwrap();
-        assert!(col.test(row0.0), "swapped entity's set bit must move into the vacated row");
-        assert!(!col.test(row2.0), "the popped last row's bit must be cleared");
+        assert!(
+            col.test(row0.0),
+            "swapped entity's set bit must move into the vacated row"
+        );
+        assert!(
+            !col.test(row2.0),
+            "the popped last row's bit must be cleared"
+        );
         // row1 is untouched.
         let _ = row1;
     }
@@ -2125,30 +2596,50 @@ mod tests {
         // Caller contract: bytes already moved out elsewhere; here we only
         // exercise the no-drop swap path's enable-bit fix-up.
         let outcome = arch.move_out_entity(row0);
-        assert_eq!(outcome, RemoveOutcome::Swapped { moved_entity: EntityId(30) });
+        assert_eq!(
+            outcome,
+            RemoveOutcome::Swapped {
+                moved_entity: EntityId(30)
+            }
+        );
 
         let col = arch.enable_store.column(STEP4_TAG).unwrap();
-        assert!(col.test(row0.0), "no-drop swap must move the bit into the vacated row");
+        assert!(
+            col.test(row0.0),
+            "no-drop swap must move the bit into the vacated row"
+        );
         assert!(!col.test(row2.0));
     }
 
     /// The `Archetype` size pin holds after the F1 `entity_ids: VmColumn`
-    /// migration. The syscall and Miri/fallback arms coincide at 8704 B — the
-    /// fallback `VmColumn` is 16 B larger (the fallback `VmReservation`'s
-    /// `layout: Layout` field) but both round to the same align-32 tail (see
-    /// the const-assert tripwire's comment for the arithmetic).
+    /// migration and KE14 D1's id-list split. The syscall and Miri/fallback
+    /// arms coincide at 8736 B — the fallback `VmColumn` is 16 B larger (the
+    /// fallback `VmReservation`'s `layout: Layout` field) but both round to the
+    /// same align-32 tail (see the const-assert tripwire's comment for the
+    /// arithmetic).
+    ///
+    /// TWO sites pin this same fact: this test and the
+    /// `const _: () = assert!(size_of::<Archetype>() == 8736)` tripwire above
+    /// `impl Archetype`. They must be edited together — KE14 D1 moved the
+    /// const-assert to 8736 and left this one at 8704, so the suite went red on
+    /// a number the same commit had already measured. Whichever site a future
+    /// growth touches first, grep the other for the old figure.
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn archetype_size_pin_holds() {
         assert_eq!(
             std::mem::size_of::<Archetype>(),
-            8704,
+            8736,
             "Archetype size pin must match the const-assert tripwire \
              (offset_of(entity_ids) = {}, size_of(VmColumn<EntityId>) = {})",
             std::mem::offset_of!(Archetype, entity_ids),
             std::mem::size_of::<VmColumn<EntityId>>()
         );
-        assert_eq!(std::mem::offset_of!(Archetype, columns), 0, "columns must stay at offset 0");
+        assert_eq!(
+            std::mem::offset_of!(Archetype, columns),
+            0,
+            "columns must stay at offset 0"
+        );
     }
 
     // ----- Phase 4 Seam 1/2: residency stamp + conflict reject -----
@@ -2237,7 +2728,10 @@ mod tests {
 
         // Build an empty archetype, then stamp via the single-component path.
         let mut arch = Archetype::create_by_ids(ArchetypeId(53), &[]);
-        assert!(!arch.flags.is_gpu_resident(), "empty archetype is not GPU-resident");
+        assert!(
+            !arch.flags.is_gpu_resident(),
+            "empty archetype is not GPU-resident"
+        );
         arch.register_component_inplace(RES_GPU_A);
         assert!(
             arch.flags.is_gpu_resident(),
@@ -2265,7 +2759,10 @@ mod tests {
         // A GPU-pure single-component archetype. Empty (len == 0) — the O1
         // data-loss guard requires it before the device flip.
         let mut arch = Archetype::create_by_ids(ArchetypeId(55), &[RES_GPU_A]);
-        assert!(arch.flags.is_gpu_resident(), "GPU-pure archetype is GPU-resident");
+        assert!(
+            arch.flags.is_gpu_resident(),
+            "GPU-pure archetype is GPU-resident"
+        );
         // Before the flip, the column is populated (non-null base from the pool).
         assert!(
             !arch.columns[RES_GPU_A.0].is_null(),
@@ -2336,7 +2833,9 @@ mod tests {
 
         // (b) After every component is flipped, all columns are null.
         assert!(
-            arch.component_ids.iter().all(|c| arch.columns[c.0].is_null()),
+            arch.all_component_ids
+                .iter()
+                .all(|c| arch.columns[c.0].is_null()),
             "after the last flip every GPU component column must be null"
         );
     }

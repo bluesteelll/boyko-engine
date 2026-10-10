@@ -1,0 +1,246 @@
+# Window 7 wave 2: the analyst's reduction (tools/analyze7b.py), recomputed from raw/
+inputs: wave 2 D:\wt\docs\docs\measurements\2026-09-25-physics-window7\wave2\raw; window 7 (blocks A, B) D:\wt\docs\docs\measurements\2026-09-25-physics-window7\raw
+
+## 0. Selection and input checks
+- wave 2: 259 records = 248 processes {'warmup': 10, 'original': 237, 'rerun': 1} + 11 pass markers (11 passes done); voided pass records 0
+  - validity problems in 0 non-warm-up processes
+  - against the driver's per-process fields: every valid flag, clean flag, mean_ms, cols value and criterion estimate reproduces
+  - slots 237: used 237 (1 by their re-run), dropped 0
+- window 7, blocks P1A-jolt and P1B-jolt (= Q1 blocks A and B): 222 records = 218 processes {'warmup': 4, 'original': 180, 'rerun': 34} + 4 pass markers (4 passes done); voided pass records 0
+  - validity problems in 0 non-warm-up processes
+  - against the driver's per-process fields: every valid flag, clean flag, mean_ms, cols value and criterion estimate reproduces
+  - slots 180: used 165 (19 by their re-run), dropped 15: P1A-jolt p0 r0 H-trk-ap trk W4, P1A-jolt p0 r0 H-trk-tree trk W2, P1A-jolt p0 r1 H-trk-ap trk W2, P1A-jolt p0 r1 H-trk-tree trk W1, P1A-jolt p0 r1 H-trk-tree trk W16, P1A-jolt p0 r2 H-trk-ap trk W1, P1A-jolt p0 r2 H-trk-ap trk W8, P1A-jolt p0 r2 H-trk-ap trk W16, P1A-jolt p0 r2 H-trk-tree trk W4, P1A-jolt p1 r0 H-trk-ap trk W4, P1A-jolt p1 r0 H-trk-tree trk W8, P1A-jolt p1 r1 H-trk-tree trk W16, P1A-jolt p1 r2 H-jolt56 j56 W4, P1A-jolt p1 r2 H-trk-ap trk W4, P1A-jolt p1 r2 H-trk-tree trk W2
+- criterion (Q3): 3 processes x [54, 54, 54] ids recomputed from sample.json (Flat, 10 samples each); the printed estimate matches the recomputed mean to 4.4e-05 relative at worst; kernel receipts (LeafList and RowWalk, equal pair counts) for [57, 57, 57] family-size pairs, every timed size included
+- launch-context lengths (Q1, Q2 rows, used set): 0 misses against the pinned cwd length and command-line characters
+- wave-2 receipts (distinct, warm-ups included): 260; median 1.12 %, p90 3.09 %, max 16.88 %, 1 over 5 % ([('07:38:05', 16.88, 'RuntimeBroker.exe')]); build/lane presence at a receipt or during a process: 0
+  - re-run: Q1D-p0 #022 r2 H-trk-tree trk W8 (re-run); the original's start 07:37:59; receipts before/after 0.64 / 16.88 % (top Taskmgr.exe 0.23 s / RuntimeBroker.exe 4.16 s); during-process witness 0.62 % (top Taskmgr.exe 0.05 s); the re-run's start 07:39:03; receipts before/after 1.02 / 1.07 % (top Taskmgr.exe 0.27 s / Taskmgr.exe 0.25 s); during-process witness 1.44 % (top Taskmgr.exe 0.09 s)
+- the during-process witness (others_busy_pct) and the 5-s receipts, used set, by pass (median; p90 / max of the witness)
+  - P1A-jolt-p0 (01:09:43-01:29:04, n=36): witness 0.82 % (1.41 / 2.98); receipts 1.46 %; top other [('Taskmgr.exe', 29), ('claude.exe', 7)]
+  - P1A-jolt-p1 (02:55:45-03:11:07, n=39): witness 2.28 % (6.05 / 8.87); receipts 3.20 %; top other [('browser.exe', 35), ('Taskmgr.exe', 2)]
+  - P1B-jolt-p0 (04:50:32-04:55:54, n=45): witness 0.63 % (1.12 / 1.37); receipts 1.19 %; top other [('Taskmgr.exe', 42), ('claude.exe', 1)]
+  - P1B-jolt-p1 (04:58:28-05:03:49, n=45): witness 0.63 % (0.86 / 1.13); receipts 1.09 %; top other [('Taskmgr.exe', 41), ('bash.exe', 3)]
+  - Q1C-p0 (06:12:15-06:15:07, n=27): witness 0.60 % (0.89 / 1.07); receipts 1.23 %; top other [('Taskmgr.exe', 27)]
+  - Q1C-p1 (06:17:41-06:20:34, n=27): witness 0.66 % (1.08 / 1.15); receipts 1.13 %; top other [('Taskmgr.exe', 25), ('claude.exe', 2)]
+  - Q2C-p0 (06:23:40-06:27:51, n=24): witness 0.69 % (0.90 / 1.14); receipts 1.07 %; top other [('Taskmgr.exe', 23), ('claude.exe', 1)]
+  - Q2C-p1 (06:30:33-06:34:38, n=24): witness 0.63 % (0.82 / 0.99); receipts 1.17 %; top other [('Taskmgr.exe', 24)]
+  - Q3-p0 (06:37:12-06:57:21, n=3): witness 0.62 % (0.63 / 0.63); receipts 1.84 %; top other [('Taskmgr.exe', 3)]
+  - Q4-p0 (07:09:51-07:13:07, n=15): witness 0.68 % (0.87 / 1.29); receipts 1.21 %; top other [('Taskmgr.exe', 13), ('RuntimeBroker.exe', 1)]
+  - Q4-p1 (07:15:56-07:19:12, n=15): witness 0.59 % (0.73 / 0.73); receipts 1.37 %; top other [('Taskmgr.exe', 15)]
+  - Q2D-p0 (07:22:00-07:26:11, n=24): witness 0.66 % (0.88 / 0.99); receipts 1.29 %; top other [('Taskmgr.exe', 24)]
+  - Q2D-p1 (07:28:53-07:32:58, n=24): witness 0.66 % (0.88 / 1.13); receipts 1.08 %; top other [('Taskmgr.exe', 23), ('claude.exe', 1)]
+  - Q1D-p0 (07:35:38-07:39:03, n=27): witness 0.64 % (1.30 / 2.02); receipts 1.07 %; top other [('Taskmgr.exe', 25), ('bash.exe', 1)]
+  - Q1D-p1 (07:41:36-07:44:30, n=27): witness 0.63 % (1.66 / 14.25); receipts 0.99 %; top other [('Taskmgr.exe', 25), ('bash.exe', 1)]
+
+## 1. Q1: the W8 headline over four separated blocks (trunk 93b2615b default tree row vs Jolt v5.6.0)
+A = window 7 P1A-jolt, B = window 7 P1B-jolt, C = Q1C (first block of this run), D = Q1D (last). Statistic: the process mean over [0,500). Rule (plan.md 4, Q1): HOLDS iff claimed in A, B, C, D AND pooled over A-D, same direction.
+- Jolt manifolds per frame over [100,500), re-read from window 7 gate/jolt_receipt: W1 8489.0000, W8 8489.0000 (the count does not depend on the thread count; W4/W16 use it)
+
+### W=4
+- H-trk-tree: A 3.0390 [2.9068-3.3550] K=5 (14.75/11.81/3.81 %); B 2.7684 [2.7559-2.7824] K=6 (0.95/0.61/0.21 %); C 2.7736 [2.7479-2.7927] K=6 (1.61/0.49/0.29 %); D 2.7856 [2.7509-2.9320] K=6 (6.50/1.52/1.21 %); pooled A-D 2.7782 [2.7479-3.3550] K=23 (21.85/3.39/1.56 %); pooled C+D 2.7773 [2.7479-2.9320] K=12 (6.63/0.86/0.63 %)
+- H-trk-ap: A 4.8118 [4.7667-4.8252] K=3 (1.22/0.61/0.46 %); B 4.5547 [4.5484-4.5691] K=6 (0.46/0.17/0.08 %); C 4.5469 [4.5357-4.7342] K=6 (4.37/0.34/0.86 %); D 4.5530 [4.5394-4.5605] K=6 (0.46/0.16/0.08 %); pooled A-D 4.5545 [4.5357-4.8252] K=21 (6.36/0.37/0.57 %); pooled C+D 4.5497 [4.5357-4.7342] K=12 (4.36/0.26/0.43 %)
+- H-jolt56: A 3.8928 [3.7579-4.0694] K=5 (8.00/3.41/1.83 %); B 3.6533 [3.5250-3.9810] K=6 (12.48/3.18/2.31 %); C 3.5372 [3.5342-3.5965] K=6 (1.76/0.43/0.35 %); D 3.6220 [3.5274-3.7492] K=6 (6.12/2.57/1.18 %); pooled A-D 3.6270 [3.5250-4.0694] K=23 (15.01/5.96/1.13 %); pooled C+D 3.5757 [3.5274-3.7492] K=12 (6.20/2.35/0.78 %)
+- **H-trk-tree / Jolt W4 [0,500)**:
+  - A: 0.7807 (-21.93 %, -0.8537); bars r/i/s 33.56/24.59/8.45 %; n/n/Y not claimed
+  - B: 0.7578 (-24.22 %, -0.8848); bars r/i/s 25.04/6.48/4.65 %; n/Y/Y not claimed
+  - C: 0.7841 (-21.59 %, -0.7636); bars r/i/s 4.77/1.31/0.91 %; Y/Y/Y CLAIMED
+  - D: 0.7691 (-23.09 %, -0.8364); bars r/i/s 17.86/5.97/3.38 %; Y/Y/Y CLAIMED
+  - pooled A-D: 0.7660 (-23.40 %, -0.8488); bars r/i/s 53.02/13.71/3.85 %; n/Y/Y not claimed
+  - pooled C+D: 0.7767 (-22.33 %, -0.7983); bars r/i/s 18.15/4.99/2.01 %; Y/Y/Y CLAIMED
+  - rule: does NOT hold (A n, B n, C Y, D Y, pooled A-D n)
+  - [100..500) per block: A 0.7722 (-22.78 %, -0.8930); bars r/i/s 36.44/24.45/8.91 %; n/n/Y not claimed; B 0.7477 (-25.23 %, -0.9303); bars r/i/s 28.96/7.54/5.41 %; n/Y/Y not claimed; C 0.7759 (-22.41 %, -0.7987); bars r/i/s 4.91/1.53/0.96 %; Y/Y/Y CLAIMED; D 0.7597 (-24.03 %, -0.8779); bars r/i/s 22.74/6.68/4.28 %; Y/Y/Y CLAIMED; pooled A-D 0.7574 (-24.26 %, -0.8875); bars r/i/s 55.47/13.95/4.05 %; n/Y/Y not claimed; pooled C+D 0.7681 (-23.19 %, -0.8362); bars r/i/s 23.01/5.16/2.46 %; Y/Y/Y CLAIMED
+  - per manifold [100,500), ns (ours over our own count, Jolt over 8,489.0): A 669.8 / 461.8 = 1.450x; B 610.1 / 434.4 = 1.404x; C 611.9 / 419.8 = 1.457x; D 614.2 / 430.4 = 1.427x; pooled A-D 613.2 / 431.0 = 1.423x; pooled C+D 613.0 / 424.8 = 1.443x (our count 4519.2575)
+- **H-trk-ap / Jolt W4 [0,500)**:
+  - A: 1.2361 (+23.61 %, +0.9190); bars r/i/s 16.19/6.93/3.78 %; Y/Y/Y CLAIMED
+  - B: 1.2468 (+24.68 %, +0.9015); bars r/i/s 24.98/6.37/4.63 %; n/Y/Y not claimed
+  - C: 1.2854 (+28.54 %, +1.0097); bars r/i/s 9.42/1.10/1.86 %; Y/Y/Y CLAIMED
+  - D: 1.2571 (+25.71 %, +0.9310); bars r/i/s 12.28/5.14/2.37 %; Y/Y/Y CLAIMED
+  - pooled A-D: 1.2557 (+25.57 %, +0.9275); bars r/i/s 32.60/11.94/2.53 %; n/Y/Y not claimed
+  - pooled C+D: 1.2724 (+27.24 %, +0.9740); bars r/i/s 15.17/4.72/1.79 %; Y/Y/Y CLAIMED
+  - rule: does NOT hold (A Y, B n, C Y, D Y, pooled A-D n)
+  - [100..500) per block: A 1.2247 (+22.47 %, +0.8807); bars r/i/s 17.98/9.22/4.26 %; Y/Y/Y CLAIMED; B 1.2339 (+23.39 %, +0.8624); bars r/i/s 28.91/7.45/5.40 %; n/Y/Y not claimed; C 1.2737 (+27.37 %, +0.9755); bars r/i/s 10.27/1.14/2.08 %; Y/Y/Y CLAIMED; D 1.2438 (+24.38 %, +0.8909); bars r/i/s 15.47/5.89/2.91 %; Y/Y/Y CLAIMED; pooled A-D 1.2431 (+24.31 %, +0.8895); bars r/i/s 33.06/12.12/2.67 %; n/Y/Y not claimed; pooled C+D 1.2596 (+25.96 %, +0.9363); bars r/i/s 18.37/4.91/2.09 %; Y/Y/Y CLAIMED
+  - per manifold [100,500), ns (ours over our own count, Jolt over 8,489.0): A 1062.3 / 461.8 = 2.300x; B 1006.8 / 434.4 = 2.318x; C 1004.5 / 419.8 = 2.393x; D 1005.6 / 430.4 = 2.336x; pooled A-D 1006.4 / 431.0 = 2.335x; pooled C+D 1005.2 / 424.8 = 2.366x (our count 4519.2575)
+- block terms H-jolt56: B/A 0.9385 n/n/Y; C/A 0.9087 n/Y/Y; D/C 1.0240 n/n/n; D/B 0.9914 n/n/n
+- block terms H-trk-tree: B/A 0.9110 n/n/Y; C/A 0.9127 n/n/Y; D/C 1.0043 n/n/n; D/B 1.0062 n/n/n
+- block terms H-trk-ap: B/A 0.9466 Y/Y/Y; C/A 0.9450 n/Y/Y; D/C 1.0013 n/n/n; D/B 0.9996 n/n/n
+- window term (context): Jolt / window 3 = A 1.0869, B 1.0201, C 0.9877, D 1.0113, pooled A-D 1.0127
+
+### W=8
+- H-trk-tree: A 2.4529 [2.3290-2.9626] K=5 (25.83/2.75/5.73 %); B 2.1878 [2.1850-2.2027] K=6 (0.81/0.08/0.15 %); C 2.1966 [2.1827-2.1989] K=6 (0.74/0.45/0.17 %); D 2.1986 [2.1792-3.1487] K=6 (44.10/1.27/9.05 %); pooled A-D 2.1969 [2.1792-3.1487] K=23 (44.13/3.98/3.02 %); pooled C+D 2.1966 [2.1792-3.1487] K=12 (44.14/0.63/4.54 %)
+- H-trk-ap: A 4.3273 [4.2040-4.4244] K=5 (5.09/2.20/1.13 %); B 3.9764 [3.9711-3.9923] K=6 (0.53/0.29/0.11 %); C 3.9706 [3.9495-3.9736] K=6 (0.61/0.13/0.12 %); D 3.9733 [3.9634-4.0712] K=6 (2.71/0.27/0.53 %); pooled A-D 3.9759 [3.9495-4.4244] K=23 (11.94/1.52/0.95 %); pooled C+D 3.9719 [3.9495-4.0712] K=12 (3.06/0.17/0.28 %)
+- H-jolt56: A 2.9357 [2.8382-3.2679] K=6 (14.64/3.56/2.72 %); B 2.5085 [2.4711-2.5936] K=6 (4.88/1.87/0.93 %); C 2.5256 [2.4736-2.7015] K=6 (9.02/1.78/1.67 %); D 2.5282 [2.4602-2.6055] K=6 (5.75/3.72/1.21 %); pooled A-D 2.5328 [2.4602-3.2679] K=24 (31.89/9.75/2.17 %); pooled C+D 2.5256 [2.4602-2.7015] K=12 (9.55/2.90/0.99 %)
+- **H-trk-tree / Jolt W8 [0,500)**:
+  - A: 0.8355 (-16.45 %, -0.4829); bars r/i/s 59.38/8.99/12.69 %; n/Y/Y not claimed
+  - B: 0.8721 (-12.79 %, -0.3207); bars r/i/s 9.90/3.74/1.88 %; Y/Y/Y CLAIMED
+  - C: 0.8697 (-13.03 %, -0.3290); bars r/i/s 18.11/3.66/3.36 %; n/Y/Y not claimed
+  - D: 0.8696 (-13.04 %, -0.3296); bars r/i/s 88.94/7.87/18.26 %; n/Y/n not claimed
+  - pooled A-D: 0.8674 (-13.26 %, -0.3360); bars r/i/s 108.89/21.06/7.44 %; n/n/Y not claimed
+  - pooled C+D: 0.8697 (-13.03 %, -0.3290); bars r/i/s 90.32/5.93/9.29 %; n/Y/Y not claimed
+  - rule: does NOT hold (A n, B Y, C n, D n, pooled A-D n)
+  - [100..500) per block: A 0.7952 (-20.48 %, -0.6182); bars r/i/s 68.27/9.96/15.04 %; n/Y/Y not claimed; B 0.8523 (-14.77 %, -0.3777); bars r/i/s 10.17/4.29/2.00 %; Y/Y/Y CLAIMED; C 0.8498 (-15.02 %, -0.3865); bars r/i/s 21.43/4.35/4.04 %; n/Y/Y not claimed; D 0.8488 (-15.12 %, -0.3905); bars r/i/s 109.72/8.05/22.48 %; n/Y/n not claimed; pooled A-D 0.8445 (-15.55 %, -0.4027); bars r/i/s 128.32/23.75/8.44 %; n/n/Y not claimed; pooled C+D 0.8498 (-15.02 %, -0.3865); bars r/i/s 111.62/6.74/11.44 %; n/Y/Y not claimed
+  - per manifold [100,500), ns (ours over our own count, Jolt over 8,489.0): A 531.1 / 355.5 = 1.494x; B 482.1 / 301.1 = 1.601x; C 484.0 / 303.2 = 1.596x; D 485.1 / 304.2 = 1.594x; pooled A-D 483.8 / 305.0 = 1.586x; pooled C+D 484.0 / 303.2 = 1.596x (our count 4519.2575)
+- **H-trk-ap / Jolt W8 [0,500)**:
+  - A: 1.4740 (+47.40 %, +1.3916); bars r/i/s 31.00/8.37/5.90 %; Y/Y/Y CLAIMED
+  - B: 1.5851 (+58.51 %, +1.4679); bars r/i/s 9.82/3.78/1.87 %; Y/Y/Y CLAIMED
+  - C: 1.5722 (+57.22 %, +1.4451); bars r/i/s 18.09/3.56/3.35 %; Y/Y/Y CLAIMED
+  - D: 1.5716 (+57.16 %, +1.4451); bars r/i/s 12.71/7.46/2.64 %; Y/Y/Y CLAIMED
+  - pooled A-D: 1.5698 (+56.98 %, +1.4431); bars r/i/s 68.10/19.73/4.73 %; n/Y/Y not claimed
+  - pooled C+D: 1.5727 (+57.27 %, +1.4463); bars r/i/s 20.06/5.80/2.05 %; Y/Y/Y CLAIMED
+  - rule: does NOT hold (A Y, B Y, C Y, D Y, pooled A-D n)
+  - [100..500) per block: A 1.4045 (+40.45 %, +1.2210); bars r/i/s 33.07/9.95/6.38 %; Y/Y/Y CLAIMED; B 1.5529 (+55.29 %, +1.4133); bars r/i/s 10.20/4.27/2.01 %; Y/Y/Y CLAIMED; C 1.5403 (+54.03 %, +1.3908); bars r/i/s 21.42/4.23/4.03 %; Y/Y/Y CLAIMED; D 1.5364 (+53.64 %, +1.3853); bars r/i/s 14.37/7.89/2.93 %; Y/Y/Y CLAIMED; pooled A-D 1.5332 (+53.32 %, +1.3806); bars r/i/s 71.98/22.93/4.92 %; n/Y/Y not claimed; pooled C+D 1.5403 (+54.03 %, +1.3908); bars r/i/s 24.18/6.66/2.40 %; Y/Y/Y CLAIMED
+  - per manifold [100,500), ns (ours over our own count, Jolt over 8,489.0): A 938.0 / 355.5 = 2.638x; B 878.4 / 301.1 = 2.917x; C 877.3 / 303.2 = 2.893x; D 878.0 / 304.2 = 2.886x; pooled A-D 878.4 / 305.0 = 2.880x; pooled C+D 877.3 / 303.2 = 2.893x (our count 4519.2575)
+- block terms H-jolt56: B/A 0.8545 n/Y/Y; C/A 0.8603 n/Y/Y; D/C 1.0010 n/n/n; D/B 1.0078 n/n/n
+- block terms H-trk-tree: B/A 0.8919 n/Y/n; C/A 0.8955 n/Y/n; D/C 1.0009 n/n/n; D/B 1.0049 n/n/n
+- block terms H-trk-ap: B/A 0.9189 n/Y/Y; C/A 0.9176 n/Y/Y; D/C 1.0007 n/n/n; D/B 0.9992 n/n/n
+- window term (context): Jolt / window 3 = A 1.1426, B 0.9764, C 0.9830, D 0.9840, pooled A-D 0.9858
+- **the processes at the ends of each W8 cell** (value ms; the rest of the cell; the range without it)
+  - H-trk-tree [A] median 2.4529, r 25.83 % -> 5.97 % without P1A-jolt-p1 #021 r1 H-trk-tree trk W8 = 2.9626 ms (+20.78 % of the median); start 03:01:28; receipts before/after 3.60 / 3.95 % (top browser.exe 0.84 s / browser.exe 0.67 s); during-process witness 4.52 % (top browser.exe 0.48 s); the cell: [2.329, 2.4068, 2.4529, 2.4741, 2.9626]
+  - H-trk-tree [B] median 2.1878, r 0.81 % -> 0.21 % without P1B-jolt-p1 #006 r0 H-trk-tree trk W8 = 2.2027 ms (+0.68 % of the median); start 04:59:01; receipts before/after 1.90 / 1.06 % (top Taskmgr.exe 0.23 s / Taskmgr.exe 0.20 s); during-process witness 0.44 % (top claude.exe 0.03 s); the cell: [2.185, 2.1873, 2.1877, 2.1879, 2.1896, 2.2027]
+  - H-trk-tree [C] median 2.1966, r 0.74 % -> 0.66 % without Q1C-p0 #022 r2 H-trk-tree trk W8 = 2.1989 ms (+0.10 % of the median); start 06:14:35; receipts before/after 1.27 / 0.89 % (top Taskmgr.exe 0.27 s / Taskmgr.exe 0.22 s); during-process witness 0.62 % (top Taskmgr.exe 0.08 s); the cell: [2.1827, 2.1843, 2.1963, 2.1969, 2.1972, 2.1989]
+  - H-trk-tree [D] median 2.1986, r 44.10 % -> 1.90 % without Q1D-p1 #024 r2 H-trk-tree trk W8 = 3.1487 ms (+43.22 % of the median); start 07:44:09; receipts before/after 1.81 / 2.18 % (top Taskmgr.exe 0.27 s / Taskmgr.exe 0.25 s); during-process witness 14.25 % (top msedge.exe 1.30 s); the cell: [2.1792, 2.1869, 2.1938, 2.2034, 2.221, 3.1487]
+  - H-jolt56 [A] median 2.9357, r 14.64 % -> 4.90 % without P1A-jolt-p1 #005 r0 H-jolt56 j56 W8 = 3.2679 ms (+11.32 % of the median); start 02:56:07; receipts before/after 4.02 / 1.58 % (top browser.exe 0.91 s / Taskmgr.exe 0.30 s); during-process witness 2.06 % (top browser.exe 0.22 s); the cell: [2.8382, 2.8616, 2.9051, 2.9664, 2.9805, 3.2679]
+  - H-jolt56 [B] median 2.5085, r 4.88 % -> 2.29 % without P1B-jolt-p1 #020 r1 H-jolt56 j56 W8 = 2.5936 ms (+3.39 % of the median); start 05:00:44; receipts before/after 0.86 / 3.35 % (top Taskmgr.exe 0.23 s / Taskmgr.exe 0.31 s); during-process witness 0.67 % (top Taskmgr.exe 0.08 s); the cell: [2.4711, 2.4776, 2.4906, 2.5264, 2.5282, 2.5936]
+  - H-jolt56 [C] median 2.5256, r 9.02 % -> 2.68 % without Q1C-p0 #014 r1 H-jolt56 j56 W8 = 2.7015 ms (+6.97 % of the median); start 06:13:41; receipts before/after 0.86 / 1.61 % (top Taskmgr.exe 0.20 s / Taskmgr.exe 0.25 s); during-process witness 1.07 % (top Taskmgr.exe 0.11 s); the cell: [2.4736, 2.4836, 2.5223, 2.5288, 2.5413, 2.7015]
+  - H-jolt56 [D] median 2.5282, r 5.75 % -> 5.15 % without Q1D-p0 #005 r0 H-jolt56 j56 W8 = 2.4602 ms (-2.69 % of the median); start 07:36:05; receipts before/after 0.84 / 0.68 % (top Taskmgr.exe 0.23 s / Taskmgr.exe 0.23 s); during-process witness 1.19 % (top Taskmgr.exe 0.09 s); the cell: [2.4602, 2.4749, 2.5195, 2.5369, 2.5946, 2.6055]
+
+### W=16
+- H-trk-tree: A 2.7452 [2.6322-2.9531] K=4 (11.69/6.82/3.33 %); B 2.3628 [2.3507-2.5798] K=6 (9.69/6.22/2.34 %); C 2.3628 [2.3497-2.4315] K=6 (3.46/0.66/0.66 %); D 2.3701 [2.3532-2.6038] K=6 (10.57/1.84/2.08 %); pooled A-D 2.3696 [2.3497-2.9531] K=22 (25.47/8.94/1.94 %); pooled C+D 2.3658 [2.3497-2.6038] K=12 (10.74/1.04/1.09 %)
+- H-trk-ap: A 4.6552 [4.5748-4.8962] K=5 (6.91/1.44/1.47 %); B 4.1251 [4.1139-4.3143] K=6 (4.86/0.45/0.97 %); C 4.1229 [4.1124-4.1606] K=6 (1.17/0.43/0.23 %); D 4.1213 [4.1058-4.1292] K=6 (0.57/0.11/0.10 %); pooled A-D 4.1292 [4.1058-4.8962] K=23 (19.14/2.88/1.55 %); pooled C+D 4.1213 [4.1058-4.1606] K=12 (1.33/0.33/0.12 %)
+- H-jolt56: A 3.1752 [2.8904-5.3684] K=6 (78.04/12.51/15.11 %); B 2.4075 [2.3421-2.4624] K=6 (5.00/2.57/0.99 %); C 2.4090 [2.3479-2.4195] K=6 (2.97/1.65/0.65 %); D 2.4253 [2.3547-2.4507] K=6 (3.96/2.16/0.85 %); pooled A-D 2.4253 [2.3421-5.3684] K=24 (124.78/7.90/6.90 %); pooled C+D 2.4120 [2.3479-2.4507] K=12 (4.26/2.67/0.52 %)
+- **H-trk-tree / Jolt W16 [0,500)**:
+  - A: 0.8646 (-13.54 %, -0.4300); bars r/i/s 157.82/28.49/30.95 %; n/n/n not claimed
+  - B: 0.9814 (-1.86 %, -0.0448); bars r/i/s 21.81/13.46/5.08 %; n/n/n not claimed
+  - C: 0.9808 (-1.92 %, -0.0463); bars r/i/s 9.13/3.56/1.85 %; n/n/Y not claimed
+  - D: 0.9773 (-2.27 %, -0.0552); bars r/i/s 22.58/5.68/4.49 %; n/n/n not claimed
+  - pooled A-D: 0.9771 (-2.29 %, -0.0557); bars r/i/s 254.71/23.86/14.33 %; n/n/n not claimed
+  - pooled C+D: 0.9808 (-1.92 %, -0.0462); bars r/i/s 23.11/5.73/2.42 %; n/n/n not claimed
+  - rule: does NOT hold (A n, B n, C n, D n, pooled A-D n)
+  - [100..500) per block: A 0.8178 (-18.22 %, -0.6069); bars r/i/s 173.01/33.68/33.67 %; n/n/n not claimed; B 0.9513 (-4.87 %, -0.1200); bars r/i/s 24.49/16.73/6.01 %; n/n/n not claimed; C 0.9519 (-4.81 %, -0.1186); bars r/i/s 9.27/4.07/1.85 %; n/Y/Y not claimed; D 0.9479 (-5.21 %, -0.1293); bars r/i/s 21.11/6.80/4.31 %; n/n/Y not claimed; pooled A-D 0.9470 (-5.30 %, -0.1317); bars r/i/s 281.94/26.06/15.80 %; n/n/n not claimed; pooled C+D 0.9500 (-5.00 %, -0.1236); bars r/i/s 22.30/5.92/2.37 %; n/n/Y not claimed
+  - per manifold [100,500), ns (ours over our own count, Jolt over 8,489.0): A 602.8 / 392.4 = 1.536x; B 518.4 / 290.1 = 1.787x; C 519.7 / 290.6 = 1.788x; D 520.5 / 292.3 = 1.781x; pooled A-D 520.5 / 292.6 = 1.779x; pooled C+D 520.1 / 291.4 = 1.785x (our count 4519.2575)
+- **H-trk-ap / Jolt W16 [0,500)**:
+  - A: 1.4661 (+46.61 %, +1.4800); bars r/i/s 156.69/25.18/30.37 %; n/Y/Y not claimed
+  - B: 1.7134 (+71.34 %, +1.7176); bars r/i/s 13.94/5.22/2.77 %; Y/Y/Y CLAIMED
+  - C: 1.7114 (+71.14 %, +1.7138); bars r/i/s 6.39/3.41/1.37 %; Y/Y/Y CLAIMED
+  - D: 1.6993 (+69.93 %, +1.6960); bars r/i/s 8.00/4.33/1.71 %; Y/Y/Y CLAIMED
+  - pooled A-D: 1.7025 (+70.25 %, +1.7039); bars r/i/s 252.48/16.82/14.14 %; n/Y/Y not claimed
+  - pooled C+D: 1.7087 (+70.87 %, +1.7093); bars r/i/s 8.93/5.38/1.07 %; Y/Y/Y CLAIMED
+  - rule: does NOT hold (A n, B Y, C Y, D Y, pooled A-D n)
+  - [100..500) per block: A 1.4033 (+40.33 %, +1.3433); bars r/i/s 172.10/30.03/33.11 %; n/Y/Y not claimed; B 1.6710 (+67.10 %, +1.6523); bars r/i/s 13.82/5.70/2.72 %; Y/Y/Y CLAIMED; C 1.6643 (+66.43 %, +1.6388); bars r/i/s 9.29/4.05/1.87 %; Y/Y/Y CLAIMED; D 1.6553 (+65.53 %, +1.6261); bars r/i/s 7.66/4.78/1.75 %; Y/Y/Y CLAIMED; pooled A-D 1.6562 (+65.62 %, +1.6300); bars r/i/s 280.34/17.17/15.64 %; n/Y/Y not claimed; pooled C+D 1.6598 (+65.98 %, +1.6324); bars r/i/s 10.49/5.81/1.24 %; Y/Y/Y CLAIMED
+  - per manifold [100,500), ns (ours over our own count, Jolt over 8,489.0): A 1034.4 / 392.4 = 2.636x; B 910.5 / 290.1 = 3.139x; C 908.5 / 290.6 = 3.126x; D 908.9 / 292.3 = 3.109x; pooled A-D 910.3 / 292.6 = 3.111x; pooled C+D 908.7 / 291.4 = 3.118x (our count 4519.2575)
+- block terms H-jolt56: B/A 0.7582 n/n/n; C/A 0.7587 n/n/n; D/C 1.0068 n/n/n; D/B 1.0074 n/n/n
+- block terms H-trk-tree: B/A 0.8607 n/n/Y; C/A 0.8607 n/Y/Y; D/C 1.0031 n/n/n; D/B 1.0031 n/n/n
+- block terms H-trk-ap: B/A 0.8861 n/Y/Y; C/A 0.8856 n/Y/Y; D/C 0.9996 n/n/n; D/B 0.9991 n/n/n
+- window term (context): Jolt / window 3 = A 1.3294, B 1.0080, C 1.0086, D 1.0154, pooled A-D 1.0154
+- **the processes at the ends of each W16 cell** (value ms; the rest of the cell; the range without it)
+  - H-trk-tree [A] median 2.7452, r 11.69 % -> 6.89 % without P1A-jolt-p1 #003 r0 H-trk-tree trk W16 = 2.9531 ms (+7.58 % of the median); start 02:55:53; receipts before/after 2.38 / 4.20 % (top browser.exe 0.34 s / browser.exe 0.55 s); during-process witness 3.09 % (top browser.exe 0.27 s); the cell: [2.6322, 2.6739, 2.8164, 2.9531]
+  - H-trk-tree [B] median 2.3628, r 9.69 % -> 8.57 % without P1B-jolt-p0 #013 r0 H-trk-tree trk W16 = 2.5798 ms (+9.19 % of the median); start 04:52:02; receipts before/after 1.59 / 1.28 % (top Taskmgr.exe 0.22 s / Taskmgr.exe 0.23 s); during-process witness 1.27 % (top AmneziaVPN.exe 0.11 s); the cell: [2.3507, 2.3575, 2.3624, 2.3631, 2.5532, 2.5798]
+  - H-trk-tree [C] median 2.3628, r 3.46 % -> 0.91 % without Q1C-p1 #021 r2 H-trk-tree trk W16 = 2.4315 ms (+2.91 % of the median); start 06:19:54; receipts before/after 2.41 / 1.41 % (top Taskmgr.exe 0.25 s / Taskmgr.exe 0.27 s); during-process witness 0.95 % (top Taskmgr.exe 0.08 s); the cell: [2.3497, 2.3509, 2.362, 2.3635, 2.3713, 2.4315]
+  - H-trk-tree [D] median 2.3701, r 10.57 % -> 2.73 % without Q1D-p0 #016 r1 H-trk-tree trk W16 = 2.6038 ms (+9.86 % of the median); start 07:37:18; receipts before/after 1.05 / 2.84 % (top Taskmgr.exe 0.27 s / Taskmgr.exe 0.23 s); during-process witness 2.02 % (top claude.exe 0.12 s); the cell: [2.3532, 2.361, 2.368, 2.3722, 2.4179, 2.6038]
+  - H-jolt56 [A] median 3.1752, r 78.04 % -> 17.11 % without P1A-jolt-p1 #002 r0 H-jolt56 j56 W16 = 5.3684 ms (+69.07 % of the median); start 02:55:45; receipts before/after 4.11 / 2.38 % (top browser.exe 1.02 s / browser.exe 0.34 s); during-process witness 8.87 % (top browser.exe 1.75 s); the cell: [2.8904, 2.9684, 3.0457, 3.3047, 3.4116, 5.3684]
+  - H-jolt56 [B] median 2.4075, r 5.00 % -> 3.63 % without P1B-jolt-p0 #014 r0 H-jolt56 j56 W16 = 2.3421 ms (-2.72 % of the median); start 04:52:08; receipts before/after 1.28 / 0.79 % (top Taskmgr.exe 0.23 s / Taskmgr.exe 0.27 s); during-process witness 0.91 % (top Taskmgr.exe 0.06 s); the cell: [2.3421, 2.3738, 2.3791, 2.436, 2.4375, 2.4624]
+  - H-jolt56 [C] median 2.4090, r 2.97 % -> 2.42 % without Q1C-p1 #020 r2 H-jolt56 j56 W16 = 2.3479 ms (-2.54 % of the median); start 06:19:48; receipts before/after 1.76 / 2.41 % (top Taskmgr.exe 0.23 s / Taskmgr.exe 0.25 s); during-process witness 0.99 % (top Taskmgr.exe 0.12 s); the cell: [2.3479, 2.3611, 2.4067, 2.4114, 2.4126, 2.4195]
+  - H-jolt56 [D] median 2.4253, r 3.96 % -> 3.01 % without Q1D-p0 #026 r2 H-jolt56 j56 W16 = 2.4507 ms (+1.05 % of the median); start 07:38:50; receipts before/after 0.66 / 2.97 % (top Taskmgr.exe 0.25 s / Taskmgr.exe 0.30 s); during-process witness 0.95 % (top Taskmgr.exe 0.14 s); the cell: [2.3547, 2.3583, 2.4244, 2.4262, 2.4276, 2.4507]
+
+- **diagnostic, not the protocol:** the W8 default row against Jolt with each block's single range-setting process removed (the process named above; the protocol cell is the one in the table):
+  - A: ours 2.4298 [2.3290-2.4741] K=4 (5.97/2.92/1.66 %); Jolt 2.9051 [2.8382-2.9805] K=5 (4.90/3.61/1.21 %); 0.8364 (-16.36 %, -0.4753); bars r/i/s 15.45/9.28/4.10 %; Y/Y/Y CLAIMED
+  - B: ours 2.1877 [2.1850-2.1896] K=5 (0.21/0.03/0.04 %); Jolt 2.4906 [2.4711-2.5282] K=5 (2.29/1.96/0.61 %); 0.8784 (-12.16 %, -0.3029); bars r/i/s 4.60/3.92/1.22 %; Y/Y/Y CLAIMED
+  - C: ours 2.1963 [2.1827-2.1972] K=5 (0.66/0.57/0.19 %); Jolt 2.5223 [2.4736-2.5413] K=5 (2.68/1.79/0.66 %); 0.8707 (-12.93 %, -0.3260); bars r/i/s 5.52/3.76/1.37 %; Y/Y/Y CLAIMED
+  - D: ours 2.1938 [2.1792-2.2210] K=5 (1.90/0.75/0.41 %); Jolt 2.5369 [2.4749-2.6055] K=5 (5.15/2.96/1.20 %); 0.8648 (-13.52 %, -0.3431); bars r/i/s 10.97/6.11/2.53 %; Y/Y/Y CLAIMED
+
+## 2. Q2: C3b t_q, parent 6dd1f916 (RowWalk) vs tip 983480a9 (LeafList), blocks C (Q2C) and D (Q2D)
+t_q = per-process median over [100,500) of phys_bp_query_ns, median over K; tree span = the sum of the four phys_bp_* per-process medians. Window 6 context (tip, W1): {'P3 (plain layout, 648 chars)': 0.2102, 'P5g (padded layout, 654 chars)': 0.2354}
+- C3b-TA-armed par W1: t_q C 0.4940 [0.4934-0.5000] K=6 (1.33/0.60/0.28 %); D 0.4938 [0.4925-0.4950] K=6 (0.51/0.19/0.09 %); pooled 0.4938 [0.4925-0.5000] K=12 (1.50/0.20/0.15 %); span 0.5613 [0.5590-0.5658] K=12 (1.23/0.40/0.14 %); step 17.2760 [17.1922-17.3333] K=12 (0.82/0.60/0.12 %)
+- C3b-TA-armed tip W1: t_q C 0.2459 [0.2431-0.2495] K=6 (2.61/1.51/0.54 %); D 0.2486 [0.2440-0.2603] K=6 (6.54/3.58/1.34 %); pooled 0.2471 [0.2431-0.2603] K=12 (6.97/1.85/0.77 %); span 0.3190 [0.3154-0.3313] K=12 (4.98/1.49/0.57 %); step 17.0220 [16.9454-17.1267] K=12 (1.07/0.33/0.10 %)
+  - tip vs par W1: C 0.4977 (-50.23 %, -0.2481); bars r/i/s 5.85/3.26/1.21 %; Y/Y/Y CLAIMED; D 0.5035 (-49.65 %, -0.2452); bars r/i/s 13.11/7.17/2.69 %; Y/Y/Y CLAIMED; pooled 0.5005 (-49.95 %, -0.2467); bars r/i/s 14.25/3.72/1.57 %; Y/Y/Y CLAIMED
+- C3b-TA-armed par W8: t_q C 0.4119 [0.4101-0.4141] K=6 (0.98/0.48/0.19 %); D 0.4111 [0.4104-0.4135] K=6 (0.75/0.12/0.14 %); pooled 0.4113 [0.4101-0.4141] K=12 (0.98/0.36/0.12 %); span 0.4648 [0.4633-0.4675] K=12 (0.91/0.21/0.10 %); step 4.2692 [4.2617-4.4095] K=12 (3.46/0.13/0.35 %)
+- C3b-TA-armed tip W8: t_q C 0.2124 [0.2117-0.2127] K=6 (0.47/0.21/0.09 %); D 0.2119 [0.2115-0.2133] K=6 (0.82/0.36/0.17 %); pooled 0.2122 [0.2115-0.2133] K=12 (0.82/0.42/0.09 %); span 0.2699 [0.2688-0.2708] K=12 (0.76/0.44/0.10 %); step 4.0792 [4.0580-4.1220] K=12 (1.57/0.38/0.16 %)
+  - tip vs par W8: C 0.5156 (-48.44 %, -0.1995); bars r/i/s 2.17/1.05/0.42 %; Y/Y/Y CLAIMED; D 0.5153 (-48.47 %, -0.1993); bars r/i/s 2.22/0.76/0.43 %; Y/Y/Y CLAIMED; pooled 0.5159 (-48.41 %, -0.1991); bars r/i/s 2.55/1.10/0.30 %; Y/Y/Y CLAIMED
+- C3b-TA-pad06 par W1: t_q C 0.4936 [0.4927-0.5001] K=6 (1.48/0.30/0.29 %); D 0.4949 [0.4929-0.5040] K=6 (2.24/0.74/0.43 %); pooled 0.4938 [0.4927-0.5040] K=12 (2.27/0.67/0.26 %); span 0.5608 [0.5577-0.5706] K=12 (2.31/0.71/0.23 %); step 17.3059 [17.1637-17.3562] K=12 (1.11/0.39/0.13 %)
+- C3b-TA-pad06 tip W1: t_q C 0.2509 [0.2442-0.2649] K=6 (8.25/3.96/1.60 %); D 0.2464 [0.2412-0.2509] K=6 (3.92/1.09/0.69 %); pooled 0.2480 [0.2412-0.2649] K=12 (9.55/2.04/0.96 %); span 0.3200 [0.3142-0.3362] K=12 (6.90/1.67/0.69 %); step 16.9872 [16.9552-17.1623] K=12 (1.22/0.38/0.13 %)
+  - tip vs par W1: C 0.5082 (-49.18 %, -0.2427); bars r/i/s 16.77/7.95/3.25 %; Y/Y/Y CLAIMED; D 0.4979 (-50.21 %, -0.2485); bars r/i/s 9.03/2.64/1.64 %; Y/Y/Y CLAIMED; pooled 0.5023 (-49.77 %, -0.2458); bars r/i/s 19.63/4.30/1.98 %; Y/Y/Y CLAIMED
+- C3b-TD-armed par W1: t_q C 0.4031 [0.4025-0.4048] K=6 (0.57/0.36/0.13 %); D 0.4029 [0.4025-0.4044] K=6 (0.48/0.12/0.09 %); pooled 0.4030 [0.4025-0.4048] K=12 (0.58/0.18/0.08 %); span 0.4543 [0.4537-0.4587] K=12 (1.10/0.43/0.15 %); step 6.8334 [6.7407-7.0402] K=12 (4.38/0.74/0.43 %)
+- C3b-TD-armed tip W1: t_q C 0.2079 [0.2070-0.2103] K=6 (1.59/0.38/0.28 %); D 0.2078 [0.2074-0.2155] K=6 (3.89/2.58/0.94 %); pooled 0.2078 [0.2070-0.2155] K=12 (4.06/0.69/0.50 %); span 0.2635 [0.2621-0.2712] K=12 (3.44/0.63/0.44 %); step 6.6266 [6.5893-6.8460] K=12 (3.87/1.30/0.51 %)
+  - tip vs par W1: C 0.5158 (-48.42 %, -0.1952); bars r/i/s 3.37/1.05/0.62 %; Y/Y/Y CLAIMED; D 0.5159 (-48.41 %, -0.1951); bars r/i/s 7.83/5.16/1.90 %; Y/Y/Y CLAIMED; pooled 0.5157 (-48.43 %, -0.1952); bars r/i/s 8.21/1.42/1.01 %; Y/Y/Y CLAIMED
+- block term D vs C C3b-TA-armed par W1: 0.9996 (-0.04 %, -0.0002); bars r/i/s 2.84/1.25/0.58 %; n/n/n not claimed
+- block term D vs C C3b-TA-armed par W8: 0.9981 (-0.19 %, -0.0008); bars r/i/s 2.46/0.99/0.47 %; n/n/n not claimed
+- block term D vs C C3b-TA-pad06 par W1: 1.0027 (+0.27 %, +0.0013); bars r/i/s 5.37/1.61/1.04 %; n/n/n not claimed
+- block term D vs C C3b-TD-armed par W1: 0.9995 (-0.05 %, -0.0002); bars r/i/s 1.49/0.76/0.31 %; n/n/n not claimed
+- layout term pad06 vs armed par W1 [C]: 0.9992 (-0.08 %, -0.0004); bars r/i/s 3.98/1.34/0.80 %; n/n/n not claimed
+- layout term pad06 vs armed par W1 [D]: 1.0023 (+0.23 %, +0.0012); bars r/i/s 4.59/1.53/0.89 %; n/n/n not claimed
+- layout term pad06 vs armed par W1 [pooled]: 1.0000 (+0.00 %, +0.0000); bars r/i/s 5.45/1.41/0.59 %; n/n/n not claimed
+- block term D vs C C3b-TA-armed tip W1: 1.0112 (+1.12 %, +0.0027); bars r/i/s 14.08/7.78/2.89 %; n/n/n not claimed
+- block term D vs C C3b-TA-armed tip W8: 0.9976 (-0.24 %, -0.0005); bars r/i/s 1.89/0.83/0.38 %; n/n/n not claimed
+- block term D vs C C3b-TA-pad06 tip W1: 0.9822 (-1.78 %, -0.0045); bars r/i/s 18.27/8.22/3.49 %; n/n/n not claimed
+- block term D vs C C3b-TD-armed tip W1: 0.9996 (-0.04 %, -0.0001); bars r/i/s 8.40/5.21/1.97 %; n/n/n not claimed
+- layout term pad06 vs armed tip W1 [C]: 1.0204 (+2.04 %, +0.0050); bars r/i/s 17.31/8.48/3.38 %; n/n/n not claimed
+- layout term pad06 vs armed tip W1 [D]: 0.9912 (-0.88 %, -0.0022); bars r/i/s 15.24/7.49/3.02 %; n/n/n not claimed
+- layout term pad06 vs armed tip W1 [pooled]: 1.0036 (+0.36 %, +0.0009); bars r/i/s 23.64/5.51/2.46 %; n/n/n not claimed
+- **C2 on C3b-TD-armed (tip, W1): C2 NOT BUILT (claimed below 0.235 in C, D and pooled)**
+  - C: 0.2079 vs 0.235 (-11.53 %; 2r 3.18 %, 2s 0.56 %; r/s Y/Y) -> below CLAIMED
+  - D: 0.2078 vs 0.235 (-11.56 %; 2r 7.77 %, 2s 1.89 %; r/s Y/Y) -> below CLAIMED
+  - pooled: 0.2078 vs 0.235 (-11.56 %; 2r 8.12 %, 2s 1.00 %; r/s Y/Y) -> below CLAIMED
+  - > 0.21: 0.2078 vs 0.21 (-1.03 %; 2r 8.12 %, 2s 1.00 %; r/s n/Y) -> on the bar; <= 0.186: 0.2078 vs 0.186 (+11.74 %; 2r 8.12 %, 2s 1.00 %; r/s Y/Y) -> above CLAIMED; c_q = 167.6 ns/row
+- **C2 on C3b-TA-armed (tip, W1): UNRESOLVED (on the bar in at least one of C, D, pooled)**
+  - C: 0.2459 vs 0.235 (+4.62 %; 2r 5.21 %, 2s 1.08 %; r/s n/Y) -> on the bar
+  - D: 0.2486 vs 0.235 (+5.79 %; 2r 13.07 %, 2s 2.68 %; r/s n/Y) -> on the bar
+  - pooled: 0.2471 vs 0.235 (+5.16 %; 2r 13.93 %, 2s 1.54 %; r/s n/Y) -> on the bar
+  - > 0.21: 0.2471 vs 0.21 (+17.68 %; 2r 13.93 %, 2s 1.54 %; r/s Y/Y) -> above CLAIMED; <= 0.186: 0.2471 vs 0.186 (+32.87 %; 2r 13.93 %, 2s 1.54 %; r/s Y/Y) -> above CLAIMED; c_q = 199.3 ns/row
+- **C2 on C3b-TA-pad06 (tip, W1): UNRESOLVED (on the bar in at least one of C, D, pooled)**
+  - C: 0.2509 vs 0.235 (+6.75 %; 2r 16.51 %, 2s 3.20 %; r/s n/Y) -> on the bar
+  - D: 0.2464 vs 0.235 (+4.85 %; 2r 7.83 %, 2s 1.39 %; r/s n/Y) -> on the bar
+  - pooled: 0.2480 vs 0.235 (+5.54 %; 2r 19.10 %, 2s 1.91 %; r/s n/Y) -> on the bar
+  - > 0.21: 0.2480 vs 0.21 (+18.11 %; 2r 19.10 %, 2s 1.91 %; r/s n/Y) -> on the bar; <= 0.186: 0.2480 vs 0.186 (+33.35 %; 2r 19.10 %, 2s 1.91 %; r/s Y/Y) -> above CLAIMED; c_q = 200.0 ns/row
+- window 6 against this run, tip W1 C3b-TA-armed: this run pooled 0.2471 [0.2431-0.2603] = 1.1757x window 6 P3's 0.2102 and 1.0498x P5g's 0.2354 (context; different windows are never pooled)
+- window 6 against this run, tip W1 C3b-TA-pad06: this run pooled 0.2480 [0.2412-0.2649] = 1.1800x window 6 P3's 0.2102 and 1.0537x P5g's 0.2354 (context; different windows are never pooled)
+
+## 3. Q3: the tree thresholds between 64 and 256 (recipe 1.4), instrument 93b2615b + G4_SIZES, K = 3
+
+### uniform
+- n=64: all_pairs 0.002333 [0.002322-0.002333] K=3 (0.49/0.25/0.20 %); tree 0.006462 [0.006248-0.006487] K=3 (3.70/1.85/1.47 %); all_pairs/tree 0.3610 (-63.90 %, -0.0041); bars r/i/s 7.47/3.74/2.97 %; Y/Y/Y CLAIMED  [window 4: 0.619]
+- n=96: all_pairs 0.005170 [0.005157-0.005212] K=3 (1.06/0.53/0.40 %); tree 0.008687 [0.008673-0.008743] K=3 (0.81/0.40/0.31 %); all_pairs/tree 0.5951 (-40.49 %, -0.0035); bars r/i/s 2.67/1.33/1.01 %; Y/Y/Y CLAIMED
+- n=112: all_pairs 0.006871 [0.006863-0.006890] K=3 (0.39/0.20/0.15 %); tree 0.009729 [0.009689-0.009738] K=3 (0.51/0.25/0.20 %); all_pairs/tree 0.7062 (-29.38 %, -0.0029); bars r/i/s 1.29/0.64/0.49 %; Y/Y/Y CLAIMED
+- n=128: all_pairs 0.010033 [0.010032-0.010055] K=3 (0.23/0.11/0.09 %); tree 0.011014 [0.010902-0.011169] K=3 (2.42/1.21/0.88 %); all_pairs/tree 0.9109 (-8.91 %, -0.0010); bars r/i/s 4.86/2.43/1.77 %; Y/Y/Y CLAIMED  [window 4: 1.137]
+- n=136: all_pairs 0.011206 [0.011144-0.011230] K=3 (0.77/0.38/0.29 %); tree 0.011614 [0.011502-0.011859] K=3 (3.07/1.54/1.14 %); all_pairs/tree 0.9649 (-3.51 %, -0.0004); bars r/i/s 6.33/3.17/2.35 %; n/Y/Y not claimed
+- n=144: all_pairs 0.012421 [0.012375-0.012450] K=3 (0.60/0.30/0.22 %); tree 0.012327 [0.012301-0.012452] K=3 (1.22/0.61/0.47 %); all_pairs/tree 1.0076 (+0.76 %, +0.0001); bars r/i/s 2.73/1.37/1.04 %; n/n/n not claimed
+- n=152: all_pairs 0.013581 [0.013557-0.013718] K=3 (1.19/0.60/0.46 %); tree 0.012956 [0.012889-0.012972] K=3 (0.64/0.32/0.25 %); all_pairs/tree 1.0482 (+4.82 %, +0.0006); bars r/i/s 2.70/1.35/1.05 %; Y/Y/Y CLAIMED  <- tree claimed faster
+- n=160: all_pairs 0.015082 [0.015074-0.015140] K=3 (0.44/0.22/0.17 %); tree 0.013459 [0.013456-0.013487] K=3 (0.23/0.11/0.09 %); all_pairs/tree 1.1206 (+12.06 %, +0.0016); bars r/i/s 0.99/0.49/0.39 %; Y/Y/Y CLAIMED  <- tree claimed faster
+- n=168: all_pairs 0.016446 [0.016384-0.016497] K=3 (0.68/0.34/0.25 %); tree 0.013968 [0.013960-0.014033] K=3 (0.52/0.26/0.21 %); all_pairs/tree 1.1774 (+17.74 %, +0.0025); bars r/i/s 1.72/0.86/0.65 %; Y/Y/Y CLAIMED  <- tree claimed faster
+- n=176: all_pairs 0.017876 [0.017875-0.017900] K=3 (0.14/0.07/0.06 %); tree 0.014617 [0.014559-0.014648] K=3 (0.61/0.30/0.22 %); all_pairs/tree 1.2229 (+22.29 %, +0.0033); bars r/i/s 1.25/0.62/0.46 %; Y/Y/Y CLAIMED  <- tree claimed faster
+- n=192: all_pairs 0.021179 [0.021155-0.021209] K=3 (0.26/0.13/0.09 %); tree 0.016095 [0.015907-0.016102] K=3 (1.21/0.60/0.50 %); all_pairs/tree 1.3159 (+31.59 %, +0.0051); bars r/i/s 2.47/1.23/1.01 %; Y/Y/Y CLAIMED  <- tree claimed faster
+- n=256: all_pairs 0.037992 [0.037828-0.038165] K=3 (0.89/0.44/0.32 %); tree 0.021027 [0.020997-0.021111] K=3 (0.54/0.27/0.20 %); all_pairs/tree 1.8068 (+80.68 %, +0.0170); bars r/i/s 2.08/1.04/0.76 %; Y/Y/Y CLAIMED  <- tree claimed faster  [window 4: 1.997]
+- **uniform: LO (largest n with all_pairs not claimed slower) = 144; HI (smallest n with tree claimed faster) = 152; monotone True; log-log crossover 142.6**
+  - bridge n=64: tree_rowwalk 0.004612 [0.004604-0.004634] K=3 (0.65/0.33/0.24 %); LeafList/RowWalk 1.4011 (+40.11 %, +0.0018); bars r/i/s 7.52/3.76/2.99 %; Y/Y/Y CLAIMED; all_pairs/tree_rowwalk 0.506 (window 4, the same kernel: 0.619)
+  - bridge n=128: tree_rowwalk 0.010613 [0.010598-0.010677] K=3 (0.75/0.37/0.29 %); LeafList/RowWalk 1.0378 (+3.78 %, +0.0004); bars r/i/s 5.06/2.53/1.85 %; n/Y/Y not claimed; all_pairs/tree_rowwalk 0.945 (window 4, the same kernel: 1.137)
+  - bridge n=256: tree_rowwalk 0.022374 [0.022359-0.022398] K=3 (0.17/0.09/0.06 %); LeafList/RowWalk 0.9398 (-6.02 %, -0.0013); bars r/i/s 1.14/0.57/0.43 %; Y/Y/Y CLAIMED; all_pairs/tree_rowwalk 1.698 (window 4, the same kernel: 1.997)
+
+### disparity
+- n=64: all_pairs 0.003068 [0.003048-0.003074] K=3 (0.84/0.42/0.32 %); tree 0.007568 [0.007551-0.007612] K=3 (0.81/0.41/0.30 %); all_pairs/tree 0.4054 (-59.46 %, -0.0045); bars r/i/s 2.33/1.16/0.88 %; Y/Y/Y CLAIMED  [window 4: 0.5]
+- n=96: all_pairs 0.006248 [0.006247-0.006257] K=3 (0.17/0.09/0.07 %); tree 0.011267 [0.010781-0.011381] K=3 (5.32/2.66/2.05 %); all_pairs/tree 0.5545 (-44.55 %, -0.0050); bars r/i/s 10.65/5.33/4.09 %; Y/Y/Y CLAIMED
+- n=112: all_pairs 0.008116 [0.008110-0.008117] K=3 (0.08/0.04/0.03 %); tree 0.012276 [0.012214-0.012301] K=3 (0.71/0.36/0.26 %); all_pairs/tree 0.6611 (-33.89 %, -0.0042); bars r/i/s 1.43/0.71/0.53 %; Y/Y/Y CLAIMED
+- n=128: all_pairs 0.012159 [0.012153-0.012191] K=3 (0.31/0.15/0.12 %); tree 0.013187 [0.013070-0.013300] K=3 (1.75/0.87/0.63 %); all_pairs/tree 0.9220 (-7.80 %, -0.0010); bars r/i/s 3.55/1.78/1.29 %; Y/Y/Y CLAIMED  [window 4: 0.946]
+- n=136: all_pairs 0.013310 [0.013299-0.013315] K=3 (0.12/0.06/0.05 %); tree 0.014189 [0.014184-0.014313] K=3 (0.91/0.45/0.37 %); all_pairs/tree 0.9381 (-6.19 %, -0.0009); bars r/i/s 1.83/0.92/0.75 %; Y/Y/Y CLAIMED
+- n=144: all_pairs 0.014757 [0.014746-0.014774] K=3 (0.19/0.10/0.07 %); tree 0.014863 [0.014858-0.015032] K=3 (1.17/0.59/0.48 %); all_pairs/tree 0.9929 (-0.71 %, -0.0001); bars r/i/s 2.38/1.19/0.98 %; n/n/n not claimed
+- n=152: all_pairs 0.016325 [0.016224-0.016335] K=3 (0.68/0.34/0.27 %); tree 0.015787 [0.015784-0.015853] K=3 (0.44/0.22/0.18 %); all_pairs/tree 1.0340 (+3.40 %, +0.0005); bars r/i/s 1.62/0.81/0.65 %; Y/Y/Y CLAIMED  <- tree claimed faster
+- n=160: all_pairs 0.017906 [0.017901-0.017937] K=3 (0.20/0.10/0.08 %); tree 0.016449 [0.016439-0.016460] K=3 (0.12/0.06/0.04 %); all_pairs/tree 1.0886 (+8.86 %, +0.0015); bars r/i/s 0.47/0.24/0.18 %; Y/Y/Y CLAIMED  <- tree claimed faster
+- n=168: all_pairs 0.019383 [0.019357-0.019405] K=3 (0.24/0.12/0.09 %); tree 0.016949 [0.016855-0.017059] K=3 (1.20/0.60/0.44 %); all_pairs/tree 1.1436 (+14.36 %, +0.0024); bars r/i/s 2.46/1.23/0.89 %; Y/Y/Y CLAIMED  <- tree claimed faster
+- n=176: all_pairs 0.020930 [0.020804-0.020943] K=3 (0.66/0.33/0.26 %); tree 0.017337 [0.017286-0.017425] K=3 (0.80/0.40/0.29 %); all_pairs/tree 1.2072 (+20.72 %, +0.0036); bars r/i/s 2.08/1.04/0.79 %; Y/Y/Y CLAIMED  <- tree claimed faster
+- n=192: all_pairs 0.024679 [0.024619-0.024742] K=3 (0.50/0.25/0.18 %); tree 0.018812 [0.018715-0.018904] K=3 (1.00/0.50/0.36 %); all_pairs/tree 1.3119 (+31.19 %, +0.0059); bars r/i/s 2.24/1.12/0.81 %; Y/Y/Y CLAIMED  <- tree claimed faster
+- n=256: all_pairs 0.042475 [0.042391-0.042612] K=3 (0.52/0.26/0.19 %); tree 0.025059 [0.025036-0.025212] K=3 (0.70/0.35/0.28 %); all_pairs/tree 1.6950 (+69.50 %, +0.0174); bars r/i/s 1.75/0.87/0.67 %; Y/Y/Y CLAIMED  <- tree claimed faster  [window 4: 1.543]
+- **disparity: LO (largest n with all_pairs not claimed slower) = 144; HI (smallest n with tree claimed faster) = 152; monotone True; log-log crossover 145.4**
+  - bridge n=64: tree_rowwalk 0.007160 [0.007089-0.007170] K=3 (1.12/0.56/0.44 %); LeafList/RowWalk 1.0570 (+5.70 %, +0.0004); bars r/i/s 2.77/1.39/1.07 %; Y/Y/Y CLAIMED; all_pairs/tree_rowwalk 0.429 (window 4, the same kernel: 0.5)
+  - bridge n=128: tree_rowwalk 0.014822 [0.014749-0.014969] K=3 (1.49/0.74/0.55 %); LeafList/RowWalk 0.8897 (-11.03 %, -0.0016); bars r/i/s 4.59/2.29/1.67 %; Y/Y/Y CLAIMED; all_pairs/tree_rowwalk 0.820 (window 4, the same kernel: 0.946)
+  - bridge n=256: tree_rowwalk 0.031039 [0.031026-0.031183] K=3 (0.50/0.25/0.20 %); LeafList/RowWalk 0.8073 (-19.27 %, -0.0060); bars r/i/s 1.73/0.87/0.69 %; Y/Y/Y CLAIMED; all_pairs/tree_rowwalk 1.368 (window 4, the same kernel: 1.543)
+
+**Q3 (recipe 1.4): TREE_BRUTE_MAX_ROWS = 144; AUTO_TREE_LO / HI = 144 / 152; L2's procedure beside it: HI 150 (the larger log-log crossover, 145.4, to two significant figures), LO 135; inside the grid**
+
+## 4. Q4: G-TW's canary resolution on the C4 binary 989ca0f0 (J-A W1, reuse on, unarmed)
+R = 7.542 % (window 7's G-TW J-A W1 [0,500) two-spread bar); frac = k R / 1.0609
+- reference L9-JA-on: 16.6480 [16.6066-16.8070] K=6 (1.20/0.22/0.22 %)
+- rung 0.5 R (frac 0.036, expected rise 3.77 %): 17.2533 [17.2378-17.3411] K=6 (0.60/0.18/0.11 %); injected 0.5987 [0.5978-0.6051] K=6 (1.21/0.17/0.23 %); rise +0.6053 ms = +3.64 % (rise/injected 1.011); 1.0364 (+3.64 %, +0.6053); bars r/i/s 2.69/0.57/0.50 %; Y/Y/Y CLAIMED -> SEEN
+- rung 1.0 R (frac 0.071, expected rise 7.54 %): 17.8861 [17.8221-17.9171] K=6 (0.53/0.39/0.12 %); injected 1.1807 [1.1791-1.1933] K=6 (1.21/0.17/0.23 %); rise +1.2381 ms = +7.44 % (rise/injected 1.049); 1.0744 (+7.44 %, +1.2381); bars r/i/s 2.63/0.90/0.51 %; Y/Y/Y CLAIMED -> SEEN
+- rung 1.5 R (frac 0.107, expected rise 11.31 %): 18.5120 [18.4440-18.5432] K=6 (0.54/0.27/0.11 %); injected 1.7794 [1.7769-1.7983] K=6 (1.21/0.17/0.23 %); rise +1.8640 ms = +11.20 % (rise/injected 1.048); 1.1120 (+11.20 %, +1.8640); bars r/i/s 2.64/0.70/0.50 %; Y/Y/Y CLAIMED -> SEEN
+- rung 2.0 R (frac 0.142, expected rise 15.08 %): 19.1239 [19.0715-19.1964] K=6 (0.65/0.49/0.15 %); injected 2.3614 [2.3581-2.3866] K=6 (1.21/0.17/0.23 %); rise +2.4759 ms = +14.87 % (rise/injected 1.048); 1.1487 (+14.87 %, +2.4759); bars r/i/s 2.74/1.07/0.53 %; Y/Y/Y CLAIMED -> SEEN
+**Q4: DEMONSTRATED; the smallest rung seen with every larger rung seen: 0.5 R = 3.77 % of the step**
+
+## 5. Against the driver's raw/reduction.json (tools/reduce7b.py)
+- 103 cells (K, median, min, max) and 150 comparisons (ratio and the three claim flags) compared by key: 0 differences; the 36 Q3 comparisons (whose cells the driver does not store) agree in K, medians and ratios to 6.2e-05 relative, the print precision of the estimates it read, and in every claim flag
+- decisions: {'Q1 W8': True, 'Q2 C2 default row': True, 'Q2 C2 cfg-A plain': True, 'Q3': True, 'Q4': True}

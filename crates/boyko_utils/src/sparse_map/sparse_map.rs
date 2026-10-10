@@ -226,6 +226,12 @@ impl<U> IndexMut<usize> for SparseMap<U> {
 
 #[cfg(test)]
 mod tests {
+    // Test oracle model: `HashSet` is the order-agnostic REFERENCE set that
+    // `SparseMap::active_indices()` (whose dense order is insertion order) is
+    // differentially compared against. `#[cfg(test)]` — compiled out of every
+    // shipping build; the map itself never touches a std collection.
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
     use std::collections::HashSet;
 

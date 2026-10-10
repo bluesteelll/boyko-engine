@@ -158,6 +158,10 @@ fn forge_second_collapsing_block(base: &mut Vec<u8>, e2: u32) {
     base[HDR_ENTITY_COUNT..HDR_ENTITY_COUNT + 8].copy_from_slice(&total.to_le_bytes());
 }
 
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: the forged block declares `POOL_MAX_ROWS` saved rows, so the snapshot carries `POOL_MAX_ROWS * 8` bytes of row table that the interpreter must build and the loader must walk (MEASURED 2026-10-10: past 3 min under the Miri sweep's flags); the ceiling check is the property and cannot be reached with fewer rows. Runs natively."
+)]
 #[test]
 fn two_blocks_collapsing_over_ceiling_is_a_loud_err_not_a_panic() {
     // Touch the component so the loader can resolve its stable name (the W1 contract).

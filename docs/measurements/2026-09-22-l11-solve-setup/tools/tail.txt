@@ -1,0 +1,43 @@
+## 5. G9 gate arithmetic, read against `02-DESIGN-REV1.md` § Gates (all-K medians; pass-0-only deltas in brackets where they differ by more than 0.1 ms)
+
+| G9 item | measured (tip − parent) | gate | arithmetic |
+|---|---|---|---|
+| parent vs tip, K=12 interleaved, receipts per process | 410 slots × K=12, 452 processes, 452 receipt pairs, 42 re-runs, 0 dropped | — | done |
+| T(1) J-As | −1.996 ms (10.693 → 8.697; −18.7 %; 2·SE 0.340; min-max disjoint) [pass 0: −2.013] | ≤ −0.486 (0.6 × −0.81) | PASS |
+| T(8) J-As | −1.103 ms (5.343 → 4.240; −20.6 %; 2·SE 0.469; min-max disjoint) [pass 0: −1.025; pass 1: −1.588] | ≤ −0.366 (0.6 × −0.61) | PASS |
+| J-As at W 2 / 4 / 16 | −1.438 / −1.253 / −1.112 ms (−18.8 / −20.3 / −20.3 %), each > 2·SE and min-max disjoint | not claimed slower | PASS |
+| solve_build (J-As-a) | W1 −0.554 ms (0.829 → 0.275; 0.183 → 0.061 µs/manifold); W8 −0.534 ms (0.839 → 0.305) | ≤ −0.174 (0.6 × −0.29) | PASS at both W |
+| store (J-As-a) | W1 −0.136 ms (0.157 → 0.021; 0.035 → 0.0045 µs/manifold); W8 −0.128 ms (0.153 → 0.025) | ≤ −0.066 (0.6 × −0.11) | PASS at both W |
+| warm_apply (J-As-a) | W1 −0.094 ms (0.613 → 0.519; 0.135 → 0.115 µs/manifold); W8 −0.092 ms | C3's lever, NOT in this tip | reported, not gated (below 0.6 × −0.19 = −0.114 as expected before C3) |
+| wide colours (J-As-a `phys_color_wide`) | W1 −0.959 ms (3.472 → 2.513; −27.6 %; 2·SE 0.097); W8 −0.244 ms (0.863 → 0.619; −28.3 %; 2·SE 0.011) | not claimed slower | PASS; measured above SE at both W (the design says the −10…−25 % is claimed only if measured above SE — the measured −28 % is above SE and beyond that range) |
+| cfg-A (J-A) at W 1 / 2 / 4 / 8 / 16 | −0.650 / −0.860 / −0.760 / −0.682 / −1.003 ms (−3.3 / −7.0 / −8.9 / −10.4 / −15.1 %), each > 2·SE; min-max disjoint only at W2 [pass 0: −0.598 / −0.713 / −0.800 / −0.788 / −0.873] | not claimed slower at any W | PASS at every W |
+| R at W 1 / 8 | −3.139 / −1.535 ms (−22.0 / −22.6 %), > 2·SE, min-max disjoint | (not in G9's gate list; "not slower" reading) | not slower |
+| R-S at W 1 / 8 | −0.093 / −0.120 ms (−1.5 / −3.7 %), NOT > 2·SE (0.275 / 0.528) | (not in G9's gate list) | not claimed either way |
+| S16 at W 1 | −0.0009 ms (−1.2 %), NOT > 2·SE (0.0021) | (not in G9's gate list) | not claimed either way |
+| the canary seen | parent: span reads the spin (543,355 vs 543,045 ns, +0.06 %), wall rise +0.494 ms against the J-As-a median for a 0.543 ms spin ((rise − spin)/T = −0.5 %). tip: span reads the spin (428,572 vs 428,103 ns, +0.11 %), wall rise +0.198 ms for a 0.428 ms spin ((rise − spin)/T = −2.7 %); the one J-C tip process (8.752 ms) lies inside the J-As-a tip cell's min-max (8.384–8.960), so at K=1 the rise is not resolvable against the process-to-process spread. | seen | span: seen on both binaries; wall rise: seen on the parent, within the spread on the tip (K=1 per binary, as the task specified) |
+
+Per-stage totals (J-As-a, W=1): setup = build + warm + store 1.598 → 0.815 ms (0.353 → 0.180 µs/manifold); solve span `sys_physics_solve_colored` 5.214 → 3.420 ms (−34.4 %); `g_ns` (executor gap) 0.093 → 0.038 ms; `u_ns` (unzoned residue) 0.0013 → 0.0010 ms; broadphase 1.919 → 1.878 ms (−2.1 %, > 2·SE 0.011) and narrowphase 2.999 → 2.975 ms (−0.8 %, > 2·SE 0.013) — both outside the lever, both moved by less than 0.05 ms. Wall 10.586 → 8.478 ms. Counters identical on both binaries (manifolds 4,519, pairs 9,559, colours 11 / wide 9, waves 108, points 17,054, wide slots 17,013.5, narrow slots 36).
+
+Against the design's target table (P0 J-B per-stage ms / µs per manifold → predicted after L11): solve_build 1.038 / 0.229 → predicted 0.25–0.55 / 0.055–0.122; measured parent 0.829 / 0.183, tip 0.275 / 0.061 (inside). store 0.270 / 0.060 → predicted 0.04–0.08 / 0.009–0.018; measured parent 0.157 / 0.035, tip 0.021 / 0.0045 (below the predicted range). warm_apply 0.614 / 0.136 → predicted 0.15–0.30 after C3; measured parent 0.613 / 0.135, tip 0.519 / 0.115 (C3 not landed). wide colours 3.576 / 0.790 → predicted 2.68–3.22 / 0.59–0.71; measured parent 3.472 / 0.768, tip 2.513 / 0.555 (below the predicted range). T(1) J-As "today" derived 11.04–11.14 → predicted 8.67–9.79; measured parent 10.693, tip 8.697 (inside). T(8) projected 5.5–5.7 → 3.93–4.69; measured parent 5.343, tip 4.240 (inside). R-S store 0.32–0.37 → predicted 0.05–0.10; measured W1 0.298 → 0.128 ms (−57 %, > 2·SE 0.136), W8 0.255 → 0.130 ms (2·SE 0.311, NOT > 2·SE: the parent R-S W8 cell has one 5.72 ms process against a 3.23 median, and its store spread follows). The parent's store and wide-colour values are lower than P0's J-B values (P0's J-B is cfg-B = Grid + simd; this window's rows are cfg-As = AllPairs + simd, and the parent tree carries L4/L5/A1b above P0's tip), so the "P0 ms" column of the design table is not this window's parent.
+
+## 6. Facts the analyst should see (no claims)
+
+1. R-S (everything frozen, the B1 carry path): the tip's `phys_solve_build` is +0.015 ms (0.033 → 0.048 ms, +44 %, > 2·SE 0.007) at W1 and +0.015 ms at W8, `phys_color_narrow` +0.0015 ms (+68 %), `phys_pass_biased/relax` +0.0003/+0.0005 ms — the only stages slower on the tip in any row, all at the microsecond level; R-S `phys_store` is −0.170 ms (W1). End to end R-S is −0.093 ms, not claimed.
+2. The tip's R-S store (0.128 / 0.130 ms) is above the design's predicted 0.05–0.10 ms for the resting world.
+3. S16 (16 manifolds): `phys_solve_build` 2.3 → 1.0 µs, `phys_store` 0.3 → 0.05 µs, `phys_pass_biased/relax` +0.2/+0.5 µs (+1.2/+1.6 %, > 2·SE), `phys_color_narrow` +0.7 µs (+1.7 %); wall −1.3 µs (−1.6 %), not > 2·SE.
+4. The armed rows' cells are much tighter than the disarmed ones (J-As-a W8: SE 0.011 / 0.008 ms, min-max 0.08 / 0.07 ms; J-As W8 disarmed: SE 0.212 / 0.101, min-max 1.69 / 0.80 ms) because the armed block ran 09:59–10:12 on a quiet machine while the disarmed main block's pass 1 (08:55–09:57) carried the background load of § 2. The disarmed cell medians are nevertheless within 0.15 ms of the armed ones (J-As W1 10.693 / 8.697 vs J-As-a 10.658 / 8.554; W8 5.343 / 4.240 vs 5.275 / 4.242).
+5. The pass split (§ 4) moves the parent more than the tip at W ≥ 2, so the pass-1 effects are the larger ones (J-A W16 −0.87 in pass 0, −1.87 in pass 1; J-As W8 −1.02 / −1.59). The pass-0 deltas are the cleaner estimate for the multi-threaded cells; every gate passes on them as well (listed in § 5).
+6. J-As W=16 is not faster than W=8 on either binary (parent 5.469 vs 5.343, tip 4.357 vs 4.240); J-A W=16 vs W=8: parent 6.663 vs 6.592, tip 5.660 vs 5.910 (the tip's W16 is 0.25 ms faster than its W8; pass 0 alone: 5.638 vs 5.773).
+
+## 7. Not measured here, and why
+
+- `warm_apply` gate (−0.19 ms): C3's lever, not in the C2 tip; the measured −0.094 ms is reported above and does not meet 0.6 × −0.19.
+- Jolt v5.6.0: not run (owner ruling); its window-3 cells (`D:/wt/joltab/docs/measurements/2026-09-21-physics-window3/raw/tables.md`, `JOLT56-T` medians over K=6: 9.828 / 5.770 / 3.581 / 2.569 / 2.388 ms at W 1/2/4/8/16; P0b's 9.650 / 5.708 / 3.557 / 2.493 / 2.447) are the comparison, from a different window and a different day; this window's tip J-As is 8.697 / 6.221 / 4.923 / 4.240 / 4.357 ms and J-A 18.932 / 11.465 / 7.769 / 5.910 / 5.660 ms at the same W, with the cross-window caveat window 3 § 3 states.
+- Committed-memory receipts (design § "What moves": about 2 MB): not part of this task.
+- C4 (parallel setup) and the serial/parallel A/B at W=8: not in this tip.
+
+## 8. Deletions and what remains
+
+- Deleted by absolute path after the window: `C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/win4b/parent_tree` and `D:/wt/_targets/l11-parent-msvc` (the parent binary survives as `bin/runner_parent.exe` with its sha256 in `bin/SHA256SUMS`).
+- Kept under `scratchpad/win4b/`: `bin/`, `gate/`, `raw/`, `logs/`, `tools/`, `rows.json`, `window_report.md`, plus the untimed rehearsal `test/window/` and `dry/`.
+- No commit was made; `D:/wt/lighttable` is untouched (`git status` clean before and after; only `D:/wt/_targets/vkval-msvc` was written by the tip build).

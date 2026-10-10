@@ -23,10 +23,21 @@
 //!
 //! [`ScheduleBuilder::build`]: ScheduleBuilder::build
 
+// App-setup schedule construction: every `HashMap` in this module belongs to the
+// builder's own scratch state (set interning, set membership / parent / name /
+// condition tables) or to a `build`-time graph pass (`flatten_set_membership`,
+// `expand_set_edges`). All of it is consumed by `ScheduleBuilder::build` and
+// lowered into the flat, id-indexed tables the `Schedule` executor runs on — it
+// runs before the first frame and never again. Module-scoped rather than ~30
+// scattered attributes because the whole file has this one temperature (the
+// trailing `#[cfg(test)] mod tests` drives the same build-time API).
+#![allow(clippy::disallowed_types)]
+
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use boyko_log::codes::{B9001, B9002, B9004, B9005, OnceSite, W1501};
 use boyko_threadpool::ThreadPool;
 use fixedbitset::FixedBitSet;
 
@@ -438,6 +449,36 @@ impl ScheduleBuilder {
             });
         }
 
+        // Step 1.5 (profiling rung 3) — mint one zone id per system.
+        //
+        // Here rather than at construction because THIS is where the system set is final: a
+        // descriptor added later would have minted an id for a schedule it never joined, and the
+        // id space is a fixed 4096.
+        //
+        // `SYSTEM_ZONES_COMPILED` is a `const`, so at a ceiling below `Deep` the whole loop --
+        // the mint, the write, and the ids they would have consumed -- is deleted from the build.
+        //
+        // Exhaustion is NON-TERMINAL and that is a reversal taken deliberately. The obvious
+        // precedent (`query_type_registry.rs`'s terminal exhaustion) does not transfer: a
+        // query-shape registry answers a SEMANTIC question, where a missing entry is a wrong
+        // answer; a zone registry answers a MEASUREMENT question, where a missing entry is a
+        // missing measurement. And the arithmetic makes the terminal form dangerous -- an `App`
+        // runs at least `Startup` + `Fixed` + `Main`, the cap is 1024 systems per schedule, and
+        // minting is unconditional at this tier, so a legal app that never asked to profile could
+        // panic at build time.
+        if crate::ecs::core::profiling::SYSTEM_ZONES_COMPILED {
+            for d in &mut descriptors {
+                let id = boyko_diag::profiling_abi::mint_id();
+                if id == boyko_diag::profiling_abi::ZONE_ID_EXHAUSTED {
+                    // Counted and raised inside `mint_id`; the profiling fold turns both into
+                    // `boyko-W9201`. The system runs, unprofiled, with the unassigned id it was
+                    // constructed with.
+                    continue;
+                }
+                d.system_box.system.set_zone(id);
+            }
+        }
+
         // Step 2 — capture names BEFORE the descriptors move into later
         // phases. Diagnostics in `cycle_in_before_after_panics` rely on
         // this snapshot.
@@ -670,6 +711,19 @@ impl ScheduleBuilder {
             }
         }
 
+        // KE17 D3 — `may_defer[i]` set iff system `i` can enqueue deferred work,
+        // folded here for the same reason `has_condition` is: the answer is
+        // constant for the schedule's lifetime and the executor must not pay a
+        // virtual call per completion to re-ask it. `System::has_deferred`
+        // defaults to `true`, so a bit is CLEAR only where a param chain
+        // declared `HAS_DEFERRED = false` all the way down.
+        let mut may_defer = FixedBitSet::with_capacity(n_final);
+        for (i, sb) in systems.iter().enumerate() {
+            if sb.system.has_deferred() {
+                may_defer.insert(i);
+            }
+        }
+
         // Build the scratch *after* the conflict graph so we can seed
         // `pred_remaining` from `pred_count` in one pass. `set_conditions_table.len()`
         // sizes the set-condition memo bitsets (§7.1).
@@ -682,6 +736,7 @@ impl ScheduleBuilder {
             conflict_graph,
             executor_scratch,
             has_condition,
+            may_defer,
             system_conditions,
             system_gating_sets,
             set_conditions: set_conditions_table,
@@ -1070,26 +1125,38 @@ impl ScheduleBuildError {
     /// Renders the error as a `boyko-B900x: …` string — the message body of
     /// the panic raised by [`ScheduleBuilder::build`].
     pub(crate) fn formatted(&self) -> String {
+        // The codes arrive through the registry CONSTANTS (L6), not as string literals:
+        // `PanicCode`'s `Display` prints `boyko-B900x`, so every rendered message is byte-identical
+        // to what this function produced before, while the identifiers now appear in source. That
+        // is what the registry's orphan check scans for -- a code whose emitter is deleted then
+        // fails a test instead of leaving a row nothing produces.
+        //
+        // POSITIONAL, never `{B9001}`: an inline format argument lives inside the string literal,
+        // where the walker's LIT stream sees it and its CODE stream does not, and the row would
+        // still read as an orphan.
         match self {
             ScheduleBuildError::OrderingCycle { systems } => format!(
-                "boyko-B9001: schedule contains a cycle of {} systems: {:?}",
+                "{}: schedule contains a cycle of {} systems: {:?}",
+                B9001,
                 systems.len(),
                 systems
             ),
             ScheduleBuildError::SetHierarchyCycle { sets } => format!(
-                "boyko-B9002: set hierarchy contains a cycle of {} sets: {:?}",
+                "{}: set hierarchy contains a cycle of {} sets: {:?}",
+                B9002,
                 sets.len(),
                 sets
             ),
             ScheduleBuildError::SetsOrderedButIntersect { a, b, shared } => format!(
-                "boyko-B9004: sets '{a}' and '{b}' are ordered relative to each \
+                "{}: sets '{a}' and '{b}' are ordered relative to each \
                  other but share member '{shared}' (a system cannot run both \
-                 before and after itself)"
+                 before and after itself)",
+                B9004
             ),
             ScheduleBuildError::UnknownSystemKey { key, n } => format!(
-                "boyko-B9005: ordering references SystemKey({}) which is not in \
+                "{}: ordering references SystemKey({}) which is not in \
                  this schedule (it has {} systems); the key is foreign or stale",
-                key.0, n
+                B9005, key.0, n
             ),
         }
     }
@@ -1322,8 +1389,17 @@ fn first_shared(a: &[SystemKey], b: &[SystemKey]) -> Option<SystemKey> {
 }
 
 /// Emits the empty-set build warning (§6.4 / §13.1 R3-B) when an ordering
-/// edge references a set with no (transitive) members. Build-time and cold,
-/// so `eprintln!` is acceptable (no logging dependency in the ECS crate).
+/// edge references a set with no (transitive) members.
+///
+/// L6: was an `eprintln!` whose comment read "no logging dependency in the ECS
+/// crate" — true when it was written, false since L5 put the seam in. The code
+/// is no longer in the message body: the sink prints it from the site's own
+/// metadata, so the rendered line still carries `boyko-W1501` and a reader's
+/// grep is unaffected.
+///
+/// `RatePolicy::Once`, honoured by this site's own latch, because the build
+/// walks every ordering edge and a schedule with one misspelled set name has as
+/// many of them as it has systems.
 #[cold]
 fn warn_if_empty(
     members: &[SystemKey],
@@ -1331,11 +1407,16 @@ fn warn_if_empty(
     set_names: &HashMap<SystemSetId, &'static str>,
 ) {
     if members.is_empty() {
-        eprintln!(
-            "boyko-W1501: ordering references set '{}' which has no members \
-             (no system joined it via in_set); the ordering has no effect",
-            set_name_or_default(set, set_names)
-        );
+        static FIRED: OnceSite = OnceSite::new();
+        if FIRED.claim() {
+            boyko_log::warn!(
+                boyko_log::Schedule,
+                W1501,
+                "ordering references set '{}' which has no members (no system joined it via \
+                 in_set); the ordering has no effect",
+                set_name_or_default(set, set_names)
+            );
+        }
     }
 }
 
@@ -1736,6 +1817,189 @@ mod tests {
                 .unwrap_or(0),
             1,
             "configure_set(S).run_if stores one set condition under S's id"
+        );
+    }
+
+    /// Profiling rung 3 — every real system in a built schedule carries a **distinct, assigned**
+    /// zone id, and only under a tier that admits system zones.
+    ///
+    /// The two halves matter separately. *Assigned* is what makes the system's samples land in a
+    /// column at all; *distinct* is what keeps two systems from merging into one row — a merge
+    /// that would look like one busy system rather than like a bug, which is the failure mode the
+    /// registry's own mint is built to avoid for static zones.
+    ///
+    /// RED: delete the `set_zone` override from `FunctionSystem` ⇒ the trait's no-op default takes
+    /// over ⇒ every zone reads `ZONE_ID_UNASSIGNED` ⇒ the first assertion reds. Run at
+    /// implementation.
+    #[test]
+    fn every_real_system_gets_its_own_zone_id() {
+        use crate::ecs::core::profiling::{SYSTEM_ZONES_COMPILED, ZONE_ID_UNASSIGNED};
+
+        fn sys_a() {}
+        fn sys_b() {}
+        fn sys_c() {}
+
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+        builder.add_system(sys_a);
+        builder.add_system(sys_b);
+        builder.add_system(sys_c);
+
+        let mut world = EcsMaster::new();
+        let schedule = builder.build(&mut world);
+        let zones: Vec<u16> = schedule
+            .systems
+            .iter()
+            .map(|sb| sb.system.meta().zone())
+            .collect();
+
+        if !SYSTEM_ZONES_COMPILED {
+            // Not a skip: at a folded tier the correct answer is that NO system has a zone, and
+            // asserting it is what would catch a minting loop the `const` gate failed to delete.
+            assert!(
+                zones.iter().all(|z| *z == ZONE_ID_UNASSIGNED),
+                "the compile tier folds system zones out, yet ids were minted: {zones:?}"
+            );
+            return;
+        }
+
+        assert!(
+            zones.iter().all(|z| *z != ZONE_ID_UNASSIGNED),
+            "a real system was left unassigned: {zones:?}"
+        );
+        for (i, a) in zones.iter().enumerate() {
+            for b in zones.iter().skip(i + 1) {
+                assert_ne!(a, b, "two systems share one zone id, so their rows would merge");
+            }
+        }
+    }
+
+    /// A test stub that never overrides `set_zone` keeps `ZONE_ID_UNASSIGNED` — the residual named
+    /// on the trait method, asserted rather than left to be discovered.
+    ///
+    /// This is not a defect being blessed: a type with no zone produces no row, which the artifact
+    /// shows as an **absent** system rather than as a wrong number. It is here so that a future
+    /// reader who finds a system missing from a profile has somewhere to find out why.
+    #[test]
+    fn a_system_that_does_not_take_a_zone_stays_unassigned() {
+        use crate::ecs::core::profiling::ZONE_ID_UNASSIGNED;
+
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+        let init = Arc::new(AtomicUsize::new(0));
+        add_counting(&mut builder, "stub", Arc::clone(&init));
+
+        let mut world = EcsMaster::new();
+        let schedule = builder.build(&mut world);
+        assert_eq!(schedule.systems[0].system.meta().zone(), ZONE_ID_UNASSIGNED);
+    }
+
+    /// The public [`Schedule::system_zones`] accessor lists every system once, in the
+    /// schedule's own order, each with a distinct assigned id — the same ids and names the
+    /// schedule holds internally — and lists nothing under a tier that folds system zones.
+    ///
+    /// The internal fields are the oracle, read here where they are visible: a reader outside
+    /// the crate has only the accessor, so an accessor that dropped, reordered or mislabelled
+    /// a system would attribute that system's samples to another system with no way to tell.
+    ///
+    /// RED, both run at implementation (2026-09-19, msvc, debug): the accessor iterating in
+    /// reverse ⇒ "entry 0 names another system"; the accessor yielding `ZONE_ID_UNASSIGNED` for
+    /// every system ⇒ "entry 0 carries an id its system's spans do not". The folded-tier branch
+    /// runs only under a `BOYKO_PROFILE` below `Deep` and was not exercised.
+    #[test]
+    fn system_zones_are_unique_and_assigned() {
+        use crate::ecs::core::profiling::{SYSTEM_ZONES_COMPILED, ZONE_ID_UNASSIGNED};
+
+        fn zoned_a() {}
+        fn zoned_b() {}
+        fn zoned_c() {}
+
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+        builder.add_system(zoned_a);
+        builder.add_system(zoned_b);
+        builder.add_system(zoned_c);
+
+        let mut world = EcsMaster::new();
+        let schedule = builder.build(&mut world);
+        let listed: Vec<(&'static str, u16)> = schedule.system_zones().collect();
+
+        if !SYSTEM_ZONES_COMPILED {
+            // Not a skip: at a folded tier the correct answer is an empty list, and asserting
+            // it is what catches an accessor that lists ids no sample will ever carry.
+            assert!(
+                listed.is_empty(),
+                "the compile tier folds system zones out, yet the accessor listed {listed:?}"
+            );
+            return;
+        }
+
+        assert_eq!(listed.len(), schedule.len(), "one entry per system: {listed:?}");
+        for (i, &(name, zone)) in listed.iter().enumerate() {
+            assert_eq!(name, schedule.systems[i].name, "entry {i} names another system");
+            assert_eq!(
+                zone,
+                schedule.systems[i].system.meta().zone(),
+                "entry {i} carries an id its system's spans do not"
+            );
+            assert_ne!(zone, ZONE_ID_UNASSIGNED, "entry {i} ({name}) is unassigned");
+        }
+        for f in ["::zoned_a", "::zoned_b", "::zoned_c"] {
+            assert_eq!(
+                listed.iter().filter(|(name, _)| name.ends_with(f)).count(),
+                1,
+                "system `{f}` must be listed exactly once: {listed:?}"
+            );
+        }
+        for (i, (_, a)) in listed.iter().enumerate() {
+            for (_, b) in listed.iter().skip(i + 1) {
+                assert_ne!(a, b, "two systems share one zone id, so their rows would merge");
+            }
+        }
+    }
+
+    /// **KE17 D3 — the `may_defer` fold, all three answers.**
+    ///
+    /// One schedule per case so index 0 is unambiguous under the topological
+    /// permutation:
+    ///
+    /// * a param-free closure declares `HAS_DEFERRED = false` all the way down
+    ///   ⇒ CLEAR, the bit the split apply window will act on;
+    /// * a `Commands` closure ⇒ SET, the only param in the tree that answers
+    ///   `true`;
+    /// * a hand-written `System` that declares NOTHING ⇒ SET, because
+    ///   `System::has_deferred` defaults to the fail-safe side. This is the
+    ///   builder-side half of the receipt whose trait-side half is
+    ///   `system::tests::undeclared_system_keeps_its_barrier`.
+    #[test]
+    fn may_defer_folds_param_chain_and_defaults_to_set() {
+        use crate::ecs::core::system::Commands;
+
+        let mut world = EcsMaster::new();
+
+        let mut b = ScheduleBuilder::new(fresh_pool());
+        b.add_system(|| {});
+        let plain = b.build(&mut world);
+        assert!(
+            plain.may_defer.is_clear(),
+            "a param-free system carries no deferred payload ⇒ bit clear"
+        );
+        assert!(!plain.may_defer(0), "the public accessor agrees");
+
+        let mut b = ScheduleBuilder::new(fresh_pool());
+        b.add_system(|_: Commands| {});
+        let deferring = b.build(&mut world);
+        assert!(
+            deferring.may_defer(0),
+            "a `Commands` system keeps its barrier ⇒ bit set"
+        );
+
+        let mut b = ScheduleBuilder::new(fresh_pool());
+        add_counting(&mut b, "undeclared", Arc::new(AtomicUsize::new(0)));
+        let undeclared = b.build(&mut world);
+        assert!(
+            undeclared.may_defer(0),
+            "a System impl that declares nothing must keep its barrier"
         );
     }
 

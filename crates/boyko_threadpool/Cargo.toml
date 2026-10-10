@@ -3,13 +3,31 @@ name = "boyko-threadpool"
 version = "0.1.0"
 edition = "2024"
 description = "Custom Chase-Lev work-stealing thread pool for boyko-engine Phase 9 scheduler"
-
+license.workspace = true
 [dependencies]
+# The diagnostics substrate. This crate owns the ONE per-thread lane integer
+# that the profiler and the logger both index by; the pool is the only code
+# that knows which thread is which, so the pool is what writes it (D1). The
+# edge is in-house and zero-dependency: `boyko_diag` has an empty
+# `[dependencies]`, so `cargo tree -p boyko-diag -e normal,build` is one node
+# and the pool's third-party graph is unchanged by this line.
+boyko-diag = { path = "../boyko_diag" }
+# The logging seam (rung L6). THREE call sites, all on a panic path: `abort_on_task_panic`
+# (`boyko-E0201`, process death) and `scope::discard_payload`'s two records (`boyko-E0202` /
+# `boyko-E0203`, a payload that will not be delivered). The edge adds no third-party crate -- `boyko_log`
+# depends on `boyko_diag` (empty `[dependencies]`) and `boyko_macros` -- and it cannot cycle:
+# nothing in the logger names this crate, because the lane identity the logger indexes by is
+# `boyko_diag`'s and is written HERE (D1).
+boyko-log = { path = "../boyko_log" }
 crossbeam-deque = "0.8"
 crossbeam-utils = "0.8"
 
 [dev-dependencies]
 criterion.workspace = true
+# Defect A6 validation: `tests/a6_panic_propagation.rs` observes the pool's two payload-discard
+# records through `boyko_log::probe`, which exists only under `test-probe`. Dev-only, so the
+# feature never reaches a shipping build (the rule `boyko_log/Cargo.toml` states for it).
+boyko-log = { path = "../boyko_log", features = ["test-probe"] }
 
 # loom is pulled in ONLY under `--cfg loom` (Phase 9.1 D1/M3/M4). It is a
 # normal (non-dev) dependency because the loom-shim lives in the library
@@ -24,5 +42,31 @@ loom.workspace = true
 default = []
 scheduler-trace = []
 
+# M2w: the Tree-Borrows NEGATIVE CONTROL of the stage-3 allocation work -- a switch that labels no
+# measurement. It swaps `Task::new_scoped`'s `execute` value for `task::scoped::run_scoped_neg`,
+# which differs from the shipped `run_scoped` by exactly
+# one protector: it binds the cell as a `&ScopedCell<F>` and passes that reference as an ARGUMENT
+# to the call that performs the release RMW, so a protector over CHUNK memory is live at the instant
+# `Scope::drop`'s `free_all` deallocates that chunk. Miri under Tree Borrows must then report
+# `deallocation through <tag> is forbidden`; A RUN THAT REPORTS NOTHING IS A RED GATE, because it
+# means M2w's positive column -- "the shipped `run_scoped` ran with the free inside a completer's
+# open release window and no UB was reported" -- is no longer known to be falsifiable. Stage 3b
+# deliberately weakened that argument's form (the cell now outlives the release RMW), and this arm
+# is what keeps the replacement checked rather than assumed.
+# THE ARM IS UNBUILDABLE NATIVELY BY DESIGN: `src/lib.rs` carries
+# `#[cfg(all(feature = "tb-neg-m2w", not(miri)))] compile_error!(...)`, so `--all-features` -- the
+# one configuration that would otherwise ship deliberate UB into the ordinary suite -- refuses to
+# compile instead. Driver: `scripts/tb_neg_gate.ps1`, one Miri process per seed, all four red.
+# It carries no `ke16-` prefix on purpose: it falsifies a gate, it does not identify a
+# configuration.
+tb-neg-m2w = []
+
 [lints]
 workspace = true
+
+# KE16 -- the pool-level wall-clock harness for nested (worker-spawned) scopes. `harness = false`
+# because criterion supplies its own main; the sibling `tests/ke16_nested_scope_occupancy.rs`
+# carries the occupancy instrument and the red-first gate, this file carries only throughput.
+[[bench]]
+name = "ke16_nested_scope"
+harness = false

@@ -11,11 +11,11 @@
 //! type via [`Cf::Scalar`] (so the body is generic over `C: Cf` alone). Instantiated two
 //! ways:
 //!
-//! - [`EvalCf`] (here, always compiled) — REAL host control flow: [`unroll_for`] is a
-//!   real `for`, [`if_`] a real `if`, [`cont`] the loop-continue token. This is the
+//! - [`EvalCf`] (here, always compiled) — REAL host control flow: [`unroll_for`](Cf::unroll_for) is a
+//!   real `for`, [`if_`](Cf::if_) a real `if`, [`cont`](Cf::cont) the loop-continue token. This is the
 //!   CPU oracle the brick-exit eval sweep locks (it is a pure host `for`/`if` ZST; no
 //!   physics-reachable code calls it).
-//! - `EmitCf` ([`crate::emit`], `feature = "emit"`) — each combinator RECORDS a
+//! - `EmitCf` (`crate::emit`, `feature = "emit"`) — each combinator RECORDS a
 //!   statement into the emit STMT IR; the printer walks it into the `[unroll]`/`for`/
 //!   `continue` HLSL. The ENTIRE emit-recorder surface (`EmitCf` + the `Stmt`/`Block`
 //!   IR + the recorder thread-local) is whole-module `#[cfg(feature = "emit")]`-gated,
@@ -26,9 +26,10 @@
 //! A data-dependent `continue` is propagated out of the loop-body closure with the `?`
 //! operator over [`Flow`] (`= core::ops::ControlFlow<LoopOp>`). The body writes
 //! `C::if_(cond, || C::cont())?;`: when `cond` holds, `if_` returns the `cont` token
-//! ([`ControlFlow::Break`]`(`[`LoopOp::Continue`]`)`) and `?` early-returns it from the
-//! FnMut, so any LIVE TAIL mutation AFTER the continue point does NOT run — matching the
-//! host `continue`. [`unroll_for`] maps that `Break(Continue)` to a real `continue`
+//! ([`ControlFlow::Break`](core::ops::ControlFlow::Break)`(`[`LoopOp::Continue`]`)`) and `?`
+//! early-returns it from the FnMut, so any LIVE TAIL mutation AFTER the continue point does
+//! NOT run — matching the host `continue`. [`unroll_for`](Cf::unroll_for) maps that
+//! `Break(Continue)` to a real `continue`
 //! (Eval) / a `Stmt::Continue` (Emit). `core::ops::ControlFlow` is `#[must_use]`,
 //! `no_std`, and its `Try` impl is STABLE for use with `?` (implementing `Try` for a
 //! custom type is nightly; reusing the std type is not), so the Eval path stays stable +
@@ -100,8 +101,8 @@ pub trait Cf {
     /// type or a per-type handle), NOT built now.
     type Var;
 
-    /// The unrolled-loop INDUCTION VARIABLE handle passed to the [`unroll_for`](Self::
-    /// unroll_for) body. `usize` on Eval (the real `for` counter); an emit iv SSA node on
+    /// The unrolled-loop INDUCTION VARIABLE handle passed to the
+    /// [`unroll_for`](Self::unroll_for) body. `usize` on Eval (the real `for` counter); an emit iv SSA node on
     /// `EmitCf` (so [`index`](Self::index) records `vec[a]` against the iv's printed
     /// name). Carried as an associated type so the body's per-axis index spelling is
     /// backend-routed.
@@ -171,7 +172,7 @@ pub trait Cf {
     fn unroll_for<F: FnMut(Self::Iv) -> Flow>(attr: &'static str, n: usize, body: F);
 
     /// A `if cond { body() }` — `body` returns a [`Flow`] (typically a [`Cf::cont`]).
-    /// When `cond` is false, FALLS THROUGH ([`ControlFlow::Continue`]); when true,
+    /// When `cond` is false, FALLS THROUGH ([`ControlFlow::Continue`](core::ops::ControlFlow::Continue)); when true,
     /// returns whatever `body` yields (so a `C::if_(cond, || C::cont())?` early-returns
     /// the continue). Eval evaluates the real `if`; Emit records `Stmt::If`.
     ///
@@ -180,13 +181,14 @@ pub trait Cf {
     /// directly with no separate `Cf::Mask` axis to keep in sync.
     fn if_<F: FnOnce() -> Flow>(cond: <Self::Scalar as FieldScalar>::Mask, body: F) -> Flow;
 
-    /// The loop-CONTINUE token (a [`ControlFlow::Break`]`(`[`LoopOp::Continue`]`)`) —
+    /// The loop-CONTINUE token (a [`ControlFlow::Break`](core::ops::ControlFlow::Break)`(`[`LoopOp::Continue`]`)`) —
     /// `?`-propagated out of the loop body to skip the rest of the iteration.
     fn cont() -> Flow;
 
-    /// The loop-BREAK token (a [`ControlFlow::Break`]`(`[`LoopOp::Break`]`)`) — the Inc-4b
-    /// PRODUCER of the break payload [`unroll_for`](Self::unroll_for)/[`runtime_for`](Self::
-    /// runtime_for) already CONSUME (cf.rs `Break` arms, tested). Mirrors [`cont`](Self::cont):
+    /// The loop-BREAK token (a [`ControlFlow::Break`](core::ops::ControlFlow::Break)`(`[`LoopOp::Break`]`)`)
+    /// — the Inc-4b PRODUCER of the break payload
+    /// [`unroll_for`](Self::unroll_for)/[`runtime_for`](Self::runtime_for) already CONSUME
+    /// (cf.rs `Break` arms, tested). Mirrors [`cont`](Self::cont):
     /// `?`-propagated out of the loop body (typically through [`if_`](Self::if_) as `C::if_(
     /// cond, C::brk)?`) to EXIT the loop. On Eval it returns `Break(LoopOp::Break)` (which
     /// [`runtime_for`](Self::runtime_for) maps to a real `break` then returns
@@ -204,7 +206,7 @@ pub trait Cf {
     // casts, real `||`, a `Cell` out-param); Emit records SSA nodes / statements.
 
     /// The `uint` scalar — `u32` on Eval, the SSA-node handle [`Scalar`](Self::Scalar)
-    /// on Emit (a handle carrying [`crate::emit`]'s `uint` [`EmitTy`] per-node). The
+    /// on Emit (a handle carrying `crate::emit`'s `uint` `EmitTy` per-node). The
     /// brick class + the linear cell index.
     type Uint: Copy;
 
@@ -222,14 +224,15 @@ pub trait Cf {
     /// The `float3` OUT-PARAMETER local state (`cell_min`) — `Cell<[f32; 3]>` on Eval
     /// (interior mutability; the body writes through `&o`), an emit out-param NAME handle
     /// on Emit (its writes print bare `cell_min = ...;`, NOT a `float3 cell_min = ...;`
-    /// decl). Owned (no lifetime), passed by `&` to [`out_vec3_assign`](Self::
-    /// out_vec3_assign) — the SAME `&Self::Var` idiom [`get_var`](Self::get_var) uses.
+    /// decl). Owned (no lifetime), passed by `&` to
+    /// [`out_vec3_assign`](Self::out_vec3_assign) — the SAME `&Self::Var` idiom
+    /// [`get_var`](Self::get_var) uses.
     type OutVec3;
 
     /// The RETURN-VALUE cell (`Cell<u32>` on Eval — the body-local cell the IIFE reads
     /// after an early return; a ZST on Emit, the value travels in the recorded
-    /// `Stmt::Return`). Owned, passed by `&` to [`ret`](Self::ret) / [`if_ret`](Self::
-    /// if_ret).
+    /// `Stmt::Return`). Owned, passed by `&` to [`ret`](Self::ret) /
+    /// [`if_ret`](Self::if_ret).
     type RetCell;
 
     /// A `StructuredBuffer<uint>` PARAMETER (`grid`) — a BORROW of the external grid data
@@ -309,10 +312,10 @@ pub trait Cf {
     // facet ([`uge`](Self::uge) for `ugt`, [`or`](Self::or) for `and2`, [`named_uint`](Self::
     // named_uint)/[`named_lit`](Self::named_lit) for `uint_lit`); ZERO new loop/return machinery.
 
-    /// `a > b` over two [`Uint`](Self::Uint)s, producing a [`Mask`](Self::Mask) — the B1
+    /// `a > b` over two [`Uint`](Self::Uint)s, producing a [`Mask`](FieldScalar::Mask) — the B1
     /// sor-retreat's `it > 0u` iteration guard. The `uint` strict-`>` analogue of
     /// [`uge`](Self::uge) (`a >= b`); a DISTINCT opcode (`OpUGreaterThan`) from a swapped `<`.
-    /// On Eval `a > b` over the host `u32`s; on Emit a [`crate::emit`] `UGt` node printed inline
+    /// On Eval `a > b` over the host `u32`s; on Emit a `crate::emit` `UGt` node printed inline
     /// (`it > 0u`).
     fn ugt(a: Self::Uint, b: Self::Uint) -> <Self::Scalar as FieldScalar>::Mask;
 
@@ -329,8 +332,9 @@ pub trait Cf {
     ) -> <Self::Scalar as FieldScalar>::Mask;
 
     /// A `uint` LITERAL — `x` on both backends as the VALUE, but spelled `<x>u` on Emit (NOT a
-    /// symbol). The B1 sor-retreat's `0u` (a bare literal, not the symbolic [`named_uint`](Self::
-    /// named_uint) constant). On Eval returns `x`; on Emit records a [`crate::emit`] `UintLit`
+    /// symbol). The B1 sor-retreat's `0u` (a bare literal, not the symbolic
+    /// [`named_uint`](Self::named_uint) constant). On Eval returns `x`; on Emit records a
+    /// `crate::emit` `UintLit`
     /// node (printed `<x>u`, already an inline leaf typed `Uint`).
     fn uint_lit(x: u32) -> Self::Uint;
 
@@ -379,9 +383,9 @@ pub trait Cf {
 
     /// The FLOAT RETURN-VALUE cell (`Cell<f32>` on Eval — the body-local cell the
     /// function-scope IIFE reads after an early in-loop return; a ZST on Emit, the value
-    /// travels in the recorded `Stmt::Return`). The float analogue of [`RetCell`](Self::
-    /// RetCell). Owned, passed by `&` to [`ret_f`](Self::ret_f) / [`if_ret_f`](Self::
-    /// if_ret_f).
+    /// travels in the recorded `Stmt::Return`). The float analogue of
+    /// [`RetCell`](Self::RetCell). Owned, passed by `&` to [`ret_f`](Self::ret_f) /
+    /// [`if_ret_f`](Self::if_ret_f).
     type RetCellF;
 
     /// A `float4` PARAMETER (`c`, the cubic coefficients) — `[f32; 4]` on Eval (opaque:
@@ -474,8 +478,8 @@ pub trait Cf {
         body: F,
     ) -> Flow;
 
-    /// `if (cond) { then } else { els }` — the TWO-arm branch (the existing [`if_`](Self::
-    /// if_) is single-arm). `m2_regula_falsi`'s `if (f_lo * f_mid <= 0.0) { hi = mid; f_hi =
+    /// `if (cond) { then } else { els }` — the TWO-arm branch (the existing
+    /// [`if_`](Self::if_) is single-arm). `m2_regula_falsi`'s `if (f_lo * f_mid <= 0.0) { hi = mid; f_hi =
     /// f_mid; } else { lo = mid; f_lo = f_mid; }`. Each arm is a `FnOnce() -> `[`Flow`]
     /// recording its block (here pure `set_var`s, returning `Flow::Continue(())`). Eval runs
     /// the real `if`/`else`; Emit records a `Stmt::IfElse` (push/record/pop each block) and
@@ -517,7 +521,7 @@ pub trait Cf {
 
     /// The BOOL RETURN-VALUE cell (`Cell<bool>` on Eval — the body-local cell the
     /// function-scope IIFE reads after an early in-loop `return true`; a ZST on Emit, the
-    /// `true`/`false` travels in the recorded `Stmt::Return` as a [`Node::BoolLit`]). The bool
+    /// `true`/`false` travels in the recorded `Stmt::Return` as a `Node::BoolLit`). The bool
     /// analogue of [`RetCellF`](Self::RetCellF). Owned, passed by `&` to [`ret_b`](Self::ret_b)
     /// / [`if_hit_ret_b`](Self::if_hit_ret_b).
     type RetCellB;
@@ -525,27 +529,28 @@ pub trait Cf {
     /// The `out float` OUT-PARAMETER local state (`hit_t`) — `Cell<f32>` on Eval (interior
     /// mutability; the body writes through `&o`), an emit out-param NAME handle on Emit (its
     /// writes print bare `hit_t = ...;`, NOT a `float hit_t = ...;` decl). The `float` analogue
-    /// of [`OutVec3`](Self::OutVec3). Owned, passed by `&` to [`out_float_assign`](Self::
-    /// out_float_assign) / [`if_hit_ret_b`](Self::if_hit_ret_b).
+    /// of [`OutVec3`](Self::OutVec3). Owned, passed by `&` to
+    /// [`out_float_assign`](Self::out_float_assign) / [`if_hit_ret_b`](Self::if_hit_ret_b).
     type OutFloat;
 
     /// The BOOL function-return (the bool analogue of [`ret_f`](Self::ret_f)). On Eval deposits
     /// `value` into the [`RetCellB`](Self::RetCellB) and returns [`Break`](LoopOp::Return); on
-    /// Emit records a single `Stmt::Return` carrying a [`Node::BoolLit`] (printed `true`/`false`,
+    /// Emit records a single `Stmt::Return` carrying a `Node::BoolLit` (printed `true`/`false`,
     /// NOT a `uint`). `m2_surface_hit`'s function-tail `return false;`.
     fn ret_b(cell: &Self::RetCellB, value: bool) -> Flow;
 
     /// Assigns the `out float` OUT-PARAMETER (`hit_t = <rhs>;`). Eval `set`s the `Cell<f32>`
     /// through `&o`; Emit records a bare `hit_t = <rhs>;` (NO decl — `hit_t` is an `out`
-    /// parameter, not a local). The `float` analogue of [`out_vec3_assign`](Self::
-    /// out_vec3_assign). `m2_surface_hit`'s in-loop `hit_t = rt;`.
+    /// parameter, not a local). The `float` analogue of
+    /// [`out_vec3_assign`](Self::out_vec3_assign). `m2_surface_hit`'s in-loop `hit_t = rt;`.
     fn out_float_assign(o: &Self::OutFloat, v: Self::Scalar);
 
     /// The COMPOSITE in-loop hit — `if (cond) { hit_t = rt; return true; }`. Records BOTH
     /// statements in ONE [`if_`](Self::if_)-style then-block (NOT the single-statement
     /// [`if_ret_f`](Self::if_ret_f)): the out-float assign (`hit_t = rt;`) THEN the bool return
-    /// (`return true;`), IN ORDER. On Eval this writes `hit_t` BEFORE the [`Break`](LoopOp::
-    /// Return) short-circuits the IIFE, so the oracle reads the FRESH `rt` (not the stale entry
+    /// (`return true;`), IN ORDER. On Eval this writes `hit_t` BEFORE the
+    /// [`Break`](LoopOp::Return) short-circuits the IIFE, so the oracle reads the FRESH `rt`
+    /// (not the stale entry
     /// default); on Emit the then-block is EXACTLY the two committed statements in order. The
     /// `?`-propagated `Break(Return)` forwards through [`runtime_for`](Self::runtime_for) to the
     /// function-scope IIFE (skipping the tail `ret_b(false)`). `m2_surface_hit`'s
@@ -588,8 +593,9 @@ pub trait Cf {
     /// Declares a mutable `bool` local named `name` (init `init`) WITHOUT recording a
     /// declaration — the bool analogue of [`decl_param`](Self::decl_param) (which suppresses a
     /// `float` decl). The re-march's `hit`/`t` are declared by the HAND-WRITTEN preamble
-    /// (`hit = false;`), so [`set_bool_var`](Self::set_bool_var)/[`get_bool_var`](Self::
-    /// get_bool_var) must resolve their names but the span must record NO `Stmt::DeclVar` (a
+    /// (`hit = false;`), so [`set_bool_var`](Self::set_bool_var)/
+    /// [`get_bool_var`](Self::get_bool_var) must resolve their names but the span must record
+    /// NO `Stmt::DeclVar` (a
     /// `bool hit = false;` redecl would diverge the committed text). Distinct from
     /// [`decl_bool_var`](Self::decl_bool_var) (which RECORDS the decl). Eval boxes `init` into a
     /// `Cell<bool>` (identical to [`decl_bool_var`](Self::decl_bool_var) on Eval); Emit seeds a
@@ -609,7 +615,7 @@ pub trait Cf {
 
     /// Assigns a mutable `bool` local to the literal `val` — the bool analogue of
     /// [`set_var`](Self::set_var). Eval `set`s the `Cell<bool>`; Emit records a `Stmt::Assign`
-    /// whose `rhs` is a [`Node::BoolLit`] (`hit = true;`, reusing the proven `Stmt::Assign`
+    /// whose `rhs` is a `Node::BoolLit` (`hit = true;`, reusing the proven `Stmt::Assign`
     /// printer + the bool-literal node). The re-march's in-loop `hit = true;` accept.
     fn set_bool_var(v: &Self::BoolVar, val: bool);
 
@@ -625,8 +631,9 @@ pub trait Cf {
     // call1) discipline — these hooks are the EMIT recorders, `unreachable!` on Eval).
 
     /// The SIGNED-`int` value type the `select_level` return carries — `i32` on Eval (the host
-    /// fixture's level index / the `-1` outside sentinel), the SSA-node handle [`Scalar`](Self::
-    /// Scalar) on Emit (a handle carrying [`crate::emit`]'s `int` [`crate::emit::EmitTy`]). DISTINCT
+    /// fixture's level index / the `-1` outside sentinel), the SSA-node handle
+    /// [`Scalar`](Self::Scalar) on Emit (a handle carrying `crate::emit`'s `int`
+    /// `crate::emit::EmitTy`). DISTINCT
     /// from [`Uint`](Self::Uint) so the return prints a SIGNED literal (`-1`, NOT `4294967295u`) and
     /// an `(int)L` cast.
     type Int: Copy;
@@ -648,14 +655,14 @@ pub trait Cf {
 
     /// A SIGNED-`int` LITERAL — `x` on both backends as the VALUE, but spelled BARE (`-1`, NOT a
     /// `<x>u` unsigned suffix) on Emit. `select_level`'s tail `return -1;`. On Eval returns `x`; on
-    /// Emit records a [`crate::emit`] `IntLit` node (printed `-1`, an inline leaf typed
+    /// Emit records a `crate::emit` `IntLit` node (printed `-1`, an inline leaf typed
     /// [`Int`](Self::Int)). DISTINCT from [`uint_lit`](Self::uint_lit) (which spells `<x>u`).
     fn int_lit_signed(x: i32) -> Self::Int;
 
     /// `(int)<uint>` — the HLSL value-preserving `uint -> int` cast (`select_level`'s `(int)L`). On
     /// Eval `u as i32` (the in-range cast — `L < BRICK_LEVELS = 3` always fits an `i32`); on Emit a
-    /// [`crate::emit`] `IntFromUint` node (printed `(int)L`, an inline leaf typed [`Int`](Self::
-    /// Int)). The ONLY non-literal `int`-typed value surface.
+    /// `crate::emit` `IntFromUint` node (printed `(int)L`, an inline leaf typed
+    /// [`Int`](Self::Int)). The ONLY non-literal `int`-typed value surface.
     fn int_from_uint(u: Self::Uint) -> Self::Int;
 
     /// `all(p >= o)` — a component-wise `float3` `>=` (`p >= o`, a bool3) reduced by the HLSL `all`
@@ -672,8 +679,8 @@ pub trait Cf {
 
     /// Reads a PUSH-CONSTANT `uint` FIELD by its bare text (`pc.brick_levels`) — `select_level`'s
     /// runtime level count, the `[unroll]` loop's early-out guard (`if (L >= pc.brick_levels) break;`).
-    /// On Eval this hook is the EMIT recorder routed around by a threaded closure (the [`call1`](Self::
-    /// call1) discipline), so it is UNREACHED (`unreachable!`); on Emit it records a [`crate::emit`]
+    /// On Eval this hook is the EMIT recorder routed around by a threaded closure (the
+    /// [`call1`](Self::call1) discipline), so it is UNREACHED (`unreachable!`); on Emit it records a `crate::emit`
     /// `PcUint` node printing the bare `field` text. `field` is the LITERAL HLSL text (`"pc.brick_levels"`).
     fn pc_uint(field: &'static str) -> Self::Uint;
 
@@ -681,7 +688,7 @@ pub trait Cf {
     /// (`select_level`'s `m2_levels[L].origin_brick_world.xyz` / `m2_levels[L].dims_atlas_dim.xyz`).
     /// `field` carries the member + swizzle (`"origin_brick_world.xyz"`). The `M4Level` STRUCT LAYOUT
     /// is NOT modeled — only the access text. On Eval this hook is the EMIT recorder routed around by
-    /// a threaded closure (UNREACHED, `unreachable!`); on Emit a [`crate::emit`] `LevelField` node
+    /// a threaded closure (UNREACHED, `unreachable!`); on Emit a `crate::emit` `LevelField` node
     /// printing `m2_levels[<L>].<field>`.
     fn level_field_vec3(l: Self::Iv, field: &'static str) -> Self::Vec3f;
 
@@ -689,7 +696,7 @@ pub trait Cf {
     /// `m2_levels[<L>].<field>` (`select_level`'s `m2_levels[L].origin_brick_world.w`). The scalar
     /// analogue of [`level_field_vec3`](Self::level_field_vec3) (a `.w` swizzle). On Eval this hook
     /// is the EMIT recorder routed around by a threaded closure (UNREACHED, `unreachable!`); on Emit
-    /// a [`crate::emit`] `LevelField` node printing `m2_levels[<L>].<field>` (typed `float`).
+    /// a `crate::emit` `LevelField` node printing `m2_levels[<L>].<field>` (typed `float`).
     fn level_field_scalar(l: Self::Iv, field: &'static str) -> Self::Scalar;
 
     /// `if (cond) { return <int>; }` — the SIGNED-`int` early-return guard (the `int` analogue of
@@ -734,8 +741,8 @@ pub trait Cf {
 
     /// A NAMED LOCAL `int` ARRAY (`int cell[3]`) — an `IntArr` name handle on Emit, an unreachable
     /// ZST on Eval (the body is EMIT-ONLY). Declared by [`decl_array_int`](Self::decl_array_int),
-    /// read/written per-element by [`arr_int_get`](Self::arr_int_get) / [`arr_int_set`](Self::
-    /// arr_int_set) / [`arr_int_add_assign`](Self::arr_int_add_assign).
+    /// read/written per-element by [`arr_int_get`](Self::arr_int_get) /
+    /// [`arr_int_set`](Self::arr_int_set) / [`arr_int_add_assign`](Self::arr_int_add_assign).
     type IntArr: Copy;
 
     /// A NAMED LOCAL `float` ARRAY (`float t_next[3]` / `float s[8]`) — the `float` analogue of
@@ -776,8 +783,8 @@ pub trait Cf {
     /// computes the access-chain TWICE at `-O0`, so it is NOT byte-identical.
     fn arr_int_add_assign(a: Self::IntArr, idx: Self::Uint, v: Self::Int);
     /// `<name>[<idx>] += <v>;` — a `float`-array element COMPOUND-ADD (`t_next[axis] +=
-    /// t_delta[axis];`). Same `+=`-token R1 rationale as [`arr_int_add_assign`](Self::
-    /// arr_int_add_assign).
+    /// t_delta[axis];`). Same `+=`-token R1 rationale as
+    /// [`arr_int_add_assign`](Self::arr_int_add_assign).
     fn arr_float_add_assign(a: Self::FloatArr, idx: Self::Uint, v: Self::Scalar);
 
     // -- Group 2: the generalized call sites ------------------------------------------
@@ -892,7 +899,7 @@ pub trait Cf {
     // splits a 16-bit `uint id` into its low/high bytes (`id & 255u`, `id >> 8u & 255u`) and returns
     // each as a normalized `[0,1]` UNORM in a `float2` (`float2((float)lo / 255.0, (float)hi /
     // 255.0)`). The facets below land the MINIMAL `float2` axis (mirroring the `float3` facets) plus
-    // the two DEAD bitwise nodes' methods ([`crate::emit`]'s `Node::And` / `Node::Shr`, whose printer
+    // the two DEAD bitwise nodes' methods (`crate::emit`'s `Node::And` / `Node::Shr`, whose printer
     // arms already exist). The named `lo`/`hi` `uint` temps reuse [`temp_uint`](Self::temp_uint); the
     // `255u`/`8u` literals reuse [`uint_lit`](Self::uint_lit); the `(float)lo` cast reuses
     // [`float_from_uint`](Self::float_from_uint); the `/ 255.0` divide is the scalar
@@ -900,7 +907,7 @@ pub trait Cf {
 
     /// The `float2` VALUE type the `pack_material_id_ba` return carries — `[f32; 2]` on Eval (the
     /// `[lo/255, hi/255]` pair), the SSA-node handle [`Scalar`](Self::Scalar) on Emit (a
-    /// [`crate::emit::Node::Vec2FromScalars`] typed `float2`). The `float2` analogue of
+    /// `crate::emit::Node::Vec2FromScalars` typed `float2`). The `float2` analogue of
     /// [`Vec3f`](Self::Vec3f). `Copy` (a `[f32; 2]` / a node handle).
     type Vec2f: Copy;
 
@@ -911,14 +918,14 @@ pub trait Cf {
     type RetCellV2;
 
     /// `a & b` over two [`Uint`](Self::Uint)s — the bitwise AND (`id & 255u`). ACTIVATES the
-    /// [`crate::emit::Node::And`] (its `{} & {}` printer arm already exists). On Eval `a & b` over the
+    /// `crate::emit::Node::And` (its `{} & {}` printer arm already exists). On Eval `a & b` over the
     /// host `u32`s; on Emit an `And` node (an UNPARENTHESIZED inline `id & 255u`). SEPARATE from the
     /// logical [`and2`](Self::and2) (which joins two Masks and prints `&&`): this is the bitwise `&`
     /// over two `uint` VALUES, result-typed [`Uint`](Self::Uint).
     fn and_u(a: Self::Uint, b: Self::Uint) -> Self::Uint;
 
     /// `a >> b` over two [`Uint`](Self::Uint)s — the logical right shift (`id >> 8u`). ACTIVATES the
-    /// [`crate::emit::Node::Shr`] (its `{} >> {}` printer arm already exists). On Eval `a >> b` over
+    /// `crate::emit::Node::Shr` (its `{} >> {}` printer arm already exists). On Eval `a >> b` over
     /// the host `u32`s; on Emit a `Shr` node (an UNPARENTHESIZED inline `id >> 8u`). The
     /// `id >> 8u & 255u` precedence is correct UNPARENTHESIZED (`>>` binds tighter than `&`).
     fn shr_u(a: Self::Uint, b: Self::Uint) -> Self::Uint;
@@ -926,7 +933,7 @@ pub trait Cf {
     /// `float2(<x>, <y>)` from TWO already-`float` SCALAR expressions — the `pack_material_id_ba`
     /// return ctor. The `float2` analogue of [`vec3_from_scalars`](Self::vec3_from_scalars) (three
     /// scalars). Asserts both operands `Float`; result [`Vec2f`](Self::Vec2f). On Eval `[x, y]`; on
-    /// Emit a [`crate::emit::Node::Vec2FromScalars`].
+    /// Emit a `crate::emit::Node::Vec2FromScalars`.
     fn vec2_from_scalars(x: Self::Scalar, y: Self::Scalar) -> Self::Vec2f;
 
     /// The `float2` function-return — `return <float2>;` (the `pack_material_id_ba` tail `return
@@ -954,7 +961,7 @@ pub trait Cf {
     /// A MUTABLE `float3` LOCAL holding the SUPPRESSED-DECL parameter `n` (the param reassigned in
     /// place by `n /= ...`). The `float3` analogue of [`decl_param`](Self::decl_param) (the scalar
     /// suppressed-decl carried param): Eval stores the `[f32; 3]` in a [`core::cell::Cell`] (interior
-    /// mutability — the `if` body reads/assigns through `&var`); Emit seeds a [`Var`](crate::emit::Var)
+    /// mutability — the `if` body reads/assigns through `&var`); Emit seeds a `Var`
     /// name entry but records NO `Stmt::DeclVar` (a `float3 n = ...;` redecl would diverge the committed
     /// text — `n` is the HLSL signature parameter). Distinct from [`Var`](Self::Var) (a `float` local)
     /// only in the held type. Owned, passed by `&` to [`get_var_vec3`](Self::get_var_vec3) /
@@ -965,7 +972,7 @@ pub trait Cf {
     /// `float3` analogue of [`decl_param`](Self::decl_param) (which seeds a `float` param). The `init`
     /// is the param's symbolic seed ([`Vec3f`](Self::Vec3f)); Eval boxes its `[f32; 3]` into a `Cell`
     /// (identical to [`decl_param`](Self::decl_param) on Eval — the no-decl distinction is Emit-only),
-    /// Emit seeds a [`Var`](crate::emit::Var) name entry but records NO statement (the SUPPRESSED-DECL
+    /// Emit seeds a `Var` name entry but records NO statement (the SUPPRESSED-DECL
     /// path). Returns the [`Vec3Var`](Self::Vec3Var) handle so the body's `n.x` / `n.xy` reads resolve
     /// the name `n`.
     fn decl_param_vec3(name: &'static str, init: Self::Vec3f) -> Self::Vec3Var;
@@ -981,7 +988,7 @@ pub trait Cf {
     /// A MUTABLE `float2` LOCAL (the `float2 e = n.xy;` declared local, reassigned inside the `if`).
     /// The `float2` analogue of [`Var`](Self::Var) (a `float` local) / [`Vec3Var`](Self::Vec3Var):
     /// Eval stores the `[f32; 2]` in a [`core::cell::Cell`]; Emit records a `Stmt::DeclVar` whose `ty`
-    /// is [`crate::emit::EmitTy::Float2`] (`float2 e = <init>;`). Owned, passed by `&` to
+    /// is `crate::emit::EmitTy::Float2` (`float2 e = <init>;`). Owned, passed by `&` to
     /// [`get_var_vec2`](Self::get_var_vec2) / [`set_var_vec2`](Self::set_var_vec2).
     type Vec2Var;
 
@@ -1000,42 +1007,42 @@ pub trait Cf {
     fn set_var_vec2(v: &Self::Vec2Var, val: Self::Vec2f);
 
     /// `v.xy` — a `float3` → `float2` swizzle (`n.xy`). Eval drops the `.z` lane (`[v[0], v[1]]`); Emit
-    /// records a [`crate::emit::Node::Vec2Swizzle`] printing `<src>.xy`. Result [`Vec2f`](Self::Vec2f).
+    /// records a `crate::emit::Node::Vec2Swizzle` printing `<src>.xy`. Result [`Vec2f`](Self::Vec2f).
     fn vec3_xy(v: Self::Vec3f) -> Self::Vec2f;
 
     /// `v.yx` — a `float2` → `float2` lane SWAP (`e.yx`). Eval swaps (`[v[1], v[0]]`); Emit records a
-    /// [`crate::emit::Node::Vec2Swizzle`] printing `<src>.yx`. Result [`Vec2f`](Self::Vec2f).
+    /// `crate::emit::Node::Vec2Swizzle` printing `<src>.yx`. Result [`Vec2f`](Self::Vec2f).
     fn vec2_yx(v: Self::Vec2f) -> Self::Vec2f;
 
     /// `v.x` — a `float2` → `float` component read (`e.x`). Eval reads lane 0; Emit records a
-    /// [`crate::emit::Node::Vec2Comp`] printing `<src>.x`. Result [`Scalar`](Self::Scalar).
+    /// `crate::emit::Node::Vec2Comp` printing `<src>.x`. Result [`Scalar`](Self::Scalar).
     fn vec2_x(v: Self::Vec2f) -> Self::Scalar;
 
     /// `v.y` — a `float2` → `float` component read (`e.y`). Eval reads lane 1; Emit records a
-    /// [`crate::emit::Node::Vec2Comp`] printing `<src>.y`. Result [`Scalar`](Self::Scalar).
+    /// `crate::emit::Node::Vec2Comp` printing `<src>.y`. Result [`Scalar`](Self::Scalar).
     fn vec2_y(v: Self::Vec2f) -> Self::Scalar;
 
     /// `abs(v)` — a component-wise `float2` absolute value (`abs(e.yx)`). Eval is `[|x|, |y|]`; Emit
-    /// records a [`crate::emit::Node::Vec2Abs`] printing `abs(<v>)`. Result [`Vec2f`](Self::Vec2f).
+    /// records a `crate::emit::Node::Vec2Abs` printing `abs(<v>)`. Result [`Vec2f`](Self::Vec2f).
     fn vec2_abs(v: Self::Vec2f) -> Self::Vec2f;
 
     /// `a * b` — a component-wise `float2` multiply (`(1.0 - abs(e.yx)) * float2(...)`). Eval is `[a0*b0,
-    /// a1*b1]`; Emit records a [`crate::emit::Node::Vec2Mul`] (the `float2` analogue of
+    /// a1*b1]`; Emit records a `crate::emit::Node::Vec2Mul` (the `float2` analogue of
     /// [`vec3_mul_scalar`](Self::vec3_mul_scalar), but BOTH operands `float2`). Result
     /// [`Vec2f`](Self::Vec2f).
     fn vec2_mul(a: Self::Vec2f, b: Self::Vec2f) -> Self::Vec2f;
 
     /// `v * s` — a `float2` times a `float` scalar (`e * 0.5`). Eval is `[v0*s, v1*s]`; Emit records a
-    /// [`crate::emit::Node::Vec2MulScalar`] (the `float2` analogue of
+    /// `crate::emit::Node::Vec2MulScalar` (the `float2` analogue of
     /// [`vec3_mul_scalar`](Self::vec3_mul_scalar)). Result [`Vec2f`](Self::Vec2f).
     fn vec2_mul_scalar(v: Self::Vec2f, s: Self::Scalar) -> Self::Vec2f;
 
     /// `v + s` — a `float2` plus a `float` scalar broadcast (`... + 0.5`). Eval is `[v0+s, v1+s]`; Emit
-    /// records a [`crate::emit::Node::Vec2AddScalar`]. Result [`Vec2f`](Self::Vec2f).
+    /// records a `crate::emit::Node::Vec2AddScalar`. Result [`Vec2f`](Self::Vec2f).
     fn vec2_add_scalar(v: Self::Vec2f, s: Self::Scalar) -> Self::Vec2f;
 
     /// `s - v` — a `float` scalar (broadcast) MINUS a `float2`, scalar on the LEFT (`1.0 - abs(e.yx)`).
-    /// Eval is `[s-v0, s-v1]`; Emit records a [`crate::emit::Node::Vec2RSubScalar`] printing `<s> -
+    /// Eval is `[s-v0, s-v1]`; Emit records a `crate::emit::Node::Vec2RSubScalar` printing `<s> -
     /// <v>` (the scalar-LHS form, DISTINCT from a `float2 - float` which has no committed use here).
     /// Result [`Vec2f`](Self::Vec2f).
     fn vec2_rsub_scalar(s: Self::Scalar, v: Self::Vec2f) -> Self::Vec2f;
@@ -1046,13 +1053,316 @@ pub trait Cf {
     /// regula-falsi root-finder) and [`FieldScalar::select`] (the condition-wrapped `(cond) ? t : e`):
     /// `oct_encode` spells the un-parenthesized form (the comparand `e.x >= 0.0` + the literals
     /// `1.0`/`-1.0` are all leaves, so no precedence wrap is needed). Eval is the eager `if cond { t }
-    /// else { e }` (both arms pure `±1.0` literals); Emit records a [`crate::emit::Node::SelectBare`]
+    /// else { e }` (both arms pure `±1.0` literals); Emit records a `crate::emit::Node::SelectBare`
     /// printing all three parts un-wrapped.
     fn select_bare(
         cond: <Self::Scalar as FieldScalar>::Mask,
         t: Self::Scalar,
         e: Self::Scalar,
     ) -> Self::Scalar;
+
+    // ---- Rung E: the particle-leaf prerequisite facets (docs/PARTICLES-PLAN.md) ----------
+    //
+    // The seven particle leaves need four op families this axis could not express: the
+    // bitwise/shift `uint` ops the PCG32 hash folds (E1), the bit-cast + half-precision
+    // conversions the packed per-particle attributes decode/encode (E2), a real `dot` (E3),
+    // and the two transcendentals the billboard corner spins with (E4).
+    //
+    // TWO of E1's five listed ops ALREADY EXIST and are deliberately NOT duplicated: the
+    // bitwise AND is [`and_u`](Self::and_u) and the logical right shift is
+    // [`shr_u`](Self::shr_u) (Track B Increment G1, the `pack_material_id_ba` byte split).
+    // A second name pushing the SAME node and printing the SAME text would be two spellings
+    // of one op, and the committed `.spv` is pinned to the existing pair.
+    //
+    // PRECEDENCE — the one composition rule to know. The bitwise/shift operators bind LOOSER
+    // than `+ - * /`, so `crate::emit`'s printer WRAPS any bitwise/shift operand that sits
+    // inside an infix parent (`(state << 13u) ^ state`, `(a ^ b) * c`). The frozen
+    // [`and_u`](Self::and_u) / [`shr_u`](Self::shr_u) printer arms keep spelling THEIR operands
+    // un-wrapped (byte-identity with the committed `pack_material_id_ba`), so a body that nests
+    // a NEW bitwise node INSIDE `and_u`/`shr_u` must materialize it first
+    // ([`temp_uint`](Self::temp_uint)); nesting the other way round wraps correctly.
+    //
+    // SHIFT AMOUNTS: `shr_u`'s Eval arm is the plain host `>>`, which PANICS in debug for an
+    // amount >= 32 instead of masking it the way the GPU does (see [`ushl`](Self::ushl) for the
+    // measured masking rule). Every committed shift amount is a small constant, so the two
+    // agree on the whole reachable domain; a leaf that ever needs an unbounded dynamic right
+    // shift must mask the amount itself.
+
+    /// `a << b` over two [`Uint`](Self::Uint)s — the LEFT shift (the PCG32 hash's diffusion
+    /// step). The `<<` analogue of the existing [`shr_u`](Self::shr_u) (`>>`).
+    ///
+    /// SHIFT-AMOUNT MASKING (measured, `dxc -T cs_6_0 -spirv`, Vulkan SDK 1.4.350): DXC lowers
+    /// `a << b` to `OpBitwiseAnd %b %uint_31` followed by `OpShiftLeftLogical` — the HLSL/D3D
+    /// rule that only the LOW 5 BITS of the shift amount are used, so shifting by 32 is
+    /// shifting by 0, NOT a zero result. The Eval arm therefore uses `u32::wrapping_shl`, which
+    /// masks by 31 identically; the two backends agree on the FULL `u32` amount domain, not
+    /// merely on the in-range part.
+    fn ushl(a: Self::Uint, b: Self::Uint) -> Self::Uint;
+
+    /// `a ^ b` over two [`Uint`](Self::Uint)s — the bitwise XOR (`OpBitwiseXor`), the PCG32
+    /// hash's mixing step. On Eval the host `^` over `u32`s (exact, no wrapping question); on
+    /// Emit a `crate::emit` `Xor` node.
+    fn uxor(a: Self::Uint, b: Self::Uint) -> Self::Uint;
+
+    /// `a | b` over two [`Uint`](Self::Uint)s — the bitwise OR (`OpBitwiseOr`), the packed-pair
+    /// assembly (`lo | (hi << 16u)`). SEPARATE from the logical [`or`](Self::or) (which joins
+    /// two Masks and prints `||`): this is `|` over two `uint` VALUES, result-typed
+    /// [`Uint`](Self::Uint).
+    fn uor(a: Self::Uint, b: Self::Uint) -> Self::Uint;
+
+    /// `asuint(x)` — the BIT-REINTERPRET `float -> uint` (`OpBitcast`), NOT the numeric
+    /// truncating cast [`float_to_uint`](Self::float_to_uint) (`(uint)f`, `OpConvertFToU`).
+    /// The two are a standing confusion and produce completely different values, so they are
+    /// distinct nodes with distinct spellings. On Eval `f32::to_bits`.
+    fn asuint(x: Self::Scalar) -> Self::Uint;
+
+    /// `asfloat(u)` — the BIT-REINTERPRET `uint -> float` (`OpBitcast`), NOT the numeric
+    /// widening cast [`float_from_uint`](Self::float_from_uint) (`(float)u`, `OpConvertUToF`).
+    /// On Eval `f32::from_bits` (total: every `u32` bit pattern is a valid `f32`, including the
+    /// NaN payloads).
+    fn asfloat(u: Self::Uint) -> Self::Scalar;
+
+    /// `f16tof32(u)` — widens the IEEE 754 binary16 in the LOW 16 bits of `u` to a `float`
+    /// (the HIGH 16 bits are ignored, so a packed pair may be passed directly). MEASURED
+    /// lowering: `OpExtInst GLSL.std.450 UnpackHalf2x16` + `OpCompositeExtract 0`. On Eval
+    /// [`crate::half::f16_bits_to_f32`] — the IEEE conversion, subnormals and NaN payloads
+    /// included.
+    fn f16tof32(u: Self::Uint) -> Self::Scalar;
+
+    /// `f32tof16(x)` — narrows `x` to IEEE 754 binary16 in the LOW 16 bits of a `uint` (the
+    /// HIGH 16 bits are zero). MEASURED lowering: `OpExtInst GLSL.std.450 PackHalf2x16` over
+    /// `float2(x, 0.0)`, i.e. round-to-nearest-EVEN with real subnormals, ±Inf on overflow and
+    /// a truncated-payload NaN. On Eval [`crate::half::f32_to_f16_bits`].
+    fn f32tof16(x: Self::Scalar) -> Self::Uint;
+
+    /// `dot(a, b)` over two `float3`s — the HLSL `dot` INTRINSIC (`OpDot`), returning a
+    /// [`Scalar`](Self::Scalar).
+    ///
+    /// DISTINCT from [`crate::scalar::v_dot`], which spells the EXPLICIT scalar fold
+    /// `a.x*b.x + a.y*b.y + a.z*b.z` precisely BECAUSE the frozen field leaves must stay
+    /// byte-identical to a host oracle and `OpDot` is free to contract into an FMA chain. This
+    /// node is the opposite trade: a leaf that spells `dot(...)` accepts that its host oracle
+    /// is a CLOSE, not bit-exact, mirror (the same standing carve-out division carries). Use
+    /// [`crate::scalar::v_dot`] whenever a bit-exact contract is required.
+    ///
+    /// On Eval the left-associated fold `(a.x*b.x + a.y*b.y) + a.z*b.z`.
+    fn vec3_dot(a: Self::Vec3f, b: Self::Vec3f) -> Self::Scalar;
+
+    /// `sin(x)` — the HLSL `sin` intrinsic (`OpExtInst GLSL.std.450 Sin`).
+    ///
+    /// The transcendentals live HERE (on the control-flow axis, whose Eval instantiation is a
+    /// codegen-only ZST no physics-reachable code calls) rather than on
+    /// [`FieldScalar`](crate::scalar::FieldScalar), whose `f32` impl IS the physics leaf — the
+    /// same firewall reasoning [`crate::interp::InterpBackend`] states, which is why trig has
+    /// so far existed ONLY on that codegen-gated backend. Both spell the identical HLSL, so a
+    /// leaf may be authored against either axis.
+    ///
+    /// The Eval arm is the `nightly`/`std` shim [`FieldScalar::sqrt`](crate::scalar::FieldScalar::sqrt)
+    /// uses for the other op stable `core` lacks.
+    fn sin(x: Self::Scalar) -> Self::Scalar;
+
+    /// `cos(x)` — the HLSL `cos` intrinsic (`OpExtInst GLSL.std.450 Cos`). The companion of
+    /// [`sin`](Self::sin); see it for the axis + Eval-shim rationale.
+    fn cos(x: Self::Scalar) -> Self::Scalar;
+
+    /// `rsqrt(x)` — the HLSL reciprocal-square-root intrinsic (measured lowering:
+    /// `OpExtInst GLSL.std.450 InverseSqrt`), the op a unit-vector / rotation-pair
+    /// renormalization is written with instead of a `sqrt` followed by a divide.
+    ///
+    /// NOT bit-exact: `InverseSqrt` is an APPROXIMATE instruction (the Vulkan precision table
+    /// allows 2 ULP), so a host oracle mirroring it as `1.0 / sqrt(x)` — which is what the Eval
+    /// arm does — agrees to a tolerance, not to the bit. The same standing carve-out
+    /// [`vec3_dot`](Self::vec3_dot) and division carry: a leaf that spells `rsqrt` has opted
+    /// out of a byte-identity contract for that value.
+    ///
+    /// The DIVIDE this replaces needs no new facet — the scalar `/` is
+    /// [`FieldScalar::div`](crate::scalar::FieldScalar::div), already reachable from any
+    /// `C: Cf` body through [`Scalar`](Self::Scalar)'s own trait bound (as
+    /// [`crate::pack::pack_material_id_ba_body`] spells it).
+    fn rsqrt(x: Self::Scalar) -> Self::Scalar;
+
+    // ---- UI-ADVANCED S1: the `ui_rect` fragment-leaf facets (`docs/UI-PLAN-SPRITES-S0-S2.md`) ----
+    //
+    // The six UI leaves (`crate::ui`) are the eDSL's first `float2`/`float4` VALUE math: the
+    // per-corner rounded-box SDF, the clip-AABB coverage, the MSDF median/range pair, the
+    // premultiplied border-over-fill composite, and the RGBA8 unpack. Every facet below is a
+    // 2-line mirror of a proven `float2`/`float3` facet; the two genuinely new op families are
+    // the `float2` INTRINSICS (`smoothstep`/`length`/`dot`/`fwidth`) and the `float4`
+    // arithmetic (`float4(...)` ctor, `* s`, `+`, `.a`). `fwidth` is the one facet with NO
+    // host semantics — its Eval arm is an honest panic (the [`call1`](Self::call1) discipline),
+    // so the leaf that spells it (`ui_screen_px_range_body`) is deliberately not oracle-swept.
+
+    /// The `float4` RETURN-VALUE cell (`Cell<[f32; 4]>` on Eval — the body-local cell the
+    /// producer reads after the body runs; a ZST on Emit, the expression travels in the
+    /// recorded `Stmt::Return`). The `float4` analogue of [`RetCellV2`](Self::RetCellV2).
+    /// Owned, passed by `&` to [`ret_vec4`](Self::ret_vec4).
+    type RetCellV4;
+
+    /// The `float4` function-return — `return <float4>;` (the `ui_unpack_rgba8` /
+    /// `ui_premultiplied_over` tails). The `float4` analogue of [`ret_vec2`](Self::ret_vec2).
+    /// On Eval deposits `value` into the [`RetCellV4`](Self::RetCellV4) and returns
+    /// [`Break`](LoopOp::Return); on Emit records a single `Stmt::Return`.
+    fn ret_vec4(cell: &Self::RetCellV4, value: Self::Vec4f) -> Flow;
+
+    /// `a - b` over two `float2`s (`abs(p) - half_size`) — component-wise. The `float2`
+    /// analogue of [`vec3_sub`](Self::vec3_sub). On Eval `[a0-b0, a1-b1]`; on Emit a
+    /// `crate::emit` `Vec2Sub` node (additive — flat on the LEFT of a same-class parent).
+    fn vec2_sub(a: Self::Vec2f, b: Self::Vec2f) -> Self::Vec2f;
+
+    /// `v - s` — a `float2` MINUS a `float` scalar broadcast (`clip.xy - fw`), vector on the
+    /// LEFT. The operand-order complement of [`vec2_rsub_scalar`](Self::vec2_rsub_scalar)
+    /// (`s - v`). On Eval `[v0-s, v1-s]`; on Emit a `Vec2SubScalar` node.
+    fn vec2_sub_scalar(v: Self::Vec2f, s: Self::Scalar) -> Self::Vec2f;
+
+    /// `max(v, s)` — a component-wise `float2` max against a scalar broadcast (`max(q, 0.0)`,
+    /// the rounded-box outside clamp; HLSL promotes the scalar arg). On Eval
+    /// `[max(v0,s), max(v1,s)]`; on Emit a `Vec2MaxScalar` node printed as the intrinsic call.
+    fn vec2_max_scalar(v: Self::Vec2f, s: Self::Scalar) -> Self::Vec2f;
+
+    /// `length(v)` over a `float2` (`length(max(q, 0.0))`) — `OpExtInst GLSL.std.450 Length`.
+    /// The Eval arm is `sqrt(x*x + y*y)` over the host f32s — `Length` carries the same
+    /// sqrt-family precision as [`FieldScalar::sqrt`], so the rounded-box oracle sweep pins
+    /// table points where the radicand is an exact square (the corner cases) rather than
+    /// claiming bit-exactness of the general norm.
+    fn vec2_length(v: Self::Vec2f) -> Self::Scalar;
+
+    /// `dot(a, b)` over two `float2`s (`dot(unit_range, screen_tex_sz)`) — `OpDot`, free to
+    /// contract into an FMA like [`vec3_dot`](Self::vec3_dot), so it carries no bit-exact
+    /// oracle contract. On Eval the left-associated fold `a.x*b.x + a.y*b.y`.
+    fn vec2_dot(a: Self::Vec2f, b: Self::Vec2f) -> Self::Scalar;
+
+    /// `smoothstep(e0, e1, x)` over three `float2`s (the clip AA band) — `OpExtInst
+    /// GLSL.std.450 SmoothStep`, component-wise. The Eval arm mirrors the spec polynomial
+    /// `t*t*(3 - 2*t)` over `t = clamp((x-e0)/(e1-e0), 0, 1)` — it contains a DIVIDE, so per
+    /// the house rule it is exact only at the saturated ends (`x <= e0` ⇒ 0, `x >= e1` ⇒ 1),
+    /// which is where the clip-coverage oracle pins its table.
+    fn vec2_smoothstep(e0: Self::Vec2f, e1: Self::Vec2f, x: Self::Vec2f) -> Self::Vec2f;
+
+    /// `fwidth(v)` over a `float2` (`fwidth(uv)`) — the FRAGMENT-stage derivative `OpFwidth`.
+    /// NO host semantics exist for a device derivative, so the Eval arm is an honest
+    /// `unreachable!` (the [`call1`](Self::call1) discipline — a loud panic, never a wrong
+    /// value); a leaf that spells it is not oracle-swept and says so in its own doc.
+    fn vec2_fwidth(v: Self::Vec2f) -> Self::Vec2f;
+
+    /// `s / v` — a `float` scalar (broadcast) DIVIDED by a `float2`, scalar on the LEFT
+    /// (`g_atlas_ubo.px_range / g_atlas_ubo.atlas_size`, `1.0 / fwidth(uv)`). A DIVIDE —
+    /// `OpFDiv` carries 2.5 ULP, so per the house rule it is never part of a bit-exact
+    /// contract; the facet exists because the committed MSDF range math spells it. On Eval
+    /// `[s/v0, s/v1]`; on Emit a `Vec2RDivScalar` node.
+    fn vec2_rdiv_scalar(s: Self::Scalar, v: Self::Vec2f) -> Self::Vec2f;
+
+    /// `cond ? t : e` over `float2` ARMS — the rounded-box radius-pair select
+    /// (`(p.x > 0.0) ? r.yz : r.xw`). The `float2` analogue of [`FieldScalar::select`] (the
+    /// cond-wrapped, arms-bare form). On Eval the eager `if cond { t } else { e }` (both arms
+    /// are pure swizzles); on Emit a `SelectVec2` node.
+    fn select_vec2(
+        cond: <Self::Scalar as FieldScalar>::Mask,
+        t: Self::Vec2f,
+        e: Self::Vec2f,
+    ) -> Self::Vec2f;
+
+    /// `v.xy` — a `float4` → `float2` two-lane swizzle (`clip.xy`, the clip AABB min). On Eval
+    /// `[v[0], v[1]]`; on Emit a `Vec4SwizzleV2` node (mask 0). DISTINCT from
+    /// [`vec3_xy`](Self::vec3_xy) (a `float3` source).
+    fn vec4_xy(v: Self::Vec4f) -> Self::Vec2f;
+
+    /// `v.zw` — the clip AABB max half (`clip.zw`). On Eval `[v[2], v[3]]`; mask 1.
+    fn vec4_zw(v: Self::Vec4f) -> Self::Vec2f;
+
+    /// `v.yz` — the rounded-box RIGHT-side radius pair `(tr, br)` (`r.yz`). On Eval
+    /// `[v[1], v[2]]`; mask 2.
+    fn vec4_yz(v: Self::Vec4f) -> Self::Vec2f;
+
+    /// `v.xw` — the rounded-box LEFT-side radius pair `(tl, bl)` (`r.xw`). On Eval
+    /// `[v[0], v[3]]`; mask 3.
+    fn vec4_xw(v: Self::Vec4f) -> Self::Vec2f;
+
+    /// `v.a` — a `float4` → `float` ALPHA read (`src.a`, the premultiplied-over source alpha),
+    /// spelled `.a` (the committed color spelling), not `.w`. On Eval `v[3]`; on Emit a
+    /// `Vec4Alpha` node.
+    fn vec4_alpha(v: Self::Vec4f) -> Self::Scalar;
+
+    /// `float4(<x>, <y>, <z>, <w>)` from FOUR already-`float` scalar expressions (the
+    /// `ui_unpack_rgba8` channel ctor). The `float4` analogue of
+    /// [`vec2_from_scalars`](Self::vec2_from_scalars). On Eval `[x, y, z, w]`; on Emit a
+    /// `Vec4FromScalars` node.
+    fn vec4_from_scalars(
+        x: Self::Scalar,
+        y: Self::Scalar,
+        z: Self::Scalar,
+        w: Self::Scalar,
+    ) -> Self::Vec4f;
+
+    /// `v * s` — a `float4` times a `float` scalar (`bc * border_cov`, `float4(...) * (1.0 /
+    /// 255.0)`). The `float4` analogue of [`vec2_mul_scalar`](Self::vec2_mul_scalar). On Eval
+    /// `[v0*s, .., v3*s]`; on Emit a `Vec4MulScalar` node (whose printer wraps a NON-LEAF
+    /// scalar operand — the committed `(1.0 / 255.0)` / `(1.0 - src.a)` parens).
+    fn vec4_mul_scalar(v: Self::Vec4f, s: Self::Scalar) -> Self::Vec4f;
+
+    /// `a + b` over two `float4`s (`src + dst * (1.0 - src.a)`, the premultiplied OVER) —
+    /// component-wise. On Eval `[a0+b0, .., a3+b3]`; on Emit a `Vec4Add` node.
+    fn vec4_add(a: Self::Vec4f, b: Self::Vec4f) -> Self::Vec4f;
+
+    /// Declares a NAMED `float2` temp (`float2 rx = <rhs>;`) — the `float2` analogue of
+    /// [`temp_vec3`](Self::temp_vec3) / [`temp_float`](Self::temp_float). Eval is identity
+    /// (the value flows directly); Emit records a named `float2` `Stmt::DeclTemp`. Returns the
+    /// temp handle so later reads spell `rx`.
+    fn temp_vec2(name: &'static str, v: Self::Vec2f) -> Self::Vec2f;
+
+    // ---- UI-ADVANCED S5: the two `float2` primitives `ui_tile_uv` needs -------------------
+    //
+    // MEASURED at the S5 build: neither existed. `frac` / `floor` / `fract` occurred NOWHERE
+    // in this crate (S-D15 (4) says so), and NEITHER did a `float2` `lerp` — the only `lerp`
+    // on the axis is the SCALAR [`crate::scalar::FieldScalar::lerp`]. S-D15 (4)'s cost line
+    // named one primitive; it is two, and the second is the one that matters for byte
+    // identity (see [`vec2_lerp`](Self::vec2_lerp)).
+
+    /// A NAMED `uint` constant that types as `uint` on the Emit backend — `FLAG_TILED`,
+    /// `UI_TILE_X_SHIFT`, `UI_TILE_MASK`.
+    ///
+    /// DISTINCT from [`named_uint`](Self::named_uint), whose Emit node is a `NamedLit`
+    /// typed `Float`: that one was minted for a symbol whose only consumer is a bare
+    /// `return` (no operand type check), and these three are operands of
+    /// [`and_u`](Self::and_u) / [`shr_u`](Self::shr_u), which DO check their operands
+    /// `Uint`. The alternative — spelling them as bare `uint` literals — would put a
+    /// second copy of the S-D2 bit layout inside the leaf body, beside the copy
+    /// `emit_hlsl_ui_flag_consts` generates from the layout; S-D10's rule is that no
+    /// shader spells a number a host constant also spells.
+    ///
+    /// On Eval returns `val` (the real number, so the oracle sweeps the real decode); on
+    /// Emit records the SYMBOL.
+    fn named_uint_val(sym: &'static str, val: u32) -> Self::Uint;
+
+    /// `frac(v)` over a `float2` — the component-wise fractional part, `OpExtInst
+    /// GLSL.std.450 Fract`. The wrap that makes `Tile` tile (S-D15's
+    /// `frac(local_uv * tiles)`).
+    ///
+    /// On Eval `x - x.floor()` per lane, which is HLSL's own definition and matches
+    /// `Fract` on the whole finite domain including negatives (`frac(-0.25) == 0.75`).
+    /// Exact: a subtract of two exactly-representable values, no rounding step — so unlike
+    /// a divide it CAN carry a bit-exact oracle contract.
+    fn vec2_frac(v: Self::Vec2f) -> Self::Vec2f;
+
+    /// `lerp(a, b, t)` over three `float2`s — the linear blend, `OpExtInst GLSL.std.450
+    /// FMix`. It is the UNTILED arm of `ui_tile_uv`, and it is spelled as the intrinsic
+    /// rather than decomposed into `a + t * (b - a)` ON PURPOSE: `FMix`'s specified form is
+    /// `x * (1 - t) + y * t`, the decomposition rounds differently, and the four S2 / one S3
+    /// / one S4 image pins were blessed against the committed `lerp(inst.uv.xy, inst.uv.zw,
+    /// input.local_uv)`. Keeping the intrinsic makes the untiled sprite's pixel IDENTICAL
+    /// rather than merely equal to within a ULP — which is the difference between six image
+    /// pins that hold by construction and six that hold by luck (`reference-golden-fp-
+    /// resolution`: an 8-bit golden cannot SEE a 1-ULP shader edit, so it would not have
+    /// caught the decomposition either way).
+    ///
+    /// On Eval `a * (1 - t) + b * t` per lane — the spec form, not the decomposition.
+    /// Mul/add only, so it carries the crate's standing FMA-contraction carve-out and no
+    /// divide.
+    fn vec2_lerp(a: Self::Vec2f, b: Self::Vec2f, t: Self::Vec2f) -> Self::Vec2f;
+
+    // `temp_vec4` (`float4 src = <rhs>;`) already exists on this axis (the Increment-5c
+    // `m2_brick_cubic_hit` facet above) and is reused by the UI leaves rather than
+    // re-declared; its Eval arm becomes the identity now that a leaf
+    // (`ui_premultiplied_over_body`) legitimately runs over EvalCf.
 }
 
 /// The control-flow EVAL backend — REAL host `for`/`if`/`continue`, a unit ZST.
@@ -1720,8 +2030,13 @@ impl Cf for EvalCf {
         unreachable!("Cf::vec3_from_scalars is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
     }
     #[inline]
-    fn temp_vec4(_name: &'static str, _v: [f32; 4]) -> [f32; 4] {
-        unreachable!("Cf::temp_vec4 is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    fn temp_vec4(_name: &'static str, v: [f32; 4]) -> [f32; 4] {
+        // Identity on Eval — a temp is an Emit-only materialization concern. This arm was an
+        // "EMIT-ONLY" honest panic while `m2_brick_cubic_hit_body` was its only caller (that
+        // body is never run over EvalCf); UI-ADVANCED S1's `ui_premultiplied_over_body` IS
+        // oracle-swept, so the identity is now the correct Eval semantics — the same shape
+        // `temp_vec3`/`temp_float`/`temp_vec2` have always had.
+        v
     }
 
     // ---- Track B Increment G1: the `float2` axis + bitwise `uint` `&`/`>>` (native host) ----
@@ -1851,5 +2166,236 @@ impl Cf for EvalCf {
         // result-equivalent to the GPU ternary (which computes both arms and selects). The SAME shape
         // `select` / `FieldScalar::select` use; the bare vs wrapped spelling is an Emit-only concern.
         if cond { t } else { e }
+    }
+
+    // ---- Rung E: the particle-leaf prerequisite facets (native host) -------------------
+
+    #[inline]
+    fn ushl(a: u32, b: u32) -> u32 {
+        // `wrapping_shl` MASKS the amount by 31, which is exactly the `OpBitwiseAnd %b
+        // %uint_31` DXC emits ahead of `OpShiftLeftLogical` (measured). The plain `a << b`
+        // would panic in debug for `b >= 32` where the GPU silently shifts by `b & 31`.
+        a.wrapping_shl(b)
+    }
+
+    #[inline]
+    fn uxor(a: u32, b: u32) -> u32 {
+        a ^ b
+    }
+
+    #[inline]
+    fn uor(a: u32, b: u32) -> u32 {
+        a | b
+    }
+
+    #[inline]
+    fn asuint(x: f32) -> u32 {
+        // The BIT-REINTERPRET (`OpBitcast`), not the numeric cast: `to_bits` is total and
+        // preserves every bit including a NaN's payload and the sign of a zero.
+        x.to_bits()
+    }
+
+    #[inline]
+    fn asfloat(u: u32) -> f32 {
+        f32::from_bits(u)
+    }
+
+    #[inline]
+    fn f16tof32(u: u32) -> f32 {
+        crate::half::f16_bits_to_f32(u)
+    }
+
+    #[inline]
+    fn f32tof16(x: f32) -> u32 {
+        crate::half::f32_to_f16_bits(x)
+    }
+
+    #[inline]
+    fn vec3_dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+        // The left-associated fold `(a.x*b.x + a.y*b.y) + a.z*b.z`. `OpDot` may contract into
+        // an FMA chain on the GPU, so this mirror is close but NOT part of a bit-exact
+        // contract (see the trait doc).
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    #[inline]
+    fn sin(x: f32) -> f32 {
+        // The same `nightly`/`std` shim `FieldScalar::sqrt` uses: stable `core` has no trig, so
+        // a strictly-`no_std` build takes the intrinsic and the default build links `std`.
+        #[cfg(feature = "nightly")]
+        {
+            core::intrinsics::sinf32(x)
+        }
+        #[cfg(not(feature = "nightly"))]
+        {
+            f32::sin(x)
+        }
+    }
+
+    #[inline]
+    fn cos(x: f32) -> f32 {
+        #[cfg(feature = "nightly")]
+        {
+            core::intrinsics::cosf32(x)
+        }
+        #[cfg(not(feature = "nightly"))]
+        {
+            f32::cos(x)
+        }
+    }
+
+    #[inline]
+    fn rsqrt(x: f32) -> f32 {
+        // `1.0 / sqrt(x)` through the SAME `nightly`/`std` sqrt shim `FieldScalar::sqrt` uses,
+        // so this arm stays `no_std`-clean. It is a CLOSE mirror of the GPU's approximate
+        // `InverseSqrt` (2 ULP allowed), not a bit-exact one — see the trait doc.
+        f32::lit(1.0).div(FieldScalar::sqrt(x))
+    }
+
+    // ---- UI-ADVANCED S1: the `ui_rect` fragment-leaf facets ------------------------------
+
+    // The `float4` return cell — the same interior-mutability shape `RetCellV2` uses.
+    type RetCellV4 = core::cell::Cell<[f32; 4]>;
+
+    #[inline]
+    fn ret_vec4(cell: &core::cell::Cell<[f32; 4]>, value: [f32; 4]) -> Flow {
+        cell.set(value);
+        Flow::Break(LoopOp::Return)
+    }
+
+    #[inline]
+    fn vec2_sub(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+        [a[0] - b[0], a[1] - b[1]]
+    }
+
+    #[inline]
+    fn vec2_sub_scalar(v: [f32; 2], s: f32) -> [f32; 2] {
+        [v[0] - s, v[1] - s]
+    }
+
+    #[inline]
+    fn vec2_max_scalar(v: [f32; 2], s: f32) -> [f32; 2] {
+        [v[0].max(s), v[1].max(s)]
+    }
+
+    #[inline]
+    fn vec2_length(v: [f32; 2]) -> f32 {
+        // The host norm through the SAME `nightly`/`std` sqrt shim the field leaves use, so
+        // this arm stays `no_std`-clean. Sqrt-family precision — see the trait doc.
+        FieldScalar::sqrt(v[0].mul(v[0]).add(v[1].mul(v[1])))
+    }
+
+    #[inline]
+    fn vec2_dot(a: [f32; 2], b: [f32; 2]) -> f32 {
+        // The left-associated fold. `OpDot` may contract into an FMA on the GPU, so this is a
+        // CLOSE mirror, not a bit-exact one (the trait doc's standing carve-out).
+        a[0].mul(b[0]).add(a[1].mul(b[1]))
+    }
+
+    #[inline]
+    fn vec2_smoothstep(e0: [f32; 2], e1: [f32; 2], x: [f32; 2]) -> [f32; 2] {
+        // The spec polynomial per lane: `t = clamp((x - e0) / (e1 - e0), 0, 1); t*t*(3 - 2t)`.
+        // Contains a DIVIDE, so it is exact only at the saturated ends (the trait doc).
+        #[inline]
+        fn lane(e0: f32, e1: f32, x: f32) -> f32 {
+            let t = x.sub(e0).div(e1.sub(e0)).clamp01();
+            t.mul(t).mul(f32::lit(3.0).sub(f32::lit(2.0).mul(t)))
+        }
+        [lane(e0[0], e1[0], x[0]), lane(e0[1], e1[1], x[1])]
+    }
+
+    #[inline]
+    fn vec2_fwidth(_v: [f32; 2]) -> [f32; 2] {
+        // A device derivative has NO host semantics — the honest-panic discipline (`call1`'s
+        // Eval arm): a loud panic, never a wrong value. The one leaf that spells `fwidth`
+        // (`ui_screen_px_range_body`) is deliberately not oracle-swept.
+        unreachable!("fwidth is a fragment-stage derivative; the Eval oracle never reaches it")
+    }
+
+    #[inline]
+    fn vec2_rdiv_scalar(s: f32, v: [f32; 2]) -> [f32; 2] {
+        [s.div(v[0]), s.div(v[1])]
+    }
+
+    #[inline]
+    fn select_vec2(cond: bool, t: [f32; 2], e: [f32; 2]) -> [f32; 2] {
+        // Eager: both arms are pure swizzles (no side effects), matching the GPU computing
+        // both operands of an `OpSelect`-shaped ternary.
+        if cond { t } else { e }
+    }
+
+    #[inline]
+    fn vec4_xy(v: [f32; 4]) -> [f32; 2] {
+        [v[0], v[1]]
+    }
+
+    #[inline]
+    fn vec4_zw(v: [f32; 4]) -> [f32; 2] {
+        [v[2], v[3]]
+    }
+
+    #[inline]
+    fn vec4_yz(v: [f32; 4]) -> [f32; 2] {
+        [v[1], v[2]]
+    }
+
+    #[inline]
+    fn vec4_xw(v: [f32; 4]) -> [f32; 2] {
+        [v[0], v[3]]
+    }
+
+    #[inline]
+    fn vec4_alpha(v: [f32; 4]) -> f32 {
+        v[3]
+    }
+
+    #[inline]
+    fn vec4_from_scalars(x: f32, y: f32, z: f32, w: f32) -> [f32; 4] {
+        [x, y, z, w]
+    }
+
+    #[inline]
+    fn vec4_mul_scalar(v: [f32; 4], s: f32) -> [f32; 4] {
+        [v[0].mul(s), v[1].mul(s), v[2].mul(s), v[3].mul(s)]
+    }
+
+    #[inline]
+    fn vec4_add(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+        [
+            a[0].add(b[0]),
+            a[1].add(b[1]),
+            a[2].add(b[2]),
+            a[3].add(b[3]),
+        ]
+    }
+
+    #[inline]
+    fn temp_vec2(_name: &'static str, v: [f32; 2]) -> [f32; 2] {
+        // Identity on Eval — a temp is an Emit-only materialization concern.
+        v
+    }
+
+    #[inline]
+    fn named_uint_val(_sym: &'static str, val: u32) -> u32 {
+        val
+    }
+
+    #[inline]
+    fn vec2_frac(v: [f32; 2]) -> [f32; 2] {
+        // HLSL's own definition of `frac` (and `GLSL.std.450 Fract`): `x - floor(x)`, so a
+        // negative input wraps upward (`frac(-0.25) == 0.75`) rather than truncating toward
+        // zero the way `%` would.
+        [v[0] - v[0].floor(), v[1] - v[1].floor()]
+    }
+
+    #[inline]
+    fn vec2_lerp(a: [f32; 2], b: [f32; 2], t: [f32; 2]) -> [f32; 2] {
+        // `FMix`'s SPECIFIED form `x * (1 - t) + y * t`, not the `a + t * (b - a)`
+        // decomposition — the two round differently and the committed shader spells the
+        // intrinsic (see the trait doc).
+        [
+            a[0] * (1.0 - t[0]) + b[0] * t[0],
+            a[1] * (1.0 - t[1]) + b[1] * t[1],
+        ]
     }
 }

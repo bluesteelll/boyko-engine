@@ -56,8 +56,8 @@ fn main() {
 
 /// Spawns the room + the fly camera: startup runs WITH the device present, so
 /// meshes register straight through the world-resident `GpuDevice` +
-/// `MeshRegistry`.
-fn setup(mut commands: Commands, mut meshes: NonSendResMut<MeshRegistry>, dev: NonSendRes<GpuDevice>) {
+/// `Assets<MeshGpu>`.
+fn setup(mut commands: Commands, mut meshes: NonSendResMut<Assets<MeshGpu>>, dev: NonSendRes<GpuDevice>) {
     let floor = meshes.plane(dev.get(), 12.0);
     let cube = meshes.cube(dev.get(), 1.0);
 

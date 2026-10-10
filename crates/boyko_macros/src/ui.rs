@@ -1,18 +1,22 @@
 //! `ui! { .. }` function-like macro implementation.
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 
 /// Implementation of the `ui!` macro (see the public entry in `lib.rs`).
-pub(crate) fn expand(input: TokenStream) -> TokenStream {
-    ui_macro::expand(input.into())
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+pub(crate) fn ui_impl(input: TokenStream) -> TokenStream {
+    ui_macro::expand(input).unwrap_or_else(syn::Error::into_compile_error)
 }
 
 /// The `ui!` authoring macro: parser, compile-time validation, and two-pass
 /// codegen. Kept in a dedicated module so its `use`s do not perturb the
 /// derive/attribute macros above.
 mod ui_macro {
+    // Proc-macro expansion: every `HashMap` in this module is the `ui!` parser's
+    // duplicate-`#name` validation table, built and dropped inside rustc while
+    // compiling the invocation. Nothing here exists in the shipped binary, so it
+    // has no engine path at all — let alone a per-frame one.
+    #![allow(clippy::disallowed_types)]
+
     use std::collections::HashMap;
 
     use proc_macro2::{Span, TokenStream as TokenStream2};

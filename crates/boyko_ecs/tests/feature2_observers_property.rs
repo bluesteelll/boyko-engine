@@ -66,7 +66,14 @@ unsafe fn p2_add(_w: DeferredEcsMaster<'_>, _ctx: ObserverContext) {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 8, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 8,
+        // No failure file under Miri: proptest finds it through the cwd, which Miri's
+        // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+        #[cfg(miri)]
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// Invariant 1 — entity-targeting + no double-fire across migration.
     ///

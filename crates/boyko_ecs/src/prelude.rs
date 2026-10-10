@@ -26,6 +26,11 @@ pub use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 pub use crate::ecs::core::entity::entity::Entity;
 pub use crate::ecs::core::resources::resource::Resource;
 
+// ── Assets (rung A0 — host-only asset kernel) ────────────────────────────────
+pub use crate::ecs::core::asset::{
+    Asset, AssetError, AssetLoadState, AssetLoader, AssetServer, Assets, Handle,
+};
+
 // ── Phase 22 — dynamic tags ──────────────────────────────────────────────────
 pub use crate::ecs::core::component::component_registry::TagId;
 pub use crate::ecs::core::component::hooks::HooksError;

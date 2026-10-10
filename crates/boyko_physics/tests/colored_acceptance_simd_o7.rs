@@ -1,14 +1,16 @@
 //! Phase O7 — acceptance on the SIMD SOLVE PATH (Gate 5).
 //!
 //! The O5 acceptance suite (`colored_acceptance_o5.rs`) drives the colored solve
-//! with the DEFAULT config (`simd_solve == false`), i.e. the SCALAR-colored (O6)
-//! path. The O7 bit-exactness tests prove `simd_solve == scalar` byte-for-byte, so
-//! physical validity follows by transitivity — but the spec's Gate 5 wants the
-//! colored acceptance gates exercised DIRECTLY on the live SIMD path. This file
-//! re-runs the penetration + sphere-stack + box-stack acceptance scenes through the
-//! REAL physics `Schedule` with `simd_solve == true` AND `parallel_solve == true`
-//! over a multi-worker pool (the production O7 path), asserting the SAME tolerance /
-//! inequality invariants the O5 gates assert.
+//! with the DEFAULT config. Until 2026-09-18 that was `simd_solve == false`, the
+//! SCALAR-colored (O6) path; since then the default is `simd_solve == true`, so the
+//! O5 suite runs the SIMD solve single-threaded. The O7 bit-exactness tests prove
+//! `simd_solve == scalar` byte-for-byte, so physical validity follows by transitivity
+//! either way — but the spec's Gate 5 wants the colored acceptance gates exercised
+//! DIRECTLY on the live SIMD path, dispatched in parallel. This file re-runs the
+//! penetration + sphere-stack + box-stack acceptance scenes through the REAL physics
+//! `Schedule` with `simd_solve == true` AND `parallel_solve == true` over a
+//! multi-worker pool, asserting the SAME tolerance / inequality invariants the O5
+//! gates assert.
 //!
 //! Gated `#[cfg(target_feature = "avx2")]`: only an +avx2 build widens the solve, so
 //! only there is this non-vacuous (a non-AVX2 build routes both to the scalar oracle
@@ -241,7 +243,7 @@ fn simd_solve_sphere_stack_is_stable() {
 
     for _ in 0..300 {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
         let bodies = all_bodies(&mut world);
         for b in &bodies {
             assert!(
@@ -314,8 +316,8 @@ fn simd_solve_box_stack_is_stable() {
     for _ in 0..300 {
         schedule.run(&mut world);
         let manifolds = world.resource::<Manifolds>();
-        total_contacts += manifolds.manifolds.len();
-        if manifolds.manifolds.iter().any(|m| m.count >= 2) {
+        total_contacts += manifolds.manifolds().len();
+        if manifolds.manifolds().iter().any(|m| m.count >= 2) {
             multi_point_frames += 1;
         }
         let bodies = all_bodies(&mut world);

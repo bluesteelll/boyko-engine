@@ -21,31 +21,72 @@ use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
     BufferUsage, CompareOp, ComputePipelineDesc, CullMode, DepthBias, Format,
     GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange,
-    ImageUsage, MemoryLocation, MipMode, PrimitiveTopology, RhiCommandEncoder, RhiDevice,
-    RhiQueue, SamplerDesc, ShaderStage, TextureDesc, TextureDimension, VertexAttribute,
-    VertexBufferLayout, VertexFormat,
+    ImageUsage, MAX_BIND_GROUP_BINDINGS, MemoryLocation, MipMode, PrimitiveTopology, QueryPoolDesc,
+    RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc, ShaderStage, TextureDesc, TextureDimension,
+    VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi::SpecConstant;
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::ddgi::DdgiAtlas;
 use boyko_rhi_vulkan::compute::{
-    B5_CAMERA_UBO_BYTES_M4, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, EDITLIST_BUFFER_WORDS,
-    INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS,
-    LOCAL_SIZE_X, TILE_BOUND_BYTES, csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
-    encode_edit_list, fullscreen_sample_fs_spirv, fullscreen_sample_vs_spirv, gbuffer_mrt_fs_spirv,
-    gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv, punctual_depth_vs_spirv,
-    sdf_gbuffer_composite_spirv, sdf_probe_update_spirv, tile_grid_extent,
+    B5_CAMERA_UBO_BYTES_M4, CAM_MODE_ORTHO, CAM_MODE_PERSPECTIVE, COMPOSITE_PUSH_CONSTANT_BYTES,
+    CLUSTER_CULL_HIER_PUSH_BYTES, CLUSTER_CULL_PUSH_BYTES, ClusterCullHierPush, ClusterCullPush,
+    CoarseMode, EDITLIST_BUFFER_WORDS,
+    INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_SHADOWS,
+    LOCAL_SIZE_X, M4_LEVEL_PARAMS_BYTES, RCAS_PUSH_BYTES, SDF_FORWARD_MARCH_PUSH_BYTES,
+    TILE_BOUND_BYTES, TILE_SIZE,
+    cluster_cull_hier_spirv, cluster_cull_spirv,
+    csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
+    deferred_pbr_wrap_spirv,
+    depth_prepass_fs_spirv, depth_prepass_vs_spirv,
+    encode_edit_list, forward_opaque_fs_spirv, forward_opaque_froxel_fs_spirv, forward_opaque_vs_spirv,
+    forward_sky_fs_spirv, forward_sky_vs_spirv, fullscreen_sample_fs_spirv,
+    fullscreen_sample_vs_spirv, fxaa_fs_spirv,
+    gbuffer_mrt_fs_spirv,
+    gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
+    gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, HZB_BUILD_PUSH_BYTES, hzb_build_spirv,
+    interp_instances_spirv, punctual_depth_fs_spirv,
+    punctual_depth_vs_spirv, rcas_spirv, sdf_forward_march_spirv, sdf_forward_march_sdfonly_spirv,
+    sdf_forward_march_sdfonly_viewt_spirv, sdf_forward_march_viewt_spirv,
+    sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
+    sdf_ssao_spirv_variant, smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv,
+    SSAO_ATROUS_PUSH_BYTES, ssao_atrous_read8_spirv, ssao_atrous_spirv, ssao_atrous_write8_spirv,
+    SSAO_QUALITY_COUNT, SSAO_QUALITY_HIGH, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM,
+    ssaa_downsample_fs_spirv, taa_resolve_spirv, tile_grid_extent, VB_BATCH_CULL_PUSH_BYTES,
+    VB_BATCH_DESC_STRIDE, VB_CULL_LAYOUT_BINDINGS, VB_CULL_UNIFORM_BYTES, vb_batch_cull_spirv,
+    VIEWT_FROM_DEPTH_PUSH_BYTES, VIEWT_FROM_DEPTH_RZ_PUSH_BYTES,
+    vb_classify_count_spirv, vb_classify_scan_spirv, vb_classify_scatter_spirv,
+    sdf_mesh_shadow_spirv, vb_geo_spirv, vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv,
+    vb_resolve_froxel_spirv,
+    sdf_ssao_vb_spirv, vb_shade_spirv, vb_shade_froxel_spirv, vb_shade_split_spirv, vb_shade_split_tex_spirv,
+    vb_shade_tex_spirv, vb_shade_tex_froxel_spirv, viewt_from_depth_spirv, viewt_from_depth_rz_spirv,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
+use boyko_rhi_vulkan::ffi::VkDescriptorSet;
 use boyko_rhi_vulkan::memory::BoundBuffer;
+// VG R3 piece 1 step P1-2: the depth pyramid's derived-scalar carrier. Named through
+// `present` (its home) rather than the legacy `swapchain` shim below, which exists only to
+// preserve pre-decomposition paths.
+// VG R3 piece 3 step P3-6: the occlusion flag word's ARMED bit, named from its home so the host
+// fold and the shader's mirrored constant have one spelling between them. The two FORCE bits left
+// this file at piece 4 rung P4-4 — they now ride `VbOcclusionArm::force_flags`, minted by
+// `crate::occlusion_arm` from the diagnostic Resource and threaded per frame.
+use boyko_rhi_vulkan::present::command_witness::CommandWitness;
+use boyko_rhi_vulkan::present::gpu_zone::{
+    GPU_RING_DEPTH, GpuZoneRecorder, PairResult, QUERIES_PER_SLOT, RetireScratch, RetiredFrame,
+};
+use boyko_rhi_vulkan::present::{HzbPlan, VB_CULL_OCC_ARMED, VbOcclusionArm};
 use boyko_rhi_vulkan::rhi_impl::{
     ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline,
-    VulkanSampler, VulkanShaderModule,
+    VulkanQueryPool, VulkanSampler, VulkanShaderModule, rebind_storage_buffer,
 };
 use boyko_rhi_vulkan::swapchain::{
-    CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, GBUFFER_INSTANCE_MODEL_BYTES,
-    GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation,
+    AaActivation, ClusterCullHierDispatch, CsmDepthActivation, DdgiUpdateActivation,
+    FRAMES_IN_FLIGHT, FrameWriteToken, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
+    GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation, RcasActivation,
+    ResolvedRenderPathGpu, SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation,
+    ViewtFromDepthActivation, ViewtFromVbDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::accel::BoundAccelStruct;
@@ -57,7 +98,9 @@ use boyko_rhi_vulkan::accel_build::{
 use boyko_rhi_vulkan::compute::{
     BUILD_TLAS_INSTANCES_PUSH_BYTES, build_tlas_instances_spirv, deferred_pbr_denoised_spirv,
     deferred_pbr_hwrt_spirv, deferred_pbr_vis_mv_spirv, deferred_pbr_vis_spirv,
-    gbuffer_mrt_mv_fs_spirv, gbuffer_mrt_mv_vs_spirv, shadow_atrous_spirv, shadow_temporal_spirv,
+    gbuffer_mrt_mv_fs_spirv, gbuffer_mrt_mv_vs_spirv, gbuffer_mrt_mvpm_fs_spirv,
+    gbuffer_mrt_mvpm_vs_spirv, shadow_atrous_spirv, shadow_temporal_spirv, vb_geo_mv_spirv,
+    vb_shade_split_hwrt_spirv, vb_shade_split_tex_hwrt_spirv, vb_shadow_vis_spirv,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::swapchain::{ShadowVisActivation, TlasBuildActivation};
@@ -65,19 +108,25 @@ use boyko_rhi_vulkan::texture::VulkanTexture;
 use boyko_sdf_math::SdfEdit;
 
 use boyko_render::{
-    DDGI_UPDATE_UBO_BYTES, DdgiConfig, DdgiUpdateConfig, DdgiUpdateUbo, GI_MAX_RAYS, GPU_LIGHT_BYTES,
-    GPU_LIGHT_WORDS, GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES,
-    LightHeaderGpu, LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialGpu, RESOLVED_CSM_BYTES,
-    RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, ResolvedCsm, ResolvedShadowAtlas, SHADOW_DIM,
-    Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table, pack_ddgi_update_ubo,
-    resolve_ddgi,
+    AREA_TEX_BYTES, AREA_TEX_H, AREA_TEX_W, AaMode, BindlessTextureTable, ClusterConfig,
+    DDGI_UPDATE_UBO_BYTES,
+    DdgiUpdateConfig, DdgiUpdateUbo, GI_MAX_RAYS, GPU_LIGHT_BYTES, GPU_LIGHT_WORDS,
+    GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES, LightHeaderGpu,
+    LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialTable, MESH_VERTEX_STRIDE,
+    PER_INSTANCE_MATERIAL_BYTES, PER_INSTANCE_MATERIAL_TEX_BYTES, RESOLVED_CSM_BYTES,
+    RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, RETIRE_DELAY, ResolvedCsm, ResolvedDdgi,
+    ResolvedShadowAtlas, RetiredGpuBuffers, SEARCH_TEX_BYTES, SEARCH_TEX_H, SEARCH_TEX_W,
+    SHADOW_DIM, SharpenMode, Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table,
+    mesh_view_t_norm, pack_ddgi_update_ubo, upload_texture_2d_raw,
 };
 #[cfg(feature = "hwrt")]
-use boyko_render::MeshRegistry;
+use boyko_ecs::ecs::core::asset::Assets;
+#[cfg(feature = "hwrt")]
+use boyko_render::{MeshAssetsExt, MeshGpu};
 #[cfg(feature = "hwrt")]
 use boyko_render::MOTION_CAM_UBO_BYTES;
 #[cfg(feature = "hwrt")]
-use boyko_render::{RESOLVED_RAY_SHADOW_BYTES, RayShadowConfig};
+use boyko_render::{RAY_SHADOW_FRAME_BYTES, RESOLVED_RAY_SHADOW_BYTES, RayShadowConfig};
 #[cfg(feature = "hwrt")]
 use boyko_scene::render_caps::MeshHandle;
 
@@ -89,11 +138,20 @@ use boyko_scene::render_caps::MeshHandle;
 // is NOT split out — its creation is inlined into (and interleaved with) `boot`.
 mod csm;
 mod interp;
+// R2: the Deferred marcher's per-frame sun, derived from the staged table's primary directional.
+mod marcher_sun;
+// Particles P0: the GPU-side bundle (buffers, pipelines, the two parity sets) + its one
+// fence-waited boot fill. Built ONLY when the owner armed the subsystem.
+mod particle;
 #[cfg(feature = "hwrt")]
 mod tlas;
 
 use csm::CsmResources;
 use interp::InterpGpuProd;
+use marcher_sun::MarcherSun;
+// Particles P0: the runner assembles the frame's inputs, so both of these leave this module — as
+// does the raw readback the gate-#7 probe decodes.
+pub(crate) use particle::{ParticleCountersRaw, ParticleFrameInputs, ParticleFramePush};
 #[cfg(feature = "hwrt")]
 use tlas::TlasResources;
 
@@ -103,11 +161,424 @@ use tlas::TlasResources;
 /// plan R7.
 pub(crate) const INSTANCE_CAPACITY: usize = 1024;
 
+/// VG rung R2c0: the visible-batch COUNTER allocation's byte size. One live `u32` at element 0,
+/// allocated at 16 B so the buffer keeps a 16-byte-aligned tail under any allocator packing.
+///
+/// Named rather than spelled at the create site because the readback's COUNT region is sized from
+/// it: a region sized by a bare literal is exactly the drift the VB-P1j lesson closed.
+pub(crate) const VB_CULL_COUNT_BYTES: u64 = 16;
+
+/// VG rung R2c0: the compacted visible-BATCH list allocation's byte size — one `u32` per batch, and
+/// batches are bounded by instances, so [`INSTANCE_CAPACITY`] is the ceiling.
+pub(crate) const VB_CULL_VISIBLE_BYTES: u64 = (INSTANCE_CAPACITY as u64) * 4;
+
+/// Rung R2a': the indirect draw-record allocation's byte size — one
+/// `VkDrawIndexedIndirectCommand` per batch.
+pub(crate) const VB_INDIRECT_BYTES: u64 =
+    (INSTANCE_CAPACITY as u64) * boyko_rhi_vulkan::ffi::DRAW_INDEXED_INDIRECT_STRIDE as u64;
+
+/// VG R3 piece 2 (docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md, decision D5 §3): the record capacity
+/// of the occlusion split's LATE indirect array — an INDEPENDENT literal (not
+/// [`INSTANCE_CAPACITY`] itself), so the const-assert immediately below actually guards drift
+/// rather than restating a definition. The [`TEX_INSTANCE_CAPACITY`] shape verbatim.
+const VB_INDIRECT_LATE_RECORDS: usize = 1024;
+const _: () = assert!(
+    VB_INDIRECT_LATE_RECORDS == INSTANCE_CAPACITY,
+    "the late record array's capacity must track the early one: both raster scopes bound their \
+     record loops by the SAME hoisted `draw_batches` (min-ed against EACH array's own derived \
+     record_capacity), so a late array shorter than the early one silently drops the tail \
+     batches from the late scope"
+);
+
+/// VG R3 piece 2: the LATE indirect draw-record allocation's byte size — 20 KiB, the same
+/// per-record stride and the same per-FIF shape as [`VB_INDIRECT_BYTES`].
+///
+/// A DEDICATED array rather than a second use of `vb_indirect` (plan D4): the early scope needs
+/// `instanceCount = early_k` and the late scope `instanceCount = late_k` in ONE command buffer,
+/// so a shared array would have to be rewritten between the scopes — a transfer racing the early
+/// scope's still-in-flight indirect fetches. `vkCmdDrawIndexedIndirectCount` (which would let one
+/// array be refilled to a zero count instead) is deliberately not loaded on this device.
+pub(crate) const VB_INDIRECT_LATE_BYTES: u64 =
+    (VB_INDIRECT_LATE_RECORDS as u64) * boyko_rhi_vulkan::ffi::DRAW_INDEXED_INDIRECT_STRIDE as u64;
+
+/// VG rung R2d-2: the per-INSTANCE survivor-list allocation's byte size.
+pub(crate) const VB_VISIBLE_INSTANCE_BYTES: u64 = (VB_VISIBLE_INSTANCE_ELEMS as u64) * 4;
+
+// ── VG rung R2d-5: the cull readback staging's FOUR regions ────────────────────────────────────
+//
+// Rung R2c-tail's staging was a 16-byte counter block plus a `size - 16` REMAINDER, and the
+// remainder is what this rung removes: a region whose size is "whatever is left" cannot be checked
+// against the buffer it copies, and the design draft that preceded this rung proposed replacing it
+// with the literals `8 records` and `32 entries` — numbers that cannot even hold the 45-instance,
+// 7-batch corpus the probe is meant to observe. EVERY region below is sized from the ALLOCATION it
+// copies (or from the capacity constant that sized that allocation), and the recorder
+// (`present/passes/vb.rs`) derives the same four sizes from `BoundBuffer::size` at record time, so
+// the two agree by derivation rather than by a matching pair of literals.
+//
+// Layout, in staging order: COUNT | LIST | RECORDS | VIS | LATE_CAND | LATE_CNT_PRE | LATE_SURV |
+// LATE_CNT_POST | LATE_REC (VG R3 piece 3 step P3-5 appended the last five).
+
+/// Byte offset of the COUNT region — the cull's visible-BATCH counter, copied from `vb_cull_count`.
+pub(crate) const VB_CULL_READBACK_COUNT_OFFSET: u64 = 0;
+
+/// Byte offset of the LIST region — the compacted visible-BATCH indices, from `vb_cull_visible`.
+/// The COUNT region starts the staging at [`VB_CULL_READBACK_COUNT_OFFSET`] (zero), so the LIST
+/// begins exactly where the counter's own allocation ends.
+pub(crate) const VB_CULL_READBACK_LIST_OFFSET: u64 = VB_CULL_COUNT_BYTES;
+
+/// Byte offset of the RECORDS region — the whole `vb_indirect` record array, whose word 1 per
+/// 20-byte record is the post-cull `instanceCount` the rasterizer actually fetches.
+pub(crate) const VB_CULL_READBACK_RECORDS_OFFSET: u64 =
+    VB_CULL_READBACK_LIST_OFFSET + VB_CULL_VISIBLE_BYTES;
+
+/// Byte offset of the VIS region — the per-INSTANCE survivor list, from `vb_visible_instance`.
+pub(crate) const VB_CULL_READBACK_VIS_OFFSET: u64 =
+    VB_CULL_READBACK_RECORDS_OFFSET + VB_INDIRECT_BYTES;
+
+/// VG R3 piece 3 step P3-5: byte offset of the PRE-late CANDIDATE region — `vb_late_visible` as the
+/// EARLY cull phase wrote it, copied by the `vb_cull_readback` pass BEFORE `vb_cull_late` runs.
+///
+/// The only place the candidate set is observable at all: the late phase compacts the same region in
+/// place, so after it the region holds the survivors followed by the original tail — a multiset that
+/// is not the candidate set (plan A3's corollary).
+pub(crate) const VB_CULL_READBACK_LATE_CAND_OFFSET: u64 =
+    VB_CULL_READBACK_VIS_OFFSET + VB_VISIBLE_INSTANCE_BYTES;
+
+/// VG R3 piece 3 step P3-5: byte offset of the PRE-late COUNT region — each batch's `n_defer`, plus
+/// the reserved [`VB_LATE_COUNT_FRAME_SLOT`] tail the early phase stamps the observed frame index
+/// into.
+pub(crate) const VB_CULL_READBACK_LATE_CNT_PRE_OFFSET: u64 =
+    VB_CULL_READBACK_LATE_CAND_OFFSET + VB_LATE_VISIBLE_BYTES;
+
+/// VG R3 piece 3 step P3-5: byte offset of the POST-late SURVIVOR region — the same
+/// `vb_late_visible` allocation, copied by `vb_cull_readback_late` AFTER the late raster, so its
+/// prefix is the compacted survivor list.
+pub(crate) const VB_CULL_READBACK_LATE_SURV_OFFSET: u64 =
+    VB_CULL_READBACK_LATE_CNT_PRE_OFFSET + VB_LATE_COUNT_BYTES;
+
+/// VG R3 piece 3 step P3-5: byte offset of the POST-late COUNT region — the second side of the
+/// no-clobber clause (`late_count_post[b] == late_count_pre[b]`, plan A5).
+pub(crate) const VB_CULL_READBACK_LATE_CNT_POST_OFFSET: u64 =
+    VB_CULL_READBACK_LATE_SURV_OFFSET + VB_LATE_VISIBLE_BYTES;
+
+/// VG R3 piece 3 step P3-5: byte offset of the POST-late RECORD region — `vb_indirect_late`, whose
+/// word 1 per 20-byte record is the `instanceCount` the LATE cull wrote and the late raster fetches.
+pub(crate) const VB_CULL_READBACK_LATE_REC_OFFSET: u64 =
+    VB_CULL_READBACK_LATE_CNT_POST_OFFSET + VB_LATE_COUNT_BYTES;
+
+/// The cull readback staging's total size: the nine regions, back to back.
+pub(crate) const VB_CULL_READBACK_BYTES: u64 =
+    VB_CULL_READBACK_LATE_REC_OFFSET + VB_INDIRECT_LATE_BYTES;
+
+/// VG rung R2d-5: one frame's decoded cull readback — every region of the staging, in host form.
+///
+/// Each vector spans its whole ALLOCATION, not the frame's live prefix: the readback has no way to
+/// know a batch count, and slicing here would put a policy decision inside the decoder. The caller
+/// holds the frame's own batch count and slices with it.
+pub(crate) struct VbCullReadback {
+    /// The cull's `InterlockedAdd` counter: batches that passed the level-1 AABB test AND carry at
+    /// least one level-2 survivor (`vb_batch_cull.comp.hlsl`'s `visible && k > 0u` gate).
+    pub(crate) visible_batches: u32,
+    /// The compacted visible-BATCH indices. Only the first [`Self::visible_batches`] entries are
+    /// written this frame, and the counter may exceed the list's capacity — the shader's
+    /// clamp-and-drop discipline — so a reader must take the MINIMUM of the two.
+    pub(crate) batch_list: Vec<u32>,
+    /// Word 1 of each `VkDrawIndexedIndirectCommand`: the post-cull `instanceCount` the
+    /// rasterizer's indirect fetch actually reads, in batch order.
+    pub(crate) record_instance_counts: Vec<u32>,
+    /// The per-INSTANCE survivor list. Batch `b` owns exactly
+    /// `[base_instance(b), base_instance(b) + record_instance_counts[b])` and writes nowhere else,
+    /// so this must be read PER BATCH — a flat prefix interleaves real entries with slots no batch
+    /// owns (the runner skips batches whose mesh is not `Loaded`, so the bases can leave gaps).
+    pub(crate) visible_instances: Vec<u32>,
+    /// VG R3 piece 3 step P3-5 (plan D8/B1) — PRE-late snapshot: the CANDIDATE list, region-addressed
+    /// by the same `base_instance` the survivor list uses and sized per batch by
+    /// [`Self::late_count_pre`].
+    pub(crate) late_candidates: Vec<u32>,
+    /// PRE-late snapshot: per-batch `n_defer`, plus [`VB_LATE_COUNT_FRAME_SLOT`]'s reserved tail.
+    pub(crate) late_count_pre: Vec<u32>,
+    /// POST-late snapshot: the same allocation after the late phase compacted it in place. Batch
+    /// `b`'s SURVIVORS are its first [`Self::late_record_instance_counts`]`[b]` entries; what
+    /// follows them inside the batch's region is the untouched candidate tail, never a survivor.
+    pub(crate) late_survivors: Vec<u32>,
+    /// POST-late snapshot: `vb_late_count` re-read. The late phase does not write it, so
+    /// `late_count_post[b] != late_count_pre[b]` is a clobber (plan A5's first clause).
+    pub(crate) late_count_post: Vec<u32>,
+    /// POST-late snapshot: word 1 of each late `VkDrawIndexedIndirectCommand` — the ONLY producer
+    /// of which is the late cull, so this is `n_keep` per batch.
+    pub(crate) late_record_instance_counts: Vec<u32>,
+    /// The ENGINE frame this capture came from — the host's own monotonic counter, supplied by the
+    /// caller (the decoder reads device bytes and cannot know it).
+    pub(crate) frame_index: u32,
+    /// The frame index the GPU read out of `VbCullUniform`, taken from
+    /// [`VB_LATE_COUNT_FRAME_SLOT`] of the PRE-late count region.
+    ///
+    /// ⚠️ Written by the early phase ONLY under `VB_CULL_OCC_ARMED`
+    /// (`vb_batch_cull.comp.hlsl`'s `if (occ_armed && i == 0u)`), which VG R3 piece 3 step P3-6
+    /// sets on exactly the frames `path_vb_occlusion_split()` holds. **No committed
+    /// `BOYKO_VB_CULL_READBACK` fixture marks `OcclusionCulling`**, so on every capture in the tree
+    /// today this still reads the staging's boot prefill rather than a GPU observation, and
+    /// equality with [`Self::frame_index`] (plan D6's control F-M4a) is still not assertable at the
+    /// ENGINE level. What makes it assertable is a marked readback fixture — step P3-8's
+    /// `vb_occ_mixed`. (The instrument itself IS gated today, one level down: the shader's frame
+    /// slot is asserted against a known value in `tests/hzb_verdict_oracle_gate.rs`, which
+    /// dispatches the real module with its own armed uniform.)
+    pub(crate) gpu_observed_frame_index: u32,
+}
+
+/// Textured-PBR T6c (review O3): the boot capacity of
+/// [`TexturedResources::tex_instance_material_rings`] — an INDEPENDENT literal (not
+/// [`INSTANCE_CAPACITY`] itself) so the const-assert immediately below actually guards
+/// drift: the tex ring does NOT participate in F7 growth (see `TexturedResources`'s
+/// doc), so the two are pinned EQUAL today by design — a future edit to either literal
+/// alone is now a BUILD ERROR, not a silent capacity mismatch.
+/// `upload_instance_materials_tex`'s own overflow `assert!` compares against the
+/// ACTUAL device buffer's `size`, so this pin is not load-bearing for that check —
+/// only for keeping the two boot budgets in sync.
+const TEX_INSTANCE_CAPACITY: usize = 1024;
+const _: () = assert!(
+    TEX_INSTANCE_CAPACITY == INSTANCE_CAPACITY,
+    "TEX_INSTANCE_CAPACITY must track INSTANCE_CAPACITY (T6c: the TEXTURED \
+     instance-material ring does not participate in F7 growth, so it is pinned to the \
+     boot instance budget, not a separately-tunable capacity)"
+);
+
+/// The survivor list and the instance ring must hold EXACTLY the same number of elements. Two
+/// separate reads need this, and they need it in OPPOSITE directions — which is why an inequality
+/// is not enough and the first version of this assert, which had only one of them, was unsound.
+///
+/// ⊇ (rung R2d-4, the vertex shader): `vb_raster.vs.hlsl` selects between
+/// `visible_instances[base + id]` and `base + id` with a `? :`, and DXC may lower that to an EAGER
+/// load plus an `OpSelect` — so the address may be issued against the survivor list even on a draw
+/// whose indirection bit is clear. Every index the RING admits must therefore be in range for the
+/// LIST.
+///
+/// ⊆ (rung R2d-6, the armed cull): the cull reads `gVbInstances[base_instance + j]` for
+/// `j < instance_count`, and the only thing bounding that address is
+/// `vb_cull_batch_count_visible_clamp`, which clamps against the SURVIVOR LIST's element count.
+/// So every index the LIST admits must in turn be in range for the RING — a list LARGER than the
+/// ring would let the clamp admit a batch whose rows run off the end of the ring.
+///
+/// `robustBufferAccess` is OFF on this device, so neither direction degrades to a zero read; both
+/// are real out-of-bounds device accesses. Equality is the only relation that satisfies both.
+const _: () = assert!(
+    VB_VISIBLE_INSTANCE_ELEMS == INSTANCE_CAPACITY,
+    "vb_visible_instance and the VB instance ring must have EQUAL element counts: the vertex \
+     shader may address the list at any index the ring admits (R2d-4), and the armed cull's \
+     batch-count clamp bounds its ring reads by the LIST's capacity (R2d-6). An inequality in \
+     either direction is an out-of-bounds device access with robustBufferAccess off."
+);
+
+/// Element count of `vb_visible_instance` — one `uint` global instance index per instance-ring
+/// slot. The allocation is sized FROM this constant, so the assert above is the real coupling
+/// rather than a restatement: changing the allocation means changing this, which trips the assert
+/// the moment it falls below the ring.
+const VB_VISIBLE_INSTANCE_ELEMS: usize = INSTANCE_CAPACITY;
+
+/// VG R3 piece 3 step P3-2 (plan D3): element count of `vb_late_visible`, the occlusion split's
+/// early-reject / late-survivor list.
+///
+/// EQUAL to [`VB_VISIBLE_INSTANCE_ELEMS`], const-asserted below rather than spelled as the same
+/// definition twice: the two lists partition the SAME per-batch regions out of the SAME
+/// `VbBatchDesc` fields, and `vb_cull_batch_count_visible_clamp` bounds BOTH with the one number it
+/// already computes from the early list's allocation.
+///
+/// ⚠️ The equality above (the R2d-6 `VB_VISIBLE_INSTANCE_ELEMS == INSTANCE_CAPACITY` pair) is
+/// CONTEXT for this constant, never a third participant: this one must track the SURVIVOR LIST, and
+/// it tracks the ring only through it.
+const VB_LATE_VISIBLE_ELEMS: usize = INSTANCE_CAPACITY;
+const _: () = assert!(
+    VB_LATE_VISIBLE_ELEMS == VB_VISIBLE_INSTANCE_ELEMS,
+    "the late candidate/survivor list must hold every index the early survivor list can: both are \
+     addressed by the SAME VbBatchDesc region and bounded by the SAME \
+     vb_cull_batch_count_visible_clamp, which is computed from ONE element count. A late list \
+     SHORTER than the early one is an out-of-bounds device write with robustBufferAccess off."
+);
+
+/// VG R3 piece 3 step P3-2: the `vb_late_visible` allocation's byte size — the SAME byte count as
+/// [`VB_VISIBLE_INSTANCE_BYTES`], by the const-assert above.
+pub(crate) const VB_LATE_VISIBLE_BYTES: u64 = (VB_LATE_VISIBLE_ELEMS as u64) * 4;
+
+/// VG R3 piece 3 step P3-2 (plan D3/D6): the index of `vb_late_count`'s RESERVED tail slot — the
+/// one element that is not a batch's `n_defer` but the frame index the GPU read out of
+/// `VbCullUniform`.
+///
+/// It sits one past the last DRAW RECORD rather than one past the last live batch, because the live
+/// batch count is a per-frame quantity and this offset must be a boot constant both the shader and
+/// the readback can address without agreeing on a frame.
+pub(crate) const VB_LATE_COUNT_FRAME_SLOT: usize = VB_INDIRECT_LATE_RECORDS;
+
+/// VG R3 piece 3 step P3-2: element count of `vb_late_count` — one `u32` per LATE DRAW RECORD plus
+/// [`VB_LATE_COUNT_FRAME_SLOT`]'s reserved tail.
+///
+/// Sized off the same record capacity `vb_indirect_late` uses, so the two arrays cannot disagree
+/// about how many batches exist — the array whose `[b]` the late cull reads and the array whose
+/// `[b].instanceCount` it writes are indexed identically.
+pub(crate) const VB_LATE_COUNT_ELEMS: usize = VB_LATE_COUNT_FRAME_SLOT + 1;
+
+/// VG R3 piece 3 step P3-2: the `vb_late_count` allocation's byte size.
+pub(crate) const VB_LATE_COUNT_BYTES: u64 = (VB_LATE_COUNT_ELEMS as u64) * 4;
+
+/// The count array and the LATE RECORD array must describe the same number of batches, checked
+/// across the record STRIDE rather than by restating [`VB_LATE_COUNT_FRAME_SLOT`]'s definition:
+/// this is the one relation the definitions above do not already state, because the record array's
+/// size is a byte count and this one is an element count. A late record array resized without
+/// resizing this — or a stride change on one side only — is a batch whose `n_defer` has no slot.
+const _: () = assert!(
+    VB_LATE_COUNT_BYTES
+        == (VB_INDIRECT_LATE_BYTES / (boyko_rhi_vulkan::ffi::DRAW_INDEXED_INDIRECT_STRIDE as u64)
+            + 1)
+            * 4,
+    "vb_late_count must hold one u32 per LATE DRAW RECORD plus exactly one reserved frame slot"
+);
+
+/// VG R3 piece 3 step P3-2: the ONE binding on `vb_cull_layout` that is not a storage buffer —
+/// the depth pyramid, read with `.Load(int3(x, y, level))` through a mip-complete SAMPLED view.
+///
+/// Named because two independent things must agree on it and neither can see the other: this
+/// layout's `DescriptorKind::SampledImage` entry, and `GBufferTargets`' `BindGroupEntry::
+/// SampledImageAtGeneral` write. `SampledImage` is deliberately NOT `CombinedImageSampler` —
+/// **no `VkSampler` is created anywhere in this piece**, because `.Load` takes integer coordinates
+/// and an explicit mip and there is no filter to configure. A linear filter would in fact be
+/// UNSOUND over a min-reduced pyramid: a bilinear blend of four reduced texels lies strictly
+/// between their min and max, so it bounds the footprint from neither side, and a false negative
+/// is missing geometry.
+pub(crate) const VB_CULL_HZB_BINDING: u32 = 9;
+
+/// VG R3 piece 3 step P3-2: `vb_cull_layout`'s ENTRY TABLE — twelve COMPUTE bindings @0..@11, in
+/// the positional order [`RhiDevice::create_bind_group`] matches its entries against.
+///
+/// | binding | resource | since |
+/// |---|---|---|
+/// | @0 | `VbIndirect` — the early draw records | R2c0 |
+/// | @1 | `VbBatchDesc` — the per-batch cull inputs | R2c0 |
+/// | @2 | `VbCullVisible` — the compacted visible-BATCH list | R2c0 |
+/// | @3 | `VbCullCount` — the visible-batch counter | R2c0 |
+/// | @4 | `gVbInstances` — the per-instance affine + `mesh_id` ring | R2d-2 |
+/// | @5 | `gMeshBounds` — the per-mesh LOCAL AABB table | R2d-2 |
+/// | @6 | `gVbVisibleInstance` — the per-instance survivor list | R2d-2 |
+/// | @7 | `VbLateVisible` — the early-reject / late-survivor list | **P3-2** |
+/// | @8 | `VbCullUni` — the `VbCullUniform` block | **P3-2** |
+/// | @9 | `gHzbPyramid` — the depth pyramid, SAMPLED at `GENERAL` | **P3-2** |
+/// | @10 | `VbIndirectLate` — the late draw records | **P3-2** |
+/// | @11 | `VbLateCount` — per-batch `n_defer` + the frame slot | **P3-2** |
+///
+/// ⚠️ The MODULE spells its bindings as `: register(uN/tN)`, and the register index IS the Vulkan
+/// binding — so the `t` and `u` spaces are kept mutually exclusive BY HAND. A new binding that
+/// reused an index across the two spaces would alias silently, with no validation message and no
+/// pixel change until something loaded from the wrong buffer. That is what
+/// [`vb_cull_layout_table_is_well_formed`] exists to make a BUILD error.
+///
+/// ⚠️ All twelve are read by the module since step P3-4; between P3-2 and P3-4 the last five were
+/// bound-but-unread, which is the legal direction — a WRITTEN descriptor a shader never loads from
+/// is never dereferenced, so the bound set may legally exceed what the module declares. The reverse
+/// is a `debug_assert` in `create_bind_group` (`entries.len() == layout.entry_count`), which is why
+/// the layout and the set moved in ONE commit and the shader lagged rather than led.
+/// `tests/vb_batch_cull_spv_sync.rs` asserts each of @7..@11 in its own named assertion, because
+/// DXC STRIPS a declared-but-unloaded resource and their presence is therefore the artifact-level
+/// proof that the load is real.
+const VB_CULL_LAYOUT_ENTRIES: [BindGroupLayoutEntry; VB_CULL_LAYOUT_BINDINGS as usize] = {
+    // Every binding in this table is a single COMPUTE storage buffer except @9, so the table is
+    // written as a fold over that rule instead of twelve near-identical literals — the shape a
+    // reader can check against the doc table above without counting braces.
+    const fn slot(binding: u32) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            count: 1,
+            kind: if binding == VB_CULL_HZB_BINDING {
+                DescriptorKind::SampledImage
+            } else {
+                DescriptorKind::StorageBuffer
+            },
+            stage: ShaderStage::COMPUTE,
+        }
+    }
+    [
+        slot(0),
+        slot(1),
+        slot(2),
+        slot(3),
+        slot(4),
+        slot(5),
+        slot(6),
+        slot(7),
+        slot(8),
+        slot(9),
+        slot(10),
+        slot(11),
+    ]
+};
+
+/// VG R3 piece 3 step P3-2 — the invariant [`VB_CULL_LAYOUT_ENTRIES`] must satisfy for the layout
+/// and the descriptor set built against it to be able to agree:
+///
+/// 1. **entry `i` declares binding `i`** — `create_bind_group` matches entries to layout bindings
+///    POSITIONALLY, so a table whose binding numbers are not the identity binds resources to the
+///    wrong slots with no error anywhere. This subsumes "distinct" and "dense".
+/// 2. **exactly one descriptor per entry**, `count == 1` — nothing here is a bindless array.
+/// 3. **COMPUTE visibility on every entry** — the cull is the only consumer of this layout.
+/// 4. **[`VB_CULL_HZB_BINDING`] alone is `SampledImage`; every other entry is `StorageBuffer`** —
+///    the kind is what makes the `SampledImageAtGeneral` write legal at @9 and what would make it
+///    illegal anywhere else.
+///
+/// A named `const fn` rather than an inline chain for the reason
+/// `boyko_rhi_vulkan`'s own `hzb_null_desc_is_bindable_and_seedable` is one: the const-assert below
+/// executes it on the SHIPPED table, and a unit test executes the SAME function on deliberately
+/// corrupted copies. A test that re-implemented the predicate would be a second opinion, not a
+/// control.
+const fn vb_cull_layout_table_is_well_formed(
+    entries: &[BindGroupLayoutEntry; VB_CULL_LAYOUT_BINDINGS as usize],
+) -> bool {
+    let mut i = 0;
+    while i < VB_CULL_LAYOUT_BINDINGS as usize {
+        let e = &entries[i];
+        if e.binding != i as u32 || e.count != 1 {
+            return false;
+        }
+        if e.stage.bits() != ShaderStage::COMPUTE.bits() {
+            return false;
+        }
+        // The pyramid slot must be SAMPLED and every OTHER slot must be a storage buffer. Stated as
+        // two exhaustive arms rather than as "the sampled one is at @9", because the second form
+        // would still admit a SECOND sampled entry elsewhere in the table.
+        let kind_ok = if e.binding == VB_CULL_HZB_BINDING {
+            matches!(e.kind, DescriptorKind::SampledImage)
+        } else {
+            matches!(e.kind, DescriptorKind::StorageBuffer)
+        };
+        if !kind_ok {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const _: () = assert!(
+    vb_cull_layout_table_is_well_formed(&VB_CULL_LAYOUT_ENTRIES),
+    "VG R3 P3-2: vb_cull_layout's entry table must declare binding i at index i, one COMPUTE \
+     descriptor each, with the depth pyramid at VB_CULL_HZB_BINDING as the ONLY SampledImage"
+);
+
+const _: () = assert!(
+    (VB_CULL_LAYOUT_BINDINGS as usize) <= MAX_BIND_GROUP_BINDINGS,
+    "VG R3 P3-2: vb_cull_layout's arity must fit the RHI's per-set binding cap, which \
+     create_bind_group_layout rejects at runtime rather than at build time"
+);
+
+/// Asset-streaming plan F7 Q2: a sane upper bound on the non-RT instance family's
+/// grown capacity — mirrors `MESH_ADDR_CAP`'s role for the BLAS-address table.
+/// `debug_assert`-only (not a hard cap like `boyko_render::MaterialTable`'s
+/// `MAX_MATERIAL_ROWS` on the material side — there is no addressing-width limit
+/// here, only a runaway-leak sanity net): catches a leaking `MeshRenderScratch::ring`
+/// in dev without a release cost.
+pub(crate) const MAX_INSTANCE_CAP: usize = 1 << 22;
+
 /// HW-RT rung R2a-3: the per-mesh BLAS-address table capacity (the max distinct meshes the
 /// host's TLAS packer can reference). The table is a tiny host-visible `u64` column indexed by
 /// `MeshHandle.0`; a registration beyond it is a hard `debug_assert` (consistent with
 /// [`INSTANCE_CAPACITY`]'s overflow discipline). Frame-invariant (BLASes never move), rewritten
-/// only when [`MeshRegistry::blas_generation`](boyko_render::MeshRegistry::blas_generation)
+/// only when [`MeshAssetsExt::blas_generation`](boyko_render::MeshAssetsExt::blas_generation)
 /// advances.
 #[cfg(feature = "hwrt")]
 pub(crate) const MESH_ADDR_CAP: usize = 256;
@@ -128,14 +599,9 @@ const _: () = assert!(
 /// `GBUFFER_FORMAT` (`R8G8B8A8_UNORM`), the same pin the showcase carries.
 const RASTER_COLOR_FORMAT: Format = Format::R8G8B8A8Unorm;
 
-/// The MARCHER's cast-shadow direction (`L`, direction TO the light) — the A1
-/// analytic SDF soft-shadow march lane of the marcher push. The host's SDF edit
-/// list is EMPTY in v1 (no pixel takes the SDF path), so this lane is
-/// bound-but-inert; it mirrors the showcase's `SHOWCASE_SUN_DIR` so a future
-/// SDF instance path (host plan R7) starts from the familiar sun. The RESOLVE's
-/// lighting is ECS-owned since host plan R4 (the light table uploads from
-/// `LightTableStaging`); this constant no longer seeds any light-table row.
-const DEFAULT_SUN_DIR: [f32; 3] = [-0.45, 0.82, 0.36];
+/// Textured-PBR T6c: the `gPbr` 4th MRT color format the TEXTURED raster pipeline declares
+/// — MUST equal `GBufferTargets`'s `gPbr` ring format (T6a's `R16G16B16A16_SFLOAT`).
+const TEX_GPBR_COLOR_FORMAT: Format = Format::R16G16B16A16Sfloat;
 
 /// The full staged-light-table capacity (`[LightHeaderGpu || GpuLight[MAX_LIGHTS]]`)
 /// — the size of the device light table AND each staging ring slot, so ANY table
@@ -158,11 +624,14 @@ pub(crate) const CSM_SHADOW_DIM: u32 = 2048;
 /// Byte size of one host cascade-UBO ring slot — `size_of::<ResolvedCsm>()`
 /// via [`RESOLVED_CSM_BYTES`] (the resolve's binding-13 shape).
 const CSM_UBO_BYTES: u64 = RESOLVED_CSM_BYTES as u64;
-/// HW-RT rung 1b: byte size of one HWRT shadow-params-UBO ring slot —
-/// `size_of::<ResolvedRayShadow>()` via [`RESOLVED_RAY_SHADOW_BYTES`] (the HWRT resolve's
-/// binding-20 shape, 16 B).
+/// HW-RT rung 1b/3b + lane fix/hwrt-shadow-ray-origin: byte size of one HWRT shadow-params-UBO
+/// ring slot — the cold resolved [`RESOLVED_RAY_SHADOW_BYTES`] mirror (cone/tmax/tmin/bias,
+/// 16 B) PLUS the runner-injected hot [`RAY_SHADOW_FRAME_BYTES`] tail at offset 16 (the rung-3b
+/// `SHADOW_FRAME_SEED`, `SHADOW_ORIGIN_MODE`, the std140 pad and `SHADOW_RASTER_FWD`, 32 B; see
+/// `upload_ray_shadow_ring`) = the HLSL `RayShadowUbo` cbuffer's 48-byte std140 block (three
+/// vec4 slots, every byte written). ×2 FIF ring; negligible.
 #[cfg(feature = "hwrt")]
-const RAY_SHADOW_UBO_BYTES: u64 = RESOLVED_RAY_SHADOW_BYTES as u64;
+const RAY_SHADOW_UBO_BYTES: u64 = (RESOLVED_RAY_SHADOW_BYTES + RAY_SHADOW_FRAME_BYTES) as u64;
 /// HW-RT rung 3a: the à-trous filter's push-constant size — a single `{ uint step }` (4 B). The
 /// recorder pushes `step = 1 << level` per dispatch.
 #[cfg(feature = "hwrt")]
@@ -176,8 +645,12 @@ const SPOT_ATLAS_SLOTS: u32 = M_SLOTS as u32;
 /// [`RESOLVED_SHADOW_ATLAS_BYTES`] (the resolve's binding-15 shape).
 const SPOT_ATLAS_UBO_BYTES: u64 = RESOLVED_SHADOW_ATLAS_BYTES as u64;
 /// Byte size of the SDFDDGI grid UBO — `size_of::<ResolvedDdgi>()` via
-/// [`RESOLVED_DDGI_BYTES`] (48 B, the resolve's binding-18 shape). A SINGLE buffer (the grid is
-/// world-fixed — Decision D1), NOT a per-FIF ring. Zero-seeded (bound-but-unread on the OFF path).
+/// [`RESOLVED_DDGI_BYTES`] (48 B, the resolve's binding-18 shape; EXACTLY the carrier — there
+/// are no bytes past `_pad`, and the shader block's member 3 sits at `Offset 36` in every
+/// committed resolve `.spv`). A SINGLE buffer, NOT a per-FIF ring — by DESCRIPTOR contract (the
+/// resolve set is boot-built and captures this buffer), so the runner's `upload_ddgi_grid` is
+/// monotone + value-gated (see `upload_ddgi_grid`). Zero-seeded == `ResolvedDdgi::DISABLED`
+/// (bound-but-unread on the OFF path).
 const DDGI_UBO_BYTES: u64 = RESOLVED_DDGI_BYTES as u64;
 /// Byte size of the SDFDDGI I2 probe-update UBO — `size_of::<DdgiUpdateUbo>()` via
 /// [`DDGI_UPDATE_UBO_BYTES`] (48 B, the update set's b6 shape). A SINGLE buffer (identity
@@ -216,19 +689,6 @@ fn zero_fill(base: NonNull<u8>, len: usize) {
     }
 }
 
-/// Packs a [`MaterialGpu`] into the 12-word (`3 × vec4` std430) table element
-/// the marcher/resolve reads (the layout the fingerprint const-asserts in
-/// `boyko_render::material` pin).
-fn pack_material(m: &MaterialGpu) -> [u32; 12] {
-    let mut w = [0u32; 12];
-    for c in 0..4 {
-        w[c] = m.base_color[c].to_bits();
-        w[4 + c] = m.mrr[c].to_bits();
-        w[8 + c] = m.emissive[c].to_bits();
-    }
-    w
-}
-
 /// Packs a header + light list into the std430 light-table word stream
 /// (`[LightHeaderGpu (16 words) || GpuLight[] (12 words each)]`) the resolve
 /// reads at binding 6 — the PRODUCTION `boyko_render` types. Since host plan R4
@@ -262,6 +722,40 @@ fn pack_light_table(header: &LightHeaderGpu, lights: &[GpuLight]) -> Vec<u32> {
     words
 }
 
+/// Multi-paradigm render-path plan, rung R1: converts the `boyko_render::ResolvedRenderPath`
+/// boot carrier into its plain-POD [`ResolvedRenderPathGpu`] mirror for [`GBufferScene`] —
+/// THE `boyko_render` → `boyko_rhi_vulkan` boundary-crossing seam (see
+/// [`GpuSceneBundles::scene`]'s `resolved_render_path` param doc for why this is a free fn,
+/// not a `From` impl: neither `ResolvedRenderPath` nor `ResolvedRenderPathGpu` is local to
+/// this crate, so a `From` impl anywhere in `boyko_app` would violate the orphan rule).
+/// Field-by-field, no allocation, no branch beyond the `#[repr(u32)]`/newtype `as`/`.bits()`
+/// casts — mirrors how `pack_ddgi_update_ubo` packs a `boyko_render` carrier into its device
+/// byte-mirror.
+#[inline]
+fn to_gpu_resolved_render_path(r: &boyko_render::ResolvedRenderPath) -> ResolvedRenderPathGpu {
+    ResolvedRenderPathGpu {
+        path: r.path as u32,
+        legs: r.legs as u32,
+        mesh_leg: r.mesh_leg,
+        sdf_leg: r.sdf_leg,
+        sdf_forward_marched: r.sdf_forward_marched,
+        needs_depth_prepass: r.needs_depth_prepass,
+        prepass_writes_motion: r.prepass_writes_motion,
+        mesh_geo_shade_split: r.mesh_geo_shade_split,
+        sdf_geo_shade_split: r.sdf_geo_shade_split,
+        sdf_surface_cache: r.sdf_surface_cache,
+        vb_geometry_table: r.vb_geometry_table,
+        depth_kind: r.depth_kind as u32,
+        thin_aux: r.thin_aux.bits(),
+        shadow: r.shadow.bits(),
+        froxel_light_cull: r.froxel_light_cull,
+        // VB-SV0 rung S4 (code-review P1-a): the resolver's OWN answer, called here rather than
+        // re-derived downstream — `boyko_rhi_vulkan` cannot name `ShadowSources`, so a recompute
+        // there would have to hardcode the `SDF_SOFT_MARCH` bit value.
+        vb_sdf_mesh_armable: r.vb_sdf_mesh_armable(),
+    }
+}
+
 /// HW-RT Rung 3b step 5a: the MESH motion-vector raster resources — the `gbuffer_mrt_mv`
 /// pipeline variant (a 4th MRT writing screen-space Δuv) plus the per-FIF prev-instance ring +
 /// motion-cam UBO ring the MV vertex shader reads at set 0.
@@ -274,7 +768,7 @@ fn pack_light_table(header: &LightHeaderGpu, lights: &[GpuLight]) -> Vec<u32> {
 #[cfg(feature = "hwrt")]
 pub(crate) struct MotionVecResources {
     /// The `gbuffer_mrt_mv.{vs,fs}` graphics pipeline: identical to the base raster pipeline
-    /// (40-byte vertex layout, D32 depth, 88-byte VERTEX push, `CullMode::None`, no blend/bias)
+    /// (64-byte vertex layout, D32 depth, 88-byte VERTEX push, `CullMode::None`, no blend/bias)
     /// EXCEPT for a 4th color format `R16G16Sfloat` (the `motion_vec` Δuv attachment) and its set-0
     /// layout ([`Self::layout`]).
     pipeline: VulkanGraphicsPipeline,
@@ -284,14 +778,15 @@ pub(crate) struct MotionVecResources {
     layout: VulkanBindGroupLayout,
     /// HW-RT Rung 3b step 5b: the SDF motion-vector VIS-variant resolve pipeline
     /// (`deferred_pbr_hwrt_vis_mv.comp` / [`deferred_pbr_vis_mv_spirv`]) — identical to the base VIS
-    /// resolve (`deferred_pbr_hwrt_vis.comp`, writes `gShadowVis` @21) EXCEPT it ALSO writes each SDF
-    /// pixel's camera-only motion vector `Δuv` to the `motion_vec` STORAGE image @23, reprojecting the
-    /// reconstructed surface `P` through the `MotionCam` UBO @22. Bound instead of the base VIS
+    /// resolve (`deferred_pbr_hwrt_vis.comp`, writes `gShadowVis` @22) EXCEPT it ALSO writes each SDF
+    /// pixel's camera-only motion vector `Δuv` to the `motion_vec` STORAGE image @24, reprojecting the
+    /// reconstructed surface `P` through the `MotionCam` UBO @23. Bound instead of the base VIS
     /// pipeline (in the VIS pass) ONLY when the temporal denoiser is active (`sdf_mv_active()`).
     vis_mv_pipeline: ComputePipeline,
-    /// HW-RT Rung 3b step 5b: the 24-binding VIS-MV resolve layout — the 22-binding VIS/DENOISED
-    /// layout (0..=21, incl. `gShadowVis` @21) PLUS the `MotionCam` UNIFORM buffer @22 + the
-    /// `motion_vec` STORAGE image @23 (both COMPUTE). Threaded (as `scene.vis_mv_layout`) into
+    /// HW-RT Rung 3b step 5b: the 25-binding VIS-MV resolve layout — the 23-binding VIS/DENOISED
+    /// layout (0..=22, incl. the raster depth @21 + `gShadowVis` @22) PLUS the `MotionCam` UNIFORM
+    /// buffer @23 + the `motion_vec` STORAGE image @24 (both COMPUTE). Threaded (as
+    /// `scene.vis_mv_layout`) into
     /// [`GBufferTargets::build_shadow_vis_mv_resolve_set`] so the per-FIF VIS-MV set is written once
     /// per extent, decoupled from the per-frame gate.
     vis_mv_layout: VulkanBindGroupLayout,
@@ -308,6 +803,114 @@ pub(crate) struct MotionVecResources {
     /// prev_instance_rings[i], motion_cam_ubo[i] }`. The recorder binds slot `s` at set 0 when the
     /// temporal gate opens.
     bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// F8-mv: the combined `gbuffer_mrt_mvpm.{vs,fs}` graphics pipeline — identical to
+    /// [`Self::pipeline`] EXCEPT its set-0 layout ([`Self::mvpm_layout`]) also declares the
+    /// per-instance material SSBO at binding 3 (the nested `#if defined(MOTION_VECTORS)`
+    /// branch in the VS moves it there to dodge the binding-1 collision with
+    /// `prev_instances`). Selected instead of [`Self::pipeline`] when a temporal frame ALSO
+    /// carries a non-default material (F8-mv; MV+PM combined).
+    mvpm_pipeline: VulkanGraphicsPipeline,
+    /// F8-mv: the 4-binding set-0 layout the mvpm pipeline declares: binding 0 = the current
+    /// instance SSBO (VERTEX), binding 1 = the prev-instance SSBO (VERTEX), binding 2 = the
+    /// motion-cam UBO (VERTEX), binding 3 = the per-instance material SSBO (VERTEX). A
+    /// SEPARATE layout from [`Self::layout`] (3-binding) and
+    /// [`GpuSceneBundles::pm_instance_material_layout`] (2-binding).
+    mvpm_layout: VulkanBindGroupLayout,
+    /// F8-mv: per-FIF bind groups against [`Self::mvpm_layout`]: slot `i` binds
+    /// `{ instance_rings[i], prev_instance_rings[i], motion_cam_ubo[i],
+    /// pm_instance_material_rings[i] }`. The recorder binds slot `s` at set 0 when both the
+    /// temporal gate opens AND a non-default material is present this frame.
+    mvpm_bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+}
+
+#[cfg(feature = "hwrt")]
+impl MotionVecResources {
+    /// Asset-streaming plan F7-hwrt (task#11): grows slot `s`'s `prev_instance_rings[s]`
+    /// to `new_cap` instances (48 B × `new_cap`, zero-filled, old buffer deferred) in
+    /// lockstep with the caller's ALREADY-grown `instance_rings_s`/`pm_ring_s` — the SAME
+    /// buffers [`GpuSceneBundles::grow_shared_instance_rings`] just repointed
+    /// `instance_bind_groups[s]`/`pm_bind_groups[s]` against, passed here BY REFERENCE
+    /// (this struct never owns or grows them itself). Rebinds `bind_groups[s]` (@0
+    /// current / @1 prev — @2 `motion_cam_ubo` untouched) and `mvpm_bind_groups[s]` (@0
+    /// current / @1 prev / @3 pm — @2 `motion_cam_ubo` untouched).
+    ///
+    /// # No seed
+    ///
+    /// `upload_prev_instance_models` rewrites the whole prev-ring THIS frame when the
+    /// temporal gate is armed (mirrors [`GpuSceneBundles::grow_shared_instance_rings`]'s
+    /// own no-seed reasoning) — zero-fill only covers the gap until that write lands.
+    ///
+    /// # Panics
+    ///
+    /// Panics (`expect`) on an RHI create/map failure — a device OOM on a post-boot grow
+    /// is setup-adjacent, not a recoverable per-frame error.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees slot `s`'s in-flight fence was waited THIS frame (the
+    /// `FrameWriteToken` proof [`GpuSceneBundles::grow_instance_family_rt`] holds) —
+    /// neither `bind_groups[s]` nor `mvpm_bind_groups[s]` is command-buffer-pending, so
+    /// rewriting their bindings in place is sound. `instance_rings_s`/`pm_ring_s` are the
+    /// caller's live, already-grown buffers.
+    // Review O2 pins `instance_rings_s`/`pm_ring_s` as SEPARATE borrowed params (not
+    // grown here, not cloned) so the caller's split-borrow of `&mut self.mv` against
+    // `&self.instance_rings[s]`/`&self.pm_instance_material_rings[s]` stays disjoint —
+    // grouping them into a struct would only relocate the same two fields behind an
+    // extra indirection with no other caller to share it.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn grow_slot(
+        &mut self,
+        device: &VulkanContext,
+        s: usize,
+        new_cap: u32,
+        instance_rings_s: &BoundBuffer,
+        pm_ring_s: &BoundBuffer,
+        retired: &mut RetiredGpuBuffers,
+        retire_frame: u64,
+    ) {
+        let prev_bytes = new_cap as u64 * GBUFFER_INSTANCE_MODEL_BYTES as u64;
+        let new_prev = {
+            let b = RhiDevice::create_buffer(
+                device,
+                &BufferDesc {
+                    size: prev_bytes,
+                    usage: BufferUsage::STORAGE,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            )
+            .expect("invariant: grown prev-instance-model SSBO ring slot create");
+            let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
+                .expect("invariant: host-visible grown prev-instance SSBO is mapped");
+            zero_fill(mapped, prev_bytes as usize);
+            b
+        };
+        let old_prev = core::mem::replace(&mut self.prev_instance_rings[s], new_prev);
+        retired.push(old_prev, retire_frame);
+
+        const MV_GROWN_BINDINGS: usize = 5;
+        let mut rebound = 0usize;
+        // SAFETY: slot `s`'s fence was waited this frame (this fn's caller contract
+        // above) — neither set is command-buffer-pending, so rewriting their bindings in
+        // place is sound. `motion_cam_ubo[s]` (@2 on both sets) is untouched: it does not
+        // share the instance-family index space and never grows.
+        unsafe {
+            rebind_storage_buffer(device, &self.bind_groups[s], 0, instance_rings_s);
+            rebound += 1;
+            rebind_storage_buffer(device, &self.bind_groups[s], 1, &self.prev_instance_rings[s]);
+            rebound += 1;
+            rebind_storage_buffer(device, &self.mvpm_bind_groups[s], 0, instance_rings_s);
+            rebound += 1;
+            rebind_storage_buffer(device, &self.mvpm_bind_groups[s], 1, &self.prev_instance_rings[s]);
+            rebound += 1;
+            rebind_storage_buffer(device, &self.mvpm_bind_groups[s], 3, pm_ring_s);
+            rebound += 1;
+        }
+        debug_assert_eq!(
+            rebound, MV_GROWN_BINDINGS,
+            "invariant: exactly 5 mv/mvpm bindings rebound (bind_groups@0/@1 + \
+             mvpm_bind_groups@0/@1/@3; @2 motion_cam_ubo untouched on both)"
+        );
+    }
 }
 
 /// The static-resource half of the windowed G-buffer scene (host plan R3):
@@ -335,6 +938,16 @@ pub(crate) struct GpuSceneBundles {
     /// SAME `instance_rings[slot]` (the compute overwrites the dynamic slots). The
     /// raster `instance_bind_group` stays `instance_bind_groups[slot]` (no bind swap).
     interp: InterpGpuProd,
+    /// Particles P0: the GPU-side particle bundle, or `None` when the owner left
+    /// `ParticleConfig::mode` at its `Off` default.
+    ///
+    /// `None` is the whole 0%-gate: no buffer, no pipeline, no descriptor set, no shader module —
+    /// and, because `scene()` then leaves `GBufferScene::particle` `None`, no framegraph `ResId`,
+    /// no pass and no recorded command either. Built by
+    /// [`Self::build_particle_bundle`](GpuSceneBundles::build_particle_bundle) AFTER `boot`,
+    /// because the arming lives in the World and `boot` runs before the World is readable
+    /// (the `build_textured_resources` precedent).
+    particle: Option<particle::ParticleGpuBundle>,
     /// HW-RT rung R2a-3: the GPU-resident per-frame TLAS resources (the packer pipeline +
     /// FIF-ringed mesh-id / instance-array SSBOs + persistent per-slot TLASes + the frame-
     /// invariant BLAS-address table). Built at boot ONLY on an RT device (`ray_query_enabled`);
@@ -348,6 +961,64 @@ pub(crate) struct GpuSceneBundles {
     /// every other frame the base 3-MRT raster pipeline draws (byte-identical OFF path).
     #[cfg(feature = "hwrt")]
     mv: Option<MotionVecResources>,
+    /// Asset-streaming plan F7 §7.3: PER-FIF-SLOT current capacity of the instance family
+    /// (`instance_rings[s]` + `interp.pairs[s]` + `interp.out_slot[s]`, plus — on the RT
+    /// leg — `tlas`'s + `mv`'s co-sized buffers), starting at [`INSTANCE_CAPACITY`]. Slots
+    /// grow INDEPENDENTLY — one fenced slot at a time, in lockstep across every co-sized
+    /// buffer — so this is a per-slot array, not a single scalar (mirrors
+    /// [`InterpGpuProd`]'s own per-slot `capacity`). Asset-streaming plan F7-hwrt
+    /// (task#11): the RT leg (`tlas.is_some()`) now ALSO grows this past
+    /// [`INSTANCE_CAPACITY`] via [`Self::grow_instance_family_rt`] — the former W3 hard
+    /// cap (pinning this forever at boot capacity on an RT device) is REMOVED; both legs
+    /// share the SAME [`MAX_INSTANCE_CAP`] ceiling (no separate RT ceiling).
+    instance_capacity: [u32; FRAMES_IN_FLIGHT],
+    /// Asset-streaming plan F7-hwrt (task#11): `true` iff slot `s`'s [`TlasResources`]
+    /// minted a NEW `VkAccelerationStructureKHR` handle this grow (via
+    /// [`Self::grow_instance_family_rt`]) whose resolve-family descriptor sets have not
+    /// yet been repointed. The runner's per-frame repoint step (mirrors
+    /// [`MaterialTable::rebind_pending`](boyko_render::MaterialTable::rebind_pending)'s
+    /// FIX-E discipline) `core::mem::take`s this flag and drives
+    /// [`GBufferFrame::repoint_tlas_accel`](boyko_rhi_vulkan::present::GBufferFrame::repoint_tlas_accel)
+    /// — gated ONLY on this flag, never on "grew this frame", so a slot left lagging by a
+    /// prior grow still converges.
+    #[cfg(feature = "hwrt")]
+    pub(crate) tlas_accel_rebind_pending: [bool; FRAMES_IN_FLIGHT],
+    /// Asset-streaming plan F8: the PER_INSTANCE_MATERIAL gbuffer producer pipeline
+    /// (`gbuffer_mrt_pm.{vs,fs}` — the base pair recompiled with `-D
+    /// PER_INSTANCE_MATERIAL=1`). Built UNCONDITIONALLY at boot (materials are not
+    /// RT-specific — unlike `mv`, this is NOT `#[cfg(feature = "hwrt")]`). Bound instead
+    /// of `raster_pipeline` ONLY on a frame with `any_non_default_material` (and no MV —
+    /// MV takes priority, F8 §2.3). Its own 2-binding set-0 layout
+    /// ([`Self::pm_instance_material_layout`]): instances @0 (VERTEX) + instance_materials
+    /// @1 (VERTEX).
+    raster_pipeline_pm: VulkanGraphicsPipeline,
+    /// Asset-streaming plan F8: the 2-binding set-0 layout [`Self::raster_pipeline_pm`]
+    /// declares. A SEPARATE layout from [`Self::instance_layout`] (which is
+    /// single-binding). Both bindings VERTEX stage.
+    pm_instance_material_layout: VulkanBindGroupLayout,
+    /// Asset-streaming plan F8+ (owner: material-drives-albedo-too): the per-slot
+    /// instance-material SSBO ring ([`INSTANCE_CAPACITY`]
+    /// [`PerInstanceMaterial`](boyko_render::PerInstanceMaterial)s = 32 B each,
+    /// zero-seeded). The runner uploads `scratch.material_ids` into slot
+    /// `token.slot()` ONLY on an `any_non_default_material` frame (Principle 1 — no
+    /// OFF-path upload cost). Grows in LOCKSTEP with [`Self::instance_rings`] via
+    /// [`Self::grow_shared_instance_rings`] on BOTH legs (asset-streaming plan F7-hwrt,
+    /// task#11 — the former RT hard cap is removed) — its index space is IDENTICAL to
+    /// `instance_rings`, so the two MUST share capacity at all times (a divergent
+    /// capacity would OOB the instant the instance ring grows).
+    pub(crate) pm_instance_material_rings: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// Asset-streaming plan F8: per-FIF bind groups against
+    /// [`Self::pm_instance_material_layout`]: slot `i` binds `{ instance_rings[i] @0,
+    /// pm_instance_material_rings[i] @1 }`. The recorder binds slot `s` at set 0 when the
+    /// PM pipeline is selected.
+    pm_bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// Textured-PBR T6c: the TEXTURED gbuffer producer pipeline resources, built LAZILY via
+    /// [`Self::build_textured_resources`] (called from `run_windowed` AFTER the bindless
+    /// texture-array table exists — its fallible create is deferred past `boot()`/
+    /// `finish()`, see `runner.rs`'s boot-order comment). `None` until that call lands (or
+    /// permanently, if the bindless table create failed and the runner already tore down
+    /// before reaching it); `Some` for the whole remaining process lifetime afterward.
+    tex: Option<TexturedResources>,
     /// The DEGENERATE legacy vertex buffer (6 identical vertices ⇒ zero-area ⇒
     /// no fragments): pass A's legacy draw target on empty-gather frames —
     /// mirrors the showcase's `showcase_quad_vertices` discipline.
@@ -365,19 +1036,37 @@ pub(crate) struct GpuSceneBundles {
     /// The brick clip-map baked from the EMPTY edit field — the valid
     /// bound-but-unread placeholders for vocab bindings 9..=15 (brick OFF).
     clipmap: BrickClipmap,
+    /// Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` pass's dedicated
+    /// BrickLevels UBO (Set-0 binding 11, `BRICK_LEVELS * M4_LEVEL_PARAMS_BYTES` = 144 B) — a
+    /// STANDALONE buffer, distinct from `camera_ring`'s own M4Level tail (this pass's Camera @3
+    /// stays the plain 80-byte Forward shape). Zero-seeded, single (NOT ringed — never rewritten:
+    /// `brick_enabled = brick_trilinear = brick_levels = 0` every frame this rung, an explicit
+    /// 0%-gate mirroring the deferred marcher's own first-landed M1/M2/M4 activation).
+    brick_levels_ubo: BoundBuffer,
     // ── Resolve (pass C) ─────────────────────────────────────────────────────
     resolve_pipeline: ComputePipeline,
     resolve_layout: VulkanBindGroupLayout,
+    /// Render terminator-softening: the SOFTWARE-RESOLVE-ONLY diffuse light-wrap variant
+    /// pipeline (`deferred_pbr_wrap.comp`, `-D TERMINATOR_WRAP=1`), built UNCONDITIONALLY at
+    /// boot alongside [`Self::resolve_pipeline`] (mirroring that pipeline's own always-built
+    /// discipline — the variant is device-agnostic, not RT-gated). Bound to the SAME
+    /// [`Self::resolve_layout`] as the base resolve (the variant changes only the diffuse
+    /// accumulation math, no descriptor — no separate layout is built). Selected instead of
+    /// [`Self::resolve_pipeline`] by [`Self::scene`]'s `terminator_wrap` gate, ONLY when
+    /// `LightingConfig::terminator_softening > 0`; every other frame binds the base pipeline
+    /// (the byte-identical 0%-gate — `deferred_pbr.hlsl`'s frozen-base discipline).
+    resolve_pipeline_wrap: ComputePipeline,
     /// HW-RT rung R2a-4b: the HWRT-variant deferred resolve pipeline (`deferred_pbr_hwrt.comp`)
-    /// paired with its 20-binding layout (the 19 software bindings plus binding 19
-    /// `AccelerationStructure`). Built at boot ONLY on an RT device (`ray_query_enabled`) under
+    /// paired with its 22-binding layout (the 19 software bindings plus binding 19
+    /// `AccelerationStructure`, binding 20 the soft-shadow UBO and binding 21 the raster depth
+    /// image). Built at boot ONLY on an RT device (`ray_query_enabled`) under
     /// `feature = "hwrt"`, the same capability gate as [`Self::tlas`]; `None` otherwise (the
     /// byte-identical software path). Its mesh-shadow term traces the per-FIF TLAS with `rayQuery`
     /// instead of sampling the CSM map.
     #[cfg(feature = "hwrt")]
     resolve_pipeline_hwrt: Option<(ComputePipeline, VulkanBindGroupLayout)>,
-    /// HW-RT rung 3a: the spatial-denoise VIS + DENOISED resolve pipelines + their SHARED 22-binding
-    /// layout (the 21-binding RESOLVE_INLINE-hwrt layout + `gShadowVis` STORAGE image @21). `.0` =
+    /// HW-RT rung 3a: the spatial-denoise VIS + DENOISED resolve pipelines + their SHARED 23-binding
+    /// layout (the 22-binding RESOLVE_INLINE-hwrt layout + `gShadowVis` STORAGE image @22). `.0` =
     /// the VIS pipeline (`deferred_pbr_hwrt_vis.comp`, writes `gShadowVis`), `.1` = the DENOISED
     /// pipeline (`deferred_pbr_hwrt_denoised.comp`, reads it), `.2` = the shared layout. Built at boot
     /// ONLY on an RT device (`ray_query_enabled`) under `feature = "hwrt"`, the same gate as
@@ -401,6 +1090,15 @@ pub(crate) struct GpuSceneBundles {
     /// temporal (kept `None`/`Spatial` ⇒ unbound ⇒ byte-identical).
     #[cfg(feature = "hwrt")]
     shadow_temporal_pipeline: Option<(ComputePipeline, VulkanBindGroupLayout)>,
+    /// Rung R9d: the VB split's DEDICATED shadow-vis gather compute pipeline (`vb_shadow_vis.comp`),
+    /// plus its 7-binding layout { `thin_normal` @0, `gViewT` @1 STORAGE images, `LightTable` @2
+    /// STORAGE buffer, the camera UBO @3, the TLAS `AccelerationStructure` @4, the
+    /// `ResolvedRayShadow` UBO @5 (reuses [`Self::ray_shadow_ubo`]), `gShadowVis` @6 (W) }. Built
+    /// at boot under the SAME `ray_query_enabled` gate as [`Self::shadow_denoise_pipelines`]'s own
+    /// VIS pipeline; `None` otherwise. Bound instead of the deferred VIS pipeline only when
+    /// `GBufferScene::path_vb_hwrt_shadow()`.
+    #[cfg(feature = "hwrt")]
+    vb_shadow_vis_pipeline: Option<(ComputePipeline, VulkanBindGroupLayout)>,
     /// HW-RT rung 1b: the HWRT soft-shadow-params UBO RING (one host-coherent slot per in-flight
     /// frame, [`RAY_SHADOW_UBO_BYTES`] each, zero-seeded). Slot `i` is bound into slot `i`'s HWRT
     /// resolve set at binding 20 (the tunable cone/tmax/tmin/bias) — each in-flight frame reads its
@@ -412,7 +1110,6 @@ pub(crate) struct GpuSceneBundles {
     /// set has no binding 20).
     #[cfg(feature = "hwrt")]
     ray_shadow_ubo: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
-    material_table: BoundBuffer,
     /// The device light table (resolve binding 6), [`LIGHT_TABLE_CAPACITY`] bytes.
     /// The recorder copies `light_upload_bytes` from the fenced slot's staging into
     /// it on a dirty frame (the rung L0-r0 async re-upload).
@@ -421,17 +1118,562 @@ pub(crate) struct GpuSceneBundles {
     /// comment for the race pin). The runner writes slot `token.slot()` through
     /// `boyko_render::upload_light_table` iff its uploaded generation lags.
     pub(crate) light_staging: [BoundBuffer; FRAMES_IN_FLIGHT],
-    light_dir: [f32; 3],
     // ── Present (pass D) ─────────────────────────────────────────────────────
     present_pipeline: VulkanGraphicsPipeline,
     present_layout: VulkanBindGroupLayout,
     present_sampler: VulkanSampler,
     depth_sampler: VulkanSampler,
+    /// Anti-aliasing Stage 1: the FXAA fullscreen graphics pipeline
+    /// (`fullscreen_sample.vs` + `fxaa.fs`), built unconditionally at boot (like
+    /// [`Self::present_pipeline`]) so the mode can flip at runtime. `color_formats[0]`
+    /// == `R8G8B8A8_UNORM` (`aa_out`'s format), NOT the swapchain format; reuses
+    /// [`Self::present_layout`].
+    fxaa_pipeline: VulkanGraphicsPipeline,
+    /// Anti-aliasing Stage 1: the dedicated LINEAR/ClampToEdge sampler FXAA's sub-texel
+    /// tap needs — DISTINCT from the NEAREST [`Self::present_sampler`].
+    fxaa_sampler: VulkanSampler,
+    /// Anti-aliasing Stage 2: pass 1 (edge detection) fullscreen graphics pipeline
+    /// (`fullscreen_sample.vs` + `smaa_edge.fs`), built unconditionally at boot (like
+    /// [`Self::fxaa_pipeline`]). `color_formats[0]` == `R8G8_UNORM` (`smaa_edges`' format);
+    /// reuses [`Self::present_layout`] (1 CIS: `lit`).
+    smaa_edge_pipeline: VulkanGraphicsPipeline,
+    /// Anti-aliasing Stage 2: pass 2 (blending-weight calculation) fullscreen graphics
+    /// pipeline (`smaa_weight.fs`). `color_formats[0]` == `R8G8B8A8_UNORM` (`smaa_weights`'
+    /// format); layout = [`Self::smaa_weight_layout`] (3 CIS).
+    smaa_weight_pipeline: VulkanGraphicsPipeline,
+    /// Anti-aliasing Stage 2: pass 3 (neighborhood blending) fullscreen graphics pipeline
+    /// (`smaa_blend.fs`). `color_formats[0]` == `R8G8B8A8_UNORM` (`aa_out`'s format — the
+    /// same target FXAA's single pass writes); layout = [`Self::smaa_blend_layout`] (2 CIS).
+    smaa_blend_pipeline: VulkanGraphicsPipeline,
+    /// Anti-aliasing Stage 2: the 3-CIS bind-group LAYOUT `{ edges @0, areaTex @1, searchTex
+    /// @2 }` [`Self::smaa_weight_pipeline`] declares at set 0.
+    smaa_weight_layout: VulkanBindGroupLayout,
+    /// Anti-aliasing Stage 2: the 2-CIS bind-group LAYOUT `{ lit @0, weights @1 }`
+    /// [`Self::smaa_blend_pipeline`] declares at set 0.
+    smaa_blend_layout: VulkanBindGroupLayout,
+    /// Anti-aliasing Stage 2: the dedicated LINEAR/ClampToEdge sampler EVERY SMAA tap uses
+    /// (`lit`, `edges`, `weights`, `areaTex`, `searchTex`) — a SEPARATE boot object from
+    /// [`Self::fxaa_sampler`] (isolation; the FXAA path stays untouched).
+    smaa_sampler: VulkanSampler,
+    /// Anti-aliasing Stage 2: the boot-resident `AreaTex` LUT (160×560, `R8G8_UNORM`),
+    /// uploaded once via `boyko_render::upload_texture_2d_raw` and never touched again.
+    smaa_area_tex: VulkanTexture,
+    /// Anti-aliasing Stage 2: the boot-resident `SearchTex` LUT (64×16, `R8_UNORM`),
+    /// uploaded once via `boyko_render::upload_texture_2d_raw` and never touched again.
+    smaa_search_tex: VulkanTexture,
+    /// Anti-aliasing Stage 3: the SSAA downsample fullscreen graphics pipeline
+    /// (`fullscreen_sample.vs` + `ssaa_downsample.fs`), built unconditionally at boot (like
+    /// [`Self::fxaa_pipeline`]) so records nothing until `AaMode::Ssaa` is host-armed.
+    /// `color_formats[0]` == `R8G8B8A8_UNORM` (`aa_out`'s format), NO push constants;
+    /// reuses [`Self::present_layout`] — the SAME 1-CIS shape [`Self::fxaa_pipeline`] uses.
+    /// Reuses [`Self::present_sampler`] (NEAREST — the shader's `.Load` ignores it) as the
+    /// SSAA sampler; no dedicated sampler field (unlike `fxaa_sampler`/`smaa_sampler`).
+    ssaa_pipeline: VulkanGraphicsPipeline,
+    /// Anti-aliasing Stage 4 (TAA W5): the temporal-resolve compute pipeline
+    /// (`taa_resolve.comp`), built unconditionally at boot (like [`Self::ssaa_pipeline`]) —
+    /// NOT hwrt-gated. Bound + dispatched by `record_taa` when `scene.taa.is_some()`.
+    taa_resolve_pipeline: ComputePipeline,
+    /// Anti-aliasing Stage 4 (TAA W5): the DEDICATED 8-binding bind-group LAYOUT
+    /// [`Self::taa_resolve_pipeline`] declares at set 0 — { `gLit` CIS @0, `gViewT` @1,
+    /// `gHistIn` @2, `gHistOut` @3, `gAaOut` @4 STORAGE images, the `ResolvedTaa` UBO @5, the
+    /// camera UBO @6, the `MotionCam` UBO @7 }. [`GBufferTargets`] writes a per-FIF
+    /// `taa_resolve_set` against it once per extent.
+    taa_resolve_layout: VulkanBindGroupLayout,
+    /// Anti-aliasing Stage 4 (TAA W5): the dedicated LINEAR/ClampToEdge sampler for the
+    /// resolve's `gLit` combined-image-sampler tap — DISTINCT boot object from
+    /// [`Self::fxaa_sampler`]/[`Self::smaa_sampler`].
+    taa_linear_sampler: VulkanSampler,
+    /// TAA rung T3: the post-resolve RCAS sharpen compute pipeline (`rcas.comp`), built
+    /// UNCONDITIONALLY at boot (like [`Self::taa_resolve_pipeline`]) so the mode can flip at
+    /// runtime. Bound + dispatched by `record_rcas` when `scene.rcas.is_some()`.
+    rcas_pipeline: ComputePipeline,
+    /// TAA rung T3: the DEDICATED 2-binding bind-group LAYOUT [`Self::rcas_pipeline`] declares
+    /// at set 0 — { `gRcasIn` STORAGE @0, `gAaOut` STORAGE @1 }. [`GBufferTargets`] writes a
+    /// per-FIF `rcas_set` against it once per extent.
+    rcas_layout: VulkanBindGroupLayout,
+    // ── Render P7-Q2: SSAO (dormant → live) ───────────────────────────────────
+    /// Render P7-Q2: the [`SSAO_QUALITY_COUNT`] pre-compiled SSAO quality-variant compute
+    /// pipelines (`sdf_ssao_{low,medium,high}.comp`), built unconditionally at boot (like
+    /// [`Self::fxaa_pipeline`]/[`Self::ssaa_pipeline`]/[`Self::taa_resolve_pipeline`]
+    /// above) so the owner-resolved quality
+    /// ([`boyko_render::ResolvedSsao::variant`]) can select a pipeline with no boot-time
+    /// rebuild. All three share [`Self::ssao_layout`] (the SSAO shader interface is
+    /// identical across variants — only the baked tap-budget constants differ, Mechanism
+    /// C) — indexed by `SSAO_QUALITY_LOW`/`_MEDIUM`/`_HIGH` (0/1/2). Boot-time creation
+    /// records no command / samples no pixel — byte-identical to the golden regardless of
+    /// this array's existence (`GBufferScene::ssao` stays `None` unless a non-`Off`
+    /// `SsaoQuality` is host-resolved). Mirrors the test harness's
+    /// (`window_present_gbuffer.rs`) SSAO boot bundle, widened to all 3 variants.
+    ssao_pipelines: [ComputePipeline; SSAO_QUALITY_COUNT],
+    /// Rung R9b: the `-D VB_THIN=1` SSAO gather pipelines (the VB split's gather — reads
+    /// `thin_normal`+`gViewT` instead of `gNormal`/`gMaterial`), indexed like
+    /// [`Self::ssao_pipelines`]. Built UNCONDITIONALLY at boot (same rationale: negligible
+    /// object cost; `GBufferScene::path_vb_ssao` gates dispatch).
+    ssao_vb_pipelines: [ComputePipeline; SSAO_QUALITY_COUNT],
+    /// Rung R9b: the VB gather's DEDICATED dense 4-binding LAYOUT { `thin_normal` @0, `gViewT`
+    /// @1 STORAGE READ, `ssao` @2 STORAGE WRITE, the camera UBO @3 } — `sdf_ssao`'s `VB_THIN`
+    /// table. [`GBufferTargets`] writes a `vb_ssao_set` against it when the split arms.
+    vb_ssao_layout: VulkanBindGroupLayout,
+    /// Rung R9b: `vb_geo`'s Set-1 aux LAYOUT { `thin_normal` STORAGE @0, `motion` STORAGE @1
+    /// (R9d — the software `.spv` never references it, the R2 contract), `MotionCam` UBO @2
+    /// (R9d, ditto) }. Built at boot; the `vb_geo` pipeline itself is deferred-built (needs the
+    /// geometry Set-2 layout).
+    vb_geo_aux_layout: VulkanBindGroupLayout,
+    /// Rung R9b: `vb_shade_split`'s Set-1 LAYOUT (9 bindings; 8 on the software leg): @0-3 =
+    /// `forward_layout1`'s shadow table kinds verbatim, @4 `gSsao` STORAGE, @5/@6 the DDGI
+    /// COMBINED image+sampler pair, @7 `ResolvedDdgi` UBO, @8 cfg(hwrt) `gShadowVis` STORAGE.
+    /// A distinct COMPUTE-only object, not `forward_layout1`.
+    vb_split_layout1: VulkanBindGroupLayout,
+    /// Rung R9b: the split pair pipelines — deferred-built by [`Self::build_vb_split_pipelines`]
+    /// (the SAME geometry-Set-2 dependency as [`Self::build_vb_resolve_pipeline`]).
+    vb_geo_pipeline: Option<ComputePipeline>,
+    /// Rung R9b: the split's lit producer (see [`Self::vb_geo_pipeline`]).
+    vb_shade_split_pipeline: Option<ComputePipeline>,
+    /// Rung R9b: the `-D TEXTURED=1` sibling (also needs the bindless Set-3 —
+    /// `build_vb_shade_textured_pipeline`'s own two-dependency reason).
+    vb_shade_split_tex_pipeline: Option<ComputePipeline>,
+    /// Rung R9d: the `-D MOTION=1` sibling of [`Self::vb_geo_pipeline`] (`vb_geo_mv.comp.hlsl`) —
+    /// deferred-built by [`Self::build_vb_split_pipelines`] under the SAME geometry-Set-2
+    /// dependency, gated ADDITIONALLY on `ctx.ray_query_enabled()` (an RT-only variant). `None`
+    /// on a non-RT device.
+    #[cfg(feature = "hwrt")]
+    vb_geo_mv_pipeline: Option<ComputePipeline>,
+    /// Rung R9d: the `-D HWRT=1` sibling of [`Self::vb_shade_split_pipeline`]. Same deferred-build
+    /// and `ray_query_enabled` gate as [`Self::vb_geo_mv_pipeline`].
+    #[cfg(feature = "hwrt")]
+    vb_shade_split_hwrt_pipeline: Option<ComputePipeline>,
+    /// Rung R9d: the `-D TEXTURED=1 -D HWRT=1` sibling of [`Self::vb_shade_split_tex_pipeline`].
+    /// Same deferred-build and `ray_query_enabled` gate as [`Self::vb_geo_mv_pipeline`], PLUS the
+    /// bindless Set-3 dependency (built only when `bindless` is `Some`).
+    #[cfg(feature = "hwrt")]
+    vb_shade_split_tex_hwrt_pipeline: Option<ComputePipeline>,
+    /// Render P7-Q2: the DEDICATED 5-binding SSAO bind-group LAYOUT { `gNormal` @0,
+    /// `gMaterial` @1, `gViewT` @2 STORAGE images READ, the `ssao` out STORAGE image @3
+    /// WRITE, the camera UBO @4 } — matching `sdf_ssao.comp`'s set 0, shared by every
+    /// entry of [`Self::ssao_pipelines`]. [`GBufferTargets`] writes an `ssao_set` against
+    /// it once per extent when [`GBufferScene::ssao`] is armed.
+    ssao_layout: VulkanBindGroupLayout,
+    /// Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully off): the
+    /// `viewt_from_depth` compute pipeline (`viewt_from_depth.comp.hlsl` /
+    /// [`viewt_from_depth_spirv`]), the `gViewT` producer that stands in for the (undispatched)
+    /// marcher on a mesh-only frame. Built UNCONDITIONALLY at boot (like
+    /// [`Self::ssao_pipelines`] above — the pipeline itself needs no device precondition to
+    /// CREATE; [`GBufferScene::path_has_viewt_from_depth`] gates whether it is actually
+    /// dispatched, so a `Both`/`Sdf`-resolved boot pays only this one negligible pipeline
+    /// object, never a descriptor set/dispatch/VRAM cost).
+    viewt_from_depth_pipeline: ComputePipeline,
+    /// The DEDICATED 2-binding `viewt_from_depth` bind-group LAYOUT { SAMPLED depth @0, STORAGE
+    /// `gViewT` @1 } — matching `viewt_from_depth.comp`'s set 0. [`GBufferTargets`] writes a
+    /// `viewt_from_depth_set` against it once per extent when
+    /// [`GBufferScene::path_has_viewt_from_depth`] holds.
+    viewt_from_depth_layout: VulkanBindGroupLayout,
+    /// TAA-under-VB: the `viewt_from_depth_rz` compute pipeline (`viewt_from_depth_rz.comp.hlsl`
+    /// / [`viewt_from_depth_rz_spirv`]) — the REVERSE-Z sibling of [`Self::viewt_from_depth_pipeline`],
+    /// the `gViewT` producer for `VisibilityBuffer × Mesh`'s TAA seam (see
+    /// [`ViewtFromVbDepthActivation`]'s doc). Built UNCONDITIONALLY at boot — the SAME rationale
+    /// as [`Self::viewt_from_depth_pipeline`] (no device precondition to CREATE;
+    /// [`GBufferScene::viewt_from_vb_depth`] gates whether it is actually dispatched, so a
+    /// non-VB or TAA-off boot pays only this one negligible pipeline object).
+    viewt_from_vb_depth_pipeline: ComputePipeline,
+    /// The DEDICATED 3-binding `viewt_from_depth_rz` bind-group LAYOUT { SAMPLED depth @0,
+    /// STORAGE `gViewT` @1, UNIFORM camera @2 } — matching `viewt_from_depth_rz.comp`'s set 0
+    /// (one more binding than [`Self::viewt_from_depth_layout`]: the reverse-Z ray
+    /// reparameterization needs the camera basis). [`GBufferTargets`] writes a
+    /// `viewt_from_vb_depth_set` against it once per extent when
+    /// [`GBufferScene::viewt_from_vb_depth`] holds.
+    viewt_from_vb_depth_layout: VulkanBindGroupLayout,
+    /// The SSAO edge-avoiding à-trous denoise chain: the `level == 0` pipeline variant
+    /// (`ssao_atrous_read8.comp` / [`ssao_atrous_read8_spirv`]) — `gAoIn` pinned `r8` (reads the
+    /// frozen `gSsao` gather endpoint), `gAoOut` pinned `r16` (writes ring 0). Built UNCONDITIONALLY
+    /// at boot (like [`Self::ssao_pipelines`] — the pipeline itself needs no device precondition to
+    /// CREATE, only the interior ring IMAGE needs `R16_UNORM` storage, checked separately by
+    /// [`GBufferTargets`]'s degrade). Shares [`Self::ssao_atrous_layout`] with the other two
+    /// variants below.
+    ssao_atrous_read8_pipeline: ComputePipeline,
+    /// The SSAO à-trous chain's INTERIOR pipeline variant (`ssao_atrous.comp` /
+    /// [`ssao_atrous_spirv`]): both `gAoIn`/`gAoOut` pinned `r16` (the two ping-pong rings). Built
+    /// in lock-step with [`Self::ssao_atrous_read8_pipeline`] (same discipline, same doc).
+    ssao_atrous_interior_pipeline: ComputePipeline,
+    /// The SSAO à-trous chain's LAST-level pipeline variant (`ssao_atrous_write8.comp` /
+    /// [`ssao_atrous_write8_spirv`]): `gAoIn` pinned `r16` (reads a ring), `gAoOut` pinned `r8`
+    /// (writes BACK into the frozen `gSsao` endpoint the resolve reads — the C1 fix). Built in
+    /// lock-step with [`Self::ssao_atrous_read8_pipeline`] (same discipline, same doc).
+    ssao_atrous_write8_pipeline: ComputePipeline,
+    /// The SSAO à-trous chain's DEDICATED 4-binding bind-group LAYOUT { `gAoIn` STORAGE image @0
+    /// (R), `gAoOut` STORAGE image @1 (W), `gViewT` STORAGE image @2 (R), the camera UNIFORM
+    /// buffer @3 } — IDENTICAL across all three pipeline variants above (only the bound VIEW + the
+    /// `[[vk::image_format]]` pin differ). Shared with `sdf_ssao`'s design ONE step narrower (no
+    /// `gMaterial`, no `gNormal` — the à-trous gate is depth-plane-fit only). [`GBufferTargets`]
+    /// writes FIVE role-keyed sets against it once per extent
+    /// ([`boyko_rhi_vulkan::present::ssao_atrous_step`]'s role→set mapping) when the device
+    /// supports `R16_UNORM` STORAGE.
+    ssao_atrous_layout: VulkanBindGroupLayout,
     // ── CSM / atlas (bound-but-unread trios; depth passes OFF in R3) ─────────
     csm: CsmResources,
+    // ── Multi-paradigm render-path plan, rung R4b-b (Set 0 UNIFIED at rung R5 code-review
+    // fix): the Forward FAMILY's mesh raster pipelines + descriptor-set layouts (see `boot`'s
+    // doc for why these are built UNCONDITIONALLY, not gated on `ResolvedRenderPath`, and for
+    // the layout-compatibility bug the unification fixed). ──────────────────
+    /// The plain-`Forward` mesh raster pipeline (`forward_opaque.{vs,fs}.hlsl`, base FS,
+    /// `VK_COMPARE_OP_GREATER`, depth-write ON) — a plain 2-set `[Set0, Set1]` layout (no
+    /// placeholder — see `boot`'s doc for the boot-panic fix that renumbered the shadow set from
+    /// Set 2 to Set 1). Set 0 = [`Self::forward_layout0`] (the UNIFIED 7-binding layout).
+    forward_pipeline: VulkanGraphicsPipeline,
+    /// Code-review follow-up (rung R4b-b): the Forward-family sky background pipeline
+    /// (`forward_sky.{vs,fs}.hlsl`) — reuses [`Self::forward_layout0`]; declares the forward
+    /// scope's depth format with `VK_COMPARE_OP_ALWAYS` and depth write OFF (`boot`'s doc,
+    /// VUID-08914). Shared verbatim by `Forward` and `ForwardPlus`.
+    forward_sky_pipeline: VulkanGraphicsPipeline,
+    /// The UNIFIED Forward-family Set-0 (core) bind-group layout — 7 bindings: instances @0,
+    /// instance_materials @1, Camera @2, LightBuf @3, Materials @4, `ClusterGrid` @5,
+    /// `LightIndexList` @6 (`GpuSceneBundles::boot`'s doc). Rung R5 code-review fix: shared by
+    /// EVERY Forward-family pipeline (`forward_pipeline`/`forward_sky_pipeline`/
+    /// `forward_prepass_pipeline`/`forward_plus_pipeline`) and the per-extent
+    /// `ForwardTargets::set0[fi]` descriptor set they are all bound alongside — a SINGLE layout
+    /// object is REQUIRED for Vulkan pipeline/descriptor-set compatibility at draw time (two
+    /// structurally-identical but DISTINCT `VkDescriptorSetLayout` handles are NOT
+    /// interchangeable — an earlier revision's bug).
+    forward_layout0: VulkanBindGroupLayout,
+    /// The Forward-family Set-1 (shadow) bind-group layout — 4 bindings (CSM + punctual atlas),
+    /// each `FRAGMENT | COMPUTE`. Shared verbatim by `Forward` and `ForwardPlus` AND, at Set 1, by
+    /// the `sdf_forward_march` and VB resolve/shade compute pipelines — hence the COMPUTE bit
+    /// (VUID-VkComputePipelineCreateInfo-layout-07988).
+    forward_layout1: VulkanBindGroupLayout,
+    // ── Multi-paradigm render-path plan, rung R5: ForwardPlus's depth prepass + froxel
+    // opaque pipeline variant (see `boot`'s doc — same "built UNCONDITIONALLY, cheap"
+    // precedent as the Forward v1 trio above; BOTH built against [`Self::forward_layout0`],
+    // the unified layout). ─────────────────
+    /// The `depth_prepass` pipeline (`depth_prepass.{vs,fs}.hlsl`) — depth-only,
+    /// `VK_COMPARE_OP_GREATER`, depth-write ON; Set 0 = [`Self::forward_layout0`] as its only
+    /// set (the prepass VS references only the `instances` binding, a subset of that layout).
+    /// Shared verbatim by `Forward` and `ForwardPlus` (only `ForwardPlus` ever records it).
+    forward_prepass_pipeline: VulkanGraphicsPipeline,
+    /// The `forward_opaque` FROXEL pipeline variant (`forward_opaque_froxel.fs.spv` +
+    /// `forward_opaque.vs.spv`, the SAME VS) — `VK_COMPARE_OP_EQUAL`, depth-write OFF; Set 0 =
+    /// [`Self::forward_layout0`] (the SAME unified layout `forward_pipeline` uses), Set 1 =
+    /// [`Self::forward_layout1`] (UNCHANGED, shared verbatim).
+    forward_plus_pipeline: VulkanGraphicsPipeline,
+    /// Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` `HAS_MESH`
+    /// compute pipeline (`sdf_forward_march.comp.hlsl` compiled with `-D HAS_MESH=1`). Built
+    /// UNCONDITIONALLY at boot (the Forward v1 trio's own "cheap, no per-frame cost either way"
+    /// precedent — `ResolvedRenderPath` does not reach `boot()`'s call site); only a
+    /// Forward-family-resolved boot with the SDF leg present ever RECORDS it. Built against
+    /// [`Self::sdf_forward_march_layout`] (Set 0) + `forward_layout1` (Set 1, the shadow set —
+    /// REUSED VERBATIM, no separate layout).
+    sdf_forward_march_pipeline: ComputePipeline,
+    /// The `sdf_forward_march` mesh-less compute pipeline (compiled with no `-D`). Built
+    /// UNCONDITIONALLY alongside [`Self::sdf_forward_march_pipeline`], against the SAME
+    /// [`Self::sdf_forward_march_layout`] (the code-review-fixed "one layout object per pipeline
+    /// family" discipline `forward_layout0` already establishes).
+    sdf_forward_march_sdfonly_pipeline: ComputePipeline,
+    /// TAA-under-VB: the `sdf_forward_march` `HAS_MESH + VIEWT` compute pipeline (`-D HAS_MESH=1
+    /// -D VIEWT=1`) — [`Self::sdf_forward_march_pipeline`] plus the `gViewT` binding-13 write.
+    /// Selected at record when the scene's `path_sdf_forward_writes_viewt()` predicate holds.
+    sdf_forward_march_viewt_pipeline: ComputePipeline,
+    /// TAA-under-VB: the `sdf_forward_march` mesh-less `VIEWT` compute pipeline (`-D VIEWT=1`).
+    sdf_forward_march_sdfonly_viewt_pipeline: ComputePipeline,
+    /// The `sdf_forward_march` pass's dedicated 14-binding Set-0 bind-group LAYOUT — see
+    /// `boyko_rhi_vulkan::present::scene_types::GBufferScene::sdf_forward_march_layout`'s doc for
+    /// the full binding table this fn's `boot` construction site mirrors.
+    sdf_forward_march_layout: VulkanBindGroupLayout,
     /// `ceil(composite pixels / LOCAL_SIZE_X)` — the marcher + resolve dispatch
     /// width, boot-fixed to the composite extent (plan D7).
     dispatch_group_count_x: u32,
+    // ── Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 FUSED path's own
+    // pipelines + Set-0 layout + instance ring (see `boot`'s doc — built UNCONDITIONALLY, the
+    // SAME "cheap, no per-frame cost either way" precedent as the Forward v1 trio). ──────
+    /// The VB-only Set-0 (core + images) bind-group layout — 9 bindings, `{0..7, 11}`:
+    /// `gVbInstances` @0, `instance_materials` @1, `Camera` @2, `LightBuf` @3, `Materials` @4,
+    /// `gVbId` @5 (SAMPLED), `gLit` @6 (STORAGE), `gClassify` @7 (STORAGE_BUFFER, VB-P2 rung P2a),
+    /// `gVbVisibleInstance` @11 (STORAGE_BUFFER, VERTEX — VG rung R2d-2). Camera/LightBuf at
+    /// bindings 2/3 (matching `forward_layout0`'s own
+    /// numbering) so [`Self::vb_sky_pipeline`] can reuse `forward_sky.{vs,fs}.hlsl`'s compiled
+    /// SPIR-V verbatim against a NEW pipeline object built for THIS layout.
+    vb_layout0: VulkanBindGroupLayout,
+    /// The `vb_raster` mesh id-raster pipeline (`vb_raster.{vs,fs}.hlsl`) — a plain 1-set
+    /// pipeline (Set 0 = [`Self::vb_layout0`], its VS reads only `gVbInstances`/the push, a
+    /// bound-but-unread subset).
+    vb_raster_pipeline: VulkanGraphicsPipeline,
+    /// The VB v1 sky background pipeline — REUSES `forward_sky.{vs,fs}.hlsl`'s compiled SPIR-V
+    /// verbatim (`GBufferScene::vb_sky_pipeline`'s doc), built as a NEW pipeline object against
+    /// [`Self::vb_layout0`].
+    vb_sky_pipeline: VulkanGraphicsPipeline,
+    /// The `vb_resolve` FUSED compute pipeline (`vb_resolve.comp.hlsl`) — a 3-set pipeline: Set 0
+    /// = [`Self::vb_layout0`], Set 1 = [`Self::forward_layout1`] (the shadow set, REUSED
+    /// verbatim), Set 2 = the Decision-0 geometry table's own Set. Built LAZILY
+    /// ([`Self::build_vb_resolve_pipeline`], mirroring [`Self::tex`]'s deferred-build shape) —
+    /// Set 2's layout does not exist at [`Self::boot`]'s call site (the live `MeshGeometryTable`
+    /// is a World `NonSendResource`, `boyko_render::mesh_geometry_table::MeshGeometryTableSlot`,
+    /// constructed by `boyko_app::runner` only on a `VisibilityBuffer`-resolved boot). `None` on
+    /// every OTHER boot (the 0%-gate).
+    vb_resolve_pipeline: Option<ComputePipeline>,
+    /// VB-SV0 DP1 (docs/VB-SV0-SDF-SHADOW-PLAN.md Rev 10, dark infra — unwired until DP2/DP3):
+    /// the dedicated `sdf_mesh_shadow.comp` prepass's own Set-0 layout — `gVbInstances`@0,
+    /// Camera@2, `LightBuf`@3, `gVbId`@5 (sampled), `gSdfTerm`@6 (rg8 storage image), the SDF
+    /// edit-list `Buf`@10. Its own layout and NOT `vb_layout0`: the pass neither reads the
+    /// material tables (1/4) nor writes `lit` (6 means a DIFFERENT image here), and sharing a
+    /// layout across two binding vocabularies is how a wrong-slot write survives review.
+    /// Built at boot (device-only inputs), unconditionally — the same zero-cost-when-unused
+    /// argument as `vb_layout0` itself.
+    sdf_mesh_shadow_layout0: VulkanBindGroupLayout,
+    /// VB-SV0 DP1: the dedicated prepass pipeline — a 3-set shape via
+    /// [`VulkanContext::create_compute_pipeline_vb`] (Set 1 = the forward shadow layout,
+    /// DECLARED for layout compatibility and never bound: the shader statically uses only
+    /// Sets 0 and 2, and Vulkan requires binding only what a pipeline statically uses). Built
+    /// LAZILY inside [`Self::build_vb_resolve_pipeline`] — the same Set-2 existence argument —
+    /// and `None` on every non-VB boot. NOTHING records it at DP1: recording arrives with DP3's
+    /// arming, and the descriptor sets with DP2's target.
+    sdf_mesh_shadow_pipeline: Option<ComputePipeline>,
+    // ── VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a (dark infra,
+    // unwired): the four classify/shade pipelines. Built LAZILY by
+    // [`Self::build_vb_classify_pipelines`], the SAME deferred-build shape as
+    // [`Self::vb_resolve_pipeline`] (`vb_shade` needs the geometry table's Set-2 layout, which
+    // does not exist at [`Self::boot`]'s call site). Nothing declares/records against these
+    // this rung — `record_vb`/`declare_vb_graph` are untouched; the fused `vb_resolve` still
+    // shades every VB frame. `None` on every boot that never calls that fn. ──────────────────
+    /// The `count` classify compute pipeline (`vb_classify_count.comp.hlsl`) — a 1-set
+    /// pipeline built against [`Self::vb_layout0`] via the GENERIC
+    /// `RhiDevice::create_compute_pipeline` (plan P2-1 — no dedicated `_vb1` helper).
+    vb_classify_count_pipeline: Option<ComputePipeline>,
+    /// The `scan` classify compute pipeline (`vb_classify_scan.comp.hlsl`) — a 1-set pipeline,
+    /// built the SAME way as [`Self::vb_classify_count_pipeline`].
+    vb_classify_scan_pipeline: Option<ComputePipeline>,
+    /// The `scatter` classify compute pipeline (`vb_classify_scatter.comp.hlsl`) — a 1-set
+    /// pipeline, built the SAME way as [`Self::vb_classify_count_pipeline`].
+    vb_classify_scatter_pipeline: Option<ComputePipeline>,
+    /// The `vb_shade` material-classified shading compute pipeline (`vb_shade.comp.hlsl`) — a
+    /// 3-set pipeline built via [`VulkanContext::create_compute_pipeline_vb`], mirroring
+    /// [`Self::vb_resolve_pipeline`]'s own pipeline shape (Set 0 = `vb_layout0`, Set 1 =
+    /// `forward_layout1`, Set 2 = the geometry table's own Set).
+    vb_shade_pipeline: Option<ComputePipeline>,
+    /// Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3): the `vb_shade` TEXTURED-variant
+    /// shading compute pipeline (`vb_shade.comp.hlsl`, `-D TEXTURED=1`, `vb_shade_tex.comp.spv`)
+    /// — a 4-set pipeline built via [`VulkanContext::create_compute_pipeline_vb_textured`]
+    /// (Set 0 = `vb_layout0`, Set 1 = `forward_layout1`, Set 2 = the geometry table's own Set,
+    /// Set 3 = the shared bindless texture-array table's Set — REUSED verbatim, R5). Built
+    /// LAZILY by [`Self::build_vb_shade_textured_pipeline`], the SAME deferred-build shape as
+    /// [`Self::vb_shade_pipeline`] widened by ONE more dependency (the bindless table's Set-3
+    /// layout, which ALSO does not exist at [`Self::boot`]'s call site). `None` until that fn
+    /// runs (a `VisibilityBuffer`-resolved boot with BOTH the geometry table AND the bindless
+    /// table armed).
+    vb_shade_tex_pipeline: Option<ComputePipeline>,
+    /// The per-slot VB instance-model SSBO ring ([`INSTANCE_CAPACITY`] ×
+    /// [`boyko_render::instance_model::VB_INSTANCE_ROW_BYTES`] (64 B) each, zero-seeded) — a
+    /// DEDICATED ring, distinct from [`Self::instance_rings`] (`InstanceModelCol`, 48 B).
+    /// Rung R8 v1 scope cut: FIXED at [`INSTANCE_CAPACITY`], no growth-past-cap support yet
+    /// (mirrors the pre-F7 state of `instance_rings` itself — the golden scene's instance count
+    /// is far below this cap). Uploaded by `boyko_render::upload::upload_vb_instance_rows` from
+    /// `MeshRenderScratch::vb_ring` (`boyko_app::runner`, gated on a `VisibilityBuffer`-resolved
+    /// boot).
+    ///
+    /// Code review P2-2 (documented deviation, not fixed this rung): built UNCONDITIONALLY in
+    /// [`Self::boot`] — the SAME "cheap, no per-frame cost either way" precedent
+    /// `vb_layout0`/`vb_raster_pipeline`/`vb_sky_pipeline` follow — rather than `Option`-gated
+    /// on `ResolvedRenderPath.path == VisibilityBuffer` the way [`Self::vb_resolve_pipeline`]
+    /// (which genuinely CANNOT exist before the geometry table does) is. Unlike those three
+    /// pipeline objects (a few hundred bytes of driver-side pipeline state each), this ring is
+    /// `INSTANCE_CAPACITY * 64` bytes **per in-flight frame** of real HOST-VISIBLE device memory
+    /// — a measurable, not merely nominal, cost paid on every non-VB boot (Deferred included),
+    /// violating the plan's "zero-cost leg/path toggle" invariant more concretely than the
+    /// pipeline objects do. Gating this allocation behind `ResolvedRenderPath.path ==
+    /// VisibilityBuffer` (an `Option<[BoundBuffer; FRAMES_IN_FLIGHT]>`, mirroring
+    /// `vb_resolve_pipeline`'s own `Option` shape) is a follow-up, not done this rung.
+    pub(crate) vb_instance_rings: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// Virtual-geometry rung R2a': the per-FIF `VkDrawIndexedIndirectCommand` records the VB
+    /// id-raster's indirect draws fetch. DEVICE-LOCAL on purpose -- a host-visible buffer written
+    /// before `vkQueueSubmit` needs no barrier at all, so it would exercise none of the indirect
+    /// plumbing this rung exists to de-risk. Filled each frame by an inline `vkCmdUpdateBuffer`
+    /// (TRANSFER), read by `vkCmdDrawIndexedIndirect` (DRAW_INDIRECT), with the dependency between
+    /// them DERIVED by the framegraph rather than hand-written.
+    ///
+    /// Per-FIF and therefore FRAME-PRIVATE, so the graph declares it undefined-seeded exactly like
+    /// `vb_instance_ring` -- a sibling in-flight frame touches a different slot and there is no
+    /// cross-frame WAR to seed against.
+    pub(crate) vb_indirect: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG R3 piece 2 step P2-3: the per-FIF LATE `VkDrawIndexedIndirectCommand` records the
+    /// occlusion split's SECOND raster scope will fetch — [`Self::vb_indirect`]'s dedicated twin,
+    /// same size, same usage, same DEVICE_LOCAL location, same per-FIF frame-private shape.
+    ///
+    /// Allocated UNCONDITIONALLY beside `vb_indirect` (the [`Self::vb_visible_instance`] rule),
+    /// so `GpuSceneBundles::scene` wires it as an unconditional `Some(...)` and every reader can
+    /// `.expect()` it under the split predicate rather than carry another `Option` arm.
+    ///
+    /// Step P2-5 landed its `vb_indirect_late_upload` filling pass and the late scope that fetches
+    /// from it TOGETHER, in one commit, because a declared indirect READ with no declared WRITE
+    /// derives an execution-only `(TOP_OF_PIPE, 0)` edge — a missing barrier, not a wasted one,
+    /// over freshly allocated device memory. The fill SEEDS `instanceCount = 0` into every record
+    /// and VG R3 piece 3 step P3-6 made the late cull that word's producer, so the seed is now the
+    /// floor (a frame whose late cull did not run draws nothing) rather than the value.
+    pub(crate) vb_indirect_late: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG rung R2c0: the per-FIF `VbBatchDesc` array the batch cull reads (one 32-byte descriptor
+    /// per `DrawBatch`), transfer-filled each frame beside the indirect records.
+    pub(crate) vb_batch_desc: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG rung R2c0: the per-FIF compacted visible-batch list. Written and UNREAD — see
+    /// `GBufferScene::vb_cull_visible`'s doc for why it exists before a consumer does.
+    pub(crate) vb_cull_visible: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG rung R2c0: the per-FIF visible-batch counter (one live `u32` at element 0).
+    pub(crate) vb_cull_count: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// Virtual-geometry ladder, rung R2d-2: the per-FIF per-INSTANCE survivor list
+    /// ([`INSTANCE_CAPACITY`] × 4 B, DEVICE_LOCAL — the SAME element count as
+    /// [`Self::vb_instance_rings`], which is what keeps one index valid for both). Allocated and
+    /// BOUND at `vb_cull_layout` @6 (written by the cull since rung R2d-3) and at every VB Set-0
+    /// layout @11 (read by `vb_raster`'s VS since rung R2d-4) — see
+    /// `GBufferScene::vb_visible_instance`'s doc for why the binding landed before the consumer.
+    pub(crate) vb_visible_instance: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG R3 piece 3 step P3-2 (plan D3): the per-FIF early-reject / late-survivor list
+    /// ([`VB_LATE_VISIBLE_ELEMS`] × 4 B, DEVICE_LOCAL — the SAME element count as
+    /// [`Self::vb_visible_instance`], const-asserted, which is what lets ONE clamp bound both).
+    /// Allocated and BOUND at `vb_cull_layout` @7 and at `vb_set0_late` @11; read and written by
+    /// nothing until the shader arms — see `GBufferScene::vb_late_visible`.
+    pub(crate) vb_late_visible: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG R3 piece 3 step P3-2 (plan D3): the per-FIF per-batch `n_defer` array plus its reserved
+    /// frame slot ([`VB_LATE_COUNT_ELEMS`] × 4 B, DEVICE_LOCAL). Bound at `vb_cull_layout` @11.
+    pub(crate) vb_late_count: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG R3 piece 3 step P3-2 (plan D6): the per-FIF
+    /// [`VbCullUniform`](boyko_rhi_vulkan::present::VbCullUniform) block
+    /// ([`VB_CULL_UNIFORM_BYTES`], DEVICE_LOCAL). Bound at `vb_cull_layout` @8.
+    pub(crate) vb_cull_uniform: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// VG rung R2c-tail: the per-FIF host-visible READBACK staging for the cull's outputs —
+    /// `Some` only under `BOYKO_VB_CULL_READBACK`. See [`Self::read_vb_cull`].
+    pub(crate) vb_cull_readback: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// VG rung R2c0: the batch cull's own 1-set bind-group layout. Minted together with
+    /// [`Self::vb_batch_cull_pipeline`] — the pairing `GBufferTargets` relies on when it builds
+    /// the ring under a layout gate that `record_vb` then `.expect()`s under a pipeline gate.
+    pub(crate) vb_cull_layout: VulkanBindGroupLayout,
+    /// VG rung R2c0: the batch-cull compute pipeline (`vb_batch_cull.comp.hlsl`).
+    pub(crate) vb_batch_cull_pipeline: ComputePipeline,
+    /// VG R3 piece 1 step P1-4: the HZB depth-pyramid build pass's own 8-binding set-0 layout
+    /// (SAMPLED `gSrcDepth` @0, STORAGE `gFine` @1, STORAGE `gDst0`..`gDst5` @2..@7). Minted
+    /// UNCONDITIONALLY together with [`Self::hzb_build_pipeline`] — see `boot`'s comment for why
+    /// the arm lives on the TARGETS (`HzbTargets` exists iff the pyramid does) rather than on a
+    /// second predicate here.
+    pub(crate) hzb_build_layout: VulkanBindGroupLayout,
+    /// VG R3 piece 1 step P1-4: the HZB depth-pyramid build compute pipeline
+    /// (`hzb_build.comp.hlsl`), built against [`Self::hzb_build_layout`] with the 72-byte
+    /// `HzbBuildPush` range. DISPATCHED BY NOTHING at this step (step P1-5 declares the pass).
+    pub(crate) hzb_build_pipeline: ComputePipeline,
+
+    // ── VB-P1b: the froxel light-cull machinery — built LAZILY by
+    // [`Self::build_froxel_light_cull`], gated entirely on `ResolvedRenderPath::froxel_light_cull`
+    // at the `boyko_app::runner` call site. That gate is armed iff the booted scene's
+    // `LightingConfig::clusters_enabled` is `true` UNDER `RenderPath::VisibilityBuffer` — every
+    // field below stays `None`/zeroed on every other boot (unarmed scenes, and every non-VB path,
+    // are byte-identical to VB-P1a's 0%-gate). See that fn's doc for the full build.
+    // ──────────────────────────────────────────────────
+    /// The L1 clustered froxel light-cull compute pipeline (`cluster_cull.comp.hlsl`) — a 1-set
+    /// pipeline built against [`Self::cull_layout`]. `None` unless the froxel arm is built.
+    cluster_cull_pipeline: Option<ComputePipeline>,
+    /// The cull bind-group LAYOUT { camera UBO @0, light table SSBO @1, `ClusterGrid` SSBO @2,
+    /// `LightIndexList` SSBO @3, `LightIndexAlloc` SSBO @4 } — matching `cluster_cull.hlsl`'s own
+    /// set 0. `None` unless [`Self::cluster_cull_pipeline`] is `Some`.
+    cull_layout: Option<VulkanBindGroupLayout>,
+    /// The L1 per-froxel `ClusterCell`/`{offset,count}` grid SSBO (`DEVICE_LOCAL`, STORAGE,
+    /// Principle 0 — a VM-native `BoundBuffer`, never `std::Vec`), sized `cluster_count * 8 B`.
+    /// `None` unless the froxel arm is built.
+    cluster_grid: Option<BoundBuffer>,
+    /// The L1 flat light-index list SSBO (`DEVICE_LOCAL`, STORAGE), sized `index_list_cap * 4 B`.
+    /// `None` unless the froxel arm is built.
+    light_index: Option<BoundBuffer>,
+    /// The L1 global slice-allocation counter SSBO (one `u32`, `DEVICE_LOCAL`, STORAGE). `None`
+    /// unless the froxel arm is built.
+    light_index_alloc: Option<BoundBuffer>,
+    /// The [`ClusterCullPush`] the cull dispatch pushes (exp-Z near/far + the caps) — meaningless
+    /// while [`Self::cluster_cull_pipeline`] is `None` (never read then).
+    cluster_cull_push: ClusterCullPush,
+    /// The L1 froxel count (`dim_x * dim_y * dim_z`) the cull's 1D dispatch covers — meaningless
+    /// while [`Self::cluster_cull_pipeline`] is `None`.
+    cluster_count: u32,
+    /// VB-P1e D11/H4: `Some` IFF [`Self::cluster_cull_pipeline`] holds the `-D HIER=1` variant
+    /// instead of the base 64-wide arm — the group count + the 24-byte push bytes
+    /// [`Self::scene`] threads into [`GBufferScene::cluster_cull_hier`]. `None` (the default)
+    /// keeps every record site on the base arm, byte-identical to every pre-H4 boot.
+    cluster_cull_hier: Option<ClusterCullHierDispatch>,
+    /// VB-P1e D11: the BOOT-frozen `ClusterConfig::packed_dims()` snapshot
+    /// [`Self::build_froxel_light_cull`] sized every L1 buffer from — meaningless while
+    /// [`Self::cluster_cull_pipeline`] is `None`. The per-frame runner compares this against the
+    /// LIVE `ClusterConfig` Resource (`runner.rs`'s debug-only boot/live dims assert) to catch an
+    /// owner system stomping the Resource after boot; release builds do not pay for it.
+    cluster_boot_packed_dims: u32,
+    /// The froxel-only Set-0 bind-group LAYOUT — 11 bindings: [`Self::vb_layout0`]'s own
+    /// `{0..7, 11}` PLUS `ClusterGrid` @8 + `LightIndexList` @9 — a DISTINCT layout OBJECT from
+    /// [`Self::vb_layout0`], which the froxel arm never widens in place. `None` unless the froxel
+    /// arm is built.
+    vb_layout0_froxel: Option<VulkanBindGroupLayout>,
+    /// The `vb_resolve` FROXEL-variant compute pipeline (`vb_resolve.comp.hlsl`, `-D FROXEL=1`)
+    /// — the SAME 3-set shape as [`Self::vb_resolve_pipeline`], built against
+    /// [`Self::vb_layout0_froxel`]. `None` unless the froxel arm is built.
+    vb_resolve_froxel_pipeline: Option<ComputePipeline>,
+    /// The `vb_shade` FROXEL-variant compute pipeline (`vb_shade.comp.hlsl`, `-D FROXEL=1`) — the
+    /// SAME 3-set shape as [`Self::vb_shade_pipeline`], built against
+    /// [`Self::vb_layout0_froxel`]. `None` unless the froxel arm is built.
+    vb_shade_froxel_pipeline: Option<ComputePipeline>,
+    /// The `vb_shade` TEXTURED+FROXEL-variant compute pipeline (`vb_shade.comp.hlsl`, `-D
+    /// TEXTURED=1 -D FROXEL=1`) — the SAME 4-set shape as [`Self::vb_shade_tex_pipeline`], built
+    /// against [`Self::vb_layout0_froxel`]. `None` unless the froxel arm is built.
+    vb_shade_tex_froxel_pipeline: Option<ComputePipeline>,
+    /// Profiling rung 5c: the GPU **zone** recorder — leg B of G10's A/B while there was an A,
+    /// and since rung 7 step 5 the ONLY GPU timing instrument the VB family has. Built at
+    /// [`Self::boot`] only under `BOYKO_VB_ZONE` + device timestamp support, and still refused
+    /// alongside the two surviving old knobs (`BOYKO_SV0_BENCH`, `BOYKO_GBUF_BENCH`), which are
+    /// their families' leg A.
+    ///
+    /// Its own ring is `GPU_RING_DEPTH` deep and independent of `FRAMES_IN_FLIGHT`, so unlike the
+    /// collectors it never needs the frame slot `s` — [`Self::vb_zone_slot`] carries the slot its
+    /// own `open_frame` claimed.
+    vb_zone: Option<GpuZoneRecorder>,
+    /// The ring slot [`Self::open_vb_zone_frame`] claimed for the frame being recorded, or `None`
+    /// when every slot was still in flight (a stated refusal: the honest response is to record no
+    /// zones this frame rather than to overwrite unread results).
+    vb_zone_slot: Option<usize>,
+    /// Profiling rung 5c: the command census both A/B legs feed, through the SAME `TsWitness` call
+    /// sites. Built whenever either leg is armed. Without `boyko_rhi_vulkan/profiling-census` its
+    /// verbs are compiled out at those sites, so it stays at zero and the per-frame line says so —
+    /// which is why the gate that reads it enables the feature rather than trusting the default.
+    vb_census: Option<CommandWitness>,
+}
+
+/// Textured-PBR T6c: the TEXTURED gbuffer producer pipeline resources — see
+/// [`GpuSceneBundles::tex`] / [`GpuSceneBundles::build_textured_resources`] for the
+/// lazy-build rationale (the bindless texture-array table's descriptor-set LAYOUT, a
+/// `create_graphics_pipeline_bindless` input, does not exist at `GpuSceneBundles::boot()`
+/// time).
+struct TexturedResources {
+    /// The 2-SET TEXTURED gbuffer producer pipeline (`gbuffer_mrt_tex.{vs,fs}`) — set 0 =
+    /// [`Self::tex_instance_material_layout`] (VERTEX), set 1 = the bindless texture-array
+    /// set's layout (FRAGMENT), built via
+    /// [`VulkanContext::create_graphics_pipeline_bindless`].
+    raster_pipeline_tex: VulkanGraphicsPipeline,
+    /// The 2-binding set-0 layout [`Self::raster_pipeline_tex`] declares: instances @0
+    /// (VERTEX, the SAME shared `instance_rings`) + instance_materials_tex @1 (VERTEX, its
+    /// own per-slot ring). A SEPARATE layout from
+    /// [`GpuSceneBundles`]'s `pm_instance_material_layout` (a wider element stride —
+    /// `PerInstanceMaterialTex`, 48 B, vs `PerInstanceMaterial`'s 32 B).
+    tex_instance_material_layout: VulkanBindGroupLayout,
+    /// The per-slot TEXTURED instance-material SSBO ring ([`INSTANCE_CAPACITY`]
+    /// [`PerInstanceMaterialTex`](boyko_render::PerInstanceMaterialTex)s = 48 B each,
+    /// zero-seeded). The runner uploads `scratch.material_tex` into slot `token.slot()`
+    /// ONLY on an `any_textured_material` frame (Principle 1 — no OFF-path upload cost).
+    ///
+    /// This RING ITSELF does NOT participate in the F7/F7-hwrt lockstep instance-family
+    /// grow (a disclosed T6c limitation, see the developer report): a scene whose gathered
+    /// instance count grows past [`INSTANCE_CAPACITY`] while using textured materials hits
+    /// `upload_instance_materials_tex`'s hard capacity assert rather than silently
+    /// corrupting memory. (Its bind-group BINDING — [`Self::tex_bind_groups`]'s binding 1
+    /// — is correspondingly never rebound either, since there is no grown buffer for it to
+    /// point at.)
+    pub(crate) tex_instance_material_rings: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// Per-FIF bind groups against [`Self::tex_instance_material_layout`]: slot `i` binds
+    /// `{ instance_rings[i] @0, tex_instance_material_rings[i] @1 }`. The recorder binds
+    /// slot `s` at set 0 when the TEXTURED pipeline is selected. Binding 0 points at the
+    /// SHARED, growable `instance_rings` — [`GpuSceneBundles::grow_shared_instance_rings`]
+    /// rebinds it in lockstep (review W1 fix; mirrors `pm_bind_groups[s]`@0), so a grow
+    /// past [`INSTANCE_CAPACITY`] on a LATER non-textured frame cannot leave this pointing
+    /// at a freed ring for a STILL-LATER textured frame.
+    tex_bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// The bindless texture-array descriptor SET, cached by value (a `Copy` FFI handle —
+    /// its LAYOUT is baked into [`Self::raster_pipeline_tex`]'s `VkPipelineLayout`, not
+    /// retained here). Bound at set 1 by the recorder every TEXTURED frame.
+    bindless_set: VkDescriptorSet,
 }
 
 impl GpuSceneBundles {
@@ -442,12 +1684,24 @@ impl GpuSceneBundles {
     /// # Panics
     /// Panics (`expect("invariant: ...")`) on any RHI create failure — a device
     /// OOM at scene-boot time is a setup failure, not a recoverable per-frame
-    /// error (the `MeshRegistry::register_mesh` precedent). The window / WSI
+    /// error (the `MeshAssetsExt::register_mesh` precedent). The window / WSI
     /// links that can legitimately fail on end-user machines are handled by
     /// `WindowHost::boot`'s typed error BEFORE this runs.
     pub(crate) fn boot(ctx: &VulkanContext, composite: (u32, u32), swap_format: Format) -> Self {
         let (cw, ch) = composite;
         debug_assert!(cw > 0 && ch > 0, "invariant: boot composite extent is non-zero");
+        // SSAA (W1): `composite` is ALREADY 2× native when `WindowHost::boot` armed SSAA (it
+        // folds the scale into `composite_extent` before calling this fn), so every buffer
+        // sized from `(cw, ch)` here scales automatically — no SSAA-specific branch needed in
+        // this function. Full enumeration of what DOES vs does NOT key off `(cw, ch)`:
+        // - PIXEL-COUNT-DERIVED (scale with SSAA, verified by the `debug_assert!`s below):
+        //   `dispatch_group_count_x` (the marcher/resolve dispatch width) and `tiles_buffer`
+        //   (the P4b coarse-cull tile grid, via `tile_grid_extent(cw, ch)`).
+        // - RESOLUTION-INDEPENDENT (fixed capacity or per-frame CONTENTS, not sized from
+        //   `(cw, ch)`): `camera_ring`/`edit_list`/`light_table`/the vertex/instance rings/the
+        //   hwrt resources/the DDGI atlas — none of these buffers' byte SIZE is a function of
+        //   `(cw, ch)` (their per-frame *contents* may encode the composite dims, but that is
+        //   host-written data, not a boot-time allocation size).
         let device = ctx;
 
         // ── The edit-list SSBO (vocab binding 0), seeded EMPTY (count == 0):
@@ -490,9 +1744,42 @@ impl GpuSceneBundles {
             b
         });
 
+        // ── Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` pass's OWN
+        // dedicated BrickLevels UBO (Set-0 binding 11) — a STANDALONE buffer, distinct from
+        // `camera_ring`'s own M4Level tail (this pass's Camera @3 stays the plain 80-byte Forward
+        // shape — `boyko_render::view::forward_gbuffer_push_from_view`'s contract, no M4 tail).
+        // Single (NOT ringed), zero-seeded, never rewritten: `brick_enabled = brick_trilinear =
+        // brick_levels = 0` every frame this rung (the explicit 0%-gate `SdfForwardMarchPush`'s
+        // doc documents), so its contents are never read.
+        const SDF_FORWARD_BRICK_LEVELS_UBO_BYTES: usize =
+            boyko_sdf_math::brick::BRICK_LEVELS * M4_LEVEL_PARAMS_BYTES;
+        let brick_levels_ubo = RhiDevice::create_buffer(
+            device,
+            &BufferDesc {
+                size: SDF_FORWARD_BRICK_LEVELS_UBO_BYTES as u64,
+                usage: BufferUsage::UNIFORM,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .expect("invariant: sdf_forward_march BrickLevels uniform buffer create");
+        {
+            let mapped = RhiDevice::buffer_mapped_ptr(device, &brick_levels_ubo)
+                .expect("invariant: host-visible BrickLevels UBO is mapped");
+            zero_fill(mapped, SDF_FORWARD_BRICK_LEVELS_UBO_BYTES);
+        }
+
         // ── The P4b coarse-cull tile buffer (vocab binding 6), bound-but-unread
         // (the coarse cull is gated OFF).
         let (tw, th) = tile_grid_extent(cw, ch);
+        // SSAA (W1): the tile grid must cover the FULL composite extent on both axes — the
+        // per-axis analogue of the `dispatch_group_count_x` coverage assert below (a future
+        // edit that keyed either buffer to `native` instead of `composite` would silently
+        // under-cull/under-dispatch at any SSAA scale; this fires immediately in debug).
+        debug_assert!(
+            (tw as u64) * (TILE_SIZE as u64) >= cw as u64
+                && (th as u64) * (TILE_SIZE as u64) >= ch as u64,
+            "invariant: the coarse-cull tile grid covers the composite pixel extent at any SSAA scale"
+        );
         let tiles_buffer = RhiDevice::create_buffer(
             device,
             &BufferDesc {
@@ -503,24 +1790,11 @@ impl GpuSceneBundles {
         )
         .expect("invariant: coarse-cull tile-bound storage buffer create");
 
-        // ── The PBR material table (vocab binding 7 + resolve binding 4): ONE
-        // slot — the engine default mid-gray dielectric (every mesh pixel picks
-        // material 0 in R3).
-        let mat_words = pack_material(&MaterialGpu::default());
-        let material_table = RhiDevice::create_buffer(
-            device,
-            &BufferDesc {
-                size: (mat_words.len() as u64) * 4,
-                usage: BufferUsage::STORAGE,
-                location: MemoryLocation::HostVisibleCoherent,
-            },
-        )
-        .expect("invariant: PBR material table create");
-        {
-            let mapped = RhiDevice::buffer_mapped_ptr(device, &material_table)
-                .expect("invariant: host-visible material table is mapped");
-            write_words(mapped, &mat_words);
-        }
+        // ── The PBR material table (vocab binding 7 + resolve binding 4) is now
+        // `Assets<Material>`/`MaterialTable`-owned (asset-system rung A1):
+        // `boyko_app::runner` boot-seeds `MaterialTable` (World NonSend) AFTER user
+        // `setup` and BEFORE the first frame's `sync_gbuffer` binds it, so `scene()`
+        // reads `material_table.table()` directly — no buffer is created here anymore.
 
         // ── The brick clip-map placeholders (vocab bindings 9..=15): the
         // marcher SPIR-V statically references them past the runtime gates, so
@@ -590,11 +1864,7 @@ impl GpuSceneBundles {
         // ── The DEGENERATE legacy vertex buffer (6 identical vertices ⇒ two
         // zero-area triangles ⇒ no fragments): pass A's target on empty-gather
         // frames — the raster pass then only clears depth to far.
-        let degenerate = Vertex {
-            position: [0.0, 0.0, 0.0],
-            normal: [0.0, 0.0, 1.0],
-            color: [1.0, 1.0, 1.0, 1.0],
-        };
+        let degenerate = Vertex::new([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]);
         let legacy_vertices = [degenerate; 6];
         let vertex_bytes = core::mem::size_of_val(&legacy_vertices) as u64;
         let vertex_buffer = RhiDevice::create_buffer(
@@ -688,10 +1958,22 @@ impl GpuSceneBundles {
             .expect("invariant: mesh-MRT vertex shader module create");
         let fs = RhiDevice::create_shader_module(device, gbuffer_mrt_fs_spirv())
             .expect("invariant: mesh-MRT fragment shader module create");
+        // Each pipeline declares ONLY the vertex attributes its vertex shader reads (DXC strips an
+        // unread input, so an extra declared attribute is a fetch nothing consumes —
+        // WARNING-Shader-OutputNotConsumed). The stride stays `MESH_VERTEX_STRIDE` for all three.
+        // Full set, locations 0/1/2 (position, color, normal): `gbuffer_mrt.vs`.
         let attributes = [
             VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
             VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
             VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
+        ];
+        // Position only, location 0: `depth_prepass.vs`, `vb_raster.vs`.
+        let attributes_pos = [VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 }];
+        // Position + normal, locations 0/2: `forward_opaque.vs` (the Forward and ForwardPlus
+        // opaque pipelines).
+        let attributes_pos_normal = [
+            VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
         ];
         let raster_pipeline = RhiDevice::create_graphics_pipeline(
             device,
@@ -703,7 +1985,10 @@ impl GpuSceneBundles {
                 color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT],
                 depth_format: Some(Format::D32Sfloat),
                 topology: PrimitiveTopology::TriangleList,
-                vertex_layout: Some(VertexBufferLayout { stride: 40, attributes: &attributes }),
+                vertex_layout: Some(VertexBufferLayout {
+                    stride: MESH_VERTEX_STRIDE as u32,
+                    attributes: &attributes,
+                }),
                 push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                 bind_group_layout: Some(&instance_layout),
                 blend: None,
@@ -712,6 +1997,93 @@ impl GpuSceneBundles {
             },
         )
         .expect("invariant: mesh-MRT graphics pipeline create");
+
+        // ── Asset-streaming plan F8: the PER_INSTANCE_MATERIAL gbuffer producer
+        // pipeline — built UNCONDITIONALLY (materials are device-agnostic, unlike
+        // `mv`). Its own 2-binding set-0 layout: instances @0 (VERTEX, the SAME shared
+        // `instance_rings`) + instance_materials @1 (VERTEX, its own per-slot ring).
+        let pm_instance_material_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: PM instance-material bind-group layout create");
+        let pm_vs = RhiDevice::create_shader_module(device, gbuffer_mrt_pm_vs_spirv())
+            .expect("invariant: PM mesh-MRT vertex shader module create");
+        let pm_fs = RhiDevice::create_shader_module(device, gbuffer_mrt_pm_fs_spirv())
+            .expect("invariant: PM mesh-MRT fragment shader module create");
+        let raster_pipeline_pm = RhiDevice::create_graphics_pipeline(
+            device,
+            &GraphicsPipelineDesc {
+                vertex_module: &pm_vs,
+                vertex_entry: c"main",
+                fragment_module: &pm_fs,
+                fragment_entry: c"main",
+                color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT],
+                depth_format: Some(Format::D32Sfloat),
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: Some(VertexBufferLayout {
+                    stride: MESH_VERTEX_STRIDE as u32,
+                    attributes: &attributes,
+                }),
+                push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
+                bind_group_layout: Some(&pm_instance_material_layout),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            },
+        )
+        .expect("invariant: PM mesh-MRT graphics pipeline create");
+        // SAFETY: both modules were created on `device` and are consumed by the pipeline
+        // create; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, pm_fs);
+            RhiDevice::destroy_shader_module(device, pm_vs);
+        }
+        let pm_material_ring_bytes = (INSTANCE_CAPACITY * PER_INSTANCE_MATERIAL_BYTES) as u64;
+        let pm_instance_material_rings: [BoundBuffer; FRAMES_IN_FLIGHT] =
+            core::array::from_fn(|_| {
+                let b = RhiDevice::create_buffer(
+                    device,
+                    &BufferDesc {
+                        size: pm_material_ring_bytes,
+                        usage: BufferUsage::STORAGE,
+                        location: MemoryLocation::HostVisibleCoherent,
+                    },
+                )
+                .expect("invariant: PM instance-material SSBO ring slot create");
+                let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
+                    .expect("invariant: host-visible PM instance-material SSBO is mapped");
+                zero_fill(mapped, pm_material_ring_bytes as usize);
+                b
+            });
+        let pm_bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT] = core::array::from_fn(|i| {
+            RhiDevice::create_bind_group(
+                device,
+                &BindGroupDesc {
+                    layout: &pm_instance_material_layout,
+                    entries: &[
+                        BindGroupEntry::StorageBuffer { buffer: &instance_rings[i] },
+                        BindGroupEntry::StorageBuffer { buffer: &pm_instance_material_rings[i] },
+                    ],
+                },
+            )
+            .expect("invariant: PM instance-material bind group create")
+        });
 
         // ── The marcher: the 16-entry vocabulary layout + the compute pipeline
         // (bindings 0..=15, mirroring the showcase's `vocab_entries`).
@@ -775,14 +2147,34 @@ impl GpuSceneBundles {
             BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
             // SDFDDGI I0: the DDGI probe-irradiance combined image @16 + depth combined image @17 +
             // the `ResolvedDdgi` grid UBO @18 (bound-but-unread; the resolve `.spv` statically
-            // references all three). The set is now EXACT-FILL at 19/19 (== MAX_BIND_GROUP_BINDINGS).
+            // references all three). `resolve_entries` itself is EXACT-FILL at 19/19 and is the
+            // SHARED derivation base for every HWRT-family layout below (`hwrt_entries`/
+            // `denoise_entries`/`vis_mv_entries` all read it directly) — it MUST stay 19 and
+            // UNTOUCHED (textured-PBR T6a's C1 fix: bumping it would shift the HWRT TLAS 19→20).
             BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
             BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
             BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
         ];
+        // Textured-PBR T6a (the critic's C1 fix): binding 19 = `gPbr` (StorageImage) —
+        // SOFTWARE-RESOLVE-ONLY. Appended to a SEPARATE vec (mirroring `hwrt_entries`'s idiom
+        // below) so `resolve_entries` itself is NEVER mutated — every HWRT-family layout
+        // (`hwrt_entries`/`denoise_entries`/`vis_mv_entries`) still derives from the untouched
+        // 19-entry base, so TLAS stays @19 and their binding counts (21/22/24) are unaffected.
+        let mut resolve_software_layout_entries = resolve_entries.to_vec();
+        resolve_software_layout_entries.push(BindGroupLayoutEntry {
+            binding: 19,
+            count: 1,
+            kind: DescriptorKind::StorageImage,
+            stage: ShaderStage::COMPUTE,
+        });
+        debug_assert_eq!(
+            resolve_software_layout_entries.len(),
+            20,
+            "invariant: the software resolve layout is EXACT-FILL at 20 (19 shared + gPbr @19)"
+        );
         let resolve_layout = RhiDevice::create_bind_group_layout(
             device,
-            &BindGroupLayoutDesc { entries: &resolve_entries },
+            &BindGroupLayoutDesc { entries: &resolve_software_layout_entries },
         )
         .expect("invariant: deferred resolve bind-group layout create");
         let resolve_pipeline = RhiDevice::create_compute_pipeline(
@@ -797,13 +2189,32 @@ impl GpuSceneBundles {
         )
         .expect("invariant: deferred resolve compute pipeline create");
 
-        // ── HW-RT rung R2a-4b: the HWRT-variant resolve pipeline + its 20-binding layout.
+        // Render terminator-softening: the `-D TERMINATOR_WRAP=1` variant pipeline, built
+        // unconditionally (device-agnostic — not RT-gated) alongside `resolve_pipeline`, reusing
+        // the SAME `resolve_layout` (the variant adds no binding; see `deferred_pbr_wrap_spirv`'s
+        // doc). Selected per-frame by `scene`'s `terminator_wrap` gate.
+        let resolve_wrap_cs = RhiDevice::create_shader_module(device, deferred_pbr_wrap_spirv())
+            .expect("invariant: terminator-wrap deferred resolve compute shader module create");
+        let resolve_pipeline_wrap = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &resolve_wrap_cs,
+                entry: c"main",
+                push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+                bind_group_layout: Some(&resolve_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: terminator-wrap deferred resolve compute pipeline create");
+
+        // ── HW-RT rung R2a-4b: the HWRT-variant resolve pipeline + its 22-binding layout.
         // Built ONLY on an RT device (`ray_query_enabled`) under `feature = "hwrt"` — the SAME
         // capability gate the TLAS resources use (`RayBackendConfig` resolves the mesh-shadow cell
         // to `HardwareTri` on exactly this device tier, so presence == the routing decision).
         // `None` on the software path ⇒ the render binds the software pipeline ⇒ byte-identical. The
         // layout is the 19 software bindings + binding 19 (`AccelerationStructure`) the
-        // `deferred_pbr_hwrt.comp` `rayQuery` mesh-shadow trace reads.
+        // `deferred_pbr_hwrt.comp` `rayQuery` mesh-shadow trace reads + binding 20 (the soft-shadow
+        // UBO) + binding 21 (the raster depth image the shadow-ray origin's producer test reads).
         #[cfg(feature = "hwrt")]
         let resolve_pipeline_hwrt = ctx.ray_query_enabled().then(|| {
             let hwrt_cs = RhiDevice::create_shader_module(device, deferred_pbr_hwrt_spirv())
@@ -822,6 +2233,19 @@ impl GpuSceneBundles {
                 binding: 20,
                 count: 1,
                 kind: DescriptorKind::UniformBuffer,
+                stage: ShaderStage::COMPUTE,
+            });
+            // Lane fix/hwrt-shadow-ray-origin: binding 21 = the raster DEPTH image (`gDepthHw`,
+            // SAMPLED — the same depth-aspect view + `depth_sampler` the marcher binds at its
+            // @1), read by the trace to tell a raster-owned pixel (`gViewT == md*64`) from an
+            // SDF-owned one before placing the shadow-ray origin on the raster's jittered ray.
+            // Inserted at 21 on EVERY HWRT resolve-family layout (the VIS/DENOISED/VIS-MV
+            // layouts below renumber `gShadowVis`/`MotionCamVis`/`gMotionVec` to 22/23/24), so
+            // the `[0..18 shared][19 TLAS][20 UBO][21 depth]` prefix is identical across them.
+            hwrt_entries.push(BindGroupLayoutEntry {
+                binding: 21,
+                count: 1,
+                kind: DescriptorKind::SampledImage,
                 stage: ShaderStage::COMPUTE,
             });
             let hwrt_layout = RhiDevice::create_bind_group_layout(
@@ -847,11 +2271,14 @@ impl GpuSceneBundles {
                 },
             )
             .expect("invariant: HWRT deferred resolve compute pipeline create");
+            // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+            // destroy it once; no GPU work is in flight yet.
+            unsafe { RhiDevice::destroy_shader_module(device, hwrt_cs) };
             (hwrt_pipeline, hwrt_layout)
         });
 
         // ── HW-RT rung 3a: the spatial-denoise VIS + DENOISED resolve pipelines (their SHARED
-        // 22-binding layout = the RESOLVE_INLINE-hwrt 21 bindings + `gShadowVis` STORAGE image @21) +
+        // 23-binding layout = the RESOLVE_INLINE-hwrt 22 bindings + `gShadowVis` STORAGE image @22) +
         // the à-trous filter pipeline (its own 6-binding layout + a 4-byte `{ uint step }` push).
         // Built under the SAME `ray_query_enabled` gate as `resolve_pipeline_hwrt` (the à-trous stack
         // lives on exactly this RT tier). `None` on the software path ⇒ the scene never wires
@@ -862,10 +2289,11 @@ impl GpuSceneBundles {
             ComputePipeline,
             VulkanBindGroupLayout,
         )> = ctx.ray_query_enabled().then(|| {
-            // The 22-binding VIS/DENOISED layout: the 19 software resolve bindings (0..=18),
+            // The 23-binding VIS/DENOISED layout: the 19 software resolve bindings (0..=18),
             // binding 19 (`AccelerationStructure` — the VIS trace target), binding 20 (the rung-1b
-            // soft-shadow-params UBO), binding 21 (`gShadowVis` STORAGE image). Rebuilt here (the
-            // `hwrt_entries` above lives inside its own closure).
+            // soft-shadow-params UBO), binding 21 (the raster depth image — the shadow-ray origin's
+            // producer test, lane fix/hwrt-shadow-ray-origin), binding 22 (`gShadowVis` STORAGE
+            // image). Rebuilt here (the `hwrt_entries` above lives inside its own closure).
             let mut denoise_entries = resolve_entries.to_vec();
             denoise_entries.push(BindGroupLayoutEntry {
                 binding: 19,
@@ -881,6 +2309,12 @@ impl GpuSceneBundles {
             });
             denoise_entries.push(BindGroupLayoutEntry {
                 binding: 21,
+                count: 1,
+                kind: DescriptorKind::SampledImage,
+                stage: ShaderStage::COMPUTE,
+            });
+            denoise_entries.push(BindGroupLayoutEntry {
+                binding: 22,
                 count: 1,
                 kind: DescriptorKind::StorageImage,
                 stage: ShaderStage::COMPUTE,
@@ -1016,6 +2450,57 @@ impl GpuSceneBundles {
                 (temporal_pipeline, temporal_layout)
             });
 
+        // ── Rung R9d: the VB split's DEDICATED shadow-vis gather pipeline + its 7-binding
+        // layout { `thin_normal` @0, `gViewT` @1 STORAGE images, `LightTable` @2 STORAGE buffer,
+        // the camera UBO @3, the TLAS `AccelerationStructure` @4, the `ResolvedRayShadow` UBO
+        // @5 (reuses the SAME `ray_shadow_ubo` ring below), `gShadowVis` @6 (W) }. Same
+        // `ray_query_enabled` gate as the deferred VIS pipeline (`shadow_denoise_pipelines`'s
+        // own `vis_pipeline`, above) — this is the split's own standalone sibling: it has no
+        // fat G-buffer to re-run the resolve front-matter against, so it traces against the
+        // split's `thin_normal`/`gViewT` lanes directly.
+        #[cfg(feature = "hwrt")]
+        let vb_shadow_vis_pipeline: Option<(ComputePipeline, VulkanBindGroupLayout)> =
+            ctx.ray_query_enabled().then(|| {
+                let layout = RhiDevice::create_bind_group_layout(
+                    device,
+                    &BindGroupLayoutDesc {
+                        entries: &[
+                            BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::AccelerationStructure, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                        ],
+                    },
+                )
+                .expect("invariant: R9d vb_shadow_vis bind-group layout create");
+                // The SAME `SHADOW_RAY_COUNT` spec-const (id 0) the deferred VIS pipeline bakes,
+                // so `mesh_vis` is bit-identical across both producers.
+                let ray_count = RayShadowConfig::default().ray_count.max(1);
+                let cs = RhiDevice::create_shader_module(device, vb_shadow_vis_spirv())
+                    .expect("invariant: R9d vb_shadow_vis compute shader module create");
+                let pipeline = RhiDevice::create_compute_pipeline(
+                    device,
+                    &ComputePipelineDesc {
+                        module: &cs,
+                        entry: c"main",
+                        // The shader reads no push; the RHI rejects a 0-byte compute range, so
+                        // declare the minimum 4-byte range (bound-but-unread — the temporal
+                        // reproject pipeline's own precedent, above).
+                        push_constant_bytes: 4,
+                        bind_group_layout: Some(&layout),
+                        spec_constants: &[SpecConstant { id: 0, value: ray_count }],
+                    },
+                )
+                .expect("invariant: R9d vb_shadow_vis compute pipeline create");
+                // SAFETY: the module was created on `device` and is consumed by the pipeline
+                // create; destroy it once; no GPU work is in flight yet.
+                unsafe { RhiDevice::destroy_shader_module(device, cs) };
+                (pipeline, layout)
+            });
+
         // Rung 1b: the HWRT soft-shadow-params UBO ring — minted ONLY on an RT device
         // (`ray_query_enabled`), the SAME gate that builds `resolve_pipeline_hwrt`. `None` on the
         // software path (the resolve set has no binding 20 there). Zero-seeded (the runner memcpys
@@ -1078,15 +2563,621 @@ impl GpuSceneBundles {
         )
         .expect("invariant: present-blit graphics pipeline create");
 
+        // Anti-aliasing Stage 1: the FXAA fullscreen pipeline + its dedicated LINEAR
+        // sampler, built unconditionally here (like `present_pipeline` above) so the mode
+        // can flip at runtime without a boot-time rebuild. Reuses `sample_vs` (the
+        // fullscreen-triangle VS) and `present_layout` (the same single-
+        // CombinedImageSampler shape); `color_formats[0]` is `aa_out`'s format
+        // (`R8G8B8A8_UNORM`), NOT the swapchain format. Boot-time creation records no
+        // command / writes no pixel — byte-identical to the golden regardless of this
+        // pipeline's existence. Built with a FRAGMENT-only push range (as are the three SMAA
+        // pipelines below): only `fxaa.fs` reads the push block — `sample_vs` declares none — and
+        // the recorder pushes with exactly the range's stages (VUID-vkCmdPushConstants-offset-01796).
+        let fxaa_sampler = RhiDevice::create_sampler(
+            device,
+            &SamplerDesc {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: AddressMode::ClampToEdge,
+                mip: MipMode::None,
+                compare: None,
+            },
+        )
+        .expect("invariant: FXAA linear/clamp sampler create");
+        let fxaa_fs = RhiDevice::create_shader_module(device, fxaa_fs_spirv())
+            .expect("invariant: FXAA fragment shader module create");
+        let fxaa_pipeline = ctx
+            .create_graphics_pipeline_fragment_push(&GraphicsPipelineDesc {
+                vertex_module: &sample_vs,
+                vertex_entry: c"main",
+                fragment_module: &fxaa_fs,
+                fragment_entry: c"main",
+                // `aa_out`'s format (== `boyko_rhi_vulkan`'s private `GBUFFER_FORMAT`
+                // constant, R8G8B8A8_UNORM) — NOT `swap_format`.
+                color_formats: &[Format::R8G8B8A8Unorm],
+                depth_format: None,
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: None,
+                push_constant_bytes: 8,
+                bind_group_layout: Some(&present_layout),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            })
+            .expect("invariant: FXAA graphics pipeline create");
+
+        // Anti-aliasing Stage 2: the SMAA 1x boot bundle — 2 dedicated layouts, 1 dedicated
+        // sampler, 3 fullscreen pipelines, 2 boot-resident LUTs — built UNCONDITIONALLY here
+        // (like `fxaa_pipeline` above) so the mode can flip at runtime without a boot-time
+        // rebuild. Reuses `sample_vs` (the fullscreen-triangle VS shared by all three SMAA
+        // passes) and `present_layout` (the edge pass's 1-CIS shape). Boot-time creation
+        // records no command / samples no OFF pixel — byte-identical to the golden
+        // regardless of this bundle's existence.
+        let smaa_weight_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::CombinedImageSampler,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::CombinedImageSampler,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::CombinedImageSampler,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: SMAA weight bind-group layout create");
+        let smaa_blend_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::CombinedImageSampler,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::CombinedImageSampler,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: SMAA blend bind-group layout create");
+        let smaa_sampler = RhiDevice::create_sampler(
+            device,
+            &SamplerDesc {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: AddressMode::ClampToEdge,
+                mip: MipMode::None,
+                compare: None,
+            },
+        )
+        .expect("invariant: SMAA linear/clamp sampler create");
+        let smaa_edge_fs = RhiDevice::create_shader_module(device, smaa_edge_fs_spirv())
+            .expect("invariant: SMAA edge fragment shader module create");
+        let smaa_edge_pipeline = ctx
+            .create_graphics_pipeline_fragment_push(&GraphicsPipelineDesc {
+                vertex_module: &sample_vs,
+                vertex_entry: c"main",
+                fragment_module: &smaa_edge_fs,
+                fragment_entry: c"main",
+                // `smaa_edges`' format (R8G8_UNORM) — NOT `swap_format`.
+                color_formats: &[Format::R8G8Unorm],
+                depth_format: None,
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: None,
+                push_constant_bytes: 16,
+                bind_group_layout: Some(&present_layout),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            })
+            .expect("invariant: SMAA edge graphics pipeline create");
+        let smaa_weight_fs = RhiDevice::create_shader_module(device, smaa_weight_fs_spirv())
+            .expect("invariant: SMAA weight fragment shader module create");
+        let smaa_weight_pipeline = ctx
+            .create_graphics_pipeline_fragment_push(&GraphicsPipelineDesc {
+                vertex_module: &sample_vs,
+                vertex_entry: c"main",
+                fragment_module: &smaa_weight_fs,
+                fragment_entry: c"main",
+                // `smaa_weights`' format (R8G8B8A8_UNORM) — NOT `swap_format`.
+                color_formats: &[Format::R8G8B8A8Unorm],
+                depth_format: None,
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: None,
+                push_constant_bytes: 16,
+                bind_group_layout: Some(&smaa_weight_layout),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            })
+            .expect("invariant: SMAA weight graphics pipeline create");
+        let smaa_blend_fs = RhiDevice::create_shader_module(device, smaa_blend_fs_spirv())
+            .expect("invariant: SMAA blend fragment shader module create");
+        let smaa_blend_pipeline = ctx
+            .create_graphics_pipeline_fragment_push(&GraphicsPipelineDesc {
+                vertex_module: &sample_vs,
+                vertex_entry: c"main",
+                fragment_module: &smaa_blend_fs,
+                fragment_entry: c"main",
+                // `aa_out`'s format (R8G8B8A8_UNORM) — NOT `swap_format`.
+                color_formats: &[Format::R8G8B8A8Unorm],
+                depth_format: None,
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: None,
+                push_constant_bytes: 16,
+                bind_group_layout: Some(&smaa_blend_layout),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            })
+            .expect("invariant: SMAA blend graphics pipeline create");
+        let smaa_area_tex = upload_texture_2d_raw(
+            device,
+            AREA_TEX_W,
+            AREA_TEX_H,
+            AREA_TEX_BYTES,
+            Format::R8G8Unorm,
+        )
+        .expect("invariant: SMAA AreaTex LUT upload (boot stage)");
+        let smaa_search_tex = upload_texture_2d_raw(
+            device,
+            SEARCH_TEX_W,
+            SEARCH_TEX_H,
+            SEARCH_TEX_BYTES,
+            Format::R8Unorm,
+        )
+        .expect("invariant: SMAA SearchTex LUT upload (boot stage)");
+
+        // Anti-aliasing Stage 3: the SSAA downsample fullscreen pipeline, built
+        // unconditionally here (like `fxaa_pipeline` above) so the host-armed mode
+        // (see `boyko_app::host::WindowHost`) can select it with no boot-time rebuild.
+        // Reuses `sample_vs` + `present_layout` (the same single-CombinedImageSampler
+        // shape FXAA uses) + `present_sampler` (NEAREST — the shader's `.Load` ignores
+        // it, so no dedicated sampler is built). `color_formats[0]` is `aa_out`'s format
+        // (`R8G8B8A8_UNORM`); NO push constants (the 2× ratio is compiled into the
+        // shader). Boot-time creation records no command / writes no pixel —
+        // byte-identical to the golden regardless of this pipeline's existence.
+        let ssaa_fs = RhiDevice::create_shader_module(device, ssaa_downsample_fs_spirv())
+            .expect("invariant: SSAA downsample fragment shader module create");
+        let ssaa_pipeline = RhiDevice::create_graphics_pipeline(
+            device,
+            &GraphicsPipelineDesc {
+                vertex_module: &sample_vs,
+                vertex_entry: c"main",
+                fragment_module: &ssaa_fs,
+                fragment_entry: c"main",
+                // `aa_out`'s format (R8G8B8A8_UNORM) — NOT `swap_format`.
+                color_formats: &[Format::R8G8B8A8Unorm],
+                depth_format: None,
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: None,
+                push_constant_bytes: 0,
+                bind_group_layout: Some(&present_layout),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            },
+        )
+        .expect("invariant: SSAA downsample graphics pipeline create");
+
+        // Anti-aliasing Stage 4 (TAA W5): the temporal-resolve compute pipeline + its DEDICATED
+        // 8-binding layout { `gLit` COMBINED_IMAGE_SAMPLER @0, `gViewT` STORAGE @1, `gHistIn`
+        // STORAGE @2, `gHistOut` STORAGE @3, `gAaOut` STORAGE @4, the `ResolvedTaa` UBO @5, the
+        // camera UBO @6 (UNJITTERED — C1 cut), the `MotionCam` UBO @7 } + a 4-byte `{ uint reset;
+        // }` push constant (`boyko_render::taa_state::TaaState`) + a DEDICATED LINEAR/ClampToEdge
+        // sampler for the `gLit` tap. Built UNCONDITIONALLY here (like `fxaa_pipeline`/
+        // `ssaa_pipeline` above) — TAA is NOT hwrt-gated (its motion vector reconstructs from
+        // `gViewT`, never a `rayQuery` trace), mirroring `shadow_temporal_pipeline`'s boot-build
+        // pattern but unconditional. Boot-time creation records no command / samples no OFF pixel
+        // — byte-identical to the golden regardless of this pipeline's existence (`GBufferScene::
+        // taa` stays `None` unless `AaMode::Taa` is selected).
+        let taa_linear_sampler = RhiDevice::create_sampler(
+            device,
+            &SamplerDesc {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: AddressMode::ClampToEdge,
+                mip: MipMode::None,
+                compare: None,
+            },
+        )
+        .expect("invariant: TAA resolve linear/clamp sampler create");
+        let taa_resolve_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: TAA resolve bind-group layout create");
+        let taa_resolve_cs = RhiDevice::create_shader_module(device, taa_resolve_spirv())
+            .expect("invariant: TAA resolve compute shader module create");
+        let taa_resolve_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &taa_resolve_cs,
+                entry: c"main",
+                // The shader reads the reset flag via a 4-byte `{ uint reset; }` COMPUTE push
+                // range (`boyko_render::taa_state::TaaState::advance`'s consumed-this-frame bit).
+                push_constant_bytes: 4,
+                bind_group_layout: Some(&taa_resolve_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: TAA resolve compute pipeline create");
+
+        // TAA rung T3: the post-resolve RCAS sharpen compute pipeline + its DEDICATED 2-binding
+        // layout { `gRcasIn` STORAGE @0, `gAaOut` STORAGE @1 } + a 16-byte `RcasPush` COMPUTE
+        // push range. Built UNCONDITIONALLY here (like `taa_resolve_pipeline` above) — RCAS is
+        // NOT hwrt-gated (a pure image-space kernel). Boot-time creation records no command /
+        // samples no OFF pixel — byte-identical to the golden regardless of this pipeline's
+        // existence (`GBufferScene::rcas` stays `None` unless `SharpenMode::Rcas` is selected
+        // AND `AaMode::Taa` is armed).
+        let rcas_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: RCAS bind-group layout create");
+        let rcas_cs = RhiDevice::create_shader_module(device, rcas_spirv())
+            .expect("invariant: RCAS compute shader module create");
+        let rcas_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &rcas_cs,
+                entry: c"main",
+                push_constant_bytes: RCAS_PUSH_BYTES,
+                bind_group_layout: Some(&rcas_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: RCAS compute pipeline create");
+
+        // Render P7-Q2: the SSAO compute pass — 3 pre-compiled quality-variant pipelines
+        // sharing ONE dedicated 5-binding layout, built UNCONDITIONALLY here (like
+        // `fxaa_pipeline`/`ssaa_pipeline`/`taa_resolve_pipeline` above) so the
+        // owner-resolved quality (`boyko_render::ResolvedSsao::variant`) can bind a
+        // variant with no boot-time rebuild. Mirrors the test harness's SSAO boot bundle
+        // (`window_present_gbuffer.rs`'s `ssao_layout`/`ssao_pipeline` construction),
+        // widened to build all 3 variants instead of one. Boot-time creation records no
+        // command / samples no pixel — byte-identical to the golden regardless of this
+        // bundle's existence (`GBufferScene::ssao` stays `None` unless a non-`Off`
+        // `SsaoQuality` is host-resolved).
+        let ssao_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: Render P7 SSAO bind-group layout create");
+        let ssao_cs_low = RhiDevice::create_shader_module(device, sdf_ssao_spirv_variant(SSAO_QUALITY_LOW))
+            .expect("invariant: SSAO LOW compute shader module create");
+        let ssao_pipeline_low = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &ssao_cs_low,
+                entry: c"main",
+                push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+                bind_group_layout: Some(&ssao_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: SSAO LOW compute pipeline create");
+        let ssao_cs_medium = RhiDevice::create_shader_module(device, sdf_ssao_spirv_variant(SSAO_QUALITY_MEDIUM))
+            .expect("invariant: SSAO MEDIUM compute shader module create");
+        let ssao_pipeline_medium = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &ssao_cs_medium,
+                entry: c"main",
+                push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+                bind_group_layout: Some(&ssao_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: SSAO MEDIUM compute pipeline create");
+        let ssao_cs_high = RhiDevice::create_shader_module(device, sdf_ssao_spirv_variant(SSAO_QUALITY_HIGH))
+            .expect("invariant: SSAO HIGH compute shader module create");
+        let ssao_pipeline_high = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &ssao_cs_high,
+                entry: c"main",
+                push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+                bind_group_layout: Some(&ssao_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: SSAO HIGH compute pipeline create");
+        // Indexed by `SSAO_QUALITY_LOW`/`_MEDIUM`/`_HIGH` (0/1/2) — `ResolvedSsao::variant`
+        // selects directly into this array.
+        let ssao_pipelines = [ssao_pipeline_low, ssao_pipeline_medium, ssao_pipeline_high];
+
+        // Rung R9b (docs/R9-VB-SPLIT-PLAN.md §5/§6): the VB split's boot-buildable objects —
+        // the `-D VB_THIN` gather trio + its dense 4-binding layout, `vb_geo`'s Set-1 aux
+        // layout, and `vb_shade_split`'s Set-1 layout. Pipelines that need the geometry Set-2
+        // (`vb_geo`/`vb_shade_split{,_tex}`) are deferred to `build_vb_split_pipelines` (the
+        // `build_vb_resolve_pipeline` two-dependency reason).
+        let vb_ssao_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    // thin_normal @0 (R), gViewT @1 (R), ssao @2 (W), camera UBO @3 — the
+                    // VB_THIN dense table (`sdf_ssao.comp.hlsl`'s own header doc).
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: R9b VB SSAO bind-group layout create");
+        let mut ssao_vb_slots: [Option<ComputePipeline>; SSAO_QUALITY_COUNT] =
+            [const { None }; SSAO_QUALITY_COUNT];
+        for (variant, slot) in ssao_vb_slots.iter_mut().enumerate() {
+            let cs = RhiDevice::create_shader_module(device, sdf_ssao_vb_spirv(variant))
+                .expect("invariant: R9b VB_THIN SSAO compute shader module create");
+            let p = RhiDevice::create_compute_pipeline(
+                device,
+                &ComputePipelineDesc {
+                    module: &cs,
+                    entry: c"main",
+                    // The SAME push block the base gather compiles (one source, the VB_THIN
+                    // define only swaps the binding table).
+                    push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+                    bind_group_layout: Some(&vb_ssao_layout),
+                    spec_constants: &[],
+                },
+            )
+            .expect("invariant: R9b VB_THIN SSAO compute pipeline create");
+            // SAFETY: the module was created on `device` and consumed by the pipeline create;
+            // destroyed once; no GPU work is in flight yet.
+            unsafe {
+                RhiDevice::destroy_shader_module(device, cs);
+            }
+            *slot = Some(p);
+        }
+        let ssao_vb_pipelines = ssao_vb_slots
+            .map(|s| s.expect("invariant: every VB_THIN SSAO variant pipeline built above"));
+        let vb_geo_aux_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    // thin_normal @0 (W). @1/@2 are the R9d MOTION slots — in the layout now
+                    // (one layout object for both variant generations, the R2 contract; the
+                    // software `vb_geo.comp.spv` never references them).
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: R9b vb_geo aux bind-group layout create");
+        // Rung R9d: the @8 `gShadowVis` STORAGE slot joins the layout together with the
+        // `-D HWRT` `vb_shade_split` shader variant that references it — the R9b `.spv` is
+        // compiled without the define on BOTH legs, so a `not(hwrt)` build's entry would be pure
+        // dead surface (the layout stays EXACT-FILL at 8 there).
+        let vb_split_layout1_base: [BindGroupLayoutEntry; 8] = [
+            // @0-3: forward_layout1's shadow-table kinds VERBATIM (a distinct COMPUTE-only
+            // object — the split shade's Set 1 is its own 8/9-binding shape).
+            BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+            // @4: gSsao (STORAGE, READ by the split shade under the header ssao_mode gate).
+            BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+            // @5/@6: the DDGI atlases (COMBINED image+sampler — the deferred t16/s16 idiom).
+            BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+            // @7: the ResolvedDdgi UBO.
+            BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        ];
+        #[cfg(not(feature = "hwrt"))]
+        let vb_split_layout1_entries = vb_split_layout1_base;
+        #[cfg(feature = "hwrt")]
+        let vb_split_layout1_entries: [BindGroupLayoutEntry; 9] = {
+            let ninth = BindGroupLayoutEntry {
+                binding: 8,
+                count: 1,
+                kind: DescriptorKind::StorageImage,
+                stage: ShaderStage::COMPUTE,
+            };
+            let mut chained = vb_split_layout1_base.into_iter().chain(core::iter::once(ninth));
+            core::array::from_fn(|_| chained.next().expect("invariant: exactly 9 entries"))
+        };
+        let vb_split_layout1 = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc { entries: &vb_split_layout1_entries },
+        )
+        .expect("invariant: R9b vb_shade_split Set-1 bind-group layout create");
+
+        // The SSAO edge-avoiding à-trous denoise chain (RHI DISPATCH WIRING follow-up to the
+        // gather above): the shared 4-binding layout { `gAoIn` @0 (R), `gAoOut` @1 (W) STORAGE
+        // images, `gViewT` @2 (R) STORAGE image, the camera UNIFORM buffer @3 } — matching
+        // `ssao_atrous.comp.hlsl`'s set 0 — plus the three role-keyed pipeline variants
+        // (read8/interior/write8; see that shader's header doc for the R8<->R16 format-pin
+        // rationale). Built UNCONDITIONALLY at boot (like `ssao_pipelines` above — the pipeline
+        // itself needs NO device precondition to CREATE; only the interior ring IMAGE needs
+        // `R16_UNORM` storage, checked separately by `GBufferTargets`'s degrade,
+        // `ssao_atrous_storage_ok()`). A 4-byte `{ uint step }` COMPUTE push range
+        // (`SSAO_ATROUS_PUSH_BYTES`) — the current à-trous level's hole width.
+        let ssao_atrous_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: SSAO à-trous bind-group layout create");
+        let ssao_atrous_read8_cs = RhiDevice::create_shader_module(device, ssao_atrous_read8_spirv())
+            .expect("invariant: SSAO à-trous read8 compute shader module create");
+        let ssao_atrous_read8_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &ssao_atrous_read8_cs,
+                entry: c"main",
+                push_constant_bytes: SSAO_ATROUS_PUSH_BYTES,
+                bind_group_layout: Some(&ssao_atrous_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: SSAO à-trous read8 compute pipeline create");
+        let ssao_atrous_interior_cs = RhiDevice::create_shader_module(device, ssao_atrous_spirv())
+            .expect("invariant: SSAO à-trous interior compute shader module create");
+        let ssao_atrous_interior_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &ssao_atrous_interior_cs,
+                entry: c"main",
+                push_constant_bytes: SSAO_ATROUS_PUSH_BYTES,
+                bind_group_layout: Some(&ssao_atrous_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: SSAO à-trous interior compute pipeline create");
+        let ssao_atrous_write8_cs = RhiDevice::create_shader_module(device, ssao_atrous_write8_spirv())
+            .expect("invariant: SSAO à-trous write8 compute shader module create");
+        let ssao_atrous_write8_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &ssao_atrous_write8_cs,
+                entry: c"main",
+                push_constant_bytes: SSAO_ATROUS_PUSH_BYTES,
+                bind_group_layout: Some(&ssao_atrous_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: SSAO à-trous write8 compute pipeline create");
+
+        // Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully off):
+        // the `viewt_from_depth` `gViewT`-producer pipeline — the dedicated 2-binding layout
+        // { SAMPLED depth @0, STORAGE `gViewT` @1 } + the 12-byte `ViewtFromDepthPush` COMPUTE
+        // push range. Built UNCONDITIONALLY here (like `ssao_pipelines`/`ssao_atrous_*` above —
+        // the pipeline itself needs no device precondition to CREATE); `GBufferScene::
+        // path_has_viewt_from_depth` gates whether the pass is DECLARED/RECORDED/dispatched, so a
+        // `Both`/`Sdf`-resolved boot pays only this one negligible pipeline object.
+        let viewt_from_depth_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: viewt_from_depth bind-group layout create");
+        let viewt_from_depth_cs = RhiDevice::create_shader_module(device, viewt_from_depth_spirv())
+            .expect("invariant: viewt_from_depth compute shader module create");
+        let viewt_from_depth_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &viewt_from_depth_cs,
+                entry: c"main",
+                push_constant_bytes: VIEWT_FROM_DEPTH_PUSH_BYTES,
+                bind_group_layout: Some(&viewt_from_depth_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: viewt_from_depth compute pipeline create");
+
+        // TAA-under-VB: the `viewt_from_depth_rz` REVERSE-Z sibling — the dedicated 3-binding
+        // layout { SAMPLED depth @0, STORAGE `gViewT` @1, UNIFORM camera @2 } + the 16-byte
+        // `ViewtFromDepthRzPush` COMPUTE push range. Built UNCONDITIONALLY here (like
+        // `viewt_from_depth_pipeline` above — the pipeline itself needs no device precondition to
+        // CREATE); `GBufferScene::viewt_from_vb_depth` gates whether it is actually dispatched, so
+        // a non-VB or TAA-off boot pays only this one negligible pipeline object.
+        let viewt_from_vb_depth_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: viewt_from_depth_rz bind-group layout create");
+        let viewt_from_vb_depth_cs =
+            RhiDevice::create_shader_module(device, viewt_from_depth_rz_spirv())
+                .expect("invariant: viewt_from_depth_rz compute shader module create");
+        let viewt_from_vb_depth_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &viewt_from_vb_depth_cs,
+                entry: c"main",
+                push_constant_bytes: VIEWT_FROM_DEPTH_RZ_PUSH_BYTES,
+                bind_group_layout: Some(&viewt_from_vb_depth_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: viewt_from_depth_rz compute pipeline create");
+
         // The shader modules are consumed by pipeline creation; destroy them now
         // (mirrors the showcase's post-create module teardown).
         // SAFETY: every module was created on `ctx` above and is no longer
         // needed once its pipeline exists; each is destroyed exactly once; no
         // GPU work has been submitted yet.
         unsafe {
+            RhiDevice::destroy_shader_module(device, viewt_from_vb_depth_cs);
+            RhiDevice::destroy_shader_module(device, viewt_from_depth_cs);
+            RhiDevice::destroy_shader_module(device, ssao_atrous_write8_cs);
+            RhiDevice::destroy_shader_module(device, ssao_atrous_interior_cs);
+            RhiDevice::destroy_shader_module(device, ssao_atrous_read8_cs);
+            RhiDevice::destroy_shader_module(device, taa_resolve_cs);
+            RhiDevice::destroy_shader_module(device, rcas_cs);
+            RhiDevice::destroy_shader_module(device, ssao_cs_high);
+            RhiDevice::destroy_shader_module(device, ssao_cs_medium);
+            RhiDevice::destroy_shader_module(device, ssao_cs_low);
+            RhiDevice::destroy_shader_module(device, ssaa_fs);
+            RhiDevice::destroy_shader_module(device, smaa_blend_fs);
+            RhiDevice::destroy_shader_module(device, smaa_weight_fs);
+            RhiDevice::destroy_shader_module(device, smaa_edge_fs);
+            RhiDevice::destroy_shader_module(device, fxaa_fs);
             RhiDevice::destroy_shader_module(device, sample_fs);
             RhiDevice::destroy_shader_module(device, sample_vs);
             RhiDevice::destroy_shader_module(device, resolve_cs);
+            RhiDevice::destroy_shader_module(device, resolve_wrap_cs);
             RhiDevice::destroy_shader_module(device, cs);
             RhiDevice::destroy_shader_module(device, fs);
             RhiDevice::destroy_shader_module(device, vs);
@@ -1095,6 +3186,431 @@ impl GpuSceneBundles {
         // ── CSM + shadow-atlas trios: ALWAYS created (resolve @12..=15 need
         // valid descriptors); both depth passes stay OFF in R3.
         let csm = CsmResources::create(device, &instance_layout);
+
+        // ── Multi-paradigm render-path plan, rung R4b-b (Set 0 UNIFIED at rung R5 code-review
+        // fix): the Forward FAMILY's mesh raster pipeline(s) + Set-0 (core)/Set-1 (shadow)
+        // bind-group layouts. Built UNCONDITIONALLY at boot (the `ssao_pipelines` precedent —
+        // `ResolvedRenderPath` does not reach `boot()`'s call site, and the pipelines are cheap
+        // to create; only a Forward-family-resolved boot ever RECORDS a given pass).
+        //
+        // Code-review fix (rung R5): an earlier revision built TWO Set-0 layouts — a 5-binding
+        // `forward_layout0` for plain `Forward` and a SEPARATE 7-binding `forward_plus_layout0`
+        // for `ForwardPlus` — but every pipeline in this family shares ONE per-extent descriptor
+        // SET (`ForwardTargets::set0[fi]`, written ONCE against whichever layout the boot path
+        // selects). A pipeline created against a DIFFERENT `VkDescriptorSetLayout` object than
+        // the one the bound `VkDescriptorSet` was allocated from is INCOMPATIBLE at draw time
+        // (`VUID-vkCmdDrawIndexed-None-02699` family) even when the two layouts declare
+        // byte-identical binding shapes — Vulkan compares LAYOUT HANDLES, not structural
+        // equivalence. With validation disabled this manifested as a SILENT no-op (every Forward
+        // draw skipped, the frame showing nothing but the `lit` clear color) whenever a
+        // `forward_sky_pipeline`/`forward_prepass_pipeline` built against the 5-binding handle
+        // was bound alongside a `ForwardPlus`-resolved `forward.set0[fi]` built against the
+        // 7-binding handle. FIX: exactly ONE Set-0 layout for the WHOLE family — `ClusterGrid`/
+        // `LightIndexList` @5/@6 are bound-but-unread placeholders (`scene.light_table`, the
+        // established idiom) under plain `Forward`; every one of the four pipelines below
+        // (`forward_pipeline` GREATER, `forward_sky_pipeline`, `forward_prepass_pipeline`,
+        // `forward_plus_pipeline` EQUAL) is built against THIS SAME layout object, and
+        // `ForwardTargets::build` writes `forward.set0[fi]` against it UNCONDITIONALLY (7
+        // entries every boot — `targets.rs`'s doc). Binding shape: instances @0 (VERTEX),
+        // instance_materials @1 (VERTEX), Camera @2 (FRAGMENT), LightBuf @3 (FRAGMENT),
+        // Materials @4 (FRAGMENT), ClusterGrid @5 (FRAGMENT), LightIndexList @6 (FRAGMENT) —
+        // `forward_opaque.fs.hlsl`'s doc (bindings 5/6 declared only under `-D FROXEL=1`, but a
+        // pipeline layout may always be a SUPERSET of what a given shader stage references).
+        //
+        // Set 1 binding shape: `gCsm`+`gCsmCmp` @0 (combined), `CsmCascades` @1,
+        // `gShadowAtlas`+`gShadowAtlasCmp` @2 (combined), `ShadowAtlas` @3 — every binding
+        // `FRAGMENT | COMPUTE` — `forward_opaque.fs.hlsl`'s OWN binding numbers (a DIFFERENT
+        // layout than the deferred resolve's single compute set, same underlying resources).
+        // COMPUTE is load-bearing, not decoration: this ONE layout object (and so every
+        // `ForwardTargets::set1[fi]` allocated from it) is also Set 1 of the compute pipelines
+        // that read the shadow tables — `sdf_forward_march` and the VB resolve/shade family —
+        // and a compute pipeline whose shader reads a binding without COMPUTE in its
+        // `stageFlags` is invalid (VUID-VkComputePipelineCreateInfo-layout-07988). Widening
+        // the flags keeps ONE handle, so the graphics and compute bind sites stay compatible;
+        // a COMPUTE-only copy would need a second `set1` array written in lock-step with this
+        // one (the `vb_layout0` VERTEX|COMPUTE / FRAGMENT|COMPUTE precedent below).
+        //
+        // Boot-panic fix: renumbered from an original Set 2 design (with an empty Set-1
+        // PLACEHOLDER layout in between, for Vulkan's contiguous-set-index rule). A zero-binding
+        // `BindGroupLayoutDesc` violates `create_bind_group_layout`'s own `1..=
+        // MAX_BIND_GROUP_BINDINGS` invariant (`rhi_impl/device.rs:205`) — a real
+        // `GpuSceneBundles::boot` panic. `forward_opaque.fs.hlsl`'s shadow bindings were
+        // renumbered to Set 1 instead (that shader's doc), so Forward is a plain 2-set
+        // `[Set0, Set1]` pipeline — no placeholder needed.
+        let forward_layout1 = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::CombinedImageSampler,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::UniformBuffer,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::CombinedImageSampler,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        count: 1,
+                        kind: DescriptorKind::UniformBuffer,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: Forward Set-1 bind-group layout create");
+        // The UNIFIED Set-0 (core) layout — 7 bindings, shared by EVERY Forward-family pipeline
+        // (see the block comment above `forward_layout1` for the code-review fix rationale).
+        let forward_layout0 = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::UniformBuffer,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 4,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                    // ClusterGrid @5 (the L1 froxel cell array, `{offset,count}` per froxel) —
+                    // bound-but-unread under plain `Forward` (the base FS never declares this
+                    // binding; `ForwardTargets::build` fills the slot with `scene.light_table`).
+                    BindGroupLayoutEntry {
+                        binding: 5,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                    // LightIndexList @6 (the per-froxel light-index slices) — same bound-but-
+                    // unread discipline as @5 under plain `Forward`.
+                    BindGroupLayoutEntry {
+                        binding: 6,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: Forward Set-0 bind-group layout create");
+        let forward_vs = RhiDevice::create_shader_module(device, forward_opaque_vs_spirv())
+            .expect("invariant: Forward mesh vertex shader module create");
+        let forward_fs = RhiDevice::create_shader_module(device, forward_opaque_fs_spirv())
+            .expect("invariant: Forward mesh fragment shader module create");
+        let forward_pipeline = ctx
+            .create_graphics_pipeline_forward(
+                &GraphicsPipelineDesc {
+                    vertex_module: &forward_vs,
+                    vertex_entry: c"main",
+                    fragment_module: &forward_fs,
+                    fragment_entry: c"main",
+                    // ONE color attachment (`lit`, reused from the Deferred allocation, C5) —
+                    // unlike the 3/4-MRT Deferred raster pipelines.
+                    color_formats: &[RASTER_COLOR_FORMAT],
+                    // Forward's OWN reverse-Z depth image (a SEPARATE allocation from Deferred's
+                    // custom-linear `depth` — Decision 4); the format is the SAME `D32Sfloat`.
+                    depth_format: Some(Format::D32Sfloat),
+                    topology: PrimitiveTopology::TriangleList,
+                    vertex_layout: Some(VertexBufferLayout {
+                        stride: MESH_VERTEX_STRIDE as u32,
+                        attributes: &attributes_pos_normal,
+                    }),
+                    push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
+                    bind_group_layout: Some(&forward_layout0),
+                    blend: None,
+                    cull_mode: CullMode::None,
+                    depth_bias: None,
+                },
+                forward_layout1.set_layout(),
+            )
+            .expect("invariant: Forward mesh graphics pipeline create");
+        // SAFETY: both modules were created on `device` and are consumed by the pipeline
+        // create; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, forward_fs);
+            RhiDevice::destroy_shader_module(device, forward_vs);
+        }
+
+        // ── Code-review follow-up (rung R4b-b): the Forward v1 sky BACKGROUND pipeline
+        // (`forward_sky.{vs,fs}.hlsl`) — replicates the deferred resolve's analytic sky/ground
+        // gradient + sun disc for `mask == 0` pixels (`deferred_pbr.hlsl:1369-1414`), drawn FIRST
+        // inside `forward_opaque`'s SAME dynamic-rendering scope so opaque geometry then draws
+        // over it. REUSES `forward_layout0` (its FS reads only Camera @2 + LightBuf @3, a subset
+        // of that layout's 5 bindings — the SAME "bound-but-unread subset" idiom every other
+        // pipeline in this fn's set already relies on) as its only set (the sky FS never reads
+        // the shadow Set-1 layout). `depth_format: Some(D32Sfloat)` — the forward scope's own
+        // depth format — because that scope ALWAYS binds `forward_depth`, and a pipeline
+        // declaring `depthAttachmentFormat == UNDEFINED` may be drawn in a scope with a depth
+        // attachment only under `VK_EXT_dynamic_rendering_unused_attachments`
+        // (VUID-vkCmdDraw-dynamicRenderingUnusedAttachments-08914), which this engine does not
+        // enable. `create_graphics_pipeline_forward_sky` pairs that format with
+        // `VK_COMPARE_OP_ALWAYS` and depth write OFF, so every sky fragment passes and none is
+        // written — the same observable result as no depth test — and `forward_pipeline`'s own
+        // `VK_COMPARE_OP_GREATER` depth-write pass (drawn right after, same scope) is untouched.
+        // No vertex buffer (`vertex_layout: None`, `SV_VertexID`-only fullscreen triangle) and no
+        // push constants (`push_constant_bytes: 0`).
+        let sky_vs = RhiDevice::create_shader_module(device, forward_sky_vs_spirv())
+            .expect("invariant: Forward sky vertex shader module create");
+        let sky_fs = RhiDevice::create_shader_module(device, forward_sky_fs_spirv())
+            .expect("invariant: Forward sky fragment shader module create");
+        let forward_sky_pipeline = ctx
+            .create_graphics_pipeline_forward_sky(&GraphicsPipelineDesc {
+                vertex_module: &sky_vs,
+                vertex_entry: c"main",
+                fragment_module: &sky_fs,
+                fragment_entry: c"main",
+                color_formats: &[RASTER_COLOR_FORMAT],
+                depth_format: Some(Format::D32Sfloat),
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: None,
+                push_constant_bytes: 0,
+                bind_group_layout: Some(&forward_layout0),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            })
+            .expect("invariant: Forward sky graphics pipeline create");
+        // SAFETY: both modules were created on `device` and are consumed by the pipeline
+        // create; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, sky_fs);
+            RhiDevice::destroy_shader_module(device, sky_vs);
+        }
+
+        // ── Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth PRE-PASS
+        // pipeline (Decision 4's EQUAL-depth early-Z contract). Built UNCONDITIONALLY at boot
+        // (the SAME "cheap, no per-frame cost either way" precedent as the Forward v1 trio
+        // above — `ResolvedRenderPath` does not reach `boot()`'s call site); only a
+        // `ForwardPlus`-resolved boot ever RECORDS it. Reuses `forward_layout0` as its ONLY set
+        // (the prepass VS references only the `instances` binding, a subset of that layout's 5
+        // bindings — the SAME bound-but-unread-subset idiom `forward_sky_pipeline` already
+        // establishes, so no new bind-group layout is needed for this pipeline). DEPTH-ONLY:
+        // `color_formats: &[]` — the SAME zero-color-attachment shape `build_graphics_pipeline`
+        // already builds for the CSM/atlas shadow-map pipelines.
+        let prepass_vs = RhiDevice::create_shader_module(device, depth_prepass_vs_spirv())
+            .expect("invariant: ForwardPlus depth-prepass vertex shader module create");
+        let prepass_fs = RhiDevice::create_shader_module(device, depth_prepass_fs_spirv())
+            .expect("invariant: ForwardPlus depth-prepass fragment shader module create");
+        let forward_prepass_pipeline = ctx
+            .create_graphics_pipeline_forward_prepass(&GraphicsPipelineDesc {
+                vertex_module: &prepass_vs,
+                vertex_entry: c"main",
+                fragment_module: &prepass_fs,
+                fragment_entry: c"main",
+                color_formats: &[],
+                depth_format: Some(Format::D32Sfloat),
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: Some(VertexBufferLayout {
+                    stride: MESH_VERTEX_STRIDE as u32,
+                    attributes: &attributes_pos,
+                }),
+                push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
+                bind_group_layout: Some(&forward_layout0),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            })
+            .expect("invariant: ForwardPlus depth-prepass graphics pipeline create");
+        // SAFETY: both modules were created on `device` and are consumed by the pipeline
+        // create; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, prepass_fs);
+            RhiDevice::destroy_shader_module(device, prepass_vs);
+        }
+
+        // ── Multi-paradigm render-path plan, rung R5 (ForwardPlus): the `forward_opaque` FROXEL
+        // pipeline variant (`VK_COMPARE_OP_EQUAL`, depth-write OFF) — built against the SAME
+        // UNIFIED `forward_layout0`/`forward_layout1` every other Forward-family pipeline uses
+        // (the code-review fix above; NO separate layout object). Built UNCONDITIONALLY at boot,
+        // same precedent as above.
+        let forward_plus_vs = RhiDevice::create_shader_module(device, forward_opaque_vs_spirv())
+            .expect("invariant: ForwardPlus opaque vertex shader module create");
+        let forward_plus_fs =
+            RhiDevice::create_shader_module(device, forward_opaque_froxel_fs_spirv())
+                .expect("invariant: ForwardPlus opaque froxel fragment shader module create");
+        let forward_plus_pipeline = ctx
+            .create_graphics_pipeline_forward_plus(
+                &GraphicsPipelineDesc {
+                    vertex_module: &forward_plus_vs,
+                    vertex_entry: c"main",
+                    fragment_module: &forward_plus_fs,
+                    fragment_entry: c"main",
+                    color_formats: &[RASTER_COLOR_FORMAT],
+                    depth_format: Some(Format::D32Sfloat),
+                    topology: PrimitiveTopology::TriangleList,
+                    vertex_layout: Some(VertexBufferLayout {
+                        stride: MESH_VERTEX_STRIDE as u32,
+                        attributes: &attributes_pos_normal,
+                    }),
+                    push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
+                    bind_group_layout: Some(&forward_layout0),
+                    blend: None,
+                    cull_mode: CullMode::None,
+                    depth_bias: None,
+                },
+                forward_layout1.set_layout(),
+            )
+            .expect("invariant: ForwardPlus opaque froxel graphics pipeline create");
+        // SAFETY: both modules were created on `device` and are consumed by the pipeline
+        // create; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, forward_plus_fs);
+            RhiDevice::destroy_shader_module(device, forward_plus_vs);
+        }
+
+        // ── Multi-paradigm render-path plan, rung R-SDFFWD (+ the TAA-under-VB `VIEWT` rung):
+        // the `sdf_forward_march` pass's Set-0 vocabulary bind-group LAYOUT (14 bindings,
+        // matching the shader's own binding table doc — `shaders/sdf_forward_march.comp.hlsl`'s
+        // header) + its FOUR `{HAS_MESH} x {VIEWT}` compute pipeline variants.
+        // Built UNCONDITIONALLY at boot (the Forward v1 trio's own "cheap, no per-frame cost
+        // either way" precedent — `ResolvedRenderPath` does not reach `boot()`'s call site); only
+        // a Forward-family-resolved boot with the SDF leg present ever RECORDS the pass. ALL
+        // pipeline variants are built against this ONE layout object (the code-review-fixed "one
+        // layout per pipeline family" discipline `forward_layout0` already establishes) at Set 0,
+        // + `forward_layout1` at Set 1 (the shadow set, REUSED VERBATIM — no separate layout; the
+        // reuse is legal because every one of its bindings carries `COMPUTE` in `stageFlags`,
+        // VUID-VkComputePipelineCreateInfo-layout-07988 — see its own block comment):
+        // @12 is HAS_MESH-referenced only and @13 VIEWT-referenced only, bound-but-unread by the
+        // other variants (the R2 contract).
+        let sdf_forward_march_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    // t0: edit-list header (READ-ONLY).
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    // t1: LightBuf (Lighting L0 light table).
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    // t2: Materials (PBR material table).
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    // b3: Camera (80-byte extent/camera block).
+                    BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                    // u4: gLit STORAGE image.
+                    BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    // t5: M1/M4 level-0 pointer grid.
+                    BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    // t6/s6: M2/M4 level-0 trilinear atlas (combined).
+                    BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+                    // t7: M4 level-1 pointer grid.
+                    BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    // t8/s8: M4 level-1 trilinear atlas (combined).
+                    BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+                    // t9: M4 level-2 pointer grid.
+                    BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    // t10/s10: M4 level-2 trilinear atlas (combined).
+                    BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+                    // b11: BrickLevels UBO (M4Level clip-map geometry, don't-care while brick_levels==0).
+                    BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                    // t12: gForwardDepth SAMPLED (declared for ALL pipeline variants — the R2
+                    // bound-but-unread contract; the mesh-less SPIR-V never statically references it).
+                    BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
+                    // u13: gViewT STORAGE (TAA-under-VB; VIEWT-variant-referenced only — the
+                    // no-VIEWT SPIR-V never statically references it, the SAME R2 contract).
+                    BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: sdf_forward_march Set-0 bind-group layout create");
+        let sdf_forward_march_cs = RhiDevice::create_shader_module(device, sdf_forward_march_spirv())
+            .expect("invariant: sdf_forward_march HAS_MESH compute shader module create");
+        let sdf_forward_march_pipeline = ctx
+            .create_compute_pipeline_forward(
+                &ComputePipelineDesc {
+                    module: &sdf_forward_march_cs,
+                    entry: c"main",
+                    push_constant_bytes: SDF_FORWARD_MARCH_PUSH_BYTES,
+                    bind_group_layout: Some(&sdf_forward_march_layout),
+                    spec_constants: &[],
+                },
+                forward_layout1.set_layout(),
+            )
+            .expect("invariant: sdf_forward_march HAS_MESH compute pipeline create");
+        let sdf_forward_march_sdfonly_cs =
+            RhiDevice::create_shader_module(device, sdf_forward_march_sdfonly_spirv())
+                .expect("invariant: sdf_forward_march mesh-less compute shader module create");
+        let sdf_forward_march_sdfonly_pipeline = ctx
+            .create_compute_pipeline_forward(
+                &ComputePipelineDesc {
+                    module: &sdf_forward_march_sdfonly_cs,
+                    entry: c"main",
+                    push_constant_bytes: SDF_FORWARD_MARCH_PUSH_BYTES,
+                    bind_group_layout: Some(&sdf_forward_march_layout),
+                    spec_constants: &[],
+                },
+                forward_layout1.set_layout(),
+            )
+            .expect("invariant: sdf_forward_march mesh-less compute pipeline create");
+        // TAA-under-VB: the two `VIEWT` gViewT-producing siblings (same layout, same push).
+        let sdf_forward_march_viewt_cs =
+            RhiDevice::create_shader_module(device, sdf_forward_march_viewt_spirv())
+                .expect("invariant: sdf_forward_march HAS_MESH+VIEWT compute shader module create");
+        let sdf_forward_march_viewt_pipeline = ctx
+            .create_compute_pipeline_forward(
+                &ComputePipelineDesc {
+                    module: &sdf_forward_march_viewt_cs,
+                    entry: c"main",
+                    push_constant_bytes: SDF_FORWARD_MARCH_PUSH_BYTES,
+                    bind_group_layout: Some(&sdf_forward_march_layout),
+                    spec_constants: &[],
+                },
+                forward_layout1.set_layout(),
+            )
+            .expect("invariant: sdf_forward_march HAS_MESH+VIEWT compute pipeline create");
+        let sdf_forward_march_sdfonly_viewt_cs =
+            RhiDevice::create_shader_module(device, sdf_forward_march_sdfonly_viewt_spirv())
+                .expect("invariant: sdf_forward_march mesh-less VIEWT compute shader module create");
+        let sdf_forward_march_sdfonly_viewt_pipeline = ctx
+            .create_compute_pipeline_forward(
+                &ComputePipelineDesc {
+                    module: &sdf_forward_march_sdfonly_viewt_cs,
+                    entry: c"main",
+                    push_constant_bytes: SDF_FORWARD_MARCH_PUSH_BYTES,
+                    bind_group_layout: Some(&sdf_forward_march_layout),
+                    spec_constants: &[],
+                },
+                forward_layout1.set_layout(),
+            )
+            .expect("invariant: sdf_forward_march mesh-less VIEWT compute pipeline create");
+        // SAFETY: all four modules were created on `device` and are consumed by their respective
+        // pipeline create calls above; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, sdf_forward_march_sdfonly_viewt_cs);
+            RhiDevice::destroy_shader_module(device, sdf_forward_march_viewt_cs);
+            RhiDevice::destroy_shader_module(device, sdf_forward_march_sdfonly_cs);
+            RhiDevice::destroy_shader_module(device, sdf_forward_march_cs);
+        }
 
         // ── The B3 interpolation pre-pass (host plan R5, refined-B): the pair /
         // out-slot SSBO rings + bind groups + compute pipeline, sized to the same
@@ -1151,7 +3667,7 @@ impl GpuSceneBundles {
                 )
                 .expect("invariant: motion-vector bind-group layout create");
 
-                // The MV pipeline: identical to `raster_pipeline` (same 40-byte vertex layout, D32
+                // The MV pipeline: identical to `raster_pipeline` (same 64-byte vertex layout, D32
                 // depth, 88-byte VERTEX push, CullMode::None, no blend/bias) EXCEPT a 4th color
                 // format `R16G16Sfloat` (the motion_vec Δuv attachment) + the 3-binding MV layout.
                 let mv_vs = RhiDevice::create_shader_module(device, gbuffer_mrt_mv_vs_spirv())
@@ -1179,7 +3695,7 @@ impl GpuSceneBundles {
                         depth_format: Some(Format::D32Sfloat),
                         topology: PrimitiveTopology::TriangleList,
                         vertex_layout: Some(VertexBufferLayout {
-                            stride: 40,
+                            stride: MESH_VERTEX_STRIDE as u32,
                             attributes: &mv_attributes,
                         }),
                         push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
@@ -1198,11 +3714,12 @@ impl GpuSceneBundles {
                 }
 
                 // ── HW-RT Rung 3b step 5b: the SDF motion-vector VIS-variant resolve pipeline +
-                // its 24-binding layout. The layout = the 22-binding VIS/DENOISED entries (the 19
-                // software resolve bindings + TLAS @19 + soft-shadow UBO @20 + `gShadowVis` @21,
-                // rebuilt here from `resolve_entries`) PLUS the `MotionCam` UBO @22 + the
-                // `motion_vec` STORAGE image @23 (both COMPUTE). Built under the SAME `mv` gate
-                // (`ray_query_enabled && shadow_denoise_storage_ok`); bound only when temporal is on.
+                // its 25-binding layout. The layout = the 23-binding VIS/DENOISED entries (the 19
+                // software resolve bindings + TLAS @19 + soft-shadow UBO @20 + the raster depth
+                // @21 (lane fix/hwrt-shadow-ray-origin) + `gShadowVis` @22, rebuilt here from
+                // `resolve_entries`) PLUS the `MotionCam` UBO @23 + the `motion_vec` STORAGE image
+                // @24 (both COMPUTE). Built under the SAME `mv` gate (`ray_query_enabled &&
+                // shadow_denoise_storage_ok`); bound only when temporal is on.
                 let mut vis_mv_entries = resolve_entries.to_vec();
                 vis_mv_entries.push(BindGroupLayoutEntry {
                     binding: 19,
@@ -1219,17 +3736,23 @@ impl GpuSceneBundles {
                 vis_mv_entries.push(BindGroupLayoutEntry {
                     binding: 21,
                     count: 1,
-                    kind: DescriptorKind::StorageImage,
+                    kind: DescriptorKind::SampledImage,
                     stage: ShaderStage::COMPUTE,
                 });
                 vis_mv_entries.push(BindGroupLayoutEntry {
                     binding: 22,
                     count: 1,
-                    kind: DescriptorKind::UniformBuffer,
+                    kind: DescriptorKind::StorageImage,
                     stage: ShaderStage::COMPUTE,
                 });
                 vis_mv_entries.push(BindGroupLayoutEntry {
                     binding: 23,
+                    count: 1,
+                    kind: DescriptorKind::UniformBuffer,
+                    stage: ShaderStage::COMPUTE,
+                });
+                vis_mv_entries.push(BindGroupLayoutEntry {
+                    binding: 24,
                     count: 1,
                     kind: DescriptorKind::StorageImage,
                     stage: ShaderStage::COMPUTE,
@@ -1239,7 +3762,7 @@ impl GpuSceneBundles {
                     &BindGroupLayoutDesc { entries: &vis_mv_entries },
                 )
                 .expect("invariant: rung-3b VIS-MV resolve bind-group layout create");
-                // The VIS-MV variant TRACES (it writes `gShadowVis` @21 like the base VIS), so bake
+                // The VIS-MV variant TRACES (it writes `gShadowVis` @22 like the base VIS), so bake
                 // the SAME `SHADOW_RAY_COUNT` spec-const (id 0) as the VIS / RESOLVE_INLINE resolve
                 // so `mesh_vis` stays bit-identical.
                 let vis_mv_ray_count = RayShadowConfig::default().ray_count.max(1);
@@ -1314,6 +3837,108 @@ impl GpuSceneBundles {
                     .expect("invariant: motion-vector bind group create")
                 });
 
+                // F8-mv: the combined MV+PM 4-binding set-0 layout — the 3-binding MV layout
+                // (current @0 / prev @1 / motion-cam @2) PLUS the per-instance material SSBO
+                // @3 (VERTEX; the VS's nested `#if defined(MOTION_VECTORS)` branch moves
+                // `instance_materials` here to dodge the binding-1 collision with
+                // `prev_instances`).
+                let mvpm_layout = RhiDevice::create_bind_group_layout(
+                    device,
+                    &BindGroupLayoutDesc {
+                        entries: &[
+                            BindGroupLayoutEntry {
+                                binding: 0,
+                                count: 1,
+                                kind: DescriptorKind::StorageBuffer,
+                                stage: ShaderStage::VERTEX,
+                            },
+                            BindGroupLayoutEntry {
+                                binding: 1,
+                                count: 1,
+                                kind: DescriptorKind::StorageBuffer,
+                                stage: ShaderStage::VERTEX,
+                            },
+                            BindGroupLayoutEntry {
+                                binding: 2,
+                                count: 1,
+                                kind: DescriptorKind::UniformBuffer,
+                                stage: ShaderStage::VERTEX,
+                            },
+                            BindGroupLayoutEntry {
+                                binding: 3,
+                                count: 1,
+                                kind: DescriptorKind::StorageBuffer,
+                                stage: ShaderStage::VERTEX,
+                            },
+                        ],
+                    },
+                )
+                .expect("invariant: mvpm bind-group layout create");
+
+                // F8-mv: the combined pipeline — identical to `mv_pipeline` (same 64-byte
+                // vertex layout, D32 depth, 88-byte VERTEX push, CullMode::None, no
+                // blend/bias, the same 4 color formats) EXCEPT the 4-binding `mvpm_layout`.
+                let mvpm_vs = RhiDevice::create_shader_module(device, gbuffer_mrt_mvpm_vs_spirv())
+                    .expect("invariant: mvpm vertex shader module create");
+                let mvpm_fs = RhiDevice::create_shader_module(device, gbuffer_mrt_mvpm_fs_spirv())
+                    .expect("invariant: mvpm fragment shader module create");
+                let mvpm_pipeline = RhiDevice::create_graphics_pipeline(
+                    device,
+                    &GraphicsPipelineDesc {
+                        vertex_module: &mvpm_vs,
+                        vertex_entry: c"main",
+                        fragment_module: &mvpm_fs,
+                        fragment_entry: c"main",
+                        color_formats: &[
+                            RASTER_COLOR_FORMAT,
+                            RASTER_COLOR_FORMAT,
+                            RASTER_COLOR_FORMAT,
+                            Format::R16G16Sfloat,
+                        ],
+                        depth_format: Some(Format::D32Sfloat),
+                        topology: PrimitiveTopology::TriangleList,
+                        vertex_layout: Some(VertexBufferLayout {
+                            stride: MESH_VERTEX_STRIDE as u32,
+                            attributes: &mv_attributes,
+                        }),
+                        push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
+                        bind_group_layout: Some(&mvpm_layout),
+                        blend: None,
+                        cull_mode: CullMode::None,
+                        depth_bias: None,
+                    },
+                )
+                .expect("invariant: mvpm graphics pipeline create");
+                // SAFETY: both modules were created on `device` and are consumed by the
+                // pipeline create; each is destroyed once; no GPU work is in flight yet.
+                unsafe {
+                    RhiDevice::destroy_shader_module(device, mvpm_fs);
+                    RhiDevice::destroy_shader_module(device, mvpm_vs);
+                }
+
+                // Per-FIF bind groups: slot `i` binds { instances[i], prev[i], motion_cam[i],
+                // pm_instance_material_rings[i] }.
+                let mvpm_bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
+                    core::array::from_fn(|i| {
+                        RhiDevice::create_bind_group(
+                            device,
+                            &BindGroupDesc {
+                                layout: &mvpm_layout,
+                                entries: &[
+                                    BindGroupEntry::StorageBuffer { buffer: &instance_rings[i] },
+                                    BindGroupEntry::StorageBuffer {
+                                        buffer: &prev_instance_rings[i],
+                                    },
+                                    BindGroupEntry::UniformBuffer { buffer: &motion_cam_ubo[i] },
+                                    BindGroupEntry::StorageBuffer {
+                                        buffer: &pm_instance_material_rings[i],
+                                    },
+                                ],
+                            },
+                        )
+                        .expect("invariant: mvpm bind group create")
+                    });
+
                 MotionVecResources {
                     pipeline: mv_pipeline,
                     layout: mv_layout,
@@ -1322,11 +3947,668 @@ impl GpuSceneBundles {
                     prev_instance_rings,
                     motion_cam_ubo,
                     bind_groups,
+                    mvpm_pipeline,
+                    mvpm_layout,
+                    mvpm_bind_groups,
                 }
             },
         );
 
+        // ── Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 (fused
+        // `vb_resolve`) Set-0 layout + `vb_raster`/`vb_sky` pipelines — built UNCONDITIONALLY at
+        // boot (the Forward v1 trio's own "cheap, no per-frame cost either way" precedent).
+        // `vb_resolve_pipeline` itself is built LAZILY (`build_vb_resolve_pipeline`, mirroring
+        // `build_textured_resources`'s deferred-build shape) because its Set 2 needs the
+        // Decision-0 geometry table's layout, which does not exist at this call site (the SAME
+        // "does not exist yet" reason `tex` is lazy — see that field's doc).
+        //
+        // Binding numbers match `forward_layout0`'s own for the shared subset (instances @0,
+        // instance_materials @1, Camera @2, LightBuf @3, Materials @4) so `vb_sky_pipeline` can
+        // reuse `forward_sky.{vs,fs}.hlsl`'s compiled SPIR-V verbatim (its FS references ONLY
+        // Camera @2 + LightBuf @3, a bound-but-unread subset). `gVbId` @5 (SAMPLED) + `gLit` @6
+        // (STORAGE) are VB-only, appended after the shared subset.
+        let vb_layout0 = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX | ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::UniformBuffer,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 4,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 5,
+                        count: 1,
+                        kind: DescriptorKind::SampledImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 6,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    // VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a
+                    // (dark infra): `gClassify` @7 (COMPUTE-only STORAGE_BUFFER, the packed
+                    // classify buffer `shaders/vb_classify_common.hlsli` declares). Added to
+                    // this ONE shared layout object BEFORE any VB pipeline is built below (R5 —
+                    // a set built against a DIFFERENT, structurally-identical layout object is
+                    // silently incompatible with a pipeline built against this one), so
+                    // `vb_raster_pipeline`/`vb_sky_pipeline`/`vb_resolve_pipeline` all rebuild
+                    // against the 8-binding layout; bound-but-unread by their frozen SPIR-V
+                    // (none of the three declares a `binding(7,0)`).
+                    BindGroupLayoutEntry {
+                        binding: 7,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    // VB-SV0 DP2: `gSdfTerm` @10 (COMPUTE-only SAMPLED_IMAGE) — the dedicated
+                    // `sdf_mesh_shadow` pass's R8G8 term. The SHIPPED design binds the REAL
+                    // per-FIF `sdf_term` ring on every VB boot — there is no null-placeholder
+                    // re-point, so recording never branches on arming. The ring is seeded white
+                    // (1,1) at creation (`seed_sdf_term_ring`) purely so every texel is DEFINED
+                    // before the first armed read; a mode-0 frame never reads it at all (the
+                    // tails' `.Load` is mode-gated, and their disarmed neutral is a shader-local
+                    // constant, not this image).
+                    // The slot the @11 comment below has been HOLDING since the S2 revert; added
+                    // to this ONE shared layout object before any VB pipeline is built (R5), and
+                    // as of DP2 the ten lit-producer modules DO declare `binding(10, 0)` — read
+                    // behind the runtime mode gate, so a mode-0 frame never touches it.
+                    BindGroupLayoutEntry {
+                        binding: 10,
+                        count: 1,
+                        kind: DescriptorKind::SampledImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    // Virtual-geometry ladder, rung R2d-2 (inert plumbing): `gVbVisibleInstance`
+                    // @11 (VERTEX-stage STORAGE_BUFFER, `Self::vb_visible_instance`) — the
+                    // per-instance survivor list R2d's per-INSTANCE cull will compact into and the
+                    // raster's vertex stage will index through. @11, not @8: @8/@9 belong to the
+                    // froxel pair in `vb_layout0_froxel` and @10 is held for VB-SV0's own Set-0
+                    // widening, so a single binding number is free in BOTH layouts and one compiled
+                    // module can name it under either. Added to this ONE shared layout object
+                    // BEFORE any VB pipeline is built below (R5 — a set built against a DIFFERENT,
+                    // structurally-identical layout object is silently incompatible), so every VB
+                    // pipeline rebuilds against the 9-binding layout; bound-but-unread by their
+                    // frozen SPIR-V, the @7 precedent above — EXCEPT `vb_raster.vs.hlsl`, which
+                    // declares `binding(11, 0)` and reads it from VG rung R2d-4 on.
+                    BindGroupLayoutEntry {
+                        binding: 11,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: VB Set-0 bind-group layout create");
+
+        // VB-SV0 DP1: the dedicated prepass's OWN Set-0 layout — see the field's doc for why it
+        // is not `vb_layout0`. Binding numbers mirror the tails' where the resource is shared
+        // (0/2/3/5) so a reader diffing the two vocabularies sees the pass's own surface (6, 10).
+        let sdf_mesh_shadow_layout0 = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::UniformBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 5,
+                        count: 1,
+                        kind: DescriptorKind::SampledImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 6,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 10,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: VB-SV0 sdf_mesh_shadow Set-0 bind-group layout create");
+
+        let vb_raster_vs = RhiDevice::create_shader_module(device, vb_raster_vs_spirv())
+            .expect("invariant: VB raster vertex shader module create");
+        let vb_raster_fs = RhiDevice::create_shader_module(device, vb_raster_fs_spirv())
+            .expect("invariant: VB raster fragment shader module create");
+        // Rung-R8 GPU regression fix (code review): `RhiDevice::create_graphics_pipeline` (the
+        // PLAIN builder) hardcodes `VK_COMPARE_OP_LESS` + depth-write ON — the standard forward-Z
+        // contract. `vb_raster`'s depth image is cleared to `0.0` and needs `VK_COMPARE_OP_GREATER`
+        // (Decision 4, hardware reverse-Z): under `LESS` against a `0.0` clear, a reverse-Z depth
+        // value (always `> 0.0`) NEVER satisfies the test, so EVERY fragment failed depth and
+        // `vb_id`/`vb_depth` never received a single write (confirmed by a GPU diagnostic: zero
+        // non-sentinel pixels even after the `mvp`-matrix fix). `create_graphics_pipeline_vb_raster`
+        // (the 1-set GREATER-compare, write-ON builder — mirrors `create_graphics_pipeline_forward`'s
+        // own reverse-Z contract) is the correct one.
+        let vb_raster_pipeline = ctx
+            .create_graphics_pipeline_vb_raster(&GraphicsPipelineDesc {
+                vertex_module: &vb_raster_vs,
+                vertex_entry: c"main",
+                fragment_module: &vb_raster_fs,
+                fragment_entry: c"main",
+                // The `vb_id` R32G32_UINT color attachment + VB's OWN reverse-Z depth
+                // (`forward.depth`, REUSED — `VbTargets`'s doc).
+                color_formats: &[Format::R32G32Uint],
+                depth_format: Some(Format::D32Sfloat),
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: Some(VertexBufferLayout {
+                    stride: MESH_VERTEX_STRIDE as u32,
+                    attributes: &attributes_pos,
+                }),
+                push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
+                bind_group_layout: Some(&vb_layout0),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            })
+            .expect("invariant: VB raster graphics pipeline create");
+        // SAFETY: both modules were created on `device` and are consumed by the pipeline
+        // create; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_raster_fs);
+            RhiDevice::destroy_shader_module(device, vb_raster_vs);
+        }
+
+        // The VB v1 sky pipeline — REUSES the EXISTING `forward_sky.{vs,fs}.hlsl` compiled
+        // SPIR-V verbatim (byte-identical shader modules to `forward_sky_pipeline`'s own), a NEW
+        // pipeline object built against `vb_layout0` (`GBufferScene::vb_sky_pipeline`'s doc).
+        let vb_sky_vs = RhiDevice::create_shader_module(device, forward_sky_vs_spirv())
+            .expect("invariant: VB sky vertex shader module create");
+        let vb_sky_fs = RhiDevice::create_shader_module(device, forward_sky_fs_spirv())
+            .expect("invariant: VB sky fragment shader module create");
+        let vb_sky_pipeline = RhiDevice::create_graphics_pipeline(
+            device,
+            &GraphicsPipelineDesc {
+                vertex_module: &vb_sky_vs,
+                vertex_entry: c"main",
+                fragment_module: &vb_sky_fs,
+                fragment_entry: c"main",
+                color_formats: &[RASTER_COLOR_FORMAT],
+                depth_format: None,
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: None,
+                push_constant_bytes: 0,
+                bind_group_layout: Some(&vb_layout0),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            },
+        )
+        .expect("invariant: VB sky graphics pipeline create");
+        // SAFETY: both modules were created on `device` and are consumed by the pipeline
+        // create; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_sky_fs);
+            RhiDevice::destroy_shader_module(device, vb_sky_vs);
+        }
+
+        // The per-slot VB instance-model SSBO ring — Decision 0's 64-byte `VbInstanceRow` stride
+        // (a DEDICATED ring, distinct from `instance_rings`' 48-byte `InstanceModelCol`), sized
+        // to the SAME `INSTANCE_CAPACITY` (rung R8 v1 scope cut: no growth-past-cap support yet).
+        let vb_instance_ring_bytes =
+            (INSTANCE_CAPACITY * boyko_render::instance_model::VB_INSTANCE_ROW_BYTES) as u64;
+        let vb_instance_rings: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: vb_instance_ring_bytes,
+                usage: BufferUsage::STORAGE,
+                location: MemoryLocation::HostVisibleCoherent,
+            })
+            .expect("invariant: VB instance ring buffer create")
+        });
+
+        // Rung R2a': one record per DrawBatch. `INSTANCE_CAPACITY` is a generous ceiling for the
+        // BATCH count (batches <= instances, since every batch holds at least one instance), and at
+        // 20 B/record the whole array is 20 KiB -- comfortably inside `vkCmdUpdateBuffer`'s 65536-byte
+        // inline limit, which is the constraint that actually binds here.
+        const _: () = assert!(
+            INSTANCE_CAPACITY * 20 <= 65536,
+            "rung R2a': the indirect record array must fit vkCmdUpdateBuffer's inline limit"
+        );
+        let vb_indirect: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: VB_INDIRECT_BYTES,
+                // Rung R2c0 added STORAGE: the batch cull rewrites `instanceCount` in place, so
+                // the same allocation is now both a compute UAV and an indirect-fetch source.
+                // Rung R2d-5 spells TRANSFER_SRC: the readback probe copies this array's
+                // post-cull `instanceCount` words, which is the only place the number the
+                // rasterizer FETCHES can be observed (the descriptors carry the pre-cull one).
+                // The bit is DECLARATIVE, not enabling — `create_buffer` already ORs
+                // TRANSFER_SRC | TRANSFER_DST into every DeviceLocal buffer, so the created usage
+                // is byte-identical with or without it. It is written to state the intent and to
+                // match `vb_cull_visible`'s spelling; no reader should conclude the copy depended
+                // on this edit.
+                usage: BufferUsage::INDIRECT
+                    | BufferUsage::TRANSFER_DST
+                    | BufferUsage::STORAGE
+                    | BufferUsage::TRANSFER_SRC,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB indirect-draw record buffer create")
+        });
+        // VG R3 piece 2 step P2-3: the LATE record array, minted right beside the early one and,
+        // like it, UNCONDITIONALLY — the `vb_visible_instance` rule (a per-frame GPU-private
+        // resource owned by this struct cannot have its existence conditioned on a per-frame ECS
+        // fact, which is exactly what the occlusion capability is).
+        //
+        // The usage set is `vb_indirect`'s, bit for bit, and each bit is here for its own reason:
+        // INDIRECT because the late scope fetches records from it; TRANSFER_DST because the fill
+        // is an inline `vkCmdUpdateBuffer` (piece 2); STORAGE because piece 3 replaces that host
+        // fill with the cull writing `instanceCount` through a descriptor, which is not a
+        // transfer — minting it now is legal and inert on a buffer nothing binds, and adding it
+        // later would mean re-creating the allocation. TRANSFER_SRC is declarative: `create_buffer`
+        // already ORs both TRANSFER bits into every DeviceLocal buffer (see `vb_indirect`'s own
+        // note), so it states intent and matches its twin's spelling.
+        let vb_indirect_late: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: VB_INDIRECT_LATE_BYTES,
+                usage: BufferUsage::INDIRECT
+                    | BufferUsage::TRANSFER_DST
+                    | BufferUsage::STORAGE
+                    | BufferUsage::TRANSFER_SRC,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB late indirect-draw record buffer create")
+        });
+
+        // --- VG rung R2c0: the batch cull's three buffers. All per-FIF and DEVICE_LOCAL: the
+        // descriptors are transfer-filled (so the cull reads them at full device bandwidth rather
+        // than over PCIe), and the two outputs are pure GPU state. ---
+        let vb_batch_desc_bytes = (INSTANCE_CAPACITY as u64) * u64::from(VB_BATCH_DESC_STRIDE);
+        let vb_batch_desc: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: vb_batch_desc_bytes,
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB batch-descriptor buffer create")
+        });
+        // The compacted visible-batch list. Its ELEMENT COUNT is the cull's clamp-and-drop bound,
+        // and `record_vb` derives that bound from `BoundBuffer::size` rather than from a host
+        // constant — the VB-P1j lesson: a capacity pushed as a word can drift from the allocation
+        // it claims to describe, and nothing detects it (`robustBufferAccess` is off here).
+        let vb_cull_visible: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: VB_CULL_VISIBLE_BYTES,
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB cull visible-list buffer create")
+        });
+        // The visible counter — [`VB_CULL_COUNT_BYTES`]; `vkCmdFillBuffer` zeroes the whole range
+        // each frame regardless of how much of it is live.
+        let vb_cull_count: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: VB_CULL_COUNT_BYTES,
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB cull counter buffer create")
+        });
+        // Virtual-geometry ladder, rung R2d-2: the per-INSTANCE survivor list — one `u32` global
+        // instance id per surviving instance, compacted by the R2d cull. Sized `INSTANCE_CAPACITY`
+        // ids because that is the ceiling on the instances a frame can carry (the same bound the
+        // instance ring itself is sized to). `TRANSFER_SRC` matches `vb_cull_visible`'s usage, and
+        // since rung R2d-5 it is USED: the cull readback probe's VIS region copies this buffer.
+        //
+        // Allocated UNCONDITIONALLY, like `vb_indirect` and the three R2c0 buffers above and
+        // unlike the R2d-1 bounds table — it is a per-frame GPU-private output owned by this
+        // struct, not a per-mesh table owned by the geometry table, so its existence cannot be
+        // conditioned on a resolved path without splitting `vb_cull_set`'s all-or-nothing gate.
+        //
+        // Since rung R2d-3 the cull shader DECLARES @6 and WRITES this buffer on every dispatched
+        // lane — the identity compaction, `VbVisibleInstance[base + j] = base + j`. Since rung
+        // R2d-4 `vb_raster.vs.hlsl` DECLARES Set-0 @11 and READS it for every draw whose per-batch
+        // push carries the indirection bit. Every VB golden pin still stays byte-identical, and now
+        // for a third kind of reason: the list is the IDENTITY, so the indirected expression is
+        // literally the pre-R2d one. That is the null-control shape held one rung longer, not the
+        // absence of GPU work.
+        let vb_visible_instance: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: VB_VISIBLE_INSTANCE_BYTES,
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB visible-instance buffer create")
+        });
+
+        // === VG R3 piece 3 step P3-2 (plan D3/D6): the occlusion split's THREE new buffers. ===
+        //
+        // All three UNCONDITIONALLY, immediately after `vb_visible_instance` and by its rule: a
+        // per-frame GPU-private resource owned by this struct cannot have its EXISTENCE conditioned
+        // on a per-frame ECS fact, which is exactly what the occlusion capability is. So
+        // `GpuSceneBundles::scene` wires all three as unconditional `Some(...)` and every reader
+        // `.expect()`s them under the split predicate rather than carrying three more `Option` arms
+        // — the dead-conjunct trap `vb_indirect_late`'s own doc records.
+        //
+        // BOUND at `vb_cull_layout` @7/@8/@11 in this same step, and READ by the cull module since
+        // step P3-4 — which is the `gVbVisibleInstance` @6 pattern completing: the descriptor
+        // arrived one step before its consumer, so the consumer step changed shader code alone. The
+        // uniform @8 is read on EVERY frame; @7 and @11 only under `VB_CULL_OCC_ARMED`, which step
+        // P3-6 sets on exactly the frames `path_vb_occlusion_split()` holds.
+        //
+        // The candidate/survivor list. `TRANSFER_SRC` is what the P3-5 readback probe will copy
+        // through; `TRANSFER_DST` is declarative (`create_buffer` already ORs both TRANSFER bits
+        // into every DeviceLocal buffer — see `vb_indirect`'s note), stated so the usage set reads
+        // as the intent rather than as an accident of the allocator.
+        let vb_late_visible: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: VB_LATE_VISIBLE_BYTES,
+                usage: BufferUsage::STORAGE
+                    | BufferUsage::TRANSFER_DST
+                    | BufferUsage::TRANSFER_SRC,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB late visible-instance buffer create")
+        });
+        // Per-batch `n_defer` plus the reserved frame slot. The array that gives
+        // `vb_indirect_late[b].instanceCount` exactly ONE producer — see
+        // `GBufferScene::vb_late_count`'s doc for the three gates the alternative destroyed.
+        let vb_late_count: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: VB_LATE_COUNT_BYTES,
+                usage: BufferUsage::STORAGE
+                    | BufferUsage::TRANSFER_DST
+                    | BufferUsage::TRANSFER_SRC,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB late per-batch count buffer create")
+        });
+        // The cull's non-push inputs. `TRANSFER_DST` is load-bearing rather than declarative here:
+        // the fill is an inline `vkCmdUpdateBuffer`, which is a transfer. No `TRANSFER_SRC` — no
+        // probe copies it back; the frame index it carries is observed through `vb_late_count`'s
+        // reserved slot, which is what makes that control a GPU observation rather than a host
+        // echo of what the host itself wrote.
+        let vb_cull_uniform: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: u64::from(VB_CULL_UNIFORM_BYTES),
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: VB cull uniform buffer create")
+        });
+
+        // VG rung R2c-tail: the cull READBACK staging — `Some` ONLY under `BOYKO_VB_CULL_READBACK`.
+        // Every golden/interactive boot leaves this `None`, so `declare_vb_graph` declares no
+        // readback pass and `record_vb` records ZERO extra commands: the byte-identity of the nine
+        // pins is unaffected by this probe existing.
+        //
+        // Host-visible COHERENT, and it is the STAGING that is host-visible — not the counter. The
+        // counter and the visible list stay DEVICE_LOCAL exactly as they ship, and the probe reads
+        // a transfer COPY of them. Making the counter itself host-visible would have been less
+        // plumbing and would have proved the cull in a configuration nobody renders.
+        let vb_cull_readback_armed = std::env::var("BOYKO_VB_CULL_READBACK").is_ok();
+        let vb_cull_readback: Option<[BoundBuffer; FRAMES_IN_FLIGHT]> =
+            vb_cull_readback_armed.then(|| {
+                core::array::from_fn(|_| {
+                    let staging = ctx
+                        .create_buffer(&BufferDesc {
+                            size: VB_CULL_READBACK_BYTES,
+                            usage: BufferUsage::TRANSFER_DST,
+                            location: MemoryLocation::HostVisibleCoherent,
+                        })
+                        .expect("invariant: VB cull readback staging create");
+                    // VG R3 piece 3 step P3-5: ZERO the whole staging once, at creation.
+                    //
+                    // Since P3-5 the staging carries five regions that are copied ONLY on an
+                    // occlusion-SPLIT frame (the two late snapshots), while the layout — and
+                    // therefore the host's decode offsets — is the same on every frame. Without a
+                    // prefill, an unsplit frame would decode never-written host-visible memory: not
+                    // a crash, but 2049 arbitrary `u32`s printed onto the probe line and read as
+                    // GPU observations. Zero is the honest value there, because "no candidates" is
+                    // precisely what an unsplit frame has.
+                    //
+                    // ⚠️ Deliberately NOT the `0xFF` poison `hzb_dump` prefills with. That value is
+                    // right for a payload that is ALWAYS copied (it makes a failed copy loud), and
+                    // wrong here: `late_count_pre[b] == 0xFFFFFFFF` would size batch `b`'s printed
+                    // candidate group to the whole clamped list on every unsplit probe run, which is
+                    // every run of the shipped corpus gates. A missing copy on an ARMED split is
+                    // caught instead by the non-vacuity clauses (`n_defer > 0`), which is where that
+                    // question belongs.
+                    let mapped = RhiDevice::buffer_mapped_ptr(ctx, &staging)
+                        .expect("invariant: host-visible cull readback staging is mapped");
+                    // SAFETY: the mapping covers `VB_CULL_READBACK_BYTES` bytes (the buffer was
+                    // just created at that size) and this runs before the staging is handed to any
+                    // submission, so nothing else reads or writes it. `write_bytes` fills whole
+                    // bytes, so no alignment beyond 1 is required.
+                    unsafe {
+                        mapped.as_ptr().write_bytes(0, VB_CULL_READBACK_BYTES as usize);
+                    }
+                    staging
+                })
+            });
+
+        // === VG R3 piece 4 rung P4-4: the FORCE selector's `BOYKO_VG_OCC_FORCE` boot decode USED
+        // === to sit here, and it is gone.
+        //
+        // It was shipping code — an `env::var` and a boot `panic!` — implementing a MEASUREMENT
+        // instrument, while the ARMING beside it was an ECS-derived per-frame predicate. Two
+        // sources of truth for one decision, and nothing checked them against each other. The
+        // regime is now `boyko_app::OcclusionForce`, a diagnostic Resource the fixtures insert
+        // (`boyko_app/tests/occ_fixture` owns the decode AND the insert, and the panic on an
+        // unknown regime moved with them), threaded per frame into `GBufferScene::vb_occlusion`'s
+        // payload so the arming and the regime travel in ONE `Option`.
+        //
+        // The boot read's other rationale — a knob that can change mid-run makes "which regime
+        // produced this capture?" unanswerable from the artifact — is answered by RECORDING rather
+        // than by asserting constancy: `VbRecordProbe::occ_flags` is stamped from the word the
+        // recorder PUSHED, `VbProbeContext` carries the host's independent view beside it, and the
+        // bench summary reports the SET of distinct regime words it observed.
+
+        // The batch cull's OWN 1-set layout — TWELVE bindings @0..@11 since VG R3 piece 3 step
+        // P3-2 (seven @0..@6 from rung R2d-3). A DEDICATED layout rather than more bindings on
+        // `vb_layout0`, because `vb_layout0_froxel` already occupies @8/@9 — appended bindings
+        // would land on DIFFERENT numbers in the two layouts and no single compiled module could
+        // name both. The `cull_layout` above is the precedent this follows.
+        //
+        // The table itself is `VB_CULL_LAYOUT_ENTRIES`, a named const so its arity is a TYPE
+        // (`[_; VB_CULL_LAYOUT_BINDINGS]`) and not a count anyone has to keep re-deriving.
+        let vb_cull_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc { entries: &VB_CULL_LAYOUT_ENTRIES },
+        )
+        .expect("invariant: VB batch-cull Set-0 bind-group layout create");
+        let vb_batch_cull_cs =
+            RhiDevice::create_shader_module(device, vb_batch_cull_spirv())
+                .expect("invariant: VB batch-cull compute shader module create");
+        let vb_batch_cull_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &vb_batch_cull_cs,
+                entry: c"main",
+                push_constant_bytes: VB_BATCH_CULL_PUSH_BYTES,
+                bind_group_layout: Some(&vb_cull_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: VB batch-cull compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_batch_cull_cs);
+        }
+
+        // VG R3 piece 1 step P1-4: the HZB depth-pyramid BUILD pass's own 1-set layout — eight
+        // bindings @0..@7, exactly `hzb_build.comp.hlsl`'s table: SAMPLED `gSrcDepth` @0, then the
+        // seven STORAGE images (`gFine` @1, `gDst0`..`gDst5` @2..@7). A DEDICATED layout, like
+        // `vb_cull_layout` above and `viewt_from_depth`'s own 2-binding one: a pass compiled from
+        // its own module names its own binding numbers, and no existing layout has this shape.
+        //
+        // ⚠️ MINTED UNCONDITIONALLY, and NOT because it is cheap (though it is one layout plus one
+        // pipeline, on a boot that may never dispatch either). The reason is that the ARM must be
+        // ONE predicate, and that predicate lives on the TARGETS: `HzbTargets` — and therefore
+        // every `hzb_build` descriptor SET — exists iff `GBufferScene::hzb` is `Some`, i.e. iff
+        // `HzbConfig` is not `Off`. The set is absent exactly when the pyramid is, by
+        // construction. Gating the pipeline on a SECOND arm bit here would create a pair that can
+        // disagree; rung R2d-2 hit precisely that defect on `vb_cull_set` (five unconditional
+        // `Some` literals threaded against a resource that was only sometimes armed, so the
+        // set-build gate and the record gate could diverge — a MISSING barrier, not merely a
+        // skipped dispatch), and the fix was to collapse presence and arming into one predicate.
+        //
+        // NOTHING DISPATCHES this pipeline at this step: no framegraph declaration, no pass, no
+        // barrier (that is step P1-5). The recorded command stream is untouched, so every pinned
+        // golden stays byte-identical.
+        let hzb_build_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::SampledImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 4,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 5,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 6,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 7,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: HZB build Set-0 bind-group layout create");
+        let hzb_build_cs = RhiDevice::create_shader_module(device, hzb_build_spirv())
+            .expect("invariant: HZB build compute shader module create");
+        let hzb_build_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &hzb_build_cs,
+                entry: c"main",
+                push_constant_bytes: HZB_BUILD_PUSH_BYTES,
+                bind_group_layout: Some(&hzb_build_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: HZB build compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, hzb_build_cs);
+        }
+
         let dispatch_group_count_x = (cw * ch).div_ceil(LOCAL_SIZE_X);
+        // SSAA (W1): the dispatch grid must cover every composite pixel — see the
+        // enumeration comment at the top of this fn. A future edit that keyed this to
+        // `native` instead of `composite` would silently UNDER-DISPATCH the marcher/resolve
+        // at any SSAA scale (a correctness bug with no crash); this fires immediately in debug.
+        debug_assert!(
+            (dispatch_group_count_x as u64) * (LOCAL_SIZE_X as u64) >= (cw as u64) * (ch as u64),
+            "invariant: dispatch grid covers composite pixel count at any SSAA scale"
+        );
+
+        // The device-capability half of every bench gate below. This was the sole env read
+        // `boot` performed until profiling rung 6 added two more; profiling rung 7 step 5
+        // deleted the VB one it was introduced for.
+        let bench_timestamps_usable = ctx.device_caps().timestamps_usable();
+        // Profiling rung 5c: the GPU zone recorder. Step 6c deleted the last old collector, so it
+        // is now the only GPU timing instrument in the engine and `BOYKO_VB_ZONE` the only knob
+        // this fn reads for one. The exclusivity assert that stood here refused that knob beside
+        // `BOYKO_SV0_BENCH`/`BOYKO_GBUF_BENCH` — G10's leg A — because a boot arming both would let
+        // an operator read a comparison it never made. It has no subject left.
+        let vb_zone_requested = std::env::var("BOYKO_VB_ZONE").is_ok();
+        if vb_zone_requested && !bench_timestamps_usable {
+            crate::diag::report_profiling_knob_unserviceable(
+                "BOYKO_VB_ZONE",
+                "this device's timestamps are unusable",
+            );
+        }
+        let vb_zone = (vb_zone_requested && bench_timestamps_usable).then(|| {
+            let pools: [VulkanQueryPool; GPU_RING_DEPTH] = core::array::from_fn(|_| {
+                RhiDevice::create_query_pool(ctx, &QueryPoolDesc { count: QUERIES_PER_SLOT })
+                    .expect("invariant: profiling rung 5c zone query-pool create")
+            });
+            GpuZoneRecorder::new(pools)
+        });
+        // The census for the one leg left. Built from the REQUEST rather than from the recorder,
+        // so a device that declined timestamps still prints a census line saying the stream had
+        // commands and no brackets — which is a different report from silence.
+        let vb_census = vb_zone_requested.then(CommandWitness::new);
 
         Self {
             raster_pipeline,
@@ -1334,10 +4616,25 @@ impl GpuSceneBundles {
             instance_rings,
             instance_bind_groups,
             interp,
+            // Particles P0: `boot` never builds the bundle — the arming lives in the World, which
+            // is not readable here. `build_particle_bundle` fills this in after `setup`, or
+            // leaves it `None` forever on a disarmed run.
+            particle: None,
             #[cfg(feature = "hwrt")]
             tlas,
             #[cfg(feature = "hwrt")]
             mv,
+            instance_capacity: [INSTANCE_CAPACITY as u32; FRAMES_IN_FLIGHT],
+            #[cfg(feature = "hwrt")]
+            tlas_accel_rebind_pending: [false; FRAMES_IN_FLIGHT],
+            raster_pipeline_pm,
+            pm_instance_material_layout,
+            pm_instance_material_rings,
+            pm_bind_groups,
+            // Textured-PBR T6c: built LAZILY (see `Self::build_textured_resources`'s doc) —
+            // `boot()` itself never constructs the TEXTURED pipeline (the bindless
+            // texture-array table does not exist yet at this call site).
+            tex: None,
             vertex_buffer,
             marcher,
             vocab_layout,
@@ -1345,8 +4642,10 @@ impl GpuSceneBundles {
             camera_ring,
             tiles_buffer,
             clipmap,
+            brick_levels_ubo,
             resolve_pipeline,
             resolve_layout,
+            resolve_pipeline_wrap,
             #[cfg(feature = "hwrt")]
             resolve_pipeline_hwrt,
             #[cfg(feature = "hwrt")]
@@ -1356,32 +4655,1483 @@ impl GpuSceneBundles {
             #[cfg(feature = "hwrt")]
             shadow_temporal_pipeline,
             #[cfg(feature = "hwrt")]
+            vb_shadow_vis_pipeline,
+            #[cfg(feature = "hwrt")]
             ray_shadow_ubo,
-            material_table,
             light_table,
             light_staging,
-            light_dir: DEFAULT_SUN_DIR,
             present_pipeline,
             present_layout,
             present_sampler,
             depth_sampler,
+            fxaa_pipeline,
+            fxaa_sampler,
+            smaa_edge_pipeline,
+            smaa_weight_pipeline,
+            smaa_blend_pipeline,
+            smaa_weight_layout,
+            smaa_blend_layout,
+            smaa_sampler,
+            smaa_area_tex,
+            smaa_search_tex,
+            ssaa_pipeline,
+            taa_resolve_pipeline,
+            taa_resolve_layout,
+            taa_linear_sampler,
+            rcas_pipeline,
+            rcas_layout,
+            ssao_pipelines,
+            ssao_vb_pipelines,
+            vb_ssao_layout,
+            vb_geo_aux_layout,
+            vb_split_layout1,
+            vb_geo_pipeline: None,
+            vb_shade_split_pipeline: None,
+            vb_shade_split_tex_pipeline: None,
+            #[cfg(feature = "hwrt")]
+            vb_geo_mv_pipeline: None,
+            #[cfg(feature = "hwrt")]
+            vb_shade_split_hwrt_pipeline: None,
+            #[cfg(feature = "hwrt")]
+            vb_shade_split_tex_hwrt_pipeline: None,
+            ssao_layout,
+            ssao_atrous_read8_pipeline,
+            ssao_atrous_interior_pipeline,
+            ssao_atrous_write8_pipeline,
+            ssao_atrous_layout,
+            viewt_from_depth_pipeline,
+            viewt_from_depth_layout,
+            viewt_from_vb_depth_pipeline,
+            viewt_from_vb_depth_layout,
             csm,
+            forward_pipeline,
+            forward_sky_pipeline,
+            forward_layout0,
+            forward_layout1,
+            forward_prepass_pipeline,
+            forward_plus_pipeline,
+            sdf_forward_march_pipeline,
+            sdf_forward_march_sdfonly_pipeline,
+            sdf_forward_march_viewt_pipeline,
+            sdf_forward_march_sdfonly_viewt_pipeline,
+            sdf_forward_march_layout,
             dispatch_group_count_x,
+            vb_layout0,
+            sdf_mesh_shadow_layout0,
+            vb_raster_pipeline,
+            vb_sky_pipeline,
+            // Built LAZILY — see `Self::vb_resolve_pipeline`'s doc.
+            vb_resolve_pipeline: None,
+            // Built LAZILY beside `vb_resolve_pipeline` — see the field's doc (VB-SV0 DP1).
+            sdf_mesh_shadow_pipeline: None,
+            // VB-P2 classification plan, rung P2a: built LAZILY by
+            // `Self::build_vb_classify_pipelines` — see that fn's doc.
+            vb_classify_count_pipeline: None,
+            vb_classify_scan_pipeline: None,
+            vb_classify_scatter_pipeline: None,
+            vb_shade_pipeline: None,
+            // Textured-PBR rung TV0: built LAZILY by `Self::build_vb_shade_textured_pipeline`
+            // — see that fn's doc.
+            vb_shade_tex_pipeline: None,
+            vb_instance_rings,
+            vb_indirect,
+            vb_indirect_late,
+            vb_batch_desc,
+            vb_cull_visible,
+            vb_cull_count,
+            vb_visible_instance,
+            // VG R3 piece 3 step P3-2: created immediately after `vb_visible_instance`, so freed
+            // immediately before it in `destroy` — reverse acquisition.
+            vb_late_visible,
+            vb_late_count,
+            vb_cull_uniform,
+            vb_cull_readback,
+            vb_cull_layout,
+            vb_batch_cull_pipeline,
+            hzb_build_layout,
+            hzb_build_pipeline,
+            // VB-P1a/P1b: built LAZILY by `Self::build_froxel_light_cull`, gated on the arm bit
+            // `ResolvedRenderPath::froxel_light_cull` (VB path AND `LightingConfig::
+            // clusters_enabled`, default OFF — an owner opt-in) — see that fn's doc.
+            cluster_cull_pipeline: None,
+            cull_layout: None,
+            cluster_grid: None,
+            light_index: None,
+            light_index_alloc: None,
+            cluster_cull_push: ClusterCullPush::UNARMED,
+            cluster_count: 0,
+            cluster_cull_hier: None,
+            cluster_boot_packed_dims: 0,
+            vb_layout0_froxel: None,
+            vb_resolve_froxel_pipeline: None,
+            vb_shade_froxel_pipeline: None,
+            vb_shade_tex_froxel_pipeline: None,
+            vb_zone,
+            vb_zone_slot: None,
+            vb_census,
         }
+    }
+
+    /// Textured-PBR T6c: builds the TEXTURED gbuffer producer pipeline + its dedicated
+    /// per-instance-material SSBO ring + per-FIF bind groups, storing them in [`Self::tex`]
+    /// for the remaining process lifetime. Called ONCE from `run_windowed`, AFTER the
+    /// bindless texture-array table (`BindlessTextureTable`) exists — its creation is
+    /// deferred past `boot()`/`finish()` (`runner.rs`'s boot-order comment: the fallible
+    /// create needs `AssetRefcountPlugin` resources only guaranteed present after every
+    /// plugin's `build()` has run), so the TEXTURED pipeline's set-1 layout
+    /// (`bindless.set().set_layout()`) is unavailable at [`Self::boot`] time.
+    ///
+    /// Mirrors [`Self::boot`]'s PM pipeline construction (@862-947 of the pre-T6c source),
+    /// widened for the 2-set layout ([`VulkanContext::create_graphics_pipeline_bindless`])
+    /// and the 5-attribute textured vertex layout (position/normal/color/uv/tangent).
+    ///
+    /// Particles P0: builds [`Self::particle`] — every buffer, pipeline and descriptor set the
+    /// subsystem owns, plus the one fence-waited boot fill.
+    ///
+    /// Called by the runner AFTER `setup`, and ONLY when `ParticleConfig::enabled()` holds, for
+    /// the same reason [`Self::build_textured_resources`] is deferred: the arming lives in the
+    /// World, and the draw's set-1 layout is the bindless table's, which does not exist at
+    /// [`Self::boot`] time. A disarmed run never calls this and therefore allocates nothing.
+    ///
+    /// `deferred_path` selects the whole depth contract frozen into the one pipeline — the compare
+    /// op ([`particle::particle_depth_compare_for`]: `LESS` for Deferred's custom-linear depth,
+    /// `GREATER` for the three reverse-Z paths) AND the draw's shader pair
+    /// ([`particle::particle_draw_spirv_for`]: the `-D DEPTH_LINEAR` fragment-depth variant on
+    /// Deferred, the base pair elsewhere). It is passed as the PREDICATE, not as two values
+    /// derived from it, because the two answers must never disagree.
+    ///
+    /// `collision` is rung P1's independent arming axis, carried as the config's own enum: it picks
+    /// the sim module ([`particle::particle_sim_spirv_for`]) and nothing else — same layout, same
+    /// push range, same descriptor sets, and the edit list is bound on every arm. Three answers
+    /// (base / `-D SDF_COLLIDE` / rung P1b's `-D SDF_COLLIDE_STATS` instrument), which is why the
+    /// value travels as the enum rather than as a predicate.
+    ///
+    /// `sort_mode` is rung P2 item 3's, and it is the axis with the widest boot consequence: it
+    /// decides whether the two sort buffers are allocated, whether the three sort pipelines are
+    /// created, and whether the alpha draw gets its own descriptor ring — structural absence on all
+    /// three when it is `None`. It also carries R10 (a sorted class may not produce motion
+    /// vectors), which is why the whole enum travels rather than a `bool`.
+    ///
+    /// # Panics
+    /// Panics (`expect("invariant: ...")`) on any RHI create/submit failure — mirrors
+    /// [`Self::boot`]'s contract, and on being called twice (the bundle is built once per run;
+    /// a second call would leak the first).
+    pub(crate) fn build_particle_bundle(
+        &mut self,
+        ctx: &VulkanContext,
+        bindless: &BindlessTextureTable,
+        capacity: u32,
+        deferred_path: bool,
+        collision: boyko_render::ParticleCollision,
+        sort_mode: boyko_render::ParticleSortMode,
+    ) {
+        assert!(
+            self.particle.is_none(),
+            "invariant: the particle bundle is built exactly once per run"
+        );
+        self.particle = Some(particle::ParticleGpuBundle::create(
+            ctx,
+            &self.camera_ring,
+            bindless,
+            // Rung P1's field, bound at Set-0 binding 10 — the SAME single edit list the marcher
+            // and the SDF shadow prepass read, never a particle-owned copy of it (principle 0).
+            &self.edit_list,
+            capacity,
+            deferred_path,
+            collision,
+            sort_mode,
+        ));
+    }
+
+    /// Particles P0: this frame slot's two staging buffers — everything the runner needs to
+    /// perform the two gated uploads. `None` on a disarmed run, which is also the runner's test
+    /// for "is there a particle frame at all".
+    ///
+    /// The pool CAPACITY is deliberately not returned beside them: it is boot-frozen inside the
+    /// bundle and read straight into the activation there, so the runner never carries a second
+    /// copy of a number the device is told.
+    #[inline]
+    pub(crate) fn particle_upload_slots(
+        &self,
+        slot: usize,
+    ) -> Option<(&BoundBuffer, &BoundBuffer)> {
+        self.particle
+            .as_ref()
+            .map(|p| (p.emit_req_staging_slot(slot), p.effects_staging_slot(slot)))
+    }
+
+    /// Particles P0 gates #7/#9: the cold pool-partition readback — `None` on a disarmed run
+    /// (no bundle, nothing to read).
+    ///
+    /// Idles the device and performs one fenced transfer submit; see
+    /// [`particle::ParticleGpuBundle::read_counters`] for why this one probe reads out of band
+    /// instead of through a framegraph pass. The caller ends the frame loop straight after.
+    #[inline]
+    pub(crate) fn read_particle_counters(
+        &self,
+        ctx: &VulkanContext,
+    ) -> Option<particle::ParticleCountersRaw> {
+        self.particle.as_ref().map(|p| p.read_counters(ctx))
+    }
+
+    /// Particles P2 item 3: the cold SORT MONOTONICITY readback and its in-submit control — `None`
+    /// on a disarmed run OR on one that did not arm the sort (there is no sorted buffer then, and a
+    /// scan of the unsorted source alone would be a measurement with nothing to compare it to).
+    ///
+    /// See [`particle::ParticleGpuBundle::read_sort_scan`] for why this range CAN be read back
+    /// where rung P2 item 2's index transform could not.
+    #[inline]
+    pub(crate) fn read_particle_sort_scan(
+        &self,
+        ctx: &VulkanContext,
+        alpha_count: u32,
+        cam_eye: [f32; 3],
+        frames_presented: u32,
+    ) -> Option<crate::particle_readback::ParticleSortReadback> {
+        self.particle
+            .as_ref()
+            .and_then(|p| p.read_sort_scan(ctx, alpha_count, cam_eye, frames_presented))
+    }
+
+    /// # Panics
+    /// Panics (`expect("invariant: ...")`) on any RHI create failure — mirrors
+    /// [`Self::boot`]'s contract (a device OOM at scene-boot time is a setup failure).
+    pub(crate) fn build_textured_resources(
+        &mut self,
+        ctx: &VulkanContext,
+        bindless: &BindlessTextureTable,
+    ) {
+        let device = ctx;
+
+        // ── The set-0 TEXTURED instance-material layout + the FIF-ringed SSBOs + bind
+        // groups. A SEPARATE layout from `pm_instance_material_layout` (a wider element
+        // stride — `PerInstanceMaterialTex`, 48 B, vs `PerInstanceMaterial`'s 32 B).
+        let tex_instance_material_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: TEX instance-material bind-group layout create");
+
+        // ── The 2-SET TEXTURED mesh-MRT G-buffer producer graphics pipeline (pass A).
+        // Set 0 = `tex_instance_material_layout` (VERTEX); set 1 = the bindless
+        // texture-array set's layout (FRAGMENT) — via `create_graphics_pipeline_bindless`
+        // (T6c plan Decision D5), NOT the generic `RhiDevice::create_graphics_pipeline`.
+        let tex_vs = RhiDevice::create_shader_module(device, gbuffer_mrt_tex_vs_spirv())
+            .expect("invariant: TEX mesh-MRT vertex shader module create");
+        let tex_fs = RhiDevice::create_shader_module(device, gbuffer_mrt_tex_fs_spirv())
+            .expect("invariant: TEX mesh-MRT fragment shader module create");
+        // The widened 5-attribute vertex layout (T6c plan Decision D6): position@0/
+        // normal@12/color@24 (unchanged from the base pipeline) + uv@40/tangent@48 (new —
+        // `boyko_render::mesh::Vertex`'s trailing fields), all against the SAME 64-byte
+        // `MESH_VERTEX_STRIDE` (every mesh already carries this stride, T3).
+        let tex_attributes = [
+            VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
+            VertexAttribute { location: 3, offset: 40, format: VertexFormat::Float32x2 },
+            VertexAttribute { location: 4, offset: 48, format: VertexFormat::Float32x4 },
+        ];
+        let raster_pipeline_tex = ctx
+            .create_graphics_pipeline_bindless(
+                &GraphicsPipelineDesc {
+                    vertex_module: &tex_vs,
+                    vertex_entry: c"main",
+                    fragment_module: &tex_fs,
+                    fragment_entry: c"main",
+                    // 3 base G-buffer attachments + the 4th `gPbr` (T6a) — always 4 color
+                    // formats declared; the recorder's `color_attachment_count` matches the
+                    // bound rendering scope (4 on every TEXTURED frame, W2-b).
+                    color_formats: &[
+                        RASTER_COLOR_FORMAT,
+                        RASTER_COLOR_FORMAT,
+                        RASTER_COLOR_FORMAT,
+                        TEX_GPBR_COLOR_FORMAT,
+                    ],
+                    depth_format: Some(Format::D32Sfloat),
+                    topology: PrimitiveTopology::TriangleList,
+                    vertex_layout: Some(VertexBufferLayout {
+                        stride: MESH_VERTEX_STRIDE as u32,
+                        attributes: &tex_attributes,
+                    }),
+                    push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
+                    bind_group_layout: Some(&tex_instance_material_layout),
+                    blend: None,
+                    cull_mode: CullMode::None,
+                    depth_bias: None,
+                },
+                bindless.set().set_layout(),
+            )
+            .expect("invariant: TEX mesh-MRT graphics pipeline create");
+        // SAFETY: both modules were created on `device` and are consumed by the pipeline
+        // create; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, tex_fs);
+            RhiDevice::destroy_shader_module(device, tex_vs);
+        }
+
+        let tex_material_ring_bytes = (TEX_INSTANCE_CAPACITY * PER_INSTANCE_MATERIAL_TEX_BYTES) as u64;
+        let tex_instance_material_rings: [BoundBuffer; FRAMES_IN_FLIGHT] =
+            core::array::from_fn(|_| {
+                let b = RhiDevice::create_buffer(
+                    device,
+                    &BufferDesc {
+                        size: tex_material_ring_bytes,
+                        usage: BufferUsage::STORAGE,
+                        location: MemoryLocation::HostVisibleCoherent,
+                    },
+                )
+                .expect("invariant: TEX instance-material SSBO ring slot create");
+                let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
+                    .expect("invariant: host-visible TEX instance-material SSBO is mapped");
+                zero_fill(mapped, tex_material_ring_bytes as usize);
+                b
+            });
+        let tex_bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT] = core::array::from_fn(|i| {
+            RhiDevice::create_bind_group(
+                device,
+                &BindGroupDesc {
+                    layout: &tex_instance_material_layout,
+                    entries: &[
+                        BindGroupEntry::StorageBuffer { buffer: &self.instance_rings[i] },
+                        BindGroupEntry::StorageBuffer { buffer: &tex_instance_material_rings[i] },
+                    ],
+                },
+            )
+            .expect("invariant: TEX instance-material bind group create")
+        });
+
+        self.tex = Some(TexturedResources {
+            raster_pipeline_tex,
+            tex_instance_material_layout,
+            tex_instance_material_rings,
+            tex_bind_groups,
+            bindless_set: bindless.set().set(),
+        });
+    }
+
+    /// Multi-paradigm render-path plan, rung R8: builds [`Self::vb_resolve_pipeline`] (the
+    /// FUSED `vb_resolve.comp.hlsl` compute pipeline) — deferred past [`Self::boot`] for the
+    /// SAME reason [`Self::build_textured_resources`] is (that fn's doc): `geometry_set`'s
+    /// descriptor-set LAYOUT (Set 2, the Decision-0 bindless geometry table) does not exist at
+    /// `boot()`'s call site — the live `MeshGeometryTable` is constructed by `boyko_app::runner`
+    /// only on a `VisibilityBuffer`-resolved boot, AFTER `boot()` returns. Called ONCE, from
+    /// `runner.rs`, immediately after a successful `MeshGeometryTable::new`.
+    pub(crate) fn build_vb_resolve_pipeline(
+        &mut self,
+        ctx: &VulkanContext,
+        geometry_set: &boyko_rhi_vulkan::geometry_bindless::VulkanGeometryBindlessSet,
+    ) {
+        let device = ctx;
+        let vb_resolve_cs = RhiDevice::create_shader_module(device, vb_resolve_spirv())
+            .expect("invariant: VB resolve compute shader module create");
+        let vb_resolve_pipeline = ctx
+            .create_compute_pipeline_vb(
+                &ComputePipelineDesc {
+                    module: &vb_resolve_cs,
+                    entry: c"main",
+                    // The 64-byte push constant (`vb_resolve.comp.hlsl`'s `PushConstants`: one
+                    // `float4x4 view_proj`).
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&self.vb_layout0),
+                    spec_constants: &[],
+                },
+                self.forward_layout1.set_layout(),
+                geometry_set.set_layout(),
+            )
+            .expect("invariant: VB resolve compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_resolve_cs);
+        }
+        self.vb_resolve_pipeline = Some(vb_resolve_pipeline);
+
+        // VB-SV0 DP1 (dark infra): the dedicated `sdf_mesh_shadow.comp` prepass pipeline, built
+        // HERE because it has the same Set-2 existence precondition and the same once-per-VB-boot
+        // lifetime. Set 1 is the forward shadow layout — DECLARED for pipeline-layout shape
+        // compatibility with `create_compute_pipeline_vb` and never bound: the shader statically
+        // uses only Sets 0 and 2. Nothing records this pipeline at DP1; DP2 adds the term target
+        // and descriptor sets, DP3 the arming.
+        let sdf_mesh_shadow_cs = RhiDevice::create_shader_module(device, sdf_mesh_shadow_spirv())
+            .expect("invariant: VB-SV0 sdf_mesh_shadow compute shader module create");
+        let sdf_mesh_shadow_pipeline = ctx
+            .create_compute_pipeline_vb(
+                &ComputePipelineDesc {
+                    module: &sdf_mesh_shadow_cs,
+                    entry: c"main",
+                    // The 64-byte push constant (`sdf_mesh_shadow.comp.hlsl`'s `PushConstants`:
+                    // one `float4x4 view_proj` — the geometry-fetch reprojection matrix).
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&self.sdf_mesh_shadow_layout0),
+                    spec_constants: &[],
+                },
+                self.forward_layout1.set_layout(),
+                geometry_set.set_layout(),
+            )
+            .expect("invariant: VB-SV0 sdf_mesh_shadow compute pipeline create");
+        // SAFETY: same argument as `vb_resolve_cs` above — created on `device`, consumed by the
+        // pipeline create, destroyed once, no GPU work in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, sdf_mesh_shadow_cs);
+        }
+        self.sdf_mesh_shadow_pipeline = Some(sdf_mesh_shadow_pipeline);
+    }
+
+    /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a (dark infra,
+    /// unwired): builds the three 1-set classify pipelines (`vb_classify_count`/`_scan`/
+    /// `_scatter`, each via the GENERIC `RhiDevice::create_compute_pipeline` against
+    /// [`Self::vb_layout0`] — plan P2-1, no dedicated `_vb1` helper) + the 3-set `vb_shade`
+    /// pipeline (via [`VulkanContext::create_compute_pipeline_vb`], the SAME 3-set builder
+    /// [`Self::build_vb_resolve_pipeline`] uses — Set 0 = `vb_layout0`, Set 1 =
+    /// `forward_layout1`, Set 2 = `geometry_set`). Deferred past [`Self::boot`] for the SAME
+    /// reason [`Self::build_vb_resolve_pipeline`] is (that fn's doc): `vb_shade` needs the
+    /// Decision-0 geometry table's Set-2 layout, which does not exist at `boot()`'s call site.
+    /// Called ONCE, from `runner.rs`, immediately after [`Self::build_vb_resolve_pipeline`].
+    ///
+    /// DARK INFRA (rung P2a): nothing declares/records against these four pipelines yet —
+    /// `record_vb`/`declare_vb_graph` are untouched, the fused `vb_resolve` still shades every
+    /// VB frame. This fn only builds+stores them so a later rung (P2b/P2c) can wire them in
+    /// without another plumbing pass.
+    pub(crate) fn build_vb_classify_pipelines(
+        &mut self,
+        ctx: &VulkanContext,
+        geometry_set: &boyko_rhi_vulkan::geometry_bindless::VulkanGeometryBindlessSet,
+    ) {
+        let device = ctx;
+
+        let vb_classify_count_cs = RhiDevice::create_shader_module(device, vb_classify_count_spirv())
+            .expect("invariant: VB classify count compute shader module create");
+        let vb_classify_count_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &vb_classify_count_cs,
+                entry: c"main",
+                push_constant_bytes: 4,
+                bind_group_layout: Some(&self.vb_layout0),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: VB classify count compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_classify_count_cs);
+        }
+
+        let vb_classify_scan_cs = RhiDevice::create_shader_module(device, vb_classify_scan_spirv())
+            .expect("invariant: VB classify scan compute shader module create");
+        let vb_classify_scan_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &vb_classify_scan_cs,
+                entry: c"main",
+                // The 4-byte `PushConstants { uint material_count; }` (`vb_classify_scan.comp
+                // .hlsl`'s own -- a LOOP BOUND only, see that file's + `vb_classify_common.hlsli`'s
+                // doc).
+                push_constant_bytes: 4,
+                bind_group_layout: Some(&self.vb_layout0),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: VB classify scan compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_classify_scan_cs);
+        }
+
+        let vb_classify_scatter_cs =
+            RhiDevice::create_shader_module(device, vb_classify_scatter_spirv())
+                .expect("invariant: VB classify scatter compute shader module create");
+        let vb_classify_scatter_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &vb_classify_scatter_cs,
+                entry: c"main",
+                push_constant_bytes: 4,
+                bind_group_layout: Some(&self.vb_layout0),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: VB classify scatter compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_classify_scatter_cs);
+        }
+
+        let vb_shade_cs = RhiDevice::create_shader_module(device, vb_shade_spirv())
+            .expect("invariant: VB shade compute shader module create");
+        let vb_shade_pipeline = ctx
+            .create_compute_pipeline_vb(
+                &ComputePipelineDesc {
+                    module: &vb_shade_cs,
+                    entry: c"main",
+                    // The SAME 64-byte push constant `vb_resolve_pipeline` declares (view_proj)
+                    // -- `vb_shade`'s shading tail is character-identical (plan D3), so its
+                    // push-constant shape is too.
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&self.vb_layout0),
+                    spec_constants: &[],
+                },
+                self.forward_layout1.set_layout(),
+                geometry_set.set_layout(),
+            )
+            .expect("invariant: VB shade compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_shade_cs);
+        }
+
+        self.vb_classify_count_pipeline = Some(vb_classify_count_pipeline);
+        self.vb_classify_scan_pipeline = Some(vb_classify_scan_pipeline);
+        self.vb_classify_scatter_pipeline = Some(vb_classify_scatter_pipeline);
+        self.vb_shade_pipeline = Some(vb_shade_pipeline);
+    }
+
+    /// Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3): builds
+    /// [`Self::vb_shade_tex_pipeline`] (the `vb_shade.comp.hlsl` `-D TEXTURED=1` compute
+    /// pipeline) — deferred past [`Self::boot`]/[`Self::build_vb_classify_pipelines`] for a
+    /// widened version of the SAME reason those two are (their own docs): this pipeline needs
+    /// BOTH the Decision-0 geometry table's Set-2 layout (`geometry_set`, constructed by
+    /// `boyko_app::runner` only on a `VisibilityBuffer`-resolved boot) AND the shared bindless
+    /// texture-array table's Set-3 layout (`bindless.set().set_layout()`, built even later —
+    /// after `app.finish()` drains every plugin/startup system, `Self::build_textured_resources`'s
+    /// own doc). Called ONCE, from `runner.rs`, immediately after
+    /// [`Self::build_textured_resources`] — the LAST of the three dependencies to become
+    /// available — gated on the geometry table existing (mirrors
+    /// [`Self::build_vb_classify_pipelines`]'s own call-site gate).
+    ///
+    /// # Panics
+    /// Panics (`expect("invariant: ...")`) on any RHI create failure — mirrors
+    /// [`Self::boot`]'s contract (a device OOM at scene-boot time is a setup failure).
+    pub(crate) fn build_vb_shade_textured_pipeline(
+        &mut self,
+        ctx: &VulkanContext,
+        geometry_set: &boyko_rhi_vulkan::geometry_bindless::VulkanGeometryBindlessSet,
+        bindless: &BindlessTextureTable,
+    ) {
+        let device = ctx;
+
+        let vb_shade_tex_cs = RhiDevice::create_shader_module(device, vb_shade_tex_spirv())
+            .expect("invariant: VB shade TEXTURED compute shader module create");
+        let vb_shade_tex_pipeline = ctx
+            .create_compute_pipeline_vb_textured(
+                &ComputePipelineDesc {
+                    module: &vb_shade_tex_cs,
+                    entry: c"main",
+                    // The SAME 64-byte push constant `vb_shade_pipeline`/`vb_resolve_pipeline`
+                    // declare (view_proj) -- the TEXTURED shading tail reads the SAME geometry-
+                    // fetch reprojection matrix, unchanged shape.
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&self.vb_layout0),
+                    spec_constants: &[],
+                },
+                self.forward_layout1.set_layout(),
+                geometry_set.set_layout(),
+                bindless.set().set_layout(),
+            )
+            .expect("invariant: VB shade TEXTURED compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_shade_tex_cs);
+        }
+
+        self.vb_shade_tex_pipeline = Some(vb_shade_tex_pipeline);
+    }
+
+    /// Rung R9b (docs/R9-VB-SPLIT-PLAN.md §6): builds the split pair — `vb_geo` (3-set: Set 0 =
+    /// [`Self::vb_layout0`], Set 1 = [`Self::vb_geo_aux_layout`], Set 2 = the geometry table)
+    /// and `vb_shade_split` (3-set: Set 1 = [`Self::vb_split_layout1`]) + the `-D TEXTURED=1`
+    /// sibling (4-set, iff `bindless` exists — `build_vb_shade_textured_pipeline`'s own
+    /// two-dependency reason). Deferred past [`Self::boot`] because the Decision-0 geometry
+    /// table's Set-2 layout does not exist at `boot()`'s call site (the SAME reason as
+    /// [`Self::build_vb_resolve_pipeline`]). Called ONCE from `runner.rs`, right after the
+    /// other VB deferred builds.
+    pub(crate) fn build_vb_split_pipelines(
+        &mut self,
+        ctx: &VulkanContext,
+        geometry_set: &boyko_rhi_vulkan::geometry_bindless::VulkanGeometryBindlessSet,
+        bindless: Option<&BindlessTextureTable>,
+    ) {
+        let device = ctx;
+
+        let vb_geo_cs = RhiDevice::create_shader_module(device, vb_geo_spirv())
+            .expect("invariant: R9b vb_geo compute shader module create");
+        let vb_geo_pipeline = ctx
+            .create_compute_pipeline_vb(
+                &ComputePipelineDesc {
+                    module: &vb_geo_cs,
+                    entry: c"main",
+                    // The 64-byte `view_proj` push (`vb_geo.comp.hlsl` — `vb_resolve`'s shape).
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&self.vb_layout0),
+                    spec_constants: &[],
+                },
+                self.vb_geo_aux_layout.set_layout(),
+                geometry_set.set_layout(),
+            )
+            .expect("invariant: R9b vb_geo compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_geo_cs);
+        }
+        self.vb_geo_pipeline = Some(vb_geo_pipeline);
+
+        let vb_shade_split_cs = RhiDevice::create_shader_module(device, vb_shade_split_spirv())
+            .expect("invariant: R9b vb_shade_split compute shader module create");
+        let vb_shade_split_pipeline = ctx
+            .create_compute_pipeline_vb(
+                &ComputePipelineDesc {
+                    module: &vb_shade_split_cs,
+                    entry: c"main",
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&self.vb_layout0),
+                    spec_constants: &[],
+                },
+                self.vb_split_layout1.set_layout(),
+                geometry_set.set_layout(),
+            )
+            .expect("invariant: R9b vb_shade_split compute pipeline create");
+        // SAFETY: as above.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_shade_split_cs);
+        }
+        self.vb_shade_split_pipeline = Some(vb_shade_split_pipeline);
+
+        if let Some(bindless) = bindless {
+            let cs = RhiDevice::create_shader_module(device, vb_shade_split_tex_spirv())
+                .expect("invariant: R9b vb_shade_split TEXTURED compute shader module create");
+            let p = ctx
+                .create_compute_pipeline_vb_textured(
+                    &ComputePipelineDesc {
+                        module: &cs,
+                        entry: c"main",
+                        push_constant_bytes: 64,
+                        bind_group_layout: Some(&self.vb_layout0),
+                        spec_constants: &[],
+                    },
+                    self.vb_split_layout1.set_layout(),
+                    geometry_set.set_layout(),
+                    bindless.set().set_layout(),
+                )
+                .expect("invariant: R9b vb_shade_split TEXTURED compute pipeline create");
+            // SAFETY: as above.
+            unsafe {
+                RhiDevice::destroy_shader_module(device, cs);
+            }
+            self.vb_shade_split_tex_pipeline = Some(p);
+        }
+
+        // Rung R9d: the hwrt shadow-chain siblings — same 3-set (4-set for the TEXTURED variant)
+        // creates as their software siblings above, gated ADDITIONALLY on `ctx.ray_query_enabled()`
+        // (an RT-only variant that reads the denoised/undenoised `gShadowVis`).
+        #[cfg(feature = "hwrt")]
+        if ctx.ray_query_enabled() {
+            let vb_geo_mv_cs = RhiDevice::create_shader_module(device, vb_geo_mv_spirv())
+                .expect("invariant: R9d vb_geo_mv compute shader module create");
+            let vb_geo_mv_pipeline = ctx
+                .create_compute_pipeline_vb(
+                    &ComputePipelineDesc {
+                        module: &vb_geo_mv_cs,
+                        entry: c"main",
+                        push_constant_bytes: 64,
+                        bind_group_layout: Some(&self.vb_layout0),
+                        spec_constants: &[],
+                    },
+                    self.vb_geo_aux_layout.set_layout(),
+                    geometry_set.set_layout(),
+                )
+                .expect("invariant: R9d vb_geo_mv compute pipeline create");
+            // SAFETY: as above.
+            unsafe {
+                RhiDevice::destroy_shader_module(device, vb_geo_mv_cs);
+            }
+            self.vb_geo_mv_pipeline = Some(vb_geo_mv_pipeline);
+
+            let vb_shade_split_hwrt_cs =
+                RhiDevice::create_shader_module(device, vb_shade_split_hwrt_spirv())
+                    .expect("invariant: R9d vb_shade_split HWRT compute shader module create");
+            let vb_shade_split_hwrt_pipeline = ctx
+                .create_compute_pipeline_vb(
+                    &ComputePipelineDesc {
+                        module: &vb_shade_split_hwrt_cs,
+                        entry: c"main",
+                        push_constant_bytes: 64,
+                        bind_group_layout: Some(&self.vb_layout0),
+                        spec_constants: &[],
+                    },
+                    self.vb_split_layout1.set_layout(),
+                    geometry_set.set_layout(),
+                )
+                .expect("invariant: R9d vb_shade_split HWRT compute pipeline create");
+            // SAFETY: as above.
+            unsafe {
+                RhiDevice::destroy_shader_module(device, vb_shade_split_hwrt_cs);
+            }
+            self.vb_shade_split_hwrt_pipeline = Some(vb_shade_split_hwrt_pipeline);
+
+            if let Some(bindless) = bindless {
+                let cs = RhiDevice::create_shader_module(device, vb_shade_split_tex_hwrt_spirv())
+                    .expect("invariant: R9d vb_shade_split TEXTURED HWRT compute shader module create");
+                let p = ctx
+                    .create_compute_pipeline_vb_textured(
+                        &ComputePipelineDesc {
+                            module: &cs,
+                            entry: c"main",
+                            push_constant_bytes: 64,
+                            bind_group_layout: Some(&self.vb_layout0),
+                            spec_constants: &[],
+                        },
+                        self.vb_split_layout1.set_layout(),
+                        geometry_set.set_layout(),
+                        bindless.set().set_layout(),
+                    )
+                    .expect("invariant: R9d vb_shade_split TEXTURED HWRT compute pipeline create");
+                // SAFETY: as above.
+                unsafe {
+                    RhiDevice::destroy_shader_module(device, cs);
+                }
+                self.vb_shade_split_tex_hwrt_pipeline = Some(p);
+            }
+        }
+    }
+
+    /// VB-P1a/P1b: builds the ENTIRE froxel light-cull machinery — the L1
+    /// `cluster_cull` compute pipeline + its OWN Set-0 layout, the `ClusterGrid`/
+    /// `LightIndexList`/`LightIndexAlloc` device-local buffers (Principle 0 — VM-native
+    /// [`BoundBuffer`]s, never a `std::Vec`/`HashMap` side store), the froxel-only
+    /// `vb_layout0_froxel` Set-0 layout (`vb_layout0`'s own {0..7, 11} PLUS `ClusterGrid` @8 +
+    /// `LightIndexList` @9 — a DISTINCT layout OBJECT, `vb_layout0` itself stays UNCHANGED), and
+    /// the three `_froxel` VB shading pipelines (`vb_resolve_froxel`/`vb_shade_froxel`/
+    /// `vb_shade_tex_froxel`, mirroring [`Self::build_vb_resolve_pipeline`]/
+    /// [`Self::build_vb_classify_pipelines`]/[`Self::build_vb_shade_textured_pipeline`]'s own
+    /// pipeline shapes, built against THIS wider layout instead of `vb_layout0`).
+    ///
+    /// GATED entirely behind `ResolvedRenderPath::froxel_light_cull` at the `boyko_app::runner`
+    /// call site — armed (VB-P1b) iff the booted scene's `LightingConfig::clusters_enabled` is
+    /// `true` under `RenderPath::VisibilityBuffer`; every other boot (unarmed scenes, and every
+    /// non-VB path) never calls this fn, so every field it would populate stays `None`/zeroed,
+    /// [`Self::scene`] threads that through unchanged, and every existing (unarmed) golden stays
+    /// byte-identical (the 0%-gate). Mirrors [`Self::build_vb_shade_textured_pipeline`]'s
+    /// two-dependency deferred-build shape: called ONCE from `runner.rs`, after
+    /// `MeshGeometryTable::new` AND the bindless texture table both exist, iff the arm bit is
+    /// armed.
+    ///
+    /// `cluster_config` sizes the buffers/push (`ClusterConfig::default()` at every current call
+    /// site — no owner-facing override is wired yet).
+    ///
+    /// VB-P1e D11/H4: `hier_cull` selects WHICH of the two cull arms is built. `true` — **the
+    /// production default since the arm-default flip**, and what `boyko_app::runner` selects when
+    /// `BOYKO_VB_HIER_CULL` is unset — builds the `-D HIER=1` 256-wide
+    /// `cluster_cull_hier_spirv()` arm; `false` builds the base 64-wide `cluster_cull_spirv()`
+    /// arm, kept selectable as the opt-out and as the equality oracle's permanent reference.
+    /// H3 proved on hardware that the two arms emit the same per-froxel sets in the same order,
+    /// and H5 proved the frame is byte-identical through the whole pipeline, so the flip is a
+    /// pure performance change (22.5× on the cull at N=512, and 1.4× FASTER even at N=8 — there
+    /// is no low-N penalty to trade against). Exactly ONE pipeline is ever built per boot —
+    /// [`Self::cluster_cull_pipeline`] holds whichever arm was selected, and
+    /// [`Self::cluster_cull_hier`] records WHICH one.
+    ///
+    /// # Panics
+    /// Panics (`expect("invariant: ...")`) on any RHI create failure — mirrors every other VB
+    /// pipeline builder's contract (a device OOM at scene-boot time is a setup failure). Also
+    /// panics (a release `assert!`, D11) if any of `cluster_config`'s grid dims exceeds 8 bits —
+    /// the header pack this fn feeds the HIER push is lossy past that contract.
+    pub(crate) fn build_froxel_light_cull(
+        &mut self,
+        ctx: &VulkanContext,
+        geometry_set: &boyko_rhi_vulkan::geometry_bindless::VulkanGeometryBindlessSet,
+        bindless: &BindlessTextureTable,
+        cluster_config: ClusterConfig,
+        hier_cull: bool,
+    ) {
+        let device = ctx;
+
+        // --- The L1 cluster-cull compute pipeline + its OWN Set-0 layout ({ camera UBO @0,
+        // light table SSBO @1, ClusterGrid SSBO @2, LightIndexList SSBO @3, LightIndexAlloc SSBO
+        // @4 } — matching `cluster_cull.hlsl`'s own binding table, the SAME shape the L1
+        // host-oracle test harness (`sdf_gbuffer_hybrid.rs`) builds by hand). A DEDICATED
+        // layout, unrelated to `vb_layout0`/`vb_layout0_froxel` — the cull pass is its OWN 1-set
+        // pipeline. Shared by BOTH arms (VB-P1e D11): the `-D HIER=1` shader widens only the
+        // PUSH range, not the descriptor bindings. ---
+        let cull_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::UniformBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 4,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: L1 cull Set-0 bind-group layout create");
+
+        // VB-P1e H4: select the arm's own SPIR-V + push-constant range. `hier_cull` is a
+        // boot-frozen choice — the SAME pipeline slot below holds whichever arm was selected,
+        // never both at once.
+        let (cull_module_words, cull_push_constant_bytes): (&'static [u32], u32) = if hier_cull {
+            (cluster_cull_hier_spirv(), CLUSTER_CULL_HIER_PUSH_BYTES)
+        } else {
+            (cluster_cull_spirv(), CLUSTER_CULL_PUSH_BYTES)
+        };
+        let cull_cs = RhiDevice::create_shader_module(device, cull_module_words)
+            .expect("invariant: L1 cluster-cull compute shader module create");
+        let cluster_cull_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &cull_cs,
+                entry: c"main",
+                push_constant_bytes: cull_push_constant_bytes,
+                bind_group_layout: Some(&cull_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: L1 cluster-cull compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, cull_cs);
+        }
+
+        // --- The L1 cluster buffers (Principle 0: VM-native `BoundBuffer`s, DEVICE_LOCAL —
+        // never a std::Vec/HashMap side store). Sized from `cluster_config`, mirroring
+        // `sdf_gbuffer_hybrid.rs`'s own host-oracle buffer sizing. ---
+        let cluster_count = cluster_config.cluster_count();
+        let cluster_grid = ctx
+            .create_buffer(&BufferDesc {
+                size: (cluster_count as u64) * 8, // uint2 {offset, count} per froxel
+                usage: BufferUsage::STORAGE,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: L1 ClusterGrid storage buffer create");
+        let light_index = ctx
+            .create_buffer(&BufferDesc {
+                size: (cluster_config.index_list_cap as u64) * 4,
+                usage: BufferUsage::STORAGE,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: L1 LightIndexList storage buffer create");
+        let light_index_alloc = ctx
+            .create_buffer(&BufferDesc {
+                size: 4,
+                usage: BufferUsage::STORAGE,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: L1 LightIndexAlloc storage buffer create");
+
+        // VB-P1e D11: the `<= 255`-per-dim contract that keeps `ClusterConfig::packed_dims()`'s
+        // mapping lossless is a `debug_assert!` only inside that method
+        // (`crates/boyko_render/src/light.rs`) — the OR it guards has no masking, so an
+        // out-of-contract dim would silently corrupt the packed word this fn feeds the HIER push
+        // below. Promoted to a release `assert!` HERE: a boot-time, once-per-process check on a
+        // setup path (Principle 1 is not engaged), the cheapest point that keeps the MAPPING
+        // honest even in a release build where `packed_dims`'s own debug_assert compiles out.
+        assert!(
+            cluster_config.dim_x <= 0xFF && cluster_config.dim_y <= 0xFF && cluster_config.dim_z <= 0xFF,
+            "invariant: cluster dims must each fit in 8 bits for the header pack (dim_x={}, dim_y={}, dim_z={})",
+            cluster_config.dim_x,
+            cluster_config.dim_y,
+            cluster_config.dim_z,
+        );
+
+        self.cluster_cull_push = ClusterCullPush::new(
+            cluster_config.z_near,
+            cluster_config.z_far,
+            cluster_config.max_lights_per_cluster,
+            cluster_config.index_list_cap,
+        );
+        self.cluster_count = cluster_count;
+        let boot_packed_dims = cluster_config.packed_dims();
+        self.cluster_boot_packed_dims = boot_packed_dims;
+        // VB-P1e D11/H4: `Some` iff the pipeline just built above is the HIER arm — the group
+        // count + the 24-byte push bytes [`Self::scene`] threads into
+        // `GBufferScene::cluster_cull_hier`, which the record site (`vb.rs`) dispatches INSTEAD
+        // of `cluster_count`/`cluster_cull_push` when `Some`.
+        self.cluster_cull_hier = hier_cull.then(|| {
+            let push = ClusterCullHierPush::new(
+                cluster_config.z_near,
+                cluster_config.z_far,
+                cluster_config.max_lights_per_cluster,
+                cluster_config.index_list_cap,
+                boot_packed_dims,
+                cluster_count,
+            );
+            let mut push_bytes = [0u8; CLUSTER_CULL_HIER_PUSH_BYTES as usize];
+            push_bytes.copy_from_slice(push.as_bytes());
+            ClusterCullHierDispatch { groups: cluster_config.hier_group_count(), push: push_bytes }
+        });
+        self.cluster_cull_pipeline = Some(cluster_cull_pipeline);
+        self.cull_layout = Some(cull_layout);
+        self.cluster_grid = Some(cluster_grid);
+        self.light_index = Some(light_index);
+        self.light_index_alloc = Some(light_index_alloc);
+
+        // --- `vb_layout0_froxel` — a NEW 11-binding Set-0 layout: `vb_layout0`'s own
+        // {0..7, 11} PLUS `ClusterGrid` @8 + `LightIndexList` @9. A DISTINCT layout OBJECT;
+        // `vb_layout0` itself is never widened in place. ---
+        let vb_layout0_froxel = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX | ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::UniformBuffer,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 4,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 5,
+                        count: 1,
+                        kind: DescriptorKind::SampledImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 6,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 7,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 8,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 9,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    // VB-SV0 DP2: `gSdfTerm` @10 — the SAME binding number and kind `vb_layout0`
+                    // gained, for the same one-compiled-module-under-both-layouts reason.
+                    BindGroupLayoutEntry {
+                        binding: 10,
+                        count: 1,
+                        kind: DescriptorKind::SampledImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    // Virtual-geometry ladder, rung R2d-2: `gVbVisibleInstance` @11, the SAME
+                    // binding number and kind `vb_layout0` gained — the two layouts must agree on
+                    // it or no single compiled module could name it under both. Placed before the
+                    // three `_froxel` pipeline creates below, so all three are built against the
+                    // 11-binding shape; bound-but-unread by their frozen SPIR-V.
+                    BindGroupLayoutEntry {
+                        binding: 11,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: VB froxel Set-0 bind-group layout create");
+
+        // `vb_resolve_froxel` — the SAME 3-set shape `build_vb_resolve_pipeline` builds, against
+        // the wider `vb_layout0_froxel`.
+        let vb_resolve_froxel_cs = RhiDevice::create_shader_module(device, vb_resolve_froxel_spirv())
+            .expect("invariant: VB resolve FROXEL compute shader module create");
+        let vb_resolve_froxel_pipeline = ctx
+            .create_compute_pipeline_vb(
+                &ComputePipelineDesc {
+                    module: &vb_resolve_froxel_cs,
+                    entry: c"main",
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&vb_layout0_froxel),
+                    spec_constants: &[],
+                },
+                self.forward_layout1.set_layout(),
+                geometry_set.set_layout(),
+            )
+            .expect("invariant: VB resolve FROXEL compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_resolve_froxel_cs);
+        }
+
+        // `vb_shade_froxel` — the SAME 3-set shape `build_vb_classify_pipelines`'s own
+        // `vb_shade` build uses, against the wider `vb_layout0_froxel`.
+        let vb_shade_froxel_cs = RhiDevice::create_shader_module(device, vb_shade_froxel_spirv())
+            .expect("invariant: VB shade FROXEL compute shader module create");
+        let vb_shade_froxel_pipeline = ctx
+            .create_compute_pipeline_vb(
+                &ComputePipelineDesc {
+                    module: &vb_shade_froxel_cs,
+                    entry: c"main",
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&vb_layout0_froxel),
+                    spec_constants: &[],
+                },
+                self.forward_layout1.set_layout(),
+                geometry_set.set_layout(),
+            )
+            .expect("invariant: VB shade FROXEL compute pipeline create");
+        // SAFETY: as above.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_shade_froxel_cs);
+        }
+
+        // `vb_shade_tex_froxel` — the SAME 4-set shape `build_vb_shade_textured_pipeline` uses,
+        // against the wider `vb_layout0_froxel`.
+        let vb_shade_tex_froxel_cs = RhiDevice::create_shader_module(device, vb_shade_tex_froxel_spirv())
+            .expect("invariant: VB shade TEXTURED+FROXEL compute shader module create");
+        let vb_shade_tex_froxel_pipeline = ctx
+            .create_compute_pipeline_vb_textured(
+                &ComputePipelineDesc {
+                    module: &vb_shade_tex_froxel_cs,
+                    entry: c"main",
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&vb_layout0_froxel),
+                    spec_constants: &[],
+                },
+                self.forward_layout1.set_layout(),
+                geometry_set.set_layout(),
+                bindless.set().set_layout(),
+            )
+            .expect("invariant: VB shade TEXTURED+FROXEL compute pipeline create");
+        // SAFETY: as above.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_shade_tex_froxel_cs);
+        }
+
+        self.vb_layout0_froxel = Some(vb_layout0_froxel);
+        self.vb_resolve_froxel_pipeline = Some(vb_resolve_froxel_pipeline);
+        self.vb_shade_froxel_pipeline = Some(vb_shade_froxel_pipeline);
+        self.vb_shade_tex_froxel_pipeline = Some(vb_shade_tex_froxel_pipeline);
+    }
+
+    /// Cheap, allocation-free steady-state check (asset-streaming plan F7 review W1):
+    /// `true` iff `needed` exceeds slot `slot`'s current instance-family capacity.
+    /// Touches no World resource at all (`host.gpu` is a plain `WindowHost` field) —
+    /// call this BEFORE paying for the (rare) [`Self::grow_instance_family_if_needed`]
+    /// path's NonSend `RetiredGpuBuffers` take-out. Asset-streaming plan F7-hwrt
+    /// (task#11): on an RT device this now ALSO triggers REAL growth (the former W3
+    /// hard-cap early-return is removed) — [`Self::grow_instance_family_if_needed`]
+    /// dispatches to [`Self::grow_instance_family_rt`], which grows the TLAS/mv sides in
+    /// lockstep, past [`INSTANCE_CAPACITY`], up to the SAME [`MAX_INSTANCE_CAP`] ceiling
+    /// the non-RT leg shares (no separate RT ceiling).
+    #[inline]
+    pub(crate) fn needs_instance_grow(&self, needed: u32, slot: usize) -> bool {
+        needed > self.instance_capacity[slot]
+    }
+
+    /// Asset-streaming plan F7-hwrt (task#11): the LOCKSTEP instance-family-ring grow
+    /// BOTH legs share — `instance_rings[s]` + `pm_instance_material_rings[s]` (defer
+    /// old, no seed) + rebind `instance_bind_groups[s]`@0 / `pm_bind_groups[s]`@0/@1 /
+    /// (textured-PBR T6c review W1) `tex_bind_groups[s]`@0 + the interp pair/out-slot
+    /// co-grow ([`InterpGpuProd::grow_slot`], which itself repoints `interp_bg[s]`@0/@1/@2
+    /// against the just-grown `instance_rings[s]`).
+    /// Extracted from the pre-task#11 `grow_instance_family_if_needed`'s body — behavior
+    /// is IDENTICAL to that body's non-RT portion (verified by
+    /// [`Self::grow_instance_family_nonrt`], its sole caller before this split).
+    /// [`Self::grow_instance_family_rt`] is the second (new) caller. Does NOT touch
+    /// `self.instance_capacity[s]` — the caller sets it once its OWN leg's grow (mv/tlas
+    /// on the RT leg) has also landed.
+    ///
+    /// # No seed
+    ///
+    /// The reallocated buffers are `write_bytes(0)`-cleared only — `upload_instance_models`
+    /// (the caller's very next step) rewrites the whole ring this frame, and
+    /// `upload_pair_ring`/`upload_pair_out_slot` do the same for the interp pair/out-slot
+    /// lanes, so no device-side re-seed is needed (unlike the material table, which has no
+    /// per-frame full-rewrite guarantee).
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees slot `s`'s in-flight fence was waited THIS frame — every
+    /// descriptor set this fn repoints (`instance_bind_groups[s]`, `pm_bind_groups[s]`,
+    /// `tex_bind_groups[s]` when `self.tex.is_some()`, `interp`'s `interp_bg[s]`) is
+    /// therefore non-command-buffer-pending.
+    unsafe fn grow_shared_instance_rings(
+        &mut self,
+        s: usize,
+        new_cap: u32,
+        ctx: &VulkanContext,
+        retired: &mut RetiredGpuBuffers,
+        epoch: u64,
+    ) {
+        let new_bytes = new_cap as u64 * GBUFFER_INSTANCE_MODEL_BYTES as u64;
+        let new_ring = RhiDevice::create_buffer(
+            ctx,
+            &BufferDesc {
+                size: new_bytes,
+                usage: BufferUsage::STORAGE,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .expect("invariant: grown instance-model SSBO ring slot create");
+        let mapped = RhiDevice::buffer_mapped_ptr(ctx, &new_ring)
+            .expect("invariant: host-visible grown instance SSBO is mapped");
+        // No seed (see this fn's doc): `upload_instance_models` rewrites the whole ring
+        // this frame; zero-fill only covers the gap until that write lands.
+        zero_fill(mapped, new_bytes as usize);
+
+        let old_ring = core::mem::replace(&mut self.instance_rings[s], new_ring);
+        retired.push(old_ring, epoch + RETIRE_DELAY);
+
+        // SAFETY: slot `s`'s fence was waited this frame (this fn's caller contract
+        // above) — `instance_bind_groups[s]`'s set is non-pending, so rewriting its
+        // binding in place is sound.
+        unsafe {
+            rebind_storage_buffer(ctx, &self.instance_bind_groups[s], 0, &self.instance_rings[s]);
+        }
+
+        // Asset-streaming plan F8 §1.2/§7i: the PM instance-material ring shares the SAME
+        // index space as `instance_rings` (`instance_materials[i]` names the SAME instance
+        // `instances[i]` does), so it MUST grow in lockstep — a divergent capacity would
+        // OOB the instant the instance ring grows. Rebind BOTH of `pm_bind_groups[s]`'s
+        // bindings (0 = the just-grown `instance_rings[s]`, 1 = the just-grown material
+        // ring): forgetting either leaves the PM set pointing at a freed/undersized buffer.
+        //
+        // RT-LEG-GROWTH COUPLING (task#11): DONE — RT-leg instance-family growth is
+        // implemented in [`Self::grow_instance_family_rt`] + `TlasResources::grow_slot` +
+        // `MotionVecResources::grow_slot`. The full rebind matrix (every descriptor set
+        // aliasing `instance_rings`/`prev_instance_rings`/`pm_instance_material_rings`/
+        // the TLAS AS handle) is enforced by the `PACK_GROWN_BINDINGS`/`MV_GROWN_BINDINGS`
+        // debug_asserts in those two `grow_slot`s plus
+        // `GBufferTargets::tlas_accel_sets`'s `expected_tlas_accel_ring_count` guard —
+        // NOT by hand-auditing this comment.
+        let new_pm_bytes = new_cap as u64 * PER_INSTANCE_MATERIAL_BYTES as u64;
+        let new_pm_ring = RhiDevice::create_buffer(
+            ctx,
+            &BufferDesc {
+                size: new_pm_bytes,
+                usage: BufferUsage::STORAGE,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .expect("invariant: grown PM instance-material SSBO ring slot create");
+        let pm_mapped = RhiDevice::buffer_mapped_ptr(ctx, &new_pm_ring)
+            .expect("invariant: host-visible grown PM instance-material SSBO is mapped");
+        // No seed (see this fn's doc): the runner's `upload_instance_materials` (gated on
+        // `any_non_default_material`) rewrites the whole lane this frame.
+        zero_fill(pm_mapped, new_pm_bytes as usize);
+        let old_pm_ring = core::mem::replace(&mut self.pm_instance_material_rings[s], new_pm_ring);
+        retired.push(old_pm_ring, epoch + RETIRE_DELAY);
+        // SAFETY: slot `s`'s fence was waited this frame (this fn's caller contract
+        // above) — `pm_bind_groups[s]`'s set is non-pending, so rewriting BOTH its
+        // bindings in place is sound. Binding 0 repoints to the SAME grown
+        // `instance_rings[s]` rebound above; binding 1 to the just-grown material ring.
+        unsafe {
+            rebind_storage_buffer(ctx, &self.pm_bind_groups[s], 0, &self.instance_rings[s]);
+            rebind_storage_buffer(ctx, &self.pm_bind_groups[s], 1, &self.pm_instance_material_rings[s]);
+        }
+
+        // Textured-PBR T6c (review W1 — latent silent device-UAF fix): `tex_bind_groups[s]`'s
+        // binding 0 shares the SAME growable `instance_rings[s]` index space as
+        // `pm_bind_groups[s]`'s binding 0 — a mechanical mirror of the rebind immediately
+        // above, restricted to the ONE growable binding. Binding 1
+        // (`tex_instance_material_rings[s]`) is FIXED at boot `INSTANCE_CAPACITY` (T6c's
+        // disclosed non-participation in this grow — see `TexturedResources`'s doc) and is
+        // therefore NOT rebound here (there is no grown buffer to point it at). WITHOUT this
+        // rebind, growing `instance_rings[s]` would defer the OLD ring (freed
+        // `RETIRE_DELAY` frames later, see `retired.push` above) while `tex_bind_groups[s]`
+        // @0 kept pointing at it — a later TEXTURED frame would then bind a descriptor
+        // referencing freed device memory (a silent device-UAF; no validation layer on this
+        // box to catch it). `self.tex` may be `None` (the TEXTURED pipeline never got built
+        // — e.g. the bindless table failed to create), in which case there is no
+        // `tex_bind_groups[s]` to rebind.
+        if let Some(tex) = self.tex.as_ref() {
+            // SAFETY: slot `s`'s fence was waited this frame (this fn's caller contract
+            // above) — `tex.tex_bind_groups[s]`'s set is non-pending, so rewriting its
+            // binding 0 in place is sound. Repoints to the SAME just-grown
+            // `instance_rings[s]` the `instance_bind_groups[s]`/`pm_bind_groups[s]`@0
+            // rebinds above use.
+            unsafe {
+                rebind_storage_buffer(ctx, &tex.tex_bind_groups[s], 0, &self.instance_rings[s]);
+            }
+        }
+
+        // SAFETY: same fence contract as above — `interp.grow_slot`'s own precondition
+        // (slot `s`'s fence was waited this frame) — reallocates `pairs[s]`/`out_slot[s]`
+        // in lockstep and repoints ALL THREE of `interp_bg[s]`'s bindings, including
+        // `model_out`@2 against the just-grown `instance_rings[s]` passed in.
+        unsafe {
+            self.interp.grow_slot(
+                ctx,
+                s,
+                new_cap,
+                &self.instance_rings[s],
+                retired,
+                epoch + RETIRE_DELAY,
+            );
+        }
+    }
+
+    /// Asset-streaming plan F7 §7.3 (task#11: split out of the former
+    /// `grow_instance_family_if_needed`, MOVED VERBATIM — behavior byte-identical): grows
+    /// the FENCED slot's non-RT instance family via [`Self::grow_shared_instance_rings`]
+    /// to `next_pow2(needed)` iff `needed` exceeds that slot's current capacity — called
+    /// BEFORE `upload_instance_models` fills the (possibly grown) ring this frame.
+    ///
+    /// # Steady-state cost
+    ///
+    /// The caller is expected to have already consulted [`Self::needs_instance_grow`]
+    /// before paying for the NonSend take-out this call requires; the internal `needed
+    /// <= self.instance_capacity[s]` re-check below is a defensive belt-and-suspenders,
+    /// not the steady-state gate anymore.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees `token` proves THIS frame's fence wait for slot `token.slot()`
+    /// — every descriptor set this fn repoints (`instance_bind_groups[s]`, `interp`'s
+    /// `interp_bg[s]`) is therefore non-command-buffer-pending.
+    unsafe fn grow_instance_family_nonrt(
+        &mut self,
+        needed: u32,
+        ctx: &VulkanContext,
+        token: &FrameWriteToken,
+        retired: &mut RetiredGpuBuffers,
+        epoch: u64,
+    ) {
+        let s = token.slot();
+        if needed <= self.instance_capacity[s] {
+            return;
+        }
+        let new_cap = needed.next_power_of_two();
+        debug_assert!(new_cap.is_power_of_two());
+        debug_assert!(new_cap >= needed);
+        debug_assert!(
+            new_cap as usize <= MAX_INSTANCE_CAP,
+            "invariant: the grown instance-family capacity ({new_cap}) exceeds the sane \
+             MAX_INSTANCE_CAP bound ({MAX_INSTANCE_CAP}) — a likely gather leak"
+        );
+
+        // SAFETY: `token` proves slot `s`'s fence was waited THIS frame (this fn's
+        // caller contract above) — every set `grow_shared_instance_rings` repoints is
+        // non-pending.
+        unsafe {
+            self.grow_shared_instance_rings(s, new_cap, ctx, retired, epoch);
+        }
+
+        self.instance_capacity[s] = new_cap;
+    }
+
+    /// Asset-streaming plan F7-hwrt (task#11): grows the FENCED slot's RT instance family
+    /// — the shared rings ([`Self::grow_shared_instance_rings`]) PLUS the RT-only mv/tlas
+    /// sides — to `next_pow2(needed)` iff `needed` exceeds that slot's current capacity.
+    /// Only reachable once `self.tlas.is_some()` (the caller's dispatch gate in
+    /// [`Self::grow_instance_family_if_needed`]).
+    ///
+    /// # mv grow is CONDITIONAL
+    ///
+    /// An RT device without `shadow_denoise_storage_ok()` has `tlas.is_some()` but
+    /// `mv.is_none()` (see [`MotionVecResources`]'s own boot gate,
+    /// `ray_query_enabled() && shadow_denoise_storage_ok()`) — growing `mv`
+    /// unconditionally would panic on that real, test-box-invisible configuration.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees `token` proves slot `token.slot()`'s fence was waited THIS
+    /// frame — every descriptor set this fn (transitively) repoints is non-pending.
+    #[cfg(feature = "hwrt")]
+    unsafe fn grow_instance_family_rt(
+        &mut self,
+        needed: u32,
+        ctx: &VulkanContext,
+        token: &FrameWriteToken,
+        retired: &mut RetiredGpuBuffers,
+        epoch: u64,
+    ) {
+        let s = token.slot();
+        if needed <= self.instance_capacity[s] {
+            return;
+        }
+        let new_cap = needed.next_power_of_two();
+        debug_assert!(new_cap.is_power_of_two());
+        debug_assert!(new_cap >= needed);
+        debug_assert!(
+            new_cap as usize <= MAX_INSTANCE_CAP,
+            "invariant: the grown instance-family capacity ({new_cap}) exceeds the sane \
+             MAX_INSTANCE_CAP bound ({MAX_INSTANCE_CAP}) — a likely gather leak"
+        );
+
+        // SAFETY: `token` proves slot `s`'s fence was waited THIS frame — every set
+        // `grow_shared_instance_rings` repoints is non-pending.
+        unsafe {
+            self.grow_shared_instance_rings(s, new_cap, ctx, retired, epoch);
+        }
+
+        if let Some(mv) = self.mv.as_mut() {
+            // SAFETY: `token` proves slot `s`'s fence was waited THIS frame — neither
+            // `bind_groups[s]` nor `mvpm_bind_groups[s]` is command-buffer-pending;
+            // `instance_rings[s]`/`pm_instance_material_rings[s]` are the just-grown
+            // buffers `grow_shared_instance_rings` produced above.
+            unsafe {
+                mv.grow_slot(
+                    ctx,
+                    s,
+                    new_cap,
+                    &self.instance_rings[s],
+                    &self.pm_instance_material_rings[s],
+                    retired,
+                    epoch + RETIRE_DELAY,
+                );
+            }
+        }
+
+        {
+            let tlas = self
+                .tlas
+                .as_mut()
+                .expect("invariant: grow_instance_family_rt is only reached when tlas.is_some()");
+            // SAFETY: `token` proves slot `s`'s fence was waited THIS frame —
+            // `bind_groups[s]` is non-pending; `instance_rings[s]` is the just-grown
+            // buffer above.
+            unsafe {
+                tlas.grow_slot(ctx, s, new_cap, &self.instance_rings[s], retired, epoch + RETIRE_DELAY);
+            }
+        }
+
+        self.instance_capacity[s] = new_cap;
+        self.tlas_accel_rebind_pending[s] = true;
+    }
+
+    /// Asset-streaming plan F7 §7.3, extended by F7-hwrt (task#11): grows the FENCED
+    /// slot's instance family (shared by both legs) iff `needed` exceeds that slot's
+    /// current capacity — called BEFORE `upload_instance_models` fills the (possibly
+    /// grown) ring this frame. Dispatches to [`Self::grow_instance_family_rt`] on an RT
+    /// device (`self.tlas.is_some()`), else [`Self::grow_instance_family_nonrt`].
+    /// `mv.is_some() ⟹ tlas.is_some()` (`mv`'s own boot gate additionally requires
+    /// `shadow_denoise_storage_ok()`, on top of the SAME `ray_query_enabled()` gate
+    /// `tlas` boots under), so checking `tlas.is_some()` alone is exhaustive — the former
+    /// `|| self.mv.is_some()` (the pre-task#11 W3 early-return) was redundant.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees `token` proves THIS frame's fence wait for slot
+    /// `token.slot()` — every descriptor set either dispatch target repoints is
+    /// therefore non-command-buffer-pending.
+    pub(crate) unsafe fn grow_instance_family_if_needed(
+        &mut self,
+        needed: u32,
+        ctx: &VulkanContext,
+        token: &FrameWriteToken,
+        retired: &mut RetiredGpuBuffers,
+        epoch: u64,
+    ) {
+        #[cfg(feature = "hwrt")]
+        if self.tlas.is_some() {
+            // SAFETY: `token` proves slot `token.slot()`'s fence was waited THIS frame —
+            // every set `grow_instance_family_rt` (transitively) repoints is non-pending.
+            unsafe {
+                self.grow_instance_family_rt(needed, ctx, token, retired, epoch);
+            }
+            return;
+        }
+        // SAFETY: `token` proves slot `token.slot()`'s fence was waited THIS frame —
+        // every set `grow_instance_family_nonrt` (transitively) repoints is non-pending.
+        unsafe {
+            self.grow_instance_family_nonrt(needed, ctx, token, retired, epoch);
+        }
+    }
+
+    /// Asset-streaming plan F7-hwrt (task#11): slot `s`'s CURRENT persistent-TLAS
+    /// acceleration structure — the runner's `repoint_tlas_accel` rebind target once
+    /// [`Self::grow_instance_family_rt`] has flagged `tlas_accel_rebind_pending[s]`.
+    #[cfg(feature = "hwrt")]
+    pub(crate) fn current_tlas_accel(&self, s: usize) -> &BoundAccelStruct {
+        self.tlas
+            .as_ref()
+            .expect("invariant: current_tlas_accel is only called on an RT device (tlas.is_some())")
+            .resolve_accels()[s]
     }
 
     /// Assembles this frame's [`GBufferScene`] ON THE STACK (plan D7 — POD +
     /// refs, zero alloc): the static bundles + this frame's `mvp` push, the
     /// fenced slot's instance bind group, and the gathered draw batch list.
     ///
-    /// R4 wiring: SDF empty, brick/coarse/SSAO/atlas/interp OFF (their
-    /// always-bound resources are valid placeholders); lighting is ECS-owned —
+    /// R4 wiring: brick/coarse/atlas/interp OFF (their always-bound resources
+    /// are valid placeholders); Render P7-Q2 SSAO is armed from `ssao_variant` (see its
+    /// param doc) — OFF (`None`) unless the owner resolved a non-`Off` `SsaoQuality`;
+    /// lighting is ECS-owned —
     /// `light_upload` is `Some(staged_bytes)` on a frame whose staging slot was
-    /// just rewritten (the recorder then records the staging→table copy), and
-    /// `csm` is `Some(resolved)` when the runner's arming predicate holds (a
-    /// fitted sun AND live caster batches — the SAME predicate
-    /// `sync_csm_light_gate` drives the light-header gate with, so the resolve
-    /// samples the cascades only on frame streams where this depth pass runs).
+    /// just rewritten (the recorder then records the staging→table copy), the Deferred
+    /// marcher's sun is `primary_sun` — the staged table's primary directional, the row the
+    /// resolve reads as its primary this frame (`None` ⇒ the marcher bakes no sun shadow; see
+    /// [`MarcherSun::from_primary`]), and
+    /// `csm` is `Some(resolved)` when the runner's arming holds —
+    /// `ResolvedCsm::depth_pass_armed`, the SAME call `sync_csm_light_gate` drives
+    /// the light-header gate with (a fitted sun AND live caster batches, the fit
+    /// itself DISABLED on a leg set without mesh-shadow producers); `atlas` likewise
+    /// through `ResolvedShadowAtlas::depth_pass_armed`.
     ///
     /// # The O1 single-matrix pin
     ///
@@ -1414,11 +6164,26 @@ impl GpuSceneBundles {
         slot: usize,
         mesh_draw: &'a [GBufferMeshDraw<'a>],
         light_upload: Option<u64>,
+        // R2: the staged table's primary directional, read by the runner this frame
+        // (`LightTableStaging::primary_directional_dir`) — the `dir_kind.xyz` bits of the first
+        // directional row, the one the resolve takes as its primary. `None` on a sunless table.
+        primary_sun: Option<[f32; 3]>,
         csm: Option<&ResolvedCsm>,
         atlas: Option<&ResolvedShadowAtlas>,
         interp_count: u32,
         overstep: f32,
-        ddgi_enabled: bool,
+        // SDFDDGI host-hook: the resolved grid carrier when the probe-update pass is ARMED
+        // (`ResolvedDdgi.ddgi_mode_word != 0` — config + R9c freeze + device caps, folded once
+        // by `resolve_ddgi_grid_gated`; the runner threads `armed.then_some(&resolved)`, the
+        // `csm` / `atlas` shape above). `None` ⇒ `ddgi_update = None`, the GI-OFF 0%-gate. The
+        // b6 update UBO packs ITS grid from this carrier — the SAME grid the resolve reads at
+        // b18 — so the atlas is updated over the volume that is sampled.
+        ddgi: Option<&ResolvedDdgi>,
+        // VB-SV0 DP3b: this frame's resolved SV0 mode (bit 0 shadow, bit 1 AO; `0` disarmed) —
+        // the runner reads `LightingConfig`'s `_armed` pair, published by `sync_sv0_light_gate`
+        // inside the SAME ECS frame (`.before_set(LightCollectSet)`), so the mode and the
+        // light-header word the tails decode can never disagree for one frame.
+        vb_sdf_mesh_mode: u32,
         frame_index: u32,
         #[cfg(feature = "hwrt")] tlas_enabled: bool,
         // HW-RT rung 3a/3b step 7: the DENOISE-ARMED gate — `spatial_enabled() || temporal_enabled()`
@@ -1438,12 +6203,314 @@ impl GpuSceneBundles {
         // temporal reproject pass runs after the à-trous chain. `false` (the default) ⇒ the base 3-MRT
         // raster + no temporal pass ⇒ byte-identical.
         #[cfg(feature = "hwrt")] temporal_enabled: bool,
+        // Asset-system rung A1: the GPU mirror of the World-owned `Assets<Material>`
+        // (boot-seeded by `boyko_app::runner` after user `setup`, before the first
+        // `sync_gbuffer` binds it). `material_table.table()` replaces the old
+        // boot-owned 1-slot stub; only slot 0 is ever registered this rung, so the
+        // bound bytes are byte-identical to that stub.
+        material_table: &'a MaterialTable,
+        // Dynamic-materials DM1: this frame's material-table copy regions, `Some` iff the runner
+        // wrote staging slot `slot` this frame (frame 0 / a grow / after a lost edit: the one
+        // full-image region; an edit frame: the compact runs). `None` declares and records nothing.
+        material_upload: Option<&'a [boyko_rhi::BufferCopy]>,
+        // Asset-streaming plan F8 §2.2: `true` iff THIS gather scattered any non-default
+        // material id (`MeshRenderScratch::any_non_default_material`, read by the runner
+        // AFTER the gather). Gates `raster_pipeline_pm`/`pm_bind_group` below — `false` on
+        // every all-default scene (the goldens), so the recorder binds the FROZEN base
+        // pipeline (byte-identity by construction, F8 §2.4).
+        any_non_default_material: bool,
+        // Textured-PBR T6c: `true` iff THIS gather scattered at least one bound bindless
+        // texture slot (`MeshRenderScratch::any_textured_material`, read by the runner
+        // AFTER `gather_material_tex_into`). Gates `raster_pipeline_tex`/`tex_bind_group`/
+        // `bindless_set` below — `false` on every non-textured scene, so the recorder binds
+        // the FROZEN base/pm pipeline.
+        any_textured_material: bool,
+        // Render terminator-softening: `true` iff `LightingConfig::terminator_softening > 0`
+        // (read by the runner from the `LightingConfig` resource, the SAME `world.try_resource`
+        // pattern the DDGI carrier read uses). Selects [`Self::resolve_pipeline_wrap`] in place of
+        // [`Self::resolve_pipeline`] below — `false` (the default) binds the base pipeline, the
+        // byte-identical 0%-gate (`deferred_pbr.hlsl`'s frozen-base discipline).
+        terminator_wrap: bool,
+        // Anti-aliasing Stage 1: the owner-resolved AA technique
+        // ([`boyko_render::ResolvedAa::mode`]). `AaMode::Off` (the default) ⇒
+        // `GBufferScene::aa == None` (the 0%-gate: no `aa_out`, no FXAA pass, present
+        // samples `lit`). `AaMode::Fxaa` arms the FXAA activation below.
+        aa_mode: AaMode,
+        // Anti-aliasing Stage 4 (TAA W5): `boyko_render::taa_state::TaaState::advance`'s
+        // consumed-this-frame reset flag (`true` on TAA's first armed frame or a resize) —
+        // threaded from `boyko_app::runner` the SAME way `terminator_wrap` is, so the RHI layer
+        // never reads `World` directly. Read ONLY when `aa_mode == AaMode::Taa` arms
+        // `TaaActivation::reset` below; ignored (and harmless) otherwise.
+        taa_reset: bool,
+        // TAA rung T3: the owner-set post-resolve sharpen mode
+        // (`boyko_render::taa_config::TaaConfig::sharpen`), threaded from `boyko_app::runner`
+        // the SAME way `aa_mode`/`taa_reset` are. `SharpenMode::None` (the default) ⇒
+        // `GBufferScene::rcas == None` (the 0%-gate: no `taa_resolved`, no `rcas_set`, the
+        // resolve writes `aa_out` directly). `SharpenMode::Rcas` arms the RCAS activation below
+        // ONLY when `aa_mode == AaMode::Taa` ALSO holds — RCAS is a pure post-process over the
+        // resolve's OWN output, never standalone (see [`RcasActivation`]'s doc).
+        sharpen: SharpenMode,
+        // TAA rung T3: the owner-set [`SharpenMode::Rcas`] strength in `[0, 1]`
+        // (`boyko_render::taa_config::TaaConfig::rcas_sharpness`), threaded the SAME way
+        // `sharpen` is. Read ONLY when `sharpen == SharpenMode::Rcas` AND `aa_mode ==
+        // AaMode::Taa` arm [`RcasActivation::sharpness`] below; ignored (and harmless)
+        // otherwise.
+        rcas_sharpness: f32,
+        // Render P7-Q2: the owner-resolved SSAO quality's variant index
+        // ([`boyko_render::ResolvedSsao::variant`]) — `Some(0/1/2)` for Low/Medium/High,
+        // `None` for [`boyko_render::SsaoQuality::Off`] (the default). Threaded from
+        // `boyko_app::runner` the SAME way `aa_mode` is (a per-frame `World` read via
+        // `try_resource`), so the RHI layer never reads `World` directly. Selects
+        // `Self::ssao_pipelines[v]` below; `None` ⇒ `GBufferScene::ssao == None` (the
+        // 0%-gate). The resolve's `ssao_mode` header gate is armed SEPARATELY, in
+        // lock-step, by `boyko_render::sync_ssao_light_gate` (through the
+        // `collect_lights` → light-table upload pipeline, independent of this fn).
+        ssao_variant: Option<usize>,
+        // The SSAO edge-avoiding à-trous denoise chain: the owner-resolved, ALREADY-CLAMPED pass
+        // count ([`boyko_render::ResolvedSsao::atrous_levels`] — `0` or
+        // `2..=boyko_render::MAX_SSAO_ATROUS_LEVELS`). Threaded from `boyko_app::runner` the SAME
+        // way `ssao_variant` is; `resolve_ssao` already forces this to `0` whenever
+        // `ssao_variant.is_none()` (SSAO itself off), so the two can never disagree — no
+        // additional `debug_assert` needed beyond the ceiling clamp below. Feeds
+        // `SsaoActivation::atrous_levels`; `0` ⇒ the recorder dispatches NO à-trous pass (the
+        // resolve reads the raw gather — the byte-identical pre-dispatch-wiring path).
+        ssao_atrous_levels: u32,
+        // Multi-paradigm render-path plan, rung R1: the boot-committed render-path selection
+        // (`WindowHost::resolved_render_path` — Decision 1, resolved ONCE, never re-derived
+        // per frame, unlike every other arming input above). Converted at THIS seam into the
+        // plain-POD [`ResolvedRenderPathGpu`] (`boyko_render` → `boyko_rhi_vulkan` dependency
+        // direction — this crate cannot see `boyko_rhi_vulkan` types the other way around, so
+        // the conversion cannot live as a `From` impl in either crate; a free fn here is the
+        // only orphan-rule-clean seam). `GBufferScene::resolved_render_path` IS read: R2 wired
+        // the declarator dispatch onto it, and this comment went on claiming otherwise. See
+        // `ResolvedRenderPathGpu`'s own doc for the per-field census of which copies have
+        // readers and which do not.
+        resolved_render_path: boyko_render::ResolvedRenderPath,
+        // Multi-paradigm render-path plan, rung R-SDFFWD: the host-precomputed
+        // `boyko_render::view::forward_view_z_coeffs(view.near, view.far)` reverse-Z decode pair
+        // — `SdfForwardMarchPush::has_mesh`'s `view_z_a`/`view_z_b` arguments. `boyko_app::runner`
+        // computes these at the SAME site it builds `mvp` via `forward_gbuffer_push_from_view`
+        // (which needs the identical `view.near`/`view.far`), so `scene()` itself never touches
+        // `ViewUniform`. Don't-care under every other leg/path (see
+        // `GBufferScene::sdf_forward_view_z_a`'s doc).
+        sdf_forward_view_z_a: f32,
+        sdf_forward_view_z_b: f32,
+        // TAA-under-VB: the `viewt_from_depth_rz` `gViewT`-producer push's reverse-Z decode
+        // `A`/`B` (`boyko_render::view::forward_view_z_coeffs`) — the SAME formula
+        // `sdf_forward_view_z_a`/`_b` above use, but gated on TAA-under-VB arming instead of the
+        // SDF-forward-march arming (VB×Mesh never marches, so those two would stay `(0.0, 0.0)`
+        // don't-care for the exact frames this pass needs real coefficients). `boyko_app::runner`
+        // computes these at the SAME site it builds `mvp`/`sdf_forward_view_z_a` (the identical
+        // `view.near`/`view.far` single-source discipline); `scene()` itself never touches
+        // `ViewUniform`. Don't-care (`0.0, 0.0`) whenever [`GBufferScene::viewt_from_vb_depth`]
+        // resolves to `None` below.
+        vb_viewt_view_z_a: f32,
+        vb_viewt_view_z_b: f32,
+        // Multi-paradigm render-path plan, rung R8: the live Decision-0 geometry table's Set,
+        // threaded from `boyko_app::runner`'s World read (`NonSendRes<MeshGeometryTableSlot>`) —
+        // `scene()` itself never touches `World` (the SAME "host reads, threads the plain value"
+        // discipline every other config knob above follows). `Some` only on a
+        // `VisibilityBuffer`-resolved boot with the device-cap armed
+        // (`resolved_render_path.vb_geometry_table`); `None` otherwise.
+        vb_geometry_set: Option<&'a boyko_rhi_vulkan::geometry_bindless::VulkanGeometryBindlessSet>,
+        // Virtual-geometry ladder, rung R2d-2: the live geometry table's `gMeshBounds[]` buffer
+        // (`MeshGeometryTable::bounds_buffer`), read from the SAME `NonSendRes
+        // <MeshGeometryTableSlot>` in `boyko_app::runner` that produced `vb_geometry_set` — so the
+        // two are `Some` together or `None` together by construction, and `scene()` still touches
+        // no `World`. `None` on every boot that never armed the table: Deferred, Forward, Forward+
+        // and `VisibilityBuffer × Sdf` (no mesh leg), plus a VB boot on a device without the
+        // descriptor-indexing cap (which resolves to `Deferred` anyway).
+        vb_mesh_bounds: Option<&'a BoundBuffer>,
+        // VG R3 piece 1 step P1-2: THIS frame's hierarchical-Z pyramid plan — the level count and
+        // per-level extents `boyko_render::hzb::HzbLayout` derived from the composite extent,
+        // computed ONCE in `boyko_app::runner` (`crate::hzb_plan::hzb_plan_for`) and threaded as
+        // plain scalars, the SAME "host reads the World, threads the plain value" discipline every
+        // knob above follows. `None` (the default `HzbMode::Off`, or an extent the oracle refuses)
+        // ⇒ `GBufferScene::hzb == None` ⇒ no image, no per-mip views, no build passes — the
+        // 0%-gate. The RHI derives NOTHING from it (plan §4): the formulas live in
+        // `boyko_render::hzb` and only there.
+        hzb: Option<HzbPlan>,
+        // VG R3 piece 1 step P1-6: the `BOYKO_HZB_DUMP` probe's host-visible staging, threaded
+        // from `boyko_app::runner`'s `HzbDump::request` (`None` on every non-probe frame, which is
+        // every golden and every interactive run). Sized by the driver to
+        // `HzbDumpLayout::total_bytes` for the SAME `hzb` plan directly above and the SAME
+        // composite extent — the two are read from one site in the runner, so the staging and the
+        // copy regions cannot be sized from different numbers.
+        hzb_dump: Option<&'a BoundBuffer>,
+        // VG R3 piece 2 step P2-3: instances in THIS frame's VB ring carrying
+        // `boyko_render::OcclusionCulling` (`MeshRenderScratch::occlusion_instances`, read by the
+        // runner off the SAME `scratch` the instance-model upload just read — the
+        // `any_non_default_material` / `any_textured_material` threading verbatim). The
+        // STRUCTURAL conjunct of `GBufferScene::path_vb_occlusion_split`; `0` on every scene in
+        // the tree today (nothing inserts the marker), which is the 0%-gate.
+        vb_occlusion_instances: u32,
+        // VG R3 piece 4 rung P4-4: THIS frame's OWNER arming for the occlusion decision, computed
+        // ONCE in `boyko_app::runner` (`crate::occlusion_arm::occlusion_arm_for`) from the live
+        // `boyko_render::OcclusionConfig` and the diagnostic `boyko_app::OcclusionForce`, and
+        // threaded as a plain value — the SAME "host reads the World, threads the plain value"
+        // discipline `hzb` directly above follows, and for the same layering reason (this crate's
+        // callee cannot name `OcclusionMode`).
+        //
+        // `None` (the default `OcclusionMode::Off`, or a host that never composed
+        // `OcclusionPlugin`) ⇒ `GBufferScene::vb_occlusion == None` ⇒
+        // `path_vb_occlusion_split()` is false through its FIRST conjunct ⇒ no late passes, no
+        // second scope, no marked instance tested — the 0%-gate every committed pin renders.
+        vb_occlusion: Option<VbOcclusionArm>,
+        // VG R3 piece 3 step P3-5: THIS frame's cull-readback arming, threaded from
+        // `boyko_app::runner`'s `VbCullProbe::request` — `false` on every frame but the ONE the
+        // probe captures, and on every frame of every non-probe run.
+        //
+        // The staging itself is boot-owned and per-FIF, so this flag (not the staging's existence)
+        // is what makes the capture ONE frame: the copies are recorded only while it holds, so a
+        // later frame reusing the same slot cannot overwrite what the drain is waiting to read. It
+        // is the `hzb_dump` staging's own per-frame `Option` in boolean form — that probe reaches
+        // the same property by handing out its buffer on the request frame alone.
+        vb_cull_readback_armed: bool,
+        // Particles P0: this frame's particle inputs — the parity, the push scalars and the two
+        // upload byte counts the runner's gates produced. `None` on a disarmed run (and, if the
+        // bundle itself is `None`, the match below produces `None` regardless: two independent
+        // reasons to be absent, neither of which can produce a half-armed frame).
+        particle: Option<particle::ParticleFrameInputs>,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
             light_upload.unwrap_or(0) <= LIGHT_TABLE_CAPACITY,
             "invariant: the staged light table fits the device table capacity"
         );
+        debug_assert!(
+            ssao_variant.is_none_or(|v| v < SSAO_QUALITY_COUNT),
+            "invariant: ssao_variant must index Self::ssao_pipelines (0..SSAO_QUALITY_COUNT)"
+        );
+        debug_assert!(
+            ssao_variant.is_some() || ssao_atrous_levels == 0,
+            "invariant: ssao_atrous_levels > 0 requires ssao_variant.is_some() (resolve_ssao forces this)"
+        );
+        let marcher = MarcherSun::from_primary(primary_sun);
+        debug_assert!(
+            marcher.lighting_flags & LIGHTING_FLAG_SHADOWS == 0
+                || (marcher.light_dir.iter().all(|c| c.is_finite())
+                    && marcher.light_dir.iter().map(|c| c * c).sum::<f32>() > 1e-12),
+            "invariant: the marcher marches a sun shadow only toward a finite, non-degenerate direction"
+        );
+
+        // Mesh-shadow producers (CSM cascade depth, the punctual spot/point atlas depth, and
+        // under `hwrt` the per-frame TLAS pack/build + the shadow_vis/à-trous/temporal denoise
+        // chain) are MESH-LEG-OWNED — they rasterize/trace MESH casters only; the SDF leg gets
+        // its shadows from its own soft march (`ShadowSources::SDF_SOFT_MARCH`).
+        //
+        // Shadow gate SG3: this seam keeps NO leg term of its own for the cascades and the
+        // atlas. The gate is upstream, in the per-frame plan: `resolve_csm_cascades` and
+        // `resolve_shadow_atlas` publish DISABLED under `!mesh_shadow_producers()`, so the
+        // runner's arming — the SAME `depth_pass_armed` call the light-header bits are written
+        // from — hands this fn `None` for both, and the header, both UBOs, the punctual light
+        // slot and these fields all derive from one fact. A suppression applied only here was
+        // the defect: it left the sampling side armed, and a mesh-less VB×Sdf frame sampled a
+        // cascade no pass had written. The assert below CHECKS the upstream gate; it does not
+        // replace it — a regression there now renders invisible-caster shadows (defined) and
+        // trips this in debug, instead of being hidden in release.
+        let mesh_leg = resolved_render_path.mesh_leg;
+        debug_assert!(
+            resolved_render_path.mesh_shadow_producers() || (csm.is_none() && atlas.is_none()),
+            "invariant: a mesh-shadow producer armed on a leg set without one — the gate is \
+             ResolvedRenderPath::mesh_shadow_producers() in boyko_render's resolve_csm_cascades / \
+             resolve_shadow_atlas, not this seam"
+        );
+        // The TLAS is not planned by a resolve, so its leg term stays here, spelled through the
+        // SAME named predicate (byte-identical to the former `&& mesh_leg`).
+        #[cfg(feature = "hwrt")]
+        let tlas_enabled = tlas_enabled && resolved_render_path.mesh_shadow_producers();
+
+        // Multi-paradigm render-path plan, rung R3b — the SDF-owned-producer gate (the mirror
+        // image of the mesh-shadow producer ownership above): SDFDDGI's probe-update
+        // pass injects indirect irradiance onto `is_sdf_lit` pixels ONLY (the SDF leg's own
+        // geometry) — it is SDF-OWNED, so it must be structurally ABSENT under `!sdf_leg`
+        // (`Deferred × Mesh`), suppressed HERE at the same single seam. `Deferred × Both`/`Sdf`
+        // keep `sdf_leg == true` ⇒ `&& true` is the identity ⇒ byte-identical. (The P0 coarse
+        // tile-cull is ALSO SDF-owned/marcher-serving, but `coarse: None` unconditionally below —
+        // never wired by this production seam yet — so it needs no additional gate here; the
+        // async `light_upload` is light-generic, not leg-owned, so it is untouched.)
+        let sdf_leg = resolved_render_path.sdf_leg;
+
+        // TAA supports two path families today: `Deferred` (any legs — the marcher/gbuffer
+        // resolve own `gViewT`) and `VisibilityBuffer` (any legs — `viewt_from_depth_rz` on the
+        // marcher-less Mesh config, the VIEWT-variant `sdf_forward_march` composite on the
+        // SDF-carrying legs; see `viewt_from_vb_depth` above/below).
+        // `ResolvedRenderPath::taa_supported()` is the SINGLE predicate every TAA gate reads —
+        // this degrade, the resolver's own `cap_forward_v1_consumers` narrowing
+        // (`RenderPathDegrade::ForwardTaaNotYetImplemented`), and `boyko_app::runner`'s
+        // `taa_armed_now` arm-state all consume it, so the three can
+        // never disagree (a split-brain half-armed state would mean jitter with no accumulator,
+        // or an armed `aa_out` with no matching dispatch). But the AA ACTIVATION arming below
+        // reads only `aa_mode` (from `AaConfig`), NOT the resolved path — so an `AaMode::Taa`
+        // request on an unsupported combination (Forward/ForwardPlus) would arm
+        // `scene.taa` (and thus `aa_out`) while the recorder runs NO temporal resolve, leaving
+        // `aa_out` armed with no matching AA dispatch (the VB/forward AA blocks assert exactly
+        // that — a debug panic, a never-written `aa_out` sampled in release). Degrade an
+        // unsupported TAA request to `Off` HERE, at the single point where `aa_mode` feeds every
+        // AA activation, so `aa_out` never arms without a pass. FXAA / SMAA / SSAA are NOT capped
+        // and arm as usual; a `taa_supported()` TAA request (Deferred or VB, any legs) is
+        // byte-UNCHANGED (the `taa_armed` / `taa_rcas` / `vb_taa` goldens hold; the SDF-carrying
+        // VB legs gain TAA support at the VIEWT rung).
+        let aa_mode = if aa_mode == AaMode::Taa && !resolved_render_path.taa_supported() {
+            AaMode::Off
+        } else {
+            aa_mode
+        };
+        // ...and the SAME hole existed for the other three modes, which the comment above admitted
+        // ("FXAA / SMAA / SSAA are NOT capped and arm as usual") without closing. `targets.rs`
+        // arms `aa_out` on `scene.aa || scene.smaa || scene.ssaa || scene.taa` with NO path term,
+        // and the present blit repoints every slot at `aa_out` whenever it is `Some` — so on
+        // Forward/ForwardPlus, whose recorder holds no AA block at all (`passes/forward.rs` has
+        // zero AA sites, and `declare_forward_graph` declares no AA pass), an FXAA/SMAA/SSAA
+        // request presented a NEVER-WRITTEN image. Same defect, same single choke point, three
+        // modes wider.
+        //
+        // Kept as a SECOND, wider degrade rather than folded into the one above, and the ordering
+        // is deliberate: the two predicates select the same paths today but answer different
+        // questions (see `post_process_aa_supported`'s doc). Collapsing them would mean a future
+        // Forward AA seam — which flips `post_process_aa_supported` first and `taa_supported`
+        // later — silently re-arms TAA on a path with no temporal machinery. Two narrow gates that
+        // can diverge beat one wide gate that cannot.
+        let aa_mode = if aa_mode != AaMode::Off && !resolved_render_path.post_process_aa_supported()
+        {
+            AaMode::Off
+        } else {
+            aa_mode
+        };
+        // The SDF-leg conjunct: the probe update marches the SDF field, so a leg set without
+        // the SDF leg disarms it regardless of the carrier (the carrier itself stays the truth
+        // for the header bit + b18; the resolve's sample then reads a never-updated atlas, a
+        // finite boot-cleared image).
+        let ddgi = ddgi.filter(|_| sdf_leg);
+
+        // VB-P2 classification plan, rung P2c (the P1-4 owner-decided selector,
+        // `GBufferScene::vb_use_classified`'s own doc): `BOYKO_VB_FORCE_CLASSIFIED` is the
+        // orchestrator's dev/golden channel to force the classified `vb_shade` path on real
+        // hardware ahead of TV0 — mirrors `boyko_app::plugins`'s `BOYKO_AA`/`BOYKO_RENDER_PATH`
+        // launch-env seam. Read once per frame (this fn's own per-frame assembly seam, not a
+        // hot inner loop) rather than cached at boot, so a running process can be toggled by
+        // re-launch without a rebuild.
+        let vb_force_classified = std::env::var("BOYKO_VB_FORCE_CLASSIFIED").is_ok();
+        // Textured-PBR rung TV0: the VB sibling of `any_textured_material`'s own
+        // `raster_pipeline_tex`/`tex_bind_group`/`bindless_set` gating below — `true` iff THIS
+        // frame's gather bound a non-zero material texture slot AND the TEXTURED `vb_shade`
+        // pipeline + the TEXTURED resources both exist (mirrors `GBufferScene::vb_tex_active`'s
+        // own condition, evaluated here pre-construction since `GBufferScene` does not exist
+        // yet at this seam).
+        let vb_tex_active_this_frame =
+            any_textured_material && self.vb_shade_tex_pipeline.is_some() && self.tex.is_some();
+        let vb_use_classified = vb_force_classified || vb_tex_active_this_frame;
+
+        // Multi-paradigm render-path plan, rung R3b: the `viewt_from_depth` push's mesh-depth
+        // ray-t normalizer needs THIS frame's camera mode — read from the SAME `cam_eye.w` lane
+        // (`mvp` bytes @76..80, `GBUFFER_PUSH_BYTES`'s doc: 0.0 = ortho, 1.0 = perspective) the
+        // raster VERTEX push already carries (there is only ONE camera per frame; no second
+        // source to desync from). Don't-care under every OTHER leg (the pass is not recorded).
+        let camera_mode_w = f32::from_le_bytes(
+            mvp[76..80].try_into().expect("invariant: mvp is GBUFFER_PUSH_BYTES (>= 80) long"),
+        );
+        let camera_mode = if camera_mode_w != 0.0 { CAM_MODE_PERSPECTIVE } else { CAM_MODE_ORTHO };
+
         // Interp arming (refined-B): the raster VS ALWAYS reads the shared instance
         // ring (`instance_bind_groups[slot]`) — no bind swap. When the gather produced
         // DYNAMIC instances, the interp compute overwrites that ring's dynamic slots
@@ -1472,25 +6539,27 @@ impl GpuSceneBundles {
             _ => None,
         };
 
-        // SDFDDGI I2 (the ARM rung): when GI is enabled, pack the b6 update UBO for THIS frame and
-        // arm the probe-update pass. The render stays BYTE-IDENTICAL — I3 has not wired the resolve
-        // sample yet, so the atlas is written-but-unread; this rung validates the LIVE RDG-integrated
-        // dispatch (`record_graph_pass` path). When disabled → `None` (the GI-OFF 0%-gate, default).
+        // SDFDDGI I2 (the ARM rung) + the host-hook fix: when the carrier is armed, pack the b6
+        // update UBO for THIS frame from THAT carrier and arm the probe-update pass; the resolve
+        // (I3/I4, SHIPPED) then samples the atlas the pass wrote, over the SAME grid it reads
+        // from b18. When disarmed → `None` (the GI-OFF 0%-gate, default).
         //
-        // The grid is world-fixed (Decision D1) → a single enabled `ResolvedDdgi` from the
-        // owner-locked default `DdgiConfig` (the host does not run the `DdgiPlugin` resolve, so it
-        // builds the carrier inline). The UBO write is host-coherent into the SINGLE (non-ringed)
-        // `ddgi_update_ubo` before the dispatch reads it (identity ray-rotation → static UBO).
-        // `light_count` drives the shader's per-ray shade loop; the host light table is bound at t5.
-        let ddgi_update = ddgi_enabled.then(|| {
+        // Before the fix this site resolved a LOCAL `DdgiConfig { ddgi_indirect: true, ..Default }`
+        // — the owner-locked default grid, whatever the owner's config said — while b18 stayed
+        // its zero boot seed, so the update pass marched a grid the resolve could never sample
+        // (the "shipped to the GPU, not to the screen" class). The carrier now comes from the
+        // world's single writer via the runner; no config is re-resolved here.
+        //
+        // The UBO write is host-coherent into the SINGLE (non-ringed) `ddgi_update_ubo` before
+        // the dispatch reads it. `light_count` drives the shader's per-ray shade loop; the host
+        // light table is bound at t5.
+        let ddgi_update = ddgi.map(|resolved| {
             let config = DdgiUpdateConfig::default();
-            let resolved = resolve_ddgi(&DdgiConfig { ddgi_indirect: true, ..DdgiConfig::default() });
             // The shade loop iterates `light_count` lights from the bound light table. The host's
             // fold caps at `MAX_LIGHTS`; a conservative full-table count keeps the dispatch
-            // representative (the resolve does not sample the atlas this rung, so the exact count
-            // does not perturb byte-identity — only the write cost).
+            // representative (rows past the header's counts are zero-kind and skipped).
             let light_count = MAX_LIGHTS;
-            let ubo = pack_ddgi_update_ubo(&resolved, &config, frame_index, light_count);
+            let ubo = pack_ddgi_update_ubo(resolved, &config, frame_index, light_count);
             let bytes = ubo.as_bytes();
             let mapped = RhiDevice::buffer_mapped_ptr(device, &self.csm.ddgi_update_ubo)
                 .expect("invariant: host-visible DDGI update UBO is mapped");
@@ -1544,13 +6613,71 @@ impl GpuSceneBundles {
                 }
             });
 
-        GBufferScene {
+        // VB-P1a/P1b: the L1 cluster-cull activation — `Some` only when
+        // `Self::build_froxel_light_cull` ran (gated on `ResolvedRenderPath::froxel_light_cull`,
+        // which resolves true on the VB path when the owner sets `LightingConfig::
+        // clusters_enabled`; it DEFAULTS off, so this `.zip` chain is `None` for a scene that
+        // never opts in — the 0%-gate — and `Some` for one that does).
+        // Threading via the SAME `Option::zip` idiom `shadow` above uses keeps this
+        // a single expression rather than five independent `.as_ref()` calls that could disagree.
+        let cluster_cull_bits = self
+            .cluster_cull_pipeline
+            .as_ref()
+            .zip(self.cull_layout.as_ref())
+            .zip(self.cluster_grid.as_ref())
+            .zip(self.light_index.as_ref())
+            .zip(self.light_index_alloc.as_ref())
+            .map(|((((pipeline, layout), grid), index), alloc)| (pipeline, layout, grid, index, alloc));
+        let (cluster_cull, cull_layout, cluster_grid, light_index, light_index_alloc) =
+            match cluster_cull_bits {
+                Some((pipeline, layout, grid, index, alloc)) => {
+                    (Some(pipeline), Some(layout), Some(grid), Some(index), Some(alloc))
+                }
+                None => (None, None, None, None, None),
+            };
+        // The 16-byte `ClusterCullPush` bytes — meaningless (never read by the recorder) while
+        // `cluster_cull` is `None`, so a zeroed push is the honest value then.
+        let mut cluster_cull_push = [0u8; CLUSTER_CULL_PUSH_BYTES as usize];
+        if cluster_cull.is_some() {
+            cluster_cull_push.copy_from_slice(self.cluster_cull_push.as_bytes());
+        }
+        let cluster_count = if cluster_cull.is_some() { self.cluster_count } else { 0 };
+
+        let mut scene = GBufferScene {
             raster_pipeline: &self.raster_pipeline,
             vertex_buffer: &self.vertex_buffer,
             vertex_count: 6,
             mvp,
             instance_bind_group,
             marcher: &self.marcher,
+            // Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully
+            // off): armed exactly when the resolved legs are `GeometryLegs::Mesh` (`mesh_leg &&
+            // !sdf_leg`) — the marcher is not dispatched then, so this pass is the sole `gViewT`
+            // producer. `Deferred × Both`/`Sdf` keep this `None` (the marcher itself writes
+            // `gViewT`) — byte-identical to every pre-R3b frame.
+            viewt_from_depth: (mesh_leg && !sdf_leg).then(|| ViewtFromDepthActivation {
+                pipeline: &self.viewt_from_depth_pipeline,
+                layout: &self.viewt_from_depth_layout,
+                mesh_view_t_norm: mesh_view_t_norm(camera_mode),
+            }),
+            // TAA-under-VB + rung R9b: `vb_viewt` arms for (a) the marcher-less TAA config
+            // (`mesh_leg && !sdf_leg && Taa` — the shipped Track-A arm; on an SDF-carrying TAA
+            // leg the `VIEWT`-variant marcher is the sole producer) OR (b) the split's SSAO
+            // (`mesh_geo_shade_split && ssao armed` — the PRE-TAIL slot: the gather needs the
+            // gViewT lane TAA-independently; under `Both`+SSAO+TAA BOTH producers arm and the
+            // marcher stays the LAST declared writer — `declare_vb_graph`'s revised asserts).
+            // `ssao_armed_now` reads the SAME freeze-clamped `ResolvedSsao` the `scene.ssao`
+            // activation below reads, so the two can never disagree.
+            viewt_from_vb_depth: (matches!(resolved_render_path.path, boyko_render::RenderPath::VisibilityBuffer)
+                && mesh_leg
+                && ((!sdf_leg && aa_mode == AaMode::Taa)
+                    || (resolved_render_path.mesh_geo_shade_split && ssao_variant.is_some())))
+                .then_some(ViewtFromVbDepthActivation {
+                    pipeline: &self.viewt_from_vb_depth_pipeline,
+                    layout: &self.viewt_from_vb_depth_layout,
+                    view_z_a: vb_viewt_view_z_a,
+                    view_z_b: vb_viewt_view_z_b,
+                }),
             vocab_layout: &self.vocab_layout,
             edit_list: &self.edit_list,
             camera_ring: &self.camera_ring,
@@ -1572,20 +6699,32 @@ impl GpuSceneBundles {
             present_pipeline: &self.present_pipeline,
             present_layout: &self.present_layout,
             present_sampler: &self.present_sampler,
-            material_table: &self.material_table,
+            material_table: material_table.table(),
             light_table: &self.light_table,
             // The FENCED slot's staging (the ring the R4 race pin demands).
             light_staging: &self.light_staging[slot],
             light_upload_bytes: light_upload.unwrap_or(0),
             light_dirty: light_upload.is_some(),
-            cluster_cull: None,
-            cull_layout: None,
-            cluster_grid: None,
-            light_index: None,
-            light_index_alloc: None,
-            cluster_cull_push: [0u8; 16],
-            cluster_count: 0,
-            resolve_pipeline: &self.resolve_pipeline,
+            material_upload: material_upload.map(|regions| boyko_rhi_vulkan::present::MaterialUploadScene {
+                staging: material_table.staging_slot(slot),
+                regions,
+            }),
+            cluster_cull,
+            cull_layout,
+            cluster_grid,
+            light_index,
+            light_index_alloc,
+            cluster_cull_push,
+            cluster_count,
+            cluster_cull_hier: self.cluster_cull_hier,
+            // Render terminator-softening: swap in the wrap-variant pipeline when armed (the
+            // `terminator_wrap` param doc above); both pipelines share `resolve_layout` (the
+            // variant adds no descriptor), so no other field here changes.
+            resolve_pipeline: if terminator_wrap {
+                &self.resolve_pipeline_wrap
+            } else {
+                &self.resolve_pipeline
+            },
             resolve_layout: &self.resolve_layout,
             // R2a-4b: the HWRT resolve pipeline+layout+per-FIF TLAS triple — `Some` only when the
             // boot built the HWRT resources (RT device + hwrt) AND the TLAS ring exists. All three
@@ -1611,9 +6750,88 @@ impl GpuSceneBundles {
             brick: None,
             coarse: None,
             coarse_mode: CoarseMode::EmptySkipOnly,
-            lighting_flags: LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
-            light_dir: self.light_dir,
-            ssao: None,
+            // R2: the Deferred marcher shadows toward the resolve's own primary directional, read
+            // from the staged table this frame — a sun that rotates moves the shadow on the next
+            // frame. A sunlit frame pushes `SHADOWS | AO`, the value every frame pushed before R2;
+            // a sunless frame pushes `AO` alone, so no phantom sun shadow masks its point and spot
+            // lights. The Forward/VB `SdfForwardMarchPush` receives the same `light_dir` and never
+            // reads it (`sdf_forward_march` takes the sun from the table itself).
+            lighting_flags: marcher.lighting_flags,
+            light_dir: marcher.light_dir,
+            // Render P7-Q2: `ssao_variant.is_some()` (the owner-resolved `SsaoQuality != Off`)
+            // ⇒ `Some` — arms the SSAO compute activation against the selected pre-compiled
+            // variant pipeline (`Self::ssao_pipelines[v]`) + the SHARED `ssao_layout`. `None`
+            // (the default, `SsaoQuality::Off`) ⇒ the 0%-gate: no SSAO pass recorded,
+            // `GBufferTargets` never builds `ssao_set`. The resolve's `ssao_mode` header gate
+            // is armed in LOCK-STEP by the SEPARATE `boyko_render::sync_ssao_light_gate`
+            // system (bridges `SsaoConfig` into `LightingConfig::ssao_mode`, word 11 of the
+            // light header) — not by this fn (see `ssao_variant`'s param doc above).
+            ssao: ssao_variant.map(|v| SsaoActivation {
+                pipeline: &self.ssao_pipelines[v],
+                layout: &self.ssao_layout,
+                atrous_levels: ssao_atrous_levels,
+            }),
+            // The SSAO à-trous chain's STABLE boot pipelines/layout — ALWAYS `Some` (built
+            // UNCONDITIONALLY above, no RT/device gate for the pipeline CREATE itself).
+            // DECOUPLED from `ssao` above (which is `None` whenever SSAO itself is off): the
+            // set-builder (`GBufferTargets::build_ssao_atrous_sets`) reads THESE fields directly,
+            // so the role-keyed sets exist before a later frame arms `ssao.atrous_levels` — no
+            // resize/rebuild needed (mirrors `resolve_layout_denoise_hwrt`'s decoupling doc).
+            ssao_atrous_read8_pipeline: Some(&self.ssao_atrous_read8_pipeline),
+            ssao_atrous_interior_pipeline: Some(&self.ssao_atrous_interior_pipeline),
+            ssao_atrous_write8_pipeline: Some(&self.ssao_atrous_write8_pipeline),
+            ssao_atrous_layout: Some(&self.ssao_atrous_layout),
+            // Anti-aliasing Stage 1: `AaMode::Off` (the default) ⇒ `None` — the 0%-gate
+            // (no `aa_out`, no FXAA pass, present samples `lit`). `AaMode::Fxaa` arms the
+            // FXAA activation against the boot-built pipeline + dedicated LINEAR sampler.
+            aa: matches!(aa_mode, AaMode::Fxaa)
+                .then(|| AaActivation { pipeline: &self.fxaa_pipeline, sampler: &self.fxaa_sampler }),
+            // Anti-aliasing Stage 2: `AaMode::Smaa` ⇒ `Some` — arms the 3-pass SMAA activation
+            // against the boot-built pipelines/layouts/sampler/LUTs. Mutually exclusive with
+            // `aa` above by construction (`matches!` on the SAME `aa_mode`, and `AaMode` is a
+            // single enum — at most one arm matches).
+            smaa: matches!(aa_mode, AaMode::Smaa).then(|| SmaaActivation {
+                edge_pipeline: &self.smaa_edge_pipeline,
+                weight_pipeline: &self.smaa_weight_pipeline,
+                blend_pipeline: &self.smaa_blend_pipeline,
+                weight_layout: &self.smaa_weight_layout,
+                blend_layout: &self.smaa_blend_layout,
+                sampler: &self.smaa_sampler,
+                area_tex: &self.smaa_area_tex,
+                search_tex: &self.smaa_search_tex,
+            }),
+            // Anti-aliasing Stage 3: `AaMode::Ssaa` ⇒ `Some` — arms the SSAA downsample
+            // activation against the boot-built pipeline + the shared NEAREST
+            // `present_sampler` (the shader's `.Load` ignores it). Mutually exclusive with
+            // `aa`/`smaa` above by construction (same single-enum `matches!` discipline).
+            // UNLIKE `aa`/`smaa`, `aa_mode == Ssaa` here is host-authoritative — it can only
+            // occur when `boyko_app::runner`'s read-site lock forced it because the host
+            // armed the 2× `composite_extent` at boot (`WindowHost::ssaa_armed`).
+            ssaa: matches!(aa_mode, AaMode::Ssaa)
+                .then(|| SsaaActivation { pipeline: &self.ssaa_pipeline, sampler: &self.present_sampler }),
+            // Anti-aliasing Stage 4 (W5): `AaMode::Taa` ⇒ `Some` — arms the temporal-resolve
+            // activation against the boot-built pipeline/layout/sampler. Mutually exclusive with
+            // `aa`/`smaa`/`ssaa` above by construction (same single-enum `matches!` discipline).
+            // `reset` is the runner's already-consumed `TaaState::advance()` result for THIS
+            // frame (see this fn's `taa_reset` param doc).
+            taa: matches!(aa_mode, AaMode::Taa).then(|| TaaActivation {
+                resolve_pipeline: &self.taa_resolve_pipeline,
+                resolve_layout: &self.taa_resolve_layout,
+                color_formats: &[Format::R8G8B8A8Unorm],
+                linear_sampler: &self.taa_linear_sampler,
+                reset: taa_reset,
+            }),
+            // TAA rung T3: `sharpen == SharpenMode::Rcas` ⇒ `Some` — arms the RCAS activation
+            // against the boot-built pipeline/layout. Guarded ALSO on `aa_mode == AaMode::Taa`
+            // (RCAS is meaningless without the resolve it post-processes): a `SharpenMode::Rcas`
+            // config on any other `aa_mode` degrades to `None` here rather than arming a
+            // standalone pass (`GBufferTargets::create`'s `debug_assert!` would otherwise trip).
+            rcas: (matches!(aa_mode, AaMode::Taa) && matches!(sharpen, SharpenMode::Rcas))
+                .then_some(RcasActivation {
+                    rcas_pipeline: &self.rcas_pipeline,
+                    rcas_layout: &self.rcas_layout,
+                    sharpness: rcas_sharpness,
+                }),
             mesh_draw,
             csm_cascade_texture: &self.csm.cascade,
             csm_compare_sampler: &self.csm.sampler,
@@ -1658,26 +6876,32 @@ impl GpuSceneBundles {
             // memcpys `ResolvedShadowAtlas` into via `upload_atlas_ring` (binding 15). The sibling
             // in-flight frame binds the OTHER slot (the lock-free WAR discipline the ring exists for).
             shadow_atlas_ubo: &self.csm.atlas_ubo[slot],
-            // SDFDDGI I1: the 3 DDGI resolve bindings (@16/@17/@18) now bind the REAL probe atlas.
-            // The GI gate is OFF by default (`DdgiConfig::ddgi_indirect == false` → LightBuf word-7
-            // bit 4 == 0), so the resolve's probe-irradiance sample never runs and all three are
-            // bound-but-unread (the 0%-gate — byte-identical pixels). I1 severs the I0a dummy: the
-            // irradiance/depth atlases are the dedicated `B10G11R11_UFLOAT`/`R16G16_SFLOAT`
-            // `Texture2DArray`s, each sampled with a dedicated LINEAR (non-comparison) sampler —
-            // closing the VUID trap (a non-Dref SampleLevel with the old CSM COMPARISON sampler was
-            // UB). The grid UBO is the dedicated zeroed `ddgi_ubo` (single buffer — world-fixed grid,
-            // no ring).
+            // SDFDDGI I1: the 3 DDGI resolve bindings (@16/@17/@18) bind the REAL probe atlas.
+            // The GI gate is OFF by default (`ResolvedDdgi::DISABLED` → LightBuf word-7 bit 4 == 0),
+            // so the resolve's probe-irradiance sample never runs and all three are bound-but-unread
+            // (the 0%-gate — byte-identical pixels). I1 severs the I0a dummy: the irradiance/depth
+            // atlases are the dedicated `B10G11R11_UFLOAT`/`R16G16_SFLOAT` `Texture2DArray`s, each
+            // sampled with a dedicated LINEAR (non-comparison) sampler — closing the VUID trap (a
+            // non-Dref SampleLevel with the old CSM COMPARISON sampler was UB).
+            //
+            // The grid UBO is the SINGLE `ddgi_ubo` (host-hook fix): the runner memcpys the
+            // `ResolvedDdgi` carrier into it (`upload_ddgi_grid`, step 5d'') MONOTONICALLY —
+            // only when the carrier is enabled and changed, never the zero image after boot. It is
+            // one buffer BY DESCRIPTOR CONTRACT, not because the config is static: this set is
+            // built once in `GBufferTargets::create` and captures the boot buffer, so a `[slot]`
+            // ring here would not be observed by the GPU. When the header bit is set the resolve
+            // DOES sample the atlas over this grid (I3/I4 SHIPPED) — the bit derives from the same
+            // carrier, so it cannot be set over a zero grid.
             ddgi_irr_texture: self.csm.ddgi_atlas.irradiance(),
             ddgi_irr_sampler: self.csm.ddgi_atlas.sampler(),
             ddgi_depth_texture: self.csm.ddgi_atlas.depth(),
             ddgi_depth_sampler: self.csm.ddgi_atlas.sampler(),
             ddgi_grid_ubo: &self.csm.ddgi_ubo,
-            // SDFDDGI I2 (the ARM rung): `ddgi_update` is `Some(...)` when GI is enabled (the packed
-            // activation computed above) → the update RDG pass is recorded + dispatched in the LIVE
-            // frame; `None` on the default GI-OFF path (byte-identical 0%-gate — no pass recorded).
-            // Even when armed the render stays byte-identical this rung: I3 has not wired the resolve
-            // sample, so the atlas is written-but-unread. The classification / ray-table / update-UBO
-            // handles are ALWAYS supplied so the RDG sink can resolve them.
+            // SDFDDGI I2 (the ARM rung): `ddgi_update` is `Some(...)` when the carrier is armed
+            // (the packed activation computed above) → the update RDG pass is recorded + dispatched
+            // in the LIVE frame over the carrier's grid; `None` on the default GI-OFF path
+            // (byte-identical 0%-gate — no pass recorded). The classification / ray-table /
+            // update-UBO handles are ALWAYS supplied so the RDG sink can resolve them.
             ddgi_update,
             ddgi_classification: self.csm.ddgi_atlas.classification(),
             ddgi_ray_table: &self.csm.ddgi_ray_table,
@@ -1747,10 +6971,13 @@ impl GpuSceneBundles {
             // instance_bind_groups[slot], unchanged) — the compute overwrites the
             // dynamic slots in place before the raster pass.
             interp,
-            // HW-RT rung R0: GPU timestamp instrumentation OFF on every host frame (byte-
-            // identical command stream — the offline `software_ray_baseline_cost` harness is
-            // the only `Some` caller).
-            gpu_timing: None,
+            // Profiling rung 5c: read through `vb_zone_for_frame`, the SAME accessor the runner
+            // reads. `None` on every golden/host/interactive frame, so the recorded command stream
+            // stays byte-identical there — which is what rung 7 step 5 left as the VB family's only
+            // timing instrument once `vb_gpu_timing` and its collector were deleted.
+            gpu_zone: self.vb_zone_for_frame(),
+            // The census both legs feed, through the same `TsWitness` sites.
+            vb_cmd_witness: self.vb_census(),
             // HW-RT rung R2a-3: the GPU-resident per-frame TLAS pack + build activation, armed
             // above from `tlas_enabled` + `self.tlas`. `None` on every non-RT / OFF frame (the
             // byte-identical path — the TLAS is built + barriered but never traced this rung).
@@ -1802,6 +7029,19 @@ impl GpuSceneBundles {
             mv_bind_group: (temporal_enabled)
                 .then(|| self.mv.as_ref().map(|m| &m.bind_groups[slot]))
                 .flatten(),
+            // F8-mv: the combined MV+PM refs. `Some` iff BOTH temporal AND a non-default
+            // material are active this frame (a strict superset of `mesh_mvpm_active()`'s
+            // other conditions) AND `self.mv` exists (an RT + storage device) — mirrors the
+            // pure-MV shape above (`.then(...).flatten()`, not `.then_some`, so
+            // `self.mv.is_none()` yields `None`).
+            #[cfg(feature = "hwrt")]
+            raster_pipeline_mvpm: (temporal_enabled && any_non_default_material)
+                .then(|| self.mv.as_ref().map(|m| &m.mvpm_pipeline))
+                .flatten(),
+            #[cfg(feature = "hwrt")]
+            mvpm_bind_group: (temporal_enabled && any_non_default_material)
+                .then(|| self.mv.as_ref().map(|m| &m.mvpm_bind_groups[slot]))
+                .flatten(),
             // HW-RT Rung 3b step 5b: the SDF motion-vector VIS resolve refs. The pipeline is the
             // recorder's ref — gated on `temporal_enabled` (mirrors `raster_pipeline_mv`) so it is
             // `Some` only on a temporal frame with the MV resources. The layout + the motion-cam UBO
@@ -1824,7 +7064,301 @@ impl GpuSceneBundles {
             // once per extent. `None` on a non-RT device.
             #[cfg(feature = "hwrt")]
             temporal_layout: self.shadow_temporal_pipeline.as_ref().map(|(_, l)| l),
-        }
+            // Asset-streaming plan F8: the PER_INSTANCE_MATERIAL gate + refs. `pm_enabled` is
+            // the per-frame `any_non_default_material` read; the pipeline/bind-group refs are
+            // `Some` iff `pm_enabled` (belt-and-suspenders — the PM pipeline/rings are ALWAYS
+            // built at boot, unlike `mv`). `false`/`None` on every all-default scene (the
+            // goldens) ⇒ the recorder binds the FROZEN base pipeline (byte-identity by
+            // construction, F8 §2.4). This frame's bind group is `pm_bind_groups[slot]` (the
+            // FENCED slot — its instance/material rings the runner just wrote/grew).
+            pm_enabled: any_non_default_material,
+            raster_pipeline_pm: any_non_default_material.then_some(&self.raster_pipeline_pm),
+            pm_bind_group: any_non_default_material.then(|| &self.pm_bind_groups[slot]),
+            // Textured-PBR T6c: the TEXTURED gate + refs. `tex_enabled` is the per-frame
+            // `any_textured_material` read; the pipeline/bind-group/bindless-set refs are
+            // `Some` iff BOTH `any_textured_material` AND `self.tex` exists (`self.tex` is
+            // built LAZILY after boot — see `Self::build_textured_resources`; it may be
+            // permanently `None` if that build never ran). `false`/`None` on every
+            // non-textured scene ⇒ the recorder binds the FROZEN base/pm pipeline. This
+            // frame's bind group is `tex.tex_bind_groups[slot]` (the FENCED slot).
+            tex_enabled: any_textured_material,
+            raster_pipeline_tex: any_textured_material
+                .then(|| self.tex.as_ref().map(|t| &t.raster_pipeline_tex))
+                .flatten(),
+            tex_bind_group: any_textured_material
+                .then(|| self.tex.as_ref().map(|t| &t.tex_bind_groups[slot]))
+                .flatten(),
+            bindless_set: any_textured_material
+                .then(|| self.tex.as_ref().map(|t| t.bindless_set))
+                .flatten(),
+            // Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh pipeline + its
+            // descriptor-set layouts (built UNCONDITIONALLY at boot, `GpuSceneBundles::boot`'s
+            // doc) + the raw instance-model/instance-material ring refs `ForwardTargets::build`
+            // (`boyko_rhi_vulkan::present::targets`) folds into Forward's OWN Set-0 bind group.
+            // Code-review fix: `Some(...)` ALWAYS — these resources genuinely exist at every
+            // boot regardless of `resolved_render_path.path` (the `Option` on `GBufferScene`
+            // exists so a NON-production test fixture can honestly say `None` instead of
+            // threading a semantically-wrong placeholder; production never needs to).
+            // Multi-paradigm render-path plan, rung R5 (ForwardPlus, code-review fix): only
+            // `forward_pipeline` (the OPAQUE variant: `VK_COMPARE_OP_GREATER` base FS vs
+            // `VK_COMPARE_OP_EQUAL` froxel FS) is path-conditional now — Forward/ForwardPlus are
+            // boot-mutually-exclusive (Decision 1), so exactly one of `self.forward_pipeline`/
+            // `self.forward_plus_pipeline` is ever threaded from this seam.
+            // `forward_layout0`/`forward_layout1`/`forward_sky_pipeline`/the instance rings are
+            // UNCONDITIONAL — `forward_layout0` is now the ONE unified 7-binding layout every
+            // Forward-family pipeline (incl. `forward_pipeline` itself) is built against, fixing
+            // the two-distinct-layout-handles bug a prior revision shipped (`boot`'s doc).
+            forward_pipeline: Some(
+                if resolved_render_path.path == boyko_render::RenderPath::ForwardPlus {
+                    &self.forward_plus_pipeline
+                } else {
+                    &self.forward_pipeline
+                },
+            ),
+            forward_sky_pipeline: Some(&self.forward_sky_pipeline),
+            forward_layout0: Some(&self.forward_layout0),
+            forward_layout1: Some(&self.forward_layout1),
+            forward_instance_ring: Some(&self.instance_rings),
+            forward_instance_material_ring: Some(&self.pm_instance_material_rings),
+            // Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth PRE-PASS
+            // pipeline — genuinely exists at every boot (built UNCONDITIONALLY, `boot`'s doc),
+            // the SAME `Some(...)` ALWAYS discipline as the Forward v1 trio above; only ever
+            // RECORDED when `GBufferScene::path_needs_depth_prepass` holds.
+            forward_prepass_pipeline: Some(&self.forward_prepass_pipeline),
+            // Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` pipeline
+            // pair + their shared Set-0 layout — genuinely exist at every boot (built
+            // UNCONDITIONALLY, `boot`'s doc), the SAME `Some(...)` ALWAYS discipline as the
+            // Forward v1 trio above; only ever RECORDED when `GBufferScene::path_has_sdf_forward`
+            // holds.
+            sdf_forward_march_pipeline: Some(&self.sdf_forward_march_pipeline),
+            sdf_forward_march_sdfonly_pipeline: Some(&self.sdf_forward_march_sdfonly_pipeline),
+            sdf_forward_march_viewt_pipeline: Some(&self.sdf_forward_march_viewt_pipeline),
+            sdf_forward_march_sdfonly_viewt_pipeline: Some(&self.sdf_forward_march_sdfonly_viewt_pipeline),
+            sdf_forward_march_layout: Some(&self.sdf_forward_march_layout),
+            brick_levels_ubo: Some(&self.brick_levels_ubo),
+            sdf_forward_view_z_a,
+            sdf_forward_view_z_b,
+            // Multi-paradigm render-path plan, rung R8: the VB v1 pipelines + layout + instance
+            // ring — `vb_layout0`/`vb_raster_pipeline`/`vb_sky_pipeline`/`vb_instance_rings` exist
+            // at EVERY boot (built UNCONDITIONALLY, `boot`'s doc, the SAME `Some(...)` ALWAYS
+            // discipline as the Forward v1 trio above); `vb_resolve_pipeline` is `Some` only
+            // AFTER `build_vb_resolve_pipeline` ran (a `VisibilityBuffer`-resolved boot with the
+            // device-cap armed); `vb_geometry_set` is threaded straight from this fn's own param
+            // (the live table itself lives in `World`, not on `Self`).
+            vb_raster_pipeline: Some(&self.vb_raster_pipeline),
+            vb_sky_pipeline: Some(&self.vb_sky_pipeline),
+            vb_resolve_pipeline: self.vb_resolve_pipeline.as_ref(),
+            vb_layout0: Some(&self.vb_layout0),
+            vb_instance_ring: Some(&self.vb_instance_rings),
+            vb_indirect: Some(&self.vb_indirect),
+            // VG R3 piece 2 step P2-3: the LATE record array — an unconditional `Some(...)`, the
+            // `vb_visible_instance` discipline, because `boot` mints it unconditionally beside
+            // `vb_indirect`. It is deliberately NOT threaded as a conjunct of the split predicate:
+            // an always-`Some` field in a gate is a dead conjunct that reads like a real one.
+            vb_indirect_late: Some(&self.vb_indirect_late),
+            // VG rung R2c0: the batch-cull arm, wired as ONE all-or-nothing group. Both
+            // `declare_vb_graph` and `record_vb` gate on all five being `Some` together, and a
+            // partial wiring here would let the two gates disagree — which is a MISSING barrier
+            // on the indirect buffer, not merely a skipped dispatch. Built unconditionally in
+            // `boot` beside `vb_indirect`, so the five are always `Some` in lock-step.
+            // VG rung R2c: the six camera-frustum planes, extracted HERE from this call's OWN
+            // `mvp` argument — the very bytes threaded on to the raster's vertex push a few lines
+            // below. Same function, same value, so the cull cannot end up testing against a
+            // different matrix than the one being drawn with; the TAA path jitters that matrix per
+            // frame, which is exactly the drift this forecloses. `boyko_rhi_vulkan` cannot do this
+            // itself — `boyko_render` sits above it — so the planes cross the boundary as data.
+            vb_cull_planes: Some(boyko_render::frustum::frustum_planes_from_push_bytes(
+                mvp[0..64]
+                    .try_into()
+                    .expect("invariant: the raster push's leading 64 bytes are view_proj"),
+            )),
+            vb_batch_desc: Some(&self.vb_batch_desc),
+            vb_cull_visible: Some(&self.vb_cull_visible),
+            vb_cull_count: Some(&self.vb_cull_count),
+            // Rung R2d-2: MANDATORY, not part of the R2c0 arm. Allocated unconditionally in `boot`
+            // beside `vb_indirect`, so this is an unconditional `Some(...)` — the same discipline
+            // `vb_instance_ring` above follows, and the reason the four Set-0 builders can
+            // `.expect()` it under `path_is_vb()` rather than carry a fifth `Option` arm.
+            vb_visible_instance: Some(&self.vb_visible_instance),
+            // VG R3 piece 3 step P3-2: the split's three buffers, wired as unconditional
+            // `Some(...)` — `boot` mints them unconditionally beside `vb_visible_instance`, so
+            // making any of them a conjunct of `path_vb_occlusion_split()` would be a dead conjunct
+            // that reads like a real gate (`vb_indirect_late`'s own doc records the trap).
+            vb_late_visible: Some(&self.vb_late_visible),
+            vb_late_count: Some(&self.vb_late_count),
+            vb_cull_uniform: Some(&self.vb_cull_uniform),
+            // VG R3 piece 3 step P3-6: the occlusion decision's flag word. SEEDED `0` here and
+            // OVERWRITTEN below the literal, because the ARMED bit is
+            // `scene.path_vb_occlusion_split()` itself and that method needs the assembled scene.
+            // See the assignment for why that indirection is the point rather than an awkwardness.
+            vb_occ_flags: 0,
+            // VG R3 piece 3 step P3-3 (plan D6): the ENGINE frame index — this call's OWN
+            // `frame_index` argument, the monotonic counter the runner advances once per presented
+            // frame and already threads into the DDGI probe-update UBO. Threaded from HERE rather
+            // than read off `Renderer::frame_index` (which is the round-robin frame-in-flight SLOT
+            // and repeats every other frame) so the cull's record-order control and the pyramid
+            // dump's pairing check compare against ONE clock instead of two that happen to agree.
+            //
+            // The recorder stamps it into `VbCullUniform::frame_index`; step P3-5 reads it back out
+            // of `vb_late_count`'s reserved tail slot (once the ARMED bit makes the shader write it).
+            engine_frame_index: frame_index,
+            // VG R3 piece 3 step P3-5: armed for ONE frame per run, not for the run.
+            //
+            // Boot mints the staging when `BOYKO_VB_CULL_READBACK` is set; `vb_cull_readback_armed`
+            // is the driver's REQUEST-frame flag. Both must hold, so `filter` rather than a second
+            // `then`: a run without the staging can never arm, and a run with it arms exactly once.
+            // The declarator and the recorder both gate the two readback passes on this field, so a
+            // non-request frame records no copy at all and the drained slot still holds the request
+            // frame's bytes.
+            vb_cull_readback: self.vb_cull_readback.as_ref().filter(|_| vb_cull_readback_armed),
+            vb_batch_cull_pipeline: Some(&self.vb_batch_cull_pipeline),
+            vb_cull_layout: Some(&self.vb_cull_layout),
+            vb_geometry_set,
+            // Rung R2d-2: ARMED, unlike `vb_visible_instance` above — it is owned by the geometry
+            // table, which exists only on a VB-resolved boot with the mesh leg and the device cap.
+            // `vb_cull_set`'s match gates on THIS, which is what keeps the set `None` exactly when
+            // the per-instance cull has nothing legal to bind at `vb_cull_layout` @5.
+            vb_mesh_bounds,
+            // VB-P2 classification plan, rung P2a (dark infra): `Some` only AFTER
+            // `build_vb_classify_pipelines` ran (the SAME `vb_resolve_pipeline` `Option` shape
+            // above). Nothing reads these fields yet — `record_vb`/`declare_vb_graph` are
+            // untouched this rung; threaded here so a later rung (P2b/P2c) needs no further
+            // plumbing.
+            vb_classify_count_pipeline: self.vb_classify_count_pipeline.as_ref(),
+            vb_classify_scan_pipeline: self.vb_classify_scan_pipeline.as_ref(),
+            vb_classify_scatter_pipeline: self.vb_classify_scatter_pipeline.as_ref(),
+            vb_shade_pipeline: self.vb_shade_pipeline.as_ref(),
+            // VB-SV0 DP3b: the dedicated prepass — pipeline (Some on VB boots, built beside
+            // `vb_resolve_pipeline`), its layout (for `DeferredSets::build`'s per-FIF prepass
+            // sets, the R5 same-object rule), and THIS frame's resolved mode (the runner threads
+            // it from `LightingConfig`'s `_armed` pair; `0` = disarmed = the pass is not declared
+            // and no term ResId is named).
+            sdf_mesh_shadow_pipeline: self.sdf_mesh_shadow_pipeline.as_ref(),
+            sdf_mesh_shadow_layout0: Some(&self.sdf_mesh_shadow_layout0),
+            vb_sdf_mesh_mode,
+            // VB-P2 classification plan, rung P2b: the classify `scan` pass's loop-bound push
+            // constant (`GBufferScene::vb_classify_material_count`'s own doc — a valid upper
+            // bound on any live `MaterialId` this frame could reference).
+            vb_classify_material_count: material_table.capacity_rows(),
+            // VB-P2 classification plan, rung P2c: the classified-vs-fused `lit`-producer
+            // selector (`GBufferScene::vb_use_classified`'s own doc) — the per-frame local
+            // computed above.
+            vb_use_classified,
+            // Textured-PBR rung TV0: the TEXTURED `vb_shade` pipeline + the raw TEXTURED
+            // instance-material ring, threaded the SAME way `raster_pipeline_tex`/`bindless_set`
+            // above are — `Some` iff `self.tex` exists (device-agnostic, unconditioned on
+            // `any_textured_material`: `GBufferTargets` needs the ring reference to build
+            // `vb_set0_tex` once per extent, independent of any SPECIFIC frame's texture usage).
+            vb_shade_tex_pipeline: self.vb_shade_tex_pipeline.as_ref(),
+            // VB-P1a/P1b: `Some` only after `Self::build_froxel_light_cull` ran (gated on the
+            // owner-opt-in arm bit, default OFF) — see that fn's doc.
+            vb_layout0_froxel: self.vb_layout0_froxel.as_ref(),
+            vb_resolve_froxel_pipeline: self.vb_resolve_froxel_pipeline.as_ref(),
+            vb_shade_froxel_pipeline: self.vb_shade_froxel_pipeline.as_ref(),
+            vb_shade_tex_froxel_pipeline: self.vb_shade_tex_froxel_pipeline.as_ref(),
+            vb_tex_instance_material_ring: self.tex.as_ref().map(|t| &t.tex_instance_material_rings),
+            // Rung R9b: the split pair + VB SSAO gather. The deferred-built pipelines are
+            // `Option`-threaded as-is (`Some` after `build_vb_split_pipelines` ran — the
+            // `vb_resolve_pipeline` shape); the boot layouts/trio are `Some(...)` ALWAYS.
+            vb_geo_pipeline: self.vb_geo_pipeline.as_ref(),
+            vb_shade_split_pipeline: self.vb_shade_split_pipeline.as_ref(),
+            vb_shade_split_tex_pipeline: self.vb_shade_split_tex_pipeline.as_ref(),
+            vb_geo_aux_layout: Some(&self.vb_geo_aux_layout),
+            vb_split_layout1: Some(&self.vb_split_layout1),
+            ssao_vb_pipeline: ssao_variant.map(|v| &self.ssao_vb_pipelines[v]),
+            vb_ssao_layout: Some(&self.vb_ssao_layout),
+            // Rung R9d: the VB hardware shadow chain. The boot-built pipeline/layout are
+            // `Option`-threaded as-is (`Some` only on an RT device); `vb_geo_mv_pipeline`/
+            // `vb_shade_split_hwrt_pipeline`/`vb_shade_split_tex_hwrt_pipeline` are `Option`-
+            // threaded like `vb_geo_pipeline`/`vb_shade_split_pipeline`/`vb_shade_split_tex_pipeline`
+            // above (`Some` after `build_vb_split_pipelines` ran on an RT device).
+            #[cfg(feature = "hwrt")]
+            vb_shadow_vis_pipeline: self.vb_shadow_vis_pipeline.as_ref().map(|(p, _)| p),
+            #[cfg(feature = "hwrt")]
+            vb_shadow_vis_layout: self.vb_shadow_vis_pipeline.as_ref().map(|(_, l)| l),
+            #[cfg(feature = "hwrt")]
+            vb_geo_mv_pipeline: self.vb_geo_mv_pipeline.as_ref(),
+            #[cfg(feature = "hwrt")]
+            vb_shade_split_hwrt_pipeline: self.vb_shade_split_hwrt_pipeline.as_ref(),
+            #[cfg(feature = "hwrt")]
+            vb_shade_split_tex_hwrt_pipeline: self.vb_shade_split_tex_hwrt_pipeline.as_ref(),
+            // Multi-paradigm render-path plan, rung R1: the plain-POD conversion (see this
+            // fn's `resolved_render_path` param doc for why it cannot be a `From` impl).
+            resolved_render_path: to_gpu_resolved_render_path(&resolved_render_path),
+            // VG R3 piece 1 step P1-2: the pyramid plan, threaded verbatim from the runner's
+            // single `HzbLayout` call (see this fn's `hzb` param doc). `None` on the default
+            // `HzbMode::Off` — no image, no views, no passes.
+            hzb,
+            // VG R3 piece 1 step P1-4: unconditional `Some(...)` — `boot` mints both without an
+            // arm dependency (see its comment). The ARMING is `hzb` directly above: `HzbTargets`,
+            // and with it every `hzb_build` descriptor set, exists iff that is `Some`. So these
+            // two being always-present cannot disagree with the pyramid's presence — there is only
+            // one predicate to disagree with.
+            hzb_build_layout: Some(&self.hzb_build_layout),
+            hzb_build_pipeline: Some(&self.hzb_build_pipeline),
+            // VG R3 piece 1 step P1-6: the dump staging, threaded verbatim (see this fn's
+            // `hzb_dump` param doc). `None` on every non-probe frame ⇒ no dump pass, no copy.
+            hzb_dump,
+            // VG R3 piece 2 step P2-3: this frame's occlusion-capable instance count, threaded
+            // verbatim from the gather (see this fn's `vb_occlusion_instances` param doc). It is
+            // the ONLY per-frame input of `GBufferScene::path_vb_occlusion_split`, so there is
+            // one number for declare and record to agree on and no second one to disagree with.
+            vb_occlusion_instances,
+            // VG R3 piece 4 rung P4-4: the OWNER's arming, threaded verbatim (see this fn's
+            // `vb_occlusion` param doc). `None` on the default `OcclusionMode::Off` — no split.
+            vb_occlusion,
+
+            // Particles P0: `Some` iff the bundle was built at boot (owner armed) AND the runner
+            // handed this frame's push/upload inputs. `None` is STRUCTURAL ABSENCE — no ResId, no
+            // pass, no command — which is what makes every existing image pin byte-identical by
+            // construction rather than by an argument about untaken branches.
+            particle: match (self.particle.as_ref(), particle) {
+                (Some(bundle), Some(inputs)) => Some(bundle.activation(
+                    slot,
+                    inputs.parity,
+                    inputs.push,
+                    inputs.emit_upload_bytes,
+                    inputs.effects_upload_bytes,
+                )),
+                _ => None,
+            },
+        };
+
+        // === VG R3 piece 3 step P3-6 (plan D9): THE ARMING, and why it is a post-assignment. ===
+        //
+        // `VB_CULL_OCC_ARMED` is set by CALLING `path_vb_occlusion_split()` on the assembled scene
+        // — never by re-deriving its conjuncts here. That is the whole design of this line, and VG
+        // R3 piece 4 rung P4-4 adding a SIXTH conjunct (the owner knob) is exactly the edit the
+        // shape exists to survive: the call picks it up with no change here, where a re-derivation
+        // would have had to be found and widened.
+        //
+        // `declare_vb_graph` declares the cull's `vb_late_visible` / `vb_late_count` WRITES and its
+        // `hzb_pyramid` READ under that predicate and under nothing else, while
+        // `vb_batch_cull.comp.hlsl` performs them under this BIT. The module's own header states
+        // the obligation: ARMED must imply the split, or the shader stores where nothing declared
+        // it and samples an image the graph never named. Two independently-computed booleans can
+        // drift into exactly that frame; one predicate, read twice, cannot — which is why this is
+        // an assignment off `scene` rather than the predicate's conjuncts copied into the literal
+        // above.
+        //
+        // The FORCE bits ride along only when ARMED is set: they are read inside the shader's
+        // armed guard, so a FORCE bit on an unsplit frame would be a word nobody reads and a
+        // difference between two frames that must be byte-identical. Since piece 4 rung P4-4 they
+        // come from `scene.vb_occlusion`'s payload — the SAME `Option` whose presence is the
+        // predicate's first conjunct — so "armed" and "which verdict is forced" cannot disagree.
+        let force_flags = scene.vb_occlusion.map_or(0, |a| a.force_flags);
+        // The shader's contradiction, refused at the last host site before the word is pushed:
+        // FORCE_KEEP (defer nothing) and FORCE_LATE (defer everything marked) are opposite
+        // controls and the resolution of "both" would be whichever branch the module tests first.
+        // `OcclusionForce::flags` cannot produce both; this states the property where a future
+        // second producer of the payload would meet it.
+        debug_assert!(
+            force_flags.count_ones() <= 1,
+            "invariant: VbOcclusionArm::force_flags is 0 or exactly one FORCE bit"
+        );
+        scene.vb_occ_flags =
+            if scene.path_vb_occlusion_split() { VB_CULL_OCC_ARMED | force_flags } else { 0 };
+        scene
     }
 
     /// The FENCED slot's interpolation-pair SSBO — the write target of the runner's
@@ -1834,6 +7368,17 @@ impl GpuSceneBundles {
     #[inline]
     pub(crate) fn interp_pair_slot(&self, slot: usize) -> &BoundBuffer {
         &self.interp.pairs[slot]
+    }
+
+    /// Textured-PBR T6c: the FENCED slot's TEXTURED instance-material SSBO — the write
+    /// target of the runner's per-frame
+    /// [`upload_instance_materials_tex`](boyko_render::upload_instance_materials_tex).
+    /// Returns `None` if [`Self::build_textured_resources`] never ran (`self.tex` absent —
+    /// e.g. the bindless texture table failed to create). The sibling in-flight frame binds
+    /// the OTHER slot — the same lock-free discipline as the base instance ring.
+    #[inline]
+    pub(crate) fn tex_instance_material_slot(&self, slot: usize) -> Option<&BoundBuffer> {
+        self.tex.as_ref().map(|t| &t.tex_instance_material_rings[slot])
     }
 
     /// HW-RT rung R2a-3: the FENCED slot's mesh-id SSBO — the write target of the runner's
@@ -1846,15 +7391,16 @@ impl GpuSceneBundles {
         self.tlas.as_ref().map(|t| t.mesh_id_slot(slot))
     }
 
-    /// HW-RT rung R2a-3: rewrites the frame-invariant BLAS-address table from `registry` IFF its
-    /// `blas_generation` advanced (a BLAS never moves — spec, so this is a no-op on the steady
-    /// per-frame path). No-op on a non-RT device (`self.tlas` absent). Called by the runner before
-    /// `scene()` on an RT device.
+    /// HW-RT rung R2a-3: rewrites the frame-invariant BLAS-address table from `mesh_assets` IFF its
+    /// `install_epoch` advanced (asset-streaming plan F6 — a no-op on the steady, never-retiring
+    /// per-frame path; see [`TlasResources::sync_blas_addr`]'s doc for why row-count growth alone
+    /// cannot gate this). No-op on a non-RT device (`self.tlas` absent). Called by the runner
+    /// before `scene()` on an RT device.
     #[cfg(feature = "hwrt")]
     #[inline]
-    pub(crate) fn sync_tlas_blas_addr(&self, device: &VulkanContext, registry: &MeshRegistry) {
+    pub(crate) fn sync_tlas_blas_addr(&self, device: &VulkanContext, mesh_assets: &Assets<MeshGpu>) {
         if let Some(t) = self.tlas.as_ref() {
-            t.sync_blas_addr(device, registry);
+            t.sync_blas_addr(device, mesh_assets);
         }
     }
 
@@ -1884,6 +7430,16 @@ impl GpuSceneBundles {
     #[inline]
     pub(crate) fn atlas_ubo_slot(&self, slot: usize) -> &BoundBuffer {
         &self.csm.atlas_ubo[slot]
+    }
+
+    /// SDFDDGI host-hook: the SINGLE binding-18 DDGI grid UBO — the write target of the runner's
+    /// value-gated [`upload_ddgi_grid`](boyko_render::upload_ddgi_grid) (step 5d''). NOT a ring:
+    /// the resolve set is boot-built and captures this one buffer, so the runner writes it
+    /// monotonically (enabled + changed only, never the zero image after boot) — the
+    /// single-buffer WAR discipline `upload_ddgi_grid` documents.
+    #[inline]
+    pub(crate) fn ddgi_ubo(&self) -> &BoundBuffer {
+        &self.csm.ddgi_ubo
     }
 
     /// HW-RT rung 1b: the FENCED slot's HWRT shadow-params-UBO ring buffer — the write target of
@@ -1928,9 +7484,256 @@ impl GpuSceneBundles {
         &self.edit_list
     }
 
+    /// VB-P1e D11: the BOOT-frozen `ClusterConfig::packed_dims()` snapshot
+    /// [`Self::build_froxel_light_cull`] sized every L1 buffer from — `0` (meaningless) while
+    /// [`Self::cluster_cull_pipeline`] is `None`. `boyko_app::runner`'s per-frame debug-only
+    /// assert compares this against the LIVE `ClusterConfig` Resource to catch an owner system
+    /// stomping the Resource after boot (a frame-level tripwire, not a fix — VB-P1k tracks the
+    /// underlying `ClusterGrid`-reader skew this cannot close).
+    #[inline]
+    pub(crate) fn cluster_boot_packed_dims(&self) -> u32 {
+        self.cluster_boot_packed_dims
+    }
+
+    /// `true` iff [`Self::build_froxel_light_cull`] actually ran and populated
+    /// [`Self::cluster_boot_packed_dims`] — the SAME `#[inline] fn ... .is_some()` idiom
+    /// [`Self::sv0_bench_armed`] uses. `boyko_app::runner`'s per-frame boot/live dims
+    /// `debug_assert_eq!` must gate on THIS, not on `ResolvedRenderPath::froxel_light_cull`
+    /// alone (P1-2, adversarial review): `froxel_light_cull` is strictly WIDER than the
+    /// condition that actually built the snapshot (`build_froxel_light_cull` additionally
+    /// requires a live `MeshGeometryTableSlot`, which `froxel_light_cull` does not — see
+    /// `render_path_config.rs`'s `vb_geometry_table`/`froxel_light_cull` fields), so a shipped
+    /// `VisibilityBuffer` + `GeometryLegs::Sdf` boot (or any boot where
+    /// `MeshGeometryTable::new` degrades to `None`) would otherwise compare a live non-zero
+    /// `ClusterConfig` against a snapshot that was never written (`0`), panicking every frame
+    /// in a debug build.
+    #[inline]
+    pub(crate) fn cluster_cull_armed(&self) -> bool {
+        self.cluster_cull_pipeline.is_some()
+    }
+
+    /// VG rung R2c-tail / R2d-5 / VG R3 piece 3 step P3-5: reads this frame's cull outputs out of
+    /// the readback staging. `None` when the probe is unarmed.
+    ///
+    /// `fi` is the frame-in-flight slot the CAPTURE frame used, and `frame_index` is that frame's
+    /// engine index — neither is "the current frame". The probe hands its staging to exactly one
+    /// frame and reads it after a drain, so the caller holds both and this fn takes them rather than
+    /// re-deriving either.
+    ///
+    /// # Ordering contract
+    ///
+    /// The caller MUST have made the capture frame's transfer writes visible to the host before
+    /// calling. Since step P3-5 that is the settle → request → DRAIN progression the pyramid dump
+    /// uses (`crate::vb_cull_probe`): `DRAIN_FRAMES (3) > FRAMES_IN_FLIGHT (2)` presented frames
+    /// after the capture, so the capture frame's slot fence has necessarily been re-waited. The
+    /// staging is HOST_COHERENT, so no explicit invalidate is needed once the copy has completed;
+    /// what is needed is that it HAS completed, and that is the caller's drain, not this fn's.
+    pub(crate) fn read_vb_cull(&self, fi: usize, frame_index: u32) -> Option<VbCullReadback> {
+        let rb = self.vb_cull_readback.as_ref()?;
+        let mapped = rb[fi].mapped?;
+        debug_assert!(
+            rb[fi].size >= VB_CULL_READBACK_BYTES,
+            "invariant: the cull readback staging is created at VB_CULL_READBACK_BYTES"
+        );
+        // The recorder packs the nine regions from the live `BoundBuffer::size` of each SOURCE,
+        // while this decode addresses them at the constants that sized those sources. The two
+        // derivations agree only because every create site spells the matching constant — a
+        // CONVENTION, and until this assert, one nothing checked. If any source were ever created
+        // at some other size the recorder would pack differently while these offsets stayed put,
+        // and every field below would be read from the wrong bytes: no crash, no validation error,
+        // just a probe that reports confident nonsense. Checked here rather than at the create
+        // sites because this is the only place that depends on the agreement.
+        debug_assert_eq!(
+            (
+                self.vb_cull_count[fi].size,
+                self.vb_cull_visible[fi].size,
+                self.vb_indirect[fi].size,
+                self.vb_visible_instance[fi].size,
+            ),
+            (VB_CULL_COUNT_BYTES, VB_CULL_VISIBLE_BYTES, VB_INDIRECT_BYTES, VB_VISIBLE_INSTANCE_BYTES),
+            "invariant: each cull source is allocated at the constant this decode addresses it by"
+        );
+        // VG R3 piece 3 step P3-5: the same two-sided check for the three LATE sources. Split from
+        // the tuple above rather than widened into a seven-tuple so a failure names which half
+        // drifted; the reason is identical and stated there.
+        debug_assert_eq!(
+            (
+                self.vb_late_visible[fi].size,
+                self.vb_late_count[fi].size,
+                self.vb_indirect_late[fi].size,
+            ),
+            (VB_LATE_VISIBLE_BYTES, VB_LATE_COUNT_BYTES, VB_INDIRECT_LATE_BYTES),
+            "invariant: each late-cull source is allocated at the constant this decode addresses it by"
+        );
+        let list_elems = (VB_CULL_VISIBLE_BYTES / 4) as usize;
+        let record_stride = boyko_rhi_vulkan::ffi::DRAW_INDEXED_INDIRECT_STRIDE as u64;
+        let records = (VB_INDIRECT_BYTES / record_stride) as usize;
+        let vis_elems = (VB_VISIBLE_INSTANCE_BYTES / 4) as usize;
+        let late_vis_elems = (VB_LATE_VISIBLE_BYTES / 4) as usize;
+        let late_count_elems = VB_LATE_COUNT_ELEMS;
+        let late_records = (VB_INDIRECT_LATE_BYTES / record_stride) as usize;
+        let mut batch_list = Vec::with_capacity(list_elems);
+        let mut record_instance_counts = Vec::with_capacity(records);
+        let mut visible_instances = Vec::with_capacity(vis_elems);
+        let mut late_candidates = Vec::with_capacity(late_vis_elems);
+        let mut late_count_pre = Vec::with_capacity(late_count_elems);
+        let mut late_survivors = Vec::with_capacity(late_vis_elems);
+        let mut late_count_post = Vec::with_capacity(late_count_elems);
+        let mut late_record_instance_counts = Vec::with_capacity(late_records);
+
+        // SAFETY: `mapped` is the live host-coherent mapping of the staging `boot` created at
+        // `VB_CULL_READBACK_BYTES` bytes. Every read below is inside that range BY CONSTRUCTION,
+        // because each region's element count is derived from the SAME constant that fixes that
+        // region's byte size and the offsets are the region offsets themselves:
+        //   * 4 B at `VB_CULL_READBACK_COUNT_OFFSET`, inside the `VB_CULL_COUNT_BYTES` (>= 4) region;
+        //   * `list_elems * 4 == VB_CULL_VISIBLE_BYTES` bytes at `VB_CULL_READBACK_LIST_OFFSET`;
+        //   * `records * record_stride == VB_INDIRECT_BYTES` bytes at
+        //     `VB_CULL_READBACK_RECORDS_OFFSET`, each read taking the 4-byte `instanceCount` at
+        //     `+ 4` inside its own 20-byte record;
+        //   * `vis_elems * 4 == VB_VISIBLE_INSTANCE_BYTES` bytes at `VB_CULL_READBACK_VIS_OFFSET`;
+        //   * `late_vis_elems * 4 == VB_LATE_VISIBLE_BYTES` bytes at each of
+        //     `VB_CULL_READBACK_LATE_CAND_OFFSET` and `VB_CULL_READBACK_LATE_SURV_OFFSET`;
+        //   * `late_count_elems * 4 == VB_LATE_COUNT_BYTES` bytes at each of
+        //     `VB_CULL_READBACK_LATE_CNT_PRE_OFFSET` and `VB_CULL_READBACK_LATE_CNT_POST_OFFSET`;
+        //   * `late_records * record_stride == VB_INDIRECT_LATE_BYTES` bytes at
+        //     `VB_CULL_READBACK_LATE_REC_OFFSET`, each read taking the 4-byte `instanceCount` at
+        //     `+ 4` inside its own 20-byte record.
+        // `VB_CULL_READBACK_BYTES` is defined as the sum of exactly those nine regions, so the last
+        // byte touched is the staging's last byte. `read_unaligned` is used because the mapping's
+        // alignment is the allocator's business, not this fn's, and a record's `instanceCount` sits
+        // at a 20-byte stride that is not 4-aligned relative to an arbitrary base. The caller's
+        // ordering contract above guarantees the device has finished writing the buffer, and
+        // `boot`'s zero prefill guarantees every byte is initialised even on a frame that copied
+        // into only some of the nine regions.
+        unsafe {
+            let base = mapped.as_ptr();
+            let visible_batches = base
+                .add(VB_CULL_READBACK_COUNT_OFFSET as usize)
+                .cast::<u32>()
+                .read_unaligned();
+            for i in 0..list_elems {
+                let off = VB_CULL_READBACK_LIST_OFFSET as usize + i * 4;
+                batch_list.push(base.add(off).cast::<u32>().read_unaligned());
+            }
+            for i in 0..records {
+                // Word 1 of `VkDrawIndexedIndirectCommand` — the same offset the cull stores to.
+                let off = VB_CULL_READBACK_RECORDS_OFFSET as usize + i * record_stride as usize + 4;
+                record_instance_counts.push(base.add(off).cast::<u32>().read_unaligned());
+            }
+            for i in 0..vis_elems {
+                let off = VB_CULL_READBACK_VIS_OFFSET as usize + i * 4;
+                visible_instances.push(base.add(off).cast::<u32>().read_unaligned());
+            }
+            for i in 0..late_vis_elems {
+                let pre = VB_CULL_READBACK_LATE_CAND_OFFSET as usize + i * 4;
+                let post = VB_CULL_READBACK_LATE_SURV_OFFSET as usize + i * 4;
+                late_candidates.push(base.add(pre).cast::<u32>().read_unaligned());
+                late_survivors.push(base.add(post).cast::<u32>().read_unaligned());
+            }
+            for i in 0..late_count_elems {
+                let pre = VB_CULL_READBACK_LATE_CNT_PRE_OFFSET as usize + i * 4;
+                let post = VB_CULL_READBACK_LATE_CNT_POST_OFFSET as usize + i * 4;
+                late_count_pre.push(base.add(pre).cast::<u32>().read_unaligned());
+                late_count_post.push(base.add(post).cast::<u32>().read_unaligned());
+            }
+            for i in 0..late_records {
+                let off =
+                    VB_CULL_READBACK_LATE_REC_OFFSET as usize + i * record_stride as usize + 4;
+                late_record_instance_counts.push(base.add(off).cast::<u32>().read_unaligned());
+            }
+            // The reserved TAIL slot, addressed by the constant the shader derives from the
+            // descriptor's own range rather than mirrors — see `VB_LATE_COUNT_FRAME_SLOT`.
+            let gpu_observed_frame_index = late_count_pre[VB_LATE_COUNT_FRAME_SLOT];
+            Some(VbCullReadback {
+                visible_batches,
+                batch_list,
+                record_instance_counts,
+                visible_instances,
+                late_candidates,
+                late_count_pre,
+                late_survivors,
+                late_count_post,
+                late_record_instance_counts,
+                frame_index,
+                gpu_observed_frame_index,
+            })
+        }
+    }
+
+    /// Profiling rung 5c: [`Self::vb_timing_for_frame`]'s sibling for leg B — THE single predicate
+    /// `Self::scene` and the runner both read, for the reason stated there.
+    ///
+    /// `None` when the leg is disarmed, when no recorder was built, **or when this frame claimed no
+    /// ring slot**. The third is a real outcome and not an error: every slot still in flight means
+    /// the GPU is more than `GPU_RING_DEPTH` frames behind, and recording no zones is the honest
+    /// response to that — overwriting a slot whose results were never read would report one frame's
+    /// timings as another's.
+    #[inline]
+    pub(crate) fn vb_zone_for_frame(&self) -> Option<(&GpuZoneRecorder, usize)> {
+        Some((self.vb_zone.as_ref()?, self.vb_zone_slot?))
+    }
+
+    /// Profiling rung 5c: the command census, if either A/B leg armed one.
+    #[inline]
+    pub(crate) fn vb_census(&self) -> Option<&CommandWitness> {
+        self.vb_census.as_ref()
+    }
+
+    /// Profiling rung 5c: claim this frame's ring slot, BEFORE `Self::scene` reads it.
+    ///
+    /// Separate from `scene` because claiming needs `&mut self` (the ring's cursor and the slot's
+    /// marks) while `scene` hands out shared borrows for the whole frame. A no-op when the leg is
+    /// not armed, so the frame loop calls it unconditionally rather than behind a predicate that
+    /// could drift from `vb_zone_for_frame`'s.
+    pub(crate) fn open_vb_zone_frame(&mut self, frame: u32, submit_epoch: u64, frame_now: u64) {
+        self.vb_zone_slot = self
+            .vb_zone
+            .as_mut()
+            .and_then(|rec| rec.open_frame(frame, submit_epoch, frame_now));
+    }
+
+    /// Profiling rung 5c: poll the ring and hand every retired frame to `sink`.
+    ///
+    /// A no-op without an armed recorder. `scratch` is the caller's, because it is ~9 KiB and a
+    /// per-frame temporary of that size is exactly the allocation this engine preallocates away.
+    pub(crate) fn retire_vb_zone(
+        &mut self,
+        ctx: &VulkanContext,
+        render_epoch: u64,
+        frame_now: u64,
+        scratch: &mut RetireScratch,
+        sink: impl FnMut(RetiredFrame, &[PairResult]),
+    ) {
+        let Some(rec) = self.vb_zone.as_mut() else { return };
+        rec.retire(ctx, render_epoch, frame_now, scratch, sink)
+            .expect("invariant: profiling rung 5c zone retire reads its own pools");
+    }
+
+    /// Profiling rung 5c: force-retire every in-flight slot at teardown.
+    ///
+    /// Frames stop at shutdown, so neither deadline horn can fire; without this the last
+    /// `GPU_RING_DEPTH` frames would be dropped silently — the loss a profiler exists to report.
+    pub(crate) fn flush_vb_zone(
+        &mut self,
+        ctx: &VulkanContext,
+        scratch: &mut RetireScratch,
+        sink: impl FnMut(RetiredFrame, &[PairResult]),
+    ) {
+        let Some(rec) = self.vb_zone.as_mut() else { return };
+        rec.flush(ctx, scratch, sink).expect("invariant: profiling rung 5c zone flush");
+    }
+
+    /// Profiling rung 5c: `true` iff this boot built a zone recorder — the boot-time question,
+    /// distinct from [`Self::vb_zone_for_frame`]'s per-frame one.
+    #[inline]
+    pub(crate) fn vb_zone_armed(&self) -> bool {
+        self.vb_zone.is_some()
+    }
+
     /// Tears every bundle down in reverse dependency order — the showcase
-    /// teardown list, minus the resources R3 does not create (staging, SSAO
-    /// pipeline, per-mesh instanced buffers).
+    /// teardown list, minus the resources R3 does not create (staging,
+    /// per-mesh instanced buffers). Render P7-Q2's SSAO pipelines/layout ARE
+    /// created here (see [`Self::ssao_pipelines`]) and are torn down below.
     ///
     /// # Safety
     /// The device is idle (the caller dropped the `Renderer`, whose `Drop`
@@ -1938,23 +7741,322 @@ impl GpuSceneBundles {
     /// exactly once (the by-value `self` enforces it); `ctx` is the live
     /// context they were created on.
     pub(crate) unsafe fn destroy(self, ctx: &VulkanContext) {
+        // `boyko-W9217`, landed at logging rung L8c. Profiling rung 5 reserved the code for
+        // "GPU timestamp slots were still in flight at teardown and were abandoned" and never
+        // emitted it.
+        //
+        // `GpuZoneRecorder::flush` exists so this is NOT true — it force-retires every in-flight
+        // slot, and its own doc says the alternative is "the loss a profiler exists to report
+        // rather than to commit". The recorder is correct; the hole was the PATH. `runner.rs`
+        // calls `flush_vb_zone` only inside `vb_zone_seen >= WARMUP + frames`, so a run that ends
+        // earlier — a window closed by hand, or `E3003`'s terminal return — reaches here with
+        // slots still holding results, and until now did so in silence.
+        //
+        // Checked FIRST, before anything is destroyed: the report reads the recorder's state, and
+        // reading it after the teardown below would be reading a corpse. A DIRECT call rather than
+        // `loss::raise`, because the frame loop has stopped by now and `fold.rs` — the flag word's
+        // only consumer — will never run again.
+        //
+        // The same block releases the recorder's pools, because it is the only place that holds
+        // the recorder by value and the report must read it before it is consumed. `boot` creates
+        // `GPU_RING_DEPTH` pools and hands the array to `GpuZoneRecorder::new`; the recorder has
+        // no `Drop` by design — destroying a `VkQueryPool` needs a device reference it does not
+        // hold, which is what `into_pools` exists for — and no caller in this crate had ever
+        // called it, so every armed `BOYKO_VB_ZONE` run ended with `vkDestroyDevice` reporting
+        // four leaked `VkQueryPool`s. Found by `vb_bench_query_validation` once its validation
+        // oracle was armed.
+        if let Some(rec) = self.vb_zone {
+            let abandoned = rec.in_flight_slots();
+            if abandoned > 0 {
+                boyko_ecs::ecs::core::profiling::report_gpu_slots_abandoned(abandoned);
+            }
+            // SAFETY: per this fn's contract the device is idle, so no submission still reads
+            // these pools; `ctx` is the live context `boot` created them on; `into_pools`
+            // consumes the recorder, so each of the four handles is destroyed exactly once.
+            unsafe {
+                for pool in rec.into_pools() {
+                    RhiDevice::destroy_query_pool(ctx, pool);
+                }
+            }
+        }
         // SAFETY: per the contract the device is idle and `ctx` is live; each
         // resource is destroyed exactly once, in reverse dependency order
         // (mirrors the showcase teardown at window_present_gbuffer ~8504..8551).
         unsafe {
             self.csm.destroy(ctx);
+            // Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh raster pipeline
+            // + its descriptor-set layouts, created right after `csm` in `boot` — destroyed
+            // here, right after it (reverse acquisition). The sky pipeline was created right
+            // after `forward_pipeline`, so it is destroyed right after it here too.
+            RhiDevice::destroy_graphics_pipeline(ctx, self.forward_pipeline);
+            RhiDevice::destroy_graphics_pipeline(ctx, self.forward_sky_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.forward_layout0);
+            RhiDevice::destroy_bind_group_layout(ctx, self.forward_layout1);
+            // Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-prepass
+            // pipeline + the froxel opaque pipeline, created right after the Forward v1 trio
+            // above — destroyed here, same reverse-acquisition order. Both are built against
+            // `self.forward_layout0` (the unified layout, already destroyed above) — no separate
+            // layout to tear down.
+            RhiDevice::destroy_graphics_pipeline(ctx, self.forward_prepass_pipeline);
+            RhiDevice::destroy_graphics_pipeline(ctx, self.forward_plus_pipeline);
+            // Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` pipeline
+            // pair + their shared dedicated Set-0 layout, created right after the ForwardPlus
+            // pair above — destroyed here, same reverse-acquisition order. Each pipeline OWNS
+            // its own 2-set pipeline layout (`create_compute_pipeline_forward`'s doc), so
+            // `destroy_compute_pipeline` tears that down too; `sdf_forward_march_layout` is the
+            // SEPARATE Set-0 `VkDescriptorSetLayout` object both pipelines' layouts embed a copy
+            // of at creation (Vulkan permits destroying a descriptor-set-layout handle once every
+            // pipeline layout built against it exists — the SAME precedent `forward_layout1`
+            // being destroyed before `forward_plus_pipeline`, above, already establishes).
+            RhiDevice::destroy_compute_pipeline(ctx, self.sdf_forward_march_pipeline);
+            RhiDevice::destroy_compute_pipeline(ctx, self.sdf_forward_march_sdfonly_pipeline);
+            RhiDevice::destroy_compute_pipeline(ctx, self.sdf_forward_march_viewt_pipeline);
+            RhiDevice::destroy_compute_pipeline(ctx, self.sdf_forward_march_sdfonly_viewt_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.sdf_forward_march_layout);
             RhiDevice::destroy_graphics_pipeline(ctx, self.present_pipeline);
+            RhiDevice::destroy_graphics_pipeline(ctx, self.fxaa_pipeline);
+            // Anti-aliasing Stage 2: the three SMAA pipelines — `smaa_edge_pipeline` shares
+            // `present_layout` with `fxaa_pipeline` (both destroyed before it, below); the
+            // weight/blend pipelines' own dedicated layouts are destroyed right after.
+            RhiDevice::destroy_graphics_pipeline(ctx, self.smaa_edge_pipeline);
+            RhiDevice::destroy_graphics_pipeline(ctx, self.smaa_weight_pipeline);
+            RhiDevice::destroy_graphics_pipeline(ctx, self.smaa_blend_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.smaa_weight_layout);
+            RhiDevice::destroy_bind_group_layout(ctx, self.smaa_blend_layout);
+            // Anti-aliasing Stage 3: the SSAA downsample pipeline — shares `present_layout`
+            // with `fxaa_pipeline`/`smaa_edge_pipeline` (destroyed before it, below). No
+            // dedicated sampler to tear down (reuses `present_sampler`, destroyed later).
+            RhiDevice::destroy_graphics_pipeline(ctx, self.ssaa_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.present_layout);
             RhiDevice::destroy_compute_pipeline(ctx, self.resolve_pipeline);
+            // Render terminator-softening: the wrap-variant pipeline shares `resolve_layout`
+            // with `resolve_pipeline` — both pipelines are destroyed before their shared layout.
+            RhiDevice::destroy_compute_pipeline(ctx, self.resolve_pipeline_wrap);
             RhiDevice::destroy_bind_group_layout(ctx, self.resolve_layout);
-            // HW-RT rung R2a-4b: the HWRT resolve pipeline + its 21-binding layout, `Option`-guarded
+            // TAA W5 (C3 fix): the taa_resolve compute pipeline + its 8-binding layout, both built
+            // UNCONDITIONALLY at boot (every config incl. AaMode::Off), like fxaa/smaa/ssaa. Pipeline
+            // before its layout — else a per-renderer boot leaks a pipeline + layout + sampler.
+            RhiDevice::destroy_compute_pipeline(ctx, self.taa_resolve_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.taa_resolve_layout);
+            // TAA rung T3: the RCAS compute pipeline + its 2-binding layout, built
+            // UNCONDITIONALLY at boot (like `taa_resolve_pipeline` above). Pipeline before layout.
+            RhiDevice::destroy_compute_pipeline(ctx, self.rcas_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.rcas_layout);
+            // Render P7-Q2: the 3 SSAO pipelines share `ssao_layout` — pipelines before the
+            // shared layout (reverse creation order), built UNCONDITIONALLY at boot (every
+            // config incl. `SsaoQuality::Off`), like fxaa/smaa/ssaa/taa above.
+            let [ssao_low, ssao_medium, ssao_high] = self.ssao_pipelines;
+            RhiDevice::destroy_compute_pipeline(ctx, ssao_low);
+            RhiDevice::destroy_compute_pipeline(ctx, ssao_medium);
+            RhiDevice::destroy_compute_pipeline(ctx, ssao_high);
+            RhiDevice::destroy_bind_group_layout(ctx, self.ssao_layout);
+            // Rung R9b: the VB split objects — deferred-built pipelines (Option-guarded) first,
+            // then the boot gather trio, then the three boot layouts (reverse creation order).
+            if let Some(p) = self.vb_shade_split_tex_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_shade_split_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_geo_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            // ⚠️ TEARDOWN AUDIT (2026-08-01, VG-R2c): the block ABOVE freed the R9b SPLIT
+            // pipelines and stopped there — the classify/shade/resolve family built by the SAME
+            // deferred builders was reaching this teardown UNFREED, in EVERY build (none of these
+            // is cfg-gated). Each also leaked a dedicated `VkPipelineLayout`: they are created
+            // with `bind_group_layout: Some(&self.vb_layout0)`, which sets `owns_layout = true`
+            // (`rhi_impl/device.rs`), and `destroy_compute_pipeline` is the only thing that frees
+            // it — so six pipelines were six pipelines PLUS six layouts.
+            //
+            // Root cause worth stating, because ordering was never the problem: the deferred
+            // builders write `self.x = Some(..)` hundreds of lines from here, and nothing
+            // structurally forces a matching line to appear in this fn. Same shape as the
+            // `vb_indirect`/`vb_instance_rings` buffer omission closed at rung R2c0.
+            // Reverse creation order (`build_vb_classify_pipelines` builds count → scan →
+            // scatter → shade; the textured/resolve builders run after it).
+            if let Some(p) = self.vb_shade_tex_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_shade_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_classify_scatter_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_classify_scan_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_classify_count_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_resolve_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            // VB-SV0 DP1: built beside `vb_resolve_pipeline` (same lazy site), destroyed beside
+            // it — the f4d0c504 audit found nine unfreed VB objects, and a pipeline added without
+            // its teardown line is how the tenth happens.
+            if let Some(p) = self.sdf_mesh_shadow_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            // Rung R9d: the hwrt shadow-chain split siblings — `Option`-guarded (present only on
+            // an RT device), destroyed in the SAME reverse-creation order as their software twins.
+            #[cfg(feature = "hwrt")]
+            if let Some(p) = self.vb_shade_split_tex_hwrt_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            #[cfg(feature = "hwrt")]
+            if let Some(p) = self.vb_shade_split_hwrt_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            #[cfg(feature = "hwrt")]
+            if let Some(p) = self.vb_geo_mv_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            // Rung VB-P1b (W5): the froxel light-cull machinery `build_froxel_light_cull` built —
+            // `Option`-guarded (allocated only when `ResolvedRenderPath::froxel_light_cull` armed
+            // at boot; every field stays `None` on an unarmed boot, so this whole block is a
+            // no-op there). Torn down in reverse acquisition order (that fn's own build order):
+            // the three `vb_layout0_froxel`-built compute pipelines, then that shared layout, then
+            // the cluster buffers (alloc counter, index list, grid), then the cull pipeline + its
+            // own dedicated 1-set layout.
+            if let Some(p) = self.vb_shade_tex_froxel_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_shade_froxel_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_resolve_froxel_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(layout) = self.vb_layout0_froxel {
+                RhiDevice::destroy_bind_group_layout(ctx, layout);
+            }
+            if let Some(buf) = self.light_index_alloc {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            if let Some(buf) = self.light_index {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            if let Some(buf) = self.cluster_grid {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            if let Some(p) = self.cluster_cull_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(layout) = self.cull_layout {
+                RhiDevice::destroy_bind_group_layout(ctx, layout);
+            }
+            // VG rung R2c0: the batch-cull pipeline + layout, and the VB-path buffers.
+            //
+            // ⚠️ `vb_instance_rings` and `vb_indirect` were reaching this teardown UNFREED —
+            // `instance_rings` two blocks down is freed, its VB-path siblings were not. Rather
+            // than add three more buffers to that omission, all of them are freed here (six since
+            // rung R2d-2's `vb_visible_instance`). Each is created in `boot`, stored only in this
+            // struct, and handed out solely as a borrow to `Self::scene`, so there is exactly one
+            // owner and no other destroy site.
+            // VG R3 piece 1 step P1-4: the HZB build pipeline + layout, acquired in `boot`
+            // immediately AFTER the batch cull's pair, so freed immediately BEFORE them — reverse
+            // acquisition, the discipline this block's header records the cost of breaking.
+            RhiDevice::destroy_compute_pipeline(ctx, self.hzb_build_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.hzb_build_layout);
+            RhiDevice::destroy_compute_pipeline(ctx, self.vb_batch_cull_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.vb_cull_layout);
+            if let Some(rb) = self.vb_cull_readback {
+                for buf in rb {
+                    RhiDevice::destroy_buffer(ctx, buf);
+                }
+            }
+            // VG R3 piece 3 step P3-2: the three occlusion-split buffers, created in `boot`
+            // immediately AFTER `vb_visible_instance` and before the readback staging, so they are
+            // freed here — between them — in reverse creation order
+            // (uniform → late_count → late_visible). Same reason as every VB buffer below: the
+            // omission this block's header records is why a new one gets its destroy in the same
+            // edit that allocates it.
+            for buf in self.vb_cull_uniform {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            for buf in self.vb_late_count {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            for buf in self.vb_late_visible {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            // Rung R2d-2: created in `boot` after `vb_cull_count` and before the readback staging,
+            // so it is freed here — between them — to keep this block reverse-acquisition. The
+            // omission this block's own header records (`vb_instance_rings`/`vb_indirect` reaching
+            // teardown unfreed) is the reason a new VB buffer gets its destroy in the same edit
+            // that allocates it.
+            for buf in self.vb_visible_instance {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            for buf in self.vb_cull_count {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            for buf in self.vb_cull_visible {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            for buf in self.vb_batch_desc {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            // VG R3 piece 2 step P2-3: created in `boot` immediately AFTER `vb_indirect` and
+            // before the R2c0 trio, so it is freed here — between them — keeping this block
+            // reverse-acquisition. The omission this block's own header records (VB buffers
+            // reaching teardown unfreed) is why a new VB buffer gets its destroy in the same edit
+            // that allocates it.
+            for buf in self.vb_indirect_late {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            for buf in self.vb_indirect {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            for buf in self.vb_instance_rings {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            // Same audit: the three UNCONDITIONALLY boot-created VB objects were also unfreed.
+            // They are created BEFORE `vb_instance_rings` (the raster/sky pipelines and the Set-0
+            // layout), so they are destroyed AFTER it — reverse acquisition. `vb_layout0` goes
+            // LAST of the three: every VB pipeline is built against it, and this file's own
+            // `sdf_forward_march_layout` block states the same rule.
+            RhiDevice::destroy_graphics_pipeline(ctx, self.vb_sky_pipeline);
+            RhiDevice::destroy_graphics_pipeline(ctx, self.vb_raster_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.vb_layout0);
+            // VB-SV0 DP1: the prepass's own Set-0 layout — created at boot right after
+            // `vb_layout0`, destroyed beside it under the same reverse-acquisition rule (its one
+            // pipeline was destroyed above with the other Option-guarded VB pipelines).
+            RhiDevice::destroy_bind_group_layout(ctx, self.sdf_mesh_shadow_layout0);
+            let [vb_ssao_low, vb_ssao_medium, vb_ssao_high] = self.ssao_vb_pipelines;
+            RhiDevice::destroy_compute_pipeline(ctx, vb_ssao_low);
+            RhiDevice::destroy_compute_pipeline(ctx, vb_ssao_medium);
+            RhiDevice::destroy_compute_pipeline(ctx, vb_ssao_high);
+            RhiDevice::destroy_bind_group_layout(ctx, self.vb_split_layout1);
+            RhiDevice::destroy_bind_group_layout(ctx, self.vb_geo_aux_layout);
+            RhiDevice::destroy_bind_group_layout(ctx, self.vb_ssao_layout);
+            // The SSAO à-trous denoise chain: the 3 role-keyed pipelines share
+            // `ssao_atrous_layout` — pipelines before the shared layout (reverse creation order),
+            // built UNCONDITIONALLY at boot (every config, like the gather pipelines above).
+            RhiDevice::destroy_compute_pipeline(ctx, self.ssao_atrous_read8_pipeline);
+            RhiDevice::destroy_compute_pipeline(ctx, self.ssao_atrous_interior_pipeline);
+            RhiDevice::destroy_compute_pipeline(ctx, self.ssao_atrous_write8_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.ssao_atrous_layout);
+            // Multi-paradigm render-path plan, rung R3b: the `viewt_from_depth` pipeline + its
+            // 2-binding layout, built UNCONDITIONALLY at boot (like the SSAO pipelines above).
+            // Pipeline before its layout (reverse creation order).
+            RhiDevice::destroy_compute_pipeline(ctx, self.viewt_from_depth_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.viewt_from_depth_layout);
+            // TAA-under-VB: the `viewt_from_depth_rz` REVERSE-Z sibling + its 3-binding layout,
+            // built UNCONDITIONALLY at boot (like `viewt_from_depth_pipeline` above). Pipeline
+            // before its layout (reverse creation order).
+            RhiDevice::destroy_compute_pipeline(ctx, self.viewt_from_vb_depth_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.viewt_from_vb_depth_layout);
+            // HW-RT rung R2a-4b: the HWRT resolve pipeline + its 22-binding layout, `Option`-guarded
             // (present only on an RT device under `feature = "hwrt"`). Pipeline before layout.
             #[cfg(feature = "hwrt")]
             if let Some((pipeline, layout)) = self.resolve_pipeline_hwrt {
                 RhiDevice::destroy_compute_pipeline(ctx, pipeline);
                 RhiDevice::destroy_bind_group_layout(ctx, layout);
             }
-            // HW-RT rung 3a: the VIS + DENOISED resolve pipelines + their shared 22-binding layout,
+            // HW-RT rung 3a: the VIS + DENOISED resolve pipelines + their shared 23-binding layout,
             // and the à-trous filter pipeline + its 6-binding layout. `Option`-guarded (present only
             // on an RT device). Pipelines before their layout.
             #[cfg(feature = "hwrt")]
@@ -1975,6 +8077,13 @@ impl GpuSceneBundles {
                 RhiDevice::destroy_compute_pipeline(ctx, pipeline);
                 RhiDevice::destroy_bind_group_layout(ctx, layout);
             }
+            // Rung R9d: the VB split's dedicated shadow-vis gather pipeline + its 7-binding
+            // layout, `Option`-guarded (present only on an RT device). Pipeline before layout.
+            #[cfg(feature = "hwrt")]
+            if let Some((pipeline, layout)) = self.vb_shadow_vis_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, pipeline);
+                RhiDevice::destroy_bind_group_layout(ctx, layout);
+            }
             // HW-RT rung 1b: the HWRT soft-shadow-params UBO ring, `Option`-guarded (minted only on
             // an RT device). Each slot is a plain host-coherent buffer (no dependents).
             #[cfg(feature = "hwrt")]
@@ -1986,6 +8095,37 @@ impl GpuSceneBundles {
             RhiDevice::destroy_compute_pipeline(ctx, self.marcher);
             RhiDevice::destroy_bind_group_layout(ctx, self.vocab_layout);
             RhiDevice::destroy_graphics_pipeline(ctx, self.raster_pipeline);
+            // Asset-streaming plan F8: the PM resources bind the SHARED `instance_rings` (@0)
+            // plus their own instance-material ring (@1); torn down BEFORE the shared instance
+            // bind groups/rings below (bind groups first, then the pipeline/layout, then the
+            // owned buffers) — mirrors the MV teardown ordering. NOT `#[cfg(feature = "hwrt")]`
+            // (built unconditionally at boot).
+            for bg in self.pm_bind_groups {
+                RhiDevice::destroy_bind_group(ctx, bg);
+            }
+            RhiDevice::destroy_graphics_pipeline(ctx, self.raster_pipeline_pm);
+            RhiDevice::destroy_bind_group_layout(ctx, self.pm_instance_material_layout);
+            for b in self.pm_instance_material_rings {
+                RhiDevice::destroy_buffer(ctx, b);
+            }
+            // Textured-PBR T6c: the TEXTURED resources bind the SHARED `instance_rings` (@0)
+            // plus their own instance-material ring (@1); torn down BEFORE the shared instance
+            // bind groups/rings below (bind groups first, then the pipeline/layout, then the
+            // owned buffers) — mirrors the PM teardown ordering immediately above.
+            // `Option`-guarded: `self.tex` is `None` if `build_textured_resources` never ran
+            // (e.g. the bindless texture table failed to create). The bindless texture-array
+            // descriptor SET/layout itself is owned and torn down separately by
+            // `BindlessTextureTable::destroy` — not touched here.
+            if let Some(tex) = self.tex {
+                for bg in tex.tex_bind_groups {
+                    RhiDevice::destroy_bind_group(ctx, bg);
+                }
+                RhiDevice::destroy_graphics_pipeline(ctx, tex.raster_pipeline_tex);
+                RhiDevice::destroy_bind_group_layout(ctx, tex.tex_instance_material_layout);
+                for b in tex.tex_instance_material_rings {
+                    RhiDevice::destroy_buffer(ctx, b);
+                }
+            }
             // HW-RT Rung 3b step 5a: the MESH motion-vector resources bind the SHARED
             // `instance_rings` (@0) plus their own prev-instance + motion-cam UBO rings; torn down
             // BEFORE the shared instance bind groups/rings below (bind groups first, then the
@@ -1993,12 +8133,20 @@ impl GpuSceneBundles {
             // (no-op).
             #[cfg(feature = "hwrt")]
             if let Some(mv) = self.mv {
+                // F8-mv: the combined mvpm bind groups/pipeline/layout, torn down BEFORE the
+                // pure-MV cluster below (bind groups first, then the pipeline/layout) — mirrors
+                // this whole block's ordering discipline.
+                for bg in mv.mvpm_bind_groups {
+                    RhiDevice::destroy_bind_group(ctx, bg);
+                }
+                RhiDevice::destroy_graphics_pipeline(ctx, mv.mvpm_pipeline);
+                RhiDevice::destroy_bind_group_layout(ctx, mv.mvpm_layout);
                 for bg in mv.bind_groups {
                     RhiDevice::destroy_bind_group(ctx, bg);
                 }
                 RhiDevice::destroy_graphics_pipeline(ctx, mv.pipeline);
                 RhiDevice::destroy_bind_group_layout(ctx, mv.layout);
-                // step 5b: the SDF motion-vector VIS resolve pipeline + its 24-binding layout
+                // step 5b: the SDF motion-vector VIS resolve pipeline + its 25-binding layout
                 // (pipeline before layout; no bind groups — the VIS-MV set lives in `GBufferTargets`).
                 RhiDevice::destroy_compute_pipeline(ctx, mv.vis_mv_pipeline);
                 RhiDevice::destroy_bind_group_layout(ctx, mv.vis_mv_layout);
@@ -2017,6 +8165,16 @@ impl GpuSceneBundles {
             if let Some(t) = self.tlas {
                 t.destroy(ctx);
             }
+            // Particles P0: the particle bundle — 9 device buffers + `quad_ib` + 2×FIF staging
+            // rings + 2 compute/draw layouts + 2 parity sets + FIF draw sets + 3 compute
+            // pipelines + 1 graphics pipeline. Torn down BEFORE the interp cluster and the shared
+            // rings below because it borrows `camera_ring` (destroyed with the rest of the boot
+            // resources further down) at its draw set's binding 1; the bindless set-1 table is
+            // owned by `BindlessTextureTable` and is NOT touched here. `None` on a disarmed run
+            // (no-op) — the arm that would otherwise leak the whole bundle at shutdown.
+            if let Some(p) = self.particle {
+                p.destroy(ctx);
+            }
             // The B3 interp cluster (host plan R5, refined-B): its `interp_bg` binds
             // the SHARED `instance_rings` (the model-out target) plus the pair +
             // out-slot rings; it is torn down here (before the shared instance
@@ -2030,15 +8188,27 @@ impl GpuSceneBundles {
             }
             RhiDevice::destroy_bind_group_layout(ctx, self.instance_layout);
             RhiDevice::destroy_sampler(ctx, self.present_sampler);
+            RhiDevice::destroy_sampler(ctx, self.fxaa_sampler);
+            RhiDevice::destroy_sampler(ctx, self.smaa_sampler);
+            RhiDevice::destroy_sampler(ctx, self.taa_linear_sampler);
+            // Anti-aliasing Stage 2: the two boot-resident SMAA LUT textures (no dependents —
+            // no set still references them once the SMAA sets above are torn down by the
+            // `Renderer`/`GBufferTargets` teardown that runs before this fn).
+            RhiDevice::destroy_texture(ctx, self.smaa_area_tex);
+            RhiDevice::destroy_texture(ctx, self.smaa_search_tex);
             RhiDevice::destroy_sampler(ctx, self.depth_sampler);
             RhiDevice::destroy_buffer(ctx, self.vertex_buffer);
             RhiDevice::destroy_buffer(ctx, self.tiles_buffer);
             self.clipmap.destroy(ctx);
+            RhiDevice::destroy_buffer(ctx, self.brick_levels_ubo);
             for slot in self.light_staging {
                 RhiDevice::destroy_buffer(ctx, slot);
             }
             RhiDevice::destroy_buffer(ctx, self.light_table);
-            RhiDevice::destroy_buffer(ctx, self.material_table);
+            // Asset-system rung A1: the material table is now World-owned
+            // (`MaterialTable`); `boyko_app::runner`'s teardown destroys it
+            // separately, AFTER this fn returns (mirrors `Assets<MeshGpu>`'s teardown
+            // slot) — destroying it here too would double-free.
             for slot in self.camera_ring {
                 RhiDevice::destroy_buffer(ctx, slot);
             }
@@ -2089,5 +8259,150 @@ impl DrawListScratch {
         self.buf = unsafe {
             core::mem::transmute::<Vec<GBufferMeshDraw<'_>>, Vec<GBufferMeshDraw<'static>>>(v)
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use boyko_render::{
+        GeometryLegs, RenderPath, RenderPathConsumers, RenderPathDeviceCaps, ResolvedRenderPath,
+        resolve_rules,
+    };
+
+    use super::*;
+
+    /// VG R3 piece 3 step P3-2 — `vb_cull_layout`'s widened entry table, CHARACTERISED against the
+    /// production predicate rather than restated.
+    ///
+    /// # What this test CANNOT claim
+    ///
+    /// * **Nothing about the SHADER.** The shipped `vb_batch_cull.comp.spv` declares seven
+    ///   bindings; five of the twelve here are bound-but-unread at this step. Whether the module
+    ///   ever names @7..@11 is measured by `vb_batch_cull_spv_sync.rs`'s census, not here.
+    /// * **Nothing about the descriptor SET.** This is the LAYOUT's table. That the set's entry
+    ///   list is in the same order and of the same arity is checked by `create_bind_group`'s own
+    ///   `entries.len() == layout.entry_count` debug-assert, on a device, at boot.
+    /// * **Nothing about IMAGE LAYOUT.** That @9's descriptor records `GENERAL` is a property of
+    ///   the `BindGroupEntry` VARIANT written there, in `boyko_rhi_vulkan`; the layout entry only
+    ///   fixes the descriptor KIND. A `SampledImage` written as `BindGroupEntry::SampledImage`
+    ///   would satisfy every assertion below and still record the wrong layout.
+    /// * **No GPU runs.** This is a table over a `const`.
+    ///
+    /// # Why it can fail
+    ///
+    /// The three controls below are the answer, and they are EXECUTED, not described: each corrupts
+    /// the shipped table in one of the three ways this step can plausibly get it wrong and shows the
+    /// SAME production predicate reject it. Delete any one of them and the test would pass on a
+    /// table that aliased two bindings, declared the pyramid as a buffer, or declared a second
+    /// sampled image.
+    ///
+    /// The table's ARITY is deliberately not asserted here: it is the array's own type
+    /// (`[_; VB_CULL_LAYOUT_BINDINGS as usize]`), so an assertion about it would compare an
+    /// expression against itself — the vacuous shape this campaign has already shipped once.
+    #[test]
+    fn vb_cull_layout_declares_twelve_compute_slots_with_the_pyramid_alone_sampled() {
+        assert!(
+            vb_cull_layout_table_is_well_formed(&VB_CULL_LAYOUT_ENTRIES),
+            "the shipped vb_cull_layout table must satisfy the predicate its const-assert executes"
+        );
+        assert_eq!(
+            VB_CULL_LAYOUT_ENTRIES[VB_CULL_HZB_BINDING as usize].kind,
+            DescriptorKind::SampledImage,
+            "the pyramid's slot must be reachable AT the named index — the predicate above checks a \
+             RULE over the whole table, this reads the one entry every SampledImageAtGeneral write \
+             depends on"
+        );
+
+        // CONTROL 1 — the SILENT ALIAS. The module spells its bindings as `register(uN/tN)` and the
+        // `t`/`u` spaces are kept mutually exclusive by hand, so a new binding that reused an index
+        // would resolve to the same Vulkan slot with no validation message and no pixel change.
+        // Give @11 the index @7 already holds and the predicate must reject the table.
+        let mut aliased = VB_CULL_LAYOUT_ENTRIES;
+        aliased[11].binding = 7;
+        assert!(
+            !vb_cull_layout_table_is_well_formed(&aliased),
+            "CONTROL: two entries claiming binding 7 must be rejected — otherwise this gate is \
+             blind to exactly the aliasing hazard the register-space split creates"
+        );
+
+        // CONTROL 2 — the WRONG KIND at the pyramid slot. A `StorageBuffer` there is what a
+        // copy-paste of the eleven surrounding entries produces, and it would make every
+        // `SampledImageAtGeneral` write at @9 a descriptor-type mismatch.
+        let mut wrong_kind = VB_CULL_LAYOUT_ENTRIES;
+        wrong_kind[VB_CULL_HZB_BINDING as usize].kind = DescriptorKind::StorageBuffer;
+        assert!(
+            !vb_cull_layout_table_is_well_formed(&wrong_kind),
+            "CONTROL: the pyramid slot declared as a storage buffer must be rejected"
+        );
+
+        // CONTROL 3 — the CONVERSE of control 2: a SECOND sampled image. The predicate must pin
+        // the pyramid slot as the ONLY one, not merely as one of them.
+        let mut extra_sampled = VB_CULL_LAYOUT_ENTRIES;
+        extra_sampled[0].kind = DescriptorKind::SampledImage;
+        assert!(
+            !vb_cull_layout_table_is_well_formed(&extra_sampled),
+            "CONTROL: a second SampledImage entry must be rejected"
+        );
+    }
+
+    /// P2-1(a): the 0%-gate carrier converts to the `ResolvedRenderPathGpu` 0%-gate default —
+    /// a never-resolved world's `GBufferScene::resolved_render_path` matches what a booted world
+    /// resolving the default `RenderPathConfig` would ALSO produce (byte-identity anchor).
+    #[test]
+    fn to_gpu_resolved_render_path_default_matches_gpu_default() {
+        let default_resolved = ResolvedRenderPath::default();
+        assert_eq!(to_gpu_resolved_render_path(&default_resolved), ResolvedRenderPathGpu::default());
+    }
+
+    /// P2-1(b): a rich, non-default carrier (Forward + SSAO + shadow-temporal — both pre-light
+    /// consumers armed, so `needs_depth_prepass`/`prepass_writes_motion`/`thin_aux` are all
+    /// non-trivially set) round-trips through [`to_gpu_resolved_render_path`] field-for-field.
+    /// Built via `resolve_rules` (not a hand-written literal) so the derived fields are a
+    /// REALISTIC, internally-consistent combination, not a possibly-inconsistent guess.
+    #[test]
+    fn to_gpu_resolved_render_path_round_trips_a_non_default_carrier() {
+        let consumers =
+            RenderPathConsumers { ssao_on: true, shadow_temporal_on: true, ..RenderPathConsumers::default() };
+        let caps = RenderPathDeviceCaps::new(true);
+        let resolved = resolve_rules(RenderPath::Forward, GeometryLegs::Mesh, consumers, caps);
+
+        // Sanity: this carrier is genuinely non-default (both Decision-8 flags fired).
+        assert!(resolved.needs_depth_prepass);
+        assert!(resolved.prepass_writes_motion);
+
+        let gpu = to_gpu_resolved_render_path(&resolved);
+        assert_eq!(gpu.path, resolved.path as u32);
+        assert_eq!(gpu.legs, resolved.legs as u32);
+        assert_eq!(gpu.mesh_leg, resolved.mesh_leg);
+        assert_eq!(gpu.sdf_leg, resolved.sdf_leg);
+        assert_eq!(gpu.sdf_forward_marched, resolved.sdf_forward_marched);
+        assert_eq!(gpu.needs_depth_prepass, resolved.needs_depth_prepass);
+        assert_eq!(gpu.prepass_writes_motion, resolved.prepass_writes_motion);
+        assert_eq!(gpu.mesh_geo_shade_split, resolved.mesh_geo_shade_split);
+        assert_eq!(gpu.sdf_geo_shade_split, resolved.sdf_geo_shade_split);
+        assert_eq!(gpu.sdf_surface_cache, resolved.sdf_surface_cache);
+        assert_eq!(gpu.vb_geometry_table, resolved.vb_geometry_table);
+        assert_eq!(gpu.depth_kind, resolved.depth_kind as u32);
+        assert_eq!(gpu.thin_aux, resolved.thin_aux.bits());
+        assert_eq!(gpu.shadow, resolved.shadow.bits());
+        assert_eq!(gpu.froxel_light_cull, resolved.froxel_light_cull);
+    }
+
+    /// `boyko_rhi_vulkan` cannot depend on `boyko_render` (the dependency runs the other way —
+    /// that is why `ResolvedRenderPathGpu` exists at all), so its `vb_shade_split_*hwrt`
+    /// selection-site check has to RESTATE the shadow bit it reads. This crate depends on both,
+    /// so it is the only place the restatement can be pinned against the owning definition.
+    ///
+    /// Without this pin the RHI-side const would be a second, unchecked copy of a value only
+    /// `boyko_render` can change: renumbering `ShadowSources` would leave the selection-site
+    /// `debug_assert!` reading the WRONG bit and still passing — an assertion that reports
+    /// "checked" while checking nothing.
+    #[test]
+    fn shadow_source_sdf_soft_march_bit_matches_boyko_render() {
+        assert_eq!(
+            boyko_rhi_vulkan::present::SHADOW_SOURCE_SDF_SOFT_MARCH,
+            boyko_render::ShadowSources::SDF_SOFT_MARCH.bits(),
+            "the RHI-side SDF_SOFT_MARCH restatement drifted from boyko_render's definition"
+        );
     }
 }

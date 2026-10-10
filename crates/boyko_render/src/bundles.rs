@@ -13,7 +13,8 @@
 //! anyway). So the light objects are three near-identical named structs.
 //!
 //! The light components have no `Default` — construct the `light` field
-//! explicitly. The pose ([`Transform`] / [`GlobalTransform`]) gives the light a
+//! explicitly. The pose ([`Transform`](boyko_scene::Transform) /
+//! [`GlobalTransform`](boyko_scene::GlobalTransform)) gives the light a
 //! place in the hierarchy; a [`DirectionalLight`] / [`SpotLight`] also carries its
 //! own direction (the light table reads that), with the pose available for
 //! parenting / editor manipulation.
@@ -44,7 +45,8 @@ pub struct MeshBundle {
     pub transform: Transform,
     /// Cached world pose, filled by `propagate_transforms`.
     pub global: GlobalTransform,
-    /// Mesh asset handle (an index into the [`MeshRegistry`](crate::MeshRegistry)).
+    /// Mesh asset handle (a dense index into the world's `Assets<MeshGpu>` table —
+    /// see [`MeshAssetsExt`](crate::MeshAssetsExt)).
     pub mesh: MeshHandle,
     /// Material asset handle (table slot; `0` = the engine default material).
     pub material: MaterialHandle,

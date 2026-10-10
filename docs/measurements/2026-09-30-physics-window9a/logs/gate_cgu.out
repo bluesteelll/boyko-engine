@@ -1,0 +1,13 @@
+2026-10-01T02:42:41.051+03:00 === gate9a rows start
+2026-10-01T02:42:43.764+03:00 row C4-JDcgu       tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:45.623+03:00 row C4-JDcgu       tip    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:47.000+03:00 row C4-JDcgu       tip    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:48.238+03:00 row C4-JDcgu       tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:49.567+03:00 row C4-JDcgu       tip    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:52.279+03:00 row C4-JDcgu       tipcgu1 W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:54.502+03:00 row C4-JDcgu       tipcgu1 W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:56.496+03:00 row C4-JDcgu       tipcgu1 W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:58.928+03:00 row C4-JDcgu       tipcgu1 W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:43:01.542+03:00 row C4-JDcgu       tipcgu1 W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:43:01.548+03:00 rows gate: 10 processes, 0 failing
+2026-10-01T02:43:01.549+03:00 === gate9a rows end

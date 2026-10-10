@@ -1,0 +1,16 @@
+error: expected `:` after field `hp` (or a known item: requires / on_add / on_insert / on_replace / on_remove / no_bundle)
+  --> tests/ui/recovery_duplicate_type_name_with_a_broken_twin.rs:19:21
+   |
+19 |     component Foo { hp f32 }
+   |                     ^^
+
+error[E0428]: the name `Foo` is defined multiple times
+  --> tests/ui/recovery_duplicate_type_name_with_a_broken_twin.rs:19:15
+   |
+17 |     tag Foo;
+   |         --- previous definition of the type `Foo` here
+18 |
+19 |     component Foo { hp f32 }
+   |               ^^^ `Foo` redefined here
+   |
+   = note: `Foo` must be defined only once in the type namespace of this module

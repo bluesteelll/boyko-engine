@@ -1,0 +1,3956 @@
+//! **The frame allocation census, and its gate.** How many heap allocations
+//! does a steady-state frame actually make — and which object is each one?
+//!
+//! # Why this binary exists
+//!
+//! The tree ships some twenty counting test binaries (the phase-1 survey
+//! counted twenty on `05fcbd1d`; KE16 adds `block_allocation_receipts.rs`).
+//! Every one of them either
+//! bypasses `Schedule::run` (an isolated helper, `run_system_once`, a direct
+//! solver call) or drives `Schedule::run` and then **subtracts it as a
+//! baseline**. So twenty gates each prove "zero in my window" and the frame
+//! total is unmeasured. This binary measures the total instead of subtracting
+//! it: it installs its own counting `#[global_allocator]` and reports what a
+//! whole frame costs, in three regimes.
+//!
+//! # Why it lives in `boyko_physics/tests/`
+//!
+//! It has to reach `boyko_physics` (the rigid pile is the largest real scene
+//! the tree can drive headless) AND `boyko_ecs` (the `App` frame funnel, the
+//! executor, `Commands`, events, `par_iter`). `boyko_app` does not depend on
+//! `boyko_physics`, and `boyko_ecs` cannot depend on it either. This crate's
+//! dev graph is the only one that spans both.
+//!
+//! # Three regimes, never one number
+//!
+//! * **SETUP** — world build + spawn + the first schedule run. Allocations here
+//!   are expected; the number is reported, never asserted.
+//! * **WARM-UP** — the frames where amortised growth is still happening. `K` is
+//!   *derived*, not assumed: `K` is one past the LAST frame in the whole run
+//!   whose allocation count exceeded the steady window's own maximum.
+//! * **STEADY STATE** — mean, min and **max** over the last
+//!   [`STEADY_FRAMES`] frames. The max is the number that matters: one frame in
+//!   two hundred that allocates is a hitch, and a mean hides it.
+//!
+//! Allocations, reallocations, deallocations and bytes are counted separately.
+//! A realloc is the signature of a `Vec` growing and is named on its own row.
+//!
+//! # Anti-vacuity (both halves)
+//!
+//! A zero from a schedule that ran nothing is this repository's most-catalogued
+//! failure. Two independent guards, and neither is optional:
+//!
+//! 1. **The counter is LIVE.** [`counter_is_live`] proves all four counters
+//!    (alloc / realloc / dealloc / bytes) move. Then EVERY scene ends with a
+//!    probe frame that makes a deliberate 1 MiB allocation *inside the measured
+//!    window* and asserts the window saw it. And [`worker_thread_allocations_are_counted`]
+//!    proves the counter is process-global by allocating from a SYSTEM BODY
+//!    running on a worker thread.
+//! 2. **The scene is DOING something.** Every scene asserts a scene-side
+//!    invariant: bodies moved and contacts were generated (S1), entities were
+//!    spawned and despawned (S2), events were delivered and `Changed` matched
+//!    (S3), exactly N systems ran exactly once per frame (S0).
+//!
+//! # What it measured — two trees, side by side (2026-09-10, release)
+//!
+//! Recorded here because the harness is the thing that produced them, and a
+//! number without its instrument is not a measurement. Counts are heap
+//! ACQUISITIONS (`alloc` + `realloc`) per steady-state frame, mean / MAX over
+//! the 256-frame window.
+//!
+//! * **BEFORE** — `feat/ecs-native-storage` @ `ad0ebea4` (`D:/wt/ecsnative`), a
+//!   thread pool that PREDATES KE16 Stage 3b: one heap cell per spawned task,
+//!   and a scratch `crossbeam_deque::Worker` built on every `Scope::drop`.
+//! * **AFTER** — `merge/ke16-into-ecsnative` @ `ca582e72` (`D:/wt/joltab`), the
+//!   same ECS and physics code with the shipped KE16 pool merged in: scoped
+//!   cells are emplaced in the per-scope `ScopeBlock`. Re-confirmed 2026-09-11
+//!   at `d11962a9`, which adds only the physics bench's off-by-default
+//!   `bench-alloc` feature and a doc — no code on any path this binary runs. The two trees differ in
+//!   `boyko_threadpool` and in comments/dead `KE16_SPAWN_BATCH` arms around the
+//!   dispatch sites — the dispatch SHAPE (what spawns where) is unchanged.
+//!
+//! ```text
+//! scene                                   BEFORE (ad0ebea4)   AFTER (ca582e72)
+//! S0  0 systems (control)                     0.000 / 0          0.000 / 0
+//! S0  1 system                                5.016 / 6          2.016 / 3
+//! S0  2 systems                               6.031 / 7          2.031 / 3 (6)
+//! S0  4 systems                               8.062 / 9          2.066 / 3 (4)
+//! S0  8 systems                              12.125 / 13         2.125 / 3
+//! S0  16 systems                             20.254 / 21         2.254 / 3
+//! S0b 4 Main + 4 Fixed, 1 substep            16.125 / 17         4.125 / 5 (6)
+//! S2  churn + par_iter                       14.098 / 16         4.039 / 5
+//! S3  query + event loop                      8.066 / 9          2.062 / 3 (4)
+//! S1a pile, default pipeline, serial         11.109 / 12         2.109 / 3
+//! S1b pile, colored, parallel OFF            12.125 / 13         2.125 / 3
+//! S1c pile, colored, parallel ON (W=4)     2670.98  / 2724     331.80  / 339   (*)
+//! ```
+//!
+//! **(\*) S1c's row is a FIXED WINDOW, not the pile's steady state.** Both
+//! columns are driven steps 64..320 of a freshly built pile, and that window is
+//! deterministic — the colored solve is bit-identical for any worker count and
+//! the dispatch decision reads only the contact set — which is the whole reason
+//! nine runs agreed to three decimals. A longer run does not stay there: the
+//! pile keeps settling and the per-step count moves in whole dispatched
+//! colours. Over 4,352 steady steps (the adjudication run, 2026-09-11,
+//! reproduced the same day with this file's scene extended to 17 x 256 steady
+//! steps) S1c read **302..339 per step, with 256-step block means ~307..332**
+//! (331.8 in the first block — which IS the census window — 331.4 in the
+//! second, 307.5 in the last; 316.1 over all 4,352), on 109..121 scope frames
+//! (9 or 10 dispatched colours) and 193..217 chunks, `OTHER` 0, `realloc` 0.
+//! No step of it exceeded the census window's own maxima (121 / 217 / 339).
+//! Quote S1c as that range; 331.797 is the census window's figure and nothing
+//! more. The debug pile (height 10) does the same over the same 4,352 steps:
+//! 147..196 per step, 73..97 scope frames (6..8 colours), one chunk each,
+//! block means 171.2..181.3. These are the numbers BEFORE A7a; the tree's current
+//! numbers are in "S1c after A7b" below.
+//!
+//! (AFTER is identical to three decimals across nine release runs — five on
+//! 2026-09-10, four on 2026-09-11; S1c read 331.797 / 339 in every one, the
+//! fixed window above — except
+//! where a once-per-thread `OTHER` acquisition, below, happened to land inside
+//! an App scene's window and added 1..3 to its MAX and a few thousandths to its
+//! mean: S0 n=2 read 2.031..2.043 with max 3..6, S0 n=4 max 3..4, S0b
+//! 4.125..4.133 with max 5..6, S2 4.039..4.047, S3 max 3..4. A parenthesised
+//! MAX is that worst run. The dispatch classes never moved in any run.)
+//!
+//! **S1c after A7a — a narrowphase id change re-draws the window; no new allocation
+//! site.** A7a (2026-09-18, the A7 lane's S1: a clipped face-contact point is named by
+//! the two features that created it, `narrowphase::feature_face_clip`, instead of
+//! inheriting a corner id) moves warm-start keys, hence impulses, hence the pile's
+//! trajectory, hence which colours the solver dispatches. Measured on
+//! `fix/a7-pile-never-rests` (base `9f712204` and base + A7a, same day, same scene,
+//! `stable-x86_64-pc-windows-msvc` rustc 1.98.1, release; the long run by this file's
+//! scene extended to 17 x 256 steady steps):
+//!
+//! ```text
+//!                         base 9f712204               base + A7a
+//! census window, mean      331.797                     336.109
+//! census window, range     326..339                    326..350
+//! window histogram         326->116 327->19            326->39 327->5 338->184
+//!                          338->108 339->13            339->27 350->1
+//! window scope             121 on 256                  121 on 255, 133 on 1
+//! window chunk             205..217                    205 on 44, 217 on 212
+//! long run, per step       302..339, mean 316.126      314..350, mean 334.269
+//! long run, block means    307.469..331.797            325.941..338.129
+//! long run, scope          109 x 2925, 121 x 1427      109 x 678, 121 x 3673, 133 x 1
+//! long run, chunk          193 x 1409, 205 x 2236,     205 x 722, 217 x 3630
+//!                          217 x 707
+//! OTHER / realloc          0 / 0                       0 / 0
+//! warm-up K (budget 64)    63                          62
+//! ```
+//!
+//! The base column reproduces the 2026-09-11 adjudication above to every printed digit,
+//! so the instrument did not move between the two trees, the two dates or the two
+//! toolchains (windows-gnu then, msvc now). The A7a
+//! window's single 350 frame is ONE frame that dispatches an eleventh colour:
+//! `133 = 1 + 12 x 11` and `350 = 133 + 217`. It is the only eleven-colour frame of the
+//! 4,352 steps, and no step after the window exceeds the window's own maxima
+//! (133 / 217 / 350).
+//!
+//! It is not the regression this gate exists for. One extra fan-out per colour pass
+//! moves EVERY frame by +12 scope and +12 chunks. Under A7a every frame of the long run
+//! still satisfies `scope = 1 + 12 x colours`. On every frame but one the colours are 9
+//! or 10 and the chunks 205 or 217, values base already visits; the one exception is the
+//! eleventh-colour frame. What moved is the mix (ten colours on 3673 of 4352 steps
+//! against 1427 at base) plus that one frame. Block by
+//! block, A7a is +4.3 (block 0) to +29.3 (block 16) above base, and under +12 on blocks
+//! 0, 1, 2 and 11, so the whole distribution did not move up by a colour. Warm-up `K` is
+//! reported, not asserted (see the note in [`report`]).
+//!
+//! The debug scene (height 10) under A7a: 171..196 in the window (mean 186.781), and
+//! 171..196 over the 4,352 steps (mean 193.649, block means 186.781..195.125), on 85 or
+//! 97 scope frames (7 or 8 colours), one chunk each. Base on the same tree reproduced
+//! the numbers above (147..196, 73..=97, block means 171.219..181.254). A7a never
+//! reaches six colours (73), and its top (97 / 97 / 195) is base's top.
+//!
+//! **S1c after A7b — wider colours dispatch one more colour; no new allocation site.**
+//! A7b (2026-09-18, the A7 lane's S5: the SAT keeps a resting face pair on its clipped
+//! face patch instead of a near-duplicate edge axis, `FACE_AXIS_PREFERENCE` in
+//! `narrowphase/box_box.rs`) carries up to four points where such a pair carried one, so
+//! the colours carry more slots. Measured on `fix/a7-pile-never-rests` (A7a + A7b, same
+//! scene and toolchain, release; the long run by this file's scene extended to 17 x 256
+//! steady steps):
+//!
+//! ```text
+//!                         A7a (08fe7b9f)              A7a + A7b
+//! census window, mean      336.109                     373.234
+//! census window, range     326..350                    362..375
+//! window histogram         326->39 327->5 338->184     362->19 374->205 375->32
+//!                          339->27 350->1
+//! window scope             121 on 255, 133 on 1        133 on 256
+//! window chunk             205 on 44, 217 on 212       229 on 19, 241 on 237
+//! long run, per step       314..350, mean 334.269      362..375, mean 374.074
+//! long run, block means    325.941..338.129            373.234..374.129
+//! long run, scope          109 x 678, 121 x 3673,      133 x 4352
+//!                          133 x 1
+//! long run, chunk          205 x 722, 217 x 3630       229 x 19, 241 x 4333
+//! OTHER / realloc          0 / 0                       0 / 0
+//! warm-up K (budget 64)    62                          57
+//! ```
+//!
+//! **The proxy FIRED, and a direct count replaced it.** The whole distribution moved up, so
+//! the proxy the A7a adjudication used for an extra fan-out (every block mean at least 12
+//! above base's 307..332) fires, and that protocol said STOP when it fires. The question it
+//! stands in for was measured directly instead: a temporary relaxed counter at the colour
+//! solve's own `pool.scope` (in `solve_color_parallel`; copied in and restored by copy,
+//! sha256-checked) was read around every step of the long run. On all 4,352 steady frames
+//! `scope = 1 + (counted colour dispatches)`, and the count is 132 = 12 passes x 11
+//! colours on every frame, so every scope frame is the install frame or a colour the
+//! solver itself dispatched: one more colour, not an extra fan-out. The chunks moved +24
+//! while the scopes moved +12 because a wider colour spawns more tasks (2,592..2,676 a
+//! frame) and grows its scope's cells past one chunk more often: 1.81 chunks per dispatch
+//! scope in the window, against 1.78 after A7a.
+//!
+//! Why the count outranks the proxy: the proxy reads a mean, and a +12 mean is what BOTH
+//! explanations produce — one extra fan-out per colour pass, or one more dispatched colour
+//! on every frame — so it cannot tell them apart; it was adequate after A7a only because
+//! there the alternative was a single eleven-colour frame in 256. The counter reads the
+//! quantity the proxy stands in for, per frame: an extra fan-out would break
+//! `scope = 1 + (counted colour dispatches)` on every frame, and it held on every frame. The
+//! orchestrator accepted this adjudication on that ground (review of the A7 lane's S5,
+//! 2026-09-18), on condition that this header record that the proxy fired, why the count
+//! replaced it, and the downward headroom the re-pin removed ("The gate", below).
+//!
+//! The kernel as finally committed adopts one more piece of Box3D's rule after that review
+//! (a held face hint that realizes no patch yields to the best face's already-built patch).
+//! Re-run on it, the census window reads the same — release 373.234 / 362..375, debug
+//! 196.250 / 195..219 — and every pin holds; the 17 x 256-step long run was not re-taken.
+//!
+//! The debug scene (height 10) under A7b: 195..219 in the window (mean 196.250), and
+//! 195..220 over the 4,352 steps (mean 200.862, block means 195.125..217.625), on 97 or
+//! 109 scope frames (8 colours on 3,312 frames, 9 on 1,040), one chunk each, `OTHER` 1 a
+//! frame. The window's MAX is 219 (dispatch 218); 133 later frames reach 220 (dispatch
+//! 219), so the debug pin's top is the long run's, not the window's. The same counter
+//! accounted for every non-install scope frame on every debug frame too.
+//!
+//! **S1c after the default SIMD flip — cohort-snapped chunks spawn fewer tasks; the
+//! trajectory did not move.** On 2026-09-18 `PhysicsConfig::simd_solve` became `true` by
+//! default (lane `perf/physics-colored-simd-default`), so S1c now runs the O7 AVX2 cohort
+//! kernel. That kernel is bit-identical to the scalar colored oracle, so the pile's
+//! trajectory and its dispatched colours did not move — scope 133 on every frame and
+//! warm-up `K` 57, as before. What moved is the task count: with `simd` on, the chunk cut
+//! walk in `solve_color_parallel` advances in cohorts of 8 groups, so a dispatched colour
+//! is cut into fewer tasks and its scope's cells overflow the first `ScopeBlock` chunk less
+//! often. Measured on that lane (base `fdab6ae9` + the flip,
+//! `stable-x86_64-pc-windows-msvc` rustc 1.98.1, release; the long run by this file's scene
+//! extended to 17 x 256 steady steps, the extension copied in and restored by copy,
+//! sha256-checked):
+//!
+//! ```text
+//!                         A7a + A7b (scalar)          + default simd_solve
+//! census window, mean      373.234                     362.125
+//! census window, range     362..375                    362..363
+//! window histogram         362->19 374->205 375->32    362->224 363->32
+//! window scope             133 on 256                  133 on 256
+//! window chunk             229 on 19, 241 on 237       229 on 256
+//! long run, per step       362..375, mean 374.074      362..363, mean 362.127
+//! long run, histogram      —                           362->3800 363->552
+//! long run, scope          133 x 4352                  133 x 4352
+//! long run, chunk          229 x 19, 241 x 4333        229 x 4352
+//! OTHER / realloc          0 / 0                       0 / 0
+//! warm-up K (budget 64)    57                          57
+//! ```
+//!
+//! The move is DOWN only: 12 chunks a frame on exactly the frames that read 241, one chunk
+//! fewer on one colour in each of the 12 colour passes. It is the flag and nothing else:
+//! with `simd_solve = false` set in the S1c arm alone (a temporary copy, restored by
+//! sha256) the window reads back the A7b column to every digit (373.234 / 362..375,
+//! histogram 362->19 374->205 375->32, chunk 229..241, `K` 57) and the new pin reds three
+//! ways: steady MAX 375 > 371, dispatch MAX 375 > 363, chunks 229..=241 outside
+//! 229..=229 (2026-09-18, release).
+//! The release pin was re-pinned to the new long run's envelope under the rule in "The
+//! gate" below — chunk 229..=229, dispatch MAX 363 — which removes the upward headroom the
+//! old pin now left (241, 375: values nothing on this tree measured). The debug scene did
+//! NOT move: its census window read 196.250 / 195..219 and its 4,352-step long run
+//! 195..220 (mean 200.862; histogram 195->2893 196->419 219->907 220->133), scope and chunk
+//! 97..=109, dispatch MAX 219 — every figure the A7b debug runs above recorded, because a
+//! debug colour's scope holds one chunk whatever its task count. Its pin is unchanged.
+//!
+//! **S1c after the default parallel narrowphase (L5 C4) — one scope and one block more
+//! on every frame; the trajectory did not move.** On 2026-09-21
+//! `PhysicsConfig::parallel_narrowphase` became `true` by default (lane
+//! `perf/physics-parallel-narrowphase`, L5 C4; the code landed dormant in C3), and the S1c
+//! arm sets it with the other two parallel flags, so S1c now dispatches its narrowphase:
+//! the step's candidate pairs (about 9.5k on the parity runner's copy of this scene; any
+//! count from 3,072 up is lane-bound here) cut into 24 chunks (4 lanes x
+//! `NP_CHUNKS_PER_LANE`) and collided across the workers under ONE `pool.scope`, whose 24
+//! task cells (each captures `&ctx` and a chunk index) share ONE 4 KiB block. The
+//! parallel loop is bit-identical to the serial one
+//! (`narrowphase_parallel_equivalence.rs`), so the pile's trajectory, its contact set
+//! and its dispatched colours did not move: what moved is exactly +1 scope and +1 chunk
+//! on EVERY frame. S1b sets the flag OFF and stays the control at 1 / 1 (without that
+//! override it dispatches too and reds its own "1 exact" three ways: scope 2, chunk 2,
+//! dispatch 5 — run once as the red-first, 2026-09-21, release). Measured on this tree
+//! (`b8d9ab8f` + the C4 working tree,
+//! `stable-x86_64-pc-windows-msvc` rustc 1.98.1, release; the long run by this file's
+//! scene extended to 17 x 256 steady steps, the extension copied in and restored by
+//! copy, sha256-checked):
+//!
+//! ```text
+//!                         + default simd_solve        + default parallel_narrowphase
+//! census window, mean      362.125                     364.125
+//! census window, range     362..363                    364..365
+//! window histogram         362->224 363->32            364->224 365->32
+//! window scope             133 on 256                  134 on 256
+//! window chunk             229 on 256                  230 on 256
+//! long run, per step       362..363, mean 362.127      364..365, mean 364.127
+//! long run, histogram      362->3800 363->552          364->3800 365->552
+//! long run, scope          133 x 4352                  134 x 4352
+//! long run, chunk          229 x 4352                  230 x 4352
+//! long run, block means    362.125..362.129            364.125..364.129
+//! OTHER / realloc          0 / 0                       0 / 0
+//! warm-up K (budget 64)    57                          57
+//! ```
+//!
+//! Every figure moved by exactly +2, frame for frame: the histogram keeps its shape (the
+//! 552 frames that carry the periodic injector block are the same 552), the block-mean
+//! alternation is the same, `K` is the same, and `134 = 1 + 1 + 12 x 11` — the install
+//! frame, the narrowphase's scope and the same eleven colours. The per-frame structural
+//! assertion now reads the narrowphase's own counter (`Manifolds::narrowphase_dispatches`,
+//! +1 on all 4,352 frames, printed per scene) and subtracts it before the modulo, so an
+//! extra fan-out in the solve still breaks it, and a narrowphase that dispatched twice in
+//! a step would too. The attribution binary's D2′ arm prices the same dispatch on one
+//! warmed world, A/B against the serial loop: +1.000 scope, +1.000 chunk, +0.000 in
+//! every other class, on every ON frame, in release and debug. The release pins are the
+//! new long run's envelope under the rule in "The gate" below — scope 134..=134, chunk
+//! 230..=230, dispatch MAX 365 — with NO upward headroom, so the fan-out regression that
+//! gate exists for (+24 a frame) still reds: it would land at 388 against 365 on every
+//! frame (arithmetic on the measured window, not a re-run of that mutation).
+//!
+//! The debug scene (height 10, 385 bodies, 22 chunks a step) moved the same way. Its
+//! census window read 197..221 (mean 198.250; histogram 197->212 198->32 221->12; 98 or
+//! 110 scope frames, one chunk each; dispatch MAX 220), and its 4,352-step long run
+//! 197..222 (mean 202.862; histogram 197->2893 198->419 221->907 222->133; block means
+//! 197.125..219.625; scope and chunk 98 on 3,312 frames and 110 on 1,040; dispatch MAX
+//! 221, reached only past the window) — every frame +1 scope and +1 chunk over the A7b
+//! debug runs above, with the same 3,312 / 1,040 split of eight- and nine-colour frames,
+//! and the narrowphase's counter +1 on every frame. Its pin is re-pinned to that long
+//! run's envelope: scope 98..=110, chunk 98..=110, dispatch MAX 221.
+//!
+//! **S1c after L11 C2 (the cohort closure shrank) — every colour scope fits its first
+//! block; the trajectory did not move.** L11 C2 (2026-09-21, lane
+//! `perf/physics-l11-solve-setup`: `CohortColumns`, the design's D4-D6 and D9) replaces the
+//! 25-word `ContactSolveView` the colour task captured with a 5-word `CohortSolveView`, so
+//! the closure `solve_color_parallel` spawns per chunk cut shrank from 264 B to 104 B
+//! (`size_of_val` at the spawn site: `ColorSolvePtrs` 216 -> 56, the cut 32 -> 16, plus
+//! `ColorCtx` 16 and the step scalars) and its `ScopedCell` from 280 B to 120 B
+//! (`SCOPED_CELL_HEADER` 16): 34 cells per 4 KiB `CHUNK0` where 14 fitted before
+//! (34 x 120 = 4,080; 14 x 280 = 3,920). The dispatch did not move — the same colours, the
+//! same cut walk, the same task count per scope: the attribution binary's spawns-per-colour-
+//! scope histogram is byte-identical on the two trees at every lane count (3..=12 at W=2,
+//! 3..=23 at W=4, 3..=32 at W=8, over 3,840 colour scopes each). So a scope that spawned
+//! 15..=23 tasks needed a second chunk before (> 14 cells) and needs none now (< 34): on this
+//! scene that is 8 of the 11 colours in each of the 12 passes, -96 chunks a frame on EVERY
+//! frame of the long run. Measured on that lane (`691891c4` = C1 as the control, rebuilt from
+//! `git archive`, and `691891c4` + the C2 working tree; `stable-x86_64-pc-windows-msvc`
+//! rustc 1.98.1, release; the long run by this file's scene extended to 17 x 256 steady
+//! steps, the extension copied in and restored by copy, sha256-checked):
+//!
+//! ```text
+//!                         C1 (691891c4)               + L11 C2
+//! census window, mean      364.125                     268.125
+//! census window, range     364..365                    268..269
+//! window histogram         364->224 365->32            268->224 269->32
+//! window scope             134 on 256                  134 on 256
+//! window chunk             230 on 256                  134 on 256
+//! long run, per step       364..365, mean 364.127      268..269, mean 268.127
+//! long run, histogram      364->3800 365->552          268->3800 269->552
+//! long run, scope          134 x 4352                  134 x 4352
+//! long run, chunk          230 x 4352                  134 x 4352
+//! long run, block means    364.125..364.129            268.125..268.129
+//! bytes acquired / step    1,369,792.8                 583,360.8
+//! OTHER / realloc          0 / 0                       0 / 0
+//! warm-up K (budget 64)    57                          57
+//! ```
+//!
+//! The control column reproduces the L5 C4 column above to every printed digit, so the
+//! instrument did not move. Every figure moved by exactly -96, frame for frame — the
+//! per-step delta over the 4,352 steps is scope 0 on every step, chunk -96 on every step,
+//! and the periodic injector block lands on the same 552 frames in both trees — so the
+//! histogram keeps its shape, the block-mean alternation is the same, `K` is the same,
+//! scope is 134 = 1 + 1 + 12 x 11 on all 4,352 frames, and the per-frame structural
+//! assertion held on every one of them. The attribution binary's D arm prices the same
+//! change on one warmed world: at W=4 chunks per scope 1.710 -> 1.000 (232.500 -> 136.000
+//! chunks a step, 368.625 -> 272.125 acquisitions), at W=2 unchanged (1.000, 272.125 on
+//! both trees). The release pins are the new long run's envelope under the rule in "The
+//! gate" below — scope 134..=134, chunk 134..=134, dispatch MAX 269 — a NARROWING with NO
+//! headroom either way, so the fan-out regression that gate exists for (+12 scope and +12
+//! chunks a frame) still reds: it would land at 292..293 against 269 on every frame, scope
+//! 146 outside 134..=134 and chunk 146 outside 134..=134 (arithmetic on the measured long
+//! run, red on 4,352 of 4,352 steps and on 256 of the window's 256 — not a re-run of that
+//! mutation).
+//!
+//! One premise of the re-pin ruling did NOT survive the run and is corrected here: at W=8
+//! a colour scope was expected to spawn up to `8 x CHUNKS_PER_WORKER` = 48 tasks (> 34
+//! cells) and so to take a second chunk again. It spawns at most 32 — at W=8 and at W=16 —
+//! because `n_chunks = min(lanes x 6, span / 64).clamp(1, groups)` is a CEILING on the cut
+//! count, and the O7 cohort-snapped cut walk rounds every cut up to whole cohorts (the
+//! widest colour of the D arm's pile, 2,880 slots, is 45 by work and yields 32 cuts of
+//! about three cohorts). 32 x 120 = 3,840 B fits the first block, so on the shipped kernel
+//! no colour scope exceeds one chunk at ANY lane count and the D arm's W=8 row equals its
+//! W=4 row (272.125; on the C1 tree too, 368.625 = 368.625). Fan-out growth with lanes is
+//! measurable on that pile only with `simd_solve = false`, where the cut walk advances in
+//! single groups: at W=8 the widest colours reach 35..=38 tasks (312 of 3,840 scopes cross
+//! 34), chunk 145..=157 against 133..=145 at W=4, 283.125 against 272.125. The
+//! attribution binary's D arm pins `chunk == scope` on every frame at W = 2 / 4 / 8 (no
+//! headroom: a closure past 112 B or a colour past 34 tasks reds it) and keeps its strict
+//! lane-growth assertion on that scalar pair (2026-09-21, release).
+//!
+//! The debug scene did NOT move: its census window read 198.250 / 197..221 (histogram
+//! 197->212 198->32 221->12; dispatch MAX 220) and its 4,352-step long run 197..222 (mean
+//! 202.862; histogram 197->2893 198->419 221->907 222->133; block means 197.125..219.625;
+//! scope and chunk 98 on 3,312 frames and 110 on 1,040; dispatch MAX 221) — every figure
+//! the L5 C4 debug run above recorded, because a debug colour's scope holds one chunk
+//! whatever its task count. Its pin is unchanged.
+//!
+//! **S1c after L9 C4 (contact reuse on by default) — the pile settles to ten colours; no
+//! new allocation site.** L9 C4 (2026-09-24, lane `u/phys-l9-c4`) turns
+//! `PhysicsConfig::contact_reuse` on by default, so a slow touching box pair's contact is
+//! refreshed from its record instead of re-collided. That moves the pile's contact set by
+//! design (5,021 steady contacts against 5,060), and with it the colours the solve
+//! dispatches: the census window read scope 122..134 and chunk 122..134, outside the pinned
+//! 134..=134 on both lines. Adjudicated by this protocol on the C4 tree (`989ca0f0` and its
+//! re-pins): this file's scene extended to 17 x 256 steady steps, and as the attribution arm
+//! the same binary with `contact_reuse = false` set in the rigid-pile setup (both extensions
+//! copied in and restored by copy, md5-checked; `stable-x86_64-pc-windows-msvc`, release):
+//!
+//! ```text
+//!                         reuse off (the A/B arm)     reuse on (the C4 default)
+//! census window, mean      —                           245.250
+//! census window, range     —                           244..269
+//! window histogram         —                           244->213 245->31 268->11 269->1
+//! window scope / chunk     —                           122..134 / 122..134, 1.00 per scope
+//! long run, per step       268..269, mean 268.127      244..269, mean 244.193
+//! long run, histogram      268->3800 269->552          244->3789 245->551 268->11 269->1
+//! long run, scope          134 x 4352                  122 x 4340, 134 x 12
+//! long run, chunk          134 x 4352                  122 x 4340, 134 x 12
+//! long run, half means     268.127 / 268.127           244.259 (MAX 269) / 244.127 (MAX 245)
+//! bytes acquired / step    583,360.8                   531,280.8
+//! OTHER / realloc          0 / 0                       0 / 0
+//! warm-up K (budget 64)    57                          58
+//! ```
+//!
+//! The reuse-off arm reproduces the L11 C2 long run above to every printed digit, so the
+//! flip alone moved it. The reuse-on pile dispatches ten colours (scope 122 = 1 + 1 +
+//! 12 x 10) on 4,340 of the 4,352 steady frames and eleven on 12, all of them early in the
+//! census window. Every scope still holds exactly one chunk, the per-frame structural
+//! assertion held on every frame, and the dispatch MAX (269, an eleven-colour frame with
+//! its injector block) did not move. The release pins are the new long run's envelope
+//! under the rule in "The gate" below: scope 122..=134, chunk 122..=134, dispatch MAX 269.
+//! That is a move of the floor DOWN, the case that rule names ("a pile that settles further
+//! ... reds downward, and that red is a re-measure"), and nothing moved upward.
+//!
+//! What the move costs S1c's pins, MEASURED by re-running the mutation on this tree (one
+//! `pool.scope` with one spawn at the top of `solve_all_colors`, under `if parallel`;
+//! 2026-09-25, release and debug): the fan-out regression (+12 scope and +12 chunks a frame)
+//! lands at 134 / 134 and dispatch 268..269 on the ten-colour frames, inside the new pins, and
+//! at 146 / 146 and dispatch 292..293 on the 12 eleven-colour frames (window histogram
+//! 268->213 269->31 292->11 293->1). Those 12 are inside the census window, so S1c's release
+//! arm still reds on that regression four ways (steady MAX 293 > 277, dispatch MAX 293 > 269,
+//! scope and chunk 134..=146 outside 122..=134), but on 12 of the window's 256 frames where it
+//! used to red on all of them, and a later change that re-draws those 12 as ten-colour frames
+//! would leave it blind with nothing to signal it.
+//!
+//! The debug scene's envelope did NOT move, so its pin is unchanged. Its 4,352-step long
+//! run with reuse on reads 197..222 (mean 198.892; histogram 197->3521 198->511 221->279
+//! 222->41) on scope and chunk 98..=110, dispatch MAX 221, `OTHER` 1 a frame; the same
+//! binary with reuse off reads the L11 C2 debug long run above digit for digit (mean
+//! 202.862; 197->2893 198->419 221->907 222->133). But with reuse on its nine-colour
+//! frames (scope 110) all fall in the second half of the long run (first half: mean
+//! 197.127, MAX 198), so the debug census window holds none of them, and the fan-out
+//! regression lands at scope 110, chunk 110 and dispatch 221 on every window frame (measured:
+//! histogram 221->224 222->32), inside the debug pin. **Since L9 C4 S1c's debug arm no longer
+//! reds on that regression, and the whole census passes with it.**
+//!
+//! **S1e gives the gate back its every-frame red.** S1e is S1c's scene and switches with
+//! `contact_reuse` overridden to `false` — the reuse-off arm the pyramid and A7-R1 already
+//! keep — and it carries S1c's pins from before the flip: release scope and chunk 134..=134,
+//! dispatch MAX 269; debug 98..=110, 221. Its census window reads the L11 C2 window above
+//! digit for digit — release 268.125 / 268..269 (histogram 268->224 269->32, scope and chunk
+//! 134 on all 256, K 57), debug 198.250 / 197..221 (197->212 198->32 221->12, scope and chunk
+//! 98 or 110) — and its last step serves 0 box pairs from reuse records where S1c's serves
+//! 5,098 (debug 1,490). Both are asserted, so the two arms are seen to differ in that switch
+//! alone. The same mutation, measured on both arms (2026-09-25,
+//! `stable-x86_64-pc-windows-msvc`):
+//!
+//! ```text
+//!                   S1c (reuse on)                     S1e (reuse off)
+//! release window    268->213 269->31 292->11 293->1    292->224 293->32
+//!         scope     134..=146 in 122..=134             146..=146 in 134..=134
+//!         verdict   RED four ways, on 12 frames        RED four ways, on all 256 frames
+//! debug   window    221->224 222->32                   221->212 222->32 245->12
+//!         scope     110..=110 in 98..=110              110..=122 in 98..=110
+//!         verdict   GREEN                              RED four ways, on 12 frames
+//! ```
+//!
+//! In release S1e reds on every frame whatever S1c's trajectory does. In debug it reds on the
+//! 12 nine-colour frames its window holds, which is the power the debug gate had before L9 C4
+//! and no more: on the eight-colour frames the regression lands at 110 / 110 and dispatch
+//! 220..221, inside the pin.
+//!
+//! **S1c and S1e after S4 (W8S lane, commit 4, 2026-09-27) — +1 scope and +1 chunk on every
+//! frame, attributed by a counter.** S4 fills the solve's cohorts under ONE more `pool.scope`
+//! on every step whose colours dispatch and whose cohorts cut into at least two setup ranges
+//! (ruling 7 of 2026-09-26 extends L5 OQ1's per-step scope exception to it until S1's region
+//! retires it). Its 32 task cells of 40 bytes fit the scope's first block, so it adds exactly
+//! one scope and one chunk. `ColoredSoftStepSolver::setup_dispatches` moved by one on every
+//! steady frame of both piles (the report's "solve setup (S4) on 256 of the 256", and on 4,352
+//! of 4,352 in the long run), and the per-frame structural assertion subtracts it the way it
+//! subtracts the narrowphase's. Re-pinned by the fourth form below (L5 C4's), from this file's
+//! scene extended to 17 x 256 steady steps (the extension copied in and restored by content,
+//! md5-checked; release all scenes, debug S1b / S1c / S1e only, because an S0 frame of the
+//! extended debug run overflows the harness's own `acquisitions - other` before S1c is reached):
+//!
+//! ```text
+//!                             S1c (reuse on)                        S1e (reuse off)
+//! release window, scope       123..=135 (mean 123.562)              135..=135
+//! release long, histogram     246->3789 247->551 270->11 271->1     270->3800 271->552
+//! release long, scope / MAX   123..=135 / dispatch 271              135..=135 / dispatch 271
+//! debug long, histogram       199->3521 200->511 223->279 224->41   199->2893 200->419 223->907 224->133
+//! debug long, scope / MAX     99..=111 / dispatch 223               99..=111 / dispatch 223
+//! ```
+//!
+//! Every histogram is L9 C4's long run above (release 244->3789 245->551 268->11 269->1 and
+//! 268->3800 269->552; debug 197->3521 198->511 221->279 222->41 and 197->2893 198->419
+//! 221->907 222->133) moved by exactly +2, bin for bin with the same frame counts: one scope and
+//! one chunk, the object the lane added. Pins, no headroom either way: S1c release scope and
+//! chunk 123..=135, dispatch MAX 271; S1e release 135..=135, 271; debug, both, 99..=111, 223.
+//! S8b's exact `scope == 1 + np` did not move: its colours stay under the floor, and S4's gate
+//! is the colours' own.
+//!
+//! **S1c and S1e after V2 (speculative contacts and the approach-velocity margin on by default,
+//! 2026-10-01; owner V2a/V2b, rulings 2026-09-30 item 10c) — sixteen colours on every frame, one
+//! chunk per scope; attributed by a same-binary `d = 0` twin.** V2 keeps a contact point while
+//! its separation is at most `d` (20 mm) plus the approach-velocity term, so the resting pile
+//! keeps every pair within 20 mm as a speculative contact: 8,554 steady contacts against 5,021,
+//! and its colouring needs sixteen colours, dispatched on every frame of both piles (reuse on and
+//! off). Every scope still holds one chunk (at W = 4 a colour spawns at most 24 tasks, under the
+//! 34 a first block holds). The census's fourth re-pin form, from this file's scene extended to
+//! 17 x 256 steady steps (the extension applied by content and restored by content, md5-checked;
+//! release all scenes, debug S1b / S1c / S1e / S1f), `stable-x86_64-pc-windows-msvc`:
+//!
+//! ```text
+//!                             S1c (reuse on)          S1e (reuse off)         S1f (d = 0, reuse on)
+//! release long, histogram     390->3800 391->552      390->3800 391->552      246->3789 247->551 270->11 271->1
+//! release long, scope / MAX   195..=195 / disp. 391   195..=195 / disp. 391   123..=135 / dispatch 271
+//! release steady contacts     8,554                   8,553                   5,021
+//! debug long, histogram       391->3800 392->552      391->3800 392->552      199->3521 200->511 223->279 224->41
+//! debug long, scope / MAX     195..=195 / disp. 391   195..=195 / disp. 391   99..=111 / dispatch 223
+//! ```
+//!
+//! `195 = 1 install + 1 narrowphase + 1 setup + 12 passes x 16 colours`, on all 4,352 frames of
+//! every long run, the per-frame structural assertion holding throughout. S1f, the same binary
+//! with `speculative_distance = 0` and the velocity term off, reads S4's long run above bin for bin
+//! with the same frame counts: the move is V2's contact rule, attributed by the switch alone, and
+//! no allocation site was added (`K` 0 on both V2 piles, `OTHER` 0 in release and the debug
+//! build's one `debug_assert_coloring` scratch per step, `realloc` 0). Pins, no headroom either
+//! way: S1c and S1e scope and chunk 195..=195, dispatch MAX 391, in both profiles; S1f keeps S4's
+//! S1c pins. The fan-out regression (+12 scope and +12 chunks a frame) now lands at 207 / 207 on
+//! every frame of S1c as well as S1e — arithmetic on the measured long runs, not a re-run of that
+//! mutation — so S1c, which saw it on 12 window frames before V2, reds on all 256 again; S1f, at
+//! the pre-V2 pin, sees it on those same 12.
+//!
+//! **S1c, S1e and S1f after SR (phase B's flip, 2026-10-07) — 3 / 3 on every frame of every
+//! pile, in both profiles; attributed by a counter.** A parallel step now runs its fill and its
+//! substeps as ONE solve region (`boyko_threadpool`'s `pool.region`), and the flip retired S4's
+//! setup scope and the per-colour scopes. The region opens one scope frame, whose `P - 1` helper
+//! cells share its first block, so a parallel step is the install frame, the narrowphase's
+//! dispatch and the region — `3 = 1 + 1 + 1` scope frames and as many chunks — whatever its
+//! colour count. `ColoredSoftStepSolver::region_dispatches` moved by one on every one of the
+//! 4,352 long-run frames of all three piles (the report's "solve region (SR) opened on 4352 of
+//! the 4352"), and the per-frame structural assertion, `scope == 1 + np + region`, held on every
+//! frame. The census's fourth re-pin form, from this file's scene extended to 17 x 256 steady
+//! steps (the extension applied by content and restored by content, md5-checked; release all
+//! scenes, debug S1b / S1c / S1e / S1f), `stable-x86_64-pc-windows-msvc`:
+//!
+//! ```text
+//!                             S1c (reuse on)          S1e (reuse off)         S1f (d = 0, reuse on)
+//! release long, histogram     6->3800 7->552          6->3800 7->552          6->3800 7->552
+//! release long, scope / MAX   3..=3 / dispatch 7      3..=3 / dispatch 7      3..=3 / dispatch 7
+//! release steady contacts     8,554                   8,553                   5,021
+//! debug long, histogram       7->3800 8->552          7->3800 8->552          7->3800 8->552
+//! debug long, scope / MAX     3..=3 / dispatch 7      3..=3 / dispatch 7      3..=3 / dispatch 7
+//! ```
+//!
+//! The steady contacts are V2's long run's, contact for contact (SR moves no value); the top
+//! bin of each histogram is the injector's dispatcher-side block (0.127 a frame), and the debug
+//! histograms carry the one `debug_assert_coloring` scratch a step. Every other scene of the
+//! release long run reads its pin. Pins, no headroom either way: S1c, S1e and S1f scope and
+//! chunk 3..=3, dispatch MAX 7, in both profiles. The fan-out regression these piles were the
+//! gate of (+12 scope frames a frame: a colour scope per pass) cannot occur any more — no colour
+//! opens a scope. Its successor, a scope opened inside a region block (`levers/scaling/
+//! 01-DESIGN.md` §6.10), is red on this tree on both sides: +1 scope frame a frame, which the
+//! structural assertion reds on S1c's first steady frame (4 against `1 + 1 + 1`), and in a debug
+//! build `boyko_threadpool`'s own assertion (a pool scope opened inside a region block) panics
+//! before the census sees the frame.
+//!
+//! **S2 after EM2′ (same tree plus the entity-id recycling fix, 2026-09-11,
+//! release and debug alike): 4.031 / 5, `realloc` 0.** The 0.008 it lost is
+//! exactly the two free-list reallocs the AFTER column's window carried
+//! (2 / 256 frames); the dispatch classes are unchanged (2 scope + 2 chunk +
+//! 0.031 injector).
+//!
+//! **The delta, attributed.** A scope frame (`pool.install` or a nested
+//! `pool.scope`) cost `4 + (one cell per spawn)` BEFORE — a `Box<ScopeShared>`
+//! plus the three allocations of the scratch deque, plus a cell per task. AFTER
+//! it costs `1 + (one 4 KiB chunk if it spawns anything, doubling as cells
+//! overflow)`: the scratch deque is gone (`join_on_worker` / `join_external`
+//! build none) and the cells share the chunk. So an App frame went from `n + 4`
+//! to a flat 2 whatever `n` is. S1c's 8.05x drop (over the fixed window) is the
+//! same two terms over the window's 121 scope frames a step, plus a third: a
+//! push made by a WORKER now lands in that
+//! worker's own Chase-Lev ring (`place_task` -> `push_on_lane_no_wake`), which
+//! allocates nothing, where BEFORE it went through the injector and cost a
+//! 1520-byte block per 63 pushes (38 a traced step; AFTER, 0.125).
+//!
+//! # What an AFTER frame is made of — attributed COMPLETELY, by layout class
+//!
+//! Every acquisition is charged to one of four classes from its `Layout` alone
+//! (see [`C_SCOPE`]); `alloc_frame_attribution.rs` checks each class against the
+//! primitive that produces it and names every call site with backtraces.
+//!
+//! ```text
+//! scene   scope/frame   chunk/frame        injector   OTHER            realloc
+//! S0 n>=1   1 exact      1 exact            n/63       0 (first touch)  0
+//! S0b       2 exact      2 exact            8/63       0 (first touch)  0
+//! S2        2 exact      2 exact            2/63       0 (first touch)  0 (was 2, EM2′)
+//! S3        1 exact      1 exact            4/63       0 (first touch)  0
+//! S1a/S1b   1 exact      1 exact            ~7/63      0                0
+//! S1c       3 exact      3 exact            0.125      0                0
+//! S1c long  3 exact      3 exact            —          0                0
+//! S1e       3 exact      3 exact            0.125      0                0
+//! S1e long  3 exact      3 exact            —          0                0
+//! S1f       3 exact      3 exact            0.125      0                0
+//! S1f long  3 exact      3 exact            —          0                0
+//! ```
+//!
+//! (Since SR's flip every parallel pile is `3 = 1 install + 1 narrowphase + 1 solve region` on
+//! every frame, whatever its colours (header, "S1c, S1e and S1f after SR"). The notes below are
+//! the rows before it. From V2 to SR: S1c and S1e 195 exact, S1f 123..135, one chunk per scope.
+//! Since V2 S1c and S1e dispatched sixteen colours on every frame, `195 = 1 + 1 + 1 + 12 x 16`,
+//! and S1f is S1c's pile under the overlap-only rule — `speculative_distance` and
+//! `speculative_velocity_cap` both `0` — which carries S1c's rows from before V2, below.)
+//!
+//! (S1c's rows are the tree after S4: 1 of the scopes and 1 of the chunks are the
+//! narrowphase's, 1 and 1 the solve setup's, every scope holds exactly one chunk, and 12 of the
+//! 4,352 long-run frames, all in the window, read 135 where the rest read 123. S1e is the same
+//! pile with contact reuse off. After L9 C4 and before S4 both read one less on every frame
+//! (122..134 and 134), and S1e's pre-S4 rows are what S1c's read after L11 C2. Before L9 C4,
+//! S1c's rows: after
+//! L11 C2 they read 134 / 134 on every frame. After the default parallel
+//! narrowphase (L5 C4), on the 25-word view, they read 134 / 230 at 1.72 chunks per scope;
+//! after the default SIMD flip 133 / 229. After A7b on the scalar kernel
+//! the window and the long run read 133 / 229..241 at 1.81 chunks per scope. After A7a
+//! alone the window read 121..133 /
+//! 205..217 at 1.78 chunks per scope and the long run 109..133 / 205..217; before A7a
+//! the window read 121 / 205..217 at 1.74 chunks per scope, and the long run read
+//! 109..121 / 193..217.)
+//!
+//! * `scope` = since SR's flip, the `Box<ScopeShared>` of `Schedule::run`'s install frame,
+//!   of each `par_iter` fan-out, of the narrowphase's one dispatch and of the solve region's one
+//!   scope: `1 + np + region`, asserted on every steady frame with `np` and `region` READ from
+//!   the narrowphase's and the solver's own counters (`region_dispatches`), 3 on every frame of
+//!   every parallel pile here. Before the flip (the rest of this note) it was the
+//!   `Box<ScopeShared>` of `Schedule::run`'s install frame, of each
+//!   `par_iter` fan-out, of the narrowphase's one dispatch (L5, on by default since
+//!   C4), of the solve setup's one dispatch (S4, W8S lane commit 4), and of each
+//!   dispatched colour in each of the solver's 12 colour passes: `1 + np + setup + 12 x`
+//!   the dispatched colours, asserted on every steady frame with `np` READ from the
+//!   narrowphase's own counter and `setup` from the solver's (`setup_dispatches`), each 1 on
+//!   every frame here. On the 1240-body pile that is `1 + 1 + 1 + 12 x 10 = 123` on 4,340 of
+//!   the long run's 4,352 frames and `1 + 1 + 1 + 12 x 11 = 135` on the other 12, all in the
+//!   census window (since S4; from L9 C4 until S4 one less; before L9 C4 134 on every frame,
+//!   and before L5 C4, 133; after A7a alone,
+//!   `1 + 12 x 10 = 121` on 255 of the window's 256 frames and 133 on one, and
+//!   `1 + 12 x 9 = 109` later in the long run; before A7a, 121 on all 256). Per
+//!   stage: `Schedule::run`'s install frame owns 1 scope + 1 chunk of every step,
+//!   `physics_narrowphase` owns 1 scope + 1 chunk of every step that dispatches (its
+//!   24 task cells fit the scope's first block; the attribution binary's D2′), and
+//!   `physics_solve_colored` owns every other dispatch object, the setup's scope among them.
+//!   In the census window that is 121.562 scopes + 121.562 chunks of the 247.250 since S4
+//!   (from L9 C4 until S4, 120.562 + 120.562 of the 245.250; after L11 C2, 132 + 132 of
+//!   the 268.125; after L5 C4 on the 25-word view,
+//!   132 + 228 of the 364.125; after A7b on the scalar kernel,
+//!   132 + 239.109 of the 373.234; after A7a alone, 120.047 + 213.938 of the
+//!   336.109; before A7a, 120 + ~209.7 of the 331.8).
+//!   ⚠ The backtrace trace that charged `physics_solve_colored`
+//!   **99.5 %** was taken on a WARM-UP step, and the percentage belongs to that
+//!   step's own numbers: **145 scope frames (1 + 12 passes x 12 dispatched
+//!   colours) and 386 acquisitions**, of which the install frame's 2 are the
+//!   other 0.5 % (the attribution binary's section E, `BOYKO_ALLOC_TRACE=1`:
+//!   the 50th step of a fresh pile, after 48 serial warm-up steps and one
+//!   parallel one; re-run 2026-09-11, 386 of 386 captured, the solve's 384 =
+//!   144 scope boxes + 240 chunk grows).
+//!   Every other physics system (the narrowphase's staging and commit columns
+//!   included — its parallel step adds the one scope and the one block above, never
+//!   a buffer), the event lane, change detection and every system body own ZERO heap
+//!   acquisitions (see "Coverage boundary").
+//! * `OTHER` = everything that is not a dispatch object, and in steady state it
+//!   is exactly one site: crossbeam-epoch's `Collector::register`, the
+//!   thread-local `LocalHandle` a pool thread creates on its FIRST steal
+//!   (2304 B, align 128). Once per thread, front-loaded, absent from the second
+//!   half of a 4096-frame run — a setup cost that lands in a frame.
+//! * `realloc` = ZERO in every scene since EM2′. It used to be
+//!   `EntityMaster::free_entity_ids` growing under `CommandQueue::apply` ->
+//!   `EcsMaster::delete_entity`, and that growth was unbounded: `Commands::spawn`
+//!   reserved fresh ids through the worker counter and never popped the list the
+//!   despawns filled, so on a flat population the list AND the id-slot store
+//!   grew one entry per despawn forever. EM2′ made the free list a claimable
+//!   stack that `Commands::spawn` pops with one `fetch_sub`, so the churn now
+//!   reuses the ids it despawns: at rest the stack holds one frame's 64
+//!   despawns and the slot store does not move.
+//!
+//! In a DEBUG build S1b, S1c and S1e carry one extra `OTHER` per step: the
+//! `cfg!(debug_assertions)`-gated `debug_assert_coloring` scratch in
+//! `ConstraintGraph::build` (the allocation `constraint_graph_o4_world.rs`
+//! already tolerates). The debug S1c scene is the height-10 pile: after L5 C4,
+//! 98..=110 scope frames (the install frame, the narrowphase's scope and 8 or 9
+//! dispatched colours) in the census window and over 4,352 steps, one chunk each,
+//! dispatch MAX 221 over the long run — pinned with the release pin's shape: the
+//! long run's envelope, no upward headroom (header, "S1c after the default parallel
+//! narrowphase"); L11 C2's debug long run reproduced every one of those figures, so
+//! the cell shrink moved nothing here. S4 adds the solve setup's scope and chunk on every
+//! frame: 99..=111, dispatch MAX 223 (header, "S1c and S1e after S4"). Since V2 the debug S1c and
+//! S1e piles dispatch sixteen colours on every frame too: 195..=195, dispatch MAX 391 (header, "S1c
+//! and S1e after V2"); S1f keeps 99..=111 / 223. Since SR's flip the debug S1c, S1e and S1f
+//! piles read 3..=3, dispatch MAX 7, like the release ones (header, "S1c, S1e and S1f after
+//! SR"). (After A7b it read
+//! 97..=109 / 97..=109, MAX
+//! 220, dispatch 219; before A7b it read 85..=97 in the window and 73..=97 over 4,352
+//! steps before A7a, 85..=97 after it, MAX 196, pinned 73..=97 / 195.)
+//!
+//! # The gate
+//!
+//! [`gate`] pins every scene's steady-state envelope at what it measured — per
+//! CLASS, not as one total, because a total is exactly what a regression hides
+//! under: the mutation that made each S0 probe system allocate one `Vec` per
+//! frame took the 1- and 2-system frames to MAX 5 against a total pin of 7 —
+//! GREEN on the total — and was caught only by their `OTHER` pins (256 and 513
+//! over the window against a budget of 4). Re-run on the final file
+//! 2026-09-11 with ONE `Box<u64>` per frame in `probe0` alone: six violations
+//! (every S0 row with n >= 1 and S0b, 256..257 `OTHER` against 4), every MAX pin
+//! still green. Headroom is zero wherever a count is
+//! structural and is justified at each non-zero pin (see [`pins`]).
+//!
+//! **S1d (L10 C0)** is S1b with `sleeping` on: the pile freezes inside the window, so its
+//! steady frames drive `IslandSleep::begin_step` / `end_step` over the frozen path, and a
+//! frozen row on some steady frame is its anti-vacuity. It carries S1b's pin exactly: since
+//! C0 the latch and the per-island scratch are kernel columns, so sleeping adds no heap
+//! acquisition to a step. RED-first: a `Vec::with_capacity(1)` in `begin_step`.
+//!
+//! (Since SR's flip S1c's number no longer depends on the data: 3 scope frames and 3 chunks on
+//! every steady frame, whatever the colours; the paragraph below is the per-colour scopes'
+//! history.) S1c's number was DATA-DEPENDENT: its warm-up spans 290..387 as the pile
+//! collapses, and after it the count moves in whole dispatched colours as the
+//! contact set settles (246..271 per step over 4,352 steps since S4; 244..269 from L9 C4
+//! until S4; 268..269 after L11 C2; 364..365
+//! after L5 C4 on the 25-word view; 362..363
+//! after the default SIMD flip; 362..375 after A7b on the scalar kernel; 314..350
+//! after A7a alone; 302..339 before it). Quote it as a range, never as a figure.
+//! Its release pins are that long run's envelope with NO upward headroom — scope
+//! 123..=135, chunk 123..=135, dispatch MAX 271 since S4 (from L9 C4 until S4: 122..=134,
+//! 122..=134, 269; after L11 C2: 134..=134, 134..=134, 269; after L5 C4 on the 25-word view:
+//! 134..=134, 230..=230, 365; after the default SIMD flip:
+//! 133..=133, 229..=229, 363; after A7b on the scalar kernel:
+//! 133..=133, 229..=241, 375; after A7a alone: 109..=133,
+//! 205..=217, 350; before A7a: 109..=121, 193..=217, 339):
+//!
+//! * **The ninth re-pin, after SR (phase B's flip), moves S1c, S1e and S1f DOWN to 3..=3,
+//!   dispatch MAX 7, in both profiles, attributed by a counter** — the fourth re-pin's form: the
+//!   solver's `region_dispatches` moved by one on every long-run frame, the per-frame structural
+//!   assertion reads it, and the setup and per-colour scopes the region replaced are gone (header,
+//!   "S1c, S1e and S1f after SR"). A narrowing; the pins keep no headroom either way.
+//!
+//! * **The eighth re-pin, after V2 (speculative contacts on by default), moves S1c and S1e UP to
+//!   195..=195, dispatch MAX 391, in both profiles, attributed by a same-binary `d = 0` twin** —
+//!   the fourth re-pin's form with the switch as the counter: S1f (`speculative_distance = 0`, the
+//!   velocity term off) reads S4's long run bin for bin, so the move is the contact rule's colours
+//!   (sixteen on every frame), not an allocation site (header, "S1c and S1e after V2"). An upward
+//!   move is a re-measure here only because a value-changing lever ordered it and its `d = 0` twin
+//!   attributes it; the pins keep no headroom either way.
+//!
+//! * **The seventh re-pin, after S4 (W8S lane, commit 4), is a +1 / +1 shift of S1c and S1e,
+//!   in both profiles, attributed by a counter** — the fourth re-pin's form. The solve
+//!   setup's own counter (`ColoredSoftStepSolver::setup_dispatches`) moved by one on every one
+//!   of the 4,352 long-run frames, the per-frame structural assertion subtracts it, and every
+//!   long-run histogram is L9 C4's moved by +2 bin for bin (header, "S1c and S1e after S4").
+//!   The pins moved by exactly the object the lane added and keep no headroom either way; the
+//!   fan-out regression (+12 scope and +12 chunks a frame) still lands 12 above them.
+//!
+//! * **The sixth re-pin, after L9 C4, moves the floor DOWN and nothing else, and it is
+//!   attributed by an A/B on one binary.** Contact reuse on by default changes the contact
+//!   set by design, and the pile dispatches ten colours on 4,340 of the long run's frames
+//!   (header, "S1c after L9 C4"); the same binary with `contact_reuse = false` reads the
+//!   L11 C2 long run digit for digit. Scope and chunk 134..=134 became 122..=134; the top
+//!   and dispatch MAX 269 did not move. It is the downward case the rule below names, a
+//!   re-measure and not an allocation regression. It costs S1c's pins power, measured by a
+//!   re-run of the mutation: the fan-out regression (+24 a frame) reds S1c's release arm only
+//!   on the window's 12 eleven-colour frames (292..293 against 269, and 146 outside
+//!   122..=134 on both classes), lands inside the pins on the other 244, and passes S1c's
+//!   debug arm outright. **S1e keeps the power:** the same pile with contact reuse off,
+//!   pinned at S1c's L11 C2 envelope (release 134..=134 / 134..=134 / 269, debug 98..=110 /
+//!   98..=110 / 221), reds on that regression on every release frame and on the debug
+//!   window's 12 nine-colour frames (header, "S1c after L9 C4").
+//!
+//! * **The fifth re-pin, after L11 C2, is a NARROWING, and it is attributed by a size,
+//!   not by a mean.** The colour task's closure shrank from 264 B to 104 B with the view
+//!   it captures, its cell from 280 B to 120 B, and 34 cells fit a chunk where 14 did;
+//!   the task counts did not move (the spawns-per-scope histogram is identical on the
+//!   two trees), so the 96 scopes a frame that spawned 15..=23 tasks stopped taking a
+//!   second chunk. The long run moved DOWN only (header, "S1c after L11 C2"): chunk
+//!   230..=230 became 134..=134 and dispatch MAX 365 became 269; scope did not move.
+//!   The rule below keeps no upward headroom, so the fan-out regression (+24 a frame)
+//!   would land at 292..293 against 269, and 146 against 134..=134 on both classes, on
+//!   every frame; that is arithmetic on the measured long run, not a re-run of that
+//!   mutation.
+//!
+//! * **The fourth re-pin, after L5 C4, is a +1 / +1 shift, and it is attributed by a
+//!   counter, not by a mean.** The narrowphase's own dispatch counter moved by one on
+//!   every one of the 4,352 frames, the per-frame structural assertion subtracts it,
+//!   and the solve's colours did not move (header, "S1c after the default parallel
+//!   narrowphase"). The pin moved by exactly the object the lane added, in both
+//!   directions, and keeps no headroom either way.
+//!
+//! * **The third re-pin, after the default SIMD flip, is a NARROWING.** The long run moved
+//!   DOWN only (header, "S1c after the default SIMD flip"), and the rule below keeps no
+//!   upward headroom, so chunk 229..=241 became 229..=229 and dispatch MAX 375 became 363;
+//!   scope did not move. The fan-out regression this gate exists for (+24 a frame, below)
+//!   would land at 386 against 363 on every frame; that is arithmetic on the measured
+//!   window, not a re-run of that mutation.
+//!
+//! * **This is a re-pin from a long-run adjudication, not a widening — twice.** A7a
+//!   turned the old pin red on three lines (steady MAX 350 > 347, dispatch 350 >
+//!   339, scope 121..=133 outside 109..=121). The gate's own message forbids
+//!   widening a pin to make a red go away, and it prescribes this instead:
+//!   re-measure over the long run, attribute the change (header, "S1c after A7a":
+//!   a narrowphase id change re-draws the window; no new allocation site), and
+//!   re-pin to what was measured with the numbers here. Every bound is a value the
+//!   A7a tree measured. The chunk floor went UP (193 -> 205), because the A7a run
+//!   never dropped to 16 chunks a pass. A7b turned the A7a pins red again (release:
+//!   steady MAX 375 > 358, dispatch 375 > 350, chunks 229..=241 outside 205..=217;
+//!   debug: steady MAX 219 > 204, dispatch 218 > 195, scope and chunks 97..=109
+//!   outside 73..=97) and was adjudicated the same way, with the fan-out question
+//!   answered by a counter rather than by the block-mean proxy (header, "S1c after
+//!   A7b"). Every bound is a value the A7b tree measured.
+//! * **Downward** they keep what the long run reached. After A7b that is the
+//!   window's own value, because no step of the 4,352 dispatched fewer than eleven
+//!   colours in release (eight in debug). **So the downward headroom is gone:** the
+//!   release scope floor went 109 -> 133 (it was the A7a long run's nine-colour frames)
+//!   and the debug floor 73 -> 97. Keeping the old floors would be a reach nothing on
+//!   this tree measured, and the pin's rule is the long run's envelope. The cost:
+//!   a pile that settles further, to ten colours or fewer in release, reds downward,
+//!   and that red is a re-measure under this protocol, not an allocation regression.
+//! * **Upward** they keep nothing. The first form of this pin allowed one
+//!   dispatched colour either way, and no upward colour was ever observed in
+//!   4,352 steady steps — while that one-colour allowance was exactly the size
+//!   of a real regression: ONE extra `pool.scope` fan-out per colour pass
+//!   (+12 scope frames and +12 chunks a step, 331.8 -> 355.8, MAX 363) sat
+//!   inside it and stayed GREEN (adjudication, 2026-09-11). The per-frame
+//!   structural assertion cannot see it either: `scope - 1 = 132` is still a
+//!   multiple of the 12 passes, it just reads as eleven colours.
+//! * **The re-pinned gate still reds on that regression. This was measured, not
+//!   argued.** The same mutation on the A7a tree (one `pool.scope` with one spawn
+//!   at the top of `solve_all_colors`, 2026-09-18) moves every window frame by +24:
+//!   histogram 350->39 351->5 362->184 363->27 374->1. It reds four ways: steady
+//!   MAX 374 > 358, dispatch MAX 374 > 350 (217 frames above it), chunks 217..=229
+//!   outside 205..=217 (212 frames at 229), and scope 133..=145 outside 109..=133.
+//!   Only that last line rests on the one eleven-colour frame. On the A7b tree the
+//!   same mutation again moves every window frame by +24 (histogram 386->19
+//!   398->205 399->32) and reds four ways against the A7b pins: steady MAX 399 >
+//!   383, dispatch MAX 399 > 375, scope 145..=145 outside 133..=133 (every frame),
+//!   and chunks 241..=253 outside 229..=241 (2026-09-18, release).
+//! * **Why there is no pin on the NUMBER of frames at the top scope value.** Such a
+//!   pin counts eleven-colour frames inside one deterministic window. That is a
+//!   trajectory pin: every contact change re-draws it, which is the trap
+//!   `G4_MOVER_ID`'s doc in `sleep_settles_box_piles.rs` records. It would also add
+//!   no power, because the regression above already reds through the chunk and
+//!   dispatch pins (on 212 and 217 frames on the A7a tree, on every frame on the
+//!   A7b tree). If a regression that those pins miss is
+//!   ever found, the trajectory-free form is a per-frame assertion
+//!   `scope = 1 + 12 x (dispatched colours)`, with the count READ from a counter
+//!   the solver exports. The objection below is to recomputing that count, not to
+//!   reading it.
+//! * **Why not pin EXACTLY against the dispatched colour count.** The count is
+//!   not observable from outside `boyko_physics/src`: whether a colour is
+//!   dispatched is decided from private constants (`MIN_PARALLEL_SLOTS_PER_COLOR`,
+//!   `MIN_SLOTS_PER_CHUNK`, `CHUNKS_PER_WORKER`) over `CohortColumns`' private
+//!   CSRs (`color_offsets`, `group_start`). Recomputing it here would be a
+//!   replica of the code under test, not an observation of it — the replica
+//!   drifts with the solver and the gate then checks the replica.
+//!
+//! # Coverage boundary — the Rust heap, and only the Rust heap
+//!
+//! The counter is a `#[global_allocator]`, so it sees exactly what passes
+//! through `GlobalAlloc`. The ECS's column storage does not: a `ComponentPool`
+//! (and so every `ScratchColumn`, which is one) reserves its address range with
+//! `VirtualAlloc(MEM_RESERVE)` (`mmap` on Unix) and grows by
+//! `VmReservation::commit` -> `VirtualAlloc(MEM_COMMIT)`
+//! (`boyko_ecs/src/ecs/memory/vm.rs`), and neither call is counted. So every
+//! zero here — "every physics buffer is free", "the event lane is free" —
+//! means **zero heap acquisitions, not zero memory growth**: a column that
+//! committed one more granule every frame would read 0 in this census. Whether
+//! committed memory is flat across the steady window is a separate question
+//! that needs a commit-side counter, and this binary does not answer it.
+//!
+//! # Open
+//!
+//! * **One `OTHER` object is unnamed.** On 2026-09-11 the S0 n=2 window carried
+//!   ONE frame of six acquisitions: 1 scope + 1 chunk + 1 injector block + 3
+//!   `OTHER`, 10 888 bytes, which leaves 5 016 bytes of `OTHER` = two 2304-byte
+//!   epoch `Local`s + 408 bytes. The 408 is not the 30-byte thread-boot object
+//!   the attribution binary names, and 832 fresh Apps in the same shape under
+//!   its layout log never reproduced a two-`OTHER` frame at all. It is inside
+//!   the per-thread allowance (3 of 4) and is not a rate — the attribution
+//!   binary's section F asserts a long run's second half carries none — but
+//!   what it IS remains unmeasured.
+//! * **The `Commands` id leak — FIXED by EM2′, and this census can no longer
+//!   see it.** The leak used to surface here as S2's pinned `realloc` of 2 (the
+//!   free list's `Vec` doubling). The recycled stack now lives on a `VmColumn`,
+//!   which grows by `VirtualAlloc(MEM_COMMIT)` — outside this counter (see
+//!   "Coverage boundary"). So S2's `realloc` pin of 0 would stay GREEN if the
+//!   deferred route stopped recycling again: the growth would move entirely
+//!   into uncounted commits. The gates that DO see that regression count ids,
+//!   not bytes: `boyko_ecs/tests/em_deferred_recycle.rs` (T-RED-1: the free
+//!   list stays <= one frame's despawns, the slot store and its commit frontier
+//!   do not move, and each frame's spawns ARE the previous window's despawns)
+//!   and the attribution binary's C6 (the same two lengths over 2048 frames of
+//!   this churn).
+//!
+//! # How to run
+//!
+//! ```text
+//! cargo test -p boyko-physics --release --test alloc_frame_census -- --nocapture
+//! ```
+//!
+//! The target is `harness = false` (see `Cargo.toml`) and this file's [`main`]
+//! is its whole runner. That is what makes the counter see ONLY the census:
+//! under libtest the test ran on a spawned thread while libtest's main thread
+//! stayed alive beside it, and that thread allocates on its own schedule — its
+//! "has been running for over 60 seconds" notice was measured as 2 `OTHER` in
+//! one frame of a long run. The census takes ~17..24 s in release and ~34 s in
+//! debug today, under the line, but a loaded machine crosses it; with no
+//! harness there is no second thread to allocate, at any duration. `main`
+//! keeps the libtest contract a runner relies on — `running 1 test`, name
+//! filters and `--exact` / `--skip`, `--list`, `--ignored` (runs nothing),
+//! `--nocapture` / `RUST_TEST_NOCAPTURE` (stream the report; otherwise it is
+//! held and printed only on failure or with `--show-output`), and exit code
+//! 101 on failure. Under Miri the binary is built and runs nothing, as the
+//! `#![cfg(not(miri))]` it replaces did.
+//!
+//! Release is the regime the question is about; a debug build carries
+//! `debug_assert!` scratch allocations the shipped frame does not have, and the
+//! scenes are scaled down under `debug_assertions` so a dev-profile sweep still
+//! terminates. The gate is pinned for BOTH profiles (see [`RELEASE`]), so the
+//! workspace's own debug `cargo test --workspace --all-targets --no-fail-fast`
+//! runs it rather than skipping it.
+//!
+//! ⚠ This binary reports **counts, not timings**. It does not need a quiet
+//! machine and no wall-clock number is produced anywhere in it.
+
+// No `#![cfg(not(miri))]`: a `harness = false` target must have a `main` in
+// every configuration, and a crate-level `cfg` would strip it. `main` returns
+// before measuring anything under Miri instead.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::hint::black_box;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::ThreadId;
+use std::time::Duration;
+
+use boyko_ecs::ecs::core::events::event::Event;
+use boyko_ecs::ecs::core::events::event_config::EventConfig;
+use boyko_ecs::ecs::core::events::event_registry::register_event;
+use boyko_ecs::ecs::core::events::parameters::parameters::Parameters;
+use boyko_ecs::ecs::core::events::participants::participants::{ParticipantInfo, Participants};
+use boyko_ecs::ecs::core::iters::query::Changed;
+use boyko_ecs::ecs::core::system::Entities;
+use boyko_ecs::prelude::*;
+use boyko_macros::{Bundle, Component, Resource};
+
+use boyko_physics::components::{
+    Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
+};
+use boyko_physics::math::{Mat3, Quat, Vec3};
+use boyko_physics::plugin::{add_physics_colored_solve, add_physics_systems};
+use boyko_physics::resources::{IslandSleep, Manifolds, PhysicsConfig};
+use boyko_physics::solver::{ColoredSoftStepSolver, SoftStepSolver};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Report output — libtest's capture contract, without libtest
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// `true` streams the report to stdout as it is produced (`--nocapture`, or
+/// `RUST_TEST_NOCAPTURE`); `false` holds it in [`HELD`] and [`main`] prints it
+/// only on failure or with `--show-output` — what libtest's capture did, so a
+/// passing census does not flood a workspace `cargo test`.
+static STREAM: AtomicBool = AtomicBool::new(false);
+/// The held report. [`main`] reserves [`HELD_RESERVE`] bytes before the first
+/// measured window, so appending never grows it during the run; every append
+/// is outside a window regardless (see [`report`]).
+static HELD: Mutex<String> = Mutex::new(String::new());
+/// Larger than the whole report.
+const HELD_RESERVE: usize = 1 << 20;
+
+/// The sink behind [`say!`] and [`say_inline!`].
+fn emit(args: std::fmt::Arguments<'_>, newline: bool) {
+    if STREAM.load(Ordering::Relaxed) {
+        if newline {
+            println!("{args}");
+        } else {
+            print!("{args}");
+        }
+    } else {
+        let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
+        // Writing into a `String` cannot fail.
+        let _ = std::fmt::Write::write_fmt(&mut *held, args);
+        if newline {
+            held.push('\n');
+        }
+    }
+}
+
+/// Prints the held report, if any, and empties it.
+fn dump_held() {
+    // `try_lock`: this also runs from the panic hook, on whatever thread
+    // panicked; a report that cannot be taken there is dumped by `main` later.
+    let mut held = match HELD.try_lock() {
+        Ok(h) => h,
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    if !held.is_empty() {
+        print!("{held}");
+        held.clear();
+    }
+}
+
+/// `println!` for the report — streamed or held, per [`STREAM`].
+macro_rules! say {
+    () => {
+        emit(format_args!(""), true)
+    };
+    ($($arg:tt)*) => {
+        emit(format_args!($($arg)*), true)
+    };
+}
+
+/// `print!` for the report — streamed or held, per [`STREAM`].
+macro_rules! say_inline {
+    ($($arg:tt)*) => {
+        emit(format_args!($($arg)*), false)
+    };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The counting global allocator
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Process-global, always-on counters. Process-global rather than
+/// thread-local **by design**: a frame's allocations are not all made on the
+/// driving thread — a system body runs on a worker, and
+/// [`worker_thread_allocations_are_counted`] pins that this counter sees them.
+/// A thread-local counter — the kind most of the tree's zero-alloc gates use —
+/// is blind to the half of the frame that is not the dispatcher.
+static N_ALLOC: AtomicU64 = AtomicU64::new(0);
+static N_REALLOC: AtomicU64 = AtomicU64::new(0);
+static N_DEALLOC: AtomicU64 = AtomicU64::new(0);
+static B_ALLOC: AtomicU64 = AtomicU64::new(0);
+static B_REALLOC: AtomicU64 = AtomicU64::new(0);
+static B_DEALLOC: AtomicU64 = AtomicU64::new(0);
+
+// ── Layout classes: WHICH object each fresh acquisition is, with no backtrace ──
+//
+// Every fresh acquisition (`alloc` / `alloc_zeroed`; a `realloc` keeps its own
+// axis above) is charged to exactly ONE of four classes, decided from its
+// `Layout` alone. That is what lets the GATE attribute every steady-state frame
+// completely without allocating, without symbolising, and without a
+// diagnostic mode: the classifier is two compares on the allocation path, and
+// the class the engine does NOT produce in steady state — [`C_OTHER`] — is
+// pinned on its own.
+//
+// The predicates are exact for this tree and each one is backed by a site:
+//
+// * [`C_SCOPE`] — `align == 128 && size == 256`. The `Box<ScopeShared>` that
+//   every `pool.install` and every nested `pool.scope` makes
+//   (`boyko_threadpool/src/thread_pool.rs`, `install` and `scope`).
+//   `ScopeShared` is `#[repr(C)]` and leads with a `CachePadded<AtomicUsize>`
+//   (align 128 on x86_64 — the same fact
+//   `boyko_threadpool/tests/block_allocation_receipts.rs` rests its chunk
+//   predicate on), followed by three 8-byte words: 152 bytes, rounded up to the
+//   alignment, 256. So this counter IS the number of scope frames opened. The
+//   SIZE is part of the predicate on purpose: crossbeam-epoch's per-thread
+//   `Local` is over-aligned too (it carries a `CachePadded` epoch) and is
+//   allocated the first time a thread pins — a one-off per thread that must
+//   land in `OTHER`, where it is visible, and not be counted as a scope.
+// * [`C_CHUNK`] — `align == 64 && size.is_power_of_two() && size >= 4096`. A
+//   Stage 3b `ScopeBlock` chunk (`boyko_threadpool/src/block.rs`, `grow`: every
+//   chunk is `(CHUNK0 << e, CHUNK_ALIGN)` with `CHUNK0 = 4096`,
+//   `CHUNK_ALIGN = 64`, `debug_assert`ed at the producer). A scope that spawns
+//   at least one task takes at least one; a scope whose cells overflow 4 KiB
+//   takes an 8 KiB one next, and so on.
+// * [`C_INJ`] — `size == 1520 && align == 8`. A `crossbeam_deque::Injector`
+//   block: a `next` pointer plus `BLOCK_CAP = 63` slots of `{ Task (16 B),
+//   state (8 B) }` = `8 + 63 * 24` (crossbeam-deque 0.8.8, `deque.rs`
+//   `const BLOCK_CAP`). Every scoped push lands in an injector, which takes a
+//   block per 63 pushes and frees it when the head leaves it.
+// * [`C_OTHER`] — everything else. In a steady-state frame of a scene that
+//   neither grows a world nor calls a system that allocates, this is the class
+//   that must be ZERO, and the gate pins it per scene.
+//
+// ⚠ The predicates are an ARGUMENT, not a type fact, so each has a positive
+// control in the gate: a scene that spawns tasks must show `C_CHUNK > 0`, a
+// scene that spawns more than 63 tasks over its window must show `C_INJ > 0`,
+// and every frame must show `C_SCOPE >= 1`. If crossbeam changes its block
+// size or `ScopeShared` loses its padding, the class empties, `C_OTHER` fills,
+// and the gate reds on BOTH — never green from an emptied bucket.
+static C_SCOPE: AtomicU64 = AtomicU64::new(0);
+static C_CHUNK: AtomicU64 = AtomicU64::new(0);
+static C_INJ: AtomicU64 = AtomicU64::new(0);
+static C_OTHER: AtomicU64 = AtomicU64::new(0);
+
+/// `ScopeBlock`'s base chunk size (`block.rs`'s `CHUNK0`), stated as a literal
+/// and cross-checked against the crate's published receipt in
+/// [`class_predicates_match_the_threadpool_receipt`].
+const CHUNK0: usize = 4096;
+/// `ScopeBlock`'s chunk alignment (`block.rs`'s `CHUNK_ALIGN`).
+const CHUNK_ALIGN: usize = 64;
+/// `crossbeam_deque::Injector`'s block size for a 16-byte `Task`.
+const INJECTOR_BLOCK_BYTES: usize = 8 + 63 * 24;
+/// `size_of::<ScopeShared>()` and its alignment (see [`C_SCOPE`]).
+const SCOPE_SHARED_BYTES: usize = 256;
+const SCOPE_SHARED_ALIGN: usize = 128;
+
+/// Charges one fresh acquisition to its class. Two compares and one relaxed
+/// RMW; allocates nothing, so it is safe inside the global allocator.
+#[inline]
+fn classify(layout: Layout) {
+    let (size, align) = (layout.size(), layout.align());
+    let class = if align == SCOPE_SHARED_ALIGN && size == SCOPE_SHARED_BYTES {
+        &C_SCOPE
+    } else if align == CHUNK_ALIGN && size.is_power_of_two() && size >= CHUNK0 {
+        &C_CHUNK
+    } else if size == INJECTOR_BLOCK_BYTES && align == 8 {
+        &C_INJ
+    } else {
+        &C_OTHER
+    };
+    class.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Delegates every request to `System` and records it. `realloc` is counted on
+/// its own axis rather than folded into acquisitions: it is the signature of a
+/// `Vec` growing, which is exactly the shape the arena exists to remove.
+struct CountingAlloc;
+
+// SAFETY: pure delegation to `System` with relaxed counter side effects; every
+// layout / pointer contract is forwarded unchanged, and the counters never
+// allocate (they are `static` atomics), so no re-entrancy is possible.
+unsafe impl GlobalAlloc for CountingAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        N_ALLOC.fetch_add(1, Ordering::Relaxed);
+        B_ALLOC.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        classify(layout);
+        // SAFETY: forwarded verbatim to the system allocator.
+        unsafe { System.alloc(layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        N_ALLOC.fetch_add(1, Ordering::Relaxed);
+        B_ALLOC.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        classify(layout);
+        // SAFETY: forwarded verbatim to the system allocator.
+        unsafe { System.alloc_zeroed(layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        N_REALLOC.fetch_add(1, Ordering::Relaxed);
+        B_REALLOC.fetch_add(new_size as u64, Ordering::Relaxed);
+        // SAFETY: forwarded verbatim to the system allocator.
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        N_DEALLOC.fetch_add(1, Ordering::Relaxed);
+        B_DEALLOC.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        // SAFETY: forwarded verbatim to the system allocator.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static ALLOC: CountingAlloc = CountingAlloc;
+
+/// One reading of the six counters.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct Snap {
+    alloc: u64,
+    realloc: u64,
+    dealloc: u64,
+    alloc_bytes: u64,
+    realloc_bytes: u64,
+    dealloc_bytes: u64,
+    /// Fresh acquisitions by layout class; `scope + chunk + inj + other == alloc`.
+    scope: u64,
+    chunk: u64,
+    inj: u64,
+    other: u64,
+}
+
+impl Snap {
+    /// Reads all six counters.
+    ///
+    /// `SeqCst` on the read side, `Relaxed` on the increment side: the real
+    /// happens-before edge is the pool's own join (a `Schedule::run` returns
+    /// only after every spawned task has completed), so this read is ordered
+    /// after every worker increment that belongs to the window regardless.
+    fn now() -> Self {
+        Snap {
+            alloc: N_ALLOC.load(Ordering::SeqCst),
+            realloc: N_REALLOC.load(Ordering::SeqCst),
+            dealloc: N_DEALLOC.load(Ordering::SeqCst),
+            alloc_bytes: B_ALLOC.load(Ordering::SeqCst),
+            realloc_bytes: B_REALLOC.load(Ordering::SeqCst),
+            dealloc_bytes: B_DEALLOC.load(Ordering::SeqCst),
+            scope: C_SCOPE.load(Ordering::SeqCst),
+            chunk: C_CHUNK.load(Ordering::SeqCst),
+            inj: C_INJ.load(Ordering::SeqCst),
+            other: C_OTHER.load(Ordering::SeqCst),
+        }
+    }
+
+    /// `self - base`, componentwise.
+    fn since(self, base: Snap) -> Snap {
+        Snap {
+            alloc: self.alloc - base.alloc,
+            realloc: self.realloc - base.realloc,
+            dealloc: self.dealloc - base.dealloc,
+            alloc_bytes: self.alloc_bytes - base.alloc_bytes,
+            realloc_bytes: self.realloc_bytes - base.realloc_bytes,
+            dealloc_bytes: self.dealloc_bytes - base.dealloc_bytes,
+            scope: self.scope - base.scope,
+            chunk: self.chunk - base.chunk,
+            inj: self.inj - base.inj,
+            other: self.other - base.other,
+        }
+    }
+
+    /// Total heap ACQUISITIONS: a realloc is an acquisition too.
+    fn acquisitions(self) -> u64 {
+        self.alloc + self.realloc
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Regimes
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Frames given to warm-up before the steady window opens. `K` is measured
+/// inside this budget, never assumed to equal it.
+const WARM_BUDGET: usize = 64;
+/// The steady window. The brief's floor is 200; 256 keeps a power of two.
+const STEADY_FRAMES: usize = 256;
+/// Total driven frames per scene.
+const TOTAL_FRAMES: usize = WARM_BUDGET + STEADY_FRAMES;
+/// The deliberate allocation the in-window liveness probe makes. Large enough
+/// that no scene's own byte traffic can be mistaken for it.
+const PROBE_BYTES: usize = 1 << 20;
+
+/// Drives `step` for [`TOTAL_FRAMES`] frames, recording the six-counter delta
+/// of each one into `out` (which MUST already have the capacity, so the
+/// recording itself never allocates inside the run).
+fn drive<F: FnMut()>(mut step: F, out: &mut Vec<Snap>) {
+    assert!(
+        out.capacity() >= TOTAL_FRAMES,
+        "sample buffer must be pre-sized or the harness allocates inside its own window"
+    );
+    out.clear();
+    for _ in 0..TOTAL_FRAMES {
+        let before = Snap::now();
+        step();
+        out.push(Snap::now().since(before));
+    }
+}
+
+/// Runs two more frames: a plain control, then one that makes a deliberate
+/// [`PROBE_BYTES`] allocation INSIDE the measured window. Asserts the window saw
+/// it — this is what makes every zero above meaningful.
+///
+/// # Why the assertion is on a NESTED snapshot, not on the frame-to-frame delta
+///
+/// The first form of this probe compared `live.alloc` against `control.alloc`
+/// and FAILED on a dev-profile run at `control=15, live=15` — not because the
+/// counter was dead, but because the control frame happened to carry the
+/// periodic +1 injector block, so the frame's own jitter exactly cancelled the
+/// probe. A liveness check that a scene's own noise can cancel is not a
+/// liveness check. The counts are therefore asserted on a snapshot pair taken
+/// AROUND the deliberate allocation, still inside the open window, which no
+/// frame jitter can move; the window TOTAL is separately asserted to contain
+/// the probe's bytes, which is the claim about the window itself.
+fn liveness_probe<F: FnMut()>(label: &str, samples: &[Snap], mut step: F) -> (Snap, Snap) {
+    let a = Snap::now();
+    step();
+    let control = Snap::now().since(a);
+
+    let window_open = Snap::now();
+    step();
+
+    let inner_open = Snap::now();
+    let mut v: Vec<u8> = Vec::with_capacity(PROBE_BYTES);
+    v.resize(PROBE_BYTES, 0xA5);
+    black_box(&v);
+    let sum = v[0] as u64 + v[PROBE_BYTES - 1] as u64;
+    drop(v);
+    let inner = Snap::now().since(inner_open);
+
+    let live = Snap::now().since(window_open);
+
+    assert_eq!(
+        sum,
+        0xA5 * 2,
+        "the probe buffer must actually have been written"
+    );
+    assert!(
+        inner.alloc >= 1,
+        "{label}: ANTI-VACUITY FAILED — the alloc counter did not see a deliberate allocation made inside the measured window (saw {})",
+        inner.alloc
+    );
+    assert!(
+        inner.dealloc >= 1,
+        "{label}: ANTI-VACUITY FAILED — the dealloc counter did not see the probe's free (saw {})",
+        inner.dealloc
+    );
+    assert!(
+        inner.alloc_bytes >= PROBE_BYTES as u64,
+        "{label}: ANTI-VACUITY FAILED — the byte counter did not see {PROBE_BYTES} probe bytes (saw {})",
+        inner.alloc_bytes
+    );
+    // And the FRAME TOTAL really accumulated it. The floor is the steady
+    // window's own MINIMUM frame, not the adjacent control frame: an earlier
+    // form compared against the control and failed on a release run at
+    // `control=5584, live=1052640` — the control frame had caught the churn
+    // scene's occasional 262 KB spike, so the scene's own jitter, not a dead
+    // counter, decided the assertion. A floor taken from the measured minimum
+    // cannot be moved by that jitter, and the claim survives: a frame carrying
+    // the probe must cost at least the cheapest frame plus the probe.
+    let steady_min_bytes =
+        Stat::of(&samples[WARM_BUDGET..], |s| s.alloc_bytes + s.realloc_bytes).min;
+    assert!(
+        live.alloc_bytes + live.realloc_bytes >= steady_min_bytes + PROBE_BYTES as u64,
+        "{label}: ANTI-VACUITY FAILED — the WINDOW total did not grow by the probe's {PROBE_BYTES} bytes (steady min={steady_min_bytes}, live={})",
+        live.alloc_bytes + live.realloc_bytes
+    );
+    (control, live)
+}
+
+/// The per-counter summary of one window.
+struct Stat {
+    min: u64,
+    max: u64,
+    sum: u64,
+    n: usize,
+}
+
+impl Stat {
+    fn of(samples: &[Snap], pick: fn(&Snap) -> u64) -> Self {
+        let mut min = u64::MAX;
+        let mut max = 0u64;
+        let mut sum = 0u64;
+        for s in samples {
+            let v = pick(s);
+            min = min.min(v);
+            max = max.max(v);
+            sum += v;
+        }
+        Stat {
+            min,
+            max,
+            sum,
+            n: samples.len(),
+        }
+    }
+    fn mean(&self) -> f64 {
+        self.sum as f64 / self.n as f64
+    }
+}
+
+/// `K` — where warm-up ends, DERIVED: one past the last frame in the whole run
+/// whose acquisition count exceeded the steady window's own maximum. If nothing
+/// in the run exceeds it, `K = 0` (the scene was born steady).
+fn settle_index(samples: &[Snap], steady_max: u64) -> usize {
+    let mut k = 0usize;
+    for (i, s) in samples.iter().enumerate() {
+        if s.acquisitions() > steady_max {
+            k = i + 1;
+        }
+    }
+    k
+}
+
+/// A frequency table over the steady window's acquisition counts. No `HashMap`
+/// (workspace-banned); a sorted `Vec` of pairs is the whole structure.
+fn histogram(samples: &[Snap]) -> Vec<(u64, usize)> {
+    let mut h: Vec<(u64, usize)> = Vec::with_capacity(16);
+    for s in samples {
+        let v = s.acquisitions();
+        match h.iter_mut().find(|(k, _)| *k == v) {
+            Some((_, c)) => *c += 1,
+            None => h.push((v, 1)),
+        }
+    }
+    h.sort_unstable_by_key(|(k, _)| *k);
+    h
+}
+
+/// One line of the closing summary table.
+struct Row {
+    label: String,
+    k: usize,
+    mean: f64,
+    min: u64,
+    max: u64,
+    realloc_max: u64,
+    bytes_mean: f64,
+    setup_alloc: u64,
+    /// Per-frame MAX of every acquisition that is NOT in the `OTHER` class —
+    /// the dispatch objects plus `realloc`s.
+    dispatch_max: u64,
+    /// `realloc`s over the whole steady window.
+    realloc_sum: u64,
+    /// Per-class steady-state figures: `(mean, min, max, sum)`.
+    scope: (f64, u64, u64, u64),
+    chunk: (f64, u64, u64, u64),
+    inj: (f64, u64, u64, u64),
+    other: (f64, u64, u64, u64),
+}
+
+/// Prints the three-regime report and returns its summary row. Every `say!`
+/// here is OUTSIDE every measured window (formatting allocates).
+fn report(
+    label: &str,
+    note: &str,
+    setup: Snap,
+    samples: &[Snap],
+    control: Snap,
+    live: Snap,
+) -> Row {
+    let steady = &samples[WARM_BUDGET..];
+    let acq = Stat::of(steady, |s| s.acquisitions());
+    let alloc = Stat::of(steady, |s| s.alloc);
+    let realloc = Stat::of(steady, |s| s.realloc);
+    let dealloc = Stat::of(steady, |s| s.dealloc);
+    let bytes = Stat::of(steady, |s| s.alloc_bytes + s.realloc_bytes);
+    let c_scope = Stat::of(steady, |s| s.scope);
+    let c_chunk = Stat::of(steady, |s| s.chunk);
+    let c_inj = Stat::of(steady, |s| s.inj);
+    let c_other = Stat::of(steady, |s| s.other);
+    let dispatch = Stat::of(steady, |s| s.acquisitions() - s.other);
+    let k = settle_index(samples, acq.max);
+
+    say!("\n╔══════════════════════════════════════════════════════════════════════");
+    say!("║ {label}");
+    say!("║ {note}");
+    say!("╠══ SETUP (world build + spawn + first run; expected, not asserted) ═══");
+    say!(
+        "║   alloc={:<8} realloc={:<6} dealloc={:<8} bytes_acquired={}",
+        setup.alloc,
+        setup.realloc,
+        setup.dealloc,
+        setup.alloc_bytes + setup.realloc_bytes
+    );
+    say!("╠══ WARM-UP (K derived, not assumed) ══════════════════════════════════");
+    say!("║   K = {k}   (last frame above the steady max, +1; budget was {WARM_BUDGET})");
+    let show = k.clamp(8, 24);
+    say_inline!("║   acquisitions/frame, frames 0..{show}: ");
+    for s in &samples[..show] {
+        say_inline!("{} ", s.acquisitions());
+    }
+    say!();
+    if k > 0 {
+        let pre = Stat::of(&samples[..k], |s| s.acquisitions());
+        say!(
+            "║   warm-up total = {} acquisitions over {k} frame(s), peak {}",
+            pre.sum, pre.max
+        );
+        // WHAT the warm-up frames above the steady max were, by class — so a
+        // late K is attributable instead of merely reported.
+        let mut over = Snap::default();
+        let mut n_over = 0usize;
+        for s in samples[..k].iter().filter(|s| s.acquisitions() > acq.max) {
+            over.alloc += s.alloc;
+            over.realloc += s.realloc;
+            over.scope += s.scope;
+            over.chunk += s.chunk;
+            over.inj += s.inj;
+            over.other += s.other;
+            n_over += 1;
+        }
+        say!(
+            "║   the {n_over} warm-up frame(s) above the steady max, by class: scope={} chunk={}              injector={} OTHER={} realloc={}",
+            over.scope, over.chunk, over.inj, over.other, over.realloc
+        );
+    }
+    // ⚠ There USED to be an assertion here, `K <= WARM_BUDGET`, and it could not
+    // fail. `K` is one past the last frame ABOVE THE STEADY MAX, and no frame of
+    // the steady window is above its own max, so `K <= WARM_BUDGET` holds by
+    // construction for every input — a guard that was green from its own
+    // definition (found 2026-09-10 while porting the harness to the KE16 tree).
+    // `K` is reported, never asserted. What guards the steady window instead is
+    // what a contaminated window would actually move: the per-frame CLASS pins in
+    // the gate below (a scope or chunk count off its structural value on any one
+    // frame), the drift line above, and the per-scene MAX.
+    say!(
+        "╠══ STEADY STATE (n = {}) ══════════════════════════════════════════════",
+        acq.n
+    );
+    say!(
+        "║   acquisitions  mean={:>9.3}  min={:<6} MAX={:<6}",
+        acq.mean(),
+        acq.min,
+        acq.max
+    );
+    say!(
+        "║     · alloc     mean={:>9.3}  min={:<6} MAX={:<6}",
+        alloc.mean(),
+        alloc.min,
+        alloc.max
+    );
+    say!(
+        "║     · realloc   mean={:>9.3}  min={:<6} MAX={:<6}   <- Vec growth",
+        realloc.mean(),
+        realloc.min,
+        realloc.max
+    );
+    say!(
+        "║   deallocations mean={:>9.3}  min={:<6} MAX={:<6}",
+        dealloc.mean(),
+        dealloc.min,
+        dealloc.max
+    );
+    say!(
+        "║   bytes acquired mean={:>8.1}  min={:<8} MAX={:<8}",
+        bytes.mean(),
+        bytes.min,
+        bytes.max
+    );
+    say_inline!("║   histogram (acquisitions -> frames): ");
+    for (v, c) in histogram(steady) {
+        say_inline!("{v}->{c}  ");
+    }
+    say!();
+    say!(
+        "║   BY CLASS (mean / min / MAX per frame):  scope {:.3}/{}/{}   chunk {:.3}/{}/{}            injector {:.3}/{}/{}   OTHER {:.3}/{}/{}",
+        c_scope.mean(),
+        c_scope.min,
+        c_scope.max,
+        c_chunk.mean(),
+        c_chunk.min,
+        c_chunk.max,
+        c_inj.mean(),
+        c_inj.min,
+        c_inj.max,
+        c_other.mean(),
+        c_other.min,
+        c_other.max
+    );
+    // A trend inside the window is the other way a steady window can be
+    // contaminated, and `K` cannot see it: halves are compared, never asserted
+    // here (the pinned MAX is the assertion).
+    let half = steady.len() / 2;
+    let h1 = Stat::of(&steady[..half], |s| s.acquisitions());
+    let h2 = Stat::of(&steady[half..], |s| s.acquisitions());
+    say!(
+        "║   drift: first half mean {:.3} max {}  |  second half mean {:.3} max {}",
+        h1.mean(),
+        h1.max,
+        h2.mean(),
+        h2.max
+    );
+    say!("╠══ ANTI-VACUITY: counter live INSIDE this scene's window ═════════════");
+    say!(
+        "║   control frame: alloc={} bytes={}   |   probe frame: alloc={} bytes={} (+{} MiB)",
+        control.alloc,
+        control.alloc_bytes,
+        live.alloc,
+        live.alloc_bytes,
+        PROBE_BYTES >> 20
+    );
+    say!("╚══════════════════════════════════════════════════════════════════════");
+
+    Row {
+        label: label.to_string(),
+        k,
+        mean: acq.mean(),
+        min: acq.min,
+        max: acq.max,
+        realloc_max: realloc.max,
+        bytes_mean: bytes.mean(),
+        setup_alloc: setup.alloc + setup.realloc,
+        dispatch_max: dispatch.max,
+        realloc_sum: realloc.sum,
+        scope: (c_scope.mean(), c_scope.min, c_scope.max, c_scope.sum),
+        chunk: (c_chunk.mean(), c_chunk.min, c_chunk.max, c_chunk.sum),
+        inj: (c_inj.mean(), c_inj.min, c_inj.max, c_inj.sum),
+        other: (c_other.mean(), c_other.min, c_other.max, c_other.sum),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Shared fixtures
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Payload row. 4096 of them, so `par_iter` is above
+/// `MIN_ARCHETYPE_FOR_PARALLEL` (1024) and actually fans out.
+#[derive(Component, Clone, Copy)]
+#[repr(C)]
+struct Payload {
+    v: u32,
+}
+
+#[derive(Bundle)]
+struct PayloadBundle {
+    p: Payload,
+}
+
+/// The churn marker: carries the generation it was spawned in, so ONE system
+/// can despawn the previous generation and spawn the next without needing an
+/// ordering edge between two systems.
+#[derive(Component, Clone, Copy)]
+#[repr(C)]
+struct Doomed {
+    wave: u32,
+}
+
+#[derive(Bundle)]
+struct DoomedBundle {
+    d: Doomed,
+}
+
+#[derive(Resource, Default)]
+struct Churn {
+    generation: u32,
+    spawned: u64,
+    despawned: u64,
+}
+
+#[derive(Resource, Default)]
+struct EventTally {
+    sent: u64,
+    received: u64,
+    changed_matches: u64,
+}
+
+/// Rows seeded into the payload archetype.
+const ROWS: usize = 4096;
+/// Entities spawned AND despawned every churn frame.
+const CHURN_PER_FRAME: usize = 64;
+/// Events sent every frame in S3.
+const EVENTS_PER_FRAME: u32 = 32;
+
+fn pool(workers: usize) -> Arc<ThreadPool> {
+    ThreadPoolBuilder::new().num_threads(workers).build()
+}
+
+fn seed_payload(world: &mut EcsMaster, rows: usize) {
+    world
+        .spawn_batch((0..rows as u32).map(|v| PayloadBundle { p: Payload { v } }))
+        .expect("seed payload rows");
+}
+
+// ── S0 probe systems: sixteen DISTINCT fn items ─────────────────────────────
+//
+// Distinct `fn` items, not an array of fn pointers: every element of such an
+// array has the SAME type, and a schedule that keyed systems by type would
+// silently collapse sixteen registrations into one — a vacuous measurement
+// that reads as a low number. Each one bumps its own counter so the scene can
+// PROVE that exactly `n` systems ran exactly once per frame.
+static PROBE_HITS: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+static FIXED_HITS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+macro_rules! probe_systems {
+    ($($idx:literal => $name:ident),* $(,)?) => {
+        $(
+            fn $name(q: Query<&Payload>) {
+                PROBE_HITS[$idx].fetch_add(1, Ordering::Relaxed);
+                black_box(q.iter().count());
+            }
+        )*
+    };
+}
+probe_systems!(
+    0 => probe0, 1 => probe1, 2 => probe2, 3 => probe3,
+    4 => probe4, 5 => probe5, 6 => probe6, 7 => probe7,
+    8 => probe8, 9 => probe9, 10 => probe10, 11 => probe11,
+    12 => probe12, 13 => probe13, 14 => probe14, 15 => probe15,
+);
+
+macro_rules! fixed_systems {
+    ($($idx:literal => $name:ident),* $(,)?) => {
+        $(
+            fn $name(q: Query<&Payload>) {
+                FIXED_HITS[$idx].fetch_add(1, Ordering::Relaxed);
+                black_box(q.iter().count());
+            }
+        )*
+    };
+}
+fixed_systems!(0 => fixed0, 1 => fixed1, 2 => fixed2, 3 => fixed3);
+
+/// Registers exactly `n` of the sixteen probe systems.
+macro_rules! add_probes {
+    ($b:expr, $n:expr) => {{
+        let n = $n;
+        if n > 0 {
+            $b.add_system(probe0);
+        }
+        if n > 1 {
+            $b.add_system(probe1);
+        }
+        if n > 2 {
+            $b.add_system(probe2);
+        }
+        if n > 3 {
+            $b.add_system(probe3);
+        }
+        if n > 4 {
+            $b.add_system(probe4);
+        }
+        if n > 5 {
+            $b.add_system(probe5);
+        }
+        if n > 6 {
+            $b.add_system(probe6);
+        }
+        if n > 7 {
+            $b.add_system(probe7);
+        }
+        if n > 8 {
+            $b.add_system(probe8);
+        }
+        if n > 9 {
+            $b.add_system(probe9);
+        }
+        if n > 10 {
+            $b.add_system(probe10);
+        }
+        if n > 11 {
+            $b.add_system(probe11);
+        }
+        if n > 12 {
+            $b.add_system(probe12);
+        }
+        if n > 13 {
+            $b.add_system(probe13);
+        }
+        if n > 14 {
+            $b.add_system(probe14);
+        }
+        if n > 15 {
+            $b.add_system(probe15);
+        }
+    }};
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Anti-vacuity 1a — the counter itself
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The layout classes are the objects they claim to be: pinned to the
+/// threadpool's own published receipt, then POSITIVELY controlled by pricing the
+/// two dispatch primitives directly, with no ECS in the way.
+///
+/// This is what stops a class from coming back green from an emptied bucket. If
+/// `ScopeShared` changes size, if the chunk constants move, or if an `install`
+/// frame starts allocating something new, one of the exact equalities below
+/// reds here, before any scene prints a number.
+fn class_predicates_match_the_threadpool_receipt() {
+    assert_eq!(CHUNK0, boyko_threadpool::__layout_receipt::CHUNK0);
+    assert_eq!(CHUNK_ALIGN, boyko_threadpool::__layout_receipt::CHUNK_ALIGN);
+
+    const WORKERS: u64 = 2;
+    const REPS: usize = 64;
+    let p = pool(WORKERS as usize);
+    // Warm the pool: the first frames on fresh threads carry one-off lazy
+    // registrations (see the `OTHER` note in the gate) that are not the claim.
+    // Several spawns per install so every lane gets work to steal.
+    for _ in 0..400 {
+        p.install(|s| {
+            for _ in 0..4 * WORKERS {
+                s.spawn(|| black_box(()));
+            }
+        });
+    }
+
+    // ⚠ The first form of this control priced ONE frame of each primitive and
+    // demanded `OTHER == 0` on it, after 64 single-spawn warm-up installs. It
+    // red on a release run on 2026-09-11 at `(scope, chunk, OTHER) = (1, 1, 1)`:
+    // a worker's crossbeam-epoch `Local` — its first steal — landed on the
+    // priced frame. The attribution binary's section G shows that is the
+    // COMMON case, not a fluke: on fresh 2-worker Apps most first steals land
+    // past frame 64. A single-frame exact-zero on a fresh pool is a coin toss,
+    // so the control now prices `REPS` frames of each primitive, holds scope,
+    // chunk and realloc EXACT on every frame, and bounds `OTHER` over both
+    // windows by one first touch per pool thread — a primitive that allocated
+    // on every call would show `REPS` of them, not two.
+    let mut empty_other = 0u64;
+    let mut one_other = 0u64;
+    let mut one_inj = 0u64;
+    for i in 0..REPS {
+        let before = Snap::now();
+        p.install(|_| ());
+        let empty = Snap::now().since(before);
+        assert_eq!(
+            (empty.scope, empty.chunk, empty.inj, empty.realloc),
+            (1, 0, 0, 0),
+            "rep {i}: an EMPTY `pool.install` must be exactly one `Box<ScopeShared>` — the \
+             scope class predicate (align {SCOPE_SHARED_ALIGN}, size {SCOPE_SHARED_BYTES}) no \
+             longer matches it, or the install frame has started allocating a dispatch object"
+        );
+        empty_other += empty.other;
+
+        let before = Snap::now();
+        p.install(|s| s.spawn(|| black_box(())));
+        let one = Snap::now().since(before);
+        assert_eq!(
+            (one.scope, one.chunk, one.realloc),
+            (1, 1, 0),
+            "rep {i}: an install frame with ONE spawn must be one `ScopeShared` plus one \
+             {CHUNK0}-byte `ScopeBlock` chunk — the chunk class predicate no longer matches the \
+             Stage 3b block"
+        );
+        one_other += one.other;
+        one_inj += one.inj;
+    }
+    say!(
+        "\n[class control] {REPS} empty installs: scope=1 chunk=0 on every frame, OTHER total {empty_other} \
+         | {REPS} installs + 1 spawn: scope=1 chunk=1 on every frame, injector total {one_inj}, \
+         OTHER total {one_other}"
+    );
+    assert!(
+        empty_other + one_other <= WORKERS,
+        "{} OTHER acquisitions over {} priced install frames on a warmed {WORKERS}-thread pool — \
+         more than one first touch per thread, so an install frame is allocating something that \
+         is neither a scope frame nor a chunk",
+        empty_other + one_other,
+        2 * REPS
+    );
+}
+
+/// All four counters move. Runs FIRST (alphabetically it does not, but it is
+/// asserted again from inside every scene, so ordering is irrelevant).
+fn counter_is_live() {
+    let before = Snap::now();
+    let mut v: Vec<u8> = Vec::with_capacity(64);
+    v.resize(64, 7);
+    // `Vec::reserve` on a non-empty allocation routes through `Global::grow`,
+    // which is `realloc` — this is what pins the realloc axis as live.
+    v.reserve(1 << 16);
+    black_box(&v);
+    let len = v.len();
+    drop(v);
+    let d = Snap::now().since(before);
+
+    assert_eq!(len, 64);
+    assert!(d.alloc >= 1, "alloc counter is dead (saw {})", d.alloc);
+    assert!(
+        d.realloc >= 1,
+        "realloc counter is dead — a Vec grew and the realloc axis did not move (saw {})",
+        d.realloc
+    );
+    assert!(
+        d.dealloc >= 1,
+        "dealloc counter is dead (saw {})",
+        d.dealloc
+    );
+    assert!(
+        d.alloc_bytes >= 64,
+        "alloc byte counter is dead (saw {})",
+        d.alloc_bytes
+    );
+    assert!(
+        d.realloc_bytes >= 1 << 16,
+        "realloc byte counter is dead (saw {})",
+        d.realloc_bytes
+    );
+    say!(
+        "\n[anti-vacuity] counter is live: alloc={} realloc={} dealloc={} \
+         alloc_bytes={} realloc_bytes={}",
+        d.alloc, d.realloc, d.dealloc, d.alloc_bytes, d.realloc_bytes
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Anti-vacuity 1b — the counter is PROCESS-GLOBAL, not dispatcher-local
+// ═══════════════════════════════════════════════════════════════════════════
+
+static WORKER_ALLOC_RAN_OFF_THREAD: AtomicBool = AtomicBool::new(false);
+
+/// A system body that allocates on a WORKER thread is counted. This is the
+/// property the tree's thread-local gates do not have, and it is why
+/// the census can claim to cover the whole frame rather than the dispatcher's
+/// half of it.
+fn worker_thread_allocations_are_counted() {
+    let main_id: ThreadId = std::thread::current().id();
+    let mut app = App::with_pool(pool(2));
+    seed_payload(app.world_mut(), 64);
+    app.add_systems(move |q: Query<&Payload>| {
+        if std::thread::current().id() != main_id {
+            WORKER_ALLOC_RAN_OFF_THREAD.store(true, Ordering::Relaxed);
+        }
+        let mut v: Vec<u8> = Vec::with_capacity(PROBE_BYTES);
+        v.resize(PROBE_BYTES, 1);
+        black_box(&v);
+        black_box(q.iter().count());
+    });
+    app.finish();
+    app.update_with_delta(Duration::from_millis(16));
+
+    let mut seen = 0u64;
+    let mut seen_bytes = 0u64;
+    for _ in 0..8 {
+        let before = Snap::now();
+        app.update_with_delta(Duration::from_millis(16));
+        let d = Snap::now().since(before);
+        seen += d.alloc;
+        seen_bytes += d.alloc_bytes;
+    }
+
+    assert!(
+        WORKER_ALLOC_RAN_OFF_THREAD.load(Ordering::Relaxed),
+        "the system body never ran off the driving thread — this probe cannot make its claim"
+    );
+    assert!(
+        seen >= 8,
+        "the counter missed worker-thread allocations (saw {seen} over 8 frames)"
+    );
+    assert!(
+        seen_bytes >= 8 * PROBE_BYTES as u64,
+        "the counter missed worker-thread BYTES (saw {seen_bytes})"
+    );
+    say!(
+        "\n[anti-vacuity] worker-thread allocations ARE counted: {seen} allocs / \
+         {} MiB over 8 frames, system body confirmed off-thread",
+        seen_bytes >> 20
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// S0 — the executor floor: what an App frame costs before any game logic
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Prices `App::update_with_delta` against the number of concurrent systems in
+/// Main. This is the term the tree's other frame-driving gates SUBTRACT.
+fn s0_executor_floor_per_system(rows: &mut Vec<Row>) {
+    const WORKERS: usize = 2;
+    let mut samples: Vec<Snap> = Vec::with_capacity(TOTAL_FRAMES);
+
+    for n in [0usize, 1, 2, 4, 8, 16] {
+        for h in PROBE_HITS.iter() {
+            h.store(0, Ordering::Relaxed);
+        }
+
+        let setup_before = Snap::now();
+        let mut app = App::with_pool(pool(WORKERS));
+        seed_payload(app.world_mut(), ROWS);
+        app.add_systems_cfg(|b| add_probes!(b, n));
+        app.finish();
+        app.update_with_delta(Duration::from_millis(16));
+        let setup = Snap::now().since(setup_before);
+
+        drive(
+            || app.update_with_delta(Duration::from_millis(16)),
+            &mut samples,
+        );
+        let (control, live) = liveness_probe("S0", &samples, || {
+            app.update_with_delta(Duration::from_millis(16))
+        });
+
+        // ── Anti-vacuity: exactly `n` systems ran, exactly once per frame ──
+        // (TOTAL_FRAMES driven + 1 setup frame + 2 probe frames.)
+        let expected = (TOTAL_FRAMES + 3) as u64;
+        for (i, h) in PROBE_HITS.iter().enumerate() {
+            let hits = h.load(Ordering::Relaxed);
+            if i < n {
+                assert_eq!(
+                    hits, expected,
+                    "S0/n={n}: probe{i} ran {hits} times, expected {expected} — the \
+                     schedule did not run every registered system exactly once per frame"
+                );
+            } else {
+                assert_eq!(hits, 0, "S0/n={n}: probe{i} ran but was never registered");
+            }
+        }
+
+        rows.push(report(
+            &format!("S0 — executor floor: App frame, {n} concurrent system(s) in Main"),
+            &format!(
+                "{WORKERS} workers, {ROWS} rows, no Fixed schedule. Frame = \
+                 fold + Time + check-ticks + update_events + Main Schedule::run."
+            ),
+            setup,
+            &samples,
+            control,
+            live,
+        ));
+    }
+}
+
+/// The same floor with a Fixed schedule attached, driven at exactly one
+/// substep per frame — the shape a real game has.
+fn s0b_executor_floor_with_fixed_substep(rows: &mut Vec<Row>) {
+    const WORKERS: usize = 2;
+    /// Exactly one 64 Hz step.
+    const STEP: Duration = Duration::from_nanos(15_625_000);
+    let mut samples: Vec<Snap> = Vec::with_capacity(TOTAL_FRAMES);
+
+    for h in PROBE_HITS.iter() {
+        h.store(0, Ordering::Relaxed);
+    }
+    for h in FIXED_HITS.iter() {
+        h.store(0, Ordering::Relaxed);
+    }
+
+    let setup_before = Snap::now();
+    let mut app = App::with_pool(pool(WORKERS));
+    seed_payload(app.world_mut(), ROWS);
+    app.add_systems_cfg(|b| add_probes!(b, 4usize));
+    app.add_systems_cfg_in(CoreSchedule::Fixed, |b| {
+        b.add_system(fixed0);
+        b.add_system(fixed1);
+        b.add_system(fixed2);
+        b.add_system(fixed3);
+    });
+    app.set_fixed_hz(64.0);
+    app.finish();
+    app.update_with_delta(STEP);
+    let setup = Snap::now().since(setup_before);
+
+    drive(|| app.update_with_delta(STEP), &mut samples);
+    let (control, live) = liveness_probe("S0b", &samples, || app.update_with_delta(STEP));
+
+    let expected = (TOTAL_FRAMES + 3) as u64;
+    for (i, h) in PROBE_HITS.iter().enumerate().take(4) {
+        assert_eq!(
+            h.load(Ordering::Relaxed),
+            expected,
+            "S0b: Main probe{i} did not run once per frame"
+        );
+    }
+    let fixed_hits = FIXED_HITS[0].load(Ordering::Relaxed);
+    assert!(
+        fixed_hits >= expected - 2 && fixed_hits <= expected + 2,
+        "S0b: the Fixed schedule ran {fixed_hits} substeps over {expected} frames — the \
+         scene is not the one-substep-per-frame shape it claims to be"
+    );
+
+    rows.push(report(
+        "S0b — executor floor: App frame, 4 Main + 4 Fixed systems, 1 substep/frame",
+        &format!("{WORKERS} workers, {ROWS} rows, 64 Hz fixed step, delta = exactly one step."),
+        setup,
+        &samples,
+        control,
+        live,
+    ));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// S1 — the rigid-body pile (Jolt-parity pyramid) through the real physics
+//      Schedule. Its "frame" is one FIXED STEP: physics is registered on a
+//      builder that needs `&mut EcsMaster` alongside it, which `App` does not
+//      expose, so the schedule is driven directly — exactly as the shipped
+//      bench and every physics acceptance suite drive it. The App funnel
+//      around it is priced by S0/S0b.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const BOX_SIZE: f32 = 2.0;
+const BOX_SEPARATION: f32 = 0.5;
+const HALF_BOX: f32 = 0.5 * BOX_SIZE;
+const FLOOR_HALF_EXTENTS: Vec3 = Vec3::new(50.0, 1.0, 50.0);
+const DT: f32 = 1.0 / 60.0;
+
+/// Jolt's `cPyramidHeight`. Scaled down in a debug build, where the shipped
+/// scene would not terminate in a reasonable sweep.
+const fn pyramid_height() -> i32 {
+    if cfg!(debug_assertions) { 10 } else { 15 }
+}
+
+fn spawn_body(
+    world: &mut EcsMaster,
+    body: RigidBody,
+    mass: RigidBodyMass,
+    collider: Collider,
+    simulated: bool,
+) -> Entity {
+    fn as_bytes<T>(value: &T) -> &[u8] {
+        // SAFETY: `T` is a `#[repr(C)]` POD physics component with no padding
+        // invariants of its own; the slice is exactly `size_of::<T>()` bytes
+        // read from a live `&T` and cannot outlive that borrow.
+        unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>()) }
+    }
+    let archetype = world.bundle_archetype_id_for::<RigidBodyBundle>();
+    let e = world
+        .create_entity(
+            archetype,
+            &[
+                (RigidBody::component_id(), as_bytes(&body)),
+                (RigidBodyMass::component_id(), as_bytes(&mass)),
+                (Collider::component_id(), as_bytes(&collider)),
+            ],
+        )
+        .expect("invariant: RigidBodyBundle archetype accepts the three columns");
+    if simulated {
+        world.enable::<Simulated>(e);
+    }
+    e
+}
+
+/// Builds Jolt's pyramid, index for index. Returns every dynamic body's handle.
+fn spawn_jolt_pyramid(world: &mut EcsMaster) -> Vec<Entity> {
+    spawn_body(
+        world,
+        RigidBody {
+            position: Vec3::new(0.0, -1.0, 0.0),
+            linear_velocity: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+        },
+        RigidBodyMass {
+            inv_inertia: Mat3::ZERO,
+            inv_mass: 0.0,
+            restitution: 0.0,
+            friction: 0.5,
+        },
+        Collider {
+            shape: ColliderShape::Box {
+                half_extents: FLOOR_HALF_EXTENTS,
+            },
+            layer: 1,
+            mask: 1,
+        },
+        false,
+    );
+
+    let height = pyramid_height();
+    let mut out = Vec::with_capacity(1400);
+    for i in 0..height {
+        let lo = i / 2;
+        let hi = height - (i + 1) / 2;
+        for j in lo..hi {
+            for k in lo..hi {
+                let odd = if i & 1 != 0 { HALF_BOX } else { 0.0 };
+                let position = Vec3::new(
+                    -(height as f32) + BOX_SIZE * j as f32 + odd,
+                    1.0 + (BOX_SIZE + BOX_SEPARATION) * i as f32,
+                    -(height as f32) + BOX_SIZE * k as f32 + odd,
+                );
+                out.push(spawn_body(
+                    world,
+                    RigidBody {
+                        position,
+                        linear_velocity: Vec3::ZERO,
+                        rotation: Quat::IDENTITY,
+                        angular_velocity: Vec3::ZERO,
+                    },
+                    RigidBodyMass {
+                        inv_inertia: Mat3::from_diagonal(Vec3::new(0.1875, 0.1875, 0.1875)),
+                        inv_mass: 0.125,
+                        restitution: 0.0,
+                        friction: 0.5,
+                    },
+                    Collider {
+                        shape: ColliderShape::Box {
+                            half_extents: Vec3::new(HALF_BOX, HALF_BOX, HALF_BOX),
+                        },
+                        layer: 1,
+                        mask: 1,
+                    },
+                    true,
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// One arm of S1. `sleeping` sets `PhysicsConfig::sleeping` (the colored solve's island
+/// sleep, `IslandSleep`); a sleeping arm must also see a frozen row on some steady frame.
+/// `reuse_off` overrides `PhysicsConfig::contact_reuse` to `false`; every other arm
+/// inherits the default (on since L9 C4). `speculative_zero` overrides
+/// `PhysicsConfig::speculative_distance` and `speculative_velocity_cap` to `0` (V2's overlap-only
+/// rule); every other arm inherits the default.
+#[allow(clippy::too_many_arguments)]
+fn run_pyramid_arm(
+    rows: &mut Vec<Row>,
+    label: &str,
+    colored: bool,
+    workers: usize,
+    parallel: bool,
+    sleeping: bool,
+    reuse_off: bool,
+    speculative_zero: bool,
+) {
+    let mut samples: Vec<Snap> = Vec::with_capacity(TOTAL_FRAMES);
+
+    let setup_before = Snap::now();
+    let mut world = EcsMaster::new();
+    let bodies = spawn_jolt_pyramid(&mut world);
+    let mut builder = ScheduleBuilder::new(pool(workers));
+    if colored {
+        let _ = add_physics_colored_solve(&mut builder, &mut world);
+    } else {
+        let _ = add_physics_systems::<SoftStepSolver>(&mut builder, &mut world);
+    }
+    world.insert_resource(FixedTime::new(Duration::from_secs_f32(DT)));
+    {
+        let cfg = world.resource_mut::<PhysicsConfig>();
+        cfg.gravity = Vec3::new(0.0, -9.81, 0.0);
+        cfg.dt = DT;
+        cfg.parallel_solve = parallel;
+        cfg.parallel_broadphase = parallel;
+        // Since L5 C4 the default is ON; the serial arm (S1b) overrides it so that it
+        // stays the control, and the parallel arm carries the dispatch it prices.
+        cfg.parallel_narrowphase = parallel;
+        cfg.sleeping = sleeping;
+        if reuse_off {
+            cfg.contact_reuse = false;
+        }
+        if speculative_zero {
+            cfg.speculative_distance = 0.0;
+            cfg.speculative_velocity_cap = 0.0;
+        }
+    }
+    let mut schedule = builder.build(&mut world);
+
+    // Scene-side invariant, part 1: where the pile starts.
+    let stride = bodies.len() / 8 + 1;
+    let mut sample_ids: Vec<Entity> = Vec::with_capacity(16);
+    let mut idx = 0usize;
+    while idx < bodies.len() {
+        sample_ids.push(bodies[idx]);
+        idx += stride;
+    }
+    // `Vec<Entity>::iter()` resolves to the prelude's
+    // `RelationshipSourceCollection::iter` (a trait method on the receiver beats an
+    // autoderef to the slice), so it yields `Entity` BY VALUE, not `&Entity`.
+    let start: Vec<Vec3> = sample_ids
+        .iter()
+        .map(|e| {
+            world
+                .get_component::<RigidBody>(e)
+                .expect("body lives")
+                .position
+        })
+        .collect();
+
+    schedule.run(&mut world);
+    let setup = Snap::now().since(setup_before);
+
+    // The narrowphase's own dispatch counter, read after every driven frame so the
+    // structural claim below can subtract the scope its dispatch opens. Pre-sized
+    // for every frame `drive` and `liveness_probe` run, so the push never allocates
+    // inside a window; the resource read allocates nothing either (S1b's exact 1 / 1
+    // pin would see it).
+    let np_after_setup = world.resource::<Manifolds>().narrowphase_dispatches();
+    let mut np_log: Vec<u64> = Vec::with_capacity(TOTAL_FRAMES + 2);
+    // SR's own count of steps whose solve ran as one solve region, logged the same way and for
+    // the same reason (0 on the reference pipeline, which has no colored solver).
+    let region_of = |world: &EcsMaster| {
+        world.try_resource::<ColoredSoftStepSolver>().map_or(0, ColoredSoftStepSolver::region_dispatches)
+    };
+    let region_after_setup = region_of(&world);
+    let mut region_log: Vec<u64> = Vec::with_capacity(TOTAL_FRAMES + 2);
+    // A sleeping arm's witness that the frozen path ran inside the window: steady frames on
+    // which some row is frozen. Read from `IslandSleep` after each frame; the read allocates
+    // nothing, so it cannot move the counts it sits beside.
+    let rows_n = bodies.len() + 1;
+    let mut frame = 0usize;
+    let mut frozen_frames = 0usize;
+    drive(
+        || {
+            schedule.run(&mut world);
+            np_log.push(world.resource::<Manifolds>().narrowphase_dispatches());
+            region_log.push(region_of(&world));
+            frame += 1;
+            if sleeping && frame > WARM_BUDGET {
+                let sleep = world.resource::<IslandSleep>();
+                frozen_frames += usize::from((0..rows_n).any(|r| !sleep.is_row_awake(r)));
+            }
+        },
+        &mut samples,
+    );
+    let (control, live) = liveness_probe(label, &samples, || {
+        schedule.run(&mut world);
+        np_log.push(world.resource::<Manifolds>().narrowphase_dispatches());
+        region_log.push(region_of(&world));
+    });
+    assert_eq!(np_log.len(), TOTAL_FRAMES + 2, "one counter reading per driven frame");
+    assert_eq!(region_log.len(), TOTAL_FRAMES + 2, "one region reading per driven frame");
+
+    // Which side of the contact-reuse A/B this arm ran, read from the last step's pair
+    // classes after the last window closed (O(pairs), allocates nothing). S1c and S1e differ
+    // in that switch alone, so each must be seen to hold its side, or the two pins gate the
+    // same pile twice and the fan-out arm (S1e) is not what it says.
+    let reused = world.resource::<Manifolds>().pair_classes().reused;
+    let reuse_side = if reuse_off {
+        "OFF (overridden)"
+    } else {
+        "at its default"
+    };
+    if reuse_off {
+        assert_eq!(
+            reused, 0,
+            "{label}: contact reuse is overridden OFF, yet the last step served {reused} box \
+             pairs from their reuse records"
+        );
+    } else if parallel {
+        assert!(
+            reused > 0,
+            "{label}: this arm runs the shipped default (contact reuse on since L9 C4), yet its \
+             last step served no box pair from a reuse record, so S1e is not its reuse-off A/B"
+        );
+    }
+
+    // ── The structural claim, per frame (SR phase B): a parallel step opens ONE install
+    // frame, ONE nested scope when the narrowphase dispatches (L5; its own counter says
+    // whether it did) and ONE when the solve runs as one solve region (its own counter
+    // likewise) — the region's stages are its blocks, never a scope of their own, and SR
+    // retired S4's setup scope and the per-colour scopes. So on EVERY steady frame
+    // `scope == 1 + np + region`, exactly. A frame that breaks this has an allocation source
+    // the class accounting does not know about. The narrowphase and the solve each run once
+    // per step, so each counter moves by at most one per frame.
+    if parallel {
+        for (i, f) in samples[WARM_BUDGET..].iter().enumerate() {
+            let j = WARM_BUDGET + i;
+            let np = np_log[j] - if j == 0 { np_after_setup } else { np_log[j - 1] };
+            let region = region_log[j] - if j == 0 { region_after_setup } else { region_log[j - 1] };
+            assert!(
+                np <= 1,
+                "{label}: steady frame {i} moved `narrowphase_dispatches` by {np}; the \
+                 narrowphase runs once per step, so it dispatches at most once"
+            );
+            assert!(
+                region <= 1,
+                "{label}: steady frame {i} moved `region_dispatches` by {region}; the solve \
+                 runs once per step, so it opens at most one region"
+            );
+            assert_eq!(
+                f.scope,
+                1 + np + region,
+                "{label}: steady frame {i} opened {} scope frames with {np} narrowphase dispatch(es) \
+                 and {region} solve region(s); the structure is 1 + {np} + {region}",
+                f.scope
+            );
+        }
+    }
+    let np_window = np_log[TOTAL_FRAMES - 1] - np_log[WARM_BUDGET - 1];
+    let region_window = region_log[TOTAL_FRAMES - 1] - region_log[WARM_BUDGET - 1];
+
+    // ── Anti-vacuity: the scene is DOING something ──
+    let contacts = world.resource::<Manifolds>().manifolds().len();
+    assert!(
+        contacts > 0,
+        "{label}: ANTI-VACUITY FAILED — the narrowphase produced ZERO contacts, so the \
+         solver had nothing to solve and every zero above is a zero over nothing"
+    );
+    let end: Vec<Vec3> = sample_ids
+        .iter()
+        .map(|e| {
+            world
+                .get_component::<RigidBody>(e)
+                .expect("body lives")
+                .position
+        })
+        .collect();
+    let mut max_move = 0.0f32;
+    for (a, b) in start.iter().zip(end.iter()) {
+        let d = *b - *a;
+        max_move = max_move.max((d.x * d.x + d.y * d.y + d.z * d.z).sqrt());
+    }
+    assert!(
+        max_move > 1e-3,
+        "{label}: ANTI-VACUITY FAILED — no sampled body moved (max {max_move}); the \
+         integrate/solve stages did not advance the world"
+    );
+    assert!(
+        !sleeping || frozen_frames > 0,
+        "{label}: ANTI-VACUITY FAILED — sleeping is on and no row froze on any of the \
+         {STEADY_FRAMES} steady frames, so the frozen path never ran inside the window"
+    );
+
+    rows.push(report(
+        label,
+        &format!(
+            "{} dynamic bodies + 1 static floor, {workers} worker(s), sleeping {}, \
+             dt=1/60. Frame = ONE fixed step = one real physics `Schedule::run`. \
+             Steady-state contacts = {contacts}; sampled bodies moved up to {max_move:.3} m; \
+             the narrowphase dispatched on {np_window} and the solve region (SR) opened on \
+             {region_window} of the {STEADY_FRAMES} steady frames; \
+             a row was frozen on {frozen_frames} of them; contact reuse {reuse_side}, \n             {reused} box pairs served from reuse records on the last step.",
+            bodies.len(),
+            if sleeping { "ON" } else { "OFF" }
+        ),
+        setup,
+        &samples,
+        control,
+        live,
+    ));
+}
+
+/// The REFERENCE pipeline (`add_physics_systems::<SoftStepSolver>`). It was the
+/// default until 2026-09-18, when the default world became the colored solve with
+/// `simd_solve` on (S1b's shape); its pin is unchanged by that.
+fn s1a_rigid_pile_reference_pipeline_serial(rows: &mut Vec<Row>) {
+    run_pyramid_arm(
+        rows,
+        "S1a — rigid pile, REFERENCE pipeline (SoftStepSolver, serial pool)",
+        false,
+        1,
+        false,
+        false,
+        false,
+        false,
+    );
+}
+
+/// The DEFAULT pipeline since 2026-09-18 — the colored solve with `simd_solve` on
+/// by default — with the parallel switches OFF (`parallel_solve`, `parallel_broadphase`
+/// and, since L5 C4, `parallel_narrowphase`, all overridden to `false`). It is also the
+/// CONTROL for `S1c`: if the two arms measure the same number, the parallel dispatch
+/// never engaged and `S1c`'s figure is about something else.
+fn s1b_rigid_pile_colored_serial(rows: &mut Vec<Row>) {
+    run_pyramid_arm(
+        rows,
+        "S1b — rigid pile, DEFAULT pipeline (colored + simd_solve), parallel OFF (control for S1c)",
+        true,
+        4,
+        false,
+        false,
+        false,
+        false,
+    );
+}
+
+/// L10 C0 (design 04 "Gates", C0): S1b with `sleeping` on — the pile freezes inside the
+/// window, so the steady frames run `IslandSleep`'s latch and per-island columns through
+/// `begin_step` / `end_step` on the frozen path. Its pin is S1b's: sleeping adds no heap
+/// acquisition to a step. RED-first: a `Vec::with_capacity(1)` in `begin_step`.
+fn s1d_rigid_pile_colored_serial_sleeping(rows: &mut Vec<Row>) {
+    run_pyramid_arm(
+        rows,
+        "S1d — rigid pile, DEFAULT pipeline (colored + simd_solve), parallel OFF, sleeping ON",
+        true,
+        4,
+        false,
+        true,
+        false,
+        false,
+    );
+}
+
+/// The default pipeline with every parallel switch ON — the shipped default for
+/// `parallel_solve` (L4) and `parallel_narrowphase` (L5 C4); `parallel_broadphase` is
+/// inert below its body floor on this scene.
+fn s1c_rigid_pile_colored_parallel(rows: &mut Vec<Row>) {
+    run_pyramid_arm(
+        rows,
+        "S1c — rigid pile, COLORED solve + parallel_solve/broadphase/narrowphase ON",
+        true,
+        4,
+        true,
+        false,
+        false,
+        false,
+    );
+}
+
+/// S1c's scene and switches with `contact_reuse` overridden OFF: the arm on which the
+/// fan-out gate reds on EVERY frame. Since L9 C4 the shipped default (S1c) settles the release
+/// pile to ten colours on 244 of the census window's 256 frames, and one extra `pool.scope`
+/// per colour pass lands inside S1c's pin on those (in debug, on all 256). With reuse off the
+/// release pile dispatches eleven colours on every frame, so this pin keeps no headroom above
+/// and the same regression reds on every frame (header, "S1c after L9 C4").
+///
+/// Named S1e, not S1d: S1d is L10's sleeping-on arm (L10 C0), and [`gate`] gives each pin
+/// exactly one row by label prefix, so a census running both arms under one name panics at
+/// the gate before it reads an envelope.
+fn s1e_rigid_pile_colored_parallel_reuse_off(rows: &mut Vec<Row>) {
+    run_pyramid_arm(
+        rows,
+        "S1e — rigid pile, COLORED solve + parallel ON, contact reuse OFF (S1c's fan-out arm)",
+        true,
+        4,
+        true,
+        false,
+        true,
+        false,
+    );
+}
+
+/// S1c's scene and switches with `speculative_distance` and `speculative_velocity_cap` overridden
+/// to `0`, V2's overlap-only rule: the pile S1c ran before V2, whose envelope it keeps now that the
+/// default has moved (S1c's long run before V2 bin for bin, header "S1c and S1e after V2"), so the
+/// fan-out regression reds against a pin no value change of V2's can move (the S1e precedent for
+/// L9 C4).
+fn s1f_rigid_pile_colored_parallel_d0(rows: &mut Vec<Row>) {
+    run_pyramid_arm(
+        rows,
+        "S1f — rigid pile, COLORED solve + parallel ON, speculative_distance 0 + speculative_velocity_cap 0 (S1c's pre-V2 twin)",
+        true,
+        4,
+        true,
+        false,
+        false,
+        true,
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// S8 / S8b — L10 C3b's sleep-skip transitions (design 04 "Census (W5)", 08 §7, ruling W1)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A unit cube's components at `position`: dynamic (`inv_mass` 1) or not, with `friction`.
+fn cube_parts(position: Vec3, velocity: Vec3, dynamic: bool, friction: f32) -> (RigidBody, RigidBodyMass, Collider) {
+    (
+        RigidBody { position, linear_velocity: velocity, rotation: Quat::IDENTITY, angular_velocity: Vec3::ZERO },
+        RigidBodyMass {
+            inv_inertia: if dynamic { Mat3::from_diagonal(Vec3::new(6.0, 6.0, 6.0)) } else { Mat3::ZERO },
+            inv_mass: if dynamic { 1.0 } else { 0.0 },
+            restitution: 0.0,
+            friction,
+        },
+        Collider { shape: ColliderShape::Box { half_extents: Vec3::new(0.5, 0.5, 0.5) }, layer: 1, mask: 1 },
+    )
+}
+
+/// A static slab of half-extents `half` at `position` with `friction`.
+fn slab_parts(position: Vec3, half: Vec3, friction: f32) -> (RigidBody, RigidBodyMass, Collider) {
+    (
+        RigidBody { position, linear_velocity: Vec3::ZERO, rotation: Quat::IDENTITY, angular_velocity: Vec3::ZERO },
+        RigidBodyMass { inv_inertia: Mat3::ZERO, inv_mass: 0.0, restitution: 0.0, friction },
+        Collider { shape: ColliderShape::Box { half_extents: half }, layer: 1, mask: 1 },
+    )
+}
+
+/// A ball of radius 0.3 at `position` moving at `velocity`.
+fn ball_parts(position: Vec3, velocity: Vec3) -> (RigidBody, RigidBodyMass, Collider) {
+    (
+        RigidBody { position, linear_velocity: velocity, rotation: Quat::IDENTITY, angular_velocity: Vec3::ZERO },
+        RigidBodyMass {
+            inv_inertia: Mat3::from_diagonal(Vec3::new(20.0, 20.0, 20.0)),
+            inv_mass: 8.0,
+            restitution: 0.0,
+            friction: 0.5,
+        },
+        Collider { shape: ColliderShape::Sphere { radius: 0.3 }, layer: 1, mask: 1 },
+    )
+}
+
+/// A frictionless sphere of radius 0.5 at `position` moving at `velocity` (S8b's sliders: one
+/// contact point per manifold, so a colour of them stays narrow).
+fn slider_parts(position: Vec3, velocity: Vec3) -> (RigidBody, RigidBodyMass, Collider) {
+    (
+        RigidBody { position, linear_velocity: velocity, rotation: Quat::IDENTITY, angular_velocity: Vec3::ZERO },
+        RigidBodyMass {
+            inv_inertia: Mat3::from_diagonal(Vec3::new(3.0, 3.0, 3.0)),
+            inv_mass: 1.0,
+            restitution: 0.0,
+            friction: 0.0,
+        },
+        Collider { shape: ColliderShape::Sphere { radius: 0.5 }, layer: 1, mask: 1 },
+    )
+}
+
+/// Spawns `(body, mass, collider)`; a dynamic one is `Simulated`.
+fn spawn_parts(world: &mut EcsMaster, parts: (RigidBody, RigidBodyMass, Collider)) -> Entity {
+    let dynamic = parts.1.inv_mass != 0.0;
+    spawn_body(world, parts.0, parts.1, parts.2, dynamic)
+}
+
+/// The towers S8 and S8b hold: 16 towers of `levels` unit cubes on the floor, a 4 x 4 grid of
+/// pitch 4 at `(x0, z0)`, each exactly touching the one below. Returns the bottom cubes' centres.
+fn spawn_towers(world: &mut EcsMaster, levels: usize, x0: f32, z0: f32) -> [Vec3; 16] {
+    let mut bases = [Vec3::ZERO; 16];
+    for (t, base) in bases.iter_mut().enumerate() {
+        let (x, z) = (x0 + 4.0 * (t % 4) as f32, z0 + 4.0 * (t / 4) as f32);
+        *base = Vec3::new(x, 0.5, z);
+        for level in 0..levels {
+            spawn_parts(world, cube_parts(Vec3::new(x, 0.5 + level as f32, z), Vec3::ZERO, true, 0.5));
+        }
+    }
+    bases
+}
+
+/// S8 (design 04 "Census (W5)"): W = 1, parallel off, the SDF pipeline with sleeping on and the
+/// sleep-skip `Sets`. Sixteen towers are settled until every dynamic row is held BEFORE the
+/// window; inside it, every transition the sleep-skip has runs: a static body spawned ahead of
+/// the towers every third frame and despawned three frames later (a Rows step each time: the
+/// held rows translate and their keys are mirrored), a ball knocked into a tower every 40th frame
+/// (D2, wake, re-freeze, move-in), the SDF field replaced (D5), sleeping off and back on (D-H,
+/// then a Reset step), and `wake_all` (D6). The last tower carries a third cube, and a lone cube
+/// stands 0.1 beside it — separated cross pairs between two islands — so nudging that third cube
+/// (which has no cross pair) restores the tower alone, and its move-in back copies the cross pairs
+/// from the lone cube's record (Invariant K). The nudge runs twice, so the window copies more
+/// cross pairs than the OTHER budget's two acquisitions could absorb had each copy allocated.
+/// Expected: S1b's frame, no heap acquisition added.
+/// RED-first: `Vec::with_capacity(1)` in the restore-source build, the move-in's capture and the
+/// cross-pair copy.
+///
+/// With `tree` (S8-tree, L10 C3c) the same window runs on the tree broadphase with its brute path
+/// off, so every transition also drives the tree's sleeper set: sleeper admissions after the
+/// move-ins, releases on the D2 steps, the Rows steps' translation of the withheld list, a static
+/// admitted and vanishing with the spawned slab, and the flushes dissolving the set. RED-first:
+/// `Vec::with_capacity(1)` in the tree's release and in its sleeper admission.
+///
+/// Without `tree` the window runs on AllPairs, named explicitly since the tree broadphase's C4
+/// made the Tree the default kind: S8 keeps the census on the verbatim AllPairs arm.
+fn s8_sleep_skip_transitions(rows: &mut Vec<Row>, tree: bool) {
+    use boyko_physics::broadphase_tree::BroadphaseTree;
+    use boyko_physics::plugin::add_physics_sdf;
+    use boyko_physics::resources::{BroadphaseKind, BroadphaseSelectMode};
+    use boyko_physics::sdf_query::SdfField;
+    use boyko_physics::sleep_sets::SleepSets;
+    use boyko_physics::solver::DefaultRigidSolver;
+    use boyko_sdf_math::{SdfEdit, sdf_op};
+
+    let label = if tree {
+        "S8-tree — sleep-skip transitions, SDF pipeline, sleeping ON (Sets), serial, Tree"
+    } else {
+        "S8 — sleep-skip transitions, SDF pipeline, sleeping ON (Sets), serial, AllPairs"
+    };
+    let mut samples: Vec<Snap> = Vec::with_capacity(TOTAL_FRAMES);
+    let setup_before = Snap::now();
+    let mut world = EcsMaster::new();
+    spawn_parts(&mut world, slab_parts(Vec3::new(0.0, -1.0, 0.0), FLOOR_HALF_EXTENTS, 0.5));
+    let bases = spawn_towers(&mut world, 2, -6.0, -6.0);
+    let third = spawn_parts(&mut world, cube_parts(bases[15] + Vec3::new(0.0, 2.0, 0.0), Vec3::ZERO, true, 0.5));
+    spawn_parts(&mut world, cube_parts(bases[15] + Vec3::new(1.1, 0.0, 0.0), Vec3::ZERO, true, 0.5));
+    let n_dynamic = 34u32;
+    let mut builder = ScheduleBuilder::new(pool(1));
+    let _ = add_physics_sdf::<DefaultRigidSolver>(&mut builder, &mut world);
+    // A field far below the floor: it collides nothing, and replacing it changes the sleep
+    // epoch's edit bits.
+    let field = |top: f32| SdfEdit::box_shape([0.0, top - 50.0, 0.0], [50.0, 50.0, 50.0], sdf_op::UNION, 0.0);
+    world.resource_mut::<SdfField>().push(field(-40.0));
+    world.insert_resource(FixedTime::new(Duration::from_secs_f32(DT)));
+    {
+        let cfg = world.resource_mut::<PhysicsConfig>();
+        cfg.gravity = Vec3::new(0.0, -9.81, 0.0);
+        cfg.dt = DT;
+        cfg.parallel_solve = false;
+        cfg.parallel_broadphase = false;
+        cfg.parallel_narrowphase = false;
+        cfg.sleeping = true;
+        // Both arms name their kind: since the tree broadphase's C4 the default is the Tree, and
+        // S8 is the census's one scene on the verbatim AllPairs arm (cfg-A's path).
+        cfg.broadphase_select = BroadphaseSelectMode::Manual;
+        cfg.broadphase = if tree { BroadphaseKind::Tree } else { BroadphaseKind::AllPairs };
+    }
+    if tree {
+        world.resource_mut::<BroadphaseTree>().set_brute_max_rows(0);
+    }
+    let mut schedule = builder.build(&mut world);
+    // Settle until every tower is held, then take the transitions' first shapes (a spawn, a
+    // despawn, a ball) before the window, so the archetypes and the columns exist.
+    let mut settle = 0;
+    while world.resource::<SleepSets>().stats().held_rows < n_dynamic {
+        schedule.run(&mut world);
+        settle += 1;
+        assert!(settle < 600, "S8: construction: the towers were not all held within 600 steps");
+    }
+    let warm_extra = spawn_parts(&mut world, slab_parts(Vec3::new(40.0, 5.0, 40.0), Vec3::new(0.5, 0.5, 0.5), 0.5));
+    schedule.run(&mut world);
+    assert!(world.delete_entity(warm_extra), "S8: construction: the warm-up body is live");
+    schedule.run(&mut world);
+    let setup = Snap::now().since(setup_before);
+
+    let rules_before = world.resource::<SleepSets>().rule_counts();
+    let tree_before = world.resource::<BroadphaseTree>().diag();
+    let mut frame = 0usize;
+    let mut extra: Option<Entity> = None;
+    let (mut restored_frames, mut moved_frames, mut rows_frames) = (0usize, 0usize, 0usize);
+    let (mut released_frames, mut withheld_frames) = (0usize, 0usize);
+    drive(
+        || {
+            frame += 1;
+            if frame.is_multiple_of(3) {
+                match extra.take() {
+                    Some(e) => {
+                        let _ = world.delete_entity(e);
+                    }
+                    None => {
+                        extra = Some(spawn_parts(
+                            &mut world,
+                            slab_parts(Vec3::new(40.0, 5.0, 40.0), Vec3::new(0.5, 0.5, 0.5), 0.5),
+                        ));
+                    }
+                }
+                rows_frames += 1;
+            }
+            if frame % 40 == 5 {
+                let base = bases[(frame / 40) % 16];
+                spawn_parts(&mut world, ball_parts(base + Vec3::new(2.5, -0.2, 0.0), Vec3::new(-6.0, 0.0, 0.0)));
+            }
+            if frame == 70 || frame == 80 {
+                let nudge = if frame == 70 { 1.0e-4 } else { -1.0e-4 };
+                world.get_component_mut::<RigidBody>(third).expect("S8: the third cube is live").position.x += nudge;
+            }
+            if frame == 100 {
+                let f = world.resource_mut::<SdfField>();
+                f.clear();
+                f.push(field(-41.0));
+            }
+            if frame == 150 {
+                world.resource_mut::<PhysicsConfig>().sleeping = false;
+            }
+            if frame == 153 {
+                world.resource_mut::<PhysicsConfig>().sleeping = true;
+            }
+            if frame == 290 {
+                world.resource_mut::<IslandSleep>().wake_all();
+            }
+            schedule.run(&mut world);
+            if frame > WARM_BUDGET {
+                let st = world.resource::<SleepSets>().stats();
+                restored_frames += usize::from(st.restored > 0);
+                moved_frames += usize::from(st.moved_in > 0);
+                released_frames += usize::from(st.released_rows > 0);
+                withheld_frames += usize::from(st.withheld_pairs > 0);
+            }
+        },
+        &mut samples,
+    );
+    let (control, live) = liveness_probe(label, &samples, || schedule.run(&mut world));
+    let rules = world.resource::<SleepSets>().rule_counts();
+    let (d2, d5, d6, dh, cross) = (
+        rules.d2_scan - rules_before.d2_scan,
+        rules.d5_epoch - rules_before.d5_epoch,
+        rules.d6_wake_all - rules_before.d6_wake_all,
+        rules.dh_mode - rules_before.dh_mode,
+        rules.cross_copies - rules_before.cross_copies,
+    );
+    assert!(
+        restored_frames > 0 && moved_frames > 0 && d2 > 0 && d5 > 0 && d6 > 0 && dh > 0 && cross > 2,
+        "{label}: ANTI-VACUITY FAILED — restores on {restored_frames} steady frames, move-ins on \
+         {moved_frames}, D2 {d2}, D5 {d5}, D6 {d6}, D-H {dh}, cross copies {cross}: a transition \
+         the arm prices did not run"
+    );
+    // The tree seam's transitions (L10 C3c): the diag is cumulative, so the window's share is a
+    // difference; the warm-up's own admissions and releases are outside it.
+    let tree_after = world.resource::<BroadphaseTree>().diag();
+    let (z_rebuilds, s_rebuilds, translations) = (
+        tree_after.sleeper_rebuilds - tree_before.sleeper_rebuilds,
+        tree_after.static_rebuilds - tree_before.static_rebuilds,
+        tree_after.translations - tree_before.translations,
+    );
+    if tree {
+        assert!(
+            z_rebuilds > 0 && s_rebuilds > 0 && translations > 0 && released_frames > 0 && withheld_frames > 0,
+            "{label}: ANTI-VACUITY FAILED — sleeper-set rebuilds {z_rebuilds}, static-set rebuilds \
+             {s_rebuilds}, translations {translations}, releases on {released_frames} steady \
+             frames, pairs withheld on {withheld_frames}: a tree-seam transition did not run"
+        );
+    }
+    rows.push(report(
+        label,
+        &format!(
+            "16 towers of 2 cubes (the last with a third) and a lone cube beside it, held before \
+             the window ({settle} settle steps), 1 worker, the SDF pipeline. In the window: a Rows \
+             step on {rows_frames} frames, a ball every 40th frame, the third cube nudged twice, an SDF \
+             field replacement, sleeping off/on, wake_all. Restores on {restored_frames} steady \
+             frames, move-ins on {moved_frames}; D2 {d2}, D5 {d5}, D6 {d6}, D-H {dh}, cross copies \
+             {cross}. Tree seam: sleeper-set rebuilds {z_rebuilds}, static-set rebuilds \
+             {s_rebuilds}, translations {translations}, releases on {released_frames} frames, \
+             pairs withheld on {withheld_frames}."
+        ),
+        setup,
+        &samples,
+        control,
+        live,
+    ));
+}
+
+/// S8b (design 08 §7, ruling W1): W = 4, the parallel narrowphase on, sleeping on, `Sets`, on
+/// the Tree (`kind`) or the Grid. Phase A (dispatching): 80 touching spheres sliding on ice,
+/// steered by a velocity write every frame so they never rest, give the stream at least 256 pairs
+/// (one contact point each, so no colour reaches the solver's dispatch width) beside 16
+/// held towers of 3 cubes, and a ball knocks a tower every 5th frame, so restores are computed
+/// inside chunks. The held towers' pairs are skipped inside the chunks on the Grid; on the Tree
+/// its sleeper set withholds them from the stream (L10 C3c), and the released rows' pairs join
+/// the chunks on each knock. Phase B (inline, from frame 200): the sliders are despawned and the stream
+/// falls below 256 pairs. Pinned in L5 C4's structural form on every steady frame: the scene
+/// holds fewer than `MIN_PARALLEL_BODIES` bodies, so the Grid opens no emit scope, and every
+/// colour stays below the solver's dispatch width (asserted), so a frame opens exactly the
+/// install frame plus the narrowphase's dispatch: `scope == 1 + Δnp_dispatches`, exact.
+fn s8b_sleep_skip_parallel_narrowphase(rows: &mut Vec<Row>, kind: boyko_physics::resources::BroadphaseKind) {
+    use boyko_physics::resources::{BroadphaseSelectMode, ConstraintGraph};
+    use boyko_physics::sleep_sets::SleepSets;
+
+    let label = match kind {
+        boyko_physics::resources::BroadphaseKind::Tree => "S8b-tree — sleep-skip, W=4, parallel narrowphase ON, Tree",
+        _ => "S8b-grid — sleep-skip, W=4, parallel narrowphase ON, Grid",
+    };
+    const MIN_COLOR_SLOTS: u32 = 256;
+    const SLIDERS_X: usize = 8;
+    const SLIDERS_Z: usize = 10;
+    let mut samples: Vec<Snap> = Vec::with_capacity(TOTAL_FRAMES);
+    let setup_before = Snap::now();
+    let mut world = EcsMaster::new();
+    spawn_parts(&mut world, slab_parts(Vec3::new(0.0, -1.0, 0.0), FLOOR_HALF_EXTENTS, 0.5));
+    let bases = spawn_towers(&mut world, 3, -30.0, -30.0);
+    spawn_parts(&mut world, slab_parts(Vec3::new(20.0, -1.0, 0.0), Vec3::new(10.0, 1.0, 40.0), 0.0));
+    let mut sliders: Vec<Entity> = Vec::with_capacity(SLIDERS_X * SLIDERS_Z);
+    for i in 0..SLIDERS_X {
+        for k in 0..SLIDERS_Z {
+            let p = Vec3::new(15.0 + i as f32, 0.5, -30.0 + k as f32);
+            sliders.push(spawn_parts(&mut world, slider_parts(p, Vec3::new(0.0, 0.0, 1.0))));
+        }
+    }
+    let mut builder = ScheduleBuilder::new(pool(4));
+    let _ = add_physics_colored_solve(&mut builder, &mut world);
+    world.insert_resource(FixedTime::new(Duration::from_secs_f32(DT)));
+    let passes = {
+        let cfg = world.resource_mut::<PhysicsConfig>();
+        cfg.gravity = Vec3::new(0.0, -9.81, 0.0);
+        cfg.dt = DT;
+        cfg.parallel_narrowphase = true;
+        cfg.broadphase_select = BroadphaseSelectMode::Manual;
+        cfg.broadphase = kind;
+        cfg.sleeping = true;
+        cfg.substeps as u64 * (1 + cfg.relax_iterations as u64)
+    };
+    // The Tree arm stays on the tree path whatever `TREE_BRUTE_MAX_ROWS` is, as S8-tree does:
+    // phase B's rows (sliders despawned) would otherwise fall to the brute loop once the tree
+    // lane raises the threshold (W8S cut, Q11).
+    if kind == boyko_physics::resources::BroadphaseKind::Tree {
+        world.resource_mut::<boyko_physics::broadphase_tree::BroadphaseTree>().set_brute_max_rows(0);
+    }
+    let mut schedule = builder.build(&mut world);
+    let steer = |world: &mut EcsMaster, sliders: &[Entity], frame: usize| {
+        for &e in sliders {
+            if let Some(mut b) = world.get_component_mut::<RigidBody>(e) {
+                b.linear_velocity.z = 1.0 + 1.0e-4 * (frame % 2) as f32;
+            }
+        }
+    };
+    let mut settle = 0usize;
+    while world.resource::<SleepSets>().stats().held_rows < 48 {
+        steer(&mut world, &sliders, settle);
+        schedule.run(&mut world);
+        settle += 1;
+        assert!(settle < 600, "{label}: construction: the towers were not all held within 600 steps");
+    }
+    let setup = Snap::now().since(setup_before);
+
+    let n_rows = world.resource::<boyko_physics::resources::SolverScratch>().bodies_len();
+    assert!(n_rows < 4096, "{label}: premise: below the Grid's parallel-emit floor, so it opens no scope");
+    let mut np_log: Vec<u64> = Vec::with_capacity(TOTAL_FRAMES + 2);
+    let mut widest_log: Vec<u32> = Vec::with_capacity(TOTAL_FRAMES + 2);
+    let np_before = world.resource::<Manifolds>().narrowphase_dispatches();
+    // SR: the solve region's term of the structure, 0 here (every colour under the floor).
+    let regions_before = world.resource::<ColoredSoftStepSolver>().region_dispatches();
+    let mut frame = 0usize;
+    let (mut chunk_restores, mut chunk_skips, mut chunk_withheld) = (0usize, 0usize, 0usize);
+    let (mut np_a, mut np_b) = (0u64, 0u64);
+    let mut last_np = np_before;
+    drive(
+        || {
+            frame += 1;
+            if frame == 200 {
+                for e in sliders.drain(..) {
+                    let _ = world.delete_entity(e);
+                }
+            }
+            steer(&mut world, &sliders, frame);
+            if frame.is_multiple_of(5) && frame < 200 {
+                let base = bases[(frame / 5) % 16];
+                spawn_parts(&mut world, ball_parts(base + Vec3::new(2.5, -0.2, 0.0), Vec3::new(-6.0, 0.0, 0.0)));
+            }
+            schedule.run(&mut world);
+            let np_now = world.resource::<Manifolds>().narrowphase_dispatches();
+            let dispatched = np_now > last_np;
+            last_np = np_now;
+            np_log.push(np_now);
+            // The widest colour's live slots, the solver's own dispatch measure (no allocation).
+            let widest = {
+                let graph = world.resource::<ConstraintGraph>();
+                let m = world.resource::<Manifolds>().solver_manifolds();
+                (0..graph.n_colors())
+                    .map(|c| graph.color(c).iter().map(|&mi| u32::from(m[mi as usize].count)).sum::<u32>())
+                    .max()
+                    .unwrap_or(0)
+            };
+            widest_log.push(widest);
+            if frame > WARM_BUDGET {
+                let st = world.resource::<SleepSets>().stats();
+                if frame < 200 {
+                    np_a += u64::from(dispatched);
+                    chunk_restores += usize::from(dispatched && st.restored_pairs > 0);
+                    chunk_skips += usize::from(dispatched && st.held_skipped_pairs > 0);
+                    chunk_withheld += usize::from(dispatched && st.withheld_pairs > 0);
+                } else if frame > 200 {
+                    np_b += u64::from(dispatched);
+                }
+            }
+        },
+        &mut samples,
+    );
+    let (control, live) = liveness_probe(label, &samples, || {
+        schedule.run(&mut world);
+        np_log.push(world.resource::<Manifolds>().narrowphase_dispatches());
+        widest_log.push(0);
+    });
+    // The structural pin, per steady frame (ruling W1, L5 C4's form with no colour, no solve
+    // region and no emit scope): exactly the install frame plus the narrowphase's dispatch scope.
+    // The region's term is 0: no colour reaches the floor (asserted per frame below), so no step
+    // opened one.
+    let regions = world.resource::<ColoredSoftStepSolver>().region_dispatches() - regions_before;
+    assert_eq!(regions, 0, "{label}: {regions} solve regions opened; every colour is under the floor");
+    for (i, f) in samples[WARM_BUDGET..].iter().enumerate() {
+        let j = WARM_BUDGET + i;
+        let np = np_log[j] - if j == 0 { np_before } else { np_log[j - 1] };
+        assert!(widest_log[j] < MIN_COLOR_SLOTS, "{label}: frame {j}: the widest colour holds {} slots, the solver dispatches from {MIN_COLOR_SLOTS}", widest_log[j]);
+        assert!(np <= 1, "{label}: frame {j}: {np} narrowphase dispatches in one step");
+        assert_eq!(f.scope, 1 + np, "{label}: frame {j}: {} scope frames, the structure has 1 + {np} (and {passes} passes open none)", f.scope);
+        assert_eq!(f.chunk, 1 + np, "{label}: frame {j}: {} chunks, one per scope frame", f.chunk);
+    }
+    // The held pairs beside the dispatching chunks: skipped inside them on the Grid; on the Tree
+    // (L10 C3c) withheld from the stream by its sleeper set, so none reaches a chunk while the
+    // towers stay held (the Grid arm keeps the chunk's skip path covered).
+    let held_beside_chunks = if kind == boyko_physics::resources::BroadphaseKind::Tree {
+        chunk_withheld
+    } else {
+        chunk_skips
+    };
+    assert!(
+        np_a > 0 && chunk_restores > 0 && held_beside_chunks > 0 && np_b == 0,
+        "{label}: ANTI-VACUITY FAILED — phase A dispatched on {np_a} frames, restored inside chunks \
+         on {chunk_restores}, skipped held pairs inside chunks on {chunk_skips}, pairs withheld \
+         beside them on {chunk_withheld}; phase B dispatched on {np_b} (must be 0)"
+    );
+    rows.push(report(
+        label,
+        &format!(
+            "16 towers of 3 cubes held ({settle} settle steps) beside 80 steered sliders, 4 workers. \
+             Phase A: {np_a} dispatching frames, restores inside chunks on {chunk_restores}, held \
+             skips inside chunks on {chunk_skips}, pairs withheld beside them on {chunk_withheld}. \
+             Phase B (sliders despawned): {np_b} dispatches."
+        ),
+        setup,
+        &samples,
+        control,
+        live,
+    ));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// S2 — spawn / despawn churn + par_iter, through real App frames
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The `par_iter` fan-out system: one `Box<ScopeShared>` plus one heap cell per
+/// chunk, per call, by construction.
+fn par_fanout(q: Query<&Payload>) {
+    static SUM: AtomicU64 = AtomicU64::new(0);
+    q.par_iter().for_each(|p: &Payload| {
+        SUM.fetch_add(p.v as u64, Ordering::Relaxed);
+    });
+}
+
+/// Spawns `CHURN_PER_FRAME` entities and despawns the previous generation, in
+/// ONE system — so no cross-system ordering edge is needed and the churn is
+/// stationary from the second frame onward.
+fn churn(mut cmds: Commands, q: Query<&Doomed>, ents: Entities, mut state: ResMut<Churn>) {
+    let generation = state.generation;
+    let mut killed = 0u64;
+    for (id, d) in q.iter_entities() {
+        if d.wave != generation
+            && let Some(e) = ents.get(id)
+        {
+            cmds.despawn(e);
+            killed += 1;
+        }
+    }
+    for _ in 0..CHURN_PER_FRAME {
+        cmds.spawn(DoomedBundle {
+            d: Doomed { wave: generation },
+        });
+    }
+    state.despawned += killed;
+    state.spawned += CHURN_PER_FRAME as u64;
+    state.generation = generation.wrapping_add(1);
+}
+
+fn s2_spawn_despawn_churn_and_par_iter(rows: &mut Vec<Row>) {
+    const WORKERS: usize = 4;
+    let mut samples: Vec<Snap> = Vec::with_capacity(TOTAL_FRAMES);
+
+    let setup_before = Snap::now();
+    let mut app = App::with_pool(pool(WORKERS));
+    seed_payload(app.world_mut(), ROWS);
+    app.world_mut().insert_resource(Churn::default());
+    app.add_systems(par_fanout);
+    app.add_systems(churn);
+    app.finish();
+    // Two frames so the churn reaches its stationary shape (generation g-1
+    // exists to be despawned) before the setup snapshot closes.
+    app.update_with_delta(Duration::from_millis(16));
+    app.update_with_delta(Duration::from_millis(16));
+    let setup = Snap::now().since(setup_before);
+
+    let entities_before = app.world().entity_count();
+    let churn_before = {
+        let c = app.world().resource::<Churn>();
+        (c.spawned, c.despawned)
+    };
+
+    drive(
+        || app.update_with_delta(Duration::from_millis(16)),
+        &mut samples,
+    );
+    let (control, live) = liveness_probe("S2", &samples, || {
+        app.update_with_delta(Duration::from_millis(16))
+    });
+
+    // ── Anti-vacuity: entities really were spawned AND despawned ──
+    let c = app.world().resource::<Churn>();
+    let spawned = c.spawned - churn_before.0;
+    let despawned = c.despawned - churn_before.1;
+    let entities_after = app.world().entity_count();
+    assert_eq!(
+        spawned,
+        (TOTAL_FRAMES + 2) as u64 * CHURN_PER_FRAME as u64,
+        "S2: the spawn side of the churn did not run every frame"
+    );
+    assert!(
+        despawned >= spawned - 2 * CHURN_PER_FRAME as u64,
+        "S2: ANTI-VACUITY FAILED — {despawned} despawned against {spawned} spawned; the \
+         churn is not stationary and the population is growing"
+    );
+    assert!(
+        entities_after.abs_diff(entities_before) <= 2 * CHURN_PER_FRAME,
+        "S2: population drifted {entities_before} -> {entities_after}; not a steady state"
+    );
+
+    rows.push(report(
+        "S2 — spawn/despawn churn + par_iter, through App frames",
+        &format!(
+            "{WORKERS} workers, {ROWS} static rows + {CHURN_PER_FRAME} entities \
+             spawned AND despawned via Commands every frame, plus one par_iter fan-out \
+             over the {ROWS}-row archetype. Measured: {spawned} spawns / {despawned} \
+             despawns across the run; population {entities_before} -> {entities_after}."
+        ),
+        setup,
+        &samples,
+        control,
+        live,
+    ));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// S3 — the query-and-event loop: the App funnel WITH `update_events` doing work
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Clone, Copy)]
+struct NoParticipants;
+impl Participants for NoParticipants {
+    fn participant_count() -> usize {
+        0
+    }
+    fn participant_info() -> &'static [ParticipantInfo] {
+        &[]
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NoParameters;
+impl Parameters for NoParameters {}
+
+/// A hand-written `Event` impl (the `#[event]` macro path is exercised by the
+/// kernel suites; this binary only needs one lane-carrying type).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Ping {
+    value: u32,
+}
+
+impl Event for Ping {
+    type Participants = NoParticipants;
+    type Parameters = NoParameters;
+    fn event_id() -> u64 {
+        200
+    }
+    fn event_name() -> &'static str {
+        "Ping"
+    }
+    fn new(_: NoParticipants, _: NoParameters) -> Self {
+        Ping { value: 0 }
+    }
+    fn participants(&self) -> &NoParticipants {
+        unimplemented!()
+    }
+    fn participants_mut(&mut self) -> &mut NoParticipants {
+        unimplemented!()
+    }
+    fn parameters(&self) -> &NoParameters {
+        unimplemented!()
+    }
+    fn parameters_mut(&mut self) -> &mut NoParameters {
+        unimplemented!()
+    }
+}
+
+fn send_pings(mut w: EventWriter<Ping>, mut tally: ResMut<EventTally>) {
+    for i in 0..EVENTS_PER_FRAME {
+        w.send(Ping { value: i })
+            .expect("send within lane capacity");
+        tally.sent += 1;
+    }
+}
+
+fn read_pings(mut r: EventReader<Ping>, mut tally: ResMut<EventTally>) {
+    let mut n = 0u64;
+    for e in r.read() {
+        black_box(e.value);
+        n += 1;
+    }
+    tally.received += n;
+}
+
+fn touch_payload(mut q: Query<Mut<Payload>>) {
+    for mut p in q.iter_mut() {
+        p.v = p.v.wrapping_add(1);
+    }
+}
+
+fn count_changed(q: Query<&Payload, Changed<Payload>>, mut tally: ResMut<EventTally>) {
+    tally.changed_matches += q.iter().count() as u64;
+}
+
+fn s3_query_and_event_loop(rows: &mut Vec<Row>) {
+    const WORKERS: usize = 2;
+    register_event::<Ping>(200);
+    let mut samples: Vec<Snap> = Vec::with_capacity(TOTAL_FRAMES);
+
+    let setup_before = Snap::now();
+    let mut app = App::with_pool(pool(WORKERS));
+    seed_payload(app.world_mut(), ROWS);
+    app.world_mut()
+        .preregister_event::<Ping>(
+            EventConfig::default_for(WORKERS as u32 + 1).expect("event config for W+1 lanes"),
+        )
+        .expect("preregister Ping");
+    app.world_mut().insert_resource(EventTally::default());
+    app.set_event_update_policy(EventUpdatePolicy::EveryFrame);
+    app.add_systems(send_pings);
+    app.add_systems(read_pings);
+    app.add_systems(touch_payload);
+    app.add_systems(count_changed);
+    app.finish();
+    for _ in 0..3 {
+        app.update_with_delta(Duration::from_millis(16));
+    }
+    let setup = Snap::now().since(setup_before);
+
+    let before = {
+        let t = app.world().resource::<EventTally>();
+        (t.sent, t.received, t.changed_matches)
+    };
+
+    drive(
+        || app.update_with_delta(Duration::from_millis(16)),
+        &mut samples,
+    );
+    let (control, live) = liveness_probe("S3", &samples, || {
+        app.update_with_delta(Duration::from_millis(16))
+    });
+
+    // ── Anti-vacuity: events were actually delivered, Changed actually matched ──
+    let t = app.world().resource::<EventTally>();
+    let sent = t.sent - before.0;
+    let received = t.received - before.1;
+    let changed = t.changed_matches - before.2;
+    let frames = (TOTAL_FRAMES + 2) as u64;
+    assert_eq!(
+        sent,
+        frames * EVENTS_PER_FRAME as u64,
+        "S3: the writer did not run every frame"
+    );
+    assert!(
+        received >= (frames - 2) * EVENTS_PER_FRAME as u64,
+        "S3: ANTI-VACUITY FAILED — only {received} of {sent} events reached a reader; \
+         the event lane is not delivering and its per-frame cost is unmeasured"
+    );
+    assert!(
+        changed >= (frames - 1) * ROWS as u64,
+        "S3: ANTI-VACUITY FAILED — Changed<Payload> matched {changed} rows over {frames} \
+         frames; change detection is not seeing the mutation"
+    );
+
+    rows.push(report(
+        "S3 — query + event loop through App frames (EveryFrame swap)",
+        &format!(
+            "{WORKERS} workers, {ROWS} rows, 4 Main systems: send {EVENTS_PER_FRAME} \
+             events, read them, mutate every row through Mut<T>, count Changed<T>. \
+             Measured: {sent} sent / {received} received / {changed} Changed matches."
+        ),
+        setup,
+        &samples,
+        control,
+        live,
+    ));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE GATE — every scene's steady-state envelope, pinned at what it IS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The profile the pins were measured in. The two profiles differ in exactly
+/// two places, both measured: a debug build's colored pipeline makes ONE extra
+/// `OTHER` acquisition per step (the `cfg!(debug_assertions)`-gated
+/// `debug_assert_coloring` scratch in `ConstraintGraph::build`, the same one
+/// `constraint_graph_o4_world.rs` tolerates), and a debug build's pyramid is
+/// height 10 instead of 15, so S1c is a different scene.
+const RELEASE: bool = !cfg!(debug_assertions);
+
+/// One scene's pinned steady-state envelope over the 256-frame window.
+///
+/// Pinned per CLASS rather than as one total, because one total is exactly
+/// the number a regression can hide under: an App frame's MAX is 3 whether it
+/// is `1 scope + 1 chunk + 1 injector block` or `1 + 1 + 1 new Vec`. The
+/// classes cannot trade against each other.
+struct Pin {
+    /// Row label prefix (unique across the census).
+    scene: &'static str,
+    /// Worker threads in the scene's pool — the bound on first-touch `OTHER`.
+    workers: u64,
+    /// Scope frames on EVERY steady frame, inclusive range.
+    scope: (u64, u64),
+    /// `ScopeBlock` chunks on EVERY steady frame, inclusive range.
+    chunk: (u64, u64),
+    /// Per-frame MAX of every non-`OTHER` acquisition (dispatch objects plus
+    /// `realloc`s).
+    dispatch_max: u64,
+    /// `OTHER` acquisitions the scene makes on every frame BY DESIGN (0, except
+    /// the debug-only coloring scratch).
+    other_per_frame: u64,
+    /// `realloc`s over the whole steady window.
+    realloc_sum: u64,
+}
+
+impl Pin {
+    /// The first-touch allowance: crossbeam-epoch's `Collector::register`,
+    /// the ONLY `OTHER` site `BOYKO_ALLOC_TRACE=1` finds in these scenes (36 of
+    /// 36 captures across 24 fresh Apps), fires once per pool thread on its
+    /// first steal — which can land in any frame, and on a fresh 2-worker App
+    /// lands in the steady window more often than not (660 of 1056, the
+    /// attribution binary's section G). Two per thread rather than one, because
+    /// a thread can also finish BOOTING after setup (std's 30-byte UTF-16 copy
+    /// of the worker name for `SetThreadDescription`, 13 Apps in 832, captured
+    /// by stack) and because one census window measured THREE on a 2-worker
+    /// pool whose third object is still unnamed (see "Open" in the header).
+    /// Measured worst: 3 against this allowance of 4.
+    fn first_touch(&self) -> u64 {
+        2 * self.workers
+    }
+    /// The steady-state MAX this scene may reach on any single frame.
+    fn total_max(&self) -> u64 {
+        self.dispatch_max + self.other_per_frame + self.first_touch()
+    }
+}
+
+/// The pins. Every number is the MEASURED steady-state figure on
+/// `merge/ke16-into-ecsnative` @ `ca582e72`, 2026-09-10, re-confirmed
+/// 2026-09-11 (nine release and five debug runs in all,
+/// `stable-x86_64-pc-windows-gnu` rustc 1.98.1); the header lists
+/// the per-scene measurements they were read from. Headroom is ZERO wherever
+/// the count is structural, and each non-zero headroom says why in one line.
+/// S1c is the one pin read from a longer run than its own window (the
+/// 4,352-step adjudication run, 2026-09-11) — and only DOWNWARD: upward it is
+/// the window's own maximum. Its RELEASE pin was re-measured and re-pinned by the
+/// same long-run protocol after A7a (base `9f712204` + A7a, 2026-09-18,
+/// `stable-x86_64-pc-windows-msvc` rustc 1.98.1), where the window's maximum is
+/// also the long run's. Both S1c pins were re-measured and re-pinned again after
+/// A7b (A7a + A7b, 2026-09-18, same toolchain): release and debug now read the
+/// long run's envelope in both directions (header, "S1c after A7b"). The RELEASE pin was
+/// re-pinned a third time, DOWN, after the default SIMD flip (2026-09-18, same
+/// toolchain): the new long run's envelope (header, "S1c after the default SIMD flip").
+/// Both S1c pins were re-pinned again, +1 scope and +1 chunk, after the default
+/// parallel narrowphase (L5 C4, 2026-09-21, same toolchain) — the release pin's fourth
+/// re-pin, the debug pin's second: the narrowphase's one dispatch scope and its one
+/// block, on every frame of both long runs (header, "S1c after the default parallel
+/// narrowphase"). The RELEASE pin was re-pinned a fifth time, DOWN, after L11 C2
+/// (2026-09-21, same toolchain): the colour task's cell shrank from 280 B to 120 B and
+/// every colour scope fits its first block, so chunk 230 -> 134 and dispatch MAX 365 ->
+/// 269 on every frame of the long run; scope unmoved, and the debug pin unmoved because
+/// its long run reproduced every figure (header, "S1c after L11 C2"). The RELEASE pin was
+/// re-pinned a sixth time after L9 C4 (2026-09-24, same toolchain): contact reuse on by
+/// default settles the pile to ten colours on 4,340 of the long run's 4,352 frames, so
+/// scope and chunk 134..=134 -> 122..=134, top and dispatch MAX unmoved, attributed by the
+/// same binary with reuse off; the debug pin unmoved, its long run's envelope the same
+/// (header, "S1c after L9 C4"). S1e (2026-09-25) is S1c's pile with contact reuse off,
+/// pinned at S1c's L11 C2 envelope in both profiles, which its window reproduces: the arm
+/// on which the fan-out regression reds on every release frame (same header section). All three
+/// parallel piles (S1c, S1e, S1f) were re-pinned DOWN after SR's flip (2026-10-07, same
+/// toolchain): 3..=3 / 3..=3 / dispatch MAX 7 on every frame of every long run, in both profiles
+/// (header, "S1c, S1e and S1f after SR").
+fn pins() -> [Pin; 19] {
+    // An App frame: one install frame (a `ScopeShared` + one chunk) and at most
+    // one injector block — the block arrives once per 63 dispatcher-side pushes,
+    // so its per-frame max is 1 and it is already inside the measured 3.
+    const fn app(scene: &'static str, scope: u64, workers: u64) -> Pin {
+        Pin {
+            scene,
+            workers,
+            scope: (scope, scope),
+            chunk: (scope, scope),
+            dispatch_max: 2 * scope + 1,
+            other_per_frame: 0,
+            realloc_sum: 0,
+        }
+    }
+    let colored_other = if RELEASE { 0 } else { 1 };
+    [
+        // No system, no install frame: `Schedule::run` returns at its
+        // `systems.is_empty()` guard.
+        Pin {
+            scene: "S0 — executor floor: App frame, 0 concurrent",
+            workers: 2,
+            scope: (0, 0),
+            chunk: (0, 0),
+            dispatch_max: 0,
+            other_per_frame: 0,
+            realloc_sum: 0,
+        },
+        app("S0 — executor floor: App frame, 1 concurrent", 1, 2),
+        app("S0 — executor floor: App frame, 2 concurrent", 1, 2),
+        app("S0 — executor floor: App frame, 4 concurrent", 1, 2),
+        app("S0 — executor floor: App frame, 8 concurrent", 1, 2),
+        app("S0 — executor floor: App frame, 16 concurrent", 1, 2),
+        // Two `Schedule::run`s a frame (Fixed + Main).
+        app("S0b", 2, 2),
+        // Install frame + the `par_iter` fan-out's nested scope: `app`'s shape
+        // exactly — 2 scope + 2 chunk + at most 1 injector block = dispatch MAX
+        // 5, `realloc` 0. Re-derived 2026-09-11 after EM2′ from the frame
+        // arithmetic, not by narrowing a measurement — and the measurement
+        // agrees in both profiles (release and debug: 4.031 / 5, `realloc` 0):
+        //   * `realloc` 0 is STRUCTURAL. The only growable this scene ever had
+        //     was `EntityMaster::free_entity_ids`, a `Vec` that took 64 despawns
+        //     a frame and was never popped by `Commands::spawn` (pinned at 2 per
+        //     window, across its 8192 and 16384 doublings). Since EM2′ the
+        //     recycled ids live on a `VmColumn` (no heap at all), and each
+        //     frame's 64 spawns claim the previous window's 64 despawns, so the
+        //     stack holds <= 64 entries at rest — inside its first commit slab
+        //     (4096 entries) for the life of the scene.
+        //   * dispatch MAX 5, no headroom: the former +1 covered the free-list
+        //     doubling landing in the same frame as the injector block. That
+        //     event no longer exists.
+        // ⚠ This pin is BLIND to a regression of the leak itself: the stack is
+        // `VirtualAlloc`-backed, so a deferred route that stopped recycling
+        // would grow it (and the id-slot store) in uncounted commits and stay
+        // green here. `em_deferred_recycle.rs` (T-RED-1) and the attribution
+        // binary's C6 count the ids instead — see "Open" in the header.
+        app("S2", 2, 4),
+        app("S3", 1, 2),
+        app("S1a", 1, 1),
+        Pin {
+            other_per_frame: colored_other,
+            ..app("S1b", 1, 4)
+        },
+        // L10 C0: S1b with sleeping on, pinned as S1b — the latch and the per-island scratch
+        // are kernel columns resized in place, so a sleeping step acquires nothing S1b does not.
+        Pin {
+            other_per_frame: colored_other,
+            ..app("S1d", 1, 4)
+        },
+        // L10 C3b (design 04 "Census (W5)"): every sleep-skip transition inside the window —
+        // Rows steps, restores, move-ins, a field edit, the D-H flush and its Reset step,
+        // `wake_all` — on S1b's frame: the held store, the restore sources and the capture are
+        // kernel columns, so no transition acquires anything.
+        Pin {
+            other_per_frame: colored_other,
+            ..app("S8 —", 1, 1)
+        },
+        // L10 C3c: S8's window on the tree broadphase — the sleeper set's admissions, releases,
+        // translations and dissolutions live in tree columns and `ContactPairs`' withheld
+        // column, so the tree seam acquires nothing either.
+        Pin {
+            other_per_frame: colored_other,
+            ..app("S8-tree", 1, 1)
+        },
+        // L10 C3b (design 08 §7, ruling W1): the install frame, plus the narrowphase's one
+        // scope and one block on a dispatching frame (phase A) and none inline (phase B). The
+        // arm asserts the exact per-frame structure (`scope == 1 + Δnp`, every colour below the
+        // solver's dispatch width, no Grid emit scope below its body floor); the range here is
+        // its two frame shapes, no headroom.
+        Pin {
+            scene: "S8b-tree",
+            workers: 4,
+            scope: (1, 2),
+            chunk: (1, 2),
+            dispatch_max: 5,
+            other_per_frame: colored_other,
+            realloc_sum: 0,
+        },
+        Pin {
+            scene: "S8b-grid",
+            workers: 4,
+            scope: (1, 2),
+            chunk: (1, 2),
+            dispatch_max: 5,
+            other_per_frame: colored_other,
+            realloc_sum: 0,
+        },
+        if RELEASE {
+            // 1240 bodies. RE-PINNED from the 4,352-step long run after A7b
+            // (2026-09-18), not widened: A7b's face-versus-edge rule carries a
+            // resting face pair's clipped patch instead of one edge point, so the
+            // colours carry more slots, and every bound below is a value that run
+            // measured (header, "S1c after A7b"). Every one of its 4,352 steady
+            // frames dispatches eleven colours (scope 133) on 229 or 241 chunks,
+            // dispatch MAX 375, and a relaxed counter at the colour solve's own
+            // `pool.scope` accounted for every non-install scope frame on every
+            // frame, so the move is an extra colour, not an extra fan-out. ZERO
+            // upward headroom: the one-colour allowance an earlier form of this
+            // pin carried upward was exactly the size of one extra fan-out per
+            // colour pass, and that regression stayed green inside it (see "The
+            // gate" in the header). An upward colour is a red to re-measure,
+            // never a pin to widen.
+            // RE-PINNED DOWN after the default SIMD flip (2026-09-18): the O7 cohort
+            // kernel is bit-identical, so the colours did not move (scope 133 on all
+            // 4,352 long-run frames), but its cohort-snapped chunk cut spawns fewer
+            // tasks, and all 4,352 frames read 229 chunks, dispatch MAX 363. The rule
+            // keeps no upward headroom, so 241 / 375 went with it (header, "S1c after
+            // the default SIMD flip").
+            // RE-PINNED +1 / +1 after the default parallel narrowphase (L5 C4,
+            // 2026-09-21): the narrowphase's one `pool.scope` and its one block on
+            // every one of 4,352 long-run frames (134 / 230, dispatch MAX 365), its own
+            // counter +1 on each, the colours unmoved (header, "S1c after the default
+            // parallel narrowphase"). No headroom either way.
+            // RE-PINNED DOWN after L11 C2 (2026-09-21): the colour task captures a 5-word
+            // `CohortSolveView` instead of the 25-word `ContactSolveView`, so its cell is
+            // 120 B, not 280, and 34 fit a chunk where 14 did; the task counts did not
+            // move, so the 96 colour scopes a frame that took a second chunk take none,
+            // and all 4,352 long-run frames read 134 chunks, dispatch MAX 269, -96 on
+            // every frame against the C1 control (header, "S1c after L11 C2"). The rule
+            // keeps no headroom either way, so 230 / 365 went with it: a chunk above 134
+            // is a colour scope that overflowed its first block again (a closure past
+            // 112 B at W=8's 32 tasks, or a colour past 34 tasks), and a red to
+            // re-measure.
+            // RE-PINNED, FLOOR DOWN, after L9 C4 (2026-09-24): contact reuse on by
+            // default moves the contact set by design, and the long run dispatches ten
+            // colours (scope and chunk 122) on 4,340 frames and eleven (134) on 12, all in
+            // the census window; dispatch MAX 269 and the top did not move. The same
+            // binary with `contact_reuse = false` reads 134 / 134 on all 4,352 frames, the
+            // L11 C2 long run digit for digit (header, "S1c after L9 C4"). The rule keeps
+            // no upward headroom; the cost is that the fan-out regression reds here only
+            // on the 12 eleven-colour frames (measured). S1e, below, reds on all 256.
+            // RE-PINNED +1 / +1 after S4 (W8S lane commit 4, 2026-09-27): the solve setup's one
+            // scope and its one block on every one of 4,352 long-run frames, its own counter +1 on
+            // each, every histogram bin +2 with the same frame counts (header, "S1c and S1e after
+            // S4"). No headroom either way.
+            // RE-PINNED UP after V2 (2026-10-01): sixteen colours on every one of the 4,352
+            // long-run frames (scope and chunk 195, dispatch MAX 391), attributed by S1f, the
+            // same binary at `d = 0`, which reads S4's long run bin for bin (header, "S1c and S1e
+            // after V2"). Old 123..=135 / 123..=135 / 271, now S1f's. No headroom either way.
+            // RE-PINNED DOWN after SR's flip (2026-10-07): the install frame, the narrowphase's
+            // dispatch and the solve region, 3 / 3 on all 4,352 long-run frames, dispatch MAX 7,
+            // `region_dispatches` +1 on each (header, "S1c, S1e and S1f after SR"). Old
+            // 195..=195 / 195..=195 / 391. No headroom either way.
+            Pin {
+                scene: "S1c",
+                workers: 4,
+                scope: (3, 3),
+                chunk: (3, 3),
+                dispatch_max: 7,
+                other_per_frame: 0,
+                realloc_sum: 0,
+            }
+        } else {
+            // 385 bodies (height 10). RE-PINNED from the 4,352-step debug long
+            // run after A7b (2026-09-18): 97 or 109 scope frames (8 or 9
+            // dispatched colours) with exactly one chunk each, dispatch MAX 219 —
+            // the census window's own MAX is 218, so the long run, not the
+            // window, sets the top. The same dispatch counter as the release pin
+            // accounted for every non-install scope frame on every frame. The
+            // release pin's shape: the long run's envelope, ZERO upward headroom.
+            // RE-PINNED +1 / +1 after the default parallel narrowphase (L5 C4,
+            // 2026-09-21): the narrowphase's one scope and one block on every frame
+            // of the 4,352-step debug long run, its counter +1 on each (header, "S1c
+            // after the default parallel narrowphase"). UNCHANGED by L11 C2 (2026-09-21):
+            // its 4,352-step debug long run reproduced every figure digit for digit — a
+            // debug colour's scope holds one chunk whatever its cell size (header, "S1c
+            // after L11 C2"). UNCHANGED by L9 C4 (2026-09-24): its debug long run with
+            // contact reuse on reaches the same envelope (98..=110, dispatch MAX 221), but
+            // its nine-colour frames no longer fall in the census window, so this arm no
+            // longer reds on the fan-out regression (measured); S1e's debug arm, below,
+            // does (header, "S1c after L9 C4"). RE-PINNED +1 / +1 after S4 (W8S lane commit 4,
+            // 2026-09-27): the solve setup's scope and block on every frame of the 4,352-step
+            // debug long run, its counter +1 on each (header, "S1c and S1e after S4"). RE-PINNED UP
+            // after V2 (2026-10-01): the height-10 pile dispatches sixteen colours on every one of
+            // the 4,352 debug long-run frames too, 195 / 195, dispatch MAX 391; old 99..=111 / 223,
+            // now S1f's (header, "S1c and S1e after V2"). RE-PINNED DOWN after SR's flip
+            // (2026-10-07): 3 / 3 on all 4,352 debug long-run frames, dispatch MAX 7 (header, "S1c,
+            // S1e and S1f after SR"); old 195..=195 / 391.
+            Pin {
+                scene: "S1c",
+                workers: 4,
+                scope: (3, 3),
+                chunk: (3, 3),
+                dispatch_max: 7,
+                other_per_frame: 1,
+                realloc_sum: 0,
+            }
+        },
+        if RELEASE {
+            // S1c with contact reuse OFF: the pin S1c carried after L11 C2 (2026-09-21),
+            // measured again on the L9 C4 tree by S1c's long-run protocol, same binary, reuse
+            // off: 134 / 134 on all 4,352 frames, dispatch MAX 269 (header, "S1c after L9 C4").
+            // No headroom either way. This is the every-frame arm of the fan-out gate: that
+            // regression lands at 146 / 146 and 292..293 on all 256 window frames here
+            // (measured, 2026-09-25), where S1c's pin sees it on 12. RE-PINNED +1 / +1 after S4
+            // (W8S lane commit 4, 2026-09-27): 135 / 135 on all 4,352 long-run frames, dispatch
+            // MAX 271, the solve setup's counter +1 on each (header, "S1c and S1e after S4").
+            // RE-PINNED UP after V2 (2026-10-01): 195 / 195 on all 4,352 long-run frames, dispatch
+            // MAX 391, S1c's figures — under V2 the reuse-off pile dispatches the same sixteen
+            // colours (header, "S1c and S1e after V2"). No headroom either way. RE-PINNED DOWN
+            // after SR's flip (2026-10-07): 3 / 3 on all 4,352 long-run frames, dispatch MAX 7, S1c's
+            // figures (header, "S1c, S1e and S1f after SR"); old 195..=195 / 391.
+            Pin {
+                scene: "S1e",
+                workers: 4,
+                scope: (3, 3),
+                chunk: (3, 3),
+                dispatch_max: 7,
+                other_per_frame: 0,
+                realloc_sum: 0,
+            }
+        } else {
+            // S1c's debug pin before L9 C4, whose long run the same binary with contact reuse
+            // off reproduces digit for digit: 98 or 110 scope frames with one chunk each,
+            // dispatch MAX 221, and the census window holds 12 of the nine-colour frames
+            // (header, "S1c after L9 C4"). The fan-out regression reds here through those 12
+            // (measured, 2026-09-25: scope 110..=122, dispatch 244), where S1c's pin is green.
+            // RE-PINNED +1 / +1 after S4 (W8S lane commit 4, 2026-09-27): 99 or 111 on the
+            // 4,352-step debug long run, dispatch MAX 223 (header, "S1c and S1e after S4").
+            // RE-PINNED UP after V2 (2026-10-01): 195 / 195 on all 4,352 debug long-run frames,
+            // dispatch MAX 391 (header, "S1c and S1e after V2"). RE-PINNED DOWN after SR's flip
+            // (2026-10-07): 3 / 3 on all 4,352 debug long-run frames, dispatch MAX 7 (header, "S1c,
+            // S1e and S1f after SR").
+            Pin {
+                scene: "S1e",
+                workers: 4,
+                scope: (3, 3),
+                chunk: (3, 3),
+                dispatch_max: 7,
+                other_per_frame: 1,
+                realloc_sum: 0,
+            }
+        },
+        // V2: S1c at `speculative_distance = 0` and the velocity term off, which carries S1c's
+        // pins from before V2 (the S4 re-pin, both profiles) and never moves with a value change of
+        // V2's; read again at V2's flip on the 4,352-step long runs, S4's histograms bin for bin
+        // (header, "S1c and S1e after V2"). RE-PINNED DOWN after SR's flip (2026-10-07): the d = 0
+        // pile opens the solve region on every frame too, 3 / 3 on all 4,352 long-run frames,
+        // dispatch MAX 7, in both profiles (header, "S1c, S1e and S1f after SR"); old release
+        // 123..=135 / 271, debug 99..=111 / 223.
+        if RELEASE {
+            Pin {
+                scene: "S1f",
+                workers: 4,
+                scope: (3, 3),
+                chunk: (3, 3),
+                dispatch_max: 7,
+                other_per_frame: 0,
+                realloc_sum: 0,
+            }
+        } else {
+            Pin {
+                scene: "S1f",
+                workers: 4,
+                scope: (3, 3),
+                chunk: (3, 3),
+                dispatch_max: 7,
+                other_per_frame: 1,
+                realloc_sum: 0,
+            }
+        },
+    ]
+}
+
+/// Evaluates every pin against its row. Collects EVERY violation before
+/// failing, so one red run names all of them rather than the first.
+fn gate(rows: &[Row]) {
+    let pins = pins();
+    let mut violations: Vec<String> = Vec::with_capacity(18);
+    let mut covered = 0usize;
+    say!(
+        "\n══════════ GATE — pinned steady-state envelopes ({}) ══════════",
+        if RELEASE { "release" } else { "debug" }
+    );
+    for pin in &pins {
+        let matching: Vec<&Row> = rows
+            .iter()
+            .filter(|r| r.label.starts_with(pin.scene))
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "GATE: pin `{}` matched {} rows — every pin must name exactly one scene",
+            pin.scene,
+            matching.len()
+        );
+        let r = matching[0];
+        covered += 1;
+        let mut check = |ok: bool, what: String| {
+            if !ok {
+                violations.push(format!("{}: {what}", r.label));
+            }
+        };
+        check(
+            r.max <= pin.total_max(),
+            format!("steady MAX {} > pinned {}", r.max, pin.total_max()),
+        );
+        check(
+            r.dispatch_max <= pin.dispatch_max,
+            format!(
+                "dispatch MAX {} > pinned {}",
+                r.dispatch_max, pin.dispatch_max
+            ),
+        );
+        check(
+            r.scope.1 >= pin.scope.0 && r.scope.2 <= pin.scope.1,
+            format!(
+                "scope frames {}..={} outside pinned {}..={}",
+                r.scope.1, r.scope.2, pin.scope.0, pin.scope.1
+            ),
+        );
+        check(
+            r.chunk.1 >= pin.chunk.0 && r.chunk.2 <= pin.chunk.1,
+            format!(
+                "chunks {}..={} outside pinned {}..={}",
+                r.chunk.1, r.chunk.2, pin.chunk.0, pin.chunk.1
+            ),
+        );
+        check(
+            r.inj.2 <= 1,
+            format!(
+                "{} injector blocks in one frame; the per-63-pushes block can arrive at most once",
+                r.inj.2
+            ),
+        );
+        let other_budget = pin.other_per_frame * STEADY_FRAMES as u64 + pin.first_touch();
+        check(
+            r.other.3 <= other_budget,
+            format!(
+                "{} OTHER acquisitions over the window > budget {other_budget}",
+                r.other.3
+            ),
+        );
+        check(
+            r.realloc_sum <= pin.realloc_sum,
+            format!(
+                "{} reallocs over the window > pinned {}",
+                r.realloc_sum, pin.realloc_sum
+            ),
+        );
+        say!(
+            "{:<66} MAX {:>4} <= {:<4} dispatch {:>4} <= {:<4} scope {:>3}..={:<3} in {:>3}..={:<3} chunk {:>3}..={:<3} in {:>3}..={:<3} OTHER {:>3} <= {:<3} realloc {} <= {}",
+            r.label,
+            r.max,
+            pin.total_max(),
+            r.dispatch_max,
+            pin.dispatch_max,
+            r.scope.1,
+            r.scope.2,
+            pin.scope.0,
+            pin.scope.1,
+            r.chunk.1,
+            r.chunk.2,
+            pin.chunk.0,
+            pin.chunk.1,
+            r.other.3,
+            other_budget,
+            r.realloc_sum,
+            pin.realloc_sum
+        );
+    }
+    assert_eq!(
+        covered,
+        rows.len(),
+        "GATE: {} scenes ran and {covered} were pinned — an unpinned scene is an ungated one",
+        rows.len()
+    );
+    // Positive controls on the classes themselves (see `C_SCOPE`'s note): if a
+    // class predicate stopped matching its object, the class would read ZERO
+    // and every "<=" above would be green from an emptied bucket.
+    let s16 = rows
+        .iter()
+        .find(|r| {
+            r.label
+                .starts_with("S0 — executor floor: App frame, 16 concurrent")
+        })
+        .expect("the 16-system row");
+    if s16.inj.3 == 0 {
+        violations.push(format!(
+            "POSITIVE CONTROL: the 16-system scene pushed {} tasks over its window and the \
+             injector class saw NO block — its predicate ({INJECTOR_BLOCK_BYTES} B, align 8) no \
+             longer matches crossbeam's block",
+            16 * STEADY_FRAMES
+        ));
+    }
+    if violations.is_empty() {
+        say!("GATE: GREEN — {covered} scenes, every class inside its pin");
+    } else {
+        for v in &violations {
+            say!("GATE VIOLATION: {v}");
+        }
+        panic!(
+            "GATE: {} violation(s) of the pinned steady-state allocation envelope — see the \
+             GATE lines above. If the change is intended, re-measure and re-pin WITH the new \
+             numbers in the header; do not widen a pin to make a red go away.",
+            violations.len()
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The single entry point
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The whole census, every scene in sequence, on the thread that calls it.
+///
+/// ONE entry point, not a stylistic choice: this binary's counter is
+/// process-global, so two scenes running at once would each measure the other's
+/// allocations and report a number that is not wrong by a little. It used to be
+/// the single `#[test]` of a libtest binary for exactly that reason; since the
+/// target became `harness = false` (see [`main`]) nothing else runs in the
+/// process at all. The two anti-vacuity probes run FIRST, so a dead counter
+/// fails the run before any scene prints a number.
+fn frame_allocation_census() {
+    counter_is_live();
+    class_predicates_match_the_threadpool_receipt();
+    worker_thread_allocations_are_counted();
+
+    // One row per pinned scene, so the capacity cannot fall behind the pin list.
+    let mut rows: Vec<Row> = Vec::with_capacity(pins().len());
+    s0_executor_floor_per_system(&mut rows);
+    s0b_executor_floor_with_fixed_substep(&mut rows);
+    s2_spawn_despawn_churn_and_par_iter(&mut rows);
+    s3_query_and_event_loop(&mut rows);
+    s1a_rigid_pile_reference_pipeline_serial(&mut rows);
+    s1b_rigid_pile_colored_serial(&mut rows);
+    s1c_rigid_pile_colored_parallel(&mut rows);
+    s1e_rigid_pile_colored_parallel_reuse_off(&mut rows);
+    s1f_rigid_pile_colored_parallel_d0(&mut rows);
+    s1d_rigid_pile_colored_serial_sleeping(&mut rows);
+    s8_sleep_skip_transitions(&mut rows, false);
+    s8_sleep_skip_transitions(&mut rows, true);
+    s8b_sleep_skip_parallel_narrowphase(&mut rows, boyko_physics::resources::BroadphaseKind::Tree);
+    s8b_sleep_skip_parallel_narrowphase(&mut rows, boyko_physics::resources::BroadphaseKind::Grid);
+
+    // ── Anti-vacuity across arms: the parallel dispatch really did engage ──
+    //
+    // `PhysicsConfig::parallel_solve = true` is a REQUEST, not an event: the
+    // colored solver still takes the inline path unless the widest color clears
+    // its own slot floor, and `parallel_broadphase` is inert below its body
+    // floor. Two arms differing only in those two flags is the only statement
+    // that distinguishes "parallel dispatch is what costs this" from "the flag
+    // was set". If they measure the same, S1c's number is about the colored
+    // pipeline and NOT about parallelism, and must not be quoted as the latter.
+    let serial_arm = rows
+        .iter()
+        .find(|r| r.label.starts_with("S1b"))
+        .expect("S1b row");
+    let parallel_arm = rows
+        .iter()
+        .find(|r| r.label.starts_with("S1c"))
+        .expect("S1c row");
+    let engaged = parallel_arm.mean > serial_arm.mean;
+    say!(
+        "
+[anti-vacuity] parallel dispatch engaged: {} — colored-serial {:.3} vs colored-parallel {:.3} acquisitions/step ({:.1}x)",
+        if engaged { "YES" } else { "NO" },
+        serial_arm.mean,
+        parallel_arm.mean,
+        parallel_arm.mean / serial_arm.mean.max(1.0),
+    );
+    assert!(
+        engaged,
+        "ANTI-VACUITY FAILED — the colored-parallel arm ({:.3}) did not acquire more than the colored-serial arm ({:.3}) on the same {}-body scene, so the parallel dispatch never engaged and neither arm measures it",
+        parallel_arm.mean,
+        serial_arm.mean,
+        pyramid_height(),
+    );
+
+    say!(
+        "
+
+══════════ SUMMARY — heap acquisitions per steady-state frame ══════════"
+    );
+    say!(
+        "{:<66} {:>4} {:>10} {:>7} {:>7} {:>8} {:>12} {:>8}",
+        "scene", "K", "mean", "min", "MAX", "realloc", "bytes/frame", "setup"
+    );
+    for r in &rows {
+        say!(
+            "{:<66} {:>4} {:>10.3} {:>7} {:>7} {:>8} {:>12.0} {:>8}",
+            r.label, r.k, r.mean, r.min, r.max, r.realloc_max, r.bytes_mean, r.setup_alloc
+        );
+    }
+    say!("═══════════════════════════════════════════════════════════════════════");
+    say!(
+        "
+══════════ BY CLASS — steady-state mean / MAX per frame ══════════"
+    );
+    say!(
+        "{:<66} {:>14} {:>14} {:>14} {:>14}",
+        "scene", "scope", "chunk", "injector", "OTHER"
+    );
+    for r in &rows {
+        say!(
+            "{:<66} {:>8.3} / {:<3} {:>8.3} / {:<3} {:>8.3} / {:<3} {:>8.3} / {:<3}",
+            r.label,
+            r.scope.0,
+            r.scope.2,
+            r.chunk.0,
+            r.chunk.2,
+            r.inj.0,
+            r.inj.2,
+            r.other.0,
+            r.other.2
+        );
+    }
+    say!("═══════════════════════════════════════════════════════════════════════");
+    say!(
+        "Counts only. No wall-clock figure is produced anywhere in this binary, and none may be derived from it."
+    );
+
+    gate(&rows);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The runner — `harness = false`, with libtest's command-line contract
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The name libtest listed and filtered this census under while it was a
+/// `#[test]`; kept so every existing filter and log search still finds it.
+const TEST_NAME: &str = "frame_allocation_census";
+
+/// The subset of libtest's command line a runner actually sends. Anything else
+/// that starts with `-` is accepted and ignored, as libtest's own no-op flags
+/// (`--test-threads`, `--color`, `-q`, …) are for a one-test binary.
+#[derive(Default)]
+struct Cli {
+    list: bool,
+    ignored_only: bool,
+    exact: bool,
+    nocapture: bool,
+    show_output: bool,
+    filters: Vec<String>,
+    skips: Vec<String>,
+}
+
+impl Cli {
+    fn from_env() -> Self {
+        let mut cli = Cli::default();
+        let mut args = std::env::args().skip(1);
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--list" => cli.list = true,
+                "--ignored" => cli.ignored_only = true,
+                "--exact" => cli.exact = true,
+                "--nocapture" | "--no-capture" => cli.nocapture = true,
+                "--show-output" => cli.show_output = true,
+                "--skip" => cli.skips.extend(args.next()),
+                // libtest's flags that take their value as the NEXT argument:
+                // consume it, or it would be read as a name filter.
+                "--test-threads" | "--color" | "--format" | "--logfile" | "--shuffle-seed"
+                | "-Z" => {
+                    let _ = args.next();
+                }
+                flag if flag.starts_with('-') => {}
+                filter => cli.filters.push(filter.to_owned()),
+            }
+        }
+        cli.nocapture |= std::env::var_os("RUST_TEST_NOCAPTURE").is_some_and(|v| v != "0");
+        cli
+    }
+
+    /// libtest's selection rule for one non-ignored test: excluded by
+    /// `--ignored`, by any `--skip` match, and by name filters none of which
+    /// matches (substring, or equality under `--exact`).
+    fn selects(&self, name: &str) -> bool {
+        let hit = |pat: &String| {
+            if self.exact {
+                name == pat
+            } else {
+                name.contains(pat.as_str())
+            }
+        };
+        !self.ignored_only
+            && !self.skips.iter().any(hit)
+            && (self.filters.is_empty() || self.filters.iter().any(hit))
+    }
+}
+
+/// Runs the census ONLY, on the main thread, with nothing else in the process.
+///
+/// The point of `harness = false` (see "How to run" in the header): the
+/// counter is process-global, and libtest kept a second thread alive beside the
+/// test that allocates on its own schedule — the "has been running for over 60
+/// seconds" notice among it. A runner of our own has no such thread. Everything
+/// `main` allocates (the command line, the report reservation, the panic hook)
+/// is allocated before [`frame_allocation_census`] opens its first window, and
+/// the summary lines after it has closed its last.
+fn main() {
+    let cli = Cli::from_env();
+    if cli.list {
+        if cli.selects(TEST_NAME) {
+            println!("{TEST_NAME}: test");
+        }
+        return;
+    }
+    if cfg!(miri) || !cli.selects(TEST_NAME) {
+        if cfg!(miri) {
+            println!(
+                "{TEST_NAME}: not run under Miri — it counts the native allocator over \
+                 multi-second scenes, which is not Miri's regime"
+            );
+        }
+        // libtest's own summary for a filtered-out test: `running 0 tests` is
+        // the line a reader checks, and it must not read as a pass of the census.
+        println!(
+            "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; \
+             1 filtered out\n"
+        );
+        return;
+    }
+
+    STREAM.store(cli.nocapture, Ordering::Relaxed);
+    HELD.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .reserve(HELD_RESERVE);
+    // A failing assertion prints the report that led up to it before its own
+    // message, as libtest's capture did.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        dump_held();
+        default_hook(info);
+    }));
+
+    println!("\nrunning 1 test");
+    let passed = std::panic::catch_unwind(frame_allocation_census).is_ok();
+    if cli.show_output || !passed {
+        dump_held();
+    }
+    if passed {
+        println!(
+            "test {TEST_NAME} ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; \
+             0 measured; 0 filtered out\n"
+        );
+    } else {
+        println!(
+            "test {TEST_NAME} ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; \
+             0 measured; 0 filtered out\n"
+        );
+        // libtest's exit code for a failed run.
+        std::process::exit(101);
+    }
+}

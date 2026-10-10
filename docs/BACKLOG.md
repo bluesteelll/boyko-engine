@@ -11,6 +11,15 @@
 ## Related
 
 - [PERF-DIRECTIONS.md](PERF-DIRECTIONS.md) - forward-looking performance directions/levers (HW-RT optional backend + RT-lighting confirmed-future, plus GPU-execution / CPU-ECS-SIMD / memory-bandwidth / codegen-PGO axes), each tagged HAVE/PARTIAL/FUTURE. BL-1 below is cross-referenced there.
+- **The language campaigns keep their open questions in their OWN corpus, not here** — this file
+  would otherwise be the third place a fork could be silently settled. *Aether is the language for
+  logic, Gaia the language for data* (owner, 2026-08-28); both are plan-only and uncommitted.
+  Entry point: [AETHER-GAIA-REVISION-2026-08-29.md](AETHER-GAIA-REVISION-2026-08-29.md) (the shared
+  work order — which rung is buildable, which ballot blocks each of the rest). Plans:
+  [aether-v2/CAMPAIGN.md](aether-v2/CAMPAIGN.md) · [gaia/CAMPAIGN.md](gaia/CAMPAIGN.md). The
+  **thirty-two open owner ballots** (`AB-*`, `F*`, `GB-*`) have their bodies in
+  [OPEN-QUESTIONS.md](OPEN-QUESTIONS.md) §2026-08-29 and §2026-08-28 — that file, not this one, is
+  their register.
 
 ## Memory / physical placement
 

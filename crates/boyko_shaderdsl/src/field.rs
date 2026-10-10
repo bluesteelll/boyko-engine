@@ -4,7 +4,7 @@
 //! `crates/boyko_rhi_vulkan/shaders/sdf_field.hlsli` (the GPU field) AND
 //! `boyko_sdf_math` lib.rs:600-689 (the CPU field). Instantiating with `S = f32`
 //! ([`crate::scalar`]'s Eval impl) reproduces the hand-written CPU field
-//! BYTE-IDENTICALLY; instantiating with `S = Emit` ([`crate::emit`]) records the
+//! BYTE-IDENTICALLY; instantiating with `S = Emit` (`crate::emit`) records the
 //! same op tree for the HLSL printer.
 //!
 //! # Op-order is load-bearing
@@ -52,7 +52,7 @@ pub mod kind {
     /// An axis-aligned box primitive — `params.xyz` are the half-extents.
     pub const BOX: u32 = 1;
     /// A capsule primitive — `center.xyz` is endpoint `a`, `params.xyz` is endpoint `b`,
-    /// `params.w` (lifted into [`EditView::radius`]) is the cap radius. APPEND-only
+    /// `params.w` (lifted into [`EditView::radius`](crate::field::EditView::radius)) is the cap radius. APPEND-only
     /// (sphere=0, box=1 are frozen).
     pub const CAPSULE: u32 = 2;
 }

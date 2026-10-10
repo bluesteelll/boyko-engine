@@ -1,0 +1,102 @@
+Preparing worktree (detached HEAD de06b6c9)
+Updating files:  57% (2543/4437)Updating files:  58% (2574/4437)Updating files:  59% (2618/4437)Updating files:  60% (2663/4437)Updating files:  61% (2707/4437)Updating files:  62% (2751/4437)Updating files:  63% (2796/4437)Updating files:  64% (2840/4437)Updating files:  65% (2885/4437)Updating files:  66% (2929/4437)Updating files:  67% (2973/4437)Updating files:  68% (3018/4437)Updating files:  69% (3062/4437)Updating files:  70% (3106/4437)Updating files:  71% (3151/4437)Updating files:  72% (3195/4437)Updating files:  73% (3240/4437)Updating files:  74% (3284/4437)Updating files:  75% (3328/4437)Updating files:  76% (3373/4437)Updating files:  77% (3417/4437)Updating files:  78% (3461/4437)Updating files:  79% (3506/4437)Updating files:  80% (3550/4437)Updating files:  81% (3594/4437)Updating files:  82% (3639/4437)Updating files:  83% (3683/4437)Updating files:  84% (3728/4437)Updating files:  85% (3772/4437)Updating files:  86% (3816/4437)Updating files:  87% (3861/4437)Updating files:  88% (3905/4437)Updating files:  89% (3949/4437)Updating files:  90% (3994/4437)Updating files:  91% (4038/4437)Updating files:  92% (4083/4437)Updating files:  93% (4127/4437)Updating files:  94% (4171/4437)Updating files:  95% (4216/4437)Updating files:  96% (4260/4437)Updating files:  97% (4304/4437)Updating files:  98% (4349/4437)Updating files:  99% (4393/4437)Updating files: 100% (4437/4437)Updating files: 100% (4437/4437), done.
+HEAD is now at de06b6c9 perf(physics): parallel_narrowphase is on by default, and the census pins the one scope and one block its dispatch costs on every frame (L5 C4)
+START 2026-09-21T03:45:48+03:00 cwd=/d/wt/mq-de06b6c9 HEAD=de06b6c952ea396e1380bf7045b7df77793b3def
+RUSTFLAGS=[unset] CARGO_TARGET_DIR=D:/wt/_targets/mq-de06b6c9 RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=6
+host: x86_64-pc-windows-msvc
+    Updating crates.io index
+     Locking 444 packages to latest Rust 1.98.1 compatible versions
+      Adding bevy_ecs v0.18.1 (available: v0.19.1)
+      Adding criterion v0.5.1 (available: v0.8.2)
+      Adding eframe v0.34.3 (available: v0.36.2)
+      Adding getrandom v0.3.4 (available: v0.4.3)
+      Adding rand v0.9.5 (available: v0.10.3)
+      Adding syn v2.0.119 (available: v3.0.6)
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling crossbeam-utils v0.8.23
+   Compiling cfg-if v1.0.5
+   Compiling windows-link v0.2.1
+   Compiling windows-sys v0.61.2
+   Compiling crossbeam-epoch v0.9.21
+   Compiling crossbeam-deque v0.8.8
+   Compiling zerocopy v0.8.57
+   Compiling boyko-diag v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_diag)
+   Compiling getrandom v0.3.4
+   Compiling serde_core v1.0.229
+   Compiling autocfg v1.5.1
+   Compiling syn v2.0.119
+   Compiling num-traits v0.2.19
+   Compiling boyko-log v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_log)
+   Compiling syn v3.0.6
+   Compiling getrandom v0.4.3
+   Compiling serde v1.0.229
+   Compiling zmij v1.0.23
+   Compiling rand_core v0.9.5
+   Compiling crossbeam-queue v0.3.14
+   Compiling static_assertions v1.1.0
+   Compiling serde_json v1.0.151
+   Compiling boyko-utils v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_utils)
+   Compiling rayon-core v1.13.0
+   Compiling boyko-threadpool v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_threadpool)
+   Compiling fixedbitset v0.5.7
+   Compiling either v1.18.0
+   Compiling regex-syntax v0.8.11
+   Compiling once_cell v1.21.4
+   Compiling boyko-ecs v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_ecs)
+   Compiling serde_derive v1.0.229
+   Compiling winapi-util v0.1.11
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling ciborium-io v0.2.2
+   Compiling clap_lex v1.1.1
+   Compiling zerocopy-derive v0.8.57
+   Compiling boyko-macros v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_macros)
+   Compiling fastrand v2.5.0
+   Compiling anstyle v1.0.14
+   Compiling plotters-backend v0.3.7
+   Compiling plotters-svg v0.3.7
+   Compiling clap_builder v4.6.7
+   Compiling tempfile v3.27.0
+   Compiling regex-automata v0.4.18
+   Compiling same-file v1.0.6
+   Compiling itertools v0.10.5
+   Compiling cast v0.3.0
+   Compiling quick-error v1.2.3
+   Compiling boyko_shaderdsl v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_shaderdsl)
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling ppv-lite86 v0.2.21
+   Compiling bit-vec v0.8.0
+   Compiling fnv v1.0.7
+   Compiling boyko-math v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_math)
+   Compiling wait-timeout v0.2.1
+   Compiling bit-set v0.8.0
+   Compiling rand_chacha v0.9.0
+   Compiling rusty-fork v0.3.1
+   Compiling ciborium v0.2.2
+   Compiling criterion-plot v0.5.0
+   Compiling boyko-input v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_input)
+   Compiling boyko_sdf_math v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_sdf_math)
+   Compiling regex v1.13.1
+   Compiling rayon v1.12.0
+   Compiling tinytemplate v1.2.1
+   Compiling boyko-scene v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_scene)
+   Compiling walkdir v2.5.0
+   Compiling clap v4.6.7
+   Compiling plotters v0.3.7
+   Compiling rand v0.9.5
+   Compiling rand_xorshift v0.4.0
+   Compiling is-terminal v0.4.17
+   Compiling oorandom v11.1.5
+   Compiling bitflags v2.13.2
+   Compiling anes v0.1.6
+   Compiling unarray v0.1.4
+   Compiling boyko-physics v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_physics)
+   Compiling proptest v1.11.0
+   Compiling criterion v0.5.1
+    Finished `parity` profile [optimized] target(s) in 42.90s
+  Executable benches\jolt_parity_pyramid.rs (D:/wt/_targets/mq-de06b6c9\parity\deps\jolt_parity_pyramid-39550833a2ead4ba.exe)
+END 2026-09-21T03:46:32+03:00 exit=0
+-rwxr-xr-x 1 flint 197609 1259520 Sep 21 03:46 D:/wt/_targets/mq-de06b6c9/parity/deps/jolt_parity_pyramid-39550833a2ead4ba.exe

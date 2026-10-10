@@ -188,15 +188,54 @@ impl Renderer<'_> {
         //     scope ENDED above, open a FRESH `begin_rendering(LoadOp::Load)` at the
         //     FULL swapchain extent (preserve the composite, do NOT re-clear) and
         //     record ONE instanced draw of the current frame's UI rects. The image is
-        //     still COLOR_ATTACHMENT_OPTIMAL (set by the to_color barrier above; the
-        //     composite scope only ended the render pass, not the layout), so no
-        //     barrier is needed between the two color passes — both are
-        //     COLOR_ATTACHMENT_OUTPUT writes to the same image, ordered by the render-
-        //     pass boundary. The COLOR→PRESENT/TRANSFER transition below then covers
-        //     BOTH passes' writes. A pass with `instance_count == 0` records nothing. ---
+        //     still COLOR_ATTACHMENT_OPTIMAL (the composite scope only ended the render
+        //     pass, not the layout) — but an EXPLICIT barrier between the two rendering
+        //     instances IS required: `vkCmdEndRendering`/`vkCmdBeginRendering` perform
+        //     NO implicit synchronization, so without it the UI pass's LOAD + draws race
+        //     the composite pass's CLEAR + draw on the same image (WAW/RAW) and the
+        //     composite can clobber the UI — a timing-dependent loss the validation
+        //     layer's pacing reliably exposed (ui_rect_swapchain_golden: the RED-rect
+        //     texel read back as the bare scene). The COLOR→PRESENT/TRANSFER transition
+        //     below still covers BOTH passes' writes for what follows. A pass with
+        //     `instance_count == 0` records nothing. ---
         if let Some(ui) = ui
             && ui.instance_count > 0
         {
+            // Barrier: composite writes → UI loadOp read + draws (same image, no layout
+            // change — a pure COLOR_ATTACHMENT_OUTPUT→COLOR_ATTACHMENT_OUTPUT ordering
+            // + availability/visibility dependency).
+            let composite_to_ui = VkImageMemoryBarrier {
+                s_type: VkStructureType::ImageMemoryBarrier,
+                p_next: ptr::null(),
+                src_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                dst_access_mask: VK_ACCESS_COLOR_ATTACHMENT_READ_BIT
+                    | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                image,
+                subresource_range: COLOR_SUBRESOURCE_RANGE,
+            };
+            // SAFETY: recording is open (between the two rendering scopes); one image
+            // barrier on the live swapchain `image`; same-layout COLOR→COLOR with
+            // COLOR_ATTACHMENT_OUTPUT on both sides orders the composite's stores
+            // before the UI pass's loadOp read + stores; `&composite_to_ui` outlives
+            // the call.
+            unsafe {
+                (self.fns.cmd_pipeline_barrier)(
+                    cmd,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    0,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    1,
+                    (&composite_to_ui as *const VkImageMemoryBarrier).cast(),
+                );
+            }
             let ui_color = VkRenderingAttachmentInfo {
                 s_type: VkStructureType::RenderingAttachmentInfo,
                 p_next: ptr::null(),
@@ -276,10 +315,28 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                // UI-ADVANCED S3: set 1 — the sprite lane's bindless texture array. The UI
+                // pipeline's layout declares it at boot (the
+                // `create_graphics_pipeline_bindless` shape), so this is purely a per-frame
+                // set bind, mirroring the set-0 bind immediately above and the textured
+                // gbuffer's own set-1 bind. It is UNCONDITIONAL: `ui_rect.fs` statically
+                // uses set 1, so an unbound set 1 is a validation error on EVERY UI draw,
+                // sprite or not. `&ui.sprite_group.descriptor_set` is a single-element
+                // pointer into the caller's live group.
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    ui.pipeline.layout,
+                    1,
+                    1,
+                    &ui.sprite_group.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
                 (self.fns.cmd_push_constants)(
                     cmd,
                     ui.pipeline.layout,
-                    VK_SHADER_STAGE_VERTEX_BIT,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                     0,
                     ui.ortho_bytes.len() as u32,
                     ui.ortho_bytes.as_ptr().cast(),

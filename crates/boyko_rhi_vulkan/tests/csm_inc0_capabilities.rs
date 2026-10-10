@@ -84,14 +84,6 @@ static MVP_VS_SPV: SpirvBlob<916> = SpirvBlob(*include_bytes!(concat!(
     "/shaders/triangle_mvp.vs.spv"
 )));
 
-/// The committed rung-3 fragment SPIR-V (`triangle_mvp.fs.spv`, 368 bytes), reused —
-/// its color output is discarded (the depth-only pipeline declares NO color
-/// attachment), but the fragment stage still runs so depth is written.
-static MVP_FS_SPV: SpirvBlob<368> = SpirvBlob(*include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/shaders/triangle_mvp.fs.spv"
-)));
-
 /// Boots a validation-enabled headless context, or returns `None` (with a SKIP log)
 /// when no GPU / loader / validation layer / dynamic-rendering is available.
 fn boot_or_skip(test: &str) -> Option<VulkanContext> {
@@ -181,6 +173,8 @@ fn array_depth_texture_creates() {
             // device by the gbuffer depth at `swapchain.rs`).
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
             array_layers: CASCADES,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("4-layer D32 array depth texture creates");
 
@@ -252,6 +246,8 @@ fn depth_only_pipeline_draws_indexed_into_array_layer() {
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
             array_layers: CASCADES,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("array depth target");
 
@@ -321,9 +317,13 @@ fn depth_only_pipeline_draws_indexed_into_array_layer() {
     let vs = ctx
         .create_shader_module(MVP_VS_SPV.as_words())
         .expect("vertex shader module");
+    // A depth-only pass writes NO color: reuse the engine's EMPTY depth fragment
+    // (`csm_depth.fs`, zero color outputs) rather than the color-writing `triangle_mvp.fs`, so the
+    // stage never writes an unused `SV_Target0` into a colorAttachmentCount == 0 pass
+    // (VUID-vkCmdDraw-None-09600). Depth is written by the rasterizer regardless of the fragment.
     let fs = ctx
-        .create_shader_module(MVP_FS_SPV.as_words())
-        .expect("fragment shader module");
+        .create_shader_module(boyko_rhi_vulkan::compute::csm_depth_fs_spirv())
+        .expect("depth-only fragment shader module");
 
     let attributes = [
         VertexAttribute {
@@ -401,7 +401,15 @@ fn depth_only_pipeline_draws_indexed_into_array_layer() {
         }),
     });
     encoder.bind_graphics_pipeline(&pipeline);
-    encoder.push_graphics_constants(&pipeline, ShaderStage::VERTEX, 0, &mvp_bytes());
+    // `RhiDevice::create_graphics_pipeline` declares its push range VERTEX|FRAGMENT
+    // (`GRAPHICS_PUSH_STAGES_DEFAULT`, rhi_impl/mod.rs), so a VERTEX-only push leaves the range's FRAGMENT bit
+    // undeclared, tripping VUID-vkCmdPushConstants-offset-01796.
+    encoder.push_graphics_constants(
+        &pipeline,
+        ShaderStage::VERTEX | ShaderStage::FRAGMENT,
+        0,
+        &mvp_bytes(),
+    );
     encoder.bind_vertex_buffer(&vertex_buffer, 0, 0);
     encoder.bind_index_buffer(&index_buffer, 0, IndexType::Uint16);
     encoder.set_viewport(&Viewport {

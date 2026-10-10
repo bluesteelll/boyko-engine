@@ -3,21 +3,21 @@ name = "boyko-render"
 version = "0.1.0"
 edition = "2024"
 description = "GPU-resident ECS columns: the boyko_render manager that mints device-local component pools behind the boyko_rhi registry and drives the boyko_ecs A2 device-mint seam (Phase 5)."
-
+license.workspace = true
 # Dependency fan-out (no cycle): boyko_render depends DIRECTLY on boyko_ecs +
 # boyko_rhi + boyko_rhi_vulkan + boyko_utils. boyko_rhi itself depends only on
 # boyko_utils (NOT on boyko_ecs). Layering (host plan D1 amendment): boyko_render
 # (the data bridge) and boyko_app (the host) are the only two crates that name
 # both the graphics RHI and the ECS core; boyko_app must not define per-entity
-# GPU data paths — those belong in boyko_render, which is why the
+# GPU data paths â€” those belong in boyko_render, which is why the
 # `RhiContext: NonSendResource` orphan impl lives here (Phase 5 MF-5).
 [lib]
 name = "boyko_render"
 
 [features]
-# The TEST-ONLY device→host readback path (`GpuColumnManager::readback_for_test`).
+# The TEST-ONLY deviceâ†’host readback path (`GpuColumnManager::readback_for_test`).
 # W2: inverted OFF by default so a production/default build ships ZERO readback
-# code (steady state does ZERO readback — D2), instead of every default build
+# code (steady state does ZERO readback â€” D2), instead of every default build
 # carrying the test-only round-trip. The crate's OWN integration tests still
 # reach it: the self-referential dev-dependency below (`boyko-render` with
 # `features = ["test-readback"]`) enables it whenever the test targets compile,
@@ -26,24 +26,40 @@ name = "boyko_render"
 default = []
 test-readback = []
 # HW-RT rung R2a-1: forwards to `boyko_rhi_vulkan/hwrt` so a render build can opt
-# into the hardware ray-tracing FFI surface. OFF by default → the shipped/golden
+# into the hardware ray-tracing FFI surface. OFF by default â†’ the shipped/golden
 # render path is byte-identical to R1 (the RT FFI compiles to nothing downstream).
 hwrt = ["boyko_rhi_vulkan/hwrt"]
+# Profiling rung 5c: forwards to `boyko_rhi_vulkan/profiling-census` so a host build can turn on
+# the ~200 command-census increments at `present/passes/vb.rs`'s record sites. OFF by default -->
+# the shipped/golden render path records exactly the commands it did before (the increments are
+# host-side `Cell<u32>` adds that compile to nothing here). Enabled only by G10's A/B gate.
+profiling-census = ["boyko_rhi_vulkan/profiling-census"]
+# Reflection opt-in seam for this crate's own components (`GpuTransform3D` /
+# `EmitterActive` are dogfood targets defined HERE — docs/REFLECTION-PLAN-GATES.md D3;
+# docs/REFLECTION-ANALYSIS.md B.12 option (b)). NON-DEFAULT; enabled only by the
+# `reflect-dogfood` leaf umbrella or a command line — the same containment shape as
+# `hwrt` above, with the CI-coverage half owed by GATES G1 clause C6 so it does not
+# inherit hwrt's F17 defect (zero CI legs compiling the gated bodies). The gated bodies
+# arrive with CORE C7/C8's `#[component(reflect)]` opt-ins.
+reflect = ["dep:boyko-reflect"]
 
 [dependencies]
+# OPTIONAL editor-only reflection layer (GATES D3 C2/C3): pulled ONLY by the non-default
+# `reflect` feature above; never in a ship closure — gated by G1/G2/G3, not by this
+# comment.
+boyko-reflect = { path = "../boyko_reflect", optional = true }
 boyko-ecs = { path = "../boyko_ecs" }
 boyko-macros = { path = "../boyko_macros" }
 boyko_rhi = { path = "../boyko_rhi" }
 boyko_rhi_vulkan = { path = "../boyko_rhi_vulkan" }
-boyko-utils = { path = "../boyko_utils" }
 # R7 SDF instance path: the `SdfEdit` std430 element + the `sdf_op` / `sdf_kind`
 # discriminants + `MAX_SDF_EDITS` for the `SdfPrimitive` component and the
 # `SdfEditStaging` gather scratch. `boyko_sdf_math` is a TRUE LEAF (depends on
 # nothing in the workspace except the `boyko_shaderdsl` field leaf), so this edge
-# is acyclic — boyko_render already sits above it in the graph.
+# is acyclic â€” boyko_render already sits above it in the graph.
 boyko_sdf_math = { path = "../boyko_sdf_math" }
 # S3: the renderer consumes the engine-derived `ViewUniform` (boyko_scene) and
-# its column-major `Mat4` (boyko_math) as the SINGLE view source — replacing the
+# its column-major `Mat4` (boyko_math) as the SINGLE view source â€” replacing the
 # prior hardcoded per-backend view. boyko_render is the only crate that may name
 # both the scene vocabulary and the marcher push-constant struct, so the
 # `ViewUniform -> CompositePushConstants` bridge lives here (the low-level
@@ -52,22 +68,57 @@ boyko-scene = { path = "../boyko_scene" }
 boyko-math = { path = "../boyko_math" }
 # GUI P5b: the MSDF font atlas is BAKED offline (boyko-fontbake, a load-time tool)
 # and shipped as a checked-in `.bfont`. boyko_render reads it with the thin POD
-# reader (`read_bfont`) at UI setup — no bake-time dependency at runtime; the reader
+# reader (`read_bfont`) at UI setup â€” no bake-time dependency at runtime; the reader
 # is the only surface used here (the generator/threadpool paths are not linked on the
 # render hot path). The metrics tables themselves become ECS-resident (boyko_ui).
 boyko-fontbake = { path = "../boyko_fontbake" }
+# Textured-PBR T2: the in-house, zero-third-party-dependency PNG decoder
+# (`decode_png`) the `PngTextureLoader` asset loader decodes raw texture bytes
+# through. It was a true workspace leaf until rung L8a, which gave it the one
+# edge every crate in this engine now has: `boyko_log`.
+boyko_image = { path = "../boyko_image" }
+# Rung L8a: the diagnostic seam. Ten sites across six files -- two hand-rolled `AtomicBool`
+# latches (one of which stored `true` over `true` from a per-frame `#[inline]` reader, forever,
+# once its condition had diverged), a GPU dispatch failure a `System` body has no `Result` channel
+# to report, and the material loader's fallback notes. Already in the graph through `boyko_ecs`.
+boyko-log = { path = "../boyko_log" }
+# UI-ADVANCED S0 (`docs/UI-PLAN-SPRITES-S0-S2.md` rung S0 item 1): PROMOTED from
+# `[dev-dependencies]`, where it sat annotated TEST-ONLY for the P6b/P7b screenshot
+# tests. The canonical UI gather (`ui::gather::gather_ui_nodes`), the
+# `ui_pack_inputs!` single spelling, and the `ui_render_discovery` system now name
+# `boyko_ui`'s components (`ComputedRect`/`UiBackground`/`ComputedClip`/`StackIndex`/
+# `UiRoot`) in PRODUCTION code — per the layering rule at the top of this file:
+# boyko_render is the home of per-entity GPU data paths, and the render-side gather
+# IS one. Acyclic: `boyko-ui` names no render crate (verified: its deps are
+# ecs/macros/utils/input/fontbake/scene/math).
+boyko-ui = { path = "../boyko_ui" }
 # S4: the 3D GPU instance (`Gpu3dInstance`) is a `bytemuck::Pod` component whose
 # column uploads zero-copy via `cast_slice` (same discipline as the demo's 2D
 # `GpuInstance`). The `derive` feature gives the `Pod` / `Zeroable` derives.
 bytemuck.workspace = true
 
 [dev-dependencies]
+# Rung L8a: `boyko_log::probe`'s record observers, for the `#[cfg(test)] mod` blocks that assert
+# a migrated site reports ONCE and not once per frame. A dev-dependency, so the feature reaches
+# this crate's test and bench targets and never a shipping build.
+boyko-log = { path = "../boyko_log", features = ["test-probe"] }
+# UI-ADVANCED S0 gate G0-5 (the SEAM GATE): `tests/ui_s0_seam_fusion.rs` proves by FAILURE TO
+# COMPILE that the two-phase upload seam cannot be re-fused — a call site holding Phase 1's
+# `WorldView` and Phase 2's `&mut RhiContext` at once is the M1 borrow conflict (E0502). Same
+# harness + compiler-witness discipline as `boyko_ecs`'s compile_fail suites.
+trybuild = "1"
+# UI-ADVANCED S1 (`docs/UI-PLAN-SPRITES-S0-S2.md`): `tests/ui_rect_edsl_sync.rs` re-runs the
+# `emit_hlsl_ui_*` span printers against the committed `ui_rect.{vs,fs}.hlsl` (which live in
+# THIS crate's `shaders/`), and feeds the HOST `UiInstance` offsets into the mirror printer so
+# the committed struct span is pinned to `offset_of!`, not to a copied literal. TEST-ONLY: the
+# production build never links the emitter (the `emit` feature stays off the prod graph).
+boyko_shaderdsl = { path = "../boyko_shaderdsl", features = ["emit"] }
 # W2: self-referential dev-dependency that turns the `test-readback` feature ON
 # for THIS crate's integration tests (now that it is OFF by default). The
 # integration tests in `tests/*.rs` compile against `boyko_render` as an external
-# crate — the lib's `#[cfg(any(test, feature = "test-readback"))]` guard sees no
+# crate â€” the lib's `#[cfg(any(test, feature = "test-readback"))]` guard sees no
 # `cfg(test)` there, so the readback API (`readback_for_test`, `readback_count`,
-# …) is only reachable via the feature. This edge is the canonical Cargo pattern
+# â€¦) is only reachable via the feature. This edge is the canonical Cargo pattern
 # for "expose a test-only API to my own integration tests without shipping it by
 # default"; it introduces no production dependency.
 boyko-render = { path = ".", features = ["test-readback"] }
@@ -86,15 +137,34 @@ boyko_rhi_vulkan = { path = "../boyko_rhi_vulkan", features = ["goldens"] }
 # physics pipeline fans across.
 boyko-physics = { path = "../boyko_physics" }
 boyko-threadpool = { path = "../boyko_threadpool" }
-# GUI P6b screenshot test ONLY: the HUD test drives the SHIPPED data-binding chain
+# Asset-streaming plan "HARD PREREQ" item (e) (branch fix/asset-validate-prereqs): the
+# serialize version-skew gates (`tests/asset_streaming_prereq_validate.rs`) save a carrier
+# row with its `MeshRefGen` lane removed and `load_world` it back, then prove
+# `validate_asset_refs` flags the lane-less row and the gather never draws it. TEST-ONLY
+# and acyclic: `boyko_render` (dev) -> `boyko_serialize` -> `boyko_ecs`; the production
+# edge stays absent (no shipped render code loads a save file).
+boyko-serialize = { path = "../boyko_serialize" }
+# GUI P6b screenshot test: the HUD test drives the SHIPPED data-binding chain
 # (`BindText` -> `UiTextBuffer` -> `emit_glyphs`) that lives in boyko-ui, then renders
 # the bound glyphs through this crate's reused `pack_ui_instance` / `record_ui_rects`
-# path. Acyclic + TEST-ONLY: `boyko_render` (dev) -> `boyko-ui`; `boyko-ui` names no
-# render crate (verified: its deps are ecs/macros/utils/input/fontbake/scene/math), so
-# no production cycle is introduced.
-boyko-ui = { path = "../boyko_ui" }
+# path. UI-ADVANCED S0 PROMOTED `boyko-ui` to `[dependencies]` above (the gather /
+# discovery / `ui_pack_inputs!` production code names its components), so the tests
+# now reach it through the production edge and no dev row remains.
 # GUI P7b screenshot test ONLY: the world-UI proof drives the SHIPPED pick/project/
 # visibility systems (boyko-ui::world), whose pick reads `PhysicalInput` (boyko-input).
 # Acyclic + TEST-ONLY: `boyko_render` (dev) -> `boyko-input`; `boyko-input` names no
 # render crate (its deps are ecs/macros/utils/math), so no production cycle is introduced.
 boyko-input = { path = "../boyko_input" }
+# UI-ADVANCED S2 measurement §10.2: `benches/ui_pack_sort.rs` — wall-clock pack+sort at
+# N ∈ {256, 2048}, the SAME deterministic scene on the 64 B and the 80 B `UiInstance`
+# builds (criterion median of each build; the bytes are arithmetic, the time is not, and
+# only the time can say whether the sort's gather — which touches every record twice —
+# notices the widening). Workspace-pinned criterion 0.5 like every other bench crate.
+criterion.workspace = true
+
+[[bench]]
+name = "ui_pack_sort"
+harness = false
+
+[lints]
+workspace = true

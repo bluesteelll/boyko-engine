@@ -1,0 +1,48 @@
+bp_g4_scene/all_pairs/1240
+                        time:   [1.8464 ms 1.8481 ms 1.8499 ms]
+Found 3 outliers among 10 measurements (30.00%)
+  2 (20.00%) low mild
+  1 (10.00%) high mild
+bp_g4_scene/grid_w1/1240
+                        time:   [5.4080 ms 5.4216 ms 5.4415 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_scene/grid_w8/1240
+                        time:   [5.4070 ms 5.4457 ms 5.5060 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_scene/tree/1240   time:   [441.23 µs 441.73 µs 442.34 µs]
+bp_g4_scene/all_pairs/10000
+                        time:   [123.29 ms 123.41 ms 123.54 ms]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high mild
+bp_g4_scene/grid_w1/10000
+                        time:   [36.734 ms 36.881 ms 37.081 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_scene/grid_w8/10000
+                        time:   [14.453 ms 14.520 ms 14.594 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+bp_g4_scene/tree/10000  time:   [4.7982 ms 4.8125 ms 4.8332 ms]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high severe
+bp_g4_scene/all_pairs/100000
+                        time:   [17.434 s 17.767 s 18.119 s]
+bp_g4_scene/grid_w1/100000
+                        time:   [335.26 ms 336.43 ms 337.71 ms]
+bp_g4_scene/grid_w8/100000
+                        time:   [128.94 ms 130.56 ms 132.25 ms]
+bp_g4_scene/tree/100000 time:   [58.980 ms 59.152 ms 59.307 ms]
+bp_g4_scene/all_pairs/j100
+                        time:   [1.8529 ms 1.8570 ms 1.8623 ms]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+bp_g4_scene/grid_w1/j100
+                        time:   [4.9802 ms 4.9823 ms 4.9848 ms]
+bp_g4_scene/grid_w8/j100
+                        time:   [4.9699 ms 4.9737 ms 4.9779 ms]
+bp_g4_scene/tree/j100   time:   [443.06 µs 444.33 µs 445.63 µs]
+

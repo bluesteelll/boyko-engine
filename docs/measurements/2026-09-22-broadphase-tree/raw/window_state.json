@@ -1,0 +1,49 @@
+{
+ "start": "2026-09-22T10:13:54.802+03:00",
+ "test": false,
+ "placement": "P-none (no affinity call)",
+ "cells_per_round": 26,
+ "order_pass0": [
+  "T-A-tree@W1",
+  "T-A-allpairs@W1",
+  "T-D-tree@W1",
+  "T-D-allpairs@W1",
+  "R-tree@W1",
+  "R-allpairs@W1",
+  "S16-tree@W1",
+  "S16-allpairs@W1",
+  "T-A-tree-armed@W1",
+  "T-A-allpairs-armed@W1",
+  "T-C-tree@W1",
+  "T-A-tree@W2",
+  "T-A-allpairs@W2",
+  "T-A-tree@W4",
+  "T-A-allpairs@W4",
+  "T-A-tree@W8",
+  "T-A-allpairs@W8",
+  "T-D-tree@W8",
+  "T-D-allpairs@W8",
+  "R-tree@W8",
+  "R-allpairs@W8",
+  "T-A-tree-armed@W8",
+  "T-A-allpairs-armed@W8",
+  "T-C-tree@W8",
+  "T-A-tree@W16",
+  "T-A-allpairs@W16"
+ ],
+ "passes": 2,
+ "rounds": 3,
+ "machine_before": {
+  "time": "2026-09-22T10:13:55.171+03:00",
+  "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+  "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n245"
+ },
+ "end": "2026-09-22T10:44:10.347+03:00",
+ "machine_after": {
+  "time": "2026-09-22T10:44:10.723+03:00",
+  "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+  "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n241"
+ },
+ "binaries_after": "all match",
+ "status": "complete"
+}

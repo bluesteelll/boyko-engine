@@ -1,0 +1,50 @@
+# F3-G4: used 3 processes, dropped 0 (own K = 3, one pass; the pass is the pooled cell)
+
+## uniform: all_pairs/tree (B = all_pairs, A = tree); claimed = i AND s (ruling 1); window 7 rule = r AND s
+    128: tree 11.154 us, all_pairs 11.374 us, ratio 1.0197 flags i/s/r YYn; ruling1 all_pairs slower CLAIMED; w7 -
+    136: tree 11.919 us, all_pairs 12.785 us, ratio 1.0727 flags i/s/r YYY; ruling1 all_pairs slower CLAIMED; w7 CLAIMED
+    144: tree 12.532 us, all_pairs 14.154 us, ratio 1.1294 flags i/s/r YYY; ruling1 all_pairs slower CLAIMED; w7 CLAIMED
+    152: tree 13.042 us, all_pairs 15.613 us, ratio 1.1971 flags i/s/r YYY; ruling1 all_pairs slower CLAIMED; w7 CLAIMED
+    160: tree 13.577 us, all_pairs 17.306 us, ratio 1.2747 flags i/s/r YYY; ruling1 all_pairs slower CLAIMED; w7 CLAIMED
+    176: tree 14.786 us, all_pairs 20.694 us, ratio 1.3995 flags i/s/r YYY; ruling1 all_pairs slower CLAIMED; w7 CLAIMED
+    256: tree 21.120 us, all_pairs 42.934 us, ratio 2.0329 flags i/s/r YYY; ruling1 all_pairs slower CLAIMED; w7 CLAIMED
+   1000: tree 85.810 us, all_pairs 636.788 us, ratio 7.4209 flags i/s/r YYY; ruling1 all_pairs slower CLAIMED; w7 CLAIMED
+  recipe on `tree`: ruling 1 LO < 128 (off the grid) / HI 128; window-7 rule LO 128 / HI 136  (pre-registered to reproduce 144 / 152)
+
+## disparity: all_pairs/tree (B = all_pairs, A = tree); claimed = i AND s (ruling 1); window 7 rule = r AND s
+    128: tree 14.305 us, all_pairs 13.630 us, ratio 0.9528 flags i/s/r YYn; ruling1 -; w7 -
+    136: tree 14.309 us, all_pairs 15.125 us, ratio 1.0571 flags i/s/r YYY; ruling1 all_pairs slower CLAIMED; w7 CLAIMED
+    144: tree 15.324 us, all_pairs 16.862 us, ratio 1.1003 flags i/s/r YYY; ruling1 all_pairs slower CLAIMED; w7 CLAIMED
+    152: tree 16.123 us, all_pairs 18.431 us, ratio 1.1432 flags i/s/r YYY; ruling1 all_pairs slower CLAIMED; w7 CLAIMED
+    160: tree 16.930 us, all_pairs 20.227 us, ratio 1.1947 flags i/s/r YYY; ruling1 all_pairs slower CLAIMED; w7 CLAIMED
+    176: tree 17.804 us, all_pairs 23.965 us, ratio 1.3460 flags i/s/r YYY; ruling1 all_pairs slower CLAIMED; w7 CLAIMED
+    256: tree 25.751 us, all_pairs 48.002 us, ratio 1.8641 flags i/s/r YYY; ruling1 all_pairs slower CLAIMED; w7 CLAIMED
+   1000: tree 107.905 us, all_pairs 661.113 us, ratio 6.1268 flags i/s/r YYY; ruling1 all_pairs slower CLAIMED; w7 CLAIMED
+  recipe on `tree`: ruling 1 LO 128 / HI 136; window-7 rule LO 128 / HI 136  (pre-registered to reproduce 144 / 152)
+
+## the same recipe on `tree_kd` (recorded for the flip; no bar)
+  uniform: ruling 1 LO 128 / HI 136
+  disparity: ruling 1 LO 128 / HI 136
+
+## R3d: bp_g4_scene tree_kd not claimed slower than tree
+   10000: tree 2838.41, tree_kd 2497.89 us, kd/tree 0.8800 flags i/s/r YYY -> kd faster CLAIMED STRONG
+  100000: tree 34891.25, tree_kd 31679.80 us, kd/tree 0.9080 flags i/s/r YYY -> kd faster CLAIMED STRONG
+    1240: tree 153.61, tree_kd 139.19 us, kd/tree 0.9061 flags i/s/r nnn -> not claimed
+    j100: tree 197.19, tree_kd 143.70 us, kd/tree 0.7287 flags i/s/r YYY -> kd faster CLAIMED STRONG
+
+# DM1: processes 30, slots 24, used 22, dropped 2
+
+## dm-vb-1920x1080-idle: order ABBAABBA; used A1=r B1=o B2=o A2=o A3=o B3=o B4=o A4=-
+  zone  4 VB_EARLY_CULL         : A n=3 median 783.0, B n=4 median 777.8 us; pairs 3; d = -6.94 us (-0.88 % of mean A); band 15.22 us (1.9 % of mean A) -> B<=A (d<=0)
+  zone  9 VB_RUN                : A n=3 median 852.0, B n=4 median 847.1 us; pairs 3; d = -6.14 us (-0.72 % of mean A); band 17.41 us (2.0 % of mean A) -> B<=A (d<=0)
+  zone  2 VB_SHADE              : A n=3 median 328.7, B n=4 median 308.2 us; pairs 3; d = -23.04 us (-7.50 % of mean A); band 71.17 us (23.2 % of mean A) -> B<=A (d<=0)
+  zone 14 VB_PRODUCE_NET        : A n=3 median 329.7, B n=4 median 309.2 us; pairs 3; d = -24.06 us (-7.81 % of mean A); band 72.19 us (23.4 % of mean A) -> B<=A (d<=0)
+
+## dm-deferred-1920x1080-idle: order ABBAABBA; used A1=o B1=o B2=r A2=o A3=r B3=o B4=o A4=o
+  zone 17 GBUF_DEFERRED_RESOLVE : A n=4 median 594.4, B n=4 median 507.1 us; pairs 4; d = -87.81 us (-14.78 % of mean A); band 130.05 us (21.9 % of mean A) -> B<=A (d<=0)
+
+## dm-vb-1920x1080-edit100: order ABBAABBA; used A1=o B1=o B2=o A2=r A3=o B3=- B4=o A4=o
+  zone  4 VB_EARLY_CULL         : A n=4 median 789.4, B n=3 median 793.8 us; pairs 3; d = +2.42 us (+0.31 % of mean A); band 23.01 us (2.9 % of mean A) -> B<=A (inside band)
+  zone  9 VB_RUN                : A n=4 median 859.6, B n=3 median 864.3 us; pairs 3; d = +2.05 us (+0.24 % of mean A); band 23.04 us (2.7 % of mean A) -> B<=A (inside band)
+  zone  2 VB_SHADE              : A n=4 median 300.5, B n=3 median 262.1 us; pairs 3; d = -24.58 us (-8.23 % of mean A); band 75.78 us (25.4 % of mean A) -> B<=A (d<=0)
+  zone 14 VB_PRODUCE_NET        : A n=4 median 301.3, B n=3 median 263.2 us; pairs 3; d = -25.60 us (-8.56 % of mean A); band 75.78 us (25.3 % of mean A) -> B<=A (d<=0)

@@ -79,8 +79,12 @@ use crate::world::components::{
 /// [`ui_layout_apply`] early-returns.
 //
 // `clippy::type_complexity`: the `Query<(), Or<(Changed<…>, …)>>` change-set type
-// IS the SystemParam signature — the engine resolves it positionally, so it
-// cannot be a `type` alias without losing the SystemParam impl. Allowed.
+// IS the SystemParam signature, which the engine reads to derive access. A `type`
+// alias is declined because it would only hide the change set from a reader, and
+// the alias must spell the lifetimes the inline signature elides. Allowed.
+//
+// NOT MEASURED HERE. `ui_visual_tick`'s measurement is over a query of a
+// DIFFERENT shape (three lifetimes against this one's two) and does not transfer.
 #[allow(clippy::type_complexity)]
 pub fn ui_layout_discovery(
     changed: Query<
@@ -1737,6 +1741,12 @@ impl UiAlign {
 // assert the change-detection / set-if-changed steady state.
 #[cfg(test)]
 mod tests {
+    // Test-harness plumbing only (compiled out of every shipping build): the file-static
+    // `Mutex<()>` serializes tests that read the process-global `RECT_CHANGES` probe
+    // counter, and `Arc<Mutex<…>>` smuggles spawned entities out of the `Send + Sync`
+    // one-shot system closure.
+    #![allow(clippy::disallowed_types)]
+
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 

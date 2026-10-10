@@ -183,6 +183,8 @@ impl InlandStore {
     #[cold]
     #[inline(never)]
     fn grow_to(&mut self, n: usize) {
+        // Read before `vm` borrows `self.vm` for the rest of the body.
+        let ceiling_predicted = self.ceiling_slots();
         // Lazy materialization (XG-B4): the reservation syscall is deferred
         // from construction to the first growth event — strictly off the
         // warm path (this fn is already #[cold]).
@@ -196,6 +198,13 @@ impl InlandStore {
         };
 
         let ceiling_slots = vm.os_len() / SLOT_SIZE; // exact: 16 | granule | os_len
+        // `EntityReservoir` sizes the recycled-entity stack from the
+        // syscall-free prediction; the two must name the same ceiling or a
+        // stack push could outrun its reservation (plan D6).
+        debug_assert_eq!(
+            ceiling_slots, ceiling_predicted,
+            "InlandStore::ceiling_slots disagrees with the materialized reservation"
+        );
         assert!(
             n <= ceiling_slots,
             "InlandStore exhausted: {n} entity slots requested, reservation ceiling is \
@@ -206,13 +215,13 @@ impl InlandStore {
         let needed = checked_slab_round(n * SLOT_SIZE); // n*16 can't overflow: n ≤ ceiling ≤ os_len/16
         // Geometric doubling clamped to [MIN, MAX], request-dominant (a
         // single huge request is a single event), never past the reservation.
-        let step = old_bytes
-            .clamp(INLAND_MIN_SLAB, INLAND_MAX_SLAB)
-            .max(needed - old_bytes);
+        let step = old_bytes.clamp(INLAND_MIN_SLAB, INLAND_MAX_SLAB).max(needed - old_bytes);
         let new_bytes = (old_bytes + step).min(vm.os_len());
         debug_assert!(new_bytes >= needed, "grow_to post-condition (proof) violated");
-
-        vm.commit(old_bytes, new_bytes);
+        // SAFETY: `old_bytes < new_bytes <= os_len`: the `min` bounds `new_bytes`, and both
+        // callers pass `n > committed_slots` (`ensure`'s guard, `with_capacity`'s fresh store), so
+        // `old_bytes < n * 16 <= os_len` (the ceiling assert above) and `step >= MIN_SLAB > 0`.
+        unsafe { vm.commit(old_bytes, new_bytes) };
         self.committed_slots = new_bytes / SLOT_SIZE;
     }
 
@@ -245,6 +254,19 @@ impl InlandStore {
     #[inline]
     pub(crate) fn committed_slots(&self) -> usize {
         self.committed_slots
+    }
+
+    /// The slot ceiling this store's reservation has — or will have once the
+    /// lazy `grow_to` materializes it — WITHOUT a syscall: the request rounded
+    /// up to the commit granule (exactly as `VmReservation::reserve` rounds
+    /// it), in slots. `grow_to` debug-asserts it equals `os_len / SLOT_SIZE`.
+    ///
+    /// The ceiling bounds every id this store can hold, so it also bounds how
+    /// many distinct recycled ids can be waiting at once — the sizing input of
+    /// `EntityReservoir`'s stack (plan D6).
+    #[inline]
+    pub(crate) fn ceiling_slots(&self) -> usize {
+        checked_slab_round(self.reserve_request) / SLOT_SIZE
     }
 }
 
@@ -483,7 +505,7 @@ mod tests {
     /// semantics (resize-with-NULL): random ensure/write/clear/read sequences
     /// must agree slot-for-slot.
     #[test]
-    #[cfg_attr(miri, ignore)] // 64 cases × slot-by-slot 40k-slot comparisons — hours under Miri
+    #[cfg_attr(miri, ignore = "miri-slow: 64 proptest cases × slot-by-slot 40k-slot comparisons — hours under Miri")]
     fn model_equivalence_with_vec_resize_semantics() {
         use proptest::prelude::*;
         use proptest::test_runner::{Config, TestRunner};

@@ -202,7 +202,7 @@ impl Renderer<'_> {
             (self.fns.cmd_push_constants)(
                 cmd,
                 scene.pipeline.layout,
-                VK_SHADER_STAGE_VERTEX_BIT,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0,
                 scene.mvp.len() as u32,
                 scene.mvp.as_ptr().cast(),

@@ -562,14 +562,58 @@ pub enum VkStructureType {
     Win32SurfaceCreateInfoKhr = 1_000_009_000,
     SwapchainCreateInfoKhr = 1_000_001_000,
     PresentInfoKhr = 1_000_001_001,
-    /// `VkPhysicalDeviceVulkan12Features` — chained into features2 to READ the
-    /// Vulkan 1.2 core feature bools (Render P1b `bindless_capable` query).
+    /// `VkPhysicalDeviceVulkan12Features` — the Vulkan 1.2 aggregate feature struct.
+    /// Declared for ABI completeness; NOT used by the T-dev bindless query/enable path
+    /// (which reads/writes the GRANULAR `VkPhysicalDeviceDescriptorIndexingFeatures`
+    /// instead — see [`VkStructureType::PhysicalDeviceDescriptorIndexingFeatures`] for
+    /// why the aggregate is avoided in the `vkCreateDevice` chain).
     /// vulkan_core.h: `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES = 51`.
     PhysicalDeviceVulkan12Features = 51,
     /// `VkPhysicalDeviceVulkan13Features` — chained to enable dynamic rendering.
     PhysicalDeviceVulkan13Features = 53,
     RenderingInfo = 1_000_044_000,
     RenderingAttachmentInfo = 1_000_044_001,
+    /// `VkPhysicalDeviceDescriptorIndexingFeatures` — the GRANULAR bindless feature
+    /// struct (T-dev), chained into `VkPhysicalDeviceFeatures2` to READ and into
+    /// `VkDeviceCreateInfo` to ENABLE the 5 descriptor-indexing bits `bindless_capable`
+    /// gates. Deliberately the granular struct, NOT the `VkPhysicalDeviceVulkan12Features`
+    /// aggregate: the aggregate also carries `bufferDeviceAddress`, which would collide
+    /// with the hwrt arm's standalone `VkPhysicalDeviceBufferDeviceAddressFeatures` in the
+    /// same `pNext` chain (VUID-VkDeviceCreateInfo-pNext-02830 forbids a promoted core
+    /// struct's aggregate alongside its own granular sub-struct). vulkan_core.h:
+    /// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES = 1000161001`.
+    PhysicalDeviceDescriptorIndexingFeatures = 1_000_161_001,
+    /// `VkPhysicalDeviceHostQueryResetFeatures` — the GRANULAR `hostQueryReset` feature
+    /// struct (profiling rung 4), chained into `VkPhysicalDeviceFeatures2` to READ and into
+    /// `VkDeviceCreateInfo` to ENABLE. Granular for the same VUID reason as the sibling
+    /// above. vulkan_core.h:
+    /// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES = 1000261000`.
+    PhysicalDeviceHostQueryResetFeatures = 1_000_261_000,
+    /// `VkCalibratedTimestampInfoEXT` — one entry of the domain array
+    /// `vkGetCalibratedTimestampsEXT` reads (profiling rung 9). Unlike the two feature structs
+    /// above it is never chained into a `pNext`: it is an ARRAY element, one per requested time
+    /// domain, and the driver only reads it. vulkan_core.h:
+    /// `VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT = 1000184000` (extension 185, so the
+    /// block base is `1000000000 + 184 * 1000`).
+    CalibratedTimestampInfoExt = 1_000_184_000,
+    /// `VkDescriptorSetLayoutBindingFlagsCreateInfo` (T4 bindless) — chained into
+    /// `VkDescriptorSetLayoutCreateInfo.pNext` to declare the PARTIALLY_BOUND /
+    /// UPDATE_AFTER_BIND / VARIABLE_DESCRIPTOR_COUNT flags per binding (the bindless
+    /// texture array binding needs all three; the paired immutable-sampler binding
+    /// needs none). Same `VK_EXT_descriptor_indexing` extension family as
+    /// [`Self::PhysicalDeviceDescriptorIndexingFeatures`] (extension number 161).
+    /// vulkan_core.h: `VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO
+    /// = 1000161000`.
+    DescriptorSetLayoutBindingFlagsCreateInfo = 1_000_161_000,
+    /// `VkDescriptorSetVariableDescriptorCountAllocateInfo` (T4 bindless) — chained
+    /// into `VkDescriptorSetAllocateInfo.pNext` to supply the RUNTIME descriptor
+    /// count for the layout's VARIABLE_DESCRIPTOR_COUNT binding at allocation time
+    /// (the bindless texture array is declared with capacity `N` but allocated with
+    /// the actual runtime size — this engine always allocates the full capacity, see
+    /// `boyko_rhi_vulkan::bindless`). vulkan_core.h:
+    /// `VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO =
+    /// 1000161003`.
+    DescriptorSetVariableDescriptorCountAllocateInfo = 1_000_161_003,
 }
 
 // ---------------------------------------------------------------------------
@@ -587,6 +631,10 @@ pub const VK_QUEUE_COMPUTE_BIT: VkFlags = 0x0000_0002;
 pub const VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT: VkFlags = 0x0000_0001;
 pub const VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT: VkFlags = 0x0000_0002;
 pub const VK_MEMORY_PROPERTY_HOST_COHERENT_BIT: VkFlags = 0x0000_0004;
+
+/// `VkMemoryHeapFlagBits` (SSAA W2 VRAM probe: `VkMemoryHeap::flags`, distinct field from
+/// `VkMemoryType::propertyFlags` above though numerically the same bit per the Vulkan spec).
+pub const VK_MEMORY_HEAP_DEVICE_LOCAL_BIT: VkFlags = 0x0000_0001;
 
 /// `VkBufferUsageFlagBits` (subset; the round-trip uses a transfer/storage
 /// buffer — the exact bits are immaterial to a host-visible map round-trip but
@@ -665,6 +713,55 @@ pub const VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: i32 = 3;
 /// constant buffer).
 pub const VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: i32 = 6;
 
+/// `VkDescriptorType::VK_DESCRIPTOR_TYPE_SAMPLER` (T4 bindless: the shared
+/// trilinear+anisotropic sampler baked as an IMMUTABLE sampler at the bindless
+/// layout's second binding — never written at runtime, so this constant is used
+/// only at layout-create time, not in any [`crate::rhi_impl::VulkanBindGroup`]
+/// write path).
+pub const VK_DESCRIPTOR_TYPE_SAMPLER: i32 = 0;
+
+// --- T4 bindless (`VK_EXT_descriptor_indexing`) binding-flag + create-flag bits.
+//     `VkDescriptorBindingFlagBits` values from vulkan_core.h; see
+//     `boyko_rhi_vulkan::bindless` for where each is applied. ---
+
+/// `VkDescriptorBindingFlagBits::VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT` — the
+/// binding may be updated while a descriptor set using it is bound to a command
+/// buffer that is not yet executing, WITHOUT invalidating that command buffer
+/// (requires the layout's `UPDATE_AFTER_BIND_POOL` create bit + a pool created with
+/// the matching bit).
+pub const VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT: VkFlags = 0x0000_0001;
+/// `VkDescriptorBindingFlagBits::VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT` — a
+/// descriptor at this binding need not be written for every index the runtime
+/// array declares; only slots actually SAMPLED by a shader invocation must hold a
+/// valid descriptor. The bindless table still writes the error texture into every
+/// slot at init (a stale/unwritten index is a bug-shaped access, not a
+/// spec-legal one this bit alone would excuse — see `BindlessTextureTable::new`).
+///
+/// VALUE PIN (validation-audit fix): the spec's `VkDescriptorBindingFlagBits` are
+/// `UPDATE_AFTER_BIND = 0x1`, `UPDATE_UNUSED_WHILE_PENDING = 0x2`,
+/// `PARTIALLY_BOUND = 0x4`, `VARIABLE_DESCRIPTOR_COUNT = 0x8`. This constant was
+/// mis-pinned at `0x2` — every "partially bound" layout actually requested
+/// UPDATE_UNUSED_WHILE_PENDING (whose device feature is never enabled — a
+/// validation error) and silently DROPPED partially-bound (making any dynamically
+/// unsampled-yet-unwritten slot spec-UB at draw time).
+pub const VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT: VkFlags = 0x0000_0004;
+/// `VkDescriptorBindingFlagBits::VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT`
+/// — the LAST binding in the layout may be allocated with a descriptor count `<=`
+/// its declared `descriptorCount`, supplied via
+/// [`VkDescriptorSetVariableDescriptorCountAllocateInfo`] at allocation time.
+pub const VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT: VkFlags = 0x0000_0008;
+
+/// `VkDescriptorPoolCreateFlagBits::VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT`
+/// — the pool may allocate sets whose layout carries the
+/// `UPDATE_AFTER_BIND_POOL` create bit.
+pub const VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT: VkFlags = 0x0000_0002;
+/// `VkDescriptorSetLayoutCreateFlagBits::VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT`
+/// — the layout may be used to allocate a set from an UPDATE_AFTER_BIND pool, and
+/// its UPDATE_AFTER_BIND-flagged bindings may be updated after being bound (T4:
+/// the whole point of a bindless layout — live incremental per-slot writes with no
+/// pipeline/command-buffer rebuild).
+pub const VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT: VkFlags = 0x0000_0002;
+
 /// `VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE`.
 pub const VK_PIPELINE_BIND_POINT_COMPUTE: i32 = 1;
 
@@ -733,8 +830,25 @@ pub const VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT: VkFlags = 0x0000_0800;
 /// `VkPipelineStageFlagBits::VK_PIPELINE_STAGE_TRANSFER_BIT`.
 pub const VK_PIPELINE_STAGE_TRANSFER_BIT: VkFlags = 0x0000_1000;
 
+/// `VkPipelineStageFlagBits::VK_PIPELINE_STAGE_VERTEX_INPUT_BIT` — the fixed-function stage that
+/// FETCHES index and vertex-attribute data.
+///
+/// Particles P0: the destination stage of the billboard quad's ONE boot barrier. The 12-byte
+/// 6-entry `u16` index buffer is uploaded once and never rewritten, so it is deliberately NOT a
+/// framegraph resource (the plan's seed table names it as the one exception); its
+/// `TRANSFER_WRITE → INDEX_READ` hand-off is therefore hand-recorded at boot instead of derived.
+pub const VK_PIPELINE_STAGE_VERTEX_INPUT_BIT: VkFlags = 0x0000_0004;
+
 /// `VkAccessFlagBits` (subset used by the 0d buffer barrier).
 pub const VK_ACCESS_SHADER_READ_BIT: VkFlags = 0x0000_0020;
+/// `VkAccessFlagBits::VK_ACCESS_INDEX_READ_BIT` — the access
+/// [`VK_PIPELINE_STAGE_VERTEX_INPUT_BIT`] performs on a bound index buffer. See that constant's
+/// doc for the one consumer.
+pub const VK_ACCESS_INDEX_READ_BIT: VkFlags = 0x0000_0002;
+/// `VK_ACCESS_INDIRECT_COMMAND_READ_BIT` — the only access
+/// `VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT` performs. Virtual-geometry rung R1: its absence is
+/// why `boyko_render`'s `GpuStage::Indirect` widened to a whole shader/transfer superset.
+pub const VK_ACCESS_INDIRECT_COMMAND_READ_BIT: VkFlags = 0x0000_0001;
 pub const VK_ACCESS_SHADER_WRITE_BIT: VkFlags = 0x0000_0040;
 /// `VkAccessFlagBits::VK_ACCESS_TRANSFER_READ_BIT`.
 pub const VK_ACCESS_TRANSFER_READ_BIT: VkFlags = 0x0000_0800;
@@ -759,6 +873,51 @@ pub const VK_QUERY_RESULT_64_BIT: VkFlags = 0x0000_0001;
 /// `VkQueryResultFlagBits::VK_QUERY_RESULT_WAIT_BIT` — block until the results are
 /// available before writing them (paired with the caller's `wait_fence`).
 pub const VK_QUERY_RESULT_WAIT_BIT: VkFlags = 0x0000_0002;
+/// `VkQueryResultFlagBits::VK_QUERY_RESULT_WITH_AVAILABILITY_BIT` — write an extra
+/// availability word after each query's value, non-zero iff that query's result is
+/// ready. **This is the bit that makes a non-blocking reader possible**: without it a
+/// caller can only learn "ready" by asking the driver to block
+/// ([`VK_QUERY_RESULT_WAIT_BIT`]), and a query the recorder never wrote then blocks
+/// forever.
+///
+/// With [`VK_QUERY_RESULT_64_BIT`] also set, the availability word is 64-bit too, so
+/// each query occupies **two** `u64` slots — value then availability — and the stride
+/// is 16 bytes.
+///
+/// vulkan_core.h: `VK_QUERY_RESULT_WITH_AVAILABILITY_BIT = 0x00000004`. (`0x10` is
+/// `VK_QUERY_RESULT_WITH_STATUS_BIT_KHR`, a different extension's bit, and `0x20` is
+/// not defined at all — both are worth naming here because a wrong value does not
+/// fail: the driver writes fewer words and the caller reads whatever was in the
+/// staging buffer, which is how a stale byte becomes an availability answer.)
+pub const VK_QUERY_RESULT_WITH_AVAILABILITY_BIT: VkFlags = 0x0000_0004;
+
+// --- Profiling rung 9 — `VK_EXT_calibrated_timestamps` time domains. ---
+//
+// `VkTimeDomainEXT` is a plain C enum; this file's idiom for one is a named `i32` const with the
+// consuming field typed `i32` (see `VK_PRESENT_MODE_*` / `VK_QUERY_TYPE_TIMESTAMP` above), NOT a
+// Rust `enum`. That is deliberate here as well as elsewhere: the driver WRITES a domain array
+// through `vkGetPhysicalDeviceCalibrateableTimeDomainsEXT`'s out-pointer, and a Rust `enum` whose
+// variants do not cover every value the driver may write would make that write UB. An `i32`
+// cannot be given an invalid value.
+
+/// `VK_TIME_DOMAIN_DEVICE_EXT` — the GPU's own timestamp counter, the SAME axis
+/// `vkCmdWriteTimestamp` writes into a query pool. The only domain this engine ever requests.
+pub const VK_TIME_DOMAIN_DEVICE_EXT: i32 = 0;
+/// `VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT` — POSIX `CLOCK_MONOTONIC`. Named for completeness;
+/// **never requested** (see [`VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT`]).
+pub const VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT: i32 = 1;
+/// `VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_EXT` — POSIX `CLOCK_MONOTONIC_RAW`. Named for
+/// completeness; never requested.
+pub const VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_EXT: i32 = 2;
+/// `VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT` — Windows' `QueryPerformanceCounter`.
+///
+/// **Named, and deliberately never requested.** This engine's CPU axis is `rdtsc`
+/// (`boyko_diag::clock::ticks`), not QPC, so a QPC stamp would have to be converted to the TSC
+/// axis by a second, uncalibrated correlation — and D14's own rule is that an uncalibrated
+/// cross-domain offset "is not an approximation; it is a fabrication". The rung-9 sampler
+/// requests [`VK_TIME_DOMAIN_DEVICE_EXT`] alone and brackets the call with its own clock, so the
+/// deviation it publishes is one it measured on the axis it actually uses.
+pub const VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT: i32 = 3;
 
 // --- Slice-1 instance / device extension names. ---
 
@@ -768,6 +927,14 @@ pub const VK_KHR_SURFACE_EXTENSION_NAME: &core::ffi::CStr = c"VK_KHR_surface";
 pub const VK_KHR_WIN32_SURFACE_EXTENSION_NAME: &core::ffi::CStr = c"VK_KHR_win32_surface";
 /// `VK_KHR_swapchain` device-extension name.
 pub const VK_KHR_SWAPCHAIN_EXTENSION_NAME: &core::ffi::CStr = c"VK_KHR_swapchain";
+/// `VK_EXT_calibrated_timestamps` device-extension name (profiling rung 9).
+///
+/// **Never promoted to core** — unlike `hostQueryReset` (rung 4), which is a Vulkan 1.2 feature
+/// bit and therefore needs no extension string. This one is the `hwrt` shape: a string in
+/// `VkDeviceCreateInfo` *and* a `vkGetDeviceProcAddr` entry point, both conditional on the
+/// device advertising it.
+pub const VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME: &core::ffi::CStr =
+    c"VK_EXT_calibrated_timestamps";
 
 // --- HW-RT rung R2a-1 — ray-query device-extension names + AS buffer-usage /
 //     build-barrier constants (gated `hwrt`: absent from the default/golden build). ---
@@ -864,6 +1031,12 @@ pub const VK_FORMAT_R16_SFLOAT: i32 = 76;
 /// R16G16_UNORM=77) — pinned to the ACTUAL enumerant, cross-checked against
 /// `Format::R16G16Unorm` in `abi_guard`.
 pub const VK_FORMAT_R16G16_UNORM: i32 = 77;
+/// `VkFormat::VK_FORMAT_R16_UNORM` — a single unsigned-normalized 16-bit channel (the SSAO
+/// à-trous denoise chain's interior ping-pong ring; 16-bit avoids the cumulative 8-bit rounding
+/// of a multi-level filter, one channel narrower than [`VK_FORMAT_R16G16_UNORM`]). The value is
+/// 70 (the 16-bit single-component UNORM block) — pinned to the ACTUAL enumerant, cross-checked
+/// against `Format::R16Unorm` in `abi_guard`.
+pub const VK_FORMAT_R16_UNORM: i32 = 70;
 /// `VkFormat::VK_FORMAT_R16G16_SFLOAT` — two 16-bit (half) floats (SDFDDGI I1: the probe
 /// DEPTH/visibility atlas's two Chebyshev moments `E[d]`/`E[d²]`). The value is 83 (the
 /// 16-bit-per-component SFLOAT block: R16=76, R16G16=83) — the M2 lesson: the const is
@@ -875,9 +1048,26 @@ pub const VK_FORMAT_R16G16_SFLOAT: i32 = 83;
 /// (the 16-bit four-component UNORM block: R16=70, R16G16=77, R16G16B16A16=91) — pinned to the
 /// ACTUAL enumerant, cross-checked against `Format::R16G16B16A16Unorm` in `abi_guard`.
 pub const VK_FORMAT_R16G16B16A16_UNORM: i32 = 91;
+/// `VkFormat::VK_FORMAT_R16G16B16A16_SFLOAT` — four 16-bit (half) floats (textured-PBR T6a: the
+/// `gPbr` deferred-resolve MRT lane — metallic/roughness/AO-modulation/emissive-modulation). The
+/// value is 97 (the 16-bit four-component SFLOAT block: R16=76, R16G16=83, R16G16B16A16_SFLOAT=97)
+/// — pinned to the ACTUAL enumerant, cross-checked against `Format::R16G16B16A16Sfloat` in
+/// `abi_guard`.
+pub const VK_FORMAT_R16G16B16A16_SFLOAT: i32 = 97;
 /// `VkFormat::VK_FORMAT_R32_SFLOAT` — a single 32-bit float (Lighting L0b: the
 /// `gViewT` G-buffer storage-image lane carrying the marcher's surface ray param `t`).
 pub const VK_FORMAT_R32_SFLOAT: i32 = 100;
+/// `VkFormat::VK_FORMAT_R32G32_UINT` — two 32-bit unsigned integers (Multi-paradigm render-path
+/// plan, rung R8: the `vb_id` Visibility-Buffer id channel — `R` = `instance_id`, `G` = raw
+/// `SV_PrimitiveID`, Decision 9). The value is 101 (the 32-bit two-component UINT block:
+/// R32=100, R32G32=101..103, R32G32_UINT=101) — pinned to the ACTUAL enumerant, cross-checked
+/// against `Format::R32G32Uint` in `abi_guard`.
+pub const VK_FORMAT_R32G32_UINT: i32 = 101;
+/// `VkFormat::VK_FORMAT_R32G32_SFLOAT` — two 32-bit floats (textured-PBR T6c: a vec2
+/// vertex UV coordinate). The value is 103 (the 32-bit two-component SFLOAT block:
+/// R32=100, R32G32=101..103, R32G32_SFLOAT=103) — pinned to the ACTUAL enumerant,
+/// cross-checked against `VertexFormat::Float32x2` in `abi_guard`.
+pub const VK_FORMAT_R32G32_SFLOAT: i32 = 103;
 /// `VkFormat::VK_FORMAT_R32G32B32_SFLOAT` — three 32-bit floats (a vec3 vertex
 /// position, Phase-6 S0 rung 3).
 pub const VK_FORMAT_R32G32B32_SFLOAT: i32 = 106;
@@ -983,6 +1173,12 @@ const _: () = assert!(
 /// `VkColorSpaceKHR::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` — the always-present space.
 pub const VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: i32 = 0;
 
+/// `VkPresentModeKHR::VK_PRESENT_MODE_IMMEDIATE_KHR` — present as soon as submitted, tearing
+/// allowed. **Optional**: profiling rung 8 D12 probes it and falls back to FIFO with a notice.
+pub const VK_PRESENT_MODE_IMMEDIATE_KHR: i32 = 0;
+/// `VkPresentModeKHR::VK_PRESENT_MODE_MAILBOX_KHR` — one queued image, replaced rather than
+/// blocked. Optional; declared for the probe's vocabulary.
+pub const VK_PRESENT_MODE_MAILBOX_KHR: i32 = 1;
 /// `VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR` — the only mode the spec guarantees.
 pub const VK_PRESENT_MODE_FIFO_KHR: i32 = 2;
 
@@ -1009,6 +1205,14 @@ pub const VK_IMAGE_VIEW_TYPE_3D: i32 = 2;
 
 /// `VkImageTiling::VK_IMAGE_TILING_OPTIMAL`.
 pub const VK_IMAGE_TILING_OPTIMAL: i32 = 0;
+
+/// `VkImageCreateFlagBits::VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` (textured-PBR T2
+/// Decision D2): the image may be viewed through an image view of a DIFFERENT but
+/// compatible format than the image's own — the sRGB-view trick (a mutable
+/// `R8G8B8A8_UNORM` image sampled through an `R8G8B8A8_SRGB` view). Set only when
+/// [`boyko_rhi::TextureDesc::view_format`] is `Some(f)` with `f != format`; `0`
+/// (the byte-identical default) for every pre-T2 texture.
+pub const VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT: VkFlags = 0x0000_0008;
 
 /// `VkImageLayout` discriminants used by the S0 transfer/storage transitions
 /// (the buffer-path `VK_ACCESS_TRANSFER_*`/stage consts are reused for images).
@@ -1048,6 +1252,9 @@ pub const VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL: i32 = 1_000_241_000;
 
 /// `VkPipelineStageFlagBits` used by the present barriers / submit wait stage.
 pub const VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: VkFlags = 0x0000_0001;
+/// `VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT` — the stage that FETCHES indirect draw/dispatch
+/// arguments from a buffer. Virtual-geometry rung R1.
+pub const VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT: VkFlags = 0x0000_0002;
 /// `VK_PIPELINE_STAGE_VERTEX_SHADER_BIT` (Pillar B B3: the interp draw SSBO is READ by the
 /// raster + shadow VERTEX shaders — the destination stage of the COMPUTE→VERTEX RAW barrier
 /// the framegraph derives after the interp compute writes the interpolated model columns).
@@ -1064,6 +1271,9 @@ pub const VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: VkFlags = 0x0000_2000;
 
 /// `VkAccessFlagBits` used by the color-attachment present barriers.
 pub const VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT: VkFlags = 0x0000_0100;
+/// `VK_ACCESS_COLOR_ATTACHMENT_READ_BIT` — a `loadOp = LOAD` attachment access (the
+/// composite→UI same-image barrier in `record_present_sampled`).
+pub const VK_ACCESS_COLOR_ATTACHMENT_READ_BIT: VkFlags = 0x0000_0080;
 /// `VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT` (Phase-6 S0 rung 4 depth barrier).
 pub const VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT: VkFlags = 0x0000_0200;
 /// `VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT` (Phase-6 S0 rung 4 depth barrier).
@@ -1079,6 +1289,17 @@ pub const VK_COMPARE_OP_LESS_OR_EQUAL: i32 = 3;
 /// `VkCompareOp::VK_COMPARE_OP_ALWAYS` (CSM Increment 0: pinned in `abi_guard.rs` for
 /// the agnostic [`CompareOp::Always`](boyko_rhi::enums::CompareOp) discriminant).
 pub const VK_COMPARE_OP_ALWAYS: i32 = 7;
+/// `VkCompareOp::VK_COMPARE_OP_GREATER` — multi-paradigm render-path plan, rung R4b-b
+/// (Decision 4): the Forward path's reverse-Z depth-test compare op (a LARGER stored
+/// depth is nearer under reverse-Z, so the fragment with the greater `z` wins).
+pub const VK_COMPARE_OP_GREATER: i32 = 4;
+/// `VkCompareOp::VK_COMPARE_OP_EQUAL` — multi-paradigm render-path plan, rung R5
+/// (ForwardPlus): the EQUAL-depth zero-overdraw compare op `forward_opaque` tests
+/// against under `ForwardPlus` (depth-write OFF), after `depth_prepass` has already
+/// written the exact same reverse-Z value with `VK_COMPARE_OP_GREATER` — a fragment
+/// survives only if its interpolated depth exactly matches the prepass-written value,
+/// so hardware early-Z rejects every occluded fragment before the inline shade runs.
+pub const VK_COMPARE_OP_EQUAL: i32 = 2;
 
 /// `VkAttachmentLoadOp` / `VkAttachmentStoreOp` discriminants for dynamic rendering.
 pub const VK_ATTACHMENT_LOAD_OP_LOAD: i32 = 0;
@@ -1096,6 +1317,10 @@ pub const VK_SAMPLE_COUNT_1_BIT: VkFlags = 0x0000_0001;
 pub const VK_FILTER_NEAREST: i32 = 0;
 /// `VkFilter::VK_FILTER_LINEAR` — bilinear interpolation.
 pub const VK_FILTER_LINEAR: i32 = 1;
+/// `VkSamplerMipmapMode::VK_SAMPLER_MIPMAP_MODE_LINEAR` — interpolated (trilinear
+/// when paired with `VK_FILTER_LINEAR` mag/min) mip sampling. T4: the bindless
+/// table's shared sampler.
+pub const VK_SAMPLER_MIPMAP_MODE_LINEAR: i32 = 1;
 /// `VkSamplerMipmapMode::VK_SAMPLER_MIPMAP_MODE_NEAREST` — no mip interpolation
 /// (rung-5 textures have a single mip level).
 pub const VK_SAMPLER_MIPMAP_MODE_NEAREST: i32 = 0;
@@ -1161,7 +1386,10 @@ pub struct VkDeviceCreateInfo {
     pub pp_enabled_layer_names: *const *const c_char,
     pub enabled_extension_count: u32,
     pub pp_enabled_extension_names: *const *const c_char,
-    /// `const VkPhysicalDeviceFeatures*` — left null (no features requested).
+    /// `const VkPhysicalDeviceFeatures*` (T-dev: points to a stack-local
+    /// [`VkPhysicalDeviceFeatures`] enabling `samplerAnisotropy`). NEVER combined with a
+    /// `VkPhysicalDeviceFeatures2` in `pNext` — the two are mutually exclusive
+    /// (VUID-VkDeviceCreateInfo-pNext-00373).
     pub p_enabled_features: *const c_void,
 }
 
@@ -1200,6 +1428,11 @@ pub struct VkPhysicalDeviceLimitsBlob(pub [u8; 504]);
 // `maxMemoryAllocationCount`, `maxSamplerAllocationCount` (11 × 4 = 44 B), then 4 B pad to the
 // 8-aligned `VkDeviceSize bufferImageGranularity` @48 + `sparseAddressSpaceSize` @56, then
 // `maxBoundDescriptorSets` @64, and the six per-stage descriptor caps @68..92 in the order below.
+/// Offset of `maxImageDimension2D` (`u32`) within `VkPhysicalDeviceLimits` — the SECOND
+/// leading `u32` (`maxImageDimension1D` is @0). SSAA W2: the boot device probe reads this
+/// to decide whether `native * 2` fits the device's max 2D image extent on both axes
+/// before arming the 2× render scale.
+pub const LIMITS_OFF_MAX_IMAGE_DIMENSION_2D: usize = 4;
 /// Offset of `maxPerStageDescriptorSamplers` (`u32`) within `VkPhysicalDeviceLimits`.
 pub const LIMITS_OFF_MAX_PER_STAGE_SAMPLERS: usize = 68;
 /// Offset of `maxPerStageDescriptorUniformBuffers` (`u32`).
@@ -1210,9 +1443,18 @@ pub const LIMITS_OFF_MAX_PER_STAGE_STORAGE_BUFFERS: usize = 76;
 pub const LIMITS_OFF_MAX_PER_STAGE_SAMPLED_IMAGES: usize = 80;
 /// Offset of `maxPerStageDescriptorStorageImages` (`u32`).
 pub const LIMITS_OFF_MAX_PER_STAGE_STORAGE_IMAGES: usize = 84;
+/// Offset of `maxBoundDescriptorSets` (`u32`) within `VkPhysicalDeviceLimits` — the
+/// field immediately preceding `maxPerStageDescriptorSamplers` @68 (see the field-order
+/// comment above `LIMITS_OFF_MAX_IMAGE_DIMENSION_2D`). Multi-paradigm render-path plan,
+/// rung R-VBGEO (Decision 0 / P2-c): `MeshGeometryTable::new` asserts this is `>= 4`
+/// (the `VisibilityBuffer` path's Set-3 geometry table needs a 4th bound descriptor set
+/// alongside Set 0/1/2 — the Vulkan-guaranteed floor).
+pub const LIMITS_OFF_MAX_BOUND_DESCRIPTOR_SETS: usize = 64;
 
 // The read offsets must lie inside the blob (the last field read is a `u32` at 84 → 84..88 <= 504).
 const _: () = assert!(LIMITS_OFF_MAX_PER_STAGE_STORAGE_IMAGES + 4 <= 504);
+const _: () = assert!(LIMITS_OFF_MAX_IMAGE_DIMENSION_2D + 4 <= 504);
+const _: () = assert!(LIMITS_OFF_MAX_BOUND_DESCRIPTOR_SETS + 4 <= 504);
 
 /// Offset of `timestampPeriod` (`float`) within `VkPhysicalDeviceLimits` (HW-RT rung
 /// R0). Re-derived from the in-repo anchor `maxPerStageDescriptorStorageImages == 84`
@@ -1225,40 +1467,69 @@ const _: () = assert!(LIMITS_OFF_MAX_PER_STAGE_STORAGE_IMAGES + 4 <= 504);
 /// bogus measurement.
 pub const LIMITS_OFF_TIMESTAMP_PERIOD: usize = 424;
 
+/// Offset of `timestampComputeAndGraphics` (`VkBool32`) within `VkPhysicalDeviceLimits` — the
+/// field immediately PRECEDING [`LIMITS_OFF_TIMESTAMP_PERIOD`] in the spec-fixed order the
+/// comment above already walks (`…, maxSampleMaskWords (u32)`,
+/// `timestampComputeAndGraphics (VkBool32) @420`, `timestampPeriod (float) @424`).
+///
+/// VB-SV0 rung S1.5: read so a timing harness can state whether the GRAPHICS+COMPUTE queue
+/// families are all guaranteed to support timestamps (`VK_TRUE`), rather than relying solely on
+/// the chosen family's `timestampValidBits`. A `VK_FALSE` device is not a failure — the per-family
+/// `timestampValidBits` check already gates usability — but a bench that reports its own
+/// resolution should report which of the two guarantees it is standing on. RECORDED ONLY: nothing
+/// branches on it (see [`crate::device::DeviceCaps::timestamps_usable`], unchanged).
+pub const LIMITS_OFF_TIMESTAMP_COMPUTE_AND_GRAPHICS: usize = 420;
+
 // The `f32` read at 424 must lie inside the blob (424..428 <= 504).
 const _: () = assert!(LIMITS_OFF_TIMESTAMP_PERIOD + 4 <= 504);
+// The `VkBool32` read at 420 must lie inside the blob, and must sit exactly one 4-byte scalar
+// before the period — a drift in either constant breaks this pairing at compile time.
+const _: () = assert!(LIMITS_OFF_TIMESTAMP_COMPUTE_AND_GRAPHICS + 4 == LIMITS_OFF_TIMESTAMP_PERIOD);
 
 impl VkPhysicalDeviceLimitsBlob {
     /// Reads the `u32` field at `offset` bytes into the opaque limits blob. The
-    /// `LIMITS_OFF_*` constants above name the documented spec offsets; a bad offset is a
-    /// programming error, guarded here with a `debug_assert` (the read stays in-bounds
-    /// because every `LIMITS_OFF_*` const-asserts `offset + 4 <= 504`).
+    /// `LIMITS_OFF_*` constants above name the documented spec offsets.
+    ///
+    /// 2026-07 audit: this was a SAFE `pub fn` performing an unchecked raw read at a
+    /// caller-supplied offset, with only a `debug_assert` in front of it — and a
+    /// `debug_assert` is absent from the release build, which is the build that matters.
+    /// A safe function must be sound for EVERY input it accepts, so `read_u32(10_000)`
+    /// from safe code was an out-of-bounds read. It is now a checked slice index: the
+    /// `unsafe` block is gone entirely, and the bounds check is free — the blob is read a
+    /// handful of times at device boot, never per frame.
+    ///
+    /// # Panics
+    ///
+    /// If `offset + 4` exceeds the 504-byte blob. Every `LIMITS_OFF_*` const-asserts that
+    /// it does not, so reaching the panic means a hand-written offset, i.e. a bug.
     #[inline]
     pub fn read_u32(&self, offset: usize) -> u32 {
-        debug_assert!(offset + 4 <= self.0.len(), "invariant: limits field read within the blob");
-        // SAFETY: `offset + 4 <= 504` (the `LIMITS_OFF_*` const-asserts + the debug-assert), so the
-        // 4-byte read is in-bounds of the blob. The bytes were written by the driver through the
-        // `vkGetPhysicalDeviceProperties` out-pointer (a valid `u32` at the spec-fixed offset). The
-        // driver writes native-endian, and this target is little-endian x86_64.
-        let bytes: [u8; 4] = unsafe { *(self.0.as_ptr().add(offset) as *const [u8; 4]) };
-        u32::from_ne_bytes(bytes)
+        // The driver writes native-endian through the `vkGetPhysicalDeviceProperties`
+        // out-pointer; this target is little-endian x86_64.
+        u32::from_ne_bytes(self.field_bytes(offset))
     }
 
     /// Reads the `f32` field at `offset` bytes into the opaque limits blob (HW-RT rung
     /// R0: `timestampPeriod` at [`LIMITS_OFF_TIMESTAMP_PERIOD`]). The companion of
-    /// [`Self::read_u32`]; a bad offset is a programming error, guarded here with a
-    /// `debug_assert` (the read stays in-bounds because `LIMITS_OFF_TIMESTAMP_PERIOD`
-    /// const-asserts `offset + 4 <= 504`).
+    /// [`Self::read_u32`] — see it for why this is a checked read.
+    ///
+    /// # Panics
+    ///
+    /// If `offset + 4` exceeds the 504-byte blob.
     #[inline]
     pub fn read_f32(&self, offset: usize) -> f32 {
-        debug_assert!(offset + 4 <= self.0.len(), "invariant: limits field read within the blob");
-        // SAFETY: `offset + 4 <= 504` (the caller's `LIMITS_OFF_*` const-asserts + the
-        // debug-assert), so the 4-byte read is in-bounds of the blob. The bytes were
-        // written by the driver through the `vkGetPhysicalDeviceProperties` out-pointer (a
-        // valid `float` at the spec-fixed offset). The driver writes native-endian, and
-        // this target is little-endian x86_64.
-        let bytes: [u8; 4] = unsafe { *(self.0.as_ptr().add(offset) as *const [u8; 4]) };
-        f32::from_ne_bytes(bytes)
+        f32::from_ne_bytes(self.field_bytes(offset))
+    }
+
+    /// The shared checked 4-byte window both readers slice out of the blob.
+    ///
+    /// `try_into` on a `&[u8]` of the right length is a compile-time-sized copy — the same
+    /// codegen the old raw read produced, with the index check the old version omitted.
+    #[inline]
+    fn field_bytes(&self, offset: usize) -> [u8; 4] {
+        self.0[offset..offset + 4]
+            .try_into()
+            .expect("invariant: a 4-byte window slices to a [u8; 4]")
     }
 }
 
@@ -1892,6 +2163,38 @@ pub struct VkDescriptorSetAllocateInfo {
     pub p_set_layouts: *const VkDescriptorSetLayout,
 }
 
+/// `VkDescriptorSetLayoutBindingFlagsCreateInfo` (T4 bindless) — chained into
+/// [`VkDescriptorSetLayoutCreateInfo::p_next`] to supply one [`VkFlags`] of
+/// [`VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT`] /
+/// [`VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT`] /
+/// [`VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT`] per binding, in the SAME
+/// order as the layout's `p_bindings` array (`binding_count` MUST equal the
+/// layout's `binding_count`, or the driver reads/writes past one of the two
+/// arrays).
+#[repr(C)]
+pub struct VkDescriptorSetLayoutBindingFlagsCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub binding_count: u32,
+    /// `const VkDescriptorBindingFlags*` — one flags word per binding, positionally
+    /// paired with the layout's `p_bindings[i]`.
+    pub p_binding_flags: *const VkFlags,
+}
+
+/// `VkDescriptorSetVariableDescriptorCountAllocateInfo` (T4 bindless) — chained
+/// into [`VkDescriptorSetAllocateInfo::p_next`] to supply the RUNTIME descriptor
+/// count for each set's VARIABLE_DESCRIPTOR_COUNT-flagged binding (the LAST
+/// binding in the layout) at allocation time. `descriptor_set_count` MUST equal
+/// the enclosing alloc-info's `descriptor_set_count`.
+#[repr(C)]
+pub struct VkDescriptorSetVariableDescriptorCountAllocateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub descriptor_set_count: u32,
+    /// `const uint32_t*` — one runtime count per set being allocated.
+    pub p_descriptor_counts: *const u32,
+}
+
 /// `VkDescriptorBufferInfo`.
 ///
 /// `#[derive(Clone, Copy)]`: a plain POD with no Drop, so the bind-group create path
@@ -2217,12 +2520,18 @@ pub struct VkImageMemoryBarrier {
     pub subresource_range: VkImageSubresourceRange,
 }
 
-/// `VkClearColorValue` (the `float32[4]` member of the union — the only variant
-/// the clear uses). A bare `[f32; 4]` matches the union's size/align (16 bytes).
+/// `VkClearColorValue` — the real Vulkan union `{ float32[4]; int32[4]; uint32[4]; }`. Multi-
+/// paradigm render-path plan, rung R8: widened from a bare `float32`-only struct to a proper
+/// `union` (both variants are the same 16-byte size/align) so the `vb_id` `R32G32_UINT` color
+/// attachment can be cleared to its sentinel `(0xFFFFFFFF, 0)` via `uint32`, alongside every
+/// existing `float32` clear (UNORM/SFLOAT color targets), which is unaffected — a union read of
+/// `float32` after a `float32` write (the only pattern every existing call site uses) is
+/// unchanged.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct VkClearColorValue {
+pub union VkClearColorValue {
     pub float32: [f32; 4],
+    pub uint32: [u32; 4],
 }
 
 /// `VkClearDepthStencilValue` (the `{ float depth; uint32_t stencil; }` member of
@@ -2375,19 +2684,77 @@ pub struct VkOffset3D {
     pub z: i32,
 }
 
+/// `VkImageBlit` — one mip-to-mip blit region for `vkCmdBlitImage` (textured-PBR
+/// T2 Decision D3, the mip-chain-generation blit). `srcOffsets`/`dstOffsets` are the
+/// two opposite corners of the (axis-aligned) source/destination box; a mip-chain
+/// blit always uses `[(0,0,0), (extent_w, extent_h, 1)]` (the full mip level).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkImageBlit {
+    pub src_subresource: VkImageSubresourceLayers,
+    pub src_offsets: [VkOffset3D; 2],
+    pub dst_subresource: VkImageSubresourceLayers,
+    pub dst_offsets: [VkOffset3D; 2],
+}
+
 /// `VkPhysicalDeviceFeatures2` — the head struct for `vkGetPhysicalDeviceFeatures2`
-/// (S0 fail-fast `dynamicRendering` support query). The `features` member is the
-/// large `VkPhysicalDeviceFeatures` block (55 `VkBool32`s = 220 bytes), reserved
-/// here as an ABI-exact opaque footprint: we only read the chained
-/// `VkPhysicalDeviceVulkan13Features.dynamic_rendering` written through `p_next`.
+/// (the device-feature support queries). The `features` member is the core
+/// [`VkPhysicalDeviceFeatures`] block (55 `VkBool32`s = 220 bytes), field-exact, so the
+/// required-feature query reads the core bits (`samplerAnisotropy`, `geometryShader`)
+/// from the SAME call that fills the chained `VkPhysicalDeviceVulkan13Features`.
 #[repr(C)]
 pub struct VkPhysicalDeviceFeatures2 {
     pub s_type: VkStructureType,
     pub p_next: *mut c_void,
-    /// `VkPhysicalDeviceFeatures features` — 55 `VkBool32`s (opaque, written by
-    /// the driver; we do not read it for the dynamic-rendering query).
-    pub features: [VkBool32; 55],
+    /// `VkPhysicalDeviceFeatures features` — written by the driver.
+    pub features: VkPhysicalDeviceFeatures,
 }
+
+/// `VkPhysicalDeviceProperties2` — the head for `vkGetPhysicalDeviceProperties2` (Vulkan 1.1
+/// core). The `properties` member is the 824-byte [`VkPhysicalDeviceProperties`] block; the
+/// callers read only what they chain through `p_next` (the subgroup properties on every boot,
+/// the acceleration-structure properties on an `hwrt` build).
+///
+/// **UNGATED**: it lived in the `hwrt`-only `accel_ffi` while ray query was its only caller.
+/// The boot's subgroup-support query is a second caller in every build, so the declaration moved
+/// here and `accel_ffi` re-exports it — one declaration of one ABI.
+#[repr(C)]
+pub struct VkPhysicalDeviceProperties2 {
+    pub s_type: i32,
+    pub _pad: i32,
+    pub p_next: *mut c_void,
+    /// `VkPhysicalDeviceProperties properties` — opaque, driver-written (824 bytes).
+    pub properties: VkPhysicalDeviceProperties,
+}
+
+/// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2` — Vulkan 1.1 core.
+pub const ST_PHYSICAL_DEVICE_PROPERTIES_2: i32 = 1_000_059_001;
+
+/// `VkPhysicalDeviceSubgroupProperties` — chained into [`VkPhysicalDeviceProperties2`] to read
+/// which subgroup operations and stages the device supports (Vulkan 1.1 core). Written BY the
+/// driver. These are PROPERTIES, not features: there is no enable bit, only a support check
+/// before any module that uses a subgroup operation is created.
+#[repr(C)]
+pub struct VkPhysicalDeviceSubgroupProperties {
+    pub s_type: i32,
+    pub p_next: *mut c_void,
+    /// `subgroupSize` — the default number of invocations per subgroup.
+    pub subgroup_size: u32,
+    /// `supportedStages` — `VkShaderStageFlags` in which subgroup operations may run.
+    pub supported_stages: VkFlags,
+    /// `supportedOperations` — `VkSubgroupFeatureFlags` (`VK_SUBGROUP_FEATURE_*_BIT`).
+    pub supported_operations: VkFlags,
+    /// `quadOperationsInAllStages`.
+    pub quad_operations_in_all_stages: VkBool32,
+}
+
+/// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES` — Vulkan 1.1 core.
+pub const ST_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES: i32 = 1_000_094_000;
+
+/// `VK_SUBGROUP_FEATURE_BASIC_BIT` — licenses the `GroupNonUniform` SPIR-V capability.
+pub const VK_SUBGROUP_FEATURE_BASIC_BIT: VkFlags = 0x0000_0001;
+/// `VK_SUBGROUP_FEATURE_BALLOT_BIT` — licenses the `GroupNonUniformBallot` SPIR-V capability.
+pub const VK_SUBGROUP_FEATURE_BALLOT_BIT: VkFlags = 0x0000_0008;
 
 /// `VkPhysicalDeviceVulkan13Features` — chained into `VkDeviceCreateInfo` to
 /// enable `dynamicRendering` + `synchronization2` (we use only `dynamicRendering`).
@@ -2429,13 +2796,13 @@ pub struct VkFormatProperties {
     pub buffer_features: VkFlags,
 }
 
-/// `VkPhysicalDeviceVulkan12Features` — chained into `VkPhysicalDeviceFeatures2` to
-/// READ the Vulkan 1.2 core feature bools (the Render P1b device-caps query reads
-/// `descriptor_indexing` + `runtime_descriptor_array` for the *recorded-only*
-/// `bindless_capable` cap; NOT enabled at device creation in P1b). The struct is
-/// declared field-exact so the driver, walking `p_next`, writes every bool it owns
-/// without reading past our footprint; the size/align guard below pins the ABI. All
-/// fields are `VkBool32`, written BY the driver.
+/// `VkPhysicalDeviceVulkan12Features` — the Vulkan 1.2 aggregate feature struct.
+/// Declared field-exact (ABI completeness / a future reader of other 1.2 bits), but
+/// NOT used by the T-dev bindless query/enable path — see
+/// [`VkPhysicalDeviceDescriptorIndexingFeatures`] for the granular struct that path
+/// reads/writes instead. The struct is declared field-exact so the driver, walking
+/// `p_next`, writes every bool it owns without reading past our footprint; the
+/// size/align guard below pins the ABI. All fields are `VkBool32`, written BY the driver.
 #[repr(C)]
 pub struct VkPhysicalDeviceVulkan12Features {
     pub s_type: VkStructureType,
@@ -2489,6 +2856,146 @@ pub struct VkPhysicalDeviceVulkan12Features {
     pub subgroup_broadcast_dynamic_id: VkBool32,
 }
 
+/// `VkPhysicalDeviceFeatures` — the CORE (Vulkan 1.0) feature-enable struct passed via
+/// [`VkDeviceCreateInfo::p_enabled_features`] (T-dev: `samplerAnisotropy`). Field-exact,
+/// in `vulkan_core.h` declaration order, so a raw pointer cast is ABI-correct.
+///
+/// Deliberately NOT chained through `VkPhysicalDeviceFeatures2`/`pNext` — the two are
+/// mutually exclusive at `vkCreateDevice` (VUID-VkDeviceCreateInfo-pNext-00373: a
+/// `VkPhysicalDeviceFeatures2` in `pNext` supersedes `p_enabled_features`, so combining
+/// them is invalid). `#[derive(Default)]` gives the all-`VK_FALSE` baseline (every
+/// `VkBool32` is `u32`, whose `Default` is `0`); callers flip only the bits they enable.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct VkPhysicalDeviceFeatures {
+    pub robust_buffer_access: VkBool32,
+    pub full_draw_index_uint32: VkBool32,
+    pub image_cube_array: VkBool32,
+    pub independent_blend: VkBool32,
+    pub geometry_shader: VkBool32,
+    pub tessellation_shader: VkBool32,
+    pub sample_rate_shading: VkBool32,
+    pub dual_src_blend: VkBool32,
+    pub logic_op: VkBool32,
+    pub multi_draw_indirect: VkBool32,
+    pub draw_indirect_first_instance: VkBool32,
+    pub depth_clamp: VkBool32,
+    pub depth_bias_clamp: VkBool32,
+    pub fill_mode_non_solid: VkBool32,
+    pub depth_bounds: VkBool32,
+    pub wide_lines: VkBool32,
+    pub large_points: VkBool32,
+    pub alpha_to_one: VkBool32,
+    pub multi_viewport: VkBool32,
+    pub sampler_anisotropy: VkBool32,
+    pub texture_compression_etc2: VkBool32,
+    pub texture_compression_astc_ldr: VkBool32,
+    pub texture_compression_bc: VkBool32,
+    pub occlusion_query_precise: VkBool32,
+    pub pipeline_statistics_query: VkBool32,
+    pub vertex_pipeline_stores_and_atomics: VkBool32,
+    pub fragment_stores_and_atomics: VkBool32,
+    pub shader_tessellation_and_geometry_point_size: VkBool32,
+    pub shader_image_gather_extended: VkBool32,
+    pub shader_storage_image_extended_formats: VkBool32,
+    pub shader_storage_image_multisample: VkBool32,
+    pub shader_storage_image_read_without_format: VkBool32,
+    pub shader_storage_image_write_without_format: VkBool32,
+    pub shader_uniform_buffer_array_dynamic_indexing: VkBool32,
+    pub shader_sampled_image_array_dynamic_indexing: VkBool32,
+    pub shader_storage_buffer_array_dynamic_indexing: VkBool32,
+    pub shader_storage_image_array_dynamic_indexing: VkBool32,
+    pub shader_clip_distance: VkBool32,
+    pub shader_cull_distance: VkBool32,
+    pub shader_float64: VkBool32,
+    pub shader_int64: VkBool32,
+    pub shader_int16: VkBool32,
+    pub shader_resource_residency: VkBool32,
+    pub shader_resource_min_lod: VkBool32,
+    pub sparse_binding: VkBool32,
+    pub sparse_residency_buffer: VkBool32,
+    pub sparse_residency_image_2d: VkBool32,
+    pub sparse_residency_image_3d: VkBool32,
+    pub sparse_residency_2_samples: VkBool32,
+    pub sparse_residency_4_samples: VkBool32,
+    pub sparse_residency_8_samples: VkBool32,
+    pub sparse_residency_16_samples: VkBool32,
+    pub sparse_residency_aliased: VkBool32,
+    pub variable_multisample_rate: VkBool32,
+    pub inherited_queries: VkBool32,
+}
+
+/// `VkPhysicalDeviceDescriptorIndexingFeatures` (T-dev) — the GRANULAR bindless
+/// feature struct. Chained into `VkPhysicalDeviceFeatures2` to READ (the
+/// `bindless_capable` query) and into `VkDeviceCreateInfo` to ENABLE exactly the 5
+/// bits the query gates: `shader_sampled_image_array_non_uniform_indexing`,
+/// `runtime_descriptor_array`, `descriptor_binding_partially_bound`,
+/// `descriptor_binding_variable_descriptor_count`,
+/// `descriptor_binding_sampled_image_update_after_bind`. Field-exact (in
+/// `vulkan_core.h` declaration order — identical to the tail of
+/// [`VkPhysicalDeviceVulkan12Features`] from `shader_input_attachment_array_dynamic_indexing`
+/// through `runtime_descriptor_array`), so the driver, walking `p_next`, writes/reads
+/// every bool it owns without stepping past our footprint. Deliberately carries NO
+/// `buffer_device_address` field (unlike the `Vulkan12Features` aggregate), so it
+/// coexists cleanly with the hwrt arm's standalone
+/// `VkPhysicalDeviceBufferDeviceAddressFeatures` in the same `pNext` chain.
+/// `VkPhysicalDeviceHostQueryResetFeatures` — the GRANULAR `hostQueryReset` feature struct
+/// (profiling rung 4). Chained into `VkPhysicalDeviceFeatures2` to READ whether the device
+/// advertises host query reset, and into `VkDeviceCreateInfo` to ENABLE it when it does.
+///
+/// **Granular, not the aggregate, for exactly the reason the sibling above states.**
+/// `hostQueryReset` also lives in [`VkPhysicalDeviceVulkan12Features`], but that aggregate
+/// carries `descriptorIndexing`'s bits too, and VUID-VkDeviceCreateInfo-pNext-02830 forbids
+/// a promoted struct's aggregate alongside its own granular sub-struct — which this chain
+/// already has.
+///
+/// vulkan_core.h: `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES = 1000261000`.
+#[repr(C)]
+pub struct VkPhysicalDeviceHostQueryResetFeatures {
+    pub s_type: VkStructureType,
+    pub p_next: *mut c_void,
+    pub host_query_reset: VkBool32,
+}
+
+/// `VkCalibratedTimestampInfoEXT` — one requested time domain (profiling rung 9).
+///
+/// Passed as an ARRAY to `vkGetCalibratedTimestampsEXT`, one element per domain, and READ by the
+/// driver only. `p_next` is `*const c_void` (not `*mut`) because this struct is input-only —
+/// unlike the two feature structs above, which the driver also writes through on the query pass.
+#[repr(C)]
+pub struct VkCalibratedTimestampInfoExt {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    /// A `VkTimeDomainEXT` — see the `VK_TIME_DOMAIN_*_EXT` constants.
+    pub time_domain: i32,
+}
+
+#[repr(C)]
+pub struct VkPhysicalDeviceDescriptorIndexingFeatures {
+    pub s_type: VkStructureType,
+    pub p_next: *mut c_void,
+    pub shader_input_attachment_array_dynamic_indexing: VkBool32,
+    pub shader_uniform_texel_buffer_array_dynamic_indexing: VkBool32,
+    pub shader_storage_texel_buffer_array_dynamic_indexing: VkBool32,
+    pub shader_uniform_buffer_array_non_uniform_indexing: VkBool32,
+    pub shader_sampled_image_array_non_uniform_indexing: VkBool32,
+    pub shader_storage_buffer_array_non_uniform_indexing: VkBool32,
+    pub shader_storage_image_array_non_uniform_indexing: VkBool32,
+    pub shader_input_attachment_array_non_uniform_indexing: VkBool32,
+    pub shader_uniform_texel_buffer_array_non_uniform_indexing: VkBool32,
+    pub shader_storage_texel_buffer_array_non_uniform_indexing: VkBool32,
+    pub descriptor_binding_uniform_buffer_update_after_bind: VkBool32,
+    pub descriptor_binding_sampled_image_update_after_bind: VkBool32,
+    pub descriptor_binding_storage_image_update_after_bind: VkBool32,
+    pub descriptor_binding_storage_buffer_update_after_bind: VkBool32,
+    pub descriptor_binding_uniform_texel_buffer_update_after_bind: VkBool32,
+    pub descriptor_binding_storage_texel_buffer_update_after_bind: VkBool32,
+    pub descriptor_binding_update_unused_while_pending: VkBool32,
+    pub descriptor_binding_partially_bound: VkBool32,
+    pub descriptor_binding_variable_descriptor_count: VkBool32,
+    pub runtime_descriptor_array: VkBool32,
+}
+
 /// `VkPresentInfoKHR`.
 #[repr(C)]
 pub struct VkPresentInfoKhr {
@@ -2526,10 +3033,27 @@ const _: () = assert!(core::mem::align_of::<VkImageCreateInfo>() == 8);
 const _: () = assert!(core::mem::size_of::<VkImageSubresourceLayers>() == 16);
 const _: () = assert!(core::mem::size_of::<VkBufferImageCopy>() == 56);
 const _: () = assert!(core::mem::align_of::<VkBufferImageCopy>() == 8);
-// 16-byte head (sType + 4 pad + pNext) + [VkBool32; 55] = 220 bytes → 236, rounded
-// up to the struct's 8-byte alignment = 240.
+// T2 mip-chain blit: `VkImageBlit` is `VkImageSubresourceLayers` (16 bytes) +
+// `[VkOffset3D; 2]` (24 bytes) x2 = 80 bytes, 4-byte aligned (every field is
+// `i32`/`u32`, no 8-byte member).
+const _: () = assert!(core::mem::size_of::<VkImageBlit>() == 80);
+const _: () = assert!(core::mem::align_of::<VkImageBlit>() == 4);
+// 16-byte head (sType + 4 pad + pNext) + `VkPhysicalDeviceFeatures` (55 `VkBool32`s =
+// 220 bytes, 4-byte aligned, asserted below) → 236, rounded up to the struct's 8-byte
+// alignment = 240.
 const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceFeatures2>() == 240);
 const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceFeatures2>() == 8);
+// 16-byte head (sType + 4 pad + pNext) + `VkPhysicalDeviceProperties` (824 bytes, 8-aligned,
+// asserted above) = 840.
+const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceProperties2>() == 840);
+const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceProperties2>() == 8);
+// Written BY the driver through the `p_next` chain: the 16-byte head (sType + 4 pad + pNext) +
+// four 4-byte members (16 bytes) = 32, already 8-byte aligned.
+const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceSubgroupProperties>() == 32);
+const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceSubgroupProperties>() == 8);
+const _: () = assert!(core::mem::offset_of!(VkPhysicalDeviceSubgroupProperties, p_next) == 8);
+const _: () = assert!(core::mem::offset_of!(VkPhysicalDeviceSubgroupProperties, supported_stages) == 20);
+const _: () = assert!(core::mem::offset_of!(VkPhysicalDeviceSubgroupProperties, supported_operations) == 24);
 // Render P1b device-caps query layout guards. `VkFormatProperties` is written BY the
 // driver; `VkPhysicalDeviceVulkan12Features` is written BY the driver through the
 // `p_next` chain — both must match the C ABI exactly. `VkFormatProperties` is three
@@ -2539,6 +3063,38 @@ const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceFeatures2>() == 8);
 const _: () = assert!(core::mem::size_of::<VkFormatProperties>() == 12);
 const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceVulkan12Features>() == 208);
 const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceVulkan12Features>() == 8);
+// T-dev bindless device-feature layout guards. `VkPhysicalDeviceFeatures` is READ by
+// the driver through `p_enabled_features` (55 `VkBool32`s = 220 bytes, 4-byte aligned —
+// no pointer member, unlike the sType-headed feature structs above).
+// `VkPhysicalDeviceDescriptorIndexingFeatures` is written/read BY the driver through the
+// `p_next` chain: the 16-byte head (sType + 4 pad + pNext) + 20 `VkBool32`s (80 bytes) =
+// 96, already 8-byte aligned (no rounding needed).
+const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceFeatures>() == 220);
+const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceFeatures>() == 4);
+const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceDescriptorIndexingFeatures>() == 96);
+const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceDescriptorIndexingFeatures>() == 8);
+// Profiling rung 4: the 16-byte sType+pNext head + one `VkBool32` (4 bytes), rounded up to
+// the 8-byte alignment = 24. Written BY the driver on the query pass and READ by it on the
+// enable pass, so the layout is pinned exactly like its siblings above.
+const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceHostQueryResetFeatures>() == 24);
+const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceHostQueryResetFeatures>() == 8);
+// Profiling rung 9: the same 16-byte sType+pNext head + one `i32` domain (4 bytes), rounded up to
+// the 8-byte alignment = 24. READ by the driver as an array element, so a wrong SIZE is worse than
+// a wrong field: the driver strides by `sizeof(VkCalibratedTimestampInfoEXT)` across OUR array and
+// would read the second element from the wrong offset — a garbage domain enum, not a Rust error.
+const _: () = assert!(core::mem::size_of::<VkCalibratedTimestampInfoExt>() == 24);
+const _: () = assert!(core::mem::align_of::<VkCalibratedTimestampInfoExt>() == 8);
+// T4 bindless: both `p_next`-chained structs are READ by the driver (we author every
+// byte), but a wrong field ORDER still misfeeds the driver a garbage count/pointer
+// (a real OOB-read hazard, not just a Rust-side type error) — pinned like every other
+// chained struct in this file. Both are the 16-byte sType+pNext head + one `u32` count
+// (padded to 8) + one pointer = 32 bytes, 8-byte aligned.
+const _: () = assert!(core::mem::size_of::<VkDescriptorSetLayoutBindingFlagsCreateInfo>() == 32);
+const _: () = assert!(core::mem::align_of::<VkDescriptorSetLayoutBindingFlagsCreateInfo>() == 8);
+const _: () =
+    assert!(core::mem::size_of::<VkDescriptorSetVariableDescriptorCountAllocateInfo>() == 32);
+const _: () =
+    assert!(core::mem::align_of::<VkDescriptorSetVariableDescriptorCountAllocateInfo>() == 8);
 
 // FFI layout guards for the new structs. The callback-data struct is written BY
 // the driver and read through the callback, so its size/align must match the C
@@ -2963,6 +3519,33 @@ pub type PfnVkCmdDispatch = unsafe extern "system" fn(
     group_count_z: u32,
 );
 
+// --- Virtual-geometry rung R1: the indirect seam. Both commands are Vulkan 1.0 CORE and need no
+//     feature bit, which is what makes this rung free. Their `Count` variants (`vkCmdDrawIndexed-
+//     IndirectCount`) are NOT: those need `drawIndirectCount` in a `VkPhysicalDeviceVulkan12Features`
+//     this device never chains, so they belong to a later rung and are deliberately absent here. ---
+
+/// `PFN_vkCmdDispatchIndirect` — a compute dispatch whose `VkDispatchIndirectCommand`
+/// (three `u32` group counts) is FETCHED FROM `buffer` at `offset` by the GPU, so the
+/// group count can be decided by an earlier pass instead of by the host.
+pub type PfnVkCmdDispatchIndirect = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    buffer: VkBuffer,
+    offset: VkDeviceSize,
+);
+
+/// `PFN_vkCmdDrawIndexedIndirect` — `draw_count` indexed draws whose
+/// `VkDrawIndexedIndirectCommand` records are fetched from `buffer` starting at `offset`
+/// with `stride` bytes between them. The record count is still host-supplied; only the
+/// record CONTENTS are GPU-decided (the fully GPU-decided count needs the `Count` variant
+/// and its feature bit — see the note above).
+pub type PfnVkCmdDrawIndexedIndirect = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    buffer: VkBuffer,
+    offset: VkDeviceSize,
+    draw_count: u32,
+    stride: u32,
+);
+
 // --- Phase-6 S0 rung-2 graphics draw commands (Vulkan 1.0 core). ---
 
 /// `PFN_vkCmdSetViewport` — dynamic viewport state (`first_viewport`/`count` +
@@ -3060,6 +3643,50 @@ pub type PfnVkCmdFillBuffer = unsafe extern "system" fn(
     dst_offset: VkDeviceSize,
     size: VkDeviceSize,
     data: u32,
+);
+
+/// `PFN_vkCmdUpdateBuffer` — writes up to 65536 bytes INLINE in the command buffer.
+///
+/// Virtual-geometry rung R2a′. Vulkan 1.0 core, no feature bit. It is a TRANSFER-stage operation,
+/// which is exactly why it is used here instead of a host-visible buffer: a host write completed
+/// before `vkQueueSubmit` needs no barrier at all, so a host-filled indirect buffer would exercise
+/// none of the indirect-barrier plumbing this rung exists to de-risk.
+///
+/// ⚠️ Must be recorded OUTSIDE a render-pass instance (`VUID-vkCmdUpdateBuffer-renderpass`), and
+/// both `dst_offset` and `data_size` must be multiples of 4.
+pub type PfnVkCmdUpdateBuffer = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    dst_buffer: VkBuffer,
+    dst_offset: VkDeviceSize,
+    data_size: VkDeviceSize,
+    p_data: *const core::ffi::c_void,
+);
+
+/// `VkDrawIndexedIndirectCommand` — the 20-byte record `vkCmdDrawIndexedIndirect` fetches.
+///
+/// Field order and size are ABI, not a choice: the GPU reads this layout directly.
+///
+/// ⚠️ **`first_instance` MUST be 0 on this device.** `drawIndirectFirstInstance` is left `VK_FALSE`
+/// (only `samplerAnisotropy` is enabled), and the validation layers cannot read buffer CONTENTS —
+/// only GPU-assisted validation would catch a violation, so a nonzero value here is a silent
+/// corruption class. Every producer asserts it host-side.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VkDrawIndexedIndirectCommand {
+    pub index_count: u32,
+    pub instance_count: u32,
+    pub first_index: u32,
+    pub vertex_offset: i32,
+    pub first_instance: u32,
+}
+
+/// Bytes per [`VkDrawIndexedIndirectCommand`] — the `stride` an indirect draw is given, and the
+/// multiplier for a record's byte offset. A multiple of 4, so every record offset satisfies
+/// `VUID-vkCmdDrawIndexedIndirect-offset-02710`.
+pub const DRAW_INDEXED_INDIRECT_STRIDE: u32 = 20;
+
+const _: () = assert!(
+    core::mem::size_of::<VkDrawIndexedIndirectCommand>() == DRAW_INDEXED_INDIRECT_STRIDE as usize
 );
 
 /// `PFN_vkCmdClearColorImage` — clears the given subresource ranges of `image` (which must
@@ -3279,6 +3906,69 @@ pub type PfnVkGetQueryPoolResults = unsafe extern "system" fn(
     flags: VkFlags,
 ) -> i32;
 
+/// `PFN_vkResetQueryPool` — resets `query_count` queries from `first_query` **on the
+/// host**, with no command buffer and no queue submission.
+///
+/// Vulkan 1.2 core (promoted from `VK_EXT_host_query_reset`), so it loads on this
+/// engine's 1.3 device — but calling it is legal only when the `hostQueryReset`
+/// feature was ENABLED at device creation, which is why
+/// [`VkPhysicalDeviceHostQueryResetFeatures`] exists beside it and why the capability
+/// is recorded rather than assumed.
+pub type PfnVkResetQueryPool = unsafe extern "system" fn(
+    device: VkDevice,
+    query_pool: VkQueryPool,
+    first_query: u32,
+    query_count: u32,
+);
+
+/// `PFN_vkEnumerateDeviceExtensionProperties` — the device-extension presence query
+/// (Vulkan 1.0 core; `p_layer_name` null to query the device's own extensions).
+///
+/// **UNGATED, and that is the point.** It was declared inside the `hwrt`-only `accel_ffi`
+/// module while ray query was its only caller; profiling rung 9 is a second caller that exists
+/// in every build, and two declarations of one ABI is the shape this tree has already paid for
+/// elsewhere. One declaration, two callers.
+pub type PfnVkEnumerateDeviceExtensionProperties = unsafe extern "system" fn(
+    physical_device: VkPhysicalDevice,
+    p_layer_name: *const core::ffi::c_char,
+    p_count: *mut u32,
+    p_properties: *mut VkExtensionProperties,
+) -> i32;
+
+/// `PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsEXT` (profiling rung 9) — which time domains
+/// this physical device can sample together.
+///
+/// INSTANCE scope (`vkGetInstanceProcAddr`), so it resolves *before* the logical device exists —
+/// which is what makes the "query before request" precedent applicable: the extension string is
+/// only appended to `VkDeviceCreateInfo` after this call has confirmed
+/// [`VK_TIME_DOMAIN_DEVICE_EXT`] is among the answers.
+///
+/// Two-call idiom: `p_time_domains` null to get the count, then a second call to fill.
+pub type PfnVkGetPhysicalDeviceCalibrateableTimeDomainsExt = unsafe extern "system" fn(
+    physical_device: VkPhysicalDevice,
+    p_time_domain_count: *mut u32,
+    p_time_domains: *mut i32,
+) -> i32;
+
+/// `PFN_vkGetCalibratedTimestampsEXT` (profiling rung 9) — samples `timestamp_count` clocks
+/// "as close together as the implementation can", and reports how close that was.
+///
+/// DEVICE scope, and resolvable **only** when `VK_EXT_calibrated_timestamps` was enabled at
+/// device creation — which is why the loaded pointer is an `Option` on the device command table
+/// rather than a `?`-loaded required entry like its timestamp-query siblings.
+///
+/// `p_timestamps` receives `timestamp_count` values, one per element of `p_timestamp_infos`.
+/// `p_max_deviation` receives the driver's own bound, in NANOSECONDS, on how far apart the
+/// samples were taken. With a single requested domain that bound says nothing cross-domain — the
+/// rung-9 sampler therefore treats it as informational and publishes its own measured bracket.
+pub type PfnVkGetCalibratedTimestampsExt = unsafe extern "system" fn(
+    device: VkDevice,
+    timestamp_count: u32,
+    p_timestamp_infos: *const VkCalibratedTimestampInfoExt,
+    p_timestamps: *mut u64,
+    p_max_deviation: *mut u64,
+) -> i32;
+
 /// `PFN_vkCmdBeginRendering` (Vulkan 1.3 core dynamic rendering).
 pub type PfnVkCmdBeginRendering = unsafe extern "system" fn(
     command_buffer: VkCommandBuffer,
@@ -3343,11 +4033,36 @@ pub type PfnVkCmdCopyBufferToImage = unsafe extern "system" fn(
     p_regions: *const VkBufferImageCopy,
 );
 
+/// `PFN_vkCmdBlitImage` — the textured-PBR T2 mip-chain-generation blit (Decision
+/// D3): a LINEAR-filtered, format-converting copy between two mip levels of an
+/// image (here always the SAME image for both `src_image`/`dst_image`).
+pub type PfnVkCmdBlitImage = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    src_image: VkImage,
+    // `src_image_layout`: `VkImageLayout` the source image is in (`TRANSFER_SRC_OPTIMAL`).
+    src_image_layout: i32,
+    dst_image: VkImage,
+    // `dst_image_layout`: `VkImageLayout` the destination image is in (`TRANSFER_DST_OPTIMAL`).
+    dst_image_layout: i32,
+    region_count: u32,
+    p_regions: *const VkImageBlit,
+    // `filter`: `VkFilter` (`VK_FILTER_LINEAR` for mip-chain downsampling).
+    filter: i32,
+);
+
 /// `PFN_vkGetPhysicalDeviceFeatures2` — the S0 fail-fast `dynamicRendering`
 /// support query (Vulkan 1.1 core; the `2` suffix, no `KHR`).
 pub type PfnVkGetPhysicalDeviceFeatures2 = unsafe extern "system" fn(
     physical_device: VkPhysicalDevice,
     p_features: *mut VkPhysicalDeviceFeatures2,
+);
+
+/// `PFN_vkGetPhysicalDeviceProperties2` (Vulkan 1.1 core) — the boot's subgroup-support query,
+/// and the `hwrt` acceleration-structure properties query. Ungated for the reason
+/// [`VkPhysicalDeviceProperties2`] is.
+pub type PfnVkGetPhysicalDeviceProperties2 = unsafe extern "system" fn(
+    physical_device: VkPhysicalDevice,
+    p_properties: *mut VkPhysicalDeviceProperties2,
 );
 
 /// `PFN_vkGetPhysicalDeviceFormatProperties` — the Render P1b device-caps query for

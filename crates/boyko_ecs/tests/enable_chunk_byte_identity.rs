@@ -18,6 +18,13 @@
 //! surface (`with_enabled` / `without_enabled` / `for_each_chunk` /
 //! `for_each_chunk_entities` / `par_for_each_chunk`).
 
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::component::component_registry::EnableTagId;
 use boyko_ecs::ecs::core::iters::query::par_iter::BatchingStrategy;
@@ -299,7 +306,10 @@ fn byte_identity_for_each_chunk_entities_row_aligned() {
     let mut ecs = EcsMaster::new();
     let tag = ecs.register_enable_tag("cbi_entities");
     let a = arch(&mut ecs);
-    let n = 8_192u32; // multi-page mixed pattern
+    // Multi-page mixed pattern: two enable-bit pages natively; under Miri just past the first
+    // page, which still crosses the page boundary, where 8 192 spawns ran past 3 min of
+    // interpretation (MEASURED 2026-10-10).
+    let n = if cfg!(miri) { 4_096u32 + 64 } else { 8_192u32 };
     let pattern = pattern_random(n, 40, 0xABCD_1234);
     let ents = spawn_rows(&mut ecs, a, n);
     for (i, &on) in pattern.iter().enumerate() {
@@ -540,6 +550,10 @@ fn byte_identity_multi_with_with_small() {
     assert_with_with("cbi_multi_small_a", "cbi_multi_small_b", &pa, &pb);
 }
 
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: the whole-page skip needs a full middle page between two others, so at least 8 193 rows (MEASURED 2026-10-10: the native 12 288 ran past 3 min under the Miri sweep's flags). Runs natively."
+)]
 #[test]
 fn byte_identity_multi_with_with_page_skip() {
     // 3 pages. The middle page (rows 4096..8192) has tag A set on NO row, so A's

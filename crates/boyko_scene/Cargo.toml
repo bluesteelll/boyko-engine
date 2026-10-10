@@ -3,7 +3,7 @@ name = "boyko-scene"
 version = "0.1.0"
 edition = "2024"
 publish = false
-
+license.workspace = true
 [lib]
 name = "boyko_scene"
 path = "src/lib.rs"
@@ -12,32 +12,55 @@ path = "src/lib.rs"
 # The scene crate sits one layer above the kernel: it owns the spatial
 # vocabulary (`Transform` / `GlobalTransform`) and the world-from-local
 # propagation system, expressed as ECS components + an exclusive system on the
-# kernel's own storage (Principle 0 — no parallel pose data system).
-#   * `boyko_ecs`   — Component / Resource / EcsMaster / ChildOf / Children, the
+# kernel's own storage (Principle 0 â€” no parallel pose data system).
+#   * `boyko_ecs`   â€” Component / Resource / EcsMaster / ChildOf / Children, the
 #                     S0 entity-yielding iteration substrate, and the by-entity
 #                     raw-pointer pool access the hierarchy descent walks.
-#   * `boyko_math`  — the SIMD-aligned POD math vocabulary (Vec3 / Quat / Affine3A);
+#   * `boyko_math`  â€” the SIMD-aligned POD math vocabulary (Vec3 / Quat / Affine3A);
 #                     `GlobalTransform` is a packed `Affine3A`.
-#   * `boyko_macros`— the `#[derive(Component)]` / `#[derive(Resource)]` macros
+#   * `boyko_macros`â€” the `#[derive(Component)]` / `#[derive(Resource)]` macros
 #                     (a normal dep here, matching `boyko_physics`).
-#   * `boyko_utils` — reusable collections (declared per the S2 scope; kept even
+#   * `boyko_utils` â€” reusable collections (declared per the S2 scope; kept even
 #                     though v1 uses only the kernel scratch, so the dep graph is
 #                     fixed for later phases that lean on `BitSet` for dirty sets).
 boyko-ecs = { path = "../boyko_ecs" }
 boyko-math = { path = "../boyko_math" }
 boyko-macros = { path = "../boyko_macros" }
-boyko-utils = { path = "../boyko_utils" }
-#   * `boyko-input` — the source-agnostic action layer (host plan R6). The
+#   * `boyko-input` â€” the source-agnostic action layer (host plan R6). The
 #                     interactive `fly_camera_system` reads the per-frame
 #                     `PhysicalInput` snapshot (level key bitset + summed
-#                     mouse delta) directly. `boyko_input` is a LEAF — it does
-#                     NOT depend on `boyko_scene` — so this edge is acyclic.
+#                     mouse delta) directly. `boyko_input` is a LEAF â€” it does
+#                     NOT depend on `boyko_scene` â€” so this edge is acyclic.
 boyko-input = { path = "../boyko_input" }
+# OPTIONAL editor-only reflection layer (docs/REFLECTION-PLAN-GATES.md D3 C2/C3;
+# docs/REFLECTION-ANALYSIS.md B.12 option (b), owner sheet B.13 #1 — the plan proceeds
+# on (b) pending the owner). Pulled ONLY by the non-default `reflect` feature below;
+# never in a ship closure — gated by the reflect manifest/resolver/artifact censuses
+# (GATES G1/G2/G3), not by this comment.
+boyko-reflect = { path = "../boyko_reflect", optional = true }
+
+[features]
+default = []
+# Reflection opt-in seam for this crate's own components (`Transform` / `Name` /
+# `Visibility` are dogfood targets defined HERE, and the derive's emitted
+# `#[cfg(feature = "reflect")]` is evaluated in the DEFINING crate — CORE D2). NON-DEFAULT,
+# and nothing in the workspace enables it except the `reflect-dogfood` leaf umbrella and
+# explicit command lines: the property that defeats feature unification is "nothing
+# enables it", not "nobody declares it" (the in-tree `hwrt` precedent — three shared
+# crates deep, default OFF at every level, in no ship build). The gated bodies arrive
+# with CORE C7/C8's `#[component(reflect)]` opt-ins.
+reflect = ["dep:boyko-reflect"]
 
 [dev-dependencies]
 # Test-only: the S2 propagation gates drive `propagate_transforms` through a
 # hand-built `Schedule` (mirroring the `boyko_ui` / `boyko_demo` schedule-build
 # pattern), which needs a `ThreadPool` to bind the schedule to. Production code
-# never touches the pool directly — it is reached only via the `App`/`Schedule`
+# never touches the pool directly â€” it is reached only via the `App`/`Schedule`
 # API in the integration tests.
 boyko-threadpool = { path = "../boyko_threadpool" }
+# Property-based test framework (asset-streaming plan F6): the
+# `DeferredFree::drain_ready` fence-gate oracle in `asset_refs.rs`.
+proptest.workspace = true
+
+[lints]
+workspace = true

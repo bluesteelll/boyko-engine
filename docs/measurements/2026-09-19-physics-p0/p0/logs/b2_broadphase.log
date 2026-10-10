@@ -1,0 +1,89 @@
+2026-09-19T04:54:58+03:00
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling crossbeam-utils v0.8.23
+   Compiling cfg-if v1.0.4
+   Compiling windows-link v0.2.1
+   Compiling crossbeam-epoch v0.9.21
+   Compiling crossbeam-deque v0.8.8
+   Compiling zerocopy v0.8.57
+   Compiling boyko-diag v0.1.0 (D:\wt\joltab\crates\boyko_diag)
+   Compiling getrandom v0.3.4
+   Compiling serde_core v1.0.229
+   Compiling autocfg v1.5.1
+   Compiling serde v1.0.229
+   Compiling zmij v1.0.23
+   Compiling getrandom v0.4.3
+   Compiling windows-sys v0.61.2
+   Compiling fixedbitset v0.5.7
+   Compiling regex-syntax v0.8.11
+   Compiling boyko-utils v0.1.0 (D:\wt\joltab\crates\boyko_utils)
+   Compiling once_cell v1.21.4
+   Compiling rayon-core v1.13.0
+   Compiling static_assertions v1.1.0
+   Compiling either v1.18.0
+   Compiling serde_json v1.0.151
+   Compiling num-traits v0.2.19
+   Compiling rand_core v0.9.5
+   Compiling itoa v1.0.18
+   Compiling plotters-backend v0.3.7
+   Compiling anstyle v1.0.14
+   Compiling fastrand v2.5.0
+   Compiling clap_lex v1.1.0
+   Compiling boyko-log v0.1.0 (D:\wt\joltab\crates\boyko_log)
+   Compiling ciborium-io v0.2.2
+   Compiling crossbeam-queue v0.3.14
+   Compiling memchr v2.8.3
+   Compiling plotters-svg v0.3.7
+   Compiling clap_builder v4.6.6
+   Compiling itertools v0.10.5
+   Compiling wait-timeout v0.2.1
+   Compiling boyko_shaderdsl v0.1.0 (D:\wt\joltab\crates\boyko_shaderdsl)
+   Compiling fnv v1.0.7
+   Compiling bit-vec v0.8.0
+   Compiling cast v0.3.0
+   Compiling winapi-util v0.1.11
+   Compiling tempfile v3.27.0
+   Compiling syn v2.0.119
+   Compiling syn v3.0.5
+   Compiling same-file v1.0.6
+   Compiling boyko-math v0.1.0 (D:\wt\joltab\crates\boyko_math)
+   Compiling quick-error v1.2.3
+   Compiling rusty-fork v0.3.1
+   Compiling walkdir v2.5.0
+   Compiling bit-set v0.8.0
+   Compiling plotters v0.3.7
+   Compiling boyko-threadpool v0.1.0 (D:\wt\joltab\crates\boyko_threadpool)
+   Compiling boyko_sdf_math v0.1.0 (D:\wt\joltab\crates\boyko_sdf_math)
+   Compiling rayon v1.12.0
+   Compiling is-terminal v0.4.17
+   Compiling rand v0.9.5
+   Compiling boyko-ecs v0.1.0 (D:\wt\joltab\crates\boyko_ecs)
+   Compiling rand_xorshift v0.4.0
+   Compiling criterion-plot v0.5.0
+   Compiling regex-automata v0.4.18
+   Compiling oorandom v11.1.5
+   Compiling unarray v0.1.4
+   Compiling anes v0.1.6
+   Compiling bitflags v2.13.2
+   Compiling clap v4.6.6
+   Compiling serde_derive v1.0.229
+   Compiling zerocopy-derive v0.8.57
+   Compiling boyko-macros v0.1.0 (D:\wt\joltab\crates\boyko_macros)
+   Compiling regex v1.13.1
+   Compiling tinytemplate v1.2.1
+   Compiling boyko-input v0.1.0 (D:\wt\joltab\crates\boyko_input)
+   Compiling boyko-scene v0.1.0 (D:\wt\joltab\crates\boyko_scene)
+   Compiling half v2.7.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling ciborium-ll v0.2.2
+   Compiling rand_chacha v0.9.0
+   Compiling ciborium v0.2.2
+   Compiling proptest v1.11.0
+   Compiling boyko-physics v0.1.0 (D:\wt\joltab\crates\boyko_physics)
+   Compiling criterion v0.5.1
+    Finished `bench` profile [optimized] target(s) in 49.82s
+  Executable benches\broadphase.rs (D:/wt/_targets/joltab-msvc\release\deps\broadphase-d4d91c3f5f56b84f.exe)
+exit 0
+2026-09-19T04:55:48+03:00

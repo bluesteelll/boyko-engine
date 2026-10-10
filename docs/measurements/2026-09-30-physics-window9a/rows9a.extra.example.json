@@ -1,0 +1,43 @@
+{
+ "_comment": "TEMPLATE for the reserved RAPIER block (PREP.md 'Adding the Rapier rows'). Copy to rows9a.extra.json and edit; the driver merges it over rows9a.json at start (binaries by key, rows by id, blocks by name, ordered by priority). Fill every '<FILL: ...>' from D:/tmp/rapier-parity/window9a_rows.md; a '<FILL' left in place makes the gate and the driver RED (the pose_hash check cannot pass), it never passes silently. The exe must also get a line in bin/SHA256SUMS and its sha256 in sha256_pin. Keys shown are the ones the 2026-09-30 pre-fix harness prints (SUMMARY: engine, cfg, install, workers, target_env, void, voids, threads.pool_threads_min/max, pose_hash, receipt_gates, rapier_version). PLACEMENT (audit-1 W2; each claim below is a selftest9a case over the driver's own --dry-run): the block priority orders BLOCKS (3.5 = after C4-BR, before C4-G4; 4.5 would run it AFTER C4-G4; 0.5 first). A row's position INSIDE a shared block is the row-list order; an overlay row is appended, i.e. it is the LAST cell of every W group (after C4-JDpar#parent at W1/2/4, after C4-rung#tip at W8/16: never next to C4-JD#tip). To choose the neighbour, give the NEW row \"insert_after\": \"<row id>\" (see the note on the row).",
+ "binaries": {
+  "rapier": {
+   "exe": "bin/rapier_parity_simd8_<FILL: short sha>.exe",
+   "commit": "<FILL: rapier-parity source state, e.g. the SOURCES.sha256 line>",
+   "kind": "rapier",
+   "sha256_pin": "<FILL: sha256 of the exe>",
+   "what": "Rapier 0.36 parity harness, simd8 arm, run by path"
+  }
+ },
+ "blocks": [
+  {
+   "name": "C4-RAPIER",
+   "item": "Rapier 0.36 vs boyko J-T",
+   "priority": 3.5,
+   "warmup": ["RAP-matched", "rapier", 8]
+  }
+ ],
+ "rows": [
+  {
+   "id": "RAP-matched",
+   "blocks": ["C4-RAPIER"],
+   "kind": "rapier",
+   "binaries": ["rapier"],
+   "args": ["--cfg", "matched", "--install", "loop"],
+   "workers": [1, 2, 4, 8, 16],
+   "steps": 500,
+   "window": [0, 500],
+   "metric_windows": [[0, 100], [100, 500]],
+   "armed": false,
+   "pose_ref": null,
+   "expect_summary": {
+    "engine": "rapier3d", "cfg": "matched", "install": "loop", "workers": "$W", "target_env": "msvc",
+    "void": false, "voids": [],
+    "threads.pool_threads_min": "$W", "threads.pool_threads_max": "$W",
+    "pose_hash": "<FILL: the final-pose hash window9a_rows.md gives for this cfg (identical at every W for the simd8 arm)>"
+   },
+   "expect_present": ["receipt_gates", "rapier_version"],
+   "note": "one row per cfg: copy this row for rapier-default (id RAP-default, --cfg rapier-default, its own pose_hash). Two placements. (A) Own block, as here (priority 3.5): the Rapier cells run in their own passes with their own warm-up, K 9; the block's cells are RAP-* only. (B) Inside C4-AB, next to J-D each round: drop the block above, set \"blocks\": [\"C4-AB\"] and \"insert_after\": \"C4-jolt56\" - the row then sits BETWEEN C4-jolt56#j56 and C4-JD#tip at every W (1/2/4/8/16), mirrored in a reversed pass. The cost is stated, not hidden: Jolt and J-D#tip stop being neighbours (Jolt keeps its J-T#tip neighbour at W1/8/16; at W2/4, where no J-T cell exists, Jolt is then next to no J-D / J-T cell). insert_after C4-JD instead would break the merge-gate pair J-D / J-Dap. Without insert_after the row is appended: the last cell of every W group, next to C4-JDpar#parent (W1/2/4) or C4-rung#tip (W8/16). Rapier shares C4-AB's K 9 and passes in (B)."
+  }
+ ]
+}

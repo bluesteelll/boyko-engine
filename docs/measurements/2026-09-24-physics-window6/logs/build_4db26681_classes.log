@@ -1,0 +1,11 @@
+warning: crates\reflect_fixture\Cargo.toml: file `C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\scratchpad\win6\trees\4db26681\crates\reflect_fixture\src\bin\reflect_on.rs` found to be present in multiple build targets:
+  * `bin` target `reflect_on`
+  * `bin` target `reflect_off_twin`
+warning: `reflect-fixture` (manifest) generated 1 warning
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling boyko-physics v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\scratchpad\win6\trees\4db26681\crates\boyko_physics)
+    Finished `parity` profile [optimized] target(s) in 17.13s
+  Executable benches\narrowphase_classes.rs (D:/wt/_targets/win6-4db26681\parity\deps\narrowphase_classes-48558213d8414e7f.exe)
+exit 0

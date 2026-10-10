@@ -1,0 +1,5 @@
+row_identity_churn/archetype_shift/sleeping_on_allpairs
+                        time:   [6.3675 ms 6.3988 ms 6.4370 ms]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

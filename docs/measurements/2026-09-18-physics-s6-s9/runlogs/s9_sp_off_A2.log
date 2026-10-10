@@ -1,0 +1,18 @@
+Gnuplot not found, using plotters backend
+sleeping_pipeline/pyramid_frozen_sleeping_on: froze at step 61, manifolds 8555, islands 1
+sleeping_pipeline/pyramid_frozen_sleeping_on: contact_wakes 0
+Benchmarking sleeping_pipeline/pyramid_sleeping_off
+Benchmarking sleeping_pipeline/pyramid_sleeping_off: Warming up for 3.0000 s
+
+Completed 255 iterations in 4853818800 nanoseconds, estimated execution time is 19034583.529411763 ns
+Benchmarking sleeping_pipeline/pyramid_sleeping_off: Collecting 20 samples in estimated 7.9945 s (420 iterations)
+Benchmarking sleeping_pipeline/pyramid_sleeping_off: Analyzing
+Criterion.rs DEBUG: Bootstrapping the absolute statistics. took 13.087 ms
+Criterion.rs DEBUG: Bootstrapped linear regression took 2.3535 ms
+Criterion.rs DEBUG: Bootstrapping the T distribution took 2.5354 ms
+Criterion.rs DEBUG: Bootstrapping the relative statistics took 5.7513 ms
+sleeping_pipeline/pyramid_sleeping_off
+                        time:   [18.256 ms 18.331 ms 18.430 ms]
+                        change: [-2.5588% -1.4219% -0.2786%] (p = 0.03 < 0.05)
+                        Change within noise threshold.
+

@@ -37,7 +37,7 @@
 //!
 //! ```powershell
 //! $env:MIRIFLAGS = "-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-ecs --test dense_d2_reentrancy
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test dense_d2_reentrancy
 //! ```
 //!
 //! `-Zmiri-ignore-leaks` is required for the SAME reason as every other
@@ -47,6 +47,13 @@
 //! by-design spawn-cache / reservation leak, issue #53). Those leaks are NOT a
 //! soundness signal — the load-bearing result is the absence of Undefined
 //! Behavior and the `test result: ok` line.
+
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

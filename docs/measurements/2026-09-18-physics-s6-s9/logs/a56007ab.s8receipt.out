@@ -1,0 +1,99 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.26
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.5
+   Compiling crossbeam-utils v0.8.23
+   Compiling windows-link v0.2.1
+   Compiling crossbeam-epoch v0.9.21
+   Compiling crossbeam-deque v0.8.8
+   Compiling zerocopy v0.8.57
+   Compiling boyko-diag v0.1.0 (D:\wt\mq-a56007ab\crates\boyko_diag)
+   Compiling serde_core v1.0.229
+   Compiling getrandom v0.3.4
+   Compiling autocfg v1.5.1
+   Compiling getrandom v0.4.3
+   Compiling serde v1.0.229
+   Compiling zmij v1.0.23
+   Compiling fixedbitset v0.5.7
+   Compiling windows-sys v0.61.2
+   Compiling once_cell v1.21.4
+   Compiling boyko-utils v0.1.0 (D:\wt\mq-a56007ab\crates\boyko_utils)
+   Compiling num-traits v0.2.19
+   Compiling static_assertions v1.1.0
+   Compiling rayon-core v1.13.0
+   Compiling regex-syntax v0.8.11
+   Compiling serde_json v1.0.151
+   Compiling either v1.18.0
+   Compiling clap_lex v1.1.1
+   Compiling ciborium-io v0.2.2
+   Compiling anstyle v1.0.14
+   Compiling fastrand v2.5.0
+   Compiling plotters-backend v0.3.7
+   Compiling crossbeam-queue v0.3.14
+   Compiling boyko-log v0.1.0 (D:\wt\mq-a56007ab\crates\boyko_log)
+   Compiling rand_core v0.9.5
+   Compiling winapi-util v0.1.11
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.3
+   Compiling plotters-svg v0.3.7
+   Compiling tempfile v3.27.0
+   Compiling same-file v1.0.6
+   Compiling clap_builder v4.6.7
+   Compiling itertools v0.10.5
+   Compiling cast v0.3.0
+   Compiling quick-error v1.2.3
+   Compiling syn v2.0.119
+   Compiling syn v3.0.6
+   Compiling wait-timeout v0.2.1
+   Compiling boyko_shaderdsl v0.1.0 (D:\wt\mq-a56007ab\crates\boyko_shaderdsl)
+   Compiling bit-vec v0.8.0
+   Compiling boyko-threadpool v0.1.0 (D:\wt\mq-a56007ab\crates\boyko_threadpool)
+   Compiling boyko-math v0.1.0 (D:\wt\mq-a56007ab\crates\boyko_math)
+   Compiling fnv v1.0.7
+   Compiling walkdir v2.5.0
+   Compiling boyko_sdf_math v0.1.0 (D:\wt\mq-a56007ab\crates\boyko_sdf_math)
+   Compiling plotters v0.3.7
+   Compiling rayon v1.12.0
+   Compiling boyko-ecs v0.1.0 (D:\wt\mq-a56007ab\crates\boyko_ecs)
+   Compiling rusty-fork v0.3.1
+   Compiling bit-set v0.8.0
+   Compiling rand v0.9.5
+   Compiling rand_xorshift v0.4.0
+   Compiling is-terminal v0.4.17
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling bitflags v2.13.2
+   Compiling unarray v0.1.4
+   Compiling criterion-plot v0.5.0
+   Compiling regex-automata v0.4.18
+   Compiling serde_derive v1.0.229
+   Compiling clap v4.6.7
+   Compiling regex v1.13.1
+   Compiling zerocopy-derive v0.8.57
+   Compiling boyko-macros v0.1.0 (D:\wt\mq-a56007ab\crates\boyko_macros)
+   Compiling tinytemplate v1.2.1
+   Compiling boyko-input v0.1.0 (D:\wt\mq-a56007ab\crates\boyko_input)
+   Compiling boyko-scene v0.1.0 (D:\wt\mq-a56007ab\crates\boyko_scene)
+   Compiling boyko-physics v0.1.0 (D:\wt\mq-a56007ab\crates\boyko_physics)
+   Compiling half v2.7.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling ciborium-ll v0.2.2
+   Compiling rand_chacha v0.9.0
+   Compiling ciborium v0.2.2
+   Compiling proptest v1.11.0
+   Compiling criterion v0.5.1
+    Finished `release` profile [optimized] target(s) in 1m 14s
+     Running benches\sleeping_pipeline.rs (D:/wt/_targets/mq-a56007ab\release\deps\sleeping_pipeline-892ed66c006bb282.exe)
+Gnuplot not found, using plotters backend
+sleeping_pipeline/pyramid_frozen_sleeping_on: froze at step 61, manifolds 8555, islands 1
+sleeping_pipeline/pyramid_frozen_sleeping_on: contact_wakes 0
+Testing sleeping_pipeline/pyramid_sleeping_off
+Success
+Testing sleeping_pipeline/pyramid_awake_sleeping_on
+Success
+Testing sleeping_pipeline/pyramid_frozen_sleeping_on
+Success
+
+rc=0 secs=78

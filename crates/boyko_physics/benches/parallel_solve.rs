@@ -31,6 +31,22 @@
 //! Anti-vacuity: every scene asserts `> 0` contacts AND `> 1` color, and (for the
 //! pyramid) that its widest color exceeds the threshold so a real `pool.scope`
 //! dispatch occurs across `> 1` worker.
+//!
+//! # Gate 10 stays SCALAR (2026-09-18)
+//!
+//! `simd_solve` defaults to `true` since 2026-09-18. Gate 10's bar (>= 2.4x at 4
+//! workers) was set and measured on the scalar colored solve, so [`config`] pins
+//! `simd_solve: false` and every `single_O5` / `parallel_Nw` row keeps that meaning.
+//! The `pyramid/default_world` row is the single-threaded solve at
+//! `PhysicsConfig::default()` (the O7 cohort kernel on); it runs with no pool, so it stays
+//! single-threaded although `parallel_solve` defaults on since L4. It is reported, not gated.
+//!
+//! # The 1-worker row since L4
+//!
+//! The colored solve refuses a dispatch on a one-worker pool (the whole-step gate's lanes
+//! term), so every `<scene>/parallel_1w` row now runs the inline path and reads as the
+//! single-threaded solve plus one ambient-pool probe per step. Rows measured before L4
+//! dispatched at one worker and are not comparable with it.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
@@ -146,8 +162,15 @@ fn small_color_scene(n: u32) -> (Vec<BodyState>, Vec<Manifold>) {
     (bodies, manifolds)
 }
 
+/// Gate 10's config: the SCALAR colored solve, whatever the default (see the module
+/// docs).
 fn config(parallel: bool) -> PhysicsConfig {
-    PhysicsConfig { dt: 1.0 / 60.0, parallel_solve: parallel, ..PhysicsConfig::default() }
+    PhysicsConfig {
+        dt: 1.0 / 60.0,
+        parallel_solve: parallel,
+        simd_solve: false,
+        ..PhysicsConfig::default()
+    }
 }
 
 fn build_graph(bodies: &[BodyState], manifolds: &[Manifold]) -> ConstraintGraph {
@@ -185,9 +208,22 @@ fn bench_one(
     } else {
         BenchmarkId::new(format!("{label}/parallel_{workers}w"), n_contacts)
     };
+    bench_with_config(group, id, n_contacts, bodies, manifolds, config(workers != 0), workers);
+}
+
+/// Times one warmed colored solve step under `cfg`, inside a `workers`-wide pool's
+/// `install` frame, or with NO pool when `workers == 0`.
+fn bench_with_config(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    id: BenchmarkId,
+    n_contacts: usize,
+    bodies: &[BodyState],
+    manifolds: &[Manifold],
+    cfg: PhysicsConfig,
+    workers: usize,
+) {
     group.bench_with_input(id, &n_contacts, |b, &_n| {
         let parallel = workers != 0;
-        let cfg = config(parallel);
         let graph = build_graph(bodies, manifolds);
         let mut solver = ColoredSoftStepSolver::default();
         let mut scratch = SolverScratch::with_capacity(bodies.len());
@@ -243,6 +279,16 @@ fn bench_pyramid_scaling(c: &mut Criterion) {
     for workers in [0usize, 1, 2, 4, 8] {
         bench_one(&mut group, "pyramid", n_contacts, &bodies, &manifolds, workers);
     }
+    // The default world's config, single-threaded: reported, not gated.
+    bench_with_config(
+        &mut group,
+        BenchmarkId::new("pyramid/default_world", n_contacts),
+        n_contacts,
+        &bodies,
+        &manifolds,
+        PhysicsConfig { dt: 1.0 / 60.0, ..PhysicsConfig::default() },
+        0,
+    );
     group.finish();
 }
 
@@ -305,5 +351,69 @@ fn large_color_raft(n: u32) -> (Vec<BodyState>, Vec<Manifold>) {
     (bodies, manifolds)
 }
 
-criterion_group!(benches, bench_pyramid_scaling, bench_threshold_effect);
+/// THE SCENE THE OLD GATE REFUSED: `pairs` disjoint dynamic pairs, spaced far apart.
+///
+/// Every pair is its own island holding ONE manifold, so the retired
+/// `max_island_constraints` metric reads 1 and the pre-fix gate forced this whole
+/// scene single-threaded. But manifolds in different islands are always
+/// body-disjoint, so the coloring puts all `pairs` of them in ONE color — the
+/// widest color is `pairs` slots, far above the per-color dispatch floor. This is
+/// the maximally parallel shape a solver can be handed, and it is exactly the shape
+/// the gate rejected: every many-debris / many-ragdoll / many-pile world.
+fn many_disjoint_pairs(pairs: u32) -> (Vec<BodyState>, Vec<Manifold>) {
+    let n = pairs * 2;
+    let mut bodies = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let pair = i / 2;
+        let within = i % 2;
+        bodies.push(dyn_sphere(Vec3::new(pair as f32 * 100.0 + within as f32, 0.6, 0.0)));
+    }
+    let manifolds: Vec<Manifold> = (0..pairs)
+        .map(|p| {
+            manifold(
+                p * 2,
+                p * 2 + 1,
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(p as f32 * 100.0 + 0.5, 0.6, 0.0),
+            )
+        })
+        .collect();
+    (bodies, manifolds)
+}
+
+/// Prices the P2 gate-metric fix: this scene used to run single-threaded no matter
+/// the worker count, because the gate judged by island size. `single_O5` is
+/// therefore ALSO what the parallel arm measured before the fix, so the
+/// single-vs-parallel ratio here IS the fix's win.
+fn bench_gate_metric_fix(c: &mut Criterion) {
+    let mut group = c.benchmark_group("parallel_solve_disjoint_pairs");
+    group.sample_size(30);
+
+    let (bodies, manifolds) = many_disjoint_pairs(4000);
+    let n_contacts = manifolds.len();
+    let graph = build_graph(&bodies, &manifolds);
+    let widest = widest_color(&graph);
+
+    // Anti-vacuity, both directions: the scene must be the one the OLD metric
+    // refused (largest island == 1) AND one the NEW metric accepts (a wide color).
+    assert!(n_contacts > 0, "scene must have contacts");
+    assert_eq!(
+        graph.max_island_constraints(),
+        1,
+        "this must be the scene the retired island metric read as 1"
+    );
+    assert!(
+        widest >= 256,
+        "widest color ({widest}) must clear the per-color dispatch floor, or the          parallel arm is measuring the gated path and the comparison is vacuous"
+    );
+
+    group.throughput(Throughput::Elements(n_contacts as u64));
+    bench_one(&mut group, "disjoint_pairs", n_contacts, &bodies, &manifolds, 0);
+    for w in [2usize, 4, 8, 16] {
+        bench_one(&mut group, "disjoint_pairs", n_contacts, &bodies, &manifolds, w);
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_pyramid_scaling, bench_threshold_effect, bench_gate_metric_fix);
 criterion_main!(benches);

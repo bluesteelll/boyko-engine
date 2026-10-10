@@ -4,7 +4,7 @@
 //!
 //! ```powershell
 //! $env:MIRIFLAGS = "-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-ecs --test miri_phase16
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_phase16
 //! ```
 //!
 //! `-Zmiri-tree-borrows` is the workspace default (`.cargo/config.toml`);
@@ -76,7 +76,7 @@ struct MiriGate(bool);
 
 // =============================================================================
 // Miri-CLEAN tests — exercise the Phase-16 condition reborrow WITHOUT spawn.
-// These run under both `cargo +nightly miri test` AND regular `cargo test`.
+// These run under both `cargo +nightly-x86_64-pc-windows-msvc miri test` AND regular `cargo test`.
 // =============================================================================
 
 /// The `run_once` built-in run as a CACHED system across three "frames" via

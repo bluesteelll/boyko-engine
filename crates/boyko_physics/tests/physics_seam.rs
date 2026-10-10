@@ -299,7 +299,7 @@ fn deterministic_pair_order() {
         let mut schedule = build_schedule::<NoopSolver>(&mut world, dt);
         schedule.run(&mut world);
 
-        world.resource::<ContactPairs>().pairs.clone()
+        world.resource::<ContactPairs>().pairs().iter().copied().collect::<Vec<_>>()
     }
 
     let a = run_once();
@@ -380,13 +380,13 @@ fn sphere_sphere_narrowphase_3d() {
     world.resource_mut::<PhysicsConfig>().gravity = Vec3::ZERO;
     schedule.run(&mut world);
 
-    let manifolds = &world.resource::<Manifolds>().manifolds;
+    let manifolds = world.resource::<Manifolds>().manifolds();
     assert_eq!(
         manifolds.len(),
         1,
         "one overlapping sphere pair → one manifold"
     );
-    let m = &manifolds[0];
+    let m = &manifolds.get(0).expect("one manifold");
     assert_eq!(m.count, 1, "sphere-sphere emits a single contact point");
     // Normal points from A toward B (+X), unit length.
     assert!((m.normal.x - 1.0).abs() < 1e-5, "normal.x: {}", m.normal.x);
@@ -409,7 +409,7 @@ fn sphere_sphere_narrowphase_3d() {
 // intractable under Miri's preemptive scheduler. These two tests drive the SAME
 // 3D math the integrate system and the narrowphase system use — the quaternion
 // step and the sphere-sphere geometry — purely through the public math API, with
-// ZERO threads, so `cargo +nightly miri test` can validate the integrate +
+// ZERO threads, so `cargo +nightly-x86_64-pc-windows-msvc miri test` can validate the integrate +
 // narrowphase paths for UB without hitting the spin loop. They are also normal
 // native tests (always run under `cargo test`).
 

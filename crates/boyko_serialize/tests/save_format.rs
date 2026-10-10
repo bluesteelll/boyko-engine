@@ -17,10 +17,10 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_macros::Component;
 
 use boyko_serialize::format::{
-    ArchetypeBlock, ColumnRegion, ENDIAN_LITTLE, FORMAT_VERSION, MAGIC, PTR_WIDTH, SaveHeader,
-    TypeTableEntry,
+    ArchetypeBlock, ColumnRegion, ENDIAN_LITTLE, FORMAT_VERSION, MAGIC, PERSIST_TICKS_FLAG,
+    PTR_WIDTH, SaveHeader, TypeTableEntry,
 };
-use boyko_serialize::{SaveOptions, save_world};
+use boyko_serialize::{LoadEntityPolicy, SaveOptions, load_world, save_world};
 
 // ── Test components ──────────────────────────────────────────────────────────
 
@@ -318,4 +318,60 @@ fn include_filter_excludes_a_component() {
             .as_bytes(),
     );
     assert_eq!(entry.stable_name_hash, pos_hash, "the kept column is Pos");
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// persist_ticks: the option ORs PERSIST_TICKS_FLAG into the header and the loader
+// reads it back (a save/load residual fix — the option used to be a silent no-op,
+// recorded nowhere on disk).
+// ════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn persist_ticks_true_sets_header_flag_and_is_observable_on_load() {
+    let mut world = EcsMaster::new();
+    let arch = world.get_or_create_archetype(&[Pos::component_id()]);
+    world.spawn_one(arch, Pos { x: 1.0, y: 2.0, z: 3.0 }).expect("spawn");
+
+    let opts = SaveOptions { persist_ticks: true, include_filter: None };
+    let mut out = Vec::new();
+    save_world(&world, &opts, &mut out).expect("save");
+
+    let header = parse_header(&out);
+    assert_eq!(
+        header.flags & PERSIST_TICKS_FLAG,
+        PERSIST_TICKS_FLAG,
+        "persist_ticks: true must OR PERSIST_TICKS_FLAG into the header's flags bit 0"
+    );
+
+    let mut dst = EcsMaster::new();
+    let report = load_world(&mut dst, &out, LoadEntityPolicy::Remap).expect("load");
+    assert!(
+        report.persist_ticks_flag,
+        "the loader must read the header's PERSIST_TICKS_FLAG back into the report"
+    );
+}
+
+#[test]
+fn persist_ticks_false_leaves_header_flag_clear() {
+    let mut world = EcsMaster::new();
+    let arch = world.get_or_create_archetype(&[Pos::component_id()]);
+    world.spawn_one(arch, Pos { x: 1.0, y: 2.0, z: 3.0 }).expect("spawn");
+
+    let opts = SaveOptions { persist_ticks: false, include_filter: None };
+    let mut out = Vec::new();
+    save_world(&world, &opts, &mut out).expect("save");
+
+    let header = parse_header(&out);
+    assert_eq!(
+        header.flags & PERSIST_TICKS_FLAG,
+        0,
+        "persist_ticks: false must leave the header's flags bit 0 clear"
+    );
+
+    let mut dst = EcsMaster::new();
+    let report = load_world(&mut dst, &out, LoadEntityPolicy::Remap).expect("load");
+    assert!(
+        !report.persist_ticks_flag,
+        "the loader must report the flag clear when the file did not set it"
+    );
 }

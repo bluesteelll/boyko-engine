@@ -1,0 +1,36 @@
+### D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe -s=Pyramid -q=Discrete -t=1 -i=12 -f  (cwd=C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/win3/dry/jolt_v5.6.0, UNTIMED)
+Single precision x86 64-bit with instructions: SSE2 SSE4.1 SSE4.2 AVX AVX2 F16C LZCNT TZCNT FMADD (16-bit ObjectLayer) (ObjectStream) 
+Running scene: Pyramid
+boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=0
+Motion Quality, Thread Count, Steps / Second, Hash
+Discrete, 1, 109.146971, 0x781114657d662672
+exit=0
+
+### D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe -s=Pyramid -q=Discrete -t=1 -i=12 -receipt  (UNTIMED)
+Single precision x86 64-bit with instructions: SSE2 SSE4.1 SSE4.2 AVX AVX2 F16C LZCNT TZCNT FMADD (16-bit ObjectLayer) (ObjectStream) 
+Running scene: Pyramid
+boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=1
+Motion Quality, Thread Count, Steps / Second, Hash
+Discrete, 1, 104.472466, 0x781114657d662672
+exit=0
+--- files written ---
+total 6
+drwxr-xr-x 1 flint 197609   0 Sep 21 00:37 ./
+drwxr-xr-x 1 flint 197609   0 Sep 21 00:37 ../
+-rw-r--r-- 1 flint 197609 153 Sep 21 00:37 per_frame_discrete_th1.csv
+-rw-r--r-- 1 flint 197609 458 Sep 21 00:37 receipt_discrete_th1.csv
+--- receipt csv ---
+Frame, Manifolds, Points, Active Bodies, Top Y
+0, 4495, 11890, 1240, 35.9972763
+1, 4495, 11890, 1240, 35.9918251
+2, 4495, 11890, 1240, 35.9836502
+3, 4495, 11890, 1240, 35.9727516
+4, 4495, 11890, 1240, 35.9591255
+5, 4495, 11890, 1240, 35.9427757
+6, 4495, 11890, 1240, 35.9237022
+7, 4495, 11890, 1240, 35.9019012
+8, 4495, 11890, 1240, 35.8773766
+9, 4495, 11890, 1240, 35.8501282
+10, 4495, 11890, 1240, 35.8201523
+11, 4495, 11890, 1240, 35.7874527
+

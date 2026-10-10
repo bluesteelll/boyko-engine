@@ -1,0 +1,5 @@
+error: material names are lowercase — they expand to builder functions, not types (rename `Gold` to `gold`)
+ --> tests/ui/material_name_is_lowercase.rs:7:14
+  |
+7 |     material Gold { base: (1.0, 0.72, 0.30), metallic: 1.0 }
+  |              ^^^^

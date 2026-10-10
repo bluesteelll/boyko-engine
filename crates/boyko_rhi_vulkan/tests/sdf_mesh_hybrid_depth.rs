@@ -434,6 +434,8 @@ fn run_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> (Vec<u32>, Vec<f32>) {
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("offscreen depth texture");
 
@@ -448,6 +450,8 @@ fn run_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> (Vec<u32>, Vec<f32>) {
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("throwaway color texture");
 
@@ -577,7 +581,15 @@ fn run_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> (Vec<u32>, Vec<f32>) {
         }),
     });
     encoder.bind_graphics_pipeline(&gfx);
-    encoder.push_graphics_constants(&gfx, ShaderStage::VERTEX, 0, &ortho_mvp_bytes());
+    // `RhiDevice::create_graphics_pipeline` declares its push range VERTEX|FRAGMENT
+    // (`GRAPHICS_PUSH_STAGES_DEFAULT`, rhi_impl/mod.rs), so a VERTEX-only push leaves the range's FRAGMENT bit
+    // undeclared, tripping VUID-vkCmdPushConstants-offset-01796.
+    encoder.push_graphics_constants(
+        &gfx,
+        ShaderStage::VERTEX | ShaderStage::FRAGMENT,
+        0,
+        &ortho_mvp_bytes(),
+    );
     encoder.bind_vertex_buffer(&vertex_buffer, 0, 0);
     encoder.set_viewport(&Viewport {
         x: 0.0,

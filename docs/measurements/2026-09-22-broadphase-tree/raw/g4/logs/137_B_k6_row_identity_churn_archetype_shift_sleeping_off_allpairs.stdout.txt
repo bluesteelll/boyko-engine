@@ -1,0 +1,3 @@
+row_identity_churn/archetype_shift/sleeping_off_allpairs
+                        time:   [11.567 ms 11.582 ms 11.598 ms]
+

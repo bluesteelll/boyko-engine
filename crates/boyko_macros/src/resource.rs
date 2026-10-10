@@ -1,12 +1,12 @@
 //! `#[derive(Resource)]` implementation.
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{DeriveInput, parse_macro_input};
+use syn::{DeriveInput};
 
 /// Implementation of `#[derive(Resource)]` (see the public entry in `lib.rs`).
-pub(crate) fn expand(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+pub(crate) fn resource_macro_impl(input: TokenStream) -> TokenStream {
+    let input = crate::common::parse2_or_compile_error!(input as DeriveInput);
     let name = input.ident;
 
     let expanded = quote! {
@@ -27,5 +27,5 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
     };
 
-    expanded.into()
+    expanded
 }

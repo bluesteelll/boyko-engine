@@ -1,0 +1,11 @@
+error[E0599]: no associated function or constant named `from_component_id` found for struct `TagId` in the current scope
+  --> tests/seam_compile_fail/neg_tag_id_from_component_id.rs:25:20
+   |
+25 |     let _ = TagId::from_component_id(id);
+   |                    ^^^^^^^^^^^^^^^^^ associated function or constant not found in `TagId`
+   |
+help: there is a method `component_id` with a similar name, but with different arguments
+  --> $WORKSPACE/crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs
+   |
+   |     pub const fn component_id(self) -> ComponentId {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

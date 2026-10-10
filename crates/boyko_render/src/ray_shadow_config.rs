@@ -70,9 +70,13 @@ impl Default for RayShadowConfig {
 
 // ---- ResolvedRayShadow (the derived UBO mirror) ---------------------------------------
 
-/// The packed UBO the HWRT resolve reads at binding 20 — the derived companion the cold
-/// [`resolve_ray_shadow_system`] writes. std140: 4 `f32` = 16 B = one `vec4` slot, no
-/// trailing pad. `ray_count` is NOT here (it is the spec-const baked at pipeline build).
+/// The COLD head of the UBO the HWRT resolve reads at binding 20 — the derived companion the
+/// cold [`resolve_ray_shadow_system`] writes. std140: 4 `f32` = 16 B = one `vec4` slot, no
+/// trailing pad. `ray_count` is NOT here (it is the spec-const baked at pipeline build). The
+/// HOT per-frame tail that follows it in the same UBO (@16..48: the rung-3b frame seed, the
+/// shadow-ray origin mode and the raster's jittered forward) is
+/// [`RayShadowFrame`](crate::upload::RayShadowFrame), packed by the runner at
+/// `upload_ray_shadow_ring`, never through this resolve.
 ///
 /// `#[repr(C)]` for a stable GPU-ready layout — the field ORDER + TYPES byte-mirror the
 /// `deferred_pbr.hlsl` `RayShadowUbo` cbuffer (cone_radius @0, tmax @4, tmin @8, bias @12).
@@ -97,10 +101,11 @@ pub struct ResolvedRayShadow {
 // HWRT resolve's binding-20 cbuffer reads this stride).
 const _: () = assert!(core::mem::size_of::<ResolvedRayShadow>() == 16);
 
-/// The byte size of the host-coherent HWRT shadow-params UBO — `size_of::<ResolvedRayShadow>()`
-/// (16 B). The HWRT resolve binds a UBO of exactly this shape at binding 20; hosts size their
-/// per-FIF ring slots from THIS constant (single source — no hand-copied `16`). Mirrors
-/// [`RESOLVED_CSM_BYTES`](crate::csm_config::RESOLVED_CSM_BYTES).
+/// The byte size of the cold resolved head — `size_of::<ResolvedRayShadow>()` (16 B), the
+/// first 16 B of the HWRT shadow-params UBO at binding 20. Hosts size their per-FIF ring slots
+/// from `RESOLVED_RAY_SHADOW_BYTES + RAY_SHADOW_FRAME_BYTES` (48 B; see
+/// [`RayShadowFrame`](crate::upload::RayShadowFrame)) — single source, no hand-copied `48`.
+/// Mirrors [`RESOLVED_CSM_BYTES`](crate::csm_config::RESOLVED_CSM_BYTES).
 pub const RESOLVED_RAY_SHADOW_BYTES: usize = core::mem::size_of::<ResolvedRayShadow>();
 
 impl Default for ResolvedRayShadow {

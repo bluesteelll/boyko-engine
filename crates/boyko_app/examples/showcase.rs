@@ -35,7 +35,7 @@ fn main() {
     app.run();
 }
 
-fn setup(mut commands: Commands, mut meshes: NonSendResMut<MeshRegistry>, dev: NonSendRes<GpuDevice>) {
+fn setup(mut commands: Commands, mut meshes: NonSendResMut<Assets<MeshGpu>>, dev: NonSendRes<GpuDevice>) {
     let floor = meshes.plane(dev.get(), 16.0);
     let cube = meshes.cube(dev.get(), 1.0);
 

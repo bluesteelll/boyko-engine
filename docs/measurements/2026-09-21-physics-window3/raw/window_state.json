@@ -1,0 +1,46 @@
+{
+ "start": "2026-09-21T03:47:46.181+03:00",
+ "test": false,
+ "placement": "P-none (no affinity call)",
+ "cells_per_round": 23,
+ "order_pass0": [
+  "JOLT-T@W1",
+  "D-L4L2@W1",
+  "JOLT56-T@W1",
+  "J-A@W1",
+  "D-L5@W1",
+  "JOLT-T@W2",
+  "D-L4L2@W2",
+  "JOLT56-T@W2",
+  "D-L5@W2",
+  "JOLT-T@W4",
+  "D-L4L2@W4",
+  "JOLT56-T@W4",
+  "D-L5@W4",
+  "JOLT-T@W8",
+  "D-L4L2@W8",
+  "J-A@W8",
+  "JOLT56-T@W8",
+  "D-L5@W8",
+  "D-L5-npoff@W8",
+  "JOLT-T@W16",
+  "D-L4L2@W16",
+  "JOLT56-T@W16",
+  "D-L5@W16"
+ ],
+ "passes": 2,
+ "rounds": 3,
+ "machine_before": {
+  "time": "2026-09-21T03:47:46.735+03:00",
+  "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+  "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n249"
+ },
+ "end": "2026-09-21T04:42:16.242+03:00",
+ "machine_after": {
+  "time": "2026-09-21T04:42:16.631+03:00",
+  "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+  "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n264"
+ },
+ "binaries_after": "all match",
+ "status": "complete"
+}

@@ -1,0 +1,11 @@
+08:04:15 over 10s: 28700=2.02s 28784=1.09s 30548=0.17s 34656=0.11s
+minimize 34656 'Claude' -> True
+08:04:28 over 10s: 28700=0.09s 30548=0.13s 34656=0.09s
+--- 08:18:49 before G5 launch ---
+08:18:59 over 10s: 28700=3.48s 28784=3.91s 30548=0.30s
+minimize 34656 'Claude' -> True
+08:19:13 over 10s: 30548=0.14s
+--- 10:13:30 before G5 launch 2 ---
+10:13:41 over 10s: 30548=0.14s 34656=0.09s
+minimize 34656 'Claude' -> True
+10:13:54 over 10s: 30548=0.22s

@@ -2,10 +2,22 @@
 name = "boyko-ecs"
 version = "0.1.0"
 edition = "2024"
-
+license.workspace = true
 [dependencies]
 boyko-utils =  { path = "../boyko_utils" }
 boyko-threadpool = { path = "../boyko_threadpool" }
+# The logging seam (rung L5). The edge runs THIS WAY and never back: `boyko_log` knows nothing
+# about the ECS -- it writes formatted lines into a `.bss` byte ring and one system here copies
+# them into `LogRing`, whose `VmColumn` fields are private to this crate and must stay so.
+# `boyko-log` depends only on `boyko-diag`, which has an empty `[dependencies]`, so this adds no
+# third-party crate to any graph that reaches the ECS.
+boyko-log = { path = "../boyko_log" }
+# The profiling seam (profiling rung 2). Already in the graph transitively through `boyko-log`;
+# named directly because this crate is now a FIRST-PARTY reader of it -- the fold consumes
+# `boyko_diag::sample`'s lane transport, `boyko_diag::clock`'s epoch and `boyko_diag::loss`'s
+# cells. A transitive path is not an API contract, and depending on one is how a crate's public
+# surface comes to rest on somebody else's dependency choice.
+boyko-diag = { path = "../boyko_diag" }
 fixedbitset = "0.5"
 crossbeam-queue = "0.3"
 crossbeam-utils = "0.8"
@@ -23,13 +35,13 @@ static_assertions = "1.1"
 # `cargo bench --features bench-alloc`. See docs/BENCHMARKING.md.
 mimalloc = { version = "0.1", optional = true }
 
-# Phase X.C/X.H — lazy-commit virtual-memory backing store. The Unix arm of
-# `VmReservation` (`memory/vm.rs`) calls `mmap` / `mprotect` / `munmap` via
-# `libc`. Already present in Cargo.lock at 0.2.x (transitively), so this
-# unifies with zero new compilation. Not pulled in on Windows/wasm32 (the
-# cfg-gated arms there use `VirtualAlloc` / the global allocator).
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
+# Rung C1 (unified plan KC-01): the lazy-commit virtual-memory backing store (`VmReservation`,
+# `VmColumn`, the commit-granularity constants) lives in `boyko_memory`, one layer below the pool.
+# This crate re-exports the old `ecs::memory::{vm, vm_column, utils}` and `ecs::constants` paths.
+# `libc` (the unix `mmap` / `mprotect` / `munmap` arm) moved there with its only user, so this
+# crate no longer names it. The edge runs this way only: `boyko_memory` has no first-party
+# dependency.
+boyko-memory = { path = "../boyko_memory" }
 
 # Phase 22.1: loom is pulled in ONLY under `--cfg loom` (mirrors
 # boyko_threadpool's Phase-9.1 setup). `term_list.rs` aliases its atomics to
@@ -40,6 +52,30 @@ loom.workspace = true
 
 [features]
 default = []
+# Profiling rung 3d — the ANALYSIS half of the profiler: the `intervals` append ring (256 KiB of
+# the reservation) and the `ConcurrencyReport` that reads it against the schedule's own
+# `ConflictGraph`. Enabling it costs nothing when the profiler is disarmed — the ring is inside the
+# reservation `arm` commits, and `arm` is the enable path.
+#
+# OPT-IN since profiling rung 14, and the change is forced rather than chosen. This was
+# `default = ["profiling-analysis"]`, on the reasoning that a development build is where the
+# question "did this schedule actually run in parallel?" is asked and that rung 14's `BOYKO_PROFILE`
+# axis would turn it off for a shipping title. MEASURED at that rung: it cannot.
+#
+#   * `cargo tree --workspace -e features --no-default-features` still reported the feature
+#     ENABLED. Nine sibling manifests depend on `boyko-ecs` and not one says
+#     `default-features = false`, so unification puts the default straight back.
+#   * Moving the request onto a dependency edge does not help either: an explicit `features = [...]`
+#     survives `--no-default-features` by design.
+#   * And an environment variable cannot set a cargo feature at all — cargo resolves features
+#     before any build script runs.
+#
+# So while it was default-on there was NO command line that could turn it off, and the axis's
+# `shipping` row would have been a claim nothing could honour. Opt-in is the only shape in which the
+# flag means what it says. Enable it the same way `hwrt` and `bench-alloc` are enabled:
+# `--features boyko-ecs/profiling-analysis`. A build that enables it under a profile that refuses it
+# fails at a `const` assertion in `src/ecs/core/profiling/mod.rs` naming both sides.
+profiling-analysis = []
 # Phase 12.5 Track B I5 — bumps `MAX_QUERY_TYPES` from 1024 to 4096 for
 # projects with an unusually high fan-out of `(D, F)` query shapes. Increases
 # the per-world `query_state_cache` footprint from ≤ 32 KB to ≤ 128 KB.
@@ -61,6 +97,10 @@ proptest.workspace = true
 # `wasm32-unknown-unknown` build (the web-demo target), where getrandom 0.3
 # otherwise requires an explicit backend flag.
 rand = "0.9.0"
+# Defect A6 validation: `tests/a6_schedule_panic_propagation.rs` observes the schedule's
+# cancellation record through `boyko_log::probe`, which exists only under `test-probe`. Dev-only,
+# so the feature never reaches a shipping build (the rule `boyko_log/Cargo.toml` states for it).
+boyko-log = { path = "../boyko_log", features = ["test-probe"] }
 
 [[bench]]
 name = "component_id"
@@ -214,8 +254,31 @@ harness = false
 name = "relation_join"
 harness = false
 
-[lints.rust]
-# Phase 9 Wave 7 Step 24: opt-in stronger ALLOC1 check via
-# `RUSTFLAGS="--cfg force_alloc_panic"`. See
-# docs/PHASE-9-FORCE-ALLOC-PANIC.md.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(force_alloc_panic)', 'cfg(loom)'] }
+
+[lints]
+workspace = true
+
+# GJ1 / profiling rung 16 (= J2). `harness = false` for the same reason every diagnostics bench in
+# this campaign uses it: the verdict discipline is the corpus's -- an interleaved twin, a spread
+# floor that is the CLOCK's resolution, and `NOT RESOLVED` as a first-class outcome -- and criterion
+# reports none of those.
+[[bench]]
+name = "gj1_flag_cost"
+harness = false
+
+# KE16 — the ECS-level measurement harness for threadpool defect A: the same
+# `par_iter` over the same world, driven (a) from the bench thread inside
+# `pool.install` (healthy: chunks reach `injector_global`) and (b) from inside a
+# scheduled system body, which the parallel scheduler runs ON A WORKER (chunks
+# reach that worker's `injector_local`, which no sibling polls). Reports
+# wall-clock, a max-in-flight occupancy counter and the ratio at N in
+# {4096, 65536}. See benches/ke16_par_iter_in_system.rs.
+[[bench]]
+name = "ke16_par_iter_in_system"
+harness = false
+
+# KE17 -- sizes the apply-window barrier (schedule.rs:623 gate). See
+# benches/ke17_apply_window.rs.
+[[bench]]
+name = "ke17_apply_window"
+harness = false

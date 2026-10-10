@@ -1,0 +1,4 @@
+START 2026-09-22T08:09:38+03:00 pwd=/c/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/win4b/parent_tree
+    Finished `parity` profile [optimized] target(s) in 0.32s
+  Executable benches\jolt_parity_pyramid.rs (D:/wt/_targets/l11-parent-msvc\parity\deps\jolt_parity_pyramid-39550833a2ead4ba.exe)
+EXIT 0 2026-09-22T08:09:39+03:00

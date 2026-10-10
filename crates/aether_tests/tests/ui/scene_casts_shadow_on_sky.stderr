@@ -1,0 +1,5 @@
+error: the `sky` node has no shadow-caster form
+ --> tests/ui/scene_casts_shadow_on_sky.rs:7:68
+  |
+7 |         sky { sky: (0.28, 0.36, 0.50), ground: (0.15, 0.14, 0.13), casts_shadow }
+  |                                                                    ^^^^^^^^^^^^

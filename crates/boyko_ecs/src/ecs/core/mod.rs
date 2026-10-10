@@ -1,5 +1,6 @@
 pub mod app;
 pub mod archetype;
+pub mod asset;
 pub mod bundle;
 pub mod change_detection;
 pub mod clone;
@@ -10,6 +11,8 @@ pub mod entity;
 pub mod hierarchy;
 pub mod iters;
 pub mod events;
+pub mod log;
+pub mod profiling;
 pub mod relationship;
 pub mod resources;
 pub mod schedule;

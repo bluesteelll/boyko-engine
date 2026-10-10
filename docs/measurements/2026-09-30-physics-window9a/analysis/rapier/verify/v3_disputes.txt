@@ -1,0 +1,4 @@
+LETTER NOT CLAIMED (ours-first and Rapier-first): 40 of 40
+still NOT CLAIMED under EXCL, ours-first (K guard is not the only reason): 10: ['R-WALL-D W2 [100,500)', 'R-WALL-D W4 [100,500)', 'R-WALL-D W16 [100,500)', 'R-ROW-M W1 [100,500)', 'R-ROW-M W2 [100,500)', 'R-ROW-M W1 [0,100)', 'R-ROW-M W2 [0,100)', 'R-ROW-M W4 [0,100)', 'R-ROW-M W8 [0,100)', 'R-ROW-M W16 [0,100)']
+still NOT CLAIMED under EXCL in BOTH orientations: 7: ['R-WALL-D W2 [100,500)', 'R-WALL-D W4 [100,500)', 'R-ROW-M W1 [100,500)', 'R-ROW-M W1 [0,100)', 'R-ROW-M W2 [0,100)', 'R-ROW-M W4 [0,100)', 'R-ROW-M W8 [0,100)']
+[100,500) EXCL identical in both orientations (strength included): 13 of 20

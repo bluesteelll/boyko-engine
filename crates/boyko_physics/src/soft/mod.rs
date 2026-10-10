@@ -10,7 +10,7 @@
 //! # Determinism (INVIOLABLE)
 //!
 //! The whole pass is bit-deterministic and uses ONLY exact `sqrt` + divide — no
-//! `rsqrt`/`rcp`/`mul_add`/FMA-contraction, no [`Vec3::normalize`] (it collapses
+//! `rsqrt`/`rcp`/`mul_add`/FMA-contraction, no [`Vec3::normalize`](boyko_math::Vec3::normalize) (it collapses
 //! at `f32::MIN_POSITIVE`; the kernel uses an explicit `d * (1.0 / len)` past the
 //! [`solver::LEN_EPS`] guard). The constraint sweep is one Gauss-Seidel iteration
 //! in pinned array order `0..m`; particles and bodies are visited in fixed index
@@ -19,13 +19,13 @@
 //! # The 0%-gate (rigid path untouched)
 //!
 //! Soft-body is OPT-IN via [`PhysicsConfig::soft_body`](crate::PhysicsConfig)
-//! (default `false`) and wired by [`add_physics_soft`]. The rigid solvers,
+//! (default `false`) and wired by [`add_physics_soft`](crate::plugin::add_physics_soft). The rigid solvers,
 //! `BodyState`/`SolverScratch`/`physics_apply`/`physics_integrate`/the constraint
 //! graph are byte-untouched; [`physics_soft_step`] is a STRICTLY DISJOINT
 //! integrator — it operates entirely on [`SoftBody`] columns, never reads or
 //! writes `scratch.bodies`, never sets a touched bit, and never enters
 //! `physics_apply`. A world that never sets `soft_body = true` and never calls
-//! [`add_physics_soft`] is byte-for-byte unaffected.
+//! [`add_physics_soft`](crate::plugin::add_physics_soft) is byte-for-byte unaffected.
 //!
 //! # Seams for SP2+
 //!
@@ -44,3 +44,6 @@ pub use colored::{ParticleColorGraph, SoftColorScratch, physics_soft_step_colore
 pub use component::{SoftBody, SoftBodyError};
 pub use coupling::{SoftRigidReaction, physics_soft_rigid_apply};
 pub use solver::{physics_soft_step, physics_soft_step_coupled};
+// L10 D9b: the step-record forms the plugin registers.
+pub(crate) use colored::physics_soft_step_colored_latched;
+pub(crate) use solver::{physics_soft_step_coupled_latched, physics_soft_step_latched};

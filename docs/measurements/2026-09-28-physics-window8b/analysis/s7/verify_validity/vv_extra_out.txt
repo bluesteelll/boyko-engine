@@ -1,0 +1,22 @@
+processes > 1.5 % from their cell median, [0,500):
+  ('S7-JA', 's7p', 16) p0 r1 +2.07 % rb 0.96 ra 0.92 witness 0.52 attempt original
+  ('S7-JA', 's7t', 8) p0 r2 +1.88 % rb 0.41 ra 0.58 witness 1.15 attempt original
+  ('S7-JA', 's7t', 16) p2 r2 +1.68 % rb 3.63 ra 2.37 witness 0.95 attempt original
+  ('S7-JT', 's7p', 8) p2 r0 +1.87 % rb 1.51 ra 0.57 witness 0.31 attempt original
+  ('S7-JT', 's7t', 8) p0 r2 +1.86 % rb 0.98 ra 0.21 witness 0.21 attempt original
+  ('S7-JT', 's7t', 8) p2 r0 +2.34 % rb 1.14 ra 1.51 witness 0.21 attempt original
+  ('S7-JT', 's7t', 16) p0 r2 +2.00 % rb 1.24 ra 0.47 witness 0.18 attempt original
+  ('S7-JT-W1', 's7p', 1) p0 r0 +3.16 % rb 0.62 ra 0.83 witness 0.35 attempt original
+  ('S7-JT-W1', 's7t', 1) p0 r0 +2.11 % rb 0.37 ra 0.62 witness 0.13 attempt original
+  ('S7-JT-W1', 's7t', 1) p2 r0 +2.35 % rb 1.31 ra 0.45 witness 0.26 attempt rerun
+  ('S7-ladder8-F1.5', 's7p', 8) p0 r2 +1.60 % rb 0.27 ra 1.14 witness 1.0 attempt original
+count 11
+paired per round T/P (used processes):
+  S7-JT@W8: median 0.9985 [0.9840-1.0102] T slower in 3 of 9
+  S7-JT@W16: median 1.0690 [1.0600-1.0874] T slower in 9 of 9
+  S7-JA@W8: median 1.0011 [0.9967-1.0186] T slower in 6 of 9
+  S7-JA@W16: median 1.1245 [1.1035-1.1483] T slower in 9 of 9
+  S7-JT-W1@W1: median 1.0050 [0.9836-1.0364] T slower in 6 of 9
+J-A P16 - T16 = -0.6579 ms; T16/T8 JT 1.2092, P16/P8 JT 1.1295, T16/T8 JA 1.1059, P16/P8 JA 0.9811
+re-run (1, 0, 'S7-JA', 's7t', 8): original start 2026-09-29T17:58:38.385+03:00, re-run start 2026-09-29T18:04:25.044+03:00, partner start 2026-09-29T17:58:30.646+03:00; re-run [0,500) 5.3031 vs original 5.3407 ms
+re-run (2, 0, 'S7-JT-W1', 's7t', 1): original start 2026-09-29T18:08:51.730+03:00, re-run start 2026-09-29T18:13:45.826+03:00, partner start 2026-09-29T18:09:24.478+03:00; re-run [0,500) 4.5598 vs original 5.2124 ms

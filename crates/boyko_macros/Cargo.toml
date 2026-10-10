@@ -2,7 +2,7 @@
 name = "boyko-macros"
 version = "0.1.0"
 edition = "2024"
-
+license.workspace = true
 [lib]
 proc-macro = true
 
@@ -13,6 +13,17 @@ proc-macro = true
 # not a compile-time reference here. A normal `boyko-ecs` dep (W2 removed it)
 # only serialized the whole workspace build graph — every crate waited for the
 # boyko_ecs host build before its proc-macros could compile.
-syn = { version = "2.0.100", features = ["full"] }
-quote = "1.0.39"
+# W2: hoisted to `[workspace.dependencies]` when `boyko_ui`'s source census
+# became a second consumer. The version pin and the `full` feature live there.
+syn = { workspace = true }
+quote = { workspace = true }
 proc-macro2 = "1.0.93"
+
+# UG-15 leg (1)'s expanded corpus (M-b, `src/ug15_corpus.rs`): the twins' output goes through the
+# SAME visitor leg (1) runs over source, which lives in the dev-only instrument crate. A dev edge
+# only: `boyko-symcensus/tests/dev_only_edge.rs` is RED on any normal or build edge onto it.
+[dev-dependencies]
+boyko-symcensus = { path = "../boyko_symcensus" }
+
+[lints]
+workspace = true

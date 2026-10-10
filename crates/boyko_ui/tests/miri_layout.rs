@@ -13,9 +13,16 @@
 //! borrow protocol + the recursive nested `get_component` / `get_component_mut`
 //! walk. Trees are kept small so Miri stays fast.
 //!
-//! Run: `RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-gnu cargo miri test -p
+//! Run: `RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-msvc cargo miri test -p
 //! boyko-ui --test miri_layout` (the repo's `.cargo/config.toml` already sets
 //! `MIRIFLAGS=-Zmiri-tree-borrows`).
+
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` / a `UiParseReport` out of the `Send + Sync` one-shot
+// system closure, and a file-static `Mutex<()>` serializes tests that arm a process-global
+// (the counting allocator, the watch-poll counters). Not engine code — the whole file is
+// compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
 
 mod common;
 

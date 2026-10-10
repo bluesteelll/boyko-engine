@@ -1,0 +1,5 @@
+error: a data-carrying enum has no v1 reflection descriptor: the walk would bake `fields: &[]`, asserting that a type with payload variants has no fields. Drop `reflect` from this item, or make it a fieldless `#[repr(Int)]` enum.
+  --> tests/reflect_compile_fail/data_carrying_enum_rejected.rs:27:5
+   |
+27 | pub enum NonStruct {
+   |     ^^^^

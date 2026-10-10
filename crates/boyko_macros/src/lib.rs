@@ -1,10 +1,10 @@
 //! Procedural macros for the `boyko-engine` ECS.
 //!
-//! Each `#[proc_macro*]` entry point below is a thin delegator whose full
-//! documentation lives on the entry itself; the implementation is in the
-//! sibling module of the same name (`component`, `relationship`, `resource`,
-//! `event`, `bundle`, `system_set`, `actionlike`, `ui`, `bindable`). Genuinely
-//! shared helpers live in `common`.
+//! Each `#[proc_macro*]` entry point below is a one-line wrapper over its `proc_macro2` twin,
+//! `<module>::<entry>_impl`, in the sibling module of the same name (`component`, `relationship`,
+//! `resource`, `event`, `bundle`, `system_set`, `actionlike`, `ui`, `bindable`, `state_chart`);
+//! the twins are what UG-15 leg (1)'s expanded corpus (M-b, `ug15_corpus`) runs, because
+//! `proc_macro::TokenStream` exists only inside a compiler-invoked macro. Shared helpers: `common`.
 //!
 //! `boyko-macros` has NO dependency on `boyko-ecs` / `boyko-ui` / `boyko-input`:
 //! every `boyko_ecs::…` (etc.) path a derive produces is emitted as a TOKEN
@@ -16,13 +16,15 @@ mod bundle;
 mod common;
 mod component;
 mod event;
+mod reflect;
 mod relationship;
 mod resource;
+mod state_chart;
 mod system_set;
 mod ui;
-
+#[cfg(test)]
+mod ug15_corpus;
 use proc_macro::TokenStream;
-
 
 /// Derive macro for implementing the Component trait.
 ///
@@ -68,9 +70,11 @@ use proc_macro::TokenStream;
 /// unsafe fn my_on_remove(world: DeferredEcsMaster<'_>, ctx: HookContext) { /* ... */ }
 /// ```
 ///
-/// Valid keys: `on_add`, `on_insert`, `on_replace`, `on_remove`. Any other key
-/// (including `on_despawn`, which is deferred to Phase 14b) is a compile error,
-/// as is a duplicate key. When at least one key is present the derive emits
+/// Valid keys: `on_add`, `on_insert`, `on_replace`, `on_remove`, `on_despawn`.
+/// Any other key is a compile error, as is a duplicate key. `on_despawn` fires
+/// once per DYING ENTITY at the despawn site, before any component drops — it is
+/// not the per-component `on_remove`, and it is the one hook a pull-style
+/// carrier cannot substitute for. When at least one key is present the derive emits
 /// `const HAS_HOOKS: bool = true;` and a `register_hooks` impl; the
 /// macro-generated `component_id()` then installs the hooks into the cold
 /// `HOOKS` table on first call, atomically with ID assignment and therefore
@@ -107,12 +111,67 @@ use proc_macro::TokenStream;
 /// is expected (wrap it in a `#[derive(Bundle)]` struct instead). The flag is
 /// also the escape hatch when a type must derive BOTH `Component` and
 /// `Bundle` — without it the two derives now collide on the `Bundle` impl.
+///
+/// # Required components (`#[require(...)]`) and storage kind
+///
+/// `#[require(B)]`, `#[require(C = expr)]` and `#[require(D(args))]` declare
+/// components the engine constructs alongside this one on attach. Two storage
+/// kinds behave differently, and the difference is enforced at COMPILE time:
+///
+/// * `storage = "dense"` is **supported**. A dense component has bytes; it
+///   merely keeps them in the global `DenseStore` rather than an archetype
+///   column, so there is something for the constructor to write.
+/// * `storage = "bitset"` (a flag) is **refused**. The constructor behind
+///   `#[require]` is an `unsafe fn(*mut u8)` whose entire job is to materialize
+///   BYTES into an uninitialized slot, and a flag is one BIT with no bytes at
+///   all — so the construct is meaningless rather than merely unimplemented.
+///   Declare the initial flag state instead, via the component `flags (...)`
+///   group (`flags (TheFlag = true)`), which is backed by the `FLAGS_DIRECT`
+///   table and sets the bit on attach.
+///
+/// The derive itself cannot tell the two apart: `#[require(Foo)]` reaches it as
+/// a path — a token, never a resolved type — which is the same limit that makes
+/// its duplicate check textual. It therefore emits, per entry, a
+/// `const _: () = assert!(!<Foo as Component>::STORAGE_IS_BITSET, …)` item and
+/// lets the COMPILER decide during const evaluation, at the one place that
+/// knows the storage kind. The refusal is a `cargo check` error spanned at the
+/// offending entry inside `#[require(...)]`, never a runtime panic.
+///
+/// # Reflection opt-in (`reflect`, CORE C7)
+///
+/// The bare `reflect` flag key opts a component into the **editor-only** reflection
+/// layer:
+///
+/// ```ignore
+/// #[derive(Component, Default)]
+/// #[component(reflect)]
+/// struct Health { current: f32, max: f32 }
+/// ```
+///
+/// It emits a `static boyko_reflect::TypeInfo` describing the type's fields — every
+/// offset a `core::mem::offset_of!` — plus `impl boyko_reflect::Reflect`, all behind
+/// `#[cfg(feature = "reflect")]` **evaluated in the crate the derive expanded into**. A
+/// consumer that has not enabled its own `reflect` feature emits nothing, and this crate
+/// never gains a dependency edge to `boyko_reflect`.
+///
+/// `default_in_place` is baked from `Default`; a type with no `Default` is refused by the
+/// `boyko_reflect::ReflectDefault` bound, spanned at the type name. Opt out with the
+/// helper attribute `#[reflect(no_default)]`, which bakes `None` instead.
+///
+/// **Tuple structs are accepted, with one caveat that cannot be a diagnostic.** A tuple
+/// struct's field names are the decimal indices (`"0"`, `"1"`, …), so *by-name* and
+/// *by-position* coincide for it: the reorder stability by-name access otherwise gives
+/// you does **not** hold, and swapping two tuple fields silently re-binds their names.
+/// Named-field structs are recommended for anything serialized. There is no
+/// `compile_error!` carrying this text because a tuple struct is accepted rather than
+/// refused, and a non-fatal proc-macro warning needs the nightly-only
+/// `proc_macro::Diagnostic`.
 #[proc_macro_derive(
     Component,
-    attributes(component, require, entities, relationship, relationship_target)
+    attributes(component, require, entities, relationship, relationship_target, reflect)
 )]
 pub fn component_macro(input: TokenStream) -> TokenStream {
-    component::expand(input)
+    component::component_macro_impl(input.into()).into()
 }
 
 /// Derive macro for the source-of-truth side of a relation — `Relationship`.
@@ -147,7 +206,7 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
 /// `boyko-ecs` for tests. Real usage lives in `boyko-ecs` integration tests.
 #[proc_macro_derive(Relationship, attributes(relationship))]
 pub fn relationship_macro(input: TokenStream) -> TokenStream {
-    relationship::expand(input)
+    relationship::relationship_macro_impl(input.into()).into()
 }
 
 /// Derive macro for the reverse-index side of a relation — `RelationshipTarget`.
@@ -177,7 +236,7 @@ pub fn relationship_macro(input: TokenStream) -> TokenStream {
 /// The example is `ignore`'d for the same reason as `#[derive(Component)]`.
 #[proc_macro_derive(RelationshipTarget, attributes(relationship_target))]
 pub fn relationship_target_macro(input: TokenStream) -> TokenStream {
-    relationship::expand_target(input)
+    relationship::relationship_target_macro_impl(input.into()).into()
 }
 
 /// Derive macro for implementing the Resource trait.
@@ -205,7 +264,7 @@ pub fn relationship_target_macro(input: TokenStream) -> TokenStream {
 /// tests.
 #[proc_macro_derive(Resource)]
 pub fn resource_macro(input: TokenStream) -> TokenStream {
-    resource::expand(input)
+    resource::resource_macro_impl(input.into()).into()
 }
 
 /// Attribute macro for defining an event type.
@@ -255,8 +314,8 @@ pub fn resource_macro(input: TokenStream) -> TokenStream {
 /// proc-macro crates cannot pull in their own consumers. End-to-end tests live
 /// in `boyko-ecs/tests/event_attribute.rs`.
 #[proc_macro_attribute]
-pub fn event(_args: TokenStream, input: TokenStream) -> TokenStream {
-    event::expand(_args, input)
+pub fn event(args: TokenStream, input: TokenStream) -> TokenStream {
+    event::event_impl(args.into(), input.into()).into()
 }
 
 /// Derive macro for the sealed [`Bundle`] trait — Phase 8.5 Step 4.
@@ -322,7 +381,7 @@ pub fn event(_args: TokenStream, input: TokenStream) -> TokenStream {
 /// would create a cycle). Real usage lives in `boyko-ecs` integration tests.
 #[proc_macro_derive(Bundle)]
 pub fn bundle_macro(input: TokenStream) -> TokenStream {
-    bundle::expand(input)
+    bundle::bundle_macro_impl(input.into()).into()
 }
 
 /// Derive macro for the [`SystemSet`] marker trait — Phase 9 Wave 7 Step 21,
@@ -377,7 +436,7 @@ pub fn bundle_macro(input: TokenStream) -> TokenStream {
 /// [`TypeId`]: std::any::TypeId
 #[proc_macro_derive(SystemSet)]
 pub fn system_set_macro(input: TokenStream) -> TokenStream {
-    system_set::expand(input)
+    system_set::system_set_macro_impl(input.into()).into()
 }
 
 /// Derive macro for the [`Actionlike`] trait — `boyko_input` I2.
@@ -388,7 +447,7 @@ pub fn system_set_macro(input: TokenStream) -> TokenStream {
 ///   `COUNT <= 256` (the `BitSet256` action cap, plan V8).
 /// * `index(self)` — the dense `0..COUNT` declaration-order index.
 /// * `from_index(i)` — the inverse (`None` for `i >= COUNT`).
-/// * `kind(self)` — the per-variant [`ActionKind`], selected by the optional
+/// * `kind(self)` — the per-variant `ActionKind`, selected by the optional
 ///   `#[actionlike(Button|Axis1D|Axis2D)]` field attribute (default `Button`).
 /// * `name(self)` — the variant's identifier as a `&'static str`.
 ///
@@ -432,7 +491,7 @@ pub fn system_set_macro(input: TokenStream) -> TokenStream {
 /// lives in `boyko-input` integration tests.
 #[proc_macro_derive(Actionlike, attributes(actionlike))]
 pub fn actionlike_macro(input: TokenStream) -> TokenStream {
-    actionlike::expand(input)
+    actionlike::actionlike_macro_impl(input.into()).into()
 }
 
 /// Function-like macro: author a UI entity tree as a literal nested block (GUI
@@ -440,7 +499,7 @@ pub fn actionlike_macro(input: TokenStream) -> TokenStream {
 ///
 /// The macro expands to a block expression that runs against a `Commands`
 /// binding in scope (default name `cmds`; override with `commands: <ident>;` as
-/// the first clause). It evaluates to the root [`Entity`] — or, for several
+/// the first clause). It evaluates to the root `Entity` — or, for several
 /// top-level nodes, a tuple of root `Entity`s.
 ///
 /// # Grammar
@@ -459,7 +518,7 @@ pub fn actionlike_macro(input: TokenStream) -> TokenStream {
 /// Each node lowers to `cmds.spawn(<base>)` plus chained `.insert(<literal>)` for
 /// every remaining component, then one standalone `cmds.entity(parent).add_child(child)`
 /// per link. A node whose component set contains BOTH `UiLayout` and `ComputedRect`
-/// spawns the canonical [`UiNodeBundle`] (hitting the Phase-8.5 static archetype
+/// spawns the canonical `UiNodeBundle` (hitting the Phase-8.5 static archetype
 /// cache); otherwise it spawns the `UiLayout` literal and injects
 /// `ComputedRect::default()`. A node without any `UiLayout` literal is a compile
 /// error.
@@ -496,7 +555,7 @@ pub fn actionlike_macro(input: TokenStream) -> TokenStream {
 /// `boyko-ui` integration tests.
 #[proc_macro]
 pub fn ui(input: TokenStream) -> TokenStream {
-    ui::expand(input)
+    ui::ui_impl(input.into()).into()
 }
 
 /// Derive macro for `boyko_ui::binding::Bindable` (GUI P4 Decision 7).
@@ -528,5 +587,64 @@ pub fn ui(input: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_derive(Bindable, attributes(bind))]
 pub fn bindable_macro(input: TokenStream) -> TokenStream {
-    bindable::expand(input)
+    bindable::bindable_macro_impl(input.into()).into()
+}
+
+/// Hierarchical state machines (Harel-lite charts) with a **flat** runtime.
+///
+/// Nested `state` blocks, `enter` / `exit` actions and `on EVENT => TARGET`
+/// routes compile to a flat enum of LEAVES, one system per leaf, and
+/// `run_if(in_state(leaf))` registrations. The hierarchy exists only at compile
+/// time: innermost-wins handler inheritance and least-common-ancestor exit/enter
+/// chains are resolved here, so the runtime does no tree walk and keeps no
+/// parallel data structure.
+///
+/// This is the engine's single machine-codegen authority. Aether's `machine`
+/// construct is a front-end that lowers its own sugar onto this macro rather
+/// than flattening charts a second time.
+///
+/// # Semantics
+///
+/// * **Innermost wins** — a handler on a composite is inherited by every
+///   descendant leaf that declares no handler of its own for that event.
+/// * **LCA chains** — a transition exits source-side states below the least
+///   common ancestor innermost-first and enters target-side ones
+///   outermost-first, so two leaves under one composite never re-enter it.
+/// * **Exactly one chain per frame** — a leaf's routes are merged into ONE
+///   system: every event lane is drained, the **first-declared** accepting route
+///   wins, and only its exit/action/enter chain runs.
+/// * **Unreachable states are a compile error** — a state no transition targets
+///   and that is not the chart's `initial` can never be entered.
+///
+/// # Generated registration surface
+///
+/// * `__state_chart_install_<chart>(app)` — `insert_state` of the initial leaf,
+///   plus its entry chain as a startup system.
+/// * `__state_chart_systems_<chart>(builder)` — the per-leaf systems.
+///
+/// # Example
+///
+/// ```ignore
+/// boyko_macros::state_chart! {
+///     chart GameFlow;
+///     initial Boot;
+///
+///     state Boot { on AssetsReady => Playing; }
+///     state Playing {
+///         initial Running;
+///         enter(mut cmds: Commands) { cmds.spawn(HudRoot); }
+///         state Running { on PausePressed => Playing.Paused; }
+///         state Paused  { on PausePressed => Playing.Running; }
+///         on PlayerDied(score: Res<Score>) if score.lives == 0 => GameOver;
+///     }
+///     state GameOver { on RestartPressed => Boot; }
+/// }
+/// ```
+///
+/// The example is `ignore`'d: a proc-macro crate cannot consume its own macros,
+/// and `boyko-macros` cannot depend on `boyko-ecs` (see the crate doc). Real
+/// usage lives in `aether-tests`.
+#[proc_macro]
+pub fn state_chart(input: TokenStream) -> TokenStream {
+    state_chart::state_chart_impl(input.into()).into()
 }

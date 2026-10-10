@@ -1,0 +1,19 @@
+1.5G	D:/wt/_targets/vkval-msvc/release
+1.0K	D:/wt/_targets/vkval-msvc/CACHEDIR.TAG
+193M	D:/wt/_targets/vkval-msvc/bench-shipped
+656M	D:/wt/_targets/vkval-msvc/debug
+1.5G	D:/wt/_targets/vkval-msvc/release
+2.0G	D:/wt/_targets/vkval-msvc/seam-census
+325M	D:/wt/_targets/vkval-msvc/sensitivity-map
+0	D:/wt/_targets/vkval-msvc/tmp
+45M	D:/wt/_targets/vkval-msvc/ug15
+D:              238G  118G  120G  50% /d
+# RK-11 (plan 00): the release dir's size, re-taken at the end of B3 stage 2
+stage 1: 1.5G (rk11-du.txt above this file's history)
+stage 2 end: 1.5G D:/wt/_targets/vkval-msvc/release
+  2.0G seam-census
+  1.5G sensitivity-map
+  2.1G debug
+  193M bench-shipped
+  74M ug15
+D: 97G free of 238G

@@ -1,0 +1,80 @@
+# Pins the toolchain IN THE TREE, so the choice stops depending on an environment
+# variable in one developer's personal, machine-global settings file.
+#
+# WHY THIS FILE EXISTS (measured 2026-09-07). The workstation that builds this
+# repo carried TWO independent Rust installs: a rustup one, and a chocolatey
+# `rust` package (1.95.0) that won on PATH because chocolatey's bin directory is
+# in the MACHINE-level PATH while rustup's shim directory had never been written
+# to the registry PATH at all. The chocolatey `cargo` is NOT a rustup shim, so it
+# silently ignores RUSTUP_TOOLCHAIN, the `+toolchain` syntax, and this file —
+# every toolchain selection the project believed it was making was a no-op
+# against it. Nothing in the tree recorded which toolchain was intended, so the
+# discrepancy could not be noticed: the workspace reported green on a toolchain
+# nobody had chosen, two minor versions behind the one that was configured.
+#
+# PRECEDENCE — measured on the machine, not taken from documentation:
+#   `cargo +toolchain ...`  BEATS this file   (verified: +nightly-gnu won over a 1.98.0 pin)
+#   RUSTUP_TOOLCHAIN env    BEATS this file   (verified: env's 1.97.1 won over a 1.98.0 pin)
+#   this file               BEATS `rustup default`
+#
+# Two CI consequences follow, and BOTH are load-bearing:
+#   - ci.yml's Miri job calls `cargo +nightly miri ...` explicitly. `+` outranks
+#     this file, so that job stays on nightly. Do not rewrite those invocations
+#     to drop the `+`.
+#   - docs.yml pins `nightly-2026-05-20` (newer nightlies break component_pool.rs
+#     via niche/layout changes, and boyko_shaderdsl needs `core_intrinsics`, which
+#     is E0554 on stable) and calls cargo WITHOUT `+`. It therefore sets
+#     RUSTUP_TOOLCHAIN explicitly to stay above this file. Removing that env block
+#     would silently drop that job onto stable.
+#
+# `channel = "stable"` rather than an exact version: it resolves to stable for
+# whatever host triple is current, which keeps Linux CI and the Windows
+# workstation on one line, and it needs no download on either. Switch to an exact
+# version here if reproducibility ever has to outrank currency.
+#
+# THE HOST TRIPLE IS NOT PINNED HERE, DELIBERATELY (2026-09-10). On that date this
+# tree's Windows recipes moved from `stable-x86_64-pc-windows-gnu` to
+# `stable-x86_64-pc-windows-msvc`, and this file did NOT change: `channel =
+# "stable"` resolves against whatever `default_host_tuple` rustup carries, so the
+# same line serves the Windows workstation and ubuntu CI. A host switch is a rustup
+# setting, NOT a pin in the tree — writing `stable-x86_64-pc-windows-msvc` here
+# would break every Linux job that shares this file.
+#
+# ⚠ STATE OF THE MACHINE, 2026-09-18: THE DEFAULT HOST HAS NOW BEEN SWITCHED.
+# MEASURED today: `~/.rustup/settings.toml` (mtime 2026-09-17 14:27) reads
+# `default_host_tuple = "x86_64-pc-windows-msvc"` and
+# `default_toolchain = "stable-x86_64-pc-windows-msvc"`, and `rustup toolchain list`
+# prints `stable-x86_64-pc-windows-msvc (active, default)`.
+#
+# The dated record this replaces, kept because it is one: on 2026-09-10 the same
+# two probes read `stable-x86_64-pc-windows-gnu (active, default)` and
+# `default_host_tuple = "x86_64-pc-windows-gnu"`, and this paragraph said the
+# default host had NOT been switched yet and that
+# `rustup set default-host x86_64-pc-windows-msvc` was a separate, owner-run step.
+# That was accurate on its date; the owner ran that step on 2026-09-17.
+#
+# THE SWITCH IS WHY SPELLING THE TOOLCHAIN WAS WORTH IT — it is not a reason to
+# stop. Every msvc recipe in the tree spells
+# `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc` explicitly (env BEATS this file,
+# measured 2026-09-07) rather than relying on the default. Not one of them needed
+# an edit on 2026-09-17, and each means exactly the same thing before and after it.
+# That argument is worth MORE now, not less: by this tree's own records the default
+# host has been rewritten TWICE in eleven days (msvc → gnu at 2026-09-07 13:56,
+# gnu → msvc at 2026-09-17 14:27, both by settings-file mtime), so a recipe that
+# reads the default depends on a value that moves with no commit to notice.
+#
+# Components are deliberately NOT listed: each CI job declares the ones it needs
+# (clippy, llvm-tools, miri, rustfmt), and listing them here would make every job
+# fetch all of them.
+#
+# PINNED TO 1.98.1 (2026-10-09). This file's own rule above said to switch to an exact version "if
+# reproducibility ever has to outrank currency", and the tree already decided that: the trybuild
+# corpus and its witness test (tests/trybuild_corpus_compiler_witness.rs) bless rustc 1.98.1 exactly.
+# Measured on the release PR (bluesteelll/boyko-engine#4): CI's floating stable resolved to 1.99.0,
+# which deprecated AtomicU64::fetch_update (a -D warnings error in every cargo job) and changed
+# trybuild error text (4 of 32 corpus targets red). The dev host builds with
+# RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc, which is 1.98.1 today and beats this file.
+# Moving to a newer compiler is one commit: this line, ci.yml's dtolnay/rust-toolchain@<version>
+# refs, the witness pin and the re-blessed trybuild .stderr files, together.
+[toolchain]
+channel = "1.98.1"

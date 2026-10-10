@@ -30,6 +30,11 @@ use crate::math::Vec3;
 /// it once per step; a body-only scene leaves it empty (the SDF stage is opt-in,
 /// inserted only by [`add_physics_sdf`](crate::plugin::add_physics_sdf)).
 ///
+/// Read once per step, by the broadphase; every later stage of that step runs with the field
+/// read then ([`StepInputs`](crate::step_inputs::StepInputs), L10 D9b). Assigning a field built
+/// with [`SdfField::from_edits`] is the normal way to change it, and it takes effect at the next
+/// broadphase like any other write. Removing this resource after setup is not supported.
+///
 /// `Default` is the EMPTY field (`count == 0`): an empty edit list evaluates to
 /// `+SDF_FAR` everywhere, so no body ever collides against an empty field.
 ///

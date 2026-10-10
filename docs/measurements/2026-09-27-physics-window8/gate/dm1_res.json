@@ -1,0 +1,17 @@
+{
+ "1920x1080": {
+  "hosted": true,
+  "came_up": null,
+  "exit": 0
+ },
+ "2560x1440": {
+  "hosted": false,
+  "came_up": "2052x1133",
+  "exit": 101
+ },
+ "3840x2160": {
+  "hosted": false,
+  "came_up": "2052x1133",
+  "exit": 101
+ }
+}

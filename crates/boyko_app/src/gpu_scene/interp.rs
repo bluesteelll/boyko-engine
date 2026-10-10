@@ -45,9 +45,14 @@ pub(super) struct InterpGpuProd {
     /// instance_rings[fi] @2 } on [`Self::layout`] — the model_out target is the SHARED
     /// instance ring, so the compute writes what the raster VS reads (no private ring).
     interp_bg: [VulkanBindGroup; FRAMES_IN_FLIGHT],
-    /// The built SSBO capacity in instances ([`INSTANCE_CAPACITY`]) — the SSBO bound,
-    /// NOT the per-frame dispatch count (that arrives via the activation).
-    capacity: u32,
+    /// The built SSBO capacity in instances, PER FIF SLOT ([`INSTANCE_CAPACITY`] at
+    /// boot) — the SSBO bound, NOT the per-frame dispatch count (that arrives via the
+    /// activation). Asset-streaming plan F7 §7.3: [`GpuSceneBundles::
+    /// grow_instance_family_if_needed`](super::GpuSceneBundles::grow_instance_family_if_needed)
+    /// grows ONE slot at a time (in lockstep with `instance_rings[s]`), so slots may sit
+    /// at DIFFERENT capacities between grows — a single shared scalar would go stale for
+    /// whichever slot last grew.
+    capacity: [u32; FRAMES_IN_FLIGHT],
 }
 
 impl InterpGpuProd {
@@ -141,7 +146,14 @@ impl InterpGpuProd {
             RhiDevice::destroy_shader_module(device, cs);
         }
 
-        Self { pipeline, layout, pairs, out_slot, interp_bg, capacity }
+        Self {
+            pipeline,
+            layout,
+            pairs,
+            out_slot,
+            interp_bg,
+            capacity: [capacity; FRAMES_IN_FLIGHT],
+        }
     }
 
     /// The [`InterpActivation`] for this frame slot `fi` and this frame's overstep
@@ -163,8 +175,8 @@ impl InterpGpuProd {
         alpha: f32,
     ) -> InterpActivation<'a> {
         debug_assert!(
-            instance_count <= self.capacity,
-            "invariant: the per-frame interp instance count fits the built SSBO capacity"
+            instance_count <= self.capacity[fi],
+            "invariant: the per-frame interp instance count fits slot fi's built SSBO capacity"
         );
         InterpActivation {
             pipeline: &self.pipeline,
@@ -175,6 +187,72 @@ impl InterpGpuProd {
             instance_count,
             alpha,
         }
+    }
+
+    /// Asset-streaming plan F7 §7.3: reallocates slot `s`'s pair/out-slot SSBOs to
+    /// `new_cap` instances (in lockstep with the caller's `instance_rings[s]` grow,
+    /// passed in as `model_out` — the SAME buffer the caller just repointed
+    /// `instance_bind_groups[s]`@0 against) and repoints ALL THREE of `interp_bg[s]`'s
+    /// bindings in place: `pairs`@0, `out_slot`@1, `model_out`@2.
+    ///
+    /// NO seed: `upload_pair_ring` / `upload_pair_out_slot` rewrite the whole ring THIS
+    /// frame (mirrors the instance ring's own no-seed growth, F7 §7.3 step 4) — only a
+    /// `write_bytes(0)` covers the gap until those writes land. The old pair/out-slot
+    /// buffers are routed through `retired` at `retire_frame` (the caller's
+    /// `epoch + RETIRE_DELAY`); `model_out`'s old buffer is the caller's own
+    /// `instance_rings[s]`, already routed by the caller.
+    ///
+    /// # Panics
+    /// Panics (`expect`/`unwrap_or_else`) on an RHI create/map failure — a device OOM on
+    /// a post-boot grow is a setup-adjacent failure, not a recoverable per-frame error
+    /// (mirrors [`Self::create`]'s boot-time panics).
+    ///
+    /// # Safety
+    /// The caller guarantees slot `s`'s in-flight fence was waited THIS frame (the
+    /// `FrameWriteToken` proof `GpuSceneBundles::grow_instance_family_if_needed` holds)
+    /// — `interp_bg[s]`'s descriptor set is not command-buffer-pending, so rewriting its
+    /// bindings in place is sound. `device` must be the live context every prior buffer
+    /// here (and `model_out`) was created on.
+    pub(super) unsafe fn grow_slot(
+        &mut self,
+        device: &VulkanContext,
+        s: usize,
+        new_cap: u32,
+        model_out: &BoundBuffer,
+        retired: &mut RetiredGpuBuffers,
+        retire_frame: u64,
+    ) {
+        let pair_bytes = new_cap as u64 * GPU_TRANSFORM3D_BYTES as u64;
+        let out_slot_bytes = new_cap as u64 * 4;
+        let make_buf = |size: u64, what: &str| {
+            let b = RhiDevice::create_buffer(
+                device,
+                &BufferDesc { size, usage: BufferUsage::STORAGE, location: MemoryLocation::HostVisibleCoherent },
+            )
+            .unwrap_or_else(|e| panic!("invariant: grown B3 interp {what} SSBO create: {e:?}"));
+            let mapped = RhiDevice::buffer_mapped_ptr(device, &b).unwrap_or_else(|| {
+                panic!("invariant: host-visible grown B3 interp {what} SSBO is mapped")
+            });
+            zero_fill(mapped, size as usize);
+            b
+        };
+        let new_pairs = make_buf(pair_bytes, "pairs");
+        let new_out_slot = make_buf(out_slot_bytes, "out_slot");
+
+        let old_pairs = core::mem::replace(&mut self.pairs[s], new_pairs);
+        let old_out_slot = core::mem::replace(&mut self.out_slot[s], new_out_slot);
+        retired.push(old_pairs, retire_frame);
+        retired.push(old_out_slot, retire_frame);
+
+        // SAFETY: slot `s`'s fence was waited this frame (this fn's caller contract
+        // above); its descriptor set is therefore non-pending — rewriting all three of
+        // its bindings in place is sound.
+        unsafe {
+            rebind_storage_buffer(device, &self.interp_bg[s], 0, &self.pairs[s]);
+            rebind_storage_buffer(device, &self.interp_bg[s], 1, &self.out_slot[s]);
+            rebind_storage_buffer(device, &self.interp_bg[s], 2, model_out);
+        }
+        self.capacity[s] = new_cap;
     }
 
     /// Tears every owned resource down in reverse dependency order (interp_bg →

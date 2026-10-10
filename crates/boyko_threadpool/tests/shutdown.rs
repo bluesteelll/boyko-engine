@@ -7,6 +7,11 @@
 //! deadlock — a regression (workers leaking / Drop unreachable / double-join)
 //! manifests as a hang or panic here.
 
+// Test-harness observation model: a `Mutex<Vec<usize>>` records which tasks ran
+// so the assertions can inspect the outcome from the test thread. It is scaffolding
+// around the pool, never inside it, and is compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -16,13 +21,21 @@ use boyko_threadpool::ThreadPoolBuilder;
 const WORKERS: usize = 4;
 
 // NOTE on liveness: these tests must NOT use a cross-task blocking primitive
-// (e.g. `std::sync::Barrier`) inside scope tasks. boyko's `Scope::drop`
-// joiner batch-steals (`steal_batch_and_pop`) and drains the batch INLINE on
-// the dispatcher (`drain_scratch`), so the dispatcher can pull several tasks
-// into its scratch deque and run them one-at-a-time; a task that blocks on a
-// barrier-of-N would wedge the dispatcher while its sibling tasks sit unrun in
-// the same scratch deque → deadlock. (Same hazard as a blocking barrier across
-// rayon tasks.) We therefore prove shutdown/join with non-blocking work only.
+// (e.g. `std::sync::Barrier`) inside scope tasks. `Scope::drop` joins by RUNNING
+// the wave on the joining thread until the scope reports drained
+// (`join_workers_until_drained`), so a joiner may legally run any subset of a
+// wave, in any order, on ONE thread, while a `Barrier`-of-N assumes N threads
+// are running it → deadlock. (Same hazard as a blocking barrier across rayon
+// tasks.) We therefore prove shutdown/join with non-blocking work only.
+//
+// KE16 axis B settled HOW MUCH of a wave a joiner may hold at once, and the
+// winning B1 joiner hides none of it: a joining worker runs one task per
+// drained-check and any batch it steals lands in its own REGISTERED deque, so
+// the residue stays stealable by every sibling (`join_on_worker`), and an
+// external joiner takes one task at a time and keeps no residue at all
+// (`join_external_helping`). That removes the "siblings sit unreachable behind a
+// blocked task" shape of the hazard, but not the RULE above. Non-blocking work
+// only.
 
 /// Run a batch of independent tasks, then drop the handle; `Drop` must set
 /// `shutdown`, unpark every worker, and join them without hanging. If the
@@ -30,13 +43,16 @@ const WORKERS: usize = 4;
 /// workers would leak; the test completing cleanly proves the cycle is broken.
 #[test]
 fn pool_drop_joins_all_workers() {
+    // Under Miri, 32: the property is the join on drop, not the volume, and the native 512 did not
+    // finish inside 3 min of interpretation (MEASURED 2026-10-10 under the Miri sweep's flags).
+    const TASKS: usize = if cfg!(miri) { 32 } else { 512 };
     let pool = ThreadPoolBuilder::new().num_threads(WORKERS).build();
     let ran = Arc::new(AtomicUsize::new(0));
 
     // Many small independent tasks (no inter-task blocking) so the work spreads
     // across the worker threads without any deadlock hazard.
     pool.install(|scope| {
-        for _ in 0..512 {
+        for _ in 0..TASKS {
             let ran = Arc::clone(&ran);
             scope.spawn(move || {
                 ran.fetch_add(1, Ordering::Relaxed);
@@ -46,7 +62,7 @@ fn pool_drop_joins_all_workers() {
 
     assert_eq!(
         ran.load(Ordering::Acquire),
-        512,
+        TASKS,
         "every spawned task must have run exactly once"
     );
 

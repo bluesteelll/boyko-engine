@@ -157,8 +157,10 @@ impl<U> Kind<U> {
 /// be destroyed), so the owner **MUST** call [`ResourceRegistry::destroy_all`]
 /// before dropping the registry — a structural, release-present teardown step
 /// (plan W4). Dropping a non-empty registry leaks **every** live GPU resource.
-/// `Drop` enforces this with a release-surviving `eprintln!` hard-error
-/// diagnostic (plan E1) plus a `debug_assert!` that fails tests; both are
+/// `Drop` enforces this with a release-surviving hard-error diagnostic (plan E1)
+/// — `boyko-E2001` since L8c, with an `eprintln!` fallback for the case where no
+/// log consumer exists, so the property the plan asked for survives the
+/// migration — plus a `debug_assert!` that fails tests; both are
 /// tripwires, not the primary guard (which is the required `destroy_all` call).
 /// The originating device/context must still be alive when `destroy_all` runs
 /// (see its docs).
@@ -353,6 +355,52 @@ impl<A: RhiApi> ResourceRegistry<A> {
     }
 }
 
+/// Reports `boyko-E2001`: a registry dropped while it still owned live resources.
+///
+/// # Why this is a module-level function and not a closure inside `drop`
+///
+/// It was one, until L8c. Two reasons moved it out, and they are the two this campaign keeps
+/// running into: a `#[cold] fn` nested in `Drop` is unreachable from any test, so the report could
+/// only ever be verified by reading it; and the `debug_assert!` below the call site fires FIRST in
+/// a debug build, which would make any test of the reporting half a `#[should_panic]` that can
+/// observe nothing after the panic. Split, an observer drives *this function* — the one a release
+/// build actually runs.
+///
+/// # The `stderr` fallback, and why this site earns one
+///
+/// With `BOYKO_LOG` unset every target's runtime ceiling is `Off`, so the `error!` below is never
+/// constructed. The comment this migration replaced said the diagnostic *"survives in RELEASE (a
+/// bare `debug_assert!` would vanish, making the leak silent)"* — and a migration that made it
+/// vanish for a different reason would have honoured the letter of the plan and reversed its
+/// point. So it follows `boyko_threadpool::worker::abort_on_task_panic`'s shape: emit, `flush()`,
+/// and print only when that answers `NoConsumer`. Its `print_allowlist.txt` row says so.
+///
+/// `Drop` runs at teardown, which is exactly when a sink is most likely to be gone already — the
+/// fallback is not a formality here.
+#[cold]
+#[inline(never)]
+pub(crate) fn report_registry_leak(buffers: usize, pipelines: usize, shaders: usize, fences: usize) {
+    let total = buffers + pipelines + shaders + fences;
+    boyko_log::error!(
+        boyko_log::Rhi,
+        boyko_log::codes::E2001,
+        "ResourceRegistry dropped with {} live resource(s) (buffers={}, pipelines={}, \
+         shaders={}, fences={}) - destroy_all was not called (LEAK)",
+        total,
+        buffers,
+        pipelines,
+        shaders,
+        fences
+    );
+    if boyko_log::lifecycle::flush() == boyko_log::lifecycle::FlushResult::NoConsumer {
+        eprintln!(
+            "boyko-E2001: ResourceRegistry dropped with {total} live resource(s) \
+             (buffers={buffers}, pipelines={pipelines}, shaders={shaders}, fences={fences}) \
+             - destroy_all was not called (LEAK)"
+        );
+    }
+}
+
 impl<A: RhiApi> Drop for ResourceRegistry<A> {
     fn drop(&mut self) {
         // Leak guard (plan E1 / RL-3): a non-empty map on drop means the owner
@@ -360,21 +408,7 @@ impl<A: RhiApi> Drop for ResourceRegistry<A> {
         // (they need `&Device`), so EVERY live GPU resource leaks. The structural
         // guard is the required `destroy_all` call; this is the tripwire.
         if !self.is_fully_drained() {
-            // Hard, best-effort diagnostic that survives in RELEASE (a bare
-            // `debug_assert!` would vanish, making the leak silent). We do not
-            // panic in `Drop` (a double-panic would abort), but we make the leak
-            // loud on stderr with the live counts.
-            #[cold]
-            #[inline(never)]
-            fn report_leak(buffers: usize, pipelines: usize, shaders: usize, fences: usize) {
-                eprintln!(
-                    "boyko_rhi: ResourceRegistry dropped with {} live resource(s) \
-                     (buffers={buffers}, pipelines={pipelines}, shaders={shaders}, \
-                     fences={fences}) — destroy_all was not called (LEAK)",
-                    buffers + pipelines + shaders + fences
-                );
-            }
-            report_leak(
+            report_registry_leak(
                 self.buffers.live_count(),
                 self.pipelines.live_count(),
                 self.shaders.live_count(),
@@ -465,6 +499,7 @@ mod tests {
         type Swapchain = ();
         type Semaphore = ();
         type Texture = ();
+        type TextureView = ();
         type Sampler = ();
         type GraphicsPipeline = ();
         type BindGroup = ();
@@ -536,6 +571,99 @@ mod tests {
         fn push_constants(&mut self, _stage: ShaderStage, _offset: u32, _bytes: &[u8]) {}
         fn dispatch(&mut self, _gx: u32, _gy: u32, _gz: u32) {}
         fn pipeline_barrier(&mut self, _barrier: &crate::descriptor::BarrierDesc<MockApi>) {}
+    }
+
+    // ===== Trait default-body tests =====
+
+    /// VG R3 piece 4 rung P4-1: the crate's FIRST assertion that a deferred-seam default body
+    /// actually errors `Unsupported` on a backend that does not override it.
+    ///
+    /// Stated as new precedent rather than as coverage: `read_query_pool_ns` and
+    /// `read_query_pool_ticks` have no such test, so nothing here proves THEY still degrade
+    /// gracefully. This one pins the verb `boyko_app`'s bench readback now routes through, so a
+    /// future backend that silently returns `Ok` without filling either out slice fails here
+    /// instead of publishing an array of zeros as a measurement.
+    #[test]
+    fn read_query_pool_pairs_ns_default_body_is_unsupported() {
+        let device = MockDevice;
+        let pool: u32 = 0;
+        let mut scratch = [0u64; 2];
+        let mut begin_ns = [0.0f64; 1];
+        let mut dur_ns = [0.0f64; 1];
+        let err = device
+            .read_query_pool_pairs_ns(&pool, 1, &mut scratch, &mut begin_ns, &mut dur_ns)
+            .expect_err(
+                "invariant: MockDevice overrides no reader, so it inherits the default body",
+            );
+        assert_eq!(err, RhiError::Unsupported("read_query_pool_pairs_ns"));
+    }
+
+    /// Profiling rung 4: the non-blocking seam's two fallible verbs degrade the same way.
+    ///
+    /// A backend that returned `Ok(())` here without filling `out_available` would publish a
+    /// frame's worth of "available, duration 0" pairs — measurements of nothing, indistinguishable
+    /// from a genuinely instantaneous pass. That is the failure this pin exists to catch, and it
+    /// is the reason the seam reports availability as data at all.
+    #[test]
+    fn the_non_blocking_query_seam_default_bodies_are_unsupported() {
+        let device = MockDevice;
+        let pool: u32 = 0;
+        let mut scratch = [0u64; 4];
+        let mut begin_ticks = [0u64; 1];
+        let mut dur_ticks = [0u64; 1];
+        let mut available = [0u8; 1];
+
+        let err = device
+            .read_query_pool_pairs_available(
+                &pool,
+                1,
+                &mut scratch,
+                &mut begin_ticks,
+                &mut dur_ticks,
+                &mut available,
+            )
+            .expect_err("invariant: MockDevice overrides no reader");
+        assert_eq!(err, RhiError::Unsupported("read_query_pool_pairs_available"));
+        assert_eq!(available, [0u8; 1], "a refused read must not claim availability");
+
+        let err = device
+            .reset_query_pool_host(&pool, 0, 2)
+            .expect_err("invariant: MockDevice enables no device feature");
+        assert_eq!(err, RhiError::Unsupported("reset_query_pool_host"));
+    }
+
+    /// And the seam's one INFALLIBLE verb answers `false`, which is what makes the pair safe.
+    ///
+    /// `host_query_reset_supported` returns a bare `bool`, so it has no `Unsupported` to report —
+    /// its default IS its answer. A default of `true` would tell a caller it may call
+    /// [`RhiDevice::reset_query_pool_host`] on a backend that has no device at all, and the
+    /// caller would then treat that verb's refusal as an error instead of as the fallback path.
+    #[test]
+    fn host_query_reset_defaults_to_false_so_the_fallback_is_the_default_path() {
+        assert!(
+            !MockDevice.host_query_reset_supported(),
+            "a backend that enabled no feature must not advertise one"
+        );
+    }
+
+    /// Profiling rung 9: the cross-domain clock seam's two verbs, pinned to their refusing
+    /// defaults.
+    ///
+    /// The `bool` half matters more here than it does for `host_query_reset`. That one's `true`
+    /// would send a caller down a path that then *errors*; this one's `true` would send a caller
+    /// down a path that then errors AND make the profiler print a correlated `cpu_gpu_offset` for
+    /// a device it never sampled — a fabricated cross-domain number, which is the exact thing
+    /// D14 refuses to produce. The default is the refusal.
+    #[test]
+    fn the_clock_seam_defaults_to_uncorrelated_rather_than_to_a_number() {
+        assert!(
+            !MockDevice.calibrated_timestamps_supported(),
+            "a backend with no device must not claim it can sample one's clock"
+        );
+        let err = MockDevice
+            .sample_device_clock()
+            .expect_err("invariant: MockDevice overrides no sampler");
+        assert_eq!(err, RhiError::Unsupported("sample_device_clock"));
     }
 
     // ===== Registry behavioral tests =====
@@ -640,5 +768,53 @@ mod tests {
         // Tear down whatever survived.
         let device = MockDevice;
         reg.destroy_all(&device);
+    }
+}
+
+#[cfg(test)]
+mod leak_report_tests {
+    use super::*;
+    use boyko_log::codes::E2001;
+    use boyko_log::probe::{last_message, observe_lock, watch, watched};
+
+    /// `boyko-E2001` reports, and carries the four counts a reader needs.
+    ///
+    /// Drives the PRODUCTION reporter rather than re-emitting an `error!` beside it — the vacuity
+    /// L8a paid for three times. It cannot be reached through an actual leaking `Drop`, because
+    /// the `debug_assert!` two lines below the call site fires first in a debug build and a
+    /// `#[should_panic]` can observe nothing after the panic; splitting the function out is what
+    /// makes this test possible at all.
+    #[test]
+    fn e2001_reports_the_leak_with_its_per_kind_counts() {
+        let _lock = observe_lock();
+        boyko_log::probe::arm::<boyko_log::Rhi>();
+        watch(b'E', E2001.number());
+
+        report_registry_leak(3, 1, 0, 2);
+
+        assert_eq!(watched(), 1, "a dropped registry with live resources must report exactly once");
+        let msg = last_message();
+        assert!(msg.contains("6 live resource(s)"), "the TOTAL must be carried: {msg}");
+        assert!(msg.contains("buffers=3"), "the per-kind split is the actionable half: {msg}");
+        assert!(msg.contains("pipelines=1"), "{msg}");
+        assert!(msg.contains("shaders=0"), "a zero kind must still print: {msg}");
+        assert!(msg.contains("fences=2"), "{msg}");
+        assert!(msg.contains("destroy_all"), "the record must name the call that was skipped: {msg}");
+    }
+
+    /// `RatePolicy::Every`, observed rather than asserted about.
+    ///
+    /// Two registries leaking is two leaks. A latch here would report the first and leave the
+    /// second invisible — and a process that leaks two registries is exactly the one where the
+    /// second matters.
+    #[test]
+    fn a_second_leaking_registry_reports_too() {
+        let _lock = observe_lock();
+        boyko_log::probe::arm::<boyko_log::Rhi>();
+        watch(b'E', E2001.number());
+        report_registry_leak(1, 0, 0, 0);
+        report_registry_leak(0, 0, 4, 0);
+        assert_eq!(watched(), 2, "`Every` means every registry, not the first one");
+        assert!(last_message().contains("shaders=4"), "{}", last_message());
     }
 }

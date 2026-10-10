@@ -1,0 +1,3 @@
+--- after swap-in (repo files):
+825eb42638bcc7069fdbe1f5675a7ddbfa76670bf16acfe98e780ff7192e9cd4 *crates/boyko_physics/src/solver/colored.rs
+5d67bed874b7d80ce457b356015f2fdf5442ee6f9ed7a93e0521bbe5670f8c9f *crates/boyko_physics/src/systems.rs

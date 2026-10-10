@@ -1,6 +1,6 @@
 //! Phase 8.5 Step 8 — Miri suite for the Static Bundle Cache.
 //!
-//! Run under `cargo +nightly miri test --test miri_phase8_5`. The tests
+//! Run under `cargo +nightly-x86_64-pc-windows-msvc miri test --test miri_phase8_5`. The tests
 //! are NOT `#[cfg(miri)]`-gated; they run under the regular `cargo test`
 //! harness too, as smoke tests for the Phase 8.5 cache paths. The
 //! convention mirrors `tests/miri_phase8a.rs` and `tests/miri_phase8cd.rs`

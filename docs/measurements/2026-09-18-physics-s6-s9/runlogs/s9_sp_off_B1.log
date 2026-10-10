@@ -1,0 +1,19 @@
+Gnuplot not found, using plotters backend
+sleeping_pipeline/pyramid_frozen_sleeping_on: froze at step 61, manifolds 8555, islands 1
+sleeping_pipeline/pyramid_frozen_sleeping_on: contact_wakes 0
+Benchmarking sleeping_pipeline/pyramid_sleeping_off
+Benchmarking sleeping_pipeline/pyramid_sleeping_off: Warming up for 3.0000 s
+
+Completed 127 iterations in 3347016600 nanoseconds, estimated execution time is 26354461.417322833 ns
+
+Warning: Unable to complete 20 samples in 5.0s. You may wish to increase target time to 5.5s, enable flat sampling, or reduce sample count to 10.
+Benchmarking sleeping_pipeline/pyramid_sleeping_off: Collecting 20 samples in estimated 5.5344 s (210 iterations)
+Benchmarking sleeping_pipeline/pyramid_sleeping_off: Analyzing
+Criterion.rs DEBUG: Bootstrapping the absolute statistics. took 11.081 ms
+Criterion.rs DEBUG: Bootstrapped linear regression took 2.0629 ms
+sleeping_pipeline/pyramid_sleeping_off
+                        time:   [26.173 ms 27.397 ms 29.197 ms]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+

@@ -74,6 +74,11 @@ pub trait SystemSet: Send + Sync + 'static {
 
 #[cfg(test)]
 mod tests {
+    // Test oracle model: a std `HashSet` is the REFERENCE hash/eq consumer the
+    // `SystemSetId` derive is verified against (the builder's set-intern map has
+    // the same requirement). Compiled out of every shipping build.
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
 
     /// `SystemSetId` round-trips through equality / hashing — the builder

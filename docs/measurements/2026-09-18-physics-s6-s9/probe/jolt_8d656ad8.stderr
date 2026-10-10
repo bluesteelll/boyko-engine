@@ -1,0 +1,2 @@
+probe: fresh build(1) replayed the first 300 steps identically
+rc=0 secs=109

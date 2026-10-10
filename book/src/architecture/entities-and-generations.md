@@ -1,8 +1,6 @@
 # Entities & Generations
 
-> An entity is a 12-byte `{ id, generation }` handle. Behind it sits an address-stable slab that recycles ids, defends stale handles with a generation counter, and turns `get_component` into a single pointer dereference — no sparse-map indirection.
-
-*(Branch: `ecs`.)*
+> An entity is a 16-byte `{ id, generation }` handle. Behind it sits an address-stable slab that recycles ids, defends stale handles with a generation counter, and turns `get_component` into a single pointer dereference — no sparse-map indirection.
 
 The [Entities](../concepts/entities.md) concept page is the "how do I use it" view. This
 page is the layer below: how the engine *allocates* and *recycles* entity ids, why the
@@ -17,7 +15,7 @@ indirection from the hot read path.
 
 ## The handle
 
-An [`Entity`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity.rs#L5)
+An [`Entity`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity.rs)
 is two fields and nothing else:
 
 ```rust,ignore
@@ -29,11 +27,14 @@ fn inspect(entity: Entity) {
 }
 ```
 
-- **`id: EntityId`** — a [`#[repr(transparent)]`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/identifiers/primitives.rs#L56)
+- **`id: EntityId`** — a [`#[repr(transparent)]`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/identifiers/primitives.rs)
   newtype over `usize`. It is the *slot index* into the entity store, so a lookup is a
   direct index, never a hash.
 - **`generation: u32`** — a counter bumped every time a slot is reused. It is the half
   that makes a *stale* handle detectable.
+
+On 64-bit targets the handle is 16 bytes (an 8-byte `usize` plus a 4-byte `u32`, padded to
+the 8-byte alignment); a `const` assertion pins the size.
 
 `Entity` is `Copy` and its derived `PartialEq` compares **both** fields. That "both fields"
 rule is the whole use-after-despawn defence — covered under
@@ -42,54 +43,77 @@ rule is the whole use-after-despawn defence — covered under
 ## Allocation and recycling
 
 All entity lifecycle goes through
-[`EntityMaster`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs#L44),
-which since Phase X.D is just four fields, ordered `#[repr(C)]` so the hot scalar cluster
-sits on one cache line:
+[`EntityMaster`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs),
+which is three fields, ordered `#[repr(C)]` (offsets 0 / 48 / 64, total size 192 bytes, all
+const-asserted):
 
 | Field | Type | Role |
 |-------|------|------|
 | `entities_inland` | `InlandStore` | The fast store: one location record per id, indexed by `EntityId.0`. |
-| `next_entity_id` | `AtomicUsize` | Monotonic counter for minting fresh ids. |
 | `live_count` | `usize` | Number of currently-live entities. |
-| `free_entity_ids` | `Vec<EntityId>` | LIFO recycling queue of freed ids. |
+| `reservoir` | `EntityReservoir` | The id source: the fresh-id counter plus the stack of recycled entities, on its own cache line. |
+
+The [`EntityReservoir`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_reservoir.rs)
+holds three things:
+
+- `next_entity_id` — an atomic counter for fresh ids;
+- `free` — a `VmColumn<Entity>` stack of recycled entities, each stored with its
+  already-bumped generation;
+- `free_top` — an atomic count of how many of those entries are still claimable.
 
 ### Allocate
 
-[`allocate_entity`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs#L124)
-returns a recycled id if one is waiting, otherwise mints a fresh one:
+There are two ways to get an id, and both recycle.
+
+**On the dispatcher** (`&mut EntityMaster`, e.g. the direct spawn API),
+[`allocate_entity`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
+pops the recycled stack, or mints a fresh id if it is empty.
+
+**On a worker** (a system's `Commands::spawn`), the claim goes through `EntityCounter<'s>`,
+the projection `Commands` carries. It points only at the reservoir, so a worker can claim an
+id but cannot reach any other `EntityMaster` field. Once a counter has seen the stack empty,
+it skips straight to the fresh counter:
 
 ```mermaid
 flowchart TD
-    A["allocate_entity()"] --> B{"free_entity_ids<br/>non-empty?"}
-    B -- "yes (recycle)" --> C["pop id<br/>read bumped generation<br/>from its inland slot"]
-    B -- "no (fresh)" --> D["next_entity_id.fetch_add(1)<br/>generation = 0<br/>ensure store has the slot"]
-    C --> E["Entity { id, generation }"]
-    D --> E
+    A["Commands::spawn (worker)"] --> B["r = free_top.fetch_sub(1)"]
+    B --> C{"r > 0 ?"}
+    C -- "yes (recycle)" --> D["read free[r - 1]<br/>Entity with its bumped generation"]
+    C -- "no (stack empty)" --> E["next_entity_id.fetch_add(1)<br/>generation = 0"]
+    D --> F["Entity { id, generation }"]
+    E --> F
 ```
 
-The fresh path reads through `fetch_add(1, Ordering::Relaxed)` even though the dispatcher
-holds `&mut self`. That keeps a *single* source of truth for the counter shared with the
-worker-side path: systems running in parallel reserve ids through an
-`EntityCounter<'s>` newtype that wraps only `*const AtomicUsize`, so a worker can mint an
-id but cannot reach any other `EntityMaster` field. `Relaxed` is correct because the
-counter guarantees only uniqueness; the happens-before that publishes a worker's writes is
-established later by the scheduler's apply-window barrier.
+Within one parallel phase the stack is pop-only and its entries are immutable, so
+`fetch_sub` hands each positive value to exactly one claimant — no double issue and no ABA
+on the stack itself. Claims can drive `free_top` below zero; the dispatcher **settles** the
+reservoir under `&mut` in the next apply window, clamping `free_top` back to 0 and
+truncating the claimed entries off the physical top. All of these atomics are `Relaxed`:
+they guarantee only uniqueness, and the happens-before that publishes a worker's writes is
+the scheduler's apply-window barrier. Batch spawns (`spawn_batch`) always take a contiguous
+range of fresh ids.
+
+This design fixed a real leak. Before it, workers could only mint fresh ids, while despawns
+applied through `Commands` pushed onto a free list that nothing on the deferred path ever
+popped — so a steady population churned through `Commands` grew the free list and the slot
+store by one entry per despawn, forever.
 
 ### Deallocate
 
-[`deallocate_entity`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs#L360)
+[`deallocate_entity`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
 is where the generation gets bumped:
 
 1. Reject the call if the handle is stale (generation mismatch) or its slot is already dead.
 2. Bump the slot's generation **in place**, then null its `archetype_ptr` (marking it dead).
-3. Push the id onto `free_entity_ids` for reuse.
+3. Push `Entity { id, bumped generation }` onto the reservoir's recycled stack.
 4. Decrement `live_count` — but only on the success path.
 
-The order matters. The generation must be incremented *before* the slot is reused, and it
-must survive deallocation, because the next `allocate_entity` for that recycled id reads the
-already-bumped generation back out of the slot. So the freed id comes back as
-`Entity { id, generation + 1 }` — a value that can never compare equal to the handle the old
-owner is still holding.
+The order matters. The generation must be incremented *before* the slot is reused, and the
+dead slot and the recycled entry must agree on it. Whoever claims or pops the id next — a
+worker's `Commands::spawn` or the dispatcher's `allocate_entity` — receives
+`Entity { id, generation + 1 }`, a value that can never compare equal to the handle the old
+owner is still holding. Because the stack entry carries the generation, a worker's claim
+never has to read the slot store.
 
 ```rust,ignore
 use boyko_ecs::prelude::*;
@@ -99,7 +123,9 @@ use boyko_macros::Component;
 struct Health(u32);
 
 // Inside a system: spawning and despawning go through Commands, never
-// EntityMaster directly (allocate/deallocate are crate-internal).
+// EntityMaster directly (allocation is crate-internal; `deallocate_entity` is
+// `pub`, but it only frees the slot — `EcsMaster::delete_entity` is the full
+// despawn).
 fn lifecycle(mut commands: Commands) {
     let e = commands.spawn(/* a #[derive(Bundle)] value */ HealthBundle(Health(100))).id();
     // ... later ...
@@ -112,28 +138,28 @@ fn lifecycle(mut commands: Commands) {
 struct HealthBundle(Health);
 ```
 
-> Note: a bare tuple is **not** a `Bundle` (the tuple impl was removed in Phase 8.5, and
-> `Bundle` is sealed). Wrap components in a `#[derive(Bundle)]` struct or tuple-struct.
+> Note: a bare tuple is **not** a `Bundle` (there is no tuple impl, and `Bundle` is
+> sealed). Wrap components in a `#[derive(Bundle)]` struct or tuple-struct.
 
-### live_count: the slot model after Phase X.D
+### live_count: no live-id list
 
 Earlier versions carried two extra acceleration vectors: `active_ids` (a dense list of live
 ids) and `sparse_to_active` (a sparse→dense map), maintained on every spawn and despawn so a
-"list all live entities" call could run in O(active). Phase X.D **deleted both**. Their only
+"list all live entities" call could run in O(active). Both were **deleted**. Their only
 consumer was the cold `iter_entities` inspection API — it had *zero* hot callers, because
 real iteration goes through [queries](../concepts/queries.md) over archetype columns, never
 through the entity master.
 
 What replaced them is a single `usize`: `live_count`, bumped on register and decremented on
 deallocate. `entity_count()` is now an O(1) field read. The trade-off is that
-[`iter_entities`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs#L447)
+[`iter_entities`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
 became an O(capacity) scan of the fast store that skips dead (`is_null`) slots — accepted,
 because it is a cold inspection/test path and the hot iteration path was never here.
 
 ## The location record: EntityInland
 
 Each slot in the fast store is one
-[`EntityInland`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_inland.rs#L24):
+[`EntityInland`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_inland.rs):
 a 16-byte `#[repr(C)]` record (size/align/offsets are const-asserted) that says *exactly
 where this entity's row lives*.
 
@@ -164,7 +190,7 @@ OS-zeroed page already reads as a sea of dead slots, so growth never has to writ
 ## The fast read path
 
 Here is the payoff. A typed
-[`get_component::<T>(entity)`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L2139)
+[`get_component::<T>(entity)`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs)
 resolves to a short, branch-light pointer chase:
 
 ```mermaid
@@ -202,7 +228,7 @@ change-detection-aware [`Mut<T>`](../change_detection.md), and `has_entity` /
 ## InlandStore: address-stable growth
 
 The fast store is an
-[`InlandStore`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/inland_store.rs#L1),
+[`InlandStore`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/inland_store.rs),
 not a `Vec`. It is one contiguous **virtual-address reservation**
 ([`VmReservation`](../memory/arena.md), `DEFAULT_INLAND_RESERVE` = 1 GiB on 64-bit),
 committed lazily in geometric slabs (256 KiB → 16 MiB) as ids grow.
@@ -260,7 +286,8 @@ budget rather than an accident.
 | Operation | Complexity | Notes |
 |-----------|------------|-------|
 | `allocate_entity` (fresh) | O(1) | `fetch_add` + `ensure` (amortized; growth is a rare commit) |
-| `allocate_entity` (recycled) | O(1) | LIFO `pop` + one slot read |
+| `allocate_entity` (recycled) | O(1) | LIFO `pop`; the entry carries its generation |
+| Worker claim (`Commands::spawn`) | O(1) | one `fetch_sub` on `free_top`, else one `fetch_add` on the fresh counter |
 | `deallocate_entity` | O(1) | In-place generation bump + `push` |
 | `get_component` / `has_entity` | O(1) | One indexed 16-B load → pointer chase; **no sparse map** |
 | `entity_count` | O(1) | Reads `live_count` |
@@ -278,7 +305,8 @@ budget rather than an accident.
   keep addresses stable.
 - [Change detection](../change_detection.md) — the per-row ticks `get_component_mut`'s
   `Mut<T>` interacts with.
-- Source: [`entity.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity.rs#L5),
-  [`entity_master.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs#L44),
-  [`entity_inland.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_inland.rs#L24),
-  [`inland_store.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/inland_store.rs#L1).
+- Source: [`entity.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity.rs),
+  [`entity_master.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs),
+  [`entity_reservoir.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_reservoir.rs),
+  [`entity_inland.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_inland.rs),
+  [`inland_store.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/inland_store.rs).

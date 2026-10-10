@@ -33,7 +33,7 @@
 //! ```bash
 //! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation \
 //!   -Zmiri-permissive-provenance -Zmiri-ignore-leaks" \
-//!   cargo +nightly miri test -p boyko-ecs --test miri_phase16_1
+//!   cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_phase16_1
 //! ```
 //! `-Zmiri-ignore-leaks` is required for the same reason as
 //! `miri_schedule_parallel.rs` (crossbeam-epoch GC nodes unreclaimed at exit).

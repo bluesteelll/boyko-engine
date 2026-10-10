@@ -1,0 +1,6 @@
+row_identity_churn/swap_churn/sleeping_off_tree
+                        time:   [9.7496 ms 9.7793 ms 9.8107 ms]
+Found 4 outliers among 20 measurements (20.00%)
+  2 (10.00%) low mild
+  2 (10.00%) high mild
+

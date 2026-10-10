@@ -1805,6 +1805,15 @@ impl_query_filter_tuple_and!(
 // non-archetypal>` could elide per-row when the archetypal half
 // matches), but that is deferred to Phase 10+ once tick-based filters
 // are real.
+//
+// # Dense arms (KE1 / Aether rung R0)
+//
+// `Or` forwards TWO of the four dense items the tuple-as-AND impl declares —
+// `HAS_DENSE` (OR-folded) and `resolve_dense` (per-arm) — and deliberately does
+// NOT forward the other two (`HAS_DENSE_INCLUDE`, `dense_include_candidates`),
+// because a dense INCLUDE term bounds the candidate set and a disjunct bounds
+// nothing. See the in-macro comments for the full ground. Before R0 it forwarded
+// none of them, and a dense arm answered from a NULL store pointer.
 
 /// Emits a `QueryFilter` impl for `Or<(F0, F1, ..)>`. Paired-ident
 /// invocation per plan §5.4 (M8 — explicit `aggregate_*` no-op
@@ -1862,6 +1871,28 @@ macro_rules! impl_or_filter_tuple {
                 false $( || $F::CONTAINS_ENABLE_TERM )*;
             const CONTAINS_CHANGE_DETECTION: bool =
                 false $( || $F::CONTAINS_CHANGE_DETECTION )*;
+            // KE1 / Aether rung R0 — Dense plan D3: OR-fold, exactly as the
+            // tuple-as-AND impl does. This const is what gates the cursor's
+            // `resolve_dense` call (`iter.rs`: `if const { F::HAS_DENSE }`), so
+            // leaving it at the `false` default meant a dense arm's store
+            // pointer stayed NULL for the whole iteration and its per-row
+            // predicate answered from that NULL — `Changed`/`Added`/`With`
+            // silently never true, `Without` silently excluding nothing. A
+            // dense arm also sets `IS_ARCHETYPAL = false`, so the AND-fold above
+            // already routes the per-row `filter_fetch` that reads it. `false`
+            // for an all-table `Or` (the 0%-gate: `resolve_dense` below
+            // const-folds to no-ops).
+            const HAS_DENSE: bool = false $( || $F::HAS_DENSE )*;
+            // `HAS_DENSE_INCLUDE` / `dense_include_candidates` are DELIBERATELY
+            // left at their defaults (`false` / no-op), which is where the `Or`
+            // impl parts company with the tuple-as-AND impl. A dense INCLUDE
+            // term BOUNDS the candidate archetype set (`QueryDataState::dense_seed`
+            // seeds from its `arch_presence`); under a disjunction it bounds
+            // nothing, because an archetype admitted through a SIBLING arm would
+            // be dropped by that seed. Same ground as the `aggregate_include`
+            // no-op override below, and the same disposition `AnyOf` carries
+            // (`HAS_DENSE = true`, `HAS_DENSE_INCLUDE = false`). Forwarding it
+            // would trade this fix for a new silent-wrong-answer.
 
             #[inline]
             fn init_state(world: &mut EcsMaster) -> Self::State {
@@ -1872,6 +1903,25 @@ macro_rules! impl_or_filter_tuple {
             fn init_access(state: &Self::State, access_set: &mut FilteredAccessSet) {
                 let ( $($s,)* ) = state;
                 $( <$F as QueryFilter>::init_access($s, access_set); )*
+            }
+
+            #[inline]
+            unsafe fn resolve_dense<'w>(
+                fetch: &mut Self::Fetch<'w>,
+                state: &Self::State,
+                world: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell<'w>,
+            ) {
+                let ( $($f,)* ) = fetch;
+                let ( $($s,)* ) = state;
+                $(
+                    // SAFETY (D3): each arm gates its own body on
+                    //   `const { $F::HAS_DENSE }` (a table arm inherits the empty
+                    //   default and folds out); the `world` cell is `Copy`,
+                    //   forwarded by value to preserve provenance. `$f.0` is the
+                    //   arm's own Fetch — `$f.1` is the BUG-ENABLE-PRE-1
+                    //   per-archetype `matches` flag, which `set_table_*` owns.
+                    unsafe { <$F as QueryFilter>::resolve_dense(&mut $f.0, $s, world); }
+                )*
             }
 
             #[inline]

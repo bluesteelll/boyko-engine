@@ -13,13 +13,18 @@
 //!
 //! # Covered cases (per the derive macro's `parse_component_hooks`)
 //!
-//! | File                          | Rejected input                                  |
-//! |-------------------------------|-------------------------------------------------|
-//! | `on_despawn_rejected.rs`      | `#[component(on_despawn = x)]` (deferred to 14b)|
-//! | `unknown_key_rejected.rs`     | `#[component(bogus = x)]` (unknown key)         |
-//! | `duplicate_key_rejected.rs`   | `#[component(on_add = a, on_add = b)]`          |
-//! | `duplicate_attr_rejected.rs`  | two separate `#[component(...)]` attrs          |
-//! | `missing_value_rejected.rs`   | `#[component(on_add)]` (key missing `= path`)   |
+//! | File                            | Rejected input                                |
+//! |---------------------------------|-----------------------------------------------|
+//! | `bitset_on_despawn_rejected.rs` | `storage = "bitset"` + a lifecycle hook       |
+//! | `unknown_key_rejected.rs`       | `#[component(bogus = x)]` (unknown key)       |
+//! | `duplicate_key_rejected.rs`     | `#[component(on_add = a, on_add = b)]`        |
+//! | `duplicate_attr_rejected.rs`    | two separate `#[component(...)]` attrs        |
+//! | `missing_value_rejected.rs`     | `#[component(on_add)]` (key missing `= path`) |
+//!
+//! KM2 retired `on_despawn_rejected.rs`: the key it pinned ("not supported in
+//! this version, deferred to Phase 14b") is now a valid key, so the fixture
+//! guarded nothing. `bitset_on_despawn_rejected.rs` replaces it and pins the
+//! refusal KM2 *creates* instead.
 //!
 //! Gated behind `#[cfg(not(miri))]` — trybuild is not wired under Miri (mirrors
 //! `compile_fail_chunk.rs`).

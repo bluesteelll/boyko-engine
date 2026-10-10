@@ -56,14 +56,16 @@ fn sum_x(world: &mut EcsMaster) -> f32 {
 
 ## The import rule (read this once)
 
-The trait `Query` (and `QueryView` via `EcsMaster::query`) come from the
-prelude. So do the change-detection data views `Ref` and `Mut`, and the
-OR-combinator `AnyOf`. **The filters do not.** `With`, `Without`, `Added`,
+The type `Query` (and `QueryView` via `EcsMaster::query`) come from the
+prelude. So do the change-detection data views `Ref` and `Mut`, the
+OR-combinator `AnyOf`, `IsEnabled`, the enable-tag filters `Enabled` /
+`Disabled`, and the relation terms `Related`, `HasRelation`, `NoRelation` and
+`RelatedTo`. **The core filters do not.** `With`, `Without`, `Added`,
 `Changed`, and `Or` live one module deep and must be imported explicitly:
 
 ```rust,ignore
 use boyko_ecs::prelude::*;
-// Filters are NOT in the prelude glob — import them from the query module.
+// These filters are NOT in the prelude glob — import them from the query module.
 use boyko_ecs::ecs::core::iters::query::{With, Without, Added, Changed, Or};
 ```
 
@@ -92,6 +94,8 @@ touch and dictates the borrow you get:
 | `Option<&T>` | `Option<&T>` | optional read — row need not have `T` |
 | `Option<&mut T>` | `Option<&mut T>` | optional write |
 | `AnyOf<(A, B, …)>` | `(Option<A::Item>, …)`, ≥1 `Some` | OR over real-component leaves |
+| `IsEnabled<T>` | `bool` — the [enable tag](enable-tags.md) bit, never drops a row | read of the bit, no column access |
+| `Related<R, D>` | `D`'s item read from the row's relation **target**, as an `Option` | read through a [relation](relations.md) |
 | `()` | `()` | match only, fetch nothing |
 | tuples up to 12 | a tuple of the above | AND of all leaves |
 
@@ -175,7 +179,16 @@ the default `()` to match on `D` alone.
 | `Added<T>` | `T` inserted within this system's window | per-row tick compare |
 | `Changed<T>` | `T` mutated within this system's window | per-row tick compare |
 | `Or<(F0, F1, …)>` | any sub-filter matches | depends on arms |
+| `Enabled<T>` / `Disabled<T>` | rows whose [enable tag](enable-tags.md) bit is set / clear | per-row bit test |
+| `HasRelation<R>` / `NoRelation<R>` | rows that carry / lack the relation `R`'s foreign key | archetype (mask test) |
+| `RelatedTo<R>` | rows whose `R` target is a given entity (seeded with `query_filtered`) | per-row compare |
 | tuples up to 12 | all sub-filters match (AND) | depends on arms |
+
+Besides the type-level `F`, both `Query` and `QueryView` take **runtime terms**
+for ids minted at runtime: `with_tag` / `without_tag` for
+[dynamic tags](dynamic-tags.md) and `with_enabled` / `without_enabled` for
+dynamic enable tags. Each returns the query, so the calls chain before you
+iterate.
 
 `With` / `Without` are **archetype-level**: the engine resolves them once per
 archetype, not once per row, so they cost nothing inside the hot loop. This is
@@ -228,10 +241,44 @@ let n = q.archetype_count(); // number of matched archetypes
 let empty = q.is_empty();    // no matched archetypes
 ```
 
-### `get` / `single` — `QueryView` only
+### Point lookups — `get` / `get_mut` / `contains` / `first` / `single` / `single_mut`
 
-The point-lookup and singleton helpers live on `QueryView` (the direct API),
-**not** on the `Query` SystemParam:
+Both shapes answer "what does this one entity's row look like?" and "give me the
+only row":
+
+| Method | `Query` | `QueryView` | Returns |
+|--------|---------|-------------|---------|
+| `get(entity)` | yes | yes | `Option<item>` — `None` if the entity is dead, stale, or filtered out |
+| `get_mut(entity)` | yes | yes | the writable twin of `get` |
+| `contains(entity)` | yes | — | `bool`; a dense `D` is a compile error, so use `get(entity).is_some()` there |
+| `first()` | yes | — | `Option<item>` — exactly `iter().next()` |
+| `single()` / `single_mut()` | yes | yes | the one row; panics on zero or more than one |
+
+A lookup agrees with `iter()` row for row: the matched archetypes, `F`'s per-row
+predicate, enable-tag and dynamic-tag terms, and dense-store membership all
+apply. `get` costs one entity-store lookup plus one archetype-set test. `first()`
+follows the iteration order, which is not lowest-id-first and can change after a
+structural change; use `single()` when exactly one row is the contract.
+
+Inside a system:
+
+```rust,ignore
+use boyko_ecs::prelude::*;
+# use boyko_macros::Component;
+# #[derive(Component)] struct Health(u32);
+# #[derive(Component)] struct Target(Entity);
+
+// Read the health of whatever each hunter is targeting.
+fn report_targets(hunters: Query<&Target>, health: Query<&Health>) {
+    for target in &hunters {
+        if let Some(h) = health.get(target.0) {
+            println!("target hp = {}", h.0);
+        }
+    }
+}
+```
+
+On the direct API:
 
 ```rust,ignore
 use boyko_ecs::prelude::*;
@@ -270,10 +317,7 @@ checker serializes them. Drop one view (let it leave scope) before opening the
 next.
 
 `get_mut` and `single_mut` are the writable twins (they take `&mut view`, so the
-view must be `let mut view = …;`). Inside
-a system, you do not have a `QueryView` — to look an entity up there, iterate the
-`Query` and match on its `iter_entities` ids, or restructure the system to take
-the lookup as input.
+view must be `let mut view = …;`, and `&mut q` on a `Query`).
 
 ## `QueryView`'s extra constraint: no change detection
 
@@ -313,6 +357,17 @@ See [Iteration](iteration.md) for the chunked and parallel APIs (including the
 `ChunkedQueryData` / `ArchetypalQueryFilter` bounds, which exclude
 change-detection leaves at compile time).
 
+Two more drivers round out the set:
+
+- **`for_each_chunk_entities`** (on `Query`) is the entity-yielding twin of
+  `for_each_chunk`: the callback also receives the archetype's `&[EntityId]`
+  slice, parallel to the component chunk, so both arrays walk sequentially.
+- **`dense_iter` / `dense_iter_mut`** (on both shapes) are the fast path for a
+  single [dense component](components.md#storage-kinds): they stride its one
+  global column directly and yield `(EntityId, &T)` / `(EntityId, &mut T)` for
+  every live slot, in slot order, without visiting archetypes. `D` must be one
+  dense leaf; a table component or a tuple is a compile error.
+
 ## How it runs under the hood
 
 A query caches the set of matched archetypes per `(D, F)` type. The first time a
@@ -337,8 +392,8 @@ nothing when absent.
 - [Tags](tags.md) — why `With` / `Without` are free per row
 - [Systems](systems.md) — where `Query` lives as a SystemParam
 - [Scheduler](../scheduler.md) — the conflict graph that lets queries run in parallel
-- Source: [`query.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/query.rs#L62),
-  [`query_view.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs#L83),
-  [`data.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/data.rs),
-  [`filter.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/filter.rs),
-  [`EcsMaster::query`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L4256)
+- Source: [`query.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/query.rs),
+  [`query_view.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs),
+  [`data.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/data.rs),
+  [`filter.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/filter.rs),
+  [`EcsMaster::query`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs)

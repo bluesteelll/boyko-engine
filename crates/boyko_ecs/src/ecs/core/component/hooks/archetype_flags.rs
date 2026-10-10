@@ -78,6 +78,25 @@ impl ArchetypeFlags {
     /// the first free bit.
     pub const GPU_RESIDENT: u16 = 1 << 11;
 
+    /// KE10 — set iff ≥1 component in the archetype declares an initial
+    /// enable-bit state (a non-empty `FLAGS_DIRECT` entry, the `flags (…)`
+    /// group). OR-computed once at archetype construction from the cold
+    /// `FLAGS_DIRECT` table, exactly like the hook bits from `HOOKS`, then read
+    /// as one `test`/`jz` on the already-loaded `flags` `u16` at each attach
+    /// site.
+    ///
+    /// **This bit IS the zero-when-unused gate for KE10.** A world where no
+    /// component declares `flags (…)` never raises it, so no attach path ever
+    /// reaches the application loop and the emitted code is unchanged.
+    ///
+    /// It is computed at MINT, so a declaration registered after a component's
+    /// first attach would silently never apply — the same staleness contract
+    /// `HooksError::AlreadyArchetyped` enforces for hooks (*mint → register →
+    /// first attach*).
+    ///
+    /// Bit 12; bit 13 is the first free bit.
+    pub const FLAGS_ON_ATTACH: u16 = 1 << 12;
+
     /// `on_add` gate mask: set iff the archetype has an `on_add` hook OR
     /// observer. The structural-op fire site widens its inner test from
     /// `ON_ADD_HOOK` to this (Phase 14b §5) — same instruction count, a
@@ -163,6 +182,33 @@ impl ArchetypeFlags {
             if hooks.on_despawn.is_some() {
                 self.insert(Self::ON_DESPAWN_HOOK);
             }
+        }
+    }
+
+    /// ORs into `self` the KE10 [`FLAGS_ON_ATTACH`](Self::FLAGS_ON_ATTACH) gate
+    /// bit if component `cid` declares an initial enable-bit state, reading the
+    /// cold `FLAGS_DIRECT` table once. One `OnceLock` read + `is_empty` per
+    /// component at mint; a world that declares no `flags (…)` group never
+    /// raises the bit and no attach path is affected.
+    ///
+    /// **Deliberately NOT folded into [`insert_from_hooks`](Self::insert_from_hooks),
+    /// and called from a different place in the construction walk.** Both walks
+    /// (`Archetype::create_by_ids` and `Archetype::register_component_inplace`)
+    /// reach `insert_from_hooks` only *past* an `is_signature_storage` screen
+    /// that skips every id owning no per-archetype pool — dense and bitset. The
+    /// hook bits may sit behind that screen, because a poolless id has no hooks
+    /// to fire from a pool; this bit may not, because the application walk
+    /// (`EcsMaster::apply_attach_flags_all`) iterates `Archetype::component_ids`,
+    /// which RETAINS poolless ids. Folded in, a dense or bitset declarer left the
+    /// gate clear and every attach funnel short-circuited — while the identical
+    /// declaration applied correctly the moment a table sibling in the same
+    /// archetype raised the bit. That is the campaign's storage-kind blindness
+    /// class (`Or<..>` over a dense arm, `any_changed_since` over a dense source),
+    /// and this call site is above the screen so it cannot recur here.
+    #[inline]
+    pub fn insert_from_flag_declarations(&mut self, cid: ComponentId) {
+        if component_registry::declares_flags(cid.0) {
+            self.insert(Self::FLAGS_ON_ATTACH);
         }
     }
 

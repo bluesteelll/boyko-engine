@@ -1,0 +1,3542 @@
+//! The expander — Decision A3: emit the CANONICAL hand-written surface and let `boyko_macros`
+//! do the codegen. One expansion authority, zero drift, minimal expansion volume (§8 R1); every
+//! engine path below is a TOKEN resolved downstream, never a dependency of this crate.
+
+use proc_macro2::{Span, TokenStream, TokenTree};
+use quote::{format_ident, quote, quote_spanned};
+use syn::Ident;
+
+use crate::ast::{
+    AetherBlock, AtPose, BundleDef, ColorLit, ComponentDef, Construct, EvField, EventDef,
+    MachineDef, MaterialDef, MeshSrc, NodeHead, NodeKeyValue, OrderKind, PluginDef, Schedule,
+    SceneDef, SceneNode, ShadowForm, StateDef, Stub, SyntaxVersion, SysParam, SysParamTy,
+    SystemDef, TagDef, TransitionDef,
+};
+use crate::ctx::AetherCtx;
+use crate::diag;
+
+/// Expand a parsed block to the flat item list, in source order (deterministic output is what
+/// the unit tests pin token-for-token). Block-level validation failures (§3.3's cross-construct
+/// rules) become `compile_error!` exactly like parse failures.
+pub fn expand(block: &AetherBlock) -> TokenStream {
+    if !block.broken.is_empty() {
+        return recovered(block);
+    }
+    match expand_inner(block) {
+        Ok(ts) => ts,
+        Err(e) => e.to_compile_error(),
+    }
+}
+
+/// §7.3's recovery emission, for a block that had at least one unreadable construct.
+///
+/// The three parts of the contract, in the order they are emitted: (a) each failure's own
+/// `compile_error!` at its own span, (b) a name-resolving stub for each failure whose name
+/// parsed, and (c) the expansion of every construct that DID parse — so one typo costs one error
+/// instead of a module-wide sea of "unresolved name".
+///
+/// Part (c) runs UNCONDITIONALLY, and a whole-block rule the survivors fail reports its own error
+/// beside the parse errors. It is not an artifact of the break, because §4's rules run over
+/// `constructs ∪ broken` ([`crate::ctx`]): a broken `plugin` still holds the plugin slot, and a
+/// broken `material gold` still occupies the name `gold`. Anything those rules still refuse would
+/// refuse just as loudly with the broken construct typed out in full.
+///
+/// The earlier shape — drop the whole expansion whenever the survivors failed a rule — is the one
+/// this comment exists to warn off. It read as conservative and was the opposite: a half-typed
+/// `plugin ;`, the ordinary mid-edit state of every block that has one, erased every sibling item
+/// in the block and re-created the unresolved-name sea the mechanism was built to prevent.
+fn recovered(block: &AetherBlock) -> TokenStream {
+    let mut out = TokenStream::new();
+    // Stub names are deduped against EACH OTHER (two broken `material gold` declarations would
+    // otherwise emit one fn twice, adding rustc's duplicate-definition error to the two parse
+    // errors that already say it) — but never against a SURVIVING construct: a stub colliding
+    // with a real item is a genuine duplicate, and §7.1 leaves the type-producing half of that
+    // fault to rustc, which reports it on both user idents.
+    let mut stubbed: Vec<String> = Vec::new();
+    for b in &block.broken {
+        out.extend(b.error.to_compile_error());
+        if let Some(stub) = &b.stub {
+            let key = stub.name().to_string();
+            if !stubbed.contains(&key) {
+                stubbed.push(key);
+                out.extend(stub_item(stub));
+            }
+        }
+    }
+    match expand_inner(block) {
+        Ok(rest) => out.extend(rest),
+        Err(e) => out.extend(e.to_compile_error()),
+    }
+    out
+}
+
+/// One §7.3 stub: the construct's name, declared in its own item kind, at the NAME's span (§7.2(3)
+/// — a downstream error against the stub points at the user's declaration).
+///
+/// The stub is diagnostic-SILENT by construction. It exists inside a file that already has one
+/// error, and a recovery item that adds `dead_code` (the author has not written the use yet) or a
+/// case-convention warning (the case gate is often the very failure being recovered from) would
+/// turn one error into an error plus a paragraph of noise — the failure mode this whole mechanism
+/// is aimed at.
+///
+/// A RECORDED EXEMPTION from §7.2(4): stubs carry the USER's name, not an `__aether_`-prefixed
+/// one. The prefix rule exists so generated names cannot collide with the author's; a stub's whole
+/// purpose is to occupy the author's name, so prefixing it would produce an item nothing can
+/// reference — the rule's letter against its own reason. The collision the prefix rule prevents is
+/// therefore possible here and is exactly the diagnostic that should fire (a stub colliding with a
+/// real item IS a duplicate declaration).
+///
+/// `plugin` gets the `Plugin` impl too. Every reference to a plugin is `app.add_plugin(P)`, so a
+/// bare `pub struct P;` would swap "cannot find value `P`" for "the trait bound `P: Plugin` is not
+/// satisfied" at the same call site — a different error, not one fewer. The empty `build` is
+/// honest: the registrations a broken `plugin` would have held are exactly the part of it that did
+/// not parse, and the file carries a `compile_error!` in any case, so nothing can run.
+fn stub_item(stub: &Stub) -> TokenStream {
+    match stub {
+        Stub::Type(name) => quote_spanned! {name.span()=>
+            #[allow(dead_code, non_camel_case_types)]
+            pub struct #name;
+        },
+        Stub::Plugin(name) => {
+            let label = name.to_string();
+            quote_spanned! {name.span()=>
+                #[allow(dead_code, non_camel_case_types)]
+                pub struct #name;
+                impl ::boyko_ecs::Plugin for #name {
+                    fn build(&self, _app: &mut ::boyko_ecs::App) {}
+                    fn name(&self) -> &'static str { #label }
+                }
+            }
+        }
+        Stub::Fn(name) => quote_spanned! {name.span()=>
+            #[allow(dead_code, non_snake_case)]
+            pub fn #name() {}
+        },
+    }
+}
+
+fn expand_inner(block: &AetherBlock) -> syn::Result<TokenStream> {
+    match block.version {
+        // §6.3's version dispatch, at the construct-table level: v2 syntax adds an arm HERE (a
+        // second table), and the exhaustive match is what makes the compiler enumerate every
+        // site that must grow one. v1 ships with the header parsed and one table.
+        SyntaxVersion::V1 => expand_v1(block),
+    }
+}
+
+fn expand_v1(block: &AetherBlock) -> syn::Result<TokenStream> {
+    // §4's pipeline: parse ─▶ ctx ─▶ expand. Every whole-block rule (duplicate fn names, one
+    // plugin, the plugin requirement for scheduled constructs) runs at ctx-build time, so an
+    // expander never re-derives block-level facts.
+    let ctx = AetherCtx::build(block)?;
+    let mut out = TokenStream::new();
+    for c in &block.constructs {
+        match c {
+            Construct::Component(def) => out.extend(component(def)),
+            Construct::Tag(def) => out.extend(tag(def)),
+            Construct::Bundle(def) => out.extend(bundle(def)),
+            Construct::Event(def) => out.extend(event(def)),
+            Construct::System(def) => out.extend(system_fn(def)),
+            Construct::Plugin(def) => out.extend(plugin_impl(def, block)?),
+            Construct::Machine(def) => out.extend(machine_items(def)),
+            Construct::Material(def) => out.extend(material_fn(def)),
+            // A scene that mints a material which did not PARSE cannot expand, and its own
+            // diagnostic would contradict the source ("no material `gold`" with `gold` declared
+            // three lines up). This failure DERIVES from the break — one fault, one error — so
+            // the scene is skipped silently and reappears the moment the material parses.
+            Construct::Scene(def) if scene_awaits_a_broken_material(def, &ctx) => {}
+            Construct::Scene(def) => out.extend(scene_fn(def, &ctx)?),
+        }
+    }
+    Ok(out)
+}
+
+/// `true` iff any node of `def` names a `material` this block declares but could not read.
+fn scene_awaits_a_broken_material(def: &SceneDef, ctx: &AetherCtx<'_>) -> bool {
+    fn walk(nodes: &[SceneNode], ctx: &AetherCtx<'_>) -> bool {
+        nodes.iter().any(|n| {
+            n.material.as_ref().is_some_and(|m| ctx.material_is_broken(m)) || walk(&n.children, ctx)
+        })
+    }
+    walk(&def.nodes, ctx)
+}
+
+/// §3.1: `component` → `#[derive(::boyko_macros::Component)]` struct with the derive's own
+/// attribute surface (`#[require(...)]`, `#[component(on_* = path, no_bundle)]`), fields `pub`.
+fn component(def: &ComponentDef) -> TokenStream {
+    let name = &def.name;
+    let requires = (!def.requires.is_empty()).then(|| {
+        let paths = &def.requires;
+        quote! { #[require( #( #paths ),* )] }
+    });
+    let component_attr = {
+        let mut keys: Vec<TokenStream> = Vec::new();
+        for (kind, path) in &def.hooks {
+            let key = Ident::new(kind.key(), proc_macro2::Span::call_site());
+            keys.push(quote! { #key = #path });
+        }
+        if def.no_bundle {
+            keys.push(quote! { no_bundle });
+        }
+        (!keys.is_empty()).then(|| quote! { #[component( #( #keys ),* )] })
+    };
+    let fields = def.fields.iter().map(|(fname, ty)| quote! { pub #fname: #ty });
+    // §7.2(3): the item exists BECAUSE of the user's name, so it is spanned at that name — a
+    // downstream fault against it (a duplicate definition, an unsatisfied derive bound) then
+    // reports at the declaration instead of at the `aether!` token. MEASURED at rung A7: with
+    // `quote!` here, rustc's "previous definition of the type `Foo` here" pointed at `aether! {`.
+    quote_spanned! {name.span()=>
+        #[derive(::boyko_macros::Component)]
+        #requires
+        #component_attr
+        pub struct #name {
+            #( #fields ),*
+        }
+    }
+}
+
+/// §3.1: `tag` → a ZST component (the derive's auto-tag detection does the rest); `(bitset)`
+/// adds `#[component(storage = "bitset")]` — the EnableTag backend. The parser already enforced
+/// the "bitset ⇒ fieldless" rule by grammar (tags cannot carry fields at all), and the derive's
+/// own check remains the authority.
+fn tag(def: &TagDef) -> TokenStream {
+    let name = &def.name;
+    let storage = def.bitset.then(|| quote! { #[component(storage = "bitset")] });
+    // Spanned at the user's name — §7.2(3), see `component`.
+    quote_spanned! {name.span()=>
+        #[derive(::boyko_macros::Component)]
+        #storage
+        pub struct #name;
+    }
+}
+
+/// §3.2: `bundle` → `#[derive(::boyko_macros::Bundle)]` — nothing more; the derive owns arity,
+/// the named-struct rule, and the static-cache codegen.
+fn bundle(def: &BundleDef) -> TokenStream {
+    let name = &def.name;
+    let fields = def.fields.iter().map(|(fname, ty)| quote! { pub #fname: #ty });
+    // Spanned at the user's name — §7.2(3), see `component`.
+    quote_spanned! {name.span()=>
+        #[derive(::boyko_macros::Bundle)]
+        pub struct #name {
+            #( #fields ),*
+        }
+    }
+}
+
+/// §3.4: `event` → `#[::boyko_macros::event]` with the two-band field markers. The Entity path
+/// is the REAL nested one — `boyko_ecs` has no root re-export, and a token that resolves is the
+/// whole tokens-not-deps contract.
+fn event(def: &EventDef) -> TokenStream {
+    let name = &def.name;
+    let fields = def.fields.iter().map(|f| match f {
+        EvField::Participant { name, components } => {
+            let ctx = components
+                .iter()
+                .map(|p| quote!(#p).to_string().replace(' ', ""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            quote! {
+                #[participant(components = #ctx)]
+                pub #name: ::boyko_ecs::ecs::core::entity::entity::Entity
+            }
+        }
+        EvField::Parameter { name, ty } => quote! {
+            #[parameter]
+            pub #name: #ty
+        },
+    });
+    // Spanned at the user's name — §7.2(3), see `component`.
+    quote_spanned! {name.span()=>
+        #[::boyko_macros::event]
+        pub struct #name {
+            #( #fields ),*
+        }
+    }
+}
+
+/// The lint suppression every Aether-generated fn whose ARITY the user controls carries.
+///
+/// MEASURED (clippy 0.1.97, rustc 1.97.1): an eight-param `system` produces
+/// `warning: this function has too many arguments (8/7)` whose span is the whole `aether!` token
+/// — the user is shown a lint about a signature they did not write, in a form they cannot act on
+/// (a `#[allow]` has nowhere to go; splitting the params is not what the lint means here, since a
+/// system's params ARE its data dependencies).
+///
+/// UNCONDITIONAL rather than gated on a param count: clippy's threshold is configuration
+/// (`too-many-arguments-threshold`, default 7), so a count-gated emission would be correct only
+/// for whoever kept the default and would go silently wrong in a crate that lowered it. The cost
+/// is a handful of tokens per generated fn (§8 R1's expansion budget measures it).
+///
+/// It rides only on the fns whose arity is UNBOUNDED by construction — `system`, and the machine
+/// fns that merge handler params. `material` emits a nullary builder and `scene` a demand-driven
+/// signature of at most four params, so neither can reach any threshold, and an `#[allow]` there
+/// would be expansion volume that can never suppress anything.
+///
+/// # What the gate covers, stated because it is narrower than the fix
+///
+/// The suppression is gated by `aether_tests`'s `a7_dx.rs` compiling clean under
+/// `cargo clippy --all-targets -- -D warnings`: that target holds an eight-param system, so the
+/// day this attribute is dropped, the gate goes red. It exercises clippy's DEFAULT threshold (7)
+/// only. A crate that lowers `too-many-arguments-threshold` is covered by the FIX (the attribute
+/// is unconditional) but not by the gate, and no cheap gate exists for it: `trybuild` drives
+/// rustc, not clippy, so no fixture can carry a lint at all, and a second probe crate with its own
+/// `clippy.toml` would have to shell out to cargo from a test — against a config-discovery walk
+/// this repo has already measured as leaking from the parent checkout
+/// (docs/OPEN-QUESTIONS.md's clippy-worktree note). Recorded rather than half-built.
+fn arity_allow() -> TokenStream {
+    quote!(#[allow(clippy::too_many_arguments)])
+}
+
+/// §3.3: `system` → a plain `pub fn` with the sugared signature and the UNTOUCHED verbatim
+/// body. Every engine path is the REAL nested one (tokens-not-deps; the root re-exports only
+/// App/Plugin/…, so the plan's idealized `::boyko_ecs::Res` is emitted as
+/// `::boyko_ecs::ecs::core::system::Res` — the A1 Entity precedent).
+fn system_fn(def: &SystemDef) -> TokenStream {
+    let name = &def.name;
+    let params = def.params.iter().map(sys_param_tokens);
+    let body = &def.body;
+    let allow = arity_allow();
+    quote! {
+        #allow
+        pub fn #name( #(#params),* ) { #body }
+    }
+}
+
+/// One param: the §3.3 sugar table plus MUTABILITY INFERENCE — a param whose expansion needs
+/// `&mut self` access gets a `mut` binding automatically. Recorded deviation from the plan's
+/// inference list: `events<E>` is INCLUDED (this engine's `EventReader::read` takes `&mut
+/// self`, so a non-mut reader binding could never be read).
+fn sys_param_tokens(p: &SysParam) -> TokenStream {
+    let name = &p.name;
+    let (inferred_mut, ty) = param_ty_and_mut(&p.ty);
+    let mut_kw = (p.explicit_mut || inferred_mut).then(|| quote!(mut));
+    quote!(#mut_kw #name: #ty)
+}
+
+/// The sugar table's (needs-`mut`, emitted-type) pair — shared by `system` params and the
+/// `machine` merged-param path (which needs the type ALONE for its dedup identity).
+fn param_ty_and_mut(ty: &SysParamTy) -> (bool, TokenStream) {
+    let sys = quote!(::boyko_ecs::ecs::core::system);
+    match ty {
+        SysParamTy::Query { data, filters } => {
+            (type_mentions_mut(data), query_type(data, filters))
+        }
+        SysParamTy::Res(t) => (false, quote!(#sys::Res<#t>)),
+        SysParamTy::ResMut(t) => (true, quote!(#sys::ResMut<#t>)),
+        SysParamTy::Local(t) => (false, quote!(#sys::Local<#t>)),
+        SysParamTy::Commands => (true, quote!(#sys::Commands)),
+        SysParamTy::Events(t) => (true, quote!(#sys::EventReader<#t>)),
+        SysParamTy::Emit(t) => (true, quote!(#sys::EventWriter<#t>)),
+        SysParamTy::Verbatim(t) => (false, quote!(#t)),
+    }
+}
+
+/// `query<D, filters>` → `Query<D, F>`: one filter stays bare (the kernel implements
+/// `QueryFilter` for bare `With<C>` — verified against d4 tests), two-plus become a tuple,
+/// zero omits `F` (the kernel's `()` default).
+fn query_type(data: &syn::Type, filters: &[(crate::ast::FilterKind, syn::Path)]) -> TokenStream {
+    let q = quote!(::boyko_ecs::ecs::core::iters::query);
+    let fs: Vec<TokenStream> = filters
+        .iter()
+        .map(|(kind, path)| {
+            let kn = Ident::new(kind.type_name(), Span::call_site());
+            quote!(#q::#kn<#path>)
+        })
+        .collect();
+    match fs.len() {
+        0 => quote!(#q::Query<#data>),
+        1 => {
+            let f = &fs[0];
+            quote!(#q::Query<#data, #f>)
+        }
+        _ => quote!(#q::Query<#data, (#(#fs),*)>),
+    }
+}
+
+/// Token-level `&mut` / `Mut<` detection for query-data mutability inference. Ident-exact —
+/// a type named `Mutation` or a path segment `permutation` never false-positives (a plain
+/// substring scan on the printed type would).
+fn type_mentions_mut(t: &syn::Type) -> bool {
+    stream_mentions_mut(quote!(#t))
+}
+
+fn stream_mentions_mut(ts: TokenStream) -> bool {
+    ts.into_iter().any(|tt| match tt {
+        TokenTree::Ident(i) => i == "mut" || i == "Mut",
+        TokenTree::Group(g) => stream_mentions_mut(g.stream()),
+        _ => false,
+    })
+}
+
+/// How a `before`/`after` target resolved against the block's siblings (§3.3).
+enum ResolvedOrder<'a> {
+    /// A sibling aether system — ordering goes through its captured `SystemKey`.
+    Sibling { kind: OrderKind, target: usize },
+    /// Anything else — a `SystemSet` type, emitted as `before_set`/`after_set` verbatim.
+    Set { kind: OrderKind, path: &'a syn::Path },
+    /// The target names a sibling `system` that did not parse (§7.3): the edge is dropped, with
+    /// no diagnostic of its own. It is not a `SystemSet` — treating it as one emits a fn item
+    /// where a type belongs — and it is not an unknown name either, since the system is declared
+    /// right there. The edge returns when its target parses.
+    Suppressed,
+}
+
+/// The registration bucket a system lands in (`on` clause; `None` → Main).
+fn bucket(s: &SystemDef) -> Schedule {
+    s.schedule.unwrap_or(Schedule::Update)
+}
+
+/// §3.3: `plugin` → `pub struct NAME; impl Plugin for NAME { build, name }`. Registration is
+/// grouped per schedule (startup one-shots, then Main `add_systems_cfg`, then Fixed
+/// `add_systems_cfg_in`), and inside a schedule the emission order is TOPOLOGICALLY sorted
+/// over sibling `before`/`after` edges so every needed `SystemKey` exists before use.
+///
+/// One recorded decision: with a `plugin` present, EVERY sibling system is registered —
+/// clause-free ones land on Main unordered (the plugin "collects sibling systems"; the plan's
+/// "register by hand" story is for plugin-FREE blocks).
+///
+/// One recorded deviation: for a bare unknown ident within Levenshtein ≤ 2 of a sibling
+/// system, the plan wanted a pass-through plus a note attached to rustc's unresolved-name
+/// error. Stable proc-macros cannot attach notes to downstream rustc errors, so that close
+/// call becomes an AETHER error carrying the note's text; a real `SystemSet` type that close
+/// in name is referenced by a qualified path to pass through.
+fn plugin_impl(def: &PluginDef, block: &AetherBlock) -> syn::Result<TokenStream> {
+    let systems: Vec<&SystemDef> = block
+        .constructs
+        .iter()
+        .filter_map(|c| match c {
+            Construct::System(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+
+    // Sibling `system`s that did NOT parse (§7.3) — an ordering clause naming one is dropped
+    // rather than mistaken for a `SystemSet` path.
+    let broken_systems: Vec<&Ident> = block
+        .broken
+        .iter()
+        .filter(|b| b.keyword == Some("system"))
+        .filter_map(crate::ast::BrokenConstruct::name)
+        .collect();
+
+    // Resolve every ordering clause against the sibling table.
+    let mut resolved: Vec<Vec<ResolvedOrder<'_>>> = Vec::with_capacity(systems.len());
+    let mut needs_key = vec![false; systems.len()];
+    for s in &systems {
+        let mut rs = Vec::with_capacity(s.orders.len());
+        for (kind, path, _) in &s.orders {
+            rs.push(resolve_order(*kind, path, s, &systems, &broken_systems, &mut needs_key)?);
+        }
+        resolved.push(rs);
+    }
+
+    // Startup one-shots keep BLOCK SOURCE order (parse already rejected a startup system's other
+    // clauses). §3.7 registers a `scene`'s spawn fn the same way, so the two kinds interleave by
+    // declaration — a scene declared before a startup system spawns before it runs, which is the
+    // only reading of the source a user can predict without knowing Aether's internals.
+    let startup_calls: Vec<TokenStream> = block
+        .constructs
+        .iter()
+        .filter_map(|c| match c {
+            Construct::System(s) if bucket(s) == Schedule::Startup => {
+                let n = &s.name;
+                Some(quote!(app.add_startup_system(#n);))
+            }
+            Construct::Scene(s) => {
+                let n = &s.name;
+                Some(quote!(app.add_startup_system(#n);))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let mut main_stmts = bucket_stmts(&systems, &resolved, &needs_key, Schedule::Update)?;
+    let fixed_stmts = bucket_stmts(&systems, &resolved, &needs_key, Schedule::Fixed)?;
+
+    // Sibling machines (§3.5): the plugin holds their `insert_state` and their transition
+    // systems' Main registrations, after the systems' own (deterministic output order).
+    let mut inserts: Vec<TokenStream> = Vec::new();
+    for c in &block.constructs {
+        if let Construct::Machine(m) = c {
+            let (insert, stmts) = machine_registrations(m);
+            inserts.push(insert);
+            main_stmts.extend(stmts);
+        }
+    }
+
+    let main_block = (!main_stmts.is_empty()).then(|| {
+        quote! { app.add_systems_cfg(|b| { #(#main_stmts)* }); }
+    });
+    let fixed_block = (!fixed_stmts.is_empty()).then(|| {
+        quote! {
+            app.add_systems_cfg_in(::boyko_ecs::ecs::core::app::CoreSchedule::Fixed, |b| { #(#fixed_stmts)* });
+        }
+    });
+
+    let pname = &def.name;
+    let pstr = pname.to_string();
+    Ok(quote! {
+        pub struct #pname;
+        impl ::boyko_ecs::Plugin for #pname {
+            fn build(&self, app: &mut ::boyko_ecs::App) {
+                #(#inserts)*
+                #(#startup_calls)*
+                #main_block
+                #fixed_block
+            }
+            fn name(&self) -> &'static str { #pstr }
+        }
+    })
+}
+
+/// Resolve one `before`/`after` target (see [`plugin_impl`]'s deviation note).
+fn resolve_order<'a>(
+    kind: OrderKind,
+    path: &'a syn::Path,
+    from: &SystemDef,
+    systems: &[&SystemDef],
+    broken_systems: &[&Ident],
+    needs_key: &mut [bool],
+) -> syn::Result<ResolvedOrder<'a>> {
+    let bare = (path.leading_colon.is_none()
+        && path.segments.len() == 1
+        && path.segments[0].arguments.is_none())
+    .then(|| path.segments[0].ident.to_string());
+    if let Some(name) = bare {
+        // A sibling `system` that did not parse is neither an unknown name nor a SystemSet: the
+        // edge is dropped (§7.3's derived-fault rule) and comes back when its target parses.
+        if broken_systems.iter().any(|b| *b == &name) {
+            return Ok(ResolvedOrder::Suppressed);
+        }
+        if let Some(target) = systems.iter().position(|s| s.name == name) {
+            if bucket(systems[target]) == Schedule::Startup {
+                return Err(diag::err(
+                    path.segments[0].ident.span(),
+                    format!("ordering references `{name}`, a startup system — startup systems run once, pre-loop, and cannot be ordered against"),
+                ));
+            }
+            if bucket(systems[target]) != bucket(from) {
+                return Err(diag::err(
+                    path.segments[0].ident.span(),
+                    format!("sibling system `{name}` runs on a different schedule — cross-schedule ordering is not expressible"),
+                ));
+            }
+            needs_key[target] = true;
+            return Ok(ResolvedOrder::Sibling { kind, target });
+        }
+        let sibling_names: Vec<String> = systems.iter().map(|s| s.name.to_string()).collect();
+        let refs: Vec<&str> = sibling_names.iter().map(String::as_str).collect();
+        if let Some(sugg) = diag::did_you_mean(&name, &refs) {
+            return Err(diag::err(
+                path.segments[0].ident.span(),
+                format!("`{name}` is not a sibling aether system; a sibling `{sugg}` exists — system-to-system ordering uses the bare system name (a real SystemSet type this close in name must be referenced by a qualified path)"),
+            ));
+        }
+    }
+    Ok(ResolvedOrder::Set { kind, path })
+}
+
+/// Registration statements for one schedule bucket, topologically sorted over sibling edges
+/// (stable Kahn: lowest source index first, so output is deterministic). A cycle is a compile
+/// error naming every member's span — Aether says it earlier and closer to source than the
+/// engine's own `ScheduleBuildError::OrderingCycle` at `build()`.
+fn bucket_stmts(
+    systems: &[&SystemDef],
+    resolved: &[Vec<ResolvedOrder<'_>>],
+    needs_key: &[bool],
+    which: Schedule,
+) -> syn::Result<Vec<TokenStream>> {
+    let members: Vec<usize> = (0..systems.len()).filter(|&i| bucket(systems[i]) == which).collect();
+    if members.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // indegree over sibling edges target→member (the target's key must exist first).
+    let mut indeg = vec![0usize; systems.len()];
+    for &i in &members {
+        for r in &resolved[i] {
+            if let ResolvedOrder::Sibling { .. } = r {
+                indeg[i] += 1;
+            }
+        }
+    }
+    let mut emitted = vec![false; systems.len()];
+    let mut order: Vec<usize> = Vec::with_capacity(members.len());
+    while order.len() < members.len() {
+        let Some(&next) = members.iter().find(|&&i| !emitted[i] && indeg[i] == 0) else {
+            // Cycle: every un-emitted member with a nonzero indegree participates.
+            let cyclic: Vec<usize> =
+                members.iter().copied().filter(|&i| !emitted[i]).collect();
+            let names =
+                cyclic.iter().map(|&i| format!("`{}`", systems[i].name)).collect::<Vec<_>>().join(", ");
+            let mut e = diag::err(
+                systems[cyclic[0]].name.span(),
+                format!("system ordering cycle among {names} — break one `before`/`after` edge"),
+            );
+            for &i in &cyclic[1..] {
+                e.combine(diag::err(systems[i].name.span(), "…cycle member"));
+            }
+            return Err(e);
+        };
+        emitted[next] = true;
+        order.push(next);
+        // Relax: members ordering against `next` lose one indegree.
+        for &i in &members {
+            if !emitted[i] {
+                for r in &resolved[i] {
+                    if let ResolvedOrder::Sibling { target, .. } = r
+                        && *target == next
+                    {
+                        indeg[i] -= 1;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(order
+        .into_iter()
+        .map(|i| {
+            let s = systems[i];
+            let n = &s.name;
+            let mut call = quote!(b.add_system(#n));
+            for (p, _) in &s.in_sets {
+                call = quote!(#call.in_set(#p));
+            }
+            for r in &resolved[i] {
+                call = match r {
+                    ResolvedOrder::Sibling { kind, target } => {
+                        let k = key_ident(&systems[*target].name);
+                        match kind {
+                            OrderKind::Before => quote!(#call.before(#k)),
+                            OrderKind::After => quote!(#call.after(#k)),
+                        }
+                    }
+                    ResolvedOrder::Set { kind, path } => match kind {
+                        OrderKind::Before => quote!(#call.before_set(#path)),
+                        OrderKind::After => quote!(#call.after_set(#path)),
+                    },
+                    // The edge names a sibling `system` that did not PARSE (§7.3). Emitting it as
+                    // a SystemSet path would hand rustc a fn item where a set type belongs — an
+                    // error on GENERATED tokens, derived from a fault already reported.
+                    ResolvedOrder::Suppressed => call,
+                };
+            }
+            for (e, _) in &s.whens {
+                call = quote!(#call.run_if(#e));
+            }
+            if needs_key[i] {
+                let k = key_ident(&s.name);
+                quote!(let #k = #call.key();)
+            } else {
+                quote!(#call;)
+            }
+        })
+        .collect())
+}
+
+/// The captured-`SystemKey` local for a sibling-ordered system (the plan's exact spelling).
+fn key_ident(name: &Ident) -> Ident {
+    format_ident!("__aether_k_{}", name)
+}
+
+// ---------------------------------------------------------------------------------- rung A3
+
+/// §3.5: `machine` → a `::boyko_macros::state_chart!` invocation.
+///
+/// **Aether is not a codegen authority here, and that is the point (v2 DECISION C7).** Flattening
+/// a chart — the leaf enum, innermost-wins inheritance, the LCA exit/enter chains, the per-leaf
+/// route merge, reachability — lives in exactly one place, `boyko_macros::state_chart!`, so a
+/// hand-written Rust chart and an Aether `machine` cannot drift apart. What Aether owns is its own
+/// SUGAR: `res<T>` → `Res<T>`, `query<&A, with B>` → `Query<&A, With<B>>`, `commands` →
+/// `Commands`. That table is Aether's alone, so the lowering here converts every param to a real
+/// Rust type and hands the chart over already de-sugared.
+///
+/// Nothing else about the construct changes: the user's idents, types, guards and bodies pass
+/// through as their ORIGINAL tokens with their original spans, so a chart diagnostic raised inside
+/// `state_chart!` still lands on the `machine` line the author wrote.
+fn machine_items(def: &MachineDef) -> TokenStream {
+    let name = &def.name;
+    let initial = &def.initial;
+    let states = def.states.iter().map(state_tokens);
+    quote! {
+        ::boyko_macros::state_chart! {
+            chart #name;
+            initial #initial;
+            #( #states )*
+        }
+    }
+}
+
+/// One `state` node, re-serialized into `state_chart!`'s grammar.
+///
+/// ⚠ **The order transitions and nested states are emitted in is SEMANTIC, not cosmetic.**
+/// Arbitration between two routes accepted on one frame is first-declared-wins, and
+/// `state_chart!`'s parser derives declaration order from the order it walks. Aether's own AST
+/// stores a state's transitions and its children in two separate lists, which loses how they were
+/// INTERLEAVED — and the naive re-emission (all transitions, then all children) reverses the
+/// relative order of a composite's own handler against its children's, flipping which route wins
+/// on every leaf that inherits it. [`TransitionDef::decl_index`] is the exact record of the source
+/// order, so the merge below replays it.
+fn state_tokens(s: &StateDef) -> TokenStream {
+    let name = &s.name;
+    let initial = s.initial.as_ref().map(|i| quote!(initial #i;));
+    let enter = s.enter.as_ref().map(|h| {
+        let p = handler_params(&h.params);
+        let b = &h.body;
+        quote!(enter #p { #b })
+    });
+    let exit = s.exit.as_ref().map(|h| {
+        let p = handler_params(&h.params);
+        let b = &h.body;
+        quote!(exit #p { #b })
+    });
+    let body = interleaved_body(s);
+    quote_spanned! {name.span()=>
+        state #name {
+            #initial
+            #enter
+            #exit
+            #body
+        }
+    }
+}
+
+/// Replay the source interleaving of a state's own transitions against its nested states.
+///
+/// Children keep their relative order (they are already stored in source order). Before each child
+/// that CONTAINS a transition, every own transition declared earlier than that child's first one is
+/// flushed; the leftovers follow. Because Aether's parser hands out `decl_index` linearly as it
+/// walks, a child's transitions occupy a contiguous index range, so every transition lands on the
+/// correct side of every child that has one.
+///
+/// ⚠ A child that contains **no** transition has no `decl_index` to flush against, so it is emitted
+/// the moment the walk reaches it — AHEAD of any own transition still pending. `on A; state C1 { };
+/// state C2 { on X; }` re-emits as `state C1 { } on A; state C2 { on X; }`. Route arbitration is
+/// unaffected (a transitionless subtree contributes no `decl_index`, and the relative order of the
+/// transitions themselves is preserved), so the observable difference is the order of the generated
+/// state enum's variants. This paragraph used to say such a child "is emitted where it stands",
+/// which is the one shape where it is not.
+fn interleaved_body(s: &StateDef) -> TokenStream {
+    let mut own: Vec<&TransitionDef> = s.transitions.iter().collect();
+    own.sort_by_key(|t| t.decl_index);
+    let mut next = 0usize;
+    let mut out = TokenStream::new();
+    for child in &s.children {
+        if let Some(first) = min_decl_index(child) {
+            while next < own.len() && own[next].decl_index < first {
+                out.extend(transition_tokens(own[next]));
+                next += 1;
+            }
+        }
+        out.extend(state_tokens(child));
+    }
+    for t in &own[next..] {
+        out.extend(transition_tokens(t));
+    }
+    out
+}
+
+/// The smallest `decl_index` anywhere in `s`'s subtree, or `None` when the subtree declares no
+/// transition at all (in which case it constrains no ordering).
+fn min_decl_index(s: &StateDef) -> Option<usize> {
+    s.transitions
+        .iter()
+        .map(|t| t.decl_index)
+        .chain(s.children.iter().filter_map(min_decl_index))
+        .min()
+}
+
+/// One `on EVENT (params)? (if GUARD)? => TARGET (BLOCK | ;)` route.
+///
+/// The `on` keyword is re-minted at the USER's `kw_span`, not at `Span::call_site()`. It is the
+/// span `state_chart!` puts the duplicate-handler diagnostic on, and a `quote!`-synthesized `on`
+/// would move that caret from the author's second `on E` onto the `aether!` token itself — the
+/// §7.2(2) failure ("an error spanned at the call site lands where the reader has no idea which of
+/// their forty lines is meant"), reintroduced by a lowering rather than by a diagnostic.
+fn transition_tokens(t: &TransitionDef) -> TokenStream {
+    let on_kw = Ident::new("on", t.kw_span);
+    let event = &t.event;
+    let params = handler_params(&t.params);
+    let guard = t.guard.as_ref().map(|g| quote!(if #g));
+    let mut target = TokenStream::new();
+    for (i, seg) in t.target.iter().enumerate() {
+        if i > 0 {
+            target.extend(quote!(.));
+        }
+        target.extend(quote!(#seg));
+    }
+    let tail = match t.action.as_ref() {
+        Some(a) => quote!({ #a }),
+        None => quote!(;),
+    };
+    quote! { #on_kw #event #params #guard => #target #tail }
+}
+
+/// A param list in `state_chart!`'s Rust-native grammar, or nothing when the list is empty.
+/// [`sys_param_tokens`] is the whole de-sugaring seam: it already emits `(mut)? name: RealType`.
+fn handler_params(params: &[SysParam]) -> Option<TokenStream> {
+    if params.is_empty() {
+        return None;
+    }
+    let ps = params.iter().map(sys_param_tokens);
+    Some(quote!( ( #( #ps ),* ) ))
+}
+
+/// The plugin-side registrations for one machine: the two fns `state_chart!` generates.
+///
+/// Aether does not re-derive which leaf is initial, nor which leaves own systems — that knowledge
+/// stays behind the generated `__state_chart_install_*` / `__state_chart_systems_*` pair, which is
+/// what keeps the flattening single-authority. Both names are a pure function of the machine's
+/// name, so this needs no model and cannot fail; a chart that does not compile still resolves
+/// them, because `state_chart!` emits stubs alongside its error.
+fn machine_registrations(def: &MachineDef) -> (TokenStream, Vec<TokenStream>) {
+    let snake_name = snake(&def.name.to_string());
+    let install = format_ident!("__state_chart_install_{}", snake_name);
+    let systems = format_ident!("__state_chart_systems_{}", snake_name);
+    (quote! { #install(app); }, vec![quote! { #systems(b); }])
+}
+
+/// The snake_case spelling for generated names (`PlayingRunning` → `playing_running`).
+///
+/// A RUN of capitals is one word, not one word per letter: `UIState` → `ui_state`, `HTTPProbe` →
+/// `http_probe`. The letter-by-letter rule this shipped with spelled those `u_i_state` and
+/// `h_t_t_p_probe` — legal idents nobody would write, in the two places a user READS a generated
+/// name.
+///
+/// The rule, applied at each uppercase char: open a new word when the previous char was lowercase
+/// or a digit (`GameFlow` → `game_flow`), or when the previous char was uppercase and the NEXT is
+/// lowercase (`UIState`: the `S` opens `state`). Everything else continues the current word.
+///
+/// This is a COPY of `boyko_macros`'s rule, and the duplication is structural rather than
+/// careless: `boyko-macros` is a `proc-macro = true` crate, so no library can link it and the two
+/// collapses cannot share one function. Aether spells the registration fn names here while
+/// `state_chart!` spells the same names there, so the two agreeing is what makes the emitted call
+/// resolve.
+///
+/// The gate on that agreement is not a unit test — it is the END-TO-END compile. A divergence
+/// makes `machine_registrations` emit a call to a fn `state_chart!` never defined, which rustc
+/// reports as "cannot find function `__state_chart_install_…`" in `aether-tests` the moment any
+/// machine test compiles. That is a loud, immediate failure rather than a wrong answer, which is
+/// the property that makes the copy tolerable.
+fn snake(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() && i != 0 {
+            let prev = chars[i - 1];
+            let next_is_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            // `!out.ends_with('_')`: a name that already spells the break (`A_B`) gets one
+            // separator, not two.
+            if (!prev.is_uppercase() || next_is_lower) && !out.ends_with('_') {
+                out.push('_');
+            }
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
+}
+
+/// §3.6: `material` → an `#[inline]` BUILDER FN over the engine's own constructors.
+///
+/// Materials are runtime-minted assets (`Assets<Material>::add`), so a static table would be the
+/// parallel data system Principle 0 forbids; a fn that returns the engine's `Material` is the
+/// zero-cost target, and it composes with any minting site (`materials.add(gold())`).
+///
+/// Both engine paths are the REAL ones and both RESOLVE: `boyko_render` re-exports `Material` and
+/// `MaterialGpu` at its root, so the plan's idealized `::boyko_render::Material` needed no nesting
+/// substitution (unlike the A1 `Entity` / A2 `Res` precedents).
+///
+/// The `textures:` escape routes through `Material::with_textures` — the ONLY constructor that can
+/// produce a textured material — so the `MATERIAL_FLAG_TEXTURED` derivation stays in the engine's
+/// one authority and Aether never mints that bit itself.
+fn material_fn(def: &MaterialDef) -> TokenStream {
+    let name = &def.name;
+    let doc = format!(" Aether material `{name}`.");
+
+    let base = rgba_array(&def.base);
+    let metallic = expr_or(def.metallic.as_ref(), quote!(0.0));
+    let roughness = expr_or(def.roughness.as_ref(), quote!(0.5));
+    let reflectance = expr_or(def.reflectance.as_ref(), quote!(0.5));
+    let flags = expr_or(def.flags.as_ref(), quote!(0));
+    let emissive = def.emissive.as_ref().map_or_else(|| quote!([0.0; 3]), rgb_array);
+
+    let build = match &def.textures {
+        None => quote! {
+            ::boyko_render::Material::new(#base, #metallic, #roughness, #reflectance, #emissive, #flags)
+        },
+        Some(t) => quote! {
+            ::boyko_render::Material::with_textures(
+                ::boyko_render::MaterialGpu::new(#base, #metallic, #roughness, #reflectance, #emissive, #flags),
+                #t
+            )
+        },
+    };
+
+    quote! {
+        #[doc = #doc]
+        #[inline]
+        pub fn #name() -> ::boyko_render::Material { #build }
+    }
+}
+
+/// A material key's verbatim expression, or the §3.6 default when the key is absent.
+fn expr_or(e: Option<&syn::Expr>, default: TokenStream) -> TokenStream {
+    e.map_or(default, |e| quote!(#e))
+}
+
+/// `base` → `[r, g, b, a]`, synthesizing the §3.6 alpha default (`1.0`) for the 3-component form.
+/// The parser guarantees 3 or 4 components, so this is total.
+fn rgba_array(c: &ColorLit) -> TokenStream {
+    let comps = &c.components;
+    if comps.len() == 3 {
+        quote!([#(#comps),*, 1.0])
+    } else {
+        quote!([#(#comps),*])
+    }
+}
+
+/// `emissive` → `[r, g, b]` (`Material::new` takes `[f32; 3]`; the parser rejected any other
+/// arity, so this is total).
+fn rgb_array(c: &ColorLit) -> TokenStream {
+    let comps = &c.components;
+    quote!([#(#comps),*])
+}
+
+// ---------------------------------------------------------------------------------- rung A6
+
+/// §3.7: `scene` → ONE spawn fn with a DEMAND-DRIVEN `SystemParam` signature, plus (via the
+/// sibling `plugin`) a startup registration.
+///
+/// The param set is computed from what the body actually uses: the mesh table + device appear
+/// because a `let … = plane/cube/mesh(…)` binding exists, the material table because a `material:`
+/// prop does. A scene with neither compresses to one param — the plan's own rule, and the reason a
+/// pure-`entity` scene needs no render crate at runtime.
+///
+/// # Emission order: every `let` first, then every mint, then the nodes
+///
+/// A DECISION, not a side effect of how the parser buckets the body. Mesh bindings are
+/// SCENE-scoped, not statement-scoped: a `let` written between two nodes still lands above both,
+/// so a node may name a binding declared below it. A mesh registration is a scene-wide resource
+/// whose ordering against spawns has no observable effect, and the alternative — refusing forward
+/// references to match Rust's statement scoping — buys a diagnostic nobody needs and costs the
+/// author a rule to remember. The mint block follows for the same reason (§3.7 hoists it "ONCE per
+/// scene fn"), and nodes come last so every name they can reference already exists.
+///
+/// # Recorded spellings that differ from §3.7's After block
+///
+/// * Engine types are named by their DEFINING crate (`::boyko_scene::Transform`,
+///   `::boyko_math::Vec3` — `boyko_render` re-exports neither), for the tokens-not-deps rule.
+/// * `meshes.plane(…)` is emitted trait-qualified, because the method form would require the user
+///   to have imported `MeshAssetsExt` into the module the macro expands into.
+/// * The four params are `__aether_`-PREFIXED (§7.2(4): "generated internal names are
+///   `__aether_`-prefixed and never collide with user names"). §3.7's After block spells them
+///   `commands` / `meshes` / `materials` / `dev`, which are user-reachable names, and a scene may
+///   legally bind any of them: MEASURED, `let dev = plane(1.0); mesh dev;` shadowed the device
+///   param and produced E0599 (`no method get on MeshHandle`) with both labels on the whole
+///   `aether!` token — the exact user-token-free shape `ctx.rs` cites to justify owning a
+///   diagnostic. Prefixing makes the collision unrepresentable instead of diagnosable. Param
+///   NAMES are invisible to registration (only types and order are), so `add_startup_system` is
+///   unaffected.
+fn scene_fn(def: &SceneDef, ctx: &AetherCtx<'_>) -> syn::Result<TokenStream> {
+    // Resolve every `material:` reference first: a scene naming a material that does not exist is
+    // the §3.7 diagnostic, and it must fire before any emission decision depends on the answer.
+    let mut referenced: Vec<&Ident> = Vec::new();
+    collect_materials(&def.nodes, ctx, &mut referenced)?;
+    // Re-order into BLOCK declaration order. Collecting in first-USE order would make the emitted
+    // mint sequence a function of node order, so swapping two nodes that place different materials
+    // would silently renumber every asset row this scene mints.
+    let used_materials: Vec<&Ident> = ctx
+        .materials()
+        .iter()
+        .map(|m| &m.name)
+        .filter(|name| referenced.iter().any(|r| r == name))
+        .collect();
+
+    // Every engine path below is VERIFIED against the tree (the tokens-not-deps rule): `Transform`
+    // / `Vec3` / `MeshBundle` live in three different crates, and §3.7's bare spellings are the
+    // AUTHOR's imports, not the macro's — the A1 `Entity` and A2 `Res` precedent, a third time.
+    let sys = quote!(::boyko_ecs::ecs::core::system);
+    let assets = quote!(::boyko_ecs::ecs::core::asset::Assets);
+
+    let (cmds, meshes, materials, dev) = (
+        scene_param(SCENE_PARAM_COMMANDS),
+        scene_param(SCENE_PARAM_MESHES),
+        scene_param(SCENE_PARAM_MATERIALS),
+        scene_param(SCENE_PARAM_DEV),
+    );
+
+    let mut params: Vec<TokenStream> = vec![quote!(mut #cmds: #sys::Commands)];
+    if !def.lets.is_empty() {
+        params.push(quote! {
+            mut #meshes: #sys::NonSendResMut<#assets<::boyko_render::MeshGpu>>
+        });
+    }
+    if !used_materials.is_empty() {
+        params.push(quote! {
+            mut #materials: #sys::ResMut<#assets<::boyko_render::Material>>
+        });
+    }
+    if !def.lets.is_empty() {
+        params.push(quote!(#dev: #sys::NonSendRes<::boyko_app::GpuDevice>));
+    }
+
+    let lets = def.lets.iter().map(|l| {
+        let name = &l.name;
+        let call = match &l.src {
+            MeshSrc::Plane(size) => {
+                quote!(::boyko_render::MeshAssetsExt::plane(&mut *#meshes, #dev.get(), #size))
+            }
+            MeshSrc::Cube(size) => {
+                quote!(::boyko_render::MeshAssetsExt::cube(&mut *#meshes, #dev.get(), #size))
+            }
+            MeshSrc::Mesh(vertices, indices) => quote! {
+                ::boyko_render::MeshAssetsExt::register_mesh(
+                    &mut *#meshes, #dev.get(), #vertices, #indices
+                )
+            },
+        };
+        quote!(let #name = #call;)
+    });
+
+    // The mints are hoisted ONCE per scene fn, in the BLOCK's material declaration order — a
+    // scene that places one material on forty nodes mints one asset row, not forty.
+    let mints = used_materials.iter().map(|name| {
+        let local = material_local(name);
+        quote!(let #local = #materials.add(#name());)
+    });
+
+    let mut stmts: Vec<TokenStream> = Vec::new();
+    let mut counter = 0usize;
+    for node in &def.nodes {
+        emit_node(node, def, &mut counter, false, &mut stmts)?;
+    }
+
+    let name = &def.name;
+    let doc = format!(" Aether scene `{name}` — the spawn fn.");
+    Ok(quote! {
+        #[doc = #doc]
+        pub fn #name( #(#params),* ) {
+            #(#lets)*
+            #(#mints)*
+            #(#stmts)*
+        }
+    })
+}
+
+/// Walk the node tree and resolve every `material: NAME` against the sibling `material`
+/// constructs (§3.7's `AetherCtx` showcase), collecting the used names in BLOCK declaration order.
+fn collect_materials<'a>(
+    nodes: &[SceneNode],
+    ctx: &AetherCtx<'a>,
+    out: &mut Vec<&'a Ident>,
+) -> syn::Result<()> {
+    for node in nodes {
+        if let Some(reference) = &node.material {
+            let Some(def) = ctx.material(reference) else {
+                return Err(unknown_symbol(
+                    reference,
+                    "material",
+                    "this aether block",
+                    &ctx.material_names(),
+                    "materials",
+                ));
+            };
+            // Declaration order, deduped: the mint sequence must not depend on node order.
+            if !out.iter().any(|m| **m == def.name) {
+                out.push(&def.name);
+            }
+        }
+        collect_materials(&node.children, ctx, out)?;
+    }
+    Ok(())
+}
+
+/// §3.7's two symmetric "no such sibling" diagnostics (`material: gol`, `mesh floot`): the
+/// declared list, then a did-you-mean when one candidate is within edit distance 2.
+///
+/// `scope` is spelled by the CALLER because the two symbol tables have different extents — a
+/// material is a block symbol (§4), a mesh binding belongs to one scene — and a message that
+/// misstates where it looked sends the reader to the wrong file region.
+fn unknown_symbol(
+    found: &Ident,
+    kind: &str,
+    scope: &str,
+    declared: &[String],
+    plural: &str,
+) -> syn::Error {
+    let refs: Vec<&str> = declared.iter().map(String::as_str).collect();
+    let list = if refs.is_empty() {
+        format!("no {plural} are declared here")
+    } else {
+        format!(
+            "{plural} here: {}",
+            refs.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")
+        )
+    };
+    let mut msg = format!("no {kind} `{found}` in {scope} ({list})");
+    if let Some(sugg) = diag::did_you_mean(&found.to_string(), &refs) {
+        msg.push_str(&format!(" (did you mean `{sugg}`?)"));
+    }
+    diag::err(found.span(), msg)
+}
+
+/// The hoisted `Handle<Material>` local for one material name (the plan's exact spelling).
+fn material_local(name: &Ident) -> Ident {
+    format_ident!("__aether_mat_{}", name)
+}
+
+/// The generated scene-param binding names (§7.2(4)). Spelled once each, here, because the
+/// signature and the body must agree on them and a typo in either would only surface as an
+/// unresolved name inside macro output.
+const SCENE_PARAM_COMMANDS: &str = "commands";
+/// The `NonSendResMut<Assets<MeshGpu>>` binding — see [`SCENE_PARAM_COMMANDS`].
+const SCENE_PARAM_MESHES: &str = "meshes";
+/// The `ResMut<Assets<Material>>` binding — see [`SCENE_PARAM_COMMANDS`].
+const SCENE_PARAM_MATERIALS: &str = "materials";
+/// The `NonSendRes<GpuDevice>` binding — see [`SCENE_PARAM_COMMANDS`].
+const SCENE_PARAM_DEV: &str = "dev";
+
+/// One generated scene param, `__aether_`-prefixed so no user `let` can shadow it (see
+/// [`scene_fn`]'s recorded-spellings section for the measurement that forced this).
+fn scene_param(role: &str) -> Ident {
+    format_ident!("__aether_{}", role)
+}
+
+/// The bound `Entity` local for a node that is a parent, a child, or both.
+fn node_local(index: usize) -> Ident {
+    format_ident!("__aether_e{}", index)
+}
+
+/// Emit one node's statements (and, recursively, its children's).
+///
+/// A node binds its `Entity` only when someone needs it — it has children, or it IS one. Every
+/// other node emits §3.7's statement form (`<commands>.spawn(…).insert(…);`), so the common case
+/// carries no locals it does not use.
+fn emit_node(
+    node: &SceneNode,
+    scene: &SceneDef,
+    counter: &mut usize,
+    want_id: bool,
+    out: &mut Vec<TokenStream>,
+) -> syn::Result<Option<Ident>> {
+    let spawn = spawn_call(node, scene)?;
+
+    let mut call = spawn;
+    if let (Some(form), Some(_)) = (node.head.shadow_form(), node.casts_shadow) {
+        let marker = match form {
+            ShadowForm::Caster => quote!(::boyko_render::ShadowCaster),
+            ShadowForm::Punctual => quote!(::boyko_render::CastsPunctualShadow),
+        };
+        call = quote!(#call.insert(#marker));
+    }
+    if let Some(reference) = &node.material {
+        // `MaterialHandle` is a `u16` TABLE SLOT, and `Handle::index()` is the row — the exact
+        // narrowing every shipped scene writes by hand.
+        let local = material_local(reference);
+        call = quote!(#call.insert(::boyko_scene::MaterialHandle(#local.index() as u16)));
+    }
+    for extra in &node.extras {
+        call = quote!(#call.insert(#extra));
+    }
+
+    let needs_id = want_id || !node.children.is_empty();
+    if !needs_id {
+        out.push(quote!(#call;));
+        return Ok(None);
+    }
+
+    let id = node_local(*counter);
+    *counter += 1;
+    out.push(quote!(let #id = #call.id();));
+
+    for child in &node.children {
+        let child_id = emit_node(child, scene, counter, true, out)?
+            .expect("invariant: `want_id` was set, so the child bound an id");
+        // Hierarchy is driven by `ChildOf` insertion (Phase 19) — user code never writes
+        // `Children`, and neither does Aether.
+        let cmds = scene_param(SCENE_PARAM_COMMANDS);
+        out.push(quote!(#cmds.add_child(#id, #child_id);));
+    }
+    Ok(Some(id))
+}
+
+/// The `<commands>.spawn(<bundle>)` (or `spawn_empty()`) head of one node's statement.
+///
+/// The numeric key slots below (`tuple3(node, 0)`, `scalar(node, 2)`, …) index the head's OWN key
+/// table in `ast.rs` — `SUN_KEYS`, `SKY_KEYS`, `POINT_KEYS`, `SPOT_KEYS`, `CAMERA_KEYS`, each in
+/// declaration order. The parser fills `SceneNode::keys` positionally from the same table, so the
+/// two sides cannot disagree about which slot a key is; what they CAN disagree about is which key
+/// a slot means, if a row is ever inserted in the middle of a table. Renaming a key is therefore
+/// free, but REORDERING one is not: change a `*_KEYS` const and the matching arm here moves with
+/// it. (The unit pins below catch that — every slot of every table is exercised with a distinct
+/// value.)
+fn spawn_call(node: &SceneNode, scene: &SceneDef) -> syn::Result<TokenStream> {
+    let cmds = scene_param(SCENE_PARAM_COMMANDS);
+    let bundle = match &node.head {
+        NodeHead::Mesh(binding) => {
+            if !scene.lets.iter().any(|l| l.name == *binding) {
+                let declared: Vec<String> =
+                    scene.lets.iter().map(|l| l.name.to_string()).collect();
+                // SCENE-scoped, not block-scoped: two scenes have two independent binding tables,
+                // and saying "in this aether block" would claim a name is absent while a sibling
+                // scene declares it. (The material list above IS block-scoped — §4 puts material
+                // symbols in the block's table — so its wording stays as A5 shipped it.)
+                return Err(unknown_symbol(
+                    binding,
+                    "mesh binding",
+                    &format!("scene `{}`", scene.name),
+                    &declared,
+                    "bindings",
+                ));
+            }
+            let transform = at_tokens(node.at.as_ref());
+            quote!(::boyko_render::MeshBundle::new(#binding, #transform))
+        }
+        NodeHead::Sun => {
+            let dir = tuple3(node, 0)?;
+            let color = tuple3_or(node, 1, quote!([1.0, 1.0, 1.0]));
+            let lux = scalar(node, 2)?;
+            // The pose is derived exactly as the shipped scenes derive theirs: a look-at whose
+            // `-Z` points at the light direction, converted to the entity's rotation.
+            quote! {
+                {
+                    let __aether_dir = #dir;
+                    let __aether_pose = ::boyko_math::Affine3A::look_at_rh(
+                        ::boyko_math::Vec3::ZERO,
+                        ::boyko_math::Vec3::new(__aether_dir[0], __aether_dir[1], __aether_dir[2]),
+                        ::boyko_math::Vec3::new(0.0, 1.0, 0.0),
+                    );
+                    ::boyko_render::DirectionalLightObject {
+                        transform: ::boyko_scene::Transform {
+                            translation: ::boyko_math::Vec3::ZERO,
+                            rotation: ::boyko_math::Quat::from_mat3(__aether_pose.matrix3),
+                            scale: ::boyko_math::Vec3::ONE,
+                        },
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        light: ::boyko_render::DirectionalLight::new(__aether_dir, #color, #lux),
+                    }
+                }
+            }
+        }
+        NodeHead::Sky => {
+            let sky = tuple3(node, 0)?;
+            let ground = tuple3(node, 1)?;
+            quote!(::boyko_render::SkyLight::new(#sky, #ground))
+        }
+        NodeHead::Point => {
+            let pos = tuple3(node, 0)?;
+            let color = tuple3_or(node, 1, quote!([1.0, 1.0, 1.0]));
+            let power = scalar(node, 2)?;
+            let range = scalar(node, 3)?;
+            quote! {
+                {
+                    let __aether_pos = #pos;
+                    ::boyko_render::PointLightObject {
+                        transform: ::boyko_scene::Transform::from_translation(
+                            ::boyko_math::Vec3::new(__aether_pos[0], __aether_pos[1], __aether_pos[2])
+                        ),
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        light: ::boyko_render::PointLight::new(__aether_pos, #color, #power, #range),
+                    }
+                }
+            }
+        }
+        NodeHead::Spot => {
+            let pos = tuple3(node, 0)?;
+            let dir = tuple3(node, 1)?;
+            let color = tuple3_or(node, 2, quote!([1.0, 1.0, 1.0]));
+            let power = scalar(node, 3)?;
+            let range = scalar(node, 4)?;
+            let inner = scalar(node, 5)?;
+            let outer = scalar(node, 6)?;
+            // `SpotLight::new`'s `direction` is only a SEED: `light_reconcile` overwrites it from
+            // the transform's world `-Z`, so the POSE is what actually aims the cone — hence the
+            // look-at at `pos + dir` rather than a bare translation.
+            quote! {
+                {
+                    let __aether_pos = #pos;
+                    let __aether_dir = #dir;
+                    let __aether_eye = ::boyko_math::Vec3::new(
+                        __aether_pos[0], __aether_pos[1], __aether_pos[2]
+                    );
+                    let __aether_pose = ::boyko_math::Affine3A::look_at_rh(
+                        __aether_eye,
+                        __aether_eye + ::boyko_math::Vec3::new(
+                            __aether_dir[0], __aether_dir[1], __aether_dir[2]
+                        ),
+                        ::boyko_math::Vec3::new(0.0, 1.0, 0.0),
+                    );
+                    ::boyko_render::SpotLightObject {
+                        transform: ::boyko_scene::Transform {
+                            translation: __aether_eye,
+                            rotation: ::boyko_math::Quat::from_mat3(__aether_pose.matrix3),
+                            scale: ::boyko_math::Vec3::ONE,
+                        },
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        light: ::boyko_render::SpotLight::new(
+                            __aether_pos, __aether_dir, #color, #power, #range, #inner, #outer
+                        ),
+                    }
+                }
+            }
+        }
+        NodeHead::Camera => {
+            let transform = at_tokens(node.at.as_ref());
+            let fov = scalar_or(node, 0, quote!(60.0));
+            let aspect = scalar(node, 1)?;
+            let near = scalar_or(node, 2, quote!(0.1));
+            let far = scalar_or(node, 3, quote!(1000.0));
+            // `fov` is authored in DEGREES; the multiply (rather than `.to_radians()`) keeps the
+            // whole expression `f32` — a method call on a bare float literal would infer `f64`
+            // and then fail against the `f32` field.
+            quote! {
+                ::boyko_scene::CameraRig {
+                    transform: #transform,
+                    global: ::boyko_scene::GlobalTransform::IDENTITY,
+                    camera: ::boyko_scene::Camera::DEFAULT,
+                    projection: ::boyko_scene::Projection::Perspective {
+                        fov_y: (#fov) * (::core::f32::consts::PI / 180.0),
+                        aspect: #aspect,
+                        near: #near,
+                        far: #far,
+                    },
+                }
+            }
+        }
+        NodeHead::Sdf(edit) => quote!(::boyko_render::SdfPrimitive(#edit)),
+        NodeHead::Entity => match &node.at {
+            // A bare `entity` with no pose spawns EMPTY and takes only its component exprs — the
+            // `ui!` shape. With a pose it takes the engine's own placed-anchor preset, so the
+            // `GlobalTransform` slot `propagate_transforms` fills is present from spawn.
+            None => return Ok(quote!(#cmds.spawn_empty())),
+            Some(_) => {
+                let transform = at_tokens(node.at.as_ref());
+                quote! {
+                    ::boyko_scene::SpatialBundle {
+                        transform: #transform,
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        visibility: ::boyko_scene::Visibility::default(),
+                    }
+                }
+            }
+        },
+    };
+    Ok(quote!(#cmds.spawn(#bundle)))
+}
+
+/// A node's pose: the §3.7 translation sugar, a verbatim `Transform` expression, or the identity
+/// for a node that declared none (the shipped `MeshBundle::new(floor, Transform::IDENTITY)` form).
+fn at_tokens(at: Option<&AtPose>) -> TokenStream {
+    match at {
+        None => quote!(::boyko_scene::Transform::IDENTITY),
+        Some(AtPose::Verbatim(e)) => quote!(#e),
+        Some(AtPose::Translation(c)) => {
+            let (x, y, z) = (&c[0], &c[1], &c[2]);
+            quote! {
+                ::boyko_scene::Transform::from_translation(::boyko_math::Vec3::new(#x, #y, #z))
+            }
+        }
+    }
+}
+
+/// A REQUIRED `Tuple3` key slot as an `[x, y, z]` array literal.
+///
+/// The parser fills slots in table order and refuses a node whose required row is absent, so this
+/// cannot fail from user input. It still returns a `Result` rather than panicking: §8 R3's
+/// never-panic contract says an internal invariant failure becomes a SPANNED error (which keeps
+/// rust-analyzer's view of the file alive), not a macro panic (which erases the whole block).
+fn tuple3(node: &SceneNode, slot: usize) -> syn::Result<TokenStream> {
+    match node.keys.get(slot) {
+        Some(Some(NodeKeyValue::Tuple(c))) => Ok(quote!([#(#c),*])),
+        _ => Err(missing_slot(node, slot, "3-tuple")),
+    }
+}
+
+/// An OPTIONAL `Tuple3` key slot, or its default.
+fn tuple3_or(node: &SceneNode, slot: usize, default: TokenStream) -> TokenStream {
+    match node.keys.get(slot) {
+        Some(Some(NodeKeyValue::Tuple(c))) => quote!([#(#c),*]),
+        _ => default,
+    }
+}
+
+/// A REQUIRED `Scalar` key slot, verbatim. Fallible for the [`tuple3`] reason.
+fn scalar(node: &SceneNode, slot: usize) -> syn::Result<TokenStream> {
+    match node.keys.get(slot) {
+        Some(Some(NodeKeyValue::Scalar(e))) => Ok(quote!(#e)),
+        _ => Err(missing_slot(node, slot, "scalar")),
+    }
+}
+
+/// An OPTIONAL `Scalar` key slot, or its default.
+fn scalar_or(node: &SceneNode, slot: usize, default: TokenStream) -> TokenStream {
+    match node.keys.get(slot) {
+        Some(Some(NodeKeyValue::Scalar(e))) => quote!(#e),
+        _ => default,
+    }
+}
+
+/// The §8 R3 fallback: a key table row the expander expected and the parse did not deliver. Not
+/// reachable from user input — the message says so, so a reader who ever sees it knows it is an
+/// Aether bug and not their syntax.
+fn missing_slot(node: &SceneNode, slot: usize, shape: &str) -> syn::Error {
+    let name = node.head.keys().get(slot).map_or("<unknown>", |k| k.name);
+    diag::err(
+        node.head_span,
+        format!(
+            "internal aether error: the `{}` node's required `{name}:` {shape} slot was not filled by the parser — please report this block",
+            node.head.kw()
+        ),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    //! The A0 snapshot channel (see the crate doc's macrotest note): `expand_block` is a plain
+    //! function, and these tests pin its output token-for-token — parse and expansion in one
+    //! assertion, against the §3.1 before/after pair VERBATIM.
+
+    use quote::quote;
+
+    /// Normalized (whitespace-insensitive) token equality: `TokenStream::to_string` is already
+    /// canonical for identical streams, so a plain string compare IS token equality.
+    fn expands_to(input: proc_macro2::TokenStream, expected: proc_macro2::TokenStream) {
+        let got = crate::expand_block(input).to_string();
+        let want = expected.to_string();
+        assert_eq!(got, want, "expansion drifted from the pinned §3.1 surface");
+    }
+
+    #[test]
+    fn the_section_3_1_before_after_pair_holds_verbatim() {
+        expands_to(
+            quote! {
+                component Health {
+                    current: f32,
+                    max: f32,
+                    requires Regen,
+                    on_add = heal_full,
+                }
+
+                tag Player;
+                tag Stunned(bitset);
+            },
+            quote! {
+                #[derive(::boyko_macros::Component)]
+                #[require(Regen)]
+                #[component(on_add = heal_full)]
+                pub struct Health {
+                    pub current: f32,
+                    pub max: f32
+                }
+                #[derive(::boyko_macros::Component)]
+                pub struct Player;
+                #[derive(::boyko_macros::Component)]
+                #[component(storage = "bitset")]
+                pub struct Stunned;
+            },
+        );
+    }
+
+    #[test]
+    fn no_bundle_and_multi_requires_and_every_hook_key_forward() {
+        expands_to(
+            quote! {
+                component Rig {
+                    bone: u32,
+                    requires A, b::C,
+                    on_insert = f::g,
+                    on_remove = h,
+                    no_bundle,
+                }
+            },
+            quote! {
+                #[derive(::boyko_macros::Component)]
+                #[require(A, b::C)]
+                #[component(on_insert = f::g, on_remove = h, no_bundle)]
+                pub struct Rig {
+                    pub bone: u32
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn a_fieldless_component_is_a_plain_zst() {
+        expands_to(
+            quote! { component Marker {} },
+            quote! {
+                #[derive(::boyko_macros::Component)]
+                pub struct Marker {}
+            },
+        );
+    }
+
+    /// Every diagnostic below asserts the MESSAGE (the contract a user reads), not the span —
+    /// span pinning is rung A7's column-exact sweep.
+    fn fails_with(input: proc_macro2::TokenStream, needle: &str) {
+        let out = crate::expand_block(input).to_string();
+        assert!(
+            out.contains("compile_error") && out.contains(needle),
+            "expected a compile_error containing {needle:?}, got: {out}"
+        );
+    }
+
+    #[test]
+    fn the_section_3_2_and_3_4_pairs_hold_verbatim() {
+        expands_to(
+            quote! {
+                bundle Projectile {
+                    pos: Position,
+                    vel: Velocity,
+                }
+            },
+            quote! {
+                #[derive(::boyko_macros::Bundle)]
+                pub struct Projectile {
+                    pub pos: Position,
+                    pub vel: Velocity
+                }
+            },
+        );
+        expands_to(
+            quote! {
+                event Damage {
+                    victim: entity(Position, Health),
+                    amount: f32,
+                }
+            },
+            quote! {
+                #[::boyko_macros::event]
+                pub struct Damage {
+                    #[participant(components = "Position, Health")]
+                    pub victim: ::boyko_ecs::ecs::core::entity::entity::Entity,
+                    #[parameter]
+                    pub amount: f32
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn a1_diagnostics_fire_where_the_plan_says() {
+        // The 17th field carries the arity error's span-friendly message.
+        let mut fields = proc_macro2::TokenStream::new();
+        for i in 0..17 {
+            let f = proc_macro2::Ident::new(&format!("f{i}"), proc_macro2::Span::call_site());
+            fields.extend(quote! { #f: u32, });
+        }
+        fails_with(quote! { bundle Fat { #fields } }, "bundle arity is capped at 16");
+        // A participant without its component context is refused, never defaulted.
+        fails_with(
+            quote! { event E { victim: entity, } },
+            "participant fields name their component context",
+        );
+        // `entity` stays contextual: a qualified path is an ordinary parameter type.
+        expands_to(
+            quote! { event E { thing: my::entity, } },
+            quote! {
+                #[::boyko_macros::event]
+                pub struct E {
+                    #[parameter]
+                    pub thing: my::entity
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn unknown_construct_lists_the_registry_and_suggests() {
+        fails_with(
+            quote! { compnent Health {} },
+            "unknown construct `compnent`",
+        );
+        fails_with(quote! { compnent Health {} }, "did you mean `component`?");
+    }
+
+    /// The planned-construct arm is GONE, and this test is the proof it went cleanly.
+    ///
+    /// Rung A6 landed `scene`, the last construct §9 listed as planned, so every keyword in
+    /// `CONSTRUCT_KEYWORDS` now dispatches and an unrecognized head is unambiguously a
+    /// misspelling. Two ways this could have gone wrong, both asserted here: the arm could have
+    /// outlived its construct (a shipped `scene` still reported "lands at rung A6" — the exact
+    /// drift the A5 version of this test was written to catch, one rung earlier), or removing it
+    /// could have taken the canonical unknown-construct path with it, leaving a near-miss on
+    /// `scene` with no suggestion.
+    #[test]
+    fn no_planned_construct_remains_and_a_near_miss_still_suggests() {
+        // `scene` is REAL: an empty scene expands, and nothing mentions a rung.
+        let out = crate::expand_block(quote! { scene lab {} }).to_string();
+        assert!(!out.contains("compile_error"), "a shipped construct must not error: {out}");
+        assert!(!out.contains("rung A6"), "the planned-construct arm outlived its rung: {out}");
+        // A near-miss on it takes the §6.1 canonical path, list and did-you-mean intact.
+        fails_with(quote! { scen lab {} }, "unknown construct `scen`");
+        fails_with(quote! { scen lab {} }, "did you mean `scene`?");
+        // `material` shipped at A5, and the same rule holds for it — a construct that stays
+        // "planned" after it lands is the one drift these two lines can catch.
+        fails_with(quote! { material gold {} }, "needs a `base:` color");
+    }
+
+    // -------------------------------------------------------- night-review fixes (A0/A1 scope)
+
+    /// The review's MAJOR: a participant context the derive's comma-split ident channel cannot
+    /// carry must be refused HERE, on the user's tokens — never forwarded into a downstream
+    /// proc-macro panic with no span.
+    #[test]
+    fn participant_context_rejects_paths_and_generics_on_the_users_span() {
+        fails_with(
+            quote! { event E { hit: entity(foo::Bar), } },
+            "bare component idents",
+        );
+        fails_with(
+            quote! { event E { hit: entity(Slot<A, B>), } },
+            "bare component idents",
+        );
+        // The plain form still passes untouched.
+        expands_to(
+            quote! { event E { hit: entity(Health), } },
+            quote! {
+                #[::boyko_macros::event]
+                pub struct E {
+                    #[participant(components = "Health")]
+                    pub hit: ::boyko_ecs::ecs::core::entity::entity::Entity
+                }
+            },
+        );
+    }
+
+    /// The review's position-dependence: a path whose FIRST segment spells a keyword parses
+    /// the same at every list position (`ident ::` continues a path, bare keywords open items).
+    #[test]
+    fn requires_list_accepts_keyword_headed_paths_at_every_position() {
+        expands_to(
+            quote! { component X { requires A, no_bundle::C, on_add = f } },
+            quote! {
+                #[derive(::boyko_macros::Component)]
+                #[require(A, no_bundle::C)]
+                #[component(on_add = f)]
+                pub struct X {}
+            },
+        );
+    }
+
+    /// The review's Unicode finding: a name the ASCII probe cannot classify must not produce a
+    /// self-identical rename suggestion; `char::is_uppercase` accepts any titled spelling.
+    #[test]
+    fn unicode_names_pass_the_case_gate_or_fail_without_a_useless_rename() {
+        // A Cyrillic-titled component is UpperCamelCase in its own script — accepted.
+        expands_to(
+            quote! { component Здоровье { hp: f32 } },
+            quote! {
+                #[derive(::boyko_macros::Component)]
+                pub struct Здоровье {
+                    pub hp: f32
+                }
+            },
+        );
+        // A lowercase Cyrillic name still fails, WITH a real (different) suggestion.
+        fails_with(quote! { component здоровье { hp: f32 } }, "rename `здоровье` to `Здоровье`");
+    }
+
+    // ------------------------------------------------------------------ rung A2: system+plugin
+
+    /// The §3.3 before/after pair, verbatim — with the REAL nested engine paths substituted for
+    /// the plan's idealized `::boyko_ecs::Res` (the root re-exports only App/Plugin/…; tokens
+    /// must RESOLVE — the A1 Entity precedent), and the plan's `…` bodies made concrete.
+    #[test]
+    fn the_section_3_3_before_after_pair_holds_verbatim() {
+        expands_to(
+            quote! {
+                plugin Movement;
+
+                system read_input(actions: res<ActionState>, mut cmds: commands)
+                    on update in InputSet
+                {
+                    let _ = (&actions, &mut cmds);
+                }
+
+                system apply_velocity(q: query<(&mut Transform, &Velocity), with Player, without Frozen>,
+                                      time: res<Time>)
+                    on update
+                    after read_input
+                    when in_state(GameFlow::Playing)
+                {
+                    for (t, v) in &mut q {
+                        t.translation += v.linear * time.delta_secs();
+                    }
+                }
+            },
+            quote! {
+                pub struct Movement;
+                impl ::boyko_ecs::Plugin for Movement {
+                    fn build(&self, app: &mut ::boyko_ecs::App) {
+                        app.add_systems_cfg(|b| {
+                            let __aether_k_read_input = b.add_system(read_input).in_set(InputSet).key();
+                            b.add_system(apply_velocity).after(__aether_k_read_input).run_if(in_state(GameFlow::Playing));
+                        });
+                    }
+                    fn name(&self) -> &'static str { "Movement" }
+                }
+                #[allow(clippy::too_many_arguments)]
+                pub fn read_input(
+                    actions: ::boyko_ecs::ecs::core::system::Res<ActionState>,
+                    mut cmds: ::boyko_ecs::ecs::core::system::Commands
+                ) {
+                    let _ = (&actions, &mut cmds);
+                }
+                #[allow(clippy::too_many_arguments)]
+                pub fn apply_velocity(
+                    mut q: ::boyko_ecs::ecs::core::iters::query::Query<
+                        (&mut Transform, &Velocity),
+                        (::boyko_ecs::ecs::core::iters::query::With<Player>,
+                         ::boyko_ecs::ecs::core::iters::query::Without<Frozen>)
+                    >,
+                    time: ::boyko_ecs::ecs::core::system::Res<Time>
+                ) {
+                    for (t, v) in &mut q {
+                        t.translation += v.linear * time.delta_secs();
+                    }
+                }
+            },
+        );
+    }
+
+    /// A clause-free system needs no plugin and expands to a bare fn — nothing else.
+    #[test]
+    fn a_clause_free_system_is_a_plain_fn_without_a_plugin() {
+        expands_to(
+            quote! { system tick(n: mut res<Counter>) { n.0 += 1; } },
+            quote! {
+                #[allow(clippy::too_many_arguments)]
+                pub fn tick(mut n: ::boyko_ecs::ecs::core::system::ResMut<Counter>) { n.0 += 1; }
+            },
+        );
+    }
+
+    /// The mutability-inference table: query-with-&mut, mut res, commands, emit and events get
+    /// `mut` bindings; plain res / read-only query / verbatim escapes do not. `Mutation` as a
+    /// type name must NOT false-positive (the token-level scan, not a substring scan).
+    #[test]
+    fn mutability_inference_follows_the_param_table() {
+        expands_to(
+            quote! {
+                system s(a: query<&T>, b: query<&mut T>, c: res<R>, d: events<E>, e: emit<E>,
+                         f: query<&Mutation>, g: local<u32>) {}
+            },
+            quote! {
+                #[allow(clippy::too_many_arguments)]
+                pub fn s(
+                    a: ::boyko_ecs::ecs::core::iters::query::Query<&T>,
+                    mut b: ::boyko_ecs::ecs::core::iters::query::Query<&mut T>,
+                    c: ::boyko_ecs::ecs::core::system::Res<R>,
+                    mut d: ::boyko_ecs::ecs::core::system::EventReader<E>,
+                    mut e: ::boyko_ecs::ecs::core::system::EventWriter<E>,
+                    f: ::boyko_ecs::ecs::core::iters::query::Query<&Mutation>,
+                    g: ::boyko_ecs::ecs::core::system::Local<u32>
+                ) {}
+            },
+        );
+    }
+
+    /// Schedule routing: startup one-shots lead, Fixed lands in `add_systems_cfg_in`, a single
+    /// filter stays bare (no 1-tuple), a non-sibling path becomes `after_set`, and the verbatim
+    /// escape hatch passes any real SystemParam through untouched.
+    #[test]
+    fn schedules_sets_and_the_escape_hatch_route_correctly() {
+        expands_to(
+            quote! {
+                plugin Sim;
+                system boot(mut cmds: commands) on startup { let _ = &mut cmds; }
+                system step(q: query<&mut Body, with Alive>) on fixed after PhysicsSet { let _ = &mut q; }
+                system draw(dev: NonSendRes<Gpu>) on update { let _ = &dev; }
+            },
+            quote! {
+                pub struct Sim;
+                impl ::boyko_ecs::Plugin for Sim {
+                    fn build(&self, app: &mut ::boyko_ecs::App) {
+                        app.add_startup_system(boot);
+                        app.add_systems_cfg(|b| {
+                            b.add_system(draw);
+                        });
+                        app.add_systems_cfg_in(::boyko_ecs::ecs::core::app::CoreSchedule::Fixed, |b| {
+                            b.add_system(step).after_set(PhysicsSet);
+                        });
+                    }
+                    fn name(&self) -> &'static str { "Sim" }
+                }
+                #[allow(clippy::too_many_arguments)]
+                pub fn boot(mut cmds: ::boyko_ecs::ecs::core::system::Commands) { let _ = &mut cmds; }
+                #[allow(clippy::too_many_arguments)]
+                pub fn step(
+                    mut q: ::boyko_ecs::ecs::core::iters::query::Query<
+                        &mut Body,
+                        ::boyko_ecs::ecs::core::iters::query::With<Alive>
+                    >
+                ) { let _ = &mut q; }
+                #[allow(clippy::too_many_arguments)]
+                pub fn draw(dev: NonSendRes<Gpu>) { let _ = &dev; }
+            },
+        );
+    }
+
+    /// A sibling `before` edge still emits the TARGET first (its key must exist), with
+    /// `.before(key)` on the referrer.
+    #[test]
+    fn sibling_before_captures_the_targets_key() {
+        expands_to(
+            quote! {
+                plugin P;
+                system a() on update before z {}
+                system z() on update {}
+            },
+            quote! {
+                pub struct P;
+                impl ::boyko_ecs::Plugin for P {
+                    fn build(&self, app: &mut ::boyko_ecs::App) {
+                        app.add_systems_cfg(|b| {
+                            let __aether_k_z = b.add_system(z).key();
+                            b.add_system(a).before(__aether_k_z);
+                        });
+                    }
+                    fn name(&self) -> &'static str { "P" }
+                }
+                #[allow(clippy::too_many_arguments)]
+                pub fn a() {}
+                #[allow(clippy::too_many_arguments)]
+                pub fn z() {}
+            },
+        );
+    }
+
+    // ------------------------------------------------------------------ rung A3: machine
+
+    /// The §3.5 before/after pair, verbatim — as the LOWERING it became at rung R2.
+    ///
+    /// Aether no longer flattens a chart. `machine` lowers to one
+    /// `::boyko_macros::state_chart!` invocation, and the leaf enum, the LCA chains, the per-leaf
+    /// route merge and the registrations are emitted THERE (v2 DECISION C7 — one codegen
+    /// authority, so a hand-written chart and an Aether `machine` cannot drift apart). The
+    /// §3.5 output this test used to pin — four leaves, the superstate predicate, the inlined
+    /// exit/enter chains — is pinned by `boyko_macros::state_chart::tests` and executed by
+    /// `aether_tests/tests/a4_machine_hierarchy.rs` against a real `App`.
+    ///
+    /// What is pinned here is Aether's whole remaining half, and it is not nothing:
+    ///
+    /// * the **de-sugaring table** — `commands` → `Commands`, `res<Score>` → `Res<Score>` — which
+    ///   is Aether's alone, because `state_chart!` takes real Rust types and knows no sugar;
+    /// * **verbatim pass-through** of every user token: state names, event paths, the guard
+    ///   expression, the action and handler bodies. A lowering that re-minted any of them would
+    ///   keep every downstream message word-for-word while moving its caret onto the `aether!`
+    ///   token;
+    /// * **source order**, which is semantic — see `the_lowering_replays_source_order` below;
+    /// * the plugin registering through the two generated fns rather than re-deriving which leaf
+    ///   is initial.
+    #[test]
+    fn the_section_3_5_before_after_pair_holds_verbatim() {
+        expands_to(
+            quote! {
+                plugin Flow;
+
+                machine GameFlow {
+                    initial Boot;
+
+                    state Boot {
+                        on AssetsReady => Playing;
+                    }
+
+                    state Playing {
+                        initial Running;
+                        enter (mut cmds: commands) { cmds.spawn(Hud); }
+                        exit (mut cmds: commands) { cmds.despawn_hud(); }
+
+                        state Running {
+                            on PausePressed => Playing.Paused;
+                        }
+                        state Paused {
+                            on PausePressed => Playing.Running;
+                        }
+
+                        on PlayerDied (score: res<Score>) if score.lives == 0 => GameOver {
+                        }
+                    }
+
+                    state GameOver {
+                        on RestartPressed => Boot;
+                    }
+                }
+            },
+            quote! {
+                pub struct Flow;
+                impl ::boyko_ecs::Plugin for Flow {
+                    fn build(&self, app: &mut ::boyko_ecs::App) {
+                        __state_chart_install_game_flow(app);
+                        app.add_systems_cfg(|b| {
+                            __state_chart_systems_game_flow(b);
+                        });
+                    }
+                    fn name(&self) -> &'static str { "Flow" }
+                }
+                ::boyko_macros::state_chart! {
+                    chart GameFlow;
+                    initial Boot;
+                    state Boot {
+                        on AssetsReady => Playing;
+                    }
+                    state Playing {
+                        initial Running;
+                        enter (mut cmds: ::boyko_ecs::ecs::core::system::Commands) {
+                            cmds.spawn(Hud);
+                        }
+                        exit (mut cmds: ::boyko_ecs::ecs::core::system::Commands) {
+                            cmds.despawn_hud();
+                        }
+                        state Running {
+                            on PausePressed => Playing.Paused;
+                        }
+                        state Paused {
+                            on PausePressed => Playing.Running;
+                        }
+                        on PlayerDied (score: ::boyko_ecs::ecs::core::system::Res<Score>)
+                            if score.lives == 0 => GameOver { }
+                    }
+                    state GameOver {
+                        on RestartPressed => Boot;
+                    }
+                }
+            },
+        );
+    }
+
+    /// Rung A3's chart diagnostics MOVED at R2, and this test records where — a deleted test is
+    /// indistinguishable from a lost gate.
+    ///
+    /// The unknown `initial`, the composite target with no `initial`, the duplicate handler and
+    /// the merged-param conflict are now raised by `boyko_macros::state_chart!`, because that is
+    /// where the flattening lives. They are asserted twice over: as unit tests in
+    /// `boyko_macros::state_chart::tests`, and — the half a user meets — as trybuild goldens under
+    /// `aether_tests/tests/ui/machine_*.rs`, which pin the MESSAGE together with the line and
+    /// column it lands on. Those goldens are the reason the move is verifiable at all: MEASURED,
+    /// eight of the nine that existed before it passed it BYTE-IDENTICAL, so the extra macro layer
+    /// demonstrably adds no expansion backtrace and moves no caret. (The ninth,
+    /// `machine_snake_collapse_collision`, changed because the merge deleted the per-event half of
+    /// the generated name — a real semantic change, not a rendering artifact.)
+    ///
+    /// What stays here is the one machine fault Aether still owns, because it is a BLOCK rule
+    /// rather than a chart rule: a `machine` is registered by a sibling `plugin`, so a block
+    /// without one has nowhere to put the registration.
+    #[test]
+    fn a3_diagnostics_fire_where_the_plan_says() {
+        fails_with(
+            quote! { machine M { initial A; state A {} } },
+            "a `machine` needs a `plugin <Name>;` declaration",
+        );
+    }
+
+    // ------------------------------------------------------- rung A4: machine hierarchy depth
+
+    /// A three-level chart's lowering: nesting, per-level `initial`, and the de-sugaring of a
+    /// handler whose params come from two different rows of the sugar table (`commands` and
+    /// `mut res<T>`) in one list.
+    ///
+    /// The SEMANTICS this test used to pin — the initial-enter chain running the whole ancestor
+    /// path once, and the LCA bound keeping an intra-`Field` hop from re-entering `World` — moved
+    /// with the flattening. They are pinned as tokens by
+    /// `boyko_macros::state_chart::tests::an_intra_composite_hop_replays_only_the_leafs_own_enter`
+    /// and executed against a real `App` by
+    /// `aether_tests::a4_machine_hierarchy::the_section_5_3_initial_enter_chain_runs_the_whole_ancestor_path_once`.
+    #[test]
+    fn the_section_5_3_initial_enter_chain_and_the_lca_bound_hold_verbatim() {
+        expands_to(
+            quote! {
+                plugin Boot;
+
+                machine Sim {
+                    initial World;
+
+                    state World {
+                        initial Field;
+                        enter (mut cmds: commands) { cmds.spawn(Ground); }
+
+                        state Field {
+                            initial Idle;
+                            enter (mut cmds: commands, log: mut res<Probe>) { log.field += 1; }
+
+                            state Idle {
+                                enter (log: mut res<Probe>) { log.idle += 1; }
+                                on Go => World.Field.Busy;
+                            }
+                            state Busy {
+                                on Stop => World.Field.Idle;
+                            }
+                        }
+                    }
+                }
+            },
+            quote! {
+                pub struct Boot;
+                impl ::boyko_ecs::Plugin for Boot {
+                    fn build(&self, app: &mut ::boyko_ecs::App) {
+                        __state_chart_install_sim(app);
+                        app.add_systems_cfg(|b| {
+                            __state_chart_systems_sim(b);
+                        });
+                    }
+                    fn name(&self) -> &'static str { "Boot" }
+                }
+                ::boyko_macros::state_chart! {
+                    chart Sim;
+                    initial World;
+                    state World {
+                        initial Field;
+                        enter (mut cmds: ::boyko_ecs::ecs::core::system::Commands) {
+                            cmds.spawn(Ground);
+                        }
+                        state Field {
+                            initial Idle;
+                            enter (
+                                mut cmds: ::boyko_ecs::ecs::core::system::Commands,
+                                mut log: ::boyko_ecs::ecs::core::system::ResMut<Probe>
+                            ) {
+                                log.field += 1;
+                            }
+                            state Idle {
+                                enter (mut log: ::boyko_ecs::ecs::core::system::ResMut<Probe>) {
+                                    log.idle += 1;
+                                }
+                                on Go => World.Field.Busy;
+                            }
+                            state Busy {
+                                on Stop => World.Field.Idle;
+                            }
+                        }
+                    }
+                }
+            },
+        );
+    }
+
+    /// A machine's whole plugin footprint is TWO calls, whatever the chart contains: which leaf
+    /// is initial, whether that leaf's ancestors declare an `enter`, and which leaves own systems
+    /// are all knowledge the flattening keeps to itself.
+    ///
+    /// That is the structural half of "Aether stops being a codegen authority". The plugin body
+    /// below is byte-identical for a one-state chart and for a forty-state one, so the two crates
+    /// can never disagree about a registration — there is nothing to disagree about.
+    ///
+    /// (Whether the enterless chain emits a startup system at all is `state_chart!`'s decision,
+    /// pinned by `boyko_macros::state_chart::tests::an_enterless_initial_chain_emits_no_startup_system`.)
+    #[test]
+    fn a_machines_plugin_footprint_is_two_generated_calls() {
+        expands_to(
+            quote! {
+                plugin P;
+                machine M {
+                    initial A;
+                    state A { initial B; state B {} }
+                }
+            },
+            quote! {
+                pub struct P;
+                impl ::boyko_ecs::Plugin for P {
+                    fn build(&self, app: &mut ::boyko_ecs::App) {
+                        __state_chart_install_m(app);
+                        app.add_systems_cfg(|b| {
+                            __state_chart_systems_m(b);
+                        });
+                    }
+                    fn name(&self) -> &'static str { "P" }
+                }
+                ::boyko_macros::state_chart! {
+                    chart M;
+                    initial A;
+                    state A { initial B; state B { } }
+                }
+            },
+        );
+    }
+
+    /// Assert `first` is emitted before `second` — for contracts about ORDER, where a full
+    /// token pin would bury the one claim being made.
+    fn emits_in_order(input: proc_macro2::TokenStream, first: &str, second: &str) {
+        let out = crate::expand_block(input).to_string();
+        let (i, j) = (out.find(first), out.find(second));
+        assert!(
+            matches!((i, j), (Some(a), Some(b)) if a < b),
+            "expected {first:?} before {second:?}, got: {out}"
+        );
+    }
+
+    /// ⚠ **The lowering's emission order is SEMANTIC.** Arbitration between two routes accepted on
+    /// one frame is first-declared-wins (v2 DECISION M6), and `state_chart!` derives declaration
+    /// order from the order its own parser walks the chart — so whatever order Aether emits IS the
+    /// order that arbitrates.
+    ///
+    /// Aether's AST stores a state's transitions and its children in two separate lists, which
+    /// loses how the author INTERLEAVED them. The naive re-emission — every transition, then every
+    /// child — puts a composite's own handler ahead of its children's on every leaf that inherits
+    /// it, which is the opposite of the source whenever the composite's handler was written last.
+    /// It compiles, it runs, and it silently picks the other winner. `interleaved_body` replays
+    /// `decl_index` instead, and this test is what makes that replay falsifiable.
+    ///
+    /// Both directions are asserted, so the property is "tracks the SOURCE" rather than any fixed
+    /// leaf-versus-ancestor rule that would satisfy one case by accident.
+    #[test]
+    fn the_lowering_replays_source_order() {
+        // Superstate handler written FIRST, leaf handler second.
+        emits_in_order(
+            quote! {
+                plugin P;
+                machine M {
+                    initial P0;
+                    state P0 {
+                        initial A;
+                        on E1 => X;
+                        state A { on E2 => X; }
+                    }
+                    state X {}
+                }
+            },
+            "E1",
+            "E2",
+        );
+        // …and the reverse source order lowers the other way round.
+        emits_in_order(
+            quote! {
+                plugin P;
+                machine M {
+                    initial P0;
+                    state P0 {
+                        initial A;
+                        state A { on E2 => X; }
+                        on E1 => X;
+                    }
+                    state X {}
+                }
+            },
+            "E2",
+            "E1",
+        );
+    }
+
+    /// `Expr::Let` is a real expression node, legal only as an `if`/`while` scrutinee. Aether
+    /// splices guards into `if !(…)` and conditions into `.run_if(…)`, where it is not valid
+    /// Rust — so it is refused on the user's own `let`.
+    #[test]
+    fn let_bindings_are_refused_as_guards_and_run_conditions() {
+        fails_with(
+            quote! { plugin P; system s() on update when let Some(x) = f() {} },
+            "`let` bindings are not usable as a run condition",
+        );
+        fails_with(
+            quote! {
+                plugin P;
+                machine M {
+                    initial A;
+                    state A { on E if let Some(_) = q => A; }
+                }
+            },
+            "`let` bindings are not usable as a transition guard",
+        );
+    }
+
+    /// A raw ident prints WITH its `r#` escape, so the case gate must classify the escaped
+    /// spelling — otherwise `r#Foo` is refused for starting with `r`, and the suggested rename
+    /// (`R#Foo`) is not a legal identifier at all.
+    #[test]
+    fn the_case_gate_reads_through_a_raw_ident_escape() {
+        expands_to(
+            quote! { component r#Foo { x: u32 } },
+            quote! {
+                #[derive(::boyko_macros::Component)]
+                pub struct r#Foo {
+                    pub x: u32
+                }
+            },
+        );
+        fails_with(quote! { component r#health { hp: f32 } }, "rename `r#health` to `Health`");
+    }
+
+    /// Rung A4's chart diagnostics moved to `boyko_macros::state_chart!` at R2, with the
+    /// flattening that raises them. The full list — flattened-name collision, duplicate sibling,
+    /// `initial` on a childless state, an unreferenced composite's typo, the predicate collapse,
+    /// a shadowed handler's target, and the merged-param conflict on both the leaf-routes and the
+    /// initial-`enter` sites — is asserted in `boyko_macros::state_chart::tests` and pinned with
+    /// its spans by the `aether_tests/tests/ui/machine_*.rs` goldens.
+    ///
+    /// **One of them is gone rather than moved, and that is deliberate.** Under one system per
+    /// (leaf, event), the generated fn name carried the event's LAST path segment, so `on a::E`
+    /// and `on b::E` on one leaf minted the same name and had to be refused. The route merge
+    /// deletes that name component — a leaf's system is named for the leaf alone — so the refusal
+    /// has no ground left. Two distinct event paths on one leaf are now two indexed readers in one
+    /// signature, arbitrated first-declared-wins like any other pair. Keeping the refusal would
+    /// have meant synthesizing a name nothing generates in order to collide with it.
+    ///
+    /// What this test still owns is Aether's half: the lowering must be FAITHFUL. Every one of
+    /// those diagnostics is raised against tokens Aether handed over, so a lowering that dropped a
+    /// nested state, re-minted an ident, or rewrote a guard would break the messages without
+    /// touching a single one of them.
+    #[test]
+    fn the_lowering_hands_over_the_users_own_tokens() {
+        let out = crate::expand_block(quote! {
+            plugin P;
+            machine M {
+                initial P0;
+                state P0 {
+                    initial Deep;
+                    on Outer (score: res<Score>) if score.lives == 0 => Top { score.deaths += 1; }
+                    state Deep { on a::E => Top; on b::E => Top; }
+                }
+                state Top {}
+            }
+        })
+        .to_string();
+
+        // The nesting survives, at every level.
+        assert!(out.contains("state P0"), "{out}");
+        assert!(out.contains("state Deep"), "{out}");
+        assert!(out.contains("initial Deep"), "{out}");
+        // Event paths keep their FULL spelling — inheritance dedups on it.
+        assert!(out.contains("a :: E") && out.contains("b :: E"), "{out}");
+        // The guard and the action block are verbatim user tokens, not re-parsed text.
+        assert!(out.contains("if score . lives == 0"), "{out}");
+        assert!(out.contains("score . deaths += 1"), "{out}");
+        // And two event paths on one leaf lower cleanly: the refusal's ground went with the
+        // per-event name component.
+        assert!(!out.contains("compile_error"), "{out}");
+    }
+
+    #[test]
+    fn a2_diagnostics_fire_where_the_plan_says() {
+        // §3.3: parens instead of angle brackets on query.
+        fails_with(
+            quote! { system s(q: query(&mut T)) {} },
+            "query takes angle brackets",
+        );
+        // §3.3: duplicate `on`.
+        fails_with(
+            quote! { plugin P; system s() on update on fixed {} },
+            "duplicate schedule clause; a system runs on exactly one schedule",
+        );
+        // §3.3: clauses need the plugin header.
+        fails_with(
+            quote! { system s() on update {} },
+            "need a `plugin <Name>;` declaration",
+        );
+        // §3.3: startup rejects every other clause.
+        fails_with(
+            quote! { plugin P; system s() on startup in SomeSet {} },
+            "rejected on startup systems",
+        );
+        // Cross-schedule sibling ordering is not expressible.
+        fails_with(
+            quote! { plugin P; system a() on fixed {} system c() on update after a {} },
+            "runs on a different schedule",
+        );
+        // Ordering against a startup system is meaningless.
+        fails_with(
+            quote! { plugin P; system a() on startup {} system c() on update after a {} },
+            "cannot be ordered against",
+        );
+        // A sibling ordering cycle is caught at expansion, before the engine's own check.
+        fails_with(
+            quote! { plugin P; system a() on update after c {} system c() on update after a {} },
+            "system ordering cycle",
+        );
+        // The did-you-mean deviation: a near-miss bare ident errors with the note's text.
+        fails_with(
+            quote! { plugin P; system read_input() on update {} system s() on update after read_inpt {} },
+            "a sibling `read_input` exists",
+        );
+        // Unknown filter with a suggestion.
+        fails_with(
+            quote! { system s(q: query<&T, wih P>) {} },
+            "unknown query filter `wih`",
+        );
+        // Unknown clause with a suggestion.
+        fails_with(
+            quote! { plugin P; system s() afterr X {} },
+            "unknown clause `afterr`",
+        );
+        // One plugin per block.
+        fails_with(
+            quote! { plugin A; plugin B; },
+            "one `plugin` per aether block",
+        );
+        // Case conventions on both new constructs.
+        fails_with(quote! { plugin movement; }, "rename `movement` to `Movement`");
+        fails_with(quote! { system Foo() {} }, "system names are snake_case");
+    }
+
+    #[test]
+    fn case_convention_diagnosed_with_a_rename() {
+        fails_with(quote! { component health { hp: f32 } }, "rename `health` to `Health`");
+        fails_with(quote! { tag player; }, "rename `player` to `Player`");
+    }
+
+    #[test]
+    fn duplicate_hooks_and_bad_tag_modifiers_are_refused() {
+        fails_with(
+            quote! { component A { on_add = f, on_add = g } },
+            "duplicate hook `on_add`",
+        );
+        fails_with(quote! { tag T(dense); }, "unknown tag modifier `dense`");
+    }
+
+    // ------------------------------------------------------------------------ rung A5: material
+
+    /// The §3.6 before/after pair, VERBATIM — the plan's two vb_lab materials and the exact
+    /// `Material::new` calls it prints, against the REAL engine paths (`::boyko_render::Material`
+    /// resolves as written: `boyko_render` re-exports it at the crate root).
+    ///
+    /// Pins the whole default table in one assertion: `gold` omits `reflectance`/`emissive`/
+    /// `flags` (→ `0.5`, `[0.0; 3]`, `0`), `lamp` omits `metallic` (→ `0.0`), and BOTH omit the
+    /// alpha component (→ the synthesized `1.0` lane).
+    #[test]
+    fn the_section_3_6_before_after_pair_holds_verbatim() {
+        expands_to(
+            quote! {
+                material gold  { base: (1.0, 0.72, 0.30), metallic: 1.0, roughness: 0.14 }
+                material lamp  { base: (0.02, 0.02, 0.02), roughness: 0.6, emissive: (1.6, 0.9, 0.3) }
+            },
+            quote! {
+                #[doc = " Aether material `gold`."]
+                #[inline]
+                pub fn gold() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([1.0, 0.72, 0.30, 1.0], 1.0, 0.14, 0.5, [0.0; 3], 0)
+                }
+                #[doc = " Aether material `lamp`."]
+                #[inline]
+                pub fn lamp() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([0.02, 0.02, 0.02, 1.0], 0.0, 0.6, 0.5, [1.6, 0.9, 0.3], 0)
+                }
+            },
+        );
+    }
+
+    /// The `textures:` escape (§3.6): the emission switches to `Material::with_textures` over an
+    /// explicit `MaterialGpu::new`, because that is the engine's ONLY textured constructor and
+    /// therefore the only place `MATERIAL_FLAG_TEXTURED` may be derived. Aether never mints the
+    /// bit itself.
+    ///
+    /// Also pins the 4-component `base` (explicit alpha passes through, no lane synthesized), a
+    /// non-literal channel expression, and the `flags:` key.
+    #[test]
+    fn the_textures_escape_routes_through_the_engines_only_textured_constructor() {
+        expands_to(
+            quote! {
+                material crate_box {
+                    base: (0.8, 0.8, 0.8, 0.5),
+                    metallic: BRASS_METALLIC,
+                    roughness: 0.3,
+                    reflectance: 0.35,
+                    flags: 0,
+                    textures: MaterialTextures { albedo: slot, ..MaterialTextures::NONE },
+                }
+            },
+            quote! {
+                #[doc = " Aether material `crate_box`."]
+                #[inline]
+                pub fn crate_box() -> ::boyko_render::Material {
+                    ::boyko_render::Material::with_textures(
+                        ::boyko_render::MaterialGpu::new(
+                            [0.8, 0.8, 0.8, 0.5], BRASS_METALLIC, 0.3, 0.35, [0.0; 3], 0
+                        ),
+                        MaterialTextures { albedo: slot, ..MaterialTextures::NONE }
+                    )
+                }
+            },
+        );
+    }
+
+    /// Every advertised key, all seven at once, every value non-default.
+    ///
+    /// The failure this catches is the one the unknown-key diagnostic exists to prevent, arriving
+    /// by the other door: a key the parser ACCEPTS but never threads into the emission is silently
+    /// ignored — the author sets `reflectance` and ships the default. Per-key coverage spread
+    /// across the other two tests cannot state that, because neither exercises all seven.
+    #[test]
+    fn every_advertised_key_reaches_the_emission() {
+        expands_to(
+            quote! {
+                material full {
+                    base: (0.1, 0.2, 0.3, 0.4),
+                    metallic: 0.11,
+                    roughness: 0.22,
+                    reflectance: 0.33,
+                    emissive: (0.44, 0.55, 0.66),
+                    flags: 7,
+                    textures: TEX,
+                }
+            },
+            quote! {
+                #[doc = " Aether material `full`."]
+                #[inline]
+                pub fn full() -> ::boyko_render::Material {
+                    ::boyko_render::Material::with_textures(
+                        ::boyko_render::MaterialGpu::new(
+                            [0.1, 0.2, 0.3, 0.4], 0.11, 0.22, 0.33, [0.44, 0.55, 0.66], 7
+                        ),
+                        TEX
+                    )
+                }
+            },
+        );
+    }
+
+    /// A material carries no scheduling, so it needs no `plugin` — and a block that HAS one is
+    /// unaffected: the plugin collects sibling systems, never materials. (Handles reach entities
+    /// through `scene` at rung A6; A5 stops at the builder fn.)
+    #[test]
+    fn a_material_needs_no_plugin_and_a_sibling_plugin_does_not_register_it() {
+        expands_to(
+            quote! {
+                plugin Look;
+                material chalk { base: (0.86, 0.86, 0.88) }
+            },
+            quote! {
+                pub struct Look;
+                impl ::boyko_ecs::Plugin for Look {
+                    fn build(&self, app: &mut ::boyko_ecs::App) {}
+                    fn name(&self) -> &'static str { "Look" }
+                }
+                #[doc = " Aether material `chalk`."]
+                #[inline]
+                pub fn chalk() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([0.86, 0.86, 0.88, 1.0], 0.0, 0.5, 0.5, [0.0; 3], 0)
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn a5_diagnostics_fire_where_the_plan_says() {
+        // §3.6's own example: a two-component color, refused on the TUPLE.
+        fails_with(
+            quote! { material gold { base: (1.0, 0.72) } },
+            "color takes 3 (rgb, alpha=1.0) or 4 (rgba) components",
+        );
+        // §2's case rule, with the plan's own wording and a rename.
+        fails_with(
+            quote! { material Gold { base: (1.0, 0.72, 0.30) } },
+            "material names are lowercase — they expand to builder functions, not types",
+        );
+        fails_with(quote! { material Gold { base: (1.0, 0.72, 0.30) } }, "rename `Gold` to `gold`");
+        // Unknown key: the exhaustive list plus a did-you-mean.
+        fails_with(
+            quote! { material m { base: (0.0, 0.0, 0.0), roughnes: 0.5 } },
+            "unknown material key `roughnes`; keys are: base, metallic, roughness, reflectance, emissive, flags, textures",
+        );
+        fails_with(
+            quote! { material m { base: (0.0, 0.0, 0.0), roughnes: 0.5 } },
+            "did you mean `roughness`?",
+        );
+        // `emissive` has no alpha lane — `Material::new` takes `[f32; 3]`. A 4-component emissive
+        // would otherwise expand to an `[f32; 4]` and fail in rustc against a SYNTHESIZED array.
+        fails_with(
+            quote! { material m { base: (0.0, 0.0, 0.0), emissive: (1.0, 0.5, 0.2, 1.0) } },
+            "`emissive` color takes exactly 3 components (rgb)",
+        );
+        // Every key defaults except `base` — §3.6's default table names six values and omits it.
+        fails_with(
+            quote! { material m { roughness: 0.5 } },
+            "material `m` needs a `base:` color",
+        );
+        // Last-write-wins on a repeated key would silently drop the first value.
+        fails_with(
+            quote! { material m { base: (0.0, 0.0, 0.0), base: (1.0, 1.0, 1.0) } },
+            "duplicate material key `base`",
+        );
+        // A color key given a scalar names the shape it wants.
+        fails_with(
+            quote! { material m { base: 0.5 } },
+            "`base` takes a color tuple: `(r, g, b)` or `(r, g, b, a)`",
+        );
+    }
+
+    /// Two materials of one name are one fn defined twice. MEASURED with real rustc: E0428 puts
+    /// BOTH of its labels on the `aether!` token and names no user token at all — a material
+    /// emits no derive and no trait bound, so unlike component×component there is no second,
+    /// localized error to rescue it. Aether therefore owns this one, with both spans (the
+    /// plugin×plugin shape). Cross-KIND collisions stay with rustc, which lands them well.
+    #[test]
+    fn two_materials_of_one_name_are_refused_with_both_spans() {
+        let out = crate::expand_block(quote! {
+            material twice { base: (0.0, 0.0, 0.0) }
+            material twice { base: (1.0, 1.0, 1.0) }
+        })
+        .to_string();
+        assert!(out.contains("duplicate material `twice`"), "got: {out}");
+        assert!(
+            out.contains("the first `material` of this name is here"),
+            "the SECOND span is the point of this diagnostic, got: {out}"
+        );
+        // A name reused across KINDS is rustc's, per §7.1 — it reports both a duplicate fn AND a
+        // localized second error, so an Aether pre-check could only be worse.
+        expands_to(
+            quote! {
+                material paint { base: (0.0, 0.0, 0.0) }
+                component Paint { coats: u8 }
+            },
+            quote! {
+                #[doc = " Aether material `paint`."]
+                #[inline]
+                pub fn paint() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([0.0, 0.0, 0.0, 1.0], 0.0, 0.5, 0.5, [0.0; 3], 0)
+                }
+                #[derive(::boyko_macros::Component)]
+                pub struct Paint {
+                    pub coats: u8
+                }
+            },
+        );
+    }
+
+    // ------------------------------------------------------------------------------ rung A6
+
+    /// §3.7's before/after pair VERBATIM — the vb_lab compression, token for token.
+    ///
+    /// Four spellings differ from the plan's After block, all recorded on [`super::scene_fn`]:
+    /// engine types are named by their DEFINING crate (`::boyko_scene::Transform`,
+    /// `::boyko_math::Vec3` — `boyko_render` re-exports neither), `meshes.plane(…)` is emitted
+    /// trait-qualified so the user need not have imported `MeshAssetsExt`, the `Commands` /
+    /// `NonSendResMut` / `ResMut` params carry their real nested paths (the A2 `Res` precedent),
+    /// and the four param BINDINGS are `__aether_`-prefixed per §7.2(4) — the After block's bare
+    /// `commands` / `meshes` / `materials` / `dev` are names a user `let` can bind, and one that
+    /// did shadowed the param with both error labels on the `aether!` token.
+    ///
+    /// What this pin OWNS that no behavior test can: the `at Transform { … }` node passes through
+    /// with the USER's bare `Transform` / `Vec3` / `Quat` spellings untouched (§7.2's verbatim
+    /// rule), while the node that gave no `at` receives Aether's own qualified
+    /// `Transform::IDENTITY`. A stringify/re-parse round-trip would erase that difference.
+    #[test]
+    fn the_section_3_7_before_after_pair_holds_verbatim() {
+        expands_to(
+            quote! {
+                plugin VbLab;
+
+                material gold { base: (1.0, 0.72, 0.30), metallic: 1.0, roughness: 0.14 }
+                material lamp { base: (0.02, 0.02, 0.02), roughness: 0.6, emissive: (1.6, 0.9, 0.3) }
+
+                scene lab {
+                    let floor = plane(22.0);
+                    let block = cube(1.0);
+
+                    mesh floor;
+                    mesh block at Transform { translation: Vec3::new(0.0, 3.0, -4.5),
+                                              rotation: Quat::IDENTITY,
+                                              scale: Vec3::new(14.0, 6.0, 0.4) };
+                    mesh block at (-2.4, 0.5, -2.2) { material: gold, casts_shadow };
+                    mesh block at (-4.4, 1.4, -1.0) { material: lamp };
+
+                    sdf SdfEdit::sphere([3.2, 0.85, 1.8], 0.85, sdf_op::UNION, 0.0);
+
+                    sun { dir: (-0.42, 0.80, 0.42), color: (1.0, 0.97, 0.92), lux: 3.2 }
+                    sky { sky: (0.28, 0.36, 0.50), ground: (0.15, 0.14, 0.13) }
+                }
+            },
+            quote! {
+                pub struct VbLab;
+                impl ::boyko_ecs::Plugin for VbLab {
+                    fn build(&self, app: &mut ::boyko_ecs::App) {
+                        app.add_startup_system(lab);
+                    }
+                    fn name(&self) -> &'static str { "VbLab" }
+                }
+                #[doc = " Aether material `gold`."]
+                #[inline]
+                pub fn gold() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([1.0, 0.72, 0.30, 1.0], 1.0, 0.14, 0.5, [0.0; 3], 0)
+                }
+                #[doc = " Aether material `lamp`."]
+                #[inline]
+                pub fn lamp() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([0.02, 0.02, 0.02, 1.0], 0.0, 0.6, 0.5, [1.6, 0.9, 0.3], 0)
+                }
+                #[doc = " Aether scene `lab` — the spawn fn."]
+                pub fn lab(
+                    mut __aether_commands: ::boyko_ecs::ecs::core::system::Commands,
+                    mut __aether_meshes: ::boyko_ecs::ecs::core::system::NonSendResMut<
+                        ::boyko_ecs::ecs::core::asset::Assets<::boyko_render::MeshGpu>>,
+                    mut __aether_materials: ::boyko_ecs::ecs::core::system::ResMut<
+                        ::boyko_ecs::ecs::core::asset::Assets<::boyko_render::Material>>,
+                    __aether_dev: ::boyko_ecs::ecs::core::system::NonSendRes<::boyko_app::GpuDevice>
+                ) {
+                    let floor = ::boyko_render::MeshAssetsExt::plane(&mut *__aether_meshes, __aether_dev.get(), 22.0);
+                    let block = ::boyko_render::MeshAssetsExt::cube(&mut *__aether_meshes, __aether_dev.get(), 1.0);
+                    let __aether_mat_gold = __aether_materials.add(gold());
+                    let __aether_mat_lamp = __aether_materials.add(lamp());
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        floor,
+                        ::boyko_scene::Transform::IDENTITY
+                    ));
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(block, Transform {
+                        translation: Vec3::new(0.0, 3.0, -4.5),
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::new(14.0, 6.0, 0.4)
+                    }));
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        block,
+                        ::boyko_scene::Transform::from_translation(
+                            ::boyko_math::Vec3::new(-2.4, 0.5, -2.2)
+                        )
+                    ))
+                    .insert(::boyko_render::ShadowCaster)
+                    .insert(::boyko_scene::MaterialHandle(__aether_mat_gold.index() as u16));
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        block,
+                        ::boyko_scene::Transform::from_translation(
+                            ::boyko_math::Vec3::new(-4.4, 1.4, -1.0)
+                        )
+                    ))
+                    .insert(::boyko_scene::MaterialHandle(__aether_mat_lamp.index() as u16));
+                    __aether_commands.spawn(::boyko_render::SdfPrimitive(
+                        SdfEdit::sphere([3.2, 0.85, 1.8], 0.85, sdf_op::UNION, 0.0)
+                    ));
+                    __aether_commands.spawn({
+                        let __aether_dir = [-0.42, 0.80, 0.42];
+                        let __aether_pose = ::boyko_math::Affine3A::look_at_rh(
+                            ::boyko_math::Vec3::ZERO,
+                            ::boyko_math::Vec3::new(__aether_dir[0], __aether_dir[1], __aether_dir[2]),
+                            ::boyko_math::Vec3::new(0.0, 1.0, 0.0),
+                        );
+                        ::boyko_render::DirectionalLightObject {
+                            transform: ::boyko_scene::Transform {
+                                translation: ::boyko_math::Vec3::ZERO,
+                                rotation: ::boyko_math::Quat::from_mat3(__aether_pose.matrix3),
+                                scale: ::boyko_math::Vec3::ONE,
+                            },
+                            global: ::boyko_scene::GlobalTransform::IDENTITY,
+                            light: ::boyko_render::DirectionalLight::new(
+                                __aether_dir, [1.0, 0.97, 0.92], 3.2
+                            ),
+                        }
+                    });
+                    __aether_commands.spawn(::boyko_render::SkyLight::new(
+                        [0.28, 0.36, 0.50], [0.15, 0.14, 0.13]
+                    ));
+                }
+            },
+        );
+    }
+
+    /// The DEMAND-DRIVEN param rule, at its floor: a scene with no mesh binding and no `material:`
+    /// prop compresses to `(commands)` alone — §3.7's own sentence, and the reason a pure-`entity`
+    /// scene drags neither the asset tables nor the device into its signature.
+    ///
+    /// Also pins the `entity` fallback's two shapes (§8 R8): with `at` it takes the engine's placed
+    /// anchor preset, without one it spawns EMPTY and carries only its component exprs.
+    #[test]
+    fn a_scene_that_uses_neither_meshes_nor_materials_takes_commands_alone() {
+        expands_to(
+            quote! {
+                scene props {
+                    entity at (1.0, 0.0, 2.0) { Health { hp: 10.0 } };
+                    entity { Marker, Tally(3) };
+                }
+            },
+            quote! {
+                #[doc = " Aether scene `props` — the spawn fn."]
+                pub fn props(mut __aether_commands: ::boyko_ecs::ecs::core::system::Commands) {
+                    __aether_commands.spawn(::boyko_scene::SpatialBundle {
+                        transform: ::boyko_scene::Transform::from_translation(
+                            ::boyko_math::Vec3::new(1.0, 0.0, 2.0)
+                        ),
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        visibility: ::boyko_scene::Visibility::default(),
+                    })
+                    .insert(Health { hp: 10.0 });
+                    __aether_commands.spawn_empty().insert(Marker).insert(Tally(3));
+                }
+            },
+        );
+    }
+
+    /// `children:` — the ONE shape that cannot use the plan's chained statement form, because a
+    /// parent must hand its `Entity` to `add_child`. A childless node keeps the chained form (the
+    /// pin above); only the nodes that need an id bind one, and the ids number in spawn order.
+    ///
+    /// Hierarchy rides on `ChildOf` insertion (Phase 19) — `Commands::add_child` is that, and
+    /// Aether writes `Children` no more than user code does.
+    #[test]
+    fn children_bind_entity_ids_and_parent_through_the_kernels_own_command() {
+        expands_to(
+            quote! {
+                scene rig {
+                    entity at (0.0, 0.0, 0.0) {
+                        Root,
+                        children: [
+                            entity { LeftArm },
+                            entity at (1.0, 0.0, 0.0) { RightArm, children: [ entity { Hand } ] }
+                        ]
+                    };
+                }
+            },
+            quote! {
+                #[doc = " Aether scene `rig` — the spawn fn."]
+                pub fn rig(mut __aether_commands: ::boyko_ecs::ecs::core::system::Commands) {
+                    let __aether_e0 = __aether_commands.spawn(::boyko_scene::SpatialBundle {
+                        transform: ::boyko_scene::Transform::from_translation(
+                            ::boyko_math::Vec3::new(0.0, 0.0, 0.0)
+                        ),
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        visibility: ::boyko_scene::Visibility::default(),
+                    })
+                    .insert(Root)
+                    .id();
+                    let __aether_e1 = __aether_commands.spawn_empty().insert(LeftArm).id();
+                    __aether_commands.add_child(__aether_e0, __aether_e1);
+                    let __aether_e2 = __aether_commands.spawn(::boyko_scene::SpatialBundle {
+                        transform: ::boyko_scene::Transform::from_translation(
+                            ::boyko_math::Vec3::new(1.0, 0.0, 0.0)
+                        ),
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        visibility: ::boyko_scene::Visibility::default(),
+                    })
+                    .insert(RightArm)
+                    .id();
+                    let __aether_e3 = __aether_commands.spawn_empty().insert(Hand).id();
+                    __aether_commands.add_child(__aether_e2, __aether_e3);
+                    __aether_commands.add_child(__aether_e0, __aether_e2);
+                }
+            },
+        );
+    }
+
+    /// The three heads §3.7 names but never demonstrates.
+    ///
+    /// # What this pin gates, and what it CANNOT
+    ///
+    /// It gates the EXPANDER: argument count, argument ORDER, which key lands in which slot, and
+    /// the synthesized defaults. `aether-lang` has no engine dependency — it emits tokens — so no
+    /// assertion in this file can notice that `SpotLight::new` grew a parameter. It would stay
+    /// green forever. (An earlier revision of this comment claimed the opposite; it was wrong, and
+    /// wrong in the "gate that could not fail" direction.)
+    ///
+    /// The ENGINE half is `aether_tests`' compiled surface — `tests/a6_scene.rs`'s `vb_lab`
+    /// module, where these same heads are expanded against the real crates and registered with
+    /// `add_startup_system`, which type-checks the whole generated body. A changed constructor
+    /// breaks THERE, in-repo, which is what §8 R4 actually asks for. The two halves are
+    /// complementary: this one says what Aether meant to emit, that one says the engine still
+    /// accepts it.
+    ///
+    /// Also pins the two defaults that are NOT the engine's: `color` falls back to white (a
+    /// neutral that IS right), and `camera`'s `fov` is authored in DEGREES and converted by a
+    /// multiply — a `.to_radians()` on a bare float literal would infer `f64` and fail against the
+    /// `f32` field.
+    #[test]
+    fn the_spot_point_and_camera_heads_lower_to_the_engines_own_constructors() {
+        expands_to(
+            quote! {
+                scene lights {
+                    spot {
+                        pos: (3.6, 4.2, 3.2), dir: (-0.6, -0.7, -0.5),
+                        color: (1.0, 0.85, 0.6),
+                        power: 6000.0, range: 14.0, inner: 16.0, outer: 26.0,
+                        casts_shadow
+                    }
+                    point { pos: (-1.8, 2.2, 2.4), power: 240.0, range: 9.0 }
+                    camera at (0.0, 2.1, 8.4) { aspect: 1120.0 / 720.0, fov: 52.0, far: 120.0 }
+                }
+            },
+            quote! {
+                #[doc = " Aether scene `lights` — the spawn fn."]
+                pub fn lights(mut __aether_commands: ::boyko_ecs::ecs::core::system::Commands) {
+                    __aether_commands.spawn({
+                        let __aether_pos = [3.6, 4.2, 3.2];
+                        let __aether_dir = [-0.6, -0.7, -0.5];
+                        let __aether_eye = ::boyko_math::Vec3::new(
+                            __aether_pos[0], __aether_pos[1], __aether_pos[2]
+                        );
+                        let __aether_pose = ::boyko_math::Affine3A::look_at_rh(
+                            __aether_eye,
+                            __aether_eye + ::boyko_math::Vec3::new(
+                                __aether_dir[0], __aether_dir[1], __aether_dir[2]
+                            ),
+                            ::boyko_math::Vec3::new(0.0, 1.0, 0.0),
+                        );
+                        ::boyko_render::SpotLightObject {
+                            transform: ::boyko_scene::Transform {
+                                translation: __aether_eye,
+                                rotation: ::boyko_math::Quat::from_mat3(__aether_pose.matrix3),
+                                scale: ::boyko_math::Vec3::ONE,
+                            },
+                            global: ::boyko_scene::GlobalTransform::IDENTITY,
+                            light: ::boyko_render::SpotLight::new(
+                                __aether_pos, __aether_dir, [1.0, 0.85, 0.6],
+                                6000.0, 14.0, 16.0, 26.0
+                            ),
+                        }
+                    })
+                    .insert(::boyko_render::CastsPunctualShadow);
+                    __aether_commands.spawn({
+                        let __aether_pos = [-1.8, 2.2, 2.4];
+                        ::boyko_render::PointLightObject {
+                            transform: ::boyko_scene::Transform::from_translation(
+                                ::boyko_math::Vec3::new(
+                                    __aether_pos[0], __aether_pos[1], __aether_pos[2]
+                                )
+                            ),
+                            global: ::boyko_scene::GlobalTransform::IDENTITY,
+                            light: ::boyko_render::PointLight::new(
+                                __aether_pos, [1.0, 1.0, 1.0], 240.0, 9.0
+                            ),
+                        }
+                    });
+                    __aether_commands.spawn(::boyko_scene::CameraRig {
+                        transform: ::boyko_scene::Transform::from_translation(
+                            ::boyko_math::Vec3::new(0.0, 2.1, 8.4)
+                        ),
+                        global: ::boyko_scene::GlobalTransform::IDENTITY,
+                        camera: ::boyko_scene::Camera::DEFAULT,
+                        projection: ::boyko_scene::Projection::Perspective {
+                            fov_y: (52.0) * (::core::f32::consts::PI / 180.0),
+                            aspect: 1120.0 / 720.0,
+                            near: 0.1,
+                            far: 120.0,
+                        },
+                    });
+                }
+            },
+        );
+    }
+
+    /// One material placed on many nodes mints ONE asset row, and the mint order follows the
+    /// BLOCK's material declarations — not the order the nodes happen to reference them, which is
+    /// what makes the emitted sequence stable under a scene edit that only moves nodes around.
+    #[test]
+    fn material_mints_are_hoisted_once_per_scene_in_declaration_order() {
+        expands_to(
+            quote! {
+                material gold { base: (1.0, 0.72, 0.30) }
+                material chalk { base: (0.86, 0.86, 0.88) }
+
+                scene row {
+                    let cube_mesh = cube(1.0);
+                    mesh cube_mesh { material: chalk };
+                    mesh cube_mesh { material: gold };
+                    mesh cube_mesh { material: chalk };
+                }
+            },
+            quote! {
+                #[doc = " Aether material `gold`."]
+                #[inline]
+                pub fn gold() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([1.0, 0.72, 0.30, 1.0], 0.0, 0.5, 0.5, [0.0; 3], 0)
+                }
+                #[doc = " Aether material `chalk`."]
+                #[inline]
+                pub fn chalk() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([0.86, 0.86, 0.88, 1.0], 0.0, 0.5, 0.5, [0.0; 3], 0)
+                }
+                #[doc = " Aether scene `row` — the spawn fn."]
+                pub fn row(
+                    mut __aether_commands: ::boyko_ecs::ecs::core::system::Commands,
+                    mut __aether_meshes: ::boyko_ecs::ecs::core::system::NonSendResMut<
+                        ::boyko_ecs::ecs::core::asset::Assets<::boyko_render::MeshGpu>>,
+                    mut __aether_materials: ::boyko_ecs::ecs::core::system::ResMut<
+                        ::boyko_ecs::ecs::core::asset::Assets<::boyko_render::Material>>,
+                    __aether_dev: ::boyko_ecs::ecs::core::system::NonSendRes<::boyko_app::GpuDevice>
+                ) {
+                    let cube_mesh = ::boyko_render::MeshAssetsExt::cube(&mut *__aether_meshes, __aether_dev.get(), 1.0);
+                    let __aether_mat_gold = __aether_materials.add(gold());
+                    let __aether_mat_chalk = __aether_materials.add(chalk());
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        cube_mesh, ::boyko_scene::Transform::IDENTITY
+                    ))
+                    .insert(::boyko_scene::MaterialHandle(__aether_mat_chalk.index() as u16));
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        cube_mesh, ::boyko_scene::Transform::IDENTITY
+                    ))
+                    .insert(::boyko_scene::MaterialHandle(__aether_mat_gold.index() as u16));
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        cube_mesh, ::boyko_scene::Transform::IDENTITY
+                    ))
+                    .insert(::boyko_scene::MaterialHandle(__aether_mat_chalk.index() as u16));
+                }
+            },
+        );
+    }
+
+    /// Startup one-shots keep BLOCK SOURCE order across the two kinds that produce them — a scene
+    /// declared before a startup system spawns before it runs. Registering all systems first and
+    /// all scenes after would type-check identically and reorder the frame.
+    #[test]
+    fn a_plugin_registers_scenes_and_startup_systems_in_declaration_order() {
+        emits_in_order(
+            quote! {
+                plugin Boot;
+                system early() on startup { }
+                scene arena { entity { Floor }; }
+                system late() on startup { }
+            },
+            "app . add_startup_system (early) ; app . add_startup_system (arena) ;",
+            "app . add_startup_system (late) ;",
+        );
+    }
+
+    /// §7.2(4) made concrete: a scene may bind ALL FOUR names §3.7's After block gives the
+    /// generated params, and every one of them still resolves to the user's own `let`.
+    ///
+    /// MEASURED before the prefix landed: `let dev = plane(1.0); mesh dev;` shadowed the device
+    /// param, and rustc reported E0599 (`no method get on MeshHandle`) with both labels on the
+    /// whole `aether!` token — no user token named anywhere, the same shape `ctx.rs` cites to
+    /// justify owning a diagnostic. Prefixing does not diagnose that fault; it deletes it.
+    ///
+    /// The pin is the WHOLE fn, not a substring search, because the failure mode is a param and a
+    /// binding agreeing on a name — which only a token-exact expansion can rule out.
+    #[test]
+    fn a_scene_may_bind_the_plans_own_param_names_without_shadowing_anything() {
+        expands_to(
+            quote! {
+                material materials { base: (0.0, 0.0, 0.0) }
+
+                scene s {
+                    let dev = plane(1.0);
+                    let commands = cube(1.0);
+                    let meshes = cube(2.0);
+
+                    mesh dev { material: materials };
+                    mesh commands;
+                    mesh meshes;
+                }
+            },
+            quote! {
+                #[doc = " Aether material `materials`."]
+                #[inline]
+                pub fn materials() -> ::boyko_render::Material {
+                    ::boyko_render::Material::new([0.0, 0.0, 0.0, 1.0], 0.0, 0.5, 0.5, [0.0; 3], 0)
+                }
+                #[doc = " Aether scene `s` — the spawn fn."]
+                pub fn s(
+                    mut __aether_commands: ::boyko_ecs::ecs::core::system::Commands,
+                    mut __aether_meshes: ::boyko_ecs::ecs::core::system::NonSendResMut<
+                        ::boyko_ecs::ecs::core::asset::Assets<::boyko_render::MeshGpu>>,
+                    mut __aether_materials: ::boyko_ecs::ecs::core::system::ResMut<
+                        ::boyko_ecs::ecs::core::asset::Assets<::boyko_render::Material>>,
+                    __aether_dev: ::boyko_ecs::ecs::core::system::NonSendRes<::boyko_app::GpuDevice>
+                ) {
+                    let dev = ::boyko_render::MeshAssetsExt::plane(&mut *__aether_meshes, __aether_dev.get(), 1.0);
+                    let commands = ::boyko_render::MeshAssetsExt::cube(&mut *__aether_meshes, __aether_dev.get(), 1.0);
+                    let meshes = ::boyko_render::MeshAssetsExt::cube(&mut *__aether_meshes, __aether_dev.get(), 2.0);
+                    let __aether_mat_materials = __aether_materials.add(materials());
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        dev, ::boyko_scene::Transform::IDENTITY
+                    ))
+                    .insert(::boyko_scene::MaterialHandle(__aether_mat_materials.index() as u16));
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        commands, ::boyko_scene::Transform::IDENTITY
+                    ));
+                    __aether_commands.spawn(::boyko_render::MeshBundle::new(
+                        meshes, ::boyko_scene::Transform::IDENTITY
+                    ));
+                }
+            },
+        );
+    }
+
+    /// A scene needs NO plugin — §3.7 registers it "when a `plugin` header is present", so a
+    /// plugin-free block emits the spawn fn and leaves registration to the author (the same
+    /// contract a clause-free `system` has).
+    #[test]
+    fn a_plugin_free_scene_is_a_plain_spawn_fn() {
+        expands_to(
+            quote! { scene empty { } },
+            quote! {
+                #[doc = " Aether scene `empty` — the spawn fn."]
+                pub fn empty(mut __aether_commands: ::boyko_ecs::ecs::core::system::Commands) {}
+            },
+        );
+    }
+
+    #[test]
+    fn a6_diagnostics_fire_where_the_plan_says() {
+        // §3.7's own two examples: an unknown material and an unknown mesh binding, each with the
+        // declared list and a did-you-mean.
+        fails_with(
+            quote! {
+                material gold { base: (1.0, 0.72, 0.30) }
+                material lamp { base: (0.02, 0.02, 0.02) }
+                scene s { entity { material: gol } }
+            },
+            "no material `gol` in this aether block (materials here: `gold`, `lamp`)",
+        );
+        fails_with(
+            quote! {
+                material gold { base: (1.0, 0.72, 0.30) }
+                scene s { entity { material: gol } }
+            },
+            "did you mean `gold`?",
+        );
+        // SCENE-scoped, and the wording has to say so: the binding table belongs to one scene, so
+        // "in this aether block" would claim a name is absent while a sibling scene declares it.
+        // The second scene below is the whole point of this case — with a block-scoped message it
+        // would read as a lie about `floor`.
+        fails_with(
+            quote! {
+                scene a {
+                    let floor = plane(1.0);
+                }
+                scene s {
+                    let ground = plane(1.0);
+                    mesh floor;
+                }
+            },
+            "no mesh binding `floor` in scene `s` (bindings here: `ground`)",
+        );
+        fails_with(
+            quote! {
+                scene s {
+                    let floor = plane(1.0);
+                    mesh floot;
+                }
+            },
+            "no mesh binding `floot` in scene `s` (bindings here: `floor`) (did you mean `floor`?)",
+        );
+        // §3.7's third published diagnostic, verbatim.
+        fails_with(
+            quote! { scene s { sky { sky: (0.0, 0.0, 0.0), ground: (0.0, 0.0, 0.0), casts_shadow } } },
+            "the `sky` node has no shadow-caster form",
+        );
+        // §6.1's extensibility diagnostic, one level down: the node-head registry.
+        fails_with(
+            quote! { scene s { sunn { dir: (0.0, 1.0, 0.0), lux: 1.0 } } },
+            "unknown scene node `sunn`; heads are: mesh, sun, spot, point, sky, camera, sdf, entity (did you mean `sun`?)",
+        );
+        // A head key table is exhaustive in its own diagnostic, exactly as `material`'s is.
+        fails_with(
+            quote! { scene s { sun { dirr: (0.0, 1.0, 0.0), lux: 1.0 } } },
+            "unknown `sun` key `dirr`; keys are: dir, color, lux (plus material, casts_shadow, children) (did you mean `dir`?)",
+        );
+        // The §3.6 required-key rule, inherited: a key whose engine parameter has no honest
+        // default is refused rather than invented.
+        fails_with(
+            quote! { scene s { sun { lux: 3.0 } } },
+            "the `sun` node needs a `dir:` key — it has no default (these default: color)",
+        );
+        // "an `aspect:` key", not "a `aspect:` key" — a published, pinned message reads as prose.
+        fails_with(
+            quote! { scene s { camera { fov: 60.0 } } },
+            "the `camera` node needs an `aspect:` key",
+        );
+        // A pose given to a head that derives its own would be SILENTLY DROPPED — the one failure
+        // mode a user cannot see in the rendered frame without hunting for it.
+        fails_with(
+            quote! { scene s { sun at (0.0, 1.0, 0.0) { dir: (0.0, 1.0, 0.0), lux: 1.0 } } },
+            "the `sun` node derives its whole pose from `dir:`",
+        );
+        fails_with(
+            quote! { scene s { sdf E::new() at (0.0, 1.0, 0.0); } },
+            "an `sdf` edit carries its WORLD-SPACE position inside the edit itself",
+        );
+        // A head with nothing to hang a `MaterialHandle` on.
+        fails_with(
+            quote! {
+                material m { base: (0.0, 0.0, 0.0) }
+                scene s { sky { sky: (0.0, 0.0, 0.0), ground: (0.0, 0.0, 0.0), material: m } }
+            },
+            "the `sky` node has no `material:` form",
+        );
+        // §2's case rule for the value-producing constructs, with the shipped rename helper.
+        fails_with(
+            quote! { scene Lab { } },
+            "scene names are lowercase — they expand to spawn fns, not types (rename `Lab` to `lab`)",
+        );
+        // Two bindings of one name silently retarget every `mesh NAME` below the second.
+        fails_with(
+            quote! { scene s { let a = cube(1.0); let a = plane(2.0); } },
+            "duplicate mesh binding `a` in this scene",
+        );
+        // The `at (…)` sugar is a TRANSLATION and has one arity; a 2-tuple is refused on the
+        // tuple's own span, and the message names the unparenthesized escape.
+        fails_with(
+            quote! { scene s { entity at (1.0, 2.0) { X } } },
+            "`at (…)` is the translation sugar and takes 3 components (x, y, z) — found 2",
+        );
+        fails_with(
+            quote! { scene s { let a = plain(1.0); } },
+            "unknown mesh source `plain`; sources are: plane, cube, mesh (did you mean `plane`?)",
+        );
+        fails_with(
+            quote! { scene s { sun { dir: (0.0, 1.0), lux: 1.0 } } },
+            "`sun` key `dir` takes exactly 3 components (x, y, z) — found 2",
+        );
+    }
+
+    /// §4's duplicate-name rule, at the boundary the A5 measurement drew: two constructs that both
+    /// expand to a bare `pub fn` collide in a way rustc reports with NO user token, so Aether owns
+    /// it — ACROSS kinds as well as within one, because `scene lab` beside `material lab` is the
+    /// same fault. The type-producing half still defers (§7.1).
+    #[test]
+    fn two_constructs_that_both_emit_a_fn_of_one_name_are_refused_with_both_spans() {
+        let out = crate::expand_block(quote! {
+            material lab { base: (0.0, 0.0, 0.0) }
+            scene lab { }
+        })
+        .to_string();
+        assert!(
+            out.contains(
+                "`lab` is declared twice in this aether block — the `material` and the `scene` both expand to a fn of that name"
+            ),
+            "got: {out}"
+        );
+        assert!(out.contains("the first `material` of this name is here"), "got: {out}");
+
+        // The A5 same-kind wording is unchanged — that golden's `.stderr` is byte-pinned.
+        let same = crate::expand_block(quote! {
+            material twice { base: (0.0, 0.0, 0.0) }
+            material twice { base: (1.0, 1.0, 1.0) }
+        })
+        .to_string();
+        assert!(
+            same.contains(
+                "duplicate material `twice` — each material expands to a builder fn of its own name"
+            ),
+            "got: {same}"
+        );
+
+        // A TYPE-producing name reused stays with rustc: the derive gives it a second, localized
+        // error, and §7.1 forbids a pre-check that could only be worse.
+        expands_to(
+            quote! {
+                tag Same;
+                component Same { x: u8 }
+            },
+            quote! {
+                #[derive(::boyko_macros::Component)]
+                pub struct Same;
+                #[derive(::boyko_macros::Component)]
+                pub struct Same {
+                    pub x: u8
+                }
+            },
+        );
+    }
+
+    // ------------------------------------------------------------- rung A7: DX hardening
+
+    /// §6.3's version header: accepted, defaulted, and refused — with the block underneath it
+    /// expanding exactly as it does without one (the header must be a gate, never a dialect).
+    #[test]
+    fn the_version_header_is_parsed_accepted_and_gated() {
+        let expected = quote! {
+            #[derive(::boyko_macros::Component)]
+            pub struct Health {
+                pub hp: f32
+            }
+        };
+        expands_to(quote! { aether v1; component Health { hp: f32 } }, expected.clone());
+        // Absent = the crate's current default (§6.3), byte-for-byte the same expansion.
+        expands_to(quote! { component Health { hp: f32 } }, expected);
+        // A version this aether does not speak is refused on the VERSION's own token, with the
+        // supported list and a did-you-mean — the §6.1 canonical shape, applied to §6.3.
+        fails_with(
+            quote! { aether v2; component Health { hp: f32 } },
+            "unknown aether syntax version `v2`; this aether speaks: v1 (did you mean `v1`?)",
+        );
+        fails_with(quote! { aether v1 component Health {} }, "header ends with `;`");
+        fails_with(quote! { aether; }, "the syntax-version header names a version");
+        // The header is the block's FIRST item; below a construct it is a misplaced header, not
+        // an unknown construct (the message a reader can act on).
+        fails_with(
+            quote! { component Health { hp: f32 } aether v1; },
+            "syntax-version header is the block's FIRST item",
+        );
+    }
+
+    /// §7.3 / §8 R3, the whole contract in one block: a broken construct yields (a) ONE error at
+    /// its own span, (b) a stub that keeps its name resolving, and (c) the full expansion of
+    /// every sibling — the difference between one typo costing one error and costing a
+    /// module-wide sea of "unresolved name" while the author is still typing.
+    #[test]
+    fn a_broken_construct_costs_one_error_and_leaves_its_siblings_whole() {
+        let out = crate::expand_block(quote! {
+            component Health { hp: f32 }
+            component Broken { hp f32 }
+            tag Player;
+            system tick() { }
+        })
+        .to_string();
+
+        // (a) exactly one error, and it is the field's own.
+        assert_eq!(out.matches("compile_error").count(), 1, "one typo, one error: {out}");
+        assert!(out.contains("expected `:` after field `hp`"), "got: {out}");
+        // (b) the broken construct's NAME still resolves, in its own item kind, and silently:
+        // a recovery stub that emitted `dead_code` or case warnings would trade one error for a
+        // paragraph of noise.
+        assert!(out.contains("pub struct Broken ;"), "no stub for the broken construct: {out}");
+        assert!(out.contains("dead_code"), "the stub must not add diagnostics of its own: {out}");
+        // (c) every OTHER construct expanded in full — including the ones declared after the
+        // failure, which an abort-at-first-error parser never reaches.
+        assert!(out.contains("pub struct Health"), "sibling before the break: {out}");
+        assert!(out.contains("pub struct Player"), "sibling after the break: {out}");
+        assert!(out.contains("pub fn tick"), "sibling after the break: {out}");
+    }
+
+    /// Recovery accumulates (§7.1) and resyncs on the next construct HEAD, not on a terminator
+    /// the author never wrote — the `;`-less `tag` is the case that would otherwise swallow its
+    /// successor and report the successor's absence as a second, invented fault.
+    #[test]
+    fn recovery_resyncs_on_the_next_construct_head() {
+        let out = crate::expand_block(quote! {
+            tag Player { }
+            component Health { hp: f32 }
+            bundle Bad { x }
+            tag Frozen;
+        })
+        .to_string();
+        assert_eq!(out.matches("compile_error").count(), 2, "two faults, two errors: {out}");
+        assert!(out.contains("a tag declaration ends with `;`"), "got: {out}");
+        assert!(out.contains("expected `:` after bundle field `x`"), "got: {out}");
+        // The construct between the two faults, and the one after the second, both survive.
+        assert!(out.contains("pub struct Health"), "got: {out}");
+        assert!(out.contains("pub struct Frozen"), "got: {out}");
+        // Both broken names still resolve, each in its own item kind.
+        assert!(out.contains("pub struct Player ;") && out.contains("pub struct Bad ;"), "{out}");
+    }
+
+    /// The recovery loop's own liveness. A resync that consumed nothing would SPIN — a hang in a
+    /// proc-macro, which presents as an editor that stops responding rather than as an error, and
+    /// is the one failure mode worse than the sea of errors §7.3 removes.
+    ///
+    /// Each input below stops the resync scan differently: no ident at all, a keyword with no
+    /// name, a keyword whose name is itself a keyword, a body that never closes its own grammar,
+    /// and a lone version header. Every one must terminate, emit at least one error, and never
+    /// panic (the never-panic contract §8 R3 rests on).
+    #[test]
+    fn recovery_terminates_and_never_panics_on_garbage() {
+        for input in [
+            quote! { 42 },
+            quote! { component },
+            quote! { component; component; },
+            quote! { system system system },
+            quote! { tag },
+            quote! { machine M { state } },
+            quote! { , , , },
+        ] {
+            let out = crate::expand_block(input.clone()).to_string();
+            assert!(
+                out.contains("compile_error"),
+                "garbage must produce an error, not silence: {input} -> {out}"
+            );
+        }
+        // A lone version header is NOT garbage — it is a legal, empty block, and it belongs in
+        // this test as the case that terminates without an error. Stated as its own assertion:
+        // folded into the loop above as `|| input == "aether v1 ;"`, the disjunct made every
+        // OTHER input's failure impossible to distinguish from this one's success.
+        let empty = crate::expand_block(quote! { aether v1; }).to_string();
+        assert!(empty.is_empty(), "a header-only block expands to nothing, quietly: {empty}");
+    }
+
+    /// §4's whole-block rules run over `constructs ∪ broken`, and this is the case that forced it:
+    /// a half-typed `plugin` is the ordinary mid-edit state of every block that has one.
+    ///
+    /// Read as absent, it makes the plugin-requirement rule fire against every sibling clause —
+    /// a second error derived from the first — and the whole-block failure then erased the entire
+    /// expansion, so ONE typo cost the block every item in it. That is the unresolved-name sea
+    /// §7.3 exists to prevent, produced by the mechanism built to prevent it.
+    #[test]
+    fn a_broken_plugin_still_holds_the_plugin_slot() {
+        let out = crate::expand_block(quote! {
+            component Health { hp: f32 }
+            plugin ;
+            system boot(mut cmds: commands) on startup { let _ = &mut cmds; }
+            system tick(q: query<&Health>) on update { let _ = &q; }
+        })
+        .to_string();
+
+        assert_eq!(out.matches("compile_error").count(), 1, "one fault, one error: {out}");
+        assert!(out.contains("expected a plugin name"), "got: {out}");
+        assert!(
+            !out.contains("need a `plugin <Name>;`"),
+            "the clause rule fired against a plugin that IS declared: {out}"
+        );
+        // Every sibling still emits.
+        assert!(out.contains("pub struct Health"), "got: {out}");
+        assert!(out.contains("pub fn boot"), "got: {out}");
+        assert!(out.contains("pub fn tick"), "got: {out}");
+    }
+
+    /// A NAMED broken plugin also stubs the `Plugin` impl — because every reference to a plugin is
+    /// `app.add_plugin(P)`, which needs the trait. A bare `pub struct P;` would trade "cannot find
+    /// value `P`" for "the trait bound `P: Plugin` is not satisfied": a different error, not one
+    /// fewer.
+    #[test]
+    fn a_named_broken_plugin_stubs_the_trait_its_only_use_site_needs() {
+        let out = crate::expand_block(quote! {
+            plugin Arena
+            component Health { hp: f32 }
+        })
+        .to_string();
+        assert!(out.contains("pub struct Arena ;"), "got: {out}");
+        assert!(out.contains("impl :: boyko_ecs :: Plugin for Arena"), "got: {out}");
+        assert!(out.contains("pub struct Health"), "got: {out}");
+    }
+
+    /// The duplicate rule sees the broken half (§4 over the union). Skipping it would not make the
+    /// collision go away — it would move the report to rustc's E0428 over two generated fns, which
+    /// the A5 measurement showed puts both labels on the `aether!` token.
+    #[test]
+    fn a_duplicate_whose_twin_is_broken_is_still_aethers_own_two_span_diagnostic() {
+        let out = crate::expand_block(quote! {
+            material gold { base: (1.0, 0.72, 0.30) }
+            material gold { base: (0.1, 0.1, 0.1), metallic: }
+        })
+        .to_string();
+        assert!(out.contains("duplicate material `gold`"), "got: {out}");
+        assert!(out.contains("the first `material` of this name is here"), "got: {out}");
+        // Two stubs of one name would add rustc's duplicate-definition error to the two errors
+        // that already say it, so stubs dedupe against each other.
+        let twice = crate::expand_block(quote! {
+            material gold { metallic: }
+            material gold { roughness: }
+        })
+        .to_string();
+        assert_eq!(twice.matches("pub fn gold").count(), 1, "one stub per name: {twice}");
+    }
+
+    /// Two suppressions that are NOT rule failures but references INTO a construct that did not
+    /// parse. Both would otherwise produce a message that contradicts the source (a scene told
+    /// there is no material `gold` while `gold` is declared above it) or an error on generated
+    /// tokens (a fn item handed to `after_set`, which takes a `SystemSet` type).
+    #[test]
+    fn a_reference_into_a_broken_construct_is_suppressed_not_reported() {
+        let scene = crate::expand_block(quote! {
+            component Health { hp: f32 }
+            material gold { metallic: }
+            scene lab { entity { material: gold } }
+        })
+        .to_string();
+        assert_eq!(scene.matches("compile_error").count(), 1, "one fault, one error: {scene}");
+        assert!(!scene.contains("no material"), "a contradicting message survived: {scene}");
+        assert!(scene.contains("pub struct Health"), "an unrelated sibling was erased: {scene}");
+
+        let order = crate::expand_block(quote! {
+            plugin P;
+            system tick(q: query(&T)) on update { }
+            system draw() on update after tick { }
+        })
+        .to_string();
+        assert_eq!(order.matches("compile_error").count(), 1, "one fault, one error: {order}");
+        assert!(!order.contains("after_set"), "the edge became a SystemSet path: {order}");
+        assert!(order.contains("b . add_system (draw)"), "got: {order}");
+    }
+
+    /// A fn-producing construct stubs as a FN, not as a struct: the stub's whole job is that the
+    /// name keeps resolving, and `scene lab` resolving to a TYPE would fail at every call site
+    /// instead — the cascade the mechanism exists to prevent, re-introduced by the fix for it.
+    #[test]
+    fn a_broken_fn_construct_stubs_as_a_fn() {
+        let out = crate::expand_block(quote! { scene lab { sun { dir: (0.0, 1.0) } } }).to_string();
+        assert!(out.contains("pub fn lab ()"), "got: {out}");
+        assert_eq!(out.matches("compile_error").count(), 1, "got: {out}");
+    }
+
+    /// The stub's item kind is keyed on the construct KEYWORD (the recovery path has no parsed
+    /// construct to ask), and that second table must agree with `Construct::emits_fn` for every
+    /// keyword in the registry — a `material` stubbed as a struct is a silent cascade.
+    #[test]
+    fn every_registry_keyword_stubs_in_the_item_kind_its_construct_emits() {
+        use crate::ast::Stub;
+        let sample = |kw: &str| -> String {
+            let name = syn::Ident::new("N", proc_macro2::Span::call_site());
+            match Stub::for_keyword(kw, name) {
+                Some(Stub::Fn(_)) => "fn".to_string(),
+                Some(Stub::Type(_)) => "type".to_string(),
+                Some(Stub::Plugin(_)) => "plugin".to_string(),
+                None => "none".to_string(),
+            }
+        };
+        for kw in crate::diag::CONSTRUCT_KEYWORDS {
+            let want = match *kw {
+                "system" | "material" | "scene" => "fn",
+                // `plugin` is a type-producing construct with a THIRD stub shape (the type plus
+                // the `Plugin` impl its only use site needs) — a shape distinction, not a kind
+                // one, which is why `emits_fn` below still lines it up with the type half.
+                "plugin" => "plugin",
+                _ => "type",
+            };
+            assert_eq!(&sample(kw), want, "stub kind for `{kw}`");
+            let name = syn::Ident::new("N", proc_macro2::Span::call_site());
+            let stub = Stub::for_keyword(kw, name).expect("every registry keyword stubs");
+            assert_eq!(
+                stub.emits_fn(),
+                matches!(*kw, "system" | "material" | "scene"),
+                "`{kw}`: the stub's item kind must agree with `Construct::emits_fn`, or §4's \
+                 duplicate rule draws its line at two different places on the two paths"
+            );
+        }
+        assert_eq!(&sample("shader"), "none", "a keyword outside the registry has no stub kind");
+    }
+
+    /// The two snake_case implementations IN THIS CRATE (the expander's generated names and the
+    /// parser's rename SUGGESTION) are separate code by design — a diagnostic's wording must not
+    /// be hostage to a codegen rule. They implement ONE specification, and this is where that is
+    /// stated: the cases below are exactly the ones that distinguish the rule from the
+    /// letter-by-letter one it replaced.
+    ///
+    /// **There is a THIRD implementation and it is not reachable from here:**
+    /// `boyko_macros::state_chart::model::snake`, which spells the `state_chart!` chart names.
+    /// `boyko_macros` is a proc-macro crate, so it exports nothing but macros and no test in this
+    /// crate can call it. It is pinned instead as an oracle against this exact corpus by
+    /// `snake_treats_a_capital_run_as_one_word` in `boyko_macros/src/state_chart/mod.rs`; the two
+    /// lists must stay identical, because that pairing is the only thing standing between the
+    /// three implementations and a silent divergence.
+    #[test]
+    fn both_snake_case_implementations_agree_on_the_same_rule() {
+        for (input, want) in [
+            ("GOLD", "gold"),
+            ("Gold", "gold"),
+            ("GameFlow", "game_flow"),
+            ("UIState", "ui_state"),
+            ("HTTPProbe", "http_probe"),
+            ("PlayingRunning", "playing_running"),
+            ("A_b", "a_b"),
+            ("AB", "ab"),
+            ("Ab", "ab"),
+            ("x", "x"),
+        ] {
+            assert_eq!(super::snake(input), want, "expander snake({input})");
+            assert_eq!(crate::parse::snake_case_for_tests(input), want, "parser snake({input})");
+        }
+    }
+
+    /// §8 R1's expansion-size measurement, in CI.
+    ///
+    /// nnethercote's point is that expansion volume is INVISIBLE — nobody notices a macro that
+    /// quietly emits ten times what it used to until compile times are already bad. Decision A3
+    /// (emit the canonical hand-written surface, leave codegen to `boyko_macros`) is a claim
+    /// about volume, and a claim nobody measures is a claim nobody keeps.
+    ///
+    /// The corpus is the pinned §3.x before/after pairs — the same content macrotest snapshots
+    /// would have carried, so this measures exactly the plan's "expanded-LOC per snapshot".
+    /// TOKENS rather than lines, because a token count is what the two crates actually exchange
+    /// and is invariant under formatting.
+    ///
+    /// The band is two-sided ON PURPOSE. A ceiling alone is satisfied by emitting NOTHING, and
+    /// this repo has shipped that exact failure — a gate whose green state includes the empty
+    /// one. The floor is what makes a silently-emptied expander fail here.
+    ///
+    /// MEASURED at rung A7 (out-tokens / in-tokens):
+    ///
+    /// | corpus | in | out | ratio |
+    /// |---|---|---|---|
+    /// | component+tag (§3.1) | 26 | 70 | 2.69 |
+    /// | system+plugin (§3.3) | 74 | 239 | 3.23 |
+    /// | machine (§3.5) | 59 | 139 | 2.36 |  ← re-measured at R2, and NOT comparable to the 624 below
+    /// | material (§3.6) | 19 | 52 | 2.74 |
+    /// | scene (§3.7) | 55 | 493 | 8.96 |
+    ///
+    /// `scene` is the remaining construct that TRANSPILES rather than sugars — one spawn statement
+    /// per node — so it is counted against the hand-written code it replaces, not against its own
+    /// source. The sugar constructs sit near 3× — Decision A3's claim, in a number.
+    ///
+    /// ⚠ **The machine row FELL from 624 to 139 at R2, and reading that as a 4.5× saving would be
+    /// wrong.** The flattening moved to `boyko_macros::state_chart!`; `machine` now lowers to one
+    /// macro invocation, so the tokens this corpus stopped counting are emitted a layer down
+    /// instead of not at all. What the new number measures is Aether's LOWERING — the de-sugared
+    /// chart it hands over — and 2.36× is the honest ratio for that job, in line with the other
+    /// sugar constructs, because after R2 sugaring is all `machine` does. The old row is left
+    /// visible above rather than overwritten precisely so a reader cannot mistake a relocation for
+    /// a reduction: this gate can no longer see the codegen at all, and a volume regression inside
+    /// `state_chart!` would not move this number by one token.
+    #[test]
+    fn expansion_volume_stays_inside_its_measured_band() {
+        // (construct, block, floor, ceiling) — bands are the MEASURED count ±10%, rounded OUT
+        // (a band rounded inward excludes counts the stated tolerance admits, so the number and
+        // the rule it claims to follow disagree — and the rule is what a re-measurer applies).
+        let corpus: [(&str, proc_macro2::TokenStream, usize, usize); 5] = [
+            (
+                "component+tag (§3.1)",
+                quote! {
+                    component Health { current: f32, max: f32, requires Regen, on_add = heal_full, }
+                    tag Player;
+                    tag Stunned(bitset);
+                },
+                63,
+                77,
+            ),
+            (
+                "system+plugin (§3.3)",
+                quote! {
+                    plugin Movement;
+                    system read_input(actions: res<ActionState>, mut cmds: commands)
+                        on update in InputSet { let _ = (&actions, &mut cmds); }
+                    system apply_velocity(q: query<(&mut Transform, &Velocity), with Player>,
+                                          time: res<Time>)
+                        on update after read_input { let _ = (&mut q, &time); }
+                },
+                215,
+                263,
+            ),
+            (
+                "machine (§3.5)",
+                quote! {
+                    plugin Flow;
+                    machine GameFlow {
+                        initial Boot;
+                        state Boot { on AssetsReady => Playing; }
+                        state Playing {
+                            initial Running;
+                            enter (mut cmds: commands) { cmds.spawn(Hud); }
+                            state Running { on PausePressed => Playing.Paused; }
+                            state Paused { on PausePressed => Playing.Running; }
+                        }
+                    }
+                },
+                125,
+                153,
+            ),
+            (
+                "material (§3.6)",
+                quote! {
+                    material gold { base: (1.0, 0.72, 0.30), metallic: 1.0, roughness: 0.14 }
+                },
+                46,
+                58,
+            ),
+            (
+                "scene (§3.7)",
+                quote! {
+                    material gold { base: (1.0, 0.72, 0.30) }
+                    scene arena {
+                        let floor = plane(22.0);
+                        mesh floor;
+                        mesh floor at (0.0, 1.0, 0.0) { material: gold, casts_shadow };
+                        sun { dir: (-0.42, 0.80, 0.42), lux: 3.2 }
+                    }
+                },
+                443,
+                543,
+            ),
+        ];
+
+        for (name, input, floor, ceil) in corpus {
+            let inp = count_tokens(input.clone());
+            let out = crate::expand_block(input);
+            assert!(!out.to_string().contains("compile_error"), "{name}: {out}");
+            let got = count_tokens(out);
+            // The measurement itself, in the CI log (`cargo test -- --nocapture`): a band that
+            // passes tells a reader nothing about which way the number is drifting.
+            println!(
+                "expansion volume {name}: in={inp} out={got} ratio={:.2}",
+                got as f64 / inp as f64
+            );
+            assert!(
+                (floor..=ceil).contains(&got),
+                "{name}: expansion is {got} tokens, band is {floor}..={ceil} — if this is a deliberate emission change, re-measure and move the band in the same commit"
+            );
+        }
+    }
+
+    /// Tokens in a stream, groups counted recursively (a `Group` is one token tree but the
+    /// downstream compiler pays for its contents).
+    fn count_tokens(ts: proc_macro2::TokenStream) -> usize {
+        ts.into_iter()
+            .map(|tt| match tt {
+                proc_macro2::TokenTree::Group(g) => 1 + count_tokens(g.stream()),
+                _ => 1,
+            })
+            .sum()
+    }
+}

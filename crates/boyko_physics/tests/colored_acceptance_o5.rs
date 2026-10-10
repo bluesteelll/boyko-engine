@@ -273,7 +273,7 @@ fn colored_restitution_resting_contact_does_not_gain_energy() {
     let mut total_contacts = 0usize;
     for _ in 0..200 {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
         let b = all_bodies(&mut world)[1];
         max_y = max_y.max(b.position.y);
         max_speed_sq = max_speed_sq.max(b.linear_velocity.length_squared());
@@ -337,7 +337,7 @@ fn colored_stacking_is_stable() {
 
     for _ in 0..300 {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
         let bodies = all_bodies(&mut world);
         for b in &bodies {
             assert!(
@@ -431,8 +431,8 @@ fn colored_stacking_is_stable_boxes() {
     for _ in 0..300 {
         schedule.run(&mut world);
         let manifolds = world.resource::<Manifolds>();
-        total_contacts += manifolds.manifolds.len();
-        if manifolds.manifolds.iter().any(|m| m.count >= 2) {
+        total_contacts += manifolds.manifolds().len();
+        if manifolds.manifolds().iter().any(|m| m.count >= 2) {
             multi_point_frames += 1;
         }
         let bodies = all_bodies(&mut world);
@@ -497,7 +497,7 @@ fn box_incline_slide(incline: f32, friction: f32, frames: usize) -> f32 {
     let mut total_contacts = 0usize;
     for _ in 0..frames {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
     }
     assert!(
         total_contacts >= 1,
@@ -554,7 +554,7 @@ fn settle_then_push_contact_slip(friction: f32, push: Vec3, frames: usize) -> f3
     let mut total_contacts = 0usize;
     for _ in 0..frames {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
     }
     assert!(total_contacts >= 1, "the pushed sphere must contact the floor (else friction is vacuous): {total_contacts}");
     let b = all_bodies(&mut world)[1];

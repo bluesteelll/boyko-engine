@@ -62,6 +62,15 @@ pub const fn native_endianness() -> u8 {
 /// `max(COLUMN_REGION_ALIGN, component_align)`.
 pub const COLUMN_REGION_ALIGN: usize = 32;
 
+/// [`SaveHeader::flags`] bit 0 — set by the saver when `SaveOptions::persist_ticks`
+/// was requested, and round-tripped by the loader into `LoadReport::persist_ticks_flag`
+/// (a save/load residual fix: the option used to be a silent no-op, recorded
+/// nowhere on disk). This flag records the save-time INTENT only — S1 still always
+/// resets every row's ticks to the load-time `current_tick` regardless of this bit;
+/// per-row tick-VALUE persistence is deferred to a later rung (plan §6). Bits
+/// 1..16 stay reserved (always 0).
+pub const PERSIST_TICKS_FLAG: u16 = 1 << 0;
+
 /// Fixed 64-byte file header (plan §3.9). Written first; the `*_off` fields are
 /// backpatched after the body is laid out (two-pass save, §3.11 W3).
 ///
@@ -83,7 +92,10 @@ pub struct SaveHeader {
     pub endianness: u8,
     /// Pointer width in bytes ([`PTR_WIDTH`]). v1 load rejects `!= 8`.
     pub ptr_width: u8,
-    /// Reserved flags bitset (e.g. "ticks persisted"). 0 in S1.
+    /// Flags bitset ([`PERSIST_TICKS_FLAG`] is bit 0; all other bits reserved and
+    /// always 0). Set by the saver from `SaveOptions`, and read back by the loader
+    /// into `LoadReport::persist_ticks_flag` — see [`PERSIST_TICKS_FLAG`] for the
+    /// intent-vs-values boundary this bit does NOT yet cross.
     pub flags: u16,
     /// Byte offset (from file start) of the [`TypeTableEntry`] array.
     pub type_table_off: u64,

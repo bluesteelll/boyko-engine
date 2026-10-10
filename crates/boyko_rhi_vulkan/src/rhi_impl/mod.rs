@@ -2,8 +2,8 @@
 //! only (Phase 1, plan Waves C+D).
 //!
 //! [`Vulkan`] is the zero-sized [`RhiApi`] marker. [`VulkanContext`] implements
-//! [`RhiDevice`]; a thin [`VulkanQueue`] implements [`RhiQueue`] (plan O1/Q2);
-//! [`VulkanCommandEncoder`] implements [`RhiCommandEncoder`] (the hot recording
+//! [`RhiDevice`](boyko_rhi::RhiDevice); a thin [`VulkanQueue`] implements [`RhiQueue`] (plan O1/Q2);
+//! [`VulkanCommandEncoder`] implements [`RhiCommandEncoder`](boyko_rhi::RhiCommandEncoder) (the hot recording
 //! path). The fixed compute descriptor-set + pipeline layouts that once lived in
 //! the dissolved `ComputeHarness` are now cached on the device ([`ComputeLayouts`],
 //! plan Q1/W2), and the command pool + buffer + descriptor pool + set move onto
@@ -35,14 +35,22 @@
 //! and the `'static` [`VkSemaphore`] for `Semaphore`.
 
 use core::ptr;
+#[cfg(feature = "hwrt")]
+use core::ffi::c_void;
 
 use boyko_rhi::{BindGroupEntry, BufferImageCopy, DescriptorKind, RhiApi, RhiQueue};
 
+#[cfg(feature = "hwrt")]
+use crate::accel::BoundAccelStruct;
+#[cfg(feature = "hwrt")]
+use crate::accel_ffi::{
+    ST_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR, VkWriteDescriptorSetAccelerationStructureKHR,
+};
 use crate::device::{DeviceFns, VulkanContext};
 use crate::error::VulkanError;
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
-use crate::texture::VulkanTexture;
+use crate::texture::{VulkanTexture, VulkanTextureView};
 
 /// The maximum number of color attachments a single `begin_rendering` scope
 /// binds inline without heap allocation (Phase-6 S0). Sized for the basic-slice
@@ -80,9 +88,13 @@ const MAX_VERTEX_ATTRIBUTES: usize = 8;
 /// raised it 22 → 24 to reserve bindings 22/23 for the VIS-MV variant's `MotionCam` UBO + `motion_vec`
 /// STORAGE image (the SDF camera-only motion vector) — BYTE-NEUTRAL by the same argument: only the
 /// 24-binding VIS-MV layout fills the two new tail slots; the software resolve still fills 19, the
-/// RESOLVE_INLINE-hwrt resolve still fills 21, and the base VIS/DENOISED set still fills 22. A
-/// `debug_assert!` traps an over-count at `create_bind_group_layout`/`create_bind_group`.
-const MAX_BIND_GROUP_BINDINGS: usize = 24;
+/// RESOLVE_INLINE-hwrt resolve still fills 21, and the base VIS/DENOISED set still fills 22. Lane
+/// fix/hwrt-shadow-ray-origin raised it 24 → 25 to INSERT the raster depth image (`gDepthHw`) at
+/// binding 21 of every HWRT resolve-family set (`gShadowVis`/`MotionCamVis`/`gMotionVec` move to
+/// 22/23/24) — BYTE-NEUTRAL by the same argument: the software resolve still fills 19; the HWRT
+/// sets now fill 22 / 23 / 25. A `debug_assert!` traps an over-count at
+/// `create_bind_group_layout`/`create_bind_group`.
+const MAX_BIND_GROUP_BINDINGS: usize = 25;
 
 // The bind-group create path keeps its own copy of the cap so a future divergence
 // from the agnostic `boyko_rhi::MAX_BIND_GROUP_BINDINGS` (the desc-side cap) breaks
@@ -149,7 +161,18 @@ fn descriptor_kind_slot(kind: DescriptorKind) -> usize {
 fn bind_group_entry_kind(entry: &BindGroupEntry<Vulkan>) -> DescriptorKind {
     match entry {
         BindGroupEntry::StorageImage { .. } => DescriptorKind::StorageImage,
+        // VG R3 step S1: an explicit view is the SAME descriptor kind as the implicit
+        // one — Vulkan has a single `VK_DESCRIPTOR_TYPE_STORAGE_IMAGE`, and only the
+        // `VkImageView` handle the write names differs. So this shares the histogram
+        // slot, the pool sizing, and the write's `descriptor_type` with `StorageImage`.
+        BindGroupEntry::StorageImageView { .. } => DescriptorKind::StorageImage,
         BindGroupEntry::SampledImage { .. } => DescriptorKind::SampledImage,
+        // VG R3 step P3-1: a `GENERAL`-layout sampled image is the SAME descriptor kind as a
+        // `SHADER_READ_ONLY_OPTIMAL` one — Vulkan has a single
+        // `VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE`, and only the layout the write RECORDS differs. So
+        // this shares the histogram slot, the pool sizing and the write's `descriptor_type` with
+        // `SampledImage`, exactly as `StorageImageView` shares them with `StorageImage`.
+        BindGroupEntry::SampledImageAtGeneral { .. } => DescriptorKind::SampledImage,
         BindGroupEntry::CombinedImage { .. } => DescriptorKind::CombinedImageSampler,
         BindGroupEntry::StorageBuffer { .. } => DescriptorKind::StorageBuffer,
         BindGroupEntry::UniformBuffer { .. } => DescriptorKind::UniformBuffer,
@@ -185,12 +208,26 @@ const _: () = assert!(
 /// [`crate::compute::COMPOSITE_PUSH_CONSTANT_BYTES`]-byte path alike). A pipeline
 /// layout may declare MORE push bytes than a given shader uses — that is valid
 /// Vulkan; only declaring FEWER than a shader reads is the bug. So the shared
-/// range is sized to the LARGEST consumer (the marcher) and every smaller-push
-/// pipeline binds against it unchanged. Derived from the consumer constant, never
-/// a magic literal, so a future widening of the marcher block re-sizes the range
+/// range is sized to the LARGEST consumer and every smaller-push pipeline binds
+/// against it unchanged. Derived from the consumer constants, never a magic
+/// literal, so a future widening of a consumer block re-sizes the range
 /// automatically. The value stays within the Vulkan-guaranteed 128-byte floor for
 /// `maxPushConstantsSize` (asserted below), so no device-limit query is required.
-const COMPUTE_PUSH_CONSTANT_RANGE_BYTES: u32 = crate::compute::COMPOSITE_PUSH_CONSTANT_BYTES;
+///
+/// VG rung R2c took the "largest consumer" title off the marcher: the batch cull's
+/// block (six `float4` frustum planes plus two counts — 104 bytes then, 112 since
+/// VG R3 piece 3 step P3-3 added `phase` + `occ_flags`) exceeds the marcher's 80.
+/// So the derivation is now an explicit `max` over BOTH consumers rather than a
+/// single name — which is what this doc always described, and what keeps the next
+/// consumer from having to notice which one currently wins. ⚠️ 112 leaves 16 bytes
+/// of the guaranteed floor, which is why the occlusion test's `float4x4` travels in
+/// a buffer instead: raising this range would destroy the property the paragraph
+/// above states — that no device-limit query is required.
+const COMPUTE_PUSH_CONSTANT_RANGE_BYTES: u32 = {
+    let marcher = crate::compute::COMPOSITE_PUSH_CONSTANT_BYTES;
+    let batch_cull = crate::compute::VB_BATCH_CULL_PUSH_BYTES;
+    if batch_cull > marcher { batch_cull } else { marcher }
+};
 
 /// The Vulkan-guaranteed minimum `maxPushConstantsSize` (Vulkan 1.3 spec,
 /// "Required Limits"). The shared compute push range must fit within it so the
@@ -284,6 +321,10 @@ impl RhiApi for Vulkan {
     type Swapchain = ();
     type Semaphore = VkSemaphore;
     type Texture = VulkanTexture;
+    // VG R3 step S1: the explicit per-mip / per-layer / format-reinterpreting view now
+    // that `create_texture_view` is implemented. Nothing binds one yet — the step adds
+    // the capability and no owner.
+    type TextureView = VulkanTextureView;
     // `Sampler`/`BindGroupLayout`/`BindGroup` bind to the S0 rung-5 concrete types
     // now that `create_sampler`/`create_bind_group_layout`/`create_bind_group` are
     // implemented (the combined-image-sampler graphics descriptor surface).
@@ -437,7 +478,7 @@ pub struct VulkanShaderModule {
 ///   `owns_layout == true` and the layout is torn down with the pipeline (reverse
 ///   creation order: pipeline → layout) in `destroy_compute_pipeline`.
 ///
-/// `layout` is the target a [`RhiCommandEncoder::bind_descriptor_set_compute`] binds
+/// `layout` is the target a [`RhiCommandEncoder::bind_descriptor_set_compute`](boyko_rhi::RhiCommandEncoder::bind_descriptor_set_compute) binds
 /// the vocabulary set against.
 ///
 /// # Safety
@@ -458,15 +499,21 @@ pub struct ComputePipeline {
     pub(crate) owns_layout: bool,
 }
 
+/// The stage visibility of a graphics pipeline's push-constant range unless its builder says
+/// otherwise: `VERTEX | FRAGMENT`. [`RhiDevice::create_graphics_pipeline`](boyko_rhi::RhiDevice::create_graphics_pipeline)
+/// and every inherent builder except the FRAGMENT-only and VERTEX-only ones declare it, so every
+/// push against such a pipeline must name BOTH stages (`VUID-vkCmdPushConstants-offset-01796`).
+const GRAPHICS_PUSH_STAGES_DEFAULT: VkFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
 /// An owned graphics pipeline ([`RhiApi::GraphicsPipeline`], Phase-6 S0 rung 2).
 ///
 /// Holds the `VkPipeline` **and** its own `VkPipelineLayout`. Unlike a compute
 /// pipeline (which shares the device's [`ComputeLayouts`]`::pipeline_layout`), a
-/// graphics pipeline uses a dedicated layout with no descriptor sets and either no
-/// push range (rung 2) or one `VERTEX`-stage push range (rung 3's MVP `float4x4`),
+/// graphics pipeline uses a dedicated layout with its own descriptor sets and either no
+/// push range or one push range at offset 0 whose stage visibility is [`Self::push_stages`],
 /// created at `create_graphics_pipeline` and torn down with the pipeline (reverse
 /// creation order: pipeline → layout) in `destroy_graphics_pipeline`. The layout is
-/// also the target of [`RhiCommandEncoder::push_graphics_constants`]. Its shader
+/// also the target of [`RhiCommandEncoder::push_graphics_constants`](boyko_rhi::RhiCommandEncoder::push_graphics_constants). Its shader
 /// modules are separate caller-owned [`VulkanShaderModule`]s (the trait splits
 /// module + pipeline creation).
 ///
@@ -478,9 +525,14 @@ pub struct ComputePipeline {
 pub struct VulkanGraphicsPipeline {
     /// The `VkPipeline` handle; destroyed first by `destroy_graphics_pipeline`.
     pub(crate) pipeline: VkPipeline,
-    /// The dedicated `VkPipelineLayout` (no descriptor sets; either no push range
-    /// — rung 2 — or one VERTEX-stage push range — rung 3); destroyed after the pipeline.
+    /// The dedicated `VkPipelineLayout`; destroyed after the pipeline.
     pub(crate) layout: VkPipelineLayout,
+    /// The `stageFlags` of `layout`'s push-constant range, or `0` when it has none. A
+    /// `vkCmdPushConstants` against `layout` must pass exactly these flags: a stage the range
+    /// lacks is `VUID-vkCmdPushConstants-offset-01795`, a stage of the range left out is
+    /// `-01796`. Recorders whose pipeline is not built with [`GRAPHICS_PUSH_STAGES_DEFAULT`] push
+    /// with this field rather than a literal, so the two cannot drift apart.
+    pub(crate) push_stages: VkFlags,
 }
 
 /// An owned texture sampler ([`RhiApi::Sampler`], Phase-6 S0 rung 5).
@@ -530,6 +582,19 @@ pub struct VulkanBindGroupLayout {
     pub(crate) entry_count: usize,
 }
 
+impl VulkanBindGroupLayout {
+    /// Multi-paradigm render-path plan, rung R4b-b: the raw `VkDescriptorSetLayout` handle —
+    /// a public accessor for cross-crate callers that need to hand a layout to a MULTI-SET
+    /// pipeline builder taking raw handles (e.g.
+    /// [`VulkanContext::create_graphics_pipeline_forward`]'s `set1_placeholder`/`set2_layout`
+    /// parameters), mirroring [`crate::bindless::VulkanBindlessSet::set_layout`]'s existing
+    /// public-accessor precedent for the SAME `create_graphics_pipeline_bindless` shape.
+    #[inline]
+    pub fn set_layout(&self) -> VkDescriptorSetLayout {
+        self.set_layout
+    }
+}
+
 /// One layout entry's `(binding, kind)` pair, retained by [`VulkanBindGroupLayout`]
 /// for the `create_bind_group` cross-check (Render P1a, review M1/M2). A trivial POD
 /// (`Copy`, no heap), read only on the create/debug path — never on the per-frame
@@ -567,6 +632,105 @@ pub struct VulkanBindGroup {
     pub(crate) descriptor_set: VkDescriptorSet,
 }
 
+/// Rewrites binding `binding` of `bg`'s descriptor set in place to point at `buffer` — a
+/// single `vkUpdateDescriptorSets` storage-buffer write, reusing the SAME device fn pointer
+/// [`VulkanCommandEncoder::bind_storage_buffer`](boyko_rhi::RhiCommandEncoder::bind_storage_buffer)'s one-time compute-set write uses
+/// (`update_descriptor_sets`). Asset-streaming plan F7 §5: growing a GPU-mirrored SSBO
+/// repoints every descriptor set that binds it in place, without a `vkDeviceWaitIdle` —
+/// the surgical tool the present-crate rebind orchestration (`GBufferFrame::
+/// repoint_material_table`) and the host's per-slot instance-family growth both drive.
+///
+/// # Safety
+///
+/// The caller guarantees `bg`'s descriptor set is not bound to any command buffer currently
+/// pending execution (VUID-vkUpdateDescriptorSets-None-03047) — i.e. every submit that could
+/// reference it has already been fence-waited (the fenced-slot discipline every F7 caller
+/// relies on). `ctx` must be the live context `bg` and `buffer` were created on.
+pub unsafe fn rebind_storage_buffer(
+    ctx: &VulkanContext,
+    bg: &VulkanBindGroup,
+    binding: u32,
+    buffer: &BoundBuffer,
+) {
+    let buffer_info = VkDescriptorBufferInfo {
+        buffer: buffer.buffer,
+        offset: 0,
+        range: buffer.size,
+    };
+    let write = VkWriteDescriptorSet {
+        s_type: VkStructureType::WriteDescriptorSet,
+        p_next: ptr::null(),
+        dst_set: bg.descriptor_set,
+        dst_binding: binding,
+        dst_array_element: 0,
+        descriptor_count: 1,
+        descriptor_type: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        p_image_info: ptr::null(),
+        p_buffer_info: &buffer_info,
+        p_texel_buffer_view: ptr::null(),
+    };
+    let fns = ctx.device_fns();
+    // SAFETY: `ctx.device()`/`ctx.device_fns()` are the live device + its command table
+    // (`ctx` is live per the caller contract above); the write references the live
+    // `buffer_info` local + `bg`'s live descriptor set; `bg`'s set is not command-buffer-
+    // pending (caller contract above), so updating it in place is sound.
+    unsafe { (fns.update_descriptor_sets)(ctx.device(), 1, &write, 0, ptr::null()) };
+}
+
+/// Rewrites binding `binding` of `bg`'s descriptor set in place to point at `accel` — the
+/// HW-RT acceleration-structure counterpart of [`rebind_storage_buffer`]: a single
+/// `vkUpdateDescriptorSets` write through the SAME `VkWriteDescriptorSetAccelerationStructureKHR`
+/// `p_next` chain [`crate::rhi_impl::device::create_bind_group`]'s
+/// `BindGroupEntry::AccelerationStructure` arm uses (HW-RT rung R2a-4a). Asset-streaming
+/// plan F7-hwrt (task#11): growing the per-slot TLAS mints a NEW `VkAccelerationStructureKHR`
+/// handle — every resolve-family descriptor set that traces it must be repointed here, or
+/// it dangles at the freed handle the instant the old TLAS is retired.
+///
+/// # Safety
+///
+/// The caller guarantees `bg`'s descriptor set is not bound to any command buffer currently
+/// pending execution (VUID-vkUpdateDescriptorSets-None-03047) — the same fenced-slot
+/// discipline [`rebind_storage_buffer`] relies on. `ctx` must be the live context `bg` and
+/// `accel` were created on; `accel` must outlive every submit that could reference it.
+#[cfg(feature = "hwrt")]
+pub unsafe fn rebind_accel_struct(
+    ctx: &VulkanContext,
+    bg: &VulkanBindGroup,
+    binding: u32,
+    accel: &BoundAccelStruct,
+) {
+    let as_write = VkWriteDescriptorSetAccelerationStructureKHR {
+        s_type: ST_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+        _pad: 0,
+        p_next: ptr::null(),
+        acceleration_structure_count: 1,
+        _pad2: 0,
+        // `accel.handle` lives in the caller's live `&BoundAccelStruct` borrow (address
+        // stable for this call); taking its address does not copy the handle into a local.
+        p_acceleration_structures: &accel.handle,
+    };
+    let write = VkWriteDescriptorSet {
+        s_type: VkStructureType::WriteDescriptorSet,
+        p_next: (&as_write as *const VkWriteDescriptorSetAccelerationStructureKHR).cast::<c_void>(),
+        dst_set: bg.descriptor_set,
+        dst_binding: binding,
+        dst_array_element: 0,
+        descriptor_count: 1,
+        descriptor_type: VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
+        p_image_info: ptr::null(),
+        p_buffer_info: ptr::null(),
+        p_texel_buffer_view: ptr::null(),
+    };
+    let fns = ctx.device_fns();
+    // SAFETY: `ctx.device()`/`ctx.device_fns()` are the live device + its command table
+    // (`ctx` is live per the caller contract above); the write's `p_next` points at the
+    // live `as_write` local (alive for the whole call), whose `p_acceleration_structures`
+    // points at `accel.handle` inside the caller's live `&BoundAccelStruct` borrow (also
+    // alive for the whole call); `bg`'s set is not command-buffer-pending (caller contract
+    // above), so updating it in place is sound.
+    unsafe { (fns.update_descriptor_sets)(ctx.device(), 1, &write, 0, ptr::null()) };
+}
+
 /// An owned fence ([`RhiApi::Fence`]).
 ///
 /// # Safety
@@ -585,8 +749,8 @@ pub struct VulkanFence {
 ///
 /// The originating [`VulkanContext`] MUST still be alive when this pool is read from
 /// or destroyed: each goes through the context's device fn-table. Its queries are
-/// UNDEFINED until reset ([`RhiCommandEncoder::reset_query_pool`]) each frame before
-/// the first [`RhiCommandEncoder::write_timestamp`]. No compile-time `'ctx` tie this
+/// UNDEFINED until reset ([`RhiCommandEncoder::reset_query_pool`](boyko_rhi::RhiCommandEncoder::reset_query_pool)) each frame before
+/// the first [`RhiCommandEncoder::write_timestamp`](boyko_rhi::RhiCommandEncoder::write_timestamp). No compile-time `'ctx` tie this
 /// phase (plan F1; the fence precedent).
 pub struct VulkanQueryPool {
     /// The `VkQueryPool` handle; destroyed by `destroy_query_pool`.
@@ -620,7 +784,7 @@ pub struct VulkanQueue {
     fns: *const DeviceFns,
 }
 
-/// The hot command-recording encoder ([`RhiCommandEncoder`]).
+/// The hot command-recording encoder ([`RhiCommandEncoder`](boyko_rhi::RhiCommandEncoder)).
 ///
 /// Owns its command pool + primary command buffer + descriptor pool + the one
 /// fixed compute descriptor set (allocated ONCE here at
@@ -673,6 +837,23 @@ pub struct VulkanCommandEncoder {
 // order in the context's `Drop`; it is dereferenced only on the owning thread.
 // The raw pointer makes the type `!Send + !Sync` by default (no auto-impl), which
 // is the discipline we want — no explicit `unsafe impl` is added.
+
+impl VulkanCommandEncoder {
+    /// The raw command buffer this encoder records into.
+    ///
+    /// Exposed for the GPU zone recorder ([`crate::present::gpu_zone`]), whose verbs take a raw
+    /// [`VkCommandBuffer`] exactly as [`gpu_timing`](crate::present::gpu_timing)'s collectors do.
+    /// A timestamp is a **witnessed** command: the recorder increments its host-side witness on the
+    /// same line that records the `vkCmd*`, so the site has to be the recorder's, not an RHI verb's
+    /// interior. Routing it through the encoder's typed surface would put the command and its
+    /// witness on opposite sides of a call boundary, which is the arrangement the witness exists to
+    /// avoid.
+    #[inline]
+    #[must_use]
+    pub fn raw_command_buffer(&self) -> VkCommandBuffer {
+        self.command_buffer
+    }
+}
 
 impl VulkanQueue {
     /// Wraps a context's queue + device fn-table into the thin RHI queue.

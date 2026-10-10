@@ -1,0 +1,26 @@
+bp_g4_uniform/tree/1000 time:   [83.627 µs 84.046 µs 84.374 µs]
+Found 3 outliers among 10 measurements (30.00%)
+  2 (20.00%) low severe
+  1 (10.00%) high mild
+bp_g4_uniform/tree_rowwalk/1000
+                        time:   [159.06 µs 159.63 µs 160.17 µs]
+
+bp_g4_disparity/tree/1000
+                        time:   [103.60 µs 104.10 µs 104.82 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_disparity/tree_rowwalk/1000
+                        time:   [228.56 µs 229.99 µs 231.45 µs]
+
+bp_g4_scene/tree/1240   time:   [143.99 µs 144.66 µs 145.63 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_scene/tree_rowwalk/1240
+                        time:   [436.52 µs 437.01 µs 437.47 µs]
+bp_g4_scene/tree/j100   time:   [144.72 µs 145.03 µs 145.33 µs]
+bp_g4_scene/tree_rowwalk/j100
+                        time:   [438.62 µs 438.81 µs 438.96 µs]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low severe
+  1 (10.00%) low mild
+

@@ -4,7 +4,7 @@
 //! Run via (NOTE the `-Zmiri-ignore-leaks` — see below):
 //! ```powershell
 //! $env:MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-ecs --test miri_phase19
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_phase19
 //! ```
 //!
 //! # Why `-Zmiri-ignore-leaks`
@@ -274,7 +274,7 @@ fn miri_cascade_inline_path() {
 /// suites). Remove the `cfg_attr` only if Miri gains a way to run this in
 /// reasonable time (e.g. a lowered `CASCADE_FANOUT_INLINE` test seam).
 #[test]
-#[cfg_attr(miri, ignore = "tractability: 34-entity wide cascade OOMs/over-runs Miri; TB surface subsumed by miri_cascade_inline_path (TESTER FINDING — not a soundness failure)")]
+#[cfg_attr(miri, ignore = "miri-slow: 34-entity wide cascade OOMs/over-runs Miri; TB surface subsumed by miri_cascade_inline_path (TESTER FINDING — not a soundness failure)")]
 fn miri_cascade_wide_path() {
     let mut ecs = EcsMaster::new();
     const FANOUT: usize = 33; // > CASCADE_FANOUT_INLINE (32)

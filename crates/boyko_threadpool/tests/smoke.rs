@@ -37,16 +37,19 @@ fn pool_install_one_task_runs() {
 
 #[test]
 fn pool_install_many_tasks_runs_all() {
+    // Under Miri, 32: still many more tasks than workers, and the native 1000 did not finish inside
+    // 3 min of interpretation (MEASURED 2026-10-10 under the Miri sweep's flags).
+    const TASKS: usize = if cfg!(miri) { 32 } else { 1000 };
     let pool = ThreadPoolBuilder::new().num_threads(4).build();
     let counter = AtomicUsize::new(0);
     pool.install(|scope| {
-        for _ in 0..1000 {
+        for _ in 0..TASKS {
             scope.spawn(|| {
                 counter.fetch_add(1, Ordering::Relaxed);
             });
         }
     });
-    assert_eq!(counter.load(Ordering::Acquire), 1000);
+    assert_eq!(counter.load(Ordering::Acquire), TASKS);
 }
 
 #[test]

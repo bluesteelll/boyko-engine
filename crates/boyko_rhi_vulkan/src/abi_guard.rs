@@ -16,7 +16,8 @@
 use boyko_rhi::enums::{
     AddressMode, BarrierAccess, BarrierStage, BlendFactor, BlendOp, BufferUsage, CompareOp,
     CullMode, DescriptorKind, Filter, Format, ImageAspect, ImageLayout, ImageUsage, IndexType,
-    LoadOp, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension, TimestampStage, VertexFormat,
+    LoadOp, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension, TextureViewDimension,
+    TimestampStage, VertexFormat,
 };
 
 use crate::ffi::{
@@ -35,10 +36,12 @@ use crate::ffi::{
     VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_FILTER_LINEAR,
     VK_FILTER_NEAREST, VK_FORMAT_B10G11R11_UFLOAT_PACK32, VK_FORMAT_B8G8R8A8_SRGB,
-    VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_D32_SFLOAT, VK_FORMAT_R16G16B16A16_UNORM,
-    VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16G16_UNORM,
-    VK_FORMAT_R16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
-    VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8_UNORM,
+    VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_D32_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT,
+    VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16G16_UNORM,
+    VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_UNORM, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
+    VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8G8B8A8_SRGB,
+    VK_FORMAT_R8G8B8A8_UNORM,
+    VK_FORMAT_R8G8_UNORM,
     VK_FORMAT_R8_SNORM, VK_FORMAT_R8_UNORM,
     VK_FORMAT_UNDEFINED,
     VK_IMAGE_ASPECT_COLOR_BIT,
@@ -49,6 +52,7 @@ use crate::ffi::{
     VK_IMAGE_TYPE_3D, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_USAGE_SAMPLED_BIT,
     VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+    VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_IMAGE_VIEW_TYPE_3D,
     VK_INDEX_TYPE_UINT16, VK_INDEX_TYPE_UINT32, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
     VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
@@ -251,6 +255,12 @@ const _: () = assert!(
     Format::R8Snorm.as_i32() == VK_FORMAT_R8_SNORM,
     "Format::R8Snorm must equal VK_FORMAT_R8_SNORM"
 );
+// Multi-paradigm render-path plan, rung R8: the `vb_id` Visibility-Buffer id-channel format
+// (`as_i32()` mapped in `create_texture`).
+const _: () = assert!(
+    Format::R32G32Uint.as_i32() == VK_FORMAT_R32G32_UINT,
+    "Format::R32G32Uint must equal VK_FORMAT_R32G32_UINT"
+);
 // Render P7: the SSAO term `gSsao` format (`as_i32()` mapped in `create_texture`).
 const _: () = assert!(
     Format::R8Unorm.as_i32() == VK_FORMAT_R8_UNORM,
@@ -286,6 +296,18 @@ const _: () = assert!(
 const _: () = assert!(
     Format::R16G16Unorm.as_i32() == VK_FORMAT_R16G16_UNORM,
     "Format::R16G16Unorm must equal VK_FORMAT_R16G16_UNORM"
+);
+// The SSAO à-trous denoise chain's interior ping-pong ring format (`as_i32()` mapped in
+// `create_texture`). Pinned to the canonical enumerant (`VK_FORMAT_R16_UNORM == 70`).
+const _: () = assert!(
+    Format::R16Unorm.as_i32() == VK_FORMAT_R16_UNORM,
+    "Format::R16Unorm must equal VK_FORMAT_R16_UNORM"
+);
+// Textured-PBR T6a: the `gPbr` deferred-resolve MRT lane format (`as_i32()` mapped in
+// `create_texture`). Pinned to the canonical enumerant (`VK_FORMAT_R16G16B16A16_SFLOAT == 97`).
+const _: () = assert!(
+    Format::R16G16B16A16Sfloat.as_i32() == VK_FORMAT_R16G16B16A16_SFLOAT,
+    "Format::R16G16B16A16Sfloat must equal VK_FORMAT_R16G16B16A16_SFLOAT"
 );
 // SDFDDGI I1: the probe IRRADIANCE atlas format (`R11G11B10F`-no-gamma, Decision D6;
 // `as_i32()` mapped in `create_texture`).
@@ -384,6 +406,10 @@ const _: () = assert!(
 // ===========================================================================
 
 // --- VertexFormat `as_i32()` (mapped in `create_graphics_pipeline`). ---
+const _: () = assert!(
+    VertexFormat::Float32x2.as_i32() == VK_FORMAT_R32G32_SFLOAT,
+    "VertexFormat::Float32x2 must equal VK_FORMAT_R32G32_SFLOAT"
+);
 const _: () = assert!(
     VertexFormat::Float32x3.as_i32() == VK_FORMAT_R32G32B32_SFLOAT,
     "VertexFormat::Float32x3 must equal VK_FORMAT_R32G32B32_SFLOAT"
@@ -548,8 +574,8 @@ const _: () = assert!(
 // discriminants MUST equal the matching `VK_COMPARE_OP_*` / `VK_CULL_MODE_*`
 // constants. These pin that equality; any drift breaks the build instead of writing
 // the wrong compare op / cull mode. (The depth-array texture's `VK_IMAGE_VIEW_TYPE_*`
-// view types are backend-only constants the agnostic surface never names, so they
-// have no agnostic counterpart to assert.)
+// view types were backend-only constants with no agnostic counterpart until VG R3 step
+// S1 surfaced `TextureViewDimension`; they are asserted in that step's section below.)
 // ===========================================================================
 
 // --- CompareOp `as_i32()` (mapped in `create_sampler`). ---
@@ -582,6 +608,34 @@ const _: () = assert!(
 const _: () = assert!(
     CullMode::Back.as_u32() == VK_CULL_MODE_BACK_BIT,
     "CullMode::Back must equal VK_CULL_MODE_BACK_BIT"
+);
+
+// ===========================================================================
+// VG R3 step S1 — the explicit image-view contract. `TextureViewDimension` `as_i32()`
+// is mapped in `texture.rs::texture_view_create_info` (the `VkImageViewCreateInfo::
+// viewType`) by a trivial `as i32` cast, so its discriminants MUST equal the matching
+// `VK_IMAGE_VIEW_TYPE_*` constants. A wrong view type is not a compile error anywhere
+// else: it is a driver-side type mismatch against the image (or, worse, a silently
+// layer-clamped view), so pin the equality here.
+//
+// `D2`/`D3` numerically COINCIDE with `VK_IMAGE_TYPE_2D`/`_3D` (asserted above for
+// `TextureDimension`), but the two live in DIFFERENT Vulkan enum namespaces
+// (`VkImageViewType` here vs `VkImageType` there) — the coincidence is not a reason to
+// merge either family into the other, exactly as with the `DescriptorKind`/`VkStructureType`
+// `1_000_150_000` collision.
+// ===========================================================================
+
+const _: () = assert!(
+    TextureViewDimension::D2.as_i32() == VK_IMAGE_VIEW_TYPE_2D,
+    "TextureViewDimension::D2 must equal VK_IMAGE_VIEW_TYPE_2D"
+);
+const _: () = assert!(
+    TextureViewDimension::D3.as_i32() == VK_IMAGE_VIEW_TYPE_3D,
+    "TextureViewDimension::D3 must equal VK_IMAGE_VIEW_TYPE_3D"
+);
+const _: () = assert!(
+    TextureViewDimension::D2Array.as_i32() == VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+    "TextureViewDimension::D2Array must equal VK_IMAGE_VIEW_TYPE_2D_ARRAY"
 );
 
 // ===========================================================================

@@ -14,6 +14,11 @@
 // ALSO usable as a `Query` SystemParam inside a system body (FINDING-1 fixed —
 // the `D: 'static` bound was dropped); this bench just exercises the direct path.
 
+// Bench-harness model: the std collections / `Arc<Mutex<_>>` here build the
+// reference workload and collect measurements outside the timed region - never
+// engine data. A `benches/` target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 #[cfg(feature = "bench-alloc")]
 #[global_allocator]
 static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;

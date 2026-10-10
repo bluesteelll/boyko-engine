@@ -1,0 +1,24 @@
+--- receipts: populations ---
+used 90 p0: before 0.70 after 0.63 witness 0.16 (n 30)
+used 90 p1: before 0.56 after 0.62 witness 0.20 (n 30)
+used 90 p2: before 0.70 after 0.70 witness 0.17 (n 30)
+all 95 timed p0: before 0.74 after 0.66 witness 0.16 (n 31)
+all 95 timed p1: before 0.56 after 0.62 witness 0.20 (n 30)
+all 95 timed p2: before 0.68 after 0.68 witness 0.19 (n 34)
+all incl warm-up p0: before 0.70 after 0.70 witness 0.18 (n 32)
+all incl warm-up p1: before 0.55 after 0.56 witness 0.20 (n 31)
+all incl warm-up p2: before 0.66 after 0.70 witness 0.19 (n 35)
+--- armed wall variants (JD-armed, JDap-armed) ---
+C4-JD-armed W1: median-over-steps wall [100,500) 4.3056; mean [100,500) 4.3496; median [0,500) 4.3159; sys/median-wall 5.8%, sys/mean-wall 5.8%
+C4-JD-armed W8: median-over-steps wall [100,500) 1.8352; mean [100,500) 1.8586; median [0,500) 1.8531; sys/median-wall 14.2%, sys/mean-wall 14.0%
+C4-JDap-armed W1: median-over-steps wall [100,500) 5.7528; mean [100,500) 5.7894; median [0,500) 5.7569; sys/median-wall 31.6%, sys/mean-wall 31.4%
+C4-JDap-armed W8: median-over-steps wall [100,500) 3.5025; mean [100,500) 3.5140; median [0,500) 3.5088; sys/median-wall 52.5%, sys/mean-wall 52.3%
+--- TreeDiag on all Tree-row processes ---
+nonzero wide/excluded/sleeper/translations/hint/evictions: []
+TreeDiag per Tree row: [('C4-JD-armed', 1, 1, 77500), ('C4-R', 1, 1, 77500), ('C4-S16', 0, 0, 0)]
+AllPairs rows broadphase_tree: ['{"bp_kernel": "LeafList", "evictions": 0, "excluded_rows": 0, "fallback_leaves": 0, "hint_candidates": 0, "kd_order_buil']
+R4 verdicts: ['equal', 'equal', 'equal', 'equal', 'equal', 'equal', 'equal', 'equal', 'equal', 'equal', 'equal', 'equal', 'equal']
+--- C4-AB C4-JD#tip W8 T(8) [0,500) mean wall, slot rule, pass_done passes ---
+C4-JD#tip W8 used: 7 per pass [1, 3, 3]; median [0,500) 1.8277; [100,500) 1.7878
+t_q 0.2046: share of T(8) 11.19%; S5 formula tq*0.745-0.01 = 0.1424 (7.79%); E=0.6: 0.1520; perfect 8-way tq*7/8 0.1790
+t_q 0.2076: share of T(8) 11.36%; S5 formula tq*0.745-0.01 = 0.1447 (7.92%); E=0.6: 0.1543; perfect 8-way tq*7/8 0.1817

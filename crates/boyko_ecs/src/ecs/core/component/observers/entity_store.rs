@@ -274,6 +274,21 @@ impl EntityObserverStore {
             .unwrap_or(false)
     }
 
+    /// `true` iff ANY entity has EVER attached a custom-trigger observer for
+    /// ANY trigger id — the **id-free** half of the 0%-probe.
+    ///
+    /// 2026-07 audit: [`has_any_custom`](Self::has_any_custom) needs a
+    /// `TriggerId`, and obtaining one costs a process-wide type intern lookup.
+    /// The edge-fire sites run on the per-frame command drain, so they must be
+    /// able to bail out BEFORE minting an id. `ever_custom` stays empty until
+    /// the first custom attach, which makes `is_empty` an exact witness of
+    /// "this store has no custom-trigger observer for any id" — same sticky,
+    /// conservative-`true` contract as the per-id probe.
+    #[inline]
+    pub(crate) fn has_any_custom_at_all(&self) -> bool {
+        self.inner.as_ref().is_some_and(|i| !i.ever_custom.is_empty())
+    }
+
     /// Removes the observer with `id`, returning `true` if it was registered.
     ///
     /// Empty lists are reclaimed: the entity's `by_entity` entry is dropped and

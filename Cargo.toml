@@ -1,26 +1,72 @@
 [workspace]
-members = ["crates/boyko_ecs", "crates/boyko_macros", "crates/boyko_utils", "crates/boyko_threadpool", "crates/bench_bevy_vs_boyko", "crates/boyko_demo", "crates/boyko_rhi", "crates/boyko_rhi_vulkan", "crates/boyko_render", "crates/boyko_serialize", "crates/boyko_physics", "crates/boyko_math", "crates/boyko_sdf_math", "crates/boyko_shaderdsl", "crates/boyko_input", "crates/boyko_ui", "crates/boyko_scene", "crates/boyko_fontbake", "crates/boyko_app"]
+members = ["crates/aether_lang", "crates/aether", "crates/aether_tests", "crates/boyko_diag", "crates/boyko_log", "crates/boyko_ecs", "crates/boyko_memory", "crates/boyko_macros", "crates/boyko_utils", "crates/boyko_threadpool", "crates/bench_bevy_vs_boyko", "crates/boyko_demo", "crates/boyko_rhi", "crates/boyko_rhi_vulkan", "crates/boyko_render", "crates/boyko_serialize", "crates/boyko_physics", "crates/boyko_math", "crates/boyko_sdf_math", "crates/boyko_shaderdsl", "crates/boyko_input", "crates/boyko_ui", "crates/boyko_scene", "crates/boyko_fontbake", "crates/boyko_app", "crates/boyko_image", "crates/boyko_reflect", "crates/reflect_fixture", "crates/reflect_dogfood", "crates/profile_fixture", "crates/profile_fixture_log", "crates/boyko_symcensus", "tools/prof_decode"]
 
-# Centralized lints opted into per-crate via `[lints] workspace = true`.
-# Only `boyko_threadpool` opts in today (Phase 9.1). Registers the
-# `cfg(loom)` model-checker flag so native `-D warnings` stays clean on the
-# `#[cfg(loom)]` / `#[cfg(not(loom))]` attributes in `boyko_threadpool::sync`.
+# 2026-07 audit, P0 build-gate finding: this workspace root is ALSO a package
+# (`boyko-engine`, the `src/main.rs` placeholder binary), so Cargo's default package
+# selection at the root is THAT PACKAGE ALONE — a bare `cargo check --all-targets` /
+# `cargo test --all-targets` / `cargo clippy --all-targets -- -D warnings` compiled a
+# `println!` and reported success in ~0.2 s while every engine crate went unchecked.
+# Both CI and local/agent invocations were therefore VACUOUSLY GREEN (measured: the bare
+# form found 0 errors where `--workspace` found 4 real ones). Listing every member as a
+# default member makes the bare form cover the whole workspace, so the vacuity is
+# impossible by construction rather than by everyone remembering `--workspace`.
+default-members = ["crates/aether_lang", "crates/aether", "crates/aether_tests", "crates/boyko_diag", "crates/boyko_log", "crates/boyko_ecs", "crates/boyko_memory", "crates/boyko_macros", "crates/boyko_utils", "crates/boyko_threadpool", "crates/bench_bevy_vs_boyko", "crates/boyko_demo", "crates/boyko_rhi", "crates/boyko_rhi_vulkan", "crates/boyko_render", "crates/boyko_serialize", "crates/boyko_physics", "crates/boyko_math", "crates/boyko_sdf_math", "crates/boyko_shaderdsl", "crates/boyko_input", "crates/boyko_ui", "crates/boyko_scene", "crates/boyko_fontbake", "crates/boyko_app", "crates/boyko_image", "crates/boyko_reflect", "crates/reflect_fixture", "crates/reflect_dogfood", "crates/profile_fixture", "crates/profile_fixture_log", "crates/boyko_symcensus", "tools/prof_decode", "."]
+
+# Centralized lints opted into per-crate via `[lints] workspace = true`. EVERY member opts in
+# (2026-07 audit — before it, only `boyko_threadpool` did, so a workspace-wide lint policy was
+# not actually workspace-wide). Registers the `cfg(loom)` model-checker flag so native
+# `-D warnings` stays clean on the `#[cfg(loom)]` / `#[cfg(not(loom))]` attributes in
+# `boyko_threadpool::sync`; harmless for the crates that never mention `loom`.
 # `cfg(miri)` is a built-in cfg and must NOT be registered here.
+# `cfg(force_alloc_panic)` was registered in `boyko_ecs`'s own `[lints.rust]` until 2026-07;
+# Cargo forbids combining `[lints] workspace = true` with local `[lints.*]` tables, so the flag
+# is hoisted here. Registering it workspace-wide only declares it EXPECTED — crates that never
+# mention it are unaffected. See docs/PHASE-9-FORCE-ALLOC-PANIC.md.
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(force_alloc_panic)'] }
+
+# The hot-path type ban (CLAUDE.md "Forbidden on the hot path", Principles 1/4) at DENY, not
+# warn. Before this table the ban existed only inside CI's `-- -D warnings`, so a plain local
+# `cargo clippy` reported it as one warning among many and rust-analyzer showed it as a hint.
+# Denying it in the manifest means the editor underlines it red while typing, a local clippy
+# fails, and CI stops being the first place anyone learns about it.
+#
+# Every member opts in with `[lints] workspace = true`. The banned paths themselves live in
+# clippy.toml (`disallowed-types`); the per-site exceptions are enumerated in
+# docs/HOT-PATH-EXCEPTIONS.md and gated by scripts/check_hotpath_exceptions.py.
+[workspace.lints.clippy]
+disallowed_types = "deny"
+
+# `missing_const_for_thread_local` is a FALSE POSITIVE across this tree: all 63
+# `thread_local!` statics in twelve crates ALREADY use a `const { … }` initialiser —
+# verified by reading every site clippy names. `rustc 1.98.1`'s clippy reports them
+# anyway, and there is nothing to rewrite because they are already in the form it asks
+# for.
+#
+# It is allowed HERE rather than per crate or per file, for two measured reasons.
+# `-D warnings` turns it into a compile ERROR, and an error in a DEPENDENCY stops its
+# dependents from being linted at all — the gate does not go red, it goes BLIND, and
+# unblinding the first crate revealed six more crates plus two REAL findings that had
+# been hidden behind them. And a crate-root `#![allow]` shifts every line of its file,
+# which moves the line anchors the internal docs carry into these files.
+#
+# Retire it when clippy stops reporting a `const {}` initialiser as non-const: delete
+# this line and run `cargo clippy --workspace --all-targets -- -D warnings`.
+missing_const_for_thread_local = "allow"
+
 
 # Shared third-party version pins (W2 workspace hygiene). Member crates opt in
 # with `<dep>.workspace = true` so a version bump happens in ONE place instead of
 # being re-declared per crate. Per-crate feature selections are preserved: the
 # workspace entry carries the common feature base, and a crate adds extras via a
 # local `features = [...]` (Cargo unions them). `mimalloc` and `bevy_ecs` are
-# deliberately NOT hoisted — each lives in a single crate with a load-bearing
+# deliberately NOT hoisted â€” each lives in a single crate with a load-bearing
 # per-crate comment.
 [workspace.dependencies]
-# Bench harness — every crate that ships criterion benches pins the same 0.5 with
+# Bench harness â€” every crate that ships criterion benches pins the same 0.5 with
 # `html_reports`.
 criterion = { version = "0.5", features = ["html_reports"] }
-# Property-based test framework — dev-only across the workspace.
+# Property-based test framework â€” dev-only across the workspace.
 proptest = "1"
 # POD cast + derive for GPU-instance columns.
 bytemuck = { version = "1", features = ["derive"] }
@@ -30,25 +76,151 @@ bytemuck = { version = "1", features = ["derive"] }
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 # Unix mmap/mprotect/munmap FFI for the VmReservation lazy-commit backing store.
 libc = "0.2"
-# loom model-checker atomics shim — pulled in ONLY under `--cfg loom`.
+# loom model-checker atomics shim â€” pulled in ONLY under `--cfg loom`.
 loom = "0.7"
+# Rust parser. `boyko_macros` needs it to expand the derives; `boyko_ui`'s
+# `ui_a1_source_census` dev-dependency needs it to WALK `src/animation.rs`
+# instead of scanning it. Hoisted the moment it stopped being a single-crate
+# dep, which is exactly the rule the two carve-outs above (`mimalloc`,
+# `bevy_ecs`) are carved out of. Per-crate feature selections are unioned by
+# Cargo: this base carries `full`, the census adds `visit` locally.
+#
+# The census's need is not a preference. MEASURED by the seventh adversarial
+# pass over rung A1: a keyword-and-regex scanner cannot distinguish
+# `advance(…)` from `done.advance()`, cannot see a branch introduced by a macro
+# invocation, and cannot see a `&&` short-circuit — three live evasions that
+# left the whole crate at EXIT=0. All three are ordinary AST nodes.
+syn = { version = "2.0.100", features = ["full"] }
+# Token printing for the two consumers of `syn` above: the derives emit with it,
+# and the census keys every AST node by its printed token text (which is why the
+# keys survive a reflow that would move every line the old scanner counted).
+quote = "1.0.39"
+# The census's TOKEN-level half. `syn` cannot help with a `macro_rules!` body: it
+# is a token tree with `$` metavariables and does not parse as Rust until
+# expansion. The one component-hook registration rung A1 ships —
+# `#[component(storage = "dense", on_add = crate::animation::ui_visual_sink_on_add)]`
+# — is written INSIDE `tween_channel!`, so an attribute scan over the parsed tree
+# sees nothing there at all. The census walks that body as tokens instead.
+#
+# Not a new node in the dependency graph: `syn` and `quote` above both depend on
+# it, so it is compiled either way; this only lets the census name the type.
+proc-macro2 = "1.0.107"
 
-# Phase X.E — deterministic bench codegen.
+# Phase X.E â€” deterministic bench codegen.
 # A single codegen unit removes the cross-build codegen-layout variance that
 # otherwise perturbs A/B bench deltas, and it hardens the "0%-gate /
 # byte-identical asm" methodology (two builds of the same source produce the
 # same machine code). This is NOT `lto`: LTO over the Bevy dependency in
 # `bench_bevy_vs_boyko` would explode compile time, and LTO shifts the mean
-# rather than the variance — out of scope for X.E. See docs/BENCHMARKING.md.
+# rather than the variance â€” out of scope for X.E. See docs/BENCHMARKING.md.
+# The SHIPPED profile. Until 2026-09-04 no `[profile.release]` existed at all, so a
+# release build ran at cargo's defaults: opt-level 3, codegen-units 16, LTO OFF.
+# `lto = "fat"` was chosen on a measured matrix (5 configurations x 7 benchmarks,
+# 10 interleaved passes plus 12 rotated-order passes on a verified-idle machine;
+# raw data and receipts in the 2026-09-04 measurement report).
+#
+# What it buys, as ratios to the previous default:
+#   ComponentPool::swap_remove/10k  0.655   (LTO is the whole ~35% lever here)
+#   ComponentPool::add fill/10k     0.849
+#   query_ref_iter/10k              0.375   (2.67x, and reproducible: IQR/median 0.4%)
+#   geometric mean over 7           0.793
+# It also SHRINKS the binary 8.76 MB -> 3.46 MB, because inlining across the crate
+# boundary makes the original bodies dead and dedups cross-crate generic
+# instantiations. Cost: roughly 2-3x the link-time of a non-LTO build.
+#
+# ⚠ `codegen-units = 1` is deliberately NOT set here, and that is a measured
+# refusal rather than an omission. Paired with fat LTO it is the ONLY configuration
+# in the whole matrix that is SLOWER than the pre-2026-09-04 default on any
+# benchmark: query_ref_iter/10k regresses 17.4%. It wins 5 of 7 benchmarks by 1-6%
+# and 26.7% on query_mut_iter, so the aggregate is close — but a default profile
+# should trade forgone gains, never a measured regression. Principle 7's
+# "excessive inlining bloats L1i and LOWERS performance" is the likely mechanism.
+[profile.release]
+lto = "fat"
+
 [profile.bench]
 codegen-units = 1
+# ⚠ EXPLICIT, not inherited: `bench` inherits `release`, so the `lto = "fat"` above
+# would otherwise silently turn every benchmark into `fat + codegen-units = 1` — the
+# one configuration measured SLOWER than the shipped default (see above). It would
+# also re-introduce exactly the compile-time explosion over the Bevy dependency that
+# the note above says X.E rejected LTO to avoid.
+#
+# The consequence must be stated rather than left to be discovered: `cargo bench` and
+# `cargo build --release` are now DIFFERENT codegen configurations by design — bench
+# optimises for VARIANCE (reproducible layout), release for SPEED. A number taken with
+# `cargo bench` therefore does NOT describe the shipped profile on the codegen axis,
+# and must not be quoted as if it did.
+lto = false
+
+# The Jolt parity runner's profile (physics perf campaign, `docs/physics/perf-campaign/`
+# ruling W1): the SHIPPED codegen, because the headline boyko/Jolt ratio compares our shipped
+# build against Jolt's shipped Distribution build. `inherits = "release"` gives fat LTO with the
+# default codegen units; `bench` above (lto = false, codegen-units = 1) is a different codegen
+# configuration and the matrix above measured fat LTO + codegen-units = 1 as a regression, so
+# neither is borrowed here. Built with
+# `cargo bench --no-run --profile parity -p boyko-physics --bench jolt_parity_pyramid`; every
+# number it produces names this profile. A single-codegen-unit profile for lever A/Bs is NOT
+# defined until a lever needs one.
+[profile.parity]
+inherits = "release"
+
+# UG-21 / MQ timing profile for decisions about SHIPPED codegen (unification plan 03 §5): a pin
+# move, a codegen-unit partition, an inlining choice, or keep-versus-re-seam on a rung UG-15
+# attributes. Run with `cargo bench --profile bench-shipped`. Byte-for-byte the same configuration
+# as `[profile.parity]` above; two names because two different receipts cite them, and a receipt
+# must name the profile it was taken under.
+[profile.bench-shipped]
+inherits = "release"
+
+# UG-15 legs (7) and (7b) (03 §6): EXACTLY the shipped codegen, in an artifact directory only the
+# `ug15` instrument writes, so no other recipe's `cargo build --release` can relink an image this
+# gate reads. No other key, and that is MEASURED, not tidiness (B3, 2026-09-23, rustc 1.98.1 msvc):
+#   * the plan's `strip = "none"` changed CODEGEN. Cargo hashes `strip` into every unit's
+#     `-C metadata`, so every crate's disambiguator, v0 symbol name and CGU partition moved, and
+#     `.text` came out 1,957,315 B for `clear` against release's 1,956,051 (demo: 8,546,370 vs
+#     8,546,242). The census reads the post-LTO OBJECT, which link-time stripping never touches,
+#     so the key bought nothing and cost the identity with release the recipe checks;
+#   * the profile NAME is not hashed: `bench-shipped` (also `inherits = "release"` alone) gave
+#     sections, defined-symbol multiset and exports identical to release's for `clear`.
+# The recipe checks `.text` equality with `release` (`ug15 textcheck`).
+[profile.seam-census]
+inherits = "release"
+
+# UG-15 sensitivity map (a) (03 §6): line tables and inline sites for `llvm-symbolizer`. The map
+# only ATTRIBUTES a pin move; no pin is ever taken under this profile. The keys are set here, never
+# through RUSTFLAGS, which would replace `.cargo/config.toml`'s `-C target-cpu=x86-64-v3` and map a
+# binary without its AVX2 arms.
+[profile.sensitivity-map]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"
 
 [package]
 name = "boyko-engine"
 version = "0.1.0"
 edition = "2024"
-
+license.workspace = true
 [dependencies]
-boyko-ecs = { path = "crates/boyko_ecs" }
-boyko-macros = { path = "crates/boyko_macros" }
-boyko-utils = { path = "crates/boyko_utils" }
+
+[dev-dependencies]
+# The root package is where this workspace puts SOURCE-TREE censuses (internal_docs_anchors,
+# vg_symbol_reachability, gpu_blocking_reader_census), because CARGO_MANIFEST_DIR IS the
+# repository root here and no "../.." walking can point a scan at the wrong tree.
+# engine_packages_census needs the constant it pins; boyko-diag has an empty [dependencies]
+# table, so this adds nothing to any graph.
+boyko-diag = { path = "crates/boyko_diag" }
+# UG-02 (tests/runtime_data_ledger_gate.rs) WALKS every scanned crate's module tree with syn
+# instead of grepping it: a text scanner misses tuple variants, aliases, `cfg(not(test))`,
+# hand-wrapped generics and every head but `Vec<` (allocator design P6, W4). No new graph
+# node: these are the workspace entries, and the feature set is exactly the one boyko_ui's
+# census dev-dependencies already request (`full` + `visit`), so no target-side feature moves.
+syn = { workspace = true, features = ["visit"] }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+
+[lints]
+workspace = true
+
+[workspace.package]
+license = "Apache-2.0"

@@ -28,6 +28,13 @@
 //! `#[allow(non_snake_case)]` on the generated ctor fns), so no crate-level mask
 //! is needed here.
 
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -158,6 +165,17 @@ fn b_effective_ids(ecs: &EcsMaster, e: Entity) -> HashSet<usize> {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        // Under Miri, two cases: the closures are value-independent by construction, and the
+        // default 256 cases ran past 3 min of interpretation (MEASURED 2026-10-10).
+        #[cfg(miri)]
+        cases: 2,
+        // No failure file under Miri: proptest finds it through the cwd, which Miri's
+        // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+        #[cfg(miri)]
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
     /// Invariant 1+2: spawning ARoot1 (with random value) always yields exactly
     /// {ARoot1, AMid, ALeaf} — value-independent canonical set, each id once.
     #[test]

@@ -1,0 +1,32 @@
+PHYSICS WINDOW 9a DRY RUN: rows9a.json, 5 blocks, K per cell = passes x rounds (default 3 x 3; a block may set its own passes / rounds), cutoff 02:28, assumed start 20:00; STOP flag C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\238150a2-5c92-4147-8309-b6428586e8a7\scratchpad\win9a\STOP absent
+per pass: idle rule >= 135 s, opening receipt 10 s, one warm-up; per process: the gate's untimed dry-sample wall + 0.4 s launch + 5 s receipt
+re-run rule (ruling 8): a slot whose latest attempt is contaminated or invalid is re-run in waves at the end of the pass until its pass-cell has every slot clean; at most 4 waves and 0.5 x the pass wall; a pass-cell with k_clean < 3 does not gate (passcell records in runs.jsonl)
+binaries: all match bin/SHA256SUMS (+ sha256_pin)
+fixture hashes: every pose_ref recorded
+fixtures: all present
+estimates: every cell has an untimed dry sample
+
+[C4-AB prio 1]: 34 cells x K 9 = 306 timed processes + 3 warm-up(s); 3 pass(es) x 3 rounds; per round 284 s; per pass 16.7 min; block 50.1 min; 20:00 -> 20:50
+  pass 0: idle rule; warm-up C4-JD#tip#8; each round: C4-rung#tip@W16(1.9s), C4-JDpar#parent@W16(2.7s), C4-JDap#tip@W16(2.7s), C4-JD#tip@W16(1.7s), C4-jolt56#j56@W16(2.1s), C4-JT#tip@W16(2.0s), C4-JT#parent@W16(1.8s), C4-JA#tip@W16(4.2s), C4-JA#parent@W16(3.8s), C4-rung#tip@W8(1.7s), C4-JDpar#parent@W8(2.6s), C4-JDap#tip@W8(2.6s), C4-JD#tip@W8(1.7s), C4-jolt56#j56@W8(2.5s), C4-JT#tip@W8(1.7s), C4-JT#parent@W8(1.7s), C4-JA#tip@W8(3.9s), C4-JA#parent@W8(3.8s), C4-JDpar#parent@W4(2.7s), C4-JDap#tip@W4(2.7s), C4-JD#tip@W4(1.8s), C4-jolt56#j56@W4(3.1s), C4-JDpar#parent@W2(3.2s), C4-JDap#tip@W2(3.2s), C4-JD#tip@W2(2.3s), C4-jolt56#j56@W2(4.4s), C4-JDpar#parent@W1(4.0s), C4-JDap#tip@W1(3.8s), C4-JD#tip@W1(3.2s), C4-jolt56#j56@W1(8.2s), C4-JT#tip@W1(3.2s), C4-JT#parent@W1(3.4s), C4-JA#tip@W1(10.1s), C4-JA#parent@W1(9.2s)
+  pass 1: idle rule; warm-up C4-JD#tip#8; each round: C4-JA#parent@W1(9.2s), C4-JA#tip@W1(10.1s), C4-JT#parent@W1(3.4s), C4-JT#tip@W1(3.2s), C4-jolt56#j56@W1(8.2s), C4-JD#tip@W1(3.2s), C4-JDap#tip@W1(3.8s), C4-JDpar#parent@W1(4.0s), C4-jolt56#j56@W2(4.4s), C4-JD#tip@W2(2.3s), C4-JDap#tip@W2(3.2s), C4-JDpar#parent@W2(3.2s), C4-jolt56#j56@W4(3.1s), C4-JD#tip@W4(1.8s), C4-JDap#tip@W4(2.7s), C4-JDpar#parent@W4(2.7s), C4-JA#parent@W8(3.8s), C4-JA#tip@W8(3.9s), C4-JT#parent@W8(1.7s), C4-JT#tip@W8(1.7s), C4-jolt56#j56@W8(2.5s), C4-JD#tip@W8(1.7s), C4-JDap#tip@W8(2.6s), C4-JDpar#parent@W8(2.6s), C4-rung#tip@W8(1.7s), C4-JA#parent@W16(3.8s), C4-JA#tip@W16(4.2s), C4-JT#parent@W16(1.8s), C4-JT#tip@W16(2.0s), C4-jolt56#j56@W16(2.1s), C4-JD#tip@W16(1.7s), C4-JDap#tip@W16(2.7s), C4-JDpar#parent@W16(2.7s), C4-rung#tip@W16(1.9s)
+  pass 2: idle rule; warm-up C4-JD#tip#8; each round: C4-rung#tip@W16(1.9s), C4-JDpar#parent@W16(2.7s), C4-JDap#tip@W16(2.7s), C4-JD#tip@W16(1.7s), C4-jolt56#j56@W16(2.1s), C4-JT#tip@W16(2.0s), C4-JT#parent@W16(1.8s), C4-JA#tip@W16(4.2s), C4-JA#parent@W16(3.8s), C4-rung#tip@W8(1.7s), C4-JDpar#parent@W8(2.6s), C4-JDap#tip@W8(2.6s), C4-JD#tip@W8(1.7s), C4-jolt56#j56@W8(2.5s), C4-JT#tip@W8(1.7s), C4-JT#parent@W8(1.7s), C4-JA#tip@W8(3.9s), C4-JA#parent@W8(3.8s), C4-JDpar#parent@W4(2.7s), C4-JDap#tip@W4(2.7s), C4-JD#tip@W4(1.8s), C4-jolt56#j56@W4(3.1s), C4-JDpar#parent@W2(3.2s), C4-JDap#tip@W2(3.2s), C4-JD#tip@W2(2.3s), C4-jolt56#j56@W2(4.4s), C4-JDpar#parent@W1(4.0s), C4-JDap#tip@W1(3.8s), C4-JD#tip@W1(3.2s), C4-jolt56#j56@W1(8.2s), C4-JT#tip@W1(3.2s), C4-JT#parent@W1(3.4s), C4-JA#tip@W1(10.1s), C4-JA#parent@W1(9.2s)
+
+[C4-G5 prio 2]: 10 cells x K 9 = 90 timed processes + 3 warm-up(s); 3 pass(es) x 3 rounds; per round 97 s; per pass 7.4 min; block 22.3 min; 20:50 -> 21:12
+  pass 0: idle rule; warm-up C4-JD-armed#tip#8; each round: C4-Rap#tip@W8(3.5s), C4-R#tip@W8(2.3s), C4-JDap-armed#tip@W8(7.4s), C4-JD-armed#tip@W8(5.7s), C4-S16ap#tip@W1(0.5s), C4-S16#tip@W1(0.5s), C4-Rap#tip@W1(5.2s), C4-R#tip@W1(4.2s), C4-JDap-armed#tip@W1(10.7s), C4-JD-armed#tip@W1(6.8s)
+  pass 1: idle rule; warm-up C4-JD-armed#tip#8; each round: C4-JD-armed#tip@W1(6.8s), C4-JDap-armed#tip@W1(10.7s), C4-R#tip@W1(4.2s), C4-Rap#tip@W1(5.2s), C4-S16#tip@W1(0.5s), C4-S16ap#tip@W1(0.5s), C4-JD-armed#tip@W8(5.7s), C4-JDap-armed#tip@W8(7.4s), C4-R#tip@W8(2.3s), C4-Rap#tip@W8(3.5s)
+  pass 2: idle rule; warm-up C4-JD-armed#tip#8; each round: C4-Rap#tip@W8(3.5s), C4-R#tip@W8(2.3s), C4-JDap-armed#tip@W8(7.4s), C4-JD-armed#tip@W8(5.7s), C4-S16ap#tip@W1(0.5s), C4-S16#tip@W1(0.5s), C4-Rap#tip@W1(5.2s), C4-R#tip@W1(4.2s), C4-JDap-armed#tip@W1(10.7s), C4-JD-armed#tip@W1(6.8s)
+
+[C4-BR prio 3]: 3 cells x K 9 = 27 timed processes + 0 warm-up(s); 3 pass(es) x 3 rounds; per round 970 s; per pass 50.9 min; block 152.7 min; 21:12 -> 23:45
+  pass 0: idle rule; no warm-up; each round: C4-BR#g4rT@W0(318.2s), C4-BR#g4r8b@W0(318.2s), C4-BR#g4r7@W0(318.2s)
+  pass 1: idle rule; no warm-up; each round: C4-BR#g4r7@W0(318.2s), C4-BR#g4r8b@W0(318.2s), C4-BR#g4rT@W0(318.2s)
+  pass 2: idle rule; no warm-up; each round: C4-BR#g4rT@W0(318.2s), C4-BR#g4r8b@W0(318.2s), C4-BR#g4r7@W0(318.2s)
+
+[C4-G4 prio 4]: 1 cells x K 9 = 9 timed processes + 0 warm-up(s); 3 pass(es) x 3 rounds; per round 508 s; per pass 27.8 min; block 83.5 min; 23:45 -> 01:08
+  pass 0: idle rule; no warm-up; each round: C4-G4#g4rT@W0(503.0s)
+  pass 1: idle rule; no warm-up; each round: C4-G4#g4rT@W0(503.0s)
+  pass 2: idle rule; no warm-up; each round: C4-G4#g4rT@W0(503.0s)
+
+[C4-G4-kd prio 5]: 1 cells x K 3 = 3 timed processes + 0 warm-up(s); 1 pass(es) x 3 rounds; per round 310 s; per pass 17.9 min; block 17.9 min; 01:08 -> 01:26
+  pass 0: idle rule; no warm-up; each round: C4-G4-kd#g4rT@W0(305.0s)
+
+TOTAL 326.5 min if every block runs; ends 01:26; the cutoff stops starting processes at 02:28

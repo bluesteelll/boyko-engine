@@ -63,7 +63,7 @@
 // pixel (`mask != 1 || view_t >= 1e30`) reconstructs `Pp = P` so its falloff contributes
 // nothing (the eDSL span carries no per-tap branch).
 //
-// # Resources (dedicated 5-binding SSAO bind-group)
+// # Resources (dedicated 5-binding SSAO bind-group — the base, non-`VB_THIN` build)
 //
 //   binding 0 : RWTexture2D<float4> (STORAGE, rgba8) — gNormal   (READ; oct + material id)
 //   binding 1 : RWTexture2D<float4> (STORAGE, rgba8) — gMaterial (READ; .b = mask)
@@ -73,22 +73,85 @@
 // `gAlbedo` is NOT bound. `[[vk::image_format]]` pins each storage image's OpTypeImage
 // (shaderStorageImageWriteWithoutFormat is OFF).
 //
+// # VB_THIN variant (`-D VB_THIN=1` — R9-VB-SPLIT-PLAN.md §5, the SSAO-gather half of the
+// VisibilityBuffer geo/shade split, R9b)
+//
+// The VB split (`vb_geo`/`vb_shade_split`) has NO material G-buffer (the no-matcache rule):
+// there is no `gMaterial` image to read `.b` from for the background/mask test, and the
+// normal source is `vb_geo`'s thin aux image (`gThinNormal`, oct-encoded in RG, roughness in
+// BA — UNREAD here) instead of the fat `gNormal`. Under this define:
+//   - `gMaterial` is DROPPED ENTIRELY — not declared, no binding reserved for it (a hole in
+//     this shader's own declarations, unlike the `sdf_forward_march.comp.hlsl` HAS_MESH
+//     precedent of reserving an unread slot in a SHARED layout — VB_THIN gets its OWN dense
+//     layout, so there is no shared layout to keep a slot alive in).
+//   - `gNormal` is REPLACED by `gThinNormal` at the SAME slot (binding 0), decoded with the
+//     SAME `oct_decode` (RG-only; the BA roughness lane is not read by this pass).
+//   - The mask test becomes `view_t < SSAO_VIEWT_BG` alone, read off the already-bound
+//     `gViewT` (the `vb_viewt`/marcher background sentinel — mirrors
+//     `viewt_from_depth_rz.comp.hlsl`'s `VIEWT_BG` convention): a background pixel takes the
+//     SAME neutral path the base's `mask != 1` arm takes (a tap reconstructs `Pp = P`; a
+//     non-lit CENTER writes the SAME neutral `1.0` the base writes).
+//   - With the material image gone, the remaining 3 images + Camera RENUMBER into a DENSE
+//     4-binding table — a DIFFERENT bind-group layout host-side (`vb_ssao_layout`), not a
+//     hole in the base's 5-binding one:
+//       binding 0 : RWTexture2D<float4> (STORAGE, rgba8) — gThinNormal (READ; oct RG, roughness BA unread)
+//       binding 1 : RWTexture2D<float>  (STORAGE, r32f)  — gViewT      (READ; surface ray param t)
+//       binding 2 : RWTexture2D<float>  (STORAGE, r8)    — ssao        (WRITE; the AO factor)
+//       binding 3 : cbuffer Camera (UNIFORM)              — the SAME 80-byte extent/camera block
+//   - The march/dither/slice math, the tuning header, and the eDSL-GENERATED
+//     `ssao_horizon_step` span are BYTE-IDENTICAL text either way — the span (and its
+//     surrounding hand-written glue) reads only function-local names (`Pp`, `P`, `n`, `hc`),
+//     never a binding, so the renumbering never touches it.
+//
 // Compiled offline (hermetic — no SDK at `cargo build` time) with:
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 sdf_ssao.comp.hlsl -Fo sdf_ssao.comp.spv
 // The `ssao_edsl_sync` re-DXC byte-identity test pins the committed .spv to this recipe.
+//
+// VB_THIN is compiled per quality preset, from the SAME per-preset `.hlsl` the base variant
+// derivation emits (`sdf_ssao_<quality>.comp.hlsl`, `boyko_shaderdsl::ssao::variant_hlsl`),
+// re-DXC'd with the ADDITIONAL `-D VB_THIN=1`:
+//   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main -D VB_THIN=1 \
+//       -fspv-target-env=vulkan1.3 sdf_ssao_low.comp.hlsl -Fo sdf_ssao_vb_low.comp.spv
+//   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main -D VB_THIN=1 \
+//       -fspv-target-env=vulkan1.3 sdf_ssao_medium.comp.hlsl -Fo sdf_ssao_vb_medium.comp.spv
+//   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main -D VB_THIN=1 \
+//       -fspv-target-env=vulkan1.3 sdf_ssao_high.comp.hlsl -Fo sdf_ssao_vb_high.comp.spv
+// The `ssao_edsl_sync` re-DXC byte-identity loop is extended to these 3 blobs.
 
-// bindings 0..2: the G-buffer lanes READ by the gather (the marcher's store views).
+// bindings 0..2 (base) / 0..1 (VB_THIN): the aux/G-buffer lanes READ by the gather (the
+// vb_geo/marcher store views). VB_THIN drops `gMaterial` and renumbers into the dense
+// 4-binding table — see the VB_THIN header doc above.
+#if VB_THIN
+[[vk::image_format("rgba8")]] RWTexture2D<float4> gThinNormal : register(u0);
+[[vk::image_format("r32f")]]  RWTexture2D<float>  gViewT      : register(u1);
+// binding 2: the SSAO output lane (R8_UNORM STORAGE in GENERAL its whole life).
+[[vk::image_format("r8")]]    RWTexture2D<float>  ssao        : register(u2);
+#else
 [[vk::image_format("rgba8")]] RWTexture2D<float4> gNormal   : register(u0);
 [[vk::image_format("rgba8")]] RWTexture2D<float4> gMaterial : register(u1);
 [[vk::image_format("r32f")]]  RWTexture2D<float>  gViewT    : register(u2);
 // binding 3: the SSAO output lane (R8_UNORM STORAGE in GENERAL its whole life).
 [[vk::image_format("r8")]]    RWTexture2D<float>  ssao      : register(u3);
+#endif
 
-// binding 4: the camera/extent UNIFORM block — byte-identical field layout to the marcher's
-// `Camera` (and the host `CompositePushConstants`). The 80-byte head is all this pass needs
-// (no M4 clip-map tail): the extent (1:1 the marched pixels) + the per-pixel view direction
-// (the shared ray-gen). Offsets pinned host-side by the existing COMPOSITE_PC_* const-asserts.
+// binding 4 (base) / binding 3 (VB_THIN, the dense renumbered table): the camera/extent
+// UNIFORM block — byte-identical field layout to the marcher's `Camera` (and the host
+// `CompositePushConstants`). The 80-byte head is all this pass needs (no M4 clip-map tail):
+// the extent (1:1 the marched pixels) + the per-pixel view direction (the shared ray-gen).
+// Offsets pinned host-side by the existing COMPOSITE_PC_* const-asserts.
+#if VB_THIN
+cbuffer Camera : register(b3) {
+    uint   count;        // total pixel count = img_w * img_h
+    uint   img_w_raw;    // runtime extent width  (0 => IMG_W_DEFAULT)
+    uint   img_h_raw;    // runtime extent height (0 => IMG_H_DEFAULT)
+    uint   camera_mode;  // RAYGEN_CAM_ORTHO | RAYGEN_CAM_PERSPECTIVE
+    float4 cam_eye;      // xyz = eye world pos          (PERSPECTIVE)
+    float4 cam_forward;  // xyz = forward basis, w = tan(fovY/2) (PERSPECTIVE)
+    float4 cam_right;    // xyz = right basis,  w = aspect (W/H)  (PERSPECTIVE)
+    float4 cam_up;       // xyz = up basis                (PERSPECTIVE)
+};
+#else
 cbuffer Camera : register(b4) {
     uint   count;        // total pixel count = img_w * img_h
     uint   img_w_raw;    // runtime extent width  (0 => IMG_W_DEFAULT)
@@ -99,6 +162,7 @@ cbuffer Camera : register(b4) {
     float4 cam_right;    // xyz = right basis,  w = aspect (W/H)  (PERSPECTIVE)
     float4 cam_up;       // xyz = up basis                (PERSPECTIVE)
 };
+#endif
 
 // Shared camera ray-generation (the SAME header the marcher + resolve include — ONE
 // ray-gen, no drift). Takes the camera fields as plain parameters (binding-agnostic).
@@ -112,8 +176,8 @@ uint img_h() { return (img_h_raw != 0u) ? img_h_raw : IMG_H_DEFAULT; }
 
 // --- SSAO tuning (mirror boyko_shaderdsl::ssao; the eDSL span spells these SYMBOLICALLY) ---
 static const float SSAO_RADIUS   = 0.5;     // world-space sampling radius
-static const uint  SSAO_SLICES   = 3u;      // rotated screen-space slices
-static const float SSAO_SLICES_F = 3.0;     // the slice count as a float (the `occ / N` divisor)
+static const uint  SSAO_SLICES   = 8u;      // rotated screen-space slices
+static const float SSAO_SLICES_F = 8.0;     // the slice count as a float (the `occ / N` divisor)
 static const uint  SSAO_STEPS    = 6u;      // forward steps per half-slice
 static const float SSAO_STRENGTH = 2.5;     // occlusion strength multiplier
 static const float SSAO_EPS      = 1.0e-4;  // length(delta) divide-by-zero guard
@@ -126,32 +190,91 @@ static const float SSAO_VIEWT_BG = 1.0e30;
 static const float SSAO_RADIUS_PIX_MIN = 2.0;
 static const float SSAO_RADIUS_PIX_MAX = 24.0;
 
-// --- The integer-hash rotation table (bit-exact GPU↔host) ---------------------------------
+// --- The evenly-spaced rotation/base-axis table (bit-exact GPU↔host) ------------------------
 // A pre-baked `(cos, sin)` table for SSAO_ROT_N evenly-spaced angles over [0, pi): angle k =
-// k*(pi/16) for k = 0..15 (degrees 0, 11.25, 22.5, ..., 168.75). The per-pixel slot is chosen
-// by the integer hash `h & 15u` (NO float `fract`/`floor`), so the GPU and the host oracle pick
-// the SAME rotation bit-exactly. Q1 widened the table 4 -> 16 to decorrelate the angular
-// banding into high-frequency noise the depth-aware blur removes. The host mirror bakes the
-// IDENTICAL `f32`-rounded values (byte-value-identical literals).
-static const uint SSAO_ROT_N = 16u;
-static const float2 SSAO_ROT[16] = {
+// k*(pi/64) for k = 0..63 (a 2.8125° step). It serves BOTH (1) the per-slice BASE axes since
+// Change A (`SSAO_ROT[sl * SSAO_BASE_STRIDE]` — slice s at s*(pi/N); the strided entries are
+// bit-identical to the retired 16-entry table's) and (2) the per-pixel DITHER rotation slot
+// (see the pick site in `main`). Widened 16 -> 64: on an even-slice axis set the effective
+// dither classes = `SSAO_ROT_N / SSAO_SLICES`, and 16 entries left only 2 classes at 8 slices
+// — spatially-coherent streaks. The host mirror bakes the IDENTICAL `f32`-rounded values
+// (byte-value-identical literals).
+static const uint SSAO_ROT_N = 64u;
+static const float2 SSAO_ROT[64] = {
     float2(  1.00000000,  0.00000000 ),  //   0.00 deg
+    float2(  0.99879545,  0.04906768 ),  //   2.81 deg
+    float2(  0.99518472,  0.09801714 ),  //   5.62 deg
+    float2(  0.98917651,  0.14673047 ),  //   8.44 deg
     float2(  0.98078525,  0.19509032 ),  //  11.25 deg
+    float2(  0.97003126,  0.24298018 ),  //  14.06 deg
+    float2(  0.95694035,  0.29028466 ),  //  16.88 deg
+    float2(  0.94154406,  0.33688986 ),  //  19.69 deg
     float2(  0.92387950,  0.38268343 ),  //  22.50 deg
+    float2(  0.90398932,  0.42755508 ),  //  25.31 deg
+    float2(  0.88192129,  0.47139674 ),  //  28.12 deg
+    float2(  0.85772860,  0.51410276 ),  //  30.94 deg
     float2(  0.83146960,  0.55557024 ),  //  33.75 deg
+    float2(  0.80320752,  0.59569931 ),  //  36.56 deg
+    float2(  0.77301043,  0.63439327 ),  //  39.38 deg
+    float2(  0.74095112,  0.67155898 ),  //  42.19 deg
     float2(  0.70710677,  0.70710677 ),  //  45.00 deg
+    float2(  0.67155898,  0.74095112 ),  //  47.81 deg
+    float2(  0.63439327,  0.77301043 ),  //  50.62 deg
+    float2(  0.59569931,  0.80320752 ),  //  53.44 deg
     float2(  0.55557024,  0.83146960 ),  //  56.25 deg
+    float2(  0.51410276,  0.85772860 ),  //  59.06 deg
+    float2(  0.47139674,  0.88192129 ),  //  61.88 deg
+    float2(  0.42755508,  0.90398932 ),  //  64.69 deg
     float2(  0.38268343,  0.92387950 ),  //  67.50 deg
+    float2(  0.33688986,  0.94154406 ),  //  70.31 deg
+    float2(  0.29028466,  0.95694035 ),  //  73.12 deg
+    float2(  0.24298018,  0.97003126 ),  //  75.94 deg
     float2(  0.19509032,  0.98078525 ),  //  78.75 deg
+    float2(  0.14673047,  0.98917651 ),  //  81.56 deg
+    float2(  0.09801714,  0.99518472 ),  //  84.38 deg
+    float2(  0.04906768,  0.99879545 ),  //  87.19 deg
     float2(  0.00000000,  1.00000000 ),  //  90.00 deg
+    float2( -0.04906768,  0.99879545 ),  //  92.81 deg
+    float2( -0.09801714,  0.99518472 ),  //  95.62 deg
+    float2( -0.14673047,  0.98917651 ),  //  98.44 deg
     float2( -0.19509032,  0.98078525 ),  // 101.25 deg
+    float2( -0.24298018,  0.97003126 ),  // 104.06 deg
+    float2( -0.29028466,  0.95694035 ),  // 106.88 deg
+    float2( -0.33688986,  0.94154406 ),  // 109.69 deg
     float2( -0.38268343,  0.92387950 ),  // 112.50 deg
+    float2( -0.42755508,  0.90398932 ),  // 115.31 deg
+    float2( -0.47139674,  0.88192129 ),  // 118.12 deg
+    float2( -0.51410276,  0.85772860 ),  // 120.94 deg
     float2( -0.55557024,  0.83146960 ),  // 123.75 deg
+    float2( -0.59569931,  0.80320752 ),  // 126.56 deg
+    float2( -0.63439327,  0.77301043 ),  // 129.38 deg
+    float2( -0.67155898,  0.74095112 ),  // 132.19 deg
     float2( -0.70710677,  0.70710677 ),  // 135.00 deg
+    float2( -0.74095112,  0.67155898 ),  // 137.81 deg
+    float2( -0.77301043,  0.63439327 ),  // 140.62 deg
+    float2( -0.80320752,  0.59569931 ),  // 143.44 deg
     float2( -0.83146960,  0.55557024 ),  // 146.25 deg
+    float2( -0.85772860,  0.51410276 ),  // 149.06 deg
+    float2( -0.88192129,  0.47139674 ),  // 151.88 deg
+    float2( -0.90398932,  0.42755508 ),  // 154.69 deg
     float2( -0.92387950,  0.38268343 ),  // 157.50 deg
+    float2( -0.94154406,  0.33688986 ),  // 160.31 deg
+    float2( -0.95694035,  0.29028466 ),  // 163.12 deg
+    float2( -0.97003126,  0.24298018 ),  // 165.94 deg
     float2( -0.98078525,  0.19509032 ),  // 168.75 deg
+    float2( -0.98917651,  0.14673047 ),  // 171.56 deg
+    float2( -0.99518472,  0.09801714 ),  // 174.38 deg
+    float2( -0.99879545,  0.04906768 ),  // 177.19 deg
 };
+
+// Even-slice base axis (Change A): slice `s` spans angle `s*(pi/SSAO_SLICES)` == `SSAO_ROT[s*STRIDE]`,
+// reusing the SAME bit-exact 16-entry rotation table (host + shader share the identical literals)
+// instead of a new per-N `(cos,sin)` table (no round-trip risk, no per-variant header). REQUIRES
+// `SSAO_SLICES` to DIVIDE `SSAO_ROT_N` (2/4/8/16) for exact even spacing — the host oracle asserts
+// this. `N=2` gives stride 8 -> `ROT[0]=(1,0)`, `ROT[8]=(0,1)`: byte-identical to the pre-A hardcoded
+// `(sl==0)?(1,0):(0,1)` pair, so the Medium variant stays frozen (the no-op proof). A common-glue
+// line (NOT in the swapped `SSAO_*` header block), so `variant_hlsl` carries it verbatim per variant.
+static const uint SSAO_BASE_STRIDE = SSAO_ROT_N / SSAO_SLICES;
 
 // --- Octahedral decode (BYTE-IDENTICAL to the resolve's `oct_decode` in deferred_pbr.hlsl;
 // the inverse of the marcher's oct_encode). gNormal.rg carries the octahedral normal; the
@@ -212,12 +335,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
     uint py = idx / w;
     int2 coord = int2((int)px, (int)py);
 
-    // Read the center pixel's class from the G-buffer. `mask` is a binary flag in
-    // gMaterial.b (an R8 round-trip maps 1.0 -> ~255/255, so test > 0.5); `view_t` is the
-    // surface ray param (a `1.0e30` sentinel on a non-lit / mesh / background pixel).
+    // Read the center pixel's class. `view_t` is the surface ray param (a `1.0e30` sentinel
+    // on a non-lit / mesh / background pixel). VB_THIN has no material G-buffer, so `view_t`
+    // alone is the mask; the base build additionally gates on `gMaterial.b` (a binary flag —
+    // an R8 round-trip maps 1.0 -> ~255/255, so test > 0.5).
+#if VB_THIN
+    float center_view_t = gViewT.Load(coord);
+    bool center_lit = (center_view_t < SSAO_VIEWT_BG);
+#else
     float center_mask = gMaterial.Load(coord).b;
     float center_view_t = gViewT.Load(coord);
     bool center_lit = (center_mask > 0.5) && (center_view_t < SSAO_VIEWT_BG);
+#endif
 
     // Default AO = 1.0 (no occlusion). A non-lit pixel (background) carries no surface, so
     // it gets the neutral factor and the resolve's `min(class_ao, ssao)` leaves it unchanged.
@@ -229,11 +358,16 @@ void main(uint3 tid : SV_DispatchThreadID) {
         generate_ray(px, py, w, h, camera_mode, cam_eye.xyz, cam_forward, cam_right, cam_up.xyz, ro, rd);
         float3 P = ro + rd * center_view_t;
 
-        // Decode the center surface normal ONCE (gNormal.rg = octahedral). The horizon step
-        // measures each neighbour's ELEVATION ABOVE THE TANGENT PLANE this normal defines — a
-        // flat lit surface (delta perpendicular to N) raises no horizon (AO = 1), a crevice
-        // (neighbours above the tangent) does. CONSTANT across all slices/taps.
+        // Decode the center surface normal ONCE (VB_THIN: `gThinNormal.rg`; base: `gNormal.rg`
+        // — the SAME octahedral decode either way). The horizon step measures each neighbour's
+        // ELEVATION ABOVE THE TANGENT PLANE this normal defines — a flat lit surface (delta
+        // perpendicular to N) raises no horizon (AO = 1), a crevice (neighbours above the
+        // tangent) does. CONSTANT across all slices/taps.
+#if VB_THIN
+        float3 N = oct_decode(gThinNormal.Load(coord).rg);
+#else
         float3 N = oct_decode(gNormal.Load(coord).rg);
+#endif
 
         // The screen-pixel march radius. PERSPECTIVE: a world radius R at view-depth z spans
         // ~ R*(h/2)/(z*tan(fovY/2)) pixels (clamped to a sane band). ORTHO: the view maps the
@@ -247,13 +381,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
             pix_radius = SSAO_RADIUS * ((float)h * 0.5) / RAYGEN_HALF_EXTENT;
         }
 
-        // The Hilbert+R2 rotation slot (bit-exact; NO float fract/floor/trig). ONE 64x64 Hilbert
-        // index per pixel drives two R2 channels: ALPHA1 -> the rotation slot, ALPHA2 -> the radial
-        // phase. `slot = (r2 * SSAO_ROT_N) >> 24` maps the Q0.24 fraction into [0, ROT_N) by an
-        // integer scale (a power-of-two table, so this is the top bits of r2). Because R2 is
-        // low-discrepancy, adjacent pixels get well-SPREAD (not random) slots — the dither lives in
-        // HIGH frequencies and the depth-aware blur removes it cleanly, unlike the prior white-noise
-        // hash whose low-frequency component survived the blur as "pixelated" blobs.
+        // The Hilbert+R2 rotation slot (bit-exact; NO float fract/floor/trig/DIV). ONE 64x64
+        // Hilbert index per pixel drives two R2 channels: ALPHA1 -> the rotation slot, ALPHA2 ->
+        // the radial phase. `slot = (r2 * SSAO_ROT_N) >> 24` maps the Q0.24 fraction into
+        // [0, ROT_N) by an integer scale. The table is 64 entries (was 16): on an EVEN-SLICE
+        // axis set, rotating the set by its own slice spacing maps it onto itself, so the
+        // EFFECTIVE dither classes = `SSAO_ROT_N / SSAO_SLICES` — 16 entries gave only TWO
+        // distinct sampling patterns at 8 slices, whose spatially-coherent Hilbert+R2 layout
+        // read as un-blurrable STREAKS radiating from contact regions. 64 entries keep >= 8
+        // classes at a 2.8125° step (4x finer), so the residual class-to-class estimator delta
+        // is small and fine-grained — noise the depth-aware resolve blur removes. The pick
+        // stays INTEGER (a continuous/rational rotation needs an FDiv, whose 2.5-ULP Vulkan
+        // tolerance breaks the bit-exact GPU<->host tap positions this shader is pinned to).
         uint hindex = ssao_hilbert(SSAO_HILBERT_W, px & (SSAO_HILBERT_W - 1u), py & (SSAO_HILBERT_W - 1u));
         uint slot = (ssao_r2(hindex, SSAO_R2_ALPHA1) * SSAO_ROT_N) >> 24u;
         float2 rot = SSAO_ROT[slot];
@@ -270,12 +409,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float occ = 0.0;
         [unroll]
         for (uint sl = 0u; sl < SSAO_SLICES; ++sl) {
-            // The base slice axis (slices evenly split a half-turn: slice s at s*(pi/SLICES));
-            // pre-baked as integer-indexed `(cos, sin)` rotated by the per-pixel `rot`. Two
-            // slices -> axes (1,0) and (0,1) before rotation. The 2D screen axis is lifted to a
-            // 3D in-screen direction along the camera right/up basis (PERSPECTIVE) or the
-            // world x/y plane (ORTHO; right=+x, up=+y) — the same basis ray-gen builds from.
-            float2 base = (sl == 0u) ? float2(1.0, 0.0) : float2(0.0, 1.0);
+            // The base slice axis: slices EVENLY split a half-turn (slice s at s*(pi/SLICES)),
+            // read from the pre-baked `(cos, sin)` rotation table at stride `SSAO_BASE_STRIDE`
+            // (Change A — real angular coverage; the pre-A code hardcoded only 2 axes, so 3+ slices
+            // duplicated the (0,1) axis and added NO coverage). Then rotated by the per-pixel `rot`.
+            // The 2D screen axis is lifted to a 3D in-screen direction along the camera right/up
+            // basis (PERSPECTIVE) or the world x/y plane (ORTHO) — the same basis ray-gen builds from.
+            float2 base = SSAO_ROT[sl * SSAO_BASE_STRIDE];
             // Rotate the base axis by the per-pixel rotation: (c -s; s c) * base. This 2D screen
             // axis picks the neighbour PIXEL (the tap offset); the horizon math measures
             // elevation against the center surface normal N, NOT this direction.
@@ -300,9 +440,17 @@ void main(uint3 tid : SV_DispatchThreadID) {
                     float3 Pp = P;
                     if (npx >= 0 && npy >= 0 && npx < (int)w && npy < (int)h) {
                         int2 ncoord = int2(npx, npy);
+#if VB_THIN
+                        float nview_t = gViewT.Load(ncoord);
+                        if (nview_t < SSAO_VIEWT_BG) {
+#else
+                        // The base arm keeps the ORIGINAL statement order (gMaterial load FIRST,
+                        // then gViewT) — the no-define compile must stay byte-identical to the
+                        // committed pre-VB_THIN .spv.
                         float nmask = gMaterial.Load(ncoord).b;
                         float nview_t = gViewT.Load(ncoord);
                         if (nmask > 0.5 && nview_t < SSAO_VIEWT_BG) {
+#endif
                             float3 nro;
                             float3 nrd;
                             generate_ray((uint)npx, (uint)npy, w, h, camera_mode, cam_eye.xyz, cam_forward, cam_right, cam_up.xyz, nro, nrd);
@@ -336,9 +484,17 @@ void main(uint3 tid : SV_DispatchThreadID) {
                     float3 Pp = P;
                     if (npx >= 0 && npy >= 0 && npx < (int)w && npy < (int)h) {
                         int2 ncoord = int2(npx, npy);
+#if VB_THIN
+                        float nview_t = gViewT.Load(ncoord);
+                        if (nview_t < SSAO_VIEWT_BG) {
+#else
+                        // The base arm keeps the ORIGINAL statement order (gMaterial load FIRST,
+                        // then gViewT) — the no-define compile must stay byte-identical to the
+                        // committed pre-VB_THIN .spv.
                         float nmask = gMaterial.Load(ncoord).b;
                         float nview_t = gViewT.Load(ncoord);
                         if (nmask > 0.5 && nview_t < SSAO_VIEWT_BG) {
+#endif
                             float3 nro;
                             float3 nrd;
                             generate_ray((uint)npx, (uint)npy, w, h, camera_mode, cam_eye.xyz, cam_forward, cam_right, cam_up.xyz, nro, nrd);

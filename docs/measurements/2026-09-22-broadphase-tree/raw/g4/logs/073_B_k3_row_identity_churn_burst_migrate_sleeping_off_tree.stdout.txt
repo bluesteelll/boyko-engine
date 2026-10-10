@@ -1,0 +1,3 @@
+row_identity_churn/burst_migrate/sleeping_off_tree
+                        time:   [9.7285 ms 9.7520 ms 9.7721 ms]
+

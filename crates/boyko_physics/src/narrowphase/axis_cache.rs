@@ -15,23 +15,31 @@
 //! # Why a single in-place table (not double-buffered like warm-start)
 //!
 //! Each frame narrowphase visits each body pair at most once, in deterministic
-//! `(min, max)` pair order, and for each pair it READS the stored axis then WRITES
-//! back the freshly chosen one — a read-then-overwrite within the same frame. A
-//! single in-place open-addressed table is therefore sufficient and deterministic:
-//! the value a pair reads is always last frame's write for that exact key (a key is
-//! touched once per frame), independent of any other pair's traffic. There are no
-//! tombstones; a pair that vanishes simply leaves a stale entry that is never read
-//! again (and if its key is reused, the stale axis is re-validated against the
-//! current candidates by the SAT, so a stale value is at worst a one-frame miss,
-//! never a soundness or determinism break).
+//! `(min, max)` pair order, and for each pair it READS the stored axis then, when the
+//! pair produces a contact, WRITES back the freshly chosen one — a read-then-overwrite
+//! within the same frame. A single in-place open-addressed table is therefore
+//! sufficient and deterministic while the rows are unchanged: the value a pair reads is
+//! the last write for that exact key (a key is touched once per frame), independent of
+//! any other pair's traffic. There are no tombstones; a pair that vanishes leaves a
+//! stale entry behind, and if a later pair reuses its key the stale axis is read as
+//! that pair's hint. The SAT keeps a hint only while it is still a valid overlapping
+//! candidate within the hysteresis ratio of the best depth, exactly like a legitimate
+//! hint, so a stale
+//! value can tip the choice between near-equal axes but is never a soundness or
+//! determinism break. That bound comes from the SAT, not from time: an entry is
+//! overwritten only on a step that produces a contact for its key.
 //!
-//! # Keying (the dense-row assumption, shared with warm-start)
+//! # Keying (row keys, carried across row moves)
 //!
-//! Keyed by `pack(body_a, body_b)` on the dense [`BodyIndex`]
-//! row indices, which are stable frame-to-frame for a stable scene (no
-//! spawn/despawn between frames — the stacking case). A structural change
-//! reshuffles the dense rows, so the matched keys differ for one frame: a
-//! one-frame hysteresis miss, never a determinism break.
+//! Keyed by `pack(body_a, body_b)` on the dense [`BodyIndex`] row indices. Rows are
+//! not stable: a despawn swap-removes, a spawn appends, and a component insert or
+//! remove shifts every later row. The table stays keyed by the rows of the step that
+//! wrote it, so a step whose rows changed cannot read in the loop — when rows shift up
+//! by one, pair `(a, b)` would read key `(a − 1, b − 1)`, which an earlier pair has
+//! already overwritten this step. Instead `BoxAxisCache::begin_frame_synced` pre-reads
+//! every box pair's previous axis through the gather's row identity map
+//! (`row_identity.rs`, interim; U7's `PairCache` replaces it) before any write. A pair
+//! whose row order flipped, or that names a new body, reads no bias for that step.
 //!
 //! # Capacity and eviction
 //!
@@ -40,18 +48,70 @@
 //! backing `Vec` only when the pair count rises (principle 5).
 //!
 //! Because there are no tombstones, a pair that vanishes leaves a STALE live entry
-//! behind (the doc above explains why a stale value is at worst a one-frame miss).
+//! behind (the doc above explains what a stale value can and cannot do).
 //! Under pair-set churn those stale entries accumulate, so occupancy would climb
 //! monotonically and eventually saturate the table (every slot occupied), turning a
 //! probe of an absent key into a full-table walk. To bound this,
 //! [`begin_frame`](BoxAxisCache::begin_frame) CLEARS the whole table (dropping all
 //! entries to [`EMPTY`]) whenever live occupancy has passed the load-≤-0.5 target
 //! (`occupied > len / 2`) or whenever the table grows. A wholesale clear costs a
-//! single frame of warm-start misses — the same one-frame cost the module already
-//! documents as acceptable for a key remap — while keeping the steady-state load
-//! bounded and every probe chain short.
+//! single frame of warm-start misses — the same one-frame cost a pair whose row order
+//! flipped, or that names a new body, takes after a row move — while keeping the
+//! steady-state load bounded and every probe chain short.
+//!
+//! # A hint change picks the contact, never whether there is one
+//!
+//! The hint can change while the poses stay put, in two ways. It can be dropped by an
+//! order flip, a `Reset` or a clear. It can also be read from a different entry one step
+//! after a row move that the pair spent without a contact: the pre-read carries the hint
+//! for the move step only, and nothing writes it under the new key. Since A7b such a change
+//! can move a pair to another axis, and so change its feature ids for a step, but it cannot
+//! change whether the pair produces a manifold: that is a function of the two poses alone
+//! (`narrowphase/box_box.rs`), except on a chosen reference face with a zero in-plane extent.
+//! So it cannot change a frozen island's manifold count and does not wake it
+//! (`IslandSleep::begin_step`). Before A7b it could — a chosen face that realized no patch
+//! gave no manifold — which was A4's Known behaviour 2.
+//!
+//! # The parallel read/commit protocol (L5)
+//!
+//! The parallel narrowphase (`narrowphase/dispatch.rs`) runs the pair loop in contiguous
+//! chunks on several workers. No worker writes this table: every worker reads its hints from
+//! [`AxisHints`] (the live slots on a frame without a pre-read, the carried-axis column on a
+//! pre-read frame), writes the axis it chose into its own bytes of the per-pair `commit`
+//! column, and after the join the calling thread replays the writes serially, in pair order,
+//! through [`BoxAxisCache::commit_axes`]. The compared state is the TABLE STATE — `(key, axis)`
+//! per slot plus `occupied` — never raw bytes: an [`AxisEntry`] has four bytes of padding.
+//!
+//! Notation: T₀ is the table after `begin_frame_synced`, and key_k is candidate pair `k`'s
+//! packed key. Keys are unique within a frame because the broadphase emits each pair once.
+//!
+//! **Lemma 1 (hint invariance).** On a frame without a pre-read, the serial loop's
+//! `probe(T_k, key_k)` equals `probe(T₀, key_k)`. T_k differs from T₀ only by `set(key_j)` for
+//! `j < k`, with key_j ≠ key_k, and each such `set` either rewrites the axis in key_j's own
+//! slot or fills an `EMPTY` slot with key_j: entries never move, and only `begin_frame`
+//! clears, before the loop. If key_k is in T₀ at slot s, every slot from its home to s is
+//! non-`EMPTY` and keeps its key, and only `set(key_k)` writes s, so the probe finds key_k with
+//! the same axis. If key_k is not in T₀, no slot ever receives key_k, so the probe still
+//! misses. On a pre-read frame the hint is `remapped[k]`, which the loop never writes. So every
+//! hint is a function of T₀ alone, and a pair can be collided in any order on any thread.
+//!
+//! **Lemma 2 (commit equivalence).** `commit_axes` applies the serial `set` sequence in the
+//! same order, minus the skipped ones. A pair is skipped only when there was no pre-read and
+//! its hint equals the axis it chose: by Lemma 1 key_k then sits in T₀ at a slot holding that
+//! axis, and only `set(key_k)` writes that slot, so the serial `set` would have written the
+//! value already there and left `occupied` alone. Removing identity steps leaves the table
+//! state and `occupied` equal to the serial loop's.
 
+use boyko_ecs::ecs::core::component::scratch::{ScratchColumn, ScratchSolveView};
+use boyko_ecs::ecs::identifiers::primitives::ComponentId;
+
+use crate::components::ColliderShape;
 use crate::manifold::BodyIndex;
+use crate::resources::BodyState;
+use crate::row_identity::{RemapCursor, RowIdentity, RowRemap};
+use crate::scratch_ids::{
+    axis_commit_id, axis_remap_id, register_narrowphase_column_layouts, scratch_reserve_rows,
+};
 
 /// The empty-slot sentinel key. A real packed key can never equal it: [`pack`]
 /// places the two `u32` body indices in the high/low 32-bit halves, so producing
@@ -62,6 +122,20 @@ const EMPTY: u64 = u64::MAX;
 /// The 64-bit multiplicative-hash constant (Fibonacci hashing — `2^64 / φ`, odd),
 /// matching the warm-start table so the two caches scramble keys identically.
 const GOLDEN_64: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// The carried-axis sentinel: no previous axis for this pair. SAT axis indices are `0..15`.
+///
+/// Also the per-pair commit's "nothing to write" value in the parallel narrowphase (L5 D3).
+pub(crate) const AXIS_NONE: u8 = u8::MAX;
+
+/// The number of canonical SAT axes: every chosen or carried axis index is below it.
+pub(crate) const SAT_AXIS_COUNT: u8 = 15;
+
+/// FNV-1a 64 offset basis, for [`BoxAxisCache::fingerprint`].
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// FNV-1a 64 prime, for [`BoxAxisCache::fingerprint`].
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// Packs a body pair `(body_a, body_b)` into a 64-bit key (the two dense row
 /// indices in the high/low 32-bit halves).
@@ -78,7 +152,7 @@ fn pack(body_a: BodyIndex, body_b: BodyIndex) -> u64 {
 /// One cache slot — a packed body-pair key and the SAT-axis index chosen last
 /// frame for that pair.
 #[derive(Clone, Copy, Debug)]
-struct AxisEntry {
+pub(crate) struct AxisEntry {
     /// The packed body-pair key ([`pack`]), or [`EMPTY`] for a free slot.
     key: u64,
     /// The canonical SAT-axis index (`0..15`) chosen for this pair last frame.
@@ -110,17 +184,55 @@ fn shift_for(len: usize) -> u32 {
     64 - len.trailing_zeros()
 }
 
+/// The first probe slot for `key` in a table with index mask `mask` and hash shift
+/// `shift` — `(key · GOLDEN_64) >> shift`, the same Fibonacci high-bits hash as the
+/// warm-start table.
+#[inline]
+fn home_slot(key: u64, mask: usize, shift: u32) -> usize {
+    let h = key.wrapping_mul(GOLDEN_64) >> shift;
+    (h as usize) & mask
+}
+
+/// Looks up the SAT-axis index stored under `key` in `slots`, or `None` on a miss.
+///
+/// A free function over the table geometry rather than a method, so the pre-read can
+/// probe the slots while it holds the carried-axis column's refill view (disjoint
+/// borrows). Linear-probes from the home slot; the first `EMPTY` slot ends the chain (no
+/// tombstones, so a miss is unambiguous).
+#[inline]
+fn probe(slots: &[AxisEntry], mask: usize, shift: u32, key: u64) -> Option<usize> {
+    let mut i = home_slot(key, mask, shift);
+    let mut probes = 0usize;
+    loop {
+        let slot = slots[i];
+        if slot.key == key {
+            return Some(slot.axis as usize);
+        }
+        if slot.key == EMPTY {
+            return None;
+        }
+        i = (i + 1) & mask;
+        probes += 1;
+        if probes > mask {
+            // Full table with no match: only reachable on a sizing violation;
+            // treat as a miss rather than loop.
+            return None;
+        }
+    }
+}
+
 /// A flat open-addressed table mapping a body pair to its last-frame SAT-axis
 /// index — the box-box reference-axis hysteresis store (P2 W4).
 ///
 /// Embedded in [`Manifolds`](crate::resources::Manifolds) (narrowphase output), so
-/// it needs no extra resource wiring. The backing `Vec` capacity is reused across
-/// frames.
-#[derive(Default)]
+/// it needs no extra resource wiring. The backing column's capacity is reused
+/// across frames.
 pub struct BoxAxisCache {
     /// The slots; length is always a power of two (`mask = len - 1`). Empty slots
-    /// carry the [`EMPTY`] sentinel key.
-    slots: Vec<AxisEntry>,
+    /// carry the [`EMPTY`] sentinel key. Backed by a [`ScratchColumn`] (engine
+    /// storage, address-stable) rather than a `std::Vec` side allocation
+    /// (audit Stage 4).
+    slots: ScratchColumn<AxisEntry>,
     /// `slots.len() - 1` — the power-of-two index mask for the probe.
     mask: usize,
     /// `64 - log2(len)` — the Fibonacci-hash right-shift, cached alongside `mask` so
@@ -130,18 +242,129 @@ pub struct BoxAxisCache {
     /// [`begin_frame`](Self::begin_frame): without it, stale entries from vanished
     /// pairs would accumulate under churn until the table saturates.
     occupied: usize,
+    /// Per candidate pair `k`, the axis its bodies' pair chose when the table was last
+    /// keyed, read through the row identity map before any write of a step whose rows
+    /// changed (`AXIS_NONE` when there is none). Valid only on a frame
+    /// `begin_frame_synced` pre-read. 1 B per pair (defect A, interim; U7 deletes it).
+    remapped: ScratchColumn<u8>,
+    /// The table's place in the gather sequence (defect A, interim; U7 deletes it).
+    cursor: RemapCursor,
+    /// Per candidate pair `k`, the axis the parallel narrowphase's chunk wants `set`, or
+    /// [`AXIS_NONE`] (L5 D3). Written by the chunk that owns `k`, read by
+    /// [`commit_axes`](Self::commit_axes) after the join. Its length only grows, and rows at
+    /// or above this frame's pair count are stale and never read.
+    commit: ScratchColumn<u8>,
+    /// Frames whose rows changed, so `begin_frame_synced` pre-read the carried axes.
+    /// Diagnostic, cold: bumped once per such frame.
+    prefetched_frames: u64,
+    /// Load-based wholesale clears in [`begin_frame`](Self::begin_frame). Diagnostic, cold.
+    load_clears: u64,
+    /// Table grows (each one also clears) in [`begin_frame`](Self::begin_frame). Diagnostic,
+    /// cold.
+    grows: u64,
+    /// Whether the current frame's key set changed: `begin_frame` grew or cleared the table, or
+    /// `begin_frame_synced` pre-read the carried axes (the rows moved, or its carry was Reset).
+    /// On such a frame a contact-reuse hit re-keys its pair's entry (L9 ruling W1).
+    keys_changed: bool,
+}
+
+/// How a frame's key set changed in [`BoxAxisCache::begin_frame_synced`] (L10 design 06 D-C):
+/// the three causes its union, [`keys_changed`](BoxAxisCache::keys_changed), merges.
+///
+/// L9's reuse reads the union; L10's axis mirror reads the causes apart — every held key is
+/// re-keyed after a grow or a clear, only the moved ones on a plain `Rows` step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct KeyChange {
+    /// The consumer's cursor did not classify as `Identity` (the rows moved, or the table
+    /// missed a gather), so the carried axes were pre-read: the `prefetched` flag `read_hint`
+    /// and the parallel narrowphase take.
+    pub(crate) prefetched: bool,
+    /// The table was wholesale-cleared for its load (`occupied > len / 2`).
+    pub(crate) cleared: bool,
+    /// The table grew to fit the frame's logical pair count (a grow also empties it).
+    pub(crate) grown: bool,
+}
+
+impl KeyChange {
+    /// Whether the key set changed at all: [`keys_changed`](BoxAxisCache::keys_changed)'s
+    /// value for the frame.
+    #[inline]
+    pub(crate) fn any(self) -> bool {
+        self.prefetched || self.cleared || self.grown
+    }
+}
+
+/// The read-only hint source the parallel narrowphase's chunks share (L5 D2).
+///
+/// On a frame without a pre-read it probes the live slots; on a pre-read frame it reads the
+/// carried-axis column. Nothing writes either while a chunk runs (module docs, Lemma 1), so a
+/// copy is handed to every worker. `Send + Sync` by construction: shared slices of POD.
+#[derive(Clone, Copy)]
+pub(crate) struct AxisHints<'a> {
+    /// The table's slots, as they stood after `begin_frame_synced`.
+    slots: &'a [AxisEntry],
+    /// The table's index mask.
+    mask: usize,
+    /// The table's hash shift.
+    shift: u32,
+    /// The carried-axis column; read only when `prefetched`.
+    remapped: &'a [u8],
+    /// Whether this frame pre-read the carried axes.
+    prefetched: bool,
+}
+
+impl AxisHints<'_> {
+    /// The hysteresis hint for candidate pair `k` = `(a, b)` — the read
+    /// [`BoxAxisCache::read_hint`] makes, from the table state before the pair loop.
+    #[inline]
+    pub(crate) fn read(&self, k: usize, a: BodyIndex, b: BodyIndex) -> Option<usize> {
+        if self.prefetched {
+            let axis = self.remapped[k];
+            (axis != AXIS_NONE).then_some(axis as usize)
+        } else {
+            probe(self.slots, self.mask, self.shift, pack(a, b))
+        }
+    }
+
+    /// Whether this frame pre-read the carried axes (the skip rule's `prefetched` term).
+    #[inline]
+    pub(crate) fn prefetched(&self) -> bool {
+        self.prefetched
+    }
 }
 
 impl BoxAxisCache {
-    /// Builds an empty cache pre-sized for up to `pairs` body pairs (no later
-    /// realloc until the pair count exceeds twice this).
-    pub fn with_capacity(pairs: usize) -> Self {
+    /// Builds an empty cache pre-sized for up to `pairs` body pairs, backed by the
+    /// kernel column registered under `id`.
+    ///
+    /// Registers the scratch layouts (idempotent) before creating the column.
+    pub(crate) fn with_capacity(id: ComponentId, pairs: usize) -> Self {
+        register_narrowphase_column_layouts();
         let len = next_pow2(2 * pairs.max(1));
+        // The reserve is a HARD ceiling for a `ScratchColumn`, and `begin_frame`
+        // grows the table with the pair count, so the floor is the same budget every
+        // other scratch column gets rather than this frame's length.
+        let reserve = len.max(scratch_reserve_rows(size_of::<AxisEntry>()));
+        let mut slots = ScratchColumn::new(id, reserve);
+        slots.build_view().resize(len, AxisEntry::empty());
         Self {
-            slots: vec![AxisEntry::empty(); len],
+            slots,
             mask: len - 1,
             shift: shift_for(len),
             occupied: 0,
+            remapped: ScratchColumn::new(
+                axis_remap_id(),
+                pairs.max(scratch_reserve_rows(size_of::<u8>())),
+            ),
+            cursor: RemapCursor::default(),
+            commit: ScratchColumn::new(
+                axis_commit_id(),
+                pairs.max(scratch_reserve_rows(size_of::<u8>())),
+            ),
+            prefetched_frames: 0,
+            load_clears: 0,
+            grows: 0,
+            keys_changed: false,
         }
     }
 
@@ -150,37 +373,56 @@ impl BoxAxisCache {
     ///
     /// This is a SINGLE in-place table, so in the steady state THIS frame's
     /// [`get`](Self::get)s must see LAST frame's [`set`](Self::set)s: each pair is
-    /// touched at most once per frame (read its stored axis, then overwrite with the
-    /// freshly chosen one), so a pair's read always returns its own last-frame write.
-    /// A pair that vanished leaves a STALE entry behind (never read again unless its
-    /// key is reused, in which case the SAT re-validates it — a one-frame miss at
-    /// worst). Under pair-set churn those stale entries accumulate, so the table is
-    /// CLEARED whenever either:
+    /// touched at most once per frame (read its stored axis, then overwrite it with the
+    /// freshly chosen one if the pair produces a contact), so while the rows are
+    /// unchanged a pair's read returns the last write under its key. A pair that
+    /// vanished leaves a STALE entry behind (read again only if a later pair reuses its
+    /// key, in which case the SAT re-validates it as that pair's hint). Under pair-set
+    /// churn those stale entries accumulate, so
+    /// the table is CLEARED whenever either:
     ///
     /// - it must grow to fit `pairs` (a fresh larger buffer starts empty anyway), or
     /// - live occupancy has passed the load-≤-0.5 target (`occupied > len / 2`).
     ///
     /// A clear drops every entry to [`EMPTY`], costing one frame of warm-start misses
-    /// (the same one-frame cost the module already accepts for a key remap) in
-    /// exchange for a bounded steady-state load and short probe chains. When neither
+    /// (the same one-frame cost that a pair whose row order flipped, or that names a
+    /// new body, takes after a row move) in exchange for a bounded steady-state load
+    /// and short probe chains. Since A7b a clear cannot wake a frozen island: it changes
+    /// hints, and a hint picks a box pair's contact, never whether it has one (module docs,
+    /// "A hint change picks the contact, never whether there is one"). When neither
     /// trigger fires, the table is left in place and allocates nothing.
     pub fn begin_frame(&mut self, pairs: usize) {
+        let _ = self.begin_frame_keyed(pairs);
+    }
+
+    /// [`begin_frame`](Self::begin_frame), returning `(grown, cleared)`: whether the table grew
+    /// (a grow also empties it) or was wholesale-cleared for its load.
+    fn begin_frame_keyed(&mut self, pairs: usize) -> (bool, bool) {
         let len = next_pow2(2 * pairs.max(1));
-        if len > self.slots.len() {
-            // Grow to a fresh larger buffer; it starts empty, so occupancy resets.
-            self.slots.clear();
-            self.slots.resize(len, AxisEntry::empty());
+        let grown = len > self.slots.len();
+        let cleared = !grown && self.occupied > self.slots.len() / 2;
+        self.keys_changed = grown || cleared;
+        if grown {
+            // Grow to a fresh larger table; it starts empty, so occupancy resets.
+            // `clear` before `resize` is what makes it fresh — the surviving prefix
+            // would otherwise keep last frame's keys.
+            let mut view = self.slots.build_view();
+            view.clear();
+            view.resize(len, AxisEntry::empty());
             self.mask = len - 1;
             self.shift = shift_for(len);
             self.occupied = 0;
-        } else if self.occupied > self.slots.len() / 2 {
+            self.grows += 1;
+        } else if cleared {
             // Stale entries have pushed the load past 0.5; wholesale clear to bound
             // occupancy and keep probe chains short (a one-frame warm-start miss).
-            for slot in &mut self.slots {
+            for slot in self.slots.build_view().as_mut_slice() {
                 slot.key = EMPTY;
             }
             self.occupied = 0;
+            self.load_clears += 1;
         }
+        (grown, cleared)
     }
 
     /// The first probe slot for `key` — `(key · GOLDEN_64) >> shift` (the same
@@ -189,8 +431,7 @@ impl BoxAxisCache {
     /// `trailing_zeros` is needed.
     #[inline]
     fn home(&self, key: u64) -> usize {
-        let h = key.wrapping_mul(GOLDEN_64) >> self.shift;
-        (h as usize) & self.mask
+        home_slot(key, self.mask, self.shift)
     }
 
     /// Looks up the SAT-axis index stored for body pair `(a, b)`, or `None` if the
@@ -201,25 +442,7 @@ impl BoxAxisCache {
     /// chain (no tombstones, so a miss is unambiguous).
     #[inline]
     pub fn get(&self, a: BodyIndex, b: BodyIndex) -> Option<usize> {
-        let key = pack(a, b);
-        let mut i = self.home(key);
-        let mut probes = 0usize;
-        loop {
-            let slot = self.slots[i];
-            if slot.key == key {
-                return Some(slot.axis as usize);
-            }
-            if slot.key == EMPTY {
-                return None;
-            }
-            i = (i + 1) & self.mask;
-            probes += 1;
-            if probes > self.mask {
-                // Full table with no match: only reachable on a sizing violation;
-                // treat as a miss rather than loop.
-                return None;
-            }
-        }
+        probe(self.slots.as_read_slice(), self.mask, self.shift, pack(a, b))
     }
 
     /// Stores the SAT-axis index `axis` chosen this frame for body pair `(a, b)`,
@@ -241,10 +464,15 @@ impl BoxAxisCache {
     pub fn set(&mut self, a: BodyIndex, b: BodyIndex, axis: usize) {
         let key = pack(a, b);
         debug_assert_ne!(key, EMPTY, "invariant: a real body-pair key cannot be EMPTY");
+        // The probe geometry goes into locals BEFORE the refill view is taken:
+        // `home` borrows all of `&self`, while the view holds `&mut self.slots`.
         let mut i = self.home(key);
+        let mask = self.mask;
+        let mut view = self.slots.build_view();
+        let slots = view.as_mut_slice();
         let mut probes = 0usize;
         loop {
-            let slot = &mut self.slots[i];
+            let slot = &mut slots[i];
             if slot.key == key {
                 slot.axis = axis as u32;
                 return;
@@ -255,9 +483,9 @@ impl BoxAxisCache {
                 self.occupied += 1;
                 return;
             }
-            i = (i + 1) & self.mask;
+            i = (i + 1) & mask;
             probes += 1;
-            if probes > self.mask {
+            if probes > mask {
                 // Full table with no home for `key`: only reachable on a sizing
                 // violation (mirrors `get`'s release-mode probe escape). Decline to
                 // cache rather than loop — a cache may refuse an entry.
@@ -269,15 +497,276 @@ impl BoxAxisCache {
             }
         }
     }
+
+    /// Prepares the table for a frame through the gather's row identity map (defect A,
+    /// interim): classifies this consumer, pre-reads every box pair's previous axis when
+    /// the rows changed, runs [`begin_frame`](Self::begin_frame), and stamps the cursor.
+    /// Returns how the frame's key set changed ([`KeyChange`]); its `prefetched` is the flag
+    /// `read_hint` takes.
+    ///
+    /// `stream` is the pair list the narrowphase collides — the pairs the pre-read covers —
+    /// and `p_logical` the step's LOGICAL pair count, which sizes the table (L10 design 04 A3,
+    /// T3): the stream plus the pairs L10's tree seam withholds. The table must be sized for
+    /// every key Off would insert, so its grow and clear decisions, and so its lookups, equal
+    /// Off's. With nothing withheld the two counts are equal.
+    ///
+    /// The pre-read is required on a step whose rows changed: when rows shift up by one,
+    /// pair `(a, b)` reads key `(a − 1, b − 1)`, which an earlier pair in `(min, max)`
+    /// order has already overwritten this step. It runs BEFORE `begin_frame`, whose clear
+    /// on growth or high occupancy would otherwise erase the axes being carried; it needs
+    /// only the pair list and the table's current mask and shift. On `Reset` it fills
+    /// `AXIS_NONE` and skips the probes.
+    pub(crate) fn begin_frame_synced(
+        &mut self,
+        stream: &[(BodyIndex, BodyIndex)],
+        p_logical: usize,
+        bodies: &[BodyState],
+        rows: &RowIdentity,
+    ) -> KeyChange {
+        debug_assert!(
+            p_logical >= stream.len(),
+            "invariant: the logical pair count covers the stream"
+        );
+        let remap = self.cursor.remap(rows);
+        let prefetched = !matches!(remap, RowRemap::Identity);
+        if prefetched {
+            self.prefetch_remapped(stream, bodies, remap);
+            debug_assert_eq!(
+                self.remapped.len(),
+                stream.len(),
+                "invariant: one carried axis per candidate pair on a pre-read frame"
+            );
+            self.prefetched_frames += 1;
+        }
+        let (grown, cleared) = self.begin_frame_keyed(p_logical);
+        self.keys_changed |= prefetched;
+        // Every current pair's previous axis is captured, and every later write this step
+        // is `set(a, b)` in current rows: the table is keyed by this gather from here on.
+        self.cursor.stamp(rows);
+        KeyChange { prefetched, cleared, grown }
+    }
+
+    /// Whether [`begin_frame`](Self::begin_frame) for `pairs` pairs would grow or clear the
+    /// table: its two conditions, read-only (L10's D3 test, made in the broadphase before the
+    /// frame; design 04 A2.1).
+    #[inline]
+    pub(crate) fn would_clear(&self, pairs: usize) -> bool {
+        let len = next_pow2(2 * pairs.max(1));
+        len > self.slots.len() || self.occupied > self.slots.len() / 2
+    }
+
+    /// Whether this frame's key set changed — the table grew or cleared, or the rows moved or
+    /// the carry was Reset — so an entry a pair does not `set` this frame is lost or stale under
+    /// its current key. A contact-reuse hit writes its record's axis on such a frame, and only on
+    /// one (L9 ruling W1: the table stays keyed for hit pairs).
+    #[inline]
+    pub(crate) fn keys_changed(&self) -> bool {
+        self.keys_changed
+    }
+
+    /// Fills the carried-axis column: for every box-box candidate pair, the axis stored
+    /// under the rows its bodies held when the table was keyed, or `AXIS_NONE`.
+    #[cold]
+    #[inline(never)]
+    fn prefetch_remapped(
+        &mut self,
+        pairs: &[(BodyIndex, BodyIndex)],
+        bodies: &[BodyState],
+        remap: RowRemap<'_>,
+    ) {
+        let slots = self.slots.as_read_slice();
+        let (mask, shift) = (self.mask, self.shift);
+        let mut view = self.remapped.build_view();
+        view.clear();
+        view.resize(pairs.len(), AXIS_NONE);
+        if matches!(remap, RowRemap::Reset) {
+            return;
+        }
+        for (carried, &(a, b)) in view.as_mut_slice().iter_mut().zip(pairs) {
+            let box_pair = matches!(bodies[a.0 as usize].shape, ColliderShape::Box { .. })
+                && matches!(bodies[b.0 as usize].shape, ColliderShape::Box { .. });
+            if !box_pair {
+                continue;
+            }
+            let Some((pa, pb)) = remap.pair(a.0, b.0) else {
+                continue;
+            };
+            if let Some(axis) = probe(slots, mask, shift, pack(BodyIndex(pa), BodyIndex(pb))) {
+                debug_assert!(axis < AXIS_NONE as usize, "invariant: SAT axis indices are 0..15");
+                *carried = axis as u8;
+            }
+        }
+    }
+
+    /// The previous axis carried for candidate pair `k` by the last pre-read, or `None`.
+    #[inline]
+    pub(crate) fn remapped_axis(&self, k: usize) -> Option<usize> {
+        let axis = self.remapped.as_read_slice()[k];
+        (axis != AXIS_NONE).then_some(axis as usize)
+    }
+
+    /// The hysteresis hint for candidate pair `k` = `(a, b)`: the carried axis on a
+    /// pre-read frame, otherwise the table's own entry. The narrowphase and the unit
+    /// tests share this one read.
+    #[inline]
+    pub(crate) fn read_hint(
+        &self,
+        prefetched: bool,
+        k: usize,
+        a: BodyIndex,
+        b: BodyIndex,
+    ) -> Option<usize> {
+        if prefetched { self.remapped_axis(k) } else { self.get(a, b) }
+    }
+
+    /// Diagnostic: `Reset` classifications of this cache's cursor after its first stamp.
+    /// Each one is a frame whose hysteresis hints were dropped instead of carried, so it
+    /// stays flat while the narrowphase runs every step — a structural liveness gate.
+    #[inline]
+    pub fn remap_resets(&self) -> u64 {
+        self.cursor.resets()
+    }
+
+    /// Diagnostic: frames whose rows had changed, so the carried axes were pre-read before the
+    /// pair loop (`begin_frame_synced`). A structural observable for gates that must see the
+    /// pre-read path taken.
+    #[inline]
+    pub fn prefetched_frames(&self) -> u64 {
+        self.prefetched_frames
+    }
+
+    /// Diagnostic: wholesale clears `begin_frame` made because stale entries pushed the load
+    /// past 0.5.
+    #[inline]
+    pub fn load_clears(&self) -> u64 {
+        self.load_clears
+    }
+
+    /// Diagnostic: times `begin_frame` grew the table (each grow also empties it).
+    #[inline]
+    pub fn grows(&self) -> u64 {
+        self.grows
+    }
+
+    /// A hash of the table state: its length, every slot's `(key, axis)` and `occupied`
+    /// (L5 ruling W3).
+    ///
+    /// Hashed by FIELD, never over raw bytes: an [`AxisEntry`] carries four bytes of padding,
+    /// which are uninitialised after a field write and would make equal tables hash unequal
+    /// (and are UB to read). The stale `axis` an `EMPTY` slot keeps is hashed too; both
+    /// narrowphase paths leave the same one. Cold: a gate's instrument, O(table length).
+    #[cold]
+    #[inline(never)]
+    pub fn fingerprint(&self) -> u64 {
+        let mut h = fnv1a(FNV_OFFSET, &(self.slots.len() as u64).to_le_bytes());
+        for entry in self.slots.as_read_slice() {
+            h = fnv1a(h, &entry.key.to_le_bytes());
+            h = fnv1a(h, &entry.axis.to_le_bytes());
+        }
+        fnv1a(h, &(self.occupied as u64).to_le_bytes())
+    }
+
+    /// The per-pair commit's reserve ceiling: the most pairs one parallel step can stage.
+    #[inline]
+    pub(crate) fn commit_capacity(&self) -> usize {
+        self.commit.capacity()
+    }
+
+    /// Grows the per-pair commit to at least `n` rows and hands out the parallel narrowphase's
+    /// two views: the read-only [`AxisHints`] and the commit's per-row write view (L5 D2, D3).
+    ///
+    /// The commit's length only grows; the fill runs only on growth. Neither view exposes a
+    /// whole-buffer `&mut`, and nothing writes the slots or the carried-axis column while they
+    /// live: the chunks write only their own commit rows, through `row_ptr`, whose provenance
+    /// is the column's own write base.
+    ///
+    /// # Panics
+    /// * `n` exceeds [`commit_capacity`](Self::commit_capacity) (the caller checks it first).
+    pub(crate) fn dispatch_views(
+        &mut self,
+        prefetched: bool,
+        n: usize,
+    ) -> (AxisHints<'_>, ScratchSolveView<'_, u8>) {
+        if self.commit.len() < n {
+            self.grow_commit(n);
+        }
+        debug_assert!(
+            !prefetched || self.remapped.len() == n,
+            "invariant: a pre-read frame carries one axis per candidate pair"
+        );
+        let hints = AxisHints {
+            slots: self.slots.as_read_slice(),
+            mask: self.mask,
+            shift: self.shift,
+            remapped: self.remapped.as_read_slice(),
+            prefetched,
+        };
+        (hints, self.commit.solve_view())
+    }
+
+    /// Grows the commit column to `n` rows (the fill only covers the new rows).
+    #[cold]
+    #[inline(never)]
+    fn grow_commit(&mut self, n: usize) {
+        self.commit.build_view().resize(n, AXIS_NONE);
+    }
+
+    /// Replays the parallel narrowphase's axis writes into the table, serially and in pair
+    /// order: `set(pairs[k], commit[k])` for every `k` whose commit is not [`AXIS_NONE`]
+    /// (L5 D3). Runs on the calling thread after the chunks' join.
+    ///
+    /// It calls the serial loop's own [`set`](Self::set), in the serial loop's order, and a
+    /// pair is left out only when its `set` would have been an identity (module docs,
+    /// Lemma 2), so the table state and `occupied` end equal to the serial path's.
+    pub(crate) fn commit_axes(&mut self, pairs: &[(BodyIndex, BodyIndex)]) {
+        debug_assert!(
+            self.commit.len() >= pairs.len(),
+            "invariant: the chunks wrote one commit row per candidate pair"
+        );
+        for (k, &(a, b)) in pairs.iter().enumerate() {
+            let axis = self.commit.as_read_slice()[k];
+            if axis != AXIS_NONE {
+                debug_assert!(
+                    axis < SAT_AXIS_COUNT,
+                    "invariant: a committed axis is a SAT axis index (0..15) or AXIS_NONE"
+                );
+                self.set(a, b, usize::from(axis));
+            }
+        }
+    }
+
+    /// Test-only: the table state `(key, axis)` per slot, and `occupied` — what the parallel
+    /// narrowphase's gates compare against the serial path.
+    #[cfg(test)]
+    pub(crate) fn table_state(&self) -> (Vec<(u64, u32)>, usize) {
+        let slots = self.slots.as_read_slice().iter().map(|e| (e.key, e.axis)).collect();
+        (slots, self.occupied)
+    }
+
+    /// Test-only: stands in for a pre-read, writing the carried-axis column directly, so a
+    /// gate can put any carried axis beside any table state.
+    #[cfg(test)]
+    pub(crate) fn seed_remapped(&mut self, axes: &[u8]) {
+        let mut view = self.remapped.build_view();
+        view.clear();
+        view.extend_from_slice(axes);
+    }
+}
+
+/// One FNV-1a 64 round over `bytes`, continuing from `h`.
+#[inline]
+fn fnv1a(h: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(h, |h, &b| (h ^ u64::from(b)).wrapping_mul(FNV_PRIME))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch_ids::box_axis_cache_id;
 
     #[test]
     fn set_get_round_trip() {
-        let mut c = BoxAxisCache::with_capacity(8);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 8);
         c.begin_frame(8);
         c.set(BodyIndex(2), BodyIndex(5), 11);
         assert_eq!(c.get(BodyIndex(2), BodyIndex(5)), Some(11));
@@ -285,7 +774,7 @@ mod tests {
 
     #[test]
     fn miss_returns_none() {
-        let mut c = BoxAxisCache::with_capacity(8);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 8);
         c.begin_frame(8);
         c.set(BodyIndex(0), BodyIndex(1), 3);
         assert_eq!(c.get(BodyIndex(4), BodyIndex(7)), None);
@@ -293,7 +782,7 @@ mod tests {
 
     #[test]
     fn overwrite_updates_axis() {
-        let mut c = BoxAxisCache::with_capacity(8);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 8);
         c.begin_frame(8);
         c.set(BodyIndex(1), BodyIndex(2), 5);
         c.set(BodyIndex(1), BodyIndex(2), 9);
@@ -314,7 +803,7 @@ mod tests {
         // Dense fill at the design load (≤ 0.5): every pair round-trips, no probe
         // chain corrupts a neighbor (the read/write protocol the hysteresis needs).
         let count = 64usize;
-        let mut c = BoxAxisCache::with_capacity(count);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), count);
         c.begin_frame(count);
         for i in 0..count {
             c.set(BodyIndex(i as u32), BodyIndex((i + 1) as u32), i % 15);
@@ -330,7 +819,7 @@ mod tests {
     /// Count live (non-`EMPTY`) slots directly — the eviction invariant is about
     /// physical occupancy, not the logical view through `get`.
     fn live_slots(c: &BoxAxisCache) -> usize {
-        c.slots.iter().filter(|s| s.key != EMPTY).count()
+        c.slots.as_read_slice().iter().filter(|s| s.key != EMPTY).count()
     }
 
     #[test]
@@ -341,7 +830,7 @@ mod tests {
         // forever in release. With the load-based clear, occupancy stays bounded and
         // every `set` returns.
         let pairs_per_frame = 32usize;
-        let mut c = BoxAxisCache::with_capacity(pairs_per_frame);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), pairs_per_frame);
         let capacity = c.slots.len();
         // Many more frames than the table could ever hold if entries never evicted.
         let frames = 200usize;
@@ -376,7 +865,7 @@ mod tests {
         // whose `mask` changed (that strands old entries at unreachable homes and
         // duplicates keys). The clear-on-grow policy makes the grown table empty, so
         // every key that re-round-trips does so through exactly one slot.
-        let mut c = BoxAxisCache::with_capacity(4);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 4);
         c.begin_frame(4);
         for i in 0..4u32 {
             c.set(BodyIndex(i), BodyIndex(i + 100), i as usize % 15);
@@ -407,7 +896,7 @@ mod tests {
         // Fill to just past the load-≤-0.5 target within one logical epoch, then a
         // fresh begin_frame(same budget) must clear (occupancy resets) rather than
         // grow — proving the eviction trigger is the load, not only the grow.
-        let mut c = BoxAxisCache::with_capacity(8);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 8);
         let capacity = c.slots.len();
         c.begin_frame(8);
         // Insert enough distinct keys to push occupancy past len/2.
@@ -425,5 +914,231 @@ mod tests {
         assert_eq!(c.slots.len(), capacity, "must not grow on a same-budget frame");
         assert_eq!(c.occupied, 0, "load-based clear must reset occupancy");
         assert_eq!(live_slots(&c), 0);
+    }
+
+    // —— Defect A interim fix: the axis carry (T5, T5b, T10) ——————————————————
+
+    use crate::components::{Collider, RigidBody, RigidBodyMass};
+    use crate::math::{Mat3, Quat, Vec3};
+    use crate::row_identity::RowKey;
+
+    /// `n` unit-mass unit cubes at the origin: every candidate pair among them is a box pair.
+    fn box_bodies(n: usize) -> Vec<BodyState> {
+        let body = RigidBody {
+            position: Vec3::ZERO,
+            linear_velocity: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+        };
+        let mass = RigidBodyMass {
+            inv_inertia: Mat3::IDENTITY,
+            inv_mass: 1.0,
+            restitution: 0.0,
+            friction: 0.5,
+        };
+        let collider = Collider {
+            shape: ColliderShape::Box {
+                half_extents: Vec3::new(0.5, 0.5, 0.5),
+            },
+            layer: 1,
+            mask: 1,
+        };
+        (0..n)
+            .map(|_| BodyState::from_columns(&body, &mass, &collider, false, true, false))
+            .collect()
+    }
+
+    /// Feeds one scripted gather into `rows`: `ids` are slots at generation 0.
+    fn gather(rows: &mut RowIdentity, ids: &[usize], added: &[u32]) {
+        rows.begin_gather();
+        {
+            let (mut cur, mut add) = rows.gather_views();
+            for &id in ids {
+                cur.push(RowKey::new(id, 0));
+            }
+            for &r in added {
+                add.push(r);
+            }
+        }
+        rows.finish_gather();
+    }
+
+    /// T5: when a body is inserted ahead of every row (`prev_row[r] = r - 1`), current pair
+    /// (2, 3) writes key (2, 3) before current pair (3, 4) reads its previous key (2, 3). The
+    /// pre-read must hand both pairs the axis they chose one step earlier. Red under M15 (the
+    /// read translated inside the loop: pair (3, 4) would read pair (2, 3)'s fresh write 13).
+    #[test]
+    fn axis_prefetch_reads_every_moved_pair_before_the_loop_writes() {
+        let mut rows = RowIdentity::with_capacity(0);
+        let bodies = box_bodies(6);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 8);
+
+        // Step 1: rows [A, B, C, D, E]; pair (B, C) chooses axis 4, pair (C, D) axis 9.
+        gather(&mut rows, &[20, 21, 22, 23, 24], &[0, 1, 2, 3, 4]);
+        let pairs = [(BodyIndex(1), BodyIndex(2)), (BodyIndex(2), BodyIndex(3))];
+        let prefetched = c.begin_frame_synced(&pairs, pairs.len(), &bodies, &rows).prefetched;
+        for (k, (a, b), axis) in [(0, pairs[0], 4), (1, pairs[1], 9)] {
+            let _ = c.read_hint(prefetched, k, a, b);
+            c.set(a, b, axis);
+        }
+
+        // Step 2: X is inserted ahead of every row, so (B, C) is now (2, 3) and (C, D) is (3, 4).
+        gather(&mut rows, &[30, 20, 21, 22, 23, 24], &[0]);
+        let pairs = [(BodyIndex(2), BodyIndex(3)), (BodyIndex(3), BodyIndex(4))];
+        let prefetched = c.begin_frame_synced(&pairs, pairs.len(), &bodies, &rows).prefetched;
+        assert!(prefetched, "construction: the rows changed, so the pre-read must run");
+        let first = c.read_hint(prefetched, 0, pairs[0].0, pairs[0].1);
+        c.set(pairs[0].0, pairs[0].1, 13);
+        let second = c.read_hint(prefetched, 1, pairs[1].0, pairs[1].1);
+        c.set(pairs[1].0, pairs[1].1, 14);
+        assert_eq!(
+            c.get(BodyIndex(2), BodyIndex(3)),
+            Some(13),
+            "construction: pair (2, 3)'s write must have overwritten key (2, 3) before pair (3, 4) read"
+        );
+        assert_eq!(
+            (first, second),
+            (Some(4), Some(9)),
+            "T5: pairs (B, C) and (C, D), moved up one row, must read the axes they chose last step \
+             through the pre-read, in loop order"
+        );
+    }
+
+    /// T5b: on a step whose rows shift down by one AND whose pair count grows past the table,
+    /// `begin_frame` reallocates and clears. The moved pair's carried axis must survive,
+    /// because the pre-read runs before that clear. Red under M11 (`begin_frame` before the
+    /// pre-read: the probe finds an empty table).
+    #[test]
+    fn axis_prefetch_survives_a_grow_clear() {
+        let mut rows = RowIdentity::with_capacity(0);
+        let bodies = box_bodies(4);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 1);
+        let small = c.slots.len();
+
+        gather(&mut rows, &[40, 41, 42], &[0, 1, 2]);
+        let pair = (BodyIndex(1), BodyIndex(2));
+        let prefetched = c.begin_frame_synced(&[pair], 1, &bodies, &rows).prefetched;
+        let _ = c.read_hint(prefetched, 0, pair.0, pair.1);
+        c.set(pair.0, pair.1, 6);
+
+        // X inserted ahead: (41, 42) moves from (1, 2) to (2, 3), and two pairs outgrow the table.
+        gather(&mut rows, &[50, 40, 41, 42], &[0]);
+        let pairs = [(BodyIndex(0), BodyIndex(1)), (BodyIndex(2), BodyIndex(3))];
+        let prefetched = c.begin_frame_synced(&pairs, pairs.len(), &bodies, &rows).prefetched;
+        assert!(prefetched, "construction: the rows changed, so the pre-read must run");
+        assert!(
+            c.slots.len() > small && live_slots(&c) == 0,
+            "construction: two pairs must grow the {small}-slot table and clear it (slots {}, live {})",
+            c.slots.len(),
+            live_slots(&c)
+        );
+        assert_eq!(
+            c.remapped_axis(1),
+            Some(6),
+            "T5b: remapped axis None after a grow-clear: the moved pair's axis must be carried \
+             from before the clear"
+        );
+        assert_eq!(c.remapped_axis(0), None, "the pair naming the new body carries nothing");
+    }
+
+    /// One scripted narrowphase frame over the single pair (1, 2): classify and pre-read, read
+    /// the hint the narrowphase would pass to the SAT, then store `axis`. Returns the hint.
+    fn t10_frame(c: &mut BoxAxisCache, bodies: &[BodyState], rows: &RowIdentity, axis: usize) -> Option<usize> {
+        let pair = (BodyIndex(1), BodyIndex(2));
+        let prefetched = c.begin_frame_synced(&[pair], 1, bodies, rows).prefetched;
+        let hint = c.read_hint(prefetched, 0, pair.0, pair.1);
+        c.set(pair.0, pair.1, axis);
+        hint
+    }
+
+    /// T10: the axis cache's cursor leaves `Reset` after one consumption and stays out of it
+    /// while the narrowphase runs every gather. Ids `[10, 11, 12]` every gather, nothing
+    /// added. Red under M9 (stamp only when the pre-read ran): gather 2 is `Identity`, so it
+    /// does not stamp, and gather 3 classifies `Reset` (resets 1, read None).
+    #[test]
+    fn axis_consumer_leaves_reset() {
+        const IDS: [usize; 3] = [10, 11, 12];
+        let mut rows = RowIdentity::with_capacity(0);
+        let bodies = box_bodies(3);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 1);
+
+        /// One scripted gather: whether the narrowphase runs the cache on it, the axis the
+        /// frame stores, and the expected hint and reset count.
+        struct Gather {
+            called: bool,
+            store: usize,
+            read: Option<usize>,
+            resets: u64,
+            what: &'static str,
+        }
+        let frame = |store, read, resets, what| Gather {
+            called: true,
+            store,
+            read,
+            resets,
+            what,
+        };
+        let script = [
+            frame(3, None, 0, "Rows (first gather, fresh cursor)"),
+            frame(3, Some(3), 0, "Identity"),
+            frame(3, Some(3), 0, "Identity (two consecutive gathers without a miss)"),
+            Gather {
+                called: false,
+                store: 0,
+                read: None,
+                resets: 0,
+                what: "gathered, cache not called",
+            },
+            frame(5, None, 1, "Reset (gather 4 was missed)"),
+            frame(5, Some(5), 1, "Identity after the Reset"),
+            frame(5, Some(5), 1, "Identity (liveness)"),
+        ];
+        for (index, step) in script.iter().enumerate() {
+            let g = index + 1;
+            gather(&mut rows, &IDS, &[]);
+            if !step.called {
+                continue;
+            }
+            let read = t10_frame(&mut c, &bodies, &rows, step.store);
+            assert_eq!(
+                (read, c.remap_resets()),
+                (step.read, step.resets),
+                "T10 gather {g} ({}): (read, remap_resets) - an axis cursor that resets after \
+                 consecutive gathers without a miss drops the carried hint",
+                step.what
+            );
+        }
+    }
+
+    proptest::proptest! {
+        // `failure_persistence: None`: no regression file is read or written, so the test runs
+        // under Miri's default isolation (the crate's convention, `broadphase_tree/tests.rs`).
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 128 },
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        /// L10 (design 04 A2.1, "Unit and property tests"): `would_clear(p)` is exactly the grow or
+        /// clear decision the next `begin_frame(p)` takes, over random frame sizes and insertions
+        /// (the D3 rule reads it in the broadphase, before the narrowphase's frame).
+        #[test]
+        fn would_clear_is_begin_frames_decision(
+            frames in proptest::collection::vec((0usize..300, 0usize..400), 1..12),
+        ) {
+            let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 8);
+            let mut key = 0u32;
+            for (pairs, inserts) in frames {
+                let predicted = c.would_clear(pairs);
+                let (grown, cleared) = c.begin_frame_keyed(pairs);
+                proptest::prop_assert_eq!(predicted, grown || cleared, "would_clear({})", pairs);
+                // At most a quarter of the table per frame: `begin_frame` leaves it at most half
+                // full, so the probes always find a slot.
+                for _ in 0..inserts.min(pairs.max(1) / 2) {
+                    key += 1;
+                    c.set(BodyIndex(key), BodyIndex(key + 1), (key % 15) as usize);
+                }
+            }
+        }
     }
 }

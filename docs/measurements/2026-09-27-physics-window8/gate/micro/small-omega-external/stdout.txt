@@ -1,0 +1,1 @@
+SUMMARY {"bench":"omega","route":"external","workers":8,"gap_us":0,"tasks":32,"reps":10,"scope_ns_median":4700,"scope_ns_mean":5720}

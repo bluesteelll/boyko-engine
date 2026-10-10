@@ -31,7 +31,7 @@
 
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
-use boyko_macros::Component;
+use boyko_macros::{Component, SystemSet};
 use boyko_scene::GlobalTransform;
 use boyko_scene::render_caps::RenderEnabled;
 use bytemuck::{Pod, Zeroable};
@@ -115,6 +115,26 @@ pub fn sync_instance_model_cols(
     }
 }
 
+/// The `Main`-schedule ordering seam for the instance PACKS — the systems that copy the
+/// propagated [`GlobalTransform`] into a per-instance GPU column:
+/// [`sync_instance_model_cols`] and
+/// [`sync_gpu_3d_instances`](crate::gpu3d_system::sync_gpu_3d_instances).
+///
+/// # Why a named set, not add-order
+///
+/// Both packs read `GlobalTransform`, which `propagate_transforms` writes, so they must run
+/// after it — otherwise the instance column trails the transform by one frame, permanently
+/// (the packs are unconditional, not `Changed`-gated). Propagation's `SystemKey` lives in
+/// [`CameraPlugin`](boyko_scene::CameraPlugin) and the packs are registered elsewhere
+/// ([`Render3dPlugin`](crate::render3d_plugin::Render3dPlugin) and the composing host), so
+/// the edge is pinned by name: the packs join this set, and the composing host configures
+/// `InstancePackSet.after(CameraSet::Resolve)` (`boyko_app::EnginePlugins` does).
+///
+/// [`sync_prev_instance_model_cols`] is NOT a member: it copies the previous
+/// [`InstanceModelCol`], not `GlobalTransform`, and must run before the pack.
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct InstancePackSet;
+
 /// The per-entity PREVIOUS-frame model affine — a byte-identical dense sibling of
 /// [`InstanceModelCol`], carrying the transform the entity had LAST frame.
 ///
@@ -137,12 +157,23 @@ pub fn sync_instance_model_cols(
 /// `StructuredBuffer<InstanceModelCol>` stride, just from the prev-instance ring instead of
 /// the current one.
 ///
-/// # HW-RT-walled
+/// # NOT `hwrt`-walled (un-walled by TAA rung D1 — mirrors [`crate::motion_cam`]'s W3 un-wall)
 ///
-/// `#[cfg(feature = "hwrt")]`: a `not(hwrt)` build never compiles this column, so its
-/// instancing path is TEXTUALLY the pre-Rung-3b code (the same discipline the RT track
-/// keeps end-to-end).
-#[cfg(feature = "hwrt")]
+/// Was `#[cfg(feature = "hwrt")]`-gated when rung 3b introduced it for the shadow-temporal
+/// mesh-MV raster producer. Un-walled (TAA rung D1) so this component + its sync system
+/// ([`sync_prev_instance_model_cols`]) are reachable/testable on BOTH legs — a FUTURE
+/// per-object TAA reprojection consumer needs this column to exist as a type before it can be
+/// wired, exactly as [`crate::motion_cam::MotionCam`] was un-walled ahead of its GPU consumer.
+///
+/// This is a data-layer-only change, and a NARROWER one than `motion_cam`'s: the GPU producer
+/// (`gbuffer_mrt_mv`, the `motion_vec` target, `MotionVecResources` in `boyko_app`) stays
+/// `#[cfg(feature = "hwrt")]`-gated, unchanged, AND — unlike `MotionCam`, whose upload fn
+/// ([`crate::upload_motion_cam_ring`]) was un-walled alongside it — this type's own upload fn
+/// (`upload_prev_instance_models`) STAYS `hwrt`-gated: it reads
+/// `MeshRenderScratch::prev_ring`, a SEPARATE `hwrt`-only wall in `mesh_draw.rs` this
+/// rung does not touch (see the D1 report for why). No plugin adds this column to any archetype
+/// on either leg yet, so the 0%-gate ([`sync_prev_instance_model_cols`]'s own doc) holds
+/// byte-identically on BOTH legs: zero matching archetypes ⇒ zero work, regardless of `hwrt`.
 #[repr(C)]
 #[derive(Component, Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct PrevInstanceModelCol {
@@ -154,9 +185,7 @@ pub struct PrevInstanceModelCol {
 // The prev-instance ring stride MUST equal the current instance ring stride (48 B): the
 // gbuffer VS indexes both by `base_instance + SV_InstanceID`, so a layout divergence would
 // desynchronise the two rings and reproject to a wrong surface point.
-#[cfg(feature = "hwrt")]
 const _: () = assert!(size_of::<PrevInstanceModelCol>() == INSTANCE_MODEL_COL_BYTES);
-#[cfg(feature = "hwrt")]
 const _: () = assert!(align_of::<PrevInstanceModelCol>() == 4);
 
 /// Copies each visible entity's CURRENT [`InstanceModelCol`] into its
@@ -176,13 +205,152 @@ const _: () = assert!(align_of::<PrevInstanceModelCol>() == 4);
 /// # 0%-gate
 ///
 /// A world with no [`PrevInstanceModelCol`] column yields zero matching archetypes ⇒ zero
-/// work: a scene that never opts into temporal motion vectors pays nothing.
-#[cfg(feature = "hwrt")]
+/// work: a scene that never opts into temporal motion vectors pays nothing. Holds on BOTH
+/// legs (this system is un-walled from `hwrt` — see the type's own doc).
 #[allow(clippy::needless_pass_by_value)]
 pub fn sync_prev_instance_model_cols(
     mut q: Query<(&InstanceModelCol, &mut PrevInstanceModelCol), Enabled<RenderEnabled>>,
 ) {
     for (cur, prev) in q.iter_mut() {
         prev.rows = cur.rows;
+    }
+}
+
+/// Multi-paradigm render-path plan, rung R-VBGEO (plan §Data structures) — the
+/// `VisibilityBuffer` path's OWN instance row: [`InstanceModelCol`]'s 48-byte 3×4
+/// row-major affine (byte-identical leading bytes, offset 0..48) plus an appended
+/// `mesh_id: u32` lane (offset 48, Decision 0's geometry-table slot) and — since VG R3
+/// piece 2 step P2-2 — a [`flags`](Self::flags) word (offset 52, formerly `_pad[0]`),
+/// padded to a 64-byte std430-stable stride.
+///
+/// A VB-path-CONDITIONAL row shape, NOT a widening of [`InstanceModelCol`] itself:
+/// Deferred/Forward keep the 48-byte column EXACTLY (byte-identity — this type is
+/// never read by any pipeline those paths bind). The VB compute fetch
+/// (`vb_geom_fetch.hlsli`, R8) needs `mesh_id` PER INSTANCE (not per-draw/push-constant)
+/// because a VB shading pass holds only `(instance_id, triangle_id)` per pixel with no
+/// per-draw binding — see Decision 0.
+///
+/// # Reachable as of rung R8
+///
+/// `MeshRenderScratch::sync_vb_instance_ring` builds a ring of these rows
+/// (from the SAME `ring`/`mesh_ids` gather output [`InstanceModelCol`]'s own scatter
+/// populates) on a `VisibilityBuffer`-resolved boot; `boyko_render::upload::
+/// upload_vb_instance_rows` uploads it into `GpuSceneBundles::vb_instance_rings`. Deferred/
+/// Forward/ForwardPlus never construct this ring (Principle 1: the boot-resolved path selects
+/// WHICH gather/upload pair runs, never a per-instance branch), pinned by the offset
+/// const-asserts below.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct VbInstanceRow {
+    /// The SAME interleaved `[linear_row.xyz | translation_component]` quads as
+    /// [`InstanceModelCol::rows`] — byte-identical leading 48 bytes (offset 0..48).
+    pub affine: [[f32; 4]; 3],
+    /// The Decision-0 geometry-table slot (this instance's mesh's `mesh_id`) — the key
+    /// the VB compute fetch resolves `gMeshIndices[]`/`gMeshVerts[]`/`gMeshMeta[]`
+    /// through. Offset 48.
+    pub mesh_id: u32,
+    /// VG R3 piece 2 step P2-2 — the per-instance FLAGS word. Offset 52, formerly
+    /// `_pad[0]`.
+    ///
+    /// Bit 0 is
+    /// [`VB_INST_FLAG_OCCLUSION_CULLING`](crate::occlusion_marker::VB_INST_FLAG_OCCLUSION_CULLING):
+    /// set iff this instance's entity carries
+    /// [`OcclusionCulling`](crate::occlusion_marker::OcclusionCulling). Bits 1..31 are
+    /// reserved and written zero.
+    ///
+    /// It occupies the SAME 16-byte lane as `mesh_id` @48 — the batch cull's existing
+    /// `gVbInstances[base_instance + j]` load already brings those bytes into cache, so the
+    /// flag costs ZERO extra device fetches. Read by NOTHING on the device as of P2-2: the
+    /// HLSL mirrors still spell offsets 52..64 `uint3 _pad` (a layout-identical spelling),
+    /// and piece 3 is what renames the field and reads the bit.
+    ///
+    /// A word rather than a `bool` so piece 3 adds a BIT, not a column.
+    pub flags: u32,
+    /// Pads the row to a 64-byte std430-stable stride — unused, always zero. Offset 56.
+    pub _pad: [u32; 2],
+}
+
+/// The byte size of one [`VbInstanceRow`] — the VB-path instance SSBO's per-instance
+/// stride (64 B: [`InstanceModelCol`]'s 48-byte affine + a `uint` `mesh_id` + a `uint`
+/// `flags` + an 8-byte pad to the next std430 lane).
+pub const VB_INSTANCE_ROW_BYTES: usize = 64;
+
+const _: () = assert!(
+    size_of::<VbInstanceRow>() == VB_INSTANCE_ROW_BYTES,
+    "VbInstanceRow must be 64 bytes (InstanceModelCol's 48-byte affine + a mesh_id uint, padded)"
+);
+const _: () = assert!(align_of::<VbInstanceRow>() == 4);
+const _: () = assert!(core::mem::offset_of!(VbInstanceRow, affine) == 0);
+const _: () = assert!(core::mem::offset_of!(VbInstanceRow, mesh_id) == 48);
+// P2-2: `flags` inherits `_pad[0]`'s offset EXACTLY, and the surviving pad starts one word
+// later. Nothing pinned the pad's offset before, so a reader could not tell from the asserts
+// alone that the flags word landed where the device mirrors' `uint3 _pad` begins — these two
+// lines are what make that a build error rather than a review claim.
+const _: () = assert!(core::mem::offset_of!(VbInstanceRow, flags) == 52);
+const _: () = assert!(core::mem::offset_of!(VbInstanceRow, _pad) == 56);
+// The leading 48 bytes MUST byte-match `InstanceModelCol` — Deferred/Forward read
+// exactly that layout; the VB path reads the SAME leading bytes plus the appended lane.
+const _: () = assert!(core::mem::offset_of!(VbInstanceRow, affine) == core::mem::offset_of!(InstanceModelCol, rows));
+
+impl VbInstanceRow {
+    /// Packs an [`InstanceModelCol`] (the already-computed 3×4 affine) plus its
+    /// resolved `mesh_id` and its per-instance `flags` word into the VB-path row shape —
+    /// the "second packing fn selected at boot" Principle 1 calls for (a future VB gather,
+    /// R8/R9, calls this instead of writing `InstanceModelCol` directly; no per-instance
+    /// path branch is needed since the boot-resolved path selects WHICH gather runs, not a
+    /// per-row check).
+    ///
+    /// `flags` is the [`flags`](Self::flags) lane verbatim — the gather's `inst_flags`
+    /// entry for this ring slot. Passing `0` reproduces the pre-P2-2 bytes exactly, which
+    /// is what every scene in the tree produces today (nothing marks anything yet).
+    #[inline]
+    pub const fn from_model_col(model: &InstanceModelCol, mesh_id: u32, flags: u32) -> Self {
+        Self { affine: model.rows, mesh_id, flags, _pad: [0; 2] }
+    }
+}
+
+#[cfg(test)]
+mod vb_instance_row_tests {
+    use super::*;
+
+    use crate::occlusion_marker::VB_INST_FLAG_OCCLUSION_CULLING;
+
+    #[test]
+    fn from_model_col_copies_the_affine_and_mesh_id_verbatim() {
+        let model = InstanceModelCol {
+            rows: [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]],
+        };
+        let row = VbInstanceRow::from_model_col(&model, 42, VB_INST_FLAG_OCCLUSION_CULLING);
+        assert_eq!(row.affine, model.rows);
+        assert_eq!(row.mesh_id, 42);
+        // P2-2 narrowed this pin: word @52 is now `flags` (set from the new argument) and
+        // only words @56/@60 remain "unused, always zero".
+        assert_eq!(row.flags, VB_INST_FLAG_OCCLUSION_CULLING);
+        assert_eq!(row._pad, [0, 0]);
+    }
+
+    #[test]
+    fn from_model_col_with_zero_flags_is_byte_identical_to_the_pre_p2_2_row() {
+        let model = InstanceModelCol {
+            rows: [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]],
+        };
+        let row = VbInstanceRow::from_model_col(&model, 42, 0);
+        // Words @52..64 all zero — exactly what the retired `_pad: [u32; 3]` carried. This
+        // is the whole reason the uploaded ring bytes are unchanged on every scene that
+        // exists today: nothing marks anything, so every `flags` is 0.
+        assert_eq!(bytemuck::bytes_of(&row)[52..64], [0u8; 12]);
+    }
+
+    #[test]
+    fn vb_instance_row_leading_bytes_match_instance_model_col_byte_for_byte() {
+        let model = InstanceModelCol {
+            rows: [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]],
+        };
+        // A SET flag word: the leading 48 bytes must be unaffected by it (the flags lane
+        // lives past `InstanceModelCol`'s footprint, at offset 52).
+        let row = VbInstanceRow::from_model_col(&model, 7, VB_INST_FLAG_OCCLUSION_CULLING);
+        let model_bytes = bytemuck::bytes_of(&model);
+        let row_bytes = bytemuck::bytes_of(&row);
+        assert_eq!(&row_bytes[0..INSTANCE_MODEL_COL_BYTES], model_bytes);
     }
 }

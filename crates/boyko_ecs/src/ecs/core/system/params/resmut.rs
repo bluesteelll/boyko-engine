@@ -2,12 +2,12 @@
 //!
 //! Mirror of [`Res`] with `&mut R` instead of `&R`. See Phase 8a plan §6
 //! (Decision D4) and §14.1 (hot path algorithm) — the path is the same
-//! shape with [`Resources::get_mut_ptr_by_id`] in place of `get_ptr_by_id`
-//! and [`FilteredAccessSet::add_resource_write`] in place of
-//! `add_resource_read`.
+//! shape, reached through `UnsafeEcsCell::resource_ptr_mut` (the stored
+//! value pointer via `get_ptr_by_id`, with no `&mut Resources` formed —
+//! PC-24 / W0), and with [`FilteredAccessSet::add_resource_write`] in place
+//! of `add_resource_read`.
 //!
 //! [`Res`]: super::res::Res
-//! [`Resources::get_mut_ptr_by_id`]: crate::ecs::core::resources::resources::Resources::get_mut_ptr_by_id
 //! [`FilteredAccessSet::add_resource_write`]: crate::ecs::core::system::filtered_access_set::FilteredAccessSet::add_resource_write
 
 use std::marker::PhantomData;
@@ -78,6 +78,8 @@ pub struct ResMutState<R: Resource> {
 //     alongside a `ResMut<R>`) for the same id can co-exist past init.
 //   - SP4: `init_state` mutates no registry.
 unsafe impl<'a, R: Resource> SystemParam for ResMut<'a, R> {
+    const HAS_DEFERRED: bool = false;
+
     type State = ResMutState<R>;
     type Item<'w, 's> = ResMut<'w, R>;
 
@@ -113,16 +115,16 @@ unsafe impl<'a, R: Resource> SystemParam for ResMut<'a, R> {
         //   protocol guarantees no `Res<R>` / `ResMut<R>` for the same id
         //   is being fetched concurrently (intra-system conflict caught at
         //   `init_access`; cross-system caught by Phase 9 scheduler).
-        //   `world.resources_mut()` is a by-value call on a `Copy` cell —
-        //   no `&self` retag (C1 RESOLUTION). The cell was minted via
-        //   `new_mutable` (debug-asserted in `resources_mut`).
-        let resources = unsafe { world.resources_mut() };
-
+        //   `world.resource_ptr_mut()` is a by-value call on a `Copy` cell —
+        //   no `&self` retag (C1 RESOLUTION) — and forms no `&mut Resources`
+        //   (PC-24 / W0), so other workers' `Resources` views stay unaliased.
+        //   The cell was minted via `new_mutable` (debug-asserted in
+        //   `resource_ptr_mut`).
+        //
         // W1 FAST PATH: cached `state.id` flows directly into the untyped
-        //   `get_mut_ptr_by_id`, bypassing `R::resource_id()`'s `OnceLock`
+        //   `get_ptr_by_id`, bypassing `R::resource_id()`'s `OnceLock`
         //   acquire-load on every `get_param`.
-        let ptr = resources
-            .get_mut_ptr_by_id(state.id)
+        let ptr = unsafe { world.resource_ptr_mut(state.id) }
             .unwrap_or_else(|| missing_resource_panic::<R>());
 
         // SAFETY (SP2): `ptr` was minted from a populated slot whose
@@ -132,6 +134,65 @@ unsafe impl<'a, R: Resource> SystemParam for ResMut<'a, R> {
         //   `'w`, bounded by the world's borrow scope; exclusivity is
         //   upheld by the access protocol.
         ResMut(unsafe { &mut *(ptr as *mut R) })
+    }
+}
+
+// ── Option<ResMut<R>> (Aether v2 KE4, rung R1) ──────────────────────────────
+
+// SAFETY (SP1, SP2, SP4): mirror of the `Option<Res<R>>` impl in `res.rs` with
+//   a WRITE declaration and a `&mut R` mint.
+//   - SP1: `init_access` declares the SAME resource write as `ResMut<R>`. The
+//     declaration must not soften just because the value may be absent —
+//     presence is a runtime fact, the conflict graph is static. See the
+//     `Option<Res<R>>` block for the full argument.
+//   - SP2: the `Some` branch mints `&mut R` for exactly the declared id;
+//     exclusivity is upheld by the access protocol.
+//   - SP4: `init_state` mutates no registry and reuses `ResMutState<R>`, so the
+//     Option wrapper carries no extra per-system state.
+unsafe impl<'a, R: Resource> SystemParam for Option<ResMut<'a, R>> {
+    const HAS_DEFERRED: bool = false;
+
+    type State = ResMutState<R>;
+    type Item<'w, 's> = Option<ResMut<'w, R>>;
+
+    #[inline]
+    fn init_state(_world: &mut EcsMaster, _system_meta: &mut SystemMeta) -> Self::State {
+        ResMutState {
+            id: R::resource_id(),
+            _marker: PhantomData,
+        }
+    }
+
+    fn init_access(
+        state: &Self::State,
+        _system_meta: &mut SystemMeta,
+        access_set: &mut FilteredAccessSet,
+        _world: &mut EcsMaster,
+    ) {
+        access_set
+            .add_resource_write(state.id, std::any::type_name::<Self>())
+            .unwrap_or_else(|conflict| intra_system_conflict_panic(conflict));
+    }
+
+    #[inline]
+    unsafe fn get_param<'w, 's>(
+        state: &'s mut Self::State,
+        _system_meta: &SystemMeta,
+        world: UnsafeEcsCell<'w>,
+    ) -> Self::Item<'w, 's> {
+        // SAFETY (SP1, SP2, U_C3): `init_access` declared a write of `state.id`;
+        //   the protocol guarantees no `Res<R>` / `ResMut<R>` for the same id is
+        //   live concurrently. The cell was minted via `new_mutable`
+        //   (debug-asserted inside `resource_ptr_mut`); by-value receiver, no
+        //   `&self` retag, and no `&mut Resources` is formed (PC-24 / W0).
+        //
+        // The KE4 difference: the absent slot is an answer, not a panic.
+        let ptr = unsafe { world.resource_ptr_mut(state.id) }?;
+        // SAFETY (SP2): `ptr` was minted from a populated slot bound to `R` at
+        //   insert time (R1); `ResMutState<R>` ties `state.id` to `R` at the type
+        //   level. The `&mut` borrow's lifetime is `'w`; exclusivity is upheld
+        //   by the access protocol.
+        Some(ResMut(unsafe { &mut *(ptr as *mut R) }))
     }
 }
 

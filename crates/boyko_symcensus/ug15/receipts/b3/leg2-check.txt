@@ -1,0 +1,60 @@
+== leg (2) check
+tree         D:\wt\lighttable (HEAD 5fa2e028e5b1b2db89eb35072178226325c4718c, 7 uncommitted path(s))
+target dir   D:/wt/_targets/vkval-msvc
+host         x86_64-pc-windows-msvc (msvc)
+rustc -vV    rustc 1.98.1 (48a229cea 2026-09-01)
+rustc -vV    binary: rustc
+rustc -vV    commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
+rustc -vV    commit-date: 2026-09-01
+rustc -vV    host: x86_64-pc-windows-msvc
+rustc -vV    release: 1.98.1
+rustc -vV    LLVM version: 22.1.8
+llvm-nm          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-nm.exe
+llvm-objdump     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-objdump.exe
+llvm-readobj     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-readobj.exe
+llvm-size        LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-size.exe
+llvm-ar          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-ar.exe
+rename entries 0, named moves 0
+boyko_demo P29-2: identical <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion
+boyko_demo P29-1: identical <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows
+boyko_demo P29-4: identical <boyko_threadpool::block::ScopeBlock>::grow
+boyko_demo D-3: identical boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new
+boyko_demo P29-3: identical boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+boyko_demo D-2: identical boyko_ecs::ecs::core::iters::query::query_type_registry::register_new
+boyko_demo D-4: identical boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>
+clear H-3: identical <boyko_ecs::ecs::core::schedule::schedule::Schedule>::run
+clear P29-2: identical <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion
+clear P29-1: identical <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows
+clear R-2: identical <boyko_scene::transform::Transform as boyko_ecs::ecs::core::component::component::Component>::component_id
+clear P29-4: identical <boyko_threadpool::block::ScopeBlock>::grow
+clear D-3: identical boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new
+clear P29-3: identical boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+clear R-1: identical boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform>
+clear D-2: identical boyko_ecs::ecs::core::iters::query::query_type_registry::register_new
+clear D-4: identical boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce>
+swap_remove H-2: identical <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity
+swap_remove H-2: identical <criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>
+swap_remove H-2: identical <criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench
+swap_remove H-2: identical <criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up
+swap_remove H-2: identical swap_remove::bench_swap_remove::{closure#0}::{closure#0}
+query_dsl H-1: identical <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>
+query_dsl H-1: identical <criterion::bencher::Bencher>::iter::<(), query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}>
+query_dsl H-1: identical <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench
+query_dsl H-1: identical <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample
+query_dsl H-1: identical <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up
+query_dsl R-4: identical boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag>
+phase9_scheduler H-3: identical <boyko_ecs::ecs::core::schedule::schedule::Schedule>::run
+phase9_scheduler H-3: identical <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::apply
+phase9_scheduler H-3: identical <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::check_change_tick
+phase9_scheduler H-3: identical <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::has_deferred
+phase9_scheduler H-3: identical <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize
+phase9_scheduler H-3: identical <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::meta
+phase9_scheduler H-3: identical <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::name
+phase9_scheduler H-3: identical <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher
+phase9_scheduler H-3: identical <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe
+phase9_scheduler H-3: identical <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::set_change_ticks
+phase9_scheduler H-3: identical <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::set_zone
+phase9_scheduler H-3: identical <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher
+phase9_scheduler H-3: identical <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe
+phase9_scheduler H-3: identical core::ptr::drop_glue::<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()>>
+checked 42 pin(s): 0 absent, 0 moved unnamed, 0 moved named

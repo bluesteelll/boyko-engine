@@ -1,0 +1,41 @@
+UG-11 at B3 (stage 4) - the closed ignore-reason vocabulary. Receipts: tests/ignore_reasons_census.rs output.
+host: msvc (stable-x86_64-pc-windows-msvc), target dir D:/wt/_targets/vkval-msvc
+
+## red-first - the clause on the unmigrated tree (729f90d5)
+test every_ignore_attribute_states_a_reason ... [ignore census] 355 sites (191 plain, 164 cfg_attr) across 12 crates, 1812 .rs files walked, 0 waivers
+test every_site_carries_a_class_its_predicate_allows ... [ignore classes] <none>=210, deferred=17, generator=1, gpu-windowed=20, miri-slow=93, miri-unsupported=6, slow=8; scopes: miri-only=156, native=198, release-only=1; rule inputs: 94 sites call a device entry, 2 exist only under Miri, 9 are feature-conditioned
+212 ignore sites break the class rules:
+test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.37s
+violation kinds:
+    177 no `<class>: ` prefix
+     19 `instrument` is not a class
+      9 `tractability` is not a class
+      3 feature-conditioned site whose class omits feature
+      2 `M2` is not a class
+      1 `miri-arm` is not a class
+      1 `calibration` is not a class
+
+## green - after the migration (948a0397)
+test every_ignore_attribute_states_a_reason ... [ignore census] 355 sites (191 plain, 164 cfg_attr) across 12 crates, 1812 .rs files walked, 0 waivers
+test every_site_carries_a_class_its_predicate_allows ... [ignore classes] <none>=1, deferred=19, feature+gpu=1, feature+gpu-cap=3, feature+gpu-windowed+gpu-cap=4, feature+miri-slow=1, flaky=1, generator=7, gpu=29, gpu-cap=1, gpu-windowed=120, gpu-windowed+gpu-cap=1, miri-slow=130, miri-unsupported=27, slow=9, solo=1; scopes: miri-only=156, native=198, release-only=1; rule inputs: 127 sites call a device entry, 2 exist only under Miri, 9 are feature-conditioned
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 48.32s
+
+## controls - one planted defect each, local branches cut from 948a0397, never merged
+u/b3-ctl-ig1 d47f8a96 : unknown prefix gpux
+      crates/boyko_rhi_vulkan/tests/sdf_gbuffer_hybrid.rs:6667 `sdf_m1_brick_offscreen_matches_golden_and_analytic` [native]: `gpux` is not a class — reason starts "gpux: GPU offscreen gate — requires a Vulkan dev"
+    test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.12s
+u/b3-ctl-ig2 a7446bfa : missing prefix
+      crates/boyko_log/tests/l14_sink_policy.rs:102 `an_armed_target_no_sink_accepts_is_unsunk_and_says_so` [native]: no `<class>: ` prefix — reason starts "drives every sink Off; run alone -- `--ignored -"
+    test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.17s
+u/b3-ctl-ig3 2467e89a : device test relabelled solo (CLAUDE.md trap 1)
+      crates/boyko_rhi_vulkan/tests/compute.rs:366 `negative_chained_barrier_hazard` [native]: `solo` on a test that calls ["boot_or_skip(…)", "boot_or_skip(…) [-> Option<VulkanContext>]"] — without a GPU that call returns early and the test PASSES having measured nothing, so its class is a `gpu*` one
+    test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.76s
+u/b3-ctl-ig4 7cf14cd1 : Miri-only test relabelled slow (CLAUDE.md trap 2)
+      crates/boyko_ecs/tests/miri_fixed_loop.rs:72 `miri_app_driver_substeps_and_hold` [native]: `slow` on a test that exists only under Miri — natively it is not even compiled, so no native leg can run it; the class is `miri-slow` or `miri-unsupported`
+    test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.56s
+u/b3-ctl-ig5 9b35a251 : feature-gated test without feature
+      crates/boyko_rhi_vulkan/tests/hwrt_blas_smoke.rs:116 `hwrt_blas_tlas_smoke` [native]: `gpu-cap` on a test that {"hwrt"} conditions — it does not exist or does not run in the default build, so the class starts `feature+`
+    test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 35.33s
+
+## UG-10 (internal_docs_anchors), scoped
+baseline 84dbfce1 and after 948a0397: 20 passed, 4 failed, the same four tests; the two logs are identical as line multisets (timings and thread ids removed) - this stage added no anchor red

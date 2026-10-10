@@ -64,10 +64,14 @@ use super::contact::{BodyEffective, effective_mass, is_dynamic_row, tangent_basi
 use super::simd;
 use super::warm_start::{self, WarmStartTable};
 use super::RigidSolver;
-use crate::manifold::{Manifold, SDF_SENTINEL};
-use crate::math::{Mat3, Vec3};
+use crate::manifold::{BodyIndex, Manifold, SDF_SENTINEL};
+use crate::math::{Mat3, Quat, Vec3};
 use crate::resources::{BodyState, PhysicsConfig, SolverScratch};
-use crate::scratch_ids::{body_eff_serial_id, register_scratch_layouts, scratch_reserve_rows};
+use crate::row_identity::{RemapCursor, RowIdentity, RowRemap, WarmSeedStats};
+use crate::scratch_ids::{
+    body_delta_serial_id, body_eff_serial_id, register_scratch_layouts, scratch_reserve_rows,
+    serial_manifold_constraints_id, serial_point_constraints_id, warm_table_id,
+};
 
 /// Maximum penetration-recovery bias speed (world units/s) the soft normal solve
 /// will inject, clamping the otherwise-unbounded `biasRate · separation` push so
@@ -76,6 +80,66 @@ use crate::scratch_ids::{body_eff_serial_id, register_scratch_layouts, scratch_r
 /// `pub(crate)` so the colored solver ([`super::colored`]) reads the SAME source
 /// (O2 — no copy-duplicated soft constant can drift); the value is unchanged.
 pub(crate) const MAX_BIAS_VELOCITY: f32 = 4.0;
+
+/// V2's K3 switch (`levers/V2-speculative/01-DESIGN.md` §2.4) — THE one place it is set, read by
+/// both solvers' speculative kernels: `true` solves every contact point on its CURRENT separation
+/// (its gather-time separation plus the two anchors' relative normal movement over the step so
+/// far — Box2D v3's full form), `false` only the points speculative at gather (`s0 > 0`), every
+/// other point keeping its gather-time separation. Read only on a step whose speculative contacts
+/// are on: otherwise both solvers run their pre-V2 kernels whatever it says. The unit gates
+/// instantiate both values.
+///
+/// `true` by the owner-verified F0e verdict (rulings 2026-09-30, item 6): on J-T at `d = 20 mm`
+/// the current separation of the penetrating points is what tightens the pile (max drift
+/// 106–153 mm with it, 189–260 mm without), and at the harsher 1.0 m drop it is the difference
+/// between 0/8 and 8/8 holding with contact reuse on. `false` stays a documented switch.
+pub(crate) const CURRENT_SEPARATION_ALL_POINTS: bool = true;
+
+/// One body row's accumulated movement over the current step (V2): `dp` the displacement of its
+/// centre of mass, `dq` its rotation, both accumulated by the tracked position integrate
+/// (`dp += v·h`, `dq = dq.integrate(ω, h)`, Box2D v3's `deltaPosition` / `deltaRotation`) and
+/// reset to [`BodyDelta::ZERO`] each speculative step. A row the integrate skips (static,
+/// kinematic, held) stays at zero, which is also what an SDF sentinel's body B reads.
+///
+/// 28 B, aligned to 32 so two share a cache line and none straddles one. Its own column, not a
+/// field of the kernels' 64 B `BodyEffective` row, whose gathers would then read two lines.
+#[repr(C, align(32))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BodyDelta {
+    /// Displacement of the centre of mass since the step's start.
+    pub(crate) dp: Vec3,
+    /// Rotation since the step's start (world frame: the current orientation is `dq · q0`).
+    pub(crate) dq: Quat,
+}
+
+const _: () = assert!(
+    size_of::<BodyDelta>() == 32 && align_of::<BodyDelta>() == 32,
+    "a body delta is 28 B padded to 32, two per cache line"
+);
+
+impl BodyDelta {
+    /// No movement: the step's start, and every row the integrate does not move.
+    pub(crate) const ZERO: Self = Self { dp: Vec3::ZERO, dq: Quat::IDENTITY };
+}
+
+/// V2's current separation of a contact point (both solvers, the colored scalar kernel and the
+/// reference, op for op; the AVX2 kernel mirrors it lane for lane): the gather-time separation
+/// `s0` plus the relative normal movement of the two anchors over the step so far,
+/// `s0 + ((dpB − dpA) + (dqB·rb − rb) − (dqA·ra − ra))·n`. The same quantity as Box2D v3's
+/// `s = dot(dp + dqB·rB − dqA·rA, n) + adjustedSeparation`, without the cancellation of two large
+/// rotated anchors. One fixed op order, no FMA.
+#[inline]
+pub(crate) fn current_separation(
+    s0: f32,
+    n: Vec3,
+    ra: Vec3,
+    rb: Vec3,
+    da: &BodyDelta,
+    db: &BodyDelta,
+) -> f32 {
+    let ds = ((db.dp - da.dp) + (db.dq.rotate(rb) - rb)) - (da.dq.rotate(ra) - ra);
+    s0 + ds.dot(n)
+}
 
 /// Minimum approach speed (world units/s) a contact must carry at gather time for
 /// the post-loop restitution pass to bounce it (Box2D-v3's `b2_velocityThreshold`).
@@ -103,7 +167,7 @@ pub(crate) const RESTITUTION_THRESHOLD: f32 = 1.0;
 /// manifold-order × point-order sequence — the same order
 /// [`SolverScratch::vn_initial`](crate::resources::SolverScratch) is indexed in.
 #[derive(Clone, Copy, Debug, Default)]
-struct PointConstraint {
+pub(crate) struct PointConstraint {
     /// Anchor offset on body A from its center of mass (world frame).
     ra: Vec3,
     /// Anchor offset on body B from its center of mass (world frame).
@@ -149,7 +213,7 @@ pub(crate) const IMMOVABLE_AT_REST: BodyEffective = BodyEffective {
 /// the span of its points in the flattened [`SoftStepSolver::points`] buffer
 /// (P2 W2).
 #[derive(Clone, Copy, Debug, Default)]
-struct ManifoldConstraint {
+pub(crate) struct ManifoldConstraint {
     /// Dense row index of body A.
     ia: usize,
     /// Dense row index of body B, OR — when [`b_is_sentinel`](Self::b_is_sentinel)
@@ -189,22 +253,37 @@ pub struct SoftStepSolver {
     /// `std::Vec` parallel-data-system (audit Stage P). This is the SERIAL path —
     /// every access is single-threaded through the build view's `as_mut_slice`.
     bodies: ScratchColumn<BodyEffective>,
-    /// Per-manifold constraint state, in deterministic manifold order.
-    manifolds: Vec<ManifoldConstraint>,
+    /// Per-manifold constraint state, in deterministic manifold order. Backed by
+    /// a [`ScratchColumn`] (audit Stage 4).
+    manifolds: ScratchColumn<ManifoldConstraint>,
     /// Flattened per-point constraint state, indexed by `manifold.point_start +
-    /// p` (the same order `scratch.vn_initial` uses).
-    points: Vec<PointConstraint>,
+    /// p` (the same order `scratch.vn_initial` uses). Backed by a
+    /// [`ScratchColumn`] (audit Stage 4).
+    points: ScratchColumn<PointConstraint>,
+    /// V2: each body row's accumulated movement over the step, parallel to `bodies` (the
+    /// colored solver's column, for the same rule): reset and advanced only on a step whose
+    /// speculative contacts are on (`PhysicsConfig::speculative_contacts`).
+    deltas: ScratchColumn<BodyDelta>,
     /// Last frame's converged impulses (W3) — probed to seed this frame's
     /// contacts at the start of [`solve`](Self::solve).
     warm_read: WarmStartTable,
     /// This frame's converged impulses (W3) — freshly zeroed each frame, filled
     /// in manifold order after the solve, then swapped into `warm_read`.
     warm_write: WarmStartTable,
-    /// Whether warm-starting is active (W3). Production default is `true`; the
+    /// The warm-start SETUP flag (W3). Production default is `true`; the
     /// `false` mode (see [`with_warm_start`](Self::with_warm_start)) zero-seeds
     /// every contact each frame, used by the A/B convergence test to demonstrate
-    /// the warm-start payoff.
+    /// the warm-start payoff. A solve runs warm iff this AND the configuration's
+    /// [`PhysicsConfig::warm_start`] are both true (L10 D5b).
     warm_start_enabled: bool,
+    /// The warm table's place in the gather sequence, stamped where `warm_read` is
+    /// rebuilt (defect A, interim; U7 deletes it).
+    warm_cursor: RemapCursor,
+    /// The last solve's warm-start lookup diagnostic (defect A, interim; U7 deletes it).
+    warm_stats: WarmSeedStats,
+    /// Solves that ran past the no-dynamic-body early return. Diagnostic (defect A,
+    /// interim).
+    solved_steps: u64,
 }
 
 impl Default for SoftStepSolver {
@@ -224,11 +303,24 @@ impl SoftStepSolver {
         let reserve = bodies.max(scratch_reserve_rows(size_of::<BodyEffective>()));
         Self {
             bodies: ScratchColumn::new(body_eff_serial_id(), reserve),
-            manifolds: Vec::with_capacity(contacts),
-            points: Vec::with_capacity(contacts),
-            warm_read: WarmStartTable::with_capacity(contacts),
-            warm_write: WarmStartTable::with_capacity(contacts),
+            manifolds: ScratchColumn::new(
+                serial_manifold_constraints_id(),
+                contacts.max(scratch_reserve_rows(size_of::<ManifoldConstraint>())),
+            ),
+            points: ScratchColumn::new(
+                serial_point_constraints_id(),
+                contacts.max(scratch_reserve_rows(size_of::<PointConstraint>())),
+            ),
+            deltas: ScratchColumn::new(
+                body_delta_serial_id(),
+                bodies.max(scratch_reserve_rows(size_of::<BodyDelta>())),
+            ),
+            warm_read: WarmStartTable::with_capacity(warm_table_id(0), contacts),
+            warm_write: WarmStartTable::with_capacity(warm_table_id(1), contacts),
             warm_start_enabled: true,
+            warm_cursor: RemapCursor::default(),
+            warm_stats: WarmSeedStats::default(),
+            solved_steps: 0,
         }
     }
 
@@ -239,11 +331,32 @@ impl SoftStepSolver {
     /// which the `warm_start_improves_convergence` A/B test runs against to show
     /// the payoff. Pre-sizes nothing (the steady-state capacity grows on the
     /// first solve).
+    ///
+    /// A setup choice: a solve runs warm iff this flag AND the configuration's
+    /// [`PhysicsConfig::warm_start`] are both true (L10 D5b), so `false` here keeps the solver
+    /// cold whatever the configuration says. A direct-drive caller that never gathers rows
+    /// resumes after a cold step from the impulses its last warm solve stored.
     pub fn with_warm_start(enabled: bool) -> Self {
         Self {
             warm_start_enabled: enabled,
             ..Self::with_capacity(0, 0)
         }
+    }
+
+    /// Diagnostic: the last solve's warm-start lookup statistics — how many manifolds
+    /// were seeded, how many of their lookup keys resolved to rows of the previous
+    /// gather, and the warm table cursor's `Reset` count (defect A, interim).
+    #[inline]
+    pub fn warm_seed_stats(&self) -> WarmSeedStats {
+        self.warm_stats
+    }
+
+    /// Diagnostic: the number of solves that ran past the no-dynamic-body early return
+    /// (defect A, interim). A step with no simulated dynamic body returns before the
+    /// count, so an unchanged value across a step shows that the early return ran.
+    #[inline]
+    pub fn solved_steps(&self) -> u64 {
+        self.solved_steps
     }
 
     /// Rebuilds the per-body solver views from the gather snapshot.
@@ -279,16 +392,26 @@ impl SoftStepSolver {
     /// or just-reformed point — e.g. a box manifold point whose feature id flipped)
     /// seeds zero, a one-frame convergence cost, no error. A box manifold's 4
     /// points therefore warm-start independently (the W3 limitation that left
-    /// points 1..count always cold). When `warm_start_enabled` is `false` (the A/B
-    /// test hook) every seed is zero (the W2 behavior). A W3 sphere-sphere manifold
+    /// points 1..count always cold). When the step is cold (`warm` false: the A/B
+    /// test hook, or `PhysicsConfig::warm_start` off) every seed is zero (the W2 behavior). A
+    /// W3 sphere-sphere manifold
     /// has one point with `feature_id == 0`, so its key equals the old per-manifold
     /// key — the sphere path is byte-identical.
     fn build_constraints(
         &mut self,
         manifolds: &[Manifold],
         bodies: &[BodyState],
-        vn_initial: &mut Vec<f32>,
+        vn_initial: &mut ScratchColumn<f32>,
+        remap: RowRemap<'_>,
+        warm: bool,
     ) {
+        if let RowRemap::Rows(prev_row) = remap {
+            debug_assert_eq!(
+                prev_row.len(),
+                bodies.len(),
+                "invariant: the warm remap maps exactly the gathered rows"
+            );
+        }
         // Disjoint-field borrows: the BodyEffective read slice (built by
         // `build_bodies` just above) is read while `self.manifolds` / `self.points`
         // are written. `bodies_eff` is the read view of the solver's body column.
@@ -297,13 +420,24 @@ impl SoftStepSolver {
             manifolds: out_manifolds,
             points: out_points,
             warm_read,
-            warm_start_enabled,
+            warm_cursor,
+            warm_stats,
             ..
         } = self;
         let bodies_eff = body_col.as_read_slice();
+        let mut out_manifolds = out_manifolds.build_view();
+        let mut out_points = out_points.build_view();
         out_manifolds.clear();
         out_points.clear();
-        vn_initial.clear();
+        // The refill view is taken ONCE for the whole build rather than per push:
+        // it is the only surface that mutates the column, and re-deriving it per
+        // contact point would re-load the base and length on every iteration.
+        let mut vn = vn_initial.build_view();
+        vn.clear();
+        // Warm-seed diagnostic (defect A): the carried count is taken only on a step whose
+        // rows changed; the unchanged step does no per-manifold work for it.
+        let carried_rows = warm && matches!(remap, RowRemap::Rows(_));
+        let (mut seeded, mut carried, mut point_hits) = (0u32, 0u32, 0u32);
 
         for m in manifolds {
             let count = m.count as usize;
@@ -331,6 +465,15 @@ impl SoftStepSolver {
             } else {
                 bodies[ib].position
             };
+            // Defect A (interim): the rows this manifold's bodies held when `warm_read`
+            // was keyed. The stored key stays in current rows; only the lookup is
+            // translated. On `Identity` it is `(a, b)` itself, and each point still packs
+            // its read key separately from its stored key.
+            let lookup = remap.manifold_pair(m);
+            seeded += 1;
+            if carried_rows && lookup.is_some() {
+                carried += 1;
+            }
 
             for p in 0..count {
                 let cp = &m.points[p];
@@ -354,7 +497,7 @@ impl SoftStepSolver {
                     };
                     bb.point_velocity(rb) - ba.point_velocity(ra)
                 };
-                vn_initial.push(dv.dot(normal));
+                vn.push(dv.dot(normal));
                 // W4 per-point warm key: this point's OWN feature id. Each point
                 // probes the `read` table independently, so a box manifold's 4
                 // points each seed from their own last-frame converged impulse. C1:
@@ -366,11 +509,18 @@ impl SoftStepSolver {
                 } else {
                     warm_start::pack(m.body_a, m.body_b, cp.feature_id)
                 };
-                let seed = if *warm_start_enabled {
-                    warm_read.get(warm_key)
+                let seed = if warm
+                    && let Some((la, lb)) = lookup
+                {
+                    warm_read.get(if b_is_sentinel {
+                        warm_start::pack_sdf(BodyIndex(la), cp.feature_id)
+                    } else {
+                        warm_start::pack(BodyIndex(la), BodyIndex(lb), cp.feature_id)
+                    })
                 } else {
                     None
                 };
+                point_hits += u32::from(seed.is_some());
                 // Warm-seed the accumulated impulses (zero on miss / disabled).
                 let (normal_impulse, tangent_impulse1, tangent_impulse2) = match seed {
                     Some(e) => (e.normal_impulse, e.tangent_impulse[0], e.tangent_impulse[1]),
@@ -398,6 +548,23 @@ impl SoftStepSolver {
                 count,
             });
         }
+
+        let translated = match remap {
+            _ if !warm => 0,
+            RowRemap::Identity => seeded,
+            RowRemap::Rows(_) => carried,
+            RowRemap::Reset => 0,
+        };
+        *warm_stats = WarmSeedStats {
+            manifolds: seeded,
+            translated,
+            points: out_points.len() as u32,
+            point_hits,
+            // The reference solver has no sleep path, so it never freezes a manifold.
+            carry_points: 0,
+            carry_hits: 0,
+            remap_resets: warm_cursor.resets(),
+        };
     }
 
     /// Applies the seeded accumulated impulse of every contact point to both
@@ -452,20 +619,29 @@ impl SoftStepSolver {
     /// deterministic flattened order `points[]` already holds (manifold order,
     /// then point index `0..count`). The resulting occupancy is a pure function of
     /// this frame's key set (order-independent, no carried history), so the
-    /// swapped-in `read` table is bit-deterministic next frame. When warm-starting
-    /// is disabled the store is skipped (the `read` table stays empty, so every
-    /// seed misses).
-    fn store_and_swap(&mut self) {
-        if !self.warm_start_enabled {
+    /// swapped-in `read` table is bit-deterministic next frame. On a cold step (`warm` false,
+    /// L10 D5b) the store is skipped: the `read` table and its stamp stay as the last warm step
+    /// left them.
+    ///
+    /// After the swap it stamps the warm cursor with `rows` (defect A, interim): this is
+    /// the table's only writer, so this is where it becomes keyed by this gather. It is
+    /// NOT stamped at lookup time, because this solver looks up in `build_constraints`
+    /// before its no-dynamic-body early return: a lookup-time stamp would mark a table
+    /// current that the step never stored.
+    fn store_and_swap(&mut self, rows: &RowIdentity, warm: bool) {
+        if !warm {
             return;
         }
         let point_count = self.points.len();
+        // A shared borrow of one field while `warm_write` is borrowed mutably below
+        // — disjoint places, so no take/put-back is needed.
+        let points = self.points.as_read_slice();
         self.warm_write.rebuild(point_count);
         // Each point persists independently under its own per-point key, in the
         // flattened `(manifold order, point index)` order — the deterministic C3
         // insertion order. A box manifold's 4 points therefore each carry their
         // converged impulse to next frame.
-        for pc in &self.points {
+        for pc in points {
             self.warm_write.insert(
                 pc.warm_key,
                 pc.normal_impulse,
@@ -473,6 +649,48 @@ impl SoftStepSolver {
             );
         }
         core::mem::swap(&mut self.warm_read, &mut self.warm_write);
+        self.warm_cursor.stamp(rows);
+    }
+
+    /// One sweep of [`solve_velocities`](Self::solve_velocities): its `SPEC = false` instance (the
+    /// pre-V2 sweep) unless `spec`, else the speculative one with
+    /// [`CURRENT_SEPARATION_ALL_POINTS`].
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn sweep(
+        spec: bool,
+        manifolds: &[ManifoldConstraint],
+        points: &mut [PointConstraint],
+        bodies_eff: &mut [BodyEffective],
+        snapshot: &[BodyState],
+        soft: SoftCoefficients,
+        bias_active: bool,
+        deltas: &[BodyDelta],
+        inv_h: f32,
+    ) {
+        if spec {
+            Self::solve_velocities::<true, CURRENT_SEPARATION_ALL_POINTS>(
+                manifolds,
+                points,
+                bodies_eff,
+                snapshot,
+                soft,
+                bias_active,
+                deltas,
+                inv_h,
+            );
+        } else {
+            Self::solve_velocities::<false, false>(
+                manifolds,
+                points,
+                bodies_eff,
+                snapshot,
+                soft,
+                bias_active,
+                deltas,
+                inv_h,
+            );
+        }
     }
 
     /// Refreshes each dynamic body's world inverse inertia from its local tensor
@@ -500,18 +718,33 @@ impl SoftStepSolver {
     // key into `points`, and the loop body also indexes `bodies_eff[mc.ia]` /
     // `bodies_eff[mc.ib]` (disjoint buffers) — a single `iter_mut` cannot express
     // the three-buffer Gauss-Seidel read/apply, so the explicit index is correct.
-    #[allow(clippy::needless_range_loop)]
-    fn solve_velocities(
+    ///
+    /// V2: `SPEC = true` (a step whose speculative contacts are on) solves each point on the
+    /// separation the colored kernel's `SPEC` instance solves it on (its current one for a point
+    /// speculative at gather, and for every point when `K3`), and a point whose separation is
+    /// positive as speculative — `dλ = -mEff·(vn + s·inv_h)`, no push, in both passes. `deltas` is
+    /// read only then. `SPEC = false` is the pre-V2 sweep.
+    #[allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+    fn solve_velocities<const SPEC: bool, const K3: bool>(
         manifolds: &[ManifoldConstraint],
         points: &mut [PointConstraint],
         bodies_eff: &mut [BodyEffective],
         snapshot: &[BodyState],
         soft: SoftCoefficients,
         bias_active: bool,
+        deltas: &[BodyDelta],
+        inv_h: f32,
     ) {
         for mc in manifolds {
             let normal = mc.normal;
             let (t1, t2) = (mc.tangent1, mc.tangent2);
+            // V2 (`SPEC` only): the two bodies' movement over the step so far; the SDF surface
+            // never moves (`mc.ib` is A's row for a sentinel).
+            let (da, db) = if SPEC {
+                (deltas[mc.ia], if mc.b_is_sentinel { BodyDelta::ZERO } else { deltas[mc.ib] })
+            } else {
+                (BodyDelta::ZERO, BodyDelta::ZERO)
+            };
             // Combined friction coefficient. The foundation stores friction per
             // body; W2 combines by `max` (a simple, symmetric, deterministic rule
             // — a sliding pair is as sticky as its stickiest surface). A
@@ -524,6 +757,12 @@ impl SoftStepSolver {
             for p in mc.point_start..(mc.point_start + mc.count) {
                 let pc = points[p];
                 let (ra, rb) = (pc.ra, pc.rb);
+                // V2: the separation this pass solves on.
+                let separation = if SPEC && (K3 || pc.separation > 0.0) {
+                    current_separation(pc.separation, normal, ra, rb, &da, &db)
+                } else {
+                    pc.separation
+                };
 
                 // ── Normal solve ────────────────────────────────────────────
                 let m_eff = {
@@ -549,12 +788,15 @@ impl SoftStepSolver {
                 // Soft bias drives the penetration toward zero; clamp the push so
                 // a deep overlap cannot launch the body.
                 let bias = if bias_active {
-                    (soft.bias_rate * pc.separation).max(-MAX_BIAS_VELOCITY)
+                    (soft.bias_rate * separation).max(-MAX_BIAS_VELOCITY)
                 } else {
                     0.0
                 };
                 // dλ = -massCoeff · mEff · (vn + bias) − impulseCoeff · λ
-                let d_lambda = if bias_active {
+                let d_lambda = if SPEC && separation > 0.0 {
+                    // A speculative point: close the gap within the substep, never push.
+                    -m_eff * (vn + separation * inv_h)
+                } else if bias_active {
                     -soft.mass_coeff * m_eff * (vn + bias) - soft.impulse_coeff * pc.normal_impulse
                 } else {
                     // Relaxation: rigid (no soft mass/impulse scaling, no bias).
@@ -646,6 +888,9 @@ impl SoftStepSolver {
     /// cross-point coupling to converge. A 4-point box manifold (W4) couples the
     /// points through the shared body, so a single sweep under-resolves the corner
     /// velocities — W4 must revisit this with a small iteration loop.
+    ///
+    /// V2 (`spec`): a point speculative at gather whose normal impulse ended the substeps at `0`
+    /// never touched, and gets no bounce (the colored solver's guard, Box2D v3's rule).
     //
     // `clippy::needless_range_loop`: `p` indexes both `points[p]` and the
     // parallel `vn_initial[p]`, plus the loop applies to `bodies_eff[mc.ia/ib]`;
@@ -657,6 +902,7 @@ impl SoftStepSolver {
         bodies_eff: &mut [BodyEffective],
         snapshot: &[BodyState],
         vn_initial: &[f32],
+        spec: bool,
     ) {
         for mc in manifolds {
             let normal = mc.normal;
@@ -676,6 +922,9 @@ impl SoftStepSolver {
                     continue;
                 }
                 let pc = points[p];
+                if spec && pc.separation > 0.0 && pc.normal_impulse == 0.0 {
+                    continue;
+                }
                 let (ra, rb) = (pc.ra, pc.rb);
                 let m_eff = {
                     let ba = bodies_eff[mc.ia];
@@ -809,26 +1058,41 @@ impl RigidSolver for SoftStepSolver {
         manifolds: &[Manifold],
         scratch: &mut SolverScratch,
     ) {
+        // L10 D5b: the step's effective warm start, first — the build below reads it before the
+        // early return.
+        let warm = self.warm_start_enabled && config.warm_start;
         let substeps = config.substeps.max(1);
         let h = config.dt / substeps as f32;
+        // V2: the speculative rule iff speculative contacts are on; `1 / h` once.
+        let spec = config.speculative_contacts();
+        let inv_h = 1.0 / h;
 
         // Build the per-body views and per-contact constraints over the gather
         // snapshot; `vn_initial` captures the pre-substep approach velocity for
         // the restitution pass.
         self.build_bodies(scratch.bodies());
         // Split the scratch borrow: the snapshot positions feed the constraint
-        // build while `vn_initial` is filled. Both columns are addressed by
-        // distinct ScratchColumns, so the body-read slice and `vn_initial` are
-        // disjoint borrows.
+        // build while `vn_initial` is filled. Both are `ScratchColumn`s under
+        // their own reserved ids, so the body-read slice and the `vn_initial`
+        // refill view are disjoint field borrows.
         {
             // Disjoint field borrows of `scratch`: the BodyState snapshot read
             // slice feeds the constraint build while `vn_initial` is filled.
             let SolverScratch {
                 bodies: body_col,
                 vn_initial,
+                rows,
                 ..
             } = &mut *scratch;
-            self.build_constraints(manifolds, body_col.as_read_slice(), vn_initial);
+            // Warm start is classified only on a warm step: a cold step never reads or stores
+            // the table, so `Identity` is a placeholder that takes no per-manifold branch, and
+            // its cursor never counts a phantom `Reset`.
+            let warm_remap = if warm {
+                self.warm_cursor.remap(rows)
+            } else {
+                RowRemap::Identity
+            };
+            self.build_constraints(manifolds, body_col.as_read_slice(), vn_initial, warm_remap, warm);
         }
         // No `manifolds.is_empty()` early-return: in solver-owned mode (C2) this
         // solver is the SOLE integrator, so the substep loop must run its gravity
@@ -845,6 +1109,12 @@ impl RigidSolver for SoftStepSolver {
         if !has_dynamic {
             return;
         }
+        self.solved_steps += 1;
+        if spec {
+            let mut deltas = self.deltas.build_view();
+            deltas.clear();
+            deltas.resize(scratch.bodies().len(), BodyDelta::ZERO);
+        }
 
         let soft = SoftCoefficients::new(config.contact_hertz, config.contact_damping, h);
         let gravity = config.gravity;
@@ -855,14 +1125,26 @@ impl RigidSolver for SoftStepSolver {
         // single-threaded mutable slice over the solver's BodyEffective column (no
         // parallel access — this is the SERIAL solver), while `manifolds` / `points`
         // / the warm tables stay borrowable through the destructured fields.
+        // SCOPED: the three refill views publish their frontiers on `Drop`, so their
+        // borrows of `self`'s fields must end before `store_and_swap` / `write_back`.
+        {
         let Self {
             bodies,
-            manifolds: mc,
-            points,
+            manifolds: mc_col,
+            points: points_col,
+            deltas: delta_col,
             ..
         } = self;
         let mut bodies_view = bodies.build_view();
         let bodies_eff = bodies_view.as_mut_slice();
+        // The constraint columns are read / mutated through their own views for the
+        // whole substep loop: `mc` is shared (the manifold list is fixed once built),
+        // `points` is the single-threaded mutable slice the sweeps accumulate into.
+        let mc = mc_col.as_read_slice();
+        let mut points_view = points_col.build_view();
+        let points = points_view.as_mut_slice();
+        let mut delta_view = delta_col.build_view();
+        let deltas = delta_view.as_mut_slice();
 
         for _ in 0..substeps {
             // (1) Gravity integrate DYNAMIC bodies only (C2 gate (2)). O1: the AVX2
@@ -876,7 +1158,7 @@ impl RigidSolver for SoftStepSolver {
             Self::warm_start_apply(mc, points, bodies_eff);
 
             // (3)+(4) Soft normal solve + coupled-friction cone (one sweep).
-            Self::solve_velocities(mc, points, bodies_eff, scratch.bodies(), soft, true);
+            Self::sweep(spec, mc, points, bodies_eff, scratch.bodies(), soft, true, deltas, inv_h);
 
             // (5) Position integrate DYNAMIC bodies only, then re-rotate the
             // world inertia for the next substep's effective mass.
@@ -901,26 +1183,38 @@ impl RigidSolver for SoftStepSolver {
             {
                 let mut view = scratch.bodies.build_view();
                 let snapshot = view.as_mut_slice();
-                simd::position_integrate(bodies_eff, snapshot, h, false);
+                if spec {
+                    // V2: the same integrate, advancing each moved row's step movement.
+                    simd::position_integrate_tracked(bodies_eff, snapshot, deltas, h);
+                } else {
+                    simd::position_integrate(bodies_eff, snapshot, h, false);
+                }
             }
             Self::refresh_inertia(bodies_eff, scratch.bodies(), use_simd);
 
             // (6) Relax passes: re-solve bias-free to remove soft-bias energy.
             for _ in 0..config.relax_iterations {
-                Self::solve_velocities(mc, points, bodies_eff, scratch.bodies(), soft, false);
+                Self::sweep(spec, mc, points, bodies_eff, scratch.bodies(), soft, false, deltas, inv_h);
             }
         }
 
-        // Post-loop restitution: ONCE, velocity-only, bias-free. Read `vn_initial`
-        // into a local borrow disjoint from the bodies read slice.
-        let vn_initial = core::mem::take(&mut scratch.vn_initial);
-        Self::apply_restitution(mc, points, bodies_eff, scratch.bodies(), &vn_initial);
-        scratch.vn_initial = vn_initial;
+        // Post-loop restitution: ONCE, velocity-only, bias-free. Both scratch
+        // reads are SHARED borrows of different columns, so they coexist directly
+        // — the take/put-back dance the `Vec` field needed is gone with it.
+        Self::apply_restitution(
+            mc,
+            points,
+            bodies_eff,
+            scratch.bodies(),
+            scratch.vn_initial(),
+            spec,
+        );
+        }
 
         // (W3) Store the converged accumulated impulses into the freshly-zeroed
         // write table (in manifold order) and swap read ↔ write so next frame
         // seeds from this frame's solution.
-        self.store_and_swap();
+        self.store_and_swap(&scratch.rows, warm);
 
         // Write the solved velocities back (positions/orientations were
         // integrated in place into the snapshot) and flag every integrated

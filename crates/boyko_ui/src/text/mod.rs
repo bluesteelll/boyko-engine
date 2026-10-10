@@ -11,9 +11,14 @@
 //!    `lower_node` ([`lower`], Decision 12).
 //! 3. [`serialize_ui`] — the canonical-text inverse ([`serialize`], Decision 16).
 //!
-//! Dispatch is reflection-free: a closed `match` over the 10-component builtin
-//! vocabulary with type-directed leaf parsers ([`dispatch`], Decision 3 / 4).
-//! No serde, no reflection, no `Any` / downcast, no external crate.
+//! Dispatch is reflection-free: a closed `match` over the builtin vocabulary with
+//! type-directed leaf parsers ([`dispatch`], Decision 3 / 4). No serde, no
+//! reflection, no `Any` / downcast, no external crate.
+//!
+//! The vocabulary itself is declared ONCE, in [`vocab`], and both the parser and
+//! the writer match on it exhaustively — the count moved from 10 to 21 across P4 /
+//! P5b / P6a / GUI #27 while this sentence still said "10-component", which is the
+//! rot a single declaration removes.
 
 pub mod ast;
 pub mod components;
@@ -27,6 +32,7 @@ pub mod report;
 pub mod serialize;
 pub mod shape;
 pub(crate) mod split;
+pub mod vocab;
 
 pub use ast::{CompKind, ParsedComponent, ParsedNode, ParsedTree, UiNameStr};
 pub use components::{FontId, TextAlign, UiText};
@@ -38,6 +44,7 @@ pub use parser::parse_ui;
 pub use report::{UiParseReport, UI_FORMAT_VERSION};
 pub use serialize::serialize_ui;
 pub use shape::{shape_into, ShapedExtent, ShapedGlyph};
+pub use vocab::{ReloadPolicy, UiTextComponent, WriterPolicy};
 
 // GUI P5b re-exports the baked POD metric/meta types + the `.bfont` reader so a host
 // can load a font into the [`FontTable`] without naming the bake crate directly.

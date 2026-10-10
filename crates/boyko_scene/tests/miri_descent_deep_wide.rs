@@ -19,13 +19,20 @@
 //!
 //! ```powershell
 //! $env:MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-scene --test miri_descent_deep_wide
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-scene --test miri_descent_deep_wide
 //! ```
 //!
 //! Every test in THIS FILE runs the descent (`propagate_transforms` over a
 //! multi-row tree), so the `--test miri_descent_deep_wide` filter cannot pass
 //! while skipping the descent unsafe — there is no non-descent test in this
 //! binary to give a false green.
+
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` out of the `Send + Sync` one-shot system closure, and the
+// file-static `Mutex<()>` guards serialize tests that arm a process-global (allocator /
+// propagation counter). Neither is engine code — the whole file is compiled out of every
+// shipping build.
+#![allow(clippy::disallowed_types)]
 
 use std::sync::{Arc, Mutex};
 

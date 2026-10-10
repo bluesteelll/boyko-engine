@@ -9,6 +9,13 @@
 //! These tests build the whole tree in a SINGLE `ui!` invocation (one apply
 //! window) and assert every `ChildOf`/`Children` edge materialised.
 
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` / a `UiParseReport` out of the `Send + Sync` one-shot
+// system closure, and a file-static `Mutex<()>` serializes tests that arm a process-global
+// (the counting allocator, the watch-poll counters). Not engine code — the whole file is
+// compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 mod common;
 
 use std::sync::{Arc, Mutex};

@@ -20,6 +20,13 @@
 //! counters keyed per relation type; `Arc<Mutex>` spawn probe; a global monotonic
 //! clock for fire ORDER).
 
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -487,7 +494,10 @@ fn run_chain_termination(ecs: &mut EcsMaster, n: usize) {
 // so terminating with N-1 / N fires proves the drain stayed bounded.
 #[test]
 fn exclusive_chain_termination_bounded_for_n_10_100_1000() {
-    for &n in &[10usize, 100, 1000] {
+    // Under Miri 10 and 100: the bound is checked per size, and the 1 000-link chain ran past 3 min
+    // of interpretation (MEASURED 2026-10-10). All three sizes natively.
+    let sizes: &[usize] = if cfg!(miri) { &[10, 100] } else { &[10, 100, 1000] };
+    for &n in sizes {
         let mut ecs = EcsMaster::new();
         // Per-world observer registration (the registry is a per-`EcsMaster` field);
         // the dedicated private `ChainRel` relation + the sequential single-test loop

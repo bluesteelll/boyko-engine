@@ -1,0 +1,361 @@
+//! The file sink — one handle, owned by whoever holds the consumer role.
+//!
+//! # Why the handle is a `static` and not a field
+//!
+//! The consumer role moves: it is the sink thread by default, a host calling
+//! [`drain`](crate::lifecycle::drain) under `SinkMode::Manual`, the ECS drain under `Scheduled`,
+//! and the crash drainer during a panic. All four take the **same** CAS'd `DRAIN_OWNER` token, so
+//! "the thread that may touch this handle" is a role rather than a thread — and a role cannot own
+//! a field on a thread's stack. The handle therefore lives beside the other consumer-role scratch,
+//! reachable only through a `&DrainToken` the compiler checks.
+//!
+//! # The cap is not rotation
+//!
+//! When the file reaches its byte cap this sink **stops writing and says so, once**
+//! (`boyko-W0103`). It does not truncate, does not delete, and does not roll over — rotation is a
+//! later rung, and a sink that silently discarded the beginning of a capture in order to keep
+//! writing would destroy exactly the records that explain the ones it kept.
+
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::io::Write;
+
+use crate::codes::{OnceSite, W0103, W0112};
+use crate::drain_owner::DrainToken;
+
+/// The longest path this sink will record. Fixed, because a path recorded at boot may not
+/// allocate — `boot` is a pure struct-fill and this is the buffer it fills.
+pub const MAX_PATH_BYTES: usize = 256;
+
+/// The recorded destination. Written by [`set_path`], read once by [`open`].
+struct PathSlot(UnsafeCell<[u8; MAX_PATH_BYTES]>);
+
+// SAFETY: written only by `set_path`, which is documented single-threaded setup ("before
+//   `enable()`, on the host thread") and asserts nothing else; read only by `open`, which runs on
+//   the enable path after that. `PATH_LEN`'s `Release`/`Acquire` pair orders the bytes against the
+//   read, so a host that violates the setup rule still cannot observe a torn path — it observes
+//   either the old length or the new one.
+unsafe impl Sync for PathSlot {}
+
+static PATH: PathSlot = PathSlot(UnsafeCell::new([0; MAX_PATH_BYTES]));
+static PATH_LEN: AtomicU64 = AtomicU64::new(0);
+
+/// The open handle. `None` until [`open`] succeeds.
+struct FileSlot(UnsafeCell<Option<std::fs::File>>);
+
+// SAFETY: `open` runs on the enable path, before any consumer role exists — there is no drain
+//   token in the process yet, so no reader can be inside `write_line`. Every subsequent access is
+//   through `&DrainToken`, and the token is a single CAS'd role (`crate::drain_owner`), so two
+//   threads inside this cell is unrepresentable. `close` takes the token for the same reason.
+unsafe impl Sync for FileSlot {}
+
+static FILE: FileSlot = FileSlot(UnsafeCell::new(None));
+
+/// Bytes written to the file so far.
+static WRITTEN: AtomicU64 = AtomicU64::new(0);
+
+/// The cap in bytes; `0` means uncapped.
+static CAP: AtomicU64 = AtomicU64::new(0);
+
+/// Set once the cap has been reached, so the check is a load rather than a comparison chain.
+static CAPPED: AtomicBool = AtomicBool::new(false);
+
+/// The `W0103` latch. Per site in the sense that matters: there is exactly one site.
+static CAP_REPORTED: OnceSite = OnceSite::new();
+
+/// Rotate at this many bytes; `0` disables rotation *(L13a)*.
+static ROTATE_AT: AtomicU64 = AtomicU64::new(0);
+
+/// How many rotated files to keep. `0` means keep none — every rotation deletes the old content.
+static ROTATE_KEEP: AtomicU64 = AtomicU64::new(0);
+
+/// Bytes deleted by rotation so far. **The number `W0112` reports.**
+static ROTATED_AWAY: AtomicU64 = AtomicU64::new(0);
+
+/// Rotations performed.
+static ROTATIONS: AtomicU64 = AtomicU64::new(0);
+
+/// `W0112`'s latch. `Once`: a session that rotates a hundred times has one fact to report — that
+/// the file no longer holds the whole session — and repeating it per rotation would bury it.
+static ROTATE_REPORTED: OnceSite = OnceSite::new();
+
+/// Record the destination. **Opens nothing.**
+///
+/// Call before [`enable`](crate::lifecycle::enable), on the host thread. Returns `false` for a
+/// path longer than [`MAX_PATH_BYTES`], which is a refusal rather than a truncation: a truncated
+/// path names a different file, and writing a log to the wrong file is worse than not writing one.
+pub fn set_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    if bytes.is_empty() || bytes.len() > MAX_PATH_BYTES {
+        return false;
+    }
+    // SAFETY: setup-time, single-threaded by this function's contract; the `Release` below
+    //   publishes these bytes to `open`'s `Acquire`.
+    unsafe {
+        let dst = PATH.0.get().cast::<u8>();
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+    }
+    PATH_LEN.store(bytes.len() as u64, Ordering::Release);
+    true
+}
+
+/// Whether a destination has been recorded.
+#[must_use]
+pub fn path_recorded() -> bool {
+    PATH_LEN.load(Ordering::Acquire) != 0
+}
+
+/// Open the recorded destination, truncating any previous contents. Returns `false` when no path
+/// was recorded or the OS refused.
+///
+/// Runs on the **enable** path and nowhere else: opening a file is a syscall, and a syscall the
+/// runtime flag has not authorised is exactly what boot may not do.
+///
+/// A refusal is not a launch failure. The synchronous channel and the rings still work, and the
+/// host learns from the return value rather than from a missing file it has to notice.
+pub fn open(cap_bytes: u64) -> bool {
+    let len = PATH_LEN.load(Ordering::Acquire) as usize;
+    if len == 0 {
+        return false;
+    }
+    // SAFETY: `PATH_LEN`'s `Acquire` pairs with `set_path`'s `Release`, so these `len` bytes are
+    //   the ones that call wrote. No consumer role exists yet (see the `FileSlot` block), so no
+    //   other thread is inside this cell.
+    let path = unsafe {
+        let src = core::slice::from_raw_parts(PATH.0.get().cast::<u8>(), len);
+        match core::str::from_utf8(src) {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+    let Ok(file) = std::fs::File::create(path) else { return false };
+
+    CAP.store(cap_bytes, Ordering::Relaxed);
+    WRITTEN.store(0, Ordering::Relaxed);
+    CAPPED.store(false, Ordering::Relaxed);
+    // SAFETY: as above — the enable path runs before any drain token exists.
+    unsafe { *FILE.0.get() = Some(file) };
+    true
+}
+
+/// Append one formatted line, with a trailing newline. Returns `false` when nothing was written.
+///
+/// Taking `&DrainToken` is the whole exclusivity argument: the token is unforgeable and there is
+/// exactly one, so this cell has one writer by construction rather than by convention.
+/// Configure rotation: roll the file at `at_bytes`, keeping `keep` older generations.
+///
+/// **`at_bytes == 0` disables rotation and is the engine default**, deliberately: a bench or a
+/// repro run must not lose its own beginning, which is the failure a silently-rotating default
+/// produces. Rotation is something an operator turns on for a long session, knowing the trade.
+///
+/// Distinct from the byte CAP, which STOPS writing. Rotation keeps writing and discards the oldest
+/// bytes instead — the two answer different questions and a sink may have both.
+pub fn set_rotation(at_bytes: u64, keep: u8) {
+    ROTATE_AT.store(at_bytes, Ordering::Relaxed);
+    ROTATE_KEEP.store(u64::from(keep), Ordering::Relaxed);
+}
+
+/// The rotation cap in bytes; `0` when rotation is off.
+///
+/// The binary sink already had this read-back and this one exists for the same caller: a gate
+/// asserting that a preset's rotation reached the SINK, not that a table row claims it.
+#[must_use]
+pub fn rotation_cap() -> u64 {
+    ROTATE_AT.load(Ordering::Relaxed)
+}
+
+/// `(rotations, bytes_deleted)` — what rotation has discarded this session.
+#[must_use]
+pub fn rotation_state() -> (u64, u64) {
+    (ROTATIONS.load(Ordering::Relaxed), ROTATED_AWAY.load(Ordering::Relaxed))
+}
+
+/// Roll the file: `name` -> `name.1` -> … -> `name.keep`, dropping what falls off the end.
+///
+/// Returns the bytes that stopped being reachable, which is what `W0112` reports. With `keep == 0`
+/// that is the whole current file; with `keep >= 1` it is whatever the oldest generation held.
+fn rotate_now(slot: &mut Option<std::fs::File>, at: u64) -> u64 {
+    let len = PATH_LEN.load(Ordering::Acquire) as usize;
+    if len == 0 {
+        return 0;
+    }
+    // SAFETY: as `open` -- `PATH_LEN`'s `Acquire` pairs with `set_path`'s `Release`, and the drain
+    //   token the caller holds is the single consumer role, so nothing else is in this cell.
+    let path = unsafe {
+        let src = core::slice::from_raw_parts(PATH.0.get().cast::<u8>(), len);
+        match core::str::from_utf8(src) {
+            Ok(p) => p.to_owned(),
+            Err(_) => return 0,
+        }
+    };
+    let keep = ROTATE_KEEP.load(Ordering::Relaxed);
+
+    // Drop the handle before renaming: on Windows an open handle blocks the rename, and a rotation
+    // that silently fails is a file that grows past its own limit while reporting it rotated.
+    *slot = None;
+
+    let oldest = std::path::PathBuf::from(format!("{path}.{keep}"));
+    let lost = std::fs::metadata(&oldest).map(|m| m.len()).unwrap_or(0);
+    let _ = std::fs::remove_file(&oldest);
+    for n in (1..=keep).rev() {
+        let from = if n == 1 {
+            std::path::PathBuf::from(&path)
+        } else {
+            std::path::PathBuf::from(format!("{path}.{}", n - 1))
+        };
+        let _ = std::fs::rename(&from, std::path::PathBuf::from(format!("{path}.{n}")));
+    }
+    // `keep == 0`: nothing is preserved, so the current file's bytes are the loss.
+    let lost = if keep == 0 {
+        let n = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(at);
+        let _ = std::fs::remove_file(&path);
+        n
+    } else {
+        lost
+    };
+
+    *slot = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok();
+    WRITTEN.store(0, Ordering::Relaxed);
+    ROTATIONS.fetch_add(1, Ordering::Relaxed);
+    ROTATED_AWAY.fetch_add(lost, Ordering::Relaxed);
+    lost
+}
+
+/// Report, once, that the file no longer holds the whole session.
+fn report_rotation_loss() {
+    if ROTATE_REPORTED.claim() {
+        let (rotations, lost) = rotation_state();
+        let mut line = crate::record::DspBuf::<160>::new();
+        let _ = core::fmt::Write::write_fmt(
+            &mut line,
+            format_args!(
+                "rotated {rotations} time(s); {lost} byte(s) of this session are no longer in the                  file -- it holds the TAIL, not the whole run"
+            ),
+        );
+        // Through the synchronous channel, not the emission path: the same argument `W0103` makes.
+        // A record about this destination losing its start would be routed to that destination.
+        let mut tag = crate::record::DspBuf::<16>::new();
+        let _ = core::fmt::Write::write_fmt(
+            &mut tag,
+            format_args!("boyko-W{:04}: ", W0112.number()),
+        );
+        crate::sync_out::write_oracle_line(tag.as_str(), line.as_str());
+    }
+}
+
+pub(crate) fn write_line(_token: &DrainToken, text: &[u8]) -> bool {
+    if CAPPED.load(Ordering::Relaxed) {
+        return false;
+    }
+    // SAFETY: the caller holds the drain token, which is a single CAS'd role, so no other thread
+    //   is inside this cell. `open` has completed (it runs on the enable path, before any token
+    //   can be claimed), so the `Option` is not being written concurrently.
+    let slot = unsafe { &mut *FILE.0.get() };
+
+    let cap = CAP.load(Ordering::Relaxed);
+    let mut written = WRITTEN.load(Ordering::Relaxed);
+    let need = text.len() as u64 + 1;
+
+    // Rotation BEFORE the cap test: rotating resets `written`, so a rotating sink is not also a
+    // capped one. A sink configured with both keeps writing and keeps discarding, which is what an
+    // operator asking for rotation asked for.
+    let rotate_at = ROTATE_AT.load(Ordering::Relaxed);
+    if rotate_at != 0 && written + need > rotate_at {
+        let lost = rotate_now(slot, written);
+        if lost > 0 {
+            report_rotation_loss();
+        }
+        let Some(_) = slot.as_mut() else { return false };
+        written = 0;
+    }
+    let Some(file) = slot.as_mut() else { return false };
+    if cap != 0 && written + need > cap {
+        report_cap(cap);
+        return false;
+    }
+
+    // Two `write_all`s rather than one staged copy: the line is already in a buffer the caller
+    // owns, and copying it again to append one byte would double the cost of the common case to
+    // save one syscall on a buffered handle that is going to coalesce them anyway.
+    if file.write_all(text).is_err() || file.write_all(b"\n").is_err() {
+        return false;
+    }
+    WRITTEN.store(written + need, Ordering::Relaxed);
+    true
+}
+
+/// Report the cap, once, through the synchronous channel.
+///
+/// Deliberately **not** through the emission path: the condition is "this destination is full",
+/// and a record about it would be routed to the destination that is full.
+#[cold]
+#[inline(never)]
+fn report_cap(cap: u64) {
+    CAPPED.store(true, Ordering::Relaxed);
+    if !CAP_REPORTED.claim() {
+        return;
+    }
+    let mut buf = [0u8; 96];
+    let n = render_cap(&mut buf, cap);
+    // SAFETY: `render_cap` writes only ASCII copied from `&'static str`s and decimal digits.
+    let text = unsafe { core::str::from_utf8_unchecked(&buf[..n]) };
+    crate::sync_out::write_oracle_line("boyko-W0103: ", text);
+}
+
+/// Render `file sink reached its N-byte cap; no further lines are written`.
+fn render_cap(buf: &mut [u8], cap: u64) -> usize {
+    let mut n = 0usize;
+    let mut put = |s: &[u8], n: &mut usize| {
+        let take = s.len().min(buf.len() - *n);
+        buf[*n..*n + take].copy_from_slice(&s[..take]);
+        *n += take;
+    };
+    put(b"file sink reached its ", &mut n);
+    let mut d = [0u8; 20];
+    let mut v = cap;
+    let mut i = d.len();
+    loop {
+        i -= 1;
+        d[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 || i == 0 {
+            break;
+        }
+    }
+    put(&d[i..], &mut n);
+    put(b"-byte cap; no further lines are written", &mut n);
+    n
+}
+
+/// Bytes written to the file, and whether the cap has stopped it.
+#[must_use]
+pub fn state() -> (u64, bool) {
+    (WRITTEN.load(Ordering::Relaxed), CAPPED.load(Ordering::Relaxed))
+}
+
+/// Whether a file is currently open.
+#[must_use]
+pub fn is_open() -> bool {
+    // SAFETY: a shared read of an `Option`'s discriminant. Every write happens either on the
+    //   enable path (before a token exists) or under the token, and this function is documented as
+    //   an observation rather than a synchronisation point — a caller racing `open` legitimately
+    //   sees either answer.
+    unsafe { (*FILE.0.get()).is_some() }
+}
+
+/// Flush and close the handle. Takes the token for the same reason [`write_line`] does.
+pub(crate) fn close(_token: &DrainToken) {
+    // SAFETY: the caller holds the single CAS'd drain role, so no other thread is inside the cell.
+    let slot = unsafe { &mut *FILE.0.get() };
+    if let Some(file) = slot.as_mut() {
+        let _ = file.flush();
+    }
+    *slot = None;
+}
+
+/// The registry row this sink emits, named here so a reader of the emitter finds the row.
+const _: () = {
+    // `W0103` is `RatePolicy::Once`, and this sink honours that with its own site latch rather
+    // than through `RATE` — which is what `Once` means, and what `crate::rate` refuses to do.
+    let _ = W0103;
+};

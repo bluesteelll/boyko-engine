@@ -18,6 +18,13 @@
 //! `#named` `let` bindings are read INSIDE the closure (they do not escape it),
 //! so the harvested `Entity` ids are what the test compares.
 
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` / a `UiParseReport` out of the `Send + Sync` one-shot
+// system closure, and a file-static `Mutex<()>` serializes tests that arm a process-global
+// (the counting allocator, the watch-poll counters). Not engine code — the whole file is
+// compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 mod common;
 
 use std::sync::{Arc, Mutex};

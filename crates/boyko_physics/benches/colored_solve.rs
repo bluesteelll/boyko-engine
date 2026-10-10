@@ -1,8 +1,9 @@
 //! Phase O5 Gate 9 — colored-vs-default solve A/B at ~1k / 10k contacts.
 //!
 //! Measures one full solver step (build + substep loop + warm store + write-back)
-//! for the colored [`ColoredSoftStepSolver`] (color-order sweep over the SoA
-//! `ContactColumns`, single-threaded in O5) against the reference
+//! for the colored [`ColoredSoftStepSolver`] (color-order sweep over the solver's
+//! contact columns — the per-point `ContactColumns` SoA in O5, the AoSoA
+//! `CohortColumns` since L11 C2 — single-threaded in O5) against the reference
 //! [`SoftStepSolver`] (manifold-order Gauss-Seidel), on the IDENTICAL warmed
 //! resting-stack contact set. Both are driven DIRECTLY (no schedule, no
 //! threadpool) so the bench isolates the solver, not the ECS dispatch.
@@ -16,6 +17,16 @@
 //!
 //! Anti-vacuity: every scene asserts `> 0` contacts AND `> 1` color before timing,
 //! so the bench never reports a no-op.
+//!
+//! # The O5 rows are SCALAR on purpose (2026-09-18)
+//!
+//! `simd_solve` defaults to `true` since 2026-09-18. The `solve_step` rows measured
+//! the O5 premise — the scalar colored sweep against the reference — and their
+//! figures (1.059× at ~1k contacts, 1.131× at ~10k, `colored_solve_plus_graph`) are
+//! that comparison, so [`config`] pins `simd_solve: false` to keep their meaning. The
+//! `default_world` row is the colored solve + graph build at `PhysicsConfig::default()`
+//! (the O7 cohort kernel on); it is reported, not gated. The SIMD A/B is
+//! `o7_simd_ab`.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
@@ -127,9 +138,12 @@ fn pile_scene(n_columns: u32, height: u32) -> (Vec<BodyState>, Vec<Manifold>) {
     (bodies, manifolds)
 }
 
+/// The O5 rows' config: the SCALAR colored solve, whatever the default (see the
+/// module docs).
 fn config() -> PhysicsConfig {
     PhysicsConfig {
         dt: 1.0 / 60.0,
+        simd_solve: false,
         ..PhysicsConfig::default()
     }
 }
@@ -226,6 +240,32 @@ fn bench_solve(c: &mut Criterion) {
                 });
             },
         );
+
+        // ── The default world: `colored_solve_plus_graph` at
+        //    `PhysicsConfig::default()` (the O7 cohort kernel on). Reported, not gated.
+        group.bench_with_input(
+            BenchmarkId::new("default_world", n_contacts),
+            &n_contacts,
+            |b, &_n| {
+                let cfg = PhysicsConfig { dt: 1.0 / 60.0, ..PhysicsConfig::default() };
+                let inv_mass: Vec<f32> = bodies.iter().map(|bb| bb.inv_mass).collect();
+                let is_dynamic = move |row: u32| (row as usize) < inv_mass.len() && inv_mass[row as usize] != 0.0;
+                let mut graph = ConstraintGraph::with_capacity(bodies.len());
+                let mut solver = ColoredSoftStepSolver::default();
+                let mut scratch = SolverScratch::with_capacity(bodies.len());
+                scratch.set_bodies(&bodies);
+                for _ in 0..4 {
+                    graph.build(&manifolds, scratch.bodies().len(), &is_dynamic);
+                    scratch.touched.reset(scratch.bodies().len());
+                    solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+                }
+                b.iter(|| {
+                    graph.build(black_box(&manifolds), scratch.bodies().len(), &is_dynamic);
+                    scratch.touched.reset(scratch.bodies().len());
+                    solver.solve_colored(black_box(&cfg), black_box(&manifolds), &graph, &mut scratch);
+                });
+            },
+        );
     }
     group.finish();
 }
@@ -238,7 +278,14 @@ fn bench_solve(c: &mut Criterion) {
 /// `{simd_solve} / {scalar-colored} >= 1.8x` on the solve, AND
 /// `{parallel + simd} >= {parallel scalar}` (no cohort-snapping width-starvation).
 /// On a non-AVX2 build `simd_solve` routes to the scalar oracle ⇒ the two lines
-/// coincide (the A/B is only meaningful under `RUSTFLAGS="-C target-feature=+avx2"`).
+/// coincide.
+///
+/// ⚠ The remedy for that is NOT `RUSTFLAGS="-C target-feature=+avx2"`, which this
+/// comment used to prescribe. `RUSTFLAGS` REPLACES `target.<triple>.rustflags`, so it
+/// deletes both the repository's `-C target-cpu=x86-64-v3` baseline and this box's
+/// linker flags — and the baseline already carries AVX2, so an ordinary
+/// `cargo bench` has the SIMD arm live. The wrong recipe fails by making both arms
+/// scalar, which reads as "the switch does nothing" rather than as an error.
 fn bench_simd_ab(c: &mut Criterion) {
     let mut group = c.benchmark_group("o7_simd_ab");
     group.sample_size(30);

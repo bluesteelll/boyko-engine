@@ -47,6 +47,12 @@
 //! 152..=199 (48 slots) — a free run disjoint from every other reserved
 //! range in the codebase at the time of writing (`MAX_COMPONENTS = 512`).
 
+// Benchmark-harness reporting only: the file-static `Mutex<Vec<…>>` is the spike sink the
+// Criterion routines append to once per measured iteration BATCH and drain in the summary
+// print. It is never inside a timed region and never in engine code -- benches are compiled
+// out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 // Phase X.E: opt-in low-variance allocator for A/B signal extraction.
 // OFF by default (`cargo bench` keeps the production system heap for honest
 // absolutes); `cargo bench --features bench-alloc` swaps in mimalloc. See

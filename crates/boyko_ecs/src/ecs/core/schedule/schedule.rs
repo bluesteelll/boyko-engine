@@ -40,6 +40,7 @@ use std::sync::atomic::Ordering;
 #[cfg(not(miri))]
 use std::time::Duration;
 
+use boyko_log::codes::B9101;
 use boyko_threadpool::{Scope, ThreadPool};
 use fixedbitset::FixedBitSet;
 
@@ -48,7 +49,9 @@ use crate::ecs::core::component::hooks::scope::DeferredScopeGuard;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::schedule::bitset_intersects::bitset_intersects;
 use crate::ecs::core::schedule::conflict_graph::{ConflictGraph, SystemIndex};
-use crate::ecs::core::schedule::executor_scratch::{CompletionCell, ExecutorScratch};
+use crate::ecs::core::schedule::executor_scratch::{
+    CompletionCell, ExecutorScratch, NO_PANICKED_SYSTEM, SystemRunGuard,
+};
 use crate::ecs::core::schedule::system_box::{BoolSystem, SystemBox};
 use crate::ecs::core::schedule::system_set::SystemSetId;
 use crate::ecs::core::state::StateEntry;
@@ -64,6 +67,27 @@ use crate::ecs::identifiers::primitives::WorldId;
 /// The completing worker unparks the dispatcher via `ScopeShared::waker`;
 /// the timeout is the backstop for the case where the wake-up raced ahead
 /// of the dispatcher's `park_timeout` call. 100 µs matches plan §5.4.5.1.
+///
+/// **This is a source constant, not the wait it produces.** On Windows
+/// `park_timeout` reaches `WaitOnAddress` through `dur2timeout`, which rounds
+/// nanoseconds UP to whole milliseconds, so the expiry is never the 100 µs
+/// written here; what it actually is depends on the system timer resolution
+/// in effect, which is process-wide state and NOT owned by this crate. Under
+/// the shipped host it is ~1 ms: `boyko_app::timer_resolution::
+/// TimerResolutionGuard` holds `timeBeginPeriod(1)` for the whole run (bound
+/// in the host runner closure), and KE16 App-12 measured this box at
+/// **1 021 µs** guarded against **15 296 µs** unguarded — a 15x difference on
+/// the same call. A process that drives this scheduler WITHOUT the host (a
+/// bench binary, a test harness, a tool) still sees the machine quantum,
+/// bounded above by whatever resolution some other process happens to have
+/// requested. KE16 App-7's `ke16_park_timeout` bench group measures the
+/// expiry, and every row it publishes states which of the two configurations
+/// it was taken in.
+///
+/// The value is therefore DEFENSIVE only. Every round that parks here is
+/// expected to be woken by the last completer, and a run in which this
+/// timeout is what ends the wait is a missed wake, not a tuning question —
+/// costing ~1 ms under the host and most of a 16 ms frame without it.
 #[cfg(not(miri))]
 const PARK_TIMEOUT: Duration = Duration::from_micros(100);
 
@@ -114,6 +138,36 @@ pub struct Schedule {
     /// whole run.
     pub(crate) has_condition: FixedBitSet,
 
+    // ── KE17 D3 — the apply-window split predicate (BUILT, NOT YET READ) ─────
+    /// `may_defer[i]` set iff system `i` reports
+    /// [`System::has_deferred`](crate::ecs::core::system::system::System::has_deferred).
+    /// Indexed by post-topo `SystemIndex`, `len() == systems.len()`, folded in
+    /// the same builder pass as its twin `has_condition` above.
+    ///
+    /// A clear bit is the statement "this system's whole param chain inherits
+    /// the no-op `SystemParam::apply`", i.e. it carries nothing that the
+    /// apply-window barrier is protecting. Nothing on the executor path reads
+    /// this yet: the split retire is step 2 of the KE17 rung and lands with the
+    /// `SCH7` safety argument in `apply_window_drain` rewritten around it.
+    /// Until then this field is written at build and read only by tests and by
+    /// `benches/ke17_apply_window.rs`'s model.
+    ///
+    /// The default answer is `true` (see `System::has_deferred`), so a system
+    /// type that says nothing keeps its barrier — an unset bit here is always
+    /// an explicit declaration, never an omission.
+    ///
+    /// **EM2′-K — a requirement the split MUST keep.** No `&mut EntityMaster`
+    /// operation (any apply that spawns, despawns, allocates or rewinds) may
+    /// run while a system with `may_defer[i] == true` is dispatched. Such a
+    /// system can hold `Commands`, whose `EntityCounter` claims from the
+    /// recycled-entity stack with `fetch_sub` (EM2′): a concurrent `settle`
+    /// stores `free_top` with a plain write that would erase the claim and
+    /// double-issue an id, and a concurrent push writes a stack index the
+    /// worker may be reading. Today the full barrier guarantees it; the split
+    /// retire must keep every `may_defer` system out of any window that
+    /// mutates `EntityMaster`.
+    pub(crate) may_defer: FixedBitSet,
+
     /// Per-system own conditions, indexed by post-topo `SystemIndex` (permuted
     /// alongside `systems` at build, §2.5). `system_conditions[i]` is empty
     /// unless system `i` carried `.run_if`. `len() == systems.len()`.
@@ -136,10 +190,13 @@ pub struct Schedule {
     /// schedule ⇒ the once-per-frame state pass early-outs on a single
     /// `is_empty()` compare (THE 0%-gate, §6.3), the twin of `has_condition`.
     ///
-    /// The last pointer-bearing field. Every pre-existing field keeps its exact
-    /// offset, so the cross-thread hot prefix
-    /// (`pool → systems → conflict_graph → executor_scratch → has_condition`)
-    /// documented above is byte-for-byte unchanged.
+    /// The last pointer-bearing field. Every field of the cross-thread hot
+    /// prefix (`pool → systems → conflict_graph → executor_scratch →
+    /// has_condition`) documented above keeps its exact offset; that prefix is
+    /// byte-for-byte unchanged. (KE17 D3 inserted `may_defer` immediately after
+    /// the prefix rather than appending it, so the fields between there and
+    /// here shifted; the prefix itself did not, and neither did the reason it
+    /// is a prefix.)
     pub(crate) state_entries: Vec<StateEntry>,
 
     // ── Phase 16.1 — tick-aware run conditions (W2) ──────────────────────────
@@ -225,6 +282,45 @@ impl Schedule {
     ///   CpuExclusive) == access().is_universal()` for every CPU system
     ///   (plan §13.6 SCH15 / Phase 4 CR-B); `GpuCompute` is the marker-set
     ///   carve-out excluded from the equality.
+    ///
+    /// # Panic semantics — what the engine promises after a caught panic
+    ///
+    /// A panic in a system body reaches the thread that called `run`, exactly
+    /// once, with the original `Box<dyn Any + Send>` — the first one captured,
+    /// when several systems panic in one run (the pool's first-wins rule; each
+    /// other payload is discarded with `boyko-E0202`). The run is **cancelled at
+    /// round granularity**: no system is dispatched after the panic is
+    /// observed, while systems already spawned run to completion (the pool's
+    /// contract — a registered task always completes its registration).
+    ///
+    /// **Delivery is closed by the pool's join, not by the executor loop.** The
+    /// executor's accounting may finish before the panicking worker has stored
+    /// its payload; what closes delivery is `Scope::drop`, which waits for the
+    /// scope to drain and then re-raises. No code between the executor loop's
+    /// return and that re-raise may skip or shorten the join (SCH-A6-1).
+    ///
+    /// **The schedule is reusable; the world is well-formed but semantically
+    /// partial.** `reset_for_frame` restores `running`/`completed`/
+    /// `pred_remaining`/the condition memos and re-arms the cancel flag, and
+    /// SCH6 holds on both recovery paths — the cancel path zeroes `pending` and
+    /// empties the queue, and `ApplyDrainGuard::drop` does the same for an
+    /// unwind out of `apply`/`drain_deferred_hook_queue`. No storage invariant
+    /// is broken. What is NOT promised is application-level consistency: the
+    /// panicked system's half-written state stays.
+    ///
+    /// **Commands queued during the aborted run stay queued** in the buffer of
+    /// the system that queued them, and are applied the next time that system
+    /// is applied — which happens only in a later run that dispatches it. A
+    /// system whose run conditions are false on a later run is skipped without
+    /// an apply, so its commands wait for a run that dispatches it (and, if
+    /// that run is cancelled too before the system is applied, for the one
+    /// after). Two consequences, named rather than discovered later: a system
+    /// that panicked has already advanced its change-detection window and on
+    /// its next run observes only changes since the aborted run; and `Commands`
+    /// claims entity ids at enqueue time, so a cancelled run leaves those ids
+    /// claimed until that apply — bounded by the spawns of that system's
+    /// unapplied runs, which is one run's worth unless the runs that dispatch
+    /// it keep being cancelled before its apply.
     ///
     /// [`Scope::spawn`]: boyko_threadpool::Scope::spawn
     /// [`ScheduleBuilder::build`]: super::schedule_builder::ScheduleBuilder::build
@@ -513,6 +609,60 @@ impl Schedule {
         self.systems.is_empty()
     }
 
+    /// KE17 D3 — whether system `index` (post-topological position, as used by
+    /// [`len`](Self::len)) can enqueue deferred work.
+    ///
+    /// `false` is the statement "this system's whole param chain inherits the
+    /// no-op `SystemParam::apply`", folded at build from
+    /// [`System::has_deferred`](crate::ecs::core::system::system::System::has_deferred).
+    /// The executor does not consult it yet; it is the predicate the split
+    /// apply window will be built on, and `benches/ke17_apply_window.rs` reads
+    /// it to check its model's mask against the kernel's own answer instead of
+    /// against a table.
+    #[inline]
+    pub fn may_defer(&self, index: usize) -> bool {
+        // A release assert, not a `debug_assert`: `FixedBitSet::contains`
+        // answers `false` out of range, and `false` is precisely the answer
+        // that licenses retiring a system early. An out-of-range read must fail
+        // loudly rather than return the one answer that is unsafe to act on.
+        assert!(
+            index < self.systems.len(),
+            "invariant: may_defer index {index} out of range (len {})",
+            self.systems.len()
+        );
+        self.may_defer.contains(index)
+    }
+
+    /// Every system's name and profiling zone id, in post-topological order (the order
+    /// [`len`](Self::len) counts).
+    ///
+    /// The name is the one the builder cached for diagnostics (typically the system
+    /// function's `type_name`); the id is the one the builder minted into the system's
+    /// `SystemMeta`, which its `SystemSpan` samples carry. A reader of the profiler joins
+    /// per-zone rows back to systems through this rather than inferring ids from build
+    /// order: ids come from one process-wide counter shared by every schedule and every
+    /// static zone, so the order a schedule was built in does not determine them.
+    ///
+    /// Yields nothing when the compile tier folds system zones out
+    /// ([`SYSTEM_ZONES_COMPILED`](crate::ecs::core::profiling::SYSTEM_ZONES_COMPILED) is
+    /// `false`): no system has a zone then, and an empty answer says so rather than
+    /// listing ids that no sample will ever carry. A system whose mint was refused
+    /// because the registry was full (counted and reported as `boyko-W9201`) is yielded
+    /// with [`ZONE_ID_UNASSIGNED`](crate::ecs::core::profiling::ZONE_ID_UNASSIGNED).
+    ///
+    /// Cold: a setup / report-time call, never on the per-frame run path.
+    #[cold]
+    pub fn system_zones(&self) -> impl Iterator<Item = (&'static str, u16)> + '_ {
+        let listed = if crate::ecs::core::profiling::SYSTEM_ZONES_COMPILED {
+            self.systems.len()
+        } else {
+            0
+        };
+        self.systems[..listed]
+            .iter()
+            .map(|sb| (sb.name, sb.system.meta().zone()))
+    }
+
     /// Main executor loop. See module docs for the loop rhythm.
     ///
     /// The `'scope` lifetime on `scope` ties every spawned closure to the
@@ -571,6 +721,14 @@ impl Schedule {
         let completion = unsafe { CompletionCell::new(self.executor_scratch.completion) };
 
         loop {
+            // Profiling rung 3d — the dispatch-round probe. It opens HERE, at the top of the
+            // iteration, rather than around `try_dispatch_ready` alone: a round as the executor
+            // experiences it is the apply-window drain of the previous wave plus the condition
+            // pass plus this wave's dispatch, and the dispatch scan on its own is the cheapest
+            // part of that. It closes at the bottom with the wave's width, and records nothing
+            // when the iteration dispatched nothing (see `RoundProbe::close`).
+            let round = crate::ecs::core::profiling::zones::RoundProbe::open();
+
             // === Step 1: apply window drain (plan §5.4.5.1 gate). ===
             //
             // Monotonicity note (Round 3 W-NEW-4): the combined check
@@ -589,6 +747,33 @@ impl Schedule {
             // worker's writes to component bytes are visible to the
             // dispatcher.
             let pending = completion.pending_load(Ordering::Acquire);
+
+            // === Step 1a: cancel check (Decision 4). ===
+            //
+            // The statement order here is the proof that the apply window can
+            // never fire over a panicked system, and it is why the flag's own
+            // load may be `Relaxed`:
+            //
+            //   * a panicking guard stores `panicked` BEFORE its `Release`
+            //     `fetch_add` on `pending`, and the `Acquire` load above
+            //     synchronises-with that `fetch_add`. So IF the panicked
+            //     system's completion is counted in the `pending` this round
+            //     read, the flag is visible to the load below and the round
+            //     cancels before the gate;
+            //   * IF it is not counted, `running` still holds that system's
+            //     bit, so `pending < running` and `running != 0`, and the gate
+            //     below is false.
+            //
+            // Either way the dispatcher does not take `&mut EcsMaster` in a
+            // round containing an unreported or a panicked completion. A
+            // SECOND `pending_load` for the cancel check would break this: the
+            // gate would then use a later value, and a completion present in
+            // the later value but absent from the earlier one could be applied
+            // before the flag is seen.
+            if completion.panicked_load(Ordering::Relaxed) != NO_PANICKED_SYSTEM {
+                return self.cancel_after_panic(completion);
+            }
+
             let running = self.executor_scratch.running.count_ones(..);
             if pending > 0 && (pending == running || running == 0) {
                 // SAFETY (SCH7 apply window): the gate above proved every
@@ -598,6 +783,13 @@ impl Schedule {
                 //   that we just Acquire-loaded. The `world_mut` reborrow
                 //   is therefore the exclusive borrow on the world for
                 //   the duration of `apply_window_drain`.
+                //   EM2′-K rests on this gate: the drain's `&mut EntityMaster`
+                //   ops (despawn pushes, the recycled stack's plain-store
+                //   `settle`) must never overlap a dispatched system that may
+                //   hold `Commands` — its `EntityCounter` claims with
+                //   `fetch_sub` on the same stack. A KE17 split window that
+                //   relaxes this gate must keep every `may_defer` system out
+                //   of it (see the `may_defer` field doc).
                 let world_mut: &mut EcsMaster = unsafe { cell.world_mut() };
                 self.apply_window_drain(world_mut, completion);
             }
@@ -645,13 +837,23 @@ impl Schedule {
             // not by re-minting the cell value).
             let dispatched = self.try_dispatch_ready(scope, cell, completion);
 
+            // Closed BEFORE the backoff park below, deliberately. The park only ever runs on a
+            // round that dispatched nothing — which records nothing — so the two orders are
+            // equivalent in what they store; this one keeps the span's definition free of a sleep
+            // even for a reader who does not know that.
+            if let Some(round) = round {
+                round.close(dispatched);
+            }
+
             // === Step 5: backoff. ===
             //
             // If nothing dispatched but something is running, park until
             // a worker unparks us (the last-completer pattern in
-            // `ScopeShared::pending`). The 100 µs timeout is the backstop
-            // for the case where the wake-up raced ahead of our park
-            // call — a benign no-op spin.
+            // `ScopeShared::pending`). `PARK_TIMEOUT` is the backstop for the
+            // case where the wake-up raced ahead of our park call — a benign
+            // no-op spin. It is a SOURCE constant: the wait it actually
+            // produces on Windows is >= 1 ms (see `PARK_TIMEOUT`'s doc), so
+            // reaching it is a missed wake and not a 100 µs latency.
             if dispatched == 0 && self.executor_scratch.running.count_ones(..) > 0 {
                 // Under Miri the scheduler is cooperative and does not advance
                 // other threads across a `park_timeout` the way it does across
@@ -677,29 +879,15 @@ impl Schedule {
     /// pushed its completion and incremented `pending_apply` before this
     /// function reads the count.
     fn apply_window_drain(&mut self, world: &mut EcsMaster, completion: CompletionCell<'_>) {
-        let target = completion.pending_load(Ordering::Acquire);
+        // The accounting is an OBLIGATION of this frame, not a trailing
+        // statement: `apply` and `drain_deferred_hook_queue` below both run
+        // user code, and `CommandQueue` re-raises rather than swallowing, so an
+        // unwind used to leave `pending == target` with entries still queued —
+        // the next run then started corrupt (SCH6 in debug, a silently wrong
+        // schedule in release). See `ApplyDrainGuard`.
+        let mut drain = ApplyDrainGuard::open(completion);
 
-        let mut drained = 0usize;
-        while drained < target {
-            // `pending_apply` (the `target` above) is incremented by the worker
-            // *after* its `completion_queue.push` (see the completion path), and
-            // this drain reads `target` with `Acquire`, which synchronizes-with
-            // that `Release` `fetch_add` — so a counted completion is always
-            // visible to `pop()` here on real hardware (the `None` arm is
-            // unreachable natively; it compiles to a never-taken retry, zero
-            // steady-state cost). Under Miri's cooperative scheduler the worker's
-            // push may not yet be observable on this step (and `ArrayQueue::pop`'s
-            // own internal `Backoff` spin has no Miri yield, being third-party),
-            // so yield to let the worker run instead of spinning — without this,
-            // the dispatcher livelocks here on the mandatory drain path.
-            let idx = match completion.pop() {
-                Some(idx) => idx,
-                None => {
-                    #[cfg(miri)]
-                    std::thread::yield_now();
-                    continue;
-                }
-            };
+        while let Some(idx) = drain.next() {
             let i = idx.0 as usize;
 
             self.executor_scratch.running.set(i, false);
@@ -744,15 +932,140 @@ impl Schedule {
                 );
                 self.executor_scratch.pred_remaining[s] -= 1;
             }
-
-            drained += 1;
         }
 
-        // Release matches the worker's `fetch_add(Release)` — but here we
-        // only `fetch_sub` what we observed; Relaxed is correct because
-        // the dispatcher's subsequent operations are sequenced behind a
-        // `&mut self` borrow.
-        completion.pending_fetch_sub(target, Ordering::Relaxed);
+        // `drain`'s `Drop` performs the single `pending_fetch_sub(target,
+        // Relaxed)` this function used to perform as its last statement — on
+        // this path and on the unwinding one alike.
+    }
+
+    /// Account for every dispatched system, then leave the run — the
+    /// cancellation path taken when a system body panicked.
+    ///
+    /// **Entered from exactly one site**: the `if` between the round's
+    /// `Acquire` load of `pending` and the `running.count_ones(..)` that feeds
+    /// the apply gate, i.e. after the load and before the gate (Decision 4,
+    /// whose proof is in the comment there). **`RoundProbe::open()` at the top
+    /// of the iteration is not moved** — a cancelled round drops its probe
+    /// unclosed and therefore records nothing, which is the behaviour
+    /// [`RoundProbe`] already documents for a round whose systems panic. That
+    /// placement is what makes the publishing epochs mutually exclusive and is
+    /// why the flag's `Relaxed` load is sufficient; a reader checking either
+    /// claim should start at the cancel check.
+    ///
+    /// **No apply, no `world_mut()`, no `completed`/`pred_remaining` update.**
+    /// Both `CommandQueue::apply` and its discard walk re-raise on a command or
+    /// `Drop` panic, so running either during cancellation could replace the
+    /// FIRST system panic with a derived one. Keeping this path free of user
+    /// code is what makes "the payload the caller receives is the first system
+    /// panic" a theorem rather than a hope.
+    ///
+    /// The commands queued by this run stay queued in their systems' buffers
+    /// and are applied the next time each system is applied, i.e. in a later
+    /// run that dispatches it (a skipped system is not applied); the panicked
+    /// system's successors keep their `pred_remaining`, so the next run re-runs
+    /// them.
+    ///
+    /// [`RoundProbe`]: crate::ecs::core::profiling::zones::RoundProbe
+    #[cold]
+    #[inline(never)]
+    fn cancel_after_panic(&mut self, completion: CompletionCell<'_>) {
+        // INVARIANT CDR1 — oneTBB step 3, "once all parts of the algorithm
+        //   stop": this function does not return while any dispatched system is
+        //   unaccounted. `running` holds a bit from `try_dispatch_ready` (set
+        //   BEFORE the spawn) until this loop pops that system's completion, and
+        //   every dispatched system publishes exactly once (SP2) on both paths.
+        //   So `running == 0` ⇒ every spawned task has RUN and been popped ⇒ the
+        //   completion queue is empty and `pending` is 0 (each iteration
+        //   subtracts exactly what it popped) ⇒ SCH6 holds at the frame
+        //   boundary, and `Scope::drop`'s stealing join finds no body left to
+        //   run inline.
+        loop {
+            let target = completion.pending_load(Ordering::Acquire);
+            let mut popped = 0usize;
+            while popped < target {
+                match completion.pop() {
+                    Some(idx) => {
+                        popped += 1;
+                        self.executor_scratch.running.set(idx.0 as usize, false);
+                    }
+                    None => {
+                        // Unreachable natively, and it takes BOTH facts — the
+                        // first alone is not enough:
+                        //  (1) every entry `target` counts was pushed before a
+                        //      `fetch_add(Release)` that this `Acquire` load
+                        //      observed (the argument `apply_window_drain`'s
+                        //      `None` arm states), so all `target` entries were
+                        //      COMMITTED; and
+                        //  (2) no `ApplyDrainGuard` window is open while this
+                        //      runs, so none of those entries was already
+                        //      POPPED. That is Decision 4's statement order: a
+                        //      round that sees the flag returns here BEFORE the
+                        //      apply gate, and the guard is opened only after
+                        //      the gate passes — the two are mutually exclusive
+                        //      per round, and a guard from an earlier round
+                        //      closed by draining its own `target` in full.
+                        // Without (2), `target` could exceed the queue's
+                        // remaining length and this inner `while` would spin
+                        // forever on a real machine — A6 inside A6's repair.
+                        // NOT a cleanup pad (this is the normal return path of
+                        // `executor_main_loop`), so retry is correct here and
+                        // `break` would under-drain; `ApplyDrainGuard::drop`'s
+                        // arm differs for exactly that reason.
+                        //
+                        // This is the INNER `while popped < target` of CDR1's
+                        // loop. The OUTER loop re-loads `pending` and re-drains
+                        // until `running.count_ones() == 0`, so a completion
+                        // published while this function is parked is absorbed by
+                        // a later iteration, NOT left for `Scope::drop`. Do not
+                        // collapse the outer loop into a single pass.
+                        #[cfg(miri)]
+                        std::thread::yield_now();
+                        continue;
+                    }
+                }
+            }
+            if popped > 0 {
+                completion.pending_fetch_sub(popped, Ordering::Relaxed);
+            }
+            if self.executor_scratch.running.count_ones(..) == 0 {
+                break;
+            }
+            // The same wait the apply-window round already performs, woken by
+            // the same unconditional pre-decrement unpark from a completing
+            // task; `PARK_TIMEOUT` is the same backstop. A pool that could not
+            // finish this loop could not finish a normal apply-window wait
+            // either, so the cancel path adds no liveness assumption.
+            #[cfg(miri)]
+            std::thread::yield_now();
+            #[cfg(not(miri))]
+            std::thread::park_timeout(PARK_TIMEOUT);
+        }
+
+        debug_assert_eq!(
+            completion.pending_load(Ordering::Relaxed),
+            0,
+            "invariant SCH6: the cancel path must zero pending"
+        );
+
+        // `running == 0` ⇒ the systems buffer is quiescent: a guard publishes
+        // only after its system's `run_unsafe` activation has been unwound
+        // (cleanup pads run innermost-first), so no worker holds a
+        // `systems_ptr`-derived borrow. Only NOW is `meta().name()` race-free,
+        // which is why the record is emitted after the drain rather than at the
+        // claim.
+        let idx = completion.panicked_load(Ordering::Relaxed);
+        let name = self
+            .systems
+            .get(idx as usize)
+            .map_or("<unknown>", |sb| sb.system.meta().name());
+        boyko_log::error!(
+            boyko_log::Schedule,
+            boyko_log::codes::E1502,
+            "system '{}' (#{}) panicked; the rest of the schedule run was cancelled",
+            name,
+            idx
+        );
     }
 
     /// Evaluate conditions for every conditioned system that is newly ready
@@ -1104,6 +1417,9 @@ impl Schedule {
                 //   requires. The reborrow's `'scope` lifetime outlives the call.
                 let world_ref: &mut EcsMaster = unsafe { cell.world_mut() };
                 let token = unsafe { DispatcherToken::new(world_ref) };
+                let _span = crate::ecs::core::profiling::zones::SystemSpan::open(
+                    self.systems[i].system.meta().zone(),
+                );
                 unsafe {
                     self.systems[i].system.run_dispatcher(token);
                 }
@@ -1250,10 +1566,17 @@ impl Schedule {
             //   - Cell ↑Send (SEND3); SystemBox ↑Send via Box<dyn System
             //     + Send + Sync + 'static>; `CompletionCell` ↑Send.
             scope.spawn(move || {
-                // Allocation discipline (ALLOC1 / ALLOC6): set the TLS
-                // flag so allocation-restricted paths (event send/read,
-                // Time access) can debug_assert their context.
-                let _alloc_guard = boyko_threadpool::InSystemRunGuard::enter();
+                // ONE guard for the two obligations this frame owes: the
+                // allocation-discipline TLS depth (ALLOC1 / ALLOC6) and the
+                // completion publish. Folding them makes "the depth is restored
+                // BEFORE the completion is published" one function body with one
+                // site instead of a property of two locals' declaration order —
+                // and, decisively, makes the publish an obligation that a
+                // PANICKING body discharges too. Before this guard the publish
+                // was two statements after the body: a panicking system left
+                // `pending` short of `running` forever and the dispatcher parked
+                // for the rest of the process.
+                let run_guard = SystemRunGuard::enter(ptrs.completion, sys_idx);
 
                 // SAFETY (S1 / SCH3): see outer SAFETY block. The cell
                 //   copy carries write-capable provenance; aliasing is
@@ -1264,30 +1587,26 @@ impl Schedule {
                 //   `*const T` Send-ness).
                 unsafe {
                     let system_slot = ptrs.system_slot(sys_idx.0 as usize);
+                    // The span opens on THIS worker, so the sample is charged to this worker's
+                    // lane -- which is the pair the overlap analysis reads. A span opened on the
+                    // dispatcher and closed here would name a producer that never ran the system.
+                    let _span = crate::ecs::core::profiling::zones::SystemSpan::open(
+                        (*system_slot).system.meta().zone(),
+                    );
                     (*system_slot).system.run_unsafe(cell_copy);
                 }
-                // Drop the guard BEFORE publishing completion so a
-                // dispatcher that observes `pending_apply == running`
-                // cannot still find a worker inside the system body
-                // (closing the SP1' window for the future force_alloc
-                // CI mode).
-                drop(_alloc_guard);
-
-                // Phase 9.3c: publish completion through the `CompletionCell`.
-                // `push` / `pending_fetch_add` are SAFE interior-mutable `&self`
-                // ops; the only `unsafe` is inside `CompletionCell::channel`,
-                // discharged by the cell's own contract (heap allocation
-                // OUTSIDE the `Schedule` allocation, so no `&mut self` protector
-                // covers it; non-retagging `as_ptr`; pointee live for the spawn
-                // via Scope::Drop). The push is infallible because capacity ≥
-                // system_count (SCH6: one push per system per frame).
-                ptrs.completion
-                    .push(sys_idx)
-                    .expect("invariant SCH6: completion_queue cap ≥ system_count");
-                // Release pairs with the dispatcher's Acquire load on `pending`
-                // (plan §5.4.5.1 diagram). Every byte the body wrote becomes
-                // visible to the dispatcher before it reads pending == target.
-                ptrs.completion.pending_fetch_add(Ordering::Release);
+                // Normal path: leave the system run (TLS depth restored first,
+                // so a dispatcher observing `pending_apply == running` cannot
+                // still find a worker inside the body — SP1'), then publish
+                // through the `CompletionCell`. `push` / `pending_fetch_add`
+                // are SAFE interior-mutable `&self` ops; the only `unsafe` is
+                // inside `CompletionCell::channel`, discharged by the cell's own
+                // contract (heap allocation OUTSIDE the `Schedule` allocation,
+                // so no `&mut self` protector covers it; non-retagging `as_ptr`;
+                // pointee live for the spawn via Scope::Drop). The `Release`
+                // pairs with the dispatcher's `Acquire` load on `pending` (plan
+                // §5.4.5.1 diagram).
+                run_guard.finish();
             });
 
             dispatched += 1;
@@ -1356,6 +1675,131 @@ impl Schedule {
                     })
                 })
             })
+    }
+}
+
+/// Bounded retry budget for `ApplyDrainGuard::drop`'s leftover loop under Miri.
+///
+/// Miri's cooperative scheduler is the only place the existing drain code
+/// contemplates a transient `None`; the cap keeps a Miri run from livelocking
+/// where the native build breaks out at once.
+#[cfg(miri)]
+const MIRI_DRAIN_RETRIES: u32 = 1024;
+
+/// The apply window's accounting, as an obligation of the frame.
+///
+/// # INVARIANT ADG1
+///
+/// `drained` counts entries REMOVED FROM THE QUEUE, not entries applied. It is
+/// incremented inside [`next`](Self::next) — the only code in this window that
+/// pops — between the `pop()` that produced the entry and `next`'s return, with
+/// nothing fallible in between. A panic anywhere in the caller's body therefore
+/// cannot separate the two, and `target - drained` is EXACTLY the number of
+/// entries still in the queue on both paths.
+///
+/// # Why both `pop()` sites differ in their `None` arm
+///
+/// Both rest on the SAME fact — every entry `target` counts was pushed before a
+/// `fetch_add(Release)` that the opening `Acquire` load observed, so all
+/// `target` entries are committed and present, and no producer runs inside the
+/// apply window. `None` is therefore unreachable natively at both sites, and
+/// they differ only in what they do when the unreachable happens. `next`
+/// **retries**, because under-draining would return to the executor loop with
+/// `running` bits still set for systems that completed — a stall — and because
+/// `next` never runs in a cleanup pad. `Drop`'s leftover loop **breaks**,
+/// because it MAY run in a cleanup pad, where a spin is uninterruptible even by
+/// another panic, and because breaking degrades to the loudest failure
+/// available: the leftover stays queued and the very next `reset_for_frame`
+/// reds on SCH6.
+///
+/// Holds no borrow of `Schedule`: the drain loop needs `&mut self` for
+/// `running`/`completed`/`pred_remaining`, so this guard restores the CHANNEL
+/// only; the dispatcher-owned bitsets are restored by the next
+/// `reset_for_frame`.
+struct ApplyDrainGuard<'a> {
+    /// The channel, by `Copy` cell — borrows nothing from `self`.
+    completion: CompletionCell<'a>,
+    /// What the opening `Acquire` load counted.
+    target: usize,
+    /// Entries POPPED so far (ADG1).
+    drained: usize,
+}
+
+impl<'a> ApplyDrainGuard<'a> {
+    /// Opens the window with the same single `Acquire` load `apply_window_drain`
+    /// opened with before this guard existed.
+    #[inline]
+    fn open(completion: CompletionCell<'a>) -> Self {
+        Self {
+            completion,
+            target: completion.pending_load(Ordering::Acquire),
+            drained: 0,
+        }
+    }
+
+    /// The window's ONLY pop. `None` ends the window.
+    #[inline]
+    fn next(&mut self) -> Option<SystemIndex> {
+        while self.drained < self.target {
+            match self.completion.pop() {
+                Some(idx) => {
+                    // ADG1: adjacent to the pop, nothing fallible between them.
+                    self.drained += 1;
+                    return Some(idx);
+                }
+                None => {
+                    // Unreachable natively (see the type's doc). Under Miri's
+                    // cooperative scheduler the worker's push may not yet be
+                    // observable on this step, so yield to let the worker run
+                    // instead of spinning.
+                    #[cfg(miri)]
+                    std::thread::yield_now();
+                }
+            }
+        }
+        None
+    }
+}
+
+impl Drop for ApplyDrainGuard<'_> {
+    fn drop(&mut self) {
+        // Normal path: `drained == target` ⇒ zero iterations, then the SAME
+        // single `fetch_sub(target, Relaxed)` this window performed as its last
+        // statement before the guard existed. Identical atomic traffic, one
+        // extra compare.
+        //
+        // No `debug_assert!` in this body, deliberately: `drained == target` is
+        // trivially true on the normal path and must not be asserted on the
+        // unwinding one, where a firing assert is a panic-during-cleanup abort.
+        #[cfg(miri)]
+        let mut retries: u32 = 0;
+        while self.drained < self.target {
+            match self.completion.pop() {
+                Some(_) => self.drained += 1,
+                None => {
+                    // No producer can run inside the apply window (the gate
+                    // proved every dispatched system already pushed AND bumped;
+                    // a system pushes exactly once per frame), so a lock-free
+                    // `pop()` returning `None` means the queue is EMPTY — which
+                    // is precisely SCH6's queue clause. Break rather than retry:
+                    // this `Drop` can run inside a cleanup pad, where a spin is
+                    // uninterruptible even by another panic.
+                    #[cfg(miri)]
+                    {
+                        retries += 1;
+                        if retries < MIRI_DRAIN_RETRIES {
+                            std::thread::yield_now();
+                            continue;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        // Only what this window's own `Acquire` load observed — never a
+        // `store`, so a concurrent `fetch_add` cannot be lost.
+        self.completion
+            .pending_fetch_sub(self.target, Ordering::Relaxed);
     }
 }
 
@@ -1439,16 +1883,62 @@ impl<'a> SpawnPointers<'a> {
     }
 }
 
+/// The completion queue refused a publish on the UNWINDING path — terminal.
+///
+/// Reached only from [`SystemRunGuard`]'s `Drop`, where the `expect` the normal
+/// path uses would be a "panic in a destructor during cleanup" abort naming the
+/// destructor rather than the invariant, and where simply dropping the
+/// completion would be the dispatcher hang this whole design removes.
+///
+/// Unreachable by construction: capacity is `ArrayQueue::new(system_count
+/// .max(1))`, a guard publishes exactly once per system per frame (SP2), and
+/// SCH6 proves the queue empty between frames. The site exists so that if the
+/// construction ever changes, the process says which invariant broke instead of
+/// hanging.
+///
+/// All four statements of the shape `boyko_threadpool`'s `abort_on_task_panic`
+/// blessed, in this order — the `NoConsumer` fallback included, because with
+/// `BOYKO_LOG` unset every target's ceiling is `Off`, so the record above is
+/// never CONSTRUCTED, and `abort` is not an unwind, so there is no panic text
+/// either.
+#[cold]
+#[inline(never)]
+pub(crate) fn completion_queue_overflow(idx: SystemIndex) -> ! {
+    boyko_log::error!(
+        boyko_log::Schedule,
+        boyko_log::codes::E1503,
+        "completion_queue overflowed publishing system #{}; the schedule's capacity invariant is \
+         broken and a dropped completion would hang the dispatcher — aborting",
+        idx.0
+    );
+    // BEFORE `abort`: it runs no destructor, no `atexit` and no sink shutdown,
+    // so a record still in its lane ring dies with the process.
+    if boyko_log::lifecycle::flush() == boyko_log::lifecycle::FlushResult::NoConsumer {
+        // Without this line the one configuration in which this site can fire is
+        // the one in which it says nothing.
+        eprintln!(
+            "boyko-E1503: completion_queue overflowed publishing system #{}; aborting",
+            idx.0
+        );
+    }
+    std::process::abort();
+}
+
 /// Phase 21 (H2) — cold panic site for the [`Schedule::run`] world-binding
 /// gate. Out-of-line so the hot run-entry path carries only the compare +
 /// never-taken branch.
 #[cold]
 #[inline(never)]
 fn schedule_world_mismatch_panic(built: WorldId, got: WorldId) -> ! {
+    // POSITIONAL, never `{B9101}`: an inline format argument lives inside the string literal,
+    // where the registry walker's LIT stream sees it and its CODE stream does not -- so the row
+    // would still read as an orphan while looking migrated. `PanicCode`'s `Display` prints
+    // `boyko-B9101`, so the rendered message is byte-identical to the pre-L6 one.
     panic!(
-        "boyko-B9101: Schedule::run called with a different world than the one it was \
+        "{}: Schedule::run called with a different world than the one it was \
          built on (built on {built}, got {got}) — a Schedule is bound to the world it \
-         was built on; build a separate Schedule per world"
+         was built on; build a separate Schedule per world",
+        B9101
     );
 }
 
@@ -1476,6 +1966,11 @@ unsafe impl<'a> Send for SpawnPointers<'a> {}
 
 #[cfg(test)]
 mod tests {
+    // Test-only observation channel: `Arc<Mutex<Vec<u8>>>` is the execution-order
+    // log the scheduler assertions read back from worker threads — harness state,
+    // never engine data. Compiled out of every shipping build.
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -2312,8 +2807,10 @@ mod tests {
         use proptest::prelude::*;
         use proptest::test_runner::{Config, TestRunner};
 
+        // Under Miri, two cases: every case builds a pool, a world and a schedule, and Miri is
+        // here for UB coverage of the clamp path, not case volume.
         let mut runner = TestRunner::new(Config {
-            cases: 256,
+            cases: if cfg!(miri) { 2 } else { 256 },
             ..Config::default()
         });
 

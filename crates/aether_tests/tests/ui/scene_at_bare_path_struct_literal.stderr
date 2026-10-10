@@ -1,0 +1,5 @@
+error: the `camera` node needs an `aspect:` key — it has no default (these default: fov, near, far) — note: the `{ … }` after `MY_POSE` was parsed as a STRUCT LITERAL (`MY_POSE { … }`), not as this node's body, so the node has no keys at all; parenthesize the pose to split them: `at (MY_POSE) { … }`
+  --> tests/ui/scene_at_bare_path_struct_literal.rs:16:9
+   |
+16 |         camera at MY_POSE { aspect: 1.5 }
+   |         ^^^^^^

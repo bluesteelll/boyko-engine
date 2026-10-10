@@ -1,0 +1,28 @@
+S4-AB: used 153; pose hashes ['0x30c5438bc6ad9ffa']; expect_pose [True]
+   armed processes 54; (binary, W, setup_steps, setup_tasks): [('parent', 8, 0, 0), ('parent', 16, 0, 0), ('tip', 8, 500, 15980), ('tip', 16, 500, 15980)]
+   cells 17; n per cell [9]; per pass [(3, 3, 3)]
+   re-runs used: [('S4-JT', 'parent', 8, 0, 1), ('S4-JT-a', 'parent', 16, 1, 1)]
+   placement main_share_top_est: 0 of 153 = 0.0 (sub-tick main CPU time), others 1.0..1.0
+   top logical CPU: [(10, 152), (0, 1)]
+SPLIT: used 54; pose hashes ['0x30c5438bc6ad9ffa']; expect_pose [True]
+   armed processes 27; (binary, W, setup_steps, setup_tasks): [('parent', 1, 0, 0), ('parent', 8, 0, 0), ('parent', 16, 0, 0)]
+   cells 6; n per cell [9]; per pass [(3, 3, 3)]
+   re-runs used: []
+   placement main_share_top_est: 0 of 54 = 0.0 (sub-tick main CPU time), others 1.0..1.0
+   top logical CPU: [(10, 54)]
+
+# unresolved-above bar (ruling 1): the largest of bar_i, bar_s over pooled and the three passes
+[0..500) S4-JT W1: delta TIP-PARENT +0.0283 ms (+0.64 %), verdict(TIP faster) NOT CLAIMED; largest i/s bar 4.45 % = 0.1966 ms
+[0..500) S4-JT W2: delta TIP-PARENT -0.0808 ms (-2.62 %), verdict(TIP faster) CLAIMED; largest i/s bar 4.90 % = 0.1511 ms
+[0..500) S4-JT W4: delta TIP-PARENT -0.1549 ms (-6.58 %), verdict(TIP faster) CLAIMED; largest i/s bar 2.52 % = 0.0592 ms
+[0..500) S4-JT W8: delta TIP-PARENT -0.1705 ms (-8.58 %), verdict(TIP faster) CLAIMED; largest i/s bar 2.94 % = 0.0583 ms
+[0..500) S4-JT W16: delta TIP-PARENT -0.1700 ms (-7.66 %), verdict(TIP faster) NOT CLAIMED; largest i/s bar 9.98 % = 0.2215 ms
+[100..500) S4-JT W1: delta TIP-PARENT +0.0165 ms (+0.39 %), verdict(TIP faster) NOT CLAIMED; largest i/s bar 4.19 % = 0.1758 ms
+[100..500) S4-JT W2: delta TIP-PARENT -0.0837 ms (-2.83 %), verdict(TIP faster) NOT CLAIMED; largest i/s bar 4.81 % = 0.1424 ms
+[100..500) S4-JT W4: delta TIP-PARENT -0.1547 ms (-6.78 %), verdict(TIP faster) CLAIMED; largest i/s bar 2.63 % = 0.0600 ms
+[100..500) S4-JT W8: delta TIP-PARENT -0.1691 ms (-8.71 %), verdict(TIP faster) CLAIMED; largest i/s bar 2.71 % = 0.0527 ms
+[100..500) S4-JT W16: delta TIP-PARENT -0.1707 ms (-7.82 %), verdict(TIP faster) NOT CLAIMED; largest i/s bar 9.72 % = 0.2122 ms
+
+# placement receipts (recorded, never used to drop)
+S4-AB: main_share_top_est null 13, 1.0 140, other 0; main_cycle_frac 0.0046..0.0181 (W1 0.0150..0.0156)
+SPLIT: main_share_top_est null 3, 1.0 51, other 0; main_cycle_frac 0.0047..0.0310 (W1 0.0153..0.0310)

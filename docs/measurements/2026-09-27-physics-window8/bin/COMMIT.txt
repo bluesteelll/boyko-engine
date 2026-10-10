@@ -1,0 +1,51 @@
+Physics window 8 (2026-09-27) - binaries, provenance and build commands. sha256 in bin/SHA256SUMS.
+Toolchain for every cargo build: rustc 1.98.1 (48a229cea 2026-09-01), RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc,
+PATH="$HOME/.cargo/bin:$PATH", CARGO_INCREMENTAL=0, CARGO_BUILD_JOBS=8, TMP/TEMP=D:/wt/_targets/tmp, RUSTFLAGS unset
+(x86-64-v3 from each tree's .cargo/config.toml), --locked with the tree's own Cargo.lock (all three commits track the
+same lock: LF sha256 fab5f63fd1c85f8bd3766a736a60efd38b5a34c2171490fa7f70ae6696966ecc; unchanged after the builds).
+
+runner_226bd99e.exe  (key instr)
+  commit 226bd99efba61c73886826eee4ab977af551bc23 (u/phys-w8s commit (1): the W8S instrument, armed-only, + the omega_b bench)
+  tree   git -C D:/wt/merge archive 226bd99e | tar -x -C D:/wt/_targets/w8s-trees/226bd99e   (never built in D:/wt/merge)
+  cmd    cd D:/wt/_targets/w8s-trees/226bd99e && CARGO_TARGET_DIR=D:/wt/_targets/w8s-226bd99e cargo bench --no-run --locked --profile parity -p boyko-physics --bench jolt_parity_pyramid
+  exe    D:/wt/_targets/w8s-226bd99e/parity/deps/jolt_parity_pyramid-5662a59aaaeba37e.exe
+  log    logs/build_instr.log: "Compiling boyko-physics v0.1.0 (D:\wt\_targets\w8s-trees\226bd99e\crates\boyko_physics)", "Finished `parity` profile [optimized]"
+
+omega_b_region_226bd99e.exe  (key omega)
+  commit 226bd99e, the same tree and target dir
+  cmd    ... cargo bench --no-run --locked --profile parity -p boyko-physics --bench omega_b_region
+  exe    D:/wt/_targets/w8s-226bd99e/parity/deps/omega_b_region-a6c2abbefcd392b9.exe
+
+dm1_A.exe  (key dmA)
+  commit cad5439b61ba6f07739523901aab90edf7079433 (trunk-sync merge into u/dm1; dm1/cut.md §11.5: A = cad5439b, not C5 40e7577d)
+  tree   git -C D:/wt/joltab worktree add --detach D:/wt/_dm1_ab cad5439b ; HEAD at build = cad5439b61ba6f07739523901aab90edf7079433
+  cmd    cd D:/wt/_dm1_ab && CARGO_TARGET_DIR=D:/wt/_targets/dm1-ab cargo test -p boyko-app --test dm1_material_table_timing --no-run --locked --message-format=json
+  exe    D:/wt/_targets/dm1-ab/debug/deps/dm1_material_table_timing-3a57c4336d8e8ef4.exe ("test" profile = dev: unoptimized + debuginfo, as the cut's command gives)
+  log    logs/build_dm1_A.{log,json,stderr}
+
+dm1_B.exe  (key dmB)
+  commit 97ee830f754e008032992fcd8a928cd29c04936f (C6: the material table is device-local)
+  tree   git -C D:/wt/_dm1_ab checkout --detach 97ee830f (same worktree, same target dir; the checkout rewrote only
+         crates/boyko_render/src/material_table.rs, whose new mtime made cargo recompile boyko-render + boyko-app)
+         HEAD at build = 97ee830f754e008032992fcd8a928cd29c04936f ; cad5439b..97ee830f = 1 commit, 1 file, +9/-7
+  cmd    the same; log logs/build_dm1_B.{log,json,stderr} ("Compiling boyko-render", "Compiling boyko-app")
+  NOTE   the two sha256 differ (47cb2c9b... vs 79bba864...). The worktree D:/wt/_dm1_ab stays at 97ee830f for the
+         window; runtime-read files are identical at both shas (the diff is one .rs file). The orchestrator removes it.
+
+jolt56prof8/PerformanceTest.exe  (key j56p) + the three MinGW DLLs (byte-identical to window 7's and to build-v5.6.0-dist's)
+  source D:/tmp/jolt/wt-v5.6.0-parity (the tree j56 was built from, with its repository patch) COPIED to
+         D:/wt/_targets/w8-jolt56prof-src (.git excluded); nothing written into the Jolt worktree
+  patch  tools/patch_jolt_w8.py on the copy only: (1) the lighter profile - JPH_PROFILE removed from
+         "Add Constraint From Cached Manifold", ConstraintManager::sSolveVelocityConstraints and
+         ContactConstraintManager::SolveVelocityConstraints (window 7's 8,488 + 10,784 samples/frame; FOLLOW-UP 10);
+         (2) the WaitingForBatch accumulated per-thread counter in PhysicsSystem::JobSolveVelocityConstraints (rdtsc at
+         the two edges of each wait episode, emitted once per job into a per-thread slot; design §7 / rev §9 OQ3);
+         PerformanceTest -wfb writes wfb_<tag>.csv (Frame, Slot, Ticks, Episodes, Jobs) per frame outside the timed pair
+         and traces "boyko-w8s-patch: tsc ticks per second ..." (calibrated over the run)
+  build  tools/build_jolt_prof8.sh = window 7's tools/build_jolt_prof.sh recipe (WinLibs MinGW gcc 16.1, Distribution,
+         -DPROFILER_IN_DISTRIBUTION=ON, target PerformanceTest, -j 12), out of source D:/wt/_targets/w8-jolt56prof;
+         logs/build_jolt56prof8.log, exit 0
+  run    copied to bin/jolt56prof8/ so no timed image runs from under D:/wt/_targets (the void rule)
+
+D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe  (key j56)
+  window 7's j56 (P0 Distribution build, sha256 918fd2b7...), run in place, not rebuilt; hash 0xb8522b4e3fc62cfe

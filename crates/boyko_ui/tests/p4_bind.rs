@@ -14,6 +14,13 @@
 //! so the change-detection `(last_run, this_run]` tick window advances
 //! frame-to-frame (a `run_system` per call would reset it).
 
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` / a `UiParseReport` out of the `Send + Sync` one-shot
+// system closure, and a file-static `Mutex<()>` serializes tests that arm a process-global
+// (the counting allocator, the watch-poll counters). Not engine code — the whole file is
+// compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, Mutex};
 
 use boyko_ecs::ecs::core::component::component::Component;

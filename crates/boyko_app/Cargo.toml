@@ -3,7 +3,7 @@ name = "boyko-app"
 version = "0.1.0"
 edition = "2024"
 description = "The host layer: OS loop + device singleton boot + the windowed runner + plugin composition (EnginePlugins) — host plan D1/R2."
-
+license.workspace = true
 # Layering (host plan D1, the amended boyko_render invariant): boyko_render
 # (the data bridge) and boyko_app (the host) are the only two crates that name
 # both the graphics RHI and the ECS core; boyko_app must not define per-entity
@@ -25,13 +25,94 @@ boyko-math = { path = "../boyko_math" }
 # mirrors from the showcase, + the derives (`Resource` for `WindowInfo`).
 boyko_sdf_math = { path = "../boyko_sdf_math" }
 boyko-macros = { path = "../boyko_macros" }
+# Profiling rung 7: `clock::session_id`, stamped into the measurement artifact's header so a reader
+# can prove which process wrote a file.
+#
+# NOT a new node in the graph — `boyko-ecs` above already depends on `boyko_diag`, so it is compiled
+# into every `boyko_app` build today; this edge makes it VISIBLE here rather than adding it. The
+# crate is std-only with zero deps of its own (a tidy test pins `cargo tree -p boyko_diag` to
+# exactly one node), so the edge costs a `use` and nothing else. Stated because the two edges this
+# campaign added before it each carry the same justification in-file.
+boyko-diag = { path = "../boyko_diag" }
+# The logging seam's ENABLE path (L7's reachability fix, L8b's row pulled forward for it). This
+# crate is the host, and `boot`/`enable` are the host's to call -- until this edge existed, every
+# emitter L5 and L6 wired up wrote into a ring with no consumer in any shipped run. Already in the
+# graph transitively through `boyko-ecs`; named directly because this crate is now a FIRST-PARTY
+# caller of its lifecycle, and a transitive path is not an API contract.
+boyko-log = { path = "../boyko_log" }
 
 [features]
 # HW-RT rung R2a-3: forwards to `boyko-render/hwrt` (→ `boyko_rhi_vulkan/hwrt`) so the host
 # can opt into the GPU-resident per-frame TLAS build. Default OFF: a `not(hwrt)` host build is
 # TEXTUALLY the pre-R2a-3 code (every RT item is `#[cfg(feature = "hwrt")]`-gated).
 hwrt = ["boyko-render/hwrt"]
+# Profiling rung 5c: forwards to `boyko-render/profiling-census` (-> `boyko_rhi_vulkan/
+# profiling-census`) so G10's A/B workers count the commands `record_vb` records. Default OFF: a
+# host build without it threads the same `Option<&CommandWitness>` and every increment at the
+# record sites compiles to nothing, so the census cannot perturb a shipped or golden frame.
+profiling-census = ["boyko-render/profiling-census"]
+# Profiling rung 8: installs a counting `#[global_allocator]` (`profiling::alloc_shim`) and states
+# its presence in the artifact. Default OFF, and it MUST stay off in any sweep: a binary may declare
+# only one global allocator, so this conflicts with every test binary that installs its own -- the
+# nineteen zero-alloc gates and `runner.rs`'s own test module. MEASURED, not predicted.
+profiling-alloc = []
 
 [dev-dependencies]
+# The interactive playground example (`examples/playground.rs`) — the first scene to
+# drive the in-house rigid solver from the windowed host, via `boyko_physics::PhysicsPlugin`.
+# DEV-ONLY on purpose: the host's layering invariant (see the manifest header) says
+# `boyko_app` sequences the frame and mints tokens; it owns no simulation. An example is a
+# CONSUMER of the engine, not part of it, so this edge exists for `--examples`/`--tests`
+# builds and never for a shipping host build.
+boyko-physics = { path = "../boyko_physics" }
+# The playground example's on-screen key hints: the text is rasterised at startup from
+# this crate's MTSDF bake (`bake_font`) into an ordinary RGBA8 texture, because the ECS UI
+# stack cannot reach the windowed screen yet (see the example's module doc). A leaf crate
+# with no deps of its own, and dev-only like the physics edge above.
+boyko-fontbake = { path = "../boyko_fontbake" }
+# Rung L8b: `boyko_log::probe`'s record observers, for the `#[cfg(test)] mod` block in `diag.rs`
+# that asserts each migrated reporter emits, emits ONCE where its row says `Once`, and carries its
+# arguments. A dev-dependency, so the feature reaches this crate's test targets and never a
+# shipping build.
+boyko-log = { path = "../boyko_log", features = ["test-probe"] }
 # The zero-alloc gate reads the uploaded instance bytes back via `bytes_of`.
 bytemuck.workspace = true
+# VB-SV0 rung S1: the adequacy oracle (`tests/sv0_oracle`) runs the SHIPPED soft-shadow leaf on
+# the host — `shadow::sdf_soft_shadow_body` instantiated over the `EvalCf` backend. That is the
+# SAME generator that emits the committed `sdf_soft_shadow` HLSL span, so the oracle marches the
+# shader's own schedule instead of a hand mirror that could drift from it. Test-only: no
+# production `boyko_app` path names the eDSL. `default-features = false` keeps the `emit`
+# (std/codegen) half off — only the f32 Eval path is linked.
+boyko_shaderdsl = { path = "../boyko_shaderdsl", default-features = false }
+# Rung B2, G-LOOP (plan gate UG-14): `tests/g_loop_runner_world_writes.rs` PARSES `src/runner.rs`
+# and walks `frame_loop` with `syn::visit::Visit` instead of scanning it, because a line grep cannot
+# tell `app.world()` handed to a helper from `app.world().resource::<T>()`. `visit` on top of the
+# workspace base's `full`; `quote` prints each site's key from its tokens; `proc-macro2` names the
+# token types. Not a new node in the graph: `boyko-macros` (a `[dependencies]` entry above) already
+# pulls the same pinned `syn`, `quote` and `proc-macro2`. Test-only, the `boyko_ui` precedent
+# (`ui_a1_source_census`).
+syn = { workspace = true, features = ["visit"] }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+# Rung B2, G-GRAPH app (b), E1 and the id census: the UI half of the headless app (b) — today's UI
+# plugin composition (`UiPlugin`, `UiInteractionPlugin`, `UiBindingPlugin`, `UiWidgetsPlugin`,
+# `UiAnimationPlugin`) until UI2 lands `boyko_app::UiPlugins`. Dev-only: the host's shipping build
+# gains no UI edge (ED19 makes that edge UI2's decision, not B2's).
+boyko-ui = { path = "../boyko_ui" }
+# Rung B2: G-GRAPH's extraction self-test builds a `ScheduleBuilder` on the app's pool, and E1's
+# counting allocator cross-checks its chunk-class predicate against
+# `boyko_threadpool::__layout_receipt` and prices raw `pool.install` frames. Already in the graph
+# through `boyko-ecs`; named so the tests can reach the pool type and the receipt.
+boyko-threadpool = { path = "../boyko_threadpool" }
+
+# Rung B2, E1 (plan gate UG-03's engine scene, the design's G-ALLOC): its own runner, like
+# `boyko_physics`'s `alloc_frame_census`. The counter is a process-global `#[global_allocator]`, and
+# libtest keeps a second thread alive beside the test that allocates on its own schedule; with
+# `harness = false` nothing else runs in the process.
+[[test]]
+name = "e1_engine_ui_alloc_census"
+path = "tests/e1_engine_ui_alloc_census.rs"
+harness = false
+
+[lints]
+workspace = true

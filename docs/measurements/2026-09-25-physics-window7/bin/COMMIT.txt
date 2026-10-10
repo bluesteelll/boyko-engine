@@ -1,0 +1,22 @@
+Window 7 binaries (2026-09-25). Built from exported trees (git -C D:/wt/lighttable archive <sha> | tar -x) under
+win7/trees/<sha>/, never in a worktree. Lock: D:/wt/joltab/Cargo.lock (the tracked trunk lock, LF sha256
+5f8de754e85aeebd7838ff01156cbfc5f815e89b8052a1f50dd8a7e090191bcb) copied in, no --locked; cargo did NOT prune it
+(LF sha256 after each build: 5f8de754... in both trees). Prefix: PATH="$HOME/.cargo/bin:$PATH"
+RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=8 TMP/TEMP=D:/wt/_targets/tmp,
+RUSTFLAGS unset; cargo bench --no-run --profile parity -p boyko-physics --bench jolt_parity_pyramid,
+CARGO_TARGET_DIR=D:/wt/_targets/win7-<sha>. Logs: win7/logs/build_<sha>_jolt_parity_pyramid.log.
+
+runner_93b2615b.exe  93b2615bcea4873e2d3af6b560c6e7997740f67f  trunk integ/unified (Phase B + thin-box fix + D-M0), contact reuse OFF by default
+  Compiling boyko-physics v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\scratchpad\win7\trees\93b2615bcea4873e2d3af6b560c6e7997740f67f\crates\boyko_physics)
+  Finished `parity` profile [optimized] target(s) in 59.31s
+runner_989ca0f0.exe  989ca0f0575e054b89bb9c288ad95569ce493734  u/phys-l9-c4: trunk 6c40b3e6 + the L9 C4 flip (contact reuse ON by default; --contact-reuse on|off gives both arms)
+  Compiling boyko-physics v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\scratchpad\win7\trees\989ca0f0575e054b89bb9c288ad95569ce493734\crates\boyko_physics)
+  Finished `parity` profile [optimized] target(s) in 59.28s
+runner_0ca312bd.exe  0ca312bd8d696cec739f27d13c98343f4e1d1a9b  window 5's G9 parent, copied from win6/bin (sha256 = win6/bin/SHA256SUMS)
+runner_cbd86a65.exe  cbd86a6525175fc18500b9733997d78c2cbc3e44  window 5's G9 tip, copied from win6/bin (sha256 = win6/bin/SHA256SUMS)
+D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe  Jolt v5.6.0 Distribution, P0's build, NOT rebuilt; sha256 918fd2b7... = window 3's bin/SHA256SUMS; run in place (its DLLs beside it)
+jolt56prof/PerformanceTest.exe  Jolt v5.6.0, the same source tree D:/tmp/jolt/wt-v5.6.0-parity (v5.6.0-dirty, the repository patch), the same
+  MinGW (WinLibs POSIX UCRT) compiler, generator and CMake options as build-v5.6.0-dist except PROFILER_IN_DISTRIBUTION=ON
+  (CMakeCache diff: only that option and the TARGET_* switches; only the PerformanceTest target was built), out-of-source
+  build dir D:/wt/_targets/win7-jolt56prof, copied here with the three MinGW runtime DLLs (sha256 equal to build-v5.6.0-dist's).
+  Log: win7/logs/build_jolt56prof.log. Used ONLY for P5's per-stage split, never for a headline number.

@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "enabled": true,
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ./.claude/hooks/clarify_gate.py"
+          }
+        ]
+      }
+    ]
+  }
+}

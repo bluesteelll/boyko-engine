@@ -1,0 +1,169 @@
+name: Miri sweep
+
+# The pure-compute Miri sweep: every test target of the pure-compute packages under Miri, in one
+# job. It lives in its own workflow, apart from `ci.yml`'s `miri` job, and it is NOT a merge gate.
+#
+# WHY SEPARATE. MEASURED 2026-10-10 (Linux build lane, round 6; nightly-msvc Miri, the step's own
+# flags, at most two Miri processes at once): the sequential sweep costs ~3-3.5 h on the
+# development host, and 57 of its targets were not yet Miri-feasible when that measurement stopped
+# (they had not completed under Miri; `enable_chunk_byte_identity`'s multi-page tests and
+# `relations_query_scaling`'s chain guard are the largest known). GitHub's hosted runner is not
+# faster than that host, so the sweep cannot hold a "twice the measured time" timeout as one
+# sequential step, and as a blocking step it would hold every push and every pull request for
+# hours. The curated Miri steps (event_attribute, drop_fn, the PC-24 Stacked- and Tree-Borrows
+# legs) stay in `ci.yml`'s `miri` job and block there.
+#
+# NOT A MERGE GATE. It runs weekly and on `workflow_dispatch` only, never on `push` or
+# `pull_request`, and no branch protection rule may require it. A red here is a finding to triage,
+# not a blocked merge. GitHub runs a scheduled workflow only on the default branch, so the weekly
+# run is master's; any other branch runs it by hand (`gh workflow run miri-sweep.yml --ref <branch>`).
+#
+# WHAT RUNS. The four KE16 Miri gates first, each file under the recipe its own `# Run` block
+# documents, in steps of their own with measured budgets; then the generic sweep, which skips
+# exactly those four test names. Every test step runs whenever `cargo miri setup` succeeded, so a
+# red step does not hide the steps after it, and the generic step carries `--no-fail-fast`, so a
+# red target does not hide the targets after it. A run therefore reports every finding it has.
+#
+# FOLLOW-UP — finishing it: split the generic sweep into a 4-way matrix of ~1 h each (ecs lib | ecs
+# tests a-k | ecs tests l-z | threadpool + serialize + math + sdf_math + image + reflect + fixture),
+# make the 57 remaining targets Miri-feasible, and give each leg `timeout-minutes` = 2 x its own
+# measured share; the KE16 recipe steps keep their own flags in whichever leg carries them. Until
+# that lands, `timeout-minutes: 360` below is GitHub's hosted-job ceiling, not a measured budget.
+
+on:
+  schedule:
+    # Mondays 03:17 UTC — off the hour, where GitHub's scheduled-run queue is shortest.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  miri-sweep:
+    name: Miri pure-compute sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    # No `-C target-cpu=x86-64-v3`, for the reason `ci.yml`'s `miri` job states: Miri interprets
+    # MIR rather than executing machine code, so the ISA baseline buys it nothing, and every
+    # `cfg(target_feature = "avx2")` site in the workspace is in `boyko_physics`, which this sweep
+    # does not select.
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo miri setup
+        id: setup
+        run: cargo +nightly miri setup
+      # THE KE16 GATES, under their own recipes (owner decision, 2026-10-10). The three protector
+      # gates (`miri_scope_completion_protector.rs`) and the free-window probe
+      # (`miri_scope_free_window.rs`) are not ignored anywhere: they run here, under the MIRIFLAGS
+      # each file's `# Run` block spells, and the generic step below skips exactly their four
+      # names. The sweep's shared flags would decide nothing about them. The protector gates are
+      # ARMED only at `-Zmiri-preemption-rate=0` — MEASURED 2026-10-10 on
+      # `x86_64-unknown-linux-gnu` under the sweep's flags: 1 passed and 2 failed, each with "the
+      # probe fired N times but NOT ONE of N frees landed inside a release window"; under the
+      # recipe: 3 passed, all three armed. The probe needs its seed range at
+      # `-Zmiri-preemption-rate=0.5`. These steps run FIRST, so the generic step's hours cannot
+      # starve them of the job's ceiling. Each one greps its pass line as well, because a test that
+      # an attribute ignored would leave the exit code green and the step vacuous.
+      #
+      # BUDGET, MEASURED 2026-10-10 on the development host, each step run as spelled here
+      # (nightly-msvc Miri; the free-window run pinned to 4 logical CPUs, the hosted runner's 4
+      # vCPUs). Protector: 6 s on a warm build (`finished in 3.95s`, all three armed); a cold Miri
+      # build of this package took 26 s, and the file's header reads 6-26 s per run on a loaded
+      # box. Free-window: 2763 s (46 min) including that cold build; all 12 seeds passed, in
+      # 2599-2732 s each, with `windows` 159-187 of 256. Each `timeout-minutes` is 2 x the
+      # measurement, rounded up to whole 5-minute steps: protector 2 x (26 + 26) s -> 5, which also
+      # covers this first test step fetching the workspace's crates on a cache miss (not measured);
+      # free-window 2 x 46 min -> 95. Together they take ~47 min of the job's 360-minute ceiling.
+      - name: cargo miri test (KE16 protector gates — their own recipe)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 5
+        shell: bash
+        env:
+          MIRIFLAGS: "-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-preemption-rate=0"
+        run: |
+          cargo +nightly miri test --locked -p boyko-threadpool --test miri_scope_completion_protector -- --nocapture 2>&1 | tee ke16_protector.log
+          grep -q 'running 3 tests' ke16_protector.log && grep -q 'test result: ok. 3 passed; 0 failed' ke16_protector.log
+      - name: cargo miri test (KE16 free-window probe — its own recipe)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 95
+        shell: bash
+        env:
+          MIRIFLAGS: "-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-many-seeds=0..12 -Zmiri-preemption-rate=0.5"
+        run: |
+          cargo +nightly miri test --locked -p boyko-threadpool --test miri_scope_free_window -- --nocapture 2>&1 | tee ke16_free_window.log
+          grep -q 'running 1 test' ke16_free_window.log && grep -q 'test result: ok. 1 passed; 0 failed' ke16_free_window.log
+      # 2026-07 audit: this step's `--all-targets` was the vacuous root-package form (it
+      # interpreted nothing). Miri CANNOT execute FFI calls, so a literal workspace sweep
+      # would fault the instant it reached `boyko_rhi_vulkan`'s raw `vk*` calls (and the
+      # crates that depend on it) — the sweep is therefore scoped EXPLICITLY to the
+      # pure-compute crates, which is what it could ever have meaningfully covered.
+      # The FFI/GPU side is covered instead by `cargo careful` + the validation-layer
+      # golden runs (docs/AUDIT-2026-07-PLAN.md's tool matrix).
+      # Reflection GATES G4 item 3 / D4: TWO reflect rows with DIFFERENT shapes, and the
+      # difference is the point. `-p boyko-reflect` is PLAIN — the crate carries no
+      # `reflect` feature (D4) and never will, so `--features reflect` on it is a hard
+      # cargo error ("none of the selected packages contains these features"); and with
+      # the feature "off" it is NOT empty — nothing in its source is cfg-gated. That row
+      # covers the arithmetic and the registry. `-p reflect-fixture` carries the
+      # `pkg/feature` spelling — the ONLY row that reaches any derive-generated unsafe,
+      # because only a consumer can hold a `#[component(reflect)]` type (B.9).
+      # `reflect-dogfood` is deliberately ABSENT: it reaches boyko_render ->
+      # boyko_rhi_vulkan, and Miri cannot execute FFI — which is why this sweep is
+      # hand-listed at all (F18). The fixture's census/codegen harnesses carry
+      # `#[cfg(not(miri))]`: Miri cannot spawn processes either, and without the guard
+      # this row reds for a reason that has nothing to do with reflection.
+      # `tests/reflect_ci_coverage.rs` pins both rows in THIS file.
+      #
+      # `--tests`, not `--all-targets`: the difference is the benches, and none of them can run a
+      # body under Miri. MEASURED 2026-10-10, each of this package set's 35 benches run alone under
+      # the job's own flags: the 33 criterion ones abort inside `Criterion::default()`, which probes
+      # for gnuplot by spawning it (`criterion_plot::version`, "`GetModuleFileNameW` not available
+      # when isolation is enabled"), before any benchmark body runs; `gj1_flag_cost` aborts on the
+      # wall clock (`SystemTime::now`); `reflect_optin_cost`'s `main` is empty until G7b. `--tests`
+      # is the lib, bins and integration tests, so the sweep keeps every target with a body Miri can
+      # execute and drops only targets that could never have been green.
+      #
+      # `MIRIFLAGS` is restated with `-Zmiri-ignore-leaks`, the flag every pool-backed Miri recipe in
+      # this tree already carries (`miri_schedule_parallel.rs`, `miri_phase15.rs`, `dense_d*_miri.rs`
+      # and the rest name it in their run lines). MEASURED 2026-10-10: without it, the targets that
+      # build a `ThreadPool` or a bundle cache red on leaks after every one of their tests passed (14
+      # of the first 60 targets run) —
+      # crossbeam-epoch's per-thread `Local`s registered by the pool's workers, which outlive
+      # their thread in crossbeam-epoch's global list (an upstream shape), and the `&'static` bundle-column slices
+      # `BundleColumnCache::resolve_and_cache` leaks once per bundle type by design (SBO6). A step
+      # `env` replaces `.cargo/config.toml`'s `[env]` entry rather than appending to it (`ci.yml`'s
+      # PC-24 step relies on the same rule), so `-Zmiri-tree-borrows` is restated here. The leak
+      # check stays on in `ci.yml`'s curated Miri steps, which keep the config's flags.
+      #
+      # `--no-fail-fast` for the reason `CLAUDE.md` gives the flag: without it cargo stops at the
+      # first red target, and every target behind it never runs. This row has done that before:
+      # one `E0063` in the `#![cfg(miri)]` file `miri_phase22.rs` stopped the whole invocation and
+      # left eleven tests unexecuted (`docs/OPEN-QUESTIONS.md`, the 2026-08-27 entry).
+      #
+      # The four `--skip`s take out exactly the KE16 gates, which the steps above run under their
+      # own recipes. `--exact` makes each `--skip` match a whole test name, not a substring, and
+      # each of the four names is defined once in the workspace. libtest reads these arguments in
+      # every binary of the selection: of its `--tests` targets none is `harness = false` (only
+      # benches are).
+      - name: cargo miri test (pure-compute sweep)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        env:
+          MIRIFLAGS: "-Zmiri-tree-borrows -Zmiri-ignore-leaks"
+        run: |
+          cargo +nightly miri test --locked --no-fail-fast --tests \
+            -p boyko-ecs -p boyko-memory -p boyko-utils -p boyko-threadpool -p boyko-serialize \
+            -p boyko-math -p boyko_sdf_math -p boyko_image \
+            -p boyko-reflect \
+            -p reflect-fixture --features reflect-fixture/reflect \
+            -- --exact \
+            --skip completer_holds_no_protector_when_the_joiner_frees \
+            --skip worker_joiner_completer_holds_no_protector_when_the_joiner_frees \
+            --skip body_environment_protector_expires_before_the_borrowed_frame_pops \
+            --skip external_joiner_free_races_completion_protector

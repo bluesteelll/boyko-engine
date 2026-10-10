@@ -1,3 +1,8 @@
+// Whole file is `#[cfg(test)]` host-oracle modules: the std collections here are REFERENCE
+// models (a `HashSet` used to prove the SSAO dither is decorrelated across pixels), never
+// engine state. Compiled out of every shipping build, so no engine path can reach them.
+#![allow(clippy::disallowed_types)]
+
 #[cfg(test)]
 mod grazing_shadow_tests {
     //! STEP-1 confirmation + STEP-3 regression for the GRAZING-ANGLE SHADOW-ACNE fix.
@@ -269,7 +274,7 @@ mod p4b_tests {
 
     use boyko_sdf_math::{sdf_edit_list, v_sub};
 
-    use super::super::{ALPHA_MARGIN, CompositeCamera, FIELD_LIPSCHITZ_L, MESH_DEPTH_CLEAR, SDF_CAM_Z, SDF_EPS, SDF_HALF_EXTENT, SDF_T_MAX, SdfEdit, TILE_FLAG_EMPTY, TILE_SIZE, sdf_op, tile_grid_extent};
+    use super::super::{ALPHA_MARGIN, CompositeCamera, FIELD_LIPSCHITZ_L, MESH_DEPTH_CLEAR, MESH_DEPTH_T_MAX, SDF_CAM_Z, SDF_EPS, SDF_HALF_EXTENT, SDF_T_MAX, SdfEdit, TILE_FLAG_EMPTY, TILE_SIZE, sdf_op, tile_grid_extent};
     use crate::goldens::{golden_composite_pixel_culled, golden_composite_pixel_ex, golden_tile_bound};
 
     // --- A tiny deterministic PRNG (splitmix64) so the randomized sweeps are
@@ -768,6 +773,75 @@ mod p4b_tests {
         // scene constants (a compile-time touch so a refactor that drops them is caught).
         let _ = (SDF_CAM_Z, SDF_T_MAX);
         println!("[e] cull-off bit-identity: {checked} pixels (ortho + perspective) all match golden_composite_pixel_ex");
+    }
+
+    /// (f) PERSPECTIVE far_t regression: the audit found the cull's covered-texel decode
+    /// used `md * T_MAX` (10) unconditionally, disagreeing with the fine marcher's
+    /// PERSPECTIVE decode `md * MESH_DEPTH_T_MAX` (64) — a ~6.4x under-decode that
+    /// truncates `far_t` short of real SDF surfaces, culling their tile (a HOLE).
+    ///
+    /// Setup: a single 8×8 tile (the whole image), a perspective camera looking exactly
+    /// down -Z (the tile-center ray is bit-exact `forward` at this extent), a narrow FOV
+    /// (small cone half-angle, so the conservative cone-entry tracks the literal surface
+    /// closely instead of firing early), a covering mesh depth `md = 0.2`, and a sphere
+    /// (r = 0.3) at the origin whose surface the eye-at-z=3 ray first hits at `t = 2.7`.
+    ///
+    ///   * correct decode: `far_t = min(0.2 * MESH_DEPTH_T_MAX, T_MAX) = min(12.8, 10) = 10`
+    ///     — the march reaches the sphere (conservatively enters around `t ≈ 2.45`,
+    ///     BEFORE the literal surface, `> 2.0`) ⇒ tile is NON-empty.
+    ///   * prior (buggy) decode: `far_t = 0.2 * T_MAX = 2.0` — the march never reaches the
+    ///     cone-entry (which needs `t > 2.0`) and breaks at `t >= far_t` ⇒ EMPTY (a hole).
+    ///
+    /// Asserts the corrected `far_t` value directly (the primary regression pin) AND that
+    /// the tile is NOT culled with `near_t` beyond the old (buggy) bound — proving the old
+    /// decode would have produced a hole here.
+    #[test]
+    fn perspective_far_t_uses_mesh_depth_t_max_not_t_max() {
+        let (w, h) = (TILE_SIZE, TILE_SIZE); // one 8x8 tile spans the whole image.
+        let camera = CompositeCamera::Perspective {
+            eye: [0.0, 0.0, 3.0],
+            forward: [0.0, 0.0, -1.0],
+            right: [1.0, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0],
+            tan_half_fov: 0.05, // narrow FOV: a small cone half-angle over the whole tile.
+            aspect: 1.0,
+        };
+        let edits = vec![SdfEdit::sphere([0.0, 0.0, 0.0], 0.3, sdf_op::UNION, 0.0)];
+        let md = 0.2_f32;
+        let tile_depths = [md; 64];
+
+        let tb = golden_tile_bound(&edits, &tile_depths, 0, 0, w, h, camera);
+
+        let old_buggy_far_t = md * SDF_T_MAX; // the pre-fix decode (2.0).
+        let expected_far_t = (md * MESH_DEPTH_T_MAX).min(SDF_T_MAX); // the fix (10.0).
+        assert!(
+            (tb.far_t - expected_far_t).abs() < 1e-4,
+            "far_t {} must equal min(md * MESH_DEPTH_T_MAX, T_MAX) = {expected_far_t} \
+             (the prior `md * T_MAX` decode gave {old_buggy_far_t}, ~6.4x too shallow)",
+            tb.far_t
+        );
+        assert_eq!(
+            tb.flags & TILE_FLAG_EMPTY,
+            0,
+            "tile wrongly culled EMPTY: far_t {} must not truncate the march before the \
+             sphere's first hit at t ~= 2.7 (a HOLE)",
+            tb.far_t
+        );
+        assert!(
+            tb.near_t > old_buggy_far_t,
+            "near_t {} must exceed the OLD buggy far_t ({old_buggy_far_t}) — proving the \
+             old decode would have missed this surface entirely (EMPTY before entry)",
+            tb.near_t
+        );
+        assert!(
+            tb.near_t <= 2.7 + 1e-2,
+            "near_t {} must be <= the sphere's analytic first hit (~2.7, conservative)",
+            tb.near_t
+        );
+        println!(
+            "[f] perspective far_t regression: far_t={} near_t={} (old buggy far_t would've been {old_buggy_far_t})",
+            tb.far_t, tb.near_t
+        );
     }
 }
 
@@ -2804,9 +2878,45 @@ mod ssao_gather_tests {
         assert_eq!(ao, 1.0, "a non-lit center pixel must return the neutral AO 1.0");
     }
 
+    #[test]
+    fn vb_thin_view_t_only_mask_matches_base_dual_gate() {
+        // R9-VB-SPLIT-PLAN.md §5 (R9b): the VB_THIN shader variant drops `gMaterial` entirely
+        // and gates the background/mask test purely on `view_t >= SSAO_VIEWT_BG` (there is no
+        // material mask byte under the VB split — the no-matcache rule). The real G-buffer
+        // producer always COUPLES `mask == 0 <=> view_t == SSAO_VIEWT_BG` (see `golden_gbuffer`'s
+        // background arm), so the base's dual `mask>0.5 && view_t<BG` gate and VB_THIN's single
+        // `view_t<BG` gate classify every pixel IDENTICALLY on any REAL (coupled) G-buffer. This
+        // locks that substitutability host-side: forcing `mask` to a CONSTANT 1 (removing its
+        // discriminative power entirely — the VB_THIN shape, which carries no mask byte at all)
+        // on both the seam fixture (lit center, background neighbourhood) and the
+        // background-center fixture must NOT change the gather's AO output, since `view_t`
+        // alone still gates every tap either way.
+        for gbuf in [
+            synthetic_gbuffer(|x, y| (x == CX as i32 && y == CY as i32, 1.5)),
+            synthetic_gbuffer(|_x, _y| (false, 0.0)),
+        ] {
+            let ao_base = golden_ssao_attributes(
+                &gbuf, CX, CY, W, H, CompositeCamera::Ortho, &SsaoParams::default(),
+            );
+            let mut gbuf_vb_thin = gbuf;
+            for attrs in &mut gbuf_vb_thin {
+                attrs.mask = 1;
+            }
+            let ao_vb_thin = golden_ssao_attributes(
+                &gbuf_vb_thin, CX, CY, W, H, CompositeCamera::Ortho, &SsaoParams::default(),
+            );
+            assert_eq!(
+                ao_base, ao_vb_thin,
+                "VB_THIN's view_t-only mask gate must reproduce the base's mask&&view_t dual \
+                 gate on a coupled G-buffer (forcing mask=1 changed AO from {ao_base} to \
+                 {ao_vb_thin})"
+            );
+        }
+    }
+
     /// The EXACT per-pixel dither the gather applies (mirror of the `golden_ssao_attributes`
     /// Hilbert+R2 low-discrepancy basis): ONE 64x64 Hilbert index drives two R2 channels — ALPHA1
-    /// -> the rotation slot `(r2 * ROT_N) >> 24` over the 16-entry table, ALPHA2 -> the radial
+    /// -> the rotation slot `(r2 * ROT_N) >> 24` over the 64-entry table, ALPHA2 -> the radial
     /// step-phase `((r2 >> 16) + 1) / 256.0`. Returned as `(rot_slot, radial_phase)` so the
     /// determinism + decorrelation test can assert both.
     fn dither(px: u32, py: u32) -> (usize, f32) {
@@ -2849,8 +2959,11 @@ mod ssao_gather_tests {
                     "radial_phase must be bit-deterministic at ({px},{py})"
                 );
 
-                // (2) range: slot in [0, 16); phase strictly in (0, 1] (no self-tap, no overshoot).
-                assert!(slot < (super::super::SSAO_ROT_N as usize), "slot {slot} out of [0,16)");
+                // (2) range: slot in [0, 64); phase strictly in (0, 1] (no self-tap, no overshoot).
+                assert!(
+                    slot < (super::super::SSAO_ROT_N as usize),
+                    "slot {slot} out of [0, SSAO_ROT_N)"
+                );
                 assert!(
                     phase > 0.0 && phase <= 1.0,
                     "radial_phase {phase} must be in (0, 1] (strictly positive ⇒ no center \
@@ -2863,12 +2976,13 @@ mod ssao_gather_tests {
             }
         }
 
-        // (3) decorrelation: over a 64×64 block the dither spreads across the table and the phase
-        // band, and produces MANY distinct (slot, phase) pairs — proving neighbouring pixels do
-        // NOT march the same step radii (the coherent-ring root cause).
+        // (3) decorrelation: over a 64×64 block the dither spreads across the (now 64-entry —
+        // the even-slice class-collapse fix) table and the phase band, and produces MANY
+        // distinct (slot, phase) pairs — proving neighbouring pixels do NOT march the same
+        // step radii (the coherent-ring root cause).
         assert!(
-            seen_slots.len() >= 8,
-            "the 16-entry rotation must exercise a spread of slots over a 64×64 block (saw {}), \
+            seen_slots.len() >= 32,
+            "the 64-entry rotation must exercise a spread of slots over a 64×64 block (saw {}), \
              else the angular banding stays coherent",
             seen_slots.len()
         );
@@ -2894,21 +3008,30 @@ mod ssao_gather_tests {
     }
 }
 
-/// Render P7 POLISH — the SSAO depth-aware box-blur host mirror ([`golden_ssao_blur`]) tests.
-/// Proves the inline resolve blur on the host side: (1) a sharp AO RING is smoothed toward its
-/// neighbourhood mean, and (2) the bilateral DEPTH gate prevents bleed across a silhouette (a
-/// `view_t` jump > [`SSAO_BLUR_DEPTH_TOL`]). Pure host math; runs device-less.
+/// The SSAO edge-avoiding à-trous denoise host mirror ([`golden_ssao_atrous`]) tests. Proves the
+/// N=3-pass chain on the host side: (1) a sharp AO discontinuity is smoothed toward its
+/// neighbourhood mean WITHIN the chain's effective footprint, unchanged FAR from it, and (2) the
+/// bilateral DEPTH gate prevents bleed across a silhouette (a `view_t` jump > [`SSAO_BLUR_DEPTH_TOL`]).
+/// Pure host math; runs device-less.
 #[cfg(test)]
-mod ssao_blur_tests {
-    use super::super::{SSAO_BLUR_DEPTH_TOL, SSAO_BLUR_R, SSAO_VIEWT_BG};
-    use crate::goldens::{golden_ssao_blur, MarcherAttributes};
+mod ssao_atrous_tests {
+    use super::super::SSAO_BLUR_DEPTH_TOL;
+    use crate::compute::CompositeCamera;
+    use crate::goldens::{golden_ssao_atrous, MarcherAttributes};
 
-    const W: u32 = 32;
-    const H: u32 = 32;
+    const W: u32 = 48;
+    const H: u32 = 48;
+    /// `N = 3` passes (steps `{1, 2, 4}`), the default `SsaoConfig::atrous_levels` — see
+    /// `boyko_render::ssao_config`.
+    const LEVELS: u32 = 3;
+    /// The chain's effective footprint half-width: `sum(2 * step)` over `steps {1,2,4}` == 14 px
+    /// (the plan's "~14px footprint" for N=3). A pixel at least this far from a discontinuity
+    /// sees ONLY same-side taps at every pass.
+    const REACH: i32 = 14;
 
     /// A `W×H` synthetic G-buffer from a per-pixel `(ssao_byte, view_t)` field. Only the
-    /// `view_t` lane (the blur's depth gate) is meaningful here; `mask`/the rest are inert (the
-    /// blur reads neither). Returns `(raw_ssao_bytes, gbuf)`.
+    /// `view_t` lane (the depth gate) is meaningful here; `mask`/the rest are inert (the filter
+    /// reads neither). Returns `(raw_ssao_bytes, gbuf)`.
     fn build<F: Fn(i32, i32) -> (u8, f32)>(field: F) -> (Vec<u8>, Vec<MarcherAttributes>) {
         let mut ssao = Vec::with_capacity((W * H) as usize);
         let mut gbuf = Vec::with_capacity((W * H) as usize);
@@ -2931,33 +3054,46 @@ mod ssao_blur_tests {
     }
 
     #[test]
-    fn sharp_ring_is_smoothed() {
+    fn sharp_ring_is_smoothed_far_stays_exact() {
         // A constant-depth flat surface (every neighbour passes the depth gate) with a SHARP AO
         // discontinuity: the left half is fully-dark (byte 0), the right half fully-bright
-        // (byte 255). At the seam column the raw value is a hard step; the 7×7 box blur of a
-        // pixel ON the seam must land near the neighbourhood mean (~0.5), STRICTLY between the
-        // two raw extremes — i.e. the discontinuity is smoothed, not preserved.
-        const SEAM: i32 = 16;
+        // (byte 255). A pixel FAR ENOUGH from the seam that NO dark tap falls inside the
+        // chain's effective footprint (REACH) sees only bright taps at every pass, so its
+        // filtered value equals the bright value EXACTLY (a weighted mean of equal taps is that
+        // value, and the R8/R16 round-trip quantization is a no-op on an already-uniform image).
+        const SEAM: i32 = 20;
         let (ssao, gbuf) = build(|x, _y| (if x < SEAM { 0 } else { 255 }, 1.5));
 
-        // A pixel just inside the bright half, within R of the seam: its raw byte is 255 → 1.0,
-        // but the blur pulls it down toward the mean because the dark half is in-kernel.
-        let px = (SEAM + 1) as u32;
-        let py = 16;
-        let raw = ssao[(py * W + px) as usize] as f32 / 255.0;
-        let blurred = golden_ssao_blur(&ssao, &gbuf, px, py, W, H);
-        assert!(
-            blurred < raw - 0.05 && blurred > 0.1,
-            "the box blur must smooth the sharp ring: raw {raw} blurred {blurred} \
-             (expected strictly between the dark and bright extremes)"
+        let px = (SEAM + REACH + 1) as u32;
+        let py = 24;
+        let raw = ssao[(py * W + px) as usize];
+        let out = golden_ssao_atrous(&ssao, &gbuf, W, H, CompositeCamera::Ortho, LEVELS);
+        let filtered = out[(py * W + px) as usize];
+        assert_eq!(
+            filtered, raw,
+            "a pixel whose entire à-trous footprint is uniformly bright must filter to that \
+             value EXACTLY, got {filtered} raw {raw}"
         );
-        // The exact 7×7 mean at the seam pixel: columns [px-R, px+R] = [SEAM-2, SEAM+4]; of the
-        // 7 columns, (SEAM-2, SEAM-1) are dark (0.0) and (SEAM..SEAM+4) are bright (1.0), each ×
-        // 7 rows → mean = 5/7. Confirms the gather order/bounds/center-counts arithmetic.
-        let expected = 5.0_f32 / 7.0;
+    }
+
+    #[test]
+    fn sharp_ring_is_smoothed_near_seam() {
+        // The counterpart: a pixel close enough to the seam (well inside REACH) that dark taps
+        // DO fall inside the footprint at the wider passes — the filtered value must visibly
+        // pull down from the raw bright value (proving the chain still smooths a nearby
+        // discontinuity).
+        const SEAM: i32 = 20;
+        let (ssao, gbuf) = build(|x, _y| (if x < SEAM { 0 } else { 255 }, 1.5));
+
+        let px = SEAM as u32; // the first bright column; the seam is one tap away
+        let py = 24;
+        let raw = ssao[(py * W + px) as usize] as f32;
+        let out = golden_ssao_atrous(&ssao, &gbuf, W, H, CompositeCamera::Ortho, LEVELS);
+        let filtered = out[(py * W + px) as usize] as f32;
         assert!(
-            (blurred - expected).abs() < 1.0e-6,
-            "the 7×7 box mean must be exactly 5/7 at the seam pixel, got {blurred}"
+            filtered < raw - 10.0,
+            "the à-trous chain must smooth a sharp ring within its effective footprint: raw \
+             {raw} filtered {filtered}"
         );
     }
 
@@ -2965,54 +3101,167 @@ mod ssao_blur_tests {
     fn depth_gate_prevents_silhouette_bleed() {
         // A silhouette: the left half is a NEAR surface (`view_t = 1.5`, dark AO byte 40) and the
         // right half is a FAR surface (`view_t = 1.5 + 10*tol`, bright AO byte 255) — a `view_t`
-        // jump far beyond the gate. A near-surface pixel ON the boundary must blur ONLY with its
-        // near-side (in-tol) neighbours, so its blurred AO stays near the dark value and is NOT
-        // pulled up by the far-side bright taps (no cross-silhouette bleed).
-        const SEAM: i32 = 16;
+        // jump far beyond the gate. A near-surface pixel ON the boundary must filter ONLY with
+        // its near-side (in-tol) neighbours at EVERY pass, so its filtered AO stays near the dark
+        // value and is NOT pulled up by the far-side bright taps (no cross-silhouette bleed).
+        const SEAM: i32 = 20;
         const DARK: u8 = 40;
         let near_t = 1.5_f32;
         let far_t = 1.5_f32 + 10.0 * SSAO_BLUR_DEPTH_TOL;
         let (ssao, gbuf) = build(|x, _y| {
-            if x < SEAM {
-                (DARK, near_t)
-            } else {
-                (255, far_t)
-            }
+            if x < SEAM { (DARK, near_t) } else { (255, far_t) }
         });
 
-        // The last near-side column (within R of the seam, so far-side taps ARE inside the
-        // kernel window but must be REJECTED by the depth gate).
         let px = (SEAM - 1) as u32;
-        let py = 16;
-        let blurred = golden_ssao_blur(&ssao, &gbuf, px, py, W, H);
-        let dark = DARK as f32 / 255.0;
+        let py = 24;
+        let out = golden_ssao_atrous(&ssao, &gbuf, W, H, CompositeCamera::Ortho, LEVELS);
+        let filtered = out[(py * W + px) as usize];
         assert!(
-            (blurred - dark).abs() < 1.0e-6,
-            "the depth gate must reject far-side taps: a near-surface pixel must blur to the \
-             near AO {dark} (got {blurred}), NOT bleed the far-side bright AO across the \
-             silhouette"
+            filtered <= DARK + 5,
+            "the depth gate must reject far-side taps at every pass: a near-surface pixel must \
+             filter close to the near AO {DARK} (got {filtered}), NOT bleed the far-side bright \
+             AO across the silhouette"
         );
     }
 
     #[test]
     fn center_always_counts_no_divide_by_zero() {
         // An ISOLATED lit pixel surrounded by a far background (every neighbour fails the depth
-        // gate): the blur must still count the CENTER (cnt ≥ 1) and return the center's own raw
-        // AO — never a 0/0 NaN.
+        // gate at every pass): the filter must still count the CENTER (weight >= 0.140625, the
+        // B3 kernel's own-tap weight) and converge to (approximately) the center's own raw AO —
+        // never a 0/0 NaN. The R16/R8 round-trip quantization between passes may shift the
+        // result by a few counts, so allow a small tolerance.
         let (ssao, gbuf) = build(|x, y| {
-            if x == 16 && y == 16 {
-                (90, 1.5)
-            } else {
-                (255, SSAO_VIEWT_BG) // far background — rejected by the gate
-            }
+            if x == 24 && y == 24 { (90, 1.5) } else { (255, super::super::SSAO_VIEWT_BG) }
         });
-        let blurred = golden_ssao_blur(&ssao, &gbuf, 16, 16, W, H);
-        assert!(blurred.is_finite(), "the center always counts — never 0/0 NaN, got {blurred}");
+        let out = golden_ssao_atrous(&ssao, &gbuf, W, H, CompositeCamera::Ortho, LEVELS);
+        let filtered = out[(24 * W + 24) as usize];
         assert!(
-            (blurred - 90.0 / 255.0).abs() < 1.0e-6,
-            "an isolated pixel (all neighbours gated out) must blur to its OWN raw AO, got {blurred}"
+            filtered.abs_diff(90) <= 2,
+            "an isolated pixel (all neighbours gated out at every pass) must filter close to \
+             its OWN raw AO, got {filtered}"
         );
-        // Sanity: the radius constant is the one the resolve compiles in.
-        assert_eq!(SSAO_BLUR_R, 3, "the host blur radius must mirror the shader's SSAO_BLUR_R");
+    }
+
+    #[test]
+    fn levels_zero_is_byte_identical_to_raw_gather() {
+        let (ssao, gbuf) = build(|x, y| (((x + y) * 7) as u8, 1.5));
+        let out = golden_ssao_atrous(&ssao, &gbuf, W, H, CompositeCamera::Ortho, 0);
+        assert_eq!(out, ssao, "levels == 0 must return the raw gather byte-identical");
+    }
+}
+
+#[cfg(test)]
+mod cluster_cull_push_validity_tests {
+    //! VB-P1e §11 closure: the exp-Z range the cull push carries is validated in EVERY build
+    //! profile, at the constructor, not by a `debug_assert!` in a different function.
+    //!
+    //! # What the rejected values do on device
+    //!
+    //! `cluster_cull.hlsl`'s `slice_view_z(k) = z_near * pow(z_far / z_near, k / dim_z)`.
+    //! At `z_near == 0` the ratio is `+inf`, so `k == 0` gives `0 * pow(inf, 0) == 0` but every
+    //! `k > 0` gives `0 * inf == NaN`. That NaN reaches `expand_aabb`, whose `min`/`max` are
+    //! GLSL.std.450 `NMin`/`NMax` (measured: the committed module carries 8 `NMin` / 18 `NMax`
+    //! and ZERO `FMin`/`FMax`) — and those DISCARD a NaN operand, so the far corners silently
+    //! drop out of the froxel AABB instead of poisoning it. The failure is therefore invisible:
+    //! every slice collapses onto its near plane and the cull quietly under-reports lights.
+    //! [`nan_slice_view_z_is_silently_swallowed_by_the_min_max_chain`] pins that mechanism, so
+    //! the reason this check has to live at the HOST is recorded as a runtime fact rather than
+    //! a comment.
+
+    use crate::compute::{ClusterCullHierPush, ClusterCullPush};
+
+    /// The shipping default (`ClusterConfig::default`) and the VB-P1d bench config both pass.
+    #[test]
+    fn a_well_formed_exp_z_range_constructs() {
+        let p = ClusterCullPush::new(0.1, 50.0, 256, 16384);
+        assert_eq!(p.z_near, 0.1);
+        assert_eq!(p.z_far, 50.0);
+        let h = ClusterCullHierPush::new(0.25, 4.0, 256, 16384, 0x18_09_10, 3456);
+        assert_eq!(h.z_near, 0.25);
+        assert_eq!(h.cluster_capacity, 3456);
+    }
+
+    /// The pre-arm placeholder is still constructible — it is the one degenerate range the
+    /// engine legitimately holds, and it must not route through the validating constructor.
+    #[test]
+    fn the_unarmed_placeholder_bypasses_the_check() {
+        assert_eq!(ClusterCullPush::UNARMED.z_near, 0.0);
+        assert_eq!(ClusterCullPush::UNARMED.z_far, 0.0);
+        assert_eq!(ClusterCullPush::UNARMED.max_lights_per_cluster, 0);
+        assert_eq!(ClusterCullPush::UNARMED.index_list_cap, 0);
+    }
+
+    // ---- The RED-mutation gates: delete the `assert!` from `new` and each of these stops
+    //      panicking, so each one goes RED. ----
+
+    #[test]
+    #[should_panic(expected = "invariant: cluster exp-Z range")]
+    fn a_zero_z_near_is_rejected() {
+        let _ = ClusterCullPush::new(0.0, 50.0, 256, 16384);
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: cluster exp-Z range")]
+    fn a_negative_z_near_is_rejected() {
+        let _ = ClusterCullPush::new(-0.1, 50.0, 256, 16384);
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: cluster exp-Z range")]
+    fn an_inverted_range_is_rejected() {
+        let _ = ClusterCullPush::new(50.0, 0.1, 256, 16384);
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: cluster exp-Z range")]
+    fn a_collapsed_range_is_rejected() {
+        let _ = ClusterCullPush::new(0.1, 0.1, 256, 16384);
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: cluster exp-Z range")]
+    fn a_nan_bound_is_rejected() {
+        // Every ordered compare against NaN is false, so `z_near > 0.0` already rejects it —
+        // pinned so a future rewrite of the predicate cannot lose the NaN case by accident.
+        let _ = ClusterCullPush::new(f32::NAN, 50.0, 256, 16384);
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: cluster exp-Z range")]
+    fn the_hierarchical_push_carries_the_same_check() {
+        let _ = ClusterCullHierPush::new(0.0, 50.0, 256, 16384, 0x18_09_10, 3456);
+    }
+
+    /// Why the check cannot be left to the shader: the NaN a `z_near == 0` slice bound
+    /// produces is SWALLOWED by the AABB's `min`/`max` chain rather than propagating, so the
+    /// device has no observable to fail on. This reproduces that swallowing with Rust's
+    /// `f32::min`/`f32::max`, which have the same IEEE `minNum`/`maxNum` NaN-dropping
+    /// semantics as GLSL.std.450 `NMin`/`NMax` (and are what the host mirror
+    /// `golden_froxel_aabb` already relies on).
+    #[test]
+    fn nan_slice_view_z_is_silently_swallowed_by_the_min_max_chain() {
+        let z_near = 0.0f32;
+        let z_far = 50.0f32;
+        let dim_z = 24.0f32;
+
+        // k == 0 is finite (0 * pow(inf, 0) == 0), every k > 0 is NaN (0 * inf).
+        let vz0 = z_near * (z_far / z_near).powf(0.0 / dim_z);
+        let vz1 = z_near * (z_far / z_near).powf(1.0 / dim_z);
+        assert!(vz0.is_finite(), "slice 0 stays finite: {vz0}");
+        assert!(vz1.is_nan(), "every slice past 0 is NaN under z_near == 0: {vz1}");
+
+        // The AABB accumulator: the `(+1e30, -1e30)` "nothing yet" initializer, expanded with
+        // a NaN point exactly as `expand_aabb` does.
+        let mut aabb_min = 1.0e30f32;
+        let mut aabb_max = -1.0e30f32;
+        aabb_min = aabb_min.min(vz1);
+        aabb_max = aabb_max.max(vz1);
+        assert_eq!(aabb_min, 1.0e30, "the NaN was DROPPED, not propagated");
+        assert_eq!(aabb_max, -1.0e30, "the NaN was DROPPED, not propagated");
+        assert!(
+            aabb_min.is_finite() && aabb_max.is_finite(),
+            "and the result is FINITE, so no device-side finiteness predicate can see the fault"
+        );
     }
 }

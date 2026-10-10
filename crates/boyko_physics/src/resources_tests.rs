@@ -4,6 +4,11 @@
     //! VALUES and the world-tensor `R₀ · I⁻¹_local · R₀ᵀ` construction that the
     //! gather builds — the values the solver's effective mass depends on.
 
+    // Test-oracle model: the std `HashSet` is the REFERENCE "no color reuses a dynamic
+    // body" checker the constraint-graph coloring is verified against. Compiled out of
+    // every shipping build (`#[cfg(test)] #[path] mod tests` of `resources.rs`).
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
     use crate::components::ColliderShape;
 
@@ -159,8 +164,28 @@
         assert_eq!(cfg.contact_hertz, 30.0);
         assert_eq!(cfg.contact_damping, 10.0);
         assert_eq!(cfg.dt, 0.0, "dt is a placeholder until gather stamps it");
-        assert!(!cfg.colored, "O4: colored is OFF by default (the 0%-gate)");
+        assert!(
+            !cfg.colored,
+            "O4: the struct default of `colored` is false; the plugin sets it from the solver type"
+        );
         assert!(!cfg.soft_body, "SP1: soft_body is OFF by default (the 0%-gate)");
+        assert!(
+            cfg.simd,
+            "O1: simd is ON by default since 2026-09-03 — the AVX2 integrate / inertia kernels \
+             are bit-identical to their scalar oracles and their gates are non-vacuous"
+        );
+        assert!(
+            cfg.simd_solve,
+            "O7: simd_solve is ON by default since 2026-09-18 (owner decision) — the AVX2 cohort \
+             kernel is bit-identical to the scalar colored oracle"
+        );
+        assert_eq!(
+            cfg.sdf_narrowphase,
+            SdfNarrowphaseKernel::Scalar,
+            "O9: the box-vs-SDF kernel defaults to the SCALAR oracle. The AVX2 arm has a known \
+             signed-zero divergence from it (owner-deferred fix), so reaching it must take an \
+             explicit opt-in — this is the containment, not a preference"
+        );
     }
 
     // ── O4: ConstraintGraph islands + coloring sanity tests ──
@@ -302,7 +327,7 @@
     // forced `n_chunks ∈ {1, 2, 4, 8}`, single-threaded (NO pool), so they:
     //   * exercise the restructured Pass A count / serial prefix-sum / Pass B
     //     `pair_offset` arithmetic + the `EmitPtrs` disjoint raw writes,
-    //   * run under `cargo +nightly miri test` (the pool spin is Miri-intractable;
+    //   * run under `cargo +nightly-x86_64-pc-windows-msvc miri test` (the pool spin is Miri-intractable;
     //     the shaped path needs no pool — `pool = None`),
     //   * prove byte-identity to the O2 serial `build` AND non-vacuity (the W2
     //     anti-vacuity bar: it ran the shaped passes, not a `build` delegate).
@@ -354,17 +379,17 @@
         /// The O2 serial `build` output for `bodies` (the bit-identity reference).
         fn serial_build(bodies: &[BodyState]) -> Vec<(BodyIndex, BodyIndex)> {
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build(bodies, &mut out);
-            out
+            out.pairs().to_vec()
         }
 
         /// The shaped-path output at a forced `n_chunks` (single-threaded, no pool).
         fn shaped_build(bodies: &[BodyState], n_chunks: usize) -> Vec<(BodyIndex, BodyIndex)> {
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build_emit_shaped_forced(bodies, &mut out, n_chunks);
-            out
+            out.pairs().to_vec()
         }
 
         /// Asserts the shaped path at EVERY forced chunk count is byte-for-byte
@@ -547,7 +572,7 @@
             // Non-vacuity: >= 2 giants land in the hatch (oversized–oversized
             // dedup AND oversized–normal emit are both exercised).
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build_emit_shaped_forced(&bodies, &mut out, 4);
             assert!(
                 grid.oversized_len() >= 2,
@@ -628,11 +653,11 @@
                 .collect();
 
             let mut reused = BroadphaseGrid::with_capacity(64);
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             // Warm on scene A at a DIFFERENT chunk count, then rebuild scene B.
             reused.build_emit_shaped_forced(&scene_a, &mut out, 8);
             reused.build_emit_shaped_forced(&scene_b, &mut out, 4);
-            let reused_b = out.clone();
+            let reused_b = out.pairs().to_vec();
 
             let fresh_b = shaped_build(&scene_b, 4);
             assert_eq!(
@@ -643,7 +668,7 @@
         }
 
         // ── Gate 5 (Miri): the curated small-scene shaped sweep at every chunk
-        //    count. `cargo +nightly miri test` runs THIS (no pool needed — the
+        //    count. `cargo +nightly-x86_64-pc-windows-msvc miri test` runs THIS (no pool needed — the
         //    shaped path runs `pool = None`); it checks the restructured offset
         //    arithmetic + the `EmitPtrs` disjoint raw writes for TB/aliasing UB.
         //    Kept small (≈ 64 bodies) so the interpreter stays tractable. ───────
@@ -694,11 +719,317 @@
             }
             let serial = serial_build(&bodies);
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build_parallel(&bodies, &mut out);
             assert_eq!(
-                out, serial,
+                out.pairs().to_vec(),
+                serial,
                 "build_parallel's no-pool route (the Miri-reachable branch) == serial build"
             );
+        }
+    }
+
+    // ─── Defect A interim fix: `IslandSleep::rekey_rows` (T7) ──────────────────────
+    //
+    // Every arm of `rekey_rows` ends keyed by the current gather, so every arm must leave the
+    // cursor stamped with that gather (invariant P). Red under M4 (the `Reset` arm does not
+    // stamp) and M5 (the `Identity` arm does not stamp).
+    mod rekey_rows {
+        use crate::resources::IslandSleep;
+        use crate::row_identity::{RemapCursor, RowIdentity, RowKey, RowRemap};
+
+        /// Feeds one scripted gather into `rows`: `ids` are slots at generation 0.
+        fn gather(rows: &mut RowIdentity, ids: &[usize], added: &[u32]) {
+            rows.begin_gather();
+            {
+                let (mut cur, mut add) = rows.gather_views();
+                for &id in ids {
+                    cur.push(RowKey::new(id, 0));
+                }
+                for &r in added {
+                    add.push(r);
+                }
+            }
+            rows.finish_gather();
+        }
+
+        /// The gather sequence `rows` is at, read through a probe stamp (`RowIdentity` has no
+        /// getter; `stamp` writes exactly this value).
+        fn gather_seq(rows: &RowIdentity) -> u64 {
+            let mut probe = RemapCursor::default();
+            probe.stamp(rows);
+            probe.synced_seq()
+        }
+
+        /// How the latch's cursor classifies against `rows`, without touching it.
+        fn classify(sleep: &IslandSleep, rows: &RowIdentity) -> &'static str {
+            let mut probe = sleep.cursor;
+            match probe.remap(rows) {
+                RowRemap::Identity => "Identity",
+                RowRemap::Rows(_) => "Rows",
+                RowRemap::Reset => "Reset",
+            }
+        }
+
+        fn latch(sleep: &IslandSleep) -> Vec<(bool, u16)> {
+            sleep
+                .latch
+                .as_read_slice()
+                .iter()
+                .map(|l| (l.asleep, l.below_count))
+                .collect()
+        }
+
+        fn set_latch(sleep: &mut IslandSleep, values: &[(bool, u16)]) {
+            assert_eq!(sleep.latch.len(), values.len(), "test setup: latch length");
+            let mut view = sleep.latch.build_view();
+            for (l, &(asleep, below)) in view.as_mut_slice().iter_mut().zip(values) {
+                l.asleep = asleep;
+                l.below_count = below;
+            }
+        }
+
+        /// The per-row island contact key (defect A4), row order.
+        fn keys(sleep: &IslandSleep) -> Vec<u32> {
+            sleep.latch.as_read_slice().iter().map(|l| l.island_key).collect()
+        }
+
+        fn set_keys(sleep: &mut IslandSleep, values: &[u32]) {
+            assert_eq!(sleep.latch.len(), values.len(), "test setup: key length");
+            let mut view = sleep.latch.build_view();
+            for (l, &key) in view.as_mut_slice().iter_mut().zip(values) {
+                l.island_key = key;
+            }
+        }
+
+        /// U8 (defect A4): the `Rows` arm permutes the island contact key with the latch.
+        /// A new body reads `NO_ISLAND_KEY` (the value a fresh row must carry, so it can
+        /// never compare equal to a live count), and the key stays sized with the latch.
+        #[test]
+        fn rekey_rows_rows_permutes_the_island_key_with_the_latch() {
+            use crate::row_identity::NO_ISLAND_KEY;
+
+            let mut rows = RowIdentity::with_capacity(0);
+            let mut sleep = IslandSleep::with_capacity(0, 0);
+
+            gather(&mut rows, &[1, 2, 3], &[0, 1, 2]);
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (keys(&sleep), keys(&sleep).len() == rows.rows_len()),
+                (vec![NO_ISLAND_KEY; 3], true),
+                "U8 first gather: every new row carries NO_ISLAND_KEY: (keys, key len == gather rows)"
+            );
+            set_keys(&mut sleep, &[11, 12, 13]);
+
+            // Growth: ids 3 and 1 move, id 9 is new in row 2, id 2 moves to the end.
+            gather(&mut rows, &[3, 1, 9, 2], &[2]);
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (keys(&sleep), keys(&sleep).len() == rows.rows_len()),
+                (vec![13, 11, NO_ISLAND_KEY, 12], true),
+                "U8 growth: each body carries its own key and the new body reads NO_ISLAND_KEY: \
+                 (keys, key len == gather rows)"
+            );
+
+            // Shrink: ids 1 and 9 are gone, 2 and 3 swap ends.
+            gather(&mut rows, &[2, 3], &[]);
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (keys(&sleep), keys(&sleep).len() == rows.rows_len()),
+                (vec![12, 13], true),
+                "U8 shrink: each survivor carries its own key: (keys, key len == gather rows)"
+            );
+        }
+
+        /// T7 `Identity`: unchanged rows one gather on leave the latch in place, and the
+        /// cursor is stamped with the current gather.
+        #[test]
+        fn rekey_rows_identity_keeps_the_latch_and_stamps() {
+            let mut rows = RowIdentity::with_capacity(0);
+            let mut sleep = IslandSleep::with_capacity(0, 0);
+            gather(&mut rows, &[1, 2, 3], &[0, 1, 2]);
+            sleep.rekey_rows(&rows);
+            set_latch(&mut sleep, &[(true, 8), (false, 2), (true, 8)]);
+
+            gather(&mut rows, &[1, 2, 3], &[]);
+            assert_eq!(classify(&sleep, &rows), "Identity", "construction: rows unchanged one gather on");
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (latch(&sleep), sleep.cursor.synced_seq(), sleep.remap_resets(), sleep.reset_wake),
+                (vec![(true, 8), (false, 2), (true, 8)], gather_seq(&rows), 0, false),
+                "T7 Identity: (latch, synced_seq, remap_resets, reset_wake)"
+            );
+        }
+
+        /// T7 `Rows`: the first gather of a fresh latch, a growth step with a new body, and a
+        /// shrink step each permute the latch through `prev_row` and stamp.
+        #[test]
+        fn rekey_rows_rows_permutes_through_new_bodies_growth_and_shrink_and_stamps() {
+            let mut rows = RowIdentity::with_capacity(0);
+            let mut sleep = IslandSleep::with_capacity(0, 0);
+
+            gather(&mut rows, &[1, 2, 3], &[0, 1, 2]);
+            assert_eq!(classify(&sleep, &rows), "Rows", "construction: a fresh latch's first gather is Rows (P17)");
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (latch(&sleep), sleep.cursor.synced_seq(), sleep.remap_resets()),
+                (vec![(false, 0); 3], gather_seq(&rows), 0),
+                "T7 Rows, first gather: every row new and awake, cursor stamped"
+            );
+            set_latch(&mut sleep, &[(true, 8), (false, 2), (true, 8)]);
+
+            // Growth: ids 3 and 1 move, id 9 is new in row 2, id 2 moves to the end.
+            gather(&mut rows, &[3, 1, 9, 2], &[2]);
+            assert_eq!(classify(&sleep, &rows), "Rows", "construction: growth step");
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (latch(&sleep), sleep.cursor.synced_seq(), sleep.remap_resets()),
+                (vec![(true, 8), (true, 8), (false, 0), (false, 2)], gather_seq(&rows), 0),
+                "T7 Rows, growth with a new body (NO_ROW): each body carries its own latch"
+            );
+
+            // Shrink: ids 1 and 9 are gone, 2 and 3 swap ends.
+            gather(&mut rows, &[2, 3], &[]);
+            assert_eq!(classify(&sleep, &rows), "Rows", "construction: shrink step");
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (latch(&sleep), sleep.cursor.synced_seq(), sleep.remap_resets()),
+                (vec![(false, 2), (true, 8)], gather_seq(&rows), 0),
+                "T7 Rows, shrink: each survivor carries its own latch"
+            );
+        }
+
+        /// T7 `Reset`: a latch that missed a gather counts one reset, sizes to the gather,
+        /// leaves a global wake pending and stamps; the next gather is `Identity` again.
+        #[test]
+        fn rekey_rows_reset_counts_once_leaves_a_wake_pending_and_stamps() {
+            let mut rows = RowIdentity::with_capacity(0);
+            let mut sleep = IslandSleep::with_capacity(0, 0);
+            gather(&mut rows, &[1, 2, 3], &[0, 1, 2]);
+            sleep.rekey_rows(&rows);
+            set_latch(&mut sleep, &[(true, 8), (true, 8), (true, 8)]);
+
+            gather(&mut rows, &[1, 2, 3], &[]); // the latch misses this gather
+            gather(&mut rows, &[1, 2, 3, 4], &[3]);
+            assert_eq!(classify(&sleep, &rows), "Reset", "construction: one gather was missed");
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (sleep.remap_resets(), sleep.reset_wake, sleep.latch.len(), sleep.cursor.synced_seq()),
+                (1, true, 4, gather_seq(&rows)),
+                "T7 Reset: (remap_resets, reset_wake, latch length, synced_seq)"
+            );
+
+            gather(&mut rows, &[1, 2, 3, 4], &[]);
+            let next = classify(&sleep, &rows);
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (next, sleep.remap_resets(), sleep.cursor.synced_seq()),
+                ("Identity", 1, gather_seq(&rows)),
+                "T7 Reset liveness: the gather after a Reset is Identity and counts nothing"
+            );
+        }
+
+        /// T7 `Rows` over a latch last sized by a direct drive: a previous row at or past the
+        /// latch's length reads `(false, 0)`, and a row inside it carries its latch.
+        #[test]
+        fn rekey_rows_rows_reads_a_row_past_a_direct_drive_latch_as_awake() {
+            let mut rows = RowIdentity::with_capacity(0);
+            let mut sleep = IslandSleep::with_capacity(0, 0);
+            gather(&mut rows, &[1, 2, 3, 4], &[0, 1, 2, 3]);
+            sleep.rekey_rows(&rows);
+            // A direct drive's `begin_step` sizes the latch to its own 2-row snapshot.
+            sleep.sync_rows(2);
+            set_latch(&mut sleep, &[(true, 8), (true, 8)]);
+
+            gather(&mut rows, &[4, 3, 2, 1], &[]);
+            assert_eq!(classify(&sleep, &rows), "Rows", "construction: a permutation one gather on");
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (latch(&sleep), sleep.cursor.synced_seq()),
+                (vec![(false, 0), (false, 0), (true, 8), (true, 8)], gather_seq(&rows)),
+                "T7 Rows past a direct-drive latch (old_len 2, m 4): rows 3 and 2 read awake"
+            );
+        }
+
+        /// T7 direct drive: a scratch that never gathered is `Identity`; the latch stays as
+        /// the direct drive left it and the stamp writes the instance's base.
+        #[test]
+        fn rekey_rows_on_a_scratch_that_never_gathered_is_identity() {
+            let rows = RowIdentity::with_capacity(0);
+            let mut sleep = IslandSleep::with_capacity(0, 0);
+            sleep.sync_rows(2);
+            set_latch(&mut sleep, &[(true, 8), (false, 1)]);
+            assert_eq!(classify(&sleep, &rows), "Identity", "construction: never gathered");
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (latch(&sleep), sleep.cursor.synced_seq(), sleep.remap_resets(), sleep.reset_wake),
+                (vec![(true, 8), (false, 1)], gather_seq(&rows), 0, false),
+                "T7 direct drive: (latch, synced_seq, remap_resets, reset_wake)"
+            );
+        }
+    }
+
+    // L10 D9b, Decision 5: the explicit wake is a request count, latched by the broadphase and
+    // served by the solve up to the latched count; the internal `Reset` wake is served by
+    // whichever `begin_step` runs next.
+    mod wake_requests {
+        use crate::resources::{ConstraintGraph, IslandSleep};
+
+        /// A sleep state over `rows` rows whose row 0 is latched asleep, with no island (an empty
+        /// graph wakes no row by contact change).
+        fn slept(graph: &ConstraintGraph, rows: usize) -> IslandSleep {
+            let mut sleep = IslandSleep::with_capacity(0, 0);
+            sleep.begin_step(graph, rows);
+            sleep.force_sleep_row(0);
+            sleep
+        }
+
+        #[test]
+        fn wake_request_after_the_latch_stays_pending() {
+            let graph = ConstraintGraph::with_capacity(0);
+            let mut sleep = slept(&graph, 2);
+            sleep.wake_all();
+            // The broadphase latches the count; a second request lands after the latch.
+            let upto = sleep.wake_requests();
+            sleep.wake_all();
+            sleep.begin_step_upto(&graph, 2, upto);
+            assert!(!sleep.is_row_asleep(0), "the latched request is served: row 0 wakes");
+            assert_eq!(sleep.wake_served, upto, "the step served exactly the latched count");
+            let count = sleep.wake_requests();
+            assert!(
+                sleep.wake_pending(count),
+                "the request raised after the latch is still pending for the next step"
+            );
+            sleep.force_sleep_row(0);
+            sleep.begin_step_upto(&graph, 2, count);
+            assert!(!sleep.is_row_asleep(0), "the next step serves the late request");
+            assert!(!sleep.wake_pending(count), "nothing is pending once every request is served");
+            // Anti-vacuity: with nothing pending the latch survives a step.
+            sleep.force_sleep_row(0);
+            sleep.begin_step_upto(&graph, 2, count);
+            assert!(sleep.is_row_asleep(0), "anti-vacuity: no pending request, no wake");
+        }
+
+        #[test]
+        fn reset_wake_is_served_whatever_upto() {
+            let graph = ConstraintGraph::with_capacity(0);
+            let mut sleep = slept(&graph, 2);
+            sleep.reset_wake = true;
+            let upto = sleep.wake_served;
+            assert!(sleep.wake_pending(upto), "a Reset wake is pending at the served count");
+            sleep.begin_step_upto(&graph, 2, upto);
+            assert!(!sleep.is_row_asleep(0), "the Reset wake is served with no request pending");
+            assert!(!sleep.reset_wake && !sleep.wake_pending(upto), "the Reset wake is spent");
+        }
+
+        #[test]
+        fn direct_drive_begin_step_serves_every_request() {
+            let graph = ConstraintGraph::with_capacity(0);
+            let mut sleep = slept(&graph, 2);
+            sleep.wake_all();
+            sleep.wake_all();
+            sleep.begin_step(&graph, 2);
+            assert!(!sleep.is_row_asleep(0), "the live count is served");
+            assert_eq!(sleep.wake_served, 2, "both requests are served");
         }
     }

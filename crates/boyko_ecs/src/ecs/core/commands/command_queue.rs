@@ -34,6 +34,25 @@ use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 /// by invariant **CQ-PACK1**.
 const COMMAND_PAYLOAD_OFFSET: usize = mem::size_of::<CommandMeta>();
 
+/// Save-point into a [`CommandQueue`]'s byte arena, produced by
+/// [`CommandQueue::mark`] and consumed by [`CommandQueue::rewind`]
+/// (kernel backlog **KE7**).
+///
+/// A newtype rather than a bare `usize` so a byte offset cannot be confused
+/// with a row index, a cursor, or a command count at a call site — the arena
+/// deals in all four.
+///
+/// # Validity
+///
+/// A mark is valid only for the queue that produced it, and only until that
+/// queue's next `apply` (which drains the arena to length 0, invalidating
+/// every outstanding offset). Using one across an `apply` is a caller bug;
+/// `rewind` debug-asserts the offset is in range but cannot detect the
+/// cross-queue case, which is why the type carries no `Default` and no
+/// public constructor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CommandMark(usize);
+
 /// Type-erased, packed, byte-arena command queue.
 ///
 /// # Layout (invariants CQ1, CQ2)
@@ -160,6 +179,176 @@ impl CommandQueue {
             std::ptr::write_unaligned(base.add(COMMAND_PAYLOAD_OFFSET) as *mut C, cmd);
             self.bytes.set_len(old_len + total);
         }
+    }
+
+    /// Records the queue's current write position so a later
+    /// [`rewind`](Self::rewind) can discard everything pushed after it
+    /// (kernel backlog **KE7**).
+    ///
+    /// The mark is a byte offset into the arena, taken at a slot boundary:
+    /// every `push` writes a whole `[CommandMeta][payload]` block, so
+    /// `bytes.len()` is always the start of the next slot and never lands
+    /// inside one.
+    ///
+    /// # Cost
+    ///
+    /// One `usize` load. No allocation, no arena walk.
+    #[inline]
+    pub(crate) fn mark(&self) -> CommandMark {
+        debug_assert_eq!(
+            self.cursor, 0,
+            "invariant (KE7): `mark` is taken at rest — a queue mid-`apply` has a \
+             non-zero cursor and its byte offsets are being consumed, so a mark \
+             into it would not survive the walk",
+        );
+        CommandMark(self.bytes.len())
+    }
+
+    /// Discards every command pushed after `mark`, running each one's
+    /// **drop glue** (kernel backlog **KE7**).
+    ///
+    /// This is the structural half of an all-or-nothing enqueue: a caller
+    /// that has pushed part of a compound edit and then discovers it cannot
+    /// finish rewinds to the mark, and the world never observes the partial
+    /// prefix.
+    ///
+    /// # Why the glue replay is load-bearing
+    ///
+    /// A `CommandMeta` header carries the ONLY surviving type information
+    /// for its payload; the arena is `[MaybeUninit<u8>]`, which has no drop
+    /// glue of its own. A rewind that merely did `bytes.set_len(mark)` would
+    /// therefore leak every non-trivial field a discarded command owns — a
+    /// `String`, a `Box`, a `Bundle` holding heap data. The walk below calls
+    /// [`consume_and_drop_glue`] with `world = None`, which is exactly the
+    /// path [`CommandQueue::drop`](Drop::drop) uses for un-flushed commands,
+    /// so a rewound command is dropped exactly once and never applied.
+    ///
+    /// # ⚠ Reserved entity ids are NOT reclaimed
+    ///
+    /// `Commands::spawn` / `spawn_empty` / `clone_and_spawn*` claim their
+    /// `Entity` **synchronously** from the world's entity reservoir (so
+    /// `.id()` can return before the apply) and only then push the command.
+    /// A rewind discards the *command*; it cannot un-claim the id, because the
+    /// id has already ESCAPED: `.id()` handed it to user code, which may have
+    /// copied it into other commands, resources, events or `Local`s, and there
+    /// is no registry of those copies. (Since EM2′ the claim does pop the
+    /// recycled stack — the old "workers must not pop it" reason is gone; the
+    /// escape is the reason that remains.) Nor does the queue record which ids
+    /// belong to which slot.
+    ///
+    /// The consequence is a **leak of id space, by design**: the ids claimed
+    /// for rewound spawns — fresh or recycled — are never issued again and
+    /// never become live entities. This is the same contract a dropped,
+    /// never-applied queue already carries (`Commands::clone_and_spawn`: "if
+    /// the queue drops without an apply, the id leaks"). It is written down
+    /// here because a rewind is the one path where a caller might reasonably
+    /// expect otherwise. Pinned by `rewind_does_not_reclaim_reserved_entity_ids`
+    /// (fresh) and `rewind_does_not_reissue_a_claimed_recycled_entity`
+    /// (recycled).
+    ///
+    /// # Panics
+    ///
+    /// A panic inside a discarded command's `Drop` impl propagates to the
+    /// caller **after** the arena has been truncated to `mark` — the queue is
+    /// left consistent and re-usable, and the commands the walk had not yet
+    /// reached are leaked rather than left in a half-drained arena. That
+    /// ordering (truncate, then resume) is the same trade the `Drop` impl
+    /// makes; a panicking `Drop` is pathological either way.
+    ///
+    /// # Cost when unused
+    ///
+    /// Zero. `rewind` is never called by the engine's own paths; a program
+    /// that does not call it pays for one extra `pub(crate)` function that is
+    /// not reachable from any hot path, and `mark`'s `CommandMark` is a
+    /// stack-local `usize` the caller owns. No field is added to
+    /// `CommandQueue` — the 56 B / one-cache-line layout (O2) is unchanged.
+    ///
+    /// # ⚠ No caller-facing surface yet
+    ///
+    /// `mark` / `rewind` are `pub(crate)` and, outside this module's own tests,
+    /// have **no caller anywhere in the workspace**. The mechanism is complete
+    /// and pinned; the surface that would let a user (or Aether-generated code,
+    /// which lives in the user's crate) reach it is not part of KE7 as landed.
+    /// A `pub` here would not be enough on its own either — a system holds
+    /// `Commands`, not `&mut CommandQueue` — so exposing the all-or-nothing
+    /// enqueue means designing a `Commands`-level transaction surface, which is
+    /// a scope decision rather than a repair. Noted here rather than left to be
+    /// re-derived: the module's file-level `#![allow(dead_code)]` means nothing
+    /// will ever warn that this pair is unwired.
+    pub(crate) fn rewind(&mut self, mark: CommandMark) {
+        let start = mark.0;
+        debug_assert!(
+            start <= self.bytes.len(),
+            "invariant (KE7): a mark cannot be past the arena's end — a mark is \
+             only valid for the queue it was taken from, and the arena never \
+             shrinks below it except through this function",
+        );
+        debug_assert_eq!(
+            self.cursor, 0,
+            "invariant (KE7): `rewind` runs at rest (cursor == 0), never from \
+             inside an `apply` walk",
+        );
+        if start >= self.bytes.len() {
+            // Nothing pushed since the mark — the common case for a caller
+            // that marked defensively and then completed normally.
+            return;
+        }
+
+        // Reuse the audited apply walk in its drop-only mode rather than
+        // hand-rolling a second byte walk: setting `cursor` to the mark makes
+        // `start` the walk's own entry cursor, so on success it drop-glues
+        // `[mark..len)` and truncates to `mark` for us.
+        self.cursor = start;
+        let mut raw = self.raw();
+
+        // SAFETY (CQ4 + drop-only path, mirrors `Drop::drop`):
+        //   - We hold `&mut self`, so no other reader/writer touches the
+        //     queue for the call's duration; `raw` is the sole accessor
+        //     while the walk runs (we do not touch `self` inside the closure).
+        //   - `world = None` selects `consume_and_drop_glue`'s drop-only
+        //     branch: each command is moved out of its slot by
+        //     `read_unaligned` and dropped in place, exactly once. No
+        //     `Command::apply` runs, so the world is never mutated.
+        //   - `cursor <= bytes.len()` on entry (debug-asserted above), the
+        //     walk's stated precondition.
+        //   - No command can push during a drop-only walk (a `Drop` impl has
+        //     no handle on this queue), so the walk's success path takes the
+        //     `set_len(start)` branch.
+        let walk = AssertUnwindSafe(|| unsafe {
+            raw.apply_or_drop_queued_no_catch(None);
+        });
+        let outcome = std::panic::catch_unwind(walk);
+
+        if let Err(payload) = outcome {
+            // A discarded command's `Drop` panicked. `CursorSync` synced the
+            // walk's local cursor into `self.cursor` during the unwind, so the
+            // slots at `[start..cursor)` have already been moved out and the
+            // ones at `[cursor..len)` were never reached. Truncating to
+            // `start` discards both ranges: the first is logically
+            // uninitialised (re-reading it would be UB), the second leaks.
+            //
+            // SAFETY:
+            //   - `start <= self.bytes.len()` (debug-asserted on entry; the
+            //     panicking walk never grows the arena).
+            //   - `MaybeUninit<u8>` has no drop glue, so `set_len` runs no
+            //     destructor over the discarded suffix.
+            //   - Bytes `0..start` are untouched by the walk (it began at
+            //     `start`) and remain valid `[CommandMeta][payload]` slots.
+            unsafe {
+                self.bytes.set_len(start);
+            }
+            self.cursor = 0;
+            std::panic::resume_unwind(payload);
+        }
+
+        debug_assert_eq!(
+            self.bytes.len(),
+            start,
+            "invariant (KE7): the drop-only walk truncates the arena to the mark",
+        );
+        // The walk left `cursor == start`; restore the at-rest value the rest
+        // of the queue's contract assumes (`apply_via_raw_twin` debug-asserts it).
+        self.cursor = 0;
     }
 
     /// Mints a [`RawCommandQueue`] borrowed from `self` for the duration
@@ -399,48 +588,84 @@ struct RawCommandQueue {
 ///
 /// Mirrors Bevy's `command_queue.rs` local-cursor pattern: the hot loop in
 /// [`RawCommandQueue::apply_or_drop_queued_no_catch`] reads / writes a
-/// stack-local `local_cursor` (cheap register access; no per-iteration
-/// `NonNull::as_ref` dereference on a heap-resident cursor field). This
-/// guard's `Drop` writes the local back into the queue's persistent
-/// cursor on EITHER normal completion OR unwind — so the Phase 12.5
-/// Opt-A1 panic-recovery semantics survive:
+/// stack-local `local_cursor` (no per-iteration `NonNull::as_ref`
+/// dereference on the queue's persistent cursor field), and does so only
+/// through this guard's `local` borrow. This guard's `Drop` writes the
+/// local back into the queue's persistent cursor on EITHER normal
+/// completion OR unwind — so the Phase 12.5 Opt-A1 panic-recovery
+/// semantics survive:
 ///
 ///   * `handle_panic_recovery` reads `*self.cursor` to identify the
 ///     survivor range `[cursor..bytes.len())`. The guard's `Drop` must
 ///     fire BEFORE `handle_panic_recovery` so the queue's cursor reflects
 ///     `consume_and_drop_glue`'s W3' advance past the panicker.
-///   * Rust drops locals in reverse declaration order; since the guard is
-///     declared AFTER `local_cursor` inside the apply function, it drops
-///     FIRST on unwind, while `local_cursor` is still alive on the stack.
+///   * The guard borrows `local_cursor`, so the borrow checker orders the
+///     guard's drop before the local's on every exit, unwind included.
 ///   * The outer `catch_unwind` in [`CommandQueue::apply`] runs
 ///     `handle_panic_recovery` only on the Err branch, AFTER unwinding
 ///     has dropped the guard.
-struct CursorSync {
-    /// Persistent queue cursor (heap-resident inside `CommandQueue::cursor`).
+///
+/// # Why `local` is a `&mut`, not a raw pointer (UG-08, both borrow models)
+///
+/// Every access to the walk's cursor goes through `guard.local`: the loop's
+/// reads and header advance, the `&mut *guard.local` reborrow handed to the
+/// glue (which ends when the glue returns), and this guard's final read. The
+/// borrow checker rejects any direct use of `local_cursor` while the guard
+/// lives, so no access can come from a path that bypasses the guard's
+/// borrow, under either model.
+///
+/// The field used to be `local_ptr: *const usize`, taken with `&raw const`
+/// before a loop that then wrote `local_cursor` directly. That was UB under
+/// Stacked Borrows. There, a raw pointer to a local carries its own
+/// `SharedReadOnly` tag, and a write through the local's own tag "pop[s]
+/// all blocks above the one containing the granting item" (UCG
+/// `wip/stacked-borrows.md`, "Accessing memory"). So the loop's first
+/// `local_cursor += …` removed the guard's tag, and the guard's read then
+/// used a tag that no longer existed. Tree Borrows accepted the same code,
+/// because a raw pointer taken directly to a local inherits the local's
+/// tag: R. Jung, "From Stacked Borrows to Tree Borrows" (2023-06-02), the
+/// `addr_of_mut!(x); x = 1; ptr.read()` example.
+///
+/// The local stays a separate stack slot from this guard, not a field of
+/// it. `&mut *guard.local` escapes into the glue, and an escaped pointer to
+/// one field would make the whole guard, including the `self`-derived
+/// `cursor_ptr`, reachable from the glue as far as LLVM can tell. That cost
+/// the drop-only walk its hoisted `bytes.as_ptr()` load when it was tried.
+/// `tests/miri_command_queue_cursor.rs` pins the three exits under both
+/// models.
+struct CursorSync<'a> {
+    /// Persistent queue cursor (`CommandQueue::cursor`, reached through the
+    /// raw twin's `&raw mut`-minted pointer).
     cursor_ptr: NonNull<usize>,
-    /// Pointer to the stack-local `local_cursor` in the apply walk.
-    /// Valid for as long as the apply walk's stack frame is live; the
-    /// guard's drop position guarantees the frame is still live when
-    /// this read fires.
-    local_ptr: *const usize,
+    /// The walk's stack-local cursor, advanced by the loop (meta header) and
+    /// by `consume_and_drop_glue` through `&mut *guard.local` (payload, W3').
+    local: &'a mut usize,
 }
 
-impl Drop for CursorSync {
+impl Drop for CursorSync<'_> {
     #[inline]
     fn drop(&mut self) {
         // SAFETY:
-        //   - `self.local_ptr` points at a `usize` stack-local in the
-        //     apply walk's frame. The guard is declared AFTER that local
-        //     so Rust's reverse-declaration drop order guarantees the
-        //     local is still alive when this read runs (true for both
-        //     normal exit and panic unwinding).
-        //   - `self.cursor_ptr` is the queue's persistent cursor field.
-        //     The apply walk holds exclusive access for the duration of
-        //     the call; no other reader/writer is touching that slot.
-        //   - The write is one `usize` store; no surrounding state needs
-        //     synchronisation here (single-threaded queue access).
+        //   - `self.cursor_ptr` is the raw twin's `cursor` pointer, minted in
+        //     `CommandQueue::raw` with `&raw mut self.cursor` from the live
+        //     `&mut CommandQueue` (a `SharedReadWrite` tag under Stacked
+        //     Borrows; the parent's own tag under Tree Borrows). The queue's
+        //     owner does not touch the struct between that mint and this
+        //     write, because the raw twin is the sole accessor for the walk
+        //     (see `raw`). The only earlier access to the cursor field is the
+        //     walk's `as_ref` read of `start` through that same twin, a
+        //     reborrow that is dead by now. So the pointer can still write
+        //     under both models.
+        //   - The guard is alive for the whole walk (declared before the loop,
+        //     dropped on the success path or during unwind), so the queue and
+        //     its `cursor` field outlive this store.
+        //   - `*self.local` is read through the guard's own `&mut` borrow of
+        //     the walk's local: a safe read, and the same borrow every other
+        //     access in the walk derived from.
+        //   - One `usize` store, single-threaded queue access (CQ5): no
+        //     synchronisation is needed.
         unsafe {
-            *self.cursor_ptr.as_ptr() = *self.local_ptr;
+            *self.cursor_ptr.as_ptr() = *self.local;
         }
     }
 }
@@ -477,25 +702,25 @@ impl RawCommandQueue {
 
         // Phase 12.6 — hybrid cursor pattern (mirrors Bevy's `command_queue.rs:240`):
         //
-        // The hot loop reads / writes a stack-local `local_cursor` (cheap
-        // register access). A scope-guard `CursorSync` writes the local
-        // back into `*self.cursor` on EITHER normal completion OR unwind
-        // (the guard's `Drop` impl fires during stack unwinding too).
+        // The hot loop reads / writes a stack-local `local_cursor`, and
+        // reaches it ONLY through the scope guard's `&mut` borrow
+        // (`*guard.local`; see `CursorSync`'s "Why `local` is a `&mut`").
+        // The guard's `Drop` writes the local back into `*self.cursor` on
+        // EITHER normal completion OR unwind (the `Drop` impl fires during
+        // stack unwinding too).
         //
         // Why this preserves Phase 12.5 Opt-A1 panic-recovery semantics:
         //
         //   * `consume_and_drop_glue` advances `*cursor_ref += sizeof::<C>()`
         //     BEFORE `cmd.apply` runs (W3' discipline). The `cursor_ref`
-        //     passed in is `&mut local_cursor` — the advance lands on the
+        //     passed in is `&mut *guard.local` — the advance lands on the
         //     stack-local.
-        //   * On panic mid-apply, unwind drops `_guard` BEFORE dropping
-        //     `local_cursor` (declared after `local_cursor` ⇒ dropped
-        //     before in LIFO order). The guard's `Drop` reads
-        //     `*self.local_ptr` (the up-to-date local) and writes it into
+        //   * On panic mid-apply, unwind drops `guard`, whose `Drop` reads
+        //     the up-to-date local through its borrow and writes it into
         //     `*self.cursor_ptr` (the queue's persistent cursor) — exactly
         //     what `handle_panic_recovery` needs to identify the survivor
-        //     range `[local_cursor..bytes.len())`.
-        //   * On normal completion, the loop exits with `local_cursor ==
+        //     range `[cursor..bytes.len())`.
+        //   * On normal completion, the loop exits with `*guard.local ==
         //     stop_snapshot`; the success-path block writes
         //     `*self.cursor.as_mut() = start` overriding the guard's
         //     write, which is fine — both happen under exclusive access.
@@ -504,57 +729,51 @@ impl RawCommandQueue {
         // enqueued by command-during-apply (pushing past `stop_snapshot`)
         // are NOT re-entered into the current walk (Q-A1.1 case 4 fix
         // happens in the post-loop compaction block below).
+        //
+        // `cursor_ptr` is `self.cursor` — a `NonNull<usize>` into the queue's
+        // `cursor` field, valid for the duration of the call (the caller holds
+        // exclusive access to the queue; see the guard's `Drop` SAFETY).
         let mut local_cursor: usize = start;
-
-        // SAFETY: `local_cursor` lives on this stack frame until the
-        //   function returns or unwinds. The guard reads its value via
-        //   raw pointer in its `Drop` impl; since the guard is declared
-        //   AFTER `local_cursor`, Rust's reverse-declaration drop order
-        //   fires the guard's Drop FIRST during unwind, while
-        //   `local_cursor` is still alive on the stack. The `cursor_ptr`
-        //   is `self.cursor` — a `NonNull<usize>` valid for the duration
-        //   of the function call (the underlying field lives on the heap
-        //   via the queue's owner, and we hold exclusive access).
-        let _guard = CursorSync {
+        let guard = CursorSync {
             cursor_ptr: self.cursor,
-            local_ptr: &raw const local_cursor,
+            local: &mut local_cursor,
         };
 
-        while local_cursor < stop_snapshot {
+        while *guard.local < stop_snapshot {
             // Read meta at the current cursor.
             //
             // SAFETY (CQ2):
-            //   - The bytes at `local_cursor` were populated by
+            //   - The bytes at `*guard.local` were populated by
             //     `CommandQueue::push<C>`, which wrote a `CommandMeta` via
             //     `write_unaligned`.
             //   - `read_unaligned` requires no alignment and creates no
             //     intermediate reference.
-            //   - `local_cursor + COMMAND_PAYLOAD_OFFSET <= stop_snapshot`
+            //   - `*guard.local + COMMAND_PAYLOAD_OFFSET <= stop_snapshot`
             //     holds because every pushed command writes a full
             //     `meta + payload` block.
             let meta = unsafe {
                 self.bytes
                     .as_mut()
                     .as_mut_ptr()
-                    .add(local_cursor)
+                    .add(*guard.local)
                     .cast::<CommandMeta>()
                     .read_unaligned()
             };
 
             // Advance the local cursor past the meta header. The guard
             // will sync this to `*self.cursor` on Drop.
-            local_cursor += COMMAND_PAYLOAD_OFFSET;
+            *guard.local += COMMAND_PAYLOAD_OFFSET;
 
             // Pointer to the command's payload bytes.
             //
             // SAFETY:
-            //   - `local_cursor < bytes.len()` (`push` wrote the payload
+            //   - `*guard.local < bytes.len()` (`push` wrote the payload
             //     immediately after the meta header).
             //   - The resulting pointer is for `consume_and_drop_glue` to
             //     `read_unaligned::<C>` from; no reference is created here.
-            let cmd_ptr = unsafe { self.bytes.as_mut().as_mut_ptr().add(local_cursor) };
+            let cmd_ptr = unsafe { self.bytes.as_mut().as_mut_ptr().add(*guard.local) };
 
-            // Pass `&mut local_cursor` to the glue — when
+            // Pass `&mut *guard.local` to the glue — when
             // `consume_and_drop_glue` advances `*cursor += sizeof::<C>()`
             // (W3'), it advances our stack-local. The guard's Drop
             // mirrors that advance into `*self.cursor` on either normal
@@ -565,9 +784,13 @@ impl RawCommandQueue {
             //     `push<C>::write_unaligned` and has not been read out
             //     since.
             //   - We hold exclusive access to the bytes (caller's
-            //     invariant). `&mut local_cursor` is a unique borrow of
-            //     the stack-local — no other reference into it lives
-            //     across this call.
+            //     invariant). `&mut *guard.local` is a unique reborrow of
+            //     the guard's borrow of the stack-local, and it ends when
+            //     the glue returns. The loop's next access goes through
+            //     `guard.local` itself, the reborrow's parent, so under
+            //     both borrow models that access only retires the dead
+            //     child. No pointer that the guard's final read depends on
+            //     is invalidated.
             //   - `world` is a live exclusive `&mut EcsMaster` if Some.
             //   - W3' (`consume_and_drop_glue`) advances the cursor by
             //     `sizeof::<C>()` BEFORE running `cmd.apply`. On panic,
@@ -579,17 +802,17 @@ impl RawCommandQueue {
             //     into `cmd: C` by `ptr::read_unaligned` and dropped via
             //     local unwind).
             unsafe {
-                (meta.consume_and_drop)(cmd_ptr, world, &mut local_cursor);
+                (meta.consume_and_drop)(cmd_ptr, world, &mut *guard.local);
             }
         }
 
         // Reached the success path: drop the guard NOW so it cannot
         // overwrite the `*self.cursor = start` reset below. (The guard
-        // exists to sync `local_cursor` into `*self.cursor` on unwind;
+        // exists to sync the local cursor into `*self.cursor` on unwind;
         // on normal completion the success-path block writes `start`
         // directly, and the guard's last-second write of
         // `local_cursor == stop_snapshot` would clobber it.)
-        drop(_guard);
+        drop(guard);
 
         // Success path. Three sub-cases:
         //   (A) `bytes.len() == stop_snapshot` — no command-during-apply
@@ -664,8 +887,9 @@ impl RawCommandQueue {
         );
 
         // `*self.cursor` was advanced past the panicker by W3' inside
-        // `consume_and_drop_glue` (which now mutates the queue's own cursor
-        // field directly — see `apply_or_drop_queued_no_catch`). The
+        // `consume_and_drop_glue` (which advances the walk's stack-local
+        // cursor; `CursorSync::drop` published it into `*self.cursor` during
+        // the unwind — see `apply_or_drop_queued_no_catch`). The
         // survivor range is everything from there to `current_stop`
         // (= `bytes.len()` AT panic time, which already includes any
         // commands the panicker pushed before panicking — Q-A1.1 case 1).
@@ -1002,6 +1226,399 @@ mod tests {
             after - before,
             COMMAND_PAYLOAD_OFFSET + mem::size_of::<ZeroCmd>(),
             "push must write meta + payload contiguously",
+        );
+    }
+
+    // =========================================================================
+    // KE7 — `CommandQueue::{mark, rewind}` (kernel backlog KE7)
+    // =========================================================================
+    //
+    // The oracle these tests exist to be: a rewind that merely truncated the
+    // arena (`bytes.set_len(mark)`) passes the "which commands applied?"
+    // assertions and FAILS `rewind_runs_drop_glue_exactly_once` — the payload
+    // of every discarded command leaks. That test is the reason the item's
+    // implementation is a walk and not a `set_len`, so it is written to
+    // observe the drop, not the outcome.
+
+    /// A command that owns heap memory, so a rewind that skips the drop glue
+    /// leaks a real allocation (visible to Miri's leak checker as well as to
+    /// the drop counter).
+    struct OwningCommand {
+        payload: Box<u32>,
+        apply_counter: &'static AtomicUsize,
+        drop_counter: &'static AtomicUsize,
+    }
+
+    impl Command for OwningCommand {
+        fn apply(self, _world: &mut EcsMaster) {
+            self.apply_counter
+                .fetch_add(*self.payload as usize, Ordering::Relaxed);
+        }
+    }
+
+    impl Drop for OwningCommand {
+        fn drop(&mut self) {
+            self.drop_counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// KE7 — the load-bearing property: a rewound command's payload is
+    /// dropped, **exactly once**, and never applied.
+    ///
+    /// Distinguishes the shipped drop-glue walk from a truncate-only
+    /// `set_len(mark)` rewind (which would report `DROP == 0` here). The
+    /// trailing `apply` proves the same bytes are not walked a second time:
+    /// a double-drop would push `DROP` to 2 and, on a real payload, be UB.
+    #[test]
+    fn rewind_runs_drop_glue_exactly_once() {
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
+
+        let mut q = CommandQueue::new();
+        let mark = q.mark();
+        q.push(OwningCommand {
+            payload: Box::new(9),
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        q.rewind(mark);
+
+        assert_eq!(
+            DROP.load(Ordering::Relaxed),
+            1,
+            "the rewound command must be dropped exactly once — a truncate-only \
+             rewind reports 0 here and leaks the Box",
+        );
+        assert_eq!(
+            APPLY.load(Ordering::Relaxed),
+            0,
+            "a rewound command must never reach `Command::apply`",
+        );
+        assert_eq!(q.bytes.len(), mark.0, "the arena is truncated to the mark");
+
+        // The rewound slot must not be walked again by a later apply.
+        let mut world = EcsMaster::new();
+        q.apply(&mut world);
+        assert_eq!(
+            DROP.load(Ordering::Relaxed),
+            1,
+            "a later apply must not re-walk the rewound bytes (a second drop \
+             would be a double-drop, not merely a wrong count)",
+        );
+    }
+
+    /// KE7 — a rewind discards the suffix and preserves the prefix: commands
+    /// pushed BEFORE the mark still apply.
+    #[test]
+    fn rewind_keeps_commands_pushed_before_the_mark() {
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
+
+        let mut q = CommandQueue::new();
+        q.push(CounterCommand {
+            delta: 1,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        let mark = q.mark();
+        q.push(CounterCommand {
+            delta: 10,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        q.push(CounterCommand {
+            delta: 100,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        q.rewind(mark);
+
+        assert_eq!(
+            DROP.load(Ordering::Relaxed),
+            2,
+            "both post-mark commands are dropped by the rewind",
+        );
+
+        let mut world = EcsMaster::new();
+        q.apply(&mut world);
+        assert_eq!(
+            APPLY.load(Ordering::Relaxed),
+            1,
+            "only the pre-mark command applies (1, not 11 / 101 / 111)",
+        );
+        assert_eq!(
+            DROP.load(Ordering::Relaxed),
+            3,
+            "the surviving command drops once, on its own apply",
+        );
+    }
+
+    /// KE7 — a mark taken on an empty queue rewinds the whole arena, and the
+    /// queue is re-usable afterwards (`cursor` is restored to its at-rest 0,
+    /// which `apply_via_raw_twin` debug-asserts).
+    #[test]
+    fn rewind_to_an_empty_mark_clears_the_queue_and_leaves_it_reusable() {
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
+
+        let mut q = CommandQueue::new();
+        let mark = q.mark();
+        assert_eq!(mark.0, 0, "a mark on an empty queue is offset 0");
+        for delta in [2usize, 3, 4] {
+            q.push(CounterCommand {
+                delta,
+                apply_counter: &APPLY,
+                drop_counter: &DROP,
+            });
+        }
+        q.rewind(mark);
+
+        assert!(q.is_empty(), "the arena is empty after a rewind to offset 0");
+        assert_eq!(q.cursor, 0, "the cursor is restored to its at-rest value");
+        assert_eq!(DROP.load(Ordering::Relaxed), 3, "all three drop");
+
+        // Re-usable: a fresh push/apply cycle behaves normally.
+        q.push(CounterCommand {
+            delta: 5,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        let mut world = EcsMaster::new();
+        q.apply(&mut world);
+        assert_eq!(
+            APPLY.load(Ordering::Relaxed),
+            5,
+            "only the post-rewind command applied",
+        );
+    }
+
+    /// KE7 — rewinding with nothing pushed since the mark is a no-op, not an
+    /// error. The common shape for a caller that marks defensively and then
+    /// completes normally.
+    #[test]
+    fn rewind_with_nothing_pushed_since_the_mark_is_a_noop() {
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
+
+        let mut q = CommandQueue::new();
+        q.push(CounterCommand {
+            delta: 6,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        let mark = q.mark();
+        let len_at_mark = q.bytes.len();
+        q.rewind(mark);
+
+        assert_eq!(q.bytes.len(), len_at_mark, "no bytes discarded");
+        assert_eq!(DROP.load(Ordering::Relaxed), 0, "nothing dropped");
+
+        let mut world = EcsMaster::new();
+        q.apply(&mut world);
+        assert_eq!(APPLY.load(Ordering::Relaxed), 6, "the command still applies");
+    }
+
+    /// KE7 — **the documented caveat, pinned as a test rather than only as
+    /// prose**: a rewind does NOT return reserved entity ids to circulation.
+    ///
+    /// `Commands::spawn` claims its `Entity` from the world's entity reservoir
+    /// before pushing the command, and the id escapes through `.id()` at that
+    /// moment. Rewinding the command therefore leaves the id claimed and
+    /// unused — id space leaks, by design. This test models that exact
+    /// sequence at the layer where both halves are visible, on an empty
+    /// recycled stack (the claim mints fresh); the recycled twin is
+    /// `rewind_does_not_reissue_a_claimed_recycled_entity`.
+    #[test]
+    fn rewind_does_not_reclaim_reserved_entity_ids() {
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
+
+        let world = EcsMaster::new();
+        let mut q = CommandQueue::new();
+
+        let mark = q.mark();
+        // The `Commands::spawn` shape: claim the id first, then enqueue.
+        // `reserve_entity` takes `&self` — a worker claims through atomics
+        // alone, without `&mut EntityMaster`.
+        let rewound = world.entity_master.reserve_entity();
+        q.push(CounterCommand {
+            delta: 1,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        q.rewind(mark);
+
+        let after = world.entity_master.reserve_entity();
+        assert_ne!(
+            after.id(),
+            rewound.id(),
+            "the rewound id is NOT re-issued — `rewind` discards the command, \
+             never the mint (KE7's documented leak)",
+        );
+        assert_eq!(
+            DROP.load(Ordering::Relaxed),
+            1,
+            "the command itself was discarded and dropped",
+        );
+    }
+
+    /// KE7, recycled twin (EM2′): with a populated recycled stack the claim
+    /// takes a RECYCLED entity, and rewinding its command leaves that entity
+    /// claimed — the dispatcher's next allocation must not re-issue it, and
+    /// neither must the next claim.
+    #[test]
+    fn rewind_does_not_reissue_a_claimed_recycled_entity() {
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
+
+        let mut world = EcsMaster::new();
+        // Populate the recycled stack with one entity (id 0, generation 1).
+        let e0 = world.entity_master.allocate_entity();
+        world.entity_master.register_entity_with_ptr(
+            e0,
+            core::ptr::NonNull::dangling().as_ptr(),
+            0,
+        );
+        assert!(world.entity_master.deallocate_entity(e0));
+        assert_eq!(world.entity_master.recycled_entity_count(), 1);
+
+        let mut q = CommandQueue::new();
+        let mark = q.mark();
+        let claimed = world.entity_master.reserve_entity();
+        assert_eq!(
+            claimed,
+            crate::ecs::core::entity::entity::Entity::new(e0.id(), e0.generation() + 1),
+            "fixture: the claim must take the recycled entity"
+        );
+        q.push(CounterCommand {
+            delta: 1,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        q.rewind(mark);
+
+        let next_claim = world.entity_master.reserve_entity();
+        assert_ne!(next_claim.id(), claimed.id(), "the next claim must not re-issue it");
+        let next_alloc = world.entity_master.allocate_entity();
+        assert_ne!(
+            next_alloc.id(),
+            claimed.id(),
+            "the dispatcher's next allocation must not re-pop the claimed entry"
+        );
+        assert_eq!(world.entity_master.recycled_entity_count(), 0);
+        assert_eq!(DROP.load(Ordering::Relaxed), 1, "the command was discarded and dropped");
+        assert_eq!(APPLY.load(Ordering::Relaxed), 0, "and never applied");
+    }
+
+    /// A command whose `Drop` panics — the fixture for `rewind`'s recovery
+    /// branch. The counter is bumped BEFORE the panic so the test can tell
+    /// "the glue ran and then panicked" from "the glue never ran".
+    struct PanickingDropCommand {
+        drop_counter: &'static AtomicUsize,
+    }
+
+    impl Command for PanickingDropCommand {
+        fn apply(self, _world: &mut EcsMaster) {
+            unreachable!("this command exists only to be rewound");
+        }
+    }
+
+    impl Drop for PanickingDropCommand {
+        fn drop(&mut self) {
+            self.drop_counter.fetch_add(1, Ordering::Relaxed);
+            panic!("KE7 fixture: a discarded command's Drop panicked");
+        }
+    }
+
+    /// KE7 — the **recovery branch**: a panic inside a discarded command's
+    /// `Drop`.
+    ///
+    /// Everything `rewind`'s `# Panics` section promises happens on this path
+    /// and nowhere else: the `catch_unwind`, the `unsafe { set_len(start) }`
+    /// with its "[start..cursor) is logically uninitialised, [cursor..len)
+    /// leaks" reasoning, the `cursor = 0` restore, and the `resume_unwind`.
+    /// Every other KE7 test drives the success path, so that whole branch —
+    /// including its `unsafe` — was never executed by anything, while the
+    /// sibling `apply` path has a dedicated `tests/command_queue_panic_recovery.rs`.
+    /// An untaken branch is not a covered branch.
+    #[test]
+    fn rewind_recovers_from_a_panicking_drop_and_leaves_the_queue_reusable() {
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
+        static PANICKER_DROP: AtomicUsize = AtomicUsize::new(0);
+
+        let mut q = CommandQueue::new();
+        // Before the mark: must survive the rewind untouched.
+        q.push(CounterCommand {
+            delta: 1,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        let mark = q.mark();
+        // First past the mark: the walk reaches this one and its `Drop` panics.
+        q.push(PanickingDropCommand {
+            drop_counter: &PANICKER_DROP,
+        });
+        // Second past the mark: the walk never reaches it — the leak the doc
+        // comment names, made observable by its drop counter staying 0.
+        q.push(CounterCommand {
+            delta: 100,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+
+        // The harness prints a backtrace-ish line for the deliberate panic;
+        // silence it so a green run reads green.
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| q.rewind(mark)));
+        std::panic::set_hook(previous_hook);
+
+        assert!(
+            outcome.is_err(),
+            "the Drop panic must PROPAGATE to the caller — `rewind` recovers the \
+             queue, it does not swallow the panic",
+        );
+        assert_eq!(
+            PANICKER_DROP.load(Ordering::Relaxed),
+            1,
+            "the panicking command's glue ran (once) before it panicked",
+        );
+        assert_eq!(
+            DROP.load(Ordering::Relaxed),
+            0,
+            "the command AFTER the panicking one was never reached, so it is \
+             leaked rather than dropped — the documented trade",
+        );
+        assert_eq!(
+            q.bytes.len(),
+            mark.0,
+            "the arena is truncated to the mark even on the panic path: both the \
+             moved-out prefix and the unreached suffix are discarded, so no slot \
+             can be re-read (which would be UB)",
+        );
+        assert_eq!(q.cursor, 0, "the at-rest cursor is restored before the resume");
+
+        // Re-usable: the pre-mark command still applies, exactly once, and the
+        // discarded bytes are never walked again.
+        let mut world = EcsMaster::new();
+        q.apply(&mut world);
+        assert_eq!(
+            APPLY.load(Ordering::Relaxed),
+            1,
+            "only the pre-mark command applies (1, not 101)",
+        );
+        assert_eq!(
+            DROP.load(Ordering::Relaxed),
+            1,
+            "and it drops exactly once, on its own apply — the leaked suffix is \
+             never re-walked",
+        );
+        assert_eq!(
+            PANICKER_DROP.load(Ordering::Relaxed),
+            1,
+            "no second drop of the panicking command (that would be a \
+             double-drop, not merely a wrong count)",
         );
     }
 }

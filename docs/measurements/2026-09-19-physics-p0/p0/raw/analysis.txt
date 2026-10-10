@@ -1,0 +1,80 @@
+window: {'window_start': '2026-09-19T05:22:15.259+03:00', 'window_end': '2026-09-19T05:46:52.939+03:00', 'status': "VOID: A/A0 band > 2 % at W ['2'] (B {'1': 0.003936258736052967, '2': 0.02310514851949197, '4': 0.007780329582348422, '8': 0.007862244849833777, '16': 0.00919421615969318}) (after pass 2)"}
+  pass 0: 2026-09-19T05:22:17.682+03:00 .. 2026-09-19T05:31:57.054+03:00; attempts 51 (re-runs 1)
+  pass 1: 2026-09-19T05:32:23.582+03:00 .. 2026-09-19T05:39:46.651+03:00; attempts 53 (re-runs 0)
+  pass 2: 2026-09-19T05:39:51.445+03:00 .. 2026-09-19T05:46:49.908+03:00; attempts 50 (re-runs 0)
+
+per row and W: window mean step time, median over passes [min, max] (n passes); per pass in pass order
+  J-A-d1    W=1  median 19.5664 ms [19.4888 ms, 19.6083 ms] n=3 spread 0.61% | p0=19.5664 ms p1=19.6083 ms p2=19.4888 ms
+  J-A-d1    W=2  median 13.7512 ms [13.7429 ms, 13.7846 ms] n=3 spread 0.30% | p0=13.7512 ms p1=13.7429 ms p2=13.7846 ms
+  J-A-d1    W=4  median 10.6380 ms [10.5691 ms, 10.8419 ms] n=3 spread 2.58% | p0=10.8419 ms(rerun) p1=10.6380 ms p2=10.5691 ms
+  J-A-d1    W=8  median 9.3587 ms [9.1161 ms, 9.4968 ms] n=3 spread 4.18% | p0=9.4968 ms p1=9.1161 ms p2=9.3587 ms
+  J-A-d1    W=16 median 9.1615 ms [9.1476 ms, 9.2121 ms] n=3 spread 0.71% | p0=9.2121 ms p1=9.1615 ms p2=9.1476 ms
+  J-A-a     W=1  median 19.6927 ms [19.6115 ms, 19.7961 ms] n=3 spread 0.94% | p0=19.6115 ms p1=19.6927 ms p2=19.7961 ms
+  J-A-a     W=2  median 13.7826 ms [13.7797 ms, 14.0821 ms] n=3 spread 2.19% | p0=14.0821 ms p1=13.7797 ms p2=13.7826 ms
+  J-A-a     W=4  median 10.7544 ms [10.6702 ms, 10.8836 ms] n=3 spread 2.00% | p0=10.8836 ms p1=10.6702 ms p2=10.7544 ms
+  J-A-a     W=8  median 9.2326 ms [9.1940 ms, 9.3536 ms] n=3 spread 1.73% | p0=9.1940 ms p1=9.3536 ms p2=9.2326 ms
+  J-A-a     W=16 median 9.2959 ms [9.2360 ms, 9.6296 ms] n=3 spread 4.26% | p0=9.6296 ms p1=9.2959 ms p2=9.2360 ms
+  J-B       W=1  median 14.1577 ms [14.0342 ms, 14.4274 ms] n=3 spread 2.80% | p0=14.0342 ms p1=14.4274 ms p2=14.1577 ms
+  J-B       W=8  median 11.1703 ms [11.1623 ms, 11.1786 ms] n=3 spread 0.15% | p0=11.1623 ms p1=11.1786 ms p2=11.1703 ms
+  J-C       W=1  median 20.7436 ms [20.5872 ms, 20.7747 ms] n=3 spread 0.91% | p0=20.5872 ms p1=20.7436 ms p2=20.7747 ms
+  J-C       W=8  median 9.7137 ms [9.6920 ms, 9.7335 ms] n=3 spread 0.43% | p0=9.7137 ms p1=9.7335 ms p2=9.6920 ms
+  J-P1      W=1  median 19.8743 ms [19.7171 ms, 20.0202 ms] n=3 spread 1.54% | p0=19.7171 ms p1=19.8743 ms p2=20.0202 ms
+  J-Son     W=1  median 9.1431 ms [9.1366 ms, 9.1697 ms] n=3 spread 0.36% | p0=9.1366 ms p1=9.1697 ms p2=9.1431 ms
+  J-Son     W=8  median 6.4154 ms [6.4105 ms, 6.4698 ms] n=3 spread 0.92% | p0=6.4105 ms p1=6.4154 ms p2=6.4698 ms
+  J-S0      W=1  median 19.6714 ms [19.5837 ms, 19.8418 ms] n=3 spread 1.32% | p0=19.6714 ms p1=19.5837 ms p2=19.8418 ms
+  L1-A1     W=1  median 19.1873 ms [19.0212 ms, 19.5039 ms] n=3 spread 2.54% | p0=19.5039 ms p1=19.1873 ms p2=19.0212 ms
+  L1-B      W=1  median 19.6778 ms [19.2293 ms, 19.7126 ms] n=3 spread 2.51% | p0=19.2293 ms p1=19.6778 ms p2=19.7126 ms
+  L1-A2     W=1  median 19.6588 ms [19.4759 ms, 19.7576 ms] n=3 spread 1.45% | p0=19.4759 ms p1=19.7576 ms p2=19.6588 ms
+  R         W=1  median 14.1382 ms [14.0667 ms, 14.3844 ms] n=3 spread 2.26% | p0=14.0667 ms p1=14.1382 ms p2=14.3844 ms
+  R         W=8  median 9.7511 ms [9.6879 ms, 9.8318 ms] n=3 spread 1.49% | p0=9.7511 ms p1=9.6879 ms p2=9.8318 ms
+  R-ref     W=1  median 24.0655 ms [23.7938 ms, 24.1984 ms] n=3 spread 1.70% | p0=23.7938 ms p1=24.0655 ms p2=24.1984 ms
+  R-S       W=1  median 6.0677 ms [6.0252 ms, 6.0684 ms] n=3 spread 0.72% | p0=6.0684 ms p1=6.0677 ms p2=6.0252 ms
+  R-S       W=8  median 6.0833 ms [6.0685 ms, 6.1147 ms] n=3 spread 0.76% | p0=6.0833 ms p1=6.0685 ms p2=6.1147 ms
+  S16       W=1  median 0.0812 ms [0.0803 ms, 0.0822 ms] n=3 spread 2.26% | p0=0.0803 ms p1=0.0822 ms p2=0.0812 ms
+  S16       W=8  median 0.0795 ms [0.0795 ms, 0.0797 ms] n=3 spread 0.30% | p0=0.0797 ms p1=0.0795 ms p2=0.0795 ms
+  AA2-pre   W=1  median 19.6191 ms [19.5495 ms, 19.6684 ms] n=3 spread 0.61% | p0=19.5495 ms p1=19.6191 ms p2=19.6684 ms
+  AA2-pre   W=8  median 9.1792 ms [9.1351 ms, 9.6256 ms] n=3 spread 5.37% | p0=9.1792 ms p1=9.1351 ms p2=9.6256 ms
+  SHIP      W=1  median 19.4922 ms [19.4046 ms, 19.5437 ms] n=3 spread 0.72% | p0=19.4922 ms p1=19.5437 ms p2=19.4046 ms
+  SHIP      W=8  median 9.1976 ms [9.0161 ms, 9.3702 ms] n=3 spread 3.93% | p0=9.3702 ms p1=9.1976 ms p2=9.0161 ms
+  J-A-d2    W=1  median 19.5401 ms [19.5128 ms, 19.6163 ms] n=3 spread 0.53% | p0=19.5128 ms p1=19.6163 ms p2=19.5401 ms
+  J-A-d2    W=2  median 13.4951 ms [13.4821 ms, 13.5557 ms] n=3 spread 0.55% | p0=13.5557 ms p1=13.4821 ms p2=13.4951 ms
+  J-A-d2    W=4  median 10.6841 ms [10.6830 ms, 11.0777 ms] n=3 spread 3.69% | p0=11.0777 ms p1=10.6830 ms p2=10.6841 ms
+  J-A-d2    W=8  median 9.1532 ms [9.1241 ms, 9.2275 ms] n=3 spread 1.13% | p0=9.1532 ms p1=9.1241 ms p2=9.2275 ms
+  J-A-d2    W=16 median 9.2090 ms [9.1440 ms, 9.3628 ms] n=3 spread 2.39% | p0=9.2090 ms p1=9.1440 ms p2=9.3628 ms
+  JOLT-T    W=1  median 15.1514 ms [15.1083 ms, 15.8424 ms] n=3 spread 4.86% | p0=15.1083 ms p1=15.1514 ms p2=15.8424 ms
+  JOLT-T    W=2  median 8.6656 ms [8.6276 ms, 8.7576 ms] n=3 spread 1.51% | p0=8.6656 ms p1=8.7576 ms p2=8.6276 ms
+  JOLT-T    W=4  median 5.2213 ms [5.1615 ms, 5.2406 ms] n=3 spread 1.53% | p0=5.2406 ms p1=5.1615 ms p2=5.2213 ms
+  JOLT-T    W=8  median 3.5287 ms [3.4910 ms, 3.5558 ms] n=3 spread 1.85% | p0=3.4910 ms p1=3.5287 ms p2=3.5558 ms
+  JOLT-T    W=16 median 3.2063 ms [3.2030 ms, 3.3275 ms] n=3 spread 3.89% | p0=3.2030 ms p1=3.2063 ms p2=3.3275 ms
+  JOLT56-T  W=1  median 9.6427 ms [9.5694 ms, 9.6646 ms] n=3 spread 1.00% | p0=9.6646 ms p1=9.6427 ms p2=9.5694 ms
+  JOLT56-T  W=2  median 5.6773 ms [5.6639 ms, 5.6813 ms] n=3 spread 0.31% | p0=5.6773 ms p1=5.6813 ms p2=5.6639 ms
+  JOLT56-T  W=4  median 3.5864 ms [3.5417 ms, 3.5878 ms] n=3 spread 1.30% | p0=3.5878 ms p1=3.5864 ms p2=3.5417 ms
+  JOLT56-T  W=8  median 2.4902 ms [2.4894 ms, 2.5324 ms] n=3 spread 1.73% | p0=2.4902 ms p1=2.4894 ms p2=2.5324 ms
+  JOLT56-T  W=16 median 2.4291 ms [2.3797 ms, 2.4843 ms] n=3 spread 4.40% | p0=2.3797 ms p1=2.4291 ms p2=2.4843 ms
+  JOLT-NPC  W=8  median 5.0707 ms [4.9943 ms, 5.1215 ms] n=3 spread 2.55% | p0=5.1215 ms p1=4.9943 ms p2=5.0707 ms
+  JOLT-SLP  W=1  median 1.9009 ms [1.8949 ms, 1.9444 ms] n=3 spread 2.61% | p0=1.9009 ms p1=1.8949 ms p2=1.9444 ms
+  JOLT-SLP  W=8  median 0.4238 ms [0.4069 ms, 0.4302 ms] n=3 spread 5.73% | p0=0.4302 ms p1=0.4069 ms p2=0.4238 ms
+  JOLT-P    W=1  median n/a [n/a, n/a] n=0 spread n/a | p1=n/a
+  JOLT-P    W=8  median n/a [n/a, n/a] n=0 spread n/a | p1=n/a
+  JOLT-RCPT W=1  median n/a [n/a, n/a] n=0 spread n/a | p1=n/a
+
+per-step closure census over 60 armed runs: 6 with any step flagged
+  {'run': 'S16@W1 p0', 'steps': 300, 'g_neg': 0, 'u_neg': 0, 'u_gt_3pct_solve': 3, 'sys_sum_gt_wall': 0, 'void': 0}
+  {'run': 'S16@W8 p0', 'steps': 300, 'g_neg': 0, 'u_neg': 0, 'u_gt_3pct_solve': 5, 'sys_sum_gt_wall': 0, 'void': 0}
+  {'run': 'S16@W8 p1', 'steps': 300, 'g_neg': 0, 'u_neg': 0, 'u_gt_3pct_solve': 6, 'sys_sum_gt_wall': 0, 'void': 0}
+  {'run': 'S16@W1 p1', 'steps': 300, 'g_neg': 0, 'u_neg': 0, 'u_gt_3pct_solve': 4, 'sys_sum_gt_wall': 0, 'void': 0}
+  {'run': 'S16@W1 p2', 'steps': 300, 'g_neg': 0, 'u_neg': 0, 'u_gt_3pct_solve': 2, 'sys_sum_gt_wall': 0, 'void': 0}
+  {'run': 'S16@W8 p2', 'steps': 300, 'g_neg': 0, 'u_neg': 0, 'u_gt_3pct_solve': 9, 'sys_sum_gt_wall': 0, 'void': 0}
+
+receipts: 308 (before+after of every attempt); cpu_avg min 0.24 median 1.17 p90 2.4 max 9.99 (% of 16 logical CPUs); over 5 %: 1
+  top-1 process by CPU in the receipt window: [('Taskmgr.exe', 251), ('claude.exe', 41), ('steamwebhelper.exe', 10), ('browser.exe', 2), ('steam.exe', 2), ('vctip.exe', 1), ('explorer.exe', 1)]
+  build processes seen using CPU: {'cargo.exe': 1}
+  original runs 153, contaminated 1: [('J-A-d1', 4, 0)]
+  re-runs 1, contaminated again 0: []
+  excluded from the timed reduction: []
+  quiet-rule wait total 176.1 s; aborted []
+    >5%: J-A-d1@W4 p0 original receipt_after 9.99% top [('vctip.exe', 1.56), ('sdf_gbuffer_hybrid-2a81a9b8ad27e6f6.exe', 0.54), ('Taskmgr.exe', 0.44)]
+
+boyko pose hash per row@W (every attempt): {"J-A-d1@W1": ["0x32d5e235342b4143"], "J-A-a@W1": ["0x32d5e235342b4143"], "J-B@W1": ["0x32d5e235342b4143"], "J-C@W1": ["0x32d5e235342b4143"], "J-P1@W1": ["0x32d5e235342b4143"], "J-Son@W1": ["0xcc2a5400c66eecce"], "J-S0@W1": ["0x32d5e235342b4143"], "L1-A1@W1": ["0x32d5e235342b4143"], "L1-B@W1": ["0x32d5e235342b4143"], "L1-A2@W1": ["0x32d5e235342b4143"], "R@W1": ["0x87e561d20589d4a5"], "R-ref@W1": ["0x67463b7ea88686d2"], "R-S@W1": ["0x2a2b7926a48aab00"], "S16@W1": ["0x8877dbb1192e9b92"], "AA2-pre@W1": ["0x32d5e235342b4143"], "SHIP@W1": ["0x32d5e235342b4143"], "J-A-d2@W1": ["0x32d5e235342b4143"], "J-A-d1@W2": ["0x32d5e235342b4143"], "J-A-a@W2": ["0x32d5e235342b4143"], "J-A-d2@W2": ["0x32d5e235342b4143"], "J-A-d1@W4": ["0x32d5e235342b4143"], "J-A-a@W4": ["0x32d5e235342b4143"], "J-A-d2@W4": ["0x32d5e235342b4143"], "J-A-d1@W8": ["0x32d5e235342b4143"], "J-A-a@W8": ["0x32d5e235342b4143"], "J-B@W8": ["0x32d5e235342b4143"], "J-C@W8": ["0x32d5e235342b4143"], "J-Son@W8": ["0xcc2a5400c66eecce"], "R@W8": ["0x87e561d20589d4a5"], "R-S@W8": ["0x2a2b7926a48aab00"], "S16@W8": ["0x8877dbb1192e9b92"], "AA2-pre@W8": ["0x32d5e235342b4143"], "SHIP@W8": ["0x32d5e235342b4143"], "J-A-d2@W8": ["0x32d5e235342b4143"], "J-A-d1@W16": ["0x32d5e235342b4143"], "J-A-a@W16": ["0x32d5e235342b4143"], "J-A-d2@W16": ["0x32d5e235342b4143"]}
+Jolt hash per row@W (every attempt): {"JOLT-T@W1": ["0xee15b89965ec747"], "JOLT56-T@W1": ["0xb8522b4e3fc62cfe"], "JOLT-SLP@W1": ["0x6b2368f4c588aeae"], "JOLT-T@W2": ["0xee15b89965ec747"], "JOLT56-T@W2": ["0xb8522b4e3fc62cfe"], "JOLT-T@W4": ["0xee15b89965ec747"], "JOLT56-T@W4": ["0xb8522b4e3fc62cfe"], "JOLT-T@W8": ["0xee15b89965ec747"], "JOLT56-T@W8": ["0xb8522b4e3fc62cfe"], "JOLT-NPC@W8": ["0xf7fd640e276d8281"], "JOLT-SLP@W8": ["0x6b2368f4c588aeae"], "JOLT-T@W16": ["0xee15b89965ec747"], "JOLT56-T@W16": ["0xb8522b4e3fc62cfe"], "JOLT-P@W8": ["0xee15b89965ec747"], "JOLT-P@W1": ["0xee15b89965ec747"], "JOLT-RCPT@W1": ["0xee15b89965ec747"]}
+non-zero exits over every attempt: []

@@ -1,0 +1,27 @@
+(a) ours 9a [0,500) / 8b trunk 16191fda [0,500):
+  W1: 4.5930 / 4.4500 = 1.0321
+  W2: 3.0706 / 2.9998 = 1.0236
+  W4: 2.2356 / 2.1981 = 1.0171
+  W8: 1.8502 / 1.8154 = 1.0191
+  W16: 2.0597 / 2.0502 = 1.0046
+(b) [100,500) Rapier/ours median ratios vs a block drift of 1.1066 (8b F3/S4-AB at W8): a gap survives if ratio > 1.1066 or < 0.9037
+  R-WALL-D W1: rs8 1.128 (yes), rs4 1.318 (yes)
+  R-WALL-D W2: rs8 1.013 (no), rs4 1.158 (yes)
+  R-WALL-D W4: rs8 0.932 (no), rs4 1.058 (no)
+  R-WALL-D W8: rs8 0.780 (yes), rs4 0.867 (yes)
+  R-WALL-D W16: rs8 0.782 (yes), rs4 0.842 (yes)
+  R-WALL-M W1: rs8 1.769 (yes), rs4 2.306 (yes)
+  R-WALL-M W2: rs8 1.520 (yes), rs4 1.909 (yes)
+  R-WALL-M W4: rs8 1.478 (yes), rs4 1.727 (yes)
+  R-WALL-M W8: rs8 1.408 (yes), rs4 1.511 (yes)
+  R-WALL-M W16: rs8 1.385 (yes), rs4 1.465 (yes)
+  R-ROW-D W1: rs8 1.896 (yes), rs4 2.214 (yes)
+  R-ROW-D W2: rs8 1.702 (yes), rs4 1.946 (yes)
+  R-ROW-D W4: rs8 1.565 (yes), rs4 1.778 (yes)
+  R-ROW-D W8: rs8 1.311 (yes), rs4 1.457 (yes)
+  R-ROW-D W16: rs8 1.314 (yes), rs4 1.415 (yes)
+  R-ROW-M W1: rs8 0.984 (no), rs4 1.283 (yes)
+  R-ROW-M W2: rs8 0.846 (yes), rs4 1.062 (no)
+  R-ROW-M W4: rs8 0.822 (yes), rs4 0.961 (no)
+  R-ROW-M W8: rs8 0.784 (yes), rs4 0.841 (yes)
+  R-ROW-M W16: rs8 0.771 (yes), rs4 0.815 (yes)

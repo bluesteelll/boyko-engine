@@ -285,6 +285,8 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("G-buffer albedo texture");
     let normal_tex = device
@@ -296,6 +298,8 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("G-buffer normal texture");
 
@@ -309,6 +313,8 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("G-buffer depth texture");
 
@@ -323,6 +329,8 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("final output texture O");
 
@@ -551,7 +559,15 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
         }),
     });
     encoder.bind_graphics_pipeline(&geometry_pipeline);
-    encoder.push_graphics_constants(&geometry_pipeline, ShaderStage::VERTEX, 0, &mvp_bytes());
+    // `RhiDevice::create_graphics_pipeline` declares its push range VERTEX|FRAGMENT
+    // (`GRAPHICS_PUSH_STAGES_DEFAULT`, rhi_impl/mod.rs), so a VERTEX-only push leaves the range's FRAGMENT bit
+    // undeclared, tripping VUID-vkCmdPushConstants-offset-01796.
+    encoder.push_graphics_constants(
+        &geometry_pipeline,
+        ShaderStage::VERTEX | ShaderStage::FRAGMENT,
+        0,
+        &mvp_bytes(),
+    );
     encoder.bind_vertex_buffer(&vertex_buffer, 0, 0);
     encoder.set_viewport(&viewport);
     encoder.set_scissor(&full);

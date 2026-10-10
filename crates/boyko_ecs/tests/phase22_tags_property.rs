@@ -27,6 +27,13 @@
 //! are tag-only (`spawn_empty`), so the archetype universe is bounded by
 //! 2^TAGS + 1.
 
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -136,7 +143,16 @@ proptest! {
     // Each case spins up a fresh EcsMaster and roughly half the ops go
     // through a full run_system apply window — modest case count (the
     // phase19 hierarchy property precedent).
-    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+    // Under Miri, two cases: every op kind is drawn per op, and 256 interpreted cases ran past
+    // 3 min (MEASURED 2026-10-10).
+    #![proptest_config(ProptestConfig {
+        cases: if cfg!(miri) { 2 } else { 256 },
+        // No failure file under Miri: proptest finds it through the cwd, which Miri's
+        // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+        #[cfg(miri)]
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// Random direct/deferred tag-op interleave; the world must match the
     /// HashMap membership oracle after EVERY operation.

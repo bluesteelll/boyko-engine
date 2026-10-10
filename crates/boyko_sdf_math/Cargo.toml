@@ -3,7 +3,7 @@ name = "boyko_sdf_math"
 version = "0.1.0"
 edition = "2024"
 description = "no_std leaf crate holding the analytic SDF edit-list field math + std430 data model, the single source of truth shared by the Vulkan golden mirror and the CPU physics collision queries. ZERO dependencies (only `core`)."
-
+license.workspace = true
 # INVIOLABLE: this is a TRUE LEAF — ZERO third-party deps, depends on NOTHING in
 # the workspace. It holds the pure SDF field math + the `SdfEdit` std430 data
 # model so `boyko_physics` (W5) can reuse the exact same analytic field as the
@@ -34,3 +34,6 @@ default = []
 # source (the `core::intrinsics::sqrtf32` intrinsic under `nightly`, else `std`'s
 # `f32::sqrt`) and stays strictly `#![no_std]` in lock-step with this crate.
 nightly = ["boyko_shaderdsl/nightly"]
+
+[lints]
+workspace = true

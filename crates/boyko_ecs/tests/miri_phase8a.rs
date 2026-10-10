@@ -1,7 +1,7 @@
 // Phase 8a Step 13 — Miri test suite for the `SystemParam` + `Resources`
 // subsystem.
 //
-// These tests are written to be run under `cargo +nightly miri test`. They
+// These tests are written to be run under `cargo +nightly-x86_64-pc-windows-msvc miri test`. They
 // exercise the unsafe code paths added in Steps 2 / 4-7 / 8 / 9 and verify
 // that no UB (uninit reads, retag failures, double-frees, aliased mutable
 // references) is detected by Miri.
@@ -225,7 +225,7 @@ fn miri_resources_replace_panic_in_drop_no_ub() {
 // ── Test 4: miri_unsafe_ecs_cell_no_retag_via_by_value_methods (C1) ────────
 //
 // C1 RESOLUTION verification: `UnsafeEcsCell` is `Copy` and its accessors
-// take `self` by value. Calling `resources()` / `resources_mut()` on
+// take `self` by value. Calling `resources()` / `resource_ptr_mut()` on
 // successive copies must NOT trigger Tree Borrows / Stacked Borrows retag
 // UB. Under Miri (which models both borrow stacks) a regression would
 // surface as a retag failure inside `run_closure_once` when the closure

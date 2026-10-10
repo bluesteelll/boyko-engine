@@ -1,0 +1,3 @@
+# The gate scripts run under Git Bash on Windows: LF in every checkout, whatever core.autocrlf says
+# (docs/physics/perf-campaign/GATE-KIT.md, "Line endings"). Covers l10/ too.
+*.sh text eol=lf

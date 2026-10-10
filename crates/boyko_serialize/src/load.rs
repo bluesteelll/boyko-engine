@@ -57,11 +57,12 @@ use boyko_ecs::ecs::core::serialize::{
     remap_loaded_entities, required_ctor_in_set,
 };
 use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
+use boyko_log::codes::W0901;
 
 use crate::error::LoadError;
 use crate::format::{
     ArchetypeBlock, ColumnRegion, DenseStoreBlock, ENDIAN_LITTLE, FORMAT_VERSION, MAGIC,
-    SaveHeader, TypeTableEntry, native_endianness,
+    PERSIST_TICKS_FLAG, SaveHeader, TypeTableEntry, native_endianness,
 };
 
 /// Which strategy the loader uses to place saved entities (plan §3.10). v1 ships
@@ -122,8 +123,9 @@ pub struct LoadReport {
     ///
     /// An OWNING (`SerializeViaFn`) dense block WITH a decoder is now DECODED (the
     /// v1.1 per-member ViaFn dense path — counted in [`Self::dense_stores_loaded`] /
-    /// [`Self::dense_members_loaded`]), not skipped. This counter (+ a debug-only
-    /// warning) makes a genuine skip OBSERVABLE rather than silent data loss.
+    /// [`Self::dense_members_loaded`]), not skipped. This counter (+ `boyko-W0901`,
+    /// emitted in every profile since rung L8a) makes a genuine skip OBSERVABLE
+    /// rather than silent data loss.
     /// Mirrors `types_skipped` / `types_bitset_skipped` on the table side.
     pub dense_stores_skipped: u32,
     /// Dense plan D4 — total dense memberships dropped by the undecodable dense
@@ -131,6 +133,33 @@ pub struct LoadReport {
     /// block's `member_count`). The owning entities stay valid without their dense
     /// membership/value; this records how many were dropped.
     pub dense_members_skipped: u64,
+    /// S2.5 remap — TABLE (archetype-column) rows whose remappable `Entity`
+    /// references (`ChildOf`, an `#[entities]` field) were rewritten from their
+    /// saved ids to the freshly-allocated ones. One count per (column, row), not
+    /// per rewritten field.
+    pub remapped_table_rows: u64,
+    /// S2.5 remap — DENSE store slots whose remappable `Entity` references were
+    /// rewritten (tombstoned slots hold no value and are not visited).
+    ///
+    /// This counter exists because its absence was a defect: the remap pass
+    /// gathered its work from `archetype.component_ids()`, which cannot reach a
+    /// dense column (a dense component has no per-archetype pool), and so an
+    /// `#[entities]` field in dense storage kept its stale saved id while the same
+    /// annotation in table storage was remapped — SILENTLY, with `Ok` returned and
+    /// no counter moving.
+    /// Reported SEPARATELY from [`Self::remapped_table_rows`] on purpose: a single
+    /// total cannot tell "no dense component opted in" from "the pass cannot see
+    /// dense storage at all".
+    pub remapped_dense_rows: u64,
+    /// The file's [`PERSIST_TICKS_FLAG`] header bit, round-tripped from
+    /// `SaveOptions::persist_ticks` (a save/load residual fix). `true` when the file
+    /// was saved with that option set. Per-row tick VALUES are NOT restored by this
+    /// rung regardless of this flag — every row is stamped fresh at the load-time
+    /// `current_tick` (matching a plain load), same as before; this field exists so
+    /// the option's recorded intent is OBSERVABLE on load rather than a silent
+    /// header no-op, and so a future tick-value-persisting rung has the header bit
+    /// already reserved and wired end to end.
+    pub persist_ticks_flag: bool,
 }
 
 /// Resolution of one file-local type to the running build (built once per load).
@@ -215,7 +244,12 @@ pub fn load_world(
 
     // ── Pre-size + the saved→fresh map (populated per archetype below) ─────────
     let mut map = LoadEntityMap::new();
-    let mut report = LoadReport::default();
+    let mut report = LoadReport {
+        // Round-trips the save-time `SaveOptions::persist_ticks` intent (a
+        // save/load residual fix) — observable on the report, not a silent no-op.
+        persist_ticks_flag: header.flags & PERSIST_TICKS_FLAG != 0,
+        ..LoadReport::default()
+    };
 
     // ── Step 4: per archetype (always fresh — start_row == 0, W4) ──────────────
     let archetype_table_off = usize_off(header.archetype_table_off, "archetype_table_off")?;
@@ -246,13 +280,20 @@ pub fn load_world(
     load_dense_region(world, bytes, &header, &resolved, &map, &mut report)?;
 
     // ── Step 5: the entity-remap pass (S2.5 / C4) ──────────────────────────────
-    // A SEPARATE whole-world pass AFTER every archetype is loaded: rewrite each
-    // saved `Entity` reference inside a remappable component (`ChildOf` / an
-    // `#[entities]` field) to its freshly-allocated `Entity` via `map`. An unmapped
-    // saved id is a loud `LoadError::Decode(UnmappedEntity)`, never a silent
-    // dangling reference. A world with no remappable component pays nothing (no
-    // pool's `map_entities_fn` is set, so no row is ever visited).
-    remap_loaded_entities(world, &map)?;
+    // A SEPARATE whole-world pass AFTER every archetype AND every dense store is
+    // loaded: rewrite each saved `Entity` reference inside a remappable component
+    // (`ChildOf` / an `#[entities]` field) to its freshly-allocated `Entity` via
+    // `map`. An unmapped saved id is a loud `LoadError::Decode(UnmappedEntity)`,
+    // never a silent dangling reference. A world with no remappable component pays
+    // nothing (no `map_entities_fn` is set, so no row is ever visited).
+    //
+    // The pass runs TWO arms — archetype columns and dense stores — because a
+    // dense component is excluded from every archetype signature and no archetype
+    // walk can reach it. The per-arm counts land on the report so a caller can see
+    // that each arm ran, rather than inferring it from a silent `Ok`.
+    let remap = remap_loaded_entities(world, &map)?;
+    report.remapped_table_rows = remap.table_rows;
+    report.remapped_dense_rows = remap.dense_rows;
 
     Ok(report)
 }
@@ -575,8 +616,20 @@ fn load_one_archetype(
 /// `SerializeViaFn` block with NO decoder (the S1 memberships-only boundary) or an
 /// `Ignore` block carries no decodable data and stays an OBSERVABLE skip, recorded
 /// in [`LoadReport::dense_stores_skipped`] / [`LoadReport::dense_members_skipped`]
-/// (plus a debug-only warning), NOT silently dropped. Runs zero turns for a
+/// (plus `boyko-W0901`, in every profile), NOT silently dropped. Runs zero turns for a
 /// `dense_store_count == 0` file (the 0%-gate).
+///
+/// # Duplicate `type_index` hardening
+///
+/// The saver emits AT MOST ONE block per live dense type, but a hostile/corrupt
+/// file can repeat a `type_index` across two blocks. `DenseStore::insert`'s
+/// target-is-empty precondition (the fresh-world-load contract enforced in
+/// `load_writer.rs`) is a `debug_assert!` only, so a release build would run a
+/// second insert pass into the SAME store with no defense — a stale slot from the
+/// first pass stays "live" while `e2s` is overwritten to the second pass's slot for
+/// any shared saved entity, an aliased/corrupted dense iteration, never a panic.
+/// This function rejects a repeated `type_index` itself, RELEASE-level, before
+/// [`load_dense_store`] / [`load_dense_store_via_fn`] is ever reached.
 fn load_dense_region(
     world: &mut EcsMaster,
     bytes: &[u8],
@@ -590,6 +643,11 @@ fn load_dense_region(
     }
     let table_off = usize_off(header.dense_table_off, "dense_table_off")?;
     let count = header.dense_store_count as usize;
+    // Tracks every `type_index` seen so far (one bool per file-local type). Sized by
+    // `resolved.len()`, itself capped by `resolve_type_table`'s own W2 guard against
+    // the real type-table bytes — NOT by this untrusted `dense_store_count` — so this
+    // allocation cannot be driven to an unbounded size by a hostile header.
+    let mut seen_type_index = vec![false; resolved.len()];
     for i in 0..count {
         let block_off = table_off
             .checked_add(i.checked_mul(DenseStoreBlock::SIZE).ok_or(OVF)?)
@@ -600,6 +658,11 @@ fn load_dense_region(
         if type_index >= resolved.len() {
             return Err(LoadError::Truncated("dense store type index out of range"));
         }
+        if seen_type_index[type_index] {
+            return Err(LoadError::Truncated("duplicate dense store type index"));
+        }
+        seen_type_index[type_index] = true;
+
         let rt = &resolved[type_index];
         let member_count = block.member_count as usize;
 
@@ -687,7 +750,7 @@ fn load_dense_region(
                 // An `Ignore` dense block carries memberships but no decodable data
                 // (its contract — not serializable). It stays an OBSERVABLE skip: the
                 // owning entity stays valid without the dense membership, and the
-                // counters (+ a debug-only warning) make the drop visible instead of a
+                // counters (+ `boyko-W0901`) make the drop visible instead of a
                 // silent data loss. Mirrors the table-side `types_skipped` /
                 // `types_bitset_skipped` counters.
                 report.dense_stores_skipped += 1;
@@ -700,28 +763,40 @@ fn load_dense_region(
     Ok(())
 }
 
-/// Debug-only tripwire for a genuinely-undecodable dense block (an `Ignore` type,
-/// or a `SerializeViaFn` type with no installed `deserialize_fn`): names the
-/// component + dropped member count so a dense store's memberships do not vanish
-/// without a trace during development. No-op in release (the `LoadReport` counters
-/// carry the signal there); no log-crate dependency — a bare `eprintln!`, matching
-/// the project's existing diagnostic pattern (`boyko_rhi`). An OWNING dense block
-/// WITH a decoder is decoded, not warned about.
-#[cfg(debug_assertions)]
+/// Reports `boyko-W0901` for a genuinely-undecodable dense block (an `Ignore` type, or a
+/// `SerializeViaFn` type with no installed `deserialize_fn`): names the component + dropped
+/// member count so a dense store's memberships do not vanish without a trace. An OWNING dense
+/// block WITH a decoder is decoded, not warned about.
+///
+/// # Two things about this function changed at rung L8a, and both were arguments the tree settled
+///
+/// It **was `#[cfg(debug_assertions)]`**, with a release no-op beside it and a doc line saying
+/// "the `LoadReport` counters carry the signal there". They do not carry it far: `LoadReport` is a
+/// return value, and a host that drops it — or logs only its totals — turns a save that silently
+/// lost a component's data into a save that loaded fine. The gate is dropped because the condition
+/// is already fully computed in release: `report.dense_stores_skipped += 1` sits on the line above
+/// each call site, in every profile. Un-gating costs the release build one `#[cold]` call on a
+/// path that was already writing to memory.
+///
+/// It also **no longer says "no log-crate dependency"**. That comment cited "the project's
+/// existing diagnostic pattern (`boyko_rhi`)" — a pattern this campaign is retiring — and the
+/// dependency it refused was a third-party facade, which `boyko_log` is not.
+///
+/// `RatePolicy::Every`: the subject is a component type, and a save carrying three undecodable
+/// dense stores has three different things to say.
 #[cold]
 #[inline(never)]
 fn warn_dense_viafn_skipped(name: &str, member_count: usize) {
-    eprintln!(
-        "boyko_serialize: dense store for component `{name}` carries no decodable \
-         data (Ignore, or SerializeViaFn with no installed deserialize_fn); skipped \
-         {member_count} member(s) (recorded in LoadReport::dense_stores_skipped)"
+    boyko_log::warn!(
+        boyko_log::Serialize,
+        W0901,
+        "dense store for component `{}` carries no decodable data (Ignore, or SerializeViaFn \
+         with no installed deserialize_fn); skipped {} member(s) (recorded in \
+         LoadReport::dense_stores_skipped)",
+        name,
+        member_count
     );
 }
-
-/// Release no-op: the `LoadReport::dense_stores_skipped` counter carries the signal.
-#[cfg(not(debug_assertions))]
-#[inline]
-fn warn_dense_viafn_skipped(_name: &str, _member_count: usize) {}
 
 /// Reads one [`DenseStoreBlock`] header from its 40-byte image at `off`.
 fn read_dense_store_block(bytes: &[u8], off: usize) -> Result<DenseStoreBlock, LoadError> {
@@ -995,5 +1070,30 @@ fn serializability_from_u8(value: u8) -> Option<Serializability> {
         1 => Some(Serializability::SerializeViaFn),
         2 => Some(Serializability::Ignore),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod l8a_w0901 {
+    use super::*;
+    use boyko_log::probe::{arm, watch, watched};
+
+    #[test]
+    fn w0901_reports_each_skipped_component_because_the_subject_is_a_type() {
+        // `Every`, and this is the assertion that makes the choice mean something: a save
+        // carrying three undecodable dense stores has three different things to say, and a
+        // `Once` here would name one component and drop the other two names on the floor.
+        //
+        // It also pins the un-gating. This reporter was `#[cfg(debug_assertions)]` with a release
+        // no-op beside it, on the argument that `LoadReport`'s counters carried the signal --
+        // they carry a NUMBER, and a host that logs only totals cannot tell which component's
+        // data vanished. The test runs in every profile now because the function does.
+        arm::<boyko_log::Serialize>();
+
+        watch(b'W', W0901.number());
+        warn_dense_viafn_skipped("Velocity", 12);
+        warn_dense_viafn_skipped("Health", 3);
+        warn_dense_viafn_skipped("Inventory", 0);
+        assert_eq!(watched(), 3, "one record per skipped component type");
     }
 }

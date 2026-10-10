@@ -1,0 +1,63 @@
+bp_g4_maintenance/stable/1240
+                        time:   [32.298 µs 32.348 µs 32.399 µs]
+bp_g4_maintenance/admission_from_empty/1240
+                        time:   [482.77 µs 483.99 µs 485.84 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_maintenance/admission_of_64/1240
+                        time:   [70.936 µs 71.000 µs 71.069 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+bp_g4_maintenance/eviction_filter/1240
+                        time:   [46.027 µs 46.104 µs 46.183 µs]
+bp_g4_maintenance/shift_translation/1240
+                        time:   [54.995 µs 55.168 µs 55.351 µs]
+bp_g4_maintenance/compaction/1240
+                        time:   [206.72 µs 207.02 µs 207.36 µs]
+bp_g4_maintenance/high_jumper/1240
+                        time:   [59.720 µs 59.954 µs 60.174 µs]
+bp_g4_maintenance/stable/10000
+                        time:   [273.78 µs 274.13 µs 274.49 µs]
+bp_g4_maintenance/admission_from_empty/10000
+                        time:   [4.9547 ms 5.0013 ms 5.0665 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_maintenance/admission_of_64/10000
+                        time:   [529.39 µs 532.32 µs 535.41 µs]
+bp_g4_maintenance/eviction_filter/10000
+                        time:   [387.58 µs 388.96 µs 390.26 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+bp_g4_maintenance/shift_translation/10000
+                        time:   [469.03 µs 470.19 µs 471.42 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+bp_g4_maintenance/compaction/10000
+                        time:   [2.3490 ms 2.3531 ms 2.3569 ms]
+bp_g4_maintenance/high_jumper/10000
+                        time:   [504.34 µs 506.75 µs 509.87 µs]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+bp_g4_maintenance/stable/100000
+                        time:   [4.3474 ms 4.3872 ms 4.4284 ms]
+bp_g4_maintenance/admission_from_empty/100000
+                        time:   [63.019 ms 63.319 ms 63.622 ms]
+bp_g4_maintenance/admission_of_64/100000
+                        time:   [9.1963 ms 9.5535 ms 9.9629 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+bp_g4_maintenance/eviction_filter/100000
+                        time:   [6.0064 ms 6.1616 ms 6.3363 ms]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high mild
+bp_g4_maintenance/shift_translation/100000
+                        time:   [8.9864 ms 9.1924 ms 9.4061 ms]
+bp_g4_maintenance/compaction/100000
+                        time:   [29.926 ms 30.278 ms 30.621 ms]
+bp_g4_maintenance/high_jumper/100000
+                        time:   [9.4995 ms 9.5884 ms 9.6503 ms]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low severe
+  1 (10.00%) high severe
+

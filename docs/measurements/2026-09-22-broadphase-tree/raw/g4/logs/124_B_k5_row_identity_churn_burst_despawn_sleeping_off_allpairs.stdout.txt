@@ -1,0 +1,3 @@
+row_identity_churn/burst_despawn/sleeping_off_allpairs
+                        time:   [11.946 ms 12.036 ms 12.095 ms]
+

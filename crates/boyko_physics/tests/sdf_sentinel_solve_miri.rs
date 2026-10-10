@@ -9,7 +9,7 @@
 //! mutates the dense scratch in place.
 //!
 //! This file drives `SoftStepSolver::solve` DIRECTLY with a hand-built
-//! `body_b == SDF_SENTINEL` manifold and a one-body scratch, so `cargo +nightly
+//! `body_b == SDF_SENTINEL` manifold and a one-body scratch, so `cargo +nightly-x86_64-pc-windows-msvc
 //! miri test -p boyko-physics --test sdf_sentinel_solve_miri` validates the C1
 //! sentinel solve under Miri's UB checker — specifically:
 //!
@@ -27,12 +27,18 @@
 //!
 //! These are pure correctness + memory-safety checks; the full-physics resting
 //! behavior is the schedule-driven `sdf_collision.rs` gate.
+//!
+//! **V2 (speculative contacts)** adds the sentinel's speculative arm on both solvers
+//! (`speculative_distance = 20 mm`, a point 10 mm off the surface): the solve reads body A's
+//! step movement and gives the surface `(0, IDENTITY)`, never a row of its own — with a one-row
+//! delta column, any read past A's row is out of bounds. The colored arm runs its scalar and its
+//! AVX2 kernel.
 
 use boyko_physics::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use boyko_physics::manifold::{ContactPoint, Manifold, SDF_SENTINEL};
 use boyko_physics::math::{Mat3, Quat, Vec3};
-use boyko_physics::resources::{BodyState, PhysicsConfig, SolverScratch};
-use boyko_physics::solver::{RigidSolver, SoftStepSolver};
+use boyko_physics::resources::{BodyState, ConstraintGraph, PhysicsConfig, SolverScratch};
+use boyko_physics::solver::{ColoredSoftStepSolver, RigidSolver, SoftStepSolver};
 
 /// Builds a one-row scratch holding a single dynamic sphere at `position` with
 /// `velocity`, sizing the touched mask for the one row so `write_back` can flag it.
@@ -178,4 +184,43 @@ fn sentinel_solve_handles_empty_manifold_list_soundly() {
         b.position.y,
         b.linear_velocity.y
     );
+}
+
+/// V2: a sphere 10 mm above the surface closing at 1 m/s, at `speculative_distance = 20 mm`: its
+/// sentinel point is speculative. Both solvers read body A's delta row and give the surface a
+/// zero movement; the one-row delta column makes any other read out of bounds. The sphere closes
+/// the gap within the step and is not pushed back before it touches (its velocity never turns
+/// upward), which also witnesses that the rule ran.
+#[test]
+fn sentinel_speculative_point_reads_only_a_delta_row() {
+    let cfg = PhysicsConfig { speculative_distance: 0.02, ..zero_gravity_config() };
+    let manifolds = [sentinel_manifold(0.01)];
+    let check = |label: &str, scratch: &SolverScratch| {
+        let b = scratch.bodies()[0];
+        assert!(
+            b.linear_velocity.y.is_finite() && b.position.y.is_finite(),
+            "{label}: finite after the speculative sentinel solve: {b:?}"
+        );
+        assert!(b.linear_velocity.y <= 1.0e-3, "{label}: no push off the surface: v.y {}", b.linear_velocity.y);
+        assert!(
+            b.linear_velocity.y > -1.0,
+            "{label}: the gap closed and the approach was arrested: v.y {}",
+            b.linear_velocity.y
+        );
+    };
+
+    let mut reference = SoftStepSolver::default();
+    let mut scratch = one_body_scratch(Vec3::new(0.0, 0.51, 0.0), Vec3::new(0.0, -1.0, 0.0), 0.5);
+    reference.solve(&cfg, &manifolds, &mut scratch);
+    check("reference", &scratch);
+
+    for simd_solve in [false, true] {
+        let cfg = PhysicsConfig { simd_solve, ..cfg };
+        let mut colored = ColoredSoftStepSolver::default();
+        let mut scratch = one_body_scratch(Vec3::new(0.0, 0.51, 0.0), Vec3::new(0.0, -1.0, 0.0), 0.5);
+        let mut graph = ConstraintGraph::with_capacity(1);
+        graph.build(&manifolds, 1, |row| row == 0);
+        colored.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+        check(if simd_solve { "colored AVX2" } else { "colored scalar" }, &scratch);
+    }
 }

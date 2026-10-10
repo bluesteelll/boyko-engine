@@ -1,0 +1,11 @@
+error: duplicate material `twice` — each material expands to a builder fn of its own name, and two of one name is one fn defined twice
+  --> tests/ui/material_duplicate_name.rs:12:14
+   |
+12 |     material twice { base: (1.0, 1.0, 1.0) }
+   |              ^^^^^
+
+error: the first `material` of this name is here
+  --> tests/ui/material_duplicate_name.rs:11:14
+   |
+11 |     material twice { base: (0.0, 0.0, 0.0) }
+   |              ^^^^^

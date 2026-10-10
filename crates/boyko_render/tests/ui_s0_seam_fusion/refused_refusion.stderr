@@ -1,0 +1,9 @@
+error[E0502]: cannot borrow `token` as mutable because it is also borrowed as immutable
+  --> tests/ui_s0_seam_fusion/refused_refusion.rs:21:15
+   |
+20 |     let view = token.world();
+   |                ----- immutable borrow occurs here
+21 |     let rhi = token.nonsend_resource_mut::<RhiContext>();
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
+22 |     let n = sys.gather_into_staging(&view);
+   |                                     ----- immutable borrow later used here

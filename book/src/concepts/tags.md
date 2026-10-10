@@ -2,8 +2,6 @@
 
 > A tag is a zero-sized component: it carries no data, only the fact of its own presence.
 
-*(Branch: `ecs`, Phase 22.)*
-
 ## What a tag is
 
 In an archetype ECS, "which components an entity has" is itself information.
@@ -75,8 +73,8 @@ Two consequences of the Bundle emission worth knowing:
   const-assert error; `#[component(no_bundle)]` suppresses the emission and
   keeps the type usable as a plain component.
 
-Bundles accept up to **16 components** (`MAX_BUNDLE_ARITY`, raised from 8 in
-Phase 22 precisely because tags make wide bundles the norm).
+Bundles accept up to **16 components** (`MAX_BUNDLE_ARITY`, raised from 8
+precisely because tags make wide bundles the norm).
 
 ## Querying tags
 
@@ -158,10 +156,10 @@ archetype granularity, outside the row loop.
 
 ## Hooks and observers
 
-All four lifecycle hooks (`on_add`, `on_insert`, `on_replace`, `on_remove`) and
-all observers fire for tags exactly as for data components, at every structural
-site — spawn, insert, remove, despawn, migration, and the deferred `Commands`
-paths. The callback context carries `{ entity, component_id }`; no data pointer
+All five lifecycle hooks (`on_add`, `on_insert`, `on_replace`, `on_remove`,
+`on_despawn`) and all observers fire for tags exactly as for data components, at
+every structural site — spawn, insert, remove, despawn, migration, and the
+deferred `Commands` paths. The callback context carries `{ entity, component_id }`; no data pointer
 existed in the ABI to go invalid.
 
 ```rust,ignore
@@ -177,7 +175,7 @@ fire.
 
 ## Tag-only and empty entities
 
-Entities may hold **zero components** (Phase 22 D5). Removing the last
+Entities may hold **zero components**. Removing the last
 component does not despawn the entity — it migrates it into the *empty
 archetype*, where it stays alive and addressable:
 
@@ -215,4 +213,4 @@ address-space profile, and when to prefer a data field — see
 - [Dynamic Tags](dynamic-tags.md) — runtime-minted, name-keyed tags without a Rust type
 - [Storage Trade-offs: Tags, Churn, and Fragmentation](../architecture/storage-tradeoffs.md)
 - [Change Detection](../change_detection.md)
-- Source: [`component_pool.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs) (tick-only ZST pools), [`spawn_at_command.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/commands/spawn_at_command.rs)
+- Source: [`component_pool.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/component_pool.rs) (tick-only ZST pools), [`spawn_at_command.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/commands/spawn_at_command.rs)

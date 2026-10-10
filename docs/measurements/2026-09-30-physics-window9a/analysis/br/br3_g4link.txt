@@ -1,0 +1,11 @@
+C4-G4 processes read: 9 of 9 (exit 0, sha, clean); passes closed [0, 1, 2]
+- bp_g4_uniform/all_pairs/144    G4 g4rT 14.041 [14.034-14.098] n=9 (IQR 0.07 %, SE 0.06 %, range 0.45 %)
+    vs BR g4rT 14.043: 0.9999 (-0.01 %) nnn | vs BR g4r7 12.440: 1.1287 (+12.87 %) YYY sep
+- bp_g4_uniform/tree/144         G4 g4rT 12.577 [12.414-12.786] n=9 (IQR 0.79 %, SE 0.41 %, range 2.95 %)
+    vs BR g4rT 12.590: 0.9990 (-0.10 %) nnn | vs BR g4r7 12.475: 1.0082 (+0.82 %) nnn
+- bp_g4_disparity/all_pairs/144  G4 g4rT 16.501 [16.489-16.607] n=9 (IQR 0.04 %, SE 0.11 %, range 0.72 %)
+    vs BR g4rT 16.567: 0.9960 (-0.40 %) nnn | vs BR g4r7 14.741: 1.1194 (+11.94 %) YYY sep
+- bp_g4_disparity/tree/144       G4 g4rT 15.288 [15.206-15.534] n=9 (IQR 1.10 %, SE 0.31 %, range 2.15 %)
+    vs BR g4rT 15.347: 0.9962 (-0.38 %) nnn | vs BR g4r7 14.950: 1.0226 (+2.26 %) nYn sep
+- G4 g4rT in-binary all_pairs/tree at 144, uniform: 1.1164 YYY (BR g4rT 1.1154, BR g4r7 0.9972)
+- G4 g4rT in-binary all_pairs/tree at 144, disparity: 1.0793 YYY (BR g4rT 1.0795, BR g4r7 0.9860)

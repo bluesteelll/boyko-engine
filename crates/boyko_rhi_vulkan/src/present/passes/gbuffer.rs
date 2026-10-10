@@ -5,22 +5,314 @@
 
 use core::ptr;
 
+use boyko_log::codes::{OnceSite, W2104};
+use boyko_rhi::TimestampStage;
+
 use crate::compute::{
     CoarseMode, DEFAULT_MARCHER_OMEGA, FineMarcherPush, INTERP_INSTANCES_PUSH_BYTES, LOCAL_SIZE_X,
-    tile_grid_extent,
+    VIEWT_FROM_DEPTH_PUSH_BYTES, ViewtFromDepthPush, tile_grid_extent,
 };
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
 
 use super::super::frame_driver::Renderer;
-use super::super::gpu_timing::TimedPass;
+// Profiling rung 7 step 6c: the two families' ids and their counts now come from `gpu_zone`, where
+// `zone_begin_stage` is keyed by the same id — one vocabulary, not two pass enums and a mapping.
+// The reserved-width asserts moved there too, beside the counts they constrain.
+use super::super::gpu_zone::{
+    GBUF_ZONE_COUNT, GpuZoneRecorder, SV0_ZONE_COUNT, ZONE_BASE_GBUFFER, ZONE_BASE_SV0,
+    ZONE_GBUF_CSM_DEPTH, ZONE_GBUF_DDGI_UPDATE, ZONE_GBUF_DEFERRED_RESOLVE,
+    ZONE_GBUF_PUNCTUAL_DEPTH, ZONE_SV0_MARCHER, zone_begin_stage,
+};
+
+#[cfg(feature = "profiling-census")]
+use super::super::command_witness::CommandWitness;
+
+
+/// Slots [`GbufWitness`] tracks: the four software-ray passes, then the SV0 marcher.
+const GBUF_SLOTS: usize = (GBUF_ZONE_COUNT + SV0_ZONE_COUNT) as usize;
+
+/// Profiling rung 6 — `record_gbuffer`'s bracket carrier, the sibling of `vb.rs`'s `TsWitness`.
+///
+/// # What it replaces, and why the shape is worth copying rather than the sites
+///
+/// Before this rung `record_gbuffer` had **no carrier at all**: ten bare
+/// `if let Some(tc) = scene.gpu_timing` / `scene.sv0_gpu_timing` sites, each opening or closing one
+/// pair, with nothing that could answer *"which pairs did this frame bracket?"*. `vb.rs` grew
+/// `TsWitness` at VG R3 P4-1 for exactly the reason that absence causes, and the reason is written
+/// into `Sv0TimedPass::Marcher`'s own doc: *"A render path that does not dispatch the marcher
+/// therefore leaves this pair UNWRITTEN, which would hang the `WAIT`-bit readback — the caller must
+/// only arm this collector on a marcher-carrying path."* The same is true of `TimedPass::DdgiUpdate`
+/// (bracketed inside `scene.ddgi_update`'s arm) and of `CsmDepth`/`PunctualDepth` (inside theirs):
+/// **a frame without DDGI, or without shadows, resets those queries and never writes them.** The
+/// old collectors have no totality epilogue — `write_zero_pair` appears nowhere in this file — so
+/// what stands between the R0 harness and an infinite wait is the harness's own configuration.
+///
+/// The zone leg deletes that premise instead of restating it: an unwritten pair retires
+/// `NotBracketed`, because the recorder polls with `WITH_AVAILABILITY` and never waits.
+///
+/// # Three collectors, one armed
+///
+/// `gpu_timing` and `sv0_gpu_timing` are independent (different pools, different harnesses) and can
+/// both be armed; the zone recorder replaces BOTH, so it arms only when neither does — F17's
+/// *"never both armed in one frame"*, applied to a leg that is two collectors wide.
+struct GbufWitness<'a> {
+    /// The frame's zone recorder and the ring slot it opened — since rung 7 step 6c the only leg.
+    zr: Option<(&'a GpuZoneRecorder, usize)>,
+    /// The command census, fed by every leg through these same call sites.
+    #[cfg(feature = "profiling-census")]
+    cw: Option<&'a CommandWitness>,
+    /// Bit `k` set when slot `k`'s BEGIN was recorded: `0..GBUF_ZONE_COUNT` is the gbuffer family,
+    /// then the SV0 one.
+    begun: u16,
+    /// Bit `k` set when slot `k`'s END was recorded.
+    ended: u16,
+    /// Zone leg only: the pair index `alloc_pair` handed slot `k`, or [`Self::NO_PAIR`].
+    ///
+    /// REMEMBERED, not derived — rung 5c measured why: the open order is not the slot order (here
+    /// the marcher opens FIRST, before every gbuffer pass), so a `count_ones` of the bits below a
+    /// slot is not that slot's open index.
+    pair_of: [u16; GBUF_SLOTS],
+}
+
+impl<'a> GbufWitness<'a> {
+    /// A slot that never opened a pair on the zone leg.
+    const NO_PAIR: u16 = u16::MAX;
+
+    /// Opens the frame's witness: picks the armed leg(s), clears the census, and **records their
+    /// pool resets**.
+    ///
+    /// The resets moved inside for `TsWitness::open`'s reason — with three legs there would be
+    /// three adjacencies to keep at the frame top, and the frame top is where edits land.
+    ///
+    /// # Safety
+    ///
+    /// Recording must be open on `cmd`, OUTSIDE any render or dynamic-rendering scope
+    /// (`VUID-vkCmdResetQueryPool-renderpass`), `fns` must be the live device fn-table, and `fi`
+    /// must be this present's in-flight slot.
+    #[inline]
+    unsafe fn open<'s>(
+        scene: &'s GBufferScene<'a>,
+        fns: &crate::device::DeviceFns,
+        cmd: VkCommandBuffer,
+        _fi: usize,
+    ) -> GbufWitness<'a> {
+        // Profiling rung 7 step 6c deleted both old collectors, so there is one leg left and no
+        // exclusivity to assert — the same subtraction step 5 made in `vb.rs`.
+        let ts = GbufWitness {
+            zr: scene.gpu_zone,
+            #[cfg(feature = "profiling-census")]
+            cw: scene.vb_cmd_witness,
+            begun: 0,
+            ended: 0,
+            pair_of: [Self::NO_PAIR; GBUF_SLOTS],
+        };
+        #[cfg(feature = "profiling-census")]
+        if let Some(w) = ts.cw {
+            w.begin_frame();
+        }
+        // HW-RT rung R0 / VB-SV0 S1.5: a TIMESTAMP query is undefined until reset, so this precedes
+        // every stamp below it. The two old collectors own different pools and are reset
+        // independently; the zone leg resets one pool for the whole frame.
+        //
+        // SAFETY (all three): caller contract — recording open, outside any render scope, live
+        // `fns`, valid `fi` / a slot `open_frame` claimed.
+        if let Some((rec, ring)) = ts.zr {
+            unsafe { rec.record_reset(fns, cmd, ring) };
+            ts.mark_query_reset();
+        }
+        ts
+    }
+
+    /// One witnessed record site that is not the profiler's. Compiles to nothing without
+    /// `profiling-census`.
+    #[inline]
+    fn cmd(&self) {
+        #[cfg(feature = "profiling-census")]
+        if let Some(w) = self.cw {
+            w.command();
+        }
+    }
+
+    /// The frame's `vkCmdResetQueryPool`s, in the census.
+    #[inline]
+    fn mark_query_reset(&self) {
+        #[cfg(feature = "profiling-census")]
+        if let Some(w) = self.cw {
+            w.query_reset();
+        }
+    }
+
+    /// The bookkeeping every leg shares at a BEGIN.
+    ///
+    /// `stage` is what the RECORDER returned, never a stage re-derived here — `vb.rs`'s
+    /// `TsWitness::mark_begin` states why at length, and it is the same reason on both families.
+    #[inline]
+    fn mark_begin(&mut self, zone: u16, stage: TimestampStage) {
+        // ONE argument, and the slot is derived here. The first draft of this rung took BOTH and
+        // cross-checked them with a `debug_assert_eq!` -- which was TAUTOLOGICAL: every caller
+        // derives the slot from the zone two lines earlier, so the assert compared `slot_of(zone)`
+        // with itself and could never fire. A gate that cannot fail is a defect in this repository,
+        // and the fix for two values that must agree is not to check them, it is to have one.
+        let slot = Self::slot_of(zone);
+        self.begun |= 1u16 << slot;
+        #[cfg(feature = "profiling-census")]
+        if let Some(w) = self.cw {
+            // ⚠️ **THE ZONE, and this line used to pass `slot as u16`** -- profiling rung 8 found
+            // it. `open_pair` names its parameter `zone`, both are `u16`, and in THIS file the two
+            // differ: the witness slot is `0..4` for the gbuffer family and `4` for the marcher,
+            // while the zone ids are `16..19` and `32`. So `zone_open_order` recorded `0,1,2,3,4`
+            // for two of the three families and had done since rung 6 ported them.
+            //
+            // It went unnoticed because its only consumer was `G10`'s cross-leg witness comparison,
+            // which rung 7 deleted with leg A -- and because `vb.rs` passes the same expression
+            // CORRECTLY, its base being 0. **A coincidence in the family that was ported first hid
+            // a confusion in the two that followed.**
+            w.open_pair(zone);
+            w.timestamp(stage);
+        }
+        #[cfg(not(feature = "profiling-census"))]
+        let _ = (zone, stage);
+    }
+
+    /// [`Self::mark_begin`]'s counterpart at an END.
+    #[inline]
+    fn mark_end(&mut self, zone: u16, stage: TimestampStage) {
+        let slot = Self::slot_of(zone);
+        self.ended |= 1u16 << slot;
+        #[cfg(feature = "profiling-census")]
+        if let Some(w) = self.cw {
+            w.timestamp(stage);
+            // Profiling rung 8: the second stream position this zone's command count needs.
+            w.close_pair(zone);
+        }
+        #[cfg(not(feature = "profiling-census"))]
+        let _ = (zone, stage);
+    }
+
+    /// The witness's own slot index for `zone` — its bit in the two masks and its `pair_of` entry.
+    ///
+    /// The two families share one mask, so the SV0 ids sit ABOVE the gbuffer ones rather than at
+    /// their own base: the witness indexes what it tracks, and the zone id names what it names.
+    ///
+    /// # Panics
+    /// On a zone outside both families. Every caller passes one of the five `ZONE_*` constants
+    /// literally, so an out-of-range id is a mis-typed call site, not a runtime condition — and a
+    /// wrong-family id would otherwise silently index another pass's bit.
+    #[inline]
+    fn slot_of(zone: u16) -> usize {
+        let gbuf = zone.wrapping_sub(ZONE_BASE_GBUFFER);
+        if gbuf < GBUF_ZONE_COUNT {
+            return gbuf as usize;
+        }
+        let sv0 = zone.wrapping_sub(ZONE_BASE_SV0);
+        assert!(sv0 < SV0_ZONE_COUNT, "invariant: zone id is in neither record_gbuffer family");
+        GBUF_ZONE_COUNT as usize + sv0 as usize
+    }
+
+    /// Records `zone`'s BEGIN stamp and witnesses it. No-op (and no command) when unarmed.
+    ///
+    /// **One verb for both families since rung 7 step 6c.** There were two — `begin` and
+    /// `sv0_begin` — because the families were two enums with independent widths, and the split
+    /// cost a duplicated body per collector leg. With one leg and one `u16` vocabulary the only
+    /// difference left is [`Self::slot_of`]'s arithmetic.
+    ///
+    /// # Safety
+    /// Recording must be open on `cmd`, `fns` must be the live device fn-table, and this zone's
+    /// begin query must not already have been written since this frame's pool reset.
+    #[inline]
+    unsafe fn begin(&mut self, fns: &crate::device::DeviceFns, cmd: VkCommandBuffer, zone: u16) {
+        let slot = Self::slot_of(zone);
+        if let Some((rec, ring)) = self.zr {
+            let Some(pair) = rec.alloc_pair(ring, zone) else { return };
+            self.pair_of[slot] = pair;
+            // Both collectors always opened at `TOP_OF_PIPE`, and `zone_begin_stage` says so for
+            // these ids — READ FROM THE TABLE rather than written here, because rung 7c's defect
+            // was exactly a stage decided at the recorder instead of looked up per zone.
+            // SAFETY: caller contract; `pair` came from `alloc_pair` on this slot just above.
+            let stage = unsafe { rec.record_begin(fns, cmd, ring, pair, zone_begin_stage(zone)) };
+            self.mark_begin(zone, stage);
+        }
+    }
+
+    /// [`Self::begin`]'s counterpart.
+    ///
+    /// # Safety
+    /// As [`Self::begin`], for this zone's end query.
+    #[inline]
+    unsafe fn end(&mut self, fns: &crate::device::DeviceFns, cmd: VkCommandBuffer, zone: u16) {
+        let slot = Self::slot_of(zone);
+        if let Some((rec, ring)) = self.zr {
+            let pair = self.pair_of[slot];
+            if pair == Self::NO_PAIR {
+                return;
+            }
+            // SAFETY: caller contract; `pair` is the index this zone's BEGIN remembered.
+            let stage = unsafe { rec.record_end(fns, cmd, ring, pair) };
+            self.mark_end(zone, stage);
+        }
+    }
+
+
+    /// Closes the frame.
+    ///
+    /// The zone leg seals — the release edge `retire`'s `Acquire` pairs with. The OLD legs get no
+    /// epilogue here, deliberately: they never had one, and inventing a totality fill for them at
+    /// the rung that replaces them would repair the very hazard the replacement exists to delete,
+    /// hiding it from the gate that is supposed to show it. What the masks buy instead is a
+    /// dev-profile statement of what the frame actually bracketed.
+    fn finish(self) {
+        debug_assert_eq!(
+            self.begun & !self.ended,
+            0,
+            "invariant: no gbuffer timestamp pair is left torn (a begin whose end never recorded)"
+        );
+        if let Some((rec, ring)) = self.zr {
+            rec.seal(ring);
+        }
+    }
+}
 use super::super::scene_types::{
-    CLUSTER_CULL_PUSH_BYTES, GBUFFER_MARCHER_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
-    GBufferScene, LIGHT_CULL_LOCAL_SIZE_X,
+    CLUSTER_CULL_HIER_PUSH_BYTES, CLUSTER_CULL_PUSH_BYTES, GBUFFER_MARCHER_PUSH_BYTES,
+    GBUFFER_PUSH_BASE_INSTANCE_OFFSET, GBufferScene, LIGHT_CULL_LOCAL_SIZE_X,
 };
 use super::super::targets::GBufferTargets;
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
+
+/// `boyko-W2104` — textured-PBR T6c (plan Decision D4): a textured material is active on a frame
+/// that also has the temporal motion-vector pipeline active. TEXTURED is never compiled with
+/// MOTION_VECTORS, so that frame renders the material's `base_color`/scalar `mrr` instead of
+/// sampled textures (the MV/mvpm arm takes priority).
+///
+/// **L7b deleted the hand-rolled latch this used to carry, and the latch was not what its own
+/// comment said it was.** The comment claimed "no per-frame `AtomicBool` load cost beyond the one
+/// `swap` on the FIRST occurrence"; the code did a `load` and then a separate `store`, which is not
+/// a `swap` and does not exclude anything — two threads arriving together both saw `false` and both
+/// printed. `OnceSite::claim` short-circuits on a `Relaxed` load and then does a `swap`, so exactly
+/// one caller observes the `false` and wins. The steady-state cost is one `Relaxed` load from a
+/// private line, off the hot path behind `#[cold]`.
+///
+/// The `LOG-ONCE` census row for this site is real, and it is **not** produced by the site: this
+/// paragraph used to claim the site "enrols itself in `ONCE_SITES`", which was wrong twice over —
+/// no such register existed, and the enrolling is the DRAIN's, from `LogSite::rate`, off the
+/// emitting thread. `boyko_log::once_sites` now holds it, and a row here reading `fired > 1` would
+/// mean this latch had stopped working.
+#[cold]
+#[inline(never)]
+fn warn_textured_suppressed_by_motion_vectors() {
+    static FIRED: OnceSite = OnceSite::new();
+    if FIRED.claim() {
+        boyko_log::warn!(
+            boyko_log::RhiVulkan,
+            W2104,
+            "a textured material is active while the temporal motion-vector gbuffer pipeline is \
+             also active this frame -- TEXTURED is never compiled with MOTION_VECTORS \
+             (textured-PBR T6c plan Decision D4), so textured material(s) render base_color/scalar \
+             mrr instead of sampled textures until temporal denoise is off"
+        );
+    }
+}
 
 impl Renderer<'_> {
     /// Records the Render-P1c on-screen 3-pass G-buffer frame into `cmd`. The barrier
@@ -61,7 +353,11 @@ impl Renderer<'_> {
     /// grid, and the camera UBO `count` were all sized to in `sync_gbuffer`). `extent` is
     /// the swapchain extent and governs ONLY pass C's clear render-area (step 8) and the
     /// readback region (step 9); the present-blit viewport is `min(extent, present_extent)`
-    /// at the origin for the exact 1:1 top-left composite present.
+    /// at the origin for the exact 1:1 top-left composite present. `aa_extent` (SSAA) is the
+    /// BOOT-FIXED native extent `aa_out` was actually allocated at (`sync_gbuffer`'s
+    /// `aa_extent` param) — the SSAA downsample pass's render-area/viewport MUST use this,
+    /// NOT `extent` (which tracks live window resizes while `aa_out` stays boot-fixed,
+    /// exactly like `present_extent`). Unread when `scene.ssaa` is `None`.
     ///
     /// # Safety
     ///
@@ -83,6 +379,7 @@ impl Renderer<'_> {
         view: VkImageView,
         extent: VkExtent2D,
         present_extent: VkExtent2D,
+        aa_extent: VkExtent2D,
         clear: [f32; 4],
         scene: &GBufferScene<'_>,
         targets: &GBufferTargets,
@@ -114,17 +411,18 @@ impl Renderer<'_> {
         // images, so no new wait is introduced. Index every image barrier / attachment by `[fi]`.
         let fi = self.frame_index;
 
-        // HW-RT rung R0: reset ALL `2 * PASS_COUNT` timestamp queries at the frame top —
-        // OUTSIDE any render / dynamic-rendering scope (recording is open but no
-        // `begin_rendering` has run yet), before the frame's first `write_timestamp`. GATED
-        // on `scene.gpu_timing`: `None` (every golden/host frame) records NOTHING, so the
-        // command stream is byte-identical. A TIMESTAMP query is undefined until reset.
-        if let Some(tc) = scene.gpu_timing {
-            // SAFETY: recording is open; `self.fns` is the live device fn-table; the reset is
-            // recorded before any `begin_rendering` (outside a render pass, per
-            // `VUID-vkCmdResetQueryPool-renderpass`); `fi` is this present's in-flight slot.
-            unsafe { tc.reset_frame(self.fns, cmd, fi) };
-        }
+        // HW-RT rung R0 / VB-SV0 S1.5 / profiling rung 6: every armed collector's frame-top pool
+        // reset AND the witness that owns every stamp below, in one call — OUTSIDE any render /
+        // dynamic-rendering scope (recording is open but no `begin_rendering` has run yet), before
+        // the frame's first `write_timestamp`. Unarmed (no collector on `scene`, which is every
+        // golden/host/interactive frame) it records NOTHING, so the command stream is
+        // byte-identical. A TIMESTAMP query is undefined until reset, which is why the resets moved
+        // INSIDE the constructor: see `GbufWitness::open`.
+        //
+        // SAFETY: recording is open; `self.fns` is the live device fn-table; no `begin_rendering`
+        // has run yet, so every reset is outside a render pass
+        // (`VUID-vkCmdResetQueryPool-renderpass`); `fi` is this present's in-flight slot.
+        let mut ts = unsafe { GbufWitness::open(scene, self.fns, cmd, fi) };
 
         // === Pass A (Render P5-r0): rasterize the mesh quad as a 3-MRT G-buffer PRODUCER
         // (albedo@0, normal@1, material@2) + the D32 depth. The marcher's attribute
@@ -144,14 +442,23 @@ impl Renderer<'_> {
         // These two batched barriers are DRIVEN by `frame_graph`'s "raster" pass — the
         // graph derives the color + depth transitions, and `GbufferBarrierSink` records
         // them into the two `vkCmdPipelineBarrier` calls. The per-frame plan is set by
-        // `declare_gbuffer_graph` just before this record; every barrier site below
+        // `declare_deferred_graph` just before this record; every barrier site below
         // fetches it the same way.
         // SAFETY: recording is open; `record_graph_pass` records the graph's derived
         // barriers for the "raster" pass into `cmd` against the live G-buffer targets.
         let plan = self
             .gbuffer_pass_plan
             .as_ref()
-            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+            .expect("invariant: declare_frame_graph ran before record_gbuffer");
+        // Multi-paradigm render-path plan, rung R2 (O1 hard rule / W1 lesson): the declare site
+        // (`declare_deferred_graph`) and this record site MUST agree on whether the raster pass
+        // exists — both call the SAME `scene.path_has_raster()` predicate, so this can never
+        // trip unless the two sites diverge.
+        debug_assert_eq!(
+            plan.raster.is_some(),
+            scene.path_has_raster(),
+            "W1: declare/record predicate desync (raster)"
+        );
 
         // === Pillar B B3: the per-instance TRS INTERPOLATION compute PRE-PASS. Recorded ONLY
         // when the scene wires the activation (`scene.interp.is_some()`); otherwise skipped
@@ -178,6 +485,7 @@ impl Renderer<'_> {
             // every other pass and future-proofs an added interp input hazard.
             // SAFETY: recording is open; `record_graph_pass` records the graph's derived
             // input barriers (currently none) for the "interp" pass into `cmd`.
+            ts.cmd();
             self.record_graph_pass(interp_pass, cmd, targets, scene, fi);
             let groups = interp.instance_count.div_ceil(LOCAL_SIZE_X);
             let mut push = [0u8; INTERP_INSTANCES_PUSH_BYTES as usize];
@@ -195,11 +503,13 @@ impl Renderer<'_> {
             // interp pass reads frame-private pair + out-slot slots (first touches — the graph
             // derives NO input barrier), so no barrier is recorded before this dispatch.
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     interp.pipeline.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -210,6 +520,7 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_push_constants)(
                     cmd,
                     interp.pipeline.layout,
@@ -218,6 +529,7 @@ impl Renderer<'_> {
                     INTERP_INSTANCES_PUSH_BYTES,
                     push.as_ptr().cast(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, groups, 1, 1);
             }
             // The interp pass's model-out WRITES (COMPUTE/SHADER_WRITE, the dynamic slots of
@@ -226,6 +538,42 @@ impl Renderer<'_> {
             // `interp_model_out` barrier at the raster pass (the model_out reader), so
             // `record_graph_pass(plan.raster)` below emits it BEFORE the raster begins — still
             // AFTER this dispatch's write. NOT recorded here.
+        }
+
+        // === Particles P0: the `upload → kickoff → emit → sim` block, recorded HERE — at the
+        // position the declarator declared it (right after `interp`), which is what keeps declare
+        // and record in the SAME order. Gated on `scene.path_has_particles()`, the ONE predicate
+        // both sites read (plan gate #6). The draw is recorded far below, at the resolve→present
+        // seam. ===
+        debug_assert_eq!(
+            scene.path_has_particles(),
+            plan.particle.kickoff.is_some(),
+            "invariant: declare/record parity on path_has_particles() — the declarator arms the \
+             kickoff pass under exactly the predicate this recorder gates on"
+        );
+        if let Some(act) = scene.particle.as_ref() {
+            // SAFETY: recording is open and outside any dynamic-rendering scope (the raster pass
+            // below opens the frame's first one). Every handle in `act` is live for this frame
+            // (`build_particle_bundle` owns them until teardown) and `act.sets` is this frame
+            // parity's set. `record_graph_pass` is the deferred path's own barrier sink, so each
+            // pass's derived barriers resolve through the ResId space THIS declarator built.
+            //
+            // Particles P0 gate #17: the zone arm is ARMED here — `GbufWitness::open` recorded
+            // this frame's `vkCmdResetQueryPool` above and `ts.finish()` seals the slot after the
+            // particle draw far below. The single coarse `ts.cmd()` this line used to carry is
+            // gone: the recorder marks each of its own commands now, so keeping it would count the
+            // particle block twice.
+            unsafe {
+                self.record_particle_compute(
+                    cmd,
+                    act,
+                    &plan.particle,
+                    super::particles::ParticleZoneArm::from_scene(scene),
+                    |p| {
+                        self.record_graph_pass(p, cmd, targets, scene, fi);
+                    },
+                );
+            }
         }
 
         // === HW-RT rung R2a-3: the GPU-resident per-frame TLAS PACK + BUILD. Recorded ONLY when
@@ -250,6 +598,7 @@ impl Renderer<'_> {
             // interp ran; else none), then bind the packer + dispatch `ceil(count / LOCAL_SIZE_X)`.
             // SAFETY: recording is open; `record_graph_pass` records the "tlas_pack" pass's derived
             // barriers into `cmd` against the live scene buffers.
+            ts.cmd();
             self.record_graph_pass(pack_pass, cmd, targets, scene, fi);
             let groups = t.count.div_ceil(LOCAL_SIZE_X);
             let push = t.count.to_le_bytes();
@@ -261,7 +610,9 @@ impl Renderer<'_> {
             // (first_set 0, count 1, zero dynamic offsets); the push is exactly
             // `BUILD_TLAS_INSTANCES_PUSH_BYTES` (4) at offset 0 and `push` outlives the call.
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, t.pipeline.pipeline);
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -272,6 +623,7 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_push_constants)(
                     cmd,
                     t.pipeline.layout,
@@ -280,6 +632,7 @@ impl Renderer<'_> {
                     crate::compute::BUILD_TLAS_INSTANCES_PUSH_BYTES,
                     push.as_ptr().cast(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, groups, 1, 1);
             }
             // Build: emit the graph's derived pack-WRITE → build-READ barrier on the instance
@@ -287,6 +640,7 @@ impl Renderer<'_> {
             // discipline — the BARRIER is graph-emitted, only the GPU work is raw).
             // SAFETY: recording is open; `record_graph_pass` records the "tlas_build" pass's derived
             // barrier (pack COMPUTE/SHADER_WRITE → build AS_BUILD/SHADER_READ on `tlas_instances`).
+            ts.cmd();
             self.record_graph_pass(build_pass, cmd, targets, scene, fi);
             let entry = boyko_rhi::AsBuildEntry {
                 kind: boyko_rhi::AsKind::Tlas,
@@ -308,6 +662,7 @@ impl Renderer<'_> {
             // resources; the pack→build barrier just recorded orders the instance-array write before
             // this build's read; `entry`/`dest` are 1-element slices that outlive the call.
             unsafe {
+                ts.cmd();
                 crate::accel::cmd_build_acceleration_structures(
                     fns,
                     cmd,
@@ -325,6 +680,7 @@ impl Renderer<'_> {
             // same table the pack bind/dispatch above used). The barrier touches no resource beyond
             // the execution/memory dependency (AS_BUILD stage → COMPUTE_SHADER stage).
             unsafe {
+                ts.cmd();
                 crate::accel::cmd_acceleration_structure_barrier(self.fns, cmd);
             }
         }
@@ -333,7 +689,16 @@ impl Renderer<'_> {
         // barriers for the "raster" pass into `cmd` against the live G-buffer targets. When the
         // interp pass ran, this also emits the COMPUTE→VERTEX RAW barrier on the SHARED interp
         // model-out ring (the instance ring the raster VS reads).
-        self.record_graph_pass(plan.raster, cmd, targets, scene, fi);
+        //
+        // Multi-paradigm render-path plan, rung R2: `Some` iff `scene.path_has_raster()` (the
+        // `debug_assert_eq!` above already pinned this) — `None` under `Deferred × Sdf` (rung R3;
+        // `mesh_depth_neutral_clear` below is its depth-clear replacement), `Some` on every other
+        // currently reachable frame, so the `if let` is byte-identical to the pre-R2
+        // unconditional call there.
+        if let Some(raster_pass) = plan.raster {
+            ts.cmd();
+            self.record_graph_pass(raster_pass, cmd, targets, scene, fi);
+        }
 
         // (2) Dynamic rendering at the marcher's extent: 3 MRT color attachments
         // (albedo@0, normal@1, material@2; CLEAR/STORE) + the depth attachment (CLEAR to
@@ -406,12 +771,41 @@ impl Renderer<'_> {
         // (an RT + storage device). OFF (the default / non-hwrt build) ⇒ the base 3-MRT raster ⇒
         // byte-identical. Evaluated ONCE; drives the attachment count, the color-array ptr, the
         // pipeline/layout, and the set-0 bind below.
-        // `mesh_mv_active()` is the SINGLE source shared with `declare_gbuffer_graph` (W1: the
+        // `mesh_mv_active()` is the SINGLE source shared with `declare_deferred_graph` (W1: the
         // barrier declaration and this write must never disagree).
         #[cfg(feature = "hwrt")]
         let mv_active = scene.mesh_mv_active();
         #[cfg(not(feature = "hwrt"))]
         let mv_active = false;
+        // Asset-streaming plan F8: decide whether this frame uses the PER_INSTANCE_MATERIAL
+        // pipeline. Present on BOTH cfg legs (materials are device-agnostic, unlike `mv`) —
+        // `mesh_pm_active()` is the SINGLE source shared with the pipeline/set selection below.
+        // MV takes priority over PM (F8 §2.3) UNLESS both are active, in which case the
+        // combined mvpm pipeline (below) renders BOTH correctly (F8-mv).
+        let pm_active = scene.mesh_pm_active();
+        // F8-mv: decide whether this frame uses the COMBINED MOTION_VECTORS +
+        // PER_INSTANCE_MATERIAL pipeline. `mesh_mvpm_active()` is the SINGLE source shared with
+        // the pipeline/set selection below; it is a strict AND of `mv_active`/`pm_active`'s
+        // gates plus the mvpm pipeline/bind-group presence, so it can only be true when both
+        // would otherwise fire. Non-hwrt build: `false` (mvpm is an MV extension, hwrt-only).
+        #[cfg(feature = "hwrt")]
+        let mvpm_active = scene.mesh_mvpm_active();
+        #[cfg(not(feature = "hwrt"))]
+        let mvpm_active = false;
+        // Textured-PBR T6c: decide whether this frame uses the TEXTURED pipeline. Present on
+        // BOTH cfg legs (materials/textures are device-agnostic, like `pm`) — `mesh_tex_active()`
+        // is the SINGLE source shared with `declare_deferred_graph`'s `pbr` write declaration
+        // (W1). `mesh_tex_active()` is ALREADY `false` whenever `mv_active` holds (T6c plan
+        // Decision D4: TEXTURED is never compiled with MOTION_VECTORS), so this tier check needs
+        // no explicit `!mv_active` guard of its own.
+        let tex_active = scene.mesh_tex_active();
+        // T6c plan Decision D4: under an active MV/mvpm frame, a textured material renders
+        // base_color/scalar via the MV/mvpm pipeline instead of sampled textures (`tex_active`
+        // above is false). Warn ONCE per process (not every frame — Principle 1, avoid I-cache/
+        // hot-path bloat + stderr spam) so the suppression is visible without a per-frame cost.
+        if mv_active && scene.tex_enabled {
+            warn_textured_suppressed_by_motion_vectors();
+        }
         // The 4th MRT: the motion_vec Δuv target (R16G16Sfloat), CLEAR to (0,0) / STORE — a pixel
         // with no mesh fragment holds zero motion (the marcher overwrites SDF pixels in step 5b).
         // Built unconditionally so it outlives `cmd_begin_rendering`; the driver reads it ONLY when
@@ -448,16 +842,40 @@ impl Renderer<'_> {
                 color: VkClearColorValue { float32: [0.0, 0.0, 0.0, 0.0] },
             },
         };
+        // Textured-PBR T6c: the 4th MRT under the TEXTURED path — `gPbr`
+        // (`R16G16B16A16_SFLOAT`), CLEAR to the T6a neutral (metallic 0, roughness 0.5, ao 1,
+        // emissive 1) / STORE. Mutually exclusive with `motion_vec_attachment` above (TEXTURED
+        // is never compiled with MOTION_VECTORS, T6c plan Decision D4), so at most one of the
+        // two is ever selected into the 4th array slot below. `image_view` is NULL (present-
+        // but-unread) when `tex_active` is false.
+        let pbr_view = if tex_active { targets.pbr[fi].view } else { VkImageView::NULL };
+        let pbr_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: pbr_view,
+            image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                color: VkClearColorValue { float32: [0.0, 0.5, 1.0, 1.0] },
+            },
+        };
         // The color-attachment array is ALWAYS 4 elements (so the ptr is valid for both counts and
         // the array outlives the bracketed calls — the lifetime caution). `color_attachment_count`
-        // selects 3 (base) vs 4 (MV); on the base path the 4th element is present-but-unread.
+        // selects 3 (base) vs 4 (MV or TEXTURED); on the base path the 4th element is
+        // present-but-unread. `mv_active`/`tex_active` are mutually exclusive (D4), so the 4th
+        // slot picks EITHER the motion_vec OR the pbr attachment, never a mix of the two.
+        let fourth_attachment = if mv_active { motion_vec_attachment } else { pbr_attachment };
         let raster_color_attachments = [
             albedo_attachment,
             normal_attachment,
             material_attachment,
-            motion_vec_attachment,
+            fourth_attachment,
         ];
-        let color_attachment_count: u32 = if mv_active { 4 } else { 3 };
+        let color_attachment_count: u32 = if mv_active || tex_active { 4 } else { 3 };
         let depth_attachment = VkRenderingAttachmentInfo {
             s_type: VkStructureType::RenderingAttachmentInfo,
             p_next: ptr::null(),
@@ -505,7 +923,24 @@ impl Renderer<'_> {
         // motion-cam @2) + this frame's MV bind group; else the base raster pipeline + the shared
         // instance bind group (byte-identical). Both pipelines carry `.pipeline` + `.layout`; the
         // push (88 B) + the per-batch `base_instance` re-push are UNCHANGED across both.
-        let raster_pipeline = if mv_active {
+        // Asset-streaming plan F8 §2.3 / F8-mv: the `pm_active`/`mvpm_active` arms are present
+        // on BOTH cfg legs (materials are device-agnostic); only the `mv_active` arm is
+        // cfg-gated (`mvpm_active` itself resolves to `false` on a non-hwrt build, so its arm
+        // never fires there). Priority mvpm > mv > pm > base: `mvpm_active` implies both
+        // `mv_active` and `pm_active` would otherwise fire, so checking it FIRST renders both
+        // deltas together instead of falling into the mv-only (default-material) arm.
+        let raster_pipeline = if mvpm_active {
+            #[cfg(feature = "hwrt")]
+            {
+                scene
+                    .raster_pipeline_mvpm
+                    .expect("invariant: mvpm_active implies raster_pipeline_mvpm is Some")
+            }
+            #[cfg(not(feature = "hwrt"))]
+            {
+                scene.raster_pipeline
+            }
+        } else if mv_active {
             #[cfg(feature = "hwrt")]
             {
                 scene
@@ -516,10 +951,29 @@ impl Renderer<'_> {
             {
                 scene.raster_pipeline
             }
+        } else if tex_active {
+            scene
+                .raster_pipeline_tex
+                .expect("invariant: tex_active implies raster_pipeline_tex is Some")
+        } else if pm_active {
+            scene
+                .raster_pipeline_pm
+                .expect("invariant: pm_active implies raster_pipeline_pm is Some")
         } else {
             scene.raster_pipeline
         };
-        let raster_set = if mv_active {
+        let raster_set = if mvpm_active {
+            #[cfg(feature = "hwrt")]
+            {
+                scene
+                    .mvpm_bind_group
+                    .expect("invariant: mvpm_active implies mvpm_bind_group is Some")
+            }
+            #[cfg(not(feature = "hwrt"))]
+            {
+                scene.instance_bind_group
+            }
+        } else if mv_active {
             #[cfg(feature = "hwrt")]
             {
                 scene
@@ -530,6 +984,14 @@ impl Renderer<'_> {
             {
                 scene.instance_bind_group
             }
+        } else if tex_active {
+            scene
+                .tex_bind_group
+                .expect("invariant: tex_active implies tex_bind_group is Some")
+        } else if pm_active {
+            scene
+                .pm_bind_group
+                .expect("invariant: pm_active implies pm_bind_group is Some")
         } else {
             scene.instance_bind_group
         };
@@ -546,101 +1008,309 @@ impl Renderer<'_> {
         // is bound before the draw to satisfy the VS's static `instances` reference:
         // `scene.instance_bind_group` (the shared N-instance SSBO — the 1-element identity
         // dummy on the legacy empty-slice arm, the gather-filled ring on the M3 instanced
-        // arm), bound ONCE for both arms. `vertex_offset`/`raster_viewport`/`raster_area`
-        // locals outlive the bracketed calls. On the legacy arm `draw(vertex_count, 1, 0, 0)`
-        // reads the merged vertex buffer; on the M3 arm the batch loop re-pushes each batch's
+        // arm), bound ONCE for both arms. Asset-streaming plan F8: when `pm_active`, set 0
+        // instead binds the PM group's TWO bindings — `instances[s]` @0 (the SAME
+        // gather-filled model ring) + `instance_materials[s]` @1 (the gather-filled,
+        // OOB-clamped id ring); both buffers are live (boot-minted or F7/F8-grown) and, on
+        // any grow, `grow_instance_family_if_needed` rebound BOTH the PM set's @0 and @1
+        // against slot `s`'s fence-waited buffers (F8 §7i), so neither descriptor points at
+        // a freed buffer. F8-mv: when `mvpm_active`, set 0 instead binds the combined group's
+        // FOUR bindings (`instances[s]` @0, `prev_instances[s]` @1, `MotionCam[s]` @2,
+        // `instance_materials[s]` @3) and the pipeline declares 4 color formats matching the
+        // 4-attachment `raster_rendering` (`color_attachment_count == 4` via `mv_active`,
+        // which `mesh_mvpm_active()` implies). All four are live, `INSTANCE_CAPACITY`-fixed
+        // rings on the RT leg (`grow_instance_family_if_needed`'s W3 gate never grows them
+        // there, so they are never rebound and never dangle). Textured-PBR T6c: when
+        // `tex_active`, set 0 instead binds the TEX group's TWO bindings — `instances[s]` @0
+        // (the SAME gather-filled model ring) + `instance_materials_tex[s]` @1 (the
+        // gather-filled `PerInstanceMaterialTex` ring) — AND, immediately after, set 1 is
+        // ALSO bound to the bindless texture-array descriptor SET (`scene.bindless_set`, a
+        // live `VkDescriptorSet` allocated by `BindlessTextureTable::new` and never
+        // destroyed before this point — its owning `BindlessTextureTable` outlives every
+        // frame until the runner's teardown); the pipeline's LAYOUT already declares this
+        // set (built via `create_graphics_pipeline_bindless` at boot), so this bind's
+        // `first_set = 1` matches a real layout slot. `raster_pipeline.layout` is the SAME
+        // 2-set layout in that case, and the pipeline declares 4 color formats (3 base +
+        // `gPbr`) matching the 4-attachment `raster_rendering` (`color_attachment_count ==
+        // 4` via `tex_active`). `vertex_offset`/
+        // `raster_viewport`/`raster_area` locals outlive the bracketed calls. On the legacy arm
+        // `draw(vertex_count, 1, 0, 0)` reads the merged vertex buffer; on the M3 arm the
+        // batch loop re-pushes each batch's
         // `base_instance` (4 bytes at offset 80, in-range of the declared 88-byte VERTEX push)
         // then `draw_indexed(index_count, instance_count, 0, 0, 0)` reads that batch's bound
         // vertex + index buffers (created on this device, carrying VERTEX/INDEX usage;
         // `index_type` a valid `VkIndexType`). Begin/End bracket pass A exactly.
-        unsafe {
-            (self.fns.cmd_begin_rendering)(cmd, &raster_rendering);
-            (self.fns.cmd_bind_pipeline)(
-                cmd,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                raster_pipeline.pipeline,
-            );
-            // M3: the instanced batch loop binds the SHARED N-instance model SSBO ONCE
-            // (set 0); the legacy (empty-slice) arm binds the 1-element identity dummy
-            // (bound-but-unread). Both bind a VALID set 0 so the VS's static `instances`
-            // reference is satisfied. The shared SSBO is `scene.instance_bind_group` for
-            // both arms (M3 repurposed it as the gather-filled N-instance ring on the
-            // instanced path); every batch indexes it by `base_instance + SV_InstanceID`.
-            (self.fns.cmd_bind_descriptor_sets)(
-                cmd,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                raster_pipeline.layout,
-                0,
-                1,
-                &raster_set.descriptor_set,
-                0,
-                ptr::null(),
-            );
-            (self.fns.cmd_push_constants)(
-                cmd,
-                raster_pipeline.layout,
-                VK_SHADER_STAGE_VERTEX_BIT,
-                0,
-                scene.mvp.len() as u32,
-                scene.mvp.as_ptr().cast(),
-            );
-            (self.fns.cmd_set_viewport)(cmd, 0, 1, &raster_viewport);
-            (self.fns.cmd_set_scissor)(cmd, 0, 1, &raster_area);
-            if scene.mesh_draw.is_empty() {
-                // LEGACY arm: byte-identical to the pre-M2 stream — a non-indexed,
-                // single-instance draw over the scene's merged vertex buffer. The shared
-                // set 0 + the `use_model_matrix == 0` push (caller contract) make the bound
-                // SSBO bound-but-unread.
-                (self.fns.cmd_bind_vertex_buffers)(
+        //
+        // Multi-paradigm render-path plan, rung R2 (Decision 2 / O1): the whole raster
+        // begin/end-rendering block is gated on `plan.raster.is_some()` — the SAME gate the
+        // raster barriers use, single-sourced from `scene.path_has_raster()` at declare time
+        // (the `debug_assert_eq!` at this fn's top guards declare/record never diverging;
+        // review R2/P2-2: one gate expression per leg, mirroring the marcher). Under the R2
+        // resolver guard this is `Some` on every currently reachable frame, so the `if` is
+        // byte-identical to the pre-R2 unconditional block.
+        if plan.raster.is_some() {
+            unsafe {
+                ts.cmd();
+                (self.fns.cmd_begin_rendering)(cmd, &raster_rendering);
+                ts.cmd();
+                (self.fns.cmd_bind_pipeline)(
                     cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    raster_pipeline.pipeline,
+                );
+                // M3: the instanced batch loop binds the SHARED N-instance model SSBO ONCE
+                // (set 0); the legacy (empty-slice) arm binds the 1-element identity dummy
+                // (bound-but-unread). Both bind a VALID set 0 so the VS's static `instances`
+                // reference is satisfied. The shared SSBO is `scene.instance_bind_group` for
+                // both arms (M3 repurposed it as the gather-filled N-instance ring on the
+                // instanced path); every batch indexes it by `base_instance + SV_InstanceID`.
+                ts.cmd();
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    raster_pipeline.layout,
                     0,
                     1,
-                    &scene.vertex_buffer.buffer,
-                    &vertex_offset,
+                    &raster_set.descriptor_set,
+                    0,
+                    ptr::null(),
                 );
-                (self.fns.cmd_draw)(cmd, scene.vertex_count, 1, 0, 0);
-            } else {
-                // M3 INSTANCED batch loop: one indexed draw per registered mesh. `scene.
-                // mvp`'s `use_model_matrix == 1` (caller contract) selects the VS arm that
-                // reads `instances[base_instance + SV_InstanceID]`. Each batch overwrites
-                // the push's `base_instance` word (offset 80, 4 bytes) with its bucket
-                // offset — NONZERO for every mesh after the first (the C1 proof) — then
-                // binds its own vertex+index buffers (with its O3 index width) and draws
-                // its instance bucket.
-                for batch in scene.mesh_draw {
-                    let base = batch.base_instance;
-                    (self.fns.cmd_push_constants)(
+                // Textured-PBR T6c: when the TEXTURED pipeline is selected, ALSO bind the bindless
+                // texture-array descriptor SET at set 1 (FRAGMENT-visible) — its LAYOUT is already
+                // baked into `raster_pipeline.layout` at boot via
+                // `VulkanContext::create_graphics_pipeline_bindless`, so this is purely a per-frame
+                // set bind, mirroring the set-0 bind immediately above. `bindless_set` is a local so
+                // `&bindless_set` is a valid single-element pointer for the call.
+                if tex_active {
+                    let bindless_set = scene
+                        .bindless_set
+                        .expect("invariant: tex_active implies bindless_set is Some");
+                    ts.cmd();
+                    (self.fns.cmd_bind_descriptor_sets)(
                         cmd,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
                         raster_pipeline.layout,
-                        VK_SHADER_STAGE_VERTEX_BIT,
-                        GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
-                        4,
-                        (&base as *const u32).cast(),
+                        1,
+                        1,
+                        &bindless_set,
+                        0,
+                        ptr::null(),
                     );
+                }
+                ts.cmd();
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    raster_pipeline.layout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0,
+                    scene.mvp.len() as u32,
+                    scene.mvp.as_ptr().cast(),
+                );
+                ts.cmd();
+                (self.fns.cmd_set_viewport)(cmd, 0, 1, &raster_viewport);
+                ts.cmd();
+                (self.fns.cmd_set_scissor)(cmd, 0, 1, &raster_area);
+                if scene.mesh_draw.is_empty() {
+                    // LEGACY arm: byte-identical to the pre-M2 stream — a non-indexed,
+                    // single-instance draw over the scene's merged vertex buffer. The shared
+                    // set 0 + the `use_model_matrix == 0` push (caller contract) make the bound
+                    // SSBO bound-but-unread.
+                    ts.cmd();
                     (self.fns.cmd_bind_vertex_buffers)(
                         cmd,
                         0,
                         1,
-                        &batch.vertex_buffer.buffer,
+                        &scene.vertex_buffer.buffer,
                         &vertex_offset,
                     );
-                    (self.fns.cmd_bind_index_buffer)(
-                        cmd,
-                        batch.index_buffer.buffer,
-                        0,
-                        batch.index_type,
-                    );
-                    (self.fns.cmd_draw_indexed)(
-                        cmd,
-                        batch.index_count,
-                        batch.instance_count,
-                        0,
-                        0,
-                        0,
-                    );
+                    ts.cmd();
+                    (self.fns.cmd_draw)(cmd, scene.vertex_count, 1, 0, 0);
+                } else {
+                    // M3 INSTANCED batch loop: one indexed draw per registered mesh. `scene.
+                    // mvp`'s `use_model_matrix == 1` (caller contract) selects the VS arm that
+                    // reads `instances[base_instance + SV_InstanceID]`. Each batch overwrites
+                    // the push's `base_instance` word (offset 80, 4 bytes) with its bucket
+                    // offset — NONZERO for every mesh after the first (the C1 proof) — then
+                    // binds its own vertex+index buffers (with its O3 index width) and draws
+                    // its instance bucket.
+                    for batch in scene.mesh_draw {
+                        let base = batch.base_instance;
+                        ts.cmd();
+                        (self.fns.cmd_push_constants)(
+                            cmd,
+                            raster_pipeline.layout,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                            GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                            4,
+                            (&base as *const u32).cast(),
+                        );
+                        ts.cmd();
+                        (self.fns.cmd_bind_vertex_buffers)(
+                            cmd,
+                            0,
+                            1,
+                            &batch.vertex_buffer.buffer,
+                            &vertex_offset,
+                        );
+                        ts.cmd();
+                        (self.fns.cmd_bind_index_buffer)(
+                            cmd,
+                            batch.index_buffer.buffer,
+                            0,
+                            batch.index_type,
+                        );
+                        ts.cmd();
+                        (self.fns.cmd_draw_indexed)(
+                            cmd,
+                            batch.index_count,
+                            batch.instance_count,
+                            0,
+                            0,
+                            0,
+                        );
+                    }
                 }
+                ts.cmd();
+                (self.fns.cmd_end_rendering)(cmd);
             }
-            (self.fns.cmd_end_rendering)(cmd);
+        }
+
+        // Multi-paradigm render-path plan, rung R3 (§E leg-disable / the O2 audit finding): the
+        // mesh-depth NEUTRAL CLEAR — `Deferred × Sdf`'s replacement for the raster pass's own
+        // depth-clear producer (see `mesh_depth_neutral_clear`'s doc in `graph_bridge.rs` +
+        // `GBufferScene::path_has_mesh_depth_neutral_clear`'s doc for the full rationale). `Some`
+        // iff `scene.path_has_mesh_depth_neutral_clear()`, mutually exclusive with `plan.raster`
+        // by construction (W1 parity, the SAME predicate `declare_deferred_graph` checks).
+        debug_assert_eq!(
+            plan.mesh_depth_neutral_clear.is_some(),
+            scene.path_has_mesh_depth_neutral_clear(),
+            "W1: declare/record predicate desync (mesh_depth_neutral_clear)"
+        );
+        if let Some(depth_clear_pass) = plan.mesh_depth_neutral_clear {
+            ts.cmd();
+            self.record_graph_pass(depth_clear_pass, cmd, targets, scene, fi);
+            let depth_only_attachment = VkRenderingAttachmentInfo {
+                s_type: VkStructureType::RenderingAttachmentInfo,
+                p_next: ptr::null(),
+                image_view: targets.depth[fi].view,
+                image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                resolve_mode: 0,
+                resolve_image_view: VkImageView::NULL,
+                resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+                store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                clear_value: VkClearValue {
+                    depth_stencil: VkClearDepthStencilValue { depth: 1.0, stencil: 0 },
+                },
+            };
+            let depth_only_area =
+                VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: present_extent };
+            let depth_only_rendering = VkRenderingInfo {
+                s_type: VkStructureType::RenderingInfo,
+                p_next: ptr::null(),
+                flags: 0,
+                render_area: depth_only_area,
+                layer_count: 1,
+                view_mask: 0,
+                color_attachment_count: 0,
+                p_color_attachments: ptr::null(),
+                p_depth_attachment: (&depth_only_attachment as *const VkRenderingAttachmentInfo)
+                    .cast(),
+                p_stencil_attachment: ptr::null(),
+            };
+            // SAFETY: recording is open; `depth_only_rendering` names only the live depth view
+            // (now `DEPTH_ATTACHMENT_OPTIMAL`, transitioned by the barrier
+            // `record_graph_pass` just emitted) with `color_attachment_count == 0` (no color
+            // attachment array is needed — `p_color_attachments` is a valid null ptr for a
+            // zero-length array per the Vulkan spec); dynamic rendering is enabled on this
+            // device (the SAME capability every other `cmd_begin_rendering` call in this fn
+            // relies on); `depth_only_area` is within the depth image's extent (==
+            // `present_extent`, matching every other G-buffer target this frame). No draw is
+            // recorded — the clear alone (LOAD_OP_CLEAR/STORE_OP_STORE, depth = 1.0) leaves the
+            // whole image at the far-plane sentinel, reproducing the raster pass's OWN depth
+            // clear value exactly (`MESH_DEPTH_CLEAR` / `DEPTH_CLEAR` == 1.0), so the
+            // byte-UNCHANGED marcher reads "no mesh" for every pixel this frame.
+            unsafe {
+                ts.cmd();
+                (self.fns.cmd_begin_rendering)(cmd, &depth_only_rendering);
+                ts.cmd();
+                (self.fns.cmd_end_rendering)(cmd);
+            }
+        }
+
+        // Multi-paradigm render-path plan, rung R3b (§E leg-disable / the R3 audit finding): the
+        // `viewt_from_depth` `gViewT`-producer — `Deferred × Mesh`'s replacement for the
+        // (undispatched) marcher's `gViewT` write (see `viewt_from_depth`'s doc in
+        // `graph_bridge.rs` + `ViewtFromDepthActivation`'s doc for the full rationale). `Some`
+        // iff `scene.viewt_from_depth.is_some()`, mutually exclusive with
+        // `plan.mesh_depth_neutral_clear` by construction (W1 parity: `plan.viewt_from_depth`
+        // and `scene.viewt_from_depth` are TWO separate `Option`s that must move in lock-step —
+        // `declare_deferred_graph` derives the former directly from the latter).
+        debug_assert_eq!(
+            plan.viewt_from_depth.is_some(),
+            scene.viewt_from_depth.is_some(),
+            "W1: declare/record predicate desync (viewt_from_depth)"
+        );
+        if let Some(viewt_from_depth_pass) = plan.viewt_from_depth {
+            ts.cmd();
+            self.record_graph_pass(viewt_from_depth_pass, cmd, targets, scene, fi);
+            let activation = scene
+                .viewt_from_depth
+                .as_ref()
+                .expect("invariant: plan.viewt_from_depth.is_some() ⇒ scene.viewt_from_depth.is_some() (W1)");
+            let push = ViewtFromDepthPush::new(
+                present_extent.width,
+                present_extent.height,
+                activation.mesh_view_t_norm,
+            );
+            let push_bytes = push.as_bytes();
+            let set = &targets
+                .viewt_from_depth_set
+                .as_ref()
+                .expect(
+                    "invariant: scene.viewt_from_depth.is_some() ⇒ GBufferTargets::create wrote viewt_from_depth_set",
+                )[self.frame_index];
+            let group_x = present_extent.width.div_ceil(8);
+            let group_y = present_extent.height.div_ceil(8);
+            // SAFETY: recording is open; `activation.pipeline` + its layout (declaring
+            // `activation.layout` at set 0 AND the 12-byte COMPUTE push range) are live on this
+            // device (caller contract); `set` binds the now-transitioned depth (SHADER_READ, by
+            // the `record_graph_pass` call above) + `gViewT` (GENERAL) images; `group_x`/`group_y`
+            // cover `present_extent` (the 8×8-tile ceiling of the SAME extent the depth/gViewT
+            // images are sized to); `&set.descriptor_set` is a single-element local alive for the
+            // call (first_set 0, count 1, zero dynamic offsets); `push_bytes` is
+            // `VIEWT_FROM_DEPTH_PUSH_BYTES` (12) bytes at offset 0, exactly the declared push
+            // range, and the backing `push` local outlives the call.
+            unsafe {
+                ts.cmd();
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    activation.pipeline.pipeline,
+                );
+                ts.cmd();
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    activation.pipeline.layout,
+                    0,
+                    1,
+                    &set.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                ts.cmd();
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    activation.pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    VIEWT_FROM_DEPTH_PUSH_BYTES,
+                    push_bytes.as_ptr().cast(),
+                );
+                ts.cmd();
+                (self.fns.cmd_dispatch)(cmd, group_x, group_y, 1);
+            }
         }
 
         // The marcher's INPUT barriers — depth→sampled, color→general, lit/viewt/ssao
@@ -683,10 +1353,11 @@ impl Renderer<'_> {
             let plan = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+                .expect("invariant: declare_frame_graph ran before record_gbuffer");
             let light_upload = plan
                 .light_upload
                 .expect("invariant: light_dirty ⇒ light_upload pass declared");
+            ts.cmd();
             self.record_graph_pass(light_upload, cmd, targets, scene, fi);
 
             let region = VkBufferCopy {
@@ -694,13 +1365,14 @@ impl Renderer<'_> {
                 dst_offset: 0,
                 size: scene.light_upload_bytes,
             };
-            // SAFETY: recording is open; the copy names the live host-coherent staging +
-            // device-local table buffers; the copy region spans `[0, light_upload_bytes)`
+            // SAFETY: recording is open; the copy names the live host-coherent staging + light
+            // table buffers; the copy region spans `[0, light_upload_bytes)`
             // ≤ both buffer sizes (caller contract — the table is sized for MAX_LIGHTS).
             // The seed-WAR barrier recorded ABOVE orders this transfer write after the
             // sibling frame's pipelined table reads; the readers' own graph passes order
             // the marcher/resolve reads after this write. `&region` outlives the call.
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_copy_buffer)(
                     cmd,
                     scene.light_staging.buffer,
@@ -708,6 +1380,27 @@ impl Renderer<'_> {
                     1,
                     &region,
                 );
+            }
+        }
+
+        // === Dynamic-materials DM1: the material-table upload, at the position
+        // `declare_deferred_graph` declared it (right after `light_upload`, before the marcher,
+        // `shadow_vis` and the resolve read the table). Recorded ONLY on an upload frame: the graph
+        // pass's cross-frame seed-WAR, then ONE multi-region staging → table copy. ===
+        if let Some(material_upload) = self.gbuffer_pass_plan.as_ref().and_then(|p| p.material_upload) {
+            let upload = scene
+                .material_upload
+                .expect("invariant: the material_upload pass is declared iff scene.material_upload is Some");
+            ts.cmd();
+            self.record_graph_pass(material_upload, cmd, targets, scene, fi);
+            if !upload.regions.is_empty() {
+                ts.cmd();
+            }
+            // SAFETY: recording is open, outside any render scope; `upload.staging` and
+            // `scene.material_table` are live buffers of this device (the scene's contract), and every
+            // region lies inside both (`MaterialUploadScene`'s contract).
+            unsafe {
+                self.record_material_copy(cmd, scene.material_table, &upload);
             }
         }
 
@@ -741,9 +1434,10 @@ impl Renderer<'_> {
             let coarse = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .coarse
                 .expect("invariant: scene.coarse.is_some() ⇒ coarse pass declared");
+            ts.cmd();
             self.record_graph_pass(coarse, cmd, targets, scene, fi);
             // SAFETY: recording is open; the coarse pipeline + its layout (declaring
             // `vocab_layout` at set 0 + the shared COMPUTE push range) are live on this device
@@ -755,11 +1449,13 @@ impl Renderer<'_> {
             // (first_set 0, count 1, zero dynamic offsets). The cull declares no push it reads,
             // but the layout's push range matches the marcher's, so no constant is pushed here.
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     coarse_pipeline.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -770,6 +1466,7 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, coarse_groups, 1, 1);
             }
 
@@ -794,8 +1491,8 @@ impl Renderer<'_> {
         // (skipping empty tiles). Either way the marcher DECLARES binding 6, so the (valid) Tiles descriptor
         // is always bound in the vocabulary set. `omega` carries the B1 over-relaxation
         // factor (`DEFAULT_MARCHER_OMEGA`, the provably hole-free speedup). Render A1/A2:
-        // the on-screen demo turns lighting ON (A1 soft shadows + A2 AO) with the default
-        // directional light.
+        // the on-screen demo turns lighting ON (A1 soft shadows + A2 AO) with the scene's
+        // primary directional (none ⇒ shadows off).
         // SDF brick-cache activation (campaign M1/M2/M4): the empty-skip + trilinear/cubic surface
         // cache + clip-map LOD gates live ENTIRELY in this per-frame push (the bound descriptors at
         // 9..=14 are static), so `scene.brick` selects ON/OFF at runtime with no re-record — the
@@ -862,37 +1559,68 @@ impl Renderer<'_> {
         // COMPUTE-read).
         // SAFETY: recording is open; `record_graph_pass` records the graph's derived
         // input barriers for the "marcher" pass into `cmd` against the live G-buffer targets.
-        let marcher = self
+        //
+        // Multi-paradigm render-path plan, rung R2 (Decision 2 / O1): `plan.marcher` is `Some`
+        // iff `scene.path_has_marcher()` — the SAME predicate `declare_deferred_graph`'s
+        // `marcher` pass declaration checks. The `debug_assert_eq!` guards the two never
+        // diverging (W1); under the R2 resolver guard this is `Some`/`true` on every currently
+        // reachable frame, so the `if let` is byte-identical to the pre-R2 unconditional
+        // dispatch.
+        let marcher_plan = self
             .gbuffer_pass_plan
             .as_ref()
-            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+            .expect("invariant: declare_frame_graph ran before record_gbuffer")
             .marcher;
-        self.record_graph_pass(marcher, cmd, targets, scene, fi);
-        unsafe {
-            (self.fns.cmd_bind_pipeline)(
-                cmd,
-                VK_PIPELINE_BIND_POINT_COMPUTE,
-                scene.marcher.pipeline,
-            );
-            (self.fns.cmd_bind_descriptor_sets)(
-                cmd,
-                VK_PIPELINE_BIND_POINT_COMPUTE,
-                scene.marcher.layout,
-                0,
-                1,
-                &targets.vocab_set[self.frame_index].descriptor_set,
-                0,
-                ptr::null(),
-            );
-            (self.fns.cmd_push_constants)(
-                cmd,
-                scene.marcher.layout,
-                VK_SHADER_STAGE_COMPUTE_BIT,
-                0,
-                GBUFFER_MARCHER_PUSH_BYTES,
-                marcher_push_bytes.as_ptr().cast(),
-            );
-            (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+        debug_assert_eq!(
+            marcher_plan.is_some(),
+            scene.path_has_marcher(),
+            "W1: declare/record predicate desync (marcher)"
+        );
+        if let Some(marcher_pass) = marcher_plan {
+            ts.cmd();
+            self.record_graph_pass(marcher_pass, cmd, targets, scene, fi);
+            // VB-SV0 rung S1.5: bracket the marcher dispatch itself. The BEGIN is written AFTER
+            // `record_graph_pass` so the bracket excludes the graph's derived input barriers —
+            // those are identical on both A/B phases (`lighting_flags` is a push constant, not a
+            // resource), so including them would only add un-cancelled noise to the paired delta.
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.begin(self.fns, cmd, ZONE_SV0_MARCHER) };
+            unsafe {
+                ts.cmd();
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    scene.marcher.pipeline,
+                );
+                ts.cmd();
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    scene.marcher.layout,
+                    0,
+                    1,
+                    &targets.vocab_set[self.frame_index].descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                ts.cmd();
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    scene.marcher.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    GBUFFER_MARCHER_PUSH_BYTES,
+                    marcher_push_bytes.as_ptr().cast(),
+                );
+                ts.cmd();
+                (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            }
+            // VB-SV0 rung S1.5: close the marcher bracket (`BOTTOM_OF_PIPE`, so it waits on the
+            // dispatch this pair exists to time).
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.end(self.fns, cmd, ZONE_SV0_MARCHER) };
         }
 
         // (5a) PBR MVP-2: make the marcher's gAlbedo + gNormal + gMaterial STORES available
@@ -941,9 +1669,10 @@ impl Renderer<'_> {
             let ssao_pass = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .ssao
                 .expect("invariant: scene.ssao.is_some() ⇒ ssao pass declared");
+            ts.cmd();
             self.record_graph_pass(ssao_pass, cmd, targets, scene, fi);
             // SAFETY: recording is open; the SSAO pipeline + its layout (declaring the SSAO set
             // layout at set 0 + the shared 80-byte COMPUTE push range) are live on this device
@@ -954,11 +1683,13 @@ impl Renderer<'_> {
             // for the call (first_set 0, count 1, zero dynamic offsets). The SSAO shader reads its
             // camera from the UBO @4, so no push constant is recorded.
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     activation.pipeline.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -969,14 +1700,146 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
             }
 
             // The SSAO pass's `ssao` WRITES (COMPUTE/SHADER_WRITE) are ordered before the
             // resolve's `gSsao.Load` READS (COMPUTE/SHADER_READ) by the graph: it derives
             // this COMPUTE→COMPUTE, GENERAL→GENERAL image barrier on `ssao` at the resolve
-            // (the `ssao` reader), so `record_pass(resolve)` emits it before the resolve
-            // dispatch (still after this SSAO dispatch's write) — NOT here.
+            // (the `ssao` reader) UNLESS the à-trous chain below runs (`atrous_levels > 0`),
+            // in which case the graph instead derives it at the à-trous chain's LEVEL 0 (the
+            // FIRST reader of the raw gather) — `record_pass(resolve)` / this block's first
+            // `record_graph_pass` call emits whichever applies, still after this dispatch's
+            // write — NOT here.
+        }
+
+        // === The SSAO edge-avoiding à-trous denoise chain (RHI DISPATCH WIRING — the deferred
+        // half of the R8<->R16 C1 endpoint solution). Recorded ONLY when `scene.ssao.is_some()`
+        // (mirrors the gather pass's gate — à-trous cannot run without a fresh gather) AND
+        // `activation.atrous_levels > 0` (the owner-authored 0%-gate:
+        // `SsaoConfig::clamped_atrous_levels() == 0`) AND the FIVE role-keyed sets all exist
+        // (`None` on a device lacking `R16_UNORM` storage — the graceful degrade,
+        // `ssao_atrous_storage_ok()`). Otherwise skipped entirely — NO bind, NO dispatch, NO
+        // barrier — so the resolve reads the raw, un-denoised gather (the byte-identical
+        // pre-dispatch-wiring path).
+        //
+        // Belt-and-suspenders (the shadow à-trous precedent): the sets are built DECOUPLED from
+        // this per-frame gate (on the STABLE boot signals, `GBufferTargets::build_ssao_atrous_
+        // sets`), so `scene.ssao.is_some()` normally implies them; a future gate mismatch
+        // DEGRADES GRACEFULLY (this whole block simply does not run) instead of an `expect`
+        // panic on a `None` set.
+        //
+        // `N` (`atrous_levels`, clamped to `MAX_SSAO_ATROUS_LEVELS`) dispatches are recorded,
+        // level `k`'s (pipeline, set) pair selected by [`crate::present::ssao_atrous_step`]'s
+        // [`crate::present::AtrousStepRole`] — `Read8` (level 0: reads the frozen R8 `gSsao`,
+        // writes ring 0) / `Interior` (ping-pongs the two R16 rings) / `Write8` (the last level:
+        // reads a ring, writes BACK into `gSsao` — the resolve's UNCHANGED binding then reads the
+        // FILTERED result). Each pushes `step = 1 << level` (a 4-byte `{ uint step }`). ===
+        if let Some(activation) = &scene.ssao
+            && activation.atrous_levels > 0
+            && let (
+                Some(read8_set),
+                Some(interior_from0_set),
+                Some(interior_from1_set),
+                Some(write8_from0_set),
+                Some(write8_from1_set),
+            ) = (
+                targets.ssao_atrous_read8_set.as_ref(),
+                targets.ssao_atrous_interior_from0_set.as_ref(),
+                targets.ssao_atrous_interior_from1_set.as_ref(),
+                targets.ssao_atrous_write8_from0_set.as_ref(),
+                targets.ssao_atrous_write8_from1_set.as_ref(),
+            )
+        {
+            let read8_pipeline = scene
+                .ssao_atrous_read8_pipeline
+                .expect("invariant: the SSAO à-trous sets built ⇒ the boot read8 pipeline is Some");
+            let interior_pipeline = scene.ssao_atrous_interior_pipeline.expect(
+                "invariant: the SSAO à-trous sets built ⇒ the boot interior pipeline is Some",
+            );
+            let write8_pipeline = scene
+                .ssao_atrous_write8_pipeline
+                .expect("invariant: the SSAO à-trous sets built ⇒ the boot write8 pipeline is Some");
+            let atrous_levels = activation.atrous_levels.min(crate::present::MAX_SSAO_ATROUS_LEVELS);
+            // O1: pin the `0 || 2..=MAX` contract (host `clamped_atrous_levels`) at the RHI boundary —
+            // the SAME assert the declarator makes, so a raw `1` (which `ssao_atrous_step(0,1)` would
+            // route as a lone `Read8` that never writes back to `gSsao`) trips loudly rather than
+            // silently wasting a dispatch + leaving the resolve on the raw gather.
+            debug_assert!(
+                atrous_levels == 0
+                    || (2..=crate::present::MAX_SSAO_ATROUS_LEVELS).contains(&atrous_levels),
+                "invariant: ssao à-trous levels is 0 or 2..=MAX at the RHI boundary; got {atrous_levels}"
+            );
+            let plan = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_frame_graph ran before record_gbuffer");
+            for level in 0..atrous_levels {
+                let atrous_pass = plan.ssao_atrous[level as usize].expect(
+                    "invariant: level < ssao_atrous_levels ⇒ ssao_atrous[level] declared",
+                );
+                // SAFETY: recording is open; `record_graph_pass` records the "ssao_atrous" pass's
+                // derived RAW barriers (the gather-write → level-0-read on the first iteration,
+                // the ring ping-pong on every iteration, the last level's write → resolve-read
+                // implicitly ordering before the resolve's later `image_access`) into `cmd`.
+                ts.cmd();
+                self.record_graph_pass(atrous_pass, cmd, targets, scene, fi);
+                let (pipeline, set) = match crate::present::ssao_atrous_step(level, atrous_levels) {
+                    crate::present::AtrousStepRole::Read8 => {
+                        (read8_pipeline, &read8_set[self.frame_index])
+                    }
+                    crate::present::AtrousStepRole::Interior { in_ring: 0 } => {
+                        (interior_pipeline, &interior_from0_set[self.frame_index])
+                    }
+                    crate::present::AtrousStepRole::Interior { .. } => {
+                        (interior_pipeline, &interior_from1_set[self.frame_index])
+                    }
+                    crate::present::AtrousStepRole::Write8 { in_ring: 0 } => {
+                        (write8_pipeline, &write8_from0_set[self.frame_index])
+                    }
+                    crate::present::AtrousStepRole::Write8 { .. } => {
+                        (write8_pipeline, &write8_from1_set[self.frame_index])
+                    }
+                };
+                let step: u32 = 1u32 << level;
+                // SAFETY: recording is open; the selected à-trous pipeline variant + its shared
+                // 4-binding layout are live on this device (caller contract); `set` binds
+                // `gAoIn`/`gAoOut` (the role-keyed pair) + `gViewT` + the camera UBO; the 4-byte
+                // `{ uint step }` push covers the pipeline's declared COMPUTE range;
+                // `dispatch_group_count_x` covers the pixel count; `&set.descriptor_set` is a
+                // single-element local alive for the call.
+                unsafe {
+                    ts.cmd();
+                    (self.fns.cmd_bind_pipeline)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        pipeline.pipeline,
+                    );
+                    ts.cmd();
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        pipeline.layout,
+                        0,
+                        1,
+                        &set.descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    ts.cmd();
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        pipeline.layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        4,
+                        (&step as *const u32).cast(),
+                    );
+                    ts.cmd();
+                    (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+                }
+            }
         }
 
         // === SDFDDGI I2: the probe-update compute pass. Recorded ONLY when the scene wires the
@@ -1008,16 +1871,15 @@ impl Renderer<'_> {
             let ddgi_update_pass = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .ddgi_update
                 .expect("invariant: scene.ddgi_update.is_some() ⇒ ddgi_update pass declared");
             // HW-RT rung R0: open the DdgiUpdate bracket BEFORE the pass's input barriers +
             // dispatch. GATED — `None` records nothing (byte-identical).
-            if let Some(tc) = scene.gpu_timing {
-                // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
-                // reset at the frame top; `fi` is this present's in-flight slot.
-                unsafe { tc.write_begin(self.fns, cmd, fi, TimedPass::DdgiUpdate) };
-            }
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.begin(self.fns, cmd, ZONE_GBUF_DDGI_UPDATE) };
+            ts.cmd();
             self.record_graph_pass(ddgi_update_pass, cmd, targets, scene, fi);
             // SAFETY: recording is open; the update pipeline + its layout (declaring the 7-binding
             // update set layout at set 0, NO push range) are live on this device (caller contract);
@@ -1029,11 +1891,13 @@ impl Renderer<'_> {
             // `&ddgi_update_set.descriptor_set` is a single-element local alive for the call
             // (first_set 0, count 1, zero dynamic offsets).
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     activation.pipeline.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1044,13 +1908,13 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, activation.dispatch_group_count_x, 1, 1);
             }
             // HW-RT rung R0: close the DdgiUpdate bracket AFTER the dispatch. GATED.
-            if let Some(tc) = scene.gpu_timing {
-                // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
-                unsafe { tc.write_end(self.fns, cmd, fi, TimedPass::DdgiUpdate) };
-            }
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.end(self.fns, cmd, ZONE_GBUF_DDGI_UPDATE) };
 
             // The update pass's atlas WRITES (COMPUTE/SHADER_WRITE, GENERAL) are ordered before the
             // resolve's atlas READS (COMPUTE/SHADER_READ) by the graph: it derives the
@@ -1062,9 +1926,27 @@ impl Renderer<'_> {
         }
 
         // === Lighting L1: the clustered froxel light-cull pass (Decision 6). Recorded ONLY
-        // when the scene wires the cull pipeline + cull set; otherwise skipped entirely (the
-        // resolve's `clusters_enabled` header gate then loops the flat table — the L1 OFF /
-        // 0%-gate, byte-identical command stream). The cull reads the camera UBO + light table
+        // when the scene wires the cull pipeline + cull set; otherwise skipped entirely and the
+        // resolve loops the flat table — the L1 OFF / 0%-gate, byte-identical command stream.
+        // The resolve's `use_clusters` is THREE terms since VB-P1k (`clusters_enabled != 0 &&
+        // cluster_count != 0 && cluster_count <= grid_capacity`, the capacity read off the BOUND
+        // `ClusterGrid` descriptor with `GetDimensions`). This fn records the DEFERRED path only
+        // (`render_gbuffer_frame` reaches `record_gbuffer` solely in the `else` arm of its
+        // `path_is_vb()`/`path_is_forward()` three-way), so the boots reachable here are exactly
+        // the Deferred ones — and on those, `ResolvedRenderPath::froxel_light_cull` is `false` by
+        // construction (`clusters_enabled && path == VisibilityBuffer`), which makes
+        // `build_froxel_light_cull` never run and this block always skipped. Which term then takes
+        // the flat branch: on the DEFAULT boot the ENABLED BIT, since
+        // `LightingConfig::clusters_enabled` defaults to `false` and `LightHeaderGpu::new` packs
+        // it verbatim; on a Deferred boot that explicitly sets it `true`, the `cluster_count != 0`
+        // term, since `sync_cluster_light_gate` pins the dims lane to `0` whenever
+        // `froxel_light_cull` is false. The CAPACITY term never decides on a Deferred frame for
+        // that same reason — it is defence in depth (`GBufferScene::cluster_cull`'s doc also
+        // records the wider VB case, where no `ClusterGrid` reader is bound at all). The two
+        // terms past the enabled bit are an out-of-bounds guard, not a style choice:
+        // `robustBufferAccess` is OFF here and no GPU-assisted validation runs, so an
+        // out-of-range `ClusterGrid` read is real UB that no layer reports. The cull reads the
+        // camera UBO + light table
         // (the L0-r0 copy above already ordered the table for COMPUTE reads) and writes the
         // ClusterGrid + LightIndexList; the resolve reads them, so a COMPUTE→COMPUTE buffer
         // barrier orders the cull WRITE before the resolve READ. The cull does NOT depend on
@@ -1087,6 +1969,7 @@ impl Renderer<'_> {
             // FILL is GPU work (not a barrier), so it runs unconditionally — only the
             // following barrier is graph-driven when the flag is ON.
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_fill_buffer)(cmd, alloc.buffer, 0, VK_WHOLE_SIZE, 0);
             }
             // The alloc TRANSFER→COMPUTE(RW) barrier (+ the light-table TRANSFER→COMPUTE
@@ -1100,26 +1983,79 @@ impl Renderer<'_> {
             let light_cull = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .light_cull
                 .expect("invariant: cull wired ⇒ light_cull pass declared");
+            ts.cmd();
             self.record_graph_pass(light_cull, cmd, targets, scene, fi);
 
-            // (L1-1) Bind the cull pipeline + the cull set (written ONCE at sync_gbuffer),
-            // push the 16-byte ClusterCullPush, dispatch over CLUSTER_COUNT froxels.
-            let cull_groups = scene.cluster_count.div_ceil(LIGHT_CULL_LOCAL_SIZE_X);
+            // (L1-1) Bind the cull pipeline + the cull set (written ONCE at sync_gbuffer), push
+            // this arm's own push image, dispatch this arm's own group count (VB-P1e H5, the
+            // SAME `match` `vb.rs` uses per D11/H4): base = `cluster_count` froxels at the
+            // 64-wide group + the 16-byte `ClusterCullPush`; hier = `h.groups` groups of 256 +
+            // the 24-byte `ClusterCullHierPush`. `scene.cluster_cull_hier` selects BOTH halves
+            // together, so the group count can never be paired with the other arm's push range.
+            //
+            // On every current Deferred boot this `match` always takes the `None` arm:
+            // `GpuSceneBundles::build_froxel_light_cull` is the only writer of both
+            // `scene.cluster_cull` and `scene.cluster_cull_hier`, and it is gated on
+            // `ResolvedRenderPath::froxel_light_cull`, which resolves VB-only
+            // (`consumers.clusters_wanted && matches!(path, RenderPath::VisibilityBuffer)`,
+            // `boyko_render::render_path_config.rs:913`) — so `scene.cluster_cull` itself stays
+            // `None` on a Deferred boot and this whole `if let` block does not execute. This
+            // rung does not migrate a live path; it makes the record site CAPABLE of carrying a
+            // hierarchical dispatch record, removing the interim `debug_assert`'s latent trap (a
+            // future Deferred froxel-cull wiring landing without a matching push/dispatch update
+            // here) ahead of that wiring existing.
+            let (cull_groups, push_ptr, push_len) = match scene.cluster_cull_hier.as_ref() {
+                Some(h) => (h.groups, h.push.as_ptr(), CLUSTER_CULL_HIER_PUSH_BYTES),
+                None => (
+                    scene.cluster_count.div_ceil(LIGHT_CULL_LOCAL_SIZE_X),
+                    scene.cluster_cull_push.as_ptr(),
+                    CLUSTER_CULL_PUSH_BYTES,
+                ),
+            };
             // SAFETY: recording is open; the cull pipeline + its layout (declaring `cull_layout`
-            // at set 0 + the 16-byte COMPUTE push range) are live on this device (caller
-            // contract); the cull set binds the camera UBO + light table + the cluster buffers;
-            // `cull_groups` covers `cluster_count` froxels at the 64-wide group; the push bytes
-            // are exactly `CLUSTER_CULL_PUSH_BYTES` (16) at offset 0; `&cull_set.descriptor_set`
-            // is a single-element local alive for the call (first_set 0, count 1).
+            // at set 0 + a COMPUTE push range sized for the SAME arm) are live on this device
+            // (caller contract); the cull set binds the camera UBO + light table + the cluster
+            // buffers; the dispatch size and the push image are the SAME `Option` arm (base:
+            // `cluster_count` froxels at the 64-wide group + the 16-byte `ClusterCullPush`;
+            // hier: `h.groups` groups of 256 + the 24-byte `ClusterCullHierPush`), so the group
+            // count can never be paired with the other arm's push range.
+            //
+            // The two arms' `ClusterGrid[fi]` write bounds are DIFFERENT quantities (P0-1,
+            // adversarial review — the two must not be conflated), but as of VB-P1j both are
+            // hard-bounded by the ALLOCATION, so neither can write past the end of `ClusterGrid`
+            // under any boot/live `ClusterConfig` skew. HIER: `cluster_cull.hlsl`'s `#ifdef HIER`
+            // branch guards on `fi < pc.cluster_capacity`, a pushed BOOT-snapshot word minted by
+            // `build_froxel_light_cull` from the SAME `ClusterConfig::cluster_count()` binding
+            // the `ClusterGrid` buffer itself was allocated from (`gpu_scene/mod.rs`) — a live
+            // edit to the `ClusterConfig` Resource cannot move this arm's own write bound, by
+            // construction (D11). BASE: the `#else` branch still carries NO `cluster_capacity`
+            // push word (its push stays 16 B / 4 words — `z_near`, `z_far`,
+            // `max_lights_per_cluster`, `index_list_cap`; VB-P1j deliberately did NOT widen it);
+            // it clamps `cluster_count` by `ClusterGrid.GetDimensions()` instead, i.e. by the
+            // bound DESCRIPTOR's own element count (SPIR-V `OpArrayLength`). That is the
+            // allocation itself rather than a host-side mirror of it, so this arm's bound cannot
+            // drift from the buffer even if a push word or a boot snapshot were wrong. Before
+            // VB-P1j it bounded only on the LIVE header's `dim_x*dim_y*dim_z`, reaching
+            // `min(64*ceil(boot_cc/64), live_cc)` — measured at 16 cells / 128 B past the end
+            // for boot 16x9x23 vs live 16x9x24.
+            // SCOPE: this bounds THIS dispatch's writes only. The `ClusterGrid` *readers*
+            // (vb_resolve/vb_shade/deferred_pbr/forward_opaque) are a separate contract, closed
+            // by VB-P1k in the same commit: each disarms its cluster walk (falling back to the
+            // in-bounds flat light scan) unless the live grid fits that same `GetDimensions()`
+            // bound.
+            // `&cull_set.descriptor_set` is a single-element local alive for the call
+            // (first_set 0, count 1).
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     cull_pipeline.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1130,14 +2066,16 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_push_constants)(
                     cmd,
                     cull_pipeline.layout,
                     VK_SHADER_STAGE_COMPUTE_BIT,
                     0,
-                    CLUSTER_CULL_PUSH_BYTES,
-                    scene.cluster_cull_push.as_ptr().cast(),
+                    push_len,
+                    push_ptr.cast(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, cull_groups, 1, 1);
             }
 
@@ -1150,12 +2088,14 @@ impl Renderer<'_> {
 
         // === CSM Increment 1b (Rung A): the cascade DEPTH pass (W5 — a NEW recorder bracket,
         // NOT record_gbuffer's main raster). Recorded ONLY when the scene wires the depth
-        // activation (`scene.csm.is_some()`); otherwise skipped entirely — NO barrier, NO
-        // rendering — so the command stream is byte-identical to the pre-CSM path (the 0%-gate;
-        // the cascade map/sampler/UBO are bound-but-unread). Renders the SAME caster batches
-        // (`scene.mesh_draw` + `scene.instance_bind_group`) from the SUN's POV into cascade
-        // layer 0, so the resolve can `min`-combine the exact hard shadow. RUN BEFORE the
-        // resolve dispatch (5b) so the cascade depth is SHADER_READ-visible to the resolve. ===
+        // activation (`scene.csm.is_some()`); otherwise NO rendering is recorded and the
+        // cascade map/sampler/UBO stay bound-but-unread — the graph's UNCONDITIONAL resolve
+        // read still derives the discard-legal UNDEFINED→SHADER_READ_ONLY transition that
+        // keeps the always-bound descriptor's layout valid (VUID-...-09600; PIXELS stay
+        // byte-identical — the resolve's `csm_mode == 0` gate never samples it). Renders the
+        // SAME caster batches (`scene.mesh_draw` + `scene.instance_bind_group`) from the SUN's
+        // POV into cascade layer 0, so the resolve can `min`-combine the exact hard shadow.
+        // RUN BEFORE the resolve dispatch (5b) so the cascade depth is SHADER_READ-visible. ===
         if let Some(csm) = &scene.csm {
             let cascade = scene.csm_cascade_texture;
             // CSM Increment 3 (Rung B): the number of cascade LAYERS to render — clamped to the
@@ -1163,13 +2103,14 @@ impl Renderer<'_> {
             // the barrier range past the array bounds. `1` reproduces the Rung-A single-cascade path.
             let active = (csm.active_count as usize).clamp(1, MAX_CASCADES) as u32;
             // (CSM-0) Barrier-in: the cascade image UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL (the
-            // depth-write access, DEPTH aspect) over ALL `[0..active)` layers. Each is re-
-            // `UNDEFINED`'d (the prior frame's content is discarded before this frame's depth pass).
-            // The graph derives the layered subresource range internally; the former hand
-            // barriers spanned `[0..active)` explicitly (the Rung-A `DEPTH_SUBRESOURCE_RANGE`
-            // covers only layer 0).
+            // depth-write access, DEPTH aspect) over the FULL `MAX_CASCADES` array — the resolve
+            // samples through a whole-array 2D_ARRAY view, so the `[active..MAX)` tail must ride
+            // the same layout cycle (09600; discard-legal garbage the shader's `active_count`
+            // gate never samples). Each layer is re-`UNDEFINED`'d (the prior frame's content is
+            // discarded before this frame's depth pass); the rendering loop below still touches
+            // only `[0..active)`.
             // The graph's "csm" pass (declaring the cascade layered DEPTH_WRITE over
-            // `depth_layers(active)`) DRIVES this barrier-in, recorded HERE, before the
+            // `depth_layers(MAX_CASCADES)`) DRIVES this barrier-in, recorded HERE, before the
             // cascade depth loop. Its barrier-OUT (→SHADER_READ_ONLY) is derived at the
             // resolve (the cascade reader), so `record_pass(resolve)` emits it — NOT here.
             // SAFETY: recording is open; `record_graph_pass` records the graph's derived
@@ -1177,19 +2118,17 @@ impl Renderer<'_> {
             let csm_pass = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .csm
                 .expect("invariant: scene.csm.is_some() ⇒ csm pass declared");
             // HW-RT rung R0: open the CsmDepth bracket BEFORE the pass's barrier-in +
             // cascade depth loop (the reset MUST have run before `begin_rendering`, so the
             // begin write is still legal here — it is outside the per-cascade rendering scope,
             // which opens below inside the loop). GATED — `None` records nothing.
-            if let Some(tc) = scene.gpu_timing {
-                // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
-                // reset at the frame top; this write is outside any `begin_rendering` scope; `fi`
-                // is this present's in-flight slot.
-                unsafe { tc.write_begin(self.fns, cmd, fi, TimedPass::CsmDepth) };
-            }
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.begin(self.fns, cmd, ZONE_GBUF_CSM_DEPTH) };
+            ts.cmd();
             self.record_graph_pass(csm_pass, cmd, targets, scene, fi);
 
             // (CSM-1) Depth-only dynamic rendering, LOOPED over the `[0..active)` cascades (Rung B).
@@ -1266,12 +2205,15 @@ impl Renderer<'_> {
                 // batch's bound vertex+index buffers (created on this device with VERTEX/INDEX
                 // usage). The locals outlive the bracketed calls. Begin/End bracket each cascade.
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_begin_rendering)(cmd, &csm_rendering);
+                    ts.cmd();
                     (self.fns.cmd_bind_pipeline)(
                         cmd,
                         VK_PIPELINE_BIND_POINT_GRAPHICS,
                         csm.pipeline.pipeline,
                     );
+                    ts.cmd();
                     (self.fns.cmd_bind_descriptor_sets)(
                         cmd,
                         VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1282,15 +2224,18 @@ impl Renderer<'_> {
                         0,
                         ptr::null(),
                     );
+                    ts.cmd();
                     (self.fns.cmd_push_constants)(
                         cmd,
                         csm.pipeline.layout,
-                        VK_SHADER_STAGE_VERTEX_BIT,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0,
                         csm_push.len() as u32,
                         csm_push.as_ptr().cast(),
                     );
+                    ts.cmd();
                     (self.fns.cmd_set_viewport)(cmd, 0, 1, &csm_viewport);
+                    ts.cmd();
                     (self.fns.cmd_set_scissor)(cmd, 0, 1, &csm_area);
                     // The caster batches: the instanced mesh draws the main pass rasterizes,
                     // FILTERED to `casts_shadow` (the `With<ShadowCaster>` subset). A RECEIVER-only
@@ -1306,14 +2251,16 @@ impl Renderer<'_> {
                         csm_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
                             ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
                             .copy_from_slice(&base.to_le_bytes());
+                        ts.cmd();
                         (self.fns.cmd_push_constants)(
                             cmd,
                             csm.pipeline.layout,
-                            VK_SHADER_STAGE_VERTEX_BIT,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                             GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
                             4,
                             (&base as *const u32).cast(),
                         );
+                        ts.cmd();
                         (self.fns.cmd_bind_vertex_buffers)(
                             cmd,
                             0,
@@ -1321,12 +2268,14 @@ impl Renderer<'_> {
                             &batch.vertex_buffer.buffer,
                             &vertex_offset,
                         );
+                        ts.cmd();
                         (self.fns.cmd_bind_index_buffer)(
                             cmd,
                             batch.index_buffer.buffer,
                             0,
                             batch.index_type,
                         );
+                        ts.cmd();
                         (self.fns.cmd_draw_indexed)(
                             cmd,
                             batch.index_count,
@@ -1336,16 +2285,15 @@ impl Renderer<'_> {
                             0,
                         );
                     }
+                    ts.cmd();
                     (self.fns.cmd_end_rendering)(cmd);
                 }
             }
             // HW-RT rung R0: close the CsmDepth bracket AFTER the cascade depth loop (all
             // `end_rendering`s recorded — this write is outside any rendering scope). GATED.
-            if let Some(tc) = scene.gpu_timing {
-                // SAFETY: recording is open; the pool was reset this frame; the per-cascade
-                // rendering scopes are all closed; `fi` is this slot.
-                unsafe { tc.write_end(self.fns, cmd, fi, TimedPass::CsmDepth) };
-            }
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.end(self.fns, cmd, ZONE_GBUF_CSM_DEPTH) };
 
             // (CSM-2) The dual-use depth barrier: DEPTH_ATTACHMENT_OPTIMAL →
             // SHADER_READ_ONLY_OPTIMAL (reusing the marcher's depth-barrier shape) over ALL
@@ -1361,12 +2309,14 @@ impl Renderer<'_> {
 
         // === Shadow Phase 5 Inc-1-GPU: the sparse SPOT atlas DEPTH pass (a NEW recorder bracket,
         // a CLONE of the CSM depth pass above). Recorded ONLY when the scene wires the activation
-        // (`scene.atlas_punctual.is_some()`); otherwise skipped entirely — NO barrier, NO rendering
-        // — so the command stream is byte-identical to the pre-Inc-1 path (the 0%-gate; the atlas
-        // map/sampler/UBO are bound-but-unread). Renders the SAME caster batches (`scene.mesh_draw` +
-        // `scene.instance_bind_group`) from each SPOT's POV into atlas layer `s`, so the resolve can
-        // multiply the exact hard shadow into that spot's contribution. RUN BEFORE the resolve
-        // dispatch (5b) so the atlas depth is SHADER_READ-visible to the resolve. ===
+        // (`scene.atlas_punctual.is_some()`); otherwise NO rendering is recorded and the atlas
+        // map/sampler/UBO stay bound-but-unread — the graph's UNCONDITIONAL resolve read still
+        // derives the discard-legal UNDEFINED→SHADER_READ_ONLY transition that keeps the
+        // always-bound descriptor's layout valid (09600, the CSM-pass mirror above). Renders the
+        // SAME caster batches (`scene.mesh_draw` + `scene.instance_bind_group`) from each SPOT's
+        // POV into atlas layer `s`, so the resolve can multiply the exact hard shadow into that
+        // spot's contribution. RUN BEFORE the resolve dispatch (5b) so the atlas depth is
+        // SHADER_READ-visible to the resolve. ===
         if let Some(atlas_act) = &scene.atlas_punctual {
             let atlas = scene.shadow_atlas_texture;
             // The number of atlas LAYERS to render — clamped to the backend cap so an out-of-range
@@ -1374,30 +2324,29 @@ impl Renderer<'_> {
             // bounds. `1` reproduces the single-spot path.
             let active = (atlas_act.active_layers as usize).clamp(1, MAX_TEXTURE_LAYERS) as u32;
             // Barrier-in: the atlas image UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL (depth-write access,
-            // DEPTH aspect) over ALL `[0..active)` layers. Each is re-`UNDEFINED`'d (the prior frame's
-            // content is discarded before this frame's depth pass). The graph derives the
-            // layered subresource range internally.
+            // DEPTH aspect) over the FULL `MAX_TEXTURE_LAYERS` array — the resolve samples through
+            // a whole-array 2D_ARRAY view, so the `[active..MAX)` tail must ride the same layout
+            // cycle (09600, the CSM barrier-in mirror above). Each layer is re-`UNDEFINED`'d; the
+            // rendering loop below still touches only `[0..active)`.
             // The graph's "atlas_depth" pass (declaring the atlas layered DEPTH_WRITE over
-            // `depth_layers(active)`) DRIVES this barrier-in, recorded HERE, before the
-            // atlas depth loop. Its barrier-OUT (→SHADER_READ_ONLY) is derived at the
+            // `depth_layers(MAX_TEXTURE_LAYERS)`) DRIVES this barrier-in, recorded HERE, before
+            // the atlas depth loop. Its barrier-OUT (→SHADER_READ_ONLY) is derived at the
             // resolve (the atlas reader) — NOT here.
             // SAFETY: recording is open; `record_graph_pass` records the graph's derived
             // UNDEFINED→DEPTH barrier-in for the "atlas_depth" pass into `cmd`.
             let atlas_pass = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .atlas
                 .expect("invariant: scene.atlas_punctual.is_some() ⇒ atlas pass declared");
             // HW-RT rung R0: open the PunctualDepth bracket BEFORE the pass's barrier-in +
             // atlas depth loop (outside the per-slot rendering scope, which opens below inside
             // the loop). GATED — `None` records nothing.
-            if let Some(tc) = scene.gpu_timing {
-                // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
-                // reset at the frame top; this write is outside any `begin_rendering` scope; `fi`
-                // is this present's in-flight slot.
-                unsafe { tc.write_begin(self.fns, cmd, fi, TimedPass::PunctualDepth) };
-            }
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.begin(self.fns, cmd, ZONE_GBUF_PUNCTUAL_DEPTH) };
+            ts.cmd();
             self.record_graph_pass(atlas_pass, cmd, targets, scene, fi);
 
             // Depth-only dynamic rendering, LOOPED over the `[0..active)` atlas slots. The render
@@ -1499,13 +2448,16 @@ impl Renderer<'_> {
                 // re-stamped every slot (the per-slot `view_proj` differs). The locals outlive the
                 // bracketed calls. Begin/End bracket each slot.
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_begin_rendering)(cmd, &atlas_rendering);
                     if bound_point != Some(is_point) {
+                        ts.cmd();
                         (self.fns.cmd_bind_pipeline)(
                             cmd,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
                             face_pipeline.pipeline,
                         );
+                        ts.cmd();
                         (self.fns.cmd_bind_descriptor_sets)(
                             cmd,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1518,6 +2470,7 @@ impl Renderer<'_> {
                         );
                         bound_point = Some(is_point);
                     }
+                    ts.cmd();
                     (self.fns.cmd_push_constants)(
                         cmd,
                         face_pipeline.layout,
@@ -1526,7 +2479,9 @@ impl Renderer<'_> {
                         atlas_push.len() as u32,
                         atlas_push.as_ptr().cast(),
                     );
+                    ts.cmd();
                     (self.fns.cmd_set_viewport)(cmd, 0, 1, &atlas_viewport);
+                    ts.cmd();
                     (self.fns.cmd_set_scissor)(cmd, 0, 1, &atlas_area);
                     // The caster batches: the instanced mesh draws the main pass rasterizes,
                     // FILTERED to `casts_shadow` (the `With<ShadowCaster>` subset). A RECEIVER-only
@@ -1541,18 +2496,22 @@ impl Renderer<'_> {
                         atlas_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
                             ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
                             .copy_from_slice(&base.to_le_bytes());
-                        // The `base_instance` lane (@80) is read only by the VS, so a VERTEX-stage
-                        // push is sufficient (a subset of the layout's `VERTEX | FRAGMENT` range).
+                        // The `base_instance` lane (@80) is read only by the VS, but the push
+                        // MUST still name the layout range's FULL `VERTEX | FRAGMENT` stage set:
+                        // VUID-vkCmdPushConstants-offset-01796 requires the call's stageFlags to
+                        // include ALL stages of every overlapping range — a subset is invalid.
                         // Both pipelines share the SAME layout, so `face_pipeline.layout` is correct
                         // for either face type.
+                        ts.cmd();
                         (self.fns.cmd_push_constants)(
                             cmd,
                             face_pipeline.layout,
-                            VK_SHADER_STAGE_VERTEX_BIT,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                             GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
                             4,
                             (&base as *const u32).cast(),
                         );
+                        ts.cmd();
                         (self.fns.cmd_bind_vertex_buffers)(
                             cmd,
                             0,
@@ -1560,12 +2519,14 @@ impl Renderer<'_> {
                             &batch.vertex_buffer.buffer,
                             &vertex_offset,
                         );
+                        ts.cmd();
                         (self.fns.cmd_bind_index_buffer)(
                             cmd,
                             batch.index_buffer.buffer,
                             0,
                             batch.index_type,
                         );
+                        ts.cmd();
                         (self.fns.cmd_draw_indexed)(
                             cmd,
                             batch.index_count,
@@ -1575,16 +2536,15 @@ impl Renderer<'_> {
                             0,
                         );
                     }
+                    ts.cmd();
                     (self.fns.cmd_end_rendering)(cmd);
                 }
             }
             // HW-RT rung R0: close the PunctualDepth bracket AFTER the atlas depth loop (all
             // `end_rendering`s recorded — outside any rendering scope). GATED.
-            if let Some(tc) = scene.gpu_timing {
-                // SAFETY: recording is open; the pool was reset this frame; the per-slot
-                // rendering scopes are all closed; `fi` is this slot.
-                unsafe { tc.write_end(self.fns, cmd, fi, TimedPass::PunctualDepth) };
-            }
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+            unsafe { ts.end(self.fns, cmd, ZONE_GBUF_PUNCTUAL_DEPTH) };
 
             // The graph derives the dual-use depth barrier-out
             // (DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL over ALL `[0..active)`
@@ -1599,7 +2559,7 @@ impl Renderer<'_> {
         // on EVERY current frame — NO bind, NO dispatch, NO barrier — and the resolve stays
         // RESOLVE_INLINE-hwrt ⇒ BYTE-IDENTICAL). When `Some`:
         //   (a) the VIS pass re-runs the resolve front-matter + traces the TLAS, WRITING
-        //       `gShadowVis` (@21 of its 22-binding set = `shadow_vis[fi]`); dispatched at the
+        //       `gShadowVis` (@22 of its 23-binding set = `shadow_vis[fi]`); dispatched at the
         //       resolve's 1D group count.
         //   (b) `levels` à-trous passes ping-pong `shadow_vis` ⇄ `shadow_vis2`, each pushing
         //       `step = 1 << level` (a 4-byte `{ uint step }`); dispatched at the SAME grid.
@@ -1626,7 +2586,7 @@ impl Renderer<'_> {
             let plan = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+                .expect("invariant: declare_frame_graph ran before record_gbuffer");
             // (a) The VIS pre-pass. Its input barriers (gNormal/gViewT store→load already visible,
             // the build→VIS AS barrier, the `shadow_vis` first-touch UNDEFINED→GENERAL) are DRIVEN
             // by the graph's "shadow_vis" pass, recorded here.
@@ -1634,15 +2594,15 @@ impl Renderer<'_> {
                 .shadow_vis
                 .expect("invariant: scene.shadow.is_some() ⇒ shadow_vis pass declared");
             // HW-RT Rung 3b step 5b: select the SDF motion-vector VIS-variant pipeline + its
-            // 24-binding set when temporal is active (`sdf_mv_active()`). That variant writes
-            // `gShadowVis` @21 (bit-identical to the base VIS) AND each SDF pixel's camera-only `Δuv`
-            // to `motion_vec` @23. `sdf_mv_active()` is the SINGLE source shared with
-            // `declare_gbuffer_graph` (the `motion_vec` STORAGE write is declared under the SAME
+            // 25-binding set when temporal is active (`sdf_mv_active()`). That variant writes
+            // `gShadowVis` @22 (bit-identical to the base VIS) AND each SDF pixel's camera-only `Δuv`
+            // to `motion_vec` @24. `sdf_mv_active()` is the SINGLE source shared with
+            // `declare_deferred_graph` (the `motion_vec` STORAGE write is declared under the SAME
             // predicate — W1: the barrier declaration and this write must never disagree). `Some`
             // implies the boot MV pipeline exists (⇒ RT + storage), a strict superset of the VIS-MV
             // set-build gate, so both `expect`s hold (they trip loudly on a future gate loosening,
             // matching the step-5a `expect` discipline). When false ⇒ the base VIS pipeline + its
-            // 22-binding set (byte-identical).
+            // 23-binding set (byte-identical).
             let (vis_pipeline, vis_set) = if scene.sdf_mv_active() {
                 let p = scene
                     .vis_mv_pipeline
@@ -1656,21 +2616,24 @@ impl Renderer<'_> {
             };
             // SAFETY: recording is open; `record_graph_pass` records the graph's derived input
             // barriers for the "shadow_vis" pass into `cmd`.
+            ts.cmd();
             self.record_graph_pass(vis_pass, cmd, targets, scene, fi);
-            // SAFETY: recording is open; the selected VIS pipeline + its layout (22-binding base or
-            // 24-binding VIS-MV) are live on this device (caller contract); `vis_set` binds the
-            // resolve inputs + `gShadowVis` @21 = `shadow_vis[fi]` (the write target) [+ the
-            // `MotionCam` UBO @22 + `motion_vec[fi]` @23 on the VIS-MV path]; `dispatch_group_count_x`
+            // SAFETY: recording is open; the selected VIS pipeline + its layout (23-binding base or
+            // 25-binding VIS-MV) are live on this device (caller contract); `vis_set` binds the
+            // resolve inputs + `gShadowVis` @22 = `shadow_vis[fi]` (the write target) [+ the
+            // `MotionCam` UBO @23 + `motion_vec[fi]` @24 on the VIS-MV path]; `dispatch_group_count_x`
             // covers the pixel count (the resolve grid); `&vis_set.descriptor_set` is a
             // single-element local alive for the call. The VIS shader reads its camera/params from
             // the bound UBOs; the resolve's 80-byte push range is declared-but-unread here (no push
             // recorded).
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     vis_pipeline.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1681,6 +2644,7 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
             }
             // (b) The `levels` à-trous passes. Each pushes `step = 1 << level`, binds the level's
@@ -1689,7 +2653,7 @@ impl Renderer<'_> {
             // "shadow_atrous" passes recorded here).
             //
             // W1: the SAME `.clamp(1, MAX_ATROUS_LEVELS)` the graph-declare site
-            // (`declare_gbuffer_graph`) and the host `clamped_levels()` use — all three agree by
+            // (`declare_deferred_graph`) and the host `clamped_levels()` use — all three agree by
             // construction (floor at 1 so it can never be an empty ping-pong, ceiling at the
             // per-level array bound). A prior `.min(atrous_sets.len())` here dropped the floor, so a
             // `levels == 0` author config would have recorded ZERO à-trous passes while the graph
@@ -1707,7 +2671,7 @@ impl Renderer<'_> {
                 atrous_sets.len() >= atrous_levels,
                 "invariant: the à-trous set array must hold at least `atrous_levels` levels"
             );
-            // The DENOISED resolve set binds `gShadowVis` @21 to the FINAL à-trous ring (or, on the
+            // The DENOISED resolve set binds `gShadowVis` @22 to the FINAL à-trous ring (or, on the
             // temporal path, `gVisIn` @0 of the temporal set), chosen by `final_is_vis2` (odd count ⇒
             // `shadow_vis2`, even/`0` ⇒ `shadow_vis` = the raw VIS). Assert the record parity matches so
             // the bind target can never diverge from the à-trous chain's last write (a divergence would
@@ -1724,6 +2688,7 @@ impl Renderer<'_> {
                 let step: u32 = 1u32 << level;
                 // SAFETY: recording is open; `record_graph_pass` records the "shadow_atrous" pass's
                 // derived RAW barriers on the ping-pong pair into `cmd`.
+                ts.cmd();
                 self.record_graph_pass(atrous_pass, cmd, targets, scene, fi);
                 let atrous_set = &level_ring[self.frame_index];
                 // SAFETY: recording is open; the à-trous pipeline + its 6-binding layout are live on
@@ -1733,11 +2698,13 @@ impl Renderer<'_> {
                 // `dispatch_group_count_x` covers the pixel count; `&atrous_set.descriptor_set` is a
                 // single-element local alive for the call.
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_bind_pipeline)(
                         cmd,
                         VK_PIPELINE_BIND_POINT_COMPUTE,
                         sh.atrous_pipeline.pipeline,
                     );
+                    ts.cmd();
                     (self.fns.cmd_bind_descriptor_sets)(
                         cmd,
                         VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1748,6 +2715,7 @@ impl Renderer<'_> {
                         0,
                         ptr::null(),
                     );
+                    ts.cmd();
                     (self.fns.cmd_push_constants)(
                         cmd,
                         sh.atrous_pipeline.layout,
@@ -1756,6 +2724,7 @@ impl Renderer<'_> {
                         4,
                         (&step as *const u32).cast(),
                     );
+                    ts.cmd();
                     (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
                 }
             }
@@ -1786,13 +2755,14 @@ impl Renderer<'_> {
             let plan = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+                .expect("invariant: declare_frame_graph ran before record_gbuffer");
             let temporal_pass = plan
                 .shadow_temporal
                 .expect("invariant: scene.temporal_active() ⇒ shadow_temporal pass declared");
             // SAFETY: recording is open; `record_graph_pass` records the "shadow_temporal" pass's
             // derived input/RAW barriers (final-vis/motion_vec/viewt → read, hist[fi]/temporal_out
             // first-touch/RAW) into `cmd`.
+            ts.cmd();
             self.record_graph_pass(temporal_pass, cmd, targets, scene, fi);
             let temporal_set = &temporal_sets[self.frame_index];
             // SAFETY: recording is open; the temporal pipeline + its 8-binding layout are live on this
@@ -1803,11 +2773,13 @@ impl Renderer<'_> {
             // shader reads NO push (its params ride the b6 UBO); the pipeline's declared 4-byte COMPUTE
             // range is bound-but-unread (no push recorded).
             unsafe {
+                ts.cmd();
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
                     temporal_pipeline.pipeline,
                 );
+                ts.cmd();
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1818,6 +2790,7 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
             }
         }
@@ -1834,18 +2807,16 @@ impl Renderer<'_> {
         let resolve = self
             .gbuffer_pass_plan
             .as_ref()
-            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+            .expect("invariant: declare_frame_graph ran before record_gbuffer")
             .resolve;
         // HW-RT rung R0: open the DeferredResolve bracket BEFORE the resolve's input barriers
         // + dispatch. This spans the WHOLE resolve dispatch, INCLUDING the inline SDF
         // soft-shadow march (R0 brackets passes, not shader sections). GATED — `None` records
         // nothing.
-        if let Some(tc) = scene.gpu_timing {
-            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
-            // reset at the frame top; this write is outside any rendering scope (the resolve is a
-            // compute dispatch); `fi` is this present's in-flight slot.
-            unsafe { tc.write_begin(self.fns, cmd, fi, TimedPass::DeferredResolve) };
-        }
+        // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+        // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+        unsafe { ts.begin(self.fns, cmd, ZONE_GBUF_DEFERRED_RESOLVE) };
+        ts.cmd();
         self.record_graph_pass(resolve, cmd, targets, scene, fi);
 
         // (5b) Deferred RESOLVE pass: bind the resolve pipeline + the resolve set (gAlbedo
@@ -1896,8 +2867,8 @@ impl Renderer<'_> {
         );
         // HW-RT rung 3a: the DENOISED resolve triple (the à-trous ON path). When the scene wires
         // `scene.shadow` (the step-7 gate; kept `None` this rung), the resolve binds the DENOISED
-        // pipeline (`deferred_pbr_hwrt_denoised.comp`, reading the FILTERED `gShadowVis` @21) + its
-        // 22-binding layout + the DENOISED resolve set — REPLACING the RESOLVE_INLINE-hwrt triple. It
+        // pipeline (`deferred_pbr_hwrt_denoised.comp`, reading the FILTERED `gShadowVis` @22) + its
+        // 23-binding layout + the DENOISED resolve set — REPLACING the RESOLVE_INLINE-hwrt triple. It
         // takes priority over `hwrt_triple` (both need `scene.tlas`, but `scene.shadow.is_some()`
         // implies the à-trous stack ran this frame). `None` ⇒ fall through to `hwrt_triple`
         // (RESOLVE_INLINE) or the software triple ⇒ byte-identical.
@@ -1956,7 +2927,9 @@ impl Renderer<'_> {
         // is a single-element local alive for the call (first_set 0, count 1, zero dynamic offsets).
         // The resolve pushes NO constants.
         unsafe {
+            ts.cmd();
             (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, resolve_pipeline_h);
+            ts.cmd();
             (self.fns.cmd_bind_descriptor_sets)(
                 cmd,
                 VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1967,13 +2940,104 @@ impl Renderer<'_> {
                 0,
                 ptr::null(),
             );
+            ts.cmd();
             (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
         }
         // HW-RT rung R0: close the DeferredResolve bracket AFTER the resolve dispatch. GATED.
-        if let Some(tc) = scene.gpu_timing {
-            // SAFETY: recording is open; the pool was reset this frame; the resolve dispatch is
-            // recorded; `fi` is this slot.
-            unsafe { tc.write_end(self.fns, cmd, fi, TimedPass::DeferredResolve) };
+        // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+        // reset by this witness's own `open`; `fi` is this present's in-flight slot.
+        unsafe { ts.end(self.fns, cmd, ZONE_GBUF_DEFERRED_RESOLVE) };
+
+        // Anti-aliasing Stage 4 (TAA W5): the temporal-resolve pass — recorded HERE, BEFORE
+        // `present_sample`'s `lit` GENERAL→SHADER_READ_ONLY_OPTIMAL transition below. TAA is a
+        // COMPUTE dispatch that reads `lit` at `GENERAL`, straight out of the resolve's write
+        // (the framegraph's `taa_resolve` pass is declared in that exact position — see
+        // `graph_bridge.rs`), the OPPOSITE ordering FXAA/SMAA/SSAA use (FRAGMENT graphics
+        // pipelines reading `lit` AFTER the SHADER_READ_ONLY_OPTIMAL transition, below). Gated on
+        // `scene.taa.is_some()` AND `targets.taa_resolve_set.is_some()` (kept in lockstep by
+        // `GBufferTargets::create`) — `None` on every other `AaMode` records nothing here.
+        // === Particles P0: the indirect billboard draw, recorded HERE — after the resolve wrote
+        // `lit` and BEFORE the TAA resolve + present blit read it, the SAME position the
+        // declarator declared the pass in. `depth[fi]` arrives at `SHADER_READ_ONLY_OPTIMAL` on
+        // this path (three pre-lit consumers sampled it), so the barrier the callback emits is a
+        // real layout transition — the one path of the four where it is (D7). ===
+        if let Some(act) = scene.particle.as_ref() {
+            let particle_plan = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
+                .particle;
+            // `present_extent` is the COMPOSITE size every `lit`/`depth` slot is allocated at —
+            // the same extent the raster scope above used, so the billboards rasterize against
+            // exactly the depth the opaque pass wrote, texel for texel.
+            let draw_targets = super::particles::ParticleDrawTargets {
+                color_view: targets.lit[fi].view,
+                depth_view: targets.depth[fi].view,
+                area: VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: present_extent },
+                viewport: VkViewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: present_extent.width as f32,
+                    height: present_extent.height as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                },
+            };
+            // SAFETY: recording is open and outside any dynamic-rendering scope (the raster
+            // scope closed long above; `record_particle_draw` opens and closes its own). The two
+            // views are this frame slot's live `lit` and `depth` images — the SAME two the
+            // declarator named in the `particle_draw` pass, so the layouts the graph leaves them
+            // in are the ones the attachments declare. Every handle in `act` is live for the
+            // frame. The zone arm is ARMED — see the compute site above; this call is still ahead
+            // of `ts.finish()`, so `ZONE_PARTICLE_DRAW`'s marks are published by that seal.
+            unsafe {
+                self.record_particle_draw(
+                    cmd,
+                    act,
+                    &particle_plan,
+                    draw_targets,
+                    super::particles::ParticleZoneArm::from_scene(scene),
+                    |p| {
+                        self.record_graph_pass(p, cmd, targets, scene, fi);
+                    },
+                );
+            }
+        }
+
+        if let Some(taa) = scene.taa.as_ref()
+            && targets.taa_resolve_set.is_some()
+        {
+            let taa_pass = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
+                .taa_resolve
+                .expect("invariant: scene.taa.is_some() ⇒ the taa_resolve pass was declared");
+            // SAFETY: recording is open; `aa_out`/`taa_hist`/`taa_resolve_set` were built by
+            // `create()` under the same `scene.taa` that gates this branch; `taa_pass` was
+            // declared this frame under the same gate (the invariant above).
+            ts.cmd();
+            unsafe { self.record_taa(cmd, targets, taa, taa_pass, scene, fi) };
+
+            // TAA rung T3: the post-resolve RCAS sharpen pass — recorded IMMEDIATELY after
+            // `record_taa` (resolve THEN rcas), still BEFORE `present_sample` below. Gated on
+            // `scene.rcas.is_some()` AND `targets.rcas_set.is_some()` (kept in lockstep by
+            // `GBufferTargets::create`, which itself only arms `taa_resolved`/`rcas_set` when
+            // `scene.rcas.is_some()`, which in turn requires `scene.taa.is_some()` — the SAME
+            // lockstep discipline `scene.taa`/`targets.taa_resolve_set` use above). `None` (the
+            // 0%-gate, `SharpenMode::None`) records nothing here — byte-identical to the
+            // pre-RCAS resolve.
+            if let Some(rcas) = scene.rcas.as_ref()
+                && targets.rcas_set.is_some()
+            {
+                // SAFETY: recording is open; `record_taa` (just above) already wrote
+                // `taa_resolved[fi]`, leaving it in GENERAL; `taa_resolved`/`aa_out`/`rcas_set`
+                // were built by `create()` under the same `scene.rcas` that gates this branch;
+                // `present_extent` sizes both `taa_resolved` and `aa_out` (the SAME extent the
+                // resolve dispatched over).
+                ts.cmd();
+                unsafe { self.record_rcas(cmd, targets, rcas, present_extent, scene, fi) };
+            }
         }
 
         // (5c) LIT: GENERAL → SHADER_READ_ONLY_OPTIMAL for the present-blit sample. The
@@ -1990,11 +3054,64 @@ impl Renderer<'_> {
         let present_sample = self
             .gbuffer_pass_plan
             .as_ref()
-            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+            .expect("invariant: declare_frame_graph ran before record_gbuffer")
             .present_sample;
+        ts.cmd();
         self.record_graph_pass(present_sample, cmd, targets, scene, fi);
 
-        // === Pass C: present-blit the LIT image (the resolve's output) into the swapchain. ===
+        // Anti-aliasing Stage 1 (FXAA) / Stage 2 (SMAA) / Stage 3 (SSAA). Stage 4 (TAA) was
+        // ALREADY recorded above (before `present_sample` — see that block's ordering comment).
+        // `sync_gbuffer` keeps `targets.aa_out.is_some() == (scene.aa.is_some() ||
+        // scene.smaa.is_some() || scene.ssaa.is_some() || scene.taa.is_some())` in lockstep (an
+        // arm-state change forces a fence-safe resync, exactly like an extent change), so these
+        // always agree within a frame. Gate on `aa_out` (what `present_set` follows) so any
+        // transient mismatch degrades to "present samples lit, no AA pass" — never a panic. RAW
+        // barriers on `aa_out` only (the DDGI-update/TLAS-build precedent); `lit` needs none
+        // (already SHADER_READ_ONLY_OPTIMAL from `present_sample` above). Consumes `lit` after
+        // the framegraph's last declared use — safe until a transient-aliasing allocator lands;
+        // exempt this site then. OFF (`aa_out` is `None`) records nothing. FXAA is checked
+        // FIRST (byte-identical to the committed Stage-1 dispatch); `scene.aa`/`scene.smaa`/
+        // `scene.ssaa`/`scene.taa` are mutually exclusive by construction (`debug_assert!` in
+        // `GBufferTargets::create`). SSAA uses `aa_extent` (the BOOT-FIXED native extent
+        // `aa_out` was actually allocated at), NOT `extent` (live, tracks window resizes) or
+        // `present_extent` (2× under SSAA) — the crux difference from FXAA/SMAA.
+        if targets.aa_out.is_some() {
+            if let Some(fxaa) = scene.aa.as_ref() {
+                // SAFETY: recording is open; `present_sample` above left `lit` in
+                // SHADER_READ_ONLY_OPTIMAL; `aa_out`/`fxaa_set` were built by `create()`
+                // under the same `scene.aa` that gates this branch; `present_extent` sizes
+                // `aa_out`.
+                ts.cmd();
+                unsafe { self.record_fxaa(cmd, targets, fxaa, present_extent, fi) };
+            } else if let Some(smaa) = scene.smaa.as_ref() {
+                // SAFETY: recording is open; `present_sample` above left `lit` in
+                // SHADER_READ_ONLY_OPTIMAL; `aa_out`/`smaa_edges`/`smaa_weights`/the three
+                // `smaa_*_set` rings were built by `create()` under the same `scene.smaa`
+                // that gates this branch; `present_extent` sizes every SMAA target.
+                ts.cmd();
+                unsafe { self.record_smaa(cmd, targets, smaa, present_extent, fi) };
+            } else if let Some(ssaa) = scene.ssaa.as_ref() {
+                debug_assert!(targets.aa_out.is_some() && targets.downsample_set.is_some());
+                // SAFETY: recording is open; `present_sample` above left `lit` (the 2× ring)
+                // in SHADER_READ_ONLY_OPTIMAL; `aa_out`/`downsample_set` were built by
+                // `create()` under the same `scene.ssaa` that gates this branch, sized to
+                // `aa_extent` (the BOOT-FIXED native size, NOT `present_extent`, which is 2×
+                // under SSAA, and NOT the live `extent`, which tracks window resizes).
+                ts.cmd();
+                unsafe { self.record_ssaa(cmd, targets, ssaa, aa_extent, fi) };
+            } else {
+                // `aa_out.is_some()` with none of aa/smaa/ssaa matched ⇒ TAA is the reason
+                // (the four arms are mutually exclusive by construction); `record_taa` already
+                // ran above — nothing left to do here.
+                debug_assert!(
+                    scene.taa.is_some(),
+                    "invariant: aa_out is armed but none of aa/smaa/ssaa/taa matched"
+                );
+            }
+        }
+
+        // === Pass C: present-blit the LIT image (the resolve's output, or `aa_out` when
+        // AA is armed) into the swapchain. ===
 
         // (7) Barrier (swapchain color): UNDEFINED → COLOR_ATTACHMENT_OPTIMAL.
         let to_color = VkImageMemoryBarrier {
@@ -2013,6 +3130,7 @@ impl Renderer<'_> {
         // TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT with UNDEFINED→COLOR is the
         // superset-correct acquire→render transition; `&to_color` outlives the call.
         unsafe {
+            ts.cmd();
             (self.fns.cmd_pipeline_barrier)(
                 cmd,
                 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -2090,12 +3208,15 @@ impl Renderer<'_> {
         // is the `SV_VertexID` fullscreen triangle (no vertex buffer). Begin/End bracket
         // pass C exactly.
         unsafe {
+            ts.cmd();
             (self.fns.cmd_begin_rendering)(cmd, &present_rendering);
+            ts.cmd();
             (self.fns.cmd_bind_pipeline)(
                 cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 scene.present_pipeline.pipeline,
             );
+            ts.cmd();
             (self.fns.cmd_bind_descriptor_sets)(
                 cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2106,9 +3227,13 @@ impl Renderer<'_> {
                 0,
                 ptr::null(),
             );
+            ts.cmd();
             (self.fns.cmd_set_viewport)(cmd, 0, 1, &blit_viewport);
+            ts.cmd();
             (self.fns.cmd_set_scissor)(cmd, 0, 1, &blit_scissor);
+            ts.cmd();
             (self.fns.cmd_draw)(cmd, 3, 1, 0, 0);
+            ts.cmd();
             (self.fns.cmd_end_rendering)(cmd);
         }
 
@@ -2134,6 +3259,7 @@ impl Renderer<'_> {
                 // COLOR→PRESENT makes the blit's writes visible to the present engine;
                 // `&to_present` outlives the call.
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_pipeline_barrier)(
                         cmd,
                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -2165,6 +3291,7 @@ impl Renderer<'_> {
                 // COLOR→TRANSFER_SRC makes the blit's writes available to the copy;
                 // `&to_transfer` outlives the call.
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_pipeline_barrier)(
                         cmd,
                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -2203,6 +3330,7 @@ impl Renderer<'_> {
                 // the SWAPCHAIN image (the on-screen golden) — NOT the depth (the depth
                 // copy is the deletion target this path proves absent).
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_copy_image_to_buffer)(
                         cmd,
                         image,
@@ -2229,6 +3357,7 @@ impl Renderer<'_> {
                 // TRANSFER_SRC→PRESENT releases the image to the present engine after the
                 // readback copy; `&to_present` outlives the call.
                 unsafe {
+                    ts.cmd();
                     (self.fns.cmd_pipeline_barrier)(
                         cmd,
                         VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -2245,6 +3374,11 @@ impl Renderer<'_> {
             }
         }
 
+        // Profiling rung 6: close the frame's witness. The one path that does not reach this line
+        // is the `vkBeginCommandBuffer` failure above, which returns BEFORE the witness exists —
+        // that frame resets nothing, writes nothing, and its caller never reaches a readback.
+        ts.finish();
+
         // SAFETY: recording is open; ending it matches the `begin` above.
         let raw = unsafe { (self.fns.end_command_buffer)(cmd) };
         let result = VkResult::from_raw(raw);
@@ -2254,4 +3388,49 @@ impl Renderer<'_> {
         Ok(())
     }
 
+}
+
+#[cfg(test)]
+mod l7b_w2104 {
+    use crate::log_probe::{arm, drain, observe_lock, observed};
+
+    /// **`boyko-W2104` fires once, and the latch it now uses actually excludes.**
+    ///
+    /// The latch this replaced was a `load` followed by a separate `store` under a doc-comment
+    /// claiming a `swap`: two callers arriving together both read `false` and both printed. That
+    /// defect is not observable from a test -- it needs two threads inside a two-instruction
+    /// window -- so what this pins is the property that survives it: the first call reports, and
+    /// every call after it is silent, which is what `RatePolicy::Once` promises for a site that
+    /// sits on the per-frame path.
+    ///
+    /// The RED that earned it: drop the `if FIRED.claim()` guard and the second clause reads
+    /// `2 != 1`; delete the whole emission and the first reads `0 != 1`.
+    ///
+    /// The exact delta is sound -- see `crate::log_probe`'s header.
+    #[test]
+    fn w2104_reports_the_suppression_once_and_then_stays_quiet() {
+        let _observe = observe_lock();
+        arm();
+        let before = observed();
+        super::warn_textured_suppressed_by_motion_vectors();
+        drain();
+        assert_eq!(
+            observed() - before,
+            1,
+            "boyko-W2104 must report that a textured material rendered untextured; before L7b \
+             this went to stderr, which no host reads and no artifact keeps"
+        );
+
+        let after_first = observed();
+        for _ in 0..8 {
+            super::warn_textured_suppressed_by_motion_vectors();
+        }
+        drain();
+        assert_eq!(
+            observed(),
+            after_first,
+            "W2104 sits on the per-frame path: a second line means every frame the two features \
+             overlap writes one"
+        );
+    }
 }

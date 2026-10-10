@@ -1,0 +1,5 @@
+row_identity_churn/first_archetype_spawn/sleeping_off_tree
+                        time:   [9.7346 ms 9.7760 ms 9.8195 ms]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

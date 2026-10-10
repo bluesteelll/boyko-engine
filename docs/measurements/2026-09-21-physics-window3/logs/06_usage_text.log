@@ -1,0 +1,16 @@
+### runner_l4l2 --help (no --scene => self-check path)
+jolt_parity_pyramid: no --scene, so this is the self-check (3 steps of s16, W=1, disarmed); pass --scene to run a row
+jolt_parity_pyramid: scene s16 gap 0 friction 0.5 bodies 16 workers 1 solver Colored cfg A profile dev armed false
+steps 3 window 0..3 final manifolds 16 pairs 31 top_y 30.987455 pose_hash 0x2d9782c2598c835a
+SUMMARY {"runner":"jolt_parity_pyramid fixed-window runner v1","label":"self-check","args":[],"profile_name":"dev","zones_compiled":true,"system_zones_compiled":true,"debug_assertions":false,"target_env":"msvc","scene":"s16","gap":0,"friction":0.5,"bodies":16,"workers":1,"solver":"colored","cfg":"a","config":{"substeps":4,"relax_iterations":2,"broadphase":"AllPairs","broadphase_select":"Manual","simd":true,"simd_solve":false,"parallel_solve":false,"parallel_broadphase":false,"sleeping":false,"sleep_threshold":0.00009999999747378752,"sleep_frames":60,"colored":true,"contact_hertz":30,"contact_damping":10},"armed":false,"canary_ns":null,"steps":3,"window":[0,3],"window_mean_ns":207766.66666666666,"window_steps_per_s":4813.091609176961,"pose_hash":"0x2d9782c2598c835a","pose_bytes":832,"expect_pose":"none","final_manifolds":16,"final_pairs":31,"final_top_y":30.987455368041992,"void_steps":0,"first_void":null,"drops_total":null,"disarmed_ring_traffic":0,"ticks_per_ns":0,"waves_total":0,"first_frozen_step":null,"frozen_by":null,"awake_max_from_frozen_by":null,"threads":{"pool_workers":1,"dispatcher":1,"solve_on_dispatcher_steps":0,"armed_steps":0,"dispatcher_lane_samples_max":0}}
+exit=0
+
+### runner_l4l2 --scene jolt --bogus (forces the usage text)
+jolt_parity_pyramid: unknown argument "--bogus"
+usage: jolt_parity_pyramid --scene jolt|rest|s16 [--workers W] [--steps N] [--window A..B] [--gap G] [--solver colored|reference] [--cfg a|b|default] [--parallel-solve] [--sleeping] [--threshold T] [--frozen-by K] [--arm-profiler] [--canary-frac F --canary-ref-ns T] [--csv PATH] [--pose-out PATH] [--expect-pose PATH] [--label TEXT]
+exit=2
+
+### runner_l4l2 --scene jolt --workers 1 --parallel-solve --steps 3 (J-P1 retired check)
+jolt_parity_pyramid: --parallel-solve at --workers 1 is J-P1, retired at L4: a one-worker pool solves inline, so the row would report waves with no dispatch behind them; take ω₁ from the zero-work spawn/join microbench
+usage: jolt_parity_pyramid --scene jolt|rest|s16 [--workers W] [--steps N] [--window A..B] [--gap G] [--solver colored|reference] [--cfg a|b|default] [--parallel-solve] [--sleeping] [--threshold T] [--frozen-by K] [--arm-profiler] [--canary-frac F --canary-ref-ns T] [--csv PATH] [--pose-out PATH] [--expect-pose PATH] [--label TEXT]
+exit=2

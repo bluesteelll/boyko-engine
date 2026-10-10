@@ -1,0 +1,1202 @@
+{
+ "0..500|W1|wall|LETTER": {
+  "ratio": 0.45045476171841303,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/1 0.4758,sep)",
+   "1": "YYY(K3/3 0.4752,sep)",
+   "2": "YYY(K3/3 0.4455,sep)"
+  },
+  "jolt": 10.1435429,
+  "ours": 4.5692072,
+  "nJ": 8,
+  "nO": 7
+ },
+ "0..500|W1|wall|GATING-ONLY": {
+  "ratio": 0.45045476171841303,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/1 0.4758,sep)",
+   "1": "YYY(K3/3 0.4752,sep)",
+   "2": "YYY(K3/3 0.4455,sep)"
+  },
+  "jolt": 10.1435429,
+  "ours": 4.5692072,
+  "nJ": 8,
+  "nO": 7
+ },
+ "0..500|W2|wall|LETTER": {
+  "ratio": 0.52703002765809,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/2 0.5331,sep)",
+   "1": "YYY(K3/3 0.5263,sep)",
+   "2": "YYY(K3/3 0.5156,sep)"
+  },
+  "jolt": 5.8262519,
+  "ours": 3.0706097,
+  "nJ": 8,
+  "nO": 8
+ },
+ "0..500|W2|wall|GATING-ONLY": {
+  "ratio": 0.52703002765809,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/2 0.5331,sep)",
+   "1": "YYY(K3/3 0.5263,sep)",
+   "2": "YYY(K3/3 0.5156,sep)"
+  },
+  "jolt": 5.8262519,
+  "ours": 3.0706097,
+  "nJ": 8,
+  "nO": 8
+ },
+ "0..500|W4|wall|LETTER": {
+  "ratio": 0.6117248797724237,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K1/1 0.6261,sep)",
+   "1": "YYY(K3/3 0.6123,sep)",
+   "2": "YYY(K3/3 0.5988,sep)"
+  },
+  "jolt": 3.6546524,
+  "ours": 2.2356418,
+  "nJ": 7,
+  "nO": 7
+ },
+ "0..500|W4|wall|GATING-ONLY": {
+  "ratio": 0.6117248797724237,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K1/1 0.6261,sep)",
+   "1": "YYY(K3/3 0.6123,sep)",
+   "2": "YYY(K3/3 0.5988,sep)"
+  },
+  "jolt": 3.6546524,
+  "ours": 2.2356418,
+  "nJ": 7,
+  "nO": 7
+ },
+ "0..500|W8|wall|LETTER": {
+  "ratio": 0.7220841244101123,
+  "flags": "YYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K0/1 -)",
+   "1": "YYY(K3/3 0.7222,sep)",
+   "2": "YYn(K3/3 0.7507,sep)"
+  },
+  "jolt": 2.5310965000000003,
+  "ours": 1.8276646,
+  "nJ": 6,
+  "nO": 7
+ },
+ "0..500|W8|wall|GATING-ONLY": {
+  "ratio": 0.7220841244101123,
+  "flags": "YYn",
+  "label": "CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K0/1 -)",
+   "1": "YYY(K3/3 0.7222,sep)",
+   "2": "YYn(K3/3 0.7507,sep)"
+  },
+  "jolt": 2.5310965000000003,
+  "ours": 1.8276646,
+  "nJ": 6,
+  "nO": 7
+ },
+ "0..500|W16|wall|LETTER": {
+  "ratio": 0.8513131974810267,
+  "flags": "nYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "YYn(K3/3 0.7651,sep)",
+   "1": "nYn(K3/3 0.8377,sep)",
+   "2": "nnn(K3/3 0.8817,sep)"
+  },
+  "jolt": 2.4535076,
+  "ours": 2.0887034,
+  "nJ": 9,
+  "nO": 9
+ },
+ "0..500|W16|wall|GATING-ONLY": {
+  "ratio": 0.8513131974810267,
+  "flags": "nYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "YYn(K3/3 0.7651,sep)",
+   "1": "nYn(K3/3 0.8377,sep)",
+   "2": "nnn(K3/3 0.8817,sep)"
+  },
+  "jolt": 2.4535076,
+  "ours": 2.0887034,
+  "nJ": 9,
+  "nO": 9
+ },
+ "100..500|W1|wall|LETTER": {
+  "ratio": 0.4348462567392807,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/1 0.4568,sep)",
+   "1": "YYY(K3/3 0.4543,sep)",
+   "2": "YYY(K3/3 0.4298,sep)"
+  },
+  "jolt": 10.004406,
+  "ours": 4.3503785,
+  "nJ": 8,
+  "nO": 7
+ },
+ "100..500|W1|wall|GATING-ONLY": {
+  "ratio": 0.4348462567392807,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/1 0.4568,sep)",
+   "1": "YYY(K3/3 0.4543,sep)",
+   "2": "YYY(K3/3 0.4298,sep)"
+  },
+  "jolt": 10.004406,
+  "ours": 4.3503785,
+  "nJ": 8,
+  "nO": 7
+ },
+ "100..500|W1|velocity rows|LETTER": {
+  "ratio": 0.41284970556783984,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/1 0.4337,sep)",
+   "1": "YYY(K3/3 0.4313,sep)",
+   "2": "YYY(K3/3 0.4080,sep)"
+  },
+  "jolt": 10.004406,
+  "ours": 4.3503785,
+  "nJ": 8,
+  "nO": 7
+ },
+ "100..500|W1|velocity rows|GATING-ONLY": {
+  "ratio": 0.41284970556783984,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/1 0.4337,sep)",
+   "1": "YYY(K3/3 0.4313,sep)",
+   "2": "YYY(K3/3 0.4080,sep)"
+  },
+  "jolt": 10.004406,
+  "ours": 4.3503785,
+  "nJ": 8,
+  "nO": 7
+ },
+ "100..500|W1|all rows|LETTER": {
+  "ratio": 0.4582537602157716,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/1 0.4814,sep)",
+   "1": "YYY(K3/3 0.4788,sep)",
+   "2": "YYY(K3/3 0.4529,sep)"
+  },
+  "jolt": 10.004406,
+  "ours": 4.3503785,
+  "nJ": 8,
+  "nO": 7
+ },
+ "100..500|W1|all rows|GATING-ONLY": {
+  "ratio": 0.4582537602157716,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/1 0.4814,sep)",
+   "1": "YYY(K3/3 0.4788,sep)",
+   "2": "YYY(K3/3 0.4529,sep)"
+  },
+  "jolt": 10.004406,
+  "ours": 4.3503785,
+  "nJ": 8,
+  "nO": 7
+ },
+ "100..500|W1|manifold|LETTER": {
+  "ratio": 0.8262503731725083,
+  "flags": "nYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/1 0.8679,sep)",
+   "1": "nYn(K3/3 0.8633,sep)",
+   "2": "nYn(K3/3 0.8166,sep)"
+  },
+  "jolt": 10.004406,
+  "ours": 4.3503785,
+  "nJ": 8,
+  "nO": 7
+ },
+ "100..500|W1|manifold|GATING-ONLY": {
+  "ratio": 0.8262503731725083,
+  "flags": "nYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/1 0.8679,sep)",
+   "1": "nYn(K3/3 0.8633,sep)",
+   "2": "nYn(K3/3 0.8166,sep)"
+  },
+  "jolt": 10.004406,
+  "ours": 4.3503785,
+  "nJ": 8,
+  "nO": 7
+ },
+ "100..500|W2|wall|LETTER": {
+  "ratio": 0.5056847742942469,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/2 0.5109,sep)",
+   "1": "YYY(K3/3 0.5065,sep)",
+   "2": "YYY(K3/3 0.4937,sep)"
+  },
+  "jolt": 5.812302000000001,
+  "ours": 2.939192625,
+  "nJ": 8,
+  "nO": 8
+ },
+ "100..500|W2|wall|GATING-ONLY": {
+  "ratio": 0.5056847742942469,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/2 0.5109,sep)",
+   "1": "YYY(K3/3 0.5065,sep)",
+   "2": "YYY(K3/3 0.4937,sep)"
+  },
+  "jolt": 5.812302000000001,
+  "ours": 2.939192625,
+  "nJ": 8,
+  "nO": 8
+ },
+ "100..500|W2|velocity rows|LETTER": {
+  "ratio": 0.480104880614603,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/2 0.4851,sep)",
+   "1": "YYY(K3/3 0.4809,sep)",
+   "2": "YYY(K3/3 0.4688,sep)"
+  },
+  "jolt": 5.812302000000001,
+  "ours": 2.939192625,
+  "nJ": 8,
+  "nO": 8
+ },
+ "100..500|W2|velocity rows|GATING-ONLY": {
+  "ratio": 0.480104880614603,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/2 0.4851,sep)",
+   "1": "YYY(K3/3 0.4809,sep)",
+   "2": "YYY(K3/3 0.4688,sep)"
+  },
+  "jolt": 5.812302000000001,
+  "ours": 2.939192625,
+  "nJ": 8,
+  "nO": 8
+ },
+ "100..500|W2|all rows|LETTER": {
+  "ratio": 0.5329054711011141,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/2 0.5384,sep)",
+   "1": "YYY(K3/3 0.5338,sep)",
+   "2": "YYY(K3/3 0.5203,sep)"
+  },
+  "jolt": 5.812302000000001,
+  "ours": 2.939192625,
+  "nJ": 8,
+  "nO": 8
+ },
+ "100..500|W2|all rows|GATING-ONLY": {
+  "ratio": 0.5329054711011141,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/2 0.5384,sep)",
+   "1": "YYY(K3/3 0.5338,sep)",
+   "2": "YYY(K3/3 0.5203,sep)"
+  },
+  "jolt": 5.812302000000001,
+  "ours": 2.939192625,
+  "nJ": 8,
+  "nO": 8
+ },
+ "100..500|W2|manifold|LETTER": {
+  "ratio": 0.9608504775948649,
+  "flags": "nYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/2 0.9708,sep)",
+   "1": "nnn(K3/3 0.9624)",
+   "2": "nYn(K3/3 0.9381)"
+  },
+  "jolt": 5.812302000000001,
+  "ours": 2.939192625,
+  "nJ": 8,
+  "nO": 8
+ },
+ "100..500|W2|manifold|GATING-ONLY": {
+  "ratio": 0.9608504775948649,
+  "flags": "nYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/2 0.9708,sep)",
+   "1": "nnn(K3/3 0.9624)",
+   "2": "nYn(K3/3 0.9381)"
+  },
+  "jolt": 5.812302000000001,
+  "ours": 2.939192625,
+  "nJ": 8,
+  "nO": 8
+ },
+ "100..500|W4|wall|LETTER": {
+  "ratio": 0.5858174460340217,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K1/1 0.6002,sep)",
+   "1": "YYY(K3/3 0.5875,sep)",
+   "2": "YYY(K3/3 0.5810,sep)"
+  },
+  "jolt": 3.6880875,
+  "ours": 2.160546,
+  "nJ": 7,
+  "nO": 7
+ },
+ "100..500|W4|wall|GATING-ONLY": {
+  "ratio": 0.5858174460340217,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K1/1 0.6002,sep)",
+   "1": "YYY(K3/3 0.5875,sep)",
+   "2": "YYY(K3/3 0.5810,sep)"
+  },
+  "jolt": 3.6880875,
+  "ours": 2.160546,
+  "nJ": 7,
+  "nO": 7
+ },
+ "100..500|W4|velocity rows|LETTER": {
+  "ratio": 0.5561840681927674,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K1/1 0.5699,sep)",
+   "1": "YYY(K3/3 0.5577,sep)",
+   "2": "YYY(K3/3 0.5516,sep)"
+  },
+  "jolt": 3.6880875,
+  "ours": 2.160546,
+  "nJ": 7,
+  "nO": 7
+ },
+ "100..500|W4|velocity rows|GATING-ONLY": {
+  "ratio": 0.5561840681927674,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K1/1 0.5699,sep)",
+   "1": "YYY(K3/3 0.5577,sep)",
+   "2": "YYY(K3/3 0.5516,sep)"
+  },
+  "jolt": 3.6880875,
+  "ours": 2.160546,
+  "nJ": 7,
+  "nO": 7
+ },
+ "100..500|W4|all rows|LETTER": {
+  "ratio": 0.6173516347090134,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K1/1 0.6325,sep)",
+   "1": "YYY(K3/3 0.6191,sep)",
+   "2": "YYY(K3/3 0.6123,sep)"
+  },
+  "jolt": 3.6880875,
+  "ours": 2.160546,
+  "nJ": 7,
+  "nO": 7
+ },
+ "100..500|W4|all rows|GATING-ONLY": {
+  "ratio": 0.6173516347090134,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K1/1 0.6325,sep)",
+   "1": "YYY(K3/3 0.6191,sep)",
+   "2": "YYY(K3/3 0.6123,sep)"
+  },
+  "jolt": 3.6880875,
+  "ours": 2.160546,
+  "nJ": 7,
+  "nO": 7
+ },
+ "100..500|W4|manifold|LETTER": {
+  "ratio": 1.113110383026214,
+  "flags": "YYn",
+  "label": "NOT CLAIMED",
+  "dir": "B>A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K1/1 1.1405,sep)",
+   "1": "YYY(K3/3 1.1162,sep)",
+   "2": "YYn(K3/3 1.1040,sep)"
+  },
+  "jolt": 3.6880875,
+  "ours": 2.160546,
+  "nJ": 7,
+  "nO": 7
+ },
+ "100..500|W4|manifold|GATING-ONLY": {
+  "ratio": 1.113110383026214,
+  "flags": "YYn",
+  "label": "CLAIMED",
+  "dir": "B>A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K1/1 1.1405,sep)",
+   "1": "YYY(K3/3 1.1162,sep)",
+   "2": "YYn(K3/3 1.1040,sep)"
+  },
+  "jolt": 3.6880875,
+  "ours": 2.160546,
+  "nJ": 7,
+  "nO": 7
+ },
+ "100..500|W8|wall|LETTER": {
+  "ratio": 0.6955876423833396,
+  "flags": "YYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K0/1 -)",
+   "1": "YYY(K3/3 0.6935,sep)",
+   "2": "YYn(K3/3 0.7132,sep)"
+  },
+  "jolt": 2.5701962499999995,
+  "ours": 1.78779675,
+  "nJ": 6,
+  "nO": 7
+ },
+ "100..500|W8|wall|GATING-ONLY": {
+  "ratio": 0.6955876423833396,
+  "flags": "YYn",
+  "label": "CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K0/1 -)",
+   "1": "YYY(K3/3 0.6935,sep)",
+   "2": "YYn(K3/3 0.7132,sep)"
+  },
+  "jolt": 2.5701962499999995,
+  "ours": 1.78779675,
+  "nJ": 6,
+  "nO": 7
+ },
+ "100..500|W8|velocity rows|LETTER": {
+  "ratio": 0.6604015761983875,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K0/1 -)",
+   "1": "YYY(K3/3 0.6584,sep)",
+   "2": "YYY(K3/3 0.6771,sep)"
+  },
+  "jolt": 2.5701962499999995,
+  "ours": 1.78779675,
+  "nJ": 6,
+  "nO": 7
+ },
+ "100..500|W8|velocity rows|GATING-ONLY": {
+  "ratio": 0.6604015761983875,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K0/1 -)",
+   "1": "YYY(K3/3 0.6584,sep)",
+   "2": "YYY(K3/3 0.6771,sep)"
+  },
+  "jolt": 2.5701962499999995,
+  "ours": 1.78779675,
+  "nJ": 6,
+  "nO": 7
+ },
+ "100..500|W8|all rows|LETTER": {
+  "ratio": 0.7330306924382795,
+  "flags": "YYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K0/1 -)",
+   "1": "YYY(K3/3 0.7308,sep)",
+   "2": "YYn(K3/3 0.7516,sep)"
+  },
+  "jolt": 2.5701962499999995,
+  "ours": 1.78779675,
+  "nJ": 6,
+  "nO": 7
+ },
+ "100..500|W8|all rows|GATING-ONLY": {
+  "ratio": 0.7330306924382795,
+  "flags": "YYn",
+  "label": "CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K0/1 -)",
+   "1": "YYY(K3/3 0.7308,sep)",
+   "2": "YYn(K3/3 0.7516,sep)"
+  },
+  "jolt": 2.5701962499999995,
+  "ours": 1.78779675,
+  "nJ": 6,
+  "nO": 7
+ },
+ "100..500|W8|manifold|LETTER": {
+  "ratio": 1.3216844808624124,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B>A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K0/1 -)",
+   "1": "YYY(K3/3 1.3177,sep)",
+   "2": "YYY(K3/3 1.3552,sep)"
+  },
+  "jolt": 2.5701962499999995,
+  "ours": 1.78779675,
+  "nJ": 6,
+  "nO": 7
+ },
+ "100..500|W8|manifold|GATING-ONLY": {
+  "ratio": 1.3216844808624124,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B>A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K0/1 -)",
+   "1": "YYY(K3/3 1.3177,sep)",
+   "2": "YYY(K3/3 1.3552,sep)"
+  },
+  "jolt": 2.5701962499999995,
+  "ours": 1.78779675,
+  "nJ": 6,
+  "nO": 7
+ },
+ "100..500|W16|wall|LETTER": {
+  "ratio": 0.8176244288652997,
+  "flags": "nYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "YYn(K3/3 0.7365,sep)",
+   "1": "nYn(K3/3 0.8058,sep)",
+   "2": "nnn(K3/3 0.8516,sep)"
+  },
+  "jolt": 2.50559325,
+  "ours": 2.04863425,
+  "nJ": 9,
+  "nO": 9
+ },
+ "100..500|W16|wall|GATING-ONLY": {
+  "ratio": 0.8176244288652997,
+  "flags": "nYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "YYn(K3/3 0.7365,sep)",
+   "1": "nYn(K3/3 0.8058,sep)",
+   "2": "nnn(K3/3 0.8516,sep)"
+  },
+  "jolt": 2.50559325,
+  "ours": 2.04863425,
+  "nJ": 9,
+  "nO": 9
+ },
+ "100..500|W16|velocity rows|LETTER": {
+  "ratio": 0.7762651730137797,
+  "flags": "nYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "YYn(K3/3 0.6993,sep)",
+   "1": "YYn(K3/3 0.7650,sep)",
+   "2": "nnn(K3/3 0.8086,sep)"
+  },
+  "jolt": 2.50559325,
+  "ours": 2.04863425,
+  "nJ": 9,
+  "nO": 9
+ },
+ "100..500|W16|velocity rows|GATING-ONLY": {
+  "ratio": 0.7762651730137797,
+  "flags": "nYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "YYn(K3/3 0.6993,sep)",
+   "1": "YYn(K3/3 0.7650,sep)",
+   "2": "nnn(K3/3 0.8086,sep)"
+  },
+  "jolt": 2.50559325,
+  "ours": 2.04863425,
+  "nJ": 9,
+  "nO": 9
+ },
+ "100..500|W16|all rows|LETTER": {
+  "ratio": 0.8616366432158149,
+  "flags": "nYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "YYn(K3/3 0.7762,sep)",
+   "1": "nnn(K3/3 0.8491,sep)",
+   "2": "nnn(K3/3 0.8975,sep)"
+  },
+  "jolt": 2.50559325,
+  "ours": 2.04863425,
+  "nJ": 9,
+  "nO": 9
+ },
+ "100..500|W16|all rows|GATING-ONLY": {
+  "ratio": 0.8616366432158149,
+  "flags": "nYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "YYn(K3/3 0.7762,sep)",
+   "1": "nnn(K3/3 0.8491,sep)",
+   "2": "nnn(K3/3 0.8975,sep)"
+  },
+  "jolt": 2.50559325,
+  "ours": 2.04863425,
+  "nJ": 9,
+  "nO": 9
+ },
+ "100..500|W16|manifold|LETTER": {
+  "ratio": 1.5535662984215535,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B>A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "YYY(K3/3 1.3995,sep)",
+   "1": "YYY(K3/3 1.5310,sep)",
+   "2": "YYY(K3/3 1.6182,sep)"
+  },
+  "jolt": 2.50559325,
+  "ours": 2.04863425,
+  "nJ": 9,
+  "nO": 9
+ },
+ "100..500|W16|manifold|GATING-ONLY": {
+  "ratio": 1.5535662984215535,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B>A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "YYY(K3/3 1.3995,sep)",
+   "1": "YYY(K3/3 1.5310,sep)",
+   "2": "YYY(K3/3 1.6182,sep)"
+  },
+  "jolt": 2.50559325,
+  "ours": 2.04863425,
+  "nJ": 9,
+  "nO": 9
+ },
+ "0..100|W1|wall|LETTER": {
+  "ratio": 0.5199647218948242,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/1 0.5496,sep)",
+   "1": "YYY(K3/3 0.5543,sep)",
+   "2": "YYY(K3/3 0.5047,sep)"
+  },
+  "jolt": 10.634358000000002,
+  "ours": 5.529491,
+  "nJ": 8,
+  "nO": 7
+ },
+ "0..100|W1|wall|GATING-ONLY": {
+  "ratio": 0.5199647218948242,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/1 0.5496,sep)",
+   "1": "YYY(K3/3 0.5543,sep)",
+   "2": "YYY(K3/3 0.5047,sep)"
+  },
+  "jolt": 10.634358000000002,
+  "ours": 5.529491,
+  "nJ": 8,
+  "nO": 7
+ },
+ "0..100|W2|wall|LETTER": {
+  "ratio": 0.6098506499277339,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/2 0.6210,sep)",
+   "1": "YYY(K3/3 0.6044,sep)",
+   "2": "YYY(K3/3 0.5965,sep)"
+  },
+  "jolt": 5.8793074999999995,
+  "ours": 3.5854995,
+  "nJ": 8,
+  "nO": 8
+ },
+ "0..100|W2|wall|GATING-ONLY": {
+  "ratio": 0.6098506499277339,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K2/2 0.6210,sep)",
+   "1": "YYY(K3/3 0.6044,sep)",
+   "2": "YYY(K3/3 0.5965,sep)"
+  },
+  "jolt": 5.8793074999999995,
+  "ours": 3.5854995,
+  "nJ": 8,
+  "nO": 8
+ },
+ "0..100|W4|wall|LETTER": {
+  "ratio": 0.7152765026934013,
+  "flags": "YYY",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K1/1 0.7347,sep)",
+   "1": "YYY(K3/3 0.7203,sep)",
+   "2": "YYY(K3/3 0.6981,sep)"
+  },
+  "jolt": 3.545517,
+  "ours": 2.536025,
+  "nJ": 7,
+  "nO": 7
+ },
+ "0..100|W4|wall|GATING-ONLY": {
+  "ratio": 0.7152765026934013,
+  "flags": "YYY",
+  "label": "CLAIMED STRONG",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K1/1 0.7347,sep)",
+   "1": "YYY(K3/3 0.7203,sep)",
+   "2": "YYY(K3/3 0.6981,sep)"
+  },
+  "jolt": 3.545517,
+  "ours": 2.536025,
+  "nJ": 7,
+  "nO": 7
+ },
+ "0..100|W8|wall|LETTER": {
+  "ratio": 0.8449274065433598,
+  "flags": "nYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K0/1 -)",
+   "1": "YYY(K3/3 0.8418,sep)",
+   "2": "nnn(K3/3 0.9120,sep)"
+  },
+  "jolt": 2.3746975,
+  "ours": 2.006447,
+  "nJ": 6,
+  "nO": 7
+ },
+ "0..100|W8|wall|GATING-ONLY": {
+  "ratio": 0.8449274065433598,
+  "flags": "nYn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K0/1 -)",
+   "1": "YYY(K3/3 0.8418,sep)",
+   "2": "nnn(K3/3 0.9120,sep)"
+  },
+  "jolt": 2.3746975,
+  "ours": 2.006447,
+  "nJ": 6,
+  "nO": 7
+ },
+ "0..100|W16|wall|LETTER": {
+  "ratio": 0.9915166900819833,
+  "flags": "nnn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K3/3 0.9459)",
+   "1": "nnn(K3/3 0.9833)",
+   "2": "nnn(K3/3 1.0166)"
+  },
+  "jolt": 2.24924,
+  "ours": 2.230159,
+  "nJ": 9,
+  "nO": 9
+ },
+ "0..100|W16|wall|GATING-ONLY": {
+  "ratio": 0.9915166900819833,
+  "flags": "nnn",
+  "label": "NOT CLAIMED",
+  "dir": "B<A",
+  "gates": [
+   0,
+   1,
+   2
+  ],
+  "per": {
+   "0": "nnn(K3/3 0.9459)",
+   "1": "nnn(K3/3 0.9833)",
+   "2": "nnn(K3/3 1.0166)"
+  },
+  "jolt": 2.24924,
+  "ours": 2.230159,
+  "nJ": 9,
+  "nO": 9
+ },
+ "scaling|0..500": {
+  "ours|1": 4.5692072,
+  "ours|2": 3.0706097,
+  "ours|4": 2.2356418,
+  "ours|8": 1.8276646,
+  "ours|16": 2.0887034,
+  "Jolt|1": 10.1435429,
+  "Jolt|2": 5.8262519,
+  "Jolt|4": 3.6546524,
+  "Jolt|8": 2.5310965000000003,
+  "Jolt|16": 2.4535076
+ },
+ "scaling|100..500": {
+  "ours|1": 4.3503785,
+  "ours|2": 2.939192625,
+  "ours|4": 2.160546,
+  "ours|8": 1.78779675,
+  "ours|16": 2.04863425,
+  "Jolt|1": 10.004406,
+  "Jolt|2": 5.812302000000001,
+  "Jolt|4": 3.6880875,
+  "Jolt|8": 2.5701962499999995,
+  "Jolt|16": 2.50559325
+ }
+}

@@ -1,0 +1,2 @@
+map (c): 327 file(s) walked, 819 type definition(s), 33 row(s)
+wrote D:\wt\lighttable\crates\boyko_symcensus\ug15\maps\containment.tsv

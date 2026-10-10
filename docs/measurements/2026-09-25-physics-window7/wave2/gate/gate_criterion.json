@@ -1,0 +1,19 @@
+[
+ {
+  "tag": "cells/G4-refine_g4r_W1",
+  "bin": "g4r",
+  "args": [
+   "--bench",
+   "--noplot",
+   "^bp_g4_(uniform|disparity)/((all_pairs|tree)/(64|96|112|128|136|144|152|160|168|176|192|256)|tree_rowwalk/(64|128|256))$"
+  ],
+  "exit": 0,
+  "wall_s": 567.413,
+  "ids": 54,
+  "receipts": 54,
+  "source": "the untimed run already in gate/cells (same filter, full criterion settings)",
+  "dir": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win7b\\gate\\cells/G4-refine_g4r_W1",
+  "why": [],
+  "ok": true
+ }
+]

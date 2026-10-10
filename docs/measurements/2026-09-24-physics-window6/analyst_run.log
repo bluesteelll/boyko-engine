@@ -1,0 +1,859 @@
+# Window 6 analyst reduction (analyze6.py)
+records 553: processes 529, pass markers 24
+attempts {'warmup': 24, 'original': 444, 'rerun': 61}
+clean recomputed vs driver contaminated flag: disagreements 0
+slots 444; chosen 436; dropped 8
+  DROPPED ('090949', 'P3-C3b', 1, 0, 1, 'C3b-TA-armed', 'par', 1) {'original': [(0.27, 6.03, 17.3739)], 'rerun': [(0.37, 5.01, 17.3744)]}
+  DROPPED ('090949', 'P3-C3b', 1, 0, 2, 'C3b-TD-tree', 'tip', 1) {'original': [(0.51, 8.41, 7.0579)], 'rerun': [(1.15, 5.17, 6.8573)]}
+  DROPPED ('090949', 'P4-G9', 0, 0, 0, 'G9-S16', 'g9p', 1) {'original': [(3.16, 5.11, 0.0833)], 'rerun': [(1.28, 5.37, 0.0824)]}
+  DROPPED ('090949', 'P4-G9', 0, 0, 0, 'G9-RS', 'g9p', 8) {'original': [(1.37, 5.87, 3.2998)], 'rerun': [(1.5, 5.2, 3.3038)]}
+  DROPPED ('090949', 'P4-G9', 0, 0, 1, 'G9-JAs-mid', 'g9p', 2) {'original': [(3.14, 5.88, 6.4998)], 'rerun': [(0.35, 5.1, 6.6178)]}
+  DROPPED ('090949', 'P4-G9', 1, 0, 1, 'G9-R', 'g9p', 1) {'original': [(0.62, 5.59, 11.2137)], 'rerun': [(0.94, 5.75, 11.1682)]}
+  DROPPED ('090949', 'P4-G9', 1, 0, 2, 'G9-JAs-mid', 'g9t', 16) {'original': [(3.58, 5.42, 4.6673)], 'rerun': [(3.06, 5.21, 4.6261)]}
+  DROPPED ('090949', 'P5a-bridge2', 0, 0, 2, 'B2-JAs', 'w4bt', 8) {'original': [(0.37, 5.3, 4.5007)], 'rerun': [(2.39, 5.41, 4.4725)]}
+slots without an original 0
+re-runs chosen 53
+distinct 5/10-s receipts 620: median 0.85 %, p90 5.13 %, max 17.21 %, over 5 %: 69
+during-process witness over chosen: median 0.26 %, p95 3.87 %, max 5.07 %, over 5 %: 1
+  witness > 3 %: [('L10-Offp', 'b4db', 1, 4.28, 1.4826), ('L10-Offp', 'b4db', 1, 3.39, 1.4566), ('L10-Son', 'b4db', 1, 3.77, 4.6956), ('L9-classes', 'c4db', 1, 4.54, 1.409), ('L9-JA-off', 'b4db', 1, 3.83, 18.1204), ('L9-JA-a-on', 'b4db', 1, 4.11, 16.5367), ('L9-JA-on', 'b4db', 1, 3.94, 16.4892), ('L9-JA-on', 'b4db', 8, 3.46, 5.8994), ('L9-JA-a-off', 'b4db', 1, 3.76, 18.1943), ('L9-JA-a-on', 'b4db', 1, 3.76, 16.5271), ('L9-JA-on', 'b4db', 1, 3.73, 16.5243), ('L9-JA-off', 'b4db', 1, 3.68, 18.1236), ('L9-JA-a-off', 'b4db', 1, 3.79, 18.1435), ('C3b-TA-armed', 'par', 1, 3.83, 17.3599), ('C3b-TD-tree', 'par', 8, 4.98, 2.6059), ('C3b-TD-tree', 'par', 1, 4.84, 6.9651), ('C3b-TD-tree', 'tip', 1, 4.07, 6.8439), ('C3b-TA-armed', 'tip', 1, 3.38, 17.1786), ('G9-JAs-a', 'g9t', 1, 4.32, 8.4923), ('G9-JAs-mid', 'g9p', 4, 4.43, 5.2699), ('G9-R', 'g9t', 1, 3.63, 10.7821), ('G9-S16', 'g9p', 1, 3.08, 0.0827), ('G9-S16', 'g9t', 1, 3.23, 0.0812), ('G9-JAs-a', 'g9p', 1, 3.03, 9.0541), ('G9-JA', 'g9t', 8, 3.87, 6.1339), ('G9-JAs-mid', 'g9t', 16, 4.63, 4.6192), ('G9-JAs-a', 'g9t', 1, 4.44, 8.4454), ('G9-JC', 'g9t', 1, 5.07, 9.0387), ('G9-JAs-mid', 'g9p', 16, 4.33, 4.9425), ('G9-RS', 'g9p', 8, 4.92, 3.2783), ('G9-JC', 'g9t', 1, 3.87, 8.985), ('G9-RS', 'g9p', 1, 3.73, 6.0832), ('G9-R', 'g9p', 1, 3.35, 11.7631), ('G9-JA', 'g9p', 1, 3.27, 18.9795), ('G9-R', 'g9p', 8, 4.3, 5.6936), ('G9-JAs-a', 'g9t', 1, 3.96, 8.6318), ('G9-RS', 'g9p', 1, 4.03, 6.0965), ('G9-R', 'g9t', 8, 4.31, 5.4129), ('G9-JA', 'g9t', 8, 5.0, 6.1175), ('G9-RS', 'g9t', 1, 4.17, 6.0114), ('G9-R', 'g9p', 1, 3.53, 11.1485), ('B2-JAs', 'w4bt', 8, 4.6, 4.4372)]
+block times {'P1-L10': ('09:12:23', '09:17:54'), 'P2a-L9classes': ('09:20:31', '09:24:07'), 'P2b-L9reuse': ('09:26:40', '09:36:50'), 'P3-C3b': ('09:40:00', '09:55:52'), 'P4-G9': ('10:02:14', '10:50:49'), 'P5a-bridge2': ('10:53:22', '11:06:30'), 'P5b-L10spans': ('11:09:05', '11:17:30'), 'P5c-C3bG4': ('12:04:41', '12:27:49'), 'P5d-L9reuseJD': ('11:33:19', '11:38:47'), 'P5e-L9reuseR': ('11:41:23', '11:48:55'), 'P5f-L9reuseJAmid': ('11:51:28', '11:59:15'), 'P5g-C3bG5': ('11:20:01', '11:30:47')}
+top process in contaminated after-receipts {'claude.exe': 67, 'explorer.exe': 1, 'RuntimeBroker.exe': 1}
+structure problems over 436 chosen processes: 0
+poses per row: [('B2-JAs', '0x32d5e235342b4143'), ('C3b-TA-armed', '0x32d5e235342b4143'), ('C3b-TD-tree', '0x32d5e235342b4143'), ('G5-TA-ap-a', '0x32d5e235342b4143'), ('G5-TA-tree-a', '0x32d5e235342b4143'), ('G5-TD-ap', '0x32d5e235342b4143'), ('G5-TD-tree', '0x32d5e235342b4143'), ('G9-JA', '0x32d5e235342b4143'), ('G9-JAs-a', '0x32d5e235342b4143'), ('G9-JAs-mid', '0x32d5e235342b4143'), ('G9-JC', '0x32d5e235342b4143'), ('G9-R', '0x87e561d20589d4a5'), ('G9-RS', '0x2a2b7926a48aab00'), ('G9-S16', '0x8877dbb1192e9b92'), ('L10-Offp', '0x3db47fae414b655c'), ('L10-Offp8', '0x3db47fae414b655c'), ('L10-RS', '0x2a2b7926a48aab00'), ('L10-RS-Offp', '0xb7f1e9e8f91f75ab'), ('L10-Son', '0xcc2a5400c66eecce'), ('L10-Son8', '0xcc2a5400c66eecce'), ('L9-JA-a-off', '0x32d5e235342b4143'), ('L9-JA-a-on', '0x30c5438bc6ad9ffa'), ('L9-JA-off', '0x32d5e235342b4143'), ('L9-JA-off-mid', '0x32d5e235342b4143'), ('L9-JA-on', '0x30c5438bc6ad9ffa'), ('L9-JA-on-mid', '0x30c5438bc6ad9ffa'), ('L9-JD-off', '0x32d5e235342b4143'), ('L9-JD-on', '0x30c5438bc6ad9ffa'), ('L9-R-off', '0x87e561d20589d4a5'), ('L9-R-on', '0xc8bbe34cf6a8afc6')]
+
+## P1 L10 pre-C0 refutation (bar 0.584 ms)
+L10-Offp@W1 wall [264,1000): 1.4670 [1.4566-1.4826] K=6 (1.77/0.88/0.34)
+L10-Offp@W1 wall tail [ffs,1000): 1.3043 [1.2935-1.3218] K=6 (2.16/0.81/0.40)  ffs(summary)=[274] ffs(csv)=[273]
+L10-Son@W1 wall [264,1000): 4.6973 [4.6759-4.7127] K=6 (0.78/0.37/0.15)
+L10-Son@W1 wall tail [ffs,1000): 4.6970 [4.6757-4.7126] K=6 (0.78/0.38/0.15)  ffs(summary)=[265] ffs(csv)=[264]
+Off-prime win vs 0.584: med 1.4670 (+151.2 % over the bar); below bar? False; min 1.4566; claimed r/i/s {'r': True, 'i': True, 's': True}
+Off-prime tail vs 0.584: med 1.3043 (+123.3 % over the bar); below bar? False; min 1.2935; claimed r/i/s {'r': True, 'i': True, 's': True}
+Son vs Offp (Offp against Son): ratio 0.3123 (-68.77 %, d -3.2302); bars 3.9/1.9/0.7 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0174
+  spans L10-Offp#b4db@W1 over win (per-process mean -> median over K, ms; B = per-process median):
+    bp                 A 0.2523 [0.2513-0.2545] K=6 (1.29/0.43/0.23) | B 0.2428
+    np                 A 0.6442 [0.6425-0.6572] K=6 (2.28/0.52/0.44) | B 0.6274
+    graph              A 0.1160 [0.1131-0.1178] K=6 (4.06/0.67/0.68) | B 0.1095
+    solve              A 0.3812 [0.3791-0.3885] K=6 (2.48/0.84/0.47) | B 0.2082
+    gather             A 0.0267 [0.0265-0.0280] K=6 (5.60/2.87/1.20) | B 0.0258
+    integrate          A 0.0001 [0.0001-0.0001] K=6 (22.31/12.85/4.58) | B 0.0001
+    apply              A 0.0049 [0.0049-0.0051] K=6 (3.59/0.43/0.68) | B 0.0046
+    select_bp          A 0.0001 [0.0001-0.0001] K=6 (18.11/13.18/4.08) | B 0.0001
+    sys_sum            A 1.4262 [1.4206-1.4455] K=6 (1.75/0.82/0.35) | B 1.2234
+    g                  A 0.0367 [0.0360-0.0451] K=6 (24.66/1.56/4.88) | B 0.0326
+    u                  A 0.0008 [0.0007-0.0009] K=6 (14.42/2.28/2.44) | B 0.0007
+    r                  A 0.0016 [0.0016-0.0016] K=6 (2.25/0.79/0.41) | B 0.0016
+    bp_verify          A 0.0054 [0.0053-0.0058] K=6 (9.48/3.85/1.80) | B 0.0051
+    bp_build           A 0.0236 [0.0228-0.0253] K=6 (10.65/5.25/2.09) | B 0.0228
+    bp_query           A 0.1950 [0.1940-0.1958] K=6 (0.94/0.57/0.19) | B 0.1880
+    bp_assemble        A 0.0280 [0.0277-0.0283] K=6 (1.99/1.05/0.39) | B 0.0265
+    solve_build        A 0.0433 [0.0419-0.0460] K=6 (9.61/3.09/1.74) | B 0.0345
+    warm_apply         A 0.0065 [0.0064-0.0068] K=6 (6.40/3.49/1.31) | B 0.0000
+    store              A 0.0795 [0.0787-0.0807] K=6 (2.46/1.04/0.46) | B 0.0764
+    integrate_in_solve A 0.0671 [0.0666-0.0679] K=6 (1.80/0.81/0.34) | B 0.0647
+    gravity            A 0.0067 [0.0065-0.0073] K=6 (12.26/5.08/2.33) | B 0.0058
+    wide               A 0.1480 [0.1477-0.1489] K=6 (0.81/0.41/0.17) | B 0.0000
+    narrow             A 0.0035 [0.0034-0.0036] K=6 (4.04/1.53/0.73) | B 0.0013
+    biased             A 0.0514 [0.0513-0.0518] K=6 (0.91/0.32/0.17) | B 0.0010
+    relax              A 0.1017 [0.1014-0.1022] K=6 (0.75/0.51/0.17) | B 0.0019
+    write_back         A 0.0009 [0.0009-0.0010] K=6 (4.31/2.62/0.88) | B 0.0009
+    sleep_begin        A 0.0026 [0.0025-0.0031] K=6 (24.44/4.80/4.29) | B 0.0025
+    sleep_freeze       A 0.0158 [0.0153-0.0166] K=6 (8.40/5.00/1.73) | B 0.0149
+    sleep_end          A 0.0052 [0.0051-0.0054] K=6 (5.96/2.24/1.15) | B 0.0048
+    tree span (sum of 4 per-col medians) 0.2423 [0.2412-0.2445] K=6 (1.39/0.86/0.29)
+    wall A 1.4670 [1.4566-1.4826] K=6 (1.77/0.88/0.34); remainder (wall - bp - np - graph - solve) 0.0690 [0.0676-0.0769] K=6 (13.49/2.61/2.55)
+    manifolds 4467.00 pairs 9545.00
+  spans L10-Son#b4db@W1 over win (per-process mean -> median over K, ms; B = per-process median):
+    bp                 A 1.9746 [1.9701-1.9794] K=6 (0.47/0.19/0.09) | B 1.9428
+    np                 A 2.3210 [2.3114-2.3274] K=6 (0.69/0.42/0.14) | B 2.3101
+    graph              A 0.1122 [0.1115-0.1153] K=6 (3.38/2.42/0.79) | B 0.1101
+    solve              A 0.2172 [0.2134-0.2239] K=6 (4.83/1.95/0.91) | B 0.2117
+    gather             A 0.0266 [0.0264-0.0275] K=6 (4.12/2.06/0.83) | B 0.0259
+    integrate          A 0.0001 [0.0001-0.0001] K=6 (19.89/3.90/3.56) | B 0.0001
+    apply              A 0.0048 [0.0047-0.0051] K=6 (7.63/0.86/1.37) | B 0.0047
+    select_bp          A 0.0001 [0.0001-0.0001] K=6 (21.76/6.44/4.01) | B 0.0001
+    sys_sum            A 4.6595 [4.6384-4.6741] K=6 (0.77/0.35/0.15) | B 4.6099
+    g                  A 0.0378 [0.0371-0.0386] K=6 (4.14/1.86/0.77) | B 0.0356
+    u                  A 0.0009 [0.0008-0.0009] K=6 (12.74/5.40/2.37) | B 0.0008
+    r                  A 0.0016 [0.0016-0.0016] K=6 (1.87/0.79/0.38) | B 0.0016
+    solve_build        A 0.0381 [0.0364-0.0409] K=6 (11.71/3.79/2.11) | B 0.0364
+    warm_apply         A 0.0000 [0.0000-0.0000] K=6 (5.19/3.45/1.14) | B 0.0000
+    store              A 0.0781 [0.0771-0.0791] K=6 (2.57/0.26/0.42) | B 0.0770
+    integrate_in_solve A 0.0656 [0.0651-0.0660] K=6 (1.35/0.68/0.27) | B 0.0647
+    gravity            A 0.0064 [0.0059-0.0074] K=6 (22.32/7.58/4.11) | B 0.0060
+    narrow             A 0.0014 [0.0013-0.0014] K=6 (6.54/5.16/1.54) | B 0.0013
+    biased             A 0.0011 [0.0010-0.0011] K=6 (3.99/2.48/0.85) | B 0.0010
+    relax              A 0.0019 [0.0019-0.0020] K=6 (3.36/1.97/0.69) | B 0.0019
+    write_back         A 0.0009 [0.0009-0.0009] K=6 (2.02/1.19/0.42) | B 0.0009
+    sleep_begin        A 0.0025 [0.0025-0.0027] K=6 (9.86/6.35/2.26) | B 0.0024
+    sleep_freeze       A 0.0172 [0.0157-0.0183] K=6 (15.38/7.67/2.98) | B 0.0162
+    sleep_end          A 0.0047 [0.0046-0.0048] K=6 (3.52/2.48/0.77) | B 0.0045
+    tree span (sum of 4 per-col medians) 0.0000 [0.0000-0.0000] K=6 (nan/nan/nan)
+    wall A 4.6973 [4.6759-4.7127] K=6 (0.78/0.37/0.15); remainder (wall - bp - np - graph - solve) 0.0696 [0.0683-0.0713] K=6 (4.36/1.50/0.78)
+    manifolds 4518.00 pairs 9559.00
+  spans L10-Offp#b4db@W1 over tail (per-process mean -> median over K, ms; B = per-process median):
+    bp                 A 0.2520 [0.2511-0.2544] K=6 (1.31/0.42/0.24) | B 0.2427
+    np                 A 0.6438 [0.6422-0.6571] K=6 (2.32/0.51/0.45) | B 0.6273
+    graph              A 0.1160 [0.1130-0.1177] K=6 (4.05/0.56/0.68) | B 0.1095
+    solve              A 0.2196 [0.2181-0.2258] K=6 (3.49/2.00/0.75) | B 0.2082
+    gather             A 0.0267 [0.0264-0.0280] K=6 (5.73/2.77/1.20) | B 0.0258
+    integrate          A 0.0001 [0.0001-0.0001] K=6 (25.07/13.72/5.03) | B 0.0001
+    apply              A 0.0048 [0.0048-0.0049] K=6 (3.16/1.04/0.58) | B 0.0046
+    select_bp          A 0.0001 [0.0001-0.0001] K=6 (19.23/13.03/4.16) | B 0.0001
+    sys_sum            A 1.2636 [1.2577-1.2848] K=6 (2.14/0.80/0.41) | B 1.2230
+    g                  A 0.0365 [0.0359-0.0451] K=6 (25.21/1.83/4.98) | B 0.0325
+    u                  A 0.0008 [0.0007-0.0008] K=6 (13.91/2.47/2.38) | B 0.0007
+    r                  A 0.0016 [0.0016-0.0016] K=6 (2.30/0.73/0.41) | B 0.0016
+    bp_verify          A 0.0054 [0.0053-0.0058] K=6 (9.48/3.90/1.80) | B 0.0051
+    bp_build           A 0.0235 [0.0228-0.0253] K=6 (10.60/5.34/2.09) | B 0.0228
+    bp_query           A 0.1949 [0.1939-0.1957] K=6 (0.93/0.58/0.19) | B 0.1880
+    bp_assemble        A 0.0280 [0.0277-0.0283] K=6 (2.12/1.05/0.41) | B 0.0265
+    solve_build        A 0.0382 [0.0370-0.0404] K=6 (8.70/4.16/1.68) | B 0.0345
+    warm_apply         A 0.0000 [0.0000-0.0000] K=6 (5.95/1.55/1.13) | B 0.0000
+    store              A 0.0799 [0.0791-0.0812] K=6 (2.56/0.82/0.45) | B 0.0765
+    integrate_in_solve A 0.0671 [0.0666-0.0678] K=6 (1.83/0.84/0.35) | B 0.0647
+    gravity            A 0.0067 [0.0064-0.0073] K=6 (12.64/5.33/2.40) | B 0.0058
+    narrow             A 0.0013 [0.0013-0.0014] K=6 (9.88/5.02/1.95) | B 0.0013
+    biased             A 0.0010 [0.0010-0.0011] K=6 (7.45/4.66/1.56) | B 0.0010
+    relax              A 0.0019 [0.0019-0.0020] K=6 (3.28/2.35/0.72) | B 0.0019
+    write_back         A 0.0009 [0.0009-0.0009] K=6 (2.70/1.08/0.52) | B 0.0009
+    sleep_begin        A 0.0026 [0.0024-0.0031] K=6 (24.73/5.00/4.36) | B 0.0025
+    sleep_freeze       A 0.0159 [0.0154-0.0167] K=6 (8.38/5.00/1.73) | B 0.0150
+    sleep_end          A 0.0052 [0.0051-0.0054] K=6 (5.90/2.33/1.14) | B 0.0048
+    tree span (sum of 4 per-col medians) 0.2423 [0.2411-0.2445] K=6 (1.39/0.86/0.29)
+    wall A 1.3043 [1.2935-1.3218] K=6 (2.16/0.81/0.40); remainder (wall - bp - np - graph - solve) 0.0687 [0.0673-0.0767] K=6 (13.80/2.77/2.61)
+    manifolds 4467.00 pairs 9545.00
+  spans L10-Son#b4db@W1 over tail (per-process mean -> median over K, ms; B = per-process median):
+    bp                 A 1.9744 [1.9701-1.9794] K=6 (0.47/0.19/0.09) | B 1.9428
+    np                 A 2.3209 [2.3113-2.3273] K=6 (0.69/0.42/0.14) | B 2.3101
+    graph              A 0.1122 [0.1115-0.1152] K=6 (3.35/2.43/0.79) | B 0.1101
+    solve              A 0.2171 [0.2133-0.2238] K=6 (4.84/1.95/0.91) | B 0.2117
+    gather             A 0.0266 [0.0264-0.0275] K=6 (4.17/2.06/0.84) | B 0.0259
+    integrate          A 0.0001 [0.0001-0.0001] K=6 (19.99/3.84/3.60) | B 0.0001
+    apply              A 0.0048 [0.0047-0.0051] K=6 (7.63/0.85/1.37) | B 0.0047
+    select_bp          A 0.0001 [0.0001-0.0001] K=6 (21.78/6.51/4.01) | B 0.0001
+    sys_sum            A 4.6592 [4.6383-4.6739] K=6 (0.77/0.36/0.15) | B 4.6099
+    g                  A 0.0378 [0.0370-0.0386] K=6 (4.17/1.85/0.78) | B 0.0356
+    u                  A 0.0009 [0.0008-0.0009] K=6 (12.78/5.35/2.37) | B 0.0008
+    r                  A 0.0016 [0.0016-0.0016] K=6 (1.89/0.78/0.38) | B 0.0016
+    solve_build        A 0.0381 [0.0364-0.0409] K=6 (11.73/3.79/2.11) | B 0.0364
+    warm_apply         A 0.0000 [0.0000-0.0000] K=6 (5.23/3.46/1.15) | B 0.0000
+    store              A 0.0781 [0.0771-0.0791] K=6 (2.57/0.26/0.42) | B 0.0770
+    integrate_in_solve A 0.0656 [0.0651-0.0660] K=6 (1.35/0.68/0.27) | B 0.0647
+    gravity            A 0.0064 [0.0059-0.0074] K=6 (22.37/7.57/4.11) | B 0.0060
+    narrow             A 0.0014 [0.0013-0.0014] K=6 (6.52/5.15/1.54) | B 0.0013
+    biased             A 0.0011 [0.0010-0.0011] K=6 (4.02/2.48/0.85) | B 0.0010
+    relax              A 0.0019 [0.0019-0.0020] K=6 (3.37/1.97/0.69) | B 0.0019
+    write_back         A 0.0009 [0.0009-0.0009] K=6 (2.02/1.19/0.42) | B 0.0009
+    sleep_begin        A 0.0025 [0.0025-0.0027] K=6 (9.87/6.37/2.27) | B 0.0024
+    sleep_freeze       A 0.0171 [0.0156-0.0182] K=6 (15.44/7.67/2.99) | B 0.0162
+    sleep_end          A 0.0047 [0.0046-0.0048] K=6 (3.54/2.46/0.77) | B 0.0045
+    tree span (sum of 4 per-col medians) 0.0000 [0.0000-0.0000] K=6 (nan/nan/nan)
+    wall A 4.6970 [4.6757-4.7126] K=6 (0.78/0.38/0.15); remainder (wall - bp - np - graph - solve) 0.0696 [0.0683-0.0713] K=6 (4.39/1.48/0.78)
+    manifolds 4518.00 pairs 9559.00
+
+## P2 L9: (a) class bench band
+  ts     45.2400 [44.9400-48.3500] K=6 (7.54/0.50/1.48)
+  tt     435.5600 [434.0900-440.8900] K=6 (1.56/0.39/0.28)
+  stream 232.6900 [232.4800-236.7800] K=6 (1.85/0.29/0.37)
+  lo     1.0771 [1.0729-1.1125] K=6 (3.68/0.60/0.71)
+  hi     1.6659 [1.6606-1.7055] K=6 (2.69/0.46/0.51)
+  rts    52.4050 [52.0200-56.8700] K=6 (9.25/0.60/1.82)
+  rtt    456.0850 [453.8800-457.8800] K=6 (0.88/0.47/0.17)
+  rlo    1.8209 [1.8084-1.8438] K=6 (1.94/0.62/0.35)
+  rhi    2.5867 [2.5717-2.6117] K=6 (1.54/0.53/0.28)
+  rain   208.4450 [206.9300-209.6100] K=6 (1.29/0.33/0.22)
+  counts N_sep/N_touch [(5044, 4515, 5044)]
+  band from median t: [1.0776, 1.6664]
+  low vs 1.0: {'eff': 7.710255999999971, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}
+  (a) verdict on the median band [1.0771, 1.6659]: CLEAR; per-process lows [1.0765, 1.0777, 1.0729, 1.0752, 1.1125, 1.0835]
+  touching term alone low/high: 1.2120 / 1.6448; sep term low/high -0.0744 / 0.0517
+
+## P2 (b) same-binary reuse off/on (b4db)
+  L9b-only prediction h*N_touch*(t_touch - t_hit): [1.4994, 1.6782] ms; bar 0.6*low = 0.8997 ms
+  bar at t_touch min/max: 0.8957 / 0.9140
+  L9-JA-off vs L9-JA-on @W1 [0,500): off 18.1313 [18.0970-18.2676] K=6 (0.94/0.29/0.18) | on 16.5068 [16.4506-16.5556] K=6 (0.64/0.27/0.12)
+      on/off ratio 0.9104 (-8.96 %, d -1.6245); bars 2.3/0.8/0.4 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0746; dT(off-on) = +1.6245 ms; worst pairing (min off - max on) +1.5414
+  L9-JA-off vs L9-JA-on @W1 [100,500): off 18.1605 [18.1324-18.3111] K=6 (0.98/0.25/0.18) | on 16.3152 [16.2494-16.3513] K=6 (0.62/0.32/0.12)
+      on/off ratio 0.8984 (-10.16 %, d -1.8453); bars 2.3/0.8/0.4 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0782; dT(off-on) = +1.8453 ms; worst pairing (min off - max on) +1.7811
+  L9-JA-off vs L9-JA-on @W1 [0,100): off 18.0178 [17.9555-18.0938] K=6 (0.77/0.44/0.15) | on 17.2815 [17.2494-17.3728] K=6 (0.71/0.18/0.13)
+      on/off ratio 0.9591 (-4.09 %, d -0.7363); bars 2.1/1.0/0.4 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0719; dT(off-on) = +0.7363 ms; worst pairing (min off - max on) +0.5826
+  L9-JA-off vs L9-JA-on @W8 [0,500): off 6.0419 [6.0338-6.1725] K=6 (2.30/0.58/0.46) | on 5.8998 [5.8593-6.0012] K=6 (2.40/0.28/0.41)
+      on/off ratio 0.9765 (-2.35 %, d -0.1422); bars 6.6/1.3/1.2 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0739; dT(off-on) = +0.1422 ms; worst pairing (min off - max on) +0.0325
+  L9-JA-off vs L9-JA-on @W8 [100,500): off 6.0539 [5.9958-6.0794] K=6 (1.38/0.72/0.28) | on 5.8750 [5.8406-6.0155] K=6 (2.98/0.81/0.57)
+      on/off ratio 0.9704 (-2.96 %, d -0.1789); bars 6.6/2.2/1.3 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0748; dT(off-on) = +0.1789 ms; worst pairing (min off - max on) -0.0197
+  L9-JA-off vs L9-JA-on @W8 [0,100): off 6.0897 [5.9783-6.5447] K=6 (9.30/2.20/1.74) | on 5.9643 [5.9343-6.1365] K=6 (3.39/1.36/0.68)
+      on/off ratio 0.9794 (-2.06 %, d -0.1254); bars 19.8/5.2/3.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.2264; dT(off-on) = +0.1254 ms; worst pairing (min off - max on) -0.1582
+  L9-JA-a-off vs L9-JA-a-on @W1 [0,500): off 18.1519 [18.1349-18.1943] K=6 (0.33/0.19/0.07) | on 16.5319 [16.5029-16.5663] K=6 (0.38/0.27/0.08)
+      on/off ratio 0.9108 (-8.92 %, d -1.6200); bars 1.0/0.7/0.2 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0372; dT(off-on) = +1.6200 ms; worst pairing (min off - max on) +1.5687
+  L9-JA-a-off vs L9-JA-a-on @W1 [100,500): off 18.1846 [18.1492-18.2218] K=6 (0.40/0.16/0.08) | on 16.3245 [16.2862-16.3770] K=6 (0.56/0.21/0.10)
+      on/off ratio 0.8977 (-10.23 %, d -1.8602); bars 1.4/0.5/0.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0435; dT(off-on) = +1.8602 ms; worst pairing (min off - max on) +1.7721
+  L9-JA-a-off vs L9-JA-a-on @W1 [0,100): off 18.0444 [17.9766-18.1052] K=6 (0.71/0.34/0.14) | on 17.3549 [17.2799-17.3827] K=6 (0.59/0.28/0.12)
+      on/off ratio 0.9618 (-3.82 %, d -0.6895); bars 1.9/0.9/0.4 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0633; dT(off-on) = +0.6895 ms; worst pairing (min off - max on) +0.5940
+  armed twins @W1 spans [100,500), off vs on:
+    bp           A-mean: off 1.9821 on 1.9717 d(off-on) +0.0104; ratio 0.9948 (-0.52 %, d -0.0104); bars 4.0/1.8/0.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0148
+    bp           B-median: off 1.9352 on 1.9353 d(off-on) -0.0002; ratio 1.0001 (+0.01 %, d +0.0002); bars 1.5/0.2/0.3 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0056
+    np           A-mean: off 2.4093 on 0.6846 d(off-on) +1.7247; ratio 0.2842 (-71.58 %, d -1.7247); bars 7.1/1.9/1.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0225
+    np           B-median: off 2.3916 on 0.6505 d(off-on) +1.7411; ratio 0.2720 (-72.80 %, d -1.7411); bars 7.9/1.9/1.4 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0248
+    graph        A-mean: off 0.1192 on 0.1174 d(off-on) +0.0018; ratio 0.9846 (-1.54 %, d -0.0018); bars 14.9/5.9/2.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0032
+    graph        B-median: off 0.1151 on 0.1121 d(off-on) +0.0030; ratio 0.9740 (-2.60 %, d -0.0030); bars 11.7/4.3/2.1 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0024
+    solve        A-mean: off 13.5772 on 13.4672 d(off-on) +0.1100; ratio 0.9919 (-0.81 %, d -0.1100); bars 1.7/0.8/0.3 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0442
+    solve        B-median: off 13.5156 on 13.4074 d(off-on) +0.1081; ratio 0.9920 (-0.80 %, d -0.1081); bars 1.5/1.0/0.3 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0424
+    sys_sum      A-mean: off 18.1359 on 16.2784 d(off-on) +1.8575; ratio 0.8976 (-10.24 %, d -1.8575); bars 1.3/0.5/0.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0429
+    sys_sum      B-median: off 18.0570 on 16.1658 d(off-on) +1.8912; ratio 0.8953 (-10.47 %, d -1.8912); bars 1.4/0.8/0.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0496
+    g            A-mean: off 0.0475 on 0.0463 d(off-on) +0.0012; ratio 0.9745 (-2.55 %, d -0.0012); bars 16.7/4.1/3.2 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0015
+    g            B-median: off 0.0437 on 0.0418 d(off-on) +0.0018; ratio 0.9580 (-4.20 %, d -0.0018); bars 10.2/4.9/2.1 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0009
+    solve_build  A-mean: off 0.4129 on 0.4018 d(off-on) +0.0111; ratio 0.9731 (-2.69 %, d -0.0111); bars 46.6/23.2/9.5 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0387
+    solve_build  B-median: off 0.3936 on 0.3865 d(off-on) +0.0071; ratio 0.9819 (-1.81 %, d -0.0071); bars 49.4/26.0/10.3 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0400
+    warm_apply   A-mean: off 0.5415 on 0.5310 d(off-on) +0.0106; ratio 0.9805 (-1.95 %, d -0.0106); bars 3.0/1.1/0.6 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0030
+    warm_apply   B-median: off 0.5341 on 0.5221 d(off-on) +0.0121; ratio 0.9774 (-2.26 %, d -0.0121); bars 2.2/1.1/0.4 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0023
+    store        A-mean: off 0.0409 on 0.0410 d(off-on) -0.0001; ratio 1.0030 (+0.30 %, d +0.0001); bars 61.0/21.4/11.8 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0048
+    store        B-median: off 0.0381 on 0.0381 d(off-on) -0.0000; ratio 1.0001 (+0.01 %, d +0.0000); bars 58.6/19.4/11.4 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0044
+    manifolds    A-mean: off 4519.2575 on 4467.6650 d(off-on) +51.5925; ratio 0.9886 (-1.14 %, d -51.5925); bars 0.0/0.0/0.0 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0000
+    manifolds    B-median: off 4519.0000 on 4468.0000 d(off-on) +51.0000; ratio 0.9887 (-1.13 %, d -51.0000); bars 0.0/0.0/0.0 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0000
+  pair_classes L9-JA-a-on: h over [0, 500] = [0.89017]; reused/full_contacts 2012903/248353
+  pair_classes L9-JA-on: h over [0, 500] = [0.89017]; reused/full_contacts 2012903/248353
+  pair_classes L9-JD-on: h over [0, 500] = [0.89017]; reused/full_contacts 2012903/248353
+  pair_classes L9-R-on: h over [600, 1100] = [0.999989]; reused/full_contacts 3876042/44
+  pair_classes L9-JA-on-mid: h over [0, 500] = [0.89017]; reused/full_contacts 2012903/248353
+  L9-JA-a-on [100,500) mean phys_np_reused = 4457.51
+  L9-JA-a-on [100,500) mean phys_np_sep_hits = 5040.94
+  L9-JA-a-on [100,500) mean phys_np_full = 46.67
+  L9-JA-a-on [100,500) mean manifolds = 4467.66
+  L9-JA-a-on [100,500) mean pairs = 9545.12
+  L9-JA-a-off [100,500) mean phys_np_reused = 0.00
+  L9-JA-a-off [100,500) mean phys_np_sep_hits = 5038.65
+  L9-JA-a-off [100,500) mean phys_np_full = 4520.56
+  L9-JA-a-off [100,500) mean manifolds = 4519.26
+  L9-JA-a-off [100,500) mean pairs = 9559.22
+
+## P2 extra G-TW rows (P5d J-D, P5e R, P5f J-A mid W)
+  L9-JD-off vs L9-JD-on @W1 [0,500): off 7.4858 [7.4635-7.5300] K=6 (0.89/0.26/0.16) | on 6.0205 [5.9952-6.0671] K=6 (1.19/0.50/0.23)
+      on/off ratio 0.8043 (-19.57 %, d -1.4652); bars 3.0/1.1/0.6 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0364; dT(off-on) = +1.4652 ms; worst pairing (min off - max on) +1.3963
+  L9-JD-off vs L9-JD-on @W1 [100,500): off 7.4794 [7.4611-7.5155] K=6 (0.73/0.33/0.14) | on 5.8177 [5.7881-5.8649] K=6 (1.32/0.55/0.25)
+      on/off ratio 0.7778 (-22.22 %, d -1.6617); bars 3.0/1.3/0.6 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0358; dT(off-on) = +1.6617 ms; worst pairing (min off - max on) +1.5962
+  L9-JD-off vs L9-JD-on @W1 [0,100): off 7.5122 [7.4730-7.5882] K=6 (1.53/0.16/0.26) | on 6.8318 [6.8019-6.8760] K=6 (1.09/0.15/0.18)
+      on/off ratio 0.9094 (-9.06 %, d -0.6803); bars 3.8/0.4/0.6 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0461; dT(off-on) = +0.6803 ms; worst pairing (min off - max on) +0.5970
+  L9-JD-off vs L9-JD-on @W8 [0,500): off 3.9391 [3.9279-3.9978] K=6 (1.77/0.23/0.33) | on 3.7475 [3.7332-3.7666] K=6 (0.89/0.38/0.17)
+      on/off ratio 0.9514 (-4.86 %, d -0.1916); bars 4.0/0.9/0.7 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0289; dT(off-on) = +0.1916 ms; worst pairing (min off - max on) +0.1614
+  L9-JD-off vs L9-JD-on @W8 [100,500): off 3.9333 [3.9186-4.0048] K=6 (2.19/0.20/0.41) | on 3.7113 [3.6973-3.7304] K=6 (0.89/0.50/0.18)
+      on/off ratio 0.9436 (-5.64 %, d -0.2220); bars 4.7/1.1/0.9 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0346; dT(off-on) = +0.2220 ms; worst pairing (min off - max on) +0.1882
+  L9-JD-off vs L9-JD-on @W8 [0,100): off 3.9640 [3.9582-3.9772] K=6 (0.48/0.15/0.09) | on 3.8858 [3.8766-3.9111] K=6 (0.89/0.29/0.16)
+      on/off ratio 0.9803 (-1.97 %, d -0.0781); bars 2.0/0.7/0.4 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0145; dT(off-on) = +0.0781 ms; worst pairing (min off - max on) +0.0470
+  L9-R-off vs L9-R-on @W1 [600,1100): off 10.7346 [10.6351-10.8007] K=6 (1.54/0.37/0.27) | on 7.8190 [7.7762-7.9300] K=6 (1.97/0.37/0.35)
+      on/off ratio 0.7284 (-27.16 %, d -2.9156); bars 5.0/1.0/0.9 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0792; dT(off-on) = +2.9156 ms; worst pairing (min off - max on) +2.7052
+  L9-R-off vs L9-R-on @W8 [600,1100): off 4.8212 [4.8148-4.8364] K=6 (0.45/0.22/0.09) | on 4.5275 [4.5164-4.5812] K=6 (1.43/0.35/0.27)
+      on/off ratio 0.9391 (-6.09 %, d -0.2937); bars 3.0/0.8/0.6 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0261; dT(off-on) = +0.2937 ms; worst pairing (min off - max on) +0.2336
+  L9-JA-off-mid vs L9-JA-on-mid @W2 [0,500): off 11.1203 [11.0732-11.1257] K=6 (0.47/0.05/0.09) | on 10.3278 [10.2909-10.3415] K=6 (0.49/0.10/0.09)
+      on/off ratio 0.9287 (-7.13 %, d -0.7925); bars 1.4/0.2/0.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0272; dT(off-on) = +0.7925 ms; worst pairing (min off - max on) +0.7318
+  L9-JA-off-mid vs L9-JA-on-mid @W2 [100,500): off 11.1199 [11.0763-11.1224] K=6 (0.41/0.03/0.08) | on 10.2021 [10.1641-10.2164] K=6 (0.51/0.21/0.10)
+      on/off ratio 0.9175 (-8.25 %, d -0.9178); bars 1.3/0.4/0.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0271; dT(off-on) = +0.9178 ms; worst pairing (min off - max on) +0.8600
+  L9-JA-off-mid vs L9-JA-on-mid @W2 [0,100): off 11.1217 [11.0609-11.1484] K=6 (0.79/0.15/0.14) | on 10.8306 [10.7981-10.8505] K=6 (0.48/0.26/0.10)
+      on/off ratio 0.9738 (-2.62 %, d -0.2911); bars 1.8/0.6/0.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0371; dT(off-on) = +0.2911 ms; worst pairing (min off - max on) +0.2104
+  L9-JA-off-mid vs L9-JA-on-mid @W4 [0,500): off 7.5114 [7.4866-7.5354] K=6 (0.65/0.13/0.11) | on 7.1147 [7.1011-7.1355] K=6 (0.48/0.26/0.10)
+      on/off ratio 0.9472 (-5.28 %, d -0.3967); bars 1.6/0.6/0.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0213; dT(off-on) = +0.3967 ms; worst pairing (min off - max on) +0.3511
+  L9-JA-off-mid vs L9-JA-on-mid @W4 [100,500): off 7.5089 [7.4824-7.5381] K=6 (0.74/0.10/0.12) | on 7.0536 [7.0384-7.0781] K=6 (0.56/0.27/0.11)
+      on/off ratio 0.9394 (-6.06 %, d -0.4553); bars 1.9/0.6/0.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0238; dT(off-on) = +0.4553 ms; worst pairing (min off - max on) +0.4043
+  L9-JA-off-mid vs L9-JA-on-mid @W4 [0,100): off 7.5167 [7.4896-7.5243] K=6 (0.46/0.23/0.09) | on 7.3591 [7.3477-7.3662] K=6 (0.25/0.17/0.05)
+      on/off ratio 0.9790 (-2.10 %, d -0.1575); bars 1.1/0.6/0.2 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0162; dT(off-on) = +0.1575 ms; worst pairing (min off - max on) +0.1234
+  L9-JA-off-mid vs L9-JA-on-mid @W16 [0,500): off 5.5976 [5.5865-5.6103] K=6 (0.42/0.14/0.07) | on 5.4821 [5.4766-5.5199] K=6 (0.79/0.40/0.17)
+      on/off ratio 0.9794 (-2.06 %, d -0.1155); bars 1.8/0.8/0.4 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0200; dT(off-on) = +0.1155 ms; worst pairing (min off - max on) +0.0667
+  L9-JA-off-mid vs L9-JA-on-mid @W16 [100,500): off 5.5822 [5.5741-5.5997] K=6 (0.46/0.12/0.08) | on 5.4507 [5.4419-5.4825] K=6 (0.75/0.46/0.16)
+      on/off ratio 0.9764 (-2.36 %, d -0.1315); bars 1.8/1.0/0.4 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0199; dT(off-on) = +0.1315 ms; worst pairing (min off - max on) +0.0915
+  L9-JA-off-mid vs L9-JA-on-mid @W16 [0,100): off 5.6558 [5.6364-5.6643] K=6 (0.49/0.27/0.10) | on 5.6153 [5.5977-5.6693] K=6 (1.27/0.27/0.23)
+      on/off ratio 0.9928 (-0.72 %, d -0.0406); bars 2.7/0.8/0.5 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0284; dT(off-on) = +0.0406 ms; worst pairing (min off - max on) -0.0329
+  L9-R-off@W1 manifolds over [600,1100): 6662.25
+  L9-R-off@W8 manifolds over [600,1100): 6662.25
+  L9-R-on@W1 manifolds over [600,1100): 6913.51
+  L9-R-on@W8 manifolds over [600,1100): 6913.51
+
+## P3 C3b (par 6dd1f916 RowWalk vs tip 983480a9 LeafList)
+  W1 par: t_q(B) 0.4044 [0.4038-0.4049] K=5 (0.27/0.11/0.06) | t_q(A mean) 0.4210 | c_q 326.1 ns (queried 1240) | tree span 0.4637 [0.4630-0.4659] K=5 (0.62/0.11/0.13) | bp sys(B) 0.4647
+        T armed 17.3984 [17.3599-17.5626] K=5 (1.16/0.70/0.28) | T-D tree 6.9458 [6.9364-7.0538] K=6 (1.69/0.30/0.33)
+  W1 tip: t_q(B) 0.2102 [0.2095-0.2120] K=6 (1.18/0.60/0.24) | t_q(A mean) 0.2202 | c_q 169.5 ns (queried 1240) | tree span 0.2714 [0.2707-0.2741] K=6 (1.24/0.61/0.25) | bp sys(B) 0.2721
+        T armed 17.2228 [17.1724-17.3052] K=6 (0.77/0.52/0.17) | T-D tree 6.8135 [6.7608-6.8767] K=5 (1.70/1.02/0.39)
+    tip vs par t_q@W1: ratio 0.5199 (-48.01 %, d -0.1941); bars 2.4/1.2/0.5 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0011
+    tip vs par tree span@W1: ratio 0.5852 (-41.48 %, d -0.1923); bars 2.8/1.2/0.6 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0018
+    tip vs par bp sys@W1: ratio 0.5855 (-41.45 %, d -0.1926); bars 3.0/1.2/0.6 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0017
+    tip vs par T armed@W1: ratio 0.9899 (-1.01 %, d -0.1756); bars 2.8/1.7/0.7 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.1147
+    tip vs par T-D@W1: ratio 0.9810 (-1.90 %, d -0.1322); bars 4.8/2.1/1.0 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0708
+    tip t_q vs 0.186 {'eff': 13.021236559139782, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; vs 0.21 {'eff': 0.10452380952381546, 'cl': {'r': False, 'i': False, 's': False}, 'claimed': False}; vs 0.235 {'eff': -10.544893617021266, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; tip span vs 0.36 {'eff': -24.61444444444445, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; par span vs 0.36 {'eff': 28.814722222222233, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}
+  W8 par: t_q(B) 0.4126 [0.4120-0.4135] K=6 (0.37/0.09/0.06) | t_q(A mean) 0.4322 | c_q 332.7 ns (queried 1240) | tree span 0.4738 [0.4732-0.4751] K=6 (0.41/0.14/0.07) | bp sys(B) 0.4726
+        T armed 4.5290 [4.4957-4.7239] K=6 (5.04/1.36/0.97) | T-D tree 2.6182 [2.6018-2.7156] K=6 (4.35/1.07/0.83)
+  W8 tip: t_q(B) 0.2129 [0.2127-0.2135] K=6 (0.37/0.20/0.08) | t_q(A mean) 0.2205 | c_q 171.7 ns (queried 1240) | tree span 0.2758 [0.2757-0.2769] K=6 (0.46/0.30/0.11) | bp sys(B) 0.2760
+        T armed 4.3023 [4.2866-4.3483] K=6 (1.43/0.66/0.28) | T-D tree 2.4307 [2.3764-2.4582] K=6 (3.37/1.54/0.65)
+    tip vs par t_q@W8: ratio 0.5161 (-48.39 %, d -0.1996); bars 1.0/0.4/0.2 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0006
+    tip vs par tree span@W8: ratio 0.5820 (-41.80 %, d -0.1980); bars 1.2/0.7/0.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0009
+    tip vs par bp sys@W8: ratio 0.5840 (-41.60 %, d -0.1966); bars 1.2/0.6/0.2 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0008
+    tip vs par T armed@W8: ratio 0.9500 (-5.00 %, d -0.2266); bars 10.5/3.0/2.0 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0916
+    tip vs par T-D@W8: ratio 0.9284 (-7.16 %, d -0.1875); bars 11.0/3.7/2.1 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0538
+    tip t_q vs 0.186 {'eff': 14.473118279569896, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; vs 0.21 {'eff': 1.3904761904761864, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; vs 0.235 {'eff': -9.39574468085106, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; tip span vs 0.35 {'eff': -21.211285714285722, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; par span vs 0.35 {'eff': 35.36492857142859, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}
+
+## P5c C3b G4 criterion (bpb, same binary)
+  bp_g4_disparity/tree/1000                0.1045 [0.1041-0.1053] K=6 (1.17/0.18/0.20)
+  bp_g4_disparity/tree_rowwalk/1000        0.2293 [0.2281-0.2307] K=6 (1.12/0.91/0.26)
+  bp_g4_scene/tree/1240                    0.1444 [0.1440-0.1451] K=6 (0.75/0.53/0.17)
+  bp_g4_scene/tree/j100                    0.1446 [0.1443-0.1457] K=6 (0.95/0.33/0.18)
+  bp_g4_scene/tree_rowwalk/1240            0.4374 [0.4370-0.4433] K=6 (1.43/0.10/0.28)
+  bp_g4_scene/tree_rowwalk/j100            0.4388 [0.4383-0.4399] K=6 (0.37/0.04/0.06)
+  bp_g4_uniform/tree/1000                  0.0841 [0.0836-0.0853] K=6 (1.99/1.01/0.40)
+  bp_g4_uniform/tree_rowwalk/1000          0.1607 [0.1583-0.1622] K=6 (2.43/0.76/0.43)
+  LeafList/RowWalk scene/{}/j100: per-process ratio 0.3297 [0.3289-0.3311] K=6 (0.66/0.32/0.13); cell ratio ratio 0.3295 (-67.05 %, d -0.2942); bars 2.0/0.7/0.4 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0008
+      vs 0.55 {'eff': -40.05664095568042, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; vs 1.0 {'eff': -67.03115252562422, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; vs 0.30 {'eff': 9.896158247919251, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; vs 0.60 {'eff': -45.05192087604038, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}
+  LeafList/RowWalk scene/{}/1240: per-process ratio 0.3303 [0.3252-0.3319] K=6 (2.02/0.68/0.38); cell ratio ratio 0.3301 (-66.99 %, d -0.2930); bars 3.2/1.1/0.7 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0025
+      vs 0.55 {'eff': -39.953191614485775, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; vs 1.0 {'eff': -66.97425538796718, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; vs 0.30 {'eff': 10.085815373442752, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; vs 0.60 {'eff': -44.95709231327862, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}
+  LeafList/RowWalk uniform/{}/1000: per-process ratio 0.5247 [0.5157-0.5378] K=6 (4.19/1.53/0.76); cell ratio ratio 0.5238 (-47.62 %, d -0.0765); bars 6.3/2.5/1.2 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0015
+      vs 0.55 {'eff': -4.602341230677876, 'cl': {'r': False, 'i': True, 's': True}, 'claimed': False}; vs 1.0 {'eff': -47.53128767687282, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; vs 0.30 {'eff': 74.89570774375727, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; vs 0.60 {'eff': -12.552146128121366, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}
+  LeafList/RowWalk disparity/{}/1000: per-process ratio 0.4570 [0.4526-0.4589] K=6 (1.37/0.77/0.29); cell ratio ratio 0.4558 (-54.42 %, d -0.1248); bars 3.2/1.8/0.7 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0013
+      vs 0.55 {'eff': -16.90055973332657, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; vs 1.0 {'eff': -54.29530785332961, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; vs 0.30 {'eff': 52.34897382223465, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; vs 0.60 {'eff': -23.825513088882676, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}
+  rowwalk j100 bridge vs window 4 0.4430 ms: 0.4388 (-0.95 %), own s 0.06 %
+  LeafList j100 vs design prediction 0.213-0.216 [F1+F2 0.189-0.195]: 0.1446; rule 1 reading j100/0.30 = 0.482
+
+## P4 L11 G9 remainder (g9p 0ca312bd vs g9t cbd86a65)
+  G9-JA@W1: parent 18.9490 [18.8844-19.0661] K=6 (0.96/0.36/0.18) | tip 18.9285 [18.8526-19.0498] K=6 (1.04/0.25/0.18)
+      tip/parent ratio 0.9989 (-0.11 %, d -0.0205); bars 2.8/0.9/0.5 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0966
+  G9-JA@W8: parent 6.1700 [6.1285-6.2846] K=6 (2.53/0.81/0.47) | tip 6.1279 [6.1110-6.2297] K=6 (1.94/0.44/0.37)
+      tip/parent ratio 0.9932 (-0.68 %, d -0.0421); bars 6.4/1.8/1.2 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0734
+  G9-R@W1: parent 11.3311 [11.1485-11.7631] K=5 (5.42/1.03/1.15) | tip 10.9177 [10.7821-11.0219] K=6 (2.20/1.01/0.42)
+      tip/parent ratio 0.9635 (-3.65 %, d -0.4134); bars 11.7/2.9/2.4 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.2763
+      solve_build B: 0.6899 -> 0.6961 d +0.0061; ratio 1.0089 (+0.89 %, d +0.0061); bars 63.7/33.7/13.0 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0901
+      solve_build A: 0.7244 -> 0.7278 d +0.0033; ratio 1.0046 (+0.46 %, d +0.0033); bars 58.6/29.2/11.9 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0864
+      warm_apply  B: 0.7395 -> 0.4488 d -0.2906; ratio 0.6070 (-39.30 %, d -0.2906); bars 6.3/2.4/1.2 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0066
+      warm_apply  A: 0.7532 -> 0.4597 d -0.2936; ratio 0.6102 (-38.98 %, d -0.2936); bars 5.6/2.1/1.1 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0056
+      store       B: 0.0579 -> 0.0594 d +0.0015; ratio 1.0260 (+2.60 %, d +0.0015); bars 59.8/41.5/13.5 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0080
+      store       A: 0.0628 -> 0.0644 d +0.0015; ratio 1.0239 (+2.39 %, d +0.0015); bars 56.5/33.4/12.0 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0077
+      wide        B: 3.6350 -> 3.5732 d -0.0619; ratio 0.9830 (-1.70 %, d -0.0619); bars 33.6/10.9/7.8 %; claimed r/i/s n/n/n; 2hypot(SE)=0.2823
+      wide        A: 3.6439 -> 3.5837 d -0.0602; ratio 0.9835 (-1.65 %, d -0.0602); bars 33.5/10.9/7.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.2818
+      narrow      B: 0.0360 -> 0.0350 d -0.0010; ratio 0.9710 (-2.90 %, d -0.0010); bars 33.4/9.9/7.4 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0027
+      narrow      A: 0.0372 -> 0.0365 d -0.0007; ratio 0.9818 (-1.82 %, d -0.0007); bars 34.1/9.4/7.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0029
+      solve_sys   B: 5.2700 -> 4.9049 d -0.3651; ratio 0.9307 (-6.93 %, d -0.3651); bars 26.7/6.6/5.9 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.3080
+      solve_sys   A: 5.3398 -> 4.9654 d -0.3744; ratio 0.9299 (-7.01 %, d -0.3744); bars 25.8/6.5/5.7 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.3012
+      bp          B: 1.9364 -> 1.9298 d -0.0065; ratio 0.9966 (-0.34 %, d -0.0065); bars 1.9/0.3/0.4 %; claimed r/i/s n/Y/n; 2hypot(SE)=0.0082
+      bp          A: 1.9903 -> 1.9886 d -0.0017; ratio 0.9991 (-0.09 %, d -0.0017); bars 4.8/1.2/1.0 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0207
+      np          B: 3.6240 -> 3.6070 d -0.0170; ratio 0.9953 (-0.47 %, d -0.0170); bars 8.7/2.4/1.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0631
+      np          A: 3.6463 -> 3.6322 d -0.0141; ratio 0.9961 (-0.39 %, d -0.0141); bars 9.2/2.9/1.9 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0678
+  G9-R@W8: parent 5.7155 [5.5954-5.8973] K=6 (5.28/3.27/1.11) | tip 5.4469 [5.3200-5.7255] K=6 (7.45/3.17/1.41)
+      tip/parent ratio 0.9530 (-4.70 %, d -0.2686); bars 18.3/9.1/3.6 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.1991
+      solve_build B: 0.6306 -> 0.7022 d +0.0715; ratio 1.1134 (+11.34 %, d +0.0715); bars 105.3/65.6/22.6 %; claimed r/i/s n/n/n; 2hypot(SE)=0.1483
+      solve_build A: 0.6618 -> 0.7222 d +0.0603; ratio 1.0911 (+9.11 %, d +0.0603); bars 95.9/58.1/20.3 %; claimed r/i/s n/n/n; 2hypot(SE)=0.1387
+      warm_apply  B: 0.7571 -> 0.4561 d -0.3009; ratio 0.6025 (-39.75 %, d -0.3009); bars 12.5/3.8/2.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0110
+      warm_apply  A: 0.7733 -> 0.4729 d -0.3004; ratio 0.6115 (-38.85 %, d -0.3004); bars 16.8/3.6/3.2 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0156
+      store       B: 0.0594 -> 0.0659 d +0.0065; ratio 1.1094 (+10.94 %, d +0.0065); bars 132.1/72.7/26.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0163
+      store       A: 0.0618 -> 0.0690 d +0.0073; ratio 1.1176 (+11.76 %, d +0.0073); bars 119.3/61.1/23.4 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0150
+      wide        B: 1.0125 -> 1.0195 d +0.0070; ratio 1.0069 (+0.69 %, d +0.0070); bars 4.9/2.7/1.0 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0101
+      wide        A: 1.0260 -> 1.0297 d +0.0037; ratio 1.0036 (+0.36 %, d +0.0037); bars 6.2/3.2/1.2 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0123
+      narrow      B: 0.0417 -> 0.0411 d -0.0006; ratio 0.9867 (-1.33 %, d -0.0006); bars 30.1/3.8/6.0 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0025
+      narrow      A: 0.0430 -> 0.0423 d -0.0007; ratio 0.9837 (-1.63 %, d -0.0007); bars 28.9/2.3/5.6 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0024
+      solve_sys   B: 2.6319 -> 2.4004 d -0.2315; ratio 0.9120 (-8.80 %, d -0.2315); bars 34.7/19.0/7.0 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.1773
+      solve_sys   A: 2.6808 -> 2.4498 d -0.2310; ratio 0.9138 (-8.62 %, d -0.2310); bars 31.9/18.4/6.6 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.1695
+      bp          B: 1.9918 -> 1.9911 d -0.0007; ratio 0.9996 (-0.04 %, d -0.0007); bars 14.4/1.3/2.8 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0565
+      bp          A: 2.0421 -> 2.0364 d -0.0057; ratio 0.9972 (-0.28 %, d -0.0057); bars 11.0/0.8/2.0 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0415
+      np          B: 0.6627 -> 0.6638 d +0.0010; ratio 1.0016 (+0.16 %, d +0.0010); bars 12.2/5.9/2.4 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0158
+      np          A: 0.6826 -> 0.6847 d +0.0020; ratio 1.0030 (+0.30 %, d +0.0020); bars 12.4/6.3/2.5 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0170
+  G9-RS@W1: parent 6.0832 [6.0453-6.1027] K=6 (0.94/0.62/0.21) | tip 6.0552 [6.0114-6.1052] K=6 (1.55/0.63/0.28)
+      tip/parent ratio 0.9954 (-0.46 %, d -0.0279); bars 3.6/1.8/0.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0426
+      solve_build B: 0.0559 -> 0.0558 d -0.0001; ratio 0.9983 (-0.17 %, d -0.0001); bars 29.3/5.9/5.1 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0028
+      solve_build A: 0.0607 -> 0.0605 d -0.0002; ratio 0.9964 (-0.36 %, d -0.0002); bars 25.2/5.9/4.5 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0027
+      warm_apply  B: 0.0000 -> 0.0000 d +0.0000; ratio 1.0000 (+0.00 %, d +0.0000); bars 50.0/0.0/10.4 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0000
+      warm_apply  A: 0.0000 -> 0.0001 d +0.0000; ratio 1.3073 (+30.73 %, d +0.0000); bars 108.7/39.8/20.2 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0000
+      store       B: 0.1293 -> 0.1150 d -0.0143; ratio 0.8895 (-11.05 %, d -0.0143); bars 6.4/3.7/1.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0015
+      store       A: 0.1315 -> 0.1183 d -0.0132; ratio 0.8999 (-10.01 %, d -0.0132); bars 7.8/3.6/1.5 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0019
+      narrow      B: 0.0037 -> 0.0037 d -0.0001; ratio 0.9862 (-1.38 %, d -0.0001); bars 13.3/5.3/2.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0001
+      narrow      A: 0.0038 -> 0.0038 d -0.0001; ratio 0.9832 (-1.68 %, d -0.0001); bars 16.3/3.7/3.2 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0001
+      solve_sys   B: 0.2920 -> 0.2764 d -0.0156; ratio 0.9467 (-5.33 %, d -0.0156); bars 13.1/6.5/2.6 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0074
+      solve_sys   A: 0.3056 -> 0.2913 d -0.0143; ratio 0.9532 (-4.68 %, d -0.0143); bars 14.1/5.8/2.6 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0077
+      bp          B: 1.9269 -> 1.9253 d -0.0017; ratio 0.9991 (-0.09 %, d -0.0017); bars 0.4/0.1/0.1 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0013
+      bp          A: 1.9877 -> 1.9826 d -0.0051; ratio 0.9974 (-0.26 %, d -0.0051); bars 2.4/1.5/0.5 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0097
+      np          B: 3.5049 -> 3.4918 d -0.0131; ratio 0.9963 (-0.37 %, d -0.0131); bars 3.7/1.8/0.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0258
+      np          A: 3.5194 -> 3.5136 d -0.0058; ratio 0.9984 (-0.16 %, d -0.0058); bars 4.1/1.9/0.8 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0275
+  G9-RS@W8: parent 3.3061 [3.2584-3.3345] K=5 (2.30/1.25/0.52) | tip 3.2761 [3.2369-3.3212] K=6 (2.57/1.18/0.48)
+      tip/parent ratio 0.9909 (-0.91 %, d -0.0300); bars 6.9/3.4/1.4 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0468
+      solve_build B: 0.0551 -> 0.0520 d -0.0031; ratio 0.9439 (-5.61 %, d -0.0031); bars 11.4/5.3/2.4 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0012
+      solve_build A: 0.0608 -> 0.0572 d -0.0036; ratio 0.9414 (-5.86 %, d -0.0036); bars 14.4/8.4/3.2 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0019
+      warm_apply  B: 0.0000 -> 0.0000 d +0.0000; ratio 1.0000 (+0.00 %, d +0.0000); bars 0.0/0.0/0.0 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0000
+      warm_apply  A: 0.0000 -> 0.0001 d +0.0000; ratio 1.3426 (+34.26 %, d +0.0000); bars 90.9/60.9/21.9 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0000
+      store       B: 0.1305 -> 0.1165 d -0.0140; ratio 0.8925 (-10.75 %, d -0.0140); bars 8.0/2.5/1.5 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0018
+      store       A: 0.1350 -> 0.1238 d -0.0112; ratio 0.9169 (-8.31 %, d -0.0112); bars 14.3/4.5/2.6 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0033
+      narrow      B: 0.0038 -> 0.0037 d -0.0001; ratio 0.9776 (-2.24 %, d -0.0001); bars 10.0/3.8/2.0 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0001
+      narrow      A: 0.0039 -> 0.0038 d -0.0001; ratio 0.9759 (-2.41 %, d -0.0001); bars 11.7/5.8/2.6 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0001
+      solve_sys   B: 0.2927 -> 0.2767 d -0.0160; ratio 0.9454 (-5.46 %, d -0.0160); bars 9.4/3.7/1.8 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0050
+      solve_sys   A: 0.3079 -> 0.2966 d -0.0113; ratio 0.9633 (-3.67 %, d -0.0113); bars 11.9/6.7/2.4 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0073
+      bp          B: 1.9636 -> 1.9644 d +0.0008; ratio 1.0004 (+0.04 %, d +0.0008); bars 8.7/6.8/2.2 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0427
+      bp          A: 2.0502 -> 2.0406 d -0.0096; ratio 0.9953 (-0.47 %, d -0.0096); bars 5.0/3.3/1.1 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0233
+      np          B: 0.6460 -> 0.6485 d +0.0026; ratio 1.0040 (+0.40 %, d +0.0026); bars 14.3/6.0/2.9 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0188
+      np          A: 0.6709 -> 0.6732 d +0.0023; ratio 1.0034 (+0.34 %, d +0.0023); bars 10.7/5.1/2.2 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0151
+  G9-S16@W1: parent 0.0825 [0.0814-0.0842] K=5 (3.38/1.29/0.75) | tip 0.0822 [0.0812-0.0835] K=6 (2.77/0.78/0.48)
+      tip/parent ratio 0.9968 (-0.32 %, d -0.0003); bars 8.7/3.0/1.8 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0015
+      solve_build B: 0.0011 -> 0.0011 d +0.0000; ratio 1.0000 (+0.00 %, d +0.0000); bars 12.6/4.3/2.4 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0000
+      solve_build A: 0.0014 -> 0.0014 d -0.0000; ratio 0.9929 (-0.71 %, d -0.0000); bars 24.0/11.0/5.0 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0001
+      warm_apply  B: 0.0020 -> 0.0020 d +0.0000; ratio 1.0051 (+0.51 %, d +0.0000); bars 5.0/1.3/1.0 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0000
+      warm_apply  A: 0.0021 -> 0.0020 d -0.0000; ratio 0.9930 (-0.70 %, d -0.0000); bars 27.0/9.7/5.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0001
+      store       B: 0.0001 -> 0.0001 d +0.0000; ratio 1.3333 (+33.33 %, d +0.0000); bars 25.0/0.0/5.2 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0000
+      store       A: 0.0001 -> 0.0001 d +0.0000; ratio 1.2073 (+20.73 %, d +0.0000); bars 30.7/9.8/6.2 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0000
+      narrow      B: 0.0443 -> 0.0444 d +0.0001; ratio 1.0012 (+0.12 %, d +0.0001); bars 4.3/1.5/0.9 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0004
+      narrow      A: 0.0451 -> 0.0454 d +0.0002; ratio 1.0052 (+0.52 %, d +0.0002); bars 7.5/4.1/1.6 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0007
+      solve_sys   B: 0.0496 -> 0.0496 d +0.0000; ratio 1.0009 (+0.09 %, d +0.0000); bars 4.4/1.7/0.9 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0004
+      solve_sys   A: 0.0508 -> 0.0511 d +0.0003; ratio 1.0053 (+0.53 %, d +0.0003); bars 8.5/4.1/1.9 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0009
+      bp          B: 0.0004 -> 0.0004 d -0.0000; ratio 0.9762 (-2.38 %, d -0.0000); bars 4.9/3.6/1.3 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0000
+      bp          A: 0.0005 -> 0.0005 d -0.0000; ratio 0.9735 (-2.65 %, d -0.0000); bars 21.3/9.8/4.2 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0000
+      np          B: 0.0094 -> 0.0095 d +0.0000; ratio 1.0037 (+0.37 %, d +0.0000); bars 6.0/0.9/1.2 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0001
+      np          A: 0.0101 -> 0.0101 d +0.0001; ratio 1.0067 (+0.67 %, d +0.0001); bars 11.1/5.5/2.4 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0002
+  G9-JAs-mid@W2: parent 6.5329 [6.4738-6.6183] K=5 (2.21/0.99/0.49) | tip 6.2901 [6.2553-6.4068] K=6 (2.41/1.40/0.53)
+      tip/parent ratio 0.9628 (-3.72 %, d -0.2429); bars 6.5/3.4/1.4 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0923
+  G9-JAs-mid@W4: parent 5.2088 [5.1734-5.2699] K=6 (1.85/0.68/0.35) | tip 4.9884 [4.9615-5.0734] K=6 (2.24/0.38/0.41)
+      tip/parent ratio 0.9577 (-4.23 %, d -0.2205); bars 5.8/1.6/1.1 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0544
+  G9-JAs-mid@W16: parent 4.8798 [4.8512-4.9637] K=6 (2.31/1.12/0.47) | tip 4.6192 [4.5856-4.6314] K=5 (0.99/0.68/0.25)
+      tip/parent ratio 0.9466 (-5.34 %, d -0.2606); bars 5.0/2.6/1.1 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0509
+  G9-JAs-a@W1: parent 8.9108 [8.6716-9.0698] K=6 (4.47/2.40/0.89) | tip 8.5486 [8.4454-8.6318] K=6 (2.18/0.82/0.39)
+      tip/parent ratio 0.9593 (-4.07 %, d -0.3623); bars 9.9/5.1/1.9 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.1717
+      solve_build B: 0.3572 -> 0.3620 d +0.0049; ratio 1.0136 (+1.36 %, d +0.0049); bars 79.2/37.4/15.2 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0542
+      solve_build A: 0.3777 -> 0.3834 d +0.0056; ratio 1.0149 (+1.49 %, d +0.0056); bars 75.2/34.1/14.2 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0539
+      warm_apply  B: 0.5278 -> 0.2979 d -0.2299; ratio 0.5644 (-43.56 %, d -0.2299); bars 3.4/2.4/0.8 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0032
+      warm_apply  A: 0.5385 -> 0.3067 d -0.2318; ratio 0.5695 (-43.05 %, d -0.2318); bars 4.5/1.8/0.8 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0035
+      store       B: 0.0308 -> 0.0315 d +0.0008; ratio 1.0244 (+2.44 %, d +0.0008); bars 120.7/46.8/22.1 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0068
+      store       A: 0.0328 -> 0.0335 d +0.0007; ratio 1.0206 (+2.06 %, d +0.0007); bars 93.3/42.6/17.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0058
+      wide        B: 2.5746 -> 2.4547 d -0.1198; ratio 0.9535 (-4.65 %, d -0.1198); bars 32.1/8.5/5.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.1453
+      wide        A: 2.5873 -> 2.4645 d -0.1228; ratio 0.9525 (-4.75 %, d -0.1228); bars 32.0/8.3/5.6 %; claimed r/i/s n/n/n; 2hypot(SE)=0.1454
+      narrow      B: 0.0096 -> 0.0093 d -0.0004; ratio 0.9626 (-3.74 %, d -0.0004); bars 29.2/5.5/5.0 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0005
+      narrow      A: 0.0102 -> 0.0098 d -0.0004; ratio 0.9627 (-3.73 %, d -0.0004); bars 30.1/6.3/5.2 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0005
+      solve_sys   B: 3.6175 -> 3.2569 d -0.3606; ratio 0.9003 (-9.97 %, d -0.3606); bars 21.7/10.7/4.2 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.1498
+      solve_sys   A: 3.6503 -> 3.2965 d -0.3539; ratio 0.9031 (-9.69 %, d -0.3539); bars 20.8/10.3/4.0 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.1456
+      bp          B: 1.9369 -> 1.9274 d -0.0095; ratio 0.9951 (-0.49 %, d -0.0095); bars 0.4/0.2/0.1 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0015
+      bp          A: 1.9918 -> 1.9940 d +0.0022; ratio 1.0011 (+0.11 %, d +0.0022); bars 3.3/1.5/0.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0131
+      np          B: 3.0309 -> 3.0558 d +0.0249; ratio 1.0082 (+0.82 %, d +0.0249); bars 7.4/4.2/1.6 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0479
+      np          A: 3.0488 -> 3.0757 d +0.0270; ratio 1.0088 (+0.88 %, d +0.0270); bars 7.7/4.1/1.6 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0496
+  G9-JC@W1: parent 9.3803 [9.1553-9.6585] K=6 (5.36/3.94/1.20) | tip 8.9966 [8.9692-9.0971] K=6 (1.42/0.50/0.27)
+      tip/parent ratio 0.9591 (-4.09 %, d -0.3837); bars 11.1/7.9/2.5 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.2306
+  claimed-slower list (tip vs parent; both-spreads or SE-only): []
+  canary J-C:
+    g9p: injected/measured/rel per process: [(0.4432, 0.4436, 0.082), (0.4527, 0.453, 0.067), (0.4336, 0.4338, 0.052), (0.4336, 0.4338, 0.062), (0.44, 0.4402, 0.046), (0.4535, 0.4537, 0.052)]
+    g9p: span 0.4419 [0.4338-0.4537] K=6 (4.51/3.44/1.02) vs injected 0.4416 [0.4336-0.4535] K=6 (4.51/3.43/1.02) (span/inj 1.0006); wall J-C 9.3803 vs J-As-a 8.9108: rise +0.4694 ms = 106 % of injected; ratio 1.0527 (+5.27 %, d +0.4694); bars 14.0/9.2/3.0 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.2754
+      J-C wall minus canary span 8.9432 [8.7023-9.2048] K=6 (5.62/4.19/1.27) vs J-As-a 8.9108 [8.6716-9.0698] K=6 (4.47/2.40/0.89): ratio 1.0036 (+0.36 %, d +0.0324); bars 14.4/9.7/3.1 %; claimed r/i/s n/n/n; 2hypot(SE)=0.2762
+    g9t: injected/measured/rel per process: [(0.4246, 0.425, 0.086), (0.4288, 0.4291, 0.08), (0.4288, 0.4306, 0.422), (0.4223, 0.4225, 0.064), (0.4267, 0.427, 0.074), (0.4316, 0.4319, 0.063)]
+    g9t: span 0.4281 [0.4225-0.4319] K=6 (2.18/1.11/0.42) vs injected 0.4278 [0.4223-0.4316] K=6 (2.18/0.86/0.40) (span/inj 1.0008); wall J-C 8.9966 vs J-As-a 8.5486: rise +0.4481 ms = 105 % of injected; ratio 1.0524 (+5.24 %, d +0.4481); bars 5.2/1.9/1.0 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0827
+      J-C wall minus canary span 8.5715 [8.5422-8.6679] K=6 (1.47/0.51/0.28) vs J-As-a 8.5486 [8.4454-8.6318] K=6 (2.18/0.82/0.39): ratio 1.0027 (+0.27 %, d +0.0230); bars 5.3/1.9/1.0 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0820
+
+## P5a bridge 2 (w4bt f8873aae vs g9p 0ca312bd, J-As)
+  W1: w4bt 8.7433 [8.6514-9.1162] K=6 (5.32/3.03/1.13) | g9p 8.7571 [8.7111-8.7759] K=6 (0.74/0.49/0.17); g9p/w4bt ratio 1.0016 (+0.16 %, d +0.0138); bars 10.7/6.1/2.3 %; claimed r/i/s n/n/n; 2hypot(SE)=0.2004
+      pass 0: w4bt 9.0184 g9p 8.7570 ratio 0.9710
+      pass 1: w4bt 8.6795 g9p 8.7726 ratio 1.0107
+  W8: w4bt 4.4508 [4.4284-4.4831] K=5 (1.23/0.54/0.27) | g9p 4.5288 [4.5053-4.5672] K=6 (1.37/0.86/0.29); g9p/w4bt ratio 1.0175 (+1.75 %, d +0.0780); bars 3.7/2.0/0.8 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0355
+      pass 0: w4bt 4.4559 g9p 4.5167 ratio 1.0136
+      pass 1: w4bt 4.4372 g9p 4.5593 ratio 1.0275
+
+## P5b L10 armed Off-prime spans at W8 and R-S
+  L10-Offp8@W8: wall win 0.8170 [0.8089-0.8810] K=6 (8.83/1.55/1.71); tail 0.7802 [0.7715-0.8425] K=6 (9.10/1.60/1.75); ffs [274]
+  L10-Son8@W8: wall win 2.7989 [2.7971-2.8067] K=6 (0.34/0.10/0.06); tail 2.7988 [2.7971-2.8066] K=6 (0.34/0.10/0.06); ffs [265]
+  L10-RS-Offp@W1: wall win 1.5936 [1.5820-1.6984] K=6 (7.30/0.68/1.43); tail 1.5938 [1.5824-1.6977] K=6 (7.24/0.71/1.42); ffs [250]
+  L10-RS-Offp@W8: wall win 0.9656 [0.9609-1.0410] K=6 (8.29/0.75/1.67); tail 0.9663 [0.9614-1.0396] K=6 (8.09/0.72/1.62); ffs [250]
+  L10-RS@W1: wall win 5.7784 [5.7575-5.9205] K=6 (2.82/0.47/0.54); tail 5.7819 [5.7585-5.9208] K=6 (2.81/0.45/0.53); ffs [248]
+  L10-RS@W8: wall win 3.1212 [3.1107-3.2863] K=6 (5.63/1.05/1.12); tail 3.1207 [3.1111-3.2782] K=6 (5.36/1.09/1.07); ffs [248]
+  spans L10-Offp8#b4db@W8 over win (per-process mean -> median over K, ms; B = per-process median):
+    bp                 A 0.2498 [0.2485-0.2626] K=6 (5.67/0.75/1.10) | B 0.2413
+    np                 A 0.1422 [0.1409-0.1587] K=6 (12.55/2.67/2.48) | B 0.1417
+    graph              A 0.1097 [0.1084-0.1205] K=6 (10.99/0.98/2.13) | B 0.1066
+    solve              A 0.2509 [0.2486-0.2741] K=6 (10.17/4.49/2.12) | B 0.2094
+    gather             A 0.0270 [0.0265-0.0279] K=6 (5.23/2.09/0.97) | B 0.0262
+    integrate          A 0.0000 [0.0000-0.0001] K=6 (37.49/7.19/7.40) | B 0.0000
+    apply              A 0.0048 [0.0048-0.0051] K=6 (5.12/1.06/1.03) | B 0.0047
+    select_bp          A 0.0001 [0.0001-0.0001] K=6 (12.96/3.23/2.28) | B 0.0001
+    sys_sum            A 0.7864 [0.7787-0.8490] K=6 (8.95/1.61/1.73) | B 0.7335
+    g                  A 0.0305 [0.0302-0.0320] K=6 (5.77/1.32/1.10) | B 0.0301
+    u                  A 0.0008 [0.0008-0.0009] K=6 (17.63/4.24/3.06) | B 0.0008
+    r                  A 0.0017 [0.0016-0.0017] K=6 (4.89/2.22/0.93) | B 0.0016
+    bp_verify          A 0.0052 [0.0052-0.0056] K=6 (7.68/0.39/1.52) | B 0.0051
+    bp_build           A 0.0221 [0.0219-0.0232] K=6 (5.83/1.05/1.14) | B 0.0216
+    bp_query           A 0.1936 [0.1926-0.2024] K=6 (5.09/0.77/0.98) | B 0.1866
+    bp_assemble        A 0.0287 [0.0285-0.0312] K=6 (9.38/0.39/1.87) | B 0.0279
+    solve_build        A 0.0370 [0.0366-0.0446] K=6 (21.57/2.47/4.31) | B 0.0325
+    warm_apply         A 0.0066 [0.0065-0.0067] K=6 (3.28/0.68/0.57) | B 0.0000
+    store              A 0.0759 [0.0752-0.0843] K=6 (11.99/1.12/2.37) | B 0.0759
+    integrate_in_solve A 0.0667 [0.0665-0.0705] K=6 (5.98/0.87/1.20) | B 0.0655
+    gravity            A 0.0062 [0.0061-0.0077] K=6 (24.96/2.33/5.02) | B 0.0056
+    wide               A 0.0251 [0.0246-0.0257] K=6 (4.66/1.26/0.80) | B 0.0000
+    narrow             A 0.0036 [0.0036-0.0038] K=6 (3.96/1.14/0.76) | B 0.0013
+    biased             A 0.0102 [0.0101-0.0105] K=6 (4.33/2.16/0.85) | B 0.0010
+    relax              A 0.0202 [0.0198-0.0207] K=6 (4.47/0.53/0.73) | B 0.0019
+    write_back         A 0.0009 [0.0009-0.0010] K=6 (7.75/2.20/1.43) | B 0.0009
+    sleep_begin        A 0.0024 [0.0023-0.0026] K=6 (10.41/3.66/1.97) | B 0.0023
+    sleep_freeze       A 0.0182 [0.0181-0.0305] K=6 (68.18/3.50/14.03) | B 0.0181
+    sleep_end          A 0.0050 [0.0049-0.0057] K=6 (14.83/2.74/2.86) | B 0.0048
+    np_dispatch        A 0.1105 [0.1090-0.1237] K=6 (13.24/3.18/2.59) | B 0.1104
+    np_compact         A 0.0170 [0.0168-0.0193] K=6 (14.53/0.93/2.91) | B 0.0166
+    np_axis_commit     A 0.0034 [0.0034-0.0036] K=6 (6.43/0.69/1.24) | B 0.0033
+    tree span (sum of 4 per-col medians) 0.2411 [0.2401-0.2422] K=6 (0.86/0.53/0.18)
+    wall A 0.8170 [0.8089-0.8810] K=6 (8.83/1.55/1.71); remainder (wall - bp - np - graph - solve) 0.0624 [0.0620-0.0651] K=6 (4.85/0.57/0.95)
+    manifolds 4467.00 pairs 9545.00
+  spans L10-Son8#b4db@W8 over win (per-process mean -> median over K, ms; B = per-process median):
+    bp                 A 1.9739 [1.9722-1.9747] K=6 (0.13/0.04/0.02) | B 1.9505
+    np                 A 0.4395 [0.4383-0.4414] K=6 (0.71/0.48/0.15) | B 0.4388
+    graph              A 0.1084 [0.1075-0.1096] K=6 (1.96/0.82/0.36) | B 0.1062
+    solve              A 0.2119 [0.2108-0.2124] K=6 (0.79/0.30/0.15) | B 0.2090
+    gather             A 0.0278 [0.0273-0.0368] K=6 (34.14/0.82/6.83) | B 0.0267
+    integrate          A 0.0001 [0.0000-0.0001] K=6 (22.55/13.84/4.82) | B 0.0000
+    apply              A 0.0048 [0.0048-0.0048] K=6 (0.88/0.24/0.17) | B 0.0047
+    select_bp          A 0.0001 [0.0001-0.0001] K=6 (11.11/5.04/2.17) | B 0.0001
+    sys_sum            A 2.7665 [2.7645-2.7741] K=6 (0.35/0.10/0.06) | B 2.7398
+    g                  A 0.0326 [0.0322-0.0327] K=6 (1.43/0.81/0.31) | B 0.0318
+    u                  A 0.0008 [0.0008-0.0008] K=6 (7.89/3.90/1.52) | B 0.0008
+    r                  A 0.0017 [0.0016-0.0017] K=6 (4.28/2.40/0.86) | B 0.0016
+    solve_build        A 0.0335 [0.0331-0.0346] K=6 (4.47/0.25/0.78) | B 0.0327
+    warm_apply         A 0.0000 [0.0000-0.0000] K=6 (9.22/1.74/1.56) | B 0.0000
+    store              A 0.0766 [0.0761-0.0772] K=6 (1.50/1.08/0.33) | B 0.0762
+    integrate_in_solve A 0.0658 [0.0655-0.0663] K=6 (1.11/0.41/0.20) | B 0.0651
+    gravity            A 0.0057 [0.0056-0.0059] K=6 (4.01/1.19/0.70) | B 0.0056
+    narrow             A 0.0013 [0.0013-0.0014] K=6 (4.13/0.97/0.82) | B 0.0013
+    biased             A 0.0010 [0.0010-0.0011] K=6 (3.98/2.01/0.77) | B 0.0010
+    relax              A 0.0019 [0.0019-0.0020] K=6 (2.21/0.95/0.41) | B 0.0019
+    write_back         A 0.0009 [0.0009-0.0009] K=6 (0.94/0.39/0.17) | B 0.0009
+    sleep_begin        A 0.0023 [0.0023-0.0024] K=6 (3.33/2.41/0.74) | B 0.0023
+    sleep_freeze       A 0.0184 [0.0182-0.0186] K=6 (2.19/1.32/0.46) | B 0.0180
+    sleep_end          A 0.0045 [0.0045-0.0045] K=6 (1.58/0.37/0.27) | B 0.0044
+    np_dispatch        A 0.4025 [0.4014-0.4043] K=6 (0.73/0.32/0.14) | B 0.4017
+    np_compact         A 0.0228 [0.0223-0.0233] K=6 (4.74/1.86/0.87) | B 0.0192
+    np_axis_commit     A 0.0034 [0.0034-0.0034] K=6 (2.08/1.22/0.43) | B 0.0033
+    tree span (sum of 4 per-col medians) 0.0000 [0.0000-0.0000] K=6 (nan/nan/nan)
+    wall A 2.7989 [2.7971-2.8067] K=6 (0.34/0.10/0.06); remainder (wall - bp - np - graph - solve) 0.0651 [0.0648-0.0743] K=6 (14.53/0.54/2.95)
+    manifolds 4518.00 pairs 9559.00
+  spans L10-RS-Offp#b4db@W1 over win (per-process mean -> median over K, ms; B = per-process median):
+    bp                 A 0.2446 [0.2433-0.2520] K=6 (3.57/0.97/0.69) | B 0.2429
+    np                 A 0.8348 [0.8229-0.8864] K=6 (7.60/1.20/1.44) | B 0.8306
+    graph              A 0.1876 [0.1863-0.2012] K=6 (7.94/1.04/1.54) | B 0.1862
+    solve              A 0.2660 [0.2639-0.2920] K=6 (10.53/1.03/2.09) | B 0.2691
+    gather             A 0.0247 [0.0244-0.0254] K=6 (4.10/1.98/0.79) | B 0.0245
+    integrate          A 0.0001 [0.0001-0.0001] K=6 (16.22/10.52/3.45) | B 0.0001
+    apply              A 0.0046 [0.0046-0.0049] K=6 (6.64/0.64/1.30) | B 0.0046
+    select_bp          A 0.0001 [0.0001-0.0001] K=6 (33.35/24.85/7.80) | B 0.0001
+    sys_sum            A 1.5611 [1.5494-1.6620] K=6 (7.22/0.70/1.41) | B 1.5558
+    g                  A 0.0326 [0.0322-0.0364] K=6 (12.64/0.55/2.50) | B 0.0318
+    u                  A 0.0008 [0.0007-0.0009] K=6 (15.79/5.44/2.95) | B 0.0008
+    r                  A 0.0025 [0.0025-0.0027] K=6 (9.00/1.96/1.71) | B 0.0025
+    bp_verify          A 0.0051 [0.0051-0.0055] K=6 (8.16/0.89/1.56) | B 0.0050
+    bp_build           A 0.0217 [0.0213-0.0234] K=6 (9.45/2.08/1.72) | B 0.0216
+    bp_query           A 0.1915 [0.1900-0.1955] K=6 (2.87/0.84/0.53) | B 0.1900
+    bp_assemble        A 0.0263 [0.0260-0.0275] K=6 (5.34/0.35/1.00) | B 0.0260
+    solve_build        A 0.0490 [0.0486-0.0594] K=6 (22.02/0.53/4.49) | B 0.0486
+    warm_apply         A 0.0000 [0.0000-0.0000] K=6 (27.32/11.07/5.46) | B 0.0000
+    store              A 0.1174 [0.1154-0.1240] K=6 (7.32/2.24/1.38) | B 0.1218
+    integrate_in_solve A 0.0647 [0.0646-0.0667] K=6 (3.13/0.38/0.63) | B 0.0645
+    gravity            A 0.0056 [0.0055-0.0069] K=6 (24.13/0.75/4.78) | B 0.0056
+    narrow             A 0.0037 [0.0037-0.0044] K=6 (20.58/15.01/5.33) | B 0.0037
+    biased             A 0.0021 [0.0021-0.0024] K=6 (16.17/9.00/3.64) | B 0.0021
+    relax              A 0.0041 [0.0041-0.0047] K=6 (15.02/8.64/3.47) | B 0.0041
+    write_back         A 0.0009 [0.0009-0.0009] K=6 (3.43/0.62/0.68) | B 0.0009
+    sleep_begin        A 0.0025 [0.0022-0.0029] K=6 (26.42/8.06/4.89) | B 0.0025
+    sleep_freeze       A 0.0142 [0.0140-0.0180] K=6 (28.49/2.45/5.74) | B 0.0140
+    sleep_end          A 0.0048 [0.0048-0.0052] K=6 (8.18/1.79/1.56) | B 0.0048
+    tree span (sum of 4 per-col medians) 0.2427 [0.2417-0.2457] K=6 (1.68/0.41/0.32)
+    wall A 1.5936 [1.5820-1.6984] K=6 (7.30/0.68/1.43); remainder (wall - bp - np - graph - solve) 0.0621 [0.0616-0.0668] K=6 (8.46/0.83/1.65)
+    manifolds 6970.00 pairs 9570.00
+  spans L10-RS-Offp#b4db@W8 over win (per-process mean -> median over K, ms; B = per-process median):
+    bp                 A 0.2528 [0.2510-0.2639] K=6 (5.08/1.06/0.97) | B 0.2442
+    np                 A 0.1858 [0.1847-0.2058] K=6 (11.35/0.45/2.29) | B 0.1848
+    graph              A 0.1884 [0.1878-0.2051] K=6 (9.20/0.93/1.86) | B 0.1850
+    solve              A 0.2772 [0.2742-0.3016] K=6 (9.89/1.50/1.93) | B 0.2747
+    gather             A 0.0260 [0.0256-0.0265] K=6 (3.39/1.17/0.61) | B 0.0253
+    integrate          A 0.0001 [0.0000-0.0001] K=6 (54.83/7.80/10.78) | B 0.0000
+    apply              A 0.0048 [0.0047-0.0049] K=6 (4.60/2.74/1.03) | B 0.0047
+    select_bp          A 0.0001 [0.0001-0.0001] K=6 (48.81/21.59/9.25) | B 0.0001
+    sys_sum            A 0.9349 [0.9306-1.0080] K=6 (8.28/0.79/1.67) | B 0.9183
+    g                  A 0.0306 [0.0304-0.0330] K=6 (8.68/0.82/1.69) | B 0.0301
+    u                  A 0.0008 [0.0008-0.0009] K=6 (11.22/5.57/2.17) | B 0.0008
+    r                  A 0.0026 [0.0026-0.0027] K=6 (3.90/0.97/0.67) | B 0.0025
+    bp_verify          A 0.0052 [0.0052-0.0056] K=6 (8.63/0.77/1.72) | B 0.0051
+    bp_build           A 0.0221 [0.0220-0.0237] K=6 (7.40/0.83/1.48) | B 0.0216
+    bp_query           A 0.1968 [0.1952-0.2042] K=6 (4.57/1.23/0.86) | B 0.1898
+    bp_assemble        A 0.0284 [0.0282-0.0301] K=6 (6.66/0.77/1.30) | B 0.0278
+    solve_build        A 0.0507 [0.0503-0.0605] K=6 (20.00/1.05/4.04) | B 0.0492
+    warm_apply         A 0.0000 [0.0000-0.0000] K=6 (23.58/2.04/4.52) | B 0.0000
+    store              A 0.1201 [0.1176-0.1300] K=6 (10.32/2.11/1.95) | B 0.1217
+    integrate_in_solve A 0.0663 [0.0658-0.0684] K=6 (3.88/0.80/0.71) | B 0.0655
+    gravity            A 0.0062 [0.0060-0.0071] K=6 (17.47/1.90/3.32) | B 0.0057
+    narrow             A 0.0038 [0.0038-0.0045] K=6 (17.94/13.18/4.46) | B 0.0037
+    biased             A 0.0022 [0.0022-0.0024] K=6 (11.30/8.89/2.72) | B 0.0021
+    relax              A 0.0042 [0.0041-0.0046] K=6 (11.73/7.99/2.74) | B 0.0041
+    write_back         A 0.0009 [0.0009-0.0009] K=6 (4.60/1.56/0.88) | B 0.0009
+    sleep_begin        A 0.0024 [0.0023-0.0026] K=6 (14.54/3.08/2.70) | B 0.0023
+    sleep_freeze       A 0.0184 [0.0180-0.0192] K=6 (6.21/2.74/1.22) | B 0.0180
+    sleep_end          A 0.0050 [0.0049-0.0054] K=6 (9.80/0.09/1.74) | B 0.0048
+    np_dispatch        A 0.1404 [0.1394-0.1547] K=6 (10.89/0.81/2.18) | B 0.1398
+    np_compact         A 0.0251 [0.0249-0.0297] K=6 (18.85/0.48/3.83) | B 0.0247
+    np_axis_commit     A 0.0034 [0.0033-0.0035] K=6 (4.86/0.38/0.91) | B 0.0033
+    tree span (sum of 4 per-col medians) 0.2441 [0.2429-0.2488] K=6 (2.44/1.04/0.48)
+    wall A 0.9656 [0.9609-1.0410] K=6 (8.29/0.75/1.67); remainder (wall - bp - np - graph - solve) 0.0615 [0.0611-0.0646] K=6 (5.84/0.73/1.12)
+    manifolds 6970.00 pairs 9570.00
+  spans L10-RS#b4db@W1 over win (per-process mean -> median over K, ms; B = per-process median):
+    bp                 A 1.9426 [1.9397-1.9996] K=6 (3.08/0.15/0.62) | B 1.9386
+    np                 A 3.3320 [3.3193-3.3725] K=6 (1.60/0.39/0.29) | B 3.3341
+    graph              A 0.1774 [0.1763-0.1867] K=6 (5.83/0.91/1.13) | B 0.1770
+    solve              A 0.2605 [0.2592-0.2878] K=6 (10.96/4.57/2.33) | B 0.2610
+    gather             A 0.0248 [0.0243-0.0265] K=6 (9.01/2.12/1.66) | B 0.0247
+    integrate          A 0.0001 [0.0001-0.0001] K=6 (45.16/7.83/7.84) | B 0.0001
+    apply              A 0.0047 [0.0046-0.0050] K=6 (8.09/1.37/1.57) | B 0.0046
+    select_bp          A 0.0001 [0.0001-0.0001] K=6 (45.16/4.57/8.93) | B 0.0001
+    sys_sum            A 5.7440 [5.7244-5.8782] K=6 (2.68/0.46/0.51) | B 5.7394
+    g                  A 0.0342 [0.0331-0.0423] K=6 (26.79/2.62/5.16) | B 0.0334
+    u                  A 0.0008 [0.0007-0.0010] K=6 (27.76/6.48/5.29) | B 0.0008
+    r                  A 0.0025 [0.0025-0.0026] K=6 (5.67/1.45/1.11) | B 0.0025
+    solve_build        A 0.0476 [0.0470-0.0585] K=6 (24.21/0.82/4.85) | B 0.0470
+    warm_apply         A 0.0000 [0.0000-0.0000] K=6 (31.25/22.21/7.06) | B 0.0000
+    store              A 0.1120 [0.1112-0.1194] K=6 (7.36/0.35/1.43) | B 0.1146
+    integrate_in_solve A 0.0650 [0.0647-0.0665] K=6 (2.86/1.02/0.56) | B 0.0647
+    gravity            A 0.0057 [0.0056-0.0077] K=6 (37.58/2.93/7.56) | B 0.0056
+    narrow             A 0.0043 [0.0037-0.0047] K=6 (22.93/14.13/4.99) | B 0.0043
+    biased             A 0.0023 [0.0021-0.0026] K=6 (21.58/9.54/4.16) | B 0.0023
+    relax              A 0.0045 [0.0041-0.0047] K=6 (14.09/9.39/3.18) | B 0.0045
+    write_back         A 0.0009 [0.0009-0.0009] K=6 (6.04/2.74/1.21) | B 0.0009
+    sleep_begin        A 0.0025 [0.0024-0.0028] K=6 (12.75/3.31/2.37) | B 0.0025
+    sleep_freeze       A 0.0147 [0.0144-0.0309] K=6 (111.92/20.68/22.62) | B 0.0143
+    sleep_end          A 0.0048 [0.0046-0.0053] K=6 (13.84/1.96/2.55) | B 0.0047
+    tree span (sum of 4 per-col medians) 0.0000 [0.0000-0.0000] K=6 (nan/nan/nan)
+    wall A 5.7784 [5.7575-5.9205] K=6 (2.82/0.47/0.54); remainder (wall - bp - np - graph - solve) 0.0634 [0.0629-0.0740] K=6 (17.44/1.84/3.51)
+    manifolds 6675.00 pairs 9570.00
+  spans L10-RS#b4db@W8 over win (per-process mean -> median over K, ms; B = per-process median):
+    bp                 A 1.9728 [1.9708-2.0607] K=6 (4.56/0.53/0.92) | B 1.9505
+    np                 A 0.6339 [0.6313-0.6721] K=6 (6.44/2.19/1.31) | B 0.6321
+    graph              A 0.1794 [0.1765-0.1895] K=6 (7.26/1.82/1.35) | B 0.1753
+    solve              A 0.2702 [0.2671-0.2960] K=6 (10.70/1.78/2.10) | B 0.2661
+    gather             A 0.0266 [0.0259-0.0278] K=6 (6.78/2.50/1.24) | B 0.0253
+    integrate          A 0.0001 [0.0000-0.0001] K=6 (58.41/26.89/11.41) | B 0.0000
+    apply              A 0.0048 [0.0047-0.0052] K=6 (8.70/0.51/1.66) | B 0.0047
+    select_bp          A 0.0001 [0.0001-0.0001] K=6 (36.77/3.73/6.48) | B 0.0001
+    sys_sum            A 3.0877 [3.0774-3.2514] K=6 (5.63/1.02/1.12) | B 3.0580
+    g                  A 0.0335 [0.0326-0.0349] K=6 (7.07/1.60/1.20) | B 0.0314
+    u                  A 0.0009 [0.0008-0.0009] K=6 (17.68/7.16/3.22) | B 0.0008
+    r                  A 0.0026 [0.0026-0.0030] K=6 (15.54/2.61/3.05) | B 0.0026
+    solve_build        A 0.0488 [0.0480-0.0581] K=6 (20.69/3.08/4.05) | B 0.0476
+    warm_apply         A 0.0000 [0.0000-0.0001] K=6 (62.09/17.90/12.49) | B 0.0000
+    store              A 0.1146 [0.1138-0.1241] K=6 (8.97/1.48/1.78) | B 0.1159
+    integrate_in_solve A 0.0661 [0.0656-0.0689] K=6 (4.91/0.83/0.93) | B 0.0652
+    gravity            A 0.0061 [0.0059-0.0071] K=6 (20.72/3.58/3.96) | B 0.0057
+    narrow             A 0.0041 [0.0038-0.0046] K=6 (19.75/13.31/4.29) | B 0.0041
+    biased             A 0.0024 [0.0022-0.0025] K=6 (12.76/7.88/2.76) | B 0.0023
+    relax              A 0.0045 [0.0042-0.0047] K=6 (12.85/8.11/2.72) | B 0.0044
+    write_back         A 0.0009 [0.0009-0.0009] K=6 (6.46/0.69/1.23) | B 0.0009
+    sleep_begin        A 0.0024 [0.0023-0.0027] K=6 (16.11/2.57/3.03) | B 0.0023
+    sleep_freeze       A 0.0183 [0.0178-0.0206] K=6 (15.32/2.23/2.91) | B 0.0177
+    sleep_end          A 0.0049 [0.0048-0.0055] K=6 (13.94/2.25/2.70) | B 0.0047
+    np_dispatch        A 0.5850 [0.5821-0.6179] K=6 (6.11/2.28/1.25) | B 0.5847
+    np_compact         A 0.0285 [0.0282-0.0320] K=6 (13.30/0.87/2.65) | B 0.0249
+    np_axis_commit     A 0.0033 [0.0033-0.0035] K=6 (5.02/1.17/0.98) | B 0.0033
+    tree span (sum of 4 per-col medians) 0.0000 [0.0000-0.0000] K=6 (nan/nan/nan)
+    wall A 3.1212 [3.1107-3.2863] K=6 (5.63/1.05/1.12); remainder (wall - bp - np - graph - solve) 0.0651 [0.0637-0.0680] K=6 (6.54/2.11/1.20)
+    manifolds 6675.00 pairs 9570.00
+  spans L10-RS-Offp#b4db@W1 over tail (per-process mean -> median over K, ms; B = per-process median):
+    bp                 A 0.2448 [0.2434-0.2521] K=6 (3.55/1.14/0.69) | B 0.2430
+    np                 A 0.8346 [0.8226-0.8865] K=6 (7.65/1.16/1.45) | B 0.8306
+    graph              A 0.1876 [0.1862-0.2007] K=6 (7.69/1.00/1.48) | B 0.1862
+    solve              A 0.2660 [0.2640-0.2917] K=6 (10.41/1.03/2.07) | B 0.2691
+    gather             A 0.0247 [0.0244-0.0254] K=6 (4.03/1.74/0.76) | B 0.0245
+    integrate          A 0.0001 [0.0001-0.0001] K=6 (16.43/11.49/3.64) | B 0.0001
+    apply              A 0.0046 [0.0046-0.0049] K=6 (6.41/0.51/1.25) | B 0.0046
+    select_bp          A 0.0001 [0.0001-0.0001] K=6 (33.62/23.54/7.59) | B 0.0001
+    sys_sum            A 1.5612 [1.5498-1.6614] K=6 (7.15/0.73/1.40) | B 1.5559
+    g                  A 0.0326 [0.0322-0.0363] K=6 (12.64/0.54/2.48) | B 0.0318
+    u                  A 0.0008 [0.0007-0.0009] K=6 (16.05/5.45/3.01) | B 0.0008
+    r                  A 0.0025 [0.0025-0.0027] K=6 (9.48/1.92/1.80) | B 0.0025
+    bp_verify          A 0.0051 [0.0051-0.0055] K=6 (7.95/1.10/1.50) | B 0.0050
+    bp_build           A 0.0217 [0.0213-0.0234] K=6 (9.48/2.24/1.73) | B 0.0216
+    bp_query           A 0.1917 [0.1901-0.1955] K=6 (2.84/1.00/0.53) | B 0.1901
+    bp_assemble        A 0.0263 [0.0260-0.0275] K=6 (5.38/0.41/1.00) | B 0.0260
+    solve_build        A 0.0490 [0.0487-0.0593] K=6 (21.70/0.68/4.43) | B 0.0485
+    warm_apply         A 0.0000 [0.0000-0.0000] K=6 (27.96/10.88/5.59) | B 0.0000
+    store              A 0.1175 [0.1153-0.1240] K=6 (7.40/2.17/1.39) | B 0.1218
+    integrate_in_solve A 0.0647 [0.0646-0.0666] K=6 (3.06/0.37/0.62) | B 0.0645
+    gravity            A 0.0056 [0.0055-0.0069] K=6 (23.86/0.73/4.72) | B 0.0056
+    narrow             A 0.0037 [0.0037-0.0044] K=6 (20.61/15.03/5.34) | B 0.0037
+    biased             A 0.0021 [0.0021-0.0024] K=6 (16.06/9.03/3.63) | B 0.0021
+    relax              A 0.0041 [0.0041-0.0047] K=6 (15.36/8.62/3.52) | B 0.0041
+    write_back         A 0.0009 [0.0009-0.0009] K=6 (3.40/0.59/0.67) | B 0.0009
+    sleep_begin        A 0.0025 [0.0022-0.0029] K=6 (26.77/8.22/4.95) | B 0.0025
+    sleep_freeze       A 0.0142 [0.0140-0.0179] K=6 (27.68/2.32/5.56) | B 0.0140
+    sleep_end          A 0.0048 [0.0048-0.0052] K=6 (8.12/1.79/1.55) | B 0.0048
+    tree span (sum of 4 per-col medians) 0.2428 [0.2417-0.2458] K=6 (1.70/0.44/0.32)
+    wall A 1.5938 [1.5824-1.6977] K=6 (7.24/0.71/1.42); remainder (wall - bp - np - graph - solve) 0.0621 [0.0616-0.0668] K=6 (8.46/0.83/1.65)
+    manifolds 6970.00 pairs 9570.00
+  spans L10-RS-Offp#b4db@W8 over tail (per-process mean -> median over K, ms; B = per-process median):
+    bp                 A 0.2531 [0.2510-0.2638] K=6 (5.03/0.99/0.94) | B 0.2443
+    np                 A 0.1858 [0.1848-0.2049] K=6 (10.83/0.58/2.19) | B 0.1849
+    graph              A 0.1884 [0.1878-0.2048] K=6 (9.03/0.93/1.82) | B 0.1851
+    solve              A 0.2771 [0.2743-0.3013] K=6 (9.77/1.42/1.90) | B 0.2748
+    gather             A 0.0261 [0.0257-0.0265] K=6 (3.23/1.03/0.57) | B 0.0253
+    integrate          A 0.0001 [0.0000-0.0001] K=6 (55.47/8.93/11.00) | B 0.0000
+    apply              A 0.0047 [0.0047-0.0049] K=6 (4.47/2.71/1.02) | B 0.0047
+    select_bp          A 0.0001 [0.0001-0.0001] K=6 (52.67/22.07/9.93) | B 0.0001
+    sys_sum            A 0.9356 [0.9307-1.0065] K=6 (8.10/0.74/1.62) | B 0.9187
+    g                  A 0.0306 [0.0304-0.0330] K=6 (8.49/0.80/1.66) | B 0.0301
+    u                  A 0.0008 [0.0008-0.0009] K=6 (11.03/5.47/2.14) | B 0.0008
+    r                  A 0.0026 [0.0026-0.0027] K=6 (4.12/1.27/0.74) | B 0.0025
+    bp_verify          A 0.0052 [0.0052-0.0056] K=6 (8.39/0.76/1.68) | B 0.0051
+    bp_build           A 0.0221 [0.0220-0.0237] K=6 (7.59/0.85/1.51) | B 0.0216
+    bp_query           A 0.1971 [0.1953-0.2041] K=6 (4.51/1.17/0.83) | B 0.1898
+    bp_assemble        A 0.0284 [0.0283-0.0301] K=6 (6.40/0.73/1.25) | B 0.0278
+    solve_build        A 0.0507 [0.0505-0.0606] K=6 (19.98/1.04/4.07) | B 0.0492
+    warm_apply         A 0.0000 [0.0000-0.0000] K=6 (22.32/2.24/4.26) | B 0.0000
+    store              A 0.1201 [0.1176-0.1298] K=6 (10.08/2.05/1.90) | B 0.1217
+    integrate_in_solve A 0.0663 [0.0658-0.0684] K=6 (3.79/0.81/0.70) | B 0.0655
+    gravity            A 0.0062 [0.0061-0.0071] K=6 (16.86/1.81/3.23) | B 0.0057
+    narrow             A 0.0038 [0.0038-0.0045] K=6 (18.05/13.12/4.45) | B 0.0037
+    biased             A 0.0022 [0.0022-0.0024] K=6 (11.94/9.10/2.82) | B 0.0022
+    relax              A 0.0042 [0.0041-0.0046] K=6 (11.89/7.95/2.74) | B 0.0041
+    write_back         A 0.0009 [0.0009-0.0009] K=6 (4.46/1.53/0.85) | B 0.0009
+    sleep_begin        A 0.0024 [0.0023-0.0026] K=6 (14.31/3.04/2.65) | B 0.0023
+    sleep_freeze       A 0.0184 [0.0180-0.0192] K=6 (6.23/2.91/1.23) | B 0.0180
+    sleep_end          A 0.0050 [0.0049-0.0053] K=6 (9.26/0.17/1.67) | B 0.0048
+    np_dispatch        A 0.1405 [0.1393-0.1540] K=6 (10.44/0.85/2.07) | B 0.1399
+    np_compact         A 0.0251 [0.0249-0.0296] K=6 (18.45/0.46/3.76) | B 0.0247
+    np_axis_commit     A 0.0034 [0.0034-0.0035] K=6 (4.68/0.41/0.89) | B 0.0033
+    tree span (sum of 4 per-col medians) 0.2442 [0.2430-0.2491] K=6 (2.50/1.03/0.49)
+    wall A 0.9663 [0.9614-1.0396] K=6 (8.09/0.72/1.62); remainder (wall - bp - np - graph - solve) 0.0615 [0.0611-0.0647] K=6 (5.73/0.71/1.11)
+    manifolds 6970.00 pairs 9570.00
+  spans L10-RS#b4db@W1 over tail (per-process mean -> median over K, ms; B = per-process median):
+    bp                 A 1.9436 [1.9402-1.9992] K=6 (3.04/0.15/0.61) | B 1.9386
+    np                 A 3.3330 [3.3192-3.3739] K=6 (1.64/0.40/0.29) | B 3.3341
+    graph              A 0.1777 [0.1765-0.1866] K=6 (5.68/0.92/1.10) | B 0.1770
+    solve              A 0.2609 [0.2593-0.2874] K=6 (10.77/4.55/2.28) | B 0.2611
+    gather             A 0.0249 [0.0243-0.0265] K=6 (8.69/2.10/1.58) | B 0.0247
+    integrate          A 0.0001 [0.0001-0.0001] K=6 (41.50/9.36/7.25) | B 0.0001
+    apply              A 0.0047 [0.0046-0.0050] K=6 (7.91/1.24/1.51) | B 0.0046
+    select_bp          A 0.0001 [0.0001-0.0001] K=6 (42.16/4.24/8.28) | B 0.0001
+    sys_sum            A 5.7468 [5.7251-5.8788] K=6 (2.67/0.44/0.50) | B 5.7395
+    g                  A 0.0348 [0.0334-0.0421] K=6 (24.93/2.71/4.66) | B 0.0335
+    u                  A 0.0008 [0.0007-0.0010] K=6 (26.60/6.05/5.07) | B 0.0008
+    r                  A 0.0025 [0.0025-0.0026] K=6 (5.53/1.55/1.08) | B 0.0025
+    solve_build        A 0.0476 [0.0470-0.0584] K=6 (24.03/0.69/4.80) | B 0.0470
+    warm_apply         A 0.0000 [0.0000-0.0000] K=6 (29.55/21.98/6.84) | B 0.0000
+    store              A 0.1122 [0.1113-0.1192] K=6 (6.99/0.41/1.35) | B 0.1146
+    integrate_in_solve A 0.0651 [0.0647-0.0665] K=6 (2.75/1.14/0.54) | B 0.0647
+    gravity            A 0.0057 [0.0056-0.0077] K=6 (37.12/2.87/7.47) | B 0.0056
+    narrow             A 0.0043 [0.0037-0.0047] K=6 (22.91/14.29/5.01) | B 0.0043
+    biased             A 0.0023 [0.0021-0.0026] K=6 (21.41/9.70/4.14) | B 0.0023
+    relax              A 0.0045 [0.0041-0.0047] K=6 (14.07/9.53/3.19) | B 0.0045
+    write_back         A 0.0009 [0.0009-0.0009] K=6 (5.57/2.28/1.11) | B 0.0009
+    sleep_begin        A 0.0025 [0.0024-0.0028] K=6 (13.78/3.14/2.59) | B 0.0025
+    sleep_freeze       A 0.0147 [0.0144-0.0308] K=6 (111.69/20.86/22.57) | B 0.0143
+    sleep_end          A 0.0048 [0.0046-0.0053] K=6 (13.35/1.82/2.46) | B 0.0047
+    tree span (sum of 4 per-col medians) 0.0000 [0.0000-0.0000] K=6 (nan/nan/nan)
+    wall A 5.7819 [5.7585-5.9208] K=6 (2.81/0.45/0.53); remainder (wall - bp - np - graph - solve) 0.0640 [0.0633-0.0737] K=6 (16.25/2.07/3.20)
+    manifolds 6675.00 pairs 9570.00
+  spans L10-RS#b4db@W8 over tail (per-process mean -> median over K, ms; B = per-process median):
+    bp                 A 1.9727 [1.9706-2.0570] K=6 (4.38/0.53/0.88) | B 1.9508
+    np                 A 0.6338 [0.6310-0.6695] K=6 (6.07/2.26/1.25) | B 0.6323
+    graph              A 0.1795 [0.1765-0.1890] K=6 (6.97/1.66/1.28) | B 0.1754
+    solve              A 0.2700 [0.2671-0.2948] K=6 (10.27/1.89/2.01) | B 0.2661
+    gather             A 0.0266 [0.0260-0.0277] K=6 (6.53/2.51/1.21) | B 0.0253
+    integrate          A 0.0001 [0.0000-0.0001] K=6 (56.35/28.06/11.22) | B 0.0000
+    apply              A 0.0048 [0.0047-0.0051] K=6 (8.47/0.65/1.62) | B 0.0047
+    select_bp          A 0.0001 [0.0001-0.0001] K=6 (38.07/5.47/6.75) | B 0.0001
+    sys_sum            A 3.0873 [3.0779-3.2433] K=6 (5.36/1.07/1.07) | B 3.0588
+    g                  A 0.0335 [0.0325-0.0349] K=6 (7.10/1.52/1.21) | B 0.0314
+    u                  A 0.0009 [0.0008-0.0009] K=6 (18.21/6.61/3.26) | B 0.0008
+    r                  A 0.0026 [0.0026-0.0030] K=6 (15.62/2.89/3.02) | B 0.0026
+    solve_build        A 0.0488 [0.0480-0.0579] K=6 (20.23/3.30/3.97) | B 0.0476
+    warm_apply         A 0.0000 [0.0000-0.0001] K=6 (62.35/16.83/12.50) | B 0.0000
+    store              A 0.1147 [0.1138-0.1235] K=6 (8.43/1.59/1.67) | B 0.1159
+    integrate_in_solve A 0.0660 [0.0656-0.0687] K=6 (4.60/0.87/0.87) | B 0.0652
+    gravity            A 0.0060 [0.0059-0.0071] K=6 (19.83/3.79/3.82) | B 0.0057
+    narrow             A 0.0041 [0.0038-0.0046] K=6 (19.83/13.22/4.30) | B 0.0041
+    biased             A 0.0024 [0.0022-0.0025] K=6 (13.97/7.57/2.86) | B 0.0023
+    relax              A 0.0045 [0.0042-0.0048] K=6 (13.12/7.73/2.69) | B 0.0044
+    write_back         A 0.0009 [0.0009-0.0009] K=6 (6.28/0.84/1.20) | B 0.0009
+    sleep_begin        A 0.0024 [0.0023-0.0027] K=6 (15.99/2.43/3.01) | B 0.0023
+    sleep_freeze       A 0.0183 [0.0179-0.0206] K=6 (15.04/1.85/2.86) | B 0.0178
+    sleep_end          A 0.0049 [0.0048-0.0054] K=6 (13.35/2.32/2.58) | B 0.0047
+    np_dispatch        A 0.5850 [0.5819-0.6154] K=6 (5.74/2.36/1.18) | B 0.5845
+    np_compact         A 0.0284 [0.0281-0.0319] K=6 (13.47/1.05/2.64) | B 0.0249
+    np_axis_commit     A 0.0033 [0.0033-0.0035] K=6 (4.79/1.21/0.94) | B 0.0033
+    tree span (sum of 4 per-col medians) 0.0000 [0.0000-0.0000] K=6 (nan/nan/nan)
+    wall A 3.1207 [3.1111-3.2782] K=6 (5.36/1.09/1.07); remainder (wall - bp - np - graph - solve) 0.0650 [0.0637-0.0680] K=6 (6.48/2.09/1.20)
+    manifolds 6675.00 pairs 9570.00
+  R-S gate at W1: 0.6 x (Off-prime_RS 1.5936 - 0.25) = 0.8062 ms; Off-prime_RS - Sets floor [0.12,0.25] = [1.3436, 1.4736]
+  R-S vs R-S Off-prime @W1: ratio 0.2758 (-72.42 %, d -4.1847); bars 15.7/1.6/3.1 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0769
+  R-S gate at W8: 0.6 x (Off-prime_RS 0.9656 - 0.25) = 0.4294 ms; Off-prime_RS - Sets floor [0.12,0.25] = [0.7156, 0.8456]
+  R-S vs R-S Off-prime @W8: ratio 0.3094 (-69.06 %, d -2.1556); bars 20.0/2.6/4.0 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0769
+  Off-prime(8) 0.8170 vs design 0.42-0.93; J-Son(8) 2.7989
+
+## P5g C3b G5 on the tip, same binary
+  W1: bp span (B) tree 0.3095 [0.3077-0.3170] K=6 (2.99/0.44/0.56) | allpairs 2.1281 [2.1232-2.1465] K=6 (1.10/0.81/0.26) | dbp(B) 1.8185 dbp(A) 1.8076; 2hypot(SE) 0.0114; worst 1.8062
+      tree span 0.3081 [0.3061-0.3142] K=6 (2.63/0.60/0.49) t_q 0.2354 [0.2325-0.2399] K=6 (3.13/0.58/0.53)
+      armed T tree 16.9488 [16.8609-16.9610] K=6 (0.59/0.39/0.14) ap 18.8918 [18.8416-18.9112] K=6 (0.37/0.19/0.07): ratio 0.8972 (-10.28 %, d -1.9430); bars 1.4/0.9/0.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0543
+      T-D tree 6.5050 [6.4649-6.5871] K=6 (1.88/1.06/0.39) ap 8.4040 [8.3568-8.4754] K=6 (1.41/0.31/0.24): ratio 0.7740 (-22.60 %, d -1.8990); bars 4.7/2.2/0.9 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0651
+      same cell two blocks: C3b-TA-armed tip T 17.2228 vs G5-TA-tree-a T 16.9488: ratio 0.9841 (-1.59 %, d -0.2739); bars 1.9/1.3/0.4 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0747
+      same cell two blocks t_q: ratio 1.1196 (+11.96 %, d +0.0251); bars 6.7/1.7/1.2 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0027; span ratio 1.1351 (+13.51 %, d +0.0367); bars 5.8/1.7/1.1 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0033
+      T-D tree two blocks (C3b-TD-tree tip vs G5-TD-tree): ratio 0.9547 (-4.53 %, d -0.3086); bars 5.1/2.9/1.1 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0742
+  W8: bp span (B) tree 0.2663 [0.2658-0.2740] K=6 (3.06/0.70/0.61) | allpairs 1.9678 [1.9642-1.9721] K=6 (0.40/0.12/0.07) | dbp(B) 1.7015 dbp(A) 1.6982; 2hypot(SE) 0.0043; worst 1.6902
+      tree span 0.2665 [0.2657-0.2734] K=6 (2.90/0.70/0.57) t_q 0.2094 [0.2087-0.2156] K=6 (3.31/0.64/0.65)
+      armed T tree 4.0433 [4.0315-4.1513] K=6 (2.96/0.67/0.57) ap 5.8276 [5.8196-5.8331] K=6 (0.23/0.15/0.05): ratio 0.6938 (-30.62 %, d -1.7843); bars 5.9/1.4/1.2 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0468
+      T-D tree 2.2466 [2.2399-2.2524] K=6 (0.55/0.09/0.09) ap 4.0237 [4.0128-4.0350] K=6 (0.55/0.14/0.10): ratio 0.5583 (-44.17 %, d -1.7771); bars 1.6/0.3/0.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0087
+      same cell two blocks: C3b-TA-armed tip T 4.3023 vs G5-TA-tree-a T 4.0433: ratio 0.9398 (-6.02 %, d -0.2590); bars 6.6/1.9/1.3 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0524
+      same cell two blocks t_q: ratio 0.9834 (-1.66 %, d -0.0035); bars 6.7/1.4/1.3 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0027; span ratio 0.9664 (-3.36 %, d -0.0093); bars 5.9/1.5/1.2 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0031
+      T-D tree two blocks (C3b-TD-tree tip vs G5-TD-tree): ratio 0.9243 (-7.57 %, d -0.1841); bars 6.8/3.1/1.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0317
+
+## P3 sensitivity: the tip armed tree row in two blocks (P3 and P5g), pooled K=12
+  W1: t_q(B) P3 0.2102 | P5g 0.2354 | pooled 0.2222 [0.2095-0.2399] K=12 (13.65/11.19/2.15) (c_q 179.2 ns)
+       t_q(A mean) pooled 0.2311 [0.2177-0.2496] K=12 (13.79/8.63/1.77); span pooled 0.2901 [0.2707-0.3142] K=12 (14.99/12.49/2.40)
+       pooled t_q vs 0.186: {'eff': 19.488037634408606, 'cl': {'r': False, 'i': False, 's': True}, 'claimed': False}; P5g block vs 0.186: {'eff': 26.53360215053764, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; P3 A-reading vs 0.186: {'eff': 18.41347715053765, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}
+       pooled t_q vs 0.21: {'eff': 5.832261904761915, 'cl': {'r': False, 'i': False, 's': True}, 'claimed': False}; P5g block vs 0.21: {'eff': 12.07261904761905, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; P3 A-reading vs 0.21: {'eff': 4.880508333333333, 'cl': {'r': False, 'i': True, 's': True}, 'claimed': False}
+       pooled t_q vs 0.235: {'eff': -5.426489361702114, 'cl': {'r': False, 'i': False, 's': True}, 'claimed': False}; P5g block vs 0.235: {'eff': 0.15000000000000568, 'cl': {'r': False, 'i': False, 's': False}, 'claimed': False}; P3 A-reading vs 0.235: {'eff': -6.276992553191485, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}
+  W8: t_q(B) P3 0.2129 | P5g 0.2094 | pooled 0.2127 [0.2087-0.2156] K=12 (3.26/1.62/0.39) (c_q 171.5 ns)
+       t_q(A mean) pooled 0.2188 [0.2112-0.2226] K=12 (5.21/3.69/0.74); span pooled 0.2745 [0.2657-0.2769] K=12 (4.10/3.30/0.64)
+       pooled t_q vs 0.186: {'eff': 14.352419354838709, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; P5g block vs 0.186: {'eff': 12.575268817204321, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; P3 A-reading vs 0.186: {'eff': 18.534968413978504, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}
+       pooled t_q vs 0.21: {'eff': 1.2835714285714284, 'cl': {'r': False, 'i': False, 's': True}, 'claimed': False}; P5g block vs 0.21: {'eff': -0.29047619047617435, 'cl': {'r': False, 'i': False, 's': False}, 'claimed': False}; P3 A-reading vs 0.21: {'eff': 4.988114880952388, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}
+       pooled t_q vs 0.235: {'eff': -9.49127659574468, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; P5g block vs 0.235: {'eff': -10.897872340425518, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}; P3 A-reading vs 0.235: {'eff': -6.180833510638295, 'cl': {'r': True, 'i': True, 's': True}, 'claimed': True}
+  D6 at P3 block: T(8) 2.4307, trigger t_q >= 0.1569; measured t_q(8) 0.2129 -> C2 saving 0.1673 ms = 6.88 % of T(8); C2 own gate needs realized >= 0.1215 ms = 73 % of the prediction
+  D6 at P5g block: T(8) 2.2466, trigger t_q >= 0.1456; measured t_q(8) 0.2094 -> C2 saving 0.1644 ms = 7.32 % of T(8); C2 own gate needs realized >= 0.1123 ms = 68 % of the prediction
+
+## The tip default row with the tree against Jolt v5.6.0 (window 3 cells, recomputed from its runs.jsonl mean_ms)
+  window 3 JOLT56-T: chosen 30, dropped 0
+  Jolt v5.6.0 W1: 9.8282 [9.5183-11.3644] K=6 (18.78/3.31/3.50)
+  Jolt v5.6.0 W8: 2.5693 [2.5007-3.1241] K=6 (24.26/3.09/4.76)
+  W1 P3 block C3b-TD-tree tip 6.8135 vs Jolt: ratio 0.6933 (-30.67 %, d -3.0147); bars 37.7/6.9/7.0 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.6898
+  W1 P5g block G5-TD-tree tip 6.5050 vs Jolt: ratio 0.6619 (-33.81 %, d -3.3232); bars 37.8/7.0/7.0 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.6896
+  W1 P3 block C3b-TD-tree par 6.9458 vs Jolt: ratio 0.7067 (-29.33 %, d -2.8824); bars 37.7/6.6/7.0 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.6892
+  W1 P5g block G5-TD-ap tip 8.4040 vs Jolt: ratio 0.8551 (-14.49 %, d -1.4242); bars 37.7/6.6/7.0 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.6889
+  W8 P3 block C3b-TD-tree tip 2.4307 vs Jolt: ratio 0.9461 (-5.39 %, d -0.1385); bars 49.0/6.9/9.6 %; claimed r/i/s n/n/n; 2hypot(SE)=0.2466
+  W8 P5g block G5-TD-tree tip 2.2466 vs Jolt: ratio 0.8744 (-12.56 %, d -0.3227); bars 48.5/6.2/9.5 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.2446
+  W8 P3 block C3b-TD-tree par 2.6182 vs Jolt: ratio 1.0190 (+1.90 %, d +0.0489); bars 49.3/6.5/9.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.2484
+  W8 P5g block G5-TD-ap tip 4.0237 vs Jolt: ratio 1.5661 (+56.61 %, d +1.4544); bars 48.5/6.2/9.5 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.2447
+
+## Cross-binary readings inside the window
+  J-A W1: g9t (cbd86a65, pre-L9) 18.9285 vs b4db reuse off (L9a+carry) 18.1313: ratio 0.9579 (-4.21 %, d -0.7973); bars 2.8/0.8/0.5 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0939
+  J-A W1: g9t vs b4db reuse on (L9a+L9b): ratio 0.8721 (-12.79 %, d -2.4218); bars 2.4/0.7/0.4 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0792
+  J-A W8: g9t (cbd86a65, pre-L9) 6.1279 vs b4db reuse off (L9a+carry) 6.0419: ratio 0.9860 (-1.40 %, d -0.0860); bars 6.0/1.5/1.2 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0715
+  J-A W8: g9t vs b4db reuse on (L9a+L9b): ratio 0.9628 (-3.72 %, d -0.2282); bars 6.2/1.0/1.1 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0665
+  np span [100,500) mean, W1: g9t J-As-a (pre-L9) 3.0757 [3.0461-3.1259] K=6 (2.59/1.09/0.51); b4db J-A-a off 2.4093 [2.3949-2.4531] K=6 (2.42/0.81/0.45); on 0.6846 [0.6729-0.6907] K=6 (2.59/0.45/0.44)
+     L9a+carry (pre-L9 -> off) +0.6665; L9b (off -> on) +1.7247; total +2.3911
+  T-D tree (C3b block) vs T-D allpairs (G5 block) tip W1: ratio 0.8107 (-18.93 %, d -1.5905); bars 4.4/2.1/0.9 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0672
+  T-D tree (C3b block) vs T-D allpairs (G5 block) tip W8: ratio 0.6041 (-39.59 %, d -1.5929); bars 6.8/3.1/1.3 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0324
+
+## Bridges
+  [win5] protocol processes 151, slots 120, chosen 117, dropped 3
+  [win4b] protocol processes 457, slots 410, chosen 410, dropped 0
+  w5 HL-D-tree tip(cbd86a65)@W1 -> w6 C3b-TD-tree par(6dd1f916): earlier 7.1062 [6.8913-7.2863] K=5 (5.56/2.26/1.19) | window 6 6.9458 [6.9364-7.0538] K=6 (1.69/0.30/0.33); ratio 0.9774 (-2.26 %, d -0.1604); bars 11.6/4.6/2.5 %; claimed r/i/s n/n/n; 2hypot(SE)=0.1758 -> HOLDS [same RowWalk kernel; plugin/ECS edits between]
+  w5 HL-D-allpairs tip@W1 -> w6 G5-TD-ap tip(983480a9): earlier 8.7823 [8.5276-9.1355] K=6 (6.92/5.34/1.57) | window 6 8.4040 [8.3568-8.4754] K=6 (1.41/0.31/0.24); ratio 0.9569 (-4.31 %, d -0.3783); bars 14.1/10.7/3.2 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.2790 -> HOLDS (SE alone claims a shift) [AllPairs path; plugin/ECS edits + tree-only C3b between]
+  w5 J-As parent(0ca312bd)@W1 -> w6 B2-JAs g9p (same binary): earlier 8.8591 [8.7088-9.1356] K=6 (4.82/2.34/0.95) | window 6 8.7571 [8.7111-8.7759] K=6 (0.74/0.49/0.17); ratio 0.9885 (-1.15 %, d -0.1020); bars 9.7/4.8/1.9 %; claimed r/i/s n/n/n; 2hypot(SE)=0.1715 -> HOLDS 
+  w4b J-As tip(f8873aae)@W1 -> w6 B2-JAs w4bt (same binary): earlier 8.6973 [8.3954-9.3084] K=12 (10.50/3.00/1.12) | window 6 8.7433 [8.6514-9.1162] K=6 (5.32/3.03/1.13); ratio 1.0053 (+0.53 %, d +0.0460); bars 23.5/8.5/3.2 %; claimed r/i/s n/n/n; 2hypot(SE)=0.2774 -> HOLDS 
+  w5 HL-D-tree tip(cbd86a65)@W8 -> w6 C3b-TD-tree par(6dd1f916): earlier 2.7160 [2.5201-2.9631] K=6 (16.31/9.96/3.42) | window 6 2.6182 [2.6018-2.7156] K=6 (4.35/1.07/0.83); ratio 0.9640 (-3.60 %, d -0.0978); bars 33.8/20.0/7.0 %; claimed r/i/s n/n/n; 2hypot(SE)=0.1907 -> HOLDS [same RowWalk kernel; plugin/ECS edits between]
+  w5 HL-D-allpairs tip@W8 -> w6 G5-TD-ap tip(983480a9): earlier 4.2957 [4.2130-4.5386] K=6 (7.58/4.09/1.57) | window 6 4.0237 [4.0128-4.0350] K=6 (0.55/0.14/0.10); ratio 0.9367 (-6.33 %, d -0.2720); bars 15.2/8.2/3.1 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.1351 -> HOLDS (SE alone claims a shift) [AllPairs path; plugin/ECS edits + tree-only C3b between]
+  w5 J-As parent(0ca312bd)@W8 -> w6 B2-JAs g9p (same binary): earlier 4.7257 [4.4552-4.8959] K=6 (9.32/1.26/1.55) | window 6 4.5288 [4.5053-4.5672] K=6 (1.37/0.86/0.29); ratio 0.9583 (-4.17 %, d -0.1969); bars 18.8/3.1/3.2 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.1488 -> HOLDS (SE alone claims a shift) 
+  w4b J-As tip(f8873aae)@W8 -> w6 B2-JAs w4bt (same binary): earlier 4.2399 [4.2041-5.0045] K=12 (18.88/4.33/2.37) | window 6 4.4508 [4.4284-4.4831] K=5 (1.23/0.54/0.27); ratio 1.0497 (+4.97 %, d +0.2109); bars 37.8/8.7/4.8 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.2024 -> HOLDS (SE alone claims a shift) 
+  w5 J-As-a parent@W1 -> w6 G9-JAs-a g9p (same binary): earlier 8.8211 [8.6291-8.9865] K=6 (4.05/1.12/0.71) | window 6 8.9108 [8.6716-9.0698] K=6 (4.47/2.40/0.89); ratio 1.0102 (+1.02 %, d +0.0897); bars 12.1/5.3/2.3 %; claimed r/i/s n/n/n; 2hypot(SE)=0.2015 -> HOLDS 
+  w5 J-As-a parent@W1 warm_apply(B) -> w6 g9p: earlier 0.5285 [0.5265-0.5297] K=6 (0.61/0.21/0.11) | window 6 0.5278 [0.5266-0.5324] K=6 (1.10/0.73/0.25); ratio 0.9987 (-0.13 %, d -0.0007); bars 2.5/1.5/0.6 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0029 -> HOLDS 
+  w5 J-As-a tip@W1 -> w6 G9-JAs-a g9t (same binary): earlier 8.4727 [8.3959-8.6680] K=6 (3.21/1.93/0.67) | window 6 8.5486 [8.4454-8.6318] K=6 (2.18/0.82/0.39); ratio 1.0089 (+0.89 %, d +0.0758); bars 7.8/4.2/1.6 %; claimed r/i/s n/n/n; 2hypot(SE)=0.1323 -> HOLDS 
+  w5 J-As-a tip@W1 warm_apply(B) -> w6 g9t: earlier 0.2960 [0.2949-0.2978] K=6 (1.00/0.66/0.21) | window 6 0.2979 [0.2959-0.2998] K=6 (1.31/0.94/0.29); ratio 1.0064 (+0.64 %, d +0.0019); bars 3.3/2.3/0.7 %; claimed r/i/s n/n/n; 2hypot(SE)=0.0021 -> HOLDS 
+  warm_apply gate re-read in window 6: 0.5278 -> 0.2979 = -0.2299 ms (bar -0.19); ratio 0.5644 (-43.56 %, d -0.2299); bars 3.4/2.4/0.8 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0032
+  w4b J-A tip(f8873aae)@W1 -> w6 G9-JA g9p(0ca312bd) [cross-binary: the line merge]: earlier 18.9323 [18.5974-19.4261] K=12 (4.38/1.06/0.42) | window 6 18.9490 [18.8844-19.0661] K=6 (0.96/0.36/0.18); ratio 1.0009 (+0.09 %, d +0.0167); bars 9.0/2.2/0.9 %; claimed r/i/s n/n/n; 2hypot(SE)=0.1739 -> HOLDS 
+  w4b J-A tip(f8873aae)@W8 -> w6 G9-JA g9p(0ca312bd) [cross-binary: the line merge]: earlier 5.9100 [5.7645-6.9744] K=12 (20.47/11.50/2.56) | window 6 6.1700 [6.1285-6.2846] K=6 (2.53/0.81/0.47); ratio 1.0440 (+4.40 %, d +0.2600); bars 41.3/23.1/5.2 %; claimed r/i/s n/n/n; 2hypot(SE)=0.3077 -> HOLDS 
+  w4b R tip(f8873aae)@W1 -> w6 G9-R g9p(0ca312bd) [cross-binary: the line merge]: earlier 11.1608 [10.7602-11.6416] K=12 (7.90/4.19/1.00) | window 6 11.3311 [11.1485-11.7631] K=5 (5.42/1.03/1.15); ratio 1.0153 (+1.53 %, d +0.1703); bars 19.2/8.6/3.0 %; claimed r/i/s n/n/n; 2hypot(SE)=0.3425 -> HOLDS 
+  w4b R tip(f8873aae)@W8 -> w6 G9-R g9p(0ca312bd) [cross-binary: the line merge]: earlier 5.2456 [5.1038-6.3535] K=12 (23.83/14.04/3.14) | window 6 5.7155 [5.5954-5.8973] K=6 (5.28/3.27/1.11); ratio 1.0896 (+8.96 %, d +0.4699); bars 48.8/28.8/6.7 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.3529 -> HOLDS (SE alone claims a shift) 
+  w4b R-S tip(f8873aae)@W1 -> w6 G9-RS g9p(0ca312bd) [cross-binary: the line merge]: earlier 5.9281 [5.8391-6.2996] K=12 (7.77/1.45/0.83) | window 6 6.0832 [6.0453-6.1027] K=6 (0.94/0.62/0.21); ratio 1.0262 (+2.62 %, d +0.1551); bars 15.7/3.2/1.7 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.1013 -> HOLDS (SE alone claims a shift) 
+  w4b R-S tip(f8873aae)@W8 -> w6 G9-RS g9p(0ca312bd) [cross-binary: the line merge]: earlier 3.1136 [3.0883-3.4575] K=12 (11.86/0.46/1.43) | window 6 3.3061 [3.2584-3.3345] K=5 (2.30/1.25/0.52); ratio 1.0618 (+6.18 %, d +0.1925); bars 24.2/2.7/3.0 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0956 -> HOLDS (SE alone claims a shift) 
+  w4b S16 tip(f8873aae)@W1 -> w6 G9-S16 g9p(0ca312bd) [cross-binary: the line merge]: earlier 0.0800 [0.0785-0.0844] K=12 (7.45/2.82/0.84) | window 6 0.0825 [0.0814-0.0842] K=5 (3.38/1.29/0.75); ratio 1.0306 (+3.06 %, d +0.0024); bars 16.4/6.2/2.3 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0018 -> HOLDS (SE alone claims a shift) 
+  w4b J-As tip(f8873aae)@W2 -> w6 G9-JAs-mid g9p(0ca312bd) [cross-binary: the line merge]: earlier 6.2214 [6.1691-7.0624] K=12 (14.36/8.02/1.83) | window 6 6.5329 [6.4738-6.6183] K=5 (2.21/0.99/0.49); ratio 1.0501 (+5.01 %, d +0.3116); bars 29.1/16.2/3.8 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.2367 -> HOLDS (SE alone claims a shift) 
+  w4b J-As tip(f8873aae)@W4 -> w6 G9-JAs-mid g9p(0ca312bd) [cross-binary: the line merge]: earlier 4.9225 [4.8896-5.3343] K=12 (9.03/2.58/1.29) | window 6 5.2088 [5.1734-5.2699] K=6 (1.85/0.68/0.35); ratio 1.0582 (+5.82 %, d +0.2863); bars 18.4/5.3/2.7 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.1323 -> HOLDS (SE alone claims a shift) 
+  w4b J-As tip(f8873aae)@W16 -> w6 G9-JAs-mid g9p(0ca312bd) [cross-binary: the line merge]: earlier 4.3567 [4.3288-5.2007] K=12 (20.01/3.32/2.63) | window 6 4.8798 [4.8512-4.9637] K=6 (2.31/1.12/0.47); ratio 1.1201 (+12.01 %, d +0.5231); bars 40.3/7.0/5.3 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.2339 -> HOLDS (SE alone claims a shift) 
+  [win4] T-A-tree-armed: chosen 12, dropped 0
+  w4 T-A-tree-armed t_q(B) (a46b8287, RowWalk)@W1 -> w6 C3b-TA-armed par (6dd1f916, RowWalk): earlier 0.4140 [0.4135-0.4175] K=6 (0.97/0.41/0.20) | window 6 0.4044 [0.4038-0.4049] K=5 (0.27/0.11/0.06); ratio 0.9768 (-2.32 %, d -0.0096); bars 2.0/0.8/0.4 %; claimed r/i/s Y/Y/Y CLAIMED(r&s); 2hypot(SE)=0.0017 -> FAILS [cross-binary]
+  w4 T-A-tree-armed tree span(B)@W1 -> w6 par: earlier 0.4749 [0.4722-0.4793] K=6 (1.49/0.45/0.26) | window 6 0.4637 [0.4630-0.4659] K=5 (0.62/0.11/0.13); ratio 0.9764 (-2.36 %, d -0.0112); bars 3.2/0.9/0.6 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0028 -> HOLDS (SE alone claims a shift) [cross-binary]
+  w4 T-A-tree-armed t_q(B) (a46b8287, RowWalk)@W8 -> w6 C3b-TA-armed par (6dd1f916, RowWalk): earlier 0.4110 [0.4099-0.4127] K=6 (0.68/0.40/0.14) | window 6 0.4126 [0.4120-0.4135] K=6 (0.37/0.09/0.06); ratio 1.0037 (+0.37 %, d +0.0015); bars 1.5/0.8/0.3 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0013 -> HOLDS (SE alone claims a shift) [cross-binary]
+  w4 T-A-tree-armed tree span(B)@W8 -> w6 par: earlier 0.4662 [0.4641-0.4685] K=6 (0.94/0.23/0.16) | window 6 0.4738 [0.4732-0.4751] K=6 (0.41/0.14/0.07); ratio 1.0163 (+1.63 %, d +0.0076); bars 2.1/0.5/0.4 %; claimed r/i/s n/Y/Y; 2hypot(SE)=0.0017 -> HOLDS (SE alone claims a shift) [cross-binary]
+  w4 G4 bp_g4_scene/tree/j100 (a46b8287 RowWalk; cited from its analysis.md:134) -> w6 tree_rowwalk/j100 (983480a9): earlier 0.4430 [0.4424-0.4440] K=6 (0.36/nan/0.13) | window 6 0.4388 [0.4383-0.4399] K=6 (0.37/0.04/0.06); ratio 0.9905 (-0.95 %, d -0.0042); bars 1.0/nan/0.3 %; claimed r/i/s n/n/Y; 2hypot(SE)=0.0013 -> HOLDS (SE alone claims a shift) [cross-binary, cited cell]

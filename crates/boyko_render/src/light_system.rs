@@ -15,10 +15,13 @@
 //! the flag via [`LightTableStaging::mark_uploaded`]. The FIRST seed uses the
 //! fence-waited `upload_initial`; only the on-change re-upload is async.
 
+use boyko_ecs::ecs::constants::pool_reserve_rows;
+use boyko_ecs::ecs::core::asset::register_asset_layout;
 use boyko_ecs::ecs::core::change_detection::Tick;
 use boyko_ecs::ecs::core::commands::Command;
 use boyko_ecs::ecs::core::component::hooks::HookContext;
 use boyko_ecs::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
+use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::iters::query::{Added, Changed, IsEnabled, Or, Query};
@@ -26,11 +29,12 @@ use boyko_ecs::ecs::core::system::into_system::IntoSystem;
 use boyko_ecs::ecs::core::system::system::System;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_ecs::ecs::identifiers::primitives::EntityId;
-use boyko_macros::Resource;
+use boyko_log::codes::{OnceSite, W2201, W2204};
+use boyko_macros::{Resource, SystemSet};
 
 use crate::light::{
-    DirectionalLight, GpuLight, LightEnabled, LightHeaderGpu, LightTableDirty, LightingConfig,
-    MAX_LIGHTS, PointLight, SkyLight, SpotLight,
+    DirectionalLight, GpuLight, LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_MASK, LightEnabled,
+    LightHeaderGpu, LightTableDirty, LightingConfig, MAX_LIGHTS, PointLight, SkyLight, SpotLight,
 };
 use crate::shadow_atlas::{PunctualSlotAssignment, SLOT_NONE, pack_atlas_slot};
 
@@ -38,6 +42,19 @@ use crate::shadow_atlas::{PunctualSlotAssignment, SLOT_NONE, pack_atlas_slot};
 pub const LIGHT_HEADER_BYTES: usize = core::mem::size_of::<LightHeaderGpu>();
 /// The byte size of one `GpuLight` table element (48 B).
 pub const GPU_LIGHT_BYTES: usize = core::mem::size_of::<GpuLight>();
+
+/// `boyko-W2201`'s per-site `Once` latch — the light-table overflow report.
+///
+/// A `Once` latch is PROCESS state, so both of this module's latches are named module-level
+/// `static`s rather than `static`s tucked inside their reporters: an observer must be able to
+/// reset one, or its green only means "nothing else in this binary tripped this condition first".
+/// Four sibling tests here fold NaN lights for reasons of their own, and they measurably did.
+/// See [`boyko_log::codes::OnceSite::reset`].
+pub(crate) static W2201_SITE: OnceSite = OnceSite::new();
+
+/// `boyko-W2204`'s per-site `Once` latch — the non-finite-light drop report. Separate from
+/// [`W2201_SITE`] because the two are separate codes; see that static's doc.
+pub(crate) static W2204_SITE: OnceSite = OnceSite::new();
 
 /// The staged-light-table WRITE GENERATION (host plan D5) — a monotonic counter
 /// bumped by [`collect_lights`] exactly once per ACTUAL staging rewrite (the rebuild is
@@ -56,13 +73,21 @@ pub struct LightTableGeneration(pub u64);
 /// The reused light-table staging scratch + the on-change dirty flag (Principle 0).
 ///
 /// `scratch` holds the contiguous `[LightHeaderGpu || GpuLight[]]` bytes the GPU table
-/// mirrors; it is sized once to `LIGHT_HEADER_BYTES + MAX_LIGHTS * GPU_LIGHT_BYTES` and
-/// refilled in place — no per-frame allocation. `dirty` is set by [`collect_lights`] on
-/// a change and cleared by [`Self::mark_uploaded`] after the recorder copies the bytes.
+/// mirrors; it is a [`ScratchColumn<u8>`] (the same `ComponentPool`-backed, VM-native
+/// transient-scratch primitive [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch)
+/// uses — Principle 0, not a `std::Vec` side store) fixed, once at construction, to exactly
+/// `LIGHT_HEADER_BYTES + MAX_LIGHTS * GPU_LIGHT_BYTES` LIVE elements — never cleared or
+/// resized afterward, because [`fold_light_table_slotted`] writes THROUGH the whole buffer
+/// at arbitrary offsets (`write_pod` at a running byte cursor), not via append-only `push`.
+/// Refilled IN PLACE on a change — no per-frame allocation. `dirty` is set by
+/// [`collect_lights`] on a change and cleared by [`Self::mark_uploaded`] after the recorder
+/// copies the bytes.
 #[derive(Resource)]
 pub struct LightTableStaging {
-    /// `[LightHeaderGpu || GpuLight[]]` host bytes; the GPU table is its mirror.
-    scratch: Vec<u8>,
+    /// `[LightHeaderGpu || GpuLight[]]` host bytes; the GPU table is its mirror. Always
+    /// exactly `LIGHT_HEADER_BYTES + MAX_LIGHTS * GPU_LIGHT_BYTES` live elements (see the
+    /// struct doc).
+    scratch: ScratchColumn<u8>,
     /// Valid byte length in `scratch` (`LIGHT_HEADER_BYTES + light_count * GPU_LIGHT_BYTES`).
     used_bytes: usize,
     /// Set on a changed frame; the recorder records the copy + barrier when set.
@@ -78,10 +103,29 @@ impl Default for LightTableStaging {
         // Preallocate the worst-case table once: header + MAX_LIGHTS elements. The
         // collection refills this in place (Principle 5 — no frame-path alloc).
         let cap = LIGHT_HEADER_BYTES + (MAX_LIGHTS as usize) * GPU_LIGHT_BYTES;
-        let mut scratch = vec![0u8; cap];
+        let byte_id = register_asset_layout::<u8>(None);
+        let mut scratch = ScratchColumn::new(byte_id, pool_reserve_rows(core::mem::size_of::<u8>()));
+        {
+            // Fill to the fixed worst-case capacity ONCE, at setup: `fold_light_table_slotted`
+            // writes through the WHOLE `cap`-sized buffer at arbitrary offsets (not via `push`),
+            // so the column must present `cap` live (zeroed) elements before any fold runs.
+            // Mirrors `fit_len` (mesh_draw.rs) — a push loop over the already-reserved
+            // `pool_reserve_rows`-class backing, never a realloc.
+            let mut view = scratch.build_view();
+            for _ in 0..cap {
+                view.push(0u8);
+            }
+        }
         // Seed with an empty default table (count 0, identity exposure) so a never-changed
         // world still has a valid header to seed the device buffer with.
-        let used = write_light_table(&mut scratch, &[], &[], &[], &[], &LightingConfig::default());
+        let used = write_light_table(
+            scratch.build_view().as_mut_slice(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &LightingConfig::default(),
+        );
         Self { scratch, used_bytes: used, dirty: true, seeded: false }
     }
 }
@@ -90,7 +134,7 @@ impl LightTableStaging {
     /// The currently-valid table bytes (`[header || GpuLight[]]`).
     #[inline]
     pub fn bytes(&self) -> &[u8] {
-        &self.scratch[..self.used_bytes]
+        &self.scratch.as_read_slice()[..self.used_bytes]
     }
 
     /// The pending on-change upload bytes if a change is queued, else `None` (idle frame
@@ -122,6 +166,13 @@ impl LightTableStaging {
     pub fn mark_uploaded(&mut self) {
         self.dirty = false;
     }
+
+    /// The staged table's primary directional light — [`primary_directional_dir`] over
+    /// [`Self::bytes`], the bytes the device table mirrors this frame.
+    #[inline]
+    pub fn primary_directional_dir(&self) -> Option<[f32; 3]> {
+        primary_directional_dir(self.bytes())
+    }
 }
 
 /// Writes `[LightHeaderGpu || GpuLight[]]` into `dst`, returning the valid byte length.
@@ -150,6 +201,49 @@ pub fn write_light_table(
         spots.iter(),
         cfg,
     )
+}
+
+/// Byte offset of the header's `l0a_count` word (`counts_exposure.z`).
+const L0A_COUNT_OFFSET: usize = core::mem::offset_of!(LightHeaderGpu, counts_exposure) + 2 * 4;
+/// Byte offset, within a row, of the `dir_kind` lane (`xyz` = direction, `w` = kind word).
+const DIR_KIND_OFFSET: usize = core::mem::offset_of!(GpuLight, dir_kind);
+/// Byte offset, within a row, of the kind word (`dir_kind.w`).
+const KIND_WORD_OFFSET: usize = DIR_KIND_OFFSET + 3 * 4;
+
+/// The native-endian `u32` at byte `off` of a staged table — the bytes are `write_pod`'s POD image —
+/// or `None` past the end, so a parser built on it cannot panic.
+#[inline]
+fn table_word(table: &[u8], off: usize) -> Option<u32> {
+    let word: [u8; 4] = table.get(off..off.checked_add(4)?)?.try_into().ok()?;
+    Some(u32::from_ne_bytes(word))
+}
+
+/// The PRIMARY directional light of a staged `[LightHeaderGpu || GpuLight[]]` table: the first row in
+/// `[0, l0a_count)` whose kind word, masked by [`LIGHT_KIND_MASK`], is [`LIGHT_KIND_DIRECTIONAL`] —
+/// the host copy of the shaders' `primary_dir_seen` latch (`deferred_pbr.hlsl`,
+/// `sdf_forward_march.comp.hlsl` and the other table readers). Returns that row's `dir_kind.xyz` bits
+/// VERBATIM, the direction TO the light: the fold has already normalised it and every shader
+/// normalises it again, so a consumer that pushes these bits hands the GPU the exact input the
+/// resolve normalises. Do not normalise or negate them on the host.
+///
+/// `None` when no row of the front block is directional, and when `table` is shorter than its
+/// header. The scan is also clamped to the rows `table` actually holds, so a header whose
+/// `l0a_count` overstates them cannot read past the end: this is a parser, and it never panics.
+///
+/// Cost: one header word, then one kind word per row until the first directional — which the fold
+/// writes first ([`fold_light_table_slotted`]), so a table with a sun stops at row 0. No allocation.
+#[inline]
+pub fn primary_directional_dir(table: &[u8]) -> Option<[f32; 3]> {
+    let rows = table.len().checked_sub(LIGHT_HEADER_BYTES)? / GPU_LIGHT_BYTES;
+    let l0a_count = table_word(table, L0A_COUNT_OFFSET)? as usize;
+    (0..l0a_count.min(rows)).find_map(|row| {
+        let base = LIGHT_HEADER_BYTES + row * GPU_LIGHT_BYTES;
+        if table_word(table, base + KIND_WORD_OFFSET)? & LIGHT_KIND_MASK != LIGHT_KIND_DIRECTIONAL {
+            return None;
+        }
+        let lane = |i: usize| table_word(table, base + DIR_KIND_OFFSET + i * 4).map(f32::from_bits);
+        Some([lane(0)?, lane(1)?, lane(2)?])
+    })
 }
 
 /// Folds the live lights — taken as four borrowing iterators — directly into `dst` as
@@ -187,9 +281,9 @@ pub fn fold_light_table<'a>(
     cfg: &LightingConfig,
 ) -> usize {
     // The un-slotted path: no punctual light carries an atlas base, so every point/spot row keeps
-    // the raw kind word `from_point` / `from_spot` produce (`SLOT_NONE` base ⇒ no pack). Byte-
-    // identical to the pre-Inc-1-GPU fold — the slice unit tests + `write_light_table` are pinned
-    // on this signature.
+    // the kind word `from_point` / `from_spot` produce, whose slot field already holds `SLOT_NONE`
+    // (`SLOT_NONE` base ⇒ no pack). The slice unit tests + `write_light_table` are pinned on this
+    // signature.
     fold_light_table_slotted(
         dst,
         directionals,
@@ -204,13 +298,26 @@ pub fn fold_light_table<'a>(
 /// except each point/spot row is tagged with its RESOLVED atlas base (`base`): a real base
 /// (`base != SLOT_NONE`) is packed into that light's kind word via [`pack_atlas_slot`] so the
 /// shader's `light_atlas_slot(L.kind)` decodes the light's OWN cube/perspective base; a `SLOT_NONE`
-/// base leaves the kind word UNTOUCHED (byte-identical to the un-slotted path — the analytic
-/// fallback), which is why a non-`CastsPunctualShadow` light and a slot-loser produce the SAME
-/// bytes as before the wiring.
+/// base leaves the kind word UNTOUCHED, and that word already carries
+/// [`SLOT_NONE_FIELD`](crate::light::SLOT_NONE_FIELD) — every point/spot row is built with it — so
+/// a non-`CastsPunctualShadow` light and a slot-loser decode `SLOT_NONE` and take the analytic
+/// fallback, byte-identical to the un-slotted path.
 ///
 /// The per-light base comes from the entity-keyed [`PunctualSlotAssignment`] handoff the
 /// [`resolve_shadow_atlas`](crate::shadow_atlas::resolve_shadow_atlas) publishes; the caller
 /// ([`collect_lights`]) resolves it per row via `PunctualSlotAssignment::base_for` before the fold.
+///
+/// # Punctual validity gate (release-safe)
+///
+/// Every point/spot row is checked by [`punctual_row_is_cullable`] BEFORE it is written; a row
+/// that fails is DROPPED (not written, and not counted in the header's `point_spot_count`) but it
+/// IS tallied, and the first fold that drops anything reports `boyko-W2204` with the tally. This
+/// sentence used to end "and the first drop logs once", which was true and useless: the count the
+/// one report carried was always one, because the reporter ran per drop. This is the
+/// second release-visible gate on this path, and it exists for the same reason as the
+/// `written == MAX_LIGHTS` one: the value it rejects would otherwise reach a consumer that
+/// cannot defend itself. See that predicate's doc for what a non-finite centre does to the
+/// clustered cull.
 ///
 /// Caller guarantees `dst` is sized for the worst case (`Default` does this). The iterators are
 /// walked exactly once each, in table order (directionals → sky → point → spot).
@@ -248,9 +355,21 @@ pub fn fold_light_table_slotted<'a>(
         l0a_count += 1;
     }
     let mut point_spot_count: u32 = 0;
+    // Rung L8a: the non-finite drops are COUNTED here and reported once at the end of the fold,
+    // rather than each calling a `#[cold]` reporter that a latch then threw away. The increment
+    // sits on the `continue` arm the row was already taking, so the straight-line cost of a fold
+    // that drops nothing is one `u32` compare after the loops.
+    let mut dropped: u32 = 0;
     for (base, p) in points {
         if written == MAX_LIGHTS {
+            if dropped != 0 {
+                report_dropped_non_finite_lights(dropped);
+            }
             return finish_folded_overflow(dst, l0a_count, point_spot_count, off, cfg);
+        }
+        if !punctual_row_is_cullable(p.position, p.range) {
+            dropped += 1;
+            continue;
         }
         write_pod(dst, off, &slot_pack(GpuLight::from_point(p), base));
         off += GPU_LIGHT_BYTES;
@@ -259,12 +378,22 @@ pub fn fold_light_table_slotted<'a>(
     }
     for (base, s) in spots {
         if written == MAX_LIGHTS {
+            if dropped != 0 {
+                report_dropped_non_finite_lights(dropped);
+            }
             return finish_folded_overflow(dst, l0a_count, point_spot_count, off, cfg);
+        }
+        if !punctual_row_is_cullable(s.position, s.range) {
+            dropped += 1;
+            continue;
         }
         write_pod(dst, off, &slot_pack(GpuLight::from_spot(s), base));
         off += GPU_LIGHT_BYTES;
         written += 1;
         point_spot_count += 1;
+    }
+    if dropped != 0 {
+        report_dropped_non_finite_lights(dropped);
     }
     debug_assert!(
         l0a_count + point_spot_count <= MAX_LIGHTS,
@@ -274,11 +403,102 @@ pub fn fold_light_table_slotted<'a>(
     finish_folded(dst, l0a_count, point_spot_count, off, cfg)
 }
 
+/// `true` iff a punctual light's cull sphere is a well-defined one: a FINITE centre and a
+/// non-NaN radius. The gate [`fold_light_table_slotted`] drops a point/spot row on.
+///
+/// # What a non-finite row did before this gate (traced into the cull)
+///
+/// `cluster_cull.hlsl`'s `sq_dist_point_aabb` is `d = max(max(aabb_min - c, c - aabb_max), 0)`
+/// then `sd = d·d`, and DXC lowers those `max`es to GLSL.std.450 **`NMax`** — measured on the
+/// committed module, which carries 18 `NMax` / 8 `NMin` and **zero** `FMax`/`FMin`. `NMax`
+/// returns the NON-NaN operand when exactly one operand is NaN, so:
+///
+/// * **NaN centre.** Both inner operands on that axis are NaN; whatever the (spec-undefined)
+///   both-NaN inner result is, the outer `NMax(·, 0.0)` has a non-NaN operand and yields `0.0`.
+///   The axis drops out of the distance entirely. With all three components NaN, `sd == 0.0`,
+///   so `sd <= r·r` holds for **every** light/froxel pair and the row is appended to **every
+///   froxel**. At the default 16×9×24 grid that is 3456 `LightIndexList` entries for ONE bad
+///   light — 21 % of `INDEX_LIST_CAP` — and they compete for the O2 clamp-and-drop caps, so a
+///   single NaN-positioned light does not merely mis-light: it **evicts correct lights**.
+///   Downstream the shading loop then computes `l = L.pos - P` = NaN on every pixel it reaches.
+/// * **±inf centre.** `aabb_min - inf = -inf` and `inf - aabb_max = +inf`, so `NMax` gives
+///   `+inf`, `sd = +inf`, and the ordered `sd <= r·r` is false — the row is rejected
+///   everywhere. Cheap in the index list, but it is exactly the case that costs the
+///   hierarchical arm its byte-identity with the flat arm (plan §5.2 Premise F, Case B).
+/// * **NaN radius.** `sd <= NaN` is false at both levels, so the arms still agree and the cull
+///   drops it — but the FLAT (non-clustered) shading paths still read the row and fold a NaN
+///   attenuation into the pixel.
+///
+/// Both centre cases apply identically to the base and hierarchical arms; neither is a memory-
+/// safety issue (`ps_n` bounds every read and `fi < capacity` every write, and neither involves
+/// the centre). This predicate is the closure of that premise, discharged where the plan filed
+/// it: on the host, one gate, before the row is ever written.
+///
+/// # Policy: reject-and-skip, not clamp, not panic
+///
+/// **Not clamp** — there is no meaningful clamp of a NaN centre. Substituting the origin
+/// teleports the light into the middle of the scene and INVENTS lighting the author never
+/// wrote; a missing light is a visible, debuggable absence, an invented one is not.
+/// **Not panic** — this is live, per-frame, gameplay-authored ECS data (one bad
+/// `GlobalTransform`, one divide-by-zero in a gameplay curve), not a build-time configuration
+/// invariant. Killing the process on a transient data glitch is not a policy this path takes
+/// anywhere else; the SAME function already answers its other release-visible gate — the
+/// `MAX_LIGHTS` overflow — with drop-and-report-once (`boyko-W2201`), and this matches it in
+/// shape. The two carry DIFFERENT codes because they need different fixes: one says the scene
+/// has too many lights, the other says one of them has a NaN.
+///
+/// # Cost
+///
+/// Four ordered compares per point/spot row (`is_finite` / `is_nan` each lower to a single
+/// compare), on a path that already writes 48 bytes per row, and the branch resolves the same
+/// way on every row of every well-formed frame — so it is perfectly predicted. Directional and
+/// sky rows are NOT checked: they carry no cull centre (`LightElem::pos` is the sky's ground
+/// colour on a sky row), so there is nothing here to validate.
+///
+/// An INFINITE radius is deliberately accepted: `r·r = +inf` is a totally-ordered comparand,
+/// both cull levels agree on it, and "a light that reaches everywhere" is a coherent (if
+/// unwise) authoring choice — unlike a NaN, it is not a broken value.
+#[inline]
+fn punctual_row_is_cullable(position: [f32; 3], range: f32) -> bool {
+    position[0].is_finite()
+        && position[1].is_finite()
+        && position[2].is_finite()
+        && !range.is_nan()
+}
+
+/// Reports `boyko-W2204` once: how many punctual lights this fold dropped for carrying a
+/// non-finite position or a NaN range.
+///
+/// **The count is the point, and it is why this moved to the END of the fold.** The migration
+/// ledger's row for these sites promised "the dropped count is now reported, which the one-shot
+/// latch never did", and the old shape could not deliver it: the reporter was called once per
+/// dropped light, so the first call — the only one the latch let through — always meant "one".
+/// Accumulating a `u32` in the fold and reporting after the loops costs one increment on a branch
+/// that was already taken and one compare per fold call, instead of one `#[cold]` call per
+/// dropped light, so it is cheaper on the path that actually drops.
+///
+/// `#[cold]` + `#[inline(never)]` for the same reason as [`finish_folded_overflow`]: only the
+/// four compares of [`punctual_row_is_cullable`] stay on the hot fold's straight-line code.
+#[cold]
+#[inline(never)]
+fn report_dropped_non_finite_lights(dropped: u32) {
+    if W2204_SITE.claim() {
+        boyko_log::warn!(
+            boyko_log::Render,
+            W2204,
+            "dropped {} point/spot light(s) with a non-finite position (or a NaN range) from \
+             the GPU light table; a NaN centre would otherwise be culled INTO every froxel",
+            dropped
+        );
+    }
+}
+
 /// Packs a resolved atlas `base` into a punctual [`GpuLight`]'s kind word, but ONLY when `base` is
 /// a real layer — a `SLOT_NONE` base returns the light UNCHANGED (byte-identical to the un-slotted
-/// fold). Guarding the `SLOT_NONE` case is what preserves the 0%-gate byte-identity:
-/// `pack_atlas_slot(kind, SLOT_NONE)` would WRITE the `0x1F` slot field (functionally the analytic
-/// fallback, but a different `dir_kind.w`), so the un-slotted rows must skip the pack entirely.
+/// fold). The row already carries [`SLOT_NONE_FIELD`](crate::light::SLOT_NONE_FIELD) from
+/// `GpuLight::from_point` / `from_spot`, so the guard only skips a pack that would rewrite the same
+/// word: the constructor is the single owner of the "no map" value, and this fold only ever adds a
+/// real assignment on top of it.
 #[inline]
 fn slot_pack(mut light: GpuLight, base: u32) -> GpuLight {
     if base != SLOT_NONE {
@@ -320,14 +540,22 @@ fn finish_folded_overflow(
     off: usize,
     cfg: &LightingConfig,
 ) -> usize {
-    use core::sync::atomic::{AtomicBool, Ordering};
-    static LOGGED: AtomicBool = AtomicBool::new(false);
-    // Relaxed: this is a best-effort one-shot log guard, not a synchronization edge — a
-    // rare double-log under a race is harmless and no data is published through this flag.
-    if !LOGGED.swap(true, Ordering::Relaxed) {
-        eprintln!(
-            "boyko_render: light table overflow — more than MAX_LIGHTS ({MAX_LIGHTS}) \
-             enabled lights; extras are dropped from the GPU table"
+    if W2201_SITE.claim() {
+        // WHAT THIS CANNOT SAY, and why it does not try. The ledger's row for this site asked for
+        // a dropped count. There is none to give: `fold_light_table_slotted` takes `impl
+        // Iterator`s, its doc pins "walked exactly once each", and this function is reached by an
+        // early `return` — so at the moment of the report nothing has looked at the remainder, and
+        // producing a count would mean draining iterators the contract says are not drained, on
+        // the overflow path, purely to make a number. What the site DOES know is the cap it hit
+        // and the rows that made it, so that is what it reports. `boyko-W2204` carries a real
+        // count because at that site one exists.
+        boyko_log::warn!(
+            boyko_log::Render,
+            W2201,
+            "light table overflow -- more than MAX_LIGHTS ({}) enabled lights; the {} rows \
+             already written are kept and every later light is dropped from the GPU table",
+            MAX_LIGHTS,
+            l0a_count + point_spot_count
         );
     }
     finish_folded(dst, l0a_count, point_spot_count, off, cfg)
@@ -354,6 +582,74 @@ fn write_pod<T: Copy>(dst: &mut [u8], off: usize, value: &T) {
         core::ptr::copy_nonoverlapping(src, dst.as_mut_ptr().add(off), size);
     }
 }
+
+/// The `Main`-schedule ordering seam that makes [`collect_lights`] visible to a
+/// cross-plugin `.before_set(LightCollectSet)` edge — the light-table-FOLD analogue of
+/// [`PunctualResolveSet`](crate::shadow_atlas::PunctualResolveSet) (which lets a
+/// DIFFERENT plugin publish BEFORE the fold reads it).
+///
+/// # Why a named set, not add-order
+///
+/// `collect_lights` is registered inside [`LightingPlugin`](crate::light_plugin::LightingPlugin)'s
+/// OWN builder closure (`light_plugin.rs`), so its `SystemKey` is a closure-local variable —
+/// invisible to any OTHER plugin's registration site. A writer that feeds the fold from a
+/// different plugin (or, like [`sync_cluster_light_gate`](crate::light::sync_cluster_light_gate),
+/// from the composing app) cannot express `.before(collect_lights)` directly; it targets THIS
+/// set instead, exactly as `resolve_shadow_atlas` targets `PunctualResolveSet`.
+///
+/// # Why this edge is load-bearing for the cluster lane (VB-P1b-0 C1)
+///
+/// Unlike the CSM/punctual/SSAO `sync_*_light_gate`s (whose worst case under a stale-by-one-frame
+/// header is a wrong SCALAR BIT — benign), [`sync_cluster_light_gate`](crate::light::sync_cluster_light_gate)
+/// feeds a GPU BUFFER INDEX: on the very first frame `clusters_enabled` goes `true`, an unordered
+/// fold could pack `clusters_enabled=1` together with `dims=0` (the gate hasn't run yet), and the
+/// froxel resolve's `cluster_z_slice`/`cluster_linear_index` (`light_table.hlsli`) would then
+/// underflow to a huge, out-of-bounds `ClusterGrid` index. That WAS real GPU UB with
+/// `robust_buffer_access` disabled; as of VB-P1k all four `ClusterGrid` readers
+/// (`vb_resolve`/`vb_shade`/`deferred_pbr`/`forward_opaque`) reject a zero-dims — or
+/// over-capacity — header and fall back to the in-bounds flat light scan, so what survives is a
+/// one-frame LIGHTING artefact rather than a device fault. This edge is therefore a CORRECTNESS
+/// edge now, not the only line against UB, and it stays for that reason.
+/// `sync_cluster_light_gate` joins THIS set with `.before_set(LightCollectSet)` so the header
+/// always carries valid dims the SAME frame the enabled bit goes hot.
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LightCollectSet;
+
+/// The `Main`-schedule ordering seam that makes the exclusive light seed
+/// ([`LightSeedState::seed`]) visible to a cross-plugin ordering edge. Its one member is the
+/// seed [`LightingPlugin`](crate::light_plugin::LightingPlugin) registers.
+///
+/// # Why a reader must be ordered after it
+///
+/// The seed is what sets a newly added light's [`LightEnabled`] bit, and a row it has not
+/// seeded yet reads DISABLED. A system that reads lights through `IsEnabled<LightEnabled>` and
+/// is not ordered after the seed can therefore run before it on the frame a light is added and
+/// see that light as disabled, while [`collect_lights`] already folds it into the table.
+///
+/// Every such reader in the workspace is ordered after the seed:
+///
+/// - **Inside `LightingPlugin`, by key, not through this set:** [`collect_lights`] and
+///   [`select_lighting_cull`](crate::light_policy::select_lighting_cull). The second one was
+///   unordered until R2b-edge and counted 0 of 3 lights on the frame they were added;
+///   `tests/light_policy_spawn_frame.rs` pins its edge.
+/// - **Outside it, through this set:**
+///   [`resolve_csm_cascades`](crate::csm_config::resolve_csm_cascades). The composing app
+///   declares `CsmResolveSet.after(LightSeedSet)`; for the shipped host that is
+///   `boyko_app`'s `EnginePlugins`, pinned by
+///   `boyko_app/tests/host_orders_csm_fit_after_light_seed.rs`.
+///
+/// A new reader of `LightEnabled` needs the same edge: a key edge if `LightingPlugin` registers
+/// it, a set edge from its composing app otherwise.
+///
+/// # Why a named set, not a key
+///
+/// The seed is a closure registered inside `LightingPlugin`'s own builder closure, so its
+/// `SystemKey` is invisible to any other registration site, exactly as for
+/// [`LightCollectSet`]. `LightingPlugin` declares membership only: an edge referencing a set
+/// with no members warns `boyko-W1501`, so the edge is declared where both sets have members
+/// (the `CsmFitSet` / `ParticleTickSet` precedent).
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LightSeedSet;
 
 /// The L0 collection system (Decision 4) — `Changed`-gated.
 ///
@@ -421,12 +717,16 @@ pub fn collect_lights(
     // with its resolved atlas base from the entity-keyed `PunctualSlotAssignment` the shadow
     // resolve published. `base_for` returns `SLOT_NONE` for a light that won no slot (or when the
     // resolve is disabled — the empty handoff), so `fold_light_table_slotted` leaves that row's
-    // kind word UNTOUCHED (byte-identical to the pre-wiring path); a real base is packed via
-    // `pack_atlas_slot` so the shader decodes the light's OWN cube/perspective base.
+    // kind word as `from_point` / `from_spot` built it, its slot field `SLOT_NONE`; a real base is
+    // packed via `pack_atlas_slot` so the shader decodes the light's OWN cube/perspective base.
     let assign = &*assignment;
     let staging = &mut *staging;
+    // Disjoint field-projection borrow (mesh_draw.rs precedent): `scratch_view` borrows only
+    // `staging.scratch`, so the plain `staging.used_bytes = used;` write below (a distinct
+    // field) needs no explicit drop.
+    let mut scratch_view = staging.scratch.build_view();
     let used = fold_light_table_slotted(
-        &mut staging.scratch,
+        scratch_view.as_mut_slice(),
         all_directionals.iter().filter_map(|(l, en)| en.then_some(l)),
         all_skies.iter().filter_map(|(l, en)| en.then_some(l)),
         all_points
@@ -480,8 +780,14 @@ pub struct LightSeedState<A, S, P, T, Aa, Sa, Pa, Ta> {
     all_point: Pa,
     all_spot: Ta,
     first_run: bool,
-    /// Reused id scratch — cleared and refilled each non-static pass (Principle 5).
-    ids: Vec<EntityId>,
+    /// Reused id scratch — cleared and refilled each non-static pass (Principle 5). A
+    /// [`ScratchColumn<EntityId>`] (Principle 0, not a `std::Vec` side store): unlike
+    /// [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch)'s fields this state is
+    /// closure-captured cross-frame data, not an ECS `Resource` — but `ScratchColumn`
+    /// needs no `Resource`/`World` home to construct (it is a bare `ComponentPool`-backed
+    /// struct built from a registered [`ComponentId`](boyko_ecs::ecs::identifiers::primitives::ComponentId)),
+    /// so it drops in here identically.
+    ids: ScratchColumn<EntityId>,
 }
 
 /// Builds the cross-frame [`LightSeedState`] with its eight cached light-id systems.
@@ -533,7 +839,10 @@ pub fn light_seed_state() -> LightSeedState<
             q.iter_entities().map(|(id, _)| id).collect::<Vec<_>>()
         }),
         first_run: false,
-        ids: Vec::new(),
+        ids: ScratchColumn::new(
+            register_asset_layout::<EntityId>(None),
+            pool_reserve_rows(core::mem::size_of::<EntityId>()),
+        ),
     }
 }
 
@@ -554,10 +863,17 @@ where
     /// `initialize` is paid once. The world borrow is internal to each call and dropped
     /// before the caller `enable`s the bits.
     fn collect_all_light_ids(&mut self, world: &mut EcsMaster) {
-        self.ids.extend(world.run_cached_system(&mut self.all_dir));
-        self.ids.extend(world.run_cached_system(&mut self.all_sky));
-        self.ids.extend(world.run_cached_system(&mut self.all_point));
-        self.ids.extend(world.run_cached_system(&mut self.all_spot));
+        // Each cached system still returns an owned `Vec<EntityId>` (the `System::Out`
+        // contract, unchanged by this scratch conversion) — `extend_from_slice` appends its
+        // bytes into the reused `ids` column, then the temporary `Vec` drops as before.
+        let dir = world.run_cached_system(&mut self.all_dir);
+        self.ids.build_view().extend_from_slice(&dir);
+        let sky = world.run_cached_system(&mut self.all_sky);
+        self.ids.build_view().extend_from_slice(&sky);
+        let point = world.run_cached_system(&mut self.all_point);
+        self.ids.build_view().extend_from_slice(&point);
+        let spot = world.run_cached_system(&mut self.all_spot);
+        self.ids.build_view().extend_from_slice(&spot);
     }
 
     /// Collects the ids of every NEWLY-added light into `self.ids` (steady-state scan).
@@ -600,8 +916,12 @@ where
     /// Factored out so the four `Added` sub-systems share one stamp+run path; the
     /// per-pass window advance is what makes `Added` mean "since the previous seed pass"
     /// (see [`collect_added_light_ids`](Self::collect_added_light_ids)).
-    fn run_added<Sys>(sys: &mut Sys, world: &mut EcsMaster, this_run: Tick, out: &mut Vec<EntityId>)
-    where
+    fn run_added<Sys>(
+        sys: &mut Sys,
+        world: &mut EcsMaster,
+        this_run: Tick,
+        out: &mut ScratchColumn<EntityId>,
+    ) where
         Sys: System<Out = Vec<EntityId>>,
     {
         // `initialize` is idempotent (FS1); the first call seeds the window, after which
@@ -610,7 +930,8 @@ where
         sys.initialize(world);
         let prev_this_run = sys.meta().this_run();
         sys.set_change_ticks(prev_this_run, this_run);
-        out.extend(world.run_cached_system(sys));
+        let added = world.run_cached_system(sys);
+        out.build_view().extend_from_slice(&added);
     }
 
     /// Exclusive seed pass (`&mut EcsMaster`): enables the [`LightEnabled`] bit on lights
@@ -642,7 +963,7 @@ where
     pub fn seed(&mut self, world: &mut EcsMaster) {
         // Collect the ids first (the query view borrows the world), then enable (needs
         // `&mut`). `self.ids` is the reused scratch (cleared here, refilled below).
-        self.ids.clear();
+        self.ids.build_view().clear();
         if self.first_run {
             self.collect_added_light_ids(world);
         } else {
@@ -659,7 +980,7 @@ where
         // without aliasing. The buffer keeps its capacity for reuse — it is `clear()`ed at the
         // top of the NEXT pass (line above), not emptied here.
         for i in 0..self.ids.len() {
-            let id = self.ids[i];
+            let id = self.ids.as_read_slice()[i];
             // `get_entity` resolves the live `Entity` (with generation); a stale / dead id
             // is a `None` no-op. `enable` is the O(1) immediate `&mut self` bit flip.
             if let Some(entity) = world.get_entity(id) {
@@ -839,6 +1160,11 @@ mod tests {
 
     #[test]
     fn overflow_of_a_single_kind_clamps_to_max_lights_without_writing_past_scratch() {
+        // Drives an emitting fold, so it joins this module's serialized set: `boyko-W2201`
+        // and `boyko-W2204` are per-SITE `Once` latches, which is PROCESS state, and a
+        // sibling that spends one inside the observer's window makes the observer read zero.
+        // Resetting fixes ORDER; the lock fixes CONCURRENCY; both are needed.
+        let _observe = boyko_log::probe::observe_lock();
         // `MAX_LIGHTS + 1` enabled point lights folded into the exact `Default`-sized
         // scratch: the +1 light must be dropped, and no byte may be written past the cap.
         let over = (MAX_LIGHTS as usize) + 1;
@@ -868,6 +1194,11 @@ mod tests {
 
     #[test]
     fn overflow_across_kinds_gates_on_the_running_total_not_per_kind() {
+        // Drives an emitting fold, so it joins this module's serialized set: `boyko-W2201`
+        // and `boyko-W2204` are per-SITE `Once` latches, which is PROCESS state, and a
+        // sibling that spends one inside the observer's window makes the observer read zero.
+        // Resetting fixes ORDER; the lock fixes CONCURRENCY; both are needed.
+        let _observe = boyko_log::probe::observe_lock();
         // The cap gates on the running total across all four kinds: MAX_LIGHTS directionals
         // fill the table, then a sky, points, and spots must ALL be dropped — proving the
         // gate is a single cross-kind counter, not a per-loop reset.
@@ -972,9 +1303,10 @@ mod tests {
         assert_eq!(spot_kind & 0xFFFF, crate::light::LIGHT_KIND_SPOT);
     }
 
-    /// A `CastsPunctualShadow` light that won NO slot (over budget) must pack `SLOT_NONE` — the
+    /// A `CastsPunctualShadow` light that won NO slot (over budget) must carry `SLOT_NONE` — the
     /// analytic fallback — never a stale base 0. Modelled as an entity absent from the assignment
-    /// (`base_for` returns `SLOT_NONE`), which the fold leaves UNPACKED.
+    /// (`base_for` returns `SLOT_NONE`): the fold skips the pack, so the row keeps the slot field
+    /// `GpuLight::from_spot` built it with, which already holds `SLOT_NONE`.
     #[test]
     fn slotted_fold_loser_packs_slot_none_not_zero() {
         let winner = EntityId(1);
@@ -998,41 +1330,112 @@ mod tests {
         let lose_kind = row_kind_word(&scratch, 1);
         assert_eq!(light_atlas_slot(win_kind), 0, "winner decodes to base 0");
         assert_ne!(win_kind & crate::shadow_atlas::CASTS_SHADOW_BIT, 0, "winner casts bit set");
-        // The loser is left UNPACKED (a `base_for` of `SLOT_NONE` skips the pack), so its kind word
-        // is byte-identical to the raw kind: slot field 0 AND casts bit CLEAR — the shader takes the
-        // analytic fallback off the CLEAR casts bit (never a stale slot-0 SAMPLE, the masked bug).
+        // Every shader site tests `light_atlas_slot(L.kind) != SLOT_NONE` under header bit 3 and
+        // none reads the casts bit, so the loser's FIELD is what keeps it off the winner's layer: a
+        // loser that decoded base 0 would sample layer 0 — another light's map.
+        assert_eq!(light_atlas_slot(lose_kind), SLOT_NONE, "loser decodes SLOT_NONE, not base 0");
         assert_eq!(lose_kind & crate::shadow_atlas::CASTS_SHADOW_BIT, 0, "loser casts bit clear");
-        assert_eq!(lose_kind, crate::light::LIGHT_KIND_SPOT, "loser kind word untouched (raw)");
+        // A literal (`LIGHT_KIND_SPOT | 0x1F << 17`), not `pack_atlas_slot`, so the check cannot
+        // agree with the fold by sharing its arithmetic.
+        assert_eq!(lose_kind, 0x003E_0002, "loser kind word is the un-slotted SPOT word");
     }
 
-    /// The 0%-gate: a point light with NO atlas base (the empty assignment — no
-    /// `CastsPunctualShadow`, or the shadow resolve disabled) folds to a kind word BYTE-IDENTICAL
-    /// to the pre-wiring path (`fold_light_table`), no slot bits set.
+    /// Gate G1 (R1): every point/spot row the fold writes decodes EXACTLY its assignment, for every
+    /// way the assignment can fall. Three points and three spots, all 64 winner masks; each winner
+    /// gets its own real base (a point's leaves room for its six faces), each loser none. Per row:
+    /// the slot field is `base_for(id)` — a real base, or `SLOT_NONE`; the casts bit is set iff the
+    /// base is real; the kind tag survives; no bit outside the tag, bit 16 and the slot field is
+    /// set; and the whole word equals a literal built WITHOUT `pack_atlas_slot`. Mask 0 is the
+    /// empty handoff (`ShadowConfig` off, or a leg set without mesh-shadow producers).
+    ///
+    /// The bases are distinct but deliberately not a feasible packing (three cubes and three spots
+    /// need 21 layers): the fold never checks layers — the resolve does — so only distinctness
+    /// matters here.
     #[test]
-    fn slotted_fold_no_assignment_is_byte_identical_to_unslotted() {
-        let pt = PointLight::new([0.0, 1.0, 0.0], [1.0, 1.0, 1.0], 300.0, 9.0);
-        let sp = SpotLight::new([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 200.0, 8.0, 20.0, 30.0);
-        let cfg = LightingConfig::default();
+    fn every_punctual_row_decodes_exactly_its_assignment() {
+        use crate::light::{LIGHT_KIND_POINT, LIGHT_KIND_SPOT};
+        use crate::shadow_atlas::{CASTS_SHADOW_BIT, M_SLOTS, POINT_FACE_COUNT};
 
-        // The un-slotted reference table.
-        let mut reference = vec![0u8; LIGHT_HEADER_BYTES + 4 * GPU_LIGHT_BYTES];
-        let r_used =
-            fold_light_table(&mut reference, [].iter(), [].iter(), [pt].iter(), [sp].iter(), &cfg);
+        // Kind tag | `SLOT_NONE` (0x1F) at bits 17..22, bit 16 clear — spelled out, not derived.
+        const UNSLOTTED_POINT: u32 = 0x003E_0001;
+        const UNSLOTTED_SPOT: u32 = 0x003E_0002;
+        // Kind tag (bits 0..16) | bit 16 | the 5-bit slot field (bits 17..22).
+        const DEFINED_BITS: u32 = 0x003F_FFFF;
+        // The extreme bases on both sides: 0, the last base a cube fits at, the last layer.
+        const LAST_POINT_BASE: u32 = (M_SLOTS - POINT_FACE_COUNT) as u32;
+        const LAST_LAYER: u32 = (M_SLOTS - 1) as u32;
 
-        // The slotted table with the EMPTY assignment (`base_for` == SLOT_NONE for both).
-        let empty = PunctualSlotAssignment::EMPTY;
-        let mut slotted = vec![0u8; LIGHT_HEADER_BYTES + 4 * GPU_LIGHT_BYTES];
-        let s_used = fold_light_table_slotted(
-            &mut slotted,
-            [].iter(),
-            [].iter(),
-            core::iter::once((empty.base_for(EntityId(0)), &pt)),
-            core::iter::once((empty.base_for(EntityId(0)), &sp)),
-            &cfg,
+        let points = [
+            PointLight::new([0.0, 1.0, 0.0], [1.0, 1.0, 1.0], 300.0, 9.0),
+            PointLight::new([2.0, 1.0, 0.0], [1.0, 0.5, 0.2], 150.0, 6.0),
+            PointLight::new([-2.0, 1.0, 1.0], [0.2, 0.5, 1.0], 90.0, 4.0),
+        ];
+        let spots = [
+            SpotLight::new([0.0, 3.0, 0.0], [0.0, -1.0, 0.0], [1.0, 1.0, 1.0], 200.0, 8.0, 20.0, 30.0),
+            SpotLight::new([3.0, 3.0, 0.0], [0.0, -1.0, 0.0], [1.0, 0.9, 0.8], 120.0, 7.0, 10.0, 25.0),
+            SpotLight::new([-3.0, 3.0, 0.0], [0.0, -1.0, 0.0], [0.8, 0.9, 1.0], 80.0, 6.0, 15.0, 40.0),
+        ];
+        // `(id, kind tag, un-slotted word, base when it wins)` in table order: points, then spots.
+        let rows: [(EntityId, u32, u32, u32); 6] = [
+            (EntityId(100), LIGHT_KIND_POINT, UNSLOTTED_POINT, 0),
+            (EntityId(101), LIGHT_KIND_POINT, UNSLOTTED_POINT, 4),
+            (EntityId(102), LIGHT_KIND_POINT, UNSLOTTED_POINT, LAST_POINT_BASE),
+            (EntityId(200), LIGHT_KIND_SPOT, UNSLOTTED_SPOT, 1),
+            (EntityId(201), LIGHT_KIND_SPOT, UNSLOTTED_SPOT, 7),
+            (EntityId(202), LIGHT_KIND_SPOT, UNSLOTTED_SPOT, LAST_LAYER),
+        ];
+
+        let mut findings: Vec<String> = Vec::new();
+        for mask in 0u32..64 {
+            let mut assign = PunctualSlotAssignment::EMPTY;
+            for (i, &(id, _, _, base)) in rows.iter().enumerate() {
+                if mask & (1 << i) != 0 {
+                    assign = assign.with_winner(id, base);
+                }
+            }
+            let mut scratch = vec![0u8; LIGHT_HEADER_BYTES + rows.len() * GPU_LIGHT_BYTES];
+            let used = fold_light_table_slotted(
+                &mut scratch,
+                [].iter(),
+                [].iter(),
+                rows[..3].iter().zip(points.iter()).map(|(r, p)| (assign.base_for(r.0), p)),
+                rows[3..].iter().zip(spots.iter()).map(|(r, s)| (assign.base_for(r.0), s)),
+                &LightingConfig::default(),
+            );
+            assert_eq!(used, LIGHT_HEADER_BYTES + rows.len() * GPU_LIGHT_BYTES, "mask {mask:#08b}: six rows");
+
+            for (elem, &(id, kind, unslotted, base)) in rows.iter().enumerate() {
+                let won = mask & (1 << elem) != 0;
+                let want_base = if won { base } else { SLOT_NONE };
+                assert_eq!(assign.base_for(id), want_base, "invariant: the fixture's own handoff");
+                let want_word = if won { kind | 0x0001_0000 | (base << 17) } else { unslotted };
+                let k = row_kind_word(&scratch, elem);
+                let at = format!("mask {mask:#08b} row {elem} (kind {kind}, base {want_base})");
+                let mut fail = |what: &str| findings.push(format!("{at}: {what} — word {k:#010x}"));
+                if light_atlas_slot(k) != want_base {
+                    fail(&format!("slot field decodes {}", light_atlas_slot(k)));
+                }
+                if (k & CASTS_SHADOW_BIT != 0) != (want_base != SLOT_NONE) {
+                    fail("casts bit disagrees with the slot");
+                }
+                if k & 0xFFFF != kind {
+                    fail("kind tag lost");
+                }
+                if k & !DEFINED_BITS != 0 {
+                    fail("a bit outside the tag, bit 16 and the slot field is set");
+                }
+                if k != want_word {
+                    fail(&format!("word is not the literal {want_word:#010x}"));
+                }
+            }
+        }
+        assert!(
+            findings.is_empty(),
+            "{} finding(s) over 64 assignment masks x 6 rows; the first {}:\n{}",
+            findings.len(),
+            findings.len().min(24),
+            findings[..findings.len().min(24)].join("\n")
         );
-
-        assert_eq!(r_used, s_used);
-        assert_eq!(reference, slotted, "empty-assignment slotted fold is byte-identical");
     }
 
     /// The host `pack_atlas_slot(kind, base)` must produce the SAME `dir_kind.w` the golden's
@@ -1058,5 +1461,292 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- The punctual validity gate (plan §5.2 Premise F closure) ---------------------
+
+    /// Reads a table row's `pos_range.xyz` (words 4..6 of the row) back out of the bytes.
+    fn row_pos(bytes: &[u8], elem: usize) -> [f32; 3] {
+        let base_word = LIGHT_HEADER_WORDS + elem * (GPU_LIGHT_BYTES / 4) + 4;
+        let mut out = [0.0f32; 3];
+        for (i, o) in out.iter_mut().enumerate() {
+            let off = (base_word + i) * 4;
+            *o = f32::from_ne_bytes(bytes[off..off + 4].try_into().unwrap());
+        }
+        out
+    }
+
+    /// A finite point light at `x` on the X axis.
+    fn point_at_x(x: f32) -> PointLight {
+        PointLight::new([x, 0.0, 0.0], [1.0, 1.0, 1.0], 300.0, 9.0)
+    }
+
+    /// **The RED-mutation gate.** Remove the `punctual_row_is_cullable` guard from
+    /// [`fold_light_table_slotted`] and this test fails on `point_spot_count == 3` and on a
+    /// NaN in row 1's position — the very row that, uploaded, is culled INTO every froxel.
+    #[test]
+    fn a_nan_positioned_point_is_dropped_and_the_finite_rows_close_up() {
+        // Drives an emitting fold, so it joins this module's serialized set: `boyko-W2201`
+        // and `boyko-W2204` are per-SITE `Once` latches, which is PROCESS state, and a
+        // sibling that spends one inside the observer's window makes the observer read zero.
+        // Resetting fixes ORDER; the lock fixes CONCURRENCY; both are needed.
+        let _observe = boyko_log::probe::observe_lock();
+        let good_a = point_at_x(1.0);
+        let bad = PointLight::new([f32::NAN, 0.0, 0.0], [1.0, 1.0, 1.0], 300.0, 9.0);
+        let good_b = point_at_x(3.0);
+
+        let mut scratch = vec![0u8; LIGHT_HEADER_BYTES + 8 * GPU_LIGHT_BYTES];
+        let used = write_light_table(
+            &mut scratch,
+            &[],
+            &[],
+            &[good_a, bad, good_b],
+            &[],
+            &LightingConfig::default(),
+        );
+
+        assert_eq!(
+            used,
+            LIGHT_HEADER_BYTES + 2 * GPU_LIGHT_BYTES,
+            "the NaN row must not occupy a table slot"
+        );
+        let h = read_header(&scratch);
+        assert_eq!(h.light_count(), 2);
+        assert_eq!(h.point_spot_count(), 2);
+        // The survivors CLOSE UP — the table has no hole where the dropped row was, so the
+        // per-froxel index lists the cull emits still address contiguous rows.
+        assert_eq!(row_pos(&scratch, 0)[0], 1.0);
+        assert_eq!(row_pos(&scratch, 1)[0], 3.0);
+    }
+
+    /// The other three rejected shapes, one per row: a `+inf` component, a `-inf` component,
+    /// and a NaN radius — on both punctual kinds.
+    #[test]
+    fn infinite_positions_and_a_nan_range_are_dropped_on_both_punctual_kinds() {
+        // Drives an emitting fold, so it joins this module's serialized set: `boyko-W2201`
+        // and `boyko-W2204` are per-SITE `Once` latches, which is PROCESS state, and a
+        // sibling that spends one inside the observer's window makes the observer read zero.
+        // Resetting fixes ORDER; the lock fixes CONCURRENCY; both are needed.
+        let _observe = boyko_log::probe::observe_lock();
+        let cfg = LightingConfig::default();
+        let keep_pt = point_at_x(1.0);
+        let keep_sp =
+            SpotLight::new([2.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0; 3], 200.0, 8.0, 20.0, 30.0);
+
+        let bad_points = [
+            PointLight::new([f32::INFINITY, 0.0, 0.0], [1.0; 3], 300.0, 9.0),
+            PointLight::new([0.0, f32::NEG_INFINITY, 0.0], [1.0; 3], 300.0, 9.0),
+            PointLight::new([0.0, 0.0, 0.0], [1.0; 3], 300.0, f32::NAN),
+        ];
+        let bad_spots = [
+            SpotLight::new(
+                [0.0, 0.0, f32::INFINITY],
+                [0.0, 0.0, 1.0],
+                [1.0; 3],
+                200.0,
+                8.0,
+                20.0,
+                30.0,
+            ),
+            SpotLight::new([f32::NAN; 3], [0.0, 0.0, 1.0], [1.0; 3], 200.0, 8.0, 20.0, 30.0),
+        ];
+
+        for bad in &bad_points {
+            let mut scratch = vec![0u8; LIGHT_HEADER_BYTES + 8 * GPU_LIGHT_BYTES];
+            let used =
+                write_light_table(&mut scratch, &[], &[], &[keep_pt, *bad], &[keep_sp], &cfg);
+            assert_eq!(
+                used,
+                LIGHT_HEADER_BYTES + 2 * GPU_LIGHT_BYTES,
+                "point row {bad:?} must be rejected"
+            );
+            assert_eq!(read_header(&scratch).point_spot_count(), 2);
+        }
+        for bad in &bad_spots {
+            let mut scratch = vec![0u8; LIGHT_HEADER_BYTES + 8 * GPU_LIGHT_BYTES];
+            let used =
+                write_light_table(&mut scratch, &[], &[], &[keep_pt], &[keep_sp, *bad], &cfg);
+            assert_eq!(
+                used,
+                LIGHT_HEADER_BYTES + 2 * GPU_LIGHT_BYTES,
+                "spot row {bad:?} must be rejected"
+            );
+            assert_eq!(read_header(&scratch).point_spot_count(), 2);
+        }
+    }
+
+    /// Golden neutrality, stated as a property rather than asserted in prose: the gate is
+    /// INERT on every well-formed row, including the awkward-but-valid ones (a zero radius, an
+    /// INFINITE radius, coordinates at the f32 extremes, a light exactly at the origin). If
+    /// this ever reddens, some real scene just lost a light and a golden is about to move.
+    #[test]
+    fn the_validity_gate_is_inert_on_every_well_formed_row() {
+        let valid_positions = [
+            [0.0, 0.0, 0.0],
+            [-1.5, 2.25, 1e-30],
+            [f32::MAX, -f32::MAX, 0.0],
+            [f32::MIN_POSITIVE, 0.0, -0.0],
+        ];
+        // `+inf` range is deliberately ACCEPTED — a totally-ordered comparand both cull levels
+        // agree on, i.e. a coherent authoring choice, unlike a NaN.
+        let valid_ranges = [0.0f32, 1e-6, 9.0, f32::MAX, f32::INFINITY];
+
+        for pos in valid_positions {
+            for range in valid_ranges {
+                assert!(
+                    punctual_row_is_cullable(pos, range),
+                    "well-formed row (pos {pos:?}, range {range}) must NOT be dropped"
+                );
+            }
+        }
+    }
+
+    /// Keeps the gate above from being vacuous: the predicate really does reject, so a green
+    /// inertness sweep means "nothing valid is rejected", not "nothing is ever rejected".
+    #[test]
+    fn the_validity_gate_is_not_vacuous() {
+        assert!(!punctual_row_is_cullable([f32::NAN, 0.0, 0.0], 1.0));
+        assert!(!punctual_row_is_cullable([0.0, f32::INFINITY, 0.0], 1.0));
+        assert!(!punctual_row_is_cullable([0.0, 0.0, f32::NEG_INFINITY], 1.0));
+        assert!(!punctual_row_is_cullable([0.0, 0.0, 0.0], f32::NAN));
+    }
+
+    /// A dropped row must not consume the `MAX_LIGHTS` budget either — the two release-visible
+    /// gates compose, they do not shadow each other.
+    #[test]
+    fn a_dropped_row_does_not_spend_the_max_lights_budget() {
+        // Drives an emitting fold, so it joins this module's serialized set: `boyko-W2201`
+        // and `boyko-W2204` are per-SITE `Once` latches, which is PROCESS state, and a
+        // sibling that spends one inside the observer's window makes the observer read zero.
+        // Resetting fixes ORDER; the lock fixes CONCURRENCY; both are needed.
+        let _observe = boyko_log::probe::observe_lock();
+        let cfg = LightingConfig::default();
+        let bad = PointLight::new([f32::NAN; 3], [1.0; 3], 300.0, 9.0);
+        let mut points = vec![bad];
+        points.extend((0..MAX_LIGHTS).map(|i| point_at_x(i as f32)));
+
+        let mut scratch =
+            vec![0u8; LIGHT_HEADER_BYTES + (MAX_LIGHTS as usize + 2) * GPU_LIGHT_BYTES];
+        let used = write_light_table(&mut scratch, &[], &[], &points, &[], &cfg);
+
+        // The bad row is skipped WITHOUT advancing `written`, so all MAX_LIGHTS valid lights fit.
+        assert_eq!(used, LIGHT_HEADER_BYTES + MAX_LIGHTS as usize * GPU_LIGHT_BYTES);
+        assert_eq!(read_header(&scratch).point_spot_count(), MAX_LIGHTS);
+        assert_eq!(row_pos(&scratch, 0)[0], 0.0, "the first survivor is the first VALID light");
+    }
+}
+
+#[cfg(test)]
+mod l8a_light_codes {
+    use super::*;
+    use boyko_log::probe::{watch, watch_any, watched};
+
+    use crate::log_probe::arm;
+
+    /// A punctual light the validity gate must reject.
+    fn nan_point() -> PointLight {
+        PointLight {
+            position: [f32::NAN, 0.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            power: 100.0,
+            range: 1.0,
+        }
+    }
+
+    fn good_point() -> PointLight {
+        PointLight {
+            position: [0.0, 0.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            power: 100.0,
+            range: 1.0,
+        }
+    }
+
+    fn scratch() -> Vec<u8> {
+        vec![0u8; LIGHT_HEADER_BYTES + (MAX_LIGHTS as usize) * GPU_LIGHT_BYTES]
+    }
+
+    fn fold(points: &[PointLight]) -> usize {
+        let mut dst = scratch();
+        fold_light_table_slotted(
+            &mut dst,
+            core::iter::empty(),
+            core::iter::empty(),
+            points.iter().map(|p| (SLOT_NONE, p)),
+            core::iter::empty::<(u32, &SpotLight)>(),
+            &LightingConfig::default(),
+        )
+    }
+
+    /// The two light-table codes, in ONE test, because a `Once` latch is process state.
+    ///
+    /// This began as two tests and they failed each other: the overflow case's fixture also
+    /// contains a NaN light, so whichever ran first spent BOTH latches and the other observed
+    /// zero. Resetting fixes that between tests — but not *within* a sequence, because a fold that
+    /// overflows spends `W2201` whether or not anyone is watching. So the only sound way to assert
+    /// on a sequence of first-occurrences is to own the whole sequence; splitting it into two
+    /// `#[test]` fns hands the ordering to the harness, which is not a thing a test may assume.
+    #[test]
+    fn w2201_and_w2204_are_separate_codes_and_each_fires_once() {
+        let _observe = boyko_log::probe::observe_lock();
+        arm();
+        // Both latches are PROCESS state and four sibling tests in this binary fold NaN lights
+        // for reasons of their own. Resetting is what makes this test independent of whatever ran
+        // before it -- without it the first assertion below observed `left: 0, right: 1` on every
+        // run, and the fix is not "lock harder": a spent latch cannot be un-spent by waiting.
+        W2204_SITE.reset();
+        W2201_SITE.reset();
+
+        // 1. Three NaN lights in ONE fold: one record carrying THREE, not three records carrying
+        //    one. This is the claim the migration ledger asked for and the old shape could not
+        //    make -- its reporter ran per dropped light, so the single record a latch let through
+        //    always described exactly one drop.
+        watch(b'W', W2204.number());
+        let _ = fold(&[nan_point(), nan_point(), nan_point()]);
+        assert_eq!(watched(), 1, "one W2204 record per fold, not one per dropped light");
+        //    AND the record says THREE. The count assertion above cannot see that: reverting this
+        //    site to its pre-migration shape -- a reporter called once per dropped light behind
+        //    the same latch -- leaves it green, because "one record saying three" and "one record
+        //    saying one" are both one record. The ledger's claim is about the PAYLOAD, so the
+        //    payload is what this line reads.
+        let msg = boyko_log::probe::last_message();
+        assert!(
+            msg.contains("dropped 3 point/spot light(s)"),
+            "the record must carry the tally, not merely exist: {msg}"
+        );
+
+        // 2. ONE fold that both overflows AND drops a NaN. `boyko-W2204`'s latch is spent by step
+        //    1, so the drop is silent; `boyko-W2201` has its own latch and fires. Watching W2201
+        //    across this fold therefore counts exactly one record, and THAT is the separation:
+        //    under a single code covering both conditions this count would be zero, because the
+        //    latch step 1 spent would be the same latch.
+        //
+        //    The two must be observed in the SAME fold, not in two. A fold that overflows spends
+        //    W2201 whether or not anyone is watching, so a first pass "to check W2204 is quiet"
+        //    would consume the very occurrence the next assertion is about -- which is exactly how
+        //    the first draft of this test failed, `left: 0, right: 1`, deterministically.
+        let mut lights: Vec<PointLight> = (0..MAX_LIGHTS + 4).map(|_| good_point()).collect();
+        lights[0] = nan_point();
+        watch(b'W', W2201.number());
+        let _ = fold(&lights);
+        assert_eq!(watched(), 1, "W2201 has its own latch and fires on its first overflow");
+
+        // 3. Both spent: silence, and `watch_any` means silence about EVERY code, so a third
+        //    reporter appearing on this path would redden this line rather than hide behind it.
+        watch_any();
+        let _ = fold(&lights);
+        assert_eq!(watched(), 0, "both Once latches are spent");
+    }
+
+    #[test]
+    fn a_clean_fold_reports_nothing() {
+        // The positive control: a fold with no NaN and no overflow must be silent, whatever the
+        // latches' state. Without it, a fold that reported unconditionally would satisfy the
+        // assertions above.
+        arm();
+
+        watch_any();
+        let _ = fold(&[good_point(), good_point()]);
+        assert_eq!(watched(), 0, "a clean fold is silent");
     }
 }

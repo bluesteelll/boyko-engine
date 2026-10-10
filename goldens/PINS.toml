@@ -1,18 +1,49 @@
-# goldens/PINS.toml — SINGLE SOURCE OF TRUTH for golden byte-identity pins.
+﻿# goldens/PINS.toml â€” SINGLE SOURCE OF TRUTH for golden byte-identity pins.
 #
 # Each pin records the SHA-256 of a dumped BMP plus the exact pipeline it was
-# blessed under. This file REPLACES the `58f6c6c3…` hash string that was formerly
+# blessed under. This file REPLACES the `58f6c6c3â€¦` hash string that was formerly
 # hand-copied across ~10 docs/*.md (miss one file = a silent stale gate).
 #
 # DO NOT hand-edit the sha256_* values. Update them ONLY via:
 #     scripts\golden.ps1 -Pin <name> [-Hwrt] -Bless
 # and only AFTER a visual owner sign-off on the freshly-dumped BMP.
 #
-# Verify a pin (no write):  scripts\golden.ps1 -Pin <name> [-Hwrt] -Check
+# Verify a pin (no write):  scripts\golden.ps1 -Pin <name> [-Hwrt]
+#   (checking IS the no-flag default -- there is no -Check parameter; passing one is a binding
+#    error. The script takes only -Pin / -Hwrt / -Bless.)
+#
+# A pin whose sha256_* is the literal "PENDING" is UNBLESSED: -Check reports it and exits 2 with a
+# hint rather than passing. That is also the way to ADD a leg by hand -- -Bless only OVERWRITES an
+# existing key, so a section missing e.g. sha256_hwrt makes the script throw; seed it with PENDING
+# first.
+#
+# HOST, 2026-09-10 (default-host clause and the golden.ps1 citation both re-derived 2026-09-18):
+# every [<pin>.env] block below now pins
+# RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-msvc", moved in the same change as the rest of
+# this tree's Windows recipes. (On 2026-09-10 the workstation's rustup DEFAULT host was still
+# x86_64-pc-windows-gnu, and moving it was recorded here as a later, owner-run step. That step
+# ran on 2026-09-17 14:27 -- MEASURED 2026-09-18, `rustup toolchain list` prints
+# `stable-x86_64-pc-windows-msvc (active, default)`.) It had to move HERE and not only in rustup,
+# and it still had to after that step: golden.ps1 SETS every key of a pin's env block explicitly
+# (the loop at :147-154, whose `Set-Item` is :151), so a pin that still named the gnu toolchain
+# would have kept the golden leg building gnu after the switch -- a split state the script's own
+# "never inherit" discipline would have hidden rather than exposed. ⚠ That citation read
+# `:143-150` until 2026-09-18, which is the tail of the env-WIPE loop (:141-146, which only
+# Remove-Items stray BOYKO_* vars) plus the head of the set loop, and stops one line SHORT of the
+# `Set-Item` the sentence is about -- it cited neither of the two things it names.
+#
+# HOST BYTE-IDENTITY, MEASURED (rung AH (4), 2026-09-21; the ledger is docs/measurements/
+# 2026-09-21-msvc-pin-ledger.md, row 25). Every sha256_* below was ORIGINALLY blessed on the
+# windows-gnu host, and an msvc build dumps the SAME bytes: the owner's run of 2026-09-10 (32/32),
+# 8668b9c7 (2026-09-18: software 32/32 PASS at e3cebe2d's gnu-blessed values, msvc, RTX 3060) and
+# 54e186d9 (61/61 check-only, 34 software + 27 hwrt). No golden was re-blessed for the host switch;
+# every re-bless since is on msvc, for a RENDER cause its own section states (2026-09-18 0973eec2,
+# 2026-09-19 429b6698, 2026-09-21 0759d193). A mismatch is a render change until a gnu build of the
+# same pin shows otherwise -- and -Bless is still NOT the reflex: owner sign-off first, as above.
 #
 # Format is a flat, section-scoped TOML subset (see scripts\golden.ps1 :: Read-Pins).
 # `sha256_hwrt` may equal `sha256_software` (the HW-RT shadow path was made
-# byte-identical to software for this scene) or diverge — each leg is pinned on its
+# byte-identical to software for this scene) or diverge â€” each leg is pinned on its
 # own -Bless run, so -Check reports reality regardless.
 
 [grand_showcase]
@@ -26,12 +57,1554 @@ test_name       = "engine_grand_showcase_512_screenshot_dump"
 bmp             = "D:\\tmp\\engine_grand_showcase.bmp"
 width           = 512
 height          = 512
-sha256_software = "58f6c6c3d986f7a393ea53b01c5021e7360cf6f1b32bf9db05d4d8bb98999dd5"
-sha256_hwrt     = "58f6c6c3d986f7a393ea53b01c5021e7360cf6f1b32bf9db05d4d8bb98999dd5"
+sha256_software = "a5ad662d2a56efd973487fe49063824c6be841ad07009f5099c0992a491ec718"
+sha256_hwrt     = "a5ad662d2a56efd973487fe49063824c6be841ad07009f5099c0992a491ec718"
 
 # Env the pin was blessed under. golden.ps1 SETS these explicitly (never inherits) and
 # CLEARS BOYKO_FORCE_SOFTWARE, so a stray shell env cannot silently change the pipeline.
 [grand_showcase.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[grand_showcase_2mat]
+# Asset-streaming plan F8 â€” the FIRST scene exercising the PER_INSTANCE_MATERIAL raster
+# pipeline: five UV-spheres, one material each (default gray, red + green matte dielectrics, a
+# low-roughness gold metal, a blue metal); the material drives BOTH albedo (base_color) and
+# metallic/roughness. Blessed by the orchestrator (delegated visual oracle) after a sign-off on the
+# freshly-dumped BMP (two visibly distinct surfaces) â€” do NOT hand-edit the sha256_* values.
+#
+# LIGHT-TABLE R2 MOVED THESE BYTES (lane fix/light-table-defects; re-blessed 2026-09-19 on the msvc
+# host after the owner's sign-off on the change -- f6147f90 -> 7e71e2a6, both legs). The Deferred
+# SDF marcher used to shadow toward a boot constant, [-0.45, 0.82, 0.36], whatever the scene's sun
+# was. It now takes the light table's primary sun, the first enabled directional the fold wrote,
+# every frame (LightTableStaging::primary_directional_dir, turned into the push by
+# crates/boyko_app/src/gpu_scene/marcher_sun.rs). This scene's sun is not that constant
+# (crates/boyko_app/tests/grand_showcase_2mat.rs, SUN_DIR = [-0.40, 0.78, 0.48]), so the old push
+# darkened a thin, hard-edged crescent on the lit side of four of the five spheres; that cut is gone
+# and the lit side falls off smoothly. 1,420 pixels changed, all on the spheres and none on the sky,
+# max channel delta 28 (the gold metal's 33 of them are scattered, not a crescent). Over those
+# pixels the L1 distance to [forward_mesh] (this scene on Forward, which never used the constant)
+# fell from 26,155 to 2,009. One of the 1,420 is darker: (237, 281) [3,69,33] ->
+# [2,69,33], 1 LSB of red lost to ACES cross-talk as green rises, which moves it toward
+# [forward_mesh]'s [0,70,33]. An A/B that pushed the old constant through the new path restored
+# f6147f90 on both legs, so the sun is the whole change. software == hwrt still holds.
+crate           = "boyko-app"
+test_binary     = "grand_showcase_2mat"
+test_name       = "grand_showcase_2mat_screenshot_dump"
+bmp             = "D:\\tmp\\grand_showcase_2mat.bmp"
+width           = 512
+height          = 512
+sha256_software = "7e71e2a6435de9581a7218f62c5aa9db89ca6229a6aeea01751246791163ff9b"
+sha256_hwrt     = "7e71e2a6435de9581a7218f62c5aa9db89ca6229a6aeea01751246791163ff9b"
+
+[grand_showcase_2mat.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\grand_showcase_2mat.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[deferred_sdf_only]
+# Multi-paradigm render-path plan, rung R3 (Deferred leg-disable, sdf leg): the SAME
+# grand_showcase room with resolved_render_path.mesh_leg forced OFF (GeometryLegs::Sdf). The
+# mesh raster gbuffer pass (boxes/walls/floor) is skipped, and so is EVERY mesh-shadow producer
+# it feeds -- CSM cascade depth, the punctual spot/point atlas depth, and (hwrt leg) the TLAS
+# pack/build + the shadow_vis/a-trous/temporal denoise chain (mesh-shadow producers are
+# mesh-leg-owned; the SDF leg's shadow is the marcher's own baked soft march, unaffected). In the
+# production host that gate is ResolvedRenderPath::mesh_shadow_producers(), read by boyko_render's
+# resolve_csm_cascades / resolve_shadow_atlas, which publish DISABLED fits so neither pass NOR
+# either light-header shadow bit arms; THIS pin's fixture (window_present_gbuffer's hand-built
+# showcase) has no such plan and applies the same predicate itself, checked by
+# declare_deferred_graph's debug_assert. The hwrt leg is therefore TLAS-less BY DESIGN under this
+# config (no mesh instances to build an acceleration structure from) and renders IDENTICAL to
+# software -- sha256_hwrt is expected to equal sha256_software (kept as its own pin, not
+# assumed, since every other pin in this file blesses both legs independently). Only the two
+# SDF spheres remain, composited by the byte-UNCHANGED marcher against the new
+# mesh_depth_neutral_clear pass's far-plane depth. Re-render + re-bless after the P1 scene-
+# assembly gate fix landed (do NOT hand-edit sha256_*).
+crate           = "boyko_rhi_vulkan"
+test_binary     = "window_present_gbuffer"
+test_name       = "engine_deferred_sdf_only_512_screenshot_dump"
+bmp             = "D:\\tmp\\deferred_sdf_only.bmp"
+width           = 512
+height          = 512
+sha256_software = "ffcc0ac6f70a6cdcd113e343ef2d65a9a3f8134478917f35bec73991d3d5515f"
+sha256_hwrt     = "ffcc0ac6f70a6cdcd113e343ef2d65a9a3f8134478917f35bec73991d3d5515f"
+
+[deferred_sdf_only.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[deferred_mesh_only]
+# Multi-paradigm render-path plan, rung R3b (Deferred leg-disable, mesh leg -- the mirror-image
+# of [deferred_sdf_only]): the SAME grand_showcase room with resolved_render_path.sdf_leg forced
+# OFF (GeometryLegs::Mesh). The SDF marcher is not dispatched at all (no two SDF spheres), so the
+# scene renders ONLY the mesh boxes/walls/floor with their CSM + punctual-atlas shadows (mesh-leg-
+# owned producers, unaffected -- mesh_leg is true here). The new viewt_from_depth compute pass
+# replaces the marcher as the sole gViewT producer for every pixel, so the resolve/SSAO still see
+# a real mesh surface depth exactly as under GeometryLegs::Both. The hwrt leg keeps its TLAS armed
+# as normal (mesh instances exist to build an acceleration structure from), unlike the sdf-only
+# sibling pin above.
+#
+# BLESSED at introduction (commit edbf3f0, "Deferred mesh-only leg -- SDF leg fully off
+# (R3b)"): the sha256_* values below are the real bless output, not placeholders -- this
+# file's only mechanically-checked unblessed sentinel is the literal "PENDING".
+crate           = "boyko_rhi_vulkan"
+test_binary     = "window_present_gbuffer"
+test_name       = "engine_deferred_mesh_only_512_screenshot_dump"
+bmp             = "D:\\tmp\\deferred_mesh_only.bmp"
+width           = 512
+height          = 512
+sha256_software = "65cb2004f3a8bcace12896cd2a5c4f959e2e7ae53d2f75f8b4ea21d9ee004ada"
+sha256_hwrt     = "65cb2004f3a8bcace12896cd2a5c4f959e2e7ae53d2f75f8b4ea21d9ee004ada"
+
+[deferred_mesh_only.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[forward_mesh]
+# Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh-only golden. Code-review
+# golden re-route: the original window_present_gbuffer.rs harness test could never actually
+# exercise RenderPath::Forward (that harness independently re-implements boot + scene assembly,
+# bypassing boyko_app::gpu_scene's real Forward wiring, so its GBufferScene literals carried
+# semantically-wrong placeholder values). This pin now boots through the REAL production
+# boyko_app::runner/gpu_scene::GpuSceneBundles path (the grand_showcase_2mat pattern) with
+# RenderPathConfig{path: Forward, legs: Mesh} inserted as a Resource before app.run() --
+# see crates/boyko_app/tests/forward_mesh.rs. Reuses grand_showcase_2mat's EXACT five-sphere
+# scene verbatim (same mesh/materials/sun/sky/camera), so the dumped BMP is a DIRECT visual
+# comparator against the Deferred 7e71e2a6 golden -- only the render path differs.
+# forward_opaque.fs.hlsl shades every mesh pixel inline (all-lights, no froxel) against the SAME
+# shared BRDF + combined CSM/punctual shadow visibility the deferred resolve uses (Set 1, this
+# scene has no CSM/atlas armed so those bindings are bound-but-unread).
+#
+# BACKGROUND = analytic sky (code-review follow-up): forward_sky.{vs,fs}.hlsl replicates the
+# deferred resolve's mask==0 sky/ground gradient + visible sun disc (deferred_pbr.hlsl:1369-1414)
+# token-for-token, drawn first inside forward_opaque's own begin_rendering scope (depth test/write
+# off) so opaque mesh geometry then draws over it -- matching the Deferred 7e71e2a6 golden's
+# background instead of a flat clear color, confirmed on real GPU (owner-verified render: five
+# spheres, correct materials/highlights, all 6 Deferred pins byte-identical).
+#
+# BLESSED at introduction (commit 85bc912, "Forward render path live end-to-end (R4b-b)"):
+# the sha256_* values below are the real bless output, not placeholders -- this file's only
+# mechanically-checked unblessed sentinel is the literal "PENDING".
+crate           = "boyko-app"
+test_binary     = "forward_mesh"
+test_name       = "forward_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\forward_mesh.bmp"
+width           = 512
+height          = 512
+sha256_software = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
+sha256_hwrt     = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
+
+[forward_mesh.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\forward_mesh.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[forwardplus_mesh]
+# Multi-paradigm render-path plan, rung R5: the ForwardPlus v1 mesh-only golden. Clones
+# [forward_mesh] verbatim -- the SAME grand_showcase_2mat five-sphere scene, the SAME production
+# boyko_app::runner/gpu_scene::GpuSceneBundles boot path -- with ONE delta: RenderPathConfig{path:
+# ForwardPlus, legs: Mesh} instead of {path: Forward, legs: Mesh}. See
+# crates/boyko_app/tests/forwardplus_mesh.rs.
+#
+# ForwardPlus adds a depth PRE-PASS (Decision 4's EQUAL-depth zero-overdraw early-Z contract:
+# depth_prepass.{vs,fs}.hlsl writes forward_depth GREATER+write-ON, then forward_opaque tests
+# EQUAL+write-OFF against it) + the forward_opaque_froxel.fs.hlsl FS variant (Set 0 grows by 2
+# bindings: ClusterGrid/LightIndexList @5/6). This scene arms NO L1 clustered-cull machinery
+# (boyko_app::gpu_scene has never wired GBufferScene::cluster_cull/cluster_grid/light_index/
+# light_index_alloc to Some -- a separate, unlanded L1-app-integration rung, out of R5 scope), so
+# the froxel FS's runtime use_clusters gate is false and it takes the IDENTICAL flat-block branch
+# forward_opaque.fs.hlsl's base compile always takes (the SAME L1 0%-gate the deferred resolve
+# uses). That gate is THREE terms since VB-P1k -- clusters_enabled != 0 && cluster_count != 0 &&
+# cluster_count <= grid_capacity, the capacity read off the BOUND ClusterGrid descriptor with
+# GetDimensions -- and the term that decides HERE is the FIRST: this scene never overrides
+# EnginePlugins's LightingConfig::default() seed, whose clusters_enabled is false, and
+# LightHeaderGpu::new packs that bit verbatim, so use_clusters short-circuits before the other two
+# are consulted. (sync_cluster_light_gate independently holds the header's dims lane at 0 on every
+# ForwardPlus boot, so a scene that DID set clusters_enabled = true here would be stopped by the
+# dims term instead.) Pixel output is expected to be pixel-identical (or ULP-level
+# FP-reorder-only) to [forward_mesh]'s
+# f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad.
+#
+# BLESSED at introduction (commit caae029, "ForwardPlus (clustered forward) render path
+# (R5)"): the sha256_* values below are the real bless output, not placeholders -- this
+# file's only mechanically-checked unblessed sentinel is the literal "PENDING".
+crate           = "boyko-app"
+test_binary     = "forwardplus_mesh"
+test_name       = "forwardplus_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\forwardplus_mesh.bmp"
+width           = 512
+height          = 512
+sha256_software = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
+sha256_hwrt     = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
+
+[forwardplus_mesh.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\forwardplus_mesh.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[forward_both]
+# Multi-paradigm render-path plan, rung R-SDFFWD: Forward x Both -- clones [forward_mesh]'s
+# five-sphere grand_showcase_2mat scene + production boyko_app::runner/gpu_scene::GpuSceneBundles
+# boot path verbatim, with ONE delta: RenderPathConfig{path: Forward, legs: Both} instead of
+# {path: Forward, legs: Mesh}. See crates/boyko_app/tests/forward_both.rs.
+#
+# SDF_FORWARD_IMPLEMENTED is now true, so Both no longer collapses to Mesh under Forward
+# (LegsCollapsedToMeshPreSdfForward is unreachable for this combo) -- the resolver honors
+# sdf_leg == true, arming sdf_forward_marched and the sdf_forward_march HAS_MESH compute dispatch
+# (declare_forward_graph's sdf_forward_march arm + record_forward). This scene's SDF edit-list is
+# boot-seeded EMPTY (count == 0, GpuSceneBundles::boot's doc) -- the march finds NO hit anywhere
+# and writes NOTHING to gLit (the "misses write nothing" contract), so forward_opaque's mesh-raster
+# color stands untouched. EXPECTED byte-identical to [forward_mesh]'s
+# f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad.
+#
+# BLESSED at introduction (commit 237c41b, "SDF forward-march wired end-to-end (R-SDFFWD
+# part 2)"): the sha256_* values below are the real bless output, not placeholders -- this
+# file's only mechanically-checked unblessed sentinel is the literal "PENDING".
+crate           = "boyko-app"
+test_binary     = "forward_both"
+test_name       = "forward_both_screenshot_dump"
+bmp             = "D:\\tmp\\forward_both.bmp"
+width           = 512
+height          = 512
+sha256_software = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
+sha256_hwrt     = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
+
+[forward_both.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\forward_both.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[sdf_forward_only]
+# Multi-paradigm render-path plan, rung R-SDFFWD: Forward x Sdf (mesh-less) -- the FIRST scene
+# exercising GeometryLegs::Sdf under a Forward-family path. No mesh entities are spawned
+# (GeometryLegs::Sdf's "zero mesh cost" contract), booted through the REAL production
+# boyko_app::runner/gpu_scene::GpuSceneBundles path with RenderPathConfig{path: Forward,
+# legs: Sdf}. See crates/boyko_app/tests/sdf_forward_only.rs.
+#
+# sdf_leg == true arms sdf_forward_marched and the MESH-LESS sdf_forward_march_sdfonly_pipeline
+# variant (mesh_leg == false, so record_forward never samples forward_depth). This scene's SDF
+# edit-list is boot-seeded EMPTY (count == 0) -- the march finds NO hit anywhere and writes
+# NOTHING to gLit, so the frame is expected to be forward_sky.{vs,fs}.hlsl's analytic sky/ground
+# gradient + sun disc ONLY (sky-only, no geometry drawn over it).
+#
+# BLESSED at introduction (commit 237c41b, "SDF forward-march wired end-to-end (R-SDFFWD
+# part 2)"): the sha256_* values below are the real bless output, not placeholders -- this
+# file's only mechanically-checked unblessed sentinel is the literal "PENDING".
+crate           = "boyko-app"
+test_binary     = "sdf_forward_only"
+test_name       = "sdf_forward_only_screenshot_dump"
+bmp             = "D:\\tmp\\sdf_forward_only.bmp"
+width           = 512
+height          = 512
+sha256_software = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858a17"
+sha256_hwrt     = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858a17"
+
+[sdf_forward_only.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\sdf_forward_only.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_mesh]
+# Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 (FUSED vb_resolve) mesh-only
+# golden. Clones [forward_mesh]'s five-sphere grand_showcase_2mat scene + production
+# boyko_app::runner/gpu_scene::GpuSceneBundles boot path, with ONE delta: RenderPathConfig{path:
+# VisibilityBuffer, legs: Mesh} instead of {path: Forward, legs: Mesh}. See
+# crates/boyko_app/tests/vb_mesh.rs.
+#
+# vb_raster (R32G32_UINT id + HW reverse-Z depth) -> vb_resolve (fused compute: geometry
+# re-fetch via the Decision-0 bindless table + analytic barycentric interpolation + the SAME
+# shared BRDF + shadow_apply.hlsli the deferred resolve/Forward/ForwardPlus all use). The
+# five spheres share ONE MeshHandle (one register_mesh_vb call, five spawns), so the SAME
+# vkCmdDrawIndexed's SV_InstanceID ranges 0..5 against one index buffer -- the Decision 9
+# (VB1) instance>0 SV_PrimitiveID-normalization fixture this rung's gate calls for, already
+# satisfied by the existing scene (no separate fixture needed).
+#
+# NOT expected byte-identical to [forward_mesh]/[forward_both] (f93b5aad...) -- the geometry
+# re-fetch's analytic barycentric interpolation is a genuinely different floating-point path
+# than the rasterizer's own hardware interpolation the other paths rely on; the orchestrator
+# compares the dumped BMP visually against those goldens (same geometry/lighting/materials).
+#
+# BLESSED at introduction (commit 4453778, "Visibility Buffer path live end-to-end (R8)"):
+# the sha256_* values below are the real bless output, not placeholders -- this file's only
+# mechanically-checked unblessed sentinel is the literal "PENDING".
+crate           = "boyko-app"
+test_binary     = "vb_mesh"
+test_name       = "vb_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\vb_mesh.bmp"
+width           = 512
+height          = 512
+sha256_software = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+sha256_hwrt     = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+
+[vb_mesh.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_mesh_hzb]
+# VG R3 piece 1 step P1-2 (docs/VG-R3-P1-PYRAMID-PLAN.md): [vb_mesh]'s scene, binary and test,
+# with BOYKO_VG_HZB=1 arming the depth pyramid. SAME test_binary + test_name on purpose -- the
+# pyramid is allocated and read by NOTHING, so this is not a second scene that ought to look the
+# same, it is the same code path with one allocation added.
+#
+# THE SHA IS DELIBERATELY IDENTICAL TO [vb_mesh]'s. That equality IS the inertness claim: a
+# divergence means the pyramid's allocation perturbed a render it must not touch. Re-bless the
+# two together or not at all -- a lone re-bless here would silently convert the gate from
+# "inert" to "whatever it does now".
+#
+# THE LOAD-BEARING LEG IS -ValidationOn, NOT the hash. This is the engine's FIRST storage image
+# with a mip chain (every other TextureDesc call site in the tree passes mip_levels: 1), so the
+# validation layer is what proves the image and its per-mip views are legal. A byte-identical
+# dump cannot make that claim: an illegal view that no pass binds changes no pixel. Run BOTH:
+#   scripts\golden.ps1 -Pin vb_mesh_hzb
+#   scripts\golden.ps1 -Pin vb_mesh_hzb -ValidationOn
+crate           = "boyko-app"
+test_binary     = "vb_mesh"
+test_name       = "vb_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\vb_mesh_hzb.bmp"
+width           = 512
+height          = 512
+sha256_software = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+sha256_hwrt     = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+
+[vb_mesh_hzb.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_hzb.bmp"
+BOYKO_VG_HZB             = "1"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_occ_split]
+# VG R3 piece 2 step P2-6, GATE G1 (docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md): [vb_mesh]'s scene,
+# binary and test, with BOYKO_VG_OCC=1 putting the OcclusionCulling marker in the spawn bundle of
+# ALL FIVE spheres. That arms GBufferScene::path_vb_occlusion_split(), which records a SECOND
+# raster scope -- vb_indirect_late_upload's vkCmdUpdateBuffer, a second begin/endRendering bracket
+# over the same two views, and one zero-instanceCount vkCmdDrawIndexedIndirect per batch.
+#
+# ⚠️ VG R3 piece 3 step P3-6 ARMED THE CULL, so what this equality asserts CHANGED, and it changed
+# from a plumbing claim into a DECISION claim. Piece 2's argument was purely structural (LOAD_OP_LOAD
+# yields what the early scope stored, no fragment is produced, STORE_OP_STORE writes it back, so a
+# scope drawing nothing is invisible). That still holds, but the cull now really tests occlusion:
+# the early phase projects every marked instance against the previous frame's depth pyramid and may
+# DEFER it to the late scope. The five spheres stand side by side against the sky, so none lies
+# behind another's silhouette and the conservative min-over-footprint test rejects NOTHING -- zero
+# deferred, zero drawn late, [vb_mesh]'s pixels. A divergence here now means THE CULL DELETED
+# VISIBLE GEOMETRY, which is the failure this pin is uniquely placed to catch.
+#
+# Re-bless the two together or not at all -- a lone re-bless here would silently convert the gate
+# from "the cull kept everything it should have" to "whatever it culls now". Unlike [vb_mesh_hzb],
+# that equality is MACHINE-CHECKED as well: the cross-pin guard
+# `the_pins_declared_byte_identical_actually_agree` (crates/boyko_app/tests/vg_density_census.rs)
+# parses this file and fails if the two literals ever diverge, which is the only thing standing
+# between a `-Bless` and a silently redefined gate.
+#
+# ⚠️ WHAT THIS PIN CANNOT CLAIM -- and it is the reason it never ships alone:
+#  * THAT THE SPLIT HAPPENED. A run that never recorded the late scope produces exactly this hash.
+#    Gate G2 (crates/boyko_app/tests/vb_occ_split_gate.rs) is the leg that reports the RECORDER's
+#    own scope count; the pair (G1 green + G2 red under the same corruption) is the evidence.
+#  * THAT ANYTHING WAS DEFERRED. On this scene the correct deferral count is ZERO, so a cull that
+#    decided nothing and a correct cull are the same pixels. The non-vacuity clause needs a fixture
+#    that actually occludes -- vb_occ_mixed, VG R3 piece 3 step P3-8.
+#  * ANYTHING ABOUT BARRIERS. A missing barrier changed no pixel and emitted no message when it
+#    was measured on this machine (the plan's "P2-0 RESOLVED" table), so the barrier evidence is
+#    gate G4's field-level assertions in
+#    crates/boyko_rhi_vulkan/tests/vb_barrier_stream_baseline.rs -- not this hash.
+#  * THAT THIS PIN COVERS A MULTI-BATCH LATE SCOPE. These five spheres share ONE MeshHandle, so the
+#    late loop runs exactly once HERE. ⚠️ This block used to add "no golden covers draw_batches >= 2;
+#    that is piece 3's first gate" -- FALSE since the [vb_occ_mixed*] family below, which registers
+#    TWO meshes (draw_batches == 2) and is pinned in four regimes. A multi-BATCH split DOES render
+#    under a golden now. What no hash can show -- here or there -- is that the late scope DREW; the
+#    executed evidence is gate G2's late_draws == draw_batches
+#    (crates/boyko_app/tests/vb_occ_split_gate.rs) and, since VG R3 piece 4 rung P4-4,
+#    vb_mesh_occ_pins_actually_split, which boots these very [*.env] blocks inside this binary.
+#
+# THE VALIDATION LEG (`scripts\golden.ps1 -Pin vb_occ_split -ValidationOn`) is gate G3, and its
+# claim is bounded by the same measurement: on this machine it sees STATIC legality only -- the
+# LOAD_OP_LOAD against the layout the graph left, vb_indirect_late's usage bits, the second
+# DRAW_INDIRECT access, the second begin/endRendering bracket, and vkCmdUpdateBuffer's alignment
+# and size rules. It CANNOT see a missing barrier: synchronization validation is not live here
+# (VK_EXT_validation_features is absent and the instance chain degrades silently), which was
+# established by deleting a real barrier and measuring 19 messages, no SYNC-HAZARD and a
+# byte-identical image. Run it against `-Pin vb_mesh -ValidationOn` and compare message for
+# message after handle normalisation; the counts must agree.
+#
+# PRE-FILLED with [vb_mesh]'s hashes (the pattern [vb_both] and [vb_mesh_hzb] use): the
+# orchestrator VERIFIES the equality on a real windowed GPU rather than blessing a fresh value.
+crate           = "boyko-app"
+test_binary     = "vb_mesh"
+test_name       = "vb_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\vb_occ_split.bmp"
+width           = 512
+height          = 512
+sha256_software = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+sha256_hwrt     = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+
+[vb_occ_split.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_occ_split.bmp"
+BOYKO_VG_OCC             = "1"
+# VG R3 piece 3 step P3-6 (plan D9): the split gained a `hzb.is_some()` conjunct -- it IS the
+# occlusion test now, and a late scope with no pyramid decides nothing. This line is REDUNDANT BY
+# DESIGN, and at VG R3 piece 4 rung P4-4 the REASON moved: until then the FIXTURE made BOYKO_VG_OCC
+# imply HzbMode::Build (a `|| occ_marked()` disjunction in vb_mesh.rs, deleted by that rung); since
+# P4-4 the HOST plans a pyramid iff a PRODUCER asks OR a CONSUMER needs one
+# (boyko_app::hzb_plan::hzb_plan_for), so BOYKO_VG_OCC would arm the pyramid on its own. Written
+# here so the configuration is legible from the pin file rather than only from
+# crates/boyko_app/tests/vb_mesh.rs -- and that redundancy is exactly why NO pin can red the host
+# disjunct; the non-pinned vb_occ_probe_dump_marked_no_hzb leg in vb_occ_split_gate.rs is the only
+# one that can. COUNTED FROM THIS FILE, not copied: SIX of the 30 pins are HZB-armed -- [vb_mesh_hzb],
+# [vb_occ_split] and the four [vb_occ_mixed*].
+BOYKO_VG_HZB             = "1"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+# ===============================================================================================
+# VG R3 piece 3 step P3-8 -- the vb_occ_mixed FOUR-PIN FAMILY.
+#
+# The first fixture in this repository on which the occlusion cull can reject anything. Every other
+# VB scene stands its geometry side by side against the sky, so the conservative min-over-footprint
+# test defers ZERO instances and "the cull decided correctly" and "the cull decided nothing" are the
+# same pixels AND the same counts. vb_occ_mixed puts four marked instances wholly inside a near
+# slab's silhouette (crates/boyko_app/tests/vb_occ_mixed_scene/mod.rs).
+#
+# ⚠️ SOFTWARE LEGS BLESSED, HWRT LEGS STILL "PENDING". The four sha256_software were blessed at
+# commit e160434 after a visual owner sign-off; the four sha256_hwrt are still the PENDING sentinel,
+# and golden.ps1's -Check reports a PENDING leg and exits 2 rather than passing -- the file header's
+# own documented way to ADD a leg by hand. NO sha256_* may be hand-edited on EITHER leg: blessing
+# requires a VISUAL OWNER SIGN-OFF on the freshly-dumped BMP, nobody else may supply one, and a
+# hand-written hash converts a gate into a transcription.
+#
+# ⚠️ ALL FOUR CARRY THE SAME LITERAL, PER LEG. That equality is the whole gate
+# (G-P3-A), and it is MACHINE-CHECKED by `the_pins_declared_byte_identical_actually_agree`
+# (crates/boyko_app/tests/vg_density_census.rs), which parses this file and fails if any of the
+# three derived legs ever diverges from [vb_occ_mixed_off]. A lone re-bless would silently convert
+# "the cull kept everything it should have" into "whatever it culls now".
+#
+# THE VARIABLE LADDER, which is the point of having four:
+#   off -> keep   FOUR variables: the split predicate, the late scope's bracket, the late dispatch,
+#                 and the second/third descriptor sets. A difference here is a PLUMBING defect.
+#   keep -> mixed ONE push-constant bit. Same pyramid, same scopes, same dispatches, same sets;
+#                 `defer` goes from identically-false to computed. A difference is a DECISION defect.
+#   keep -> late  ONE push-constant bit, the other one: the late raster path.
+# The pyramid's EXISTENCE is deliberately not a variable in this family -- [vb_occ_mixed_off]
+# carries BOYKO_VG_HZB="1" too, and the pyramid's byte-neutrality is already pinned by [vb_mesh] vs
+# [vb_mesh_hzb]. Round 2's table left `off` with no env at all, which would have rendered the
+# five-sphere scene instead of this one and made the four-pin equality meaningless.
+#
+# ⚠️ WHAT THE FOUR HASHES CANNOT CLAIM:
+#  * THAT ANYTHING WAS DEFERRED. Byte-identity is satisfied by a cull that rejects nothing. The
+#    non-vacuity clause (S n_defer > 0) is asserted from the GPU readback in
+#    crates/boyko_app/tests/vb_occ_mixed.rs (gate G-P3-B), never from a hash.
+#  * THAT THE LATE PHASE DID ANYTHING on the three unforced pins. On a converged static frame the
+#    correct late survivor count is ZERO (plan D12's fixed point); only [vb_occ_mixed_late] makes
+#    the late scope draw.
+#  * ANYTHING ABOUT BARRIERS -- a missing barrier was MEASURED to change no pixel and emit no
+#    message on this machine.
+# ===============================================================================================
+
+[vb_occ_mixed_off]
+# The BASELINE of the four-pin family: the mixed scene with the pyramid built and NOTHING marked, so
+# `path_vb_occlusion_split()` is false, there is ONE raster scope and all eight instances are drawn
+# in it. This is the image the other three must reproduce byte for byte.
+crate           = "boyko-app"
+test_binary     = "vb_mesh"
+test_name       = "vb_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\vb_occ_mixed_off.bmp"
+width           = 512
+height          = 512
+sha256_software = "85b7d3788130a8bb65f0b5b92ba86c71499bd7a4babe7d6900a711944d2913d9"
+sha256_hwrt     = "PENDING"
+
+[vb_occ_mixed_off.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_occ_mixed_off.bmp"
+BOYKO_VG_SCENE           = "mixed"
+BOYKO_VG_HZB             = "1"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_occ_mixed_keep]
+# FORCE_KEEP: the split is armed in full -- second scope, late cull dispatch, both extra descriptor
+# sets -- and the early phase defers NOTHING, which is exactly the behaviour that shipped before the
+# cull was armed. It is the ONE-VARIABLE baseline of the decision, the null control the decidability
+# protocol asks for.
+#
+# ⚠️ NO LONGER THE DISARM ROUTE. Until VG R3 piece 4 this block named FORCE_KEEP as the supported way
+# to turn the feature off; rung P4-4 gave the owner boyko_render::OcclusionConfig, whose default
+# OcclusionMode::Off IS the disarm and suppresses the split predicate, the late passes and the extra
+# descriptor-set bindings -- none of which FORCE_KEEP ever suppressed. FORCE_KEEP is now what it
+# always measured: a DIAGNOSTIC verdict override (boyko_app::OcclusionForce::KeepAll), the
+# every-mechanism-no-decision leg of the ladder below. The pin rendered with the config Off is
+# [vb_occ_mixed_off] -- which also carries no markers, since one env word (BOYKO_VG_OCC) arms both.
+#
+# Round 1 shipped VB_CULL_OCC_FORCE_KEEP as production shader surface that no gate ever set; this
+# pin is what makes it a supported switch rather than untested surface.
+crate           = "boyko-app"
+test_binary     = "vb_mesh"
+test_name       = "vb_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\vb_occ_mixed_keep.bmp"
+width           = 512
+height          = 512
+sha256_software = "85b7d3788130a8bb65f0b5b92ba86c71499bd7a4babe7d6900a711944d2913d9"
+sha256_hwrt     = "PENDING"
+
+[vb_occ_mixed_keep.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_occ_mixed_keep.bmp"
+BOYKO_VG_SCENE           = "mixed"
+BOYKO_VG_HZB             = "1"
+BOYKO_VG_OCC             = "1"
+BOYKO_VG_OCC_FORCE       = "keep"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_occ_mixed]
+# THE LOAD-BEARING PIN: the cull ARMED and UNFORCED on a scene that actually occludes. Four marked
+# instances sit wholly inside the near slab's silhouette and inside one 128-aligned pyramid block
+# each, so the early phase defers exactly them; the two marked instances outside the slab's rect are
+# drawn early. On a converged frame the late phase then rejects every candidate again (plan D12: one
+# predicate, the same bytes, the same verdict), so the late scope draws zero and the image is
+# [vb_occ_mixed_off]'s.
+#
+# A DIVERGENCE HERE IS THE CULL DELETING VISIBLE GEOMETRY. It is the one failure a hash is uniquely
+# placed to catch, and the reason this pin ships beside a count gate rather than alone.
+crate           = "boyko-app"
+test_binary     = "vb_mesh"
+test_name       = "vb_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\vb_occ_mixed.bmp"
+width           = 512
+height          = 512
+sha256_software = "85b7d3788130a8bb65f0b5b92ba86c71499bd7a4babe7d6900a711944d2913d9"
+sha256_hwrt     = "PENDING"
+
+[vb_occ_mixed.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_occ_mixed.bmp"
+BOYKO_VG_SCENE           = "mixed"
+BOYKO_VG_HZB             = "1"
+BOYKO_VG_OCC             = "1"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_occ_mixed_late]
+# FORCE_LATE: the early phase defers EVERY marked instance regardless of the pyramid, so the early
+# scope draws only the two UNMARKED ones (the slab and the far filler) and the LATE scope is the one
+# that rasterises the two survivors. This is the ONLY regime in which a static scene can exercise
+# the late raster path at all, and the only one in which `depth_early != depth_final` -- the pair of
+# clauses that prove the pyramid was built at the right point in the frame (G-P3-E clauses 2 and 3).
+#
+# The unmarked filler exists precisely so the early depth is not EMPTY here: with every instance
+# marked, FORCE-LATE would leave every texel at the reverse-Z far plane and trip the SHIPPED
+# non-vacuity clauses in crates/boyko_app/tests/hzb_engine_pyramid_gate.rs.
+crate           = "boyko-app"
+test_binary     = "vb_mesh"
+test_name       = "vb_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\vb_occ_mixed_late.bmp"
+width           = 512
+height          = 512
+sha256_software = "85b7d3788130a8bb65f0b5b92ba86c71499bd7a4babe7d6900a711944d2913d9"
+sha256_hwrt     = "PENDING"
+
+[vb_occ_mixed_late.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_occ_mixed_late.bmp"
+BOYKO_VG_SCENE           = "mixed"
+BOYKO_VG_HZB             = "1"
+BOYKO_VG_OCC             = "1"
+BOYKO_VG_OCC_FORCE       = "late"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_both]
+# Multi-paradigm render-path plan, rung R10: the VisibilityBuffer x Both golden. Clones [vb_mesh]'s
+# five-sphere grand_showcase_2mat scene + production boyko_app::runner/gpu_scene::GpuSceneBundles
+# boot path verbatim, with ONE delta: RenderPathConfig{path: VisibilityBuffer, legs: Both} instead
+# of {VisibilityBuffer, Mesh}. See crates/boyko_app/tests/vb_both.rs.
+#
+# VB_SDF_IMPLEMENTED is now true, so Both no longer collapses to Mesh under VB -- the resolver
+# honors sdf_leg == true, arming sdf_forward_marched and the HAS_MESH sdf_forward_march COMPUTE
+# dispatch AFTER vb_resolve (declare_vb_graph's sdf_forward_march arm + record_vb). This scene's
+# SDF edit-list is boot-seeded EMPTY (count == 0) -- the march finds NO hit anywhere and writes
+# NOTHING to gLit, leaving the five spheres vb_resolve painted untouched. The frame is therefore
+# EXPECTED byte-for-byte identical to the mesh-only VB frame [vb_mesh] (f4719cbf), EXACTLY as
+# forward_both == forward_mesh (f93b5aad) proves for the Forward family -- the O3 shared-frame
+# oracle. The pre-filled sha256_* below are [vb_mesh]'s hashes; the orchestrator VERIFIES the
+# equality on a real windowed GPU device (vb_both_screenshot_dump, #[ignore]) rather than blessing
+# a fresh value. If a divergence is found, re-render + re-bless via
+# `scripts\golden.ps1 -Pin vb_both -Bless` (and `-Hwrt -Bless`) AFTER the owner's visual sign-off.
+crate           = "boyko-app"
+test_binary     = "vb_both"
+test_name       = "vb_both_screenshot_dump"
+bmp             = "D:\\tmp\\vb_both.bmp"
+width           = 512
+height          = 512
+sha256_software = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+sha256_hwrt     = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+
+[vb_both.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_both.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_both_sdf]
+# VB-SV0 plan, rung S1 (docs/VB-SV0-SDF-SHADOW-PLAN.md): the VisibilityBuffer x Both golden with a
+# NON-EMPTY SDF edit list. See crates/boyko_app/tests/vb_both_sdf.rs; the scene itself lives in the
+# shared crates/boyko_app/tests/sv0_scene/mod.rs so the S1 CPU oracle measures what this pin
+# renders.
+#
+# Scene: [vb_both]'s five-sphere grand_showcase_2mat row verbatim (same mesh generation, same five
+# materials, same sun/sky, same camera) PLUS one SDF sphere (radius 0.45) placed 1.32 along the
+# unit sun direction from the CENTRE sphere's centre -- a surface-to-surface gap of 0.25.
+# path = VisibilityBuffer, legs = Both, AA off, 512x512.
+#
+# WHY it exists: every other VB pin ([vb_both] and [vb_sdf_only] both say so in their own comments)
+# is boot-seeded with count == 0 SDF edits, which makes SV0's shadow AND contact-AO terms exactly
+# 1.0 -- so a byte-identity gate over those pins is VACUOUS. This pin is the non-empty selection.
+# collect_sdf_edits gathers count == 1 here.
+#
+# NOT byte-comparable to [vb_mesh] / [vb_both]: with a non-empty edit list, sdf_forward_march
+# composites the SDF body's own pixels into gLit independently of SV0, so the frame differs by
+# construction. That difference proves nothing on its own -- S1's actual gate is the CPU coverage
+# oracle over this scene, not a frame diff.
+#
+# HALF-BLESSED, and the halves are not interchangeable. This header read "sha256_* are the literal
+# PENDING sentinel" after the software leg had been blessed, which invites the one edit that must
+# never happen here: re-blessing a leg that is already pinned. Only `sha256_hwrt` is PENDING.
+# `golden.ps1` exits 2 on it by design, so any gate quantified over this pin's hwrt leg is
+# vacuous until it is blessed -- do not read a green run as covering it.
+# The orchestrator blesses the remaining leg on a real windowed GPU device via
+# `scripts\golden.ps1 -Pin vb_both_sdf -Hwrt -Bless` AFTER the owner's visual sign-off.
+# Do NOT invent hashes.
+crate           = "boyko-app"
+test_binary     = "vb_both_sdf"
+test_name       = "vb_both_sdf_screenshot_dump"
+bmp             = "D:\\tmp\\vb_both_sdf.bmp"
+width           = 512
+height          = 512
+sha256_software = "88522c5aaf5564a7c5257d102fd5ce2d1f75a6d528d8fc17c90ff438b5dc8fc1"
+sha256_hwrt     = "PENDING"
+
+[vb_both_sdf.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_both_sdf.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_both_sdf_tex]
+# VB-SV0 plan, rung S1: the TEXTURED half of the S1 fixture pair -- [vb_both_sdf]'s scene with a
+# real textured material, so the material-classified vb_shade_tex row is the one carrying the
+# SV0-affected pixels. See crates/boyko_app/tests/vb_both_sdf_tex.rs.
+#
+# Scene: identical to [vb_both_sdf] (SAME shared sv0_scene row / sun / sky / camera / SDF body),
+# with the flat-colour materials replaced by ONE Material::with_textures material
+# (crates/boyko_app/assets/pbr_fixtures/synth_bumps, the committed oracle set) shared across four
+# instances. path = VisibilityBuffer, legs = Both, AA off, 512x512.
+#
+# WHY it exists: three of the SV0 gate rows are TEXTURED rows, and they were unconstructible --
+# the shipping textured pins ([vb_mesh_tex], [vb_mesh_tex_froxel]) are legs = Mesh, where SV0 is
+# structurally unarmable, and nothing in the tree was textured AND legs = Both AND carrying a
+# non-empty SDF edit list at the same time.
+#
+# ONE deliberate delta from vb_mesh_tex.rs's material row: the untextured contrast sphere is the
+# LAST index here, not the middle one. The middle sphere is the SDF body's anchor and therefore the
+# only sphere carrying shadowed / contact-AO pixels; leaving it untextured would route every
+# SV0-affected pixel through the plain vb_shade row and leave vb_shade_tex arming nothing -- a
+# textured fixture whose textured half is vacuous. Both classified rows stay populated either way.
+#
+# Textured-ness is entirely in-test (no RenderPathConfig field, no env knob): MATERIAL_FLAG_TEXTURED
+# OR-reduces over the mesh draws into vb_tex_active, which auto-selects the classified pipeline.
+# BOYKO_PBR_TEXTURE_DIR overrides the compiled-in synth_bumps folder; the pin is blessed on the
+# default folder, and the dump run prints the resolved bindless slots (0 = fallback) so a silent
+# fall back to the fallback texel cannot masquerade as a textured render.
+#
+# HALF-BLESSED, exactly as [vb_both_sdf] above -- see that pin's header for why the distinction
+# matters. Only `sha256_hwrt` is PENDING; the software leg is pinned and must not be re-blessed.
+# The orchestrator blesses the remaining leg via
+# `scripts\golden.ps1 -Pin vb_both_sdf_tex -Hwrt -Bless` AFTER the owner's visual sign-off.
+# Do NOT invent hashes.
+crate           = "boyko-app"
+test_binary     = "vb_both_sdf_tex"
+test_name       = "vb_both_sdf_tex_screenshot_dump"
+bmp             = "D:\\tmp\\vb_both_sdf_tex.bmp"
+width           = 512
+height          = 512
+sha256_software = "2f4de3909240bc737c8a696fa7a5e4cf161f1d320559a1f0b933362df9133970"
+sha256_hwrt     = "PENDING"
+
+[vb_both_sdf_tex.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_both_sdf_tex.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_sdf_only]
+# Multi-paradigm render-path plan, rung R10: VisibilityBuffer x Sdf (mesh-less) -- the FIRST scene
+# exercising GeometryLegs::Sdf under the VisibilityBuffer path. No mesh entities are spawned
+# (GeometryLegs::Sdf's "zero mesh cost" contract), booted through the REAL production
+# boyko_app::runner/gpu_scene::GpuSceneBundles path with RenderPathConfig{path: VisibilityBuffer,
+# legs: Sdf}. See crates/boyko_app/tests/vb_sdf_only.rs.
+#
+# sdf_leg == true arms sdf_forward_marched and the MESH-LESS sdf_forward_march_sdfonly_pipeline
+# variant; mesh_leg == false gates vb_raster/vb_resolve OFF entirely (they need the Decision-0
+# geometry table, absent with no mesh leg), so vb_sky + the mesh-less march are the sole gLit
+# producers. This scene's SDF edit-list is boot-seeded EMPTY (count == 0) -- the march finds NO hit
+# and writes NOTHING to gLit, so the frame is the forward_sky.{vs,fs}.hlsl analytic sky/ground
+# gradient + sun disc ONLY. vb_sky REUSES the compiled forward_sky SPIR-V verbatim, so with the
+# same camera/sun uniforms the frame is EXPECTED byte-identical to [sdf_forward_only] (a1256bde,
+# the Forward x Sdf sky-only frame) -- the O3 shared-frame oracle. The pre-filled sha256_* below
+# are [sdf_forward_only]'s hashes; the orchestrator VERIFIES the equality on a real windowed GPU
+# device (vb_sdf_only_screenshot_dump, #[ignore]). If the separate vb_sky pipeline object diverges
+# by any ULP, re-render + re-bless via `scripts\golden.ps1 -Pin vb_sdf_only -Bless` (and
+# `-Hwrt -Bless`) AFTER the owner's visual sign-off on the freshly-dumped BMP.
+crate           = "boyko-app"
+test_binary     = "vb_sdf_only"
+test_name       = "vb_sdf_only_screenshot_dump"
+bmp             = "D:\\tmp\\vb_sdf_only.bmp"
+width           = 512
+height          = 512
+sha256_software = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858a17"
+sha256_hwrt     = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858a17"
+
+[vb_sdf_only.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_sdf_only.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_mesh_tex]
+# Textured-PBR rung TV0 (RENDER-PARITY-PLAN.md Sec 2.3 / VB-P2-CLASSIFICATION-PLAN.md): the
+# VisibilityBuffer TEXTURED golden -- [vb_mesh]'s five-sphere scene with a REAL textured
+# material (crates/boyko_app/assets/pbr_fixtures/synth_bumps) shared across four instances,
+# rendered through RenderPath::VisibilityBuffer x GeometryLegs::Mesh. See
+# crates/boyko_app/tests/vb_mesh_tex.rs.
+#
+# Textures force GBufferScene::vb_tex_active() -> vb_use_classified onto the material-classified
+# vb_shade_tex.comp.spv pipeline automatically (no BOYKO_VB_FORCE_CLASSIFIED needed): Set 0 binds
+# vb_set0_tex (the wider PerInstanceMaterialTex ring at b1, against the SAME vb_layout0 layout
+# object as the base vb_set0, R5), Set 3 adds the shared bindless texture-array table (the SAME
+# layout object gbuffer_mrt.fs.hlsl's TEXTURED variant binds).
+#
+# This pin is NOT byte-comparable to any other pin: it is its own frozen bytes, and what makes
+# those bytes CORRECT is VB-vs-Deferred parity on an IDENTICAL scene. vb_mesh_tex.rs's eval fn
+# (vb_mesh_tex_aa_screenshot_dump, BOYKO_PATH=vb|deferred) renders both halves from the same
+# `setup`, which is the only harness that can: the launcher's BOYKO_RENDER_PATH seam is applied
+# inside EnginePlugins::build(), so a test's own post-add_plugins insert_resource wins over it.
+# Measured at bless (synth_bumps, 512, AA off): mean |delta| 0.030/255, max 3/255, zero pixels
+# over 8 -- the residual is sampler ULP + shading-order, not a path difference. Re-checked on the
+# alley-brick-wall pack (640 and 1280 solo): max 5-6/255, same verdict.
+#
+# BLESSED 2026-07-16 after the owner's visual sign-off (five-sphere synth_bumps dump + the
+# Deferred side-by-side + a 1280 solo brick close-up). synth_bumps' normal.png is the DirectX
+# conversion of the baker's OpenGL output (scripts/normal_ogl_to_dx.py) -- the engine re-signs
+# nothing, so re-baking that fixture WITHOUT re-converting would move these bytes and invert the
+# relief this golden exists to prove. sha256_hwrt EQUALS sha256_software here: the scene has no
+# shadow receivers (no ground plane), so the ray backend has nothing to change -- kept as its own
+# pin so a future scene edit cannot silently drop the HW-RT leg's coverage.
+crate           = "boyko-app"
+test_binary     = "vb_mesh_tex"
+test_name       = "vb_mesh_tex_screenshot_dump"
+bmp             = "D:\\tmp\\vb_mesh_tex.bmp"
+width           = 512
+height          = 512
+sha256_software = "5d8f8854cfb123d14d04c2cc0977364714a1916e2314ccb9248956e6456092b6"
+sha256_hwrt     = "5d8f8854cfb123d14d04c2cc0977364714a1916e2314ccb9248956e6456092b6"
+
+[vb_mesh_tex.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_tex.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[taa_armed]
+# AA Stage 4 rung T0: the ARMED-TAA gate. Until this pin existed, every one of the other pins
+# rendered with `AaMode::Off` (the default), so the whole temporal path -- the jitter, the history
+# ring, the reprojection, the variance clamp, the reset transition -- carried ZERO regression
+# protection: an ON-path change could only be caught by someone re-running an eval by hand.
+#
+# This pin renders `AaMode::Taa` at its shipped default `jitter_scope = RasterOnly`, i.e. exactly
+# what a world that sets `AaConfig { mode: Taa }` and nothing else gets today. Its sibling
+# [taa_armed_basis] pins the opt-in shear; the PAIR is the point -- the two must differ, and
+# `-Check`ing both is what proves `JitterScope` still selects anything at all.
+#
+# `BOYKO_TAA_PHASE` is deliberately NOT set: an unpinned phase cycles HALTON_8 across the 30
+# `SETTLE_FRAMES` presented before the readback, so these bytes exercise REAL multi-phase temporal
+# accumulation rather than convergence onto a single frozen offset. Determinism was proven before
+# blessing -- two separate processes at an identical phase produced 0 differing pixels out of
+# 810000 (crates/boyko_app/tests/taa_jitter_eval.rs, the A0 control). The corollary: this pin is
+# legitimately sensitive to `host_dump::SETTLE_FRAMES` and to the Halton table. If either changes,
+# these bytes SHOULD move, and that is the pin doing its job -- not a flake to bless away.
+#
+# sha256_hwrt DIVERGES from sha256_software here, unlike most pins in this file -- and that is
+# correct, not a defect. Under `hwrt` the DIRECTIONAL shadow term is a rayQuery mesh trace, not the
+# CSM cascade lookup: deferred_pbr.hlsl's `#if HWRT` arm never calls csm_visibility at all (which is
+# also why the four deferred_pbr_hwrt_* blobs are byte-identical across CSM-kernel edits -- DXC
+# eliminates the uncalled function). The two legs therefore render genuinely different shadows, and
+# TAA accumulates those different inputs. Each leg is pinned on its own -Bless run.
+#
+# NB an earlier draft of this comment claimed the ray backend "has nothing to change here" because
+# the scene's directional shadow is CSM. The bless disproved it on the spot: the legs' hashes
+# differ. Left recorded because the wrong version was plausible enough to write.
+#
+# SHADOW GATE SG4 MOVED THESE BYTES, and the new ones are the DEFINED frame (vkval lane; ruled and
+# re-blessed 2026-09-18 on the msvc host -- software ee3a8a8c -> 765de1d9, hwrt 109c7055 ->
+# 0acc66b5). The fixture hand-seeds the DERIVED bit `LightingConfig.csm_shadows` to true (no pin
+# sets BOYKO_CSM_OFF; crates/boyko_app/tests/taa_jitter_eval.rs, at the seed's "STAYS, on purpose"
+# comment), while `sync_csm_light_gate`, which owns that bit, runs one frame behind
+# `collect_lights`. So on frame 0 the light header's CSM bit is ON while the host is unarmed -- no
+# caster batch yet, so no cascade pass records. Before SG4 that frame sampled cascades no pass had
+# written, through the live fitted cascade UBO: the pixel depended on memory nothing wrote. SG4
+# uploads `ResolvedCsm::DISABLED` on every unarmed frame (crates/boyko_app/src/runner.rs step 5d,
+# `frame_uniform`), so frame 0 now reads `gCsmActive == 0` and samples no cascade. TAA carries
+# frame 0 into history, and what survives the settle frames is 5 pixels, max channel delta 3/255,
+# on the SDF sphere's upper rim (x 182-201, y 155-158) -- measured against the e3cebe2d frame, the
+# same 5 pixels and deltas on both legs. The seed STAYS: it is the goldens' only witness of a
+# header-LEADS-host frame, and it refutes the shadow design's D4 premise that a static scene's
+# header only ever trails the host.
+#
+# LIGHT-TABLE R2 MOVED THESE BYTES BY ONE PIXEL (lane fix/light-table-defects; re-blessed
+# 2026-09-19 on the msvc host -- software 765de1d9 -> 31ce5178, hwrt 0acc66b5 -> c6429c3e). R2
+# makes the Deferred SDF marcher take the light table's primary sun instead of a boot constant (see
+# [grand_showcase_2mat]). This scene's sun IS that constant, [-0.45, 0.82, 0.36]
+# (crates/boyko_app/tests/taa_jitter_eval.rs, SUN_DIR), so the direction did not change, only its
+# bits. The old push was the raw, non-unit constant, normalised in the shader; the new one is the
+# table's value, the pose's direction after the quaternion round-trip, normalised by
+# GpuLight::from_directional. The two agree to rounding, and that difference crosses one 8-bit step
+# at one pixel: (236, 191), 1 LSB darker, the same pixel on both legs. An A/B that pushed the raw
+# constant through the new path restored 765de1d9 and 0acc66b5, so the rounding is the whole change.
+#
+# R4-FRAME-ORDER + R4b-OPEN-EDGES MOVED THESE BYTES, AND THE PINNED ONES WERE WRONG ON TWO COUNTS
+# (lane fix/light-table-defects; ruled and re-blessed 2026-09-21 on the msvc host -- software
+# 31ce5178 -> b1e3b254 (7,275 px changed, max channel delta 15), hwrt c6429c3e -> ebddcd7d
+# (5,031 px, max 14)). Two orders the shipped host never declared decided the pinned frame 0, and
+# both ran the wrong way:
+#  * Frame 0 drew 0 meshes under the undeclared `visibility_sync` / reader order: the mesh and
+#    caster gathers filter on `Enabled<RenderEnabled>`, which `visibility_sync` sets through a
+#    deferred command, and nothing ordered the readers after that writer -- the executor's wave
+#    packing ran the gathers first (measured: 0 draw rows on frame 0, 7 on every later frame).
+#    R4's E1, `VisibilitySet::Read.after(VisibilitySet::Sync)` in crates/boyko_app/src/plugins.rs.
+#  * Frame 0 was lit from the sun's identity `GlobalTransform`, because `light_reconcile` ran before
+#    `propagate_transforms`: the fixture spawns the sun with a posed `Transform` and
+#    `GlobalTransform::IDENTITY` (crates/boyko_app/tests/taa_jitter_eval.rs, the
+#    `DirectionalLightObject` spawn), and the reconcile (`Changed<GlobalTransform>`,
+#    crates/boyko_render/src/light_reconcile.rs) copied the identity pose's direction into the
+#    light table -- measured in 34 of 34 frames of the order dump, the docs/OPEN-QUESTIONS.md
+#    2026-09-19 (b) finding. R4b's edge C, `LightReconcileSet.after(CameraSet::Resolve)`, in the
+#    same file.
+# TAA carried that frame into its history; what survives the settle frames sits on the mesh
+# silhouettes and on the SDF sphere's terminator. Attribution by single-edge A/B on the lane tree:
+# the hwrt value with edge C removed equals the G2-edge value
+# (1dde137bc09f5fa0ba0f06824990e1be6f179cc8c720ff5164cef48208f9c261), which is the mesh-only move;
+# the software value with edge C removed is the mesh-only value ae67351d. Removing only the G2 edge
+# (the light seed's `.before(cull)`) moves nothing on either leg any more -- the pair it used to
+# flip is declared now.
+# HWRT SHADOW-RAY ORIGIN MOVED THESE BYTES (lane fix/hwrt-shadow-ray-origin; re-blessed 2026-09-21 on the
+# msvc host -- hwrt ebddcd7d -> 6f6cb89e; the software hash b1e3b254 is unchanged). The pinned hwrt
+# frame carried a false-shadow region -- 100,916 px (38.5 % of the frame) darker than the software
+# leg by > 30 LSB on the far floor, the cube tops and the wall -- from deferred_pbr.hlsl
+# reconstructing the cone-trace origin on the b5 pixel ray while a raster-owned pixel's gViewT is the
+# Euclidean distance the JITTERED raster wrote (frame 30 is Halton phase 7, jy = +0.389 px; the origin
+# sat up to 6.9 mm under the floor beyond t ~ 2.9 m, and every one of the 16 cone rays self-hit the
+# receiver from below). The origin now uses the ray through the raster's own sub-pixel sample
+# (`SHADOW_RASTER_FWD` / `SHADOW_ORIGIN_MODE` in the 48-B RayShadowUbo, `boyko_render::RayShadowFrame`,
+# `raster_ray_forward` in view.rs) on raster-owned pixels, told apart from SDF-owned ones bit-exactly
+# (`gViewT == md*64` against the raster depth `gDepthHw` @21). Measured against the software leg on
+# the new frame (exact bytes): 109 px darker by > 30 LSB, all within the two legs' intrinsic
+# difference -- 96 px on one contact-shadow line at the right cube's wall base (x 422-452,
+# y 196-201; the cone trace draws it, the CSM never does; present in the old pin and on the TAA-off
+# hwrt frame, 95 of the 96 coincident) plus 13 px in the penumbra strip (x 162-185, y 203-315; the
+# soft cone vs Tent13 PCF). The TAA-off hwrt-vs-software difference, the regime without the defect,
+# is 125 px on exact bytes (the probe's window-resampled figure was 270). The earlier note's "the
+# two legs render genuinely different shadows" was this artefact, not the trace's softness. Gates:
+# taa_jitter_eval::{hwrt_shadow_origin_phase7,hwrt_shadow_origin_all_phases,
+# hwrt_shadow_origin_consecutive_frames} (gpu-windowed, --features hwrt) -- red on the tree before
+# the fix (band-F delta 42.1 LSB / 29,951 px; max phase pair 97,853 px; max consecutive-frame
+# change 95,748 px), green after (0.236 LSB / 0 px; 0 px; 0 px).
+crate           = "boyko-app"
+test_binary     = "taa_jitter_eval"
+test_name       = "taa_jitter_eval_screenshot_dump"
+bmp             = "D:\\tmp\\taa_armed.bmp"
+width           = 512
+height          = 512
+sha256_software = "b1e3b254835e8d445130d3d9a3ec3aa375ca5ea930220dfff0e5783833d95130"
+sha256_hwrt     = "6f6cb89ec4854d7587b1417e136127c09c5280881ea953bded1e507154a41bd4"
+
+[taa_armed.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\taa_armed.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+BOYKO_AA                 = "taa"
+BOYKO_WIN                = "512"
+# EXPLICIT since `JitterScope::RasterAndBasis` became the default: this pin exists to freeze the
+# RasterOnly opt-OUT path, so it must NAME it. Left implicit it would render the default and
+# collapse onto [taa_armed_basis]'s bytes -- firing this pair's own "if the two pins ever agree,
+# the shear is dead" alarm from the pins' configuration rather than from a regression. A gate that
+# can cry wolf at itself is not a gate.
+BOYKO_TAA_SCOPE          = "raster"
+
+[taa_armed_basis]
+# AA Stage 4 rung T0 (sibling): the same armed-TAA scene through rung C1's OPT-IN b5 camera-basis
+# shear (`jitter_scope = RasterAndBasis`), the path that finally makes the Halton jitter reach the
+# shading sample position rather than only the raster mesh vertex push.
+#
+# Why it is worth its own bytes: the shear is the campaign's keystone and its ONLY structural
+# guard today is that `RasterOnly` stays the default. This pin is what would catch a regression
+# that silently disarms the shear -- a failure mode with NO other symptom, because a disarmed
+# shear renders a perfectly plausible picture (it is precisely the picture we shipped for months).
+# Proven live at bless: with the mesh leg disabled, Halton phase 0 vs phase 4 goes from 0 differing
+# pixels under `RasterOnly` to 70662 (8.72%) here.
+#
+# These bytes MUST differ from [taa_armed]'s. If the two pins ever agree, the shear is dead.
+#
+# Rung T2 (the resolve-policy knobs) moved these bytes by exactly ONE pixel at 1/255, while
+# [taa_armed] stayed byte-identical through the same change. That asymmetry IS the diagnosis, and
+# it is worth keeping: both legs run the identical shader at the identical `TaaConfig::default()`
+# mode words -- the ONLY thing that differs is the b6 basis, i.e. the VALUES fed to the resolve. So
+# T2's added branches perturbed float evaluation ORDER, and for one pixel's values the result
+# rounded one quantization step differently. A structural defect could not produce 1 px; it would
+# move the frame wholesale. Re-blessed on that measurement, NOT on a visual check -- 1/255 on a
+# single pixel is not something an eye can adjudicate, and pretending otherwise would be theatre.
+# Measured on the software leg (262144 px, delta histogram {1: 1}); the hwrt leg is inferred from
+# the same cause, not separately measured.
+#
+# Rung C2 is baked into these bytes: C1 shipped with the shear leaking into taa_resolve's OWN
+# reprojection (it built `P` from the sheared basis, then reprojected it with an UNJITTERED
+# `mc_prev_view_proj`), so the history lookup wobbled with the Halton phase and progressively
+# BLURRED the history instead of accumulating it. The owner caught it by eye on a mesh cube's edge
+# while a whole-frame "intermediate tone" metric was reporting the blur as a 10-point ANTIALIASING
+# GAIN -- the metric cannot tell blur from AA. Fixed by reprojecting differentially,
+# `history_uv = pixel_uv + (prev_uv - cur_uv)`, which is exactly zero for a static camera BY
+# CONSTRUCTION. Post-fix, the marched sphere still antialiases (0.0% -> 38.3% edge-ramp share vs AA
+# off, measured on the SDF-only leg) while the cube's edge profile is now identical to [taa_armed]'s.
+#
+# Shadow gate SG4 moved these bytes, for the reason recorded in [taa_armed] (vkval lane; ruled and
+# re-blessed 2026-09-18 on the msvc host -- software 87559012 -> 456b4060, hwrt 70aefdfb ->
+# 0809d4b9). The fixture's hand-seeded `LightingConfig.csm_shadows = true` makes frame 0 a
+# header-ON, host-unarmed frame, which used to sample a cascade no pass had written and now reads
+# the DISABLED cascade UBO; TAA carries that frame into history. On the software leg that is 2
+# pixels at max channel delta 1/255 on the SDF sphere's rim, measured against the e3cebe2d frame.
+# These bytes still differ from [taa_armed]'s, so the shear is still live.
+#
+# R4-frame-order + R4b-open-edges moved these bytes, and the pinned ones were wrong on two counts,
+# for the reasons recorded in [taa_armed] (lane fix/light-table-defects; ruled and re-blessed
+# 2026-09-21 on the msvc host -- software 456b4060 -> 53ba8049 (4,444 px changed, max channel
+# delta 13), hwrt 0809d4b9 -> 32ba8e29 (2,100 px, max 14)): frame 0 drew 0 meshes under the
+# undeclared `visibility_sync` / reader order (R4's E1), and frame 0 was lit from the sun's identity
+# `GlobalTransform` because `light_reconcile` ran before `propagate_transforms` (R4b's edge C); TAA
+# carried that frame. The hwrt value with edge C removed equals the G2-edge value
+# (ee8701b257f19ec7e4d68707aca0905c56d4c8fc4ff3479b97fbf903676889ec), which is the mesh-only move;
+# the software value with edge C removed is the mesh-only value 114767d1. These bytes still differ
+# from [taa_armed]'s, so the shear is still live.
+# HWRT SHADOW-RAY ORIGIN MOVED THESE BYTES (lane fix/hwrt-shadow-ray-origin; re-blessed 2026-09-21 on the
+# msvc host -- hwrt 32ba8e29 -> 3af811ff; the software hash 53ba8049 is unchanged). The pinned hwrt
+# frame carried a false-shadow region -- 148,056 px (56.5 % of the frame) darker than the software
+# leg by > 30 LSB -- the same b5-ray origin defect as [taa_armed], DOUBLED under the basis scope: the
+# b5 shear (`composite_perspective_from_view_sheared`) points the resolve ray through raster-NDC
+# q + j while the raster samples q - j (docs/OPEN-QUESTIONS.md, the 2026-09-21 D2 item; a pin test
+# records the sign), so the mesh-owned origin was 2j off instead of j. The fix derives
+# `SHADOW_RASTER_FWD` from the UNJITTERED view + the raster's own jitter, so it is exact under either
+# scope and does not inherit D2. Measured against the software leg on the new frame (exact bytes):
+# 107 px darker by > 30 LSB, all within the legs' intrinsic difference -- 96 px on the contact-shadow
+# line at the right cube's wall base (x 422-452, y 196-201; in the old pin and on the TAA-off frame)
+# plus 11 px in the penumbra strip (x 162-183, y 203-315). Same gates as [taa_armed].
+crate           = "boyko-app"
+test_binary     = "taa_jitter_eval"
+test_name       = "taa_jitter_eval_screenshot_dump"
+bmp             = "D:\\tmp\\taa_armed_basis.bmp"
+width           = 512
+height          = 512
+sha256_software = "53ba8049cf35b0ba5d0ebbfca941fdee2ea04697b45e073d24ae2661e81d3a29"
+sha256_hwrt     = "3af811ffd75b035c2b7c3c21474403a2fdf7e097ef5dbe38a9eef559242ac4be"
+
+[taa_armed_basis.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\taa_armed_basis.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+BOYKO_AA                 = "taa"
+BOYKO_TAA_SCOPE          = "basis"
+BOYKO_WIN                = "512"
+
+[taa_rcas]
+# AA Stage 4 rung T3: the ARMED-RCAS gate. Pins the post-resolve contrast-adaptive sharpen
+# (SharpenMode::Rcas) at its shipped default rcas_sharpness = 0.25, over the same armed-TAA scene
+# as [taa_armed_basis] (JitterScope::RasterAndBasis, the shipped default). Until this pin existed
+# the RCAS ping-pong path -- the taa_resolved intermediate, the gAaOut repoint, the record_rcas
+# barriers, the CAS kernel -- carried ZERO regression protection.
+#
+# These bytes MUST differ from [taa_armed_basis]'s: same scene, same jitter, the ONLY variable is
+# the added sharpen pass. If the two ever agree, RCAS is a no-op (the pass silently stopped
+# running). The 0%-gate stays [taa_armed]/[taa_armed_basis]: SharpenMode::None (their config) is
+# byte-UNCHANGED by T3 -- proven by those two pins staying identical across this rung.
+#
+# sha256_hwrt DIVERGES from sha256_software, for the SAME reason [taa_armed] does: under hwrt the
+# directional shadow is a rayQuery mesh trace, not the CSM lookup, so the resolve's lit input --
+# and thus the sharpened output -- genuinely differ. Each leg is pinned on its own -Bless run.
+#
+# Shadow gate SG4 moved these bytes, for the reason recorded in [taa_armed] (vkval lane; ruled and
+# re-blessed 2026-09-18 on the msvc host -- software 37839075 -> 063d4b0e, hwrt 08752f67 ->
+# 0168e5c4). The fixture's hand-seeded `LightingConfig.csm_shadows = true` makes frame 0 a
+# header-ON, host-unarmed frame, which used to sample a cascade no pass had written and now reads
+# the DISABLED cascade UBO; TAA carries that frame into history and the sharpen runs over the
+# result. On the software leg that is 2 pixels at max channel delta 2/255 on the SDF sphere's rim,
+# measured against the e3cebe2d frame. These bytes still differ from [taa_armed_basis]'s, so RCAS
+# still runs.
+#
+# R4-frame-order + R4b-open-edges moved these bytes, and the pinned ones were wrong on two counts,
+# for the reasons recorded in [taa_armed] (lane fix/light-table-defects; ruled and re-blessed
+# 2026-09-21 on the msvc host -- software 063d4b0e -> 304adbfa (7,172 px changed, max channel
+# delta 18), hwrt 0168e5c4 -> 6daa4b74 (3,127 px, max 19)): frame 0 drew 0 meshes under the
+# undeclared `visibility_sync` / reader order (R4's E1), and frame 0 was lit from the sun's identity
+# `GlobalTransform` because `light_reconcile` ran before `propagate_transforms` (R4b's edge C); TAA
+# carried that frame and the sharpen runs over the result. The hwrt value with edge C removed equals
+# the G2-edge value (da521c743b5ca8ddc0706f548e7ef413bde2f681074bb813fab3ee08c7492b01), which is the
+# mesh-only move; the software value with edge C removed is the mesh-only value 3041775e. These
+# bytes still differ from [taa_armed_basis]'s, so RCAS still runs.
+# HWRT SHADOW-RAY ORIGIN MOVED THESE BYTES (lane fix/hwrt-shadow-ray-origin; re-blessed 2026-09-21 on the
+# msvc host -- hwrt 6daa4b74 -> cd1b86ab; the software hash 304adbfa is unchanged). The pinned hwrt
+# frame carried the same false-shadow region as [taa_armed_basis] (147,919 px, 56.4 % of the frame
+# darker than the software leg by > 30 LSB), RCAS-sharpened. Measured against the software leg on the
+# new frame (exact bytes): 120 px darker by > 30 LSB, all within the legs' intrinsic difference --
+# 98 px on the contact-shadow line at the right cube's wall base (x 422-453, y 196-201; in the old
+# pin and on the TAA-off frame) plus 22 px in the RCAS-widened penumbra strip (x 162-188,
+# y 203-315). Same gates as [taa_armed].
+crate           = "boyko-app"
+test_binary     = "taa_jitter_eval"
+test_name       = "taa_jitter_eval_screenshot_dump"
+bmp             = "D:\\tmp\\taa_rcas.bmp"
+width           = 512
+height          = 512
+sha256_software = "304adbfad32f7512162db15e03aec9a0cda5eb144b8521e86bf070ee5eb262d2"
+sha256_hwrt     = "cd1b86abdbcbbbf74d509f5cc100159b9c9de1da735dd96ba8ec1bd8e07d0e95"
+
+[taa_rcas.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\taa_rcas.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+BOYKO_AA                 = "taa"
+BOYKO_WIN                = "512"
+# Arms SharpenMode::Rcas (requires BOYKO_AA=taa). Scope is left DEFAULT (RasterAndBasis, matching
+# [taa_armed_basis]) and BOYKO_TAA_SHARPNESS is left DEFAULT (0.25) -- this pin freezes the shipped
+# RCAS default, so it NAMES neither and inherits both.
+BOYKO_TAA_SHARPEN        = "rcas"
+
+[vb_taa]
+# TAA-under-VB (VisibilityBuffer x Mesh): the SAME taa_jitter_eval scene driven through
+# RenderPath::VisibilityBuffer x GeometryLegs::Mesh via EnginePlugins' BOYKO_RENDER_PATH /
+# BOYKO_GEOMETRY_LEGS dev/test launch seam (boyko_app::plugins). The chain this pin freezes:
+# the jittered reverse-Z push (forward_gbuffer_push_from_view_jittered - rows 0/1 only, the
+# z-row byte-untouched, the R8 hard rule), the viewt_from_depth_rz gViewT producer (the
+# proven sdf_forward_march reverse-Z decode + ray_gen reparameterization), and the UNCHANGED
+# taa_resolve accumulating over vb_resolve's lit.
+#
+# These bytes MUST differ from the SAME scene with BOYKO_AA unset (AA off) - if they ever
+# agree, the VB jitter/resolve chain is structurally dead (the VB analogue of the
+# [taa_armed]/[taa_armed_basis] "if the pins agree the shear is dead" alarm). Scope raster
+# (named explicitly, the [taa_armed] discipline): the basis shear is a structural no-op for
+# the VB MESH leg (vb_resolve reconstructs from pc.view_proj, not the camera basis), so
+# raster is the honest scope to freeze; RasterAndBasis renders identically here today and
+# becomes load-bearing only at the VBxBoth TAA follow-up. The AA-off frame that alarm compares
+# against is now a pin of its own: [vb_mesh_shadows] is this scene, path and legs with BOYKO_AA
+# unset, so the alarm reads 5be729a8 here against 32c73274 there.
+#
+# THESE BYTES CARRY CASCADED SHADOWS (vkval lane; owner-approved and re-blessed 2026-09-18 on the
+# msvc host, c4d3f817 -> 637e8d34): VB now renders the mesh casters' CSM shadows. Before the lane,
+# `forward_layout1` -- the Set-1 shadow layout (cascade map, cascade UBO, punctual atlas, atlas
+# UBO) that the VB resolve/shade compute pipelines also bind -- declared all four bindings
+# FRAGMENT-only, so the compute stage read bindings its layout never exposed to it
+# (VUID-VkComputePipelineCreateInfo-layout-07988) and VB shaded exactly as if gCsmActive == 0. The
+# fix widened those stage flags to FRAGMENT | COMPUTE (crates/boyko_app/src/gpu_scene/mod.rs, where
+# `forward_layout1` is created), which made the cascades visible to the VB shading.
+#
+# sha256_hwrt EQUALS sha256_software on this scene -- measured, each leg blessed on its own run,
+# and kept as its own pin so a future scene edit cannot silently drop the HW-RT leg's coverage
+# (the vb_mesh_tex precedent). The hwrt values committed before the lane -- 6eaca745 here,
+# b695fe80 for [vb_taa_rcas], 61dc2630 for [vb_both_taa] -- were STALE, not a host difference: at
+# base e3cebe2d the hwrt leg rendered these pins' SOFTWARE hashes on the msvc host AND on the gnu
+# host, so none of the three reproduced anywhere.
+#
+# R4-frame-order + R4b-open-edges moved these bytes, and the pinned ones were wrong on two counts,
+# for the reasons recorded in [taa_armed] (lane fix/light-table-defects; ruled and re-blessed
+# 2026-09-21 on the msvc host -- 637e8d34 -> 5be729a8 on BOTH legs, 2,541 px changed, max channel
+# delta 13): frame 0 drew 0 meshes under the undeclared `visibility_sync` / reader order (R4's E1),
+# and frame 0 was lit from the sun's identity `GlobalTransform` because `light_reconcile` ran before
+# `propagate_transforms` (R4b's edge C); TAA carried that frame. The hwrt value with edge C removed
+# equals the G2-edge value (1f8853ccf243f630d0219d19f3a6915aecb4a171b64024e9a51e8098248e665d), which
+# is the mesh-only move, and the software leg lands on that same value with edge C removed.
+# sha256_hwrt still EQUALS sha256_software: the G2 edge alone had split the legs (1f8853cc on hwrt
+# against 637e8d34 on software, because it flipped the gather / `visibility_sync` pair on the hwrt
+# leg only); with the pair declared on both legs, parity is regained.
+crate           = "boyko-app"
+test_binary     = "taa_jitter_eval"
+test_name       = "taa_jitter_eval_screenshot_dump"
+bmp             = "D:\\tmp\\vb_taa.bmp"
+width           = 512
+height          = 512
+sha256_software = "5be729a8f42834c2709bf511597eaf2baf43362bdda5fb90f8a3cb831e629899"
+sha256_hwrt     = "5be729a8f42834c2709bf511597eaf2baf43362bdda5fb90f8a3cb831e629899"
+
+[vb_taa.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_taa.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+BOYKO_AA                 = "taa"
+BOYKO_WIN                = "512"
+BOYKO_TAA_SCOPE          = "raster"
+BOYKO_RENDER_PATH        = "vb"
+BOYKO_GEOMETRY_LEGS      = "mesh"
+
+[vb_taa_rcas]
+# TAA-under-VB + the T3 RCAS sharpen: [vb_taa]'s chain plus SharpenMode::Rcas at the shipped
+# default sharpness (0.25, inherited - the [taa_rcas] discipline). These bytes MUST differ
+# from [vb_taa]'s: same scene, same jitter, the ONLY variable is the added sharpen pass (the
+# record_rcas body is path-portable and runs verbatim under VB).
+#
+# These bytes carry cascaded shadows, for the reason recorded in [vb_taa]: the Set-1 stage-flag
+# fix let the VB compute shading see the CSM bindings (vkval lane; owner-approved and re-blessed
+# 2026-09-18 on the msvc host, 01e06ef8 -> 6b59bcee). sha256_hwrt EQUALS sha256_software --
+# measured, each leg blessed on its own run; the hwrt value committed before the lane (b695fe80)
+# was stale, see [vb_taa].
+#
+# R4-frame-order + R4b-open-edges moved these bytes, and the pinned ones were wrong on two counts,
+# for the reasons recorded in [taa_armed] (lane fix/light-table-defects; ruled and re-blessed
+# 2026-09-21 on the msvc host -- 6b59bcee -> 23d4d7e7 on BOTH legs, 4,631 px changed, max channel
+# delta 18): frame 0 drew 0 meshes under the undeclared `visibility_sync` / reader order (R4's E1),
+# and frame 0 was lit from the sun's identity `GlobalTransform` because `light_reconcile` ran before
+# `propagate_transforms` (R4b's edge C); TAA carried that frame and the sharpen runs over the
+# result. The hwrt value with edge C removed equals the G2-edge value
+# (3e873c4b3122e1ad8e5bf864239e8df54a5f8ad0a97d16116dbf86463746b2ca), which is the mesh-only move,
+# and the software leg lands on that same value with edge C removed. sha256_hwrt still EQUALS
+# sha256_software (parity regained, see [vb_taa]). These bytes still differ from [vb_taa]'s, so RCAS
+# still runs under VB.
+crate           = "boyko-app"
+test_binary     = "taa_jitter_eval"
+test_name       = "taa_jitter_eval_screenshot_dump"
+bmp             = "D:\\tmp\\vb_taa_rcas.bmp"
+width           = 512
+height          = 512
+sha256_software = "23d4d7e7969306b30eedfbf43997362d091e6a5caded27ec561228822b962fce"
+sha256_hwrt     = "23d4d7e7969306b30eedfbf43997362d091e6a5caded27ec561228822b962fce"
+
+[vb_taa_rcas.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_taa_rcas.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+BOYKO_AA                 = "taa"
+BOYKO_WIN                = "512"
+BOYKO_TAA_SCOPE          = "raster"
+BOYKO_TAA_SHARPEN        = "rcas"
+BOYKO_RENDER_PATH        = "vb"
+BOYKO_GEOMETRY_LEGS      = "mesh"
+
+[vb_mesh_ssao]
+# Rung R9b (docs/R9-VB-SPLIT-PLAN.md): the VB geo/shade SPLIT golden - the [vb_mesh] five-sphere
+# scene with SsaoConfig::High, so the boot resolver arms mesh_geo_shade_split and the frame runs
+# vb_geo -> ssao(-D VB_THIN, thin_normal + gViewT-sentinel mask) -> a-trous x3 -> vb_shade_split
+# instead of the fused vb_resolve. NOT byte-compared to any deferred SSAO pin (the split's
+# geometric interpolated normal differs from the deferred mapped-normal gather by design).
+# The pin run itself exercises every new declare/record parity debug_assert (dev-profile build).
+# sha256_hwrt EQUALS sha256_software on this scene (each leg blessed on its own run).
+crate           = "boyko-app"
+test_binary     = "vb_mesh_ssao"
+test_name       = "vb_mesh_ssao_screenshot_dump"
+bmp             = "D:\\tmp\\vb_mesh_ssao.bmp"
+width           = 512
+height          = 512
+sha256_software = "85625a11684d4f2e40ee98510b840647546331b9fa0ba555499faf4109e8144f"
+sha256_hwrt     = "85625a11684d4f2e40ee98510b840647546331b9fa0ba555499faf4109e8144f"
+
+[vb_mesh_ssao.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_ssao.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_mesh_froxel]
+# Rung VB-P1b (docs/VB-PERFORMANCE-TRACK.md's VB-P1): the FUSED vb_resolve FROXEL light-cull
+# EQUALITY golden. The [vb_mesh] five-sphere scene plus 14 point/spot lights (2 of them
+# CastsPunctualShadow-flagged -- VB-P1-0's regression target: the cull must mask a light's
+# kind word, bit 16 casts_sdf_shadow + bits 17..21 the atlas slot, before the POINT/SPOT test,
+# or a shadow-flagged/atlas-slotted light silently vanishes under clustering), all comfortably
+# below MAX_LIGHTS_PER_CLUSTER (256) and INDEX_LIST_CAP (16384). See
+# crates/boyko_app/tests/vb_mesh_froxel.rs.
+#
+# THE EQUALITY CONTRACT: this pin's hash MUST equal the SAME scene rendered with
+# BOYKO_VB_FROXEL_FORCE_OFF set (LightingConfig::clusters_enabled forced false -- the flat
+# baseline leg). Below the caps, vb_resolve.comp.hlsl's FROXEL and flat arms visit the exact
+# same point/spot lights in the exact same ascending table-index order with the exact same
+# per-light range re-test -- the loop BODY is token-for-token identical between the two arms,
+# only the index-list SOURCE differs -- so the two renders are BYTE-IDENTICAL, not merely
+# visually close (the SAME O3 shared-frame-oracle equality [vb_both]/[vb_sdf_only] already
+# use against [vb_mesh], applied to the froxel arm). A byte MISMATCH here means either the
+# cull dropped/duplicated a light (re-introducing VB-P1-0) or the header's cluster_params lane
+# (sync_cluster_light_gate, VB-P1b-0) disagrees with the flat path's light-table.
+#
+# BLESSED at rung VB-P1b (commit d60d95b): both legs were rendered on a real windowed GPU
+# device, confirmed byte-identical to each other, and blessed to that ONE shared hash. The
+# sha256_* values below are the real bless output -- this file's only mechanically-checked
+# unblessed sentinel is the literal "PENDING", which they are not.
+crate           = "boyko-app"
+test_binary     = "vb_mesh_froxel"
+test_name       = "vb_mesh_froxel_screenshot_dump"
+bmp             = "D:\\tmp\\vb_mesh_froxel.bmp"
+width           = 512
+height          = 512
+sha256_software = "fb220ff30f16658e8efa165db2c822263253274a17006c5ecf66ad19414d86ba"
+sha256_hwrt     = "fb220ff30f16658e8efa165db2c822263253274a17006c5ecf66ad19414d86ba"
+
+[vb_mesh_froxel.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_froxel.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_mesh_tex_froxel]
+# Rung VB-P1c (docs/VB-PERFORMANCE-TRACK.md's VB-P1): the CLASSIFIED (TEXTURED) vb_shade_tex
+# FROXEL light-cull EQUALITY golden -- closes the VB-P1a "W2" gap ([vb_mesh_froxel] only
+# exercised the froxel selector on the NON-textured fused vb_resolve arm). The [vb_mesh_tex]
+# textured five-sphere scene (four spheres sharing one real PBR material, forcing the
+# classified vb_shade_tex pipeline via GBufferScene::vb_tex_active) plus the SAME 14 point/spot
+# lights [vb_mesh_froxel] uses (2 of them CastsPunctualShadow-flagged -- VB-P1-0's regression
+# target), all comfortably below MAX_LIGHTS_PER_CLUSTER (256) and INDEX_LIST_CAP (16384). See
+# crates/boyko_app/tests/vb_mesh_tex_froxel.rs.
+#
+# THE EQUALITY CONTRACT: this pin's hash MUST equal the SAME scene rendered with
+# BOYKO_VB_FROXEL_FORCE_OFF set (LightingConfig::clusters_enabled forced false -- the flat
+# textured baseline leg, i.e. [vb_mesh_tex]'s own light-augmented sibling). vb_shade.comp.hlsl's
+# FROXEL and flat arms visit the exact same point/spot lights in the exact same ascending
+# table-index order with the exact same per-light range re-test regardless of -D TEXTURED -- the
+# loop BODY is token-for-token identical between the two arms, only the index-list SOURCE
+# differs -- so the two renders are BYTE-IDENTICAL. Classification (VB-P2, grouping pixels by
+# material) and clustering (VB-P1, grouping lights by froxel) are each a byte-preserving
+# regrouping of the same per-light accumulation; composing both (this pin) changes neither order
+# nor terms. A byte MISMATCH here means either the cull dropped/duplicated a light
+# (re-introducing VB-P1-0 under the TEXTURED arm) or the (textured, froxel) pipeline/Set-0
+# selector (passes/vb.rs) picked the wrong pipeline.
+#
+# BLESSED at rung VB-P1c (commit b2b1240): both legs were rendered on a real windowed GPU
+# device, confirmed byte-identical to each other, and blessed to that ONE shared hash. The
+# sha256_* values below are the real bless output -- this file's only mechanically-checked
+# unblessed sentinel is the literal "PENDING", which they are not.
+crate           = "boyko-app"
+test_binary     = "vb_mesh_tex_froxel"
+test_name       = "vb_mesh_tex_froxel_screenshot_dump"
+bmp             = "D:\\tmp\\vb_mesh_tex_froxel.bmp"
+width           = 512
+height          = 512
+sha256_software = "6d7ea00d35c8e77156cb1124d291edcd98209f5124878d7aa459feae81701c23"
+sha256_hwrt     = "6d7ea00d35c8e77156cb1124d291edcd98209f5124878d7aa459feae81701c23"
+
+[vb_mesh_tex_froxel.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_tex_froxel.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_both_taa]
+# TAA-under-VB, the VIEWT rung (VisibilityBuffer x Both): [vb_taa]'s taa_jitter_eval scene
+# (which REALLY contains an SdfEdit::sphere among the mesh cubes - unlike [vb_both]'s empty
+# edit-list) driven through vb x both. The chain this pin freezes: the jittered reverse-Z
+# push rasterized by vb_raster, then the HAS_MESH+VIEWT sdf_forward_march variant as the SOLE
+# gViewT producer (marched t on SDF-owned pixels, the decoded t_mesh on mesh pixels, the
+# 1.0e30 sentinel on background - vb_viewt is structurally OFF here, its arming is
+# mesh-and-not-sdf), and the UNCHANGED taa_resolve accumulating over the composited lit.
+#
+# These bytes MUST differ from [vb_both]'s AA-off frame family (dead-chain alarm) AND from
+# [vb_taa] (the SDF sphere is marched here but absent under legs=mesh - if they agree the
+# marcher leg went dead).
+#
+# TWO CHANGES ARE IN THESE BYTES (vkval lane; re-blessed 2026-09-18 on the msvc host, 5285d35b ->
+# bf490908):
+#  * The Set-1 stage-flag fix recorded in [vb_taa]: the mesh casters' cascaded shadows now reach
+#    the VB compute shading. The owner approved that frame, b0cb98c3, visually on 2026-09-18.
+#  * Shadow gate SG4, recorded in [taa_armed]: frame 0 -- header CSM bit ON from the fixture's
+#    `csm_shadows` hand-seed, host unarmed -- now reads the DISABLED cascade UBO instead of a
+#    cascade nothing wrote. bf490908 differs from the approved b0cb98c3 by exactly that: 5 pixels,
+#    max channel delta 3/255, on the SDF sphere's upper rim (x 182-201, y 155-158), measured.
+# sha256_hwrt EQUALS sha256_software -- measured, each leg blessed on its own run; the hwrt value
+# committed before the lane (61dc2630) was stale, see [vb_taa].
+#
+# KNOWN GAP, frozen on purpose: in this VB frame the mesh-drawn floor does NOT receive the SDF
+# sphere's shadow, while the Deferred frame of the same scene shows it. That term is VB-SV0 (SDF
+# soft shadow and contact AO on mesh pixels), which ships DEFAULT-OFF because its pass costs 5.75x
+# against the inherited 2x budget (docs/VB-SV0-SDF-SHADOW-PLAN.md, "DP4 ADJUDICATED"). An
+# SV0-armed pin is planned separately. When SV0 is armed, THIS frame will change -- that move is
+# the feature arriving, not a regression.
+#
+# R4-frame-order + R4b-open-edges moved these bytes, and the pinned ones were wrong on two counts,
+# for the reasons recorded in [taa_armed] (lane fix/light-table-defects; ruled and re-blessed
+# 2026-09-21 on the msvc host -- bf490908 -> 025830c5 on BOTH legs, 6,393 px changed, max channel
+# delta 18): frame 0 drew 0 meshes under the undeclared `visibility_sync` / reader order (R4's E1),
+# and frame 0 was lit from the sun's identity `GlobalTransform` because `light_reconcile` ran before
+# `propagate_transforms` (R4b's edge C); TAA carried that frame. The hwrt value with edge C removed
+# equals the G2-edge value (d648618d8560104277ec07b60c61988224ce83267f8ccc8e69ba942ca6fb112e), which
+# is the mesh-only move, and the software leg lands on that same value with edge C removed.
+# sha256_hwrt still EQUALS sha256_software (parity regained, see [vb_taa]). These bytes still differ
+# from [vb_taa]'s, so the marcher leg is still live.
+crate           = "boyko-app"
+test_binary     = "taa_jitter_eval"
+test_name       = "taa_jitter_eval_screenshot_dump"
+bmp             = "D:\\tmp\\vb_both_taa.bmp"
+width           = 512
+height          = 512
+sha256_software = "025830c5440d346364dda739209e1c123981f345ab5ddcea58c5b79f5e3e4e9a"
+sha256_hwrt     = "025830c5440d346364dda739209e1c123981f345ab5ddcea58c5b79f5e3e4e9a"
+
+[vb_both_taa.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_both_taa.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+BOYKO_AA                 = "taa"
+BOYKO_WIN                = "512"
+BOYKO_TAA_SCOPE          = "raster"
+BOYKO_RENDER_PATH        = "vb"
+BOYKO_GEOMETRY_LEGS      = "both"
+
+[vb_sdf_taa]
+# TAA-under-VB, the VIEWT rung (VisibilityBuffer x Sdf, mesh-less): the taa_jitter_eval scene
+# under legs=sdf - no raster, vb_sky + the SDFONLY+VIEWT sdf_forward_march variant are the
+# sole producers (gViewT = marched t on the sphere, 1.0e30 everywhere else; the jittered push
+# is built but consumed by no raster - SDF pixels are reprojection-stabilized, not
+# supersampled, the SAME C1-cut semantics Deferred x Sdf TAA ships with today).
+#
+# These bytes MUST differ from the SAME scene/legs with BOYKO_AA unset (dead-chain alarm -
+# verified at bless time against a fresh AA-off render, not a stored pin). sha256_hwrt EQUALS
+# sha256_software on this scene (each leg blessed on its own run - the [vb_taa] precedent).
+#
+# R4-frame-order + R4b-open-edges moved these bytes, and the pinned ones were wrong (lane
+# fix/light-table-defects; ruled and re-blessed 2026-09-21 on the msvc host -- 00da6769 -> e4f88703
+# on BOTH legs, 6,826 px changed, max channel delta 14). The family's two causes are recorded in
+# [taa_armed]: frame 0 drew 0 meshes under the undeclared `visibility_sync` / reader order (R4's
+# E1), and frame 0 was lit from the sun's identity `GlobalTransform` because `light_reconcile` ran
+# before `propagate_transforms` (R4b's edge C). This pin has NO mesh (legs=sdf), so the first cause
+# moves nothing here and the G2 edge never moved it: with edge C removed both legs render the old
+# 00da6769 unchanged, so there is no mesh-only value to cite. The whole move is the second cause --
+# the sun now points where the fixture posed it on frame 0 too, and TAA carried the identity-lit
+# frame: the diff is the SDF sphere's terminator, 6,743 px brighter and 83 darker, inside x 128-239,
+# y 155-266. sha256_hwrt still EQUALS sha256_software.
+crate           = "boyko-app"
+test_binary     = "taa_jitter_eval"
+test_name       = "taa_jitter_eval_screenshot_dump"
+bmp             = "D:\\tmp\\vb_sdf_taa.bmp"
+width           = 512
+height          = 512
+sha256_software = "e4f88703874b5a8a4ba0c396c97c12dbeff0b7cc0ff3911714fdb8254f88d2f6"
+sha256_hwrt     = "e4f88703874b5a8a4ba0c396c97c12dbeff0b7cc0ff3911714fdb8254f88d2f6"
+
+[vb_sdf_taa.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_sdf_taa.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+BOYKO_AA                 = "taa"
+BOYKO_WIN                = "512"
+BOYKO_TAA_SCOPE          = "raster"
+BOYKO_RENDER_PATH        = "vb"
+BOYKO_GEOMETRY_LEGS      = "sdf"
+
+[deferred_sdf_casters]
+# The unwritten-shadow-map fix's own pin (vkval lane, 2026-09-18): the taa_jitter_eval scene --
+# five ShadowCaster cubes, a floor and a wall, the SDF sphere, the sun with CSM armed
+# (cascade_count 3) -- driven through Deferred x Sdf with AA OFF. Until this pin existed the
+# ONLY pinned coverage of a mesh-less leg set WITH shadow casters was [vb_sdf_taa], a TAA pin,
+# and Deferred x Sdf with casters had none at all: it rendered the SDF sphere dark on every tree,
+# because the host skipped the cascade depth pass while the light-header CSM bit and the cascade
+# UBO stayed armed, so the marcher sampled a cascade nothing had written (a poison clear of that
+# never-written cascade moved the sphere; see crates/boyko_app/tests/unwritten_shadow_map_gate.rs).
+#
+# The fix gates every mesh-shadow producer in the per-frame plan
+# (ResolvedRenderPath::mesh_shadow_producers() in resolve_csm_cascades / resolve_shadow_atlas), so
+# this scene now renders the config-off look: the sphere LIT by the sun and shadowed only by the
+# SDF soft march (the SDF leg's own shadow source), and no cascade shadows anywhere -- there is
+# no mesh leg to cast or receive them. The owner ruled the lit sphere the correct image
+# (2026-09-18); the bytes this pin freezes are signed off at bless, like every pin here.
+#
+# BOYKO_AA is deliberately NOT set: the fixture then renders the engine default (AaMode::Off), and
+# golden.ps1 wipes every stray BOYKO_* before applying this block, so the absence is reliable.
+# Blessed 2026-09-18 on the msvc host at ea6b1df8 on BOTH legs, each leg on its own run: the hwrt
+# equality is measured, not assumed.
+crate           = "boyko-app"
+test_binary     = "taa_jitter_eval"
+test_name       = "taa_jitter_eval_screenshot_dump"
+bmp             = "D:\\tmp\\deferred_sdf_casters.bmp"
+width           = 512
+height          = 512
+sha256_software = "ea6b1df8a1537f0c11368c891a3215bdebcdb5ca861b1c989613eb3f6c074df6"
+sha256_hwrt     = "ea6b1df8a1537f0c11368c891a3215bdebcdb5ca861b1c989613eb3f6c074df6"
+
+[deferred_sdf_casters.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\deferred_sdf_casters.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+BOYKO_WIN                = "512"
+BOYKO_RENDER_PATH        = "deferred"
+BOYKO_GEOMETRY_LEGS      = "sdf"
+
+[vb_mesh_shadows]
+# VB cascaded shadows pinned WITHOUT TAA (vkval lane, 2026-09-18): the taa_jitter_eval scene
+# through VisibilityBuffer x Mesh with AA OFF. Until this pin the VB path's CSM shadows were pinned
+# ONLY through the TAA pins ([vb_taa], [vb_taa_rcas], [vb_both_taa]) -- the taa_jitter_eval scene
+# is the only pinned VB scene with shadow casters -- so a shadow regression under VB could only
+# ever surface as a TAA mismatch, and be misread as one.
+#
+# These frames carry the floor shadows the VB compute stage was silently missing before the lane
+# widened the Set-1 stage flags (the base read FRAGMENT-only bindings from compute, VUID 07988, and
+# behaved exactly as if gCsmActive == 0; [vb_taa] records the fix). The owner ruled the shadowed
+# VB frames correct (2026-09-18). This pin is also [vb_taa]'s AA-off reference -- the same scene,
+# path and legs with BOYKO_AA unset -- so the two must differ, or VB's jitter/resolve chain is dead.
+#
+# BOYKO_AA deliberately NOT set (the [deferred_sdf_casters] note). BOYKO_TAA_SCOPE is irrelevant
+# with AA off and is not named. Blessed 2026-09-18 on the msvc host at 32c73274 on BOTH legs, each
+# leg on its own run: the hwrt leg was MEASURED equal to software.
+crate           = "boyko-app"
+test_binary     = "taa_jitter_eval"
+test_name       = "taa_jitter_eval_screenshot_dump"
+bmp             = "D:\\tmp\\vb_mesh_shadows.bmp"
+width           = 512
+height          = 512
+sha256_software = "32c732749861865a425dadd3777e2b2e97adf59b307f7bcef3ea42d095506a23"
+sha256_hwrt     = "32c732749861865a425dadd3777e2b2e97adf59b307f7bcef3ea42d095506a23"
+
+[vb_mesh_shadows.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_shadows.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+BOYKO_WIN                = "512"
+BOYKO_RENDER_PATH        = "vb"
+BOYKO_GEOMETRY_LEGS      = "mesh"
+
+[particle_additive]
+# Particles P0 gate #16 -- the FIRST particle image pin. One emitter, one effect, the whole armed
+# GPU chain (kickoff -> emit -> sim, all indirect -> one vkCmdDrawIndexedIndirect) composited into
+# `lit` as additive billboards, captured at presented frame 30.
+#
+# NO INTER-PARTICLE OVERDRAW, and that is the pin's precondition, not a description. Additive
+# blending is commutative, but `lit` is 8-bit post-tonemap and saturates, so `sat(sat(a)+b)` is
+# order-free only while nothing clips. The fixture therefore emits ONE particle per frame at a
+# UNIFORM speed from a cone whose axis is rotated onto world +Y: every live particle has a distinct
+# age, hence a distinct radius, hence its own pixels. MEASURED at the capture: 30 particles, 354
+# saturated pixels, ~12 px each, shells ~7 px apart. Blend ORDER is therefore irrelevant to these
+# bytes and the pin is reproducible whatever order the sim's waves retire in.
+#
+# The clock is NOT the engine's. `Time` is inserted PAUSED at config time and the fixture drives
+# exactly one substep per frame from its own system, so the simulated instant is a function of the
+# FRAME INDEX alone. That is load-bearing twice over: the runner advances the ECS with the real
+# wall delta (measured 0.1-40 ms on this host, so no `max_delta` clamp binds on every frame), and
+# `particle_emit` seeds its RNG with `rng_seed ^ gid ^ frame_index` -- a run that spawned on
+# different frames would draw different DIRECTIONS, not merely different positions. Verified: three
+# runs, byte-identical.
+#
+# ⚠️ PINNED ON THE VB PATH, NOT ON THE ENGINE-DEFAULT DEFERRED ONE. It was pinned here because on
+# Deferred the particle draw rendered NOTHING: `gbuffer_push_from_view` (the marcher-aligned
+# projection) sets row2 == row3, so every rasterized vertex has clip.z == clip.w and
+# SV_Position.z is exactly 1.0, while that path's depth buffer holds the fragment-written euclidean
+# `length(cam_eye - P)/MESH_DEPTH_T_MAX`; under VK_COMPARE_OP_LESS every particle fragment failed.
+# It was never fixable host-side (no 4x4 matrix produces a euclidean distance through a perspective
+# divide), and pinning the default path then would have frozen a particle-free image as "correct".
+#
+# THAT ARM HAS LANDED (`docs/PARTICLES-PLAN.md`, P2 item 1): Deferred binds the `-D DEPTH_LINEAR`
+# shader pair, whose fragment writes the depth buffer's own encode through SV_Depth. MEASURED
+# 2026-08-20 on this host, same fixture, gate-#12 occluder armed: 265 saturated particle pixels on
+# Deferred, a particle set IDENTICAL to the VB leg's, zero of them on the wall; the same run with
+# the base pair forced still renders 0. **Re-pointing this pin at Deferred is an owner call, not a
+# mechanical one** -- it would replace a blessed digest with one nobody has looked at, and the two
+# paths shade the scene differently (their BMPs are not equal even where the particles are). Left
+# on VB until that sign-off.
+crate           = "boyko-app"
+test_binary     = "particle_lab"
+test_name       = "particle_lab_screenshot_dump"
+bmp             = "D:\\tmp\\particle_additive.bmp"
+width           = 512
+height          = 512
+# PENDING owner visual sign-off, captured 2026-08-20 (three byte-identical runs). The value is the
+# real digest, not the unblessed sentinel, so -Check regressions are caught from today; what is
+# outstanding is the OWNER's look at the BMP, which is the only thing that can say the image is
+# RIGHT rather than merely stable.
+sha256_software = "f27d97acd104039e849ce5740f30bf89a5560bbba6822110eadaf0fdd023fc89"
+# The HW-RT leg was NOT run for this pin. The scene has no ray-traced content (no shadow casters,
+# no SDF, unlit particles), so the two legs are expected to agree -- but "expected" is not
+# "measured", and the sibling vb_* pins each blessed their hwrt leg on its own run. Seeded with the
+# mechanically-checked unblessed sentinel rather than a copy of the software digest, which would be
+# a claim nobody made.
+sha256_hwrt     = "PENDING"
+
+[particle_additive.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_HOST_DUMP          = "D:\\tmp\\particle_additive.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+BOYKO_WIN                = "512"
+BOYKO_RENDER_PATH        = "vb"
+
+[particle_sdf_collide]
+# Particles P1 gate -- the SDF-collision image pin. The same one-emitter fixture as
+# `particle_additive`, plus an `SdfPrimitive` slab (a 4 x 0.2 x 4 box at y = 2.0) standing above the
+# upward fan, with the sim built from the `-D SDF_COLLIDE` module.
+#
+# WHAT THE BYTES SAY, and what makes them a pin rather than a picture: the particles stop at the
+# slab. MEASURED at this capture against the control run (`BOYKO_PARTICLE_SDF` set,
+# `BOYKO_PARTICLE_COLLIDE` unset -- the same scene, the same effect table, the same clock, the
+# pipeline built from the base module instead): above the contact plane this image holds ZERO
+# near-white pixels while the control holds 164; the topmost white row is 216 here and 99 there,
+# against a slab-underside row of 219 predicted from the camera. The fan's x-range is identical in
+# both (`[175,386]`) because the fixture's friction is 0 and the tangential component is untouched.
+#
+# TWO KNOBS, ON PURPOSE. `BOYKO_PARTICLE_SDF` puts the collider AND the per-effect contact
+# parameters in the scene; `BOYKO_PARTICLE_COLLIDE` picks the shader module. Splitting them is what
+# makes the control exact -- with only the first set, the two runs differ in ONE BIT, so "they
+# bounced" cannot be explained by the scene having changed.
+#
+# The determinism argument is `particle_additive`'s, verbatim and unchanged: `Time` is inserted
+# PAUSED at config time and the fixture drives exactly one substep per frame, so the simulated
+# instant is a function of the frame index alone -- which matters twice, because `particle_emit`
+# seeds its RNG with `rng_seed ^ gid ^ frame_index`. Verified: two runs, byte-identical.
+#
+# PINNED ON DEFERRED, not on VB like its sibling. That path marches the `SdfPrimitive` into the
+# G-buffer, so the collider the particles hit is VISIBLE in the same image as the collision -- which
+# is the whole point of an image pin for this rung. (Its own known property, unchanged by P1: SDF
+# surfaces do not write depth on this leg, so the billboards are not occluded BY the slab; the
+# claim here is about trajectories, and gate #12's dumps are where occlusion is judged.)
+crate           = "boyko-app"
+test_binary     = "particle_lab"
+test_name       = "particle_lab_screenshot_dump"
+bmp             = "D:\\tmp\\particle_sdf_collide.bmp"
+width           = 512
+height          = 512
+# PENDING owner visual sign-off, captured 2026-08-20 at 729f5ad6 (two byte-identical runs). The
+# value is the real digest, not the unblessed sentinel, so -Check regressions are caught; what is
+# outstanding is the OWNER's look at the BMP -- the only thing that can say the image is RIGHT
+# rather than merely stable and merely different from its control.
+# LIGHT-TABLE R2 moved it by ONE pixel (lane fix/light-table-defects; re-pinned 2026-09-19 on the
+# msvc host, 729f5ad6 -> c6a055a1): (463, 385), 1 LSB brighter. This scene's sun is the old boot
+# constant (crates/boyko_app/tests/particle_scene/mod.rs, SUN_DIR), so the marcher's sun changed
+# only in its bits -- the rounding recorded in [taa_armed]. An A/B that pushed the raw constant
+# through the new path restored 729f5ad6. The re-pin carries that rounding; it is not the sign-off.
+sha256_software = "c6a055a1518ca4deef97dd942a1b3592ff68e471733643f417b6336135b23bc3"
+# The HW-RT leg was first run during R2's testing (2026-09-19): 729f5ad6 on the pre-R2 tree and
+# c6a055a1 after, equal to the software leg both times; this re-pin's own run rendered c6a055a1
+# again. Pinned from that run, with the same owner sign-off outstanding as the software leg.
+sha256_hwrt     = "c6a055a1518ca4deef97dd942a1b3592ff68e471733643f417b6336135b23bc3"
+
+[particle_sdf_collide.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_HOST_DUMP          = "D:\\tmp\\particle_sdf_collide.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+BOYKO_WIN                = "512"
+BOYKO_RENDER_PATH        = "deferred"
+BOYKO_PARTICLE_SDF       = "1"
+BOYKO_PARTICLE_COLLIDE   = "1"

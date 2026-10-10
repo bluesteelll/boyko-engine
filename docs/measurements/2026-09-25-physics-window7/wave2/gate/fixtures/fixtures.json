@@ -1,0 +1,15 @@
+{
+ "J500": {
+  "hash": "0x32d5e235342b4143",
+  "file": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7/gate/fixtures/J500.pose",
+  "also": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win6/gate/fixtures/J500.pose",
+  "sha256": "eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f",
+  "sha256_win6": "eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f"
+ },
+ "JAon500c4": {
+  "hash": "0x30c5438bc6ad9ffa",
+  "file": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7/gate/fixtures/JAon500c4.pose",
+  "sha256": "e268d7a5e9ffc4c6b25d403601e119d20b490cbaed5cec4a910e3159f28a5b89",
+  "recorded_by": "window 7's gate7.py (win7/gate/fixtures/fixtures.json)"
+ }
+}

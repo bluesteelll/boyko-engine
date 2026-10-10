@@ -98,7 +98,7 @@ pub struct EcsMaster {
     /// methods (`insert_resource`, `remove_resource`, `resource`,
     /// `resource_mut`) are deferred to Step 9; this minimal field addition
     /// unblocks Step 7's `Res<R>` / `ResMut<R>` `get_param` via
-    /// `UnsafeEcsCell::resources()` / `resources_mut()`.
+    /// `UnsafeEcsCell::resources()` / `resource_ptr_mut()`.
     pub(crate) resources: Resources,
 
     /// Phase 4 Seam 2 (D6 / CR-A / P5) — world-global **non-`Send`** resource
@@ -140,11 +140,11 @@ pub struct EcsMaster {
     ///
     /// Phase 11 Round 3 (C-N1): `pub(crate)` so
     /// [`crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::entity_counter`]
-    /// can project `next_id_atomic()` without going through the `&self`
-    /// borrow that the public accessor would impose. The field is still
-    /// opaque to out-of-crate consumers — the only worker-side view is
-    /// the [`crate::ecs::core::system::params::entity_counter::EntityCounter<'s>`]
-    /// newtype (EM6).
+    /// can project `&raw const (*world).entity_master.reservoir` without going
+    /// through the `&self` borrow that the public accessor would impose. The
+    /// field is still opaque to out-of-crate consumers — the only worker-side
+    /// view is the [`crate::ecs::core::system::params::entity_counter::EntityCounter<'s>`]
+    /// newtype, which reaches the entity reservoir and nothing else (EM6′).
     pub(crate) entity_master: EntityMaster,
 
     /// Archetype management system.
@@ -425,7 +425,7 @@ impl EcsMaster {
     /// ceilings). (Phase X.J retired the historical shared Arena.)
     pub fn new() -> Self {
         let archetype_master = ArchetypeMaster::new();
-        // EventDispatcher::new(1) validates 1 ∈ 1..=64 — never fails.
+        // EventDispatcher::new(1) validates 1 ∈ 1..=MAX_EVENT_THREADS — never fails.
         let events = EventDispatcher::new(1)
             .expect("invariant: default thread_count=1 is always valid");
         // Phase 12.6 — entity fast-store starts empty. Growth is driven by:
@@ -472,7 +472,7 @@ impl EcsMaster {
     /// explicitly after construction.
     pub fn with_capacity(entity_capacity: usize, archetype_capacity: usize) -> Self {
         let archetype_master = ArchetypeMaster::with_capacity(archetype_capacity);
-        // EventDispatcher::new(1) validates 1 ∈ 1..=64 — never fails.
+        // EventDispatcher::new(1) validates 1 ∈ 1..=MAX_EVENT_THREADS — never fails.
         let events = EventDispatcher::new(1)
             .expect("invariant: default thread_count=1 is always valid");
         Self {
@@ -1436,10 +1436,11 @@ mod tests {
     // C-007 guard tests: validate that create_entity never leaks EntityIds.
     //
     // The guard sequence is:
-    //   1. has_archetype() checked BEFORE allocate_entity()
+    //   1. has_archetype() checked BEFORE allocate_entity_ticketed()
     //   2. If archetype not found → bail! (no EntityId consumed)
-    //   3. On post-allocation failure → rewind_allocate() undoes fresh-ID
-    //      allocation, or deallocate_entity() recycles an existing one.
+    //   3. On post-allocation failure → rewind_allocate(ticket) undoes the
+    //      branch the ticket records: a fresh id rolls the counter back, a
+    //      recycled entity returns to the recycled stack (R1).
 
     /// Creating an entity in a non-existent archetype must fail and must not
     /// consume an EntityId from the allocator.
@@ -1527,12 +1528,12 @@ mod tests {
         let entity_master = ecs.entity_master_mut();
 
         // Allocate a fresh entity without registering it.
-        let entity = entity_master.allocate_entity();
-        assert_eq!(entity.id(), EntityId(0));
+        let ticket = entity_master.allocate_entity_ticketed();
+        assert_eq!(ticket.entity().id(), EntityId(0));
         assert_eq!(entity_master.next_entity_id(), EntityId(1));
 
         // Rewind must succeed and restore next_entity_id to 0.
-        let rewound = entity_master.rewind_allocate(entity);
+        let rewound = entity_master.rewind_allocate(ticket);
         assert!(rewound, "fresh-ID rewind must succeed");
         assert_eq!(entity_master.next_entity_id(), EntityId(0),
             "next_entity_id must be restored after rewind");

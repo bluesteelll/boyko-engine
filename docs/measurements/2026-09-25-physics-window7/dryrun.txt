@@ -1,0 +1,30 @@
+WINDOW 7 DRY RUN: rows7.json, 6 blocks, K = 6 (2 passes x 3 rounds), cutoff 04:15, assumed start 01:10
+per pass: idle rule >= 135 s (3 polls 60 s apart), opening receipt 10 s, one warm-up; per process: the gate's untimed wall + 0.4 s launch + 5 s receipt
+binaries: all match bin/SHA256SUMS
+fixtures: all present
+
+[P1] P1A-jolt: 15 cells x K 6 = 90 timed processes + 2 warm-ups; per round 119 s; per pass 8.5 min; block 17.0 min; 01:10 -> 01:27 fits
+  pass 0: idle rule; warm-up H-trk-tree#trk@W8; each of 3 rounds: H-trk-tree#trk@W1(3.7s), H-jolt56#j56@W1(5.9s), H-trk-ap#trk@W1(4.6s), H-trk-tree#trk@W2(2.7s), H-jolt56#j56@W2(3.6s), H-trk-ap#trk@W2(3.6s), H-trk-tree#trk@W4(2.0s), H-jolt56#j56@W4(2.5s), H-trk-ap#trk@W4(3.0s), H-trk-tree#trk@W8(1.7s), H-jolt56#j56@W8(2.0s), H-trk-ap#trk@W8(2.8s), H-trk-tree#trk@W16(1.8s), H-jolt56#j56@W16(1.9s), H-trk-ap#trk@W16(2.9s)
+  pass 1: idle rule; warm-up H-trk-tree#trk@W8; each of 3 rounds: H-trk-ap#trk@W16(2.9s), H-jolt56#j56@W16(1.9s), H-trk-tree#trk@W16(1.8s), H-trk-ap#trk@W8(2.8s), H-jolt56#j56@W8(2.0s), H-trk-tree#trk@W8(1.7s), H-trk-ap#trk@W4(3.0s), H-jolt56#j56@W4(2.5s), H-trk-tree#trk@W4(2.0s), H-trk-ap#trk@W2(3.6s), H-jolt56#j56@W2(3.6s), H-trk-tree#trk@W2(2.7s), H-trk-ap#trk@W1(4.6s), H-jolt56#j56@W1(5.9s), H-trk-tree#trk@W1(3.7s)
+
+[P2] P2-L9GTW: 35 cells x K 6 = 210 timed processes + 2 warm-ups; per round 384 s; per pass 21.8 min; block 43.5 min; 01:27 -> 02:10 fits
+  pass 0: idle rule; warm-up L9-JA-off#c4@W8; each of 3 rounds: L9-JA-off#c4@W1(10.0s), L9-JA-on#c4@W1(9.1s), L9-JD-off#c4@W1(4.7s), L9-JD-on#c4@W1(3.7s), L9-R-off#c4@W1(13.2s), L9-R-on#c4@W1(10.1s), L9-JA-a-off#c4@W1(10.0s), L9-JA-a-on#c4@W1(9.1s), L9-JC#c4@W1(9.4s), L9-JA-off#c4@W2(6.5s), L9-JA-on#c4@W2(6.0s), L9-JD-off#c4@W2(3.6s), L9-JD-on#c4@W2(3.1s), L9-R-off#c4@W2(10.0s), L9-R-on#c4@W2(8.2s), L9-JA-off#c4@W4(4.6s), L9-JA-on#c4@W4(4.4s), L9-JD-off#c4@W4(3.0s), L9-JD-on#c4@W4(2.8s), L9-R-off#c4@W4(7.9s), L9-R-on#c4@W4(7.2s), L9-JA-off#c4@W8(3.7s), L9-JA-on#c4@W8(3.6s), L9-JD-off#c4@W8(2.7s), L9-JD-on#c4@W8(2.6s), L9-R-off#c4@W8(7.0s), L9-R-on#c4@W8(6.7s), L9-JA-a-off#c4@W8(3.8s), L9-JA-a-on#c4@W8(3.7s), L9-JA-off#c4@W16(3.8s), L9-JA-on#c4@W16(3.8s), L9-JD-off#c4@W16(3.1s), L9-JD-on#c4@W16(2.8s), L9-R-off#c4@W16(7.5s), L9-R-on#c4@W16(7.5s)
+  pass 1: idle rule; warm-up L9-JA-off#c4@W8; each of 3 rounds: L9-R-on#c4@W16(7.5s), L9-R-off#c4@W16(7.5s), L9-JD-on#c4@W16(2.8s), L9-JD-off#c4@W16(3.1s), L9-JA-on#c4@W16(3.8s), L9-JA-off#c4@W16(3.8s), L9-JA-a-on#c4@W8(3.7s), L9-JA-a-off#c4@W8(3.8s), L9-R-on#c4@W8(6.7s), L9-R-off#c4@W8(7.0s), L9-JD-on#c4@W8(2.6s), L9-JD-off#c4@W8(2.7s), L9-JA-on#c4@W8(3.6s), L9-JA-off#c4@W8(3.7s), L9-R-on#c4@W4(7.2s), L9-R-off#c4@W4(7.9s), L9-JD-on#c4@W4(2.8s), L9-JD-off#c4@W4(3.0s), L9-JA-on#c4@W4(4.4s), L9-JA-off#c4@W4(4.6s), L9-R-on#c4@W2(8.2s), L9-R-off#c4@W2(10.0s), L9-JD-on#c4@W2(3.1s), L9-JD-off#c4@W2(3.6s), L9-JA-on#c4@W2(6.0s), L9-JA-off#c4@W2(6.5s), L9-JC#c4@W1(9.4s), L9-JA-a-on#c4@W1(9.1s), L9-JA-a-off#c4@W1(10.0s), L9-R-on#c4@W1(10.1s), L9-R-off#c4@W1(13.2s), L9-JD-on#c4@W1(3.7s), L9-JD-off#c4@W1(4.7s), L9-JA-on#c4@W1(9.1s), L9-JA-off#c4@W1(10.0s)
+
+[P3] P3-G9JA: 6 cells x K 6 = 36 timed processes + 2 warm-ups; per round 61 s; per pass 5.6 min; block 11.2 min; 02:10 -> 02:21 fits
+  pass 0: idle rule; warm-up G9-JA-mid#g9t@W4; each of 3 rounds: G9-JA-mid#g9p@W2(6.7s), G9-JA-mid#g9t@W2(6.7s), G9-JA-mid#g9p@W4(4.7s), G9-JA-mid#g9t@W4(4.7s), G9-JA-mid#g9p@W16(3.9s), G9-JA-mid#g9t@W16(4.0s)
+  pass 1: idle rule; warm-up G9-JA-mid#g9t@W4; each of 3 rounds: G9-JA-mid#g9t@W16(4.0s), G9-JA-mid#g9p@W16(3.9s), G9-JA-mid#g9t@W4(4.7s), G9-JA-mid#g9p@W4(4.7s), G9-JA-mid#g9t@W2(6.7s), G9-JA-mid#g9p@W2(6.7s)
+
+[P4] P4-trkspans: 2 cells x K 6 = 12 timed processes + 2 warm-ups; per round 16 s; per pass 3.3 min; block 6.6 min; 02:21 -> 02:28 fits
+  pass 0: idle rule; warm-up S-trk-tree-a#trk@W8; each of 3 rounds: S-trk-tree-a#trk@W1(3.8s), S-trk-tree-a#trk@W8(1.8s)
+  pass 1: idle rule; warm-up S-trk-tree-a#trk@W8; each of 3 rounds: S-trk-tree-a#trk@W8(1.8s), S-trk-tree-a#trk@W1(3.8s)
+
+[P5] P5-joltprof: 2 cells x K 6 = 12 timed processes + 2 warm-ups; per round 20 s; per pass 3.6 min; block 7.1 min; 02:28 -> 02:35 fits
+  pass 0: idle rule; warm-up P-jolt56-prof#j56p@W8; each of 3 rounds: P-jolt56-prof#j56p@W1(8.0s), P-jolt56-prof#j56p@W8(2.5s)
+  pass 1: idle rule; warm-up P-jolt56-prof#j56p@W8; each of 3 rounds: P-jolt56-prof#j56p@W8(2.5s), P-jolt56-prof#j56p@W1(8.0s)
+
+[P1] P1B-jolt: 15 cells x K 6 = 90 timed processes + 2 warm-ups; per round 119 s; per pass 8.5 min; block 17.0 min; 02:35 -> 02:52 fits
+  pass 0: idle rule; warm-up H-trk-tree#trk@W8; each of 3 rounds: H-trk-tree#trk@W1(3.7s), H-jolt56#j56@W1(5.9s), H-trk-ap#trk@W1(4.6s), H-trk-tree#trk@W2(2.7s), H-jolt56#j56@W2(3.6s), H-trk-ap#trk@W2(3.6s), H-trk-tree#trk@W4(2.0s), H-jolt56#j56@W4(2.5s), H-trk-ap#trk@W4(3.0s), H-trk-tree#trk@W8(1.7s), H-jolt56#j56@W8(2.0s), H-trk-ap#trk@W8(2.8s), H-trk-tree#trk@W16(1.8s), H-jolt56#j56@W16(1.9s), H-trk-ap#trk@W16(2.9s)
+  pass 1: idle rule; warm-up H-trk-tree#trk@W8; each of 3 rounds: H-trk-ap#trk@W16(2.9s), H-jolt56#j56@W16(1.9s), H-trk-tree#trk@W16(1.8s), H-trk-ap#trk@W8(2.8s), H-jolt56#j56@W8(2.0s), H-trk-tree#trk@W8(1.7s), H-trk-ap#trk@W4(3.0s), H-jolt56#j56@W4(2.5s), H-trk-tree#trk@W4(2.0s), H-trk-ap#trk@W2(3.6s), H-jolt56#j56@W2(3.6s), H-trk-tree#trk@W2(2.7s), H-trk-ap#trk@W1(4.6s), H-jolt56#j56@W1(5.9s), H-trk-tree#trk@W1(3.7s)
+
+TOTAL 102.5 min if every block runs; the cutoff stops starting processes at 04:15

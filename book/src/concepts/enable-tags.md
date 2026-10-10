@@ -2,8 +2,6 @@
 
 > An enable tag is a per-row bit you flip in place — no archetype migration, no fragmentation, ideal for high-churn flags.
 
-*(Branch: `ecs`, EnableTag phase.)*
-
 ## What an enable tag is
 
 A [tag](tags.md) encodes presence in the archetype **signature**: adding or
@@ -61,9 +59,35 @@ data is a data component, not an enable bit.
 
 ## Toggling and probing
 
-Enable, disable, and test are direct `EcsMaster` operations. Enable and disable
-take `&mut EcsMaster` (they are structural-class operations — see
-[the access contract](#the-access-contract)); the probe takes `&self`:
+Inside a system, toggle through [`Commands`](commands.md). `EntityCommands`
+has `enable::<T>()` / `disable::<T>()` and the runtime-id twins `enable_id` /
+`disable_id`. Each queues a toggle that is applied at the next apply point, with
+the same O(1), no-migration cost as the direct form:
+
+```rust,ignore
+use boyko_ecs::prelude::*;
+use boyko_ecs::ecs::core::system::Entities; // not in the prelude
+# use boyko_macros::Component;
+# #[derive(Component)] struct Health(u32);
+# #[derive(Component)] #[component(storage = "bitset")] struct Stunned;
+
+fn stun_the_wounded(mut commands: Commands, entities: Entities, q: Query<&Health>) {
+    for (id, health) in q.iter_entities() {
+        if health.0 < 10 {
+            if let Some(e) = entities.get(id) {
+                commands.entity(e).enable::<Stunned>();
+            }
+        }
+    }
+}
+```
+
+A toggle queued for an entity that is despawned before the apply is a silent
+no-op.
+
+Outside systems, enable, disable, and test are direct `EcsMaster` operations.
+Enable and disable take `&mut EcsMaster` (they are structural-class operations —
+see [the access contract](#the-access-contract)); the probe takes `&self`:
 
 ```rust,ignore
 use boyko_ecs::prelude::*;
@@ -83,8 +107,8 @@ leaks a set bit onto a recycled slot), matching the deferred-command contract.
 
 ## Querying: `Enabled<T>` / `Disabled<T>`
 
-`Enabled<T>` and `Disabled<T>` are per-row query filters. They live in
-`boyko_ecs::ecs::core::iters::query`:
+`Enabled<T>` and `Disabled<T>` are per-row query filters. They are in the
+prelude, and also exported from `boyko_ecs::ecs::core::iters::query`:
 
 - `Query<&D, Enabled<A>>` visits rows whose `A` bit is **set**.
 - `Query<&D, Disabled<A>>` visits rows whose `A` bit is **clear**. A row in an
@@ -92,8 +116,7 @@ leaks a set bit onto a recycled slot), matching the deferred-command contract.
   positive-data `Disabled` query also visits no-`A`-column rows.
 
 ```rust,ignore
-use boyko_ecs::prelude::*;
-use boyko_ecs::ecs::core::iters::query::{Enabled, Disabled};
+use boyko_ecs::prelude::*; // includes Enabled and Disabled
 
 # #[derive(Clone, Copy)] #[derive(boyko_macros::Component)] #[repr(C)]
 # struct Position { x: f32, y: f32 }
@@ -124,6 +147,31 @@ The same filters work as the system parameter `Query<D, F>` and the direct-API
 `world.query::<D, F>()` view shown above, across every driver
 (`iter`/`iter_mut`, `par_iter`, `get`/`single`).
 
+## Reading the bit without filtering: `IsEnabled<T>`
+
+A filter drops rows. Sometimes you need every row the query already matches,
+plus the bit as a value — for example when another column is addressed by row
+order and a dropped row would shift it. `IsEnabled<T>` is a query-data term that
+yields `bool` for each row, in the same order as `iter()`, and never removes a
+row. It is in the prelude:
+
+```rust,ignore
+use boyko_ecs::prelude::*;
+
+// Every Position row, with its Stunned bit as a bool.
+fn report(q: Query<(&Position, IsEnabled<Stunned>)>) {
+    for (pos, stunned) in q.iter() {
+        if stunned {
+            println!("stunned at {}", pos.x);
+        }
+    }
+}
+```
+
+A row in an archetype that never allocated a column for the tag reads `false`.
+`IsEnabled<T>` declares no data access, so it never conflicts with another
+system in the scheduler.
+
 ## The data-less global scan
 
 The sole forms `Query<(), Enabled<A>>` and `Query<(), Disabled<A>>` — no
@@ -134,7 +182,6 @@ ever allocated), never the whole world.
 
 ```rust,ignore
 use boyko_ecs::prelude::*;
-use boyko_ecs::ecs::core::iters::query::Disabled;
 
 // How many entities (across present-A archetypes) currently have A off?
 fn count_disabled(world: &mut EcsMaster) -> usize {
@@ -227,7 +274,7 @@ operations: **do not toggle an enable bit during query iteration.**
 |-----------|------|-------|
 | Toggle (`enable`/`disable`) | O(1) atomic bit RMW | no migration, no structural bump |
 | First toggle into an archetype | O(1) + lazy page alloc | allocates the 512 B page, bumps `enable_generation` once |
-| `is_enabled` | O(1), ≤ 5 ns | inland load → column scan (≤ 4) → paged bit test |
+| `is_enabled` | O(1) | inland load → column scan (≤ 4) → paged bit test |
 | Query per-row gate | ≈ 1 branch/row | bench-flat for queries with no enable term |
 | Data-less global scan | O(present-`A` archetypes) | bounded by the presence bitset, never a full-world sweep |
 | Carry an enable tag | 0 B/row resident until toggled | pages are demand-allocated |
@@ -244,4 +291,5 @@ is the decision matrix.
 - [Dynamic Tags](dynamic-tags.md) — runtime-minted, name-keyed archetype tags
 - [Storage Trade-offs: Tags, Churn, and Fragmentation](../architecture/storage-tradeoffs.md) — Table vs Bitset decision matrix
 - [Change Detection](../change_detection.md) — why it does not extend to enable tags
-- Source: [`enable_tag_api.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs) (`register_enable_tag` / `enable` / `disable` / `is_enabled`), [`filter_enable.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/filter_enable.rs) (`Enabled` / `Disabled`), [`enable_terms.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/enable_terms.rs) (`with_enabled` / `without_enabled`), [`enable_store.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs) (paged bitset)
+- [Commands](commands.md) — the deferred `enable` / `disable` toggles
+- Source: [`enable_tag_api.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs) (`register_enable_tag` / `enable` / `disable` / `is_enabled`), [`filter_enable.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/filter_enable.rs) (`Enabled` / `Disabled`), [`enable_terms.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/enable_terms.rs) (`with_enabled` / `without_enabled`), [`enable_store.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs) (paged bitset)

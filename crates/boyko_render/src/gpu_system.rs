@@ -51,6 +51,7 @@ use boyko_ecs::ecs::core::system::system::System;
 use boyko_ecs::ecs::core::system::system_meta::SystemMeta;
 use boyko_ecs::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
+use boyko_log::codes::E2203;
 
 use boyko_rhi::ComputePipelineHandle;
 
@@ -394,10 +395,86 @@ unsafe impl System for GpuSystem {
 /// an RHI failure during the GPU dispatch is reported here. Pulled out `#[cold]
 /// #[inline(never)]` so the error path never bloats the hot `run_unsafe` body's
 /// I-cache. In debug it panics (the validation oracle would already have flagged a
-/// device fault); in release it logs loudly without aborting the frame.
+/// device fault); in release it reports `boyko-E2203` without aborting the frame.
+///
+/// **No latch, deliberately — and since L8a-wired, a per-second WINDOW instead.** A device fault
+/// that recurs must stay visible: this is the only way the condition reaches anyone, and a `Once`
+/// here would report the first bad frame of a session and then let an hour of broken frames look
+/// identical to a good one. `MinIntervalMs(1_000)` keeps that property — one line per second is
+/// not a latch — while bounding what the flood costs EVERYONE ELSE.
+///
+/// That last half is why the policy changed. This paragraph used to end "the flood is bounded by
+/// the ring, which drops and counts — not by the registry's rate column, which the emission macros
+/// do not read". They read it now; and the ring is SHARED, so a fault recurring at 60 fps evicts
+/// other subsystems' records for the whole session. The suppressed occurrences are counted and the
+/// census prints them, which is the half that did not exist when this comment was written.
 #[cold]
 #[inline(never)]
 fn gpu_dispatch_failed(error: &crate::error::GpuColumnError) {
     debug_assert!(false, "GpuSystem::run_unsafe: GPU dispatch failed: {error}");
-    eprintln!("boyko_render: GpuSystem dispatch failed: {error}");
+    report_gpu_dispatch_failed(error);
+}
+
+/// Reports `boyko-E2203`, split out of [`gpu_dispatch_failed`] so it is reachable past that
+/// function's `debug_assert!` — the same split `crate::bindless` makes, for the same reason: an
+/// observer must be able to drive the function a release build runs, not a copy of its body.
+///
+/// Generic over `Display` rather than taking `&GpuColumnError`, so the observer can hand it a
+/// synthetic failure without constructing a device error whose variants have nothing to do with
+/// what is under test.
+#[cold]
+#[inline(never)]
+fn report_gpu_dispatch_failed(error: &impl core::fmt::Display) {
+    boyko_log::error!(
+        boyko_log::Render,
+        E2203,
+        "GpuSystem dispatch failed: {}",
+        boyko_log::dsp!(error)
+    );
+}
+
+#[cfg(test)]
+mod l8a_e2203 {
+    use super::*;
+    use boyko_log::probe::{watch, watched};
+
+    use crate::log_probe::arm;
+
+    #[test]
+    fn e2203_is_damped_to_one_per_second_and_is_not_a_latch() {
+        // `MinIntervalMs(1_000)`, and the two assertions are the two halves of that choice.
+        //
+        // The reporter's `debug_assert!(false, ..)` fires first in a debug build, so what is
+        // driven here is the emission the release build performs.
+        arm();
+
+        let suppressed_before = boyko_log::rate::suppressed();
+        watch(b'E', E2203.number());
+        for _ in 0..3 {
+            report_gpu_dispatch_failed(&"a synthetic device fault");
+        }
+        assert_eq!(watched(), 1, "three failures inside one window must deliver one");
+        assert_eq!(
+            boyko_log::rate::suppressed() - suppressed_before,
+            2,
+            "the two refused occurrences must be COUNTED, or the flood is silent about what it dropped"
+        );
+
+        // ── AND IT IS NOT A LATCH, WHICH IS THE POINT OF A WINDOW ───────────────────────────
+        //
+        // Driven through `rate::admit` with an explicit stamp rather than by sleeping: a test that
+        // slept a second to cross the window would be asserting about the scheduler, and the claim
+        // here is about the policy. A `Once` would refuse this call; a window admits it.
+        // The stamp is `now_ms() + 2_000` and NOT a literal. MEASURED: a literal `9_000_000`
+        // refused, because `now_ms` counts from the tick counter's own origin -- on this box that
+        // is already ~80 million ms at process start, so a "large" literal is in the PAST and the
+        // window reads as never having opened. A test asserting "not a latch" that failed for
+        // that reason would have accused the policy of the opposite of its defect.
+        let idx = E2203.code_idx();
+        let later = boyko_log::rate::now_ms() + 2_000;
+        assert!(
+            boyko_log::rate::admit(idx, boyko_log::RatePolicy::MinIntervalMs(1_000), later),
+            "a second window must open; if this refuses, the code is a latch wearing an interval's name"
+        );
+    }
 }

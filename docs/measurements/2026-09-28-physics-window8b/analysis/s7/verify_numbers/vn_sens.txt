@@ -1,0 +1,43 @@
+(a) quantile method sensitivity (claimed i&s every pass+pooled / STRONG / signs B>A):
+   inclusive C1-JT: (True, True, {True})
+   inclusive C1-JA: (True, True, {True})
+   inclusive C2-JT: (False, False, {False})
+   inclusive C2-JA: (False, False, {False, True})
+   inclusive C3-JT: (True, True, {True})
+   exclusive C1-JT: (True, True, {True})
+   exclusive C1-JA: (True, True, {True})
+   exclusive C2-JT: (False, False, {False})
+   exclusive C2-JA: (False, False, {False, True})
+   exclusive C3-JT: (True, True, {True})
+(b) leave-one-process-out: does any single dropped process change claimed / STRONG?
+   C1-JT: base (True, True); flips []
+   C1-JA: base (True, True); flips []
+   C2-JT: base (False, False); flips []
+   C2-JA: base (False, False); flips []
+   C3-JT: base (True, True); flips []
+(c) pre-flight recomputed:
+   JT W1: P==T bytes True; sha fixture True; P 0x30c5438bc6ad9ffa match void 0 W 1; T 0x30c5438bc6ad9ffa match void 0 W 1
+   JT W2: P==T bytes True; sha fixture True; P 0x30c5438bc6ad9ffa match void 0 W 2; T 0x30c5438bc6ad9ffa match void 0 W 2
+   JT W4: P==T bytes True; sha fixture True; P 0x30c5438bc6ad9ffa match void 0 W 4; T 0x30c5438bc6ad9ffa match void 0 W 4
+   JT W8: P==T bytes True; sha fixture True; P 0x30c5438bc6ad9ffa match void 0 W 8; T 0x30c5438bc6ad9ffa match void 0 W 8
+   JT W16: P==T bytes True; sha fixture True; P 0x30c5438bc6ad9ffa match void 0 W 16; T 0x30c5438bc6ad9ffa match void 0 W 16
+   JA W1: P==T bytes True; sha fixture True; P 0x30c5438bc6ad9ffa match void 0 W 1; T 0x30c5438bc6ad9ffa match void 0 W 1
+   JA W2: P==T bytes True; sha fixture True; P 0x30c5438bc6ad9ffa match void 0 W 2; T 0x30c5438bc6ad9ffa match void 0 W 2
+   JA W4: P==T bytes True; sha fixture True; P 0x30c5438bc6ad9ffa match void 0 W 4; T 0x30c5438bc6ad9ffa match void 0 W 4
+   JA W8: P==T bytes True; sha fixture True; P 0x30c5438bc6ad9ffa match void 0 W 8; T 0x30c5438bc6ad9ffa match void 0 W 8
+   JA W16: P==T bytes True; sha fixture True; P 0x30c5438bc6ad9ffa match void 0 W 16; T 0x30c5438bc6ad9ffa match void 0 W 16
+   engagement P-JT-W8: lanes_sum 392023 bound 399732 within True scopes 49404 tasks 1126176 pose 0x30c5438bc6ad9ffa void 0 steps 500
+   engagement T-JT-W8: lanes_sum 381099 bound 399732 within True scopes 49404 tasks 1126176 pose 0x30c5438bc6ad9ffa void 0 steps 500
+   engagement P-JT-W16: lanes_sum 607272 bound 403732 within False scopes 49404 tasks 1126176 pose 0x30c5438bc6ad9ffa void 0 steps 500
+   engagement T-JT-W16: lanes_sum 391361 bound 403732 within True scopes 49404 tasks 1126176 pose 0x30c5438bc6ad9ffa void 0 steps 500
+   engagement P-JA-W8: lanes_sum 394544 bound 399732 within True scopes 49404 tasks 1485480 pose 0x30c5438bc6ad9ffa void 0 steps 500
+   engagement T-JA-W8: lanes_sum 380996 bound 399732 within True scopes 49404 tasks 1485480 pose 0x30c5438bc6ad9ffa void 0 steps 500
+   engagement P-JA-W16: lanes_sum 597418 bound 403732 within False scopes 49404 tasks 1485480 pose 0x30c5438bc6ad9ffa void 0 steps 500
+   engagement T-JA-W16: lanes_sum 399017 bound 403732 within True scopes 49404 tasks 1485480 pose 0x30c5438bc6ad9ffa void 0 steps 500
+(d) ladders under both quartile methods, [0,500) (seen = i&s every pass + pooled, rung slower):
+   inclusive ladder8: seen [(0.03, False), (0.06, True), (0.09, True), (0.12, True)] -> R = 0.06
+   inclusive ladder16: seen [(0.0525, True), (0.105, True), (0.1575, True), (0.21, True)] -> R = 0.0525
+   inclusive JA-ladder16: seen [(0.105, False)] -> R = None
+   exclusive ladder8: seen [(0.03, False), (0.06, False), (0.09, False), (0.12, True)] -> R = 0.12
+   exclusive ladder16: seen [(0.0525, False), (0.105, True), (0.1575, True), (0.21, True)] -> R = 0.105
+   exclusive JA-ladder16: seen [(0.105, False)] -> R = None

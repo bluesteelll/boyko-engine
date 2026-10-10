@@ -57,6 +57,21 @@ fn extract_fn(src: &str, sig: &str) -> String {
     panic!("unbalanced braces extracting `{sig}` — the function never closed");
 }
 
+/// Reads `shaders/sdf_forward_march.comp.hlsl` (LF-normalized) — the rung R-SDFFWD SDF
+/// forward-march pass, whose brick-atlas/soft-shadow spans are VERBATIM copies of
+/// `sdf_gbuffer_composite.hlsl`'s own generated spans (see that file's header doc). Every test
+/// below that pins a span copied into this file asserts against it in ADDITION to
+/// `sdf_gbuffer_composite.hlsl` (never in place of it).
+fn read_forward_march_shader() -> String {
+    let shader_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/shaders/sdf_forward_march.comp.hlsl"
+    );
+    std::fs::read_to_string(shader_path)
+        .expect("invariant: shaders/sdf_forward_march.comp.hlsl must exist next to this crate")
+        .replace("\r\n", "\n")
+}
+
 #[test]
 fn sdf_field_smin_smax_match_edsl_emit() {
     // Generate the HLSL field bodies from the eDSL (LF-normalized).
@@ -123,6 +138,9 @@ fn m2_decode_matches_edsl_emit() {
     // pins the spliced scale body to the generator. A hand-edit — which would silently
     // diverge the GPU brick decode from the host oracle the trilinear fetch is golden-
     // compared against — fails CI here.
+    //
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM (its own M2
+    // brick-atlas acceleration) — pinned against that file too.
     let generated = boyko_shaderdsl::emit::emit_hlsl_decode_snorm8().replace("\r\n", "\n");
     let m2_decode = extract_fn(&generated, "float m2_decode(float n, float band_half) {");
 
@@ -137,6 +155,15 @@ fn m2_decode_matches_edsl_emit() {
     assert!(
         shader.contains(&m2_decode),
         "sdf_gbuffer_composite.hlsl `m2_decode` DRIFTED from boyko_shaderdsl::emit — the committed \
+         body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl --features emit \
+         --bin emit_field` and re-splice the m2_decode body between the GENERATED decode_snorm8 \
+         sentinels.\n--- expected (eDSL-generated) ---\n{m2_decode}"
+    );
+
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&m2_decode),
+        "sdf_forward_march.comp.hlsl `m2_decode` DRIFTED from boyko_shaderdsl::emit — the committed \
          body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl --features emit \
          --bin emit_field` and re-splice the m2_decode body between the GENERATED decode_snorm8 \
          sentinels.\n--- expected (eDSL-generated) ---\n{m2_decode}"
@@ -169,6 +196,16 @@ fn m2_cubic_eval_matches_edsl_emit() {
          --features emit --bin emit_field` and re-splice the m2_cubic_eval body between the \
          GENERATED m2_cubic_eval sentinels.\n--- expected (eDSL-generated) ---\n{m2_cubic_eval}"
     );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&m2_cubic_eval),
+        "sdf_forward_march.comp.hlsl `m2_cubic_eval` DRIFTED from boyko_shaderdsl::emit — the \
+         committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice the m2_cubic_eval body between the \
+         GENERATED m2_cubic_eval sentinels.\n--- expected (eDSL-generated) ---\n{m2_cubic_eval}"
+    );
 }
 
 #[test]
@@ -195,6 +232,16 @@ fn m2_jcgt_cubic_coeffs_matches_edsl_emit() {
         shader.contains(&m2_jcgt),
         "sdf_gbuffer_composite.hlsl `m2_jcgt_cubic_coeffs` DRIFTED from boyko_shaderdsl::emit — the \
          committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice the m2_jcgt_cubic_coeffs body between the \
+         GENERATED m2_jcgt_cubic_coeffs sentinels.\n--- expected (eDSL-generated) ---\n{m2_jcgt}"
+    );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&m2_jcgt),
+        "sdf_forward_march.comp.hlsl `m2_jcgt_cubic_coeffs` DRIFTED from boyko_shaderdsl::emit — \
+         the committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
          --features emit --bin emit_field` and re-splice the m2_jcgt_cubic_coeffs body between the \
          GENERATED m2_jcgt_cubic_coeffs sentinels.\n--- expected (eDSL-generated) ---\n{m2_jcgt}"
     );
@@ -230,6 +277,17 @@ fn dist_to_brick_exit_matches_edsl_emit() {
     assert!(
         shader.contains(&dist),
         "sdf_gbuffer_composite.hlsl `dist_to_brick_exit` DRIFTED from boyko_shaderdsl::emit — the \
+         committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice the dist_to_brick_exit body between the \
+         GENERATED dist_to_brick_exit sentinels.\n--- expected (eDSL-generated) ---\n{dist}"
+    );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too (its own M1
+    // empty-space-skip acceleration).
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&dist),
+        "sdf_forward_march.comp.hlsl `dist_to_brick_exit` DRIFTED from boyko_shaderdsl::emit — the \
          committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
          --features emit --bin emit_field` and re-splice the dist_to_brick_exit body between the \
          GENERATED dist_to_brick_exit sentinels.\n--- expected (eDSL-generated) ---\n{dist}"
@@ -271,6 +329,17 @@ fn brick_cell_class_matches_edsl_emit() {
     assert!(
         shader.contains(&bcc),
         "sdf_gbuffer_composite.hlsl `brick_cell_class` DRIFTED from boyko_shaderdsl::emit — the \
+         committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice the brick_cell_class body between the \
+         GENERATED brick_cell_class sentinels (the 3 call sites stay UNCHANGED).\n\
+         --- expected (eDSL-generated) ---\n{bcc}"
+    );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&bcc),
+        "sdf_forward_march.comp.hlsl `brick_cell_class` DRIFTED from boyko_shaderdsl::emit — the \
          committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
          --features emit --bin emit_field` and re-splice the brick_cell_class body between the \
          GENERATED brick_cell_class sentinels (the 3 call sites stay UNCHANGED).\n\
@@ -318,6 +387,17 @@ fn m2_regula_falsi_matches_edsl_emit() {
          GENERATED m2_regula_falsi sentinels (the 2 call sites stay UNCHANGED).\n\
          --- expected (eDSL-generated) ---\n{rf}"
     );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&rf),
+        "sdf_forward_march.comp.hlsl `m2_regula_falsi` DRIFTED from boyko_shaderdsl::emit — the \
+         committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice the m2_regula_falsi body between the \
+         GENERATED m2_regula_falsi sentinels (the 2 call sites stay UNCHANGED).\n\
+         --- expected (eDSL-generated) ---\n{rf}"
+    );
 }
 
 #[test]
@@ -346,6 +426,17 @@ fn sdf_soft_shadow_matches_edsl_emit() {
          --features emit --bin emit_field` and re-splice between the GENERATED sdf_soft_shadow \
          sentinels (the dot preamble stays hand-written).\n--- expected (eDSL-generated) ---\n{generated}"
     );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too (its own primary-
+    // light analytic soft shadow).
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&generated),
+        "sdf_forward_march.comp.hlsl `sdf_soft_shadow` span DRIFTED from boyko_shaderdsl::emit — the \
+         committed span no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice between the GENERATED sdf_soft_shadow \
+         sentinels (the dot preamble stays hand-written).\n--- expected (eDSL-generated) ---\n{generated}"
+    );
 }
 
 #[test]
@@ -357,25 +448,363 @@ fn sdf_soft_shadow_ranged_matches_edsl_emit() {
     // shadow caster. A hand-edit of the committed function fails CI here. The body is
     // statement-for-statement identical to `sdf_soft_shadow` EXCEPT the escape break spells
     // the PARAMETER `t_max` (B3 — option a, so the marcher's frozen `sdf_gbuffer_composite.
-    // comp.spv` cannot move; `marcher_spv_byte_frozen` is the gate for that). The resolve
+    // comp.spv` cannot move; `marcher_spv_sync.rs::sdf_gbuffer_composite_spv_byte_identical`
+    // is the re-DXC gate for that). The resolve
     // re-DXCs to `deferred_pbr.comp.spv`; the host shadow march mirror is
     // `host_soft_shadow_ranged` (compute.rs), consumer-side (±2/255).
+    //
+    // VB-SV0 rung S2 RE-TARGETED this from `deferred_pbr.hlsl` to the shared
+    // `sdf_shadow_leaves.hlsli` (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §4.1): the three VB
+    // lit-producer tails need the same leaf, so it MOVED verbatim (sentinels included) into a
+    // shared header that `deferred_pbr.hlsl` now `#include`s at the point the span occupied. The
+    // pin's meaning is unchanged — it still asserts the shipped body IS the generator's output;
+    // only the file it reads moved. The consumer set is now `deferred_pbr.hlsl` (six rows) +
+    // `vb_resolve.comp.hlsl` + `vb_shade.comp.hlsl` + `vb_shade_split.comp.hlsl` (ten rows between
+    // them), so a hand-edit here would re-pin SIXTEEN `.spv` at once rather than one — the same
+    // count the failure message below spells out.
     let generated = boyko_shaderdsl::emit::emit_hlsl_sdf_soft_shadow_ranged().replace("\r\n", "\n");
 
-    let shader_path = concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/deferred_pbr.hlsl");
+    let shader_path = concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_shadow_leaves.hlsli");
     let shader = std::fs::read_to_string(shader_path)
-        .expect("invariant: shaders/deferred_pbr.hlsl must exist next to this crate")
+        .expect("invariant: shaders/sdf_shadow_leaves.hlsli must exist next to this crate")
         .replace("\r\n", "\n");
 
     assert!(
         shader.contains(&generated),
-        "deferred_pbr.hlsl `sdf_soft_shadow_ranged` DRIFTED from boyko_shaderdsl::emit — the \
-         committed function no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
-         --features emit --bin emit_field` and re-splice the sdf_soft_shadow_ranged function \
-         between the GENERATED sdf_soft_shadow_ranged sentinels, then re-DXC deferred_pbr.comp.spv \
-         (bump DEFERRED_PBR_SPV in compute.rs to the new size).\n\
+        "sdf_shadow_leaves.hlsli `sdf_soft_shadow_ranged` DRIFTED from boyko_shaderdsl::emit — \
+         the committed function no longer matches the generator. Re-run `cargo run -p \
+         boyko_shaderdsl --features emit --bin emit_field` and re-splice the \
+         sdf_soft_shadow_ranged function between the GENERATED sdf_soft_shadow_ranged sentinels, \
+         then re-DXC EVERY consumer: the six `deferred_pbr*.comp.spv` rows AND the ten VB \
+         lit-producer rows.\n\
          --- expected (eDSL-generated) ---\n{generated}"
     );
+
+    // The shared header is now the ONLY hand-placed definition: `deferred_pbr.hlsl` must consume
+    // it through the include rather than carrying a second, forkable copy. Without this, the
+    // move could be silently undone by pasting the function back and the pin above would still
+    // pass on the header's untouched copy.
+    let resolve = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/deferred_pbr.hlsl"))
+        .expect("invariant: shaders/deferred_pbr.hlsl must exist next to this crate")
+        .replace("\r\n", "\n");
+    assert!(
+        resolve.contains("#include \"sdf_shadow_leaves.hlsli\""),
+        "deferred_pbr.hlsl must CONSUME `sdf_soft_shadow_ranged` through \
+         `#include \"sdf_shadow_leaves.hlsli\"` (VB-SV0 §4.1), not carry its own copy"
+    );
+    assert!(
+        !resolve.contains("float sdf_soft_shadow_ranged(float3 p, float3 n, float3 L, float t_max) {"),
+        "deferred_pbr.hlsl carries a SECOND definition of `sdf_soft_shadow_ranged` — the VB-SV0 \
+         §4.1 move exists to cut the copy count, and a re-introduced local copy would fork \
+         silently from the shared header every consumer else reads"
+    );
+}
+
+/// VB-SV0 rung S3 LAYER 1 — the INCLUDE-CONTRACT precondition pin, in EVERY consumer of the
+/// shared header, DERIVED from the shader directory rather than listed here.
+///
+/// # Why this is its OWN test and not the tail of `sdf_soft_shadow_ranged_matches_edsl_emit`
+///
+/// It was written there first, and two things argue against leaving it: a failure would report
+/// under a name that says "the generator drifted", which is not what broke; and the assertions
+/// above it would MASK it — a red on the generator pin means these tails are never examined at
+/// all, so two independent defects would surface one at a time. Layers are supposed to fail
+/// independently.
+///
+/// # Why the selection is DERIVED and not spelled out
+///
+/// The first version of this pin quantified over the three VB tails only, and that was a hole
+/// with a name: `deferred_pbr.hlsl` is the FOURTH consumer (rung S2's §4.1 move put the leaf
+/// there), it is subject to the identical ordering contract, and a `deferred_pbr.hlsl` that
+/// violated it would fail to COMPILE while passing this entire CPU suite. A hard-coded list is
+/// also how the gate goes stale in the other direction: a new consumer is added, nobody
+/// remembers this file, and it is silently uncovered. So the set is read off the
+/// shipped tree — every `.hlsl`/`.hlsli` that carries the `#include` is checked — and
+/// [`SHADOW_LEAVES_MIN_CONSUMERS`] only asserts that the currently-known ones did not vanish.
+///
+/// # VB-SV0 DP6b — the `Buf` SLOT stops being one number for everyone
+///
+/// Until DP6b every consumer put the edit list at Set-0 slot 10 (plan §2.2), so a single
+/// two-spelling disjunction covered them all. `vb_geo.comp.hlsl`'s `-D VB_SV0_TERM=1` variant
+/// hosts the march inside the split's geometry pass, whose Set 0 is the shared `vb_layout0`
+/// (slot 10 is not free there) and whose Set 1 is its own aux layout — so its edit list is at
+/// **Set 1 @4**, with `register(t0)` unchanged (DP6 design P1-4: only the Vulkan SLOT moves; the
+/// HLSL register is what `sdf_field.hlsli`'s contract names).
+///
+/// The disjunction is therefore replaced by [`BUF_BINDING_BY_CONSUMER`], a per-consumer table.
+/// A consumer ABSENT from that table is a RED rather than a pass: a new marcher host must state
+/// where it put the edit list, because "wherever it likes" is how two hosts silently disagree
+/// about which descriptor the field comes from.
+#[test]
+fn sv0_shadow_leaf_consumers_satisfy_include_contract() {
+    //
+    // The assertions above prove the shared header's body IS the generator's output. They say
+    // NOTHING about whether a consumer can legally include it. `sdf_shadow_leaves.hlsli` opens
+    // with an explicit INCLUDE CONTRACT: `field_distance` (which itself needs
+    // `StructuredBuffer<uint> Buf : register(t0)` declared FIRST) plus the five-name shadow
+    // tuning block must all be in scope BEFORE the `#include`. HLSL has no module system, so
+    // that contract is enforced by nothing but textual ordering — delete the const block from
+    // one consumer and the failure is a DXC error in a file the author was not editing, which is
+    // exactly the class of breakage a text pin should catch at `cargo test` time instead.
+    //
+    // ORDER is asserted, not merely presence. A `.contains()` for each token would pass on a
+    // consumer that declared its consts AFTER the include, which does not compile. Comparing
+    // byte offsets is what actually encodes "in scope BEFORE", the words the contract uses.
+    let consumers = sv0_shadow_leaf_consumers();
+    let found: Vec<&str> = consumers.iter().map(|(name, _)| name.as_str()).collect();
+
+    for required in SHADOW_LEAVES_MIN_CONSUMERS {
+        assert!(
+            found.contains(&required),
+            "{required} no longer contains `{SHADOW_LEAVES_INCLUDE}` (VB-SV0 §4.1). The shared \
+             header exists so that the ranged shadow leaf has ONE definition across the deferred \
+             resolve and the SV0 marcher hosts; a consumer that dropped the include either forked \
+             its own copy or silently lost the SV0 term. Derived consumer set: {found:?}"
+        );
+    }
+
+    for (name, src) in &consumers {
+        let include_at = src
+            .find(SHADOW_LEAVES_INCLUDE)
+            .expect("invariant: the selection is BY this substring");
+
+        // The `Buf @ t0` precondition. `sdf_field.hlsli` declares no binding of its own; every
+        // consumer must have bound the edit-list SSBO first or `field_distance` cannot compile.
+        //
+        // Comment lines are EXCLUDED, and that is not defensive tidiness: `deferred_pbr.hlsl:156`
+        // quotes this exact token inside the prose above the declaration, so a bare
+        // `src.find(BUF_T0_DECL)` returns the COMMENT's offset — five lines before the real
+        // `[[vk::binding(10)]]` at `:161`. The ordering assertion below would then be comparing a
+        // comment's position against the include's, and a tree that moved the DECLARATION after
+        // the include (which does not compile) would pass. Found by mutating this file's binding
+        // number and reading the red, which pointed at the comment.
+        let (buf_at, decl_line) = find_decl_line(src, BUF_T0_DECL).unwrap_or_else(|| {
+            panic!(
+                "{name} must declare `{BUF_T0_DECL}` — `sdf_field.hlsli`'s own include \
+                 contract requires `Buf` in scope FIRST, and `sdf_shadow_leaves.hlsli` reaches \
+                 the field only through `field_distance`. (Mentions inside `//` comments do not \
+                 count; this looks for the DECLARATION.)"
+            )
+        });
+        assert!(
+            buf_at < include_at,
+            "{name} declares `Buf @ t0` at byte {buf_at}, AFTER the \
+             `{SHADOW_LEAVES_INCLUDE}` at byte {include_at}. The include contract says the \
+             precondition must be in scope BEFORE the include; this ordering does not compile"
+        );
+
+        // The `register(t0)` token above carries the HLSL register but NOT the Vulkan binding, so
+        // the binding is asserted separately, on the SAME line, against this consumer's own row in
+        // `BUF_BINDING_BY_CONSUMER`. Before DP6b this was a two-spelling disjunction on one slot
+        // (§2.2's Set-0 @10); `vb_geo.comp.hlsl` moved its edit list to Set-1 @4 because slot 10 is
+        // not free in the shared `vb_layout0`, and a disjunction that grew a third arm would stop
+        // pinning anything — every consumer would satisfy some arm. The table pins each host to ITS
+        // OWN slot instead.
+        let expected_binding = BUF_BINDING_BY_CONSUMER
+            .iter()
+            .find(|(consumer, _)| *consumer == name.as_str())
+            .map(|(_, binding)| *binding)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{name} consumes `{SHADOW_LEAVES_INCLUDE}` but has no row in \
+                     `BUF_BINDING_BY_CONSUMER`. A new marcher host must STATE where it put the \
+                     edit list — an unlisted consumer is a RED, not a pass, because 'wherever it \
+                     likes' is how two hosts come to disagree about which descriptor carries the \
+                     field. Add the row with the host's own `vk::binding` spelling."
+                )
+            });
+        assert!(
+            decl_line.contains(expected_binding),
+            "{name} declares `Buf` at a Vulkan binding other than its pinned \
+             `{expected_binding}` — the line is `{decl_line}`. The binding is host-specific since \
+             DP6b, so read `BUF_BINDING_BY_CONSUMER`'s doc before changing either side: the `.spv` \
+             interface delta moves with it"
+        );
+
+        // The const block. These five names are quoted verbatim from the header's own contract;
+        // `GRAD_H` / `FIELD_LIPSCHITZ_L` are excluded deliberately because they arrive through
+        // `sdf_field.hlsli` rather than the consumer's own tuning block.
+        //
+        // Matched on the DECLARATION, not on the bare spaced token this pin first used. A
+        // `find(" SHADOW_K ")` is satisfied by the word inside a comment, so deleting the
+        // declaration while any earlier prose mentioning it survived would leave the gate GREEN —
+        // a false green that happens to be unreachable today only because no such comment exists
+        // above the block in any consumer. That is luck, not a gate.
+        for const_name in SHADOW_LEAVES_REQUIRED_CONSTS {
+            let decl_at = find_static_const_decl(src, const_name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name} does not declare `{const_name}`, which \
+                         `sdf_shadow_leaves.hlsli`'s INCLUDE CONTRACT requires in scope before \
+                         the `#include`. Each consumer's tuning block is a VERBATIM mirror of \
+                         `deferred_pbr.hlsl`'s (plan §4.2); \
+                         `sdf_shadow_leaf_oracle.rs::sdf_shadow_and_ao_consts_match_deferred_and_marcher` \
+                         pins the VALUES (its `SHADOW_CONST_SOURCES` gained this file at DP6b), \
+                         this pins their PRESENCE and their ORDER against the include"
+                    )
+                });
+            assert!(
+                decl_at < include_at,
+                "{name} declares `{const_name}` at byte {decl_at}, AFTER the \
+                 `{SHADOW_LEAVES_INCLUDE}` at byte {include_at} — the include contract requires \
+                 it in scope BEFORE the include"
+            );
+        }
+    }
+
+    eprintln!(
+        "S3 layer 1: include contract satisfied by {} DERIVED consumers of \
+         sdf_shadow_leaves.hlsli: {found:?}",
+        consumers.len()
+    );
+}
+
+/// The `#include` line every SV0 consumer reaches the shared leaves through (VB-SV0 §4.1).
+const SHADOW_LEAVES_INCLUDE: &str = "#include \"sdf_shadow_leaves.hlsli\"";
+
+/// The edit-list SSBO declaration `sdf_field.hlsli`'s own include contract requires in scope
+/// before it is included.
+///
+/// This token carries the HLSL REGISTER (`t0`) only — it deliberately contains no Vulkan binding
+/// number, because the consumers spell the attribute differently
+/// (`[[vk::binding(10, 0)]]` in `sdf_mesh_shadow.comp.hlsl`, `[[vk::binding(10)]]` in
+/// `deferred_pbr.hlsl:161`, `[[vk::binding(4, 1)]]` in `vb_geo.comp.hlsl`'s DP6b variant). The
+/// Vulkan binding is asserted separately by the caller against the same declaration LINE, through
+/// [`BUF_BINDING_BY_CONSUMER`].
+///
+/// **UNTOUCHED by DP6b** (design P1-4): `vb_geo`'s SV0 span writes
+/// `[[vk::binding(4, 1)]] StructuredBuffer<uint> Buf : register(t0);`, keeping the register exactly
+/// as `sdf_mesh_shadow.comp.hlsl:96` spells it. Only the SLOT moved.
+const BUF_T0_DECL: &str = "StructuredBuffer<uint> Buf : register(t0)";
+
+/// Each derived consumer's OWN expected `vk::binding` spelling for the edit-list SSBO.
+///
+/// A consumer ABSENT from this table is a RED (the caller panics by name): a new marcher host must
+/// state where it put the edit list. That is the whole reason this is a table and not a widened
+/// disjunction — a three-arm `contains(a) || contains(b) || contains(c)` is satisfied by any host
+/// matching any arm, so it would stop distinguishing the hosts it lists.
+///
+/// * `deferred_pbr.hlsl` — Set 0 slot 10, set index defaulted (§2.2's original decision).
+/// * `sdf_mesh_shadow.comp.hlsl` — Set 0 slot 10, set index explicit. The dedicated DP1 pass; it is
+///   RETIRED at DP6e, and its row goes with it.
+/// * `vb_geo.comp.hlsl` — **Set 1 slot 4** (VB-SV0 DP6b, Decision 5). The SV0 variant hosts the
+///   march inside the split's geometry pass, whose Set 0 is the shared `vb_layout0` where slot 10
+///   is not free; its own `vb_geo_aux_layout` carries the edit list at @4 instead.
+const BUF_BINDING_BY_CONSUMER: [(&str, &str); 3] = [
+    ("deferred_pbr.hlsl", "[[vk::binding(10)]]"),
+    ("sdf_mesh_shadow.comp.hlsl", "[[vk::binding(10, 0)]]"),
+    ("vb_geo.comp.hlsl", "[[vk::binding(4, 1)]]"),
+];
+
+/// The five names `sdf_shadow_leaves.hlsli`'s INCLUDE CONTRACT names verbatim. `GRAD_H` and
+/// `FIELD_LIPSCHITZ_L` are NOT here: the contract sources those from `sdf_field.hlsli`, not from
+/// the consumer's own tuning block.
+const SHADOW_LEAVES_REQUIRED_CONSTS: [&str; 5] = [
+    "MAX_IT",
+    "SHADOW_K",
+    "SHADOW_MINT",
+    "SHADOW_MINT_STEP",
+    "SHADOW_HIT_EPS",
+];
+
+/// The first NON-COMMENT line containing `token`, as `(byte offset of the line, the line)`.
+///
+/// The `//`-prefix skip is the whole point: HLSL headers in this tree quote their own declarations
+/// in the prose above them, so a plain `str::find` locates the documentation rather than the code
+/// and any position-based reasoning built on it is wrong by however far the comment sits from the
+/// declaration.
+fn find_decl_line<'a>(src: &'a str, token: &str) -> Option<(usize, &'a str)> {
+    let mut offset = 0usize;
+    for line in src.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if !trimmed.trim_start().starts_with("//") && trimmed.contains(token) {
+            return Some((offset, trimmed));
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// The byte offset of the `static const <type> NAME = ...;` line declaring `name`, or `None`.
+///
+/// Declaration-anchored on purpose: the LHS must be exactly two whitespace-separated tokens (the
+/// type and the name) before the `=`, so a mention of `name` inside a comment or an expression
+/// cannot stand in for the declaration. The offset is the start of the LINE, which is what the
+/// caller's `decl_at < include_at` ordering comparison wants.
+fn find_static_const_decl(src: &str, name: &str) -> Option<usize> {
+    const PREFIX: &str = "static const ";
+    let mut offset = 0usize;
+    for line in src.split_inclusive('\n') {
+        if let Some(after) = line.trim_start().strip_prefix(PREFIX)
+            && let Some(eq) = after.find('=')
+        {
+            let mut lhs = after[..eq].split_whitespace();
+            if let (Some(_ty), Some(decl_name), None) = (lhs.next(), lhs.next(), lhs.next())
+                && decl_name == name
+            {
+                return Some(offset);
+            }
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// The consumers of `sdf_shadow_leaves.hlsli` that must NEVER stop consuming it.
+///
+/// **Rev 10 re-pointed this list; VB-SV0 DP6b adds its third entry.** The inline architecture put
+/// the leaves in the three VB lit-producer tails; the revert (`13f1c9a3`) took them out after the
+/// dark-path tax measured ~+75%, and the march moved into ONE marcher-shaped host —
+/// `sdf_mesh_shadow.comp.hlsl`, the dedicated prepass (plan Rev 10 / RENDER-PARITY §3.2 Option B).
+/// The tails deliberately do NOT consume the leaves any more: a tail regaining this include is the
+/// inline coming back, and the derived-set scan below makes that visible the day it happens.
+///
+/// **DP6b (`docs/VB-SV0-DP6-DESIGN.md`, Decision 3) adds `vb_geo.comp.hlsl`** — but ONLY behind
+/// `-D VB_SV0_TERM=1`. That is not the inline returning: the tails are lit producers that would
+/// have paid the +64 % dark tax on every VB frame, whereas `vb_geo` compiles the march into a
+/// SEPARATE `.spv` selected only when the term is armed, and it already performs the very
+/// `vb_geom_fetch` the march needs. The include is nonetheless unconditional TEXT to this file's
+/// scanner (a `#include` inside an `#ifdef` still matches the substring), which is what puts the
+/// new host under the same contract as the old ones — the intended outcome.
+///
+/// **At DP6e this list goes back to two entries**, when `sdf_mesh_shadow.comp.hlsl` is deleted and
+/// `vb_geo` is the sole producer (design Decision 8).
+///
+/// This is a MINIMUM, not the selection: [`sv0_shadow_leaf_consumers`] derives the actual set from
+/// the shipped tree so a further consumer is covered the day it appears. This list exists only so
+/// that a consumer LOSING the include reds instead of shrinking the gate silently.
+const SHADOW_LEAVES_MIN_CONSUMERS: [&str; 3] = [
+    "deferred_pbr.hlsl",
+    "sdf_mesh_shadow.comp.hlsl",
+    "vb_geo.comp.hlsl",
+];
+
+/// Every committed shader that consumes `sdf_shadow_leaves.hlsli`, DERIVED by scanning the crate's
+/// shader directory for the `#include`.
+///
+/// Returned as `(name, source)` pairs sorted by name, with CRLF normalized so a caller's byte
+/// offsets mean the same thing on either line-ending convention.
+fn sv0_shadow_leaf_consumers() -> Vec<(String, String)> {
+    let dir = format!("{}/shaders", env!("CARGO_MANIFEST_DIR"));
+    let entries = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("invariant: {dir} must exist next to this crate: {e}"));
+
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.expect("invariant: the shader directory must be readable");
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !(name.ends_with(".hlsl") || name.ends_with(".hlsli")) {
+            continue;
+        }
+        let src = std::fs::read_to_string(entry.path())
+            .unwrap_or_else(|e| panic!("invariant: shaders/{name} must be readable: {e}"))
+            .replace("\r\n", "\n");
+        if src.contains(SHADOW_LEAVES_INCLUDE) {
+            out.push((name, src));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 #[test]
@@ -410,6 +839,17 @@ fn m2_surface_hit_refine_matches_edsl_emit() {
          --features emit --bin emit_field` and re-splice between the GENERATED m2_surface_hit_refine \
          sentinels (the integer preamble + the 3 call sites stay hand-written).\n\
          --- expected (eDSL-generated) ---\n{generated}"
+    );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&generated),
+        "sdf_forward_march.comp.hlsl `m2_surface_hit` refine span DRIFTED from \
+         boyko_shaderdsl::emit — the committed span no longer matches the generator. Re-run \
+         `cargo run -p boyko_shaderdsl --features emit --bin emit_field` and re-splice between the \
+         GENERATED m2_surface_hit_refine sentinels (the integer preamble + the 3 call sites stay \
+         hand-written).\n--- expected (eDSL-generated) ---\n{generated}"
     );
 }
 
@@ -693,6 +1133,17 @@ fn select_level_matches_edsl_emit() {
          sentinels (the `int select_level(float3 p) {{` signature + the closing `}}` stay \
          hand-written).\n--- expected (eDSL-generated) ---\n{generated}"
     );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&generated),
+        "sdf_forward_march.comp.hlsl `select_level` scan span DRIFTED from boyko_shaderdsl::emit — \
+         the committed span no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice between the GENERATED select_level \
+         sentinels (the `int select_level(float3 p) {{` signature + the closing `}}` stay \
+         hand-written).\n--- expected (eDSL-generated) ---\n{generated}"
+    );
 }
 
 #[test]
@@ -725,6 +1176,17 @@ fn m2_brick_span_matches_edsl_emit() {
     assert!(
         shader.contains(&generated),
         "sdf_gbuffer_composite.hlsl `m2_brick_span` body span DRIFTED from boyko_shaderdsl::emit — \
+         the committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice between the GENERATED m2_brick_span \
+         sentinels (the `bool m2_brick_span(...) {{` signature + the closing `}}` stay \
+         hand-written).\n--- expected (eDSL-generated) ---\n{generated}"
+    );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&generated),
+        "sdf_forward_march.comp.hlsl `m2_brick_span` body span DRIFTED from boyko_shaderdsl::emit — \
          the committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
          --features emit --bin emit_field` and re-splice between the GENERATED m2_brick_span \
          sentinels (the `bool m2_brick_span(...) {{` signature + the closing `}}` stay \
@@ -771,6 +1233,18 @@ fn m2_brick_cubic_hit_matches_edsl_emit() {
          --features emit --bin emit_field` and re-splice between the GENERATED m2_brick_cubic_hit \
          sentinels (the signature, the `t_exit <= t_enter` early-out, the `const uint W` decl, and the \
          closing `}}` stay hand-written).\n--- expected (eDSL-generated) ---\n{generated}"
+    );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&generated),
+        "sdf_forward_march.comp.hlsl `m2_brick_cubic_hit` body span DRIFTED from \
+         boyko_shaderdsl::emit — the committed body no longer matches the generator. Re-run `cargo \
+         run -p boyko_shaderdsl --features emit --bin emit_field` and re-splice between the \
+         GENERATED m2_brick_cubic_hit sentinels (the signature, the `t_exit <= t_enter` early-out, \
+         the `const uint W` decl, and the closing `}}` stay hand-written).\n\
+         --- expected (eDSL-generated) ---\n{generated}"
     );
 }
 

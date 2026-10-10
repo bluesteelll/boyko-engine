@@ -1,0 +1,718 @@
+{
+ "protocol": {
+  "k_per_cell": 6,
+  "passes": 2,
+  "rounds_per_pass": 3,
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "rerun_contaminated_once_at_end_of_pass": true,
+  "void_pass_on_build_process": true,
+  "placement": "P-none",
+  "idle_rule": "tools/wait_idle7.ps1: 0 build procs (cargo/rustc/link/lld-link/dxc/clippy-driver/cl/msbuild/miri/cargo-miri/gcc toolchain/cmake/the bench exe names) AND 0 procs whose image is under D:/wt/_targets or D:/wt/mq-* on 3 consecutive 60-s polls, 10-s cpu < 5 %; up to 30 polls (30 min) per wait; a timeout STOPS the window",
+  "hard_stop_local": "04:15"
+ },
+ "binaries": {
+  "trk": {
+   "exe": "bin/runner_93b2615b.exe",
+   "commit": "93b2615bcea4873e2d3af6b560c6e7997740f67f",
+   "kind": "runner"
+  },
+  "c4": {
+   "exe": "bin/runner_989ca0f0.exe",
+   "commit": "989ca0f0575e054b89bb9c288ad95569ce493734",
+   "kind": "runner"
+  },
+  "g9p": {
+   "exe": "bin/runner_0ca312bd.exe",
+   "commit": "0ca312bd8d696cec739f27d13c98343f4e1d1a9b",
+   "kind": "runner"
+  },
+  "g9t": {
+   "exe": "bin/runner_cbd86a65.exe",
+   "commit": "cbd86a6525175fc18500b9733997d78c2cbc3e44",
+   "kind": "runner"
+  },
+  "j56": {
+   "exe": "D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe",
+   "commit": "Jolt v5.6.0 (wt-v5.6.0-parity, v5.6.0-dirty, repository patch)",
+   "kind": "jolt"
+  },
+  "j56p": {
+   "exe": "bin/jolt56prof/PerformanceTest.exe",
+   "commit": "Jolt v5.6.0 same source, Distribution + PROFILER_IN_DISTRIBUTION=ON",
+   "kind": "joltprof"
+  }
+ },
+ "blocks": [
+  {
+   "name": "P1A-jolt",
+   "item": "P1",
+   "warmup": [
+    "H-trk-tree",
+    "trk",
+    8
+   ]
+  },
+  {
+   "name": "P2-L9GTW",
+   "item": "P2",
+   "warmup": [
+    "L9-JA-off",
+    "c4",
+    8
+   ]
+  },
+  {
+   "name": "P3-G9JA",
+   "item": "P3",
+   "warmup": [
+    "G9-JA-mid",
+    "g9t",
+    4
+   ]
+  },
+  {
+   "name": "P4-trkspans",
+   "item": "P4",
+   "warmup": [
+    "S-trk-tree-a",
+    "trk",
+    8
+   ]
+  },
+  {
+   "name": "P5-joltprof",
+   "item": "P5",
+   "warmup": [
+    "P-jolt56-prof",
+    "j56p",
+    8
+   ]
+  },
+  {
+   "name": "P1B-jolt",
+   "item": "P1",
+   "warmup": [
+    "H-trk-tree",
+    "trk",
+    8
+   ]
+  }
+ ],
+ "rows": [
+  {
+   "id": "H-trk-tree",
+   "blocks": [
+    "P1A-jolt",
+    "P1B-jolt"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "trk"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "J500",
+   "broadphase": "Tree",
+   "note": "OUR default row on trunk integ/unified 93b2615b (Phase B + thin-box + D-M0; contact reuse off by default on this tree)"
+  },
+  {
+   "id": "H-jolt56",
+   "blocks": [
+    "P1A-jolt",
+    "P1B-jolt"
+   ],
+   "kind": "jolt",
+   "binaries": [
+    "j56"
+   ],
+   "args": [
+    "-s=Pyramid",
+    "-q=Discrete",
+    "-f"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": null,
+   "broadphase": "AllPairs",
+   "jolt_hash": "0xb8522b4e3fc62cfe",
+   "note": "Jolt v5.6.0 Distribution, P0 build 918fd2b7, the repository patch; the same exe and spelling as window 3 JOLT56-T"
+  },
+  {
+   "id": "H-trk-ap",
+   "blocks": [
+    "P1A-jolt",
+    "P1B-jolt"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "trk"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "allpairs"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs",
+   "note": "the AllPairs reference row, same binary"
+  },
+  {
+   "id": "L9-JA-off",
+   "blocks": [
+    "P2-L9GTW"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "c4"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "off"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L9-JA-on",
+   "blocks": [
+    "P2-L9GTW"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "c4"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JAon500c4",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L9-JD-off",
+   "blocks": [
+    "P2-L9GTW"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "c4"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--contact-reuse",
+    "off"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L9-JD-on",
+   "blocks": [
+    "P2-L9GTW"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "c4"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JDon500c4",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L9-R-off",
+   "blocks": [
+    "P2-L9GTW"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "c4"
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--solver",
+    "colored",
+    "--contact-reuse",
+    "off"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 1100,
+   "window": [
+    600,
+    1100
+   ],
+   "metric_windows": [],
+   "armed": false,
+   "pose_ref": "R1100",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L9-R-on",
+   "blocks": [
+    "P2-L9GTW"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "c4"
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--solver",
+    "colored",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 1100,
+   "window": [
+    600,
+    1100
+   ],
+   "metric_windows": [],
+   "armed": false,
+   "pose_ref": "Ron1100c4",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L9-JA-a-off",
+   "blocks": [
+    "P2-L9GTW"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "c4"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "off"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs",
+   "note": "the armed table (per-stage spans bp/np/setup/colours, per manifold and per pair), W1 and W8"
+  },
+  {
+   "id": "L9-JA-a-on",
+   "blocks": [
+    "P2-L9GTW"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "c4"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JAon500c4",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L9-JC",
+   "blocks": [
+    "P2-L9GTW"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "c4"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JAon500c4",
+   "broadphase": "AllPairs",
+   "canary_of": "L9-JA-a-on",
+   "canary_frac": 0.05,
+   "note": "the canary on the L9 binary: --canary-frac 0.05 --canary-ref-ns = the latest valid L9-JA-a-on window mean (same binary, W1); must be SEEN"
+  },
+  {
+   "id": "G9-JA-mid",
+   "blocks": [
+    "P3-G9JA"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "g9p",
+    "g9t"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a"
+   ],
+   "workers": [
+    2,
+    4,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [],
+   "armed": false,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "S-trk-tree-a",
+   "blocks": [
+    "P4-trkspans"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "trk"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "J500",
+   "broadphase": "Tree"
+  },
+  {
+   "id": "P-jolt56-prof",
+   "blocks": [
+    "P5-joltprof"
+   ],
+   "kind": "joltprof",
+   "binaries": [
+    "j56p"
+   ],
+   "args": [
+    "-s=Pyramid",
+    "-q=Discrete",
+    "-f",
+    "-p"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": null,
+   "broadphase": "AllPairs",
+   "jolt_hash": "0xb8522b4e3fc62cfe",
+   "note": "profiled Jolt: per-stage times from the single-frame profile dumps at frames 100/200/300/400 (the harness dumps every 100th frame)"
+  }
+ ]
+}

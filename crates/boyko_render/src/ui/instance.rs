@@ -18,12 +18,14 @@
 /// # std430 layout contract (the compile-time oracle)
 ///
 /// Field order places the two `float2`s first (off 0, 8 — so the first `float4`
-/// lands on a 16 B boundary at off 16), then the two `float4`s (off 16, 32), then
-/// four scalars (off 48..60). The total stride is **64 B**, a multiple of 16, so
-/// the std430 array stride is legal with NO internal padding and NO tail pad. The
-/// HLSL `struct UiInstance` mirrors these offsets; the per-field `offset_of!`
-/// const-asserts below are the build-time oracle that catches a Rust↔HLSL offset
-/// drift the size assert alone would miss.
+/// lands on a 16 B boundary at off 16), then the three `float4`s (off 16, 32, 48),
+/// then four scalars (off 64..76). The total stride is **80 B** (UI-ADVANCED S2 /
+/// architecture D1 — widened ONCE from 64 B when the `uv` field retired the
+/// `corner_radius` text-lane alias), a multiple of 16, so the std430 array stride
+/// is legal with NO internal padding and NO tail pad. The HLSL `struct UiInstance`
+/// mirrors these offsets; the per-field `offset_of!` const-asserts below are the
+/// build-time oracle that catches a Rust↔HLSL offset drift the size assert alone
+/// would miss.
 ///
 /// `align(16)` is forced explicitly so the Rust struct's alignment matches the
 /// std430 array's 16 B stride alignment (a `[f32; 4]` field is only 4-aligned in
@@ -40,33 +42,57 @@ pub struct UiInstance {
     /// Clip AABB `min.xy, max.xy`, physical px (valid iff `CLIP_PRESENT`). Shared by
     /// rect AND text nodes (text clips too).
     pub clip: [f32; 4],
-    /// Per-corner radius `tl, tr, br, bl`, physical px.
+    /// Per-corner radius `tl, tr, br, bl`, physical px — **ALWAYS the radius**.
     ///
-    /// # Text-lane alias (GUI P5b Decision T4-G)
+    /// # The text-lane alias is RETIRED (UI-ADVANCED S2 / architecture D1)
     ///
-    /// When [`FLAG_TEXT`] is set, the fragment shader REINTERPRETS this field as the
-    /// glyph's atlas UV rect `(left, top, right, bottom)`, NORMALIZED to `[0, 1]` over
-    /// the atlas size. A text node never sets `corner_radius`/`border`, and a rect node
-    /// never sets a UV, so the two are mutually exclusive by `FLAG_TEXT` — aliasing the
-    /// field keeps `UiInstance` at 64 B, one pipeline, one z-sort, one draw. The
-    /// reinterpret is VALUE-ONLY in the shader (no Rust transmute): Rust-side this stays
-    /// a plain `[f32; 4]`, so the `offset_of!` oracle and the Miri-TB byte view are
-    /// unchanged. A future textured/nine-slice rect (needing BOTH a radius and a UV on
-    /// one instance) retires this alias and widens `UiInstance` to 80 B — the recorded
-    /// deliberate-revisit trigger.
+    /// Until S2 this field was REINTERPRETED as the glyph UV under [`FLAG_TEXT`]
+    /// (GUI P5b Decision T4-G), which kept the record at 64 B but forbade a node
+    /// carrying BOTH a radius and a UV — the exact case sprites trigger (a rounded
+    /// avatar, a nine-slice chip). The recorded deliberate-revisit fired: the UV now
+    /// lives in its own [`uv`](UiInstance::uv) field, this field means ONE thing, and
+    /// a `FLAG_TEXT` instance packs it ZERO (gate G2-5).
     pub corner_radius: [f32; 4],
+    /// Normalized UV rect `(u0, v0, u1, v1)` in `[0, 1]` — glyphs AND (from S3)
+    /// sprites. Written verbatim at pack (never scale-folded). A plain rect packs the
+    /// identity `(0, 0, 1, 1)` and its shader branch never reads it (S-D8: the
+    /// widening is default-OFF — every existing image is byte-identical).
+    pub uv: [f32; 4],
     /// PREMULTIPLIED RGBA8 fill (`byte0=R .. byte3=A`).
     pub color: u32,
     /// PREMULTIPLIED-at-pack RGBA8 border color.
     pub border_color: u32,
     /// Uniform border width, physical px (P5a is uniform; per-side is deferred).
     pub border_width: f32,
-    /// Bit flags: bit0 `BORDER_ANY`, bit1 `CLIP_PRESENT`, the rest reserved.
+    /// Bit flags under the S-D2 bit budget (fixed at S2, once — and **SPENT OUT at S5**):
+    /// bit0 [`FLAG_BORDER_ANY`], bit1 [`FLAG_CLIP_PRESENT`], bit2 [`FLAG_TEXT`],
+    /// bit3 [`FLAG_TEXTURED`] (S3's sprite lane), bit4 reserved for S7's deferred
+    /// per-sprite sampler index, bit5 [`FLAG_TILED`] (S5's tiled nine-slice lane),
+    /// bits [`UI_TILE_X_SHIFT`]`..=12` / [`UI_TILE_Y_SHIFT`]`..=19` the two
+    /// [`UI_TILE_BITS`]-bit repeat counts, bits
+    /// [`UI_SLOT_SHIFT`]`..32` the bindless slot — [`UI_SLOT_BITS`] bits, slots
+    /// `0..=`[`UI_SLOT_MASK`], EXACTLY the table's range (the capacity
+    /// const-assert below).
+    ///
+    /// **The budget is EXHAUSTED**: S-D2 left bits 5..19 free — fifteen — and S5's flag
+    /// plus its two 7-bit fields are fifteen. Only bit 4 remains, and it is S7's. The next
+    /// per-instance datum widens the record instead of taking a bit; the animation and
+    /// interaction plans read §6's exposure row to learn that.
+    ///
+    /// At S2 every packed instance had bits 3..31 zero. **S3 moved that gate,
+    /// deliberately**: an UNTEXTURED instance still has bits 3..31 zero, and a
+    /// `FLAG_TEXTURED` one has bit 3 set plus its slot in the top 12. **S5 moves it
+    /// again, and only for one lane**: a TILED nine-slice sub-quad additionally carries
+    /// bit 5 and its two count fields. Every other record — background, glyph, whole-rect
+    /// sprite, `Stretch` slice, and a `Tile` slice whose own counts are both `1` (every
+    /// corner) — still leaves bits 4..19 zero, which is what keeps the six committed image
+    /// pins identical (gate G5-11 / the S3 G3-5 successor).
     pub flags: u32,
 }
 
-/// The byte size of [`UiInstance`] (the std430 array stride).
-pub const UI_INSTANCE_SIZE: usize = 64;
+/// The byte size of [`UiInstance`] (the std430 array stride) — 80 B since the
+/// UI-ADVANCED S2 widening (architecture D1; 64 B before it).
+pub const UI_INSTANCE_SIZE: usize = 80;
 
 /// `UiInstance.flags` bit0 — the rect has a (uniform, P5a) border to draw. Set at
 /// pack when `border_width > 0`; gates the fragment shader's border branch.
@@ -76,12 +102,119 @@ pub const FLAG_BORDER_ANY: u32 = 1 << 0;
 /// sentinel-free uniform branch — unclipped rects never evaluate `clip_coverage`).
 pub const FLAG_CLIP_PRESENT: u32 = 1 << 1;
 /// `UiInstance.flags` bit2 — the instance is a GLYPH quad, not a rounded rect (GUI
-/// P5b Decision T4-G). When set, the fragment shader REINTERPRETS `corner_radius` as
-/// the glyph's normalized atlas UV rect `(left, top, right, bottom)` and samples the
-/// MSDF atlas (`median` + `screenPxRange` AA, premultiplied out) instead of
-/// evaluating the rounded-box SDF. A uniform-per-instance branch, so the rect
-/// majority is unregressed.
+/// P5b Decision T4-G). When set, the fragment shader reads the glyph's normalized
+/// atlas UV rect from [`UiInstance::uv`] (its own field since the S2 widening — the
+/// `corner_radius` alias is retired) and samples the MSDF atlas (`median` +
+/// `screenPxRange` AA, premultiplied out) instead of evaluating the rounded-box
+/// SDF. A uniform-per-instance branch, so the rect majority is unregressed.
 pub const FLAG_TEXT: u32 = 1 << 2;
+/// `UiInstance.flags` bit3 — the instance is a SPRITE quad: the fragment shader
+/// samples the bindless texture at the slot in bits
+/// [`UI_SLOT_SHIFT`]`..32` through the UI's OWN sampler (set 0, binding 3 — S-D4)
+/// and modulates it by the premultiplied tint in [`UiInstance::color`]
+/// (UI-ADVANCED S3, architecture D2). Mutually exclusive with [`FLAG_TEXT`]: a
+/// glyph and a sprite are different quads, emitted separately (D4's per-node
+/// emission contract), never one record wearing both flags.
+pub const FLAG_TEXTURED: u32 = 1 << 3;
+/// `UiInstance.flags` bit5 — the instance is a TILED sprite quad: the fragment shader wraps
+/// the quad corner `(`[`UI_TILE_X_SHIFT`]`, `[`UI_TILE_Y_SHIFT`]`)` times inside the
+/// record's own UV sub-rect (`frac`) instead of stretching it across (`lerp`) — UI-ADVANCED
+/// S5, S-D15.
+///
+/// Set at pack ONLY when at least one of the two repeat counts exceeds `1`, which is what
+/// makes a corner sub-quad (always `1×1`) pack BYTE-IDENTICALLY to its `Stretch` record.
+/// Implies [`FLAG_TEXTURED`]: it is only ever set on a nine-slice sub-quad, and those are
+/// emitted only for a node carrying both `UiNineSlice` and `UiImage`.
+///
+/// **The wrap is of the quad PARAMETER, not of the UV**, so the sample can never leave the
+/// sub-rect for any count — which is what makes `Tile` over a sprite-sheet frame correct by
+/// construction rather than a forbidden pair (the hazard the retired S-D7 guarded).
+pub const FLAG_TILED: u32 = 1 << 5;
+
+/// The LOW bit of the X repeat-count field inside `UiInstance.flags` (S-D15): bits
+/// `6..=12`, [`UI_TILE_BITS`] wide, holding `1..=`[`UI_TILE_MAX`] repeats ACROSS the
+/// record's UV sub-rect. Zero when [`FLAG_TILED`] is clear.
+pub const UI_TILE_X_SHIFT: u32 = 6;
+/// The LOW bit of the Y repeat-count field inside `UiInstance.flags` (S-D15): bits
+/// `13..=19`, repeats DOWN the sub-rect. See [`UI_TILE_X_SHIFT`].
+pub const UI_TILE_Y_SHIFT: u32 = 13;
+/// The WIDTH in bits of each repeat-count field (S-D15).
+///
+/// **7, not 8 and not 6**, and the reason is measured against the use: a UI chrome edge
+/// tiles an 8–32 px source over up to ~1000 px, i.e. tens of repeats. 6 bits (63) could
+/// clip a long scrollbar track; 7 bits (127) cannot, and 8 would not fit beside the flag in
+/// the fifteen bits S-D2 left.
+pub const UI_TILE_BITS: u32 = 7;
+/// Each repeat-count field's mask AFTER its shift (`0x7F`). Derived from [`UI_TILE_BITS`],
+/// never spelled — the emitted HLSL derives its own `UI_TILE_MASK` from the same generator
+/// input, so the two cannot drift into a quad tiling a different number of times.
+pub const UI_TILE_MASK: u32 = (1u32 << UI_TILE_BITS) - 1;
+/// The largest repeat count a field can hold (`127`) — the `min` the pack clamps a derived
+/// count into. Equal to [`UI_TILE_MASK`] because the counts are stored verbatim (a count of
+/// `0` is unreachable: the flag is set only when a count exceeds `1`).
+pub const UI_TILE_MAX: u32 = UI_TILE_MASK;
+
+/// The LOW bit of the bindless-slot field inside `UiInstance.flags` (S-D2).
+///
+/// The field sits at the TOP of the word on purpose: it is the widest field and the
+/// flags are what grow, so a new flag can never risk the slot (S-D2's rejected
+/// alternative packed it at bits 3..14, adjacent to the flags).
+pub const UI_SLOT_SHIFT: u32 = 20;
+/// The WIDTH in bits of the bindless-slot field inside `UiInstance.flags` (S-D2) —
+/// 12 bits, slots `0..=4095`, EXACTLY
+/// [`BINDLESS_TEXTURE_CAPACITY`](boyko_rhi_vulkan::bindless::BINDLESS_TEXTURE_CAPACITY)'s
+/// range with ZERO headroom (the const-assert below is what makes that safe).
+pub const UI_SLOT_BITS: u32 = 12;
+/// The bindless-slot field's mask AFTER the [`UI_SLOT_SHIFT`] right-shift
+/// (`0xFFF`). Derived from [`UI_SLOT_BITS`], never spelled — the emitted HLSL
+/// derives its own `UI_SLOT_MASK` from the same generator input, so the two cannot
+/// drift into a quad sampling a different texture.
+pub const UI_SLOT_MASK: u32 = (1u32 << UI_SLOT_BITS) - 1;
+
+// S-D2 (UI-ADVANCED S2): the 12-bit bindless-slot field in `flags` bits 20..31 has
+// EXACTLY zero headroom over the live table capacity — and D3 refuses a UI slot
+// reservation, so "raise the capacity" is the natural response to slot pressure,
+// and a raised capacity would SILENTLY truncate the field and make a UI quad
+// sample a different texture. This assert is against the LIVE constant the
+// allocator uses (mutation M2-c: a copy of it here would keep passing).
+const _: () = assert!(
+    boyko_rhi_vulkan::bindless::BINDLESS_TEXTURE_CAPACITY <= 1 << UI_SLOT_BITS,
+    "UiInstance.flags carries the bindless slot in bits 20..31"
+);
+// The slot field ends exactly at the top of the word: a shift/width pair that
+// overhung would silently drop the high slot bits on every sprite above 2047.
+const _: () = assert!(
+    UI_SLOT_SHIFT + UI_SLOT_BITS == 32,
+    "the bindless-slot field must end at bit 31 (S-D2's bit budget)"
+);
+// Bit 4 is RESERVED for S7's deferred per-sprite sampler index, so the slot field must not
+// reach down into it.
+const _: () = assert!(
+    FLAG_TEXTURED.trailing_zeros() < UI_SLOT_SHIFT - 1,
+    "bit 4 stays reserved between the flags and the slot field"
+);
+// S-D15's bit budget, made mechanical. The three relations below say, together, that the
+// flag and the two count fields EXACTLY fill S-D2's fifteen free bits (5..=19), do not
+// overlap each other, do not collide with S7's reserved bit 4, and stop below the slot
+// field. The budget is spent out; a rung that wants a bit widens the record instead, and
+// this is the line that tells it so.
+const _: () = assert!(
+    FLAG_TILED.trailing_zeros() == FLAG_TEXTURED.trailing_zeros() + 2,
+    "FLAG_TILED sits at bit 5, one above S7's reserved bit 4"
+);
+const _: () = assert!(
+    UI_TILE_X_SHIFT == FLAG_TILED.trailing_zeros() + 1,
+    "the X repeat-count field starts immediately above FLAG_TILED"
+);
+const _: () = assert!(
+    UI_TILE_Y_SHIFT == UI_TILE_X_SHIFT + UI_TILE_BITS,
+    "the two repeat-count fields are adjacent and do not overlap"
+);
+const _: () = assert!(
+    UI_TILE_Y_SHIFT + UI_TILE_BITS == UI_SLOT_SHIFT,
+    "the tile fields end exactly where the bindless-slot field begins — the S-D2 budget is \
+     EXHAUSTED (fifteen free bits, fifteen spent)"
+);
 
 // --- std430 layout oracle (compile-time). The size/align pin the array stride;
 //     the per-field `offset_of!` asserts pin every field's byte offset against the
@@ -93,10 +226,11 @@ const _: () = assert!(core::mem::offset_of!(UiInstance, min_px) == 0);
 const _: () = assert!(core::mem::offset_of!(UiInstance, size_px) == 8);
 const _: () = assert!(core::mem::offset_of!(UiInstance, clip) == 16);
 const _: () = assert!(core::mem::offset_of!(UiInstance, corner_radius) == 32);
-const _: () = assert!(core::mem::offset_of!(UiInstance, color) == 48);
-const _: () = assert!(core::mem::offset_of!(UiInstance, border_color) == 52);
-const _: () = assert!(core::mem::offset_of!(UiInstance, border_width) == 56);
-const _: () = assert!(core::mem::offset_of!(UiInstance, flags) == 60);
+const _: () = assert!(core::mem::offset_of!(UiInstance, uv) == 48);
+const _: () = assert!(core::mem::offset_of!(UiInstance, color) == 64);
+const _: () = assert!(core::mem::offset_of!(UiInstance, border_color) == 68);
+const _: () = assert!(core::mem::offset_of!(UiInstance, border_width) == 72);
+const _: () = assert!(core::mem::offset_of!(UiInstance, flags) == 76);
 
 impl UiInstance {
     /// Re-views a packed `&[UiInstance]` as the contiguous `&[u8]` the upload
@@ -108,7 +242,7 @@ impl UiInstance {
     #[inline]
     pub fn slice_as_bytes(instances: &[UiInstance]) -> &[u8] {
         // SAFETY: `UiInstance` is `#[repr(C, align(16))]` all-POD (f32/u32), with no
-        // padding (const-asserted 64 B / 16-align / per-field offsets above), so the
+        // padding (const-asserted 80 B / 16-align / per-field offsets above), so the
         // byte image of `instances` is a valid initialized `[u8]` of exactly
         // `len * UI_INSTANCE_SIZE` bytes. The `&[UiInstance]` borrow keeps the
         // backing alive for the returned slice's lifetime; the slice is read-only.

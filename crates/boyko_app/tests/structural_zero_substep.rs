@@ -10,11 +10,11 @@
 //!
 //! # Scoping (documented)
 //!
-//! Headless: `MeshRegistry` needs a live device, so the gather runs through a
-//! test-local system over the SAME `(MeshHandle, InstanceModelCol)` +
-//! `Enabled<RenderEnabled>` query shape `gather_mesh_draws` uses, with a fixed
-//! meta table instead of the registry; the upload is the production
-//! `upload_instance_models` over a fake mapped slot.
+//! Headless: the mesh asset table (`Assets<MeshGpu>`) needs a live device, so the
+//! gather runs through a test-local system over the SAME `(MeshHandle,
+//! InstanceModelCol)` + `Enabled<RenderEnabled>` query shape `gather_mesh_draws`
+//! uses, with a fixed meta table instead of the asset table; the upload is the
+//! production `upload_instance_models` over a fake mapped slot.
 
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
@@ -22,7 +22,7 @@ use boyko_ecs::ecs::core::system::ResMut;
 use boyko_ecs::prelude::*;
 use boyko_macros::Resource;
 use boyko_render::instance_model::InstanceModelCol;
-use boyko_render::mesh_draw::MeshRenderScratch;
+use boyko_render::mesh_draw::{MeshRenderScratch, PerInstanceMaterial};
 use boyko_render::{GpuTransform3D, MeshBundle, upload_instance_models};
 use boyko_rhi::enums::IndexType;
 use boyko_rhi_vulkan::ffi::VkBuffer;
@@ -45,6 +45,10 @@ fn count_substep(mut s: ResMut<Substeps>) {
 /// (`Option<&GpuTransform3D>` keys static vs interpolated) + the same
 /// count→prefix-sum→scatter core, with a fixed meta table (no GPU registry). The
 /// test spawns only static meshes, so every row takes the `None` branch.
+///
+/// The 5th gather-input element (VG R3 piece 2 step P2-2: the occlusion-culling capability)
+/// is `false` for every row — this test spawns through `MeshBundle`, which carries no
+/// `OcclusionCulling`, so `false` is what the real query term would resolve to here.
 #[allow(clippy::needless_pass_by_value)]
 fn gather_headless(
     q: Query<
@@ -55,8 +59,8 @@ fn gather_headless(
 ) {
     scratch.gather_mixed_into(
         1,
-        |_mesh| (36u32, IndexType::Uint16),
-        || q.iter().map(|(h, col, pair)| (h.0, col, pair)),
+        |_mesh| Some((36u32, IndexType::Uint16)),
+        || q.iter().map(|(h, col, pair)| (h.0, col, pair, PerInstanceMaterial::default(), false)),
     );
 }
 
@@ -80,6 +84,7 @@ fn structural_spawn_on_zero_substep_frame_reaches_the_instance_ring() {
         offset: 0,
         size: storage.len() as u64,
         mapped: core::ptr::NonNull::new(storage.as_mut_ptr()),
+        block: 0,
     };
     // SAFETY: no GPU work exists in this process (no device was booted), so
     // nothing submitted can reference the fake slot — the `forge_unfenced`
@@ -100,7 +105,7 @@ fn structural_spawn_on_zero_substep_frame_reaches_the_instance_ring() {
         0,
         "precondition: the first frame ran zero fixed substeps"
     );
-    let ring_before = app.world().resource::<MeshRenderScratch>().ring.clone();
+    let ring_before = app.world().resource::<MeshRenderScratch>().ring.as_read_slice().to_vec();
     assert_eq!(ring_before.len(), 1, "frame 1 gathered the first instance");
     // SAFETY: the fake slot's `mapped` points to the LIVE heap `storage` Vec of
     // exactly `size` bytes (outliving every upload), satisfying the memory
@@ -134,7 +139,8 @@ fn structural_spawn_on_zero_substep_frame_reaches_the_instance_ring() {
         "the gather output changed on the structural-change frame"
     );
     assert_ne!(
-        scratch.ring, ring_before,
+        scratch.ring.as_read_slice(),
+        ring_before.as_slice(),
         "the gathered ring differs from the pre-spawn frame"
     );
 
@@ -147,7 +153,7 @@ fn structural_spawn_on_zero_substep_frame_reaches_the_instance_ring() {
     // The upload happened: the slot's leading bytes are the NEW two records
     // (the second one did not exist before the spawn), proving a 0-substep
     // structural-change frame re-uploads — the P0-3 regression witness.
-    let expect: &[u8] = bytemuck::cast_slice(scratch.ring.as_slice());
+    let expect: &[u8] = bytemuck::cast_slice(scratch.ring.as_read_slice());
     assert_eq!(
         &storage[..expect.len()],
         expect,

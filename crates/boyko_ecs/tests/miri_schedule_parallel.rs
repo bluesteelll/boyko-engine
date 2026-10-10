@@ -71,7 +71,7 @@
 //! ```bash
 //! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation \
 //!   -Zmiri-permissive-provenance -Zmiri-ignore-leaks" \
-//!   cargo +nightly miri test -p boyko-ecs --test miri_schedule_parallel
+//!   cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_schedule_parallel
 //! ```
 //!
 //! `-Zmiri-ignore-leaks` is REQUIRED (same as `miri_scope.rs`): with the Phase

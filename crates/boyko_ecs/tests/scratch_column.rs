@@ -95,6 +95,113 @@ fn push_extend_as_slice_round_trip() {
     assert_eq!(col.len(), 5);
 }
 
+// ── resize / truncate: the sized-then-written-by-index idiom ────────────────
+
+#[test]
+fn resize_grows_with_the_fill_value_and_shrinks_in_place() {
+    let mut col = f32_column(4096);
+    {
+        let mut build = col.build_view();
+        build.resize(5, F32(7.0));
+        assert_eq!(build.len(), 5);
+        assert_eq!(build.as_slice(), &[F32(7.0); 5]);
+
+        // Write by index — the whole point of sizing first.
+        for (i, v) in build.as_mut_slice().iter_mut().enumerate() {
+            v.0 = i as f32;
+        }
+
+        // Shrink keeps the surviving prefix byte-for-byte.
+        build.resize(2, F32(99.0));
+        assert_eq!(build.as_slice(), &[F32(0.0), F32(1.0)]);
+
+        // A resize to the current length touches nothing.
+        build.resize(2, F32(99.0));
+        assert_eq!(build.as_slice(), &[F32(0.0), F32(1.0)]);
+    }
+    assert_eq!(col.len(), 2);
+}
+
+#[test]
+fn resize_over_reused_rows_writes_the_fill_rather_than_re_exposing_stale_bytes() {
+    // The sharp case: a shrink is O(1) and leaves the old bytes in place, so a
+    // grow back over them must actually FILL. An implementation that only raised
+    // `len` would pass every length assertion and hand back last frame's data —
+    // which is exactly the bug a warm-start table or a cursor pass would then
+    // read as live state.
+    let mut col = f32_column(4096);
+    {
+        let mut build = col.build_view();
+        build.resize(8, F32(1.0));
+        for (i, v) in build.as_mut_slice().iter_mut().enumerate() {
+            v.0 = 100.0 + i as f32;
+        }
+        build.truncate(2);
+        assert_eq!(build.as_slice(), &[F32(100.0), F32(101.0)]);
+
+        build.resize(8, F32(-1.0));
+        assert_eq!(
+            build.as_slice(),
+            &[
+                F32(100.0),
+                F32(101.0),
+                F32(-1.0),
+                F32(-1.0),
+                F32(-1.0),
+                F32(-1.0),
+                F32(-1.0),
+                F32(-1.0),
+            ],
+            "rows 2..8 must carry the fill value, not the 102..107 left behind by the truncate"
+        );
+    }
+}
+
+#[test]
+fn truncate_above_the_live_length_is_a_no_op() {
+    let mut col = body_column(1024);
+    {
+        let mut build = col.build_view();
+        build.resize(3, Body16 { px: 1.0, py: 2.0, vx: 3.0, vy: 4.0 });
+        build.truncate(9);
+        assert_eq!(build.len(), 3, "truncate past the frontier must not invent rows");
+        build.truncate(3);
+        assert_eq!(build.len(), 3);
+    }
+}
+
+#[test]
+fn resize_grows_across_a_commit_step_without_moving_the_base() {
+    // `resize` takes ONE grow for the whole span instead of a per-element check,
+    // so the address-stability property has to be re-checked on that path rather
+    // than inherited from `push`'s.
+    let mut col = f32_column(1 << 20);
+    let base_before = {
+        let mut build = col.build_view();
+        build.resize(4, F32(0.0));
+        build.as_slice().as_ptr() as usize
+    };
+    let mut build = col.build_view();
+    build.resize(300_000, F32(5.0));
+    assert_eq!(build.len(), 300_000);
+    assert_eq!(
+        build.as_slice().as_ptr() as usize,
+        base_before,
+        "the column base must not move across a resize-driven grow"
+    );
+    assert_eq!(build.as_slice()[299_999], F32(5.0));
+    assert_eq!(build.as_slice()[4], F32(5.0));
+    assert_eq!(build.as_slice()[3], F32(0.0));
+}
+
+#[test]
+#[should_panic(expected = "reserve ceiling exhausted")]
+fn resize_past_the_reserve_ceiling_panics() {
+    let mut col = f32_column(16);
+    let mut build = col.build_view();
+    build.resize(17, F32(0.0));
+}
+
 // ── clear() = len-0, no free, base unchanged ────────────────────────────────
 
 #[test]

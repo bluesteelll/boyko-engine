@@ -5,7 +5,8 @@
 //! slot's PREVIOUS OCCUPANT (frame N−2 under `FRAMES_IN_FLIGHT == 2`) unless
 //! the slot's in-flight fence was waited first — the `80bf033` motion-shadow
 //! race class. These upload fns therefore demand a borrowed
-//! [`FrameWriteToken`], mintable ONLY by `Renderer::wait_frame_in_flight`
+//! [`FrameWriteToken`](boyko_rhi_vulkan::swapchain::FrameWriteToken), mintable ONLY by
+//! `Renderer::wait_frame_in_flight`
 //! (or the audited `forge_unfenced` setup hatch): the fence proof is a
 //! compile-time precondition, not a convention. The caller (the `boyko_app`
 //! runner — the "WHEN" side) selects `ring[token.slot()]` and passes that slot
@@ -13,7 +14,8 @@
 //!
 //! # Why these are `unsafe fn` (review P1)
 //!
-//! [`BoundBuffer`]'s fields are public, so SAFE code can construct one whose
+//! [`BoundBuffer`](boyko_rhi_vulkan::memory::BoundBuffer)'s fields are public, so SAFE
+//! code can construct one whose
 //! `mapped` dangles or whose `size` overstates the mapping — a safe fn writing
 //! through it would be unsound by definition. The memory precondition (a live
 //! host-visible mapping of at least `size` bytes) is therefore an explicit
@@ -28,7 +30,9 @@ use boyko_rhi_vulkan::swapchain::FrameWriteToken;
 use boyko_scene::ViewUniform;
 use boyko_sdf_math::SdfEdit;
 
+use crate::aa_config::{RESOLVED_TAA_BYTES, ResolvedTaa};
 use crate::csm_config::{RESOLVED_CSM_BYTES, ResolvedCsm};
+use crate::ddgi_config::{RESOLVED_DDGI_BYTES, ResolvedDdgi};
 use crate::ray_shadow_config::{RESOLVED_RAY_SHADOW_BYTES, ResolvedRayShadow};
 use crate::shadow_atlas::{RESOLVED_SHADOW_ATLAS_BYTES, ResolvedShadowAtlas};
 use crate::shadow_denoise_config::{
@@ -36,14 +40,25 @@ use crate::shadow_denoise_config::{
     ResolvedTemporalShadow,
 };
 use crate::gpu_transform3d::GPU_TRANSFORM3D_BYTES;
-use crate::mesh_draw::MeshRenderScratch;
-#[cfg(feature = "hwrt")]
+use crate::mesh_draw::{
+    MeshRenderScratch, PER_INSTANCE_MATERIAL_BYTES, PER_INSTANCE_MATERIAL_TEX_BYTES,
+};
+// TAA W3: un-walled from `hwrt` — the resolve's camera-only MV reconstruction needs the
+// MotionCam ring upload on BOTH legs (see `boyko_render::motion_cam`'s module doc).
 use crate::motion_cam::{MOTION_CAM_UBO_BYTES, MotionCam};
-use crate::view::composite_from_view;
+// Particles P0: the two POD tables the gated per-frame uploads stage.
+use crate::particle::{EffectParamsGpu, EmitRequestGpu};
+use crate::view::composite_from_view_sheared;
 
-/// Writes the 80-byte b5 camera block (the marcher / resolve / SSAO
-/// `CompositePushConstants` image) into ONE camera-ring slot from the resolved
-/// engine view — the per-frame camera upload of the production G-buffer path.
+/// [`upload_camera_ring`] with an optional TAA rung-C1 b5 camera-basis shear
+/// ([`composite_from_view_sheared`]) — the SAME `(jx, jy)`
+/// [`crate::taa_jitter::NdcJitter`] the raster gbuffer push already applies, so the
+/// marcher/resolve/SSAO/CSM/froxel-shared basis samples the identical final-NDC sub-pixel
+/// position (I2) when the caller opts in via `TaaConfig::jitter_scope ==
+/// JitterScope::RasterAndBasis`. `ndc_jitter == None` is byte-identical to
+/// [`upload_camera_ring`] (a structural skip — see
+/// [`composite_perspective_from_view_sheared`](crate::view::composite_perspective_from_view_sheared)'s
+/// doc for why a computed `Some([0.0, 0.0])` is NOT an equivalent substitute).
 ///
 /// `width`/`height` are the COMPOSITE extent (boot-fixed, plan D7): they size
 /// the push's `count = width * height` dispatch bound AND its aspect lane, so
@@ -71,18 +86,19 @@ use crate::view::composite_from_view;
 ///   the slot's previous occupant finished every GPU read of this buffer (the
 ///   sibling in-flight frame binds the OTHER slot). Passing a different slot's
 ///   buffer re-opens the `80bf033` write-after-read race.
-pub unsafe fn upload_camera_ring(
+pub unsafe fn upload_camera_ring_sheared(
     token: &FrameWriteToken,
     ring_slot: &BoundBuffer,
     view: &ViewUniform,
     width: u32,
     height: u32,
+    ndc_jitter: Option<[f32; 2]>,
 ) {
     // The borrow IS the fence proof (mint-gated); no slot index is re-derivable
     // from the buffer, so the slot identity is the caller's contract.
     let _ = token;
 
-    let pc = composite_from_view(view, width, height);
+    let pc = composite_from_view_sheared(view, width, height, ndc_jitter);
     let bytes = pc.as_bytes();
     debug_assert_eq!(
         bytes.len(),
@@ -118,6 +134,36 @@ pub unsafe fn upload_camera_ring(
     // view (no overlap).
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+}
+
+/// Writes the 80-byte b5 camera block (the marcher / resolve / SSAO
+/// `CompositePushConstants` image) into ONE camera-ring slot from the resolved
+/// engine view — the per-frame camera upload of the production G-buffer path.
+///
+/// Delegates to [`upload_camera_ring_sheared`] with `ndc_jitter = None` — byte-identical to
+/// the pre-C1-lift upload (the structural skip; see that fn's doc).
+///
+/// # Panics
+///
+/// Same as [`upload_camera_ring_sheared`].
+///
+/// # Safety
+///
+/// Same contract as [`upload_camera_ring_sheared`].
+pub unsafe fn upload_camera_ring(
+    token: &FrameWriteToken,
+    ring_slot: &BoundBuffer,
+    view: &ViewUniform,
+    width: u32,
+    height: u32,
+) {
+    // SAFETY: forwards this fn's own preconditions verbatim to
+    // `upload_camera_ring_sheared` — `token`/`ring_slot`/`view` are unchanged, and `None`
+    // selects the byte-identical unsheared path (mirrors `composite_from_view`'s own
+    // `_sheared(..., None)` delegation).
+    unsafe {
+        upload_camera_ring_sheared(token, ring_slot, view, width, height, None);
     }
 }
 
@@ -164,12 +210,15 @@ pub unsafe fn upload_instance_models(
     if scratch.ring.is_empty() {
         return;
     }
-    let bytes: &[u8] = bytemuck::cast_slice(scratch.ring.as_slice());
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.ring.as_read_slice());
     assert!(
         bytes.len() as u64 <= ring_slot.size,
         "instance ring overflow: {} gathered instances ({} bytes) exceed the \
-         {}-instance ({}-byte) slot (grow the boot instance capacity; dynamic \
-         growth is host plan R7)",
+         {}-instance ({}-byte) slot (asset-streaming plan F7: \
+         `GpuSceneBundles::grow_instance_family_if_needed` grows this ring on a non-RT \
+         device before this call; a live overflow here means either an RT device's hard \
+         INSTANCE_CAPACITY cap (F7 W3 — growth is out of scope there) or a caller-ordering \
+         bug that skipped the grow)",
         scratch.ring.len(),
         bytes.len(),
         ring_slot.size / 48,
@@ -187,6 +236,300 @@ pub unsafe fn upload_instance_models(
     // finished its GPU reads; the sibling frame binds the other slot) —
     // race-free, lock-free. `bytes` is the scratch's own heap buffer, a
     // distinct non-overlapping region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+}
+
+/// Multi-paradigm render-path plan, rung R8 (Decision 0): uploads the gathered 64-byte
+/// [`VbInstanceRow`](crate::instance_model::VbInstanceRow) VB-path instance ring
+/// ([`MeshRenderScratch::vb_ring`], built by
+/// `MeshRenderScratch::sync_vb_instance_ring`)
+/// into ONE VB instance-SSBO ring slot — mirrors [`upload_instance_models`] exactly (ONE
+/// contiguous `bytemuck` memcpy, zero staging, zero allocation), against a DEDICATED ring
+/// (distinct from the 48-byte `InstanceModelCol` ring [`upload_instance_models`] targets).
+///
+/// Called ONLY on a `VisibilityBuffer`-resolved boot (the caller's own gate, `boyko_app::runner`
+/// — this fn is unconditionally correct either way, the SAME "call-site decides" discipline
+/// `MeshRenderScratch::sync_vb_instance_ring`'s doc states).
+///
+/// # Panics
+///
+/// Panics if the gathered ring exceeds the slot's capacity — the SAME hard overflow discipline
+/// as [`upload_instance_models`].
+///
+/// # Safety
+///
+/// * `ring_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ring_slot.size` valid, persistently-mapped bytes.
+/// * `ring_slot` is the FENCED slot's buffer — `vb_instance_rings[token.slot()]` (the same
+///   token/slot contract as [`upload_instance_models`]).
+pub unsafe fn upload_vb_instance_rows(
+    token: &FrameWriteToken,
+    ring_slot: &BoundBuffer,
+    scratch: &MeshRenderScratch,
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    if scratch.vb_ring.is_empty() {
+        return;
+    }
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.vb_ring.as_read_slice());
+    assert!(
+        bytes.len() as u64 <= ring_slot.size,
+        "VB instance ring overflow: {} gathered instances ({} bytes) exceed the \
+         {}-instance ({}-byte) slot (rung R8 v1 has no growth-past-INSTANCE_CAPACITY support \
+         for the VB ring yet — mirrors the pre-F7 `instance_rings` state)",
+        scratch.vb_ring.len(),
+        bytes.len(),
+        ring_slot.size / 64,
+        ring_slot.size
+    );
+
+    let mapped =
+        ring_slot.mapped.expect("invariant: the VB instance ring slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `ring_slot.size` valid mapped
+    // host-coherent bytes, and `bytes.len() <= ring_slot.size` is hard-asserted above — the
+    // write is in-bounds. The borrowed `FrameWriteToken` + the slot-identity contract prove
+    // this slot's in-flight fence was waited THIS frame (race-free, lock-free, the SAME
+    // reasoning as `upload_instance_models`). `bytes` is the scratch's own buffer, a distinct
+    // non-overlapping region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+}
+
+/// Asset-streaming plan F8+ (owner: material-drives-albedo-too): uploads the gathered
+/// per-instance [`MeshRenderScratch::material_ids`] lane (id + `base_color`, a
+/// [`PerInstanceMaterial`](crate::mesh_draw::PerInstanceMaterial) per instance) into ONE
+/// instance-material-SSBO ring slot — ONE contiguous `bytemuck` memcpy, zero staging,
+/// zero allocation (mirrors [`upload_instance_models`]'s discipline exactly).
+///
+/// Called ONLY on a frame with [`MeshRenderScratch::any_non_default_material`] (Principle 1 —
+/// a default frame does ZERO material-upload work); the caller (the runner) is responsible for
+/// that gate. The lane is index-aligned with the instance ring (`instance_materials[i]` names
+/// the SAME instance `instances[i]` does), so it shares the instance ring's growth/cap
+/// discipline (asset-streaming plan F8 §1.2): grown in lockstep by
+/// `GpuSceneBundles::grow_instance_family_if_needed` on the non-RT leg, hard-capped at
+/// `INSTANCE_CAPACITY` on an RT device (the F7 W3 gate).
+///
+/// # Panics
+///
+/// Panics if the gathered lane exceeds the slot's capacity — the SAME hard overflow discipline
+/// as [`upload_instance_models`] (the F7 C3 discipline: a live overflow on an RT device's hard
+/// cap must ABORT, never OOB-write).
+///
+/// # Safety
+///
+/// * `ring_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ring_slot.size` valid, persistently-mapped bytes.
+/// * `ring_slot` is the FENCED slot's buffer — `pm_instance_material_rings[token.slot()]` (the
+///   same token/slot contract as [`upload_instance_models`]).
+pub unsafe fn upload_instance_materials(
+    token: &FrameWriteToken,
+    ring_slot: &BoundBuffer,
+    scratch: &MeshRenderScratch,
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    if scratch.material_ids.is_empty() {
+        return;
+    }
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.material_ids.as_read_slice());
+    assert!(
+        bytes.len() as u64 <= ring_slot.size,
+        "instance-material ring overflow: {} gathered material payloads ({} bytes) exceed the \
+         {}-instance ({}-byte) slot (asset-streaming plan F7 W3: an RT device hard-caps the \
+         whole instance family at INSTANCE_CAPACITY — the material ring shares that cap; reduce \
+         the scene's simultaneous drawable count or raise the boot INSTANCE_CAPACITY)",
+        scratch.material_ids.len(),
+        bytes.len(),
+        ring_slot.size / PER_INSTANCE_MATERIAL_BYTES as u64,
+        ring_slot.size
+    );
+
+    let mapped = ring_slot
+        .mapped
+        .expect("invariant: the instance-material ring slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `ring_slot.size` valid mapped
+    // host-coherent bytes, and `bytes.len() <= ring_slot.size` is hard-asserted above — the
+    // write is in-bounds. The borrowed `FrameWriteToken` + the slot-identity contract prove
+    // this slot's in-flight fence was waited THIS frame (the slot's previous occupant finished
+    // its VERTEX reads of the material SSBO; the sibling frame binds the other slot) —
+    // race-free, lock-free. `bytes` is the scratch's own heap buffer, a distinct
+    // non-overlapping region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+}
+
+/// Dynamic-materials DM1 (live defect D-2): zero-fills rows `[0, rows)` of ONE
+/// instance-material-SSBO ring slot — the falling edge of the `PerInstanceMaterial` upload rule
+/// (design F7), taken once per slot when the last non-default material leaves the scene.
+///
+/// [`upload_instance_materials`] runs only on a frame with a non-default material, but the VB
+/// classify and shading shaders and `forward_opaque.vs` read this ring every frame. Without the
+/// zero-fill, a default instance renumbered into a departed instance's index would keep that
+/// instance's material id. On such a frame every instance's id is 0, so zero is exact. The
+/// caller (the runner, through `material_gate::pm_ring_action`) passes the slot's high-water
+/// row count, the prefix any earlier upload into this slot can have written.
+///
+/// # Panics
+///
+/// Panics if `rows` exceeds the slot's capacity — a high-water record larger than the ring is a
+/// host bookkeeping bug, never a clamp.
+///
+/// # Safety
+///
+/// The same contract as [`upload_instance_materials`]: `ring_slot` is a LIVE host-visible
+/// buffer minted by `RhiDevice::create_buffer` (`HostVisibleCoherent`) whose `mapped` pointer
+/// targets at least `ring_slot.size` valid, persistently-mapped bytes, and it is the FENCED
+/// slot's buffer — `pm_instance_material_rings[token.slot()]`.
+#[cold]
+pub unsafe fn zero_instance_materials(token: &FrameWriteToken, ring_slot: &BoundBuffer, rows: u32) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    let bytes = rows as usize * PER_INSTANCE_MATERIAL_BYTES;
+    assert!(
+        bytes as u64 <= ring_slot.size,
+        "instance-material ring zero-fill overflow: {rows} rows ({bytes} bytes) exceed the \
+         {}-byte slot — the runner's high-water record outgrew the ring it describes",
+        ring_slot.size
+    );
+    let mapped = ring_slot
+        .mapped
+        .expect("invariant: the instance-material ring slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `ring_slot.size` valid mapped
+    // host-coherent bytes, and `bytes <= ring_slot.size` is hard-asserted above — the write is
+    // in-bounds. The borrowed `FrameWriteToken` + the slot-identity contract prove this slot's
+    // in-flight fence was waited THIS frame (its previous occupant finished reading the ring;
+    // the sibling frame binds the other slot) — race-free, lock-free. `PerInstanceMaterial` is
+    // plain-old-data, so all-zero bytes are a valid value (`id = 0`, the default material).
+    unsafe {
+        core::ptr::write_bytes(mapped.as_ptr(), 0, bytes);
+    }
+}
+
+/// Dynamic-materials DM1 (design F1 A4): copies this frame's compact edited material rows
+/// (`MaterialUploadStaging::rows`, packed in drain order) into `[0, rows.len()·48)` of ONE material
+/// staging slot — the bytes this frame's `material_upload` runs copy from. The `light_table`
+/// staging idiom ([`upload_light_table`]): the fenced slot only, one `memcpy`, no allocation.
+///
+/// The slot invariant (design F1) holds by construction: every run this frame records reads only
+/// `[0, rows.len()·48)` of this slot, which this call just wrote.
+///
+/// # Panics
+///
+/// Panics if the rows exceed the slot's size — the stager stages rows `< high_water <= capacity`,
+/// and the slot is sized `capacity·48`, so an overflow is a caller-ordering bug that skipped a
+/// grow, never a clamp.
+///
+/// # Safety
+///
+/// `staging_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+/// (`HostVisibleCoherent`) whose `mapped` pointer targets at least `staging_slot.size` valid,
+/// persistently-mapped bytes, and it is the FENCED slot's buffer — `MaterialTable::staging_slot(
+/// token.slot())` — so the slot's previous occupant's recorded copy has retired.
+pub unsafe fn upload_material_rows(
+    token: &FrameWriteToken,
+    staging_slot: &BoundBuffer,
+    rows: &[crate::material::MaterialGpu],
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    let bytes = core::mem::size_of_val(rows);
+    assert!(
+        bytes as u64 <= staging_slot.size,
+        "material staging overflow: {} staged rows ({bytes} bytes) exceed the {}-byte slot — a row \
+         past the table's capacity was staged without the grow that owes the full image",
+        rows.len(),
+        staging_slot.size
+    );
+    let mapped = staging_slot
+        .mapped
+        .expect("invariant: the material staging slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `staging_slot.size` valid mapped
+    // host-coherent bytes, and `bytes <= staging_slot.size` is hard-asserted above — the write is
+    // in-bounds. `MaterialGpu` is `#[repr(C, align(16))]` over three `[f32; 4]` lanes, 48 bytes with
+    // no padding (const-asserted in `material.rs`), so every byte of `rows` is initialized and may
+    // be copied as bytes. The borrowed `FrameWriteToken` + the slot-identity contract prove this
+    // slot's in-flight fence was waited THIS frame (the sibling frame copies from the other slot)
+    // — race-free, lock-free. `rows` is the staging resource's own column, distinct from the
+    // mapped slot.
+    unsafe {
+        core::ptr::copy_nonoverlapping(rows.as_ptr().cast::<u8>(), mapped.as_ptr(), bytes);
+    }
+}
+
+/// Textured-PBR rung T6c: uploads the gathered per-instance
+/// [`MeshRenderScratch::material_tex`] lane (base_color + material id + five bindless
+/// texture slots + the metallic/roughness fallback scalars, a
+/// [`PerInstanceMaterialTex`](crate::mesh_draw::PerInstanceMaterialTex) per instance) into
+/// ONE TEXTURED instance-material-SSBO ring slot — ONE contiguous `bytemuck` memcpy, zero
+/// staging, zero allocation (mirrors [`upload_instance_materials`]'s discipline exactly).
+///
+/// Called ONLY on a frame with [`MeshRenderScratch::any_textured_material`] (Principle 1 —
+/// a non-textured frame does ZERO material-upload work); the caller (the runner) is
+/// responsible for that gate. The lane is index-aligned with the instance ring
+/// (`instance_materials_tex[i]` names the SAME instance `instances[i]` does).
+///
+/// # Panics
+///
+/// Panics if the gathered lane exceeds the slot's capacity — the SAME hard overflow
+/// discipline as [`upload_instance_materials`]. UNLIKE `upload_instance_materials`'s ring,
+/// the TEXTURED instance-material ring does NOT participate in the F7/F7-hwrt lockstep
+/// grow (a disclosed T6c limitation): it stays fixed at its boot
+/// [`crate::mesh_draw::PerInstanceMaterialTex`]-stride capacity for the whole process
+/// lifetime, so a scene whose gathered instance count grows past that capacity while using
+/// textured materials panics here rather than silently corrupting memory.
+///
+/// # Safety
+///
+/// * `ring_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ring_slot.size` valid, persistently-mapped bytes.
+/// * `ring_slot` is the FENCED slot's buffer — `tex_instance_material_rings[token.slot()]`
+///   (the same token/slot contract as [`upload_instance_materials`]).
+pub unsafe fn upload_instance_materials_tex(
+    token: &FrameWriteToken,
+    ring_slot: &BoundBuffer,
+    scratch: &MeshRenderScratch,
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    if scratch.material_tex.is_empty() {
+        return;
+    }
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.material_tex.as_read_slice());
+    assert!(
+        bytes.len() as u64 <= ring_slot.size,
+        "TEXTURED instance-material ring overflow: {} gathered material payloads ({} bytes) \
+         exceed the {}-instance ({}-byte) slot (T6c: this ring does NOT participate in F7 \
+         growth — reduce the scene's simultaneous drawable count or raise the boot \
+         INSTANCE_CAPACITY)",
+        scratch.material_tex.len(),
+        bytes.len(),
+        ring_slot.size / PER_INSTANCE_MATERIAL_TEX_BYTES as u64,
+        ring_slot.size
+    );
+
+    let mapped = ring_slot
+        .mapped
+        .expect("invariant: the TEXTURED instance-material ring slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `ring_slot.size` valid mapped
+    // host-coherent bytes, and `bytes.len() <= ring_slot.size` is hard-asserted above — the
+    // write is in-bounds. The borrowed `FrameWriteToken` + the slot-identity contract prove
+    // this slot's in-flight fence was waited THIS frame (the slot's previous occupant finished
+    // its VERTEX reads of the material SSBO; the sibling frame binds the other slot) —
+    // race-free, lock-free. `bytes` is the scratch's own heap buffer, a distinct
+    // non-overlapping region.
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
     }
@@ -238,12 +581,14 @@ pub unsafe fn upload_pair_ring(
     if scratch.pair_ring.is_empty() {
         return;
     }
-    let bytes: &[u8] = bytemuck::cast_slice(scratch.pair_ring.as_slice());
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.pair_ring.as_read_slice());
     assert!(
         bytes.len() as u64 <= slot_buffer.size,
         "pair ring overflow: {} gathered pairs ({} bytes) exceed the {}-pair \
-         ({}-byte) slot (grow the boot instance capacity; dynamic growth is host \
-         plan R7)",
+         ({}-byte) slot (asset-streaming plan F7: `GpuSceneBundles::\
+         grow_instance_family_if_needed` grows this ring in lockstep with the instance \
+         ring on a non-RT device before this call — see `upload_instance_models`'s \
+         overflow message for the RT-capped / caller-ordering alternatives)",
         scratch.pair_ring.len(),
         bytes.len(),
         slot_buffer.size / GPU_TRANSFORM3D_BYTES as u64,
@@ -308,12 +653,14 @@ pub unsafe fn upload_pair_out_slot(
     if scratch.pair_out_slot.is_empty() {
         return;
     }
-    let bytes: &[u8] = bytemuck::cast_slice(scratch.pair_out_slot.as_slice());
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.pair_out_slot.as_read_slice());
     assert!(
         bytes.len() as u64 <= slot_buffer.size,
         "out-slot ring overflow: {} gathered out-slots ({} bytes) exceed the {}-slot \
-         ({}-byte) buffer (grow the boot instance capacity; dynamic growth is host \
-         plan R7)",
+         ({}-byte) buffer (asset-streaming plan F7: `GpuSceneBundles::\
+         grow_instance_family_if_needed` grows this ring in lockstep with the instance \
+         ring on a non-RT device before this call — see `upload_instance_models`'s \
+         overflow message for the RT-capped / caller-ordering alternatives)",
         scratch.pair_out_slot.len(),
         bytes.len(),
         slot_buffer.size / 4,
@@ -375,11 +722,14 @@ pub unsafe fn upload_mesh_ids(
     if scratch.mesh_ids.is_empty() {
         return;
     }
-    let bytes: &[u8] = bytemuck::cast_slice(scratch.mesh_ids.as_slice());
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.mesh_ids.as_read_slice());
     assert!(
         bytes.len() as u64 <= slot.size,
         "mesh-id ring overflow: {} gathered mesh-ids ({} bytes) exceed the {}-slot \
-         ({}-byte) buffer (grow the boot instance capacity; dynamic growth is host plan R7)",
+         ({}-byte) buffer (asset-streaming plan F7 W3: an RT device hard-caps the whole \
+         instance family at INSTANCE_CAPACITY — the TLAS packer's `instance_arrays`/\
+         backing/scratch are sized once for it, so this ring never grows; reduce the \
+         scene's simultaneous drawable count or raise the boot INSTANCE_CAPACITY)",
         scratch.mesh_ids.len(),
         bytes.len(),
         slot.size / 4,
@@ -407,6 +757,13 @@ pub unsafe fn upload_mesh_ids(
 /// zero staging, zero allocation. The gbuffer MV vertex shader reads this slot at binding 1
 /// (`prev_instances[base_instance + SV_InstanceID]`) to compute each mesh pixel's per-object
 /// `prev_world`, so its motion vector is `cur_world − prev_world`.
+///
+/// STILL `feature = "hwrt"`-gated (unlike [`crate::PrevInstanceModelCol`] itself, TAA rung D1):
+/// this fn reads [`MeshRenderScratch::prev_ring`], which is its own SEPARATE
+/// `#[cfg(feature = "hwrt")]` wall in `mesh_draw.rs` (that field, `gather_prev_ring_into`, and the
+/// `hwrt`-only `gather_mesh_draws` variant that fills it are a deeper, un-investigated wall this
+/// rung does not un-wall — see the D1 report). Un-walling THIS fn's signature without also
+/// un-walling `prev_ring` does not compile (`scratch.prev_ring` would not exist on `not(hwrt)`).
 ///
 /// Uploaded ONLY when the temporal denoiser is on (the runner gates the CALL on `feature = "hwrt"`
 /// plus `temporal_enabled` plus the `mv` ring's presence — the SAME gate that binds the MV
@@ -444,12 +801,15 @@ pub unsafe fn upload_prev_instance_models(
     if scratch.prev_ring.is_empty() {
         return;
     }
-    let bytes: &[u8] = bytemuck::cast_slice(scratch.prev_ring.as_slice());
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.prev_ring.as_read_slice());
     assert!(
         bytes.len() as u64 <= ring_slot.size,
         "prev-instance ring overflow: {} gathered instances ({} bytes) exceed the \
-         {}-instance ({}-byte) slot (grow the boot instance capacity; dynamic growth is host \
-         plan R7)",
+         {}-instance ({}-byte) slot (asset-streaming plan F7 W3: an RT device hard-caps \
+         the whole instance family at INSTANCE_CAPACITY — the TLAS packer's \
+         `instance_arrays`/backing/scratch are sized once for it, so this ring never \
+         grows; reduce the scene's simultaneous drawable count or raise the boot \
+         INSTANCE_CAPACITY)",
         scratch.prev_ring.len(),
         bytes.len(),
         ring_slot.size / core::mem::size_of::<crate::InstanceModelCol>() as u64,
@@ -497,7 +857,6 @@ pub unsafe fn upload_prev_instance_models(
 ///   contract as [`upload_csm_ring`]): the token proves that slot's in-flight fence was waited THIS
 ///   frame, so the slot's previous occupant finished every VERTEX read of this UBO and the sibling
 ///   in-flight frame binds the OTHER ring slot — race-free, lock-free.
-#[cfg(feature = "hwrt")]
 pub unsafe fn upload_motion_cam_ring(
     token: &FrameWriteToken,
     ring_slot: &BoundBuffer,
@@ -664,22 +1023,95 @@ pub unsafe fn upload_csm_ring(
     }
 }
 
+/// The HOT per-frame tail of the HWRT `RayShadowUbo` (UBO bytes @16..48) — written every HWRT
+/// frame by the runner, never resolve-derived (the cold/hot split
+/// [`upload_ray_shadow_ring`]'s doc states: the cold [`ResolvedRayShadow`] @0..16 is author
+/// policy re-derived by `resolve_ray_shadow_system`; these are the runner's own per-frame
+/// values).
+///
+/// `#[repr(C)]` POD, byte-mirroring `deferred_pbr.hlsl`'s `RayShadowUbo` fields
+/// `SHADOW_FRAME_SEED` @16, `SHADOW_ORIGIN_MODE` @20, the explicit std140 pad @24..32 and
+/// `SHADOW_RASTER_FWD` @32 (a `float4` cannot straddle a 16-B slot, so it lands at 32 whatever
+/// the packing — the pad makes the HLSL and Rust offsets agree by inspection; both are
+/// const-asserted below).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RayShadowFrame {
+    /// `SHADOW_FRAME_SEED` — the runner's monotonic frame index; advances the shadow ray's
+    /// Vogel-disk cone rotation by the golden angle every frame (rung 3b). UBO @16.
+    pub seed: u32,
+    /// `SHADOW_ORIGIN_MODE`: `0` = the legacy origin `P` on the b5 pixel ray (a STRUCTURAL
+    /// skip in the shader — `P_shadow` is a copy of `P`); `1` = the shadow-ray origin is
+    /// re-placed on the RASTER's jittered pixel ray for raster-owned pixels
+    /// (`eye + rd_r * gViewT`, exact for the Euclidean depth encode). The runner sets `1` iff
+    /// TAA is armed on a perspective camera. UBO @20.
+    pub origin_mode: u32,
+    /// std140 pad so `raster_fwd` lands at UBO @32 (asserted below). Always zero.
+    pub _pad: [u32; 2],
+    /// `SHADOW_RASTER_FWD`: `xyz` = [`raster_ray_forward`](crate::view::raster_ray_forward)
+    /// when `origin_mode == 1`, else zero; `w = 0`, unread. UBO @32.
+    pub raster_fwd: [f32; 4],
+}
+
+impl RayShadowFrame {
+    /// The `origin_mode == 0` frame: the legacy `P` origin, `raster_fwd` a structural zero.
+    #[inline]
+    #[must_use]
+    pub const fn legacy(seed: u32) -> Self {
+        Self { seed, origin_mode: 0, _pad: [0; 2], raster_fwd: [0.0; 4] }
+    }
+
+    /// The `origin_mode == 1` frame: the raster-ray origin with `fwd_r` from
+    /// [`raster_ray_forward`](crate::view::raster_ray_forward).
+    #[inline]
+    #[must_use]
+    pub const fn raster_ray(seed: u32, fwd_r: [f32; 3]) -> Self {
+        Self { seed, origin_mode: 1, _pad: [0; 2], raster_fwd: [fwd_r[0], fwd_r[1], fwd_r[2], 0.0] }
+    }
+}
+
+/// The byte size of the hot per-frame tail — `size_of::<RayShadowFrame>()` (32 B). The HWRT
+/// `RayShadowUbo` block is `RESOLVED_RAY_SHADOW_BYTES + RAY_SHADOW_FRAME_BYTES` (48 B); hosts
+/// size their per-FIF ring slots from that sum (single source — no hand-copied `48`).
+pub const RAY_SHADOW_FRAME_BYTES: usize = core::mem::size_of::<RayShadowFrame>();
+
+// Layout pins: the tail is exactly two std140 vec4 slots, and `raster_fwd` sits at UBO @32
+// (`RESOLVED_RAY_SHADOW_BYTES` (16) + 16). A change is a deliberate decision (the HWRT resolve's
+// binding-20 cbuffer reads these offsets).
+const _: () = assert!(RAY_SHADOW_FRAME_BYTES == 32);
+const _: () = assert!(core::mem::offset_of!(RayShadowFrame, seed) == 0);
+const _: () = assert!(core::mem::offset_of!(RayShadowFrame, origin_mode) == 4);
+const _: () = assert!(core::mem::offset_of!(RayShadowFrame, raster_fwd) == 16);
+const _: () = assert!(RESOLVED_RAY_SHADOW_BYTES + core::mem::offset_of!(RayShadowFrame, raster_fwd) == 32);
+
 /// Copies the resolved [`ResolvedRayShadow`] (the HWRT `rayQuery` mesh-shadow tuning —
 /// cone/tmax/tmin/bias, byte-identical to the HWRT resolve's binding-20 UBO shape, see
-/// [`RESOLVED_RAY_SHADOW_BYTES`]) into ONE HWRT shadow-params-UBO ring slot — the per-frame
-/// upload of the HWRT resolve path (mirroring [`upload_csm_ring`]).
+/// [`RESOLVED_RAY_SHADOW_BYTES`]) PLUS the hot per-frame [`RayShadowFrame`] tail (the rung-3b
+/// seed, the shadow-ray origin mode and the raster's jittered forward) into ONE HWRT
+/// shadow-params-UBO ring slot — the per-frame upload of the HWRT resolve path (mirroring
+/// [`upload_csm_ring`]).
+///
+/// `frame` lands at UBO byte offset [`RESOLVED_RAY_SHADOW_BYTES`] (16), matching the HLSL
+/// `RayShadowUbo` fields `SHADOW_FRAME_SEED` @16, `SHADOW_ORIGIN_MODE` @20 and
+/// `SHADOW_RASTER_FWD` @32. It is packed HERE, not routed through the cold
+/// [`ResolvedRayShadow`] resolve: these are HOT per-frame values (the runner's monotonic frame
+/// index, this frame's TAA arm state and jitter), not author-tunable policy, so folding them
+/// into the cold resolve would force a needless extra write of the other four scalars every
+/// frame for no benefit (one-producer-per-field, cold/hot separation).
 ///
 /// Uploaded every HWRT frame (the runner gates the CALL on `feature = "hwrt"` +
 /// `ray_query_enabled()`, the SAME gate that mints the ring), exactly like
 /// [`upload_csm_ring`]: `resolve_ray_shadow_system` re-derives the 16-byte UBO from the cold
 /// [`RayShadowConfig`](crate::ray_shadow_config::RayShadowConfig) each frame, so a boot-seed
-/// would go stale the moment the author retunes, and the 16-byte memcpy is cheaper than a
-/// change gate. A default config uploads the byte-identical R2a-4b consts.
+/// would go stale the moment the author retunes, and the 48-byte memcpy pair is cheaper than a
+/// change gate. A default config + [`RayShadowFrame::legacy`]`(0)` uploads the byte-identical
+/// R2a-4b consts with the legacy origin.
 ///
 /// # Panics
 ///
-/// Panics if `ring_slot.size` is smaller than [`RESOLVED_RAY_SHADOW_BYTES`]: the memcpy would
-/// be out-of-bounds (UB), so the guard is a hard assert in every build.
+/// Panics if `ring_slot.size` is smaller than `RESOLVED_RAY_SHADOW_BYTES + RAY_SHADOW_FRAME_BYTES`
+/// (48 B): the memcpy pair would be out-of-bounds (UB), so the guard is a hard assert in every
+/// build.
 ///
 /// # Safety
 ///
@@ -693,35 +1125,45 @@ pub unsafe fn upload_ray_shadow_ring(
     token: &FrameWriteToken,
     ring_slot: &BoundBuffer,
     resolved: &ResolvedRayShadow,
+    frame: &RayShadowFrame,
 ) {
     // The borrow IS the fence proof — see `upload_camera_ring`.
     let _ = token;
 
-    // Hard bound BEFORE the memcpy (review P1 discipline): an undersized slot would make the
-    // 16-byte write out-of-bounds. One compare per frame.
+    // Hard bound BEFORE the memcpy pair (review P1 discipline): an undersized slot would make
+    // the 48-byte write out-of-bounds. One compare per frame.
+    const RAY_SHADOW_UBO_WRITE_BYTES: usize = RESOLVED_RAY_SHADOW_BYTES + RAY_SHADOW_FRAME_BYTES;
     assert!(
-        ring_slot.size as usize >= RESOLVED_RAY_SHADOW_BYTES,
-        "HWRT shadow-params UBO slot too small: {} bytes < the {}-byte ResolvedRayShadow mirror",
+        ring_slot.size as usize >= RAY_SHADOW_UBO_WRITE_BYTES,
+        "HWRT shadow-params UBO slot too small: {} bytes < the {}-byte ResolvedRayShadow + RayShadowFrame mirror",
         ring_slot.size,
-        RESOLVED_RAY_SHADOW_BYTES
+        RAY_SHADOW_UBO_WRITE_BYTES
     );
 
     let mapped = ring_slot
         .mapped
         .expect("invariant: the HWRT shadow-params UBO slot is host-visible mapped");
     // SAFETY: `resolved` is a live `#[repr(C)]` POD of exactly `RESOLVED_RAY_SHADOW_BYTES`
-    // (const-asserted at its definition) with no padding holes (4 packed `f32`s), so reading its
-    // raw bytes is defined. `mapped` targets >= `ring_slot.size >= RESOLVED_RAY_SHADOW_BYTES`
-    // valid mapped host-coherent bytes (hard-asserted above) — the write is in-bounds. The
-    // borrowed `FrameWriteToken` + the slot-identity contract prove this slot's in-flight fence
-    // was waited THIS frame (the previous occupant's resolve finished its UBO reads; the sibling
-    // frame binds the other slot) — race-free, lock-free. The two regions are distinct
-    // allocations (no overlap).
+    // (const-asserted at its definition) with no padding holes (4 packed `f32`s), and `frame` a
+    // live `#[repr(C)]` POD of exactly `RAY_SHADOW_FRAME_BYTES` (const-asserted above) whose
+    // only "padding" is the explicit, always-written `_pad` field — so reading either's raw
+    // bytes is defined. `mapped` targets >= `ring_slot.size >= RAY_SHADOW_UBO_WRITE_BYTES` (48)
+    // valid mapped host-coherent bytes (hard-asserted above), so both writes — `[0..16)` then
+    // `[16..48)` via `mapped.add(RESOLVED_RAY_SHADOW_BYTES)` — are in-bounds and
+    // non-overlapping. The borrowed `FrameWriteToken` + the slot-identity contract prove this
+    // slot's in-flight fence was waited THIS frame (the previous occupant's resolve finished its
+    // UBO reads; the sibling frame binds the other slot) — race-free, lock-free. Each copy's src
+    // and dst are distinct allocations.
     unsafe {
         core::ptr::copy_nonoverlapping(
             (resolved as *const ResolvedRayShadow).cast::<u8>(),
             mapped.as_ptr(),
             RESOLVED_RAY_SHADOW_BYTES,
+        );
+        core::ptr::copy_nonoverlapping(
+            (frame as *const RayShadowFrame).cast::<u8>(),
+            mapped.as_ptr().add(RESOLVED_RAY_SHADOW_BYTES),
+            RAY_SHADOW_FRAME_BYTES,
         );
     }
 }
@@ -853,6 +1295,61 @@ pub unsafe fn upload_temporal_shadow_ring(
     }
 }
 
+/// Copies the resolved [`ResolvedTaa`] (the Stage-4/rung-T2 TAA temporal-resolve tunables —
+/// `default_blend`/`min_blend`/`variance_gamma` plus the eight T2 mode words/scalars,
+/// byte-identical to the resolve's binding-5 UBO shape, see [`RESOLVED_TAA_BYTES`]) into ONE
+/// TAA-tunables UBO ring slot — the per-frame upload of the TAA resolve path, mirroring
+/// [`upload_temporal_shadow_ring`] (a SEPARATE carrier from every hwrt shadow UBO, NOT
+/// `hwrt`-gated: TAA runs on the pure-software leg too).
+///
+/// Uploaded every TAA-armed frame (the runner gates the CALL on the TAA UBO ring slot existing —
+/// `GBufferFrame::taa_ubo_slot`, the SAME gate that mints it): a boot-seed would go stale the
+/// moment a future policy retunes any tunable, and a 48-byte memcpy is cheaper than a change-gate.
+///
+/// # Panics
+///
+/// Panics if `ring_slot.size` is smaller than [`RESOLVED_TAA_BYTES`]: the memcpy would be
+/// out-of-bounds (UB), so the guard is a hard assert in every build.
+///
+/// # Safety
+///
+/// * `ring_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ring_slot.size` valid, persistently-mapped bytes.
+/// * `ring_slot` is the FENCED slot's buffer — the renderer's `taa_ubo[token.slot()]` (the same
+///   token/slot contract as [`upload_temporal_shadow_ring`]): the resolve of the slot's previous
+///   occupant retired behind the waited fence, and the sibling in-flight frame binds the OTHER
+///   ring slot.
+pub unsafe fn upload_taa_ring(token: &FrameWriteToken, ring_slot: &BoundBuffer, resolved: &ResolvedTaa) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    // Hard bound BEFORE the memcpy (review P1 discipline): an undersized slot would make the
+    // 48-byte write out-of-bounds. One compare per frame.
+    assert!(
+        ring_slot.size as usize >= RESOLVED_TAA_BYTES,
+        "TAA tunables UBO slot too small: {} bytes < the {}-byte ResolvedTaa mirror",
+        ring_slot.size,
+        RESOLVED_TAA_BYTES
+    );
+
+    let mapped = ring_slot.mapped.expect("invariant: the TAA tunables UBO slot is host-visible mapped");
+    // SAFETY: `resolved` is a live `#[repr(C)]` POD of exactly `RESOLVED_TAA_BYTES` (const-asserted
+    // at its definition) with no padding holes (twelve packed 4-byte `f32`/`u32` scalars), so
+    // reading its raw bytes is defined. `mapped` targets >= `ring_slot.size >= RESOLVED_TAA_BYTES`
+    // valid mapped host-coherent bytes (hard-asserted above) — the write is in-bounds. The borrowed
+    // `FrameWriteToken` + the slot-identity contract prove this slot's in-flight fence was waited
+    // THIS frame (the previous occupant's resolve finished its UBO read; the sibling frame binds
+    // the other slot) — race-free, lock-free. The two regions are distinct allocations (no overlap).
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            (resolved as *const ResolvedTaa).cast::<u8>(),
+            mapped.as_ptr(),
+            RESOLVED_TAA_BYTES,
+        );
+    }
+}
+
 /// Copies the fitted [`ResolvedShadowAtlas`] (the punctual spot/point atlas selection,
 /// byte-identical to the resolve's binding-15 UBO shape, see [`RESOLVED_SHADOW_ATLAS_BYTES`])
 /// into ONE atlas-UBO ring slot — the per-frame punctual upload of the production G-buffer path
@@ -916,10 +1413,75 @@ pub unsafe fn upload_atlas_ring(
     }
 }
 
+/// Memcpys `resolved` ([`ResolvedDdgi::as_bytes`], 48 B) into the resolve's binding-18 DDGI
+/// grid UBO `ubo` — the SDFDDGI host-hook upload (the GI analogue of [`upload_atlas_ring`],
+/// minus the ring). The bytes are the twelve LE words the resolve shader's `ResolvedDdgi`
+/// cbuffer reads (`gDdgiOrigin`@0, `gDdgiInvSpacDims`@16, `gDdgiMode`@32, `_gDdgiPad`@36).
+///
+/// # Why a SINGLE buffer, and why the caller value-gates the write
+///
+/// `ubo` is NOT a `FRAMES_IN_FLIGHT` ring: the resolve descriptor sets are built ONCE at
+/// G-buffer creation and capture the buffer handle the boot frame passed, so a host-side
+/// `[slot]` ring would not be observed by the GPU (the descriptor contract, not the "static
+/// config" the grid's D1 world-fixedness suggests). The write token proves THIS slot's fence
+/// only; the sibling in-flight frame may be executing its resolve while the host writes.
+/// The caller therefore writes MONOTONICALLY and value-gated (`boyko_app::runner`):
+///
+/// * only when `resolved.ddgi_mode_word != 0` AND the carrier differs from the last one
+///   written — a steady state performs ZERO host writes, so no concurrent access exists;
+/// * the first write lands on the frame whose `Main` set the header bit; the sibling frame's
+///   light staging (a per-slot ring) still carries bit 0, so it never reads b18 (the read is
+///   inside the shader's `if (ddgi_mode != 0u)`);
+/// * the DISABLED (zero) image is NEVER written after boot — a runtime grid edit may tear the
+///   sibling's 48-byte read for one frame, but both halves of any torn read are then finite
+///   grids (`inv_spacing > 0`, dims ≥ 1), so the worst case is one frame of spatially-wrong
+///   but FINITE GI, never a NaN; a DISABLE leaves the last grid bound-but-unread once the
+///   header bit drops.
+///
+/// # Panics
+///
+/// Panics if `ubo.size` is smaller than [`RESOLVED_DDGI_BYTES`]: the memcpy would be
+/// out-of-bounds (UB), so the guard is a hard assert in every build.
+///
+/// # Safety
+///
+/// * `ubo` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ubo.size` valid, persistently-mapped bytes.
+/// * `token` proves the CALLER's in-flight slot fence was waited this frame; the caller
+///   additionally honours the monotone value-gated discipline above, which is what bounds a
+///   concurrent sibling read of this single buffer to finite bytes.
+pub unsafe fn upload_ddgi_grid(token: &FrameWriteToken, ubo: &BoundBuffer, resolved: &ResolvedDdgi) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    // Hard bound BEFORE the memcpy (review P1 discipline): an undersized buffer would make the
+    // 48-byte write out-of-bounds. One compare per (rare) write.
+    assert!(
+        ubo.size as usize >= RESOLVED_DDGI_BYTES,
+        "DDGI grid UBO too small: {} bytes < the {}-byte ResolvedDdgi mirror",
+        ubo.size,
+        RESOLVED_DDGI_BYTES
+    );
+
+    let mapped = ubo.mapped.expect("invariant: the DDGI grid UBO is host-visible mapped");
+    let bytes = resolved.as_bytes();
+    // SAFETY: `bytes` is a live 48-byte stack array (the carrier's `#[repr(C)]` byte image, every
+    // byte initialized). `mapped` targets >= `ubo.size >= RESOLVED_DDGI_BYTES` valid mapped
+    // host-coherent bytes (hard-asserted above) — the write is in-bounds. The single buffer is
+    // NOT ringed: the borrowed `FrameWriteToken` proves this slot's fence, and the caller's
+    // monotone value-gated discipline (doc above — never the zero image after boot, no write
+    // on a static carrier) is what makes a sibling in-flight read observe only finite grids.
+    // The two regions are distinct allocations (no overlap).
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), RESOLVED_DDGI_BYTES);
+    }
+}
+
 /// Encodes `edits` into the marcher's binding-0 edit-list SSBO (`slot`) — the R7 SDF
 /// instance path's ONE-SHOT boot-static write (host plan R7). Word 0 becomes
 /// `edit_count`, then the packed edit array (see
-/// [`encode_edit_list`](boyko_rhi_vulkan::compute::encode_edit_list)); the pixel region
+/// [`encode_edit_list`]); the pixel region
 /// past the array is left as the boot seed wrote it (the shader owns those words).
 ///
 /// # Why NOT a per-slot ring (unlike the sibling uploads)
@@ -979,4 +1541,286 @@ pub unsafe fn upload_sdf_edit_list(token: &FrameWriteToken, slot: &BoundBuffer, 
         core::slice::from_raw_parts_mut(mapped.as_ptr().cast::<u32>(), EDITLIST_BUFFER_WORDS)
     };
     encode_edit_list(buf, edits);
+}
+
+/// Particles P0 (`docs/PARTICLES-PLAN.md` Rev 4): writes this frame's packed
+/// [`EmitRequestGpu`](crate::particle::EmitRequestGpu) table into ONE emit-request STAGING ring
+/// slot. The recorder's `particle_upload` pass then copies those bytes into the device-local
+/// table on the GPU timeline.
+///
+/// # Called ONLY on a frame that spawns
+///
+/// The caller gates this on `ParticleEmitScratch::total_spawn() > 0` — the SAME predicate that
+/// decides whether the `particle_emit` pass is declared. That is not an optimisation but a
+/// correctness requirement: the plan's conditional-pass proof needs "written but unread this
+/// frame" to be unconstructible, because the device table's cross-frame seed says its terminal is
+/// a COMPUTE READ. A frame with no spawns therefore moves **0 bytes** across PCIe, which is one
+/// of the plan's own metric rows.
+///
+/// Returns the number of bytes staged — the SAME number the recorder's `vkCmdCopyBuffer` region
+/// takes, so the caller never computes it a second time.
+///
+/// # Why this takes `&[EmitRequestGpu]` and not `&[u8]`
+///
+/// The plan's API sketch says `bytes: &[u8]`. It is typed here instead, and the byte view happens
+/// in THIS crate, because this crate owns the POD type and its `Pod` bound: a `&[u8]` parameter
+/// would push the `bytemuck::cast_slice` out to every caller, where passing the WRONG table (the
+/// effect rows into the request staging, say) is a type-correct mistake. It is untypeable here.
+///
+/// # Panics
+///
+/// Panics if the staged bytes exceed `staging_slot.size`: the memcpy would run past the mapped
+/// range (UB), so the guard is a hard assert in every build. Size the staging ring at
+/// `MAX_EMITTERS * size_of::<EmitRequestGpu>()` (16 KB) so any table the host's D15 release clamp
+/// admits fits.
+///
+/// # Safety
+///
+/// * `staging_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `staging_slot.size` valid, persistently-mapped bytes.
+/// * `staging_slot` is the FENCED slot's buffer — `emit_req_staging[token.slot()]` (the same
+///   token/slot contract as [`upload_light_table`]). A single un-ringed staging instance, or the
+///   wrong slot, re-opens the host-write-vs-GPU-copy race: frame N's recorded staging→device copy
+///   READS this buffer while it executes, and only the borrowed token proves frame N−2's copy
+///   retired.
+pub unsafe fn upload_particle_emit_requests(
+    token: &FrameWriteToken,
+    staging_slot: &BoundBuffer,
+    requests: &[EmitRequestGpu],
+) -> u64 {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+    let bytes: &[u8] = bytemuck::cast_slice(requests);
+
+    assert!(
+        bytes.len() as u64 <= staging_slot.size,
+        "particle emit-request table overflow: {} staged bytes exceed the {}-byte staging slot \
+         (size the staging ring at MAX_EMITTERS * size_of::<EmitRequestGpu>())",
+        bytes.len(),
+        staging_slot.size
+    );
+
+    let mapped = staging_slot
+        .mapped
+        .expect("invariant: the particle emit-request staging slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `staging_slot.size` valid mapped
+    // host-coherent bytes, and `bytes.len() <= staging_slot.size` is hard-asserted above — the
+    // write is in-bounds. The borrowed `FrameWriteToken` + the slot-identity contract prove this
+    // slot's in-flight fence was waited THIS frame, so the slot's previous occupant (frame N−2)
+    // finished its recorded staging→device copy and the sibling in-flight frame writes the OTHER
+    // ring slot — race-free, lock-free. `bytes` is the `ScratchColumn`'s own VM-backed lane, a
+    // distinct non-overlapping region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+    bytes.len() as u64
+}
+
+/// Particles P0: writes the baked [`EffectParamsGpu`](crate::particle::EffectParamsGpu) table
+/// into ONE effect-table STAGING ring slot. The recorder's `particle_upload` pass copies it into
+/// the device-local table.
+///
+/// # Called only when the table actually changed
+///
+/// The caller gates this on a WRITER-SIDE generation — `ParticleEffectScratch::rows_gen()`
+/// compared against a per-in-flight-slot record — never a hash and never a byte-compare. A static
+/// scene therefore re-uploads nothing after the two boot catch-up frames, and the idle command
+/// stream is byte-identical.
+///
+/// Unlike the emit-request half, this one is NOT tied to the emit pass's predicate: the effect
+/// table has at least one reader on EVERY armed frame (the sim needs effect parameters whether or
+/// not anything spawned), so an upload with no spawns is a well-formed state rather than the
+/// "written but unread" one the conditional-pass proof rules out.
+///
+/// Returns the number of bytes staged — the recorder's copy size. Typed on `&[EffectParamsGpu]`
+/// for the reason [`upload_particle_emit_requests`] states.
+///
+/// # Panics
+///
+/// Panics if the staged bytes exceed `staging_slot.size`. Size the staging ring at
+/// `MAX_EFFECTS * size_of::<EffectParamsGpu>()` (32 KB).
+///
+/// # Safety
+///
+/// Identical contract to [`upload_particle_emit_requests`], on
+/// `effects_staging[token.slot()]`.
+pub unsafe fn upload_particle_effects(
+    token: &FrameWriteToken,
+    staging_slot: &BoundBuffer,
+    rows: &[EffectParamsGpu],
+) -> u64 {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+    let bytes: &[u8] = bytemuck::cast_slice(rows);
+
+    assert!(
+        bytes.len() as u64 <= staging_slot.size,
+        "particle effect table overflow: {} staged bytes exceed the {}-byte staging slot \
+         (size the staging ring at MAX_EFFECTS * size_of::<EffectParamsGpu>())",
+        bytes.len(),
+        staging_slot.size
+    );
+
+    let mapped = staging_slot
+        .mapped
+        .expect("invariant: the particle effect staging slot is host-visible mapped");
+    // SAFETY: verbatim the argument `upload_particle_emit_requests` makes, on the effect-table
+    // staging ring — bounded write into a live mapping, on the slot whose fence the borrowed
+    // token proves was waited this frame.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+    bytes.len() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use core::ptr::NonNull;
+
+    use boyko_rhi_vulkan::ffi::VkBuffer;
+
+    use super::*;
+
+    /// A host-visible `BoundBuffer` view over caller-owned storage — the same no-GPU
+    /// test hatch `boyko_app`'s `zero_alloc.rs` uses for these upload fns: only
+    /// `size` and `mapped` are read, so no device is needed. `storage` outlives the
+    /// slot (the caller's stack frame).
+    fn fake_slot(storage: &mut [u8]) -> BoundBuffer {
+        BoundBuffer {
+            buffer: VkBuffer::NULL,
+            offset: 0,
+            size: storage.len() as u64,
+            mapped: NonNull::new(storage.as_mut_ptr()),
+            block: 0,
+        }
+    }
+
+    /// SDFDDGI host-hook gate (b): `upload_ddgi_grid` writes EXACTLY `ResolvedDdgi::as_bytes()`
+    /// into the b18 buffer — the twelve LE words the resolve's `ResolvedDdgi` cbuffer reads —
+    /// and nothing past them (a 48-byte slot is fully overwritten, no sentinel survives).
+    #[test]
+    fn ddgi_grid_upload_writes_exactly_as_bytes() {
+        use crate::ddgi_config::{DdgiConfig, RESOLVED_DDGI_BYTES, resolve_ddgi};
+
+        let mut storage = [0xA5u8; RESOLVED_DDGI_BYTES];
+        let slot = fake_slot(&mut storage);
+        let resolved = resolve_ddgi(&DdgiConfig {
+            ddgi_indirect: true,
+            origin: [-6.0, -0.5, -6.0],
+            spacing: 0.75,
+            dims: [16, 8, 16],
+        });
+        // SAFETY: no GPU device exists in this process — the `forge_unfenced` setup contract
+        // holds trivially (the `ray_shadow_ring_packs_resolved_and_frame_seed` precedent).
+        let token = unsafe { FrameWriteToken::forge_unfenced(0) };
+        // SAFETY: `slot.mapped` targets `storage`'s live 48-byte backing (this stack frame
+        // outlives the call); `slot.size == 48 >= RESOLVED_DDGI_BYTES` satisfies the hard bound.
+        unsafe {
+            upload_ddgi_grid(&token, &slot, &resolved);
+        }
+        assert_eq!(storage, resolved.as_bytes(), "the b18 write is the carrier's byte image");
+        assert_eq!(resolved.ddgi_mode_word, 1);
+    }
+
+    /// SDFDDGI host-hook gate (b): an undersized b18 slot is a hard panic in every build (the
+    /// memcpy would be out-of-bounds) — the `upload_atlas_ring` discipline.
+    #[test]
+    #[should_panic(expected = "DDGI grid UBO too small")]
+    fn ddgi_grid_upload_rejects_an_undersized_slot() {
+        use crate::ddgi_config::{DdgiConfig, RESOLVED_DDGI_BYTES, resolve_ddgi};
+
+        let mut storage = [0u8; RESOLVED_DDGI_BYTES - 1];
+        let slot = fake_slot(&mut storage);
+        let resolved = resolve_ddgi(&DdgiConfig { ddgi_indirect: true, ..DdgiConfig::default() });
+        // SAFETY: as above — no device, the setup contract holds trivially.
+        let token = unsafe { FrameWriteToken::forge_unfenced(0) };
+        // SAFETY: the fn asserts the bound BEFORE any write, so the undersized slot is never
+        // written; `slot.mapped` is still a live pointer into `storage`.
+        unsafe {
+            upload_ddgi_grid(&token, &slot, &resolved);
+        }
+    }
+
+    /// The write footprint — `RESOLVED_RAY_SHADOW_BYTES` (the cold resolved mirror) plus the
+    /// 32-byte hot `RayShadowFrame` tail `upload_ray_shadow_ring` appends — is 48 B, the
+    /// minimum a host ring slot must be minted at for the upload to not panic.
+    #[test]
+    fn ray_shadow_ring_write_is_48_bytes() {
+        assert_eq!(RESOLVED_RAY_SHADOW_BYTES + RAY_SHADOW_FRAME_BYTES, 48);
+        assert_eq!(RAY_SHADOW_FRAME_BYTES, 32);
+        assert_eq!(core::mem::offset_of!(RayShadowFrame, raster_fwd), 16);
+    }
+
+    /// An undersized slot (the pre-lane 32-byte block) is refused BEFORE the memcpy.
+    #[test]
+    #[should_panic(expected = "HWRT shadow-params UBO slot too small")]
+    fn ray_shadow_ring_refuses_a_32_byte_slot() {
+        let mut storage = [0u8; 32];
+        let slot = fake_slot(&mut storage);
+        // SAFETY: no GPU device exists in this process (see the test below).
+        let token = unsafe { FrameWriteToken::forge_unfenced(0) };
+        // SAFETY: `slot.mapped` targets live storage; the size assert fires before any write.
+        unsafe {
+            upload_ray_shadow_ring(&token, &slot, &ResolvedRayShadow::default(), &RayShadowFrame::legacy(0));
+        }
+    }
+
+    /// The resolved mirror stays exactly 16 B: the rung-3b frame seed rides in the SAME
+    /// upload but is NOT folded into the cold `ResolvedRayShadow` (cold/hot separation,
+    /// one-producer-per-field — see `upload_ray_shadow_ring`'s doc).
+    #[test]
+    fn resolved_ray_shadow_is_still_16_bytes() {
+        assert_eq!(core::mem::size_of::<ResolvedRayShadow>(), 16);
+        assert_eq!(RESOLVED_RAY_SHADOW_BYTES, 16);
+    }
+
+    /// `upload_ray_shadow_ring` packs the resolved mirror into `[0..16)`, the seed
+    /// (little-endian) into `[16..20)`, the origin mode into `[20..24)`, zeroes into
+    /// `[24..32)` and the raster forward into `[32..48)` — the exact byte shape the HLSL
+    /// `RayShadowUbo` cbuffer reads (`cone_radius/tmax/tmin/bias` @0, `SHADOW_FRAME_SEED`
+    /// @16, `SHADOW_ORIGIN_MODE` @20, `SHADOW_RASTER_FWD` @32).
+    #[test]
+    fn ray_shadow_ring_packs_resolved_and_frame_tail() {
+        let mut storage = [0xAAu8; 48];
+        let slot = fake_slot(&mut storage);
+        let resolved = ResolvedRayShadow { cone_radius: 0.035, tmax: 1e4, tmin: 1e-3, bias: 1e-3 };
+        let frame = RayShadowFrame::raster_ray(0x1234_5678, [0.25, -0.5, 0.75]);
+
+        // SAFETY: no GPU device exists in this process, so no submitted work can
+        // reference slot 0 — the `forge_unfenced` no-fence-needed setup contract holds
+        // trivially (mirrors `boyko_app`'s `zero_alloc.rs` test usage).
+        let token = unsafe { FrameWriteToken::forge_unfenced(0) };
+        // SAFETY: `slot.mapped` targets `storage`'s live 48-byte backing (owned by this
+        // stack frame, outliving the call) — `slot.size == 48` satisfies the hard bound
+        // the fn asserts. The token/slot contract holds trivially (see above).
+        unsafe {
+            upload_ray_shadow_ring(&token, &slot, &resolved, &frame);
+        }
+
+        let mut expected = [0u8; 48];
+        expected[0..4].copy_from_slice(&resolved.cone_radius.to_le_bytes());
+        expected[4..8].copy_from_slice(&resolved.tmax.to_le_bytes());
+        expected[8..12].copy_from_slice(&resolved.tmin.to_le_bytes());
+        expected[12..16].copy_from_slice(&resolved.bias.to_le_bytes());
+        expected[16..20].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        expected[20..24].copy_from_slice(&1u32.to_le_bytes());
+        // [24..32) stays zero (the explicit std140 pad).
+        expected[32..36].copy_from_slice(&0.25f32.to_le_bytes());
+        expected[36..40].copy_from_slice(&(-0.5f32).to_le_bytes());
+        expected[40..44].copy_from_slice(&0.75f32.to_le_bytes());
+        expected[44..48].copy_from_slice(&0.0f32.to_le_bytes());
+        assert_eq!(&storage[..], &expected[..]);
+    }
+
+    /// The legacy frame carries mode 0 and an all-zero forward (a structural zero, so the
+    /// shader's `SHADOW_ORIGIN_MODE == 0` skip never reads it).
+    #[test]
+    fn ray_shadow_frame_legacy_is_mode_zero() {
+        let f = RayShadowFrame::legacy(7);
+        assert_eq!(f, RayShadowFrame { seed: 7, origin_mode: 0, _pad: [0; 2], raster_fwd: [0.0; 4] });
+        let r = RayShadowFrame::raster_ray(7, [1.0, 2.0, 3.0]);
+        assert_eq!(r.origin_mode, 1);
+        assert_eq!(r.raster_fwd, [1.0, 2.0, 3.0, 0.0]);
+    }
 }

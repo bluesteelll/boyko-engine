@@ -7,9 +7,13 @@
 //!
 //! * `count()` == model length; `capacity()` is constant;
 //! * `committed_rows()` follows the GROW1-ZST frontier (0 before the first
-//!   add; `min(granule_rows, reserve)` == reserve after it — one tick
-//!   granule covers 16,384 rows, far above the test reserve) and is
-//!   monotone;
+//!   add; the first tick page's `(COMMIT_PAGE - σ) / 4` rows, capped at the
+//!   reserve, after it; the reserve once an add reaches that frontier) and is
+//!   monotone. The tick frontier is measured from the sub-region's absolute
+//!   page floor (packing plan D2), so the first rung depends on
+//!   `σ = pool_base_stagger(id)` of the derive-minted, mint-order-dependent
+//!   id; the model computes it from the fixture's own id (cut PC-6). On the
+//!   64 KiB granule the first rung was the reserve for every σ;
 //! * `add_typed` returns the tail index until the reserve ceiling, then
 //!   `None` with ZERO observable state change;
 //! * `swap_remove(i)` succeeds iff `i < len`; `pop()` iff `len > 0`;
@@ -31,6 +35,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use boyko_ecs::ecs::constants::{COMMIT_PAGE, pool_base_stagger};
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::memory::component_pool::ComponentPool;
 use boyko_macros::Component;
@@ -39,9 +44,26 @@ use proptest::prelude::*;
 const SEQ: Ordering = Ordering::SeqCst;
 
 /// Pool reserve ceiling — small so random sequences actually REACH the
-/// ceiling arm (`add -> None`), yet still well under one tick granule
-/// (16,384 rows), so the frontier jumps 0 -> RESERVE on the first add.
+/// ceiling arm (`add -> None`). The first tick page covers it for every
+/// `σ <= 3904` (frontier 0 -> RESERVE on the first add); at σ = 3968 / 4032
+/// the first page holds 32 / 16 rows and the second grow reaches RESERVE.
 const RESERVE: usize = 48;
+
+/// The GROW1-ZST frontier after a grow from `committed` rows (packing plan
+/// D2): the tick frontier doubles from one `COMMIT_PAGE` measured from the
+/// page floor, `rows = (ticks - σ) / 4`, clamped to [`RESERVE`]. A single
+/// one-row request never outruns the doubling here (`σ + 4 · RESERVE` is
+/// below two pages), so rung `k` holds `2^k` pages.
+fn next_zst_frontier(sigma: usize, committed: usize) -> usize {
+    let mut ticks = COMMIT_PAGE;
+    loop {
+        let rows = ((ticks - sigma) / 4).min(RESERVE);
+        if rows > committed {
+            return rows;
+        }
+        ticks *= 2;
+    }
+}
 
 /// A generated pool operation. `swap_remove` carries a RAW index that may
 /// deliberately fall out of bounds (the `false` arm is part of the model).
@@ -70,13 +92,26 @@ fn pool_op_strategy() -> impl Strategy<Value = PoolOp> {
 struct PModelTag;
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        // Under Miri, two cases of at most 48 ops (the `assets.rs` `edited_set` budget): the
+        // default 256 cases ran past 10 min of interpretation (MEASURED 2026-10-10).
+        #[cfg(miri)]
+        cases: 2,
+        // No failure file under Miri: proptest finds it through the cwd, which Miri's
+        // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+        #[cfg(miri)]
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
     /// Random add/swap_remove/pop sequence: every public observable of the
     /// ZST pool must match the reference model after every operation.
     #[test]
     fn zst_pool_len_and_grow_match_model(
-        ops in proptest::collection::vec(pool_op_strategy(), 1..96)
+        ops in proptest::collection::vec(pool_op_strategy(), 1..if cfg!(miri) { 48 } else { 96 })
     ) {
-        let mut pool = ComponentPool::new(PModelTag::component_id().0, RESERVE);
+        let id = PModelTag::component_id().0;
+        let sigma = pool_base_stagger(id);
+        let mut pool = ComponentPool::new(id, RESERVE);
         prop_assert_eq!(pool.component_layout().size(), 0, "fixture must be a ZST");
         prop_assert_eq!(pool.capacity(), RESERVE);
         prop_assert_eq!(pool.committed_rows(), 0, "zero initial commit");
@@ -85,7 +120,7 @@ proptest! {
         let base = pool.buffer_ptr();
 
         let mut len = 0usize; // the reference model
-        let mut grew = false; // committed frontier: 0 until the first add
+        let mut committed = 0usize; // model frontier: 0 until the first add
 
         for (step, op) in ops.into_iter().enumerate() {
             match op {
@@ -97,8 +132,11 @@ proptest! {
                             "step {}: add must return the tail index",
                             step
                         );
+                        // An add grows exactly when it finds len == committed.
+                        if len == committed {
+                            committed = next_zst_frontier(sigma, committed);
+                        }
                         len += 1;
-                        grew = true;
                     } else {
                         let before = (pool.count(), pool.committed_rows());
                         prop_assert_eq!(
@@ -143,9 +181,10 @@ proptest! {
             prop_assert_eq!(pool.capacity(), RESERVE, "step {}: capacity is constant", step);
             prop_assert_eq!(
                 pool.committed_rows(),
-                if grew { RESERVE } else { 0 },
-                "step {}: GROW1-ZST frontier (one granule covers the reserve)",
-                step
+                committed,
+                "step {}: GROW1-ZST frontier (σ = {})",
+                step,
+                sigma
             );
             prop_assert_eq!(pool.is_full(), len == RESERVE, "step {}: is_full", step);
             prop_assert_eq!(
@@ -203,11 +242,22 @@ impl Drop for PDropTag {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        // Under Miri, two cases of at most 48 ops (the `assets.rs` `edited_set` budget): the
+        // default 256 cases ran past 3 min of interpretation (MEASURED 2026-10-10).
+        #[cfg(miri)]
+        cases: 2,
+        // No failure file under Miri: proptest finds it through the cwd, which Miri's
+        // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+        #[cfg(miri)]
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
     /// Every logical removal drops the Drop-impl ZST exactly once; pool
     /// Drop accounts exactly the survivors; total drops == total adds.
     #[test]
     fn zst_pool_drop_accounting_matches_model(
-        ops in proptest::collection::vec(pool_op_strategy(), 1..96)
+        ops in proptest::collection::vec(pool_op_strategy(), 1..if cfg!(miri) { 48 } else { 96 })
     ) {
         let mut pool = ComponentPool::new(PDropTag::component_id().0, RESERVE);
         let baseline = P_DROP_COUNT.load(SEQ);

@@ -27,6 +27,13 @@
 //! (e.g. `MeshOnly { h: MeshHandle }`) via `Commands::spawn`, exactly like the
 //! `boyko_ecs/tests/required_components.rs` suite.
 
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` out of the `Send + Sync` one-shot system closure, and the
+// file-static `Mutex<()>` guards serialize tests that arm a process-global (allocator /
+// propagation counter). Neither is engine code — the whole file is compiled out of every
+// shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, Mutex};
 
 use boyko_ecs::ecs::core::bundle::Bundle;
@@ -40,7 +47,7 @@ use boyko_macros::Bundle as DeriveBundle;
 use boyko_math::Vec3;
 
 use boyko_scene::camera::{Camera, Projection};
-use boyko_scene::render_caps::MeshHandle;
+use boyko_scene::render_caps::{MeshHandle, MeshRefGen};
 use boyko_scene::transform::{GlobalTransform, Transform};
 
 /// The kernel's component-id ceiling (mirror of the crate-private
@@ -141,11 +148,19 @@ fn mesh_handle_alone_auto_inserts_pose_pair() {
         Some(GlobalTransform::default()),
         "the auto-inserted GlobalTransform holds GlobalTransform::default()"
     );
-    // Exactly the three columns — no spurious extra migration.
+    // `MeshHandle` also requires `MeshRefGen` (asset-streaming F5 generation carrier), so
+    // the closure is four columns, not three. The count was written before that attribute
+    // existed and only went red when the 2026-07 audit made the vacuously-green CI run this
+    // suite again — the engine expands the closure correctly.
+    assert!(
+        world.has_component(e, MeshRefGen::component_id()),
+        "S8 require: MeshHandle alone auto-inserts its MeshRefGen generation carrier"
+    );
+    // Exactly the four columns — no spurious extra migration.
     assert_eq!(
         live_component_count(&world, e),
-        3,
-        "MeshHandle + the two auto-inserted pose components = exactly 3 columns"
+        4,
+        "MeshHandle + the two auto-inserted pose components + MeshRefGen = exactly 4 columns"
     );
 }
 
@@ -181,14 +196,14 @@ fn manual_transform_is_not_clobbered_or_duplicated() {
         "present ⇒ skip: the authored Transform(3,4,5) is KEPT, not clobbered by the require's default"
     );
 
-    // Exactly THREE columns: MeshHandle + the one supplied Transform (not two) +
-    // the one auto-inserted GlobalTransform. A double-insert would not change the
-    // archetype set (same id), but the value check above already proves no
+    // Exactly FOUR columns: MeshHandle + the one supplied Transform (not two) + the one
+    // auto-inserted GlobalTransform + the required MeshRefGen. A double-insert would not
+    // change the archetype set (same id), but the value check above already proves no
     // clobber; this pins "no spurious extra component".
     assert_eq!(
         live_component_count(&world, e),
-        3,
-        "exactly ONE Transform (no duplicate column) + MeshHandle + GlobalTransform"
+        4,
+        "exactly ONE Transform (no duplicate column) + MeshHandle + GlobalTransform + MeshRefGen"
     );
 }
 
@@ -332,12 +347,16 @@ fn require_expansion_matches_derive_bundle_archetype() {
         Transform::component_id(),
         GlobalTransform::component_id(),
         MeshHandle::component_id(),
+        // Pulled in by `MeshHandle`'s own `#[require]` on BOTH paths — which is exactly the
+        // equivalence this gate exists to prove: the require expansion and the derive-bundle
+        // expansion reach the identical column set.
+        MeshRefGen::component_id(),
     ] {
         assert!(world.has_component(from_require, id), "require entity carries {id:?}");
         assert!(world.has_component(from_bundle, id), "bundle entity carries {id:?}");
     }
-    assert_eq!(live_component_count(&world, from_require), 3, "require: exactly 3 columns");
-    assert_eq!(live_component_count(&world, from_bundle), 3, "bundle: exactly 3 columns");
+    assert_eq!(live_component_count(&world, from_require), 4, "require: exactly 4 columns");
+    assert_eq!(live_component_count(&world, from_bundle), 4, "bundle: exactly 4 columns");
 }
 
 // ════════════════════════════════════════════════════════════════════════════

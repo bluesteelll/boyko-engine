@@ -1,0 +1,11 @@
+error: `lab` is declared twice in this aether block — the `material` and the `scene` both expand to a fn of that name
+  --> tests/ui/scene_collides_with_a_material_fn.rs:10:11
+   |
+10 |     scene lab {
+   |           ^^^
+
+error: the first `material` of this name is here
+ --> tests/ui/scene_collides_with_a_material_fn.rs:8:14
+  |
+8 |     material lab { base: (0.0, 0.0, 0.0) }
+  |              ^^^

@@ -7,7 +7,7 @@
 //! See `docs/PHASE-12.5-QUERY-OPTIMIZATIONS-PLAN.md` §4.1 (data structure),
 //! §7.4 (atomic ordering), and §10.3 (cache memory footprint).
 //!
-//! # Why a `(TypeId, TypeId) → QueryTypeId` HashMap instead of a per-impl `static SLOT`
+//! # Why a `(TypeId, TypeId)` key instead of a per-impl `static SLOT`
 //!
 //! An earlier draft of this module placed `static SLOT: OnceLock<QueryTypeId>`
 //! inside the blanket `impl<D, F> QueryTypeKey for (D, F)` body and called
@@ -22,28 +22,38 @@
 //! `(D, F)` pair would receive the same `QueryTypeId(0)` and the per-world
 //! cache would collapse to one slot.
 //!
-//! v1 fix: a process-global
-//! `OnceLock<Mutex<HashMap<(TypeId, TypeId), QueryTypeId>>>` keyed by
-//! `(TypeId::of::<D>(), TypeId::of::<F>())`. Cost:
+//! The id must therefore be interned under a **runtime** key,
+//! `(TypeId::of::<D>(), TypeId::of::<F>())`. That requirement outlives any
+//! particular table: it is a property of the language, not of the container.
 //!
-//! * Warm path: one `OnceLock::get_or_init` Acquire load (~1 ns) + one
-//!   `Mutex::lock` (~10 ns uncontended) + one `HashMap::get` (~10 ns).
-//!   Total ~20-30 ns per `world.query::<D, F>()` call.
-//! * `EcsMaster::query` is called ~50 times per frame across all systems —
-//!   not 10 000 times per entity. The combined overhead is ~1 µs/frame,
-//!   invisible at 60 Hz.
+//! # The table: [`TypeIntern`], lock-free
 //!
-//! This technically violates CLAUDE.md principle 1 ("no HashMap on the
-//! hot path"), but the cost shows up at most once per system-level call,
-//! never per-entity. Documented trade-off; revisit in Phase 13 if profiling
-//! ever surfaces this on the hot path.
+//! [`REGISTRY`] is a [`TypeIntern`] (`boyko_utils::type_intern`) — an
+//! open-addressed table of write-once slots, sized at twice the id cap so
+//! probes stay short. A warm `world.query::<D, F>()` hashes the key and takes
+//! one acquire load; no lock, no allocation, no `unsafe` on any path. The cold
+//! mint gate is claimed at most once per distinct `(D, F)` per process and
+//! never on a hit — it exists only to make "probe, then claim" atomic, so two
+//! threads racing on a first-sight pair cannot mint two ids for one shape.
+//!
+//! **Superseded v1, removed by the 2026-07 audit:** a process-global
+//! `OnceLock<Mutex<HashMap<(TypeId, TypeId), QueryTypeId>>>`, whose cost this
+//! header used to quote as "~20-30 ns … ~50 times per frame, ~1 µs/frame,
+//! invisible at 60 Hz". The estimate was wrong in kind, not in magnitude: the
+//! memo lookup WAS the locked map, so the lock was taken on EVERY call rather
+//! than on the first, and under the parallel scheduler that is not 20 ns but
+//! one contended process-global lock per worker thread, inside the frame. See
+//! `boyko_utils::type_intern`'s module header for the full finding — four
+//! registries had independently reached for that same shape, each documenting
+//! it as "cold, registration-only", and all four claims were false.
 //!
 //! # Atomic ordering (§7.4)
 //!
 //! Counter ordering is `Relaxed` — uniqueness is the only invariant the
-//! counter itself carries. Per-(D, F) happens-before is enforced by the
-//! global `Mutex<HashMap<...>>` (mutex acquire/release establishes the
-//! necessary ordering for every subsequent reader).
+//! counter itself carries. Per-(D, F) happens-before comes from [`REGISTRY`]:
+//! each slot is published by a `OnceLock` release-store that every subsequent
+//! reader's acquire load pairs with, so a thread that observes an id also
+//! observes everything the minting thread wrote before publishing it.
 //!
 //! # Exhaustion is terminal (mirrors Phase 8.5 W1)
 //!
@@ -53,9 +63,10 @@
 //! init closure) cannot drive the counter past the cap.
 
 use std::any::TypeId;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+
+use boyko_log::codes::{B0502, OnceSite, W0501};
+use boyko_utils::type_intern::TypeIntern;
 
 use crate::ecs::core::iters::query::data::QueryData;
 use crate::ecs::core::iters::query::filter::QueryFilter;
@@ -65,8 +76,9 @@ use crate::ecs::core::iters::query::filter::QueryFilter;
 /// Minted lazily on the first call to [`QueryTypeKey::query_type_id`] for
 /// each concrete `(D, F)` pair. Two `QueryTypeId` values compare equal iff
 /// they correspond to the same Rust `(D, F)` pair — guaranteed by the
-/// `(TypeId::of::<D>(), TypeId::of::<F>())` key in the global
-/// `Mutex<HashMap<...>>` registry maintained by [`QueryTypeKey`].
+/// `(TypeId::of::<D>(), TypeId::of::<F>())` key under which the process-global
+/// `REGISTRY` intern seats the id: its per-key cold mint gate makes
+/// "probe, then claim" atomic, so one pair can never receive two ids.
 ///
 /// `#[repr(transparent)]` over `usize` so the id can be used directly as
 /// an index into the per-world `Box<[OnceLock<_>; MAX_QUERY_TYPES]>` cache
@@ -91,28 +103,23 @@ pub const MAX_QUERY_TYPES: usize = 4096;
 /// Monotonic counter for `QueryTypeId` values minted via [`register_new`].
 ///
 /// `Relaxed` is sufficient: uniqueness across concurrent callers is the
-/// only invariant the counter itself carries. Happens-before for the
-/// minted id is established by the global `Mutex<HashMap<...>>` registry
-/// (the mutex's acquire/release pair sequences readers behind the writer
-/// that inserted the entry).
+/// only invariant the counter itself carries. Happens-before for the minted id is
+/// established by [`REGISTRY`] — the intern publishes each `(key, id)` cell through a
+/// `OnceLock` release-store that every reader's acquire load pairs with.
 static QUERY_NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
 /// Mints a fresh [`QueryTypeId`] from the process-global counter.
 ///
-/// Called from the `(D, F)` blanket impl's global registry insert path
-/// (see the `impl<D, F> QueryTypeKey for (D, F)` body below). The
-/// `Mutex<HashMap<(TypeId, TypeId), QueryTypeId>>` guarantees that each
-/// `(D, F)` pair burns exactly one slot.
+/// Called from the `(D, F)` blanket impl's mint path (see the
+/// `impl<D, F> QueryTypeKey for (D, F)` body below), under [`REGISTRY`]'s mint gate, which
+/// guarantees that each `(D, F)` pair burns exactly one slot.
 ///
-/// # Trade-off (documented in the module doc-comment)
+/// # Cost
 ///
-/// Each `world.query::<D, F>()` call pays one mutex lock + one HashMap
-/// lookup (~20-30 ns amortised). Acceptable because `query()` is a
-/// system-level entry point invoked tens of times per frame, not per
-/// entity. The cost would violate principle 1 ("no HashMap on hot path")
-/// if called per-entity, but it is not — see the module-level rationale
-/// for the rust-lang/rust#22991 / rust-lang/rfcs#2130 constraint that
-/// forced this design.
+/// Zero on the steady-state path: `world.query::<D, F>()` resolves its id from the lock-free
+/// intern (a hash plus one acquire load) and never reaches here after the first sight of a
+/// given `(D, F)`. Until the 2026-07 audit this call sat behind an unconditional global mutex
+/// acquire — see [`REGISTRY`] for what that actually cost.
 ///
 /// # Panics
 ///
@@ -129,24 +136,67 @@ static QUERY_NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 #[cold]
 #[inline(never)]
 pub fn register_new() -> QueryTypeId {
-    // Relaxed: uniqueness only. Happens-before is provided by the
-    // surrounding `Mutex<HashMap<...>>` in `QueryTypeKey::query_type_id`
-    // (the mutex acquire/release synchronises every reader behind the
-    // writer that inserted the entry).
+    // Relaxed: uniqueness only. The happens-before edge for the minted id comes from
+    // `REGISTRY`'s per-slot `OnceLock` release-store, paired with each reader's acquire
+    // load — see the `QUERY_NEXT_ID` doc above.
     let id = QUERY_NEXT_ID.fetch_add(1, Ordering::Relaxed);
     if id >= MAX_QUERY_TYPES {
         // Saturate so re-entries cannot push past the cap.
         QUERY_NEXT_ID.store(MAX_QUERY_TYPES, Ordering::Relaxed);
+        // POSITIONAL, never `{B0502}`: an inline format argument lives inside the string
+        // literal, which the registry walker's LIT stream sees and its CODE stream does not.
         panic!(
-            "QueryTypeId exhaustion: MAX_QUERY_TYPES = {} reached. \
+            "{}: QueryTypeId exhaustion: MAX_QUERY_TYPES = {} reached. \
              This is a terminal panic — the process must restart. \
              Enable the `big_query_table` cargo feature on boyko_ecs \
              (raises the cap to 4096) or consolidate query shapes.",
-            MAX_QUERY_TYPES
+            B0502, MAX_QUERY_TYPES
         );
+    }
+    // `id + 1` is the occupancy AFTER this mint, so the equality fires exactly once, on the mint
+    // that crossed the line -- and the number in the message is a measurement rather than the
+    // threshold restated.
+    if id + 1 == QUERY_TABLE_HIGH_WATER {
+        report_query_table_filling(id + 1);
     }
     QueryTypeId(id)
 }
+
+/// 75 % of the query-type table.
+///
+/// A fraction rather than a fixed remaining count, because what matters is the **rate** relative
+/// to the cap: a codebase at 768 of 1024 is one refactor from the wall whether the cap is 1024 or
+/// the `big_query_table` 4096.
+const QUERY_TABLE_HIGH_WATER: usize = MAX_QUERY_TYPES / 4 * 3;
+
+/// `boyko-W0501` — the query-type table crossed 75 % occupancy.
+///
+/// **Without this the table's only observable behaviour was 1023 silent mints and then a process
+/// kill.** `boyko-B0502` is correct and unhelpful alone: by the time it fires it names the shape
+/// that happened to be last, and not the ones that filled the table. A title that grows its query
+/// surface gradually crosses this line long before the other, and the gap is where the cheap fix
+/// lives.
+#[cold]
+#[inline(never)]
+fn report_query_table_filling(used: usize) {
+    static FIRED: OnceSite = OnceSite::new();
+    if FIRED.claim() {
+        boyko_log::warn!(
+            boyko_log::Query,
+            W0501,
+            "the query-type table is {} of {} slots used (75 %); at {} the next distinct \
+             Query<D, F> shape is a terminal panic (boyko-B0502) -- enable the \
+             `big_query_table` feature or consolidate query shapes",
+            used,
+            MAX_QUERY_TYPES,
+            MAX_QUERY_TYPES
+        );
+    }
+}
+
+/// Table size backing [`REGISTRY`] — twice [`MAX_QUERY_TYPES`], the load factor
+/// [`TypeIntern`] documents for short probes.
+const REGISTRY_SLOTS: usize = MAX_QUERY_TYPES * 2;
 
 /// Process-global registry mapping `(TypeId::of::<D>(), TypeId::of::<F>())`
 /// to the assigned [`QueryTypeId`].
@@ -154,21 +204,32 @@ pub fn register_new() -> QueryTypeId {
 /// Replaces the per-impl `static SLOT: OnceLock<QueryTypeId>` pattern
 /// (which is unsound inside a generic function body — see the module
 /// doc-comment for the rustc#22991 / rfcs#2130 discussion).
-static REGISTRY: OnceLock<Mutex<HashMap<(TypeId, TypeId), QueryTypeId>>> = OnceLock::new();
+///
+/// 2026-07 audit: this was a `OnceLock<Mutex<HashMap<(TypeId, TypeId), QueryTypeId>>>`
+/// carrying the comment "the PER-FRAME system path never reaches it". Only the SystemParam
+/// half of that was true. The immediate-mode `EcsMaster::query::<D, F>()` escape hatch DOES
+/// run inside the frame, and it took the process-global lock UNCONDITIONALLY on every call —
+/// before any memo could short-circuit it — so the admitted "~20-30 ns … ~50 times per frame"
+/// was in reality one contended global lock per worker thread per query call. [`TypeIntern`]
+/// keeps the rust#22991 fix (a `TypeId` key, because a `static` in a generic body collapses)
+/// and drops the lock: the hit path is a hash plus one acquire load.
+static REGISTRY: TypeIntern<(TypeId, TypeId), REGISTRY_SLOTS> = TypeIntern::new();
 
 /// Static-typed key for a `(D, F)` query shape.
 ///
 /// Implemented for every `(D, F)` pair where `D: QueryData + 'static` and
-/// `F: QueryFilter + 'static`. The global `Mutex<HashMap<(TypeId, TypeId),
-/// QueryTypeId>>` serialises racing callers so all observers see the same
-/// id for each pair.
+/// `F: QueryFilter + 'static`. Racing callers are serialised by [`REGISTRY`]'s
+/// per-key cold mint gate — claimed only on a first-sight pair — so all
+/// observers see the same id for each pair.
 ///
 /// # Usage
 ///
 /// `EcsMaster::query<D, F>()` calls `<(D, F) as QueryTypeKey>::query_type_id()`
-/// once per cache lookup. Cost: ~20-30 ns (Mutex lock + HashMap lookup).
-/// Acceptable at system-call frequency (`query()` is called ~50 times per
-/// frame), not at per-entity frequency.
+/// once per cache lookup. A warm call is a key hash plus one acquire load;
+/// that operation count is the claim, because the intern path carries no
+/// measurement in this repo and a nanosecond figure here would be a guess.
+/// The frequency is system-level (`query()` is called ~50 times per frame),
+/// not per-entity.
 pub trait QueryTypeKey: 'static {
     /// Returns the process-global [`QueryTypeId`] for this `(D, F)` pair.
     fn query_type_id() -> QueryTypeId;
@@ -179,33 +240,34 @@ where
     D: QueryData + 'static,
     F: QueryFilter + 'static,
 {
+    // Lock-free get-or-mint over the once-per-`(D, F)` intern (rust#22991 forces the
+    // `TypeId` key). A hit is a hash plus one acquire load; only a first-sight `(D, F)`
+    // takes the table's cold mint gate, and `register_new` keeps owning the id dispenser
+    // and its terminal exhaustion panic.
     #[inline]
     fn query_type_id() -> QueryTypeId {
         let key = (TypeId::of::<D>(), TypeId::of::<F>());
-        let registry = REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
-        // The mutex is held only for the lookup + insert; `register_new`
-        // is `#[cold]` and runs at most once per `(D, F)` pair so the
-        // typical lock-hold time is ~10 ns.
-        let mut map = registry
-            .lock()
-            .expect("invariant: query_type_registry mutex poisoned");
-        if let Some(&id) = map.get(&key) {
-            return id;
-        }
-        let id = register_new();
-        map.insert(key, id);
-        id
+        let id = REGISTRY
+            .get_or_mint_with(key, |_| register_new().0 as u32)
+            .unwrap_or_else(query_intern_full);
+        QueryTypeId(id as usize)
     }
 }
 
-/// Test-only escape hatch: forces the next [`register_new`] call to return
-/// `QueryTypeId(value)`.
+/// Terminal panic for a full [`REGISTRY`] table.
 ///
-/// Exists solely to exercise the exhaustion branch without burning ~1024
-/// real minter slots. Never call from production code.
-#[cfg(test)]
-pub(crate) fn set_next_id_for_test(value: usize) {
-    QUERY_NEXT_ID.store(value, Ordering::Relaxed);
+/// Distinct from [`register_new`]'s cap panic: that one fires when the ID DISPENSER is
+/// exhausted, this one when the intern TABLE cannot seat another key. With
+/// `REGISTRY_SLOTS = MAX_QUERY_TYPES * 2` the dispenser is always the first to give out, so
+/// reaching here means the two caps drifted apart in a later edit.
+#[cold]
+#[inline(never)]
+fn query_intern_full() -> u32 {
+    panic!(
+        "query type intern table full: REGISTRY_SLOTS = {REGISTRY_SLOTS} cannot seat another \
+         (D, F) key while MAX_QUERY_TYPES = {MAX_QUERY_TYPES} ids remain mintable. The table \
+         must stay at least twice the id cap — see TypeIntern's load-factor contract."
+    );
 }
 
 #[cfg(test)]
@@ -213,41 +275,15 @@ mod tests {
     use super::*;
 
     use std::mem;
-    use std::panic::{self, AssertUnwindSafe};
     use std::ptr::NonNull;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::OnceLock;
 
-    // ── Test serialization (mirrors Phase 8.5 pattern) ──────────────────
-    //
-    // The tests below mutate `QUERY_NEXT_ID`. Rust's default test harness
-    // runs tests in parallel, so without serialization
-    // `register_new_assigns_distinct_ids` and `register_new_exhaustion_panics`
-    // would race.
-    static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-    fn acquire_test_lock() -> MutexGuard<'static, ()> {
-        match TEST_MUTEX.lock() {
-            Ok(g) => g,
-            // The exhaustion test panics inside `register_new`. The unwind
-            // poisons the mutex; recover the guard so subsequent tests run.
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-
-    /// Snapshot the counter on entry so it can be restored on exit.
-    struct CounterSnapshot(usize);
-
-    impl CounterSnapshot {
-        fn take() -> Self {
-            Self(QUERY_NEXT_ID.load(Ordering::Relaxed))
-        }
-    }
-
-    impl Drop for CounterSnapshot {
-        fn drop(&mut self) {
-            QUERY_NEXT_ID.store(self.0, Ordering::Relaxed);
-        }
-    }
+    // Nothing here STORES to `QUERY_NEXT_ID`. The lib-test binary runs every src/ test module in
+    // one process, and seven of them mint a first-sight `(D, F)` through `world.query::<D, F>()`
+    // without any lock this module could take: a test that parked the counter at the cap redded a
+    // sibling's unrelated test with `boyko-B0502`, and one that parked it at 0 handed a sibling a
+    // `QueryTypeId` the dispenser had already given out -- the per-world cache's index (A4b). The
+    // exhaustion contract lives in `tests/l6_query_table_exhaustion.rs`, a process of its own.
 
     #[test]
     fn query_type_id_newtype_layout() {
@@ -263,41 +299,22 @@ mod tests {
         );
     }
 
+    /// Three mints on one thread come back distinct and strictly increasing. Strictly increasing,
+    /// not contiguous: other harness threads mint from the same counter, and the gaps are theirs.
     #[test]
     fn register_new_assigns_distinct_ids() {
-        let _guard = acquire_test_lock();
-        let _snap = CounterSnapshot::take();
-
-        set_next_id_for_test(0);
-
         let a = register_new();
         let b = register_new();
         let c = register_new();
 
-        assert_ne!(a, b);
-        assert_ne!(b, c);
-        assert_ne!(a, c);
-
-        assert_eq!(a, QueryTypeId(0));
-        assert_eq!(b, QueryTypeId(1));
-        assert_eq!(c, QueryTypeId(2));
-    }
-
-    #[test]
-    fn register_new_exhaustion_panics() {
-        let _guard = acquire_test_lock();
-        let _snap = CounterSnapshot::take();
-
-        set_next_id_for_test(MAX_QUERY_TYPES - 1);
-        let last = register_new();
-        assert_eq!(last, QueryTypeId(MAX_QUERY_TYPES - 1));
-
-        let result = panic::catch_unwind(AssertUnwindSafe(register_new));
-        assert!(result.is_err());
-
-        // W1 saturate clamp.
-        let pinned = QUERY_NEXT_ID.load(Ordering::Relaxed);
-        assert_eq!(pinned, MAX_QUERY_TYPES);
+        assert!(
+            a.0 < b.0 && b.0 < c.0,
+            "the dispenser is monotonic: expected {a:?} < {b:?} < {c:?}"
+        );
+        assert!(
+            c.0 < MAX_QUERY_TYPES,
+            "the lib-test binary must stay well below the cap; got {c:?}"
+        );
     }
 
     /// QC8 tripwire — the per-world cache slot footprint must fit

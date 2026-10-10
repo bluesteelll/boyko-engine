@@ -262,7 +262,7 @@ mod tests {
     // function holds `&mut world` for its whole body (a single owned borrow), so
     // it is fully Miri-testable: this is the path the plan §9 / the tester brief
     // calls out as the one that "holds `&mut world`, no pool". They run under
-    // both regular `cargo test` AND `cargo +nightly miri test --lib`.
+    // both regular `cargo test` AND `cargo +nightly-x86_64-pc-windows-msvc miri test --lib`.
 
     /// `fire_initial = true` synthesizes a `none → initial` transition: the
     /// record carries `exited: None, entered: <current>` and the state is

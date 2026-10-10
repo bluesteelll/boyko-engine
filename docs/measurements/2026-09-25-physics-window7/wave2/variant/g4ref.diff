@@ -1,0 +1,11 @@
+--- C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7b/variant/broadphase.rs.orig	2026-09-25 05:15:03.818603700 +0300
++++ C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7b/trees/93b2615bcea4873e2d3af6b560c6e7997740f67f_g4ref/crates/boyko_physics/benches/broadphase.rs	2026-09-25 05:23:41.316152500 +0300
+@@ -296,7 +296,7 @@
+ // ── G4: the tree broadphase (design C3; module docs, "G4 of the tree broadphase") ────────────
+ 
+ /// G4 pair-finding sizes of the `uniform` and `disparity` families: the design's list.
+-const G4_SIZES: [usize; 7] = [17, 64, 128, 256, 1_000, 10_000, 100_000];
++const G4_SIZES: [usize; 27] = [17, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 208, 224, 240, 256];
+ /// G4 `scene` sizes, in dynamic boxes (the floor is one more row): J, and the design's 10k and
+ /// 100k.
+ const G4_SCENE_SIZES: [usize; 3] = [1_240, 10_000, 100_000];

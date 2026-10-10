@@ -233,13 +233,22 @@ fn main() {
 
 `State<S>` and `NextState<S>` are generic resources, and every resource needs a unique `ResourceId`. The obvious implementation — a `static ID: OnceLock<ResourceId>` inside the `resource_id()` body — is **unsound here**, because a `static` declared in a *generic* function is not monomorphised: every instantiation shares the one static ([rust-lang/rust#22991](https://github.com/rust-lang/rust/issues/22991)). That would silently collapse `State<AppState>` and `State<NetState>` onto the same resource slot.
 
-boyko-engine instead mints ids through a process-global `TypeId → ResourceId` registry — the same pattern the query-type registry already uses for `(D, F)` pairs. The cold path probes a `HashMap` keyed on `TypeId::of::<State<S>>()` and mints exactly once per concrete type. It is paid at most once per type per process; every per-frame `in_state` read goes through the id cached on the system's resource state, with zero map traffic on the hot path. Distinct state types are guaranteed distinct ids — a regression test asserts this directly.
+boyko-engine instead mints ids through the kernel's generic-resource registry, [`resource_type_registry`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/resources/resource_type_registry.rs): a process-global `TypeId → ResourceId` map shared by every generic resource (`State<S>`, `NextState<S>`, and the input crate's `ActionState<A>` / `InputMap<A>`). The cold path probes a `HashMap` keyed on `TypeId::of::<State<S>>()` and mints exactly once per concrete type. It is paid at most once per type per process; every per-frame `in_state` read goes through the id cached on the system's resource state, with zero map traffic on the hot path. Distinct state types are guaranteed distinct ids — a regression test asserts this directly.
 
 You never touch this machinery; it is the reason `State<AppState>` and `State<NetState>` coexist correctly.
 
 ## Ordering state systems
 
 State enter/exit systems are ordinary systems, so order them with the usual [`.before` / `.after` / `.in_set`](ordering-and-sets.md) tools. The crate also exposes an **opt-in** `StateTransitionSet` marker (`boyko_ecs::ecs::core::state::StateTransitionSet`) you can drop your enter/exit systems into and then order *that set* relative to your gameplay set. It is not auto-wired: forcing a global "all enter/exit before everything" edge would duplicate the [scheduling](ordering-and-sets.md) machinery and perturb every state-using schedule's conflict graph, so the choice is left to you. Unused, it costs nothing.
+
+## Hierarchical state machines: `state_chart!`
+
+`States` is a flat enum. When states nest — a `Playing` state with `Running`
+and `Paused` children that share handlers — use the `boyko_macros::state_chart!`
+macro instead. It compiles the hierarchy down to exactly the machinery on this
+page: a flat enum of leaf states, one system per leaf gated with
+`run_if(in_state(leaf))`, and an `insert_state` of the initial leaf. There is no
+runtime tree. See [State Charts](state-charts.md) for the syntax and semantics.
 
 ## Differences from Bevy
 
@@ -250,7 +259,8 @@ State enter/exit systems are ordinary systems, so order them with the usual [`.b
 ## See also
 
 - [Run conditions](run-conditions.md) — the `.run_if(...)` mechanism every state condition rides on.
+- [State Charts](state-charts.md) — hierarchical machines that lower onto `States`.
 - [Resources](../concepts/resources.md) — `State<S>` / `NextState<S>` are ordinary resources you can read with `Res` / `ResMut`.
 - [Scheduler](../scheduler.md) — where the transition pass runs and how systems are dispatched.
 - [Ordering & sets](ordering-and-sets.md) — for sequencing enter/exit systems via `StateTransitionSet`.
-- Source: [`state/states.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/state/states.rs#L37), [`state/state.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/state/state.rs#L18), [`state/next_state.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/state/next_state.rs#L19), [`common_conditions.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/common_conditions.rs#L82), [`state_resource_registry.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/state/state_resource_registry.rs#L67).
+- Source: [`state/states.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/state/states.rs), [`state/state.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/state/state.rs), [`state/next_state.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/state/next_state.rs), [`common_conditions.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/common_conditions.rs), [`resources/resource_type_registry.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/resources/resource_type_registry.rs).

@@ -6,7 +6,7 @@
 //! - `S = f32` — the **Eval** backend ([`scalar`]): every op is a single `core`
 //!   f32 instruction, BYTE-IDENTICAL to the hand-written `boyko_sdf_math` field
 //!   (`boyko_sdf_math` DELEGATES to [`field`] over `f32`).
-//! - `S = Emit` — the **HLSL SSA recorder** ([`emit`], `feature = "emit"`): each op
+//! - `S = Emit` — the **HLSL SSA recorder** (`emit`, `feature = "emit"`): each op
 //!   pushes one SSA node; the printer walks the arena into HLSL textually
 //!   equivalent to the frozen `crates/boyko_rhi_vulkan/shaders/sdf_field.hlsli`.
 //!
@@ -27,10 +27,28 @@
 //! The one op stable `core` lacks is `sqrt`: the `nightly` feature uses
 //! `core::intrinsics::sqrtf32` (strict `no_std`), else `std` is linked SOLELY for
 //! `f32::sqrt` (mirroring `boyko_sdf_math`). The `emit` feature (OFF by default)
-//! gates the std-side SSA recorder + the HLSL printer ([`emit`]) and the
+//! gates the std-side SSA recorder + the HLSL printer (`emit`) and the
 //! `emit_field` bin, so a physics build NEVER links the emitter.
 //!
 //! IN-HOUSE: ZERO third-party deps. No rust-gpu / naga / spirv-builder.
+
+
+// `missing_const_for_thread_local` is a FALSE POSITIVE for this crate on clippy
+// 1.98.0 (2026-09-01), and the allow is the repair rather than a suppression:
+// every `thread_local!` initialiser here ALREADY IS `const { … }`, which is
+// exactly what the lint asks for.
+//
+// Two candidate cures were tested and neither works. Upgrading the toolchain
+// (1.97.1 -> 1.98.1) was taken specifically to fix this; it narrowed the lint
+// from five spans to a handful but did not remove it, so "wait for upstream" is
+// not a live plan. And the neighbouring-doc-comment confusion this lint has had
+// before is not the cause: stripping the `///` lines above a flagged static
+// leaves the bare `const { … }` form and the lint still fires.
+//
+// Placement matters: an `#[allow]` written OUTSIDE a `thread_local!` invocation
+// is reported as an `unused attribute` while the lint fires anyway, so this is
+// crate-level. Delete it when clippy stops reporting the const form.
+#![allow(clippy::missing_const_for_thread_local)]
 
 // Strictly `#![no_std]` only when the `sqrt` intrinsic is available (the `nightly`
 // feature) AND the std-side emitter is not requested. The `emit` feature pulls
@@ -45,11 +63,14 @@ pub mod cf;
 pub mod cubic_hit;
 pub mod decl;
 pub mod field;
+pub mod half;
 pub mod levels;
 pub mod marcher;
 pub mod normal;
 pub mod oct;
 pub mod pack;
+pub mod particle;
+pub mod particle_facets;
 pub mod probe_blend;
 pub mod probe_march;
 pub mod refine;
@@ -59,6 +80,8 @@ pub mod shadow;
 pub mod sor;
 pub mod ssao;
 pub mod surface;
+pub mod ui;
+pub mod vb;
 
 #[cfg(feature = "emit")]
 pub mod emit;
@@ -82,11 +105,20 @@ pub use field::{
     EditView, MAX_SDF_EDITS, SDF_FAR, combine, edit_distance, kind, op, sd_box, sd_sphere,
     sdf_field_body, smax, smin,
 };
+pub use half::{f16_bits_to_f32, f32_to_f16_bits};
 pub use levels::{BRICK_LEVELS, select_level_body};
 pub use marcher::{b1_marcher_fold_d_body, b1_marcher_mesh_p_body};
 pub use normal::sdf_normal_body;
 pub use oct::{oct_decode_body, oct_encode_body};
 pub use pack::pack_material_id_ba_body;
+pub use particle::{
+    particle_billboard_corner_body, particle_curve_eval_body, particle_integrate_body,
+    particle_rng_body, particle_rot_advance_body, particle_spawn_state_body,
+};
+pub use particle_facets::{
+    e1_bit_mix_body, e2_bitcast_sign_flip_body, e2_pack_half2_body, e2_unpack_half2_body,
+    e3_dot_body, e4_trig_body, e5_renorm_body,
+};
 pub use probe_blend::{probe_blend_body, probe_depth_blend_body};
 pub use probe_march::{
     GI_HIT_EPS, GI_MAX_IT, GI_MINT, GI_MINT_STEP, GI_T_MAX, probe_march_body,
@@ -111,9 +143,14 @@ pub use sor::{
 };
 pub use ssao::{
     SSAO_EPS, SSAO_RADIUS, SSAO_SLICES, SSAO_STEPS, SSAO_STRENGTH, ssao_estimate_body,
-    ssao_horizon_step_body, ssao_slice_body,
+    ssao_estimate_body_params, ssao_horizon_step_body, ssao_horizon_step_body_params,
+    ssao_slice_body, ssao_slice_body_params,
 };
 pub use surface::{
     EPS as M2_SURFACE_EPS, M2_REFINE_ITERS, M2_REFINE_RELAX, T_MAX as M2_SURFACE_T_MAX,
     m2_surface_hit_refine_body,
+};
+pub use vb::{
+    BaryBasis, NEAR_CLIP_DENOM_EPS, NEAR_CLIP_W_EPSILON, vb_barycentric_eval_body,
+    vb_barycentric_grad_body, vb_interp_body, vb_near_clip_body, vb_uv_grad_body,
 };

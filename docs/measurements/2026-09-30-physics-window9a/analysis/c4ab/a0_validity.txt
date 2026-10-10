@@ -1,0 +1,38 @@
+closed passes: C4-AB-p0, C4-AB-p1, C4-AB-p2, C4-G5-p0, C4-G5-p1, C4-G5-p2, C4-RAPIER-p0, C4-RAPIER-p1, C4-RAPIER-p2
+
+## C4-AB: timed processes 379 (originals 306, re-runs 73); invalid by my check 0, by the driver 0; validity agreement 379/379; clean agreement with the driver 379/379
+  slots 306: used 260 (re-runs used 50), dropped 46
+  per pass: processes / unclean: p0 140/84, p1 105/3, p2 134/32
+  pass-cells 102; my K == the driver k_clean on 102; differ: []
+  short pass-cells (K < 3): 30: p0 C4-JA#parent@W1 K2; p0 C4-JA#parent@W8 K1; p0 C4-JA#parent@W16 K2; p0 C4-JA#tip@W8 K1; p0 C4-JA#tip@W16 K2; p0 C4-JD#tip@W1 K1; p0 C4-JD#tip@W2 K2; p0 C4-JD#tip@W4 K1; p0 C4-JD#tip@W8 K1; p0 C4-JDap#tip@W1 K1; p0 C4-JDap#tip@W2 K2; p0 C4-JDap#tip@W4 K1; p0 C4-JDap#tip@W8 K1; p0 C4-JDap#tip@W16 K2; p0 C4-JDpar#parent@W1 K2; p0 C4-JDpar#parent@W2 K2; p0 C4-JDpar#parent@W4 K1; p0 C4-JDpar#parent@W8 K1; p0 C4-JDpar#parent@W16 K2; p0 C4-JT#parent@W1 K2; p0 C4-JT#parent@W8 K2; p0 C4-JT#parent@W16 K2; p0 C4-JT#tip@W1 K1; p0 C4-JT#tip@W8 K1; p0 C4-JT#tip@W16 K1; p0 C4-jolt56#j56@W1 K2; p0 C4-jolt56#j56@W2 K2; p0 C4-jolt56#j56@W4 K1; p0 C4-jolt56#j56@W8 K0; p0 C4-rung#tip@W16 K2
+  unclean reasons (a process can have several): {'witness': 103, 'receipt after': 38}
+  top other process of the witness on unclean processes: {'Telegram.exe': 47, 'browser.exe': 41, 'claude.exe': 24, 'CurseForge.exe': 4, 'gh.exe': 1, 'explorer.exe': 1, 'sihost.exe': 1}
+  witness p0: median 2.18 %, max 7.60 %, > 2 %: 74 of 140
+  witness p1: median 0.43 %, max 4.80 %, > 2 %: 3 of 105
+  witness p2: median 1.07 %, max 18.39 %, > 2 %: 26 of 134
+  pass_done C4-AB-p0 at 2026-09-30T19:59:09.619+03:00
+  pass_done C4-AB-p1 at 2026-09-30T20:14:31.880+03:00
+  pass_done C4-AB-p2 at 2026-09-30T20:43:29.915+03:00
+  used runner processes 222; pose_hash by row: {('C4-JDpar', '0x30c5438bc6ad9ffa'): 38, ('C4-JD', '0x30c5438bc6ad9ffa'): 38, ('C4-JA', '0x30c5438bc6ad9ffa'): 47, ('C4-rung', '0x30c5438bc6ad9ffa'): 17, ('C4-JDap', '0x30c5438bc6ad9ffa'): 37, ('C4-JT', '0x30c5438bc6ad9ffa'): 45}
+  used Jolt processes 38; hashes Counter({'0xb8522b4e3fc62cfe': 38})
+  (row, binary, broadphase, tree_brute_max_rows): {('C4-JDpar', 'parent', 'AllPairs', 144): 38, ('C4-JD', 'tip', 'Tree', 128): 38, ('C4-JA', 'tip', 'AllPairs', 128): 24, ('C4-JA', 'parent', 'AllPairs', 144): 23, ('C4-rung', 'tip', 'Tree', 128): 17, ('C4-JDap', 'tip', 'AllPairs', 128): 37, ('C4-JT', 'tip', 'Tree', 128): 21, ('C4-JT', 'parent', 'Tree', 144): 24}
+
+## C4-G5: timed processes 95 (originals 90, re-runs 5); invalid by my check 0, by the driver 0; validity agreement 95/95; clean agreement with the driver 95/95
+  slots 90: used 90 (re-runs used 5), dropped 0
+  per pass: processes / unclean: p0 31/1, p1 30/0, p2 34/4
+  pass-cells 30; my K == the driver k_clean on 30; differ: []
+  short pass-cells (K < 3): 0: 
+  unclean reasons (a process can have several): {'witness': 5, 'receipt after': 1}
+  top other process of the witness on unclean processes: {'claude.exe': 3, 'RuntimeBroker.exe': 1, 'browser.exe': 1}
+  witness p0: median 0.16 %, max 9.09 %, > 2 %: 1 of 31
+  witness p1: median 0.20 %, max 1.46 %, > 2 %: 0 of 30
+  witness p2: median 0.19 %, max 9.09 %, > 2 %: 4 of 34
+  pass_done C4-G5-p0 at 2026-09-30T21:28:10.489+03:00
+  pass_done C4-G5-p1 at 2026-09-30T21:34:06.345+03:00
+  pass_done C4-G5-p2 at 2026-09-30T21:40:51.052+03:00
+  used runner processes 90; pose_hash by row: {('C4-Rap', '0x6cbe24bf8fafda26'): 18, ('C4-R', '0x6cbe24bf8fafda26'): 18, ('C4-JDap-armed', '0x30c5438bc6ad9ffa'): 18, ('C4-JD-armed', '0x30c5438bc6ad9ffa'): 18, ('C4-S16ap', '0x4470add61a854f4c'): 9, ('C4-S16', '0x4470add61a854f4c'): 9}
+  used Jolt processes 0; hashes Counter()
+  (row, binary, broadphase, tree_brute_max_rows): {('C4-Rap', 'tip', 'AllPairs', 128): 18, ('C4-R', 'tip', 'Tree', 128): 18, ('C4-JDap-armed', 'tip', 'AllPairs', 128): 18, ('C4-JD-armed', 'tip', 'Tree', 128): 18, ('C4-S16ap', 'tip', 'AllPairs', 128): 9, ('C4-S16', 'tip', 'Tree', 128): 9}
+  armed used 36; void_steps Counter({0: 36})
+
+all launched timed process records 696; driver-invalid 0

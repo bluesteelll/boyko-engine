@@ -1,0 +1,100 @@
+diff --git a/crates/boyko_physics/benches/jolt_parity_pyramid.rs b/crates/boyko_physics/benches/jolt_parity_pyramid.rs
+index 25435828..5105ec56 100644
+--- a/crates/boyko_physics/benches/jolt_parity_pyramid.rs
++++ b/crates/boyko_physics/benches/jolt_parity_pyramid.rs
+@@ -257,4 +257,43 @@ fn bench_jolt_parity_pyramid(c: &mut Criterion) {
+ }
+ 
+ criterion_group!(benches, bench_jolt_parity_pyramid);
+-criterion_main!(benches);
++// MQ-PROBE (MEASUREMENT-QUEUE §9 R2; never committed, never timed): the live contact-point
++// count per step of a fresh `build(w)` world, from step 1. Every criterion sample of
++// `full_step/w` rebuilds the world, steps 20 untimed, then times steps 21..=20+iters, so this
++// one series gives every sample's timed steps. No timing is taken.
++fn mq_probe_points(world: &EcsMaster) -> (usize, u64) {
++    let manifolds = world.resource::<boyko_physics::resources::Manifolds>().manifolds();
++    let live = manifolds.iter().filter(|m| m.count > 0).count();
++    let points = manifolds.iter().map(|m| u64::from(m.count)).sum();
++    (live, points)
++}
++
++fn main() {
++    let steps: usize = std::env::var("MQ_PROBE_STEPS")
++        .ok()
++        .and_then(|s| s.parse().ok())
++        .expect("probe: set MQ_PROBE_STEPS");
++    println!("arm,step,manifolds_live,points");
++    let mut first = Vec::with_capacity(steps);
++    for workers in [1usize, 4] {
++        let (mut world, mut schedule, n) = build(workers);
++        assert_eq!(n, 1240, "probe: the pyramid holds 1240 boxes");
++        for step in 1..=steps {
++            schedule.run(black_box(&mut world));
++            let (l, p) = mq_probe_points(&world);
++            if workers == 1 {
++                first.push((l, p));
++            }
++            println!("full_step/{workers},{step},{l},{p}");
++        }
++    }
++    // Replay: a second fresh build(1) must reproduce the series, since every criterion
++    // sample starts from a fresh build.
++    let replay = steps.min(300);
++    let (mut world, mut schedule, _n) = build(1);
++    for (i, expected) in first.iter().take(replay).enumerate() {
++        schedule.run(black_box(&mut world));
++        assert_eq!(mq_probe_points(&world), *expected, "probe: replay diverged at step {}", i + 1);
++    }
++    eprintln!("probe: fresh build(1) replayed the first {replay} steps identically");
++}
+diff --git a/crates/boyko_physics/benches/sleeping_pipeline.rs b/crates/boyko_physics/benches/sleeping_pipeline.rs
+index c6bccf1d..ef258fe7 100644
+--- a/crates/boyko_physics/benches/sleeping_pipeline.rs
++++ b/crates/boyko_physics/benches/sleeping_pipeline.rs
+@@ -351,4 +351,45 @@ fn bench_sleeping_pipeline(c: &mut Criterion) {
+ }
+ 
+ criterion_group!(benches, bench_sleeping_pipeline);
+-criterion_main!(benches);
++// MQ-PROBE (MEASUREMENT-QUEUE §9 R2; never committed, never timed): the live contact-point
++// count of the bench's OWN piles, per step, from construction onward. No timing is taken.
++// The piles are built and warmed exactly as `bench_sleeping_pipeline` builds them (off, awake,
++// frozen, then WARM_STEPS interleaved), so step N here is step N of the timed binary's pile.
++fn mq_probe_points(pile: &Pile) -> (usize, u64) {
++    let manifolds = pile.world.resource::<Manifolds>().manifolds();
++    let live = manifolds.iter().filter(|m| m.count > 0).count();
++    let points = manifolds.iter().map(|m| u64::from(m.count)).sum();
++    (live, points)
++}
++
++fn main() {
++    let steps: usize = std::env::var("MQ_PROBE_STEPS")
++        .ok()
++        .and_then(|s| s.parse().ok())
++        .expect("probe: set MQ_PROBE_STEPS");
++    let mut off = Pile::new(0.0, Vec3::new(0.0, -9.81, 0.0), false, None);
++    let mut awake = Pile::new(JOLT_SEPARATION, Vec3::new(0.0, -9.81, 0.0), true, Some(0.0));
++    let frozen = frozen_pile();
++    let (fl, fp) = mq_probe_points(&frozen);
++    eprintln!("probe: frozen pile live manifolds {fl}, points {fp}");
++    println!("arm,step,manifolds_live,points");
++    let mut off_series = Vec::with_capacity(steps);
++    for step in 1..=steps {
++        off.step();
++        let (l, p) = mq_probe_points(&off);
++        off_series.push((l, p));
++        println!("pyramid_sleeping_off,{step},{l},{p}");
++        awake.step();
++        let (l, p) = mq_probe_points(&awake);
++        println!("pyramid_awake_sleeping_on,{step},{l},{p}");
++    }
++    // Replay: a second, fresh off pile must reproduce the series (the premise that the
++    // probe's trajectory is the timed binary's trajectory rests on determinism).
++    let replay = steps.min(300);
++    let mut again = Pile::new(0.0, Vec3::new(0.0, -9.81, 0.0), false, None);
++    for (i, expected) in off_series.iter().take(replay).enumerate() {
++        again.step();
++        assert_eq!(mq_probe_points(&again), *expected, "probe: replay diverged at step {}", i + 1);
++    }
++    eprintln!("probe: fresh off pile replayed the first {replay} steps identically");
++}

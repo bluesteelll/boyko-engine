@@ -1,0 +1,12 @@
+aac562a7101451e6aee077b81fc1fb80c61b4587 perf(physics): Auto's Grid band moves from 96/192 to the measured 2,700/3,000, so Auto keeps AllPairs on the Jolt pyramid, where Grid measured 2.46x slower (L2)
+caac7d067d6a27c878fb807d50510ad9063a66ab perf(physics): parallel_solve is on by default, and a one-worker pool solves inline instead of opening a scope for every wide color (L4)
+f236ebdd6b1528106c87fcccfa750fe40eb4b4a7 docs(physics): the tree broadphase and sleeping-by-default designs, revision 2, closed by ruling
+--- ancestors ---
+f236ebdd ancestor: yes
+caac7d06 ancestor: yes
+dbd85977 ancestor: yes
+8d656ad8 ancestor: yes
+67563d3b ancestor: yes
+aff98fe7 ancestor: yes
+00c07d0f ancestor: yes
+56c1e9e7 ancestor: yes

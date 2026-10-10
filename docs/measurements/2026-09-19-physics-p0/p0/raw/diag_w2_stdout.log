@@ -1,0 +1,16 @@
+ 0 rep1     JOLT-T   mean 8.5236 ms rb 1.02% ra 1.75% exit 0
+ 1 rep1     JOLT56-T mean 5.6792 ms rb 1.75% ra 1.17% exit 0
+ 2 rep1     J-A-d1   mean 13.5198 ms rb 1.17% ra 0.59% exit 0
+ 3 rep1     J-A-a    mean 13.8672 ms rb 0.59% ra 1.17% exit 0
+ 4 rep1     J-A-d2   mean 13.8319 ms rb 1.17% ra 0.58% exit 0
+ 5 rep2     JOLT-T   mean 8.5675 ms rb 0.58% ra 2.36% exit 0
+ 6 rep2     JOLT56-T mean 6.0818 ms rb 2.36% ra 2.16% exit 0
+ 7 rep2     J-A-d1   mean 13.7557 ms rb 2.16% ra 1.47% exit 0
+ 8 rep2     J-A-a    mean 13.5110 ms rb 1.47% ra 0.78% exit 0
+ 9 rep2     J-A-d2   mean 13.5437 ms rb 0.78% ra 0.53% exit 0
+10 consec1  J-A-d1   mean 14.0586 ms rb 0.53% ra 1.04% exit 0
+11 consec2  J-A-d1   mean 13.6914 ms rb 1.04% ra 1.37% exit 0
+12 consec3  J-A-d1   mean 14.1750 ms rb 1.37% ra 0.34% exit 0
+13 consec4  J-A-d1   mean 13.8426 ms rb 0.34% ra 0.39% exit 0
+14 consec5  J-A-d1   mean 13.7515 ms rb 0.39% ra 1.32% exit 0
+15 consec6  J-A-d1   mean 13.4797 ms rb 1.32% ra 2.75% exit 0

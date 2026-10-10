@@ -51,6 +51,11 @@
 //!
 //! Output image: `D:\claude\BoykoEngine\target\screenshots\s35_orbit.bmp`
 
+// Test harness, not an engine path: `Arc<Mutex<Option<Entity>>>` is the established probe that
+// carries the spawned rig `Entity` out of a one-shot `run_system` closure back to the
+// assertions. Test-only scaffolding, never linked into a shipping build.
+#![allow(clippy::disallowed_types)]
+
 mod common;
 
 use std::path::{Path, PathBuf};
@@ -294,7 +299,7 @@ fn write_bmp(path: &Path, rgba: &[u8], w: u32, h: u32) -> std::io::Result<()> {
     buf.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
     buf.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
     // --- pixel data: RGBA -> BGRA (the ONLY channel swap; no row flip) ---
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         buf.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
     }
 
@@ -594,7 +599,7 @@ mod gpu {
     /// and writes the BMP. `#[ignore]`d — Vulkan boot can hang a headless run; the
     /// orchestrator runs it on the RTX (see the module header).
     #[test]
-    #[ignore = "boots Vulkan on the GPU; owner-run on the RTX (see module header)"]
+    #[ignore = "gpu: boots Vulkan on the GPU; owner-run on the RTX (see module header)"]
     fn s35_orbit_screenshot() {
         let Some(ctx) = boot_or_skip("s35_orbit_screenshot") else {
             return;

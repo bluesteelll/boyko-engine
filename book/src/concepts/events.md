@@ -12,9 +12,6 @@ deliberately familiar. The difference is underneath: a Boyko event bus is a
 scheduler's conflict graph, so any number of systems can write the same event
 type in parallel with zero coordination.
 
-*(Branch: `ecs`. Events: dispatcher Phase 6, `EventReader` / `EventWriter`
-SystemParams Phase 12.)*
-
 ---
 
 ## When to reach for events
@@ -84,7 +81,7 @@ Rules enforced by the macro:
   `Clone, Copy`. If you want `Debug` / `PartialEq` on the event, implement them
   by hand rather than `#[derive(...)]`-ing on the outer struct.
 - Constructing and inspecting an event goes through the
-  [`Event`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/events/event.rs#L18)
+  [`Event`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/events/event.rs)
   trait (`Event::new`, `Event::participants`). The prelude does **not** re-export
   `Event`; import it with
   `use boyko_ecs::ecs::core::events::event::Event;` wherever you call `E::new`.
@@ -102,7 +99,7 @@ struct LevelCleared {
 ```
 
 The macro generates an implementation of the
-[`Event`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/events/event.rs#L18)
+[`Event`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/events/event.rs)
 trait. Each event type is assigned a unique `EventId` lazily on first use, the
 same model as component ids.
 
@@ -167,7 +164,7 @@ built rather than corrupting anything at runtime.
 
 If two or more **worker** systems write the same event in parallel, register it
 with an explicit
-[`EventConfig`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/events/event_config.rs#L16)
+[`EventConfig`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/events/event_config.rs)
 through `preregister_event`. Allocate **`worker_count + 1`** lanes: one per worker
 (workers are indexed `0..worker_count`) plus one for the dispatcher thread, which
 gets the lane at index `worker_count`.
@@ -181,7 +178,8 @@ use boyko_ecs::ecs::core::events::event_config::EventConfig;
 fn build(app: &mut App, worker_count: u32) {
     // One lane per worker (ids 0..worker_count) plus the dispatcher lane at
     // index `worker_count`. `default_for` keeps the 1024-per-lane capacity.
-    // Bounds: thread_count in 1..=64, capacity_per_lane in 1..=16384.
+    // Bounds: thread_count in 1..=65 (one lane per pool worker plus one for a
+    // non-worker sender), capacity_per_lane in 1..=16384.
     let cfg = EventConfig::default_for(worker_count + 1)
         .expect("config within bounds");
 
@@ -218,7 +216,7 @@ that overflows in one frame returns `EventBufferFull` rather than reallocating.
 
 ## Writing events
 
-Take an [`EventWriter<E>`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/system/params/event_writer.rs#L89)
+Take an [`EventWriter<E>`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/system/params/event_writer.rs)
 as a [system parameter](systems.md) and call `send`:
 
 ```rust,ignore
@@ -304,7 +302,7 @@ flowchart LR
 
 ## Reading events
 
-Take an [`EventReader<E>`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/system/params/event_reader.rs#L87)
+Take an [`EventReader<E>`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/system/params/event_reader.rs)
 and iterate `read()`:
 
 ```rust,ignore
@@ -446,9 +444,9 @@ event](#multi-writer-events-size-the-lanes-with-eventconfig)).
 - [Commands](commands.md) — `commands.send_event(e)` for deferred sends from a
   command closure.
 - `EventUpdatePolicy` and the once-per-frame swap live on the `App` —
-  [`app/`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/app)
+  [`app/`](https://github.com/bluesteelll/boyko-engine/tree/master/crates/boyko_ecs/src/ecs/core/app)
   (`set_event_update_policy`, `EveryFrame` vs `WaitForFixed`).
 - Source:
-  [`events/`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/events),
-  [`event_writer.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/system/params/event_writer.rs),
-  [`event_reader.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/system/params/event_reader.rs).
+  [`events/`](https://github.com/bluesteelll/boyko-engine/tree/master/crates/boyko_ecs/src/ecs/core/events),
+  [`event_writer.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/system/params/event_writer.rs),
+  [`event_reader.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/system/params/event_reader.rs).

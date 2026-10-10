@@ -4,7 +4,8 @@
 //! This is the Principle-0 heart of M3: the instanced draw is driven by the
 //! [`MeshHandle`](boyko_scene::render_caps::MeshHandle) +
 //! [`InstanceModelCol`](crate::instance_model::InstanceModelCol) of SPAWNED ENTITIES
-//! — read through an ECS [`Query`] — NOT by a test-built buffer. The gather buckets
+//! — read through an ECS [`Query`](boyko_ecs::ecs::core::iters::query::Query) — NOT by
+//! a test-built buffer. The gather buckets
 //! every visible instance by its mesh id into ONE contiguous instance ring (so each
 //! mesh draws ALL its instances in a single `vkCmdDrawIndexed`), and emits a
 //! [`DrawBatch`] per non-empty mesh carrying that bucket's `base_instance` offset
@@ -21,40 +22,54 @@
 //!    [`InstanceModelCol`] into `ring[offsets[m] + cursors[m]++]` — contiguous per
 //!    bucket, no overlap.
 //!
-//! Alloc-free after warmup: every `Vec` is `clear()`ed + re-filled (capacity
-//! persists); the per-mesh lanes grow POW2 keyed off the registry's mesh count (O2 —
-//! no fixed `MAX_MESHES` ceiling), and the ring grows POW2 keyed off the live
-//! instance count. The scratch is a reused [`Resource`], NOT an ad-hoc `Vec` (the
-//! [`UiRenderScratch`](crate::ui::UiRenderScratch) precedent, Principle 5).
+//! Alloc-free after warmup: every lane is a
+//! [`ScratchColumn<T>`](boyko_ecs::ecs::core::component::scratch::ScratchColumn) — the
+//! same `ComponentPool`-backed, VM-native transient-scratch primitive the kernel's own
+//! solver scratch uses, NOT `std::Vec` (Principle 0) — `clear()`ed + re-filled every
+//! frame (the backing reservation persists). Each lane's ceiling is
+//! [`pool_reserve_rows`](boyko_ecs::ecs::constants::pool_reserve_rows) of its element
+//! size — the same VA-reservation-class (address-space-only, lazy-commit) ceiling every
+//! other kernel column uses, so there is no fixed `MAX_MESHES`/instance-count cap in
+//! practice. The scratch is a reused [`Resource`](boyko_macros::Resource), NOT an
+//! ad-hoc buffer (the [`UiRenderScratch`](crate::ui::UiRenderScratch) precedent,
+//! Principle 5).
 //!
 //! # The per-instance mesh-id lane (M3 → HW-RT, TLAS-readiness)
 //!
 //! Alongside the affine [`ring`](MeshRenderScratch::ring) the gather scatters a
 //! PARALLEL [`mesh_ids`](MeshRenderScratch::mesh_ids) lane: `mesh_ids[i]` is ring
 //! instance `i`'s `MeshHandle.0` — which is also its BLAS index (the mesh BLAS is
-//! keyed by the same `MeshRegistry` handle). This makes the instance ring DIRECTLY
+//! keyed by the same `Assets<MeshGpu>` handle). This makes the instance ring DIRECTLY
 //! consumable by a future TLAS builder — instance `i` maps to (`ring[i]` = its 3×4
 //! world affine, `mesh_ids[i]` = its BLAS) in O(1), with no need to reconstruct the
 //! mapping by range-searching the per-mesh [`batches`](MeshRenderScratch::batches).
 //! The lane is valid for DYNAMIC rows too (interpolation rewrites the affine on-GPU,
-//! never the mesh identity). It is a host-side `Vec<u32>` the acceleration-structure
+//! never the mesh identity). It is a host-side scratch column the acceleration-structure
 //! builder reads; the RASTER draw does NOT read it (it reads mesh identity from each
 //! batch's contiguous `base_instance` range), so the lane costs the raster path
 //! nothing but one scatter store per instance.
 
+use boyko_ecs::ecs::constants::pool_reserve_rows;
+use boyko_ecs::ecs::core::asset::{Assets, register_asset_layout};
+use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
 use boyko_ecs::ecs::core::iters::query::Query;
-use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
-use boyko_ecs::ecs::core::system::{NonSendRes, ResMut};
-#[cfg(feature = "hwrt")]
-use boyko_ecs::ecs::core::system::Res;
+use boyko_ecs::ecs::core::iters::query::filter_enable::{Disabled, Enabled};
+use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
+use boyko_ecs::ecs::core::schedule::system_config::SystemConfig;
+use boyko_ecs::ecs::core::system::{NonSendRes, Res, ResMut};
 use boyko_macros::Resource;
 use boyko_rhi::enums::IndexType;
-use boyko_scene::render_caps::{MeshHandle, RenderEnabled};
-use bytemuck::Zeroable;
+use boyko_scene::render_caps::{MaterialHandle, MeshHandle, RenderEnabled};
+use bytemuck::{Pod, Zeroable};
 
+use crate::asset_refcount::{AssetValidateSet, MaterialStale, RenderStale};
 use crate::gpu_transform3d::GpuTransform3D;
-use crate::instance_model::InstanceModelCol;
-use crate::mesh_registry::MeshRegistry;
+use crate::instance_model::{InstanceModelCol, VbInstanceRow};
+use crate::material::{Material, MaterialTextures};
+use crate::mesh::MeshGpu;
+use crate::mesh_assets::MeshAssetsExt;
+use crate::mesh_geometry_table::VB_GEOMETRY_RESERVED_SLOT;
+use crate::occlusion_marker::{OcclusionCulling, VB_INST_FLAG_OCCLUSION_CULLING};
 
 /// One per-mesh instanced draw (mesh foundation M3) — the consumer issues exactly ONE
 /// `vkCmdDrawIndexed(index_count, instance_count, 0, 0, base_instance)` per batch
@@ -68,10 +83,11 @@ use crate::mesh_registry::MeshRegistry;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DrawBatch {
     /// The mesh this batch draws (`MeshHandle.0`) — the consumer resolves it to GPU
-    /// buffers via the [`MeshRegistry`].
+    /// buffers via the world's `Assets<MeshGpu>` table
+    /// ([`MeshAssetsExt`]).
     pub mesh_id: u32,
     /// The mesh's index count (`vkCmdDrawIndexed`'s `index_count`), copied from the
-    /// registry at gather time so the recorder reads it without a second lookup.
+    /// asset table at gather time so the recorder reads it without a second lookup.
     pub index_count: u32,
     /// The mesh's bound index width (O3 mixed `Uint16`/`Uint32`), copied from the
     /// registry at gather time.
@@ -85,61 +101,293 @@ pub struct DrawBatch {
     pub instance_count: u32,
 }
 
+/// Asset-streaming plan F8+ (owner: material-drives-albedo-too): the per-instance
+/// material PAYLOAD scattered in lock-step with [`MeshRenderScratch::ring`] /
+/// [`MeshRenderScratch::mesh_ids`] — the OOB-clamped material slot (F8 §4.2) PLUS that
+/// slot's `base_color`, so the `PER_INSTANCE_MATERIAL` raster fragment can source
+/// `gAlbedo` from the material table instead of the mesh's vertex color (closing the F8
+/// gap: a material previously drove only `mrr` — metallic/roughness — never the visible
+/// color).
+///
+/// `#[repr(C)]`, `Pod`/`Zeroable` (mirrors [`InstanceModelCol`]/[`GpuTransform3D`]'s
+/// discipline — the `cast_slice` upload + the ring's zero-fill placeholder both depend
+/// on it): `base_color` (a `float4`) at offset 0, `id` at offset 16, padded to a 32-byte
+/// stride. A `float4` cannot straddle a 16-byte boundary under HLSL structured-buffer
+/// packing, so `id` immediately following `base_color` and `_pad` filling out the
+/// second 16-byte lane produces the SAME 32-byte element stride host- and
+/// device-side — the exact layout `gbuffer_mrt.vs.hlsl`'s `PerInstanceMaterial` mirror
+/// reads.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Default)]
+pub struct PerInstanceMaterial {
+    /// The material's LINEAR `base_color` (`rgb` + alpha/cutoff `w`), copied from
+    /// `Assets<Material>` at gather time — the PM fragment's `gAlbedo` source.
+    /// Offset 0.
+    pub base_color: [f32; 4],
+    /// The OOB-clamped material slot (F8 §4.2) — packed into `gNormal.BA` by the PM
+    /// fragment shader, unchanged from F8. Offset 16.
+    pub id: u32,
+    /// Pads the element to a 32-byte stride (a whole `float4` lane) — unused, always
+    /// zero.
+    pub _pad: [u32; 3],
+}
+
+/// The byte size of one [`PerInstanceMaterial`] — the PM instance-material SSBO's
+/// per-instance stride (32 B: a `float4` `base_color` + a `uint` `id`, padded to the
+/// next 16-byte lane).
+pub const PER_INSTANCE_MATERIAL_BYTES: usize = 32;
+
+// The whole PM raster path depends on this exact size/offset pair: the SSBO stride +
+// the VS's `instance_materials[i]` indexing derive from them. A silent layout drift
+// (a reordered field, a removed pad word) would corrupt every material-bearing
+// instance's albedo/id silently — the `MaterialGpu`/`GpuTransform3D` fingerprint
+// discipline.
+const _: () = assert!(
+    core::mem::size_of::<PerInstanceMaterial>() == PER_INSTANCE_MATERIAL_BYTES,
+    "PerInstanceMaterial must be 32 bytes (the PM instance-material SSBO's element stride)"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterial, base_color) == 0,
+    "PerInstanceMaterial::base_color must be at offset 0"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterial, id) == 16,
+    "PerInstanceMaterial::id must be at offset 16"
+);
+
+/// Textured-PBR rung T6c: the per-instance TEXTURED material payload —
+/// [`PerInstanceMaterial`]'s `base_color`/`id` PLUS the resolved row's five
+/// [`MaterialTextures`] bindless slots PLUS the FALLBACK `metallic`/`roughness`
+/// scalars the textured gbuffer fragment uses verbatim when the metal-rough
+/// texture slot is `0` (T6c plan Decision D3 — the gPbr override is
+/// UNCONDITIONAL, so `gPbr.rg` must carry the FINAL metallic/roughness even for an
+/// instance with no metal-rough texture bound).
+///
+/// `#[repr(C)]`, `Pod`/`Zeroable` (mirrors [`PerInstanceMaterial`]'s discipline):
+/// `base_color` (a `float4`) at offset 0, `material_id` at offset 16, the five
+/// texture slots at offsets 20-40, `metallic`/`roughness` at offsets 40/44 — a
+/// 48-byte (three-`float4`-lane) stride, the SAME "a `float4` cannot straddle a
+/// 16-byte boundary" discipline [`PerInstanceMaterial`]'s doc explains (no
+/// trailing pad needed: the eight scalar fields from offset 16 run contiguously to
+/// 48 with none crossing a 16-byte lane).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Default)]
+pub struct PerInstanceMaterialTex {
+    /// The material's LINEAR `base_color` (`rgb` + alpha/cutoff `w`). Offset 0.
+    pub base_color: [f32; 4],
+    /// The OOB-clamped material slot (mirrors [`PerInstanceMaterial::id`]). Offset 16.
+    pub material_id: u32,
+    /// Bindless albedo-texture slot (mirrors [`MaterialTextures::albedo`]). Offset 20.
+    pub albedo: u32,
+    /// Bindless normal-map slot (mirrors [`MaterialTextures::normal`]). Offset 24.
+    pub normal: u32,
+    /// Bindless metallic-roughness-texture slot (mirrors
+    /// [`MaterialTextures::metal_rough`]). Offset 28.
+    pub metal_rough: u32,
+    /// Bindless ambient-occlusion-texture slot (mirrors [`MaterialTextures::ao`]).
+    /// Offset 32.
+    pub ao: u32,
+    /// Bindless emissive-texture slot (mirrors [`MaterialTextures::emissive`]).
+    /// Offset 36.
+    pub emissive: u32,
+    /// The material's scalar metallic parameter (mirrors
+    /// [`MaterialGpu::metallic`](crate::material::MaterialGpu::metallic)) — the
+    /// textured fragment's gPbr override uses this verbatim when
+    /// [`Self::metal_rough`] is `0` (no texture bound). Offset 40.
+    pub metallic: f32,
+    /// The material's scalar roughness parameter (mirrors
+    /// [`MaterialGpu::roughness`](crate::material::MaterialGpu::roughness)).
+    /// Offset 44.
+    pub roughness: f32,
+}
+
+/// The byte size of one [`PerInstanceMaterialTex`] — the textured per-instance-material
+/// SSBO's per-instance stride (48 B: a `float4` `base_color` + six `uint`s (id + five
+/// texture slots) + two `f32` fallback scalars (metallic/roughness), exactly filling
+/// three 16-byte lanes with no explicit pad).
+pub const PER_INSTANCE_MATERIAL_TEX_BYTES: usize = 48;
+
+// The SAME layout-fingerprint discipline as `PerInstanceMaterial` above: a silent
+// drift here would corrupt every textured instance's payload silently — this struct
+// feeds a device-read SSBO (T6c).
+const _: () = assert!(
+    core::mem::size_of::<PerInstanceMaterialTex>() == PER_INSTANCE_MATERIAL_TEX_BYTES,
+    "PerInstanceMaterialTex must be 48 bytes (a float4 base_color + six uints + two \
+     f32 fallback scalars)"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, base_color) == 0,
+    "PerInstanceMaterialTex::base_color must be at offset 0"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, material_id) == 16,
+    "PerInstanceMaterialTex::material_id must be at offset 16"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, albedo) == 20,
+    "PerInstanceMaterialTex::albedo must be at offset 20"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, normal) == 24,
+    "PerInstanceMaterialTex::normal must be at offset 24"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, metal_rough) == 28,
+    "PerInstanceMaterialTex::metal_rough must be at offset 28"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, ao) == 32,
+    "PerInstanceMaterialTex::ao must be at offset 32"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, emissive) == 36,
+    "PerInstanceMaterialTex::emissive must be at offset 36"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, metallic) == 40,
+    "PerInstanceMaterialTex::metallic must be at offset 40 (T6c plan Decision D3)"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, roughness) == 44,
+    "PerInstanceMaterialTex::roughness must be at offset 44 (T6c plan Decision D3)"
+);
+
 /// The reused per-frame mesh-render scratch (Principle-0 storage — a [`Resource`],
 /// NOT a side store; the [`UiRenderScratch`](crate::ui::UiRenderScratch) precedent).
 ///
-/// Cleared-not-reallocated each frame (Principle 5): a steady-state frame only
-/// `clear()`s + re-fills + scatters in place, so there is ZERO steady-state
-/// allocation. The per-mesh lanes (`counts`/`offsets`/`cursors`) grow POW2 keyed off
-/// the registry's mesh count (O2 — no fixed `MAX_MESHES`); the instance `ring` grows
-/// POW2 keyed off the live instance count.
-#[derive(Resource, Default)]
+/// Every lane is a [`ScratchColumn<T>`] — the same `ComponentPool`-backed,
+/// address-stable, VM-native transient-scratch primitive the kernel's own solver
+/// scratch uses — NOT a `std::Vec` (Principle 0: durable/bulk per-frame data lives
+/// on the engine's own storage). Cleared-not-reallocated each frame (Principle 5):
+/// a steady-state frame only `clear()`s + re-fills + scatters in place through each
+/// lane's [`ScratchBuildView`](boyko_ecs::ecs::core::component::scratch::ScratchBuildView),
+/// so there is ZERO steady-state heap allocation. Each lane's reservation ceiling is
+/// [`pool_reserve_rows`] of its element size — the SAME VA-reservation-class ceiling
+/// (address space only, lazy-commit, effectively unbounded in practice) every other
+/// `ComponentPool`-backed kernel column uses, so this preserves the "no fixed
+/// `MAX_MESHES`/instance-count ceiling" property without a bespoke growth scheme.
+#[derive(Resource)]
 pub struct MeshRenderScratch {
     /// `counts[m]` — the number of visible instances of mesh `m` (pass 1). Length ==
-    /// the per-mesh-lane capacity (≥ mesh count); `clear()` + re-fill with zeros.
-    counts: Vec<u32>,
+    /// the per-mesh-lane length (≥ mesh count); `clear()` + re-fill with zeros.
+    counts: ScratchColumn<u32>,
     /// `offsets[m]` — mesh `m`'s `base_instance` (the prefix-sum of `counts`). Reused.
-    offsets: Vec<u32>,
+    offsets: ScratchColumn<u32>,
     /// `cursors[m]` — the scatter write-head within mesh `m`'s bucket (pass 2),
     /// `0..counts[m]`. A separate lane so `offsets` stays the immutable bucket base.
-    cursors: Vec<u32>,
+    cursors: ScratchColumn<u32>,
     /// The emitted [`DrawBatch`]es (one per non-empty mesh), in mesh-id order;
-    /// `clear()` + `extend`, never `Vec::new`.
-    pub batches: Vec<DrawBatch>,
+    /// `clear()` + sequential `push`, never a fresh allocation.
+    pub batches: ScratchColumn<DrawBatch>,
     /// The UNIFIED contiguous instance ring (refined-B) — EVERY visible instance's
     /// 48-byte [`InstanceModelCol`], STATIC and interpolated alike, in one
     /// draw-ordered buffer. Static rows are CPU-scattered here at gather time; dynamic
     /// (interpolated) rows' slots are left as-scattered on the CPU (stale bytes,
     /// overwritten on-GPU) and filled by the interp compute pre-pass via
-    /// [`pair_out_slot`](Self::pair_out_slot). The renderer uploads this whole slice
-    /// into ONE shared instance SSBO bound once for the whole batch list; on an interp
-    /// frame the compute overwrites only the dynamic slots before the raster VS reads.
-    /// `ring.len()` == the TOTAL drawable count. `clear()` + scatter, capacity persists.
-    pub ring: Vec<InstanceModelCol>,
+    /// [`pair_out_slot`](Self::pair_out_slot). The renderer uploads
+    /// [`as_read_slice()`](ScratchColumn::as_read_slice) into ONE shared instance SSBO
+    /// bound once for the whole batch list; on an interp frame the compute overwrites
+    /// only the dynamic slots before the raster VS reads. `ring.len()` == the TOTAL
+    /// drawable count. `clear()` + scatter, backing reservation persists.
+    pub ring: ScratchColumn<InstanceModelCol>,
     /// The parallel per-instance MESH-ID (BLAS-index) lane (M3 → HW-RT): `mesh_ids[i]`
     /// is [`ring`](Self::ring) instance `i`'s `MeshHandle.0`, scattered in lock-step with
     /// `ring` (`mesh_ids.len() == ring.len()`, every slot written exactly once). Makes the
     /// instance ring directly TLAS-consumable — instance `i` → (`ring[i]` affine,
     /// `mesh_ids[i]` BLAS) — without range-searching [`batches`](Self::batches). Valid for
     /// dynamic rows (mesh identity is interpolation-invariant). Host-side only (the
-    /// AS builder reads it; the raster draw does not). `clear()` + scatter, capacity persists.
-    pub mesh_ids: Vec<u32>,
+    /// AS builder reads it; the raster draw does not). `clear()` + scatter, backing
+    /// reservation persists.
+    pub mesh_ids: ScratchColumn<u32>,
     /// The contiguous interpolation-PAIR ring (Pillar B B1) — the 96-byte
     /// [`GpuTransform3D`] of EVERY DYNAMIC (interpolated) instance, in gather order.
     /// `pair_ring.len()` == the dynamic instance count (NOT the total — static rows
     /// contribute no pair). The B2 interpolation compute pre-pass reads this slice as
     /// its `TransformPair` input SSBO. Populated by
-    /// [`gather_mixed_into`](Self::gather_mixed_into); `clear()` + scatter, capacity
-    /// persists.
-    pub pair_ring: Vec<GpuTransform3D>,
+    /// [`gather_mixed_into`](Self::gather_mixed_into); `clear()` + scatter, backing
+    /// reservation persists.
+    pub pair_ring: ScratchColumn<GpuTransform3D>,
     /// The parallel SoA lane to [`pair_ring`](Self::pair_ring): `pair_out_slot[d]` is
     /// dynamic instance `d`'s gather-assigned offset into the unified
     /// [`ring`](Self::ring) — where the interp compute must scatter its interpolated
     /// model column (the shader's `OutSlot` binding). A SEPARATE lane, NOT a widened
     /// 96-byte pair record, keeping the pair ring's dense std430 layout intact
     /// (Principle 0). `pair_out_slot.len()` == `pair_ring.len()` == the dynamic count.
-    /// `clear()` + scatter, capacity persists.
-    pub pair_out_slot: Vec<u32>,
+    /// `clear()` + scatter, backing reservation persists.
+    pub pair_out_slot: ScratchColumn<u32>,
+    /// Asset-streaming plan F8+ (owner: material-drives-albedo-too): the parallel
+    /// per-instance MATERIAL PAYLOAD lane. `material_ids[i]` is [`ring`](Self::ring)
+    /// instance `i`'s FINAL (OOB-clamped, F8 §4.2) material slot PLUS that slot's
+    /// `base_color` ([`PerInstanceMaterial`]), scattered in lock-step with `ring`
+    /// (`material_ids.len() == ring.len()`, every slot written once, the SAME
+    /// `counts[m] == 0` skip as `mesh_ids`). Read by
+    /// [`upload_instance_materials`](crate::upload::upload_instance_materials) into the
+    /// FIF-ringed instance-material SSBO the `PER_INSTANCE_MATERIAL` gbuffer VS indexes
+    /// as `instance_materials[base_instance + SV_InstanceID]` — the VS forwards both the
+    /// id (packed into `gNormal.BA`) and `base_color` (the PM fragment's `gAlbedo`
+    /// source) to the fragment. Host-side scratch; the BASE raster path never reads it.
+    /// `clear()` + scatter, backing reservation persists.
+    pub material_ids: ScratchColumn<PerInstanceMaterial>,
+    /// Asset-streaming plan F8: `true` iff ANY scattered `material_ids[i] != 0` this
+    /// gather — the per-frame `PER_INSTANCE_MATERIAL` pipeline-selection flag (an
+    /// OR-reduce fused into the scatter, O(1) extra state). RESET to `false` at the top
+    /// of every [`gather_mixed_into`](Self::gather_mixed_into): a persistent `Resource`
+    /// field must not stay sticky-true after a material is removed. `false` on every
+    /// all-default scene, so the runner binds the FROZEN base pipeline (byte-identity by
+    /// construction).
+    any_non_default_material: bool,
+    /// VG R3 piece 2 step P2-2: the parallel per-instance FLAGS lane — `inst_flags[i]` is
+    /// [`ring`](Self::ring) instance `i`'s
+    /// [`VbInstanceRow::flags`](crate::instance_model::VbInstanceRow::flags) word, scattered
+    /// in LOCK-STEP with `ring`/`mesh_ids` (`inst_flags.len() == ring.len()`, every slot
+    /// written exactly once, the SAME `counts[m] == 0` skip). Bit 0 is
+    /// [`VB_INST_FLAG_OCCLUSION_CULLING`]: set iff that instance's entity carries
+    /// [`OcclusionCulling`]; bits 1..31 are reserved and written zero.
+    ///
+    /// FUSED into the PRIMARY scatter (the `material_ids` shape), never a second walk over
+    /// the query — the marker read is one `Option<&ZST>` probe per row, which resolves to a
+    /// per-ARCHETYPE constant. Read by `sync_vb_instance_ring` into the VB instance ring;
+    /// read by nothing on the device as of P2-2.
+    /// `clear()` + scatter, backing reservation persists.
+    pub inst_flags: ScratchColumn<u32>,
+    /// VG R3 piece 2 step P2-2: the count of instances in THIS frame's ring whose
+    /// [`inst_flags`](Self::inst_flags) entry carries bit 0 — an ADD-reduce fused into the
+    /// same scatter, O(1) extra state. The frame-level STRUCTURAL conjunct of the raster
+    /// split's arming predicate (`> 0` ⇔ "the occlusion-culling capability is present in this
+    /// frame's ring"). RESET to 0 at the top of every
+    /// [`gather_mixed_into`](Self::gather_mixed_into), beside `any_non_default_material`'s
+    /// reset: a persistent `Resource` field must not stay sticky-true after the last marked
+    /// entity leaves the frame — and a sticky count here would arm the split PERMANENTLY for
+    /// the process.
+    occlusion_instances: u32,
+    /// Textured-PBR rung T6c: the parallel per-instance TEXTURED material payload
+    /// lane, mirroring `material_ids`' shape one level up ([`PerInstanceMaterialTex`]
+    /// carries `base_color`/`id` PLUS the resolved row's five bindless texture slots
+    /// PLUS the fallback metallic/roughness scalars). Populated by
+    /// [`gather_material_tex_into`](Self::gather_material_tex_into), called from
+    /// [`gather_mesh_draws`] right after the affine gather (mirrors the HW-RT
+    /// `gather_prev_ring_into` call-site pattern). `clear()` + scatter, backing
+    /// reservation persists.
+    pub material_tex: ScratchColumn<PerInstanceMaterialTex>,
+    /// The scatter write-head lane for [`material_tex`](Self::material_tex) — a
+    /// private twin of `cursors`/`prev_cursors`, reset to 0 so
+    /// [`gather_material_tex_into`](Self::gather_material_tex_into) can re-derive
+    /// each drawable's ring slot (`offsets[m] + material_tex_cursors[m]++`)
+    /// IDENTICALLY to the `ring` scatter, without disturbing `cursors`. Reused
+    /// across frames (`fit_len` re-zeros it), never a fresh allocation.
+    material_tex_cursors: ScratchColumn<u32>,
+    /// Textured-PBR rung T6c: `true` iff ANY instance scattered into
+    /// [`material_tex`](Self::material_tex) this gather carries at least one
+    /// non-zero bindless texture slot (an OR-reduce of
+    /// [`MaterialTextures::any`](crate::material::MaterialTextures::any), fused
+    /// into the [`gather_material_tex_into`](Self::gather_material_tex_into) scatter,
+    /// O(1) extra state) — the per-frame TEXTURED gbuffer pipeline-selection gate
+    /// (mirrors [`any_non_default_material`](Self::any_non_default_material)'s
+    /// shape). RESET to `false` at the top of every `gather_material_tex_into` call:
+    /// a persistent `Resource` field must not stay sticky-true after a texture is
+    /// removed. `false` on every non-textured scene, so the runner binds the
+    /// FROZEN base/pm pipeline (byte-identity by construction).
+    any_textured_material: bool,
     /// HW-RT Rung 3b: the PREVIOUS-frame instance ring — the 48-byte
     /// [`InstanceModelCol`] each drawable had LAST frame, scattered INDEX-ALIGNED with
     /// [`ring`](Self::ring) (`prev_ring[i]` is `ring[i]`'s prev-frame model). Filled from
@@ -150,36 +398,149 @@ pub struct MeshRenderScratch {
     /// (binding 1) so a moving mesh's per-object motion vector is `cur_world −
     /// prev_world`. Written ONLY when the temporal denoiser is on (the raster MV variant);
     /// on every other frame it is filled but the prev-instance ring is bound by no set.
-    /// `clear()` + scatter, capacity persists (like `ring`). Host-side only.
+    /// `clear()` + scatter, backing reservation persists (like `ring`). Host-side only.
     #[cfg(feature = "hwrt")]
-    pub prev_ring: Vec<InstanceModelCol>,
-    /// HW-RT Rung 3b: the prev-ring scatter's write-head lane — a private clone of
+    pub prev_ring: ScratchColumn<InstanceModelCol>,
+    /// HW-RT Rung 3b: the prev-ring scatter's write-head lane — a private twin of
     /// `cursors` reset to 0 so [`gather_prev_ring_into`](Self::gather_prev_ring_into) can
     /// re-derive each drawable's ring slot (`offsets[m] + prev_cursors[m]++`) IDENTICALLY
     /// to the `ring` scatter, without disturbing `cursors`. Reused across frames
-    /// (`fit_len` re-zeros it), never `Vec::new` on the hot path.
+    /// (`fit_len` re-zeros it), never a fresh allocation on the hot path.
     #[cfg(feature = "hwrt")]
-    prev_cursors: Vec<u32>,
+    prev_cursors: ScratchColumn<u32>,
+    /// Multi-paradigm render-path plan, rung R8 (Decision 0): the VB-path instance ring —
+    /// `vb_ring[i]` is [`ring`](Self::ring) instance `i`'s affine PLUS its resolved
+    /// geometry-table `mesh_id` ([`VbInstanceRow`]), built by
+    /// `sync_vb_instance_ring` ONLY when the boot-resolved path
+    /// is `VisibilityBuffer` — a Deferred/Forward boot never calls it, so this lane stays empty
+    /// (the zero-cost path-toggle discipline: an unused `ScratchColumn` costs an unbacked VA
+    /// reservation, no committed pages). `clear()` + scatter, backing reservation persists.
+    pub vb_ring: ScratchColumn<VbInstanceRow>,
 }
 
-/// Grows `v` to at least `min_len` using POW2 capacity steps (O2 — no fixed ceiling),
-/// then sets its length to exactly `min_len` (the extra capacity stays reserved). The
-/// `[min_len .. ]` tail is left at `fill` after a grow; existing `[.. old_len]` is NOT
-/// reset here (the caller zeroes lanes explicitly where it matters). Alloc-free once
-/// the capacity covers `min_len`.
-#[inline]
-fn fit_len(v: &mut Vec<u32>, min_len: usize, fill: u32) {
-    if v.capacity() < min_len {
-        // POW2 reserve keyed off the requested length (O2): reserve up to the next
-        // power of two so repeated small growths amortize, never realloc per frame.
-        let target = min_len.next_power_of_two();
-        v.reserve(target - v.len());
+/// Constructs every lane fresh: registers ONE [`boyko_ecs`] `ComponentId` per
+/// DISTINCT element type (memoized process-wide by [`register_asset_layout`] — no
+/// `World`/registry handle needed here, mirroring the asset store's F1
+/// `AssetBacking::register_layout` convention) and sizes each lane's backing
+/// `ComponentPool` at [`pool_reserve_rows`] of its element size — the kernel's
+/// standard VA-reservation-class ceiling (address space only, lazy-commit), so
+/// `MeshRenderScratch::default()` stays a valid zero-argument constructor callable
+/// from `insert_resource(MeshRenderScratch::default())` / test setup exactly as
+/// before.
+impl Default for MeshRenderScratch {
+    fn default() -> Self {
+        let u32_id = register_asset_layout::<u32>(None);
+        let batch_id = register_asset_layout::<DrawBatch>(None);
+        let model_id = register_asset_layout::<InstanceModelCol>(None);
+        let pair_id = register_asset_layout::<GpuTransform3D>(None);
+        let material_id = register_asset_layout::<PerInstanceMaterial>(None);
+        let material_tex_id = register_asset_layout::<PerInstanceMaterialTex>(None);
+
+        let u32_rows = pool_reserve_rows(std::mem::size_of::<u32>());
+        let batch_rows = pool_reserve_rows(std::mem::size_of::<DrawBatch>());
+        let model_rows = pool_reserve_rows(std::mem::size_of::<InstanceModelCol>());
+        let pair_rows = pool_reserve_rows(std::mem::size_of::<GpuTransform3D>());
+        let material_rows = pool_reserve_rows(std::mem::size_of::<PerInstanceMaterial>());
+        let material_tex_rows = pool_reserve_rows(std::mem::size_of::<PerInstanceMaterialTex>());
+        let vb_row_id = register_asset_layout::<VbInstanceRow>(None);
+        let vb_row_rows = pool_reserve_rows(std::mem::size_of::<VbInstanceRow>());
+
+        Self {
+            counts: ScratchColumn::new(u32_id, u32_rows),
+            offsets: ScratchColumn::new(u32_id, u32_rows),
+            cursors: ScratchColumn::new(u32_id, u32_rows),
+            batches: ScratchColumn::new(batch_id, batch_rows),
+            ring: ScratchColumn::new(model_id, model_rows),
+            mesh_ids: ScratchColumn::new(u32_id, u32_rows),
+            pair_ring: ScratchColumn::new(pair_id, pair_rows),
+            pair_out_slot: ScratchColumn::new(u32_id, u32_rows),
+            material_ids: ScratchColumn::new(material_id, material_rows),
+            any_non_default_material: false,
+            inst_flags: ScratchColumn::new(u32_id, u32_rows),
+            occlusion_instances: 0,
+            material_tex: ScratchColumn::new(material_tex_id, material_tex_rows),
+            material_tex_cursors: ScratchColumn::new(u32_id, u32_rows),
+            any_textured_material: false,
+            #[cfg(feature = "hwrt")]
+            prev_ring: ScratchColumn::new(model_id, model_rows),
+            #[cfg(feature = "hwrt")]
+            prev_cursors: ScratchColumn::new(u32_id, u32_rows),
+            vb_ring: ScratchColumn::new(vb_row_id, vb_row_rows),
+        }
     }
-    v.clear();
-    v.resize(min_len, fill);
+}
+
+/// Grows `col` to exactly `min_len` live elements (a fresh `clear()` + fill-push):
+/// every slot in `[0, min_len)` holds `fill` until the caller's scatter overwrites
+/// it. Unlike the old `Vec`-backed POW2-reserve dance, there is no separate
+/// capacity-growth step to amortize — `col`'s backing `ComponentPool` already
+/// reserves a [`pool_reserve_rows`]-class VA ceiling at construction, so growing
+/// `len` within it is a cheap page-commit at worst (never a realloc/move; alloc-free
+/// once the working set's pages are resident from a prior frame).
+#[inline]
+fn fit_len(col: &mut ScratchColumn<u32>, min_len: usize, fill: u32) {
+    let mut view = col.build_view();
+    view.clear();
+    for _ in 0..min_len {
+        view.push(fill);
+    }
 }
 
 impl MeshRenderScratch {
+    /// Multi-paradigm render-path plan, rung R8 (Decision 0): builds [`vb_ring`](Self::vb_ring)
+    /// from the ALREADY-scattered [`ring`](Self::ring)/[`mesh_ids`](Self::mesh_ids) pair — a
+    /// PARALLEL fold over the SAME gather output (no second ECS query, the SAME pattern
+    /// `material_ids`/`material_tex` establish one level up). For instance `i`, resolves the
+    /// asset `mesh_ids[i]` to its Decision-0 geometry-table slot via `mesh_assets`
+    /// (`MeshGpu::geometry_slot`) and packs
+    /// `VbInstanceRow::from_model_col(&ring[i], slot, inst_flags[i])`.
+    ///
+    /// VG R3 piece 2 step P2-2 added the third lane. It costs one extra sequential `u32` load
+    /// per row and no extra pass. On every scene in the tree today `inst_flags[i] == 0` (no
+    /// entity carries [`OcclusionCulling`]), which is exactly what the retired `_pad[0]`
+    /// carried — so the uploaded ring bytes are UNCHANGED, not merely equivalent.
+    ///
+    /// Call this AFTER [`gather_mesh_draws`] (or [`gather_mixed_into`](Self::gather_mixed_into))
+    /// populates `ring`/`mesh_ids` for the frame, and ONLY when the boot-resolved
+    /// [`RenderPath`](crate::render_path_config::RenderPath) is `VisibilityBuffer` — the caller's
+    /// own gate, not this fn's (mirrors every other path-conditional producer in this codebase:
+    /// the CALL SITE decides whether to run, this fn is unconditionally correct either way).
+    ///
+    /// Under a VB boot every mesh present at boot carries a real slot: the streamed loader path
+    /// and [`MeshAssetsVbExt`](crate::mesh_assets::MeshAssetsVbExt) claim one at registration,
+    /// and `backfill_vb_geometry_slots` claims one for the plain
+    /// [`MeshAssetsExt`](crate::mesh_assets::MeshAssetsExt) registrations right afterwards. A
+    /// mesh that missed all three — registered through the plain methods AFTER boot — resolves
+    /// to [`VB_GEOMETRY_RESERVED_SLOT`](crate::mesh_geometry_table::VB_GEOMETRY_RESERVED_SLOT)
+    /// here: the degenerate (zero-triangle) slot, which the compute fetch's own `tri_count`
+    /// clamp makes SAFE (never a GPU-undefined `%0`) but which draws nothing — such a mesh is
+    /// invisible to the VB renderer, and the fix is at registration (`register_mesh_vb`), not
+    /// here.
+    fn sync_vb_instance_ring(&mut self, mesh_assets: &Assets<MeshGpu>) {
+        let ring_slice = self.ring.as_read_slice();
+        let mesh_ids_slice = self.mesh_ids.as_read_slice();
+        let inst_flags_slice = self.inst_flags.as_read_slice();
+        debug_assert_eq!(
+            ring_slice.len(),
+            mesh_ids_slice.len(),
+            "invariant: ring/mesh_ids are scattered in lock-step (parallel lanes)"
+        );
+        debug_assert_eq!(
+            ring_slice.len(),
+            inst_flags_slice.len(),
+            "invariant: ring/inst_flags are scattered in lock-step (parallel lanes)"
+        );
+        let mut view = self.vb_ring.build_view();
+        view.clear();
+        for ((model, &mesh_id), &flags) in
+            ring_slice.iter().zip(mesh_ids_slice.iter()).zip(inst_flags_slice.iter())
+        {
+            let geometry_slot =
+                mesh_assets.get_by_index(mesh_id).map_or(VB_GEOMETRY_RESERVED_SLOT, |m| m.geometry_slot);
+            view.push(VbInstanceRow::from_model_col(model, geometry_slot, flags));
+        }
+    }
+
     /// The number of distinct meshes with at least one visible instance this frame —
     /// `batches.len()` after a [`gather_mixed_into`](Self::gather_mixed_into). The Principle-1
     /// one-draw-per-mesh count.
@@ -205,6 +566,45 @@ impl MeshRenderScratch {
         self.pair_ring.len()
     }
 
+    /// Asset-streaming plan F8: `true` iff ANY instance this gather carries a non-default
+    /// material id — the runner's `PER_INSTANCE_MATERIAL` raster-pipeline selection gate
+    /// (asset-streaming plan F8 §2.2). `false` on every all-default scene, so the runner
+    /// binds the byte-frozen base pipeline.
+    #[inline]
+    pub fn any_non_default_material(&self) -> bool {
+        self.any_non_default_material
+    }
+
+    /// Textured-PBR rung T6c: `true` iff ANY instance this gather carries at least one
+    /// bound bindless texture slot — the runner's TEXTURED raster-pipeline selection gate.
+    /// `false` on every non-textured scene, so the runner binds the byte-frozen base/pm
+    /// pipeline. Valid only after [`gather_material_tex_into`](Self::gather_material_tex_into)
+    /// has run this frame (called from [`gather_mesh_draws`] right after the affine gather).
+    #[inline]
+    pub fn any_textured_material(&self) -> bool {
+        self.any_textured_material
+    }
+
+    /// VG R3 piece 2 step P2-2: the number of instances in THIS frame's ring carrying
+    /// [`OcclusionCulling`] — the STRUCTURAL conjunct of the VB raster split's arming
+    /// predicate (`GBufferScene::path_vb_occlusion_split()`, P2-3). `0` on every scene in the
+    /// tree today, so the split is unarmed everywhere and the recorded pass structure is
+    /// unchanged.
+    ///
+    /// Counts instances that reached the RING, so it over-approximates the drawn set in the
+    /// harmless direction: the runner further skips batches whose mesh is not `Loaded`, so a
+    /// frame can arm the split with zero marked instances actually drawn (an armed empty
+    /// scope) — never the reverse.
+    ///
+    /// Read off the MAIN [`MeshRenderScratch`] only. `CsmCasterScratch` wraps this same type
+    /// and therefore carries its own (truthful, caster-filtered) count; that one is REDUNDANT,
+    /// never authoritative — reading it would be a SECOND frame-level predicate that can
+    /// disagree with the first.
+    #[inline]
+    pub fn occlusion_instances(&self) -> u32 {
+        self.occlusion_instances
+    }
+
     /// The UNIFIED gather core (refined-B, Decision 7): ONE count → prefix-sum →
     /// scatter over ALL drawables — static and interpolated alike — into ONE
     /// draw-ordered output [`ring`](Self::ring), recording each interpolated row's
@@ -218,10 +618,29 @@ impl MeshRenderScratch {
     /// another's batches.
     ///
     /// `mesh_count` is the registry's mesh count (sizes the per-mesh lanes, O2); `meta`
-    /// resolves a mesh id to its `(index_count, index_type)` for the emitted batch;
-    /// `iter_input` is an ITERATOR FACTORY the gather invokes TWICE (once to count, once
+    /// resolves a mesh id to its `(index_count, index_type)` for the emitted batch, or
+    /// `None` if the mesh no longer resolves (asset-streaming plan F6 FIX-2/FIX-C1: a
+    /// carrier whose mesh retired THIS frame, between `validate_asset_refs`'s
+    /// best-effort disable and this gather). A non-resolvable mesh's instances are
+    /// EXCLUDED from the ring/`mesh_ids`/prev-ring BY CONSTRUCTION (not merely
+    /// un-batched — `bucket_lanes_mixed` zeroes `counts[m]` for such a mesh, so the
+    /// scatter's `counts[m] == 0` skip covers it too): the hwrt TLAS packer
+    /// must never see a retired mesh's id in `mesh_ids`, so `count == ring.len()`
+    /// holds exactly, with no tail drop and no freed-BLAS read; `iter_input` is an
+    /// ITERATOR FACTORY the gather invokes TWICE (once to count, once
     /// to scatter) — each call returns a FRESH iterator over the same
-    /// `(mesh_id, &InstanceModelCol, Option<&GpuTransform3D>)` source. The `Option` keys
+    /// `(mesh_id, &InstanceModelCol, Option<&GpuTransform3D>, PerInstanceMaterial, bool)`
+    /// source
+    /// (asset-streaming plan F8 widened the 4th element to the row's FINAL, already
+    /// OOB-clamped material id; F8+ widens it again to a [`PerInstanceMaterial`] carrying
+    /// that slot's `base_color` alongside the id — see [`gather_mesh_draws`]'s closure).
+    /// The 5th element (VG R3 piece 2 step P2-2) is the row's OCCLUSION-CULLING capability:
+    /// `true` iff its entity carries [`OcclusionCulling`]. The caller RESOLVES it — the
+    /// caller is where the query term lives, exactly as the caller resolves the material
+    /// payload — and this core scatters it into [`inst_flags`](Self::inst_flags) and folds it
+    /// into [`occlusion_instances`](Self::occlusion_instances), so the core needs no ECS read
+    /// of its own and a hand-built test tuple needs no marker value to construct.
+    /// The `Option` keys
     /// the row's kind: `None` ⇒ STATIC (the affine is real, CPU-scattered into `ring`),
     /// `Some(pair)` ⇒ DYNAMIC (the affine is a placeholder — the interp compute
     /// overwrites this ring slot on-GPU — and the pair + its assigned ring slot are
@@ -231,18 +650,23 @@ impl MeshRenderScratch {
     /// passes FULLY MONOMORPHIC — zero virtual dispatch on the per-instance hot path
     /// (P-002/P4). An ECS [`Query`] iterator is not `Clone`, but it does not need to be:
     /// `Query::iter` borrows `&self`, so the factory simply re-runs `q.iter()` per pass
-    /// (the system wrapper [`gather_mesh_draws`] passes
-    /// `|| q.iter().map(|(h, c, g)| (h.0, c, g))`; a unit test passes a slice map). The
+    /// (the system wrapper [`gather_mesh_draws`] passes `|| q.iter().map(..)` mapping its
+    /// query row onto this Item tuple; a unit test passes a slice map). The
     /// two iterators observe the SAME rows in the SAME order (the gather is over row
     /// VALUES — mesh id + affine + pair — plus a stable per-mesh cursor, not the global
     /// row order), so the second pass's `offsets[m] + cursors[m]` assigns each row the
     /// SAME slot the count pass reserved for it.
     ///
-    /// After the call: `batches` holds one [`DrawBatch`] per non-empty mesh in mesh-id
-    /// order with the correct prefix-sum `base_instance`s; `ring` holds each mesh's
-    /// instances contiguously (`ring.len() == the total drawable count`, no overlap);
-    /// `pair_ring` / `pair_out_slot` hold the dynamic rows' pairs + ring slots
-    /// (`len() == the dynamic count`, in gather order).
+    /// After the call: `batches` holds one [`DrawBatch`] per non-empty, resolvable
+    /// mesh (mesh-id order, correct prefix-sum `base_instance`s); `ring` holds ONLY
+    /// resolvable meshes' instances, contiguously (`ring.len() == Σ instance_count`
+    /// over resolvable meshes — a non-resolvable mesh's instances are excluded
+    /// entirely, not merely un-batched, per FIX-C1 above); `pair_ring` /
+    /// `pair_out_slot` hold the dynamic rows' pairs + ring slots (`len() == the
+    /// dynamic count`, in gather order, non-resolvable rows excluded the same way);
+    /// [`inst_flags`](Self::inst_flags) holds one flags word per ring slot and
+    /// [`occlusion_instances`](Self::occlusion_instances) the count of set bit-0s among them,
+    /// both recomputed from scratch (never accumulated across frames).
     ///
     /// `debug_assert!`s catch an out-of-range `mesh_id` (a gather over a handle the
     /// registry never minted — a bundle/asset-binding bug) and pin the SoA-lane
@@ -250,35 +674,115 @@ impl MeshRenderScratch {
     /// range of the ring).
     pub fn gather_mixed_into<'a, M, F, I>(&mut self, mesh_count: usize, meta: M, iter_input: F)
     where
-        M: FnMut(u32) -> (u32, IndexType),
+        M: FnMut(u32) -> Option<(u32, IndexType)>,
         F: Fn() -> I,
-        I: Iterator<Item = (u32, &'a InstanceModelCol, Option<&'a GpuTransform3D>)>,
+        I: Iterator<
+            Item = (
+                u32,
+                &'a InstanceModelCol,
+                Option<&'a GpuTransform3D>,
+                PerInstanceMaterial,
+                bool,
+            ),
+        >,
     {
+        // Asset-streaming plan F8 §2.2 (finding 3): reset the per-frame PM
+        // pipeline-selection flag BEFORE the scatter recomputes it below — a persistent
+        // `Resource` field must not stay sticky-true after a material is removed.
+        self.any_non_default_material = false;
+        // VG R3 piece 2 step P2-2, the same reason one line up and a sharper consequence:
+        // `occlusion_instances` is the STRUCTURAL conjunct of the raster split's arming
+        // predicate, so a count left over from a frame that had a marked entity would arm the
+        // split on every later frame — permanently, for the process. Reset BEFORE the scatter
+        // recomputes it below.
+        self.occlusion_instances = 0;
+
         // Shared count → prefix-sum → batch-emit over the lanes; `bucket_lanes` touches
         // only the small `mesh_id` key (the record tuple is never read on pass 1).
         let total = self.bucket_lanes_mixed(mesh_count, meta, &iter_input);
 
-        // The output lanes are temporarily taken so the scatter closure can borrow
-        // `&self.offsets` / `&mut self.cursors` disjointly from them.
-        let mut ring = std::mem::take(&mut self.ring);
-        let mut mesh_ids = std::mem::take(&mut self.mesh_ids);
-        let mut pair_ring = std::mem::take(&mut self.pair_ring);
-        let mut pair_out_slot = std::mem::take(&mut self.pair_out_slot);
-        ring.clear();
-        ring.resize(total as usize, InstanceModelCol::zeroed());
+        // Grow `ring`/`mesh_ids` to exactly `total` live elements: a clear + fill-push
+        // loop, byte-equivalent to the old `Vec::resize(total, fill)` — every slot in
+        // `[0, total)` is written here, then overwritten exactly once by the scatter
+        // below (no slot is ever READ between the two writes), so the fill value is
+        // never observed. `ScratchColumn` has no bulk "grow to N" op; a push-loop over
+        // its already-reserved (`pool_reserve_rows`-class) backing is the equivalent —
+        // never a realloc, at worst a page-commit already amortized from a prior frame.
+        {
+            let mut ring_view = self.ring.build_view();
+            ring_view.clear();
+            for _ in 0..total {
+                ring_view.push(InstanceModelCol::zeroed());
+            }
+        }
         // The per-instance mesh-id lane is scattered in lock-step with `ring` (every slot
         // written once, so the `0` fill is fully overwritten).
-        mesh_ids.clear();
-        mesh_ids.resize(total as usize, 0);
-        // The pair lanes are re-filled by `push` (their length is the dynamic count,
-        // not `total`); `clear()` keeps the reserved capacity (Principle 5).
-        pair_ring.clear();
-        pair_out_slot.clear();
         {
-            let offsets = &self.offsets;
-            let cursors = &mut self.cursors;
-            for (mesh_id, col, maybe_pair) in iter_input() {
+            let mut mesh_ids_view = self.mesh_ids.build_view();
+            mesh_ids_view.clear();
+            for _ in 0..total {
+                mesh_ids_view.push(0u32);
+            }
+        }
+        // Asset-streaming plan F8: the parallel per-instance material-id lane grows to
+        // `total` in lock-step with `ring`/`mesh_ids` — every slot in `[0, total)` is
+        // written here, then overwritten exactly once by the scatter below.
+        {
+            let mut material_ids_view = self.material_ids.build_view();
+            material_ids_view.clear();
+            for _ in 0..total {
+                material_ids_view.push(PerInstanceMaterial::zeroed());
+            }
+        }
+        // VG R3 piece 2 step P2-2: the per-instance flags lane grows to `total` in lock-step
+        // with `ring`/`mesh_ids`/`material_ids`. The `clear()` is separately load-bearing from
+        // the scalar reset above: without it a SHRINKING ring would leave stale non-zero tail
+        // entries — never read by `sync_vb_instance_ring` (bounded by `ring.len()`) but
+        // visible to anything that reads the lane by its own length.
+        {
+            let mut inst_flags_view = self.inst_flags.build_view();
+            inst_flags_view.clear();
+            for _ in 0..total {
+                inst_flags_view.push(0u32);
+            }
+        }
+        // The pair lanes are re-filled by `push` (their length is the dynamic count,
+        // not `total`); `clear()` keeps the backing reservation (Principle 5).
+        self.pair_ring.build_view().clear();
+        self.pair_out_slot.build_view().clear();
+        {
+            // Disjoint field-projection borrows off `&mut self` / `&self` — each view
+            // borrows only its own field, so all eight coexist (the same discipline the
+            // prior `mem::take` dance achieved, without needing `ScratchColumn: Default`).
+            let mut ring_view = self.ring.build_view();
+            let ring = ring_view.as_mut_slice();
+            let mut mesh_ids_view = self.mesh_ids.build_view();
+            let mesh_ids = mesh_ids_view.as_mut_slice();
+            let mut material_ids_view = self.material_ids.build_view();
+            let material_ids = material_ids_view.as_mut_slice();
+            let mut inst_flags_view = self.inst_flags.build_view();
+            let inst_flags = inst_flags_view.as_mut_slice();
+            let mut pair_ring_view = self.pair_ring.build_view();
+            let mut pair_out_slot_view = self.pair_out_slot.build_view();
+            let offsets = self.offsets.as_read_slice();
+            let mut cursors_view = self.cursors.build_view();
+            let cursors = cursors_view.as_mut_slice();
+            let counts = self.counts.as_read_slice();
+            for (mesh_id, col, maybe_pair, final_material, occlusion_capable) in iter_input() {
                 let m = mesh_id as usize;
+                // FIX-C1 (asset-streaming plan F6): a non-resolvable mesh's instances
+                // are EXCLUDED from the ring/`mesh_ids` here — not scattered into a
+                // reserved-but-unused slot. `bucket_lanes_mixed` already zeroed this
+                // mesh's count/offset span (`counts[m] == 0` iff the mesh had no
+                // instances OR its `meta` resolved to `None` this gather — the two
+                // are indistinguishable here, and don't need to be: both mean "skip"),
+                // so `total` (== `ring.len()`, sized above) already excludes them;
+                // this skip is what keeps a retired mesh's id out of `mesh_ids`
+                // entirely, so the hwrt TLAS packer (`BlasAddr[MeshIds[i]]`) never
+                // reads a freed BLAS device address.
+                if counts[m] == 0 {
+                    continue;
+                }
                 let slot = offsets[m] + cursors[m];
                 cursors[m] += 1;
                 // STATIC rows carry the real model column; DYNAMIC rows carry a
@@ -290,47 +794,87 @@ impl MeshRenderScratch {
                 // or interpolated (interpolation touches only the affine), so it is written
                 // unconditionally for every slot (M3 → HW-RT TLAS-readiness).
                 mesh_ids[slot as usize] = mesh_id;
+                // Asset-streaming plan F8+: the material payload (id + base_color) lane is
+                // scattered in lock-step, with the SAME skip as `ring`/`mesh_ids` above. The
+                // OR-reduce is fused into this same pass (computed on the SCATTER pass only,
+                // §4.3) — the per-frame PM pipeline-selection flag, keyed off the id ONLY
+                // (base_color never gates the flag).
+                material_ids[slot as usize] = final_material;
+                self.any_non_default_material |= final_material.id != 0;
+                // VG R3 piece 2 step P2-2: the flags lane + its ADD-reduce, fused into this
+                // same scatter with the SAME skip — no second walk over the input. Both the
+                // store and the fold are branchless: a `bool` multiply/add, never an `if`.
+                inst_flags[slot as usize] =
+                    u32::from(occlusion_capable) * VB_INST_FLAG_OCCLUSION_CULLING;
+                self.occlusion_instances += u32::from(occlusion_capable);
                 if let Some(pair) = maybe_pair {
-                    pair_ring.push(*pair);
-                    pair_out_slot.push(slot);
+                    pair_ring_view.push(*pair);
+                    pair_out_slot_view.push(slot);
                 }
             }
         }
         debug_assert_eq!(
-            ring.len(),
+            self.ring.len(),
             total as usize,
             "invariant: the unified ring holds exactly Σ instance_count instances"
         );
         debug_assert_eq!(
-            mesh_ids.len(),
-            ring.len(),
+            self.mesh_ids.len(),
+            self.ring.len(),
             "invariant: the per-instance mesh-id lane is parallel to the ring (one id per instance)"
         );
         debug_assert_eq!(
-            pair_ring.len(),
-            pair_out_slot.len(),
+            self.material_ids.len(),
+            self.ring.len(),
+            "invariant: the material payload lane is parallel to the ring (one payload per instance)"
+        );
+        debug_assert_eq!(
+            self.inst_flags.len(),
+            self.ring.len(),
+            "invariant: the per-instance flags lane is parallel to the ring (one word per instance)"
+        );
+        debug_assert!(
+            self.occlusion_instances <= total,
+            "invariant: the occlusion fold counts a SUBSET of THIS frame's ring — a count \
+             above the ring length means the per-frame reset was skipped and the split would \
+             arm permanently"
+        );
+        debug_assert_eq!(
+            self.pair_ring.len(),
+            self.pair_out_slot.len(),
             "invariant: the pair ring and its out-slot lane are parallel (one entry per dynamic row)"
         );
         debug_assert!(
-            pair_out_slot.iter().all(|&s| (s as usize) < ring.len()),
+            self.pair_out_slot
+                .as_read_slice()
+                .iter()
+                .all(|&s| (s as usize) < self.ring.len()),
             "invariant: every dynamic out-slot indexes the unified ring in range"
         );
-        self.ring = ring;
-        self.mesh_ids = mesh_ids;
-        self.pair_ring = pair_ring;
-        self.pair_out_slot = pair_out_slot;
     }
 
-    /// The count → prefix-sum → batch-emit core of the unified gather (Decision 7).
+    /// The count → resolve → prefix-sum → batch-emit core of the unified gather
+    /// (Decision 7; asset-streaming plan F6 FIX-C1 adds the resolve step).
     ///
-    /// Fills `counts` (pass 1), `offsets` (each mesh's `base_instance`), zeroed
-    /// `cursors` (the scatter write-heads the caller advances), and `batches` (one
-    /// [`DrawBatch`] per non-empty mesh, mesh-id order). Returns `Σ instance_count` —
+    /// Fills `counts` (pass 1); then, per mesh (pass 2, AT MOST `mesh_count` calls
+    /// to `meta`, NEVER per-instance): resolves `meta(m)` for every mesh with a
+    /// non-zero count, and — on `None` — ZEROES `counts[m]` BEFORE the
+    /// prefix-sum runs, so a non-resolvable mesh contributes NOTHING to
+    /// `offsets`/`running` (its instances are excluded from the ring by
+    /// construction, not merely un-batched — see
+    /// [`gather_mixed_into`](Self::gather_mixed_into)'s scatter, which consults
+    /// `counts[m] == 0` per instance: the zeroing here IS the resolvability
+    /// signal, so no separate lane is needed). Fills `offsets` (each mesh's
+    /// `base_instance`), zeroed `cursors` (the scatter write-heads the caller
+    /// advances), and `batches` (one [`DrawBatch`] per resolvable non-empty mesh,
+    /// mesh-id order). Returns `Σ instance_count` over RESOLVABLE meshes only —
     /// the ring length the caller sizes its scatter to.
     ///
     /// `iter_input` is invoked ONCE here (the count pass); the caller invokes it a
     /// second time for the scatter. Only the small `mesh_id` key is touched — neither
-    /// the affine nor the `Option` pair is read on pass 1.
+    /// the affine nor the `Option` pair is read on pass 1. The resolve pass is
+    /// O(mesh_count), not O(instance_count) — `meta` is never called per-instance,
+    /// keeping the per-instance scatter a plain array index (`counts[m] == 0`).
     fn bucket_lanes_mixed<'a, M, F, I>(
         &mut self,
         mesh_count: usize,
@@ -338,15 +882,28 @@ impl MeshRenderScratch {
         iter_input: &F,
     ) -> u32
     where
-        M: FnMut(u32) -> (u32, IndexType),
+        M: FnMut(u32) -> Option<(u32, IndexType)>,
         F: Fn() -> I,
-        I: Iterator<Item = (u32, &'a InstanceModelCol, Option<&'a GpuTransform3D>)>,
+        I: Iterator<
+            Item = (
+                u32,
+                &'a InstanceModelCol,
+                Option<&'a GpuTransform3D>,
+                PerInstanceMaterial,
+                bool,
+            ),
+        >,
     {
-        // --- Pass 1: count per mesh (touches only the small MeshHandle key). ---
+        // --- Pass 1: count per mesh (touches only the small MeshHandle key). Asset-
+        // streaming plan F8 §4.3: the 4th tuple element (the OOB-clamped material id +
+        // base_color payload) is IGNORED on this pass — only the scatter pass (below, in
+        // `gather_mixed_into`) reads and scatters it. The 5th (the P2-2 occlusion capability)
+        // is ignored here for the same reason: counting it on BOTH passes would double it. ---
         fit_len(&mut self.counts, mesh_count, 0);
         {
-            let counts = &mut self.counts;
-            for (mesh_id, _col, _pair) in iter_input() {
+            let mut counts_view = self.counts.build_view();
+            let counts = counts_view.as_mut_slice();
+            for (mesh_id, _col, _pair, _material_id, _occlusion_capable) in iter_input() {
                 debug_assert!(
                     (mesh_id as usize) < mesh_count,
                     "invariant: a gathered mesh_id is in range of the registry"
@@ -355,18 +912,40 @@ impl MeshRenderScratch {
             }
         }
 
-        // --- Prefix-sum: offsets[m] = Σ counts[0..m] = mesh m's base_instance. Emit a
-        // DrawBatch per non-empty mesh (in mesh-id order). ---
+        // --- Resolve + prefix-sum: offsets[m] = Σ counts[0..m] = mesh m's
+        // base_instance (over RESOLVABLE meshes only). `meta` is called ONCE per
+        // non-empty mesh (never per-instance, asset-streaming plan F6 FIX-C1) —
+        // `None` zeroes `counts[m]` BEFORE it feeds `running`/`offsets`, so a
+        // non-resolvable mesh's instances are excluded from the ring by
+        // construction (the zeroed `counts[m]` IS the scatter's per-instance
+        // exclusion signal — `counts[m] == 0`, no separate lane needed). Emits a
+        // DrawBatch per resolvable non-empty mesh (in mesh-id order) — the SAME
+        // `meta` call drives both the batch emission and the exclusion, so there
+        // is exactly one skip mechanism.
         fit_len(&mut self.offsets, mesh_count, 0);
         fit_len(&mut self.cursors, mesh_count, 0);
-        self.batches.clear();
+        self.batches.build_view().clear();
         let mut running: u32 = 0;
+        // Disjoint field-projection borrows: `offsets`/`counts` (both `ScratchColumn<u32>`)
+        // and `batches` (`ScratchColumn<DrawBatch>`) are three DISTINCT fields of `self`, so
+        // their views coexist for the loop's duration exactly as the prior direct
+        // `self.offsets[m]` / `self.counts[m]` / `self.batches.push` field accesses did.
+        let mut offsets_view = self.offsets.build_view();
+        let offsets = offsets_view.as_mut_slice();
+        let mut counts_view = self.counts.build_view();
+        let counts = counts_view.as_mut_slice();
+        let mut batches_view = self.batches.build_view();
         for m in 0..mesh_count {
-            self.offsets[m] = running;
-            let c = self.counts[m];
-            if c != 0 {
-                let (index_count, index_type) = meta(m as u32);
-                self.batches.push(DrawBatch {
+            offsets[m] = running;
+            // A mesh with zero instances this frame needs no `meta` call — its
+            // resolvability is moot (nothing would be excluded either way).
+            let resolved = if counts[m] != 0 { meta(m as u32) } else { None };
+            if resolved.is_none() {
+                counts[m] = 0;
+            }
+            let c = counts[m];
+            if let Some((index_count, index_type)) = resolved {
+                batches_view.push(DrawBatch {
                     mesh_id: m as u32,
                     index_count,
                     index_type,
@@ -391,8 +970,10 @@ impl MeshRenderScratch {
     ///
     /// The slot arithmetic is `offsets[m] + prev_cursors[m]++` — the SAME `offsets` (this
     /// frame's prefix-sum) and the SAME per-mesh cursor advance the `ring` scatter used,
-    /// over the SAME query iteration order. So `prev_ring[slot]` lands in the SAME slot
-    /// `ring[slot]` did for that drawable — guaranteed by construction, not by luck. A
+    /// over the SAME query iteration order, INCLUDING the SAME `counts[m] == 0`
+    /// per-instance skip (asset-streaming plan F6 FIX-C1) — a row whose mesh `gather_mixed_into`
+    /// excluded from `ring` is excluded here too. So `prev_ring[slot]` lands in the SAME
+    /// slot `ring[slot]` did for that drawable — guaranteed by construction, not by luck. A
     /// `prev_cursors` lane (reset to 0 here) keeps `cursors` untouched.
     ///
     /// # Fallback (camera-only motion)
@@ -419,18 +1000,37 @@ impl MeshRenderScratch {
     {
         let total = self.ring.len();
         // A fresh cursor lane sized to the current mesh-lane length, reset to 0 (reuses the
-        // reserved capacity — no per-frame alloc). `offsets.len()` is the mesh count the
+        // backing reservation — no per-frame alloc). `offsets.len()` is the mesh count the
         // affine gather just fitted.
         fit_len(&mut self.prev_cursors, self.offsets.len(), 0);
 
-        let mut prev_ring = std::mem::take(&mut self.prev_ring);
-        prev_ring.clear();
-        prev_ring.resize(total, InstanceModelCol::zeroed());
+        // Grow `prev_ring` to exactly `total` — same clear + fill-push equivalence as
+        // `gather_mixed_into`'s `ring` grow (every slot is written once here, then
+        // overwritten exactly once by the scatter below).
         {
-            let offsets = &self.offsets;
-            let cursors = &mut self.prev_cursors;
+            let mut prev_ring_view = self.prev_ring.build_view();
+            prev_ring_view.clear();
+            for _ in 0..total {
+                prev_ring_view.push(InstanceModelCol::zeroed());
+            }
+        }
+        {
+            let mut prev_ring_view = self.prev_ring.build_view();
+            let prev_ring = prev_ring_view.as_mut_slice();
+            let offsets = self.offsets.as_read_slice();
+            let mut cursors_view = self.prev_cursors.build_view();
+            let cursors = cursors_view.as_mut_slice();
+            let counts = self.counts.as_read_slice();
             for (mesh_id, curr, maybe_prev) in iter_input() {
                 let m = mesh_id as usize;
+                // FIX-C1 (asset-streaming plan F6): mirror `gather_mixed_into`'s skip
+                // EXACTLY — a non-resolvable mesh's instances never occupied a `ring`
+                // slot, so they must not occupy a `prev_ring` slot either. The
+                // index-alignment guarantee this fn depends on requires visiting the
+                // SAME rows, in the SAME order, with the SAME skip as the affine gather.
+                if counts[m] == 0 {
+                    continue;
+                }
                 let slot = (offsets[m] + cursors[m]) as usize;
                 cursors[m] += 1;
                 // A row with a prev column carries LAST frame's affine; a row without one
@@ -442,12 +1042,144 @@ impl MeshRenderScratch {
             }
         }
         debug_assert_eq!(
-            prev_ring.len(),
+            self.prev_ring.len(),
             self.ring.len(),
             "invariant: the prev-instance ring is index-aligned with the current ring"
         );
-        self.prev_ring = prev_ring;
     }
+
+    /// Textured-PBR rung T6c: scatters the per-instance TEXTURED material payload
+    /// ([`PerInstanceMaterialTex`]) INDEX-ALIGNED with [`ring`](Self::ring), re-using
+    /// the offsets [`gather_mixed_into`](Self::gather_mixed_into) just computed — the
+    /// SAME index-alignment guarantee `gather_prev_ring_into` (feature = "hwrt")
+    /// documents (the SAME `offsets`, the SAME per-mesh cursor advance via a PRIVATE
+    /// cursor lane (`material_tex_cursors`), the SAME `counts[m] ==
+    /// 0` skip). Call IMMEDIATELY after `gather_mixed_into` on the SAME frame, with a
+    /// factory yielding the SAME rows in the SAME order as the affine gather's factory.
+    ///
+    /// `material_id` is the row's ALREADY-RESOLVED id, and the caller MUST obtain it from
+    /// the SAME `resolve_material_id` call the affine gather's
+    /// [`PerInstanceMaterial::id`] came from — both the F8 OOB clamp AND the prereq (d)
+    /// `get_by_index -> None => 0` construction guard. This lane and `material_ids` are
+    /// index-aligned and are read by different shaders against the same `Materials` SSBO,
+    /// so an id computed independently here is a per-instance disagreement (the fix-pass
+    /// BLOCKING finding: this closure once carried the clamp alone and shipped a raw
+    /// Loading-slot id).
+    ///
+    /// `materials` resolves each row's `base_color`/`metallic`/`roughness` +
+    /// [`MaterialTextures`] bindless slots; `default_base_color`/`default_metallic`/
+    /// `default_roughness` are the pinned default's parameters (mirrors
+    /// [`gather_mesh_draws`]'s own precompute — Principle 1: the `id == 0` fast path
+    /// needs no per-instance store lookup). Also (re)computes
+    /// [`any_textured_material`](Self::any_textured_material) — an OR-reduce of
+    /// [`MaterialTextures::any`] fused into this scatter, RESET to `false` at the top
+    /// of every call (a persistent `Resource` field must not stay sticky-true after a
+    /// texture is removed).
+    ///
+    /// Called from [`gather_mesh_draws`] right after the affine gather (mirrors the
+    /// HW-RT `gather_prev_ring_into` call-site pattern); the existing `material_ids`
+    /// scatter in [`gather_mixed_into`](Self::gather_mixed_into) is untouched by this
+    /// method.
+    pub fn gather_material_tex_into<F, J>(
+        &mut self,
+        materials: &Assets<Material>,
+        default_base_color: [f32; 4],
+        default_metallic: f32,
+        default_roughness: f32,
+        iter_input: F,
+    ) where
+        F: Fn() -> J,
+        J: Iterator<Item = (u32, u32)>,
+    {
+        self.any_textured_material = false;
+
+        let total = self.ring.len();
+        // A fresh cursor lane sized to the current mesh-lane length, reset to 0 —
+        // mirrors `gather_prev_ring_into`'s `prev_cursors` re-derivation exactly.
+        fit_len(&mut self.material_tex_cursors, self.offsets.len(), 0);
+
+        // Grow `material_tex` to exactly `total` — same clear + fill-push equivalence
+        // as `gather_mixed_into`'s `ring`/`material_ids` grow.
+        {
+            let mut view = self.material_tex.build_view();
+            view.clear();
+            for _ in 0..total {
+                view.push(PerInstanceMaterialTex::zeroed());
+            }
+        }
+        {
+            let mut view = self.material_tex.build_view();
+            let material_tex = view.as_mut_slice();
+            let offsets = self.offsets.as_read_slice();
+            let mut cursors_view = self.material_tex_cursors.build_view();
+            let cursors = cursors_view.as_mut_slice();
+            let counts = self.counts.as_read_slice();
+            for (mesh_id, material_id) in iter_input() {
+                let m = mesh_id as usize;
+                // FIX-C1 (asset-streaming plan F6): mirror `gather_mixed_into`'s skip
+                // EXACTLY — see `gather_prev_ring_into`'s identical comment.
+                if counts[m] == 0 {
+                    continue;
+                }
+                let slot = (offsets[m] + cursors[m]) as usize;
+                cursors[m] += 1;
+                // Principle 1 (review O1 fix): `material_id == 0` (the pinned default —
+                // every all-default / non-textured-material instance) short-circuits the
+                // store lookup entirely, mirroring `gather_mesh_draws`'s own `id == 0 ->
+                // default_base_color` fast path — the doc above claims this; this is what
+                // makes it true. The slot is ALWAYS written (never skipped): an id-0 row
+                // still needs its `PerInstanceMaterialTex` populated with the pinned
+                // default's REAL parameters (not the zeroed init the `view.push` loop
+                // above filled it with).
+                let (base_color, metallic, roughness, textures) = if material_id == 0 {
+                    (default_base_color, default_metallic, default_roughness, MaterialTextures::NONE)
+                } else {
+                    let row = materials.get_by_index(material_id);
+                    (
+                        row.map_or(default_base_color, |mat| mat.gpu.base_color),
+                        row.map_or(default_metallic, |mat| mat.gpu.metallic()),
+                        row.map_or(default_roughness, |mat| mat.gpu.roughness()),
+                        row.map_or(MaterialTextures::NONE, |mat| mat.textures),
+                    )
+                };
+                self.any_textured_material |= textures.any();
+                material_tex[slot] = PerInstanceMaterialTex {
+                    base_color,
+                    material_id,
+                    albedo: textures.albedo,
+                    normal: textures.normal,
+                    metal_rough: textures.metal_rough,
+                    ao: textures.ao,
+                    emissive: textures.emissive,
+                    metallic,
+                    roughness,
+                };
+            }
+        }
+        debug_assert_eq!(
+            self.material_tex.len(),
+            self.ring.len(),
+            "invariant: the textured material payload lane is index-aligned with the ring"
+        );
+    }
+}
+
+/// Multi-paradigm render-path plan, rung R8 (Decision 0): the ECS-native SYSTEM wrapper over
+/// `MeshRenderScratch::sync_vb_instance_ring` — a `NonSendRes<Assets<MeshGpu>>` + a
+/// `ResMut<MeshRenderScratch>` are TWO DISJOINT resources (a NonSend asset table and a plain
+/// Resource), so the scheduler's own disjoint-borrow machinery is what makes calling THIS
+/// system sound; a manual `World::resource_mut` + `World::non_send_resource` pair through the
+/// SAME `&mut World` handle cannot express the split safely. `boyko_app::runner` drives this via
+/// `World::run_system`, the SAME one-shot-system idiom `upload_material_assets`/
+/// `upload_mesh_assets` already use for their own boot-time asset drains, gated on the
+/// boot-resolved path being `VisibilityBuffer` (Decision 1's own "call-site decides" discipline —
+/// this system itself is unconditionally correct either way).
+#[allow(clippy::needless_pass_by_value)]
+pub fn sync_vb_instance_ring_system(
+    mesh_assets: NonSendRes<Assets<MeshGpu>>,
+    mut scratch: ResMut<MeshRenderScratch>,
+) {
+    scratch.sync_vb_instance_ring(&mesh_assets);
 }
 
 /// The ECS-native M3 gather SYSTEM: buckets every visible
@@ -456,10 +1188,62 @@ impl MeshRenderScratch {
 /// resource (Principle 0 — instances from spawned entities via the query, not an
 /// ad-hoc buffer).
 ///
-/// The query is filtered on `Enabled<RenderEnabled>` (the `Visibility::Hidden` gate),
-/// so a hidden row never enters a bucket. The [`MeshRegistry`] (a `NonSend` resource)
-/// supplies the mesh count (sizes the lanes, O2) + each batch's `(index_count,
-/// index_type)`.
+/// The queries are filtered on `Enabled<RenderEnabled>` (the `Visibility::Hidden` gate),
+/// so a hidden row never enters a bucket, AND on `Disabled<RenderStale>` (asset-streaming
+/// plan prereq (b)), so a row whose mesh `validate_asset_refs` marked stale THIS frame
+/// never enters one either — two independent bits with two independent owners. The
+/// world's [`Assets<MeshGpu>`] (a `NonSend` resource) supplies the mesh count (sizes the
+/// lanes, O2) + each batch's `(index_count, index_type)`.
+///
+/// # Stale-material substitution by query split (asset-streaming plan prereq (d))
+///
+/// Two queries with IDENTICAL data and complementary `MaterialStale` terms feed ONE
+/// chained iterator: `q_ok` (`Disabled<MaterialStale>`) yields each row's real, guarded
+/// material; `q_mat_stale` (`Enabled<MaterialStale>`) yields the same row shape with the
+/// pinned default material (slot 0, the default colour) substituted. Every pass walks the
+/// SAME `q_ok.chain(q_mat_stale)` row sequence — the count + scatter, the
+/// textured-payload scatter, and under `hwrt` the prev-ring scatter — so every lane stays
+/// index-aligned by construction.
+///
+/// ⚠️ Those passes are SEPARATE closures over that one sequence, not one shared factory:
+/// each `iter_input` has a different `Item` type (the affine gather yields the 5-tuple, the
+/// textured scatter `(mesh_id, material_id)`, the prev-ring scatter `(mesh_id, curr,
+/// prev)`). What must agree between them is therefore agreed EXPLICITLY, by calling ONE
+/// function: the material id both instance lanes ship comes from
+/// `resolve_material_id`. (A fix-pass finding: while each closure computed its own
+/// clamp, the textured lane shipped a raw Loading-slot id that the primary lane guarded to
+/// 0 — two index-aligned lanes disagreeing per instance.)
+///
+/// No `Entity`-in-query, no per-row world probe, no extra pass: a stale row costs the
+/// second query's iteration setup, a stale-free scene costs two per-row bit tests over
+/// ABSENT pages (always true) — `q_ok` then yields exactly the pre-split rows in the
+/// pre-split archetype order and the chained tail is empty, which is the goldens'
+/// byte-identity argument.
+///
+/// # The Loading-slot construction guard (prereq (d), mirror of F6 FIX-2)
+///
+/// For a non-default id `resolve_material_id` resolves `get_by_index(id)`; `None` maps
+/// the id itself to `0` — not only the colour. Before this the colour fell back but the
+/// RAW id shipped to the shader and read a hole row of the material SSBO. Zero cost (the
+/// lookup already ran) and independent of validate's timing: a carrier bound to a
+/// `reserve()`d slot on its spawn frame (no epoch bump ⇒ validate does not run) never
+/// ships a hole id. BOTH instance lanes call it (see the ⚠️ above).
+///
+/// WHICH states resolve to `None` is [`Assets::get_by_index`]'s contract, not this
+/// module's: `Loading`, `Failed`, `Vacant`, and a `Loading → Retiring` row (a reservation
+/// abandoned before its fill) are unresolvable, but a `Loaded → Retiring` row still
+/// resolves — `STATE_RETIRING` consults the `live` bitset, so the value is present until
+/// the fence-gated `retire`. A carrier that binds a still-live retiring slot therefore
+/// ships its real id and reads the not-yet-retired value, which is SAFE and deliberate
+/// (it mirrors the mesh lane's `try_get` contract); the eventual `retire` bumps
+/// `install_epoch`, so validate then marks the carrier `MaterialStale` and the
+/// substitution takes over. `MaterialStale` likewise remains the GEN-mismatch guard — a
+/// reused slot resolves to the NEW tenant, which only the generation lane detects.
+///
+/// # Registration — through [`add_gather_mesh_draws`] only (prereq (c))
+///
+/// The host registers this system via [`add_gather_mesh_draws`], which pins it
+/// `.after_set(AssetValidateSet)` so it reads THIS frame's stale bits; see that helper.
 ///
 /// # Static + interpolated in ONE gather (refined-B — the R5 review P0 fix)
 ///
@@ -499,7 +1283,7 @@ impl MeshRenderScratch {
 /// `Option`, so it never restricts archetype matching — a scene without the column yields
 /// `None` for every row). Immediately after the unified gather the system re-scatters that
 /// prev column INDEX-ALIGNED with the ring via
-/// [`gather_prev_ring_into`](MeshRenderScratch::gather_prev_ring_into) (reusing the SAME
+/// `MeshRenderScratch::gather_prev_ring_into` (reusing the SAME
 /// offsets over the SAME query order — alignment guaranteed by construction). A row without
 /// a prev column falls back to its current affine (camera-only motion). The prev ring is
 /// bound by the gbuffer MV pipeline only when the temporal denoiser is on; otherwise it is
@@ -507,60 +1291,333 @@ impl MeshRenderScratch {
 /// pre-Rung-3b system verbatim.
 #[cfg(not(feature = "hwrt"))]
 #[allow(clippy::needless_pass_by_value)]
+// `clippy::type_complexity`: this IS the ECS query contract — the 5-term tuple + the
+// `(Enabled<RenderEnabled>, Disabled<RenderStale>, Disabled<MaterialStale>)` filter is the
+// system's `SystemParam` signature, which the scheduler reads to derive access (mirrors
+// the hwrt variant's identical justification; asset-streaming plan F8's material term
+// tips this variant over the threshold too).
+#[allow(clippy::type_complexity)]
 pub fn gather_mesh_draws(
-    q: Query<
-        (&MeshHandle, &InstanceModelCol, Option<&GpuTransform3D>),
-        Enabled<RenderEnabled>,
+    q_ok: Query<
+        (
+            &MeshHandle,
+            &InstanceModelCol,
+            Option<&GpuTransform3D>,
+            Option<&MaterialHandle>,
+            // VG R3 piece 2 step P2-2 — the occlusion-culling capability, read NON-FILTERING.
+            // `Option<&T>` never drops and never reorders a row, which is what keeps the
+            // scatter in lock-step with the instance ring; `With<T>` / `Enabled<T>` both
+            // FILTER, and a filtered gather would silently RENUMBER the ring. Under table
+            // storage this term also declares a real shared read of the component id to the
+            // scheduler — the query tuple IS the access contract.
+            Option<&OcclusionCulling>,
+        ),
+        (Enabled<RenderEnabled>, Disabled<RenderStale>, Disabled<MaterialStale>),
     >,
-    registry: NonSendRes<MeshRegistry>,
+    // Asset-streaming plan prereq (d): the SAME data under the complementary material
+    // term — rows whose material is stale, drawn with the pinned default (see the doc).
+    q_mat_stale: Query<
+        (
+            &MeshHandle,
+            &InstanceModelCol,
+            Option<&GpuTransform3D>,
+            Option<&MaterialHandle>,
+            Option<&OcclusionCulling>,
+        ),
+        (Enabled<RenderEnabled>, Disabled<RenderStale>, Enabled<MaterialStale>),
+    >,
+    mesh_assets: NonSendRes<Assets<MeshGpu>>,
     mut scratch: ResMut<MeshRenderScratch>,
+    material_assets: Res<Assets<Material>>,
 ) {
-    let mesh_count = registry.len();
+    // asset-streaming plan F5: `high_water()`, not `len()` — a live `MeshHandle.0`
+    // can exceed the live COUNT once a hole exists (a freed-then-not-yet-reused
+    // slot); `high_water()` is the true index ceiling the bucket lanes must size to.
+    let mesh_count = mesh_assets.high_water();
+    // Asset-streaming plan F8 §4.2: the OOB clamp ceiling, read ONCE per system run — a
+    // raw material slot >= this (garbage / never-minted handle) clamps to the PINNED
+    // default slot 0 (a live, valid row, never a zeroed hole). Captured `Copy` into the
+    // closure below, so both `iter_input()` passes (count + scatter, F8 §4.3) see the
+    // IDENTICAL ceiling within this one system run.
+    let material_high_water = material_assets.high_water() as u32;
+    // Asset-streaming plan F8+ (owner: material-drives-albedo-too): a plain reference
+    // (not the `Res` wrapper) so the `move` closure below can COPY it into a fresh
+    // inner closure on each of the two `iter_input()` invocations (`Res` itself does
+    // not derive `Copy`; `&Assets<Material>` does).
+    let material_table: &Assets<Material> = &material_assets;
+    // Principle 1 (F8+ reviewer M1/M2): the default material's `base_color`, computed ONCE.
+    // The `id == 0` fast path in the closure then needs NO per-instance store lookup — the
+    // common / all-default / golden scene does zero material work — and the not-Loaded
+    // fallback agrees with the pinned default's color (M2) instead of a stray mid-gray. Reads
+    // slot 0's ACTUAL base_color ONCE (id 0 = the "default material" = whatever is pinned at
+    // slot 0 — the slot-0-never-retires invariant), so it tracks the real default, not a
+    // hardcoded `Material::default()` guess.
+    let default_base_color =
+        material_table.get_by_index(0).map_or([0.8, 0.8, 0.8, 1.0], |m| m.gpu.base_color);
     scratch.gather_mixed_into(
         mesh_count,
+        // INVARIANT (asset-streaming plan F6 FIX-2): never dereference a non-Loaded
+        // slot. `try_get` + `None` lets `gather_mixed_into` skip ONLY this bucket's
+        // batch (see its doc) — a graceful, construction-guaranteed skip that does
+        // not depend on `validate_asset_refs` (a best-effort net) having caught this
+        // mesh's retire in time.
         |mesh_id| {
-            let m = registry.get(MeshHandle(mesh_id));
-            (m.index_count, m.index_type)
+            let m = mesh_assets.try_get(MeshHandle(mesh_id))?;
+            Some((m.index_count, m.index_type))
         },
-        || q.iter().map(|(h, col, pair)| (h.0, col, pair)),
+        // Slot resolved by index. Mesh staleness is EXCLUDED by the `Disabled<RenderStale>`
+        // term (validate_asset_refs marked it earlier this frame — the `AssetValidateSet`
+        // edge); material staleness is SUBSTITUTED by the chained `q_mat_stale` tail.
+        || {
+            q_ok.iter()
+                .map(move |(h, col, pair, mat_h, occ)| {
+                    // ONE guarded resolution, shared with the textured-payload scatter
+                    // below (see `resolve_material_id`): the F8 OOB clamp AND the prereq
+                    // (d) construction guard, so both index-aligned lanes ship the SAME id.
+                    let (id, base_color) = resolve_material_id(
+                        material_table,
+                        material_high_water,
+                        default_base_color,
+                        mat_h,
+                    );
+                    let material = PerInstanceMaterial { base_color, id, _pad: [0; 3] };
+                    // VG R3 piece 2 step P2-2: PRESENCE is the whole datum, so the `Option<&ZST>`
+                    // collapses to a `bool` here and the shared gather core scatters/folds it.
+                    (h.0, col, pair, material, occ.is_some())
+                })
+                .chain(q_mat_stale.iter().map(move |(h, col, pair, _mat_h, occ)| {
+                    // Prereq (d): the stale material is substituted by the pinned default.
+                    let material =
+                        PerInstanceMaterial { base_color: default_base_color, id: 0, _pad: [0; 3] };
+                    (h.0, col, pair, material, occ.is_some())
+                }))
+        },
+    );
+    // Textured-PBR rung T6c: the parallel TEXTURED material-payload scatter — a SECOND,
+    // index-aligned pass over the SAME query (mirrors HW-RT's `gather_prev_ring_into`
+    // call-site shape), re-using the offsets `gather_mixed_into` just fixed. Unlike PM's
+    // `material_ids` (fused into the PRIMARY scatter above, zero extra passes), this walks
+    // the query again — the id==0 fast path still needs no per-instance store lookup
+    // (Principle 1), but a non-textured scene still pays the O(N) walk itself; the flag
+    // this call computes (`any_textured_material`) gates the (costlier) upload below.
+    let default_metallic = material_table.get_by_index(0).map_or(0.0, |m| m.gpu.metallic());
+    let default_roughness = material_table.get_by_index(0).map_or(0.5, |m| m.gpu.roughness());
+    scratch.gather_material_tex_into(
+        material_table,
+        default_base_color,
+        default_metallic,
+        default_roughness,
+        || {
+            q_ok.iter()
+                .map(move |(h, _col, _pair, mat_h, _occ)| {
+                    // THE SAME guarded resolution the primary lane above ran — not a
+                    // second, independently-written clamp. `PerInstanceMaterialTex::
+                    // material_id` indexes the same `Materials` SSBO from the textured
+                    // shaders, so a guard on one lane only is a per-instance disagreement.
+                    let (id, _base_color) = resolve_material_id(
+                        material_table,
+                        material_high_water,
+                        default_base_color,
+                        mat_h,
+                    );
+                    (h.0, id)
+                })
+                .chain(q_mat_stale.iter().map(|(h, _col, _pair, _mat_h, _occ)| (h.0, 0u32)))
+        },
     );
 }
 
+/// The ONE guarded material resolution BOTH per-instance lanes read (asset-streaming plan
+/// prereq (d) — the fix-pass BLOCKING finding).
+///
+/// # Why a shared fn and not two closures that "do the same thing"
+///
+/// [`gather_mesh_draws`] scatters the material twice into two INDEX-ALIGNED lanes that two
+/// different shaders read: [`PerInstanceMaterial::id`] (the base VB / PM path) and
+/// [`PerInstanceMaterialTex::material_id`] (the TEXTURED path —
+/// `vb_shade.comp.hlsl`'s `Materials[pmt.material_id]`, `gbuffer_mrt.vs.hlsl`'s
+/// `output.tex_mat_id`). Both index the SAME `Materials` SSBO. When the guard lived
+/// inline in the primary closure only, the textured closure kept the bare F8 clamp
+/// (`raw >= high_water -> 0`) and shipped the RAW id of a `reserve()`d / `Failed` /
+/// `Vacant` slot — the two lanes disagreed per instance and the hole id the primary lane
+/// is guarded against reached the shader on every textured path. One function, called
+/// from both, makes the agreement structural instead of a duplicated-edit convention.
+///
+/// # The two guards, in order
+///
+/// 1. F8 §4.2 OOB clamp: a raw slot `>= material_high_water` (garbage / never-minted
+///    handle) clamps to the pinned default 0 — a live, valid row, never a zeroed hole.
+/// 2. Prereq (d) construction guard (mirror of F6 FIX-2): for a non-default id,
+///    `get_by_index` resolving to `None` maps the ID ITSELF to 0, not only the colour.
+///    Zero cost (the lookup already had to run for the colour) and independent of
+///    `validate_asset_refs`' timing: a carrier bound to a `reserve()`d slot on its spawn
+///    frame (no epoch bump ⇒ validate does not run) never ships a hole id.
+///
+/// `id == 0` (the pinned default — every all-default / golden scene) short-circuits the
+/// store lookup entirely (Principle 1). [`MaterialStale`] remains the GEN-mismatch guard:
+/// a REUSED slot resolves to the NEW tenant, which only the generation lane detects.
+#[inline]
+fn resolve_material_id(
+    material_table: &Assets<Material>,
+    material_high_water: u32,
+    default_base_color: [f32; 4],
+    mat_h: Option<&MaterialHandle>,
+) -> (u32, [f32; 4]) {
+    let raw = mat_h.map_or(0u32, |m| u32::from(m.0));
+    let clamped = if raw >= material_high_water { 0 } else { raw };
+    if clamped == 0 {
+        return (0, default_base_color);
+    }
+    match material_table.get_by_index(clamped) {
+        Some(m) => (clamped, m.gpu.base_color),
+        None => (0, default_base_color),
+    }
+}
+
+/// Registers [`gather_mesh_draws`] pinned `.after_set(`[`AssetValidateSet`]`)` and hands the
+/// caller the `SystemConfig` to chain its own edges on (`.after(pack)`, `.after(snap)`) —
+/// the exact [`add_gpu_transform_pack`](crate::gpu_transform_pack::add_gpu_transform_pack)
+/// shape (asset-streaming plan prereq (c)).
+///
+/// # Why a by-name set inside a consumer-side helper
+///
+/// `validate_asset_refs` is registered by `AssetRefcountPlugin` in ITS OWN
+/// `add_systems_cfg` closure; the gather lives in the host's later closure. A
+/// `SystemKey` edge cannot cross that boundary (`SystemKey` is `pub(crate)` to
+/// `boyko_ecs`, and the target does not exist yet at the plugin's build time), so the
+/// F5 shape pinned validate → gather by ADD-ORDER only — deterministic but emergent. The
+/// set edge holds regardless of add-order, and — unlike an edge chained inside the host
+/// closure — it is provable in a bare `App` through the builder's cycle detection
+/// (`tests/asset_validate_schedule_edge.rs` turns red the moment this `.after_set` is
+/// dropped). Every raw-`MeshHandle.0` consumer MUST be registered through a helper of
+/// this shape; a host that registers the gather without `AssetRefcountPlugin` gets the
+/// scheduler's memberless-set warning, which is the correct diagnosis (no validate).
+#[inline]
+pub fn add_gather_mesh_draws(builder: &mut ScheduleBuilder) -> SystemConfig<'_> {
+    builder.add_system(gather_mesh_draws).after_set(AssetValidateSet)
+}
+
 /// The HW-RT Rung 3b variant of [`gather_mesh_draws`] (see that fn's docs): identical
-/// bucketed gather PLUS the prev-instance ring scatter. The affine gather reads only
-/// `(MeshHandle, InstanceModelCol, GpuTransform3D)` — the prev term is read solely by the
-/// second, index-aligned scatter, so the ring / mesh-id / pair lanes are byte-identical to
-/// the non-hwrt gather (the OFF path never diverges).
+/// bucketed gather (now including the asset-streaming plan F8 material-id clamp) PLUS the
+/// prev-instance ring scatter. The prev term is read solely by the second, index-aligned
+/// scatter, so the ring / mesh-id / material-id / inst-flags / pair lanes are byte-identical
+/// to the non-hwrt gather (the OFF path never diverges) — which is why the VG R3 P2-2
+/// occlusion term is added to BOTH variants identically rather than only to the one a plain
+/// `cargo check` compiles.
 #[cfg(feature = "hwrt")]
 #[allow(clippy::needless_pass_by_value)]
-// `clippy::type_complexity`: this IS the ECS query contract — the 4-term tuple + the
-// `Enabled<RenderEnabled>` filter is the system's `SystemParam` signature, which the scheduler
-// reads to derive access. Factoring it into a `type` alias would only hide the access set from a
-// reader (and the alias could not carry the elided lifetime cleanly). The 3-term non-hwrt variant
-// stays under the threshold; the 4th (`Option<&PrevInstanceModelCol>`) tips it only under hwrt.
+// `clippy::type_complexity`: this IS the ECS query contract — the 6-term tuple + the
+// `(Enabled<RenderEnabled>, Disabled<RenderStale>, Disabled<MaterialStale>)` filter is the
+// system's `SystemParam` signature, which the scheduler reads to derive access. Factoring it
+// into a `type` alias would only hide the access set from a reader (and the alias could not
+// carry the elided lifetime cleanly). Both variants now carry the asset-streaming plan F8
+// material term, so both need this `#[allow]` (mirrors the non-hwrt variant's identical
+// justification); the hwrt variant's EXTRA `Option<&PrevInstanceModelCol>` term is what makes
+// it a 6-tuple rather than the non-hwrt variant's 5-tuple.
 #[allow(clippy::type_complexity)]
 pub fn gather_mesh_draws(
-    q: Query<
+    q_ok: Query<
         (
             &MeshHandle,
             &InstanceModelCol,
             Option<&GpuTransform3D>,
             Option<&crate::instance_model::PrevInstanceModelCol>,
+            Option<&MaterialHandle>,
+            // VG R3 piece 2 step P2-2 — see the non-hwrt variant's comment above. Added
+            // IDENTICALLY on both legs: the lane contract says the OFF path never diverges.
+            Option<&OcclusionCulling>,
         ),
-        Enabled<RenderEnabled>,
+        (Enabled<RenderEnabled>, Disabled<RenderStale>, Disabled<MaterialStale>),
     >,
-    registry: NonSendRes<MeshRegistry>,
+    // Asset-streaming plan prereq (d) — see the non-hwrt variant's comment above.
+    q_mat_stale: Query<
+        (
+            &MeshHandle,
+            &InstanceModelCol,
+            Option<&GpuTransform3D>,
+            Option<&crate::instance_model::PrevInstanceModelCol>,
+            Option<&MaterialHandle>,
+            Option<&OcclusionCulling>,
+        ),
+        (Enabled<RenderEnabled>, Disabled<RenderStale>, Enabled<MaterialStale>),
+    >,
+    mesh_assets: NonSendRes<Assets<MeshGpu>>,
     mut scratch: ResMut<MeshRenderScratch>,
     denoise: Res<crate::ShadowDenoiseConfig>,
+    material_assets: Res<Assets<Material>>,
 ) {
-    let mesh_count = registry.len();
+    // asset-streaming plan F5: `high_water()`, not `len()` — see the non-hwrt
+    // variant's comment above.
+    let mesh_count = mesh_assets.high_water();
+    // Asset-streaming plan F8 §4.2: the OOB clamp ceiling — see the non-hwrt variant's
+    // comment above.
+    let material_high_water = material_assets.high_water() as u32;
+    // Asset-streaming plan F8+ (owner: material-drives-albedo-too) — see the non-hwrt
+    // variant's comment above.
+    let material_table: &Assets<Material> = &material_assets;
+    // Principle 1 (F8+ reviewer M1/M2) — see the non-hwrt variant's comment above.
+    let default_base_color =
+        material_table.get_by_index(0).map_or([0.8, 0.8, 0.8, 1.0], |m| m.gpu.base_color);
     scratch.gather_mixed_into(
         mesh_count,
+        // INVARIANT (asset-streaming plan F6 FIX-2): never dereference a non-Loaded
+        // slot — see the non-hwrt variant's comment above.
         |mesh_id| {
-            let m = registry.get(MeshHandle(mesh_id));
-            (m.index_count, m.index_type)
+            let m = mesh_assets.try_get(MeshHandle(mesh_id))?;
+            Some((m.index_count, m.index_type))
         },
-        || q.iter().map(|(h, col, pair, _prev)| (h.0, col, pair)),
+        // Slot resolved by index; mesh staleness excluded by `Disabled<RenderStale>`,
+        // material staleness substituted by the chained tail — see the non-hwrt variant.
+        || {
+            q_ok.iter()
+                .map(move |(h, col, pair, _prev, mat_h, occ)| {
+                    // ONE guarded resolution shared with the textured scatter below —
+                    // see the non-hwrt variant and `resolve_material_id`.
+                    let (id, base_color) = resolve_material_id(
+                        material_table,
+                        material_high_water,
+                        default_base_color,
+                        mat_h,
+                    );
+                    let material = PerInstanceMaterial { base_color, id, _pad: [0; 3] };
+                    // VG R3 piece 2 step P2-2 — see the non-hwrt variant's comment above.
+                    (h.0, col, pair, material, occ.is_some())
+                })
+                .chain(q_mat_stale.iter().map(move |(h, col, pair, _prev, _mat_h, occ)| {
+                    let material =
+                        PerInstanceMaterial { base_color: default_base_color, id: 0, _pad: [0; 3] };
+                    (h.0, col, pair, material, occ.is_some())
+                }))
+        },
+    );
+    // Textured-PBR rung T6c — see the non-hwrt variant's comment above. NOT gated on
+    // `feature = "hwrt"`-specific state: materials/textures are device-agnostic (the PM
+    // precedent), and even under a hardware-ROUTED resolve (RT device, not forced-software)
+    // the raster still writes gAlbedo/gNormal from sampled textures — only the SCALAR
+    // metallic/roughness/AO/emissive silently fall back to `Materials[id].mrr` there, since
+    // `gPbr` is a software-resolve-only binding (T6a plan Decision D1).
+    let default_metallic = material_table.get_by_index(0).map_or(0.0, |m| m.gpu.metallic());
+    let default_roughness = material_table.get_by_index(0).map_or(0.5, |m| m.gpu.roughness());
+    scratch.gather_material_tex_into(
+        material_table,
+        default_base_color,
+        default_metallic,
+        default_roughness,
+        || {
+            q_ok.iter()
+                .map(move |(h, _col, _pair, _prev, mat_h, _occ)| {
+                    // THE SAME guarded resolution the primary lane ran — see the
+                    // non-hwrt variant's comment and `resolve_material_id`.
+                    let (id, _base_color) = resolve_material_id(
+                        material_table,
+                        material_high_water,
+                        default_base_color,
+                        mat_h,
+                    );
+                    (h.0, id)
+                })
+                .chain(q_mat_stale.iter().map(|(h, _col, _pair, _prev, _mat_h, _occ)| (h.0, 0u32)))
+        },
     );
     // The prev-instance ring is bound ONLY by the temporal-MV raster pipeline, so the O(N)
     // prev-scatter is pure waste on a temporal-OFF frame (the default `mode ∈ {None, Spatial}`).
@@ -569,7 +1626,13 @@ pub fn gather_mesh_draws(
     // here (`EnginePlugins` adds `ShadowDenoisePlugin` alongside this system). When ON, the
     // re-scatter reuses the SAME offsets over the SAME query order ⇒ index-aligned with `ring`.
     if denoise.temporal_enabled() {
-        scratch.gather_prev_ring_into(|| q.iter().map(|(h, col, _pair, prev)| (h.0, col, prev)));
+        // The SAME `q_ok ... chain(q_mat_stale ...)` shape as the primary scatter, so the
+        // prev ring stays index-aligned with `ring` across the substitution tail too.
+        scratch.gather_prev_ring_into(|| {
+            q_ok.iter()
+                .map(|(h, col, _pair, prev, _mat, _occ)| (h.0, col, prev))
+                .chain(q_mat_stale.iter().map(|(h, col, _pair, prev, _mat, _occ)| (h.0, col, prev)))
+        });
     }
 }
 
@@ -594,14 +1657,16 @@ mod tests {
 
     /// A fake registry `meta`: every mesh `m` has `index_count = 6 * (m + 1)` and
     /// alternating index width (mesh 0 → Uint16, mesh 1 → Uint32, …) to exercise the
-    /// O3 mixed-width batch carry.
-    fn meta(mesh_id: u32) -> (u32, IndexType) {
+    /// O3 mixed-width batch carry. Always `Some` — these existing suites exercise the
+    /// "every mesh resolves" path; the F6 FIX-2 `None` (skipped-bucket) path is a
+    /// dedicated new suite (see the tester's list).
+    fn meta(mesh_id: u32) -> Option<(u32, IndexType)> {
         let width = if mesh_id.is_multiple_of(2) {
             IndexType::Uint16
         } else {
             IndexType::Uint32
         };
-        (6 * (mesh_id + 1), width)
+        Some((6 * (mesh_id + 1), width))
     }
 
     /// A distinct-per-instance interpolation pair so a misplaced scatter is
@@ -619,10 +1684,21 @@ mod tests {
         }
     }
 
-    /// A STATIC input row (no interpolation pair) for the unified gather.
+    /// A STATIC input row (no interpolation pair, default material payload, NOT
+    /// occlusion-culling capable) for the unified gather.
     #[inline]
-    fn stat(mesh_id: u32, col: &InstanceModelCol) -> (u32, &InstanceModelCol, Option<&GpuTransform3D>) {
-        (mesh_id, col, None)
+    fn stat(
+        mesh_id: u32,
+        col: &InstanceModelCol,
+    ) -> (u32, &InstanceModelCol, Option<&GpuTransform3D>, PerInstanceMaterial, bool) {
+        (mesh_id, col, None, PerInstanceMaterial::default(), false)
+    }
+
+    /// Builds a [`PerInstanceMaterial`] test payload — a distinct `(id, base_color)` pair
+    /// so a misplaced scatter is detectable by EITHER field.
+    #[inline]
+    fn pim(id: u32, base_color: [f32; 4]) -> PerInstanceMaterial {
+        PerInstanceMaterial { base_color, id, _pad: [0; 3] }
     }
 
     /// The C1 nonzero-`base_instance` proof + the Principle-1 one-draw-per-mesh guard,
@@ -657,7 +1733,7 @@ mod tests {
         assert_eq!(scratch.batch_count(), 2, "two distinct meshes => two batches");
 
         // Batch 0 = mesh A: base 0, 3 instances, Uint16 width, 6 indices.
-        let ba = scratch.batches[0];
+        let ba = scratch.batches.as_read_slice()[0];
         assert_eq!(ba.mesh_id, 0);
         assert_eq!(ba.base_instance, 0, "mesh A is the first bucket => base 0");
         assert_eq!(ba.instance_count, 3);
@@ -666,7 +1742,7 @@ mod tests {
 
         // Batch 1 = mesh B: base == count(A) == 3 (NONZERO — the C1 proof), 2
         // instances, Uint32 width, 12 indices (O3 mixed width).
-        let bb = scratch.batches[1];
+        let bb = scratch.batches.as_read_slice()[1];
         assert_eq!(bb.mesh_id, 1);
         assert_eq!(bb.base_instance, 3, "mesh B's base == count(A) == 3 (NONZERO)");
         assert_eq!(bb.instance_count, 2);
@@ -674,7 +1750,7 @@ mod tests {
         assert_eq!(bb.index_type, IndexType::Uint32);
 
         // Σ instance_count == total inputs.
-        let total: u32 = scratch.batches.iter().map(|b| b.instance_count).sum();
+        let total: u32 = scratch.batches.as_read_slice().iter().map(|b| b.instance_count).sum();
         assert_eq!(total, 5);
         assert_eq!(scratch.instance_count(), 5, "the ring holds every instance");
         // All-static ⇒ interp OFF (the pair lanes are empty ⇒ no dispatch).
@@ -687,14 +1763,14 @@ mod tests {
         for ord in 0..3u32 {
             let slot = ba.base_instance + ord;
             assert_eq!(
-                scratch.ring[slot as usize], affine(0, ord),
+                scratch.ring.as_read_slice()[slot as usize], affine(0, ord),
                 "mesh A instance {ord} at ring slot {slot}"
             );
         }
         for ord in 0..2u32 {
             let slot = bb.base_instance + ord;
             assert_eq!(
-                scratch.ring[slot as usize], affine(1, ord),
+                scratch.ring.as_read_slice()[slot as usize], affine(1, ord),
                 "mesh B instance {ord} at ring slot {slot}"
             );
         }
@@ -705,7 +1781,13 @@ mod tests {
     #[test]
     fn bucketing_empty_yields_no_batches() {
         let mut scratch = MeshRenderScratch::default();
-        let inputs: Vec<(u32, &InstanceModelCol, Option<&GpuTransform3D>)> = Vec::new();
+        let inputs: Vec<(
+            u32,
+            &InstanceModelCol,
+            Option<&GpuTransform3D>,
+            PerInstanceMaterial,
+            bool,
+        )> = Vec::new();
         scratch.gather_mixed_into(3, meta, || inputs.iter().copied());
         assert_eq!(scratch.batch_count(), 0);
         assert_eq!(scratch.instance_count(), 0);
@@ -726,14 +1808,103 @@ mod tests {
         scratch.gather_mixed_into(3, meta, || inputs.iter().copied());
 
         assert_eq!(scratch.batch_count(), 2, "mesh 1 is empty => only 2 batches");
-        assert_eq!(scratch.batches[0].mesh_id, 0);
-        assert_eq!(scratch.batches[0].base_instance, 0);
-        assert_eq!(scratch.batches[0].instance_count, 2);
+        let batches = scratch.batches.as_read_slice();
+        assert_eq!(batches[0].mesh_id, 0);
+        assert_eq!(batches[0].base_instance, 0);
+        assert_eq!(batches[0].instance_count, 2);
         // Mesh 2's base == count(0) + count(1) == 2 + 0 == 2.
-        assert_eq!(scratch.batches[1].mesh_id, 2);
-        assert_eq!(scratch.batches[1].base_instance, 2);
-        assert_eq!(scratch.batches[1].instance_count, 1);
+        assert_eq!(batches[1].mesh_id, 2);
+        assert_eq!(batches[1].base_instance, 2);
+        assert_eq!(batches[1].instance_count, 1);
         assert_eq!(scratch.instance_count(), 3);
+    }
+
+    /// FIX-C1 regression guard (asset-streaming plan F6, hwrt GPU-UAF closure): a
+    /// `meta` closure returning `None` for a mesh with a NONZERO instance count in
+    /// the MIDDLE of the scene (a retired-slot hole — its carriers are still
+    /// gathered by the query this frame, between `validate_asset_refs`'s
+    /// best-effort disable and this gather) must EXCLUDE that mesh's instances
+    /// from the ring / `mesh_ids` ENTIRELY (not merely leave them un-batched —
+    /// `bucket_lanes_mixed` zeroes `counts[m]` for a non-resolvable mesh, and the
+    /// scatter's `counts[m] == 0` skip excludes it): the hwrt TLAS
+    /// packer reads `BlasAddr[MeshIds[i]]` for every `i` in the FULL ring, so a
+    /// retired mesh's id surviving in `mesh_ids` would read a freed BLAS device
+    /// address. Sibling of [`bucketing_skips_empty_mesh_in_the_middle`] above,
+    /// which only covers the `count == 0` skip (a DIFFERENT code path — that
+    /// test never reaches the `meta` call at all, since `bucket_lanes_mixed`'s
+    /// `self.counts[m] != 0` guard short-circuits first).
+    #[test]
+    fn none_mid_scene_meta_excludes_its_instances_from_the_ring() {
+        let mesh_count = 3;
+        // mesh 0: 2 instances, mesh 1 (the retired hole, NONZERO count): 3
+        // instances, mesh 2: 2 instances. Interleaved so the scatter order, not
+        // input order, drives the ring layout.
+        let a0 = affine(0, 0);
+        let a1 = affine(0, 1);
+        let b0 = affine(1, 0);
+        let b1 = affine(1, 1);
+        let b2 = affine(1, 2);
+        let c0 = affine(2, 0);
+        let c1 = affine(2, 1);
+        let inputs = [
+            stat(0, &a0),
+            stat(1, &b0),
+            stat(0, &a1),
+            stat(1, &b1),
+            stat(2, &c0),
+            stat(1, &b2),
+            stat(2, &c1),
+        ];
+
+        // FIX-C1 scenario: mesh 1's meta returns None (a retired-slot hole) —
+        // everything else (the query rows, the mesh_count) is unchanged.
+        let meta_hole = |mesh_id: u32| if mesh_id == 1 { None } else { meta(mesh_id) };
+        let mut holed = MeshRenderScratch::default();
+        holed.gather_mixed_into(mesh_count, meta_hole, || inputs.iter().copied());
+
+        assert_eq!(holed.batch_count(), 2, "mesh 1's None must skip its batch");
+        assert!(
+            holed.batches.as_read_slice().iter().all(|b| b.mesh_id != 1),
+            "no batch may reference the mesh whose meta returned None"
+        );
+
+        // THE KEY GATE (FIX-C1): the ring holds ONLY the surviving (resolvable)
+        // instances — count == ring.len() == Σ surviving, NOT the pre-hole total.
+        assert_eq!(
+            holed.instance_count(),
+            4,
+            "the retired mesh's 3 instances must be EXCLUDED, not merely un-batched: \
+             2 (mesh 0) + 2 (mesh 2) == 4, not 2 + 3 + 2 == 7"
+        );
+
+        // No retired mesh_id ever appears in the TLAS-consumable mesh-id lane —
+        // the exact hazard FIX-C1 closes (a stale id would let the hwrt packer
+        // read `BlasAddr[1]`, a freed BLAS device address).
+        assert!(
+            holed.mesh_ids.as_read_slice().iter().all(|&id| id != 1),
+            "the retired mesh's id must never appear in mesh_ids"
+        );
+
+        // The surviving batches are CONTIGUOUS (no gap where the excluded mesh's
+        // instances used to be) — mesh 2 starts exactly where mesh 0 ends.
+        let batches = holed.batches.as_read_slice();
+        let mesh0 = *batches.iter().find(|b| b.mesh_id == 0).expect("mesh0 batch present");
+        let mesh2 = *batches.iter().find(|b| b.mesh_id == 2).expect("mesh2 batch present");
+        assert_eq!(mesh0.base_instance, 0, "mesh 0's base_instance is unaffected (it precedes the hole)");
+        assert_eq!(mesh0.instance_count, 2);
+        assert_eq!(
+            mesh2.base_instance,
+            mesh0.base_instance + mesh0.instance_count,
+            "mesh 2's batch is CONTIGUOUS with mesh 0's — no gap for the excluded mesh"
+        );
+        assert_eq!(mesh2.instance_count, 2);
+
+        // The ring itself is exactly [a0, a1, c0, c1] — no reserved-but-empty slots.
+        let ring = holed.ring.as_read_slice();
+        assert_eq!(ring[0], a0);
+        assert_eq!(ring[1], a1);
+        assert_eq!(ring[2], c0);
+        assert_eq!(ring[3], c1);
     }
 
     /// Re-running the gather REUSES the scratch's capacity (Principle 5): after a
@@ -745,8 +1916,17 @@ mod tests {
 
         // Frame 1: 5 instances across 2 meshes.
         let big: Vec<InstanceModelCol> = (0..5).map(|i| affine(i % 2, i)).collect();
-        let big_inputs: Vec<(u32, &InstanceModelCol, Option<&GpuTransform3D>)> =
-            big.iter().enumerate().map(|(i, c)| ((i as u32) % 2, c, None)).collect();
+        let big_inputs: Vec<(
+            u32,
+            &InstanceModelCol,
+            Option<&GpuTransform3D>,
+            PerInstanceMaterial,
+            bool,
+        )> = big
+            .iter()
+            .enumerate()
+            .map(|(i, c)| ((i as u32) % 2, c, None, PerInstanceMaterial::default(), false))
+            .collect();
         scratch.gather_mixed_into(2, meta, || big_inputs.iter().copied());
         assert_eq!(scratch.instance_count(), 5);
         let ring_cap_after_big = scratch.ring.capacity();
@@ -786,9 +1966,9 @@ mod tests {
         let cube_placeholder = affine(1, 0);
         let cube_pair = pair(1, 0);
         let inputs = [
-            (0u32, &floor0, None),
-            (1u32, &cube_placeholder, Some(&cube_pair)),
-            (0u32, &floor1, None),
+            (0u32, &floor0, None, PerInstanceMaterial::default(), false),
+            (1u32, &cube_placeholder, Some(&cube_pair), PerInstanceMaterial::default(), false),
+            (0u32, &floor1, None, PerInstanceMaterial::default(), false),
         ];
 
         let mut scratch = MeshRenderScratch::default();
@@ -797,17 +1977,18 @@ mod tests {
         // TWO batches — the floor batch is NOT dropped by the cube's presence (the P0
         // regression dropped exactly this).
         assert_eq!(scratch.batch_count(), 2, "static + interp => two batches, none dropped");
-        let bf = scratch.batches[0];
-        let bc = scratch.batches[1];
+        let batches = scratch.batches.as_read_slice();
+        let bf = batches[0];
+        let bc = batches[1];
         assert_eq!((bf.mesh_id, bf.base_instance, bf.instance_count), (0, 0, 2), "floor batch");
         assert_eq!((bc.mesh_id, bc.base_instance, bc.instance_count), (1, 2, 1), "cube batch (NONZERO base)");
 
         // base_instance / instance_count cover the whole bound ring [0, 3) with no gap.
-        let total: u32 = scratch.batches.iter().map(|b| b.instance_count).sum();
+        let total: u32 = batches.iter().map(|b| b.instance_count).sum();
         assert_eq!(total, 3);
         assert_eq!(scratch.instance_count(), 3, "ring covers every drawable, no drop");
         let mut covered = [false; 3];
-        for b in &scratch.batches {
+        for b in batches {
             for s in b.base_instance..b.base_instance + b.instance_count {
                 assert!(!covered[s as usize], "no ring slot double-covered");
                 covered[s as usize] = true;
@@ -816,15 +1997,16 @@ mod tests {
         assert!(covered.iter().all(|&c| c), "the two batches cover [0, 3) contiguously");
 
         // The STATIC floor rows hold their real affines verbatim (not GPU-touched).
-        assert_eq!(scratch.ring[0], affine(0, 0), "floor slot 0 is the real affine");
-        assert_eq!(scratch.ring[1], affine(0, 1), "floor slot 1 is the real affine");
+        let ring = scratch.ring.as_read_slice();
+        assert_eq!(ring[0], affine(0, 0), "floor slot 0 is the real affine");
+        assert_eq!(ring[1], affine(0, 1), "floor slot 1 is the real affine");
 
         // The DYNAMIC cube: exactly one pair, its out-slot == the cube's ring slot (2),
         // and that slot is NOT a static slot (never CPU-authoritative).
         assert_eq!(scratch.dynamic_count(), 1, "exactly one interpolated instance");
-        assert_eq!(scratch.pair_ring[0], cube_pair, "the cube's pair was recorded");
+        assert_eq!(scratch.pair_ring.as_read_slice()[0], cube_pair, "the cube's pair was recorded");
         assert_eq!(
-            scratch.pair_out_slot[0], bc.base_instance,
+            scratch.pair_out_slot.as_read_slice()[0], bc.base_instance,
             "the cube's out-slot is its gather-assigned ring slot (2)"
         );
     }
@@ -840,9 +2022,9 @@ mod tests {
         let p_b1 = pair(1, 1);
         let ph = affine(9, 9); // one shared placeholder — the CPU bytes are overwritten.
         let inputs = [
-            (0u32, &ph, Some(&p_a)),
-            (1u32, &ph, Some(&p_b0)),
-            (1u32, &ph, Some(&p_b1)),
+            (0u32, &ph, Some(&p_a), PerInstanceMaterial::default(), false),
+            (1u32, &ph, Some(&p_b0), PerInstanceMaterial::default(), false),
+            (1u32, &ph, Some(&p_b1), PerInstanceMaterial::default(), false),
         ];
 
         let mut scratch = MeshRenderScratch::default();
@@ -852,7 +2034,7 @@ mod tests {
         assert_eq!(scratch.dynamic_count(), 3, "every row is interpolated");
         assert_eq!(scratch.pair_ring.len(), scratch.pair_out_slot.len());
         // Every out-slot is a distinct index in [0, 3).
-        let mut slots: Vec<u32> = scratch.pair_out_slot.clone();
+        let mut slots: Vec<u32> = scratch.pair_out_slot.as_read_slice().to_vec();
         slots.sort_unstable();
         assert_eq!(slots, vec![0, 1, 2], "the three out-slots partition the ring");
     }
@@ -869,7 +2051,11 @@ mod tests {
         let s1 = affine(0, 1);
         let ph = affine(1, 0);
         let p = pair(1, 0);
-        let f1 = [(0u32, &s0, None), (0u32, &s1, None), (1u32, &ph, Some(&p))];
+        let f1 = [
+            (0u32, &s0, None, PerInstanceMaterial::default(), false),
+            (0u32, &s1, None, PerInstanceMaterial::default(), false),
+            (1u32, &ph, Some(&p), PerInstanceMaterial::default(), false),
+        ];
         scratch.gather_mixed_into(2, meta, || f1.iter().copied());
         assert_eq!(scratch.instance_count(), 3);
         assert_eq!(scratch.dynamic_count(), 1);
@@ -906,10 +2092,10 @@ mod tests {
         let ph = affine(9, 9);
         let p = pair(1, 0);
         let inputs = [
-            (0u32, &a00, None),
-            (1u32, &a10, None),
-            (0u32, &a01, None),
-            (1u32, &ph, Some(&p)),
+            (0u32, &a00, None, PerInstanceMaterial::default(), false),
+            (1u32, &a10, None, PerInstanceMaterial::default(), false),
+            (0u32, &a01, None, PerInstanceMaterial::default(), false),
+            (1u32, &ph, Some(&p), PerInstanceMaterial::default(), false),
         ];
 
         let mut scratch = MeshRenderScratch::default();
@@ -920,39 +2106,175 @@ mod tests {
         assert_eq!(scratch.mesh_ids.len(), 4);
 
         // Every slot in each batch's range carries that batch's mesh_id.
-        for b in &scratch.batches {
+        let mesh_ids = scratch.mesh_ids.as_read_slice();
+        for b in scratch.batches.as_read_slice() {
             let start = b.base_instance as usize;
             let end = start + b.instance_count as usize;
-            for slot in start..end {
+            for (slot, &id) in mesh_ids.iter().enumerate().take(end).skip(start) {
                 assert_eq!(
-                    scratch.mesh_ids[slot], b.mesh_id,
+                    id, b.mesh_id,
                     "ring slot {slot} must carry its batch's mesh_id {}",
                     b.mesh_id
                 );
             }
         }
         // Concretely: mesh 0 fills [0,2), mesh 1 fills [2,4).
-        assert_eq!(scratch.mesh_ids, vec![0, 0, 1, 1]);
+        assert_eq!(mesh_ids, [0u32, 0, 1, 1]);
 
         // The DYNAMIC row: its ring affine is the WRONG-encoded placeholder (x == 9), but
         // its mesh-id entry is the correct BLAS id (1). The interp out-slot points at that
         // same slot, and the lane there reads 1.
-        let dyn_slot = scratch.pair_out_slot[0] as usize;
-        assert_eq!(scratch.mesh_ids[dyn_slot], 1, "the dynamic row maps to BLAS 1");
+        let dyn_slot = scratch.pair_out_slot.as_read_slice()[0] as usize;
+        assert_eq!(mesh_ids[dyn_slot], 1, "the dynamic row maps to BLAS 1");
+        let ring = scratch.ring.as_read_slice();
         assert_eq!(
-            scratch.ring[dyn_slot].rows[0][3], 9.0,
+            ring[dyn_slot].rows[0][3], 9.0,
             "the dynamic row's ring affine is the placeholder (proves the lane is key-derived)"
         );
 
         // For STATIC rows the ring affine's encoded mesh id agrees with the lane.
-        for (slot, &mid) in scratch.mesh_ids.iter().enumerate() {
+        for (slot, &mid) in mesh_ids.iter().enumerate() {
             if slot == dyn_slot {
                 continue;
             }
             assert_eq!(
-                scratch.ring[slot].rows[0][3] as u32, mid,
+                ring[slot].rows[0][3] as u32, mid,
                 "a static row's affine-encoded mesh id matches the lane"
             );
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Asset-streaming plan F8+ — the material payload (id + base_color) lane.
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// F8+: the material payload lane is scattered in lock-step with the ring —
+    /// `material_ids[slot]` carries the SAME instance `ring[slot]` holds (by the
+    /// gather's own scatter cursor, the exact bases
+    /// `bucketing_two_meshes_nonzero_base_contiguous` proves), the lane's length equals
+    /// the ring's (`material_ids.len() == ring.len()`), and (owner: material-drives-
+    /// albedo-too) the scattered `base_color` matches the SAME instance's material, not
+    /// a sibling's.
+    #[test]
+    fn material_ids_scatter_is_index_aligned_with_ring() {
+        let mesh_count = 2;
+        let a0 = affine(0, 0);
+        let a1 = affine(0, 1);
+        let b0 = affine(1, 0);
+        // A distinct (id, base_color) payload per instance so a misplaced scatter is
+        // detectable by EITHER field — mirrors the affine's own
+        // distinct-per-instance-value idiom.
+        let inputs = [
+            (0u32, &a0, None, pim(10, [0.1, 0.0, 0.0, 1.0]), false),
+            (1u32, &b0, None, pim(20, [0.2, 0.0, 0.0, 1.0]), false),
+            (0u32, &a1, None, pim(11, [0.3, 0.0, 0.0, 1.0]), false),
+        ];
+
+        let mut scratch = MeshRenderScratch::default();
+        scratch.gather_mixed_into(mesh_count, meta, || inputs.iter().copied());
+
+        assert_eq!(
+            scratch.material_ids.len(),
+            scratch.ring.len(),
+            "material_ids is parallel to the ring"
+        );
+
+        // mesh 0's two instances scatter into [0, 2), mesh 1's one instance into [2, 3) —
+        // the SAME bases the C1 test above proves; index directly rather than searching.
+        let batches = scratch.batches.as_read_slice();
+        let ba = batches[0];
+        let bb = batches[1];
+        let material_ids = scratch.material_ids.as_read_slice();
+        assert_eq!(
+            material_ids[ba.base_instance as usize],
+            pim(10, [0.1, 0.0, 0.0, 1.0]),
+            "mesh 0's first-gathered instance keeps its OWN material payload (id + base_color)"
+        );
+        assert_eq!(
+            material_ids[ba.base_instance as usize + 1],
+            pim(11, [0.3, 0.0, 0.0, 1.0]),
+            "mesh 0's second-gathered instance keeps its OWN material payload"
+        );
+        assert_eq!(
+            material_ids[bb.base_instance as usize],
+            pim(20, [0.2, 0.0, 0.0, 1.0]),
+            "mesh 1's instance keeps its OWN material payload"
+        );
+    }
+
+    /// F8 finding 3: `any_non_default_material` must NOT stay sticky-true after a material
+    /// is removed — [`gather_mixed_into`] resets it to `false` at the TOP of every call, then
+    /// recomputes it via the scatter's OR-reduce. Frame 1 carries a non-default material;
+    /// frame 2 (the SAME reused [`MeshRenderScratch`]) is all-default and must observe the
+    /// flag flip back to `false` — a sticky-true flag here would keep the PM pipeline bound
+    /// (and its upload running) on every subsequent all-default frame, a Principle-1
+    /// violation (F8 §2.4/§4.3).
+    #[test]
+    fn any_non_default_material_flag_resets_per_gather() {
+        let mut scratch = MeshRenderScratch::default();
+
+        let a0 = affine(0, 0);
+        let frame1 = [(0u32, &a0, None, pim(7, [0.9, 0.1, 0.1, 1.0]), false)];
+        scratch.gather_mixed_into(1, meta, || frame1.iter().copied());
+        assert!(
+            scratch.any_non_default_material(),
+            "a non-default scattered id must flip the flag true"
+        );
+
+        let a1 = affine(0, 1);
+        let frame2 = [(0u32, &a1, None, PerInstanceMaterial::default(), false)];
+        scratch.gather_mixed_into(1, meta, || frame2.iter().copied());
+        assert!(
+            !scratch.any_non_default_material(),
+            "an all-default gather on the SAME reused scratch must reset the flag, not leave \
+             it sticky-true from the prior frame (F8 finding 3)"
+        );
+    }
+
+    /// FIX-C1 parity (F8): a non-resolvable mesh's instances are excluded from
+    /// `material_ids` too, IDENTICALLY to `ring`/`mesh_ids` — the retired mesh's material
+    /// payloads must never survive into the lane (its instances are never scattered at all,
+    /// because `bucket_lanes_mixed` zeroed `counts[m]` for it, so the scatter's
+    /// `counts[m] == 0` skip excludes them — the SAME mechanism
+    /// [`none_mid_scene_meta_excludes_its_instances_from_the_ring`] proves for
+    /// `ring`/`mesh_ids`).
+    #[test]
+    fn counts_zero_skip_excludes_material_id() {
+        let mesh_count = 3;
+        let a0 = affine(0, 0);
+        let b0 = affine(1, 0); // mesh 1: the retired hole.
+        let b1 = affine(1, 1);
+        let c0 = affine(2, 0);
+        let inputs = [
+            (0u32, &a0, None, pim(5, [0.5, 0.0, 0.0, 1.0]), false),
+            (1u32, &b0, None, pim(99, [0.9, 0.9, 0.9, 1.0]), false), // would-be payloads on
+            (1u32, &b1, None, pim(98, [0.8, 0.8, 0.8, 1.0]), false), // the excluded mesh —
+            // must never appear in the surviving lane.
+            (2u32, &c0, None, pim(6, [0.6, 0.0, 0.0, 1.0]), false),
+        ];
+
+        let meta_hole = |mesh_id: u32| if mesh_id == 1 { None } else { meta(mesh_id) };
+        let mut scratch = MeshRenderScratch::default();
+        scratch.gather_mixed_into(mesh_count, meta_hole, || inputs.iter().copied());
+
+        assert_eq!(scratch.instance_count(), 2, "mesh 1's instances must be excluded entirely");
+        assert_eq!(
+            scratch.material_ids.len(),
+            scratch.ring.len(),
+            "material_ids stays parallel to the ring even with an excluded mesh"
+        );
+        let material_ids = scratch.material_ids.as_read_slice();
+        assert!(
+            material_ids.iter().all(|m| m.id != 99 && m.id != 98),
+            "the retired mesh's material ids must never survive into material_ids"
+        );
+        assert!(
+            material_ids.iter().any(|m| m.id == 5),
+            "mesh 0's surviving instance keeps its material id"
+        );
+        assert!(
+            material_ids.iter().any(|m| m.id == 6),
+            "mesh 2's surviving instance keeps its material id"
+        );
     }
 }

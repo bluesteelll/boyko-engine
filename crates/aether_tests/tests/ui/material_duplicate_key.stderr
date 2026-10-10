@@ -1,0 +1,11 @@
+error: duplicate material key `roughness`
+  --> tests/ui/material_duplicate_key.rs:15:9
+   |
+15 |         roughness: 0.20,
+   |         ^^^^^^^^^
+
+error: the first `roughness:` is here
+  --> tests/ui/material_duplicate_key.rs:13:9
+   |
+13 |         roughness: 0.14,
+   |         ^^^^^^^^^

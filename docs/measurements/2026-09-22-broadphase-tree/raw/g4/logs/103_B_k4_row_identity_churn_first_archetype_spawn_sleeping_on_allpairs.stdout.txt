@@ -1,0 +1,3 @@
+row_identity_churn/first_archetype_spawn/sleeping_on_allpairs
+                        time:   [5.8094 ms 5.8171 ms 5.8248 ms]
+

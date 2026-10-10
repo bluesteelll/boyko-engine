@@ -1,0 +1,21 @@
+{
+  "_doc": "D-L5 block when C4 (parallel narrowphase ON by default) has landed on l5np. Fill sha256/commit from bin/SHA256SUMS after the build; the 500-step pose gate at W=1/8/16 must equal 0x32d5e235342b4143 before any timed process.",
+  "rows": [
+    {
+      "id": "D-L5", "engine": "boyko", "role": "l5",
+      "what": "the default configuration at the l5np HEAD after C4: L4 + L2 + L5 (parallel narrowphase on by default).",
+      "exe": "bin/runner_l5.exe", "sha256": "FILL", "commit": "FILL",
+      "args": ["--scene", "jolt", "--gap", "0.5", "--cfg", "default"],
+      "workers": [1, 2, 4, 8, 16], "steps": 500, "window": [0, 500], "armed": false,
+      "expected_pose": "0x32d5e235342b4143", "expect_pose_of": "D-L4L2", "timed": true
+    },
+    {
+      "id": "D-L5-npoff", "engine": "boyko", "role": "l5",
+      "what": "the same binary with --parallel-np off: the same-binary A/B of the parallel narrowphase at W=8.",
+      "exe": "bin/runner_l5.exe", "sha256": "FILL", "commit": "FILL",
+      "args": ["--scene", "jolt", "--gap", "0.5", "--cfg", "default", "--parallel-np", "off"],
+      "workers": [8], "steps": 500, "window": [0, 500], "armed": false,
+      "expected_pose": "0x32d5e235342b4143", "expect_pose_of": "D-L4L2", "timed": true
+    }
+  ]
+}

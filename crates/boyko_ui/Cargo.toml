@@ -3,7 +3,7 @@ name = "boyko-ui"
 version = "0.1.0"
 edition = "2024"
 publish = false
-
+license.workspace = true
 [lib]
 name = "boyko_ui"
 path = "src/lib.rs"
@@ -11,8 +11,12 @@ path = "src/lib.rs"
 [dependencies]
 boyko-ecs    = { path = "../boyko_ecs" }
 boyko-macros = { path = "../boyko_macros" }
-boyko-utils  = { path = "../boyko_utils" }
-# P4: UI is a symmetric ACTION SOURCE (`ActionState::ui_press`) — `ui_dispatch`
+# Profiling rung 15 (`profiling_overlay.rs`). NOT a new node in the graph — `boyko-ecs` above
+# already depends on `boyko_diag`, so it is compiled either way; the edge only lets the overlay
+# name `zone_desc` and `SampleKind` directly instead of routing a re-export through `boyko_ecs`
+# for one reader. Same shape and same reason as `boyko_app`'s own `boyko-diag` line.
+boyko-diag   = { path = "../boyko_diag" }
+# P4: UI is a symmetric ACTION SOURCE (`ActionState::ui_press`) â€” `ui_dispatch`
 # lowers an Interaction edge into an action. Acyclic: boyko-input does NOT depend
 # on boyko-ui. The OS focus/cursor-inside flags on `PhysicalInput` are also read
 # here for the blur/leave short-circuit (Decision 12).
@@ -20,7 +24,7 @@ boyko-input  = { path = "../boyko_input" }
 # GUI P5b: the glyph metrics table + atlas metadata are ECS-resident (the FontTable
 # Resource) and loaded once from a checked-in `.bfont`. boyko-ui depends on the bake
 # crate ONLY for the POD metric/meta types + the thin `read_bfont` reader (load-time,
-# off every hot path) — NOT for the generator. Acyclic: boyko-fontbake depends on the
+# off every hot path) â€” NOT for the generator. Acyclic: boyko-fontbake depends on the
 # threadpool, never on boyko-ui or boyko-render. The render-side atlas upload lives in
 # boyko-render; the emitter here produces render-agnostic glyph-quad descriptors the
 # host folds into the P5a instance stream (so boyko-ui takes NO render dependency).
@@ -33,7 +37,7 @@ boyko-fontbake = { path = "../boyko_fontbake" }
 # `world` module is the only place boyko-ui touches the scene crate.
 boyko-scene  = { path = "../boyko_scene" }
 boyko-math   = { path = "../boyko_math" }
-# NOTE: boyko-threadpool is NOT a dependency in P1 — the apply pass is exclusive;
+# NOTE: boyko-threadpool is NOT a dependency in P1 â€” the apply pass is exclusive;
 # the host already owns the pool to build the schedule.
 
 [dev-dependencies]
@@ -44,3 +48,20 @@ boyko-threadpool = { path = "../boyko_threadpool" }
 boyko-macros     = { path = "../boyko_macros" }
 # P2 `ui!` macro compile-fail acceptance tests (snapshot-based).
 trybuild         = "1"
+# A1: `tests/ui_a1_source_census.rs` PARSES `src/animation.rs` rather than
+# scanning it. `visit` on top of the workspace base's `full` — the census walks
+# the tree with `syn::visit::Visit`.
+#
+# Not a new node in the dependency graph: `boyko-macros` (a `[dependencies]`
+# entry of this crate, three lines above) already pulls the same pinned `syn`,
+# so the compile was happening either way. Test-only, like `trybuild` beside it.
+syn              = { workspace = true, features = ["visit"] }
+quote            = { workspace = true }
+# The census's hook-registration scan reads `#[component(… on_add = …)]` as
+# TOKENS, because the one that matters is written inside `macro_rules!
+# tween_channel` and a parsed tree has no attribute there at all. Test-only, and
+# already compiled as a dependency of `syn` and `quote` above.
+proc-macro2      = { workspace = true }
+
+[lints]
+workspace = true

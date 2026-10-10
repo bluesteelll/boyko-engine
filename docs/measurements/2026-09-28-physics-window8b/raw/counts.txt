@@ -1,0 +1,132 @@
+records 1106: processes 914, warm-ups 20, passes done 21, voided passes 0, blocks skipped []
+block          row                          bin     W   n rerun valid clean before after build witness hang notmeas void
+S4-AB          S4-JT-a                      tip    16   9     0     9     9      0     0     0       0    0       0    0
+S4-AB          S4-JT-a                      parent  16  10     1    10     9      0     0     0       1    0       0    0
+S4-AB          S4-JT                        tip    16   9     0     9     9      0     0     0       0    0       0    0
+S4-AB          S4-JT                        parent  16   9     0     9     9      0     0     0       0    0       0    0
+S4-AB          S4-zone-N60000               tip     8   9     0     9     9      0     0     0       0    0       0    0
+S4-AB          S4-zone-N30000               tip     8   9     0     9     9      0     0     0       0    0       0    0
+S4-AB          S4-rung                      tip     8   9     0     9     9      0     0     0       0    0       0    0
+S4-AB          S4-JT-a                      tip     8   9     0     9     9      0     0     0       0    0       0    0
+S4-AB          S4-JT-a                      parent   8   9     0     9     9      0     0     0       0    0       0    0
+S4-AB          S4-JT                        tip     8   9     0     9     9      0     0     0       0    0       0    0
+S4-AB          S4-JT                        parent   8  10     1    10     9      0     0     0       1    0       0    0
+S4-AB          S4-JT                        tip     4   9     0     9     9      0     0     0       0    0       0    0
+S4-AB          S4-JT                        parent   4   9     0     9     9      0     0     0       0    0       0    0
+S4-AB          S4-JT                        tip     2   9     0     9     9      0     0     0       0    0       0    0
+S4-AB          S4-JT                        parent   2   9     0     9     9      0     0     0       0    0       0    0
+S4-AB          S4-JT                        tip     1   9     0     9     9      0     0     0       0    0       0    0
+S4-AB          S4-JT                        parent   1   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-JA-ladder16-F1            s7p    16   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-ladder16-F2               s7p    16   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-ladder16-F1.5             s7p    16   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-ladder16-F1               s7p    16   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-ladder16-F0.5             s7p    16   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-JA                        s7t    16   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-JA                        s7p    16   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-JT                        s7t    16   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-JT                        s7p    16   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-ladder8-F2                s7p     8   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-ladder8-F1.5              s7p     8   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-ladder8-F1                s7p     8   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-ladder8-F0.5              s7p     8   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-JA                        s7t     8  10     1    10     9      0     0     0       1    0       0    0
+S7-AB          S7-JA                        s7p     8   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-JT                        s7t     8   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-JT                        s7p     8   9     0     9     9      0     0     0       0    0       0    0
+S7-AB          S7-JT-W1                     s7t     1  10     1    10     9      0     1     0       1    0       0    0
+S7-AB          S7-JT-W1                     s7p     1   9     0     9     9      0     0     0       0    0       0    0
+SPLIT          SPLIT-J-T-a                  parent  16   9     0     9     9      0     0     0       0    0       0    0
+SPLIT          SPLIT-J-T                    parent  16   9     0     9     9      0     0     0       0    0       0    0
+SPLIT          SPLIT-J-T-a                  parent   8   9     0     9     9      0     0     0       0    0       0    0
+SPLIT          SPLIT-J-T                    parent   8   9     0     9     9      0     0     0       0    0       0    0
+SPLIT          SPLIT-J-T-a                  parent   1   9     0     9     9      0     0     0       0    0       0    0
+SPLIT          SPLIT-J-T                    parent   1   9     0     9     9      0     0     0       0    0       0    0
+omega-v2       omega-wgap-external          omega2   0  13     4    13     9      0     2     0       3    0       0    0
+omega-v2       omega-wgap-worker            omega2   0  13     4    13     9      0     1     0       3    0       0    0
+omega-v2       omega2-gap-external          omega2   0  12     3    12     8      0     3     0       4    0       0    0
+omega-v2       omega2-gap-worker            omega2   0  12     3    12     8      0     2     0       3    0       0    0
+omega-v2       omega2-external              omega2   0  13     4    13     9      0     4     0       2    0       0    0
+omega-v2       omega2-worker                omega2   0  12     3    12     9      0     3     0       2    0       0    0
+F3             F3-RT-kd                     tip    16  13     4    13     7      0     2     0       5    0       0    0
+F3             F3-RT-leaflist               tip    16  11     2    11     9      0     0     0       2    0       0    0
+F3             F3-JT-kd                     tip    16  10     1    10     8      0     0     0       2    0       0    0
+F3             F3-JT-leaflist               tip    16  11     2    11     8      0     0     0       3    0       0    0
+F3             F3-RT-kd                     tip     8  11     2    11     8      0     1     0       2    0       0    0
+F3             F3-RT-leaflist               tip     8  13     4    13     8      0     1     0       5    0       0    0
+F3             F3-JT-kd                     tip     8  13     4    13     9      0     0     0       4    0       0    0
+F3             F3-JT-leaflist               tip     8  13     4    13     8      0     0     0       5    0       0    0
+F3             F3-TD-armed-kd               tip     8  13     4    13     9      0     0     0       4    0       0    0
+F3             F3-TD-armed-leaflist         tip     8  13     4    13     9      0     0     0       4    0       0    0
+F3             F3-RT-kd                     tip     4  11     2    11     8      0     0     0       3    0       0    0
+F3             F3-RT-leaflist               tip     4  11     2    11     9      0     0     0       2    0       0    0
+F3             F3-JT-kd                     tip     4  12     3    12     8      0     0     0       4    0       0    0
+F3             F3-JT-leaflist               tip     4  12     3    12     8      0     0     0       4    0       0    0
+F3             F3-RT-kd                     tip     2  11     2    11     8      0     0     0       3    0       0    0
+F3             F3-RT-leaflist               tip     2  10     1    10     9      0     0     0       1    0       0    0
+F3             F3-JT-kd                     tip     2  10     1    10     9      0     0     0       1    0       0    0
+F3             F3-JT-leaflist               tip     2  10     1    10     8      0     0     0       2    0       0    0
+F3             F3-RT-kd                     tip     1  11     2    11     9      0     0     0       2    0       0    0
+F3             F3-RT-leaflist               tip     1  10     1    10     8      0     0     0       2    0       0    0
+F3             F3-JT-kd                     tip     1  10     1    10     9      0     0     0       1    0       0    0
+F3             F3-JT-leaflist               tip     1  10     1    10     9      0     0     0       1    0       0    0
+F3             F3-TR-armed                  tip     1  11     2    11     8      0     0     0       3    0       0    0
+F3             F3-TA-armed-kd               tip     1  10     1    10     8      0     0     0       2    0       0    0
+F3             F3-TA-armed-leaflist         tip     1   9     0     9     9      0     0     0       0    0       0    0
+F3             F3-TD-armed-kd               tip     1  10     1    10     9      0     0     0       1    0       0    0
+F3             F3-TD-armed-leaflist         tip     1  10     1    10     8      0     0     0       2    0       0    0
+F3-G4          G4                           g4ref   0   3     0     3     3      0     0     0       0    0       0    0
+J-Son-T        JSoffT-a                     tip     8   9     0     9     9      0     0     0       0    0       0    0
+J-Son-T        JSoffT                       tip     8  10     1    10     8      0     1     0       1    0       0    0
+J-Son-T        JSonT-a                      tip     8  12     3    12     9      0     0     0       3    0       0    0
+J-Son-T        JSonT                        tip     8  13     4    13     9      0     0     0       4    0       0    0
+J-Son-T        JSoffT-a                     tip     1  10     1    10     9      0     0     0       1    0       0    0
+J-Son-T        JSoffT                       tip     1  10     1    10     8      0     1     0       1    0       0    0
+J-Son-T        JSonT-a                      tip     1  12     3    12     9      0     0     0       3    0       0    0
+J-Son-T        JSonT                        tip     1   9     0     9     9      0     0     0       0    0       0    0
+DM1            dm-vb-1920x1080-idle         dmA     0   6     2     6     3      0     0     0       3    0       0    0
+DM1            dm-vb-1920x1080-idle         dmB     0   4     0     4     4      0     0     0       0    0       0    0
+DM1            dm-deferred-1920x1080-idle   dmA     0   5     1     5     4      0     0     0       1    0       0    0
+DM1            dm-deferred-1920x1080-idle   dmB     0   5     1     5     4      0     1     0       0    0       0    0
+DM1            dm-vb-1920x1080-edit100      dmA     0   5     1     5     4      0     1     0       1    0       0    0
+DM1            dm-vb-1920x1080-edit100      dmB     0   5     1     5     3      0     1     0       1    0       0    0
+omega-v1-cont  omega1-s72-external          omega2   0   4     1     4     2      0     2     0       2    0       0    0
+omega-v1-cont  omega1-s72-worker            omega2   0   5     2     5     2      0     3     0       3    0       0    0
+omega-v1-cont  omega1-s36-external          omega2   0   5     2     5     2      0     1     0       3    0       0    0
+omega-v1-cont  omega1-s36-worker            omega2   0   6     3     6     2      0     3     0       3    0       0    0
+R4 pose compares: 171, equal 171, DIFFER 0, missing 0
+placement receipts: 914 of 914 launched processes carry the main-thread cycle fraction, 867 the top-CPU share estimate; 914 carry the per-CPU ranking
+omega_b v2 park rule: 44 (row, park config) cells over 49 processes; VOID 0, no park taken (gap 0, reported) 33
+no park taken omega2-external P2/stages36/bpp1/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P2/stages36/bpp2/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P2/stages36/bpp4/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P2/stages72/bpp1/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P2/stages72/bpp2/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P2/stages72/bpp4/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P4/stages36/bpp1/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P4/stages36/bpp2/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P4/stages36/bpp4/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P4/stages72/bpp1/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P4/stages72/bpp2/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P4/stages72/bpp4/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P8/stages36/bpp1/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P8/stages36/bpp2/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P8/stages36/bpp4/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P8/stages72/bpp1/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-external P8/stages72/bpp2/gap0/external (13 reps; gap 0: reported, not void)
+no park taken omega2-worker P2/stages36/bpp1/gap0/worker (12 reps; gap 0: reported, not void)
+no park taken omega2-worker P2/stages36/bpp2/gap0/worker (12 reps; gap 0: reported, not void)
+no park taken omega2-worker P2/stages36/bpp4/gap0/worker (12 reps; gap 0: reported, not void)
+no park taken omega2-worker P2/stages72/bpp1/gap0/worker (12 reps; gap 0: reported, not void)
+no park taken omega2-worker P2/stages72/bpp2/gap0/worker (12 reps; gap 0: reported, not void)
+no park taken omega2-worker P2/stages72/bpp4/gap0/worker (12 reps; gap 0: reported, not void)
+no park taken omega2-worker P4/stages36/bpp1/gap0/worker (12 reps; gap 0: reported, not void)
+no park taken omega2-worker P4/stages36/bpp2/gap0/worker (12 reps; gap 0: reported, not void)
+no park taken omega2-worker P4/stages36/bpp4/gap0/worker (12 reps; gap 0: reported, not void)
+no park taken omega2-worker P4/stages72/bpp1/gap0/worker (12 reps; gap 0: reported, not void)
+no park taken omega2-worker P4/stages72/bpp2/gap0/worker (12 reps; gap 0: reported, not void)
+no park taken omega2-worker P4/stages72/bpp4/gap0/worker (12 reps; gap 0: reported, not void)
+no park taken omega2-worker P8/stages36/bpp1/gap0/worker (12 reps; gap 0: reported, not void)
+no park taken omega2-worker P8/stages36/bpp2/gap0/worker (12 reps; gap 0: reported, not void)
+no park taken omega2-worker P8/stages36/bpp4/gap0/worker (12 reps; gap 0: reported, not void)
+no park taken omega2-worker P8/stages72/bpp1/gap0/worker (12 reps; gap 0: reported, not void)

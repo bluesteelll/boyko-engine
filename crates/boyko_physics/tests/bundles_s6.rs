@@ -5,9 +5,12 @@
 //! crate's physics columns; the layering is cycle-free (`boyko_physics ->
 //! boyko_scene`, never the reverse). Gates covered here (no render crate needed):
 //!
-//! * EXACT component set — each bundle spawns precisely its declared columns
-//!   (membership is the characteristic function of `component_ids()` over the
-//!   whole `[0, MAX_COMPONENTS)` id space).
+//! * EXACT component set — each bundle spawns precisely its declared columns PLUS the
+//!   transitive `#[require]` closure those columns pull in, and nothing else (membership is
+//!   checked over the whole `[0, MAX_COMPONENTS)` id space, so an unexpected extra is caught
+//!   wherever its id landed). The closure is spelled out per test rather than derived: the
+//!   kernel's `get_required_plan` is `pub(crate)`, and naming the expected carriers keeps the
+//!   test able to FAIL when a new `#[require]` edge appears unannounced.
 //! * WARM-PATH cache — repeated spawns hit the Phase-8.5 per-impl static bundle
 //!   cache (idempotent `bundle_archetype_id_for`, ZERO new archetypes per spawn).
 //! * 0%-GATE — a bundle spawn lands in the SAME `ArchetypeId` as the equivalent
@@ -18,6 +21,13 @@
 //! `Gpu3dInstance` packs at the new world pose) needs `boyko_render` too, so it
 //! lives in `boyko_render/tests/bundles_s6_integration.rs` (render dev-depends on
 //! physics; physics never depends on render — acyclic).
+
+// Test-only: `HashSet` is the ORACLE model here — the reference "no color reuses a
+// dynamic body" / injectivity checker the constraint-graph coloring is differentially
+// verified against — and `Arc<Mutex<…>>` is the established probe for smuggling a spawned
+// `Entity` out of the `Send + Sync` one-shot system closure. The solver's own structures
+// stay VM-native; this file is compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
 
 use std::sync::{Arc, Mutex};
 
@@ -34,7 +44,9 @@ use boyko_physics::components::{
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 
-use boyko_scene::render_caps::{MaterialHandle, MeshHandle, Visibility};
+use boyko_scene::render_caps::{
+    MaterialHandle, MaterialRefGen, MeshHandle, MeshRefGen, Visibility,
+};
 use boyko_scene::transform::{GlobalTransform, Transform};
 
 /// The kernel's component-id ceiling (mirror of the crate-private
@@ -152,7 +164,7 @@ where
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn dynamic_body_spawns_exactly_its_eight_components() {
+fn dynamic_body_spawns_its_declared_set_plus_required_closure() {
     let mut world = EcsMaster::new();
     let e = spawn_bundle(&mut world, a_dynamic_body);
 
@@ -165,6 +177,16 @@ fn dynamic_body_spawns_exactly_its_eight_components() {
         RigidBodyMass::component_id(),
         Collider::component_id(),
         Visibility::component_id(),
+        // The `#[require]` closure, NOT bundle fields. `MeshHandle` declares
+        // `#[require(Transform, GlobalTransform, MeshRefGen)]` and `MaterialHandle`
+        // `#[require(MaterialRefGen)]` (asset-streaming F5 generation carriers), so a spawn
+        // legitimately materialises two columns the bundle never names. This test predates
+        // those attributes and asserted an EXACT arity-8 set; it went red the moment the
+        // 2026-07 audit fixed the vacuously-green CI and the suite actually ran again.
+        // The invariant worth keeping is "nothing beyond the declared set AND its required
+        // closure", so the closure is spelled out rather than the check weakened.
+        MeshRefGen::component_id(),
+        MaterialRefGen::component_id(),
     ];
     assert_exact_component_set(&world, e, &expected, "DynamicBody");
     assert_eq!(DynamicBody::component_ids().len(), 8, "DynamicBody is arity 8");
@@ -249,6 +271,9 @@ fn dynamic_body_bundle_matches_manual_insert_archetype() {
     let mut world = EcsMaster::new();
 
     // Manual multi-insert into a hand-built archetype with the identical set.
+    // The hand-built set must include the `#[require]` closure the bundle path materialises
+    // (`MeshRefGen` via `MeshHandle`, `MaterialRefGen` via `MaterialHandle`) — otherwise the
+    // two archetypes differ by two columns and the 0%-gate below compares unlike things.
     let arch = world.create_archetype(&[
         Transform::component_id(),
         GlobalTransform::component_id(),
@@ -258,8 +283,13 @@ fn dynamic_body_bundle_matches_manual_insert_archetype() {
         RigidBodyMass::component_id(),
         Collider::component_id(),
         Visibility::component_id(),
+        MeshRefGen::component_id(),
+        MaterialRefGen::component_id(),
     ]);
     let b = a_dynamic_body();
+    // The require-ctors the bundle path would run: both carriers default to GEN_UNSYNCED.
+    let mesh_ref_gen = MeshRefGen::default();
+    let material_ref_gen = MaterialRefGen::default();
     let manual = world
         .create_entity(
             arch,
@@ -272,9 +302,11 @@ fn dynamic_body_bundle_matches_manual_insert_archetype() {
                 (RigidBodyMass::component_id(), as_bytes(&b.mass)),
                 (Collider::component_id(), as_bytes(&b.collider)),
                 (Visibility::component_id(), as_bytes(&b.visibility)),
+                (MeshRefGen::component_id(), as_bytes(&mesh_ref_gen)),
+                (MaterialRefGen::component_id(), as_bytes(&material_ref_gen)),
             ],
         )
-        .expect("manual DynamicBody archetype accepts its eight columns");
+        .expect("manual DynamicBody archetype accepts its ten columns");
 
     let bundle_arch = world.bundle_archetype_id_for::<DynamicBody>();
     assert_eq!(

@@ -7,7 +7,7 @@ use std::ptr::NonNull;
 
 use crate::ecs::core::archetype::archetype::Column;
 use crate::ecs::core::change_detection::Tick;
-use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
+use crate::ecs::core::component::component_registry::{self, MAX_COMPONENTS};
 use crate::ecs::core::component::hooks::dispatch::{
     trigger_on_add, trigger_on_insert, trigger_on_remove, trigger_on_replace,
 };
@@ -68,7 +68,10 @@ impl EcsMaster {
     /// # Safety
     /// The returned pointer borrows the dense column for `&self`; it must not be
     /// read across a structural mutation of the same store. The cast type must
-    /// match the store's registered component type.
+    /// match the store's registered component type. This fn does NOT validate the
+    /// entity's liveness/generation — `slot_of` is generation-blind, so a stale
+    /// handle for a recycled id would cross-read another tenant's slot; the caller
+    /// must have validated liveness/generation first (as `get_component_raw` does).
     #[inline]
     pub fn dense_get_raw(&self, entity: Entity, component_id: ComponentId) -> Option<*const u8> {
         let store = self.dense_registry.store(component_id)?;
@@ -95,21 +98,51 @@ impl EcsMaster {
         component_id: ComponentId,
         bytes: &[u8],
     ) {
+        self.dense_insert_only(entity, archetype_id, component_id, bytes);
+        self.dense_fire_add_insert(entity, component_id);
+    }
+
+    /// Store half of [`Self::dense_insert_and_fire`]: inserts `bytes` into the
+    /// `component_id` dense store (creating it lazily) and seeds `arch_presence`
+    /// with `archetype_id`. **Fires nothing.**
+    ///
+    /// Split out because `migrate_entity_insert` writes the dense store in its
+    /// Phase 1 — BEFORE the migration's `on_add` fires — and a caller that must
+    /// reproduce that phase order (`add_component_by_id`'s dense `#[require]`
+    /// arm) cannot use the fused form: a hook reading
+    /// `DeferredEcsMaster::get_component::<Dense>` would observe the value
+    /// absent, because `get_component_raw` HAS a dense arm (the
+    /// `StorageKind::Dense` early return below). MEASURED on the typed path: the
+    /// required column's `on_add` sees the dense component present.
+    ///
+    /// The `&mut DenseStore` borrow of `self.dense_registry` ends at this fn's
+    /// exit, so no `self`-derived `&mut` into storage is live when the caller
+    /// mints a `world_ptr` for the fire half (the archetypal SAFETY-1
+    /// discipline, now enforced by the split rather than by a block scope).
+    pub(crate) fn dense_insert_only(
+        &mut self,
+        entity: Entity,
+        archetype_id: ArchetypeId,
+        component_id: ComponentId,
+        bytes: &[u8],
+    ) {
         let current_tick = self.current_tick();
-        {
-            let store = self.dense_registry.store_mut(component_id);
-            store.insert(entity.id(), bytes, current_tick);
-            store.mark_arch_present(archetype_id);
-            // <-- the `&mut DenseStore` borrow of `self.dense_registry` ends here,
-            // BEFORE `world_ptr` is minted (no `self`-derived `&mut` is live at
-            // the fire, mirroring the archetypal SAFETY-1 discipline).
-        }
-        // MINT: no `self`-derived `&mut` into storage is live (the store borrow
-        // above dropped at the block close).
+        let store = self.dense_registry.store_mut(component_id);
+        store.insert(entity.id(), bytes, current_tick);
+        store.mark_arch_present(archetype_id);
+    }
+
+    /// Fire half of [`Self::dense_insert_and_fire`]: on_add THEN on_insert (Bevy
+    /// add-before-insert ordering), hooks first then observers, per component.
+    /// Both self-gate to a no-op when nothing is registered.
+    ///
+    /// NOT entity-targeted: `migrate_entity_insert`'s POST dense block fires no
+    /// `fire_entity_observers` either, and matching it IS the parity target. The
+    /// dense entity-observer gap is path-symmetric and filed, not fixed here.
+    pub(crate) fn dense_fire_add_insert(&mut self, entity: Entity, component_id: ComponentId) {
+        // MINT: no `self`-derived `&mut` into storage is live (the store borrow,
+        // if any, ended before this call — see `dense_insert_only`).
         let world_ptr = NonNull::from(&mut *self);
-        // on_add THEN on_insert (Bevy add-before-insert ordering). Hooks first,
-        // then observers, per component (both self-gate to a no-op when nothing
-        // is registered).
         trigger_on_add(world_ptr, component_id, entity);
         fire_on_add_observers(world_ptr, component_id, entity);
         trigger_on_insert(world_ptr, component_id, entity);
@@ -185,8 +218,22 @@ impl EcsMaster {
         if inland.generation() != entity.generation() {
             return None;
         }
-        let archetype_ptr = inland.archetype_ptr();
         debug_assert!(component_id.0 < MAX_COMPONENTS);
+
+        // Dense (Dense plan D2/D4): the id has NO archetype column at all —
+        // route through the global `DenseStore` instead of the table's
+        // `columns` lookup. `inland`'s liveness + generation check above
+        // already validated `entity`, so the membership probe below (keyed
+        // only by `EntityId`, generation-blind) is safe: a stale handle for a
+        // recycled id was already rejected. Wires up the previously dead
+        // `dense_get_raw` (mirrors the `QueryView` non-member -> `None`
+        // discipline).
+        if component_registry::storage_kind(component_id.0) == component_registry::StorageKind::Dense
+        {
+            return self.dense_get_raw(entity, component_id);
+        }
+
+        let archetype_ptr = inland.archetype_ptr();
 
         // BUG-MIGRATE-TB-1 (Tree Borrows): do NOT form `&*archetype_ptr` here.
         // A `&Archetype` covers the WHOLE struct (incl. `current_index`); a
@@ -248,6 +295,23 @@ impl EcsMaster {
             return None;
         }
         debug_assert!(component_id.0 < MAX_COMPONENTS);
+
+        // Dense (Dense plan D2): mirrors `get_component_raw`'s dense branch
+        // (which routes through `dense_get_raw`), but write-capable —
+        // `dense_get_raw` returns `*const u8`, so the mutable path re-resolves
+        // the same `slot_of` + `row_ptr` lookup directly. `inland`'s liveness +
+        // generation check above already validated `entity`.
+        if component_registry::storage_kind(component_id.0) == component_registry::StorageKind::Dense
+        {
+            let store = self.dense_registry.store(component_id)?;
+            let slot = store.slot_of(entity.id())?;
+            let view = store.solve_view();
+            // SAFETY: `slot` came from `slot_of` on a live, generation-checked
+            //   entity (validated above), so it is a LIVE slot — `row_ptr`'s
+            //   bounds + liveness debug_assert holds. `&mut self` gives
+            //   exclusive access to the column for the pointer's use.
+            return Some(unsafe { view.row_ptr(slot as usize) });
+        }
 
         let archetype_ptr = inland.archetype_ptr();
 
@@ -396,6 +460,33 @@ impl EcsMaster {
     /// sizes produce undefined behavior in release. Callers should obtain
     /// the slice from a properly-sized `&T` for the target component type
     /// (see `get_component_mut` typed wrappers).
+    ///
+    /// Dense (Dense plan D2/D4): routed through [`DenseStore::insert_or_replace`]
+    /// (verified `false` for an entity that never had the component — this
+    /// never silently creates a NEW membership; that is `Commands::insert` /
+    /// `dense_insert_and_fire`'s job, which additionally fires hooks/observers).
+    ///
+    /// # Change detection — BOTH arms stamp [`Self::current_tick`]
+    ///
+    /// A successful write stamps the row's / slot's `changed` tick with the
+    /// world's current tick on either storage kind, so a direct-API write is
+    /// observed by a subsequent `Changed<T>` query exactly like a `Mut<T>`
+    /// deref. The dense arm stamps inside `insert_or_replace`; the table arm
+    /// stamps the same value through `ComponentPool::write_changed_tick`.
+    ///
+    /// The table arm did NOT stamp before this was fixed, and that was a silent
+    /// wrong answer rather than an error: the bytes landed, `get_component` read
+    /// them back, and every dirty gate keyed on the tick — `boyko_scene`'s
+    /// transform propagation, the GPU instance sync, `boyko_ui`'s data binds —
+    /// stayed blind, so a raw write moved the data and nothing on screen.
+    /// Gated by `tests/change_tick_on_raw_write.rs`.
+    ///
+    /// A REFUSED write (stale entity, absent component) stamps nothing.
+    ///
+    /// Outside a system the stamp carries the same `is_added` / `is_changed`
+    /// caveats as [`Self::get_component_mut`] — see its `O4` / Bug #56 sections.
+    ///
+    /// [`DenseStore::insert_or_replace`]: crate::ecs::core::component::dense::DenseStore::insert_or_replace
     #[inline]
     pub fn set_component_raw(
         &mut self,
@@ -403,9 +494,72 @@ impl EcsMaster {
         component_id: ComponentId,
         component_bytes: &[u8],
     ) -> bool {
-        let Some(dst) = self.get_component_raw_mut(entity, component_id) else {
+        if component_registry::storage_kind(component_id.0) == component_registry::StorageKind::Dense
+        {
+            let Some(inland) = self.entity_master.entities_inland.get(entity.id().0) else {
+                return false;
+            };
+            if inland.is_null() || inland.generation() != entity.generation() {
+                return false;
+            }
+            let entity_id = entity.id();
+            let Some(store) = self.dense_registry.store(component_id) else {
+                return false;
+            };
+            if !store.contains(entity_id) {
+                return false;
+            }
+            let current_tick = self.current_tick();
+            let store = self
+                .dense_registry
+                .store_existing_mut(component_id)
+                .expect("invariant: presence probe above confirmed the store exists");
+            store.insert_or_replace(entity_id, component_bytes, current_tick);
+            return true;
+        }
+
+        // Table arm. Resolved inline instead of through `get_component_raw_mut`
+        // because the write must ALSO stamp the row's `changed` tick, and the
+        // two live in different places: the fast data pointer in `columns`, the
+        // tick sub-region on the `ComponentPool`. One resolution yields both
+        // (the alternative — call the helper, then re-resolve the entity for the
+        // tick — pays the inland lookup, the slab hop and the storage-kind test
+        // twice on a `~15-18 ns` path). Same prologue and same projections as
+        // `get_component_mut`'s table arm.
+        let current_tick = self.current_tick();
+        let Some(&inland) = self.entity_master.entities_inland.get(entity.id().0) else {
             return false;
         };
+        if inland.is_null() || inland.generation() != entity.generation() {
+            return false;
+        }
+        debug_assert!(component_id.0 < MAX_COMPONENTS);
+        let row = inland.unit_index() as usize;
+        let archetype_ptr = inland.archetype_ptr();
+
+        // BUG-MIGRATE-TB-1 (Tree Borrows): do NOT form `&mut *archetype_ptr` —
+        // a struct-wide `&mut Archetype` covers `current_index` and would narrow
+        // the interior-mutable slab cell a sibling structural migration writes.
+        // Project the single `Column` through a raw-pointer read instead.
+        // SAFETY (U1, U2, U4, U11, U14, F1): `archetype_ptr` is write-capable,
+        //   stable, interior-mutable (`SharedReadWrite`, F4-rooted) slab
+        //   provenance minted during `create_entity`; it is non-null and
+        //   generation-matched above ⇒ the slot is live, and `&mut self` means
+        //   no other live borrow into it exists. `component_id.0 <
+        //   MAX_COMPONENTS` (debug-asserted; the caller boundary is the same one
+        //   `get_component_raw_mut` relies on) keeps the `[Column;
+        //   MAX_COMPONENTS]` index in bounds. `Column` is `Copy`.
+        let column = unsafe {
+            let columns_ptr = core::ptr::addr_of!((*archetype_ptr).columns).cast::<Column>();
+            *columns_ptr.add(component_id.0)
+        };
+        // A null column is the single source of truth for "not hosted HERE" —
+        // it also covers a GPU-resident column, whose pool still exists but
+        // whose CPU rows are not the live storage.
+        if column.ptr.is_null() {
+            return false;
+        }
+
         // Stride is not re-queried here; the size invariant lives at the
         // caller boundary (typed wrappers downcast from `&T` with
         // `size_of::<T>()`). A debug-assertable stride check would require
@@ -413,9 +567,9 @@ impl EcsMaster {
         // which defeats the fast-path goal. The pool layer carries the
         // ultimate size guarantee through `Layout`.
         // SAFETY (U5, U6, U10):
-        //   - dst is a valid *mut u8 to a byte range of size `stride` for
-        //     the target component (U5/U6 — column resolved through the
-        //     same fast path as get_component_raw_mut).
+        //   - `column.ptr + row * stride` is a valid *mut u8 to a byte range of
+        //     size `stride` for the target component (U5/U6 — `row` is the live
+        //     entity's own row, and the column base is the pool's buffer base).
         //   - The caller's slice is sized to match by API contract; typed
         //     wrappers enforce this via `size_of::<T>()`.
         //   - Single-threaded &mut self ⇒ no concurrent reader.
@@ -423,8 +577,34 @@ impl EcsMaster {
         //     buffer live in disjoint allocations (slice is a caller-stack
         //     view; the pool buffer lives in the pool's own reservation).
         unsafe {
-            std::ptr::copy_nonoverlapping(component_bytes.as_ptr(), dst, component_bytes.len());
+            std::ptr::copy_nonoverlapping(
+                component_bytes.as_ptr(),
+                column.ptr.add(row * column.stride as usize),
+                component_bytes.len(),
+            );
         }
+
+        // The stamp. `current_tick` is the SAME value the dense arm hands to
+        // `insert_or_replace` above — one tick source for both storages, so the
+        // two arms cannot drift into two answers.
+        // SAFETY (U1, U4, F1): same slab provenance as the `columns` projection
+        //   above; this one reads only the cold `component_pools` field (never
+        //   `current_index`), so the shared `&ComponentPoolBundle` narrows
+        //   nothing a sibling migration writes — the uniform F4 read discipline
+        //   `get_component_raw` and `get_component_changed_tick` already use.
+        let pools = unsafe { &*core::ptr::addr_of!((*archetype_ptr).component_pools) };
+        let pool = pools.get_pool(component_id).expect(
+            "invariant: a non-null column is published from a live CPU-resident pool in the \
+             same archetype (`refresh_column`), so the pool exists",
+        );
+        debug_assert!(row < pool.count());
+        // SAFETY: `row` is the live entity's own row, so `row < pool.count() <=
+        //   committed_rows` (debug-asserted above) — the tick slot lies in the
+        //   committed prefix of the pool's `changed` tick sub-region. Exclusive
+        //   access to this `(archetype, component)` rests on `&mut self`, the
+        //   direct-API OBS-MUT2 basis (no system is running, so Phase 9 SCH3's
+        //   conflict graph is not the argument here).
+        unsafe { pool.write_changed_tick(row, current_tick) };
         true
     }
 
@@ -432,6 +612,10 @@ impl EcsMaster {
     /// component of type `T` owned by `entity`, or `None` if the entity is
     /// stale, the archetype does not host `T`, or the entity was never
     /// registered.
+    ///
+    /// Dense components are supported transparently: [`Self::get_component_raw`]
+    /// routes a `Dense`-classified `T` through the global `DenseStore` (Dense
+    /// plan D2), so no separate dense arm is needed here.
     #[inline]
     pub fn get_component<T: crate::ecs::core::component::component::Component>(
         &self,
@@ -492,6 +676,42 @@ impl EcsMaster {
         debug_assert!(cid.0 < MAX_COMPONENTS);
         let idx = inland.unit_index() as usize;
         let this_run = self.current_tick();
+
+        // Dense (Dense plan D4): `T` has NO archetype column at all; resolve
+        // the global `DenseStore` instead and build the `Mut<T>` from its
+        // per-slot tick pointers, mirroring `Mut<T>::fetch`'s dense arm
+        // (`data/mut_.rs`) exactly — the direct-API guard must bump the SAME
+        // per-slot `changed_tick` a dense query would, or a `Changed<T>` query
+        // would miss a direct-API write. `inland`'s liveness + generation
+        // check above already validated `entity`.
+        if component_registry::storage_kind(cid.0) == component_registry::StorageKind::Dense {
+            let store = self.dense_registry.store(cid)?;
+            let slot = store.slot_of(entity.id())? as usize;
+            // SAFETY: `slot` came from `slot_of` on a live, generation-checked
+            //   entity (validated above), so it is a LIVE slot — `row_ptr`'s
+            //   bounds + liveness debug_assert holds. The pointer is cast to
+            //   `T`, matching the store's registered type (the store was
+            //   created for `T::component_id()`). Exclusivity of the `&mut T`
+            //   rests on `&mut self` (whole-world exclusivity) — the
+            //   system-less direct-API path, the same OBS-MUT2 basis the
+            //   table arm below uses (not Phase 9 SCH3's conflict graph).
+            let value: &mut T = unsafe { &mut *(store.solve_view().row_ptr(slot) as *mut T) };
+            // SAFETY: `slot < store.len()` (it came from `slot_of`, which only
+            //   maps live slots below the column's high-water mark), so
+            //   `[slot]` on both tick sub-regions lies in the committed
+            //   prefix; `Tick` is `Copy`.
+            let added: Tick = unsafe { *(*store.added_ticks_ptr().add(slot)).get() };
+            let changed_tick: *const UnsafeCell<Tick> =
+                unsafe { store.changed_ticks_ptr().add(slot) };
+            return Some(Mut {
+                value,
+                added,
+                changed_tick,
+                last_run: this_run,
+                this_run,
+                deref_mut_called: false,
+            });
+        }
 
         // BUG-MIGRATE-TB-1: project the individual fields (`columns`,
         // `component_pools`) through the raw slab pointer; do NOT form a
@@ -558,6 +778,9 @@ impl EcsMaster {
     ///
     /// Uses the fast inland + column lookup: a null `column.ptr` is the
     /// single source of truth for "archetype does not host this component".
+    ///
+    /// Dense (Dense plan D2): a dense id has no column at all — delegates to
+    /// [`Self::dense_contains`], the store's membership oracle.
     #[inline]
     pub fn has_component(&self, entity: Entity, component_id: ComponentId) -> bool {
         let Some(inland) = self.entity_master.entities_inland.get(entity.id().0) else {
@@ -568,6 +791,10 @@ impl EcsMaster {
         }
         if component_id.0 >= MAX_COMPONENTS {
             return false;
+        }
+        if component_registry::storage_kind(component_id.0) == component_registry::StorageKind::Dense
+        {
+            return self.dense_contains(entity, component_id);
         }
         // BUG-MIGRATE-TB-1: project `columns` (offset 0) through the raw slab
         // pointer instead of forming `&Archetype` — a foreign `&Archetype` read

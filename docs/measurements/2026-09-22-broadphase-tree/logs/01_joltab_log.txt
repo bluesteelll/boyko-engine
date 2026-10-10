@@ -1,0 +1,3 @@
+c52ad183 test(physics): the tree broadphase's script harness keys its rows by slot AND generation, so it compiles against the A1b RowIdentity and a recycled id is a new key, as the engine's is (semantic conflict of the C1+C3 merge)
+bbd5d12c Merge branch 'perf/physics-tree-broadphase' into merge/ke16-into-ecsnative
+17ef3ef7 docs(claude-md): the ignore census after the A1b, hwrt shadow-origin and A3 merges - 334 = 184 + 150 across 1,652 files

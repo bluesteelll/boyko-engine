@@ -1,0 +1,577 @@
+# Asset system rework — assets-as-components + VM-native store + full streaming
+
+> **Gaia note (added 2026-08-29) — this plan's ground stands; Gaia adds requirements ON it, and
+> owns the authoring half.** [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) is the data language for
+> scenes, UI documents and the DataAsset/DataTable analog, and it **absorbs the scene-format
+> pipeline** (own text → build-time bake → binary, zero runtime reflection). It does not replace the
+> runtime asset system specified here — its D1/S1 decisions are untouched — but three of its
+> findings land squarely on this document, all of them **open, none decided**:
+>
+> - **The handles this plan carries are process-local.** `MeshHandle(u32)` / `MaterialHandle(u16)`
+>   are POB integers that blit a **process-local slot**, so a baked reference passes every loud
+>   refusal and is meaningless after a restart — recorded as "the single most dangerous finding for
+>   scenes" ([`gaia/DECISIONS.md`](gaia/DECISIONS.md) §What the inventory found, item 2). Cure:
+>   stable asset ids in the binary plus a bake lint (`GN1`) banning the raw form.
+> - **A loaded scene's assets sit at refcount 0.** The loader runs no hooks, so the refcount
+>   lifetime owner this plan installs never fires for load-path spawns — every mesh of a loaded
+>   scene is retirable mid-game. That is item (v) of ballot **F4**, and kernel request **GK-3** (a
+>   specified post-load fixup seam).
+> - **Streaming acquires an authoring-side counterpart.** Gaia's **G6** emits a cell catalog from
+>   day one, with `load_cell` / unload and a cross-load object-id → `Entity` map (**GK-1**, a
+>   generalization of `LoadEntityMap`) sequenced behind ballot **F5**.
+>
+> The byte format underneath both is unchanged: Gaia's baker **prints the existing
+> `boyko_serialize` format** — see [SERIALIZATION-PLAN.md](SERIALIZATION-PLAN.md), which carries its
+> own Gaia note.
+
+Status: **DESIGN LOCKED (2026-07-10)** — v2 architecture + delta-fixes below. Owner-approved
+direction (assets-as-components, S1 VM-native shared store, full-streaming scope). Supersedes the
+committed A0–A3b `Assets<T>`-on-`std::Vec` + `Box<dyn Any>` foundation (Principle-0/1 violations).
+
+This plan was produced by an architect↔critic loop (2 design rounds, 5 adversarial critics). The
+raw v2 design + all critiques live in the session scratchpad; this file is the durable, corrected,
+implementation-ready spec. Every rung is atomic + gated.
+
+## Locked decisions
+
+- **Instance side (D1):** a renderable game object = `Transform + StaticMesh + MeshMaterial`, where
+  the carriers are THIN SoA components (a bare dense id per column, `#[repr(transparent)]`), NOT fat
+  structs. "Extensible metadata" = ADD sibling columns, never fields inside the carrier. This is
+  already the engine shape: `MeshHandle | MaterialHandle | Visibility | InstanceModelCol`
+  (`crates/boyko_scene/src/render_caps.rs`).
+- **Shared store (S1):** VM-native, resource-owned, keyed by a dense slot id. The
+  `Handle`/`Assets`/`AssetServer` *wrapper* is dissolved in spirit (the id inside the component IS
+  the handle); `Assets<T>` and `Handle<T>` names are RETAINED as VM-native facades to minimise churn
+  and the byte-identity blast radius. The four `std::Vec` columns in `assets.rs` are deleted.
+- **Store backing = the shipped DenseStore recipe.** Both stores are a store-owned `ComponentPool`
+  (VM-native, occupancy-tracked, address-stable) + `LiveBitmap` + free-list + VM-native gen/state/
+  refcount lanes. `ComponentPool::new(id, reserve_rows)` is standalone (no archetype), exactly as
+  `DenseStore.column` / `ScratchColumn` already are (`dense_store.rs:69`, `scratch_column.rs:69`).
+  This **refutes and retracts** the `slot.rs` "a VM-native SlotColumn is unsound (drop `!Copy` UB)"
+  rationale — `DenseStore` already does occupancy-tracked exactly-once drop over such a pool.
+- **Scope = FULL STREAMING** (owner-selected): generation-in-carrier + gather validation; refcount
+  lifetime owner via hooks; fence-gated deferred GPU-free; path→handle dedup without HashMap; plus
+  GPU-mirror growth (stream-in) and the material-into-raster wiring (a confirmed bug: the raster path
+  ignores material — `gbuffer_mrt.fs.hlsl:51` hardcodes `DEFAULT_MESH_MATERIAL_ID = 0u`).
+- **Carry-forwards:** `HasLoaders` const-table static dispatch (delete `Box<dyn Any>`/`TypeId`/loaders
+  HashMap/`decode_thunk`); OBJ vertex sort-dedup (delete its HashMap); ZERO HashMap in the asset system.
+
+## The unified store
+
+```rust
+pub struct Assets<T: AssetBacking> {
+    col:        ComponentPool,   // store-owned data column (stride = size_of::<T>()), address-stable
+    slot_word:  VmColumn<u32>,   // {gen: high 29b, state: low 3b} per slot — single packed probe
+    refcount:   VmColumn<u32>,   // per-slot live-ref count — streaming lifetime owner
+    live:       LiveBitmap,      // occupancy (DenseStore-sanctioned)
+    free:       Vec<u32>,        // LIFO free-list (DenseStore-sanctioned); slot returns ONLY at retire
+    pinned:     BitSet,          // NEVER_RETIRE bits (slot 0 = default asset)
+    dirty:      BitSet,          // slots whose gen advanced/retired THIS frame — drives validation
+    live_count: usize,
+    high_water: usize,           // == col.count(); dense id space [0,high_water) for gather sizing
+    dirty_gen:  u64,             // GPU-mirror re-upload trigger (unchanged semantics)
+    free_epoch: u64,             // monotonic; bumped on ANY free/gen-advance; validate early-out oracle
+    id:         AssetKind,       // routing tag for the deferred-free queue
+    _t:         PhantomData<T>,
+}
+```
+
+- **`slot_word`**: states `Vacant=0 Loading=1 Loaded=2 Failed=3 Retiring=4` (3 bits); gen = high 29
+  bits (wrap by difference-compare, same as ticks). No `states: Vec` (the last unsanctioned Vec is gone).
+- **Send/Sync:** `Assets<T>` must reproduce the `Vec<T>` auto-trait profile so `Assets<MaterialGpu>`
+  stays a `Send+Sync` `Resource` and `Assets<MeshGpu>` stays `!Send` (`NonSendResource`). Since
+  `ComponentPool`/`VmColumn` hold a `NonNull` (auto-`!Send`), add
+  `unsafe impl<T: AssetBacking + Send> Send for Assets<T>` + `Sync` mirror, with a SAFETY comment
+  (single-owner, `&mut` mutation, `&` shared reads, no interior mutability — the `Vec<T>` profile).
+- **`take_at` (the ONLY new store unsafe):** `ComponentPool::take_at<T>(idx) -> T` = `ptr::read` the
+  row WITHOUT running `drop_at`; caller clears the `live` bit first so terminal `Drop`/`drop_at` never
+  re-touches it (exactly-once move-out). Miri-TB gated.
+- **`fill` signature:** `fill(h, v) -> Result<(), (AssetError, T)>` — on a Retiring/Vacant/gen-mismatch
+  target the value is RETURNED (never dropped: `MeshGpu` has no device-freeing `Drop`; a bare drop
+  leaks BoundBuffer+BLAS), and the caller routes it to the fence-gated deferred-free queue.
+- **remove/retire = take-at-RETIRE, single owner = the store.** `remove(h)`/refcount→0 marks the slot
+  `Retiring` (occupied-but-UNREUSABLE), enqueues `FreeEntry{kind,slot,retire_frame}` (NO value),
+  bumps `free_epoch`, sets `dirty`. `retire_deferred_frees` does the single `take_at` + device
+  destroy + gen-bump + free-list push once the fence retires.
+- **Terminal `Drop`** mirrors `DenseStore::drop` (drop live slots via `drop_at`, `pop_entity_no_drop`
+  to 0). Explicit `destroy(ctx)` remains the device teardown (drain deferred queue with `wait_idle`).
+
+### AssetBacking — via a macro, NOT a blanket impl (FIX-A)
+
+A blanket `impl<T: bytemuck::Pod> AssetBacking for T` + `impl AssetBacking for MeshGpu` is **E0119**
+on stable (coherence does no negative reasoning over the foreign `Pod` trait — it cannot prove
+`MeshGpu: !Pod`). Use a declarative macro instead:
+
+```rust
+pub trait AssetBacking: Sized + Send + Sync + 'static {
+    const NEEDS_TEARDOWN: bool;
+    fn register_layout() -> ComponentId;   // cached OnceLock<ComponentId> per T
+}
+macro_rules! impl_asset_pod_backing { ($($t:ty),*) => { $(
+    impl AssetBacking for $t {
+        const NEEDS_TEARDOWN: bool = false;               // POD: drop_fn = None
+        fn register_layout() -> ComponentId { register_asset_layout::<$t>(None) }
+    })* } }
+impl_asset_pod_backing!(MaterialGpu);                      // + POD test types in #[cfg(test)]
+impl AssetBacking for MeshGpu {                            // Resident: manual drop_fn (frees no device mem)
+    const NEEDS_TEARDOWN: bool = true;
+    fn register_layout() -> ComponentId { register_asset_layout::<MeshGpu>(Some(MeshGpu::drop_glue)) }
+}
+```
+
+The ~30 `assets.rs` unit tests + the 256-case `assets_matches_hashmap_oracle` proptest instantiate
+`Assets::<u64>` — the test module does `impl_asset_pod_backing!(u64, u32);` once, then ports verbatim.
+
+## State machine (states V/L/D=Loaded/F/R=Retiring; gen advances only on R→V)
+
+| Current | Event | Next | refcount | deferred-free | value |
+|---|---|---|---|---|---|
+| V | `add(v)` | D | =0 | — | write v; live=1; stamp gen |
+| V | `reserve()` | L | =0 | — | no value; live=1; stamp gen |
+| L | `fill` gen-match | D | — | — | write v |
+| L | `fail` | F | — | — | — |
+| L | `dec_ref→0` (cancel-load-on-retire) | R | 0 | enqueue `{slot,cur+FIF}`; epoch++; dirty | pending fill will be rejected |
+| D | `fill` | D | — | — | **Err((AlreadyLoaded,v))** → deferred-free |
+| R\|V | `fill` | unchanged | — | — | **Err((Retiring/Stale,v))** → deferred-free |
+| D,L,F | `inc_ref` **gen-match** | same | +1 | — | — |
+| any | `inc_ref` **gen-MISMATCH** | unchanged | **no-op** | — | stale weak handle; validate disables entity (FIX-B) |
+| D,F | `dec_ref→>0` | same | -1 | — | — |
+| D | `dec_ref→0` (unpinned) | R | 0 | enqueue; epoch++; dirty | — |
+| F | `dec_ref→0` | R | 0 | enqueue (no device value); epoch++; dirty | — |
+| F | `fill` gen-match (late) | unchanged | — | — | **Err((Failed,v))** → deferred-free (FIX-F defensive) |
+| any pinned | `dec_ref→0` | unchanged | 0 | — (never enqueued) | slot 0 immortal |
+| R | `retire` (fence elapsed) | V | — | dequeued | `take_at`(D)→destroy; None(F/cancelled-L); **gen++**; free-list |
+
+- Enqueue-to-Retiring is **IDEMPOTENT** (guard: only a non-Retiring source state may enqueue) so a slot
+  already queued can never be double-enqueued → no double-`take_at`/double-destroy (FIX-B).
+- `inc_ref`/`dec_ref` carry the handle **generation**; a gen-mismatch is a no-op (a raw `Handle` copy
+  held outside a carrier is WEAK/non-owning — only carrier components are strong refs). The v2
+  `debug_assert!(false)` "a fresh handle can never name a Retiring slot" is DELETED — it is reachable
+  from safe user code via a stale weak handle (FIX-B).
+- Re-add can't alias a queued slot: `add` draws ONLY from the free-list, and a Retiring slot enters the
+  free-list solely via `retire` (after destroy).
+- **Never-attached reclamation (FIX-F):** retire triggers only on a `1→0` decrement; an `add` that is
+  never attached stays `Loaded` at refcount 0 (speculative loads need explicit `unload`). Documented
+  accumulation; high-water compaction is a follow-up (with O2).
+
+## Four streaming pieces
+
+1. **Refcount via hooks → Send resource → apply system.** On both `MeshHandle`/`MaterialHandle`:
+   `on_insert` (fresh add AND replace-insert) → `RefDelta{kind, slot, gen, +1}` + `SyncRefGen`;
+   `on_replace` (before overwrite, reads old) → `RefDelta{.. -1}`; `on_remove` → `RefDelta{.. -1}` +
+   `ClearRefGen`. In-place `*mh = MeshHandle(new)` fires `on_replace(-1)+on_insert(+1)` → balanced +
+   ref-gen re-derived. `RefcountDeltas` is a **plain Send `Resource`** (POD deltas), reached from the
+   hook via `DeferredEcsMaster::resource_mut` (the sanctioned on_remove-counter pattern,
+   `deferred_master.rs:105`). `RefDelta` carries `gen` (FIX-B). `apply_refcount_deltas` folds the buffer
+   into each store, gen-checking each delta (mismatch → no-op).
+2. **Generation-in-carrier + validate.** `MeshRefGen(u32)` / `MaterialRefGen(u32)` are TWO independent
+   auto-maintained components (separate columns — binding one never clobbers the other). Written by a
+   `SyncRefGen{e, lane, slot}` deferred command the hook enqueues (apply-time has NonSend-store access);
+   drained BEFORE `validate_asset_refs`. `validate_asset_refs`: **O(1) early-out** when no store's
+   `free_epoch` advanced (all-static/golden frames — provably zero-cost); on a churn frame, a branchless
+   L1-resident `dirty.test(slot)` per visible row, and the full `slot_word` probe ONLY on churned rows —
+   gen-mismatch/not-Loaded → `disable::<RenderEnabled>` (mesh) or substitute id 0 (material). The
+   gather's count-pass key stays a thin 4 B `MeshHandle`; ref-gen never enters the gather. **Cost bound
+   (FIX-C):** O(1) static; on churn O(visible) cheap bit-tests + O(referenced∩retired) full probes — the
+   perf-critic's sanctioned "branchless L1-resident dirty-bitset" relaxation of "not a full scan". The
+   bit-test may be FUSED into the gather's existing per-instance count-pass to avoid a second iteration.
+3. **Deferred GPU-free (fence-gated, monotonic counter).** `FreeEntry{kind, slot, retire_frame}` (no
+   value) + `FreeEntry::Device{buf, retire_frame}` for grown buffers. `retire_deferred_frees` runs LAST,
+   after `wait_frame_in_flight`: pop `retire_frame <= current_monotonic_frame`; `store.retire(slot)`
+   (single `take_at`); `ctx.destroy_buffer`/`destroy_blas`; gen-bump + free-list push; also drains the
+   fill-reject queue. `current_frame` = the MONOTONIC renderer counter (`runner.rs` `frame_index`,
+   `wrapping_add(1)`), NOT the `%FIF` slot. `retire_frame = F_free + FIF` (proof §Fence-gate).
+4. **PathIndex dedup (append + merge, ZERO new unsafe).** `entries: VmColumn<PathEntry>` with a sorted
+   prefix `[0,sorted_len)` + unsorted tail; lookup = binary-search prefix ∥ linear-scan small tail;
+   insert = `push` to tail, sort-merge into the prefix when the tail exceeds a threshold. Uses only safe
+   `push`/`set`/index-read (no shift/insert-at primitive needed). Host primitives get synthetic stable
+   keys (`hash("@prim/cube/{size.to_bits()}")`) so `cube(size)×1000` dedups to one resident handle.
+
+## GPU-mirror growth (grow-and-defer-old) — corrected inventory (FIX-D)
+
+Only the **two CPU-mirrored SSBOs grow**: (a) the `MaterialTable` device SSBO + FIF staging ring, and
+(b) the mesh **instance** SSBO. Both re-seed from CPU-resident stores (materials from the store
+ComponentPool; instances assembled per-frame from the gather) — **no device→device copy**. Per-mesh
+`vertex_buffer`/`index_buffer` are **self-allocated per mesh** (`build_mesh_gpu`) and freed individually
+at retire — they are NOT a strided shared mirror and do NOT participate in mirror-growth (v2's listing of
+them as growable was wrong).
+
+On a frame where the store grew past device capacity, `grow_to(new_cap.next_power_of_two())`: alloc a
+larger buffer, `seed_live_rows` (holes zeroed), route the OLD buffer through the SAME fence-gated queue
+(`retire_frame = current + FIF`), set `rebind_pending = [true; FIF]`, rebind THIS frame's descriptor set.
+`rebind_current(fif_slot)` runs **every frame right after `wait_frame_in_flight`**, gated ONLY on
+`rebind_pending[fif_slot]`, **decoupled from `flush_if_dirty`** (FIX-E) — otherwise a non-dirty frame
+leaves a FIF slot bound to the freed old buffer → UAF at M+FIF. `grow_to`/`rebind_current` run strictly
+AFTER `wait_frame_in_flight` (updating an in-flight descriptor set is UB) — asserted with a
+`debug_assert` on the ordering (FIX-E). Every FIF slot is rebound within `[M, M+FIF-1]` before the old
+buffer's `retire_frame = M+FIF` elapses.
+
+## Fence-gate correctness
+
+After `wait_frame_in_flight` at monotonic frame M, all GPU work from frame ≤ M−FIF is complete (the
+swapchain slot `M%FIF`'s previous submit was frame M−FIF). A slot marked Retiring at frame `F_free` may
+be referenced by `F_free`'s submit; safe to destroy once `M ≥ F_free + FIF`. BLAS-address depth: the
+TLAS is fully rebuilt per-frame from live instances, so a BLAS device address is consumed only within
+the frame that gathered it — FIF=2 covers it; a `debug_assert` pins the per-frame-TLAS-rebuild contract
+(if the TLAS ever becomes persistent/compacted or an async-compute queue with a separate fence is added,
+deepen the queue). Deterministic fence-ordering test: retire is observed strictly after the fence-wait.
+
+## Material-into-raster wiring + golden pipeline binding
+
+Bind the `PER_INSTANCE_MATERIAL` gbuffer variant ONLY when the scene contains a non-default material
+(any `MaterialHandle.0 != 0`). Default-material scenes (the goldens: `shadow_denoise_eval.rs:96` spawns
+`MeshBundle::new(cube, …)` → `MaterialHandle(0)`) stay on the **frozen base `.spv`** → `dac6dbbb` /
+`58f6c6c3` rest on a true frozen-shader guarantee. `gbuffer_mrt.fs.hlsl` is hand-authored HLSL (only the
+`oct_encode`/`pack_material_id_ba` bodies eDSL-spliced between sentinels; `MOTION_VECTORS` `#ifdef`
+precedent), so a `#ifdef PER_INSTANCE_MATERIAL` wrapper (reading `instance_materials[base+SV_InstanceID]`
+via a `nointerpolation` varying, replacing the `=0` constant) is a legitimate hand edit;
+`gbuffer_mrt_edsl_sync.rs`'s `contains()` guard stays green. Data path: `mesh_draw`/`csm_caster` size
+the gather on `high_water()` (fixes the len() hole); a `material_ids` lane parallel to the instance ring
+scatters each instance's `MaterialHandle.0` into a FIF-ringed instance-material SSBO (grows via §growth).
+
+## Rung sequence (each atomic + gated)
+
+| Rung | What | Gate | Byte-identity |
+|---|---|---|---|
+| **F1** | Unified store on standalone `ComponentPool` (`AssetBacking` via macro, packed `slot_word`, `refcount`/`free_epoch`/`dirty`/`pinned`, `take_at`, `fill→Result`, terminal Drop, conditional `unsafe impl Send/Sync`); delete `slot.rs` + 4 Vecs; retract "SlotColumn unsound". **Includes the two concrete backings so the workspace stays green:** `impl_asset_pod_backing!(MaterialGpu)` in `material.rs`, `impl AssetBacking for MeshGpu` + a no-op `drop_glue` (= `drop_in_place`, frees no device memory — matches MeshGpu's existing no-Drop contract) in `mesh.rs`. `Assets<T>` is constructed for both types in `boyko_app::runner.rs`, so these must land with F1 (orphan rules place them in `boyko_render`). | port ~30 unit tests + 256-proptest via `impl_asset_pod_backing!(u64)`; Miri-TB take_at exactly-once; **F1 slot-id parity test** (golden scene mints identical slot ids old-vs-new, FIX-F); build+clippy | goldens hold (CPU-container swap; append order preserved) |
+| **F2** | State machine + refcount hooks (`on_insert/on_replace/on_remove`) + `RefcountDeltas` Send Resource + `apply_refcount_deltas` (gen-checked) + `Retiring` + slot-0 pin | refcount unit tests; in-place-rebind fires on_replace+on_insert; despawn-cascade reentrancy; slot-0-never-retires; joint `(slot,gen,state,refcount)` proptest oracle | N/A |
+| **F3** | Static loader dispatch `HasLoaders` const-table; delete `Box<dyn Any>`/`TypeId`/`loaders` HashMap/`decode_thunk` | loader-dispatch tests rewritten dyn→HasLoaders | N/A |
+| **F4** | `PathIndex` (append+merge) replacing `interned` HashMap; synthetic primitive keys | intern/dedup tests; cube×N→1 slot; binary-search proptest vs BTreeMap oracle | N/A |
+| **F5** | `MeshRefGen`/`MaterialRefGen` two lanes + `SyncRefGen`/`ClearRefGen` commands + `validate_asset_refs` (free_epoch-gated) + gather sizing `high_water()` | staleness test (free+reuse→row skipped); two-lane independence; free_epoch early-out zero-cost; all-live golden byte-identity | goldens hold |
+| **F6** | Deferred GPU-free + fence gate (monotonic) + `retire_deferred_frees` after `wait_frame_in_flight` + fill-reject routing | fence-ordering unit test; Miri-TB take/destroy exactly-once; churn stress (10k over 1k frames, destroy==create, no UAF) | N/A |
+| **F7** | GPU-mirror growth (MaterialTable SSBO + instance SSBO only; FIF descriptor rebind; old-buffer defer) | grow-past-boot (mint slot 4 over boot=4 → no panic); rebind-under-FIF; multi-grow-per-window (two grows M,M+1 → both retire on own M+FIF, all slots rebind, FIX-F); old-buffer fence-gated destroy | N/A |
+| **F8** | Material-into-raster: `#ifdef PER_INSTANCE_MATERIAL` VS/FS variant + `material_ids` lane + instance-material SSBO; base pipeline for default scenes | `gbuffer_mrt_edsl_sync.rs` green; MeshBundle-material-id==0 precondition; NEW 2-material golden; `dac6dbbb`/`58f6c6c3` hold | default scenes on frozen base → hold by construction |
+| **F-obj** | OBJ sort-dedup (delete `HashMap<(i32,i32,i32),u32>`) | obj decode tests (same tri count, dedup == HashMap oracle) | N/A |
+
+Ordering: F1 store under a green byte-identity gate → F2 lifecycle/refcount → F3/F4 remove last HashMaps
+(independent, may parallelise) → F5 validation → F6 teardown → F7 growth → F8 raster wiring → F-obj.
+
+**Invariants discovered during F2 review (load-bearing — do not regress):**
+- **HARD GATE (W2):** F5's generation-check MUST land before F6 (retire/reuse). Until F5, `inc_ref`/`dec_ref`
+  are generation-oblivious (RefDelta carries no gen); this is sound ONLY because no slot is retired-and-reused
+  until F6. A stale weak `Handle(slot)` decrementing a reused slot would corrupt the new tenant's refcount —
+  F5's gen-check closes it, so F6 (the first reuse) must not precede F5.
+- **Store read invariant (C1):** `get_by_index` (and `get`) resolve a row iff its `live` bit is set. `dec_ref`
+  may transition a `Loading`/`Failed` row (which has `live=0` and holds inert zeroed scratch, never a valid `T`)
+  to `Retiring`; such a row must resolve to `None` (forming `&T` over the scratch is UB — a zeroed `MeshGpu`
+  niche is immediate UB). Only a `Loaded→Retiring` row (`live=1`) resolves. `dec_ref` does not bump generation,
+  so `state()`/`remove()` must have an explicit `Retiring` arm (both return `None`; `remove` must NOT `take_at`
+  a Retiring row — the deferred-retire path in F6 is its sole owner) instead of `unreachable!()`.
+- **Carrier rebind contract (W1):** a `MeshHandle`/`MaterialHandle` may be rebound ONLY via spawn or a
+  SINGLE-component `insert` — never inside a migrating multi-component bundle that re-supplies the handle (the
+  insert-migration overlap path fires `on_insert` but NOT the table `on_replace` → the old slot's ref leaks).
+  Also: hooks fire on `insert`, NOT on a raw `Query<&mut MeshHandle>` deref write (none exist in-tree today).
+
+**F5 locked mechanism (architect→soundness-critic, design-locked):**
+- Generation lanes `MeshRefGen(u32)`/`MaterialRefGen(u32)` are `#[require]`d by the carriers (co-presence
+  guaranteed; `Default = GEN_UNSYNCED = u32::MAX`, real gens are 29-bit so never collide). Reconciled with F2's
+  ACTUAL 2 hooks: lane is set/re-synced ONLY on the `+1` path (no `ClearRefGen`); on removal `on_replace(-1)` does
+  not rewrite it (dropped with the entity on despawn; orphaned-but-never-read on a bare remove; self-heals on
+  re-insert). `RefDelta` grows `{entity, gen}`; `on_replace(-1)` reads the sibling lane via `get_component`
+  (valid: despawn fires hooks PRE-structural-removal, `entity_api.rs:1035` before `:1071`) so the decrement
+  carries the BIND generation. `dec_ref(slot, gen)` gen-checks (mismatch → no-op — closes the FIX-B stale-decrement
+  corruption); `inc_ref → bool` state-guarded (refuses on Retiring/Vacant).
+- **BLOCKER FIX (critic C):** `apply_refcount_deltas` stamps the lane on `+1` **UNCONDITIONALLY** with the
+  attach-time `generation(slot)` — even when `inc_ref` REFUSES (resurrection: carrier binds an already-Retiring
+  slot). Otherwise the refused-bind carrier stays `GEN_UNSYNCED`, which both makes validate skip it AND bypasses
+  the dec gen-check → its later `-1` corrupts a reused slot's refcount (premature free / UAF at F6). With the
+  unconditional stamp: validate sees `Retiring != Loaded` → disables it; the `-1` carries the attach-gen → mismatches
+  the reused slot's gen → suppressed. Slot refcount still never rises (inc refused) → F5/F6 boundary airtight.
+  `GEN_UNSYNCED` is thus only the transient pre-`apply` `Default` (apply runs `.before(validate)`, per-system flush).
+- `validate_asset_refs`: `free_epoch` early-out (O(1), zero on churn-free/golden frames); on a churn frame a full
+  dense O(visible) `u32`-compare (the plan's per-row `dirty.test` gating is DROPPED — it had a visible-later hole);
+  gen-mismatch or `state != Loaded` → `disable::<RenderEnabled>` (mesh) / `insert(MaterialHandle(0))` (material).
+  Ordered `apply → validate → gather`.
+- `mesh_count = high_water()` (not `len()`) at `mesh_draw.rs:521/:559`, `csm_caster.rs:174` (fixes the hole where a
+  live index exceeds `len()` once a hole exists; byte-identical on hole-free goldens).
+- **Single point of failure (research: Bevy gets staleness free via a gen-keyed HashMap; we don't):** `validate`
+  is the SOLE staleness backstop for the bare-slot carriers → every raw `MeshHandle.0`/`MaterialHandle.0` read site
+  MUST be downstream of `validate` this frame; document each read site + audit completeness.
+
+**HARD PREREQ before async streaming (F6/F7) — F5's validate is deliberately disable-only + latent today**
+*(status per item below — the plan header's "COMPLETE 9/9" covers the F1..F8 rungs, NOT these five prereqs, which
+carried no marker at all until branch `fix/asset-validate-prereqs`):*
+- **[IN PROGRESS — branch `fix/asset-validate-prereqs`, commit `<hash>`]** (a)+(b) below.
+  `fill` (Loading→Loaded) does NOT bump `free_epoch`, and `validate` never re-enables → a carrier bound while its
+  asset is Loading would be disabled and stranded invisible once it finishes loading. Latent in F5 (in-tree loads
+  are synchronous `add()`→Loaded; validate never fires on goldens). Before async `reserve`/`fill` streaming is
+  exercised, ADD: (a) `fill` bumps a validation epoch + `validate` gains an enable path; and (b) DECOUPLE staleness
+  from user visibility — `validate` disabling `RenderEnabled` fights `visibility_sync` (both drive that bit); use a
+  separate `RenderStale` EnableTag the gather also filters on, instead of reusing `RenderEnabled`. (Bevy PR #18734
+  is the same-frame-handle-swap race this defends against.)
+  - SHIPPED FORM: (a) the validation epoch is the EXISTING `Assets::install_epoch()` (bumped by `fill`/`add`/`retire`)
+    — no kernel field was added; `ValidateCursor` now tracks all four `{mesh,mat} × {free,install}` epochs and
+    `validate_asset_refs` gained a CLEAR arm (a complementary `Enabled<RenderStale>` query whose now-valid rows emit
+    `stale:false`), so a carrier bound while its mesh was Loading is un-stranded by the `fill`. (b) staleness lives in
+    two new `#[component(storage = "bitset")]` EnableTags in `boyko_render::asset_refcount` — `RenderStale` (mesh) and
+    `MaterialStale` — and `validate` NEVER touches `RenderEnabled` again, so `visibility_sync` keeps sole ownership of
+    the visibility bit. Both gathers filter `Disabled<RenderStale>`. Gates: `fill_re_enables_a_carrier_bound_while_loading`,
+    `stale_wins_for_the_gather_and_visibility_bit_is_untouched` (`tests/asset_streaming_prereq_validate.rs`).
+    ⚠️ ADDED (fix pass) — the first shipped form gated the MESH arms and the MAIN gather only; three arms it shipped
+    survived deletion with every lane suite green. Twins now gate each of them, each MEASURED red under its own
+    deletion mutation and red on no other test: `material_fill_re_enables_a_carrier_bound_while_loading` (the
+    `q_mat_stale` CLEAR arm — without it a carrier bound to a `reserve()`d material is drawn with the substituted
+    default forever, the (a) bug mirrored onto the material lane) and `stale_caster_is_dropped_from_the_shadow_gather`
+    (the `Disabled<RenderStale>` term on `gather_shadow_casters` — without it a caster whose mesh slot was reused
+    under it casts the WRONG mesh's shadow while the main gather correctly drops it).
+- **[IN PROGRESS — branch `fix/asset-validate-prereqs`, commit `<hash>`]**
+  (c) **Hard `validate → gather` scheduler edge (F5 review O1):** F5's `validate_asset_refs .before(gather_*)` is
+  currently pinned by ADD-ORDER only (deterministic today — NonSend systems are dispatcher-solo, lowest-index-first,
+  per-system flush, and `plugins.rs` adds AssetRefcountPlugin before the gather closure — but EMERGENT, not an
+  explicit contract). Before F6/F7 (when `validate` actually fires), fold the sketched
+  `add_asset_validate_systems(&mut ScheduleBuilder) -> SystemKey` helper into the host gather closure and add the
+  explicit `.before` edge (mirror `add_gpu_transform_pack`).
+  - SHIPPED FORM — a BY-NAME set, not the sketched `SystemKey` helper. `validate_asset_refs` joins
+    `AssetValidateSet` (`#[derive(SystemSet)]`), and each consumer is registered through a `boyko_render`-side helper
+    that chains the edge itself: `add_gather_mesh_draws(&mut ScheduleBuilder) -> SystemConfig<'_>` (mesh_draw.rs) and
+    `add_gather_shadow_casters` (csm_caster.rs), both `.after_set(AssetValidateSet)`; the host chains its own
+    `.after(pack)` / `.after(snap)` onto the returned config (the `add_gpu_transform_pack` shape).
+    WHY NOT the sketched helper: (1) `SystemKey` lives in `pub(crate) mod ordering`, so it is unnameable
+    cross-crate — the same limit `gpu_transform_pack.rs:112-113` already documents; (2) an edge chained inside the
+    HOST closure has no mutation-sensitive test — that closure is reachable only through `EnginePlugins::build`
+    (windowed runner + process-global hooks), and both systems are NonSend/dispatcher-solo, so deleting the edge
+    changes no observable order and a behavioural test cannot go red; (3) a set edge inside a `boyko_render` helper
+    IS provable in a bare `App` via the builder's cycle detection. Gate: `tests/asset_validate_schedule_edge.rs`
+    pins a probe `.after(gather).before_set(AssetValidateSet)` and asserts `App::finish` panics with the B9001
+    "schedule contains a cycle" text; deleting `.after_set` in the helper turns it red (MEASURED).
+    Trade-off: a host that registers the gathers WITHOUT `AssetRefcountPlugin` gets a W1501 memberless-set warning —
+    correct, since such a host has no validate.
+- **[IN PROGRESS — branch `fix/asset-validate-prereqs`, commit `<hash>`]**
+  (d) **Material substitution (F5 review W1, DEFERRED to F8):** F5's `validate` does NOT substitute stale materials
+  (it disables stale MESHES only). Stale-material refcount corruption is already prevented by the `dec_ref` gen-check
+  at despawn; the VISIBLE substitution (point a stale material at the default slot 0) is inert until F8 (the raster
+  hardcodes material 0) and needs `Entity`-in-query / `RenderStale` infrastructure F8 will add — so it lands in F8,
+  not F5. (The F5 dev's `&mut MaterialHandle`-in-`validate` workaround was removed: it bypassed the hook contract and
+  dropped a retire ticket on a matching-gen Loading/Failed slot.)
+  - SHIPPED FORM — substitution by QUERY SPLIT, so no `Entity` enters the gather and no `MaterialHandle` is written.
+    Both `gather_mesh_draws` cfg variants take two read-only queries with IDENTICAL data and complementary material
+    terms: `q_ok` `(Enabled<RenderEnabled>, Disabled<RenderStale>, Disabled<MaterialStale>)` and `q_mat_stale`
+    `(… , Enabled<MaterialStale>)`; every pass walks that ONE chained row sequence
+    (`q_ok.map(real).chain(q_mat_stale.map(default))`) — the count pass, the scatter, `gather_material_tex_into` and
+    (hwrt) `gather_prev_ring_into` — so there is no extra pass.
+    ⚠️ CORRECTED (fix pass): those are SEPARATE closures over that one sequence, not one shared factory — each
+    `iter_input` has a different `Item` type. What must agree between them is agreed EXPLICITLY, by calling ONE
+    function: `mesh_draw::resolve_material_id`. The first shipped form had the guard inline in the primary closure
+    only, so the TEXTURED payload closure kept the bare F8 clamp and shipped the RAW id of a `reserve()`d slot in
+    `PerInstanceMaterialTex::material_id` while `PerInstanceMaterial::id` shipped 0 — two index-aligned lanes
+    disagreeing per instance, read by `vb_shade.comp.hlsl:357` (`Materials[pmt.material_id]`) and
+    `gbuffer_mrt.vs.hlsl:404` → `gbuffer_mrt.fs.hlsl:283`.
+    The CONSTRUCTION guard itself (mirror of F6 FIX-2's `try_get`): for `id != 0`, a `get_by_index(id)` that returns
+    `None` maps BOTH id and colour to the pinned default — previously the colour fell back but the RAW id still
+    reached the shader and indexed a hole row of the material SSBO. The guard is independent of validate timing, so a
+    carrier bound to a `reserve()`d slot on its spawn frame (no epoch bump ⇒ validate does not run) is safe too.
+    ⚠️ CORRECTED (fix pass): the unresolvable states are `Loading` / `Failed` / `Vacant` / `Loading→Retiring`, NOT
+    "Loading/Failed/Retiring/Vacant" as first written. `Assets::get_by_index` (`assets.rs:643-650`) reads
+    `STATE_RETIRING => self.live.test(idx)`, so a `Loaded→Retiring` row still RESOLVES — a carrier binding a still-live
+    retiring slot ships its real id and reads the not-yet-retired value, which is safe and deliberate (it mirrors the
+    mesh lane's `try_get` contract): the fence-gated `retire` bumps `install_epoch`, so validate then marks the
+    carrier `MaterialStale` and the substitution takes over.
+    Gates: `stale_material_substitutes_default_slot_0`, `loading_material_ships_id_0_without_validate` — both now
+    assert the id on BOTH lanes (`material_ids[slot].id` AND `material_tex[slot].material_id`); the tex assertion was
+    RED on the first shipped form (MEASURED: `left: 1 right: 0`).
+- **[IN PROGRESS — branch `fix/asset-validate-prereqs`, commit `<hash>`]**
+  (e) **Serialize/`#[require]` version-skew (F5 review, S0-S3 concern):** `load_archetype` builds archetypes from
+  the file's saved component-id list and does NOT run `#[require]` expansion → a `MeshHandle` row from a schema-older
+  save would lack `MeshRefGen` and be AND-filtered out of `validate`'s query (silent, no panic). Latent (no such
+  save in-tree; same-build round-trips serialize the lane). Also confirm the deserialize path does not fire the
+  carrier hooks without the lane present (a `-1` with `GEN_UNSYNCED` against a never-incremented refcount).
+  - SHIPPED FORM — the CHECK, not the repair. `validate_asset_refs` gained an unconditional orphan pass (OUTSIDE the
+    epoch early-out, because a load bumps no store epoch): `Query<&MeshHandle, (Without<MeshRefGen>,
+    Disabled<RenderStale>)>` and the material twin mark every match stale and bump
+    `ValidateCursor::orphan_rows_flagged`. `Without` over a TABLE component is archetypal, so a well-formed world
+    matches ZERO archetypes and the pass touches no row; the `Disabled<…Stale>` term makes each orphan cost one
+    command exactly once. Semantics: a lane-less carrier is un-refcounted and unvalidatable ⇒ never drawn
+    (conservative) and counted. Gate: `schema_older_save_lacking_ref_gen_lane_is_flagged_not_drawn`.
+    ⚠️ ADDED (fix pass): that gate strips `MeshRefGen` only, so the MATERIAL orphan pass shipped ungated (deleting it
+    left every lane suite green). `schema_older_save_lacking_material_ref_gen_lane_is_flagged` is its twin — the saved
+    row binds material slot 1, not the default 0, so "flagged and substituted" is DISTINGUISHABLE from "drawn with its
+    raw id"; MEASURED red under the deletion mutation.
+  - CONFIRMED (the second half of the item): `load_archetype` fires NO carrier hooks — verified by reading
+    `crates/boyko_ecs/src/ecs/core/serialize/load_writer.rs:315-583` (blit/decode/construct → `commit_units` →
+    `fill_ticks` → `register_batch`, no hook dispatch anywhere under `ecs/core/serialize`) and PINNED by
+    `load_world_fires_no_carrier_hooks`. So there is no spurious `-1`; the mirror-image problem is B1 below.
+  - **BLOCKED — B1 (kernel/owner), tracked separately: loaded carriers never push `+1`.** Because
+    `load_archetype` dispatches no `on_insert`, EVERY loaded `MeshHandle`/`MaterialHandle` is un-refcounted, even on a
+    same-build round trip. A later despawn then trips `dec_ref`'s `debug_assert!(count > 0)`
+    (`assets.rs:943-946`) or, in release, `saturating_sub` reaches 0 → `Retiring` → the slot retires under other
+    loaded carriers. The fix is kernel-level (replay `on_insert` in `load_archetype`, or expose the loaded-entity
+    range for a scene-level rebind) and outside this lane's crates. No in-tree host calls `load_world` today.
+  - **BLOCKED — B2 (kernel): `#[require]` expansion at load** needs a runtime require table in the component
+    registry; none exists (the only `required_components` is the events one,
+    `events/participants/participants.rs:28`). Hence lane-less rows are QUARANTINED, not reconstructed.
+  - NOT DONE (scope): a `boyko_log` W-code for orphan rows would edit `crates/boyko_log/src/codes.rs` + the
+    diagnostics ledger, outside this lane's `-p` scope and behind its own census gates. The lane ships the
+    `ValidateCursor::orphan_rows_flagged` counter instead; a follow-up may wire a code.
+- **Goldens `58f6c6c3` / `ac09f138` — byte-identical BY CONSTRUCTION. NO golden was RUN in this lane** (it is CPU-only
+  by charter: no device, no timings). The argument, per changed mechanism, is that each one is provably inert on a
+  fully-Loaded, churn-free scene:
+  1. `RenderStale` / `MaterialStale` are `bitset` EnableTags that only `validate_asset_refs` writes, and validate's
+     per-row loop sits behind the four-epoch early-out. A golden scene's stores are `add()`→Loaded at boot and never
+     churn, so no `{free,install}` epoch advances after boot and the loop never runs — every row stays
+     `Disabled<…Stale>`. The gathers' new filter terms therefore exclude nothing.
+  2. The `q_ok` / `q_mat_stale` split leaves `q_ok` yielding exactly the pre-split rows in the pre-split archetype
+     order (the `Disabled<MaterialStale>` term matches every row over an ABSENT bitset page), and the chained tail is
+     EMPTY — same rows, same order ⇒ same ring, same batches, same lanes.
+  3. The orphan passes are `Without<…RefGen>` over TABLE components: archetypal, so a world built by `Commands::spawn`
+     (where `#[require]` materializes both lanes) matches ZERO archetypes and touches no row.
+  4. The fix pass's shared `resolve_material_id` is value-identical to the two computations it replaces WHEREVER the
+     slot is Loaded: `Assets::get_by_index` (`assets.rs:636-653`) returns `Some` for every `STATE_LOADED` row, so the
+     `None ⇒ 0` arm is unreachable on a fully-Loaded scene and both lanes ship exactly the ids they shipped before —
+     the primary lane's expression is unchanged in value, and the tex lane's is unchanged in value on this input
+     class (it differed only on non-Loaded slots, which a golden has none of).
+  5. `.after_set(AssetValidateSet)` adds an ordering CONSTRAINT, not a system: with both gathers already ordered
+     after validate by add-order today, the resolved order is the same one that produced the blessed hashes.
+  The orchestrator, who has the device, should still re-run both goldens before the merge — this is a construction
+  argument, not a measurement.
+
+**F6 locked mechanism (architect→soundness-critic, design-locked):** full design = scratchpad `f6_design_full.md`.
+- **Clock = a dedicated `submission_epoch: u64`, NOT the runner's `frame_index`.** The jitter/SDFDDGI `frame_index`
+  (runner.rs:468) advances on pre-acquire recreate-SKIPS where NO submit happened → runs AHEAD of GPU submits →
+  gating on it UNDER-gates → UAF. The correct clock is a new `Renderer.submission_epoch` incremented at the ring
+  advance (frame_driver.rs:460, reached only on a committed `vkQueueSubmit`). Published into a `RenderEpoch(u64)`
+  resource; `apply_one` stamps `retire_frame = epoch + FRAMES_IN_FLIGHT` (replaces F2's placeholder 0);
+  `retire_deferred_frees` drains `retire_frame <= epoch`.
+- `retire_deferred_frees` is a HOST STEP at runner.rs:536 (right after `wait_frame_in_flight`), NOT a Main-schedule
+  system (the schedule runs before the fence wait). `Assets::retire(slot)` = a Retiring-gated sibling of `remove`
+  (take_at + gen-bump→Vacant + refcount 0 + free-list push + free_epoch++); device teardown BLAS-BEFORE-buffer.
+  Fill-reject orphans (rejected `MeshGpu` with live buffers) route through a `!Send OrphanedMeshGpu` queue on the
+  same fence gate (FreeEntry can't name MeshGpu). Resurrection needs NO retire-time recheck (F5 `inc_ref` refuses a
+  Retiring slot → refcount provably 0 at retire; slot off the free-list until retire → no ABA).
+- **BLOCKER FIX 1 (hwrt, critic):** the per-frame TLAS `blas_addr` table is refreshed only when
+  `blas_generation == high_water()` advances — but retire+REUSE does NOT change `col.count()` → `blas_addr[reused]`
+  keeps the FREED BLAS device address → GPU-UAF on the ray dispatch. FIX: write `blas_addr[slot]` at BLAS-INSTALL
+  time (add/fill/register_mesh), decoupled from the high_water gate, so a reused slot's address is refreshed on the
+  re-add. + an hwrt churn test asserting no stale device address survives a retire+reuse.
+- **BLOCKER FIX 2 (retire-before-resolve, critic):** retire at :536 frees a slot the same frame the buffer resolve
+  at runner.rs:856 (`mesh().expect()` → PANIC on Vacant) and the submit at :1030 (GPU-UAF under hwrt) run — and the
+  gather (:512, pre-retire) may still contain that slot if `validate` (best-effort: add-order edge + lane-less
+  carriers) didn't disable it. FIX: route the :856 resolve AND the TLAS-instance gather through `try_get`/`get_by_index`
+  and SKIP a slot that does not resolve to a live Loaded row (never `.expect()`) → any retired-slot-in-batch becomes a
+  graceful skip BY CONSTRUCTION, independent of validate. State the invariant "the resolve/TLAS gather never
+  dereferences a non-Loaded slot."
+- **MAJOR FIX (test gate, critic):** the CPU/mock tests (deterministic fence-order, Miri-TB exactly-once, CPU churn)
+  do NOT exercise the real fence-gated DEVICE free (goldens never retire). ADD a headless REAL-DEVICE churn
+  integration test (hwrt + non-hwrt) that drives the frame loop, spawns/despawns to force `retire_deferred_frees`
+  against live device resources with VALIDATION LAYERS ON (assert zero VUID/UAF), destroy_count == create_count,
+  free-list/live/high_water consistent. Run by the orchestrator (subagents can't run fresh GPU exes, os-740).
+- Moderates: DROP the `submission_epoch % FIF == frame_index` debug_assert (false after `recreate` resets
+  frame_index=0; recreate's `device_wait_idle` backstops the horizon) — keep only `RETIRE_DELAY == FIF` + monotonic.
+  RECONCILE the `destroy_blas`/`destroy_buffer` "device-idle" SAFETY docs with F6's weaker-but-sufficient per-resource
+  precondition ("the fence for `retire_frame` was waited → every submit referencing this resource is complete").
+  Mark `fill()`'s return `#[must_use]` + document the OrphanedMeshGpu routing obligation (leak guard).
+
+## Test plan
+
+- **PORT VERBATIM:** `assets.rs` ~30 unit + 256-proptest (`Assets::<u64>` via `impl_asset_pod_backing!`).
+- **DELETE:** `slot.rs` intrusive-`next_free` tests; any `server.rs` HashMap-iteration/collision-internal test.
+- **REWRITE:** `server.rs` loader-dispatch (F3), intern/dedup (F4, + BTreeMap oracle); `obj.rs` dedup (F-obj).
+- **ADAPT + re-gate:** `asset_pipeline_integration.rs` (4) at F1/F3; `boyko_app` smoke `interp_smoke`/
+  `sdf_room_smoke`/`room_smoke` at F5/F8 (assert default scenes bind the base pipeline).
+- **NEW:** Miri-TB take/destroy exactly-once (F1/F6); joint state-machine oracle (F2); deterministic
+  fence-ordering (F6); churn stress (F6); growth + multi-grow-per-window (F7); two-lane independence
+  (F5); F1 slot-id parity; NEW 2-material golden (F8).
+- **loom DROPPED** for the deferred-free/refcount path — it is dispatcher-serial (hooks fire only in the
+  single-threaded apply window), so loom is vacuous; the real hazard is a GPU-fence happens-before loom
+  cannot model. Gated instead by the fence-ordering test + Miri-TB + the model oracle.
+- **Goldens** `dac6dbbb` + `58f6c6c3` re-run after F1/F5/F8 (SHA-256 of the framebuffer BMP; opaque draws
+  order-independent + append-order-preserving mint ⇒ CPU-container swap invisible).
+
+**F7 as-built (SHIPPED — architect→critic→developer→code-reviewer→tester, full design = scratchpad `f7_design_v2.md`):**
+- **Scope LOCKED = E1 Option B (critic-confirmed):** the MaterialTable device SSBO + FIF staging grows on BOTH legs;
+  the per-FIF instance-capacity family (`instance_rings`+interp `pairs`/`out_slot`) grows on NON-RT devices only,
+  RUNTIME-gated on `self.tlas.is_none() && self.mv.is_none()` (W3 — an `hwrt` BUILD on a non-RT device still grows;
+  never `#[cfg]`). On an RT device the instance family stays HARD-CAPPED at `INSTANCE_CAPACITY`; the TLAS
+  instance-array + persistent backing + scratch regrow is **F7-hwrt (deferred, tracked)** — growing the ring there
+  without them OOB-writes the still-1024 `instance_arrays` (tlas.rs:34,38) → device-lost.
+- **Grow-and-defer-old reuses F6 verbatim:** `submission_epoch` clock + `retire_frame = epoch + FRAMES_IN_FLIGHT`;
+  old buffers ride a NEW `RetiredGpuBuffers` (`!Send Vec` teardown queue mirroring `OrphanedMeshGpu` — `BoundBuffer`
+  is `!Send`, can't enter the `Send` `DeferredFree`), drained at the F6 `retire_deferred_frees` site. Grow re-seeds
+  from the CPU authority (`write_bytes(0)` then `seed_rows`, holes zeroed, NO device→device copy).
+- **C1 (hwrt device-UAF, critic-caught — the F6-C1 class):** the material buffer is bound in **7 per-FIF set-rings**
+  (`vocab_set`@7, `resolve_set`@4, + 5 hwrt shadow-resolve variants @4), several built ONCE with no per-frame
+  update. A single present-crate choke-point `GBufferFrame::repoint_material_table(slot, buf)` walks the canonical
+  `GBufferTargets::material_set_rings()` list co-located with `resolve_software_entries`; a `sync_gbuffer` count
+  debug_assert (`material_set_rings().count() == expected_material_ring_count()`, both from the SAME built
+  `Option.is_some()`) is the exhaustive-by-construction net. A missed ring = a freed-material-buffer UAF on a
+  denoise-armed hwrt frame — verified by a 32-combination CPU test + the real-device C1 headless phase.
+- **W1 (FIF-rebind proof, re-grounded — NOT `epoch%FIF`, false after recreate resets frame_index):** rests on
+  (a) `rebind_pending[FIF]` = a PERSISTENT per-slot flag consumed on the slot's NEXT occupancy (not a horizon timer),
+  (b) `repoint_material_table` runs BEFORE the fenced slot's set is recorded (runner step 4.6 < step 7, guarded by a
+  step-6 `debug_assert`), (c) `recreate`'s `device_wait_idle` drains the old buffer's last use. FIX-E (rebind gated
+  ONLY on `rebind_pending`, DECOUPLED from `flush_if_dirty`) is LOAD-BEARING (a dirty-coupled rebind would let a slot
+  lag > FIF → UAF) and structurally guarded.
+- **W1-alloc (code-reviewer-caught, real Principle-1/5 violation):** the naive take-out/reinsert of the NonSend
+  resources every frame = 3 malloc+free/frame through `#[cold]` paths on the golden path. FIX: a cheap alloc-free
+  `needs_grow`/`needs_instance_grow` check runs every frame (plain `non_send_resource` deref); the `remove`/reinsert
+  dance runs ONLY inside `if grow_needed` (the rare grow frame). Guarded by `zero_alloc`+`structural` staying green.
+- **C3 (release-OOB, critic-caught):** every `upload.rs`/`flush_if_dirty` overflow guard stays a HARD `assert!`
+  (never downgraded) — dead-but-cheap on a growable path, LIVE on the capped RT path (a >`INSTANCE_CAPACITY` hwrt
+  gather MUST abort, not OOB-write). Verified by `asset_streaming_f7_rt_cap_headless.rs` (`catch_unwind`).
+- Gates GREEN: goldens `58f6c6c3` BOTH legs (growth inert on boot-capacity scenes); 33 CPU/Miri tests; F6 churn
+  regression BOTH legs; `asset_streaming_f7_grow_headless.rs` (material grow + multi-grow FIX-F + non-RT instance grow
+  + rebind-under-FIF, Phase B runtime-gated to non-RT) BOTH legs; `f7_rt_cap` hwrt.
+
+**F8 as-built (SHIPPED — the LAST rung; closes the confirmed bug: the raster ignored per-instance material,
+`gbuffer_mrt.fs.hlsl` hardcoded material id 0 for every pixel):**
+- **Producer-only fix.** The deferred resolve already samples `Materials[mat_id]` (`deferred_pbr.hlsl:1035`); F8
+  wires the REAL per-instance id into `gNormal.BA`. A SEPARATE `#ifdef PER_INSTANCE_MATERIAL` gbuffer variant
+  (`gbuffer_mrt_pm.{vs,fs}.spv`, recompiled with `-D`; the committed BASE `.spv` is byte-frozen — the developer
+  `cmp`-verified a no-`-D` recompile against the committed blob = identical; the resolve `.spv` is untouched). A
+  per-frame `any_non_default_material` OR-reduce (fused into the scatter, RESET per gather) selects `mv > pm > base`
+  on BOTH cfg legs (the `pm` arm is NOT cfg-gated — else it would be dead on the software leg the golden runs on).
+- **Data path.** A `material_ids` `ScratchColumn` lane parallel to `ring`/`mesh_ids` (same `counts[m]==0` skip) →
+  the `pm_instance_material_rings` SSBO that JOINS the F7 instance family (non-RT lockstep grow, RT hard-cap). A HARD
+  CPU-side OOB clamp (`raw_material_id >= high_water() → 0`, targeting the live pinned slot 0) is the SOLE
+  material-safety; task#13 IN PROGRESS on branch `fix/asset-validate-prereqs` (commit `<hash>`): the `MaterialStale`
+  EnableTag + `validate`'s material arm + the gather substitution (query split: `q_ok` / `q_mat_stale` chained into
+  ONE iterator, no extra pass) + the Loading-slot construction guard (`get_by_index` → `None` ⇒ id 0, so a non-Loaded
+  slot never reaches the shader as a raw id) are now wired. The CPU-side OOB clamp remains, as the first line.
+- **base_color→albedo extension (owner-requested).** The mesh albedo came from the VERTEX color (`deferred_pbr.hlsl:1020`
+  reads `base = gAlbedo`); only the SDF marcher read `base_color`. So a "red material" was metallic but not red. Fix:
+  the per-instance payload widened to `PerInstanceMaterial { base_color:[f32;4], id:u32, _pad }` (32 B, std430 stride
+  verified at the SPIR-V level: offsets 0/16, stride 32); the PM VS forwards a `nointerpolation mat_albedo` varying, the
+  PM FS writes it to `gAlbedo` under `#ifdef/#else` (the `#else` char-for-char the vertex-color line). Resolve + base
+  frozen → byte-identity by construction. Principle 1 (reviewer M1/M2): `id == 0` SHORT-CIRCUITS the store lookup (the
+  common/golden all-default path does ZERO per-instance material work), `default_base_color` = the ACTUAL slot-0
+  base_color read ONCE. Now the material drives BOTH albedo AND metallic/roughness for meshes.
+- **Deferred/tracked:** ~~MaterialStale substitution → async prereq (task#13)~~ **[SHIPPED — branch
+  `fix/asset-validate-prereqs`, commit `<hash>`]** — the visible substitution landed as prereq (d) above (query split
+  + the shared `resolve_material_id` construction guard on BOTH instance lanes); see that item for the shipped form,
+  its two ⚠️ fix-pass corrections and its gates. The combined MV+PM variant remains → **F8-mv**
+  (task#12 — materials render default under temporal denoise, MV>PM, warn-once'd).
+- Gates GREEN: `58f6c6c3` BOTH legs (base `.spv` cmp-identical + full golden holds); a NEW `grand_showcase_2mat`
+  golden `ac09f138` (a 5-sphere material chart — default/red/green/gold-metal/blue-metal — oracle-blessed BOTH legs);
+  the F8 gather/OOB/two-pass CPU tests + `mesh_pm_active`; `grow_headless`/`rt_cap` extended material-bearing BOTH
+  legs; F6 churn BOTH legs; opus-reviewed TWICE (F8 core + the base_color extension, the latter verifying the
+  HLSL↔Rust layout against the disassembled SPIR-V). **→ asset-streaming plan COMPLETE (9/9 rungs).**
+
+## Open questions (non-blocking)
+
+1. **ComponentId budget:** each asset type consumes one id from the 512 cap (MeshGpu, MaterialGpu, + POD
+   test types) — a handful today; if asset types proliferate, lift the resident store onto a dedicated
+   `VmReservation`-owned column (localized `col`-type swap).
+2. **Material staleness UX:** substitute id 0 (draw continues, neutral) vs skip-like-mesh — design
+   substitutes id 0.
+3. **A carrier bound to a never-minted index is never lane-stamped** (pre-existing, found while shipping the five
+   prereqs): `apply_one` gets `try_generation(slot) == None`, returns no stamp, so the lane stays `GEN_UNSYNCED`
+   forever and `validate_asset_refs` TRUSTS it (`GEN_UNSYNCED` is the "freshly bound" sentinel, skipped in both
+   arms). The gather's `try_get` keeps it safe — the row is simply never drawn — so this is a silent-invisibility
+   hole, not a soundness hole. Not one of the five; recorded here rather than fixed.
+4. **Rebinding a `MaterialHandle` over a bundle's default can permanently retire the PINNED slot 0**
+   (pre-existing, MEASURED 2026-09-10 while writing the (b)/(d) gates). `MeshBundle` already carries
+   `MaterialHandle(0)` (`bundles.rs:72`). Spawning the bundle and then `insert`ing a `MaterialHandle` is a REPLACE:
+   `on_replace` pushes `-1` on slot 0 BEFORE `on_insert`'s `+1`. Applied in order that is a zero-crossing on the
+   default slot → `Retiring` → and `inc_ref` then REFUSES the `+1` (its resurrection guard), so slot 0 stays
+   `Retiring` for the world's lifetime. `state_of_index(0)` is then `None`, so `validate`'s new material arm marks
+   EVERY carrier `MaterialStale` and every row is drawn with the substituted default.
+   - Reachable from user code and from the existing test harnesses (`asset_streaming_f5_validation.rs:261/295/322`,
+     `asset_streaming_f8_material_gather.rs:90`), but NOT from any shipped host path: a survey of
+     `crates/boyko_app/src`, `crates/boyko_render/src`, `crates/boyko_scene/src` and `crates/boyko_demo/src` finds
+     zero `insert(MaterialHandle(..))` / `insert(MeshHandle(..))` sites, so the golden byte-identity argument is
+     unaffected.
+   - It DID silently weaken a gate: with the `insert` form, `stale_wins_for_the_gather_and_visibility_bit_is_untouched`
+     passed because the row was excluded as MATERIAL-stale, and deleting `Disabled<RenderStale>` from the gather
+     filter did NOT turn it red. The new suite's `spawn_drawable` therefore builds the bundle with its material
+     already set; see that function's doc. The other two suites still use the `insert` form and are left alone.
+   - The real fix is a kernel/hook-ordering question (apply `+1` before `-1` within one entity's replace, or make
+     `inc_ref` resurrect a `Retiring` slot whose refcount is climbing again) — outside this lane's crates.

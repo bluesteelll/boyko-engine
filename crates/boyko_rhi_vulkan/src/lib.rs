@@ -82,6 +82,12 @@
 //! # let _ = bound;
 //! ```
 
+// Profiling rung 5: this crate's lane region, declared ONCE at the root. `declare_zone!` reads the
+// constant it defines for both the id counter and the ring region, so no zone site chooses — a
+// crate is one partition for all of its zones, which is what makes a game's runaway scope cost a
+// game's samples and not the renderer's.
+boyko_diag::profiling_partition!(Engine);
+
 pub mod abi_guard;
 /// HW-RT rung R2a-1: the `BoundAccelStruct` + the Vulkan acceleration-structure verb
 /// impls. Gated `hwrt` — absent from the default/golden build (byte-identical).
@@ -96,6 +102,12 @@ pub mod accel_ffi;
 /// from the default/golden build (byte-identical).
 #[cfg(feature = "hwrt")]
 pub mod accel_build;
+/// T4 — the bindless texture-array descriptor set: the dedicated 2-binding
+/// UPDATE_AFTER_BIND layout ([`bindless::VulkanBindlessSet`]) + its shared
+/// trilinear+anisotropic immutable sampler + the per-slot incremental write verb
+/// ([`bindless::write_bindless_texture`]). See the module docs for the layout
+/// shape decision and the device-UAF-safety argument.
+pub mod bindless;
 pub mod brick_atlas;
 pub mod compute;
 pub mod ddgi;
@@ -111,10 +123,26 @@ pub mod device;
 pub mod error;
 pub mod ffi;
 pub mod framegraph;
+/// Multi-paradigm render-path plan, rung R-VBGEO (Decision 0 / P2-c) — the
+/// `VisibilityBuffer` path's own Set-3 geometry descriptor set:
+/// [`geometry_bindless::VulkanGeometryBindlessSet`] (two bindless `STORAGE_BUFFER`
+/// runtime arrays `gMeshVerts[]`/`gMeshIndices[]` + the plain `gMeshMeta[]` SSBO
+/// binding) + its per-slot write verb
+/// ([`geometry_bindless::write_geometry_buffer_slot`]). A sibling of, not a reuse of,
+/// [`bindless::VulkanBindlessSet`] — see the module doc for why.
+pub mod geometry_bindless;
+/// Test-only: the two helpers the four `boyko-2xxx` observing tests share (L7b).
+#[cfg(test)]
+pub(crate) mod log_probe;
 pub mod memory;
 pub mod mesh_sdf_texture;
 pub mod present;
 pub mod rhi_impl;
+/// Test-only: Gate B, the device-free census of every committed `.spv`'s SPIR-V capabilities
+/// against the device's required-feature tables. A unit test (not `tests/`) because it reads the
+/// crate-private `REQUIRED_CORE` / `REQUIRED_V13`.
+#[cfg(test)]
+mod spirv_capability_census;
 pub mod suballocator;
 pub mod swapchain;
 pub mod texture;

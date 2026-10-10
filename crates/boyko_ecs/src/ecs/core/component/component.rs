@@ -102,6 +102,16 @@ pub trait Component: 'static + Sized {
     /// `HAS_REQUIRES = false`.
     const HAS_REQUIRES: bool = false;
 
+    /// KE10 (the component `flags (…)` group) — compile-time elision flag,
+    /// the enable-bit twin of [`Self::HAS_REQUIRES`]. `false` by default, so a
+    /// component that declares no initial flag states pays zero: the
+    /// derive-emitted `install_flags::<Self>` call is const-gated on this exactly
+    /// as `install_required` is on `HAS_REQUIRES`, the `FLAGS_DIRECT` slot stays
+    /// UNSET, and `ArchetypeFlags::FLAGS_ON_ATTACH` is never raised, so no attach
+    /// path in the process ever tests a flag entry. A backward-compatible
+    /// widening — every existing impl keeps `HAS_FLAGS = false`.
+    const HAS_FLAGS: bool = false;
+
     /// Entity cloning (Feature 3, D2) — compile-time clone classification.
     /// Defaults to [`Cloneability::Ignore`] (no clone-fn installed) so EVERY
     /// existing / hand-written impl keeps the default and the component is
@@ -244,6 +254,17 @@ pub trait Component: 'static + Sized {
     #[inline]
     fn register_required(_builder: &mut RequiredBuilder) {}
 
+    /// KE10 (the component `flags (…)` group) — declares this component's
+    /// initial enable-bit states into `builder`. Defaulted empty; the
+    /// `flags (X = on, Y = off)` group overrides it. Called once at registration
+    /// time (`install_flags::<Self>`), before the component can appear in any
+    /// archetype — the same staleness-immunity property `register_hooks` and
+    /// `register_required` have, and it is load-bearing here: the archetype's
+    /// `FLAGS_ON_ATTACH` gate bit is OR-computed at mint, so a declaration
+    /// registered after the first attach would silently never apply.
+    #[inline]
+    fn register_flags(_builder: &mut FlagsBuilder) {}
+
     #[inline]
     fn debug_type_name() -> &'static str {
         std::any::type_name::<Self>()
@@ -311,6 +332,55 @@ impl RequiredBuilder {
     /// ready to leak into the `REQUIRES_DIRECT` table.
     #[inline]
     pub fn into_entries(self) -> Box<[RequiredDirectEntry]> {
+        self.entries.into_boxed_slice()
+    }
+}
+
+/// Collects a component's initial enable-bit states at registration time
+/// (KE10 — the `flags (…)` group). The generated
+/// [`Component::register_flags`] body calls [`FlagsBuilder::flag`] once per
+/// entry; the registry's `install_flags` then leaks the accumulated entries into
+/// the cold `FLAGS_DIRECT` table.
+///
+/// The push-only twin of [`RequiredBuilder`], minus both of that type's
+/// obligations: there is no ctor to carry (a flag is a bit) and no closure to
+/// build (a bit pulls no other bit). Duplicate same-id entries are a *derive*
+/// concern, exactly as they are for `#[require]`, so this runtime builder
+/// performs no dedup.
+#[derive(Default)]
+pub struct FlagsBuilder {
+    entries: Vec<crate::ecs::core::component::component_registry::FlagDirectEntry>,
+}
+
+impl FlagsBuilder {
+    /// Creates an empty builder.
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Records one initial flag state: the flag's id resolver `id_fn` (stored
+    /// UNCALLED, per `FlagIdFn`'s re-entrancy contract — it is
+    /// `Stunned::component_id` as a fn item, WITHOUT parentheses) and the
+    /// `initial` state to apply on attach.
+    #[inline]
+    pub fn flag(
+        &mut self,
+        id_fn: crate::ecs::core::component::component_registry::FlagIdFn,
+        initial: bool,
+    ) {
+        self.entries
+            .push(crate::ecs::core::component::component_registry::FlagDirectEntry { id_fn, initial });
+    }
+
+    /// Consumes the builder, returning the accumulated entries as a boxed slice
+    /// ready to leak into the `FLAGS_DIRECT` table.
+    #[inline]
+    pub fn into_entries(
+        self,
+    ) -> Box<[crate::ecs::core::component::component_registry::FlagDirectEntry]> {
         self.entries.into_boxed_slice()
     }
 }

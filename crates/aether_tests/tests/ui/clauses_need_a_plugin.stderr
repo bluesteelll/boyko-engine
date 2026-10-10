@@ -1,0 +1,5 @@
+error: scheduling clauses (`on`, `after`, `when`, …) need a `plugin <Name>;` declaration in this block to hold the generated registration
+ --> tests/ui/clauses_need_a_plugin.rs:5:12
+  |
+5 |     system tick() on update {}
+  |            ^^^^

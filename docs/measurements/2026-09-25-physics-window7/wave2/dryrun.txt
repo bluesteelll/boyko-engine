@@ -1,0 +1,93 @@
+WINDOW 7 WAVE 2 DRY RUN: rows7b.json, 6 blocks, K per block = passes x rounds (default 2 x 3), cutoff 11:45, assumed start 05:58; STOP flag C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\scratchpad\win7b\STOP absent
+per pass: idle rule >= 135 s (3 polls 60 s apart), opening receipt 10 s, one warm-up (if the block has one); per process: the gate's untimed wall + 0.4 s launch + 5 s receipt
+binaries: all match bin/SHA256SUMS
+fixtures: all present
+estimates: every cell has an untimed gate wall
+
+[Q1 prio 1] Q1C: 9 cells x K 6 = 54 timed processes + 2 warm-ups; 2 pass(es) x 3 rounds; per round 66 s; per pass 5.8 min; block 11.7 min (reserve after it 0.0 min); 05:58 -> 06:09 fits
+  pass 0: idle rule; warm-up H-trk-tree#trk#8; each of 3 rounds: H-trk-tree#trk@W4(2.4s), H-jolt56#j56@W4(2.4s), H-trk-ap#trk@W4(2.8s), H-trk-tree#trk@W8(2.9s), H-jolt56#j56@W8(1.8s), H-trk-ap#trk@W8(2.6s), H-trk-tree#trk@W16(1.7s), H-jolt56#j56@W16(1.6s), H-trk-ap#trk@W16(2.6s)
+  pass 1: idle rule; warm-up H-trk-tree#trk#8; each of 3 rounds: H-trk-ap#trk@W16(2.6s), H-jolt56#j56@W16(1.6s), H-trk-tree#trk@W16(1.7s), H-trk-ap#trk@W8(2.6s), H-jolt56#j56@W8(1.8s), H-trk-tree#trk@W8(2.9s), H-trk-ap#trk@W4(2.8s), H-jolt56#j56@W4(2.4s), H-trk-tree#trk@W4(2.4s)
+
+[Q2 prio 2] Q2C: 8 cells x K 6 = 48 timed processes + 2 warm-ups; 2 pass(es) x 3 rounds; per round 94 s; per pass 7.4 min; block 14.7 min (reserve after it 11.7 min); 06:09 -> 06:24 fits
+  pass 0: idle rule; warm-up C3b-TA-armed#tip#1; each of 3 rounds: C3b-TA-armed#par@W1(9.5s), C3b-TA-armed#tip@W1(9.4s), C3b-TA-pad06#par@W1(9.5s), C3b-TA-pad06#tip@W1(11.7s), C3b-TD-armed#par@W1(4.0s), C3b-TD-armed#tip@W1(4.1s), C3b-TA-armed#par@W8(3.0s), C3b-TA-armed#tip@W8(2.8s)
+  pass 1: idle rule; warm-up C3b-TA-armed#tip#1; each of 3 rounds: C3b-TA-armed#tip@W8(2.8s), C3b-TA-armed#par@W8(3.0s), C3b-TD-armed#tip@W1(4.1s), C3b-TD-armed#par@W1(4.0s), C3b-TA-pad06#tip@W1(11.7s), C3b-TA-pad06#par@W1(9.5s), C3b-TA-armed#tip@W1(9.4s), C3b-TA-armed#par@W1(9.5s)
+
+[Q3 prio 3] Q3: 1 cells x K 3 = 3 timed processes no warm-up; 1 pass(es) x 3 rounds; per round 573 s; per pass 31.1 min; block 31.1 min (reserve after it 26.4 min); 06:24 -> 06:55 fits
+  pass 0: idle rule; no warm-up; each of 3 rounds: G4-refine#g4r@W1(567.8s)
+
+[Q4 prio 4] Q4: 5 cells x K 6 = 30 timed processes + 2 warm-ups; 2 pass(es) x 3 rounds; per round 72 s; per pass 6.2 min; block 12.5 min (reserve after it 26.4 min); 06:55 -> 07:08 fits
+  pass 0: idle rule; warm-up L9-JA-on#c4#1; each of 3 rounds: L9-JA-on#c4@W1(8.8s), L9-JC-r050#c4@W1(9.1s), L9-JC-r100#c4@W1(9.4s), L9-JC-r150#c4@W1(9.7s), L9-JC-r200#c4@W1(10.0s)
+  pass 1: idle rule; warm-up L9-JA-on#c4#1; each of 3 rounds: L9-JC-r200#c4@W1(10.0s), L9-JC-r150#c4@W1(9.7s), L9-JC-r100#c4@W1(9.4s), L9-JC-r050#c4@W1(9.1s), L9-JA-on#c4@W1(8.8s)
+
+[Q2 prio 2] Q2D: 8 cells x K 6 = 48 timed processes + 2 warm-ups; 2 pass(es) x 3 rounds; per round 94 s; per pass 7.4 min; block 14.7 min (reserve after it 11.7 min); 07:08 -> 07:22 fits
+  pass 0: idle rule; warm-up C3b-TA-armed#tip#1; each of 3 rounds: C3b-TA-armed#par@W1(9.5s), C3b-TA-armed#tip@W1(9.4s), C3b-TA-pad06#par@W1(9.5s), C3b-TA-pad06#tip@W1(11.7s), C3b-TD-armed#par@W1(4.0s), C3b-TD-armed#tip@W1(4.1s), C3b-TA-armed#par@W8(3.0s), C3b-TA-armed#tip@W8(2.8s)
+  pass 1: idle rule; warm-up C3b-TA-armed#tip#1; each of 3 rounds: C3b-TA-armed#tip@W8(2.8s), C3b-TA-armed#par@W8(3.0s), C3b-TD-armed#tip@W1(4.1s), C3b-TD-armed#par@W1(4.0s), C3b-TA-pad06#tip@W1(11.7s), C3b-TA-pad06#par@W1(9.5s), C3b-TA-armed#tip@W1(9.4s), C3b-TA-armed#par@W1(9.5s)
+
+[Q1 prio 1] Q1D: 9 cells x K 6 = 54 timed processes + 2 warm-ups; 2 pass(es) x 3 rounds; per round 66 s; per pass 5.8 min; block 11.7 min (reserve after it 0.0 min); 07:22 -> 07:34 fits
+  pass 0: idle rule; warm-up H-trk-tree#trk#8; each of 3 rounds: H-trk-tree#trk@W4(2.4s), H-jolt56#j56@W4(2.4s), H-trk-ap#trk@W4(2.8s), H-trk-tree#trk@W8(2.9s), H-jolt56#j56@W8(1.8s), H-trk-ap#trk@W8(2.6s), H-trk-tree#trk@W16(1.7s), H-jolt56#j56@W16(1.6s), H-trk-ap#trk@W16(2.6s)
+  pass 1: idle rule; warm-up H-trk-tree#trk#8; each of 3 rounds: H-trk-ap#trk@W16(2.6s), H-jolt56#j56@W16(1.6s), H-trk-tree#trk@W16(1.7s), H-trk-ap#trk@W8(2.6s), H-jolt56#j56@W8(1.8s), H-trk-tree#trk@W8(2.9s), H-trk-ap#trk@W4(2.8s), H-jolt56#j56@W4(2.4s), H-trk-tree#trk@W4(2.4s)
+
+per item (minutes): Q1 23.4, Q2 29.4, Q3 31.1, Q4 12.5
+TOTAL 96.3 min if every block runs; ends 07:34; the cutoff stops starting processes at 11:45
+
+launch-context lengths of the padded rows:
+  Q1C H-trk-tree#trk@W4 original: cwd 163 (target 163); cmdline 637 chars (earlier window: 637)
+  Q1C H-trk-tree#trk@W4 rerun: cwd 163 (target 163); cmdline 637 chars (earlier window: 637)
+  Q1C H-jolt56#j56@W4 original: cwd 161 (target 161); cmdline 38 chars (earlier window: 38)
+  Q1C H-jolt56#j56@W4 rerun: cwd 161 (target 161); cmdline 38 chars (earlier window: 38)
+  Q1C H-trk-ap#trk@W4 original: cwd 161 (target 161); cmdline 635 chars (earlier window: 635)
+  Q1C H-trk-ap#trk@W4 rerun: cwd 161 (target 161); cmdline 635 chars (earlier window: 635)
+  Q1C H-trk-tree#trk@W8 original: cwd 163 (target 163); cmdline 637 chars (earlier window: 637)
+  Q1C H-trk-tree#trk@W8 rerun: cwd 163 (target 163); cmdline 637 chars (earlier window: 637)
+  Q1C H-jolt56#j56@W8 original: cwd 161 (target 161); cmdline 38 chars (earlier window: 38)
+  Q1C H-jolt56#j56@W8 rerun: cwd 161 (target 161); cmdline 38 chars (earlier window: 38)
+  Q1C H-trk-ap#trk@W8 original: cwd 161 (target 161); cmdline 635 chars (earlier window: 635)
+  Q1C H-trk-ap#trk@W8 rerun: cwd 161 (target 161); cmdline 635 chars (earlier window: 635)
+  Q1C H-trk-tree#trk@W16 original: cwd 164 (target 164); cmdline 641 chars (earlier window: 641)
+  Q1C H-trk-tree#trk@W16 rerun: cwd 164 (target 164); cmdline 641 chars (earlier window: 641)
+  Q1C H-jolt56#j56@W16 original: cwd 162 (target 162); cmdline 39 chars (earlier window: 39)
+  Q1C H-jolt56#j56@W16 rerun: cwd 162 (target 162); cmdline 39 chars (earlier window: 39)
+  Q1C H-trk-ap#trk@W16 original: cwd 162 (target 162); cmdline 639 chars (earlier window: 639)
+  Q1C H-trk-ap#trk@W16 rerun: cwd 162 (target 162); cmdline 639 chars (earlier window: 639)
+  Q2C C3b-TA-armed#par@W1 original: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q2C C3b-TA-armed#par@W1 rerun: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q2C C3b-TA-armed#tip@W1 original: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q2C C3b-TA-armed#tip@W1 rerun: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q2C C3b-TA-pad06#par@W1 original: cwd 166 (target 166); cmdline 654 chars (earlier window: 654)
+  Q2C C3b-TA-pad06#par@W1 rerun: cwd 166 (target 166); cmdline 654 chars (earlier window: 654)
+  Q2C C3b-TA-pad06#tip@W1 original: cwd 166 (target 166); cmdline 654 chars (earlier window: 654)
+  Q2C C3b-TA-pad06#tip@W1 rerun: cwd 166 (target 166); cmdline 654 chars (earlier window: 654)
+  Q2C C3b-TA-armed#par@W8 original: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q2C C3b-TA-armed#par@W8 rerun: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q2C C3b-TA-armed#tip@W8 original: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q2C C3b-TA-armed#tip@W8 rerun: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q2D C3b-TA-armed#par@W1 original: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q2D C3b-TA-armed#par@W1 rerun: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q2D C3b-TA-armed#tip@W1 original: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q2D C3b-TA-armed#tip@W1 rerun: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q2D C3b-TA-pad06#par@W1 original: cwd 166 (target 166); cmdline 654 chars (earlier window: 654)
+  Q2D C3b-TA-pad06#par@W1 rerun: cwd 166 (target 166); cmdline 654 chars (earlier window: 654)
+  Q2D C3b-TA-pad06#tip@W1 original: cwd 166 (target 166); cmdline 654 chars (earlier window: 654)
+  Q2D C3b-TA-pad06#tip@W1 rerun: cwd 166 (target 166); cmdline 654 chars (earlier window: 654)
+  Q2D C3b-TA-armed#par@W8 original: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q2D C3b-TA-armed#par@W8 rerun: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q2D C3b-TA-armed#tip@W8 original: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q2D C3b-TA-armed#tip@W8 rerun: cwd 163 (target 163); cmdline 648 chars (earlier window: 648)
+  Q1D H-trk-tree#trk@W4 original: cwd 163 (target 163); cmdline 637 chars (earlier window: 637)
+  Q1D H-trk-tree#trk@W4 rerun: cwd 163 (target 163); cmdline 637 chars (earlier window: 637)
+  Q1D H-jolt56#j56@W4 original: cwd 161 (target 161); cmdline 38 chars (earlier window: 38)
+  Q1D H-jolt56#j56@W4 rerun: cwd 161 (target 161); cmdline 38 chars (earlier window: 38)
+  Q1D H-trk-ap#trk@W4 original: cwd 161 (target 161); cmdline 635 chars (earlier window: 635)
+  Q1D H-trk-ap#trk@W4 rerun: cwd 161 (target 161); cmdline 635 chars (earlier window: 635)
+  Q1D H-trk-tree#trk@W8 original: cwd 163 (target 163); cmdline 637 chars (earlier window: 637)
+  Q1D H-trk-tree#trk@W8 rerun: cwd 163 (target 163); cmdline 637 chars (earlier window: 637)
+  Q1D H-jolt56#j56@W8 original: cwd 161 (target 161); cmdline 38 chars (earlier window: 38)
+  Q1D H-jolt56#j56@W8 rerun: cwd 161 (target 161); cmdline 38 chars (earlier window: 38)
+  Q1D H-trk-ap#trk@W8 original: cwd 161 (target 161); cmdline 635 chars (earlier window: 635)
+  Q1D H-trk-ap#trk@W8 rerun: cwd 161 (target 161); cmdline 635 chars (earlier window: 635)
+  Q1D H-trk-tree#trk@W16 original: cwd 164 (target 164); cmdline 641 chars (earlier window: 641)
+  Q1D H-trk-tree#trk@W16 rerun: cwd 164 (target 164); cmdline 641 chars (earlier window: 641)
+  Q1D H-jolt56#j56@W16 original: cwd 162 (target 162); cmdline 39 chars (earlier window: 39)
+  Q1D H-jolt56#j56@W16 rerun: cwd 162 (target 162); cmdline 39 chars (earlier window: 39)
+  Q1D H-trk-ap#trk@W16 original: cwd 162 (target 162); cmdline 639 chars (earlier window: 639)
+  Q1D H-trk-ap#trk@W16 rerun: cwd 162 (target 162); cmdline 639 chars (earlier window: 639)

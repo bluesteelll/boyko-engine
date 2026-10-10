@@ -25,7 +25,7 @@
 //!
 //! [`GlobalTransform::default`] is [`Affine3A::IDENTITY`] — a **valid** pose, not
 //! NaN/garbage. An entity spawned this frame renders at the origin for at most
-//! one frame, until the next [`propagate_transforms`] run composes its real
+//! one frame, until the next [`propagate_transforms`](crate::propagation::propagate_transforms) run composes its real
 //! world pose. This pre-satisfies the "a required component's `Default` must be
 //! valid before its producer runs" rule.
 

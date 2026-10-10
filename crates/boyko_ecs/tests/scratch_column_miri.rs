@@ -18,7 +18,7 @@
 //!
 //! Run:
 //! ```text
-//! RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-gnu \
+//! RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-msvc \
 //!   MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-ignore-leaks" \
 //!   cargo miri test -p boyko-ecs --test scratch_column_miri
 //! ```

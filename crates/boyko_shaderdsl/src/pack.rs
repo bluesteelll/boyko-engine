@@ -34,7 +34,7 @@
 //! - `<EvalCf>` — the CPU oracle (real `&`/`>>`/`(float)`/`/` + a body-local `Cell<[f32; 2]>`). The
 //!   eval sweep reproduces the committed byte split to-bits against a host mirror transcribing the
 //!   committed body verbatim.
-//! - `<EmitCf>` — the HLSL recorder; the printer ([`crate::emit::emit_hlsl_pack_material_id_ba`])
+//! - `<EmitCf>` — the HLSL recorder; the printer (`crate::emit::emit_hlsl_pack_material_id_ba`)
 //!   walks the STMT IR into the body span (byte-identical to the committed `.comp.spv`, proven by the
 //!   cmp-`.spv`).
 //!

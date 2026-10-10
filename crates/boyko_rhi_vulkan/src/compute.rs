@@ -9,7 +9,7 @@
 //!   [`transform_add_spirv`]), exposed as `&'static [u32]` so trait callers feed
 //!   them straight into [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module);
 //! - the dispatch `LOCAL_SIZE_X` the shaders declare (`[numthreads(64,1,1)]`);
-//! - the CPU golden ([`golden_write_pattern`] / [`golden_chained`]) the
+//! - the CPU golden (`golden_write_pattern` / `golden_chained`) the
 //!   bit-exact readback diff asserts against;
 //! - [`ComputeError`], the rich compute-path error variant (now folded into the
 //!   unified [`VulkanError`](crate::error::VulkanError) at the trait boundary).
@@ -66,6 +66,9 @@ use boyko_sdf_math::{BrickClass, SDF_EDIT_BAND_HALF, SdfEditAabb, SdfEditField};
 
 use crate::ffi::VkResult;
 use crate::memory::MemoryError;
+// VG R3 piece 1 step P1-4: the pyramid's level CAPACITY, which is what makes `MAX_HZB_PASSES`
+// derivable here rather than a second hand-counted number.
+use crate::present::MAX_HZB_LEVELS;
 
 /// Re-exports of the leaf items whose canonical import path the rung-8/9/10/11
 /// tests (and any external caller) use as `boyko_rhi_vulkan::compute::{..}`.
@@ -267,8 +270,9 @@ embed_spirv! {
     /// Render P7 POLISH: the single `gSsao` center tap becomes an inline 7×7 (`R == 3`) depth-gated
     /// box blur (`gViewT` bilateral gate at `SSAO_BLUR_DEPTH_TOL == 0.1`) to kill the discrete-step
     /// SSAO RINGS — still inside the SAME `ssao_mode != 0` combine (NO new pass; the 0%-gate holds,
-    /// `ssao_mode == 0` never executes the loop). The host mirror is `golden_ssao_blur`; the gather
-    /// order/bounds/gate are byte-mirrored so GPU == host within ±2/255; 25280 → 26608 bytes.
+    /// `ssao_mode == 0` never executes the loop). [Later SUPERSEDED: the denoise moved OUT of the
+    /// resolve into the `ssao_atrous.comp` edge-avoiding à-trous pass chain; the resolve now reads the
+    /// already-filtered `gSsao` directly. The host mirror is now `golden_ssao_atrous`.]; ... bytes.
     /// Render Shadow Phase 3: Screen-Space Contact Shadows (SSCS) add `project_to_screen` (the exact
     /// `generate_ray` inverse) + `sscs_march` (an unrolled 8-step screen-space depth march) multiplied
     /// into the per-light `vis` at both lighting sites, gated by `contact_shadow_mode` (header word 7
@@ -307,9 +311,39 @@ embed_spirv! {
     /// precision — is absorbed by the `ddgi_probe_gi_resolve` golden's tight ULP tolerance. NB: pinning
     /// MORE sites `precise` was reverted — it perturbed DXC's global optimization enough to drift the
     /// GI-OFF PBR path off the golden). GI still OFF by default → the injection never runs →
-    /// byte-identical pixels (the 0%-gate); only `ddgi_indirect=true` samples.
+    /// byte-identical pixels (the 0%-gate); only `ddgi_indirect=true` samples. Textured-PBR T6a: the
+    /// `gPbr` STORAGE image @19 (SOFTWARE-ONLY, `#if !HWRT`) + the `MATERIAL_FLAG_TEXTURED_BIT`-gated
+    /// metallic/roughness/AO/emissive override — the file grows further; the flag bit is 0 on every
+    /// current material (the injection never dynamically fires) → byte-identical pixels (the 0%-gate).
+    /// The HWRT-family `.spv` below are BYTE-IDENTICAL to their pre-T6a state (verified by recompile
+    /// diff — everything T6a adds is inside `#if !HWRT`/`#else`-mirrored blocks).
     DEFERRED_PBR_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/deferred_pbr.comp.spv")
+}
+
+embed_spirv! {
+    /// The Render terminator-softening SOFTWARE-RESOLVE-ONLY variant SPIR-V
+    /// (`shaders/deferred_pbr_wrap.comp.spv`, compiled `-T cs_6_0 -D TERMINATOR_WRAP=1`).
+    ///
+    /// Compiled from the SAME `deferred_pbr.hlsl` with the `#if TERMINATOR_WRAP` diffuse
+    /// light-wrap arm active at both direct-light accumulation sites (`diff * nol_wrapped(NoL,
+    /// ts) + spec * NoL` instead of the physical `(diff + spec) * NoL` clamp) — the frozen-base
+    /// discipline (mirrors `gbuffer_mrt.fs.hlsl`'s `#ifdef` variants): [`DEFERRED_PBR_SPV`]
+    /// above (`TERMINATOR_WRAP` undefined) preprocesses CHARACTER-IDENTICAL to the pre-feature
+    /// source, so this variant is a strictly ADDITIVE compile that never perturbs the base
+    /// module's bytes (a runtime `if (ts > 0.0) {..} else {..}` guard was tried first and
+    /// rejected: the mere PRESENCE of the extra branch/loads drifted DXC's FMA fusion in the
+    /// base module even on the `ts == 0` path).
+    ///
+    /// Selected by the host ONLY when `LightingConfig::terminator_softening > 0` (the
+    /// `gpu_scene::GpuSceneBundles::scene` `terminator_wrap` gate); every other frame binds
+    /// [`DEFERRED_PBR_SPV`]. Reuses the SAME 20-binding software resolve layout as
+    /// [`DEFERRED_PBR_SPV`] (the variant changes only diffuse-accumulation math, no
+    /// descriptor), so no separate bind-group layout is built for it. An `HWRT +
+    /// TERMINATOR_WRAP` combo is explicitly OUT OF SCOPE this rung — never compiled, never
+    /// selected (the HWRT-family `.spv` below are unaffected by this variant).
+    DEFERRED_PBR_WRAP_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/deferred_pbr_wrap.comp.spv")
 }
 
 embed_spirv! {
@@ -320,8 +354,11 @@ embed_spirv! {
     /// `RaytracingAccelerationStructure`, averaged) instead of the CSM shadow-map sample, so the module
     /// carries `OpCapability RayQueryKHR` + `SPV_KHR_ray_query` + the 20th descriptor. Gated behind
     /// `feature = "hwrt"` + a runtime `ctx.ray_query_enabled()` +
-    /// `RayBackendConfig.table[Shadow][Mesh] == HardwareTri`; the software `.spv` above stays the frozen
-    /// 65456-byte golden artifact (the `#else` is byte-verbatim, verified by a recompile temp-diff).
+    /// `RayBackendConfig.table[Shadow][Mesh] == HardwareTri`; THIS `.spv` stays byte-verbatim across
+    /// changes scoped to the software-only `#if !HWRT` arm (e.g. textured-PBR T6a's `gPbr` binding +
+    /// flag-gated override) — the `#else` arm this file compiles is byte-verbatim, verified by a
+    /// recompile temp-diff. The SOFTWARE `.spv` above is NOT byte-frozen (it grows per rung; the
+    /// PIXEL-GOLDEN, not a byte count, is its authority).
     #[cfg(feature = "hwrt")]
     DEFERRED_PBR_HWRT_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/deferred_pbr_hwrt.comp.spv")
@@ -333,9 +370,9 @@ embed_spirv! {
     /// inline `rayQuery` Vogel-disk cone trace as [`DEFERRED_PBR_HWRT_SPV`] (RESOLVE_INLINE) — same
     /// `SHADOW_RAY_COUNT` spec-const, same live inputs, so `mesh_vis` is bit-identical — but instead of
     /// combining it into the lighting it **writes** `gShadowVis[px,py] = RG(mesh_vis, validity)` to the
-    /// 22nd descriptor (`RWTexture2D<float2>` @21) and RETURNS (lighting stripped). Non-mesh-arm pixels
-    /// write `RG(1.0, 0.0)`. This is the à-trous pre-pass. Bound to the 22-binding VIS/DENOISED layout
-    /// (the 21-binding RESOLVE_INLINE-hwrt layout + `gShadowVis` @21); gated behind `feature = "hwrt"` +
+    /// 23rd descriptor (`RWTexture2D<float2>` @22) and RETURNS (lighting stripped). Non-mesh-arm pixels
+    /// write `RG(1.0, 0.0)`. This is the à-trous pre-pass. Bound to the 23-binding VIS/DENOISED layout
+    /// (the 22-binding RESOLVE_INLINE-hwrt layout + `gShadowVis` @22); gated behind `feature = "hwrt"` +
     /// `ctx.ray_query_enabled()` and only ever dispatched when `scene.shadow.is_some()`.
     #[cfg(feature = "hwrt")]
     DEFERRED_PBR_VIS_SPV,
@@ -347,9 +384,9 @@ embed_spirv! {
     /// (`shaders/deferred_pbr_hwrt_denoised.comp.spv`, compiled from `deferred_pbr.hlsl` with
     /// `SHADOW_STAGE=2`). Identical to [`DEFERRED_PBR_HWRT_SPV`] (RESOLVE_INLINE) except the inline
     /// Vogel trace is replaced by a single `mesh_vis = gShadowVis.Load(px,py).r` (reading the FINAL
-    /// à-trous output at descriptor @21), then the identical `vis = min(vis, mesh_vis)` combine and
+    /// à-trous output at descriptor @22), then the identical `vis = min(vis, mesh_vis)` combine and
     /// full lighting. It does NOT trace, so it references no acceleration structure and declares no
-    /// `SHADOW_RAY_COUNT` spec-const. Bound to the SAME 22-binding VIS/DENOISED layout; selected as the
+    /// `SHADOW_RAY_COUNT` spec-const. Bound to the SAME 23-binding VIS/DENOISED layout; selected as the
     /// resolve pipeline only when `scene.shadow.is_some()`.
     #[cfg(feature = "hwrt")]
     DEFERRED_PBR_DENOISED_SPV,
@@ -360,12 +397,12 @@ embed_spirv! {
     /// The Rung-3b step-5b MOTION_VECTORS VIS-variant deferred-resolve SPIR-V
     /// (`shaders/deferred_pbr_hwrt_vis_mv.comp.spv`, compiled from `deferred_pbr.hlsl` with
     /// `SHADOW_STAGE=1 + MOTION_VECTORS`). Identical to [`DEFERRED_PBR_VIS_SPV`] (writes `gShadowVis`
-    /// @21) except it ALSO writes each SDF pixel's CAMERA-ONLY motion vector `Δuv` to a `motion_vec`
-    /// STORAGE image @23 (rg16), reprojecting the reconstructed surface `P` through a `MotionCam` UBO
-    /// @22 (cur+prev marcher-aligned view-proj — the SAME 128 B pair the raster MV variant reads). Mesh
+    /// @22) except it ALSO writes each SDF pixel's CAMERA-ONLY motion vector `Δuv` to a `motion_vec`
+    /// STORAGE image @24 (rg16), reprojecting the reconstructed surface `P` through a `MotionCam` UBO
+    /// @23 (cur+prev marcher-aligned view-proj — the SAME 128 B pair the raster MV variant reads). Mesh
     /// pixels are raster-owned (the gbuffer MV variant); the two producers write disjoint pixels of one
-    /// `motion_vec`. Bound to a 24-binding VIS-MV layout (the 22 VIS bindings + `MotionCam` @22 +
-    /// `motion_vec` @23); selected instead of [`DEFERRED_PBR_VIS_SPV`] only when the temporal denoiser
+    /// `motion_vec`. Bound to a 25-binding VIS-MV layout (the 23 VIS bindings + `MotionCam` @23 +
+    /// `motion_vec` @24); selected instead of [`DEFERRED_PBR_VIS_SPV`] only when the temporal denoiser
     /// is active. The base VIS `.spv` stays the byte-frozen 8032-byte golden.
     #[cfg(feature = "hwrt")]
     DEFERRED_PBR_VIS_MV_SPV,
@@ -387,6 +424,37 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// The SSAO à-trous edge-avoiding denoise filter, INTERIOR pin (`shaders/ssao_atrous.comp.spv`,
+    /// `ssao_atrous.comp.hlsl` compiled with no `-D`): `gAoIn`/`gAoOut` both `r16`. Bound to the SHARED
+    /// 4-binding à-trous layout { @0 `gAoIn`, @1 `gAoOut`, @2 `gViewT`, @3 the shared 80-byte Camera
+    /// UBO } + a 4-byte `{ uint step; }` push. Selected for every level EXCEPT the first (reads the R8
+    /// gather) and the last (writes back to the R8 `gSsao`) — software (NOT `hwrt`-gated: the SSAO
+    /// denoise gate is depth-plane-fit only, no `rayQuery`).
+    SSAO_ATROUS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/ssao_atrous.comp.spv")
+}
+
+embed_spirv! {
+    /// The SSAO à-trous edge-avoiding denoise filter, READ-R8 pin
+    /// (`shaders/ssao_atrous_read8.comp.spv`, `-D SSAO_ATROUS_READ_R8=1`): `gAoIn` pinned `r8` (reads
+    /// the `sdf_ssao` gather's raw R8_UNORM output), `gAoOut` pinned `r16`. Selected for LEVEL 0 only
+    /// (`N >= 2`). Same 4-binding layout as [`SSAO_ATROUS_SPV`]; only the `gAoIn` `OpTypeImage` pin
+    /// differs.
+    SSAO_ATROUS_READ8_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/ssao_atrous_read8.comp.spv")
+}
+
+embed_spirv! {
+    /// The SSAO à-trous edge-avoiding denoise filter, WRITE-R8 pin
+    /// (`shaders/ssao_atrous_write8.comp.spv`, `-D SSAO_ATROUS_WRITE_R8=1`): `gAoIn` pinned `r16`,
+    /// `gAoOut` pinned `r8` (writes back into the frozen `gSsao` R8_UNORM image the resolve reads at
+    /// binding 11). Selected for the LAST level only. Same 4-binding layout as [`SSAO_ATROUS_SPV`];
+    /// only the `gAoOut` `OpTypeImage` pin differs.
+    SSAO_ATROUS_WRITE8_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/ssao_atrous_write8.comp.spv")
+}
+
+embed_spirv! {
     /// The Rung-3b TEMPORAL shadow-vis reproject+accumulate SPIR-V (`shaders/shadow_temporal.comp.spv`,
     /// Option B). ONE dispatch AFTER the à-trous filter, BEFORE the RESOLVE_DENOISED resolve: reprojects
     /// the current shadow-vis (`gVisIn` — the à-trous output in `Both`, the raw VIS output in `Temporal`)
@@ -394,7 +462,7 @@ embed_spirv! {
     /// G=conf/CONF_MAX, B=depth/DEPTH_NORM, A=_), variance-clamps to the current 3×3 AABB (Salvi),
     /// velocity-adaptive `k = lerp(feedback_max, feedback_min, |Δuv|·extent/VELOCITY_REF)`, and hard-
     /// resets on disocclusion (off-screen / conf==0 / prev-vs-cur depth swap, W2). Writes the history
-    /// `[fi]` + `gTemporalOut` (the DENOISED reads it at `gShadowVis` @21). Bound to its OWN 8-binding
+    /// `[fi]` + `gTemporalOut` (the DENOISED reads it at `gShadowVis` @22). Bound to its OWN 8-binding
     /// layout { @0 `gVisIn` RG read, @1 `gMotionVec` RG16F read, @2 `gViewT` r32f read, @3 `gHistIn`
     /// RGBA16 read (`hist[1-fi]`), @4 `gHistOut` RGBA16 write (`hist[fi]`), @5 `gTemporalOut` RG16 write,
     /// @6 `ResolvedTemporalShadow` UBO (16 B), @7 the shared 80-byte Camera UBO }. NEW `.spv` (no base
@@ -402,6 +470,43 @@ embed_spirv! {
     #[cfg(feature = "hwrt")]
     SHADOW_TEMPORAL_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/shadow_temporal.comp.spv")
+}
+
+embed_spirv! {
+    /// Anti-aliasing Stage 4 (TAA) — the temporal-resolve reproject+accumulate SPIR-V
+    /// (`shaders/taa_resolve.comp.hlsl`, Option B). Modeled on [`SHADOW_TEMPORAL_SPV`]'s
+    /// algorithm (reproject → neighborhood clamp → confidence-adaptive feedback →
+    /// disocclusion reset), generalized scalar→RGB. Bound to its OWN 8-binding layout {
+    /// @0 `gLit` COMBINED_IMAGE_SAMPLER (current LDR color), @1 `gViewT` r32f read (the depth
+    /// proxy the camera-only MV ray marches by), @2 `gHistIn` rgba16f read (`taa_hist[1-fi]`,
+    /// the framegraph's C1-fix read-sibling), @3 `gHistOut` rgba16f write (`taa_hist[fi]`), @4
+    /// `gAaOut` rgba8 write (the present-blit's input), @5 the `ResolvedTaa` tunables UBO (16
+    /// B), @6 the shared 80-byte Camera UBO (UNJITTERED — C1 cut), @7 the `MotionCam` UBO
+    /// (`boyko_render::motion_cam`, 128 B) } + a 4-byte `{ uint reset; }` push constant
+    /// (`boyko_render::taa_state::TaaState`). NOT `hwrt`-gated (TAA works on the pure-software
+    /// leg — its motion vector is reconstructed from `gViewT`, never a `rayQuery` trace).
+    ///
+    /// **W5**: bound at boot (`boyko_app::gpu_scene::GpuSceneBundles::boot`, mirroring
+    /// [`SHADOW_TEMPORAL_SPV`]'s `shadow_temporal_pipeline` boot-build pattern, unconditionally
+    /// here) and dispatched by `present::passes::taa::Renderer::record_taa` when
+    /// `GBufferScene::taa.is_some()` (`AaMode::Taa` armed) — see `TaaActivation`'s doc in
+    /// `present::scene_types` for the full activation shape. The const-asserted length is the
+    /// anti-drift guard.
+    TAA_RESOLVE_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/taa_resolve.comp.spv")
+}
+
+embed_spirv! {
+    /// Anti-aliasing Stage 4 (TAA rung T3) — the post-resolve CONTRAST-ADAPTIVE SHARPEN SPIR-V
+    /// (`shaders/rcas.comp.hlsl`, AMD FidelityFX CAS). The `SharpenMode::Rcas` pass reads the
+    /// resolve's intermediate `taa_resolved` (the ping) and writes `aa_out` (the pong — the
+    /// present-blit's input, unchanged). Bound to its OWN 2-binding layout { @0 `gRcasIn` rgba8
+    /// STORAGE read (the resolved LDR color), @1 `gAaOut` rgba8 STORAGE write } + a 16-byte COMPUTE
+    /// push range `{ uint img_w; uint img_h; float sharpness; uint _pad; }`. NOT recorded on
+    /// `SharpenMode::None` (the default — the resolve writes `aa_out` directly, the structural
+    /// 0%-gate). The const-asserted length is the anti-drift guard.
+    RCAS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/rcas.comp.spv")
 }
 
 embed_spirv! {
@@ -429,6 +534,89 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// VB-P1e rung H2 ("dark infra"): the `-D HIER=1` hierarchical variant of the Lighting-L1
+    /// cluster cull (`shaders/cluster_cull.hlsl`, same source as [`CLUSTER_CULL_SPV`]). One
+    /// 256-lane workgroup per z-slice block (instead of one 64-wide group per `CLUSTER_COUNT`
+    /// chunk): the group first reduces its own froxels' AABBs into a group box in groupshared
+    /// memory, coarse-culls the point/spot table against THAT once, records survivors as a
+    /// groupshared bitmask, then re-runs the identical per-froxel fine test over only the
+    /// mask's set bits. Same cull-set bindings as the base variant, plus a 24-byte
+    /// [`ClusterCullHierPush`] (the base 16-byte `ClusterCullPush` widened by two boot-snapshot
+    /// words — see `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` D11). VB-P1e H4 arms this pipeline
+    /// on the VisibilityBuffer path behind the boot-time `BOYKO_VB_HIER_CULL` env selection
+    /// (`boyko_app::runner`); unset (the default, every golden/production boot) keeps the base
+    /// arm selected — byte-identical to every pre-H4 boot.
+    CLUSTER_CULL_HIER_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/cluster_cull_hier.comp.spv")
+}
+
+embed_spirv! {
+    /// VG rung R2c0: the committed per-BATCH draw-record cull SPIR-V
+    /// (`shaders/vb_batch_cull.comp.hlsl`).
+    ///
+    /// One invocation per `DrawBatch`. Writes `instanceCount` into word 1 of that batch's
+    /// `VkDrawIndexedIndirectCommand` and atomic-appends the batch index into a compacted
+    /// visible list. ARMED since rung R2c: the decision is a conservative AABB-vs-frustum test
+    /// against six host-pushed planes. (Rung R2c0 shipped it INERT — `visible` was the literal
+    /// `true` — as the null control `docs/VG-DECIDABILITY-FLOOR.md` requires; the re-DXC byte gate
+    /// and the opcode census in `tests/vb_batch_cull_spv_sync.rs` pin whichever state ships, and
+    /// R2c re-pinned them rather than deleting them.)
+    VB_BATCH_CULL_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_batch_cull.comp.spv")
+}
+
+embed_spirv! {
+    /// VG R3 piece 3 step P3-4: the `-D VB_CULL_DEBUG_PROBE=1` DIAGNOSTIC variant of the batch cull
+    /// (`shaders/vb_batch_cull.comp.hlsl`, the SAME source as [`VB_BATCH_CULL_SPV`]).
+    ///
+    /// Identical in every computation, and it declares one binding more: `VbCullDebug` @12, an
+    /// 8-word-per-instance record written at EVERY exit of `occlusion_reject` — the stage that
+    /// fired, `depth_near`, `occ`, the selected level and the four tap coordinates.
+    ///
+    /// It exists because `hzb_verdict_oracle_gate.rs`'s boundary corpus can observe only the
+    /// PARTITION. It was built to diagnose a verdict disagreement whose cause could not be read off
+    /// a partition, and it did: 72 probes, `depth_near` differing by at most 1 ULP in BOTH
+    /// directions, `level` and all four taps identical — which located the divergence at the one
+    /// operation Vulkan does not specify to 0.5 ULP, `OpFDiv`. The verdict no longer divides (see
+    /// the shader's step 6), and the same corpus now reports zero disagreements.
+    ///
+    /// `depth_near` survives HERE and nowhere else: it is computed only under the macro, so the
+    /// shipping module does not spell the quantity that used to decide.
+    ///
+    /// ⚠️ NOTHING IN THE ENGINE BINDS OR DISPATCHES THIS. The only consumer is the gate, which
+    /// builds its own thirteen-binding layout for it. With the macro undefined the source
+    /// preprocesses character-identically, so the seam ITSELF cannot move [`VB_BATCH_CULL_SPV`] —
+    /// which is a property of the token stream, not a standing promise that the base artifact never
+    /// changes: the division-free verdict moved both. `tests/vb_batch_cull_spv_sync.rs` gates both
+    /// against their own re-DXC.
+    VB_BATCH_CULL_DEBUG_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_batch_cull_debug.comp.spv")
+}
+
+embed_spirv! {
+    /// VG R3 piece 1 step P1-3: the committed hierarchical-Z depth-pyramid BUILD SPIR-V
+    /// (`shaders/hzb_build.comp.hlsl`).
+    ///
+    /// One 16×16 workgroup per 32×32 tile of the pass's FIRST OUTPUT LEVEL, reducing by `min` —
+    /// under this engine's reverse-Z that is the FARTHEST surface of each footprint, the lower
+    /// bound a later occlusion test needs — and writing up to [`HZB_LEVELS_PER_PASS`] mips per
+    /// dispatch. Bound to its OWN 8-binding set { SAMPLED `gSrcDepth` @0, STORAGE `gFine` @1,
+    /// STORAGE `gDst0`..`gDst5` @2..@7 } plus the [`HZB_BUILD_PUSH_BYTES`] push that carries every
+    /// per-level extent (the shader derives none of them).
+    ///
+    /// **Step P1-4 mints the pipeline and its descriptor sets, and NOTHING DISPATCHES THEM** — no
+    /// framegraph declaration, no pass, no barrier; that is step P1-5. Machinery that exists and
+    /// provably changes nothing observable, one step before its consumer, is the same null-control
+    /// discipline rung R2c0 shipped [`VB_BATCH_CULL_SPV`] under.
+    ///
+    /// The host oracle is `boyko_render::hzb::build_pyramid`, matched BIT-EXACTLY: the only float
+    /// operation in the entire build is `min`, so agreement is decidable to `to_bits()` at every
+    /// texel of every level.
+    HZB_BUILD_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/hzb_build.comp.spv")
+}
+
+embed_spirv! {
     /// The committed Render P4b coarse-cull / tile pre-trace SPIR-V
     /// (`shaders/sdf_tile_cull.hlsl`). A 1/8-res CONSERVATIVE cone-trace: one invocation
     /// per 8×8 fine-pixel tile emits a [`TileBound`] the fine marcher reads to early-out
@@ -437,6 +625,36 @@ embed_spirv! {
     /// depth @1, STORAGE `TileBound` @6, UNIFORM camera @5 }.
     SDF_TILE_CULL_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_tile_cull.comp.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully off):
+    /// the `gViewT` producer replacement (`shaders/viewt_from_depth.comp.hlsl`). A full-screen,
+    /// 8×8-tiled pass that reproduces the SDF marcher's own mesh-depth → `t_mesh` conversion
+    /// (`sdf_gbuffer_composite.hlsl`'s `mesh_norm`/`t_mesh`/`gViewT` sentinel logic, byte-for-
+    /// byte) for every pixel, so a mesh-only frame — which never dispatches the marcher — still
+    /// gives the resolve/SSAO a real `gViewT` lane. Bound to its OWN dedicated 2-binding layout
+    /// { SAMPLED depth @0, STORAGE `gViewT` @1 } + the 12-byte [`ViewtFromDepthPush`] (`img_w`,
+    /// `img_h`, the host-precomputed `mesh_norm`). See [`ViewtFromDepthPush`]'s doc for the
+    /// `mesh_norm` single-source-of-truth (`boyko_render::gbuffer_depth::mesh_view_t_norm` — a
+    /// dev-only back-edge from this crate, so not a doc-linkable path here).
+    VIEWT_FROM_DEPTH_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/viewt_from_depth.comp.spv")
+}
+
+embed_spirv! {
+    /// TAA-under-VB (`VisibilityBuffer × Mesh`): the `gViewT` producer for the VB path
+    /// (`shaders/viewt_from_depth_rz.comp.hlsl`) — the REVERSE-Z sibling of
+    /// [`VIEWT_FROM_DEPTH_SPV`] (whose Deferred custom-linear decode cannot be reused). A
+    /// full-screen, 8×8-tiled pass inverting `vb_depth`'s hardware reverse-Z encode
+    /// (`view_z = B / (d − A)`, the proven `sdf_forward_march` HAS_MESH decode) and
+    /// reparameterizing to the marcher ray metric (`t = view_z / dot(cam_forward, rd)`,
+    /// `ray_gen.hlsli` verbatim), so the UNCHANGED TAA resolve reconstructs
+    /// `P = ro + rd·view_t` for VB-rasterized geometry. Bound to its OWN dedicated
+    /// 3-binding layout { SAMPLED depth @0, STORAGE `gViewT` @1, camera UBO @2 — the SAME
+    /// b5 ring slot the TAA resolve reads } + the 16-byte [`ViewtFromDepthRzPush`].
+    VIEWT_FROM_DEPTH_RZ_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/viewt_from_depth_rz.comp.spv")
 }
 
 // The committed Render P7-Q2 SSAO (HBAO-lite, no-trig) quality-VARIANT SPIR-V — one PRE-COMPILED
@@ -466,7 +684,7 @@ embed_spirv! {
 }
 
 embed_spirv! {
-    /// `SSAO_PARAMS[SSAO_QUALITY_HIGH]` — `sdf_ssao_high.comp.spv` (3 slices × 6 steps × 2 = 36 taps).
+    /// `SSAO_PARAMS[SSAO_QUALITY_HIGH]` — `sdf_ssao_high.comp.spv` (8 slices × 6 steps × 2 = 96 taps).
     SDF_SSAO_HIGH_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_ssao_high.comp.spv")
 }
@@ -539,13 +757,439 @@ embed_spirv! {
 embed_spirv! {
     /// The committed mesh-MRT G-buffer PRODUCER vertex SPIR-V (`shaders/gbuffer_mrt.vs.hlsl`).
     /// Vertex layout: position (loc 0, offset 0) + world normal (loc 2, offset 12) + color
-    /// (loc 1, offset 24), a 40-byte stride. Reads the set-0 `InstanceModelCol` SSBO + the
+    /// (loc 1, offset 24). The shader itself declares no stride (a `VkVertexInputBindingDescription`
+    /// property the HOST pipeline sets, `boyko_render::mesh::VERTEX_STRIDE` — 64 bytes since the
+    /// trailing `uv`/`tangent` fields were appended; this shader reads only the first 3 attributes,
+    /// so it is unaffected). Reads the set-0 `InstanceModelCol` SSBO + the
     /// 88-byte `{ view_proj; cam_eye; base_instance; use_model_matrix }` VERTEX push
     /// ([`GBUFFER_PUSH_BYTES`](crate::swapchain::GBUFFER_PUSH_BYTES)); `use_model_matrix == 0`
     /// is the legacy merged-draw arm, `== 1` the instanced arm. Exported for the host layer
     /// (host plan R3): the SAME blob the `window_present_gbuffer` harness embeds.
     GBUFFER_MRT_VS_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/gbuffer_mrt.vs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R4b: the Forward v1 mesh raster VERTEX SPIR-V
+    /// (`shaders/forward_opaque.vs.hlsl`). Emits a REAL hardware reverse-Z `SV_Position.z`
+    /// (`boyko_render::view::forward_view_proj_rows`, NOT the Deferred custom-linear encode);
+    /// the SAME 88-byte VERTEX push shape + set-0 `InstanceModelCol` SSBO layout as
+    /// [`GBUFFER_MRT_VS_SPV`] — only the matrix CONTENT + the trailing forwarded `mat_id`
+    /// (instead of `PerInstanceMaterial`'s full payload) differ. See that file's header for the
+    /// full v1 scope cut.
+    FORWARD_OPAQUE_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/forward_opaque.vs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R4b: the Forward v1 mesh raster FRAGMENT SPIR-V
+    /// (`shaders/forward_opaque.fs.hlsl`). Shades every covered pixel inline against the full
+    /// light table (all-lights, no froxel) via the SAME shared BRDF (`pbr_lighting.hlsli`) +
+    /// combined CSM/punctual shadow visibility (`shadow_apply.hlsli`) the deferred resolve uses.
+    /// NO `SV_Depth`/`discard`/UAV — early-Z stays live. Set 0 (camera/light/materials + the
+    /// VS instance SSBOs) + Set 1 (CSM/atlas, its OWN binding numbers — boot-panic fix:
+    /// renumbered from an original Set 2 design, see `rhi_impl/device.rs::build_graphics_pipeline`'s
+    /// doc) — no bindless texture table this v1 rung. See that file's header for the full v1
+    /// scope cut.
+    FORWARD_OPAQUE_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/forward_opaque.fs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R4b-b (code-review follow-up): the Forward v1 sky
+    /// BACKGROUND vertex SPIR-V (`shaders/forward_sky.vs.hlsl`) — a full-screen triangle, NO
+    /// vertex buffer, NO descriptor bindings (`SV_VertexID`-only, the `fullscreen_sample.vs.hlsl`
+    /// idiom). Paired with [`FORWARD_SKY_FS_SPV`].
+    FORWARD_SKY_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/forward_sky.vs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R4b-b (code-review follow-up): the Forward v1 sky
+    /// BACKGROUND fragment SPIR-V (`shaders/forward_sky.fs.hlsl`) — replicates the deferred
+    /// resolve's `mask == 0` background branch (analytic sky/ground gradient + visible sun disc,
+    /// `deferred_pbr.hlsl:1369-1414`) so a Forward frame's uncovered pixels match a Deferred
+    /// frame's instead of staying flat-clear/black. Drawn FIRST inside `forward_opaque`'s SAME
+    /// dynamic-rendering scope, depth test/write OFF (`depth_format: None`), so opaque mesh
+    /// geometry then draws over it. Paired with [`FORWARD_SKY_VS_SPV`].
+    FORWARD_SKY_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/forward_sky.fs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 mesh id-raster VERTEX
+    /// SPIR-V (`shaders/vb_raster.vs.hlsl`) — reads the 64-byte `VbInstanceRow` SSBO (byte-
+    /// identical leading 48 bytes to `InstanceModelCol` + an appended `mesh_id` lane) and exports
+    /// the GLOBAL instance index as a flat interpolant (Decision 9 — no FS-side `SV_InstanceID`
+    /// read). VG rung R2d-4: that index is `base_instance + SV_InstanceID`, or — when the per-draw
+    /// push carries the indirection bit — that same expression read THROUGH `gVbVisibleInstance`
+    /// (@11), whose entries are themselves global indices. Paired with [`VB_RASTER_FS_SPV`].
+    VB_RASTER_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_raster.vs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 mesh id-raster FRAGMENT
+    /// SPIR-V (`shaders/vb_raster.fs.hlsl`) — writes ONLY `SV_Target0 = uint2(instance_id, raw
+    /// SV_PrimitiveID)` (Decision 9) into the `vb_id` `R32G32_UINT` color attachment. NO
+    /// `SV_Depth`/`discard`/UAV — early-Z stays live. Paired with [`VB_RASTER_VS_SPV`].
+    VB_RASTER_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_raster.fs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 FUSED resolve compute
+    /// SPIR-V (`shaders/vb_resolve.comp.hlsl`, `mesh_geo_shade_split == false`). Unpacks `vb_id`,
+    /// re-fetches the covered triangle's geometry via the Decision-0 bindless table (Set 2,
+    /// `vb_geom_fetch.hlsli`), shades ALL-LIGHTS (a TOKEN-FOR-TOKEN clone of
+    /// `forward_opaque.fs.hlsl`'s own light loop), and writes `lit` (STORAGE). A 3-set pipeline:
+    /// Set 0 = the VB-only core+images vocabulary, Set 1 = the Forward-family shadow set (REUSED
+    /// verbatim), Set 2 = the geometry table's own Set.
+    VB_RESOLVE_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_resolve.comp.spv")
+}
+
+embed_spirv! {
+    /// VB-SV0 DP1 (docs/VB-SV0-SDF-SHADOW-PLAN.md Rev 10, dark infra — unwired until DP2/DP3):
+    /// the DEDICATED SDF-on-mesh shadow + contact-AO prepass SPIR-V
+    /// (`shaders/sdf_mesh_shadow.comp.hlsl`). Per covered pixel: re-fetch via the Decision-0
+    /// table, march `sdf_soft_shadow_ranged` for the PRIMARY directional from the geometric face
+    /// normal's lifted origin, run the 5-tap `sdf_ao`, write the R8G8 term the lit-producer
+    /// tails `min`-combine. A 3-set pipeline layout with an EMPTY Set 1: Set 0 = its own
+    /// vocabulary (`gVbInstances`@0, Camera@2, `LightBuf`@3, `gVbId`@5, `gSdfTerm`@6, SDF
+    /// `Buf`@10), Set 2 = the geometry table's own Set — `vb_geom_fetch.hlsli` hardcodes
+    /// `space2`, and an empty middle layout is cheaper than a set-index fork of the one shared
+    /// fetch header every VB consumer pins byte-identically.
+    SDF_MESH_SHADOW_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_mesh_shadow.comp.spv")
+}
+
+embed_spirv! {
+    /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a (dark infra,
+    /// unwired): the `count` classify compute SPIR-V (`shaders/vb_classify_count.comp.hlsl`) —
+    /// one thread per composite pixel, `InterlockedAdd(counts[mat], 1)` for every mesh-covered
+    /// pixel's material id. A 1-set pipeline (Set 0 = `vb_layout0`, built via the generic
+    /// `RhiDevice::create_compute_pipeline`, plan P2-1 — no dedicated `_vb1` helper).
+    VB_CLASSIFY_COUNT_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_classify_count.comp.spv")
+}
+
+embed_spirv! {
+    /// VB-P2 classification plan, rung P2a: the `scan` classify compute SPIR-V
+    /// (`shaders/vb_classify_scan.comp.hlsl`) — a SINGLE workgroup performing the two chained
+    /// exclusive prefix sums (`counts->offsets`/`cursors`, `gc->gbase`+`group_to_mat` fill) over
+    /// the frame's live `[0, material_count)` M-array prefix. A 1-set pipeline (Set 0 =
+    /// `vb_layout0`).
+    VB_CLASSIFY_SCAN_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_classify_scan.comp.spv")
+}
+
+embed_spirv! {
+    /// VB-P2 classification plan, rung P2a: the `scatter` classify compute SPIR-V
+    /// (`shaders/vb_classify_scatter.comp.hlsl`) — one thread per composite pixel, claims a
+    /// `pixel_list` slot (`InterlockedAdd(cursors[mat], 1)`) and stores its linear pixel index.
+    /// A 1-set pipeline (Set 0 = `vb_layout0`).
+    VB_CLASSIFY_SCATTER_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_classify_scatter.comp.spv")
+}
+
+embed_spirv! {
+    /// VB-P2 classification plan, rung P2a: the `vb_shade` material-classified shading compute
+    /// SPIR-V (`shaders/vb_shade.comp.hlsl`) — `vb_resolve.comp.hlsl`'s body plus an ~8-line
+    /// classify-table pixel-selection prologue swap (plan D3, byte-identical by construction);
+    /// the shading tail is character-identical to [`VB_RESOLVE_SPV`]'s own source. A 3-set
+    /// pipeline: Set 0 = `vb_layout0`, Set 1 = the Forward-family shadow set (REUSED verbatim),
+    /// Set 2 = the Decision-0 geometry table's own Set — built via
+    /// [`crate::device::VulkanContext::create_compute_pipeline_vb`], mirroring
+    /// [`VB_RESOLVE_SPV`]'s own pipeline shape.
+    VB_SHADE_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade.comp.spv")
+}
+
+embed_spirv! {
+    /// Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3): the `vb_shade` TEXTURED-variant
+    /// shading compute SPIR-V (`shaders/vb_shade.comp.hlsl`, `-D TEXTURED=1`) — [`VB_SHADE_SPV`]'s
+    /// SAME source, splicing a bindless-texture material eval (Set 3) into the material-eval
+    /// locals, a near-verbatim copy of `gbuffer_mrt.fs.hlsl`'s own TEXTURED block. A 4-set
+    /// pipeline: Set 0 = `vb_layout0` (a DISTINCT descriptor SET against the SAME layout object,
+    /// binding the wider `PerInstanceMaterialTex` ring at b1), Set 1 = the Forward-family shadow
+    /// set (REUSED verbatim), Set 2 = the Decision-0 geometry table's own Set, Set 3 = the shared
+    /// bindless texture-array table (REUSED verbatim, R5) — built via
+    /// [`crate::device::VulkanContext::create_compute_pipeline_vb_textured`].
+    VB_SHADE_TEX_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade_tex.comp.spv")
+}
+
+embed_spirv! {
+    /// VB-P1a ("dark infra"): the `vb_resolve` FROXEL-variant resolve compute SPIR-V
+    /// (`shaders/vb_resolve.comp.hlsl`, `-D FROXEL=1`) — [`VB_RESOLVE_SPV`]'s SAME source with the
+    /// `#ifdef FROXEL` seam active: the point/spot loop walks the pixel's froxel slice via
+    /// `ClusterGrid`/`LightIndexList` (Set 0 bindings 8/9, froxel-compile-only) instead of the flat
+    /// `[l0a_count, light_count)` scan, gated at runtime by `use_clusters` — THREE terms since
+    /// VB-P1k (`clusters_enabled != 0 && cluster_count != 0 && cluster_count <= grid_capacity`,
+    /// the capacity being `ClusterGrid.GetDimensions(...)`, i.e. the BOUND descriptor's own
+    /// element count via SPIR-V `OpArrayLength`) — the SAME shape and fallback
+    /// `forward_opaque_froxel.fs.hlsl` establishes. The two terms past the enabled bit are an
+    /// out-of-bounds guard, not a style choice: `robustBufferAccess` is OFF in this engine (the
+    /// device is created with `samplerAnisotropy` as its ONLY core feature bit) and no
+    /// GPU-assisted validation runs, so an out-of-range `ClusterGrid` read is real UB that no
+    /// layer reports. UNLIKE the Deferred/ForwardPlus readers, this variant never guards a
+    /// PLACEHOLDER descriptor: `record_vb` binds it only under `scene.cluster_cull.is_some()`,
+    /// and the Set-0 it binds (`GBufferTargets::vb_set0_froxel`) is built only when the REAL
+    /// `cluster_grid`/`light_index` exist — there is no `unwrap_or(light_table)` fallback on this
+    /// path, so an unarmed VB boot binds the BASE compile, which declares no `ClusterGrid` at all.
+    /// The base
+    /// (non-FROXEL) compile's tokens are byte-for-byte unperturbed by the `#else` arm, so
+    /// [`VB_RESOLVE_SPV`] stays byte-identical to its pre-VB-P1a build. LOADED since VB-P1b, when
+    /// the arm bit (`ResolvedRenderPath::froxel_light_cull` — the VB path AND the owner-opt-in
+    /// `LightingConfig::clusters_enabled`, which defaults off) resolves true; byte-gated by
+    /// `vb_froxel_spv_sync.rs`.
+    VB_RESOLVE_FROXEL_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_resolve_froxel.comp.spv")
+}
+
+embed_spirv! {
+    /// VB-P1a ("dark infra"): the `vb_shade` FROXEL-variant shading compute SPIR-V
+    /// (`shaders/vb_shade.comp.hlsl`, `-D FROXEL=1`) — [`VB_SHADE_SPV`]'s SAME source with the
+    /// SAME `#ifdef FROXEL` seam [`VB_RESOLVE_FROXEL_SPV`] documents (the shading tail is
+    /// character-identical to `vb_resolve.comp.hlsl`'s own, plan D3, so the froxel seam is too).
+    /// LOADED since VB-P1b — see [`VB_RESOLVE_FROXEL_SPV`]'s doc.
+    VB_SHADE_FROXEL_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade_froxel.comp.spv")
+}
+
+embed_spirv! {
+    /// VB-P1a ("dark infra"): the `vb_shade` TEXTURED+FROXEL-variant shading compute SPIR-V
+    /// (`shaders/vb_shade.comp.hlsl`, `-D TEXTURED=1 -D FROXEL=1`) — [`VB_SHADE_TEX_SPV`]'s SAME
+    /// source with the SAME `#ifdef FROXEL` seam, both defines active simultaneously (TEXTURED
+    /// selects the material-eval arm at Set 3; FROXEL selects the point/spot index source — the
+    /// two `#ifdef`s are independent, non-overlapping spans). LOADED since VB-P1c (the classified
+    /// textured froxel selection) — see [`VB_RESOLVE_FROXEL_SPV`]'s doc.
+    VB_SHADE_TEX_FROXEL_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade_tex_froxel.comp.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS vertex
+    /// SPIR-V (`shaders/depth_prepass.vs.hlsl`) — a position-only subset of
+    /// [`FORWARD_OPAQUE_VS_SPV`] (same instance SSBO + push shape, no normal/mat_id export).
+    /// Paired with [`DEPTH_PREPASS_FS_SPV`] in
+    /// [`VulkanContext::create_graphics_pipeline_forward_prepass`].
+    DEPTH_PREPASS_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/depth_prepass.vs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS fragment
+    /// SPIR-V (`shaders/depth_prepass.fs.hlsl`) — an empty entry point (zero color attachments;
+    /// this RHI's pipeline builder requires a fragment module unconditionally). Paired with
+    /// [`DEPTH_PREPASS_VS_SPV`].
+    DEPTH_PREPASS_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/depth_prepass.fs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the `forward_opaque` FROXEL
+    /// fragment SPIR-V — `shaders/forward_opaque.fs.hlsl` recompiled with `-D FROXEL=1`
+    /// (see that file's header). Declares `ClusterGrid`/`LightIndexList` @5/6, a subset of the
+    /// UNIFIED 7-binding `forward_layout0` every Forward-family pipeline is built against
+    /// (rung R5 code-review fix — ONE Set-0 layout object, never two distinct handles); Set 1
+    /// (shadow) is UNCHANGED, shared verbatim with [`FORWARD_OPAQUE_FS_SPV`]. Paired with
+    /// [`FORWARD_OPAQUE_VS_SPV`] (the VS is IDENTICAL — only the fragment shader's light-loop
+    /// source differs by the `#ifdef FROXEL` compile flag) in
+    /// [`VulkanContext::create_graphics_pipeline_forward_plus`].
+    FORWARD_OPAQUE_FROXEL_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/forward_opaque_froxel.fs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R-SDFFWD: the SDF forward-march FUSED
+    /// march-then-shade compute SPIR-V, `HAS_MESH` variant (`shaders/sdf_forward_march.comp.hlsl`
+    /// compiled with `-D HAS_MESH=1`). Marches the SDF field (the M1/M2/M4 brick/clip-map
+    /// acceleration + the analytic A1 soft-shadow march are VERBATIM copies of
+    /// `sdf_gbuffer_composite.hlsl`'s own spans, wired to real shared resources but threaded OFF
+    /// this rung), then runs the full Cook-Torrance shade (a TOKEN-FOR-TOKEN clone of
+    /// `forward_opaque.fs.hlsl`'s own light loop) and stores directly into the Forward `lit`
+    /// STORAGE image. Samples the Forward reverse-Z `forward_depth` image to bound the march at
+    /// the mesh surface (Decision 4's ownership gate — `sdf_owns = hit && t < t_mesh`). Paired
+    /// with [`SDF_FORWARD_MARCH_SDFONLY_SPV`] (the mesh-less sibling compile).
+    SDF_FORWARD_MARCH_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_forward_march.comp.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R-SDFFWD: the SDF forward-march FUSED
+    /// march-then-shade compute SPIR-V, mesh-less variant (`shaders/sdf_forward_march.comp.hlsl`
+    /// compiled with no `-D`). Used under `GeometryLegs::Sdf` (no raster mesh leg): never samples
+    /// `forward_depth` (the ownership gate collapses to `sdf_owns = hit` — every hit is owned),
+    /// so its Set-0 layout still reserves the depth-image slot (bound-but-unread, the R2
+    /// contract) but its SPIR-V never references it. Paired with [`SDF_FORWARD_MARCH_SPV`].
+    SDF_FORWARD_MARCH_SDFONLY_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_forward_march_sdfonly.comp.spv")
+}
+
+embed_spirv! {
+    /// TAA-under-VB (the `VB x Both`/`VB x Sdf` rung): the SDF forward-march compute SPIR-V,
+    /// `HAS_MESH + VIEWT` variant (`shaders/sdf_forward_march.comp.hlsl` compiled with
+    /// `-D HAS_MESH=1 -D VIEWT=1`). Identical to [`SDF_FORWARD_MARCH_SPV`] plus the `gViewT`
+    /// binding-13 write (r32f `core.viewt`): on a TAA-armed SDF-carrying VisibilityBuffer leg
+    /// the marcher IS the composite and the SOLE gViewT producer — every in-bounds pixel is
+    /// written exactly once (SDF-owned `t`, mesh-owned `t_mesh`, background `1.0e30`), the
+    /// `sdf_gbuffer_composite.hlsl` u8 discipline. Dispatched under `VB x Both` when
+    /// `GBufferScene::path_sdf_forward_writes_viewt()`.
+    SDF_FORWARD_MARCH_VIEWT_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_forward_march_viewt.comp.spv")
+}
+
+embed_spirv! {
+    /// TAA-under-VB: the SDF forward-march compute SPIR-V, mesh-less `VIEWT` variant
+    /// (`shaders/sdf_forward_march.comp.hlsl` compiled with `-D VIEWT=1` only). Identical to
+    /// [`SDF_FORWARD_MARCH_SDFONLY_SPV`] plus the `gViewT` binding-13 write (mesh-less: every
+    /// pixel stores the marched `t` or the `1.0e30` background sentinel). Dispatched under
+    /// `VB x Sdf` when `GBufferScene::path_sdf_forward_writes_viewt()`.
+    SDF_FORWARD_MARCH_SDFONLY_VIEWT_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_forward_march_sdfonly_viewt.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9b (docs/R9-VB-SPLIT-PLAN.md §5): the `vb_geo` thin-aux geometry compute SPIR-V
+    /// (`shaders/vb_geo.comp.hlsl`, no `-D`): the VB split's producer half — one thread/pixel
+    /// over `vb_id` (sentinel writes nothing), `vb_geom_fetch` re-derive of the interpolated
+    /// GEOMETRIC normal, oct RG + material-scalar roughness B into `thin_normal`. Set 0 =
+    /// `vb_layout0` (reused), Set 1 = `vb_geo_aux_layout`, Set 2 = the geometry table; 64-byte
+    /// `view_proj` push. The `-D MOTION=1` sibling (`vb_geo_mv`) is rung R9d.
+    VB_GEO_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_geo.comp.spv")
+}
+
+embed_spirv! {
+    /// VB-SV0 DP6b (`docs/VB-SV0-DP6-DESIGN.md`, Decisions 1 + 5): the `-D VB_SV0_TERM=1` sibling
+    /// of [`VB_GEO_SPV`] — the SDF-on-mesh soft shadow + contact-AO march compiled INTO the split's
+    /// geometry half, which already performs the per-covered-pixel `vb_geom_fetch` the march needs.
+    /// This is DP6's producer consolidation: it replaces the dedicated `sdf_mesh_shadow.comp.spv`
+    /// prepass, which is retired at DP6e.
+    ///
+    /// Identical `vb_geo` re-fetch + `gThinNormal` write, plus — under a wave-uniform light-header
+    /// mode read — one `sdf_soft_shadow_ranged` march for the PRIMARY directional from the
+    /// GEOMETRIC face normal's lifted origin and the 5-tap `sdf_ao` along the SHADING normal, both
+    /// stored into the R8G8 term. Set 1 (`vb_geo_aux_layout`) gains `gSdfTerm` @3 (rg8 STORAGE,
+    /// WRITE) and the SDF edit list `Buf` @4 (STORAGE, READ); Set 2 is unchanged.
+    ///
+    /// **Set 0's reflected interface is NOT common with [`VB_GEO_SPV`], and the difference is
+    /// measured rather than assumed.** `vb_layout0`'s @3 `LightBuf` is declared by all three
+    /// variants but READ only by this one, and DXC strips a declared-but-unread
+    /// `StructuredBuffer` — `spirv-dis | grep -c 'OpDecorate %LightBuf'` gives **0** on
+    /// `vb_geo.comp.spv`, **0** on `vb_geo_mv.comp.spv` and **2** here. The DESCRIPTOR SET LAYOUT
+    /// object is nonetheless shared and unchanged: a module that does not statically use a
+    /// descriptor imposes no requirement on it, which is the whole R2 bound-but-unread contract.
+    /// Stated because "Set 0 unchanged" would otherwise be read as "the reflection matches", and a
+    /// later rung diffing the three modules' interfaces would find a discrepancy this doc denied.
+    ///
+    /// **A `-D` variant and NOT an unconditionally-compiled runtime-gated span**, because carrying
+    /// the march dark measured `+10 128 B` on this `15 888 B` kernel at `13f1c9a3` (+75 % on
+    /// `vb_resolve`) — Decision 1. The variant as shipped is `28 292 B`, i.e. `+12 404 B` /
+    /// `+78.1 %`, so the tax the design refused to pay unconditionally is larger here than the
+    /// figure it refused it on.
+    ///
+    /// **Selected by NOTHING at DP6b** — the pipeline pick and the `sdf_term` write declaration
+    /// both arrive at DP6c, driven by the single `vb_sv0_host` predicate (Decision 6, invariant 9).
+    VB_GEO_SV0_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_geo_sv0.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9b: the `vb_shade_split` lit-producer compute SPIR-V
+    /// (`shaders/vb_shade_split.comp.hlsl`, no `-D`): the split's consumer half — RE-fetch +
+    /// the `vb_resolve`-character-identical shading tail + the gSsao Filament combine (gated by
+    /// the light-header `ssao_mode` word) + DDGI probe injection (header-gated, runtime-off
+    /// until R9c arms the host side) + `#if HWRT` denoised gShadowVis (R9d). Set 1 =
+    /// `vb_split_layout1` (11 bindings — NOT `forward_layout1`).
+    VB_SHADE_SPLIT_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade_split.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9b: the `-D TEXTURED=1` sibling of [`VB_SHADE_SPLIT_SPV`] (Set 3 = the shared
+    /// bindless texture table — the `vb_shade_tex` idiom).
+    VB_SHADE_SPLIT_TEX_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade_split_tex.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9d (docs/R9-VB-SPLIT-PLAN.md §6): the VB split's DEDICATED hardware shadow-vis
+    /// gather SPIR-V (`shaders/vb_shadow_vis.comp.hlsl`, no `-D`) — the split's own standalone
+    /// sibling of [`DEFERRED_PBR_VIS_SPV`] (that one is FUSED into `deferred_pbr.hlsl`'s
+    /// `SHADOW_STAGE=1` arm, reading the fat gbuffer; this one has no gbuffer to read). Traces
+    /// the SAME `SHADOW_RAY_COUNT` Vogel-disk cone against the `tlas_instances`-built TLAS, but
+    /// its per-pixel normal/depth come from `thin_normal`/`gViewT` (the VB split's own thin-aux
+    /// lanes) instead of a fat G-buffer MRT, and it writes `gShadowVis[px,py] = RG(mesh_vis,
+    /// validity)`. Bound to its OWN 7-binding layout { @0 `thin_normal` read, @1 `gViewT` read,
+    /// @2 `LightTable` read, @3 the shared 80-byte Camera UBO, @4 the TLAS
+    /// `ACCELERATION_STRUCTURE_KHR`, @5 `ResolvedRayShadow` UBO, @6 `gShadowVis` write }. Gated
+    /// behind `feature = "hwrt"` + `ctx.ray_query_enabled()`, dispatched only when
+    /// `GBufferScene::path_vb_hwrt_shadow()`.
+    #[cfg(feature = "hwrt")]
+    VB_SHADOW_VIS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shadow_vis.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9d: the `-D MOTION=1` sibling of [`VB_GEO_SPV`] (`shaders/vb_geo_mv.comp.hlsl`) —
+    /// selected instead of the base `vb_geo` when the VB hwrt shadow chain's temporal denoise
+    /// stage is armed (`GBufferScene::vb_geo_mv_active()`). Identical `vb_geo` re-fetch +
+    /// `thin_normal` write, plus a per-pixel CAMERA-ONLY motion vector `Δuv` written to
+    /// `motion_vec` (rg16, `vb_geo_aux_set`'s @1) reprojected through a `MotionCam` UBO
+    /// (the same set's @2, replacing the R9b placeholder camera-ring binding when armed) — the
+    /// SAME reproject-through-`MotionCam` idiom [`DEFERRED_PBR_VIS_MV_SPV`] uses for the
+    /// mesh-less SDF leg. Set 0/2 unchanged from `vb_geo`; only Set 1 (`vb_geo_aux_layout`)
+    /// gains the two new bindings' targets.
+    #[cfg(feature = "hwrt")]
+    VB_GEO_MV_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_geo_mv.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9d: the `-D HWRT=1` sibling of [`VB_SHADE_SPLIT_SPV`]
+    /// (`shaders/vb_shade_split.comp.hlsl` compiled with `-D HWRT=1`) — reads the FINAL
+    /// denoised/undenoised `gShadowVis` (bound at `vb_split_set1`'s entry @8: `temporal_out`
+    /// when the temporal stage is armed, else the à-trous-parity final ring, else raw
+    /// `shadow_vis`) and combines it into the mesh-shadow term exactly as
+    /// [`DEFERRED_PBR_DENOISED_SPV`] does for the fused deferred resolve. Selected instead of
+    /// [`VB_SHADE_SPLIT_SPV`] only when `GBufferScene::path_vb_hwrt_shadow()`.
+    #[cfg(feature = "hwrt")]
+    VB_SHADE_SPLIT_HWRT_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade_split_hwrt.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9d: the `-D TEXTURED=1 -D HWRT=1` sibling of [`VB_SHADE_SPLIT_TEX_SPV`] — the
+    /// textured-PBR counterpart of [`VB_SHADE_SPLIT_HWRT_SPV`] (Set 3 = the shared bindless
+    /// texture table).
+    #[cfg(feature = "hwrt")]
+    VB_SHADE_SPLIT_TEX_HWRT_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade_split_tex_hwrt.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9b: the `-D VB_THIN=1` SSAO gather, LOW quality
+    /// (`shaders/sdf_ssao_low.comp.hlsl` + the define): reads `thin_normal` (oct RG) +
+    /// `gViewT` (background = the `1e30` sentinel replaces the dropped `gMaterial.b` mask),
+    /// writes `ssao` — the VB split's gather. Dense 4-binding table
+    /// (`thin_normal`@0/`gViewT`@1/`ssao`@2/Camera@3, `vb_ssao_layout`).
+    SDF_SSAO_VB_LOW_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_ssao_vb_low.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9b: the `-D VB_THIN=1` SSAO gather, MEDIUM quality — see [`SDF_SSAO_VB_LOW_SPV`].
+    SDF_SSAO_VB_MEDIUM_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_ssao_vb_medium.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9b: the `-D VB_THIN=1` SSAO gather, HIGH quality — see [`SDF_SSAO_VB_LOW_SPV`].
+    SDF_SSAO_VB_HIGH_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_ssao_vb_high.comp.spv")
 }
 
 embed_spirv! {
@@ -585,6 +1229,105 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// Asset-streaming plan F8+ PER_INSTANCE_MATERIAL-variant mesh-MRT G-buffer PRODUCER
+    /// vertex SPIR-V (`shaders/gbuffer_mrt_pm.vs.spv`, compiled from `gbuffer_mrt.vs.hlsl`
+    /// with `-D PER_INSTANCE_MATERIAL=1`). Identical to [`GBUFFER_MRT_VS_SPV`] except it
+    /// additionally reads a per-instance material PAYLOAD SSBO (set-0 binding 1, VERTEX —
+    /// id + `base_color`) at the SAME `pc.base_instance + SV_InstanceID` index the
+    /// model-matrix arm already uses, and forwards both flat (`nointerpolation`) to the
+    /// fragment. Materials are device-agnostic (unlike `mv`, this is NOT
+    /// `#[cfg(feature = "hwrt")]`) — built at boot on every device and bound instead of the
+    /// base pipeline ONLY on a frame with a non-default material (and no temporal denoise —
+    /// MV takes priority, asset-streaming plan F8 §2.3). The base [`GBUFFER_MRT_VS_SPV`]
+    /// stays the byte-frozen 3-MRT golden (never recompiled by F8/F8+).
+    GBUFFER_MRT_PM_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/gbuffer_mrt_pm.vs.spv")
+}
+
+embed_spirv! {
+    /// Asset-streaming plan F8+ PER_INSTANCE_MATERIAL-variant mesh-MRT G-buffer PRODUCER
+    /// fragment SPIR-V (`shaders/gbuffer_mrt_pm.fs.spv`, compiled from `gbuffer_mrt.fs.hlsl`
+    /// with `-D PER_INSTANCE_MATERIAL=1`). Writes the SAME 3 attribute MRTs + `SV_Depth` as
+    /// [`GBUFFER_MRT_FS_SPV`], except `gNormal.BA` packs the REAL per-instance material id
+    /// (forwarded flat from the VS, unchanged from F8) AND `gAlbedo` sources the
+    /// per-instance material's `base_color` (owner: material-drives-albedo-too) instead of
+    /// the mesh vertex color. Paired with [`gbuffer_mrt_pm_vs_spirv`]; the base
+    /// [`GBUFFER_MRT_FS_SPV`] stays the byte-frozen golden (never recompiled by F8/F8+).
+    GBUFFER_MRT_PM_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/gbuffer_mrt_pm.fs.spv")
+}
+
+embed_spirv! {
+    /// F8-mv: the combined MOTION_VECTORS + PER_INSTANCE_MATERIAL mesh-MRT G-buffer
+    /// PRODUCER vertex SPIR-V (`shaders/gbuffer_mrt_mvpm.vs.spv`, compiled from
+    /// `gbuffer_mrt.vs.hlsl` with BOTH `-D MOTION_VECTORS=1 -D PER_INSTANCE_MATERIAL=1`).
+    /// Identical to [`GBUFFER_MRT_MV_VS_SPV`] except it ALSO reads a per-instance material
+    /// PAYLOAD SSBO — moved to set-0 binding 3 (the nested `#if defined(MOTION_VECTORS)`
+    /// branch resolves the binding-1 collision with `prev_instances`) — and forwards the id
+    /// + `base_color` flat to the fragment, like [`GBUFFER_MRT_PM_VS_SPV`]. Bound into a
+    /// 4-attachment pipeline with a 4-binding set-0 layout (instances @0, prev_instances @1,
+    /// `MotionCam` @2, instance_materials @3, all VERTEX); selected only when temporal denoise
+    /// AND a non-default material are both active this frame (MV+PM combined, F8-mv). The base
+    /// [`GBUFFER_MRT_VS_SPV`]/[`GBUFFER_MRT_MV_VS_SPV`]/[`GBUFFER_MRT_PM_VS_SPV`] stay
+    /// byte-frozen (the step-2 byte-identity gate).
+    #[cfg(feature = "hwrt")]
+    GBUFFER_MRT_MVPM_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/gbuffer_mrt_mvpm.vs.spv")
+}
+
+embed_spirv! {
+    /// F8-mv: the combined MOTION_VECTORS + PER_INSTANCE_MATERIAL mesh-MRT G-buffer
+    /// PRODUCER fragment SPIR-V (`shaders/gbuffer_mrt_mvpm.fs.spv`, compiled from
+    /// `gbuffer_mrt.fs.hlsl` with BOTH `-D MOTION_VECTORS=1 -D PER_INSTANCE_MATERIAL=1`).
+    /// Writes the SAME 3 attribute MRTs + `SV_Depth` as [`GBUFFER_MRT_FS_SPV`], PLUS the 4th
+    /// MRT `motion_vec` Δuv (like [`GBUFFER_MRT_MV_FS_SPV`]) AND sources `gAlbedo`/`gNormal.BA`
+    /// from the forwarded per-instance material (like [`GBUFFER_MRT_PM_FS_SPV`]). Paired with
+    /// [`gbuffer_mrt_mvpm_vs_spirv`]; the `gbuffer_mrt.fs.hlsl` source is UNTOUCHED by F8-mv —
+    /// only the `-D` combination is new.
+    #[cfg(feature = "hwrt")]
+    GBUFFER_MRT_MVPM_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/gbuffer_mrt_mvpm.fs.spv")
+}
+
+embed_spirv! {
+    /// Textured-PBR rung T6c TEXTURED-variant mesh-MRT G-buffer PRODUCER vertex SPIR-V
+    /// (`shaders/gbuffer_mrt_tex.vs.spv`, compiled from `gbuffer_mrt.vs.hlsl` with
+    /// `-D TEXTURED=1`). An INDEPENDENT #ifdef axis from PER_INSTANCE_MATERIAL/
+    /// MOTION_VECTORS (never compiled together with either — T6c plan Decision D4). Reads a
+    /// per-instance TEXTURED material PAYLOAD SSBO (set-0 binding 1, VERTEX —
+    /// `PerInstanceMaterialTex`) at the SAME `pc.base_instance + SV_InstanceID` index the
+    /// model-matrix arm already uses, PLUS the vertex `uv`/`tangent` attributes (declared
+    /// 4th/5th, DXC-assigned SPIR-V locations 3/4), building the tangent-space basis
+    /// `world_T = normalize(mul(m3, tangent.xyz))` (the PLAIN model 3x3, glTF/Mikktspace
+    /// convention). Bound into the 2-set TEXTURED raster pipeline (set 0 = the
+    /// `PerInstanceMaterialTex` layout, VERTEX; set 1 = the bindless texture-array set,
+    /// FRAGMENT) with the widened 64-byte `MESH_VERTEX_STRIDE` vertex layout (position@0 /
+    /// normal@12 / color@24 / uv@40 / tangent@48). The base [`GBUFFER_MRT_VS_SPV`] stays the
+    /// byte-frozen 3-MRT golden (never recompiled by T6c — the ENTIRE new axis is
+    /// `#ifdef TEXTURED`-gated).
+    GBUFFER_MRT_TEX_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/gbuffer_mrt_tex.vs.spv")
+}
+
+embed_spirv! {
+    /// Textured-PBR rung T6c TEXTURED-variant mesh-MRT G-buffer PRODUCER fragment SPIR-V
+    /// (`shaders/gbuffer_mrt_tex.fs.spv`, compiled from `gbuffer_mrt.fs.hlsl` with
+    /// `-D TEXTURED=1`). Samples the bindless texture array (set 1, `NonUniformResourceIndex`-
+    /// gated — see the `textured_nonuniform_spirv` hermetic proof) for gAlbedo (modulated by
+    /// `base_color`), performs tangent-space normal mapping into gNormal (the TBN basis is
+    /// glTF/Mikktspace convention; the sampled green channel is separately negated per this
+    /// engine's own convention for OpenGL-style input maps — see `gbuffer_mrt.fs.hlsl`'s
+    /// GREEN-CHANNEL CONVENTION block; geometric normal when unbound), and writes a 4th MRT
+    /// `SV_Target3 pbr` (`R16G16B16A16_SFLOAT`) carrying `[metallic, roughness, AO-modulation,
+    /// emissive-luminance-modulation]` (glTF metal-rough channel convention: metallic = B,
+    /// roughness = G) — read by the deferred SOFTWARE resolve's flag-gated `gPbr.Load`
+    /// (T6a). Paired with [`gbuffer_mrt_tex_vs_spirv`]; the base [`GBUFFER_MRT_FS_SPV`] stays
+    /// byte-frozen (never recompiled by T6c).
+    GBUFFER_MRT_TEX_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/gbuffer_mrt_tex.fs.spv")
+}
+
+embed_spirv! {
     /// The committed fullscreen-sample vertex SPIR-V (`shaders/fullscreen_sample.vs.hlsl`): a
     /// fullscreen triangle generating positions + UVs from `SV_VertexID` (no vertex buffer).
     /// The present-blit pass's VS.
@@ -598,6 +1341,56 @@ embed_spirv! {
     /// The present-blit pass's FS; paired with [`fullscreen_sample_vs_spirv`].
     FULLSCREEN_SAMPLE_FS_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/fullscreen_sample.fs.spv")
+}
+
+embed_spirv! {
+    /// FXAA 3.11 compact fragment SPIR-V (`shaders/fxaa.fs.hlsl`, three-source-validated
+    /// against Lottes FXAA3_11 / Rodriguez compact form / Bevy's shipped `fxaa.wgsl`): a
+    /// 12-tap edge-only luma post-process. Paired with [`fullscreen_sample_vs_spirv`] (the
+    /// FXAA pipeline reuses the same fullscreen-triangle VS); reads `lit` (LINEAR sampler),
+    /// writes `aa_out`. Stage-1 anti-aliasing pass — armed only when `scene.aa` is `Some`.
+    FXAA_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/fxaa.fs.spv")
+}
+
+embed_spirv! {
+    /// AA campaign Stage 3 — SSAA 2× downsample fragment SPIR-V
+    /// (`shaders/ssaa_downsample.fs.hlsl`): a linear-light 2×2 box filter that resolves the
+    /// 2× LIT ring into the native-size `aa_out`. Paired with [`fullscreen_sample_vs_spirv`]
+    /// (reuses the same fullscreen-triangle VS); reads `lit` via `.Load` (the bound sampler
+    /// is irrelevant), writes `aa_out`. Armed only when `scene.ssaa` is `Some` — boot-fixed,
+    /// host-authoritative (see `boyko_app::host::WindowHost`).
+    SSAA_DOWNSAMPLE_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/ssaa_downsample.fs.spv")
+}
+
+embed_spirv! {
+    /// AA campaign Stage 2 — SMAA 1x pass 1 (edge detection) fragment SPIR-V
+    /// (`shaders/smaa_edge.fs.hlsl`, ported verbatim from iryoku `SMAALumaEdgeDetectionPS`).
+    /// Paired with [`fullscreen_sample_vs_spirv`] (all three SMAA passes share the same
+    /// fullscreen-triangle VS); reads `lit`, writes `edges` (R8G8). Armed only when
+    /// `scene.smaa` is `Some`.
+    SMAA_EDGE_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/smaa_edge.fs.spv")
+}
+
+embed_spirv! {
+    /// AA campaign Stage 2 — SMAA 1x pass 2 (blending-weight calculation) fragment SPIR-V
+    /// (`shaders/smaa_weight.fs.hlsl`, ported verbatim from iryoku
+    /// `SMAABlendingWeightCalculationPS`, PRESET_HIGH diagonal + corner detection). Reads
+    /// `edges` + the boot-resident `areaTex`/`searchTex` LUTs, writes `weights` (RGBA8).
+    /// Armed only when `scene.smaa` is `Some`.
+    SMAA_WEIGHT_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/smaa_weight.fs.spv")
+}
+
+embed_spirv! {
+    /// AA campaign Stage 2 — SMAA 1x pass 3 (neighborhood blending) fragment SPIR-V
+    /// (`shaders/smaa_blend.fs.hlsl`, ported verbatim from iryoku
+    /// `SMAANeighborhoodBlendingPS`). Reads `lit` + pass 2's `weights`, writes `aa_out` (the
+    /// same target FXAA's single pass writes). Armed only when `scene.smaa` is `Some`.
+    SMAA_BLEND_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/smaa_blend.fs.spv")
 }
 
 embed_spirv! {
@@ -705,7 +1498,7 @@ pub fn spec_constant_smoke_spirv() -> &'static [u32] {
 /// The shader reuses the rung-1 compute contract verbatim: binding 0 (set 0) is
 /// one `RWStructuredBuffer<uint>` at COMPUTE + a 4-byte `uint count` push
 /// constant; everything else (camera/sphere/light) is hardcoded in the shader,
-/// mirrored host-side by [`golden_sdf_pixel`].
+/// mirrored host-side by `golden_sdf_pixel`.
 #[inline]
 pub fn sdf_spheretrace_spirv() -> &'static [u32] {
     SDF_SPHERETRACE_SPV.as_words()
@@ -720,7 +1513,7 @@ pub fn sdf_spheretrace_spirv() -> &'static [u32] {
 /// The edit-list is PACKED as a header region at the front of that single buffer
 /// (no second binding): word 0 = `edit_count`, then the [`MAX_SDF_EDITS`]-entry
 /// [`SdfEdit`] array, then the packed-RGBA pixel output. The host writes the
-/// header via [`encode_edit_list`] and mirrors the fold in [`golden_editlist_pixel`].
+/// header via [`encode_edit_list`] and mirrors the fold in `golden_editlist_pixel`.
 #[inline]
 pub fn sdf_editlist_spirv() -> &'static [u32] {
     SDF_EDITLIST_SPV.as_words()
@@ -737,7 +1530,7 @@ pub fn sdf_editlist_spirv() -> &'static [u32] {
 /// [`encode_edit_list`], the GPU image→buffer copy writes the rasterized mesh
 /// depth into [`COMPOSITE_DEPTH_BASE_WORDS`], and the shader reads both, bounds the
 /// march by the per-pixel mesh depth, and composites into [`COMPOSITE_PIXEL_BASE_WORDS`].
-/// The fold + lighting are mirrored host-side by [`golden_composite_pixel`].
+/// The fold + lighting are mirrored host-side by `golden_composite_pixel`.
 #[inline]
 pub fn sdf_depth_composite_spirv() -> &'static [u32] {
     SDF_DEPTH_COMPOSITE_SPV.as_words()
@@ -753,7 +1546,7 @@ pub fn sdf_depth_composite_spirv() -> &'static [u32] {
 /// is a read-only `StructuredBuffer<uint>` (the same packed edit-list header format,
 /// [`encode_edit_list`] / [`EDITLIST_BUFFER_WORDS`]) and binding 1 is a
 /// `RWTexture2D<float4>` it STOREs the marcher color into. The field eval + ray-gen +
-/// lighting are reused VERBATIM from rung 9, so [`golden_editlist_pixel`] predicts the
+/// lighting are reused VERBATIM from rung 9, so `golden_editlist_pixel` predicts the
 /// stored texel within the same `+/-2/255` per-channel tolerance (the float→UNORM store
 /// quantization vs [`pack_rgba`]'s rounding is under one LSB). It proves a storage-image
 /// WRITE through the COMPUTE bind point + the vocabulary set works on the GPU.
@@ -768,7 +1561,7 @@ pub fn sdf_editlist_storage_image_spirv() -> &'static [u32] {
 ///
 /// The image-based rewrite of the rung-10 [`sdf_depth_composite_spirv`] marcher: the
 /// field eval + ray-gen + lighting are a VERBATIM cut of `sdf_depth_composite.hlsl`, so
-/// [`golden_composite_pixel_ex`] predicts the ALBEDO output within the same `+/-2/255`
+/// `golden_composite_pixel_ex` predicts the ALBEDO output within the same `+/-2/255`
 /// per-channel tolerance. It is bound to the P1b vocabulary set: binding 0 a read-only
 /// `StructuredBuffer<uint>` edit-list, binding 1 a `Texture2D<float>` SAMPLED depth
 /// (the rasterized D32_SFLOAT image, fetched with `.Load`), bindings 2..4 the MRT
@@ -792,10 +1585,23 @@ pub fn sdf_gbuffer_composite_spirv() -> &'static [u32] {
 /// color `lit = (mask == 1) ? base * vis : base` to a STORAGE image @ binding 2. It is
 /// dispatched 1D over the SAME pixel count as the marcher (the camera UBO @ binding 5
 /// supplies the extent for the 1:1 index → (px, py) mapping). The host mirror is
-/// [`golden_deferred_resolve`], fed by [`golden_marcher_attributes`].
+/// `golden_deferred_resolve`, fed by `golden_marcher_attributes`.
 #[inline]
 pub fn deferred_pbr_spirv() -> &'static [u32] {
     DEFERRED_PBR_SPV.as_words()
+}
+
+/// The Render terminator-softening variant SPIR-V (`-D TERMINATOR_WRAP=1`) as a `u32` word
+/// stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Binds into the SAME 20-binding software resolve layout as [`deferred_pbr_spirv`] (the
+/// variant changes only the diffuse accumulation math, no descriptor). Selected instead of
+/// [`deferred_pbr_spirv`] only when `LightingConfig::terminator_softening > 0`; NOT
+/// `#[cfg(feature = "hwrt")]`-gated (a software-resolve-only variant, see [`DEFERRED_PBR_WRAP_SPV`]).
+#[inline]
+pub fn deferred_pbr_wrap_spirv() -> &'static [u32] {
+    DEFERRED_PBR_WRAP_SPV.as_words()
 }
 
 /// The R2a-4b HWRT-variant deferred-resolve SPIR-V (`shaders/deferred_pbr_hwrt.comp.spv`) as a `u32`
@@ -819,8 +1625,8 @@ pub fn deferred_pbr_hwrt_spirv() -> &'static [u32] {
 ///
 /// The à-trous pre-pass: runs the inline Vogel `rayQuery` trace exactly as the RESOLVE_INLINE-hwrt
 /// resolve does (bit-identical `mesh_vis`, same `SHADOW_RAY_COUNT` spec-const) but writes
-/// `gShadowVis[px,py] = RG(mesh_vis, validity)` to descriptor @21 and returns. Bound to the
-/// 22-binding VIS/DENOISED layout; dispatched only when `scene.shadow.is_some()`. See
+/// `gShadowVis[px,py] = RG(mesh_vis, validity)` to descriptor @22 and returns. Bound to the
+/// 23-binding VIS/DENOISED layout; dispatched only when `scene.shadow.is_some()`. See
 /// [`DEFERRED_PBR_VIS_SPV`]; the const-asserted length is the anti-drift guard.
 #[cfg(feature = "hwrt")]
 #[inline]
@@ -832,9 +1638,9 @@ pub fn deferred_pbr_vis_spirv() -> &'static [u32] {
 /// (`SHADOW_STAGE=1 + MOTION_VECTORS`) as a `u32` word stream, ready for
 /// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
 ///
-/// Identical to [`deferred_pbr_vis_spirv`] (writes `gShadowVis` @21) plus a per-SDF-pixel
-/// camera-only motion vector `Δuv` written to a `motion_vec` STORAGE image @23, reprojecting the
-/// reconstructed surface `P` through a `MotionCam` UBO @22. Bound to the 24-binding VIS-MV layout;
+/// Identical to [`deferred_pbr_vis_spirv`] (writes `gShadowVis` @22) plus a per-SDF-pixel
+/// camera-only motion vector `Δuv` written to a `motion_vec` STORAGE image @24, reprojecting the
+/// reconstructed surface `P` through a `MotionCam` UBO @23. Bound to the 25-binding VIS-MV layout;
 /// selected instead of [`deferred_pbr_vis_spirv`] only when the temporal shadow denoiser is active.
 /// See [`DEFERRED_PBR_VIS_MV_SPV`]; the const-asserted length is the anti-drift guard.
 #[cfg(feature = "hwrt")]
@@ -847,9 +1653,9 @@ pub fn deferred_pbr_vis_mv_spirv() -> &'static [u32] {
 /// ready for [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
 ///
 /// Identical to the RESOLVE_INLINE-hwrt resolve except the inline trace is replaced by one
-/// `gShadowVis.Load(px,py).r` read of the FILTERED vis at descriptor @21, then the identical
+/// `gShadowVis.Load(px,py).r` read of the FILTERED vis at descriptor @22, then the identical
 /// `min`-combine + full lighting. Declares no `SHADOW_RAY_COUNT` spec-const (it never traces).
-/// Bound to the SAME 22-binding VIS/DENOISED layout; selected as the resolve pipeline only when
+/// Bound to the SAME 23-binding VIS/DENOISED layout; selected as the resolve pipeline only when
 /// `scene.shadow.is_some()`. See [`DEFERRED_PBR_DENOISED_SPV`].
 #[cfg(feature = "hwrt")]
 #[inline]
@@ -870,6 +1676,29 @@ pub fn shadow_atrous_spirv() -> &'static [u32] {
     SHADOW_ATROUS_SPV.as_words()
 }
 
+/// The SSAO à-trous denoise filter, INTERIOR pin (`r16`/`r16`), as a `u32` word stream. Bound to
+/// the shared 4-binding à-trous layout (see [`SSAO_ATROUS_SPV`]). Software — built unconditionally
+/// (NOT `hwrt`-gated).
+#[inline]
+pub fn ssao_atrous_spirv() -> &'static [u32] {
+    SSAO_ATROUS_SPV.as_words()
+}
+
+/// The SSAO à-trous denoise filter, READ-R8 pin (`r8`/`r16`), as a `u32` word stream — LEVEL 0
+/// only (reads the raw `sdf_ssao` gather output). See [`SSAO_ATROUS_READ8_SPV`].
+#[inline]
+pub fn ssao_atrous_read8_spirv() -> &'static [u32] {
+    SSAO_ATROUS_READ8_SPV.as_words()
+}
+
+/// The SSAO à-trous denoise filter, WRITE-R8 pin (`r16`/`r8`), as a `u32` word stream — the LAST
+/// level only (writes back into the frozen `gSsao` the resolve reads). See
+/// [`SSAO_ATROUS_WRITE8_SPV`].
+#[inline]
+pub fn ssao_atrous_write8_spirv() -> &'static [u32] {
+    SSAO_ATROUS_WRITE8_SPV.as_words()
+}
+
 /// The Rung-3b TEMPORAL shadow-vis reproject+accumulate SPIR-V as a `u32` word stream. Bound to its
 /// own 8-binding layout (see [`SHADOW_TEMPORAL_SPV`]): one dispatch after the à-trous filter, before
 /// the RESOLVE_DENOISED resolve; reprojects `gVisIn` through `gMotionVec` into the RGBA16 history ring
@@ -879,6 +1708,28 @@ pub fn shadow_atrous_spirv() -> &'static [u32] {
 #[inline]
 pub fn shadow_temporal_spirv() -> &'static [u32] {
     SHADOW_TEMPORAL_SPV.as_words()
+}
+
+/// Anti-aliasing Stage 4 (TAA) — the temporal-resolve SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Bound to its
+/// own 8-binding layout (see [`TAA_RESOLVE_SPV`]'s doc for the full binding contract). NOT
+/// `hwrt`-gated. Bound at boot (W5) by `boyko_app::gpu_scene::GpuSceneBundles::boot` into
+/// `taa_resolve_pipeline`, dispatched by `crate::present::passes::taa::Renderer::record_taa`
+/// when `GBufferScene::taa.is_some()`.
+#[inline]
+pub fn taa_resolve_spirv() -> &'static [u32] {
+    TAA_RESOLVE_SPV.as_words()
+}
+
+/// The TAA rung T3 CONTRAST-ADAPTIVE SHARPEN (AMD FidelityFX CAS) compute SPIR-V, for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Bound to its
+/// own 2-binding layout + a 16-byte COMPUTE push range (see [`RCAS_SPV`]'s doc for the full
+/// binding contract). NOT `hwrt`-gated. Bound at boot by `boyko_app::gpu_scene` into the
+/// `rcas_pipeline`, dispatched by `crate::present::passes::rcas::Renderer::record_rcas` when
+/// `GBufferScene`'s `SharpenMode::Rcas` is armed.
+#[inline]
+pub fn rcas_spirv() -> &'static [u32] {
+    RCAS_SPV.as_words()
 }
 
 /// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V as a `u32` word stream, ready for
@@ -904,11 +1755,223 @@ pub fn ddgi_probe_gi_resolve_spirv() -> &'static [u32] {
 /// culls the point/spot block (`sqDistPointAABB <= r²`), and atomic-appends survivors into
 /// the index list + writes the `{offset, count}` cell. Dispatched 1D over `CLUSTER_COUNT`
 /// BEFORE the resolve (with a COMPUTE→COMPUTE buffer barrier so the resolve's reads see the
-/// writes). The host mirror is [`golden_cluster_cull`].
+/// writes). The host mirror is `golden_cluster_cull`.
 #[inline]
 pub fn cluster_cull_spirv() -> &'static [u32] {
     CLUSTER_CULL_SPV.as_words()
 }
+
+/// VB-P1e rung H2: the `-D HIER=1` hierarchical cluster-cull SPIR-V as a `u32` word stream. See
+/// [`CLUSTER_CULL_HIER_SPV`]'s doc. Armed on the VB path by H4 (`boyko_app::gpu_scene::
+/// GpuSceneBundles::build_froxel_light_cull`) behind the `BOYKO_VB_HIER_CULL` boot selection.
+#[inline]
+pub fn cluster_cull_hier_spirv() -> &'static [u32] {
+    CLUSTER_CULL_HIER_SPV.as_words()
+}
+
+/// The batch-cull pipeline's COMPUTE push range — `vb_batch_cull.comp.hlsl`'s
+/// `VbBatchCullPush { float4 planes[6]; uint batch_count; uint visible_cap; uint phase;
+/// uint occ_flags; }`.
+///
+/// 96 bytes of planes + 8 of counts + 8 of VG R3 piece 3 step P3-3's two selector words. Rung R2c0
+/// shipped this at 8 bytes (counts only); rung R2c widened it to 104 when the frustum decision
+/// arrived; P3-3 widens it to 112 for `phase` (which of the two cull phases this dispatch is) and
+/// `occ_flags` (the occlusion decision's arming word — [`super::present::scene_types::VB_CULL_OCC_ARMED`]
+/// and the two FORCE controls). Well inside Vulkan's guaranteed 128-byte minimum
+/// `maxPushConstantsSize`, which is the bound that actually binds here — the raster's own push is
+/// 88 bytes, so the device plainly clears 112, and the shared COMPUTE range's own const-assert in
+/// `rhi_impl` is the mechanical gate on the 128.
+///
+/// ⚠️ The remaining headroom is 16 bytes, which is why the occlusion test's `float4x4` travels in a
+/// BUFFER ([`VB_CULL_UNIFORM_BYTES`]) rather than in more push words.
+pub const VB_BATCH_CULL_PUSH_BYTES: u32 = 112;
+
+/// VG R3 piece 3 step P3-2 (plan D6): the byte size of the batch cull's NON-push input block —
+/// `vb_batch_cull.comp.hlsl`'s `VbCullUniform`, a per-FIF `DEVICE_LOCAL` buffer written by
+/// `vkCmdUpdateBuffer` and read as a `StructuredBuffer`.
+///
+/// It is a BUFFER rather than more push words because [`VB_BATCH_CULL_PUSH_BYTES`] is 104 against a
+/// shared COMPUTE range const-asserted at most `VULKAN_MIN_MAX_PUSH_CONSTANTS_SIZE` (128) — 24 bytes
+/// of headroom, and the occlusion test needs a `float4x4` (64) plus two extents, a level count and a
+/// frame index. Raising the range instead would destroy the property `rhi_impl`'s push module states
+/// in words: no device-limit query is required.
+///
+/// 96 = 64 (the row-major view-projection) + 8 (`src_extent`) + 8 (`base_extent`) + 4 (`levels`) +
+/// 4 (`frame_index`) + 8 of tail padding to the 16-byte std430 stride. The HOST half of that layout
+/// is pinned by `present::scene_types::VbCullUniform`'s own size const-assert.
+pub const VB_CULL_UNIFORM_BYTES: u32 = 96;
+
+/// VG R3 piece 3 step P3-2: the ARITY of the batch cull's descriptor-set layout — twelve COMPUTE
+/// bindings @0..@11 since this step (seven @0..@6 before it).
+///
+/// ONE number, so the host layout's entry array is sized by it (a `[BindGroupLayoutEntry; N]`, whose
+/// length a literal cannot drift from) rather than by counting elements at each reader. Round 1 of
+/// the plan wrote the arity as a literal in six places against a table of five additions on a base
+/// of seven, and the arithmetic disagreed with itself.
+///
+/// ⚠️ This is the HOST layout's arity, NOT the module's declared binding count. The two are allowed
+/// to differ in exactly one direction — a WRITTEN descriptor a shader never loads from is never
+/// dereferenced, so a bound set may legally exceed what the module declares (`present/passes/vb.rs`
+/// states the argument at the dispatch's own SAFETY comment). The reverse would be a
+/// `debug_assert` failure in `create_bind_group`, which is why the set and the layout move in one
+/// commit while the shader lags.
+pub const VB_CULL_LAYOUT_BINDINGS: u32 = 12;
+
+/// The batch-cull shader's `[numthreads(64,1,1)]` group width, and the host's dispatch divisor:
+/// the dispatch is `ceil(batch_count / VB_BATCH_CULL_LOCAL_SIZE_X)` groups.
+///
+/// HLSL requires a literal in `[numthreads]`, so this cannot be the SAME symbol the shader uses —
+/// the two spellings are held together by `tests/vb_batch_cull_spv_sync.rs`, which reads the
+/// compiled `LocalSize` out of the module and asserts it equals this.
+pub const VB_BATCH_CULL_LOCAL_SIZE_X: u32 = 64;
+
+/// VG R3 piece 1 step P1-4: the HZB build pipeline's COMPUTE push range —
+/// `hzb_build.comp.hlsl`'s `HzbBuildPush`.
+///
+/// The layout the shader pins, offset by offset: eight `uint2` at 0 (`src_extent`), 8
+/// (`fine_extent`), 16, 24, 32, 40, 48, 56 (`out_extent0`..`out_extent5`), then two `uint` at 64
+/// (`base_level`) and 68 (`level_count`) — 72 bytes, `68 + 4`. Well inside Vulkan's guaranteed
+/// 128-byte minimum `maxPushConstantsSize`; the raster's own push is 88 bytes, so the device
+/// plainly clears this.
+///
+/// The SHADER half of that table is pinned by `tests/hzb_build_spv_sync.rs`, which reads every
+/// `OpMemberDecorate %type_PushConstant_HzbBuildPush <i> Offset <n>` out of the compiled module
+/// and asserts the member-ordered sequence `[0, 8, 16, 24, 32, 40, 48, 56, 64, 68]`. That is the
+/// one contract no other test can see: a drift makes the shader read a level extent from the
+/// wrong bytes, and the outcome — a pyramid that writes nothing, or one that reduces over the
+/// wrong footprint — carries no validation message at all. So a drift fails that test instead of
+/// silently corrupting a dispatch.
+pub const HZB_BUILD_PUSH_BYTES: u32 = 72;
+
+/// VG R3 piece 1 step P1-3: the HZB build shader's `[numthreads(16,16,1)]` group edge —
+/// `hzb_build.comp.hlsl`'s `LOCAL_SIZE`.
+///
+/// A 16×16 workgroup in which every thread owns a 2×2 block of the pass's FIRST OUTPUT LEVEL, hence
+/// the [`HZB_BUILD_TILE`] the host actually divides by. Drift here changes the LDS region layout the
+/// shader's reduce chain is built on (16×16 → 8×8 → 4×4 → 2×2 → 1), so it is not a tuning knob: it
+/// is pinned to the compiled module by `tests/hzb_build_spv_sync.rs`, which reads `LocalSize` out of
+/// the `.spv` and asserts it equals this.
+pub const HZB_BUILD_LOCAL_SIZE: u32 = 16;
+
+/// VG R3 piece 1 step P1-3: the HZB build shader's tile edge, in texels of the pass's FIRST OUTPUT
+/// LEVEL `d` — and THE DISPATCH DIVISOR, `groups[a] = ceil(E_a(d) / HZB_BUILD_TILE)`.
+///
+/// ⚠️ The divisor is over the OUTPUT level's extent, never the source's: level 0 is `prev_pow2` of
+/// each source axis (`P <= S < 2P`), so the two differ at every non-power-of-two extent.
+///
+/// Too small a divisor under-dispatches and leaves the pyramid's tail texels holding the boot clear
+/// `0.0`, which under reverse-Z is the FAR plane — the pyramid would then report that nothing is in
+/// front of those texels, which is the geometry-deleting direction for whatever reads it. Too large
+/// costs empty groups, which the boundary rule makes harmless but not free.
+///
+/// # ⚠️ How this one is pinned, and how it is NOT
+///
+/// The three HZB constants here read as three equivalent pins and they are not:
+///
+/// * [`HZB_BUILD_LOCAL_SIZE`] is pinned DIRECTLY — the module declares
+///   `OpExecutionMode … LocalSize 16 16 1` and the sync test compares it.
+/// * **This one has no field to read.** The tile appears in the module only as the anonymous
+///   multipliers `TILE >> k`, so the sync test ties it through the CONSTANTS those multipliers
+///   declare, in both directions: `%uint_TILE` must be present and `%uint_(2*TILE)` must be
+///   absent. That was added after a review found the previous assertion —
+///   `local_size[0] * 2 == HZB_BUILD_TILE` — could not fail, since the `const _` below already
+///   makes both sides the same expression. A `TILE = 64u` in the shader against an unchanged
+///   `[numthreads(16,16,1)]` passed BOTH gates and left half of every level unwritten.
+/// * [`HZB_LEVELS_PER_PASS`] is pinned INDIRECTLY, through `op_image_write` and the binding-set
+///   length, both of which the sync test now derives from it rather than spelling as literals.
+pub const HZB_BUILD_TILE: u32 = 32;
+
+/// VG R3 piece 1 step P1-3: how many pyramid levels ONE dispatch of `hzb_build.comp.hlsl` writes
+/// (`d ..= d+5`), and therefore what makes the host's pass count `ceil(levels / HZB_LEVELS_PER_PASS)`
+/// — at most 3 for the 17-level deepest pyramid the oracle admits.
+///
+/// It is not free to raise: the shader's six destination bindings and the tile-collapse identity
+/// below both encode it. Lowering it silently leaves the top mips unwritten — again at the boot
+/// clear `0.0`, the far plane.
+///
+/// Pinned INDIRECTLY (see [`HZB_BUILD_TILE`]'s note on the three different pin strengths): the sync
+/// test derives its `op_image_write` expectation and its binding-set length FROM this constant, so
+/// a change here that the shader does not follow fails there. The shader's own `LEVELS_PER_PASS`
+/// declaration is documentation — no expression reads it, and a `.spv` census cannot see it.
+pub const HZB_LEVELS_PER_PASS: u32 = 6;
+
+// Each thread owns a 2×2 block of the first output level, so the tile a workgroup covers is exactly
+// twice its own edge. The shader's `block_base = tile_base + tid * 2` is this identity.
+const _: () = assert!(HZB_BUILD_TILE == HZB_BUILD_LOCAL_SIZE * 2);
+
+// The tile halves once per level, so it collapses to exactly 1×1 at the pass's LAST level — which is
+// what makes every texel a pass writes a fold of level-`d` texels the group already owns, i.e. what
+// makes a pass free of cross-tile dependencies and of any intra-dispatch image barrier.
+const _: () = assert!(1u32 << HZB_LEVELS_PER_PASS == HZB_BUILD_TILE * 2);
+
+/// VG R3 piece 1 step P1-4: the fixed inline CAPACITY of the per-frame `hzb_build` descriptor-set
+/// array — how many dispatches the DEEPEST pyramid the host oracle admits would need.
+///
+/// ⚠️ **A CAPACITY, never a SPAN** — the same warning [`MAX_HZB_LEVELS`] carries, for the same
+/// reason. The LIVE pass count is `plan.levels.div_ceil(HZB_LEVELS_PER_PASS)`, and at every real
+/// render extent that is 2 (11 levels at 1920×1080; the third pass is first reached at a
+/// 4096-wide source). Nothing may size a dispatch loop, a barrier range or a mip index from this
+/// value — read the count from the plan.
+pub const MAX_HZB_PASSES: usize = 3;
+
+// `MAX_HZB_LEVELS` levels at `HZB_LEVELS_PER_PASS` levels per dispatch. Spelled as a literal so the
+// number is readable where the array is declared; the assert is what keeps it true if either input
+// moves.
+const _: () = assert!(MAX_HZB_PASSES == MAX_HZB_LEVELS.div_ceil(HZB_LEVELS_PER_PASS as usize));
+
+/// VG R3 piece 1 step P1-3: the HZB depth-pyramid build SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// See [`HZB_BUILD_SPV`]'s doc for the binding table and the null-control state (step P1-4 mints
+/// the pipeline and its sets; nothing dispatches them until P1-5).
+#[inline]
+pub fn hzb_build_spirv() -> &'static [u32] {
+    HZB_BUILD_SPV.as_words()
+}
+
+/// VG rung R2c0: the byte stride of one `VbBatchDesc` — `vb_batch_cull.comp.hlsl`'s
+/// `VbBatchDescGpu { float3 aabb_min; uint instance_count; float3 aabb_max; uint base_instance; }`
+/// (rung R2d-3 named the trailing word, which R2c0 had reserved as `pad`; the stride is unchanged).
+pub const VB_BATCH_DESC_STRIDE: u32 = 32;
+
+/// VG rung R2c0: the per-BATCH draw-record cull SPIR-V as a `u32` word stream. See
+/// [`VB_BATCH_CULL_SPV`]'s doc.
+///
+/// Bound to the batch-cull set { `RWByteAddressBuffer` VbIndirect @0,
+/// `StructuredBuffer<VbBatchDescGpu>` VbBatchDesc @1, `RWStructuredBuffer<uint>` VbCullVisible
+/// @2, `RWStructuredBuffer<uint>` VbCullCount @3 } + an 8-byte `{ batch_count, visible_cap }`
+/// push. Dispatched 1D over the batch count BEFORE `vb_raster`, with the `TRANSFER → COMPUTE`
+/// and `COMPUTE → DRAW_INDIRECT` dependencies DERIVED by the framegraph rather than hand-written.
+#[inline]
+pub fn vb_batch_cull_spirv() -> &'static [u32] {
+    VB_BATCH_CULL_SPV.as_words()
+}
+
+/// VG R3 piece 3 step P3-4: the `-D VB_CULL_DEBUG_PROBE=1` diagnostic batch-cull SPIR-V as a `u32`
+/// word stream. See [`VB_BATCH_CULL_DEBUG_SPV`]'s doc.
+///
+/// Bound to the base twelve-binding cull set PLUS `RWStructuredBuffer<uint> VbCullDebug` @12, sized
+/// [`VB_CULL_DEBUG_RECORD_WORDS`] `u32` per INSTANCE SLOT. Its only caller is
+/// `boyko_app/tests/hzb_verdict_oracle_gate.rs`; no engine path creates a set for it.
+#[inline]
+pub fn vb_batch_cull_debug_spirv() -> &'static [u32] {
+    VB_BATCH_CULL_DEBUG_SPV.as_words()
+}
+
+/// VG R3 piece 3 step P3-4: the ARITY of the DIAGNOSTIC cull variant's descriptor-set layout —
+/// [`VB_CULL_LAYOUT_BINDINGS`] plus the one `VbCullDebug` sink at @12.
+///
+/// Derived from the base arity rather than written as `13`, so widening the base layout moves this
+/// one with it instead of silently aliasing the sink onto a real binding.
+pub const VB_CULL_DEBUG_LAYOUT_BINDINGS: u32 = VB_CULL_LAYOUT_BINDINGS + 1;
+
+/// VG R3 piece 3 step P3-4: the `u32` word count of ONE `VbCullDebug` record — the shader's
+/// `VB_DBG_RECORD_WORDS`.
+///
+/// `{ stage, asuint(depth_near), asuint(occ), level, tap_x0, tap_x1, tap_y0, tap_y1 }`. The two
+/// spellings cannot be one symbol across the language boundary; the gate that reads the records is
+/// what holds them together, by asserting every written record's stage word is a legal stage.
+pub const VB_CULL_DEBUG_RECORD_WORDS: u32 = 8;
 
 /// The committed Render P4b coarse-cull / tile pre-trace SPIR-V as a `u32` word
 /// stream, ready for
@@ -916,7 +1979,7 @@ pub fn cluster_cull_spirv() -> &'static [u32] {
 ///
 /// The coarse pre-pass for the [`sdf_gbuffer_composite_spirv`] marcher: one invocation
 /// per 8×8 tile cone-traces the frozen `field_distance` and emits a [`TileBound`] (the
-/// host mirror is [`golden_tile_bound`]). It is bound to the P4b vocabulary set —
+/// host mirror is `golden_tile_bound`). It is bound to the P4b vocabulary set —
 /// binding 0 a read-only `StructuredBuffer<uint>` edit-list, binding 1 a
 /// `Texture2D<float>` SAMPLED depth, binding 6 a `RWStructuredBuffer<TileBound>` output,
 /// binding 5 the UNIFORM camera block — and dispatched 1D over `tiles_w * tiles_h`
@@ -925,6 +1988,21 @@ pub fn cluster_cull_spirv() -> &'static [u32] {
 #[inline]
 pub fn sdf_tile_cull_spirv() -> &'static [u32] {
     SDF_TILE_CULL_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R3b: the `viewt_from_depth` gViewT-producer SPIR-V as
+/// a `u32` word stream. See [`VIEWT_FROM_DEPTH_SPV`]'s doc.
+#[inline]
+pub fn viewt_from_depth_spirv() -> &'static [u32] {
+    VIEWT_FROM_DEPTH_SPV.as_words()
+}
+
+/// TAA-under-VB: the `viewt_from_depth_rz` gViewT-producer SPIR-V (the reverse-Z sibling for
+/// the `VisibilityBuffer × Mesh` path) as a `u32` word stream. See
+/// [`VIEWT_FROM_DEPTH_RZ_SPV`]'s doc.
+#[inline]
+pub fn viewt_from_depth_rz_spirv() -> &'static [u32] {
+    VIEWT_FROM_DEPTH_RZ_SPV.as_words()
 }
 
 /// The committed CSM Increment-1b Rung-A cascade DEPTH-PASS vertex SPIR-V as a `u32` word
@@ -997,6 +2075,243 @@ pub fn gbuffer_mrt_fs_spirv() -> &'static [u32] {
     GBUFFER_MRT_FS_SPV.as_words()
 }
 
+/// Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh raster VERTEX SPIR-V as a
+/// `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Paired with
+/// [`forward_opaque_fs_spirv`] in [`VulkanContext::create_graphics_pipeline_forward`](crate::device::VulkanContext::create_graphics_pipeline_forward).
+#[inline]
+pub fn forward_opaque_vs_spirv() -> &'static [u32] {
+    FORWARD_OPAQUE_VS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh raster FRAGMENT SPIR-V as a
+/// `u32` word stream. Paired with [`forward_opaque_vs_spirv`].
+#[inline]
+pub fn forward_opaque_fs_spirv() -> &'static [u32] {
+    FORWARD_OPAQUE_FS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R4b-b (code-review follow-up): the Forward v1 sky
+/// background VERTEX SPIR-V as a `u32` word stream. Paired with [`forward_sky_fs_spirv`].
+#[inline]
+pub fn forward_sky_vs_spirv() -> &'static [u32] {
+    FORWARD_SKY_VS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R4b-b (code-review follow-up): the Forward v1 sky
+/// background FRAGMENT SPIR-V as a `u32` word stream. Paired with [`forward_sky_vs_spirv`].
+#[inline]
+pub fn forward_sky_fs_spirv() -> &'static [u32] {
+    FORWARD_SKY_FS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 mesh id-raster VERTEX
+/// SPIR-V as a `u32` word stream. Paired with [`vb_raster_fs_spirv`].
+#[inline]
+pub fn vb_raster_vs_spirv() -> &'static [u32] {
+    VB_RASTER_VS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 mesh id-raster FRAGMENT
+/// SPIR-V as a `u32` word stream. Paired with [`vb_raster_vs_spirv`].
+#[inline]
+pub fn vb_raster_fs_spirv() -> &'static [u32] {
+    VB_RASTER_FS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 FUSED resolve compute
+/// SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+#[inline]
+pub fn vb_resolve_spirv() -> &'static [u32] {
+    VB_RESOLVE_SPV.as_words()
+}
+
+/// VB-SV0 DP1: the dedicated SDF-on-mesh shadow + contact-AO prepass SPIR-V as a `u32` word
+/// stream, ready for [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+#[inline]
+pub fn sdf_mesh_shadow_spirv() -> &'static [u32] {
+    SDF_MESH_SHADOW_SPV.as_words()
+}
+
+/// VB-P2 classification plan, rung P2a: the `count` classify compute SPIR-V as a `u32` word
+/// stream, ready for [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+#[inline]
+pub fn vb_classify_count_spirv() -> &'static [u32] {
+    VB_CLASSIFY_COUNT_SPV.as_words()
+}
+
+/// VB-P2 classification plan, rung P2a: the `scan` classify compute SPIR-V as a `u32` word
+/// stream.
+#[inline]
+pub fn vb_classify_scan_spirv() -> &'static [u32] {
+    VB_CLASSIFY_SCAN_SPV.as_words()
+}
+
+/// VB-P2 classification plan, rung P2a: the `scatter` classify compute SPIR-V as a `u32` word
+/// stream.
+#[inline]
+pub fn vb_classify_scatter_spirv() -> &'static [u32] {
+    VB_CLASSIFY_SCATTER_SPV.as_words()
+}
+
+/// VB-P2 classification plan, rung P2a: the `vb_shade` material-classified shading compute
+/// SPIR-V as a `u32` word stream.
+#[inline]
+pub fn vb_shade_spirv() -> &'static [u32] {
+    VB_SHADE_SPV.as_words()
+}
+
+/// Textured-PBR rung TV0: the `vb_shade` TEXTURED-variant shading compute SPIR-V as a `u32`
+/// word stream.
+#[inline]
+pub fn vb_shade_tex_spirv() -> &'static [u32] {
+    VB_SHADE_TEX_SPV.as_words()
+}
+
+/// VB-P1a/P1b: the `vb_resolve` FROXEL-variant resolve compute SPIR-V as a `u32` word
+/// stream. LOADED since VB-P1b — see [`VB_RESOLVE_FROXEL_SPV`]'s doc.
+#[inline]
+pub fn vb_resolve_froxel_spirv() -> &'static [u32] {
+    VB_RESOLVE_FROXEL_SPV.as_words()
+}
+
+/// VB-P1a/P1b: the `vb_shade` FROXEL-variant shading compute SPIR-V as a `u32` word
+/// stream. LOADED since VB-P1b — see [`VB_RESOLVE_FROXEL_SPV`]'s doc.
+#[inline]
+pub fn vb_shade_froxel_spirv() -> &'static [u32] {
+    VB_SHADE_FROXEL_SPV.as_words()
+}
+
+/// VB-P1a/P1c: the `vb_shade` TEXTURED+FROXEL-variant shading compute SPIR-V as a
+/// `u32` word stream. LOADED since VB-P1b — see [`VB_RESOLVE_FROXEL_SPV`]'s doc.
+#[inline]
+pub fn vb_shade_tex_froxel_spirv() -> &'static [u32] {
+    VB_SHADE_TEX_FROXEL_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS VERTEX
+/// SPIR-V as a `u32` word stream. Paired with [`depth_prepass_fs_spirv`] in
+/// [`VulkanContext::create_graphics_pipeline_forward_prepass`](crate::device::VulkanContext::create_graphics_pipeline_forward_prepass).
+#[inline]
+pub fn depth_prepass_vs_spirv() -> &'static [u32] {
+    DEPTH_PREPASS_VS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS FRAGMENT
+/// SPIR-V (an empty entry point) as a `u32` word stream. Paired with [`depth_prepass_vs_spirv`].
+#[inline]
+pub fn depth_prepass_fs_spirv() -> &'static [u32] {
+    DEPTH_PREPASS_FS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the `forward_opaque` FROXEL
+/// FRAGMENT SPIR-V as a `u32` word stream. Paired with [`forward_opaque_vs_spirv`] (the SAME
+/// vertex shader — only the fragment shines through a different `#ifdef FROXEL` compile) in
+/// [`VulkanContext::create_graphics_pipeline_forward_plus`](crate::device::VulkanContext::create_graphics_pipeline_forward_plus).
+#[inline]
+pub fn forward_opaque_froxel_fs_spirv() -> &'static [u32] {
+    FORWARD_OPAQUE_FROXEL_FS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R-SDFFWD: the SDF forward-march `HAS_MESH` compute
+/// SPIR-V as a `u32` word stream. Paired with [`sdf_forward_march_sdfonly_spirv`].
+#[inline]
+pub fn sdf_forward_march_spirv() -> &'static [u32] {
+    SDF_FORWARD_MARCH_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R-SDFFWD: the SDF forward-march mesh-less compute
+/// SPIR-V as a `u32` word stream. Paired with [`sdf_forward_march_spirv`].
+#[inline]
+pub fn sdf_forward_march_sdfonly_spirv() -> &'static [u32] {
+    SDF_FORWARD_MARCH_SDFONLY_SPV.as_words()
+}
+
+/// TAA-under-VB: the SDF forward-march `HAS_MESH + VIEWT` compute SPIR-V as a `u32` word
+/// stream (the gViewT-producing sibling of [`sdf_forward_march_spirv`]).
+#[inline]
+pub fn sdf_forward_march_viewt_spirv() -> &'static [u32] {
+    SDF_FORWARD_MARCH_VIEWT_SPV.as_words()
+}
+
+/// TAA-under-VB: the SDF forward-march mesh-less `VIEWT` compute SPIR-V as a `u32` word
+/// stream (the gViewT-producing sibling of [`sdf_forward_march_sdfonly_spirv`]).
+#[inline]
+pub fn sdf_forward_march_sdfonly_viewt_spirv() -> &'static [u32] {
+    SDF_FORWARD_MARCH_SDFONLY_VIEWT_SPV.as_words()
+}
+
+/// Rung R9b: the `vb_geo` thin-aux geometry compute SPIR-V as a `u32` word stream.
+#[inline]
+pub fn vb_geo_spirv() -> &'static [u32] {
+    VB_GEO_SPV.as_words()
+}
+
+/// VB-SV0 DP6b: the `-D VB_SV0_TERM=1` `vb_geo` sibling as a `u32` word stream — the consolidated
+/// SDF-on-mesh term producer. See [`VB_GEO_SV0_SPV`] for the added `gSdfTerm`/`Buf` bindings and
+/// for why it is a separate module rather than a runtime branch.
+#[inline]
+pub fn vb_geo_sv0_spirv() -> &'static [u32] {
+    VB_GEO_SV0_SPV.as_words()
+}
+
+/// Rung R9b: the `vb_shade_split` lit-producer compute SPIR-V as a `u32` word stream.
+#[inline]
+pub fn vb_shade_split_spirv() -> &'static [u32] {
+    VB_SHADE_SPLIT_SPV.as_words()
+}
+
+/// Rung R9b: the `-D TEXTURED=1` `vb_shade_split` sibling as a `u32` word stream.
+#[inline]
+pub fn vb_shade_split_tex_spirv() -> &'static [u32] {
+    VB_SHADE_SPLIT_TEX_SPV.as_words()
+}
+
+/// Rung R9d: the VB split's dedicated hardware shadow-vis gather SPIR-V as a `u32` word stream.
+/// See [`VB_SHADOW_VIS_SPV`] for the binding layout.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn vb_shadow_vis_spirv() -> &'static [u32] {
+    VB_SHADOW_VIS_SPV.as_words()
+}
+
+/// Rung R9d: the `-D MOTION=1` `vb_geo` sibling as a `u32` word stream. See [`VB_GEO_MV_SPV`]
+/// for the added `motion_vec`/`MotionCam` bindings.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn vb_geo_mv_spirv() -> &'static [u32] {
+    VB_GEO_MV_SPV.as_words()
+}
+
+/// Rung R9d: the `-D HWRT=1` `vb_shade_split` sibling as a `u32` word stream — reads the denoised
+/// `gShadowVis` instead of a software shadow term. See [`VB_SHADE_SPLIT_HWRT_SPV`].
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn vb_shade_split_hwrt_spirv() -> &'static [u32] {
+    VB_SHADE_SPLIT_HWRT_SPV.as_words()
+}
+
+/// Rung R9d: the `-D TEXTURED=1 -D HWRT=1` `vb_shade_split` sibling as a `u32` word stream. See
+/// [`VB_SHADE_SPLIT_TEX_HWRT_SPV`].
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn vb_shade_split_tex_hwrt_spirv() -> &'static [u32] {
+    VB_SHADE_SPLIT_TEX_HWRT_SPV.as_words()
+}
+
+/// Rung R9b: the `-D VB_THIN=1` SSAO gather variants, indexed by the SSAO quality variant
+/// index (`0` = Low, `1` = Medium, `2` = High — the SAME index `ResolvedSsao::variant`
+/// selects with).
+#[inline]
+pub fn sdf_ssao_vb_spirv(variant: usize) -> &'static [u32] {
+    match variant {
+        0 => SDF_SSAO_VB_LOW_SPV.as_words(),
+        1 => SDF_SSAO_VB_MEDIUM_SPV.as_words(),
+        _ => SDF_SSAO_VB_HIGH_SPV.as_words(),
+    }
+}
+
 /// The Rung-3b MOTION_VECTORS-variant mesh-MRT gbuffer VERTEX SPIR-V as a `u32` word stream.
 /// Bound into the 4-attachment MV raster pipeline (3× `R8G8B8A8_UNORM` + `motion_vec`
 /// `R16G16_SFLOAT`, `D32Sfloat` depth) with the 3-binding instance-MV set (instances @0,
@@ -1014,6 +2329,65 @@ pub fn gbuffer_mrt_mv_vs_spirv() -> &'static [u32] {
 #[inline]
 pub fn gbuffer_mrt_mv_fs_spirv() -> &'static [u32] {
     GBUFFER_MRT_MV_FS_SPV.as_words()
+}
+
+/// Asset-streaming plan F8 PER_INSTANCE_MATERIAL-variant mesh-MRT gbuffer VERTEX SPIR-V as a
+/// `u32` word stream. Bound into the PM raster pipeline (the base 3-attachment layout) with the
+/// 2-binding instance-material set (instances @0, `instance_materials` @1) + the 88-byte VERTEX
+/// push. Paired with [`gbuffer_mrt_pm_fs_spirv`]; selected only on a frame with a non-default
+/// material. NOT `#[cfg(feature = "hwrt")]` — materials are device-agnostic.
+#[inline]
+pub fn gbuffer_mrt_pm_vs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_PM_VS_SPV.as_words()
+}
+
+/// Asset-streaming plan F8 PER_INSTANCE_MATERIAL-variant mesh-MRT gbuffer FRAGMENT SPIR-V as a
+/// `u32` word stream. Paired with [`gbuffer_mrt_pm_vs_spirv`]; packs the real per-instance
+/// material id into `gNormal.BA`.
+#[inline]
+pub fn gbuffer_mrt_pm_fs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_PM_FS_SPV.as_words()
+}
+
+/// F8-mv combined MOTION_VECTORS + PER_INSTANCE_MATERIAL mesh-MRT gbuffer VERTEX SPIR-V as a
+/// `u32` word stream. Bound into the 4-attachment mvpm raster pipeline with the 4-binding
+/// set-0 layout (instances @0, prev_instances @1, `MotionCam` @2, instance_materials @3, all
+/// VERTEX) + the 88-byte VERTEX push. Paired with [`gbuffer_mrt_mvpm_fs_spirv`]; selected only
+/// when temporal denoise AND a non-default material are both active this frame.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn gbuffer_mrt_mvpm_vs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_MVPM_VS_SPV.as_words()
+}
+
+/// F8-mv combined MOTION_VECTORS + PER_INSTANCE_MATERIAL mesh-MRT gbuffer FRAGMENT SPIR-V as a
+/// `u32` word stream. Paired with [`gbuffer_mrt_mvpm_vs_spirv`]; writes the 4th MRT
+/// `motion_vec` (`Δuv`) AND sources `gAlbedo`/`gNormal.BA` from the per-instance material.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn gbuffer_mrt_mvpm_fs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_MVPM_FS_SPV.as_words()
+}
+
+/// Textured-PBR rung T6c TEXTURED-variant mesh-MRT gbuffer VERTEX SPIR-V as a `u32` word
+/// stream. Bound into the 2-set TEXTURED raster pipeline (set 0 = the `PerInstanceMaterialTex`
+/// layout, VERTEX; set 1 = the bindless texture-array set, FRAGMENT) with the widened 64-byte
+/// `MESH_VERTEX_STRIDE` vertex layout. Paired with [`gbuffer_mrt_tex_fs_spirv`]; selected only
+/// on a frame with at least one textured material AND no active temporal denoise (TEXTURED is
+/// never compiled with MOTION_VECTORS — T6c plan Decision D4). NOT `#[cfg(feature = "hwrt")]`
+/// — materials/textures are device-agnostic.
+#[inline]
+pub fn gbuffer_mrt_tex_vs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_TEX_VS_SPV.as_words()
+}
+
+/// Textured-PBR rung T6c TEXTURED-variant mesh-MRT gbuffer FRAGMENT SPIR-V as a `u32` word
+/// stream. Paired with [`gbuffer_mrt_tex_vs_spirv`]; samples the bindless texture array for
+/// gAlbedo/gNormal (tangent-space normal mapping) and writes the 4th MRT `pbr` (metallic/
+/// roughness/AO/emissive) the deferred software resolve reads under the TEXTURED flag.
+#[inline]
+pub fn gbuffer_mrt_tex_fs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_TEX_FS_SPV.as_words()
 }
 
 /// The committed fullscreen-sample (present-blit) vertex SPIR-V as a `u32` word stream,
@@ -1036,6 +2410,54 @@ pub fn fullscreen_sample_fs_spirv() -> &'static [u32] {
     FULLSCREEN_SAMPLE_FS_SPV.as_words()
 }
 
+/// The committed FXAA 3.11 compact fragment SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Paired with [`fullscreen_sample_vs_spirv`] in the FXAA post-process pipeline
+/// (`color_formats[0]` == `aa_out`'s format, NOT the swapchain format — see
+/// [`AaActivation`](crate::present::AaActivation)).
+#[inline]
+pub fn fxaa_fs_spirv() -> &'static [u32] {
+    FXAA_FS_SPV.as_words()
+}
+
+/// The committed SSAA 2× downsample fragment SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Paired with [`fullscreen_sample_vs_spirv`] in the SSAA downsample pipeline
+/// (`color_formats[0]` == `aa_out`'s format; the SAME `present_layout` FXAA/present reuse —
+/// see [`SsaaActivation`](crate::present::SsaaActivation)).
+#[inline]
+pub fn ssaa_downsample_fs_spirv() -> &'static [u32] {
+    SSAA_DOWNSAMPLE_FS_SPV.as_words()
+}
+
+/// The committed SMAA 1x pass-1 (edge detection) fragment SPIR-V as a `u32` word stream,
+/// ready for [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+/// Paired with [`fullscreen_sample_vs_spirv`] in the SMAA edge pipeline.
+#[inline]
+pub fn smaa_edge_fs_spirv() -> &'static [u32] {
+    SMAA_EDGE_FS_SPV.as_words()
+}
+
+/// The committed SMAA 1x pass-2 (blending-weight calculation) fragment SPIR-V as a `u32`
+/// word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Paired
+/// with [`fullscreen_sample_vs_spirv`] in the SMAA weight pipeline.
+#[inline]
+pub fn smaa_weight_fs_spirv() -> &'static [u32] {
+    SMAA_WEIGHT_FS_SPV.as_words()
+}
+
+/// The committed SMAA 1x pass-3 (neighborhood blending) fragment SPIR-V as a `u32` word
+/// stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Paired
+/// with [`fullscreen_sample_vs_spirv`] in the SMAA blend pipeline.
+#[inline]
+pub fn smaa_blend_fs_spirv() -> &'static [u32] {
+    SMAA_BLEND_FS_SPV.as_words()
+}
+
 /// The committed Render P7 SSAO (HBAO-lite) SPIR-V as a `u32` word stream, ready for
 /// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
 ///
@@ -1047,7 +2469,7 @@ pub fn fullscreen_sample_fs_spirv() -> &'static [u32] {
 /// `R8_UNORM` `ssao` lane the deferred resolve combines under `ssao_mode != 0`. Dispatched 1D over
 /// the SAME pixel count as the marcher/resolve, BETWEEN the marcher→resolve store-to-load barrier and
 /// the resolve (with a COMPUTE→COMPUTE barrier on `ssao` so the resolve's `gSsao.Load` sees the
-/// store). The host mirror is [`golden_ssao_attributes`].
+/// store). The host mirror is `golden_ssao_attributes`.
 #[inline]
 pub fn sdf_ssao_spirv() -> &'static [u32] {
     sdf_ssao_spirv_variant(SSAO_QUALITY_MEDIUM)
@@ -1060,7 +2482,7 @@ pub fn sdf_ssao_spirv() -> &'static [u32] {
 /// All three variants share the SAME 5-binding SSAO interface (so one bind-group layout drives any
 /// of them); only the BAKED `static const` tap budget (the `[unroll]` loop counts) differs — the
 /// host selects a variant by binding its pipeline (Mechanism C, ZERO per-pixel runtime cost). Feed
-/// the matching `SSAO_PARAMS[q]` row to [`golden_ssao_attributes`] for the bit-comparable host oracle.
+/// the matching `SSAO_PARAMS[q]` row to `golden_ssao_attributes` for the bit-comparable host oracle.
 ///
 /// # Panics
 ///
@@ -1330,7 +2752,7 @@ pub const SSAO_VIEWT_BG: f32 = 1.0e30;
 /// Render P7-Q2 — ONE SSAO quality preset, the host-side mirror of
 /// `boyko_shaderdsl::ssao::SsaoParams` (the lib cannot import the eDSL: `boyko_shaderdsl` is a
 /// DEV-dependency only, so this struct re-states the same five scalars the pre-compiled `.spv`
-/// variants bake). The host AO oracle [`golden_ssao_attributes`] reads these IN PLACE OF the module
+/// variants bake). The host AO oracle `golden_ssao_attributes` reads these IN PLACE OF the module
 /// `SSAO_*` consts, so feeding [`SSAO_PARAMS`]`[q]` reproduces variant `q`'s GPU result bit-for-bit.
 ///
 /// The module `SSAO_RADIUS`/`SSAO_SLICES`/`SSAO_STEPS`/`SSAO_STRENGTH`/`SSAO_EPS` consts remain the
@@ -1377,8 +2799,10 @@ pub const SSAO_PARAMS: [SsaoParams; 3] = [
         strength: SSAO_STRENGTH,
         eps: SSAO_EPS,
     },
-    // High — the widest tap budget (3 slices × 6 steps × 2 = 36 taps).
-    SsaoParams { radius: 0.5, slices: 3, steps: 6, strength: 2.5, eps: 1.0e-4 },
+    // High — the widest tap budget (8 REAL evenly-spaced slices × 6 steps × 2 = 96 taps; Change B
+    // owner-escalated — 8 divides SSAO_ROT_N(16) for even stride-2 spacing; variance of the slice
+    // mean falls ~1/N, attacking the contact-shadow noise at the source).
+    SsaoParams { radius: 0.5, slices: 8, steps: 6, strength: 2.5, eps: 1.0e-4 },
 ];
 
 /// The LOW SSAO quality variant index into [`SSAO_PARAMS`] / [`sdf_ssao_spirv_variant`].
@@ -1394,13 +2818,18 @@ pub const SSAO_RADIUS_PIX_MIN: f32 = 2.0;
 /// The perspective screen-pixel radius clamp maximum (`SSAO_RADIUS_PIX_MAX`) — keeps taps
 /// inside a sane neighbourhood.
 pub const SSAO_RADIUS_PIX_MAX: f32 = 24.0;
-/// The integer-hash rotation table size (`SSAO_ROT_N`); the per-pixel slot is `hash &
-/// (SSAO_ROT_N - 1)` (a power-of-two mask == `% N`; NO float `fract`/`floor`, so the host and
-/// GPU pick the SAME rotation). Q1 widened this 4 -> 16 to decorrelate the angular banding.
-pub const SSAO_ROT_N: u32 = 16;
-/// The pre-baked `(cos, sin)` rotation table for the 16 evenly-spaced angles over [0, π):
-/// angle k = k·(π/16) for k = 0..15 (degrees 0, 11.25, 22.5, …, 168.75), BYTE-IDENTICAL to the
-/// shader's `SSAO_ROT[16]` so the host picks the same slot.
+/// The rotation table size (`SSAO_ROT_N`); the per-pixel slot is `(r2 * SSAO_ROT_N) >> 24`
+/// (an INTEGER scale of the Q0.24 R2 fraction; NO float `fract`/`floor`/div, so the host and
+/// GPU pick the SAME rotation bit-exactly). Widened 16 -> 64: an even-slice axis set has only
+/// `SSAO_ROT_N / SSAO_SLICES` EFFECTIVE dither classes (rotating the set by its own slice
+/// spacing maps it onto itself) — 16 entries left just 2 classes at 8 slices, whose coherent
+/// Hilbert+R2 layout read as un-blurrable streaks; 64 keeps >= 8 classes at a 2.8125° step.
+pub const SSAO_ROT_N: u32 = 64;
+/// The pre-baked `(cos, sin)` rotation table for the 64 evenly-spaced angles over [0, π):
+/// angle k = k·(π/64) for k = 0..63 (a 2.8125° step), BYTE-IDENTICAL to the shader's
+/// `SSAO_ROT[64]` so the host picks the same slot. Also the per-slice BASE axes (Change A —
+/// `SSAO_ROT[sl * (SSAO_ROT_N / slices)]`; the strided entries are bit-identical to the
+/// retired 16-entry table's).
 //
 // These literals are LOAD-BEARING: each must round to the EXACT `f32` the shader's
 // `float2(...)` literal carries (the integer-hash rotation slot must agree bit-for-bit
@@ -1409,37 +2838,106 @@ pub const SSAO_ROT_N: u32 = 16;
 // or truncate digits — either DIVERGES the host literal from the frozen shader table, the
 // exact drift this oracle exists to prevent. The `ssao_edsl_sync` cross-check pins the math.
 #[allow(clippy::approx_constant, clippy::excessive_precision)]
-pub const SSAO_ROT: [(f32, f32); 16] = [
+pub const SSAO_ROT: [(f32, f32); 64] = [
     (1.00000000, 0.00000000),
+    (0.99879545, 0.04906768),
+    (0.99518472, 0.09801714),
+    (0.98917651, 0.14673047),
     (0.98078525, 0.19509032),
+    (0.97003126, 0.24298018),
+    (0.95694035, 0.29028466),
+    (0.94154406, 0.33688986),
     (0.92387950, 0.38268343),
+    (0.90398932, 0.42755508),
+    (0.88192129, 0.47139674),
+    (0.85772860, 0.51410276),
     (0.83146960, 0.55557024),
+    (0.80320752, 0.59569931),
+    (0.77301043, 0.63439327),
+    (0.74095112, 0.67155898),
     (0.70710677, 0.70710677),
+    (0.67155898, 0.74095112),
+    (0.63439327, 0.77301043),
+    (0.59569931, 0.80320752),
     (0.55557024, 0.83146960),
+    (0.51410276, 0.85772860),
+    (0.47139674, 0.88192129),
+    (0.42755508, 0.90398932),
     (0.38268343, 0.92387950),
+    (0.33688986, 0.94154406),
+    (0.29028466, 0.95694035),
+    (0.24298018, 0.97003126),
     (0.19509032, 0.98078525),
+    (0.14673047, 0.98917651),
+    (0.09801714, 0.99518472),
+    (0.04906768, 0.99879545),
     (0.00000000, 1.00000000),
+    (-0.04906768, 0.99879545),
+    (-0.09801714, 0.99518472),
+    (-0.14673047, 0.98917651),
     (-0.19509032, 0.98078525),
+    (-0.24298018, 0.97003126),
+    (-0.29028466, 0.95694035),
+    (-0.33688986, 0.94154406),
     (-0.38268343, 0.92387950),
+    (-0.42755508, 0.90398932),
+    (-0.47139674, 0.88192129),
+    (-0.51410276, 0.85772860),
     (-0.55557024, 0.83146960),
+    (-0.59569931, 0.80320752),
+    (-0.63439327, 0.77301043),
+    (-0.67155898, 0.74095112),
     (-0.70710677, 0.70710677),
+    (-0.74095112, 0.67155898),
+    (-0.77301043, 0.63439327),
+    (-0.80320752, 0.59569931),
     (-0.83146960, 0.55557024),
+    (-0.85772860, 0.51410276),
+    (-0.88192129, 0.47139674),
+    (-0.90398932, 0.42755508),
     (-0.92387950, 0.38268343),
+    (-0.94154406, 0.33688986),
+    (-0.95694035, 0.29028466),
+    (-0.97003126, 0.24298018),
     (-0.98078525, 0.19509032),
+    (-0.98917651, 0.14673047),
+    (-0.99518472, 0.09801714),
+    (-0.99879545, 0.04906768),
 ];
 
-/// Render P7 POLISH — the SSAO depth-aware box-blur half-kernel radius (`SSAO_BLUR_R` in the
-/// resolve). `R == 3` is a 7×7 box: the inline blur of `gSsao` INSIDE the resolve's `ssao_mode
-/// != 0` combine that smooths the discrete-step HBAO RINGS. The host mirror [`golden_ssao_blur`]
-/// uses the SAME radius so the GPU and host averages agree texel-for-texel.
-pub const SSAO_BLUR_R: i32 = 3;
-/// Render P7 POLISH — the SSAO blur's bilateral DEPTH gate (`SSAO_BLUR_DEPTH_TOL` in the
-/// resolve), in `view_t` (world-distance) units. A neighbour tap is averaged in ONLY when
-/// `|tap.view_t - center.view_t| <= SSAO_BLUR_DEPTH_TOL`; this keeps the blur WITHIN a flat
-/// surface (the mesh floor has near-constant `view_t`) while REJECTING the mesh↔SDF silhouette
-/// (where `view_t` jumps far more than the tol), so AO never bleeds across the edge. `0.1` was
-/// chosen to sit comfortably inside that band. Mirrored bit-for-bit by [`golden_ssao_blur`].
-pub const SSAO_BLUR_DEPTH_TOL: f32 = 0.1;
+/// The Dammertz 5-tap B3-spline weights for the SSAO à-trous kernel (`SSAO_ATROUS_H` in
+/// `ssao_atrous.comp.hlsl`), for offsets `-2..=2`. EXACT `f32` literals. Equals
+/// `boyko_shaderdsl::ssao::SSAO_ATROUS_H` and `shadow_atrous.comp.hlsl`'s `ATROUS_H`.
+pub const SSAO_ATROUS_H: [f32; 5] = [0.0625, 0.25, 0.375, 0.25, 0.0625];
+/// The SSAO à-trous per-pass normalization guard (`SSAO_ATROUS_W_EPS` in
+/// `ssao_atrous.comp.hlsl`). Equals `boyko_shaderdsl::ssao::SSAO_ATROUS_W_EPS`.
+pub const SSAO_ATROUS_W_EPS: f32 = 1.0e-4;
+/// The SSAO à-trous plane-fit RESIDUAL depth gate (`SSAO_BLUR_DEPTH_TOL` in
+/// `ssao_atrous.comp.hlsl`), in linear view-Z (world-distance) units. A neighbour tap is
+/// averaged in ONLY when `|residual| <= SSAO_BLUR_DEPTH_TOL` (the plane-fit residual, not the
+/// raw difference); this keeps the filter WITHIN a flat/sloped surface while REJECTING the
+/// mesh↔SDF silhouette. Equals `boyko_shaderdsl::ssao::SSAO_BLUR_DEPTH_TOL`; mirrored bit-for-bit
+/// by `golden_ssao_atrous`.
+pub const SSAO_BLUR_DEPTH_TOL: f32 = 1.0;
+/// The SSAO à-trous per-pass DEPTH falloff scale (`SSAO_BLUR_DEPTH_SIGMA` in
+/// `ssao_atrous.comp.hlsl`), in linear view-Z units: the per-tap depth weight is
+/// `clamp01(1 - (dz*dz) / (SSAO_BLUR_DEPTH_SIGMA * SSAO_BLUR_DEPTH_SIGMA))`, softening the
+/// depth agreement WITHIN the hard [`SSAO_BLUR_DEPTH_TOL`] gate. Equals
+/// `boyko_shaderdsl::ssao::SSAO_BLUR_DEPTH_SIGMA`; mirrored bit-for-bit by
+/// `golden_ssao_atrous`.
+pub const SSAO_BLUR_DEPTH_SIGMA: f32 = 1.0;
+/// The SSAO à-trous slope-aware depth-gate gradient clamp (`SSAO_BLUR_GRAD_CLAMP` in
+/// `ssao_atrous.comp.hlsl`): each pass predicts a tap's linear-Z from the center's clamped local
+/// gradient (min-magnitude one-sided differences at the fixed ±1 offset) and gates the
+/// SVGF step-scaled RESIDUAL — the band follows a sloped/curved surface instead of truncating
+/// the kernel, while a silhouette/background step (clamped) still rejects. Equals
+/// `boyko_shaderdsl::ssao::SSAO_BLUR_GRAD_CLAMP`; mirrored bit-for-bit by `golden_ssao_atrous`.
+pub const SSAO_BLUR_GRAD_CLAMP: f32 = 0.1;
+
+/// The SSAO à-trous push-constant size (`{ uint step; }`, `ssao_atrous.comp.hlsl`'s
+/// `SsaoAtrousPush`) — 4 bytes, the single-`u32` hole-`step` compute push range (mirrors
+/// `shadow_atrous.comp.hlsl`'s own 4-byte `step` push).
+pub const SSAO_ATROUS_PUSH_BYTES: u32 = 4;
 
 
 /// P6 R1 cap: the maximum EXTRA shadow casters marched per pixel (the dominant-N bound).
@@ -1657,7 +3155,7 @@ pub const MESH_COLOR: [f32; 3] = [0.15, 0.65, 0.25];
 /// raster pass writes a first-class PBR G-buffer (`base = this color`, `n = (0, 0, 1)`,
 /// `mat_id = 0`, `shadow = ao = 1`, `mask = 1`) and the deferred resolve runs FULL
 /// Cook-Torrance on it — exactly like an SDF pixel. The host oracle
-/// [`golden_marcher_attributes`] models that producer with this albedo so the GPU-vs-oracle
+/// `golden_marcher_attributes` models that producer with this albedo so the GPU-vs-oracle
 /// comparison matches mesh pixels too. (The old flat marcher-derived [`MESH_COLOR`] with
 /// `mask = 0` is the pre-P5 behavior; it is retained only for the docs/inline-composite
 /// `golden_composite_pixel_*` oracles that model the marcher's own mesh arm.)
@@ -1725,6 +3223,19 @@ pub const SDF_VIEW_HALF_EXTENT: f32 = SDF_HALF_EXTENT;
 /// `worldZ = CAM_Z - T_MAX` to stored depth `1.0`).
 pub const SDF_TRACE_T_MAX: f32 = SDF_T_MAX;
 
+/// The march step budget every host SDF marcher in this module runs — `sdf_soft_shadow`'s
+/// `[loop]` trip count. Public mirror of the private `SDF_MAX_IT`, in the same shape as
+/// [`SDF_TRACE_T_MAX`] above.
+///
+/// It is `pub` because `tests/sdf_shadow_leaf_oracle.rs`'s layer 5 PINS it against the shipped
+/// shaders' `MAX_IT`, and an integration test is a separate crate. Before that pin the constant
+/// was executed by `goldens::host_soft_shadow_ranged` — the mirror side of that file's layer-3a
+/// bit-exactness — while being held by nothing: MEASURED, doubling it to `256` left every test in
+/// that suite green, because the layer-3a fixture's rays terminate by occluder hit or by
+/// `t > t_max` and never by exhausting the budget, so the truncation point is not observable in
+/// the result.
+pub const SDF_TRACE_MAX_IT: u32 = SDF_MAX_IT;
+
 /// The PERSPECTIVE mesh-depth normalizer (`gbuffer_mrt.fs` encodes `md =
 /// length(eye_rel) / MESH_DEPTH_T_MAX`; the marcher decodes `t_mesh = md *
 /// MESH_DEPTH_T_MAX` on the CAM_PERSPECTIVE arm). DECOUPLED from the marcher's
@@ -1739,7 +3250,7 @@ pub const SDF_TRACE_T_MAX: f32 = SDF_T_MAX;
 pub const MESH_DEPTH_T_MAX: f32 = 64.0;
 
 /// The world-space XY a pixel's orthographic ray passes through (the ray origin's
-/// xy), mirroring the camera reconstruction in [`golden_composite_pixel`]. The
+/// xy), mirroring the camera reconstruction in `golden_composite_pixel`. The
 /// rung-10 test uses this to compute, host-side, exactly which pixels a world-XY
 /// quad covers (so the discriminator texels are picked independent of the GPU).
 #[inline]
@@ -1971,7 +3482,7 @@ impl CoarseMode {
 ///   offset  8 : u32   lighting_flags   bit 0 = A1 shadows, bit 1 = A2 AO; 0 = OFF path
 ///   offset 12 : u32   _pad             aligns `light_dir` to offset 16 (a `float3` lands
 ///                                      on a 16-byte boundary under std430)
-///   offset 16 : [f32;3] light_dir      the directional-light direction (un-normalized)
+///   offset 16 : \[f32;3\] light_dir      the directional-light direction (un-normalized)
 ///   offset 28 : f32   _pad2            tail pad to a 32-byte stride
 ///   total: 32 bytes — a subset of the declared 80-byte COMPUTE push range, so the
 ///   pipeline-layout declaration is unchanged.
@@ -2217,6 +3728,114 @@ impl FineMarcherPush {
     }
 }
 
+/// Multi-paradigm render-path plan, rung R-SDFFWD: `#[repr(C)]` the SDF forward-march compute
+/// pass's OWN dedicated push constant (`shaders/sdf_forward_march.comp.hlsl`) — a NEW pass, not
+/// sharing [`FineMarcherPush`]/[`GBUFFER_MARCHER_PUSH_BYTES`] (this pass has no coarse-cull, no
+/// A2 AO, no MDF; it needs the reverse-Z view-Z decode constants instead). 40 bytes, HLSL
+/// scalar-packed (the const-asserts below pin every offset):
+///
+///   offset  0 : u32     extent_w        render extent width (dispatch bound `idx < w*h`)
+///   offset  4 : u32     extent_h        render extent height
+///   offset  8 : f32     view_z_a        HAS_MESH reverse-Z decode `A` (don't-care w/o HAS_MESH)
+///   offset 12 : f32     view_z_b        HAS_MESH reverse-Z decode `B`
+///   offset 16 : \[f32;3\] light_dir       primary directional light direction (un-normalized)
+///   offset 28 : u32     brick_enabled   M1 empty-skip gate; 0 = OFF (this rung's host default)
+///   offset 32 : u32     brick_trilinear M2 trilinear+cubic gate; 0 = OFF
+///   offset 36 : u32     brick_levels    M4 clip-map level count; 0 = OFF
+///
+/// `view_z_a`/`view_z_b` mirror `boyko_render::view::forward_view_z_from_depth`'s own `A`/`B`
+/// derivation (`A = -near/(far-near)`, `B = near*far/(far-near)`) exactly — the shader's
+/// `view_z = view_z_b / (depth - view_z_a)` is that function's algebraic inverse, ported to HLSL
+/// so the compute pass does not need `near`/`far` themselves.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SdfForwardMarchPush {
+    /// Render extent width — the dispatch bounds `idx < extent_w * extent_h`.
+    pub extent_w: u32,
+    /// Render extent height.
+    pub extent_h: u32,
+    /// HAS_MESH reverse-Z decode `A` (don't-care on the mesh-less SDFONLY variant).
+    pub view_z_a: f32,
+    /// HAS_MESH reverse-Z decode `B`.
+    pub view_z_b: f32,
+    /// The primary directional light direction — UNREAD by `sdf_forward_march`, which takes the sun
+    /// from the light table itself (its `primary_dir_seen` loop). Kept only so the push layout and
+    /// the four `.spv` variants stay stable; removing it is a refactor.
+    pub light_dir: [f32; 3],
+    /// M1 empty-space-skip gate: non-zero reads the pointer-grid bindings. `0` = OFF (the
+    /// analytic-only march — this rung's host default; see this struct's doc).
+    pub brick_enabled: u32,
+    /// M2 trilinear+JCGT-cubic SURFACE-brick gate. `0` = OFF (this rung's host default).
+    pub brick_trilinear: u32,
+    /// M4 clip-map LEVEL COUNT. `0` = OFF (no level is ever selected — this rung's host
+    /// default).
+    pub brick_levels: u32,
+}
+
+/// Byte size of [`SdfForwardMarchPush`] — the SDF forward-march pass's COMPUTE push range.
+pub const SDF_FORWARD_MARCH_PUSH_BYTES: u32 = core::mem::size_of::<SdfForwardMarchPush>() as u32;
+
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, extent_w) == 0);
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, extent_h) == 4);
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, view_z_a) == 8);
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, view_z_b) == 12);
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, light_dir) == 16);
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, brick_enabled) == 28);
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, brick_trilinear) == 32);
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, brick_levels) == 36);
+const _: () = assert!(SDF_FORWARD_MARCH_PUSH_BYTES == 40, "SdfForwardMarchPush must be 40 bytes");
+
+impl SdfForwardMarchPush {
+    /// Builds the push for a mesh-less (`GeometryLegs::Sdf`) dispatch: `view_z_a`/`view_z_b`
+    /// are don't-care (the SDFONLY variant never reads them). The brick/clip-map acceleration
+    /// stays OFF (`brick_enabled = brick_trilinear = 0`, `brick_levels = 0`) — see this struct's
+    /// doc for why that is a deliberate, precedented 0%-gate rather than a missing feature.
+    #[inline]
+    pub const fn sdf_only(extent_w: u32, extent_h: u32, light_dir: [f32; 3]) -> Self {
+        Self {
+            extent_w,
+            extent_h,
+            view_z_a: 0.0,
+            view_z_b: 0.0,
+            light_dir,
+            brick_enabled: 0,
+            brick_trilinear: 0,
+            brick_levels: 0,
+        }
+    }
+
+    /// Builds the push for a `HAS_MESH` dispatch: `view_z_a`/`view_z_b` are the reverse-Z decode
+    /// constants `boyko_render::view::forward_view_z_from_depth` itself derives from
+    /// `near`/`far` (`A = -near/(far-near)`, `B = near*far/(far-near)`) — the caller passes them
+    /// precomputed so this pass needs no `near`/`far` fields of its own.
+    #[inline]
+    pub const fn has_mesh(extent_w: u32, extent_h: u32, view_z_a: f32, view_z_b: f32, light_dir: [f32; 3]) -> Self {
+        Self {
+            extent_w,
+            extent_h,
+            view_z_a,
+            view_z_b,
+            light_dir,
+            brick_enabled: 0,
+            brick_trilinear: 0,
+            brick_levels: 0,
+        }
+    }
+
+    /// Re-views the push constants as their raw 40-byte slice for `push_constants`.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` / `[f32; 3]` fields (all `Copy`,
+        // every offset + the 40-byte total pinned by the const-asserts above, no uninit padding),
+        // so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern. The
+        // `&self` borrow keeps the struct alive for the slice's lifetime; the slice is read-only
+        // (no aliasing write).
+        unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
+        }
+    }
+}
+
 /// The Lighting-L1 cull push constants (mirrors `cluster_cull.hlsl`'s `ClusterCullPush`): the
 /// exp-Z near/far the froxel-AABB build samples its slice view-z from, plus the per-froxel /
 /// flat-list caps the cull clamp-and-drops at (O2). `#[repr(C)]`, 16 B (`f32, f32, u32, u32`),
@@ -2244,7 +3863,45 @@ const _: () = assert!(core::mem::offset_of!(ClusterCullPush, index_list_cap) == 
 const _: () = assert!(CLUSTER_CULL_PUSH_BYTES == 16, "ClusterCullPush must be 16 bytes");
 
 impl ClusterCullPush {
+    /// The PRE-ARM placeholder: an all-zero push, held by a `GBufferScene` whose froxel cull
+    /// has not been built yet (`GpuSceneBundles::build_froxel_light_cull` overwrites it with a
+    /// real one when the arm bit is set).
+    ///
+    /// It deliberately BYPASSES [`Self::new`]'s exp-Z validation, and that is the honest
+    /// spelling rather than a loophole: `z_near == z_far == 0` is not a cull configuration at
+    /// all, it is the "no cull exists" sentinel, and it is never pushed — the record site
+    /// dispatches nothing while `cluster_cull_pipeline` is `None`. Routing it through `new`
+    /// would have forced that constructor's check to accept the one degenerate range it most
+    /// needs to reject.
+    pub const UNARMED: Self =
+        Self { z_near: 0.0, z_far: 0.0, max_lights_per_cluster: 0, index_list_cap: 0 };
+
     /// Builds the cull push from the exp-Z near/far + the caps.
+    ///
+    /// # Panics
+    ///
+    /// Asserts `z_far > z_near > 0` **in every build profile**. Until this rung the only such
+    /// check was a `debug_assert!` in a DIFFERENT function ([`ClusterConfig::z_scale`], which
+    /// the push path never calls), i.e. it vanished in release — which is where the goldens and
+    /// production run.
+    ///
+    /// **What an unvalidated range did.** `cluster_cull.hlsl`'s slice bound is
+    /// `slice_view_z(k) = z_near * pow(z_far / z_near, k / dim_z)`. At `z_near == 0` that is
+    /// `0 * pow(+inf, k/dim_z)`, i.e. `0 * 1 == 0` at `k == 0` but `0 * inf == NaN` for every
+    /// `k > 0`; the NaN flows into `view_z_to_t` and then into `expand_aabb`, whose `min`/`max`
+    /// are GLSL.std.450 `NMin`/`NMax` and therefore DISCARD it — so the far corners silently
+    /// vanish from the froxel AABB and every slice collapses onto its near plane. With
+    /// `z_far <= z_near` the exp-Z ratio is `<= 1` and the slices run backwards, so the AABB a
+    /// froxel builds is not the volume the resolve's `cluster_z_slice` inverts back to. Both
+    /// are silent wrong-lighting, not crashes — exactly the failure shape a release-visible
+    /// check exists to convert into a loud one.
+    ///
+    /// This is a BOOT-path constructor (once per `build_froxel_light_cull`, never per frame:
+    /// the per-frame record site re-pushes the stored bytes), so the assert is off the hot path
+    /// and Principle 1 is not engaged. The panic is by design — a `ClusterConfig` with a
+    /// degenerate exp-Z range is an authoring error that cannot be rendered correctly, and the
+    /// same function already promotes the `packed_dims` 8-bit contract to a release `assert!`
+    /// at its own arm site for the same reason.
     #[inline]
     pub const fn new(
         z_near: f32,
@@ -2252,6 +3909,11 @@ impl ClusterCullPush {
         max_lights_per_cluster: u32,
         index_list_cap: u32,
     ) -> Self {
+        assert!(
+            z_near > 0.0 && z_far > z_near,
+            "invariant: cluster exp-Z range must satisfy z_far > z_near > 0 (see \
+             ClusterCullPush::new — a degenerate range makes slice_view_z NaN or non-monotonic)"
+        );
         Self { z_near, z_far, max_lights_per_cluster, index_list_cap }
     }
 
@@ -2268,8 +3930,261 @@ impl ClusterCullPush {
     }
 }
 
+/// VB-P1e D11: the hierarchical cull pipeline's COMPUTE push constants — the base
+/// [`ClusterCullPush`] (16 B: `z_near`, `z_far`, `max_lights_per_cluster`, `index_list_cap`)
+/// widened by two BOOT-snapshot words the `-D HIER=1` shader reads instead of re-deriving its
+/// dims/write-bound from the LIVE light-table header (`cluster_cull.hlsl`'s `#ifdef HIER` push
+/// tail). Mirrors `cluster_cull_hier_equiv.rs`'s own test-local copy (H3), now the production
+/// mirror H4 arms — the two are structurally identical (same fields, same offsets).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClusterCullHierPush {
+    /// Exp-Z near plane (slice 0 view-z) — mirrors [`ClusterCullPush::z_near`].
+    pub z_near: f32,
+    /// Exp-Z far plane (slice `dim_z` view-z) — mirrors [`ClusterCullPush::z_far`].
+    pub z_far: f32,
+    /// Per-froxel light-index cap (O2 clamp-and-drop) — mirrors
+    /// [`ClusterCullPush::max_lights_per_cluster`].
+    pub max_lights_per_cluster: u32,
+    /// Flat light-index-list capacity in `u32`s — mirrors [`ClusterCullPush::index_list_cap`].
+    pub index_list_cap: u32,
+    /// BOOT snapshot: `dim_x | dim_y<<8 | dim_z<<16` (the MAPPING the coarse-group thread map
+    /// derives its `(x, y, z)` from) — never the live header's dims lane.
+    pub cluster_dims_packed: u32,
+    /// BOOT `ClusterConfig::cluster_count()` in FULL precision (the WRITE BOUND every
+    /// `ClusterGrid[fi]` write clamps against) — the same binding that sized the buffer.
+    pub cluster_capacity: u32,
+}
 
-/// The camera the extent-aware golden ([`golden_composite_pixel_ex`]) reconstructs a
+/// Byte size of [`ClusterCullHierPush`] — the hierarchical cull pipeline's declared COMPUTE
+/// push range (24 B).
+pub const CLUSTER_CULL_HIER_PUSH_BYTES: u32 = core::mem::size_of::<ClusterCullHierPush>() as u32;
+
+const _: () = assert!(core::mem::offset_of!(ClusterCullHierPush, z_near) == 0);
+const _: () = assert!(core::mem::offset_of!(ClusterCullHierPush, z_far) == 4);
+const _: () = assert!(core::mem::offset_of!(ClusterCullHierPush, max_lights_per_cluster) == 8);
+const _: () = assert!(core::mem::offset_of!(ClusterCullHierPush, index_list_cap) == 12);
+const _: () = assert!(core::mem::offset_of!(ClusterCullHierPush, cluster_dims_packed) == 16);
+const _: () = assert!(core::mem::offset_of!(ClusterCullHierPush, cluster_capacity) == 20);
+const _: () =
+    assert!(CLUSTER_CULL_HIER_PUSH_BYTES == 24, "ClusterCullHierPush must be 24 bytes");
+const _: () = assert!(CLUSTER_CULL_HIER_PUSH_BYTES <= COMPOSITE_PUSH_CONSTANT_BYTES);
+
+impl ClusterCullHierPush {
+    /// Builds the hierarchical-arm push from the base cull parameters + D11's boot snapshot
+    /// (`cluster_dims_packed`, `cluster_capacity` — both minted from the SAME
+    /// `ClusterConfig`/`cluster_count()` binding that sizes the `ClusterGrid` buffer, never
+    /// re-read from the live light-table header).
+    ///
+    /// # Panics
+    ///
+    /// Asserts the SAME release-visible `z_far > z_near > 0` contract as
+    /// [`ClusterCullPush::new`] — the hierarchical arm runs the identical `slice_view_z` in its
+    /// phase-0 AABB build, so it inherits the identical failure. It has no `UNARMED` sibling
+    /// because it is only ever constructed inside the `hier_cull` arm branch, never as a
+    /// placeholder.
+    #[inline]
+    pub const fn new(
+        z_near: f32,
+        z_far: f32,
+        max_lights_per_cluster: u32,
+        index_list_cap: u32,
+        cluster_dims_packed: u32,
+        cluster_capacity: u32,
+    ) -> Self {
+        assert!(
+            z_near > 0.0 && z_far > z_near,
+            "invariant: cluster exp-Z range must satisfy z_far > z_near > 0 (see \
+             ClusterCullPush::new — a degenerate range makes slice_view_z NaN or non-monotonic)"
+        );
+        Self {
+            z_near,
+            z_far,
+            max_lights_per_cluster,
+            index_list_cap,
+            cluster_dims_packed,
+            cluster_capacity,
+        }
+    }
+
+    /// Re-views the push constants as their raw 24-byte slice for `push_constants`.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `f32`/`u32` fields (all `Copy`), every
+        // offset and the 24-byte total pinned by the const-asserts above (no uninit padding),
+        // so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern. The
+        // `&self` borrow keeps the struct alive for the slice's lifetime; the slice is read-only.
+        unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
+        }
+    }
+}
+
+/// Multi-paradigm render-path plan, rung R3b: the `viewt_from_depth` compute push constants
+/// (mirrors `viewt_from_depth.comp.hlsl`'s `ViewtFromDepthPush`). `#[repr(C)]`, 12 B (`u32, u32,
+/// f32`), the offsets pinned by the const-asserts below so a host/shader desync is a build
+/// error (the same discipline as [`ClusterCullPush`]).
+///
+/// `mesh_norm` is the ONLY field this shader's `mesh_norm` selection reads — it is NOT
+/// recomputed in HLSL from `camera_mode` (that would be a THIRD hand-written copy of the
+/// marcher's `mesh_norm` ternary, alongside `sdf_gbuffer_composite.hlsl` and
+/// `sdf_tile_cull.hlsl`). The host caller MUST derive it via
+/// `boyko_render::gbuffer_depth::mesh_view_t_norm` (the single-sourced Rust mirror of that same
+/// ternary, over [`CAM_MODE_PERSPECTIVE`]/[`MESH_DEPTH_T_MAX`]/[`SDF_TRACE_T_MAX`]) — never by
+/// re-deriving the branch ad hoc at the call site.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewtFromDepthPush {
+    /// The runtime extent width — the dispatch bounds guard (`ceil(img_w/8)` groups may run
+    /// threads past the real extent; the shader discards `tid.x >= img_w`).
+    pub img_w: u32,
+    /// The runtime extent height — same bounds-guard role as [`Self::img_w`].
+    pub img_h: u32,
+    /// The host-precomputed mesh-depth ray-t normalizer (`boyko_render::gbuffer_depth::
+    /// mesh_view_t_norm`): [`MESH_DEPTH_T_MAX`] under `CAM_MODE_PERSPECTIVE`, [`SDF_TRACE_T_MAX`]
+    /// under ortho — EXACTLY the marcher's own `mesh_norm` value for this frame's camera.
+    pub mesh_norm: f32,
+}
+
+/// Byte size of [`ViewtFromDepthPush`] — the `viewt_from_depth` pipeline's declared COMPUTE push
+/// range (12 B).
+pub const VIEWT_FROM_DEPTH_PUSH_BYTES: u32 = core::mem::size_of::<ViewtFromDepthPush>() as u32;
+
+const _: () = assert!(core::mem::offset_of!(ViewtFromDepthPush, img_w) == 0);
+const _: () = assert!(core::mem::offset_of!(ViewtFromDepthPush, img_h) == 4);
+const _: () = assert!(core::mem::offset_of!(ViewtFromDepthPush, mesh_norm) == 8);
+const _: () = assert!(VIEWT_FROM_DEPTH_PUSH_BYTES == 12, "ViewtFromDepthPush must be 12 bytes");
+
+impl ViewtFromDepthPush {
+    /// Builds the push from the runtime extent + the host-precomputed mesh-depth normalizer.
+    #[inline]
+    pub const fn new(img_w: u32, img_h: u32, mesh_norm: f32) -> Self {
+        Self { img_w, img_h, mesh_norm }
+    }
+
+    /// Re-views the push constants as their raw 12-byte slice for `push_constants`.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` fields (all `Copy`, every
+        // offset + the 12-byte total pinned by the const-asserts above, no uninit padding), so
+        // its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern. The
+        // `&self` borrow keeps the struct alive for the slice's lifetime; read-only.
+        unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
+        }
+    }
+}
+
+/// TAA-under-VB: the `viewt_from_depth_rz` compute push constants (mirrors
+/// `viewt_from_depth_rz.comp.hlsl`'s `ViewtFromDepthRzPush`). `#[repr(C)]`, 16 B
+/// (`u32, u32, f32, f32`), offsets pinned by the const-asserts below — the same
+/// discipline as [`ViewtFromDepthPush`], whose Deferred custom-linear `mesh_norm`
+/// this reverse-Z sibling replaces with the `forward_view_z_coeffs(near, far)` pair.
+///
+/// `view_z_a`/`view_z_b` MUST come from `boyko_render::view::forward_view_z_coeffs`
+/// (the single-sourced host mirror of `forward_view_proj_rows`'s reverse-Z encode) —
+/// never re-derived ad hoc at the call site (the `mesh_norm` single-source precedent).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewtFromDepthRzPush {
+    /// The runtime extent width — the dispatch bounds guard (`ceil(img_w/8)` groups may run
+    /// threads past the real extent; the shader discards `tid.x >= img_w`).
+    pub img_w: u32,
+    /// The runtime extent height — same bounds-guard role as [`Self::img_w`].
+    pub img_h: u32,
+    /// `forward_view_z_coeffs(near, far).0` — the reverse-Z encode's `A` in
+    /// `view_z = B / (depth − A)`.
+    pub view_z_a: f32,
+    /// `forward_view_z_coeffs(near, far).1` — the encode's `B`.
+    pub view_z_b: f32,
+}
+
+/// Byte size of [`ViewtFromDepthRzPush`] — the `viewt_from_depth_rz` pipeline's declared
+/// COMPUTE push range (16 B).
+pub const VIEWT_FROM_DEPTH_RZ_PUSH_BYTES: u32 =
+    core::mem::size_of::<ViewtFromDepthRzPush>() as u32;
+
+const _: () = assert!(core::mem::offset_of!(ViewtFromDepthRzPush, img_w) == 0);
+const _: () = assert!(core::mem::offset_of!(ViewtFromDepthRzPush, img_h) == 4);
+const _: () = assert!(core::mem::offset_of!(ViewtFromDepthRzPush, view_z_a) == 8);
+const _: () = assert!(core::mem::offset_of!(ViewtFromDepthRzPush, view_z_b) == 12);
+const _: () =
+    assert!(VIEWT_FROM_DEPTH_RZ_PUSH_BYTES == 16, "ViewtFromDepthRzPush must be 16 bytes");
+
+impl ViewtFromDepthRzPush {
+    /// Builds the push from the runtime extent + the host-precomputed reverse-Z pair.
+    #[inline]
+    pub const fn new(img_w: u32, img_h: u32, view_z_a: f32, view_z_b: f32) -> Self {
+        Self { img_w, img_h, view_z_a, view_z_b }
+    }
+
+    /// Re-views the push constants as their raw 16-byte slice for `push_constants`.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` fields (all `Copy`, every
+        // offset + the 16-byte total pinned by the const-asserts above, no uninit padding),
+        // so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern.
+        // The `&self` borrow keeps the struct alive for the slice's lifetime; read-only.
+        unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
+        }
+    }
+}
+
+/// TAA rung T3: the post-resolve RCAS sharpen compute pass's OWN push constant
+/// (`shaders/rcas.comp.hlsl`) — mirrors [`ClusterCullPush`]'s `#[repr(C)]`, 16-byte,
+/// const-asserted-offset shape. Unlike the resolve, RCAS binds no camera UBO (a pure
+/// image-space kernel — see `rcas.comp.hlsl`'s module doc), so the runtime extent rides the
+/// push alongside the owner-set sharpness:
+///
+///   offset  0 : u32  img_w      runtime extent width  (0 => the shader's `IMG_W_DEFAULT`)
+///   offset  4 : u32  img_h      runtime extent height (0 => the shader's `IMG_H_DEFAULT`)
+///   offset  8 : f32  sharpness  `[0, 1]`: 0 = mild (peak `-1/8`), 1 = strong (peak `-1/5`)
+///   offset 12 : u32  _pad       keeps the range a round 16 bytes; unread
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RcasPush {
+    /// Render extent width — the dispatch bounds `idx < img_w * img_h`.
+    pub img_w: u32,
+    /// Render extent height.
+    pub img_h: u32,
+    /// The owner-set `SharpenMode::Rcas` (boyko_render's) strength in
+    /// `[0, 1]` (`boyko_render::taa_config::TaaConfig::rcas_sharpness`).
+    pub sharpness: f32,
+    /// Padding to a round 16-byte push range; unread by the shader.
+    pub _pad: u32,
+}
+
+/// Byte size of [`RcasPush`] — the RCAS pipeline's declared COMPUTE push range (16 B).
+pub const RCAS_PUSH_BYTES: u32 = core::mem::size_of::<RcasPush>() as u32;
+
+const _: () = assert!(core::mem::offset_of!(RcasPush, img_w) == 0);
+const _: () = assert!(core::mem::offset_of!(RcasPush, img_h) == 4);
+const _: () = assert!(core::mem::offset_of!(RcasPush, sharpness) == 8);
+const _: () = assert!(core::mem::offset_of!(RcasPush, _pad) == 12);
+const _: () = assert!(RCAS_PUSH_BYTES == 16, "RcasPush must be 16 bytes");
+
+impl RcasPush {
+    /// Builds the push from the runtime extent + the owner-set sharpness.
+    #[inline]
+    pub const fn new(img_w: u32, img_h: u32, sharpness: f32) -> Self {
+        Self { img_w, img_h, sharpness, _pad: 0 }
+    }
+
+    /// Re-views the push constants as their raw 16-byte slice for `push_constants`.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` fields (all `Copy`, every
+        // offset + the 16-byte total pinned by the const-asserts above, no uninit padding),
+        // so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern.
+        // The `&self` borrow keeps the struct alive for the slice's lifetime; read-only.
+        unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
+        }
+    }
+}
+
+/// The camera the extent-aware golden (`golden_composite_pixel_ex`) reconstructs a
 /// ray from. ORTHO is the golden-frozen path; PERSPECTIVE mirrors the shader's
 /// additive ray-gen (eye + orthonormal basis + half-FOV tangent + aspect).
 #[derive(Clone, Copy, Debug)]
@@ -2346,7 +4261,7 @@ pub(crate) fn composite_ray(
 
 /// The `(ray_origin, ray_dir)` for pixel `(px, py)` at extent `(img_w, img_h)` under
 /// `camera`, exposing the shared marcher/resolve ray-gen ([`composite_ray`]) so the PBR
-/// MVP-2 resolve golden ([`golden_deferred_resolve`]) can reconstruct the per-pixel view
+/// MVP-2 resolve golden (`golden_deferred_resolve`) can reconstruct the per-pixel view
 /// direction (`V = -rd`) the GPU resolve uses. Bit-identical to the marcher's ray-gen.
 #[inline]
 pub fn composite_pixel_ray(
@@ -2406,7 +4321,7 @@ pub(crate) const BRICK_CLASS_EMPTY_OUTSIDE: u32 = 0;
 /// near-field grid cell edge — the world span a single apron'd `BRICK_ALLOC³` atlas tile covers.
 pub const M2_BRICK_WORLD: f32 = 2.0;
 
-/// The world width of one M2 atlas voxel (the brick scale [`fill_brick`] / [`brick_cubic_hit`] pin).
+/// The world width of one M2 atlas voxel (the brick scale [`fill_brick`] / [`brick_cubic_hit`](boyko_sdf_math::brick::brick_cubic_hit) pin).
 pub const M2_VOXEL_SIZE: f32 = 0.25;
 
 /// The M2 near-field grid edge (cells per axis). A `4³` lattice of [`M2_BRICK_WORLD`]-sized bricks
@@ -3535,7 +5450,7 @@ pub const GOLDEN_LIGHT_KIND_SKY: u32 = 3;
 pub const GOLDEN_LIGHT_HEADER_BASE_WORDS: usize = 16;
 
 
-/// The bit offset of the 5-bit atlas-slot field in [`GoldenLight::dir_kind`]`.w` — mirrors
+/// The bit offset of the 5-bit atlas-slot field in `GoldenLight::dir_kind``.w` — mirrors
 /// `boyko_render::shadow_atlas::ATLAS_SLOT_SHIFT` and the shader's `ATLAS_SLOT_SHIFT`.
 pub const GOLDEN_ATLAS_SLOT_SHIFT: u32 = 17;
 /// The 5-bit mask for the atlas-slot field — mirrors `boyko_render::shadow_atlas::ATLAS_SLOT_MASK`.
@@ -3543,12 +5458,19 @@ pub const GOLDEN_ATLAS_SLOT_MASK: u32 = 0x1F;
 /// The "no map" 5-bit sentinel (`0x1F == 31`) — a light on the analytic fallback. Mirrors
 /// `boyko_render::shadow_atlas::SLOT_NONE` and the shader's `SLOT_NONE`.
 pub const GOLDEN_SLOT_NONE: u32 = 0x1F;
+/// The atlas-slot field holding [`GOLDEN_SLOT_NONE`] (`0x003E_0000`) — the field every
+/// `GoldenLight::point` / `spot` row is born with, so an un-slotted light decodes the sentinel
+/// rather than slot 0. Mirrors `boyko_render::light::SLOT_NONE_FIELD`; `with_atlas_slot` replaces
+/// it with a real slot.
+pub const GOLDEN_SLOT_NONE_FIELD: u32 = GOLDEN_SLOT_NONE << GOLDEN_ATLAS_SLOT_SHIFT;
 
 /// The kind-enum mask (low 16 bits) — mirrors the shader's `LIGHT_KIND_MASK`. The P6 R1
 /// `casts_sdf_shadow` flag occupies bit 16, so the enum + the flag coexist in one word.
 pub const GOLDEN_LIGHT_KIND_MASK: u32 = 0xFFFF;
 /// Bit 16 of the kind word: the P6 R1 per-light `casts_sdf_shadow` flag (mirrors the shader's
-/// `LIGHT_FLAG_CASTS_SHADOW`).
+/// `LIGHT_FLAG_CASTS_SHADOW`). The host ALSO sets it on every row packed with a real atlas slot
+/// (`boyko_render::shadow_atlas::pack_atlas_slot`, mirrored by `GoldenLight::with_atlas_slot`), so
+/// there it reads "slotted"; the punctual atlas sample never tests it (it tests the slot field).
 pub const GOLDEN_LIGHT_FLAG_CASTS_SHADOW: u32 = 0x1_0000;
 
 /// The maximum `cos(outer)` the spot bake clamps to (mirrors
@@ -3606,9 +5528,34 @@ pub const PBR_SKY_DIFFUSE: [f32; 3] = [0.10, 0.10, 0.12];
 /// The resolve's analytic specular-IBL sky color (scales EnvBRDFApprox).
 pub const PBR_SKY_SPEC: [f32; 3] = [0.10, 0.10, 0.12];
 /// The "empty field" distance sentinel, mirroring the shader's `FAR` (= 1e9 in
-/// `sdf_field.hlsli`). Used as the argmin seed in [`pick_material_id`] so the host
+/// `sdf_field.hlsli`). Used as the argmin seed in `pick_material_id` so the host
 /// oracle initializes its nearest-surface search identically to the GPU marcher.
 pub const PBR_FAR: f32 = 1.0e9;
+
+// --- PBR P1 — the HDR sun disc in the reflected environment (mirrors deferred_pbr.hlsl) ----
+
+/// The sun-kernel exponent clamp floor (mirrors the shader's `SUN_KERNEL_EXPONENT_MIN`): a
+/// fully rough surface (GGX alpha -> 1) maps its Blinn-Phong-equivalent exponent to `n -> 0`;
+/// floored at 1 so the kernel stays a valid (if very broad) cosine lobe.
+pub const SUN_KERNEL_EXPONENT_MIN: f32 = 1.0;
+/// The sun-kernel exponent clamp ceiling (mirrors the shader's `SUN_KERNEL_EXPONENT_MAX`):
+/// guards the `pow` blowup as alpha -> 0 (a mirror-smooth surface) while keeping the disc
+/// visibly wider than one screen pixel.
+pub const SUN_KERNEL_EXPONENT_MAX: f32 = 2048.0;
+/// The default gate on the env sun-disc contribution (mirrors the shader's `SUN_ENV_WEIGHT`).
+/// Owner-retunable at the visual gate; `1.0` keeps the disc's peak commensurate with the
+/// material's own DFG-weighted specular tint (the kernel already peaks at exactly 1.0 only
+/// where `R` points at the light and falls off sharply elsewhere).
+pub const SUN_ENV_WEIGHT: f32 = 1.0;
+
+// --- Render sky background — the visible sun disc baked into the BACKGROUND (mask == 0) ----
+
+/// The FIXED cosine-power exponent of the sky background's sun disc (mirrors the shader's
+/// `SKY_SUN_EXPONENT`). Unlike `sun_kernel_exponent` (roughness-driven, for the metal's own
+/// reflected sun-disc term), this is a single moderate exponent (~512, a tight but clearly
+/// visible disc) used for every directional light — the background is a flat environment
+/// element, not a BRDF lobe. Owner-retunable.
+pub const SKY_SUN_EXPONENT: f32 = 512.0;
 
 
 /// The Hilbert tile edge (`SSAO_HILBERT_W`; XeGTAO uses level 6 = 64) — the host mirror of the
@@ -3733,6 +5680,456 @@ const _: () = assert!(TILE_BOUND_BYTES == 16, "TileBound must be a 16-byte std43
 #[inline]
 pub const fn tile_grid_extent(img_w: u32, img_h: u32) -> (u32, u32) {
     (img_w.div_ceil(TILE_SIZE), img_h.div_ceil(TILE_SIZE))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Particles — the twelve committed artifacts (eight base modules + the two `-D DEPTH_LINEAR` draw
+// stages + the `-D SDF_COLLIDE` and `-D SDF_COLLIDE_STATS` sims), their push ranges and their group
+// edges (`docs/PARTICLES-PLAN.md` Rev 4). See `present/passes/particles.rs` for the recorder and
+// `boyko_app::gpu_scene::particle` for the host layout table these bindings mirror.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+embed_spirv! {
+    /// Particles P0: the ONE-THREAD bookkeeping pass (`shaders/particle_kickoff.comp.hlsl`,
+    /// algorithm A2 / decision D3).
+    ///
+    /// Swaps the alive roles' COUNTS, clamps the requested spawn against the free list, publishes
+    /// `dead_base`/`emit_append_base`, and writes both indirect argument blocks. Binds a SUBSET of
+    /// the shared Set-0 vocabulary — `p_counters` @0 (read+write), `p_dispatch_args` @1 (write),
+    /// `p_draw_args` @2 (write) — and takes [`PARTICLE_KICKOFF_PUSH_BYTES`] of `COMPUTE` push.
+    ///
+    /// It is one thread because that is what makes `particle_emit` need ZERO atomics: a single
+    /// lane owning both counters can pre-DECREMENT one and pre-INCREMENT the other in the same
+    /// pass, so every emit lane computes both of its indices arithmetically from `gid`.
+    PARTICLE_KICKOFF_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_kickoff.comp.spv")
+}
+
+embed_spirv! {
+    /// Particles P0: the SPAWN pass (`shaders/particle_emit.comp.hlsl`, algorithm A3 / decision
+    /// D8). `DispatchIndirect`, [`PARTICLE_LOCAL_SIZE`] threads, ZERO global atomics.
+    ///
+    /// Binds `p_counters` @0 (read), `p_dead` @3 (read), `p_alive_read` @4 (write), `p_particle`
+    /// @6 (write), `p_emit_req` @8 (read) and `p_effects` @9 (read); takes
+    /// [`PARTICLE_EMIT_PUSH_BYTES`] of `COMPUTE` push. The `first_spawn` prefix orders LANES only
+    /// — the slot comes from the free list and the list position from the append base — so the
+    /// pass is correct against the SHUFFLED `p_dead` the free list is in from frame 2 onward.
+    PARTICLE_EMIT_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_emit.comp.spv")
+}
+
+embed_spirv! {
+    /// Particles P0: the HOT LOOP (`shaders/particle_sim.comp.hlsl`, algorithm A4 / decisions
+    /// D3, D5). `DispatchIndirect`, [`PARTICLE_LOCAL_SIZE`] threads, `O(alive_count_cur)`.
+    ///
+    /// The widest Set-0 subset: `p_counters` @0 (RW, atomic), `p_draw_args` @2 (RW, atomic),
+    /// `p_dead` @3 (write), `p_alive_read` @4 (read), `p_alive_write` @5 (write), `p_particle` @6
+    /// (RW), `p_render` @7 (write), `p_effects` @9 (read); [`PARTICLE_SIM_PUSH_BYTES`] of
+    /// `COMPUTE` push. Its atomics are WAVE-AGGREGATED (one `InterlockedAdd` per wave per
+    /// counter), which is the difference between ~32 µs and ~0.5 ms at 1M survivors.
+    PARTICLE_SIM_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_sim.comp.spv")
+}
+
+embed_spirv! {
+    /// Particles P1: the `-D SDF_COLLIDE` HOT LOOP (`shaders/particle_sim.comp.hlsl`, plan D9) —
+    /// the same pass with field collision compiled IN.
+    ///
+    /// Interface-identical to [`PARTICLE_SIM_SPV`] apart from ONE added read: the engine's SDF edit
+    /// list at Set-0 binding 10 (`StructuredBuffer<uint> Buf`, the binding number every field
+    /// consumer in the tree uses), which is boot-static and read-only for the whole present loop —
+    /// so it needs no framegraph `ResId`, no seed row and no barrier, and arming this variant moves
+    /// no derived barrier stream. Same [`PARTICLE_SIM_PUSH_BYTES`] push block, same layout object:
+    /// the collision tuning (`collision_radius`/`restitution`/`friction`) is PER-EFFECT and arrives
+    /// in the row the sim already fetched.
+    ///
+    /// Per substep it either SKIPS the field on a Lipschitz bound carried in the sim record's
+    /// `cached_field_d` lane, or evaluates it once and resolves a contact. Its atomic census is
+    /// UNCHANGED (the same three wave-leader sites): collision adds no counter.
+    PARTICLE_SIM_SDF_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_sim_sdf.comp.spv")
+}
+
+embed_spirv! {
+    /// Particles P1b: the `-D SDF_COLLIDE -D SDF_COLLIDE_STATS` HOT LOOP
+    /// (`shaders/particle_sim.comp.hlsl`) — [`PARTICLE_SIM_SDF_SPV`]'s simulation, exactly, plus the
+    /// per-wave SKIP CENSUS.
+    ///
+    /// **A MEASUREMENT module, never a shipping one.** Gate #17 measured that the
+    /// `ZONE_PARTICLE_SIM` armed-vs-disarmed delta cannot serve as the skip-rate instrument — its
+    /// dominant term has the opposite sign to the field walk and is 4–6× the row's resolution — so
+    /// the rate is read off this module's device-side counters instead.
+    ///
+    /// Interface-identical to [`PARTICLE_SIM_SDF_SPV`]: the same nine bindings, the same push block,
+    /// the same layout object. What it adds is one `WaveActiveCountBits` ballot on the skip
+    /// predicate the collide arm already computes, folded by one `WaveIsFirstLane()` lane into
+    /// `p_counters`' three stats words (7/8/9, carved out of the counter line's pad).
+    ///
+    /// **It EXCEEDS the shipping per-wave atomic budget by design** — 1–2 more per wave per
+    /// substep, so **3–6** per wave at the plan's steady state against the shipping modules' 1–4
+    /// (`2 + 1` for an all-surviving single-class wave that skips the field, `4 + 2` for a mixed
+    /// survive/die wave carrying both classes that evaluates). Rung P2's blend partition moved the
+    /// UPPER bound only, 5 → 6; the lower is unchanged, since an additive-only wave still retires
+    /// in two. `docs/SHADER-VARIANT-MANIFEST.md`'s row states that exception rather than the census
+    /// pins being widened: a widened bound would stop gating the two modules that ship.
+    PARTICLE_SIM_STATS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_sim_stats.comp.spv")
+}
+
+embed_spirv! {
+    /// Particles P0: the billboard-expansion VERTEX stage (`shaders/particle_draw.vs.hlsl`,
+    /// algorithm A5). Four vertices and six indices per instance, one `DrawIndexedIndirect`.
+    ///
+    /// Its OWN set-0 vocabulary — `StructuredBuffer<ParticleRender>` @0 + the camera cbuffer @1,
+    /// both `VERTEX` — NOT the compute vocabulary above; set 1 is the bindless table
+    /// [`PARTICLE_DRAW_FS_SPV`] samples. Takes [`PARTICLE_DRAW_PUSH_BYTES`] of `VERTEX` push, and
+    /// reads the render buffer at `index_base + index_step * SV_InstanceID` because
+    /// `firstInstance` MUST be 0 on this device.
+    PARTICLE_DRAW_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_draw.vs.spv")
+}
+
+embed_spirv! {
+    /// Particles P0: the FRAGMENT stage (`shaders/particle_draw.fs.hlsl`, algorithm A5) — one
+    /// modulate and one bindless sample, unlit. Paired with [`PARTICLE_DRAW_VS_SPV`].
+    ///
+    /// The blend is PIPELINE state ([`boyko_rhi::enums::BlendState::ADDITIVE`] with
+    /// `depth_write = OFF`), never shader code. Binds set 1 only: `Texture2D gTextures[]` @0 and
+    /// `SamplerState` @1 — the SAME layout object `gbuffer_mrt.fs.hlsl` binds — which is what
+    /// makes ONE draw cover every effect. Declares NO push range of its own.
+    PARTICLE_DRAW_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_draw.fs.spv")
+}
+
+embed_spirv! {
+    /// Particles P2: the `-D DEPTH_LINEAR` VERTEX stage (`shaders/particle_draw.vs.hlsl`), the
+    /// DEFERRED path's only arm.
+    ///
+    /// Interface-identical to [`PARTICLE_DRAW_VS_SPV`] — the same two set-0 bindings, the same
+    /// [`PARTICLE_DRAW_PUSH_BYTES`] `VERTEX` range, so the SAME pipeline layout object serves both
+    /// (the `deferred_pbr_wrap` precedent). The delta is two extra interpolants: `eye_rel`
+    /// (`cam_eye.xyz - world`, perspective-correct) and `cam_mode`, which
+    /// [`PARTICLE_DRAW_DLIN_FS_SPV`] needs to write the depth buffer's own encode.
+    PARTICLE_DRAW_DLIN_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_draw_dlin.vs.spv")
+}
+
+embed_spirv! {
+    /// Particles P2: the `-D DEPTH_LINEAR` FRAGMENT stage (`shaders/particle_draw.fs.hlsl`).
+    ///
+    /// Writes `SV_Depth = (cam_mode > 0.5) ? length(eye_rel) / MESH_DEPTH_T_MAX : position.z` —
+    /// term for term `gbuffer_mrt.fs.hlsl`'s own `SV_Depth`, because on Deferred that fragment IS
+    /// what the depth buffer holds, and the particle VS's projective `SV_Position.z` is pinned to
+    /// 1.0 by the marcher matrix (`row2 == row3`). Same set-1 bindings and no push range, so the
+    /// layout is unchanged.
+    ///
+    /// COST: an `SV_Depth` write disables early-Z on this leg (see the shader header). The three
+    /// reverse-Z paths bind [`PARTICLE_DRAW_FS_SPV`] and keep it.
+    PARTICLE_DRAW_DLIN_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_draw_dlin.fs.spv")
+}
+
+embed_spirv! {
+    /// Particles P2 item 3: the radix sort's HISTOGRAM, dispatch 1 of 3
+    /// (`shaders/particle_sort_hist.comp.hlsl`, plan D10). `DispatchIndirect`,
+    /// [`PARTICLE_LOCAL_SIZE`] threads.
+    ///
+    /// Builds the global 256-bin population of the ALPHA class's 8-bit quantized log-depth keys.
+    /// Binds `p_draw_args` @2 (read — the class's live count), `p_render` @7 (read) and
+    /// `p_sort_bins` @12 (read+write, atomic); takes [`PARTICLE_SORT_PUSH_BYTES`] of `COMPUTE` push.
+    ///
+    /// The per-element increments are LDS; exactly ONE global `InterlockedAdd` is issued per
+    /// OCCUPIED bin per group, which is D5's wave-aggregation argument applied to a histogram.
+    PARTICLE_SORT_HIST_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_sort_hist.comp.spv")
+}
+
+embed_spirv! {
+    /// Particles P2 item 3: the radix sort's 256-BIN SCAN, dispatch 2 of 3
+    /// (`shaders/particle_sort_scan.comp.hlsl`, plan D10). ONE group of [`PARTICLE_LOCAL_SIZE`]
+    /// threads, dispatched DIRECTLY.
+    ///
+    /// Turns the histogram half of `p_sort_bins` into the offsets half (an exclusive prefix sum)
+    /// **and re-zeroes the histogram half in the same dispatch** — which is what keeps
+    /// `particle_kickoff`, one module for every arming, byte-frozen across this rung. Binds
+    /// `p_sort_bins` @12 alone, takes NO push, and carries ZERO atomics: one lane owns one bin for
+    /// the whole dispatch.
+    PARTICLE_SORT_SCAN_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_sort_scan.comp.spv")
+}
+
+embed_spirv! {
+    /// Particles P2 item 3: the radix sort's PERMUTATION, dispatch 3 of 3
+    /// (`shaders/particle_sort_scatter.comp.hlsl`, plan D10). `DispatchIndirect`,
+    /// [`PARTICLE_LOCAL_SIZE`] threads.
+    ///
+    /// Copies each alpha render record from `p_render` to `p_render_sorted` at its sorted rank,
+    /// using the SAME `capacity - 1 - rank` mirror the sim wrote the class with — so the ALPHA
+    /// draw's `(capacity - 1, -1)` push pair is unchanged and only the buffer bound at the draw
+    /// set's binding 0 differs. Binds `p_draw_args` @2 (read), `p_render` @7 (read),
+    /// `p_render_sorted` @11 (write) and `p_sort_bins` @12 (read+write, atomic); takes
+    /// [`PARTICLE_SORT_PUSH_BYTES`] of `COMPUTE` push.
+    PARTICLE_SORT_SCATTER_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_sort_scatter.comp.spv")
+}
+
+/// Particles P0: `particle_kickoff`'s push block — `{ uint requested_spawn; uint capacity }`.
+///
+/// ⚠️ **NOT part of the shared `COMPUTE_PUSH_CONSTANT_RANGE_BYTES` `max`, deliberately.** The
+/// three particle compute pipelines are built against their OWN pipeline layouts (the plan's
+/// "dedicated layouts" clause, D12), so none of these three consts may widen the shared range —
+/// which sits at 112 of a 128-byte guaranteed floor and has only 16 bytes of headroom left.
+/// `tests/particle_barrier_stream.rs` asserts the shared range is still exactly 112 and that each
+/// particle range is strictly under it.
+pub const PARTICLE_KICKOFF_PUSH_BYTES: u32 = 8;
+
+/// Particles P0: `particle_emit`'s push block — `{ uint emitter_count; uint frame_index }`.
+/// `emitter_count` is the host's D15 release-clamped row count; `frame_index` is the per-frame
+/// half of the spawn seed (the per-emitter half is a constant in the request row, so an idle
+/// frame rewrites no request bytes). See [`PARTICLE_KICKOFF_PUSH_BYTES`] for why this is not in
+/// the shared range.
+pub const PARTICLE_EMIT_PUSH_BYTES: u32 = 8;
+
+/// Particles P0/P2: `particle_sim`'s push block — `{ uint steps; float timestep; uint capacity }`.
+///
+/// `steps` is `ParticleClock::steps()`, ALREADY ceiling-clamped on the host (plan M3) — one
+/// number with two consumers, the host's own emitter advance and this push. The shader's
+/// `min(pc.steps, PARTICLE_SUBSTEP_CEILING)` is the hang guard against a corrupt push constant
+/// and can never bind on a well-formed frame. See [`PARTICLE_KICKOFF_PUSH_BYTES`] for why this is
+/// not in the shared range.
+///
+/// **`capacity` arrived at rung P2's blend partition (plan D10/M2)**, and it is a push rather than
+/// a counter word because the alpha class's render index is the mirror `capacity - 1 - q_pos`: a
+/// counter word would put a per-frame device load on the hot loop's tail for a value that is
+/// boot-frozen. It is `ParticleGpuBundle::capacity` — the SAME number `particle_kickoff` is pushed
+/// and the same one the draw's alpha `index_base` is derived from, so CAP has one home and three
+/// consumers rather than three derivations.
+pub const PARTICLE_SIM_PUSH_BYTES: u32 = 12;
+
+/// Particles P2 item 3: the push block `particle_sort_hist` and `particle_sort_scatter` SHARE —
+/// `{ float3 cam_eye; uint capacity }` (12 + 4).
+///
+/// One block for both, because the two passes must bin from the SAME eye: the histogram decides how
+/// large each bin's reservation is and the scatter decides which reservation an element joins, so
+/// two eyes would size a bin from one population and fill it from another.
+///
+/// `particle_sort_scan`'s SHADER declares no push block at all — a range it does not read cannot
+/// drift from the one these two do — but its pipeline layout is given this same range anyway,
+/// because [`RhiDevice::create_compute_pipeline`](boyko_rhi::RhiDevice::create_compute_pipeline)
+/// has no zero-range form. A declared range no shader references is legal Vulkan, and the recorder
+/// emits no `vkCmdPushConstants` for that pass.
+///
+/// See [`PARTICLE_KICKOFF_PUSH_BYTES`] for why this is not in the shared COMPUTE range.
+pub const PARTICLE_SORT_PUSH_BYTES: u32 = 16;
+
+/// Particles P2 item 3: the radix's bin count — `2^8`, one 8-bit digit, ONE pass (plan D10).
+///
+/// EQUAL to [`PARTICLE_LOCAL_SIZE`] by design, which is what makes all three sort modules
+/// one-bin-per-lane; the generator asserts the equality and `tests/particle_edsl_sync.rs` pins the
+/// declared width against the compiled artifacts.
+pub const PARTICLE_SORT_BINS: u32 = 256;
+
+/// Particles P2 item 3: the word count of `p_sort_bins` — the histogram half `[0, BINS)` followed
+/// by the running-offsets half `[BINS, 2·BINS)` in ONE allocation.
+///
+/// Two halves and not one array because the scatter DESTROYS what it consumes (each reservation
+/// advances its bin's offset), so a single array would leave nothing to zero for the next frame.
+pub const PARTICLE_SORT_BINS_WORDS: u32 = 2 * PARTICLE_SORT_BINS;
+
+/// Particles P2 item 3: the near end of the sort key's depth range, in world units.
+///
+/// A power of two so [`PARTICLE_SORT_LOG_NEAR`] is EXACT in binary floating point and the shader
+/// mirror needs no rounding argument. It also serves as the `max` clamp that makes the key's `log2`
+/// total (a particle at the eye would otherwise reach `log2(0)`).
+pub const PARTICLE_SORT_NEAR: f32 = 0.125;
+
+/// Particles P2 item 3: `log2(PARTICLE_SORT_NEAR)` — exactly `-3`.
+pub const PARTICLE_SORT_LOG_NEAR: f32 = -3.0;
+
+/// Particles P2 item 3: the sort key's range in OCTAVES — `log2(4096) - log2(0.125) == 15`.
+///
+/// Fifteen octaves over [`PARTICLE_SORT_BINS`] bins is 0.0586 octaves per bin ⇒ **4.15 % relative
+/// depth resolution, CONSTANT across the range**, which is the whole reason the key is logarithmic:
+/// a linear key over the same span would spend 99.99 % of its bins beyond four units and resolve
+/// nothing where billboards actually overlap.
+pub const PARTICLE_SORT_LOG_SPAN: f32 = 15.0;
+
+/// Particles P2 item 3: the reciprocal of [`PARTICLE_SORT_LOG_SPAN`], mirrored into both key-bearing
+/// shaders as a LITERAL so the device multiplies rather than divides (plan gate #14 / M7 — a divide
+/// drags `OpFDiv`'s 2.5 ULP into a quantizer whose job is to be a stable step function).
+pub const PARTICLE_SORT_INV_LOG_SPAN: f32 = 1.0 / PARTICLE_SORT_LOG_SPAN;
+
+/// Particles P2 item 3: **the host mirror of the device's sort key** — the same expression
+/// `particle_sort_{hist,scatter}.comp.hlsl` carry, term for term.
+///
+/// # What it is for, and what it is NOT for
+///
+/// It exists so the monotonicity readback (plan P2's named gate) can state its property in the
+/// key's own units: "the recomputed key is non-decreasing in rank". It is NOT a bit-exactness
+/// contract — `log2` is not required to be correctly rounded on either side, so a record sitting
+/// exactly on a bin boundary may quantize one step differently here than on the device. The
+/// readback therefore reports the depth sequence beside the key sequence, and the depth-ratio bound
+/// it checks needs no oracle at all.
+///
+/// The two shaders' constants are pinned against the four `PARTICLE_SORT_*` consts above by
+/// `tests/particle_edsl_sync.rs`, which is what makes "the same expression" decidable rather than
+/// asserted.
+///
+/// Returns a value in `[0, PARTICLE_SORT_BINS)`. Bin 0 is the FARTHEST — the key is inverted so
+/// that an ascending sort is back-to-front.
+#[must_use]
+pub fn particle_sort_key(pos: [f32; 3], cam_eye: [f32; 3]) -> u32 {
+    let dx = cam_eye[0] - pos[0];
+    let dy = cam_eye[1] - pos[1];
+    let dz = cam_eye[2] - pos[2];
+    let d = (dx * dx + dy * dy + dz * dz).sqrt();
+    // `max` in the NaN-tolerant direction the device's `NMax` takes: a NaN distance becomes the
+    // near clamp, so the particle sorts as the nearest rather than poisoning the quantizer.
+    let clamped = if d > PARTICLE_SORT_NEAR { d } else { PARTICLE_SORT_NEAR };
+    let bin_max = (PARTICLE_SORT_BINS - 1) as f32;
+    let t = ((clamped.log2() - PARTICLE_SORT_LOG_NEAR) * PARTICLE_SORT_INV_LOG_SPAN).clamp(0.0, 1.0);
+    PARTICLE_SORT_BINS - 1 - (t * bin_max + 0.5) as u32
+}
+
+/// Particles P0: `particle_draw.vs`'s `VERTEX`-stage push block — `{ float4x4 view_proj; uint
+/// index_base; int index_step }` (64 + 4 + 4).
+///
+/// A GRAPHICS range, entirely separate from the shared COMPUTE one, so it is bounded only by the
+/// device's own `maxPushConstantsSize` floor and not by [`PARTICLE_KICKOFF_PUSH_BYTES`]'s note.
+/// `(index_base, index_step) == (0, +1)` at P0 — the identity, i.e. a strictly sequential read of
+/// the render buffer with no indirection.
+pub const PARTICLE_DRAW_PUSH_BYTES: u32 = 72;
+
+/// Particles P0: the `[numthreads(256,1,1)]` group edge of `particle_emit` and `particle_sim`
+/// (the research corpus's `THREADCOUNT_SIMULATION`).
+///
+/// Mirrored HOST-side only for the boot-time argument-block seeding and the OOB reasoning: the
+/// per-frame group counts are computed ON THE DEVICE by `particle_kickoff` and consumed by
+/// `vkCmdDispatchIndirect`, so no host code divides by this on the hot path. `LocalSize` is
+/// pinned against the compiled modules by `tests/particle_edsl_sync.rs`.
+pub const PARTICLE_LOCAL_SIZE: u32 = 256;
+
+/// Particles P0: `particle_kickoff`'s `[numthreads(1,1,1)]` group edge. The pass is dispatched
+/// DIRECTLY (one group of one thread) — it is the pass that WRITES the indirect argument blocks
+/// the other two are dispatched from, so it cannot itself be indirect.
+pub const PARTICLE_KICKOFF_LOCAL_SIZE: u32 = 1;
+
+/// Particles P0: the byte offset of `particle_emit`'s `VkDispatchIndirectCommand` inside
+/// `p_dispatch_args` (plan D4 — the two commands sit at 0 and 16).
+pub const PARTICLE_DISPATCH_EMIT_OFFSET: u64 = 0;
+
+/// Particles P0: the byte offset of `particle_sim`'s `VkDispatchIndirectCommand` inside
+/// `p_dispatch_args`. See [`PARTICLE_DISPATCH_EMIT_OFFSET`].
+pub const PARTICLE_DISPATCH_SIM_OFFSET: u64 = 16;
+
+/// Particles P0: the byte offset of the ADDITIVE `VkDrawIndexedIndirectCommand` inside
+/// `p_draw_args` — the first of the two slots (plan D4).
+pub const PARTICLE_DRAW_ADDITIVE_OFFSET: u64 = 0;
+
+/// Particles P2: the byte offset of the ALPHA `VkDrawIndexedIndirectCommand` inside `p_draw_args`
+/// — the second slot, at `size_of::<VkDrawIndexedIndirectCommand>() + 4` bytes of inter-command pad
+/// (plan D4: the two slots sit at 0 and 24, so `alpha.instanceCount` lands at byte 28).
+///
+/// Both slots carry `firstInstance == 0` (F5b — `drawIndirectFirstInstance` is not enabled on this
+/// device and a nonzero value there is a silent corruption class), so the two classes are told
+/// apart ONLY by the VS's `index_base`/`index_step` push pair, never by the fetched command.
+///
+/// Recorded UNCONDITIONALLY beside the additive slot: kickoff zeroes `instanceCount` every frame
+/// and only an alpha-class survivor ever raises it, so a scene with no alpha effect fetches a
+/// zero-instance command and rasterizes nothing. That is what keeps every pre-P2 image pin
+/// byte-identical without a host-side predicate.
+pub const PARTICLE_DRAW_ALPHA_OFFSET: u64 = 24;
+
+/// Particles P0: the index count of the billboard quad — two triangles over four corners.
+///
+/// `vkCmdDrawIndirect` (non-indexed) is not loaded on this device, so the draw is INDEXED and
+/// this is the `indexCount` every kickoff writes into both draw slots.
+pub const PARTICLE_QUAD_INDEX_COUNT: u32 = 6;
+
+/// Particles P0: the byte size of the billboard quad's `u16` index buffer — six 2-byte indices.
+/// Uploaded ONCE at boot under its own `TRANSFER_WRITE → INDEX_READ` barrier and never rewritten,
+/// which is why it is deliberately NOT a framegraph resource.
+pub const PARTICLE_QUAD_IB_BYTES: u64 = PARTICLE_QUAD_INDEX_COUNT as u64 * 2;
+
+/// Particles P0: the ONE-THREAD bookkeeping SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). See
+/// [`PARTICLE_KICKOFF_SPV`]'s doc for the binding subset and the push block.
+#[inline]
+pub fn particle_kickoff_spirv() -> &'static [u32] {
+    PARTICLE_KICKOFF_SPV.as_words()
+}
+
+/// Particles P0: the SPAWN SPIR-V as a `u32` word stream. See [`PARTICLE_EMIT_SPV`]'s doc.
+#[inline]
+pub fn particle_emit_spirv() -> &'static [u32] {
+    PARTICLE_EMIT_SPV.as_words()
+}
+
+/// Particles P0: the HOT-LOOP SPIR-V as a `u32` word stream. See [`PARTICLE_SIM_SPV`]'s doc.
+#[inline]
+pub fn particle_sim_spirv() -> &'static [u32] {
+    PARTICLE_SIM_SPV.as_words()
+}
+
+/// Particles P1: the `-D SDF_COLLIDE` HOT-LOOP SPIR-V as a `u32` word stream. See
+/// [`PARTICLE_SIM_SDF_SPV`]'s doc.
+#[inline]
+pub fn particle_sim_sdf_spirv() -> &'static [u32] {
+    PARTICLE_SIM_SDF_SPV.as_words()
+}
+
+/// Particles P1b: the `-D SDF_COLLIDE_STATS` HOT-LOOP SPIR-V as a `u32` word stream — the skip-rate
+/// instrument. See [`PARTICLE_SIM_STATS_SPV`]'s doc for why it is a third module and not a flag.
+#[inline]
+pub fn particle_sim_stats_spirv() -> &'static [u32] {
+    PARTICLE_SIM_STATS_SPV.as_words()
+}
+
+/// Particles P2 item 3: the radix HISTOGRAM SPIR-V as a `u32` word stream. See
+/// [`PARTICLE_SORT_HIST_SPV`]'s doc.
+#[inline]
+pub fn particle_sort_hist_spirv() -> &'static [u32] {
+    PARTICLE_SORT_HIST_SPV.as_words()
+}
+
+/// Particles P2 item 3: the radix SCAN SPIR-V as a `u32` word stream. See
+/// [`PARTICLE_SORT_SCAN_SPV`]'s doc.
+#[inline]
+pub fn particle_sort_scan_spirv() -> &'static [u32] {
+    PARTICLE_SORT_SCAN_SPV.as_words()
+}
+
+/// Particles P2 item 3: the radix SCATTER SPIR-V as a `u32` word stream. See
+/// [`PARTICLE_SORT_SCATTER_SPV`]'s doc.
+#[inline]
+pub fn particle_sort_scatter_spirv() -> &'static [u32] {
+    PARTICLE_SORT_SCATTER_SPV.as_words()
+}
+
+/// Particles P0: the billboard-expansion VERTEX SPIR-V as a `u32` word stream. See
+/// [`PARTICLE_DRAW_VS_SPV`]'s doc.
+#[inline]
+pub fn particle_draw_vs_spirv() -> &'static [u32] {
+    PARTICLE_DRAW_VS_SPV.as_words()
+}
+
+/// Particles P0: the FRAGMENT SPIR-V as a `u32` word stream. See [`PARTICLE_DRAW_FS_SPV`]'s doc.
+#[inline]
+pub fn particle_draw_fs_spirv() -> &'static [u32] {
+    PARTICLE_DRAW_FS_SPV.as_words()
+}
+
+/// Particles P2: the `-D DEPTH_LINEAR` billboard-expansion VERTEX SPIR-V. See
+/// [`PARTICLE_DRAW_DLIN_VS_SPV`]'s doc.
+#[inline]
+pub fn particle_draw_dlin_vs_spirv() -> &'static [u32] {
+    PARTICLE_DRAW_DLIN_VS_SPV.as_words()
+}
+
+/// Particles P2: the `-D DEPTH_LINEAR` FRAGMENT SPIR-V. See [`PARTICLE_DRAW_DLIN_FS_SPV`]'s doc.
+#[inline]
+pub fn particle_draw_dlin_fs_spirv() -> &'static [u32] {
+    PARTICLE_DRAW_DLIN_FS_SPV.as_words()
 }
 
 #[cfg(test)]

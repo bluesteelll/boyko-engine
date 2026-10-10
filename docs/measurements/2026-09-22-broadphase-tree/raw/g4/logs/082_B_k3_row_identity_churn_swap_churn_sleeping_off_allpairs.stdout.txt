@@ -1,0 +1,3 @@
+row_identity_churn/swap_churn/sleeping_off_allpairs
+                        time:   [11.832 ms 11.874 ms 11.918 ms]
+

@@ -1,0 +1,41 @@
+Gnuplot not found, using plotters backend
+row_identity_churn/stable/sleeping_off_allpairs: 4 churn steps built 0 maps and resolved 0 rows by stage 2
+row_identity_churn/swap_churn/sleeping_off_allpairs: 4 churn steps built 4 maps and resolved 4 rows by stage 2
+row_identity_churn/archetype_shift/sleeping_off_allpairs: 4 churn steps built 4 maps and resolved 5 rows by stage 2
+row_identity_churn/first_archetype_spawn/sleeping_off_allpairs: 4 churn steps built 4 maps and resolved 2 rows by stage 2
+row_identity_churn/burst_despawn/sleeping_off_allpairs: 4 churn steps built 4 maps and resolved 124 rows by stage 2
+row_identity_churn/burst_migrate/sleeping_off_allpairs: 4 churn steps built 4 maps and resolved 2546 rows by stage 2
+row_identity_churn/stable/sleeping_off_tree: 4 churn steps built 0 maps and resolved 0 rows by stage 2
+row_identity_churn/stable/sleeping_off_tree: tree over the receipt: translations +0 evictions +0 patches +0; static_rebuilds 1 members 1
+row_identity_churn/swap_churn/sleeping_off_tree: 4 churn steps built 4 maps and resolved 4 rows by stage 2
+row_identity_churn/swap_churn/sleeping_off_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+row_identity_churn/archetype_shift/sleeping_off_tree: 4 churn steps built 4 maps and resolved 5 rows by stage 2
+row_identity_churn/archetype_shift/sleeping_off_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+row_identity_churn/first_archetype_spawn/sleeping_off_tree: 4 churn steps built 4 maps and resolved 2 rows by stage 2
+row_identity_churn/first_archetype_spawn/sleeping_off_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+row_identity_churn/burst_despawn/sleeping_off_tree: 4 churn steps built 4 maps and resolved 124 rows by stage 2
+row_identity_churn/burst_despawn/sleeping_off_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+row_identity_churn/burst_migrate/sleeping_off_tree: 4 churn steps built 4 maps and resolved 2546 rows by stage 2
+row_identity_churn/burst_migrate/sleeping_off_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+row_identity_churn/stable/sleeping_on_allpairs: 4 churn steps built 0 maps and resolved 0 rows by stage 2
+row_identity_churn/swap_churn/sleeping_on_allpairs: 4 churn steps built 4 maps and resolved 4 rows by stage 2
+row_identity_churn/archetype_shift/sleeping_on_allpairs: 4 churn steps built 4 maps and resolved 5 rows by stage 2
+row_identity_churn/first_archetype_spawn/sleeping_on_allpairs: 4 churn steps built 4 maps and resolved 2 rows by stage 2
+row_identity_churn/burst_despawn/sleeping_on_allpairs: 4 churn steps built 4 maps and resolved 124 rows by stage 2
+row_identity_churn/burst_migrate/sleeping_on_allpairs: 4 churn steps built 4 maps and resolved 2546 rows by stage 2
+row_identity_churn/stable/sleeping_on_tree: 4 churn steps built 0 maps and resolved 0 rows by stage 2
+row_identity_churn/stable/sleeping_on_tree: tree over the receipt: translations +0 evictions +0 patches +0; static_rebuilds 1 members 1
+row_identity_churn/swap_churn/sleeping_on_tree: 4 churn steps built 4 maps and resolved 4 rows by stage 2
+row_identity_churn/swap_churn/sleeping_on_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+Benchmarking row_identity_churn/swap_churn/sleeping_on_tree
+Benchmarking row_identity_churn/swap_churn/sleeping_on_tree: Warming up for 3.0000 s
+Benchmarking row_identity_churn/swap_churn/sleeping_on_tree: Collecting 20 samples in estimated 5.2069 s (1260 iterations)
+Benchmarking row_identity_churn/swap_churn/sleeping_on_tree: Analyzing
+row_identity_churn/archetype_shift/sleeping_on_tree: 4 churn steps built 4 maps and resolved 5 rows by stage 2
+row_identity_churn/archetype_shift/sleeping_on_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+row_identity_churn/first_archetype_spawn/sleeping_on_tree: 4 churn steps built 4 maps and resolved 2 rows by stage 2
+row_identity_churn/first_archetype_spawn/sleeping_on_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+row_identity_churn/burst_despawn/sleeping_on_tree: 4 churn steps built 4 maps and resolved 124 rows by stage 2
+row_identity_churn/burst_despawn/sleeping_on_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+row_identity_churn/burst_migrate/sleeping_on_tree: 4 churn steps built 4 maps and resolved 2546 rows by stage 2
+row_identity_churn/burst_migrate/sleeping_on_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1

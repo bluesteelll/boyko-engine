@@ -162,7 +162,7 @@ NoL));` (vis starts as the SDF analytic term from `gMaterial.r`).
    with a 20-entry layout (the 19 existing + binding 19 `DescriptorKind::AccelerationStructure`). Otherwise the
    software pipeline/layout is unchanged (byte-identical). **Store as ADDITIVE `Option` fields, NOT mutations
    (critic P1-3):** `GBufferScene` gains `#[cfg(feature="hwrt")] resolve_pipeline_hwrt: Option<&'a ComputePipeline>`
-   (beside the existing single `resolve_pipeline` @scene_types.rs:944) — `None` ⇒ software ⇒ byte-identical.
+   (beside the existing single `resolve_pipeline` @scene_types.rs:946) — `None` ⇒ software ⇒ byte-identical.
    The layouts DIFFER (19 vs 20 bindings), so `resolve_pipeline_hwrt` must carry its OWN pipeline+layout.
 10. **`crates/boyko_rhi_vulkan/src/present/targets.rs:561-691`** — build a SECOND per-FIF resolve set for the
     HWRT variant (a `#[cfg(feature="hwrt")] resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>` on
@@ -186,7 +186,7 @@ NoL));` (vis starts as the SDF analytic term from `gMaterial.r`).
 
 12. **Build→trace barrier** — insert `crate::accel::cmd_acceleration_structure_barrier(self.fns, cmd)`
     (`accel.rs:589`; `AS_WRITE→AS_READ`, stages `AS_BUILD→COMPUTE_SHADER`) **immediately after the
-    `cmd_build_acceleration_structures` at `gbuffer.rs:317`**, inside the existing `#[cfg(feature="hwrt")]`
+    `cmd_build_acceleration_structures` at `gbuffer.rs:622`**, inside the existing `#[cfg(feature="hwrt")]`
     + `if let (Some(t), Some(fns))` gate (so the tlas-OFF path stays byte-identical). This orders the R2a-3
     TLAS build against the resolve's rayQuery read (the TLAS backing is untracked by the framegraph, so a
     raw barrier is correct — no double-transition). The resolve dispatch is at `gbuffer.rs:1505-1548`;

@@ -36,6 +36,14 @@
 //! Run: `cargo test -p boyko_rhi_vulkan --test ddgi_probe_gi_cost -- --ignored --nocapture
 //! --test-threads=1` with `BOYKO_DISABLE_VALIDATION=1` (validation is crash-prone on the box).
 
+// clippy 1.98's `chunks_exact_to_as_chunks` fires on the RGBA readback loops below.
+// Left as `chunks_exact` DELIBERATELY: every site here sits inside a `zip` / `filter` /
+// `enumerate` chain where `as_chunks().0` changes the item type from `&[u8]` to
+// `&[u8; N]`, so the rewrite is semantic rather than textual - and these targets need a
+// GPU, so the edit could not be verified by running them on this headless box. The
+// LIBRARY code this lint flagged was converted properly; this is the test-only remainder.
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 use core::ptr::NonNull;
 use std::time::Instant;
 
@@ -552,7 +560,7 @@ fn measure_config(
 /// is `u32`-granular; `48 == 12 * 4`).
 fn bytemuck_u32s(bytes: &[u8; 48]) -> Vec<u32> {
     let mut out = Vec::with_capacity(12);
-    for chunk in bytes.chunks_exact(4) {
+    for chunk in bytes.as_chunks::<4>().0 {
         out.push(u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     out
@@ -562,7 +570,7 @@ fn bytemuck_u32s(bytes: &[u8; 48]) -> Vec<u32> {
 /// full sweep, prints per-config `median / p95 / stddev`. The orchestrator reads these numbers to
 /// derive the shipped cadence; nothing here asserts a derived value.
 #[test]
-#[ignore = "cost measurement (RTX + --nocapture --test-threads=1); the orchestrator runs it"]
+#[ignore = "gpu: cost measurement (RTX + --nocapture --test-threads=1); the orchestrator runs it"]
 fn ddgi_probe_gi_cost() {
     let Some(ctx) = boot_or_skip() else {
         return;

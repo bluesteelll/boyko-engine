@@ -20,10 +20,10 @@ Both resources are inserted automatically by [`App::finish`](plugins.md) (and th
 that owns its own frame loop inserts them by hand — see
 [Driving the clock without an App](#driving-the-clock-without-an-app) below.
 
-> Source: [`core/time/`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/time/mod.rs) —
-> [`time.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/time/time.rs),
-> [`fixed_time.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/time/fixed_time.rs),
-> [`fixed_loop.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/time/fixed_loop.rs).
+> Source: [`core/time/`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/time/mod.rs) —
+> [`time.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/time/time.rs),
+> [`fixed_time.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/time/fixed_time.rs),
+> [`fixed_loop.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/time/fixed_loop.rs).
 
 ## The two clocks at a glance
 
@@ -212,7 +212,11 @@ flowchart TD
     G --> H
 ```
 
-Step ④ is the catch-up loop. [`fixed_advance`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/time/fixed_loop.rs#L51)
+Before step ①, the driver also runs the profiler's frame fold (step ⓪ in
+[App & Plugins](plugins.md#the-frame-driver)). Without an armed profiler it costs
+one predicted branch.
+
+Step ④ is the catch-up loop. [`fixed_advance`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/time/fixed_loop.rs)
 adds this frame's *virtual* delta to `FixedTime::overstep`, then repeatedly
 expends one whole timestep — running the Fixed schedule once per expense — until
 the accumulator drops below one step. So the Fixed schedule can run:
@@ -283,9 +287,11 @@ Read the alpha from **Main**, never from a Fixed system: the frame-driver order
 guarantees the loop has finished expending before Main runs, so `overstep <
 timestep` and the alpha is a clean `[0, 1)`. Mid-catch-up a Fixed system could
 still see `overstep >= timestep`; `overstep_fraction` then saturates just below
-`1.0` rather than exceeding the documented range. The
-[physics](../simulation/physics.md) and rendering layers consume this alpha to do
-the blend on the GPU.
+`1.0` rather than exceeding the documented range. The windowed host consumes this
+alpha: it blends every entity that carries a `GpuTransform3D` pair between its
+previous and current pose, on the GPU (see
+[Windowed host](windowed-host.md)). [Physics](../simulation/physics.md) does not
+read it.
 
 ## Driving the clock without an App
 

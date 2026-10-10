@@ -7,7 +7,9 @@
 //! gather→solve→apply pipeline addresses by [`BodyIndex`]
 //! — see [`crate::systems`].
 
+use boyko_ecs::ecs::constants::POOL_MIN_ROWS;
 use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn};
+use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use boyko_macros::Resource;
 use boyko_threadpool::try_with_active_pool;
 use boyko_utils::bit_mask::bit_set_256::BitSet256;
@@ -16,31 +18,67 @@ use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use crate::manifold::{BodyIndex, Manifold};
 use crate::math::{Mat3, Quat, Vec3};
 use crate::narrowphase::axis_cache::BoxAxisCache;
-use crate::scratch_ids::{body_state_id, register_scratch_layouts, scratch_reserve_rows};
+use crate::narrowphase::carry::{NO_SEQ, PairCarry, PairTag, build_jumpers};
+use crate::narrowphase::reuse::RowFrame;
+use crate::held_store::{HeldStore, HeldView};
+use crate::row_identity::{NO_ISLAND_KEY, NO_ROW, RemapCursor, RowIdentity, RowRemap, SleepLatch};
+use crate::solver::warm_records::ord;
+use crate::scratch_ids::{
+    bodies_prev_id, body_state_id, broadphase_column_id, graph_column_id, graph_island_info_id,
+    register_broadphase_column_layouts,
+    box_axis_cache_id, contact_pairs_id, contact_pairs_prev_id, jumper_bits_id, manifolds_id,
+    np_stage_id, row_frames_id,
+    register_narrowphase_column_layouts,
+    register_graph_column_layouts, register_scratch_layouts, scratch_reserve_rows,
+    sensor_overlaps_id, sleep_island_scratch_id, sleep_latch_id, sleep_latch_prev_id,
+    touched_awake_id,
+    touched_solver_id, vn_initial_id,
+    TREE_SL, register_tree_column_layouts, tree_column_id,
+};
+use crate::broadphase_tree::sphere_bound_feasible;
 use crate::systems::body_bounding_radius;
+
+#[path = "resources_views.rs"]
+mod views;
+
+pub use views::{
+    HELD_BASE, IslandIter, IslandManifolds, ManifoldsIter, ManifoldsView, PairsIter, PairsView,
+};
 
 /// Number of bits in one [`BitSet256`] chunk.
 const BITS_PER_CHUNK: usize = 256;
 
 /// Broadphase algorithm selector (plan O2, Decision 1; the 0%-gate flag).
 ///
-/// [`AllPairs`](BroadphaseKind::AllPairs) is the DEFAULT and runs the shipped
-/// O(n²) double loop byte-for-byte unchanged — so a world that never opts in is
-/// bit-identical to today (the campaign 0%-gate). [`Grid`](BroadphaseKind::Grid)
+/// [`Tree`](BroadphaseKind::Tree) is the DEFAULT since the tree broadphase's C4: the
+/// packed-BVH broadphase with a persistent static set
+/// ([`BroadphaseTree`](crate::broadphase_tree::BroadphaseTree)), whose pair set is
+/// AllPairs' exact set by construction (the same predicate on the same bits, one
+/// owner per pair, an integer-count assembly) — so the flip moved no result bit.
+/// [`AllPairs`](BroadphaseKind::AllPairs) runs the shipped O(n²) double loop
+/// byte-for-byte unchanged (cfg-A and every AllPairs pin run it). [`Grid`](BroadphaseKind::Grid)
 /// opts into the uniform-grid CSR counting-sort, which emits candidate pairs then
 /// applies the SAME sphere-bound feasibility predicate as all-pairs and SORTS the
 /// survivors by `(min, max)` — so its [`ContactPairs`] output is bit-identical to
-/// all-pairs (the O2 correctness gate). The choice is a single runtime branch in
-/// [`physics_broadphase`](crate::systems::physics_broadphase) (the one-branch
+/// all-pairs (the O2 correctness gate). The Tree is serial, and at or below
+/// `TREE_BRUTE_MAX_ROWS` rows it runs the all-pairs loop itself. The choice is a single
+/// runtime branch in [`physics_broadphase`](crate::systems::physics_broadphase) (the one-branch
 /// floor).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BroadphaseKind {
-    /// The shipped O(n²) all-pairs loop (DEFAULT) — byte-identical to today.
-    #[default]
+    /// The shipped O(n²) all-pairs loop — byte-identical to before O2 (opt-in since the
+    /// tree broadphase's C4).
     AllPairs,
     /// The uniform-grid CSR counting-sort broadphase (opt-in, O2). Produces a
     /// `(min, max)`-sorted pair set bit-identical to [`AllPairs`](Self::AllPairs).
     Grid,
+    /// The packed-BVH broadphase with a persistent static set (the DEFAULT since the
+    /// tree broadphase design's commit C4). Produces a `(min, max)`-sorted pair set
+    /// bit-identical to [`AllPairs`](Self::AllPairs); runs the all-pairs loop itself at or below
+    /// [`BroadphaseTree::brute_max_rows`](crate::broadphase_tree::BroadphaseTree::brute_max_rows)
+    /// rows.
+    #[default]
+    Tree,
 }
 
 /// Who drives [`PhysicsConfig::broadphase`] — the user (Manual, the 0%-gate) or
@@ -68,12 +106,84 @@ pub enum BroadphaseSelectMode {
     Auto,
 }
 
+/// Which kernel the box-vs-SDF narrowphase
+/// ([`physics_narrowphase_sdf`](crate::systems::physics_narrowphase_sdf)'s box path)
+/// folds the field with (plan O9).
+///
+/// This is a KERNEL selector in the shape of [`BroadphaseKind`] — a single runtime
+/// branch per box body, taken once per body per step, OUTSIDE the 8-corner loop —
+/// and deliberately NOT a `cfg`. Until 2026-09-03 the arm was chosen by
+/// `cfg(target_feature = "avx2")` alone, so enabling the `x86-64-v3` ISA baseline
+/// silently moved every build onto [`Avx2`](Self::Avx2) and its known divergence.
+/// A configuration that changes NUMERICS must be asked for, and asking for it must
+/// be visible in a diff — hence a resource field a reader can grep, not a build
+/// flag nobody reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SdfNarrowphaseKernel {
+    /// The frozen scalar corner-by-corner fold (DEFAULT) — the bit-oracle the
+    /// committed GPU goldens are blessed against, on every build and every ISA.
+    #[default]
+    Scalar,
+    /// The O9 AVX2 batched fold: the 8 corner distances in one
+    /// `sdf_edit_list_x8` call plus one 6-offset
+    /// batch per penetrating corner. Falls back to
+    /// [`Scalar`](Self::Scalar) on a non-AVX2 build and under Miri (the kernel is
+    /// x86-64 + AVX2 only), so selecting it is always legal.
+    ///
+    /// ⚠ **NOT bit-identical to [`Scalar`](Self::Scalar).** The x8 fold and the
+    /// scalar oracle diverge on the SIGN OF ZERO (`+0` where the oracle produces
+    /// `-0`) at a `±0` tie, because `f32::max`/`min` return the first operand on a
+    /// tie while the hardware `MAXPS`/`MINPS` return the second, and `clamp01_x8`'s
+    /// operand swap does not cover every tie site in the fold. The witness is
+    /// adversarial (coordinates near `1e9`, params at `-0.0`) and the manifold-level
+    /// differential still passes, so the practical exposure is small — but it is a
+    /// real divergence from the oracle the GPU goldens are compared against, it is
+    /// invisible to any value comparison (`+0 == -0`), and the fix is owner-deferred
+    /// (2026-09-02). The standing gate is
+    /// `sdf_simd::o9_kernel_tests::x8_bits_eq_scalar_bits_widened_proptest`, kept
+    /// `#[ignore]`d and RED rather than widened to a tolerance.
+    Avx2,
+}
+
+/// How a sleeping world treats its frozen islands (L10, `levers/L10-sleeping/`): the mode the
+/// colored broadphase records for each step, read only when
+/// [`PhysicsConfig::sleeping`] is on (a world with sleeping off runs [`Off`](Self::Off) whatever
+/// this says).
+///
+/// Every mode yields the same observables — poses, velocities, sleep latches, the logical
+/// contact views, island ids and queries, warm-start seeds — bit for bit: [`Off`](Self::Off) is
+/// the oracle the other mode is gated against.
+///
+/// A write to `PhysicsConfig::sleep_skip` takes effect at the next broadphase.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SleepSkip {
+    /// A frozen island is still collided every step; only its solve and integrate are
+    /// skipped (the O8 path). The oracle.
+    Off,
+    /// A frozen, clean island is HELD: its pairs skip the narrowphase, the SDF stage, the
+    /// colouring and the solve, and its contacts are kept for the views (DEFAULT). A held
+    /// island is restored — collided again from what it kept — the step its inputs change
+    /// (`sleep_sets.rs`), and a change of `contact_reuse`, `contact_reuse_distance`,
+    /// `speculative_distance`, `speculative_velocity_cap`, `dt`, the effective warm start (the
+    /// solver's setup flag AND
+    /// [`PhysicsConfig::warm_start`], L10 D5b), the SDF field or its kernel restores every held
+    /// island.
+    #[default]
+    Sets,
+}
+
 /// Global physics tunables (plan D1; P2 W1 soft-constraint set).
 ///
 /// `gravity`, `substeps`, `relax_iterations`, and the soft-constraint pair
 /// (`contact_hertz` / `contact_damping`) are user-set; `dt` is NOT — it is
 /// stamped by [`physics_gather`](crate::systems::physics_gather) from the
 /// fixed clock each step (OQ-1), so a hand-set value is overwritten.
+///
+/// Read once per step, by the broadphase; every later stage of that step runs with the value
+/// read then ([`StepInputs`](crate::step_inputs::StepInputs), L10 D9b). A write takes effect at
+/// the next broadphase, whether it writes a field, assigns a new value, or calls
+/// `insert_resource`. A value must keep the pipeline's wiring (`broadphase == Grid` on the
+/// coupling path). Removing this resource after setup is not supported.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct PhysicsConfig {
     /// Constant acceleration applied to dynamic bodies each step (world
@@ -98,9 +208,24 @@ pub struct PhysicsConfig {
     /// damping. `1.0` is critically damped; the Box2D-v3 "Soft Step" default of
     /// `10.0` is heavily overdamped for stable resting contact.
     pub contact_damping: f32,
-    /// Broadphase algorithm (default [`BroadphaseKind::AllPairs`] = the shipped
-    /// O(n²) loop, byte-identical to today). Set to [`BroadphaseKind::Grid`] to
-    /// opt into the O2 uniform-grid broadphase, whose pair set is bit-identical to
+    /// Warm-start contacts from the previous step's impulses (default `true`, L10 D5b). A shipped
+    /// solver runs warm iff this AND its setup flag are both true
+    /// ([`ColoredSoftStepSolver::with_warm_start`](crate::solver::ColoredSoftStepSolver::with_warm_start),
+    /// [`SoftStepSolver::with_warm_start`](crate::solver::SoftStepSolver::with_warm_start)); a
+    /// custom solver must honour it ([`RigidSolver::solve`](crate::solver::RigidSolver::solve)). The
+    /// pipeline reads it once per step, at the broadphase; a write takes effect at the next one.
+    ///
+    /// In the plugin's pipelines, whose rows are gathered every step, the first warm step after a
+    /// cold one seeds every contact with zero, and every island asleep at that step (frozen, or
+    /// held by the sleep-skip) keeps no warm memory and wakes cold whenever it wakes. On a sleeping
+    /// colored world a change of the effective value also restores every held island (L10 D5). A
+    /// direct-drive caller that never gathers rows (`solve_colored`, `solve_colored_sleeping`,
+    /// `RigidSolver::solve`) resumes from the impulses its last warm solve stored.
+    pub warm_start: bool,
+    /// Broadphase algorithm (default [`BroadphaseKind::Tree`] since the tree broadphase's
+    /// C4 = the packed-BVH broadphase with a persistent static set). Set to
+    /// [`BroadphaseKind::AllPairs`] for the shipped O(n²) loop, or to [`BroadphaseKind::Grid`]
+    /// for the O2 uniform-grid broadphase; every kind's pair set is bit-identical to
     /// all-pairs (the 0%-gate flag — a single runtime branch in
     /// [`physics_broadphase`](crate::systems::physics_broadphase)).
     pub broadphase: BroadphaseKind,
@@ -115,43 +240,73 @@ pub struct PhysicsConfig {
     /// (the O2 0%-correctness gate), `Auto` is result-transparent — it changes the
     /// broadphase, never a physics result bit.
     pub broadphase_select: BroadphaseSelectMode,
-    /// Opt into the O1 AVX2 width-only SoA kernels for the hot per-substep
-    /// `refresh_inertia` (`R · I⁻¹_local · Rᵀ`) and the gravity/position/quaternion
-    /// integrate loop (default `false`). These are a PURE speed path: each AVX2
+    /// Run the O1 AVX2 width-only SoA kernels for the hot per-substep
+    /// `refresh_inertia` (`R · I⁻¹_local · Rᵀ`) and the gravity integrate loop
+    /// (default `true` since 2026-09-03). These are a PURE speed path: each AVX2
     /// lane mirrors the scalar op sequence exactly — exact `mul`/`add`/`sub`/`div`/
     /// `sqrt`, NO FMA contraction, NO `rsqrt`/`rcp` — so the SIMD output is
     /// BIT-IDENTICAL to the scalar path (the `simd_o1` differential proptest is the
-    /// gate). The scalar path stays the default and the bit-oracle (the campaign
-    /// 0%-gate); when this flag is `false`, or on a non-AVX2 build, the solver runs
-    /// the byte-identical scalar kernels. Toggling it changes performance, never
-    /// the result.
+    /// gate). Set it to `false` to run the scalar bit-oracle instead: the two
+    /// produce the same bits, so the flag changes performance, never the result.
+    ///
+    /// It is also a no-op on a non-AVX2 build — the dispatchers in
+    /// [`crate::solver::simd`] are `cfg(target_feature = "avx2")`-gated and take the
+    /// scalar arm there. The gate has no `not(miri)` term, so under Miri the arm
+    /// follows the Miri build's own target features, exactly as natively.
+    ///
+    /// **It does NOT gate the position/quaternion integrate**, which both solvers
+    /// call with a hard-coded `false`: the SoA kernel MEASURED ~1.6× SLOWER on the
+    /// AoS `BodyState` (see the note at the call site in
+    /// [`SoftStepSolver`](crate::solver::SoftStepSolver)). Nor does it gate the O7
+    /// colored solve ([`simd_solve`](Self::simd_solve)) or the box-vs-SDF
+    /// narrowphase kernel ([`sdf_narrowphase`](Self::sdf_narrowphase)) — the latter
+    /// deliberately, because that arm is not bit-identical.
     pub simd: bool,
-    /// Opt into the O7 AVX2 cohort-batched colored CONTACT SOLVE (default `false`),
-    /// independent of [`simd`](Self::simd) (which gates only the O1 integrate /
-    /// inertia kernels). This is the SEPARATE A/B + rollback knob for the
-    /// 8-lane-per-cohort [`solve_color_avx2`](crate::solver::ColoredSoftStepSolver)
-    /// kernel: when `true`, the colored solve widens its per-color sweep over
-    /// cohorts of 8 body-disjoint manifold-groups; when `false`, it runs the
-    /// byte-identical scalar `solve_color` oracle (the O6 0%-gate).
+    /// Run the O7 AVX2 cohort-batched colored CONTACT SOLVE (default `true` since
+    /// 2026-09-18, owner decision), independent of [`simd`](Self::simd) (which gates
+    /// only the O1 integrate / inertia kernels). This is the SEPARATE A/B + rollback
+    /// knob for the 8-lane-per-cohort
+    /// [`solve_color_avx2`](crate::solver::ColoredSoftStepSolver) kernel: when
+    /// `true`, the colored solve widens its per-color sweep over cohorts of 8
+    /// body-disjoint manifold-groups; when `false`, it runs the scalar `solve_color`
+    /// oracle (the O6 path).
     ///
     /// Like [`simd`](Self::simd) it is a PURE speed path — each AVX2 lane mirrors the
     /// scalar op sequence exactly (exact `mul`/`add`/`sub`/`div`/`sqrt`, NO FMA, NO
     /// `rsqrt`/`rcp`), so the widened solve is BIT-IDENTICAL to the scalar colored
     /// result for any cohort shape and worker count (the differential + the
-    /// `{1, N}×{simd}` parallel tests are the gate). It is effective only on the
-    /// colored-solve path ([`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver)
-    /// driven by [`physics_solve_colored`](crate::systems::physics_solve_colored));
-    /// it is a no-op for the shipped [`SoftStepSolver`](crate::solver::SoftStepSolver)
-    /// and on a non-AVX2 build / Miri (both arms then run the scalar oracle). Default
-    /// OFF so an un-opted world is byte-identical to the O6 colored solve; enabling
-    /// the O7 solve needs `simd_solve == true` (it does NOT follow [`simd`](Self::simd)).
+    /// `{1, N}×{simd}` parallel tests are the gate). Setting it to `false` changes
+    /// performance, never a result bit. It is effective only on the colored-solve
+    /// path ([`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver) — the
+    /// default world's solver — driven by
+    /// [`physics_solve_colored`](crate::systems::physics_solve_colored)); it is a
+    /// no-op for the reference [`SoftStepSolver`](crate::solver::SoftStepSolver) and
+    /// on a non-AVX2 build (both arms then run the scalar oracle). The dispatch gate
+    /// has no `not(miri)` term, so under Miri the arm follows the Miri build's own
+    /// target features, exactly as natively. It does NOT follow [`simd`](Self::simd).
     pub simd_solve: bool,
+    /// Which kernel the box-vs-SDF narrowphase folds the field with (default
+    /// [`SdfNarrowphaseKernel::Scalar`] = the frozen scalar oracle).
+    ///
+    /// Read once per box body in
+    /// [`physics_narrowphase_sdf`](crate::systems::physics_narrowphase_sdf); a no-op
+    /// for a world that never registers the SDF stage
+    /// ([`add_physics_sdf`](crate::plugin::add_physics_sdf)).
+    ///
+    /// ⚠ Unlike [`simd`](Self::simd) and [`simd_solve`](Self::simd_solve), which are
+    /// bit-identity-gated pure speed paths, [`Avx2`](SdfNarrowphaseKernel::Avx2) is
+    /// a KNOWN-DIVERGENT arm (`±0`, owner-deferred fix) — read that variant's docs
+    /// before setting it. It is a separate field precisely so that flipping `simd`
+    /// cannot drag the divergence in with it.
+    pub sdf_narrowphase: SdfNarrowphaseKernel,
     /// Opt into the O3 PARALLEL candidate EMIT in the
     /// [`BroadphaseGrid`](BroadphaseGrid) (default `false`).
     ///
     /// Effective only on the grid broadphase path
     /// ([`BroadphaseKind::Grid`](BroadphaseKind::Grid)); it is a no-op for the
-    /// shipped all-pairs loop. When `true`,
+    /// shipped all-pairs loop and for the tree broadphase, whose query has a
+    /// switch of its own, [`parallel_tree_query`](Self::parallel_tree_query) (S5;
+    /// this flag keeps its Grid-only meaning, D6 of the tree's design). When `true`,
     /// [`physics_broadphase`](crate::systems::physics_broadphase) routes the grid
     /// to [`BroadphaseGrid::build_parallel`](BroadphaseGrid::build_parallel), which
     /// keeps the CSR build (count + prefix-sum + scatter) and the oversized emit
@@ -171,27 +326,29 @@ pub struct PhysicsConfig {
     /// [`build`](BroadphaseGrid::build), byte-identical to O2 (the campaign
     /// 0%-gate). Toggling it changes performance, never the result.
     pub parallel_broadphase: bool,
-    /// Opt into building the [`ConstraintGraph`] after narrowphase — constraint
-    /// islands + greedy graph coloring (plan O4, Decision 2 / Decision 7).
+    /// Whether the pipeline builds the [`ConstraintGraph`] after narrowphase —
+    /// constraint islands + greedy graph coloring (plan O4, Decision 2 / Decision 7).
     ///
-    /// When `true`, the [`physics_build_graph`](crate::systems::physics_build_graph)
+    /// Written by the plugin at wire-up: `true` for every world whose solver is
+    /// [`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver) (the default,
+    /// [`DefaultRigidSolver`](crate::solver::DefaultRigidSolver)) and for
+    /// [`add_physics_colored`](crate::plugin::add_physics_colored) with any solver.
+    /// It records the schedule's shape and nothing reads it at runtime: the
+    /// [`physics_build_graph`](crate::systems::physics_build_graph) stage runs iff
+    /// it was registered, so setting this field after wire-up changes nothing. The
     /// stage partitions each step's manifolds into islands (connected components
     /// over DYNAMIC bodies, Box2D's ground rule) and greedy-colors them so no color
-    /// shares a dynamic body — the enabler for the future colored/SIMD/parallel
-    /// solve (O5+). **In O4 the partition is built and validated but NOT consumed:
-    /// the shipped [`SoftStepSolver`](crate::solver::SoftStepSolver) still solves
-    /// in manifold order**, so the simulation output is byte-identical whether this
-    /// flag is on or off (it is a pure pre-compute). The DEFAULT is `false`, so an
-    /// un-opted world never runs the stage (the campaign 0%-gate). The colored path
-    /// is registered ONLY by
-    /// [`add_physics_colored`](crate::plugin::add_physics_colored).
+    /// shares a dynamic body. The colored solve consumes the partition; with the
+    /// reference [`SoftStepSolver`](crate::solver::SoftStepSolver) on the
+    /// `add_physics_colored` path it is built but NOT consumed (the O4 shape,
+    /// byte-identical to the graph-free reference). The struct default is `false`.
     pub colored: bool,
-    /// Opt into the O6 PARALLEL per-color solve (default `false`).
+    /// The O6 PARALLEL per-color solve (default `true` since L4).
     ///
     /// Effective only on the colored-solve path (the
     /// [`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver) driven by
-    /// the [`physics_solve_colored`](crate::systems::physics_solve_colored) stage);
-    /// it is a no-op for the shipped
+    /// the [`physics_solve_colored`](crate::systems::physics_solve_colored) stage —
+    /// the default world's solve); it is a no-op for the reference
     /// [`SoftStepSolver`](crate::solver::SoftStepSolver). When `true`, each color's
     /// manifold-groups are dispatched across the ambient
     /// [`ThreadPool`](boyko_threadpool::ThreadPool)'s workers via `pool.scope`,
@@ -203,41 +360,163 @@ pub struct PhysicsConfig {
     /// **Bit-identity is the gate:** the parallel result is BIT-FOR-BIT identical to
     /// the single-threaded colored solve for ANY worker count (the disjoint-body
     /// partition makes each body's accumulation independent of which worker runs
-    /// which group, and the canonical IM-2b warm store is worker-count-independent).
-    /// When `false` — or when no pool is attached to the running thread — the
-    /// colored solve runs the O5 single-threaded path, BYTE-IDENTICAL to O5 (the
-    /// O6 0%-gate). Toggling it changes performance, never the result.
+    /// which group, and the warm store — a write by manifold index — is
+    /// worker-count-independent).
+    /// When `false` — or when no pool is attached to the running thread, or the
+    /// attached pool has a single worker — the colored solve runs the O5
+    /// single-threaded path, BYTE-IDENTICAL to O5 (the O6 0%-gate). The one-worker
+    /// case is decided once per step, before any color: a W=1 world with the flag on
+    /// takes exactly the path of a W=1 world with it off and opens no `pool.scope`
+    /// (gated by `one_worker_parallel_solve_takes_the_inline_path`). Toggling it
+    /// changes performance, never the result.
     pub parallel_solve: bool,
+    /// The L5 PARALLEL narrowphase (default `true` since L5 C4).
+    ///
+    /// When `true`, [`physics_narrowphase`](crate::systems::physics_narrowphase) splits
+    /// the step's candidate pairs into contiguous chunks and collides them across the
+    /// ambient [`ThreadPool`](boyko_threadpool::ThreadPool)'s workers via one
+    /// `pool.scope`. Each chunk writes its manifolds into its own rows of an ECS-owned
+    /// staging column and its chosen box-box axes into its own rows of a per-pair
+    /// commit; after the join the calling thread joins the chunks' runs in pair order
+    /// and replays the axis writes into the hysteresis table serially, in pair order.
+    ///
+    /// **Bit-identity is the gate:** the manifold stream, the sensor-overlap stream,
+    /// the hysteresis table state and so every pose are identical to the serial loop
+    /// for any worker count, any chunk partition and any steal order
+    /// ([`BoxAxisCache`]'s Lemmas 1 and 2; `narrowphase/dispatch.rs`, Lemma 3).
+    ///
+    /// It is a request. The step still runs the serial loop, byte-identical to a world
+    /// with the flag off, when no pool is attached to the running thread, when the pool
+    /// has a single worker, or when the pair count yields fewer than two chunks of
+    /// [`NP_MIN_PAIRS_PER_CHUNK`](crate::narrowphase::NP_MIN_PAIRS_PER_CHUNK) pairs. So
+    /// a one-worker world takes exactly the path of a world with the flag off and opens
+    /// no `pool.scope` (gated by `one_worker_parallel_narrowphase_runs_the_serial_loop`).
+    /// A dispatched step costs one `pool.scope` (a boxed shared frame plus its task
+    /// blocks), pinned by the frame allocation census. Toggling it changes performance,
+    /// never the result.
+    pub parallel_narrowphase: bool,
+    /// S5, the PARALLEL TREE QUERY (default `false`;
+    /// `docs/physics/perf-campaign/levers/scaling/01-DESIGN.md` §6.5).
+    ///
+    /// Read only on the tree broadphase path ([`BroadphaseKind::Tree`]): the broadphase
+    /// system mirrors it into the [`BroadphaseTree`](crate::broadphase_tree::BroadphaseTree)
+    /// on every Tree step (`BroadphaseTree::parallel_query`). The query that reads it lands in
+    /// S5's commit C2; until then it changes nothing.
+    pub parallel_tree_query: bool,
+    /// L9b CONTACT REUSE (default `true` since commit C4, built in commit C3 of
+    /// `docs/physics/perf-campaign/levers/L9-contact-reuse/02-DESIGN-REV1.md`).
+    ///
+    /// When `true`, a touching box-box pair that is slow (its relative motion over a step
+    /// is small against the reuse distance) and involves no sensor keeps a record of its
+    /// last full collision — the reference face and the kept incident points, or the edge
+    /// pair — and, while its relative pose stays within τ_eff of that collision (measured
+    /// in the larger body's frame, scaled by the smaller body's extent), refreshes the
+    /// record from the current poses instead of running the SAT and the clip: each kept
+    /// point is carried with its body and its separation re-measured against the reference
+    /// face, and a point that lifted off is dropped (`narrowphase/reuse.rs`).
+    ///
+    /// **It changes values**, within the design's bounds (lemma L9-L3): an unseen feature
+    /// penetrates at most τ_eff before the next full collision, and the lever arms are off
+    /// by at most τ_eff. It never changes determinism: the output of a slow pair is a pure
+    /// function of its record and the current poses (a miss emits the refresh of the record
+    /// it just built, lemma L9-L1), and the serial loop and any partition of the parallel
+    /// narrowphase produce the same bits for any worker count.
+    ///
+    /// **Default ON** since L9 C4 (window 6's decision). `false` is the exact narrowphase: with
+    /// [`Self::speculative_distance`] and [`Self::speculative_velocity_cap`] both `0`, the
+    /// trajectories from before contact reuse, and the arm cross-window bridges run.
+    /// Toggling it at runtime needs no epoch: off, the records are ignored and not written;
+    /// on, the next full collision of a slow pair builds one.
+    pub contact_reuse: bool,
+    /// τ, the reuse distance in metres (default [`DEFAULT_CONTACT_REUSE_DISTANCE`], 1 mm);
+    /// only meaningful when [`contact_reuse`](Self::contact_reuse) is `true`. Must be finite
+    /// and `>= 0`; `0` disables reuse in effect (only bitwise-unchanged poses would hit).
+    ///
+    /// A pair's effective distance τ_eff is `τ` clamped by 5 % of the smaller bounding
+    /// radius and by 5 % of the thinnest half-extent of either box, so small and thin boxes
+    /// get a proportionally tighter bound. A change takes effect at the next check.
+    pub contact_reuse_distance: f32,
+    /// V2's speculative contact distance `d`, in metres (default
+    /// [`DEFAULT_SPECULATIVE_DISTANCE`], 20 mm, the owner's value, 2026-09-30). **It changes
+    /// values**: a contact point is kept while its separation is at most `d` plus the
+    /// approach-velocity margin
+    /// ([`speculative_velocity_cap`](Self::speculative_velocity_cap)), on every pair type (box-box,
+    /// sphere-sphere, sphere-box, SDF), a body's broadphase bounding sphere is inflated by `d / 2`
+    /// (plus its own velocity term) so every such pair is a candidate, and the solvers solve a
+    /// point whose current separation is positive as a speculative contact (`bias = s / h`, no
+    /// push) — Box2D v3's and Jolt's rule. A pair with a sensor on either side uses the
+    /// overlap-only rule, so overlap reports stay exact.
+    ///
+    /// **`0`, with the velocity term off, is the overlap-only rule, bit for bit the engine before
+    /// V2**: the value every cross-window bridge runs. Must be finite and `>= 0`. A change takes
+    /// effect at the next broadphase, and restores every held island (L10's sleep epoch).
+    pub speculative_distance: f32,
+    /// V2's approach-velocity margin (rulings 2026-09-30, item 9): the cap, in metres, on the
+    /// velocity term a pair's speculative margin adds to
+    /// [`speculative_distance`](Self::speculative_distance) — `d_eff = d + min(cap, max(0, approach)
+    /// · dt)`, `approach` the rate at which the two bodies close the gap at the start of the step
+    /// (per contact point, linear and angular; per SAT axis, the bound no point exceeds). Default
+    /// [`DEFAULT_SPECULATIVE_VELOCITY_CAP`], 0.5 m, the owner-ruled value. **It changes
+    /// values**: a pair that closes more than `d` in one step becomes a contact on the step
+    /// before it touches, instead of landing on whichever corner arrives first (F0g: J-T holds at
+    /// every drop height of the gap sweep with it, and at under half of them without it). Each
+    /// body's broadphase radius grows by `min(cap, (|v| + |ω| R) · dt)` to match.
+    ///
+    /// **`0` switches the term off**; with [`speculative_distance`](Self::speculative_distance)
+    /// `= 0` as well, the overlap-only rule. Must be finite and `>= 0`. A change takes effect at
+    /// the next broadphase, and restores every held island (L10's sleep epoch).
+    pub speculative_velocity_cap: f32,
     /// Opt into the O8 per-island SLEEPING / deactivation (default `false`).
     ///
     /// Effective only on the colored-solve path (the
     /// [`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver) driven by
     /// [`physics_solve_colored`](crate::systems::physics_solve_colored)) — it consumes
-    /// the [`ConstraintGraph`] islands (O4), so it is a no-op for the shipped
-    /// [`SoftStepSolver`](crate::solver::SoftStepSolver). When `true`, the solver
+    /// the [`ConstraintGraph`] islands (O4), so it is a no-op — silently — for the
+    /// reference [`SoftStepSolver`](crate::solver::SoftStepSolver). When `true`, the solver
     /// tracks a per-island SPEED² metric (`max body |v|²+|ω|²`, mass-INDEPENDENT) with
     /// a per-row debounce counter; an island below
     /// [`sleep_threshold`](Self::sleep_threshold) for
     /// [`sleep_frames`](Self::sleep_frames) consecutive frames is FROZEN and thereafter
     /// SKIPS ONLY its SOLVE + INTEGRATE work — the gather still walks every row (IM-1
-    /// intact), so a frozen body keeps its dense-row warm key (no warm-start thrash).
+    /// intact). A frozen body's warm entries are keyed by row, and lookups are
+    /// translated through the row identity map when its row moves (interim,
+    /// `row_identity.rs`).
     ///
-    /// The sleep state is keyed per BODY ROW (rows are stable across frames), and the
-    /// per-frame freeze decision is DERIVED from the rows (an island is frozen iff
-    /// every member row is latched asleep). So a slept pile that a faller / new body
-    /// joins wakes the SAME frame the contact appears (wake-on-merge), and a topology
-    /// change cannot spuriously freeze a moving island.
+    /// The sleep state is stored per BODY ROW. Rows are not stable: a despawn
+    /// swap-removes, a spawn appends, and a component insert or remove migrates a body
+    /// and shifts later rows. `IslandSleep::rekey_rows` re-keys the latch to this
+    /// gather's rows at the start of each sleeping solve. The per-frame freeze decision
+    /// is DERIVED from the rows (an island is frozen iff every member row is latched
+    /// asleep), so a slept pile that a faller / new body joins wakes the SAME frame the
+    /// contact appears (wake-on-merge), and a merge or split cannot spuriously freeze a
+    /// moving island. A latched body whose island's manifold count changes, for example
+    /// because its support was removed, wakes on the first step whose contacts show the
+    /// change (wake-on-contact-change, `IslandSleep::begin_step`). A row move cannot
+    /// spuriously freeze an island either: rows are keyed by the entity's slot AND
+    /// generation, so a body spawned by a command applied inside the physics schedule
+    /// run, before the gather — which is flagged as added one gather late — starts with a
+    /// fresh latch even when it recycled a despawned body's slot (`row_identity.rs`).
     ///
     /// **Determinism:** the speed² compare is EXACT (no `sqrt`/`rsqrt`/`algebraic_*`),
     /// the debounce is a per-row integer, and the freeze decision is a pure function of
-    /// the per-row latch + this frame's island assignment (no `HashMap`, no volatile-id
-    /// carry), so sleeping-ON is run-to-run bit-deterministic. It is NOT bit-equivalent
-    /// to sleeping-off (sleeping deliberately stops integrating); the gate is
-    /// "sleeping-ON rest state == sleeping-OFF rest state to ε".
+    /// the per-row latch and island contact key + this frame's island assignment and
+    /// island manifold counts (no `HashMap`, no volatile-id carry), so sleeping-ON is
+    /// run-to-run bit-deterministic. It is NOT bit-equivalent to sleeping-off (sleeping
+    /// deliberately stops integrating); the gate is "sleeping-ON rest state ==
+    /// sleeping-OFF rest state to ε".
     ///
     /// **Default OFF** so an un-opted colored world is BYTE-IDENTICAL to the O6/O7
     /// colored solve (the campaign 0%-gate); enabling it is the entire opt-in.
     pub sleeping: bool,
+    /// How a sleeping world treats its frozen islands (L10; default [`SleepSkip::Sets`]);
+    /// only meaningful when [`sleeping`](Self::sleeping) is `true`, and only on the colored
+    /// path, where the broadphase records it for the step.
+    ///
+    /// Every value gives the same observables bit for bit ([`SleepSkip::Off`] is the oracle),
+    /// so it changes cost, never a result: the per-slot narrowphase tags of held pairs, and the
+    /// warm store's and the hysteresis table's bytes, are what differ, never a lookup or a
+    /// view.
+    pub sleep_skip: SleepSkip,
     /// Per-island SPEED² threshold below which an island is a sleep CANDIDATE (default
     /// [`DEFAULT_SLEEP_THRESHOLD`]); only meaningful when [`sleeping`](Self::sleeping)
     /// is `true`.
@@ -245,10 +524,10 @@ pub struct PhysicsConfig {
     /// The tracked metric is `max over the island's dynamic bodies of
     /// (|linear_velocity|² + |angular_velocity|²)` — pure speed² + angular speed²,
     /// **mass-INDEPENDENT** (no mass term — a light-fast body has a high `|v|²` and so
-    /// correctly stays awake). It is the Box2D-style sleep metric, computed with exact
+    /// correctly stays awake), velocity-only and taken per island, computed with exact
     /// arithmetic (no `sqrt`). An island whose busiest body is below this for
     /// [`sleep_frames`](Self::sleep_frames) consecutive frames sleeps. Units:
-    /// (world-units/s)² + (rad/s)².
+    /// (world-units/s)² + (rad/s)². Box2D's metric differs (`IslandSleep::end_step`).
     pub sleep_threshold: f32,
     /// Consecutive frames an island must stay below
     /// [`sleep_threshold`](Self::sleep_threshold) before it is put to sleep — the
@@ -346,8 +625,36 @@ pub const DEFAULT_SLEEP_THRESHOLD: f32 = 1.0e-4;
 
 /// Default consecutive-frame debounce before an island sleeps (plan O8) — half a
 /// second at 120 Hz, long enough that a transient low-speed frame does not sleep a
-/// still-settling stack (the no-oscillation gate).
+/// still-settling stack (no velocity-driven flap; no self-wake from frozen energy).
 pub const DEFAULT_SLEEP_FRAMES: u16 = 60;
+
+/// Default contact-reuse distance τ, in metres (L9b D4): 1 mm, a tenth of A7-R1's 10 mm
+/// creep bound.
+pub const DEFAULT_CONTACT_REUSE_DISTANCE: f32 = 0.001;
+
+/// The owner's speculative contact distance (V2b, 2026-09-30), in metres: 20 mm, Jolt's
+/// `mSpeculativeContactDistance` and Box2D v3.1's `B2_SPECULATIVE_DISTANCE`, four times the support
+/// unevenness measured on the J-T pile (F0). A NUMERICS-CHANGING value: see
+/// [`PhysicsConfig::speculative_distance`].
+pub const DEFAULT_SPECULATIVE_DISTANCE: f32 = 0.02;
+
+/// The owner-ruled cap on V2's approach-velocity margin (rulings 2026-09-30, item 9), in metres:
+/// half a metre, never reached on the J-T gap sweep F0g measured (a 2.0 m drop closes about
+/// 0.13 m per 1/60 s step). A NUMERICS-CHANGING value: see
+/// [`PhysicsConfig::speculative_velocity_cap`].
+pub const DEFAULT_SPECULATIVE_VELOCITY_CAP: f32 = 0.5;
+
+impl PhysicsConfig {
+    /// Whether V2's speculative contacts are on: a positive
+    /// [`speculative_distance`](Self::speculative_distance) or a positive
+    /// [`speculative_velocity_cap`](Self::speculative_velocity_cap). Off, every stage runs the
+    /// overlap-only rule, and both solvers their pre-V2 kernels.
+    #[inline]
+    #[must_use]
+    pub fn speculative_contacts(&self) -> bool {
+        self.speculative_distance > 0.0 || self.speculative_velocity_cap > 0.0
+    }
+}
 
 impl Default for PhysicsConfig {
     fn default() -> Self {
@@ -363,20 +670,43 @@ impl Default for PhysicsConfig {
             relax_iterations: 2,
             contact_hertz: 30.0,
             contact_damping: 10.0,
-            // Default to the shipped O(n²) loop so an un-opted world is
-            // byte-identical to today (the campaign 0%-gate).
-            broadphase: BroadphaseKind::AllPairs,
+            // L10 D5b: warm start on, as the solvers' own default; the effective value is this AND
+            // the solver's setup flag, so the default keeps every setup choice's effect.
+            warm_start: true,
+            // The tree broadphase's C4: the Tree by default. Its pair set is all-pairs'
+            // exact set (G1), so the flip moves no pose.
+            broadphase: BroadphaseKind::Tree,
             // Default Manual so the user owns `broadphase` (the P3 0%-gate): the
             // density policy only counts bodies, it never overrides the kind.
             broadphase_select: BroadphaseSelectMode::Manual,
-            // Default OFF so an un-opted world runs the scalar bit-oracle kernels
-            // (the campaign 0%-gate); the SIMD path is a pure opt-in speed path.
-            simd: false,
-            // Default OFF (independent of `simd`) so the colored solve runs the
-            // byte-identical scalar `solve_color` oracle (the O6 0%-gate); the O7
-            // cohort-batched solve is a pure opt-in speed path with a bit-identical
-            // result. Enabling it requires `simd_solve == true` explicitly.
-            simd_solve: false,
+            // Default ON since 2026-09-03. The O1 kernels are bit-identity-gated
+            // against their scalar oracles over counts 1..16 including partial tails,
+            // degenerate quaternions and adversarial inputs, and those gates became
+            // NON-VACUOUS for the first time when the `x86-64-v3` baseline landed
+            // (2026-09-02) — before that both O7 test binaries printed
+            // `running 0 tests` and the "green" proved nothing. With the gates
+            // actually executing the AVX2 arms, the campaign 0%-gate is satisfied by
+            // the bit-identity itself rather than by leaving the path unshipped.
+            // On a non-AVX2 build the dispatchers still take the scalar arm, so
+            // this is a no-op there. There is no Miri-specific fallback: under Miri
+            // the arm follows the Miri build's target features.
+            simd: true,
+            // Default ON since 2026-09-18 (owner decision), independent of `simd`.
+            // The O7 cohort kernel is bit-identical to the scalar colored oracle
+            // `solve_color` — no FMA, no `rcp`/`rsqrt`, the scalar op order per
+            // lane, and both `max` clamps are ±0-tie-free — and the `{1, N}×{simd}`
+            // differentials are the gate, so the flag changes performance, never a
+            // result bit. On a non-AVX2 build it is a no-op.
+            simd_solve: true,
+            // Default SCALAR because the AVX2 arm is the ONE SIMD path in this crate
+            // that is NOT bit-identical to its oracle: it returns `+0` where the
+            // scalar fold returns `-0` at a `±0` tie (the standing RED gate
+            // `x8_bits_eq_scalar_bits_widened_proptest`; owner-deferred fix,
+            // 2026-09-02). The scalar fold is what the committed GPU goldens were
+            // blessed against, so it is what a default build must run — an ISA flag
+            // must not be able to change a number. Do NOT "optimise" this to Avx2 to
+            // match `simd`; the two flags gate different guarantees.
+            sdf_narrowphase: SdfNarrowphaseKernel::Scalar,
             // Default OFF so an un-opted grid world runs the O2 serial `build`,
             // byte-identical to O2 (the campaign 0%-gate); the parallel emit is a
             // pure opt-in speed path with a bit-identical pair multiset.
@@ -385,13 +715,36 @@ impl Default for PhysicsConfig {
             // (the campaign 0%-gate); O4 only PRODUCES the partition — the solve is
             // byte-identical whether on or off.
             colored: false,
-            // Default OFF so the colored solve runs the O5 single-threaded path,
-            // BYTE-IDENTICAL to O5 (the O6 0%-gate); the parallel dispatch is a pure
-            // opt-in speed path with a bit-identical result.
-            parallel_solve: false,
+            // Default ON since L4 (P0b §9, lever L4: with it off the wide colors run
+            // serially at every W). The result is bit-identical to the single-threaded
+            // path for any worker count, and a one-worker pool still takes that path
+            // exactly: the solver's whole-step gate refuses the dispatch below two
+            // lanes, so W=1 opens no scope.
+            parallel_solve: true,
+            // Default ON since L5 C4 (P0b, lever L5: the narrowphase is the largest
+            // parallelisable serial stage at W = 8). The result is bit-identical to the
+            // serial loop for any worker count, partition and steal order, and a
+            // one-worker pool still runs that loop exactly: `chunk_count` yields zero
+            // chunks below two lanes, so W=1 opens no scope. The serial loop stays the
+            // same-binary A/B (`parallel_narrowphase = false`).
+            parallel_narrowphase: true,
+            // Default OFF until S5's C4 flips it, after the census and the ledger are derived on
+            // the solve region's form (rulings 2026-10-01, item 19 Q3).
+            parallel_tree_query: false,
+            // Default ON since L9 C4 (window 6's decision). `false` is the exact narrowphase,
+            // every trajectory the engine produced before contact reuse existed.
+            contact_reuse: true,
+            contact_reuse_distance: DEFAULT_CONTACT_REUSE_DISTANCE,
+            // V2 (owner V2a/V2b, 2026-09-30): speculative contacts are the contact rule. `0` for
+            // both is the overlap-only rule, the engine before V2 bit for bit.
+            speculative_distance: DEFAULT_SPECULATIVE_DISTANCE,
+            // V2 (rulings 2026-09-30, item 9): the approach-velocity margin.
+            speculative_velocity_cap: DEFAULT_SPECULATIVE_VELOCITY_CAP,
             // Default OFF so an un-opted colored world is BYTE-IDENTICAL to the O6/O7
             // colored solve (the campaign 0%-gate); sleeping is a pure opt-in.
             sleeping: false,
+            // L10: the mode a sleeping world runs; inert while `sleeping` is off.
+            sleep_skip: SleepSkip::Sets,
             sleep_threshold: DEFAULT_SLEEP_THRESHOLD,
             sleep_frames: DEFAULT_SLEEP_FRAMES,
             // Default OFF so an un-opted world runs no soft-body work (the campaign
@@ -425,7 +778,8 @@ impl Default for PhysicsConfig {
 /// Inserted by [`add_physics_systems`](crate::plugin::add_physics_systems) from
 /// the chosen solver's
 /// [`RigidSolver::owns_integration`](crate::solver::RigidSolver::owns_integration):
-/// an owning TGS solver (the [`SoftStepSolver`](crate::solver::SoftStepSolver))
+/// an owning TGS solver (the [`SoftStepSolver`](crate::solver::SoftStepSolver) and
+/// the default [`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver))
 /// integrates DYNAMIC bodies inside its own substep loop, so the pipeline stage
 /// must early-return to avoid double-integration. See the C2 contract block in
 /// [`crate::systems`].
@@ -445,20 +799,204 @@ pub enum IntegrationMode {
 ///
 /// Each pair is `(BodyIndex, BodyIndex)` keyed by the dense scratch row index
 /// (IM-1). The list is sorted deterministically by `(min, max)` (D4) so contact
-/// iteration order is reproducible (float add is non-associative). The `Vec` is
+/// iteration order is reproducible (float add is non-associative). The column is
 /// cleared and refilled each step, capacity reused.
-#[derive(Resource, Default)]
+///
+/// The previous step's list is kept beside it (L9 D9, the narrowphase's pair carry):
+/// the broadphase swaps the two at its start ([`rotate`](Self::rotate)) and stamps the
+/// list it builds with the gather sequence it was built on. On a step whose rows moved,
+/// `rotate` also rebuilds the jumper bitset the carry's join reads (L10 C0 moved the build
+/// here from the narrowphase prologue, design 06 Δ9, so the broadphase can read it too).
+///
+/// With L10's sleep-skip on the tree broadphase, the pairs of held islands are not emitted
+/// into the list but kept beside it, withheld (L10 C3c, design 04 T3):
+/// [`pairs`](Self::pairs) is the LOGICAL set, the stream merged with them, and it equals
+/// what every broadphase kind emits with the sleep-skip off.
+#[derive(Resource)]
 pub struct ContactPairs {
     /// Candidate pairs in deterministic `(min, max)` order.
-    pub pairs: Vec<(BodyIndex, BodyIndex)>,
+    ///
+    /// Backed by a `ComponentPool` column (audit Stage 4) and `pub(crate)` so the
+    /// broadphase can hand `BroadphaseGrid::build` the column itself: the O3
+    /// parallel emit needs the column's provenance-preserving write base, not a
+    /// pointer laundered through a whole-buffer `&mut [T]`. Consumers read
+    /// [`pairs`](Self::pairs).
+    pub(crate) pairs: ScratchColumn<(BodyIndex, BodyIndex)>,
+    /// The previous broadphase's pairs, in the same order (L9 D9): the list the
+    /// narrowphase's pair carry joins this step's pairs against. Swapped with `pairs`
+    /// at the start of every broadphase, so the two columns alternate roles.
+    pairs_prev: ScratchColumn<(BodyIndex, BodyIndex)>,
+    /// The gather sequence `pairs` was built on, or `NO_SEQ` before the first
+    /// broadphase (review OQ4's stamp).
+    seq: u64,
+    /// The gather sequence `pairs_prev` was built on, or `NO_SEQ`.
+    seq_prev: u64,
+    /// Broadphases opened so far ([`rotate`](Self::rotate) calls): the ordinal of the list in
+    /// `pairs`, which tells two lists built on one gather apart.
+    rotations: u64,
+    /// One bit per current row, set iff the gather's stage 2 resolved it — a **jumper**,
+    /// whose pairs the carry's join finds by binary search instead of the monotone merge (L9
+    /// D9, `narrowphase/carry.rs`). Rebuilt by [`rotate`](Self::rotate) on a step whose rows
+    /// moved (L10 C0, design 06 Δ9) and read only on such a step.
+    jumper_bits: ScratchColumn<u64>,
+    /// The gather sequence `jumper_bits` was built on, or `NO_SEQ` before the first build.
+    jumper_seq: u64,
+    /// The pairs the tree broadphase withholds from the stream (L10 C3c, design 04 T3): its
+    /// sleeper pair list `SL`, the pairs with one endpoint in its sleeper set and the other in its
+    /// static or sleeper set — two resting, non-sensor rows, one held (Invariant V). Strictly
+    /// sorted, disjoint from `pairs`, never merged into it; persistent across steps and
+    /// maintained by the tree (translated on a `Rows` step, filtered, released). Empty after any
+    /// step on which the tree path did not run (T6). On the tree cohort's `SL` id.
+    withheld: ScratchColumn<(BodyIndex, BodyIndex)>,
+}
+
+/// A refill view over one of [`ContactPairs`]' pair lists.
+pub(crate) type PairListBuild<'a> = ScratchBuildView<'a, (BodyIndex, BodyIndex)>;
+
+impl Default for ContactPairs {
+    /// Hand-written because the backing column needs its reserved [`ComponentId`],
+    /// which no derive can supply.
+    #[inline]
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
 }
 
 impl ContactPairs {
     /// Builds an empty pair buffer pre-sized for `capacity` pairs.
     pub fn with_capacity(capacity: usize) -> Self {
+        register_broadphase_column_layouts();
+        // The jumper bitset's id is the narrowphase cohort's, where the join reads it.
+        register_narrowphase_column_layouts();
+        // The withheld list's id is the tree cohort's `SL` (L10 C3c, design 04 T3).
+        register_tree_column_layouts();
+        let reserve = capacity.max(scratch_reserve_rows(size_of::<(BodyIndex, BodyIndex)>()));
         Self {
-            pairs: Vec::with_capacity(capacity),
+            pairs: ScratchColumn::new(contact_pairs_id(), reserve),
+            // The same reserve: the two columns swap roles every step.
+            pairs_prev: ScratchColumn::new(contact_pairs_prev_id(), reserve),
+            seq: NO_SEQ,
+            seq_prev: NO_SEQ,
+            rotations: 0,
+            jumper_bits: ScratchColumn::new(
+                jumper_bits_id(),
+                scratch_reserve_rows(size_of::<u64>()),
+            ),
+            jumper_seq: NO_SEQ,
+            withheld: ScratchColumn::new(tree_column_id(TREE_SL), reserve),
         }
+    }
+
+    /// Opens a broadphase step (L9 D9): the current list becomes the previous one, and
+    /// the list the broadphase fills next is stamped with the gather sequence of `rows` and
+    /// the next rotation ordinal. O(1): the two columns swap. Every broadphase arm clears the
+    /// list before it fills it.
+    ///
+    /// On a step whose rows moved it also rebuilds the jumper bitset from `rows`' stage-2
+    /// list (L10 C0, design 06 Δ9), `O(rows / 64 + jumpers)`. The bits are the ones the
+    /// narrowphase prologue built before C0: a carry that joins on a `Rows` step classified
+    /// against this same gather.
+    #[inline]
+    pub(crate) fn rotate(&mut self, rows: &RowIdentity) {
+        core::mem::swap(&mut self.pairs, &mut self.pairs_prev);
+        self.seq_prev = self.seq;
+        self.seq = rows.gather_seq();
+        self.rotations += 1;
+        if rows.rows_changed() {
+            build_jumpers(&mut self.jumper_bits, rows.rows_len(), rows.stage2_rows());
+            self.jumper_seq = rows.gather_seq();
+        }
+    }
+
+    /// The jumper bitset (one bit per current row, set iff stage 2 resolved it), valid on a
+    /// step whose rows moved and whose broadphase ran on that gather
+    /// ([`jumper_seq`](Self::jumper_seq)).
+    #[inline]
+    pub(crate) fn jumper_bits(&self) -> &[u64] {
+        self.jumper_bits.as_read_slice()
+    }
+
+    /// The gather sequence the jumper bitset was built on (`NO_SEQ` before the first build).
+    #[inline]
+    pub(crate) fn jumper_seq(&self) -> u64 {
+        self.jumper_seq
+    }
+
+    /// The ordinal of the current list: the number of broadphases opened so far. The
+    /// previous list's is one less.
+    #[inline]
+    pub(crate) fn rotations(&self) -> u64 {
+        self.rotations
+    }
+
+    /// The previous broadphase's pairs (L9 D9), in `(min, max)` order.
+    #[inline]
+    pub(crate) fn pairs_prev(&self) -> &[(BodyIndex, BodyIndex)] {
+        self.pairs_prev.as_read_slice()
+    }
+
+    /// The gather sequence the current list was built on (`NO_SEQ` before the first
+    /// broadphase).
+    #[inline]
+    pub(crate) fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// The gather sequence the previous list was built on.
+    #[inline]
+    pub(crate) fn seq_prev(&self) -> u64 {
+        self.seq_prev
+    }
+
+    /// This step's LOGICAL candidate pairs, in the deterministic `(min, max)` order (L10 design
+    /// 04 D6): the pairs the broadphase emitted into the stream, merged with the pairs L10's
+    /// tree seam withholds for held islands (design 04 T3), so the view is the exact set every
+    /// broadphase kind emits with the sleep-skip off. No copy: the merge happens as the view is
+    /// read, and with nothing withheld the view is the stream element for element.
+    #[inline]
+    pub fn pairs(&self) -> PairsView<'_> {
+        PairsView::new(self.pairs.as_read_slice(), self.withheld.as_read_slice())
+    }
+
+    /// The pairs the narrowphase collides this step: the broadphase's stream, `(min, max)`
+    /// sorted, WITHOUT the pairs L10's tree seam withholds. The narrowphase's chunk count, its
+    /// pair tags and the pair carry index this list (design 06 D-D D2).
+    #[inline]
+    pub(crate) fn pairs_stream(&self) -> &[(BodyIndex, BodyIndex)] {
+        self.pairs.as_read_slice()
+    }
+
+    /// The pairs the tree broadphase withholds from the stream (L10 C3c, design 04 T3), strictly
+    /// sorted: the logical view is [`pairs_stream`](Self::pairs_stream) ⊎ this.
+    #[inline]
+    pub(crate) fn withheld(&self) -> &[(BodyIndex, BodyIndex)] {
+        self.withheld.as_read_slice()
+    }
+
+    /// The refill view over the withheld list (the tree's maintenance of its `SL`).
+    #[inline]
+    pub(crate) fn withheld_build(&mut self) -> ScratchBuildView<'_, (BodyIndex, BodyIndex)> {
+        self.withheld.build_view()
+    }
+
+    /// The refill views over the stream and the withheld list at once (the tree's release, T4,
+    /// which moves pairs from the second into the first).
+    #[inline]
+    pub(crate) fn split_build(&mut self) -> (PairListBuild<'_>, PairListBuild<'_>) {
+        (self.pairs.build_view(), self.withheld.build_view())
+    }
+
+    /// The single-threaded refill view over the pair list (clear + push).
+    ///
+    /// The production producer is `BroadphaseGrid::build` / `::build_parallel`,
+    /// which take the whole resource; this is the surface for a driver that emits
+    /// pairs itself — the all-pairs transcription in `benches/broadphase.rs`, whose
+    /// whole value is being container-identical to the shipped arm. It refills the stream
+    /// only: the withheld list is the tree broadphase's (a tree step's brute path and every other
+    /// kind's step empty it first, T6).
+    #[inline]
+    pub fn pairs_build(&mut self) -> ScratchBuildView<'_, (BodyIndex, BodyIndex)> {
+        self.pairs.build_view()
     }
 }
 
@@ -565,22 +1103,22 @@ const MIN_PARALLEL_BODIES: usize = 4096;
 /// changes which cells a pair is bucketed into, never the surviving pairs). The
 /// proxy is kept deterministic anyway for clean reasoning and the determinism
 /// gate. The result is bit-identical run-to-run AND bit-identical to all-pairs.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct BroadphaseGrid {
     /// Exclusive prefix sums of `counts`; `len == n_cells + 1`. CSR offsets.
-    cell_start: Vec<u32>,
+    cell_start: ScratchColumn<u32>,
     /// Body rows bucketed by cell (the scatter target). CSR values.
-    cell_bodies: Vec<u32>,
+    cell_bodies: ScratchColumn<u32>,
     /// Per-cell body-count histogram, reused; rebuilt then prefix-summed each
     /// build.
-    counts: Vec<u32>,
+    counts: ScratchColumn<u32>,
     /// A running write cursor per cell during scatter (a working copy of
     /// `cell_start`), reused across builds.
-    cursor: Vec<u32>,
+    cursor: ScratchColumn<u32>,
     /// Bodies spanning ≥ [`MAX_CELL_SPAN`] cells on some axis — binned into the
     /// COARSE size-class grid below (the P8 size-disparity strategy), never bucketed
     /// into the fine grid. Ascending dense-row order (pushed during the count pass).
-    oversized: Vec<u32>,
+    oversized: ScratchColumn<u32>,
     /// P8 COARSE size-class grid — a second CSR over the SAME world AABB with a
     /// coarser cell ([`COARSE_CELL_FACTOR`] × the fine cell), holding ONLY the
     /// oversized bodies. Replaces the old O(k·n) oversized-vs-all residual:
@@ -588,35 +1126,35 @@ pub struct BroadphaseGrid {
     /// the minimum shared coarse cell), and each oversized body's coarse footprint
     /// bounds the fine cells it scans for oversized–small candidates. Exclusive
     /// prefix sums of the coarse histogram; `len == coarse_n_cells + 1`.
-    coarse_cell_start: Vec<u32>,
+    coarse_cell_start: ScratchColumn<u32>,
     /// P8 coarse grid CSR values: the oversized DENSE ROWS bucketed by coarse cell
     /// (the scatter target), `coarse_cell_start[c]..coarse_cell_start[c + 1]` indexes
     /// coarse cell `c`'s oversized rows. Capacity-reused (clear + refill each build).
-    coarse_cell_bodies: Vec<u32>,
+    coarse_cell_bodies: ScratchColumn<u32>,
     /// P8 coarse grid per-cell oversized-body histogram, reused; rebuilt then
     /// prefix-summed into [`coarse_cell_start`](Self::coarse_cell_start) each build.
-    coarse_counts: Vec<u32>,
+    coarse_counts: ScratchColumn<u32>,
     /// P8 coarse grid scatter write cursor (a working copy of `coarse_cell_start`),
     /// reused across builds.
-    coarse_cursor: Vec<u32>,
+    coarse_cursor: ScratchColumn<u32>,
     /// Scratch copy of the per-body bounding radii, reused across builds; used to
     /// compute the deterministic median radius (the typical-body cell-size proxy,
     /// O2 W1). `select_nth_unstable` reorders this in place — that is why it is a
     /// throwaway scratch buffer, not read after the median is taken.
-    scratch_radii: Vec<f32>,
+    scratch_radii: ScratchColumn<f32>,
     /// Pre-filter candidate pairs (before the sphere-bound test), reused. Used
     /// only by the serial [`build`](Self::build); the parallel
     /// [`build_parallel`](Self::build_parallel) emits feasibility-filtered
     /// survivors straight into `out`.
-    candidates: Vec<(BodyIndex, BodyIndex)>,
+    candidates: ScratchColumn<(BodyIndex, BodyIndex)>,
     /// O3 parallel emit (Pass A): per-cell SURVIVING-pair count (the count of
     /// within-cell pairs `(i, j)` with `min_shared_cell == c && feasible`),
     /// `len == n_cells`. Reused (clear + resize each parallel build).
-    pair_count: Vec<u32>,
+    pair_count: ScratchColumn<u32>,
     /// O3 parallel emit: exclusive prefix-sum of `pair_count`, `len == n_cells + 1`
     /// — so `pair_offset[c]..pair_offset[c + 1]` is cell `c`'s contiguous out
     /// sub-range and `pair_offset[n_cells]` is the total survivor count. Reused.
-    pair_offset: Vec<u32>,
+    pair_offset: ScratchColumn<u32>,
     /// World-space origin of cell `(0, 0, 0)` (the AABB min corner).
     origin: Vec3,
     /// Reciprocal of the cell edge length, so a coordinate maps to a cell index by
@@ -639,32 +1177,44 @@ pub struct BroadphaseGrid {
     oversized_candidate_count: usize,
 }
 
+impl Default for BroadphaseGrid {
+    /// An empty grid at the kernel's standard column budget. Hand-written because
+    /// `ScratchColumn` has no `Default` — a column is bound to a registered
+    /// `ComponentId` at construction, so there is no id-free empty value.
+    #[inline]
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
+}
+
 impl BroadphaseGrid {
     /// Builds an empty grid pre-sized for `capacity` bodies (no later realloc in
     /// steady state). The cell buffers grow on the first build to the live cell
     /// count and reuse that capacity thereafter.
     pub fn with_capacity(capacity: usize) -> Self {
+        // `capacity` is advisory now: a `ScratchColumn` reserves ADDRESS SPACE at
+        // the kernel's own budget and commits on demand, so a uniform generous
+        // ceiling costs zero resident bytes and removes the grow-cap hazard a
+        // caller-sized `Vec` carried.
+        let _ = capacity;
+        register_broadphase_column_layouts();
+        let u32_rows = scratch_reserve_rows(core::mem::size_of::<u32>());
+        let f32_rows = scratch_reserve_rows(core::mem::size_of::<f32>());
+        let pair_rows = scratch_reserve_rows(core::mem::size_of::<(BodyIndex, BodyIndex)>());
         Self {
-            cell_start: Vec::new(),
-            cell_bodies: Vec::with_capacity(capacity),
-            counts: Vec::new(),
-            cursor: Vec::new(),
-            oversized: Vec::with_capacity(capacity),
-            // P8 coarse size-class grid: the value array holds only the oversized
-            // bodies (few), so a small reserve covers it; the cell-indexed buffers
-            // (start/counts/cursor) grow on the first build to the live coarse cell
-            // count and reuse that capacity thereafter (like the fine grid's).
-            coarse_cell_start: Vec::new(),
-            coarse_cell_bodies: Vec::with_capacity(capacity),
-            coarse_counts: Vec::new(),
-            coarse_cursor: Vec::new(),
-            scratch_radii: Vec::with_capacity(capacity),
-            candidates: Vec::with_capacity(capacity),
-            // The parallel-emit CSR scratch grows on the first parallel build to the
-            // live cell count and reuses that capacity thereafter (like every other
-            // cell-indexed buffer here); a fresh `Vec` is the cheap first reserve.
-            pair_count: Vec::new(),
-            pair_offset: Vec::new(),
+            cell_start: ScratchColumn::new(broadphase_column_id(0), u32_rows),
+            cell_bodies: ScratchColumn::new(broadphase_column_id(1), u32_rows),
+            counts: ScratchColumn::new(broadphase_column_id(2), u32_rows),
+            cursor: ScratchColumn::new(broadphase_column_id(3), u32_rows),
+            oversized: ScratchColumn::new(broadphase_column_id(4), u32_rows),
+            coarse_cell_start: ScratchColumn::new(broadphase_column_id(5), u32_rows),
+            coarse_cell_bodies: ScratchColumn::new(broadphase_column_id(6), u32_rows),
+            coarse_counts: ScratchColumn::new(broadphase_column_id(7), u32_rows),
+            coarse_cursor: ScratchColumn::new(broadphase_column_id(8), u32_rows),
+            scratch_radii: ScratchColumn::new(broadphase_column_id(9), f32_rows),
+            candidates: ScratchColumn::new(broadphase_column_id(10), pair_rows),
+            pair_count: ScratchColumn::new(broadphase_column_id(11), u32_rows),
+            pair_offset: ScratchColumn::new(broadphase_column_id(12), u32_rows),
             origin: Vec3::ZERO,
             inv_cell: 1.0,
             dims: [1, 1, 1],
@@ -727,9 +1277,9 @@ impl BroadphaseGrid {
         if c + 1 >= self.cell_start.len() {
             return &[];
         }
-        let start = self.cell_start[c] as usize;
-        let end = self.cell_start[c + 1] as usize;
-        &self.cell_bodies[start..end]
+        let start = self.cell_start.as_read_slice()[c] as usize;
+        let end = self.cell_start.as_read_slice()[c + 1] as usize;
+        &self.cell_bodies.as_read_slice()[start..end]
     }
 
     /// The oversized bodies — those spanning more than [`MAX_CELL_SPAN`] cells on
@@ -737,7 +1287,7 @@ impl BroadphaseGrid {
     /// coupling walks these as a separate pass alongside the 27-cell neighbourhood.
     #[inline]
     pub fn oversized_slice(&self) -> &[u32] {
-        &self.oversized
+        self.oversized.as_read_slice()
     }
 
     /// Maps a world position to its integer cell coordinate, clamped into
@@ -884,11 +1434,10 @@ impl BroadphaseGrid {
         // median of which is the typical-body cell-size floor input).
         let mut min = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
         let mut max = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-        self.scratch_radii.clear();
-        self.scratch_radii.reserve(bodies.len());
+        self.scratch_radii.build_view().clear();
         for b in bodies {
             let r = body_bounding_radius(b);
-            self.scratch_radii.push(r);
+            self.scratch_radii.build_view().push(r);
             let p = b.position;
             min.x = min.x.min(p.x - r);
             min.y = min.y.min(p.y - r);
@@ -908,10 +1457,15 @@ impl BroadphaseGrid {
         // (a `body_bounding_radius` of a finite shape; a non-finite shape would
         // already have collapsed the extent below), so no NaN reaches the compare.
         let mid = self.scratch_radii.len() / 2;
-        let (_, median, _) = self
-            .scratch_radii
-            .select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median_radius = *median;
+        let median_radius = {
+            let mut radii_view = self.scratch_radii.build_view();
+            let (_, median, _) = radii_view
+                .as_mut_slice()
+                .select_nth_unstable_by(mid, |a, b| {
+                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            *median
+        };
 
         // Clamp the extent to a finite, non-negative box before any cell-count
         // arithmetic: a diverged solver can emit a ±Inf/NaN `BodyState.position`,
@@ -1023,13 +1577,17 @@ impl BroadphaseGrid {
     /// over the SAME [`body_bounding_radius`]-based sphere-bound predicate
     /// (`delta.length_squared() <= (rA + rB)²`). All scratch buffers are
     /// capacity-reused — no per-step heap allocation once warmed.
-    pub fn build(&mut self, bodies: &[BodyState], out: &mut Vec<(BodyIndex, BodyIndex)>) {
-        out.clear();
-        self.candidates.clear();
+    pub fn build(
+        &mut self,
+        bodies: &[BodyState],
+        out: &mut ContactPairs,
+    ) {
+        out.pairs.build_view().clear();
+        self.candidates.build_view().clear();
 
         let n = bodies.len();
         if n == 0 {
-            self.oversized.clear();
+            self.oversized.build_view().clear();
             return;
         }
 
@@ -1046,14 +1604,19 @@ impl BroadphaseGrid {
 
         // (6) Feasibility filter (the SAME sphere-bound predicate as all-pairs) +
         // sort by (min, max). Bit-identical to the all-pairs output set.
-        for &(a, b) in &self.candidates {
-            let ia = a.0 as usize;
-            let ib = b.0 as usize;
-            if Self::feasible(&bodies[ia], &bodies[ib]) {
-                out.push((a, b));
+        {
+            // One refill view for the whole filter + sort: `out` is a parameter, so
+            // it is disjoint from the `&self` borrow the candidate slice holds.
+            let mut out = out.pairs.build_view();
+            for &(a, b) in self.candidates.as_read_slice() {
+                let ia = a.0 as usize;
+                let ib = b.0 as usize;
+                if Self::feasible(&bodies[ia], &bodies[ib]) {
+                    out.push((a, b));
+                }
             }
+            out.as_mut_slice().sort_unstable();
         }
-        out.sort_unstable();
     }
 
     /// The serial CSR build shared by [`build`](Self::build) and
@@ -1068,65 +1631,106 @@ impl BroadphaseGrid {
     /// any candidate buffer. `bodies` must be non-empty (the caller early-returns on
     /// an empty world).
     fn build_csr(&mut self, bodies: &[BodyState]) {
-        self.oversized.clear();
+        self.oversized.build_view().clear();
 
         // (1) AABB + closed-form cell-size proxy.
         self.recompute_geometry(bodies);
         let n_cells = self.n_cells();
 
+        // Geometry snapshot. `cell_coord` / `cell_index` read ONLY these Copy
+        // scalars, so lifting them into locals lets the column views below stay
+        // hoisted across the hot loops. Without it every increment would have to
+        // rebuild a `build_view()`, because a `&self` helper call cannot coexist
+        // with a `&mut` borrow of one of `self`'s columns.
+        let origin = self.origin;
+        let inv_cell = self.inv_cell;
+        let dims = self.dims;
+        let coord = |p: Vec3| -> [u32; 3] {
+            let rel = p - origin;
+            let to_cell = |v: f32, dim: u32| -> u32 {
+                let idx = (v * inv_cell).floor();
+                if idx <= 0.0 { 0 } else { (idx as u32).min(dim - 1) }
+            };
+            [to_cell(rel.x, dims[0]), to_cell(rel.y, dims[1]), to_cell(rel.z, dims[2])]
+        };
+        let index = |c: [u32; 3]| -> u32 { c[0] + dims[0] * (c[1] + dims[1] * c[2]) };
+
         // (2) Count: per body, +1 to every cell its AABB spans; an AABB spanning
         // more than MAX_CELL_SPAN cells on any axis goes to `oversized` instead.
-        self.counts.clear();
-        self.counts.resize(n_cells, 0);
-        for (row, b) in bodies.iter().enumerate() {
-            let r = body_bounding_radius(b);
-            let half = Vec3::new(r, r, r);
-            let (lo, hi) = self.cell_range(b.position - half, b.position + half);
-            if Self::is_oversized(lo, hi) {
-                self.oversized.push(row as u32);
-                continue;
+        {
+            let mut counts_view = self.counts.build_view();
+            counts_view.clear();
+            for _ in 0..n_cells {
+                counts_view.push(0);
             }
-            for z in lo[2]..=hi[2] {
-                for y in lo[1]..=hi[1] {
-                    for x in lo[0]..=hi[0] {
-                        let c = self.cell_index([x, y, z]) as usize;
-                        self.counts[c] += 1;
+            let counts = counts_view.as_mut_slice();
+            let mut oversized_view = self.oversized.build_view();
+            for (row, b) in bodies.iter().enumerate() {
+                let r = body_bounding_radius(b);
+                let half = Vec3::new(r, r, r);
+                let (lo, hi) = (coord(b.position - half), coord(b.position + half));
+                if Self::is_oversized(lo, hi) {
+                    oversized_view.push(row as u32);
+                    continue;
+                }
+                for z in lo[2]..=hi[2] {
+                    for y in lo[1]..=hi[1] {
+                        for x in lo[0]..=hi[0] {
+                            counts[index([x, y, z]) as usize] += 1;
+                        }
                     }
                 }
             }
         }
 
-        // (3) Exclusive prefix-sum counts → cell_start (len n_cells + 1).
-        self.cell_start.clear();
-        self.cell_start.reserve(n_cells + 1);
-        let mut acc = 0u32;
-        self.cell_start.push(0);
-        for &c in &self.counts {
-            acc += c;
-            self.cell_start.push(acc);
-        }
-        let total_inserts = acc as usize;
+        // (3) Exclusive prefix-sum counts -> cell_start (len n_cells + 1).
+        let total_inserts = {
+            let counts = self.counts.as_read_slice();
+            let mut start_view = self.cell_start.build_view();
+            start_view.clear();
+            let mut acc = 0u32;
+            start_view.push(0);
+            for &c in counts {
+                acc += c;
+                start_view.push(acc);
+            }
+            acc as usize
+        };
 
         // (4) Scatter rows into cell_bodies at cursor[cell]++ (a working copy of
         // cell_start), in dense-row order so each cell slice is row-sorted.
-        self.cursor.clear();
-        self.cursor.extend_from_slice(&self.cell_start[..n_cells]);
-        self.cell_bodies.clear();
-        self.cell_bodies.resize(total_inserts, 0);
-        for (row, b) in bodies.iter().enumerate() {
-            let r = body_bounding_radius(b);
-            let half = Vec3::new(r, r, r);
-            let (lo, hi) = self.cell_range(b.position - half, b.position + half);
-            if Self::is_oversized(lo, hi) {
-                continue;
+        {
+            let mut cursor_view = self.cursor.build_view();
+            cursor_view.clear();
+            cursor_view.extend_from_slice(&self.cell_start.as_read_slice()[..n_cells]);
+        }
+        {
+            let mut bodies_view = self.cell_bodies.build_view();
+            bodies_view.clear();
+            for _ in 0..total_inserts {
+                bodies_view.push(0);
             }
-            for z in lo[2]..=hi[2] {
-                for y in lo[1]..=hi[1] {
-                    for x in lo[0]..=hi[0] {
-                        let c = self.cell_index([x, y, z]) as usize;
-                        let slot = self.cursor[c] as usize;
-                        self.cell_bodies[slot] = row as u32;
-                        self.cursor[c] += 1;
+        }
+        {
+            let mut cursor_view = self.cursor.build_view();
+            let cursor = cursor_view.as_mut_slice();
+            let mut bodies_view = self.cell_bodies.build_view();
+            let cell_bodies = bodies_view.as_mut_slice();
+            for (row, b) in bodies.iter().enumerate() {
+                let r = body_bounding_radius(b);
+                let half = Vec3::new(r, r, r);
+                let (lo, hi) = (coord(b.position - half), coord(b.position + half));
+                if Self::is_oversized(lo, hi) {
+                    continue;
+                }
+                for z in lo[2]..=hi[2] {
+                    for y in lo[1]..=hi[1] {
+                        for x in lo[0]..=hi[0] {
+                            let c = index([x, y, z]) as usize;
+                            let slot = cursor[c] as usize;
+                            cell_bodies[slot] = row as u32;
+                            cursor[c] += 1;
+                        }
                     }
                 }
             }
@@ -1154,62 +1758,106 @@ impl BroadphaseGrid {
         // large `coarse_counts` histogram every frame when there is nothing to bin.
         if self.oversized.is_empty() {
             self.coarse_dims = [0, 0, 0];
-            self.coarse_cell_start.clear();
-            self.coarse_cell_bodies.clear();
+            self.coarse_cell_start.build_view().clear();
+            self.coarse_cell_bodies.build_view().clear();
             return;
         }
 
         let coarse_n_cells = self.coarse_n_cells();
 
+        // Coarse geometry snapshot — same reason as `build_csr`'s: the `&self`
+        // helpers cannot be called while a column view is held.
+        let origin = self.origin;
+        let coarse_inv_cell = self.coarse_inv_cell;
+        let coarse_dims = self.coarse_dims;
+        let coord = |p: Vec3| -> [u32; 3] {
+            let rel = p - origin;
+            let to_cell = |v: f32, dim: u32| -> u32 {
+                let idx = (v * coarse_inv_cell).floor();
+                if idx <= 0.0 { 0 } else { (idx as u32).min(dim - 1) }
+            };
+            [
+                to_cell(rel.x, coarse_dims[0]),
+                to_cell(rel.y, coarse_dims[1]),
+                to_cell(rel.z, coarse_dims[2]),
+            ]
+        };
+        let index =
+            |c: [u32; 3]| -> u32 { c[0] + coarse_dims[0] * (c[1] + coarse_dims[1] * c[2]) };
+
         // (1) Count: per oversized body, +1 to every coarse cell its AABB spans.
-        self.coarse_counts.clear();
-        self.coarse_counts.resize(coarse_n_cells, 0);
-        for &row in &self.oversized {
-            let b = &bodies[row as usize];
-            let r = body_bounding_radius(b);
-            let half = Vec3::new(r, r, r);
-            let (lo, hi) = self.coarse_cell_range(b.position - half, b.position + half);
-            for z in lo[2]..=hi[2] {
-                for y in lo[1]..=hi[1] {
-                    for x in lo[0]..=hi[0] {
-                        let c = self.coarse_cell_index([x, y, z]) as usize;
-                        self.coarse_counts[c] += 1;
+        {
+            let oversized = self.oversized.as_read_slice();
+            let mut counts_view = self.coarse_counts.build_view();
+            counts_view.clear();
+            for _ in 0..coarse_n_cells {
+                counts_view.push(0);
+            }
+            let counts = counts_view.as_mut_slice();
+            for &row in oversized {
+                let b = &bodies[row as usize];
+                let r = body_bounding_radius(b);
+                let half = Vec3::new(r, r, r);
+                let (lo, hi) = (coord(b.position - half), coord(b.position + half));
+                for z in lo[2]..=hi[2] {
+                    for y in lo[1]..=hi[1] {
+                        for x in lo[0]..=hi[0] {
+                            counts[index([x, y, z]) as usize] += 1;
+                        }
                     }
                 }
             }
         }
 
-        // (2) Exclusive prefix-sum → coarse_cell_start (len coarse_n_cells + 1).
-        self.coarse_cell_start.clear();
-        self.coarse_cell_start.reserve(coarse_n_cells + 1);
-        let mut acc = 0u32;
-        self.coarse_cell_start.push(0);
-        for &c in &self.coarse_counts {
-            acc += c;
-            self.coarse_cell_start.push(acc);
-        }
-        let total_inserts = acc as usize;
+        // (2) Exclusive prefix-sum -> coarse_cell_start (len coarse_n_cells + 1).
+        let total_inserts = {
+            let counts = self.coarse_counts.as_read_slice();
+            let mut start_view = self.coarse_cell_start.build_view();
+            start_view.clear();
+            let mut acc = 0u32;
+            start_view.push(0);
+            for &c in counts {
+                acc += c;
+                start_view.push(acc);
+            }
+            acc as usize
+        };
 
         // (3) Scatter the oversized rows into coarse_cell_bodies at coarse_cursor++,
         // in ascending oversized-list (== dense-row) order so each coarse cell slice
         // is row-sorted (matching the fine grid's within-cell ordering).
-        self.coarse_cursor.clear();
-        self.coarse_cursor
-            .extend_from_slice(&self.coarse_cell_start[..coarse_n_cells]);
-        self.coarse_cell_bodies.clear();
-        self.coarse_cell_bodies.resize(total_inserts, 0);
-        for &row in &self.oversized {
-            let b = &bodies[row as usize];
-            let r = body_bounding_radius(b);
-            let half = Vec3::new(r, r, r);
-            let (lo, hi) = self.coarse_cell_range(b.position - half, b.position + half);
-            for z in lo[2]..=hi[2] {
-                for y in lo[1]..=hi[1] {
-                    for x in lo[0]..=hi[0] {
-                        let c = self.coarse_cell_index([x, y, z]) as usize;
-                        let slot = self.coarse_cursor[c] as usize;
-                        self.coarse_cell_bodies[slot] = row;
-                        self.coarse_cursor[c] += 1;
+        {
+            let mut cursor_view = self.coarse_cursor.build_view();
+            cursor_view.clear();
+            cursor_view
+                .extend_from_slice(&self.coarse_cell_start.as_read_slice()[..coarse_n_cells]);
+        }
+        {
+            let mut out_view = self.coarse_cell_bodies.build_view();
+            out_view.clear();
+            for _ in 0..total_inserts {
+                out_view.push(0);
+            }
+        }
+        {
+            let oversized = self.oversized.as_read_slice();
+            let mut cursor_view = self.coarse_cursor.build_view();
+            let cursor = cursor_view.as_mut_slice();
+            let mut out_view = self.coarse_cell_bodies.build_view();
+            let out = out_view.as_mut_slice();
+            for &row in oversized {
+                let b = &bodies[row as usize];
+                let r = body_bounding_radius(b);
+                let half = Vec3::new(r, r, r);
+                let (lo, hi) = (coord(b.position - half), coord(b.position + half));
+                for z in lo[2]..=hi[2] {
+                    for y in lo[1]..=hi[1] {
+                        for x in lo[0]..=hi[0] {
+                            let c = index([x, y, z]) as usize;
+                            let slot = cursor[c] as usize;
+                            out[slot] = row;
+                            cursor[c] += 1;
+                        }
                     }
                 }
             }
@@ -1226,12 +1874,17 @@ impl BroadphaseGrid {
     }
 
     /// The SAME sphere-bound feasibility predicate the all-pairs path uses
-    /// (`delta.length_squared() <= (rA + rB)²`) — the O2 0%-correctness contract.
+    /// (`delta.length_squared() <= (rA + rB)²`) — the O2 0%-correctness contract,
+    /// delegated to the one predicate the tree broadphase also evaluates
+    /// ([`sphere_bound_feasible`]).
     #[inline]
     fn feasible(a: &BodyState, b: &BodyState) -> bool {
-        let bound = body_bounding_radius(a) + body_bounding_radius(b);
-        let delta = b.position - a.position;
-        delta.length_squared() <= bound * bound
+        sphere_bound_feasible(
+            a.position,
+            body_bounding_radius(a),
+            b.position,
+            body_bounding_radius(b),
+        )
     }
 
     /// Emits within-cell all-pairs candidates, deduped to the minimum shared cell
@@ -1242,16 +1895,16 @@ impl BroadphaseGrid {
     fn emit_cell_candidates(&mut self, bodies: &[BodyState]) {
         let n_cells = self.n_cells();
         for c in 0..n_cells {
-            let start = self.cell_start[c] as usize;
-            let end = self.cell_start[c + 1] as usize;
-            let slice = &self.cell_bodies[start..end];
+            let start = self.cell_start.as_read_slice()[c] as usize;
+            let end = self.cell_start.as_read_slice()[c + 1] as usize;
+            let slice = &self.cell_bodies.as_read_slice()[start..end];
             // Bodies are row-sorted within the slice, so `(slice[p], slice[q])`
             // with p < q is already `(min, max)`.
             for p in 0..slice.len() {
                 let i = slice[p];
                 for &j in &slice[p + 1..] {
                     if self.min_shared_cell(&bodies[i as usize], &bodies[j as usize]) == c as u32 {
-                        self.candidates.push((BodyIndex(i), BodyIndex(j)));
+                        self.candidates.build_view().push((BodyIndex(i), BodyIndex(j)));
                     }
                 }
             }
@@ -1298,9 +1951,9 @@ impl BroadphaseGrid {
         // ── (1) oversized–oversized via the coarse grid ─────────────────────────
         let coarse_n_cells = self.coarse_n_cells();
         for c in 0..coarse_n_cells {
-            let start = self.coarse_cell_start[c] as usize;
-            let end = self.coarse_cell_start[c + 1] as usize;
-            let slice = &self.coarse_cell_bodies[start..end];
+            let start = self.coarse_cell_start.as_read_slice()[c] as usize;
+            let end = self.coarse_cell_start.as_read_slice()[c + 1] as usize;
+            let slice = &self.coarse_cell_bodies.as_read_slice()[start..end];
             // Oversized rows are row-sorted within a coarse cell slice, so
             // `(slice[p], slice[q])` with p < q is already `(min, max)`.
             for p in 0..slice.len() {
@@ -1309,7 +1962,7 @@ impl BroadphaseGrid {
                     if self.min_shared_coarse_cell(&bodies[i as usize], &bodies[j as usize])
                         == c as u32
                     {
-                        self.candidates.push((BodyIndex(i), BodyIndex(j)));
+                        self.candidates.build_view().push((BodyIndex(i), BodyIndex(j)));
                     }
                 }
             }
@@ -1323,7 +1976,7 @@ impl BroadphaseGrid {
         // the lowest fine cell both share, so a small body found in several of `o`'s
         // overlapped cells contributes the pair exactly once.
         for idx in 0..self.oversized.len() {
-            let o = self.oversized[idx];
+            let o = self.oversized.as_read_slice()[idx];
             let ob = &bodies[o as usize];
             let r = body_bounding_radius(ob);
             let half = Vec3::new(r, r, r);
@@ -1332,14 +1985,14 @@ impl BroadphaseGrid {
                 for y in lo[1]..=hi[1] {
                     for x in lo[0]..=hi[0] {
                         let fine_cell = self.cell_index([x, y, z]);
-                        let cstart = self.cell_start[fine_cell as usize] as usize;
-                        let cend = self.cell_start[fine_cell as usize + 1] as usize;
-                        for &s in &self.cell_bodies[cstart..cend] {
+                        let cstart = self.cell_start.as_read_slice()[fine_cell as usize] as usize;
+                        let cend = self.cell_start.as_read_slice()[fine_cell as usize + 1] as usize;
+                        for &s in &self.cell_bodies.as_read_slice()[cstart..cend] {
                             let sb = &bodies[s as usize];
                             if self.min_shared_cell(ob, sb) == fine_cell {
                                 // Key `(min, max)` over the dense rows (`o` vs `s`).
                                 let (mn, mx) = if o < s { (o, s) } else { (s, o) };
-                                self.candidates.push((BodyIndex(mn), BodyIndex(mx)));
+                                self.candidates.build_view().push((BodyIndex(mn), BodyIndex(mx)));
                             }
                         }
                     }
@@ -1400,9 +2053,9 @@ impl BroadphaseGrid {
     /// the one literal source).
     fn count_cell_pairs(&self, cell: u32, bodies: &[BodyState]) -> u32 {
         let c = cell as usize;
-        let start = self.cell_start[c] as usize;
-        let end = self.cell_start[c + 1] as usize;
-        let slice = &self.cell_bodies[start..end];
+        let start = self.cell_start.as_read_slice()[c] as usize;
+        let end = self.cell_start.as_read_slice()[c + 1] as usize;
+        let slice = &self.cell_bodies.as_read_slice()[start..end];
         let mut count = 0u32;
         for p in 0..slice.len() {
             let i = slice[p];
@@ -1435,9 +2088,9 @@ impl BroadphaseGrid {
         out_slice: &mut [(BodyIndex, BodyIndex)],
     ) -> usize {
         let c = cell as usize;
-        let start = self.cell_start[c] as usize;
-        let end = self.cell_start[c + 1] as usize;
-        let slice = &self.cell_bodies[start..end];
+        let start = self.cell_start.as_read_slice()[c] as usize;
+        let end = self.cell_start.as_read_slice()[c + 1] as usize;
+        let slice = &self.cell_bodies.as_read_slice()[start..end];
         let mut w = 0usize;
         for p in 0..slice.len() {
             let i = slice[p];
@@ -1467,15 +2120,19 @@ impl BroadphaseGrid {
     /// two AABBs, independent of which worker visits it), and the final
     /// `out.sort_unstable()` canonicalizes ORDER.
     ///
-    /// **Production shortcut.** When there is no ambient pool, OR the pool offers a
-    /// single effective lane (`num_threads() + 1 == 1`, i.e. zero worker threads),
-    /// OR the body count is below [`MIN_PARALLEL_BODIES`], this delegates straight
-    /// to the O2 serial [`build`](Self::build) and returns — a single effective lane
-    /// is pure serial work, so the emit-shaped multi-pass dispatch would only add
-    /// overhead (the W=1 regression). The parallel-shaped path is dispatched ONLY
-    /// when there are `>= 2` lanes, `n >= MIN_PARALLEL_BODIES`, and a pool is
-    /// present. Either way the result is byte-identical to `build`.
-    pub fn build_parallel(&mut self, bodies: &[BodyState], out: &mut Vec<(BodyIndex, BodyIndex)>) {
+    /// **Production shortcut.** When there is no ambient pool, OR the pool has a
+    /// single worker (`num_threads() < 2`), OR the body count is below
+    /// [`MIN_PARALLEL_BODIES`], this delegates straight to the O2 serial
+    /// [`build`](Self::build) and returns — one lane is pure serial work, so the
+    /// emit-shaped multi-pass dispatch would only add overhead (the W=1
+    /// regression). The parallel-shaped path is dispatched ONLY when there are
+    /// `>= 2` lanes, `n >= MIN_PARALLEL_BODIES`, and a pool is present. Either way
+    /// the result is byte-identical to `build`.
+    pub fn build_parallel(
+        &mut self,
+        bodies: &[BodyState],
+        out: &mut ContactPairs,
+    ) {
         let n = bodies.len();
 
         // Shortcut: below the parallel threshold (or an empty world) → the O2 serial
@@ -1485,20 +2142,26 @@ impl BroadphaseGrid {
             return;
         }
 
-        // Dispatch the parallel-shaped path ONLY when a pool offers >= 2 effective
-        // lanes; a single lane (no worker threads) is pure serial work, so route to
-        // the O2 serial `build` (no shaped-path overhead — eliminates the W=1
-        // regression). When no pool is attached, `try_with_active_pool` returns
-        // `None` and we fall through to the serial `build`.
+        // Dispatch the parallel-shaped path ONLY when a pool offers >= 2 lanes; a
+        // single lane is pure serial work, so route to the O2 serial `build` (no
+        // shaped-path overhead — eliminates the W=1 regression). When no pool is
+        // attached, `try_with_active_pool` returns `None` and we fall through to the
+        // serial `build`.
+        //
+        // KE16 App-1: `lanes` is `num_threads()`, never `+ 1` — the caller of
+        // `pool.scope` is one OF the W workers on the production route. That also
+        // makes this guard LIVE: `num_threads() + 1 < 2` was unreachable
+        // (`num_threads() >= 1`), while `num_threads() < 2` is the real "one worker
+        // ⇒ serial" test.
         let dispatched = try_with_active_pool(|pool| {
-            let lanes = pool.num_threads() + 1;
+            let lanes = pool.num_threads();
             if lanes < 2 {
                 return false;
             }
             // CSR build first (serial, byte-identical to O2), then fan the emit.
-            out.clear();
+            out.pairs.build_view().clear();
             self.build_csr(bodies);
-            self.emit_passes(bodies, out, lanes * CHUNKS_PER_WORKER, Some(pool));
+            self.emit_passes(bodies, &mut out.pairs, lanes * CHUNKS_PER_WORKER, Some(pool));
             true
         });
         if dispatched != Some(true) {
@@ -1519,7 +2182,7 @@ impl BroadphaseGrid {
     fn emit_passes(
         &mut self,
         bodies: &[BodyState],
-        out: &mut Vec<(BodyIndex, BodyIndex)>,
+        out: &mut ScratchColumn<(BodyIndex, BodyIndex)>,
         n_chunks: usize,
         pool: Option<&boyko_threadpool::PoolInner>,
     ) {
@@ -1527,8 +2190,13 @@ impl BroadphaseGrid {
         let n_chunks = n_chunks.clamp(1, n_cells.max(1));
 
         // Pass A: per-cell surviving-pair COUNT into `pair_count` (disjoint slots).
-        self.pair_count.clear();
-        self.pair_count.resize(n_cells, 0);
+        {
+            let mut count_view = self.pair_count.build_view();
+            count_view.clear();
+            for _ in 0..n_cells {
+                count_view.push(0);
+            }
+        }
         // Read-only grid + bodies + the write base, captured as raw pointers so a
         // worker never holds an outer `&self`/`&mut self` borrow across the scope
         // (the Phase 9.3c bare-pointer discipline). The chunk cell ranges are
@@ -1537,7 +2205,7 @@ impl BroadphaseGrid {
             grid: self as *const BroadphaseGrid,
             bodies: bodies.as_ptr(),
             bodies_len: bodies.len(),
-            pair_count: self.pair_count.as_mut_ptr(),
+            pair_count: self.pair_count.solve_base(),
             pair_offset: core::ptr::null(),
             out_base: core::ptr::null_mut(),
         };
@@ -1561,13 +2229,12 @@ impl BroadphaseGrid {
 
         // Serial exclusive prefix-sum pair_count → pair_offset (len n_cells + 1);
         // m = pair_offset[n_cells] is the total surviving within-cell pair count.
-        self.pair_offset.clear();
-        self.pair_offset.reserve(n_cells + 1);
+        self.pair_offset.build_view().clear();
         let mut acc = 0u32;
-        self.pair_offset.push(0);
-        for &c in &self.pair_count {
+        self.pair_offset.build_view().push(0);
+        for &c in self.pair_count.as_read_slice() {
             acc += c;
-            self.pair_offset.push(acc);
+            self.pair_offset.build_view().push(acc);
         }
         let m = acc as usize;
 
@@ -1575,15 +2242,18 @@ impl BroadphaseGrid {
         // calls — the candidate multiset is identical) into `candidates`, then
         // feasibility-filter it — counted now so `out` can be sized once. The coarse
         // CSR was built by `build_csr` above, so the oversized emit is ready here.
-        self.candidates.clear();
+        self.candidates.build_view().clear();
         self.emit_oversized_candidates(bodies);
         let oversized_reserve = self.candidates.len();
 
         // Size `out` once for the m survivors + the (≤ oversized_reserve) feasible
         // oversized pairs. The survivor region is filled by Pass B; the oversized
         // region is appended serially after.
-        out.clear();
-        out.resize(m + oversized_reserve, (BodyIndex(0), BodyIndex(0)));
+        {
+            let mut out = out.build_view();
+            out.clear();
+            out.resize(m + oversized_reserve, (BodyIndex(0), BodyIndex(0)));
+        }
 
         // Pass B: emit each cell's survivors into its `out[pair_offset[c]..]` sub-
         // range (disjoint per chunk), UNSORTED (cell-major). The single final serial
@@ -1596,8 +2266,12 @@ impl BroadphaseGrid {
             bodies: bodies.as_ptr(),
             bodies_len: bodies.len(),
             pair_count: core::ptr::null_mut(),
-            pair_offset: self.pair_offset.as_ptr(),
-            out_base: out.as_mut_ptr(),
+            pair_offset: self.pair_offset.as_read_slice().as_ptr(),
+            // The column's provenance-preserving write base, NOT a pointer
+            // laundered through a whole-buffer `&mut [T]`: the workers write through
+            // it concurrently, and a base branded by a slice reborrow is the exact
+            // Tree-Borrows shape that root-caused SP4.
+            out_base: out.solve_base(),
         };
         Self::run_balanced_cell_chunks(n_cells, n_chunks, pass_b_ptrs, pool, |c_lo, c_hi| {
             // SAFETY: `[c_lo, c_hi)` is one chunk's disjoint cell range. The worker
@@ -1634,13 +2308,21 @@ impl BroadphaseGrid {
         // Serial oversized emit appended after the m survivors (W3, feasibility-
         // filtered with the SAME predicate). `candidates` already holds this build's
         // oversized pairs (the verbatim O2 emitter above); filter into out[m..].
+        //
+        // The refill view is taken only HERE, after `run_balanced_cell_chunks` has
+        // joined every task: it is a `&mut` borrow of the column, and taking it
+        // while the workers' raw base was live would invalidate that base.
+        let mut out = out.build_view();
         let mut w = m;
-        for &(a, b) in &self.candidates {
-            let ia = a.0 as usize;
-            let ib = b.0 as usize;
-            if Self::feasible(&bodies[ia], &bodies[ib]) {
-                out[w] = (a, b);
-                w += 1;
+        {
+            let slots = out.as_mut_slice();
+            for &(a, b) in self.candidates.as_read_slice() {
+                let ia = a.0 as usize;
+                let ib = b.0 as usize;
+                if Self::feasible(&bodies[ia], &bodies[ib]) {
+                    slots[w] = (a, b);
+                    w += 1;
+                }
             }
         }
         // Truncate any oversized slots that the feasibility filter dropped (the
@@ -1653,10 +2335,10 @@ impl BroadphaseGrid {
         // dedup) and disjoint from the distinct oversized pairs, so the sorted
         // permutation is unique: the result is the same multiset in the same
         // canonical (min, max) order as the serial `build`.
-        out.sort_unstable();
+        out.as_mut_slice().sort_unstable();
 
         debug_assert!(
-            out.windows(2).all(|p| p[0] <= p[1]),
+            out.as_slice().windows(2).all(|p| p[0] <= p[1]),
             "invariant (O3): the sorted output is non-decreasing (== O2's sort)"
         );
         debug_assert_eq!(
@@ -1685,14 +2367,22 @@ impl BroadphaseGrid {
         let per = n_cells.div_ceil(n_chunks).max(1);
         match pool {
             Some(pool) => {
+                // `spawn_batch` is one `spawn` per body, so the pooled arm
+                // dispatches exactly the `while c_lo < n_cells` walk of the serial
+                // arm below. `per >= 1`, so this count is that walk's closed form:
+                // the ranges are unchanged, and it is also the upper bound
+                // `spawn_batch` is promised.
+                let n_waves = n_cells.div_ceil(per);
+                let body = &body;
                 pool.scope(|scope| {
-                    let mut c_lo = 0usize;
-                    while c_lo < n_cells {
-                        let c_hi = (c_lo + per).min(n_cells);
-                        let body = &body;
-                        scope.spawn(move || body(c_lo, c_hi));
-                        c_lo = c_hi;
-                    }
+                    scope.spawn_batch(
+                        n_waves,
+                        (0..n_waves).map(move |chunk| {
+                            let c_lo = chunk * per;
+                            let c_hi = (c_lo + per).min(n_cells);
+                            move || body(c_lo, c_hi)
+                        }),
+                    );
                 });
             }
             None => {
@@ -1755,24 +2445,36 @@ impl BroadphaseGrid {
             }
             c_hi
         };
+        // The cut walk as an iterator factory: the chunk boundaries are
+        // data-dependent (they follow the survivor prefix sum), so unlike Pass A's
+        // they have no closed form — the only way to learn a cut is to walk to it.
+        // Factored here rather than written twice so the pooled arm and the serial
+        // arm cannot drift apart.
+        let cuts = || {
+            let next_hi = &next_hi;
+            let mut c_lo = 0usize;
+            core::iter::from_fn(move || {
+                if c_lo >= n_cells {
+                    return None;
+                }
+                let c_hi = next_hi(c_lo);
+                let cut = (c_lo, c_hi);
+                c_lo = c_hi;
+                Some(cut)
+            })
+        };
         match pool {
             Some(pool) => {
+                let body = &body;
                 pool.scope(|scope| {
-                    let mut c_lo = 0usize;
-                    while c_lo < n_cells {
-                        let c_hi = next_hi(c_lo);
-                        let body = &body;
+                    for (c_lo, c_hi) in cuts() {
                         scope.spawn(move || body(c_lo, c_hi));
-                        c_lo = c_hi;
                     }
                 });
             }
             None => {
-                let mut c_lo = 0usize;
-                while c_lo < n_cells {
-                    let c_hi = next_hi(c_lo);
+                for (c_lo, c_hi) in cuts() {
                     body(c_lo, c_hi);
-                    c_lo = c_hi;
                 }
             }
         }
@@ -1794,17 +2496,17 @@ impl BroadphaseGrid {
     pub(crate) fn build_emit_shaped_forced(
         &mut self,
         bodies: &[BodyState],
-        out: &mut Vec<(BodyIndex, BodyIndex)>,
+        out: &mut ContactPairs,
         n_chunks: usize,
     ) {
-        out.clear();
+        out.pairs.build_view().clear();
         let n = bodies.len();
         if n == 0 {
-            self.oversized.clear();
+            self.oversized.build_view().clear();
             return;
         }
         self.build_csr(bodies);
-        self.emit_passes(bodies, out, n_chunks, None);
+        self.emit_passes(bodies, &mut out.pairs, n_chunks, None);
     }
 
     /// The number of bodies classified oversized in the most recent
@@ -1958,14 +2660,19 @@ unsafe impl Sync for EmitPtrs {}
 /// embedded here so the narrowphase stage reaches it via the same `ResMut` it
 /// already holds — no extra resource wiring (the cache is a narrowphase-internal
 /// detail of producing stable feature ids, not a solver input).
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct Manifolds {
     /// Manifolds the SOLVER consumes, in the deterministic pair order. A pair
     /// involving a [`Sensor`](crate::components::Sensor) body never enters this
     /// buffer (it is routed to [`sensor_overlaps`](Self::sensor_overlaps)
     /// instead), so the solved contact set — and thus the bit-deterministic
     /// solve — is identical whether or not any `Sensor` exists (std-lib S5).
-    pub manifolds: Vec<Manifold>,
+    ///
+    /// Backed by a `ComponentPool` column (audit Stage 4) and `pub(crate)` so the
+    /// narrowphase can take a refill view of it disjointly from
+    /// `sensor_overlaps` and `box_axis_cache`. Consumers read
+    /// [`manifolds`](Self::manifolds).
+    pub(crate) manifolds: ScratchColumn<Manifold>,
     /// Sensor / trigger OVERLAPS detected this step (std-lib S5): a manifold for
     /// each overlapping pair where EITHER body carries
     /// [`Sensor`](crate::components::Sensor). The narrowphase generates it with
@@ -1975,23 +2682,358 @@ pub struct Manifolds {
     /// velocity change. Cleared and refilled each step alongside `manifolds`
     /// (capacity reused, no per-step alloc). Empty in any world that never minted
     /// a `Sensor` id (the 0%-gate).
-    pub sensor_overlaps: Vec<Manifold>,
+    ///
+    /// Its own column under its own id, not a second view of `manifolds`: the
+    /// narrowphase writes one or the other for every pair in ONE pass, so a
+    /// shared id would put element `i` of both in the same cache set. Consumers
+    /// read [`sensor_overlaps`](Self::sensor_overlaps).
+    pub(crate) sensor_overlaps: ScratchColumn<Manifold>,
     /// Per-body-pair last-frame SAT-axis index (box-box hysteresis, P2 W4).
     /// Persisted in place across frames; the box-box generator feeds the stored
     /// axis back to bias against feature-id flicker on a resting stack.
     pub box_axis_cache: BoxAxisCache,
+    /// The parallel narrowphase's staging column (L5 D1): chunk `c`, owning pairs
+    /// `[lo, hi)`, writes its solver manifolds upward from row `lo` and its sensor
+    /// overlaps downward from row `hi − 1`, and the compaction joins the runs in pair
+    /// order into [`manifolds`](Self::manifolds) and
+    /// [`sensor_overlaps`](Self::sensor_overlaps).
+    ///
+    /// Its length only grows (to the largest pair count a dispatched step has seen,
+    /// filled only on growth); rows outside a chunk's written runs are stale and never
+    /// read. Untouched while `parallel_narrowphase` is off.
+    pub(crate) np_stage: ScratchColumn<Manifold>,
+    /// The per-row orientation frames (L9 D2, `narrowphase/reuse.rs`): row `r`'s world box
+    /// axes, `Mat3::from_quat(rotation)`'s columns, written for every box row once per step
+    /// at the entry of the narrowphase, so a box pair reads two frames instead of converting
+    /// two quaternions — and, on a step that requested contact reuse, its bounding radius.
+    ///
+    /// Its length is the step's row count whenever the fill ran; a non-box row's slot is
+    /// stale and never read. Untouched on a step whose pairs build their frames per pair
+    /// (fewer pairs than half the rows).
+    pub(crate) row_frames: ScratchColumn<RowFrame>,
+    /// The pair carry (L9 D9, `narrowphase/carry.rs`): every candidate pair's tag and — with
+    /// contact reuse on — its reuse record, this step's and the previous step's, and the
+    /// stamps that tie them to the pair list they index (the join's jumper bitset lives in
+    /// [`ContactPairs`] since L10 C0). It
+    /// carries a separated box pair's separating axis (L9a (ii)) and a slow touching box
+    /// pair's last full collision (L9b) to the next step.
+    pub(crate) pair_carry: PairCarry,
+    /// Steps whose narrowphase dispatched chunks across the pool — monotonic, written
+    /// only by the calling thread after the join. A structural witness, read through
+    /// [`narrowphase_dispatches`](Self::narrowphase_dispatches).
+    np_dispatches: u64,
+    /// L10's held store (C3b, `held_store.rs`): what a held island keeps — its row table, its
+    /// kept manifolds and pairs — so the logical views below still report it. Written by the
+    /// colored broadphase only; empty while sleeping is off.
+    pub(crate) held: HeldStore,
+}
+
+impl Default for Manifolds {
+    /// Hand-written because every field's backing column needs its reserved
+    /// [`ComponentId`], which no derive can supply.
+    #[inline]
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
 }
 
 impl Manifolds {
     /// Builds an empty manifold buffer pre-sized for `capacity` manifolds (and the
     /// box-axis hysteresis cache for `capacity` pairs).
     pub fn with_capacity(capacity: usize) -> Self {
+        register_narrowphase_column_layouts();
+        // A `ScratchColumn`'s reserve is a HARD ceiling rather than the growth hint
+        // `Vec::with_capacity` gave, so the floor is the same budget every other
+        // scratch column gets. The sensor buffer keeps the same ceiling: it is
+        // empty in a sensor-free world, and reservation is address space, not
+        // commit.
+        let reserve = capacity.max(scratch_reserve_rows(size_of::<Manifold>()));
         Self {
-            manifolds: Vec::with_capacity(capacity),
-            sensor_overlaps: Vec::new(),
-            box_axis_cache: BoxAxisCache::with_capacity(capacity),
+            manifolds: ScratchColumn::new(manifolds_id(), reserve),
+            sensor_overlaps: ScratchColumn::new(sensor_overlaps_id(), reserve),
+            box_axis_cache: BoxAxisCache::with_capacity(box_axis_cache_id(), capacity),
+            // The same ceiling: the stage holds at most one manifold per candidate pair,
+            // and a reservation is address space, not commit, until a dispatch grows it.
+            np_stage: ScratchColumn::new(np_stage_id(), reserve),
+            // One frame per body row. `capacity` counts pairs, not rows, so the floor is the
+            // budget every scratch column gets; the fill declines a step past it.
+            row_frames: ScratchColumn::new(
+                row_frames_id(),
+                capacity.max(scratch_reserve_rows(size_of::<RowFrame>())),
+            ),
+            pair_carry: PairCarry::with_capacity(capacity),
+            np_dispatches: 0,
+            held: HeldStore::with_capacity(0),
         }
     }
+
+    /// Diagnostic: an FNV-1a 64 hash of the pair tags the last narrowphase wrote (L9 D9),
+    /// in pair order — equal across the serial loop and any chunking of the parallel one.
+    /// O(pairs).
+    pub fn pair_tags_fingerprint(&self) -> u64 {
+        self.pair_carry.tags().iter().fold(0xcbf2_9ce4_8422_2325, |h, t| {
+            t.bits()
+                .to_le_bytes()
+                .iter()
+                .fold(h, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3))
+        })
+    }
+
+    /// Diagnostic: how many box pairs of the last narrowphase were found separated by the
+    /// separating axis their previous step carried, without running the SAT (L9a (ii)).
+    /// O(pairs).
+    pub fn separated_axis_hits(&self) -> usize {
+        // L10 rule 5 (design 08 B1′): a held-skip tag carries SEPHIT and is not a hit.
+        self.pair_carry
+            .tags()
+            .iter()
+            .filter(|t| !t.is_held_skip() && t.has(PairTag::SEPHIT))
+            .count()
+    }
+
+    /// Diagnostic: the last narrowphase's candidate pairs by how each was collided (L9), from
+    /// the pair tags. O(pairs).
+    pub fn pair_classes(&self) -> PairClasses {
+        let tags = self.pair_carry.tags();
+        let mut c = PairClasses { pairs: tags.len() as u64, ..PairClasses::default() };
+        for t in tags {
+            // L10 rule 5 (design 08 B1′): the held-skip tag first, before any single-bit test —
+            // it has no BOX bit and carries both HIT and SEPHIT.
+            if t.is_held_skip() {
+                c.held_skipped += 1;
+            } else if !t.has(PairTag::BOX) {
+                c.non_box += 1;
+            } else if t.has(PairTag::SEPHIT) {
+                c.sep_hits += 1;
+            } else if t.has(PairTag::HIT) {
+                c.reused += 1;
+            } else {
+                c.full += 1;
+                c.full_contacts += u64::from(t.axis().is_some());
+                c.records_built += u64::from(t.has(PairTag::REC));
+            }
+        }
+        c
+    }
+
+    /// Diagnostic (L10's bit-identity gate, design 06 §7 and 08 §7): calls `f` with every LOGICAL
+    /// candidate pair of the last step, in order — `pairs`' stream, which the last narrowphase
+    /// ran over, merged with the pairs the tree withheld (design 04 T3) — and the probe of its
+    /// tag. A pair the sleep-skip skipped carries the held-skip tag in its slot, and its probe
+    /// the copy the held store keeps of it, which is what the pair's state is claimed on; a
+    /// withheld pair has no slot, and its probe reads as a skipped one's; a collided pair's
+    /// probe is its own tag. O(pairs), plus two binary searches per held pair.
+    pub fn for_each_pair_tag(&self, pairs: &ContactPairs, mut f: impl FnMut(PairTagProbe)) {
+        let held = self.held.view();
+        let kept_probe = |a: BodyIndex, b: BodyIndex, slot: PairTag, withheld: bool| {
+            let is_held = slot.is_held_skip();
+            let kept = if is_held { held.kept_tag_of(a.0, b.0) } else { Some(slot) };
+            PairTagProbe {
+                a: a.0,
+                b: b.0,
+                slot: slot.bits(),
+                held: is_held,
+                withheld,
+                invariant: kept.map(|t| t.bits() & PairTag::HIT_INVARIANT),
+                kept_class: kept.is_some_and(|t| {
+                    !t.is_held_skip() && t.bits() & (PairTag::REC | PairTag::SEP | PairTag::PUSHED) != 0
+                }),
+            }
+        };
+        let tags = self.pair_carry.tags();
+        let stream = &pairs.pairs_stream()[..pairs.pairs_stream().len().min(tags.len())];
+        let withheld = pairs.withheld();
+        let (mut s, mut w) = (0usize, 0usize);
+        while s < stream.len() || w < withheld.len() {
+            if w < withheld.len() && (s == stream.len() || withheld[w] < stream[s]) {
+                let (a, b) = withheld[w];
+                f(kept_probe(a, b, PairTag::HELD_SKIP, true));
+                w += 1;
+            } else {
+                let (a, b) = stream[s];
+                f(kept_probe(a, b, tags[s], false));
+                s += 1;
+            }
+        }
+    }
+
+    /// Diagnostic: an FNV-1a 64 hash of the reuse records the last narrowphase wrote (L9b) —
+    /// every pair slot whose tag carries `REC`, its index and every word of its record, in pair
+    /// order. Equal across the serial loop and any chunking of the parallel one. O(pairs).
+    pub fn reuse_records_fingerprint(&self) -> u64 {
+        let records = self.pair_carry.records();
+        let fnv = |h: u64, w: u32| {
+            w.to_le_bytes()
+                .iter()
+                .fold(h, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3))
+        };
+        self.pair_carry
+            .tags()
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.has(PairTag::REC))
+            .fold(0xcbf2_9ce4_8422_2325, |h, (k, _)| {
+                records[k].words().iter().fold(fnv(h, k as u32), |h, &w| fnv(h, w))
+            })
+    }
+
+    /// Diagnostic: steps whose pair carry could not be joined although it had been stamped
+    /// before — a missed gather, or a pair list that is not the one the carry's tags index.
+    /// Flat while the pipeline runs every step.
+    #[inline]
+    pub fn pair_carry_resets(&self) -> u64 {
+        self.pair_carry.resets()
+    }
+
+    /// Diagnostic: steps whose pair carry joined across moved rows, reading the jumper bitset
+    /// the broadphase rebuilt on that step (L10 C0 moved the build from the narrowphase
+    /// prologue into [`ContactPairs::rotate`]; the count is the one it kept before, one per
+    /// such step).
+    #[inline]
+    pub fn pair_carry_jumper_builds(&self) -> u64 {
+        self.pair_carry.jumper_builds()
+    }
+
+    /// Diagnostic: the number of steps whose narrowphase dispatched its pairs across the
+    /// pool (L5). It stays flat while `parallel_narrowphase` is off, on a one-worker pool,
+    /// and on a step with fewer than two chunks' worth of pairs; each dispatched step adds
+    /// exactly one. O(1).
+    #[inline]
+    pub fn narrowphase_dispatches(&self) -> u64 {
+        self.np_dispatches
+    }
+
+    /// Records one dispatched narrowphase step. Called by the dispatch after its join.
+    #[inline]
+    pub(crate) fn note_np_dispatch(&mut self) {
+        self.np_dispatches += 1;
+    }
+
+    /// This step's LOGICAL solver manifolds, in the order the sleep-skip off would emit them
+    /// (L10 design 04 D6): the stream the narrowphase and the SDF stage wrote, merged with the
+    /// manifolds L10 keeps for held islands by their canonical ordinal (body-body pairs by
+    /// `(a, b)`, then SDF contacts by row).
+    ///
+    /// The view yields [`Manifold`]s by value and has no `Index`: a held manifold is rebuilt
+    /// from its island's row table, and a caller that mixed the view's positions with the
+    /// solver's indices would read the wrong one. [`solver_manifolds`](Self::solver_manifolds)
+    /// is the stream the graph and the solve index.
+    ///
+    /// With no island held the view is the stream element for element.
+    #[inline]
+    pub fn manifolds(&self) -> ManifoldsView<'_> {
+        ManifoldsView::new(self.manifolds.as_read_slice(), self.held.view())
+    }
+
+    /// The contiguous read slice over this step's STREAM solver manifolds, in the deterministic
+    /// pair order: what the constraint graph colours and the solve reads, and what
+    /// [`ConstraintGraph::color`] indexes. Without L10's held manifolds (see
+    /// [`manifolds`](Self::manifolds)).
+    #[inline]
+    pub fn solver_manifolds(&self) -> &[Manifold] {
+        self.manifolds.as_read_slice()
+    }
+
+    /// The manifold behind handle `handle` (L10 design 04 D6): a stream index below
+    /// [`HELD_BASE`], or `HELD_BASE + slot` for a kept manifold. `None` for a handle that names
+    /// nothing. Handles are what [`ConstraintGraph::island`] yields, valid until the next step.
+    #[inline]
+    pub fn get(&self, handle: u32) -> Option<Manifold> {
+        if handle < HELD_BASE {
+            self.solver_manifolds().get(handle as usize).copied()
+        } else {
+            let held = self.held.view();
+            held.slot_of_handle(handle).map(|slot| held.manifold(slot))
+        }
+    }
+
+    /// The position handle `handle` holds in [`manifolds`](Self::manifolds), the order the
+    /// sleep-skip off would emit (L10 design 04 D6), or `None` for a handle that names nothing.
+    /// O(log n): a stream manifold's position is its index plus the kept manifolds ranked below
+    /// it, a kept one's its rank in the kept order plus the stream manifolds ranked below it.
+    #[inline]
+    pub fn position_of(&self, handle: u32) -> Option<usize> {
+        let stream = self.solver_manifolds();
+        let held = self.held.view();
+        if handle < HELD_BASE {
+            let m = stream.get(handle as usize)?;
+            Some(handle as usize + held.rank_below(ord(m.body_a.0, m.body_b.0)))
+        } else {
+            let slot = held.slot_of_handle(handle)?;
+            let key = held.ordinal(slot);
+            let below = stream.partition_point(|m| ord(m.body_a.0, m.body_b.0) < key);
+            Some(held.rank_below(key) + below)
+        }
+    }
+
+    /// The contiguous read slice over this step's sensor / trigger overlaps.
+    #[inline]
+    pub fn sensor_overlaps(&self) -> &[Manifold] {
+        self.sensor_overlaps.as_read_slice()
+    }
+
+    /// The single-threaded refill view over the solver manifold buffer (clear +
+    /// push) — the ONLY surface that mutates it, used by the narrowphase.
+    #[inline]
+    pub fn manifolds_build(&mut self) -> ScratchBuildView<'_, Manifold> {
+        self.manifolds.build_view()
+    }
+
+    /// The single-threaded refill view over the sensor-overlap buffer.
+    #[inline]
+    pub fn sensor_overlaps_build(&mut self) -> ScratchBuildView<'_, Manifold> {
+        self.sensor_overlaps.build_view()
+    }
+}
+
+/// The last narrowphase's candidate pairs by how each was collided (L9), from the pair tags
+/// ([`Manifolds::pair_classes`]): `non_box + sep_hits + reused + full + held_skipped == pairs`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PairClasses {
+    /// Candidate pairs the narrowphase tagged.
+    pub pairs: u64,
+    /// Pairs L10's sleep-skip did not collide because an endpoint is held (their tag is the
+    /// held-skip tag, classed before any other test).
+    pub held_skipped: u64,
+    /// Sphere-sphere and sphere-box pairs.
+    pub non_box: u64,
+    /// Box pairs the separating axis they carried from the previous step rejected, the SAT not
+    /// run (L9a (ii)).
+    pub sep_hits: u64,
+    /// Box pairs whose output came from their contact-reuse record (L9b), the SAT not run.
+    pub reused: u64,
+    /// Box pairs whose full collision (SAT, clip) ran.
+    pub full: u64,
+    /// Of `full`, the pairs whose full collision produced a contact.
+    pub full_contacts: u64,
+    /// Of `full_contacts`, the slow pairs that built a reuse record from it (L9b misses).
+    pub records_built: u64,
+}
+
+/// One candidate pair's narrowphase tag as L10's bit-identity gate compares it
+/// ([`Manifolds::for_each_pair_tag`]; design 06 §7, 08 §7): a collided pair's slot tag is
+/// claimed bit for bit; a held pair's slot holds the held-skip tag, and its state is claimed on
+/// the kept copy without the bits no reader of a kept tag consumes (`HIT` and `SEPHIT`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PairTagProbe {
+    /// The pair's lower row.
+    pub a: u32,
+    /// The pair's higher row.
+    pub b: u32,
+    /// The slot's tag bits; the held-skip tag's for a withheld pair, which has no slot.
+    pub slot: u16,
+    /// Whether the narrowphase did not collide the pair: skipped for a held endpoint, or
+    /// withheld by the tree broadphase.
+    pub held: bool,
+    /// Whether the tree broadphase withheld the pair (L10 C3c, design 04 T3): it is in the
+    /// logical view, not in the stream.
+    pub withheld: bool,
+    /// The tag's claimed bits — every bit but `HIT` and `SEPHIT` — of the slot's tag, or of the
+    /// held store's copy for a held pair; `None` for a held pair the store keeps no copy of.
+    pub invariant: Option<u16>,
+    /// Whether that tag carries state a held island keeps: a reuse record, a separating axis or
+    /// a manifold (design 06 B2).
+    pub kept_class: bool,
 }
 
 /// Bit width of one `color_occ` word (a `u64` per-color body bitset cell).
@@ -2002,38 +3044,52 @@ const OCC_WORD_BITS: u32 = 64;
 /// solve runs the byte-identical single-threaded path (plan P2, the LargeIslandSplitter
 /// trigger).
 ///
-/// # Rationale (`[DERIVED]` direction, `[ESTIMATE]` value)
+/// ⚠ **RETIRED AS THE DISPATCH GATE.** The whole-solve gate now reads the widest
+/// COLOR's slot count (`CohortColumns::widest_color_slots`, colored.rs) against
+/// the solver's own `MIN_PARALLEL_SLOTS_PER_COLOR`. This const survives as the
+/// island-size threshold the P2 tests are written against; nothing in the solve
+/// path reads it.
 ///
-/// `build_graph` + greedy coloring + the per-color `pool.scope` dispatch are pure
-/// overhead at small contact counts: below the crossover the partition + dispatch
-/// cost exceeds the parallel-solve saving (docs/ARCHITECTURE-HYBRID-PERF.md Part 3.3
-/// `[DERIVED]`). The colored solve parallelizes WITHIN a color, and the largest
-/// color is bounded by the largest island's manifold count, so the largest island is
-/// the metric that bounds the largest parallel unit a step can produce. When even
-/// the largest island is below this, no color can cross the solver's own
-/// `MIN_PARALLEL_SLOTS_PER_COLOR` per-color dispatch threshold (a color holds ≤ one
-/// manifold per island it spans, and a step's manifolds-per-island peak is exactly
-/// this count), so a `pool.scope` can never help — the whole solve runs
-/// single-threaded, skipping the ambient-pool probe and per-color span checks every
-/// pass.
+/// # Why it was retired — two independent errors, both in the expensive direction
+///
+/// The rationale it carried was: "the largest color is bounded by the largest
+/// island's manifold count", justified by "a color holds ≤ one manifold per island
+/// it spans, and a step's manifolds-per-island peak is exactly this count".
+///
+/// 1. **The premise is false.** A color is a set of BODY-DISJOINT manifolds, not a
+///    set of island representatives. Two manifolds of the SAME island can be body
+///    disjoint and share a color — in the chain `A-B-C-D`, `(A,B)` and `(C,D)` do.
+/// 2. **The inference does not follow even if the premise held.** A bound of one
+///    manifold per island caps each island's CONTRIBUTION to a color, not the
+///    color's WIDTH. Manifolds in different islands are always body-disjoint, so
+///    `n` disjoint pairs are `n` islands of one manifold each AND one color of `n`
+///    slots. Island size bounds color width from below not at all.
+///
+/// So the gate forced the single-threaded path on precisely the most parallel
+/// scenes the solver can be handed — every many-pile, many-debris, many-ragdoll
+/// world. Regression-gated by
+/// `many_disjoint_pairs_are_one_wide_color_and_must_dispatch`
+/// (tests/large_island_gate_p2.rs).
+///
+/// # The guard that should have caught it, and why it did not
+///
+/// The retired sanity assert below encoded exactly the right worry — the
+/// whole-solve gate must not be stricter than the per-color floor — and enforced
+/// it by setting this const EQUAL to `MIN_PARALLEL_SLOTS_PER_COLOR = 256`. That
+/// could not work: the two 256s are in different UNITS. One counts manifolds in
+/// the largest island, the other counts slots in a color. Matching the magnitude
+/// of two incommensurable quantities proves nothing about their order, and the
+/// gate was stricter anyway. **A guard that compares numbers across units is not
+/// a guard.**
 ///
 /// # Value (UNMEASURED)
 ///
-/// `256` mirrors the analysis's `~256 contacts` first-principles crossover AND the
-/// solver's own `MIN_PARALLEL_SLOTS_PER_COLOR = 256` per-color floor (a step that
-/// cannot reach that floor in its largest island can never dispatch). It is a
-/// PROVISIONAL const; **P10 (offline calibration) is a HARD dependency** — it
-/// replaces this `[ESTIMATE]` with a `[MEASURED]` break-even. Until then the gate
-/// only changes WHERE the bit-identical colored solve runs, never the bits, so a
-/// mis-calibrated value is at worst a perf regression near the boundary, never a
-/// result change.
+/// `256` mirrored the analysis's `~256 contacts` first-principles crossover. It
+/// remains an `[ESTIMATE]`; P10 (offline calibration) would have replaced it with
+/// a `[MEASURED]` break-even. That dependency now belongs to
+/// `MIN_PARALLEL_SLOTS_PER_COLOR`, which is the value the gate actually reads.
 pub const LARGE_ISLAND_CONSTRAINTS: u32 = 256;
 
-// Sanity: the whole-solve gate must not be STRICTER than the solver's own per-color
-// dispatch floor — if it were, a step could clear the per-color floor (a genuinely
-// parallel color exists) yet still be forced single-threaded by this coarser gate,
-// leaving real parallelism on the table. Keeping it == the per-color floor makes the
-// whole-solve gate a pure pre-empt of steps that cannot dispatch anyway.
 const _: () = assert!(LARGE_ISLAND_CONSTRAINTS >= 1, "the threshold must admit at least one constraint");
 
 /// Constraint islands + greedy graph coloring of one step's manifolds (plan O4,
@@ -2076,32 +3132,32 @@ const _: () = assert!(LARGE_ISLAND_CONSTRAINTS >= 1, "the threshold must admit a
 /// in manifold order; CSR groups preserve ascending manifold index. No `HashMap`,
 /// no iteration-order-dependent containers, no atomics. Same input → identical
 /// `island_of` / `color_start` / `color_contacts` every run.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct ConstraintGraph {
     /// Union-find parent links over dynamic body rows, reused across builds. Sized
     /// to the dynamic-body count each build; a static/sentinel row is never a node.
-    uf_parent: Vec<u32>,
+    uf_parent: ScratchColumn<u32>,
     /// Union-find subtree sizes (union-by-size), reused across builds.
-    uf_size: Vec<u32>,
+    uf_size: ScratchColumn<u32>,
     /// `island_of[row]` = compacted island id of dynamic body `row` (flat). A
     /// static/sentinel row holds [`NO_ISLAND`](ConstraintGraph::NO_ISLAND).
-    island_of: Vec<u32>,
+    island_of: ScratchColumn<u32>,
     /// CSR offsets: `island_manifold_start[i]..[i + 1]` indexes `island_manifolds`
     /// (`len == n_islands + 1`). NO `Vec<Vec>`.
-    island_manifold_start: Vec<u32>,
+    island_manifold_start: ScratchColumn<u32>,
     /// CSR values: manifold indices grouped by island (flat).
-    island_manifolds: Vec<u32>,
+    island_manifolds: ScratchColumn<u32>,
     /// CSR offsets: `color_start[c]..[c + 1]` indexes `color_contacts`
     /// (`len == n_colors + 1`). NO `Vec<Vec>`.
-    color_start: Vec<u32>,
+    color_start: ScratchColumn<u32>,
     /// CSR values: manifold indices grouped by color, ascending within a color
     /// (manifold order — D4).
-    color_contacts: Vec<u32>,
+    color_contacts: ScratchColumn<u32>,
     /// Flat per-color body bitset matrix, addressed
     /// `color_occ[color * words_per_color + (body >> 6)]`; bit `body & 63` is set
     /// when `body` is occupied in `color`. Reused (clear, never realloc) — the
     /// coloring occupancy scratch.
-    color_occ: Vec<u64>,
+    color_occ: ScratchColumn<u64>,
     /// `u64` words per color row in `color_occ` (`= n_dynamic.div_ceil(64)`).
     words_per_color: u32,
     /// Number of colors produced this build (`color_start.len() == n_colors + 1`).
@@ -2123,7 +3179,52 @@ pub struct ConstraintGraph {
     /// (see [`max_island_constraints`](Self::max_island_constraints)). Folded into
     /// [`flatten_islands`](Self::flatten_islands) at zero extra pass (the per-island
     /// counts already exist as the CSR deltas).
+    ///
+    /// With L10 holding islands it is the maximum over [`island_len`](Self::island_len), the
+    /// logical count (design 04 A5).
     max_island_constraints: u32,
+    /// Per island of the last build (L10 C3b, design 04 A5): its union-find root, its member
+    /// count, and — for a held island — its kept manifolds' first slot and count, which
+    /// [`island_len`](Self::island_len) and [`island`](Self::island) add to the stream's. The
+    /// next step's broadphase reads it for its move-in candidates.
+    island_info: ScratchColumn<IslandInfo>,
+}
+
+/// One island of a [`ConstraintGraph`] build (L10 C3b, design 04 A5), 16 B.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct IslandInfo {
+    /// The island's union-find root (a member row).
+    pub(crate) root: u32,
+    /// Its member rows.
+    pub(crate) members: u32,
+    /// The first kept manifold slot of the held record the island is, or
+    /// [`NO_HELD`](Self::NO_HELD) (design 04's `held` names the record; the slot is what
+    /// [`ConstraintGraph::island`]'s handles need, and the record is `kept[slot].record`).
+    pub(crate) held_start: u32,
+    /// The held record's kept manifolds (`0` for an island that is not held).
+    pub(crate) held_len: u32,
+}
+
+impl IslandInfo {
+    /// An island that is not held.
+    pub(crate) const NO_HELD: u32 = u32::MAX;
+}
+
+const _: () = assert!(size_of::<IslandInfo>() == 16, "IslandInfo is 16 B (design 04 A5)");
+
+impl Default for ConstraintGraph {
+    /// An empty graph at the kernel's standard column budget.
+    ///
+    /// Hand-written because `ScratchColumn` has no `Default`: a column is bound to
+    /// a registered `ComponentId` at construction, so there is no id-free empty
+    /// value to derive. `with_capacity(0)` is the whole body — the reservation is
+    /// address space with zero commit, so a "default" graph costs no resident
+    /// memory until its first build.
+    #[inline]
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
 }
 
 impl ConstraintGraph {
@@ -2135,22 +3236,31 @@ impl ConstraintGraph {
     /// steady state). The CSR buffers grow on the first builds to the live counts
     /// and reuse that capacity thereafter.
     pub fn with_capacity(capacity: usize) -> Self {
-        let words = capacity.div_ceil(OCC_WORD_BITS as usize);
+        // `capacity` is now advisory. A `ScratchColumn` reserves ADDRESS SPACE at
+        // the kernel's own budget (`scratch_reserve_rows`) and commits nothing
+        // until it grows, so a generous uniform ceiling costs zero resident bytes
+        // and removes the per-build grow-cap hazard a caller-sized `Vec` had.
+        let _ = capacity;
+        register_graph_column_layouts();
+        let u32_rows = scratch_reserve_rows(core::mem::size_of::<u32>());
+        let u64_rows = scratch_reserve_rows(core::mem::size_of::<u64>());
         Self {
-            uf_parent: Vec::with_capacity(capacity),
-            uf_size: Vec::with_capacity(capacity),
-            island_of: Vec::with_capacity(capacity),
-            island_manifold_start: Vec::with_capacity(capacity + 1),
-            island_manifolds: Vec::with_capacity(capacity),
-            color_start: Vec::with_capacity(capacity + 1),
-            color_contacts: Vec::with_capacity(capacity),
-            // One color row worth of words is a cheap first reserve; it grows to the
-            // live color count × words-per-color and reuses that capacity.
-            color_occ: Vec::with_capacity(words),
+            uf_parent: ScratchColumn::new(graph_column_id(0), u32_rows),
+            uf_size: ScratchColumn::new(graph_column_id(1), u32_rows),
+            island_of: ScratchColumn::new(graph_column_id(2), u32_rows),
+            island_manifold_start: ScratchColumn::new(graph_column_id(3), u32_rows),
+            island_manifolds: ScratchColumn::new(graph_column_id(4), u32_rows),
+            color_start: ScratchColumn::new(graph_column_id(5), u32_rows),
+            color_contacts: ScratchColumn::new(graph_column_id(6), u32_rows),
+            color_occ: ScratchColumn::new(graph_column_id(7), u64_rows),
             words_per_color: 0,
             n_colors: 0,
             n_islands: 0,
             max_island_constraints: 0,
+            island_info: ScratchColumn::new(
+                graph_island_info_id(),
+                scratch_reserve_rows(size_of::<IslandInfo>()),
+            ),
         }
     }
 
@@ -2167,15 +3277,21 @@ impl ConstraintGraph {
     }
 
     /// Manifold count of the LARGEST island in the current partition (`0` for an
-    /// empty partition) — the P2 large-island gate metric.
+    /// empty partition).
     ///
-    /// The colored solve compares this against
-    /// [`LARGE_ISLAND_CONSTRAINTS`](crate::resources::LARGE_ISLAND_CONSTRAINTS) to
-    /// decide its whole-solve parallel-dispatch strategy: below the threshold it runs
-    /// the byte-identical single-threaded path (the dispatch cannot amortize), at/
-    /// above it the colored-parallel path. Computed during
-    /// [`build`](Self::build) at zero extra pass (folded into the island CSR), so
-    /// reading it is free.
+    /// ⚠ **This is NOT the parallel-dispatch metric, and using it as one was a
+    /// measured defect.** It bounds nothing about how wide a COLOR can be: a color
+    /// is a set of body-disjoint manifolds, and manifolds in different islands are
+    /// always body-disjoint, so `n` disjoint pairs give `max_island_constraints ==
+    /// 1` and a single color of `n` slots. The whole-solve gate reads
+    /// `CohortColumns::widest_color_slots` instead — see
+    /// [`LARGE_ISLAND_CONSTRAINTS`](crate::resources::LARGE_ISLAND_CONSTRAINTS) for
+    /// the full account.
+    ///
+    /// It remains an exact, cheap description of ISLAND structure — computed during
+    /// [`build`](Self::build) at zero extra pass (folded into the island CSR) — and
+    /// is kept for diagnostics and for the P2 tests. Do not reintroduce it as a
+    /// dispatch predicate.
     #[inline]
     pub fn max_island_constraints(&self) -> u32 {
         self.max_island_constraints
@@ -2186,32 +3302,86 @@ impl ConstraintGraph {
     #[inline]
     pub fn color(&self, color: u32) -> &[u32] {
         let c = color as usize;
-        if c + 1 >= self.color_start.len() {
+        let starts = self.color_start.as_read_slice();
+        if c + 1 >= starts.len() {
             return &[];
         }
-        let start = self.color_start[c] as usize;
-        let end = self.color_start[c + 1] as usize;
-        &self.color_contacts[start..end]
+        let start = starts[c] as usize;
+        let end = starts[c + 1] as usize;
+        &self.color_contacts.as_read_slice()[start..end]
     }
 
-    /// Manifold indices of island `island`. Returns an empty slice for
+    /// The manifolds of island `island`, as handles (L10 design 04 D6): stream indices into
+    /// [`Manifolds::solver_manifolds`] below [`HELD_BASE`], and `HELD_BASE + slot` for the
+    /// manifolds L10 keeps for a held island. [`Manifolds::get`] resolves a handle, and
+    /// [`Manifolds::position_of`] maps it to its position in [`Manifolds::manifolds`]. Empty for
     /// `island >= n_islands`.
+    ///
+    /// The stream handles come first, ascending, then a held island's kept handles, ascending by
+    /// slot; as a set they are the island's manifolds under the sleep-skip off, and through
+    /// [`Manifolds::position_of`] they are `Off`'s index list.
     #[inline]
-    pub fn island(&self, island: u32) -> &[u32] {
+    pub fn island(&self, island: u32) -> IslandManifolds<'_> {
         let i = island as usize;
-        if i + 1 >= self.island_manifold_start.len() {
-            return &[];
+        let starts = self.island_manifold_start.as_read_slice();
+        if i + 1 >= starts.len() {
+            return IslandManifolds::new(&[], 0, 0);
         }
-        let start = self.island_manifold_start[i] as usize;
-        let end = self.island_manifold_start[i + 1] as usize;
-        &self.island_manifolds[start..end]
+        let start = starts[i] as usize;
+        let end = starts[i + 1] as usize;
+        let (held_start, held_len) = match self.island_info.as_read_slice().get(i) {
+            Some(info) if info.held_start != IslandInfo::NO_HELD => (info.held_start, info.held_len),
+            _ => (0, 0),
+        };
+        IslandManifolds::new(
+            &self.island_manifolds.as_read_slice()[start..end],
+            held_start,
+            held_len,
+        )
+    }
+
+    /// The number of manifolds of island `island` (L10 design 04 D7): its stream manifolds plus
+    /// the manifolds kept for it while it is held — what [`island`](Self::island) yields, and
+    /// what the sleep step keys the island by. `0` for `island >= n_islands`.
+    #[inline]
+    pub fn island_len(&self, island: u32) -> u32 {
+        let i = island as usize;
+        let starts = self.island_manifold_start.as_read_slice();
+        if i + 1 >= starts.len() {
+            return 0;
+        }
+        let held = self.island_info.as_read_slice().get(i).map_or(0, |info| info.held_len);
+        starts[i + 1] - starts[i] + held
+    }
+
+    /// The per-island info of the last build (L10 C3b): root, members, held run.
+    #[inline]
+    pub(crate) fn island_info(&self) -> &[IslandInfo] {
+        self.island_info.as_read_slice()
     }
 
     /// Compacted island id of dynamic body `row`, or [`NO_ISLAND`](Self::NO_ISLAND)
     /// for a static/sentinel row (or one out of range).
     #[inline]
     pub fn island_of(&self, row: u32) -> u32 {
-        self.island_of.get(row as usize).copied().unwrap_or(Self::NO_ISLAND)
+        self.island_of.as_read_slice().get(row as usize).copied().unwrap_or(Self::NO_ISLAND)
+    }
+
+    /// The island CSR offsets: island `i` holds `starts[i + 1] - starts[i]` manifolds.
+    /// After a build the slice holds `n_islands + 1` entries; before the first build it
+    /// is empty and `n_islands` is `0`.
+    #[inline]
+    pub(crate) fn island_starts(&self) -> &[u32] {
+        self.island_manifold_start.as_read_slice()
+    }
+
+    /// The per-row island ids of the last build, one entry per dynamic row it was
+    /// given: `ids[row] == island_of(row)` for every `row < ids.len()`, and every row
+    /// at or past the end has no island ([`NO_ISLAND`](Self::NO_ISLAND)). Empty
+    /// before the first build.
+    #[inline]
+    pub(crate) fn island_ids(&self) -> &[u32] {
+        self.island_of.as_read_slice()
     }
 
     /// Partitions `manifolds` (in manifold order) into islands + colors over the
@@ -2241,26 +3411,133 @@ impl ConstraintGraph {
         n_dynamic: usize,
         is_dynamic: impl Fn(u32) -> bool,
     ) {
+        self.build_with_held(manifolds, n_dynamic, &is_dynamic, &is_dynamic, HeldView::EMPTY, false);
+    }
+
+    /// [`build`](Self::build) with L10's held islands (design 04 A5, D7, D8): the partition of
+    /// the stream `manifolds`, plus one island per held record, each with the id, the members and
+    /// the manifold count the sleep-skip off gives it.
+    ///
+    /// * `is_member(row)` is the membership predicate the island ids are assigned over — the
+    ///   dynamic rows, held ones included;
+    /// * `movable(row)` is the predicate the unions, the filing and the colouring use — the
+    ///   dynamic rows that are not held (`is_dynamic_row(effective_inv_mass(..))`, the solve's
+    ///   write guard's own value, ruling W1);
+    /// * `held` is the store: every live record's members are pre-rooted under the record's
+    ///   root before any union — no stream manifold names a held row, so no union touches them —
+    ///   and the flatten assigns ids in ascending root order over the members, so a held island's
+    ///   id is `Off`'s (its root is `Off`'s: a monotone renaming of an unchanged union sequence).
+    ///   [`island_len`](Self::island_len) adds the record's kept manifolds, and
+    ///   [`max_island_constraints`](Self::max_island_constraints) is the maximum of that;
+    /// * `with_info` records every island's root and member count for the next step's move-in
+    ///   candidates (a step the sleep-skip runs); off, the info is left empty.
+    pub(crate) fn build_with_held(
+        &mut self,
+        manifolds: &[Manifold],
+        n_dynamic: usize,
+        is_member: &impl Fn(u32) -> bool,
+        movable: &impl Fn(u32) -> bool,
+        held: HeldView<'_>,
+        with_info: bool,
+    ) {
         self.reset_islands(n_dynamic);
-        self.build_islands(manifolds, &is_dynamic);
-        self.flatten_islands(manifolds, n_dynamic, &is_dynamic);
-        self.color_manifolds(manifolds, n_dynamic, &is_dynamic);
+        self.pre_root(n_dynamic, held);
+        self.build_islands(manifolds, movable);
+        self.flatten_islands(manifolds, n_dynamic, is_member, movable, held, with_info);
+        self.color_manifolds(manifolds, n_dynamic, movable);
+    }
+
+    /// L10 (design 04 A5): every island's root (the row that claimed its id), member count and —
+    /// for a held record's island — its kept run, when `with_info`; otherwise the info is empty.
+    fn fill_island_info(
+        &mut self,
+        n_dynamic: usize,
+        is_member: &impl Fn(u32) -> bool,
+        held: HeldView<'_>,
+        with_info: bool,
+    ) {
+        let mut info_view = self.island_info.build_view();
+        info_view.clear();
+        if !with_info {
+            return;
+        }
+        info_view.resize(
+            self.n_islands as usize,
+            IslandInfo { root: Self::NO_ISLAND, members: 0, held_start: IslandInfo::NO_HELD, held_len: 0 },
+        );
+        let info = info_view.as_mut_slice();
+        let island_of = self.island_of.as_read_slice();
+        let parent = self.uf_parent.as_read_slice();
+        for row in 0..n_dynamic as u32 {
+            if !is_member(row) {
+                continue;
+            }
+            let i = &mut info[island_of[row as usize] as usize];
+            i.members += 1;
+            if parent[row as usize] == row {
+                i.root = row;
+            }
+        }
+        for rec in held.records() {
+            if !rec.live() {
+                continue;
+            }
+            let i = &mut info[island_of[rec.root as usize] as usize];
+            debug_assert!(
+                i.root == rec.root && i.members == rec.n_members,
+                "invariant: a held record is one island of the build, rooted where Off roots it"
+            );
+            i.held_start = rec.kept_start;
+            i.held_len = rec.kept_len;
+        }
+    }
+
+    /// Pre-roots every live held record's members under its root (design 04 D7).
+    #[inline]
+    fn pre_root(&mut self, n_dynamic: usize, held: HeldView<'_>) {
+        if held.is_empty() {
+            return;
+        }
+        let mut parent = self.uf_parent.build_view();
+        let mut size = self.uf_size.build_view();
+        let parent = parent.as_mut_slice();
+        let size = size.as_mut_slice();
+        for rec in held.records() {
+            if !rec.live() {
+                continue;
+            }
+            let root = rec.root as usize;
+            debug_assert!(root < n_dynamic, "invariant: a held root is a current row");
+            for &m in held.rows(rec.members_range()) {
+                debug_assert!((m as usize) < n_dynamic, "invariant: a held member is a current row");
+                parent[m as usize] = rec.root;
+            }
+            size[root] = rec.n_members;
+        }
     }
 
     /// Resets the union-find forest to `n_dynamic` singleton sets and clears
     /// `island_of` to [`NO_ISLAND`](Self::NO_ISLAND) (capacity reused).
     #[inline]
     fn reset_islands(&mut self, n_dynamic: usize) {
-        self.uf_parent.clear();
-        self.uf_size.clear();
-        self.uf_parent.reserve(n_dynamic);
-        self.uf_size.reserve(n_dynamic);
-        for row in 0..n_dynamic as u32 {
-            self.uf_parent.push(row);
-            self.uf_size.push(1);
+        // `build_view()` is the only surface that can refill a column, and it is
+        // `!Send` by design — that is the property that makes the SP4 whole-buffer
+        // reborrow un-typeable, so the ceremony is the point, not overhead.
+        {
+            let mut parent = self.uf_parent.build_view();
+            let mut size = self.uf_size.build_view();
+            parent.clear();
+            size.clear();
+            for row in 0..n_dynamic as u32 {
+                parent.push(row);
+                size.push(1);
+            }
         }
-        self.island_of.clear();
-        self.island_of.resize(n_dynamic, Self::NO_ISLAND);
+        let mut island_of = self.island_of.build_view();
+        island_of.clear();
+        for _ in 0..n_dynamic {
+            island_of.push(Self::NO_ISLAND);
+        }
     }
 
     /// Iterative union-find `find` with full path compression (no recursion — the
@@ -2268,14 +3545,16 @@ impl ConstraintGraph {
     #[inline]
     fn uf_find(&mut self, mut x: u32) -> u32 {
         // Walk to the root.
+        let mut view = self.uf_parent.build_view();
+        let parent = view.as_mut_slice();
         let mut root = x;
-        while self.uf_parent[root as usize] != root {
-            root = self.uf_parent[root as usize];
+        while parent[root as usize] != root {
+            root = parent[root as usize];
         }
         // Path-compress: point every node on the path straight at the root.
-        while self.uf_parent[x as usize] != root {
-            let next = self.uf_parent[x as usize];
-            self.uf_parent[x as usize] = root;
+        while parent[x as usize] != root {
+            let next = parent[x as usize];
+            parent[x as usize] = root;
             x = next;
         }
         root
@@ -2290,13 +3569,15 @@ impl ConstraintGraph {
         if ra == rb {
             return;
         }
-        let (small, big) = if self.uf_size[ra as usize] < self.uf_size[rb as usize] {
-            (ra, rb)
-        } else {
-            (rb, ra)
+        let (small, big) = {
+            let mut size_view = self.uf_size.build_view();
+            let size = size_view.as_mut_slice();
+            let (small, big) =
+                if size[ra as usize] < size[rb as usize] { (ra, rb) } else { (rb, ra) };
+            size[big as usize] += size[small as usize];
+            (small, big)
         };
-        self.uf_parent[small as usize] = big;
-        self.uf_size[big as usize] += self.uf_size[small as usize];
+        self.uf_parent.build_view().as_mut_slice()[small as usize] = big;
     }
 
     /// Unions the two bodies of every manifold IFF BOTH are dynamic (Box2D's
@@ -2318,46 +3599,79 @@ impl ConstraintGraph {
     /// manifold with at least one dynamic body is filed under that body's island;
     /// a manifold with NO dynamic body (both static — degenerate) is filed under no
     /// island (skipped).
+    ///
+    /// L10 (design 04 A5): ids are assigned over `is_member` (held rows included), manifolds are
+    /// filed over `is_dynamic` (the movable rows: no stream manifold names a held row), and
+    /// `island_info` records every island's root, member count and held run when `with_info`
+    /// (a step the sleep-skip runs); otherwise it is left empty, and `island_len` reads the CSR
+    /// alone.
     fn flatten_islands(
         &mut self,
         manifolds: &[Manifold],
         n_dynamic: usize,
+        is_member: &impl Fn(u32) -> bool,
         is_dynamic: &impl Fn(u32) -> bool,
+        held: HeldView<'_>,
+        with_info: bool,
     ) {
         // Assign dense island ids to roots in ascending root order (deterministic).
         // `island_of` doubles as the root→dense-id map: a root maps itself, a child
         // is resolved through its compacted root.
         let mut next_id = 0u32;
         for row in 0..n_dynamic as u32 {
-            if !is_dynamic(row) {
+            if !is_member(row) {
                 continue;
             }
             let root = self.uf_find(row);
             if root == row {
                 // This row is a root — claim the next dense island id for it.
-                self.island_of[row as usize] = next_id;
+                self.island_of.build_view().as_mut_slice()[row as usize] = next_id;
                 next_id += 1;
             }
         }
         // Resolve every dynamic child to its root's dense id.
         for row in 0..n_dynamic as u32 {
-            if !is_dynamic(row) {
+            if !is_member(row) {
                 continue;
             }
             let root = self.uf_find(row);
-            self.island_of[row as usize] = self.island_of[root as usize];
+            let mut view = self.island_of.build_view();
+            let island_of = view.as_mut_slice();
+            island_of[row as usize] = island_of[root as usize];
         }
         self.n_islands = next_id;
+        self.fill_island_info(n_dynamic, is_member, held, with_info);
 
         // CSR group manifolds by island via a counting sort (deterministic, stable
         // by manifold index). counts → exclusive prefix sum → scatter.
         let n_islands = self.n_islands as usize;
-        self.island_manifold_start.clear();
-        self.island_manifold_start.resize(n_islands + 1, 0);
-        // Per manifold, resolve its island (the dynamic side's island).
-        for m in manifolds {
-            if let Some(isl) = self.manifold_island(m, is_dynamic) {
-                self.island_manifold_start[isl as usize + 1] += 1;
+        {
+            let mut starts = self.island_manifold_start.build_view();
+            starts.clear();
+            for _ in 0..=n_islands {
+                starts.push(0);
+            }
+        }
+        // Per manifold, resolve its island (the dynamic side's island). The
+        // resolution is inlined off a READ slice of `island_of` rather than routed
+        // through `manifold_island`, because that takes `&self` and would conflict
+        // with the hoisted `&mut` view on the starts column — the same split-borrow
+        // shape the scatter loop below already used.
+        {
+            let island_of = self.island_of.as_read_slice();
+            let mut starts_view = self.island_manifold_start.build_view();
+            let starts = starts_view.as_mut_slice();
+            for m in manifolds {
+                let a = m.body_a.0;
+                let b = m.body_b.0;
+                let isl = if is_dynamic(a) {
+                    island_of[a as usize]
+                } else if is_dynamic(b) {
+                    island_of[b as usize]
+                } else {
+                    continue;
+                };
+                starts[isl as usize + 1] += 1;
             }
         }
         // Exclusive prefix-sum the per-island counts in place, folding the LARGEST
@@ -2366,23 +3680,40 @@ impl ConstraintGraph {
         // accumulation below reads it before overwriting), so the max is exact and
         // free. `0` for an island-less partition (the loop body never runs).
         let mut max_island = 0u32;
-        for i in 0..n_islands {
-            max_island = max_island.max(self.island_manifold_start[i + 1]);
-            self.island_manifold_start[i + 1] += self.island_manifold_start[i];
-        }
+        let total = {
+            let info = self.island_info.as_read_slice();
+            let mut starts_view = self.island_manifold_start.build_view();
+            let starts = starts_view.as_mut_slice();
+            for i in 0..n_islands {
+                // L10: the logical count adds a held island's kept manifolds (design 04 A5).
+                let held = info.get(i).map_or(0, |x| x.held_len);
+                max_island = max_island.max(starts[i + 1] + held);
+                starts[i + 1] += starts[i];
+            }
+            starts[n_islands] as usize
+        };
         self.max_island_constraints = max_island;
-        let total = self.island_manifold_start[n_islands] as usize;
-        self.island_manifolds.clear();
-        self.island_manifolds.resize(total, 0);
+        {
+            let mut out = self.island_manifolds.build_view();
+            out.clear();
+            for _ in 0..total {
+                out.push(0);
+            }
+        }
         // Scatter with a running cursor (a working copy of the starts). Reuse
         // `uf_size` as the cursor scratch to avoid a fresh alloc. Split-borrow the
         // fields (`island_of` read, `uf_size`/`island_manifolds` written) so the
         // resolution does not re-borrow `self` through `manifold_island`.
-        let cursor = &mut self.uf_size;
-        cursor.clear();
-        cursor.extend_from_slice(&self.island_manifold_start[..n_islands]);
-        let island_of = &self.island_of;
-        let out = &mut self.island_manifolds;
+        {
+            let mut cursor_view = self.uf_size.build_view();
+            cursor_view.clear();
+            cursor_view.extend_from_slice(&self.island_manifold_start.as_read_slice()[..n_islands]);
+        }
+        let mut cursor_view = self.uf_size.build_view();
+        let cursor = cursor_view.as_mut_slice();
+        let island_of = self.island_of.as_read_slice();
+        let mut out_view = self.island_manifolds.build_view();
+        let out = out_view.as_mut_slice();
         for (mi, m) in manifolds.iter().enumerate() {
             let a = m.body_a.0;
             let b = m.body_b.0;
@@ -2398,22 +3729,6 @@ impl ConstraintGraph {
             let slot = cursor[isl as usize];
             out[slot as usize] = mi as u32;
             cursor[isl as usize] = slot + 1;
-        }
-    }
-
-    /// The island a manifold belongs to: the dense island of its dynamic side
-    /// (body_a if dynamic, else body_b if dynamic), or `None` if neither body is
-    /// dynamic (a static-static degenerate contact — filed under no island).
-    #[inline]
-    fn manifold_island(&self, m: &Manifold, is_dynamic: &impl Fn(u32) -> bool) -> Option<u32> {
-        let a = m.body_a.0;
-        let b = m.body_b.0;
-        if is_dynamic(a) {
-            Some(self.island_of[a as usize])
-        } else if is_dynamic(b) {
-            Some(self.island_of[b as usize])
-        } else {
-            None
         }
     }
 
@@ -2435,70 +3750,108 @@ impl ConstraintGraph {
     ) {
         let words = n_dynamic.div_ceil(OCC_WORD_BITS as usize);
         self.words_per_color = words as u32;
-        self.color_occ.clear();
-        self.n_colors = 0;
 
-        // Per-manifold chosen color, then a counting sort into CSR (so the values
-        // stay in ascending manifold order within each color — D4). Reuse
-        // `uf_parent` as the per-manifold color scratch.
-        let chosen = &mut self.uf_parent;
-        chosen.clear();
-        chosen.reserve(manifolds.len());
+        // `n_colors` is grown in a LOCAL and written back once. The column views
+        // below borrow disjoint fields of `self`, so reading the field through
+        // `self` inside the loop would compile — but the local keeps the growth in
+        // one place and makes the write-back a single statement.
+        let mut n_colors = 0u32;
+        {
+            let mut occ_view = self.color_occ.build_view();
+            occ_view.clear();
+            // Per-manifold chosen color, then a counting sort into CSR (so the
+            // values stay in ascending manifold order within each color — D4).
+            // Reuse `uf_parent` as the per-manifold color scratch.
+            let mut chosen = self.uf_parent.build_view();
+            chosen.clear();
 
-        for m in manifolds {
-            let a = m.body_a.0;
-            let b = m.body_b.0;
-            let a_dyn = is_dynamic(a);
-            let b_dyn = is_dynamic(b);
-            // Find the lowest color where every dynamic side is free.
-            let mut color = 0u32;
-            loop {
-                if color >= self.n_colors {
-                    // Need a new color row: append `words` zeroed occupancy words.
-                    self.color_occ.resize(self.color_occ.len() + words, 0);
-                    self.n_colors += 1;
-                }
-                let base = color as usize * words;
-                let free = (!a_dyn || !occ_get(&self.color_occ, base, a))
-                    && (!b_dyn || !occ_get(&self.color_occ, base, b));
-                if free {
-                    if a_dyn {
-                        occ_set(&mut self.color_occ, base, a);
+            for m in manifolds {
+                let a = m.body_a.0;
+                let b = m.body_b.0;
+                let a_dyn = is_dynamic(a);
+                let b_dyn = is_dynamic(b);
+                // Find the lowest color where every dynamic side is free.
+                let mut color = 0u32;
+                loop {
+                    if color >= n_colors {
+                        // Need a new color row: append `words` zeroed occupancy
+                        // words. A column grows by `push`, not `resize` — the
+                        // reservation is already committed-on-demand underneath.
+                        for _ in 0..words {
+                            occ_view.push(0);
+                        }
+                        n_colors += 1;
                     }
-                    if b_dyn {
-                        occ_set(&mut self.color_occ, base, b);
+                    let base = color as usize * words;
+                    let free = {
+                        let occ = occ_view.as_slice();
+                        (!a_dyn || !occ_get(occ, base, a)) && (!b_dyn || !occ_get(occ, base, b))
+                    };
+                    if free {
+                        let occ = occ_view.as_mut_slice();
+                        if a_dyn {
+                            occ_set(occ, base, a);
+                        }
+                        if b_dyn {
+                            occ_set(occ, base, b);
+                        }
+                        chosen.push(color);
+                        break;
                     }
-                    chosen.push(color);
-                    break;
+                    color += 1;
                 }
-                color += 1;
             }
         }
+        self.n_colors = n_colors;
 
         // CSR group manifolds by chosen color (counting sort; stable by manifold
         // index → ascending manifold order within a color).
         let n_colors = self.n_colors as usize;
-        self.color_start.clear();
-        self.color_start.resize(n_colors + 1, 0);
-        for &c in chosen.iter() {
-            self.color_start[c as usize + 1] += 1;
+        {
+            let mut starts = self.color_start.build_view();
+            starts.clear();
+            for _ in 0..=n_colors {
+                starts.push(0);
+            }
         }
-        for c in 0..n_colors {
-            self.color_start[c + 1] += self.color_start[c];
+        {
+            let chosen = self.uf_parent.as_read_slice();
+            let mut starts_view = self.color_start.build_view();
+            let starts = starts_view.as_mut_slice();
+            for &c in chosen {
+                starts[c as usize + 1] += 1;
+            }
+            for c in 0..n_colors {
+                starts[c + 1] += starts[c];
+            }
         }
-        let total = self.color_start[n_colors] as usize;
+        let total = self.color_start.as_read_slice()[n_colors] as usize;
         debug_assert_eq!(total, manifolds.len(), "invariant: every manifold colored");
-        self.color_contacts.clear();
-        self.color_contacts.resize(total, 0);
+        {
+            let mut contacts = self.color_contacts.build_view();
+            contacts.clear();
+            for _ in 0..total {
+                contacts.push(0);
+            }
+        }
         // Scatter with a running cursor (working copy of the starts). Reuse
         // `uf_size` as the cursor scratch.
-        let cursor = &mut self.uf_size;
-        cursor.clear();
-        cursor.extend_from_slice(&self.color_start[..n_colors]);
-        for (mi, &c) in self.uf_parent.iter().enumerate() {
-            let slot = cursor[c as usize];
-            self.color_contacts[slot as usize] = mi as u32;
-            cursor[c as usize] = slot + 1;
+        {
+            let mut cursor_view = self.uf_size.build_view();
+            cursor_view.clear();
+            cursor_view.extend_from_slice(&self.color_start.as_read_slice()[..n_colors]);
+        }
+        {
+            let chosen = self.uf_parent.as_read_slice();
+            let mut cursor_view = self.uf_size.build_view();
+            let cursor = cursor_view.as_mut_slice();
+            let mut contacts_view = self.color_contacts.build_view();
+            let contacts = contacts_view.as_mut_slice();
+            for (mi, &c) in chosen.iter().enumerate() {
+                let slot = cursor[c as usize];
+                contacts[slot as usize] = mi as u32;
+                cursor[c as usize] = slot + 1;
+            }
         }
 
         self.debug_assert_coloring(manifolds, n_dynamic, is_dynamic);
@@ -2564,10 +3917,13 @@ fn occ_set(occ: &mut [u64], base: usize, body: u32) {
 /// denotes a DIFFERENT island after any topology change (a merge, a split, a new
 /// body). Keying the sleep latch by island id therefore breaks under exactly the
 /// events sleeping must handle: a faller merging into a slept pile, or a pile
-/// splitting. Body ROWS, by contrast, are STABLE across frames (the gather is FULL
-/// and dense, IM-1 — rows never shift), so the latch is carried PER ROW and the
-/// island-active decision is DERIVED from the rows fresh each frame. This makes the
-/// model topology-robust by construction: there is no volatile-id carry to corrupt.
+/// splitting. Body ROWS are not stable either — a despawn swap-removes, a spawn
+/// appends, and a component insert or remove migrates a body and shifts every later
+/// row — but unlike an island id a row can be FOLLOWED: the latch is stored PER ROW,
+/// and at the start of each sleeping solve `rekey_rows` re-keys it through
+/// [`SolverScratch`]'s row identity map (interim; U6 replaces it with `BodyGate`). The
+/// island-active decision is then DERIVED from the rows fresh each frame, so there is
+/// no volatile-id carry to corrupt.
 ///
 /// # The model
 ///
@@ -2575,96 +3931,254 @@ fn occ_set(occ: &mut [u64], base: usize, body: u32) {
 ///   at rest for [`PhysicsConfig::sleep_frames`] consecutive frames.
 /// - Each frame, an island is FROZEN iff EVERY one of its member dynamic rows is
 ///   latched `asleep`. If ANY member row is awake — a never-slept row, a just-woken
-///   row, a brand-new body (default `asleep = false`), or a faller that was moving
-///   last frame — the WHOLE island is ACTIVE this frame: all its manifolds are solved
+///   row, a brand-new body (`rekey_rows` gives `asleep = false` to a row whose body was
+///   absent from the previous gather or whose `RigidBody` was just added; one gather
+///   late when the spawn was applied inside the same schedule run, before the gather),
+///   or a faller that was moving last frame — the WHOLE island is ACTIVE this frame:
+///   all its manifolds are solved
 ///   and all its bodies integrated. This is **wake-on-merge**: a slept island that
 ///   absorbs an awake/new row wakes the SAME frame the contact appears (no mid-air
 ///   freeze, no penetration-stick).
+/// - Each row also keeps the number of manifolds filed under its island at the
+///   previous `begin_step` (the island contact key, defect A4). A latched row whose
+///   island's count differs this step is unlatched there. This is
+///   **wake-on-contact-change**: a sleeping body whose support is despawned, loses a
+///   physics component or is teleported away wakes on the first step after the
+///   change, whenever that change alters its island's manifold count (`begin_step`
+///   lists what the count cannot see). It only ever clears a latch, so its worst case
+///   is a spurious wake.
 /// - A FROZEN island skips ONLY its SOLVE + INTEGRATE work — but
 ///   [`physics_gather`](crate::systems::physics_gather) still snapshots every row, so
-///   a frozen body keeps its dense-row warm key and the IM-1 `physics_apply` desync
-///   `debug_assert!` can never fire.
+///   the IM-1 `physics_apply` desync `debug_assert!` can never fire. Warm entries
+///   follow row moves through lookup translation.
 ///
 /// # Determinism
 ///
 /// The per-island energy is `max over the island's dynamic rows of (|v|² + |ω|²)`,
 /// accumulated with EXACT arithmetic (`v·v + ω·ω`, no `sqrt`/`rsqrt`/`algebraic_*`);
 /// the debounce is a per-row integer counter; the freeze decision is a pure function
-/// of the per-row latch + this frame's island assignment. No `HashMap`, no
-/// iteration-order or volatile-id dependence. So sleeping-ON is run-to-run
+/// of the per-row latch and island contact key + this frame's island assignment and
+/// island manifold counts (integer CSR differences of a deterministic build). No
+/// `HashMap`, no iteration-order or volatile-id dependence. So sleeping-ON is run-to-run
 /// bit-deterministic. It is NOT bit-equivalent to sleeping-off (a frozen island
 /// deliberately stops integrating).
 ///
 /// # Capacity reuse (zero per-step alloc)
 ///
-/// The per-row buffers are resized to the live row count (a one-time grow like every
-/// other physics buffer); the per-island scratch is cleared + resized each step. No
-/// per-step heap allocation in steady state. The `awake_rows` mask reuses the
-/// engine's growable [`TouchedMask`] bitset.
-#[derive(Resource, Default)]
+/// Every buffer is a kernel column whose reservation is taken at construction (L10 C0,
+/// design D14): the per-row latch and the per-island scratch are `ScratchColumn`s, resized
+/// in place to the live row and island counts, and the `awake_rows` mask reuses the
+/// engine's growable [`TouchedMask`] bitset. No per-step heap allocation in steady state.
+///
+/// Step state: replacing or removing it after the first step is not supported, because the step
+/// keeps state in it that one sleep-skip mode carries and the other rebuilds.
+#[derive(Resource)]
 pub struct IslandSleep {
-    /// Per-ROW sleep LATCH — `true` once this row's island has been below
-    /// [`PhysicsConfig::sleep_threshold`] for [`PhysicsConfig::sleep_frames`]
-    /// consecutive frames, `false` until then or after a wake. Indexed by BODY ROW
-    /// (stable across frames), so it survives topology changes intact (the whole
-    /// point of the rewrite). A brand-new row defaults `false` (awake).
-    asleep: Vec<bool>,
-    /// Per-ROW consecutive frames its island has been below
-    /// [`PhysicsConfig::sleep_threshold`] — the debounce counter. Saturates at
-    /// [`PhysicsConfig::sleep_frames`]; reset to `0` when the row's island is above
-    /// threshold or the row is woken. Indexed by BODY ROW; a new row defaults `0`.
-    below_count: Vec<u16>,
-    /// Per-ISLAND "frozen this frame" decision, DERIVED in [`begin_step`](Self::begin_step)
-    /// from the per-row latch (`frozen_islands[i]` is `true` iff every member dynamic
-    /// row of island `i` is latched `asleep`). Pure per-frame scratch (cleared +
-    /// resized to this build's island count each step) — it is NOT a persistent latch,
-    /// so there is no volatile-id carry. Drives the manifold SOLVE-skip predicate.
-    frozen_islands: Vec<bool>,
-    /// Per-island SPEED² metric this frame (`max |v|²+|ω|² over the island's dynamic
-    /// rows`, mass-INDEPENDENT), exact arithmetic. Pure scratch (clear + resize each
-    /// step) — recomputed every [`end_step`](Self::end_step). Named `energy` for
-    /// brevity; it is a speed² proxy, NOT a mass-weighted kinetic energy.
-    energy: Vec<f32>,
+    /// Per-ROW sleep latch, one 8 B [`SleepLatch`] per row (L10 C0, design D14):
+    ///
+    /// * `asleep` — `true` once this row's island has been below
+    ///   [`PhysicsConfig::sleep_threshold`] for [`PhysicsConfig::sleep_frames`] consecutive
+    ///   frames, `false` until then or after a wake;
+    /// * `below_count` — the debounce counter: consecutive frames the row's island has been
+    ///   below the threshold, saturating at `sleep_frames`, reset to `0` when the island is
+    ///   above it or the row is woken;
+    /// * `island_key` — the number of manifolds filed under this row's island at the
+    ///   previous [`begin_step`](Self::begin_step), or [`NO_ISLAND_KEY`] for a row that had
+    ///   no island then or whose body is new (defect A4).
+    ///
+    /// Indexed by the current gather row and carried across row moves by `rekey_rows`, so it
+    /// survives topology changes intact; a row whose body is new, or was not in the previous
+    /// gather, starts [`SleepLatch::FRESH`] (awake). `begin_step` reads one element per row
+    /// instead of three arrays. A kernel column under `SCRATCH_ID_SLEEP_LATCH`, the id and
+    /// cache-set slot the island contact key held alone before C0.
+    latch: ScratchColumn<SleepLatch>,
+    /// Per-ISLAND step scratch, one 8 B [`IslandScratch`] per island of this step's build
+    /// (L10 C0, design D14): the FROZEN decision [`begin_step`](Self::begin_step) derives
+    /// from the row latch (every member dynamic row latched asleep), which drives the
+    /// manifold SOLVE-skip predicate, and the speed² metric [`end_step`](Self::end_step)
+    /// accumulates (`max |v|² + |ω|²` over the island's dynamic rows, mass-INDEPENDENT,
+    /// exact arithmetic — a speed² proxy, NOT a mass-weighted kinetic energy). Pure per-frame
+    /// scratch, not a persistent latch, so there is no volatile-id carry.
+    ///
+    /// `begin_step` sizes it to its build's island count, every island a freeze candidate;
+    /// `end_step` resets only the metric of its build's islands and never shortens it, so the
+    /// frozen decisions `begin_step` took stay readable after the step.
+    island_scratch: ScratchColumn<IslandScratch>,
     /// Body→awake mask (`true` = the row is awake this step). Drives the SOLVE +
-    /// INTEGRATE skip — NOT the gather skip (IM-1). Rebuilt each step from
-    /// `frozen_islands` + the graph's `island_of`; a row with no island (static /
+    /// INTEGRATE skip — NOT the gather skip (IM-1). Rebuilt each step from the islands'
+    /// frozen decisions + the graph's `island_of`; a row with no island (static /
     /// out-of-island) is awake (immovable bodies cost nothing to "integrate" — the
     /// kernels no-op them).
     awake_rows: TouchedMask,
-    /// Whether a global wake was requested (config change / explicit
-    /// [`wake_all`](Self::wake_all)) — consumed once on the next solve, which clears
-    /// every row's latch before deciding afresh.
-    wake_all: bool,
+    /// Whether a `Reset` re-key left a global wake pending (`rekey_rows`) — served by the next
+    /// `begin_step` that runs, which clears every row's latch before deciding afresh.
+    reset_wake: bool,
+    /// The explicit [`wake_all`](Self::wake_all) requests since construction; never reset (L10
+    /// D9b, Decision 5). The broadphase latches it into the step record, and the solve serves
+    /// exactly the latched count.
+    wake_requests: u64,
+    /// The request count the last `begin_step` served: a request is pending while
+    /// `wake_served` is below the count a step latched.
+    wake_served: u64,
+    /// Carry scratch for `rekey_rows`: the previous gather's latch, copied out before the
+    /// latch is permuted to the current rows. 8 B/row, written on change steps only
+    /// (defect A, interim; U6 deletes it).
+    latch_prev: ScratchColumn<SleepLatch>,
+    /// Rows unlatched by wake-on-contact-change since construction. A diagnostic counter,
+    /// like [`remap_resets`](Self::remap_resets).
+    contact_wakes: u64,
+    /// The latch's place in the gather sequence (defect A, interim; U6 deletes it).
+    cursor: RemapCursor,
+    /// The awake mask's place in the gather sequence (L10 C3b, design 04 D9): stamped by the solve
+    /// right after every [`begin_step`](Self::begin_step) ([`stamp_mask`](Self::stamp_mask)), so
+    /// the next broadphase knows the mask it reads (its resting test R2) was built on the
+    /// previous gather — a solve that took the no-dynamic-body early return leaves it stale.
+    mask_cursor: RemapCursor,
+}
+
+/// One island's per-step sleep scratch (L10 C0, design D14): the frozen decision and the
+/// speed² metric of [`IslandSleep`]'s per-island column. 8 B, align 4, every byte a named
+/// field.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct IslandScratch {
+    /// The island's speed² metric this step, `max |v|² + |ω|²` over its dynamic rows.
+    energy: f32,
+    /// `1` iff every member dynamic row is latched asleep this step (the island is FROZEN).
+    frozen: u8,
+    /// Zero.
+    _p: [u8; 3],
+}
+
+impl IslandScratch {
+    /// An island of this step's build before its members are read: a freeze candidate.
+    const CANDIDATE: Self = Self { energy: 0.0, frozen: 1, _p: [0; 3] };
+    /// An island past the count the last `begin_step` decided: not frozen.
+    const THAWED: Self = Self { energy: 0.0, frozen: 0, _p: [0; 3] };
+}
+
+const _: () = assert!(
+    size_of::<IslandScratch>() == 8 && align_of::<IslandScratch>() == 4,
+    "IslandScratch is the 8 B, align 4 per-island sleep element (D14)"
+);
+
+impl Default for IslandSleep {
+    /// Hand-written because `awake_rows`'s backing column needs its reserved
+    /// [`ComponentId`], which no derive can supply.
+    #[inline]
+    fn default() -> Self {
+        Self::with_capacity(0, 0)
+    }
 }
 
 impl IslandSleep {
     /// Builds an empty sleep state pre-sized for `islands` islands and `rows` bodies
     /// (no later realloc in steady state).
     ///
-    /// The per-row latch buffers reserve `rows`; the per-island scratch reserves
-    /// `islands` (the worst case is one singleton island per row, so `islands` is a
-    /// hint — the scratch grows to the live island count and reuses that capacity).
+    /// Every buffer is a kernel column that reserves address space at the kernel's column
+    /// budget and commits pages as it grows: the latch and its carry for at least `rows`
+    /// rows, the per-island scratch for at least `islands` islands (the worst case is one
+    /// singleton island per row, so `islands` is a hint — the scratch grows to the live
+    /// island count and reuses that capacity).
     pub fn with_capacity(islands: usize, rows: usize) -> Self {
+        register_scratch_layouts();
+        let latch_reserve = rows.max(scratch_reserve_rows(size_of::<SleepLatch>()));
         Self {
-            asleep: Vec::with_capacity(rows),
-            below_count: Vec::with_capacity(rows),
-            frozen_islands: Vec::with_capacity(islands),
-            energy: Vec::with_capacity(islands),
-            awake_rows: TouchedMask::with_capacity(rows),
-            wake_all: false,
+            latch: ScratchColumn::new(sleep_latch_id(), latch_reserve),
+            island_scratch: ScratchColumn::new(
+                sleep_island_scratch_id(),
+                islands.max(scratch_reserve_rows(size_of::<IslandScratch>())),
+            ),
+            awake_rows: TouchedMask::with_capacity(touched_awake_id(), rows),
+            reset_wake: false,
+            wake_requests: 0,
+            wake_served: 0,
+            latch_prev: ScratchColumn::new(sleep_latch_prev_id(), latch_reserve),
+            contact_wakes: 0,
+            cursor: RemapCursor::default(),
+            mask_cursor: RemapCursor::default(),
         }
     }
 
-    /// Requests that EVERY row wake on the next solve (the explicit-wake /
-    /// config-change substrate, plan O8 / Decision 5 (ii)/(iii)).
+    /// Records that the awake mask was just built on `rows`' gather (L10 C3b): called by the
+    /// solve right after [`begin_step`](Self::begin_step).
+    #[inline]
+    pub(crate) fn stamp_mask(&mut self, rows: &RowIdentity) {
+        self.mask_cursor.stamp(rows);
+    }
+
+    /// How the next reader classifies the awake mask against `rows` (L10 A1.1): `Identity` or
+    /// `Rows` when it was built on the previous gather, else `Reset`.
+    #[inline]
+    pub(crate) fn mask_peek<'a>(&self, rows: &'a RowIdentity) -> RowRemap<'a> {
+        self.mask_cursor.peek(rows)
+    }
+
+    /// How the next reader classifies the latch against `rows` (L10 A1.1).
+    #[inline]
+    pub(crate) fn latch_peek<'a>(&self, rows: &'a RowIdentity) -> RowRemap<'a> {
+        self.cursor.peek(rows)
+    }
+
+    /// The per-row latch, in the rows its cursor was last stamped with (L10 A1.3 reads a
+    /// previous row's latch in the broadphase, before the solve re-keys it).
+    #[inline]
+    pub(crate) fn latches(&self) -> &[SleepLatch] {
+        self.latch.as_read_slice()
+    }
+
+    /// Whether a global wake is pending for a step that latched `upto` requests: a `Reset` wake,
+    /// or a request the last `begin_step` did not serve (L10 D6 flushes every held island on it;
+    /// D9b Decision 5).
+    #[inline]
+    pub(crate) fn wake_pending(&self, upto: u64) -> bool {
+        self.reset_wake || upto != self.wake_served
+    }
+
+    /// The explicit [`wake_all`](Self::wake_all) requests since construction: the count the
+    /// broadphase latches into the step record (L10 D9b).
+    #[inline]
+    pub(crate) fn wake_requests(&self) -> u64 {
+        self.wake_requests
+    }
+
+    /// Diagnostic: rows unlatched by wake-on-contact-change (see `begin_step`) since
+    /// this resource was constructed. It stays flat while no latched row's island
+    /// changes its manifold count.
+    #[inline]
+    pub fn contact_wakes(&self) -> u64 {
+        self.contact_wakes
+    }
+
+    /// Diagnostic (L10's bit-identity gate, design 04 "What is compared"): an FNV-1a 64 hash
+    /// of every row's sleep latch — whether it is latched asleep, its debounce count and its
+    /// island contact key — in row order. O(rows).
+    pub fn latch_fingerprint(&self) -> u64 {
+        let fnv = |h: u64, w: u32| {
+            w.to_le_bytes()
+                .iter()
+                .fold(h, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3))
+        };
+        self.latch.as_read_slice().iter().fold(0xcbf2_9ce4_8422_2325, |h, l| {
+            let h = fnv(h, u32::from(l.asleep) | (u32::from(l.below_count) << 8));
+            fnv(h, l.island_key)
+        })
+    }
+
+    /// Requests that EVERY row wake (the explicit-wake / config-change substrate, plan O8 /
+    /// Decision 5 (ii)/(iii)).
+    ///
+    /// Wakes every island at the next broadphase. A call made after this step's broadphase is
+    /// served by the next step, in every sleep-skip mode (L10 D9b): the broadphase latches the
+    /// request count, and the step's solve serves exactly that count.
     ///
     /// A pure signal the solver does NOT itself trip — unlike `Changed<RigidBody>`,
     /// which the solver sets every frame by writing velocities back (W6), so it is a
-    /// sound wake key. Consumed once: the next solve clears every row's latch, then
+    /// sound wake key. Served once: the solve clears every row's latch, then
     /// re-evaluates the energy/debounce from scratch.
     #[inline]
     pub fn wake_all(&mut self) {
-        self.wake_all = true;
+        self.wake_requests += 1;
     }
 
     /// Returns `true` if island `island` is FROZEN this frame (its solve + integrate
@@ -2673,10 +4187,10 @@ impl IslandSleep {
     /// asleep), NOT a persistent per-island latch.
     #[inline]
     pub fn is_island_frozen(&self, island: u32) -> bool {
-        self.frozen_islands
+        self.island_scratch
+            .as_read_slice()
             .get(island as usize)
-            .copied()
-            .unwrap_or(false)
+            .is_some_and(|s| s.frozen != 0)
     }
 
     /// Returns `true` if body `row` is awake this step (drives the SOLVE / INTEGRATE
@@ -2696,9 +4210,10 @@ impl IslandSleep {
     /// energy / debounce path. Call AFTER a `begin_step` has sized the per-row buffers.
     #[cfg(test)]
     pub(crate) fn force_sleep_row(&mut self, row: usize) {
-        if row < self.asleep.len() {
-            self.asleep[row] = true;
-            self.below_count[row] = DEFAULT_SLEEP_FRAMES;
+        let mut view = self.latch.build_view();
+        if let Some(latch) = view.as_mut_slice().get_mut(row) {
+            latch.asleep = true;
+            latch.below_count = DEFAULT_SLEEP_FRAMES;
         }
     }
 
@@ -2707,39 +4222,118 @@ impl IslandSleep {
     /// per-frame decision). `false` for an out-of-range row.
     #[cfg(test)]
     pub(crate) fn is_row_asleep(&self, row: usize) -> bool {
-        self.asleep.get(row).copied().unwrap_or(false)
+        self.latch.as_read_slice().get(row).is_some_and(|l| l.asleep)
     }
 
-    /// Resizes the per-ROW latch buffers to `n_rows`, preserving the latch / debounce
-    /// of rows that still exist and defaulting any newly-appeared row to awake
-    /// (`asleep = false`, debounce `0`) — so a brand-new body is awake on its first
-    /// frame.
+    /// Resizes the per-ROW latch to `n_rows`, keeping the entries of rows that still exist
+    /// and defaulting any newly-appeared row to awake ([`SleepLatch::FRESH`]: `asleep =
+    /// false`, debounce `0`, key [`NO_ISLAND_KEY`]).
     ///
-    /// Rows are STABLE across frames (the gather is full + dense, IM-1), so this carry
-    /// is exact and topology-robust: a merge / split changes the island assignment,
-    /// not the row identity, so the latch follows the body, not the (volatile) island
-    /// id. There is no per-island carry to corrupt (the C3 class of bug is gone by
-    /// construction).
+    /// This only sizes the buffers and does not decide which body a row holds. On the
+    /// gather-driven path `rekey_rows` has already aligned and sized the latch;
+    /// direct-drive callers rely on this function alone. The carry is exact only after
+    /// `rekey_rows` has aligned the latch with this gather's rows: a merge / split then
+    /// changes the island assignment, not the row identity, so the latch follows the
+    /// body, not the (volatile) island id. There is no per-island carry to corrupt (the
+    /// C3 class of bug is gone by construction).
     ///
-    /// Caveat (caller contract): the latch follows a STABLE row, so a row that flips
+    /// Caveat (caller contract): the latch follows the body's row, so a row that flips
     /// mass regime at RUNTIME (static ↔ dynamic) keeps its old latch — `end_step`
     /// skips static rows and so cannot refresh it. A freshly-dynamic row that carried
     /// a stale `asleep = true` would be a spurious freeze candidate; such a runtime
     /// flip MUST be paired with [`wake_all`](Self::wake_all) (or clearing that row's
-    /// latch). Not reachable today (`inv_mass` is stable after spawn). See
+    /// latch) unless at least one `begin_step` observes the static phase: that step
+    /// stores [`NO_ISLAND_KEY`] for the row, and when the row returns as a dynamic
+    /// island member its live key differs, which clears the latch. A flip spanning only
+    /// steps that take the solver's no-dynamic-body early return keeps its latch and
+    /// key. Not reachable today (`inv_mass` is stable after spawn). See
     /// [`end_step`](Self::end_step).
     fn sync_rows(&mut self, n_rows: usize) {
-        self.asleep.resize(n_rows, false);
-        self.below_count.resize(n_rows, 0);
+        self.latch.build_view().resize(n_rows, SleepLatch::FRESH);
+    }
+
+    /// Re-keys the per-row latch to the current gather's rows (defect A, interim).
+    ///
+    /// Called at the start of every sleeping colored solve, BEFORE the solver's
+    /// no-dynamic-body early return, so a transient all-disabled step does not force a
+    /// wake on the next one.
+    /// * `Identity` — the latch is already keyed by these rows.
+    /// * `Rows` — the latch, island contact key included, is permuted: each row takes the
+    ///   latch of the row its body held one gather ago, and a new body starts awake with
+    ///   key [`NO_ISLAND_KEY`].
+    /// * `Reset` — the latch missed a gather (sleeping was off, or the resource was
+    ///   replaced). It is sized to this gather and a global wake is left pending, so
+    ///   every latch is cleared before `begin_step` reads one: on this solve, or on the
+    ///   next one that runs if this one returns early.
+    ///
+    /// Every arm ends keyed by this gather's rows, so the cursor is stamped after the
+    /// `match`, unconditionally.
+    pub(crate) fn rekey_rows(&mut self, rows: &RowIdentity) {
+        match self.cursor.remap(rows) {
+            RowRemap::Identity => {}
+            RowRemap::Rows(prev_row) => {
+                self.permute_latch(prev_row);
+                debug_assert_eq!(
+                    self.latch.len(),
+                    rows.rows_len(),
+                    "invariant: a Rows re-key sizes the latch to the gather"
+                );
+            }
+            RowRemap::Reset => {
+                self.sync_rows(rows.rows_len());
+                self.reset_wake = true;
+                debug_assert_eq!(
+                    self.latch.len(),
+                    rows.rows_len(),
+                    "invariant: a Reset re-key sizes the latch to the gather"
+                );
+            }
+        }
+        self.cursor.stamp(rows);
+    }
+
+    /// Diagnostic: `Reset` classifications of the sleep latch's cursor after its first
+    /// stamp. Each one is a gather whose latches were cleared instead of carried, so it
+    /// stays flat while sleeping runs uninterrupted — a structural liveness gate.
+    #[inline]
+    pub fn remap_resets(&self) -> u64 {
+        self.cursor.resets()
+    }
+
+    /// Permutes the per-row latch, island contact key included, through `prev_row` (the
+    /// `Rows` arm of `rekey_rows`): the latch is copied to its carry, then each row takes
+    /// its body's previous element. O(m + n), sequential.
+    #[cold]
+    #[inline(never)]
+    fn permute_latch(&mut self, prev_row: &[u32]) {
+        let old_len = self.latch.len();
+        {
+            let mut carry = self.latch_prev.build_view();
+            carry.clear();
+            carry.extend_from_slice(self.latch.as_read_slice());
+        }
+        let mut view = self.latch.build_view();
+        view.resize(prev_row.len(), SleepLatch::FRESH);
+        let carry = self.latch_prev.as_read_slice();
+        for (latch, &p) in view.as_mut_slice().iter_mut().zip(prev_row) {
+            // A latch last sized by a direct drive can be shorter than the previous
+            // gather, so an old row past its end starts awake like a new body.
+            *latch = if p != NO_ROW && (p as usize) < old_len {
+                carry[p as usize]
+            } else {
+                SleepLatch::FRESH
+            };
+        }
     }
 
     /// Step phase 1 (BEFORE the solve): resizes the per-row latch to this frame's row
-    /// count, derives the per-island FROZEN decision from the row latch (THIS is the
-    /// wake), and rebuilds the `awake_rows` body mask the solver reads to skip frozen
-    /// islands' SOLVE + INTEGRATE (plan O8, row-keyed).
+    /// count, unlatches every latched row whose island's manifold count changed
+    /// (wake-on-contact-change), derives the per-island FROZEN decision from the row
+    /// latch (THIS is the wake), and rebuilds the `awake_rows` body mask the solver reads
+    /// to skip frozen islands' SOLVE + INTEGRATE (plan O8, row-keyed).
     ///
-    /// # Freeze / wake decision (pure function of the per-row latch + this frame's
-    /// island assignment)
+    /// # Freeze / wake decision (pure function of the per-row latch and island contact
+    /// key + this frame's island assignment and island manifold counts)
     ///
     /// An island is FROZEN this frame IFF EVERY one of its member dynamic rows is
     /// latched `asleep`. If ANY member row is awake (`asleep[row] == false`) — a
@@ -2750,61 +4344,202 @@ impl IslandSleep {
     /// This IS **wake-on-merge**: a slept pile that absorbs an awake/new row wakes the
     /// SAME frame the contact appears (the merged island now contains an awake row, so
     /// it is not frozen — no mid-air freeze, no penetration-stick). It is also
-    /// topology-robust: the decision is recomputed from the stable rows each frame, so
-    /// a re-island'd scene cannot spuriously freeze a moving island (no volatile-id
-    /// carry).
+    /// topology-robust: the decision is recomputed each frame from the per-row latch,
+    /// which `rekey_rows` has aligned with this gather's rows, so a re-island'd scene
+    /// cannot spuriously freeze a moving island (no volatile-id carry).
     ///
-    /// `wake_all` (explicit [`wake_all`](Self::wake_all) / a config change) clears
-    /// every row's latch first, so no island can be frozen this frame.
+    /// A pending wake — an explicit [`wake_all`](Self::wake_all) request this call serves, or a
+    /// `Reset` re-key's — clears every row's latch first, so no island can be frozen this frame.
+    /// This entry serves every request made so far (direct drive);
+    /// [`begin_step_upto`](Self::begin_step_upto) serves a latched count (the pipeline).
     ///
     /// The `Changed<RigidBody>` route is intentionally NOT a wake condition: the
     /// solver writes velocities back through `Mut<RigidBody>` every step for every
     /// awake body, so it trips `Changed` itself (W6).
     ///
+    /// # Wake-on-contact-change (defect A4)
+    ///
+    /// Each row's key is the number of manifolds filed under its island this step
+    /// (`island_starts[i + 1] - island_starts[i]`), or [`NO_ISLAND_KEY`] for a row with
+    /// no island. A row that is latched asleep and whose key differs from the one stored
+    /// at the previous `begin_step` is unlatched, its debounce restarts, and
+    /// [`contact_wakes`](Self::contact_wakes) counts it. Every row then stores its key.
+    /// The comparison runs before the freeze fold, so a woken row makes its island
+    /// active on this same step. A key is a count, never an island id, so the
+    /// renumbering of islands that a row move or an unrelated removal causes wakes
+    /// nothing.
+    ///
+    /// The count also sees a support by a static, kinematic or SDF body, because such a
+    /// manifold is filed under the dynamic side's island. Only touching, non-sensor
+    /// manifolds reach the graph. It only ever clears a latch: its worst case is a
+    /// spurious wake, never a new freeze.
+    ///
+    /// **Whole-island wakes.** The unlatch is per row and per row's OWN stored key: a
+    /// member whose stored key happens to equal the island's new count keeps its latch
+    /// (two rows that were in different islands last step can carry different stored
+    /// keys). The island still stays active for at least
+    /// [`PhysicsConfig::sleep_frames`] steps, as in Box2D and Rapier, because the freeze
+    /// fold is an AND over members and the unlatched member's debounce restarts.
+    /// Deleting a member of a frozen pile therefore wakes the rest of the pile.
+    ///
+    /// **Onset flicker.** A latched island is compared on its first frozen step too,
+    /// against a count sampled while it was still being solved. A pile whose knife-edge
+    /// box contacts appear and vanish at rest can therefore be woken at a latch attempt,
+    /// and each such wake restarts the debounce, so the pile sleeps later or not at all
+    /// (defect A7). The comparison is kept because skipping it would leave a support
+    /// removed on that step undetected for as long as the island stays frozen.
+    ///
+    /// **A box-axis hint change does not wake an island.** Since A7b, whether a box-box
+    /// manifold exists is a function of the two poses alone (`narrowphase/box_box.rs`):
+    /// past an overlapping SAT every path ends in a face patch or an edge contact. The one
+    /// exception is a chosen reference face with a zero in-plane extent (a zero-volume
+    /// collider), which gives no contact, so for such a collider the face a hint picks can
+    /// still decide it. The hint a pair reads can change while the poses stay put — on the
+    /// step after a row move the pair spent without a contact, on an order-reversing move,
+    /// on an axis-cache reset, and on a wholesale clear (a new all-pair high of any shape,
+    /// or stale-key occupancy); a despawn's swap-remove moves one row, and a spawn, a
+    /// despawn, or a migration into or out of an archetype walked before the island's
+    /// shifts every row of the island by one, re-keying every one of its pairs. Such a
+    /// change picks WHICH contact a pair carries, never whether it has one, so it never
+    /// changes an island's manifold count and never wakes it. Before A7b a chosen face that
+    /// realized no patch gave no manifold and the hint could decide which face was chosen,
+    /// so a hint change could add or remove a knife-edge pair's manifold and wake a frozen
+    /// island (A4's Known behaviour 2). That is retired for box-box pairs: a count change at
+    /// fixed poses is a defect.
+    ///
+    /// Not covered:
+    /// - a support that moves but keeps its island's manifold count (Box2D's
+    ///   `b2Body_SetTransform` does not wake either); call [`wake_all`](Self::wake_all);
+    /// - a user write to a sleeping body that changes no contact;
+    /// - a step whose changes to one frozen island add exactly as many manifolds as they
+    ///   remove;
+    /// - a parked support resting on the SDF field loses its field contact, so its
+    ///   island wakes; the solve's effect on the load it carries is unmeasured. Since
+    ///   2026-09-18 this is reachable through
+    ///   `add_physics_sdf::<DefaultRigidSolver>` with `sleeping` on, and no gate covers
+    ///   SDF + sleeping (a recorded gap; sleeping defaults off);
+    /// - a soft→rigid coupling reaction (`add_physics_soft(.., true)`) landing on a
+    ///   sleeping body does not wake it (a recorded gap, reachable the same way).
+    ///
     /// `awake_rows[row]` is set for every body in an ACTIVE island and for every row
     /// with no island (static / out-of-island bodies — they cost nothing to keep
     /// "awake" since the integrate kernels no-op an `inv_mass == 0` row).
     pub(crate) fn begin_step(&mut self, graph: &ConstraintGraph, n_rows: usize) {
+        let upto = self.wake_requests;
+        self.begin_step_upto(graph, n_rows, upto);
+    }
+
+    /// [`begin_step`](Self::begin_step) serving the requests counted up to `upto` (L10 D9b,
+    /// Decision 5): the count the step's broadphase latched. A request raised after the latch
+    /// stays pending, and the next step serves it in every sleep-skip mode.
+    pub(crate) fn begin_step_upto(&mut self, graph: &ConstraintGraph, n_rows: usize, upto: u64) {
+        debug_assert!(
+            self.wake_served <= upto && upto <= self.wake_requests,
+            "invariant: a step serves a request count between the last one served and the count              requested (served {}, upto {upto}, requested {})",
+            self.wake_served,
+            self.wake_requests
+        );
         self.sync_rows(n_rows);
+        let wake = self.reset_wake || upto != self.wake_served;
+        self.wake_served = upto;
+        self.reset_wake = false;
+        let Self {
+            latch,
+            island_scratch,
+            awake_rows,
+            contact_wakes,
+            ..
+        } = self;
+        let mut latch_view = latch.build_view();
+        debug_assert_eq!(
+            latch_view.len(),
+            n_rows,
+            "invariant: sync_rows sized the latch to the rows"
+        );
+        // Re-sliced to `n_rows`: the loops visit exactly the rows the latch was sized to.
+        let latches = &mut latch_view.as_mut_slice()[..n_rows];
 
         // Explicit / config-change wake: clear every row's latch before deciding, so
         // no island can be frozen this frame.
-        if self.wake_all {
-            for s in &mut self.asleep {
-                *s = false;
+        if wake {
+            for l in latches.iter_mut() {
+                l.asleep = false;
+                l.below_count = 0;
             }
-            for c in &mut self.below_count {
-                *c = 0;
-            }
-            self.wake_all = false;
         }
 
-        // Derive the per-island FROZEN decision from the row latch: an island starts
-        // a candidate to freeze (`true`) and is cleared the moment any member dynamic
-        // row is found awake. A static/out-of-island row (`NO_ISLAND`) is not a member.
+        // One pass per row: compare and store the island contact key (unlatching a row
+        // whose island's count changed), then derive the per-island FROZEN decision from
+        // the row latch: an island starts a candidate to freeze and is cleared the moment
+        // any member dynamic row is found awake. A static/out-of-island row (`NO_ISLAND`)
+        // is not a member.
         let n_islands = graph.n_islands() as usize;
-        self.frozen_islands.clear();
-        self.frozen_islands.resize(n_islands, true);
-        for row in 0..n_rows {
-            let isl = graph.island_of(row as u32);
+        let mut scratch_view = island_scratch.build_view();
+        scratch_view.clear();
+        scratch_view.resize(n_islands, IslandScratch::CANDIDATE);
+        let islands = scratch_view.as_mut_slice();
+        let starts = graph.island_starts();
+        // Hoisted beside `starts`: `island_of(row)` re-derives this slice and
+        // bound-checks the row on every call, once per row of the sweep below
+        // (MEASUREMENT-QUEUE.md §8 R2).
+        let ids = graph.island_ids();
+        // L10: the per-island held runs (empty unless the sleep-skip holds islands).
+        let held_info = graph.island_info();
+        debug_assert!(
+            n_islands == 0 || starts.len() == n_islands + 1,
+            "invariant: the island CSR holds n_islands + 1 offsets"
+        );
+        // A row past the graph's rows has no island, which is what `island_of` answers
+        // for it, so it takes the sentinel and touches no latch. The shipped wiring builds
+        // the graph over every row, so this tail is empty there; a graph built over fewer
+        // rows, or not yet built, reaches it.
+        let (in_graph, past_graph) = latches.split_at_mut(n_rows.min(ids.len()));
+        for l in past_graph {
+            l.island_key = NO_ISLAND_KEY;
+        }
+        for (l, &isl) in in_graph.iter_mut().zip(ids) {
             if isl == ConstraintGraph::NO_ISLAND {
+                // The sentinel is what unlatches a row that returns to an island after a
+                // static phase.
+                l.island_key = NO_ISLAND_KEY;
                 continue;
             }
-            if !self.asleep[row] {
+            let i = isl as usize;
+            // `i + 1` first: its bound check implies the one on `i`.
+            let hi = starts[i + 1];
+            let lo = starts[i];
+            // L10 (design 04 D7, 06 B6): the logical count, a held island's kept manifolds
+            // included (`ConstraintGraph::island_len`), so the key is `Off`'s.
+            let key = hi - lo + held_info.get(i).map_or(0, |info| info.held_len);
+            debug_assert!(
+                key != NO_ISLAND_KEY,
+                "invariant: a live island contact key is below the sentinel"
+            );
+            // Wake-on-contact-change. It only clears a latch, and it runs before the fold
+            // below so a woken row makes its island active on this step.
+            if l.asleep && l.island_key != key {
+                l.asleep = false;
+                // A restarted debounce keeps a slowly accelerating woken body from
+                // re-latching at this step's `end_step`.
+                l.below_count = 0;
+                *contact_wakes += 1;
+            }
+            l.island_key = key;
+            if !l.asleep {
                 // An awake member row forces its whole island active this frame
                 // (wake-on-merge: a new / moving row joining a slept pile wakes it).
-                self.frozen_islands[isl as usize] = false;
+                islands[i].frozen = 0;
             }
         }
 
         // Build the body→awake mask from the per-island frozen decision. A row is
         // awake iff it has no island, or its island is not frozen this frame.
-        self.awake_rows.reset(n_rows);
+        awake_rows.reset(n_rows);
         for row in 0..n_rows {
             let isl = graph.island_of(row as u32);
-            let awake = isl == ConstraintGraph::NO_ISLAND || !self.frozen_islands[isl as usize];
+            let awake = isl == ConstraintGraph::NO_ISLAND || islands[isl as usize].frozen == 0;
             if awake {
-                self.awake_rows.set(row);
+                awake_rows.set(row);
             }
         }
     }
@@ -2817,11 +4552,16 @@ impl IslandSleep {
     ///
     /// The per-island value is the **MAX over the island's dynamic rows of
     /// `|linear_velocity|² + |angular_velocity|²`** — pure speed² + angular speed²,
-    /// NOT a mass-normalized kinetic energy (it carries no mass term). It is the
-    /// Box2D-style sleep metric: a light-fast body has a high `|v|²` and so correctly
-    /// stays awake. The arithmetic is EXACT (`v·v + ω·ω`, no `sqrt`/`rsqrt`/
-    /// `algebraic_*`, order-fixed dot products), so it is run-to-run bit-deterministic.
-    /// MAX (not SUM) is used so a single busy row keeps its whole island awake.
+    /// NOT a mass-normalized kinetic energy (it carries no mass term), so a light-fast
+    /// body has a high `|v|²` and correctly stays awake. It is velocity-only, and every
+    /// member row's debounce advances from the island's maximum. Box2D's rule differs:
+    /// each body compares `max(|v| + |ω|·extent, 0.5·|Δx|/dt)` with a default 0.05 m/s,
+    /// where `Δx` bounds how far its extent moved during the step, position correction
+    /// included, and keeps its own timer; an island can sleep only once every body in
+    /// it has stayed below for 0.5 s. The arithmetic is EXACT (`v·v + ω·ω`, no
+    /// `sqrt`/`rsqrt`/`algebraic_*`, order-fixed dot products), so it is run-to-run
+    /// bit-deterministic. MAX (not SUM) is used so a single busy row keeps its whole
+    /// island awake.
     ///
     /// # The per-row latch update
     ///
@@ -2830,8 +4570,10 @@ impl IslandSleep {
     /// `asleep = below_count >= frames`; otherwise every member row resets
     /// `below_count = 0` and `asleep = false`. A frozen island's restored-low
     /// velocities keep it below threshold, so it stays latched asleep until a merge
-    /// brings an awake row (handled in `begin_step`) or `wake_all` fires — a frozen
-    /// island does NOT wake via its own frozen energy. No oscillation.
+    /// brings an awake row (handled in `begin_step`), its island's manifold count
+    /// changes (also `begin_step`), or `wake_all` fires — a frozen island does NOT wake
+    /// via its own frozen energy. That is the whole no-oscillation claim: a count change
+    /// can still wake an island at each latch attempt (onset flicker, `begin_step`).
     ///
     /// # Mass-regime flip (caller contract)
     ///
@@ -2843,7 +4585,10 @@ impl IslandSleep {
     /// NOT reachable today (per-body `inv_mass` is stable after spawn), but a future
     /// runtime mass-regime flip MUST be paired with [`wake_all`](Self::wake_all) (or
     /// clearing that row's latch) so a freshly-dynamic body isn't spuriously frozen by
-    /// a stale latch.
+    /// a stale latch, unless at least one `begin_step` observes the static phase: the
+    /// [`NO_ISLAND_KEY`] it stores then clears the latch when the row returns. A flip
+    /// spanning only steps that take the solver's no-dynamic-body early return keeps
+    /// its latch and key.
     pub(crate) fn end_step(
         &mut self,
         bodies: &[BodyState],
@@ -2851,10 +4596,23 @@ impl IslandSleep {
         threshold: f32,
         frames: u16,
     ) {
-        // Reset the per-island speed² accumulators (scratch, sized to this build).
+        // Reset the per-island speed² accumulators of this build's islands. The column is
+        // never shortened here: the frozen decisions `begin_step` took stay readable, and
+        // an island past its count reads not frozen.
         let n_islands = graph.n_islands() as usize;
-        self.energy.clear();
-        self.energy.resize(n_islands, 0.0);
+        let Self {
+            latch,
+            island_scratch,
+            ..
+        } = self;
+        let mut scratch_view = island_scratch.build_view();
+        if scratch_view.len() < n_islands {
+            scratch_view.resize(n_islands, IslandScratch::THAWED);
+        }
+        let islands = scratch_view.as_mut_slice();
+        for s in &mut islands[..n_islands] {
+            s.energy = 0.0;
+        }
 
         // Accumulate the per-island MAX dynamic-row speed² (exact, deterministic).
         for (row, b) in bodies.iter().enumerate() {
@@ -2870,7 +4628,7 @@ impl IslandSleep {
             let w = b.angular_velocity;
             // Exact speed² + angular speed² (no sqrt — order-fixed dot products).
             let e = v.dot(v) + w.dot(w);
-            let slot = &mut self.energy[isl as usize];
+            let slot = &mut islands[isl as usize].energy;
             if e > *slot {
                 *slot = e;
             }
@@ -2878,7 +4636,8 @@ impl IslandSleep {
 
         // Advance the per-ROW debounce / latch from each island's speed². A row's
         // island is below threshold ⇒ tick its debounce; above ⇒ reset + wake.
-        for row in 0..self.asleep.len() {
+        let mut latch_view = latch.build_view();
+        for (row, l) in latch_view.as_mut_slice().iter_mut().enumerate() {
             if row >= bodies.len() || bodies[row].inv_mass == 0.0 {
                 // No live dynamic body at this row this frame — leave its latch
                 // untouched (it carries forward; `begin_step` defaults new rows awake).
@@ -2888,15 +4647,14 @@ impl IslandSleep {
             if isl == ConstraintGraph::NO_ISLAND {
                 continue;
             }
-            if self.energy[isl as usize] < threshold {
-                let c = &mut self.below_count[row];
-                if *c < frames {
-                    *c += 1;
+            if islands[isl as usize].energy < threshold {
+                if l.below_count < frames {
+                    l.below_count += 1;
                 }
-                self.asleep[row] = *c >= frames;
+                l.asleep = l.below_count >= frames;
             } else {
-                self.below_count[row] = 0;
-                self.asleep[row] = false;
+                l.below_count = 0;
+                l.asleep = false;
             }
         }
     }
@@ -2958,6 +4716,15 @@ pub struct BodyState {
     /// to today (the 0%-gate). Placed with the trailing scalars (it does not
     /// disturb the leading hot fields).
     pub is_sensor: bool,
+    /// The margin this row's broadphase bounding sphere is inflated by (V2): half of
+    /// `PhysicsConfig::speculative_distance` plus the row's approach-velocity term,
+    /// `min(cap, (|v| + |ω| R) · dt)` (`PhysicsConfig::speculative_velocity_cap`, ruling 9),
+    /// written by [`physics_gather`](crate::systems::physics_gather) into every row it gathers,
+    /// so every pair a narrowphase site could keep is a candidate of every broadphase
+    /// ([`body_bounding_radius`](crate::systems::body_bounding_radius) adds it).
+    /// `0` is the exact bounding sphere; a row built by [`from_columns`](Self::from_columns)
+    /// carries `0`. Placed beside `shape`, the other field the radius reads.
+    pub bp_margin: f32,
     /// The collider shape, projected at gather so broad/narrowphase have the
     /// body's real geometry (P2 W2). The broadphase reads its bounding radius
     /// and the sphere-sphere narrowphase reads its sphere radius — neither phase
@@ -3024,6 +4791,7 @@ impl BodyState {
             simulated,
             kinematic,
             is_sensor,
+            bp_margin: 0.0,
             shape: collider.shape,
         }
     }
@@ -3079,23 +4847,42 @@ fn local_inv_inertia(shape: ColliderShape, inv_mass: f32) -> Mat3 {
 ///
 /// Built from the `boyko_utils` [`BitSet256`] 256-bit chunk so it scales past
 /// 256 rows (a `BitSet256` alone caps at 256; `BitSet<T>` caps at 128). Each
-/// chunk is a fixed 256-bit word block; the `Vec<BitSet256>` grows in chunk
+/// chunk is a fixed 256-bit word block; the chunk column grows in chunk
 /// granularity and its capacity is reused across steps. The solver sets bit
 /// `i` for every row it mutates; [`physics_apply`](crate::systems::physics_apply)
 /// writes back only set rows.
-#[derive(Default)]
+///
+/// # The chunks live in a [`ScratchColumn`], not a `std::Vec` (audit Stage 4)
+///
+/// One mask is one kernel column, so the bitset is engine storage like every
+/// other physics buffer rather than a side allocation. Each INSTANCE needs its
+/// own [`ComponentId`]: two masks under one id would silently share a
+/// `pool_base_stagger` and put element `i` of both in the same L1/L2 set, so the
+/// id is a constructor parameter instead of a constant baked into the type.
 pub struct TouchedMask {
     /// One 256-bit chunk per 256 rows; chunk `i >> 8` holds bit `i & 255`.
-    chunks: Vec<BitSet256>,
+    chunks: ScratchColumn<BitSet256>,
 }
 
 impl TouchedMask {
     /// Builds an empty mask pre-sized for `rows` bodies (no later realloc in
-    /// steady state).
+    /// steady state), backed by the kernel column registered under `id`.
+    ///
+    /// `id` must be this mask instance's OWN reserved scratch id — see the type
+    /// docs. Registers the scratch layouts (idempotent) before creating the
+    /// column, so a mask built from any constructor finds its layout installed.
     #[inline]
-    pub fn with_capacity(rows: usize) -> Self {
+    pub(crate) fn with_capacity(id: ComponentId, rows: usize) -> Self {
+        register_scratch_layouts();
+        // The ceiling is in CHUNKS, so `scratch_reserve_rows` is the wrong budget
+        // here: it would hand a 32-byte element 16.7 M slots — 256x more chunks
+        // than any world can address. `POOL_MIN_ROWS` chunks already cover
+        // `POOL_MIN_ROWS * 256` rows, past the engine's own `POOL_MAX_ROWS` row
+        // ceiling, so a push can only exceed it in a world whose body column
+        // would have panicked first.
+        let reserve = rows.div_ceil(BITS_PER_CHUNK).max(POOL_MIN_ROWS);
         Self {
-            chunks: Vec::with_capacity(rows.div_ceil(BITS_PER_CHUNK)),
+            chunks: ScratchColumn::new(id, reserve),
         }
     }
 
@@ -3104,8 +4891,12 @@ impl TouchedMask {
     #[inline]
     pub fn reset(&mut self, rows: usize) {
         let needed = rows.div_ceil(BITS_PER_CHUNK);
-        self.chunks.clear();
-        self.chunks.resize(needed, BitSet256::new());
+        // `clear` first, then `resize`: a bare `resize` down would KEEP the
+        // surviving prefix's bits, and this is a reset. `clear` is O(1) and leaves
+        // the committed pages, so the fill is the only work.
+        let mut view = self.chunks.build_view();
+        view.clear();
+        view.resize(needed, BitSet256::new());
     }
 
     /// Marks row `index` as touched.
@@ -3115,17 +4906,18 @@ impl TouchedMask {
             index < self.chunks.len() * BITS_PER_CHUNK,
             "invariant: touched index {index} out of range; call reset(rows) first"
         );
-        self.chunks[index >> 8].set(index & (BITS_PER_CHUNK - 1));
+        self.chunks.build_view().as_mut_slice()[index >> 8].set(index & (BITS_PER_CHUNK - 1));
     }
 
     /// Returns `true` if row `index` was touched.
     #[inline]
     pub fn get(&self, index: usize) -> bool {
+        let chunks = self.chunks.as_read_slice();
         let chunk = index >> 8;
-        if chunk >= self.chunks.len() {
+        if chunk >= chunks.len() {
             return false;
         }
-        self.chunks[chunk].get(index & (BITS_PER_CHUNK - 1))
+        chunks[chunk].get(index & (BITS_PER_CHUNK - 1))
     }
 }
 
@@ -3138,12 +4930,12 @@ impl TouchedMask {
 /// [`physics_apply`](crate::systems::physics_apply) writes back. Every buffer is
 /// cleared and refilled each step, capacity reused.
 ///
-/// A row→entity map (for the gameplay [`Contact`](crate::components::Contact)
-/// producer) is intentionally NOT carried here in the foundation: `Entity` is not
-/// yet a `QueryData`, so the gather cannot populate it, and shipping an
-/// always-empty buffer whose "parallel to `bodies`" invariant is false from day
-/// one is a footgun (review M2). Phase 10 adds it back together with the `Contact`
-/// producer once `Entity`-as-`QueryData` lands.
+/// The gather records row → [`RowKey`](crate::row_identity::RowKey) — the entity's slot
+/// index and generation, the slot from `Query::iter_entities` and the generation through
+/// `Entities::get` — for the row identity map (`rows`, defect A, interim), which the
+/// row-keyed consumers carry their state through when rows move. A row → entity
+/// projection for the gameplay [`Contact`](crate::components::Contact) producer is still
+/// not carried.
 /// # `bodies` is a [`ScratchColumn`], not a `std::Vec` (audit Stage P)
 ///
 /// The gather snapshot lives in the engine's OWN storage — one address-stable
@@ -3173,7 +4965,26 @@ pub struct SolverScratch {
     /// (P2 W2). Indexed in the solver's flattened contact-point order (manifold
     /// order × point order); rebuilt and refilled each solve, capacity reused
     /// (no per-step alloc). Left empty by the no-op / non-owning solvers.
-    pub vn_initial: Vec<f32>,
+    ///
+    /// Backed by a `ComponentPool` column like `bodies` (audit Stage 4), and
+    /// `pub(crate)` for the same reason: the in-crate solver destructures
+    /// `SolverScratch` to borrow it disjointly from the BodyState read slice.
+    /// External consumers read [`vn_initial`](Self::vn_initial).
+    pub(crate) vn_initial: ScratchColumn<f32>,
+    /// The gather's per-row entity identity and previous-row map (defect A, interim;
+    /// U5–U7 delete it). Refilled by [`physics_gather`](crate::systems::physics_gather)
+    /// only, so a direct drive that never gathers leaves every consumer on `Identity`.
+    pub(crate) rows: RowIdentity,
+    /// The previous step's post-solve snapshot: the baseline L10's broadphase tests a row's
+    /// inputs against (design 04 D2 R3, D3). The gather swaps it with
+    /// [`bodies`](Self::bodies) — O(1), the two columns alternate roles — only on a step
+    /// whose sleep-skip mode is active ([`keep_baseline`](Self::keep_baseline)), so a world
+    /// with sleeping off never touches it.
+    bodies_prev: ScratchColumn<BodyState>,
+    /// The gather sequence `bodies_prev` was kept on, or `0` before the first keep: the
+    /// broadphase trusts the baseline only when this is the current gather, so a mode written
+    /// between the gather and the broadphase yields no baseline rather than a wrong one.
+    baseline_seq: u64,
 }
 
 impl Default for SolverScratch {
@@ -3192,12 +5003,37 @@ impl SolverScratch {
         let reserve = rows.max(scratch_reserve_rows(size_of::<BodyState>()));
         Self {
             bodies: ScratchColumn::new(body_state_id(), reserve),
-            touched: TouchedMask::with_capacity(rows),
-            // One initial normal-velocity slot per body is a cheap first-frame
-            // reserve; the TGS solver grows it to the live contact-point count
-            // and reuses that capacity thereafter.
-            vn_initial: Vec::with_capacity(rows),
+            touched: TouchedMask::with_capacity(touched_solver_id(), rows),
+            // A `ScratchColumn`'s reserve is a HARD ceiling (a push past it
+            // panics), and contact points outnumber bodies — so unlike the old
+            // `Vec::with_capacity(rows)` hint, the floor here has to be the same
+            // budget every other scratch column gets, not the body count.
+            vn_initial: ScratchColumn::new(
+                vn_initial_id(),
+                rows.max(scratch_reserve_rows(size_of::<f32>())),
+            ),
+            rows: RowIdentity::with_capacity(rows),
+            // The same reserve as `bodies`: the two columns swap roles.
+            bodies_prev: ScratchColumn::new(bodies_prev_id(), reserve),
+            baseline_seq: 0,
         }
+    }
+
+    /// Keeps the current snapshot as the resting baseline of the gather that is about to
+    /// refill it (L10 design 04 D3): the snapshot and the baseline columns swap, O(1), and the
+    /// baseline is stamped with the current gather sequence. Called by the gather after it opens
+    /// the gather and before it clears the snapshot, only when a sleep-skip mode is active.
+    #[inline]
+    pub(crate) fn keep_baseline(&mut self) {
+        core::mem::swap(&mut self.bodies, &mut self.bodies_prev);
+        self.baseline_seq = self.rows.gather_seq();
+    }
+
+    /// The resting baseline — the previous step's post-solve snapshot, by previous row — when
+    /// the current gather kept one ([`keep_baseline`](Self::keep_baseline)), else `None`.
+    #[inline]
+    pub(crate) fn baseline(&self) -> Option<&[BodyState]> {
+        (self.baseline_seq == self.rows.gather_seq()).then(|| self.bodies_prev.as_read_slice())
     }
 
     /// The contiguous read slice over the gathered bodies (`[0, len)` live span).
@@ -3247,13 +5083,42 @@ impl SolverScratch {
         self.touched.reset(rows.len());
     }
 
+    /// The contiguous read slice over the captured approach velocities, in the
+    /// solver's flattened contact-point order.
+    #[inline]
+    pub fn vn_initial(&self) -> &[f32] {
+        self.vn_initial.as_read_slice()
+    }
+
+    /// The single-threaded refill view over `vn_initial` (clear + push) — the ONLY
+    /// surface that mutates it, used by the serial TGS solver's constraint build.
+    #[inline]
+    pub fn vn_initial_build(&mut self) -> ScratchBuildView<'_, f32> {
+        self.vn_initial.build_view()
+    }
+
+    /// Diagnostic: how many gathers found the rows changed (or a body added) and built a
+    /// previous-row map. A structural census: flat while no body is spawned, despawned or
+    /// migrated between steps.
+    #[inline]
+    pub fn row_remap_builds(&self) -> u64 {
+        self.rows.remap_builds()
+    }
+
+    /// Diagnostic: how many current rows the previous-row map resolved by sort + binary
+    /// search instead of by its aligned walk. A structural cost gate.
+    #[inline]
+    pub fn row_remap_searched(&self) -> u64 {
+        self.rows.remap_searched()
+    }
+
     /// Clears the snapshot for a fresh gather, reusing capacity. The touched
     /// mask is reset by the gather once the row count is known; `vn_initial` is
     /// rebuilt by the solver, so it is cleared here for a fresh solve.
     #[inline]
     pub fn clear(&mut self) {
         self.bodies.build_view().clear();
-        self.vn_initial.clear();
+        self.vn_initial.build_view().clear();
     }
 }
 

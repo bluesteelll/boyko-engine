@@ -1,0 +1,282 @@
+//! `G23a` — resident memory is bounded and allocated once, over three measurement domains.
+//!
+//! # Why this is its own binary
+//!
+//! It installs a `#[global_allocator]`. An integration test is a separate binary, so the counting
+//! wrapper measures this file's work and nothing else — inside the crate's own test binary it
+//! would be counting nine hundred unrelated tests' allocations at the same time.
+//!
+//! # Two departures from the gate as written, both narrowings and both stated
+//!
+//! **1. Domain 1 asserts ZERO, not "> 0".** The gate says *"each domain > 0 (two-sided — a stub
+//! that allocates nothing fails)"*, which is the right instinct applied to the wrong domain. The
+//! std-allocator domain exists to catch the profiler reaching for the heap; the design's whole
+//! claim is that it never does. Asserting `> 0` there would demand an allocation in order to prove
+//! there are none. The two-sidedness the clause wants is kept, and moved to where it can hold:
+//! domains 2 and 3 are asserted `> 0`, so a stub that reserves nothing and links no static fails.
+//!
+//! **2. Domain 3 is measured with `size_of`, not with `section_report`.** The gate names
+//! `section_report{LANES, REGISTRY}.total` as domain 3's bytes — but `section_report` shells out to
+//! `llvm-readobj`, and this box had no `llvm-readobj`, `objdump` or `nm` on `PATH` under the then
+//! active `stable-x86_64-pc-windows-gnu` toolchain (re-measured this rung; unchanged since the
+//! substrate measured it). The gate's own rule is that tool absence is a **RED, never a SKIP**, so
+//! under the literal reading this row could not be green on this machine at all.
+//!
+//! ⚠ **CORRECTED 2026-09-10 — the tool is present, and `PATH` was never the question.**
+//! `llvm-tools` is installed on BOTH stable toolchains: `llvm-nm`, `llvm-readobj` and
+//! `llvm-objdump` sit in `~/.rustup/toolchains/stable-x86_64-pc-windows-{gnu,msvc}/lib/rustlib/
+//! x86_64-pc-windows-{gnu,msvc}/bin/`, which is where `boyko_diag::storage::resolve_tool` looks
+//! after `PATH`. `objdump` and `nm` are on `PATH` too, from WinLibs' mingw64; only the `llvm-`
+//! spellings are off it. The instrument is green on both hosts — `boyko_diag`'s `gate::` suite,
+//! 8 tests with `--features section-gate`, including a live probe of its own test binary (gnu
+//! 2026-09-10, msvc 2026-09-18) — so "this row could not be green on this machine at all" no
+//! longer holds. The split below is kept on its own merits (an exact compile-time bound beats a
+//! shell-out), not on tool absence.
+//!
+//! The two things being conflated are separable. The tool proves **`.bss` residency** — that the
+//! image carries no raw data for a symbol. This gate needs the symbol's **bytes**, and the bytes of
+//! a `static` array are a compile-time constant that `size_of` gives exactly, with no toolchain and
+//! no shell-out. So the bound is measured here and is exact; the residency claim is **not made
+//! here** and stays `G22a`'s, which is UNRUN — not blocked. Its D0 prerequisite
+//! (`rustup component add llvm-tools`) is discharged on both stable toolchains as of 2026-09-10;
+//! nobody has since run the gate, and that is not this rung's to clear either.
+//!
+//! # The counter is PER-THREAD, and the first version of it was not
+//!
+//! **MEASURED, and it is the reason this note exists.** The first draft counted into a process-wide
+//! `AtomicUsize`. Both tests in this file then failed, reporting 136 B for `Profiler::new()` and
+//! 11 753 B for `arm` — figures that have nothing to do with the profiler. `libtest` runs the two
+//! tests on separate threads, and a global counter read before and after a call reports *whatever
+//! the whole process allocated in that interval*, which included the other test's harness.
+//!
+//! A direct probe settled it: with the two loads adjacent, `Profiler::new()`, `clock::calibrate()`,
+//! a first `warn!`, a second `warn!` and `arm` each measured **exactly 0**.
+//!
+//! The failure mode worth keeping is not the red. It is that the same instrument would have gone
+//! **green by luck** had the scheduler placed the two tests further apart — a gate whose verdict
+//! depends on thread timing is not measuring its subject. A per-thread counter answers the question
+//! that was actually asked: *did this call, on this thread, reach for the heap*.
+
+// clippy 1.98.0 false positive: this file's `thread_local!` initialisers already
+// use the `const { … }` form the lint asks for (all 63 in the workspace do).
+// See this crate's lib.rs for the full account and the delete condition.
+#![allow(clippy::missing_const_for_thread_local)]
+// Excluded from Miri for the reason `boyko_reflect/tests/c4_prim_zero_alloc.rs` measured first: a
+// `#[global_allocator]` that forwards to `System` is not transparent under Miri + Tree Borrows,
+// and libtest's own channel teardown then frees through it into a protected tag. MEASURED
+// 2026-10-10 here under the Miri sweep's flags, the same report: `deallocation through <tag>
+// (root of the allocation) ... is forbidden`, raised inside `mpmc::Sender::drop` with only
+// `Counting::dealloc` of this file on the stack. Counting allocations is not Miri's subject.
+#![cfg(not(miri))]
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+
+use boyko_ecs::ecs::core::profiling::{ArmOutcome, Profiler, ProfilerConfig};
+
+thread_local! {
+    /// Bytes this thread's allocations have asked for. `const`-initialised and `Copy`, so the slot
+    /// needs no lazy setup and registers no destructor — either would re-enter the allocator from
+    /// inside the allocator.
+    static ALLOCATED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// This thread's total. `0` if TLS is already torn down, which cannot happen on a live test thread
+/// and must not panic if it somehow does.
+fn allocated() -> usize {
+    ALLOCATED.try_with(Cell::get).unwrap_or(0)
+}
+
+/// The counting wrapper. Only `alloc`/`alloc_zeroed`/`realloc`'s growth are counted: the question
+/// is *"did this call reach for the heap"*, and a free tells us about an allocation some earlier
+/// call made.
+struct Counting;
+
+/// Charge `n` bytes to the calling thread, ignoring a torn-down TLS.
+#[inline]
+fn charge(n: usize) {
+    let _ = ALLOCATED.try_with(|c| c.set(c.get() + n));
+}
+
+// SAFETY: every method forwards to `System` with the caller's own layout and pointer, unchanged.
+//   The accounting touches a `Cell<usize>` in `const`-initialised thread-local storage: no lazy
+//   initialisation and no destructor, so it cannot re-enter the allocator, and `try_with` makes a
+//   torn-down TLS a zero rather than a panic inside an allocation.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        charge(layout.size());
+        // SAFETY: `layout` is the caller's, forwarded unchanged.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: `ptr` and `layout` are the caller's, forwarded unchanged.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        charge(layout.size());
+        // SAFETY: as `alloc`.
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        charge(new_size.saturating_sub(layout.size()));
+        // SAFETY: as `dealloc`, plus `new_size` forwarded unchanged.
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static ALLOC: Counting = Counting;
+
+/// The `dev` profile's armed budget, derived here rather than quoted, because a budget quoted from
+/// a document is a number nothing checks.
+///
+/// At `LANE_COUNT = 80`, `REGION_CAPACITY = 1024`, `zone_stride = ENGINE_ZONE_SLOTS = 4096` and
+/// `WINDOW = 121`:
+///
+/// | Term | Bytes |
+/// |---|---|
+/// | sample slab `80 × 2 × 1024 × 24` | 3 932 160 |
+/// | `total` `4096 × 121 × 8` | 3 964 928 |
+/// | `count` + `min` + `max` `3 × 4096 × 121 × 4` | 5 947 392 |
+/// | `label` `4096 × 121 × 1` | 495 616 |
+/// | frames + begins `121 × 32 + 121 × 8` | 4 840 |
+/// | `LANES` `80 × 256` + `REGISTRY` `7168 × 8` | 77 824 |
+/// | `DYN_DESCS` `3072 × 24` + `DYN_NAMES` `65 536` | 139 264 |
+/// | **total** | **≈ 14.9 MiB** |
+///
+/// **Profiling rung 10 moved two of those rows and added one.** `REGISTRY` grew from
+/// `ENGINE_ZONE_SLOTS` to `ZONE_ID_SPACE = ENGINE_ZONE_SLOTS + MAX_USER_BUDGET` = 7168 entries,
+/// because user ids live in the same table; and the two dynamic arenas are new. Measured, not
+/// projected: `dyn_descs_bytes()` is 73 728 (24 B/descriptor × 3072) and `dyn_names_bytes()` is
+/// 65 536.
+///
+/// 16 MiB leaves ~1.3 MiB of headroom for the section padding and the reservation's granule
+/// rounding. It is a `dev` figure and says nothing about a shipped title: the shipping row is
+/// 1 280 KiB and depends on per-profile constants (`ENGINE_ZONE_SLOTS = 256`,
+/// `REGION_CAPACITY = 128`) that arrive with the single build axis at J1. **Until then no
+/// shipping-budget claim is made here**, and quoting one would be a number taken on a geometry the
+/// binary does not have.
+const DEV_ARMED_BUDGET_BYTES: usize = 16 * 1024 * 1024;
+
+/// The three domains, summed, against the budget — and each domain asserted in the direction it
+/// can actually be wrong in.
+///
+/// # The showable RED
+///
+/// Raise `LANE_COUNT` in `boyko_diag::lane` from 80 to 256: the sample slab becomes
+/// `256 × 2 × 1024 × 24` = 12 582 912 B (+8.65 MiB) and `LANES` becomes 65 536 B, so the sum
+/// reaches ~23.0 MiB and crosses 16 MiB. Nothing else in the row moves. Run and confirmed at
+/// implementation.
+#[test]
+fn the_armed_footprint_is_bounded_and_the_store_never_touches_the_heap() {
+    let mut p = Profiler::new();
+
+    let before = allocated();
+    let outcome = p.arm(ProfilerConfig::default());
+    let std_bytes = allocated() - before;
+
+    assert_eq!(outcome, ArmOutcome::Armed, "this binary's first arm must create the reservation");
+
+    let reserved = Profiler::reserved_bytes();
+    // **G23b (profiling rung 10): domain 3 is now the COMPLETE `.bss` set.** Until rung 10 it was
+    // two symbols, because the other two did not exist to be linked — `DYN_DESCS`/`DYN_NAMES`
+    // arrive with `dyn_registry.rs`, which is exactly why `G22b`/`G23b` are separate rows from
+    // `G22a`/`G23a` rather than a wider claim bolted onto them.
+    let statics = boyko_diag::sample::lanes_bytes()
+        + boyko_diag::profiling_abi::registry_bytes()
+        + boyko_diag::profiling_abi::dyn_registry::dyn_descs_bytes()
+        + boyko_diag::profiling_abi::dyn_registry::dyn_names_bytes();
+
+    // Domain 2 and domain 3 are the two-sided half: a stub that reserves nothing, or one that
+    // links no static, fails here.
+    assert!(reserved > 0, "domain 2 measured nothing — was anything reserved at all?");
+    assert!(statics > 0, "domain 3 measured nothing — are the transports linked?");
+
+    // **The COMPOSITION clause, and the reason it exists.**
+    //
+    // `G23b`'s literal RED — "raise `MAX_USER_BUDGET` in the shipping profile from 512 to 3072" —
+    // is NOT PRODUCIBLE here, and the arithmetic says why rather than the absence being noticed
+    // later. There is no shipping profile (the `BOYKO_PROFILE` axis is rung 14), so the RED becomes
+    // "raise the constant"; and the constant is bounded by the id space being `u16`, so
+    // `MAX_USER_BUDGET` cannot exceed ~61 439. At 8 B/id in `REGISTRY` plus 24 B/id in `DYN_DESCS`
+    // that is ~1.9 MiB of growth against a 16 MiB dev budget — it does not cross, and no setting of
+    // that constant makes it cross.
+    //
+    // An upper bound nothing can push past is a gate that cannot fail. So the claim `G23b` actually
+    // adds — "these two arenas are INSIDE the sum" — is asserted directly: domain 3 equals the four
+    // terms, computed independently of the expression above. Dropping a term from that expression
+    // reds here, which is the RED that IS producible and the one that matches the row's own title
+    // ("this row is what puts their bytes inside the budget sum").
+    let four_terms = boyko_diag::sample::lanes_bytes()
+        + boyko_diag::profiling_abi::registry_bytes()
+        + boyko_diag::profiling_abi::dyn_registry::dyn_descs_bytes()
+        + boyko_diag::profiling_abi::dyn_registry::dyn_names_bytes();
+    assert_eq!(
+        statics, four_terms,
+        "domain 3 is not the four-symbol `.bss` set G23b names. If a term went missing from the \
+         sum, the bound below is being taken over fewer bytes than the process actually holds — \
+         which is the failure mode B6 split this row out to prevent, one gate to the right."
+    );
+    assert!(
+        boyko_diag::profiling_abi::dyn_registry::dyn_descs_bytes() > 0
+            && boyko_diag::profiling_abi::dyn_registry::dyn_names_bytes() > 0,
+        "the two dynamic arenas measured zero bytes — they are `MAX_USER_BUDGET` and \
+         `DYN_NAME_BYTES` wide, so a zero means one of those constants is 0 and the registry can \
+         hold nothing"
+    );
+
+    // Domain 1, asserted in the only direction it can be wrong in. See the module docs.
+    assert_eq!(
+        std_bytes, 0,
+        "the profiling store reached for the heap during arm ({std_bytes} B). Every byte it owns \
+         is either the reservation or a `.bss` static, by construction — a heap allocation here \
+         means a `Vec`, a `Box` or a `String` got in."
+    );
+
+    let total = std_bytes + reserved + statics;
+    assert!(
+        total <= DEV_ARMED_BUDGET_BYTES,
+        "the armed footprint is {total} B, over the {DEV_ARMED_BUDGET_BYTES} B dev budget \
+         (reservation {reserved}, statics {statics})"
+    );
+
+    // DISCLOSURE, not a gate — and labelled so, because the difference matters. The budget above
+    // is one number for two configurations: `profiling-analysis` puts a 256 KiB interval ring
+    // inside the same reservation, and both configurations pass the same 16 MiB test. A reader
+    // handed only "total = N B" cannot tell which one produced it, so the line below says. There
+    // is no assertion attached because the honest one is unavailable here: `Layout` is
+    // `pub(crate)`, so this binary cannot compute what the other configuration's reservation
+    // would have been, and `reserved > 256 KiB` would be a gate that cannot fail dressed as one.
+    println!(
+        "profiling_residency: analysis {}, total {total} B (reservation {reserved}, statics {statics})",
+        if cfg!(feature = "profiling-analysis") { "ON" } else { "OFF" }
+    );
+
+    // And it is allocated ONCE: a second arm at the live geometry adds nothing to any domain.
+    let before_second = allocated();
+    assert_eq!(p.arm(ProfilerConfig::default()), ArmOutcome::Rearmed);
+    assert_eq!(
+        allocated() - before_second,
+        0,
+        "a re-arm allocated"
+    );
+    assert_eq!(Profiler::reserved_bytes(), reserved, "a re-arm reserved more address space");
+}
+
+/// A disarmed store costs **nothing** in any domain: no reservation, no heap, no page.
+///
+/// This is the flag-off half of the residency claim, and it is the one a shipped title actually
+/// pays. It runs before the arm test in a fresh process only by accident of ordering, so it
+/// asserts about its own `Profiler` rather than about `reserved_bytes`, which is process-wide.
+#[test]
+fn a_store_that_never_arms_allocates_nothing() {
+    let before = allocated();
+    let p = Profiler::new();
+    let after = allocated();
+    assert!(!p.is_armed());
+    assert_eq!(p.zone_stride(), 0);
+    assert_eq!(after - before, 0, "constructing a disarmed store allocated");
+}

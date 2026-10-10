@@ -1,0 +1,7411 @@
+{
+ "raw": "raw",
+ "records": 171,
+ "attempts": 169,
+ "used": 137,
+ "warmups": [
+  {
+   "pass": 0,
+   "mean_ms": 9.0527674,
+   "valid": true
+  },
+  {
+   "pass": 1,
+   "mean_ms": 7.6914066,
+   "valid": true
+  }
+ ],
+ "nonzero_exits": [],
+ "reruns": [
+  {
+   "pass": 0,
+   "round": 0,
+   "seq": 1,
+   "row": "JOLT-T",
+   "W": 1,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 15.798251800000001
+  },
+  {
+   "pass": 0,
+   "round": 0,
+   "seq": 2,
+   "row": "D-L4L2",
+   "W": 1,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": true,
+   "rerun_mean_ms": 10.495625
+  },
+  {
+   "pass": 0,
+   "round": 0,
+   "seq": 4,
+   "row": "J-A",
+   "W": 1,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 19.3372132
+  },
+  {
+   "pass": 0,
+   "round": 0,
+   "seq": 5,
+   "row": "D-L5",
+   "W": 1,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 10.7008016
+  },
+  {
+   "pass": 0,
+   "round": 0,
+   "seq": 6,
+   "row": "JOLT-T",
+   "W": 2,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 8.677767
+  },
+  {
+   "pass": 0,
+   "round": 0,
+   "seq": 8,
+   "row": "JOLT56-T",
+   "W": 2,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 5.7174628
+  },
+  {
+   "pass": 0,
+   "round": 0,
+   "seq": 10,
+   "row": "JOLT-T",
+   "W": 4,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 5.1056396
+  },
+  {
+   "pass": 0,
+   "round": 0,
+   "seq": 12,
+   "row": "JOLT56-T",
+   "W": 4,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 3.5193664
+  },
+  {
+   "pass": 0,
+   "round": 0,
+   "seq": 13,
+   "row": "D-L5",
+   "W": 4,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 6.1060984000000005
+  },
+  {
+   "pass": 0,
+   "round": 0,
+   "seq": 15,
+   "row": "D-L4L2",
+   "W": 8,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 7.6930414
+  },
+  {
+   "pass": 0,
+   "round": 0,
+   "seq": 16,
+   "row": "J-A",
+   "W": 8,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 9.069542
+  },
+  {
+   "pass": 0,
+   "round": 0,
+   "seq": 18,
+   "row": "D-L5",
+   "W": 8,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 5.3501652
+  },
+  {
+   "pass": 0,
+   "round": 0,
+   "seq": 20,
+   "row": "JOLT-T",
+   "W": 16,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 3.1896316000000002
+  },
+  {
+   "pass": 0,
+   "round": 0,
+   "seq": 22,
+   "row": "JOLT56-T",
+   "W": 16,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 2.3997702000000003
+  },
+  {
+   "pass": 0,
+   "round": 1,
+   "seq": 24,
+   "row": "JOLT-T",
+   "W": 1,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 15.0678492
+  },
+  {
+   "pass": 0,
+   "round": 1,
+   "seq": 25,
+   "row": "D-L4L2",
+   "W": 1,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 10.5831856
+  },
+  {
+   "pass": 0,
+   "round": 1,
+   "seq": 26,
+   "row": "JOLT56-T",
+   "W": 1,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 9.5182656
+  },
+  {
+   "pass": 0,
+   "round": 1,
+   "seq": 27,
+   "row": "J-A",
+   "W": 1,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 19.482652
+  },
+  {
+   "pass": 0,
+   "round": 1,
+   "seq": 28,
+   "row": "D-L5",
+   "W": 1,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 10.6958226
+  },
+  {
+   "pass": 0,
+   "round": 1,
+   "seq": 29,
+   "row": "JOLT-T",
+   "W": 2,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 8.4563778
+  },
+  {
+   "pass": 0,
+   "round": 1,
+   "seq": 30,
+   "row": "D-L4L2",
+   "W": 2,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 8.9444126
+  },
+  {
+   "pass": 0,
+   "round": 1,
+   "seq": 31,
+   "row": "JOLT56-T",
+   "W": 2,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 5.7829804000000005
+  },
+  {
+   "pass": 0,
+   "round": 1,
+   "seq": 34,
+   "row": "D-L4L2",
+   "W": 4,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 8.260529400000001
+  },
+  {
+   "pass": 0,
+   "round": 1,
+   "seq": 37,
+   "row": "JOLT-T",
+   "W": 8,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 3.5660556
+  },
+  {
+   "pass": 0,
+   "round": 1,
+   "seq": 41,
+   "row": "D-L5",
+   "W": 8,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 5.344691
+  },
+  {
+   "pass": 0,
+   "round": 2,
+   "seq": 50,
+   "row": "J-A",
+   "W": 1,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 19.371163199999998
+  },
+  {
+   "pass": 0,
+   "round": 2,
+   "seq": 51,
+   "row": "D-L5",
+   "W": 1,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 10.683984800000001
+  },
+  {
+   "pass": 0,
+   "round": 2,
+   "seq": 57,
+   "row": "D-L4L2",
+   "W": 4,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 8.2075218
+  },
+  {
+   "pass": 0,
+   "round": 2,
+   "seq": 65,
+   "row": "D-L5-npoff",
+   "W": 8,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 8.0579908
+  },
+  {
+   "pass": 1,
+   "round": 0,
+   "seq": 12,
+   "row": "JOLT56-T",
+   "W": 4,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 3.5791242000000003
+  },
+  {
+   "pass": 1,
+   "round": 1,
+   "seq": 26,
+   "row": "D-L4L2",
+   "W": 16,
+   "reason": "contaminated",
+   "rerun_valid": true,
+   "rerun_contaminated": false,
+   "rerun_mean_ms": 8.0837406
+  }
+ ],
+ "excluded_slots": [
+  [
+   {
+    "row": "D-L4L2",
+    "W": 1,
+    "pass": 0,
+    "seq": 2,
+    "attempt": "original",
+    "invalid": [],
+    "contaminated": true,
+    "skipped": null,
+    "aborted": null
+   },
+   {
+    "row": "D-L4L2",
+    "W": 1,
+    "pass": 0,
+    "seq": 2,
+    "attempt": "rerun",
+    "invalid": [],
+    "contaminated": true,
+    "skipped": null,
+    "aborted": null
+   }
+  ]
+ ],
+ "contaminated_attempts": [
+  {
+   "row": "JOLT-T",
+   "W": 1,
+   "pass": 0,
+   "round": 0,
+   "seq": 1,
+   "attempt": "original",
+   "rb": 1.95,
+   "ra": 5.64,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "browser.exe",
+     "pid": 19792,
+     "cpu_s": 1.344,
+     "pct_of_machine": 1.68
+    },
+    {
+     "name": "browser.exe",
+     "pid": 10040,
+     "cpu_s": 0.797,
+     "pct_of_machine": 1.0
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.406,
+     "pct_of_machine": 0.51
+    }
+   ],
+   "top_before": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.328,
+     "pct_of_machine": 0.41
+    },
+    {
+     "name": "browser.exe",
+     "pid": 19792,
+     "cpu_s": 0.156,
+     "pct_of_machine": 0.2
+    },
+    {
+     "name": "browser.exe",
+     "pid": 10040,
+     "cpu_s": 0.156,
+     "pct_of_machine": 0.2
+    }
+   ],
+   "mean_ms": 18.8822508
+  },
+  {
+   "row": "D-L4L2",
+   "W": 1,
+   "pass": 0,
+   "round": 0,
+   "seq": 2,
+   "attempt": "original",
+   "rb": 4.31,
+   "ra": 6.33,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 1.625,
+     "pct_of_machine": 2.03
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.891,
+     "pct_of_machine": 1.11
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.359,
+     "pct_of_machine": 0.45
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.094,
+     "pct_of_machine": 1.37
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 0.562,
+     "pct_of_machine": 0.7
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.328,
+     "pct_of_machine": 0.41
+    }
+   ],
+   "mean_ms": 11.8658128
+  },
+  {
+   "row": "J-A",
+   "W": 1,
+   "pass": 0,
+   "round": 0,
+   "seq": 4,
+   "attempt": "original",
+   "rb": 3.04,
+   "ra": 5.26,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 1.344,
+     "pct_of_machine": 1.68
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.109,
+     "pct_of_machine": 1.39
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.406,
+     "pct_of_machine": 0.51
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 0.641,
+     "pct_of_machine": 0.8
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.406,
+     "pct_of_machine": 0.51
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.312,
+     "pct_of_machine": 0.39
+    }
+   ],
+   "mean_ms": 20.789294
+  },
+  {
+   "row": "D-L5",
+   "W": 1,
+   "pass": 0,
+   "round": 0,
+   "seq": 5,
+   "attempt": "original",
+   "rb": 2.69,
+   "ra": 6.73,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 2.406,
+     "pct_of_machine": 3.01
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.562,
+     "pct_of_machine": 1.95
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.328,
+     "pct_of_machine": 0.41
+    }
+   ],
+   "top_before": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.391,
+     "pct_of_machine": 0.49
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.297,
+     "pct_of_machine": 0.37
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.25,
+     "pct_of_machine": 0.31
+    }
+   ],
+   "mean_ms": 11.8928094
+  },
+  {
+   "row": "JOLT-T",
+   "W": 2,
+   "pass": 0,
+   "round": 0,
+   "seq": 6,
+   "attempt": "original",
+   "rb": 2.54,
+   "ra": 10.08,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 1.281,
+     "pct_of_machine": 1.6
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.609,
+     "pct_of_machine": 0.76
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.391,
+     "pct_of_machine": 0.49
+    }
+   ],
+   "top_before": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.438,
+     "pct_of_machine": 0.55
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.25,
+     "pct_of_machine": 0.31
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 0.125,
+     "pct_of_machine": 0.16
+    }
+   ],
+   "mean_ms": 9.6519504
+  },
+  {
+   "row": "JOLT56-T",
+   "W": 2,
+   "pass": 0,
+   "round": 0,
+   "seq": 8,
+   "attempt": "original",
+   "rb": 1.72,
+   "ra": 5.93,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 1.875,
+     "pct_of_machine": 2.34
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.094,
+     "pct_of_machine": 1.37
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.328,
+     "pct_of_machine": 0.41
+    }
+   ],
+   "top_before": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.391,
+     "pct_of_machine": 0.49
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 0.234,
+     "pct_of_machine": 0.29
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.219,
+     "pct_of_machine": 0.27
+    }
+   ],
+   "mean_ms": 6.5744868
+  },
+  {
+   "row": "JOLT-T",
+   "W": 4,
+   "pass": 0,
+   "round": 0,
+   "seq": 10,
+   "attempt": "original",
+   "rb": 2.45,
+   "ra": 8.72,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 2.109,
+     "pct_of_machine": 2.64
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.438,
+     "pct_of_machine": 1.8
+    },
+    {
+     "name": "browser.exe",
+     "pid": 9212,
+     "cpu_s": 1.219,
+     "pct_of_machine": 1.52
+    }
+   ],
+   "top_before": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.344,
+     "pct_of_machine": 0.43
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.188,
+     "pct_of_machine": 0.23
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.125,
+     "pct_of_machine": 0.16
+    }
+   ],
+   "mean_ms": 6.2378206
+  },
+  {
+   "row": "JOLT56-T",
+   "W": 4,
+   "pass": 0,
+   "round": 0,
+   "seq": 12,
+   "attempt": "original",
+   "rb": 3.64,
+   "ra": 6.18,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 2.328,
+     "pct_of_machine": 2.91
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.562,
+     "pct_of_machine": 1.95
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.328,
+     "pct_of_machine": 0.41
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 0.672,
+     "pct_of_machine": 0.84
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.359,
+     "pct_of_machine": 0.45
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.359,
+     "pct_of_machine": 0.45
+    }
+   ],
+   "mean_ms": 4.1817852
+  },
+  {
+   "row": "D-L5",
+   "W": 4,
+   "pass": 0,
+   "round": 0,
+   "seq": 13,
+   "attempt": "original",
+   "rb": 4.85,
+   "ra": 6.38,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 2.484,
+     "pct_of_machine": 3.11
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.516,
+     "pct_of_machine": 1.89
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.344,
+     "pct_of_machine": 0.43
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 0.984,
+     "pct_of_machine": 1.23
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.922,
+     "pct_of_machine": 1.15
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.391,
+     "pct_of_machine": 0.49
+    }
+   ],
+   "mean_ms": 7.1208658
+  },
+  {
+   "row": "D-L4L2",
+   "W": 8,
+   "pass": 0,
+   "round": 0,
+   "seq": 15,
+   "attempt": "original",
+   "rb": 3.89,
+   "ra": 6.41,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 2.438,
+     "pct_of_machine": 3.05
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.234,
+     "pct_of_machine": 1.54
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.406,
+     "pct_of_machine": 0.51
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 0.734,
+     "pct_of_machine": 0.92
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.359,
+     "pct_of_machine": 0.45
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.359,
+     "pct_of_machine": 0.45
+    }
+   ],
+   "mean_ms": 9.374279
+  },
+  {
+   "row": "J-A",
+   "W": 8,
+   "pass": 0,
+   "round": 0,
+   "seq": 16,
+   "attempt": "original",
+   "rb": 2.47,
+   "ra": 7.08,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 2.156,
+     "pct_of_machine": 2.7
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.422,
+     "pct_of_machine": 1.78
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.359,
+     "pct_of_machine": 0.45
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.719,
+     "pct_of_machine": 0.9
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 0.422,
+     "pct_of_machine": 0.53
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.344,
+     "pct_of_machine": 0.43
+    }
+   ],
+   "mean_ms": 10.8378362
+  },
+  {
+   "row": "D-L5",
+   "W": 8,
+   "pass": 0,
+   "round": 0,
+   "seq": 18,
+   "attempt": "original",
+   "rb": 3.24,
+   "ra": 10.96,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "python.exe",
+     "pid": 18252,
+     "cpu_s": 2.938,
+     "pct_of_machine": 3.67
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 1.891,
+     "pct_of_machine": 2.36
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.984,
+     "pct_of_machine": 1.23
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.484,
+     "pct_of_machine": 0.61
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.453,
+     "pct_of_machine": 0.57
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.375,
+     "pct_of_machine": 0.47
+    }
+   ],
+   "mean_ms": 6.4867805999999995
+  },
+  {
+   "row": "JOLT-T",
+   "W": 16,
+   "pass": 0,
+   "round": 0,
+   "seq": 20,
+   "attempt": "original",
+   "rb": 2.05,
+   "ra": 6.27,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 1.688,
+     "pct_of_machine": 2.11
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.312,
+     "pct_of_machine": 1.64
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.344,
+     "pct_of_machine": 0.43
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.391,
+     "pct_of_machine": 0.49
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.391,
+     "pct_of_machine": 0.49
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 0.281,
+     "pct_of_machine": 0.35
+    }
+   ],
+   "mean_ms": 4.0555262
+  },
+  {
+   "row": "JOLT56-T",
+   "W": 16,
+   "pass": 0,
+   "round": 0,
+   "seq": 22,
+   "attempt": "original",
+   "rb": 4.23,
+   "ra": 6.65,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 1.922,
+     "pct_of_machine": 2.4
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.25,
+     "pct_of_machine": 1.56
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.328,
+     "pct_of_machine": 0.41
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.453,
+     "pct_of_machine": 0.57
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 0.422,
+     "pct_of_machine": 0.53
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.375,
+     "pct_of_machine": 0.47
+    }
+   ],
+   "mean_ms": 3.1390692000000002
+  },
+  {
+   "row": "JOLT-T",
+   "W": 1,
+   "pass": 0,
+   "round": 1,
+   "seq": 24,
+   "attempt": "original",
+   "rb": 3.2,
+   "ra": 5.83,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 2.203,
+     "pct_of_machine": 2.75
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.328,
+     "pct_of_machine": 1.66
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.344,
+     "pct_of_machine": 0.43
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.922,
+     "pct_of_machine": 1.15
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.297,
+     "pct_of_machine": 0.37
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.266,
+     "pct_of_machine": 0.33
+    }
+   ],
+   "mean_ms": 18.0063886
+  },
+  {
+   "row": "D-L4L2",
+   "W": 1,
+   "pass": 0,
+   "round": 1,
+   "seq": 25,
+   "attempt": "original",
+   "rb": 1.86,
+   "ra": 6.49,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 2.125,
+     "pct_of_machine": 2.66
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.641,
+     "pct_of_machine": 2.05
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.344,
+     "pct_of_machine": 0.43
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.438,
+     "pct_of_machine": 0.55
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.297,
+     "pct_of_machine": 0.37
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 0.234,
+     "pct_of_machine": 0.29
+    }
+   ],
+   "mean_ms": 11.3290676
+  },
+  {
+   "row": "JOLT56-T",
+   "W": 1,
+   "pass": 0,
+   "round": 1,
+   "seq": 26,
+   "attempt": "original",
+   "rb": 3.79,
+   "ra": 7.47,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.922,
+     "pct_of_machine": 2.4
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 1.266,
+     "pct_of_machine": 1.58
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.391,
+     "pct_of_machine": 0.49
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.094,
+     "pct_of_machine": 1.37
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 1.0,
+     "pct_of_machine": 1.25
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.344,
+     "pct_of_machine": 0.43
+    }
+   ],
+   "mean_ms": 13.4219672
+  },
+  {
+   "row": "J-A",
+   "W": 1,
+   "pass": 0,
+   "round": 1,
+   "seq": 27,
+   "attempt": "original",
+   "rb": 3.95,
+   "ra": 6.46,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 2.031,
+     "pct_of_machine": 2.54
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.422,
+     "pct_of_machine": 1.78
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.453,
+     "pct_of_machine": 0.57
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.641,
+     "pct_of_machine": 0.8
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.406,
+     "pct_of_machine": 0.51
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 0.359,
+     "pct_of_machine": 0.45
+    }
+   ],
+   "mean_ms": 20.5386182
+  },
+  {
+   "row": "D-L5",
+   "W": 1,
+   "pass": 0,
+   "round": 1,
+   "seq": 28,
+   "attempt": "original",
+   "rb": 2.96,
+   "ra": 8.22,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 2.281,
+     "pct_of_machine": 2.85
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 1.719,
+     "pct_of_machine": 2.15
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.328,
+     "pct_of_machine": 0.41
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.484,
+     "pct_of_machine": 0.61
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.312,
+     "pct_of_machine": 0.39
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 0.281,
+     "pct_of_machine": 0.35
+    }
+   ],
+   "mean_ms": 11.623087400000001
+  },
+  {
+   "row": "JOLT-T",
+   "W": 2,
+   "pass": 0,
+   "round": 1,
+   "seq": 29,
+   "attempt": "original",
+   "rb": 2.74,
+   "ra": 15.74,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "browser.exe",
+     "pid": 19792,
+     "cpu_s": 5.766,
+     "pct_of_machine": 7.21
+    },
+    {
+     "name": "browser.exe",
+     "pid": 10040,
+     "cpu_s": 1.125,
+     "pct_of_machine": 1.41
+    },
+    {
+     "name": "browser.exe",
+     "pid": 22676,
+     "cpu_s": 0.625,
+     "pct_of_machine": 0.78
+    }
+   ],
+   "top_before": [
+    {
+     "name": "browser.exe",
+     "pid": 19792,
+     "cpu_s": 0.422,
+     "pct_of_machine": 0.53
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.375,
+     "pct_of_machine": 0.47
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.328,
+     "pct_of_machine": 0.41
+    }
+   ],
+   "mean_ms": 19.391889199999998
+  },
+  {
+   "row": "D-L4L2",
+   "W": 2,
+   "pass": 0,
+   "round": 1,
+   "seq": 30,
+   "attempt": "original",
+   "rb": 3.27,
+   "ra": 16.97,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 2.812,
+     "pct_of_machine": 3.52
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 2.344,
+     "pct_of_machine": 2.93
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.453,
+     "pct_of_machine": 0.57
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.016,
+     "pct_of_machine": 1.27
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 0.406,
+     "pct_of_machine": 0.51
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.391,
+     "pct_of_machine": 0.49
+    }
+   ],
+   "mean_ms": 11.2272654
+  },
+  {
+   "row": "JOLT56-T",
+   "W": 2,
+   "pass": 0,
+   "round": 1,
+   "seq": 31,
+   "attempt": "original",
+   "rb": 3.81,
+   "ra": 10.81,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 2.094,
+     "pct_of_machine": 2.62
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 1.422,
+     "pct_of_machine": 1.78
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.406,
+     "pct_of_machine": 0.51
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 1.031,
+     "pct_of_machine": 1.29
+    },
+    {
+     "name": "claude.exe",
+     "pid": 4744,
+     "cpu_s": 0.375,
+     "pct_of_machine": 0.47
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.359,
+     "pct_of_machine": 0.45
+    }
+   ],
+   "mean_ms": 7.0595662
+  },
+  {
+   "row": "D-L4L2",
+   "W": 4,
+   "pass": 0,
+   "round": 1,
+   "seq": 34,
+   "attempt": "original",
+   "rb": 1.95,
+   "ra": 12.85,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "rust-analyzer.exe",
+     "pid": 19220,
+     "cpu_s": 1.156,
+     "pct_of_machine": 1.45
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.234,
+     "pct_of_machine": 0.29
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.078,
+     "pct_of_machine": 0.1
+    }
+   ],
+   "top_before": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.328,
+     "pct_of_machine": 0.41
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.062,
+     "pct_of_machine": 0.08
+    },
+    {
+     "name": "steamwebhelper.exe",
+     "pid": 3288,
+     "cpu_s": 0.047,
+     "pct_of_machine": 0.06
+    }
+   ],
+   "mean_ms": 13.431724599999999
+  },
+  {
+   "row": "JOLT-T",
+   "W": 8,
+   "pass": 0,
+   "round": 1,
+   "seq": 37,
+   "attempt": "original",
+   "rb": 1.24,
+   "ra": 7.19,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.219,
+     "pct_of_machine": 0.27
+    },
+    {
+     "name": "steam.exe",
+     "pid": 3144,
+     "cpu_s": 0.125,
+     "pct_of_machine": 0.16
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.109,
+     "pct_of_machine": 0.14
+    }
+   ],
+   "top_before": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.188,
+     "pct_of_machine": 0.23
+    },
+    {
+     "name": "steamwebhelper.exe",
+     "pid": 3288,
+     "cpu_s": 0.094,
+     "pct_of_machine": 0.12
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.094,
+     "pct_of_machine": 0.12
+    }
+   ],
+   "mean_ms": 3.52453
+  },
+  {
+   "row": "D-L5",
+   "W": 8,
+   "pass": 0,
+   "round": 1,
+   "seq": 41,
+   "attempt": "original",
+   "rb": 0.65,
+   "ra": 16.27,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.297,
+     "pct_of_machine": 0.37
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.25,
+     "pct_of_machine": 0.31
+    },
+    {
+     "name": "bash.exe",
+     "pid": 15448,
+     "cpu_s": 0.219,
+     "pct_of_machine": 0.27
+    }
+   ],
+   "top_before": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.172,
+     "pct_of_machine": 0.21
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.156,
+     "pct_of_machine": 0.2
+    },
+    {
+     "name": "python.exe",
+     "pid": 22064,
+     "cpu_s": 0.016,
+     "pct_of_machine": 0.02
+    }
+   ],
+   "mean_ms": 6.3767076
+  },
+  {
+   "row": "J-A",
+   "W": 1,
+   "pass": 0,
+   "round": 2,
+   "seq": 50,
+   "attempt": "original",
+   "rb": 3.75,
+   "ra": 9.6,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.625,
+     "pct_of_machine": 0.78
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.234,
+     "pct_of_machine": 0.29
+    },
+    {
+     "name": "claude.exe",
+     "pid": 23404,
+     "cpu_s": 0.047,
+     "pct_of_machine": 0.06
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.438,
+     "pct_of_machine": 0.55
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.25,
+     "pct_of_machine": 0.31
+    },
+    {
+     "name": "steamwebhelper.exe",
+     "pid": 3288,
+     "cpu_s": 0.031,
+     "pct_of_machine": 0.04
+    }
+   ],
+   "mean_ms": 19.6889118
+  },
+  {
+   "row": "D-L5",
+   "W": 1,
+   "pass": 0,
+   "round": 2,
+   "seq": 51,
+   "attempt": "original",
+   "rb": 2.85,
+   "ra": 8.4,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.281,
+     "pct_of_machine": 0.35
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.266,
+     "pct_of_machine": 0.33
+    },
+    {
+     "name": "steamwebhelper.exe",
+     "pid": 3288,
+     "cpu_s": 0.031,
+     "pct_of_machine": 0.04
+    }
+   ],
+   "top_before": [
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.25,
+     "pct_of_machine": 0.31
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.203,
+     "pct_of_machine": 0.25
+    },
+    {
+     "name": "steam.exe",
+     "pid": 3144,
+     "cpu_s": 0.031,
+     "pct_of_machine": 0.04
+    }
+   ],
+   "mean_ms": 10.656188
+  },
+  {
+   "row": "D-L4L2",
+   "W": 4,
+   "pass": 0,
+   "round": 2,
+   "seq": 57,
+   "attempt": "original",
+   "rb": 1.84,
+   "ra": 7.48,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "grep.exe",
+     "pid": 2964,
+     "cpu_s": 2.547,
+     "pct_of_machine": 3.18
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.234,
+     "pct_of_machine": 0.29
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.141,
+     "pct_of_machine": 0.18
+    }
+   ],
+   "top_before": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.25,
+     "pct_of_machine": 0.31
+    },
+    {
+     "name": "steam.exe",
+     "pid": 3144,
+     "cpu_s": 0.062,
+     "pct_of_machine": 0.08
+    },
+    {
+     "name": "nvsphelper64.exe",
+     "pid": 13884,
+     "cpu_s": 0.047,
+     "pct_of_machine": 0.06
+    }
+   ],
+   "mean_ms": 8.8889382
+  },
+  {
+   "row": "D-L5-npoff",
+   "W": 8,
+   "pass": 0,
+   "round": 2,
+   "seq": 65,
+   "attempt": "original",
+   "rb": 0.94,
+   "ra": 13.89,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.312,
+     "pct_of_machine": 0.39
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.109,
+     "pct_of_machine": 0.14
+    },
+    {
+     "name": "steamwebhelper.exe",
+     "pid": 3288,
+     "cpu_s": 0.031,
+     "pct_of_machine": 0.04
+    }
+   ],
+   "top_before": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.203,
+     "pct_of_machine": 0.25
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.156,
+     "pct_of_machine": 0.2
+    },
+    {
+     "name": "steamwebhelper.exe",
+     "pid": 3288,
+     "cpu_s": 0.016,
+     "pct_of_machine": 0.02
+    }
+   ],
+   "mean_ms": 8.0199734
+  },
+  {
+   "row": "D-L4L2",
+   "W": 1,
+   "pass": 0,
+   "round": 0,
+   "seq": 2,
+   "attempt": "rerun",
+   "rb": 2.97,
+   "ra": 22.5,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.328,
+     "pct_of_machine": 0.41
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.328,
+     "pct_of_machine": 0.41
+    },
+    {
+     "name": "steamwebhelper.exe",
+     "pid": 3288,
+     "cpu_s": 0.062,
+     "pct_of_machine": 0.08
+    }
+   ],
+   "top_before": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.281,
+     "pct_of_machine": 0.35
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.234,
+     "pct_of_machine": 0.29
+    },
+    {
+     "name": "AmneziaVPN.exe",
+     "pid": 18332,
+     "cpu_s": 0.047,
+     "pct_of_machine": 0.06
+    }
+   ],
+   "mean_ms": 10.495625
+  },
+  {
+   "row": "JOLT56-T",
+   "W": 4,
+   "pass": 1,
+   "round": 0,
+   "seq": 12,
+   "attempt": "original",
+   "rb": 2.05,
+   "ra": 12.29,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.188,
+     "pct_of_machine": 0.23
+    },
+    {
+     "name": "browser.exe",
+     "pid": 19804,
+     "cpu_s": 0.094,
+     "pct_of_machine": 0.12
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.047,
+     "pct_of_machine": 0.06
+    }
+   ],
+   "top_before": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.172,
+     "pct_of_machine": 0.21
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.141,
+     "pct_of_machine": 0.18
+    },
+    {
+     "name": "steam.exe",
+     "pid": 3144,
+     "cpu_s": 0.047,
+     "pct_of_machine": 0.06
+    }
+   ],
+   "mean_ms": 3.6685117999999997
+  },
+  {
+   "row": "D-L4L2",
+   "W": 16,
+   "pass": 1,
+   "round": 1,
+   "seq": 26,
+   "attempt": "original",
+   "rb": 1.44,
+   "ra": 5.54,
+   "build_before": [],
+   "build_after": [],
+   "top_after": [
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.344,
+     "pct_of_machine": 0.43
+    },
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.219,
+     "pct_of_machine": 0.27
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5948,
+     "cpu_s": 0.109,
+     "pct_of_machine": 0.14
+    }
+   ],
+   "top_before": [
+    {
+     "name": "Taskmgr.exe",
+     "pid": 22656,
+     "cpu_s": 0.219,
+     "pct_of_machine": 0.27
+    },
+    {
+     "name": "claude.exe",
+     "pid": 5268,
+     "cpu_s": 0.141,
+     "pct_of_machine": 0.18
+    },
+    {
+     "name": "steam.exe",
+     "pid": 3144,
+     "cpu_s": 0.078,
+     "pct_of_machine": 0.1
+    }
+   ],
+   "mean_ms": 8.0269228
+  }
+ ],
+ "invalid_attempts": [],
+ "receipts": {
+  "n": 205,
+  "n_10s": 2,
+  "min": 0.47,
+  "median": 2.03,
+  "p90": 6.553999999999999,
+  "max": 22.5,
+  "over5": [
+   [
+    "2026-09-21T03:50:32.757+03:00",
+    5.64,
+    [
+     "browser.exe",
+     "browser.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T03:51:08.762+03:00",
+    6.33,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T03:52:00.228+03:00",
+    5.26,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T03:52:36.244+03:00",
+    6.73,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T03:53:11.275+03:00",
+    10.08,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T03:53:54.815+03:00",
+    5.93,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T03:54:37.462+03:00",
+    8.72,
+    [
+     "claude.exe",
+     "claude.exe",
+     "browser.exe"
+    ]
+   ],
+   [
+    "2026-09-21T03:57:24.588+03:00",
+    6.18,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T03:58:48.264+03:00",
+    6.38,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T03:59:30.449+03:00",
+    6.41,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:00:05.940+03:00",
+    7.08,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:00:45.893+03:00",
+    10.96,
+    [
+     "python.exe",
+     "claude.exe",
+     "claude.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:01:27.658+03:00",
+    6.27,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:02:09.402+03:00",
+    6.65,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:02:56.974+03:00",
+    5.83,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:03:32.729+03:00",
+    6.49,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:04:59.579+03:00",
+    7.47,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:05:39.925+03:00",
+    6.46,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:06:15.816+03:00",
+    8.22,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:07:45.688+03:00",
+    15.74,
+    [
+     "browser.exe",
+     "browser.exe",
+     "browser.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:12:31.659+03:00",
+    16.97,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:13:05.299+03:00",
+    10.81,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:13:58.741+03:00",
+    12.85,
+    [
+     "rust-analyzer.exe",
+     "Taskmgr.exe",
+     "claude.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:14:45.542+03:00",
+    7.19,
+    [
+     "Taskmgr.exe",
+     "steam.exe",
+     "claude.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:15:43.835+03:00",
+    16.27,
+    [
+     "claude.exe",
+     "Taskmgr.exe",
+     "bash.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:17:37.707+03:00",
+    9.6,
+    [
+     "claude.exe",
+     "Taskmgr.exe",
+     "claude.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:18:13.098+03:00",
+    8.4,
+    [
+     "claude.exe",
+     "Taskmgr.exe",
+     "steamwebhelper.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:19:31.194+03:00",
+    7.48,
+    [
+     "grep.exe",
+     "Taskmgr.exe",
+     "claude.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:21:50.455+03:00",
+    13.89,
+    [
+     "Taskmgr.exe",
+     "claude.exe",
+     "steamwebhelper.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:23:33.759+03:00",
+    22.5,
+    [
+     "claude.exe",
+     "Taskmgr.exe",
+     "steamwebhelper.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:32:17.716+03:00",
+    12.29,
+    [
+     "Taskmgr.exe",
+     "browser.exe",
+     "claude.exe"
+    ]
+   ],
+   [
+    "2026-09-21T04:34:56.649+03:00",
+    5.54,
+    [
+     "claude.exe",
+     "Taskmgr.exe",
+     "claude.exe"
+    ]
+   ]
+  ],
+  "build_procs": [],
+  "top_process_counts": {
+   "Taskmgr.exe": 110,
+   "claude.exe": 88,
+   "browser.exe": 4,
+   "python.exe": 1,
+   "rust-analyzer.exe": 1,
+   "grep.exe": 1
+  }
+ },
+ "others_during": {
+  "n": 137,
+  "median": 0.67,
+  "max": 5.1,
+  "over5": [
+   [
+    "JOLT56-T",
+    8,
+    0,
+    17,
+    5.1,
+    [
+     "claude.exe",
+     "claude.exe",
+     "Taskmgr.exe"
+    ]
+   ]
+  ]
+ },
+ "cells": {
+  "D-L4L2@W1": {
+   "n": 5,
+   "median": 10.596283199999998,
+   "min": 10.549003,
+   "max": 10.75912,
+   "q1": 10.5831856,
+   "q3": 10.5967398,
+   "range_pct": 1.9829311470270876,
+   "iqr_pct": 0.12791466351144465,
+   "sd_pct": 0.7725412852823771,
+   "se_med_pct": 0.43300382751646216,
+   "values_by_process": [
+    10.5832,
+    10.7591,
+    10.549,
+    10.5963,
+    10.5967
+   ],
+   "process_ids": [
+    "p0r1s25R",
+    "p0r2s48",
+    "p1r0s22",
+    "p1r1s45",
+    "p1r2s68"
+   ],
+   "per_pass_median": {
+    "0": 10.6711528,
+    "1": 10.596283199999998
+   },
+   "median_step": {
+    "n": 5,
+    "median": 10.62905,
+    "min": 10.5579,
+    "max": 10.72275,
+    "q1": 10.5644,
+    "q3": 10.6495,
+    "range_pct": 1.5509382306038593,
+    "iqr_pct": 0.8006359928686065,
+    "sd_pct": 0.6371583070622421,
+    "se_med_pct": 0.3571226430843975
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    0.56,
+    0.82,
+    0.46,
+    0.45,
+    0.63
+   ],
+   "others_top_by_process": [
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 0,
+    "stats": {
+     "n": 5,
+     "median": 10.596283199999998,
+     "min": 10.549003,
+     "max": 10.75912,
+     "q1": 10.5831856,
+     "q3": 10.5967398,
+     "range_pct": 1.9829311470270876,
+     "iqr_pct": 0.12791466351144465,
+     "sd_pct": 0.7725412852823771,
+     "se_med_pct": 0.43300382751646216
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 5,
+     "median": 10.415585,
+     "min": 10.343265,
+     "max": 10.716808,
+     "q1": 10.392636,
+     "q3": 10.528837,
+     "range_pct": 3.5863852102402287,
+     "iqr_pct": 1.3076653879738853,
+     "sd_pct": 1.431640777386955,
+     "se_med_pct": 0.8024243468238835
+    },
+    "100_500": {
+     "n": 5,
+     "median": 10.6004375,
+     "min": 10.56672275,
+     "max": 10.850741,
+     "q1": 10.59677275,
+     "q3": 10.64145775,
+     "range_pct": 2.679306868230665,
+     "iqr_pct": 0.4215392053394135,
+     "sd_pct": 1.0816474938997451,
+     "se_med_pct": 0.6062556316469042
+    }
+   },
+   "summary_vs_csv_max_rel": 0.0,
+   "manifolds": {
+    "0_100": [
+     4544.2
+    ],
+    "100_500": [
+     4519.257
+    ],
+    "0_500": [
+     4524.246
+    ],
+    "final": [
+     4515.0
+    ]
+   },
+   "pairs": {
+    "0_100": [
+     9569.12
+    ],
+    "100_500": [
+     9559.215
+    ],
+    "0_500": [
+     9561.196
+    ],
+    "final": [
+     9559.0
+    ]
+   },
+   "final_manifolds": [
+    4515
+   ],
+   "final_pairs": [
+    9559
+   ],
+   "pose": [
+    "0x32d5e235342b4143"
+   ],
+   "config": {
+    "substeps": 4,
+    "relax_iterations": 2,
+    "broadphase": "AllPairs",
+    "broadphase_select": "Manual",
+    "simd": true,
+    "simd_solve": true,
+    "parallel_solve": true,
+    "parallel_broadphase": false,
+    "sleeping": false,
+    "sleep_threshold": 9.999999747378752e-05,
+    "sleep_frames": 60,
+    "colored": true,
+    "contact_hertz": 30,
+    "contact_damping": 10
+   },
+   "expect_pose": [
+    "match"
+   ],
+   "pool_workers": [
+    1
+   ]
+  },
+  "D-L5@W1": {
+   "n": 6,
+   "median": 10.7378894,
+   "min": 10.683984800000001,
+   "max": 10.7928172,
+   "q1": 10.69706735,
+   "q3": 10.775963149999999,
+   "range_pct": 1.0135362355287338,
+   "iqr_pct": 0.7347421551948536,
+   "sd_pct": 0.4546520028077188,
+   "se_med_pct": 0.23262614460735564,
+   "values_by_process": [
+    10.7008,
+    10.6958,
+    10.684,
+    10.775,
+    10.7928,
+    10.7763
+   ],
+   "process_ids": [
+    "p0r0s5R",
+    "p0r1s28R",
+    "p0r2s51R",
+    "p1r0s19",
+    "p1r1s42",
+    "p1r2s65"
+   ],
+   "per_pass_median": {
+    "0": 10.6958226,
+    "1": 10.776291800000001
+   },
+   "median_step": {
+    "n": 6,
+    "median": 10.6893,
+    "min": 10.6155,
+    "max": 10.7823,
+    "q1": 10.6460875,
+    "q3": 10.747025,
+    "range_pct": 1.5604389436164998,
+    "iqr_pct": 0.9442854069022347,
+    "sd_pct": 0.6241111698360243,
+    "se_med_pct": 0.3193312123310767
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    0.84,
+    0.46,
+    0.53,
+    0.67,
+    0.51,
+    1.03
+   ],
+   "others_top_by_process": [
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 0,
+    "stats": {
+     "n": 6,
+     "median": 10.7378894,
+     "min": 10.683984800000001,
+     "max": 10.7928172,
+     "q1": 10.69706735,
+     "q3": 10.775963149999999,
+     "range_pct": 1.0135362355287338,
+     "iqr_pct": 0.7347421551948536,
+     "sd_pct": 0.4546520028077188,
+     "se_med_pct": 0.23262614460735564
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 10.5138065,
+     "min": 10.360501,
+     "max": 10.981095,
+     "q1": 10.47573075,
+     "q3": 10.83379,
+     "range_pct": 5.902657615013179,
+     "iqr_pct": 3.405610042376186,
+     "sd_pct": 2.474324455853327,
+     "se_med_pct": 1.2660068692500228
+    },
+    "100_500": {
+     "n": 6,
+     "median": 10.754963624999998,
+     "min": 10.725091,
+     "max": 10.83096525,
+     "q1": 10.739604750000002,
+     "q3": 10.779160125,
+     "range_pct": 0.9844222044033125,
+     "iqr_pct": 0.3677871574391221,
+     "sd_pct": 0.3592449437537026,
+     "se_med_pct": 0.18381039942422395
+    }
+   },
+   "summary_vs_csv_max_rel": 0.0,
+   "manifolds": {
+    "0_100": [
+     4544.2
+    ],
+    "100_500": [
+     4519.257
+    ],
+    "0_500": [
+     4524.246
+    ],
+    "final": [
+     4515.0
+    ]
+   },
+   "pairs": {
+    "0_100": [
+     9569.12
+    ],
+    "100_500": [
+     9559.215
+    ],
+    "0_500": [
+     9561.196
+    ],
+    "final": [
+     9559.0
+    ]
+   },
+   "final_manifolds": [
+    4515
+   ],
+   "final_pairs": [
+    9559
+   ],
+   "pose": [
+    "0x32d5e235342b4143"
+   ],
+   "config": {
+    "substeps": 4,
+    "relax_iterations": 2,
+    "broadphase": "AllPairs",
+    "broadphase_select": "Manual",
+    "simd": true,
+    "simd_solve": true,
+    "parallel_solve": true,
+    "parallel_broadphase": false,
+    "parallel_narrowphase": true,
+    "sleeping": false,
+    "sleep_threshold": 9.999999747378752e-05,
+    "sleep_frames": 60,
+    "colored": true,
+    "contact_hertz": 30,
+    "contact_damping": 10
+   },
+   "expect_pose": [
+    "match"
+   ],
+   "pool_workers": [
+    1
+   ]
+  },
+  "J-A@W1": {
+   "n": 6,
+   "median": 19.482608900000002,
+   "min": 19.3372132,
+   "max": 19.644036399999997,
+   "q1": 19.39901385,
+   "q3": 19.52570605,
+   "range_pct": 1.5748568457892547,
+   "iqr_pct": 0.6502835459577531,
+   "sd_pct": 0.5746837318161804,
+   "se_med_pct": 0.2940412888877215,
+   "values_by_process": [
+    19.3372,
+    19.4827,
+    19.3712,
+    19.4826,
+    19.5401,
+    19.644
+   ],
+   "process_ids": [
+    "p0r0s4R",
+    "p0r1s27R",
+    "p0r2s50R",
+    "p1r0s20",
+    "p1r1s43",
+    "p1r2s66"
+   ],
+   "per_pass_median": {
+    "0": 19.371163199999998,
+    "1": 19.5400574
+   },
+   "median_step": {
+    "n": 6,
+    "median": 19.500525,
+    "min": 19.37655,
+    "max": 19.65045,
+    "q1": 19.4381875,
+    "q3": 19.5243125,
+    "range_pct": 1.4045775690654358,
+    "iqr_pct": 0.4416547759611555,
+    "sd_pct": 0.486548172796143,
+    "se_med_pct": 0.24894606183267576
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    0.64,
+    0.49,
+    0.79,
+    0.55,
+    0.42,
+    0.9
+   ],
+   "others_top_by_process": [
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 0,
+    "stats": {
+     "n": 6,
+     "median": 19.482608900000002,
+     "min": 19.3372132,
+     "max": 19.644036399999997,
+     "q1": 19.39901385,
+     "q3": 19.52570605,
+     "range_pct": 1.5748568457892547,
+     "iqr_pct": 0.6502835459577531,
+     "sd_pct": 0.5746837318161804,
+     "se_med_pct": 0.2940412888877215
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 19.1997985,
+     "min": 18.99194,
+     "max": 19.617064,
+     "q1": 19.1154825,
+     "q3": 19.24636625,
+     "range_pct": 3.2558883365364464,
+     "iqr_pct": 0.6816933521463905,
+     "sd_pct": 1.1145850696963193,
+     "se_med_pct": 0.5702859021827094
+    },
+    "100_500": {
+     "n": 6,
+     "median": 19.553279625000002,
+     "min": 19.4235315,
+     "max": 19.6507795,
+     "q1": 19.464110625,
+     "q3": 19.6013589375,
+     "range_pct": 1.162198896339874,
+     "iqr_pct": 0.7019196530310898,
+     "sd_pct": 0.4698916373832349,
+     "se_med_pct": 0.2404236191915083
+    }
+   },
+   "summary_vs_csv_max_rel": 0.0,
+   "manifolds": {
+    "0_100": [
+     4544.2
+    ],
+    "100_500": [
+     4519.257
+    ],
+    "0_500": [
+     4524.246
+    ],
+    "final": [
+     4515.0
+    ]
+   },
+   "pairs": {
+    "0_100": [
+     9569.12
+    ],
+    "100_500": [
+     9559.215
+    ],
+    "0_500": [
+     9561.196
+    ],
+    "final": [
+     9559.0
+    ]
+   },
+   "final_manifolds": [
+    4515
+   ],
+   "final_pairs": [
+    9559
+   ],
+   "pose": [
+    "0x32d5e235342b4143"
+   ],
+   "config": {
+    "substeps": 4,
+    "relax_iterations": 2,
+    "broadphase": "AllPairs",
+    "broadphase_select": "Manual",
+    "simd": true,
+    "simd_solve": false,
+    "parallel_solve": false,
+    "parallel_broadphase": false,
+    "sleeping": false,
+    "sleep_threshold": 9.999999747378752e-05,
+    "sleep_frames": 60,
+    "colored": true,
+    "contact_hertz": 30,
+    "contact_damping": 10
+   },
+   "expect_pose": [
+    "none"
+   ],
+   "pool_workers": [
+    1
+   ]
+  },
+  "JOLT-T@W1": {
+   "n": 6,
+   "median": 15.3394725,
+   "min": 15.0678492,
+   "max": 19.0422108,
+   "q1": 15.1333612,
+   "q3": 15.72474275,
+   "range_pct": 25.90937595800638,
+   "iqr_pct": 3.8552926119200075,
+   "sd_pct": 10.03706942623211,
+   "se_med_pct": 5.135542677391895,
+   "values_by_process": [
+    15.7983,
+    15.0678,
+    19.0422,
+    15.1196,
+    15.5042,
+    15.1747
+   ],
+   "process_ids": [
+    "p0r0s1R",
+    "p0r1s24R",
+    "p0r2s47",
+    "p1r0s23",
+    "p1r1s46",
+    "p1r2s69"
+   ],
+   "per_pass_median": {
+    "0": 15.798251800000001,
+    "1": 15.1747294
+   },
+   "median_step": {
+    "n": 6,
+    "median": 15.271775000000002,
+    "min": 14.96875,
+    "max": 18.97045,
+    "q1": 15.2163375,
+    "q3": 15.500875,
+    "range_pct": 26.203240946124463,
+    "iqr_pct": 1.863159324963868,
+    "sd_pct": 10.00493393356594,
+    "se_med_pct": 5.119100308903858
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    1.54,
+    0.49,
+    1.13,
+    0.69,
+    0.53,
+    0.88
+   ],
+   "others_top_by_process": [
+    "claude.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 1,
+    "stats": {
+     "n": 5,
+     "median": 15.1747294,
+     "min": 15.0678492,
+     "max": 19.0422108,
+     "q1": 15.119571800000001,
+     "q3": 15.5042156,
+     "range_pct": 26.19065879355977,
+     "iqr_pct": 2.5347654634289505,
+     "sd_pct": 11.330182571812314,
+     "se_med_pct": 6.3504857455764485
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 14.750826499999999,
+     "min": 14.52005,
+     "max": 17.629035,
+     "q1": 14.6504635,
+     "q3": 16.473108,
+     "range_pct": 21.07668339804552,
+     "iqr_pct": 12.356219497260028,
+     "sd_pct": 9.432158143029959,
+     "se_med_pct": 4.826035232638996
+    },
+    "100_500": {
+     "n": 6,
+     "median": 15.318549,
+     "min": 15.204799,
+     "max": 19.546242,
+     "q1": 15.254085625,
+     "q3": 15.5926835,
+     "range_pct": 28.341085046632024,
+     "iqr_pct": 2.210378247965911,
+     "sd_pct": 11.233006227237142,
+     "se_med_pct": 5.747452809743195
+    }
+   },
+   "steps_per_s": {
+    "n": 6,
+    "median": 65.19881000000001,
+    "min": 52.514911,
+    "max": 66.366473,
+    "q1": 63.598254,
+    "q3": 66.07933750000001,
+    "range_pct": 21.245114749793746,
+    "iqr_pct": 3.805412246021071,
+    "sd_pct": 8.167374391143229,
+    "se_med_pct": 4.178899035841313
+   },
+   "steps_per_s_values": [
+    63.298,
+    66.366,
+    52.515,
+    66.139,
+    64.499,
+    65.899
+   ],
+   "ms_from_steps_per_s": {
+    "n": 6,
+    "median": 15.339472559084765,
+    "min": 15.067849093020206,
+    "max": 19.042210697072306,
+    "q1": 15.133361261273555,
+    "q3": 15.724742736073967,
+    "range_pct": 25.909375884624502,
+    "iqr_pct": 3.855292106834327,
+    "sd_pct": 10.037069094782288,
+    "se_med_pct": 5.13554250780308
+   },
+   "hash": [
+    "0xee15b89965ec747"
+   ],
+   "threads": [
+    1
+   ],
+   "patch_line": [
+    "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=0"
+   ]
+  },
+  "JOLT56-T@W1": {
+   "n": 6,
+   "median": 9.8281962,
+   "min": 9.5182656,
+   "max": 11.364361,
+   "q1": 9.6977446,
+   "q3": 10.022982200000001,
+   "range_pct": 18.783664493795932,
+   "iqr_pct": 3.309229825916593,
+   "sd_pct": 6.837830435642151,
+   "se_med_pct": 3.498627789824098,
+   "values_by_process": [
+    11.3644,
+    9.5183,
+    9.6693,
+    10.0729,
+    9.7832,
+    9.8732
+   ],
+   "process_ids": [
+    "p0r0s3",
+    "p0r1s26R",
+    "p0r2s49",
+    "p1r0s21",
+    "p1r1s44",
+    "p1r2s67"
+   ],
+   "per_pass_median": {
+    "0": 9.6692632,
+    "1": 9.8732036
+   },
+   "median_step": {
+    "n": 6,
+    "median": 9.76415,
+    "min": 9.52325,
+    "max": 11.08825,
+    "q1": 9.591525,
+    "q3": 9.937375,
+    "range_pct": 16.028020872272542,
+    "iqr_pct": 3.5420389895689706,
+    "sd_pct": 5.991827823839829,
+    "se_med_pct": 3.065764138732784
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    1.77,
+    0.51,
+    0.62,
+    0.78,
+    0.86,
+    0.55
+   ],
+   "others_top_by_process": [
+    "claude.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "Taskmgr.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 1,
+    "stats": {
+     "n": 5,
+     "median": 9.783188800000001,
+     "min": 9.5182656,
+     "max": 10.072908400000001,
+     "q1": 9.6692632,
+     "q3": 9.8732036,
+     "range_pct": 5.669345765871364,
+     "iqr_pct": 2.0846004730073333,
+     "sd_pct": 2.1392458999972077,
+     "se_med_pct": 1.1990319227523363
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 10.2786465,
+     "min": 9.955545,
+     "max": 11.274116,
+     "q1": 10.08250025,
+     "q3": 10.366940500000002,
+     "range_pct": 12.828255159859799,
+     "iqr_pct": 2.767292853198144,
+     "sd_pct": 4.618849824708476,
+     "se_med_pct": 2.3632695349561796
+    },
+    "100_500": {
+     "n": 6,
+     "median": 9.715583625,
+     "min": 9.40894575,
+     "max": 11.38692225,
+     "q1": 9.599119,
+     "q3": 9.9394293125,
+     "range_pct": 20.358802685927152,
+     "iqr_pct": 3.5027263995167326,
+     "sd_pct": 7.438536690358496,
+     "se_med_pct": 3.805983699867865
+    }
+   },
+   "steps_per_s": {
+    "n": 6,
+    "median": 101.7502045,
+    "min": 87.994389,
+    "max": 105.061157,
+    "q1": 99.77820675,
+    "q3": 103.11941225,
+    "range_pct": 16.773202652383855,
+    "iqr_pct": 3.2837334494005868,
+    "sd_pct": 6.033477748659177,
+    "se_med_pct": 3.0870746385745913
+   },
+   "steps_per_s_values": [
+    87.994,
+    105.061,
+    103.42,
+    99.276,
+    102.216,
+    101.284
+   ],
+   "ms_from_steps_per_s": {
+    "n": 6,
+    "median": 9.828196183029693,
+    "min": 9.518265632654321,
+    "max": 11.364360970788717,
+    "q1": 9.697744624687545,
+    "q3": 10.022982207285576,
+    "range_pct": 18.78366389675901,
+    "iqr_pct": 3.3092296545689437,
+    "sd_pct": 6.837830258568824,
+    "se_med_pct": 3.4986276992231886
+   },
+   "hash": [
+    "0xb8522b4e3fc62cfe"
+   ],
+   "threads": [
+    1
+   ],
+   "patch_line": [
+    "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=0"
+   ]
+  },
+  "D-L4L2@W2": {
+   "n": 6,
+   "median": 9.096608,
+   "min": 8.9444126,
+   "max": 10.1839426,
+   "q1": 9.000202550000001,
+   "q3": 9.147263,
+   "range_pct": 13.626287952608273,
+   "iqr_pct": 1.616651503505479,
+   "sd_pct": 5.149887303596,
+   "se_med_pct": 2.634978887587932,
+   "values_by_process": [
+    10.1839,
+    8.9444,
+    9.1531,
+    8.9791,
+    9.1296,
+    9.0636
+   ],
+   "process_ids": [
+    "p0r0s7",
+    "p0r1s30R",
+    "p0r2s53",
+    "p1r0s17",
+    "p1r1s40",
+    "p1r2s63"
+   ],
+   "per_pass_median": {
+    "0": 9.1531464,
+    "1": 9.0636032
+   },
+   "median_step": {
+    "n": 6,
+    "median": 8.9915,
+    "min": 8.885,
+    "max": 9.97215,
+    "q1": 8.93945,
+    "q3": 9.00875,
+    "range_pct": 12.090863593393754,
+    "iqr_pct": 0.7707279096924691,
+    "sd_pct": 4.622473432354802,
+    "se_med_pct": 2.3651235812842044
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    1.59,
+    0.52,
+    0.75,
+    0.48,
+    0.6,
+    0.54
+   ],
+   "others_top_by_process": [
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 1,
+    "stats": {
+     "n": 5,
+     "median": 9.0636032,
+     "min": 8.9444126,
+     "max": 9.1531464,
+     "q1": 8.979069,
+     "q3": 9.1296128,
+     "range_pct": 2.3029891688109316,
+     "iqr_pct": 1.6609707715359765,
+     "sd_pct": 1.0061287836440613,
+     "se_med_pct": 0.5639279383406942
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 8.9576455,
+     "min": 8.845863,
+     "max": 10.140266,
+     "q1": 8.8700715,
+     "q3": 9.004238,
+     "range_pct": 14.450259278512428,
+     "iqr_pct": 1.4977875603583661,
+     "sd_pct": 5.59406855788701,
+     "se_med_pct": 2.8622475943229087
+    },
+    "100_500": {
+     "n": 6,
+     "median": 9.119956,
+     "min": 8.9666685,
+     "max": 10.19486175,
+     "q1": 9.029080624999999,
+     "q3": 9.1998526875,
+     "range_pct": 13.467096222832637,
+     "iqr_pct": 1.8725097193451492,
+     "sd_pct": 5.061377212622542,
+     "se_med_pct": 2.589692028419053
+    }
+   },
+   "summary_vs_csv_max_rel": 0.0,
+   "manifolds": {
+    "0_100": [
+     4544.2
+    ],
+    "100_500": [
+     4519.257
+    ],
+    "0_500": [
+     4524.246
+    ],
+    "final": [
+     4515.0
+    ]
+   },
+   "pairs": {
+    "0_100": [
+     9569.12
+    ],
+    "100_500": [
+     9559.215
+    ],
+    "0_500": [
+     9561.196
+    ],
+    "final": [
+     9559.0
+    ]
+   },
+   "final_manifolds": [
+    4515
+   ],
+   "final_pairs": [
+    9559
+   ],
+   "pose": [
+    "0x32d5e235342b4143"
+   ],
+   "config": {
+    "substeps": 4,
+    "relax_iterations": 2,
+    "broadphase": "AllPairs",
+    "broadphase_select": "Manual",
+    "simd": true,
+    "simd_solve": true,
+    "parallel_solve": true,
+    "parallel_broadphase": false,
+    "sleeping": false,
+    "sleep_threshold": 9.999999747378752e-05,
+    "sleep_frames": 60,
+    "colored": true,
+    "contact_hertz": 30,
+    "contact_damping": 10
+   },
+   "expect_pose": [
+    "none"
+   ],
+   "pool_workers": [
+    2
+   ]
+  },
+  "D-L5@W2": {
+   "n": 6,
+   "median": 7.8644566000000005,
+   "min": 7.7673048,
+   "max": 8.7444656,
+   "q1": 7.79613845,
+   "q3": 7.92663915,
+   "range_pct": 12.425026288529585,
+   "iqr_pct": 1.6593733888746973,
+   "sd_pct": 4.756583869147991,
+   "se_med_pct": 2.4337422031535594,
+   "values_by_process": [
+    8.7445,
+    7.7673,
+    7.807,
+    7.9219,
+    7.9282,
+    7.7925
+   ],
+   "process_ids": [
+    "p0r0s9",
+    "p0r1s32",
+    "p0r2s55",
+    "p1r0s15",
+    "p1r1s38",
+    "p1r2s61"
+   ],
+   "per_pass_median": {
+    "0": 7.806994400000001,
+    "1": 7.921918799999999
+   },
+   "median_step": {
+    "n": 6,
+    "median": 7.741,
+    "min": 7.68015,
+    "max": 8.5344,
+    "q1": 7.7113499999999995,
+    "q3": 7.7588,
+    "range_pct": 11.035395943676523,
+    "iqr_pct": 0.612969900529653,
+    "sd_pct": 4.282579939688354,
+    "se_med_pct": 2.191214498539959
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    1.27,
+    1.21,
+    0.6,
+    1.72,
+    0.74,
+    0.37
+   ],
+   "others_top_by_process": [
+    "Taskmgr.exe",
+    "claude.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "Taskmgr.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 1,
+    "stats": {
+     "n": 5,
+     "median": 7.806994400000001,
+     "min": 7.7673048,
+     "max": 8.7444656,
+     "q1": 7.7925198,
+     "q3": 7.928212599999999,
+     "range_pct": 12.516478812896292,
+     "iqr_pct": 1.7380927031278421,
+     "sd_pct": 5.333528253072468,
+     "se_med_pct": 2.989404180390734
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 7.6822575,
+     "min": 7.606676,
+     "max": 8.718567,
+     "q1": 7.652324500000001,
+     "q3": 7.729901,
+     "range_pct": 14.473492980416237,
+     "iqr_pct": 1.00981384703649,
+     "sd_pct": 5.594515409661477,
+     "se_med_pct": 2.86247622942154
+    },
+    "100_500": {
+     "n": 6,
+     "median": 7.91098825,
+     "min": 7.807462,
+     "max": 8.75094025,
+     "q1": 7.82136675,
+     "q3": 7.9855670000000005,
+     "range_pct": 11.926174331000924,
+     "iqr_pct": 2.0755971922976926,
+     "sd_pct": 4.574423688990932,
+     "se_med_pct": 2.340538565757863
+    }
+   },
+   "summary_vs_csv_max_rel": 0.0,
+   "manifolds": {
+    "0_100": [
+     4544.2
+    ],
+    "100_500": [
+     4519.257
+    ],
+    "0_500": [
+     4524.246
+    ],
+    "final": [
+     4515.0
+    ]
+   },
+   "pairs": {
+    "0_100": [
+     9569.12
+    ],
+    "100_500": [
+     9559.215
+    ],
+    "0_500": [
+     9561.196
+    ],
+    "final": [
+     9559.0
+    ]
+   },
+   "final_manifolds": [
+    4515
+   ],
+   "final_pairs": [
+    9559
+   ],
+   "pose": [
+    "0x32d5e235342b4143"
+   ],
+   "config": {
+    "substeps": 4,
+    "relax_iterations": 2,
+    "broadphase": "AllPairs",
+    "broadphase_select": "Manual",
+    "simd": true,
+    "simd_solve": true,
+    "parallel_solve": true,
+    "parallel_broadphase": false,
+    "parallel_narrowphase": true,
+    "sleeping": false,
+    "sleep_threshold": 9.999999747378752e-05,
+    "sleep_frames": 60,
+    "colored": true,
+    "contact_hertz": 30,
+    "contact_damping": 10
+   },
+   "expect_pose": [
+    "match"
+   ],
+   "pool_workers": [
+    2
+   ]
+  },
+  "JOLT-T@W2": {
+   "n": 6,
+   "median": 8.5714665,
+   "min": 8.4563778,
+   "max": 8.7444314,
+   "q1": 8.5540609,
+   "q3": 8.6519069,
+   "range_pct": 3.3606104626320312,
+   "iqr_pct": 1.141531615389275,
+   "sd_pct": 1.185372446350289,
+   "se_med_pct": 0.6065048001886331,
+   "values_by_process": [
+    8.6778,
+    8.4564,
+    8.5743,
+    8.5492,
+    8.5686,
+    8.7444
+   ],
+   "process_ids": [
+    "p0r0s6R",
+    "p0r1s29R",
+    "p0r2s52",
+    "p1r0s18",
+    "p1r1s41",
+    "p1r2s64"
+   ],
+   "per_pass_median": {
+    "0": 8.5743266,
+    "1": 8.5686064
+   },
+   "median_step": {
+    "n": 6,
+    "median": 8.646975000000001,
+    "min": 8.55925,
+    "max": 8.8266,
+    "q1": 8.5872375,
+    "q3": 8.6677875,
+    "range_pct": 3.0918326929359528,
+    "iqr_pct": 0.9315396424761119,
+    "sd_pct": 1.1175563098495227,
+    "se_med_pct": 0.5718061597363411
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    0.96,
+    0.83,
+    0.73,
+    0.57,
+    0.52,
+    1.13
+   ],
+   "others_top_by_process": [
+    "claude.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 0,
+    "stats": {
+     "n": 6,
+     "median": 8.5714665,
+     "min": 8.4563778,
+     "max": 8.7444314,
+     "q1": 8.5540609,
+     "q3": 8.6519069,
+     "range_pct": 3.3606104626320312,
+     "iqr_pct": 1.141531615389275,
+     "sd_pct": 1.185372446350289,
+     "se_med_pct": 0.6065048001886331
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 8.084829,
+     "min": 8.051767,
+     "max": 8.377092,
+     "q1": 8.05997575,
+     "q3": 8.128409000000001,
+     "range_pct": 4.02389463030077,
+     "iqr_pct": 0.8464402895843781,
+     "sd_pct": 1.5373685486981536,
+     "se_med_pct": 0.7866062749436668
+    },
+    "100_500": {
+     "n": 6,
+     "median": 8.69369125,
+     "min": 8.5575305,
+     "max": 8.83626625,
+     "q1": 8.660473875000001,
+     "q3": 8.799324312500001,
+     "range_pct": 3.2061841395621125,
+     "iqr_pct": 1.5971401963464065,
+     "sd_pct": 1.238082208937257,
+     "se_med_pct": 0.6334741498847808
+    }
+   },
+   "steps_per_s": {
+    "n": 6,
+    "median": 116.6661635,
+    "min": 114.358493,
+    "max": 118.253941,
+    "q1": 115.58457299999999,
+    "q3": 116.90365225,
+    "range_pct": 3.3389698290713072,
+    "iqr_pct": 1.1306442334499167,
+    "sd_pct": 1.1762926707709918,
+    "se_med_pct": 0.6018590641666469
+   },
+   "steps_per_s_values": [
+    115.237,
+    118.254,
+    116.627,
+    116.97,
+    116.705,
+    114.358
+   ],
+   "ms_from_steps_per_s": {
+    "n": 6,
+    "median": 8.571466493269476,
+    "min": 8.456377787865861,
+    "max": 8.744431425832099,
+    "q1": 8.554060916597933,
+    "q3": 8.651906888556635,
+    "range_pct": 3.3606109082083497,
+    "iqr_pct": 1.1415312891385916,
+    "sd_pct": 1.1853725501508725,
+    "se_med_pct": 0.6065048532989887
+   },
+   "hash": [
+    "0xee15b89965ec747"
+   ],
+   "threads": [
+    2
+   ],
+   "patch_line": [
+    "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=0"
+   ]
+  },
+  "JOLT56-T@W2": {
+   "n": 6,
+   "median": 5.7704603,
+   "min": 5.7028374,
+   "max": 5.8177414,
+   "q1": 5.7301711,
+   "q3": 5.780391450000001,
+   "range_pct": 1.9912449618620567,
+   "iqr_pct": 0.8703005893654777,
+   "sd_pct": 0.742012994304014,
+   "se_med_pct": 0.3796565748034401,
+   "values_by_process": [
+    5.7175,
+    5.783,
+    5.8177,
+    5.7683,
+    5.7028,
+    5.7726
+   ],
+   "process_ids": [
+    "p0r0s8R",
+    "p0r1s31R",
+    "p0r2s54",
+    "p1r0s16",
+    "p1r1s39",
+    "p1r2s62"
+   ],
+   "per_pass_median": {
+    "0": 5.7829804000000005,
+    "1": 5.768296
+   },
+   "median_step": {
+    "n": 6,
+    "median": 5.732275,
+    "min": 5.66025,
+    "max": 5.78385,
+    "q1": 5.713087499999999,
+    "q3": 5.7730625,
+    "range_pct": 2.1562119751756605,
+    "iqr_pct": 1.046268715300654,
+    "sd_pct": 0.8236573741081372,
+    "se_med_pct": 0.421430540793697
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    0.41,
+    0.47,
+    0.74,
+    0.74,
+    0.82,
+    0.85
+   ],
+   "others_top_by_process": [
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 0,
+    "stats": {
+     "n": 6,
+     "median": 5.7704603,
+     "min": 5.7028374,
+     "max": 5.8177414,
+     "q1": 5.7301711,
+     "q3": 5.780391450000001,
+     "range_pct": 1.9912449618620567,
+     "iqr_pct": 0.8703005893654777,
+     "sd_pct": 0.742012994304014,
+     "se_med_pct": 0.3796565748034401
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 5.8254660000000005,
+     "min": 5.714072,
+     "max": 6.076251,
+     "q1": 5.800777249999999,
+     "q3": 5.955472749999999,
+     "range_pct": 6.217167862622497,
+     "iqr_pct": 2.6555042978535943,
+     "sd_pct": 2.3395459302468775,
+     "se_med_pct": 1.1970464146736206
+    },
+    "100_500": {
+     "n": 6,
+     "median": 5.73021625,
+     "min": 5.69130725,
+     "max": 5.7728045,
+     "q1": 5.6987785,
+     "q3": 5.7686280624999995,
+     "range_pct": 1.4222369007452376,
+     "iqr_pct": 1.218969048506661,
+     "sd_pct": 0.6906178960814189,
+     "se_med_pct": 0.353359883097685
+    }
+   },
+   "steps_per_s": {
+    "n": 6,
+    "median": 173.2964255,
+    "min": 171.888011,
+    "max": 175.351308,
+    "q1": 172.99876899999998,
+    "q3": 174.51742275000004,
+    "range_pct": 1.9984814978194592,
+    "iqr_pct": 0.8763329916461868,
+    "sd_pct": 0.7456249114915229,
+    "se_med_pct": 0.38150463961956843
+   },
+   "steps_per_s_values": [
+    174.903,
+    172.921,
+    171.888,
+    173.361,
+    175.351,
+    173.231
+   ],
+   "ms_from_steps_per_s": {
+    "n": 6,
+    "median": 5.770460283810665,
+    "min": 5.702837414819855,
+    "max": 5.8177414130413085,
+    "q1": 5.7301710914053166,
+    "q3": 5.780391433551072,
+    "range_pct": 1.9912449366270355,
+    "iqr_pct": 0.870300455695909,
+    "sd_pct": 0.742012951864387,
+    "se_med_pct": 0.3796565530888832
+   },
+   "hash": [
+    "0xb8522b4e3fc62cfe"
+   ],
+   "threads": [
+    2
+   ],
+   "patch_line": [
+    "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=0"
+   ]
+  },
+  "D-L4L2@W4": {
+   "n": 6,
+   "median": 8.280007600000001,
+   "min": 8.1963864,
+   "max": 9.561467,
+   "q1": 8.2207737,
+   "q3": 8.37726035,
+   "range_pct": 16.4864655438239,
+   "iqr_pct": 1.8899336517517171,
+   "sd_pct": 6.414645158924195,
+   "se_med_pct": 3.28210183421508,
+   "values_by_process": [
+    9.5615,
+    8.2605,
+    8.2075,
+    8.1964,
+    8.2995,
+    8.4032
+   ],
+   "process_ids": [
+    "p0r0s11",
+    "p0r1s34R",
+    "p0r2s57R",
+    "p1r0s13",
+    "p1r1s36",
+    "p1r2s59"
+   ],
+   "per_pass_median": {
+    "0": 8.260529400000001,
+    "1": 8.2994858
+   },
+   "median_step": {
+    "n": 6,
+    "median": 8.188375,
+    "min": 8.14625,
+    "max": 9.2539,
+    "q1": 8.1579125,
+    "q3": 8.254725,
+    "range_pct": 13.527103973621134,
+    "iqr_pct": 1.1823163936678571,
+    "sd_pct": 5.33678755664709,
+    "se_med_pct": 2.730607819221171
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    2.08,
+    0.64,
+    0.45,
+    0.36,
+    0.64,
+    0.67
+   ],
+   "others_top_by_process": [
+    "claude.exe",
+    "claude.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "Taskmgr.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 1,
+    "stats": {
+     "n": 5,
+     "median": 8.260529400000001,
+     "min": 8.1963864,
+     "max": 8.4031852,
+     "q1": 8.2075218,
+     "q3": 8.2994858,
+     "range_pct": 2.503456981824913,
+     "iqr_pct": 1.1132942641666408,
+     "sd_pct": 1.0121413840076274,
+     "se_med_pct": 0.5672979575491813
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 8.117392500000001,
+     "min": 8.00861,
+     "max": 9.378208,
+     "q1": 8.08078625,
+     "q3": 8.23025125,
+     "range_pct": 16.872388516386284,
+     "iqr_pct": 1.8412932478009538,
+     "sd_pct": 6.433599511966967,
+     "se_med_pct": 3.291799972669629
+    },
+    "100_500": {
+     "n": 6,
+     "median": 8.320661375,
+     "min": 8.22770675,
+     "max": 9.60728175,
+     "q1": 8.267488375,
+     "q3": 8.414012625000002,
+     "range_pct": 16.580112299065902,
+     "iqr_pct": 1.7609687907771916,
+     "sd_pct": 6.412581875998296,
+     "se_med_pct": 3.2810461398613286
+    }
+   },
+   "summary_vs_csv_max_rel": 0.0,
+   "manifolds": {
+    "0_100": [
+     4544.2
+    ],
+    "100_500": [
+     4519.257
+    ],
+    "0_500": [
+     4524.246
+    ],
+    "final": [
+     4515.0
+    ]
+   },
+   "pairs": {
+    "0_100": [
+     9569.12
+    ],
+    "100_500": [
+     9559.215
+    ],
+    "0_500": [
+     9561.196
+    ],
+    "final": [
+     9559.0
+    ]
+   },
+   "final_manifolds": [
+    4515
+   ],
+   "final_pairs": [
+    9559
+   ],
+   "pose": [
+    "0x32d5e235342b4143"
+   ],
+   "config": {
+    "substeps": 4,
+    "relax_iterations": 2,
+    "broadphase": "AllPairs",
+    "broadphase_select": "Manual",
+    "simd": true,
+    "simd_solve": true,
+    "parallel_solve": true,
+    "parallel_broadphase": false,
+    "sleeping": false,
+    "sleep_threshold": 9.999999747378752e-05,
+    "sleep_frames": 60,
+    "colored": true,
+    "contact_hertz": 30,
+    "contact_damping": 10
+   },
+   "expect_pose": [
+    "none"
+   ],
+   "pool_workers": [
+    4
+   ]
+  },
+  "D-L5@W4": {
+   "n": 6,
+   "median": 6.172789699999999,
+   "min": 6.1060984000000005,
+   "max": 6.710003599999999,
+   "q1": 6.1350839,
+   "q3": 6.2349841999999995,
+   "range_pct": 9.783343177882749,
+   "iqr_pct": 1.6183979182054402,
+   "sd_pct": 3.695134077004695,
+   "se_med_pct": 1.8906433686258217,
+   "values_by_process": [
+    6.1061,
+    6.1742,
+    6.71,
+    6.123,
+    6.2552,
+    6.1714
+   ],
+   "process_ids": [
+    "p0r0s13R",
+    "p0r1s36",
+    "p0r2s59",
+    "p1r0s11",
+    "p1r1s34",
+    "p1r2s57"
+   ],
+   "per_pass_median": {
+    "0": 6.174209599999999,
+    "1": 6.1713698
+   },
+   "median_step": {
+    "n": 6,
+    "median": 6.11795,
+    "min": 6.0438,
+    "max": 6.35375,
+    "q1": 6.09385,
+    "q3": 6.137062500000001,
+    "range_pct": 5.066239508332035,
+    "iqr_pct": 0.7063231964955742,
+    "sd_pct": 1.7702141343507019,
+    "se_med_pct": 0.9057434843800937
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    0.55,
+    0.7,
+    1.71,
+    0.64,
+    0.63,
+    0.54
+   ],
+   "others_top_by_process": [
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 1,
+    "stats": {
+     "n": 5,
+     "median": 6.1713698,
+     "min": 6.1060984000000005,
+     "max": 6.2552424,
+     "q1": 6.122988599999999,
+     "q3": 6.174209599999999,
+     "range_pct": 2.4167081998553988,
+     "iqr_pct": 0.8299778114090645,
+     "sd_pct": 0.941310926279114,
+     "se_med_pct": 0.5275979960254694
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 6.132543500000001,
+     "min": 6.092988,
+     "max": 6.280485,
+     "q1": 6.10604375,
+     "q3": 6.16046075,
+     "range_pct": 3.057410028970843,
+     "iqr_pct": 0.887347965815488,
+     "sd_pct": 1.1269267163407313,
+     "se_med_pct": 0.5766005992680976
+    },
+    "100_500": {
+     "n": 6,
+     "median": 6.182851250000001,
+     "min": 6.09160425,
+     "max": 6.81738325,
+     "q1": 6.1410970625,
+     "q3": 6.2681907500000005,
+     "range_pct": 11.738580966184495,
+     "iqr_pct": 2.0555837810265993,
+     "sd_pct": 4.378615894854166,
+     "se_med_pct": 2.2403520231872567
+    }
+   },
+   "summary_vs_csv_max_rel": 0.0,
+   "manifolds": {
+    "0_100": [
+     4544.2
+    ],
+    "100_500": [
+     4519.257
+    ],
+    "0_500": [
+     4524.246
+    ],
+    "final": [
+     4515.0
+    ]
+   },
+   "pairs": {
+    "0_100": [
+     9569.12
+    ],
+    "100_500": [
+     9559.215
+    ],
+    "0_500": [
+     9561.196
+    ],
+    "final": [
+     9559.0
+    ]
+   },
+   "final_manifolds": [
+    4515
+   ],
+   "final_pairs": [
+    9559
+   ],
+   "pose": [
+    "0x32d5e235342b4143"
+   ],
+   "config": {
+    "substeps": 4,
+    "relax_iterations": 2,
+    "broadphase": "AllPairs",
+    "broadphase_select": "Manual",
+    "simd": true,
+    "simd_solve": true,
+    "parallel_solve": true,
+    "parallel_broadphase": false,
+    "parallel_narrowphase": true,
+    "sleeping": false,
+    "sleep_threshold": 9.999999747378752e-05,
+    "sleep_frames": 60,
+    "colored": true,
+    "contact_hertz": 30,
+    "contact_damping": 10
+   },
+   "expect_pose": [
+    "match"
+   ],
+   "pool_workers": [
+    4
+   ]
+  },
+  "JOLT-T@W4": {
+   "n": 6,
+   "median": 5.1677722,
+   "min": 5.1056396,
+   "max": 5.2502086,
+   "q1": 5.1248277,
+   "q3": 5.2271208499999995,
+   "range_pct": 2.7975110822415843,
+   "iqr_pct": 1.9794438694491894,
+   "sd_pct": 1.2234467100838373,
+   "se_med_pct": 0.6259857859236608,
+   "values_by_process": [
+    5.1056,
+    5.233,
+    5.2502,
+    5.1259,
+    5.1245,
+    5.2096
+   ],
+   "process_ids": [
+    "p0r0s10R",
+    "p0r1s33",
+    "p0r2s56",
+    "p1r0s14",
+    "p1r1s37",
+    "p1r2s60"
+   ],
+   "per_pass_median": {
+    "0": 5.232953599999999,
+    "1": 5.1259217999999995
+   },
+   "median_step": {
+    "n": 6,
+    "median": 5.220924999999999,
+    "min": 5.18015,
+    "max": 5.2936,
+    "q1": 5.1873000000000005,
+    "q3": 5.2798625,
+    "range_pct": 2.1729865876257444,
+    "iqr_pct": 1.7729138035884382,
+    "sd_pct": 1.000772662124714,
+    "se_med_pct": 0.5120529208731324
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    0.76,
+    0.89,
+    1.34,
+    0.72,
+    0.46,
+    0.71
+   ],
+   "others_top_by_process": [
+    "Taskmgr.exe",
+    "claude.exe",
+    "claude.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 0,
+    "stats": {
+     "n": 6,
+     "median": 5.1677722,
+     "min": 5.1056396,
+     "max": 5.2502086,
+     "q1": 5.1248277,
+     "q3": 5.2271208499999995,
+     "range_pct": 2.7975110822415843,
+     "iqr_pct": 1.9794438694491894,
+     "sd_pct": 1.2234467100838373,
+     "se_med_pct": 0.6259857859236608
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 4.7799305,
+     "min": 4.712787,
+     "max": 4.796072,
+     "q1": 4.74716325,
+     "q3": 4.79043025,
+     "range_pct": 1.7423893506401413,
+     "iqr_pct": 0.9051805251143331,
+     "sd_pct": 0.7112339459608014,
+     "se_med_pct": 0.36390824133839855
+    },
+    "100_500": {
+     "n": 6,
+     "median": 5.26924,
+     "min": 5.20385275,
+     "max": 5.36374275,
+     "q1": 5.2120799375,
+     "q3": 5.3389500000000005,
+     "range_pct": 3.0344034433808265,
+     "iqr_pct": 2.407748792994817,
+     "sd_pct": 1.3942000169315854,
+     "se_med_pct": 0.7133530100987351
+    }
+   },
+   "steps_per_s": {
+    "n": 6,
+    "median": 193.519673,
+    "min": 190.468623,
+    "max": 195.861847,
+    "q1": 191.31062275,
+    "q3": 195.128514,
+    "range_pct": 2.786912522325316,
+    "iqr_pct": 1.9728698332391261,
+    "sd_pct": 1.2191516322706173,
+    "se_med_pct": 0.623788176793364
+   },
+   "steps_per_s_values": [
+    195.862,
+    191.097,
+    190.469,
+    195.087,
+    195.142,
+    191.952
+   ],
+   "ms_from_steps_per_s": {
+    "n": 6,
+    "median": 5.167772206223159,
+    "min": 5.105639588908809,
+    "max": 5.2502085868494985,
+    "q1": 5.124827708114744,
+    "q3": 5.2271208437823535,
+    "range_pct": 2.7975110390236653,
+    "iqr_pct": 1.9794435897237344,
+    "sd_pct": 1.22344662616762,
+    "se_med_pct": 0.6259857429872919
+   },
+   "hash": [
+    "0xee15b89965ec747"
+   ],
+   "threads": [
+    4
+   ],
+   "patch_line": [
+    "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=0"
+   ]
+  },
+  "JOLT56-T@W4": {
+   "n": 6,
+   "median": 3.5814395,
+   "min": 3.5193664,
+   "max": 3.66344,
+   "q1": 3.5509533,
+   "q3": 3.6356301999999996,
+   "range_pct": 4.022784693138053,
+   "iqr_pct": 2.364325852775103,
+   "sd_pct": 1.620670404765038,
+   "se_med_pct": 0.8292283012314771,
+   "values_by_process": [
+    3.5194,
+    3.5416,
+    3.5838,
+    3.5791,
+    3.6634,
+    3.6529
+   ],
+   "process_ids": [
+    "p0r0s12R",
+    "p0r1s35",
+    "p0r2s58",
+    "p1r0s12R",
+    "p1r1s35",
+    "p1r2s58"
+   ],
+   "per_pass_median": {
+    "0": 3.541563,
+    "1": 3.652922
+   },
+   "median_step": {
+    "n": 6,
+    "median": 3.584575,
+    "min": 3.5437,
+    "max": 3.6683,
+    "q1": 3.5622875,
+    "q3": 3.6126750000000003,
+    "range_pct": 3.4760048262346315,
+    "iqr_pct": 1.40567570771989,
+    "sd_pct": 1.2718534517572595,
+    "se_med_pct": 0.6507534623420024
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    0.39,
+    0.33,
+    1.19,
+    0.38,
+    1.01,
+    0.64
+   ],
+   "others_top_by_process": [
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "claude.exe",
+    "claude.exe",
+    "Taskmgr.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 0,
+    "stats": {
+     "n": 6,
+     "median": 3.5814395,
+     "min": 3.5193664,
+     "max": 3.66344,
+     "q1": 3.5509533,
+     "q3": 3.6356301999999996,
+     "range_pct": 4.022784693138053,
+     "iqr_pct": 2.364325852775103,
+     "sd_pct": 1.620670404765038,
+     "se_med_pct": 0.8292283012314771
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 3.4403699999999997,
+     "min": 3.426021,
+     "max": 3.512669,
+     "q1": 3.42942575,
+     "q3": 3.4547440000000003,
+     "range_pct": 2.5185663169949697,
+     "iqr_pct": 0.735916485726832,
+     "sd_pct": 0.9471960433842209,
+     "se_med_pct": 0.48464003765315
+    },
+    "100_500": {
+     "n": 6,
+     "median": 3.616706875,
+     "min": 3.54270275,
+     "max": 3.71471575,
+     "q1": 3.5808858125,
+     "q3": 3.671113875,
+     "range_pct": 4.756066940039196,
+     "iqr_pct": 2.4947574027546824,
+     "sd_pct": 1.8322659315270675,
+     "se_med_pct": 0.9374927569093083
+    }
+   },
+   "steps_per_s": {
+    "n": 6,
+    "median": 279.217454,
+    "min": 272.967484,
+    "max": 284.142055,
+    "q1": 275.0743245,
+    "q3": 281.6203945,
+    "range_pct": 4.002103321234358,
+    "iqr_pct": 2.344434384821798,
+    "sd_pct": 1.6088783322715692,
+    "se_med_pct": 0.8231947979275309
+   },
+   "steps_per_s_values": [
+    284.142,
+    282.361,
+    279.037,
+    279.398,
+    272.967,
+    273.753
+   ],
+   "ms_from_steps_per_s": {
+    "n": 6,
+    "median": 3.581439496704923,
+    "min": 3.519366395798045,
+    "max": 3.663440001520474,
+    "q1": 3.5509533004583913,
+    "q3": 3.6356301981904418,
+    "range_pct": 4.022784856619318,
+    "iqr_pct": 2.3643257916253173,
+    "sd_pct": 1.6206704446368463,
+    "se_med_pct": 0.8292283216321902
+   },
+   "hash": [
+    "0xb8522b4e3fc62cfe"
+   ],
+   "threads": [
+    4
+   ],
+   "patch_line": [
+    "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=0"
+   ]
+  },
+  "D-L4L2@W8": {
+   "n": 6,
+   "median": 7.7827181,
+   "min": 7.6930414,
+   "max": 8.0418132,
+   "q1": 7.7501585,
+   "q3": 7.9098287,
+   "range_pct": 4.481362366189259,
+   "iqr_pct": 2.051599427711507,
+   "sd_pct": 1.7217427556302671,
+   "se_med_pct": 0.8809427359265419,
+   "values_by_process": [
+    7.693,
+    7.9479,
+    8.0418,
+    7.7436,
+    7.7699,
+    7.7955
+   ],
+   "process_ids": [
+    "p0r0s15R",
+    "p0r1s38",
+    "p0r2s61",
+    "p1r0s9",
+    "p1r1s32",
+    "p1r2s55"
+   ],
+   "per_pass_median": {
+    "0": 7.9479396,
+    "1": 7.769940200000001
+   },
+   "median_step": {
+    "n": 6,
+    "median": 7.712275,
+    "min": 7.6718,
+    "max": 7.7651,
+    "q1": 7.6977875,
+    "q3": 7.7397,
+    "range_pct": 1.2097597660871813,
+    "iqr_pct": 0.5434518348995655,
+    "sd_pct": 0.4444958732539885,
+    "se_med_pct": 0.22742968391296325
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    0.48,
+    2.26,
+    1.31,
+    0.48,
+    0.56,
+    0.53
+   ],
+   "others_top_by_process": [
+    "Taskmgr.exe",
+    "claude.exe",
+    "claude.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 1,
+    "stats": {
+     "n": 5,
+     "median": 7.769940200000001,
+     "min": 7.6930414,
+     "max": 8.0418132,
+     "q1": 7.7435646,
+     "q3": 7.795496,
+     "range_pct": 4.4887321011814185,
+     "iqr_pct": 0.6683629302578153,
+     "sd_pct": 1.7462368114166484,
+     "se_med_pct": 0.9787531585670192
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 7.6257435000000005,
+     "min": 7.563735,
+     "max": 7.858449,
+     "q1": 7.6035275,
+     "q3": 7.675084000000001,
+     "range_pct": 3.8647247969984817,
+     "iqr_pct": 0.9383544043934954,
+     "sd_pct": 1.3836094030582098,
+     "se_med_pct": 0.7079342422077456
+    },
+    "100_500": {
+     "n": 6,
+     "median": 7.81535525,
+     "min": 7.71646275,
+     "max": 8.14340525,
+     "q1": 7.7934951875000005,
+     "q3": 7.933308125,
+     "range_pct": 5.462867474898226,
+     "iqr_pct": 1.7889517882120516,
+     "sd_pct": 1.9900705017762024,
+     "se_med_pct": 1.018234661820705
+    }
+   },
+   "summary_vs_csv_max_rel": 0.0,
+   "manifolds": {
+    "0_100": [
+     4544.2
+    ],
+    "100_500": [
+     4519.257
+    ],
+    "0_500": [
+     4524.246
+    ],
+    "final": [
+     4515.0
+    ]
+   },
+   "pairs": {
+    "0_100": [
+     9569.12
+    ],
+    "100_500": [
+     9559.215
+    ],
+    "0_500": [
+     9561.196
+    ],
+    "final": [
+     9559.0
+    ]
+   },
+   "final_manifolds": [
+    4515
+   ],
+   "final_pairs": [
+    9559
+   ],
+   "pose": [
+    "0x32d5e235342b4143"
+   ],
+   "config": {
+    "substeps": 4,
+    "relax_iterations": 2,
+    "broadphase": "AllPairs",
+    "broadphase_select": "Manual",
+    "simd": true,
+    "simd_solve": true,
+    "parallel_solve": true,
+    "parallel_broadphase": false,
+    "sleeping": false,
+    "sleep_threshold": 9.999999747378752e-05,
+    "sleep_frames": 60,
+    "colored": true,
+    "contact_hertz": 30,
+    "contact_damping": 10
+   },
+   "expect_pose": [
+    "match"
+   ],
+   "pool_workers": [
+    8
+   ]
+  },
+  "D-L5@W8": {
+   "n": 6,
+   "median": 5.3474281,
+   "min": 5.3070036,
+   "max": 5.650609,
+   "q1": 5.3368151,
+   "q3": 5.427825149999999,
+   "range_pct": 6.4256198227331085,
+   "iqr_pct": 1.7019406020625039,
+   "sd_pct": 2.423007731715499,
+   "se_med_pct": 1.2397502782390055,
+   "values_by_process": [
+    5.3502,
+    5.3447,
+    5.6506,
+    5.3342,
+    5.307,
+    5.4537
+   ],
+   "process_ids": [
+    "p0r0s18R",
+    "p0r1s41R",
+    "p0r2s64",
+    "p1r0s6",
+    "p1r1s29",
+    "p1r2s52"
+   ],
+   "per_pass_median": {
+    "0": 5.3501652,
+    "1": 5.3341898
+   },
+   "median_step": {
+    "n": 6,
+    "median": 5.2732,
+    "min": 5.25895,
+    "max": 5.32775,
+    "q1": 5.2707625,
+    "q3": 5.3141125,
+    "range_pct": 1.3047106121520218,
+    "iqr_pct": 0.8220814685579956,
+    "sd_pct": 0.5835017867318761,
+    "se_med_pct": 0.29855311354769504
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    0.92,
+    0.25,
+    0.52,
+    0.51,
+    0.41,
+    0.68
+   ],
+   "others_top_by_process": [
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 0,
+    "stats": {
+     "n": 6,
+     "median": 5.3474281,
+     "min": 5.3070036,
+     "max": 5.650609,
+     "q1": 5.3368151,
+     "q3": 5.427825149999999,
+     "range_pct": 6.4256198227331085,
+     "iqr_pct": 1.7019406020625039,
+     "sd_pct": 2.423007731715499,
+     "se_med_pct": 1.2397502782390055
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 5.3267489999999995,
+     "min": 5.230253,
+     "max": 6.773484,
+     "q1": 5.28755825,
+     "q3": 5.69478025,
+     "range_pct": 28.971348190049873,
+     "iqr_pct": 7.644850545801953,
+     "sd_pct": 11.277795113957886,
+     "se_med_pct": 5.770369383242836
+    },
+    "100_500": {
+     "n": 6,
+     "median": 5.360508125,
+     "min": 5.295269,
+     "max": 5.38014325,
+     "q1": 5.349129312500001,
+     "q3": 5.3686780625,
+     "range_pct": 1.5833247151360206,
+     "iqr_pct": 0.3646809135281245,
+     "sd_pct": 0.5622980617204785,
+     "se_med_pct": 0.28770406686967553
+    }
+   },
+   "summary_vs_csv_max_rel": 0.0,
+   "manifolds": {
+    "0_100": [
+     4544.2
+    ],
+    "100_500": [
+     4519.257
+    ],
+    "0_500": [
+     4524.246
+    ],
+    "final": [
+     4515.0
+    ]
+   },
+   "pairs": {
+    "0_100": [
+     9569.12
+    ],
+    "100_500": [
+     9559.215
+    ],
+    "0_500": [
+     9561.196
+    ],
+    "final": [
+     9559.0
+    ]
+   },
+   "final_manifolds": [
+    4515
+   ],
+   "final_pairs": [
+    9559
+   ],
+   "pose": [
+    "0x32d5e235342b4143"
+   ],
+   "config": {
+    "substeps": 4,
+    "relax_iterations": 2,
+    "broadphase": "AllPairs",
+    "broadphase_select": "Manual",
+    "simd": true,
+    "simd_solve": true,
+    "parallel_solve": true,
+    "parallel_broadphase": false,
+    "parallel_narrowphase": true,
+    "sleeping": false,
+    "sleep_threshold": 9.999999747378752e-05,
+    "sleep_frames": 60,
+    "colored": true,
+    "contact_hertz": 30,
+    "contact_damping": 10
+   },
+   "expect_pose": [
+    "match"
+   ],
+   "pool_workers": [
+    8
+   ]
+  },
+  "D-L5-npoff@W8": {
+   "n": 6,
+   "median": 7.9729557,
+   "min": 7.8045675999999995,
+   "max": 9.1575904,
+   "q1": 7.85140685,
+   "q3": 8.210673250000001,
+   "range_pct": 16.970153239406567,
+   "iqr_pct": 4.506062914660381,
+   "sd_pct": 6.44137304591976,
+   "se_med_pct": 3.295777360258917,
+   "values_by_process": [
+    9.1576,
+    8.2616,
+    8.058,
+    7.8392,
+    7.8046,
+    7.8879
+   ],
+   "process_ids": [
+    "p0r0s19",
+    "p0r1s42",
+    "p0r2s65R",
+    "p1r0s5",
+    "p1r1s28",
+    "p1r2s51"
+   ],
+   "per_pass_median": {
+    "0": 8.2615674,
+    "1": 7.839235599999999
+   },
+   "median_step": {
+    "n": 6,
+    "median": 7.81155,
+    "min": 7.756,
+    "max": 8.93855,
+    "q1": 7.7720375,
+    "q3": 7.9523125,
+    "range_pct": 15.138480839270043,
+    "iqr_pct": 2.3078006285564316,
+    "sd_pct": 5.910434305785769,
+    "se_med_pct": 3.0241185280590903
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    1.72,
+    0.92,
+    0.63,
+    0.92,
+    0.45,
+    0.42
+   ],
+   "others_top_by_process": [
+    "claude.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "claude.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 1,
+    "stats": {
+     "n": 5,
+     "median": 7.887920599999999,
+     "min": 7.8045675999999995,
+     "max": 8.2615674,
+     "q1": 7.839235599999999,
+     "q3": 8.0579908,
+     "range_pct": 5.793666330769115,
+     "iqr_pct": 2.7732936358411275,
+     "sd_pct": 2.4050556450959317,
+     "se_med_pct": 1.3480163708480168
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 7.712534,
+     "min": 7.609689,
+     "max": 8.930365,
+     "q1": 7.67921675,
+     "q3": 7.976708,
+     "range_pct": 17.12376243657402,
+     "iqr_pct": 3.857243935650724,
+     "sd_pct": 6.550957364232887,
+     "se_med_pct": 3.3518470076401674
+    },
+    "100_500": {
+     "n": 6,
+     "median": 7.991503625,
+     "min": 7.83615325,
+     "max": 9.21439675,
+     "q1": 7.889917812499999,
+     "q3": 8.333109125,
+     "range_pct": 17.246360192948057,
+     "iqr_pct": 5.545781285934169,
+     "sd_pct": 6.640450518995134,
+     "se_med_pct": 3.3976368588506007
+    }
+   },
+   "summary_vs_csv_max_rel": 0.0,
+   "manifolds": {
+    "0_100": [
+     4544.2
+    ],
+    "100_500": [
+     4519.257
+    ],
+    "0_500": [
+     4524.246
+    ],
+    "final": [
+     4515.0
+    ]
+   },
+   "pairs": {
+    "0_100": [
+     9569.12
+    ],
+    "100_500": [
+     9559.215
+    ],
+    "0_500": [
+     9561.196
+    ],
+    "final": [
+     9559.0
+    ]
+   },
+   "final_manifolds": [
+    4515
+   ],
+   "final_pairs": [
+    9559
+   ],
+   "pose": [
+    "0x32d5e235342b4143"
+   ],
+   "config": {
+    "substeps": 4,
+    "relax_iterations": 2,
+    "broadphase": "AllPairs",
+    "broadphase_select": "Manual",
+    "simd": true,
+    "simd_solve": true,
+    "parallel_solve": true,
+    "parallel_broadphase": false,
+    "parallel_narrowphase": false,
+    "sleeping": false,
+    "sleep_threshold": 9.999999747378752e-05,
+    "sleep_frames": 60,
+    "colored": true,
+    "contact_hertz": 30,
+    "contact_damping": 10
+   },
+   "expect_pose": [
+    "match"
+   ],
+   "pool_workers": [
+    8
+   ]
+  },
+  "J-A@W8": {
+   "n": 6,
+   "median": 9.1743669,
+   "min": 9.069542,
+   "max": 9.2429372,
+   "q1": 9.1310919,
+   "q3": 9.21237585,
+   "range_pct": 1.8899963549528398,
+   "iqr_pct": 0.885989746060857,
+   "sd_pct": 0.7028253666854846,
+   "se_med_pct": 0.3596059279946487,
+   "values_by_process": [
+    9.0695,
+    9.1973,
+    9.1243,
+    9.2429,
+    9.2174,
+    9.1514
+   ],
+   "process_ids": [
+    "p0r0s16R",
+    "p0r1s39",
+    "p0r2s62",
+    "p1r0s8",
+    "p1r1s31",
+    "p1r2s54"
+   ],
+   "per_pass_median": {
+    "0": 9.124320599999999,
+    "1": 9.217391800000001
+   },
+   "median_step": {
+    "n": 6,
+    "median": 9.06875,
+    "min": 9.03335,
+    "max": 9.0889,
+    "q1": 9.0528375,
+    "q3": 9.0755125,
+    "range_pct": 0.612543073742249,
+    "iqr_pct": 0.2500344589937925,
+    "sd_pct": 0.22193923964954,
+    "se_med_pct": 0.11355689480729138
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    0.86,
+    1.32,
+    0.41,
+    0.7,
+    0.78,
+    0.68
+   ],
+   "others_top_by_process": [
+    "Taskmgr.exe",
+    "claude.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "claude.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 0,
+    "stats": {
+     "n": 6,
+     "median": 9.1743669,
+     "min": 9.069542,
+     "max": 9.2429372,
+     "q1": 9.1310919,
+     "q3": 9.21237585,
+     "range_pct": 1.8899963549528398,
+     "iqr_pct": 0.885989746060857,
+     "sd_pct": 0.7028253666854846,
+     "se_med_pct": 0.3596059279946487
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 9.002554,
+     "min": 8.964551,
+     "max": 9.2444,
+     "q1": 8.987765750000001,
+     "q3": 9.059596500000001,
+     "range_pct": 3.1085511955829475,
+     "iqr_pct": 0.7978930201362876,
+     "sd_pct": 1.163081981983284,
+     "se_med_pct": 0.5950997150791829
+    },
+    "100_500": {
+     "n": 6,
+     "median": 9.2020895,
+     "min": 9.09578975,
+     "max": 9.28402775,
+     "q1": 9.164476562499999,
+     "q3": 9.237155999999999,
+     "range_pct": 2.0456006214675497,
+     "iqr_pct": 0.7898145035429152,
+     "sd_pct": 0.7240509447007031,
+     "se_med_pct": 0.3704661559277721
+    }
+   },
+   "summary_vs_csv_max_rel": 0.0,
+   "manifolds": {
+    "0_100": [
+     4544.2
+    ],
+    "100_500": [
+     4519.257
+    ],
+    "0_500": [
+     4524.246
+    ],
+    "final": [
+     4515.0
+    ]
+   },
+   "pairs": {
+    "0_100": [
+     9569.12
+    ],
+    "100_500": [
+     9559.215
+    ],
+    "0_500": [
+     9561.196
+    ],
+    "final": [
+     9559.0
+    ]
+   },
+   "final_manifolds": [
+    4515
+   ],
+   "final_pairs": [
+    9559
+   ],
+   "pose": [
+    "0x32d5e235342b4143"
+   ],
+   "config": {
+    "substeps": 4,
+    "relax_iterations": 2,
+    "broadphase": "AllPairs",
+    "broadphase_select": "Manual",
+    "simd": true,
+    "simd_solve": false,
+    "parallel_solve": true,
+    "parallel_broadphase": true,
+    "sleeping": false,
+    "sleep_threshold": 9.999999747378752e-05,
+    "sleep_frames": 60,
+    "colored": true,
+    "contact_hertz": 30,
+    "contact_damping": 10
+   },
+   "expect_pose": [
+    "none"
+   ],
+   "pool_workers": [
+    8
+   ]
+  },
+  "JOLT-T@W8": {
+   "n": 6,
+   "median": 3.5826373,
+   "min": 3.4660822000000002,
+   "max": 4.6930962,
+   "q1": 3.50211,
+   "q3": 3.81203255,
+   "range_pct": 34.2489037335708,
+   "iqr_pct": 8.650681719860394,
+   "sd_pct": 13.15653460274548,
+   "se_med_pct": 6.731640688107375,
+   "values_by_process": [
+    4.6931,
+    3.5661,
+    3.883,
+    3.4808,
+    3.4661,
+    3.5992
+   ],
+   "process_ids": [
+    "p0r0s14",
+    "p0r1s37R",
+    "p0r2s60",
+    "p1r0s10",
+    "p1r1s33",
+    "p1r2s56"
+   ],
+   "per_pass_median": {
+    "0": 3.8829704,
+    "1": 3.4807948
+   },
+   "median_step": {
+    "n": 6,
+    "median": 3.6441,
+    "min": 3.5116,
+    "max": 4.77375,
+    "q1": 3.5517375,
+    "q3": 3.761325,
+    "range_pct": 34.63543810543069,
+    "iqr_pct": 5.751420103729305,
+    "sd_pct": 13.183879151006535,
+    "se_med_pct": 6.745631733563497
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    4.72,
+    0.54,
+    1.09,
+    0.67,
+    0.78,
+    1.08
+   ],
+   "others_top_by_process": [
+    "claude.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "Taskmgr.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 1,
+    "stats": {
+     "n": 5,
+     "median": 3.5660556,
+     "min": 3.4660822000000002,
+     "max": 3.8829704,
+     "q1": 3.4807948,
+     "q3": 3.599219,
+     "range_pct": 11.69045709775248,
+     "iqr_pct": 3.3208736285547595,
+     "sd_pct": 4.720845796459839,
+     "se_med_pct": 2.646000075238622
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 3.158449,
+     "min": 3.101201,
+     "max": 3.963815,
+     "q1": 3.1216315,
+     "q3": 3.18613375,
+     "range_pct": 27.311316408781646,
+     "iqr_pct": 2.0422128076153934,
+     "sd_pct": 10.644504380389932,
+     "se_med_pct": 5.446341377524842
+    },
+    "100_500": {
+     "n": 6,
+     "median": 3.6886843750000002,
+     "min": 3.5573025,
+     "max": 4.8754165,
+     "q1": 3.5972296249999998,
+     "q3": 3.96850725,
+     "range_pct": 35.73398713464065,
+     "iqr_pct": 10.065312920680569,
+     "sd_pct": 13.76801195901508,
+     "se_med_pct": 7.044507713932079
+    }
+   },
+   "steps_per_s": {
+    "n": 6,
+    "median": 279.1299645,
+    "min": 213.078948,
+    "max": 288.51018,
+    "q1": 262.6106125,
+    "q3": 285.57349925,
+    "range_pct": 27.023695623333904,
+    "iqr_pct": 8.2265932255367,
+    "sd_pct": 10.34347765952714,
+    "se_med_pct": 5.292318773278839
+   },
+   "steps_per_s_values": [
+    213.079,
+    280.422,
+    257.535,
+    287.291,
+    288.51,
+    277.838
+   ],
+   "ms_from_steps_per_s": {
+    "n": 6,
+    "median": 3.58263729902607,
+    "min": 3.466082202021433,
+    "max": 4.693096194561652,
+    "q1": 3.502110001439969,
+    "q3": 3.8120325463169773,
+    "range_pct": 34.248903534660876,
+    "iqr_pct": 8.65068157921707,
+    "sd_pct": 13.156534526867757,
+    "se_med_pct": 6.731640649283963
+   },
+   "hash": [
+    "0xee15b89965ec747"
+   ],
+   "threads": [
+    8
+   ],
+   "patch_line": [
+    "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=0"
+   ]
+  },
+  "JOLT56-T@W8": {
+   "n": 6,
+   "median": 2.5692559,
+   "min": 2.5007257999999997,
+   "max": 3.1241478,
+   "q1": 2.5142891,
+   "q3": 2.5935797999999997,
+   "range_pct": 24.26469080016514,
+   "iqr_pct": 3.0861347832265213,
+   "sd_pct": 9.301069641410548,
+   "se_med_pct": 4.7589628068149405,
+   "values_by_process": [
+    3.1241,
+    2.5931,
+    2.5039,
+    2.5007,
+    2.5454,
+    2.5937
+   ],
+   "process_ids": [
+    "p0r0s17",
+    "p0r1s40",
+    "p0r2s63",
+    "p1r0s7",
+    "p1r1s30",
+    "p1r2s53"
+   ],
+   "per_pass_median": {
+    "0": 2.5931243999999998,
+    "1": 2.5453874
+   },
+   "median_step": {
+    "n": 6,
+    "median": 2.57075,
+    "min": 2.5006,
+    "max": 3.0893,
+    "q1": 2.5116375,
+    "q3": 2.6279500000000002,
+    "range_pct": 22.89993192648061,
+    "iqr_pct": 4.524457843041924,
+    "sd_pct": 8.765569168074759,
+    "se_med_pct": 4.484969929233354
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    5.1,
+    0.6,
+    0.93,
+    0.23,
+    0.76,
+    0.3
+   ],
+   "others_top_by_process": [
+    "claude.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "Taskmgr.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 1,
+    "stats": {
+     "n": 5,
+     "median": 2.5453874,
+     "min": 2.5007257999999997,
+     "max": 2.5937316,
+     "q1": 2.503923,
+     "q3": 2.5931243999999998,
+     "range_pct": 3.653895670262226,
+     "iqr_pct": 3.5044331562260376,
+     "sd_pct": 1.7906869709863291,
+     "se_med_pct": 1.0036671529308987
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 2.371371,
+     "min": 2.297169,
+     "max": 2.781505,
+     "q1": 2.34155,
+     "q3": 2.49505075,
+     "range_pct": 20.424303071936038,
+     "iqr_pct": 6.473080340444413,
+     "sd_pct": 7.7072283044648655,
+     "se_med_pct": 3.9434618015629908
+    },
+    "100_500": {
+     "n": 6,
+     "median": 2.60012575,
+     "min": 2.54697675,
+     "max": 3.2098085,
+     "q1": 2.548670875,
+     "q3": 2.649095125,
+     "range_pct": 25.49229590145784,
+     "iqr_pct": 3.862284352977932,
+     "sd_pct": 9.931214371186865,
+     "se_med_pct": 5.081381135838564
+    }
+   },
+   "steps_per_s": {
+    "n": 6,
+    "median": 389.251344,
+    "min": 320.087289,
+    "max": 399.883906,
+    "q1": 385.5674735,
+    "q3": 397.74685375,
+    "range_pct": 20.50002350152451,
+    "iqr_pct": 3.1289243923586834,
+    "sd_pct": 7.780725118429332,
+    "se_med_pct": 3.981067003712971
+   },
+   "steps_per_s_values": [
+    320.087,
+    385.635,
+    399.373,
+    399.884,
+    392.868,
+    385.545
+   ],
+   "ms_from_steps_per_s": {
+    "n": 6,
+    "median": 2.5692559005302176,
+    "min": 2.5007257981520263,
+    "max": 3.124147800820669,
+    "q1": 2.5142891021665816,
+    "q3": 2.593579798629243,
+    "range_pct": 24.264690899025947,
+    "iqr_pct": 3.086134644910145,
+    "sd_pct": 9.30106964906769,
+    "se_med_pct": 4.758962810732777
+   },
+   "hash": [
+    "0xb8522b4e3fc62cfe"
+   ],
+   "threads": [
+    8
+   ],
+   "patch_line": [
+    "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=0"
+   ]
+  },
+  "D-L4L2@W16": {
+   "n": 6,
+   "median": 8.1605206,
+   "min": 8.0837406,
+   "max": 10.0401542,
+   "q1": 8.151991200000001,
+   "q3": 8.20880645,
+   "range_pct": 23.97412733692504,
+   "iqr_pct": 0.6962209004165696,
+   "sd_pct": 9.442908257558082,
+   "se_med_pct": 4.831535610249391,
+   "values_by_process": [
+    10.0402,
+    8.1629,
+    8.2241,
+    8.1582,
+    8.0837,
+    8.1499
+   ],
+   "process_ids": [
+    "p0r0s21",
+    "p0r1s44",
+    "p0r2s67",
+    "p1r0s3",
+    "p1r1s26R",
+    "p1r2s49"
+   ],
+   "per_pass_median": {
+    "0": 8.224121,
+    "1": 8.1499288
+   },
+   "median_step": {
+    "n": 6,
+    "median": 8.03345,
+    "min": 7.94515,
+    "max": 9.7387,
+    "q1": 7.983675,
+    "q3": 8.083825000000001,
+    "range_pct": 22.32602431085025,
+    "iqr_pct": 1.2466623928698264,
+    "sd_pct": 8.782625533788764,
+    "se_med_pct": 4.493696948079766
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    2.35,
+    0.82,
+    0.67,
+    0.5,
+    0.92,
+    0.72
+   ],
+   "others_top_by_process": [
+    "claude.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "Taskmgr.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 1,
+    "stats": {
+     "n": 5,
+     "median": 8.1581784,
+     "min": 8.0837406,
+     "max": 8.224121,
+     "q1": 8.1499288,
+     "q3": 8.1628628,
+     "range_pct": 1.720732167367163,
+     "iqr_pct": 0.15854029374988363,
+     "sd_pct": 0.6113576642524573,
+     "se_med_pct": 0.3426615685737474
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 8.0080075,
+     "min": 7.864128,
+     "max": 9.643028,
+     "q1": 7.9226322499999995,
+     "q3": 8.09919675,
+     "range_pct": 22.21401515920158,
+     "iqr_pct": 2.2048493336201465,
+     "sd_pct": 8.555589469429076,
+     "se_med_pct": 4.377532224263169
+    },
+    "100_500": {
+     "n": 6,
+     "median": 8.219906375,
+     "min": 8.11991125,
+     "max": 10.13943575,
+     "q1": 8.192862875000001,
+     "q3": 8.2454688125,
+     "range_pct": 24.568704409361366,
+     "iqr_pct": 0.6399821980940652,
+     "sd_pct": 9.650621531878146,
+     "se_med_pct": 4.9378136820283505
+    }
+   },
+   "summary_vs_csv_max_rel": 0.0,
+   "manifolds": {
+    "0_100": [
+     4544.2
+    ],
+    "100_500": [
+     4519.257
+    ],
+    "0_500": [
+     4524.246
+    ],
+    "final": [
+     4515.0
+    ]
+   },
+   "pairs": {
+    "0_100": [
+     9569.12
+    ],
+    "100_500": [
+     9559.215
+    ],
+    "0_500": [
+     9561.196
+    ],
+    "final": [
+     9559.0
+    ]
+   },
+   "final_manifolds": [
+    4515
+   ],
+   "final_pairs": [
+    9559
+   ],
+   "pose": [
+    "0x32d5e235342b4143"
+   ],
+   "config": {
+    "substeps": 4,
+    "relax_iterations": 2,
+    "broadphase": "AllPairs",
+    "broadphase_select": "Manual",
+    "simd": true,
+    "simd_solve": true,
+    "parallel_solve": true,
+    "parallel_broadphase": false,
+    "sleeping": false,
+    "sleep_threshold": 9.999999747378752e-05,
+    "sleep_frames": 60,
+    "colored": true,
+    "contact_hertz": 30,
+    "contact_damping": 10
+   },
+   "expect_pose": [
+    "none"
+   ],
+   "pool_workers": [
+    16
+   ]
+  },
+  "D-L5@W16": {
+   "n": 6,
+   "median": 5.551754900000001,
+   "min": 5.479515,
+   "max": 6.8381572,
+   "q1": 5.5024106,
+   "q3": 5.710081850000001,
+   "range_pct": 24.4723015419863,
+   "iqr_pct": 3.740641540209216,
+   "sd_pct": 9.521296311700382,
+   "se_med_pct": 4.871643452523888,
+   "values_by_process": [
+    6.8382,
+    5.592,
+    5.7494,
+    5.4795,
+    5.4994,
+    5.5115
+   ],
+   "process_ids": [
+    "p0r0s23",
+    "p0r1s46",
+    "p0r2s69",
+    "p1r0s1",
+    "p1r1s24",
+    "p1r2s47"
+   ],
+   "per_pass_median": {
+    "0": 5.7494272,
+    "1": 5.4993928
+   },
+   "median_step": {
+    "n": 6,
+    "median": 5.43965,
+    "min": 5.42715,
+    "max": 6.68615,
+    "q1": 5.4340874999999995,
+    "q3": 5.480275000000001,
+    "range_pct": 23.14487145312657,
+    "iqr_pct": 0.8490895553942102,
+    "sd_pct": 9.314005809199097,
+    "se_med_pct": 4.765581695151647
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    1.34,
+    0.77,
+    1.22,
+    0.64,
+    0.6,
+    0.53
+   ],
+   "others_top_by_process": [
+    "claude.exe",
+    "Taskmgr.exe",
+    "claude.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 0,
+    "stats": {
+     "n": 6,
+     "median": 5.551754900000001,
+     "min": 5.479515,
+     "max": 6.8381572,
+     "q1": 5.5024106,
+     "q3": 5.710081850000001,
+     "range_pct": 24.4723015419863,
+     "iqr_pct": 3.740641540209216,
+     "sd_pct": 9.521296311700382,
+     "se_med_pct": 4.871643452523888
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 5.5088945,
+     "min": 5.452167,
+     "max": 6.957684,
+     "q1": 5.465034999999999,
+     "q3": 5.5397625,
+     "range_pct": 27.328840659409977,
+     "iqr_pct": 1.356488130241026,
+     "sd_pct": 10.866766795127294,
+     "se_med_pct": 5.560063627316271
+    },
+    "100_500": {
+     "n": 6,
+     "median": 5.568715375,
+     "min": 5.475836,
+     "max": 6.8082755,
+     "q1": 5.5050790625,
+     "q3": 5.76097875,
+     "range_pct": 23.927232948227303,
+     "iqr_pct": 4.595309156018761,
+     "sd_pct": 9.236206391517268,
+     "se_med_pct": 4.725775033185451
+    }
+   },
+   "summary_vs_csv_max_rel": 0.0,
+   "manifolds": {
+    "0_100": [
+     4544.2
+    ],
+    "100_500": [
+     4519.257
+    ],
+    "0_500": [
+     4524.246
+    ],
+    "final": [
+     4515.0
+    ]
+   },
+   "pairs": {
+    "0_100": [
+     9569.12
+    ],
+    "100_500": [
+     9559.215
+    ],
+    "0_500": [
+     9561.196
+    ],
+    "final": [
+     9559.0
+    ]
+   },
+   "final_manifolds": [
+    4515
+   ],
+   "final_pairs": [
+    9559
+   ],
+   "pose": [
+    "0x32d5e235342b4143"
+   ],
+   "config": {
+    "substeps": 4,
+    "relax_iterations": 2,
+    "broadphase": "AllPairs",
+    "broadphase_select": "Manual",
+    "simd": true,
+    "simd_solve": true,
+    "parallel_solve": true,
+    "parallel_broadphase": false,
+    "parallel_narrowphase": true,
+    "sleeping": false,
+    "sleep_threshold": 9.999999747378752e-05,
+    "sleep_frames": 60,
+    "colored": true,
+    "contact_hertz": 30,
+    "contact_damping": 10
+   },
+   "expect_pose": [
+    "match"
+   ],
+   "pool_workers": [
+    16
+   ]
+  },
+  "JOLT-T@W16": {
+   "n": 6,
+   "median": 3.1638751999999997,
+   "min": 3.1120476,
+   "max": 3.2053466,
+   "q1": 3.1470232,
+   "q3": 3.18415755,
+   "range_pct": 2.9488836980674846,
+   "iqr_pct": 1.1736983178097573,
+   "sd_pct": 1.0523027957069688,
+   "se_med_pct": 0.5384187044445546,
+   "values_by_process": [
+    3.1896,
+    3.1427,
+    3.16,
+    3.1677,
+    3.112,
+    3.2053
+   ],
+   "process_ids": [
+    "p0r0s20R",
+    "p0r1s43",
+    "p0r2s66",
+    "p1r0s4",
+    "p1r1s27",
+    "p1r2s50"
+   ],
+   "per_pass_median": {
+    "0": 3.160015,
+    "1": 3.1677353999999998
+   },
+   "median_step": {
+    "n": 6,
+    "median": 3.21005,
+    "min": 3.17015,
+    "max": 3.277,
+    "q1": 3.1975749999999996,
+    "q3": 3.2317875000000003,
+    "range_pct": 3.328608588651271,
+    "iqr_pct": 1.065793367704573,
+    "sd_pct": 1.1538391294820993,
+    "se_med_pct": 0.5903705395135924
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    0.92,
+    0.49,
+    0.73,
+    0.49,
+    0.62,
+    0.6
+   ],
+   "others_top_by_process": [
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe",
+    "Taskmgr.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 0,
+    "stats": {
+     "n": 6,
+     "median": 3.1638751999999997,
+     "min": 3.1120476,
+     "max": 3.2053466,
+     "q1": 3.1470232,
+     "q3": 3.18415755,
+     "range_pct": 2.9488836980674846,
+     "iqr_pct": 1.1736983178097573,
+     "sd_pct": 1.0523027957069688,
+     "se_med_pct": 0.5384187044445546
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 2.8290515000000003,
+     "min": 2.759064,
+     "max": 2.855468,
+     "q1": 2.7987432500000002,
+     "q3": 2.839085,
+     "range_pct": 3.4076438693321824,
+     "iqr_pct": 1.4259814641055357,
+     "sd_pct": 1.2759304513056775,
+     "se_med_pct": 0.6528394900745481
+    },
+    "100_500": {
+     "n": 6,
+     "median": 3.244031,
+     "min": 3.2002935,
+     "max": 3.2999165,
+     "q1": 3.233845125,
+     "q3": 3.2688986875,
+     "range_pct": 3.070963255283326,
+     "iqr_pct": 1.0805557191037913,
+     "sd_pct": 1.0770566874634386,
+     "se_med_pct": 0.5510842208566109
+    }
+   },
+   "steps_per_s": {
+    "n": 6,
+    "median": 316.068563,
+    "min": 311.978742,
+    "max": 321.331846,
+    "q1": 314.05760549999997,
+    "q3": 317.76240625,
+    "range_pct": 2.959200975644001,
+    "iqr_pct": 1.1721509772549132,
+    "sd_pct": 1.0558540249960562,
+    "se_med_pct": 0.5402357178372934
+   },
+   "steps_per_s_values": [
+    313.516,
+    318.198,
+    316.454,
+    315.683,
+    321.332,
+    311.979
+   ],
+   "ms_from_steps_per_s": {
+    "n": 6,
+    "median": 3.163875202018701,
+    "min": 3.112047599539823,
+    "max": 3.205346600185983,
+    "q1": 3.147023202475177,
+    "q3": 3.18415755455749,
+    "range_pct": 2.9488837166090147,
+    "iqr_pct": 1.173698382876152,
+    "sd_pct": 1.052302816707172,
+    "se_med_pct": 0.5384187151894678
+   },
+   "hash": [
+    "0xee15b89965ec747"
+   ],
+   "threads": [
+    16
+   ],
+   "patch_line": [
+    "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=0"
+   ]
+  },
+  "JOLT56-T@W16": {
+   "n": 6,
+   "median": 2.3884695000000002,
+   "min": 2.3374707999999997,
+   "max": 2.464546,
+   "q1": 2.35189365,
+   "q3": 2.4334684500000003,
+   "range_pct": 5.320361009424661,
+   "iqr_pct": 3.415358663780311,
+   "sd_pct": 2.1844633594469682,
+   "se_med_pct": 1.1176972414198132,
+   "values_by_process": [
+    2.3998,
+    2.4447,
+    2.4645,
+    2.3772,
+    2.3435,
+    2.3375
+   ],
+   "process_ids": [
+    "p0r0s22R",
+    "p0r1s45",
+    "p0r2s68",
+    "p1r0s2",
+    "p1r1s25",
+    "p1r2s48"
+   ],
+   "per_pass_median": {
+    "0": 2.4447012000000004,
+    "1": 2.3434686
+   },
+   "median_step": {
+    "n": 6,
+    "median": 2.422,
+    "min": 2.3672,
+    "max": 2.46535,
+    "q1": 2.3837,
+    "q3": 2.4562500000000003,
+    "range_pct": 4.052436003303053,
+    "iqr_pct": 2.9954582989265117,
+    "sd_pct": 1.7752906547603295,
+    "se_med_pct": 0.9083409245400828
+   },
+   "csv_vs_record_max_abs_rel": 0.0,
+   "others_busy_by_process": [
+    0.24,
+    1.35,
+    4.38,
+    1.3,
+    0.82,
+    0.5
+   ],
+   "others_top_by_process": [
+    "Taskmgr.exe",
+    "steam.exe",
+    "claude.exe",
+    "claude.exe",
+    "browser.exe",
+    "Taskmgr.exe"
+   ],
+   "pass_by_process": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1
+   ],
+   "supp_witness_filtered": {
+    "rule": "SUPPLEMENTARY, not the ruled statistic: processes whose during-process others_busy_pct <= 1.5 (P0b p95 1.44)",
+    "n_excluded": 1,
+    "stats": {
+     "n": 5,
+     "median": 2.3771687999999997,
+     "min": 2.3374707999999997,
+     "max": 2.4447012000000004,
+     "q1": 2.3434686,
+     "q3": 2.3997702000000003,
+     "range_pct": 4.510845001835824,
+     "iqr_pct": 2.368430882989895,
+     "sd_pct": 1.848916594856683,
+     "se_med_pct": 1.036304437812691
+    }
+   },
+   "sub": {
+    "0_100": {
+     "n": 6,
+     "median": 2.1556855,
+     "min": 2.125851,
+     "max": 2.199798,
+     "q1": 2.137593,
+     "q3": 2.1868782500000004,
+     "range_pct": 3.4303241358723238,
+     "iqr_pct": 2.286291298058112,
+     "sd_pct": 1.4322150904067985,
+     "se_med_pct": 0.7328037106892793
+    },
+    "100_500": {
+     "n": 6,
+     "median": 2.4466655,
+     "min": 2.3880435,
+     "max": 2.532268,
+     "q1": 2.407218,
+     "q3": 2.49396475,
+     "range_pct": 5.8947371432670295,
+     "iqr_pct": 3.545509183825909,
+     "sd_pct": 2.3609493483165194,
+     "se_med_pct": 1.207997635819051
+    }
+   },
+   "steps_per_s": {
+    "n": 6,
+    "median": 418.687526,
+    "min": 405.754244,
+    "max": 427.812831,
+    "q1": 410.9625995,
+    "q3": 425.20554649999997,
+    "range_pct": 5.268508286057701,
+    "iqr_pct": 3.401808297484353,
+    "sd_pct": 2.1651932463715524,
+    "se_med_pct": 1.1078375419503321
+   },
+   "steps_per_s_values": [
+    416.707,
+    409.048,
+    405.754,
+    420.668,
+    426.718,
+    427.813
+   ],
+   "ms_from_steps_per_s": {
+    "n": 6,
+    "median": 2.3884695008483403,
+    "min": 2.337470799233696,
+    "max": 2.4645460023826637,
+    "q1": 2.351893650476219,
+    "q3": 2.4334684512784186,
+    "range_pct": 5.320361139375368,
+    "iqr_pct": 3.4153586961535667,
+    "sd_pct": 2.1844633975986216,
+    "se_med_pct": 1.117697260940396
+   },
+   "hash": [
+    "0xb8522b4e3fc62cfe"
+   ],
+   "threads": [
+    16
+   ],
+   "patch_line": [
+    "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=0"
+   ]
+  }
+ },
+ "comparisons": {
+  "boyko D-L4L2 / Jolt v5.3.0 @W1": {
+   "ratio": 0.6907853708789529,
+   "effect_pct": -30.921462912104715,
+   "bar_range_pct": 51.97029068485837,
+   "bar_iqr_pct": 7.714828134097671,
+   "bar_se_pct": 10.30752946267095,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.6.0 @W1": {
+   "ratio": 1.078151370238213,
+   "effect_pct": 7.815137023821306,
+   "bar_range_pct": 37.77608067279294,
+   "bar_iqr_pct": 6.623402207892017,
+   "bar_se_pct": 7.050642162632666,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "Jolt v5.6.0 vs v5.3.0 @W1": {
+   "ratio": 0.6407127885264634,
+   "effect_pct": -35.928721147353656,
+   "bar_range_pct": 64.00380658519644,
+   "bar_iqr_pct": 10.161551685497832,
+   "bar_se_pct": 12.42806421017255,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L5 vs D-L4L2 @W1": {
+   "ratio": 1.0133637613611537,
+   "effect_pct": 1.3363761361153692,
+   "bar_range_pct": 4.453884432528495,
+   "bar_iqr_pct": 1.4915873367143133,
+   "bar_se_pct": 0.9830711831780818,
+   "claim_range": false,
+   "claim_iqr": false,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.3.0 @W1": {
+   "ratio": 0.7000168617271553,
+   "effect_pct": -29.998313827284473,
+   "bar_range_pct": 51.85838478911771,
+   "bar_iqr_pct": 7.849363581372791,
+   "bar_se_pct": 10.281617288047322,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.6.0 @W1": {
+   "ratio": 1.0925595278612772,
+   "effect_pct": 9.255952786127718,
+   "bar_range_pct": 37.621978019036675,
+   "bar_iqr_pct": 6.77963069063687,
+   "bar_se_pct": 7.012705992663413,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W2": {
+   "ratio": 1.0612662372302335,
+   "effect_pct": 6.12662372302335,
+   "bar_range_pct": 28.06915930689405,
+   "bar_iqr_pct": 3.958108898309784,
+   "bar_se_pct": 5.40775806067024,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.6.0 @W2": {
+   "ratio": 1.5764094243920195,
+   "effect_pct": 57.64094243920195,
+   "bar_range_pct": 27.542024607173552,
+   "bar_iqr_pct": 3.672048583358572,
+   "bar_se_pct": 5.324378969542125,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "Jolt v5.6.0 vs v5.3.0 @W2": {
+   "ratio": 0.6732173893463855,
+   "effect_pct": -32.67826106536145,
+   "bar_range_pct": 7.812492349997637,
+   "bar_iqr_pct": 2.8709005867728306,
+   "bar_se_pct": 1.4310655993955468,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L5 vs D-L4L2 @W2": {
+   "ratio": 0.8645482579880326,
+   "effect_pct": -13.54517420119674,
+   "bar_range_pct": 36.88126904747442,
+   "bar_iqr_pct": 4.633392764483505,
+   "bar_se_pct": 7.173901267635309,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.3.0 @W2": {
+   "ratio": 0.9175158766589125,
+   "effect_pct": -8.248412334108746,
+   "bar_range_pct": 25.742958722897658,
+   "bar_iqr_pct": 4.028207776487576,
+   "bar_se_pct": 5.016352931787234,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.6.0 @W2": {
+   "ratio": 1.3628820217340376,
+   "effect_pct": 36.28820217340376,
+   "bar_range_pct": 25.167148012342782,
+   "bar_iqr_pct": 3.7475021865532754,
+   "bar_se_pct": 4.926353712920834,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W4": {
+   "ratio": 1.6022392782715928,
+   "effect_pct": 60.22392782715929,
+   "bar_range_pct": 33.44425896221695,
+   "bar_iqr_pct": 5.473590134572943,
+   "bar_se_pct": 6.6825296570494785,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.6.0 @W4": {
+   "ratio": 2.3119216728357412,
+   "effect_pct": 131.19216728357412,
+   "bar_range_pct": 33.94032073007198,
+   "bar_iqr_pct": 6.053721482236955,
+   "bar_se_pct": 6.770468824452627,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "Jolt v5.6.0 vs v5.3.0 @W4": {
+   "ratio": 0.6930335474152672,
+   "effect_pct": -30.696645258473275,
+   "bar_range_pct": 9.799768352896981,
+   "bar_iqr_pct": 6.167085136561907,
+   "bar_se_pct": 2.077958401644946,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L5 vs D-L4L2 @W4": {
+   "ratio": 0.745505318135215,
+   "effect_pct": -25.449468186478498,
+   "bar_range_pct": 38.34148405390264,
+   "bar_iqr_pct": 4.9763685674094855,
+   "bar_se_pct": 7.575414126630117,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.3.0 @W4": {
+   "ratio": 1.194477902876601,
+   "effect_pct": 19.447790287660105,
+   "bar_range_pct": 20.35090877494068,
+   "bar_iqr_pct": 5.113671813463075,
+   "bar_se_pct": 3.9831598268245565,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.6.0 @W4": {
+   "ratio": 1.7235499022111078,
+   "effect_pct": 72.35499022111078,
+   "bar_range_pct": 21.15623789085108,
+   "bar_iqr_pct": 5.730357252301961,
+   "bar_se_pct": 4.128995966523599,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W8": {
+   "ratio": 2.1723432902348225,
+   "effect_pct": 117.23432902348225,
+   "bar_range_pct": 69.08169122447704,
+   "bar_iqr_pct": 17.781265920075878,
+   "bar_se_pct": 13.578077398183364,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.6.0 @W8": {
+   "ratio": 3.0291720260329074,
+   "effect_pct": 202.91720260329075,
+   "bar_range_pct": 49.3500892921063,
+   "bar_iqr_pct": 7.411690255812581,
+   "bar_se_pct": 9.679625426767231,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "Jolt v5.6.0 vs v5.3.0 @W8": {
+   "ratio": 0.7171409453030593,
+   "effect_pct": -28.28590546969407,
+   "bar_range_pct": 83.94671230200784,
+   "bar_iqr_pct": 18.369379098768405,
+   "bar_se_pct": 16.48790021202587,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L5 vs D-L4L2 @W8": {
+   "ratio": 0.6870900412029571,
+   "effect_pct": -31.290995879704287,
+   "bar_range_pct": 15.667954399141971,
+   "bar_iqr_pct": 5.331289534337846,
+   "bar_se_pct": 3.041736909317065,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.3.0 @W8": {
+   "ratio": 1.4925954407944115,
+   "effect_pct": 49.259544079441156,
+   "bar_range_pct": 69.69292638590234,
+   "bar_iqr_pct": 17.633025382080714,
+   "bar_se_pct": 13.689699354796135,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.6.0 @W8": {
+   "ratio": 2.081313932177795,
+   "effect_pct": 108.13139321777952,
+   "bar_range_pct": 50.20214376832605,
+   "bar_iqr_pct": 7.048639503674305,
+   "bar_se_pct": 9.835590017694237,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W16": {
+   "ratio": 2.579280181468599,
+   "effect_pct": 157.9280181468599,
+   "bar_range_pct": 48.30961381057914,
+   "bar_iqr_pct": 2.7293158728196434,
+   "bar_se_pct": 9.722886619600931,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.6.0 @W16": {
+   "ratio": 3.4166316965738934,
+   "effect_pct": 241.66316965738935,
+   "bar_range_pct": 49.11476449450624,
+   "bar_iqr_pct": 6.9711974134824475,
+   "bar_se_pct": 9.918262645561553,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "Jolt v5.6.0 vs v5.3.0 @W16": {
+   "ratio": 0.7549189993334757,
+   "effect_pct": -24.50810006665243,
+   "bar_range_pct": 12.165879554776854,
+   "bar_iqr_pct": 7.222809022392517,
+   "bar_se_pct": 2.481243095525477,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L5 vs D-L4L2 @W16": {
+   "ratio": 0.6803187164309101,
+   "effect_pct": -31.968128356908988,
+   "bar_range_pct": 68.51721898410652,
+   "bar_iqr_pct": 7.609762854259162,
+   "bar_se_pct": 13.72248465572133,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.3.0 @W16": {
+   "ratio": 1.7547325823724025,
+   "effect_pct": 75.47325823724024,
+   "bar_range_pct": 49.298659528495634,
+   "bar_iqr_pct": 7.840909863929882,
+   "bar_se_pct": 9.8026128414448,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.6.0 @W16": {
+   "ratio": 2.324398490330314,
+   "effect_pct": 132.4398490330314,
+   "bar_range_pct": 50.087914072459085,
+   "bar_iqr_pct": 10.130562459132861,
+   "bar_se_pct": 9.996430773430351,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L4L2 vs J-A (bridge) @W1": {
+   "ratio": 0.5438842022846333,
+   "effect_pct": -45.61157977153667,
+   "bar_range_pct": 5.064460491929793,
+   "bar_iqr_pct": 1.3254898736461704,
+   "bar_se_pct": 1.0468096182490083,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "J-A / Jolt v5.3.0 @W1": {
+   "ratio": 1.2700964065094158,
+   "effect_pct": 27.00964065094158,
+   "bar_range_pct": 51.91438862658592,
+   "bar_iqr_pct": 7.819501215210183,
+   "bar_se_pct": 10.28790724508814,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L4L2 vs J-A (bridge) @W8": {
+   "ratio": 0.8483111897345199,
+   "effect_pct": -15.168881026548009,
+   "bar_range_pct": 9.727218488104894,
+   "bar_iqr_pct": 4.46946889100312,
+   "bar_se_pct": 1.9030255147324047,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "J-A / Jolt v5.3.0 @W8": {
+   "ratio": 2.5607858490168685,
+   "effect_pct": 156.07858490168684,
+   "bar_range_pct": 68.60202601011532,
+   "bar_iqr_pct": 17.39186845033641,
+   "bar_se_pct": 13.482477929109564,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L5-npoff vs D-L5 @W8": {
+   "ratio": 1.4909888549974144,
+   "effect_pct": 49.09888549974144,
+   "bar_range_pct": 36.29185534387802,
+   "bar_iqr_pct": 9.633525793566236,
+   "bar_se_pct": 7.042479438603688,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L5-npoff vs D-L4L2 @W8 (same knobs, different binaries)": {
+   "ratio": 1.0244435938133234,
+   "effect_pct": 2.4443593813323394,
+   "bar_range_pct": 35.10377242554074,
+   "bar_iqr_pct": 9.902254935652545,
+   "bar_se_pct": 6.822963729165494,
+   "claim_range": false,
+   "claim_iqr": false,
+   "claim_se": false
+  },
+  "D-L5 vs J-A (bridge) @W1": {
+   "ratio": 0.5511525409720666,
+   "effect_pct": -44.88474590279334,
+   "bar_range_pct": 3.7456266687746855,
+   "bar_iqr_pct": 1.9623605425749546,
+   "bar_se_pct": 0.749867195510338,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L5 vs J-A (bridge) @W8": {
+   "ratio": 0.5828661703076209,
+   "effect_pct": -41.71338296923791,
+   "bar_range_pct": 13.395622617562154,
+   "bar_iqr_pct": 3.837488576177842,
+   "bar_se_pct": 2.581702675245609,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L4L2 W16 vs W8": {
+   "ratio": 1.048543772901141,
+   "effect_pct": 4.854377290114109,
+   "bar_range_pct": 48.77874087035023,
+   "bar_iqr_pct": 4.333028388535225,
+   "bar_se_pct": 9.82238188161908,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": false
+  },
+  "D-L5 W16 vs W8": {
+   "ratio": 1.0382102940290119,
+   "effect_pct": 3.821029402901188,
+   "bar_range_pct": 50.6036414843124,
+   "bar_iqr_pct": 8.219245937502455,
+   "bar_se_pct": 10.053833235321255,
+   "claim_range": false,
+   "claim_iqr": false,
+   "claim_se": false
+  },
+  "JOLT-T W16 vs W8": {
+   "ratio": 0.8831134538793529,
+   "effect_pct": -11.688654612064708,
+   "bar_range_pct": 68.75124208379447,
+   "bar_iqr_pct": 17.45988109461874,
+   "bar_se_pct": 13.50627721544001,
+   "claim_range": false,
+   "claim_iqr": false,
+   "claim_se": false
+  },
+  "JOLT56-T W16 vs W8": {
+   "ratio": 0.9296347242016649,
+   "effect_pct": -7.036527579833507,
+   "bar_range_pct": 49.68224877753522,
+   "bar_iqr_pct": 9.206281052086089,
+   "bar_se_pct": 9.776906283712737,
+   "claim_range": false,
+   "claim_iqr": false,
+   "claim_se": false
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W1 [0,100)": {
+   "ratio": 0.7061017902962929,
+   "effect_pct": -29.389820970370707,
+   "bar_range_pct": 42.759267624115246,
+   "bar_iqr_pct": 24.850444586073205,
+   "bar_se_pct": 9.784579888589732,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W1 [100,500)": {
+   "ratio": 0.6920001039262922,
+   "effect_pct": -30.799989607370783,
+   "bar_range_pct": 56.93490271931892,
+   "bar_iqr_pct": 4.500429890896662,
+   "bar_se_pct": 11.5586780716704,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W2 [0,100)": {
+   "ratio": 1.1079573235253337,
+   "effect_pct": 10.79573235253337,
+   "bar_range_pct": 30.00011474724708,
+   "bar_iqr_pct": 3.4408305624055084,
+   "bar_se_pct": 5.9367367207879544,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W2 [100,500)": {
+   "ratio": 1.0490315031604096,
+   "effect_pct": 4.903150316040961,
+   "bar_range_pct": 27.68698592565198,
+   "bar_iqr_pct": 4.922255359417058,
+   "bar_se_pct": 5.3320893843331,
+   "claim_range": false,
+   "claim_iqr": false,
+   "claim_se": false
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W4 [0,100)": {
+   "ratio": 1.6982239595324662,
+   "effect_pct": 69.82239595324661,
+   "bar_range_pct": 33.92423410466965,
+   "bar_iqr_pct": 4.1035168367845865,
+   "bar_se_pct": 6.623707803996724,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W4 [100,500)": {
+   "ratio": 1.5791008523050762,
+   "effect_pct": 57.910085230507626,
+   "bar_range_pct": 33.71099097367728,
+   "bar_iqr_pct": 5.96599206578731,
+   "bar_se_pct": 6.715396127978111,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W8 [0,100)": {
+   "ratio": 2.4143950084361028,
+   "effect_pct": 141.4395008436103,
+   "bar_range_pct": 55.16680529945958,
+   "bar_iqr_pct": 4.494949227670105,
+   "bar_se_pct": 10.984317055116254,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W8 [100,500)": {
+   "ratio": 2.1187378630084064,
+   "effect_pct": 111.87378630084064,
+   "bar_range_pct": 72.29829202925791,
+   "bar_iqr_pct": 20.44611187407193,
+   "bar_se_pct": 14.235433363011003,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W16 [0,100)": {
+   "ratio": 2.83063334124529,
+   "effect_pct": 183.063334124529,
+   "bar_range_pct": 44.94772547008068,
+   "bar_iqr_pct": 5.251584035293645,
+   "bar_se_pct": 8.85188969074135,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W16 [100,500)": {
+   "ratio": 2.533855679862492,
+   "effect_pct": 153.3855679862492,
+   "bar_range_pct": 49.519775915077524,
+   "bar_iqr_pct": 2.5117148532150084,
+   "bar_se_pct": 9.936940731815504,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  }
+ },
+ "supp_comparisons_witness_filtered": {
+  "boyko D-L4L2 / Jolt v5.3.0 @W1": {
+   "ratio": 0.698284820815322,
+   "effect_pct": -30.171517918467806,
+   "bar_range_pct": 52.531233527284314,
+   "bar_iqr_pct": 5.075981921060566,
+   "bar_se_pct": 12.730461345829312,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.3.0 @W1": {
+   "ratio": 0.7076165325228139,
+   "effect_pct": -29.238346747718612,
+   "bar_range_pct": 52.42052513057836,
+   "bar_iqr_pct": 5.27821257215454,
+   "bar_se_pct": 12.70949001776618,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.6.0 @W1": {
+   "ratio": 1.0975858300925359,
+   "effect_pct": 9.758583009253584,
+   "bar_range_pct": 11.518461201694144,
+   "bar_iqr_pct": 4.420590533710525,
+   "bar_se_pct": 2.442779134456529,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L5 vs D-L4L2 @W1": {
+   "ratio": 1.0133637613611537,
+   "effect_pct": 1.3363761361153692,
+   "bar_range_pct": 4.453884432528495,
+   "bar_iqr_pct": 1.4915873367143133,
+   "bar_se_pct": 0.9830711831780818,
+   "claim_range": false,
+   "claim_iqr": false,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W2": {
+   "ratio": 1.0574156942688862,
+   "effect_pct": 5.741569426888615,
+   "bar_range_pct": 8.147996512815244,
+   "bar_iqr_pct": 4.030840276086397,
+   "bar_se_pct": 1.6563366714445944,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.3.0 @W2": {
+   "ratio": 0.9108119829903087,
+   "effect_pct": -8.918801700969127,
+   "bar_range_pct": 25.919563619415637,
+   "bar_iqr_pct": 4.158875171773972,
+   "bar_se_pct": 6.100618141267145,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.6.0 @W2": {
+   "ratio": 1.3529240293014408,
+   "effect_pct": 35.292402930144085,
+   "bar_range_pct": 25.347765059020315,
+   "bar_iqr_pct": 3.887615907219306,
+   "bar_se_pct": 6.026832159112804,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L5 vs D-L4L2 @W2": {
+   "ratio": 0.8613565960169132,
+   "effect_pct": -13.864340398308684,
+   "bar_range_pct": 25.453172767680044,
+   "bar_iqr_pct": 4.808238824585595,
+   "bar_se_pct": 6.0842590587116785,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W4": {
+   "ratio": 1.598470110582661,
+   "effect_pct": 59.847011058266105,
+   "bar_range_pct": 7.508226186020872,
+   "bar_iqr_pct": 4.542079766330099,
+   "bar_se_pct": 1.6895977945273675,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.3.0 @W4": {
+   "ratio": 1.1942031423134325,
+   "effect_pct": 19.420314231343248,
+   "bar_range_pct": 7.3936585743494545,
+   "bar_iqr_pct": 4.292813156768582,
+   "bar_se_pct": 1.6373366783756536,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.6.0 @W4": {
+   "ratio": 1.7231534415142291,
+   "effect_pct": 72.3153441514229,
+   "bar_range_pct": 9.385792499431073,
+   "bar_iqr_pct": 5.011546629746988,
+   "bar_se_pct": 1.9656848383943266,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L5 vs D-L4L2 @W4": {
+   "ratio": 0.7470913183845093,
+   "effect_pct": -25.290868161549074,
+   "bar_range_pct": 6.959245758872501,
+   "bar_iqr_pct": 2.7772556857860407,
+   "bar_se_pct": 1.5494342426183358,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W8": {
+   "ratio": 2.178861204519638,
+   "effect_pct": 117.8861204519638,
+   "bar_range_pct": 25.045199382761393,
+   "bar_iqr_pct": 6.774927501714913,
+   "bar_se_pct": 5.642437113009842,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.3.0 @W8": {
+   "ratio": 1.499535817669248,
+   "effect_pct": 49.95358176692479,
+   "bar_range_pct": 26.679983302895227,
+   "bar_iqr_pct": 7.4631905964619,
+   "bar_se_pct": 5.844072946347088,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.6.0 @W8": {
+   "ratio": 2.100830741913785,
+   "effect_pct": 110.08307419137849,
+   "bar_range_pct": 14.783713156776509,
+   "bar_iqr_pct": 7.79170162657818,
+   "bar_se_pct": 3.1901902803852358,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L5 vs D-L4L2 @W8": {
+   "ratio": 0.6882199814098955,
+   "effect_pct": -31.17800185901045,
+   "bar_range_pct": 15.676390653779615,
+   "bar_iqr_pct": 3.6569445276031693,
+   "bar_se_pct": 3.1590748631829593,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L4L2 / Jolt v5.3.0 @W16": {
+   "ratio": 2.578539886781881,
+   "effect_pct": 157.8539886781881,
+   "bar_range_pct": 6.828421268943578,
+   "bar_iqr_pct": 2.368715065998233,
+   "bar_se_pct": 1.276419448101875,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.3.0 @W16": {
+   "ratio": 1.7547325823724025,
+   "effect_pct": 75.47325823724024,
+   "bar_range_pct": 49.298659528495634,
+   "bar_iqr_pct": 7.840909863929882,
+   "bar_se_pct": 9.8026128414448,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "boyko D-L5 / Jolt v5.6.0 @W16": {
+   "ratio": 2.335448328280264,
+   "effect_pct": 133.5448328280264,
+   "bar_range_pct": 49.76911754863622,
+   "bar_iqr_pct": 8.854798468590705,
+   "bar_se_pct": 9.961292449546725,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L5 vs D-L4L2 @W16": {
+   "ratio": 0.6805140348487599,
+   "effect_pct": -31.948596515124006,
+   "bar_range_pct": 49.06544453905283,
+   "bar_iqr_pct": 7.487999507767365,
+   "bar_se_pct": 9.767359290841366,
+   "claim_range": false,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L5-npoff vs D-L5 @W8": {
+   "ratio": 1.4750867992035273,
+   "effect_pct": 47.508679920352726,
+   "bar_range_pct": 17.30377527114685,
+   "bar_iqr_pct": 6.5077674831068695,
+   "bar_se_pct": 3.6628562016371595,
+   "claim_range": true,
+   "claim_iqr": true,
+   "claim_se": true
+  },
+  "D-L5-npoff vs D-L4L2 @W8": {
+   "ratio": 1.0151842095258337,
+   "effect_pct": 1.5184209525833658,
+   "bar_range_pct": 14.658142505578832,
+   "bar_iqr_pct": 5.70538924075815,
+   "bar_se_pct": 3.3317298098610424,
+   "claim_range": false,
+   "claim_iqr": false,
+   "claim_se": false
+  }
+ },
+ "bridge_to_p0b": {
+  "J-A@W1": {
+   "p0b_median_ms": 19.671,
+   "win3_median_ms": 19.482608900000002,
+   "win3_min": 19.3372132,
+   "win3_max": 19.644036399999997,
+   "shift_pct": -0.9577098266483453,
+   "win3_range_pct": 1.5748568457892547,
+   "win3_iqr_pct": 0.6502835459577531,
+   "win3_se_pct": 0.2940412888877215,
+   "p0b_inside_win3_minmax": false
+  },
+  "J-A@W8": {
+   "p0b_median_ms": 9.162,
+   "win3_median_ms": 9.1743669,
+   "win3_min": 9.069542,
+   "win3_max": 9.2429372,
+   "shift_pct": 0.13498035363457284,
+   "win3_range_pct": 1.8899963549528398,
+   "win3_iqr_pct": 0.885989746060857,
+   "win3_se_pct": 0.3596059279946487,
+   "p0b_inside_win3_minmax": true
+  },
+  "JOLT-T@W1": {
+   "p0b_median_ms": 15.723,
+   "win3_median_ms": 15.3394725,
+   "win3_min": 15.0678492,
+   "win3_max": 19.0422108,
+   "shift_pct": -2.4392768555619226,
+   "win3_range_pct": 25.90937595800638,
+   "win3_iqr_pct": 3.8552926119200075,
+   "win3_se_pct": 5.135542677391895,
+   "p0b_inside_win3_minmax": true
+  },
+  "JOLT-T@W2": {
+   "p0b_median_ms": 8.794,
+   "win3_median_ms": 8.5714665,
+   "win3_min": 8.4563778,
+   "win3_max": 8.7444314,
+   "shift_pct": -2.5305151239481516,
+   "win3_range_pct": 3.3606104626320312,
+   "win3_iqr_pct": 1.141531615389275,
+   "win3_se_pct": 0.6065048001886331,
+   "p0b_inside_win3_minmax": false
+  },
+  "JOLT-T@W4": {
+   "p0b_median_ms": 5.229,
+   "win3_median_ms": 5.1677722,
+   "win3_min": 5.1056396,
+   "win3_max": 5.2502086,
+   "shift_pct": -1.1709275196022162,
+   "win3_range_pct": 2.7975110822415843,
+   "win3_iqr_pct": 1.9794438694491894,
+   "win3_se_pct": 0.6259857859236608,
+   "p0b_inside_win3_minmax": true
+  },
+  "JOLT-T@W8": {
+   "p0b_median_ms": 3.533,
+   "win3_median_ms": 3.5826373,
+   "win3_min": 3.4660822000000002,
+   "win3_max": 4.6930962,
+   "shift_pct": 1.4049617888480137,
+   "win3_range_pct": 34.2489037335708,
+   "win3_iqr_pct": 8.650681719860394,
+   "win3_se_pct": 6.731640688107375,
+   "p0b_inside_win3_minmax": true
+  },
+  "JOLT-T@W16": {
+   "p0b_median_ms": 3.209,
+   "win3_median_ms": 3.1638751999999997,
+   "win3_min": 3.1120476,
+   "win3_max": 3.2053466,
+   "shift_pct": -1.4061950763477826,
+   "win3_range_pct": 2.9488836980674846,
+   "win3_iqr_pct": 1.1736983178097573,
+   "win3_se_pct": 0.5384187044445546,
+   "p0b_inside_win3_minmax": false
+  },
+  "JOLT56-T@W1": {
+   "p0b_median_ms": 9.65,
+   "win3_median_ms": 9.8281962,
+   "win3_min": 9.5182656,
+   "win3_max": 11.364361,
+   "shift_pct": 1.8465927461139842,
+   "win3_range_pct": 18.783664493795932,
+   "win3_iqr_pct": 3.309229825916593,
+   "win3_se_pct": 3.498627789824098,
+   "p0b_inside_win3_minmax": true
+  },
+  "JOLT56-T@W2": {
+   "p0b_median_ms": 5.708,
+   "win3_median_ms": 5.7704603,
+   "win3_min": 5.7028374,
+   "win3_max": 5.8177414,
+   "shift_pct": 1.0942589348283072,
+   "win3_range_pct": 1.9912449618620567,
+   "win3_iqr_pct": 0.8703005893654777,
+   "win3_se_pct": 0.3796565748034401,
+   "p0b_inside_win3_minmax": true
+  },
+  "JOLT56-T@W4": {
+   "p0b_median_ms": 3.557,
+   "win3_median_ms": 3.5814395,
+   "win3_min": 3.5193664,
+   "win3_max": 3.66344,
+   "shift_pct": 0.6870818105144894,
+   "win3_range_pct": 4.022784693138053,
+   "win3_iqr_pct": 2.364325852775103,
+   "win3_se_pct": 0.8292283012314771,
+   "p0b_inside_win3_minmax": true
+  },
+  "JOLT56-T@W8": {
+   "p0b_median_ms": 2.493,
+   "win3_median_ms": 2.5692559,
+   "win3_min": 2.5007257999999997,
+   "win3_max": 3.1241478,
+   "shift_pct": 3.0588006417970437,
+   "win3_range_pct": 24.26469080016514,
+   "win3_iqr_pct": 3.0861347832265213,
+   "win3_se_pct": 4.7589628068149405,
+   "p0b_inside_win3_minmax": false
+  },
+  "JOLT56-T@W16": {
+   "p0b_median_ms": 2.447,
+   "win3_median_ms": 2.3884695000000002,
+   "win3_min": 2.3374707999999997,
+   "win3_max": 2.464546,
+   "shift_pct": -2.3919288925214444,
+   "win3_range_pct": 5.320361009424661,
+   "win3_iqr_pct": 3.415358663780311,
+   "win3_se_pct": 1.1176972414198132,
+   "p0b_inside_win3_minmax": true
+  }
+ },
+ "scaling": {
+  "D-L4L2": {
+   "1": 1.0,
+   "2": 1.1648609239839727,
+   "4": 1.2797431731825943,
+   "8": 1.3615144559842143,
+   "16": 1.2984812758146824
+  },
+  "J-A": {
+   "1": 1.0,
+   "8": 2.1235916453265022
+  },
+  "JOLT-T": {
+   "1": 1.0,
+   "2": 1.7895972060323633,
+   "4": 2.9682950227566143,
+   "8": 4.281614692059394,
+   "16": 4.848317816075679
+  },
+  "JOLT56-T": {
+   "1": 1.0,
+   "2": 1.7031910261994179,
+   "4": 2.744202770980775,
+   "8": 3.8253084093336134,
+   "16": 4.114851037453064
+  },
+  "D-L5": {
+   "1": 1.0,
+   "2": 1.3653695285189824,
+   "4": 1.739552118550224,
+   "8": 2.0080474574309846,
+   "16": 1.9341432742284785
+  }
+ },
+ "hashes_per_row": {
+  "JOLT-T": [
+   "0xee15b89965ec747"
+  ],
+  "JOLT56-T": [
+   "0xb8522b4e3fc62cfe"
+  ],
+  "J-A": [
+   "0x32d5e235342b4143"
+  ],
+  "D-L5": [
+   "0x32d5e235342b4143"
+  ],
+  "D-L4L2": [
+   "0x32d5e235342b4143"
+  ],
+  "D-L5-npoff": [
+   "0x32d5e235342b4143"
+  ]
+ },
+ "void_steps_nonzero": [],
+ "drops_nonzero": [],
+ "disarmed_ring_traffic_nonzero": [],
+ "jolt_threads": [
+  [
+   "JOLT-T",
+   1,
+   1
+  ],
+  [
+   "JOLT-T",
+   2,
+   2
+  ],
+  [
+   "JOLT-T",
+   4,
+   4
+  ],
+  [
+   "JOLT-T",
+   8,
+   8
+  ],
+  [
+   "JOLT-T",
+   16,
+   16
+  ],
+  [
+   "JOLT56-T",
+   1,
+   1
+  ],
+  [
+   "JOLT56-T",
+   2,
+   2
+  ],
+  [
+   "JOLT56-T",
+   4,
+   4
+  ],
+  [
+   "JOLT56-T",
+   8,
+   8
+  ],
+  [
+   "JOLT56-T",
+   16,
+   16
+  ]
+ ],
+ "masks": [
+  "0xffff"
+ ],
+ "target_env": [
+  "msvc"
+ ],
+ "profiles": [
+  [
+   "D-L4L2",
+   "dev"
+  ],
+  [
+   "D-L5",
+   "dev"
+  ],
+  [
+   "D-L5-npoff",
+   "dev"
+  ],
+  [
+   "J-A",
+   "dev"
+  ]
+ ],
+ "exe_sha_per_row": {
+  "JOLT-T": [
+   "29b23ad1cfc38b7fb39b484b8cc2cfad522a0a910fd03d6e3a15f8b90e0cefac"
+  ],
+  "JOLT56-T": [
+   "918fd2b70ecc634cc0574cb676c56a3c929a46a51173cf9aa76fdd628e2ef0ad"
+  ],
+  "J-A": [
+   "ef9325efa9a277274f602c59504b0856f75ae1ddec7d683b0ac5f8c5bf7968c3"
+  ],
+  "D-L5": [
+   "26d17a102814bccbd5f1d2ab2ddd696fd4f14c90ed10069d0d9ee3788901a8ab"
+  ],
+  "D-L4L2": [
+   "368d4104578bd621a2eccc3be99e903a9843e070a118e94c90d4b354d1410aeb"
+  ],
+  "D-L5-npoff": [
+   "26d17a102814bccbd5f1d2ab2ddd696fd4f14c90ed10069d0d9ee3788901a8ab"
+  ]
+ },
+ "expect_pose_gate": [
+  [
+   "D-L4L2",
+   1,
+   "match"
+  ],
+  [
+   "D-L4L2",
+   2,
+   "none"
+  ],
+  [
+   "D-L4L2",
+   4,
+   "none"
+  ],
+  [
+   "D-L4L2",
+   8,
+   "match"
+  ],
+  [
+   "D-L4L2",
+   16,
+   "none"
+  ],
+  [
+   "D-L5",
+   1,
+   "match"
+  ],
+  [
+   "D-L5",
+   2,
+   "match"
+  ],
+  [
+   "D-L5",
+   4,
+   "match"
+  ],
+  [
+   "D-L5",
+   8,
+   "match"
+  ],
+  [
+   "D-L5",
+   16,
+   "match"
+  ],
+  [
+   "D-L5-npoff",
+   8,
+   "match"
+  ],
+  [
+   "J-A",
+   1,
+   "none"
+  ],
+  [
+   "J-A",
+   8,
+   "none"
+  ]
+ ],
+ "jolt_receipts": [
+  {
+   "row": "JOLT-T",
+   "exit": 0,
+   "manifolds": {
+    "n_frames": 500,
+    "mean_0_500": 8171.046,
+    "mean_0_100": 7031.22,
+    "mean_100_500": 8456.0025,
+    "final": 8456.0,
+    "points_mean_100_500": 31034.94,
+    "active_bodies_min": 1240.0
+   },
+   "args": [
+    "-s=Pyramid",
+    "-q=Discrete",
+    "-receipt",
+    "-t=1",
+    "-i=500"
+   ],
+   "hash": "0xee15b89965ec747"
+  },
+  {
+   "row": "JOLT56-T",
+   "exit": 0,
+   "manifolds": {
+    "n_frames": 500,
+    "mean_0_500": 8199.646,
+    "mean_0_100": 7042.23,
+    "mean_100_500": 8489.0,
+    "final": 8489.0,
+    "points_mean_100_500": 31111.9575,
+    "active_bodies_min": 1240.0
+   },
+   "args": [
+    "-s=Pyramid",
+    "-q=Discrete",
+    "-receipt",
+    "-t=1",
+    "-i=500"
+   ],
+   "hash": "0xb8522b4e3fc62cfe"
+  }
+ ],
+ "per_manifold": {
+  "1": {
+   "boyko_manifolds_100_500": 4519.257,
+   "boyko_us_per_manifold_100_500": 2.3456151088552835,
+   "JOLT-T_manifolds_100_500": 8456.0025,
+   "JOLT-T_us_per_manifold_100_500": 1.8115591853242712,
+   "per_manifold_ratio_boyko_over_JOLT-T": 1.2948045682732776,
+   "JOLT56-T_manifolds_100_500": 8489.0,
+   "JOLT56-T_us_per_manifold_100_500": 1.1444909441630347,
+   "per_manifold_ratio_boyko_over_JOLT56-T": 2.0494833277782116
+  },
+  "2": {
+   "boyko_manifolds_100_500": 4519.257,
+   "boyko_us_per_manifold_100_500": 2.01802110391155,
+   "JOLT-T_manifolds_100_500": 8456.0025,
+   "JOLT-T_us_per_manifold_100_500": 1.0281088788703645,
+   "per_manifold_ratio_boyko_over_JOLT-T": 1.9628476568832403,
+   "JOLT56-T_manifolds_100_500": 8489.0,
+   "JOLT56-T_us_per_manifold_100_500": 0.6750166391801153,
+   "per_manifold_ratio_boyko_over_JOLT56-T": 2.9895871994543226
+  },
+  "4": {
+   "boyko_manifolds_100_500": 4519.257,
+   "boyko_us_per_manifold_100_500": 1.8411569368593113,
+   "JOLT-T_manifolds_100_500": 8456.0025,
+   "JOLT-T_us_per_manifold_100_500": 0.623136050397336,
+   "per_manifold_ratio_boyko_over_JOLT-T": 2.954662847198966,
+   "JOLT56-T_manifolds_100_500": 8489.0,
+   "JOLT56-T_us_per_manifold_100_500": 0.42604628048062204,
+   "per_manifold_ratio_boyko_over_JOLT56-T": 4.321495154897973
+  },
+  "8": {
+   "boyko_manifolds_100_500": 4519.257,
+   "boyko_us_per_manifold_100_500": 1.7293451666944368,
+   "JOLT-T_manifolds_100_500": 8456.0025,
+   "JOLT-T_us_per_manifold_100_500": 0.43622082361021064,
+   "per_manifold_ratio_boyko_over_JOLT-T": 3.96438013293861,
+   "JOLT56-T_manifolds_100_500": 8489.0,
+   "JOLT56-T_us_per_manifold_100_500": 0.306293526917187,
+   "per_manifold_ratio_boyko_over_JOLT56-T": 5.646038896414558
+  },
+  "16": {
+   "boyko_manifolds_100_500": 4519.257,
+   "boyko_us_per_manifold_100_500": 1.818862342858572,
+   "JOLT-T_manifolds_100_500": 8456.0025,
+   "JOLT-T_us_per_manifold_100_500": 0.38363647598259343,
+   "per_manifold_ratio_boyko_over_JOLT-T": 4.741108983967151,
+   "JOLT56-T_manifolds_100_500": 8489.0,
+   "JOLT56-T_us_per_manifold_100_500": 0.28821598539286136,
+   "per_manifold_ratio_boyko_over_JOLT56-T": 6.310761494992437
+  }
+ },
+ "perf_total_by_pass": {
+  "0": 129.2,
+  "1": 130.45
+ },
+ "wall_clock": {
+  "start": "2026-09-21T03:47:46.181+03:00",
+  "end": "2026-09-21T04:42:16.242+03:00",
+  "status": "complete",
+  "first_process": "2026-09-21T03:50:18.009+03:00",
+  "last_process_end": "2026-09-21T04:41:58.110+03:00",
+  "binaries_after": "all match",
+  "machine_before": {
+   "time": "2026-09-21T03:47:46.735+03:00",
+   "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+   "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n249"
+  },
+  "machine_after": {
+   "time": "2026-09-21T04:42:16.631+03:00",
+   "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+   "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n264"
+  },
+  "order_pass0": [
+   "JOLT-T@W1",
+   "D-L4L2@W1",
+   "JOLT56-T@W1",
+   "J-A@W1",
+   "D-L5@W1",
+   "JOLT-T@W2",
+   "D-L4L2@W2",
+   "JOLT56-T@W2",
+   "D-L5@W2",
+   "JOLT-T@W4",
+   "D-L4L2@W4",
+   "JOLT56-T@W4",
+   "D-L5@W4",
+   "JOLT-T@W8",
+   "D-L4L2@W8",
+   "J-A@W8",
+   "JOLT56-T@W8",
+   "D-L5@W8",
+   "D-L5-npoff@W8",
+   "JOLT-T@W16",
+   "D-L4L2@W16",
+   "JOLT56-T@W16",
+   "D-L5@W16"
+  ],
+  "cells_per_round": 23,
+  "per_pass": {
+   "0": [
+    "2026-09-21T03:50:08.426+03:00",
+    "2026-09-21T04:28:09.535+03:00"
+   ],
+   "1": [
+    "2026-09-21T04:30:35.667+03:00",
+    "2026-09-21T04:41:58.110+03:00"
+   ]
+  }
+ }
+}

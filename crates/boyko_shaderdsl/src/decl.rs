@@ -12,7 +12,7 @@
 //! span (the `float` decls + ALL comments between them stay hand-written). This module authors the
 //! two decls ONCE over the control-flow axis `C: Cf` via the TYPED [`Cf::decl_bool_var`] facet
 //! (Inc 4d — `decl_var` hardcodes `float`); the printers
-//! ([`crate::emit::emit_hlsl_b1_decl_hit`] / [`crate::emit::emit_hlsl_b1_decl_exhausted`]) walk
+//! (`crate::emit::emit_hlsl_b1_decl_hit` / `crate::emit::emit_hlsl_b1_decl_exhausted`) walk
 //! each one-statement body into its `bool <name> = <init>;` line.
 //!
 //! Each body is a ONE-STATEMENT decl (no loop, no return, no field call) — the smallest possible

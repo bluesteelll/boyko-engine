@@ -59,6 +59,8 @@ pub struct NonSendResMutState<R: NonSendResource> {
 //   `CpuExclusive` (dispatcher-solo at `running == 0`), so no other reference
 //   into the same NonSend slot can co-exist for the borrow's lifetime.
 unsafe impl<'a, R: NonSendResource> SystemParam for NonSendResMut<'a, R> {
+    const HAS_DEFERRED: bool = false;
+
     type State = NonSendResMutState<R>;
     type Item<'w, 's> = NonSendResMut<'w, R>;
 

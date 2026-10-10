@@ -24,6 +24,13 @@
 //!   reject self-links but NOT 2-cycles). With the visited set const-folded away,
 //!   the walk must TERMINATE at the depth cap (`MAX_PROPAGATION_DEPTH`), not hang.
 
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, Mutex};
 
 use boyko_ecs::ecs::constants::MAX_PROPAGATION_DEPTH;
@@ -136,7 +143,10 @@ fn wide_fanout_descendants_and_sources_linear_in_n() {
 
 #[test]
 fn balanced_binary_tree_descendants_linear_in_n() {
-    for &n in &[15usize, 127, 1023] {
+    // Under Miri 15 and 127: the count is exact per size, and the 1 023-node tree ran past 3 min of
+    // interpretation (MEASURED 2026-10-10). All three sizes natively.
+    let sizes: &[usize] = if cfg!(miri) { &[15, 127] } else { &[15, 127, 1023] };
+    for &n in sizes {
         // n = 2^k - 1 ⇒ a complete binary tree: node i's parent is (i-1)/2.
         let mut ecs = EcsMaster::new();
         let nodes = spawn_tags(&mut ecs, n);

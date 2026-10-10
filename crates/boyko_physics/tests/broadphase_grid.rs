@@ -9,10 +9,15 @@
 //! `AllPairs` arm (same operand order, same [`body_bounding_radius`]), so a match
 //! proves the grid reproduces the real default path — NOT a re-derived oracle.
 
+// clippy 1.98.0 false positive: this file's `thread_local!` initialisers already
+// use the `const { … }` form the lint asks for (all 63 in the workspace do).
+// See this crate's lib.rs for the full account and the delete condition.
+#![allow(clippy::missing_const_for_thread_local)]
+
 use boyko_physics::components::ColliderShape;
 use boyko_physics::manifold::BodyIndex;
 use boyko_physics::math::Vec3;
-use boyko_physics::resources::{BodyState, BroadphaseGrid};
+use boyko_physics::resources::{BodyState, BroadphaseGrid, ContactPairs};
 use boyko_physics::systems::body_bounding_radius;
 
 use proptest::prelude::*;
@@ -56,9 +61,9 @@ fn all_pairs(bodies: &[BodyState]) -> Vec<(BodyIndex, BodyIndex)> {
 
 /// Runs the grid build over `bodies` into a fresh grid, returning the pair set.
 fn grid_pairs(grid: &mut BroadphaseGrid, bodies: &[BodyState]) -> Vec<(BodyIndex, BodyIndex)> {
-    let mut out = Vec::new();
+    let mut out = ContactPairs::with_capacity(0);
     grid.build(bodies, &mut out);
-    out
+    out.pairs().iter().copied().collect::<Vec<_>>()
 }
 
 /// Asserts the grid pair set is bit-identical (same `(min, max)` order) to
@@ -113,6 +118,61 @@ proptest! {
         let a = all_pairs(&bodies);
         prop_assert_eq!(g, a);
     }
+}
+
+// ── V2 (C3): the speculative margin ──────────────────────────────────────────
+
+/// Every body's bounding sphere inflated by `margin` (V2's `bp_margin`, half the speculative
+/// distance), as the gather writes it.
+fn with_margin(mut b: BodyState, margin: f32) -> BodyState {
+    b.bp_margin = margin;
+    b
+}
+
+proptest! {
+    // V2 B2: the 0%-correctness scenes with every bounding sphere inflated by 10 mm (half of the
+    // owner's 20 mm speculative distance): the grid still emits all-pairs' exact set.
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn grid_equals_all_pairs_with_the_speculative_margin(
+        scene in proptest::collection::vec(
+            (
+                (-20.0_f32..20.0, -20.0_f32..20.0, -20.0_f32..20.0),
+                prop_oneof![
+                    (0.1_f32..3.0).prop_map(|r| ColliderShape::Sphere { radius: r }),
+                    ((0.1_f32..3.0), (0.1_f32..3.0), (0.1_f32..3.0))
+                        .prop_map(|(x, y, z)| ColliderShape::Box {
+                            half_extents: Vec3::new(x, y, z),
+                        }),
+                ],
+            ),
+            0..40usize,
+        )
+    ) {
+        let bodies: Vec<BodyState> = scene
+            .into_iter()
+            .map(|((px, py, pz), shape)| with_margin(body(Vec3::new(px, py, pz), shape), 0.01))
+            .collect();
+        let mut grid = BroadphaseGrid::with_capacity(bodies.len());
+        let g = grid_pairs(&mut grid, &bodies);
+        let a = all_pairs(&bodies);
+        prop_assert_eq!(g, a);
+    }
+}
+
+/// V2 B2's anti-vacuity: the margin is what pairs two spheres whose surfaces are 10 mm apart —
+/// no candidate without it, one with it, on the grid and on all-pairs alike.
+#[test]
+fn the_speculative_margin_pairs_surfaces_within_the_distance() {
+    let exact = [sphere(Vec3::ZERO, 0.5), sphere(Vec3::new(1.01, 0.0, 0.0), 0.5)];
+    let inflated = exact.map(|b| with_margin(b, 0.01));
+    let mut grid = BroadphaseGrid::with_capacity(2);
+    assert!(grid_pairs(&mut grid, &exact).is_empty() && all_pairs(&exact).is_empty(), "no margin, no pair");
+    let mut grid = BroadphaseGrid::with_capacity(2);
+    let g = grid_pairs(&mut grid, &inflated);
+    assert_eq!(g, all_pairs(&inflated), "the grid and all-pairs agree with the margin");
+    assert_eq!(g.len(), 1, "the margin pairs the two spheres");
 }
 
 // ── Multi-oversized size disparity (O2 W1: decoupled cell-size floor) ─────────
@@ -402,7 +462,7 @@ fn grid_does_no_per_step_alloc_in_steady_state() {
         .collect();
 
     let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-    let mut out: Vec<(BodyIndex, BodyIndex)> = Vec::new();
+    let mut out = ContactPairs::with_capacity(0);
     // Warm-up builds: grow every buffer (grid scratch + the output Vec) to its
     // steady-state size. Several iterations so prefix-sum/cursor/candidate Vecs
     // all settle.
@@ -523,7 +583,7 @@ mod world_ab {
         let (mut world, mut schedule) = static_cluster_world();
         world.resource_mut::<PhysicsConfig>().broadphase = kind;
         schedule.run(&mut world);
-        world.resource::<ContactPairs>().pairs.clone()
+        world.resource::<ContactPairs>().pairs().iter().copied().collect::<Vec<_>>()
     }
 
     #[test]
@@ -557,7 +617,7 @@ mod o3_parallel {
     use super::{all_pairs, sphere};
     use boyko_physics::manifold::BodyIndex;
     use boyko_physics::math::Vec3;
-    use boyko_physics::resources::{BodyState, BroadphaseGrid};
+    use boyko_physics::resources::{BodyState, BroadphaseGrid, ContactPairs};
     use boyko_threadpool::ThreadPoolBuilder;
 
     /// `MIN_PARALLEL_BODIES` from `resources.rs` (private const, mirrored here only
@@ -601,19 +661,27 @@ mod o3_parallel {
         let pool = ThreadPoolBuilder::new().num_threads(workers).build();
         pool.install(|_scope| {
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build_parallel(bodies, &mut out);
-            out
+            out.pairs().iter().copied().collect::<Vec<_>>()
         })
     }
 
     // ── Gate 6: pool-dispatched `build_parallel` byte-identity at workers ∈
-    //    {1, 2, 4} over many dense scenes — the interleave-dependent leg. Each
+    //    {2, 3, 4} over many dense scenes — the interleave-dependent leg. Each
     //    worker count's output must be byte-for-byte equal to the O2 serial
     //    `build` AND to all-pairs (the candidate multiset is partition- AND
-    //    interleave-independent; the final sort canonicalizes order). ──────────
+    //    interleave-independent; the final sort canonicalizes order).
+    //
+    //    The set is {2, 3, 4} and not {1, 2, 4} since KE16 App-1: `build_parallel`
+    //    now computes `lanes = pool.num_threads()` and returns early when
+    //    `lanes < 2`, so a ONE-worker pool takes the O2 serial `build` and a
+    //    `workers = 1` leg would exercise the fallback while this comment claimed
+    //    it covered the dispatched emit. That leg has its own test below
+    //    (`one_worker_build_parallel_takes_the_serial_fallback`), with a receipt
+    //    that it really is the serial path. ─────────────────────────────────────
     #[test]
-    fn parallel_dispatched_bit_identical_at_1_2_4_workers() {
+    fn parallel_dispatched_bit_identical_at_2_3_4_workers() {
         // A spread of body counts ABOVE the parallel threshold so the dispatched
         // branch is taken; several distinct dense scenes so interleave-dependent
         // bugs across builds surface.
@@ -622,13 +690,14 @@ mod o3_parallel {
 
             // The serial reference (O2 `build`) + the all-pairs oracle.
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut serial = Vec::new();
+            let mut serial = ContactPairs::with_capacity(0);
             grid.build(&bodies, &mut serial);
+            let serial = serial.pairs().iter().copied().collect::<Vec<_>>();
             let oracle = all_pairs(&bodies);
             assert_eq!(serial, oracle, "O2 serial build == all-pairs (n={n})");
             assert!(!serial.is_empty(), "anti-vacuity: scene n={n} has survivors");
 
-            for &workers in &[1usize, 2, 4] {
+            for &workers in &[2usize, 3, 4] {
                 let par = parallel_pairs(workers, &bodies);
                 assert_eq!(
                     par, serial,
@@ -637,6 +706,53 @@ mod o3_parallel {
                 );
             }
         }
+    }
+
+    // ── App-1 leg: a ONE-worker pool takes the O2 SERIAL `build`, and still
+    //    reproduces it byte-for-byte. KE16 App-1 re-aimed the dead
+    //    `lanes < 2` guard (it asked `num_threads() + 1 < 2`, which cannot hold)
+    //    at `num_threads() < 2`, so this leg left the dispatched set above and
+    //    needs its own name. The RECEIPT that it really is the serial path is the
+    //    allocation count: the dispatched path opens two `pool.scope`s per build
+    //    and allocates their frames + per-chunk closures, while a warmed serial
+    //    `build` allocates ZERO (the property
+    //    `grid_does_no_per_step_alloc_in_steady_state` gates directly). ────────
+    #[test]
+    fn one_worker_build_parallel_takes_the_serial_fallback() {
+        let bodies = dense_scene(MIN_PARALLEL_BODIES + 500);
+
+        let mut grid = BroadphaseGrid::with_capacity(bodies.len());
+        let mut serial = ContactPairs::with_capacity(0);
+        grid.build(&bodies, &mut serial);
+        let serial = serial.pairs().iter().copied().collect::<Vec<_>>();
+        assert!(!serial.is_empty(), "anti-vacuity: the one-worker scene has survivors");
+
+        let pool = ThreadPoolBuilder::new().num_threads(1).build();
+        assert_eq!(pool.num_threads(), 1, "the fallback leg needs a one-worker pool");
+
+        let (par, allocs) = pool.install(|_scope| {
+            let mut grid = BroadphaseGrid::with_capacity(bodies.len());
+            let mut out = ContactPairs::with_capacity(0);
+            // Warm every scratch Vec so the measured build is the steady-state one.
+            for _ in 0..6 {
+                grid.build_parallel(&bodies, &mut out);
+            }
+            let before = super::ALLOC.count();
+            grid.build_parallel(&bodies, &mut out);
+            let after = super::ALLOC.count();
+            (out.pairs().iter().copied().collect::<Vec<_>>(), after.wrapping_sub(before))
+        });
+
+        assert_eq!(
+            par, serial,
+            "build_parallel on a one-worker pool must reproduce the O2 serial build byte-for-byte"
+        );
+        assert_eq!(
+            allocs, 0,
+            "a warmed one-worker build_parallel allocated {allocs} times: it dispatched the \
+             shaped path (two `pool.scope`s allocate) instead of taking the App-1 serial \
+             fallback, so the `lanes < 2` guard is not doing what its comment says"
+        );
     }
 
     // ── Gate 6 (anti-vacuity): the PARALLEL branch genuinely runs — the pool has
@@ -662,27 +778,27 @@ mod o3_parallel {
         );
         let dispatched = pool.install(|_scope| {
             let mut grid = BroadphaseGrid::with_capacity(big.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build_parallel(&big, &mut out);
-            out
+            out.pairs().iter().copied().collect::<Vec<_>>()
         });
 
         // (b) The SAME scene with NO ambient pool → the no-pool shaped fallback
         //     (build_parallel called outside any install frame).
         let no_pool = {
             let mut grid = BroadphaseGrid::with_capacity(big.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build_parallel(&big, &mut out);
-            out
+            out.pairs().iter().copied().collect::<Vec<_>>()
         };
 
         // (c) Below the threshold, even inside a pool → the serial fallback.
         let small = dense_scene(MIN_PARALLEL_BODIES - 1000);
         let small_in_pool = pool.install(|_scope| {
             let mut grid = BroadphaseGrid::with_capacity(small.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build_parallel(&small, &mut out);
-            out
+            out.pairs().iter().copied().collect::<Vec<_>>()
         });
 
         // Every branch reproduces all-pairs byte-for-byte (the whole contract).
@@ -709,7 +825,7 @@ mod o3_parallel {
 
         let (allocs, n_pairs) = pool.install(|_scope| {
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             // Warm: several dispatched builds so every grid scratch Vec
             // (pair_count, pair_offset, cell_*, candidates) AND `out` reach
             // steady-state capacity (clear()+refill thereafter).
@@ -719,7 +835,7 @@ mod o3_parallel {
             let before = super::ALLOC.count();
             grid.build_parallel(&bodies, &mut out);
             let after = super::ALLOC.count();
-            (after.wrapping_sub(before), out.len())
+            (after.wrapping_sub(before), out.pairs().len())
         });
 
         assert!(n_pairs > 0, "anti-vacuity: the warmed parallel build produced pairs");
@@ -729,13 +845,13 @@ mod o3_parallel {
 
         // Pass A + Pass B each issue ONE `pool.scope` (a boxed shared frame + the
         // per-spawn closure boxes); the work-balanced chunking emits up to
-        // (workers + 1) × CHUNKS_PER_WORKER chunks per scope. The grid's OWN
+        // workers × CHUNKS_PER_WORKER chunks per scope. The grid's OWN
         // scratch is zero-per-step-alloc (capacity reuse), so the only residual is
         // this bounded 2-scope dispatch cost — INDEPENDENT of the candidate-set
         // size (the load-bearing property: a buffer that re-grew per step would
         // scale the count with n_pairs). CHUNKS_PER_WORKER (= 4) is mirrored here.
         let chunks_per_worker = 4;
-        let per_scope_cap = 16 + (workers + 1) * chunks_per_worker * 5; // generous
+        let per_scope_cap = 16 + workers * chunks_per_worker * 5; // generous
         let scopes_per_build = 2; // Pass A + Pass B
         let bound = scopes_per_build * per_scope_cap;
         assert!(

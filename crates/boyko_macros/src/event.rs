@@ -1,16 +1,16 @@
 //! `#[event]` attribute-macro implementation.
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{Fields, Ident, ItemStruct};
 
 /// Implementation of `#[event]` (see the public entry in `lib.rs`).
-pub(crate) fn expand(_args: TokenStream, input: TokenStream) -> TokenStream {
-    let input2: proc_macro2::TokenStream = input.clone().into();
-    let item_struct = match syn::parse::<ItemStruct>(input) {
+pub(crate) fn event_impl(_args: TokenStream, input: TokenStream) -> TokenStream {
+    let input2: proc_macro2::TokenStream = input.clone();
+    let item_struct = match syn::parse2::<ItemStruct>(input) {
         Ok(s) => s,
-        Err(e) => return e.to_compile_error().into(),
+        Err(e) => return e.to_compile_error(),
     };
 
     if let Err(ts) = validate_event_struct(&item_struct) {
@@ -31,8 +31,7 @@ fn validate_event_struct(s: &ItemStruct) -> Result<(), TokenStream> {
                 s.ident.span(),
                 "#[event] does not support generic structs (Q-001 scope)",
             )
-            .to_compile_error()
-            .into(),
+            .to_compile_error(),
         );
     }
     match &s.fields {
@@ -42,8 +41,7 @@ fn validate_event_struct(s: &ItemStruct) -> Result<(), TokenStream> {
                 s.ident.span(),
                 "#[event] requires a struct with named fields",
             )
-            .to_compile_error()
-            .into(),
+            .to_compile_error(),
         ),
     }
 }
@@ -103,8 +101,7 @@ fn generate_event_impl(
                             attr.path().get_ident().map_or(Span::call_site(), |i| i.span()),
                             "field has duplicate #[participant] markers",
                         )
-                        .to_compile_error()
-                        .into(),
+                        .to_compile_error(),
                     );
                 }
                 is_participant = true;
@@ -131,7 +128,7 @@ fn generate_event_impl(
                     }
                 });
                 if let Err(e) = result {
-                    parse_error = Some(e.to_compile_error().into());
+                    parse_error = Some(e.to_compile_error());
                 }
                 if let Some(ts) = parse_error {
                     return Err(ts);
@@ -154,8 +151,7 @@ fn generate_event_impl(
                             field_ident
                         ),
                     )
-                    .to_compile_error()
-                    .into(),
+                    .to_compile_error(),
                 );
             }
             (false, false) => {
@@ -168,8 +164,7 @@ fn generate_event_impl(
                             field_ident
                         ),
                     )
-                    .to_compile_error()
-                    .into(),
+                    .to_compile_error(),
                 );
             }
             (true, false) => {
@@ -334,7 +329,7 @@ fn generate_event_impl(
         };
     };
 
-    Ok(expanded.into())
+    Ok(expanded)
 }
 
 /// Builds the `Participants` trait impl for the participants substruct.

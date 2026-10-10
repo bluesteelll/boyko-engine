@@ -45,19 +45,54 @@
 // ("rgba8")]]` pins each G-buffer `OpTypeImage` to `Rgba8` (shaderStorageImageWriteWithoutFormat
 // is OFF); `gViewT` is pinned `r32f` and `gSsao` `r8`.
 //
-// # BRDF (the Filament/Karis real-time convergence — single scatter)
+// # BRDF (the Filament/Karis real-time convergence, PBR P0 — multi-scatter compensated)
 //
 //   D = GGX/Trowbridge-Reitz; V = height-correlated Smith visibility (folds 1/(4 NoL NoV));
 //   F = Schlick; diffuse = Lambert (albedo/PI). Metallic-roughness:
 //     f0 = lerp(0.16*reflectance^2, base, metallic);  diffuse = base*(1-metallic).
 //   Direct light: one analytic directional light, modulated by the A1 shadow.
-//   Ambient/IBL: analytic EnvBRDFApprox (Karis mobile) for specular + a hemisphere
-//   diffuse ambient, modulated by the A2 AO. No IBL texture, no LUT (MVP-2).
-//   The host oracle (`golden_deferred_resolve` in compute.rs) models this identically.
+//   Ambient/IBL: analytic EnvBRDFApprox (Karis mobile) specular sampled along the
+//   REFLECTION vector against a STEEPENED sky/ground gradient (PBR P0-B — a metal mirrors
+//   its surroundings, not a flat tint; the smoothstep gives it a real bright-cap/dark-belly
+//   split instead of a flat mid-tone) + a hemisphere diffuse ambient sampled along N. AO is
+//   DECOUPLED (the PBR metal fix): diffuse ambient is modulated by the A2 AO (`ao_final`),
+//   ambient SPECULAR by a separate roughness-aware `spec_ao` (Filament SpecularAO_Lagarde,
+//   ~1 for smooth/metal) — a metal's diffuse is 0, so its ambient specular IS its entire
+//   appearance and must not be AO-darkened like matte paint. A 1-mul multi-scatter
+//   energy-compensation term (PBR P0-D) recovers the single-scatter GGX energy loss at high
+//   roughness, applied at every specular site (direct + ambient). No IBL texture, no LUT (MVP-2).
+//   OUTPUT: the accumulated linear radiance is exposure-scaled, then tonemapped by the
+//   SELECTED operator (`tonemap_select`, word-7 bits 8..11 — DEFAULT Hill ACES-fitted,
+//   hue-preserving highlight rolloff, PBR P0-C; Khronos PBR Neutral / Reinhard-Jodie are
+//   selectable via `LightingConfig::tonemapper`), then manually gamma-2.2 encoded (the
+//   gLit/swapchain chain is linear UNORM end to end — no hardware sRGB). The host oracle
+//   (`golden_deferred_resolve*` in goldens.rs) models this identically.
 //
 // Compiled offline (hermetic build — no SDK at `cargo build` time) with:
 //   dxc.exe -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 deferred_pbr.hlsl \
 //       -Fo deferred_pbr.comp.spv
+//   (TERMINATOR_WRAP variant, SOFTWARE-RESOLVE-ONLY: add `-D TERMINATOR_WRAP=1
+//       -Fo deferred_pbr_wrap.comp.spv` — the diffuse terminator light-wrap at both
+//       direct-light accumulation sites, frozen-base discipline: with the flag UNDEFINED
+//       this source preprocesses CHARACTER-IDENTICAL to the pre-feature file, so the base
+//       `.spv` above is untouched by construction. An HWRT + TERMINATOR_WRAP combo is
+//       explicitly OUT OF SCOPE this rung — never compiled, never selected by the host.)
+//   (HWRT variant, feature="hwrt": add `-T cs_6_5 -D HWRT=1
+//       -Fo deferred_pbr_hwrt.comp.spv` — RESOLVE_INLINE, the default SHADOW_STAGE; see
+//       compute.rs's `DEFERRED_PBR_HWRT_SPV` embed doc. The four HWRT variants bind the TLAS @19,
+//       the RayShadowUbo @20 (48 B) and the raster depth `gDepthHw` @21 on top of the 19 shared
+//       bindings; VIS/DENOISED add `gShadowVis` @22, VIS+MV `MotionCamVis` @23 + `gMotionVec` @24.)
+//   (HWRT VIS variant: add `-T cs_6_5 -D HWRT=1 -D SHADOW_STAGE=1
+//       -Fo deferred_pbr_hwrt_vis.comp.spv` — writes gShadowVis and returns before
+//       lighting, the à-trous spatial-denoise pre-pass; see compute.rs's
+//       `DEFERRED_PBR_VIS_SPV` embed doc.)
+//   (HWRT DENOISED variant: add `-T cs_6_5 -D HWRT=1 -D SHADOW_STAGE=2
+//       -Fo deferred_pbr_hwrt_denoised.comp.spv` — reads the à-trous output instead of
+//       tracing; see compute.rs's `DEFERRED_PBR_DENOISED_SPV` embed doc.)
+//   (HWRT VIS+MOTION_VECTORS variant: add `-T cs_6_5 -D HWRT=1 -D SHADOW_STAGE=1
+//       -D MOTION_VECTORS=1 -Fo deferred_pbr_hwrt_vis_mv.comp.spv` — VIS plus the
+//       per-pixel camera-only motion vector the temporal shadow denoiser reprojects with;
+//       see compute.rs's `DEFERRED_PBR_VIS_MV_SPV` embed doc.)
 
 static const float PI = 3.14159265358979323846;
 
@@ -176,24 +211,24 @@ struct CascadeData {
 };
 
 // binding 13 (b13): the cascade UBO — byte-mirrors `boyko_render::ResolvedCsm` (336 B): the inline
-// `CascadeData[MAX_CASCADES]` (4 × 80 = 320 B) + `active_count` + `csm_mode_word` + 8 B pad. The
-// host uploads `ResolvedCsm` verbatim each frame. `gCsmMode` mirrors `csm_mode_word` (a redundant
-// copy of the header bit, carried for completeness); the resolve gates on the HEADER's
-// `load_csm_mode` (the single source of truth), NOT this field.
+// `CascadeData[MAX_CASCADES]` (4 × 80 = 320 B) + `active_count` + `csm_mode_word` +
+// `pcf_kernel_word` + 4 B pad. The host uploads `ResolvedCsm` verbatim each frame. `gCsmMode`
+// mirrors `csm_mode_word` (a redundant copy of the header bit, carried for completeness); the
+// resolve gates on the HEADER's `load_csm_mode` (the single source of truth), NOT this field.
+// `gCsmPcfKernel` (rung E1) mirrors `pcf_kernel_word` — `csm_pcf_disc` (`shadow_apply.hlsli`)
+// branches on it directly.
 static const uint MAX_CASCADES = 4u;
 cbuffer CsmCascades : register(b13) {
     CascadeData gCascades[MAX_CASCADES];
-    uint gCsmActive;   // number of valid cascades (0 = disabled); mirrors ResolvedCsm.active_count
-    uint gCsmMode;     // mirrors ResolvedCsm.csm_mode_word (the resolve gates on the header bit)
-    uint2 _gCsmPad;    // pad to the 336-byte ResolvedCsm stride
+    uint gCsmActive;      // number of valid cascades (0 = disabled); mirrors ResolvedCsm.active_count
+    uint gCsmMode;        // mirrors ResolvedCsm.csm_mode_word (the resolve gates on the header bit)
+    uint gCsmPcfKernel;   // mirrors ResolvedCsm.pcf_kernel_word (rung E1: the CsmPcfKernel word)
+    uint _gCsmPad;        // pad to the 336-byte ResolvedCsm stride
 };
 
-// CSM Rung-A normal-offset bias FACTOR (D6): the receiver lookup is pushed off the surface by
-// `n * gCascades[0].texel_size * CSM_NORMAL_BIAS` so a grazing receiver does not self-shadow
-// (acne). Kept LOW because the term is `min`-combined with the analytic SDF visibility — a slight
-// acne is preferred over peter-panning (a too-large offset would lift the contact shadow off the
-// floor and read as a floating caster). Owner-retunable; mirrors the host matrix golden's bias.
-static const float CSM_NORMAL_BIAS = 2.0;
+// Multi-paradigm render-path plan, rung R4b (Decision 3/7 extraction): `CSM_NORMAL_BIAS` moved
+// to `shadow_apply.hlsli` (it is read only by `csm_sample_cascade`, which moved with it) —
+// `#include`d below, after the DDGI resolve include.
 
 // === Shadow Phase 5 Inc-1-GPU — the sparse SPOT/POINT atlas (binding 14 + 15) ==================
 //
@@ -277,6 +312,28 @@ cbuffer ResolvedDdgi : register(b18) {
     uint3  _gDdgiPad;       // pad to the 48-byte ResolvedDdgi stride
 };
 
+#if !HWRT
+// Textured-PBR T6a (binding 19, SOFTWARE-RESOLVE-ONLY; the critic's C1 fix): the `gPbr`
+// deferred-resolve MRT lane the (T6c) textured raster writes — r=metallic, g=roughness,
+// b=AO-texture modulation, a=emissive-strength modulation. Declared ENTIRELY under `#if
+// !HWRT` so no HWRT `.spv` ever references it (the byte-identity gate — mirrors the TLAS's
+// `#if HWRT` symmetry at the SAME binding index; the two arms are mutually exclusive
+// compiles of this ONE source file, never both present in the same `.spv`). The `.Load`
+// below is INSIDE the flag-gated branch, so it never executes for a flag=0 material (every
+// current material) — the discarded/unwritten contents are never observed.
+[[vk::binding(19)]] [[vk::image_format("rgba16f")]] RWTexture2D<float4> gPbr;
+
+// A bit in `MaterialGpu.mrr.w`'s bitcast `flags` lane, set iff the material carries a
+// texture sidecar (mirrors `boyko_render::MATERIAL_FLAG_TEXTURED`). The Rust-side copies
+// of this bit (the `MATERIAL_FLAG_TEXTURED` const and its two callers,
+// `MaterialTable::seed_rows`'s derive-at-upload and `Material::with_textures`'s CPU-side
+// mirror) are cross-checked against the shader's `.spv` output by the runtime test
+// `textured_pbr_t6a_host_shader_agreement.rs`; this HLSL literal agrees with them by
+// source-comment convention (there is no machine-checked host↔shader assert on the value
+// `1u` itself — unlike e.g. `MATERIAL_GPU_WORDS`, which IS const-asserted host-side).
+static const uint MATERIAL_FLAG_TEXTURED_BIT = 1u;
+#endif
+
 #if HWRT
 // binding 19 (t19): the per-frame TLAS (R2a-3 `PersistentTlas.accel`) the HWRT mesh-shadow variant
 // traces with `rayQuery` (R2a-4b). Declared ENTIRELY under `#if HWRT` so the software `.spv` never
@@ -298,16 +355,60 @@ cbuffer ResolvedDdgi : register(b18) {
 //   * cone/tmax/tmin/bias come from RayShadowUbo @ binding 20 — a per-FIF UBO byte-mirroring
 //     `boyko_render::ResolvedRayShadow` (4×f32: cone_radius, tmax, tmin, bias). Runtime-tunable,
 //     defaults byte-identical to the old consts.
-// binding 20 (b20): the tunable soft-shadow params UBO. Field ORDER + TYPES exactly match
-// `boyko_render::ResolvedRayShadow` (cone_radius @0, tmax @4, tmin @8, bias @12 — 16 B, one vec4
-// slot, no trailing pad). Declared ENTIRELY under `#if HWRT` — the software `.spv` never references
-// it (the byte-identity gate).
+//   * SHADOW_FRAME_SEED (rung 3b temporal) is the runner's per-frame counter, packed straight
+//     into the UBO at `upload_ray_shadow_ring` (a HOT per-frame value, NOT routed through the
+//     cold `ResolvedRayShadow` resolve — see that struct's doc). It advances the Vogel-disk cone
+//     rotation below by the golden angle each frame, so the temporal shadow denoiser has
+//     something to average (a frame-invariant rotation is measured dead weight for it).
+//   * SHADOW_ORIGIN_MODE / SHADOW_RASTER_FWD (lane fix/hwrt-shadow-ray-origin) are the other
+//     two hot per-frame values (`boyko_render::RayShadowFrame`): under an armed TAA the raster
+//     depth of a RASTER-owned pixel is the Euclidean distance the JITTERED raster wrote, so the
+//     cone-trace origin must be reconstructed on the raster's jittered pixel ray, not the b5
+//     ray — see the `P_shadow` block at the trace. `SHADOW_RASTER_FWD.xyz` is the ray-gen
+//     forward that puts `generate_ray` through the raster's sub-pixel sample (the host's
+//     `raster_ray_forward`: `fwd - right*(jx*aspect*tan) + up*(jy*tan)`, from the UNJITTERED
+//     view, so it is exact under either jitter scope). Mode 0 (TAA off / ortho) is a STRUCTURAL
+//     skip — `P_shadow` is a plain copy of `P`, so every non-TAA hwrt frame is byte-identical.
+// binding 20 (b20): the tunable soft-shadow params UBO. Field ORDER + TYPES exactly match the
+// cold `boyko_render::ResolvedRayShadow` (cone_radius @0, tmax @4, tmin @8, bias @12) PLUS the
+// runner-injected hot `boyko_render::RayShadowFrame` tail (seed @16, origin mode @20, an explicit
+// std140 pad @24..32, raster forward @32) — a 48 B std140 block (three vec4 slots, every byte
+// written; the pad is explicit so the HLSL and Rust offsets agree by inspection: a `float4`
+// cannot straddle a 16-B slot, so `SHADOW_RASTER_FWD` lands at 32 whatever the packing).
+// Declared ENTIRELY under `#if HWRT` — the software `.spv` never references it (the
+// byte-identity gate).
 cbuffer RayShadowUbo : register(b20) {
-    float SHADOW_CONE_RADIUS; // was 0.035 (tan(half-angle) of the sun disk, ~2°)
-    float SHADOW_RAY_TMAX;    // was 1e4
-    float SHADOW_RAY_TMIN;    // was 1e-3
-    float SHADOW_RAY_BIAS;    // was 1e-3
+    float  SHADOW_CONE_RADIUS;  // @0  was 0.035 (tan(half-angle) of the sun disk, ~2°)
+    float  SHADOW_RAY_TMAX;     // @4  was 1e4
+    float  SHADOW_RAY_TMIN;     // @8  was 1e-3
+    float  SHADOW_RAY_BIAS;     // @12 was 1e-3
+    uint   SHADOW_FRAME_SEED;   // @16 rung 3b: per-frame counter (see above)
+    uint   SHADOW_ORIGIN_MODE;  // @20 0 = legacy origin P (structural skip); 1 = raster-ray origin on raster-owned pixels
+    uint   _shadow_pad0;        // @24 explicit: keeps SHADOW_RASTER_FWD at 32 by inspection
+    uint   _shadow_pad1;        // @28
+    float4 SHADOW_RASTER_FWD;   // @32 xyz = fwd_r (the raster's jittered ray-gen forward, unit-agnostic like cam_forward.xyz); w = 0, unread
 };
+
+// binding 21 (lane fix/hwrt-shadow-ray-origin): the raster DEPTH image — the SAME depth-aspect
+// sampled view (+ `depth_sampler`) the marcher binds at its @1 (`gDepth`), so this reads exactly
+// the texel the marcher / `viewt_from_depth` decoded `gViewT` from. Read ONLY inside the trace
+// (`csm_mode != OFF && NoL > 0`) and ONLY when `SHADOW_ORIGIN_MODE != 0` (a wave-uniform UBO
+// gate), to tell a RASTER-owned pixel from an SDF-owned one: both producers write `gViewT` as
+// `md * MESH_DEPTH_T_MAX` for a mesh-covered pixel (the marcher's `t_mesh`, `viewt_from_depth`'s
+// `md * pc.mesh_norm`), a power-of-two multiply that is EXACT in fp32, and an SDF-owned pixel has
+// `t < t_mesh` STRICTLY (`own_pixel`), so `gViewT == md * 64` is a bit-exact, tolerance-free
+// producer test. Declared ENTIRELY under `#if HWRT` (the byte-identity gate); the host inserts
+// it at 21 in every HWRT resolve-family layout, so `gShadowVis` / `MotionCamVis` / `gMotionVec`
+// below moved to 22 / 23 / 24.
+[[vk::binding(21)]] Texture2D<float> gDepthHw;
+// Mirrors `sdf_gbuffer_composite.hlsl`'s DEPTH_CLEAR / the host MESH_DEPTH_CLEAR (the far-plane
+// sentinel the raster / `mesh_depth_neutral_clear` clear to): `md < 1.0` means a mesh covered
+// the pixel.
+static const float HWRT_DEPTH_CLEAR      = 1.0;
+// Mirrors `compute.rs` MESH_DEPTH_T_MAX (`mesh_view_t_norm(PERSPECTIVE)`); TAA is
+// perspective-only, so the ORTHO norm (10) is never the live one under mode 1. A host↔shader
+// text tripwire (`boyko_rhi_vulkan/tests/hwrt_depth_norm_mirror.rs`) pins the two values equal.
+static const float HWRT_MESH_DEPTH_T_MAX = 64.0;
 
 // R2a-4b soft-shadow (owner-eval): the hard single-ray trace read TOO SHARP, so the mesh-shadow
 // term cone-samples N rays jittered within the sun's angular disk around `l` and averages the miss
@@ -329,11 +430,12 @@ cbuffer RayShadowUbo : register(b20) {
 #endif
 
 #if SHADOW_STAGE != SHADOW_STAGE_RESOLVE_INLINE
-// binding 21 (u21): the shadow-visibility image (Rung 3a spatial denoise). RG: R = raw mesh_vis,
+// binding 22 (u22): the shadow-visibility image (Rung 3a spatial denoise). RG: R = raw mesh_vis,
 // G = validity (1 = a real mesh-shadow sample was written; 0 = the neutral fill on a pixel that
 // never reached the mesh arm). Declared ENTIRELY under `SHADOW_STAGE != RESOLVE_INLINE` so the
-// RESOLVE_INLINE `.spv` (the byte-identity gate) never references it — 21 is the next free HWRT
-// binding after the TLAS @19 + RayShadowUbo @20. ONE binding serves BOTH stages: the VIS stage
+// RESOLVE_INLINE `.spv` (the byte-identity gate) never references it — 22 is the next free HWRT
+// binding after the TLAS @19 + RayShadowUbo @20 + gDepthHw @21 (it was 21 before the lane
+// fix/hwrt-shadow-ray-origin inserted the depth image). ONE binding serves BOTH stages: the VIS stage
 // UAV-WRITES `float2(mesh_vis, 1.0)` here, and the RESOLVE_DENOISED stage `.Load`s the à-trous-
 // FILTERED value the host binds into this same slot (the host swaps the descriptor between stages).
 // `[[vk::image_format("rg16")]]` pins the `OpTypeImage` to `Rg16` (`shaderStorageImageWriteWithout-
@@ -342,24 +444,25 @@ cbuffer RayShadowUbo : register(b20) {
 // the RESOLVE_DENOISED stage reads the FINAL à-trous output (also RG16, either ring by parity), so
 // the single "rg16" pin matches the bound view on EVERY level and every `levels` value — no
 // format-class mismatch on the odd-parity or DENOISED bind (the former RG8-vs-RG16 divergence).
-[[vk::image_format("rg16")]] RWTexture2D<float2> gShadowVis : register(u21);
+[[vk::image_format("rg16")]] RWTexture2D<float2> gShadowVis : register(u22);
 #endif
 
 #ifdef MOTION_VECTORS
 // Rung 3b step 5b: the SDF-pixel motion-vector output + the camera pair. Declared ONLY under
 // MOTION_VECTORS (the `deferred_pbr_hwrt_vis_mv` variant — SHADOW_STAGE=VIS + MOTION_VECTORS), so
-// the base VIS / DENOISED / RESOLVE_INLINE `.spv` never reference bindings 22/23 and their layouts
-// stay the frozen byte-identity gate. binding 22: the `MotionCam` UBO (current + previous
+// the base VIS / DENOISED / RESOLVE_INLINE `.spv` never reference bindings 23/24 and their layouts
+// stay the frozen byte-identity gate. binding 23: the `MotionCam` UBO (current + previous
 // marcher-aligned proj*view, column-major — the SAME 128 B camera pair the raster MV variant reads,
-// so the mesh and SDF motion vectors share ONE camera basis). binding 23 (u23): the `motion_vec`
-// image the raster wrote MESH pixels into; this stage adds the SDF pixels (camera-only). Pinned
+// so the mesh and SDF motion vectors share ONE camera basis). binding 24 (u24): the `motion_vec`
+// image the raster wrote MESH pixels into; this stage adds the SDF pixels (camera-only). (Both
+// were 22/23 before the lane fix/hwrt-shadow-ray-origin inserted gDepthHw @21.) Pinned
 // **rg16f** (`R16G16_SFLOAT`, matching the image) — NOT `rg16`/UNORM: Δuv is SIGNED and can exceed
 // [0,1], so a UNORM pin would clamp negative/>1 motion and disagree with the raster's SFLOAT pixels.
-[[vk::binding(22)]] cbuffer MotionCamVis {
+[[vk::binding(23)]] cbuffer MotionCamVis {
     float4x4 mv_cur_view_proj;   // current marcher-aligned proj*view
     float4x4 mv_prev_view_proj;  // last frame's marcher-aligned proj*view
 };
-[[vk::image_format("rg16f")]] RWTexture2D<float2> gMotionVec : register(u23);
+[[vk::image_format("rg16f")]] RWTexture2D<float2> gMotionVec : register(u24);
 
 // Marcher-aligned clip -> [0,1]^2 screen UV. The projection (`marcher_view_proj_rows`) bakes the
 // y-flip into clip.y, so this is the plain NDC remap (NO extra negation) — IDENTICAL to the gbuffer
@@ -370,20 +473,10 @@ float2 mv_clip_to_uv(float4 clip) {
 }
 #endif
 
-// Shadow Phase 5 Inc-1-GPU normal-offset bias FACTOR — the spot receiver lookup is pushed off the
-// surface by `n * SPOT_SHADOW_NORMAL_BIAS` so a grazing receiver does not self-shadow (acne). A
-// world-space constant (the spot map has no per-cascade `texel_size`); owner-retunable. Mirrors the
-// host spot matrix golden's bias.
-static const float SPOT_SHADOW_NORMAL_BIAS = 0.02;
-
-// CSM Increment 3 — Rung B cross-fade band WIDTH (D7), as a PROPORTION of the SELECTED cascade's
-// VIEW-Z range [prev_split, split_far]. Inside the trailing `overlap*range` slice the resolve ALSO
-// samples cascade `c+1` and `mix`es the two visibilities so the cascade boundary is a smooth
-// gradient instead of a hard resolution seam. No TAA on this engine => an ANALYTIC ramp, not a
-// dither (a dither would shimmer without temporal accumulation). `0.2` = the band is the last 20%
-// of each cascade — wide enough to hide the seam, narrow enough that the common pixel samples ONE
-// cascade. Owner-retunable; mirrors the host `csm_select_blend` golden's constant.
-static const float CSM_OVERLAP_PROPORTION = 0.2;
+// Multi-paradigm render-path plan, rung R4b (Decision 3/7 extraction): `SPOT_SHADOW_NORMAL_BIAS`
+// and `CSM_OVERLAP_PROPORTION` moved to `shadow_apply.hlsli` (read only by
+// `spot_atlas_visibility`/`punctual_atlas_visibility` and `csm_visibility`, which moved with
+// them) — `#include`d below, after the DDGI resolve include.
 
 // Shared camera ray-gen (the SAME header the marcher includes — ONE ray-gen, no drift).
 #include "ray_gen.hlsli"
@@ -398,6 +491,12 @@ static const float CSM_OVERLAP_PROPORTION = 0.2;
 // Included AFTER the gDdgiIrr/gDdgiDepth/ResolvedDdgi binding decls above (the tap helpers read
 // them). GI-OFF (`ddgi_mode == 0`) never calls into it — the 0%-gate holds.
 #include "ddgi_resolve.hlsli"
+// Multi-paradigm render-path plan, rung R4b (Decision 7 / W2): the combined shadow-source apply
+// — `csm_visibility`/`spot_atlas_visibility`/`punctual_atlas_visibility` + their helpers, a
+// VERBATIM textual cut (see that header's doc). Included AFTER the CSM/atlas binding decls above
+// (its INCLUDE CONTRACT precondition) — the same "declare, then include" idiom `sdf_field.hlsli`'s
+// `Buf` precondition and `pbr_lighting.hlsli`'s `PI`/`LIGHT_UP` precondition use.
+#include "shadow_apply.hlsli"
 
 // P6 R1 shadow-march tuning — MIRRORS the marcher's frozen A1 consts (`sdf_gbuffer_
 // composite.hlsl:407-437`) byte-for-byte (the same owner defaults; `GRAD_H` +
@@ -433,47 +532,33 @@ static const float SSCS_THICKNESS_FLOOR = 0.07;  // min occluder-thickness toler
 static const float SSCS_EDGE_FADE_K     = 6.0;   // HDRP screen-edge vignette steepness
 static const float SSCS_DISTANCE_FADE   = 50.0;  // disable SSCS past this view depth (far surfaces)
 
-// Render P7 POLISH: the SSAO depth-aware box-blur kernel. The raw `gSsao` is a no-blur
-// HBAO-lite gather (2 slices × 4 discrete step radii) → VISIBLE CONCENTRIC RINGS on a broad
-// contact-AO region (a mesh floor around an SDF occluder). The fix is an inline NxN box blur
-// of the AO INSIDE the resolve's `ssao_mode != 0` combine (NO new pass): `ssao_blurred` is the
-// mean of the (2*R+1)² neighbour taps whose `gViewT` is within `SSAO_BLUR_DEPTH_TOL` of the
-// CENTER's (a bilateral DEPTH gate — the blur does NOT bleed AO across the mesh↔SDF silhouette,
-// where `view_t` jumps far more than the tol). The center always passes its own gate, so the
-// count is ≥ 1. `SSAO_BLUR_R == 3` → a 7×7 box; `SSAO_BLUR_DEPTH_TOL == 0.1` view-t units
-// stays WITHIN a flat surface (the mesh floor has constant `view_t`) yet rejects the
-// silhouette. The HOST mirror is `golden_ssao_blur` (compute.rs), byte-mirror-friendly
-// (integer/`abs`/compare only — no transcendental); GPU == host within the existing ±2/255.
-static const int   SSAO_BLUR_R          = 3;
-static const float SSAO_BLUR_DEPTH_TOL  = 0.1;
+// Render P7 POLISH follow-up: the SSAO denoise MOVED OUT of this resolve into a dedicated
+// multi-pass edge-avoiding à-trous compute chain (`ssao_atrous.comp.hlsl`, mirroring the
+// SHIPPED `shadow_atrous.comp.hlsl` RT soft-shadow denoiser) — see that file's header doc for
+// the filter itself (the Dammertz 5-tap B3-spline, the plane-fit depth gate, linear-Z). The
+// former inline 15x15 bilateral blur (Render P7 POLISH Change C) is RETIRED from this file: the
+// combine below now `.Load`s the à-trous chain's FINAL filtered lane directly (a single
+// `gSsao.Load`, no per-pixel neighbourhood walk in the resolve). `SSAO_BLUR_R` /
+// `SSAO_BLUR_SPATIAL_SIGMA` / `SSAO_BLUR_DEPTH_TOL` / `SSAO_BLUR_DEPTH_SIGMA` /
+// `SSAO_BLUR_GRAD_CLAMP` moved to `ssao_atrous.comp.hlsl` (the depth gate lives entirely inside
+// the à-trous pass now); this file keeps only the bare `1.0e30` background sentinel the combine
+// below still reads.
 
-// === P6 R1 — the `t_max`-RANGED soft-shadow leaf (multi-light SDF shadows) ===============
-// GENERATED by `boyko_shaderdsl::emit::emit_hlsl_sdf_soft_shadow_ranged()`; a SEPARATELY-
-// named clone of the marcher's frozen `sdf_soft_shadow` whose escape break spells the RUNTIME
-// `t_max` instead of the hardcoded `T_MAX` (B3 — option a). The `sdf_soft_shadow_ranged_
-// matches_edsl_emit` sync pin (in `boyko_rhi_vulkan/tests/sdf_field_edsl_sync.rs`) pins this
-// to the generator; a hand-edit fails CI. `t_max` = the light DISTANCE for a punctual caster
-// or `T_MAX` for an extra directional. The `dot(n, L)` early-out is the resolve's per-light
-// `NoL <= 0` skip (hand-written in the loop), so this body is the loop+tail only.
-// === GENERATED sdf_soft_shadow_ranged BEGIN ===
-float sdf_soft_shadow_ranged(float3 p, float3 n, float3 L, float t_max) {
-    float res = 1.0;
-    float t = SHADOW_MINT;
-    [loop]
-    for (uint i = 0u; i < MAX_IT; ++i) {
-        float d = field_distance(p + L * t);
-        res = min(res, SHADOW_K * d / t);
-        if (d < SHADOW_HIT_EPS) {
-            return 0.0;
-        }
-        t = t + max(d / FIELD_LIPSCHITZ_L, SHADOW_MINT_STEP);
-        if (t > t_max) {
-            break;
-        }
-    }
-    return clamp(res, 0.0, 1.0);
-}
-// === GENERATED sdf_soft_shadow_ranged END ===
+// VB-SV0 (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §4.1): `sdf_soft_shadow_ranged` — which lived
+// VERBATIM at THIS point in this file — moved into the shared `sdf_shadow_leaves.hlsli` so the
+// three VB lit-producer tails can consume the SAME definition instead of hand-copying it. The
+// `#include` sits at exactly the point the moved span occupied, so this file's token stream is
+// unchanged where it matters and all SIX `deferred_pbr` `.spv` stay byte-identical
+// (`cluster_grid_read_bound.rs::deferred_and_forward_families_spv_byte_identical` is that gate).
+// The header ALSO carries `sdf_ao` + the three A2 AO consts, which this file never referenced
+// and still does not — they arrive as unreferenced declarations that DXC strips, which is
+// asserted by the same byte gate rather than assumed.
+//
+// Its INCLUDE CONTRACT is already satisfied here: `field_distance` (`sdf_field.hlsli`, included at
+// :447 — BELOW `Buf`'s decl at :161, which is the order `sdf_field.hlsli`'s own contract requires)
+// plus the `MAX_IT`/`SHADOW_K`/`SHADOW_MINT`/`SHADOW_MINT_STEP`/`SHADOW_HIT_EPS` block declared
+// immediately above at :466-474, and `FIELD_LIPSCHITZ_L` from `sdf_field.hlsli`.
+#include "sdf_shadow_leaves.hlsli"
 
 // The legacy 64x64 fixture extent when the UBO extent is zero (mirrors the marcher).
 static const uint IMG_W_DEFAULT = 64u;
@@ -502,360 +587,36 @@ float3 oct_decode(float2 e) {
     return normalize(n);
 }
 
-// --- Cook-Torrance / GGX terms (Filament real-time forms) -----------------------------
+// Multi-Paradigm Render-Path Rung-0 (Decision 3): the Cook-Torrance/GGX primitive terms
+// (D_GGX / V_SmithGGXCorrelated / F_Schlick / safe_normalize) moved OUT to
+// `pbr_lighting.hlsli` — a VERBATIM textual cut, character-identical to the region this
+// `#include` replaces. `PI` (declared above) stays in scope for `D_GGX` (the header's
+// INCLUDE CONTRACT). Permanent shared BRDF seam: later render paths `#include` the same
+// header instead of duplicating these terms.
+#include "pbr_lighting.hlsli"
 
-// GGX/Trowbridge-Reitz normal distribution. `a` is the remapped roughness (perceptual^2).
-float D_GGX(float NoH, float a) {
-    float a2 = a * a;
-    float d = (NoH * a2 - NoH) * NoH + 1.0;     // = (NoH^2)(a2-1)+1, the stable rearrange
-    return a2 / (PI * d * d);
+// === Render terminator-softening — PREPROCESSOR VARIANT `TERMINATOR_WRAP` (frozen-base
+// discipline, mirrors `gbuffer_mrt.fs.hlsl`'s `#ifdef`/`#else`/`#endif` convention) ===========
+//
+// A runtime `if (ts > 0.0) {...} else {VERBATIM original}` guard was tried first and dropped:
+// even on the `ts == 0` (OFF) path, the mere PRESENCE of the extra branch + loads perturbed
+// DXC's FMA fusion in the surrounding function, drifting the base resolve's pixels off the
+// golden. The fix moves the choice to the PREPROCESSOR instead: with `TERMINATOR_WRAP`
+// undefined (the base compile, `deferred_pbr.comp.spv`), every site below preprocesses to a
+// token stream CHARACTER-IDENTICAL to the pre-feature source (the `#else` arms), so DXC's
+// codegen for the base is untouched BY CONSTRUCTION — no branch, no dead code, nothing for the
+// optimizer to see differently. The wrap arm carries NO `if (ts > 0.0)` runtime check (the
+// variant itself IS the opt-in: the host selects `deferred_pbr_wrap.comp.spv` only when
+// `LightingConfig::terminator_softening > 0`, see `deferred_pbr_wrap_spirv` in `compute.rs`).
+#if TERMINATOR_WRAP
+// Diffuse-terminator wrap (Valve/half-Lambert family): w=0 reduces EXACTLY to
+// saturate(nol) (the byte-identity anchor); w>0 ramps the terminator over a band of
+// width ~w so normal-mapped bump slopes fade into shadow instead of clipping to
+// black islands. DIFFUSE ONLY — specular keeps the physical clamp.
+float nol_wrapped(float nol, float w) {
+    return saturate((nol + w) / (1.0 + w));
 }
-
-// Height-correlated Smith visibility (folds the 1/(4 NoL NoV) of the specular denominator).
-float V_SmithGGXCorrelated(float NoV, float NoL, float a) {
-    float a2 = a * a;
-    float lambdaV = NoL * sqrt((NoV - a2 * NoV) * NoV + a2);
-    float lambdaL = NoV * sqrt((NoL - a2 * NoL) * NoL + a2);
-    return 0.5 / max(lambdaV + lambdaL, 1e-5);
-}
-
-// Schlick Fresnel.
-float3 F_Schlick(float u, float3 f0) {
-    float f = pow(1.0 - u, 5.0);
-    return f0 + (1.0 - f0) * f;
-}
-
-// Zero-/non-finite-guarded normalize — the FAITHFUL mirror of the host oracle's
-// `boyko_sdf_math::v_normalize` (compute.rs reuses it for every golden lighting
-// normalize). HLSL's intrinsic `normalize(0)` is `0/0 == NaN`, whereas the host
-// returns `float3(0,0,0)`; that divergence is the L1 black-pixel bug. At a surface
-// whose normal faces AWAY from a still-in-range point/spot light the half-vector
-// `v + l` can be ~zero (the light direction `l` is ~opposite the view dir `v`):
-// the host's `v_normalize(v+l)` yields `[0,0,0]` -> NoH = LoH = 0 -> a FINITE spec
-// term that the `NoL == 0` factor then zeroes, while the GPU's `normalize(v+l)`
-// yields NaN -> NaN spec -> `NaN * 0 == NaN` -> `pack_unorm(NaN) == 0` -> a pure
-// BLACK pixel. Using this guard for every per-light `normalize` restores bit-parity
-// with the host (the guard is byte-identical to `normalize` on all non-degenerate
-// inputs, so the L0a/L0b/L1-off paths that already match are unchanged).
-float3 safe_normalize(float3 a) {
-    float len = sqrt(dot(a, a));
-    // FLT_MIN floor + isfinite guard, matching v_normalize's
-    // `len <= f32::MIN_POSITIVE || !len.is_finite()` degenerate branch.
-    if (len <= 1.17549435e-38 || !isfinite(len)) {
-        return float3(0.0, 0.0, 0.0);
-    }
-    return a / len;
-}
-
-// === CSM Increment 1b/3 — the cascade shadow-map visibility sample (Rung B: N cascades) =======
-//
-// Projects the receiver world point `P` (normal-offset by `n` along `gCascades[c].texel_size *
-// CSM_NORMAL_BIAS`, D6) into cascade `c`'s light-clip space, builds the shadow-map UV (Y-FLIPPED to
-// match the engine's framebuffer convention — see below), and PCF-compares the receiver's
-// light-space depth against the stored cascade depth via `gCsm.SampleCmpLevelZero(float3(uv, c))`.
-// Returns the VISIBILITY in [0,1] (1 = lit, 0 = fully shadowed). One LAYER of the cascade array.
-//
-// UV Y-FLIP CONVENTION: the cascade depth pass renders with the SAME negative-viewport-free,
-// Vulkan-default top-left framebuffer origin as the main raster pass; clip→NDC maps `clip.y` to
-// the [-1,1] NDC Y, and the framebuffer's texel row 0 is NDC Y = -1's projection AFTER the
-// Vulkan Y-down convention. The engine's other reprojection (`project_to_screen`, the SSCS inverse)
-// applies a `(-ndc_y) * 0.5 + 0.5` flip to convert NDC→UV; this CSM lookup applies the IDENTICAL
-// flip (`uv.y = 1 - (clip.y/clip.w * 0.5 + 0.5)`) so the cascade UV addresses the same texel the
-// depth pass wrote. (The ortho light projection has `clip.w == 1`, so the perspective divide is a
-// no-op, but it is kept for generality.)
-//
-// O1 MAJORNESS: `gCascades[c].view_proj` is the SAME column-major matrix the depth VS pushed at
-// `@0` for cascade `c`, so `mul(view_proj, float4(P_off,1))` here reprojects EXACTLY as the depth
-// VS projected the caster — the host matrix golden (compute.rs) pins this agreement.
-// Slope-scaled shadow normal-offset multiplier. A near-GRAZING receiver (small NoL — a vertical
-// face under a steep light) needs a LARGER along-normal offset to clear the per-texel light-space
-// depth slope, the source of self-shadow ACNE (the dark band on the column / the diagonal wedge on
-// the CSM caster box). A head-on receiver (NoL ~ 1) keeps the minimal offset so contact shadows do
-// not PETER-PAN (light leak at the base). `1/NoL` is the standard slope term, floored at the light
-// horizon and capped so a silhouette pixel cannot offset unboundedly. Shared by CSM + spot + point.
-static const float SHADOW_GRAZING_BIAS_MAX = 6.0;
-float shadow_grazing_scale(float nol) {
-    return clamp(1.0 / max(nol, 1.0e-3), 1.0, SHADOW_GRAZING_BIAS_MAX);
-}
-
-// === Shadow-edge PCF (anti-scintillation) =======================================================
-//
-// A single-tap shadow-map compare leaves the shadow boundary a 1-2 screen-pixel STEP that
-// requantizes under sub-pixel camera motion: the edge pixels flip 0<->1 every frame while the
-// camera moves, so the (world-fixed!) shadow visibly "dances" in motion and is rock-stable when
-// stopped. Proven by the shadow-motion A/B harness (`shadow_motion_ab_dump`): the frame is a pure
-// function of the camera pose (no cross-frame race), and a 3 mrad yaw flips shadow-edge pixels at
-// near-full swing (max channel delta 226/255).
-//
-// The fix is SPATIAL, not temporal (this engine deliberately has NO TAA — the analytic-ramp
-// convention, see CSM_OVERLAP_PROPORTION): widen the binary edge into a ~4-texel tent ramp so
-// sub-pixel motion produces proportional visibility deltas instead of full flips.
-//
-// 13-tap TENT DISC over the hardware 2x2 comparison taps, all with COMPILE-TIME texel offsets
-// (the `int2` offset overload — SPIR-V ConstOffset caps offsets at [-8, 7]; no dimension query,
-// no per-tap UV math; offsets clamp at the map edge per the sampler address mode). Taps: center
-// (w 4), the ±2 ring of 8 (w 2), the ±4 axis ring of 4 (w 1) — sum 24. With the hardware 2x2
-// bilinear under each tap the kernel integrates a smooth ~10-texel footprint (2048-map texel =
-// 0.0078 wu ⇒ ~0.08 wu penumbra ≈ 2-3 screen px at room viewing distance — wide enough that a
-// 1-2 px/frame camera drift moves the edge by a FRACTION of its ramp, killing the crawl, while
-// the sun shadow still reads crisp). The A/B harness verified the 3x3 (1-px ramp) variant was
-// NOT wide enough: shadow-edge flip counts barely moved; ramp width must exceed the per-frame
-// image drift by 2-3x.
-//
-// The tap pattern is FIXED (no per-pixel rotation/noise): screen-anchored noise would reintroduce
-// exactly the temporal boil this kernel removes (the no-TAA analytic-ramp convention again).
-// Cost: +12 comparison taps per shadowed sample, only inside the csm_mode / shadow_mode
-// structural gates (the 0%-gate scenes never run any of this).
-//
-// Two sibling helpers (not one) because HLSL < 6.6 cannot pass texture/sampler objects as
-// arguments portably; each hardcodes its own combined-descriptor pair.
-
-float csm_pcf_disc(float2 uv, float layer, float ref) {
-    float3 c = float3(uv, layer);
-    float v;
-    v  = gCsm.SampleCmpLevelZero(gCsmCmp, c, ref) * (4.0 / 24.0);
-    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2(-2,  0)) * (2.0 / 24.0);
-    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 2,  0)) * (2.0 / 24.0);
-    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 0, -2)) * (2.0 / 24.0);
-    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 0,  2)) * (2.0 / 24.0);
-    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2(-2, -2)) * (2.0 / 24.0);
-    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 2, -2)) * (2.0 / 24.0);
-    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2(-2,  2)) * (2.0 / 24.0);
-    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 2,  2)) * (2.0 / 24.0);
-    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2(-4,  0)) * (1.0 / 24.0);
-    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 4,  0)) * (1.0 / 24.0);
-    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 0, -4)) * (1.0 / 24.0);
-    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 0,  4)) * (1.0 / 24.0);
-    return v;
-}
-
-float atlas_pcf_disc(float2 uv, float layer, float ref) {
-    float3 c = float3(uv, layer);
-    float v;
-    v  = gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref) * (4.0 / 24.0);
-    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2(-2,  0)) * (2.0 / 24.0);
-    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 2,  0)) * (2.0 / 24.0);
-    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 0, -2)) * (2.0 / 24.0);
-    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 0,  2)) * (2.0 / 24.0);
-    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2(-2, -2)) * (2.0 / 24.0);
-    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 2, -2)) * (2.0 / 24.0);
-    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2(-2,  2)) * (2.0 / 24.0);
-    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 2,  2)) * (2.0 / 24.0);
-    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2(-4,  0)) * (1.0 / 24.0);
-    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 4,  0)) * (1.0 / 24.0);
-    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 0, -4)) * (1.0 / 24.0);
-    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 0,  4)) * (1.0 / 24.0);
-    return v;
-}
-
-float csm_sample_cascade(uint c, float3 P, float3 n, float nol) {
-    float3 P_off = P + n * (gCascades[c].texel_size * CSM_NORMAL_BIAS * shadow_grazing_scale(nol));
-    float4 clip = mul(gCascades[c].view_proj, float4(P_off, 1.0));
-    if (clip.w <= 0.0) {
-        return 1.0;                        // behind the light plane — treat as lit (no shadow data)
-    }
-    float3 ndc = clip.xyz / clip.w;
-    float2 uv;
-    uv.x = ndc.x * 0.5 + 0.5;
-    // NO second Y-flip: the cascade depth pass renders into a POSITIVE-height viewport (it does NOT
-    // use a negative-height Vulkan flip), so the hardware stores the occluder at fy=(ndc.y*0.5+0.5)*DIM
-    // — and `csm_cascade_view_proj` ALREADY negates light-up once (its `-inv_h*up` clip row). A second
-    // `1.0 - (...)` here would Y-flip the READ vs the WRITE, mirroring every shadow across the cascade's
-    // light-up=0 line (invisible only when the caster sits on that line — the camera-fit fixed point;
-    // a world-fixed off-axis caster shows the full mirror). Match the write convention exactly.
-    uv.y = ndc.y * 0.5 + 0.5;
-    // Outside this cascade's footprint there is no shadow data for it — treat as lit (the SELECT
-    // already picked the tightest in-range cascade; a footprint miss here means fully lit). `ref`
-    // is the receiver's light-space NDC depth (Vulkan [0,1] depth range).
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
-        return 1.0;
-    }
-    float ref = ndc.z;
-    // PCF: 13-tap tent disc over the hardware 2x2 comparisons (LessOrEqual) — the tent-weighted
-    // lit fraction of a ~10-texel footprint at array layer `c` (anti-scintillation, see
-    // `csm_pcf_disc`).
-    return csm_pcf_disc(uv, (float)c, ref);
-}
-
-// === CSM Increment 3 — Rung B: the cascade SELECT + smooth cross-fade band (D7) ===============
-//
-// SELECT (the interval compare-chain): `view_z` is the receiver's VIEW-SPACE depth (`dot(P -
-// cam_eye, cam_forward)` for PERSP, `view_t` for ORTHO — the SAME quantity the L1 froxel slice
-// uses), and the PSSM `split_far` boundaries are ALSO view-space (the resolve fits them that way),
-// so the SELECT runs in VIEW-Z LINEAR space (the critic's open Q4 answer). The chosen cascade is
-// the FIRST `c` whose `view_z < gCascades[c].split_far` — i.e. the tightest cascade still covering
-// the pixel. Past the LAST active split → no cascade covers the pixel → fully lit (return 1).
-//
-// The chain is BRANCH-LIGHT (Principle 1, this is a hot compute path): the selected index is the
-// COUNT of splits `view_z` has already passed — `sel = sum_c step(split_far[c], view_z)` over a
-// single bounded loop with uniform control flow (no per-lane early `return`; every lane walks the
-// same `gCsmActive` iterations). `sel == gCsmActive` ⇔ past every split ⇔ uncovered (fully lit).
-//
-// BLEND (the analytic cross-fade): inside the trailing `CSM_OVERLAP_PROPORTION * range` slice of
-// the selected cascade's view-z range `[prev_split, split_far]`, ALSO sample cascade `sel+1` (when
-// it exists) and `lerp` the two visibilities, `band_t` ramping 0→1 across the band. The COMMON case
-// (outside the band, or the last cascade) samples ONE cascade — `band_t == 0` so the second sample
-// is multiplied out (`lerp(a, b, 0) == a`); the `sel+1` sample is taken unconditionally inside the
-// `csm_mode` block but is cheap and never read when `band_t == 0`. Blend space: VIEW-Z LINEAR
-// (matching `split_far`), so the seam fades over a constant-depth slice.
-//
-// Returns the blended VISIBILITY in [0,1]. Host mirror: `csm_host_select_blend` (the demo test).
-float csm_visibility(float3 P, float3 n, float view_z, float nol) {
-    if (gCsmActive == 0u) {
-        return 1.0;                        // no cascades fitted — fully lit (defensive; gated above)
-    }
-    // SELECT: the selected cascade index = the number of splits the pixel has passed. `prev_split`
-    // tracks the near edge of the selected cascade (the previous cascade's far, 0 for cascade 0).
-    uint sel = 0u;
-    float prev_split = 0.0;
-    for (uint c = 0u; c < gCsmActive; ++c) {
-        float far_c = gCascades[c].split_far;
-        float passed = step(far_c, view_z);  // 1 when view_z >= this split (the pixel is beyond it)
-        prev_split = prev_split + passed * (far_c - prev_split); // latch the near edge as splits pass
-        sel += (uint)passed;
-    }
-    // Past the last active split (`sel == gCsmActive`): no cascade covers this pixel → fully lit (no
-    // shadow data beyond the shadow distance).
-    if (sel >= gCsmActive) {
-        return 1.0;
-    }
-
-    float vis_sel = csm_sample_cascade(sel, P, n, nol);
-
-    // BLEND band: the trailing `overlap * range` of the selected cascade's view-z range. Outside
-    // the band `band_t == 0` (one-cascade common case); inside it ramps 0→1 to `sel + 1`.
-    float far_sel = gCascades[sel].split_far;
-    float range = max(far_sel - prev_split, 1.0e-4);      // guard a degenerate (zero-width) cascade
-    float band_start = far_sel - CSM_OVERLAP_PROPORTION * range;
-    float band_t = saturate((view_z - band_start) / max(far_sel - band_start, 1.0e-4));
-    // Only blend toward a NEXT cascade that exists; the last cascade has no successor → no fade-out
-    // (its far edge is the shadow distance, beyond which `sel >= gCsmActive` already returned lit).
-    float has_next = (sel + 1u < gCsmActive) ? 1.0 : 0.0;
-    band_t *= has_next;
-    uint next = min(sel + 1u, gCsmActive - 1u);            // clamp the index (multiplied out if !has_next)
-    float vis_next = csm_sample_cascade(next, P, n, nol);
-    return lerp(vis_sel, vis_next, band_t);
-}
-
-// === Shadow Phase 5 Inc-1-GPU — the SPOT atlas shadow-map visibility sample =====================
-//
-// Projects the receiver world point `P` (normal-offset by `n * SPOT_SHADOW_NORMAL_BIAS`, the acne
-// guard) into atlas slot `s`'s light-clip space, builds the shadow-map UV (Y-FLIPPED to match the
-// engine's framebuffer convention — IDENTICAL to `csm_sample_cascade`), and PCF-compares the
-// receiver's light-space depth against the stored spot depth via
-// `gShadowAtlas.SampleCmpLevelZero(float3(uv, s))`. Returns the VISIBILITY in [0,1] (1 = lit, 0 =
-// fully shadowed). One LAYER of the atlas array.
-//
-// O1 MAJORNESS: `gFaces[s].view_proj` is the SAME column-major matrix the depth pass pushed at `@0`
-// for slot `s`, so `mul(view_proj, float4(P_off,1))` here reprojects EXACTLY as the depth pass
-// projected the caster — the host spot matrix golden pins this agreement.
-//
-// SPOT (Inc 1) uses the perspective NDC-z directly; POINT (Inc 2) will branch on `gFaces[s].inv_range`
-// + `light_pos`, not added here (the spot-only increment).
-float spot_atlas_visibility(uint s, float3 P, float3 n, float nol) {
-    float3 P_off = P + n * (SPOT_SHADOW_NORMAL_BIAS * shadow_grazing_scale(nol));
-    float4 clip = mul(gFaces[s].view_proj, float4(P_off, 1.0));
-    if (clip.w <= 0.0) {
-        return 1.0;                        // behind the light plane — treat as lit (no shadow data)
-    }
-    float3 ndc = clip.xyz / clip.w;
-    float2 uv;
-    uv.x = ndc.x * 0.5 + 0.5;
-    uv.y = ndc.y * 0.5 + 0.5;              // NO 2nd Y-flip (same as csm_sample_cascade): the spot matrix
-                                           // already Y-flips once (-f*up) into a positive-height viewport;
-                                           // a 1.0-(...) double-flips = latent mirror (masked when the
-                                           // caster sits on the cone axis — the fixed point).
-    // Outside this spot's cone footprint there is no shadow data — treat as lit (the cone falloff
-    // already drove the contribution to 0 at the edge). `ref` is the receiver's light-space NDC
-    // depth (Vulkan [0,1] depth range).
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
-        return 1.0;
-    }
-    float ref = ndc.z;
-    // PCF: 13-tap tent disc over the hardware 2x2 comparisons (LessOrEqual) — the tent-weighted
-    // lit fraction of a ~10-texel footprint at array layer `s` (anti-scintillation, see
-    // `atlas_pcf_disc`).
-    return atlas_pcf_disc(uv, (float)s, ref);
-}
-
-// === Shadow Phase 5 Inc-2 (POINT cube) — the OMNI point atlas shadow-map visibility sample =======
-//
-// A POINT light occupies SIX CONTIGUOUS atlas layers `base..base+6` (the ±X/±Y/±Z cube faces, the
-// host fit's `[+X, -X, +Y, -Y, +Z, -Z]` order). All six faces share the SAME `light_pos`/`inv_range`
-// (read from `gFaces[base]`), and the depth pass stored, on each face, the LINEAR RADIAL distance
-// `saturate(length(world - light_pos) * inv_range)` (`punctual_depth.fs`). So the resolve:
-//   1. forms `dir = P - light_pos` (light -> receiver),
-//   2. MAJOR-AXIS face-selects: the face whose axis has the largest |component| of `dir`
-//      (branchless `step`/`abs` 6-way pick) — `face` in `[0,6)` matching the host order,
-//   3. builds the per-face UV via the standard cube-map `(major, sc, tc)` mapping (the two minor
-//      axes divided by |major|, then `*0.5 + 0.5`, with the per-face sign/swizzle convention that
-//      matches the host look-at basis so the lookup hits the texel the depth pass wrote),
-//   4. compares the receiver's OWN normalized radial distance `ref = length(dir) * inv_range`
-//      against the stored face distance via `SampleCmpLevelZero` (LessOrEqual — same sense as the
-//      spot path: a receiver farther than the stored occluder is shadowed).
-// Returns the VISIBILITY in [0,1] (1 = lit, 0 = fully shadowed).
-//
-// The UV convention here is pinned to the host `point_faces` look-at (right-handed,
-// `Affine3A::look_at_rh(eye, eye + axis, +Y)`), the SAME `point_host_project` mirror the matrix
-// golden asserts. A normal-offset bias (`P + n * SPOT_SHADOW_NORMAL_BIAS`) on the distance origin
-// guards grazing self-shadow acne, exactly like the spot path.
-float punctual_atlas_visibility(uint base, float3 P, float3 n, float nol) {
-    float3 P_off = P + n * (SPOT_SHADOW_NORMAL_BIAS * shadow_grazing_scale(nol));
-    float3 light_pos = gFaces[base].light_pos;
-    float inv_range = gFaces[base].inv_range;
-    float3 dir = P_off - light_pos;                       // light -> receiver
-    float3 a = abs(dir);
-
-    // Major-axis face select (branchless). face order: +X=0,-X=1,+Y=2,-Y=3,+Z=4,-Z=5.
-    // `ma` is the magnitude of the dominant axis; `uvc = (right.d, -(up.d))` the two minor coords
-    // (sc, tc) for that face's basis. The per-face right/up come from the host fit's RH look-at
-    // (`spot_demo_view_proj` basis: right = norm(cross(up_hint, fwd)), up = cross(fwd, right), up_hint
-    // = +Y except +Z for a ±Y axis). The depth pass projects `ndc.x = right.d / fwd.d`,
-    // `ndc.y = -(up.d) / fwd.d`, so `uvc / ma` reproduces NDC EXACTLY (`fwd.d == ma` on each face).
-    // NOTE: this hand-coded reconstruction DROPS the perspective `f = cot(FOV/2)` factor, valid ONLY
-    // because cube faces are 90° (`f == 1`). The Rust bake pins that with a compile-time assert on
-    // `POINT_FACE_FOV_Y == π/2` (shadow_atlas.rs); if that FOV ever changes, sample the uploaded
-    // per-face `view_proj` here (like the spot path) instead of this table.
-    uint face;
-    float ma;
-    float2 uvc;
-    if (a.x >= a.y && a.x >= a.z) {
-        ma = a.x;
-        face = (dir.x >= 0.0) ? 0u : 1u;
-        // +X: right = -Z, up = +Y => sc = -z, tc = -y.   -X: right = +Z, up = +Y => sc = z, tc = -y.
-        uvc = (dir.x >= 0.0) ? float2(-dir.z, -dir.y) : float2(dir.z, -dir.y);
-    } else if (a.y >= a.x && a.y >= a.z) {
-        ma = a.y;
-        face = (dir.y >= 0.0) ? 2u : 3u;
-        // +Y: right = -X, up = +Z => sc = -x, tc = -z.   -Y: right = +X, up = +Z => sc = x, tc = -z.
-        uvc = (dir.y >= 0.0) ? float2(-dir.x, -dir.z) : float2(dir.x, -dir.z);
-    } else {
-        ma = a.z;
-        face = (dir.z >= 0.0) ? 4u : 5u;
-        // +Z: right = +X, up = +Y => sc = x, tc = -y.    -Z: right = -X, up = +Y => sc = -x, tc = -y.
-        uvc = (dir.z >= 0.0) ? float2(dir.x, -dir.y) : float2(-dir.x, -dir.y);
-    }
-    // Project the minor coords onto the face plane (divide by |major|), then map [-1,1] -> [0,1].
-    // The Y axis is FLIPPED to match the engine's framebuffer convention (the depth pass rendered
-    // with the same `view_proj` Y-flip the spot/cascade paths use).
-    float inv_ma = (ma > 1e-8) ? (1.0 / ma) : 0.0;
-    float2 uv;
-    uv.x = uvc.x * inv_ma * 0.5 + 0.5;
-    // NO second Y-flip (the CSM mirror, applied to the point cube). uvc.y is ALREADY -(up.dir) — the
-    // face matrix's own `-f*up` Y-flip — and the atlas depth pass writes into a POSITIVE-height
-    // viewport (no negative-height Vulkan flip), so the stored texel is at ndc.y*0.5+0.5. A `1.0 - (...)`
-    // here would Y-mirror every point shadow about uv.y=0.5 (invisible only for a caster on the face's
-    // central axis — the fixed point; an off-axis box/slab shows the full mirror). Net Y inversions = 1.
-    uv.y = uvc.y * inv_ma * 0.5 + 0.5;
-    // The receiver's own normalized radial distance — the SAME expression the depth FS stored, so
-    // the LessOrEqual compare is apples-to-apples. Saturated to the [0,1] depth range.
-    float ref = saturate(length(dir) * inv_range);
-    uint layer = base + face;
-    // PCF: 13-tap tent disc (see `atlas_pcf_disc`). Taps that cross a cube-face UV edge clamp to
-    // the face border texel; the stored value is the RADIAL distance (continuous across faces), so
-    // the clamped tap reads a near-correct neighbor — an acceptable few-texel seam approximation.
-    return atlas_pcf_disc(uv, (float)layer, ref);
-}
+#endif
 
 // Karis "mobile" analytic environment BRDF approximation (no DFG LUT). Returns the
 // (scale, bias) the split-sum specular IBL needs: `spec_env = f0*scale + bias`.
@@ -866,6 +627,51 @@ float2 env_brdf_approx(float roughness, float NoV) {
     float a004 = min(r.x * r.x, exp2(-9.28 * NoV)) * r.x + r.y;
     return float2(-1.04, 1.04) * a004 + r.zw;
 }
+
+// === PBR P1 — the HDR sun disc in the reflected environment =================================
+//
+// The environment the reflection vector `R` samples (the LIGHT_KIND_SKY gradient below) gets a
+// bright "sun disc" baked in for every directional light — the canonical chrome cue (a sharp
+// highlight sliding across a smooth metal's curvature) a flat sky-gradient alone cannot produce.
+// `sun_kernel_exponent` is the cheap analytic stand-in for prefiltered-cubemap mip selection: it
+// maps the GGX alpha (roughness^2) to a Blinn-Phong-equivalent cosine-power exponent
+// (`n = 2/alpha^2 - 2`, the standard Phong<->GGX conversion), clamped to avoid the `pow` blowup
+// as alpha -> 0 (a mirror-smooth surface) while staying a valid (if very broad) lobe as
+// alpha -> 1 (fully rough). At roughness 0.13 (alpha ~= 0.0169) this clamps to the MAX (a tight
+// ~1.5-degree-half-width disc); at roughness 0.42 (alpha ~= 0.1764) it lands at n ~= 62 (a broad
+// ~8.5-degree glint) — the sharp-vs-soft contrast the visual gate calls for.
+static const float SUN_KERNEL_EXPONENT_MIN = 1.0;
+static const float SUN_KERNEL_EXPONENT_MAX = 2048.0;
+
+float sun_kernel_exponent(float alpha) {
+    float n = 2.0 / max(alpha * alpha, 1e-6) - 2.0;
+    return clamp(n, SUN_KERNEL_EXPONENT_MIN, SUN_KERNEL_EXPONENT_MAX);
+}
+
+// The analytic sun-disc kernel: `pow(saturate(dot(dir, sun_dir)), k(alpha))`. `dir` is the
+// REFLECTION vector `R` (not the surface normal — the disc must slide with the view, the
+// mirror cue), `sun_dir` is the directional light's unit direction. Peaks at exactly 1.0 where
+// `R` points at the light (a smooth metal shows a pinpoint glint there) and falls off per
+// `sun_kernel_exponent` — sharp on a low-roughness surface, broad on a high-roughness one.
+float sun_kernel(float3 dir, float3 sun_dir, float alpha) {
+    float c = saturate(dot(dir, sun_dir));
+    return pow(c, sun_kernel_exponent(alpha));
+}
+
+// The default gate on the env sun-disc contribution — owner-retunable at the visual gate.
+// `1.0` keeps the disc's peak commensurate with the material's own DFG-weighted specular tint
+// (the kernel itself already peaks at exactly 1.0 only where `R` points at the light and falls
+// off sharply everywhere else, so a unity weight is not overbearing away from the highlight).
+static const float SUN_ENV_WEIGHT = 1.0;
+
+// === Render sky background — the visible sun disc baked into the BACKGROUND (mask == 0) =====
+//
+// The background branch renders the SAME analytic sky the metals reflect (`sky_kernel`
+// below), so a bare pixel is coherent with the reflected environment instead of a dark void.
+// `SKY_SUN_EXPONENT` is a FIXED, moderate cosine-power exponent (unlike `sun_kernel_exponent`,
+// NOT roughness-driven — the background is a flat environment element, not a BRDF lobe): ~512
+// reads as a tight but clearly visible sun disc against the sky gradient. Owner-retunable.
+static const float SKY_SUN_EXPONENT = 512.0;
 
 // === Render Shadow Phase 3 — SSCS screen-space march ========================================
 
@@ -986,6 +792,11 @@ float sscs_march(float3 P, float3 n, float3 l, float t_max, float NoL, uint px, 
     return saturate(1.0 - occlusion);
 }
 
+// Multi-paradigm render-path plan, rung R4b (Decision 3 extraction): the output-stage tonemap
+// operators (`aces_fitted`/`khronos_pbr_neutral`/`reinhard_jodie`/`tonemap_select` +
+// `ACES_IN`/`ACES_OUT`/`OETF_GAMMA_EXP`) moved to `pbr_lighting.hlsli` (already `#include`d
+// above) — the SAME curve every render path's final `lit` write now shares.
+
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
     uint idx = tid.x;
@@ -1029,6 +840,23 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float metallic    = m.mrr.x;
         float roughness   = clamp(m.mrr.y, 0.045, 1.0); // fp32 floor (no fp16 floor needed)
         float reflectance = m.mrr.z;
+#if !HWRT
+        // Textured-PBR T6a (SOFTWARE-RESOLVE-ONLY): the `MATERIAL_FLAG_TEXTURED_BIT` override.
+        // `reflectance` above is left UNTOUCHED (no texture channel carries it yet); `metallic`/
+        // `roughness`/`ao`/`emissive` are REASSIGNED, never reordered — for a flag=0 material
+        // (every current material) the branch is DEAD and every value stays a bit-for-bit copy of
+        // its pre-branch assignment (the flag=0 byte-identity invariant). `ao` is the OUTER
+        // `is_sdf_lit`-scope A2 SDF-march AO (declared above `is_sdf_lit`'s body start); reassigning
+        // it here propagates into `ao_final` below (the SSAO combine reads THIS `ao`).
+        float3 emissive = m.emissive.rgb;
+        if (asuint(m.mrr.w) & MATERIAL_FLAG_TEXTURED_BIT) {
+            float4 pbr = gPbr.Load(coord);
+            metallic  = pbr.r;
+            roughness = clamp(pbr.g, 0.045, 1.0);
+            ao        = ao * pbr.b;
+            emissive  = emissive * pbr.a;
+        }
+#endif
         float a = roughness * roughness;                 // GGX alpha = perceptual^2
 
         // Metallic-roughness split: dielectric f0 from reflectance (0.5 -> 4% F0); metals
@@ -1043,16 +871,47 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float3 v = -rd;
         float NoV = max(dot(n, v), 1e-4);
 
+        // PBR P0-D: multi-scatter energy compensation — ONE per-pixel term (view +
+        // roughness only), hoisted here (before the light loop) and REUSED at every
+        // specular site below (both direct-light sites + the sky ambient specular) so
+        // `env_brdf_approx` runs exactly once per pixel (Principle 1 — no duplicate ALU).
+        // Single-scatter GGX loses energy at high roughness (up to ~40%), so a rough metal
+        // (no diffuse fallback) came out too dark/desaturated. `Ess = dfg.x + dfg.y` is the
+        // Fdez-Aguera scale+bias energy estimate (NOT `1/dfg.y`); `energy_comp` redistributes
+        // the lost energy back into the metal's own f0 tint.
+        float2 dfg_v = env_brdf_approx(roughness, NoV);
+        float  Ess = max(dfg_v.x + dfg_v.y, 1e-4);
+        float3 energy_comp = 1.0 + f0 * (1.0 / Ess - 1.0);
+
+        // Multi-Paradigm Render-Path Rung-4a (Decision 3): the per-pixel `Surface` carrier
+        // (`pbr_lighting.hlsli`) — bundles the hoisted terms every direct-light + ambient
+        // evaluation below now shares via `eval_pbr_direct_bsdf`/`eval_pbr_ambient_hemi`/
+        // `eval_pbr_sun_disc` instead of re-deriving the bare locals per call site.
+        Surface surf;
+        surf.n = n;
+        surf.NoV = NoV;
+        surf.a = a;
+        surf.f0 = f0;
+        surf.diffuse_color = diffuse_color;
+        surf.energy_comp = energy_comp;
+
+        // PBR P1: the REFLECTION vector, hoisted ONCE per pixel (view + normal only) so BOTH
+        // the sky-gradient ambient specular (LIGHT_KIND_SKY) and the per-directional HDR
+        // sun-disc term (LIGHT_KIND_DIRECTIONAL, below) reuse the SAME `R` — a pixel with N
+        // directional lights costs one `reflect`, not N.
+        float3 R = reflect(-v, n);
+
         // The hemisphere factor the sky lerp interpolates against (world up).
         float hemi = dot(n, LIGHT_UP) * 0.5 + 0.5;
 
         // L0a: loop the no-`P` front block of the table (directionals + sky). The W1
         // op-order is PINNED to the host oracle (`golden_deferred_resolve_table`):
-        //   direct  += (diff + spec) * (NoL * shadow) * L.color   (accumulator from 0)
-        //   ambient += (spec_ambient + diff_ambient) * ao          (accumulator from 0)
-        //   lit      = (direct + ambient + emissive) * exposure     (* exposure LAST)
+        //   direct  += (diff + spec) * (NoL * shadow) * L.color        (accumulator from 0)
+        //   ambient += diff_ambient * ao_final + spec_ambient * spec_ao (PBR metal fix:
+        //              decoupled diffuse-AO/specular-AO, accumulator from 0)
+        //   lit      = (direct + ambient + emissive) * exposure          (* exposure LAST)
         // No reassociation — a degenerate 1-directional + 1-sky table at exposure 1.0 is
-        // bit-identical to the old LIGHT_DIR/LIGHT_COLOR/SKY_* path.
+        // bit-identical to the old LIGHT_DIR/LIGHT_COLOR/SKY_* path (pre-metal-fix).
         LightHeader H = load_light_header(LightBuf);
 
         // P6 R1: the resolve shadow_mode (header word 7; 0 on every pre-P6 scene → the
@@ -1082,6 +941,16 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // 0%-gate). Read ONCE here, consumed at the GATED (empty at I0) injection site after the L0a
         // ambient accumulation below.
         uint ddgi_mode = load_ddgi_mode(LightBuf);
+        // Render terminator-softening (`#if TERMINATOR_WRAP` variant — the frozen-base
+        // discipline note above `nol_wrapped`): the diffuse light-wrap amount, header word 7
+        // bits 12..19. Read ONCE here (a wave-uniform header broadcast), consumed at each
+        // direct-light diffuse accumulation site below via `nol_wrapped` (DIFFUSE ONLY —
+        // specular keeps the physical NoL clamp). Declared ENTIRELY under `TERMINATOR_WRAP` so
+        // the base compile references neither `ts` nor `load_terminator_softening` (the latter
+        // stays an unreferenced, harmless function in the shared `light_table.hlsli`).
+#if TERMINATOR_WRAP
+        float ts = load_terminator_softening(LightBuf);
+#endif
         float view_t = gViewT.Load(coord);
         float3 P = ro + rd * view_t;
 #ifdef MOTION_VECTORS
@@ -1108,32 +977,33 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float ao_final = ao;
         uint ssao_mode = load_ssao_mode(LightBuf);
         if (ssao_mode != SSAO_MODE_OFF) {
-            // Render P7 POLISH: the inline depth-gated box blur of `gSsao` (replaces the single
-            // center tap — kills the discrete-step RINGS). Average the (2*R+1)² neighbour AO
-            // taps whose `gViewT` is within `SSAO_BLUR_DEPTH_TOL` of the center's; the center
-            // always passes its own gate so the count is ≥ 1 (no divide-by-zero). The depth
-            // gate is the silhouette guard — a neighbour across the mesh↔SDF edge has a far
-            // `view_t` and is rejected, so the blur never bleeds AO over the silhouette.
-            float ssao_sum = 0.0;
-            float ssao_cnt = 0.0;
-            for (int dy = -SSAO_BLUR_R; dy <= SSAO_BLUR_R; ++dy) {
-                for (int dx = -SSAO_BLUR_R; dx <= SSAO_BLUR_R; ++dx) {
-                    int2 c = coord + int2(dx, dy);
-                    if (c.x < 0 || c.y < 0 || c.x >= (int)w || c.y >= (int)h) {
-                        continue;                         // bounds (extent from the camera UBO)
-                    }
-                    float vt = gViewT.Load(c);
-                    if (abs(vt - view_t) > SSAO_BLUR_DEPTH_TOL) {
-                        continue;                         // silhouette gate (far-depth neighbour)
-                    }
-                    ssao_sum += gSsao.Load(c).r;
-                    ssao_cnt += 1.0;
-                }
-            }
-            float ssao_blurred = ssao_sum / max(ssao_cnt, 1.0); // center counts → cnt ≥ 1
+            // Render P7 POLISH follow-up: the SSAO denoise now lives in a DEDICATED multi-pass
+            // à-trous compute chain (`ssao_atrous.comp.hlsl`), run BEFORE this resolve dispatch.
+            // `gSsao` here is the chain's FINAL filtered lane (or the raw `sdf_ssao` gather when
+            // the denoise is off, `atrous_levels == 0`) — a single `.Load`, no per-pixel
+            // neighbourhood walk in the resolve anymore.
+            //
+            // Render P7 POLISH Track 2: the tail combine below is MACHINE-GENERATED by
+            // `boyko_shaderdsl::emit::emit_hlsl_ssao_blur_combine()` (tracing
+            // `boyko_shaderdsl::ssao::ssao_blur_combine_body` over the Emit backend) — the SAME
+            // single-sourced body the host oracle `golden_ssao_atrous` / `ssao_blur_combine_body`
+            // locks against. The `ssao_atrous_edsl_sync` test pins the committed span to the
+            // generator; a hand-edit fails CI.
+            float ssao_blurred = gSsao.Load(coord).r;
+            // === GENERATED ssao_blur_combine BEGIN ===
             float ao_class = (view_t >= 1.0e30) ? 1.0 : ao;
             ao_final = min(ao_class, ssao_blurred);
+            // === GENERATED ssao_blur_combine END ===
         }
+
+        // PBR metal fix: decoupled specular occlusion (Filament SpecularAO_Lagarde ==
+        // Bevy deferred `specular_occlusion`), hoisted ONCE per pixel (NoV + roughness +
+        // ao_final only) and reused at every ambient-specular site below. Diffuse AO
+        // (ao_final) darkens Lambert ambient correctly, but a metal has diffuse == 0 — its
+        // ambient SPECULAR is its ENTIRE appearance, so multiplying that by ao_final reads
+        // as "AO-darkened matte paint", not metal. `spec_ao` stays ~1 for smooth/metal
+        // surfaces and only gently occludes rough+cavity, matching every competitor's split.
+        float spec_ao = saturate(pow(NoV + ao_final, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao_final);
 
         float3 lit_direct = float3(0.0, 0.0, 0.0);
         float3 ambient = float3(0.0, 0.0, 0.0);
@@ -1170,6 +1040,40 @@ void main(uint3 tid : SV_DispatchThreadID) {
                                          ? (dot(rd, cam_forward.xyz) * view_t)
                                          : view_t;
 #if HWRT
+    #if SHADOW_STAGE != SHADOW_STAGE_RESOLVE_DENOISED
+                        // Lane fix/hwrt-shadow-ray-origin: `P` above is `ro + rd * view_t` on the b5
+                        // ray, but a RASTER-owned pixel's `view_t` is the Euclidean distance of the
+                        // surface the JITTERED raster put here (gbuffer_mrt.fs.hlsl under
+                        // gbuffer_push_from_view_jittered) — pairing it with the b5 ray displaces P
+                        // by t*dtheta (mm..cm at the far floor) and, on the +y jitter phases, puts
+                        // the origin UNDER the receiver beyond an iso-line: every cone ray self-hits
+                        // (the 2026-09-21 mechanism note; 11k..102k px per phase, jumping every
+                        // frame). The exact origin is eye + rd_r*view_t with rd_r the ray through
+                        // the pixel the raster sampled (residual: the rasteriser's sub-pixel snap
+                        // + fp, <= ~0.05 mm at 10 m, >= 30x under the 1.82 mm bias+TMin guard —
+                        // SHADOW_RASTER_FWD from the host: the
+                        // unjittered forward sheared by the raster's OWN jitter — independent of
+                        // the b5 scope). SDF-owned pixels are marched on the b5 ray itself and stay
+                        // on `P`. Producer test: raster-owned <=> gViewT == md*64 (bit-exact: both
+                        // producers write md*64.0, a power-of-two multiply; an SDF hit has
+                        // t < t_mesh strictly). SHADOW_ORIGIN_MODE == 0 (TAA off / ortho) is a
+                        // STRUCTURAL skip: P_shadow is a copy of P. Only the trace origin moves —
+                        // the CSM `P`, `csm_view_z`, SSCS, the point/spot `P` and the MV write keep
+                        // `P`, so the HWRT-vs-software delta stays confined to the trace.
+                        float3 P_shadow = P;
+                        if (SHADOW_ORIGIN_MODE != 0u) {
+                            float md = gDepthHw.Load(int3((int)px, (int)py, 0)).r;
+                            bool raster_owned = (md < HWRT_DEPTH_CLEAR)
+                                             && (view_t == md * HWRT_MESH_DEPTH_T_MAX);
+                            if (raster_owned) {
+                                float3 ro_r, rd_r;
+                                generate_ray(px, py, w, h, camera_mode, cam_eye.xyz,
+                                             float4(SHADOW_RASTER_FWD.xyz, cam_forward.w),
+                                             cam_right, cam_up.xyz, ro_r, rd_r);
+                                P_shadow = ro_r + rd_r * view_t;
+                            }
+                        }
+    #endif
     #if SHADOW_STAGE == SHADOW_STAGE_RESOLVE_INLINE
                         // R2a-4b (owner-eval, soft): the mesh-shadow term routes to a SOFT `rayQuery`
                         // TLAS trace (replacing the CSM shadow-map sample for mesh geometry). The
@@ -1186,11 +1090,15 @@ void main(uint3 tid : SV_DispatchThreadID) {
                         // per-pixel golden-angle spiral is rotated by the shader's own IGN hash (the
                         // SAME `ign(px, py)` the SSCS dither uses) so neighbouring pixels sample
                         // decorrelated cone directions — the penumbra reads as noise, not banding (no
-                        // TAA on this engine, so `SHADOW_RAY_COUNT` carries the single-frame smoothness).
+                        // spatial TAA on this engine, so `SHADOW_RAY_COUNT` carries the single-frame
+                        // smoothness). Rung 3b adds a SECOND, per-frame rotation term keyed off
+                        // `SHADOW_FRAME_SEED`: the spiral also advances by the golden angle every
+                        // frame, so the same pixel samples a DIFFERENT cone subset frame-to-frame —
+                        // the temporal decorrelation the shadow temporal-reproject pass averages out.
                         float3 sh_up = abs(l.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
                         float3 sh_tx = normalize(cross(sh_up, l));
                         float3 sh_ty = cross(l, sh_tx);
-                        float  sh_rot = ign(px, py) * 6.2831853; // IGN → [0, 2π) spiral rotation
+                        float  sh_rot = ign(px, py) * 6.2831853 + float(SHADOW_FRAME_SEED & 0xFFu) * 2.399963229728653; // IGN spiral + rung-3b per-frame golden-angle step
                         float  occ = 0.0;
                         [loop] for (uint si = 0u; si < SHADOW_RAY_COUNT; ++si) {
                             float sh_r = sqrt((si + 0.5) / SHADOW_RAY_COUNT);        // Vogel disk radius
@@ -1198,7 +1106,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                             float2 sh_d = float2(cos(sh_t), sin(sh_t)) * (sh_r * SHADOW_CONE_RADIUS);
                             float3 sh_dir = normalize(l + sh_tx * sh_d.x + sh_ty * sh_d.y);
                             RayDesc shadow_ray;
-                            shadow_ray.Origin = P + n * SHADOW_RAY_BIAS;
+                            shadow_ray.Origin = P_shadow + n * SHADOW_RAY_BIAS;
                             shadow_ray.Direction = sh_dir;
                             shadow_ray.TMin = SHADOW_RAY_TMIN;
                             shadow_ray.TMax = SHADOW_RAY_TMAX;
@@ -1214,8 +1122,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
     #elif SHADOW_STAGE == SHADOW_STAGE_VIS
                         // Rung 3a VIS: the IDENTICAL Vogel-disk trace as RESOLVE_INLINE (same
                         // SHADOW_RAY_COUNT spec-const, cone/tmax/tmin/bias UBO, IGN rotation,
-                        // golden angle, ray flags) — copied VERBATIM so `mesh_vis` is bit-identical
-                        // to the inline path (the C3 algebraic anchor). The ONLY divergence vs
+                        // golden angle, rung-3b SHADOW_FRAME_SEED per-frame rotation term, ray
+                        // flags) — copied VERBATIM so `mesh_vis` is bit-identical to the inline
+                        // path, INCLUDING across frames now that the rotation is frame-varying (the
+                        // C3 algebraic anchor). The ONLY divergence vs
                         // RESOLVE_INLINE is the SINK: instead of `vis = min(vis, mesh_vis)`, write
                         // the raw visibility (+ validity 1) to `gShadowVis` and RETURN before any
                         // lighting — the VIS stage produces NO lit output (the à-trous filter + the
@@ -1223,7 +1133,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                         float3 sh_up = abs(l.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
                         float3 sh_tx = normalize(cross(sh_up, l));
                         float3 sh_ty = cross(l, sh_tx);
-                        float  sh_rot = ign(px, py) * 6.2831853; // IGN → [0, 2π) spiral rotation
+                        float  sh_rot = ign(px, py) * 6.2831853 + float(SHADOW_FRAME_SEED & 0xFFu) * 2.399963229728653; // IGN spiral + rung-3b per-frame golden-angle step
                         float  occ = 0.0;
                         [loop] for (uint si = 0u; si < SHADOW_RAY_COUNT; ++si) {
                             float sh_r = sqrt((si + 0.5) / SHADOW_RAY_COUNT);        // Vogel disk radius
@@ -1231,7 +1141,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                             float2 sh_d = float2(cos(sh_t), sin(sh_t)) * (sh_r * SHADOW_CONE_RADIUS);
                             float3 sh_dir = normalize(l + sh_tx * sh_d.x + sh_ty * sh_d.y);
                             RayDesc shadow_ray;
-                            shadow_ray.Origin = P + n * SHADOW_RAY_BIAS;
+                            shadow_ray.Origin = P_shadow + n * SHADOW_RAY_BIAS;
                             shadow_ray.Direction = sh_dir;
                             shadow_ray.TMin = SHADOW_RAY_TMIN;
                             shadow_ray.TMax = SHADOW_RAY_TMAX;
@@ -1274,24 +1184,58 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 if (contact_mode == CONTACT_SHADOW_MODE_ON && NoL > 0.0) {
                     vis *= sscs_march(P, n, l, T_MAX, NoL, px, py, w, h);
                 }
-                float3 hvec = normalize(v + l);
-                float NoH = saturate(dot(n, hvec));
-                float LoH = saturate(dot(l, hvec));
-                float  D = D_GGX(NoH, a);
-                float  V = V_SmithGGXCorrelated(NoV, NoL, a); // folds 1/(4 NoL NoV)
-                float3 F = F_Schlick(LoH, f0);
-                float3 spec = (D * V) * F;
-                float3 diff = diffuse_color * (1.0 / PI);
-                lit_direct += (diff + spec) * (NoL * vis) * L.color;
+                // PBR P0-A.1: safe_normalize parity with the punctual site below — the
+                // intrinsic `normalize(0)` is NaN when `v` is near-opposite `l` (a
+                // near-grazing/back-facing directional receiver); NoL then zeroes the NaN
+                // spec's contribution on the host but not on the GPU (NaN * 0 == NaN).
+                // Multi-Paradigm Render-Path Rung-4a (Decision 3): the D/V/F/spec/diff
+                // Cook-Torrance combination is the SHARED `eval_pbr_direct_bsdf`
+                // (`pbr_lighting.hlsli`) — identical body to the point/spot site below, now
+                // single-sourced.
+                PbrDirectTerms bsdf = eval_pbr_direct_bsdf(surf, v, l, NoL);
+                // Render terminator-softening (`#if TERMINATOR_WRAP` variant — the frozen-base
+                // discipline note above `nol_wrapped`): DIFFUSE ONLY, `spec` keeps the physical
+                // NoL clamp. No runtime check (the variant itself is the opt-in); the `#else`
+                // arm is CHARACTER-FOR-CHARACTER the pre-feature statement, so the base
+                // compile's token stream — and DXC's codegen for this whole function — is
+                // untouched by construction.
+#if TERMINATOR_WRAP
+                lit_direct += (bsdf.diffuse * nol_wrapped(NoL, ts) + bsdf.specular * NoL) * vis * L.color;
+#else
+                lit_direct += (bsdf.diffuse + bsdf.specular) * (NoL * vis) * L.color;
+#endif
+
+                // PBR P1 — the HDR sun disc: a SECOND, roughness-widened specular response
+                // from this SAME directional light, sampled along the REFLECTION vector `R`
+                // (not `l`) instead of the direct Cook-Torrance half-vector lobe above. Uses
+                // the SAME DFG + energy_comp weighting the sky ambient specular uses (P0-B/
+                // P0-D), so the glint shades consistently with the flat-gradient reflection.
+                // INTENTIONAL double-count with the direct lobe (both widen with roughness
+                // together — the industry-standard sky-cubemap + directional-light overlap;
+                // real-time engines carry the sun both ways). NOT shadow/vis-modulated (only
+                // AO-gated, mirroring the sky ambient's own AO gate) — this is an environment
+                // term, not a direct-light term. `SUN_ENV_WEIGHT` is the single tuning knob.
+                // Rung-4a: the DFG/energy_comp weighting is the SHARED `eval_pbr_sun_disc`
+                // (`pbr_lighting.hlsli`); `SUN_ENV_WEIGHT` stays here (declared AFTER this
+                // file's `#include "pbr_lighting.hlsli"`, so the header cannot reference it).
+                float sun_k = sun_kernel(R, l, a);
+                float3 sun_spec_ambient = eval_pbr_sun_disc(surf, dfg_v, sun_k, L.color) * SUN_ENV_WEIGHT;
+                // PBR metal fix: sun_spec_ambient is a SPECULAR term (the environment glint) —
+                // decoupled from diffuse ao_final onto spec_ao (see the `spec_ao` doc above).
+                ambient += sun_spec_ambient * spec_ao;
             } else if (light_kind(L) == LIGHT_KIND_SKY) {
-                // Hemisphere ambient: lerp(ground, sky, hemi) diffuse + EnvBRDFApprox spec.
+                // Hemisphere ambient: diffuse integrates the FULL hemisphere around N
+                // (Lambert), so `hemi_color = lerp(ground, sky, hemi)` keeps sampling along
+                // N. PBR P0-B: the specular lobe is narrow and view-dependent — a metal must
+                // MIRROR its surroundings, not show the identical flat sky tint from every
+                // angle — so the specular term samples the SAME sky/ground gradient along
+                // the REFLECTION vector `R` (PBR P1: hoisted above the light loop) instead of N.
+                // Rung-4a: the full combination (hemi lerp + steepened reflected hemisphere +
+                // decoupled-AO combine, the PBR metal fix) is the SHARED `eval_pbr_ambient_hemi`
+                // (`pbr_lighting.hlsli`).
                 float3 sky_color = L.color;       // upper hemisphere
                 float3 ground_color = L.pos;      // lower hemisphere (packed in pos lane)
-                float2 dfg = env_brdf_approx(roughness, NoV);
-                float3 hemi_color = lerp(ground_color, sky_color, hemi);
-                float3 spec_ambient = (f0 * dfg.x + dfg.y) * sky_color;
-                float3 diff_ambient = diffuse_color * hemi_color;
-                ambient += (spec_ambient + diff_ambient) * ao_final;
+                ambient += eval_pbr_ambient_hemi(surf, R, dfg_v, sky_color, ground_color, hemi, ao_final, spec_ao);
             }
             // Point/spot (kinds 1/2) are the L0b block — not in the L0a front block.
         }
@@ -1334,7 +1278,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // never consumed). `rd` is unit (the shared ray-gen), so `view_t` is the true world
         // distance and `P = ro + rd * view_t` is the exact marched surface point.
 
-        // L1 cluster lookup (Decision 6): when `clusters_enabled`, map this pixel to its
+        // L1 cluster lookup (Decision 6): when `use_clusters` — the THREE-term gate built below,
+        // NOT the `clusters_enabled` bit alone since VB-P1k — map this pixel to its
         // froxel and loop ONLY the cluster's point/spot indices; else loop the flat
         // `[l0a_count .. light_count)` block (the L0b path — the L1 0%-gate). The froxel z
         // slice uses the SAME view-z the cull used: `view_z = dot(rd, cam_forward.xyz) *
@@ -1342,8 +1287,57 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // (ORTHO). The linearization (`cluster_linear_index`) + the slice/tile maps are the
         // shared `light_table.hlsli` helpers — byte-identical to the cull WRITE (a mismatch
         // would silently map to the wrong cluster).
+        //
+        // Two DEFENCE terms beyond the enabled bit, bringing this site to the same three-term
+        // form `vb_resolve.comp.hlsl`/`vb_shade.comp.hlsl` carry (it had NEITHER of them until
+        // now, and it is reachable on EVERY Deferred boot, unlike the `#ifdef FROXEL` VB sites):
+        //
+        //   * non-zero dims (VB-P1b-0 C1). `cluster_z_slice` clamps to `(int)dim_z - 1`, which
+        //     for `dim_z == 0` is `-1` and returns `0xFFFFFFFF`; `cluster_linear_index` then
+        //     yields `0xFFFFFFFF` and `ClusterGrid[cluster]` reads gigabytes past the end. A
+        //     zero-dims header is exactly what `sync_cluster_light_gate` publishes on every
+        //     non-VB-froxel boot -- including this shader's own Deferred path -- so the enabled
+        //     bit alone was never a sufficient guard here.
+        //   * CAPACITY (VB-P1k). `cluster_linear_index` is < dim_x*dim_y*dim_z by construction,
+        //     so the LIVE header's dims are the only bound this read would otherwise have --
+        //     while `ClusterGrid` was SIZED at boot from `ClusterConfig::cluster_count()` and is
+        //     never re-allocated, and `sync_cluster_light_gate` republishes the LIVE dims every
+        //     frame. A post-boot `ClusterConfig` edit that GROWS the grid therefore makes such a
+        //     read leave the allocation, silently (`robustBufferAccess` is OFF -- the device is
+        //     created with `samplerAnisotropy` as its only core feature bit -- and no GPU-assisted
+        //     validation runs). `GetDimensions` reports the BOUND DESCRIPTOR's own element count
+        //     (SPIR-V `OpArrayLength`) -- the allocation itself, not a host-side mirror of it --
+        //     so this term disarms the cluster walk for exactly the frames whose live grid does
+        //     not fit the buffer, falling back to the in-bounds flat scan (which is also the
+        //     CORRECT lighting for such a frame; clamping the index would silently shade against
+        //     the wrong froxel).
+        //
+        // Both terms are inert on every armed, correctly-packed frame (dims nonzero together
+        // with the enabled bit, and `cluster_count == grid_capacity` when boot dims == live
+        // dims -- every shipping configuration), so ON==OFF equality is unaffected.
+        //
+        // WHICH term actually decides HERE, boot by boot. This source's resolve set is bound only
+        // inside `Renderer::record_gbuffer`, which `render_gbuffer_frame` records only on a
+        // DEFERRED boot -- and Deferred can never arm `ResolvedRenderPath::froxel_light_cull`
+        // (`clusters_enabled && path == VisibilityBuffer`), so no boot that reaches this code has
+        // an L1 cull built: `ClusterGrid` is ALWAYS the light-table placeholder here
+        // (`targets.rs`), and `GetDimensions` reports THAT buffer's element count -- still a true
+        // bound on the bound descriptor. On the DEFAULT boot the ENABLED BIT takes the flat branch
+        // first, because `LightingConfig::clusters_enabled` defaults to `false` and
+        // `LightHeaderGpu::new` packs it verbatim. A Deferred boot that explicitly sets it `true`
+        // gets past that term and is stopped by the DIMS term, because `sync_cluster_light_gate`
+        // pins the header's dims lane to `0` whenever `froxel_light_cull` is false. The CAPACITY
+        // term therefore never decides a host-booted Deferred frame -- on THIS leaf it is defence
+        // in depth, and the only nonzero-dims headers that reach it today come from a direct-RHI
+        // harness (`GoldenLightHeader::new_clustered`, `tests/sdf_gbuffer_hybrid.rs`). The
+        // grow-past-the-allocation case the term is built for is live on the VB leaves, whose
+        // header does carry real dims.
         ClusterParams cp = load_cluster_params(LightBuf);
-        bool use_clusters = cp.clusters_enabled != 0u;
+        uint grid_capacity, grid_stride;
+        ClusterGrid.GetDimensions(grid_capacity, grid_stride);
+        uint cluster_count = cp.dim_x * cp.dim_y * cp.dim_z;
+        bool use_clusters = (cp.clusters_enabled != 0u) && (cluster_count != 0u)
+                         && (cluster_count <= grid_capacity);
         uint ps_count;       // number of point/spot lights to walk
         uint ps_offset;      // base into LightIndexList (clusters) or the flat block
         if (use_clusters) {
@@ -1425,19 +1419,15 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 }
             }
             // The SAME Cook-Torrance direct term as the directional path, scaled by the
-            // distance/cone attenuation and the light's canonical (baked-I) color. The
-            // half-vector uses `safe_normalize` (host `v_normalize` parity): at a back-facing
-            // surface `v + l` can be ~zero, and the intrinsic `normalize(0) == NaN` would
-            // poison `spec` and (since `NaN * (NoL == 0) == NaN`) blacken the pixel.
-            float3 hvec = safe_normalize(v + l);
+            // distance/cone attenuation and the light's canonical (baked-I) color.
+            // Multi-Paradigm Render-Path Rung-4a (Decision 3): the SHARED
+            // `eval_pbr_direct_bsdf` (`pbr_lighting.hlsli`) — identical body to the
+            // directional site above, including the `safe_normalize` half-vector parity
+            // (host `v_normalize`; at a back-facing surface `v + l` can be ~zero, and the
+            // intrinsic `normalize(0) == NaN` would poison `spec` and, since
+            // `NaN * (NoL == 0) == NaN`, blacken the pixel).
             float NoL = max(dot(n, l), 0.0);
-            float NoH = saturate(dot(n, hvec));
-            float LoH = saturate(dot(l, hvec));
-            float  D = D_GGX(NoH, a);
-            float  V = V_SmithGGXCorrelated(NoV, NoL, a);
-            float3 F = F_Schlick(LoH, f0);
-            float3 spec = (D * V) * F;
-            float3 diff = diffuse_color * (1.0 / PI);
+            PbrDirectTerms bsdf = eval_pbr_direct_bsdf(surf, v, l, NoL);
             // P6 R1: `vis` DEFAULTS to `shadow` (the marcher's gMaterial.r channel) — the
             // EXACT legacy L0b/L1 point/spot modulation (`(NoL * shadow) * atten`), so a
             // `shadow_mode==0` scene is BYTE-IDENTICAL to today (the 0%-gate; the L0b/L1
@@ -1468,15 +1458,75 @@ void main(uint3 tid : SV_DispatchThreadID) {
             if (contact_mode == CONTACT_SHADOW_MODE_ON && NoL > 0.0) {
                 vis *= sscs_march(P, n, l, sqrt(d2), NoL, px, py, w, h);
             }
-            lit_direct += (diff + spec) * (NoL * vis * punctual_shadow) * atten * L.color;
+            // Render terminator-softening (`#if TERMINATOR_WRAP` variant — the frozen-base
+            // discipline note above `nol_wrapped`): DIFFUSE ONLY, `spec` keeps the physical NoL
+            // clamp. The `#else` arm is CHARACTER-FOR-CHARACTER the pre-feature statement (the
+            // base compile's token stream is untouched by construction).
+#if TERMINATOR_WRAP
+            lit_direct += (bsdf.diffuse * nol_wrapped(NoL, ts) + bsdf.specular * NoL) * (vis * punctual_shadow) * atten * L.color;
+#else
+            lit_direct += (bsdf.diffuse + bsdf.specular) * (NoL * vis * punctual_shadow) * atten * L.color;
+#endif
         }
 
-        // O3: exposure is the FINAL multiply on the accumulated LINEAR radiance.
+        // O3: exposure is the FINAL multiply on the accumulated LINEAR radiance, THEN the
+        // PBR P0-C filmic tonemap (hue-preserving highlight rolloff), THEN the manual gamma
+        // OETF (see `aces_fitted`'s doc comment for why the OETF is manual, not hardware).
+        // Textured-PBR T6a: the SOFTWARE arm sums the (possibly texture-modulated) local
+        // `emissive`; the HWRT arm is CHARACTER-FOR-CHARACTER the pre-T6a line (no `emissive`
+        // local exists under `HWRT` — the HWRT `.spv` is untouched by this rung).
+#if !HWRT
+        lit = (lit_direct + ambient + emissive) * H.exposure;
+#else
         lit = (lit_direct + ambient + m.emissive.rgb) * H.exposure;
+#endif
+        lit = tonemap_select(lit, load_tonemap_mode(LightBuf));
+        lit = pow(lit, OETF_GAMMA_EXP);
     } else {
-        // mesh / background / empty (mask == 0): PASS THE BASE THROUGH byte-identically
-        // (the 0%-gate). No PBR, no material fetch, no normal/id decode.
-        lit = base;
+        // mesh / background / empty (mask == 0): render the PROCEDURAL SKY along the view
+        // ray instead of the flat base pass-through, so the visible background matches the
+        // SkyLight gradient the metals reflect (an otherwise-incoherent scene: a metal shows
+        // a bright sky the viewer never sees, floating against a dark void). A scene with NO
+        // SKY entry in the light table keeps the byte-identical dark pass-through (the
+        // 0%-gate: a scene without a SkyLight has no sky to render). No material fetch, no
+        // normal/id decode — the light-table scan is the only extra work, and it runs ONLY
+        // for background pixels (cheap: no geometry/lighting there).
+        float3 ro_bg, rd_bg;
+        generate_ray(px, py, w, h, camera_mode, cam_eye.xyz, cam_forward, cam_right, cam_up.xyz, ro_bg, rd_bg);
+
+        LightHeader H_bg = load_light_header(LightBuf);
+        bool has_sky = false;
+        float3 sky_color = float3(0.0, 0.0, 0.0);
+        float3 ground_color = float3(0.0, 0.0, 0.0);
+        float3 sun_disc = float3(0.0, 0.0, 0.0);
+        for (uint bi = 0u; bi < H_bg.l0a_count; ++bi) {
+            LightElem BL = load_light(LightBuf, bi);
+            if (light_kind(BL) == LIGHT_KIND_SKY) {
+                has_sky = true;
+                sky_color = BL.color;      // upper hemisphere (L.color)
+                ground_color = BL.pos;     // lower hemisphere (packed in the pos lane)
+            } else if (light_kind(BL) == LIGHT_KIND_DIRECTIONAL) {
+                // A visible sun disc for every directional light — the SAME `pow`-kernel
+                // shape the metal's own sun-disc term uses (`sun_kernel`), but a FIXED
+                // exponent (the background is a flat environment element, not a BRDF lobe).
+                float3 bl = normalize(BL.dir);
+                sun_disc += BL.color * pow(saturate(dot(rd_bg, bl)), SKY_SUN_EXPONENT);
+            }
+        }
+
+        if (has_sky) {
+            float3 sky = lerp(ground_color, sky_color, saturate(dot(rd_bg, LIGHT_UP) * 0.5 + 0.5));
+            sky += sun_disc;
+            // O3: exposure is the FINAL multiply on the linear radiance, THEN the SAME
+            // tonemap + manual gamma OETF the lit path applies (`aces_fitted`'s doc comment).
+            sky *= H_bg.exposure;
+            sky = tonemap_select(sky, load_tonemap_mode(LightBuf));
+            sky = pow(sky, OETF_GAMMA_EXP);
+            lit = sky;
+        } else {
+            // No SkyLight in this scene's table — keep the dark pass-through byte-identical.
+            lit = base;
+        }
     }
 
 #if SHADOW_STAGE == SHADOW_STAGE_VIS

@@ -13,8 +13,9 @@ use crate::ray_shadow_config::{RayShadowConfig, ResolvedRayShadow, resolve_ray_s
 /// Registers the dormant ray-backend seam (HW-RT rung R1): inserts the derived
 /// [`RayBackendConfig`] carrier (default DISABLED — every cell
 /// [`RayBackend::Software`](crate::ray_backend::RayBackend::Software)) + its
-/// [`RayCaps`] device-tier input (default [`RtTier::Absent`](boyko_rhi_vulkan's
-/// `RtTier`) — dormant until the host fills it) + the owner's
+/// [`RayCaps`] device-tier input (default
+/// [`RtTier::Absent`](boyko_rhi_vulkan::device::RtTier::Absent) — dormant until the host
+/// fills it) + the owner's
 /// [`RayBackendPolicy`] override input (default zero-override —
 /// `force_software = false`, today's behavior), and schedules the cold
 /// [`resolve_ray_backend_system`] (the SINGLE writer of `RayBackendConfig`) under

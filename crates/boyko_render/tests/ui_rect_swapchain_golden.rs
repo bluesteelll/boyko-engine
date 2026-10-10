@@ -55,6 +55,8 @@
 
 #![cfg(windows)]
 
+mod common;
+
 use core::slice;
 
 use boyko_rhi::enums::{AddressMode, BarrierAccess, BarrierStage, DescriptorKind, Filter};
@@ -80,6 +82,22 @@ use boyko_render::{
 /// that always fits.
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 64;
+
+/// UI-ADVANCED S2 (S-D6): SHA-256 of the full swapchain readback, blessed on the 64 B
+/// `UiInstance` build (commit A of the S2 two-commit protocol) — the widening must
+/// reproduce it exactly (gate G2-3). Unlike the offscreen goldens' fixed 64×64 RGBA
+/// frames, this readback's extent AND byte order are WSI-decided (the driver clamps
+/// the surface extent; the swapchain picks BGRA or RGBA), so the pin carries both and
+/// is asserted only when the live frame matches the blessed shape — a different WSI
+/// shape gets a loud NOTE, never a silent pass-as-checked. Re-bless:
+/// `BOYKO_UI_GOLDEN_BLESS=1`.
+const UI_GOLDEN_SHA256: &str = "23145246c9a642c96eb3abce5c0d7a5dbbb0e1bd9febf3499e7e7b0f7bcffdd7";
+/// The swapchain extent the hash above was blessed at (WSI-clamped: the RTX 3060
+/// driver's minimum surface extent widens the requested 64×64 to 120×64).
+const UI_GOLDEN_EXTENT: (u32, u32) = (120, 64);
+/// The swapchain readback byte order the hash above was blessed at
+/// (`VK_FORMAT_B8G8R8A8_UNORM`, format 44).
+const UI_GOLDEN_IS_BGRA: bool = true;
 
 /// Per-channel tolerance on the readback bytes: the float->UNORM sample round-trip of
 /// the composite + the premultiplied blend ROP make a bit-exact match brittle; the
@@ -196,6 +214,8 @@ fn rect(x: f32, y: f32, w: f32, h: f32, color: u32, clip: Option<[f32; 4]>) -> U
             border_width: [0.0; 4],
             clip,
             text_uv: None,
+            image: None,
+            nine_slice: None,
         },
         1.0,
     )
@@ -394,6 +414,8 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
             dimension: TextureDimension::D2,
             usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         },
     )
     .expect("SAMPLED composite scene texture");
@@ -510,7 +532,12 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
         boyko_render::ui_rect_vs_spirv(),
         boyko_render::ui_rect_fs_spirv(),
         UI_ROWS,
-        &font,
+        Some(&font),
+        boyko_render::UiSamplerMode::Smooth,
+        // No bindless table on this on-screen harness: the UI gets its private
+        // fallback set 1, which is exactly the G3-4 shape a host without a
+        // `BindlessTextureTable` boots into.
+        None,
     )
     .expect("ui_setup (UI pipeline + per-FIF rings, swapchain format)");
 
@@ -570,6 +597,13 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
         "the re-created swapchain extent must match the probe extent (stable surface)"
     );
     assert_eq!(swapchain.extent().height, live.height, "re-created swapchain height stable");
+    println!(
+        "phase-C swapchain: {} images, extent {}x{}, format {}",
+        swapchain.image_count(),
+        swapchain.extent().width,
+        swapchain.extent().height,
+        swapchain.format()
+    );
     let mut renderer =
         Renderer::new(rhi.context(), &surface, &swapchain).expect("renderer (command pool + sync)");
 
@@ -586,6 +620,19 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
         },
     )
     .expect("readback staging buffer");
+    // Sentinel-fill the staging (0xCD) — the anti-stale tripwire. The shared host block
+    // RECYCLES freed ranges: this staging lands where Phase B's scene-upload staging was
+    // freed (shifted by ui_setup's 1088 B of carve-outs), so its INITIAL mapped contents
+    // are the STALE host-authored scene bytes — which once masqueraded as a rendered
+    // frame while the GPU copy had not even executed (the host read raced the readback
+    // frame's fence). The sentinel makes any such unexecuted-copy read unmistakable, and
+    // the post-wait assert below trips on it instead of chasing ghost pixels.
+    {
+        let p = RhiDevice::buffer_mapped_ptr(rhi.context(), &staging).expect("staging mapped");
+        // SAFETY: `p` maps `staging_size` host-coherent bytes; no GPU work references
+        // the staging yet (created just above, first submit is below).
+        unsafe { core::ptr::write_bytes(p.as_ptr(), 0xCD, staging_size as usize) };
+    }
 
     for i in 0..5u32 {
         window.pump_events();
@@ -662,17 +709,39 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
         readback_done,
         "no readback frame presented (swapchain kept recreating) — cannot assert the UI golden"
     );
+    // FENCE THE READBACK before touching the staging: drop the renderer NOW — its Drop
+    // waits the device idle, which completes the readback frame's whole submission
+    // (composite + UI draws + the image→buffer copy). The old code read the staging
+    // right here with only ONE later present having run: that present fence-waited the
+    // SIBLING slot, so frame 3's copy was never waited — under validation pacing the
+    // host reliably read the staging's initial (stale recycled) bytes and the golden
+    // chased a frame that was never there (proven by an all-0xCD sentinel readback).
+    // Correctness by construction beats fence arithmetic: wait-idle, then read.
+    drop(renderer);
     let w = readback_extent.width;
     let h = readback_extent.height;
     let dst = RhiDevice::buffer_mapped_ptr(rhi.context(), &staging).expect("staging mapped");
     let byte_count = (w * h * 4) as usize;
     let mut out = vec![0u8; byte_count];
     // SAFETY: `dst` maps `staging_size` (>= byte_count) host-coherent bytes; the
-    // readback frame's submit completed before this read (the renderer fence-waits the
-    // slot at the start of each later present, and 1 more frame followed frame 3); `out`
-    // is a distinct alloc.
+    // renderer was dropped above (device wait-idle), so the readback frame's copy is
+    // complete + coherent; `out` is a distinct alloc.
     unsafe {
         core::ptr::copy_nonoverlapping(dst.as_ptr(), out.as_mut_ptr(), byte_count);
+    }
+    // The tripwire pairs with the 0xCD sentinel fill at creation: an all-sentinel
+    // readback means the copy never executed before this read (a sync bug in the test
+    // or the present path) — fail HERE with the true cause, not on a pixel mismatch.
+    assert!(
+        out.iter().any(|&b| b != 0xCD),
+        "readback staging still holds the creation sentinel — the image→buffer copy never \
+         executed before the host read (readback-fence sync bug)"
+    );
+    // Diagnostic raw-frame dump (env-gated): the whole readback as raw bytes so an
+    // external histogram can classify a failing frame without single-texel guesswork.
+    if let Some(p) = std::env::var_os("BOYKO_UIRECT_DUMP") {
+        std::fs::write(&p, &out).expect("raw readback dump");
+        println!("uirect raw dump -> {:?} ({}x{})", p, w, h);
     }
     let read = |x: u32, y: u32| -> [u8; 4] {
         let b = texel_base(x, y, w);
@@ -697,10 +766,30 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
     // UI pass LOADED the composited scene, did not clear it.
     assert_readback_close(read(2, 2), SCENE_RGBA, is_bgra, "uncovered texel == BLUE scene (UI pass LoadOp::Load preserved it)");
 
-    // Clean reverse-order teardown. Drop the windowed handles FIRST (the renderer's Drop
-    // waits the device idle, and they hold the `&rhi` borrow), THEN the UI capability
-    // (`destroy_all`, also waits idle), THEN the composite resources, THEN `rhi`.
-    drop(renderer);
+    // S-D6: the full-image pin, gated on the WSI shape it was blessed at (see the
+    // constant's doc). In bless mode the helper prints the hash and this arm prints the
+    // shape to record beside it.
+    if std::env::var_os("BOYKO_UI_GOLDEN_BLESS").is_some() {
+        println!(
+            "BLESS ui_rect_swapchain_golden: extent {w}x{h}, is_bgra = {is_bgra} (the hash is \
+             over the RAW readback bytes; the BMP dump assumes RGBA, so R/B appear swapped \
+             in the viewer when is_bgra — the geometry is what to eyeball)"
+        );
+        common::assert_ui_golden_image_pin("ui_rect_swapchain_golden", &out, w, h, UI_GOLDEN_SHA256);
+    } else if (w, h) == UI_GOLDEN_EXTENT && is_bgra == UI_GOLDEN_IS_BGRA {
+        common::assert_ui_golden_image_pin("ui_rect_swapchain_golden", &out, w, h, UI_GOLDEN_SHA256);
+    } else {
+        eprintln!(
+            "NOTE ui_rect_swapchain_golden: live readback {w}x{h} bgra={is_bgra} differs from \
+             the blessed WSI shape {UI_GOLDEN_EXTENT:?} bgra={UI_GOLDEN_IS_BGRA} — the S-D6 \
+             image hash was NOT checked on this host (the texel asserts above did run)"
+        );
+    }
+
+    // Clean reverse-order teardown. The renderer was ALREADY dropped before the readback
+    // read above (the wait-idle that fences the copy); the remaining windowed handles
+    // drop here, THEN the UI capability (`destroy_all`, also waits idle), THEN the
+    // composite resources, THEN `rhi`.
     drop(swapchain);
     drop(surface);
     rhi.destroy_all();

@@ -1,0 +1,6 @@
+row_identity_churn/burst_migrate/sleeping_on_allpairs
+                        time:   [6.4023 ms 6.4430 ms 6.4883 ms]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+

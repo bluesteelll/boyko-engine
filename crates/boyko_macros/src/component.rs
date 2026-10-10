@@ -6,17 +6,18 @@
 //! the relationship-side parsing/types live in [`crate::relationship`]; the shared
 //! [`crate::common::FieldAccess`] selector is reused here.
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::{format_ident, quote};
-use syn::{Data, DeriveInput, Expr, Fields, Ident, Path, Type, parse_macro_input};
+use quote::{format_ident, quote, quote_spanned};
+use syn::spanned::Spanned;
+use syn::{Data, DeriveInput, Expr, Fields, Ident, Path, Type};
 
 use crate::common::FieldAccess;
 use crate::relationship::{RelationshipRole, clone_ignore_codegen, parse_relationship_role};
 
 /// Implementation of `#[derive(Component)]` (see the public entry in `lib.rs`).
-pub(crate) fn expand(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+pub(crate) fn component_macro_impl(input: TokenStream) -> TokenStream {
+    let input = crate::common::parse2_or_compile_error!(input as DeriveInput);
 
     // Phase 14a: parse the optional `#[component(...)]` hook attribute
     // (extended in Phase 22 with the bare `no_bundle` flag key, and in EnableTag
@@ -75,22 +76,25 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     }
 
     // EnableTag D5 (Step 10 hardening A): a bitset enable tag has NO
-    // `ComponentPool`, so the structural lifecycle hooks (on_add / on_insert /
-    // on_replace / on_remove) can NEVER fire for it — enable/disable is a
-    // per-row bit RMW, not a structural component op. Silently accepting the
-    // combination would install dead hooks (a compile-but-lie footgun), so
-    // reject it loudly at macro time. (A future enable-bit observer, if any,
-    // would be a SEPARATE key, not these structural hooks.)
+    // `ComponentPool`, so the lifecycle hooks (on_add / on_insert / on_replace /
+    // on_remove / on_despawn) can NEVER fire for it — enable/disable is a
+    // per-row bit RMW, not a structural component op, and a bitset id is
+    // excluded from every archetype signature, so `ArchetypeFlags` never even
+    // ORs its hook bits in. Silently accepting the combination would install
+    // dead hooks (a compile-but-lie footgun), so reject it loudly at macro time.
+    // KM2 folds `on_despawn` into this refusal for the same reason it is refused
+    // for the other four — the flag bit is computed over the signature. (A
+    // future enable-bit observer, if any, would be a SEPARATE key.)
     if hooks.storage_bitset && hooks.any() {
         return syn::Error::new(
             input.ident.span(),
             "#[component(storage = \"bitset\")] cannot combine with lifecycle hooks \
-             (on_add/on_insert/on_replace/on_remove): an enable-bit tag has no \
-             ComponentPool, so these hooks never fire. Remove the hook(s), or drop \
-             `storage = \"bitset\"` to use a normal component.",
+             (on_add/on_insert/on_replace/on_remove/on_despawn): an enable-bit tag has \
+             no ComponentPool and is excluded from every archetype signature, so these \
+             hooks never fire. Remove the hook(s), or drop `storage = \"bitset\"` to use \
+             a normal component.",
         )
-        .to_compile_error()
-        .into();
+        .to_compile_error();
     }
 
     // Feature 3 (D3 gate): scan the struct fields for an `Entity` / `ChildOf` type
@@ -152,6 +156,48 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             }
         };
 
+    // Reflection CORE C7: `#[component(reflect)]` emits a free `static TypeInfo` plus the
+    // `impl boyko_reflect::Reflect` pointing at it, and D20's `ReflectDefault` witness.
+    // The whole emission is `#[cfg(feature = "reflect")]` evaluated in the EXPANDING
+    // crate (D2), so an un-annotated derive and a feature-off consumer both emit nothing,
+    // and this crate keeps no edge to `boyko_reflect` (D17). CORE C8 adds the install
+    // call in `component_id()` below, which is what makes the descriptor reachable.
+    //
+    // CORE C9 / D37 — D29's `!hooks.storage_bitset` term is REPLACED here, not joined.
+    //
+    // C8 landed a *silent* suppression: `hooks.reflect && !hooks.storage_bitset`, so a
+    // `#[component(reflect, storage = "bitset")]` tag compiled and published nothing. C9
+    // makes the combination a spanned `compile_error!`, which leaves that term unreachable
+    // in its suppressing branch and its only witness (`reflect_fixture`'s
+    // `c8_bitset_suppression.rs`) unable to compile — a dead datum whose gate has just been
+    // deleted, and a RED (*"drop the `storage_bitset` term"*) with no subject left to
+    // observe it. So the term goes with the gate it served. Nothing is lost: feature off,
+    // the whole emission is `cfg`-stripped and nothing installs; feature on, the refusal
+    // stops the compile. ECS D5's *"two mechanisms at two boundaries"* is the compile-time
+    // refusal plus the release `assert!` inside `install_type_info` — not three.
+    //
+    // The bitset condition is now an ARGUMENT rather than a suppression: `codegen` needs
+    // the `reflect` key's span to put the caret on it (D37), and a `bool` cannot carry one.
+    //
+    // Computed BEFORE `input.ident` moves below, like every other codegen that needs to
+    // walk the fields.
+    let (reflect_items, reflect_default_witness, reflect_refused) = if hooks.reflect {
+        let no_default = match crate::reflect::parse_reflect_no_default(&input.attrs) {
+            Ok(v) => v,
+            Err(ts) => return ts,
+        };
+        let bitset_reflect_key = if hooks.storage_bitset { hooks.reflect_span } else { None };
+        crate::reflect::codegen(&input, &input.ident, no_default, bitset_reflect_key)
+    } else {
+        (TokenStream2::new(), TokenStream2::new(), false)
+    };
+    // A REFUSED item emits refusals and no descriptor, so the install slot below must go
+    // with it: `<Self as Reflect>::TYPE_INFO` on a type with no `impl Reflect` is an
+    // E0277 that would land in every refused fixture's blessed `.stderr` beside the real
+    // message, freezing rustc's rendering of a second, derived error. One refusal, one
+    // error.
+    let reflect_enabled = hooks.reflect && !reflect_refused;
+
     let name = input.ident;
 
     // Emit `const HAS_HOOKS = true;` + a `register_hooks` impl only when at
@@ -170,8 +216,12 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     // line in the generated `component_id()` reads THAT const — so the cold `HOOKS`
     // slot is installed for a relationship even though the in-macro `hooks` struct
     // carries no user hook path.
+    // KM2: the relationship arm MERGES the user's non-owned hook paths
+    // (`on_add` / `on_remove` / `on_despawn`) into the generated body. It used to
+    // discard them — this is the only `register_hooks` emitted for a
+    // relationship side, so a user hook on one compiled and never fired.
     let hook_items = match &relationship {
-        Some(role) => role.hook_items_codegen(),
+        Some(role) => role.hook_items_codegen(&hooks),
         None => hooks.codegen(),
     };
 
@@ -188,6 +238,16 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let require_ctor_fns = requires.ctor_fns_codegen(&name);
     let require_items = requires.codegen(&name);
     let require_install = requires.install_codegen();
+
+    // KE11 (ballot AB-6 arm (a)): refuse `#[require(<a bitset flag>)]` at COMPILE
+    // time. The derive cannot resolve `Foo` to a `StorageKind` (it holds a token),
+    // so the refusal is a `const _: () = assert!(!<Foo as Component>::STORAGE_IS_BITSET, …)`
+    // item the compiler evaluates — see `RequiresSpec::bitset_refusal_codegen`.
+    // The refusal lives HERE and not in Aether on purpose: Aether's prime directive
+    // is to emit exactly what a disciplined engineer would hand-write, so a refusal
+    // that existed only in Aether would make the two surfaces disagree about the
+    // same declaration. `storage = "dense"` is deliberately NOT refused.
+    let require_bitset_refusals = requires.bitset_refusal_codegen();
 
     // Entity cloning (Feature 3): emit the `CLONE_BEHAVIOR` const + `clone_fn()`
     // override classifying the type, and the UNGATED `install_clone_fn::<Self>(raw)`
@@ -302,6 +362,43 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
     };
 
+    // Reflection CORE C8 — the SEVENTH install slot, and the campaign's central claim in
+    // one line. `component_id()` is the funnel every other per-type datum is published
+    // through; the descriptor C7 baked is inert until it joins them, because nothing else
+    // in the expansion references it (MEASURED at C7: zero `__REFLECT_TYPE_INFO` symbols
+    // in every link configuration — an uncalled static is dropped before the linker sees
+    // it).
+    //
+    // The paths are ABSOLUTE, and that is a decision rather than a copy of the neighbours.
+    // The six slots above use the non-absolute `boyko_ecs::…` form and matching them would
+    // be defensible — but this is the one path whose ABSENCE IN A SHIP BUILD is what the
+    // whole campaign claims, and a bare first segment resolves through the consumer's own
+    // scope before the extern prelude, so a consumer `mod boyko_reflect` or
+    // `use x as boyko_reflect` would shadow it. Every other path the reflect emission puts
+    // into a consumer crate is already absolute (`reflect.rs:190`, `:249`, `:378`, `:463`);
+    // this closes the last one.
+    //
+    // `#[cfg(feature = "reflect")]` on the STATEMENT, evaluated in the crate the derive
+    // expanded into (D2) — the same gate the descriptor itself carries. Feature-off, the
+    // statement is not merely dead, it does not exist: `boyko_reflect` is not in the
+    // consumer's resolved graph at all, so an un-`cfg`'d form would be `E0433` rather than
+    // a silent leak (which is exactly what C8's first RED observes).
+    //
+    // No `IS_REFLECT` const (D7): "is `T` reflectable?" has one carrier, and it is
+    // `type_info_of(id).is_some()`. `boyko_macros` gains NO dependency on `boyko_reflect`
+    // (D17) — this is a token stream, not a call site in this crate.
+    let reflect_install = if reflect_enabled {
+        quote! {
+            #[cfg(feature = "reflect")]
+            ::boyko_reflect::install_type_info(
+                raw,
+                <Self as ::boyko_reflect::Reflect>::TYPE_INFO,
+            );
+        }
+    } else {
+        TokenStream2::new()
+    };
+
     // Phase 22 D7: single-component Bundle emission (suppressed by
     // `#[component(no_bundle)]`). EnableTag D6: `storage = "bitset"` ALSO
     // suppresses it — a bitset tag has no `ComponentPool` and must not be
@@ -321,7 +418,13 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let expanded = quote! {
         #bundle_items
 
+        #reflect_items
+
+        #reflect_default_witness
+
         #require_ctor_fns
+
+        #require_bitset_refusals
 
         #relationship_clone_assert
 
@@ -369,6 +472,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                     #relationship_install
                     #residency_install
                     #serialize_install
+                    #reflect_install
                     boyko_ecs::ecs::identifiers::primitives::ComponentId(raw)
                 })
             }
@@ -405,7 +509,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
     };
 
-    expanded.into()
+    expanded
 }
 
 /// Parsed `#[component(...)]` lifecycle-hook paths (Phase 14a). Each field holds
@@ -427,6 +531,12 @@ pub(crate) struct ComponentHookPaths {
     pub(crate) on_insert: Option<Path>,
     pub(crate) on_replace: Option<Path>,
     on_remove: Option<Path>,
+    /// KM2: the entity-level despawn hook, fired once per dying entity BEFORE
+    /// any component drops. Deferred out of Phase 14a and shipped kernel-side by
+    /// Feature 2 (`ComponentHooks::on_despawn`, `ArchetypeFlags::ON_DESPAWN_HOOK`,
+    /// `trigger_on_despawn`); the derive key was unlocked once the kernel half
+    /// was re-verified firing.
+    on_despawn: Option<Path>,
     no_bundle: bool,
     /// `true` iff `storage = "bitset"` was supplied (EnableTag D5).
     storage_bitset: bool,
@@ -452,6 +562,20 @@ pub(crate) struct ComponentHookPaths {
     /// Serialization S0 (§3.5): `Some(v)` iff `format_version = N` was supplied —
     /// the human-facing layout/semantic version. Default `0` when omitted.
     format_version: Option<u16>,
+    /// Reflection CORE C7: `true` iff the bare `reflect` flag was supplied — opts the
+    /// component into the EDITOR-ONLY reflection layer. The emission it turns on is
+    /// itself `#[cfg(feature = "reflect")]`, evaluated in the crate the derive expanded
+    /// into (CORE D2), so the key is inert in a consumer that has not enabled the
+    /// feature and this crate never gains an edge to `boyko_reflect` (CORE D17).
+    reflect: bool,
+    /// Reflection CORE C9 / D37: the span of the `reflect` key itself, kept so the
+    /// `storage = "bitset"` refusal can put its caret **on that token**.
+    ///
+    /// A `bool` cannot carry a caret, and the caret is the deliverable here: three
+    /// census-gated documents specified three different ones for this single refusal, and
+    /// the blessed `.stderr` freezes whichever is emitted. `storage = "bitset"` is
+    /// legitimate on its own; `reflect` is the token that is wrong.
+    reflect_span: Option<proc_macro2::Span>,
 }
 
 impl ComponentHookPaths {
@@ -461,6 +585,31 @@ impl ComponentHookPaths {
             || self.on_insert.is_some()
             || self.on_replace.is_some()
             || self.on_remove.is_some()
+            || self.on_despawn.is_some()
+    }
+
+    /// The hook paths a relationship side does NOT own, as `register_hooks`
+    /// assignment statements (KM2). A `#[derive(Relationship)]` /
+    /// `#[derive(RelationshipTarget)]` component generates its `register_hooks`
+    /// body from [`RelationshipRole::hook_items_codegen`], which owns
+    /// `on_insert` / `on_replace` and is the ONLY body emitted — so anything the
+    /// user declared used to be discarded wholesale. `reject_hook_collision`
+    /// refuses the owned slots, and its doc states the remaining slots "compose
+    /// without conflict"; this method is what makes that true. `on_insert` /
+    /// `on_replace` are deliberately absent here — a user value for either is a
+    /// compile error before this is ever called.
+    pub(crate) fn non_relationship_owned_assigns(&self) -> Vec<TokenStream2> {
+        let mut assigns: Vec<TokenStream2> = Vec::new();
+        if let Some(p) = &self.on_add {
+            assigns.push(quote! { hooks.on_add = ::std::option::Option::Some(#p); });
+        }
+        if let Some(p) = &self.on_remove {
+            assigns.push(quote! { hooks.on_remove = ::std::option::Option::Some(#p); });
+        }
+        if let Some(p) = &self.on_despawn {
+            assigns.push(quote! { hooks.on_despawn = ::std::option::Option::Some(#p); });
+        }
+        assigns
     }
 
     /// Emits the `const HAS_HOOKS = true;` + `register_hooks` impl when any key
@@ -486,6 +635,9 @@ impl ComponentHookPaths {
         }
         if let Some(p) = &self.on_remove {
             assigns.push(quote! { hooks.on_remove = ::std::option::Option::Some(#p); });
+        }
+        if let Some(p) = &self.on_despawn {
+            assigns.push(quote! { hooks.on_despawn = ::std::option::Option::Some(#p); });
         }
 
         quote! {
@@ -579,7 +731,7 @@ impl ComponentHookPaths {
 /// field.
 fn reject_non_zst_bitset_tag(input: &DeriveInput) -> Result<(), TokenStream> {
     let err = |span: Span, msg: &str| -> TokenStream {
-        syn::Error::new(span, msg).to_compile_error().into()
+        syn::Error::new(span, msg).to_compile_error()
     };
 
     match &input.data {
@@ -605,13 +757,14 @@ fn reject_non_zst_bitset_tag(input: &DeriveInput) -> Result<(), TokenStream> {
 /// Parses the optional `#[component(on_add = path, ...)]` attribute (Phase 14a,
 /// plan §6.1). Mirrors the `#[event]` macro's `parse_nested_meta` idiom.
 ///
-/// Accepts the four lifecycle-hook keys (`on_add` / `on_insert` / `on_replace` /
-/// `on_remove`), each `= <path>`, the bare `no_bundle` flag key (Phase 22
-/// D7 — suppresses the single-component `Bundle` emission), and the
+/// Accepts the five lifecycle-hook keys (`on_add` / `on_insert` / `on_replace` /
+/// `on_remove` / `on_despawn`), each `= <path>`, the bare `no_bundle` flag key
+/// (Phase 22 D7 — suppresses the single-component `Bundle` emission), and the
 /// `storage = "bitset"` NameValue key (EnableTag D5 — a `LitStr` value, Wave 5
-/// Step 10). Rejects:
-/// - `on_despawn` (removed from 14a — deferred to 14b),
-/// - any other unknown key,
+/// Step 10). `on_despawn` was deferred out of Phase 14a and unlocked by KM2 once
+/// the kernel half (`ComponentHooks::on_despawn` + `ArchetypeFlags::ON_DESPAWN_HOOK`
+/// + `trigger_on_despawn`) was re-verified firing. Rejects:
+/// - any unknown key,
 /// - a duplicate key,
 /// - a key missing its `= <path>` value (surfaced by `meta.value()` / `parse`),
 /// - an unknown `storage` string (only `"bitset"` is supported),
@@ -629,23 +782,11 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                 attr,
                 "duplicate #[component(...)] attribute; combine all hooks into one",
             )
-            .to_compile_error()
-            .into());
+            .to_compile_error());
         }
         seen_attr = true;
 
         let result = attr.parse_nested_meta(|meta| {
-            // `on_despawn` was removed from Phase 14a — emit a clear error rather
-            // than letting it fall into the generic "unknown key" branch.
-            if meta.path.is_ident("on_despawn") {
-                return Err(meta.error(
-                    "on_despawn is not supported in this version (deferred to Phase 14b); \
-                     valid keys: on_add, on_insert, on_replace, on_remove, no_bundle, \
-                     no_clone, clone = <fn>, storage = \"bitset\", no_serialize, \
-                     stable_name = \"..\", format_version = N",
-                ));
-            }
-
             // Phase 22 D7: bare flag key — no `= <value>` follows.
             if meta.path.is_ident("no_bundle") {
                 if paths.no_bundle {
@@ -654,6 +795,24 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                     ));
                 }
                 paths.no_bundle = true;
+                return Ok(());
+            }
+
+            // Reflection CORE C7: bare flag key `reflect` — opt this component into the
+            // editor-only reflection layer. `no_bundle` (just above) is the precedent
+            // for the shape: no `= <value>` follows, and a repeat is an error rather
+            // than a silent second `true`.
+            if meta.path.is_ident("reflect") {
+                if paths.reflect {
+                    return Err(meta.error(
+                        "duplicate #[component(...)] key; reflect may be set at most once",
+                    ));
+                }
+                paths.reflect = true;
+                // CORE C9 / D37 -- the caret for the `storage = "bitset"` refusal. Taken
+                // from the key's own path so it survives whatever else the attribute
+                // carries and however it is formatted.
+                paths.reflect_span = Some(meta.path.span());
                 return Ok(());
             }
 
@@ -771,12 +930,16 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                 &mut paths.on_replace
             } else if meta.path.is_ident("on_remove") {
                 &mut paths.on_remove
+            } else if meta.path.is_ident("on_despawn") {
+                // KM2: unlocked. The kernel slot has existed and fired since
+                // Feature 2; only the derive was still refusing the key.
+                &mut paths.on_despawn
             } else {
                 return Err(meta.error(
                     "unknown #[component(...)] key; \
-                     valid keys: on_add, on_insert, on_replace, on_remove, no_bundle, \
-                     no_clone, clone = <fn>, storage = \"bitset\", no_serialize, \
-                     stable_name = \"..\", format_version = N",
+                     valid keys: on_add, on_insert, on_replace, on_remove, on_despawn, \
+                     no_bundle, no_clone, clone = <fn>, storage = \"bitset\", \
+                     no_serialize, stable_name = \"..\", format_version = N, reflect",
                 ));
             };
 
@@ -791,7 +954,7 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
         });
 
         if let Err(e) = result {
-            return Err(e.to_compile_error().into());
+            return Err(e.to_compile_error());
         }
     }
 
@@ -973,6 +1136,76 @@ impl RequiresSpec {
         quote! { #(#fns)* }
     }
 
+    /// Emits the per-entry compile-time refusal of `#[require(<a bitset flag>)]`
+    /// (KE11, ballot AB-6 arm (a)) — one `const _: () = assert!(…)` item per
+    /// `#[require]` entry, in declaration order. Empty when no `#[require]` key
+    /// is present (the 0%-gate).
+    ///
+    /// # Why the refusal is a const-assert and not a `syn::Error`
+    ///
+    /// The macro CANNOT know a required component's storage kind. It sees
+    /// `#[require(Foo)]` as a [`Path`] — a token, never a resolved type — which
+    /// is the same limit the duplicate check states for itself in
+    /// [`parse_requires`] ("the macro cannot resolve a path to a `ComponentId`").
+    /// There is no attribute, no naming convention and no side channel that
+    /// carries `StorageKind` into expansion, so a `syn::Error` here is not
+    /// merely inconvenient, it is unimplementable.
+    ///
+    /// What the macro CAN do is emit code that makes the COMPILER answer the
+    /// question during const evaluation: `Component::STORAGE_IS_BITSET` is a
+    /// trait const (`false` by default, overridden to `true` by
+    /// `#[component(storage = "bitset")]` — see [`ComponentHooks::storage_codegen`]),
+    /// so `<Foo as Component>::STORAGE_IS_BITSET` is decided at `cargo check`
+    /// time by name resolution and const-eval, at the one place that does know.
+    /// This is the shape the query layer already uses for `Added<C>` / `Changed<C>`
+    /// over a bitset tag; the refusal is a compile error, never a runtime panic.
+    ///
+    /// A plain `const _: () = …` item suffices because `#[derive(Component)]`
+    /// never handles generics (`input.generics` is not read anywhere in this
+    /// module), so the assert is non-generic and evaluated eagerly rather than
+    /// per-monomorphization.
+    ///
+    /// # Why BITSET only, and never DENSE
+    ///
+    /// [`RequiredCtor`] is an `unsafe fn(*mut u8)` whose whole job is to
+    /// materialize BYTES into an uninitialized storage slot. A `dense` component
+    /// has bytes — it merely keeps them in a `DenseStore` instead of an archetype
+    /// column — so `#[require(SomeDense)]` is meaningful and MUST keep compiling.
+    /// A `bitset` flag has no bytes at all, so there is nothing for a ctor to
+    /// write; the capability the author actually wants ("attaching X sets flag F")
+    /// exists under its own name as the component `flags (…)` group, backed by
+    /// the `FLAGS_DIRECT` table. The message names it.
+    fn bitset_refusal_codegen(&self) -> TokenStream2 {
+        if !self.any() {
+            return TokenStream2::new();
+        }
+        let asserts: Vec<TokenStream2> = self
+            .entries
+            .iter()
+            .map(|e| {
+                let ty = &e.ty;
+                // Span the whole item at the required type path so the diagnostic
+                // points at the offending entry INSIDE `#[require(...)]`, not at
+                // the `#[derive(Component)]` line — with several entries the
+                // derive-site span would not say which one is the flag.
+                quote_spanned! { ty.span() =>
+                    const _: () = assert!(
+                        !<#ty as ::boyko_ecs::ecs::core::component::component::Component>
+                            ::STORAGE_IS_BITSET,
+                        "#[require(...)] of a bitset flag: a flag is a BIT, not bytes, and a \
+                         required-component constructor exists only to write bytes into a \
+                         storage slot, so there is nothing to construct. Declare the initial \
+                         flag state instead: the component `flags (...)` group, e.g. \
+                         `flags (TheFlag = true)`, which is backed by FLAGS_DIRECT and sets \
+                         the bit on attach. (A `storage = \"dense\"` component is NOT refused \
+                         here — it has bytes, and #[require] of it is supported.)"
+                    );
+                }
+            })
+            .collect();
+        quote! { #(#asserts)* }
+    }
+
     /// Emits `const HAS_REQUIRES = true;` + the `register_required` impl when any
     /// `#[require]` key is present, or an empty token stream otherwise. The
     /// `register_required` body pushes one `(component_id, ctor)` pair per entry
@@ -1059,7 +1292,7 @@ fn parse_requires(attrs: &[syn::Attribute]) -> Result<RequiresSpec, TokenStream>
         );
         let list = match parsed {
             Ok(l) => l,
-            Err(e) => return Err(e.to_compile_error().into()),
+            Err(e) => return Err(e.to_compile_error()),
         };
 
         if list.is_empty() {
@@ -1068,8 +1301,7 @@ fn parse_requires(attrs: &[syn::Attribute]) -> Result<RequiresSpec, TokenStream>
                 "empty #[require(...)]: list at least one required component, e.g. \
                  #[require(Velocity, Mass = Mass(1.0))]",
             )
-            .to_compile_error()
-            .into());
+            .to_compile_error());
         }
 
         for expr in list {
@@ -1095,8 +1327,7 @@ fn parse_requires(attrs: &[syn::Attribute]) -> Result<RequiresSpec, TokenStream>
                     "duplicate #[require(...)] for the same component; each required \
                      component may be listed at most once",
                 )
-                .to_compile_error()
-                .into());
+                .to_compile_error());
             }
             spec.entries.push(entry);
         }
@@ -1108,7 +1339,7 @@ fn parse_requires(attrs: &[syn::Attribute]) -> Result<RequiresSpec, TokenStream>
 /// Lowers one `#[require(...)]` list element [`Expr`] into a [`RequireEntry`].
 fn parse_require_entry(expr: Expr) -> Result<RequireEntry, TokenStream> {
     let err = |e: Expr, msg: &str| -> TokenStream {
-        syn::Error::new_spanned(e, msg).to_compile_error().into()
+        syn::Error::new_spanned(e, msg).to_compile_error()
     };
     match expr {
         // `B` — bare path ⇒ `B::default()`.
@@ -1776,8 +2007,7 @@ fn validate_entities_attrs(input: &DeriveInput) -> Result<(), TokenStream> {
                      `#[entities]` on the Entity-bearing field (its remap is wired \
                      in a later serialization phase)",
                 )
-                .to_compile_error()
-                .into());
+                .to_compile_error());
             }
         }
         Ok(())

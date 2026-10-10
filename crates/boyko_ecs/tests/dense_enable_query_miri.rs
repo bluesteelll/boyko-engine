@@ -23,9 +23,9 @@
 //!   coverage is DEFERRED: they null-deref on a dense `D` today — a pre-existing
 //!   bug tracked as a follow-up; see the case-(d) note.)
 //!
-//! Run (toolchain note — nightly GNU):
+//! Run (toolchain note — nightly MSVC):
 //! ```text
-//! RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-gnu \
+//! RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-msvc \
 //!   MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks -Zmiri-disable-isolation" \
 //!   cargo miri test -p boyko-ecs --test dense_enable_query_miri
 //! ```

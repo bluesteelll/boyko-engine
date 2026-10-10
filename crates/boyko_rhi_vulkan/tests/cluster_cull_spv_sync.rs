@@ -1,0 +1,426 @@
+//! Cluster-cull `.spv` byte-identity gate — the re-DXC oracle for `cluster_cull.hlsl`.
+//!
+//! `cluster_cull.hlsl` grew an `#ifdef HIER` seam at rung VB-P1e H2 ("dark infra"): the
+//! hierarchical two-level cull, compiled in only under `-D HIER=1`. This test clones the
+//! `redxc_with_defines` multi-variant idiom `vb_froxel_spv_sync.rs:52-69` uses for the VB froxel
+//! family, scoped to the two `cluster_cull.hlsl` variants:
+//!
+//! * `cluster_cull.comp.spv` (`cluster_cull.hlsl`, no `-D` — the base arm, gate (b): the `#ifdef
+//!   HIER` seam must be physically inert on this compile. It was byte-identical to its pre-H2
+//!   build until rung VB-P1j, which deliberately RE-PINNED this artifact by adding the base
+//!   arm's `ClusterGrid.GetDimensions()` write bound; the seam's inertness is still what this
+//!   gate proves — the blob it proves it against simply moved once, on purpose).
+//! * `cluster_cull_hier.comp.spv` (`cluster_cull.hlsl`, `-D HIER=1` — the new variant, gate (a)).
+//!
+//! The arm bit is never armed this rung (no pipeline is created, nothing selects the HIER
+//! module) — but both committed `.spv` must still byte-match their source under the frozen
+//! recipe, exactly like every other variant family in this crate.
+//!
+//! SKIPS (with an eprintln) when no `dxc` resolves on the host — the byte gate is only as
+//! hermetic as the pinned VulkanSDK 1.4.350.0 toolchain that produced the committed artifacts; a
+//! DIFFERENT dxc version failing this test means "wrong toolchain", not "drifted shader" (the
+//! committed recipe header pins the exact version).
+//!
+//! Also carries the H1.6 opcode/decoration census pin (`cluster_cull_spv_census_pinned`). It
+//! closes the *base-module precondition* of the open P0 recorded in
+//! `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md`'s errata — **not the P0 itself**. The P0: H2's
+//! structural tripwires (assertions e5/e6) select instructions by "a `NoContraction`-decorated
+//! `OpFAdd`" / "`NoContraction`-decorated `OpFSub`", and against the PRE-H1.6 base module
+//! (`NoContraction == 0`, measured) both selectors pick the EMPTY SET — so their quantification is
+//! vacuously true and would go green on an arbitrarily divergent module.
+//!
+//! What this pin does: it makes the base module's decoration count a non-zero, EXACT literal, so
+//! an empty or shrunken selection is RED at the source instead of silently satisfying a later
+//! rung's "for all decorated X" quantifier.
+//!
+//! What it does NOT do: it says nothing about the HIER module. `cluster_cull_hier_dis_gate.rs`
+//! (H2 gate (e)) discharges that half, pre-registering e5's and e6's own non-empty selection
+//! counts under BOTH compile options and demonstrating each can go RED.
+
+use std::path::PathBuf;
+use std::process::Command;
+
+/// The shaders directory (`CARGO_MANIFEST_DIR/shaders`), where the committed `.hlsl` and `.spv`
+/// live (and where DXC must run so any `#include` resolves).
+fn shaders_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders")
+}
+
+/// Locates the `dxc` executable: first the pinned Vulkan-SDK path (the repo's offline recipe),
+/// then `$VULKAN_SDK/Bin`, then `PATH`. Returns `None` if none resolve (the byte-identity test
+/// then SKIPS) — the `marcher_spv_sync.rs` idiom verbatim.
+fn find_dxc() -> Option<PathBuf> {
+    let pinned = PathBuf::from("C:/VulkanSDK/1.4.350.0/Bin/dxc.exe");
+    if pinned.exists() {
+        return Some(pinned);
+    }
+    let bare = if cfg!(windows) { "dxc.exe" } else { "dxc" };
+    if let Ok(sdk) = std::env::var("VULKAN_SDK") {
+        let candidate = PathBuf::from(sdk).join("Bin").join(bare);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    if Command::new(bare).arg("--version").output_within(DXC_DEADLINE).is_ok() {
+        return Some(PathBuf::from(bare));
+    }
+    None
+}
+
+/// Re-DXCs `hlsl_name` (relative to the shaders dir) under the EXACT frozen recipe pinned in
+/// `cluster_cull.hlsl`'s own header comment (`-spirv -T cs_6_0 -E main
+/// -fspv-target-env=vulkan1.3`, no `-O`) plus the given `-D` defines, into a fresh temp `.spv`
+/// named after `out_tag` (unique per run and call, via `child_guard::scratch_path`), and
+/// returns the bytes. Never overwrites a committed artifact. Mirrors
+/// `vb_froxel_spv_sync.rs:56-69`'s `redxc_with_defines`.
+fn redxc_with_defines(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str, defines: &[&str], out_tag: &str) -> Vec<u8> {
+    let out_spv = child_guard::scratch_path(&format!("{out_tag}.redxc.spv"));
+    let mut cmd = Command::new(dxc);
+    cmd.current_dir(dir).args(["-spirv", "-T", "cs_6_0", "-E", "main"]);
+    for d in defines {
+        cmd.args(["-D", d]);
+    }
+    cmd.args(["-fspv-target-env=vulkan1.3", hlsl_name, "-Fo"]).arg(&out_spv);
+    let status = cmd.status_within(DXC_DEADLINE).expect("invariant: dxc was located and must run");
+    assert!(status.success(), "dxc failed re-compiling {hlsl_name} {defines:?} under the frozen recipe");
+    let bytes = std::fs::read(&out_spv).expect("invariant: dxc wrote the re-DXC .spv");
+    let _ = std::fs::remove_file(&out_spv); // best-effort tidy
+    bytes
+}
+
+/// One committed artifact must byte-equal its own re-DXC. Mirrors `vb_froxel_spv_sync.rs:72-86`.
+fn assert_spv_byte_identical(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str, defines: &[&str], spv_name: &str) {
+    let committed_path = dir.join(spv_name);
+    let committed = std::fs::read(&committed_path)
+        .unwrap_or_else(|e| panic!("missing committed {}: {e}", committed_path.display()));
+    let fresh = redxc_with_defines(dxc, dir, hlsl_name, defines, spv_name);
+    assert!(
+        committed == fresh,
+        "{spv_name} ({} bytes committed, {} bytes fresh) is NOT the re-DXC of {hlsl_name} \
+         {defines:?} under the frozen recipe — either the committed .spv is stale (re-run the \
+         recipe in the shader's header and commit it) or the host dxc is not the pinned \
+         VulkanSDK 1.4.350.0 toolchain.",
+        committed.len(),
+        fresh.len(),
+    );
+}
+
+/// Locates `spirv-dis`: first the pinned Vulkan-SDK path (beside the pinned `dxc.exe`), then
+/// `$VULKAN_SDK/Bin`, then `PATH`. Mirrors [`find_dxc`]'s layered lookup and
+/// `field_probe_gate.rs`'s `find_spirv_dis` (`field_probe_gate.rs:43-59`). Returns `None` if none
+/// resolve (the census test then SKIPS).
+fn find_spirv_dis() -> Option<PathBuf> {
+    let pinned = PathBuf::from("C:/VulkanSDK/1.4.350.0/Bin/spirv-dis.exe");
+    if pinned.exists() {
+        return Some(pinned);
+    }
+    let bare = if cfg!(windows) { "spirv-dis.exe" } else { "spirv-dis" };
+    if let Ok(sdk) = std::env::var("VULKAN_SDK") {
+        let candidate = PathBuf::from(sdk).join("Bin").join(bare);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    if Command::new(bare).arg("--version").output().is_ok() {
+        return Some(PathBuf::from(bare));
+    }
+    None
+}
+
+/// Disassembles `spv_path` via `spirv-dis`, returning the textual SPIR-V. Panics on a non-zero
+/// exit — a malformed committed `.spv` is a build-integrity bug, not a skip.
+fn disassemble(spirv_dis: &PathBuf, spv_path: &PathBuf) -> String {
+    let out = Command::new(spirv_dis)
+        .arg(spv_path)
+        .output()
+        .expect("invariant: spirv-dis was located and must run");
+    assert!(
+        out.status.success(),
+        "spirv-dis failed on {}: {}",
+        spv_path.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).expect("invariant: spirv-dis emits UTF-8 disassembly")
+}
+
+/// The opcode/decoration counts `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` D10 and section 8.8 pin
+/// for `cluster_cull.comp.spv`. Every field is counted by EXACT per-line token match (split on
+/// whitespace, not substring search), so e.g. `NMin` cannot false-match inside a longer mnemonic.
+#[derive(Debug, PartialEq, Eq)]
+struct SpvCensus {
+    op_dot: usize,
+    no_contraction: usize,
+    op_ford_less_than_equal: usize,
+    op_return: usize,
+    n_min: usize,
+    n_max: usize,
+    f_min: usize,
+    f_max: usize,
+    op_control_barrier: usize,
+    /// VB-P1j: the emitted `ClusterGrid.GetDimensions()` — the base arm's WRITE bound. This is
+    /// the ARTIFACT-level half of the fix's pin (the other half,
+    /// `tests/cluster_grid_write_bound.rs`, sweeps a Rust mirror of the prologue and cannot see
+    /// the real module). Dropping the clamp from the HLSL collapses this to 0, which is RED.
+    ///
+    /// Counted with the OPERAND scoped to `%ClusterGrid`, matching
+    /// `tests/cluster_grid_read_bound.rs`'s `cluster_grid_array_lengths` — see
+    /// [`the_array_length_census_is_scoped_to_cluster_grid`] for why the bare-opcode form this
+    /// field used to carry could not stay sound.
+    cluster_grid_array_length: usize,
+}
+
+/// Counts the census tokens in a `spirv-dis` disassembly. `GLSL.std.450` ext-inst calls
+/// (`NMin`/`NMax`/`FMin`/`FMax`) appear as a bare operand token on the `OpExtInst` line
+/// (e.g. `%482 = OpExtInst %v3float %1 NMax %481 %60`), so a whitespace-split exact match finds
+/// them without needing to distinguish opcode position from operand position.
+///
+/// `cluster_grid_array_length` is the one field NOT counted by a bare opcode token: it requires
+/// `%ClusterGrid` on the SAME line, so it pins the length of one named buffer rather than "some
+/// length, of something". See [`the_array_length_census_is_scoped_to_cluster_grid`].
+fn census(dis: &str) -> SpvCensus {
+    let mut c = SpvCensus {
+        op_dot: 0,
+        no_contraction: 0,
+        op_ford_less_than_equal: 0,
+        op_return: 0,
+        n_min: 0,
+        n_max: 0,
+        f_min: 0,
+        f_max: 0,
+        op_control_barrier: 0,
+        cluster_grid_array_length: 0,
+    };
+    for line in dis.lines() {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        for tok in &toks {
+            match *tok {
+                "OpDot" => c.op_dot += 1,
+                "NoContraction" => c.no_contraction += 1,
+                "OpFOrdLessThanEqual" => c.op_ford_less_than_equal += 1,
+                "OpReturn" => c.op_return += 1,
+                "NMin" => c.n_min += 1,
+                "NMax" => c.n_max += 1,
+                "FMin" => c.f_min += 1,
+                "FMax" => c.f_max += 1,
+                "OpControlBarrier" => c.op_control_barrier += 1,
+                _ => {}
+            }
+        }
+        // Operand-scoped, exactly as `tests/cluster_grid_read_bound.rs` does it: an
+        // `OpArrayLength` whose operand is any OTHER buffer must not stand in for this one.
+        if toks.contains(&"OpArrayLength") && toks.contains(&"%ClusterGrid") {
+            c.cluster_grid_array_length += 1;
+        }
+    }
+    c
+}
+
+/// H2 gate (a): the new `-D HIER=1` variant byte-equals its own re-DXC under the frozen recipe.
+#[test]
+fn cluster_cull_hier_variant_spv_byte_identical() {
+    let Some(dxc) = find_dxc() else {
+        eprintln!(
+            "cluster_cull_spv_sync: dxc not found (no C:/VulkanSDK/.../dxc.exe, no \
+             $VULKAN_SDK/Bin, not on PATH) — SKIPPING the cluster-cull-hier re-DXC \
+             byte-identity check on this host."
+        );
+        return;
+    };
+    let dir = shaders_dir();
+    assert_spv_byte_identical(&dxc, &dir, "cluster_cull.hlsl", &["HIER=1"], "cluster_cull_hier.comp.spv");
+}
+
+/// H2 gate (b): the BASE (no `-D`) compile stays byte-identical to the committed blob — the
+/// `#ifdef HIER` seam (the HIER-only push-tail members + the new arm of `main`) must be
+/// physically inert on this compile. **Re-measured at this rung, not inherited**: the push
+/// struct's HIER-only tail widened by a second word since the last time this inertness was
+/// probed, so a stale measurement would not cover the artifact being committed here.
+///
+/// The blob itself was re-pinned once, at rung VB-P1j, when the base arm gained its
+/// `ClusterGrid.GetDimensions()` write bound (`cluster_cull.hlsl`'s `#else` prologue). That
+/// edit is INSIDE the base arm and leaves `cluster_cull_hier.comp.spv` byte-identical — verified
+/// by the sibling test above, which is the direction this gate does not cover.
+#[test]
+fn cluster_cull_base_variant_spv_unperturbed_by_the_hier_seam() {
+    let Some(dxc) = find_dxc() else {
+        eprintln!(
+            "cluster_cull_spv_sync: dxc not found (no C:/VulkanSDK/.../dxc.exe, no \
+             $VULKAN_SDK/Bin, not on PATH) — SKIPPING the cluster-cull base-variant \
+             byte-identity check on this host."
+        );
+        return;
+    };
+    let dir = shaders_dir();
+    assert_spv_byte_identical(&dxc, &dir, "cluster_cull.hlsl", &[], "cluster_cull.comp.spv");
+}
+
+/// H1.6 census pin (D10, section 8.8 gate (a)): the committed `cluster_cull.comp.spv` carries
+/// EXACTLY the opcode/decoration counts D10's measured table predicts for the 7-decoration
+/// `precise` placement, and — the mechanical P0 discharge — `NoContraction` is asserted non-zero
+/// as an explicit, separate check so a future edit that silently drops `precise` (collapsing
+/// `NoContraction` back to 0) is caught HERE, before it can make an H2 structural selector
+/// vacuously true. SKIPS (with an eprintln) when no `spirv-dis` resolves, matching
+/// `field_probe_gate.rs`'s skip semantics.
+#[test]
+fn cluster_cull_spv_census_pinned() {
+    let Some(spirv_dis) = find_spirv_dis() else {
+        eprintln!(
+            "cluster_cull_spv_sync: spirv-dis not found (no C:/VulkanSDK/.../spirv-dis.exe, no \
+             $VULKAN_SDK/Bin, not on PATH) — SKIPPING the H1.6 opcode/decoration census check on \
+             this host."
+        );
+        return;
+    };
+    let dir = shaders_dir();
+    let committed_path = dir.join("cluster_cull.comp.spv");
+    assert!(
+        committed_path.exists(),
+        "missing committed {}",
+        committed_path.display()
+    );
+    let dis = disassemble(&spirv_dis, &committed_path);
+    let actual = census(&dis);
+
+    // MEASURED values (docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md D10, section 8.8 gate (a)) — do not
+    // edit these literals to make a failing run pass; a mismatch means the census DRIFTED and the
+    // fix is in the shader source, not in this test.
+    let expected = SpvCensus {
+        op_dot: 8,
+        no_contraction: 7,
+        op_ford_less_than_equal: 1,
+        op_return: 1,
+        n_min: 8,
+        n_max: 18,
+        f_min: 0,
+        f_max: 0,
+        op_control_barrier: 0,
+        // VB-P1j: exactly ONE `ClusterGrid.GetDimensions()` — the capacity clamp on the base
+        // arm's write bound. MEASURED on the artifact this rung commits.
+        cluster_grid_array_length: 1,
+    };
+    assert_eq!(
+        actual, expected,
+        "cluster_cull.comp.spv opcode/decoration census diverged from the H1.6 pin. Expected \
+         {expected:?} (D10's measured 7-decoration `precise` placement — 2 `OpFSub` + 3 `OpFMul` \
+         + 2 `OpFAdd` decorated `NoContraction`, `OpDot` down from 9 to 8), got {actual:?}. If \
+         `sq_dist_point_aabb` was intentionally re-shaped, re-run the D10 measurement, update \
+         this pin AND re-run the H1.6 gate (docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md section 8.8) \
+         in full, including its zero-golden-move budget and perf gate."
+    );
+
+    // The BASE-MODULE PRECONDITION of the errata's open P0 (not the P0 itself — see this file's
+    // module doc): H2's e5/e6 selectors pick instructions BY `NoContraction`-decoration, and on
+    // the pre-H1.6 base module (`NoContraction == 0`) both pick the empty set and vacuously pass
+    // on any module, however divergent. Asserting non-zero HERE, on the artifact this rung ships,
+    // means that failure mode cannot silently return once H2 is built. It does NOT relieve H2 of
+    // pre-registering e5's and e6's OWN non-empty selection counts on both compile options.
+    assert!(
+        actual.no_contraction > 0,
+        "invariant: NoContraction must be non-zero on the H1.6-re-pinned base module — a zero \
+         count means a later `NoContraction`-scoped structural selector (H2's e5/e6) would \
+         select the empty set and vacuously pass on an arbitrarily divergent module"
+    );
+
+    // VB-P1j, stated separately from the aggregate equality so a failure names the SAFETY
+    // property rather than "the census drifted": the base arm's `ClusterGrid[fi]` write must be
+    // bounded by the buffer's own element count. Deleting the `GetDimensions` clamp from
+    // `cluster_cull.hlsl` restores an out-of-bounds device write that NOTHING else in this
+    // repository detects — `robustBufferAccess` is off and no GPU-assisted validation runs.
+    assert_eq!(
+        actual.cluster_grid_array_length, 1,
+        "invariant: the base cull arm must carry exactly one `OpArrayLength` on `ClusterGrid` \
+         (VB-P1j's capacity clamp). Got {}. A count of 0 means the write bound fell back to the \
+         LIVE header dims against a BOOT-sized allocation.",
+        actual.cluster_grid_array_length
+    );
+}
+
+/// FIXTURE CONTROL for [`census`]'s `cluster_grid_array_length` selector: an `OpArrayLength` is
+/// counted only when `%ClusterGrid` is its operand.
+///
+/// # Why the bare-opcode form it replaces could not stay sound
+///
+/// Until this rung the field counted any bare `OpArrayLength` token anywhere in the module. That
+/// agreed with the intended meaning only because the module happens to emit exactly ONE such
+/// instruction today — not because it holds only one lengthable buffer. MEASURED in
+/// `cluster_cull.comp.spv`'s disassembly: FOUR `StorageBuffer` variables (`LightBuf`,
+/// `ClusterGrid`, `LightIndexList`, `LightIndexAlloc`), each pointing at a struct whose member 0
+/// is a runtime array (`%_runtimearr_uint` / `%_runtimearr_v2uint`), so the `OpArrayLength … 0`
+/// form is legal on any of the four — the module's single length is a fact about today's source,
+/// not a structural guarantee.
+///
+/// A second one is not hypothetical. `docs/SHADER-VARIANT-MANIFEST.md` tracks the open
+/// `LightIndexList` capacity-bound gap; its READER half lands in the four consuming shaders, but
+/// the same "anchor on the allocation, not on a push word" move VB-P1j made for `ClusterGrid`
+/// applies to THIS file's write side too, where `LightIndexList` is currently bounded by the
+/// pushed `pc.index_list_cap` — replacing that with `LightIndexList.GetDimensions()` puts a
+/// second `OpArrayLength` in this very module.
+///
+/// Under the bare count, landing it would take the census to 2 while saying nothing about which
+/// buffer either length belongs to — and DELETING the `ClusterGrid` clamp at the same time would
+/// still read 1 and pass. The scoped form fails that combination.
+///
+/// Runs unconditionally — no `dxc` / `spirv-dis`, so it cannot SKIP the way the artifact gates do.
+#[test]
+fn the_array_length_census_is_scoped_to_cluster_grid() {
+    // The real instruction, verbatim from `spirv-dis cluster_cull.comp.spv`.
+    let on_grid = "         %98 = OpArrayLength %uint %ClusterGrid 0\n";
+    assert_eq!(
+        census(on_grid).cluster_grid_array_length,
+        1,
+        "the selector missed the REAL `ClusterGrid` array length — it is now blind in the \
+         direction it exists to watch, and the census pin is vacuous"
+    );
+
+    // A length taken on a DIFFERENT buffer of the same module must not stand in for it. This is
+    // the exact line the tracked `LightIndexList` bound would add.
+    let on_other = "         %98 = OpArrayLength %uint %LightIndexList 0\n";
+    assert_eq!(
+        census(on_other).cluster_grid_array_length,
+        0,
+        "an `OpArrayLength` on `LightIndexList` was counted as the `ClusterGrid` write bound — a \
+         module that bounds the index list and NOT the grid would satisfy the VB-P1j pin while \
+         shipping the out-of-bounds grid write the pin exists to forbid"
+    );
+
+    // Both together: the count must track the grid alone, not the module's total.
+    let both = format!("{on_other}{on_grid}");
+    assert_eq!(
+        census(&both).cluster_grid_array_length,
+        1,
+        "the selector is counting every array length in the module rather than the grid's"
+    );
+
+    // Whole-token matching, the same near-miss guard `cluster_grid_read_bound.rs` pins for its own
+    // selector: a longer identifier that merely starts with the name is a different variable.
+    for near_miss in [
+        "         %98 = OpArrayLength %uint %ClusterGridDebug 0\n",
+        "         %98 = OpArrayLength %uint %OldClusterGrid 0\n",
+    ] {
+        assert_eq!(
+            census(near_miss).cluster_grid_array_length,
+            0,
+            "{near_miss:?} false-matched `%ClusterGrid`; the pin would be satisfied by a length \
+             taken on a buffer that is not the one being bounded"
+        );
+    }
+
+    // The operand must be on the SAME instruction. `%ClusterGrid` appears on its own `OpVariable`
+    // line, on `OpName`/`OpDecorate` lines and in `OpEntryPoint`'s interface list (MEASURED: 6
+    // such lines in `cluster_cull.comp.spv` besides the `OpArrayLength`), and an `OpArrayLength`
+    // elsewhere in the module must not pair with any of them.
+    let split_across_lines = "%ClusterGrid = OpVariable %_ptr_StorageBuffer_x StorageBuffer\n\
+                                       %98 = OpArrayLength %uint %LightIndexList 0\n";
+    assert_eq!(
+        census(split_across_lines).cluster_grid_array_length,
+        0,
+        "the selector paired an `OpArrayLength` with a `%ClusterGrid` mention on a DIFFERENT \
+         line — the declaration alone would then satisfy the bound pin"
+    );
+}
+
+// `status_within` / `output_within` (a deadline on each dxc this file spawns) and `scratch_path`
+// (a temp file no other run shares) live in `tests/child_guard/mod.rs`, whose module doc records
+// the hung-dxc stall behind them. Declared last so that no line an internal document cites moves.
+mod child_guard;
+use child_guard::{BoundedRun, DXC_DEADLINE};

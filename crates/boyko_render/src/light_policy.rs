@@ -17,7 +17,8 @@
 //!
 //! [`select_lighting_cull`] runs at the gather/setup boundary — scheduled BEFORE
 //! `collect_lights` so the fresh decision feeds the header fold the SAME frame
-//! (no one-frame staleness) — and it is the SINGLE owner of every field it writes
+//! (no one-frame staleness), and AFTER the light seed so a light added this frame is
+//! counted this frame — and it is the SINGLE owner of every field it writes
 //! (`LightStats.point_spot_count`, `LightStats.cluster_band`, and, in
 //! [`Auto`](crate::light::ClusterSelectMode::Auto) mode, `LightingConfig.clusters_enabled`).
 //! The per-row resolve never reads [`LightStats`]; the only hot consumer is the header
@@ -37,26 +38,84 @@ use boyko_ecs::ecs::core::system::ResMut;
 
 use crate::light::{ClusterSelectMode, LightEnabled, LightingConfig, PointLight, SpotLight};
 
-// ---- provisional banded thresholds (P10 calibrates these) ----------------------------
+// ---- banded thresholds (VB-P1d measured; see docs/VB-PERFORMANCE-TRACK.md) -----------
 
 /// Banded LOW edge: in [`Auto`](crate::light::ClusterSelectMode::Auto) mode the cluster
 /// path switches OFF when the live point/spot light count drops to `<= CLUSTER_LO`.
 ///
-/// `[ESTIMATE:needs-calibration]` — UNMEASURED. The clustered (L1) cull amortizes its
-/// grid build + per-froxel VRAM only across MANY overlapping point/spot lights; below a
-/// handful it is pure overhead vs the flat L0b loop (Part 3.2). This is a sane engineering
-/// band, NOT a measured crossover; **P10 (offline criterion calibration) replaces it with
-/// a `[MEASURED]` break-even** (`docs/ARCHITECTURE-HYBRID-PERF.md` Part 5, P10 is a HARD
-/// dependency of P1).
-pub const CLUSTER_LO: u32 = 4;
+/// `[MEASURED]` (VB-P1d, RTX 3060, `crates/boyko_app/tests/vb_p1d_cull_shade_bench.rs`): the
+/// froxel light-cull is O(clusters × lights) (`cluster_cull.hlsl` dispatches one thread per
+/// froxel, each linearly scanning every light) and DOMINATES `froxel_total_ns` — it only
+/// beats the flat all-lights scan above ~100 point/spot lights (measured break-even ≈ 103,
+/// linearly interpolated between the N_ps=64 and N_ps=128 samples below). At 8 lights
+/// clustering is ~43% SLOWER than flat. `CLUSTER_LO = 64` disarms where the flat scan clearly
+/// wins (flat 95877 ns vs froxel 102720 ns at N_ps=64, +7% flat's favor). A future cull
+/// optimization (the `uint local[256]` per-thread spill in `cluster_cull.hlsl`) would lower
+/// this break-even and could tighten the band.
+///
+/// Measured `froxel_total_ns = cull_ns + shade_ns` vs `flat_shade_ns`, averaged over 100 timed
+/// frames per config (froxel_shade stays ~25-30k ns regardless of N_ps — the clustering
+/// payoff; flat_shade and froxel_cull both grow ~linearly with N_ps):
+/// - N_ps=8:   flat 32799 | froxel 46816 (cull 19741 + shade 27075) — flat wins (+43%)
+/// - N_ps=32:  flat 60815 | froxel 71999 (cull 42253 + shade 29747) — flat wins
+/// - N_ps=64:  flat 95877 | froxel 102720 (cull 72748 + shade 29973) — flat wins (+7%)
+/// - N_ps=128: flat 167322 | froxel 163039 (cull 134920 + shade 28119) — froxel wins (-2.6%)
+/// - N_ps=256: flat 315044 | froxel 277662 (cull 252154 + shade 25508) — froxel wins (-12%)
+/// - N_ps=512: flat 592015 | froxel 523370 (cull 498067 + shade 25303) — froxel wins (-12%)
+///
+/// ⚠️ `[REPRODUCIBILITY CAVEAT]` (added at VB-P1e rung H0, 2026-07-25). A re-measurement on the
+/// SAME RTX 3060 reproduces the `N_ps` ≤ 128 rows within ~6% PER LEG, but **not** the high rows
+/// sitting ABOVE this band: `N_ps=256` came out +21% (froxel) / +23% (flat) and `N_ps=512`
+/// **+125% on the flat leg** / +55%
+/// on the froxel leg, with a ~21% run-to-run spread at `N_ps=512` (the pass is stable WITHIN a
+/// run — `BOYKO_VB_BENCH_FRAMES` 40 vs 220 differ by 0.13% — and unstable ACROSS runs; GPU
+/// power/clock state is the leading suspect, not confirmed). Re-measured `flat / froxel_total`
+/// (ns): `30888 / 44963` @8, `57586 / 67562` @32, `96587 / 96242` @64, `158622 / 173013` @128,
+/// `387133 / 335179` @256, `1330623 / 810285` @512 — so froxel's margin moves -42.7→-45.6% @8,
+/// -18.4→-17.3% @32, **-7.1→+0.4% @64**, **+2.6→-9.1% @128**, +11.9→+13.4% @256, +11.6→+39.1%
+/// @512: NON-MONOTONIC exactly inside `[LO, HI]`, with BOTH determining rows flipping SIGN even
+/// though both reproduce. They flip because a margin is a RATIO of two legs each holding only to
+/// ~6%, and two such legs admit ~12.8% of movement in their ratio (1.06/0.94) — which covers the
+/// +7.1% margin at 64 as well as the 2.6% one at 128. (The +7.1% is NOT itself below the ~6%
+/// per-leg figure; it is the RATIO band that makes it unresolvable.)
+///
+/// ⚠️ **The re-measurement does not support [`CLUSTER_HI`].** Four of the six rows DO move toward
+/// clustering (+1.1 / +7.5 / +1.6 / +27.5 points at `N_ps` 32 / 64 / 256 / 512) — the source of
+/// the old "favours clustering MORE, so the constants stay conservative" reading. But `N_ps=128`
+/// is one of the two that move the other way (`N_ps=8` is the other, -2.8), and 128 is both the
+/// value `HI` takes and the row its "froxel already wins by ~2.6%" justification cites: there the
+/// margin moves **11.6 points AGAINST** clustering, measuring the froxel leg **9.1% SLOWER** at
+/// exactly the count `HI` arms it. Re-running the interpolation this doc used for ≈103 (linear in
+/// the `flat - froxel` ns difference) over the re-measured rows moves the durable crossing to
+/// **≈156** — bracketed by 128 at `-14391` ns and 256 at `+51954` ns, i.e. ABOVE `HI` rather than
+/// below it; on percentage margins the same pair gives ≈180. That ≈156 leans on the
+/// NON-reproducing `N_ps=256` row and is NOT a replacement constant, but the finding needs only
+/// the reproducing `N_ps=128` row.
+///
+/// `CLUSTER_LO = 64` does survive: in the re-measured sweep, AT OR BELOW `N_ps=128`, the froxel
+/// leg leads only inside a ~2.6-light-wide window (interpolated crossings at ≈63 and ≈65) and
+/// only by 345 ns (0.4%), while below that window both sweeps agree flat wins by 17-46% (`N_ps`
+/// 32 and 8) — far outside the ~12.8% ratio band. (Froxel leads again above the ≈156 crossing;
+/// that is `HI`'s problem, not `LO`'s.) Re-tuning `HI` needs a repeated-run protocol with a
+/// stated variance band, not another single sweep. Tracked as VB-P1f in
+/// `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md`.
+pub const CLUSTER_LO: u32 = 64;
 
 /// Banded HIGH edge: in [`Auto`](crate::light::ClusterSelectMode::Auto) mode the cluster
 /// path switches ON when the live point/spot light count rises to `>= CLUSTER_HI`.
 ///
-/// `[ESTIMATE:needs-calibration]` — UNMEASURED (see [`CLUSTER_LO`]). `CLUSTER_LO < CLUSTER_HI`
-/// is the hysteresis gap that prevents boundary thrash; both consts are provisional and
-/// **gated on P10** for their calibrated values.
-pub const CLUSTER_HI: u32 = 8;
+/// `[MEASURED]` (VB-P1d, see [`CLUSTER_LO`]'s own doc for the full data table + provenance).
+/// `CLUSTER_HI = 128` arms above the ≈103 break-even measured in THAT table (where froxel wins
+/// by ~2.6% at N_ps=128, widening to ~-12% by N_ps=256/512), and the band `[64, 128]` straddles
+/// that ≈103. `CLUSTER_LO < CLUSTER_HI` is the hysteresis gap that prevents boundary thrash.
+///
+/// ⚠️ **This is the constant the H0 re-measurement contradicts — read [`CLUSTER_LO`]'s
+/// REPRODUCIBILITY CAVEAT before trusting the paragraph above.** The `N_ps=128` row that
+/// determines `HI` reproduced to ~6% per leg and still flipped SIGN (froxel 9.1% SLOWER, not 2.6%
+/// faster), which puts the re-measured crossing ABOVE 128 rather than below it. `HI` stays at 128
+/// because VB-P1e does not re-tune the band (plan §1.4 consequence 3; the re-tune is VB-P1f), NOT
+/// because the re-measurement supports it.
+pub const CLUSTER_HI: u32 = 128;
 
 const _: () = assert!(CLUSTER_LO < CLUSTER_HI, "hysteresis: the OFF edge must sit below the ON edge");
 
@@ -121,7 +180,10 @@ fn banded(current: bool, value: u32, lo: u32, hi: u32) -> bool {
 /// [`LightingConfig::clusters_enabled`](crate::light::LightingConfig).
 ///
 /// Scheduled BEFORE `collect_lights` (so this frame's decision feeds the header fold —
-/// no one-frame staleness). It is the SINGLE owner of the fields it writes (Part 2.2
+/// no one-frame staleness) and AFTER the light seed
+/// ([`LightSeedState::seed`](crate::light_system::LightSeedState::seed)), which sets the
+/// `LightEnabled` bit of a light added this frame; before the seed that light reads
+/// disabled and is not counted. It is the SINGLE owner of the fields it writes (Part 2.2
 /// write discipline):
 ///
 /// 1. Counts entities with a `PointLight` OR a `SpotLight` whose
@@ -131,7 +193,7 @@ fn banded(current: bool, value: u32, lo: u32, hi: u32) -> bool {
 /// 2. In [`Manual`](crate::light::ClusterSelectMode::Manual) (the default — the 0%-gate):
 ///    leaves `clusters_enabled` untouched (owner-controlled, byte-identical to pre-P1).
 /// 3. In [`Auto`](crate::light::ClusterSelectMode::Auto): applies the
-///    [`CLUSTER_LO`]/[`CLUSTER_HI`] [`banded`] hysteresis to the count and writes the
+///    [`CLUSTER_LO`]/[`CLUSTER_HI`] `banded` hysteresis to the count and writes the
 ///    result to BOTH [`LightStats::cluster_band`] and `clusters_enabled`.
 //
 // `clippy::needless_pass_by_value`: `Query`/`ResMut` are by-value `SystemParam`s

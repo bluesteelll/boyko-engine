@@ -1,0 +1,304 @@
+{
+ "generated": "2026-09-23T00:40:17.719+03:00",
+ "rows_json": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win5\\rows.json",
+ "toolchain": "stable-x86_64-pc-windows-msvc",
+ "profile": "parity",
+ "logical_cpus": 16,
+ "binaries": {
+  "parent": {
+   "exe": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win5\\bin\\runner_parent.exe",
+   "sha256": "3993684b9f0ab8d99981cf8571a6ad988d1a14dd09675e065a8d22cb78507d1e",
+   "commit": "0ca312bd8d696cec739f27d13c98343f4e1d1a9b"
+  },
+  "tip": {
+   "exe": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win5\\bin\\runner_tip.exe",
+   "sha256": "9c7caff172cc2ef5fe34d7cb58720e16901ca62e0df78fb2a8a8088c2c8b597e",
+   "commit": "cbd86a6525175fc18500b9733997d78c2cbc3e44"
+  }
+ },
+ "rows": {
+  "HL-D-tree": {
+   "id": "HL-D-tree",
+   "block": "headline",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "expected_pose": "0x32d5e235342b4143",
+   "pose_ref": "J",
+   "tree": true,
+   "ws": [
+    1,
+    2,
+    4,
+    8
+   ],
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ]
+  },
+  "HL-D-allpairs": {
+   "id": "HL-D-allpairs",
+   "block": "headline",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "allpairs"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "expected_pose": "0x32d5e235342b4143",
+   "pose_ref": "J",
+   "tree": false,
+   "ws": [
+    1,
+    2,
+    4,
+    8
+   ],
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ]
+  },
+  "HL-R-tree": {
+   "id": "HL-R-tree",
+   "block": "headline",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "expected_pose": "0xee2a67a98434919a",
+   "pose_ref": "R",
+   "tree": true,
+   "ws": [
+    1,
+    8
+   ],
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ]
+  },
+  "HL-R-allpairs": {
+   "id": "HL-R-allpairs",
+   "block": "headline",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "allpairs"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "expected_pose": "0xee2a67a98434919a",
+   "pose_ref": "R",
+   "tree": false,
+   "ws": [
+    1,
+    8
+   ],
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ]
+  },
+  "J-As": {
+   "id": "J-As",
+   "block": "g9",
+   "binaries": [
+    "parent",
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "as"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "expected_pose": "0x32d5e235342b4143",
+   "pose_ref": "J",
+   "tree": false,
+   "ws": [
+    1,
+    8
+   ],
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ]
+  },
+  "J-As-a": {
+   "id": "J-As-a",
+   "block": "armed",
+   "binaries": [
+    "parent",
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "as"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": true,
+   "expected_pose": "0x32d5e235342b4143",
+   "pose_ref": "J",
+   "tree": false,
+   "ws": [
+    1,
+    8
+   ],
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ]
+  }
+ },
+ "protocol": {
+  "k_per_cell": 6,
+  "passes": 2,
+  "rounds_per_pass": 3,
+  "blocks": [
+   "headline",
+   "g9",
+   "armed"
+  ],
+  "order": "per block, pass 0: W ascending; inside a W group row by row in this file's order (tree then allpairs; parent then tip); pass 1: the whole list reversed",
+  "warmup_per_pass": "one untimed process per pass: headline = tip HL-D-tree W=8; g9/armed = tip J-As W=8",
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "rerun_contaminated_once_at_end_of_pass": true,
+  "void_pass_on_build_process": true,
+  "band_void": false,
+  "placement": "P-none",
+  "steps": 500,
+  "window": [
+   0,
+   500
+  ],
+  "armed_span_steps": [
+   100,
+   500
+  ],
+  "idle_rule": "tools/wait_idle5.ps1: 0 build procs (cargo/rustc/link/miri/...) AND 0 procs from D:/wt/_targets or D:/wt/mq-* on 3 consecutive 60-s polls, 10-s cpu < 5 %; up to 120 polls (120 min) per wait"
+ },
+ "blocks": [
+  {
+   "name": "headline",
+   "passes": 2,
+   "rounds": 3
+  },
+  {
+   "name": "g9",
+   "passes": 2,
+   "rounds": 3
+  },
+  {
+   "name": "armed",
+   "passes": 2,
+   "rounds": 3
+  }
+ ],
+ "gate_dir": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win5\\gate"
+}

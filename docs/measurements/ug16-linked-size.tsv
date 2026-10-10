@@ -1,0 +1,5 @@
+# UG-16 (plan gate, rung B2): linked section sizes of boyko_demo, profile.release (fat LTO),
+# llvm-size -A -d. One row per rung; written by scripts/ug16_linked_size.py --record.
+# Band: .text or .rdata above +1 % vs the previous row is HOLD for the owner's written acceptance.
+rung	date_utc	head	dirty	tree_id	toolchain	llvm_size_version	image	image_mtime_utc	text	rdata	total	sections	note
+B2	2026-09-23T04:13:09Z	4d75a4e3602fb6198ea547c589c14c907ab1ddc5	0	3cb969f06bb2	stable-x86_64-pc-windows-msvc	22.1.8-rust-1.98.1-stable	D:/wt/_targets/ui-msvc/release/boyko_demo.exe	2026-09-23T04:02:02Z	8540450	3389028	12463130	.text=8540450;.rdata=3389028;.data=272384;.pdata=234600;.reloc=26668	B2 baseline; profile.release lto=fat; rustc 1.98.1 msvc

@@ -136,6 +136,20 @@ impl BarrierStage {
     pub const LATE_FRAGMENT_TESTS: BarrierStage = BarrierStage(0x0000_0200);
     /// `VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT`.
     pub const BOTTOM_OF_PIPE: BarrierStage = BarrierStage(0x0000_2000);
+    /// `VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT` — the stage that FETCHES indirect
+    /// draw/dispatch arguments from a buffer. Virtual-geometry rung R1 ("load the
+    /// indirect seam"): its absence is why `boyko_render`'s `GpuStage::Indirect`
+    /// widened to a `COMPUTE_SHADER | TRANSFER` superset, which is sound but
+    /// synchronises far more than a GPU-decided cut needs.
+    pub const DRAW_INDIRECT: BarrierStage = BarrierStage(0x0000_0002);
+    /// `VK_PIPELINE_STAGE_VERTEX_INPUT_BIT` — the fixed-function stage that FETCHES
+    /// index and vertex-attribute data.
+    ///
+    /// Particles P0: the destination stage of the billboard quad's ONE boot barrier.
+    /// That 12-byte index buffer is written once at boot and read-only forever, which
+    /// is why it is deliberately NOT a framegraph resource — its hand-off is the one
+    /// hand-written barrier in the whole subsystem.
+    pub const VERTEX_INPUT: BarrierStage = BarrierStage(0x0000_0004);
 
     /// The empty set (no stage bits) — an invalid barrier; callers must set at
     /// least one when a buffer barrier is present (asserted at the encoder).
@@ -185,6 +199,23 @@ impl BarrierAccess {
     /// `VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT` — the depth write the
     /// UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL barrier makes available (rung 4).
     pub const DEPTH_STENCIL_ATTACHMENT_WRITE: BarrierAccess = BarrierAccess(0x0000_0400);
+    /// `VK_ACCESS_INDIRECT_COMMAND_READ_BIT` — the ONLY access the
+    /// [`BarrierStage::DRAW_INDIRECT`] stage performs. Virtual-geometry rung R1.
+    ///
+    /// ⚠️ There is deliberately no write counterpart, because Vulkan has none: an
+    /// indirect-argument buffer is WRITTEN by a compute shader or a transfer, and
+    /// read by this stage. A declaration of "indirect write" is incoherent, and
+    /// `boyko_render`'s mapping widens it rather than inventing a bit.
+    pub const INDIRECT_COMMAND_READ: BarrierAccess = BarrierAccess(0x0000_0001);
+    /// `VK_ACCESS_INDEX_READ_BIT` — the access [`BarrierStage::VERTEX_INPUT`] performs
+    /// on a bound index buffer. See that constant's doc for the one consumer.
+    pub const INDEX_READ: BarrierAccess = BarrierAccess(0x0000_0002);
+    /// `VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT` — the OTHER access
+    /// [`BarrierStage::VERTEX_INPUT`] performs: the fixed-function vertex fetch reading a
+    /// bound vertex buffer. Added with the device-local mesh upload
+    /// (`boyko_render::mesh_assets::upload_device_local`), whose staged `TRANSFER_WRITE`
+    /// has to be made visible to exactly this access before the first draw binds it.
+    pub const VERTEX_ATTRIBUTE_READ: BarrierAccess = BarrierAccess(0x0000_0008);
 
     /// The empty set (no access bits).
     pub const NONE: BarrierAccess = BarrierAccess(0);
@@ -278,6 +309,16 @@ pub enum Format {
     R8G8Unorm = 16,
     /// `VK_FORMAT_R16_SFLOAT` — a compact single-channel float (deferred SDF use).
     R16Sfloat = 76,
+    /// `VK_FORMAT_R16_UNORM` — a single unsigned-normalized 16-bit channel mapping the 16-bit
+    /// word onto `[0, 1]` (the SSAO à-trous denoise chain's interior ping-pong ring — 16-bit
+    /// precision avoids the cumulative 8-bit rounding a multi-level filter would accrue between
+    /// the two frozen `R8_UNORM` endpoints; one channel narrower than [`Self::R16G16Unorm`]).
+    ///
+    /// The value is the canonical `VkFormat` enumerant `VK_FORMAT_R16_UNORM == 70` (the 16-bit
+    /// single-component UNORM block: R16_UNORM=70, R16G16_UNORM=77). VERIFIED against the Vulkan
+    /// spec enumerant, NOT a copied guess; cross-checked against `VK_FORMAT_R16_UNORM` in
+    /// `abi_guard`.
+    R16Unorm = 70,
     /// `VK_FORMAT_R16G16_UNORM` — two unsigned-normalized 16-bit channels mapping each
     /// 16-bit word onto `[0, 1]` (Rung 3a: the à-trous ping-pong target `shadow_vis2` —
     /// 16-bit precision avoids the 3× cumulative 8-bit rounding a multi-level filter would
@@ -310,6 +351,17 @@ pub enum Format {
     /// Vulkan spec enumerant, cross-checked against `Format::R16G16B16A16Unorm` in `abi_guard` (the
     /// M2 lesson: a wrong format const is a silent dead-branch bug).
     R16G16B16A16Unorm = 91,
+    /// `VK_FORMAT_R16G16B16A16_SFLOAT` — four 16-bit (half) float channels (textured-PBR T6a:
+    /// the `gPbr` deferred-resolve MRT lane — `r`=metallic, `g`=roughness, `b`=AO-texture
+    /// modulation, `a`=emissive-strength modulation).
+    ///
+    /// The value is the canonical `VkFormat` enumerant `VK_FORMAT_R16G16B16A16_SFLOAT == 97`
+    /// (the 16-bit four-component SFLOAT block: R16=76, R16G16=83, R16G16B16A16 UNORM block
+    /// 84..91, R16G16B16A16_SFLOAT=97). VERIFIED against the Vulkan spec enumerant, cross-checked
+    /// against `Format::R16G16B16A16Sfloat` in `abi_guard` (the M2 lesson: a wrong format const is
+    /// a silent dead-branch bug). Storage-image support for this format is part of the Vulkan 1.0
+    /// CORE mandatory format table (unlike `R8_UNORM`/`R16G16_UNORM`, which need a boot probe).
+    R16G16B16A16Sfloat = 97,
     /// `VK_FORMAT_B10G11R11_UFLOAT_PACK32` — the packed R11G11B10 unsigned-float HDR
     /// format (SDFDDGI I1: the probe IRRADIANCE atlas, Decision D6 — stored WITHOUT the
     /// gamma encode so the resolve path is bit-exact). Despite the "R11G11B10F" shorthand
@@ -326,6 +378,12 @@ pub enum Format {
     /// G-buffer lane storing the marcher's surface ray parameter `t` for world-position
     /// reconstruction in the deferred resolve).
     R32Sfloat = 100,
+    /// `VK_FORMAT_R32G32_UINT` — two 32-bit unsigned integers (Multi-paradigm render-path plan,
+    /// rung R8: the `vb_id` Visibility-Buffer id channel — `R` = `instance_id`, `G` = raw
+    /// `SV_PrimitiveID`, Decision 9). The value is 101 (R32=100, R32G32=101..103,
+    /// R32G32_UINT=101) — pinned to the ACTUAL enumerant, cross-checked against
+    /// `VK_FORMAT_R32G32_UINT` in `abi_guard`.
+    R32G32Uint = 101,
     /// `VK_FORMAT_R32G32B32_SFLOAT` — three 32-bit floats (deferred position use).
     R32G32B32Sfloat = 106,
     /// `VK_FORMAT_D32_SFLOAT` — a 32-bit float depth attachment (deferred S1 use).
@@ -449,6 +507,48 @@ impl TextureDimension {
     }
 }
 
+/// The shape an image VIEW presents its subresource range as (the `VkImageViewType`
+/// `i32` family, VG R3 step S1).
+///
+/// `#[repr(i32)]` with discriminants equal to the matching `VK_IMAGE_VIEW_TYPE_*`
+/// constants (asserted backend-side in `abi_guard.rs`), so the backend lowers a
+/// [`crate::device::TextureViewDesc::dimension`] to a `VkImageViewType` with a trivial
+/// `as i32` cast — no per-shape translation table.
+///
+/// This is deliberately NOT [`TextureDimension`]. That family is the IMAGE's
+/// `VkImageType` (`VK_IMAGE_TYPE_2D`/`_3D`), which has no spelling for "an array slice
+/// of a 2D image"; a view over a multi-layer image needs exactly that spelling, so the
+/// view shape is its own family. The two coincide numerically at `D2`/`D3` (Vulkan
+/// assigns `VK_IMAGE_VIEW_TYPE_2D == VK_IMAGE_TYPE_2D == 1` and
+/// `VK_IMAGE_VIEW_TYPE_3D == VK_IMAGE_TYPE_3D == 2`) and diverge at [`Self::D2Array`],
+/// which is `5` — a value the image-type family does not have at all.
+///
+/// Only the shapes an image created through
+/// [`crate::device::RhiDevice::create_texture`] can actually take are defined (2D,
+/// 2D-array, 3D); 1D and cube views are absent because no image in the engine is
+/// created with those shapes. The family grows per phase.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureViewDimension {
+    /// `VK_IMAGE_VIEW_TYPE_2D` — one 2D slice. The shape a per-mip depth-pyramid
+    /// level is written through (`base_mip: k, mip_count: 1, layer_count: 1`).
+    D2 = 1,
+    /// `VK_IMAGE_VIEW_TYPE_3D` — a whole 3D image (a 3D image has no array layers).
+    D3 = 2,
+    /// `VK_IMAGE_VIEW_TYPE_2D_ARRAY` — `layer_count` consecutive 2D layers of a
+    /// multi-layer image, addressed by a shader as `Texture2DArray` /
+    /// `RWTexture2DArray`.
+    D2Array = 5,
+}
+
+impl TextureViewDimension {
+    /// The raw `i32` discriminant — equal to the matching `VkImageViewType`.
+    #[inline]
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
 /// A dynamic-rendering attachment load op (`VkAttachmentLoadOp` family).
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -518,6 +618,9 @@ impl PrimitiveTopology {
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VertexFormat {
+    /// `VK_FORMAT_R32G32_SFLOAT` — two 32-bit floats (textured-PBR T6c: a vec2 UV
+    /// coordinate).
+    Float32x2 = 103,
     /// `VK_FORMAT_R32G32B32_SFLOAT` — three 32-bit floats (a vec3 position).
     Float32x3 = 106,
     /// `VK_FORMAT_R32G32B32A32_SFLOAT` — four 32-bit floats (a vec4 color).
@@ -826,6 +929,29 @@ impl BlendState {
         color_op: BlendOp::Add,
         src_alpha: BlendFactor::One,
         dst_alpha: BlendFactor::OneMinusSrcAlpha,
+        alpha_op: BlendOp::Add,
+    };
+
+    /// Additive: `src + dst` for both color and alpha (`ONE`/`ONE`, op `ADD`) — the
+    /// GPU particle system's P0 blend (`docs/PARTICLES-PLAN.md` D7/D10).
+    ///
+    /// Unlike the two alpha states above, this one is COMMUTATIVE, which is the whole
+    /// reason P0 ships its particles UNSORTED: under the 8-bit saturation of an LDR
+    /// target `sat(sat(x) + y) == min(1, x + y)`, so the composited result does not
+    /// depend on the order the instances retire in. The destination factor is `ONE`
+    /// rather than `ONE_MINUS_SRC_ALPHA` precisely so no term of the sum can attenuate
+    /// what was already there — an attenuating factor would re-introduce order
+    /// dependence and with it the sort P0 does not have.
+    ///
+    /// The pipeline that uses it pairs it with `depth_test = ON` / `depth_write = OFF`,
+    /// so opaque geometry still occludes the additive fragments while they contribute
+    /// nothing to the depth buffer for each other.
+    pub const ADDITIVE: BlendState = BlendState {
+        src_color: BlendFactor::One,
+        dst_color: BlendFactor::One,
+        color_op: BlendOp::Add,
+        src_alpha: BlendFactor::One,
+        dst_alpha: BlendFactor::One,
         alpha_op: BlendOp::Add,
     };
 }

@@ -6,6 +6,32 @@
 > per-subsystem catalog see [SYSTEMS.md](SYSTEMS.md); for the "where is X?"
 > lookup see [FEATURE_MAP.md](FEATURE_MAP.md).
 
+> **Anchors are partly gated, and the boundary is stated because it moved four
+> times.** `tests/internal_docs_anchors.rs` runs under the ordinary
+> `cargo test --workspace` and checks **exactly two notations**: the suffix form
+> `file.rs:N` (including `(:N)`) and the bare `(N)` member line. For those: the
+> path must exist, line N must still hold a definition, and where a line's
+> backticked symbols pair one-to-one with its numbers, line N must also name the
+> symbol it stands beside. An anchor written `:N~` / `(N~)` deliberately points
+> at a non-definition — a struct field, an enforcement site, a module-doc
+> invariant — and waives **both** the shape and the identity check, keeping only
+> the in-file bounds check.
+>
+> **NOT read by the gate:** line numbers spelled `line N` or `(line N)`. Nine
+> such sites exist across these documents. That form is invisible — changing one
+> to `(line 99999)` leaves the suite green and does not even move the anchor
+> count. Write new citations in the `:N` form.
+>
+> **Binding rule, stated exactly because getting it wrong is what caused the
+> worst rot found here:** an anchor binds to the nearest resolvable file-shaped
+> path mention since the last heading — a **File:** header, **but also any inline
+> markdown link or bare `crates/...` mention.** So an inline file link dropped
+> into a member table silently rebinds every row after it, and a table whose
+> members live in several files needs its header split.
+>
+> Do not read this box as a freshness guarantee for the whole document. It states
+> which notations are machine-checked; a number in any other form is unverified.
+
 ## Goals and non-goals
 
 **Goals:**
@@ -91,6 +117,7 @@ boyko-engine/
 │   ├── boyko_render/                     # bridge: GPU-resident ECS columns (DeviceLocal pools) + lighting/SDF; names both ECS + RHI
 │   ├── boyko_shaderdsl/                  # in-house Rust shader eDSL: field math authored once → f32 Eval mirror + HLSL Emit (byte-identical .spv)
 │   ├── boyko_fontbake/                   # load-time MTSDF font baker → .bfont (off the render hot path)
+│   ├── boyko_image/                      # in-house PNG decoder (RFC 1950 zlib + RFC 1951 DEFLATE), zero third-party deps
 │   ├── boyko_ui/                         # ECS-native UI (widgets = entities; layout = systems; MSDF text; world-space/diegetic HUD)
 │   │
 │   │   # ── apps / benches ───────────────────────────────────────────
@@ -134,9 +161,9 @@ boyko_math       ──→ (leaf: no workspace deps)
 boyko_sdf_math   ──→ boyko_shaderdsl               (no_std leaf; delegates f32 field bodies)
 boyko_scene      ──→ boyko_ecs, boyko_math, boyko_macros, boyko_utils
 boyko_input      ──→ boyko_ecs, boyko_macros, boyko_utils
-boyko_serialize  ──→ boyko_ecs
+boyko_serialize  ──→ boyko_ecs, boyko_log
 boyko_physics    ──→ boyko_ecs, boyko_macros, boyko_utils, boyko_threadpool,
-                     boyko_math, boyko_scene, boyko_sdf_math
+                     boyko_math, boyko_scene, boyko_sdf_math, boyko_log
 ```
 
 ### Render / UI / shaders
@@ -150,13 +177,17 @@ dependency.
 
 ```
 boyko_rhi         ──→ boyko_utils                          (FFI-free trait surface)
-boyko_rhi_vulkan  ──→ boyko_rhi, boyko_sdf_math            (raw hand-FFI Vulkan; framegraph RDG)
+boyko_rhi_vulkan  ──→ boyko_rhi, boyko_sdf_math,            (raw hand-FFI Vulkan; framegraph RDG)
+                      boyko_diag, boyko_log
 boyko_shaderdsl   ──→ (leaf: no workspace deps)
 boyko_fontbake    ──→ boyko_math, boyko_threadpool         (load-time tool)
-boyko_render      ──→ boyko_ecs, boyko_macros, boyko_utils,
-                      boyko_rhi, boyko_rhi_vulkan,
-                      boyko_scene, boyko_math, boyko_fontbake
-boyko_ui          ──→ boyko_ecs, boyko_macros, boyko_utils,
+boyko_image       ──→ boyko_log                            (load-time PNG decode; `boyko_log` is
+                                                           its ONLY workspace edge, added at L8a)
+boyko_render      ──→ boyko_ecs, boyko_macros,
+                      boyko_rhi, boyko_rhi_vulkan, boyko_sdf_math,
+                      boyko_scene, boyko_math, boyko_fontbake,
+                      boyko_image, boyko_log
+boyko_ui          ──→ boyko_ecs, boyko_macros,
                       boyko_input, boyko_scene, boyko_math, boyko_fontbake
 ```
 
@@ -227,13 +258,13 @@ bitsets), `crossbeam-queue` / `crossbeam-utils`, `static_assertions` (compile-ti
 User → EcsMaster::create_entity(archetype_id, &[(ComponentId, &[u8])])
     ├─ Guard (C-007): archetype_master.has_archetype(archetype_id)?
     │      └─ no → Err(EcsError::ArchetypeNotFound) before any allocation
-    ├─ EntityMaster::allocate_entity()
-    │      └─ recycle from free_entity_ids, or fetch_add(next_entity_id)
-    │         → Entity { id, generation }
+    ├─ EntityMaster::allocate_entity_ticketed()
+    │      └─ pop the recycled stack, or fetch_add(next_entity_id)
+    │         → AllocTicket { Entity { id, generation }, Fresh | Recycled }
     ├─ ArchetypeMaster::get_archetype_mut(id) → &mut Archetype
     ├─ Archetype::create_entity(entity_id, &mut inland, components)
     │      ├─ Two-phase commit (C-009): bundle.can_push_entity_components(...)
-    │      │      └─ false → entity_master.rewind_allocate(entity);
+    │      │      └─ false → entity_master.rewind_allocate(ticket);
     │      │                  Err(EcsError::ArchetypeRejectedEntity)
     │      ├─ bundle.push_entity_components(...) — lockstep memcpy into the pool columns
     │      └─ fill the per-row added_ticks/changed_ticks with the world's tick
@@ -345,7 +376,7 @@ stable heap address so those pointers + per-`(D,F)` caches stay valid.
 
 ### 4. Reserve/commit virtual-memory backing (Phases X.C → X.F → X.G/X.H → X.I/X.J)
 
-**Where:** [memory/vm.rs](../crates/boyko_ecs/src/ecs/memory/vm.rs)
+**Where:** [boyko_memory/vm.rs](../crates/boyko_memory/src/vm.rs)
 
 Every storage owner backs itself with a `VmReservation`: a write-once
 virtual-address reservation (`VirtualAlloc(MEM_RESERVE, PAGE_NOACCESS)` on
@@ -364,7 +395,7 @@ outright. See [PHASE-XI-RESULTS.md](archive/PHASE-XI-RESULTS.md) +
 
 ### 5. Global `ComponentRegistry` / `EventRegistry` / `ResourceRegistry` (lazy IDs)
 
-**Where:** [component/component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs),
+**Where:** [component/component_registry/](../crates/boyko_ecs/src/ecs/core/component/component_registry/),
 [events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs),
 [resources/resource_registry.rs](../crates/boyko_ecs/src/ecs/core/resources/resource_registry.rs)
 
@@ -383,16 +414,18 @@ exclusivity (a type cannot be both Component and Resource, M6) is checked at
 
 **Where:** [entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
 
-Four fields: `free_entity_ids` (LIFO recycle), `next_entity_id: AtomicUsize`,
-`entities_inland: Vec<EntityInland>` (the hot fast store, indexed by `EntityId.0`,
-`is_null()` ⇔ dead), and a plain `live_count: usize`. Phase 7 dropped the
+Three fields: `entities_inland` (the hot fast store, indexed by `EntityId.0`,
+`is_null()` ⇔ dead), a plain `live_count: usize`, and the `reservoir`
+(`EntityReservoir`: the fresh-id `AtomicUsize` plus the recycled-entity stack,
+LIFO on a `VmColumn`). Phase 7 dropped the
 `SparseMap<EntityInland>` indirection; **Phase X.D** dropped the EnTT-style
 `active_ids` + `sparse_to_active` (their only consumer was the cold
 `iter_entities`, and the despawn swap-remove they needed was deleted with them),
 net-removing `unsafe` and shedding −12 B/entity. `Generation` bumps on
-deallocation (the ABA defence). Workers touch only `next_entity_id` (via the
-`EntityCounter` atomic-RMW newtype); all other mutation is dispatcher-`&mut self`
-inside the apply window. See [PHASE-XD-RESULTS.md](archive/PHASE-XD-RESULTS.md).
+deallocation (the ABA defence). Workers touch only the reservoir (via the
+`EntityCounter` newtype: `fetch_sub` claims from the recycled stack, `fetch_add`
+mints fresh — EM2′, so a `Commands`-churned population reuses its ids); all
+other mutation is dispatcher-`&mut self` inside the apply window. See [PHASE-XD-RESULTS.md](archive/PHASE-XD-RESULTS.md).
 
 ### 7. Domain error type `EcsError`
 
@@ -480,9 +513,11 @@ Layered on the above without disturbing the hot path:
 
 ### 13. Tags share the ComponentId space; storage is tick-only (Phase 22)
 
-**Where:** [component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs)
-(`TagId` :214, mint protocol :496-609 — the planned `identifiers/tag_id.rs`
-was NOT created, a recorded deviation),
+**Where:** [component_registry/tags.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs)
+(`TagId` :49, name-keyed mint :182-207 — the planned `identifiers/tag_id.rs`
+was NOT created, a recorded deviation) over
+[component_registry/mod.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs)
+(the id mint itself, `try_register_dynamic` :967),
 [ecs_master/tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/tag_api.rs),
 [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs),
 [query/tag_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/tag_terms.rs),
@@ -522,8 +557,10 @@ archetype (2 MiB cfg fallback) — zero resident until commit.
 **Where:** [component/enable/](../crates/boyko_ecs/src/ecs/core/component/enable/)
 (`enable_store.rs` = `EnablePage`/`EnableColumn`/`EnableStore`, `enable_presence.rs`
 = the `EnablePresence` cull oracle),
-[component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs)
-(`StorageKind` + `STORAGE_KIND` table + `EnableTagId`),
+[component_registry/mod.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs)
+(`StorageKind` :325 + the `STORAGE_KIND` table :375) and
+[component_registry/tags.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs)
+(`EnableTagId` :93),
 [ecs_master/enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs),
 [query/filter_enable.rs](../crates/boyko_ecs/src/ecs/core/iters/query/filter_enable.rs)
 + [query/enable_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/enable_terms.rs).

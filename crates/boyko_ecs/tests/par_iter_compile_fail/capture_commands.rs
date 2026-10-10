@@ -12,9 +12,13 @@
 //! commands sequentially after `par_iter` returns, or use a deterministic
 //! per-thread buffer reduced post-hoc.
 //!
-//! The deeper `!Sync` story for `Commands<'_>` is enforced indirectly:
-//! `Commands::add` / `Commands::spawn` take `&mut self`, and the `Fn`
-//! bound forbids `&mut self` calls from inside the closure.
+//! Since EM2′ the rejection comes one layer EARLIER, from the trait system:
+//! `Commands<'_>` is `!Sync` because its `EntityCounter` keeps the EXHAUSTED
+//! bit in a `Cell`, so a closure capturing it fails the `Sync` bound (E0277)
+//! before the borrow checker's `Fn`-body rejection (E0596) is reached. Before
+//! EM2′ `Commands` was in fact `Sync` (`CommandQueue` is auto-`Sync`), and only
+//! the `Fn` bound stood between the user and the mistake; the `.stderr`
+//! baseline records which layer fires.
 
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::system::Commands;

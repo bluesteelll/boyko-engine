@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 description = "The single SIMD-aligned POD math vocabulary for the engine: Vec2/3/4, Quat, Mat3 (row-major), Mat4 (column-major), Affine3A. Vec3/Quat/Mat3 are lifted verbatim from the physics foundation and are bit-deterministic (exact sqrt, NO FMA/rsqrt/fast-math)."
-
+license.workspace = true
 [lib]
 name = "boyko_math"
 path = "src/lib.rs"
@@ -15,3 +15,6 @@ path = "src/lib.rs"
 # `len_sq.sqrt().recip()` for normalize, NO FMA/`mul_add`/`rsqrt`/`rcp`/fast-math
 # anywhere. Adding a dep or a fast-math feature would break that contract.
 [dependencies]
+
+[lints]
+workspace = true

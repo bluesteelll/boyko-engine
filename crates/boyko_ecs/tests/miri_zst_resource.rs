@@ -3,7 +3,7 @@
 //! Run under:
 //!
 //! ```powershell
-//! cargo +nightly miri test -p boyko-ecs --test miri_zst_resource
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_zst_resource
 //! ```
 //!
 //! `-Zmiri-tree-borrows` is the workspace default (`.cargo/config.toml`). No

@@ -51,12 +51,25 @@ pub struct BoundBuffer {
     /// The Vulkan buffer handle.
     pub buffer: VkBuffer,
     /// The byte offset within the block where the buffer's memory is bound.
+    ///
+    /// This is a **memory-bind** offset into `block`'s `VkDeviceMemory`, never a
+    /// buffer-relative one: every `create_bound_buffer` mints a distinct
+    /// `VkBuffer` whose own addressing starts at 0, so a
+    /// `VkDescriptorBufferInfo.offset` must NOT be fed from this field.
     pub offset: u64,
     /// The buffer's requested size in bytes.
     pub size: u64,
     /// CPU pointer to the buffer's first byte (block map base + offset) for a
     /// host-visible buffer; `None` for a device-local (never-mapped) buffer.
     pub mapped: Option<NonNull<u8>>,
+    /// Index of the owning block within its [`BlockPool`].
+    ///
+    /// A pool grows by appending blocks, so `offset` alone no longer identifies
+    /// a sub-allocation — two blocks can both have a live region at the same
+    /// offset. Freeing must return the region to the block it came from, and
+    /// this is what says which one. The block constructors set `0`; the pool
+    /// stamps the real index, so a block stays index-agnostic.
+    pub block: u32,
 }
 
 /// One host-visible + host-coherent `VkDeviceMemory` block with a sub-allocator
@@ -97,7 +110,7 @@ impl HostVisibleBlock {
     /// returned block (plan A1).
     ///
     /// `device_address` (HW-RT rung R2a-2): when `true` the allocation is flagged
-    /// [`VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`] (a [`VkMemoryAllocateFlagsInfo`] chained
+    /// `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT` (a `VkMemoryAllocateFlagsInfo` chained
     /// into `p_next`) so buffers sub-allocated from it can return a device address — the
     /// precondition for an acceleration-structure build input / scratch / backing buffer.
     /// The caller passes `true` ONLY under `hwrt` on a ray-query device; `false` keeps the
@@ -289,7 +302,7 @@ impl HostVisibleBlock {
         // `map_base + offset` is in-bounds of the persistent mapping.
         let mapped = unsafe { NonNull::new_unchecked(self.map_base.as_ptr().add(offset as usize)) };
 
-        Ok(BoundBuffer { buffer, offset, size, mapped: Some(mapped) })
+        Ok(BoundBuffer { buffer, offset, size, mapped: Some(mapped), block: 0 })
     }
 
     /// Destroys a previously-created [`BoundBuffer`] and frees its sub-region.
@@ -376,7 +389,7 @@ impl DeviceLocalBlock {
     ///
     /// `device_address` (HW-RT rung R2a-2): identical contract to
     /// [`HostVisibleBlock::new`] — `true` flags the allocation
-    /// [`VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`] (only under `hwrt` on a ray-query device);
+    /// `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT` (only under `hwrt` on a ray-query device);
     /// `false` keeps `p_next` null (byte-identical).
     pub fn new(
         device: VkDevice,
@@ -522,7 +535,7 @@ impl DeviceLocalBlock {
         }
 
         // No `mapped` pointer: device-local memory is never mapped (plan D3/MF-8).
-        Ok(BoundBuffer { buffer, offset, size, mapped: None })
+        Ok(BoundBuffer { buffer, offset, size, mapped: None, block: 0 })
     }
 
     /// Destroys a previously-created [`BoundBuffer`] and frees its sub-region.
@@ -564,6 +577,263 @@ impl Drop for DeviceLocalBlock {
         unsafe {
             (fns.free_memory)(self.device, self.memory, ptr::null());
         }
+    }
+}
+
+/// The block operations a [`BlockPool`] needs, so one pool serves both the
+/// host-visible and the device-local block without duplicating the growth logic.
+///
+/// Deliberately narrow: a block knows how to allocate a `capacity` of memory and
+/// how to hand out / take back sub-allocations, and nothing about pools or
+/// indices. The pool stamps [`BoundBuffer::block`] after the fact.
+pub trait PoolBlock: Sized {
+    /// Allocates one `capacity`-byte block. Same contract as
+    /// [`HostVisibleBlock::new`] / [`DeviceLocalBlock::new`], which are its only
+    /// two implementations.
+    fn new_block(
+        device: VkDevice,
+        fns: &DeviceFns,
+        mem_props: &VkPhysicalDeviceMemoryProperties,
+        capacity: u64,
+        device_address: bool,
+    ) -> Result<Self, MemoryError>;
+
+    /// Sub-allocates a bound buffer, or `Err(MemoryError::SubAllocExhausted)`
+    /// when this block has no room for it.
+    fn create_in_block(&mut self, size: u64, usage: VkFlags) -> Result<BoundBuffer, MemoryError>;
+
+    /// This block's own capacity in bytes. Blocks in one pool are NOT uniformly
+    /// sized — a request larger than the default mints a block sized to fit —
+    /// so the pool sums this rather than multiplying.
+    fn block_capacity(&self) -> u64;
+
+    /// # Safety
+    ///
+    /// `bound` must have been produced by [`Self::create_in_block`] on THIS block
+    /// and not already destroyed.
+    unsafe fn destroy_in_block(&mut self, bound: BoundBuffer);
+
+    /// Sub-allocations this block handed out that are not yet destroyed
+    /// (diagnostic — never on a per-frame path).
+    fn live_allocations(&self) -> usize;
+
+    /// Whether `offset` names a live sub-allocation of this block — the same key
+    /// [`Self::destroy_in_block`] frees by (diagnostic; O(live)).
+    fn allocation_is_live(&self, offset: u64) -> bool;
+}
+
+impl PoolBlock for HostVisibleBlock {
+    #[inline]
+    fn new_block(
+        device: VkDevice,
+        fns: &DeviceFns,
+        mem_props: &VkPhysicalDeviceMemoryProperties,
+        capacity: u64,
+        device_address: bool,
+    ) -> Result<Self, MemoryError> {
+        Self::new(device, fns, mem_props, capacity, device_address)
+    }
+
+    #[inline]
+    fn create_in_block(&mut self, size: u64, usage: VkFlags) -> Result<BoundBuffer, MemoryError> {
+        self.create_bound_buffer(size, usage)
+    }
+
+    #[inline]
+    fn block_capacity(&self) -> u64 {
+        self.capacity()
+    }
+
+    #[inline]
+    unsafe fn destroy_in_block(&mut self, bound: BoundBuffer) {
+        // SAFETY: forwarded verbatim from this trait method's own contract.
+        unsafe { self.destroy_bound_buffer(bound) }
+    }
+
+    #[inline]
+    fn live_allocations(&self) -> usize {
+        self.suballoc.live_count()
+    }
+
+    #[inline]
+    fn allocation_is_live(&self, offset: u64) -> bool {
+        self.suballoc.is_live(offset)
+    }
+}
+
+impl PoolBlock for DeviceLocalBlock {
+    #[inline]
+    fn new_block(
+        device: VkDevice,
+        fns: &DeviceFns,
+        mem_props: &VkPhysicalDeviceMemoryProperties,
+        capacity: u64,
+        device_address: bool,
+    ) -> Result<Self, MemoryError> {
+        Self::new(device, fns, mem_props, capacity, device_address)
+    }
+
+    #[inline]
+    fn create_in_block(&mut self, size: u64, usage: VkFlags) -> Result<BoundBuffer, MemoryError> {
+        self.create_bound_buffer(size, usage)
+    }
+
+    #[inline]
+    fn block_capacity(&self) -> u64 {
+        self.capacity()
+    }
+
+    #[inline]
+    unsafe fn destroy_in_block(&mut self, bound: BoundBuffer) {
+        // SAFETY: forwarded verbatim from this trait method's own contract.
+        unsafe { self.destroy_bound_buffer(bound) }
+    }
+
+    #[inline]
+    fn live_allocations(&self) -> usize {
+        self.suballoc.live_count()
+    }
+
+    #[inline]
+    fn allocation_is_live(&self, offset: u64) -> bool {
+        self.suballoc.is_live(offset)
+    }
+}
+
+/// A **growable** pool of same-kind memory blocks.
+///
+/// # Why this exists (VG-R0 staging rung S1)
+///
+/// Each memory location used to be ONE lazily-created block of a fixed 64 MiB,
+/// first-fit, with no growth path — so 64 MiB was a hard ceiling on everything
+/// that location backed. For mesh geometry that ceiling is reached by ordinary
+/// content: at 64 B/vertex and 0.5 vertices/triangle plus `u32` indices a mesh
+/// costs ~44 B/triangle, so the whole engine could hold roughly **1.5 M
+/// triangles** of mesh at once, and the failure was a `vkCreateBuffer` `.expect`
+/// panic rather than a recoverable `Err` — outside every gate that was supposed
+/// to bound the corpus.
+///
+/// The pool removes the ceiling in one place: allocation walks the existing
+/// blocks and, only if none has room, appends a new one sized to fit the
+/// request. Callers are unchanged.
+///
+/// # Cost
+///
+/// `alloc` may try several blocks, and each attempt costs a `vkCreateBuffer` +
+/// `vkDestroyBuffer` pair, because a buffer's alignment and true size are only
+/// knowable from `vkGetBufferMemoryRequirements` on a *created* buffer. That is
+/// bounded by the block count (one or two in practice) and this is an
+/// asset-upload path, never a per-frame one.
+pub struct BlockPool<B> {
+    blocks: Vec<B>,
+    default_capacity: u64,
+}
+
+impl<B: PoolBlock> BlockPool<B> {
+    /// A pool whose blocks are `default_capacity` bytes unless a single request
+    /// needs more. No memory is allocated until the first [`Self::alloc`].
+    pub fn new(default_capacity: u64) -> Self {
+        debug_assert!(default_capacity > 0, "invariant: non-zero default block capacity");
+        Self { blocks: Vec::new(), default_capacity }
+    }
+
+    /// Blocks currently allocated. `0` before the first allocation.
+    #[inline]
+    pub fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Sum of every block's capacity, in bytes. Summed, not multiplied: a
+    /// request larger than the default mints an over-sized block.
+    #[inline]
+    pub fn total_capacity(&self) -> u64 {
+        self.blocks.iter().map(B::block_capacity).sum()
+    }
+
+    /// Live sub-allocations summed over every block — buffers allocated from this
+    /// pool and not yet freed (diagnostic — never on a per-frame path).
+    #[inline]
+    pub fn live_allocations(&self) -> usize {
+        self.blocks.iter().map(B::live_allocations).sum()
+    }
+
+    /// Whether the sub-allocation keyed by `(block, offset)` — the
+    /// [`BoundBuffer::block`] and [`BoundBuffer::offset`] that [`Self::alloc`]
+    /// returns — is still live. An out-of-range `block` is `false`, never a panic.
+    #[inline]
+    pub fn allocation_is_live(&self, block: u32, offset: u64) -> bool {
+        self.blocks.get(block as usize).is_some_and(|b| b.allocation_is_live(offset))
+    }
+
+    /// The capacity a fresh block must have to hold `size`.
+    ///
+    /// Rounded up to a whole number of default blocks, **plus a slack term**:
+    /// `vkGetBufferMemoryRequirements` may report a size larger than the
+    /// requested one (alignment padding), so sizing a block to exactly the
+    /// request would fail for any request that is already an exact multiple.
+    fn capacity_for(&self, size: u64) -> u64 {
+        const SLACK: u64 = 1024 * 1024;
+        let want = size.saturating_add(SLACK);
+        let blocks = want.div_ceil(self.default_capacity).max(1);
+        self.default_capacity * blocks
+    }
+
+    /// Sub-allocates a bound buffer, growing the pool if no existing block has
+    /// room. The returned buffer's [`BoundBuffer::block`] names its owner.
+    pub fn alloc(
+        &mut self,
+        device: VkDevice,
+        fns: &DeviceFns,
+        mem_props: &VkPhysicalDeviceMemoryProperties,
+        device_address: bool,
+        size: u64,
+        usage: VkFlags,
+    ) -> Result<BoundBuffer, MemoryError> {
+        for (i, block) in self.blocks.iter_mut().enumerate() {
+            match block.create_in_block(size, usage) {
+                Ok(mut bound) => {
+                    bound.block = i as u32;
+                    return Ok(bound);
+                }
+                // Only exhaustion is a reason to try the next block; a real
+                // Vulkan failure is reported rather than retried N times.
+                Err(MemoryError::SubAllocExhausted) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        let capacity = self.capacity_for(size);
+        let mut block = B::new_block(device, fns, mem_props, capacity, device_address)?;
+        // A block sized by `capacity_for` has room by construction; a failure
+        // here is a driver-side one and is propagated rather than looped on.
+        let mut bound = block.create_in_block(size, usage)?;
+        bound.block = self.blocks.len() as u32;
+        self.blocks.push(block);
+        Ok(bound)
+    }
+
+    /// Returns a sub-allocation to the block it came from.
+    ///
+    /// # Safety
+    ///
+    /// `bound` must have been produced by [`Self::alloc`] on THIS pool and not
+    /// already destroyed.
+    pub unsafe fn free(&mut self, bound: BoundBuffer) {
+        let idx = bound.block as usize;
+        debug_assert!(idx < self.blocks.len(), "invariant: freeing into a live block index");
+        // SAFETY: by this function's contract `bound` came from `alloc` on this
+        // pool, so `bound.block` is the index the pool stamped and the block at
+        // that index is the one that minted it. Blocks are only ever appended
+        // (never removed or reordered) until `clear`, so the index stays valid.
+        unsafe { self.blocks[idx].destroy_in_block(bound) };
+    }
+
+    /// Drops every block, freeing its device memory.
+    ///
+    /// The owning context calls this in its `Drop`, BEFORE `vkDestroyDevice` and
+    /// before the boxed fn-table each block cached a pointer into.
+    pub fn clear(&mut self) {
+        self.blocks.clear();
     }
 }
 
@@ -663,5 +933,165 @@ mod tests {
         let p = props_with(&[(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0)]);
         let required = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
         assert_eq!(select_memory_type(&p, required, u32::MAX), None);
+    }
+
+    /// Capacity of every mock block.
+    const MOCK_BLOCK_BYTES: u64 = 1024;
+    /// Size of every mock sub-allocation.
+    const MOCK_ALLOC_BYTES: u64 = 64;
+
+    /// A [`PoolBlock`] with no device behind it — a bare [`SubAllocator`] — so [`BlockPool`]'s
+    /// live-allocation sum and block routing are testable without Vulkan. `new_block` always
+    /// fails, so a pool of these is built from its fields directly and never grows.
+    struct MockBlock {
+        suballoc: SubAllocator,
+    }
+
+    impl PoolBlock for MockBlock {
+        fn new_block(
+            _device: VkDevice,
+            _fns: &DeviceFns,
+            _mem_props: &VkPhysicalDeviceMemoryProperties,
+            _capacity: u64,
+            _device_address: bool,
+        ) -> Result<Self, MemoryError> {
+            Err(MemoryError::NoSuitableMemoryType)
+        }
+
+        fn create_in_block(&mut self, size: u64, _usage: VkFlags) -> Result<BoundBuffer, MemoryError> {
+            let offset = self.suballoc.alloc(size, 1).ok_or(MemoryError::SubAllocExhausted)?;
+            Ok(BoundBuffer { buffer: VkBuffer::NULL, offset, size, mapped: None, block: 0 })
+        }
+
+        fn block_capacity(&self) -> u64 {
+            self.suballoc.capacity()
+        }
+
+        unsafe fn destroy_in_block(&mut self, bound: BoundBuffer) {
+            let freed = self.suballoc.free(bound.offset);
+            assert!(freed, "test mock: destroy_in_block got an offset this block never handed out");
+        }
+
+        fn live_allocations(&self) -> usize {
+            self.suballoc.live_count()
+        }
+
+        fn allocation_is_live(&self, offset: u64) -> bool {
+            self.suballoc.is_live(offset)
+        }
+    }
+
+    /// A mock block holding `count` live allocations at offsets `0, 64, 128, …`.
+    fn mock_block(count: u64) -> MockBlock {
+        let mut block = MockBlock { suballoc: SubAllocator::new(MOCK_BLOCK_BYTES) };
+        for i in 0..count {
+            let bound = block
+                .create_in_block(MOCK_ALLOC_BYTES, 0)
+                .expect("test setup: the mock block has room");
+            assert_eq!(bound.offset, i * MOCK_ALLOC_BYTES, "test setup: first-fit carves from the front");
+        }
+        block
+    }
+
+    /// A pool over `blocks`, built from its fields.
+    fn mock_pool(blocks: Vec<MockBlock>) -> BlockPool<MockBlock> {
+        BlockPool { blocks, default_capacity: MOCK_BLOCK_BYTES }
+    }
+
+    /// One more allocation from block `index`, stamped with that index the way
+    /// [`BlockPool::alloc`] stamps a buffer an existing block had room for. (`alloc` itself needs
+    /// a device fn table, which a unit test cannot build.)
+    fn alloc_in(pool: &mut BlockPool<MockBlock>, index: u32) -> BoundBuffer {
+        let mut bound = pool.blocks[index as usize]
+            .create_in_block(MOCK_ALLOC_BYTES, 0)
+            .expect("test setup: the mock block has room");
+        bound.block = index;
+        bound
+    }
+
+    /// M5 — a pool with no blocks has no live allocations.
+    #[test]
+    fn block_pool_live_allocations_is_zero_without_blocks() {
+        let pool = BlockPool::<MockBlock>::new(MOCK_BLOCK_BYTES);
+        assert_eq!(pool.live_allocations(), 0, "an empty pool holds no live sub-allocation");
+    }
+
+    /// M6 — the live count is summed over every block. Blocks holding 2 and 3 keep the right
+    /// answer apart from the plausible wrong ones: first block alone 2, last alone 3, block count 2.
+    #[test]
+    fn block_pool_live_allocations_sums_every_block() {
+        let pool = mock_pool(vec![mock_block(2), mock_block(3)]);
+        assert_eq!(pool.live_allocations(), 5, "live allocations must be summed over both blocks (2 + 3)");
+    }
+
+    /// M7 — `allocation_is_live` reads only the block it names. Offset 128 is live in block 1
+    /// (three allocations) and was never handed out by block 0 (two), so a lookup that ignored
+    /// the block index would read it live here.
+    #[test]
+    fn block_pool_allocation_is_live_is_false_for_an_offset_live_only_in_another_block() {
+        let pool = mock_pool(vec![mock_block(2), mock_block(3)]);
+        assert!(
+            !pool.allocation_is_live(0, 2 * MOCK_ALLOC_BYTES),
+            "offset 128 is live only in block 1, so block 0 must read it dead"
+        );
+    }
+
+    /// M8 — the same key reads live in the block that holds it.
+    #[test]
+    fn block_pool_allocation_is_live_is_true_in_the_block_that_holds_it() {
+        let pool = mock_pool(vec![mock_block(2), mock_block(3)]);
+        assert!(pool.allocation_is_live(1, 2 * MOCK_ALLOC_BYTES), "offset 128 is live in block 1");
+    }
+
+    /// M9 — a block index one past the end is `false`, not a panic. Offset 0 is live in both
+    /// blocks, so an index that was clamped or wrapped instead of rejected would read live.
+    #[test]
+    fn block_pool_allocation_is_live_is_false_for_a_block_past_the_end() {
+        let pool = mock_pool(vec![mock_block(2), mock_block(3)]);
+        assert!(!pool.allocation_is_live(2, 0), "block 2 does not exist in a two-block pool");
+    }
+
+    /// M10 — the largest possible block index is `false`, not a panic.
+    #[test]
+    fn block_pool_allocation_is_live_is_false_for_block_u32_max() {
+        let pool = mock_pool(vec![mock_block(2), mock_block(3)]);
+        assert!(!pool.allocation_is_live(u32::MAX, 0), "block u32::MAX does not exist in a two-block pool");
+    }
+
+    /// M11 — the key `BlockPool::free` frees by is the key `allocation_is_live` reads: once the
+    /// allocation at (block 1, offset 0) is freed, that key reads dead. Offset 0 stays live in
+    /// block 0, so a lookup that ignored the block index would still read it live.
+    #[test]
+    fn block_pool_free_makes_its_key_read_dead() {
+        let mut pool = mock_pool(vec![mock_block(0), mock_block(0)]);
+        let _in_block_0 = alloc_in(&mut pool, 0);
+        let in_block_1 = alloc_in(&mut pool, 1);
+        // SAFETY: `in_block_1` was just sub-allocated from block 1 of THIS pool and stamped with
+        // that index, exactly as `alloc` returns it, and nothing freed it before; a mock block
+        // owns no device memory.
+        unsafe { pool.free(in_block_1) };
+        assert!(!pool.allocation_is_live(1, 0), "the freed key (block 1, offset 0) must read dead");
+    }
+
+    /// M12 — freeing in one block leaves the same offset live in the other.
+    #[test]
+    fn block_pool_free_leaves_the_same_offset_live_in_another_block() {
+        let mut pool = mock_pool(vec![mock_block(0), mock_block(0)]);
+        let _in_block_0 = alloc_in(&mut pool, 0);
+        let in_block_1 = alloc_in(&mut pool, 1);
+        // SAFETY: as in `block_pool_free_makes_its_key_read_dead`.
+        unsafe { pool.free(in_block_1) };
+        assert!(pool.allocation_is_live(0, 0), "block 0's allocation at offset 0 was not freed");
+    }
+
+    /// M13 — freeing one allocation lowers the pool's live count by exactly one.
+    #[test]
+    fn block_pool_free_decrements_live_allocations() {
+        let mut pool = mock_pool(vec![mock_block(0), mock_block(0)]);
+        let _in_block_0 = alloc_in(&mut pool, 0);
+        let in_block_1 = alloc_in(&mut pool, 1);
+        // SAFETY: as in `block_pool_free_makes_its_key_read_dead`.
+        unsafe { pool.free(in_block_1) };
+        assert_eq!(pool.live_allocations(), 1, "two live allocations, one freed, leaves one");
     }
 }

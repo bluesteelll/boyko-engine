@@ -16,14 +16,14 @@ use core::ptr::{self, NonNull};
 use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BufferDesc, ComputePipelineDesc,
     DescriptorKind, GraphicsPipelineDesc, MemoryLocation, MipMode, QueryPoolDesc, RhiDevice,
-    SamplerDesc, TextureDesc,
+    SamplerDesc, TextureDesc, TextureViewDesc,
 };
 
 use crate::compute::ComputeError;
 use crate::device::{DeviceFns, VulkanContext};
 use crate::error::VulkanError;
 use crate::memory::BoundBuffer;
-use crate::texture::VulkanTexture;
+use crate::texture::{VulkanTexture, VulkanTextureView};
 
 impl RhiDevice<Vulkan> for VulkanContext {
     type Error = VulkanError;
@@ -38,13 +38,11 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // bits (plan D5), so the projection is an identity cast on the u32 family.
         let usage: VkFlags = desc.usage.bits();
         match desc.location {
-            // The host-visible foundation block (plan Q1).
-            MemoryLocation::HostVisibleCoherent => {
-                let block = self.host_block()?;
-                let bound = block.borrow_mut().create_bound_buffer(desc.size, usage)?;
-                Ok(bound)
-            }
-            // The Phase-5 device-local (VRAM) block (plan D3/MF-8). Always add the
+            // The host-visible foundation pool (plan Q1). Growable since VG-R0's
+            // staging rung S1: a request larger than the free space in every
+            // existing block appends one rather than failing.
+            MemoryLocation::HostVisibleCoherent => self.alloc_host_buffer(desc.size, usage),
+            // The Phase-5 device-local (VRAM) pool (plan D3/MF-8). Always add the
             // `TRANSFER_SRC | TRANSFER_DST` usage so the staging upload + the
             // test-only readback (`vkCmdCopyBuffer`) can name the buffer as either
             // copy endpoint regardless of the caller's declared usage. The result
@@ -53,41 +51,28 @@ impl RhiDevice<Vulkan> for VulkanContext {
                 let usage = usage
                     | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
                     | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-                let block = self.device_block()?;
-                let bound = block.borrow_mut().create_bound_buffer(desc.size, usage)?;
-                Ok(bound)
+                self.alloc_device_buffer(desc.size, usage)
             }
         }
     }
 
     unsafe fn destroy_buffer(&self, buffer: BoundBuffer) {
-        // Plan A3: if a `BoundBuffer` exists, it was sub-allocated from one of the
-        // shared blocks, so that block MUST already be initialized. A silent
-        // early-return on `Err` here would drop the owned `buffer` WITHOUT
-        // destroying its `VkBuffer` / returning its sub-allocation — a leak. The
-        // matching block's `*_block()` only fails on the first-ever allocation
-        // (which already happened to mint `buffer`), so these `expect`s are
-        // unreachable by construction. `mapped` discriminates the origin block: a
-        // host-visible buffer carries `Some(ptr)`, a device-local one `None`.
+        // Plan A3: if a `BoundBuffer` exists it was sub-allocated from one of the
+        // pools, and `buffer.block` names WHICH block inside that pool minted it —
+        // which is what makes freeing correct once a pool can hold more than one.
+        // `mapped` still discriminates the POOL: a host-visible buffer carries
+        // `Some(ptr)`, a device-local one `None`.
         if buffer.mapped.is_some() {
-            let block = self
-                .host_block()
-                .expect("invariant: host block initialized when a host BoundBuffer exists");
             // SAFETY: `buffer` was produced by `create_buffer(HostVisibleCoherent)`
-            // on this device's shared host block, the GPU is no longer using it
-            // (caller fence-waited per the trait contract), and the by-value move
-            // destroys it exactly once. The block is borrowed `&mut`
-            // single-threaded.
-            unsafe { block.borrow_mut().destroy_bound_buffer(buffer) };
+            // on this device's host pool, the GPU is no longer using it (caller
+            // fence-waited per the trait contract), and the by-value move destroys
+            // it exactly once. The pool is borrowed `&mut` single-threaded.
+            unsafe { self.free_host_buffer(buffer) };
         } else {
-            let block = self
-                .device_block()
-                .expect("invariant: device block initialized when a device BoundBuffer exists");
             // SAFETY: `buffer` was produced by `create_buffer(DeviceLocal)` on this
-            // device's shared device-local block, the GPU is no longer using it
-            // (caller fence-waited), and the by-value move destroys it exactly once.
-            // The block is borrowed `&mut` single-threaded.
-            unsafe { block.borrow_mut().destroy_bound_buffer(buffer) };
+            // device's device-local pool, the GPU is no longer using it (caller
+            // fence-waited), and the by-value move destroys it exactly once.
+            unsafe { self.free_device_buffer(buffer) };
         }
     }
 
@@ -119,6 +104,27 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // contract); the by-value move destroys it exactly once. `destroy` tears
         // down the view → image → dedicated memory in reverse order.
         unsafe { texture.destroy(self.device(), self.device_fns()) };
+    }
+
+    fn create_texture_view(
+        &self,
+        texture: &VulkanTexture,
+        desc: &TextureViewDesc,
+    ) -> Result<VulkanTextureView, VulkanError> {
+        // SAFETY: `self.device()`/`self.device_fns()` are the live device + its command
+        // table; `texture` is a live `&VulkanTexture` created by `create_texture` on this
+        // same device (the trait's context-alive contract), so the view names a live
+        // image. `VulkanTextureView::create` upholds the rest of the FFI invariants
+        // internally (documented at its own `unsafe` block).
+        unsafe { VulkanTextureView::create(self.device(), self.device_fns(), texture, desc) }
+    }
+
+    unsafe fn destroy_texture_view(&self, view: VulkanTextureView) {
+        // SAFETY: `view` was created on this device by `create_texture_view`; the GPU is
+        // no longer using it and its parent texture is still alive (caller contract —
+        // THE OWNERSHIP RULE has the view destroyed BEFORE its image); the by-value move
+        // destroys it exactly once.
+        unsafe { view.destroy(self.device(), self.device_fns()) };
     }
 
     fn create_sampler(&self, desc: &SamplerDesc) -> Result<VulkanSampler, VulkanError> {
@@ -202,14 +208,15 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // `stage_flags` the entry's `ShaderStage` bits (identity cast, also asserted).
         // The bindings are a fixed-capacity inline array — zero heap allocation.
         let count = desc.entries.len();
-        debug_assert!(
-            (1..=MAX_BIND_GROUP_BINDINGS).contains(&count),
-            "invariant: bind-group-layout entry count must be in 1..=MAX_BIND_GROUP_BINDINGS"
-        );
-        // Release-safe: clamp to the inline capacity (and a floor of 1) so the count
-        // handed to the driver never exceeds the initialized slots even if a
-        // (debug-asserted) out-of-range count slipped through a release build.
-        let count = count.clamp(1, MAX_BIND_GROUP_BINDINGS);
+        // 2026-07 audit: this used to `clamp(1, CAP)`, which turned an EMPTY entry slice into
+        // `count == 1` and then panicked at `desc.entries[0]` below — from a safe `pub fn`. A
+        // clamp cannot invent a slot that does not exist. An out-of-range count is a caller
+        // error, rejected here before any Vulkan object is created (no leak, no panic).
+        if !(1..=MAX_BIND_GROUP_BINDINGS).contains(&count) {
+            return Err(VulkanError::Unsupported(
+                "bind-group-layout entry count must be in 1..=MAX_BIND_GROUP_BINDINGS",
+            ));
+        }
         // Review M2: every declared binding must fit the inline-array capacity so the
         // retained `(binding, kind)` pairs (read at `create_bind_group` to target each
         // write) stay addressable. Debug-only; the contiguous-0..N convention every
@@ -322,10 +329,15 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // allocated once, and `vkUpdateDescriptorSets` writes the whole set ONCE at
         // create — there is NO per-frame rewrite.
         let count = desc.entries.len();
-        debug_assert!(
-            (1..=MAX_BIND_GROUP_BINDINGS).contains(&count),
-            "invariant: bind-group entry count must be in 1..=MAX_BIND_GROUP_BINDINGS"
-        );
+        // 2026-07 audit: same clamp-then-panic bug as `create_bind_group_layout`, but WORSE
+        // here — the panic on `desc.entries[i]` fires AFTER `vkCreateDescriptorPool` (below),
+        // and a raw `VkDescriptorPool` has no RAII, so the unwind leaked it. Reject an
+        // out-of-range count before the pool exists.
+        if !(1..=MAX_BIND_GROUP_BINDINGS).contains(&count) {
+            return Err(VulkanError::Unsupported(
+                "bind-group entry count must be in 1..=MAX_BIND_GROUP_BINDINGS",
+            ));
+        }
         // Review M1: the group's arity must equal the layout's declared entry count —
         // one descriptor write per layout binding, no more, no fewer. (The doc on
         // `BindGroupDesc` promises this check; it is now real because the layout
@@ -334,7 +346,6 @@ impl RhiDevice<Vulkan> for VulkanContext {
             count == desc.layout.entry_count,
             "P1a: BindGroupDesc.entries.len() must equal the layout's entry count"
         );
-        let count = count.clamp(1, MAX_BIND_GROUP_BINDINGS);
 
         // --- Per-kind descriptor histogram → pool sizes (one entry per kind that
         //     actually appears, so the pool is sized exactly). The kinds map onto fixed
@@ -412,7 +423,8 @@ impl RhiDevice<Vulkan> for VulkanContext {
         //     write's `dst_binding` is the LAYOUT entry's binding (caller contract:
         //     entries are in layout order, so `desc.layout`'s binding `i`). Image kinds
         //     declare the layout the descriptor records: GENERAL for a storage image,
-        //     SHADER_READ_ONLY_OPTIMAL for a sampled one — the caller transitions each
+        //     SHADER_READ_ONLY_OPTIMAL for a sampled one (and GENERAL for the one sampled
+        //     kind named for it, `SampledImageAtGeneral`) — the caller transitions each
         //     via `image_barrier` before access (the P1a SAFETY contract), and
         //     validation cross-checks the recorded layout at access time. All three
         //     inline arrays are fixed-capacity (zero heap) and outlive the update call. ---
@@ -510,11 +522,40 @@ impl RhiDevice<Vulkan> for VulkanContext {
                     };
                     p_image_info = (&image_infos[i] as *const VkDescriptorImageInfo).cast();
                 }
+                // VG R3 step S1: the same descriptor write as `StorageImage` above —
+                // `VK_IMAGE_LAYOUT_GENERAL`, NULL sampler, one `p_image_info` — with the
+                // view handle taken from the caller's EXPLICIT view instead of being
+                // selected out of the texture. There is no array/single-layer fallback to
+                // make here: the desc already said which layers the view spans.
+                BindGroupEntry::StorageImageView { view } => {
+                    image_infos[i] = VkDescriptorImageInfo {
+                        sampler: VkSampler::NULL,
+                        image_view: view.view,
+                        image_layout: VK_IMAGE_LAYOUT_GENERAL,
+                    };
+                    p_image_info = (&image_infos[i] as *const VkDescriptorImageInfo).cast();
+                }
                 BindGroupEntry::SampledImage { texture, sampler } => {
                     image_infos[i] = VkDescriptorImageInfo {
                         sampler: sampler.sampler,
                         image_view: texture.view,
                         image_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    };
+                    p_image_info = (&image_infos[i] as *const VkDescriptorImageInfo).cast();
+                }
+                // VG R3 step P3-1: the same descriptor write as `SampledImage` above — one
+                // `p_image_info`, the texture's own view, `VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE` — with
+                // the recorded layout GENERAL and the sampler slot NULL. The caller keeps the image
+                // in `GENERAL` for life (the HZB pyramid is boot-cleared into it and written there
+                // by the build pass), so recording SHADER_READ_ONLY_OPTIMAL would name a layout the
+                // image is never in. No array/single-layer fallback is made here — as for
+                // `SampledImage` above, `texture.view` is the full-subresource view, which is what a
+                // single-layer MIP-CHAINED image wants: the reader indexes mips, not layers.
+                BindGroupEntry::SampledImageAtGeneral { texture } => {
+                    image_infos[i] = VkDescriptorImageInfo {
+                        sampler: VkSampler::NULL,
+                        image_view: texture.view,
+                        image_layout: VK_IMAGE_LAYOUT_GENERAL,
                     };
                     p_image_info = (&image_infos[i] as *const VkDescriptorImageInfo).cast();
                 }
@@ -617,6 +658,9 @@ impl RhiDevice<Vulkan> for VulkanContext {
             (fns.update_descriptor_sets)(device, count as u32, writes.as_ptr(), 0, ptr::null())
         };
 
+        // Counted only past every error edge above (each destroys its own pool before
+        // returning), so the count covers exactly the pools that outlive this call.
+        self.note_descriptor_pool_created();
         Ok(VulkanBindGroup {
             descriptor_pool,
             descriptor_set,
@@ -636,6 +680,7 @@ impl RhiDevice<Vulkan> for VulkanContext {
                 ptr::null(),
             )
         };
+        self.note_descriptor_pool_destroyed();
     }
 
     fn create_shader_module(&self, spirv: &[u32]) -> Result<VulkanShaderModule, VulkanError> {
@@ -875,6 +920,723 @@ impl RhiDevice<Vulkan> for VulkanContext {
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        // Textured-PBR T6c (plan Decision D5): the real work moved to `build_graphics_pipeline`
+        // (a Vulkan-only inherent method, below) so it can be shared with
+        // `create_graphics_pipeline_bindless`'s 2-set path. `set1: None, VK_COMPARE_OP_LESS,
+        // depth_write: true` here reuses the IDENTICAL code path (not merely a `None`-gated
+        // branch) every pre-T6c/pre-R4b-b caller took — byte-identical
+        // `VkPipelineLayoutCreateInfo`/depth-stencil state by construction.
+        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_LESS, true, GRAPHICS_PUSH_STAGES_DEFAULT)
+    }
+
+    unsafe fn destroy_graphics_pipeline(&self, pipeline: VulkanGraphicsPipeline) {
+        // SAFETY: both handles were created on this device by
+        // `create_graphics_pipeline`, no submission using the pipeline is pending
+        // (caller contract), and the by-value move destroys each exactly once.
+        // Reverse creation order: the pipeline (created last) is destroyed before its
+        // dedicated empty layout (created first).
+        unsafe {
+            (self.device_fns().destroy_pipeline)(self.device(), pipeline.pipeline, ptr::null());
+            (self.device_fns().destroy_pipeline_layout)(
+                self.device(),
+                pipeline.layout,
+                ptr::null(),
+            );
+        }
+    }
+
+    fn create_fence(&self, signaled: bool) -> Result<VulkanFence, VulkanError> {
+        let fence_info = VkFenceCreateInfo {
+            s_type: VkStructureType::FenceCreateInfo,
+            p_next: ptr::null(),
+            // `VK_FENCE_CREATE_SIGNALED_BIT` == 0x1.
+            flags: if signaled { 0x0000_0001 } else { 0 },
+        };
+        let mut fence = VkFence::NULL;
+        // SAFETY: `device` is live; `fence_info` is fully initialized; `&mut
+        // fence` is a valid out-pointer; NULL allocator.
+        let raw = unsafe {
+            (self.device_fns().create_fence)(self.device(), &fence_info, ptr::null(), &mut fence)
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkCreateFence", result));
+        }
+        Ok(VulkanFence { fence })
+    }
+
+    unsafe fn destroy_fence(&self, fence: VulkanFence) {
+        // SAFETY: `fence.fence` was created on this device, is not pending (caller
+        // contract), and the by-value move destroys it exactly once.
+        unsafe { (self.device_fns().destroy_fence)(self.device(), fence.fence, ptr::null()) };
+    }
+
+    fn wait_fence(&self, fence: &VulkanFence, timeout_ns: u64) -> Result<(), VulkanError> {
+        // SAFETY: `device` is live; `&fence.fence` names one live fence;
+        // `wait_all = VK_TRUE` blocks until it is signaled (or the timeout
+        // elapses). After this returns `Ok` the submission that signals it has
+        // completed — the fence-before-readback discipline.
+        let raw = unsafe {
+            (self.device_fns().wait_for_fences)(
+                self.device(),
+                1,
+                &fence.fence,
+                VK_TRUE,
+                timeout_ns,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkWaitForFences", result));
+        }
+        Ok(())
+    }
+
+    fn reset_fence(&self, fence: &VulkanFence) -> Result<(), VulkanError> {
+        // SAFETY: `device` is live; `&fence.fence` names one live fence to reset
+        // to unsignaled (no submission referencing it is pending — caller resets
+        // only after a `wait_fence`).
+        let raw =
+            unsafe { (self.device_fns().reset_fences)(self.device(), 1, &fence.fence) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkResetFences", result));
+        }
+        Ok(())
+    }
+
+    fn create_query_pool(&self, desc: &QueryPoolDesc) -> Result<VulkanQueryPool, VulkanError> {
+        debug_assert!(desc.count > 0, "invariant: a query pool needs >= 1 query");
+        let create_info = VkQueryPoolCreateInfo {
+            s_type: VkStructureType::QueryPoolCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            query_type: VK_QUERY_TYPE_TIMESTAMP,
+            query_count: desc.count,
+            // A TIMESTAMP pool sets no pipeline-statistics flags.
+            pipeline_statistics: 0,
+        };
+        let mut pool = VkQueryPool::NULL;
+        // SAFETY: `device` is live; `create_info` is fully initialized (a TIMESTAMP pool of
+        // `count` queries); `&mut pool` is a valid out-pointer; NULL allocator. The queries
+        // are UNDEFINED at creation — the caller resets them before the first write.
+        let raw = unsafe {
+            (self.device_fns().create_query_pool)(self.device(), &create_info, ptr::null(), &mut pool)
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkCreateQueryPool", result));
+        }
+        Ok(VulkanQueryPool { pool, count: desc.count })
+    }
+
+    unsafe fn destroy_query_pool(&self, pool: VulkanQueryPool) {
+        // SAFETY: `pool.pool` was created on this device, no submission writing/reading it is
+        // pending (caller contract), and the by-value move destroys it exactly once.
+        unsafe { (self.device_fns().destroy_query_pool)(self.device(), pool.pool, ptr::null()) };
+    }
+
+    fn read_query_pool_ns(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+        out_ns: &mut [f64],
+    ) -> Result<(), VulkanError> {
+        debug_assert!(
+            out_ns.len() >= pair_count as usize,
+            "invariant: out_ns must hold pair_count ns values"
+        );
+        self.fetch_query_pair_ticks(pool, pair_count, scratch)?;
+        // × `timestampPeriod`. The tick deltas themselves (masking + wrap handling) are the
+        // shared helper's business; this method is only the ns SCALE.
+        let period = self.device_caps().timestamp_period as f64;
+        for i in 0..pair_count as usize {
+            out_ns[i] = scratch[i] as f64 * period;
+        }
+        Ok(())
+    }
+
+    fn read_query_pool_ticks(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+        out_ticks: &mut [u64],
+    ) -> Result<(), VulkanError> {
+        debug_assert!(
+            out_ticks.len() >= pair_count as usize,
+            "invariant: out_ticks must hold pair_count tick values"
+        );
+        self.fetch_query_pair_ticks(pool, pair_count, scratch)?;
+        out_ticks[..pair_count as usize].copy_from_slice(&scratch[..pair_count as usize]);
+        Ok(())
+    }
+
+    fn read_query_pool_pairs_ns(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+        out_begin_ns: &mut [f64],
+        out_dur_ns: &mut [f64],
+    ) -> Result<(), VulkanError> {
+        self.fetch_query_pair_stamps(pool, pair_count, scratch, out_begin_ns, out_dur_ns)
+    }
+
+    // ===== PROFILING RUNG 4 — the non-blocking query seam =====
+
+    fn read_query_pool_pairs_available(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+        out_begin_ticks: &mut [u64],
+        out_dur_ticks: &mut [u64],
+        out_available: &mut [u8],
+    ) -> Result<(), VulkanError> {
+        self.fetch_query_pairs_available(
+            pool,
+            pair_count,
+            scratch,
+            out_begin_ticks,
+            out_dur_ticks,
+            out_available,
+        )
+    }
+
+    fn reset_query_pool_host(
+        &self,
+        pool: &VulkanQueryPool,
+        first: u32,
+        count: u32,
+    ) -> Result<(), VulkanError> {
+        if !self.device_caps().host_query_reset {
+            // The verb's own contract: a backend whose device did not ENABLE the feature refuses
+            // rather than calling a driver entry point that would reject it. The recorder's
+            // fallback (a recorded `vkCmdResetQueryPool`) is what runs instead, and it is fully
+            // specified — this is not a degraded path, it is the other one.
+            return Err(VulkanError::Rhi(boyko_rhi::RhiError::unsupported(
+                "reset_query_pool_host",
+            )));
+        }
+        debug_assert!(
+            first.saturating_add(count) <= pool.count,
+            "invariant: the reset range must fit the pool's query count"
+        );
+        // SAFETY: `device` is live and `pool.pool` is a live pool created on it; the range
+        //   `[first, first + count)` is inside `pool.count` (asserted above). `hostQueryReset` was
+        //   enabled at device creation — `device_caps().host_query_reset` carries the ENABLED
+        //   contract, not an advertised one, checked immediately above — which is what makes this
+        //   entry point legal to call at all. The caller's own contract is that no submitted
+        //   command buffer may still be reading or writing these queries.
+        unsafe {
+            (self.device_fns().reset_query_pool)(self.device(), pool.pool, first, count);
+        }
+        Ok(())
+    }
+
+    fn host_query_reset_supported(&self) -> bool {
+        self.device_caps().host_query_reset
+    }
+
+    fn calibrated_timestamps_supported(&self) -> bool {
+        // The ENABLED contract, carried by the ONE boot probe that also decided whether the
+        // extension string went into `VkDeviceCreateInfo` and whether the entry point was loaded.
+        // Reading the cap rather than `device_fns().get_calibrated_timestamps.is_some()` would be
+        // a second source for one fact; `sample_device_clock` below checks the pointer because it
+        // needs the pointer, not because it doubts the cap.
+        self.device_caps().calibrated_timestamps
+    }
+
+    fn sample_device_clock(&self) -> Result<boyko_rhi::DeviceClockSample, VulkanError> {
+        let Some(get_calibrated) = self.device_fns().get_calibrated_timestamps else {
+            return Err(VulkanError::Rhi(boyko_rhi::RhiError::unsupported(
+                "sample_device_clock",
+            )));
+        };
+
+        let info = crate::ffi::VkCalibratedTimestampInfoExt {
+            s_type: crate::ffi::VkStructureType::CalibratedTimestampInfoExt,
+            p_next: core::ptr::null(),
+            // The DEVICE domain alone. The host domains are declared in `ffi.rs` and never
+            // requested: this engine's CPU axis is `rdtsc`, not `CLOCK_MONOTONIC` or QPC, so a
+            // host-domain stamp would need a second, uncalibrated conversion to reach the axis the
+            // offset is expressed in. Bracketing with our own clock measures that relation
+            // directly instead of estimating it twice.
+            time_domain: crate::ffi::VK_TIME_DOMAIN_DEVICE_EXT,
+        };
+        let mut device_ticks: u64 = 0;
+        let mut driver_max_deviation_ns: u64 = 0;
+
+        // The bracket. Nothing may sit between these reads and the call but the call — no
+        // allocation, no logging, no `Result` mapping — because everything that does widens the
+        // interval this rung publishes as its own uncertainty. The error mapping is deliberately
+        // AFTER `cpu_ticks_after`.
+        let cpu_ticks_before = boyko_diag::clock::ticks();
+        // SAFETY: `get_calibrated` is `vkGetCalibratedTimestampsEXT` resolved from THIS device
+        //   (`load_device_fns`), and it is `Some` only when the extension was enabled at device
+        //   creation — the same single probe gates both. `info` is one fully-initialised
+        //   `#[repr(C)]` element whose size/align are const-asserted against the C ABI, and the
+        //   count passed is exactly 1, so the driver reads one element and never strides past it.
+        //   `device_ticks` and `driver_max_deviation_ns` are valid out-pointers for one `u64`
+        //   each; all three locals outlive the call.
+        let raw = unsafe {
+            (get_calibrated)(
+                self.device(),
+                1,
+                &info,
+                &mut device_ticks,
+                &mut driver_max_deviation_ns,
+            )
+        };
+        let cpu_ticks_after = boyko_diag::clock::ticks();
+
+        let result = crate::ffi::VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkGetCalibratedTimestampsEXT", result));
+        }
+
+        Ok(boyko_rhi::DeviceClockSample {
+            cpu_ticks_before,
+            cpu_ticks_after,
+            // Masked HERE, so this value and a zone's `begin_ticks` come off the seam on the same
+            // axis. A caller that had to remember to mask one of two device-tick sources would
+            // eventually not.
+            device_ticks: device_ticks & self.device_caps().timestamp_mask(),
+            driver_max_deviation_ns,
+        })
+    }
+
+    // ===== HW-RT ACCELERATION-STRUCTURE VERBS (rung R2a-1; `feature="hwrt"` overrides) =====
+    // Each delegates to a `crate::accel` inherent helper (the real `vkGet*`/`vkCreate*` FFI).
+    // Present ONLY under `hwrt`; a default build inherits the `#[cold]` erroring defaults.
+
+    #[cfg(feature = "hwrt")]
+    fn get_acceleration_structure_build_sizes(
+        &self,
+        kind: boyko_rhi::AsKind,
+        geometry: &boyko_rhi::AsGeometryDesc,
+    ) -> Result<boyko_rhi::AsBuildSizes, VulkanError> {
+        self.build_sizes(kind, geometry)
+    }
+
+    #[cfg(feature = "hwrt")]
+    fn create_acceleration_structure(
+        &self,
+        kind: boyko_rhi::AsKind,
+        buffer: &BoundBuffer,
+        size: u64,
+    ) -> Result<crate::accel::BoundAccelStruct, VulkanError> {
+        self.create_accel(kind, buffer.buffer, size)
+    }
+
+    #[cfg(feature = "hwrt")]
+    fn get_acceleration_structure_device_address(
+        &self,
+        accel: &crate::accel::BoundAccelStruct,
+    ) -> Result<u64, VulkanError> {
+        self.accel_device_address(accel)
+    }
+
+    #[cfg(feature = "hwrt")]
+    fn get_buffer_device_address(&self, buffer: &BoundBuffer) -> Result<u64, VulkanError> {
+        self.buffer_device_address(buffer.buffer)
+    }
+
+    #[cfg(feature = "hwrt")]
+    unsafe fn destroy_acceleration_structure(&self, accel: crate::accel::BoundAccelStruct) {
+        // SAFETY: the RhiDevice contract — the GPU is no longer using `accel` (caller
+        // fence-waited/`wait_idle`'d) and it is destroyed once (by-value move).
+        unsafe { self.destroy_accel(accel) };
+    }
+
+    fn create_command_encoder(&self) -> Result<VulkanCommandEncoder, VulkanError> {
+        let layouts = self.compute_layouts()?;
+        // SAFETY: the device is live; `layouts` are this device's shared compute
+        // layouts; the encoder takes a raw pointer to this context's `DeviceFns`
+        // (which outlives any encoder built from `&self`).
+        let enc = unsafe {
+            VulkanCommandEncoder::new(
+                self.device(),
+                self.device_fns() as *const DeviceFns,
+                self.queue_family_index(),
+                layouts.set_layout,
+                layouts.pipeline_layout,
+            )
+        };
+        // HW-RT rung R2a-1: wire the AS command table (a raw pointer into this context, which
+        // outlives the encoder) so `cmd_build_acceleration_structures` can reach the FFI; null
+        // when ray query is off. No-op on a non-hwrt build.
+        #[cfg(feature = "hwrt")]
+        let enc = enc.map(|mut e| {
+            let p = self
+                .accel_fns_opt()
+                .map_or(ptr::null(), |f| f as *const crate::accel::AccelFns);
+            e.set_accel_fns(p);
+            e
+        });
+        enc
+    }
+
+    unsafe fn destroy_command_encoder(&self, enc: VulkanCommandEncoder) {
+        // SAFETY: `enc` was created on this device, its last submission has
+        // completed (caller contract), and the by-value move destroys it exactly
+        // once. `destroy` tears down the descriptor pool + command pool (which
+        // frees the set + command buffer) in reverse order.
+        unsafe { enc.destroy(self.device(), self.device_fns()) };
+    }
+
+    fn wait_idle(&self) -> Result<(), VulkanError> {
+        // SAFETY: `device` is live; `vkDeviceWaitIdle` blocks until every queue is
+        // idle — the belt-and-braces teardown sync (plan W4).
+        let raw = unsafe { (self.device_fns().device_wait_idle)(self.device()) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkDeviceWaitIdle", result));
+        }
+        Ok(())
+    }
+}
+
+/// The flag word every non-blocking query read uses (profiling rung 4).
+///
+/// # This `const` is the mechanism, not a convention
+///
+/// A blocking reader is the failure this whole seam exists to remove: with
+/// `VK_QUERY_RESULT_WAIT_BIT` set, `vkGetQueryPoolResults` **blocks forever** on any query its
+/// recorder never wrote, and this repository has no kill-after-timeout pattern — so the defect's
+/// symptom is a hang, and a hang is not a red a gate can show.
+///
+/// A source gate cannot close it either: the verb's body has to live here, beside its siblings, and
+/// a grep scoped to the profiling module would structurally exclude this file. That is the exact
+/// shape of a mechanical check whose scope excludes the defect.
+///
+/// So the flag word is a checked `const` and the red is a **build failure**: add the bit and the
+/// assertion below stops the workspace from compiling. There is no flags parameter on the verb, so
+/// no caller can reintroduce it either.
+const GPU_ZONE_QUERY_FLAGS: VkFlags =
+    VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT;
+const _: () = assert!(
+    GPU_ZONE_QUERY_FLAGS & VK_QUERY_RESULT_WAIT_BIT == 0,
+    "G2a: a blocking GPU query reader must be unrepresentable, not merely unwritten"
+);
+// And the availability bit must be PRESENT, or the driver writes no availability word and the
+// reader reports whatever the caller's staging buffer happened to hold. The two halves of the
+// flag word fail in opposite directions, so both are pinned.
+const _: () = assert!(
+    GPU_ZONE_QUERY_FLAGS & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT != 0,
+    "G2c: without the availability bit the reader answers from stale staging bytes"
+);
+
+/// `u64`s of `scratch` each query consumes under [`GPU_ZONE_QUERY_FLAGS`]: the value, then the
+/// availability word (64-bit too, because `VK_QUERY_RESULT_64_BIT` is set).
+const WORDS_PER_QUERY: usize = 2;
+
+impl VulkanContext {
+    /// The body of [`RhiDevice::read_query_pool_pairs_available`] (profiling rung 4): one
+    /// **non-blocking** `vkGetQueryPoolResults` over `2 * pair_count` queries, followed by the
+    /// same mask/wrap arithmetic its blocking siblings use.
+    ///
+    /// # `VK_NOT_READY` is a result, not an error
+    ///
+    /// Without `WAIT_BIT` the driver returns `VK_NOT_READY` when any requested query is
+    /// unavailable, having still written every word it could. That is the *normal* outcome for a
+    /// frame still in flight, so it maps to `Ok(())` with the corresponding availability bytes
+    /// clear. Treating it as an error would make "the GPU has not finished yet" a failure.
+    ///
+    /// # An unavailable pair reads ZERO, not whatever the driver left
+    ///
+    /// Vulkan leaves an unavailable query's value undefined. `scratch` is caller-owned staging
+    /// that this function does not zero, so "undefined" here means "whatever the caller last put
+    /// there" — and handing that to a reader is how a stale byte becomes a measurement. The out
+    /// slices get zeros for any pair whose availability is not `(1, 1)`.
+    ///
+    /// # Panics
+    ///
+    /// `debug_assert`s that `2 * pair_count` fits `pool.count`, that `scratch` holds
+    /// `4 * pair_count` words, and that each out slice holds `pair_count` values.
+    fn fetch_query_pairs_available(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+        out_begin_ticks: &mut [u64],
+        out_dur_ticks: &mut [u64],
+        out_available: &mut [u8],
+    ) -> Result<(), VulkanError> {
+        let query_count = pair_count * 2;
+        debug_assert!(
+            query_count <= pool.count,
+            "invariant: the requested query count must fit the pool's query count"
+        );
+        debug_assert!(
+            scratch.len() >= query_count as usize * WORDS_PER_QUERY,
+            "invariant: scratch must hold value + availability for every query"
+        );
+        debug_assert!(
+            out_begin_ticks.len() >= pair_count as usize
+                && out_dur_ticks.len() >= pair_count as usize
+                && out_available.len() >= pair_count as usize,
+            "invariant: every out slice must hold pair_count values"
+        );
+
+        let stride = (WORDS_PER_QUERY * 8) as VkDeviceSize;
+        // SAFETY: `device` is live; `pool.pool` is a live TIMESTAMP pool and `query_count` fits
+        //   its extent (asserted above); `scratch.as_mut_ptr()` names
+        //   `query_count * WORDS_PER_QUERY` `u64` slots (asserted above) — `data_size` is exactly
+        //   that many bytes and `stride` is the 16 bytes one query occupies under
+        //   `64_BIT | WITH_AVAILABILITY_BIT`. NULL is not passed. The flag word carries NO
+        //   `WAIT_BIT` (const-asserted above), so this call CANNOT block, which is the one
+        //   property that makes it safe to ask about queries the recorder may never have written.
+        let raw = unsafe {
+            (self.device_fns().get_query_pool_results)(
+                self.device(),
+                pool.pool,
+                0,
+                query_count,
+                query_count as usize * WORDS_PER_QUERY * 8,
+                scratch.as_mut_ptr().cast::<c_void>(),
+                stride,
+                GPU_ZONE_QUERY_FLAGS,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        // `VK_SUCCESS` (every query available) and `VK_NOT_READY` (some are not) are BOTH the
+        // expected outcomes of a poll, so BOTH are accepted here — explicitly, and **not** through
+        // `is_success()`, which is `self.0 == 0` and would reject `VK_NOT_READY` as an error.
+        //
+        // MEASURED, not assumed: writing `!result.is_success()` here made G2c's first clause fail
+        // with `Vk("vkGetQueryPoolResults", VK_NOT_READY)` on the very poll the whole seam exists
+        // to make legal — a poll of a pool nothing has written. The mistake came from the sibling
+        // reader's comment two functions down, which asserted that `is_success()` "would also
+        // accept" `VK_NOT_READY`; that sentence was wrong and is corrected there.
+        //
+        // Anything else — a lost device, an out-of-memory — is a real error and is returned as one.
+        if result != VkResult::SUCCESS && result != VkResult::NOT_READY {
+            return Err(VulkanError::Vk("vkGetQueryPoolResults", result));
+        }
+
+        let mask = self.device_caps().timestamp_mask();
+        for i in 0..pair_count as usize {
+            // Pair `i` is queries `2i` (begin) and `2i + 1` (end); each query is two words.
+            let begin_word = i * 2 * WORDS_PER_QUERY;
+            let end_word = begin_word + WORDS_PER_QUERY;
+            let both_available = scratch[begin_word + 1] != 0 && scratch[end_word + 1] != 0;
+            if !both_available {
+                out_available[i] = 0;
+                out_begin_ticks[i] = 0;
+                out_dur_ticks[i] = 0;
+                continue;
+            }
+            let begin = scratch[begin_word] & mask;
+            let end = scratch[end_word] & mask;
+            out_available[i] = 1;
+            out_begin_ticks[i] = begin;
+            out_dur_ticks[i] = end.wrapping_sub(begin) & mask;
+        }
+        Ok(())
+    }
+
+    /// The `vkGetQueryPoolResults` FFI call itself (VG R3 piece 4 rung P4-1), shared by
+    /// [`Self::fetch_query_pair_ticks`] and [`Self::fetch_query_pair_stamps`]: host-waits +
+    /// reads `query_count` raw timestamps from `pool` into `scratch[0..query_count]`, UNMASKED
+    /// and UNCOMPACTED.
+    ///
+    /// Extracted so the pair-compacting reader and the begin-offset reader share one FFI call
+    /// and one `is_success()` contract instead of two spellings that can drift.
+    ///
+    /// # Panics
+    ///
+    /// `debug_assert`s that `query_count` fits both `pool.count` and `scratch`.
+    fn fetch_query_raw_ticks(
+        &self,
+        pool: &VulkanQueryPool,
+        query_count: u32,
+        scratch: &mut [u64],
+    ) -> Result<(), VulkanError> {
+        debug_assert!(
+            query_count <= pool.count,
+            "invariant: the requested query count must fit the pool's query count"
+        );
+        debug_assert!(
+            scratch.len() >= query_count as usize,
+            "invariant: scratch must hold query_count raw timestamps"
+        );
+
+        // SAFETY: `device` is live; `pool.pool` is a live TIMESTAMP pool whose `[0..query_count)`
+        // queries were reset + written this frame (caller contract, after `wait_fence`);
+        // `scratch.as_mut_ptr()` names `query_count` `u64` slots (asserted above) — `data_size`
+        // is exactly that many bytes and `stride` is 8 (one `u64` per query). `64_BIT | WAIT_BIT`
+        // reads each result as a 64-bit value, blocking until it is available. NULL is not passed.
+        let raw = unsafe {
+            (self.device_fns().get_query_pool_results)(
+                self.device(),
+                pool.pool,
+                0,
+                query_count,
+                (query_count as usize) * 8,
+                scratch.as_mut_ptr().cast::<c_void>(),
+                8,
+                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        // `WAIT_BIT` makes the call return ONLY once every requested query is available, so the sole
+        // success code here is `VK_SUCCESS`; the positive non-error `VK_NOT_READY`/`VK_INCOMPLETE`
+        // (meaning an unwritten/partial query) cannot occur.
+        //
+        // CORRECTED at profiling rung 4: this comment used to add "which `is_success()` would also
+        // accept" of those two codes. It does not — `VkResult::is_success` is `self.0 == 0`, i.e.
+        // `VK_SUCCESS` alone, and `VK_NOT_READY` is 1. The claim was harmless HERE, because
+        // `WAIT_BIT` makes both codes unreachable, and that is exactly why it survived: a false
+        // statement about a branch nothing can take is never contradicted by a test. It was
+        // contradicted the moment a NON-blocking reader copied it — G2c's first clause failed with
+        // `VK_NOT_READY` treated as an error.
+        // Callers MUST read only WRITTEN (begin,end) pairs — an unwritten query would block this call
+        // forever and never reach here (the timing harnesses enforce this: the isolated smoke reads 1
+        // pair; the combined harness asserts all four passes active). So `is_success()` here is
+        // unambiguously a fully-available result.
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkGetQueryPoolResults", result));
+        }
+        Ok(())
+    }
+
+    /// The shared body of [`RhiDevice::read_query_pool_ns`] and
+    /// [`RhiDevice::read_query_pool_ticks`]: host-waits + reads `2 * pair_count` raw timestamps
+    /// from `pool` ([`Self::fetch_query_raw_ticks`]) and COMPACTS them in place into
+    /// `scratch[0..pair_count]` as masked tick deltas. The two public readers differ only in what
+    /// they do with those integers (scale to ns, or copy out), so the `vkGetQueryPoolResults` FFI
+    /// call and the mask/wrap arithmetic exist exactly once.
+    ///
+    /// # Why the in-place compaction is sound
+    ///
+    /// Pair `i` reads `scratch[2i]`/`scratch[2i+1]` and writes `scratch[i]`. Since `i <= 2i` for
+    /// every `i >= 0` and the loop runs in ASCENDING `i`, slot `i` was already consumed at step
+    /// `floor(i/2) <= i` before this step overwrites it. No input is destroyed before it is read,
+    /// so the caller needs no second buffer.
+    ///
+    /// # Panics
+    ///
+    /// `debug_assert`s that `2 * pair_count` fits both `pool.count` and `scratch`.
+    fn fetch_query_pair_ticks(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+    ) -> Result<(), VulkanError> {
+        self.fetch_query_raw_ticks(pool, pair_count * 2, scratch)?;
+
+        // Mask each raw timestamp to the queue family's valid bits BEFORE subtracting (high
+        // bits above the valid width are hardware garbage). The `wrapping_sub` + post-subtraction
+        // mask handles a counter wrap across the pair.
+        let mask = self.device_caps().timestamp_mask();
+        for i in 0..pair_count as usize {
+            let begin = scratch[2 * i] & mask;
+            let end = scratch[2 * i + 1] & mask;
+            scratch[i] = end.wrapping_sub(begin) & mask;
+        }
+        Ok(())
+    }
+
+    /// The body of [`RhiDevice::read_query_pool_pairs_ns`] (VG R3 piece 4 rung P4-1): the same
+    /// FFI read as [`Self::fetch_query_pair_ticks`], but emitting BOTH halves of each pair into
+    /// two caller-owned slices instead of compacting the deltas over the raw stamps.
+    ///
+    /// `out_dur_ns[i]` is computed from the SAME masked integer delta
+    /// (`(end & mask).wrapping_sub(begin & mask) & mask`) scaled by the SAME `f64`
+    /// `timestampPeriod`, so it is bit-for-bit what [`RhiDevice::read_query_pool_ns`] produces
+    /// for the same pool contents — the property `GpuSceneBundles::read_vb_bench_ns`'s
+    /// dev-profile dual read asserts on every bench frame.
+    ///
+    /// `out_begin_ns[i]` is pair `i`'s begin stamp as an offset from pair 0's begin stamp
+    /// (`base`), under the same mask/wrap arithmetic. Writing into two SEPARATE out slices means
+    /// the in-place aliasing question [`Self::fetch_query_pair_ticks`] has to reason about does
+    /// not arise here at all: `scratch` is read, never written.
+    ///
+    /// # Panics
+    ///
+    /// `debug_assert`s that `pair_count > 0` (pair 0's begin IS the base), that `2 * pair_count`
+    /// fits both `pool.count` and `scratch`, and that both out slices hold `pair_count` values.
+    fn fetch_query_pair_stamps(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+        out_begin_ns: &mut [f64],
+        out_dur_ns: &mut [f64],
+    ) -> Result<(), VulkanError> {
+        debug_assert!(pair_count > 0, "invariant: the base offset is pair 0's begin stamp");
+        debug_assert!(
+            out_begin_ns.len() >= pair_count as usize,
+            "invariant: out_begin_ns must hold pair_count offsets"
+        );
+        debug_assert!(
+            out_dur_ns.len() >= pair_count as usize,
+            "invariant: out_dur_ns must hold pair_count durations"
+        );
+        self.fetch_query_raw_ticks(pool, pair_count * 2, scratch)?;
+
+        let mask = self.device_caps().timestamp_mask();
+        let period = self.device_caps().timestamp_period as f64;
+        // Pair 0's begin is the frame's base stamp (the verb's CALLER CONTRACT: it must be the
+        // earliest-recorded stamp, else its offset wraps to ~2^timestampValidBits rather than
+        // going negative — a caller is expected to reject such a sample, not to scale it).
+        let base = scratch[0] & mask;
+        for i in 0..pair_count as usize {
+            let begin = scratch[2 * i] & mask;
+            let end = scratch[2 * i + 1] & mask;
+            out_begin_ns[i] = (begin.wrapping_sub(base) & mask) as f64 * period;
+            out_dur_ns[i] = (end.wrapping_sub(begin) & mask) as f64 * period;
+        }
+        Ok(())
+    }
+
+    /// The shared graphics-pipeline builder (textured-PBR T6c, plan Decision D5): builds the
+    /// `VkPipelineLayout` from `desc.bind_group_layout` at set 0 plus, when `set1` is `Some`,
+    /// a SECOND raw `VkDescriptorSetLayout` at set 1 (FRAGMENT-visible — the caller passes
+    /// [`crate::bindless::VulkanBindlessSet::set_layout`] directly, no wrapper type), then
+    /// builds the rest of the pipeline state exactly as before. `set1: None` is the path
+    /// EVERY existing caller (`RhiDevice::create_graphics_pipeline`) takes — the produced
+    /// `VkPipelineLayoutCreateInfo` is BYTE-IDENTICAL to the pre-T6c single-set (or zero-set)
+    /// layout: `set_layout_count`/`p_set_layouts[0]`/the push range are computed the SAME way,
+    /// just from a 3-element inline array instead of a scalar local (the driver reads only the
+    /// first `set_layout_count` entries either way, so the extra unread slots are inert). This
+    /// fn is the SOLE body `create_graphics_pipeline`, [`Self::create_graphics_pipeline_bindless`],
+    /// AND (multi-paradigm render-path plan, rung R4b-b) [`Self::create_graphics_pipeline_forward`]
+    /// call — a shared code path, not a `None`-gated branch, so every pre-T6c/pre-R4b-b pipeline's
+    /// layout is untouched BY CONSTRUCTION.
+    ///
+    /// Rung R4b-b boot-panic fix: an earlier revision of this fn took a THIRD `set2` parameter so
+    /// `forward_opaque.fs.hlsl`'s (then Set-2) shadow bindings could sit past an empty Set-1
+    /// placeholder. That placeholder was a ZERO-BINDING [`BindGroupLayoutDesc`], which
+    /// [`RhiDevice::create_bind_group_layout`]'s own `1..=MAX_BIND_GROUP_BINDINGS` invariant
+    /// REJECTS — a real `GpuSceneBundles::boot` panic (`debug_assert!` in `create_bind_group_layout`,
+    /// `device.rs:205`), caught post-implementation. The shader's shadow bindings were renumbered
+    /// to Set 1 instead (`forward_opaque.fs.hlsl`'s doc), so Forward is a plain 2-set
+    /// `[Set0, Set1]` pipeline — the SAME shape [`Self::create_graphics_pipeline_bindless`]
+    /// already builds, no placeholder needed. `set2` was removed; `set1` now serves BOTH the
+    /// bindless texture set (T6c) AND Forward's shadow set (R4b-b) — two DIFFERENT call sites,
+    /// never both at once.
+    ///
+    /// `depth_compare` (rung R4b-b): the depth-test compare op, `VK_COMPARE_OP_LESS` for every
+    /// pre-R4b-b caller (Deferred's custom-linear depth, nearer = smaller `z`) or
+    /// `VK_COMPARE_OP_GREATER` for Forward's hardware reverse-Z (Decision 4, nearer = larger `z`).
+    ///
+    /// `push_stages`: the `stageFlags` of the push-constant range (ignored when
+    /// `desc.push_constant_bytes == 0`), a non-empty subset of `VERTEX | FRAGMENT`. It must name
+    /// every stage whose shader reads the push block, and every recorder must push with exactly
+    /// it (`VUID-vkCmdPushConstants-offset-01796`), which is why the pipeline carries it as
+    /// [`VulkanGraphicsPipeline::push_stages`].
+    fn build_graphics_pipeline(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+        set1: Option<VkDescriptorSetLayout>,
+        depth_compare: i32,
+        depth_write: bool,
+        push_stages: VkFlags,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
         let device = self.device();
         let fns = self.device_fns();
 
@@ -885,34 +1647,59 @@ impl RhiDevice<Vulkan> for VulkanContext {
         //     when `desc.bind_group_layout` is `Some`, so a `bind_descriptor_set` can
         //     bind a matching group before the sampling draw; `None` keeps the
         //     rungs-2..4 no-descriptor path byte-identical (count 0, null array).
+        //     Textured-PBR T6c ADDS an optional SECOND set (`set1`) — see this fn's doc.
         //     Created first; if pipeline creation fails below, it is torn down before
         //     the error returns (reverse-order rollback). The `push_range` +
-        //     `set_layout` locals must outlive the create call, so they are bound
+        //     `set_layouts` locals must outlive the create call, so they are bound
         //     here (the layout-info pointers below reference them). ---
-        // The push range spans `VERTEX | FRAGMENT`: every existing graphics shader pushes from the
-        // VERTEX stage only (the gbuffer/cascade/spot pipelines), and a fragment stage that declares
-        // no push block simply ignores the range — so widening the visibility is byte-neutral for
-        // them. The Shadow Phase 5 Inc-2 POINT depth FS (`punctual_depth.fs`) READS the `cam_eye@64`
-        // lane (`light_pos`/`inv_range`), which requires the range to cover `FRAGMENT`. Push-constant
-        // stage flags are part of the pipeline LAYOUT, not the recorded command stream, and the
-        // recorders keep pushing with `VK_SHADER_STAGE_VERTEX_BIT` (a subset), so the rendered output
-        // of every pre-Inc-2 pipeline is unchanged (the 0%-gate holds).
+        // The push range's visibility is the caller's `push_stages`. Most builders pass
+        // `GRAPHICS_PUSH_STAGES_DEFAULT` (`VERTEX | FRAGMENT`): the Shadow Phase 5 Inc-2 POINT depth
+        // FS (`punctual_depth.fs`) READS the `cam_eye@64` lane, and a stage that declares no push
+        // block simply ignores the range; their recorders push `VERTEX | FRAGMENT`. A recorder may
+        // NOT push a subset of the range's stages (VUID-vkCmdPushConstants-offset-01796), so a
+        // pipeline whose recorder pushes one stage is built with exactly that stage: the particle
+        // billboard (VERTEX: only `particle_draw.vs` reads the block) and the fullscreen AA passes
+        // (FRAGMENT: `fullscreen_sample.vs` declares no push block).
+        let has_push = desc.push_constant_bytes > 0;
+        debug_assert!(
+            !has_push
+                || (push_stages != 0 && push_stages & !GRAPHICS_PUSH_STAGES_DEFAULT == 0),
+            "invariant: a graphics push range is visible to a non-empty subset of VERTEX | FRAGMENT"
+        );
         let push_range = VkPushConstantRange {
-            stage_flags: VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            stage_flags: push_stages,
             offset: 0,
             size: desc.push_constant_bytes,
         };
-        let has_push = desc.push_constant_bytes > 0;
-        let set_layout = desc
+        let set0 = desc
             .bind_group_layout
             .map_or(VkDescriptorSetLayout::NULL, |bgl| bgl.set_layout);
-        let has_set = desc.bind_group_layout.is_some();
+        let has_set0 = desc.bind_group_layout.is_some();
+        // Textured-PBR T6c (D5) / rung R4b-b: a set-1-only layout (skipping set 0) is not a
+        // shape this engine ever needs — both `set1` callers (the TEXTURED raster pipeline's
+        // bindless set, Forward's shadow set) always declare set 0 too.
+        debug_assert!(
+            set1.is_none() || has_set0,
+            "invariant: a set-1 pipeline layout always also declares set 0"
+        );
+        // `set_layout_count` is EXACTLY `u32::from(has_set0)` when `set1` is `None` (the
+        // byte-identical value `create_graphics_pipeline`'s pre-T6c code computed) or `2` when
+        // `set1` is `Some` (T6c's textured pipeline OR R4b-b's Forward pipeline). The array
+        // always holds both slots; the driver reads only the first `set_layout_count` of them.
+        let set_layouts: [VkDescriptorSetLayout; 2] =
+            [set0, set1.unwrap_or(VkDescriptorSetLayout::NULL)];
+        let set_layout_count: u32 = if set1.is_some() { 2 } else { u32::from(has_set0) };
+        let has_any_set = set_layout_count > 0;
         let pl_info = VkPipelineLayoutCreateInfo {
             s_type: VkStructureType::PipelineLayoutCreateInfo,
             p_next: ptr::null(),
             flags: 0,
-            set_layout_count: u32::from(has_set),
-            p_set_layouts: if has_set { &set_layout } else { ptr::null() },
+            set_layout_count,
+            p_set_layouts: if has_any_set {
+                set_layouts.as_ptr()
+            } else {
+                ptr::null()
+            },
             push_constant_range_count: u32::from(has_push),
             p_push_constant_ranges: if has_push {
                 &push_range
@@ -922,12 +1709,13 @@ impl RhiDevice<Vulkan> for VulkanContext {
         };
         let mut layout = VkPipelineLayout::NULL;
         // SAFETY: `device` is live; `pl_info` is fully initialized with either zero
-        // descriptor sets (null array valid for count 0) or one set pointing at the
-        // `set_layout` local (the caller's live bind-group set-layout, alive for this
-        // whole fn) when `has_set`, and either zero push ranges (null array valid for
-        // count 0) or one range pointing at the `push_range` local (alive for this
-        // whole fn) when `has_push`; `&mut layout` is a valid out-pointer; NULL
-        // allocator.
+        // descriptor sets (null array valid for count 0) or `set_layout_count` sets
+        // pointing at the live `set_layouts` inline array (alive for this whole fn) — slot
+        // 0 the caller's live bind-group set-layout when `has_set0`, slot 1 the caller's
+        // live bindless set-layout (T6c) or Forward's shadow set-layout (R4b-b) when
+        // `set1.is_some()` — and either zero push ranges (null array valid for count 0) or
+        // one range pointing at the `push_range` local (alive for this whole fn) when
+        // `has_push`; `&mut layout` is a valid out-pointer; NULL allocator.
         let raw =
             unsafe { (fns.create_pipeline_layout)(device, &pl_info, ptr::null(), &mut layout) };
         let result = VkResult::from_raw(raw);
@@ -1180,20 +1968,28 @@ impl RhiDevice<Vulkan> for VulkanContext {
         };
 
         // Depth-stencil state (Phase-6 S0 rung 4). Declared ONLY when a depth format
-        // is present: depth test + write enabled, compare op LESS (nearer fragment
-        // wins), no depth-bounds, no stencil. A `None` `depth_format` (rungs 1..3)
-        // leaves both the depth-stencil pointer null and `depth_attachment_format`
-        // UNDEFINED, so the rung-2/3 no-depth pipelines stay byte-identical. The
-        // `depth_state` local must outlive the create call, so it is bound here. The
-        // agnostic `Format` discriminant equals the `VkFormat` constant (asserted in
-        // `abi_guard.rs`); `VK_COMPARE_OP_LESS` is the FFI constant.
+        // is present: depth test enabled, compare op `depth_compare` (`LESS` for
+        // every Deferred/CSM/atlas caller — nearer fragment wins; `GREATER` for Forward's
+        // hardware reverse-Z, rung R4b-b Decision 4 — nearer fragment has the LARGER stored
+        // depth; `EQUAL` for ForwardPlus's zero-overdraw `forward_opaque` pass, rung R5), no
+        // depth-bounds, no stencil. `depth_write` (rung R5) is `true` for every pre-R5 caller
+        // (byte-identical `VK_TRUE`) and `false` ONLY for the ForwardPlus `forward_opaque`
+        // variant, which relies entirely on `depth_prepass`'s own GREATER+write-ON pass to
+        // have already committed the final depth value — an EQUAL test with writes disabled
+        // costs no depth bandwidth and cannot perturb the prepass-owned value. A `None`
+        // `depth_format` (rungs 1..3) leaves both the depth-stencil pointer null and
+        // `depth_attachment_format` UNDEFINED, so the rung-2/3 no-depth pipelines stay
+        // byte-identical. The `depth_state` local must outlive the create call, so it is
+        // bound here. The agnostic `Format` discriminant equals the `VkFormat` constant
+        // (asserted in `abi_guard.rs`); `VK_COMPARE_OP_LESS`/`VK_COMPARE_OP_GREATER`/
+        // `VK_COMPARE_OP_EQUAL` are the FFI constants.
         let depth_state = VkPipelineDepthStencilStateCreateInfo {
             s_type: VkStructureType::PipelineDepthStencilStateCreateInfo,
             p_next: ptr::null(),
             flags: 0,
             depth_test_enable: VK_TRUE,
-            depth_write_enable: VK_TRUE,
-            depth_compare_op: VK_COMPARE_OP_LESS,
+            depth_write_enable: if depth_write { VK_TRUE } else { VK_FALSE },
+            depth_compare_op: depth_compare,
             depth_bounds_test_enable: VK_FALSE,
             stencil_test_enable: VK_FALSE,
             front: VkStencilOpState::default(),
@@ -1317,268 +2113,581 @@ impl RhiDevice<Vulkan> for VulkanContext {
             return Err(VulkanError::Vk("vkCreateGraphicsPipelines", result));
         }
 
-        Ok(VulkanGraphicsPipeline { pipeline, layout })
+        Ok(VulkanGraphicsPipeline {
+            pipeline,
+            layout,
+            push_stages: if has_push { push_stages } else { 0 },
+        })
     }
 
-    unsafe fn destroy_graphics_pipeline(&self, pipeline: VulkanGraphicsPipeline) {
-        // SAFETY: both handles were created on this device by
-        // `create_graphics_pipeline`, no submission using the pipeline is pending
-        // (caller contract), and the by-value move destroys each exactly once.
-        // Reverse creation order: the pipeline (created last) is destroyed before its
-        // dedicated empty layout (created first).
-        unsafe {
-            (self.device_fns().destroy_pipeline)(self.device(), pipeline.pipeline, ptr::null());
-            (self.device_fns().destroy_pipeline_layout)(
-                self.device(),
-                pipeline.layout,
-                ptr::null(),
-            );
+    /// Textured-PBR T6c (plan Decision D5): builds a 2-set graphics pipeline — set 0 exactly
+    /// as `desc.bind_group_layout` declares (the TEXTURED raster's `PerInstanceMaterialTex`
+    /// SSBO layout, VERTEX), set 1 = `set1_layout` (the bindless texture-array set's raw
+    /// `VkDescriptorSetLayout`, FRAGMENT-visible —
+    /// [`crate::bindless::VulkanBindlessSet::set_layout`]). A Vulkan-only, ADDITIVE inherent
+    /// method: `boyko_rhi::GraphicsPipelineDesc` itself is UNCHANGED (no new field), so every
+    /// one of its existing construction sites across the workspace (other gbuffer/CSM/UI/test
+    /// pipelines) needs no edit and takes the untouched [`Self::build_graphics_pipeline`]`(desc,
+    /// None)` path via `RhiDevice::create_graphics_pipeline`.
+    pub fn create_graphics_pipeline_bindless(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+        set1_layout: VkDescriptorSetLayout,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        self.build_graphics_pipeline(
+            desc,
+            Some(set1_layout),
+            VK_COMPARE_OP_LESS,
+            true,
+            GRAPHICS_PUSH_STAGES_DEFAULT,
+        )
+    }
+
+    /// Multi-paradigm render-path plan, rung R4b-b (Set 0 unified at rung R5): builds plain
+    /// `Forward`'s mesh raster pipeline — set 0 exactly as `desc.bind_group_layout` declares
+    /// (the UNIFIED Forward-family 7-binding core set: instances/instance_materials/Camera/
+    /// LightBuf/Materials/ClusterGrid/LightIndexList — this base FS references only the first 5,
+    /// a subset, the SAME idiom `forward_sky_pipeline` uses), set 1 =
+    /// `set1_layout` (the CSM + punctual-atlas shadow set, `forward_opaque.fs.hlsl`'s Set 1 —
+    /// renumbered from an original Set 2 design: with no bindless texture table this v1 rung,
+    /// Set 1 is free, so the pipeline layout is a plain 2-set `[Set0, Set1]`, the SAME shape
+    /// [`Self::create_graphics_pipeline_bindless`] builds; a `set2`-with-empty-set1-placeholder
+    /// shape was tried first and rejected — `RhiDevice::create_bind_group_layout`'s own
+    /// `1..=MAX_BIND_GROUP_BINDINGS` invariant forbids a zero-binding layout, which crashed
+    /// `GpuSceneBundles::boot`, `build_graphics_pipeline`'s doc). Depth-tests
+    /// `VK_COMPARE_OP_GREATER` (Decision 4: hardware reverse-Z — a nearer fragment has the LARGER
+    /// stored depth), unlike every other graphics pipeline in this engine (`VK_COMPARE_OP_LESS`,
+    /// Deferred's custom-linear depth). A Vulkan-only, ADDITIVE inherent method (the
+    /// [`Self::create_graphics_pipeline_bindless`] precedent): `boyko_rhi::GraphicsPipelineDesc`
+    /// itself is UNCHANGED (no new field), so every pre-existing pipeline construction site
+    /// across the workspace needs no edit.
+    pub fn create_graphics_pipeline_forward(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+        set1_layout: VkDescriptorSetLayout,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        self.build_graphics_pipeline(
+            desc,
+            Some(set1_layout),
+            VK_COMPARE_OP_GREATER,
+            true,
+            GRAPHICS_PUSH_STAGES_DEFAULT,
+        )
+    }
+
+    /// Particles P0 (`docs/PARTICLES-PLAN.md` D7): builds the additive billboard draw pipeline —
+    /// set 0 = `desc.bind_group_layout` (`{ StructuredBuffer<ParticleRender> @0, Camera cbuffer
+    /// @1 }`, the VERTEX half's own vocabulary), set 1 = `set1_layout` (the shared bindless
+    /// `Texture2D[]` + sampler set the FRAGMENT half samples through), and a `VERTEX`-stage push
+    /// range of `desc.push_constant_bytes` — the 2-set shape
+    /// [`Self::create_graphics_pipeline_bindless`] already establishes.
+    ///
+    /// The push range is VERTEX-only, not the default `VERTEX | FRAGMENT`, because only
+    /// `particle_draw.vs` declares the push block (`particle_draw.fs` reads none) and the recorder
+    /// pushes with [`VulkanGraphicsPipeline::push_stages`]; a range naming FRAGMENT too would make
+    /// that VERTEX push invalid (`VUID-vkCmdPushConstants-offset-01796`).
+    ///
+    /// # Why the compare op is a PARAMETER and the depth write is not
+    ///
+    /// `depth_compare` is caller-supplied because it is the ONE piece of this pipeline that is a
+    /// property of the RENDER PATH rather than of particles: `VK_COMPARE_OP_LESS` under Deferred
+    /// (custom-linear depth) and `VK_COMPARE_OP_GREATER` under Forward / ForwardPlus /
+    /// VisibilityBuffer (hardware reverse-Z). It is resolved ONCE at boot from
+    /// `ResolvedRenderPath`, so exactly one `VkPipeline` exists per process — a wrong value here
+    /// inverts occlusion, and no automated image gate would see it (plan gate #12 is an
+    /// owner-eval screenshot per path for exactly that reason).
+    ///
+    /// `depth_write` is hardcoded `false` and is NOT a parameter, because it is a property of the
+    /// BLEND CLASS and not of the path: additive fragments must not occlude each other, on any
+    /// path. Depth TESTING stays on (`build_graphics_pipeline` hardcodes `depth_test_enable`), so
+    /// opaque geometry still occludes the billboards. Making it a knob would let a caller
+    /// construct the one combination — additive with depth writes — that this plan's
+    /// "P0 ships unsorted, provably" argument does not survive.
+    pub fn create_graphics_pipeline_particle(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+        set1_layout: VkDescriptorSetLayout,
+        depth_compare: i32,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        self.build_graphics_pipeline(
+            desc,
+            Some(set1_layout),
+            depth_compare,
+            false,
+            VK_SHADER_STAGE_VERTEX_BIT,
+        )
+    }
+
+    /// Builds a pipeline exactly as [`RhiDevice::create_graphics_pipeline`] does — set 0 only,
+    /// `VK_COMPARE_OP_LESS`, depth write on — except that its push-constant range is visible to the
+    /// FRAGMENT stage only.
+    ///
+    /// For the fullscreen anti-aliasing passes (FXAA, and SMAA's edge / weight / blend): their
+    /// vertex shader, `fullscreen_sample.vs`, declares no push block, and their fragment shaders
+    /// read the whole range (`rt_metrics` / the FXAA texel size). The recorders push with
+    /// [`VulkanGraphicsPipeline::push_stages`], and `VUID-vkCmdPushConstants-offset-01796`
+    /// requires a push to name every stage of each range it overlaps — so a default
+    /// `VERTEX | FRAGMENT` range would make their FRAGMENT push invalid, and widening the push
+    /// instead would declare a VERTEX read no shader makes.
+    pub fn create_graphics_pipeline_fragment_push(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        debug_assert!(
+            desc.push_constant_bytes > 0,
+            "invariant: a FRAGMENT-push pipeline declares a push range"
+        );
+        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_LESS, true, VK_SHADER_STAGE_FRAGMENT_BIT)
+    }
+
+    /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): builds the `depth_prepass`
+    /// pipeline — a DEPTH-ONLY pipeline (`desc.color_formats` empty, zero color attachments;
+    /// `build_graphics_pipeline`'s existing CSM/atlas depth-only shape, the SAME one
+    /// `RhiDevice::create_graphics_pipeline` already builds for the cascade/spot-atlas depth
+    /// passes) with set 0 ONLY (`desc.bind_group_layout`, reused from
+    /// [`Self::create_graphics_pipeline_forward`]'s own `forward_layout0` — the prepass VS
+    /// references only its `instances` binding, a subset of that layout, the SAME
+    /// bound-but-unread-subset idiom `forward_sky_pipeline` already relies on) — no set 1.
+    /// `VK_COMPARE_OP_GREATER` (Decision 4, hardware reverse-Z) with depth WRITE ON: this pass
+    /// is `forward_opaque`'s sole depth producer under `ForwardPlus`, committing the final
+    /// per-pixel depth before any color work runs.
+    pub fn create_graphics_pipeline_forward_prepass(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_GREATER, true, GRAPHICS_PUSH_STAGES_DEFAULT)
+    }
+
+    /// Builds the Forward sky BACKGROUND pipeline (`forward_sky.{vs,fs}.hlsl`): a 1-set pipeline
+    /// (set 0 = `desc.bind_group_layout`) that DECLARES the forward scope's depth format but
+    /// neither rejects nor writes a fragment through it — `VK_COMPARE_OP_ALWAYS` with depth write
+    /// OFF, observationally identical to no depth test at all.
+    ///
+    /// The sky draws inside `forward_opaque`'s dynamic-rendering scope, which always binds
+    /// `forward_depth`. A pipeline whose `depthAttachmentFormat` is `UNDEFINED` may be drawn in a
+    /// scope that HAS a depth attachment only with `VK_EXT_dynamic_rendering_unused_attachments`
+    /// (VUID-vkCmdDraw-dynamicRenderingUnusedAttachments-08914), which this engine does not
+    /// enable; declaring the format keeps the draw legal without a new device requirement or a
+    /// second rendering scope per frame.
+    ///
+    /// `desc.depth_format` must therefore be `Some` — the scope's own depth format.
+    pub fn create_graphics_pipeline_forward_sky(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        debug_assert!(
+            desc.depth_format.is_some(),
+            "invariant: the sky pipeline declares the forward scope's depth format (VUID-08914)"
+        );
+        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_ALWAYS, false, GRAPHICS_PUSH_STAGES_DEFAULT)
+    }
+
+    /// Multi-paradigm render-path plan, rung R8: builds the `vb_raster` mesh id-raster pipeline
+    /// (Decision 9) — a 1-set pipeline (set 0 ONLY, `desc.bind_group_layout` = `vb_layout0`; its
+    /// VS references only `gVbInstances`/the push, a bound-but-unread subset — the SAME idiom
+    /// [`Self::create_graphics_pipeline_forward_prepass`] already establishes for its own 1-set
+    /// depth-only pipeline). `VK_COMPARE_OP_GREATER` (Decision 4, hardware reverse-Z) with depth
+    /// WRITE ON: `vb_raster` is the SOLE depth producer for the VB path (mirrors
+    /// `create_graphics_pipeline_forward`'s own reverse-Z contract for `forward_opaque`).
+    ///
+    /// UNLIKE `create_graphics_pipeline_forward_prepass` this pipeline is NOT depth-only —
+    /// `desc.color_formats` carries the `vb_id` `R32G32_UINT` color attachment
+    /// (`build_graphics_pipeline` itself is agnostic to color-attachment count; the two builders
+    /// differ only in which pass's caller supplies a non-empty `color_formats`) — a SEPARATE,
+    /// precisely-named wrapper rather than reusing the prepass one so a reader is never misled
+    /// by a "prepass"-named builder producing `vb_raster_pipeline`.
+    pub fn create_graphics_pipeline_vb_raster(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_GREATER, true, GRAPHICS_PUSH_STAGES_DEFAULT)
+    }
+
+    /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): builds the `forward_opaque`
+    /// FROXEL pipeline variant — the SAME 2-set `[Set0, Set1]` shape
+    /// [`Self::create_graphics_pipeline_forward`] builds (`set1_layout` = the UNCHANGED
+    /// CSM/punctual shadow set), but `VK_COMPARE_OP_EQUAL` with depth WRITE OFF (Decision 4's
+    /// EQUAL-depth zero-overdraw contract): `depth_prepass` already committed the final depth
+    /// this frame, so `forward_opaque` under `ForwardPlus` only TESTS against it — a fragment
+    /// survives iff its interpolated depth exactly matches the prepass-written value, letting
+    /// hardware early-Z reject every occluded fragment before the froxel-culled inline shade
+    /// runs. `desc.bind_group_layout` is the UNIFIED 7-binding `forward_layout0` (declares
+    /// `ClusterGrid`/`LightIndexList` at bindings 5/6) — the SAME layout object
+    /// [`Self::create_graphics_pipeline_forward`] builds its pipeline against (rung R5
+    /// code-review fix: exactly ONE Set-0 layout for the whole Forward family, since Vulkan
+    /// treats two structurally-identical-but-distinct `VkDescriptorSetLayout` handles as
+    /// pipeline/descriptor-set INCOMPATIBLE — never two separate layout objects for one
+    /// descriptor set).
+    pub fn create_graphics_pipeline_forward_plus(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+        set1_layout: VkDescriptorSetLayout,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        self.build_graphics_pipeline(
+            desc,
+            Some(set1_layout),
+            VK_COMPARE_OP_EQUAL,
+            false,
+            GRAPHICS_PUSH_STAGES_DEFAULT,
+        )
+    }
+
+    /// Multi-paradigm render-path plan, rung R-SDFFWD: builds a 2-set COMPUTE pipeline — Set 0 =
+    /// `desc.bind_group_layout` (REQUIRED; unlike [`RhiDevice::create_compute_pipeline`]'s
+    /// optional `None` = device-shared fallback, a 2-set compute pipeline always owns a dedicated
+    /// layout), Set 1 = `set1_layout` (a layout built elsewhere and reused verbatim — the SAME
+    /// "one physical descriptor set shared by two Vulkan pipelines" idiom
+    /// [`Self::create_graphics_pipeline_forward`] already establishes on the graphics side; the
+    /// `sdf_forward_march` compute pass's OWN Set 1 is `GBufferScene::forward_layout1`, the
+    /// Forward-family shadow set reused verbatim by BOTH the `HAS_MESH` and mesh-less compute
+    /// pipeline variants).
+    ///
+    /// Mirrors [`RhiDevice::create_compute_pipeline`]'s dedicated-layout push-range sizing (the
+    /// FULL `COMPUTE_PUSH_CONSTANT_RANGE_BYTES` shared budget, regardless of `desc
+    /// .push_constant_bytes`'s own smaller size — a pipeline may use fewer bytes than its layout
+    /// declares) and [`Self::build_graphics_pipeline`]'s 2-set `p_set_layouts`/`set_layout_count`
+    /// construction, specialized to a single COMPUTE stage (no vertex input / rasterization
+    /// state, no specialization constants — this pass's two variants are separate compiled SPIR-V
+    /// modules, not one spec-constant-branched module).
+    ///
+    /// **Contract on `set1_layout`:** every binding of `set1_layout` the shader reads must include
+    /// `COMPUTE` in its `stageFlags` (VUID-VkComputePipelineCreateInfo-layout-07988). A layout
+    /// shared with a graphics pipeline therefore carries `FRAGMENT | COMPUTE`, as
+    /// `GBufferScene::forward_layout1` does.
+    pub fn create_compute_pipeline_forward(
+        &self,
+        desc: &ComputePipelineDesc<Vulkan>,
+        set1_layout: VkDescriptorSetLayout,
+    ) -> Result<ComputePipeline, VulkanError> {
+        if desc.push_constant_bytes == 0
+            || !desc.push_constant_bytes.is_multiple_of(4)
+            || desc.push_constant_bytes > COMPUTE_PUSH_CONSTANT_RANGE_BYTES
+        {
+            return Err(VulkanError::Unsupported(
+                "push_constant_bytes must be a multiple of 4 within the shared compute push range",
+            ));
         }
-    }
-
-    fn create_fence(&self, signaled: bool) -> Result<VulkanFence, VulkanError> {
-        let fence_info = VkFenceCreateInfo {
-            s_type: VkStructureType::FenceCreateInfo,
-            p_next: ptr::null(),
-            // `VK_FENCE_CREATE_SIGNALED_BIT` == 0x1.
-            flags: if signaled { 0x0000_0001 } else { 0 },
+        let bgl = desc.bind_group_layout.expect(
+            "invariant: create_compute_pipeline_forward always builds a dedicated 2-set layout \
+             (Set 0 is required, unlike create_compute_pipeline's optional device-shared fallback)",
+        );
+        let set_layouts = [bgl.set_layout, set1_layout];
+        let push_range = VkPushConstantRange {
+            stage_flags: VK_SHADER_STAGE_COMPUTE_BIT,
+            offset: 0,
+            size: COMPUTE_PUSH_CONSTANT_RANGE_BYTES,
         };
-        let mut fence = VkFence::NULL;
-        // SAFETY: `device` is live; `fence_info` is fully initialized; `&mut
-        // fence` is a valid out-pointer; NULL allocator.
-        let raw = unsafe {
-            (self.device_fns().create_fence)(self.device(), &fence_info, ptr::null(), &mut fence)
-        };
-        let result = VkResult::from_raw(raw);
-        if !result.is_success() {
-            return Err(VulkanError::Vk("vkCreateFence", result));
-        }
-        Ok(VulkanFence { fence })
-    }
-
-    unsafe fn destroy_fence(&self, fence: VulkanFence) {
-        // SAFETY: `fence.fence` was created on this device, is not pending (caller
-        // contract), and the by-value move destroys it exactly once.
-        unsafe { (self.device_fns().destroy_fence)(self.device(), fence.fence, ptr::null()) };
-    }
-
-    fn wait_fence(&self, fence: &VulkanFence, timeout_ns: u64) -> Result<(), VulkanError> {
-        // SAFETY: `device` is live; `&fence.fence` names one live fence;
-        // `wait_all = VK_TRUE` blocks until it is signaled (or the timeout
-        // elapses). After this returns `Ok` the submission that signals it has
-        // completed — the fence-before-readback discipline.
-        let raw = unsafe {
-            (self.device_fns().wait_for_fences)(
-                self.device(),
-                1,
-                &fence.fence,
-                VK_TRUE,
-                timeout_ns,
-            )
-        };
-        let result = VkResult::from_raw(raw);
-        if !result.is_success() {
-            return Err(VulkanError::Vk("vkWaitForFences", result));
-        }
-        Ok(())
-    }
-
-    fn reset_fence(&self, fence: &VulkanFence) -> Result<(), VulkanError> {
-        // SAFETY: `device` is live; `&fence.fence` names one live fence to reset
-        // to unsignaled (no submission referencing it is pending — caller resets
-        // only after a `wait_fence`).
-        let raw =
-            unsafe { (self.device_fns().reset_fences)(self.device(), 1, &fence.fence) };
-        let result = VkResult::from_raw(raw);
-        if !result.is_success() {
-            return Err(VulkanError::Vk("vkResetFences", result));
-        }
-        Ok(())
-    }
-
-    fn create_query_pool(&self, desc: &QueryPoolDesc) -> Result<VulkanQueryPool, VulkanError> {
-        debug_assert!(desc.count > 0, "invariant: a query pool needs >= 1 query");
-        let create_info = VkQueryPoolCreateInfo {
-            s_type: VkStructureType::QueryPoolCreateInfo,
+        let pl_info = VkPipelineLayoutCreateInfo {
+            s_type: VkStructureType::PipelineLayoutCreateInfo,
             p_next: ptr::null(),
             flags: 0,
-            query_type: VK_QUERY_TYPE_TIMESTAMP,
-            query_count: desc.count,
-            // A TIMESTAMP pool sets no pipeline-statistics flags.
-            pipeline_statistics: 0,
+            set_layout_count: 2,
+            p_set_layouts: set_layouts.as_ptr(),
+            push_constant_range_count: 1,
+            p_push_constant_ranges: &push_range,
         };
-        let mut pool = VkQueryPool::NULL;
-        // SAFETY: `device` is live; `create_info` is fully initialized (a TIMESTAMP pool of
-        // `count` queries); `&mut pool` is a valid out-pointer; NULL allocator. The queries
-        // are UNDEFINED at creation — the caller resets them before the first write.
+        let mut pipeline_layout = VkPipelineLayout::NULL;
+        // SAFETY: `self.device()` is live; `pl_info` is fully initialized referencing the
+        // `set_layouts` local (both the caller's live Set-0 vocabulary layout and the live Set-1
+        // shadow layout, alive for this whole fn) + the `push_range` local (alive for this whole
+        // fn); `&mut pipeline_layout` is a valid out-pointer; NULL allocator.
         let raw = unsafe {
-            (self.device_fns().create_query_pool)(self.device(), &create_info, ptr::null(), &mut pool)
+            (self.device_fns().create_pipeline_layout)(
+                self.device(),
+                &pl_info,
+                ptr::null(),
+                &mut pipeline_layout,
+            )
         };
         let result = VkResult::from_raw(raw);
         if !result.is_success() {
-            return Err(VulkanError::Vk("vkCreateQueryPool", result));
+            return Err(VulkanError::Vk("vkCreatePipelineLayout(compute-forward)", result));
         }
-        Ok(VulkanQueryPool { pool, count: desc.count })
-    }
 
-    unsafe fn destroy_query_pool(&self, pool: VulkanQueryPool) {
-        // SAFETY: `pool.pool` was created on this device, no submission writing/reading it is
-        // pending (caller contract), and the by-value move destroys it exactly once.
-        unsafe { (self.device_fns().destroy_query_pool)(self.device(), pool.pool, ptr::null()) };
-    }
-
-    fn read_query_pool_ns(
-        &self,
-        pool: &VulkanQueryPool,
-        pair_count: u32,
-        scratch: &mut [u64],
-        out_ns: &mut [f64],
-    ) -> Result<(), VulkanError> {
-        let query_count = pair_count * 2;
-        debug_assert!(
-            query_count <= pool.count,
-            "invariant: 2 * pair_count must fit the pool's query count"
-        );
-        debug_assert!(
-            scratch.len() >= query_count as usize,
-            "invariant: scratch must hold 2 * pair_count raw timestamps"
-        );
-        debug_assert!(
-            out_ns.len() >= pair_count as usize,
-            "invariant: out_ns must hold pair_count ns values"
-        );
-
-        // SAFETY: `device` is live; `pool.pool` is a live TIMESTAMP pool whose `[0..query_count)`
-        // queries were reset + written this frame (caller contract, after `wait_fence`);
-        // `scratch.as_mut_ptr()` names `query_count` `u64` slots (asserted above) — `data_size`
-        // is exactly that many bytes and `stride` is 8 (one `u64` per query). `64_BIT | WAIT_BIT`
-        // reads each result as a 64-bit value, blocking until it is available. NULL is not passed.
+        let stage = VkPipelineShaderStageCreateInfo {
+            s_type: VkStructureType::PipelineShaderStageCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            stage: VK_SHADER_STAGE_COMPUTE_BIT,
+            module: desc.module.module,
+            p_name: desc.entry.as_ptr(),
+            p_specialization_info: ptr::null(),
+        };
+        let cp_info = VkComputePipelineCreateInfo {
+            s_type: VkStructureType::ComputePipelineCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            stage,
+            layout: pipeline_layout,
+            base_pipeline_handle: VkPipeline::NULL,
+            base_pipeline_index: -1,
+        };
+        let mut pipeline = VkPipeline::NULL;
+        // SAFETY: `self.device()` is live; null pipeline cache (`0`) is valid; one create-info is
+        // fully initialized, referencing the live shader module + the just-created dedicated
+        // `pipeline_layout`; `&mut pipeline` is a valid out-pointer for the single pipeline; NULL
+        // allocator. The module is owned by the caller's `VulkanShaderModule`, alive for this call.
         let raw = unsafe {
-            (self.device_fns().get_query_pool_results)(
+            (self.device_fns().create_compute_pipelines)(
                 self.device(),
-                pool.pool,
                 0,
-                query_count,
-                (query_count as usize) * 8,
-                scratch.as_mut_ptr().cast::<c_void>(),
-                8,
-                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT,
+                1,
+                &cp_info,
+                ptr::null(),
+                &mut pipeline,
             )
         };
         let result = VkResult::from_raw(raw);
-        // `WAIT_BIT` makes the call return ONLY once every requested query is available, so the sole
-        // success code here is `VK_SUCCESS`; the positive non-error `VK_NOT_READY`/`VK_INCOMPLETE`
-        // (which `is_success()` would also accept, meaning an unwritten/partial query) cannot occur.
-        // Callers MUST read only WRITTEN (begin,end) pairs — an unwritten query would block this call
-        // forever and never reach here (the timing harnesses enforce this: the isolated smoke reads 1
-        // pair; the combined harness asserts all four passes active). So `is_success()` here is
-        // unambiguously a fully-available result.
         if !result.is_success() {
-            return Err(VulkanError::Vk("vkGetQueryPoolResults", result));
+            // SAFETY: `pipeline_layout` was just created on this device above and is not yet
+            // owned by any pipeline (this create failed); destroying it once here prevents a leak
+            // on this error path.
+            unsafe {
+                (self.device_fns().destroy_pipeline_layout)(
+                    self.device(),
+                    pipeline_layout,
+                    ptr::null(),
+                )
+            };
+            return Err(VulkanError::from(ComputeError::VkError("vkCreateComputePipelines", result)));
         }
+        Ok(ComputePipeline { pipeline, layout: pipeline_layout, owns_layout: true })
+    }
 
-        // Mask each raw timestamp to the queue family's valid bits BEFORE subtracting (high
-        // bits above the valid width are hardware garbage), then × `timestampPeriod`. The
-        // `wrapping_sub` + post-subtraction mask handles a counter wrap across the pair.
-        let caps = self.device_caps();
-        let mask = caps.timestamp_mask();
-        let period = caps.timestamp_period as f64;
-        for i in 0..pair_count as usize {
-            let begin = scratch[2 * i] & mask;
-            let end = scratch[2 * i + 1] & mask;
-            let ticks = end.wrapping_sub(begin) & mask;
-            out_ns[i] = ticks as f64 * period;
+    /// Multi-paradigm render-path plan, rung R8: builds a 3-set COMPUTE pipeline for the `vb_resolve`
+    /// FUSED pass — Set 0 = `desc.bind_group_layout` (REQUIRED, the VB-only core+images vocabulary,
+    /// `vb_layout0`), Set 1 = `set1_layout` (`GBufferScene::forward_layout1`, the Forward-family
+    /// shadow set, REUSED VERBATIM — the SAME idiom [`Self::create_compute_pipeline_forward`]
+    /// already establishes), Set 2 = `set2_layout` (the Decision-0 geometry table's OWN Set,
+    /// `MeshGeometryTable::set().set_layout()`). Otherwise a byte-for-byte mirror of
+    /// [`Self::create_compute_pipeline_forward`]'s push-range sizing + pipeline-layout/pipeline
+    /// construction, widened from 2 to 3 set layouts.
+    ///
+    /// **Contract on `set1_layout`:** every binding of `set1_layout` the shader reads must include
+    /// `COMPUTE` in its `stageFlags` (VUID-VkComputePipelineCreateInfo-layout-07988) — the
+    /// Forward-family shadow set is shared with graphics pipelines and carries
+    /// `FRAGMENT | COMPUTE` for exactly this reason.
+    pub fn create_compute_pipeline_vb(
+        &self,
+        desc: &ComputePipelineDesc<Vulkan>,
+        set1_layout: VkDescriptorSetLayout,
+        set2_layout: VkDescriptorSetLayout,
+    ) -> Result<ComputePipeline, VulkanError> {
+        if desc.push_constant_bytes == 0
+            || !desc.push_constant_bytes.is_multiple_of(4)
+            || desc.push_constant_bytes > COMPUTE_PUSH_CONSTANT_RANGE_BYTES
+        {
+            return Err(VulkanError::Unsupported(
+                "push_constant_bytes must be a multiple of 4 within the shared compute push range",
+            ));
         }
-        Ok(())
-    }
-
-    // ===== HW-RT ACCELERATION-STRUCTURE VERBS (rung R2a-1; `feature="hwrt"` overrides) =====
-    // Each delegates to a `crate::accel` inherent helper (the real `vkGet*`/`vkCreate*` FFI).
-    // Present ONLY under `hwrt`; a default build inherits the `#[cold]` erroring defaults.
-
-    #[cfg(feature = "hwrt")]
-    fn get_acceleration_structure_build_sizes(
-        &self,
-        kind: boyko_rhi::AsKind,
-        geometry: &boyko_rhi::AsGeometryDesc,
-    ) -> Result<boyko_rhi::AsBuildSizes, VulkanError> {
-        self.build_sizes(kind, geometry)
-    }
-
-    #[cfg(feature = "hwrt")]
-    fn create_acceleration_structure(
-        &self,
-        kind: boyko_rhi::AsKind,
-        buffer: &BoundBuffer,
-        size: u64,
-    ) -> Result<crate::accel::BoundAccelStruct, VulkanError> {
-        self.create_accel(kind, buffer.buffer, size)
-    }
-
-    #[cfg(feature = "hwrt")]
-    fn get_acceleration_structure_device_address(
-        &self,
-        accel: &crate::accel::BoundAccelStruct,
-    ) -> Result<u64, VulkanError> {
-        self.accel_device_address(accel)
-    }
-
-    #[cfg(feature = "hwrt")]
-    fn get_buffer_device_address(&self, buffer: &BoundBuffer) -> Result<u64, VulkanError> {
-        self.buffer_device_address(buffer.buffer)
-    }
-
-    #[cfg(feature = "hwrt")]
-    unsafe fn destroy_acceleration_structure(&self, accel: crate::accel::BoundAccelStruct) {
-        // SAFETY: the RhiDevice contract — the GPU is no longer using `accel` (caller
-        // fence-waited/`wait_idle`'d) and it is destroyed once (by-value move).
-        unsafe { self.destroy_accel(accel) };
-    }
-
-    fn create_command_encoder(&self) -> Result<VulkanCommandEncoder, VulkanError> {
-        let layouts = self.compute_layouts()?;
-        // SAFETY: the device is live; `layouts` are this device's shared compute
-        // layouts; the encoder takes a raw pointer to this context's `DeviceFns`
-        // (which outlives any encoder built from `&self`).
-        let enc = unsafe {
-            VulkanCommandEncoder::new(
+        let bgl = desc.bind_group_layout.expect(
+            "invariant: create_compute_pipeline_vb always builds a dedicated 3-set layout \
+             (Set 0 is required, unlike create_compute_pipeline's optional device-shared fallback)",
+        );
+        let set_layouts = [bgl.set_layout, set1_layout, set2_layout];
+        let push_range = VkPushConstantRange {
+            stage_flags: VK_SHADER_STAGE_COMPUTE_BIT,
+            offset: 0,
+            size: COMPUTE_PUSH_CONSTANT_RANGE_BYTES,
+        };
+        let pl_info = VkPipelineLayoutCreateInfo {
+            s_type: VkStructureType::PipelineLayoutCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            set_layout_count: 3,
+            p_set_layouts: set_layouts.as_ptr(),
+            push_constant_range_count: 1,
+            p_push_constant_ranges: &push_range,
+        };
+        let mut pipeline_layout = VkPipelineLayout::NULL;
+        // SAFETY: `self.device()` is live; `pl_info` is fully initialized referencing the
+        // `set_layouts` local (the caller's live Set-0 VB vocabulary layout, the live Set-1
+        // shadow layout, and the live Set-2 geometry-table layout, all alive for this whole fn)
+        // + the `push_range` local (alive for this whole fn); `&mut pipeline_layout` is a valid
+        // out-pointer; NULL allocator.
+        let raw = unsafe {
+            (self.device_fns().create_pipeline_layout)(
                 self.device(),
-                self.device_fns() as *const DeviceFns,
-                self.queue_family_index(),
-                layouts.set_layout,
-                layouts.pipeline_layout,
+                &pl_info,
+                ptr::null(),
+                &mut pipeline_layout,
             )
         };
-        // HW-RT rung R2a-1: wire the AS command table (a raw pointer into this context, which
-        // outlives the encoder) so `cmd_build_acceleration_structures` can reach the FFI; null
-        // when ray query is off. No-op on a non-hwrt build.
-        #[cfg(feature = "hwrt")]
-        let enc = enc.map(|mut e| {
-            let p = self
-                .accel_fns_opt()
-                .map_or(ptr::null(), |f| f as *const crate::accel::AccelFns);
-            e.set_accel_fns(p);
-            e
-        });
-        enc
-    }
-
-    unsafe fn destroy_command_encoder(&self, enc: VulkanCommandEncoder) {
-        // SAFETY: `enc` was created on this device, its last submission has
-        // completed (caller contract), and the by-value move destroys it exactly
-        // once. `destroy` tears down the descriptor pool + command pool (which
-        // frees the set + command buffer) in reverse order.
-        unsafe { enc.destroy(self.device(), self.device_fns()) };
-    }
-
-    fn wait_idle(&self) -> Result<(), VulkanError> {
-        // SAFETY: `device` is live; `vkDeviceWaitIdle` blocks until every queue is
-        // idle — the belt-and-braces teardown sync (plan W4).
-        let raw = unsafe { (self.device_fns().device_wait_idle)(self.device()) };
         let result = VkResult::from_raw(raw);
         if !result.is_success() {
-            return Err(VulkanError::Vk("vkDeviceWaitIdle", result));
+            return Err(VulkanError::Vk("vkCreatePipelineLayout(compute-vb)", result));
         }
-        Ok(())
+
+        let stage = VkPipelineShaderStageCreateInfo {
+            s_type: VkStructureType::PipelineShaderStageCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            stage: VK_SHADER_STAGE_COMPUTE_BIT,
+            module: desc.module.module,
+            p_name: desc.entry.as_ptr(),
+            p_specialization_info: ptr::null(),
+        };
+        let cp_info = VkComputePipelineCreateInfo {
+            s_type: VkStructureType::ComputePipelineCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            stage,
+            layout: pipeline_layout,
+            base_pipeline_handle: VkPipeline::NULL,
+            base_pipeline_index: -1,
+        };
+        let mut pipeline = VkPipeline::NULL;
+        // SAFETY: `self.device()` is live; null pipeline cache (`0`) is valid; one create-info is
+        // fully initialized, referencing the live shader module + the just-created dedicated
+        // `pipeline_layout`; `&mut pipeline` is a valid out-pointer for the single pipeline; NULL
+        // allocator. The module is owned by the caller's `VulkanShaderModule`, alive for this call.
+        let raw = unsafe {
+            (self.device_fns().create_compute_pipelines)(
+                self.device(),
+                0,
+                1,
+                &cp_info,
+                ptr::null(),
+                &mut pipeline,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            // SAFETY: `pipeline_layout` was just created on this device above and is not yet
+            // owned by any pipeline (this create failed); destroying it once here prevents a leak
+            // on this error path.
+            unsafe {
+                (self.device_fns().destroy_pipeline_layout)(
+                    self.device(),
+                    pipeline_layout,
+                    ptr::null(),
+                )
+            };
+            return Err(VulkanError::from(ComputeError::VkError("vkCreateComputePipelines", result)));
+        }
+        Ok(ComputePipeline { pipeline, layout: pipeline_layout, owns_layout: true })
+    }
+
+    /// Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3 / `docs/VB-P2-CLASSIFICATION-PLAN.md`):
+    /// builds a 4-set COMPUTE pipeline for the `vb_shade` TEXTURED variant (`vb_shade_tex.comp.spv`,
+    /// `-D TEXTURED=1`) — Set 0 = `desc.bind_group_layout` (REQUIRED, `vb_layout0`, the SAME layout
+    /// object the base `vb_shade`/`vb_resolve` pipelines are built against — R5, a textured frame
+    /// binds a DIFFERENT descriptor SET instance against this SAME layout object, never a second
+    /// layout), Set 1 = `set1_layout` (`GBufferScene::forward_layout1`, the Forward-family shadow
+    /// set, REUSED VERBATIM), Set 2 = `set2_layout` (the Decision-0 geometry table's OWN Set), Set 3
+    /// = `set3_layout` (the shared bindless texture-array table — the SAME layout object
+    /// `gbuffer_mrt.fs.hlsl`'s TEXTURED variant binds, `BindlessTextureTable::set().set_layout()`).
+    /// Otherwise a byte-for-byte mirror of [`Self::create_compute_pipeline_vb`]'s push-range
+    /// sizing and pipeline-layout/pipeline construction, widened from 3 to 4 set layouts.
+    /// Vulkan's guaranteed `maxBoundDescriptorSets` floor is exactly 4
+    /// (`DeviceCaps::max_bound_descriptor_sets`'s own doc — `MeshGeometryTable::new` already
+    /// `debug_assert!`s this at construction for every `VisibilityBuffer`-resolved boot, textured
+    /// or not), so no additional floor check is needed here.
+    ///
+    /// **Contract on `set1_layout`:** every binding of `set1_layout` the shader reads must include
+    /// `COMPUTE` in its `stageFlags` (VUID-VkComputePipelineCreateInfo-layout-07988), as for
+    /// [`Self::create_compute_pipeline_vb`].
+    pub fn create_compute_pipeline_vb_textured(
+        &self,
+        desc: &ComputePipelineDesc<Vulkan>,
+        set1_layout: VkDescriptorSetLayout,
+        set2_layout: VkDescriptorSetLayout,
+        set3_layout: VkDescriptorSetLayout,
+    ) -> Result<ComputePipeline, VulkanError> {
+        if desc.push_constant_bytes == 0
+            || !desc.push_constant_bytes.is_multiple_of(4)
+            || desc.push_constant_bytes > COMPUTE_PUSH_CONSTANT_RANGE_BYTES
+        {
+            return Err(VulkanError::Unsupported(
+                "push_constant_bytes must be a multiple of 4 within the shared compute push range",
+            ));
+        }
+        let bgl = desc.bind_group_layout.expect(
+            "invariant: create_compute_pipeline_vb_textured always builds a dedicated 4-set layout \
+             (Set 0 is required, unlike create_compute_pipeline's optional device-shared fallback)",
+        );
+        let set_layouts = [bgl.set_layout, set1_layout, set2_layout, set3_layout];
+        let push_range = VkPushConstantRange {
+            stage_flags: VK_SHADER_STAGE_COMPUTE_BIT,
+            offset: 0,
+            size: COMPUTE_PUSH_CONSTANT_RANGE_BYTES,
+        };
+        let pl_info = VkPipelineLayoutCreateInfo {
+            s_type: VkStructureType::PipelineLayoutCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            set_layout_count: 4,
+            p_set_layouts: set_layouts.as_ptr(),
+            push_constant_range_count: 1,
+            p_push_constant_ranges: &push_range,
+        };
+        let mut pipeline_layout = VkPipelineLayout::NULL;
+        // SAFETY: `self.device()` is live; `pl_info` is fully initialized referencing the
+        // `set_layouts` local (the caller's live Set-0 VB vocabulary layout, the live Set-1 shadow
+        // layout, the live Set-2 geometry-table layout, and the live Set-3 bindless-texture layout,
+        // all alive for this whole fn) + the `push_range` local (alive for this whole fn); `&mut
+        // pipeline_layout` is a valid out-pointer; NULL allocator.
+        let raw = unsafe {
+            (self.device_fns().create_pipeline_layout)(
+                self.device(),
+                &pl_info,
+                ptr::null(),
+                &mut pipeline_layout,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkCreatePipelineLayout(compute-vb-textured)", result));
+        }
+
+        let stage = VkPipelineShaderStageCreateInfo {
+            s_type: VkStructureType::PipelineShaderStageCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            stage: VK_SHADER_STAGE_COMPUTE_BIT,
+            module: desc.module.module,
+            p_name: desc.entry.as_ptr(),
+            p_specialization_info: ptr::null(),
+        };
+        let cp_info = VkComputePipelineCreateInfo {
+            s_type: VkStructureType::ComputePipelineCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            stage,
+            layout: pipeline_layout,
+            base_pipeline_handle: VkPipeline::NULL,
+            base_pipeline_index: -1,
+        };
+        let mut pipeline = VkPipeline::NULL;
+        // SAFETY: `self.device()` is live; null pipeline cache (`0`) is valid; one create-info is
+        // fully initialized, referencing the live shader module + the just-created dedicated
+        // `pipeline_layout`; `&mut pipeline` is a valid out-pointer for the single pipeline; NULL
+        // allocator. The module is owned by the caller's `VulkanShaderModule`, alive for this call.
+        let raw = unsafe {
+            (self.device_fns().create_compute_pipelines)(
+                self.device(),
+                0,
+                1,
+                &cp_info,
+                ptr::null(),
+                &mut pipeline,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            // SAFETY: `pipeline_layout` was just created on this device above and is not yet
+            // owned by any pipeline (this create failed); destroying it once here prevents a leak
+            // on this error path.
+            unsafe {
+                (self.device_fns().destroy_pipeline_layout)(
+                    self.device(),
+                    pipeline_layout,
+                    ptr::null(),
+                )
+            };
+            return Err(VulkanError::from(ComputeError::VkError("vkCreateComputePipelines", result)));
+        }
+        Ok(ComputePipeline { pipeline, layout: pipeline_layout, owns_layout: true })
     }
 }

@@ -149,10 +149,20 @@ impl From<VulkanError> for RhiError {
                 | BootError::ViewtStorageFormatUnsupported
                 | BootError::GbufferColorAttachmentFormatUnsupported
                 | BootError::SsaoStorageFormatUnsupported
+                // T-dev: a device that cannot get the 5-bit bindless descriptor-indexing
+                // prerequisite enabled — same generic backend-boot-failure category as the
+                // format-unsupported device rejections above.
+                | BootError::BindlessUnsupported
                 // SDFDDGI I0: a device whose per-stage descriptor limits cannot satisfy the resolve
                 // set's actual per-type need — external input, projected as a generic backend boot
                 // failure (the same category as the format-unsupported device rejections above).
-                | BootError::ResolveDescriptorLimitExceeded { .. } => {
+                | BootError::ResolveDescriptorLimitExceeded { .. }
+                // A device missing a feature every boot enables — external input, the same
+                // category as the device rejections above.
+                | BootError::RequiredFeatureUnsupported(_)
+                // A device missing a subgroup property a committed shader relies on — external
+                // input, the same category.
+                | BootError::RequiredSubgroupPropertyUnsupported(_) => {
                     RhiError::BackendError("vulkan boot failed")
                 }
                 BootError::VkError(_cmd, result) => match result {

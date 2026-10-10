@@ -24,7 +24,7 @@ use super::sync::{BufBarrier, ImgBarrier};
 /// barriers are recorded, at worst one extra `vkCmdPipelineBarrier` per stage
 /// pair spanning a chunk boundary). The `debug_assert` still flags the headroom
 /// breach so the constant gets raised deliberately (audit B-010: the guard must
-/// not be debug-only — `declare_gbuffer_graph` grows two files away).
+/// not be debug-only — `declare_deferred_graph` grows two files away).
 pub const MAX_PASS_BARRIERS: usize = 16;
 
 /// A backend sink that RECORDS one batched sync1 `vkCmdPipelineBarrier` per call.

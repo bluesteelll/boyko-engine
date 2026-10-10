@@ -1,0 +1,99 @@
+# 1. Census of the resumed run (run_tag 033740)
+records 185: process records 140, passcell 37, pass_done 8, other 0
+- C4-CGU    passes closed [0, 1, 2]; process records 119 ({'warmup': 6, 'original': 90, 'rerun': 23}); driver-valid 119/119; driver-unclean timed 23; deepest re-run 2; 03:40:01 .. 03:58:16
+- C4-BR     passes closed [0]; process records 9 ({'original': 9}); driver-valid 9/9; driver-unclean timed 0; deepest re-run 0; 04:00:42 .. 04:26:12
+- C4-G4     passes closed [0, 1, 2]; process records 9 ({'original': 9}); driver-valid 9/9; driver-unclean timed 0; deepest re-run 0; 04:28:37 .. 05:38:37
+- C4-G4-kd  passes closed [0]; process records 3 ({'original': 3}); driver-valid 3/3; driver-unclean timed 0; deepest re-run 0; 05:41:02 .. 05:48:51
+timed processes 134 (originals 111, re-runs 23), warm-ups 6; window log counters say timed 134, rerun 23, warm 6
+sha256 = pin AND = SHA256SUMS on 140/140 process records; by binary {('tip', '8d6e7d41'): 61, ('tipcgu1', '3e1f72ba'): 58, ('g4rT', '19c9eb1f'): 15, ('g4r8b', 'b887850f'): 3, ('g4r7', 'f96a9c11'): 3}
+  file tip sha256 now 8d6e7d4173857ca8 pin 8d6e7d4173857ca8
+  file tipcgu1 sha256 now 3e1f72babf769872 pin 3e1f72babf769872
+  file g4r7 sha256 now f96a9c11ebd72d4d pin f96a9c11ebd72d4d
+  file g4r8b sha256 now b887850f38633d62 pin b887850f38633d62
+  file g4rT sha256 now 19c9eb1f67cc7285 pin 19c9eb1f67cc7285
+
+## independent validity, slots, K vs the driver
+C4-CGU: timed 113, independently invalid 0, unclean 23; slots used 90 (re-runs 20), dropped 0
+C4-BR : timed 9, invalid 0, unclean 0; used 9, dropped 0
+C4-G4   : timed 9, invalid 0 ([]), unclean 0; used 9, dropped 0
+C4-G4-kd: timed 3, invalid 0 ([]), unclean 0; used 3, dropped 0
+pass-cells 37: my K == driver k_clean on 37; short (K < 3) 0; K values {3: 37}
+
+## receipts of the used processes (median [min-max], %)
+- C4-CGU   before 1.15 [0.21-4.17], after 1.14 [0.21-3.75], witness 0.48 [0.00-1.95]
+- C4-BR    before 2.12 [0.52-3.00], after 2.12 [1.18-3.00], witness 1.22 [1.19-1.28]
+- C4-G4    before 2.12 [0.76-3.99], after 1.73 [0.61-3.99], witness 1.04 [0.98-1.06]
+- C4-G4-kd before 2.47 [2.32-2.71], after 2.32 [0.62-2.71], witness 1.23 [1.23-1.29]
+top other process on the 23 unclean timed processes: {'claude.exe': 23}
+
+## idle waits (wait_log.txt, starts at or after 03:37)
+resume idle waits 8; polls per wait [3, 3, 3, 3, 3, 3, 3, 3]; reached 8/8; D: free during the resume 107.79..107.79 GB
+WINDOW_DONE: exit 0 / complete / 2026-10-01T05:48:56.776+03:00 / counts exit 0 (raw/counts.txt)
+window_log end line: WINDOW END exit 0: complete; counters {'timed': 134, 'rerun': 23, 'warm': 6, 'voided_processes': 0}; binaries after all match
+aborted C4-BR attempt (run 191354): 8 process records, pass_done False -> excluded
+
+# 2. C4-CGU re-derivation (A = tip cgu16, B = tipcgu1; B/A < 1 = cgu1 faster)
+- 100..500 W1  A 4.3096 (n 9) B 4.2956 (n 9) B/A 0.9967 (-0.33 %) bars i 3.66 s 1.08 r 7.51; pooled nnn; p0 nnn p1 nnn p2 nnn -> NOT CLAIMED B<A
+- 100..500 W2  A 2.9569 (n 9) B 2.9725 (n 9) B/A 1.0053 (+0.53 %) bars i 4.05 s 1.30 r 9.68; pooled nnn; p0 nnn p1 nnn p2 nnn -> NOT CLAIMED B>A
+- 100..500 W4  A 2.2015 (n 9) B 2.1993 (n 9) B/A 0.9990 (-0.10 %) bars i 3.53 s 0.99 r 6.68; pooled nnn; p0 nnn p1 nnn p2 nnn -> NOT CLAIMED B<A
+- 100..500 W8  A 1.8884 (n 9) B 1.8699 (n 9) B/A 0.9903 (-0.97 %) bars i 11.22 s 2.78 r 16.77; pooled nnn; p0 nnn p1 nnn p2 nnn -> NOT CLAIMED B<A
+- 100..500 W16 A 2.1576 (n 9) B 2.1705 (n 9) B/A 1.0060 (+0.60 %) bars i 10.18 s 2.51 r 15.84; pooled nnn; p0 nnn p1 nnn p2 nnn -> NOT CLAIMED B>A
+- 0..500 W1  A 4.5499 (n 9) B 4.5132 (n 9) B/A 0.9919 (-0.81 %) bars i 2.99 s 0.97 r 6.92; pooled nnn; p0 nnn p1 nnn p2 nnn -> NOT CLAIMED B<A
+- 0..500 W2  A 3.0922 (n 9) B 3.0954 (n 9) B/A 1.0010 (+0.10 %) bars i 3.41 s 1.14 r 8.86; pooled nnn; p0 nnn p1 nnn p2 nnn -> NOT CLAIMED B>A
+- 0..500 W4  A 2.2706 (n 9) B 2.2764 (n 9) B/A 1.0026 (+0.26 %) bars i 2.70 s 0.91 r 6.13; pooled nnn; p0 nnn p1 nnn p2 nnn -> NOT CLAIMED B>A
+- 0..500 W8  A 1.9269 (n 9) B 1.9331 (n 9) B/A 1.0032 (+0.32 %) bars i 9.86 s 2.67 r 19.35; pooled nnn; p0 nnn p1 nnn p2 nnn -> NOT CLAIMED B>A
+- 0..500 W16 A 2.1885 (n 9) B 2.2116 (n 9) B/A 1.0105 (+1.05 %) bars i 8.42 s 2.43 r 16.11; pooled nnn; p0 nnn p1 nnn p2 nnn -> NOT CLAIMED B>A
+CGU-PROFILE ([100,500)): cgu1 claimed faster at W8 = False; claimed slower at W none -> profile moves to cgu 1: NO
+post hoc paired (same pass+round, used slots) n 45: geomean cgu1/cgu16 0.9996; cgu1 faster in 21
+  W1  n 9 median 0.9937, cgu1 faster 7
+  W2  n 9 median 1.0009, cgu1 faster 3
+  W4  n 9 median 0.9988, cgu1 faster 5
+  W8  n 9 median 1.0022, cgu1 faster 3
+  W16 n 9 median 1.0002, cgu1 faster 3
+
+## post hoc cross-run: C4-CGU tip (033740) against C4-AB C4-JD#tip (191354), [100,500)
+- W1  AB n 1/3/3 -> CGU tip: 4.3504 -> 4.3096 (-0.94 %) pooled nnn, NOT CLAIMED; cgu1 against AB tip -1.26 %
+- W2  AB n 2/3/3 -> CGU tip: 2.9392 -> 2.9569 (+0.60 %) pooled nnn, NOT CLAIMED; cgu1 against AB tip +1.13 %
+- W4  AB n 1/3/3 -> CGU tip: 2.1605 -> 2.2015 (+1.90 %) pooled nnn, NOT CLAIMED; cgu1 against AB tip +1.80 %
+- W8  AB n 1/3/3 -> CGU tip: 1.7878 -> 1.8884 (+5.62 %) pooled nYn, NOT CLAIMED; cgu1 against AB tip +4.60 %
+- W16 AB n 3/3/3 -> CGU tip: 2.0486 -> 2.1576 (+5.32 %) pooled nYn, NOT CLAIMED; cgu1 against AB tip +5.95 %
+
+# 3. C4-G4 re-derivation (A = tree, B = all_pairs; ratio > 1 = tree faster)
+- uniform 96: ap 5.966 tree 9.103 ratio 0.6553 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B<A
+- uniform 104: ap 7.008 tree 9.400 ratio 0.7455 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B<A
+- uniform 112: ap 8.046 tree 10.018 ratio 0.8031 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B<A
+- uniform 120: ap 9.205 tree 10.461 ratio 0.8800 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B<A
+- uniform 128: ap 11.274 tree 11.199 ratio 1.0067 pooled nnn p nnn/nnn/nnn sep False -> NOT CLAIMED B>A
+- uniform 136: ap 12.590 tree 11.991 ratio 1.0500 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B>A
+- uniform 144: ap 14.041 tree 12.577 ratio 1.1164 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B>A
+- uniform 152: ap 15.457 tree 13.129 ratio 1.1773 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B>A
+- uniform 160: ap 17.124 tree 13.681 ratio 1.2517 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B>A
+  uniform: LO 128 HI 136 monotone True
+- disparity 96: ap 7.126 tree 10.870 ratio 0.6555 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B<A
+- disparity 104: ap 8.110 tree 11.695 ratio 0.6935 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B<A
+- disparity 112: ap 9.294 tree 12.557 ratio 0.7402 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B<A
+- disparity 120: ap 10.579 tree 12.996 ratio 0.8140 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B<A
+- disparity 128: ap 13.466 tree 13.800 ratio 0.9758 pooled nYn p YYY/nnn/YYY sep True -> NOT CLAIMED B<A
+- disparity 136: ap 14.974 tree 14.211 ratio 1.0537 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B>A
+- disparity 144: ap 16.501 tree 15.288 ratio 1.0793 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B>A
+- disparity 152: ap 18.244 tree 16.196 ratio 1.1265 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B>A
+- disparity 160: ap 20.045 tree 16.843 ratio 1.1901 pooled YYY p YYY/YYY/YYY sep True -> CLAIMED STRONG B>A
+  disparity: LO 128 HI 136 monotone True
+recipe: T = min LO = 128; AUTO = (128, 136); edge fired False; provisional {'TREE_BRUTE_MAX_ROWS': 128, 'AUTO_TREE_LO': 128, 'AUTO_TREE_HI': 136} -> RE-READ, EQUAL to provisional
+window 7's LO 144: all_pairs claimed slower at 144 in ['uniform', 'disparity']
+
+# 4. C4-G4-kd (n 3, own block, cross-block against G4 pooled n 9; not gating)
+- uniform 96: kd 8.788; kd/tree 0.9653 YYn; kd/all_pairs 1.4730 YYY
+- uniform 112: kd 10.099; kd/tree 1.0081 nnn; kd/all_pairs 1.2553 YYY
+- uniform 128: kd 11.336; kd/tree 1.0123 YYn; kd/all_pairs 1.0055 nnn
+- disparity 96: kd 10.293; kd/tree 0.9469 YYn; kd/all_pairs 1.4445 YYY
+- disparity 112: kd 11.823; kd/tree 0.9416 YYn; kd/all_pairs 1.2721 YYY
+- disparity 128: kd 13.915; kd/tree 1.0083 nnn; kd/all_pairs 1.0333 YYn
+
+# 5. C4-BR re-derivation (K 3, one pass, diagnostic; ratio = B/A)
+- all_pairs g4r8b/g4r7: 1.1302 YYY sep 1.1184 YYY sep 1.1200 YYY sep 1.1145 YYY sep; median 1.1192
+- all_pairs g4rT/g4r7: 1.1289 YYY sep 1.1183 YYY sep 1.1239 YYY sep 1.1177 YYY sep; median 1.1211
+- all_pairs g4rT/g4r8b: 0.9988 nnn 1.0000 nnn 1.0035 nnn 1.0029 nnn; median 1.0014
+- tree      g4r8b/g4r7: 1.0093 nnn 0.9934 nnn 1.0218 YYY sep 1.0270 YYY sep; median 1.0155
+- tree      g4rT/g4r7: 1.0092 nnn 1.0038 nnn 1.0265 YYn sep 1.0239 nnn sep; median 1.0165
+- tree      g4rT/g4r8b: 0.9999 nnn 1.0105 nnn 1.0046 nnn 0.9970 nnn; median 1.0023

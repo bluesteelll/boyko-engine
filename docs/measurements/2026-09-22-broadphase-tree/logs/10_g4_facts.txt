@@ -1,0 +1,110 @@
+records 166 originals 156 reruns 10
+exit codes Counter({0: 166})
+valid 166 aborted 0
+first start 2026-09-22T03:48:22.340+03:00 last end 2026-09-22T07:54:31.967+03:00
+
+== contaminated/voided processes (original attempt) and their re-runs ==
+A k2 seq5 original bp_g4_uniform end 04:31:03 rb 1.92% ra 6.5% others 2.53% build_during [] top3_after [('claude.exe', 28700, 2.52), ('claude.exe', 28784, 2.48), ('claude.exe', 30548, 0.18)]
+B k1 seq13 original row_identity_churn/burst_migrate/sleeping_on_tree end 05:39:36 rb 1.41% ra 5.33% others 2.13% build_during [] top3_after [('claude.exe', 28784, 2.01), ('claude.exe', 28700, 1.41), ('claude.exe', 30548, 0.08)]
+B k1 seq17 original row_identity_churn/first_archetype_spawn/sleeping_on_tree end 05:43:30 rb 1.37% ra 9.54% others 2.18% build_during [] top3_after [('claude.exe', 28784, 0.49), ('claude.exe', 28700, 0.43), ('claude.exe', 34656, 0.18)]
+B k1 seq20 original row_identity_churn/archetype_shift/sleeping_on_allpairs end 05:46:32 rb 1.31% ra 5.3% others 2.34% build_during [] top3_after [('claude.exe', 28784, 2.58), ('claude.exe', 28700, 1.66), ('claude.exe', 30548, 0.29)]
+B k1 seq21 original row_identity_churn/swap_churn/sleeping_on_tree end 05:47:51 rb 1.74% ra 5.78% others 2.27% build_during [] top3_after [('claude.exe', 28784, 2.32), ('claude.exe', 28700, 1.82), ('claude.exe', 30548, 0.14)]
+B k1 seq23 original row_identity_churn/stable/sleeping_on_tree end 05:50:00 rb 1.31% ra 5.19% others 2.51% build_during [] top3_after [('claude.exe', 28784, 2.5), ('claude.exe', 28700, 1.45), ('claude.exe', 30548, 0.16)]
+B k1 seq24 original row_identity_churn/stable/sleeping_on_allpairs end 05:51:16 rb 1.5% ra 7.16% others 1.83% build_during [] top3_after [('claude.exe', 28784, 1.8), ('claude.exe', 28700, 1.72), ('RuntimeBroker.exe', 21356, 0.04)]
+B k1 seq29 original row_identity_churn/first_archetype_spawn/sleeping_off_tree end 05:56:10 rb 1.31% ra 6.68% others 2.46% build_during [] top3_after [('claude.exe', 28784, 2.83), ('claude.exe', 28700, 1.37), ('claude.exe', 30548, 0.51)]
+B k1 seq30 original row_identity_churn/first_archetype_spawn/sleeping_off_allpairs end 05:57:27 rb 0.72% ra 7.1% others 2.26% build_during [] top3_after [('claude.exe', 28784, 2.25), ('claude.exe', 28700, 1.41), ('powershell.exe', 20400, 0.45)]
+B k6 seq155 original row_identity_churn/burst_migrate/sleeping_on_allpairs end 07:43:33 rb 0.7% ra 5.85% others 0.26% build_during [] top3_after [('nvcontainer.exe', 8344, 3.18), ('claude.exe', 30548, 0.12), ('steamwebhelper.exe', 30596, 0.04)]
+
+== used processes 156 ==
+max receipt_before cpu_avg 4.67 max receipt_after 4.67
+others_busy_pct during: min 0.12 max 3.12
+build_procs_during any: False
+waited_s>0: [(6, 25.0), (13, 25.0), (14, 25.0), (18, 25.0), (21, 25.0), (22, 25.0), (24, 25.0), (25, 25.0), (30, 25.0), (31, 25.0), (156, 25.0)]
+
+== processes ended before the UI window was minimized (05:57:55) ==
+count 31 block A 13 block B seqs [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+others_busy_pct before-minimize: min 1.83 max 3.12
+after-minimize count 135 others_busy_pct min 0.12 max 1.18
+block A: 13 processes, wall_s sum 6233, first start 03:48:22, last end 05:35:56
+block B: 153 processes, wall_s sum 7019, first start 05:38:47, last end 07:54:31
+
+== structural receipts (distinct per group/cell across K; count of processes carrying each) ==
+cells with >1 distinct receipt line: ['bp_g4_maintenance/high_jumper/1240', 'bp_g4_maintenance/high_jumper/10000', 'bp_g4_maintenance/high_jumper/100000', 'row_identity_churn/stable/sleeping_off_tree', 'row_identity_churn/swap_churn/sleeping_off_tree', 'row_identity_churn/archetype_shift/sleeping_off_tree', 'row_identity_churn/first_archetype_spawn/sleeping_off_tree', 'row_identity_churn/burst_despawn/sleeping_off_tree', 'row_identity_churn/burst_migrate/sleeping_off_tree', 'row_identity_churn/stable/sleeping_on_tree', 'row_identity_churn/swap_churn/sleeping_on_tree', 'row_identity_churn/archetype_shift/sleeping_on_tree', 'row_identity_churn/first_archetype_spawn/sleeping_on_tree', 'row_identity_churn/burst_despawn/sleeping_on_tree', 'row_identity_churn/burst_migrate/sleeping_on_tree']
+  [13] bp_g4_disparity/1000: rows 1004 pairs 6706 tree members 0 static_rebuilds 0 wide 0 excluded 0
+  [13] bp_g4_disparity/10000: rows 10004 pairs 68605 tree members 0 static_rebuilds 0 wide 0 excluded 0
+  [13] bp_g4_disparity/100000: rows 100004 pairs 574763 tree members 0 static_rebuilds 0 wide 0 excluded 0
+  [13] bp_g4_disparity/128: rows 132 pairs 820 tree members 0 static_rebuilds 0 wide 0 excluded 0
+  [13] bp_g4_disparity/17: rows 21 pairs 104 tree members 0 static_rebuilds 0 wide 0 excluded 0
+  [13] bp_g4_disparity/256: rows 260 pairs 1670 tree members 0 static_rebuilds 0 wide 0 excluded 0
+  [13] bp_g4_disparity/64: rows 68 pairs 406 tree members 0 static_rebuilds 0 wide 0 excluded 0
+  [13] bp_g4_maintenance/admission_from_empty/10000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 10000; pairs 83149 (oracle ok)
+  [13] bp_g4_maintenance/admission_from_empty/100000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 100000; pairs 867834 (oracle ok)
+  [13] bp_g4_maintenance/admission_from_empty/1240: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 1240; pairs 9464 (oracle ok)
+  [13] bp_g4_maintenance/admission_of_64/10000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 10064; pairs 83509 (oracle ok)
+  [13] bp_g4_maintenance/admission_of_64/100000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 100064; pairs 868194 (oracle ok)
+  [13] bp_g4_maintenance/admission_of_64/1240: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 1304; pairs 9824 (oracle ok)
+  [13] bp_g4_maintenance/compaction/10000: timed step: evictions +1 translations +0 patches +0 static_rebuilds +1; members 5000; pairs 83149 (oracle ok)
+  [13] bp_g4_maintenance/compaction/100000: timed step: evictions +1 translations +0 patches +0 static_rebuilds +1; members 50000; pairs 867834 (oracle ok)
+  [13] bp_g4_maintenance/compaction/1240: timed step: evictions +1 translations +0 patches +0 static_rebuilds +1; members 620; pairs 9464 (oracle ok)
+  [13] bp_g4_maintenance/eviction_filter/10000: timed step: evictions +1 translations +0 patches +0 static_rebuilds +0; members 9999; pairs 83143 (oracle ok)
+  [13] bp_g4_maintenance/eviction_filter/100000: timed step: evictions +1 translations +0 patches +0 static_rebuilds +0; members 99999; pairs 867828 (oracle ok)
+  [13] bp_g4_maintenance/eviction_filter/1240: timed step: evictions +1 translations +0 patches +0 static_rebuilds +0; members 1239; pairs 9458 (oracle ok)
+  [13] bp_g4_maintenance/high_jumper/10000: the mover (row 5000) has 9 higher-row partners
+  [13] bp_g4_maintenance/high_jumper/10000: timed step: evictions +0 translations +1 patches +18 static_rebuilds +0; members 10000; pairs 83149 (oracle ok)
+  [13] bp_g4_maintenance/high_jumper/100000: the mover (row 50000) has 9 higher-row partners
+  [13] bp_g4_maintenance/high_jumper/100000: timed step: evictions +0 translations +1 patches +18 static_rebuilds +0; members 100000; pairs 867834 (oracle ok)
+  [13] bp_g4_maintenance/high_jumper/1240: the mover (row 620) has 9 higher-row partners
+  [13] bp_g4_maintenance/high_jumper/1240: timed step: evictions +0 translations +1 patches +18 static_rebuilds +0; members 1240; pairs 9464 (oracle ok)
+  [13] bp_g4_maintenance/shift_translation/10000: timed step: evictions +0 translations +1 patches +0 static_rebuilds +0; members 10000; pairs 83149 (oracle ok)
+  [13] bp_g4_maintenance/shift_translation/100000: timed step: evictions +0 translations +1 patches +0 static_rebuilds +0; members 100000; pairs 867834 (oracle ok)
+  [13] bp_g4_maintenance/shift_translation/1240: timed step: evictions +0 translations +1 patches +0 static_rebuilds +0; members 1240; pairs 9464 (oracle ok)
+  [13] bp_g4_maintenance/stable/10000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +0; members 10000; pairs 83149 (oracle ok)
+  [13] bp_g4_maintenance/stable/100000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +0; members 100000; pairs 867834 (oracle ok)
+  [13] bp_g4_maintenance/stable/1240: timed step: evictions +0 translations +0 patches +0 static_rebuilds +0; members 1240; pairs 9464 (oracle ok)
+  [13] bp_g4_scene/10000: rows 10001 pairs 83559 tree members 1 static_rebuilds 1 wide 0 excluded 0
+  [13] bp_g4_scene/100000: rows 100001 pairs 840494 tree members 1 static_rebuilds 1 wide 0 excluded 0
+  [13] bp_g4_scene/1240: rows 1241 pairs 9570 tree members 1 static_rebuilds 1 wide 0 excluded 0
+  [13] bp_g4_scene/j100: rows 1241 pairs 9564 tree members 1 static_rebuilds 1 wide 0 excluded 0
+  [13] bp_g4_uniform/1000: rows 1000 pairs 2400 tree members 0 static_rebuilds 0 wide 0 excluded 0
+  [13] bp_g4_uniform/10000: rows 10000 pairs 28599 tree members 0 static_rebuilds 0 wide 0 excluded 0
+  [13] bp_g4_uniform/100000: rows 100000 pairs 293501 tree members 0 static_rebuilds 0 wide 0 excluded 0
+  [13] bp_g4_uniform/128: rows 128 pairs 275 tree members 0 static_rebuilds 0 wide 0 excluded 0
+  [13] bp_g4_uniform/17: rows 17 pairs 30 tree members 0 static_rebuilds 0 wide 0 excluded 0
+  [13] bp_g4_uniform/256: rows 256 pairs 568 tree members 0 static_rebuilds 0 wide 0 excluded 0
+  [13] bp_g4_uniform/64: rows 64 pairs 141 tree members 0 static_rebuilds 0 wide 0 excluded 0
+  [153] row_identity_churn/archetype_shift/sleeping_off_allpairs: 4 churn steps built 4 maps and resolved 5 rows by stage 2
+  [153] row_identity_churn/archetype_shift/sleeping_off_tree: 4 churn steps built 4 maps and resolved 5 rows by stage 2
+  [153] row_identity_churn/archetype_shift/sleeping_off_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+  [153] row_identity_churn/archetype_shift/sleeping_on_allpairs: 4 churn steps built 4 maps and resolved 5 rows by stage 2
+  [153] row_identity_churn/archetype_shift/sleeping_on_tree: 4 churn steps built 4 maps and resolved 5 rows by stage 2
+  [153] row_identity_churn/archetype_shift/sleeping_on_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+  [153] row_identity_churn/burst_despawn/sleeping_off_allpairs: 4 churn steps built 4 maps and resolved 124 rows by stage 2
+  [153] row_identity_churn/burst_despawn/sleeping_off_tree: 4 churn steps built 4 maps and resolved 124 rows by stage 2
+  [153] row_identity_churn/burst_despawn/sleeping_off_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+  [153] row_identity_churn/burst_despawn/sleeping_on_allpairs: 4 churn steps built 4 maps and resolved 124 rows by stage 2
+  [153] row_identity_churn/burst_despawn/sleeping_on_tree: 4 churn steps built 4 maps and resolved 124 rows by stage 2
+  [153] row_identity_churn/burst_despawn/sleeping_on_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+  [153] row_identity_churn/burst_migrate/sleeping_off_allpairs: 4 churn steps built 4 maps and resolved 2546 rows by stage 2
+  [153] row_identity_churn/burst_migrate/sleeping_off_tree: 4 churn steps built 4 maps and resolved 2546 rows by stage 2
+  [153] row_identity_churn/burst_migrate/sleeping_off_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+  [153] row_identity_churn/burst_migrate/sleeping_on_allpairs: 4 churn steps built 4 maps and resolved 2546 rows by stage 2
+  [153] row_identity_churn/burst_migrate/sleeping_on_tree: 4 churn steps built 4 maps and resolved 2546 rows by stage 2
+  [153] row_identity_churn/burst_migrate/sleeping_on_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+  [153] row_identity_churn/first_archetype_spawn/sleeping_off_allpairs: 4 churn steps built 4 maps and resolved 2 rows by stage 2
+  [153] row_identity_churn/first_archetype_spawn/sleeping_off_tree: 4 churn steps built 4 maps and resolved 2 rows by stage 2
+  [153] row_identity_churn/first_archetype_spawn/sleeping_off_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+  [153] row_identity_churn/first_archetype_spawn/sleeping_on_allpairs: 4 churn steps built 4 maps and resolved 2 rows by stage 2
+  [153] row_identity_churn/first_archetype_spawn/sleeping_on_tree: 4 churn steps built 4 maps and resolved 2 rows by stage 2
+  [153] row_identity_churn/first_archetype_spawn/sleeping_on_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+  [153] row_identity_churn/stable/sleeping_off_allpairs: 4 churn steps built 0 maps and resolved 0 rows by stage 2
+  [153] row_identity_churn/stable/sleeping_off_tree: 4 churn steps built 0 maps and resolved 0 rows by stage 2
+  [153] row_identity_churn/stable/sleeping_off_tree: tree over the receipt: translations +0 evictions +0 patches +0; static_rebuilds 1 members 1
+  [153] row_identity_churn/stable/sleeping_on_allpairs: 4 churn steps built 0 maps and resolved 0 rows by stage 2
+  [153] row_identity_churn/stable/sleeping_on_tree: 4 churn steps built 0 maps and resolved 0 rows by stage 2
+  [153] row_identity_churn/stable/sleeping_on_tree: tree over the receipt: translations +0 evictions +0 patches +0; static_rebuilds 1 members 1
+  [153] row_identity_churn/swap_churn/sleeping_off_allpairs: 4 churn steps built 4 maps and resolved 4 rows by stage 2
+  [153] row_identity_churn/swap_churn/sleeping_off_tree: 4 churn steps built 4 maps and resolved 4 rows by stage 2
+  [153] row_identity_churn/swap_churn/sleeping_off_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1
+  [153] row_identity_churn/swap_churn/sleeping_on_allpairs: 4 churn steps built 4 maps and resolved 4 rows by stage 2
+  [153] row_identity_churn/swap_churn/sleeping_on_tree: 4 churn steps built 4 maps and resolved 4 rows by stage 2
+  [153] row_identity_churn/swap_churn/sleeping_on_tree: tree over the receipt: translations +4 evictions +0 patches +0; static_rebuilds 1 members 1

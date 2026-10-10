@@ -1,0 +1,3 @@
+﻿# wait_idle8.ps1 start 2026-09-27T18:42:10.2901307+03:00; poll every 1 s, max 1 polls; quiet = build procs 0 AND lane-target procs 0 AND cpu10 < 5 % AND 100 <= proc count <= 999; need 3 consecutive
+poll   1 2026-09-27T18:42:10.3018037+03:00 cpu10=2.58% procs=225 build_procs=0 [] lane_target_procs=0 [] D_free_GB=216.59 quiet=True streak=1 top3(cpu s in ~10s): claude(6456)=0.86s claude(16692)=0.78s powershell(23760)=0.31s
+# TIMEOUT: never idle after 1 polls at 2026-09-27T18:42:21.0961024+03:00

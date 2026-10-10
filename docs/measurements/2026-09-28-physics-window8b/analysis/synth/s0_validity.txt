@@ -1,0 +1,109 @@
+# Window 8b validity (synthesis re-derivation)
+2026-09-29T17:21:02.508+03:00 WINDOW START cutoff 2026-09-29T21:36:00 blocks ['S4-AB', 'S7-AB', 'SPLIT', 'omega-v2', 'F3', 'F3-G4', 'J-Son-T', 'DM1', 'omega-v1-cont'] test False resume False
+2026-09-29T21:09:20.793+03:00 WINDOW END exit 0: complete; counters {'timed': 894, 'rerun': 108, 'warm': 20, 'voided_processes': 0, 'r4_differ': 0}; binaries after all match
+window wall: 228.3 min
+
+## idle waits per pass (idle rule start -> idle reached)
+  S4-AB-p0                130.5 s
+  S4-AB-p1                130.5 s
+  S4-AB-p2                130.5 s
+  S7-AB-p0                130.5 s
+  S7-AB-p1                250.5 s
+  S7-AB-p2                130.4 s
+  SPLIT-p0                130.5 s
+  SPLIT-p1                130.5 s
+  SPLIT-p2                130.5 s
+  omega-v2-p0             190.5 s
+  omega-v2-p1             130.5 s
+  omega-v2-p2             490.5 s
+  F3-p0                   130.5 s
+  F3-p1                   130.5 s
+  F3-p2                   130.5 s
+  F3-G4-p0                130.5 s
+  J-Son-T-p0              130.4 s
+  J-Son-T-p1              130.5 s
+  J-Son-T-p2              130.5 s
+  DM1-p0                  130.5 s
+  omega-v1-cont-p0        130.5 s
+passes 21; wait min 130.4 / median 130.5 / max 490.5 s; sum 54.7 min; waits > 135 s: [('S7-AB-p1', 250), ('omega-v2-p0', 191), ('omega-v2-p2', 491)]
+voided_pass records: 0; pass_done records: 21
+R4 records: 171; verdicts Counter({'equal': 171})
+
+## per block: processes, validity, clean, slot rule
+S4-AB          timed  155 (orig 153, re-run   2), warm-ups 3, invalid mine 0 / driver 0 (disagree 0), unclean   2, slots 153, used 153 (re-runs  2), dropped  0; 17:23:29-17:44:44
+    cells 17; K per pass-cell {3: 51}; n per cell {9: 17}
+S7-AB          timed  173 (orig 171, re-run   2), warm-ups 3, invalid mine 0 / driver 0 (disagree 0), unclean   2, slots 171, used 171 (re-runs  2), dropped  0; 17:47:16-18:13:48
+    cells 19; K per pass-cell {3: 57}; n per cell {9: 19}
+SPLIT          timed   54 (orig  54, re-run   0), warm-ups 3, invalid mine 0 / driver 0 (disagree 0), unclean   0, slots  54, used  54 (re-runs  0), dropped  0; 18:16:19-18:27:04
+    cells 6; K per pass-cell {3: 18}; n per cell {9: 6}
+omega-v2       timed   75 (orig  54, re-run  21), warm-ups 3, invalid mine 0 / driver 0 (disagree 0), unclean  23, slots  54, used  52 (re-runs 19), dropped  2; 18:30:39-19:09:05
+    dropped ('omega-v2', 0, 9) omega2-gap-external#omega2@W0: [('original', ['witness 4.03']), ('rerun', ['receipt after 7.54', 'witness 2.33'])]
+    dropped ('omega-v2', 0, 16) omega2-gap-worker#omega2@W0: [('original', ['receipt after 7.27', 'witness 5.97']), ('rerun', ['witness 2.79'])]
+    cells 6; K per pass-cell {2: 2, 3: 16}; n per cell {8: 2, 9: 4}
+F3             timed  299 (orig 243, re-run  56), warm-ups 3, invalid mine 0 / driver 0 (disagree 0), unclean  72, slots 243, used 227 (re-runs 40), dropped 16; 19:11:37-19:54:04
+    dropped ('F3', 0, 23) F3-TR-armed#tip@W1: [('original', ['witness 2.71']), ('rerun', ['witness 2.49'])]
+    dropped ('F3', 0, 28) F3-RT-kd#tip@W16: [('original', ['witness 2.18']), ('rerun', ['receipt after 9.02'])]
+    dropped ('F3', 0, 42) F3-RT-kd#tip@W2: [('original', ['witness 2.12']), ('rerun', ['witness 2.24'])]
+    dropped ('F3', 0, 47) F3-RT-leaflist#tip@W1: [('original', ['witness 2.53']), ('rerun', ['witness 2.27'])]
+    dropped ('F3', 0, 59) F3-RT-kd#tip@W8: [('original', ['witness 2.21']), ('rerun', ['receipt after 16.83'])]
+    dropped ('F3', 0, 60) F3-RT-leaflist#tip@W8: [('original', ['witness 3.26']), ('rerun', ['witness 2.74'])]
+    dropped ('F3', 0, 65) F3-RT-kd#tip@W4: [('original', ['witness 2.01']), ('rerun', ['witness 2.08'])]
+    dropped ('F3', 1, 1) F3-TD-armed-leaflist#tip@W1: [('original', ['witness 2.15']), ('rerun', ['witness 2.11'])]
+    dropped ('F3', 1, 31) F3-TA-armed-kd#tip@W1: [('original', ['witness 2.15']), ('rerun', ['witness 2.21'])]
+    dropped ('F3', 1, 51) F3-JT-leaflist#tip@W16: [('original', ['witness 2.26']), ('rerun', ['witness 2.44'])]
+    dropped ('F3', 1, 52) F3-JT-kd#tip@W16: [('original', ['witness 2.15']), ('rerun', ['witness 5.17'])]
+    dropped ('F3', 1, 74) F3-JT-leaflist#tip@W8: [('original', ['witness 2.16']), ('rerun', ['witness 5.53'])]
+    dropped ('F3', 2, 1) F3-RT-kd#tip@W16: [('original', ['witness 2.21']), ('rerun', ['receipt after 6.67', 'witness 2.49'])]
+    dropped ('F3', 2, 40) F3-JT-kd#tip@W4: [('original', ['witness 2.07']), ('rerun', ['witness 3.26'])]
+    dropped ('F3', 2, 41) F3-JT-leaflist#tip@W4: [('original', ['witness 2.38']), ('rerun', ['witness 2.02'])]
+    dropped ('F3', 2, 72) F3-JT-leaflist#tip@W2: [('original', ['witness 2.17']), ('rerun', ['witness 2.5'])]
+    cells 27; K per pass-cell {2: 16, 3: 65}; n per cell {7: 1, 8: 14, 9: 12}
+F3-G4          timed    3 (orig   3, re-run   0), warm-ups 0, invalid mine 0 / driver 0 (disagree 0), unclean   0, slots   3, used   3 (re-runs  0), dropped  0; 19:56:30-20:29:39
+J-Son-T        timed   85 (orig  72, re-run  13), warm-ups 3, invalid mine 0 / driver 0 (disagree 0), unclean  15, slots  72, used  70 (re-runs 11), dropped  2; 20:32:11-20:50:11
+    dropped ('J-Son-T', 0, 2) JSoffT#tip@W8: [('original', ['witness 2.73']), ('rerun', ['receipt after 5.51'])]
+    dropped ('J-Son-T', 0, 6) JSoffT#tip@W1: [('original', ['receipt after 14.77']), ('rerun', ['witness 2.01'])]
+    cells 8; K per pass-cell {2: 2, 3: 22}; n per cell {8: 2, 9: 6}
+DM1            timed   30 (orig  24, re-run   6), warm-ups 1, invalid mine 0 / driver 0 (disagree 0), unclean   8, slots  24, used  22 (re-runs  4), dropped  2; 20:52:48-20:59:43
+    dropped ('DM1', 0, 8) dm-vb-1920x1080-idle#dmA@W0: [('original', ['witness 2.08']), ('rerun', ['witness 2.1'])]
+    dropped ('DM1', 0, 22) dm-vb-1920x1080-edit100#dmB@W0: [('original', ['witness 2.1']), ('rerun', ['receipt after 5.36'])]
+omega-v1-cont  timed   20 (orig  12, re-run   8), warm-ups 1, invalid mine 0 / driver 0 (disagree 0), unclean  12, slots  12, used   8 (re-runs  4), dropped  4; 21:03:31-21:09:15
+    dropped ('omega-v1-cont', 0, 1) omega1-s72-external#omega2@W0: [('original', ['receipt after 5.8', 'witness 6.25']), ('rerun', ['receipt after 7.6', 'witness 7.7'])]
+    dropped ('omega-v1-cont', 0, 10) omega1-s72-worker#omega2@W0: [('original', ['receipt after 6.21', 'witness 2.87']), ('rerun', ['receipt after 7.83', 'witness 5.57'])]
+    dropped ('omega-v1-cont', 0, 11) omega1-s36-external#omega2@W0: [('original', ['witness 6.23']), ('rerun', ['witness 2.79'])]
+    dropped ('omega-v1-cont', 0, 12) omega1-s36-worker#omega2@W0: [('original', ['receipt after 8.02']), ('rerun', ['receipt after 5.21', 'witness 2.03'])]
+    cells 4; K per pass-cell {2: 4}; n per cell {2: 4}
+
+TOTAL {'timed': 894, 'orig': 786, 'rerun': 108, 'warm': 20, 'invalid': 0, 'drv_invalid': 0, 'disagree': 0, 'unclean': 134, 'slots': 786, 'used': 760, 'dropped': 26, 'rerun_used': 82}
+
+## unclean reasons (process-level; one process may carry several)
+  ('DM1', 'receipt after'): 3
+  ('DM1', 'witness'): 6
+  ('F3', 'receipt after'): 4
+  ('F3', 'witness'): 70
+  ('J-Son-T', 'receipt after'): 2
+  ('J-Son-T', 'witness'): 13
+  ('S4-AB', 'witness'): 2
+  ('S7-AB', 'receipt after'): 1
+  ('S7-AB', 'witness'): 2
+  ('omega-v1-cont', 'receipt after'): 9
+  ('omega-v1-cont', 'witness'): 11
+  ('omega-v2', 'receipt after'): 15
+  ('omega-v2', 'witness'): 17
+
+## top 'other' process in the witness of unclean processes: [('claude.exe', 99), ('browser.exe', 17), ('Telegram.exe', 12), ('Discord.exe', 2), ('RuntimeBroker.exe', 1), ('explorer.exe', 1)]
+
+placement receipts: 914 of 914 launched processes carry main_cycle_frac, 867 main_share_top_est; used to drop: none (the slot rule above reads only validity and clean)
+
+## receipts of the USED processes, per block (max before / after / witness %)
+  S4-AB          4.08 / 4.08 / 1.22
+  S7-AB          3.63 / 3.63 / 1.64
+  SPLIT          3.11 / 3.11 / 0.81
+  omega-v2       4.92 / 3.98 / 1.85
+  F3             4.91 / 4.91 / 1.98
+  F3-G4          2.50 / 2.50 / 1.06
+  J-Son-T        4.79 / 4.02 / 1.93
+  DM1            4.15 / 3.89 / 1.84
+  omega-v1-cont  4.36 / 4.22 / 1.84
+
+## binaries of the window (rows8b.json + rows8b.extra.json): tip (runner, runner_tip_16191fda.exe), parent (runner, runner_parent_16191fda_s4off.exe), g4ref (criterion, broadphase_g4ref_16191fda.exe), dmA (dm1, dm1_A.exe), dmB (dm1, dm1_B.exe), s7p (runner, runner_tip_16191fda.exe), s7t (runner, runner_s7_tip_a3adc827.exe), omega2 (micro, omega_b_region_v2_a3adc827.exe)
+kinds of timed processes: {'runner': 781, 'micro': 99, 'criterion': 3, 'dm1': 31}

@@ -19,11 +19,18 @@
 //! command-queue, a documented non-gate — see miri_phase19):
 //! ```powershell
 //! $env:MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-ecs --test miri_prefab_s7
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_prefab_s7
 //! ```
 //! `-Zmiri-ignore-leaks` isolates the TB signal from the `App` -> `ThreadPool`
 //! `Arc` teardown leak (an allocator artifact orthogonal to TB), exactly as the
 //! kernel's threadpool-bearing Miri suites do.
+
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

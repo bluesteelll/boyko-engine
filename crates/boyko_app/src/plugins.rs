@@ -6,8 +6,13 @@
 //! D4 `FixedSet` ordering seam, and the windowed G-buffer runner.
 
 use boyko_ecs::ecs::core::app::CoreSchedule;
+use boyko_ecs::ecs::core::log::LogPlugin;
+use boyko_ecs::ecs::core::profiling::{ArmOutcome, Profiler, ProfilerConfig, ProfilerPlugin};
+use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 use boyko_ecs::{App, Plugin};
-use boyko_render::instance_model::sync_instance_model_cols;
+use boyko_render::instance_model::{InstancePackSet, sync_instance_model_cols};
+use boyko_render::light_reconcile::LightReconcileSet;
+use boyko_render::shadow_atlas::PunctualResolveSet;
 // HW-RT rung 3b: the prev-frame model-affine copy system (temporal motion vectors), ordered
 // `.before` the affine pack below. `not(hwrt)` never compiles it.
 #[cfg(feature = "hwrt")]
@@ -19,14 +24,18 @@ use boyko_render::instance_model::sync_prev_instance_model_cols;
 use boyko_render::MotionCamState;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
-    CsmCasterScratch, CsmPlugin, LightingConfig, LightingPlugin, MeshRenderScratch,
-    RayPlugin, Render3dPlugin, SdfPlugin, ShadowAtlasPlugin, ShadowDenoisePlugin,
-    add_gpu_transform_pack, gather_mesh_draws, gather_shadow_casters, snap_apply,
-    sync_csm_light_gate, sync_punctual_light_gate,
+    AssetRefcountPlugin, ClusterConfig, CsmCasterScratch, CsmFitSet, CsmPlugin, CsmResolveSet,
+    DdgiPlugin, DdgiResolveSet, LightCollectSet, LightSeedSet, LightingConfig, LightingPlugin,
+    MaterialUploadStaging, MeshRenderScratch, ParticlePlugin, ParticleTickSet, RayPlugin, Render3dPlugin,
+    RenderPathPlugin, SdfPlugin, ShadowAtlasPlugin, ShadowDenoisePlugin, SsaoPlugin,
+    add_gather_mesh_draws, add_gather_shadow_casters, add_gpu_transform_pack,
+    reduce_caster_bounds, snap_apply, stage_material_edits, sync_cluster_light_gate, sync_csm_light_gate,
+    sync_ddgi_light_gate, sync_punctual_light_gate, sync_ssao_light_gate, sync_sv0_light_gate,
 };
-use boyko_scene::{CameraPlugin, FixedSet};
+use boyko_scene::{CameraPlugin, CameraSet, FixedSet, VisibilitySet};
 
 use crate::runner::{self, WindowDesc};
+use crate::timer_resolution::TimerResolutionGuard;
 
 /// The engine host plugin: composes the scene/render frame systems, wires the
 /// D4 `FixedSet` ordering seam, opens a window, and installs the windowed
@@ -39,13 +48,24 @@ use crate::runner::{self, WindowDesc};
 /// `resolve_active_camera` + `visibility_sync` with their ordering edges) and
 /// [`Render3dPlugin`], then registers the R3 mesh path —
 /// `sync_instance_model_cols` → `gather_mesh_draws` (edge-ordered) — AFTER
-/// them. The propagation → pack edge cannot be expressed explicitly
-/// (`propagate_transforms`'s `SystemKey` is only obtainable inside
-/// `CameraPlugin`'s own builder closure), so it is pinned by the documented
-/// cross-crate ADD-ORDER contract — and unlike the `Changed`-gated systems
-/// that contract usually covers, `sync_instance_model_cols` is UNCONDITIONAL:
-/// a wrong order would be a PERMANENT one-frame pose lag, not a
-/// self-correcting stagger. The add-order here IS the pin; do not reorder.
+/// them. Add-order is NOT an ordering pin: the executor orders two systems that
+/// have no path between them by its wave packing, which any unrelated edge can
+/// reshuffle (measured: one added edge between two lighting systems flipped the mesh
+/// gather and `visibility_sync` on the `hwrt` leg, and with them whether frame 0 drew
+/// any mesh; and, earlier and independently, MEASURED 2026-08-26 on the playground's
+/// camera-parented HUD panel — the first entity moved from a Main-schedule system — the
+/// affine pack ran before `propagate_transforms`, so its `InstanceModelCol` held the
+/// previous frame's pose every frame while its `GlobalTransform` was current). Every
+/// cross-plugin reader → writer
+/// dependency of the render path is therefore a named set edge declared in `build`:
+/// `VisibilitySet::Validate` after `VisibilitySet::Sync` and `VisibilitySet::Read` after
+/// both (`RenderEnabled`, set by `visibility_sync`; `RenderStale` / `MaterialStale`, written by
+/// `validate_asset_refs` and filtered on by the gathers, which additionally pin that edge per
+/// consumer with `.after_set(AssetValidateSet)`), `InstancePackSet` after `CameraSet::Resolve` (the propagated
+/// `GlobalTransform`), `LightReconcileSet` after `CameraSet::Resolve` (the light's
+/// `GlobalTransform`), the CSM fit / punctual resolve after `CameraSet::Resolve`
+/// (`ViewUniform`), and both of those after `LightReconcileSet` (the sun direction; the
+/// point / spot poses the atlas ranks).
 /// Do NOT also add `CameraPlugin` / `TransformPlugin` / `Render3dPlugin` /
 /// `LightingPlugin` / `CsmPlugin` yourself — a duplicate plugin panics.
 ///
@@ -95,6 +115,12 @@ pub struct EnginePlugins {
     width: u32,
     /// Requested client-area height in pixels.
     height: u32,
+    /// SSAA (AA campaign Stage 3): the owner-requested render scale, default `0`
+    /// (off — byte-identical to before SSAA existed). Set via [`Self::with_ssaa_scale`];
+    /// `build` also honors `BOYKO_AA=ssaa` (the owner-eval channel) when this stays at
+    /// its default. Only `2` is ever honored past `build` — the host's device-capability
+    /// probe is the sole arming authority (see `crate::host::WindowHost::boot`).
+    ssaa_scale: u32,
 }
 
 impl EnginePlugins {
@@ -115,9 +141,250 @@ impl EnginePlugins {
             title,
             width,
             height,
+            ssaa_scale: 0,
         }
     }
+
+    /// Requests SSAA (AA campaign Stage 3) at the given render scale — v1 honors ONLY
+    /// `2` (2× per axis); any other value is clamped to off by the host's boot-time
+    /// device-capability probe (`WindowHost::boot`), which is the sole arming authority
+    /// (dims + VRAM budget) and NEVER panics on a device that cannot fit the request.
+    #[inline]
+    pub fn with_ssaa_scale(mut self, scale: u32) -> Self {
+        self.ssaa_scale = scale;
+        self
+    }
 }
+
+/// Arms the profiler when `BOYKO_PROFILE_ON` is set — **the enable path, and the only one**.
+///
+/// # Why an environment variable and not a flag parser
+///
+/// `SEAM.md` weighs the two and takes this one: an env var matches the **28 existing `BOYKO_*`
+/// switches** in this workspace, adds zero new mechanism and zero new parse surface, and is
+/// something a support desk can already ask a player to do. The alternative — a real argv reader in
+/// `boyko_app` — would be the **first** in the workspace and would owe a specification for
+/// unknown-flag behaviour, precedence against the env vars that already exist, and the `--`
+/// convention. It is not free and it is not one line.
+///
+/// # What "on" costs, stated
+///
+/// `arm` is where every one-time cost of the profiler lives: it commits the reservation, calibrates
+/// the clock and publishes each lane's slab. That is the whole point of splitting `new` from `arm` —
+/// the plugin above can be added unconditionally precisely because this function is the only thing
+/// that spends anything.
+///
+/// A refusal is reported, not panicked on. `ArmOutcome` distinguishes a first arm from a re-arm and
+/// from a geometry the reservation cannot hold; a host that cannot profile is a host that runs
+/// without a profiler, which is a state the fold call site already handles.
+/// Maps a `BOYKO_LOG` value to a level. `None` when the value names none.
+fn parse_log_level(spec: &str) -> Option<boyko_log::Level> {
+    use boyko_log::Level;
+    Some(match spec.trim().to_ascii_lowercase().as_str() {
+        "off" => Level::Off,
+        "error" => Level::Error,
+        "warn" => Level::Warn,
+        "info" => Level::Info,
+        "debug" => Level::Debug,
+        "trace" => Level::Trace,
+        _ => return None,
+    })
+}
+
+/// Records the logging configuration always, and turns it on when `BOYKO_LOG` names a level.
+///
+/// `SEAM.md` §507 picks the delivery mechanism and names this variable: `BOYKO_LOG=debug`, matching
+/// the 28 existing `BOYKO_*` switches, against an argv parser that would be the first in the
+/// workspace and would owe a specification of its own.
+///
+/// # `boot` is unconditional, and that is a contract rather than a hope
+///
+/// L3 specifies it as a pure struct-fill that **spawns no thread, installs no hook and calls no
+/// `calibrate()`** — the same property that makes `ProfilerPlugin` safe to add unconditionally
+/// above. Without it `SinkState` stays `NotBooted`, so `enable()` has nothing to act on and
+/// `flush()` answers `NoConsumer` — which is precisely why `boyko_threadpool`'s abort path prints
+/// for itself, and precisely the state the whole subsystem was in through L6.
+///
+/// # What "on" costs, and what "off" costs
+///
+/// **Off** (variable unset): one `AtomicU8` store at startup and nothing else. The control array
+/// stays `.bss`-zero, so every site is one predicted branch, no thread exists and no destination
+/// is opened. **On**: one sink thread, a console destination on `stderr`'s own handle, and the
+/// records the levels admit.
+///
+/// # An unrecognised value is not silent
+///
+/// It enables at `Info` rather than refusing, because a typo that produced NO log and no
+/// explanation is worse than one that produced the default. Either way the first line the enabled
+/// logger emits says which level was applied and what the variable held, so the operator never has
+/// to infer it from the absence of output.
+fn boot_and_enable_logging_from_env() {
+    use boyko_log::lifecycle::{LogConfig, SinkMode, boot, boot_preset, enable};
+    use boyko_log::preset::LogRuntimePreset;
+
+    // ── `BOYKO_LOG_PRESET` — the production route to the preset table ───────────────────────
+    //
+    // Without this `boot_preset` had exactly one caller: its own test. That is the same defect the
+    // rung before this one fixed for `header()` and `rotates()`, arriving one rung later in the
+    // function introduced to fix it -- and it kept the binary sink, rotation and `logdec` reachable
+    // only from tests, which is what "a format nobody writes" means.
+    //
+    // The names are `LogRuntimePreset::name`'s own, so the string a host sets and the string
+    // `runtime_preset=` prints in the header are the same set. That is what lets someone reproduce
+    // a run from its own log rather than from a memory of how it was launched.
+    //
+    // Absent, the hand-built config below runs and the header says `runtime_preset=custom`, which
+    // is the honest answer for a configuration no row describes.
+    let mut bad_preset: Option<String> = None;
+    if let Some(raw) = std::env::var_os("BOYKO_LOG_PRESET") {
+        let raw = raw.to_string_lossy().into_owned();
+        if let Some(preset) = LogRuntimePreset::from_name(&raw) {
+            let text = std::env::var("BOYKO_LOG_FILE").ok();
+            let blog = std::env::var("BOYKO_LOG_BLOG").ok();
+            boot_preset(preset, text.as_deref(), blog.as_deref());
+            if !enable() {
+                return;
+            }
+            // The preset armed every engine target at the compile ceiling; `BOYKO_LOG` still
+            // narrows it, so the two knobs compose rather than one silently winning.
+            //
+            // EXCEPT under `Off`, and the exception is measured rather than tidy. `Off` configures
+            // no sink at all, so arming its targets produces the one state this vocabulary calls
+            // out by name: armed, and no sink accepts it. Every site would pay gate (c)'s load and
+            // deliver nothing -- and the `W0111` that reports exactly that could not be printed
+            // either, because reporting needs a destination `Off` did not open. MEASURED: a host
+            // run with `BOYKO_LOG_PRESET=off` emits not one line, census included.
+            //
+            // So `Off` means off. A contradictory pair of flags resolves to the row that promises
+            // nothing rather than to a configuration that costs something and delivers nothing.
+            if preset != LogRuntimePreset::Off
+                && let Some(level) = std::env::var("BOYKO_LOG").ok().and_then(|v| parse_log_level(&v))
+            {
+                for (id, _name) in boyko_log::target::engine_targets() {
+                    boyko_log::target::set_target_level(id, level);
+                }
+            }
+            return;
+        }
+        // A name the table does not carry is a launch mistake worth naming. The record is emitted
+        // BELOW, after the fallback has armed its targets -- reporting it here would emit into a
+        // process whose `CONTROL` is still `.bss`-zero, and gate (c) would refuse the one record
+        // that tells the operator about their typo. MEASURED: the first draft did exactly that and
+        // the host gate read `left: 0, right: 1`. It is the same defect as the session header's,
+        // one function down, written by the same hand an hour later.
+        bad_preset = Some(raw);
+    }
+
+    boot(LogConfig {
+        console: true,
+        sink_thread: true,
+        // The in-frame `LogRing` is a READER's convenience and its consumer (the console widget)
+        // is deferred to the UI plan. Asking the drain to feed a ring nothing displays would copy
+        // every line into ECS storage for no reader.
+        ecs_ring: false,
+        file: false,
+        binary: false,
+        file_cap_bytes: 0,
+        sink_mode: SinkMode::Thread,
+    });
+
+    let Some(raw) = std::env::var_os("BOYKO_LOG") else {
+        return;
+    };
+    let raw = raw.to_string_lossy().into_owned();
+    let level = parse_log_level(&raw).unwrap_or(boyko_log::Level::Info);
+
+    // ARM BEFORE ENABLE, and the order is the whole reason the session header reaches anyone.
+    //
+    // `enable()` emits the header -- `build_profile` / `runtime_preset` / `ceiling` / `session`,
+    // which is G16(d)'s subject. `CONTROL` is `.bss`-zero, so with the targets still `Off` gate (c)
+    // refuses that record and the header is silently dropped. MEASURED by running the host with
+    // `BOYKO_LOG=debug` and reading its output: every census row printed, and the header was
+    // absent. No logging gate could see it -- `l17_preset_boot` goes through `boot_preset`, which
+    // arms the targets itself, so the shipped host was the only path with the defect.
+    //
+    // Arming first is safe: a control byte is a `.bss` write, and nothing is delivered before
+    // `enable()` opens a destination anyway.
+    for (id, _name) in boyko_log::target::engine_targets() {
+        boyko_log::target::set_target_level(id, level);
+    }
+    if !enable() {
+        return;
+    }
+    if let Some(raw) = bad_preset {
+        boyko_log::warn!(
+            boyko_log::App,
+            boyko_log::codes::W1803,
+            "BOYKO_LOG_PRESET={} names no preset; the hand-built configuration is used instead",
+            boyko_log::dsp!(raw, 32)
+        );
+    }
+    boyko_log::info!(
+        boyko_log::App,
+        "logging enabled at {} for every engine target (BOYKO_LOG={})",
+        level.as_str(),
+        boyko_log::dsp!(raw, 64)
+    );
+}
+
+fn arm_profiler_from_env(app: &mut App) {
+    if std::env::var_os("BOYKO_PROFILE_ON").is_none() {
+        return;
+    }
+    // The resource is absent in a SECOND world: `ProfilerPlugin::build` refuses to bind there and
+    // inserts nothing, because the lane rings are process-global and two worlds folding them would
+    // each take half the samples. `try_resource_mut` rather than `resource_mut` so that host is a
+    // host without a profiler rather than a panic at startup.
+    let Some(profiler) = app.world_mut().try_resource_mut::<Profiler>() else {
+        return;
+    };
+    let outcome = profiler.arm(ProfilerConfig::default());
+    debug_assert!(
+        matches!(outcome, ArmOutcome::Armed | ArmOutcome::Rearmed),
+        "BOYKO_PROFILE_ON was set but the profiler refused to arm: {outcome:?}"
+    );
+}
+
+/// Records the KE16 App-12 timer-resolution outcome — one line, once, at boot.
+///
+/// # Why `info!` and not `warn!` with a code
+///
+/// A refused raise is a fact about the machine, not a defect the operator can act on, and the
+/// engine keeps running either way — the same bar `boot_and_enable_logging_from_env`'s own closing
+/// `info!` clears. Reaching for `warn!` would additionally mean registering a new `Live` `W` code
+/// in `boyko_log::codes` **plus** a `docs/diagnostics/<code>.md` page (the registry's orphan check
+/// requires both), which is a three-file cross-crate change to say something no reader needs to
+/// act on. `info!` takes no code, so the brief's "one line stating the requested period and
+/// whether it was granted" costs exactly one line.
+///
+/// # Ordering
+///
+/// Called from the runner closure, so `boot_and_enable_logging_from_env` has already run in
+/// `build()` and the target ceilings are armed. Emitting from `build()` instead would be safe but
+/// pointless — the guard does not exist yet there.
+#[cfg(windows)]
+fn report_timer_resolution(guard: &TimerResolutionGuard) {
+    match guard.held_period_ms() {
+        Some(period_ms) => boyko_log::info!(
+            boyko_log::App,
+            "timer resolution: requested {} ms, granted — short park_timeout backstops now expire \
+             near their deadline instead of at the ~15.6 ms default quantum",
+            period_ms
+        ),
+        None => boyko_log::info!(
+            boyko_log::App,
+            "timer resolution: requested {} ms, REFUSED (TIMERR_NOCANDO) — timed waits keep this \
+             system's default quantum; the engine runs, less precisely",
+            crate::timer_resolution::ENGINE_PERIOD_MS
+        ),
+    }
+}
+
+/// The non-Windows arm: there is no process-wide timer resolution to raise (POSIX timed waits
+/// already carry nanosecond deadlines), so there is nothing to report and a line claiming
+/// otherwise would be noise the reader has to learn to ignore.
+#[cfg(not(windows))]
+fn report_timer_resolution(_guard: &TimerResolutionGuard) {}
 
 impl Plugin for EnginePlugins {
     /// Composes the frame systems + the D4 seam, then installs the windowed
@@ -125,11 +392,70 @@ impl Plugin for EnginePlugins {
     /// runner owns the app lifecycle from there (its own `finish()` call,
     /// `AppExit` policy, and teardown — see `runner.rs`).
     fn build(&self, app: &mut App) {
+        // ── The profiler, made REACHABLE ────────────────────────────────────────────────────────
+        //
+        // MEASURED after profiling rung 15, and it is the reason this line exists: `ProfilerPlugin`
+        // was added NOWHERE outside tests. Fifteen rungs of profiler — the store, the fold, the GPU
+        // channel, the retention tiers, the telemetry writer, the overlay — sat complete and
+        // unreachable from any host, because the resource they all read was never inserted. The
+        // fold was already being called every frame (`App::update_with_delta`, `app.rs:689`); it
+        // found no `Profiler` and returned.
+        //
+        // Unconditional, and that is safe by the store's own design rather than by hope:
+        // `Profiler::new()` *"reserves nothing, commits nothing, calibrates nothing"* — the plugin
+        // runs before a host has read its launch flag, and a diagnostics subsystem may not make a
+        // syscall the flag has not authorised. Every one-time cost is in `arm`, and `arm` IS the
+        // enable path. A host that never sets the flag pays one disarmed resource and a
+        // `frame == 0` early return per frame.
+        //
+        // Added FIRST so `arm_profiler_from_env` below finds the resource, and so a second world —
+        // where `ProfilerPlugin` refuses to bind and inserts nothing — is refused before anything
+        // downstream can assume the store is there.
+        app.add_plugin(ProfilerPlugin);
+        arm_profiler_from_env(app);
+
+        // ── The logger, made REACHABLE — the SAME defect, two rungs later ───────────────────────
+        //
+        // MEASURED at the opening of logging rung L7: `boyko_log::lifecycle::boot` and `enable`
+        // were called from NOWHERE outside tests. L5 landed the ECS seam, L6 landed the engine's
+        // own emitters — twelve `Live` codes across `boyko_ecs` and `boyko_threadpool` — and in a
+        // shipped run every one of them wrote into a `.bss` lane ring with no consumer: refused on
+        // overflow, counted, and never read. Not one byte reached anyone.
+        //
+        // It is the same shape as the `ProfilerPlugin` line above, in the same campaign, and it
+        // hid the same way: EVERY logging gate boots and enables the logger ITSELF before asking
+        // whether a record arrived, so none of them can observe that no host does. The hole lies
+        // BETWEEN the gates. `crates/boyko_app/tests/log_host_*.rs` are the two that look at a
+        // real host instead of building their own world.
+        //
+        // And the SEAM, made reachable the same way — found by the same kind of test, one rung
+        // later. `boot`/`enable` above fixed the lifecycle's reachability; `LogPlugin` — the L5
+        // seam's registration, `log_drain_system`, `LogRing`, `LogStats` — was still added by
+        // NOTHING outside its own tests, so the in-frame display ring had no consumer in any real
+        // host and `SinkMode::Scheduled`'s per-frame drain (which lives in that system) could not
+        // run anywhere. Unconditional for the same reason `ProfilerPlugin` is: `build` inserts two
+        // lazy resources and one system, reserves nothing, and a process that never enables
+        // logging pays one flag load per frame.
+        app.add_plugin(LogPlugin);
+        boot_and_enable_logging_from_env();
+
         // Scene stack: propagation + camera resolve + visibility bridge
         // (CameraPlugin SUPERSEDES TransformPlugin — adding both would
         // double-register propagation), then the S4 3D instance pack.
         app.add_plugin(CameraPlugin);
         app.add_plugin(Render3dPlugin);
+
+        // Asset-streaming plan F2: the refcount lifetime pipeline. Inserts
+        // `RefcountDeltas`/`DeferredFree` and registers `apply_refcount_deltas`
+        // `.before(validate_asset_refs)`, the latter joining `AssetValidateSet`. The
+        // validate -> gather edge is pinned BY NAME: the two gathers below are
+        // registered through `add_gather_mesh_draws` / `add_gather_shadow_casters`,
+        // which chain `.after_set(AssetValidateSet)` (asset-streaming plan prereq (c)),
+        // so this plugin's position in the add-order is no longer load-bearing for
+        // that edge. The `Assets<MeshGpu>`/`Assets<Material>` resources it reads are
+        // inserted by `runner::run_windowed` before the frame loop starts, well after
+        // this `build()` call, so add-order here does not matter either.
+        app.add_plugin(AssetRefcountPlugin);
 
         // The R4 lighting stack. LightingPlugin registers the light eviction
         // hooks as its FIRST action, inheriting its registration-first
@@ -147,13 +473,27 @@ impl Plugin for EnginePlugins {
         // + sun reconcile before the cascade fit) — all Changed-gated, so the
         // cross-plugin stagger is self-correcting per their type-level docs.
         //
-        // SSAO is deliberately NOT composed: `SsaoPlugin` is config-only (no
-        // GPU cost at boot), but the windowed host creates no SSAO pipeline /
-        // targets yet, so composing it would ship a silently-dead
-        // `SsaoConfig` knob. It lands together with the host SSAO pass.
+        // Render P7-Q2: `SsaoPlugin` — the SSAO quality config substrate. UNLIKE its old
+        // config-only state, the windowed host now boots the SSAO pipeline/layout
+        // (`gpu_scene::GpuSceneBundles::boot`) and arms `GBufferScene::ssao` from the
+        // resolved selection (`boyko_app::runner`'s per-frame `World` read — the same
+        // `try_resource` pattern `ResolvedAa` uses), so this is a LIVE consumer, mirroring
+        // `ShadowDenoisePlugin`/`AaPlugin` below. The default `SsaoQuality::Off` keeps
+        // every host world byte-identical (`scene.ssao` stays `None`, the resolve's
+        // `ssao_mode` header gate stays 0), so composing it unconditionally is safe.
         app.insert_resource(LightTableStaging::default());
         app.insert_resource(LightingConfig::default());
+        // VB-P1b-0: `ClusterConfig` is seeded HERE (mirrors `LightingConfig` immediately
+        // above), not by `LightingPlugin`/any render-path plugin — it bridges the L1
+        // froxel-cull grid/near/far parameters into the light-header pack via the
+        // `sync_cluster_light_gate` bridge below, the SAME "composing app seeds it"
+        // precedent `LightingConfig` itself follows. Default `16x9x24` dims / `0.1..50.0`
+        // near/far (`ClusterConfig::default()`) — inert until a scene ALSO sets
+        // `LightingConfig::clusters_enabled = true` (the 0%-gate: the sync gate zeros the
+        // header's cluster lane whenever that bit is off, regardless of these dims).
+        app.insert_resource(ClusterConfig::default());
         app.add_plugin(LightingPlugin);
+        app.add_plugin(SsaoPlugin);
         app.add_plugin(CsmPlugin);
         // ShadowAtlasPlugin (the punctual host rung) — the spot/point analogue of CsmPlugin:
         // it seeds the owner-set `ShadowConfig` (default DISABLED — the 0%-gate; overwrite it
@@ -165,6 +505,25 @@ impl Plugin for EnginePlugins {
         // expressible across plugins; a loose one-frame stagger off cold owner state is
         // self-correcting, and the default DISABLED config gates the whole path off).
         app.add_plugin(ShadowAtlasPlugin);
+
+        // SDFDDGI host-hook (Decision 4): `DdgiPlugin` — the GI config substrate — composed
+        // UNCONDITIONALLY, here after `ShadowAtlasPlugin` (its `Resolved*` sibling) and before
+        // `RayPlugin` (whose `RayCaps` boot override sits next to the `DdgiCaps` one in the
+        // runner). It seeds the owner-set `DdgiConfig` (default DISABLED — the 0%-gate;
+        // overwrite it AFTER `add_plugins` to enable GI), the derived `ResolvedDdgi` carrier
+        // (the SINGLE truth for the header bit, the b18 grid bytes and the update-pass arming),
+        // `DdgiUpdateConfig`, `DdgiCaps` (the runner overrides it at boot with the real
+        // `ddgi_storage_ok()` query) and an inert `RenderPathFrozenConsumers` (a harmless
+        // double-insert with `SsaoPlugin`'s — the runner overwrites both at boot), and
+        // registers `resolve_ddgi_grid_gated` in `DdgiResolveSet`. Safe to compose
+        // unconditionally for the same reason `SsaoPlugin`/`AaPlugin` are: the default carrier
+        // is the all-zero DISABLED image (== the b18 buffer's boot seed), the gate keeps the
+        // header bit 0, `ddgi_update` stays `None` — the command stream is byte-identical.
+        //
+        // Before this line NO host composed the plugin: for the whole I0..I7 ladder the
+        // production world carried no carrier, the runner's `DdgiCaps` override landed in a
+        // world with no reader, and `resolve_ddgi_grid_gated` never ran.
+        app.add_plugin(DdgiPlugin);
 
         // HW-RT rung R1 — the dormant unified ray / acceleration-structure seam.
         // RayPlugin seeds the derived `RayBackendConfig` carrier (default DISABLED —
@@ -189,6 +548,72 @@ impl Plugin for EnginePlugins {
         // `Spatial` for a headless flight-check.
         app.add_plugin(ShadowDenoisePlugin);
 
+        // Anti-aliasing Stage 1 — unlike `SsaoPlugin` above (deliberately NOT composed: the
+        // windowed host has no SSAO pipeline/targets yet, so composing it would ship a
+        // silently-dead knob), `AaPlugin` HAS a live consumer (the FXAA post-process pass
+        // wired into `gpu_scene::scene`/`record_gbuffer`) — mirrors `ShadowDenoisePlugin`'s
+        // live wiring. Injects `resolve_aa_policy` (reads `AaConfig`, writes `ResolvedAa`;
+        // no render-resource conflict with any other system → scheduled independently).
+        // The default `AaMode::Off` keeps every host world byte-identical (`scene.aa` stays
+        // `None`), so composing it unconditionally is safe.
+        app.add_plugin(boyko_render::AaPlugin);
+
+        // Multi-paradigm render-path plan, rung R1 — `RenderPathPlugin`: seeds the owner-set
+        // `RenderPathConfig` (default `Deferred + Both`, the byte-identity anchor) + its derived
+        // `ResolvedRenderPath`. UNLIKE `AaPlugin`/`SsaoPlugin` above it registers NO per-frame
+        // system (Decision 1 — path/legs are a ONE-TIME boot commitment, never re-derived per
+        // frame); `boyko_app::runner` calls `resolve_render_path` directly at boot and overrides
+        // this plugin's default, the SAME `DdgiCaps`/`RayCaps` override precedent.
+        //
+        // What IS still without a reader is this Resource specifically: no system anywhere takes
+        // `Res<ResolvedRenderPath>`. The carrier itself is read downstream (the runner threads it
+        // host-side into the RHI, which dispatches its declarator on it) — a distinction this
+        // comment used to collapse into a flat "nothing downstream reads the resolved carrier
+        // yet", which stopped being true at R2.
+        app.add_plugin(RenderPathPlugin);
+
+        // VG R3 piece 1 (docs/VG-R3-P1-PYRAMID-PLAN.md) — `HzbPlugin`: seeds the owner-set
+        // `HzbConfig` (default `HzbMode::Off`, the byte-identity anchor). Like `RenderPathPlugin`
+        // above and UNLIKE `AaPlugin`/`SsaoPlugin` it registers NO system: the producer knob maps
+        // to downstream state by the identity, so there is no `Resolved*` carrier to derive and
+        // no policy to schedule (see `boyko_render::hzb_config`'s module doc).
+        //
+        // The consumer is `runner::frame_loop`, which reads the config per frame and threads the
+        // derived pyramid shape onto `GBufferScene`. Under the default `Off` that is `None`: no
+        // image, no per-mip views, no build passes — so composing it unconditionally leaves every
+        // host world byte-identical, exactly as `AaPlugin`'s default `Off` does.
+        app.add_plugin(boyko_render::HzbPlugin);
+
+        // VG R3 piece 4 rung P4-4 — `OcclusionPlugin`: seeds the owner-set `OcclusionConfig`
+        // (default `OcclusionMode::Off`, the byte-identity anchor). Immediately after `HzbPlugin`
+        // because the two are the PRODUCER and CONSUMER halves of one feature, and one plugin per
+        // config family is this file's shipped mapping. System-less, for `HzbPlugin`'s own reason:
+        // the map from the knob to downstream state is the identity, so there is no `Resolved*`
+        // carrier to derive.
+        //
+        // Composing it UNCONDITIONALLY is safe and is what makes the split's arming an ECS fact
+        // rather than an env read: the default `Off` makes
+        // `GBufferScene::path_vb_occlusion_split()` false through its FIRST conjunct, so no late
+        // pass is declared or recorded and every host world stays byte-identical.
+        //
+        // ⚠️ Its DIAGNOSTIC sibling `boyko_app::OcclusionForce` is deliberately NOT composed here.
+        // That one is a measurement instrument (defer nothing / defer everything), read through
+        // `try_resource` so absence IS its default — the same treatment an absent `HzbConfig`
+        // gets. Composing an instrument as if it were an owner knob is how a fixture-only control
+        // becomes shipping surface.
+        app.add_plugin(boyko_render::OcclusionPlugin);
+
+        // Dev/test launch seam: `BOYKO_RENDER_PATH` / `BOYKO_GEOMETRY_LEGS` override the
+        // `Deferred + Both` anchor `RenderPathPlugin` just seeded, so `scripts/run-scene.ps1` can
+        // launch ANY windowed example in ANY paradigm without editing the scene. Runs DURING
+        // `build()`, BEFORE any scene's own post-`add_plugins` `insert_resource(RenderPathConfig)`
+        // (e.g. a golden test's explicit config), so an explicit choice still wins — a stray env
+        // var never clobbers a pinned golden. `None` (both env vars unset — the golden-run case)
+        // leaves the byte-identity anchor untouched.
+        if let Some(cfg) = render_path_config_from_env() {
+            app.insert_resource(cfg);
+        }
+
         // The R7 SDF instance path (composed by DEFAULT): inserts the
         // `SdfEditStaging` gather scratch and registers the one-shot startup
         // `collect_sdf_edits` gather. An entity carrying `SdfPrimitive` is direct-
@@ -198,59 +623,110 @@ impl Plugin for EnginePlugins {
         // boot-static edit-list upload on the first frame under the write token.
         app.add_plugin(SdfPlugin);
 
+        // ── The particle subsystem, made REACHABLE — the THIRD instance of this defect ──────────
+        //
+        // MEASURED: `ParticlePlugin` was added NOWHERE outside tests. Its only three `add_plugin`
+        // calls were in `boyko_render/tests/particle_containment.rs`, so none of the six resources
+        // it inserts — `ParticleConfig`, `ParticleClock`, `Assets<ParticleEffect>`,
+        // `ParticleEmitScratch`, `ParticleEffectScratch`, `ParticleEffectRefs` — existed in any
+        // production world. Same shape as the `ProfilerPlugin` and `LogPlugin` lines at the top of
+        // this fn, and it hid the same way: every particle gate builds its own world, and the hole
+        // is BETWEEN them. `crates/boyko_app/tests/particle_host_reachable.rs` is the gate that
+        // looks at THIS composition instead.
+        //
+        // It was not merely inert — it was a LATENT PANIC on this file's own documented convention.
+        // The `CsmConfig`/`ShadowConfig` blocks above tell a host to overwrite a 0%-gated config
+        // AFTER `add_plugins`. A host doing exactly that for particles passed `runner.rs`'s boot
+        // gate (`try_resource::<ParticleConfig>()` + `enabled()`), built the GPU bundle, reached
+        // the per-frame `particle_upload_slots(s).map(..)` with `Some(..)` — and panicked on frame
+        // 1 at `world.resource::<ParticleClock>()`. Composing the plugin makes the five companions
+        // unconditional, so arming can no longer outrun its own substrate.
+        //
+        // Unconditional, and safe for the reason `particle_config.rs` states — *"this is what lets
+        // a host compose `ParticlePlugin` unconditionally"*. The default `ParticleMode::Off` is the
+        // 0%-gate: no pass declared, no `ResId`, no pipeline, no device buffer, every committed
+        // golden hash unchanged BY CONSTRUCTION. What a default host now pays is two POD resources,
+        // one empty `Assets` table, three `ScratchColumn`-backed resources (address space reserved,
+        // ZERO committed pages — the same idiom as the `MeshRenderScratch`/`CsmCasterScratch`
+        // inserts below) and three `Main` systems whose bodies are an empty query walk, an empty
+        // queue drain and a generation test.
+        //
+        // The event-policy hazard that would make this unsafe — a render plugin touching
+        // `CoreSchedule::Fixed`, which flips EVERY event type in the process from `EveryFrame` to
+        // `WaitForFixed` — is the D17 containment contract, and it is pinned (with a non-vacuity
+        // canary) by `boyko_render/tests/particle_containment.rs`.
+        app.add_plugin(ParticlePlugin);
+        app.add_systems_cfg(|b| {
+            // THE ORDERING EDGE, and it is a real decision rather than bookkeeping.
+            // `particle_tick_emitters` reads `&GlobalTransform` and carried NO edge — not in the
+            // plugin, not in the fixture. Transform propagation is `propagate_transforms`, a member
+            // of `CameraSet::Resolve` (wired by `CameraPlugin`, added near the top of this fn).
+            //
+            // Registering the plugin after `CameraPlugin` would place the fold correctly BY
+            // ADD-ORDER — and this repository has MEASURED that add-order is not a pin: a pose
+            // written in `Main` was drawn a frame late precisely because its ordering was "nailed
+            // by add-order". Untreated, emitters spawn from a one-frame-stale pose and a moving
+            // emitter trails its own carrier forever, because that lag never self-corrects (unlike
+            // the cold-owner-state cross-plugin staggers this file documents elsewhere, which do).
+            //
+            // Declared HERE and not inside `ParticlePlugin`, for the SAME reason the `CsmFitSet →
+            // CsmResolveSet` edge below is declared here: an ordering edge that references a
+            // memberless set warns `boyko-W1501` at schedule build, and `CameraSet::Resolve` is
+            // memberless in a world that composes `ParticlePlugin` without a camera — a legitimate
+            // composition, and the one its own D17 containment gate builds. This closure is the
+            // first place BOTH sets have members. `App::add_systems_cfg` threads the SAME Main
+            // builder through every closure and plugin, so the edge resolves against
+            // `ParticleTickSet`'s membership (declared at the fold's registration site, the only
+            // place a `SystemKey` is nameable) regardless of registration order.
+            b.configure_set(ParticleTickSet).after(CameraSet::Resolve);
+        });
+
         // The R3 mesh path: pack GlobalTransform → InstanceModelCol, then
         // bucket the visible instances into the reused MeshRenderScratch the
         // runner uploads from. The pack → gather edge is explicit; the
-        // propagation → pack edge is the ADD-ORDER pin above (the pack is
-        // UNCONDITIONAL, so a wrong order would be a permanent one-frame pose
-        // lag — see the type-level Composition doc).
+        // propagation → pack and `visibility_sync` → reader edges are the named
+        // set edges at the end of this closure (the pack is UNCONDITIONAL, so a
+        // wrong order would be a permanent one-frame pose lag — see the
+        // type-level Composition doc).
         //
         // R4 adds the caster half in the SAME closure so its edges are
         // expressible: `gather_shadow_casters` (the `With<ShadowCaster>`
         // production gather) runs after the pack, and `sync_csm_light_gate`
         // (the header-gate ⇄ depth-pass lock-step) after the caster gather, so
         // the gate's caster predicate is THIS frame's.
+        // Asset-streaming plan prereq (c): BOTH gathers are registered through their
+        // `boyko_render` helpers (`add_gather_shadow_casters` / `add_gather_mesh_draws`),
+        // which pin each `.after_set(AssetValidateSet)` — the validate -> gather edge
+        // is a by-name contract, not the add-order accident it was under F5. The
+        // helpers return the `SystemConfig`, so this closure chains its own `.after(pack)`
+        // / `.after(snap)` edges exactly as before (the `add_gpu_transform_pack` shape).
         // R5 adds the INTERPOLATION Main system `snap_apply` (the zero-streak
         // collapse for teleported bodies) in the SAME closure. Refined-B unifies
         // the two former gathers into ONE `gather_mesh_draws` over ALL drawables
         // (static + interpolated), so `snap_apply` must run BEFORE it: the collapsed
         // `curr == prev` a teleport lands is what the unified gather reads into the
         // pair lanes THIS frame. The single gather runs `.after(pack)` (the affine
-        // pack — add-order cross-schedule note above) AND `.after(snap)`; it emits
+        // pack) AND `.after(snap)`; it emits
         // ONE batch list + ONE ring, recording each interpolated row's pair +
         // out-slot, so the runner arms interp only when `dynamic_count() > 0`.
         app.insert_resource(MeshRenderScratch::default());
         app.insert_resource(CsmCasterScratch::default());
+        // Dynamic-materials DM1: the compact material upload staging `stage_material_edits`
+        // (registered below) fills and the runner copies into the table's staging slot.
+        app.insert_resource(MaterialUploadStaging::default());
         // HW-RT rung 3b step 5a: the persisted prev-frame camera view-proj (the motion-vector
         // camera carry). Inserted so the runner's `advance` (temporal frames only) finds it; a
         // `None` seed yields `prev == cur` on the first temporal frame (zero motion). Dormant until
         // the temporal denoiser is on (0%-gate). `not(hwrt)` never inserts it.
         #[cfg(feature = "hwrt")]
         app.insert_resource(MotionCamState::default());
-        app.add_systems_cfg(|b| {
-            let pack = b.add_system(sync_instance_model_cols).key();
-            // HW-RT rung 3b: `prev := curr` MUST run BEFORE the affine pack refreshes `curr`
-            // from this frame's moving `GlobalTransform`, so a mesh's motion vector is this
-            // frame's true per-object displacement (else `prev == curr`, zero motion, every
-            // box ghosts under its own motion). Dormant until a scene carries the
-            // `PrevInstanceModelCol` column (0%-gate).
-            #[cfg(feature = "hwrt")]
-            b.add_system(sync_prev_instance_model_cols).before(pack);
-            let casters = b.add_system(gather_shadow_casters).after(pack).key();
-            b.add_system(sync_csm_light_gate).after(casters);
-            // The punctual header-gate ⇄ depth-pass lock-step (mirrors the csm sync): after the
-            // SAME caster gather so the gate's caster predicate is THIS frame's. It reads
-            // `ResolvedShadowAtlas.mode_word` (written by `resolve_shadow_atlas` in
-            // ShadowAtlasPlugin, ordered earlier by add-order) — the resolve→sync edge follows the
-            // same cross-plugin add-order discipline as csm (self-correcting under a one-frame lag,
-            // gated off by the default DISABLED ShadowConfig).
-            b.add_system(sync_punctual_light_gate).after(casters);
-            // The unified gather runs after BOTH the affine pack and the snap
-            // collapse (snap-before-gather is load-bearing — the gather reads the
-            // collapsed pair).
-            let snap = b.add_system(snap_apply).key();
-            b.add_system(gather_mesh_draws).after(pack).after(snap);
-        });
+        // SDFDDGI host-hook: the Main frame systems are registered by a NAMED fn (a verbatim
+        // code motion of the former closure) so a headless test can run the PRODUCTION
+        // registration in a subset-composed world -- `app.update()` on a bare `EnginePlugins`
+        // panics (the runner, not `build`, inserts the world residents), and the ECS exposes no
+        // system-name introspection, so this is the only device-free way to prove a gate is
+        // registered (`sync_ddgi_light_gate` was not, for the whole I0..I7 ladder).
+        app.add_systems_cfg(register_main_frame_systems);
 
         // The D4 ordering seam: engine Fixed snapshots run AFTER user Fixed
         // gameplay, pinned BY NAME (no topological accident). R5 makes the seam
@@ -267,12 +743,44 @@ impl Plugin for EnginePlugins {
             add_gpu_transform_pack(b).in_set(FixedSet::Snapshot);
         });
 
+        // SSAA (AA campaign Stage 3): the explicit builder wins when `>= 2`; otherwise
+        // `BOYKO_AA=ssaa` (the owner-eval channel, same env family the AA framework
+        // already reserves) requests the v1 default of `2`. Any other value the host
+        // does not honor (only `2` arms — see `WindowHost::boot`), so passing it through
+        // unclamped here is harmless: the host's device-capability probe is the sole
+        // arming authority.
+        let ssaa_scale = if self.ssaa_scale >= 2 {
+            self.ssaa_scale
+        } else if std::env::var("BOYKO_AA").as_deref() == Ok("ssaa") {
+            2
+        } else {
+            0
+        };
         let desc = WindowDesc {
             title: self.title,
             width: self.width,
             height: self.height,
+            ssaa_scale,
         };
         app.set_runner(Box::new(move |app: &mut App| {
+            // ── KE16 App-12: the timer resolution, held for exactly the run ─────────────────────
+            //
+            // The binding lives HERE and not in `build()` above, and the difference is the whole
+            // point of an RAII guard. `build()` is the precedent for a process-wide boot-time side
+            // effect (`boot_and_enable_logging_from_env`, two blocks up) but it takes `&self` and
+            // returns, so a guard bound there would raise the resolution and restore it before the
+            // first frame — the one shape that costs the power and buys none of the precision.
+            // This closure IS the run: `run_windowed`'s own doc says it "owns the whole app
+            // lifecycle" — device boot, frame loop, D2 teardown — so the guard's scope is the
+            // process's useful life and its `Drop` runs on the normal return AND on an unwind
+            // through the frame loop.
+            //
+            // Unconditional and un-flagged: the owner ruled on 2026-09-02 that the engine takes
+            // the documented power cost, so this is not an opt-in. It is also not free to skip on
+            // a boot that fails — a refused device still unwinds through this frame, which is
+            // exactly why the release is a `Drop` and not a statement after the call.
+            let timer_resolution = TimerResolutionGuard::new_1ms();
+            report_timer_resolution(&timer_resolution);
             runner::run_windowed(app, desc)
         }));
     }
@@ -280,4 +788,315 @@ impl Plugin for EnginePlugins {
     fn name(&self) -> &'static str {
         "boyko_app::EnginePlugins"
     }
+}
+
+/// The `Main`-schedule frame systems `EnginePlugins` registers -- the affine pack, the caster
+/// gather, every `sync_*_light_gate` header bridge, the snap collapse, the unified draw
+/// gather and the material edit stager -- as ONE builder fn (the body of the former
+/// `add_systems_cfg` closure, moved verbatim).
+///
+/// `pub` so an INTEGRATION test can run the PRODUCTION registration in a world composed of
+/// the same render plugins minus the window/runner (the `tests/camera_resolve.rs` subset
+/// precedent). That is what lets the SDFDDGI host-hook gate
+/// (`tests/ddgi_host_hook_registration.rs`) assert `sync_ddgi_light_gate` is registered HERE
+/// with its two ordering edges, rather than trusting a doc comment that says so. The gate
+/// cannot be a `#[cfg(test)] mod` in this file: `tests/host_ecs_entry_points_are_guarded.rs`
+/// forbids `app.update()` anywhere under `src/` as raw text, and the root reachability
+/// census's controls need the `CsmPlugin` registration to be spelled exactly once in this
+/// file (comments included — this sentence deliberately does not spell it) — both walk source
+/// as text and neither strips `cfg(test)`, by design.
+pub fn register_main_frame_systems(b: &mut ScheduleBuilder) {
+    let pack = b
+        .add_system(sync_instance_model_cols)
+        .in_set(InstancePackSet)
+        .in_set(VisibilitySet::Read)
+        .key();
+    // HW-RT rung 3b: `prev := curr` MUST run BEFORE the affine pack refreshes `curr`
+    // from this frame's moving `GlobalTransform`, so a mesh's motion vector is this
+    // frame's true per-object displacement (else `prev == curr`, zero motion, every
+    // box ghosts under its own motion). Dormant until a scene carries the
+    // `PrevInstanceModelCol` column (0%-gate).
+    #[cfg(feature = "hwrt")]
+    b.add_system(sync_prev_instance_model_cols).before(pack).in_set(VisibilitySet::Read);
+    // `add_gather_shadow_casters`, not `add_system(gather_shadow_casters)`: the helper
+    // chains `.after_set(AssetValidateSet)` (asset-streaming prereq (c)), the
+    // consumer-side pin of the validate -> gather edge that holds in any host; the
+    // `VisibilitySet::Read` membership is this host's own pin of the same order, plus
+    // the sync edge (R4b, the `configure_set` block below).
+    let casters =
+        add_gather_shadow_casters(b).after(pack).in_set(VisibilitySet::Read).key();
+    b.add_system(sync_csm_light_gate).after(casters);
+    // CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C5: `reduce_caster_bounds`
+    // is the UNWIRED EXPORTED API `CsmPlugin` deliberately does not register (mirrors
+    // `gather_shadow_casters` itself) — this is the app that co-registers it. `.after
+    // (casters)` folds THIS frame's finished gather output, not last frame's scratch
+    // (D7 — `CsmCasterScratch` is single-writer, `gather_shadow_casters` owns it).
+    // `.in_set(CsmFitSet)` gives `resolve_csm_cascades` (which joins `CsmResolveSet` in
+    // `CsmPlugin`, csm_plugin.rs:76) something to order against below. Without this
+    // registration `CsmCasterBounds` stays the `EMPTY` seed `CsmPlugin` inserts, so
+    // every `CsmFitMode` renders as `Fixed` (D7/T15) — never a panic, always a no-op.
+    b.add_system(reduce_caster_bounds).after(casters).in_set(CsmFitSet);
+    // `CsmFitSet → CsmResolveSet`: `resolve_csm_cascades` must observe THIS frame's
+    // folded bounds, not a one-frame-stale value (D11 — no accepted stagger, unlike
+    // the cold-owner-state cross-plugin staggers documented elsewhere in this file).
+    // Declared HERE (not inside `CsmPlugin`) because this closure is the first one that
+    // gives `CsmFitSet` a member; a `configure_set` inside `CsmPlugin` alone would warn
+    // W1501 (memberless set) in a bare-`CsmPlugin` world (D11). `App::add_systems_cfg`
+    // threads the SAME Main builder through every closure/plugin (app.rs:313-319), so
+    // this edge resolves against `CsmFitSet`'s membership above and `CsmResolveSet`'s
+    // membership in `CsmPlugin` regardless of registration order.
+    b.configure_set(CsmResolveSet).after(CsmFitSet);
+    // `LightSeedSet → CsmResolveSet`: the fit takes the first ENABLED sun (defect R2b), and
+    // the exclusive light seed is what enables a newly added light. Unordered, on the first
+    // frame of a sun spawned before the first update, the fit ran before the seed in 300 of
+    // 300 measured runs and published `ResolvedCsm::DISABLED` while `collect_lights`
+    // (ordered after the seed) already lit with that sun. Declared here for the same memberless-set reason as the edge above:
+    // `LightingPlugin` and `CsmPlugin` each declare membership only, and this closure runs
+    // in the one composition that holds both. No cycle: nothing is ordered after
+    // `resolve_csm_cascades` (its key is never taken, and no edge names `CsmResolveSet` as
+    // a predecessor), so no path leads from it back to the seed. Pinned by
+    // `tests/host_orders_csm_fit_after_light_seed.rs`, which goes red without this line.
+    b.configure_set(CsmResolveSet).after(LightSeedSet);
+    // The punctual header-gate ⇄ depth-pass lock-step (mirrors the csm sync): after the
+    // SAME caster gather so the gate's caster predicate is THIS frame's. It reads
+    // `ResolvedShadowAtlas.mode_word` (written by `resolve_shadow_atlas` in
+    // ShadowAtlasPlugin, ordered earlier by add-order) — the resolve→sync edge follows the
+    // same cross-plugin add-order discipline as csm (self-correcting under a one-frame lag,
+    // gated off by the default DISABLED ShadowConfig).
+    b.add_system(sync_punctual_light_gate).after(casters);
+    // Render P7-Q2: the SSAO header-gate bridge — mirrors `sync_csm_light_gate`/
+    // `sync_punctual_light_gate`'s cross-plugin registration (it bridges
+    // `SsaoPlugin`'s `SsaoConfig` and `LightingPlugin`'s `LightingConfig`), but
+    // reads `SsaoConfig` directly (no `ResolvedSsao`/caster dependency), so it
+    // carries no ordering edge here — UNLIKE `sync_ddgi_light_gate` below, which reads
+    // a resolved carrier and needs both edges.
+    b.add_system(sync_ssao_light_gate);
+    // SDFDDGI host-hook (the defect this line repairs): the GI header-gate bridge — the SOLE
+    // production writer of `LightingConfig::ddgi_indirect` (LightBuf word-7 bit 4). It was
+    // registered by NO host for the whole I0..I7 ladder, so the bit was never set, the resolve
+    // never entered `if (ddgi_mode != 0u)`, and the probe atlas the update pass wrote every
+    // enabled frame was never sampled — the feature drew zero pixels.
+    //
+    // BOTH edges are load-bearing, and neither is decoration:
+    //
+    // * `.after_set(DdgiResolveSet)` — the gate reads the `ResolvedDdgi` CARRIER (config + the
+    //   R9c boot freeze + the device caps, folded once by `resolve_ddgi_grid_gated`), not any
+    //   config of its own. Run before the resolve it would read LAST frame's carrier and the
+    //   bit would land a frame late on every flip.
+    // * `.before_set(LightCollectSet)` — `collect_lights` consumes `LightTableDirty` and packs
+    //   word 7 in the SAME pass, so without this edge the flipped bit reaches the GPU header a
+    //   frame late. That matters here more than for `sync_ssao_light_gate` (which carries no
+    //   edge): a late bit of 1 over a carrier that has already gone DISABLED is a frame whose
+    //   header says "sample the grid" — the exact shape the single-carrier design exists to
+    //   make impossible. Same by-name cross-plugin seam `sync_cluster_light_gate`/
+    //   `sync_sv0_light_gate` use (`collect_lights`' `SystemKey` is not nameable here).
+    b.add_system(sync_ddgi_light_gate).after_set(DdgiResolveSet).before_set(LightCollectSet);
+    // VB-SV0 rung S4: the SDF-on-mesh header-gate bridge — reads the boot-committed
+    // `ResolvedRenderPath`, RESOLVES `LightingConfig`'s two SV0 request bits against
+    // `vb_sdf_mesh_armable()`, and publishes the pair into the `_armed` fields the header
+    // packer reads. Same cross-plugin registration rationale as the gates above (it
+    // bridges `RenderPathPlugin`'s resolved carrier and `LightingPlugin`'s
+    // `LightingConfig`). The resolve is monotone downward — `request && capability` — so
+    // a world that never sets the request is untouched.
+    //
+    // It DOES carry an ordering edge (code-review P2-b), for the reason
+    // `sync_cluster_light_gate` below carries one and `sync_ssao_light_gate` above does
+    // not. Those two publish a bit that FOLLOWS an owner-set config, so an unordered fold
+    // packs a value one frame late and self-corrects. This gate publishes the result of a
+    // CAPABILITY resolve against a request the owner may set at any time: run after the
+    // fold, the first armed frame packs the PRE-resolve `_armed` pair — the wrong state,
+    // not a late one. `[vb_both_sdf]`-shaped fixtures dump a small fixed number of
+    // frames, so "one frame" is a frame that can be the measured one. `LightCollectSet`
+    // is the same by-name cross-plugin seam `sync_cluster_light_gate` uses (see its own
+    // comment below for why `collect_lights`' `SystemKey` is not nameable here).
+    b.add_system(sync_sv0_light_gate).before_set(LightCollectSet);
+    // VB-P1b-0: the L1 cluster header-gate bridge — reads `ClusterConfig` directly (no
+    // caster/resolved-carrier dependency, the SAME "no edge" shape `sync_ssao_light_gate`
+    // above carries for ITS OWN inputs). `ClusterConfig` is seeded by THIS fn (mirrors
+    // `LightingConfig` itself), so this bridge belongs alongside the other
+    // `sync_*_light_gate`s in this SAME closure rather than inside `LightingPlugin`/any
+    // render-path plugin.
+    //
+    // UNLIKE the sibling gates, this one DOES carry an explicit `.before_set` edge
+    // (code-review C1): `sync_csm_light_gate`/`sync_ssao_light_gate` feed the fold with
+    // only a SCALAR HEADER BIT, so a one-frame-stale read is merely a wrong bit (benign,
+    // self-correcting). This gate feeds a GPU BUFFER INDEX (`cluster_packed_dims`): on the
+    // very first frame `clusters_enabled` goes `true`, an unordered fold could pack
+    // `clusters_enabled=1` with STALE/ZERO dims (this gate hasn't run yet that frame), and
+    // the froxel resolve's `cluster_z_slice`/`cluster_linear_index` would then underflow to
+    // an out-of-bounds `ClusterGrid` index. That WAS real GPU UB with
+    // `robust_buffer_access` disabled (`device.rs`); as of VB-P1k all four `ClusterGrid`
+    // readers reject a zero-dims (or over-capacity) header and fall back to the in-bounds
+    // flat light scan, so the residue is a one-frame LIGHTING artefact rather than a
+    // device fault — this edge is now a correctness edge, not the only line against UB,
+    // and it stays for that reason. `.before_set(LightCollectSet)` is the SAME cross-plugin
+    // by-name seam `resolve_shadow_atlas`/`PunctualResolveSet` uses (`collect_lights`'s
+    // `SystemKey` is a closure-local in `LightingPlugin::build`, invisible here) — see
+    // `LightCollectSet`'s own doc.
+    b.add_system(sync_cluster_light_gate).before_set(LightCollectSet);
+    // The unified gather runs after BOTH the affine pack and the snap
+    // collapse (snap-before-gather is load-bearing — the gather reads the
+    // collapsed pair).
+    let snap = b.add_system(snap_apply).key();
+    // `add_gather_mesh_draws`: the helper chains `.after_set(AssetValidateSet)` (see the
+    // caster gather above); `VisibilitySet::Read` is this host's pin.
+    let gather = add_gather_mesh_draws(b).after(pack).after(snap).in_set(VisibilitySet::Read).key();
+    // Dynamic-materials DM1: drain `Assets<Material>`'s edited set into `MaterialUploadStaging`.
+    // AFTER the gather, so every material id the gather scattered this frame belongs to a row
+    // minted before the drain — a row minted into the table's headroom (defect D-1) is staged on
+    // the first frame it can be drawn, never one frame late. (Before the gather, a mint landing
+    // between the two would draw one frame of an unstaged row.) It also keeps the stager off the
+    // validate → gather chain.
+    b.add_system(stage_material_edits).after(gather);
+
+    // ── Every render reader runs after its writer (R4-frame-order) ──────────────────────
+    //
+    // Each edge below orders a reader after the system that writes what it reads, where
+    // the two are registered by different plugins and so can only meet by set name. None
+    // of these pairs had an ordering path before: each was decided by the executor's wave
+    // packing, which is a function of the whole graph, so an unrelated edge could flip
+    // it. MEASURED on the golden host: `gather_mesh_draws` ran before `visibility_sync`,
+    // drew 0 of 7 meshes on frame 0, and TAA carried that frame into its history on both
+    // feature legs; one edge added between two lighting systems flipped the pair on the
+    // `hwrt` leg only. Declared here, not in the plugins, because this is the one
+    // composition that populates every set named (an edge naming a memberless set warns
+    // `boyko-W1501`). Each is pinned by a `tests/host_orders_*.rs` gate that declares the
+    // reverse edge and expects the ordering cycle; `tests/host_frame_zero_draws_every_mesh.rs`
+    // pins the frame-0 consequence.
+    //
+    // `RenderEnabled`: `visibility_sync` (`VisibilitySet::Sync`) sets the bit through a
+    // deferred command; every system that only filters on `Enabled<RenderEnabled>` joins
+    // `VisibilitySet::Read`: both instance packs, `sync_prev_instance_model_cols`, and the
+    // caster and mesh gathers. The readers declare their writer here; the same order is
+    // also implied by the two `Validate` edges below, so this line alone cannot be made
+    // to fail (its gate goes red with this line and one of those deleted) — it stays as
+    // the readers' own declaration, which a transitive path is not.
+    b.configure_set(VisibilitySet::Read).after(VisibilitySet::Sync);
+    // `RenderStale` / `MaterialStale` (R4b-open-edges, re-based on the asset-validate
+    // prereqs): `validate_asset_refs` (`VisibilitySet::Validate`) writes the two stale
+    // bits through deferred commands (`asset_refcount.rs`, `SetStaleCommand`), and the
+    // readers filter on them (`Disabled<RenderStale>` in both gathers), so the readers
+    // run after validation or a gather draws a row the validation marked stale this
+    // frame — the same order the gather helpers pin per consumer with
+    // `.after_set(AssetValidateSet)`; this set edge covers the instance packs as well.
+    // Validation after the sync: since the prereq lane, validation no longer reads
+    // `RenderEnabled` (its queries do not filter on it, so a hidden row's stale bit is
+    // maintained while hidden), and this edge therefore carries no data today; it stays
+    // as the declared phase order R4b introduced, pinned by
+    // `tests/host_orders_asset_validation_after_visibility_sync.rs`, and dropping it
+    // is a ruling for the host's owner, not a merge. Validation cannot simply join
+    // `Read`: a member shared by two ordered sets is rejected (`boyko-B9004`).
+    b.configure_set(VisibilitySet::Validate).after(VisibilitySet::Sync);
+    b.configure_set(VisibilitySet::Read).after(VisibilitySet::Validate);
+    // `GlobalTransform`: both instance packs copy it into their instance columns, and
+    // `propagate_transforms` (in `CameraSet::Resolve`) writes it. The packs are also after
+    // propagation through `visibility_sync` (itself `.after(propagate)`), but that edge
+    // carries no data and is not this dependency's declaration.
+    //
+    // MEASURED 2026-08-26 (render line), before any edge declared this: on the first scene
+    // that moves an entity from the MAIN schedule (the playground's camera-parented HUD
+    // panel), its `Transform` and `GlobalTransform` were this frame's while its
+    // `InstanceModelCol` — the affine the GPU draws — held the PREVIOUS frame's pose, every
+    // frame: the pack ran before the propagation. Static props never move, and a physics
+    // body reaches the GPU through the `GpuTransform3D` pair packed in `FixedSet::Snapshot`,
+    // so nothing else showed it. The render line fixed it with a per-system
+    // `.after_set(CameraSet::Resolve)` on `sync_instance_model_cols`; this set edge is the
+    // same order for every member of `InstancePackSet`, and the A8 merge kept only this one.
+    b.configure_set(InstancePackSet).after(CameraSet::Resolve);
+    // `GlobalTransform`, the lights' (R4b-open-edges): `light_reconcile` derives each
+    // light's `direction` / `position` from it (`light_reconcile.rs`, the three
+    // `&GlobalTransform` queries in its signature, read in its three loops), and
+    // `propagate_transforms` writes it. Unordered, the frame-0 light table carried the
+    // identity pose's direction for a sun spawned with a posed `Transform` and an identity
+    // `GlobalTransform` (measured, `docs/OPEN-QUESTIONS.md` 2026-09-19 (b)); wherever the
+    // wrong order holds on a later frame (not measured), a moving light's pose trails its
+    // transform by one frame for as long as it moves.
+    b.configure_set(LightReconcileSet).after(CameraSet::Resolve);
+    // `ViewUniform`: written by `resolve_active_camera` (in `CameraSet::Resolve`), read by
+    // the CSM fit and by the punctual atlas ranking. Both halves are also implied today by
+    // other chains — the CSM half by the pack edge above (`InstancePackSet →
+    // gather_shadow_casters → reduce_caster_bounds → CsmResolveSet`) and, since R4b, both
+    // halves by the reconcile edges (`LightReconcileSet` after `CameraSet::Resolve`, and
+    // the fit / the resolve after `LightReconcileSet`, below) — so their gates pin the
+    // order rather than these lines alone (each goes red only with every path cut). They
+    // stay as the fit's and the resolve's own declarations, which those unrelated chains
+    // are not.
+    b.configure_set(CsmResolveSet).after(CameraSet::Resolve);
+    b.configure_set(PunctualResolveSet).after(CameraSet::Resolve);
+    // `DirectionalLight::direction`: written by `light_reconcile`, read by the CSM fit.
+    b.configure_set(CsmResolveSet).after(LightReconcileSet);
+    // `SpotLight` / `PointLight` `position` and `SpotLight::direction` (R4b-open-edges):
+    // written by `light_reconcile`, read by the punctual atlas ranking and fit
+    // (`shadow_atlas.rs`, `spot_priority` / `spot_input_from`). A ranking that runs first
+    // ranks a moving light from last frame's pose.
+    b.configure_set(PunctualResolveSet).after(LightReconcileSet);
+}
+
+/// Parses the `BOYKO_RENDER_PATH` / `BOYKO_GEOMETRY_LEGS` dev/test launch env vars into a
+/// [`boyko_render::RenderPathConfig`] override (Multi-paradigm render-path plan — the launcher
+/// seam `scripts/run-scene.ps1` drives).
+///
+/// Returns `None` when BOTH are unset (the common/golden case), so [`EnginePlugins::build`] leaves
+/// `RenderPathPlugin`'s `Deferred + Both` byte-identity anchor exactly as seeded. When EITHER is
+/// set, the unset axis keeps its anchor value (path→`Deferred`, legs→`Both`). Values are
+/// case-insensitive and accept friendly aliases; an unrecognized value falls back to that axis's
+/// anchor with an `eprintln` diagnostic (never a panic — a mistyped var must not crash the app).
+fn render_path_config_from_env() -> Option<boyko_render::RenderPathConfig> {
+    use boyko_render::{GeometryLegs, RenderPath};
+
+    let path_var = std::env::var("BOYKO_RENDER_PATH").ok();
+    let legs_var = std::env::var("BOYKO_GEOMETRY_LEGS").ok();
+    if path_var.is_none() && legs_var.is_none() {
+        return None;
+    }
+
+    let path = match path_var.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("deferred") => RenderPath::Deferred,
+        Some("forward") => RenderPath::Forward,
+        Some("forwardplus" | "forward+" | "forward_plus" | "clustered") => RenderPath::ForwardPlus,
+        Some("visibilitybuffer" | "vb" | "visibility_buffer" | "visbuffer") => {
+            RenderPath::VisibilityBuffer
+        }
+        Some(other) => {
+            // Two sites, one code, one latch EACH — the latch is declared here rather than inside
+            // the reporter so that a mistyped `BOYKO_RENDER_PATH` cannot silence a mistyped
+            // `BOYKO_GEOMETRY_LEGS`, and so the property is visible at the site that needs it.
+            static W3009_PATH: boyko_log::codes::OnceSite = boyko_log::codes::OnceSite::new();
+            crate::diag::report_unrecognized_env_value(
+                &W3009_PATH,
+                "BOYKO_RENDER_PATH",
+                other,
+                "Deferred",
+                "deferred|forward|forwardplus|vb",
+            );
+            RenderPath::Deferred
+        }
+    };
+
+    let legs = match legs_var.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("both") => GeometryLegs::Both,
+        Some("mesh") => GeometryLegs::Mesh,
+        Some("sdf") => GeometryLegs::Sdf,
+        Some(other) => {
+            static W3009_LEGS: boyko_log::codes::OnceSite = boyko_log::codes::OnceSite::new();
+            crate::diag::report_unrecognized_env_value(
+                &W3009_LEGS,
+                "BOYKO_GEOMETRY_LEGS",
+                other,
+                "Both",
+                "both|mesh|sdf",
+            );
+            GeometryLegs::Both
+        }
+    };
+
+    let path_name = crate::diag::debug_into(&path);
+    let legs_name = crate::diag::debug_into(&legs);
+    boyko_log::info!(
+        boyko_log::App,
+        "render-path override from env: {} x {}",
+        path_name.as_str(),
+        legs_name.as_str()
+    );
+    Some(boyko_render::RenderPathConfig { path, legs })
 }

@@ -1,0 +1,83 @@
+{
+ "start": "2026-09-22T08:18:13.492+03:00",
+ "test": false,
+ "placement": "P-none (no affinity call)",
+ "blocks": [
+  {
+   "name": "main",
+   "passes": 2,
+   "rounds": 6,
+   "cells_per_round": 30,
+   "order_pass0": [
+    "J-As#parent@W1",
+    "J-As#tip@W1",
+    "J-A#parent@W1",
+    "J-A#tip@W1",
+    "R#parent@W1",
+    "R#tip@W1",
+    "R-S#parent@W1",
+    "R-S#tip@W1",
+    "S16#parent@W1",
+    "S16#tip@W1",
+    "J-As#parent@W2",
+    "J-As#tip@W2",
+    "J-A#parent@W2",
+    "J-A#tip@W2",
+    "J-As#parent@W4",
+    "J-As#tip@W4",
+    "J-A#parent@W4",
+    "J-A#tip@W4",
+    "J-As#parent@W8",
+    "J-As#tip@W8",
+    "J-A#parent@W8",
+    "J-A#tip@W8",
+    "R#parent@W8",
+    "R#tip@W8",
+    "R-S#parent@W8",
+    "R-S#tip@W8",
+    "J-As#parent@W16",
+    "J-As#tip@W16",
+    "J-A#parent@W16",
+    "J-A#tip@W16"
+   ]
+  },
+  {
+   "name": "armed",
+   "passes": 2,
+   "rounds": 6,
+   "cells_per_round": 4,
+   "order_pass0": [
+    "J-As-a#parent@W1",
+    "J-As-a#tip@W1",
+    "J-As-a#parent@W8",
+    "J-As-a#tip@W8"
+   ]
+  },
+  {
+   "name": "canary",
+   "passes": 1,
+   "rounds": 1,
+   "cells_per_round": 2,
+   "order_pass0": [
+    "J-C#parent@W1",
+    "J-C#tip@W1"
+   ]
+  }
+ ],
+ "machine_before": {
+  "time": "2026-09-22T08:18:13.902+03:00",
+  "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+  "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n243"
+ },
+ "end": "2026-09-22T10:12:24.646+03:00",
+ "machine_after": {
+  "time": "2026-09-22T10:12:24.988+03:00",
+  "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+  "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n254"
+ },
+ "binaries_after": "all match",
+ "status": "complete",
+ "timed_processes": 452,
+ "reruns": 42,
+ "warmups": 5
+}

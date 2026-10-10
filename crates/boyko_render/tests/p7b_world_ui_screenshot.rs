@@ -86,6 +86,19 @@
 //!
 //! Output image: `D:\claude\BoykoEngine\target\screenshots\p7b_world_ui.bmp`
 
+// clippy 1.98's `chunks_exact_to_as_chunks` fires on the RGBA readback loops below.
+// Left as `chunks_exact` DELIBERATELY: every site here sits inside a `zip` / `filter` /
+// `enumerate` chain where `as_chunks().0` changes the item type from `&[u8]` to
+// `&[u8; N]`, so the rewrite is semantic rather than textual - and these targets need a
+// GPU, so the edit could not be verified by running them on this headless box. The
+// LIBRARY code this lint flagged was converted properly; this is the test-only remainder.
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
+// Test harness, not an engine path: `Arc<Mutex<..>>` carries the spawned `Entity` out of a
+// one-shot `run_system` closure, and a `Mutex<Option<FnOnce>>` lets a once-only readback
+// closure be called from a `Fn` system. Test-only scaffolding, never linked into a shipping build.
+#![allow(clippy::disallowed_types)]
+
 mod common;
 
 use std::path::{Path, PathBuf};
@@ -283,6 +296,8 @@ fn msdf_instances_at(text: &str, font: &BakedFont, origin_x: f32, origin_y: f32)
                     border_width: [0.0; 4],
                     clip: None,
                     text_uv: Some(g.uv),
+                    image: None,
+                    nine_slice: None,
                 },
                 1.0,
             )
@@ -353,7 +368,7 @@ fn write_bmp(path: &Path, rgba: &[u8], w: u32, h: u32) -> std::io::Result<()> {
     buf.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
     buf.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
     // --- pixel data: RGBA -> BGRA (the ONLY channel swap; no row flip) ---
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         buf.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
     }
 
@@ -872,7 +887,9 @@ mod gpu {
             boyko_render::ui_rect_vs_spirv(),
             boyko_render::ui_rect_fs_spirv(),
             4,
-            font,
+            Some(font),
+            boyko_render::UiSamplerMode::Smooth,
+            None,
         )
         .expect("ui_setup (UI pipeline + atlas upload + per-FIF rings)");
 
@@ -892,6 +909,9 @@ mod gpu {
         let (pipeline, bind_group) = rhi
             .ui_handles(plan.frame_index)
             .expect("ui_handles after ui_setup");
+        // UI-ADVANCED S3: set 1 — the sprite lane. Resolved through the SAME accessor
+        // the on-screen `ui_pass` reads (S-D9), so both recorders bind one set.
+        let sprite_group = rhi.ui_sprite_group().expect("ui_sprite_group after ui_setup");
 
         let device = rhi.context();
         let queue = device.rhi_queue();
@@ -905,6 +925,8 @@ mod gpu {
                 dimension: TextureDimension::D2,
                 usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
                 array_layers: 1,
+                mip_levels: 1,
+                view_format: None,
             })
             .expect("offscreen output texture");
 
@@ -976,7 +998,7 @@ mod gpu {
         // the UI bind-group layout (binding 0 SSBO, binding 1 atlas, binding 2 UBO)
         // and a 16-byte VERTEX push range.
         unsafe {
-            record_ui_rects(&mut encoder, &full, &plan, pipeline, bind_group);
+            record_ui_rects(&mut encoder, &full, &plan, pipeline, bind_group, sprite_group);
         }
         encoder.end_rendering();
 
@@ -1044,8 +1066,10 @@ mod gpu {
         debug_assert_eq!(bg.len(), fg.len(), "composite inputs are the same extent");
         let mut out = vec![0u8; bg.len()];
         for (o, (b, f)) in out
-            .chunks_exact_mut(4)
-            .zip(bg.chunks_exact(4).zip(fg.chunks_exact(4)))
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(bg.as_chunks::<4>().0.iter().zip(fg.as_chunks::<4>().0.iter()))
         {
             let a = f[3] as f32 / 255.0;
             for c in 0..3 {
@@ -1063,7 +1087,7 @@ mod gpu {
     /// and writes the BMP. `#[ignore]`d — Vulkan boot can hang a headless run; the
     /// orchestrator runs it on the RTX (see the module header).
     #[test]
-    #[ignore = "boots Vulkan on the GPU; owner-run on the RTX (see module header)"]
+    #[ignore = "gpu: boots Vulkan on the GPU; owner-run on the RTX (see module header)"]
     fn p7b_world_ui_screenshot() {
         let Some(ctx) = boot_or_skip("p7b_world_ui_screenshot") else {
             return;

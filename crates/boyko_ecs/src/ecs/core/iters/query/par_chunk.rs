@@ -248,8 +248,20 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
                 // non-overlapping by construction; CD3 disjointness for
                 // `&mut [T]` slices is therefore satisfied structurally. The run
                 // walk nests INSIDE each batch with `range_end = end` (C5).
-                let mut start = 0usize;
-                while start < entity_count {
+                //
+                // KE16 App-4: the archetype's whole chunk count goes to
+                // `Scope::spawn_batch` in ONE call. Underneath it is one
+                // `spawn` per body — each body registers itself and each push
+                // takes its own wake decision — so `n_chunks` is the caller's
+                // UPPER-BOUND promise, not a batched registration; the map
+                // below yields exactly that many bodies. `chunk_size >= 1`
+                // (`BatchingStrategy::chunk_size` ends in `.max(1)`), so the
+                // count is the closed form of the `while start < entity_count`
+                // walk it replaces and the ranges are unchanged.
+                let n_chunks = entity_count.div_ceil(chunk_size);
+
+                scope.spawn_batch(n_chunks, (0..n_chunks).map(|chunk| {
+                    let start = chunk * chunk_size;
                     let end = (start + chunk_size).min(entity_count);
 
                     let captured = ChunkChunkCaptures::<'_, D, F, Func> {
@@ -262,7 +274,7 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
                         has_enable,
                         f: f_ref as *const Func,
                         _state_borrow: PhantomData,
-                        _data_filter_invariance: PhantomData,
+                        _data_filter_marker: PhantomData,
                     };
 
                     // SAFETY (PAR2 / PAR3 / S1 / SEND1 / SEND3 / CD1-CD4):
@@ -286,13 +298,11 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
                     //   - The conflict graph / `FilteredAccessSet` guarantees
                     //     no concurrent system aliases this archetype's
                     //     columns for the current dispatch round (SCH3).
-                    scope.spawn(move || {
+                    move || {
                         // SAFETY: forwarded; see outer SAFETY block.
                         unsafe { run_chunk_owned::<D, F, Func>(captured); }
-                    });
-
-                    start = end;
-                }
+                    }
+                }));
             }
         });
     });
@@ -353,9 +363,16 @@ struct ChunkChunkCaptures<'s, D: ChunkedQueryData, F: ArchetypalQueryFilter, Fun
     f: *const Func,
     /// Lifetime carrier for the `'s` state borrow.
     _state_borrow: PhantomData<&'s ()>,
-    /// Invariance over `(D, F)`. `fn() -> (D, F)` keeps the marker
-    /// `Send + Sync` independently of `D`/`F` auto-trait bounds.
-    _data_filter_invariance: PhantomData<fn() -> (D, F)>,
+    /// Type carrier for `(D, F)`. `fn() -> (D, F)` owns nothing, so the marker
+    /// is `Send + Sync` independently of `D`/`F` auto-trait bounds — that is
+    /// what the `fn` shape is here for.
+    ///
+    /// NOT invariance, which the old field name (`_data_filter_invariance`)
+    /// and this comment both claimed: a `fn` **return** position is covariant
+    /// (invariance would need `fn(D, F) -> (D, F)`). Neither is observable
+    /// here — `D` and `F` are bounded `+ 'static` at every use site, so
+    /// neither carries a lifetime for variance to act on.
+    _data_filter_marker: PhantomData<fn() -> (D, F)>,
 }
 
 // Manual `Copy`/`Clone` so the auto-derive does not synthesise a
@@ -446,10 +463,10 @@ where
 {
     // SAFETY (CD1, CD2, CD4, PAR2): mirrors the inline path in
     //   `par_for_each_chunk_impl` but writes to a sub-range only. CD3
-    //   disjointness is enforced by the outer while-loop emitting
-    //   non-overlapping `[start, start + len)` half-open ranges via the
-    //   `BatchingStrategy` monotonic walk. The `data_state` deref is bounded
-    //   by the surrounding `scope.Drop`; the `f` deref likewise.
+    //   disjointness is enforced by the outer `0..n_chunks` dispatch walk,
+    //   which emits non-overlapping `[start, start + len)` half-open ranges
+    //   from the `BatchingStrategy` chunk size. The `data_state` deref is
+    //   bounded by the surrounding `scope.Drop`; the `f` deref likewise.
     let mut chunk_fetch =
         <D as ChunkedQueryData>::init_chunk_fetch(unsafe { &*captured.data_state });
     unsafe {
@@ -747,6 +764,14 @@ mod tests {
         }
     }
 
+    /// Rows in a parallel-path test's archetype under Miri: the smallest count that still clears
+    /// [`MIN_ARCHETYPE_FOR_PARALLEL`](crate::ecs::core::iters::query::par_iter::MIN_ARCHETYPE_FOR_PARALLEL),
+    /// so the scope.spawn fan-out is the path taken exactly as natively. The native sizes
+    /// (4 000-12 000 rows, spawned one entity at a time) cost 17-20 min per test under Miri
+    /// (MEASURED 2026-10-10).
+    const MIRI_PARALLEL_ROWS: u32 =
+        crate::ecs::core::iters::query::par_iter::MIN_ARCHETYPE_FOR_PARALLEL as u32 + 76;
+
     fn register_wave7_components() {
         component_registry::register_layout::<CompW7a>(COMP_W7A.0);
         component_registry::register_layout::<CompW7b>(COMP_W7B.0);
@@ -811,7 +836,8 @@ mod tests {
         register_wave7_components();
         let mut ecs = EcsMaster::new();
         let arch = ecs.create_archetype(&[COMP_W7A]);
-        for i in 0..10_000u32 {
+        let n: u32 = if cfg!(miri) { MIRI_PARALLEL_ROWS } else { 10_000 };
+        for i in 0..n {
             spawn_w7a(&mut ecs, arch, i);
         }
 
@@ -852,9 +878,9 @@ mod tests {
 
         assert_eq!(
             counter.load(Ordering::Relaxed),
-            10_000,
+            n as usize,
             "PAR2/CD3 full coverage: every row processed exactly once \
-             (counter == 10000, no overlap, no drop)",
+             (counter == n, no overlap, no drop)",
         );
         // At least 2 invocations (large-archetype split fan-out); upper bound
         // is the worker count × chunks-per-worker, but we only pin the
@@ -888,8 +914,11 @@ mod tests {
         let arch_a = ecs.create_archetype(&[COMP_A, COMP_W7A]);
         let arch_b = ecs.create_archetype(&[COMP_A, COMP_W7B]);
 
-        // 5000 entities into arch_a.
-        for i in 0..5000u32 {
+        // 5000 entities into arch_a and 7000 into arch_b natively; under Miri each archetype gets
+        // just past the parallel threshold, with different counts so the two stay distinguishable.
+        let (n_a, n_b): (u32, u32) =
+            if cfg!(miri) { (MIRI_PARALLEL_ROWS, MIRI_PARALLEL_ROWS + 31) } else { (5000, 7000) };
+        for i in 0..n_a {
             let ca = CompA(i);
             let cw = CompW7a(i);
             // SAFETY: both `#[repr(C)]` POD; byte slices valid for the call.
@@ -908,8 +937,7 @@ mod tests {
             ecs.create_entity(arch_a, &[(COMP_A, a_bytes), (COMP_W7A, w_bytes)])
                 .expect("multi-archetype spawn arch_a must succeed");
         }
-        // 7000 entities into arch_b.
-        for i in 0..7000u32 {
+        for i in 0..n_b {
             let ca = CompA(i + 100_000);
             let cw = CompW7b(i);
             // SAFETY: both `#[repr(C)]` POD; byte slices valid for the call.
@@ -984,8 +1012,8 @@ mod tests {
 
         assert_eq!(
             total.load(Ordering::Relaxed),
-            12_000,
-            "multi-archetype dispatch sum: 5000 + 7000 = 12000 (every row across both archetypes processed exactly once)",
+            (n_a + n_b) as usize,
+            "multi-archetype dispatch sum: n_a + n_b (every row across both archetypes processed exactly once)",
         );
     }
 
@@ -1001,7 +1029,8 @@ mod tests {
         register_wave7_components();
         let mut ecs = EcsMaster::new();
         let arch = ecs.create_archetype(&[COMP_W7POS]);
-        for i in 0..4000u32 {
+        let n: u32 = if cfg!(miri) { MIRI_PARALLEL_ROWS } else { 4000 };
+        for i in 0..n {
             spawn_w7pos(&mut ecs, arch, i);
         }
 
@@ -1045,7 +1074,7 @@ mod tests {
         let state = QueryDataState::<&CompW7Pos, ()>::new(&mut ecs);
         // SAFETY (U_C1): cell consumed within this scope.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
-        let mut collected: Vec<u32> = Vec::with_capacity(4000);
+        let mut collected: Vec<u32> = Vec::with_capacity(n as usize);
         // SAFETY (Q1, CD1-CD4): read-only re-iteration; no aliasing live.
         unsafe {
             let ids = state.archetype_state.matched_ids_pre_terms();
@@ -1063,9 +1092,9 @@ mod tests {
             );
         }
 
-        assert_eq!(collected.len(), 4000, "every row must reappear after mutation");
+        assert_eq!(collected.len(), n as usize, "every row must reappear after mutation");
         collected.sort_unstable();
-        let expected: Vec<u32> = (0..4000u32).map(|i| i.wrapping_mul(2)).collect();
+        let expected: Vec<u32> = (0..n).map(|i| i.wrapping_mul(2)).collect();
         assert_eq!(
             collected, expected,
             "every CompW7Pos(i) must now read back as CompW7Pos(i*2) — \

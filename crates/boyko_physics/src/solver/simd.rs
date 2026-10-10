@@ -16,8 +16,9 @@
 //!   `a*b + c` rounds TWICE. The two differ by a single ULP on FMA-capable CPUs
 //!   and would diverge per target. Every `a*b + c` here is a SEPARATE `_mm256_mul_ps`
 //!   then `_mm256_add_ps`, mirroring the scalar two-rounding sequence exactly. (The
-//!   crate also carries no `target-feature=+fma` and no `mul_add` call, so the
-//!   compiler cannot contract the explicit `mul`+`add` either.)
+//!   ISA baseline DOES include FMA since 2026-09-02, but this module emits no
+//!   `mul_add` and no fused intrinsic, and Rust never contracts an explicit
+//!   `mul`+`add` on its own — see the "FMA baseline" section below.)
 //! - **NO `rsqrtps` / `rcpps`** (`_mm256_rsqrt_ps` / `_mm256_rcp_ps`): the
 //!   approximate reciprocal/reciprocal-sqrt instructions return DIFFERENT bits on
 //!   Intel vs AMD. The normalize uses exact `_mm256_sqrt_ps` then `_mm256_div_ps`,
@@ -43,13 +44,30 @@
 //! `pointvel_x8` / `effective_mass_x8` / `apply_impulse_blend_x8`) — is written
 //! `mul_add`-FREE: every `a*b + c` is a SEPARATE `_mm256_mul_ps` then
 //! `_mm256_add_ps`, mirroring the scalar two-rounding sequence, so the SIMD bits
-//! match the scalar oracle on every target. Rust does NOT auto-contract an
-//! explicit `mul`+`add` into a single FMA (contraction needs an explicit
-//! `f32::mul_add`, which this module never calls, or a global fast-math flag,
-//! which Rust stable exposes none of), so a `+fma` build would NOT silently fuse
-//! these — but to make the no-FMA assumption a COMPILE-TIME contract rather than
-//! a runtime hope, the build is rejected outright under `+fma` (the
-//! [`compile_error!`] guard at module scope, below the doc block).
+//! match the scalar oracle on every target.
+//!
+//! # FMA baseline — the ISA has it; this module does not use it
+//!
+//! The build enables FMA. Owner ruling, 2026-09-02: the ISA baseline is
+//! `-C target-cpu=x86-64-v3`, which includes FMA, and the two `compile_error!`
+//! guards that used to reject such a build (here and in `crate::sdf_simd`) are
+//! gone. **The property that was ever load-bearing is that this module contains
+//! no fused and no approximate op — not that the CPU lacks the instruction.**
+//!
+//! An ISA bit cannot fuse anything on its own: Rust does NOT contract an explicit
+//! `mul`+`add` into an FMA. Contraction requires an explicit [`f32::mul_add`] or a
+//! global fast-math flag, and stable Rust exposes neither implicitly. MEASURED
+//! 2026-09-02 on `rustc 1.97.1` with `-C target-cpu=x86-64-v3 --emit=asm`:
+//! `a * b + c` compiles to `vmulss` + `vaddss` — ZERO `vfmadd`; `a.mul_add(b, c)`
+//! compiles to exactly ONE `vfmadd213ss`; and a slice loop `c[i] = a[i]*b[i]+c[i]`
+//! auto-vectorises to 16 `ymm` references with SEPARATE `vmulps` and `vaddps` and
+//! still zero FMA. So the twice-rounded sequence survives an `+fma` build intact,
+//! and the old guard was rejecting a build that could not have hurt us.
+//!
+//! What makes the invariant load-bearing now is a source census, not the ISA:
+//! [`tests::solver_simd_has_no_fma_or_approx_callsites`] fails the build if this
+//! file ever gains a fused intrinsic, an `rcp`/`rsqrt` approximation, or a
+//! `mul_add` call. That test is the enforcement; this paragraph is only its map.
 //!
 //! # Safety
 //!
@@ -66,22 +84,19 @@
 //! [`refresh_inertia`], [`apply_gravity`], and [`position_integrate`] are the
 //! public entry points the solver calls. They run the AVX2 kernel ONLY when the
 //! compile-time gate is satisfied AND the runtime `simd` flag is set; otherwise
-//! (flag off, or a non-AVX2 build, or under Miri) they run the scalar kernel,
-//! which is byte-identical to the shipped `refresh_inertia` / integrate loop —
-//! the campaign 0%-gate. The scalar kernel is also the differential-test oracle.
+//! (flag off, or a non-AVX2 build) they run the scalar kernel, which is
+//! byte-identical to the shipped `refresh_inertia` / integrate loop — the
+//! campaign 0%-gate. The scalar kernel is also the differential-test oracle. The
+//! compile-time gate has no `not(miri)` term, so under Miri the arm follows the
+//! Miri build's own target features, exactly as natively.
 
-// Decision 5 (O7) defense-in-depth: this SIMD module is written `mul_add`-free
-// (O1 integrate/inertia + O7 colored-solve `x8` helpers); reject any `+fma` build
-// so the no-FMA determinism invariant is a compile-time contract, not a runtime
-// hope. See the "No-FMA invariant" module-doc paragraph for why contraction
-// cannot actually occur on our explicit `mul`+`add` even under `+fma`.
-#[cfg(target_feature = "fma")]
-compile_error!(
-    "boyko-physics determinism requires no FMA contraction; this SIMD module is \
-     written mul_add-free and must be built without +fma. (No mul_add is emitted, \
-     so +fma would not actually contract our explicit mul+add, but the build is \
-     rejected to make the no-FMA invariant load-bearing.)"
-);
+// A `#[cfg(target_feature = "fma")] compile_error!` stood here until 2026-09-02,
+// rejecting the whole build under `+fma`. It was removed when the owner enabled
+// the `x86-64-v3` baseline, because it gated the WRONG proposition: it asserted
+// "the CPU has no FMA" when what the oracle tests need is "this file emits no
+// fused or approximate op". The enforcement moved rather than vanished — see
+// `tests::solver_simd_has_no_fma_or_approx_callsites`, the source census that now
+// fails the build on a fused/approx/`mul_add` call site regardless of ISA.
 
 use crate::math::{Mat3, Vec3};
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
@@ -89,6 +104,7 @@ use crate::math::Quat;
 use crate::resources::BodyState;
 
 use super::contact::{BodyEffective, is_dynamic_row};
+use super::soft_step::BodyDelta;
 
 /// AVX2 batch width (8 `f32` lanes per `__m256`).
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
@@ -121,7 +137,7 @@ pub fn refresh_inertia(
             return;
         }
     }
-    // Flag off / non-AVX2 build / Miri: the byte-identical scalar oracle.
+    // Flag off / non-AVX2 build: the byte-identical scalar oracle.
     #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
     let _ = simd;
     refresh_inertia_scalar(bodies_eff, snapshot);
@@ -232,6 +248,33 @@ pub fn position_integrate_scalar(
         if snap.simulated && is_dynamic_row(eff.inv_mass) {
             snap.position = snap.position + eff.linear_velocity * h;
             snap.rotation = snap.rotation.integrate(eff.angular_velocity, h);
+        }
+    }
+}
+
+/// [`position_integrate_scalar`] that also accumulates each moved row's movement over the step
+/// (V2, the speculative current separation): the same loop, the same guard, the same two pose
+/// statements, then `dp += v·h` and `dq = dq.integrate(ω, h)` on the row's [`BodyDelta`]
+/// (Box2D v3's `deltaPosition` / `deltaRotation`). Both solvers call it in place of the untracked
+/// integrate on a step whose speculative contacts are on — no stage, loop or pass of its own. A
+/// row the guard skips keeps its delta. `deltas` holds one entry per row.
+#[inline]
+pub(crate) fn position_integrate_tracked(
+    bodies_eff: &[BodyEffective],
+    snapshot: &mut [BodyState],
+    deltas: &mut [BodyDelta],
+    h: f32,
+) {
+    debug_assert!(
+        deltas.len() >= snapshot.len().min(bodies_eff.len()),
+        "invariant: every integrated row has a delta"
+    );
+    for ((eff, snap), delta) in bodies_eff.iter().zip(snapshot.iter_mut()).zip(deltas.iter_mut()) {
+        if snap.simulated && is_dynamic_row(eff.inv_mass) {
+            snap.position = snap.position + eff.linear_velocity * h;
+            snap.rotation = snap.rotation.integrate(eff.angular_velocity, h);
+            delta.dp = delta.dp + eff.linear_velocity * h;
+            delta.dq = delta.dq.integrate(eff.angular_velocity, h);
         }
     }
 }
@@ -515,12 +558,14 @@ fn mat3_transpose_x8(m: [core::arch::x86_64::__m256; 9]) -> [core::arch::x86_64:
 // These widen `contact.rs` / `math.rs` op-for-op to 8 lanes for the colored
 // solver's `solve_color_avx2` kernel (Phase O7). Each is a pure-register function
 // (no memory access) `#[target_feature(enable = "avx2")]`-gated like the O1
-// helpers above, and is `pub(super)` so `colored.rs` (which owns `ContactColumns`
-// and the oracle `solve_color`) can call them next to the oracle. Every `a*b + c`
-// is a SEPARATE `_mm256_mul_ps` then `_mm256_add_ps` (NO FMA — the module-doc
-// no-FMA invariant + the `+fma` compile_error guard), and the op ORDER matches the
-// scalar source line-for-line, so the 8-lane result is `f32`-bit-identical to the
-// scalar per-lane result (Decision 2's per-lane op-identity premise).
+// helpers above, and is `pub(super)` so `colored.rs` (which owns the AoSoA
+// `CohortColumns` and the oracle `solve_color`) can call them next to the oracle.
+// Every `a*b + c` is a SEPARATE `_mm256_mul_ps` then `_mm256_add_ps` (NO FMA —
+// the module-doc no-FMA invariant, enforced by the
+// `solver_simd_has_no_fma_or_approx_callsites` source census; the ISA baseline
+// does carry FMA), and the op ORDER matches the scalar source line-for-line, so
+// the 8-lane result is `f32`-bit-identical to the scalar per-lane result
+// (Decision 2's per-lane op-identity premise).
 
 /// 8-wide `Vec3::cross` (right-handed), bit-identical to the scalar
 /// [`Vec3::cross`](crate::math::Vec3::cross): `x = a.y*b.z - a.z*b.y`,
@@ -542,6 +587,28 @@ pub(super) fn cross8(
     let cy = _mm256_sub_ps(_mm256_mul_ps(az, bx), _mm256_mul_ps(ax, bz));
     let cz = _mm256_sub_ps(_mm256_mul_ps(ax, by), _mm256_mul_ps(ay, bx));
     [cx, cy, cz]
+}
+
+/// 8-wide `Quat::rotate` (V2's current separation), bit-identical to the scalar
+/// [`Quat::rotate`](crate::math::Quat::rotate): `t = (u × v)·2`, then `(v + t·w) + u × t` with
+/// `u = (q.x, q.y, q.z)` — the same two [`cross8`]s, the `·2` and `·w` as separate `mul`s, and
+/// the two `add`s left to right (NO FMA). `q` is `[x, y, z, w]`, `v` `[x, y, z]`.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+pub(super) fn rotate_x8(
+    q: [core::arch::x86_64::__m256; 4],
+    v: [core::arch::x86_64::__m256; 3],
+) -> [core::arch::x86_64::__m256; 3] {
+    use core::arch::x86_64::{_mm256_add_ps, _mm256_mul_ps, _mm256_set1_ps};
+    let two = _mm256_set1_ps(2.0);
+    let c = cross8(q[0], q[1], q[2], v[0], v[1], v[2]);
+    let t = [_mm256_mul_ps(c[0], two), _mm256_mul_ps(c[1], two), _mm256_mul_ps(c[2], two)];
+    let c2 = cross8(q[0], q[1], q[2], t[0], t[1], t[2]);
+    [
+        _mm256_add_ps(_mm256_add_ps(v[0], _mm256_mul_ps(t[0], q[3])), c2[0]),
+        _mm256_add_ps(_mm256_add_ps(v[1], _mm256_mul_ps(t[1], q[3])), c2[1]),
+        _mm256_add_ps(_mm256_add_ps(v[2], _mm256_mul_ps(t[2], q[3])), c2[2]),
+    ]
 }
 
 /// 8-wide `Vec3::dot`, bit-identical to the scalar
@@ -1123,6 +1190,7 @@ mod tests {
             simulated,
             kinematic,
             is_sensor: false,
+            bp_margin: 0.0,
             shape: ColliderShape::Sphere { radius },
         };
         let eff = BodyEffective {
@@ -1251,6 +1319,57 @@ mod tests {
         }
     }
 
+    /// V2: the tracked integrate moves every pose exactly as the untracked one does (the same
+    /// bits, substep after substep); a row its guard skips keeps [`BodyDelta::ZERO`]; and a moved
+    /// row's delta is its movement since the start: `dp` the sum of its `v·h` in the integrate's
+    /// order, and `dq` the rotation that carries every anchor from the start orientation to the
+    /// current one (`q_now·r = dq·(q0·r)`, to rounding — `Quat::integrate` left-multiplies the
+    /// world-frame `ω`, so the two compose). Red under a delta advanced outside the guard, or a
+    /// rotation delta that is not accumulated.
+    #[test]
+    fn v2_tracked_integrate_moves_poses_as_the_untracked_one() {
+        let mut rng = Rng::new(0x5bec_0da7_0000_0003);
+        let (mut moved_rows, mut skipped_rows) = (0usize, 0usize);
+        for count in 1..=16usize {
+            let mut eff = Vec::with_capacity(count);
+            let mut start = Vec::with_capacity(count);
+            for _ in 0..count {
+                let (e, s) = random_body(&mut rng);
+                eff.push(e);
+                start.push(s);
+            }
+            let h = 0.001 + rng.f32_in(1.0).abs() * 0.01;
+            let mut plain = start.clone();
+            let mut tracked = start.clone();
+            let mut deltas = vec![BodyDelta::ZERO; count];
+            let mut dp_sum = vec![Vec3::ZERO; count];
+            for _ in 0..4 {
+                position_integrate_scalar(&eff, &mut plain, h);
+                position_integrate_tracked(&eff, &mut tracked, &mut deltas, h);
+                for i in 0..count {
+                    dp_sum[i] = dp_sum[i] + eff[i].linear_velocity * h;
+                }
+            }
+            for i in 0..count {
+                assert_eq!(bits3(plain[i].position), bits3(tracked[i].position), "position, body {i}");
+                assert_eq!(bits4(plain[i].rotation), bits4(tracked[i].rotation), "rotation, body {i}");
+                if !(start[i].simulated && is_dynamic_row(eff[i].inv_mass)) {
+                    skipped_rows += 1;
+                    assert_eq!(deltas[i], BodyDelta::ZERO, "a row the guard skips keeps a zero delta, body {i}");
+                    continue;
+                }
+                moved_rows += 1;
+                assert_eq!(bits3(deltas[i].dp), bits3(dp_sum[i]), "dp is the sum of v·h, body {i}");
+                let r_local = Vec3::new(0.3, -0.7, 0.5);
+                let r0 = start[i].rotation.rotate(r_local);
+                let r_now = tracked[i].rotation.rotate(r_local);
+                let err = (deltas[i].dq.rotate(r0) - r_now).length();
+                assert!(err < 1.0e-5, "dq carries the anchor to its current place, body {i}: error {err}");
+            }
+        }
+        assert!(moved_rows > 0 && skipped_rows > 0, "anti-vacuity: moved {moved_rows}, skipped {skipped_rows}");
+    }
+
     /// A degenerate (near-zero) quaternion lane normalizes to IDENTITY under BOTH
     /// paths bit-identically (the zero-guard mask), and a zero angular velocity is
     /// NaN-free (the divide is `1.0 / sqrt(len_sq)` with `len_sq >= 1` for a unit
@@ -1279,6 +1398,7 @@ mod tests {
                 simulated: true,
                 kinematic: false,
                 is_sensor: false,
+                bp_margin: 0.0,
                 shape: ColliderShape::Sphere { radius: 1.0 },
             });
             eff.push(BodyEffective {
@@ -1315,6 +1435,7 @@ mod tests {
             simulated: true,
             kinematic: false,
             is_sensor: false,
+            bp_margin: 0.0,
             shape: ColliderShape::Sphere { radius: 0.5 },
         };
         let eff = BodyEffective {
@@ -1349,6 +1470,7 @@ mod tests {
             simulated: true,
             kinematic: false,
             is_sensor: false,
+            bp_margin: 0.0,
             shape: ColliderShape::Sphere { radius: 0.5 },
         };
         let eff = BodyEffective {
@@ -1525,5 +1647,116 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// No-FMA / no-approx source census — the enforcement that REPLACED the
+    /// `#[cfg(target_feature = "fma")] compile_error!` guard removed on 2026-09-02
+    /// when the `x86-64-v3` (AVX2 + FMA) baseline landed. Mirrors
+    /// [`crate::sdf_simd`]'s `sdf_simd_has_no_fma_or_approx_callsites`.
+    ///
+    /// The guard asserted "the CPU has no FMA"; the property the bit-identity
+    /// oracles actually need is "this file emits no fused and no approximate op",
+    /// which is a source property and holds on any ISA. This test gates that
+    /// property directly, so the invariant survives an FMA-capable build.
+    ///
+    /// Why each banned item is banned:
+    ///
+    /// - `fmadd` / `fmsub` / `fnmadd` / `fnmsub` / `fmaddsub` / `fmsubadd`: every
+    ///   fused form rounds ONCE, where the scalar oracle's `a*b + c` (or `a*b - c`)
+    ///   rounds TWICE. One ULP of divergence breaks `f32::to_bits` equality against
+    ///   the scalar kernel. The whole family is listed, not just `fmadd`, because
+    ///   this module is dense in mul-then-SUB sequences too — `cross8` is literally
+    ///   `mul; mul; sub`, which is exactly what an `fmsub` would fuse.
+    /// - `rsqrt` / `rcp`: ~12-bit approximations whose refinement differs between
+    ///   Intel and AMD, so they return different bits per VENDOR, not merely per
+    ///   rounding. The quaternion normalize (exact `_mm256_sqrt_ps` then
+    ///   `_mm256_div_ps`) and the effective-mass reciprocal are the two sites a
+    ///   future edit would plausibly "optimise" into them.
+    /// - `mul_add(`: the safe-Rust route to the same single rounding. A future edit
+    ///   could reach for it in a scalar oracle helper without touching an intrinsic
+    ///   at all, which an intrinsic-only ban would never see. Matching the bare
+    ///   `mul_add(` stem catches the method form, the `f32::mul_add(` UFCS form and
+    ///   any re-export alike.
+    ///
+    /// Both 256-bit and 128-bit spellings are banned: the module is `__m256`-only
+    /// today, but a tail-handling edit is the obvious way a `_mm_` form arrives.
+    ///
+    /// Doc-comment prose naming the banned ops (this comment, and the module doc)
+    /// is allowed — only NON-comment lines are scanned.
+    #[test]
+    fn solver_simd_has_no_fma_or_approx_callsites() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("solver")
+            .join("simd.rs");
+        let contents = std::fs::read_to_string(&path).expect("solver/simd.rs must be readable");
+
+        // Match a CALL-SITE: each stem completed to a real `_ps(` invocation. The
+        // needles are ASSEMBLED from fragments at runtime so no full call token
+        // appears as a string literal in THIS source — otherwise the gate would
+        // flag its own definition line.
+        let suffix = "_ps(";
+        let widths = ["_mm256_", "_mm_"];
+        let stems = ["fmadd", "fmsub", "fnmadd", "fnmsub", "fmaddsub", "fmsubadd", "rsqrt", "rcp"];
+        let mut banned: Vec<String> = Vec::with_capacity(widths.len() * stems.len() + 1);
+        for w in widths {
+            for s in stems {
+                banned.push(format!("{w}{s}{suffix}"));
+            }
+        }
+        banned.push(format!("{}{}", "mul_add", "("));
+        // `algebraic_mul` / `_add` / `_sub` / `_div` / `_rem`, stable since Rust 1.98
+        // (float_algebraic, rust-lang/rust#136469). They are the sanctioned per-operation
+        // fast-math API: they permit the optimiser to CONTRACT a multiply and an add into
+        // one rounding and to REASSOCIATE, which is precisely the pair of freedoms this
+        // module's determinism rests on refusing. A future edit could write
+        // `a.algebraic_mul(b).algebraic_add(c)` and, before this needle existed, the census
+        // would have passed while the no-FMA contract silently stopped holding — the closed
+        // needle list is exactly the shape a new language feature walks past, and this one
+        // walked past it within a release of the list being written (2026-09-02).
+        // The stem alone is banned rather than each spelling: the family is closed to this
+        // module either way, and a stem match cannot be defeated by a UFCS call.
+        banned.push(format!("{}{}", "algebraic", "_"));
+
+        let mut hits = Vec::new();
+        for (i, line) in contents.lines().enumerate() {
+            let trimmed = line.trim_start();
+            // Skip doc / line comments — prose may name the banned ops to document
+            // the prohibition (the module-doc and this test's own doc do exactly
+            // that). `//!` starts with `//`, so one check covers both.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            for b in &banned {
+                if line.contains(b.as_str()) {
+                    hits.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "no-FMA/no-approx invariant violated: solver/simd.rs has banned op call-sites \
+             (the scalar oracles in this file are the bit-identity reference; a fused or \
+             approximate op diverges from them):\n{}",
+            hits.join("\n"),
+        );
+
+        // Non-vacuity: a census that scans the wrong text passes for the wrong
+        // reason. Proving the scanner sees real intrinsic call-sites of the exact
+        // shape the needles model means an empty `hits` is evidence, not silence.
+        //
+        // The witness is ASSEMBLED from fragments for the same reason the needles
+        // are. Written as a literal it named itself: this census scans its OWN file,
+        // so `contents` contained the token because the assertion line contained it,
+        // and the check passed over a hypothetical file with no intrinsics left in it
+        // at all — the guard against a vacuous pass was itself vacuous (found
+        // 2026-09-03 while extending the census to `systems.rs` and `colored.rs`).
+        let witness = format!("{}{}{}", "_mm256_", "mul", suffix);
+        assert!(
+            contents.contains(&witness),
+            "census scanned {} but found no `{witness}` call-site — the file moved or \
+             was rewritten, so an empty hit list proves nothing",
+            path.display(),
+        );
     }
 }

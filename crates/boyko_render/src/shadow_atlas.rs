@@ -43,7 +43,8 @@ use boyko_math::{Mat4, Vec3, Vec4};
 use boyko_scene::{GlobalTransform, ViewUniform};
 
 use crate::csm_caster::CsmCasterScratch;
-use crate::light::{LightTableDirty, LightingConfig, PointLight, SpotLight};
+use crate::light::{LightTableDirty, LightingConfig, PointLight, SLOT_NONE_FIELD, SpotLight};
+use crate::render_path_config::ResolvedRenderPath;
 use crate::shadow_marker::CastsPunctualShadow;
 
 // ---- constants -----------------------------------------------------------------------
@@ -76,8 +77,13 @@ pub const ATLAS_SLOT_MASK: u32 = 0x1F;
 
 /// The "this light casts an exact (mapped) shadow" bit in a light's kind word — bit `16`,
 /// directly below the slot field and above the 16-bit kind tag. Set when a light was assigned
-/// an atlas slot (`slot != SLOT_NONE`); the resolve tests it to branch onto the map sample vs
-/// the analytic fallback.
+/// an atlas slot (`slot != SLOT_NONE`), so on the host it reads "slotted".
+///
+/// The punctual shader sites do NOT test it: they branch onto the map sample on header bit 3 and
+/// `light_atlas_slot(kind) != SLOT_NONE` alone, which is why an un-slotted row must carry
+/// [`SLOT_NONE_FIELD`] (every point/spot row is built with it). In the shader bit 16 is
+/// `LIGHT_FLAG_CASTS_SHADOW`, the SDF-shadow flag of the multi-light `shadow_mode` — follow-up
+/// R1-F1 (`docs/render/light-table-defects/R1-DESIGN.md`).
 pub const CASTS_SHADOW_BIT: u32 = 1 << 16;
 
 /// Priority denominator floor — guards the `range² / dist²` screen-coverage proxy against a
@@ -135,6 +141,12 @@ const _: () = assert!(
 // and stay distinct from `SLOT_NONE`. `16 - 6 == 10 < 31` — proven at compile time.
 const _: () = assert!((M_SLOTS - POINT_FACE_COUNT) < (ATLAS_SLOT_MASK as usize));
 const _: () = assert!((M_SLOTS - POINT_FACE_COUNT) != (SLOT_NONE as usize));
+
+// The field every point/spot row is born with (`light.rs`'s `SLOT_NONE_FIELD`, a literal there so
+// the row constructor does not depend on this module) IS this module's sentinel at this module's
+// offset, and it touches neither the kind tag nor `CASTS_SHADOW_BIT`.
+const _: () = assert!(SLOT_NONE_FIELD == SLOT_NONE << ATLAS_SLOT_SHIFT);
+const _: () = assert!(SLOT_NONE_FIELD & (0xFFFF | CASTS_SHADOW_BIT) == 0);
 
 /// Rec. 709 luminance weights (linear RGB → relative luminance) for the priority proxy.
 const LUMA_R: f32 = 0.2126;
@@ -293,6 +305,37 @@ impl ResolvedShadowAtlas {
         face_point_mask: 0,
         _pad: 0,
     };
+
+    /// Whether this frame's punctual (spot/point) depth pass is armed: a fitted atlas
+    /// (`mode_word == 1` — at least one `CastsPunctualShadow` light slotted) AND at least one
+    /// caster batch. The casters are the SAME [`CsmCasterScratch`] the cascade arm reads: a
+    /// `ShadowCaster` mesh casts into both the cascade array and the atlas.
+    ///
+    /// The formula's ONLY spelling — [`sync_punctual_light_gate`] drives the light-header bit
+    /// with it and the windowed host arms the pass and picks the atlas UBO with it (the
+    /// [`ResolvedCsm::depth_pass_armed`](crate::csm_config::ResolvedCsm::depth_pass_armed)
+    /// discipline). The leg condition is not a term here: [`resolve_shadow_atlas`] publishes
+    /// [`Self::DISABLED`] on a leg set without mesh-shadow producers.
+    #[inline]
+    #[must_use]
+    pub fn depth_pass_armed(&self, casters: &CsmCasterScratch) -> bool {
+        self.mode_word == 1 && casters.batch_count() > 0
+    }
+
+    /// The atlas UBO contents the host uploads for a frame: `self` when the frame's punctual
+    /// depth pass is armed, [`Self::DISABLED`] when it is not — the
+    /// [`ResolvedCsm::frame_uniform`](crate::csm_config::ResolvedCsm::frame_uniform) choice
+    /// for the atlas.
+    ///
+    /// What it buys is narrower than the cascade's (see [`sync_punctual_light_gate`]'s "What a
+    /// punctual sample can read"): a SPOT sample through a zero `view_proj` hits `clip.w <= 0`
+    /// and returns full visibility before any read, while a POINT sample reads its layer
+    /// regardless and is made harmless by the zero `inv_range` instead.
+    #[inline]
+    #[must_use]
+    pub const fn frame_uniform(&self, depth_pass_armed: bool) -> &Self {
+        if depth_pass_armed { self } else { &Self::DISABLED }
+    }
 }
 
 impl Default for ResolvedShadowAtlas {
@@ -330,7 +373,7 @@ impl Default for ResolvedShadowAtlas {
 /// correct.
 ///
 /// * [`resolve_shadow_atlas`] joins this set (`.in_set(PunctualResolveSet)`);
-/// * [`collect_lights`] runs `.after_set(PunctualResolveSet)`;
+/// * [`collect_lights`](crate::light_system::collect_lights) runs `.after_set(PunctualResolveSet)`;
 /// * both are registered into `CoreSchedule::Main`, so the edge binds.
 #[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PunctualResolveSet;
@@ -370,8 +413,8 @@ pub struct PunctualSlotAssignment {
 
 impl PunctualSlotAssignment {
     /// The empty handoff — no winners. The value a disabled resolve (0%-gate) publishes and the
-    /// [`Default`], so the fold reads [`SLOT_NONE`] for every light (byte-identical to the
-    /// pre-wiring path).
+    /// [`Default`], so the fold reads [`SLOT_NONE`] for every light and packs nothing: every
+    /// point/spot row keeps the [`SLOT_NONE_FIELD`] its constructor built it with.
     pub const EMPTY: Self = Self { winners: [(EntityId(0), 0); M_SLOTS], len: 0 };
 
     /// Looks up the assigned atlas base for `entity`, or [`SLOT_NONE`] when the light won no slot
@@ -405,7 +448,7 @@ impl PunctualSlotAssignment {
         }
     }
 
-    /// The builder form of [`push`](Self::push) — returns `self` with the `(entity, base)` winner
+    /// The builder form of `push` — returns `self` with the `(entity, base)` winner
     /// appended. The `base` MUST be a real layer (`< M_SLOTS`). Used to assemble an assignment in a
     /// functional style (tests, and any producer building the handoff off-system).
     #[inline]
@@ -430,8 +473,9 @@ impl Default for PunctualSlotAssignment {
 ///
 /// The slot occupies the field above the kind tag and the casts-shadow bit, so it NEVER
 /// collides with either (proven by `pack_atlas_slot_never_collides`). A `slot == SLOT_NONE`
-/// (the "no map" sentinel) leaves [`CASTS_SHADOW_BIT`] clear, so the resolve falls back to the
-/// analytic term for that light.
+/// (the "no map" sentinel) writes [`SLOT_NONE_FIELD`] and leaves [`CASTS_SHADOW_BIT`] clear; the
+/// resolve falls back to the analytic term for that light because the FIELD decodes
+/// `SLOT_NONE` — the shader sites do not read the bit.
 ///
 /// `slot` MUST be `< M_SLOTS` or exactly [`SLOT_NONE`]; a debug build asserts it (a larger
 /// value would overflow the 5-bit field and corrupt the kind tag).
@@ -515,7 +559,7 @@ pub struct PointShadowInput {
 ///    get [`SLOT_NONE`].
 /// 3. **Bump-allocate** one layer per selected spot (spot = 1 layer); for each selected spot at
 ///    layer `L`, compute the spot's perspective `view_proj` (`look_at` from the apex along the
-///    cone axis, FOV `2·outer`, near [`SPOT_SHADOW_NEAR`], far `range`; column-major) →
+///    cone axis, FOV `2·outer`, near `SPOT_SHADOW_NEAR`, far `range`; column-major) →
 ///    `faces[L]`, and record `out_slots[spot] = L`.
 /// 4. `active_layers = count`, `mode_word = (count > 0) as u32`.
 pub fn resolve_shadow_atlas_spots(
@@ -904,26 +948,46 @@ pub fn spot_priority(color: [f32; 3], range: f32, position: [f32; 3], camera_pos
 /// [`gather_shadow_casters`](crate::csm_caster::gather_shadow_casters) /
 /// [`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws) gather APIs.
 ///
+/// # The mesh-shadow producer gate (shadow gate SG1)
+///
+/// The atlas is a MESH-shadow producer (the punctual depth pass rasterizes `ShadowCaster`
+/// meshes only). On a boot whose leg set owns none
+/// ([`ResolvedRenderPath::mesh_shadow_producers`] is `false`) this policy takes the SAME arm
+/// as a disabled [`ShadowConfig`]: [`ResolvedShadowAtlas::DISABLED`] plus the EMPTY
+/// [`PunctualSlotAssignment`]. That turns off both inputs a punctual sample has — the header
+/// bit (a `DISABLED` fit never arms [`sync_punctual_light_gate`]) and the light-table slot,
+/// which no UBO can reach: [`collect_lights`](crate::light_system::collect_lights) runs
+/// `.after_set(PunctualResolveSet)`, so in the SAME frame every punctual row is folded
+/// un-slotted, its slot field [`SLOT_NONE`] (see [`sync_punctual_light_gate`]'s "What a punctual
+/// sample can read": the header bit and the field each hold on their own). The carrier is
+/// boot-constant, so the arm is fixed before frame 0.
+///
 /// Cold by construction (zero hot-path cost): a single fit run once per frame; the per-row
 /// render path never reads [`ShadowConfig`].
 //
 // `clippy::needless_pass_by_value`: `Res`/`ResMut`/`Query` are by-value `SystemParam`s
 // read/written through reborrows — the same false-positive `resolve_csm_cascades` carries.
-#[allow(clippy::needless_pass_by_value)]
+// `clippy::too_many_arguments`: an ECS system's arguments ARE its `SystemParam`s and the
+// param-injection protocol cannot read a struct of them (`collect_lights`' rationale); the
+// eighth is the boot carrier the SG1 arm reads.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn resolve_shadow_atlas(
     cfg: Res<ShadowConfig>,
     view: Res<ViewUniform>,
     spots: Query<(&SpotLight, &GlobalTransform), With<CastsPunctualShadow>>,
     points: Query<(&PointLight, &GlobalTransform), With<CastsPunctualShadow>>,
+    path: Res<ResolvedRenderPath>,
     mut out: ResMut<ResolvedShadowAtlas>,
     mut assignment: ResMut<PunctualSlotAssignment>,
     mut table_dirty: ResMut<LightTableDirty>,
 ) {
-    if !cfg.enabled() {
+    // Shadow gate SG1 (see the doc above): a leg set without mesh-shadow producers is the
+    // config-disabled world at every consumer.
+    if !cfg.enabled() || !path.mesh_shadow_producers() {
         *out = ResolvedShadowAtlas::DISABLED;
-        // 0%-gate: publish the empty handoff so the fold packs NOTHING (every punctual row's
-        // `dir_kind.w` stays byte-identical to the pre-wiring path). Value-gated so a static
-        // disabled frame never dirties the light table.
+        // 0%-gate: publish the empty handoff so the fold packs NOTHING (every punctual row keeps
+        // the `SLOT_NONE_FIELD` it was built with). Value-gated so a static disabled frame never
+        // dirties the light table.
         publish_assignment(&mut assignment, &mut table_dirty, PunctualSlotAssignment::EMPTY);
         return;
     }
@@ -1054,29 +1118,59 @@ fn publish_assignment(
 /// Bridges the [`ResolvedShadowAtlas`] resolve and the [`LightingConfig`] header gate — the
 /// spot/point analogue of [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate). It is
 /// the SINGLE production writer of [`LightingConfig::punctual_shadows`], keeping the header's
-/// word-7 punctual bit ([`PUNCTUAL_MODE_BIT`](crate::light::PUNCTUAL_MODE_BIT)) in lock-step with
-/// the depth-pass activation predicate: **a fitted atlas** (`resolved.mode_word == 1`) **AND live
-/// casters** (`casters.batch_count() > 0`). The casters are the SAME
-/// [`CsmCasterScratch`](crate::csm_caster::CsmCasterScratch) the CSM path gathers —
-/// [`ShadowCaster`](crate::shadow_marker::ShadowCaster) meshes cast into BOTH the cascade array
+/// word-7 punctual bit ([`PUNCTUAL_MODE_BIT`](crate::light::PUNCTUAL_MODE_BIT)) tracking the
+/// depth-pass arming, [`ResolvedShadowAtlas::depth_pass_armed`] — the formula's only spelling,
+/// which the windowed host arms the pass with too. The casters are the SAME
+/// [`CsmCasterScratch`] the CSM path gathers —
+/// [`ShadowCaster`](crate::csm_marker::ShadowCaster) meshes cast into BOTH the cascade array
 /// and the punctual atlas, so one gather feeds both gates.
 ///
-/// # The never-rendered-VALUES invariant (review W3)
+/// # What a punctual sample can read
 ///
-/// Every SAMPLED layer `s < active_layers` was rendered THIS frame (the slot-pack guarantees a
-/// bump-allocated layer is written by the depth pass); an unslotted light (`SLOT_NONE`) takes the
-/// analytic fallback and never samples an unwritten layer; the host boot-seed covers only the
-/// first-frame / gate-on-before-render LAYOUT defense; the depth pass barriers the WHOLE `M_SLOTS`
-/// array to `SHADER_READ_ONLY_OPTIMAL`. So no sampled layer is ever unwritten or wrong-layout, and
-/// soundness does NOT rest on this system's 1–2-frame flip timing (the same discipline the CSM
-/// sync documents).
+/// A punctual sample takes its atlas LAYER from the light table (the row's kind word,
+/// [`light_atlas_slot`]), not from the UBO. Every shader site checks header bit 3 and then
+/// `light_atlas_slot(kind) != SLOT_NONE`, and nothing else. The second check rejects every
+/// UN-slotted row: each point/spot row is built with [`SLOT_NONE_FIELD`]
+/// (`GpuLight::from_point`/`from_spot`), and `collect_lights` overwrites that field only for a
+/// light the resolve assigned a layer. So an un-slotted row is held by its own field whatever
+/// bit 3 says, and a slotted row by bit 3. Three cases:
+///
+/// 1. **No plan** — `ShadowConfig` off, or a leg set without mesh-shadow producers:
+///    [`resolve_shadow_atlas`] publishes the EMPTY [`PunctualSlotAssignment`], so in the SAME
+///    frame every punctual row is folded un-slotted (`collect_lights` runs
+///    `.after_set(PunctualResolveSet)`) and carries `SLOT_NONE`, and bit 3 is off (the plan is
+///    `DISABLED`, so [`ResolvedShadowAtlas::depth_pass_armed`] is `false`). Structural; both hold.
+/// 2. **Armed** — every assigned layer is a bump-allocated layer `< active_layers`, and the
+///    punctual depth pass renders it earlier in the same command buffer. An un-slotted row on an
+///    armed frame (a light without `CastsPunctualShadow`, or a slot loser) decodes `SLOT_NONE`,
+///    so its atlas term stays `1.0` and it samples nothing. (What else bit 3 does to such a light
+///    in `deferred_pbr.hlsl` is the open owner decision F3, not this gate's.)
+/// 3. **Unarmed while bit 3 is ON** — the header disagreeing with the host for 1–2 frames, which
+///    concerns SLOTTED rows only (an un-slotted row is held by its field, above):
+///    trailing a disarm, or leading the first arming. A static scene is not exempt: a derived
+///    field set before the sync system first runs leads the host on frame 0 (the CSM bit is
+///    measured doing so in `taa_jitter_eval`; see
+///    [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate)'s "The header can trail OR
+///    lead the host"). The host uploads [`ResolvedShadowAtlas::DISABLED`] for every unarmed frame
+///    ([`ResolvedShadowAtlas::frame_uniform`]), so every face a row can name is the zero face.
+///    A SPOT sample projects through a zero `view_proj`, hits `clip.w <= 0` and returns full
+///    visibility before any read. A POINT sample has no UBO-driven early-out and reads its
+///    cube layers as they were last rendered, or as boot left them if they never were. With
+///    the DISABLED face its `inv_range` is `0`, so the compare depth is
+///    `ref = saturate(length(dir) * 0) = 0`, and the `LessOrEqual` compare passes (lit) for
+///    ANY stored depth `>= 0`. The remaining exposure is exactly never-written memory that
+///    holds NaN or negative bits — those fail the compare and read as shadowed. Open follow-up
+///    (F2).
+///
+/// The host's boot layout seed makes the descriptor's LAYOUT valid; it defines no values, and
+/// no case above relies on it for values.
 ///
 /// # Value-gated write
 ///
 /// `cfg.punctual_shadows` is written only on an actual flip, so a static frame does zero work and
 /// never dirties the light table.
 ///
-/// # Registration — app-wired (matches [`sync_csm_light_gate`])
+/// # Registration — app-wired (matches [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate))
 ///
 /// NOT registered by any plugin here: it bridges the shadow-atlas plugin's
 /// [`ResolvedShadowAtlas`] and the lighting plugin's [`LightingConfig`] / [`LightTableDirty`], so
@@ -1090,7 +1184,7 @@ pub fn sync_punctual_light_gate(
     mut cfg: ResMut<LightingConfig>,
     mut dirty: ResMut<LightTableDirty>,
 ) {
-    let on = resolved.mode_word == 1 && casters.batch_count() > 0;
+    let on = resolved.depth_pass_armed(&casters);
     // Value gate BEFORE the `DerefMut`: flip-only write, flip-only table dirtying.
     if cfg.punctual_shadows != on {
         cfg.punctual_shadows = on;
@@ -1247,6 +1341,63 @@ mod tests {
         assert_eq!(size_of::<ResolvedShadowAtlas>(), 1296);
         assert_eq!(M_SLOTS, 16);
         assert_eq!(SLOT_NONE, 0x1F);
+    }
+
+    /// The punctual sibling of `csm_config`'s
+    /// `a_live_csm_mode_word_implies_the_boot_shadow_source_bit` — see that test for the full
+    /// rationale. `ShadowSources::PUNCTUAL_ATLAS` records `ShadowConfig::enabled()` at boot; the
+    /// frame gate is strictly stronger (`boyko_app`'s
+    /// `punctual_armed = resolve_shadow_atlas(..).mode_word == 1 && casters.batch_count() > 0`,
+    /// the predicate [`sync_punctual_light_gate`] drives), so only the containment
+    /// `mode_word == 1 ⇒ PUNCTUAL_ATLAS` can be stated truthfully.
+    ///
+    /// Note the extra asymmetry this side carries: `mode_word` is ALSO `0` for an enabled config
+    /// with no eligible spots, so the bit is a strict superset here even before the caster
+    /// count is consulted — which is precisely why wiring the bit into the gate would change
+    /// behaviour rather than merely centralise it.
+    #[test]
+    fn a_live_atlas_mode_word_implies_the_boot_shadow_source_bit() {
+        use crate::render_path_config::{
+            GeometryLegs, RenderPath, RenderPathConsumers, RenderPathDeviceCaps, ShadowSources,
+            resolve_rules,
+        };
+
+        let spots = [spot(1.0), spot(2.0)];
+        let mut live_rows = 0u32;
+        for (cfg, inputs) in [
+            (ShadowConfig::default(), &spots[..]),
+            (enabled_cfg(), &spots[..]),
+            // Enabled but with no eligible source: `mode_word` stays 0 while the bit is SET.
+            (enabled_cfg(), &[][..]),
+        ] {
+            let mut slots = [SLOT_NONE; 2];
+            let resolved =
+                resolve_shadow_atlas_spots(&cfg, inputs, &mut slots[..inputs.len()]);
+            // The boot bit's OWN source predicate, threaded exactly as `boyko_app::runner`
+            // threads it (`punctual_shadows_on: ShadowConfig::enabled()`).
+            let consumers =
+                RenderPathConsumers { punctual_shadows_on: cfg.enabled(), ..Default::default() };
+            let booted = resolve_rules(
+                RenderPath::Deferred,
+                GeometryLegs::Mesh,
+                consumers,
+                RenderPathDeviceCaps::new(true),
+            );
+
+            if resolved.mode_word == 1 {
+                live_rows += 1;
+                assert!(
+                    booted.shadow.contains(ShadowSources::PUNCTUAL_ATLAS),
+                    "a live atlas mode_word with no ShadowSources::PUNCTUAL_ATLAS bit: {cfg:?}"
+                );
+            }
+            assert_eq!(
+                booted.shadow.contains(ShadowSources::PUNCTUAL_ATLAS),
+                cfg.enabled(),
+                "the PUNCTUAL_ATLAS bit must track ShadowConfig::enabled() exactly: {cfg:?}"
+            );
+        }
+        assert_eq!(live_rows, 1, "exactly one fixture should fit a live atlas");
     }
 
     #[test]
@@ -1723,5 +1874,93 @@ mod tests {
             ndc_y < 0.0,
             "+X face: a +Y-offset receiver must map to ndc.y < 0 under the -f·up Y-flip (mirror bug ⇒ > 0), got {ndc_y}"
         );
+    }
+
+    /// A caster scratch holding exactly `n <= 2` single-instance batches, one per mesh id, built
+    /// through the production gather core (`gather_mixed_into`) rather than by hand.
+    fn casters(n: usize) -> CsmCasterScratch {
+        let identity = crate::instance_model::InstanceModelCol {
+            rows: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+        };
+        let rows = [identity; 2];
+        let mut scratch = CsmCasterScratch::default();
+        scratch.0.gather_mixed_into(
+            n,
+            |_| Some((6, boyko_rhi::enums::IndexType::Uint16)),
+            || {
+                rows[..n].iter().enumerate().map(|(i, col)| {
+                    (i as u32, col, None, crate::mesh_draw::PerInstanceMaterial::default(), false)
+                })
+            },
+        );
+        scratch
+    }
+
+    /// [`ResolvedShadowAtlas::depth_pass_armed`]'s truth table: mode word 0/1 × caster batches
+    /// 0/2. Exactly one row arms; the scratch's batch count is asserted before use so an empty
+    /// gather cannot make every row "unarmed" for the wrong reason.
+    #[test]
+    fn depth_pass_armed_needs_a_fitted_atlas_and_casters() {
+        let (empty, two) = (casters(0), casters(2));
+        assert_eq!((empty.batch_count(), two.batch_count()), (0, 2));
+
+        let mut slots = [SLOT_NONE; 1];
+        let live = resolve_shadow_atlas_spots(&enabled_cfg(), &[spot(1.0)], &mut slots);
+        assert_eq!(live.mode_word, 1, "the fixture must be a live fit");
+        let cases = [
+            (ResolvedShadowAtlas::DISABLED, &empty, false),
+            (ResolvedShadowAtlas::DISABLED, &two, false),
+            (live, &empty, false),
+            (live, &two, true),
+        ];
+        for (resolved, c, want) in cases {
+            assert_eq!(
+                resolved.depth_pass_armed(c),
+                want,
+                "mode {} with {} caster batch(es) must arm = {want}",
+                resolved.mode_word,
+                c.batch_count()
+            );
+        }
+    }
+
+    /// The raw bytes of a [`ResolvedShadowAtlas`] — what `upload_atlas_ring` memcpys.
+    fn atlas_bytes(r: &ResolvedShadowAtlas) -> &[u8] {
+        // SAFETY: `ResolvedShadowAtlas` is `#[repr(C)]` with no padding holes — every lane is an
+        // explicit field and the 1296-byte size plus each field offset is const-asserted — so all
+        // `RESOLVED_SHADOW_ATLAS_BYTES` bytes behind `r` are initialized. The slice borrows `r`
+        // read-only for its own lifetime.
+        unsafe {
+            core::slice::from_raw_parts(
+                (r as *const ResolvedShadowAtlas).cast::<u8>(),
+                RESOLVED_SHADOW_ATLAS_BYTES,
+            )
+        }
+    }
+
+    /// Shadow gate SG4 for the atlas: an UNARMED frame uploads byte-for-byte
+    /// [`ResolvedShadowAtlas::DISABLED`] — in particular every face's `view_proj` and `inv_range`
+    /// are zero, which is what the spot early-out and the point `ref == 0` argument in
+    /// [`sync_punctual_light_gate`]'s doc rest on. The fit used has a POINT (non-zero
+    /// `inv_range`) and a spot, so its bytes differ from `DISABLED` and the check is not vacuous.
+    #[test]
+    fn an_unarmed_frame_uploads_the_disabled_atlas_bytes() {
+        let point = PointShadowInput { position: [0.0, 2.0, 0.0], range: 8.0, priority: 2.0 };
+        let (mut spot_slots, mut point_slots) = ([SLOT_NONE; 1], [SLOT_NONE; 1]);
+        let live = resolve_shadow_atlas_inputs(
+            &enabled_cfg(),
+            &[spot(1.0)],
+            &[point],
+            &mut spot_slots,
+            &mut point_slots,
+        );
+        assert_eq!(live.mode_word, 1, "the fixture must be a live fit");
+        assert!(live.faces[..live.active_layers as usize].iter().any(|f| f.inv_range != 0.0));
+        assert_ne!(atlas_bytes(&live), atlas_bytes(&ResolvedShadowAtlas::DISABLED));
+
+        let unarmed = live.frame_uniform(false);
+        assert_eq!(atlas_bytes(unarmed), atlas_bytes(&ResolvedShadowAtlas::DISABLED));
+        assert!(unarmed.faces.iter().all(|f| f.inv_range == 0.0 && f.view_proj == [[0.0; 4]; 4]));
+        assert!(core::ptr::eq(live.frame_uniform(true), &live), "armed uploads the fit itself");
     }
 }

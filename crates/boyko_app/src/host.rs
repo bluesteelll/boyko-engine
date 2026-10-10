@@ -10,6 +10,7 @@
 //! D8); the runner's non-Windows arm exits gracefully before this module is
 //! ever needed.
 
+use boyko_render::{ResolvedDdgi, ResolvedRenderPath};
 use boyko_rhi::Format;
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::{VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM};
@@ -17,6 +18,7 @@ use boyko_rhi_vulkan::swapchain::{
     FRAMES_IN_FLIGHT, GBufferFrame, Renderer, Surface, Swapchain, SwapchainError,
 };
 use boyko_rhi_vulkan::window::{Window, WindowError};
+use boyko_scene::FreeEntry;
 
 use crate::gpu_scene::{DrawListScratch, GpuSceneBundles};
 use crate::runner::WindowDesc;
@@ -88,11 +90,45 @@ pub(crate) struct WindowHost {
     pub(crate) gpu: GpuSceneBundles,
     /// The reusable per-frame draw-list allocation (0 alloc/frame after warmup).
     pub(crate) draw_scratch: DrawListScratch,
+    /// Asset-streaming plan F6: the host-parked scratch buffer
+    /// `retire_deferred_frees` drains ready [`FreeEntry`] rows into every frame —
+    /// reused across frames (capacity retained), zero steady-state allocation.
+    pub(crate) retire_scratch: Vec<FreeEntry>,
     /// The boot-fixed composite extent (plan D7): the G-buffer / marcher /
     /// camera-push extent, frozen at the boot client size. A window resize
     /// recreates the swapchain only; the present blit clamps to
-    /// `min(window, composite)`.
+    /// `min(window, composite)`. Under armed SSAA this is `2 * native_extent`
+    /// (see [`Self::ssaa_armed`]); otherwise it equals [`Self::native_extent`].
     pub(crate) composite_extent: (u32, u32),
+    /// SSAA (AA campaign Stage 3, W2): whether the boot device probe armed the 2×
+    /// supersample render scale — decided ONCE here, never per-frame. `true` ⇒
+    /// `composite_extent == 2 * native_extent` and the per-frame read site
+    /// (`runner::frame_loop`) LOCKS `AaMode::Ssaa`. `false` ⇒ `composite_extent ==
+    /// native_extent` and any `AaMode::Ssaa` resource-request degrades to `Off` — the
+    /// device-capability degrade seam `AaConfig`'s doc reserves, resolved host-side
+    /// because this layer is the only one that sees the boot resolution + device caps.
+    pub(crate) ssaa_armed: bool,
+    /// The ARMED render scale per axis — a member of [`SSAA_SCALES`] when
+    /// [`Self::ssaa_armed`], and **1** otherwise, so `composite_extent == native_extent *
+    /// ssaa_scale` is total rather than conditional. Added at VG-R0 rung R0e, when the admitted
+    /// set stopped being a single constant: a `bool` can no longer say WHICH scale armed, and the
+    /// density census asserts the achieved extent against the rung it requested.
+    pub(crate) ssaa_scale: u32,
+    /// SSAA (W2): the pre-scale window client size (`window.width()`/`height()` at
+    /// boot) — ALWAYS the render extent `aa_out` uses (native, never scaled), regardless of
+    /// [`Self::ssaa_armed`]. Equals [`Self::composite_extent`] when SSAA is not armed.
+    pub(crate) native_extent: (u32, u32),
+    /// Multi-paradigm render-path plan, rung R1: the boot-committed render-path selection
+    /// (Decision 1) — resolved exactly ONCE by `run_windowed`, right after this struct boots
+    /// (device caps + the World's config Resources are both live by then), and written into
+    /// this field (the `ssaa_armed` precedent: a host-authoritative boot commitment, never a
+    /// per-frame `World` read). Seeded to [`ResolvedRenderPath::default`] here (`Deferred +
+    /// Both`, the byte-identity anchor) so the field is never observed uninitialized between
+    /// [`Self::boot`] returning and the runner's boot-lock write. Threaded into
+    /// `GpuSceneBundles::scene()` every frame, where it becomes the plain-POD
+    /// `ResolvedRenderPathGpu` the RHI dispatches its per-path declarator on. (This doc read
+    /// "DEAD-BUT-THREADED at R1 (nothing reads it yet)" for as long as that was false.)
+    pub(crate) resolved_render_path: ResolvedRenderPath,
     /// Per-in-flight-slot record of the `LightTableGeneration` whose staged
     /// bytes were last written into that slot's light staging (host plan D5/R4).
     /// Seeded `u64::MAX` (≠ any real generation) so BOTH slots upload the real
@@ -100,6 +136,37 @@ pub(crate) struct WindowHost {
     /// `light_uploaded_gen[s] != generation` (the deterministic writer-side
     /// gate — see `crate::light_gate::light_upload_due`).
     pub(crate) light_uploaded_gen: [u64; FRAMES_IN_FLIGHT],
+    /// SDFDDGI host-hook: the last `ResolvedDdgi` image written into the SINGLE binding-18
+    /// grid UBO (`GpuSceneBundles::ddgi_ubo`) — the value gate for that write. Seeded
+    /// `DISABLED`, which IS the buffer's zero boot seed, so the first ENABLED carrier differs
+    /// and uploads; thereafter the runner writes only when the carrier is enabled AND differs
+    /// (a static frame does one 48-byte compare and no write; the zero image is never written
+    /// after boot — see `upload_ddgi_grid`'s single-buffer discipline). Cold: read once per
+    /// frame on the host path, 48 bytes.
+    pub(crate) last_ddgi_grid: ResolvedDdgi,
+    /// Particles P0: per-in-flight-slot record of the `ParticleEffectScratch::rows_gen()` whose
+    /// baked bytes were last written into that slot's effect staging.
+    ///
+    /// `light_uploaded_gen`'s twin, seeded `u64::MAX` for the same reason — BOTH slots upload the
+    /// real effect table on their first frames, which is what makes the device table defined at
+    /// frame 0 without a separate boot upload path. The gate is
+    /// [`crate::particle_gate::particle_effects_upload_due`]. Carried unconditionally (8 bytes on
+    /// a disarmed run, never read there).
+    pub(crate) particle_effects_uploaded_gen: [u64; FRAMES_IN_FLIGHT],
+    /// Dynamic-materials DM1 (live defect D-2): per in-flight slot, the high-water row count
+    /// written into that slot's `PerInstanceMaterial` ring since it was last all-zero — the
+    /// state of [`crate::material_gate::pm_ring_action`]. Seeded `0`: the boot rings are
+    /// zero-filled. Host state rather than a `World` resource because the frame loop may add
+    /// no `World` write (the G-LOOP census).
+    pub(crate) pm_ring_high_water: [u32; FRAMES_IN_FLIGHT],
+    /// Dynamic-materials DM1 (design F3, cut C-4): `true` while the material table is owed a FULL
+    /// image rebuilt from the CPU authority — seeded `true` (the table is created empty, so frame 0
+    /// copies the image boot used to write), set by a table grow (the grown buffer is created
+    /// empty) and by a frame that drained edits but never recorded their copy (a minimized or
+    /// recreate-skipped frame); cleared by the recorded frame that copies it. The state of
+    /// [`crate::material_gate::material_upload_plan`]. Host state for the reason
+    /// [`Self::pm_ring_high_water`] is.
+    pub(crate) material_full_image_pending: bool,
     /// The swapchain + per-image views. Dropped after the explicit
     /// frame/gpu teardown (device idle by then).
     pub(crate) swapchain: Swapchain<'static>,
@@ -167,7 +234,55 @@ impl WindowHost {
 
         // Plan D7: the composite extent is boot-fixed from the ACTUAL client
         // size the window came up at.
-        let composite_extent = (window.width(), window.height());
+        let native_extent = (window.width(), window.height());
+
+        // SSAA (AA campaign Stage 3, C1/C2/W2): the ONE place the 2x render scale is
+        // decided — a boot-time device-capability probe, never a per-frame choice.
+        // `desc.ssaa_scale` is the owner's request (0/1 == off; v1 honors ONLY `2`).
+        // Arms iff BOTH the device's `maxImageDimension2D` fits `native * 2` on every
+        // axis AND the estimated 2x ring VRAM cost stays under half the largest
+        // DEVICE_LOCAL heap; any failure degrades to `Off` — NEVER a panic, boot
+        // proceeds exactly as an unscaled boot would.
+        let caps = ctx.device_caps();
+        let want = desc.ssaa_scale;
+        // VG-R0 rung R0e: the admitted set gained 4×. The probe is now parameterised BY the
+        // requested scale instead of by one constant, so `want == 2` follows exactly the arithmetic
+        // it followed before (`SSAA_SCALES[0] == 2`) and every golden that arms SSAA is
+        // byte-identical across the widening; `want == 4` runs the same probe against 4.
+        let admitted = SSAA_SCALES.contains(&want);
+        let dims_ok = admitted
+            && native_extent.0.saturating_mul(want) <= caps.max_image_dimension_2d
+            && native_extent.1.saturating_mul(want) <= caps.max_image_dimension_2d;
+        let est = if admitted { ssaa_ring_bytes_estimate(native_extent, want) } else { 0 };
+        let vram_ok = admitted && est < caps.device_local_heap_bytes / SSAA_VRAM_FRACTION_DEN;
+        let ssaa_armed = admitted && dims_ok && vram_ok;
+        // 1 when SSAA is off or degraded, so `composite = native * ssaa_scale` is total.
+        let ssaa_scale = if ssaa_armed { want } else { 1 };
+        // Cold, boot-once diagnostics (mirrors `query_device_caps`'s DDGI/shadow-denoise
+        // degrade logging) — never on the frame path, never a panic. Emitted UNCONDITIONALLY
+        // (not `#[cfg(debug_assertions)]`): a RELEASE-build degrade-to-Off must be observable,
+        // else an owner requesting `BOYKO_AA=ssaa` on a device that fails the dims/VRAM probe
+        // silently gets no supersampling with zero explanation (spec B11).
+        //
+        // TWO sites, TWO latches, ONE code (`W3005`). They are the same condition — "the SSAA the
+        // operator asked for is not happening" — with one fix, so check 2 makes them one page; but
+        // `Once` is per SITE (F11), and a shared latch would let a probe refusal silence the
+        // "that scale does not exist in this build" line for the rest of the process.
+        if admitted && !ssaa_armed {
+            crate::diag::report_ssaa_probe_refused(
+                want,
+                dims_ok,
+                vram_ok,
+                est,
+                caps.device_local_heap_bytes,
+            );
+        }
+        if want != 0 && want != 1 && !admitted {
+            let admitted_scales = crate::diag::debug_into(&SSAA_SCALES);
+            crate::diag::report_ssaa_scale_unsupported(want, admitted_scales.as_str());
+        }
+        let composite_extent = (native_extent.0 * ssaa_scale, native_extent.1 * ssaa_scale);
+
         let gpu = GpuSceneBundles::boot(ctx, composite_extent, swap_format);
 
         Ok(Self {
@@ -175,13 +290,63 @@ impl WindowHost {
             frame: GBufferFrame::new(),
             gpu,
             draw_scratch: DrawListScratch::new(),
+            retire_scratch: Vec::new(),
             composite_extent,
+            ssaa_armed,
+            ssaa_scale,
+            native_extent,
+            resolved_render_path: ResolvedRenderPath::default(),
             // u64::MAX ≠ any real generation ⇒ both slots upload the ECS light
             // table on their first frames (host plan D5/R4).
             light_uploaded_gen: [u64::MAX; FRAMES_IN_FLIGHT],
+            // DISABLED == the b18 buffer's zero boot seed: the first enabled carrier differs
+            // from it and is uploaded; a never-enabled run never writes the buffer at all.
+            last_ddgi_grid: ResolvedDdgi::DISABLED,
+            // Same `u64::MAX ≠ any real generation` seed, same reason: both slots upload the
+            // baked particle effect table on their first frames.
+            particle_effects_uploaded_gen: [u64::MAX; FRAMES_IN_FLIGHT],
+            pm_ring_high_water: [0; FRAMES_IN_FLIGHT],
+            material_full_image_pending: true,
             swapchain,
             surface,
             window,
         })
     }
+}
+
+/// SSAA: the admitted render scales, per axis. The boot arming probe
+/// ([`WindowHost::boot`]) admits ONLY these; any other `WindowDesc::ssaa_scale` degrades to `Off`.
+///
+/// ⚠️ **4× is VG-R0 rung R0e's addition and it is a MEASUREMENT capability, not a quality feature.**
+/// R0d measured `visible_tris` as NOT CONVERGED on either committed camera path (residuals 0.3545
+/// and 0.2444 against a 0.05 margin), and `[k1_instrument].on_not_converged_refute_direction`'s own
+/// disposition for that is to **extend the ladder upward**, never to adjudicate on an underestimate.
+/// Extending it needs a composite beyond `2 × 1920×1080`. The arithmetic that made 4× worth adding:
+/// on `orbit_mid`, `D_est` needs a further **1.35×** in `visible_tris` to cross `[k1].d_est_min`,
+/// which the measured growth exponent puts at **14.4 Mpx** — reachable at `4 × 1280×720` = 14.75 Mpx
+/// for an estimated 0.95 GB, well inside this box. On `approach_close` the same arithmetic says
+/// **320 Mpx** and a 42 GB heap, which is why the ladder can settle one path and not the other.
+const SSAA_SCALES: [u32; 2] = [2, 4];
+
+/// SSAA (W2): the VRAM-budget divisor — arm only if the estimated 2× ring cost stays
+/// under `1 / SSAA_VRAM_FRACTION_DEN` of the largest `DEVICE_LOCAL` heap.
+const SSAA_VRAM_FRACTION_DEN: u64 = 2;
+
+/// SSAA (W2): a conservative VRAM estimate (bytes) for the `scale`× composite-extent
+/// CORE rings, used ONLY to decide whether to arm SSAA at boot — the real allocations
+/// flow through [`GpuSceneBundles::boot`] and are never sized from this number.
+/// `native` is the pre-scale `(width, height)`; the core rings cost ≈ 33 B/px ×
+/// `FRAMES_IN_FLIGHT`(2) = 66 B/px at NATIVE resolution, scaled by `scale²` (area) for
+/// the composite extent; `feature = "hwrt"` adds the RT ring cost (≈ 28 B/px × FIF(2)
+/// at native, same `scale²` scaling).
+const fn ssaa_ring_bytes_estimate(native: (u32, u32), scale: u32) -> u64 {
+    const CORE_BYTES_PER_NATIVE_PX: u64 = 66;
+    #[cfg(feature = "hwrt")]
+    const PER_NATIVE_PX: u64 = CORE_BYTES_PER_NATIVE_PX + 28;
+    #[cfg(not(feature = "hwrt"))]
+    const PER_NATIVE_PX: u64 = CORE_BYTES_PER_NATIVE_PX;
+
+    let native_px = native.0 as u64 * native.1 as u64;
+    let scale_sq = (scale as u64) * (scale as u64);
+    native_px * scale_sq * PER_NATIVE_PX
 }

@@ -1,22 +1,30 @@
 //! The colored TGS-Soft solver (Phase O5, Decision 7) — a SEPARATE
-//! [`RigidSolver`] that solves contacts in graph-COLOR order over a
-//! cache-friendly Struct-of-Arrays [`ContactColumns`], so a future parallel
-//! ([O6]) / SIMD ([O7]) kernel can drop in over the SAME columns with no
-//! restructure.
+//! [`RigidSolver`] that solves contacts in graph-COLOR order over the
+//! cohort-shaped constraint tables of [`CohortColumns`] (L11 C2): every 8-group
+//! cohort of a color is one aligned head of per-manifold constants plus one
+//! block per rank of per-point data, the layout the [O7] AVX2 kernel loads as
+//! vectors, the scalar oracle walks lane by lane, and the [O6] parallel
+//! dispatch cuts by group exactly as it cut the per-point columns before.
 //!
 //! [O6]: https://github.com/bluesteelll/boyko-engine
 //! [O7]: https://github.com/bluesteelll/boyko-engine
 //!
-//! # Why a separate solver (Decision 7, the 0%-gate)
+//! # Why a separate solver (Decision 7)
 //!
-//! The shipped [`SoftStepSolver`](super::SoftStepSolver) — its AoS
+//! The reference [`SoftStepSolver`](super::SoftStepSolver) — its AoS
 //! `PointConstraint` layout and the manifold-order `solve_velocities`
-//! Gauss-Seidel sweep — is **byte-untouched** and stays the default + the
-//! 0%-gate reference. This solver is opt-in via
-//! [`add_physics_colored`](crate::plugin::add_physics_colored)
-//! (`PhysicsConfig::colored == true`) and is wired as a distinct
+//! Gauss-Seidel sweep — is **byte-untouched** by this solver and stays in the
+//! tree as the reference oracle. It carries the one contact rule both solvers
+//! share: V2's speculative branch (a step whose speculative contacts are on,
+//! `PhysicsConfig::speculative_contacts`) is in both, through the same scalar helper, and a
+//! step with them off runs the pre-V2 sweep
+//! in both. Since 2026-09-18 (owner decision) THIS solver is the default
+//! world's ([`DefaultRigidSolver`](super::DefaultRigidSolver)), with the O7 AVX2
+//! cohort kernel on (`PhysicsConfig::simd_solve`). Every `add_physics_*::<S>`
+//! entry wires it when `S` is this type: the constraint graph plus a distinct
 //! [`physics_solve_colored`](crate::systems::physics_solve_colored) stage that
-//! REPLACES the default solve. A non-colored world is unaffected.
+//! stands in for the generic solve. A world wired with the reference solver is
+//! unaffected.
 //!
 //! # The value change (Phase O5 — isolated here on purpose)
 //!
@@ -56,51 +64,84 @@
 //! through their shared bodies. This is the property that lets [O6] dispatch a
 //! color's groups across threads and [O7] pack adjacent GROUPS (never adjacent
 //! points of one group) into a lane. The
-//! [`group_start`](ContactColumns::group_start) +
-//! [`color_group_start`](ContactColumns::color_group_start) CSR records the
+//! [`group_start`](CohortColumns::group_start) +
+//! [`color_group_start`](CohortColumns::color_group_start) CSR records the
 //! per-manifold group boundaries so a consumer can enumerate, per color, the
 //! groups and each group's slot range. (O5 is single-threaded; it solves a
 //! color's contiguous SoA span slot-by-slot in index order, which absorbs the
 //! intra-group coupling for free — the group CSR is additive data O5 does not
 //! consume.)
 //!
-//! # IM-2b canonical warm-store (LOAD-BEARING for O6)
+//! # The warm store: one record per manifold, in stream order (L11 C1)
 //!
-//! The velocity accumulation is order-independent within a color, but the
-//! warm-start STORE is NOT — the open-addressed [`WarmStartTable`] is
-//! linear-probed, so two keys with colliding home slots resolve in INSERTION
-//! order. A solve-dispatch-order store would make next frame's seeds depend on
-//! the color layout (and, in [O6], the thread count) — a frame-delayed
-//! determinism break. So after the substeps this solver walks the contacts in
-//! CANONICAL `(manifold order, point index)` order — independent of the color
-//! layout — and stores each point's converged impulse under its own per-point
-//! key. The canonical order is materialized once (per build) in
-//! [`ContactColumns::canonical`].
+//! The velocity accumulation is order-independent within a color, and so is the
+//! warm store: each manifold's converged impulses go to `recs[mi]` of the write
+//! side of a double-buffered [`WarmRecords`] — a write by the manifold index, whose
+//! layout is a pure function of the stream and never of the color layout or (in
+//! [O6]) the thread count. The next step finds each manifold's source record by
+//! a merge-join over the previous stream's ordinals (`warm_records::plan_sources`,
+//! D2) and matches points by feature id inside the record, through the one lookup
+//! routine the B1 carry also uses (`WarmLookup::seed`, ruling W1). No hash, no
+//! per-point key, no table refill. `warm_records.rs` states Lemma W, the argument
+//! that every seed and hit count equals the per-point table's it replaced.
 
+use std::cell::Cell;
 use std::marker::PhantomData;
+use std::ptr;
+use std::slice;
 
+use boyko_diag::profiling_abi::{ZoneGuard, ZoneHandle};
+use boyko_diag::{zone, zone_enabled};
 use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn, ScratchSolveView};
 use boyko_macros::Resource as ResourceDerive;
-use boyko_threadpool::try_with_active_pool;
+use boyko_threadpool::{
+    REGION_MAX_BLOCKS_PER_PARTICIPANT, RegionFrame, RegionLine, RegionLines, RegionReport,
+    RegionStages, SchedItem, StageEntry, V2Policy, claim_lines, link_hints, try_with_active_pool,
+};
 
-use super::contact::{BodyEffective, effective_mass, is_dynamic_row, tangent_basis};
+use super::contact::{
+    BodyEffective, effective_inv_mass, effective_mass, is_dynamic_row, tangent_basis,
+};
 use super::simd;
 // O2: the soft constants, the immovable-surface view, and the soft-coefficient
 // derivation are SHARED from the reference solver — a single source of truth so
-// the colored kernel cannot drift from `soft_step.rs` (the byte-untouched
-// 0%-gate reference). These are `pub(crate)` re-uses (visibility-widened only,
-// no value/layout change to `soft_step.rs`).
-use super::soft_step::{IMMOVABLE_AT_REST, MAX_BIAS_VELOCITY, RESTITUTION_THRESHOLD, SoftCoefficients};
-use super::warm_start::{self, WarmStartTable};
+// the colored kernel cannot drift from `soft_step.rs` (the 0%-gate reference).
+// These are `pub(crate)` re-uses (visibility-widened only, no value/layout change
+// to `soft_step.rs`); V2's delta row, its current-separation helper and the K3
+// switch live there too, so both solvers read one definition.
+use super::soft_step::{
+    BodyDelta, CURRENT_SEPARATION_ALL_POINTS, IMMOVABLE_AT_REST, MAX_BIAS_VELOCITY,
+    RESTITUTION_THRESHOLD, SoftCoefficients, current_separation,
+};
+use super::warm_records::{
+    self, PlanCounts, SearchCursors, WarmIndex, WarmLookup, WarmRecord, WarmRecords, WarmRun, ord,
+    point_fid,
+};
 use super::RigidSolver;
 use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
+use crate::profiling::{
+    HIST_BINS, PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY,
+    PHYS_HIST_COLORS_GE256, PHYS_HIST_COLORS_LT32, PHYS_HIST_COLORS_LT64, PHYS_HIST_COLORS_LT128,
+    PHYS_HIST_COLORS_LT256, PHYS_HIST_SLOTS_GE256, PHYS_HIST_SLOTS_LT32, PHYS_HIST_SLOTS_LT64,
+    PHYS_HIST_SLOTS_LT128, PHYS_HIST_SLOTS_LT256, PHYS_INTEGRATE, PHYS_PASS_BIASED,
+    PHYS_PASS_RELAX, PHYS_REGION_BLOCKS_MAX, PHYS_REGION_HELPER_BLOCKS, PHYS_REGION_INLINE,
+    PHYS_REGION_MAX_WAIT, PHYS_REGION_OPENS, PHYS_REGION_PUBLISHED, PHYS_REGION_STALLS,
+    PHYS_RESTITUTION, PHYS_S6_GRAPH_HIT, PHYS_S6_PB_HIT, PHYS_SB_BODIES,
+    PHYS_SB_PA, PHYS_SB_PB, PHYS_SB_PC, PHYS_SLEEP_BEGIN, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE,
+    PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY,
+    PHYS_SETUP_CHUNKS, PHYS_WRITE_BACK, ZoneCanary, counter, hist_bin,
+};
 use crate::resources::{
-    BodyState, ConstraintGraph, IslandSleep, LARGE_ISLAND_CONSTRAINTS, PhysicsConfig, SolverScratch,
+    BodyState, ConstraintGraph, IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
 };
+use crate::row_identity::{RemapCursor, RowIdentity, RowRemap, WarmSeedStats};
 use crate::scratch_ids::{
-    body_eff_colored_id, contact_column_id, register_scratch_layouts, scratch_reserve_rows,
+    body_delta_colored_id, body_eff_colored_id, colored_frozen_rows_id, contact_column_id,
+    region_entry_id, region_line_id, region_sched_id, region_u32_id, register_scratch_layouts,
+    scratch_reserve_rows, warm_table_id,
 };
+use crate::sleep_sets::{HeldSolve, RowCls, SleepSets};
 
 /// Loads one SoA `[f32; 8]` column into a `__m256` (the O7 cohort kernel's scalar
 /// vector load helper). Unaligned — any alignment.
@@ -114,20 +155,6 @@ fn load1(col: &[f32; 8]) -> core::arch::x86_64::__m256 {
     use core::arch::x86_64::_mm256_loadu_ps;
     // SAFETY: `col` is an in-bounds `[f32; 8]`; the unaligned load is valid.
     unsafe { _mm256_loadu_ps(col.as_ptr()) }
-}
-
-/// Stores a `__m256` into one SoA `[f32; 8]` column (the O7 cohort kernel's scalar
-/// vector store helper, used to stage impulse/velocity for the guarded write-back).
-///
-/// # Safety
-///
-/// AVX2-gated; the store writes 8 in-bounds `f32`.
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-#[target_feature(enable = "avx2")]
-fn store1(out: &mut [f32; 8], reg: core::arch::x86_64::__m256) {
-    use core::arch::x86_64::_mm256_storeu_ps;
-    // SAFETY: `out` is an in-bounds `[f32; 8]`; the unaligned store is valid.
-    unsafe { _mm256_storeu_ps(out.as_mut_ptr(), reg) }
 }
 
 /// Loads 3 SoA `[f32; 8]` columns into a `[__m256; 3]` register triple (the O7
@@ -194,10 +221,70 @@ fn store3(regs: &[core::arch::x86_64::__m256; 3], out: &mut [[f32; 8]; 3]) {
     }
 }
 
+/// Loads one aligned `[f32; 8]` row of a cohort head or rank block into a
+/// `__m256` (the O7 cohort kernel's aligned row load, L11 C2).
+///
+/// # Safety
+///
+/// AVX2-gated (the `cfg` + `target_feature`); `row` must point at a live,
+/// 32 B-aligned `[f32; 8]` — every row of a [`CohortHead`] / [`RankBlock`] is, by
+/// the structs' `align(64)` layout — that no other thread writes concurrently.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+unsafe fn load_row(row: *const [f32; COHORT]) -> core::arch::x86_64::__m256 {
+    use core::arch::x86_64::_mm256_load_ps;
+    debug_assert!((row as usize).is_multiple_of(32), "invariant: an aligned row load");
+    // SAFETY: the caller passes a live, 32 B-aligned row; the aligned load reads its
+    //   8 `f32`.
+    unsafe { _mm256_load_ps(row.cast::<f32>()) }
+}
+
+/// Loads three aligned `[f32; 8]` rows (a `Vec3` per lane) into a `[__m256; 3]`
+/// register triple.
+///
+/// # Safety
+///
+/// As [`load_row`]: AVX2-gated; `rows` is a live, 32 B-aligned `[[f32; 8]; 3]`.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+unsafe fn load_rows3(rows: *const [[f32; COHORT]; 3]) -> [core::arch::x86_64::__m256; 3] {
+    // SAFETY: each row of a live `[[f32; 8]; 3]` is a live, 32 B-aligned row.
+    unsafe {
+        [
+            load_row(&raw const (*rows)[0]),
+            load_row(&raw const (*rows)[1]),
+            load_row(&raw const (*rows)[2]),
+        ]
+    }
+}
+
+/// Stores a `__m256` into one aligned `[f32; 8]` row of a rank block (the O7
+/// cohort kernel's impulse store).
+///
+/// # Safety
+///
+/// AVX2-gated; `row` must point at a live, 32 B-aligned `[f32; 8]` this thread
+/// owns (a SIMD worker's cuts are whole cohorts, so no other worker touches it).
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+unsafe fn store_row(row: *mut [f32; COHORT], reg: core::arch::x86_64::__m256) {
+    use core::arch::x86_64::_mm256_store_ps;
+    debug_assert!((row as usize).is_multiple_of(32), "invariant: an aligned row store");
+    // SAFETY: the caller passes a live, 32 B-aligned, exclusively-owned row; the
+    //   aligned store writes its 8 `f32`.
+    unsafe { _mm256_store_ps(row.cast::<f32>(), reg) }
+}
+
 /// The min-work threshold (W1): a color whose total slot count is BELOW this is
 /// solved INLINE on the calling thread (the single-threaded [`solve_color`] over
 /// the whole color span) instead of dispatched through a [`ThreadPool`]
 /// (boyko_threadpool::ThreadPool) `scope`.
+///
+/// Since SR (phase B) no colour opens a scope: this is the solve region's default wide floor
+/// ([`RegionGrain::DEFAULT`]: a colour under it is one inline block, and the step's widest colour
+/// must reach it for the step to open a region at all). The sections below were written and
+/// measured for the per-colour `pool.scope` path SR retired; they are kept as the floor's
+/// rationale.
 ///
 /// # Why a threshold (the zero-per-step-alloc bound)
 ///
@@ -223,10 +310,17 @@ fn store3(regs: &[core::arch::x86_64::__m256; 3], out: &mut [[f32; 8]; 3]) {
 /// The metric is the color's total slot count (the sum over its groups, i.e. the
 /// color span width). The value `256` is a starting point the tester benches; a
 /// true zero-alloc reusable-scope threadpool API is a filed follow-up.
-const MIN_PARALLEL_SLOTS_PER_COLOR: u32 = 256;
+///
+/// `pub(crate)` for one reader outside this file: the profiling zones class a color as
+/// wide or narrow by this same floor ([`crate::profiling::WIDE_COLOR_MIN_SLOTS`]).
+pub(crate) const MIN_PARALLEL_SLOTS_PER_COLOR: u32 = 256;
 
 /// O6 perf (work-balanced chunking): how many group-chunks to emit per ambient
 /// worker lane when a color is dispatched parallel.
+///
+/// Since SR (phase B) the solve region's default blocks per participant
+/// ([`RegionGrain::DEFAULT`]`.max_bpp`), for a colour's sweeps and for the fill. The sections
+/// below were measured on the per-colour `pool.scope` path SR retired.
 ///
 /// # Why MORE chunks than lanes
 ///
@@ -252,7 +346,78 @@ const MIN_PARALLEL_SLOTS_PER_COLOR: u32 = 256;
 /// the converged per-body result is independent of the partition and the visiting
 /// order) holds for ANY chunking. So tuning this const changes only WHERE work runs,
 /// never the bits. `4` is a starting point the bench sweeps (3..=8 typical).
-const CHUNKS_PER_WORKER: usize = 6;
+pub(crate) const CHUNKS_PER_WORKER: usize = 6;
+
+/// Minimum SLOTS a dispatched chunk must carry, so a chunk pays for its own
+/// boxed closure.
+///
+/// Since SR (phase B) the solve region's default colour block floor
+/// ([`RegionGrain::DEFAULT`]`.colour_min_points`). The sections below were measured on the
+/// per-colour `pool.scope` path SR retired.
+///
+/// ⚠ WITHOUT THIS, MORE WORKERS MAKE THE STEP SLOWER, AND THAT IS MEASURED. The
+/// chunk count was `lanes * CHUNKS_PER_WORKER` clamped only by the GROUP count —
+/// a function of the machine and of the partition, and of nothing about the work
+/// inside a chunk. A color that just clears
+/// [`MIN_PARALLEL_SLOTS_PER_COLOR`] (256 slots) therefore split into
+/// `16 * 6 = 96` chunks on a 16-lane pool: about 2.7 slots of work per boxed
+/// closure. Adding lanes added allocations against fixed work, so the Jolt-parity
+/// pyramid measured 0.82x at 8 workers and 0.56x at 16 — NEGATIVE scaling.
+///
+/// The two existing constants do not cover this. `MIN_PARALLEL_SLOTS_PER_COLOR`
+/// decides WHETHER a color dispatches at all; nothing decided HOW FINELY it was
+/// then cut. The kernel's own row driver has had exactly this floor since it was
+/// written (`BatchingStrategy::min_batch_size`) — this is the physics dispatcher
+/// catching up with it.
+///
+/// Bit-identity is unaffected: the `{1, N}` property holds for ANY partition
+/// (distinct chunks touch disjoint dynamic bodies, and the warm store is a write by
+/// manifold index — a pure function of the stream, never of the partition), so this
+/// changes only WHERE work runs, never the values.
+///
+/// # ⚠ The value is 64 because 256 was MEASURED to be better on one scene and to
+/// # BREAK another — a single global constant cannot serve both
+///
+/// Swept on the Jolt-parity pyramid (`benches/jolt_parity_pyramid.rs`), W = 8 / 16:
+///
+/// | floor |  W8 ms | W16 ms |
+/// |------:|-------:|-------:|
+/// |    32 |  22.87 |  29.67 |
+/// |    64 |  21.60 |  26.99 |
+/// |   128 |  20.93 |  25.13 |
+/// |   256 |  20.14 |  20.98 |
+///
+/// Monotone, still descending at 256 — so on that scene alone the answer is
+/// "raise it". Raising it to 256 turns
+/// `many_disjoint_pairs_are_one_wide_color_and_must_dispatch` RED: that scene is
+/// ONE colour of 500 slots, `500 / 256 == 1` chunk, and the single-chunk
+/// short-circuit below then sends it inline — undoing the whole measured 1.95x
+/// win of the P2 gate-metric fix.
+///
+/// The two scenes want opposite things and both are legitimate. A pyramid is many
+/// NARROW colours, so its cost is per-wave dispatch and it wants coarse chunks; a
+/// debris pile is ONE WIDE colour, so its cost is idle lanes and it wants fine
+/// ones. No single integer is right for both, which is the concrete case for
+/// making the cut policy a per-call-site OBJECT rather than a global constant —
+/// argued elsewhere in this campaign, measured here.
+///
+/// 64 is therefore chosen as the largest value that keeps BOTH gates green, not
+/// as the optimum of either. It captures most of the pyramid win (26.99 vs 35.26
+/// ms unfloored at W = 16) without refusing the wide-colour dispatch.
+const MIN_SLOTS_PER_CHUNK: usize = 64;
+
+/// S4 (the parallel solve setup, `docs/physics/perf-campaign/levers/scaling/01-DESIGN.md` §6.4):
+/// the fewest laid-out contact points a setup task carries, so a task pays for its share of the
+/// scope. Arithmetic, not measured: at the L11 witness's 20–40 ns of fill per point a 256-point
+/// task fills for 5–10 µs, against the 2.88 µs a dispatched wave loses at W8 (window 7). The W8S
+/// window re-derives it. Changes only WHERE the fill runs, never a value. Since SR the region
+/// grain's default `fill_points` ([`RegionGrain::DEFAULT`]).
+pub(crate) const SETUP_MIN_POINTS_PER_CHUNK: usize = 256;
+
+/// S4: the most ranges the fill is cut into — row D's one-block rule, sized for S4's setup scope
+/// (32 task cells of at most 128 B fill a scope's first 4 KiB block). Since SR the ranges are the
+/// solve region's Fill blocks, and the cap bounds the [`RangeOut`] slots on `solve_region`'s frame.
+pub(crate) const SETUP_MAX_TASKS: usize = 32;
 
 /// O7 SIMD cohort width: the number of body-disjoint manifold-GROUPS packed into
 /// one AVX2 batch (one group per lane = 8 lanes per `__m256`).
@@ -264,53 +429,526 @@ const CHUNKS_PER_WORKER: usize = 6;
 /// the [`solve_color_avx2`](ColoredSoftStepSolver::solve_color_avx2) kernel uses.
 const COHORT: usize = 8;
 
-/// `Send` + `Sync`-marked raw pointers to the SoA columns + per-body buffer
-/// dispatched into the O6 per-color worker closures.
+/// The cohort-shaped constraint layout (L11 D5): today's cohorts, materialised.
 ///
-/// Raw pointers are `!Send`/`!Sync` by default; this wrapper lets a worker task
-/// capture them. The fields are **private** and reached only through the `&self`
-/// accessor methods so that a closure capturing the wrapper captures the WHOLE
-/// struct — never the inner `*mut` directly (Rust 2021+ disjoint capture would
-/// otherwise see the bare `*mut` field and reject the closure as `!Send`). This is
-/// the same idiom the engine's `par_iter` `SharedPtr`/`ChunkCaptures` use.
-#[derive(Copy, Clone)]
-struct ColorSolvePtrs<'a> {
-    /// Per-element bodies access via the committed [`ScratchSolveView`] — Copy,
-    /// Send+Sync, row-ptr-ONLY. There is NO whole-buffer `&mut [BodyEffective]`
-    /// reborrow path (the SP4 structural fix): a worker reaches a body row only
-    /// through [`ScratchSolveView::row_ptr`], which yields one typed `*mut
-    /// BodyEffective` per DISTINCT index its color owns.
-    bodies: ScratchSolveView<'a, BodyEffective>,
-    /// The worker-facing contact-column solve view (P2): `Copy + Send + Sync`,
-    /// per-element raw base + index ONLY. This REPLACES the deleted `cols: *mut
-    /// ContactColumns` + `columns()` (`&mut *self.cols`) whole-struct reborrow —
-    /// the rigid Tree-Borrows race surface. A worker reaches a contact column
-    /// element solely through `view.<accessor>(i)` (`base.add(i)`), so no `&mut`
-    /// ever spans more than one row and the whole-buffer reborrow is un-typeable
-    /// on the worker path.
-    view: ContactSolveView<'a>,
+/// A cohort is an 8-group window counted from a color's first group — the same
+/// window every path has walked since O7 (the serial loop, the inline path and the
+/// `COHORT`-stepped parallel cuts), so cohort membership never depends on the
+/// worker count. C2 stores each cohort as one [`CohortHead`] (the eight lanes'
+/// per-manifold constants) plus one [`RankBlock`] per rank (the eight lanes'
+/// point-`r` data), with a cold [`CohortCold`] and a cold `vn0` row per rank
+/// beside them. The AVX2 kernel loads a rank as ten aligned vectors instead of
+/// gathering 160 scalars; the scalar oracle, the warm apply, the restitution pass
+/// and the store walk the same blocks lane by lane in group-major order, which is
+/// the slot order the per-point columns had. Padding lanes (`lane >= nlanes`) and
+/// the ranks past a lane's width are zero in every field, so the layout bytes are
+/// a pure function of the stream (G3).
+///
+/// Every reader indexes by `(cohort, lane, rank)`: group `g` of color `c` is lane
+/// `(g - color_group_start[c]) % 8` of cohort `color_cohort_start[c] + (g -
+/// color_group_start[c]) / 8` ([`ColorCtx`]).
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CohortHead {
+    /// Per-lane contact normal (A → B), three SoA rows.
+    n: [[f32; COHORT]; 3],
+    /// Per-lane first friction tangent, three SoA rows. The second tangent is derived
+    /// where it is read as `n × t1` — the same op [`tangent_basis`] uses.
+    t1: [[f32; COHORT]; 3],
+    /// Per-lane combined friction coefficient (`max(µa, µb)`, the reference rule).
+    friction: [f32; COHORT],
+    /// Per-lane dense body-A row.
+    body_a: [u32; COHORT],
+    /// Per-lane dense body-B row; `== body_a` on a sentinel lane, whose body B is
+    /// [`IMMOVABLE_AT_REST`] and never a row.
+    body_b: [u32; COHORT],
+    /// Per-lane live point count; `0` on a padding lane.
+    width: [u8; COHORT],
+    /// Index of the cohort's first [`RankBlock`] (and its first `vn0` row).
+    rank_base: u32,
+    /// The cohort's rank count: the widest lane's point count.
+    depth: u8,
+    /// Live lanes, `1..=8`.
+    nlanes: u8,
+    /// Bit `lane` set on an SDF lane (body B immovable); clear on a padding lane.
+    sentinel: u8,
+    /// Zero.
+    _p: u8,
+    /// Zero, to the fifth line.
+    _pad: [u8; 16],
 }
 
-// SAFETY: `ColorSolvePtrs` is `Send + Sync` because its only shared-mutable state
-//   is reached PER ELEMENT through `view: ContactSolveView` and `bodies:
-//   ScratchSolveView`, both of which expose mutation only as a single-row
-//   `base + index` write (never a whole-buffer `&mut [_]` reborrow — the P2/P1
-//   structural fix). The C2 coloring invariant guarantees two workers in one
-//   parallel step never share a contact row (distinct colors => distinct rows =>
-//   distinct body pairs), so concurrent impulse writes target disjoint addresses
-//   and concurrent reads never alias a concurrent write; a SHARED static body
-//   (`inv_mass == 0`) is never written (the `*_movable` guard in `solve_color`),
-//   so it is read-only across workers. No `&mut` ever spans more than one element,
-//   so no overlapping unique TB protector is ever created. The bases are
-//   address-stable (the backing `ComponentPool` reservations never realloc-move)
-//   and finalized BEFORE any view is built (the B4 re-create-before-view-live
-//   discipline in `solve_colored_inner`), so they cannot dangle while a view is
-//   live. The wrapper has no interior mutability, so a shared `&` to it (the outer
-//   `pool.scope` closure's capture across the spawn loop) is trivially safe —
-//   hence both `Send` (cross-thread move into a task) and `Sync` (shared by the
-//   loop) hold.
-unsafe impl Send for ColorSolvePtrs<'_> {}
-unsafe impl Sync for ColorSolvePtrs<'_> {}
+const _: () = assert!(
+    size_of::<CohortHead>() == 320 && align_of::<CohortHead>() == 64,
+    "a cohort head is exactly five cache lines"
+);
+
+impl CohortHead {
+    /// A head with every field zero: the value a padding cohort would hold.
+    const ZERO: Self = Self {
+        n: [[0.0; COHORT]; 3],
+        t1: [[0.0; COHORT]; 3],
+        friction: [0.0; COHORT],
+        body_a: [0; COHORT],
+        body_b: [0; COHORT],
+        width: [0; COHORT],
+        rank_base: 0,
+        depth: 0,
+        nlanes: 0,
+        sentinel: 0,
+        _p: 0,
+        _pad: [0; 16],
+    };
+
+    /// Lane `l`'s contact normal.
+    #[inline]
+    fn normal(&self, l: usize) -> Vec3 {
+        Vec3::new(self.n[0][l], self.n[1][l], self.n[2][l])
+    }
+
+    /// Lane `l`'s first friction tangent.
+    #[inline]
+    fn tangent1(&self, l: usize) -> Vec3 {
+        Vec3::new(self.t1[0][l], self.t1[1][l], self.t1[2][l])
+    }
+
+    /// Whether lane `l` is an SDF lane (body B immovable, never a row).
+    #[inline]
+    fn is_sentinel(&self, l: usize) -> bool {
+        (self.sentinel >> l) & 1 != 0
+    }
+}
+
+/// One cohort's cold per-lane data (D5): read once per step by the restitution
+/// pass and the store, never by a sweep. 64 B.
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CohortCold {
+    /// Per-lane combined restitution coefficient (`max(ea, eb)`).
+    restitution: [f32; COHORT],
+    /// Per-lane manifold index: the store's record index. `0` on a padding lane.
+    mi: [u32; COHORT],
+}
+
+const _: () = assert!(
+    size_of::<CohortCold>() == 64 && align_of::<CohortCold>() == 64,
+    "a cohort's cold data is one cache line"
+);
+
+impl CohortCold {
+    /// Every field zero.
+    const ZERO: Self = Self {
+        restitution: [0.0; COHORT],
+        mi: [0; COHORT],
+    };
+}
+
+/// One rank of one cohort (D5): the eight lanes' point-`r` anchors, separation and
+/// accumulated impulses, each an aligned `[f32; 8]` row. 320 B, one owner per
+/// cohort under the SIMD kernel (which writes the three impulse rows as vectors);
+/// scalar workers may share a block and then write distinct lane elements through
+/// raw projections. Padding lanes and the ranks past a lane's width are zero.
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RankBlock {
+    /// Body-A anchor offset (world frame), three SoA rows.
+    ra: [[f32; COHORT]; 3],
+    /// Body-B anchor offset (world frame), three SoA rows; zero on a sentinel lane.
+    rb: [[f32; COHORT]; 3],
+    /// Signed separation at gather time (negative = penetrating).
+    sep: [f32; COHORT],
+    /// Accumulated normal impulse `λn ≥ 0` (warm-seeded).
+    ni: [f32; COHORT],
+    /// Accumulated tangent impulse along `t1` (warm-seeded).
+    ti1: [f32; COHORT],
+    /// Accumulated tangent impulse along `t2` (warm-seeded).
+    ti2: [f32; COHORT],
+}
+
+const _: () = assert!(
+    size_of::<RankBlock>() == 320 && align_of::<RankBlock>() == 64,
+    "a rank block is exactly five cache lines"
+);
+
+impl RankBlock {
+    /// Every field zero.
+    const ZERO: Self = Self {
+        ra: [[0.0; COHORT]; 3],
+        rb: [[0.0; COHORT]; 3],
+        sep: [0.0; COHORT],
+        ni: [0.0; COHORT],
+        ti1: [0.0; COHORT],
+        ti2: [0.0; COHORT],
+    };
+
+    /// Lane `l`'s body-A anchor.
+    #[inline]
+    fn ra(&self, l: usize) -> Vec3 {
+        Vec3::new(self.ra[0][l], self.ra[1][l], self.ra[2][l])
+    }
+
+    /// Lane `l`'s body-B anchor.
+    #[inline]
+    fn rb(&self, l: usize) -> Vec3 {
+        Vec3::new(self.rb[0][l], self.rb[1][l], self.rb[2][l])
+    }
+
+    /// Zeroes lane `l` of every row.
+    #[inline]
+    fn clear_lane(&mut self, l: usize) {
+        for c in 0..3 {
+            self.ra[c][l] = 0.0;
+            self.rb[c][l] = 0.0;
+        }
+        self.sep[l] = 0.0;
+        self.ni[l] = 0.0;
+        self.ti1[l] = 0.0;
+        self.ti2[l] = 0.0;
+    }
+}
+
+/// A manifold's part in the step (P-a of D4): its live point count, and whether its
+/// island is frozen this step (B1). Written in stream order, read by the layout
+/// pass in color order and by the store's second pass in manifold order. A manifold
+/// is laid out — solved — iff it is not frozen and has a live point.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ManifoldTag {
+    /// Live points, `0..=MAX_CONTACT_POINTS`.
+    count: u8,
+    /// [`Self::FROZEN`] and [`Self::SRC_RESTORE`], or zero.
+    flags: u8,
+}
+
+impl ManifoldTag {
+    /// The manifold's island is frozen this step: not solved, its record carried.
+    const FROZEN: u8 = 1;
+    /// L10 (design 08 A3′, the plan's E1): the manifold's warm run names positions of the
+    /// restore source — the kept records of the islands restored this step — not of the read
+    /// side. Set by P-a's search; the P-c seed and the D3 carry pick their source by it.
+    const SRC_RESTORE: u8 = 1 << 1;
+
+    /// Whether the manifold is frozen this step.
+    #[inline]
+    fn frozen(self) -> bool {
+        self.flags & Self::FROZEN != 0
+    }
+
+    /// Whether the manifold's warm run lies in L10's restore source.
+    #[inline]
+    fn src_restore(self) -> bool {
+        self.flags & Self::SRC_RESTORE != 0
+    }
+
+    /// Whether the manifold was laid out into a cohort and solved.
+    #[inline]
+    fn solved(self) -> bool {
+        !self.frozen() && self.count != 0
+    }
+}
+
+/// A step's warm sources as the P-c seed and the D3 carry read them: every manifold's run
+/// (`plan`), and the lookup its tag names — the read side, or L10's restore source for a
+/// manifold P-a marked [`SRC_RESTORE`](ManifoldTag::SRC_RESTORE) (design 08 A3′, the plan's
+/// E1). One branch per manifold, none per point.
+#[derive(Clone, Copy)]
+struct WarmSources<'a> {
+    /// The read side's lookup.
+    lookup: WarmLookup<'a>,
+    /// The restore source's lookup, on a step that has one.
+    restore: Option<WarmLookup<'a>>,
+    /// Every manifold's run.
+    plan: &'a [WarmRun],
+    /// Every manifold's tag.
+    tags: &'a [ManifoldTag],
+}
+
+impl<'a> WarmSources<'a> {
+    /// Manifold `mi`'s lookup and run.
+    #[inline]
+    fn of(self, mi: usize) -> (WarmLookup<'a>, WarmRun) {
+        let lookup = match self.restore {
+            Some(restore) if self.tags[mi].src_restore() => restore,
+            _ => self.lookup,
+        };
+        (lookup, self.plan[mi])
+    }
+}
+
+/// A color's place in the group and cohort tables: its first group index and its
+/// first cohort index. Group `g` of the color is lane `(g - g_base) % 8` of cohort
+/// `k_base + (g - g_base) / 8` — today's cohort, an 8-group window from the color's
+/// first group, on every path.
+#[derive(Clone, Copy, Debug)]
+struct ColorCtx {
+    /// The color's first group (`color_group_start[c]`).
+    g_base: usize,
+    /// The color's first cohort (`color_cohort_start[c]`).
+    k_base: usize,
+}
+
+impl ColorCtx {
+    /// The `(cohort, lane)` of group `g` of this color.
+    #[inline]
+    fn lane_of(self, g: usize) -> (usize, usize) {
+        let d = g - self.g_base;
+        (self.k_base + d / COHORT, d % COHORT)
+    }
+
+    /// The cohort range `[k_lo, k_hi)` of the cohort-aligned group range `[g_lo,
+    /// g_hi)` of this color: `g_lo` is a cohort boundary (the color's first group,
+    /// or a `COHORT`-stepped cut from it), and `g_hi` is one or the color's end.
+    #[inline]
+    fn cohorts_of(self, g_lo: usize, g_hi: usize) -> (usize, usize) {
+        debug_assert!(
+            (g_lo - self.g_base).is_multiple_of(COHORT),
+            "invariant: a SIMD group range starts on a cohort boundary"
+        );
+        (
+            self.k_base + (g_lo - self.g_base) / COHORT,
+            self.k_base + (g_hi - self.g_base).div_ceil(COHORT),
+        )
+    }
+}
+
+/// The colored solver's anti-vacuity counters (L11 C0): what the G1 identity gate
+/// reads to show that a pinned scene exercised the path it claims to. Crate-internal;
+/// outside `cfg(test)` this is a zero-sized type whose methods are empty, so the
+/// step carries no counting cost in a shipping build (the `WalkCounters` pattern in
+/// `row_identity.rs`: one impl whose counting statements are `#[cfg(test)]`-gated,
+/// never a `not(test)` predicate).
+///
+/// Every count is cumulative over the solver's lifetime; a scene asserts a delta over
+/// its steps. `backward_searches` and `cold_index_steps` are D2's own counts (C1):
+/// what `warm_records::plan_sources` reports of the merge-join it ran.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SetupCounters {
+    /// Points of frozen manifolds whose record the store carried (B1 hits): the sum of
+    /// [`WarmSeedStats::carry_hits`] over the steps.
+    #[cfg(test)]
+    pub(crate) carry_hits: u64,
+    /// Lookups on a strict read side that the cursor could not gallop forward to (a
+    /// descent of the translated ordinals), served by a backward binary search.
+    #[cfg(test)]
+    pub(crate) backward_searches: u64,
+    /// Per-point lookups that found no stored point: an untranslatable pair (a flipped
+    /// order, a `Reset`), a pair the previous stream did not hold, or a feature id its
+    /// record does not carry.
+    #[cfg(test)]
+    pub(crate) misses: u64,
+    /// Steps that looked up a read side whose ordinals were NOT strictly increasing
+    /// (an unsorted stream, or a duplicate pair) and built D2's cold sorted index.
+    #[cfg(test)]
+    pub(crate) cold_index_steps: u64,
+    /// Manifolds met with two live points sharing a (masked) feature id, solved or
+    /// carried: the last-write-wins case Lemma W's in-record scan must reproduce.
+    #[cfg(test)]
+    pub(crate) duplicate_fids_met: u64,
+    /// Solves run with warm start disabled (no lookup, no store, no stamp).
+    #[cfg(test)]
+    pub(crate) disabled_steps: u64,
+    /// Points the restitution pass applied an impulse to (both of its gates passed).
+    #[cfg(test)]
+    pub(crate) restitution_applied: u64,
+    /// Builds whose fill ran its ranges on scoped std threads (G4-F's route, `SetupMode::Threads`):
+    /// the witness that the route was taken, as the region's report is the Fill blocks'.
+    #[cfg(test)]
+    pub(crate) thread_fills: u64,
+}
+
+impl SetupCounters {
+    /// Adds the store's carry hits of one step.
+    #[inline]
+    fn carry(&mut self, hits: u32) {
+        #[cfg(test)]
+        {
+            self.carry_hits += u64::from(hits);
+        }
+        // The only other reader of `hits` is the gated statement above.
+        let _ = hits;
+    }
+
+    /// Adds one manifold's per-point lookup misses.
+    #[inline]
+    fn miss(&mut self, points: u32) {
+        #[cfg(test)]
+        {
+            self.misses += u64::from(points);
+        }
+        // The only other reader of `points` is the gated statement above.
+        let _ = points;
+    }
+
+    /// Counts a manifold with two live points sharing a masked feature id.
+    #[inline]
+    fn duplicate_fids(&mut self, m: &Manifold) {
+        #[cfg(test)]
+        {
+            let n = m.count as usize;
+            let dup = (0..n).any(|p| (p + 1..n).any(|q| point_fid(m, p) == point_fid(m, q)));
+            self.duplicate_fids_met += u64::from(dup);
+        }
+        // The only other reader of `m` is the gated statement above.
+        let _ = m;
+    }
+
+    /// Counts one solve; `warm_start_enabled` false is a disabled step.
+    #[inline]
+    fn step(&mut self, warm_start_enabled: bool) {
+        #[cfg(test)]
+        {
+            self.disabled_steps += u64::from(!warm_start_enabled);
+        }
+        // The only other reader of the flag is the gated statement above.
+        let _ = warm_start_enabled;
+    }
+
+    /// Counts one point the restitution pass applied to.
+    #[inline]
+    fn restitution(&mut self) {
+        #[cfg(test)]
+        {
+            self.restitution_applied += 1;
+        }
+    }
+
+    /// Adds another count's fields (S4: a setup task's, after the join, in task order — integer
+    /// sums, exact under any partition).
+    #[inline]
+    fn merge(&mut self, other: &SetupCounters) {
+        #[cfg(test)]
+        {
+            self.carry_hits += other.carry_hits;
+            self.backward_searches += other.backward_searches;
+            self.misses += other.misses;
+            self.cold_index_steps += other.cold_index_steps;
+            self.duplicate_fids_met += other.duplicate_fids_met;
+            self.disabled_steps += other.disabled_steps;
+            self.restitution_applied += other.restitution_applied;
+            self.thread_fills += other.thread_fills;
+        }
+        // The only other reader of `other` is the gated block above.
+        let _ = other;
+    }
+
+    /// Adds what one step's `plan_sources` counted: its backward searches, and whether
+    /// it built the cold index.
+    #[inline]
+    fn plan(&mut self, counts: warm_records::PlanCounts) {
+        #[cfg(test)]
+        {
+            self.backward_searches += u64::from(counts.backward_searches);
+            self.cold_index_steps += u64::from(counts.cold_index);
+        }
+        // The only other reader of `counts` is the gated block above.
+        let _ = counts;
+    }
+}
+
+/// FNV-1a 64 offset basis (the runner's pose-hash function, reused for the C0 digest).
+#[cfg(test)]
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// The same basis for the W8S S6 witness, which exists in every build.
+const FNV_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// FNV-1a 64 prime.
+#[cfg(test)]
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Folds one `u32` into an FNV-1a 64 hash, byte by byte, little-endian.
+#[cfg(test)]
+#[inline]
+fn fnv_u32(mut h: u64, v: u32) -> u64 {
+    for b in v.to_le_bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
+/// Folds one `u64` into an FNV-1a 64 hash, byte by byte, little-endian.
+#[cfg(test)]
+#[inline]
+fn fnv_u64(h: u64, v: u64) -> u64 {
+    // Truncation is the point: the low and high halves, in that order.
+    fnv_u32(fnv_u32(h, v as u32), (v >> 32) as u32)
+}
+
+/// Folds a `u32` slice, length first, into an FNV-1a 64 hash.
+#[cfg(test)]
+fn fnv_u32s(mut h: u64, vs: &[u32]) -> u64 {
+    h = fnv_u32(h, vs.len() as u32);
+    for &v in vs {
+        h = fnv_u32(h, v);
+    }
+    h
+}
+
+/// Folds a [`WarmSeedStats`] into an FNV-1a 64 hash, field by field in declaration order.
+#[cfg(test)]
+fn fnv_warm_stats(mut h: u64, s: &WarmSeedStats) -> u64 {
+    for v in [
+        s.manifolds,
+        s.translated,
+        s.points,
+        s.point_hits,
+        s.carry_points,
+        s.carry_hits,
+    ] {
+        h = fnv_u32(h, v);
+    }
+    fnv_u64(h, s.remap_resets)
+}
+
+/// The step's solve parameters (V2, `levers/V2-speculative/01-DESIGN.md` §2.4): the soft
+/// coefficients, `1 / h`, whether the speculative branch runs
+/// (`PhysicsConfig::speculative_contacts`), and the bodies' accumulated step movement that branch
+/// reads.
+///
+/// The dispatch hands ONE reference to every kernel call in place of the three coefficients it
+/// forwarded before, so the parallel colour task's capture keeps its size (a reference is two
+/// fewer words than the coefficients it replaces): its scope keeps its cell budget, one chunk per
+/// colour scope, which the frame census pins. `Copy` + `Sync` (the delta view is `Sync`), so a
+/// shared reference crosses into every worker task; the kernels copy the fields out once per call.
+#[derive(Clone, Copy)]
+struct SolveStep<'a> {
+    /// `SoftCoefficients::bias_rate`.
+    bias_rate: f32,
+    /// `SoftCoefficients::mass_coeff`.
+    mass_coeff: f32,
+    /// `SoftCoefficients::impulse_coeff`.
+    impulse_coeff: f32,
+    /// `1 / h` for the substep `h`, computed once per step in `f32`, so every kernel multiplies a
+    /// speculative separation by the same bits.
+    inv_h: f32,
+    /// Whether the speculative branch runs: `PhysicsConfig::speculative_contacts`. Off, every
+    /// kernel runs its `SPEC = false` instance, the pre-V2 instruction stream.
+    spec: bool,
+    /// Each body row's accumulated movement over the step, reset by the step's reset and written by
+    /// the tracked integrate; read only when `spec` (empty otherwise). Never written during a sweep.
+    deltas: ScratchSolveView<'a, BodyDelta>,
+}
+
+/// Copy of body row `i`'s accumulated step movement through the delta view (V2).
+///
+/// # Safety contract (caller)
+/// `i < deltas.len()` — a gathered body row on a `spec` step, whose delta column the step's reset
+/// sized to the gathered row count — and no writer of the column during the sweep (the tracked
+/// integrate and the step's reset run between sweeps: on one thread serially, or as the Integrate
+/// stage's and the first gravity stage's row blocks in the solve region, which never share an
+/// item with a sweep).
+#[inline]
+fn delta_copy(deltas: ScratchSolveView<'_, BodyDelta>, i: usize) -> BodyDelta {
+    debug_assert!(i < deltas.len(), "invariant: a speculative lane's body row has a delta");
+    // SAFETY: `i < deltas.len()` (the contract, debug-asserted): `row_ptr(i)` is the live `i`-th
+    //   element on the column's address-stable base. The column is written only by the tracked
+    //   integrate and the step's reset — serially between sweeps, or in the solve region by its
+    //   Integrate stage and its first gravity stage, whose blocks write disjoint rows and never run
+    //   while a sweep runs (the region's item barrier) — so this read aliases no write, whichever
+    //   worker makes it. `BodyDelta: Copy`, so the read is a byte copy with no drop glue.
+    unsafe { *deltas.row_ptr(i) }
+}
 
 // ── BodyEffective row access through the ScratchSolveView (mirror 1) ─────────────
 //
@@ -368,961 +1006,875 @@ fn body_mut<'a>(view: ScratchSolveView<'a, BodyEffective>, i: usize) -> &'a mut 
     unsafe { &mut *view.row_ptr(i) }
 }
 
-/// Worker-facing, color-disjoint contact solve view (audit Stage P — P2).
+/// Worker-facing, color-disjoint cohort solve view (audit Stage P — P2; L11 C2).
 ///
 /// `Copy + Send + Sync`: the scheduler hands a COPY to each parallel worker. It
-/// exposes the contact columns the colored kernels touch on the worker path as
-/// per-element raw `base + index` accessors ONLY — there is NO whole-buffer
-/// `&mut [_]` / slice path, so the `&mut *self.cols` whole-struct reborrow that
-/// caused the rigid Tree-Borrows race is un-typeable from this view (the P2
-/// structural fix, mirroring the body [`ScratchSolveView`] from P1).
+/// exposes the cohort tables the colored kernels touch on the worker path as raw
+/// bases ONLY — a `&CohortHead` per cohort (never written during a solve) and a
+/// `*mut RankBlock` per rank block, reached per element through raw projections.
+/// There is NO whole-buffer `&mut [_]` / slice path, so the `&mut *self.cols`
+/// whole-struct reborrow that caused the rigid Tree-Borrows race is un-typeable
+/// from this view (the P2 structural fix, mirroring the body [`ScratchSolveView`]).
 ///
 /// # SAFETY / soundness (`Send + Sync`)
 ///
-/// Soundness rests on the C2 coloring disjointness invariant: any two contact
-/// rows touched concurrently by distinct workers belong to distinct color bands
-/// and therefore distinct rows. All mutation goes through `set_*_impulse*` which
-/// writes a SINGLE row via `base + index` (no `&mut` ever spans more than one
-/// element), so two workers never materialize overlapping `&mut`. Read accessors
-/// form a value read from a single element only. The 24 read-only bases (geometry,
-/// body indices, the friction coefficient, the per-group `group_start` CSR) are
-/// never written by any worker, so concurrent reads are sound.
+/// Soundness rests on the C2 coloring disjointness invariant: any two lanes touched
+/// concurrently by distinct workers belong to distinct groups of one color and
+/// therefore to distinct dynamic bodies. A SIMD worker owns whole cohorts (its
+/// cuts are `COHORT`-stepped), so its aligned vector loads and stores of a block's
+/// rows touch no other worker's data. A scalar worker owns whole groups, which may
+/// share a cohort with another worker's groups: it reads its lanes' head constants
+/// through a shared `&CohortHead` (no worker writes a head during a solve) and
+/// reads and writes its lanes' block elements ONLY through raw `&raw` projections
+/// (`(*block).ni[lane]`), so no `&`/`&mut` ever spans a block and two workers never
+/// materialize overlapping references.
 ///
-/// PROVENANCE: every base — the three worker-mutable impulse bases AND the
-/// read-only ones — is a raw write-capable base derived from
+/// PROVENANCE: every base is a raw write-capable base derived from
 /// [`ScratchColumn::solve_base`] (i.e. `ComponentPool::buffer_ptr().cast_mut()`,
-/// provenance-preserving, NO `&[_]` interposed). The impulse `*mut f32` bases
-/// therefore carry WRITE provenance, so the per-row `*base.add(i) = v` writes are
-/// Tree-Borrows-clean (the C1 fix; the prior `as_read_slice().as_ptr().cast_mut()`
-/// branded them Frozen / SharedReadOnly — UB to write through). The read-only
-/// bases are `*const _` reborrows of the same write-capable raw base, which is
-/// sound to read through. The bases are address-stable (backed by `ComponentPool`
-/// reservations that never realloc-move) and captured AFTER the last build-time
-/// grow (the B4 re-create-before-view-live discipline), so they cannot dangle
-/// while a view is live.
+/// provenance-preserving, NO `&[_]` interposed). The block base therefore carries
+/// WRITE provenance, so the per-element and per-row writes are Tree-Borrows-clean
+/// (the C1 fix; the prior `as_read_slice().as_ptr().cast_mut()` branded them
+/// Frozen / SharedReadOnly — UB to write through). The read-only bases are
+/// `*const _` reborrows of the same write-capable raw base, which is sound to read
+/// through. The bases are address-stable (backed by `ComponentPool` reservations
+/// that never realloc-move) and captured AFTER the last build-time grow (the B4
+/// re-create-before-view-live discipline), so they cannot dangle while a view is
+/// live.
 #[derive(Clone, Copy)]
-struct ContactSolveView<'a> {
-    // ── read-only geometry bases (per contact-point slot) ──
-    ra_x: *const f32,
-    ra_y: *const f32,
-    ra_z: *const f32,
-    rb_x: *const f32,
-    rb_y: *const f32,
-    rb_z: *const f32,
-    normal_x: *const f32,
-    normal_y: *const f32,
-    normal_z: *const f32,
-    tangent1_x: *const f32,
-    tangent1_y: *const f32,
-    tangent1_z: *const f32,
-    tangent2_x: *const f32,
-    tangent2_y: *const f32,
-    tangent2_z: *const f32,
-    separation: *const f32,
-    friction: *const f32,
-    // ── read-only body indices / sentinel flag ──
-    body_a: *const u32,
-    body_b: *const u32,
-    b_is_sentinel: *const bool,
-    // ── worker-mutable impulse bases ──
-    normal_impulse: *mut f32,
-    tangent1_impulse: *mut f32,
-    tangent2_impulse: *mut f32,
-    // ── read-only per-group CSR base (worker AVX2 kernel navigates groups) ──
-    group_start: *const u32,
-    /// Slot count (the exclusive index ceiling for the per-slot accessors).
-    len: usize,
+struct CohortSolveView<'a> {
+    /// Read-only cohort heads.
+    heads: *const CohortHead,
+    /// Worker-mutable rank blocks (the impulse rows are written; the rest read).
+    blocks: *mut RankBlock,
+    /// Cohort count (the exclusive ceiling of `heads`).
+    n_heads: usize,
+    /// Rank block count (the exclusive ceiling of `blocks`).
+    n_blocks: usize,
     /// Binds the view to the column borrow so it cannot outlive a refill / regrow.
     _marker: PhantomData<&'a ()>,
 }
 
 // SAFETY: see the struct-level soundness note — the C2 coloring disjointness
-//   invariant + per-element-only mutation + address-stable bases. No `&mut` ever
-//   spans more than one element, so concurrent worker access never aliases.
-unsafe impl Send for ContactSolveView<'_> {}
+//   invariant + per-lane raw projections on the scalar path + whole-cohort ownership
+//   on the SIMD path + address-stable bases. No `&mut` ever spans more than one
+//   element, so concurrent worker access never aliases.
+unsafe impl Send for CohortSolveView<'_> {}
 // SAFETY: see the `Send` impl above — shared access yields per-element reads /
-//   single-row writes only (no whole-buffer slice), and disjoint color bands mean
+//   per-lane writes only (no whole-buffer slice), and disjoint groups mean
 //   concurrent accessors target disjoint memory.
-unsafe impl Sync for ContactSolveView<'_> {}
+unsafe impl Sync for CohortSolveView<'_> {}
 
-impl<'a> ContactSolveView<'a> {
-    /// The contact-point slot count.
-    #[inline]
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Reads `group_start[g]` (the per-group CSR boundary). Used by the AVX2 worker
-    /// kernel to navigate the manifold-group ranges and by the dispatcher to cut
-    /// work-balanced chunks.
+impl<'a> CohortSolveView<'a> {
+    /// Cohort `k`'s head, shared: no worker writes a head during a solve, so the
+    /// reference never aliases a write.
     ///
     /// # Safety
-    /// `g` must index the live `group_start` column (`g <= n_groups`); upheld by
-    /// the dispatcher / kernel, which read only group indices within the color's
-    /// `[g_lo, g_hi]` range.
+    /// `k < n_heads` — a cohort of the color or chunk being solved.
     #[inline]
-    unsafe fn group_start_at(&self, g: usize) -> u32 {
-        // SAFETY: `g` is in range per the method contract; `group_start` is the live
-        //   base of the `group_start` ScratchColumn. A plain `*const u32` read forms
-        //   no reference spanning the column, so it never conflicts with a worker's
-        //   per-element impulse write (the Tree-Borrows discipline).
-        unsafe { *self.group_start.add(g) }
+    unsafe fn head(&self, k: usize) -> &'a CohortHead {
+        debug_assert!(k < self.n_heads, "invariant: a solved cohort is a built cohort");
+        // SAFETY: `k < n_heads` (the contract), so `heads + k` is the live `k`-th head
+        //   on the address-stable base; heads are written only by the single-threaded
+        //   build, before any view is live, so this shared read aliases no write.
+        unsafe { &*self.heads.add(k) }
     }
 
-    // ── scalar per-element reads (single-row `*base.add(i)` provenance) ──
-
-    /// Reads slot `i`'s body-A anchor as a [`Vec3`].
+    /// Rank block `i`, raw: the caller projects single lanes (`(*block).ni[lane]`,
+    /// scalar workers) or whole rows (aligned vector loads, the SIMD worker that
+    /// owns the cohort), never a reference to the whole block.
+    ///
+    /// # Safety
+    /// `i < n_blocks` — a rank of a cohort of the color or chunk being solved.
     #[inline]
-    fn ra(&self, i: usize) -> Vec3 {
-        // SAFETY: `i < len` (the kernel iterates `[start, end) ⊆ [0, len)`); the
-        //   three bases point at the live `i`-th element on address-stable columns.
-        unsafe { Vec3::new(*self.ra_x.add(i), *self.ra_y.add(i), *self.ra_z.add(i)) }
-    }
-
-    /// Reads slot `i`'s body-B anchor as a [`Vec3`].
-    #[inline]
-    fn rb(&self, i: usize) -> Vec3 {
-        // SAFETY: `i < len`; address-stable bases, live `i`-th element.
-        unsafe { Vec3::new(*self.rb_x.add(i), *self.rb_y.add(i), *self.rb_z.add(i)) }
-    }
-
-    /// Reads slot `i`'s contact normal as a [`Vec3`].
-    #[inline]
-    fn normal(&self, i: usize) -> Vec3 {
-        // SAFETY: `i < len`; address-stable bases, live `i`-th element.
-        unsafe { Vec3::new(*self.normal_x.add(i), *self.normal_y.add(i), *self.normal_z.add(i)) }
-    }
-
-    /// Reads slot `i`'s first friction tangent as a [`Vec3`].
-    #[inline]
-    fn tangent1(&self, i: usize) -> Vec3 {
-        // SAFETY: `i < len`; address-stable bases, live `i`-th element.
-        unsafe {
-            Vec3::new(*self.tangent1_x.add(i), *self.tangent1_y.add(i), *self.tangent1_z.add(i))
-        }
-    }
-
-    /// Reads slot `i`'s second friction tangent as a [`Vec3`].
-    #[inline]
-    fn tangent2(&self, i: usize) -> Vec3 {
-        // SAFETY: `i < len`; address-stable bases, live `i`-th element.
-        unsafe {
-            Vec3::new(*self.tangent2_x.add(i), *self.tangent2_y.add(i), *self.tangent2_z.add(i))
-        }
-    }
-
-    // ── single-column scalar reads (the AVX2 SoA gather marshals these per lane;
-    //    only the avx2-gated `solve_color_avx2` consumes them, so they are
-    //    dead-code-allowed on a non-AVX2 build) ──
-
-    /// Reads slot `i`'s `ra_x` component.
-    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
-    #[inline]
-    fn ra_x(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.ra_x.add(i) }
-    }
-    /// Reads slot `i`'s `ra_y` component.
-    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
-    #[inline]
-    fn ra_y(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.ra_y.add(i) }
-    }
-    /// Reads slot `i`'s `ra_z` component.
-    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
-    #[inline]
-    fn ra_z(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.ra_z.add(i) }
-    }
-    /// Reads slot `i`'s `rb_x` component.
-    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
-    #[inline]
-    fn rb_x(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.rb_x.add(i) }
-    }
-    /// Reads slot `i`'s `rb_y` component.
-    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
-    #[inline]
-    fn rb_y(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.rb_y.add(i) }
-    }
-    /// Reads slot `i`'s `rb_z` component.
-    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
-    #[inline]
-    fn rb_z(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.rb_z.add(i) }
-    }
-    /// Reads slot `i`'s `normal_x` component.
-    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
-    #[inline]
-    fn normal_x(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.normal_x.add(i) }
-    }
-    /// Reads slot `i`'s `normal_y` component.
-    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
-    #[inline]
-    fn normal_y(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.normal_y.add(i) }
-    }
-    /// Reads slot `i`'s `normal_z` component.
-    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
-    #[inline]
-    fn normal_z(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.normal_z.add(i) }
-    }
-    /// Reads slot `i`'s `tangent1_x` component.
-    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
-    #[inline]
-    fn tangent1_x(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.tangent1_x.add(i) }
-    }
-    /// Reads slot `i`'s `tangent1_y` component.
-    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
-    #[inline]
-    fn tangent1_y(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.tangent1_y.add(i) }
-    }
-    /// Reads slot `i`'s `tangent1_z` component.
-    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
-    #[inline]
-    fn tangent1_z(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.tangent1_z.add(i) }
-    }
-    /// Reads slot `i`'s `tangent2_x` component.
-    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
-    #[inline]
-    fn tangent2_x(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.tangent2_x.add(i) }
-    }
-    /// Reads slot `i`'s `tangent2_y` component.
-    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
-    #[inline]
-    fn tangent2_y(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.tangent2_y.add(i) }
-    }
-    /// Reads slot `i`'s `tangent2_z` component.
-    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
-    #[inline]
-    fn tangent2_z(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.tangent2_z.add(i) }
-    }
-
-    /// Reads slot `i`'s signed separation.
-    #[inline]
-    fn separation(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.separation.add(i) }
-    }
-
-    /// Reads slot `i`'s combined friction coefficient.
-    #[inline]
-    fn friction(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.friction.add(i) }
-    }
-
-    /// Reads slot `i`'s dense body-A row index.
-    #[inline]
-    fn body_a(&self, i: usize) -> u32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.body_a.add(i) }
-    }
-
-    /// Reads slot `i`'s dense body-B row index.
-    #[inline]
-    fn body_b(&self, i: usize) -> u32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.body_b.add(i) }
-    }
-
-    /// Reads slot `i`'s sentinel flag (`true` = SDF contact, B is immovable).
-    #[inline]
-    fn b_is_sentinel(&self, i: usize) -> bool {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element.
-        unsafe { *self.b_is_sentinel.add(i) }
-    }
-
-    // ── impulse reads (single-row) ──
-
-    /// Reads slot `i`'s accumulated normal impulse.
-    #[inline]
-    fn normal_impulse(&self, i: usize) -> f32 {
-        // SAFETY: `i < len`; address-stable base, live `i`-th element. A concurrent
-        //   write by another worker targets a DISTINCT row (the C2 invariant).
-        unsafe { *self.normal_impulse.add(i) }
-    }
-
-    /// Reads slot `i`'s accumulated first tangent impulse.
-    #[inline]
-    fn tangent1_impulse(&self, i: usize) -> f32 {
-        // SAFETY: as `normal_impulse` — `i < len`, distinct-row concurrency.
-        unsafe { *self.tangent1_impulse.add(i) }
-    }
-
-    /// Reads slot `i`'s accumulated second tangent impulse.
-    #[inline]
-    fn tangent2_impulse(&self, i: usize) -> f32 {
-        // SAFETY: as `normal_impulse` — `i < len`, distinct-row concurrency.
-        unsafe { *self.tangent2_impulse.add(i) }
-    }
-
-    // ── impulse writes (single-row, `base + index`, never spanning rows) ──
-
-    /// Writes slot `i`'s accumulated normal impulse.
-    #[inline]
-    fn set_normal_impulse(&self, i: usize, v: f32) {
-        // SAFETY: `i < len`; the C2 coloring invariant grants row `i` to AT MOST ONE
-        //   worker, so this single-element write never aliases another worker's. The
-        //   base is address-stable and carries WRITE provenance — it is the raw
-        //   `ScratchColumn::solve_base` (`ComponentPool::buffer_ptr().cast_mut()`),
-        //   never an `&[f32]`-Frozen reborrow — so `*base.add(i) = v` is TB-clean.
-        unsafe { *self.normal_impulse.add(i) = v }
-    }
-
-    /// Writes slot `i`'s accumulated first tangent impulse.
-    #[inline]
-    fn set_tangent1_impulse(&self, i: usize, v: f32) {
-        // SAFETY: as `set_normal_impulse` — `i < len`, single-owner row, write-capable
-        //   `solve_base`-derived `*mut f32` (not a Frozen `&[f32]` reborrow).
-        unsafe { *self.tangent1_impulse.add(i) = v }
-    }
-
-    /// Writes slot `i`'s accumulated second tangent impulse.
-    #[inline]
-    fn set_tangent2_impulse(&self, i: usize, v: f32) {
-        // SAFETY: as `set_normal_impulse` — `i < len`, single-owner row, write-capable
-        //   `solve_base`-derived `*mut f32` (not a Frozen `&[f32]` reborrow).
-        unsafe { *self.tangent2_impulse.add(i) = v }
+    unsafe fn block(&self, i: usize) -> *mut RankBlock {
+        debug_assert!(i < self.n_blocks, "invariant: a solved rank is a built rank");
+        // SAFETY: `i < n_blocks` (the contract), so `blocks + i` is the live `i`-th
+        //   block on the address-stable, write-capable base.
+        unsafe { self.blocks.add(i) }
     }
 }
 
-/// Single-thread build / refill view over all 31 contact [`ScratchColumn`]s
-/// (audit Stage P — P2).
+/// Lane `l` of a block's three anchor rows, read through raw projections (the
+/// scalar worker path: no reference to the block is formed).
 ///
-/// `!Send` (`PhantomData<*mut ()>`): the build/push phase runs on ONE thread, so
-/// holding `&mut` build views over whole columns is sound — no other thread is
-/// live during build. This is the ONLY surface that pushes / fills the columns;
-/// the worker-facing [`ContactSolveView`] deliberately lacks every whole-buffer
-/// path (the structural SP4 fix).
-struct ContactBuildView<'a> {
-    ra_x: ScratchBuildView<'a, f32>,
-    ra_y: ScratchBuildView<'a, f32>,
-    ra_z: ScratchBuildView<'a, f32>,
-    rb_x: ScratchBuildView<'a, f32>,
-    rb_y: ScratchBuildView<'a, f32>,
-    rb_z: ScratchBuildView<'a, f32>,
-    normal_x: ScratchBuildView<'a, f32>,
-    normal_y: ScratchBuildView<'a, f32>,
-    normal_z: ScratchBuildView<'a, f32>,
-    tangent1_x: ScratchBuildView<'a, f32>,
-    tangent1_y: ScratchBuildView<'a, f32>,
-    tangent1_z: ScratchBuildView<'a, f32>,
-    tangent2_x: ScratchBuildView<'a, f32>,
-    tangent2_y: ScratchBuildView<'a, f32>,
-    tangent2_z: ScratchBuildView<'a, f32>,
-    separation: ScratchBuildView<'a, f32>,
-    friction: ScratchBuildView<'a, f32>,
-    restitution: ScratchBuildView<'a, f32>,
-    normal_impulse: ScratchBuildView<'a, f32>,
-    tangent1_impulse: ScratchBuildView<'a, f32>,
-    tangent2_impulse: ScratchBuildView<'a, f32>,
-    body_a: ScratchBuildView<'a, u32>,
-    body_b: ScratchBuildView<'a, u32>,
-    b_is_sentinel: ScratchBuildView<'a, bool>,
-    warm_key: ScratchBuildView<'a, u64>,
-    vn_initial: ScratchBuildView<'a, f32>,
-    _not_send: PhantomData<*mut ()>,
+/// # Safety
+/// `rows` is a live `[[f32; 8]; 3]` of a built block and `l < 8`; no other worker
+/// writes lane `l` of it (anchors are never written during a solve).
+#[inline]
+unsafe fn lane_vec3(rows: *const [[f32; COHORT]; 3], l: usize) -> Vec3 {
+    debug_assert!(l < COHORT);
+    // SAFETY: each projection names one live `f32` inside the row array (the
+    //   contract); `ptr::read` of a `Copy` value forms no reference.
+    unsafe {
+        Vec3::new(
+            ptr::read(&raw const (*rows)[0][l]),
+            ptr::read(&raw const (*rows)[1][l]),
+            ptr::read(&raw const (*rows)[2][l]),
+        )
+    }
 }
 
-/// The colored solver's per-contact constraint state in **Struct-of-Arrays**
-/// form, laid out so one COLOR is a contiguous span (Phase O5, Decision 7 — the
-/// `ContactColumns` sketch).
+/// The colored solver's per-step constraint state in cohort-shaped **AoSoA** form
+/// (L11 D5): one [`CohortHead`] and one [`CohortCold`] per cohort, one
+/// [`RankBlock`] and one cold `vn0` row per (cohort, rank), plus the per-manifold
+/// plan and the four CSRs that place a color in the tables.
 ///
 /// # Layout
 ///
-/// Each logical contact = one manifold POINT (the same granularity the reference
-/// `PointConstraint` uses). The columns are PARALLEL flat `Vec`s indexed by a
-/// dense "slot" `0..len`. Slots are ordered **by color** — `color_offsets[c] ..
-/// color_offsets[c + 1]` is color `c`'s contiguous span, so
-/// [`solve_color`](ColoredSoftStepSolver::solve_color) slices a color with one
-/// range and streams its columns linearly (cache-friendly; [O7] widens the same
-/// columns to 8-wide with no restructure).
+/// Cohorts are numbered in color order: color `c`'s cohorts are
+/// `color_cohort_start[c] .. color_cohort_start[c + 1]`, its groups
+/// `color_group_start[c] .. color_group_start[c + 1]`, and group `g` of the color
+/// is lane `(g - color_group_start[c]) % 8` of cohort
+/// `color_cohort_start[c] + (g - color_group_start[c]) / 8`. A cohort's ranks are
+/// `rank_base .. rank_base + depth` in `blocks` / `rank_cold`. `group_start` is the per-group POINT prefix
+/// (`len == n_groups + 1`) the dispatcher cuts work-balanced chunks by, and
+/// `color_offsets` the per-color point prefix (`len == n_colors + 1`) the
+/// whole-solve dispatch gate and the profiling zones read — both exactly the CSRs
+/// the per-point columns kept, so the dispatch structure is unchanged (D6).
 ///
-/// [O7]: https://github.com/bluesteelll/boyko-engine
+/// # The build (D4)
 ///
-/// Geometry columns (`ra*`, `rb*`, `normal*`, `tangent1*`, `tangent2*`,
-/// `separation`, body rows, the friction coefficient, the sentinel flag) are
-/// built once per solve and re-read each substep. The impulse columns
-/// (`normal_impulse`, `tangent1_impulse`, `tangent2_impulse`) are warm-SEEDED at
-/// build and accumulate across substeps.
+/// Three passes: P-a in stream order writes the warm keys, the source runs
+/// (`plan`) and the per-manifold `tags`; P-b walks the color CSR and lays the
+/// cohorts out — the CSRs, each cohort's rank table and lane manifolds — sizing
+/// `heads` / `cold` to a bound it then cuts, and `blocks` / `rank_cold` to their
+/// exact rank count; P-c fills every cohort from its manifolds (the head lanes,
+/// the blocks, the seeds, the lazy `vn0`), zeroing padding. Columns are `resize`d,
+/// never pushed: growth fills once, and every entry is then overwritten.
 ///
-/// # Canonical order (IM-2b)
+/// # The warm store's view (L11 C1/C2)
 ///
-/// `canonical[k]` is the slot index of the `k`-th contact in canonical
-/// `(manifold order, point index)` order — the deterministic order the warm
-/// store walks, INDEPENDENT of the color layout. Each slot also carries its
-/// `warm_key` and gather-time approach velocity `vn_initial` so the restitution
-/// pass and warm store need no parallel buffer.
+/// The store walks cohorts and writes each solved manifold's converged impulses
+/// into its record by `cold.mi` (`warm_records.rs`), then walks `tags` for the
+/// frozen manifolds' carry (B1) and the empty ones. Neither depends on the worker
+/// count: the layout is a pure function of the stream and the graph.
 ///
-/// # Manifold-group boundaries (C1 — load-bearing for O6/O7)
-///
-/// The O4 coloring invariant is manifold-GROUP granular: a single manifold's ≥2
-/// points share both bodies and are contiguous in the SAME color span, so they
-/// must NOT be split across threads/lanes. `group_start` is a flat CSR over the
-/// solve (slot) order: group `g`'s slot range is
-/// `group_start[g] .. group_start[g + 1]` (`len == n_groups + 1`), one group per
-/// appended manifold with ≥1 live point. `color_group_start` is the parallel
-/// per-color CSR: color `c`'s groups are
-/// `color_group_start[c] .. color_group_start[c + 1]` (`len == n_colors + 1`),
-/// each value an index INTO `group_start`. A consumer (O6/O7) enumerates color
-/// `c`'s manifold-groups as `g in color_group_start[c]..color_group_start[c + 1]`
-/// and reads each group's slot range from `group_start[g] .. group_start[g + 1]`,
-/// keeping every point of one manifold on ONE thread / lane.
-///
-/// All columns are `clear()`-ed and refilled each build — capacity is reused, no
-/// per-step alloc in steady state (W2). The columns are kernel-native
-/// [`ScratchColumn`]s (audit Stage P — P2) instead of `std::Vec` side-stores: a
-/// `ScratchColumn`'s data base is ADDRESS-STABLE across an in-place grow, which is
-/// the property a `std::Vec` lacks (a realloc moves the base — the SP4/rigid race
-/// root cause). The worker-facing [`ContactSolveView`] hands out per-element
-/// `base + index` accessors ONLY, so the parallel solve never reborrows the whole
-/// buffer.
-struct ContactColumns {
-    /// Body-A anchor offset (world frame), split into three SoA columns.
-    ra_x: ScratchColumn<f32>,
-    ra_y: ScratchColumn<f32>,
-    ra_z: ScratchColumn<f32>,
-    /// Body-B anchor offset (world frame), split into three SoA columns.
-    rb_x: ScratchColumn<f32>,
-    rb_y: ScratchColumn<f32>,
-    rb_z: ScratchColumn<f32>,
-    /// Contact normal (A → B), split into three SoA columns.
-    normal_x: ScratchColumn<f32>,
-    normal_y: ScratchColumn<f32>,
-    normal_z: ScratchColumn<f32>,
-    /// First friction tangent, split into three SoA columns.
-    tangent1_x: ScratchColumn<f32>,
-    tangent1_y: ScratchColumn<f32>,
-    tangent1_z: ScratchColumn<f32>,
-    /// Second friction tangent, split into three SoA columns.
-    tangent2_x: ScratchColumn<f32>,
-    tangent2_y: ScratchColumn<f32>,
-    tangent2_z: ScratchColumn<f32>,
-    /// Signed separation at gather time (negative = penetrating).
-    separation: ScratchColumn<f32>,
-    /// Combined friction coefficient (`max(µa, µb)`, the reference rule).
-    friction: ScratchColumn<f32>,
-    /// Combined restitution coefficient (`max(ea, eb)`, the reference rule).
-    restitution: ScratchColumn<f32>,
-    /// Accumulated normal impulse `λn ≥ 0` (warm-seeded).
-    normal_impulse: ScratchColumn<f32>,
-    /// Accumulated tangent impulse along `t1` (warm-seeded).
-    tangent1_impulse: ScratchColumn<f32>,
-    /// Accumulated tangent impulse along `t2` (warm-seeded).
-    tangent2_impulse: ScratchColumn<f32>,
-    /// Dense body-A row index.
-    body_a: ScratchColumn<u32>,
-    /// Dense body-B row index (an A-row placeholder when `b_is_sentinel`).
-    body_b: ScratchColumn<u32>,
-    /// `true` for an SDF contact (`body_b == SDF_SENTINEL`): body B is
-    /// [`IMMOVABLE_AT_REST`], never `bodies[body_b]`.
-    b_is_sentinel: ScratchColumn<bool>,
-    /// Per-point warm-start key (`pack`/`pack_sdf` with this point's feature id).
-    warm_key: ScratchColumn<u64>,
-    /// Gather-time relative normal APPROACH velocity (B−A on the normal),
-    /// captured before the first substep for the restitution pass.
-    vn_initial: ScratchColumn<f32>,
-    /// CSR color offsets: `color_offsets[c] .. color_offsets[c + 1]` is color
-    /// `c`'s contiguous slot span (`len == n_colors + 1`).
+/// The columns are kernel-native [`ScratchColumn`]s (audit Stage P — P2): a
+/// `ScratchColumn`'s data base is ADDRESS-STABLE across an in-place grow, the
+/// property `std::Vec` lacks (the SP4/rigid race root cause). The worker-facing
+/// [`CohortSolveView`] hands out raw bases only, so the parallel solve never
+/// reborrows a whole buffer.
+struct CohortColumns {
+    /// One head per cohort, in color order (HOT: five lines per cohort per sweep).
+    heads: ScratchColumn<CohortHead>,
+    /// One block per (cohort, rank), cohorts in color order (HOT: the sweeps' data).
+    blocks: ScratchColumn<RankBlock>,
+    /// One cold record per cohort (restitution, manifold indices).
+    cold: ScratchColumn<CohortCold>,
+    /// One cold `vn0` row per (cohort, rank): the gather-time relative normal
+    /// APPROACH velocity of each lane's point, computed only where the lane's
+    /// restitution can read it (D9) and zero elsewhere.
+    rank_cold: ScratchColumn<[f32; COHORT]>,
+    /// Per-manifold-index warm source (L11 D2, ruling W1): the run of the previous
+    /// stream's records whose key is this manifold's translated pair, written by
+    /// `plan_sources` in stream order, read by the seed of every solved point and by
+    /// the store's carry. `WarmRun::MISS` when nothing was looked up.
+    plan: ScratchColumn<WarmRun>,
+    /// Per-manifold-index tag (P-a): the live point count and the frozen flag.
+    tags: ScratchColumn<ManifoldTag>,
+    /// CSR color point offsets: `color_offsets[c + 1] - color_offsets[c]` is color
+    /// `c`'s point count (`len == n_colors + 1`).
     color_offsets: ScratchColumn<u32>,
-    /// Slot indices in canonical `(manifold, point)` order (IM-2b warm store).
-    canonical: ScratchColumn<u32>,
-    /// CSR manifold-group boundaries in solve (slot) order (C1): group `g`'s slot
-    /// run is `group_start[g] .. group_start[g + 1]` (`len == n_groups + 1`). One
-    /// group per appended manifold with ≥1 live point.
+    /// CSR manifold-group point boundaries in solve order (C1): group `g` holds
+    /// `group_start[g + 1] - group_start[g]` points (`len == n_groups + 1`). One
+    /// group per laid-out manifold.
     group_start: ScratchColumn<u32>,
-    /// Per-color CSR into `group_start` (C1): color `c`'s manifold-groups are
-    /// `color_group_start[c] .. color_group_start[c + 1]` (`len == n_colors + 1`),
-    /// each value indexing `group_start`. Lets O6/O7 enumerate, per color, the
-    /// groups and (via `group_start`) each group's slot range.
+    /// Per-color CSR into the groups (C1): color `c`'s groups are
+    /// `color_group_start[c] .. color_group_start[c + 1]` (`len == n_colors + 1`).
     color_group_start: ScratchColumn<u32>,
-    /// Reused scratch: per-manifold-index base slot + live-point count, written as
-    /// each manifold is appended in the build walk so the canonical order is
-    /// recovered WITHOUT a second replay walk (W1/O1/O3 fold). `(u32::MAX, 0)` for
-    /// a manifold absent from every color or with no live point. Capacity-reused
-    /// (`clear()` + per-build `manifold_fill` refill), never `vec!` per step.
-    manifold_base: ScratchColumn<(u32, u32)>,
+    /// Per-color CSR into the cohorts (C2): color `c`'s cohorts are
+    /// `color_cohort_start[c] .. color_cohort_start[c + 1]` (`len == n_colors + 1`).
+    color_cohort_start: ScratchColumn<u32>,
 }
 
-impl ContactColumns {
-    /// Builds the 31 contact columns, each on its own band id, reserving
-    /// `contacts` rows (clamped up to the kernel's adaptive per-element budget so
-    /// a freshly-built solver never regrows in steady state).
+impl CohortColumns {
+    /// Builds the 10 cohort columns, each on its own band id, reserving room for
+    /// `contacts` points (clamped up to the kernel's adaptive per-element budget so
+    /// a freshly-built solver never regrows in steady state). A cohort has at least
+    /// one point and a rank block at least one, so `contacts` bounds both counts.
     ///
-    /// The contact-column layouts are registered idempotently before any
-    /// `ScratchColumn::new` reads them (see [`register_scratch_layouts`]).
+    /// The layouts are registered idempotently before any `ScratchColumn::new`
+    /// reads them (see [`register_scratch_layouts`]).
     fn with_capacity(contacts: usize) -> Self {
-        // Self-register the contact-column band BEFORE any `ScratchColumn::new` reads a
-        // synthetic id's layout — idempotent (write-once `OnceLock`), so calling it here
-        // AND in the solver constructor costs one branch each after the first. Makes this
-        // constructor safe for ANY caller (tests build `ContactColumns` directly).
+        // Self-register the band BEFORE any `ScratchColumn::new` reads a synthetic
+        // id's layout — idempotent (write-once `OnceLock`), so calling it here AND in
+        // the solver constructor costs one branch each after the first. Makes this
+        // constructor safe for ANY caller (tests build `CohortColumns` directly).
         register_scratch_layouts();
         // Reserve at least the contact count, but never below the kernel's adaptive
         // per-element budget (a pure-address-space reservation, demand-committed —
         // a generous ceiling costs nothing and removes the per-step grow-cap hazard).
-        let f32_rows = contacts.max(scratch_reserve_rows(size_of::<f32>()));
-        let u32_rows = contacts.max(scratch_reserve_rows(size_of::<u32>()));
-        let bool_rows = contacts.max(scratch_reserve_rows(size_of::<bool>()));
-        let u64_rows = contacts.max(scratch_reserve_rows(size_of::<u64>()));
-        let pair_rows = contacts.max(scratch_reserve_rows(size_of::<(u32, u32)>()));
-
+        let rows = |stride: usize| contacts.max(scratch_reserve_rows(stride));
         // `k` walks the band in struct field order (see `register_contact_column_layouts`).
-        let mut k = 0usize;
-        let mut f32_col = || {
-            let c = ScratchColumn::<f32>::new(contact_column_id(k), f32_rows);
-            k += 1;
-            c
+        let cols = Self {
+            heads: ScratchColumn::new(contact_column_id(0), rows(size_of::<CohortHead>())),
+            blocks: ScratchColumn::new(contact_column_id(1), rows(size_of::<RankBlock>())),
+            cold: ScratchColumn::new(contact_column_id(2), rows(size_of::<CohortCold>())),
+            rank_cold: ScratchColumn::new(contact_column_id(3), rows(size_of::<[f32; COHORT]>())),
+            plan: ScratchColumn::new(contact_column_id(4), rows(size_of::<WarmRun>())),
+            tags: ScratchColumn::new(contact_column_id(5), rows(size_of::<ManifoldTag>())),
+            color_offsets: ScratchColumn::new(contact_column_id(6), rows(size_of::<u32>())),
+            group_start: ScratchColumn::new(contact_column_id(7), rows(size_of::<u32>())),
+            color_group_start: ScratchColumn::new(contact_column_id(8), rows(size_of::<u32>())),
+            color_cohort_start: ScratchColumn::new(contact_column_id(9), rows(size_of::<u32>())),
         };
-        Self {
-            ra_x: f32_col(),
-            ra_y: f32_col(),
-            ra_z: f32_col(),
-            rb_x: f32_col(),
-            rb_y: f32_col(),
-            rb_z: f32_col(),
-            normal_x: f32_col(),
-            normal_y: f32_col(),
-            normal_z: f32_col(),
-            tangent1_x: f32_col(),
-            tangent1_y: f32_col(),
-            tangent1_z: f32_col(),
-            tangent2_x: f32_col(),
-            tangent2_y: f32_col(),
-            tangent2_z: f32_col(),
-            separation: f32_col(),
-            friction: f32_col(),
-            restitution: f32_col(),
-            normal_impulse: f32_col(),
-            tangent1_impulse: f32_col(),
-            tangent2_impulse: f32_col(),
-            body_a: ScratchColumn::<u32>::new(contact_column_id(21), u32_rows),
-            body_b: ScratchColumn::<u32>::new(contact_column_id(22), u32_rows),
-            b_is_sentinel: ScratchColumn::<bool>::new(contact_column_id(23), bool_rows),
-            warm_key: ScratchColumn::<u64>::new(contact_column_id(24), u64_rows),
-            vn_initial: ScratchColumn::<f32>::new(contact_column_id(25), f32_rows),
-            color_offsets: ScratchColumn::<u32>::new(contact_column_id(26), u32_rows),
-            canonical: ScratchColumn::<u32>::new(contact_column_id(27), u32_rows),
-            group_start: ScratchColumn::<u32>::new(contact_column_id(28), u32_rows),
-            color_group_start: ScratchColumn::<u32>::new(contact_column_id(29), u32_rows),
-            manifold_base: ScratchColumn::<(u32, u32)>::new(contact_column_id(30), pair_rows),
-        }
+        // The kernel's aligned vector loads need 32 B rows; the structs are `align(64)`
+        // and the pool's base plus its cache-line stagger keeps that alignment.
+        debug_assert!(
+            (cols.heads.solve_base() as usize).is_multiple_of(64)
+                && (cols.blocks.solve_base() as usize).is_multiple_of(64),
+            "invariant: the cohort tables are 64 B-aligned"
+        );
+        cols
     }
 
-    /// Number of contact-point slots currently built.
+    /// Number of contact points laid out (the sum over colors).
     #[inline]
     fn len(&self) -> usize {
-        self.separation.len()
+        self.color_offsets().last().map_or(0, |&n| n as usize)
     }
 
-    /// Borrows the 25 push-filled columns as single-thread build views (the
-    /// `manifold_base` / CSR columns are filled via their own helpers, not the
-    /// per-row `push_row`). The borrows are DISJOINT-field, so the borrow checker
-    /// permits 25 simultaneous `&mut` into one `&mut ContactColumns`.
-    fn build_view(&mut self) -> ContactBuildView<'_> {
-        ContactBuildView {
-            ra_x: self.ra_x.build_view(),
-            ra_y: self.ra_y.build_view(),
-            ra_z: self.ra_z.build_view(),
-            rb_x: self.rb_x.build_view(),
-            rb_y: self.rb_y.build_view(),
-            rb_z: self.rb_z.build_view(),
-            normal_x: self.normal_x.build_view(),
-            normal_y: self.normal_y.build_view(),
-            normal_z: self.normal_z.build_view(),
-            tangent1_x: self.tangent1_x.build_view(),
-            tangent1_y: self.tangent1_y.build_view(),
-            tangent1_z: self.tangent1_z.build_view(),
-            tangent2_x: self.tangent2_x.build_view(),
-            tangent2_y: self.tangent2_y.build_view(),
-            tangent2_z: self.tangent2_z.build_view(),
-            separation: self.separation.build_view(),
-            friction: self.friction.build_view(),
-            restitution: self.restitution.build_view(),
-            normal_impulse: self.normal_impulse.build_view(),
-            tangent1_impulse: self.tangent1_impulse.build_view(),
-            tangent2_impulse: self.tangent2_impulse.build_view(),
-            body_a: self.body_a.build_view(),
-            body_b: self.body_b.build_view(),
-            b_is_sentinel: self.b_is_sentinel.build_view(),
-            warm_key: self.warm_key.build_view(),
-            vn_initial: self.vn_initial.build_view(),
-            _not_send: PhantomData,
-        }
-    }
-
-    /// Freezes the built columns into the worker-facing [`ContactSolveView`] (B4
+    /// Freezes the built tables into the worker-facing [`CohortSolveView`] (B4
     /// re-create-before-view-live: called AFTER the last build-time grow, so the
     /// captured raw bases are stable for every worker's lifetime).
     ///
     /// Every base is derived from the kernel's write-capable raw base accessor
     /// [`ScratchColumn::solve_base`] — a provenance-preserving `*mut T` taken from
-    /// `ComponentPool::buffer_ptr` with NO `&[T]` interposed. The three impulse
-    /// columns (worker-mutable) therefore carry WRITE provenance: the previous
-    /// `as_read_slice().as_ptr().cast_mut()` branded them Frozen / SharedReadOnly,
-    /// which is Tree-Borrows-UB to write through (`set_*_impulse`). The read-only
-    /// bases are stored as `*const _` reborrows of the same write-capable raw base
-    /// — reading through a `*const` derived from a write-capable base is sound, and
-    /// deriving every base from one accessor sidesteps any future Frozen-tag trap.
-    /// Concurrent `*mut` writes are non-aliasing by the C2 coloring invariant (two
-    /// workers never own the same slot).
-    fn solve_view(&self) -> ContactSolveView<'_> {
-        ContactSolveView {
-            ra_x: self.ra_x.solve_base().cast_const(),
-            ra_y: self.ra_y.solve_base().cast_const(),
-            ra_z: self.ra_z.solve_base().cast_const(),
-            rb_x: self.rb_x.solve_base().cast_const(),
-            rb_y: self.rb_y.solve_base().cast_const(),
-            rb_z: self.rb_z.solve_base().cast_const(),
-            normal_x: self.normal_x.solve_base().cast_const(),
-            normal_y: self.normal_y.solve_base().cast_const(),
-            normal_z: self.normal_z.solve_base().cast_const(),
-            tangent1_x: self.tangent1_x.solve_base().cast_const(),
-            tangent1_y: self.tangent1_y.solve_base().cast_const(),
-            tangent1_z: self.tangent1_z.solve_base().cast_const(),
-            tangent2_x: self.tangent2_x.solve_base().cast_const(),
-            tangent2_y: self.tangent2_y.solve_base().cast_const(),
-            tangent2_z: self.tangent2_z.solve_base().cast_const(),
-            separation: self.separation.solve_base().cast_const(),
-            friction: self.friction.solve_base().cast_const(),
-            body_a: self.body_a.solve_base().cast_const(),
-            body_b: self.body_b.solve_base().cast_const(),
-            b_is_sentinel: self.b_is_sentinel.solve_base().cast_const(),
+    /// `ComponentPool::buffer_ptr` with NO `&[T]` interposed. The block base
+    /// (worker-mutable) therefore carries WRITE provenance; the read-only bases are
+    /// `*const _` reborrows of the same write-capable raw base, sound to read
+    /// through. Concurrent writes are non-aliasing by the C2 coloring invariant.
+    fn solve_view(&self) -> CohortSolveView<'_> {
+        CohortSolveView {
+            heads: self.heads.solve_base().cast_const(),
             // Worker-mutable: write-capable provenance (NOT Frozen).
-            normal_impulse: self.normal_impulse.solve_base(),
-            tangent1_impulse: self.tangent1_impulse.solve_base(),
-            tangent2_impulse: self.tangent2_impulse.solve_base(),
-            group_start: self.group_start.solve_base().cast_const(),
-            len: self.len(),
+            blocks: self.blocks.solve_base(),
+            n_heads: self.heads.len(),
+            n_blocks: self.blocks.len(),
             _marker: PhantomData,
         }
     }
 
-    /// Reads slot `i`'s body-A anchor as a [`Vec3`] (single-thread passes only —
-    /// `apply_restitution` / `warm_start_apply`).
-    #[inline]
-    fn ra(&self, i: usize) -> Vec3 {
-        let s = self.ra_x.as_read_slice();
-        Vec3::new(s[i], self.ra_y.as_read_slice()[i], self.ra_z.as_read_slice()[i])
-    }
-
-    /// Reads slot `i`'s body-B anchor as a [`Vec3`] (single-thread passes only).
-    #[inline]
-    fn rb(&self, i: usize) -> Vec3 {
-        Vec3::new(
-            self.rb_x.as_read_slice()[i],
-            self.rb_y.as_read_slice()[i],
-            self.rb_z.as_read_slice()[i],
-        )
-    }
-
-    /// Reads slot `i`'s contact normal as a [`Vec3`] (single-thread passes only).
-    #[inline]
-    fn normal(&self, i: usize) -> Vec3 {
-        Vec3::new(
-            self.normal_x.as_read_slice()[i],
-            self.normal_y.as_read_slice()[i],
-            self.normal_z.as_read_slice()[i],
-        )
-    }
-
-    /// Reads slot `i`'s first friction tangent as a [`Vec3`] — used ONLY by the
-    /// +avx2 `cone_probe` differential oracle, so it is gated to that exact build.
-    #[cfg(all(test, target_arch = "x86_64", target_feature = "avx2"))]
-    #[inline]
-    fn tangent1(&self, i: usize) -> Vec3 {
-        Vec3::new(
-            self.tangent1_x.as_read_slice()[i],
-            self.tangent1_y.as_read_slice()[i],
-            self.tangent1_z.as_read_slice()[i],
-        )
-    }
-
-    /// Reads slot `i`'s second friction tangent as a [`Vec3`] — used ONLY by the
-    /// +avx2 `cone_probe` differential oracle, so it is gated to that exact build.
-    #[cfg(all(test, target_arch = "x86_64", target_feature = "avx2"))]
-    #[inline]
-    fn tangent2(&self, i: usize) -> Vec3 {
-        Vec3::new(
-            self.tangent2_x.as_read_slice()[i],
-            self.tangent2_y.as_read_slice()[i],
-            self.tangent2_z.as_read_slice()[i],
-        )
-    }
-
-    /// Reads slot `i`'s combined restitution coefficient (single-thread only —
-    /// `apply_restitution`).
-    #[inline]
-    fn restitution(&self, i: usize) -> f32 {
-        self.restitution.as_read_slice()[i]
-    }
-
-    /// Reads slot `i`'s gather-time approach velocity (single-thread only —
-    /// `apply_restitution`).
-    #[inline]
-    fn vn_initial(&self, i: usize) -> f32 {
-        self.vn_initial.as_read_slice()[i]
-    }
-
-    /// Reads slot `i`'s body-A row index (single-thread passes only).
-    #[inline]
-    fn body_a(&self, i: usize) -> u32 {
-        self.body_a.as_read_slice()[i]
-    }
-
-    /// Reads slot `i`'s body-B row index (single-thread passes only).
-    #[inline]
-    fn body_b(&self, i: usize) -> u32 {
-        self.body_b.as_read_slice()[i]
-    }
-
-    /// Reads slot `i`'s sentinel flag (single-thread passes only).
-    #[inline]
-    fn b_is_sentinel(&self, i: usize) -> bool {
-        self.b_is_sentinel.as_read_slice()[i]
-    }
-
-    /// Reads slot `i`'s accumulated normal impulse (single-thread passes only).
-    #[inline]
-    fn normal_impulse(&self, i: usize) -> f32 {
-        self.normal_impulse.as_read_slice()[i]
-    }
-
-    /// Reads slot `i`'s first tangent impulse (single-thread passes only).
-    #[inline]
-    fn tangent1_impulse(&self, i: usize) -> f32 {
-        self.tangent1_impulse.as_read_slice()[i]
-    }
-
-    /// Reads slot `i`'s second tangent impulse (single-thread passes only).
-    #[inline]
-    fn tangent2_impulse(&self, i: usize) -> f32 {
-        self.tangent2_impulse.as_read_slice()[i]
-    }
-
-    /// Reads slot `i`'s warm-start key (single-thread passes only — `store_and_swap`).
-    #[inline]
-    fn warm_key(&self, i: usize) -> u64 {
-        self.warm_key.as_read_slice()[i]
-    }
-
-    /// Writes slot `i`'s normal impulse (single-thread passes only —
-    /// `apply_restitution` runs after the parallel solve has joined).
-    #[inline]
-    fn set_normal_impulse(&mut self, i: usize, v: f32) {
-        self.normal_impulse.build_view().as_mut_slice()[i] = v;
-    }
-
-    /// The CSR color-offsets column as a read slice.
+    /// The CSR color point offsets as a read slice.
     #[inline]
     fn color_offsets(&self) -> &[u32] {
         self.color_offsets.as_read_slice()
     }
 
-    /// The per-group CSR (`group_start`) as a read slice.
+    /// Point count of the WIDEST color — the whole-solve dispatch metric.
+    ///
+    /// This is the same quantity `solve_all_colors` compares against
+    /// [`MIN_PARALLEL_SLOTS_PER_COLOR`] per color, taken over the widest color:
+    /// if it does not clear the floor, no color does, and the whole-solve
+    /// dispatch is pure loss. If it DOES clear the floor, at least one color is
+    /// worth dispatching and the whole-solve gate must let the step through.
+    ///
+    /// It replaces `ConstraintGraph::max_island_constraints` as the gate metric.
+    /// That one measured ISLAND size, on the premise that a small largest island
+    /// cannot yield a wide color — but a color is a set of BODY-DISJOINT
+    /// manifolds, and manifolds in DIFFERENT islands are always body-disjoint,
+    /// so island size bounds color width from ABOVE only in the degenerate
+    /// single-island case and bounds it from below not at all. `n` disjoint
+    /// pairs are `n` islands of one manifold each AND one color of `n` slots.
+    ///
+    /// Zero for an empty partition: `color_offsets` is then empty or a lone
+    /// sentinel, `windows(2)` yields nothing, and the gate correctly refuses.
+    #[inline]
+    fn widest_color_slots(&self) -> u32 {
+        self.color_offsets()
+            .windows(2)
+            .map(|w| w[1] - w[0])
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// `(wide, narrow)` contact-point totals over this step's colors, classed by the
+    /// same `MIN_PARALLEL_SLOTS_PER_COLOR` floor as the per-color profiling zones.
+    ///
+    /// Read only by the armed profiler's slot counters, once per step, so it is out
+    /// of line rather than folded into the build.
+    #[cold]
+    fn slots_by_width(&self) -> (u64, u64) {
+        self.color_offsets().windows(2).fold((0, 0), |(wide, narrow), w| {
+            let slots = w[1] - w[0];
+            if slots < MIN_PARALLEL_SLOTS_PER_COLOR {
+                (wide, narrow + u64::from(slots))
+            } else {
+                (wide + u64::from(slots), narrow)
+            }
+        })
+    }
+
+    /// W8S instrument 3: pushes this step's colour histogram — per bin of
+    /// [`crate::profiling::HIST_BIN_EDGES`], the colours whose width lies in it and their slots
+    /// — ten counters, each once. One pass over `color_offsets`, armed only; a colour with no
+    /// slot (every manifold of it frozen) is in no bin.
+    #[cold]
+    #[inline(never)]
+    fn push_histogram(&self) {
+        let mut colors = [0u64; HIST_BINS];
+        let mut slots = [0u64; HIST_BINS];
+        for w in self.color_offsets().windows(2) {
+            if let Some(bin) = hist_bin(w[1] - w[0]) {
+                colors[bin] += 1;
+                slots[bin] += u64::from(w[1] - w[0]);
+            }
+        }
+        counter!(PHYS_HIST_COLORS_LT32, colors[0]);
+        counter!(PHYS_HIST_COLORS_LT64, colors[1]);
+        counter!(PHYS_HIST_COLORS_LT128, colors[2]);
+        counter!(PHYS_HIST_COLORS_LT256, colors[3]);
+        counter!(PHYS_HIST_COLORS_GE256, colors[4]);
+        counter!(PHYS_HIST_SLOTS_LT32, slots[0]);
+        counter!(PHYS_HIST_SLOTS_LT64, slots[1]);
+        counter!(PHYS_HIST_SLOTS_LT128, slots[2]);
+        counter!(PHYS_HIST_SLOTS_LT256, slots[3]);
+        counter!(PHYS_HIST_SLOTS_GE256, slots[4]);
+    }
+
+    /// The per-group point CSR (`group_start`) as a read slice.
     #[inline]
     fn group_start(&self) -> &[u32] {
         self.group_start.as_read_slice()
     }
 
-    /// The per-color CSR into `group_start` as a read slice.
+    /// The per-color CSR into the groups as a read slice.
     #[inline]
     fn color_group_start(&self) -> &[u32] {
         self.color_group_start.as_read_slice()
     }
 
-    /// The canonical-order slot list as a read slice.
+    /// The per-color CSR into the cohorts as a read slice.
     #[inline]
-    fn canonical(&self) -> &[u32] {
-        self.canonical.as_read_slice()
+    fn color_cohort_start(&self) -> &[u32] {
+        self.color_cohort_start.as_read_slice()
     }
 
-    /// Resets the push-filled point columns AND the CSR columns for a fresh build,
-    /// seeding the three CSRs with their leading `0`.
-    fn begin_build(&mut self) {
-        self.build_view().clear();
-        self.color_offsets.build_view().clear();
-        self.group_start.build_view().clear();
-        self.color_group_start.build_view().clear();
-        self.canonical.build_view().clear();
-        self.color_offsets.build_view().push(0);
-        self.group_start.build_view().push(0);
-        self.color_group_start.build_view().push(0);
-    }
-
-    /// Appends a `color_offsets` CSR boundary.
+    /// Color `c`'s place in the group and cohort tables (the tests' lane lookup).
+    #[cfg(test)]
     #[inline]
-    fn push_color_offset(&mut self, v: u32) {
-        self.color_offsets.build_view().push(v);
-    }
-
-    /// Appends a `group_start` CSR boundary.
-    #[inline]
-    fn push_group_start(&mut self, v: u32) {
-        self.group_start.build_view().push(v);
-    }
-
-    /// Appends a `color_group_start` CSR boundary.
-    #[inline]
-    fn push_color_group_start(&mut self, v: u32) {
-        self.color_group_start.build_view().push(v);
-    }
-
-    /// Appends a canonical-order slot index.
-    #[inline]
-    fn push_canonical(&mut self, v: u32) {
-        self.canonical.build_view().push(v);
-    }
-
-    /// Reproduces the prior `manifold_base.resize(n, (u32::MAX, 0))` then runs the
-    /// sparse manifold-start write (audit Stage P — P2, critic note O1).
-    ///
-    /// `manifold_fill` is a TRANSIENT refill stager reproducing the resize-sentinel
-    /// pattern on the `manifold_base` [`ScratchColumn`] — NOT durable per-entity
-    /// data. The column is `clear`-ed then refilled to exactly `n` rows of the
-    /// sentinel `(u32::MAX, 0)`; the committed pages are capacity-reused (no free,
-    /// no per-frame alloc in steady state). The caller (`build_columns`) then
-    /// sparse-overwrites the manifold-start rows with `(base, count)`.
-    fn manifold_fill(&mut self, n: usize) {
-        let mut view = self.manifold_base.build_view();
-        view.clear();
-        // Refill the first `n` rows with the resize sentinel (the same value
-        // `Vec::resize(n, (u32::MAX, 0))` produced) — a straight broadcast of the
-        // sentinel pair, in-place on the address-stable column (grows the committed
-        // frontier the first time, capacity-reused thereafter — zero steady-state
-        // alloc).
-        for _ in 0..n {
-            view.push((u32::MAX, 0));
+    fn color_ctx(&self, c: usize) -> ColorCtx {
+        ColorCtx {
+            g_base: self.color_group_start()[c] as usize,
+            k_base: self.color_cohort_start()[c] as usize,
         }
     }
 
-    /// Sparse-overwrites `manifold_base[mi]` with `(base, count)` (the manifold-start
-    /// write run after [`manifold_fill`](Self::manifold_fill)).
+    /// The per-manifold warm-source runs as a read slice.
     #[inline]
-    fn set_manifold_base(&mut self, mi: usize, base: u32, count: u32) {
-        self.manifold_base.build_view().as_mut_slice()[mi] = (base, count);
+    fn plan(&self) -> &[WarmRun] {
+        self.plan.as_read_slice()
     }
 
-    /// The `manifold_base` column as a read slice (the canonical-order emit reads it).
+    /// The per-manifold tags as a read slice.
     #[inline]
-    fn manifold_base(&self) -> &[(u32, u32)] {
-        self.manifold_base.as_read_slice()
+    fn tags(&self) -> &[ManifoldTag] {
+        self.tags.as_read_slice()
+    }
+
+    /// The cohort heads as a read slice (the single-threaded passes).
+    #[inline]
+    fn heads(&self) -> &[CohortHead] {
+        self.heads.as_read_slice()
+    }
+
+    /// The rank blocks as a read slice (the single-threaded passes).
+    #[inline]
+    fn blocks(&self) -> &[RankBlock] {
+        self.blocks.as_read_slice()
+    }
+
+    /// Sizes `plan` and `tags` to exactly `n` manifolds for P-a to write by index
+    /// (fills only on growth; every entry is then overwritten).
+    fn manifold_fill(&mut self, n: usize) {
+        self.plan.build_view().resize(n, WarmRun::MISS);
+        self.tags.build_view().resize(n, ManifoldTag::default());
+    }
+
+    /// P-b (D4): lays the cohorts out over the graph's color CSR from the tags P-a
+    /// wrote, in color order. Writes the four CSRs and every cohort's rank table —
+    /// `rank_base`, `depth`, `nlanes`, the per-lane `width` and `cold.mi`, the zero
+    /// padding bytes — and sizes `blocks` / `rank_cold` to the exact rank count. The
+    /// lane data the fill (P-c) writes is untouched here.
+    ///
+    /// `heads` / `cold` are sized to a bound (one cohort per eight manifolds plus one
+    /// partial cohort per color) and cut to the cohort count afterwards — the
+    /// sized-then-written idiom; the fill on growth happens once.
+    ///
+    /// Returns the laid-out manifold count.
+    fn layout(&mut self, graph: &ConstraintGraph) -> u32 {
+        let Self {
+            heads,
+            blocks,
+            cold,
+            rank_cold,
+            tags,
+            color_offsets,
+            group_start,
+            color_group_start,
+            color_cohort_start,
+            ..
+        } = self;
+        let n_colors = graph.n_colors() as usize;
+        let tags = tags.as_read_slice();
+        let bound = tags.len().div_ceil(COHORT) + n_colors;
+
+        let mut heads_view = heads.build_view();
+        heads_view.resize(bound, CohortHead::ZERO);
+        let mut cold_view = cold.build_view();
+        cold_view.resize(bound, CohortCold::ZERO);
+        let heads = heads_view.as_mut_slice();
+        let cold = cold_view.as_mut_slice();
+
+        let mut color_offsets = color_offsets.build_view();
+        let mut group_start = group_start.build_view();
+        let mut color_group_start = color_group_start.build_view();
+        let mut color_cohort_start = color_cohort_start.build_view();
+        color_offsets.clear();
+        group_start.clear();
+        color_group_start.clear();
+        color_cohort_start.clear();
+        color_offsets.push(0);
+        group_start.push(0);
+        color_group_start.push(0);
+        color_cohort_start.push(0);
+
+        let mut k = 0usize;
+        let mut ranks = 0u32;
+        let mut points = 0u32;
+        let mut groups = 0u32;
+        let mut seeded = 0u32;
+        for c in 0..n_colors {
+            let mut lane = 0usize;
+            // The graph yields the color's manifold indices in ascending order (D4),
+            // so lanes ascend in manifold index within a cohort and cohorts within a
+            // color: group-major order over the cohorts is the slot order.
+            for &mi in graph.color(c as u32) {
+                let tag = tags[mi as usize];
+                if !tag.solved() {
+                    continue;
+                }
+                if lane == 0 {
+                    // Open a cohort: its rank table starts at the running rank count;
+                    // the lane fields the fill does not write are zeroed here.
+                    let head = &mut heads[k];
+                    head.rank_base = ranks;
+                    head.depth = 0;
+                    head.width = [0; COHORT];
+                    head._p = 0;
+                    head._pad = [0; 16];
+                    cold[k].mi = [0; COHORT];
+                }
+                heads[k].width[lane] = tag.count;
+                heads[k].depth = heads[k].depth.max(tag.count);
+                cold[k].mi[lane] = mi;
+                points += u32::from(tag.count);
+                group_start.push(points);
+                groups += 1;
+                seeded += 1;
+                lane += 1;
+                if lane == COHORT {
+                    heads[k].nlanes = COHORT as u8;
+                    ranks += u32::from(heads[k].depth);
+                    k += 1;
+                    lane = 0;
+                }
+            }
+            if lane != 0 {
+                heads[k].nlanes = lane as u8;
+                ranks += u32::from(heads[k].depth);
+                k += 1;
+            }
+            color_offsets.push(points);
+            color_group_start.push(groups);
+            color_cohort_start.push(k as u32);
+        }
+        heads_view.truncate(k);
+        cold_view.truncate(k);
+        blocks.build_view().resize(ranks as usize, RankBlock::ZERO);
+        rank_cold.build_view().resize(ranks as usize, [0.0; COHORT]);
+        seeded
+    }
+
+    /// L11 C0: the FNV-1a 64 digest of the built layout's LOGICAL per-point values in
+    /// slot order — the three warm seeds, and `vn0` masked to `0.0` wherever the
+    /// restitution pass would never read it (`restitution <= 0.0`; a NaN coefficient
+    /// keeps it, the exact complement D9/O3 rule) — then the group and colour CSRs,
+    /// each length-first. Layout-free by construction: C2 re-derives the same values
+    /// from the cohort blocks (cohorts in color order, lanes, then ranks, is the slot
+    /// order the per-point columns had), so the C0 pins reproduce, and a changed
+    /// seed, mask rule or CSR boundary moves the digest. Taken right after the
+    /// build, before any sweep touches the impulse rows.
+    #[cfg(test)]
+    fn setup_digest(&self) -> u64 {
+        let blocks = self.blocks();
+        let vn0 = self.rank_cold.as_read_slice();
+        let mut h = fnv_u32(FNV_OFFSET, self.len() as u32);
+        for (head, cold) in self.heads().iter().zip(self.cold.as_read_slice()) {
+            let rank_base = head.rank_base as usize;
+            for (l, &width) in head.width[..head.nlanes as usize].iter().enumerate() {
+                for (blk, vn) in blocks[rank_base..].iter().zip(&vn0[rank_base..]).take(width as usize) {
+                    h = fnv_u32(h, blk.ni[l].to_bits());
+                    h = fnv_u32(h, blk.ti1[l].to_bits());
+                    h = fnv_u32(h, blk.ti2[l].to_bits());
+                    let masked = if cold.restitution[l] <= 0.0 { 0.0 } else { vn[l] };
+                    h = fnv_u32(h, masked.to_bits());
+                }
+            }
+        }
+        h = fnv_u32s(h, self.group_start());
+        h = fnv_u32s(h, self.color_group_start());
+        fnv_u32s(h, self.color_offsets())
     }
 }
 
-impl ContactBuildView<'_> {
-    /// Clears every push-filled column for a fresh build (capacity reused — the
-    /// committed pages stay resident; `clear` is `len = 0` with no free).
-    fn clear(&mut self) {
-        self.ra_x.clear();
-        self.ra_y.clear();
-        self.ra_z.clear();
-        self.rb_x.clear();
-        self.rb_y.clear();
-        self.rb_z.clear();
-        self.normal_x.clear();
-        self.normal_y.clear();
-        self.normal_z.clear();
-        self.tangent1_x.clear();
-        self.tangent1_y.clear();
-        self.tangent1_z.clear();
-        self.tangent2_x.clear();
-        self.tangent2_y.clear();
-        self.tangent2_z.clear();
-        self.separation.clear();
-        self.friction.clear();
-        self.restitution.clear();
-        self.normal_impulse.clear();
-        self.tangent1_impulse.clear();
-        self.tangent2_impulse.clear();
-        self.body_a.clear();
-        self.body_b.clear();
-        self.b_is_sentinel.clear();
-        self.warm_key.clear();
-        self.vn_initial.clear();
+/// G3's debug half: every padding lane of `head` / `cold` and every padding rank of
+/// the cohort's blocks and `vn0` rows is zero, so the layout bytes are a pure
+/// function of the stream. Checked after each cohort's fill in debug builds; the
+/// release build trusts the fill.
+#[cfg(debug_assertions)]
+fn debug_assert_padding_zero(
+    head: &CohortHead,
+    cold: &CohortCold,
+    blocks: &[RankBlock],
+    vn0: &[[f32; COHORT]],
+) {
+    let nlanes = head.nlanes as usize;
+    for l in 0..COHORT {
+        let width = head.width[l] as usize;
+        if l >= nlanes {
+            assert!(
+                width == 0
+                    && (0..3).all(|c| head.n[c][l].to_bits() == 0 && head.t1[c][l].to_bits() == 0)
+                    && head.friction[l].to_bits() == 0
+                    && head.body_a[l] == 0
+                    && head.body_b[l] == 0
+                    && !head.is_sentinel(l)
+                    && cold.restitution[l].to_bits() == 0
+                    && cold.mi[l] == 0,
+                "invariant: padding lane {l} of a cohort is zero in every head field"
+            );
+        }
+        for (blk, vn) in blocks.iter().zip(vn0).skip(width) {
+            assert!(
+                (0..3).all(|c| blk.ra[c][l].to_bits() == 0 && blk.rb[c][l].to_bits() == 0)
+                    && blk.sep[l].to_bits() == 0
+                    && blk.ni[l].to_bits() == 0
+                    && blk.ti1[l].to_bits() == 0
+                    && blk.ti2[l].to_bits() == 0
+                    && vn[l].to_bits() == 0,
+                "invariant: the ranks past lane {l}'s width are zero in every row"
+            );
+        }
     }
+    assert!(head._p == 0 && head._pad == [0; 16], "invariant: the head's padding bytes are zero");
+}
 
-    /// Appends one contact-point slot in lockstep across the 26 push-filled
-    /// columns. Order is identical to the prior `Vec::push` order, so the byte
-    /// layout is bit-for-bit identical.
-    #[allow(clippy::too_many_arguments)]
-    fn push_point(
-        &mut self,
-        ra: Vec3,
-        rb: Vec3,
-        normal: Vec3,
-        t1: Vec3,
-        t2: Vec3,
-        separation: f32,
-        friction: f32,
-        restitution: f32,
-        seed: (f32, f32, f32),
-        body_a: u32,
-        body_b: u32,
-        b_is_sentinel: bool,
-        warm_key: u64,
-        vn_initial: f32,
-    ) {
-        self.ra_x.push(ra.x);
-        self.ra_y.push(ra.y);
-        self.ra_z.push(ra.z);
-        self.rb_x.push(rb.x);
-        self.rb_y.push(rb.y);
-        self.rb_z.push(rb.z);
-        self.normal_x.push(normal.x);
-        self.normal_y.push(normal.y);
-        self.normal_z.push(normal.z);
-        self.tangent1_x.push(t1.x);
-        self.tangent1_y.push(t1.y);
-        self.tangent1_z.push(t1.z);
-        self.tangent2_x.push(t2.x);
-        self.tangent2_y.push(t2.y);
-        self.tangent2_z.push(t2.z);
-        self.separation.push(separation);
-        self.friction.push(friction);
-        self.restitution.push(restitution);
-        self.normal_impulse.push(seed.0);
-        self.tangent1_impulse.push(seed.1);
-        self.tangent2_impulse.push(seed.2);
-        self.body_a.push(body_a);
-        self.body_b.push(body_b);
-        self.b_is_sentinel.push(b_is_sentinel);
-        self.warm_key.push(warm_key);
-        self.vn_initial.push(vn_initial);
+/// S4: how one step's P-c runs when it opens no solve region (a region step's fill is the
+/// region's stage 0, [`FillPlan`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SetupRun {
+    /// On the calling thread, over every cohort. `fused` searches the laid-out manifolds' warm
+    /// runs in the fill, as a region's ranged fill does (the serial twin of shape F; test builds
+    /// only set it).
+    Inline {
+        /// Whether the fill searches the laid-out manifolds' runs itself.
+        fused: bool,
+    },
+    /// In this many scoped std threads: the pool-free twin of the region's Fill blocks that Miri
+    /// runs (G4-F).
+    #[cfg(test)]
+    Threads(usize),
+}
+
+/// S4, test builds: how a test forces the setup's shape (G4-A, G4-F).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SetupMode {
+    /// The production gate.
+    #[default]
+    Auto,
+    /// Shape F's fused search on the calling thread, one range.
+    SerialFused,
+    /// This task count (capped by the cohorts and [`SETUP_MAX_TASKS`]) on the ambient pool, the
+    /// P2 gate and the point floor waived: a Fill entry of this many blocks in a forced solve
+    /// region (SR, KD5). A step whose cut makes two ranges or more publishes it.
+    Pool(usize),
+    /// The same tasks on scoped std threads.
+    Threads(usize),
+}
+
+/// What one P-c range reports (S4): its point hits, its searches' counts, its anti-vacuity
+/// counts. Integer sums, reduced after the join in range order.
+#[derive(Clone, Copy, Debug, Default)]
+struct RangeOut {
+    /// The lanes' point hits.
+    hits: u32,
+    /// The fused search's counts (all zero when the runs were planned serially).
+    counts: PlanCounts,
+    /// The fill's anti-vacuity counts.
+    setup: SetupCounters,
+}
+
+/// One step's P-c as its ranges see it (S4, L11 D10): the write-capable raw base of every table
+/// the fill writes, taken with `ScratchColumn::solve_base` after the last build-time grow (B4),
+/// and shared views of what it only reads. No reference spans a column a range writes — heads,
+/// cold, blocks, `vn0`, `plan`, `tags`, the write side's records — so ranges on different threads
+/// hold no overlapping reference (the P1/P2 discipline). A range writes only its own cohorts,
+/// their own rank rows, and the `plan` / `tags` / record entries of its own lanes' manifolds.
+struct FillCtx<'a> {
+    heads: *mut CohortHead,
+    cold: *mut CohortCold,
+    blocks: *mut RankBlock,
+    vn0: *mut [f32; COHORT],
+    plan: *mut WarmRun,
+    tags: *mut ManifoldTag,
+    /// The write side's records, `None` with warm start off (no record is written).
+    recs_w: Option<*mut WarmRecord>,
+    /// Built cohorts.
+    n_heads: usize,
+    /// Built rank blocks (and `vn0` rows).
+    n_blocks: usize,
+    manifolds: &'a [Manifold],
+    bodies: &'a [BodyState],
+    bodies_eff: &'a [BodyEffective],
+    /// The read side's lookup.
+    lookup: WarmLookup<'a>,
+    /// L10's restore source's lookup, on a step that has one.
+    restore: Option<WarmLookup<'a>>,
+    /// How the warm store's cursor classifies this gather.
+    remap: RowRemap<'a>,
+    /// Shape F: the fill searches each laid-out manifold's run itself (strict read side, warm,
+    /// looked up); otherwise P-a planned every run and the fill reads `plan` and `tags`.
+    fused: bool,
+    /// One [`RangeOut`] slot per range.
+    outs: *mut RangeOut,
+}
+
+// SAFETY: `FillCtx` is shared by reference between the setup tasks. Its raw bases are written only
+//   per element, each element by exactly one range: cohort `k`'s head, cold record, rank blocks and
+//   `vn0` rows by the range that owns `k` (the cuts partition the cohorts, and P-b gives each cohort
+//   its own consecutive ranks); `plan[mi]`, `tags[mi]` and the record `mi` by the range owning the
+//   one lane manifold `mi` has (P-b lays each solved manifold out once); `outs[i]` by range `i`
+//   alone. No range forms a reference over a whole column. Its shared views (`manifolds`, the
+//   bodies, both lookups, the remap) are not written while any range runs. The bases are
+//   address-stable (`ComponentPool` reservations) and taken after the last grow, and the scope's
+//   join outlives every task, so no base dangles.
+unsafe impl Sync for FillCtx<'_> {}
+
+impl<'a> FillCtx<'a> {
+    /// Manifold `mi`'s lookup and run for its lane's fill. Shape F searches it here with the
+    /// range's own cursors — D2's search is exact from any cursor, so the result is the one P-a's
+    /// stream-order walk finds; only the `backward` count differs — and records it in `plan` and
+    /// `tags` as P-a would. Otherwise P-a planned it, and it is read back.
+    ///
+    /// # Safety
+    /// `mi` is the manifold of a lane of a cohort the calling range owns, so no other thread
+    /// reads or writes `plan[mi]` or `tags[mi]` while it runs.
+    #[inline]
+    unsafe fn source(
+        &self,
+        mi: usize,
+        cursors: &mut SearchCursors,
+        counts: &mut PlanCounts,
+    ) -> (WarmLookup<'a>, WarmRun) {
+        if self.fused {
+            let (run, restored) = warm_records::source_of(
+                &self.manifolds[mi],
+                self.remap,
+                self.lookup.read,
+                self.lookup.index,
+                self.restore.map(|r| r.read),
+                cursors,
+                counts,
+            );
+            // SAFETY: `mi` is this range's own lane manifold (the contract), `mi < n` (a laid-out
+            //   manifold of this step), and `plan` / `tags` are the write-capable bases of
+            //   columns sized to `n`: the read, the writes and the tag's read-modify-write touch
+            //   elements no other thread touches, and form no reference.
+            unsafe {
+                ptr::write(self.plan.add(mi), run);
+                if restored {
+                    let tag = self.tags.add(mi);
+                    let mut t = ptr::read(tag);
+                    t.flags |= ManifoldTag::SRC_RESTORE;
+                    ptr::write(tag, t);
+                }
+            }
+            let lookup = match self.restore {
+                Some(restore) if restored => restore,
+                _ => self.lookup,
+            };
+            (lookup, run)
+        } else {
+            // SAFETY: as above; P-a wrote both entries before any range started, and nothing
+            //   writes them while ranges run.
+            let (run, tag) = unsafe { (ptr::read(self.plan.add(mi)), ptr::read(self.tags.add(mi))) };
+            let lookup = match self.restore {
+                Some(restore) if tag.src_restore() => restore,
+                _ => self.lookup,
+            };
+            (lookup, run)
+        }
     }
+}
+
+/// What the build reports to the solve (S4): L10's restore counts and, on a step whose substeps
+/// run as one region (SR: the P2 predicate held), `fill`, the plan of the fill the region runs as
+/// its stage 0 — on such a step the restore counts are the serial sources' alone (the ranges' are
+/// added after the region).
+struct BuildOut {
+    restore_searches: u32,
+    restore_hits: u32,
+    fill: Option<FillPlan>,
+}
+
+/// SR (phase B): the fill a region runs as its stage 0 (KD5) — what `build_columns` decided before
+/// it returned early: S4's cohort ranges (one inline range under two), whether the ranges search
+/// their own lanes' runs (shape F), what the serial sources counted, and the warm statistics' inputs
+/// the shared tail ([`fill_tail`]) reduces with the ranges' reports after the region.
+#[derive(Clone, Copy)]
+struct FillPlan {
+    cuts: [(u32, u32); SETUP_MAX_TASKS],
+    n_ranges: usize,
+    fused: bool,
+    plan_counts: PlanCounts,
+    tail: FillTail,
+}
+
+/// S4 / SR: the step's warm statistics, less the point hits the fill counts.
+#[derive(Clone, Copy, Debug)]
+struct FillTail {
+    seeded: u32,
+    translated: u32,
+    points: u32,
+    frozen_points: u32,
+}
+
+/// S4 / SR: the fill's tail, one routine for the serial fill and the region's stage 0 — the
+/// ranges' reports in range order (integer sums, exact under any partition), the
+/// setup counters, and the step's [`WarmSeedStats`]. Returns the plan counts with the ranges'
+/// searches added.
+#[inline]
+fn fill_tail(
+    outs: &[RangeOut],
+    mut plan_counts: PlanCounts,
+    tail: FillTail,
+    counters: &mut SetupCounters,
+    warm_stats: &mut WarmSeedStats,
+    remap_resets: u64,
+) -> PlanCounts {
+    // A range that did not run (the fill fell back inline) left its slot at the default, which adds
+    // nothing.
+    let mut point_hits = 0u32;
+    for out in outs {
+        point_hits += out.hits;
+        plan_counts.backward_searches += out.counts.backward_searches;
+        plan_counts.restore_searches += out.counts.restore_searches;
+        plan_counts.restore_hits += out.counts.restore_hits;
+        counters.merge(&out.setup);
+    }
+    counters.plan(plan_counts);
+    *warm_stats = WarmSeedStats {
+        manifolds: tail.seeded,
+        translated: tail.translated,
+        points: tail.points,
+        point_hits,
+        carry_points: tail.frozen_points,
+        // Counted by the store, which runs the carry after the solve.
+        carry_hits: 0,
+        remap_resets,
+    };
+    plan_counts
+}
+
+/// SR: the fill's task count on a region step — S4's terms (the lanes, work, cohort and cell-budget
+/// terms) with the region grain's lanes factor and point floor:
+/// `min(max_bpp · lanes, points / fill_points, cohorts, SETUP_MAX_TASKS)`. At two or more the
+/// cohorts are cut ([`setup_cuts`]), and the Fill entry has a block per range when the cut makes
+/// two ranges or more.
+#[inline]
+fn region_fill_tasks(lanes: usize, points: usize, n_cohorts: usize, grain: RegionGrain) -> usize {
+    (grain.max_bpp as usize * lanes)
+        .min(points / grain.fill_points as usize)
+        .min(n_cohorts)
+        .min(SETUP_MAX_TASKS)
+}
+
+/// SR: whether a step of `n_colors` colours fits the region's table — its entries are named by a
+/// `u16` (`StageEntry`, `SchedItem`). A step past it runs the serial loop, which solves the same bits.
+#[inline]
+const fn region_fits(n_colors: usize) -> bool {
+    E_COLOURS + 3 * n_colors <= u16::MAX as usize + 1
+}
+
+/// S4: cuts `heads` into at most `tasks` consecutive cohort ranges by point quota — `points /
+/// tasks`, rounded up — on cohort boundaries, the colour cut walk's shape over cohorts. Writes the
+/// ranges to `cuts` and returns their count, `1..=tasks`.
+fn setup_cuts(
+    heads: &[CohortHead],
+    points: usize,
+    tasks: usize,
+    cuts: &mut [(u32, u32); SETUP_MAX_TASKS],
+) -> usize {
+    debug_assert!(
+        (1..=SETUP_MAX_TASKS).contains(&tasks),
+        "invariant: 1..=SETUP_MAX_TASKS setup tasks"
+    );
+    let target = points.div_ceil(tasks).max(1);
+    let (mut n, mut lo, mut acc) = (0usize, 0usize, 0usize);
+    for (k, h) in heads.iter().enumerate() {
+        acc += h.width[..h.nlanes as usize].iter().map(|&w| usize::from(w)).sum::<usize>();
+        if acc >= target && n + 1 < tasks {
+            cuts[n] = (lo as u32, (k + 1) as u32);
+            n += 1;
+            lo = k + 1;
+            acc = 0;
+        }
+    }
+    if lo < heads.len() {
+        cuts[n] = (lo as u32, heads.len() as u32);
+        n += 1;
+    }
+    n
+}
+
+/// W8S instrument 4 (S6's hit-rate counter, `levers/scaling/01-DESIGN.md` §6.6): what the
+/// previous ARMED step's graph and layout inputs were, as far as the solve sees them. The design
+/// keyed the memo on a `StepInputs` epoch and an L10 held-store epoch; neither exists on this tree
+/// (cut §1.1), so the witness compares the inputs themselves: the gather, the stream's pair
+/// ordinals, every row's dynamic and held flags, the sleeping arm and the held store's size. A
+/// hit is a step whose inputs equal the witness's, taken on the gather just before it. 24 B,
+/// written only while armed.
+#[derive(Clone, Copy, Debug, Default)]
+struct S6Witness {
+    /// The gather the witness was taken on; `0` before the first armed step.
+    gather_seq: u64,
+    /// FNV-1a 64 of the stream's pair ordinals, the count first.
+    stream: u64,
+    /// FNV-1a 64 of every row's (dynamic, held) flags, the row count first, then the sleeping
+    /// arm and the held store's live points.
+    rows: u64,
+}
+
+/// One word folded into an FNV-1a 64 hash (the S6 witness's hash: a word at a time, which is
+/// all a witness needs; it is not the runner's pose hash).
+#[inline]
+fn fnv_word(h: u64, v: u64) -> u64 {
+    (h ^ v).wrapping_mul(0x0000_0100_0000_01b3)
 }
 
 /// The colored TGS-Soft rigid-body solver (Phase O5, Decision 7).
 ///
-/// A `Resource` owning its [`ContactColumns`] SoA scratch + the double-buffered
-/// warm-start cache. Solves contacts in color order (a Gauss-Seidel sweep across
+/// A `Resource` owning its [`CohortColumns`] tables + the double-buffered
+/// per-manifold warm store. Solves contacts in color order (a Gauss-Seidel sweep across
 /// colors) over the columns, single-threaded in O5. Like the reference
 /// [`SoftStepSolver`](super::SoftStepSolver) it
 /// [`owns_integration`](RigidSolver::owns_integration), so the pipeline's
 /// `physics_integrate` is gated off.
+///
+/// Step state: replacing or removing it after the first step is not supported, because the step
+/// keeps state in it that one sleep-skip mode carries and the other rebuilds.
 #[derive(ResourceDerive)]
 pub struct ColoredSoftStepSolver {
     /// Per-body solver view, parallel to `scratch.bodies` — refreshed each
@@ -1334,21 +1886,81 @@ pub struct ColoredSoftStepSolver {
     /// realloc-moves across a refill-grow — the property `std::Vec` lacked that
     /// caused the SP4 colored-solve data race.
     bodies: ScratchColumn<BodyEffective>,
-    /// The SoA contact columns, grouped by color (rebuilt each solve, reused).
-    columns: ContactColumns,
-    /// Last frame's converged impulses — probed to seed this frame's contacts.
-    warm_read: WarmStartTable,
-    /// This frame's converged impulses — freshly zeroed, filled in canonical
-    /// order after the solve (IM-2b), then swapped into `warm_read`.
-    warm_write: WarmStartTable,
-    /// Whether warm-starting is active (production default `true`).
+    /// V2: each body row's accumulated movement over the step (`dp`, `dq`), parallel to
+    /// `bodies`, for the speculative current separation. Reset to `(0, IDENTITY)` for every row
+    /// before the first sweep of a step whose speculative contacts are on (serially after the
+    /// build, or by a region step's first gravity stage; [`reset_deltas`](Self::reset_deltas)) and
+    /// advanced by the tracked integrate; untouched (and unread) otherwise. Its own column, not a field of
+    /// [`BodyEffective`], whose 64 B line every kernel gather reads.
+    deltas: ScratchColumn<BodyDelta>,
+    /// The cohort tables, in color order (rebuilt each solve, reused).
+    columns: CohortColumns,
+    /// The two sides of the warm store (L11 D1): `warm[warm_cur]` holds the previous
+    /// step's records and is read this step; the other side is written by
+    /// `plan_sources` (the keys) and the store (the records), then becomes current.
+    warm: [WarmRecords; 2],
+    /// Which side of `warm` is read this step (`0` or `1`).
+    warm_cur: u8,
+    /// The cold sorted index over the read side's keys, built by `plan_sources` on a
+    /// step whose read side is not strictly increasing (D2; hand-built streams only).
+    warm_index: WarmIndex,
+    /// The warm-start SETUP flag (production default `true`; `with_warm_start` sets it). The
+    /// pipeline never writes it: a solve runs warm iff this AND the configuration's
+    /// [`PhysicsConfig::warm_start`] are both true (L10 D5b).
     warm_start_enabled: bool,
+    /// Whether the last solve that ran past the no-dynamic-body early return ran warm:
+    /// `warm_start_enabled && config.warm_start`, written once per such solve before its first
+    /// reader (L10 D5b). Every warm gate of a step reads it. Initialised to the setup flag.
+    warm_effective: bool,
     /// O8 integrate-freeze scratch: the pre-solve `(row, BodyState)` snapshot of each
     /// slept body, captured before the substep loop and restored after — so a slept
     /// island's bodies are NOT integrated (their hot state is frozen) without masking
     /// the per-lane O1 SIMD integrate kernels. Capacity-reused (cleared each step);
-    /// empty when sleeping is off (the byte-identical O6/O7 path).
-    frozen: Vec<(u32, BodyState)>,
+    /// empty when sleeping is off (the byte-identical O6/O7 path). Backed by a
+    /// [`ScratchColumn`] (audit Stage 4).
+    frozen: ScratchColumn<(u32, BodyState)>,
+    /// The warm store's place in the gather sequence, stamped where the read side
+    /// is swapped in (defect A, interim; U7 deletes it).
+    warm_cursor: RemapCursor,
+    /// The last solve's warm-start lookup diagnostic (defect A, interim; U7 deletes it).
+    warm_stats: WarmSeedStats,
+    /// Solves that ran past the no-dynamic-body early return. Diagnostic (defect A,
+    /// interim).
+    solved_steps: u64,
+    /// Solves that took the no-awake fast path (L10 C3a). Diagnostic.
+    fast_path_steps: u64,
+    /// The G1 anti-vacuity counters (L11 C0). Zero-sized outside `cfg(test)`.
+    counters: SetupCounters,
+    /// W8S instrument 4: the previous armed step's graph and layout inputs. Written only while
+    /// the profiler is armed.
+    s6: S6Witness,
+    /// W8S: the in-zone canary ([`set_zone_canary`](Self::set_zone_canary)); spins nowhere by
+    /// default.
+    canary: ZoneCanary,
+    /// SR: the solve region's grain ([`set_region_grain`](Self::set_region_grain)).
+    grain: RegionGrain,
+    /// SR: the region's frame and table columns.
+    region: RegionColumns,
+    /// SR: steps whose substeps ran as one region ([`region_dispatches`](Self::region_dispatches)).
+    region_dispatches: u64,
+    /// SR: region steps whose warm store ran in the region
+    /// ([`region_store_dispatches`](Self::region_store_dispatches)).
+    region_store_dispatches: u64,
+    /// SR: the last region's report ([`last_region_report`](Self::last_region_report)).
+    region_last: RegionReport,
+    /// SR, Miri: the per-kind helper blocks and widest entries of the regions so far.
+    #[cfg(miri)]
+    region_tally: [RegionKindCount; SK_COUNT],
+    /// SR, test builds under Miri: how the region is started.
+    #[cfg(all(test, miri))]
+    pub(crate) region_route: RegionRoute,
+    /// S4, test builds: the setup's forced shape.
+    #[cfg(test)]
+    pub(crate) setup_mode: SetupMode,
+    /// The last solve's setup digest (L11 C0): the built columns' logical values,
+    /// then the step's [`WarmSeedStats`], folded after the store. Test-only.
+    #[cfg(test)]
+    step_digest: u64,
 }
 
 impl Default for ColoredSoftStepSolver {
@@ -1368,29 +1980,386 @@ impl ColoredSoftStepSolver {
         let reserve = bodies.max(scratch_reserve_rows(size_of::<BodyEffective>()));
         Self {
             bodies: ScratchColumn::new(body_eff_colored_id(), reserve),
-            columns: ContactColumns::with_capacity(contacts),
-            warm_read: WarmStartTable::with_capacity(contacts),
-            warm_write: WarmStartTable::with_capacity(contacts),
+            deltas: ScratchColumn::new(
+                body_delta_colored_id(),
+                bodies.max(scratch_reserve_rows(size_of::<BodyDelta>())),
+            ),
+            columns: CohortColumns::with_capacity(contacts),
+            // One record per manifold; a manifold has at least one point in every
+            // stream the narrowphase emits, so `contacts` bounds the manifold count
+            // there, and the reserve floor covers the hand-built streams that do not.
+            warm: [
+                WarmRecords::with_capacity(warm_table_id(4), warm_table_id(2), contacts),
+                WarmRecords::with_capacity(warm_table_id(5), warm_table_id(3), contacts),
+            ],
+            warm_cur: 0,
+            warm_index: WarmIndex::with_capacity(warm_table_id(6), contacts),
             warm_start_enabled: true,
-            frozen: Vec::with_capacity(bodies),
+            warm_effective: true,
+            frozen: ScratchColumn::new(
+                colored_frozen_rows_id(),
+                bodies.max(scratch_reserve_rows(size_of::<(u32, BodyState)>())),
+            ),
+            warm_cursor: RemapCursor::default(),
+            warm_stats: WarmSeedStats::default(),
+            solved_steps: 0,
+            fast_path_steps: 0,
+            counters: SetupCounters::default(),
+            s6: S6Witness::default(),
+            canary: ZoneCanary::default(),
+            grain: RegionGrain::DEFAULT,
+            region: RegionColumns::new(),
+            region_dispatches: 0,
+            region_store_dispatches: 0,
+            region_last: RegionReport::default(),
+            #[cfg(miri)]
+            region_tally: [RegionKindCount::default(); SK_COUNT],
+            #[cfg(all(test, miri))]
+            region_route: RegionRoute::Pool,
+            #[cfg(test)]
+            setup_mode: SetupMode::Auto,
+            #[cfg(test)]
+            step_digest: 0,
         }
     }
 
     /// Builds a solver with warm-starting toggled `enabled` (test hook, mirrors
     /// [`SoftStepSolver::with_warm_start`](super::SoftStepSolver::with_warm_start)).
+    ///
+    /// A setup choice: a solve runs warm iff this flag AND the configuration's
+    /// [`PhysicsConfig::warm_start`] are both true (L10 D5b), so `false` here keeps the solver
+    /// cold whatever the configuration says, and `PhysicsConfig::warm_start` is the runtime
+    /// switch.
     pub fn with_warm_start(enabled: bool) -> Self {
         Self {
             warm_start_enabled: enabled,
+            warm_effective: enabled,
             ..Self::with_capacity(0, 0)
         }
     }
 
+    /// Diagnostic: the last solve's warm-start lookup statistics — how many manifolds
+    /// were seeded, how many of their lookup keys resolved to rows of the previous
+    /// gather, and the warm table cursor's `Reset` count (defect A, interim).
+    #[inline]
+    pub fn warm_seed_stats(&self) -> WarmSeedStats {
+        self.warm_stats
+    }
+
+    /// Diagnostic: the number of solves that ran past the no-dynamic-body early return
+    /// (defect A, interim). A step with no simulated dynamic body returns before the
+    /// count, so an unchanged value across a step shows that the early return ran.
+    #[inline]
+    pub fn solved_steps(&self) -> u64 {
+        self.solved_steps
+    }
+
+    /// Diagnostic: the number of solves that took the no-awake fast path (L10 C3a) — sleeping
+    /// on, no dynamic row awake and no contact point laid out — which run no substep, no
+    /// restitution pass and no freeze capture or restore, and leave every value as the full
+    /// path would. A structural witness: a reader derives the same count from the world.
+    #[inline]
+    pub fn fast_path_steps(&self) -> u64 {
+        self.fast_path_steps
+    }
+
+    /// W8S's in-zone canary (the profiling module's docs, "The in-zone canary"): from the next
+    /// solve on, `zone` busy-waits `ns` nanoseconds on the calling thread each time it opens
+    /// armed. `zone` must be one of [`crate::profiling::CANARY_ZONES`] (the solve build and its
+    /// four sub-zones); any other is refused with `false` and changes nothing. `ns == 0` removes
+    /// the canary. A measurement instrument for the parity runner, not an engine feature: it
+    /// changes no value, and a disarmed zone never spins.
+    #[doc(hidden)]
+    pub fn set_zone_canary(&mut self, zone: &'static ZoneHandle, ns: u64) -> bool {
+        match ZoneCanary::new(zone, ns) {
+            Some(canary) => {
+                self.canary = canary;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// SR: sets the solve region's grain (`levers/scaling/02-SR-DESIGN.md` §2). Value-neutral: a
+    /// grain changes only where the work runs. Returns `false` and changes nothing for a grain
+    /// whose terms are out of range ([`RegionGrain::is_valid`]).
+    #[doc(hidden)]
+    pub fn set_region_grain(&mut self, grain: RegionGrain) -> bool {
+        if !grain.is_valid() {
+            return false;
+        }
+        self.grain = grain;
+        true
+    }
+
+    /// SR: the steps whose substeps ran as one solve region (one pool dispatch per such step),
+    /// since construction — the `narrowphase_dispatches` pattern. The frame census subtracts it
+    /// from a frame's scope count; a step whose parallel gate does not hold (`parallel_solve`, a
+    /// pool of two workers or more, a colour at least the grain's wide floor) adds nothing.
+    #[inline]
+    pub fn region_dispatches(&self) -> u64 {
+        self.region_dispatches
+    }
+
+    /// SR: the region steps whose warm store ran as the region's last stage (a warm step on which
+    /// no row could bounce), since construction. The rest stored serially after the restitution
+    /// pass.
+    #[doc(hidden)]
+    #[inline]
+    pub fn region_store_dispatches(&self) -> u64 {
+        self.region_store_dispatches
+    }
+
+    /// SR: the last region's report — its published and inline items, the blocks its helpers ran,
+    /// its widest published item (the stall census reads 0 unless the profiler was armed). The
+    /// default report before the first region. Read by the region's counter gates without arming
+    /// the profiler (critique W3).
+    #[doc(hidden)]
+    #[inline]
+    pub fn last_region_report(&self) -> RegionReport {
+        self.region_last
+    }
+
+    /// SR, Miri: per stage kind, the blocks the helpers ran and the widest entry, over every region
+    /// so far — the Miri legs' per-kind guard (critique W2). Natively it does not exist.
+    #[cfg(miri)]
+    #[doc(hidden)]
+    pub fn region_kind_tally(&self) -> [RegionKindCount; SK_COUNT] {
+        self.region_tally
+    }
+
+    /// W8S: the in-zone canary's busy-waits since [`set_zone_canary`](Self::set_zone_canary) —
+    /// one per armed opening of its zone. The parity runner compares it with the zone's sample
+    /// count, so a canary that never ran cannot pass as one whose zone was slow anyway.
+    #[doc(hidden)]
+    pub fn zone_canary_spins(&self) -> u64 {
+        self.canary.spins()
+    }
+
+    /// W8S instrument 4, armed only: S6's graph and P-b hits for this step, pushed as
+    /// [`PHYS_S6_GRAPH_HIT`] and [`PHYS_S6_PB_HIT`], and the witness the next armed step
+    /// compares with. Runs before P-a overwrites the tag column, which still holds the previous
+    /// step's tags, and after `IslandSleep::begin_step`, which decides this step's frozen
+    /// islands.
+    ///
+    /// The graph hit: the witness was taken on the gather just before this one, the rows did not
+    /// change, and the stream's pair ordinals, every row's dynamic and held flags, the sleeping
+    /// arm and the held store's size are equal, with no held-store transition this step (no
+    /// kept manifold moved in, no restore source). The P-b hit adds that every manifold's tag
+    /// `(count, FROZEN)` equals the one the previous step wrote, which is all the layout reads
+    /// besides the graph. Hash equality stands in for equality of the two word streams (FNV-1a
+    /// 64; a collision would read a miss as a hit, at a rate no window resolves).
+    #[cold]
+    #[inline(never)]
+    fn s6_probe(
+        &mut self,
+        manifolds: &[Manifold],
+        graph: &ConstraintGraph,
+        scratch: &SolverScratch,
+        held: Option<&HeldSolve<'_>>,
+        sleep: Option<&IslandSleep>,
+        sleeping: bool,
+    ) {
+        let seq = scratch.rows.gather_seq();
+        let stream = manifolds
+            .iter()
+            .fold(fnv_word(FNV_BASIS, manifolds.len() as u64), |h, m| fnv_word(h, ord(m.body_a.0, m.body_b.0)));
+        let cls: &[RowCls] = held.map_or(&[], |h| h.cls);
+        let bodies = scratch.bodies();
+        let mut rows = fnv_word(FNV_BASIS, bodies.len() as u64);
+        for (row, b) in bodies.iter().enumerate() {
+            let held_row = cls.get(row).is_some_and(|c| c.is_held());
+            rows = fnv_word(rows, u64::from(is_dynamic_row(b.inv_mass)) | (u64::from(held_row) << 1));
+        }
+        rows = fnv_word(rows, u64::from(sleeping));
+        rows = fnv_word(rows, u64::from(held.map_or(0, |h| h.held.live_points())));
+        let transition = held.is_some_and(|h| !h.capture.is_empty() || h.restore.is_some_and(|r| !r.keys().is_empty()));
+        let prev = self.s6;
+        let graph_hit = prev.gather_seq != 0
+            && prev.gather_seq + 1 == seq
+            && !scratch.rows.rows_changed()
+            && prev.stream == stream
+            && prev.rows == rows
+            && !transition;
+        let pb_hit = graph_hit && {
+            let tags = self.columns.tags();
+            tags.len() == manifolds.len()
+                && manifolds.iter().zip(tags).all(|(m, t)| {
+                    let frozen = sleep.is_some_and(|s| Self::manifold_frozen(m, graph, s));
+                    t.count == m.count && t.frozen() == frozen
+                })
+        };
+        self.s6 = S6Witness { gather_seq: seq, stream, rows };
+        counter!(PHYS_S6_GRAPH_HIT, u64::from(graph_hit));
+        counter!(PHYS_S6_PB_HIT, u64::from(pb_hit));
+    }
+
+    /// Diagnostic (L10's bit-identity gate, design 04 "What is compared", 06 §7): calls
+    /// `f(key, fid, seed)` for every point of every logical manifold of `manifolds` — the
+    /// stream's, whose records the last store wrote, and the held store's, whose records
+    /// `sets` keeps — with the seed the next step's lookup of that manifold finds for the
+    /// point's feature id: the last stored point with that id (Lemma W), `None` on a miss and
+    /// with warm start off — off for the last solve that ran, the solver's setup flag AND the
+    /// configuration's `warm_start` (L10 D5b). `key` is the manifold's ordinal in the rows of the
+    /// last step. Stream manifolds first, in stream order, then the kept ones by ordinal.
+    /// O(points · log manifolds) on a strict store.
+    pub fn for_each_warm_seed(
+        &self,
+        manifolds: &Manifolds,
+        sets: &SleepSets,
+        mut f: impl FnMut(u64, u16, Option<[f32; 3]>),
+    ) {
+        debug_assert!(
+            self.warm_start_enabled || !self.warm_effective,
+            "invariant: warm start runs only if the setup flag allows it"
+        );
+        let read = &self.warm[usize::from(self.warm_cur)];
+        let (keys, recs) = (read.keys(), read.recs());
+        let lookup = |key: u64, fid: u16| -> Option<[f32; 3]> {
+            if !self.warm_effective {
+                return None;
+            }
+            if read.strict() {
+                let i = keys.partition_point(|&k| k < key);
+                (keys.get(i) == Some(&key)).then(|| recs[i].seed_of(fid)).flatten()
+            } else {
+                (0..keys.len()).rev().filter(|&i| keys[i] == key).find_map(|i| recs[i].seed_of(fid))
+            }
+        };
+        for m in manifolds.solver_manifolds() {
+            let key = ord(m.body_a.0, m.body_b.0);
+            for p in 0..usize::from(m.count) {
+                let fid = point_fid(m, p);
+                f(key, fid, lookup(key, fid));
+            }
+        }
+        let held = manifolds.held.view();
+        let kept_rec = sets.kept_records();
+        for &slot in held.order() {
+            let m = held.manifold(slot);
+            let key = ord(m.body_a.0, m.body_b.0);
+            for p in 0..usize::from(m.count) {
+                let fid = point_fid(&m, p);
+                let seed = if self.warm_effective {
+                    kept_rec.get(slot as usize).and_then(|r| r.seed_of(fid))
+                } else {
+                    None
+                };
+                f(key, fid, seed);
+            }
+        }
+    }
+
+    /// The warm-start setup flag. L10's broadphase ANDs it with the latched
+    /// `PhysicsConfig::warm_start` into the effective warm start its sleep epoch reads (design 04
+    /// D5, D5b), since a change of that value changes what a held island's records would be under
+    /// `Off`.
+    #[inline]
+    pub(crate) fn warm_start_enabled(&self) -> bool {
+        self.warm_start_enabled
+    }
+
+    /// L10's D-H drain (ruling on rev 2.3, open question 2): the warm records of the islands a
+    /// flush restored on a step whose mode is `Off` join the read side before the solve, which
+    /// searches the read side alone on that path, so every lookup of the step finds what
+    /// `Off`'s store holds. Merged into the idle write side, which then becomes the read side;
+    /// the warm cursor's stamp is unchanged, since the drained keys are in the rows the read
+    /// side is keyed in. Called by the colored broadphase, never by the solve, with `warm` the
+    /// step's effective warm start (L10 D5b: the solve has not yet set `warm_effective` for the
+    /// step). A cold step reads no record, and takes none.
+    pub(crate) fn drain_restore(&mut self, restore: &WarmRecords, warm: bool) {
+        if !warm || restore.keys().is_empty() {
+            return;
+        }
+        let (read, write) = Self::warm_sides(&mut self.warm, self.warm_cur);
+        write.merge_of(read, restore);
+        self.warm_cur ^= 1;
+    }
+
+    /// L10 A1′ (design 06 A1, 08 A1′): every kept manifold the broadphase moved in this step
+    /// takes the record `Off`'s store writes for it at this step — its points carried from the
+    /// read side through the run of its previous-step pair, by the D2 search and the D3 carry a
+    /// frozen stream manifold takes — and its hits join the held total. Runs before the swap,
+    /// while the read side still holds the previous step's records, on the full path and the
+    /// fast path alike (O10). With warm start off or a Reset, every run misses: an empty record
+    /// with no hit, as `Off`'s carry would drop every point. `remap` is how the warm store's
+    /// cursor classifies this gather (the build's classification, not yet stamped).
+    fn capture_moved_in(&self, remap: RowRemap<'_>, held: &mut HeldSolve<'_>) {
+        let range = held.capture.clone();
+        if range.is_empty() {
+            return;
+        }
+        let mut kept_rec = held.kept_rec.build_view();
+        let recs = kept_rec.as_mut_slice();
+        if !self.warm_effective {
+            recs[range].fill(WarmRecord::EMPTY);
+            return;
+        }
+        let read = &self.warm[usize::from(self.warm_cur)];
+        let lookup = WarmLookup { read, index: &self.warm_index };
+        let mut cursor = 0usize;
+        for (i, slot) in range.enumerate() {
+            let m = held.held.manifold(slot as u32);
+            let run = match remap.manifold_pair(&m) {
+                Some((la, lb)) if read.strict() => read.find(&mut cursor, ord(la, lb)).run,
+                Some((la, lb)) => self.warm_index.run(ord(la, lb)),
+                None => WarmRun::MISS,
+            };
+            // Design 08 OQ3: the run is the previous-stream index the move-in copied the
+            // manifold from (debug builds hand the list over; a strict side's run is the index).
+            if let Some(&entry) = held.sources.get(i) {
+                debug_assert_eq!(entry >> 32, slot as u64, "invariant: the list is in capture order");
+                debug_assert!(
+                    run == WarmRun::MISS || !read.strict() || u64::from(run.lo) == entry & 0xFFFF_FFFF,
+                    "invariant: a moved-in manifold's run is the stream index it was copied from"
+                );
+            }
+            let (rec, hits) = lookup.carry(run, &m, usize::from(m.count));
+            debug_assert_eq!(
+                u32::from(rec.count()),
+                hits,
+                "invariant: the carry compacts its hits, so a record's count is its hit count"
+            );
+            recs[slot] = rec;
+            *held.held_warm += hits;
+        }
+    }
+
+    /// The G1 anti-vacuity counters, cumulative since construction (L11 C0).
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn setup_counters(&self) -> SetupCounters {
+        self.counters
+    }
+
+    /// The last solve's setup digest (L11 C0): `0` before the first solve that built
+    /// columns; unchanged by a solve that took the no-dynamic-body early return.
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn step_digest(&self) -> u64 {
+        self.step_digest
+    }
+
     /// Rebuilds the per-body solver views from the gather snapshot (mirrors the
     /// reference `build_bodies`).
-    fn build_bodies(&mut self, bodies: &[BodyState]) {
+    ///
+    /// `cls` is L10's classification of the step (empty when the sleep-skip did not classify
+    /// it): a row it marks `HELD` gets the effective inverse mass `0` (design 04 D8, ruling
+    /// W1), read from the same function over the same flag as the graph's colouring predicate,
+    /// so the write guards, gravity, the integrate, the refresh and the write-back leave a held
+    /// row as the colouring does.
+    ///
+    /// V2's per-step reset of the accumulated movement is not here (SR C5): it follows the build,
+    /// where the step knows whether its region resets it ([`reset_deltas`](Self::reset_deltas)).
+    fn build_bodies(&mut self, bodies: &[BodyState], cls: &[RowCls]) {
+        debug_assert!(
+            cls.is_empty() || cls.len() >= bodies.len(),
+            "invariant: a classification covers every row"
+        );
         let mut view = self.bodies.build_view();
         view.clear();
-        for b in bodies {
+        for (row, b) in bodies.iter().enumerate() {
+            let held = cls.get(row).is_some_and(|c| c.is_held());
             // The `*_movable` guard's ANGULAR no-op (`ω + inv_inertia·(r×p) == ω`
             // for a guarded static row) keys only on `inv_mass == 0`, so it relies
             // on a static row ALSO carrying `inv_inertia == Mat3::ZERO`. Production
@@ -1402,8 +2371,10 @@ impl ColoredSoftStepSolver {
                 is_dynamic_row(b.inv_mass) || b.inv_inertia == Mat3::ZERO,
                 "static row (inv_mass == 0) must have inv_inertia == Mat3::ZERO for the *_movable angular no-op"
             );
+            // L10 D8 (ruling W1): the graph's colouring predicate reads the same function
+            // over the same flag, so the write guards and the colouring cannot disagree.
             view.push(BodyEffective {
-                inv_mass: b.inv_mass,
+                inv_mass: effective_inv_mass(b.inv_mass, held),
                 inv_inertia: b.inv_inertia,
                 linear_velocity: b.linear_velocity,
                 angular_velocity: b.angular_velocity,
@@ -1411,200 +2382,599 @@ impl ColoredSoftStepSolver {
         }
     }
 
-    /// Builds the SoA [`ContactColumns`] in COLOR order from the graph's CSR,
-    /// warm-SEEDS each point, and captures `vn_initial` (Phase O5).
+    /// V2's per-step reset of every row's accumulated movement to `(0, IDENTITY)`, on a speculative
+    /// step. The invariant is that the reset precedes the step's first sweep, whose K3 reads the
+    /// column (cut B-F2), not merely the first integrate. Serial here on every path but a region
+    /// step (`region`), whose first substep's gravity stage writes the zeros row-parallel (SR C5,
+    /// `SolveStages::reset_delta_rows`); there the column is only sized to the `rows` — grown with
+    /// zeros or cut, never re-filled serially.
+    fn reset_deltas(&mut self, rows: usize, region: bool) {
+        let mut deltas = self.deltas.build_view();
+        if !region {
+            deltas.clear();
+        }
+        deltas.resize(rows, BodyDelta::ZERO);
+    }
+
+    /// Builds the cohort layout ([`CohortColumns`]) from the graph's color CSR,
+    /// warm-SEEDS each point, and captures the lazy `vn0` (L11 D4: plan → layout →
+    /// fill).
     ///
-    /// Iterates colors `0..n_colors`; for each color the graph yields its
-    /// manifold indices in ascending order (D4); each manifold's points are
-    /// appended in point order. The result is one contiguous SoA span per color
-    /// (recorded in `color_offsets`). The same walk records each manifold's base
-    /// slot (in `manifold_base`) and its group boundary (`group_start` /
-    /// `color_group_start`, C1); the `canonical` index list is then emitted from
-    /// `manifold_base` so the warm store walks the points in canonical `(manifold,
-    /// point)` order regardless of the color layout (IM-2b) — no second walk.
+    /// P-a, in stream order: this step's ordinals go to the warm store's write side
+    /// and every manifold's source run to `plan` (`warm_records::plan_sources`), then
+    /// every manifold's live point count and frozen flag to `tags`. P-b, over the
+    /// color CSR: [`CohortColumns::layout`] assigns each solved manifold a lane of a
+    /// cohort (8-group windows from each color's first group — today's cohorts) and
+    /// sizes the tables. P-c, per cohort: [`fill_cohort`](Self::fill_cohort) writes
+    /// the lane constants, the rank blocks, the seeds by feature id, the lazy `vn0`
+    /// and the zero padding.
     ///
     /// Mirrors the reference `build_constraints` per-point math: anchors relative
-    /// to each body's gather center, the degeneracy-safe tangent basis, the
-    /// per-point warm key (`pack` / `pack_sdf`), and the seeded accumulated
-    /// impulses (zero on a miss / when disabled).
+    /// to each body's gather center, the degeneracy-safe tangent basis, and the
+    /// seeded accumulated impulses (zero on a miss / when disabled).
     ///
-    /// W1/O1/O3 fold: the manifold-group boundaries (C1), the per-manifold base
-    /// slot, and the canonical `(manifold, point)` order are ALL recorded inside
-    /// this single append walk — there is no separate replay pass and no per-step
-    /// heap allocation (all scratch is capacity-reused).
+    /// No per-step heap allocation: all scratch is capacity-reused.
+    ///
+    /// `restore` is L10's restore warm source for the step (design 06 A3), searched after a
+    /// miss of the read side. Returns its searches and hits and, on a step that runs as one solve
+    /// region, the fill's plan.
+    ///
+    /// # S4 / SR: the parallel setup (`levers/scaling/01-DESIGN.md` §6.4, as built: shape F)
+    ///
+    /// One decision per step, right after P-b: the P2 predicate (`parallel_solve`, a pool of at
+    /// least two workers, the widest colour at least the region grain's wide floor). A step that
+    /// fails it runs the serial path: P-a's stream-order search of every manifold, then the fill
+    /// over every cohort on this thread. A step that passes runs its fill and substeps as ONE
+    /// solve region (SR, KD5): this build stops after the serial sources and returns the fill's
+    /// plan — the task count ([`region_fill_tasks`]) and, at two or more, the cohorts cut by point
+    /// quota on cohort boundaries ([`setup_cuts`]) — and the region's stage 0 fills each range
+    /// through the same per-range routine ([`fill_range`](Self::fill_range)); a cut of one range
+    /// is one inline block. Where the read side is searched by D2's cursor (strict, warm, not
+    /// `Reset`), shape F moves the laid-out manifolds' search into the ranges:
+    /// serial P-a1 writes every ordinal, the write side's strictness and the run of every
+    /// manifold that is not laid out (frozen, or empty — the store's carry reads those), and
+    /// each range searches its own lanes' runs — exact from any cursor — before filling them.
+    /// Every output byte is the serial path's; `SetupCounters::backward_searches` counts
+    /// differently (a range's cursors start at 0). The P-a / P-b / P-c order changed with it: the
+    /// source search now follows the layout, which reads only the tags' counts and frozen flags.
+    #[allow(clippy::too_many_arguments)]
     fn build_columns(
         &mut self,
         manifolds: &[Manifold],
         graph: &ConstraintGraph,
         bodies: &[BodyState],
         sleep: Option<&IslandSleep>,
-    ) {
-        // Disjoint-field borrows: `columns` is written while `bodies` /
-        // `warm_read` are read. Destructure `self` so the borrow checker sees the
+        remap: RowRemap<'_>,
+        restore: Option<&WarmRecords>,
+        parallel_solve: bool,
+    ) -> BuildOut {
+        #[cfg(test)]
+        let setup_mode = self.setup_mode;
+        if let RowRemap::Rows(prev_row) = remap {
+            debug_assert_eq!(
+                prev_row.len(),
+                bodies.len(),
+                "invariant: the warm remap maps exactly the gathered rows"
+            );
+        }
+        // Disjoint-field borrows: `columns` is written while `bodies` / the warm
+        // read side are read. Destructure `self` so the borrow checker sees the
         // fields are distinct (a re-borrow alias through a method call would not).
         let Self {
             columns: cols,
             bodies: bodies_eff,
-            warm_read,
+            warm,
+            warm_cur,
+            warm_index,
             warm_start_enabled,
+            warm_effective,
+            warm_cursor,
+            warm_stats,
+            counters,
+            canary,
+            grain,
+            #[cfg(all(test, miri))]
+            region_route,
             ..
         } = self;
-        // Reset the push-filled point columns + the three CSR columns, seeding each
-        // CSR's leading `0` (B4: all grow / refill happens here, single-threaded,
-        // BEFORE any `solve_view()` captures a base — so no worker can see a moving
-        // base).
-        cols.begin_build();
-
-        // Reused per-manifold base map (no `vec!` per step): base slot + live count
-        // recorded as each manifold is first appended, consumed below to emit the
-        // canonical order in manifold index ascending order (D4). `manifold_fill`
-        // reproduces `resize(n, (u32::MAX, 0))` on the address-stable column (O1).
-        cols.manifold_fill(manifolds.len());
-
-        // The BodyEffective rows read by the per-point build are a SINGLE-THREADED
-        // read here (the build runs before any parallel dispatch); take one read
-        // slice of the solver's body column. Disjoint from `cols` (distinct field).
-        let bodies_eff = bodies_eff.as_read_slice();
-
-        for color in 0..graph.n_colors() {
-            for &mi in graph.color(color) {
-                let m = &manifolds[mi as usize];
-                // O8 sleep skip (SOLVE half): a manifold whose island is FROZEN this
-                // frame is NOT pushed — it never enters a color span, so it is never
-                // solved. This is the IM-1-safe solve skip (gather stays full; only the
-                // solve is elided). `sleep == None` (sleeping off) takes the
-                // byte-identical O6/O7 path. The island is the manifold's dynamic side
-                // (the same resolution the graph build uses).
-                if sleep.is_some_and(|s| Self::manifold_frozen(m, graph, s)) {
-                    continue;
-                }
-                let base = cols.len() as u32;
-                let count = Self::push_manifold_points(
-                    cols,
-                    m,
-                    bodies,
-                    bodies_eff,
-                    warm_read,
-                    *warm_start_enabled,
-                );
-                if count != 0 {
-                    // One manifold-group per appended manifold with ≥1 live point;
-                    // its contiguous slot run is `[base, base + count)` (C1).
-                    cols.set_manifold_base(mi as usize, base, count);
-                    cols.push_group_start(base + count);
-                }
-            }
-            cols.push_color_offset(cols.len() as u32);
-            // Color `c`'s manifold-groups end at the current `group_start` length
-            // (the per-color CSR indexes into `group_start`).
-            cols.push_color_group_start((cols.group_start().len() - 1) as u32);
-        }
-
-        // Canonical `(manifold, point)` order for the IM-2b warm store — emitted
-        // from the base map recorded above, in ascending manifold index, WITHOUT a
-        // second color→manifold→point replay walk (W1/O1/O3 fold). The base map is
-        // read into a fixed-capacity stack-free pass; pull each `(base, count)` by
-        // value so no `&[_]` borrow into `cols` is held across the `push_canonical`.
-        let n_manifolds = cols.manifold_base().len();
-        for mi in 0..n_manifolds {
-            let (base, count) = cols.manifold_base()[mi];
-            if base == u32::MAX {
-                continue;
-            }
-            for p in 0..count {
-                cols.push_canonical(base + p);
-            }
-        }
-        debug_assert_eq!(
-            cols.canonical().len(),
-            cols.len(),
-            "invariant: canonical order must cover every built contact-point slot exactly once"
+        debug_assert!(
+            *warm_start_enabled || !*warm_effective,
+            "invariant: warm start runs only if the setup flag allows it"
         );
+        let n = manifolds.len();
+        // W8S: P-a's span: the sizing and the tags. (Since S4 the warm source search follows
+        // P-b, inside P-c's span.)
+        let pa_zone = zone!(PHYS_SB_PA);
+        canary.at(&PHYS_SB_PA, pa_zone.is_some());
+
+        // P-a (D4): stream order. The write side takes this step's ordinals; every
+        // manifold's warm source run goes to `plan`. The read side is `warm[cur]`,
+        // the write side the other one — two elements of one array, borrowed apart.
+        // B4: every grow / refill happens here and in P-b, single-threaded, BEFORE
+        // any base is taken for the fill — so no range can see a moving base.
+        let (read, write) = Self::warm_sides(warm, *warm_cur);
+        cols.manifold_fill(n);
+        if *warm_effective {
+            write.resize(n);
+        }
+
+        // P-a, the tags: the live point count and the freeze decision, made here once
+        // per manifold. A manifold whose island is FROZEN this step is not laid out —
+        // it never enters a cohort, so it is never solved — the IM-1-safe solve skip
+        // (gather stays full; only the solve is elided); the store carries its record
+        // instead (B1). `sleep == None` (sleeping off) takes the byte-identical O6/O7
+        // path. The island is the manifold's dynamic side (the same resolution the
+        // graph build uses). The tags are written before the source search below, which
+        // adds L10's `SRC_RESTORE` to the manifolds whose run it finds in `restore`.
+        //
+        // Warm-seed diagnostic (defect A): the carried count is taken only on a step
+        // whose rows changed; the unchanged step does no per-manifold work for it. The layout
+        // reads the tags' counts and frozen flags only, never `SRC_RESTORE`, so it runs before the
+        // source search.
+        let carried_rows = *warm_effective && matches!(remap, RowRemap::Rows(_));
+        let mut carried = 0u32;
+        let mut points = 0u32;
+        // Live points of the manifolds frozen this step (B1): the carry set's size.
+        let mut frozen_points = 0u32;
+        {
+            let mut tags = cols.tags.build_view();
+            let tags = tags.as_mut_slice();
+            for (m, tag) in manifolds.iter().zip(tags) {
+                let frozen = sleep.is_some_and(|s| Self::manifold_frozen(m, graph, s));
+                *tag = ManifoldTag {
+                    count: m.count,
+                    flags: if frozen { ManifoldTag::FROZEN } else { 0 },
+                };
+                if tag.solved() {
+                    points += u32::from(m.count);
+                    if carried_rows && remap.manifold_pair(m).is_some() {
+                        carried += 1;
+                    }
+                } else if frozen && *warm_effective && m.count != 0 {
+                    frozen_points += u32::from(m.count);
+                    counters.duplicate_fids(m);
+                }
+            }
+        }
+        drop(pa_zone);
+
+        // P-b (D4): the layout, in color order.
+        let seeded = {
+            let pb_zone = zone!(PHYS_SB_PB);
+            canary.at(&PHYS_SB_PB, pb_zone.is_some());
+            cols.layout(graph)
+        };
+        debug_assert_eq!(points, cols.len() as u32, "invariant: the tags and the layout agree on the point count");
+
+        // SR's gate, once per step (the method docs): P2 decides whether the step runs as one
+        // solve region, and the region's fill is cut into ranges. The cuts read only the heads'
+        // widths (P-b's), so they are taken before the source search, whose shape (fused or not)
+        // follows from the gate.
+        let lanes = try_with_active_pool(|pool| pool.num_threads()).unwrap_or(0);
+        // SR, test builds under Miri: the Stacked Borrows route runs the region on std threads,
+        // with no pool to count.
+        #[cfg(all(test, miri))]
+        let lanes = match *region_route {
+            RegionRoute::Threads(n) => n as usize,
+            RegionRoute::Pool => lanes,
+        };
+        let p2 = parallel_solve && lanes >= 2 && cols.widest_color_slots() >= grain.wide_floor;
+        let n_cohorts = cols.heads.len();
+        // SR (phase B): a step whose gate holds runs its substeps as one region and its fill as
+        // the region's stage 0 (KD5): this build stops after the serial sources and hands the
+        // fill's plan over. Test builds force it with `SetupMode::Pool` (G4-A's region modes): a
+        // `#[cfg(test)]` statement narrows the production binding, never a `not(test)` pair, which
+        // the workspace's source censuses would read as test-only
+        // (`production_reachability_census`). A table too wide for the region's entry index
+        // (`region_fits`) solves serially.
+        let forced = false;
+        #[cfg(test)]
+        let forced = forced || matches!(setup_mode, SetupMode::Pool(_));
+        let region = (p2 || forced) && n_cohorts > 0 && region_fits(graph.n_colors() as usize);
+        // The region's fill takes the region grain's terms (its default is S4's); a step that
+        // opens no region fills on this thread.
+        let tasks = if region { region_fill_tasks(lanes, points as usize, n_cohorts, *grain) } else { 0 };
+        #[cfg(test)]
+        let tasks = match setup_mode {
+            SetupMode::Auto | SetupMode::SerialFused => tasks,
+            SetupMode::Pool(t) | SetupMode::Threads(t) => t.min(n_cohorts).min(SETUP_MAX_TASKS),
+        };
+        let mut cuts = [(0u32, 0u32); SETUP_MAX_TASKS];
+        let n_ranges = if tasks >= 2 { setup_cuts(cols.heads(), points as usize, tasks, &mut cuts) } else { 0 };
+        // Past the region's early return the fill runs on this thread in one range (test builds:
+        // shape F's fused search on it, or G4-F's ranges on scoped std threads).
+        let run = SetupRun::Inline { fused: false };
+        #[cfg(test)]
+        let run = match setup_mode {
+            SetupMode::SerialFused => SetupRun::Inline { fused: true },
+            SetupMode::Threads(_) if n_ranges >= 2 && !region => SetupRun::Threads(n_ranges),
+            _ => run,
+        };
+        // Ranges are the region's Fill blocks or G4-F's threads; a cut that left one range, and
+        // every step that runs neither, fills cohorts `[0, n)` as one range.
+        let ranged = (region && n_ranges >= 2) || !matches!(run, SetupRun::Inline { .. });
+        let n_ranges = if ranged {
+            n_ranges
+        } else {
+            cuts[0] = (0, n_cohorts as u32);
+            1
+        };
+        // Shape F where the read side is searched by D2's cursor: strict, warm, looked up.
+        let fused = (ranged || matches!(run, SetupRun::Inline { fused: true }))
+            && *warm_effective
+            && !matches!(remap, RowRemap::Reset)
+            && read.strict();
+
+        // P-c (D4, S4): the sources, then the fill. On a region step the fill's span opens in the
+        // region (its stage 0's hook), so the serial sources sit outside `PHYS_SB_PC` (critique O7:
+        // one span per step).
+        let pc_zone = if region { None } else { zone!(PHYS_SB_PC) };
+        canary.at(&PHYS_SB_PC, pc_zone.is_some());
+        // The sources: this step's ordinals to the write side, and the warm run of every manifold
+        // — or, fused, of every manifold not laid out — to `plan`, from the read side, or (L10,
+        // design 06 A3) from the restore source when the read side misses, which marks the tag
+        // `SRC_RESTORE`. The tags are cells so the two callbacks can share them.
+        let plan_counts = {
+            let mut tags_view = cols.tags.build_view();
+            let tags = Cell::from_mut(tags_view.as_mut_slice()).as_slice_of_cells();
+            let mut plan_view = cols.plan.build_view();
+            let plan = plan_view.as_mut_slice();
+            let on_restore = |mi: usize| {
+                let mut tag = tags[mi].get();
+                tag.flags |= ManifoldTag::SRC_RESTORE;
+                tags[mi].set(tag);
+            };
+            if fused {
+                warm_records::plan_sources_unsolved(
+                    manifolds,
+                    remap,
+                    read,
+                    write,
+                    warm_index,
+                    plan,
+                    restore,
+                    |mi| tags[mi].get().solved(),
+                    on_restore,
+                )
+            } else {
+                warm_records::plan_sources_restored(
+                    manifolds,
+                    remap,
+                    *warm_effective,
+                    read,
+                    write,
+                    warm_index,
+                    plan,
+                    restore,
+                    on_restore,
+                )
+            }
+        };
+        let translated = match remap {
+            _ if !*warm_effective => 0,
+            RowRemap::Identity => seeded,
+            RowRemap::Rows(_) => carried,
+            RowRemap::Reset => 0,
+        };
+        let tail = FillTail { seeded, translated, points, frozen_points };
+        if region {
+            return BuildOut {
+                restore_searches: 0,
+                restore_hits: 0,
+                fill: Some(FillPlan { cuts, n_ranges, fused, plan_counts, tail }),
+            };
+        }
+        let index: &WarmIndex = warm_index;
+        let lookup = WarmLookup { read, index };
+        let restore_lookup = restore.map(|read| WarmLookup { read, index });
+
+        // The fill: one range on this thread (test builds: or G4-F's ranges on std threads). The
+        // `BodyEffective` rows the fill reads are the solver's body column, which nothing writes
+        // during the build. The write side's records take each solved manifold's
+        // shape now, while its manifold is in cache; the store writes the impulses (D3).
+        let mut outs = [RangeOut::default(); SETUP_MAX_TASKS];
+        let ctx = FillCtx {
+            heads: cols.heads.solve_base(),
+            cold: cols.cold.solve_base(),
+            blocks: cols.blocks.solve_base(),
+            vn0: cols.rank_cold.solve_base(),
+            plan: cols.plan.solve_base(),
+            tags: cols.tags.solve_base(),
+            recs_w: if *warm_effective { Some(write.recs_base()) } else { None },
+            n_heads: n_cohorts,
+            n_blocks: cols.blocks.len(),
+            manifolds,
+            bodies,
+            bodies_eff: bodies_eff.as_read_slice(),
+            lookup,
+            restore: restore_lookup,
+            remap,
+            fused,
+            outs: outs.as_mut_ptr(),
+        };
+        match run {
+            SetupRun::Inline { .. } => {
+                // SAFETY: one range over every cohort, on the only thread touching the tables:
+                //   `ctx`'s bases were taken after the last grow and nothing else holds a
+                //   reference to a column it writes; slot 0 is the range's.
+                unsafe { ptr::write(ctx.outs, Self::fill_range(&ctx, 0, n_cohorts)) };
+            }
+            #[cfg(test)]
+            SetupRun::Threads(_) => {
+                Self::fill_threads(&ctx, &cuts[..n_ranges]);
+                counters.thread_fills += 1;
+            }
+        }
+        // Q2: the setup's chunk count is the region's Fill blocks; a step that opens no region
+        // fills in none.
+        counter!(PHYS_SETUP_CHUNKS, 0);
+        let plan_counts =
+            fill_tail(&outs[..n_ranges], plan_counts, tail, counters, warm_stats, warm_cursor.resets());
+        drop(pc_zone);
+
         debug_assert_eq!(
             cols.group_start().len() as u32,
             *cols.color_group_start().last().unwrap_or(&0) + 1,
             "invariant: the per-color group CSR must tile every manifold-group exactly once"
         );
+        debug_assert_eq!(
+            cols.heads.len() as u32,
+            *cols.color_cohort_start().last().unwrap_or(&0),
+            "invariant: the per-color cohort CSR must tile every cohort exactly once"
+        );
+        BuildOut {
+            restore_searches: plan_counts.restore_searches,
+            restore_hits: plan_counts.restore_hits,
+            fill: None,
+        }
     }
 
-    /// Appends one manifold's live points to the SoA columns (the per-point
-    /// build, factored out so it borrows `cols` mutably without aliasing
-    /// `self.bodies` / `self.warm_read`). Returns the number of live points
-    /// appended (`0` when the manifold has no live point), so the caller can
-    /// record the manifold-group's slot run (C1).
-    fn push_manifold_points(
-        cols: &mut ContactColumns,
-        m: &Manifold,
+    /// S4 (P-c by cohort range, L11 D10): fills cohorts `[k_lo, k_hi)` through
+    /// [`fill_cohort`](Self::fill_cohort) and reports the range's hits and counts. The one routine
+    /// of every shape — the calling thread's single range and each setup task's — so the serial
+    /// and parallel fills are the same instructions. A pure function of the cohorts' rank tables,
+    /// the manifolds, the bodies and the warm sources, so ranges may run in any order or at once.
+    ///
+    /// # Safety
+    /// `ctx` holds the bases of this step's built tables, taken after the last grow; `k_lo <= k_hi
+    /// <= ctx.n_heads`; and while this runs no other thread reads or writes cohorts `[k_lo, k_hi)`,
+    /// their rank blocks and `vn0` rows, or the `plan` / `tags` / record entries of their lanes'
+    /// manifolds, and nothing holds a reference over any of those columns. Cohorts own consecutive,
+    /// pairwise disjoint rank rows (P-b), and each laid-out manifold is one lane of one cohort, so
+    /// disjoint cohort ranges satisfy this for each other.
+    unsafe fn fill_range(ctx: &FillCtx<'_>, k_lo: usize, k_hi: usize) -> RangeOut {
+        debug_assert!(k_lo <= k_hi && k_hi <= ctx.n_heads, "invariant: a range of built cohorts");
+        let mut cursors = SearchCursors::default();
+        let mut counts = PlanCounts::default();
+        let mut setup = SetupCounters::default();
+        let mut hits = 0u32;
+        for k in k_lo..k_hi {
+            // SAFETY: `k < n_heads` and cohort `k` is this range's alone (the contract), so its
+            //   head and cold record are live and no other reference to either exists.
+            let (head, cold) = unsafe { (&mut *ctx.heads.add(k), &mut *ctx.cold.add(k)) };
+            let (lo, depth) = (head.rank_base as usize, head.depth as usize);
+            debug_assert!(lo + depth <= ctx.n_blocks, "invariant: a cohort's ranks are built");
+            // SAFETY: the cohort's ranks `[lo, lo + depth)` lie inside the built blocks and `vn0`
+            //   rows (P-b sized both to the rank count) and are cohort `k`'s alone.
+            let (blocks, vn0) = unsafe {
+                (
+                    slice::from_raw_parts_mut(ctx.blocks.add(lo), depth),
+                    slice::from_raw_parts_mut(ctx.vn0.add(lo), depth),
+                )
+            };
+            // SAFETY: every lane of cohort `k` is this range's, so the records and the `plan` /
+            //   `tags` entries the fill and `source` touch are its alone (the contract).
+            hits += unsafe {
+                Self::fill_cohort(
+                    head,
+                    cold,
+                    blocks,
+                    vn0,
+                    ctx.manifolds,
+                    ctx.bodies,
+                    ctx.bodies_eff,
+                    |mi| ctx.source(mi, &mut cursors, &mut counts),
+                    ctx.recs_w,
+                    &mut setup,
+                )
+            };
+            #[cfg(debug_assertions)]
+            debug_assert_padding_zero(head, cold, blocks, vn0);
+        }
+        RangeOut { hits, counts, setup }
+    }
+
+    /// S4, test builds: runs `cuts` on scoped std threads, one per range — the pool-free twin of
+    /// the region's Fill blocks that Miri drives (G4-F).
+    #[cfg(test)]
+    fn fill_threads(ctx: &FillCtx<'_>, cuts: &[(u32, u32)]) {
+        std::thread::scope(|scope| {
+            for (i, &(lo, hi)) in cuts.iter().enumerate() {
+                scope.spawn(move || {
+                    // SAFETY: `fill_range`'s contract per range: `ctx`'s bases were taken after the
+                    //   last grow and outlive the scope (it joins before `ctx` drops); `setup_cuts`
+                    //   made the ranges consecutive and pairwise disjoint within `[0, n_heads)`, so
+                    //   no two threads touch one cohort's rows or one manifold's plan / tag /
+                    //   record entries; and `outs` has a slot per range (`cuts.len() <=
+                    //   SETUP_MAX_TASKS`), slot `i` written by range `i` alone.
+                    unsafe { ptr::write(ctx.outs.add(i), Self::fill_range(ctx, lo as usize, hi as usize)) };
+                });
+            }
+        });
+    }
+
+    /// The read side and the write side of the warm store: `warm[cur]` is read this
+    /// step, the other side written.
+    #[inline]
+    fn warm_sides(warm: &mut [WarmRecords; 2], cur: u8) -> (&WarmRecords, &mut WarmRecords) {
+        let [side0, side1] = warm;
+        if cur == 0 { (side0, side1) } else { (side1, side0) }
+    }
+
+    /// P-c (D4): fills one cohort from its manifolds — a pure function of the cohort's
+    /// rank table (P-b), the manifolds, the bodies and the warm read side, so the
+    /// cohorts could be filled in any order or in parallel (C4).
+    ///
+    /// Per live lane: the manifold constants go into the head (the normal, the first
+    /// tangent, the friction, the body rows, the sentinel bit) and the cold record
+    /// (the restitution); the write side's record takes the manifold's shape (its
+    /// feature ids and point count); per point, the rank block takes the anchors,
+    /// the separation and the seed — the last stored point of the manifold's run
+    /// carrying its feature id (Lemma W), zero on a miss or when nothing was looked
+    /// up — and the cold row its `vn0`, computed only where the restitution pass can
+    /// read it (`!(restitution <= 0.0)`, D9/O3) and zero elsewhere. Every padding
+    /// lane and every rank past a lane's width is written as zero.
+    ///
+    /// `blocks` / `vn0` are the cohort's own `depth` rows. `recs_w` is the write side's record
+    /// base, `None` with warm start disabled (no record is written). `source(mi)` is manifold
+    /// `mi`'s lookup and run (the read side, or L10's restore source): planned by P-a, or searched
+    /// by shape F's range (S4). Returns the lanes' point hits.
+    ///
+    /// # Safety
+    /// `recs_w`, when `Some`, is the write-capable base of a record column holding every
+    /// manifold index of this step, and no other thread reads or writes the records of this
+    /// cohort's lanes' manifolds while this runs (S4's disjoint cohort ranges).
+    // The ten parameters are the per-cohort slice of every table the fill reads
+    // or writes, split so the S4 parallel fill hands each range its own cohort
+    // rows without a shared `&mut CohortColumns`; a parameter struct would be built
+    // once per cohort per step for no reader.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fill_cohort<'a>(
+        head: &mut CohortHead,
+        cold: &mut CohortCold,
+        blocks: &mut [RankBlock],
+        vn0: &mut [[f32; COHORT]],
+        manifolds: &[Manifold],
         bodies: &[BodyState],
         bodies_eff: &[BodyEffective],
-        warm_read: &WarmStartTable,
-        warm_start_enabled: bool,
+        mut source: impl FnMut(usize) -> (WarmLookup<'a>, WarmRun),
+        recs_w: Option<*mut WarmRecord>,
+        counters: &mut SetupCounters,
     ) -> u32 {
-        let count = m.count as usize;
-        if count == 0 {
-            return 0;
-        }
-        let ia = m.body_a.0 as usize;
-        let b_is_sentinel = m.body_b == SDF_SENTINEL;
-        let ib = if b_is_sentinel { ia } else { m.body_b.0 as usize };
-        let normal = m.normal;
-        let (t1, t2) = tangent_basis(normal);
+        let depth = head.depth as usize;
+        let nlanes = head.nlanes as usize;
+        debug_assert!(
+            blocks.len() == depth && vn0.len() == depth && (1..=COHORT).contains(&nlanes),
+            "invariant: a cohort's fill sees exactly its ranks and 1..=8 lanes"
+        );
+        let mut sentinel = 0u8;
+        let mut hits = 0u32;
+        for l in 0..COHORT {
+            if l >= nlanes {
+                // Padding lane: zero in every field.
+                for c in 0..3 {
+                    head.n[c][l] = 0.0;
+                    head.t1[c][l] = 0.0;
+                }
+                head.friction[l] = 0.0;
+                head.body_a[l] = 0;
+                head.body_b[l] = 0;
+                cold.restitution[l] = 0.0;
+                for (blk, vn) in blocks.iter_mut().zip(vn0.iter_mut()) {
+                    blk.clear_lane(l);
+                    vn[l] = 0.0;
+                }
+                continue;
+            }
+            let mi = cold.mi[l] as usize;
+            let m = &manifolds[mi];
+            let width = head.width[l] as usize;
+            debug_assert!(
+                width == m.count as usize && 1 <= width && width <= depth,
+                "invariant: a lane's width is its manifold's live point count"
+            );
+            let ia = m.body_a.0 as usize;
+            let b_is_sentinel = m.body_b == SDF_SENTINEL;
+            let ib = if b_is_sentinel { ia } else { m.body_b.0 as usize };
+            let normal = m.normal;
+            let (t1, _) = tangent_basis(normal);
 
-        // Combined material coefficients (the reference `max` rule). For a
-        // sentinel, `ib == ia`, so this resolves to A's own material — the same
-        // convention the reference uses.
-        let friction = bodies[ia].friction.max(bodies[ib].friction);
-        let restitution = bodies[ia].restitution.max(bodies[ib].restitution);
+            // Combined material coefficients (the reference `max` rule). For a
+            // sentinel, `ib == ia`, so this resolves to A's own material — the same
+            // convention the reference uses.
+            let friction = bodies[ia].friction.max(bodies[ib].friction);
+            let restitution = bodies[ia].restitution.max(bodies[ib].restitution);
 
-        let pa = bodies[ia].position;
-        let pb = if b_is_sentinel { Vec3::ZERO } else { bodies[ib].position };
+            let pa = bodies[ia].position;
+            let pb = if b_is_sentinel { Vec3::ZERO } else { bodies[ib].position };
 
-        // One single-thread build view over the 26 push-filled columns for the
-        // whole manifold's points (the CSR / `manifold_base` columns are filled by
-        // the caller, not here).
-        let mut view = cols.build_view();
-        for p in 0..count {
-            let cp = &m.points[p];
-            let ra = cp.anchor_a - pa;
-            let rb = if b_is_sentinel { Vec3::ZERO } else { cp.anchor_b - pb };
+            head.n[0][l] = normal.x;
+            head.n[1][l] = normal.y;
+            head.n[2][l] = normal.z;
+            head.t1[0][l] = t1.x;
+            head.t1[1][l] = t1.y;
+            head.t1[2][l] = t1.z;
+            head.friction[l] = friction;
+            head.body_a[l] = ia as u32;
+            head.body_b[l] = ib as u32;
+            sentinel |= u8::from(b_is_sentinel) << l;
+            cold.restitution[l] = restitution;
 
-            // Gather-time relative normal approach velocity (B−A on the normal).
+            // D9: `vn0` is read only by the restitution pass, and only where the
+            // coefficient is not `<= 0` — the exact complement of its skip (a NaN
+            // coefficient keeps the value). It is dead elsewhere, so a zero there
+            // changes no value.
+            // The written form IS the rule: `restitution > 0.0` would differ on a NaN
+            // coefficient, which the consumer does not skip (review O3).
+            #[allow(clippy::neg_cmp_op_on_partial_ord)]
+            let lazy_vn0 = !(restitution <= 0.0);
             let ba = &bodies_eff[ia];
             let bb = if b_is_sentinel { &IMMOVABLE_AT_REST } else { &bodies_eff[ib] };
-            let vn_initial = (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal);
 
-            let warm_key = if b_is_sentinel {
-                warm_start::pack_sdf(m.body_a, cp.feature_id)
-            } else {
-                warm_start::pack(m.body_a, m.body_b, cp.feature_id)
-            };
-            let seed = if warm_start_enabled {
-                match warm_read.get(warm_key) {
-                    Some(e) => (e.normal_impulse, e.tangent_impulse[0], e.tangent_impulse[1]),
-                    None => (0.0, 0.0, 0.0),
+            let (lookup, run) = source(mi);
+            if let Some(recs) = recs_w {
+                // SAFETY: `mi` indexes this step's record column (the contract: it holds every
+                //   manifold index), and the record is this lane's alone, so the one-element
+                //   `&mut` aliases nothing.
+                unsafe { (*recs.add(mi)).set_shape(m) };
+            }
+            let mut lane_hits = 0u32;
+            for (r, (blk, vn)) in blocks.iter_mut().zip(vn0.iter_mut()).enumerate() {
+                if r >= width {
+                    blk.clear_lane(l);
+                    vn[l] = 0.0;
+                    continue;
                 }
-            } else {
-                (0.0, 0.0, 0.0)
-            };
+                let cp = &m.points[r];
+                let ra = cp.anchor_a - pa;
+                let rb = if b_is_sentinel { Vec3::ZERO } else { cp.anchor_b - pb };
+                blk.ra[0][l] = ra.x;
+                blk.ra[1][l] = ra.y;
+                blk.ra[2][l] = ra.z;
+                blk.rb[0][l] = rb.x;
+                blk.rb[1][l] = rb.y;
+                blk.rb[2][l] = rb.z;
+                blk.sep[l] = cp.separation;
 
-            view.push_point(
-                ra,
-                rb,
-                normal,
-                t1,
-                t2,
-                cp.separation,
-                friction,
-                restitution,
-                seed,
-                ia as u32,
-                ib as u32,
-                b_is_sentinel,
-                warm_key,
-                vn_initial,
-            );
+                // The seed: the last stored point of the manifold's run carrying this
+                // feature id (Lemma W), zero on a miss or when nothing was looked up
+                // (an empty run).
+                let seed = match lookup.seed(run, point_fid(m, r)) {
+                    Some(seed) => {
+                        lane_hits += 1;
+                        seed
+                    }
+                    None => [0.0; 3],
+                };
+                blk.ni[l] = seed[0];
+                blk.ti1[l] = seed[1];
+                blk.ti2[l] = seed[2];
+
+                // Gather-time relative normal approach velocity (B−A on the normal).
+                vn[l] = if lazy_vn0 {
+                    (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal)
+                } else {
+                    0.0
+                };
+            }
+            hits += lane_hits;
+            if recs_w.is_some() {
+                counters.miss(width as u32 - lane_hits);
+                counters.duplicate_fids(m);
+            }
         }
-        count as u32
+        head.sentinel = sentinel;
+        hits
     }
 
     /// Whether a manifold belongs to a FROZEN island this frame (plan O8) — the
@@ -1635,47 +3005,414 @@ impl ColoredSoftStepSolver {
         isl != ConstraintGraph::NO_ISLAND && sleep.is_island_frozen(isl)
     }
 
-    /// Applies every contact point's seeded accumulated impulse to both bodies'
-    /// velocities (the warm-start apply, run once per substep after gravity).
+    /// Whether no dynamic row (`inv_mass != 0`, the rows the freeze capture snapshots) is awake
+    /// this step: the first condition of the no-awake fast path (L10 C3a).
+    #[inline]
+    fn no_awake_dynamic_row(sleep: &IslandSleep, bodies: &[BodyState]) -> bool {
+        !bodies
+            .iter()
+            .enumerate()
+            .any(|(row, b)| is_dynamic_row(b.inv_mass) && sleep.is_row_awake(row))
+    }
+
+    /// Applies the seeded accumulated impulse of every contact point of cohorts `[k_lo, k_hi)` to
+    /// both bodies' velocities (the warm-start apply, run once per substep after gravity) — the
+    /// D7 dispatch fork, the SINGLE site that chooses the apply's shape. The serial step passes
+    /// every cohort; the cohorts are walked in order, so applying `[0, k)` then `[k, n)` is the
+    /// whole apply, add for add.
     ///
-    /// Mirrors the reference `warm_start_apply`, but reads the SoA columns.
-    /// Iterating in slot order (color order) is safe here: the apply is a pure
-    /// accumulation onto velocities and, within a color, the bodies are
-    /// disjoint; across colors the seed is independent of order. (O5 is
-    /// single-threaded; the slot-order walk is fine.)
-    fn warm_start_apply(view: ContactSolveView<'_>, bodies_eff: ScratchSolveView<'_, BodyEffective>) {
-        for i in 0..view.len() {
-            let normal = view.normal(i);
-            let t1 = view.tangent1(i);
-            let t2 = view.tangent2(i);
-            let impulse = normal * view.normal_impulse(i)
-                + t1 * view.tangent1_impulse(i)
-                + t2 * view.tangent2_impulse(i);
-            let ia = view.body_a(i) as usize;
-            body_mut(bodies_eff, ia).apply_impulse(view.ra(i), impulse * -1.0);
-            if !view.b_is_sentinel(i) {
-                body_mut(bodies_eff, view.body_b(i) as usize).apply_impulse(view.rb(i), impulse);
+    /// - `simd == false`, or a non-AVX2 build →
+    ///   [`warm_apply_scalar`](Self::warm_apply_scalar), the group-major oracle.
+    /// - `simd == true` on an AVX2 build →
+    ///   [`warm_apply_avx2`](Self::warm_apply_avx2) over the same cohorts, eight
+    ///   lanes at a time and bit-identical (L11 C3, D7).
+    ///
+    /// The flag is [`PhysicsConfig::simd_solve`] — the same one that forks the
+    /// sweep kernel, so a step never mixes the two shapes, and the `simd_solve`
+    /// arms of every G1 scene gate this fork. On the serial step the apply runs on the
+    /// calling thread with no worker live; in the solve region (SR) each colour's cohorts are
+    /// one entry whose blocks apply disjoint cohort ranges at once — within a colour the dynamic
+    /// bodies are disjoint (O4), so each body's adds keep their order, and the colours' entries
+    /// run in colour order.
+    #[inline]
+    fn warm_start_apply(
+        cols: &CohortColumns,
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
+        simd: bool,
+        k_lo: usize,
+        k_hi: usize,
+    ) {
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            if simd {
+                // SAFETY: the `target_feature = "avx2"` compile-time gate guarantees the
+                //   executing CPU supports every AVX2 intrinsic the apply uses (a non-AVX2
+                //   host cannot reach this branch — the `cfg` excludes it). `cols` is the
+                //   cohort table `build_columns` filled this step, so every head's
+                //   `rank_base + depth` is in bounds and every head and block is live and
+                //   64 B-aligned. No other thread writes the dynamic body rows of cohorts
+                //   `[k_lo, k_hi)` while this runs: serially no worker is live, and in the solve
+                //   region the item's other blocks hold other cohorts of the same colour, whose
+                //   dynamic bodies are disjoint from these (O4); the static rows they share are
+                //   only read (the movability guard).
+                unsafe { Self::warm_apply_avx2(cols, bodies_eff, k_lo, k_hi) };
+                return;
+            }
+        }
+        // Flag off / non-AVX2 build: the group-major oracle.
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        let _ = simd;
+        Self::warm_apply_scalar(cols, bodies_eff, k_lo, k_hi);
+    }
+
+    /// The scalar warm-start apply — the ORACLE the AVX2 apply is gated against
+    /// (G4), and the path a `simd_solve == false` step takes.
+    ///
+    /// Mirrors the reference `warm_start_apply`, but reads the cohort tables
+    /// group-major — cohorts in color order, lanes, then ranks — which is the slot
+    /// order the per-point columns had, so every body's add sequence is unchanged.
+    /// The apply is a pure accumulation onto velocities and, within a color, the
+    /// bodies are disjoint; across colors the seed is independent of order.
+    ///
+    /// Walks cohorts `[k_lo, k_hi)` (`k_hi <= n_heads`, else the slice panics).
+    fn warm_apply_scalar(
+        cols: &CohortColumns,
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
+        k_lo: usize,
+        k_hi: usize,
+    ) {
+        let blocks = cols.blocks();
+        for head in &cols.heads()[k_lo..k_hi] {
+            let rank_base = head.rank_base as usize;
+            for l in 0..head.nlanes as usize {
+                let normal = head.normal(l);
+                let t1 = head.tangent1(l);
+                let t2 = normal.cross(t1);
+                // Guard the write on MOVABILITY, exactly as `solve_color` does — see the
+                // `ia_movable` / `ib_movable` rationale there for the full proof. Two
+                // properties, and only the first is about this function today:
+                //
+                // * BIT-IDENTICAL. A static / kinematic row has `inv_mass == 0` AND
+                //   `inv_inertia == Mat3::ZERO`, so both halves of `apply_impulse` are a
+                //   value no-op on it for every finite impulse. Skipping the write cannot
+                //   change a bit.
+                // * LOAD-BEARING THE MOMENT THIS RUNS IN PARALLEL. The coloring marks only
+                //   DYNAMIC bodies, so two manifold-groups in one color may SHARE a static
+                //   body (a ground floor as `body_b`). Unguarded, a color-partitioned
+                //   parallel apply has every lane writing that one shared static row — a
+                //   data race that is VALUE-identical and therefore invisible to the
+                //   `{1, N}` bit oracles. The guard is what makes each worker's writes
+                //   disjoint, and it must land BEFORE the parallel dispatch, not with it.
+                //
+                // `is_dynamic_row` is the same predicate the O4 coloring uses, so the two
+                // cannot drift into disagreeing about which rows are shared. It is the
+                // IEEE `inv_mass != 0.0`, so a `-0.0` row is immovable on this path and on
+                // the AVX2 one (review O1, gated by
+                // `negative_zero_inv_mass_row_is_immovable_in_both_warm_applies`).
+                let ia = head.body_a[l] as usize;
+                let ia_movable = is_dynamic_row(body_ref(bodies_eff, ia).inv_mass);
+                let ib = head.body_b[l] as usize;
+                let ib_movable =
+                    !head.is_sentinel(l) && is_dynamic_row(body_ref(bodies_eff, ib).inv_mass);
+                for blk in &blocks[rank_base..rank_base + head.width[l] as usize] {
+                    let impulse = normal * blk.ni[l] + t1 * blk.ti1[l] + t2 * blk.ti2[l];
+                    if ia_movable {
+                        body_mut(bodies_eff, ia).apply_impulse(blk.ra(l), impulse * -1.0);
+                    }
+                    if ib_movable {
+                        body_mut(bodies_eff, ib).apply_impulse(blk.rb(l), impulse);
+                    }
+                }
             }
         }
     }
 
-    /// Solves the normal + coupled-friction impulses for one COLOR's contiguous
-    /// SoA span once (one Gauss-Seidel sweep over the color) — the per-color
-    /// kernel (Phase O5, Decision 7).
+    /// The 8-lane warm-start apply (L11 C3, D7): one cohort at a time, serial,
+    /// under `simd_solve`. BIT-IDENTICAL to
+    /// [`warm_apply_scalar`](Self::warm_apply_scalar).
     ///
-    /// `span` is the color's `[start, end)` slot range. POOL-AGNOSTIC and
-    /// ORDER-INDEPENDENT ACROSS THE MANIFOLD-GROUPS of the color: each
-    /// manifold-group in a color touches dynamic bodies no OTHER group in the
-    /// color touches (the O4 coloring invariant is manifold-group granular), so
-    /// the velocity result does not depend on the order the GROUPS are visited —
-    /// the property [O6] relies on to dispatch a color's groups across threads
-    /// (and [O7] to pack adjacent groups into a lane). The ≥2 points of a SINGLE
-    /// manifold-group share BOTH bodies, so they are order-coupled and must be
-    /// solved together, sequentially, on one thread / lane — never split across
-    /// workers/lanes. O5 is single-threaded and visits the span slot-by-slot in
-    /// ascending order, which solves each group's points in sequence for free.
-    /// Per-group boundaries are in `cols.group_start` / `cols.color_group_start`
-    /// for the parallel/SIMD consumers.
+    /// # Why the bits are the same
+    ///
+    /// * **The impulse associates left to right.** The scalar
+    ///   `normal * ni + t1 * ti1 + t2 * ti2` is `((n·λn + t1·λt1) + t2·λt2)` per
+    ///   component, and each product is a separate `mul` then `add` here (NO FMA —
+    ///   the module's no-FMA invariant, censused by
+    ///   `colored_has_no_fma_or_approx_callsites`). Mutation M7 re-associates it and
+    ///   is recorded red.
+    /// * **`t2 = n × t1`** via [`cross8`](super::simd::cross8), op for op the
+    ///   `Vec3::cross` the scalar calls and the one `tangent_basis` derived the
+    ///   stored tangent with.
+    /// * **The register carry is the scalar's read-modify-write.** The A/B
+    ///   velocities are gathered once per cohort, carried across the ranks and
+    ///   scattered at cohort exit. Within a color the manifold-groups are
+    ///   body-disjoint (the O4 invariant), so lane `l`'s two rows are touched by no
+    ///   other lane of the cohort; each lane therefore sees exactly its own adds, in
+    ///   ascending rank order, which is the scalar's sequence for that body. The
+    ///   scatter lands before the next cohort's gather, so the cross-cohort order is
+    ///   the scalar's too — and cohorts are walked in color order on both paths.
+    /// * **The mask is `active ∧ movable`** (review O1): `active = width[l] > r`
+    ///   reproduces the scalar's `r < width[l]` rank bound, and `movable` is the
+    ///   IEEE `inv_mass != 0.0` of [`is_dynamic_row`] — an
+    ///   `_mm256_cmp_ps::<_CMP_NEQ_OQ>` against zero, NOT a bit test, so a `-0.0`
+    ///   `inv_mass` row is immovable here exactly as it is on the scalar path.
+    ///   [`apply_impulse_blend_x8`](super::simd::apply_impulse_blend_x8) blends, so
+    ///   a masked-off lane keeps its original velocity bits.
+    ///
+    /// # O2 — a padding lane reads no body row
+    ///
+    /// A lane `>= nlanes` is skipped by the gather (its staged state is written
+    /// zero, never read from a row) and by the scatter. Its `width` is 0, so
+    /// `active` is false at every rank and every blended write is discarded. The
+    /// fill zeroes a padding lane's `body_a`, so gathering it would read row 0 — a
+    /// real, dynamic row the solve writes. That read is value-identical (the lane is
+    /// masked), which is why only the contract, the Miri case and mutation M12 can
+    /// see it.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee AVX2 (the `cfg` + `target_feature` gate), that
+    /// `cols` is a fully built cohort table — every head's `rank_base + depth`
+    /// within `blocks`, every head and block live and 64 B-aligned — and that no
+    /// other thread writes the dynamic body rows of cohorts `[k_lo, k_hi)` while this runs
+    /// (serially the apply owns every row; in the solve region no other block of the item writes
+    /// these rows: its cohorts are another range of the same colour, body-disjoint by O4, and the
+    /// static rows the lanes share are only read). It walks cohorts `[k_lo, k_hi)`
+    /// (`k_hi <= n_heads`, else the slice panics).
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[target_feature(enable = "avx2")]
+    unsafe fn warm_apply_avx2(
+        cols: &CohortColumns,
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
+        k_lo: usize,
+        k_hi: usize,
+    ) {
+        use core::arch::x86_64::{
+            _CMP_NEQ_OQ, _mm_loadl_epi64, _mm256_add_ps, _mm256_and_ps, _mm256_castsi256_ps,
+            _mm256_cmp_ps, _mm256_cmpgt_epi32, _mm256_cvtepu8_epi32, _mm256_mul_ps,
+            _mm256_set1_epi32, _mm256_set1_ps,
+        };
+        use crate::solver::simd::{apply_impulse_blend_x8, cross8};
+
+        const W: usize = COHORT;
+
+        // ── Per-cohort stack scratch (zero heap; the kernel's gather-once shape) ──
+        let mut ia = [0usize; W]; // body-A row index
+        let mut ib = [0usize; W]; // body-B row index (== ia for a sentinel)
+        let mut sent = [false; W]; // sentinel per lane (padding lanes: false)
+        let mut a_invm_s = [0.0f32; W];
+        let mut b_invm_s = [0.0f32; W];
+        let mut a_ii_s = [[0.0f32; W]; 9];
+        let mut b_ii_s = [[0.0f32; W]; 9];
+        let mut a_lin_s = [[0.0f32; W]; 3];
+        let mut a_ang_s = [[0.0f32; W]; 3];
+        let mut b_lin_s = [[0.0f32; W]; 3];
+        let mut b_ang_s = [[0.0f32; W]; 3];
+        // a_static[lane] = 1.0 when A is NOT movable (`inv_mass == 0.0`, IEEE — so a
+        // `-0.0` row lands here). Always-dynamic by manifold convention, but kept for
+        // scalar-exactness: the scalar guards both sides.
+        let mut a_static_s = [0.0f32; W];
+        let mut not_sent_f = [0.0f32; W];
+        // Velocity scatter staging (written only at cohort exit).
+        let mut out_a_lin = [[0.0f32; W]; 3];
+        let mut out_a_ang = [[0.0f32; W]; 3];
+        let mut out_b_lin = [[0.0f32; W]; 3];
+        let mut out_b_ang = [[0.0f32; W]; 3];
+
+        // SAFETY (target_feature): every intrinsic below is AVX2; this fn is
+        //   `#[target_feature(enable = "avx2")]`-gated and only reached on an AVX2
+        //   build (the `cfg` gate), so the CPU supports them.
+        let zero = _mm256_set1_ps(0.0);
+        let one = _mm256_set1_ps(1.0);
+        let neg_one = _mm256_set1_ps(-1.0);
+
+        let blocks = cols.blocks();
+        for head in &cols.heads()[k_lo..k_hi] {
+            let nlanes = head.nlanes as usize;
+            let depth = head.depth as usize;
+            let rank_base = head.rank_base as usize;
+            debug_assert!((1..=W).contains(&nlanes), "cohort has 1..=8 lanes");
+            debug_assert!(
+                rank_base + depth <= blocks.len(),
+                "invariant: the cohort's ranks are built"
+            );
+
+            // ── Gather-ONCE (cohort entry) ──────────────────────────────────────
+            for lane in 0..W {
+                // Review O2: a padding lane (`lane >= nlanes`) reads NO body row.
+                let b_sent = head.is_sentinel(lane);
+                sent[lane] = b_sent;
+                not_sent_f[lane] = if b_sent { 0.0 } else { 1.0 };
+                if lane < nlanes {
+                    let lane_ia = head.body_a[lane] as usize;
+                    let lane_ib = head.body_b[lane] as usize;
+                    // A sentinel reads IMMOVABLE_AT_REST, never `bodies_eff[lane_ib]`,
+                    // mirroring the scalar's short-circuited `!is_sentinel(l) && …`, so
+                    // only assert B's row when it is a real body.
+                    debug_assert!(lane_ia < bodies_eff.len());
+                    debug_assert!(b_sent || lane_ib < bodies_eff.len());
+                    ia[lane] = lane_ia;
+                    ib[lane] = lane_ib;
+
+                    let ba = body_ref(bodies_eff, lane_ia);
+                    a_invm_s[lane] = ba.inv_mass;
+                    a_static_s[lane] = if is_dynamic_row(ba.inv_mass) { 0.0 } else { 1.0 };
+                    Self::stage_body_state(ba, lane, &mut a_ii_s, &mut a_lin_s, &mut a_ang_s);
+
+                    let bb =
+                        if b_sent { &IMMOVABLE_AT_REST } else { body_ref(bodies_eff, lane_ib) };
+                    b_invm_s[lane] = bb.inv_mass;
+                    Self::stage_body_state(bb, lane, &mut b_ii_s, &mut b_lin_s, &mut b_ang_s);
+                } else {
+                    ia[lane] = 0;
+                    ib[lane] = 0;
+                    a_invm_s[lane] = 0.0;
+                    b_invm_s[lane] = 0.0;
+                    a_static_s[lane] = 1.0;
+                    for c in 0..9 {
+                        a_ii_s[c][lane] = 0.0;
+                        b_ii_s[c][lane] = 0.0;
+                    }
+                    for c in 0..3 {
+                        a_lin_s[c][lane] = 0.0;
+                        a_ang_s[c][lane] = 0.0;
+                        b_lin_s[c][lane] = 0.0;
+                        b_ang_s[c][lane] = 0.0;
+                    }
+                }
+            }
+
+            let a_invm = load1(&a_invm_s);
+            let b_invm = load1(&b_invm_s);
+            let a_ii = load9(&a_ii_s);
+            let b_ii = load9(&b_ii_s);
+            // movable masks (constant within the cohort), the kernel's guard table:
+            // A movable = `inv_mass != 0.0`; B movable = !sentinel AND `inv_mass != 0.0`.
+            let not_sent = _mm256_cmp_ps::<_CMP_NEQ_OQ>(load1(&not_sent_f), zero);
+            let a_movable = _mm256_cmp_ps::<_CMP_NEQ_OQ>(load1(&a_static_s), one);
+            let b_movable = _mm256_and_ps(not_sent, _mm256_cmp_ps::<_CMP_NEQ_OQ>(b_invm, zero));
+
+            // The head's per-lane constants: aligned rows of the 64 B-aligned head.
+            // SAFETY: `head` is a live `&CohortHead`; its `n` / `t1` rows sit at offsets
+            //   0 / 96, both 32 B-aligned.
+            let (n, t1) = unsafe { (load_rows3(&raw const head.n), load_rows3(&raw const head.t1)) };
+            let t2 = cross8(n[0], n[1], n[2], t1[0], t1[1], t1[2]);
+            // The per-lane widths, widened to 8 × i32 for the per-rank `active` compare.
+            // SAFETY: `head.width` is a live 8 B array; `_mm_loadl_epi64` reads 8 bytes
+            //   with no alignment requirement.
+            let width = unsafe { _mm256_cvtepu8_epi32(_mm_loadl_epi64(head.width.as_ptr().cast())) };
+
+            // A/B velocity: REGISTER-CARRIED across the whole rank loop.
+            let mut a_lin = load3(&a_lin_s);
+            let mut a_ang = load3(&a_ang_s);
+            let mut b_lin = load3(&b_lin_s);
+            let mut b_ang = load3(&b_ang_s);
+
+            // ── Rank loop (register-carry velocity) ─────────────────────────────
+            for r in 0..depth {
+                // SAFETY: `rank_base + r < rank_base + depth <= blocks.len()` (asserted
+                //   above), so this is a built block of THIS cohort; `blocks` is a shared
+                //   slice of the 64 B-aligned column, so each row sits at offset
+                //   0 / 96 / 224 / 256 / 288 of a 64 B-aligned block and the aligned
+                //   vector loads below are in bounds and aligned. The apply never writes
+                //   a block, and no worker is live.
+                let blk: *const RankBlock = &blocks[rank_base + r];
+                // active = width[lane] > r as a lane mask (an integer compare, cast) —
+                // the scalar's `r < width[l]` rank bound.
+                let active =
+                    _mm256_castsi256_ps(_mm256_cmpgt_epi32(width, _mm256_set1_epi32(r as i32)));
+                let mask_a = _mm256_and_ps(active, a_movable);
+                let mask_b = _mm256_and_ps(active, b_movable);
+
+                // Nine aligned loads: the rank's two anchors and three impulse rows.
+                // SAFETY: see the block's contract above.
+                let (ra, rb, ni, ti1, ti2) = unsafe {
+                    (
+                        load_rows3(&raw const (*blk).ra),
+                        load_rows3(&raw const (*blk).rb),
+                        load_row(&raw const (*blk).ni),
+                        load_row(&raw const (*blk).ti1),
+                        load_row(&raw const (*blk).ti2),
+                    )
+                };
+
+                // impulse = ((n·λn + t1·λt1) + t2·λt2), component by component: the
+                // scalar `normal * ni + t1 * ti1 + t2 * ti2` associates left to right.
+                // Separate mul then add, NO FMA. (Mutation M7 re-associates this.)
+                let imp = [
+                    _mm256_add_ps(
+                        _mm256_add_ps(_mm256_mul_ps(n[0], ni), _mm256_mul_ps(t1[0], ti1)),
+                        _mm256_mul_ps(t2[0], ti2),
+                    ),
+                    _mm256_add_ps(
+                        _mm256_add_ps(_mm256_mul_ps(n[1], ni), _mm256_mul_ps(t1[1], ti1)),
+                        _mm256_mul_ps(t2[1], ti2),
+                    ),
+                    _mm256_add_ps(
+                        _mm256_add_ps(_mm256_mul_ps(n[2], ni), _mm256_mul_ps(t1[2], ti1)),
+                        _mm256_mul_ps(t2[2], ti2),
+                    ),
+                ];
+                // A gets -impulse, B gets +impulse (the scalar's `impulse * -1.0`).
+                let neg_imp = [
+                    _mm256_mul_ps(imp[0], neg_one),
+                    _mm256_mul_ps(imp[1], neg_one),
+                    _mm256_mul_ps(imp[2], neg_one),
+                ];
+                let (na_lin, na_ang) =
+                    apply_impulse_blend_x8(a_lin, a_ang, ra, neg_imp, a_invm, a_ii, mask_a);
+                a_lin = na_lin;
+                a_ang = na_ang;
+                let (nb_lin, nb_ang) =
+                    apply_impulse_blend_x8(b_lin, b_ang, rb, imp, b_invm, b_ii, mask_b);
+                b_lin = nb_lin;
+                b_ang = nb_ang;
+            }
+
+            // ── Scatter-ONCE (cohort exit): A/B velocity registers → body rows ───
+            // Only MOVABLE lanes BELOW `nlanes` are written (D7): a static / sentinel
+            // row is never touched (its register held the unchanged gathered value
+            // anyway, since `mask_*` masked it off), and a padding lane is not a lane —
+            // its `body_a` is the fill's zero, i.e. row 0. Mutation M12 drops both
+            // halves of that guard and is recorded red.
+            // SAFETY: the stores write 8 `f32` into in-bounds `[f32; 8]` stack buffers.
+            store3(&a_lin, &mut out_a_lin);
+            store3(&a_ang, &mut out_a_ang);
+            store3(&b_lin, &mut out_b_lin);
+            store3(&b_ang, &mut out_b_ang);
+            for lane in 0..nlanes {
+                if a_static_s[lane] == 0.0 {
+                    let b = body_mut(bodies_eff, ia[lane]);
+                    b.linear_velocity =
+                        Vec3::new(out_a_lin[0][lane], out_a_lin[1][lane], out_a_lin[2][lane]);
+                    b.angular_velocity =
+                        Vec3::new(out_a_ang[0][lane], out_a_ang[1][lane], out_a_ang[2][lane]);
+                }
+                if !sent[lane] && is_dynamic_row(b_invm_s[lane]) {
+                    let b = body_mut(bodies_eff, ib[lane]);
+                    b.linear_velocity =
+                        Vec3::new(out_b_lin[0][lane], out_b_lin[1][lane], out_b_lin[2][lane]);
+                    b.angular_velocity =
+                        Vec3::new(out_b_ang[0][lane], out_b_ang[1][lane], out_b_ang[2][lane]);
+                }
+            }
+        }
+    }
+
+    /// Solves the normal + coupled-friction impulses for one COLOR's manifold-group
+    /// range once (one Gauss-Seidel sweep over the groups) — the per-color kernel
+    /// (Phase O5, Decision 7) over the cohort layout (L11 C2).
+    ///
+    /// `[g_lo, g_hi)` is the color's (or a chunk's) group range and `ctx` places the
+    /// color in the cohort tables. POOL-AGNOSTIC and ORDER-INDEPENDENT ACROSS THE
+    /// MANIFOLD-GROUPS of the color: each manifold-group in a color touches dynamic
+    /// bodies no OTHER group in the color touches (the O4 coloring invariant is
+    /// manifold-group granular), so the velocity result does not depend on the
+    /// order the GROUPS are visited — the property [O6] relies on to dispatch a
+    /// color's groups across threads (and [O7] to pack adjacent groups into a lane).
+    /// The ≥2 points of a SINGLE manifold-group share BOTH bodies, so they are
+    /// order-coupled and must be solved together, sequentially, on one thread /
+    /// lane — never split across workers/lanes. The scalar oracle visits each group's
+    /// ranks in ascending order, which solves the group's points in sequence.
     ///
     /// [O6]: https://github.com/bluesteelll/boyko-engine
     ///
@@ -1684,105 +3421,133 @@ impl ColoredSoftStepSolver {
     /// normal solve (`dλ = -massCoeff·mEff·(vn + bias) - impulseCoeff·λ`, the
     /// `max(0)` clamp, the `max(-MAX_BIAS_VELOCITY)` bias clamp), then the 2-DOF
     /// coupled Coulomb friction CONE (`|λt| ≤ µ·λn`, exact `sqrt`), reading the
-    /// columns instead of the AoS `PointConstraint`. SCALAR in O5 ([O7] widens
-    /// this to AVX2 over the same columns).
+    /// cohort tables instead of the AoS `PointConstraint`. SCALAR here ([O7] widens
+    /// this to AVX2 over the same tables).
     ///
     /// [O7]: https://github.com/bluesteelll/boyko-engine
     ///
     /// O7 dispatch fork over a contiguous group range — the SINGLE site that
     /// chooses the scalar oracle vs the AVX2 cohort kernel.
     ///
-    /// - `simd == false` → [`solve_color`](Self::solve_color) over `span` (the
-    ///   color/chunk's `[start, end)` slot range): BYTE-IDENTICAL to the committed
-    ///   O6 path (the 0%-gate). `g_lo`/`g_hi` are ignored.
+    /// - `simd == false` → [`solve_color`](Self::solve_color) over the groups
+    ///   `[g_lo, g_hi)`: BYTE-IDENTICAL to the committed O6 path (the 0%-gate).
     /// - `simd == true` on an AVX2 build → [`solve_color_avx2`](Self::solve_color_avx2)
-    ///   over the manifold-GROUP range `[g_lo, g_hi)` as 8-group cohorts: the
-    ///   bit-exact WIDTH-ONLY path (Decision 2).
-    /// - `simd == true` on a non-AVX2 build / Miri → falls back to
-    ///   [`solve_color`](Self::solve_color) over `span` (one fallback = the oracle;
+    ///   over the cohorts of `[g_lo, g_hi)` (`ctx.cohorts_of`): the bit-exact
+    ///   WIDTH-ONLY path (Decision 2). The range must start on a cohort boundary —
+    ///   the color's first group, or a `COHORT`-stepped cut from it — which the
+    ///   caller (a whole color, or a parallel cohort-run chunk) upholds.
+    /// - `simd == true` on a non-AVX2 build → falls back to
+    ///   [`solve_color`](Self::solve_color) (one fallback = the oracle;
     ///   bit-identical, simpler — the design's "choose the latter").
     ///
-    /// `span` and `[g_lo, g_hi)` MUST describe the same contiguous slot region
-    /// (`span == (group_start[g_lo], group_start[g_hi])`) so the two paths solve the
-    /// identical work — the caller (a whole color, or a parallel cohort-run chunk)
-    /// upholds this.
+    /// The gate is `cfg(all(target_arch = "x86_64", target_feature = "avx2"))` with
+    /// no `not(miri)` term, on purpose: under Miri the fork follows the Miri build's
+    /// own target features, so an AVX2 Miri build exercises the `unsafe` kernel
+    /// rather than a scalar stand-in.
     #[allow(clippy::too_many_arguments)]
     #[inline]
     fn solve_color_dispatch(
-        view: ContactSolveView<'_>,
+        view: CohortSolveView<'_>,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
-        span: (usize, usize),
+        ctx: ColorCtx,
         g_lo: usize,
         g_hi: usize,
-        bias_rate: f32,
-        mass_coeff: f32,
-        impulse_coeff: f32,
+        step: &SolveStep<'_>,
         bias_active: bool,
         simd: bool,
     ) {
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
             if simd {
+                let (k_lo, k_hi) = ctx.cohorts_of(g_lo, g_hi);
                 // SAFETY: the `target_feature = "avx2"` compile-time gate guarantees
                 //   the executing CPU supports every AVX2 intrinsic the kernel uses
                 //   (a non-AVX2 host cannot reach this branch — the `cfg` excludes it).
-                //   The kernel documents its per-load bounds + disjoint-write invariants.
+                //   `[k_lo, k_hi)` are built cohorts of one color (the caller's range),
+                //   whose lanes are body-disjoint; the kernel documents its per-load
+                //   bounds + disjoint-write invariants.
                 unsafe {
-                    Self::solve_color_avx2(
-                        view,
-                        bodies_eff,
-                        span,
-                        g_lo,
-                        g_hi,
-                        bias_rate,
-                        mass_coeff,
-                        impulse_coeff,
-                        bias_active,
-                    );
+                    Self::solve_color_avx2(view, bodies_eff, k_lo, k_hi, step, bias_active);
                 }
                 return;
             }
         }
-        // Flag off / non-AVX2 build / Miri: the byte-identical scalar oracle over
-        // the whole span (the 0%-gate AND the SIMD non-AVX2 fallback).
+        // Flag off / non-AVX2 build: the scalar oracle over the groups (the
+        // `simd_solve == false` path AND the SIMD non-AVX2 fallback).
         #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-        let _ = (g_lo, g_hi, simd);
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        let _ = (g_lo, g_hi);
-        Self::solve_color(
-            view,
-            bodies_eff,
-            span,
-            bias_rate,
-            mass_coeff,
-            impulse_coeff,
-            bias_active,
-        );
+        let _ = simd;
+        Self::solve_color(view, bodies_eff, ctx, g_lo, g_hi, step, bias_active);
     }
 
+    /// The scalar per-color kernel over the cohort layout: group-major (lane outer,
+    /// rank inner) over the groups `[g_lo, g_hi)` of the color `ctx` places — the
+    /// slot order of the per-point columns, op for op. Worker-safe: reads its lanes'
+    /// constants through the shared head and its lanes' block elements through raw
+    /// projections, and writes its lanes' impulse elements the same way (a scalar
+    /// chunk may share a cohort with another worker's chunk, never a lane).
+    ///
     /// [O7]: https://github.com/bluesteelll/boyko-engine
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// V2: one branch per call picks the instance — `SPEC = false` (the step's speculative
+    /// contacts are off), whose body is the pre-V2 kernel, or the speculative one with
+    /// the step's `K3` ([`CURRENT_SEPARATION_ALL_POINTS`]).
     fn solve_color(
-        view: ContactSolveView<'_>,
+        view: CohortSolveView<'_>,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
-        span: (usize, usize),
-        bias_rate: f32,
-        mass_coeff: f32,
-        impulse_coeff: f32,
+        ctx: ColorCtx,
+        g_lo: usize,
+        g_hi: usize,
+        step: &SolveStep<'_>,
         bias_active: bool,
     ) {
-        let (start, end) = span;
-        for i in start..end {
-            let ra = view.ra(i);
-            let rb = view.rb(i);
-            let normal = view.normal(i);
-            let t1 = view.tangent1(i);
-            let t2 = view.tangent2(i);
-            let ia = view.body_a(i) as usize;
-            let b_is_sentinel = view.b_is_sentinel(i);
-            let ib = view.body_b(i) as usize;
-            let friction = view.friction(i);
-            let separation = view.separation(i);
+        if step.spec {
+            Self::solve_color_k::<true, CURRENT_SEPARATION_ALL_POINTS>(
+                view,
+                bodies_eff,
+                ctx,
+                g_lo,
+                g_hi,
+                step,
+                bias_active,
+            );
+        } else {
+            Self::solve_color_k::<false, false>(view, bodies_eff, ctx, g_lo, g_hi, step, bias_active);
+        }
+    }
+
+    /// The body of [`solve_color`](Self::solve_color).
+    ///
+    /// `SPEC = false` is the pre-V2 kernel: every point takes the soft rule on its gather-time
+    /// separation (`K3` is unread). `SPEC = true` is V2's rule per point (design §2.4): the
+    /// separation `s` it solves on is the current one — `s0` plus the relative normal movement of
+    /// the two anchors over the step so far — for a point speculative at gather (`s0 > 0`), and for
+    /// every point when `K3`; otherwise `s0`. A point with `s > 0` is speculative: `dλ = -m·(vn +
+    /// s/h)`, mass scale 1, impulse scale 0, in the biased and the relaxation pass alike (Box2D
+    /// v3); any other point takes the soft rule on `s`, so with `K3 = false` a point penetrating
+    /// at gather runs the pre-V2 ops on the pre-V2 value. The AVX2 kernel is the same op for op.
+    fn solve_color_k<const SPEC: bool, const K3: bool>(
+        view: CohortSolveView<'_>,
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
+        ctx: ColorCtx,
+        g_lo: usize,
+        g_hi: usize,
+        step: &SolveStep<'_>,
+        bias_active: bool,
+    ) {
+        let SolveStep { bias_rate, mass_coeff, impulse_coeff, inv_h, deltas, .. } = *step;
+        for g in g_lo..g_hi {
+            let (k, l) = ctx.lane_of(g);
+            // SAFETY: `g` is a built group of the color, so `(k, l)` is a live lane of a
+            //   built cohort (`k < n_heads`); heads are never written during a solve.
+            let head = unsafe { view.head(k) };
+            debug_assert!(l < head.nlanes as usize, "invariant: a group maps to a live lane");
+            let normal = head.normal(l);
+            let t1 = head.tangent1(l);
+            let t2 = normal.cross(t1);
+            let ia = head.body_a[l] as usize;
+            let b_is_sentinel = head.is_sentinel(l);
+            let ib = head.body_b[l] as usize;
+            let friction = head.friction[l];
 
             // Snapshot body B (the immovable surface for an SDF contact).
             let bb_view = || -> BodyEffective {
@@ -1807,7 +3572,7 @@ impl ColoredSoftStepSolver {
             // write to that shared static row means parallel workers never write the
             // same `BodyEffective`, so the only bodies a worker writes are its
             // groups' DISJOINT dynamic rows (the O6 data-race freedom argument; see
-            // `solve_color_parallel`).
+            // `SolveStages`' `Sync` contract).
             //
             // MT soundness: `is_dynamic_row` is the SAME predicate the O4 coloring
             // uses (`physics_build_graph`) — they MUST agree over the same `inv_mass`
@@ -1817,185 +3582,258 @@ impl ColoredSoftStepSolver {
             let ia_movable = is_dynamic_row(body_ref(bodies_eff, ia).inv_mass);
             let ib_movable = !b_is_sentinel && is_dynamic_row(body_ref(bodies_eff, ib).inv_mass);
 
-            // ── Normal solve ───────────────────────────────────────────────
-            let m_eff = {
-                let ba = body_copy(bodies_eff, ia);
-                let bb = bb_view();
-                effective_mass(normal, ra, rb, &ba, &bb)
-            };
-            let vn = {
-                let ba = body_ref(bodies_eff, ia);
-                let bb = bb_view();
-                (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal)
-            };
-            let bias = if bias_active {
-                (bias_rate * separation).max(-MAX_BIAS_VELOCITY)
+            // V2 (`SPEC` only): the lane's two bodies' movement over the step so far. A sentinel B
+            // is the immovable surface, which never moves: its row index is A's, never B's.
+            let (da, db) = if SPEC {
+                let db = if b_is_sentinel { BodyDelta::ZERO } else { delta_copy(deltas, ib) };
+                (delta_copy(deltas, ia), db)
             } else {
-                0.0
+                (BodyDelta::ZERO, BodyDelta::ZERO)
             };
-            let lambda_n = view.normal_impulse(i);
-            let d_lambda = if bias_active {
-                -mass_coeff * m_eff * (vn + bias) - impulse_coeff * lambda_n
-            } else {
-                -m_eff * vn
-            };
-            let new_lambda = (lambda_n + d_lambda).max(0.0);
-            let applied_n = new_lambda - lambda_n;
-            view.set_normal_impulse(i, new_lambda);
-            {
-                let impulse = normal * applied_n;
-                if ia_movable {
-                    body_mut(bodies_eff, ia).apply_impulse(ra, impulse * -1.0);
-                }
-                if ib_movable {
-                    body_mut(bodies_eff, ib).apply_impulse(rb, impulse);
-                }
-            }
 
-            // ── Friction solve (2-DOF coupled cone) ────────────────────────
-            // `new_lambda` IS the value just stored at slot `i`'s normal impulse, so
-            // `friction * new_lambda` is bit-identical to re-reading the column and
-            // removes a redundant load.
-            let max_friction = friction * new_lambda;
-            let m_eff_t1 = {
-                let ba = body_copy(bodies_eff, ia);
-                let bb = bb_view();
-                effective_mass(t1, ra, rb, &ba, &bb)
-            };
-            let m_eff_t2 = {
-                let ba = body_copy(bodies_eff, ia);
-                let bb = bb_view();
-                effective_mass(t2, ra, rb, &ba, &bb)
-            };
-            let (vt1, vt2) = {
-                let ba = body_ref(bodies_eff, ia);
-                let bb = bb_view();
-                let dv = bb.point_velocity(rb) - ba.point_velocity(ra);
-                (dv.dot(t1), dv.dot(t2))
-            };
-            // Read each tangent impulse ONCE (both uses read the same pre-write value);
-            // bit-identical to the prior double-read, no reload between the two uses.
-            let lambda_t1 = view.tangent1_impulse(i);
-            let lambda_t2 = view.tangent2_impulse(i);
-            let mut new_t1 = lambda_t1 - m_eff_t1 * vt1;
-            let mut new_t2 = lambda_t2 - m_eff_t2 * vt2;
-            let len_sq = new_t1 * new_t1 + new_t2 * new_t2;
-            if len_sq > max_friction * max_friction && len_sq > 0.0 {
-                let scale = max_friction / len_sq.sqrt();
-                new_t1 *= scale;
-                new_t2 *= scale;
-            }
-            let applied_t1 = new_t1 - lambda_t1;
-            let applied_t2 = new_t2 - lambda_t2;
-            view.set_tangent1_impulse(i, new_t1);
-            view.set_tangent2_impulse(i, new_t2);
-            {
-                let impulse = t1 * applied_t1 + t2 * applied_t2;
-                if ia_movable {
-                    body_mut(bodies_eff, ia).apply_impulse(ra, impulse * -1.0);
+            let rank_base = head.rank_base as usize;
+            for r in 0..head.width[l] as usize {
+                // SAFETY: `rank_base + r < rank_base + depth <= n_blocks` (a built rank
+                //   of this cohort); every access below is a raw projection of lane `l`,
+                //   which this worker owns (the group is its own) — no reference to the
+                //   block is formed, so another worker's writes to its own lanes of the
+                //   same block never alias.
+                let blk = unsafe { view.block(rank_base + r) };
+                // SAFETY: as above — single-lane raw reads of live `f32`s.
+                let (ra, rb, separation) = unsafe {
+                    (
+                        lane_vec3(&raw const (*blk).ra, l),
+                        lane_vec3(&raw const (*blk).rb, l),
+                        ptr::read(&raw const (*blk).sep[l]),
+                    )
+                };
+
+                // V2: the separation this pass solves on (the design's `s_eff`).
+                let separation = if SPEC && (K3 || separation > 0.0) {
+                    current_separation(separation, normal, ra, rb, &da, &db)
+                } else {
+                    separation
+                };
+
+                // ── Normal solve ───────────────────────────────────────────────
+                let m_eff = {
+                    let ba = body_copy(bodies_eff, ia);
+                    let bb = bb_view();
+                    effective_mass(normal, ra, rb, &ba, &bb)
+                };
+                let vn = {
+                    let ba = body_ref(bodies_eff, ia);
+                    let bb = bb_view();
+                    (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal)
+                };
+                let bias = if bias_active {
+                    (bias_rate * separation).max(-MAX_BIAS_VELOCITY)
+                } else {
+                    0.0
+                };
+                // SAFETY: a single-lane raw read of the live impulse element this
+                //   worker owns.
+                let lambda_n = unsafe { ptr::read(&raw const (*blk).ni[l]) };
+                let d_lambda = if SPEC && separation > 0.0 {
+                    // A speculative point: close the gap within the substep, never push.
+                    -m_eff * (vn + separation * inv_h)
+                } else if bias_active {
+                    -mass_coeff * m_eff * (vn + bias) - impulse_coeff * lambda_n
+                } else {
+                    -m_eff * vn
+                };
+                let new_lambda = (lambda_n + d_lambda).max(0.0);
+                // The AVX2 kernel's `_mm256_max_ps(sum, +0)` returns `+0` on a `±0` tie,
+                // while this `max` leaves the sign of such a tie unspecified; they agree
+                // bit-for-bit because the tie cannot occur. λ starts at `+0` and is always
+                // a `max(.., 0)` output, and in round-to-nearest a sum is `-0` only when
+                // both addends are `-0`, so by induction the clamp never sees `-0`.
+                debug_assert!(
+                    new_lambda.to_bits() != 0x8000_0000,
+                    "invariant: the normal-impulse clamp never yields -0 (the SIMD ±0-tie proof)"
+                );
+                let applied_n = new_lambda - lambda_n;
+                // SAFETY: a single-lane raw write of the impulse element this worker
+                //   owns (the C2 coloring invariant grants lane `l` of this cohort to AT
+                //   MOST ONE worker); the base carries WRITE provenance
+                //   (`ScratchColumn::solve_base`), never a Frozen `&[_]` reborrow.
+                unsafe { ptr::write(&raw mut (*blk).ni[l], new_lambda) };
+                {
+                    let impulse = normal * applied_n;
+                    if ia_movable {
+                        body_mut(bodies_eff, ia).apply_impulse(ra, impulse * -1.0);
+                    }
+                    if ib_movable {
+                        body_mut(bodies_eff, ib).apply_impulse(rb, impulse);
+                    }
                 }
-                if ib_movable {
-                    body_mut(bodies_eff, ib).apply_impulse(rb, impulse);
+
+                // ── Friction solve (2-DOF coupled cone) ────────────────────────
+                // `new_lambda` IS the value just stored at this lane's normal impulse,
+                // so `friction * new_lambda` is bit-identical to re-reading the element
+                // and removes a redundant load.
+                let max_friction = friction * new_lambda;
+                let m_eff_t1 = {
+                    let ba = body_copy(bodies_eff, ia);
+                    let bb = bb_view();
+                    effective_mass(t1, ra, rb, &ba, &bb)
+                };
+                let m_eff_t2 = {
+                    let ba = body_copy(bodies_eff, ia);
+                    let bb = bb_view();
+                    effective_mass(t2, ra, rb, &ba, &bb)
+                };
+                let (vt1, vt2) = {
+                    let ba = body_ref(bodies_eff, ia);
+                    let bb = bb_view();
+                    let dv = bb.point_velocity(rb) - ba.point_velocity(ra);
+                    (dv.dot(t1), dv.dot(t2))
+                };
+                // Read each tangent impulse ONCE (both uses read the same pre-write value);
+                // bit-identical to the prior double-read, no reload between the two uses.
+                // SAFETY: single-lane raw reads of the live impulse elements this worker
+                //   owns.
+                let (lambda_t1, lambda_t2) = unsafe {
+                    (ptr::read(&raw const (*blk).ti1[l]), ptr::read(&raw const (*blk).ti2[l]))
+                };
+                let mut new_t1 = lambda_t1 - m_eff_t1 * vt1;
+                let mut new_t2 = lambda_t2 - m_eff_t2 * vt2;
+                let len_sq = new_t1 * new_t1 + new_t2 * new_t2;
+                if len_sq > max_friction * max_friction && len_sq > 0.0 {
+                    let scale = max_friction / len_sq.sqrt();
+                    new_t1 *= scale;
+                    new_t2 *= scale;
+                }
+                let applied_t1 = new_t1 - lambda_t1;
+                let applied_t2 = new_t2 - lambda_t2;
+                // SAFETY: as the normal-impulse write — single-lane, single-owner,
+                //   write-capable base.
+                unsafe {
+                    ptr::write(&raw mut (*blk).ti1[l], new_t1);
+                    ptr::write(&raw mut (*blk).ti2[l], new_t2);
+                }
+                {
+                    let impulse = t1 * applied_t1 + t2 * applied_t2;
+                    if ia_movable {
+                        body_mut(bodies_eff, ia).apply_impulse(ra, impulse * -1.0);
+                    }
+                    if ib_movable {
+                        body_mut(bodies_eff, ib).apply_impulse(rb, impulse);
+                    }
                 }
             }
         }
     }
 
-    /// AVX2 8-wide colored solve (Phase O7) — lane = one whole manifold-GROUP, a
-    /// batch (cohort) = 8 body-disjoint groups of one color, BIT-IDENTICAL to
-    /// [`solve_color`](Self::solve_color) over the same `[g_lo, g_hi)` groups.
+    /// AVX2 8-wide colored solve (Phase O7) over the cohort layout (L11 C2) — lane
+    /// = one whole manifold-GROUP, a cohort = 8 body-disjoint groups of one color,
+    /// BIT-IDENTICAL to [`solve_color`](Self::solve_color) over the same groups.
     ///
-    /// Solves the manifold-GROUP range `[g_lo, g_hi)` (groups indexing
-    /// `cols.group_start`) as cohorts of up to 8 groups. Per cohort: GATHER-ONCE
-    /// the 8 groups' two body pairs (inv_mass, inv_inertia, velocity) into stack
-    /// SoA; a RANK loop `r = 0..max_width` where each ACTIVE lane (`width > r`)
-    /// solves its group's point-`r` normal→friction with the A/B velocity
-    /// REGISTER-CARRIED across ranks (so point `p` sees `p-1`'s update — the
-    /// intra-group Gauss-Seidel coupling) and the per-rank impulse slots
-    /// read-modify-written; SCATTER-ONCE the 16 body rows at cohort exit.
+    /// Solves the cohorts `[k_lo, k_hi)`. Per cohort: GATHER-ONCE the live lanes'
+    /// two body pairs (inv_mass, inv_inertia, velocity) into stack SoA and load the
+    /// head's constants (`n`, `t1`, the friction; `t2 = n × t1` in registers, the
+    /// same op `tangent_basis` uses); a RANK loop `r = 0..depth` where each ACTIVE
+    /// lane (`width > r`) solves its group's point-`r` normal→friction with the A/B
+    /// velocity REGISTER-CARRIED across ranks (so point `p` sees `p-1`'s update —
+    /// the intra-group Gauss-Seidel coupling) and the rank block's impulse rows
+    /// read-modify-written as vectors; SCATTER-ONCE the 16 body rows at cohort exit.
     ///
     /// # Bit-exactness (Decision 2, the PINNED invariant)
     ///
     /// Each lane runs its group's EXACT scalar `solve_color` op sequence (the same
     /// IEEE round-to-nearest `mul`/`add`/`sub`/`div`/`sqrt`, NO FMA, NO
     /// `rsqrt`/`rcp` — the `simd::*_x8` helpers mirror `contact.rs`/`math.rs`
-    /// op-for-op). The 8 lanes write DISJOINT body rows + DISJOINT impulse slots
+    /// op-for-op). The 8 lanes write DISJOINT body rows + DISJOINT impulse elements
     /// (the O4 coloring invariant: distinct groups of a color touch disjoint
     /// dynamic bodies), so the parallel 8-lane evaluation equals solving the 8
     /// groups sequentially, which equals the scalar single-threaded colored solve,
-    /// bit-for-bit. Masked exhausted / partial-cohort / static lanes compute
-    /// garbage that every `blendv` / guarded scalar scatter discards (FP exceptions
-    /// masked ⇒ Inf/NaN are inert DATA, never traps — Decision 3/4).
+    /// bit-for-bit. Masked exhausted / padding / static lanes compute on the zero
+    /// padding that every `blendv` / guarded scalar scatter discards (FP exceptions
+    /// masked ⇒ Inf/NaN are inert DATA, never traps — Decision 3/4); the impulse
+    /// store is `blendv(old, new, active)`, so padding stays zero.
     ///
     /// # Safety
     ///
     /// The caller must guarantee AVX2 is available (the `cfg` + `target_feature`
-    /// gate — a non-AVX2 host cannot link this path). `[g_lo, g_hi)` must be a valid
-    /// contiguous group range (`g_hi <= cols.group_start.len() - 1`) whose groups'
-    /// dynamic bodies are pairwise-disjoint (the O4 coloring invariant — upheld
-    /// because the range is a color's groups, or a cohort-run within one color). All
-    /// gathered body indices are `< bodies_eff.len()` (the build invariant).
+    /// gate — a non-AVX2 host cannot link this path). `[k_lo, k_hi)` must be built
+    /// cohorts of ONE color (`k_hi <= n_heads`) whose lanes' dynamic bodies are
+    /// pairwise-disjoint (the O4 coloring invariant — upheld because the range is a
+    /// color's cohorts, or a cohort-run within one color). All gathered body indices
+    /// are `< bodies_eff.len()` (the build invariant).
     ///
-    /// `span == [chunk_start, chunk_end)` is the worker's OWN slot span — the union
-    /// of the `[g_lo, g_hi)` groups' contiguous slot runs (`chunk_start ==
-    /// group_start[g_lo]`, `chunk_end == group_start[g_hi]`). C1 (the cross-worker
-    /// READ-race fix): every column slot the kernel READS or WRITES MUST lie within
-    /// `span`. The per-rank gather is therefore clamped to the LANE'S OWN GROUP last
-    /// slot (never the global `cols.len()`), and an ABSENT lane (partial trailing
-    /// cohort) gathers `chunk_start` — both provably in `span`. A foreign slot
-    /// (`>= chunk_end`) belongs to the next concurrently-running worker, which writes
-    /// it every rank, so reading it would be an unsynchronized cross-thread access
-    /// (a data race) even though the value is `blendv`-discarded. Every gathered slot
-    /// staying in `span` removes that race. The per-cohort scatter writes only own
-    /// in-span slots (`g_base + r` for active lanes) and ≤ 16 distinct dynamic body
-    /// rows; statics/sentinels are never written (the movable-blend guard), so a
-    /// SHARED static row across cohorts is read-only.
+    /// A SIMD worker OWNS its cohorts: the dispatcher's cuts are `COHORT`-stepped,
+    /// so every head and block the kernel loads or stores belongs to `[k_lo, k_hi)`
+    /// and to no concurrently-running worker — there is no foreign read (the old
+    /// per-point gather's clamped-slot trick is gone with the per-point columns).
+    /// Lanes `>= nlanes` read NO body row (review O2): their gathered state is zero,
+    /// so a padding lane never touches a row another chunk of the color may be
+    /// writing. The per-cohort scatter writes ≤ 16 distinct dynamic body rows;
+    /// statics/sentinels are never written (the movable-blend guard), so a SHARED
+    /// static row across cohorts is read-only.
+    ///
+    /// V2: one branch per call picks the instance, as [`solve_color`](Self::solve_color) does;
+    /// the speculative instance is [`solve_color_k`](Self::solve_color_k)'s rule lane for lane —
+    /// the current separation and both `dλ` formulas computed on every lane, a per-lane blend on
+    /// `s > 0` selecting between them, no per-lane branch.
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[target_feature(enable = "avx2")]
-    #[allow(clippy::too_many_arguments)]
     fn solve_color_avx2(
-        view: ContactSolveView<'_>,
+        view: CohortSolveView<'_>,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
-        span: (usize, usize),
-        g_lo: usize,
-        g_hi: usize,
-        bias_rate: f32,
-        mass_coeff: f32,
-        impulse_coeff: f32,
+        k_lo: usize,
+        k_hi: usize,
+        step: &SolveStep<'_>,
+        bias_active: bool,
+    ) {
+        if step.spec {
+            Self::solve_color_avx2_k::<true, CURRENT_SEPARATION_ALL_POINTS>(
+                view,
+                bodies_eff,
+                k_lo,
+                k_hi,
+                step,
+                bias_active,
+            );
+        } else {
+            Self::solve_color_avx2_k::<false, false>(view, bodies_eff, k_lo, k_hi, step, bias_active);
+        }
+    }
+
+    /// The body of [`solve_color_avx2`](Self::solve_color_avx2), `SPEC` and `K3` as in
+    /// [`solve_color_k`](Self::solve_color_k).
+    ///
+    /// # Safety
+    ///
+    /// [`solve_color_avx2`](Self::solve_color_avx2)'s.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[target_feature(enable = "avx2")]
+    fn solve_color_avx2_k<const SPEC: bool, const K3: bool>(
+        view: CohortSolveView<'_>,
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
+        k_lo: usize,
+        k_hi: usize,
+        step: &SolveStep<'_>,
         bias_active: bool,
     ) {
         use core::arch::x86_64::{
-            _mm256_add_ps, _mm256_and_ps, _mm256_blendv_ps, _mm256_cmp_ps, _mm256_div_ps,
-            _mm256_max_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_sqrt_ps, _mm256_sub_ps,
-            _CMP_GT_OQ, _CMP_NEQ_OQ,
+            _CMP_GT_OQ, _CMP_NEQ_OQ, _mm_loadl_epi64, _mm256_add_ps, _mm256_and_ps,
+            _mm256_blendv_ps, _mm256_castsi256_ps, _mm256_cmp_ps, _mm256_cmpgt_epi32,
+            _mm256_cvtepu8_epi32, _mm256_div_ps, _mm256_max_ps, _mm256_mul_ps,
+            _mm256_set1_epi32, _mm256_set1_ps, _mm256_sqrt_ps, _mm256_sub_ps,
         };
-        use crate::solver::simd::{apply_impulse_blend_x8, dot8, effective_mass_x8, pointvel_x8};
+        use crate::solver::simd::{
+            apply_impulse_blend_x8, cross8, dot8, effective_mass_x8, pointvel_x8, rotate_x8,
+        };
 
-        const W: usize = 8;
-        if g_lo >= g_hi {
-            return;
-        }
-        // C1: the worker's OWN slot span `[chunk_start, chunk_end)` — every gathered
-        // slot must lie inside it (no foreign / cross-worker read). It is the union of
-        // the `[g_lo, g_hi)` groups' contiguous slot runs.
-        let (chunk_start, chunk_end) = span;
-        // SAFETY: `g_lo`/`g_hi` are within the color's group range `[g_lo, g_hi] <=
-        //   n_groups` (the caller's contract), each a valid `group_start` index.
-        debug_assert!(
-            chunk_start == unsafe { view.group_start_at(g_lo) } as usize
-                && chunk_end == unsafe { view.group_start_at(g_hi) } as usize
-                && chunk_start < chunk_end,
-            "invariant: span is exactly the [g_lo, g_hi) groups' slot run"
-        );
+        let SolveStep { bias_rate, mass_coeff, impulse_coeff, inv_h, deltas, .. } = *step;
+        const W: usize = COHORT;
+        debug_assert!(k_hi <= view.n_heads, "invariant: the cohort range is built");
 
         // ── Per-cohort stack scratch (zero heap; capacity-retained per call) ────
         // Per-lane (group) metadata, gathered once at cohort entry.
-        let mut g_base = [0usize; W]; // slot base of each lane's group
-        let mut g_last = [0usize; W]; // last slot the lane may gather (its own group's)
-        let mut g_width = [0u32; W]; // each lane's group width (0 = absent lane)
         let mut ia = [0usize; W]; // body-A row index
         let mut ib = [0usize; W]; // body-B row index (== ia for a sentinel)
-        let mut sent = [false; W]; // b_is_sentinel per lane
+        let mut sent = [false; W]; // sentinel per lane (padding lanes: false)
         // Per-lane A/B body-state gather (constants within the call): inv_mass,
         // inv_inertia (9), linear (3), angular (3).
         let mut a_invm_s = [0.0f32; W];
@@ -2010,23 +3848,18 @@ impl ColoredSoftStepSolver {
         // by manifold convention, but kept for scalar-exactness (the scalar guards
         // both sides — Decision 6 / residual-risk 4).
         let mut a_static_s = [0.0f32; W];
-        // Per-rank geometry + impulse staging (re-gathered each rank, clamped).
-        let mut ra_s = [[0.0f32; W]; 3];
-        let mut rb_s = [[0.0f32; W]; 3];
-        let mut n_s = [[0.0f32; W]; 3];
-        let mut t1_s = [[0.0f32; W]; 3];
-        let mut t2_s = [[0.0f32; W]; 3];
-        let mut sep_s = [0.0f32; W];
-        let mut fric_s = [0.0f32; W];
-        let mut ni_s = [0.0f32; W];
-        let mut ti1_s = [0.0f32; W];
-        let mut ti2_s = [0.0f32; W];
-        let mut active_s = [0.0f32; W];
+        let mut not_sent_f = [0.0f32; W];
         // Velocity scatter staging (written only at cohort exit).
         let mut out_a_lin = [[0.0f32; W]; 3];
         let mut out_a_ang = [[0.0f32; W]; 3];
         let mut out_b_lin = [[0.0f32; W]; 3];
         let mut out_b_ang = [[0.0f32; W]; 3];
+        // V2 (`SPEC` only): each lane's two bodies' movement over the step, SoA; a sentinel B and
+        // a padding lane stage `(0, IDENTITY)`.
+        let mut dpa_s = [[0.0f32; W]; 3];
+        let mut dqa_s = [[0.0f32; W]; 4];
+        let mut dpb_s = [[0.0f32; W]; 3];
+        let mut dqb_s = [[0.0f32; W]; 4];
 
         // Whole-call constants (bias_active hoisted OUTSIDE the loops for I-cache
         // compactness — it is loop-invariant, exactly as the scalar `if`).
@@ -2039,43 +3872,37 @@ impl ColoredSoftStepSolver {
         let neg_max_bias = _mm256_set1_ps(-MAX_BIAS_VELOCITY);
         let mass_coeff_v = _mm256_set1_ps(mass_coeff);
         let impulse_coeff_v = _mm256_set1_ps(impulse_coeff);
+        let inv_h_v = _mm256_set1_ps(inv_h);
 
-        let mut cohort_lo = g_lo;
-        while cohort_lo < g_hi {
-            let cohort_hi = (cohort_lo + W).min(g_hi);
-            let nlanes = cohort_hi - cohort_lo;
+        for k in k_lo..k_hi {
+            // SAFETY: `k < k_hi <= n_heads` (the caller's contract): a built cohort of
+            //   the color, never written during a solve.
+            let head = unsafe { view.head(k) };
+            let nlanes = head.nlanes as usize;
+            let depth = head.depth as usize;
+            let rank_base = head.rank_base as usize;
             debug_assert!((1..=W).contains(&nlanes), "cohort has 1..=8 lanes");
+            debug_assert!(rank_base + depth <= view.n_blocks, "invariant: the cohort's ranks are built");
 
             // ── Gather-ONCE (cohort entry) ──────────────────────────────────────
-            let mut max_width = 0u32;
             for lane in 0..W {
+                // Review O2: a padding lane (`lane >= nlanes`) reads NO body row —
+                // its gathered state is zero, so it never touches a row another chunk
+                // of this color may be writing. Permanently inactive (`width == 0`
+                // ⇒ `active = false` at every rank), every write discarded.
+                let b_sent = head.is_sentinel(lane);
+                sent[lane] = b_sent;
+                not_sent_f[lane] = if b_sent { 0.0 } else { 1.0 };
                 if lane < nlanes {
-                    let g = cohort_lo + lane;
-                    // SAFETY: `g`/`g + 1` index the live `group_start` CSR — `g` is in
-                    //   `[cohort_lo, cohort_hi) ⊆ [g_lo, g_hi)` and `g + 1 <= g_hi <=
-                    //   n_groups`, both valid CSR indices (the caller's contract).
-                    let base = unsafe { view.group_start_at(g) } as usize;
-                    let width = unsafe { view.group_start_at(g + 1) } as usize - base;
-                    debug_assert!(width >= 1, "every built group has >= 1 point");
-                    let s = base; // first slot of the group (the body pair is shared)
-                    let lane_ia = view.body_a(s) as usize;
-                    let b_sent = view.b_is_sentinel(s);
-                    let lane_ib = view.body_b(s) as usize;
+                    let lane_ia = head.body_a[lane] as usize;
+                    let lane_ib = head.body_b[lane] as usize;
                     // O3: B is only indexed when it is a real body (a sentinel reads
                     // IMMOVABLE_AT_REST, never `bodies_eff[lane_ib]`), mirroring the
                     // scalar oracle's conditional index — so only assert it then.
                     debug_assert!(lane_ia < bodies_eff.len());
                     debug_assert!(b_sent || lane_ib < bodies_eff.len());
-
-                    g_base[lane] = base;
-                    // Own-group last slot: the lane re-reads its own (in-span) slot
-                    // once exhausted (rank r >= width), never a foreign worker's.
-                    g_last[lane] = base + width - 1;
-                    g_width[lane] = width as u32;
                     ia[lane] = lane_ia;
                     ib[lane] = lane_ib;
-                    sent[lane] = b_sent;
-                    max_width = max_width.max(width as u32);
 
                     // Body A (always the dynamic side by convention).
                     let ba = body_ref(bodies_eff, lane_ia);
@@ -2089,26 +3916,15 @@ impl ColoredSoftStepSolver {
                     let bb = if b_sent { &IMMOVABLE_AT_REST } else { body_ref(bodies_eff, lane_ib) };
                     b_invm_s[lane] = bb.inv_mass;
                     Self::stage_body_state(bb, lane, &mut b_ii_s, &mut b_lin_s, &mut b_ang_s);
+                    if SPEC {
+                        // A sentinel B never moves: its row index is A's, never B's.
+                        let db = if b_sent { BodyDelta::ZERO } else { delta_copy(deltas, lane_ib) };
+                        Self::stage_delta(&delta_copy(deltas, lane_ia), lane, &mut dpa_s, &mut dqa_s);
+                        Self::stage_delta(&db, lane, &mut dpb_s, &mut dqb_s);
+                    }
                 } else {
-                    // Absent lane (partial trailing cohort): permanently inactive
-                    // (`width == 0` ⇒ `active = false` at every rank), every write
-                    // discarded. Zero its gathered state so the masked arithmetic is
-                    // harmless (no NaN propagation into a live lane — lanes are
-                    // independent regardless).
-                    //
-                    // C1: an absent lane (no group in this cohort) gathers a
-                    // SELF-OWNED, in-span slot — `chunk_start`, the worker's first
-                    // slot — at every rank (`s = min(chunk_start + r, chunk_start) ==
-                    // chunk_start`), NEVER slot 0 / the global len. Its value is
-                    // discarded (width 0 ⇒ inactive at every rank), but the READ must
-                    // stay inside `[chunk_start, chunk_end)` so it cannot touch a
-                    // concurrently-running worker's slots.
-                    g_base[lane] = chunk_start;
-                    g_last[lane] = chunk_start;
-                    g_width[lane] = 0;
                     ia[lane] = 0;
                     ib[lane] = 0;
-                    sent[lane] = true; // never-scatter the absent B lane
                     a_invm_s[lane] = 0.0;
                     b_invm_s[lane] = 0.0;
                     a_static_s[lane] = 1.0;
@@ -2122,6 +3938,10 @@ impl ColoredSoftStepSolver {
                         b_lin_s[c][lane] = 0.0;
                         b_ang_s[c][lane] = 0.0;
                     }
+                    if SPEC {
+                        Self::stage_delta(&BodyDelta::ZERO, lane, &mut dpa_s, &mut dqa_s);
+                        Self::stage_delta(&BodyDelta::ZERO, lane, &mut dpb_s, &mut dqb_s);
+                    }
                 }
             }
 
@@ -2132,12 +3952,25 @@ impl ColoredSoftStepSolver {
             let a_static = load1(&a_static_s);
             let a_ii = load9(&a_ii_s);
             let b_ii = load9(&b_ii_s);
-            // not-sentinel mask as 1.0/0.0 → register (1.0 where B is a REAL body).
-            let mut not_sent_f = [0.0f32; W];
-            for lane in 0..W {
-                not_sent_f[lane] = if sent[lane] { 0.0 } else { 1.0 };
-            }
             let not_sent = _mm256_cmp_ps::<_CMP_NEQ_OQ>(load1(&not_sent_f), zero);
+
+            // The head's per-lane constants: aligned rows of the 64 B-aligned head.
+            // SAFETY: `head` is a live `&CohortHead`; its `n` / `t1` / `friction` rows
+            //   sit at offsets 0 / 96 / 192, all 32 B-aligned.
+            let (n, t1, fric) = unsafe {
+                (
+                    load_rows3(&raw const head.n),
+                    load_rows3(&raw const head.t1),
+                    load_row(&raw const head.friction),
+                )
+            };
+            // t2 = n × t1, op-for-op `Vec3::cross` (`cross8`), the same op
+            // `tangent_basis` derives the stored per-point tangent with.
+            let t2 = cross8(n[0], n[1], n[2], t1[0], t1[1], t1[2]);
+            // The per-lane widths, widened to 8 × i32 for the per-rank `active` compare.
+            // SAFETY: `head.width` is a live 8 B array; `_mm_loadl_epi64` reads 8 bytes
+            //   with no alignment requirement.
+            let width = unsafe { _mm256_cvtepu8_epi32(_mm_loadl_epi64(head.width.as_ptr().cast())) };
 
             // A/B velocity: REGISTER-CARRIED from here across the whole rank loop.
             let mut a_lin = load3(&a_lin_s);
@@ -2151,59 +3984,48 @@ impl ColoredSoftStepSolver {
             let b_neq0 = _mm256_cmp_ps::<_CMP_NEQ_OQ>(b_invm, zero);
             let b_movable = _mm256_and_ps(not_sent, b_neq0);
 
-            // ── Rank loop (register-carry velocity) ─────────────────────────────
-            for r in 0..max_width as usize {
-                // active = (g_width[lane] > r) as 1.0/0.0 → mask.
-                for lane in 0..W {
-                    active_s[lane] = if (g_width[lane] as usize) > r { 1.0 } else { 0.0 };
-                }
-                let active = _mm256_cmp_ps::<_CMP_NEQ_OQ>(load1(&active_s), zero);
+            // V2 (`SPEC` only): `dpB − dpA` once per cohort (the scalar recomputes the same bits
+            // per point) and both rotations.
+            let (dp_rel, dqa, dqb) = if SPEC {
+                let (dpa, dpb) = (load3(&dpa_s), load3(&dpb_s));
+                (
+                    [
+                        _mm256_sub_ps(dpb[0], dpa[0]),
+                        _mm256_sub_ps(dpb[1], dpa[1]),
+                        _mm256_sub_ps(dpb[2], dpa[2]),
+                    ],
+                    [load1(&dqa_s[0]), load1(&dqa_s[1]), load1(&dqa_s[2]), load1(&dqa_s[3])],
+                    [load1(&dqb_s[0]), load1(&dqb_s[1]), load1(&dqb_s[2]), load1(&dqb_s[3])],
+                )
+            } else {
+                ([zero; 3], [zero; 4], [zero; 4])
+            };
 
-                // Per-rank gather (C1 — own-span bound): slot `s = min(g_base + r,
-                // g_last)` where `g_last` is the LANE'S OWN GROUP last slot (an absent
-                // lane's `g_base == g_last == chunk_start`). An ACTIVE lane (rank r <
-                // width) reads its exact rank-r slot; an EXHAUSTED lane re-reads its
-                // own group's last (in-span) slot; an ABSENT lane reads `chunk_start`.
-                // Every `s` therefore lies in `[chunk_start, chunk_end)` — never a
-                // concurrently-running worker's slot (the cross-worker READ-race fix).
-                for lane in 0..W {
-                    let s = (g_base[lane] + r).min(g_last[lane]);
-                    debug_assert!(
-                        (chunk_start..chunk_end).contains(&s),
-                        "C1: every gathered slot must lie within the worker's own span \
-                         [{chunk_start}, {chunk_end}); got s={s} (lane={lane}, rank={r})"
-                    );
-                    ra_s[0][lane] = view.ra_x(s);
-                    ra_s[1][lane] = view.ra_y(s);
-                    ra_s[2][lane] = view.ra_z(s);
-                    rb_s[0][lane] = view.rb_x(s);
-                    rb_s[1][lane] = view.rb_y(s);
-                    rb_s[2][lane] = view.rb_z(s);
-                    n_s[0][lane] = view.normal_x(s);
-                    n_s[1][lane] = view.normal_y(s);
-                    n_s[2][lane] = view.normal_z(s);
-                    t1_s[0][lane] = view.tangent1_x(s);
-                    t1_s[1][lane] = view.tangent1_y(s);
-                    t1_s[2][lane] = view.tangent1_z(s);
-                    t2_s[0][lane] = view.tangent2_x(s);
-                    t2_s[1][lane] = view.tangent2_y(s);
-                    t2_s[2][lane] = view.tangent2_z(s);
-                    sep_s[lane] = view.separation(s);
-                    fric_s[lane] = view.friction(s);
-                    ni_s[lane] = view.normal_impulse(s);
-                    ti1_s[lane] = view.tangent1_impulse(s);
-                    ti2_s[lane] = view.tangent2_impulse(s);
-                }
-                let ra = load3(&ra_s);
-                let rb = load3(&rb_s);
-                let n = load3(&n_s);
-                let t1 = load3(&t1_s);
-                let t2 = load3(&t2_s);
-                let sep = load1(&sep_s);
-                let fric = load1(&fric_s);
-                let mut ni = load1(&ni_s);
-                let mut ti1 = load1(&ti1_s);
-                let mut ti2 = load1(&ti2_s);
+            // ── Rank loop (register-carry velocity) ─────────────────────────────
+            for r in 0..depth {
+                // SAFETY: `rank_base + r < rank_base + depth <= n_blocks` (asserted
+                //   above): a built block of THIS cohort, which this worker owns whole
+                //   (the `COHORT`-stepped cuts); its rows are 32 B-aligned (offsets
+                //   0 / 96 / 192 / 224 / 256 / 288 of a 64 B-aligned block), so the
+                //   aligned vector loads and stores below are in bounds and aligned, and
+                //   no other worker touches the block.
+                let blk = unsafe { view.block(rank_base + r) };
+                // active = width[lane] > r as a lane mask (an integer compare, cast).
+                let active =
+                    _mm256_castsi256_ps(_mm256_cmpgt_epi32(width, _mm256_set1_epi32(r as i32)));
+
+                // Ten aligned loads: the rank's anchors, separation and impulses.
+                // SAFETY: see the block's contract above.
+                let (ra, rb, sep, old_ni, old_ti1, old_ti2) = unsafe {
+                    (
+                        load_rows3(&raw const (*blk).ra),
+                        load_rows3(&raw const (*blk).rb),
+                        load_row(&raw const (*blk).sep),
+                        load_row(&raw const (*blk).ni),
+                        load_row(&raw const (*blk).ti1),
+                        load_row(&raw const (*blk).ti2),
+                    )
+                };
 
                 // Velocity-write masks (active AND movable), per Decision 6.
                 let mask_a = _mm256_and_ps(active, a_movable);
@@ -2220,7 +4042,36 @@ impl ColoredSoftStepSolver {
                     _mm256_sub_ps(pvb[2], pva[2]),
                 ];
                 let vn = dot8(dvn[0], dvn[1], dvn[2], n[0], n[1], n[2]);
-                let lambda_n = ni;
+                let lambda_n = old_ni;
+                // V2: the separation this pass solves on, the scalar's `s_eff` op for op:
+                // s0 + ((dpB − dpA) + (dqB·rb − rb) − (dqA·ra − ra))·n, blended back to s0 on a
+                // lane penetrating at gather unless `K3`.
+                let sep = if SPEC {
+                    let rot_b = rotate_x8(dqb, rb);
+                    let rot_a = rotate_x8(dqa, ra);
+                    let ds = [
+                        _mm256_sub_ps(
+                            _mm256_add_ps(dp_rel[0], _mm256_sub_ps(rot_b[0], rb[0])),
+                            _mm256_sub_ps(rot_a[0], ra[0]),
+                        ),
+                        _mm256_sub_ps(
+                            _mm256_add_ps(dp_rel[1], _mm256_sub_ps(rot_b[1], rb[1])),
+                            _mm256_sub_ps(rot_a[1], ra[1]),
+                        ),
+                        _mm256_sub_ps(
+                            _mm256_add_ps(dp_rel[2], _mm256_sub_ps(rot_b[2], rb[2])),
+                            _mm256_sub_ps(rot_a[2], ra[2]),
+                        ),
+                    ];
+                    let s_cur = _mm256_add_ps(sep, dot8(ds[0], ds[1], ds[2], n[0], n[1], n[2]));
+                    if K3 {
+                        s_cur
+                    } else {
+                        _mm256_blendv_ps(sep, s_cur, _mm256_cmp_ps::<_CMP_GT_OQ>(sep, zero))
+                    }
+                } else {
+                    sep
+                };
                 // bias_active hoisted: the whole d_lambda branch is a Rust `if`, not
                 // a per-lane blend (matches the scalar loop-invariant `if`).
                 let d_lambda = if bias_active {
@@ -2237,10 +4088,21 @@ impl ColoredSoftStepSolver {
                     // -mEff * vn.
                     _mm256_mul_ps(_mm256_mul_ps(neg_one, m_eff), vn)
                 };
+                // V2: a speculative lane (s > 0) takes -mEff * (vn + s/h), the scalar's
+                // `-m_eff * (vn + separation * inv_h)`, selected per lane.
+                let d_lambda = if SPEC {
+                    let spec_dl = _mm256_mul_ps(
+                        _mm256_mul_ps(neg_one, m_eff),
+                        _mm256_add_ps(vn, _mm256_mul_ps(sep, inv_h_v)),
+                    );
+                    _mm256_blendv_ps(d_lambda, spec_dl, _mm256_cmp_ps::<_CMP_GT_OQ>(sep, zero))
+                } else {
+                    d_lambda
+                };
                 // new_lambda = max(lambda_n + d_lambda, 0); applied = new - old.
                 let new_lambda = _mm256_max_ps(_mm256_add_ps(lambda_n, d_lambda), zero);
                 let applied_n = _mm256_sub_ps(new_lambda, lambda_n);
-                ni = new_lambda;
+                let ni = new_lambda;
                 // impulse = n * applied_n (vec3).
                 let imp_n = [
                     _mm256_mul_ps(n[0], applied_n),
@@ -2263,7 +4125,7 @@ impl ColoredSoftStepSolver {
                 b_ang = nb_ang;
 
                 // ── FRICTION solve (2-DOF coupled cone, Decision 3) ─────────────
-                // max_friction = friction * ni (the JUST-written new normal impulse).
+                // max_friction = friction * ni (the JUST-computed new normal impulse).
                 let max_fric = _mm256_mul_ps(fric, ni);
                 let m_eff_t1 = effective_mass_x8(t1, ra, rb, a_invm, a_ii, b_invm, b_ii);
                 let m_eff_t2 = effective_mass_x8(t2, ra, rb, a_invm, a_ii, b_invm, b_ii);
@@ -2279,8 +4141,8 @@ impl ColoredSoftStepSolver {
                 let vt1 = dot8(dvt[0], dvt[1], dvt[2], t1[0], t1[1], t1[2]);
                 let vt2 = dot8(dvt[0], dvt[1], dvt[2], t2[0], t2[1], t2[2]);
                 // new_t = ti - m_eff_t * vt (separate mul then sub — matches scalar).
-                let mut new_t1 = _mm256_sub_ps(ti1, _mm256_mul_ps(m_eff_t1, vt1));
-                let mut new_t2 = _mm256_sub_ps(ti2, _mm256_mul_ps(m_eff_t2, vt2));
+                let mut new_t1 = _mm256_sub_ps(old_ti1, _mm256_mul_ps(m_eff_t1, vt1));
+                let mut new_t2 = _mm256_sub_ps(old_ti2, _mm256_mul_ps(m_eff_t2, vt2));
                 // The cone: len_sq = t1*t1 + t2*t2 (left-to-right); two-predicate mask
                 // (len_sq > mf²) AND (len_sq > 0); UNCONDITIONAL scale = mf/sqrt(len_sq);
                 // blendv-discard on unclamped lanes (Inf/NaN bit-irrelevant there).
@@ -2296,10 +4158,8 @@ impl ColoredSoftStepSolver {
                 let scale = _mm256_div_ps(max_fric, _mm256_sqrt_ps(len_sq));
                 new_t1 = _mm256_blendv_ps(new_t1, _mm256_mul_ps(new_t1, scale), cone);
                 new_t2 = _mm256_blendv_ps(new_t2, _mm256_mul_ps(new_t2, scale), cone);
-                let applied_t1 = _mm256_sub_ps(new_t1, ti1);
-                let applied_t2 = _mm256_sub_ps(new_t2, ti2);
-                ti1 = new_t1;
-                ti2 = new_t2;
+                let applied_t1 = _mm256_sub_ps(new_t1, old_ti1);
+                let applied_t2 = _mm256_sub_ps(new_t2, old_ti2);
                 // impulse = t1*applied_t1 + t2*applied_t2 (vec3; per-component
                 // separate mul then add — matches `t1 * a1 + t2 * a2`).
                 let imp_t = [
@@ -2330,22 +4190,17 @@ impl ColoredSoftStepSolver {
                 b_lin = nb_lin2;
                 b_ang = nb_ang2;
 
-                // ── Per-rank impulse SCATTER (gated by `active` only — matches the
+                // ── Per-rank impulse STORE (gated by `active` only — matches the
                 //    scalar UNCONDITIONAL impulse write, the velocity-vs-impulse
-                //    asymmetry of Decision 6: impulse slots written for every LIVE
-                //    point regardless of body movability). Via stack staging + a
-                //    guarded scalar write so an inactive/clamped lane is a true
-                //    NO-OP (no slot collision — Decision 4 resolution). ──────────
-                store1(&mut ni_s, ni);
-                store1(&mut ti1_s, ti1);
-                store1(&mut ti2_s, ti2);
-                for lane in 0..nlanes {
-                    if (g_width[lane] as usize) > r {
-                        let s = g_base[lane] + r; // active ⇒ exact in-range slot
-                        view.set_normal_impulse(s, ni_s[lane]);
-                        view.set_tangent1_impulse(s, ti1_s[lane]);
-                        view.set_tangent2_impulse(s, ti2_s[lane]);
-                    }
+                //    asymmetry of Decision 6: impulse elements written for every LIVE
+                //    point regardless of body movability). A `blendv` keeps an
+                //    inactive lane's old value — zero on a padding lane or rank — so
+                //    the store is one aligned vector per row and padding stays zero. ──
+                // SAFETY: see the block's contract — an owned, aligned block row.
+                unsafe {
+                    store_row(&raw mut (*blk).ni, _mm256_blendv_ps(old_ni, ni, active));
+                    store_row(&raw mut (*blk).ti1, _mm256_blendv_ps(old_ti1, new_t1, active));
+                    store_row(&raw mut (*blk).ti2, _mm256_blendv_ps(old_ti2, new_t2, active));
                 }
             }
 
@@ -2355,12 +4210,13 @@ impl ColoredSoftStepSolver {
             store3(&a_ang, &mut out_a_ang);
             store3(&b_lin, &mut out_b_lin);
             store3(&b_ang, &mut out_b_ang);
-            // A is written for every lane (always-dynamic by convention; a STATIC-A
-            // lane was masked off in `mask_a`, so its registers held the unchanged
-            // gathered velocity — writing it back is a no-op of the gathered value,
-            // but to be safe against a shared static A across cohorts we skip it).
-            // SOUNDNESS: writing only MOVABLE rows keeps cohorts disjoint (a shared
-            // static row is never written, matching the scalar `*_movable` guard).
+            // A is written for every live lane (always-dynamic by convention; a
+            // STATIC-A lane was masked off in `mask_a`, so its registers held the
+            // unchanged gathered velocity — writing it back is a no-op of the gathered
+            // value, but to be safe against a shared static A across cohorts we skip
+            // it). SOUNDNESS: writing only MOVABLE rows keeps cohorts disjoint (a
+            // shared static row is never written, matching the scalar `*_movable`
+            // guard). Padding lanes are never scattered.
             for lane in 0..nlanes {
                 if a_static_s[lane] == 0.0 {
                     let b = body_mut(bodies_eff, ia[lane]);
@@ -2375,8 +4231,6 @@ impl ColoredSoftStepSolver {
                     b.angular_velocity = Vec3::new(out_b_ang[0][lane], out_b_ang[1][lane], out_b_ang[2][lane]);
                 }
             }
-
-            cohort_lo = cohort_hi;
         }
     }
 
@@ -2384,6 +4238,20 @@ impl ColoredSoftStepSolver {
     /// `angular_velocity` (3) into the cohort gather buffers at `lane` (the
     /// scalar-side gather half of [`solve_color_avx2`]). Pure scalar marshaling, no
     /// intrinsics.
+    /// Stages one body's accumulated step movement (V2) into the cohort's SoA buffers at `lane`:
+    /// `dp` (3 columns) and `dq` (4, `x y z w`). Pure scalar marshaling, no intrinsics.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[inline]
+    fn stage_delta(d: &BodyDelta, lane: usize, dp: &mut [[f32; 8]; 3], dq: &mut [[f32; 8]; 4]) {
+        dp[0][lane] = d.dp.x;
+        dp[1][lane] = d.dp.y;
+        dp[2][lane] = d.dp.z;
+        dq[0][lane] = d.dq.x;
+        dq[1][lane] = d.dq.y;
+        dq[2][lane] = d.dq.z;
+        dq[3][lane] = d.dq.w;
+    }
+
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[inline]
     fn stage_body_state(
@@ -2411,388 +4279,58 @@ impl ColoredSoftStepSolver {
         ang[2][lane] = b.angular_velocity.z;
     }
 
-    /// One full Gauss-Seidel sweep ACROSS colors: solves colors `0..n_colors`
-    /// SEQUENTIALLY (a barrier between colors — cross-color order is fixed).
+    /// One full Gauss-Seidel sweep ACROSS colors on the calling thread: solves colors
+    /// `0..n_colors` SEQUENTIALLY (cross-color order is fixed), each color's groups in ascending
+    /// order — BYTE-IDENTICAL to the committed O5 colored solve (the O6 0%-gate).
     ///
-    /// `parallel` selects the per-color dispatch:
-    ///
-    /// - `false` (O5): each color's contiguous slot span is solved slot-by-slot in
-    ///   ascending order on the calling thread — BYTE-IDENTICAL to the committed O5
-    ///   colored solve (the O6 0%-gate). This is the path taken when
-    ///   [`PhysicsConfig::parallel_solve`] is off OR when no
-    ///   [`ThreadPool`](boyko_threadpool::ThreadPool) is attached to the running
-    ///   thread.
-    /// - `true` (O6): each color's manifold-GROUPS are partitioned into disjoint
-    ///   worker chunks and dispatched across the ambient pool via `pool.scope`; the
-    ///   scope-Drop join is the barrier BEFORE the next color (color `c + 1` may read
-    ///   bodies color `c` wrote). See [`solve_color_parallel`](Self::solve_color_parallel).
-    ///
-    /// The single-threaded order within a group's contiguous slot run is preserved
-    /// in BOTH paths (a worker solves its chunk's slots in ascending order, exactly
-    /// as O5 does), and distinct groups in a color touch DISJOINT dynamic bodies, so
-    /// the parallel result is bit-identical to the sequential one for any worker
-    /// count (see [`solve_color_parallel`](Self::solve_color_parallel)).
-    #[allow(clippy::too_many_arguments)]
+    /// This is the sweep of a step that does not open the solve region: when
+    /// [`PhysicsConfig::parallel_solve`] is off, when the step's widest color is under the region
+    /// grain's wide floor, or when the running thread's
+    /// [`ThreadPool`](boyko_threadpool::ThreadPool) is absent or has one worker (P2, decided once
+    /// per step in `build_columns`). A region step runs the same per-color dispatch as its Biased
+    /// and Relax stages' blocks ([`SolveStages`]): distinct groups in a color touch DISJOINT
+    /// dynamic bodies and a group's ranks keep their single-threaded order, so the region's
+    /// result is bit-identical to this one for any worker count.
     fn solve_all_colors(
-        cols: &ContactColumns,
+        cols: &CohortColumns,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
-        bias_rate: f32,
-        mass_coeff: f32,
-        impulse_coeff: f32,
+        step: &SolveStep<'_>,
         bias_active: bool,
-        parallel: bool,
         simd: bool,
     ) {
-        // B4 re-create-before-view-live: the columns are FROZEN by now (the last
-        // build-time grow happened in `build_columns`, before the substep loop), so
-        // the worker-facing `ContactSolveView` captures stable raw bases that cannot
-        // dangle while a view is live. The view is `Copy` — each worker gets a copy.
+        // B4 re-create-before-view-live: the tables are FROZEN by now (the last build-time grow
+        // happened in `build_columns`, before the substep loop), so the `CohortSolveView` captures
+        // stable raw bases that cannot dangle while it is live.
         let view = cols.solve_view();
         let color_offsets = cols.color_offsets();
         let color_group_start = cols.color_group_start();
+        let color_cohort_start = cols.color_cohort_start();
         let n_colors = color_offsets.len().saturating_sub(1);
         for c in 0..n_colors {
-            if parallel {
-                Self::solve_color_parallel(
-                    cols,
-                    view,
-                    bodies_eff,
-                    c,
-                    bias_rate,
-                    mass_coeff,
-                    impulse_coeff,
-                    bias_active,
-                    simd,
-                );
-            } else {
-                let start = color_offsets[c] as usize;
-                let end = color_offsets[c + 1] as usize;
-                // O7 dispatch fork (the 0%-gate): `simd == false` runs the byte-
-                // identical scalar oracle `solve_color`; `simd == true` runs the
-                // AVX2 cohort kernel over the color's manifold-GROUP range (the
-                // bit-exact width-only path). The non-parallel SIMD path solves the
-                // WHOLE color's groups as cohorts on the calling thread.
-                let g_lo = color_group_start[c] as usize;
-                let g_hi = color_group_start[c + 1] as usize;
-                Self::solve_color_dispatch(
-                    view,
-                    bodies_eff,
-                    (start, end),
-                    g_lo,
-                    g_hi,
-                    bias_rate,
-                    mass_coeff,
-                    impulse_coeff,
-                    bias_active,
-                    simd,
-                );
-            }
-        }
-    }
-
-    /// Solves ONE color in parallel (O6): partitions the color's manifold-GROUPS
-    /// into disjoint worker chunks and dispatches them across the ambient
-    /// [`ThreadPool`](boyko_threadpool::ThreadPool) via `pool.scope`. The
-    /// scope-Drop join (the barrier) returns before the caller advances to the next
-    /// color, ordering the Gauss-Seidel sweep.
-    ///
-    /// # Granularity (C1): MANIFOLD-GROUP, never slot
-    ///
-    /// Dispatch is at MANIFOLD-GROUP granularity, NOT slot granularity. A color's
-    /// groups are `g in color_group_start[c]..color_group_start[c + 1]`, each group
-    /// `g`'s slot run is `group_start[g]..group_start[g + 1]`, and a color's groups
-    /// occupy a CONTIGUOUS block of `group_start` (the build appends them in order),
-    /// so a chunk of consecutive groups maps to a CONTIGUOUS slot span
-    /// `group_start[chunk_lo]..group_start[chunk_hi]` — the same `[start, end)` shape
-    /// [`solve_color`](Self::solve_color) consumes, kept cache-friendly. All points
-    /// of one manifold-group stay on ONE worker (they share both bodies and are
-    /// order-coupled — they MUST be solved sequentially within the group).
-    ///
-    /// # Chunk count + balance (the work-stealing perf knob)
-    ///
-    /// The color is split into `(num_threads + 1) * `[`CHUNKS_PER_WORKER`] chunks
-    /// (capped at the group count), balanced by total SLOT count rather than group
-    /// count — the dispatch loop walks groups accumulating slots and cuts a chunk
-    /// once its run reaches the per-chunk slot quota. Emitting MORE, smaller,
-    /// work-balanced chunks than lanes lets the Chase-Lev work-STEALING pool
-    /// equalize the lanes (an idle lane steals the next chunk), which removes the
-    /// coarse `num_threads + 1` split's load imbalance. The chunk count + shape are
-    /// FREE perf knobs (see the bit-identity property below): they change only WHERE
-    /// work runs, never the bits.
-    ///
-    /// # The {1 worker, N workers} BIT-IDENTITY property (LOAD-BEARING)
-    ///
-    /// Within a color, each dynamic body belongs to at most ONE manifold-group (the
-    /// O4 coloring invariant: no two manifolds in a color share a dynamic body), so
-    /// each body's velocity is accumulated by exactly ONE group. Therefore:
-    ///
-    /// - **Disjoint writes:** parallel workers write PAIRWISE-DISJOINT
-    ///   `BodyEffective` rows (and pairwise-disjoint impulse-column slots) — no
-    ///   shared write, no data race, no atomics needed.
-    /// - **Order-independent per body:** a body's converged velocity is the result
-    ///   of solving its one group's points in sequence; which worker runs that group
-    ///   and in what order the groups are visited cannot change that result.
-    /// - **Within-group order preserved:** a worker solves its chunk's slots in
-    ///   ascending index order, exactly as O5 does, so each group's order-coupled
-    ///   points are solved in the SAME sequence as single-threaded.
-    /// - **Barrier between colors:** the scope-Drop join completes color `c` before
-    ///   color `c + 1` starts (cross-color Gauss-Seidel order is fixed).
-    /// - **Worker-count-independent warm store:** the converged impulses are stored
-    ///   in CANONICAL `(manifold, point)` order after the solve (IM-2b), so next
-    ///   frame's seeds do not depend on the dispatch / thread count.
-    ///
-    /// Hence the per-body result — and the full body snapshot — is BIT-FOR-BIT
-    /// identical to the single-threaded colored solve for ANY worker count. Any
-    /// deviation from bit-identity is a bug (a shared write, a non-disjoint chunk, a
-    /// missing barrier, or a float-reduction-order dependence).
-    ///
-    /// # O7 cohort-snapping (Decision 7)
-    ///
-    /// When `simd`, the chunk boundaries are SNAPPED to cohort (8-group) boundaries
-    /// so every task solves only full-width-8 cohorts (the last cohort of the COLOR
-    /// may be partial — handled by the masked kernel; the last cohort of a TASK is
-    /// always whole). Each task routes through
-    /// [`solve_color_dispatch`](Self::solve_color_dispatch) with its chunk's group
-    /// range, so a worker runs [`solve_color_avx2`](Self::solve_color_avx2) over its
-    /// cohorts. Cohorts within a color are body-disjoint (each is 8 disjoint groups;
-    /// distinct cohorts are pairwise disjoint), so cross-worker disjointness — and
-    /// thus the {1, N}×{simd} bit-identity — is unchanged from O6.
-    #[allow(clippy::too_many_arguments)]
-    fn solve_color_parallel(
-        cols: &ContactColumns,
-        view: ContactSolveView<'_>,
-        bodies_eff: ScratchSolveView<'_, BodyEffective>,
-        color: usize,
-        bias_rate: f32,
-        mass_coeff: f32,
-        impulse_coeff: f32,
-        bias_active: bool,
-        simd: bool,
-    ) {
-        // The color's manifold-group range (indices into `group_start`).
-        let color_group_start = cols.color_group_start();
-        let color_offsets = cols.color_offsets();
-        let g_lo = color_group_start[color] as usize;
-        let g_hi = color_group_start[color + 1] as usize;
-        let n_groups = g_hi - g_lo;
-        if n_groups == 0 {
-            return;
-        }
-
-        let span = (color_offsets[color] as usize, color_offsets[color + 1] as usize);
-
-        // W1 min-work threshold: a SMALL color does not amortize a `pool.scope`
-        // dispatch (a boxed shared frame + a boxed closure per spawn), so solve it
-        // INLINE on the calling thread — the EXACT `solve_color` over the whole
-        // span the no-pool / `parallel_solve == false` path uses. This is
-        // BIT-IDENTICAL to the parallel split (within a color the groups touch
-        // disjoint dynamic bodies ⇒ inline == 1-worker == N-worker), so it changes
-        // only WHERE the color is solved, never the bits. The metric is the color's
-        // total slot count (the span width). Bounding `scope` to large colors keeps
-        // the residual scope allocation at the justified, threshold-bounded
-        // parallelism cost (one scope per genuinely-parallel unit, the `par_iter`
-        // per-dispatch cost class) instead of one-per-tiny-color.
-        let color_slots = (span.1 - span.0) as u32;
-        if color_slots < MIN_PARALLEL_SLOTS_PER_COLOR {
-            // Inline on the calling thread, routed through the O7 dispatch fork:
-            // `simd` runs `solve_color_avx2` over the whole color's groups (as
-            // cohorts), else the scalar oracle over the span — both bit-identical to
-            // the parallel split.
-            Self::solve_color_dispatch(
-                view,
-                bodies_eff,
-                span,
-                g_lo,
-                g_hi,
-                bias_rate,
-                mass_coeff,
-                impulse_coeff,
-                bias_active,
-                simd,
-            );
-            return;
-        }
-
-        // Grab the ambient pool (set by `Schedule::run`'s `install` frame). When no
-        // pool is attached (ad-hoc / no-scheduler call), fall back to the
-        // single-threaded color solve so the result still matches O5 exactly.
-        // W1: a `pool.scope` allocates (a boxed shared frame + a boxed closure per
-        // spawn). This site is reached ONLY for colors above
-        // `MIN_PARALLEL_SLOTS_PER_COLOR`, so the residual per-step scope allocation
-        // is bounded to the FEW large colors that amortize the dispatch — the
-        // justified, threshold-bounded parallelism cost (the same per-dispatch cost
-        // class as the engine's `Query::par_iter`, one scope per genuinely-parallel
-        // unit). The solver's own scratch stays zero-per-step-alloc; a true
-        // zero-alloc reusable-scope threadpool API is a filed follow-up.
-        let dispatched = try_with_active_pool(|pool| {
-            // O6 perf: emit MORE, work-BALANCED chunks than lanes so the Chase-Lev
-            // work-stealing pool equalizes the lanes (an idle lane steals the next
-            // chunk). The dispatcher lane that called `pool.scope` ALSO work-steals
-            // while the scope is open, so the lane pool is `num_threads + 1`; target
-            // `(num_threads + 1) * CHUNKS_PER_WORKER` chunks, capped at the group
-            // count (a chunk is always ≥ 1 WHOLE manifold-group — never split a
-            // group's order-coupled points across lanes, the C1 invariant). At least
-            // one chunk always (`max(1)`). Bit-identity is chunk-COUNT- AND
-            // chunk-SHAPE-independent (the {1, N} property holds for ANY partition —
-            // distinct chunks touch disjoint dynamic bodies), so this is a pure,
-            // bench-tunable perf knob, never a value change.
-            let lanes = pool.num_threads() + 1;
-            let n_chunks = (lanes * CHUNKS_PER_WORKER).clamp(1, n_groups);
-
-            // Balance by total SLOT count (work), not group count: groups vary in
-            // width (1..=MAX_CONTACT_POINTS points), so an equal-GROUP split is
-            // work-imbalanced. `target` is the per-chunk slot quota; the dispatch
-            // loop walks groups accumulating slots and cuts a chunk once its run
-            // reaches `target` (a contiguous group range → a contiguous slot span).
-            // Computed from the CSR with NO per-step Vec of chunk bounds (W2: the
-            // chunk boundaries are derived on the fly, alloc-free).
-            let total_slots = span.1 - span.0;
-            let target = total_slots.div_ceil(n_chunks).max(1);
-
-            // Send + Sync wrapper: the contact-column SOLVE VIEW (Copy, per-element
-            // base+index only) + the bodies SOLVE VIEW (Copy, row-ptr-only). Each
-            // worker writes only its chunk's DISJOINT impulse slots and DISJOINT body
-            // rows, reaching every contact column element via `view.<accessor>(i)` and
-            // every body row via `bodies.row_ptr(i)` — NO whole-buffer reborrow on any
-            // path (the P2 + P1 structural fix; the prior `cols: *mut ContactColumns`
-            // + `columns()` `&mut *self.cols` whole-struct reborrow that caused the
-            // rigid Tree-Borrows race is DELETED). The `group_start` CSR base now rides
-            // inside `view`, read via `view.group_start_at` — no `&[u32]` borrow into
-            // `cols` is ever held across the scope (TB-clean, Phase 9.3c discipline).
-            let ptrs = ColorSolvePtrs {
-                bodies: bodies_eff,
-                view,
+            // Profiling: one span per color, classed by the inline floor's own predicate so the
+            // class does not depend on the worker count (the region's colour hooks use the same).
+            let _color_zone =
+                if color_offsets[c + 1] - color_offsets[c] < MIN_PARALLEL_SLOTS_PER_COLOR {
+                    zone!(PHYS_COLOR_NARROW)
+                } else {
+                    zone!(PHYS_COLOR_WIDE)
+                };
+            // The color's place in the tables: its first group and first cohort.
+            let ctx = ColorCtx {
+                g_base: color_group_start[c] as usize,
+                k_base: color_cohort_start[c] as usize,
             };
-
-            pool.scope(|scope| {
-                let mut chunk_g_lo = g_lo;
-                while chunk_g_lo < g_hi {
-                    // The chunk's first group's first slot. Read via the view's raw
-                    // `group_start` base (no `&` borrow into `cols`).
-                    // SAFETY: `chunk_g_lo` is within `[g_lo, g_hi)`, a valid index
-                    //   into the live `group_start` column.
-                    let chunk_start = unsafe { ptrs.view.group_start_at(chunk_g_lo) } as usize;
-
-                    // Grow the chunk by WHOLE groups until its accumulated slot run
-                    // reaches the per-chunk slot `target` (work-balanced) or the
-                    // color's last group is consumed. A group is never split: the
-                    // chunk boundary always falls on a `group_start` index, so every
-                    // point of one manifold-group stays on ONE lane (C1). Always
-                    // includes ≥ 1 group (the first), so it makes progress.
-                    //
-                    // O7 cohort-snapping (Decision 7): when `simd`, advance in steps
-                    // of `COHORT` (8 groups) and clamp at `g_hi`, so every chunk
-                    // boundary falls on a cohort boundary (a multiple-of-8 group
-                    // offset from `g_lo`) — every task thus solves only full-width-8
-                    // cohorts (plus the color's single possibly-partial trailing
-                    // cohort, on whichever task owns the last group). The step keeps
-                    // the chunk a contiguous group range = a contiguous slot span,
-                    // the shape `solve_color_avx2` consumes. Bit-identity is
-                    // chunk-shape-independent (cohorts are pairwise body-disjoint), so
-                    // snapping is a pure perf knob.
-                    let step = if simd { COHORT } else { 1 };
-                    let mut chunk_g_hi = (chunk_g_lo + step).min(g_hi);
-                    while chunk_g_hi < g_hi {
-                        // SAFETY: `chunk_g_hi <= g_hi`, a valid `group_start` index.
-                        let so_far =
-                            unsafe { ptrs.view.group_start_at(chunk_g_hi) } as usize - chunk_start;
-                        if so_far >= target {
-                            break;
-                        }
-                        chunk_g_hi = (chunk_g_hi + step).min(g_hi);
-                    }
-
-                    // The chunk's contiguous slot span ends at its last group's last
-                    // slot.
-                    // SAFETY: `chunk_g_hi` is within `(g_lo, g_hi]`, a valid index
-                    //   into the live `group_start` column.
-                    let chunk_end = unsafe { ptrs.view.group_start_at(chunk_g_hi) } as usize;
-                    debug_assert!(
-                        chunk_start >= span.0 && chunk_end <= span.1 && chunk_start < chunk_end,
-                        "invariant: a group-chunk's slot span is non-empty and lies within the color span"
-                    );
-                    debug_assert!(
-                        !simd || (chunk_g_lo - g_lo).is_multiple_of(COHORT),
-                        "invariant: a SIMD chunk's lo boundary is a cohort (8-group) boundary"
-                    );
-
-                    let task_g_lo = chunk_g_lo;
-                    let task_g_hi = chunk_g_hi;
-                    scope.spawn(move || {
-                        // DISJOINTNESS (the O6 + P2 soundness argument — why the
-                        // concurrent per-element accesses are race- and TB-clean):
-                        //   - `ptrs` carries only `Copy` solve views (`ContactSolveView`
-                        //     + body `ScratchSolveView`) whose raw bases name columns
-                        //     borrowed for the whole `solve_color_parallel` frame;
-                        //     `pool.scope`'s Drop blocks (work-stealing join) until every
-                        //     spawned task completes, so every base outlives every task —
-                        //     no use-after-free, no escape past the borrow, and (B4) no
-                        //     regrow moves a base while a view is live.
-                        //   - This chunk solves ONLY slots `[chunk_start, chunk_end)` and
-                        //     writes ONLY those slots' impulse columns via
-                        //     `view.set_*_impulse*(s, _)` (a single-row `base + s` write).
-                        //     Distinct chunks have non-overlapping slot ranges (they
-                        //     partition the color's groups), so no two workers write the
-                        //     same column element and no `&mut`/store ever spans more than
-                        //     one row.
-                        //   - Within ONE color, each DYNAMIC body belongs to at most one
-                        //     manifold-group (the O4 coloring invariant), so distinct
-                        //     chunks' groups touch DISJOINT dynamic body rows — no two
-                        //     workers `apply_impulse` to the same dynamic `BodyEffective`
-                        //     (each reached per-element via `bodies.row_ptr`, never a
-                        //     whole-buffer reborrow).
-                        //   - A SHARED static body (a ground floor several groups in this
-                        //     color reference) is NEVER WRITTEN: the `*_movable` guard in
-                        //     `solve_color` skips the `apply_impulse` for any
-                        //     `inv_mass == 0` row (already a value no-op), so a shared
-                        //     static row is read-only across workers. Sentinel body B is
-                        //     likewise never written (`IMMOVABLE_AT_REST`, a local copy).
-                        //   - The contact columns + bodies a chunk READS are its own
-                        //     disjoint slots/rows plus shared read-only static rows + the
-                        //     read-only `group_start` CSR, so no chunk reads an element
-                        //     another chunk is writing.
-                        //   The DELETED `cols: *mut ContactColumns` + `columns()`
-                        //   (`&mut *self.cols`) whole-struct reborrow — the rigid TB race
-                        //   surface — is gone and un-typeable from `ptrs`. O7: when
-                        //   `simd`, the worker runs `solve_color_avx2` over its cohort
-                        //   range `[task_g_lo, task_g_hi)` — a cohort packs 8 disjoint
-                        //   groups, so distinct workers' cohort-runs still touch DISJOINT
-                        //   dynamic rows + DISJOINT impulse slots, statics/sentinels
-                        //   never-written; the disjointness argument is UNCHANGED from
-                        //   the scalar chunk dispatch above.
-                        Self::solve_color_dispatch(
-                            ptrs.view,
-                            ptrs.bodies,
-                            (chunk_start, chunk_end),
-                            task_g_lo,
-                            task_g_hi,
-                            bias_rate,
-                            mass_coeff,
-                            impulse_coeff,
-                            bias_active,
-                            simd,
-                        );
-                    });
-
-                    chunk_g_lo = chunk_g_hi;
-                }
-            });
-        });
-
-        // PAR-fallback: no pool attached → run the color single-threaded, routed
-        // through the O7 dispatch fork so `simd` still widens (over the whole
-        // color's groups as cohorts) and `!simd` is BYTE-IDENTICAL to O5 (the same
-        // `solve_color` over the whole color span).
-        if dispatched.is_none() {
+            let g_hi = color_group_start[c + 1] as usize;
+            // O7 dispatch fork (the 0%-gate): `simd == false` runs the byte-identical scalar
+            // oracle `solve_color`; `simd == true` runs the AVX2 cohort kernel over the color's
+            // cohorts (the bit-exact width-only path).
             Self::solve_color_dispatch(
                 view,
                 bodies_eff,
-                span,
-                g_lo,
+                ctx,
+                ctx.g_base,
                 g_hi,
-                bias_rate,
-                mass_coeff,
-                impulse_coeff,
+                step,
                 bias_active,
                 simd,
             );
@@ -2804,80 +4342,205 @@ impl ColoredSoftStepSolver {
     /// Mirrors the reference `apply_restitution`: for each contact whose
     /// gather-time approach speed exceeds [`RESTITUTION_THRESHOLD`] it drives the
     /// current relative normal velocity to `-e·vn_initial`, keeping `λn ≥ 0`.
-    /// Walks in color order (the bodies within a color are disjoint; cross-color
-    /// the result is order-fixed). A zero-restitution contact is skipped.
-    fn apply_restitution(cols: &mut ContactColumns, bodies_eff: ScratchSolveView<'_, BodyEffective>) {
+    /// Walks the cohorts group-major in color order — the slot order (the bodies
+    /// within a color are disjoint; cross-color the result is order-fixed). A
+    /// zero-restitution contact is skipped, and only there is `vn0` unread (D9).
+    ///
+    /// V2 (`spec`, a step whose speculative contacts are on): a point speculative at gather
+    /// (`s0 > 0`) whose normal impulse ended the substeps at `0` never touched this step, and gets
+    /// no bounce — Box2D v3's rule ("the total normal impulse is 0 for speculative points").
+    /// Without it such a point, approaching faster than the threshold, would be pushed apart
+    /// before any contact.
+    fn apply_restitution(
+        cols: &mut CohortColumns,
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
+        counters: &mut SetupCounters,
+        spec: bool,
+    ) {
         // Single-threaded (run after the parallel solve has joined), so direct
-        // `&mut ContactColumns` per-element access is sound — `restitution` /
-        // `vn_initial` are ST-only columns absent from the worker-facing view.
-        for i in 0..cols.len() {
-            if cols.restitution(i) <= 0.0 {
-                continue;
-            }
-            let vn0 = cols.vn_initial(i);
-            if vn0 > -RESTITUTION_THRESHOLD {
-                continue;
-            }
-            let ra = cols.ra(i);
-            let rb = cols.rb(i);
-            let normal = cols.normal(i);
-            let ia = cols.body_a(i) as usize;
-            let b_is_sentinel = cols.b_is_sentinel(i);
-            let ib = cols.body_b(i) as usize;
-            let bb_view = || -> BodyEffective {
-                if b_is_sentinel { IMMOVABLE_AT_REST } else { body_copy(bodies_eff, ib) }
-            };
-            let m_eff = {
-                let ba = body_copy(bodies_eff, ia);
-                let bb = bb_view();
-                effective_mass(normal, ra, rb, &ba, &bb)
-            };
-            let vn = {
-                let ba = body_ref(bodies_eff, ia);
-                let bb = bb_view();
-                (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal)
-            };
-            let v_target = -cols.restitution(i) * vn0;
-            let d_lambda = m_eff * (v_target - vn);
-            let lambda_n = cols.normal_impulse(i);
-            let new_lambda = (lambda_n + d_lambda).max(0.0);
-            let applied = new_lambda - lambda_n;
-            cols.set_normal_impulse(i, new_lambda);
-            let impulse = normal * applied;
-            body_mut(bodies_eff, ia).apply_impulse(ra, impulse * -1.0);
-            if !b_is_sentinel {
-                body_mut(bodies_eff, ib).apply_impulse(rb, impulse);
+        // `&mut` access to the blocks is sound — `cold` / `rank_cold` are ST-only
+        // columns absent from the worker-facing view.
+        let CohortColumns { heads, blocks, cold, rank_cold, .. } = cols;
+        let heads = heads.as_read_slice();
+        let cold = cold.as_read_slice();
+        let vn0 = rank_cold.as_read_slice();
+        let mut blocks = blocks.build_view();
+        let blocks = blocks.as_mut_slice();
+        for (head, cold) in heads.iter().zip(cold) {
+            let rank_base = head.rank_base as usize;
+            for l in 0..head.nlanes as usize {
+                let restitution = cold.restitution[l];
+                if restitution <= 0.0 {
+                    continue;
+                }
+                let normal = head.normal(l);
+                let ia = head.body_a[l] as usize;
+                let b_is_sentinel = head.is_sentinel(l);
+                let ib = head.body_b[l] as usize;
+                let bb_view = || -> BodyEffective {
+                    if b_is_sentinel { IMMOVABLE_AT_REST } else { body_copy(bodies_eff, ib) }
+                };
+                for r in 0..head.width[l] as usize {
+                    let vn0 = vn0[rank_base + r][l];
+                    if vn0 > -RESTITUTION_THRESHOLD {
+                        continue;
+                    }
+                    let blk = &mut blocks[rank_base + r];
+                    if spec && blk.sep[l] > 0.0 && blk.ni[l] == 0.0 {
+                        continue;
+                    }
+                    counters.restitution();
+                    let ra = blk.ra(l);
+                    let rb = blk.rb(l);
+                    let m_eff = {
+                        let ba = body_copy(bodies_eff, ia);
+                        let bb = bb_view();
+                        effective_mass(normal, ra, rb, &ba, &bb)
+                    };
+                    let vn = {
+                        let ba = body_ref(bodies_eff, ia);
+                        let bb = bb_view();
+                        (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal)
+                    };
+                    let v_target = -restitution * vn0;
+                    let d_lambda = m_eff * (v_target - vn);
+                    let lambda_n = blk.ni[l];
+                    let new_lambda = (lambda_n + d_lambda).max(0.0);
+                    // Same `±0` invariant as `solve_color`'s clamp: this impulse is the
+                    // next step's warm seed, which the AVX2 kernel clamps with a
+                    // `+0`-on-tie `max`.
+                    debug_assert!(
+                        new_lambda.to_bits() != 0x8000_0000,
+                        "invariant: the restitution clamp never yields -0 (the SIMD ±0-tie proof)"
+                    );
+                    let applied = new_lambda - lambda_n;
+                    blk.ni[l] = new_lambda;
+                    let impulse = normal * applied;
+                    // Same movability guard as `solve_color` / `warm_start_apply` — see
+                    // the `ia_movable` rationale in `solve_color`. Bit-identical today (an
+                    // impulse on an immovable row is a value no-op), and the precondition
+                    // for ever running this pass color-partitioned: without it, lanes
+                    // sharing a static `body_b` would all write the same row.
+                    if is_dynamic_row(body_ref(bodies_eff, ia).inv_mass) {
+                        body_mut(bodies_eff, ia).apply_impulse(ra, impulse * -1.0);
+                    }
+                    if !b_is_sentinel && is_dynamic_row(body_ref(bodies_eff, ib).inv_mass) {
+                        body_mut(bodies_eff, ib).apply_impulse(rb, impulse);
+                    }
+                }
             }
         }
     }
 
-    /// Stores every contact point's converged impulses into the freshly-zeroed
-    /// `write` table in CANONICAL `(manifold, point)` order (IM-2b), then swaps
-    /// `read` ↔ `write`.
+    /// The store (L11 D3): writes every manifold's record into the warm store's
+    /// write side by manifold index, then swaps the sides.
     ///
-    /// The store order is `columns.canonical` — the deterministic
-    /// manifold-then-point sequence — NOT the color/slot order the solve used.
-    /// The open-addressed table is insertion-order-sensitive on home-slot
-    /// collisions, so a canonical store keeps next frame's seeds independent of
-    /// the color layout (and, in [O6], the thread count) — the load-bearing
-    /// determinism guarantee.
+    /// Two passes. The cohorts first, in color order: each live lane's converged
+    /// impulses go into its manifold's record (`cold.mi`) — the record's shape (its
+    /// feature ids and point count) was written by the fill, so only the impulse
+    /// values are touched; the writes land on one ascending stream of 64 B records
+    /// per color. Then the tags, in manifold order: a manifold FROZEN this step (B1)
+    /// carries — each of its live points looked up by feature id in the read side
+    /// through the run `plan_sources` found for it, the hits compacted into the
+    /// record, a miss dropping its point (a pair whose rows cannot be translated, a
+    /// `Reset`, a feature id that changed) — so the island wakes with the impulses
+    /// it froze with; a manifold with no live point stores an empty record. The
+    /// layout is a pure function of the stream and the solved values, never of the
+    /// color layout or (in [O6]) the thread count, and the write side's keys were
+    /// written in stream order by `plan_sources`.
+    ///
+    /// After the swap it stamps the warm cursor with `rows`: the read side has just
+    /// been written from this step's cohorts and carried records, keyed by this
+    /// gather's rows, and this is its only writer (defect A, interim). A cold step (L10 D5b:
+    /// `warm_effective` false) neither stores nor stamps.
+    ///
+    /// `restore` is L10's restore warm source (design 06 A3): a frozen manifold that P-a
+    /// marked `SRC_RESTORE` carries from it (design 08 A3′, mutation N28).
     ///
     /// [O6]: https://github.com/bluesteelll/boyko-engine
-    fn store_and_swap(&mut self) {
-        if !self.warm_start_enabled {
+    fn store_and_swap(
+        &mut self,
+        rows: &RowIdentity,
+        manifolds: &[Manifold],
+        restore: Option<&WarmRecords>,
+    ) {
+        debug_assert!(
+            self.warm_start_enabled || !self.warm_effective,
+            "invariant: warm start runs only if the setup flag allows it"
+        );
+        if !self.warm_effective {
             return;
         }
         let cols = &self.columns;
-        self.warm_write.rebuild(cols.len());
-        for k in 0..cols.canonical().len() {
-            let i = cols.canonical()[k] as usize;
-            self.warm_write.insert(
-                cols.warm_key(i),
-                cols.normal_impulse(i),
-                [cols.tangent1_impulse(i), cols.tangent2_impulse(i)],
-            );
+        let (read, write) = Self::warm_sides(&mut self.warm, self.warm_cur);
+        let index = &self.warm_index;
+        let tags = cols.tags();
+        let plan = cols.plan();
+        let sources = WarmSources {
+            lookup: WarmLookup { read, index },
+            restore: restore.map(|read| WarmLookup { read, index }),
+            plan,
+            tags,
+        };
+        debug_assert!(
+            tags.len() == manifolds.len() && plan.len() == manifolds.len(),
+            "invariant: tags and plan hold one row per manifold of this step"
+        );
+        let blocks = cols.blocks();
+        let mut carry_hits = 0u32;
+        {
+            let mut recs_w = write.recs_mut();
+            let recs_w = recs_w.as_mut_slice();
+            debug_assert_eq!(recs_w.len(), manifolds.len(), "invariant: one record per manifold");
+            for (head, cold) in cols.heads().iter().zip(cols.cold.as_read_slice()) {
+                let rank_base = head.rank_base as usize;
+                for l in 0..head.nlanes as usize {
+                    let rec = &mut recs_w[cold.mi[l] as usize];
+                    debug_assert_eq!(
+                        usize::from(rec.count()),
+                        head.width[l] as usize,
+                        "invariant: the fill wrote the solved record's shape"
+                    );
+                    for (p, blk) in blocks[rank_base..rank_base + head.width[l] as usize].iter().enumerate() {
+                        rec.set_impulses(p, [blk.ni[l], blk.ti1[l], blk.ti2[l]]);
+                    }
+                }
+            }
+            for (mi, (m, &tag)) in manifolds.iter().zip(tags).enumerate() {
+                if tag.solved() {
+                    continue;
+                }
+                recs_w[mi] = if tag.frozen() && tag.count != 0 {
+                    debug_assert_eq!(
+                        tag.count,
+                        m.count,
+                        "invariant: a frozen tag holds its manifold's live-point count"
+                    );
+                    let (lookup, run) = sources.of(mi);
+                    let (rec, hits) = lookup.carry(run, m, usize::from(tag.count));
+                    carry_hits += hits;
+                    rec
+                } else {
+                    WarmRecord::EMPTY
+                };
+            }
         }
-        core::mem::swap(&mut self.warm_read, &mut self.warm_write);
+        self.warm_stats.carry_hits = carry_hits;
+        self.counters.carry(carry_hits);
+        debug_assert!(
+            carry_hits <= self.warm_stats.carry_points,
+            "invariant: the carry keeps at most the frozen manifolds' live points"
+        );
+        self.swap_and_stamp(rows);
+    }
+
+    /// The store's tail (L11 D3): the written side becomes the read side, and the warm cursor is
+    /// stamped with `rows`, the gather it was keyed by. The serial store's, and a region step's
+    /// whose store ran in the region (SR).
+    #[inline]
+    fn swap_and_stamp(&mut self, rows: &RowIdentity) {
+        self.warm_cur ^= 1;
+        self.warm_cursor.stamp(rows);
     }
 
     /// Writes the solved velocities back into the gather snapshot and flags every
@@ -2931,13 +4594,18 @@ impl ColoredSoftStepSolver {
     /// friction sweep (here: a Gauss-Seidel sweep ACROSS colors via
     /// [`solve_all_colors`](Self::solve_all_colors)), position integrate + the
     /// inertia refresh, then the bias-free relax passes. After the substeps: the
-    /// restitution pass, the canonical-order warm store (IM-2b), and the
-    /// write-back. The integrate / inertia kernels are the SAME `simd::*`
-    /// helpers the reference calls (no duplicated inertia math).
+    /// restitution pass, the warm store's write by manifold index
+    /// ([`store_and_swap`](Self::store_and_swap), L11 D3), and the write-back. The
+    /// integrate / inertia kernels are the SAME `simd::*` helpers the reference
+    /// calls (no duplicated inertia math).
     ///
     /// `solve` (the [`RigidSolver`] entry) cannot reach the graph through the
     /// trait signature, so the [`physics_solve_colored`](crate::systems::physics_solve_colored)
     /// stage calls THIS method directly with `Res<ConstraintGraph>`.
+    ///
+    /// The solve runs warm iff the solver's setup flag AND `config.warm_start` are both true
+    /// (L10 D5b). A direct-drive caller that never gathers rows keeps its warm store's cursor
+    /// on `Identity`, so after a cold step it resumes from the impulses its last warm solve stored.
     pub fn solve_colored(
         &mut self,
         config: &PhysicsConfig,
@@ -2946,17 +4614,29 @@ impl ColoredSoftStepSolver {
         scratch: &mut SolverScratch,
     ) {
         // Sleeping OFF (or no resource): the byte-identical O6/O7 colored path.
-        self.solve_colored_inner(config, manifolds, graph, scratch, None);
+        self.solve_colored_inner(config, manifolds, graph, scratch, None, None, None);
     }
 
-    /// The colored solve with O8 sleeping (plan O8 / Decision 5) — the entry the
-    /// [`physics_solve_colored`](crate::systems::physics_solve_colored) stage calls
-    /// when `PhysicsConfig::sleeping` is on.
+    /// The colored solve with O8 sleeping (plan O8 / Decision 5), with no L10 held inputs. The
+    /// [`physics_solve_colored`](crate::systems::physics_solve_colored) stage's sleeping arm
+    /// calls its crate-private sibling `solve_colored_held` (this solve plus L10's sleep-skip
+    /// inputs), not this entry.
     ///
     /// Identical to [`solve_colored`](Self::solve_colored) but threads the
     /// [`IslandSleep`] state: slept islands skip ONLY their SOLVE + INTEGRATE work
     /// (the gather is untouched — IM-1), and the energy / debounce / sleep transition
     /// is advanced after the solve for next frame.
+    ///
+    /// A step on which no dynamic row is awake and no contact point is laid out takes the
+    /// no-awake fast path (L10 C3a, [`fast_path_steps`](Self::fast_path_steps)): it skips the
+    /// substep loop, the restitution pass and the freeze capture and restore, which would change
+    /// no state, and still builds the columns (the store's keys and tags), carries every frozen
+    /// manifold's record, swaps the store and advances the sleep state. Its values are the full
+    /// path's, bit for bit.
+    ///
+    /// Direct drive: the solve serves every `IslandSleep::wake_all` request made so far, and after
+    /// a cold step (`config.warm_start` false, L10 D5b) it resumes from the impulses its last warm
+    /// solve stored.
     pub fn solve_colored_sleeping(
         &mut self,
         config: &PhysicsConfig,
@@ -2965,12 +4645,46 @@ impl ColoredSoftStepSolver {
         scratch: &mut SolverScratch,
         sleep: &mut IslandSleep,
     ) {
-        self.solve_colored_inner(config, manifolds, graph, scratch, Some(sleep));
+        self.solve_colored_inner(config, manifolds, graph, scratch, Some(sleep), None, None);
+    }
+
+    /// [`solve_colored_sleeping`](Self::solve_colored_sleeping) with L10's sleep-skip (design
+    /// 04 A6, 06 A1–A3, 08 A1′): the rows the broadphase holds get the effective inverse mass
+    /// `0` (D8), P-a searches the restore source after the read side (A3), and the kept
+    /// manifolds moved in this step take their warm records before the swap (A1′); the logical
+    /// [`WarmSeedStats`] add the held store's points and hits (E6′). The
+    /// [`physics_solve_colored`](crate::systems::physics_solve_colored) stage's sleeping arm,
+    /// which passes the `IslandSleep::wake_all` request count its broadphase latched as
+    /// `wake_upto`: the step serves exactly those requests (L10 D9b, Decision 5).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn solve_colored_held(
+        &mut self,
+        config: &PhysicsConfig,
+        manifolds: &[Manifold],
+        graph: &ConstraintGraph,
+        scratch: &mut SolverScratch,
+        sleep: &mut IslandSleep,
+        held: HeldSolve<'_>,
+        wake_upto: u64,
+    ) {
+        self.solve_colored_inner(
+            config,
+            manifolds,
+            graph,
+            scratch,
+            Some(sleep),
+            Some(held),
+            Some(wake_upto),
+        );
     }
 
     /// Shared body of the colored solve — `sleep == None` is the byte-identical
     /// O6/O7 path (the 0%-gate), `sleep == Some(_)` adds the O8 solve+integrate skip
-    /// for slept islands (gather stays full — IM-1).
+    /// for slept islands (gather stays full — IM-1), and `held == Some(_)` L10's
+    /// sleep-skip on top of it. `wake_upto` is the wake request count the step serves: `Some` of
+    /// the count the pipeline's broadphase latched, or `None` in direct drive, which serves every
+    /// request made so far.
+    #[allow(clippy::too_many_arguments)]
     fn solve_colored_inner(
         &mut self,
         config: &PhysicsConfig,
@@ -2978,9 +4692,23 @@ impl ColoredSoftStepSolver {
         graph: &ConstraintGraph,
         scratch: &mut SolverScratch,
         mut sleep: Option<&mut IslandSleep>,
+        mut held: Option<HeldSolve<'_>>,
+        wake_upto: Option<u64>,
     ) {
         let substeps = config.substeps.max(1);
         let h = config.dt / substeps as f32;
+        // V2: the speculative branch runs iff speculative contacts are on (a positive distance or
+        // a positive velocity cap; off — and a NaN — is the pre-V2 kernel); `1 / h` once, so every
+        // kernel multiplies by the same bits.
+        let spec = config.speculative_contacts();
+        let inv_h = 1.0 / h;
+
+        // Defect A (interim): re-key the sleep latch to this gather's rows BEFORE the early
+        // return below, so a transient step with no simulated dynamic body does not leave
+        // the latch keyed by an older gather and force a wake on the next step.
+        if let Some(sleep) = sleep.as_mut() {
+            sleep.rekey_rows(&scratch.rows);
+        }
 
         // O1: degenerate early-return BEFORE any build/alloc. In solver-owned mode
         // a free dynamic body must keep falling, so the only valid skip is a world
@@ -2994,6 +4722,10 @@ impl ColoredSoftStepSolver {
         if !has_dynamic {
             return;
         }
+        self.solved_steps += 1;
+        // L10 D5b: the step's effective warm start, written once, before any gate reads it.
+        self.warm_effective = self.warm_start_enabled && config.warm_start;
+        self.counters.step(self.warm_effective);
 
         // O8 phase 1 (BEFORE the solve): apply the wake conditions and build the
         // body→awake mask from last frame's sleep flags. This decides which islands
@@ -3003,14 +4735,103 @@ impl ColoredSoftStepSolver {
         let n_rows = scratch.bodies_len();
         let sleeping_active = sleep.is_some();
         if let Some(sleep) = sleep.as_mut() {
-            sleep.begin_step(graph, n_rows);
+            let _z = zone!(PHYS_SLEEP_BEGIN);
+            match wake_upto {
+                Some(upto) => sleep.begin_step_upto(graph, n_rows, upto),
+                None => sleep.begin_step(graph, n_rows),
+            }
+            // L10 A1.1 (design 04 D9): the awake mask is now this gather's; the next
+            // broadphase's resting test trusts it only with this stamp.
+            sleep.stamp_mask(&scratch.rows);
         }
         // An immutable view used by `build_columns` (SOLVE skip) + the integrate
         // freeze; `None` when sleeping is off so the path is byte-identical.
         let sleep_view: Option<&IslandSleep> = sleep.as_deref();
 
-        self.build_bodies(scratch.bodies());
-        self.build_columns(manifolds, graph, scratch.bodies(), sleep_view);
+        // W8S instrument 4, armed only: S6's hit counter, read while the tag column still holds
+        // the previous step's tags.
+        if zone_enabled!(PHYS_S6_GRAPH_HIT) {
+            self.s6_probe(manifolds, graph, scratch, held.as_ref(), sleep_view, config.sleeping);
+        }
+
+        let (fill, warm_remap) = {
+            let build_zone = zone!(PHYS_SOLVE_BUILD);
+            self.canary.at(&PHYS_SOLVE_BUILD, build_zone.is_some());
+            let cls: &[RowCls] = held.as_ref().map_or(&[], |h| h.cls);
+            let warm_remap = {
+                let bodies_zone = zone!(PHYS_SB_BODIES);
+                self.canary.at(&PHYS_SB_BODIES, bodies_zone.is_some());
+                self.build_bodies(scratch.bodies(), cls);
+                // Ruling W1: the write guards read the effective inverse mass of the flag the
+                // colouring read, so a held row is immovable to both.
+                debug_assert!(
+                    cls.iter().zip(self.bodies.as_read_slice()).all(|(c, e)| !c.is_held() || e.inv_mass == 0.0),
+                    "invariant: a held row's effective inverse mass is 0 (design 04 D8, ruling W1)"
+                );
+                // Warm start is classified only on a warm step: a cold step never reads or stores
+                // the records, so `Identity` is a placeholder that takes no per-manifold branch, and
+                // its cursor never counts a phantom `Reset`.
+                if self.warm_effective {
+                    self.warm_cursor.remap(&scratch.rows)
+                } else {
+                    RowRemap::Identity
+                }
+            };
+            let restore = held.as_ref().and_then(|h| h.restore);
+            let built = self.build_columns(
+                manifolds,
+                graph,
+                scratch.bodies(),
+                sleep_view,
+                warm_remap,
+                restore,
+                config.parallel_solve,
+            );
+            if let Some(h) = held.as_mut() {
+                h.rules.restore_rec_searches += u64::from(built.restore_searches);
+                h.rules.restore_rec_hits += u64::from(built.restore_hits);
+            }
+            (built.fill, warm_remap)
+        };
+        // V2: the step's accumulated movement starts at `(0, IDENTITY)` before its first sweep —
+        // serially here, or on a region step by its first substep's gravity stage (SR C5).
+        if spec {
+            self.reset_deltas(scratch.bodies_len(), fill.is_some());
+        }
+        // L11 C0: the setup digest is taken here, over the seeds the sweeps have not
+        // yet touched; the step's warm stats are folded in after the store. A region step fills
+        // in its region and takes the digest there, right after its fill (SR).
+        #[cfg(test)]
+        if fill.is_none() {
+            self.step_digest = self.columns.setup_digest();
+        }
+        // Profiling: this step's slot totals by color class, the denominators of the
+        // per-color spans. One pass over the color CSR, and only while armed.
+        if zone_enabled!(PHYS_SLOTS_WIDE) {
+            let (wide, narrow) = self.columns.slots_by_width();
+            counter!(PHYS_SLOTS_WIDE, wide);
+            counter!(PHYS_SLOTS_NARROW, narrow);
+            // W8S instrument 3: the colour histogram, from the same CSR.
+            self.columns.push_histogram();
+        }
+
+        // L10 C3a (design 06 D-A, 08 A1′/O10): the no-awake fast path. With sleeping on, no
+        // dynamic row awake and no point laid out, the freeze capture, the substep loop, the
+        // restitution pass and the freeze restore change no state: every row the loop integrates
+        // is a frozen row the restore puts back (with its velocity), no cohort is swept, and the
+        // write-back skips every frozen row. So they are skipped, and what does change state
+        // still runs, in order: the build above (P-a's write-side keys, the tags, the empty
+        // layout), the store's carry and swap and the cursor's stamp, the write-back and
+        // `end_step`. A manifold with no dynamic side is solved on every step, so a layout with a
+        // point keeps the full path.
+        let fast = self.columns.len() == 0
+            && sleep_view.is_some_and(|sleep| Self::no_awake_dynamic_row(sleep, scratch.bodies()));
+        self.fast_path_steps += u64::from(fast);
+        if let Some(h) = held.as_mut()
+            && !h.cls.is_empty()
+        {
+            h.stats.fast_path = u32::from(fast);
+        }
 
         // O8 integrate-freeze (INTEGRATE half): capture the pre-solve hot state of
         // every slept-island body so the per-substep integrate (which streams the
@@ -3018,16 +4839,22 @@ impl ColoredSoftStepSolver {
         // slept rows after the loop. This freezes a slept body's position / rotation /
         // velocity without touching the audited integrate kernels. `frozen` is
         // capacity-reused (empty when sleeping is off — the byte-identical path).
-        self.frozen.clear();
-        if let Some(sleep) = sleep_view {
-            for (row, b) in scratch.bodies().iter().enumerate() {
-                if b.inv_mass == 0.0 {
-                    // Static rows are no-ops to the integrate kernels (the
-                    // `inv_mass != 0` guard) — no need to snapshot them.
-                    continue;
-                }
-                if !sleep.is_row_awake(row) {
-                    self.frozen.push((row as u32, *b));
+        if !fast {
+            let mut frozen = self.frozen.build_view();
+            frozen.clear();
+            if let Some(sleep) = sleep_view {
+                let _z = zone!(PHYS_SLEEP_FREEZE);
+                let eff = self.bodies.as_read_slice();
+                for (row, b) in scratch.bodies().iter().enumerate() {
+                    if eff[row].inv_mass == 0.0 {
+                        // Static rows are no-ops to the integrate kernels (the
+                        // `inv_mass != 0` guard) — no need to snapshot them. So are the rows
+                        // L10 holds (design 04 D8: their effective inverse mass is `0`).
+                        continue;
+                    }
+                    if !sleep.is_row_awake(row) {
+                        frozen.push((row as u32, *b));
+                    }
                 }
             }
         }
@@ -3038,95 +4865,236 @@ impl ColoredSoftStepSolver {
         // inertia refresh).
         let use_simd = config.simd;
         // O7: gates the cohort-batched colored CONTACT SOLVE — a SEPARATE flag from
-        // O1's `simd` so the solve widen has independent A/B + rollback. Default OFF
-        // ⇒ the scalar `solve_color` oracle (the O6 0%-gate, byte-identical).
+        // O1's `simd` so the solve widen has independent A/B + rollback. Default ON
+        // since 2026-09-18; `false` selects the scalar `solve_color` oracle, which
+        // produces the same bits.
         let use_simd_solve = config.simd_solve;
-        // O6: parallel per-color dispatch when opted in. The result is bit-identical
-        // to the single-threaded colored solve for any worker count (disjoint-body
-        // groups + canonical warm store); when off it is BYTE-IDENTICAL to O5.
+        // O6 / SR: the parallel solve when opted in. A step whose parallel gate holds runs its
+        // substeps as one solve region (below); the result is bit-identical to the
+        // single-threaded colored solve for any worker count (disjoint-body groups + a warm store
+        // written by manifold index), and every other step runs the loop below, BYTE-IDENTICAL
+        // to O5.
         //
-        // P2 large-island gate: even with `parallel_solve` opted in, a step whose
-        // LARGEST island is below `LARGE_ISLAND_CONSTRAINTS` cannot produce a color
-        // worth a `pool.scope` dispatch — the largest color is bounded by the largest
-        // island's manifold count, so no color can clear the solver's per-color
-        // `MIN_PARALLEL_SLOTS_PER_COLOR` dispatch floor. Force the byte-identical
-        // single-threaded path so the whole solve skips the ambient-pool probe + the
-        // per-color span checks every pass (the build_graph + dispatch overhead the
-        // analysis flags as pure loss below the crossover). This changes only WHERE
-        // the colored solve runs, NEVER the bits: the inline / single-threaded path is
-        // the SAME `solve_color` the `parallel == false` fallback uses, and the
-        // {1, N}-worker bit-identity property makes large-island parallel == this. The
-        // metric is a single scalar compare on a count `build_graph` already folded in
-        // (zero extra pass). `[ESTIMATE]` threshold — P10 calibrates it (see the const).
-        let parallel =
-            config.parallel_solve && graph.max_island_constraints() >= LARGE_ISLAND_CONSTRAINTS;
+        // P2 whole-solve dispatch gate (`build_columns`, once per step, right after P-b): even
+        // with `parallel_solve` opted in, a step whose WIDEST COLOR cannot clear the region
+        // grain's wide floor has no color worth a parallel stage, so the region is pure loss and
+        // the step runs the byte-identical single-threaded loop. This changes only WHERE the
+        // colored solve runs, NEVER the bits.
+        //
+        // ⚠ THE METRIC WAS WRONG UNTIL P2, AND IT WAS WRONG IN THE EXPENSIVE DIRECTION. It used
+        // `graph.max_island_constraints() >= LARGE_ISLAND_CONSTRAINTS`, on the stated premise
+        // that "the largest color is bounded by the largest island's manifold count". It is not.
+        // A color is a set of BODY-DISJOINT manifolds, and manifolds in DIFFERENT islands are
+        // always body-disjoint — so `n` disjoint pairs are `n` islands of ONE manifold each AND a
+        // single color of `n` slots. Island size bounds color width from below not at all, and
+        // the old gate therefore forced the single-threaded path on precisely the most parallel
+        // scenes the solver can be handed: every many-pile, many-debris, many-ragdoll world.
+        // Regression-gated by `many_disjoint_pairs_are_one_wide_color_and_must_dispatch`.
+        //
+        // L4 lanes term: a pool of ONE worker has nothing to parallelise with, so P2 asks for two
+        // lanes or more — one thread-local read per step, never per color — and with
+        // `parallel_solve` on by default a W=1 world runs exactly the path of
+        // `parallel_solve == false`. `num_threads()`, never `+ 1`, for the reason
+        // `BroadphaseGrid::build_parallel` gives (KE16 App-1). No pool attached ⇒ inline. Gated
+        // red-first by `one_worker_parallel_solve_takes_the_inline_path`.
+        debug_assert!(
+            fill.is_none() || !fast,
+            "invariant: a region step laid out a cohort (`build_columns` admits none without), so it is never the fast path"
+        );
 
-        for _ in 0..substeps {
+        // SR (phase B): a step whose build handed its fill over (the parallel gate holding) runs
+        // the fill and its substeps as ONE region (`solve_region`) instead of the loop below.
+        let (region_report, region_store) = match &fill {
+            Some(fill) => {
+                let (report, counts, stored) = self.solve_region(
+                    scratch,
+                    &RegionStep {
+                        bias_rate: soft.bias_rate,
+                        mass_coeff: soft.mass_coeff,
+                        impulse_coeff: soft.impulse_coeff,
+                        inv_h,
+                        spec,
+                        gravity,
+                        h,
+                        simd: use_simd,
+                        simd_solve: use_simd_solve,
+                        substeps,
+                        biased: 1,
+                        relax: config.relax_iterations,
+                    },
+                    fill,
+                    RegionSources {
+                        manifolds,
+                        restore: held.as_ref().and_then(|h| h.restore),
+                        remap: warm_remap,
+                    },
+                );
+                // L10's restore counts (critique O6): the ranges' searches exist only after the
+                // region's END.
+                if let Some(h) = held.as_mut() {
+                    h.rules.restore_rec_searches += u64::from(counts.restore_searches);
+                    h.rules.restore_rec_hits += u64::from(counts.restore_hits);
+                }
+                (Some(report), stored)
+            }
+            None => (None, false),
+        };
+
+        // L10 C3a: the fast path runs no substep; a region step ran them in its region.
+        let passes = if fast || region_report.is_some() { 0 } else { substeps };
+        for _ in 0..passes {
             // (1) Gravity integrate DYNAMIC bodies (shared O1 kernel). Single-
             // threaded — the BodyEffective build view's mut slice (no parallel
             // access in the integrate kernels).
             {
+                let _z = zone!(PHYS_GRAVITY);
                 let mut view = self.bodies.build_view();
                 simd::apply_gravity(view.as_mut_slice(), scratch.bodies(), gravity, h, use_simd);
             }
 
             // (2) Warm-start apply. The colored sweeps reach bodies through the body
-            // SOLVE VIEW and the contacts through the contact SOLVE VIEW (per-element
-            // base+index) — single-threaded here, parallel in `solve_all_colors`; the
-            // views are the SAME surface either way (the P1/P2 structural fix: no
-            // whole-buffer reborrow on any contact / body path).
-            Self::warm_start_apply(self.columns.solve_view(), self.bodies.solve_view());
+            // SOLVE VIEW — single-threaded here, parallel in the solve region's stages
+            // (`SolveStages`); the body view is the SAME surface either way (the P1 structural fix: no
+            // whole-buffer reborrow on any body path). The cohort tables are read
+            // through shared slices: no worker is live. `use_simd_solve` forks the
+            // apply's SHAPE only (C3, D7): the 8-lane apply is bit-identical to the
+            // group-major oracle, and it is the same flag the sweep kernel forks on,
+            // so a step never mixes the two.
+            {
+                let _z = zone!(PHYS_WARM_APPLY);
+                Self::warm_start_apply(
+                    &self.columns,
+                    self.bodies.solve_view(),
+                    use_simd_solve,
+                    0,
+                    self.columns.heads.len(),
+                );
+            }
 
             // (3)+(4) Soft normal + friction sweep ACROSS colors (Gauss-Seidel).
-            Self::solve_all_colors(
-                &self.columns,
-                self.bodies.solve_view(),
-                soft.bias_rate,
-                soft.mass_coeff,
-                soft.impulse_coeff,
-                true,
-                parallel,
-                use_simd_solve,
-            );
+            {
+                let _z = zone!(PHYS_PASS_BIASED);
+                let step = SolveStep {
+                    bias_rate: soft.bias_rate,
+                    mass_coeff: soft.mass_coeff,
+                    impulse_coeff: soft.impulse_coeff,
+                    inv_h,
+                    spec,
+                    deltas: self.deltas.solve_view(),
+                };
+                Self::solve_all_colors(
+                    &self.columns,
+                    self.bodies.solve_view(),
+                    &step,
+                    true,
+                    use_simd_solve,
+                );
+            }
 
             // (5) Position integrate (scalar — the reference's MEASURED-SCALAR
             // choice for the AoS `BodyState`) then refresh the world inertia. The
             // BodyEffective read slice + the BodyState mut slice are distinct
             // ScratchColumns (no borrow conflict).
             {
-                let mut snap_view = scratch.bodies.build_view();
-                simd::position_integrate(
-                    self.bodies.as_read_slice(),
-                    snap_view.as_mut_slice(),
-                    h,
-                    false,
-                );
-            }
-            {
-                let mut view = self.bodies.build_view();
-                simd::refresh_inertia(view.as_mut_slice(), scratch.bodies(), use_simd);
+                let _z = zone!(PHYS_INTEGRATE);
+                {
+                    let mut snap_view = scratch.bodies.build_view();
+                    if spec {
+                        // V2: the same integrate, which also advances each moved row's step
+                        // movement for the speculative current separation — no new stage.
+                        let mut delta_view = self.deltas.build_view();
+                        simd::position_integrate_tracked(
+                            self.bodies.as_read_slice(),
+                            snap_view.as_mut_slice(),
+                            delta_view.as_mut_slice(),
+                            h,
+                        );
+                    } else {
+                        simd::position_integrate(
+                            self.bodies.as_read_slice(),
+                            snap_view.as_mut_slice(),
+                            h,
+                            false,
+                        );
+                    }
+                }
+                {
+                    let mut view = self.bodies.build_view();
+                    simd::refresh_inertia(view.as_mut_slice(), scratch.bodies(), use_simd);
+                }
             }
 
             // (6) Relax: re-solve bias-free to remove soft-bias energy.
+            let step = SolveStep {
+                bias_rate: soft.bias_rate,
+                mass_coeff: soft.mass_coeff,
+                impulse_coeff: soft.impulse_coeff,
+                inv_h,
+                spec,
+                deltas: self.deltas.solve_view(),
+            };
             for _ in 0..config.relax_iterations {
+                let _z = zone!(PHYS_PASS_RELAX);
                 Self::solve_all_colors(
                     &self.columns,
                     self.bodies.solve_view(),
-                    soft.bias_rate,
-                    soft.mass_coeff,
-                    soft.impulse_coeff,
+                    &step,
                     false,
-                    parallel,
                     use_simd_solve,
                 );
             }
         }
 
-        // Post-loop restitution (ONCE, velocity-only, bias-free).
-        Self::apply_restitution(&mut self.columns, self.bodies.solve_view());
+        // SR: one sample of each region counter per solving step, armed only (every physics zone
+        // is `Deep` on the root scope).
+        if zone_enabled!(PHYS_REGION_OPENS) {
+            push_region_counters(region_report);
+        }
 
-        // IM-2b: store converged impulses in canonical order, then swap.
-        self.store_and_swap();
+        // Post-loop restitution (ONCE, velocity-only, bias-free); not on the fast path, which
+        // lays out no point. A region step whose store ran in the region had no row that could
+        // bounce: the pass has no work, and its span stays (one per step) with an empty body.
+        if !fast {
+            let _z = zone!(PHYS_RESTITUTION);
+            if !region_store {
+                Self::apply_restitution(
+                    &mut self.columns,
+                    self.bodies.solve_view(),
+                    &mut self.counters,
+                    spec,
+                );
+            }
+        }
+
+        // D3: store every manifold's record by index, carry the frozen manifolds'
+        // points (B1), then swap the sides. A region step whose store ran in the region (its span
+        // opened there, the Store item's hook) leaves the capture and the swap.
+        {
+            let _z = if region_store { None } else { zone!(PHYS_STORE) };
+            // L10 A1′ (design 08 O10): the move-in capture, before the swap, on both paths.
+            if let Some(h) = held.as_mut() {
+                let remap = self.warm_cursor.peek(&scratch.rows);
+                self.capture_moved_in(remap, h);
+            }
+            if region_store {
+                self.swap_and_stamp(&scratch.rows);
+            } else {
+                let restore = held.as_ref().and_then(|h| h.restore);
+                self.store_and_swap(&scratch.rows, manifolds, restore);
+            }
+            // L10 E6′ (design 06): the logical carry adds the held store's points and hits —
+            // `Off` carries the same frozen manifolds' records every step with the same hits.
+            if let Some(h) = held.as_ref()
+                && self.warm_effective
+            {
+                self.warm_stats.carry_points += h.held.live_points();
+                self.warm_stats.carry_hits += *h.held_warm;
+            }
+        }
+        #[cfg(test)]
+        {
+            self.step_digest = fnv_warm_stats(self.step_digest, &self.warm_stats);
+        }
 
         // O8 integrate-freeze RESTORE: undo the integrate on slept rows by restoring
         // their captured pre-solve hot state into `scratch.bodies` (position /
@@ -3134,13 +5102,15 @@ impl ColoredSoftStepSolver {
         // matching `BodyEffective` velocity (which `write_back` would copy out) is also
         // restored so the slept body keeps its frozen velocity. Then `write_back` is
         // told to SKIP slept rows, so `physics_apply` leaves the live component
-        // untouched (frozen) — and the gather-walked-every-row IM-1 invariant holds.
-        if sleeping_active {
+        // untouched (frozen) — and the gather-walked-every-row IM-1 invariant holds. The fast
+        // path captured nothing and integrated nothing, so it has nothing to restore.
+        if sleeping_active && !fast {
+            let _z = zone!(PHYS_SLEEP_FREEZE);
             let mut snap_view = scratch.bodies.build_view();
             let snapshot = snap_view.as_mut_slice();
             let mut eff_view = self.bodies.build_view();
             let eff_rows = eff_view.as_mut_slice();
-            for &(row, snap) in &self.frozen {
+            for &(row, snap) in self.frozen.as_read_slice() {
                 let r = row as usize;
                 snapshot[r] = snap;
                 let eff = &mut eff_rows[r];
@@ -3152,10 +5122,13 @@ impl ColoredSoftStepSolver {
         // Write the solved velocities back and flag integrated DYNAMIC rows. With
         // sleeping on, slept rows are skipped (their `awake_rows` bit is clear), so the
         // frozen rows are never flagged touched — `physics_apply` leaves them be.
-        if let Some(sleep) = sleep.as_deref() {
-            self.write_back_awake(scratch, sleep);
-        } else {
-            self.write_back(scratch);
+        {
+            let _z = zone!(PHYS_WRITE_BACK);
+            if let Some(sleep) = sleep.as_deref() {
+                self.write_back_awake(scratch, sleep);
+            } else {
+                self.write_back(scratch);
+            }
         }
 
         // O8 phase 2 (AFTER the solve): accumulate this frame's per-island energy from
@@ -3163,8 +5136,1178 @@ impl ColoredSoftStepSolver {
         // transition for next frame. The mutable reborrow is sound: `sleep_view` (the
         // immutable view) is dead after the freeze capture.
         if let Some(sleep) = sleep.as_mut() {
+            let _z = zone!(PHYS_SLEEP_END);
             sleep.end_step(scratch.bodies(), graph, config.sleep_threshold, config.sleep_frames);
         }
+    }
+}
+
+// ── SR phase B: the solve region (`levers/scaling/02-SR-DESIGN.md` §2) ─────────────────────────
+
+/// SR: the solve region's grain — every term that decides how many blocks an entry of the
+/// region's table gets (critique r1 W1: every term is a knob, so a test can force a multi-block
+/// entry of every kind on a small scene).
+///
+/// Value-neutral: within a colour the manifold-groups touch disjoint dynamic bodies, the body
+/// stages are row-local, and a cohort partition of a colour's warm start keeps every body's adds
+/// in order, so a grain changes only WHERE work runs, never a bit. [`RegionGrain::DEFAULT`]
+/// reproduces the cuts the per-colour scopes made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionGrain {
+    /// A colour of at least this many contact points is cut into blocks; a narrower one runs as
+    /// one block on the region's orchestrator, in colour order (KD8). The step's parallel gate
+    /// (P2) reads it too: a step whose widest colour is under it opens no region.
+    pub wide_floor: u32,
+    /// The fewest points a colour block carries (the colour cut's work floor).
+    pub colour_min_points: u32,
+    /// The most blocks per participant of a colour entry, `1..=8` (the colour cut's lanes
+    /// factor).
+    pub max_bpp: u32,
+    /// The most blocks per participant of a body entry (gravity, integrate), `1..=8`.
+    pub body_bpp: u32,
+    /// The fewest rows a body block carries, rounded up to whole 8-row groups.
+    pub body_rows: u32,
+    /// The fewest laid-out points a Fill or Store block carries (S4's setup floor).
+    pub fill_points: u32,
+}
+
+impl RegionGrain {
+    /// The per-colour scopes' cuts: the inline floor, the colour cut's work floor and lanes
+    /// factor, one body block per participant of at least 32 rows, S4's setup floor.
+    pub const DEFAULT: Self = Self {
+        wide_floor: MIN_PARALLEL_SLOTS_PER_COLOR,
+        colour_min_points: MIN_SLOTS_PER_CHUNK as u32,
+        max_bpp: CHUNKS_PER_WORKER as u32,
+        body_bpp: 1,
+        body_rows: 32,
+        fill_points: SETUP_MIN_POINTS_PER_CHUNK as u32,
+    };
+
+    /// Whether every term is in range: every floor at least 1, and both per-participant factors
+    /// in `1..=`[`REGION_MAX_BLOCKS_PER_PARTICIPANT`] (the region asserts `n_blocks ≤ 8 · P` at
+    /// publish).
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        self.wide_floor >= 1
+            && self.colour_min_points >= 1
+            && self.max_bpp >= 1
+            && self.max_bpp <= REGION_MAX_BLOCKS_PER_PARTICIPANT
+            && self.body_bpp >= 1
+            && self.body_bpp <= REGION_MAX_BLOCKS_PER_PARTICIPANT
+            && self.body_rows >= 1
+            && self.fill_points >= 1
+    }
+}
+
+impl Default for RegionGrain {
+    #[inline]
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// SR, Miri: one stage kind's share of the regions run so far — the blocks the helpers ran
+/// (participants other than 0) and the most blocks one entry of the kind had. The per-kind guard
+/// of the Miri legs (critique W2) reads it; natively it does not exist.
+#[cfg(miri)]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RegionKindCount {
+    /// The stage kind's name.
+    pub kind: &'static str,
+    /// Blocks of the kind the helpers ran.
+    pub helper_blocks: u64,
+    /// The most blocks one entry of the kind had.
+    pub max_blocks: u32,
+}
+
+/// SR, test builds under Miri: how the region is started (the cut's §2.6). `Threads(n)` runs it
+/// on `n` scoped std threads through `boyko_threadpool::region_on_threads` and needs no pool: the
+/// Stacked Borrows leg, which cannot run the pool (phase A's finding).
+#[cfg(all(test, miri))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RegionRoute {
+    /// The ambient pool, as production runs it.
+    #[default]
+    Pool,
+    /// This many scoped std threads.
+    Threads(u32),
+}
+
+/// SR: the solve region's frame and table, in the solver Resource's own columns (Principle 0;
+/// `02-SR-DESIGN.md` §1.1). The four line groups are four separate columns, never one merged
+/// one. Every column is grown serially before a region and never shrunk (phase A's carried W3
+/// obligation): a done line therefore never shrinks below its high-water mark and back, and the
+/// hint scratch is sized at its high-water mark.
+struct RegionColumns {
+    /// The sync line (publish, poison): one line.
+    sync: ScratchColumn<RegionLine>,
+    /// One done line per entry.
+    done: ScratchColumn<RegionLine>,
+    /// One receipt line per participant.
+    receipts: ScratchColumn<RegionLine>,
+    /// One claim line per block of every published entry (`V2Policy`).
+    claims: ScratchColumn<RegionLine>,
+    /// The stage table.
+    entries: ScratchColumn<StageEntry>,
+    /// The schedule.
+    schedule: ScratchColumn<SchedItem>,
+    /// Every entry's block boundaries: block `b` of an entry spans `cuts[first_cut + b] ..
+    /// cuts[first_cut + b + 1]` (rows, cohorts or groups, by kind).
+    cuts: ScratchColumn<u32>,
+    /// `link_hints`' scratch: one slot per entry.
+    hints: ScratchColumn<u32>,
+    /// The claim column's epoch counter (ruling 17 A3): created with the column, never reset, so it
+    /// is at or above every epoch the claim lines hold.
+    epoch: u64,
+}
+
+impl RegionColumns {
+    /// Empty columns on the region's ids, the layouts registered first.
+    fn new() -> Self {
+        register_scratch_layouts();
+        let rows = |stride: usize| scratch_reserve_rows(stride);
+        Self {
+            sync: ScratchColumn::new(region_line_id(), rows(size_of::<RegionLine>())),
+            done: ScratchColumn::new(region_line_id(), rows(size_of::<RegionLine>())),
+            receipts: ScratchColumn::new(region_line_id(), rows(size_of::<RegionLine>())),
+            claims: ScratchColumn::new(region_line_id(), rows(size_of::<RegionLine>())),
+            entries: ScratchColumn::new(region_entry_id(), rows(size_of::<StageEntry>())),
+            schedule: ScratchColumn::new(region_sched_id(), rows(size_of::<SchedItem>())),
+            cuts: ScratchColumn::new(region_u32_id(), rows(size_of::<u32>())),
+            hints: ScratchColumn::new(region_u32_id(), rows(size_of::<u32>())),
+            epoch: 0,
+        }
+    }
+}
+
+/// Grows `col` to at least `n` elements of `zero`, never shrinking it.
+#[inline]
+fn grow_to<T: Copy + 'static>(col: &mut ScratchColumn<T>, n: usize, zero: T) {
+    if col.len() < n {
+        col.build_view().resize(n, zero);
+    }
+}
+
+/// SR: what a step's region takes from `solve_colored_inner`, besides the solver's own columns.
+#[derive(Clone, Copy)]
+struct RegionStep {
+    /// The soft coefficients' bias rate.
+    bias_rate: f32,
+    /// The soft coefficients' mass scale.
+    mass_coeff: f32,
+    /// The soft coefficients' impulse decay.
+    impulse_coeff: f32,
+    /// `1 / h`.
+    inv_h: f32,
+    /// V2's speculative branch runs.
+    spec: bool,
+    /// `PhysicsConfig::gravity`.
+    gravity: Vec3,
+    /// The substep.
+    h: f32,
+    /// `PhysicsConfig::simd`: the gravity and inertia kernels' shape.
+    simd: bool,
+    /// `PhysicsConfig::simd_solve`: the warm apply's and the sweeps' shape, and the colour cut's
+    /// cohort snapping.
+    simd_solve: bool,
+    /// Substeps.
+    substeps: u32,
+    /// Biased passes per substep.
+    biased: u32,
+    /// Relax passes per substep.
+    relax: u32,
+}
+
+/// SR: one built table's sizes.
+#[derive(Clone, Copy, Debug)]
+struct RegionTable {
+    /// Entries.
+    entries: usize,
+    /// Schedule items.
+    items: usize,
+    /// Claim lines.
+    claims: usize,
+}
+
+/// SR: gravity on a row range (substeps 2..S).
+const SK_GRAVITY: u8 = 0;
+/// SR: one colour's warm start, on a cohort range.
+const SK_WARM: u8 = 1;
+/// SR: one colour's biased sweep, on a group range.
+const SK_BIASED: u8 = 2;
+/// SR: integrate and the inertia refresh, on a row range.
+const SK_INTEGRATE: u8 = 3;
+/// SR: one colour's relax sweep, on a group range.
+const SK_RELAX: u8 = 4;
+/// SR: the fill (P-c, the region's stage 0, KD5), on a cohort range.
+const SK_FILL: u8 = 5;
+/// SR: the warm store (pass 1 on a cohort range, pass 2's carry on a manifold range), the region's
+/// last stage on a step where no row can bounce.
+const SK_STORE: u8 = 6;
+/// SR: the first substep's gravity on a row range, which on a speculative step also resets the
+/// rows' accumulated movement (V2's per-step reset, folded here because it precedes the first
+/// sweep; SR C5).
+const SK_GRAVITY_FIRST: u8 = 7;
+/// SR, test builds: the setup digest, one inline block right after the fill (`step_digest`'s
+/// "seeds before the first sweep").
+#[cfg(test)]
+const SK_DIGEST: u8 = 8;
+/// SR, Miri: the stage kinds the per-kind tally counts.
+#[cfg(miri)]
+const SK_COUNT: usize = 9;
+/// SR: each kind's name, by kind.
+#[cfg(miri)]
+const SK_NAMES: [&str; SK_COUNT] =
+    ["gravity", "warm", "biased", "integrate", "relax", "fill", "store", "gravity_first", "digest"];
+
+/// SR: the gravity entry's index (the table's fixed entries come first): substeps 2..S.
+const E_GRAVITY: u16 = 0;
+/// SR: the first substep's gravity entry — its own entry, with its own done line and claim lines,
+/// because a block is not told which item runs it (critique W1).
+const E_GRAVITY_FIRST: u16 = 1;
+/// SR: the integrate entry's index.
+const E_INTEGRATE: u16 = 2;
+/// SR: the fill entry's index.
+const E_FILL: u16 = 3;
+/// SR: the store entry's index (scheduled only on a step where no row can bounce).
+const E_STORE: u16 = 4;
+/// SR, test builds: the digest entry's index.
+#[cfg(test)]
+const E_DIGEST: u16 = 5;
+/// SR: the first colour entry's index; colour `c`'s warm, biased and relax entries follow (the
+/// digest's entry sits before them in test builds).
+const E_COLOURS: usize = if cfg!(test) { 6 } else { 5 };
+
+/// SR: a step's stage table, built serially before its region — counted loops over the colours
+/// and the passes, so IB's presets change only `substeps`, `biased` and `relax` (ruling 15).
+///
+/// The entries: gravity and integrate (one row cut both use), then per colour its warm start
+/// (a cohort cut), its biased sweep and its relax sweep (one group cut both use). The schedule,
+/// per substep: gravity, every colour's warm start in colour order, `biased` passes of every
+/// colour's biased sweep, integrate, `relax` passes of every colour's relax sweep — the serial
+/// loop's order. An entry is reused across its passes, one item each.
+struct TableBuilder<'v, 'c> {
+    entries: ScratchBuildView<'v, StageEntry>,
+    cuts: ScratchBuildView<'c, u32>,
+    claims: u32,
+    p: u32,
+}
+
+impl TableBuilder<'_, '_> {
+    /// Pushes an entry of `n_blocks` blocks whose cuts start at `first_cut`, its claim lines after
+    /// the previous entries'.
+    fn entry(&mut self, kind: u8, color: usize, n_blocks: usize, first_cut: usize) {
+        let n = u16::try_from(n_blocks).expect("invariant: an entry's blocks fit a u16 (at most 8 per participant)");
+        let color = u16::try_from(color).expect("invariant: the region path admits only colour indices a u16 names");
+        let first_cut = u32::try_from(first_cut).expect("invariant: the cut column holds fewer than 2^32 boundaries");
+        self.entries.push(StageEntry::new(kind, color, n, self.claims, first_cut));
+        self.claims += claim_lines::<V2Policy>(n, self.p);
+    }
+
+    /// Cuts rows `[0, rows)` into whole 8-row groups — `min(body_bpp · P, ⌈rows / body_rows⌉)`
+    /// blocks of at least `body_rows` rows rounded up to 8 — and returns the block count.
+    fn body_cuts(&mut self, rows: usize, grain: RegionGrain) -> usize {
+        let unit = (grain.body_rows as usize).div_ceil(COHORT) * COHORT;
+        let n = (grain.body_bpp as usize * self.p as usize).min(rows.div_ceil(unit)).max(1);
+        let per = rows.div_ceil(n).div_ceil(COHORT) * COHORT;
+        let mut lo = 0usize;
+        self.cuts.push(0);
+        let mut blocks = 0usize;
+        while lo < rows {
+            lo = (lo + per).min(rows);
+            self.cuts.push(lo as u32);
+            blocks += 1;
+        }
+        blocks
+    }
+
+    /// Cuts a colour's groups `[g_lo, g_hi)` into at most `n_target` blocks by point quota (the
+    /// per-colour scopes' walk), each a whole number of groups and, under `simd`, a whole number
+    /// of cohorts from the colour's first group. Returns the block count.
+    fn colour_cuts(&mut self, group_start: &[u32], g_lo: usize, g_hi: usize, n_target: usize, simd: bool) -> usize {
+        let total = (group_start[g_hi] - group_start[g_lo]) as usize;
+        let target = total.div_ceil(n_target).max(1);
+        let step = if simd { COHORT } else { 1 };
+        self.cuts.push(g_lo as u32);
+        let (mut lo, mut blocks) = (g_lo, 0usize);
+        while lo < g_hi {
+            let start = group_start[lo] as usize;
+            let mut hi = (lo + step).min(g_hi);
+            while hi < g_hi && (group_start[hi] as usize) - start < target {
+                hi = (hi + step).min(g_hi);
+            }
+            self.cuts.push(hi as u32);
+            blocks += 1;
+            lo = hi;
+        }
+        blocks
+    }
+
+    /// Cuts cohorts `[k_lo, k_hi)` into at most `n_target` ranges by point quota (S4's setup cut's
+    /// walk). Returns the range count.
+    fn cohort_cuts(&mut self, heads: &[CohortHead], k_lo: usize, k_hi: usize, n_target: usize) -> usize {
+        let points = |h: &CohortHead| h.width[..h.nlanes as usize].iter().map(|&w| usize::from(w)).sum::<usize>();
+        let total: usize = heads[k_lo..k_hi].iter().map(points).sum();
+        let target = total.div_ceil(n_target).max(1);
+        self.cuts.push(k_lo as u32);
+        let (mut n, mut lo, mut acc) = (0usize, k_lo, 0usize);
+        for (k, h) in heads.iter().enumerate().take(k_hi).skip(k_lo) {
+            acc += points(h);
+            if acc >= target && n + 1 < n_target {
+                self.cuts.push((k + 1) as u32);
+                n += 1;
+                lo = k + 1;
+                acc = 0;
+            }
+        }
+        if lo < k_hi {
+            self.cuts.push(k_hi as u32);
+            n += 1;
+        }
+        n
+    }
+}
+
+/// SR: one step's region work, block by block (`02-SR-DESIGN.md` §2.4) — `Copy` views and the
+/// read-only table, never a reference over a column a stage writes.
+///
+/// # The W5 rule
+///
+/// `solve_region` takes no `&[BodyState]` / `&[BodyEffective]` and this struct holds none: a
+/// shared reference that spanned the region would be protected for the whole call, and the
+/// gravity and integrate blocks' row writes would violate its protector under Stacked and Tree
+/// Borrows whether or not it was read again. Every body slice a block needs is formed inside the
+/// block from a raw view, over the block's own rows, and dies at the block's end.
+struct SolveStages<'a> {
+    /// The stage table (read-only while the region is open).
+    entries: &'a [StageEntry],
+    /// The schedule (the hooks read it).
+    schedule: &'a [SchedItem],
+    /// Every entry's block boundaries.
+    cuts: &'a [u32],
+    /// The cohort tables: the warm kernels read their heads and blocks through it, and the
+    /// colour CSRs place a colour; no stage writes the struct's own bytes.
+    cols: &'a CohortColumns,
+    /// The sweeps' raw cohort view.
+    view: CohortSolveView<'a>,
+    /// The body rows.
+    bodies: ScratchSolveView<'a, BodyEffective>,
+    /// The gather snapshot (`SolverScratch::bodies`).
+    snapshot: ScratchSolveView<'a, BodyState>,
+    /// The step's solve parameters, the delta view among them.
+    step: SolveStep<'a>,
+    /// `PhysicsConfig::gravity`.
+    gravity: Vec3,
+    /// The substep.
+    h: f32,
+    /// The gravity and inertia kernels' shape.
+    simd: bool,
+    /// The warm apply's and the sweeps' shape.
+    simd_solve: bool,
+    /// The last colour's index (the hooks close a pass's span after it).
+    last_colour: u16,
+    /// The fill's inputs (stage 0).
+    fill: FillParts<'a>,
+    /// The store's inputs (the last stage, on a step where no row can bounce).
+    store: StoreParts<'a>,
+    /// Participant 0's span slots (the hooks only; see [`RegionHooks`]).
+    hooks: *mut RegionHooks,
+    /// Miri: blocks the helpers ran, per kind.
+    #[cfg(miri)]
+    tally: &'a [core::sync::atomic::AtomicU64; SK_COUNT],
+}
+
+/// SR: what a Fill block needs besides the body rows — a [`FillCtx`]'s raw parts and shared views,
+/// less the two body slices, which each Fill block forms itself (the W5 rule). The raw bases are
+/// the tables' write-capable bases, taken after the step's last grow.
+#[derive(Clone, Copy)]
+struct FillParts<'a> {
+    heads: *mut CohortHead,
+    cold: *mut CohortCold,
+    blocks: *mut RankBlock,
+    vn0: *mut [f32; COHORT],
+    plan: *mut WarmRun,
+    tags: *mut ManifoldTag,
+    /// The write side's records, `None` with warm start off.
+    recs_w: Option<*mut WarmRecord>,
+    n_heads: usize,
+    n_blocks: usize,
+    manifolds: &'a [Manifold],
+    /// The read side's lookup.
+    lookup: WarmLookup<'a>,
+    /// L10's restore source's lookup, on a step that has one.
+    restore: Option<WarmLookup<'a>>,
+    /// How the warm store's cursor classifies this gather.
+    remap: RowRemap<'a>,
+    /// Shape F: the ranges search their own lanes' runs.
+    fused: bool,
+    /// One [`RangeOut`] slot per Fill block (`SETUP_MAX_TASKS` of them, on `solve_region`'s frame).
+    outs: *mut RangeOut,
+    /// Test builds: the setup digest's slot (on `solve_region`'s frame).
+    #[cfg(test)]
+    digest: *mut u64,
+}
+
+/// SR: what a Store block needs (`store_and_swap`'s two passes, split by range): the write side's
+/// record base, the manifolds, the carry's lookups, and one carry slot per Store block. The `plan`
+/// and `tags` slices the carry reads are formed in the block: the fill, earlier in the region,
+/// writes both through raw bases, and a shared slice held across it would be invalidated.
+#[derive(Clone, Copy)]
+struct StoreParts<'a> {
+    /// The write side's records (written per manifold: a solved one's impulses in pass 1, an
+    /// unsolved one's whole record in pass 2).
+    recs_w: *mut WarmRecord,
+    manifolds: &'a [Manifold],
+    /// The read side's lookup.
+    lookup: WarmLookup<'a>,
+    /// L10's restore source's lookup, on a step that has one.
+    restore: Option<WarmLookup<'a>>,
+    /// One carry-hit slot per Store block (`SETUP_MAX_TASKS` of them, on `solve_region`'s frame).
+    carry: *mut u32,
+}
+
+/// SR: the step's inputs the fill reads, from `solve_colored_inner`.
+#[derive(Clone, Copy)]
+struct RegionSources<'a> {
+    manifolds: &'a [Manifold],
+    restore: Option<&'a WarmRecords>,
+    remap: RowRemap<'a>,
+}
+
+// SAFETY: every participant calls `run_block` through a shared `&SolveStages`. What a block
+//   writes is its own for the item (`RegionStages::run_block`'s contract), by kind:
+//   * gravity / integrate: rows `[lo, hi)` of the body, snapshot and delta columns, and the cuts
+//     partition `[0, n_rows)`;
+//   * a warm start: the dynamic body rows of cohorts `[lo, hi)` of one colour, and the cuts
+//     partition the colour's cohorts, whose dynamic bodies are pairwise disjoint (O4); the static
+//     rows the colour's lanes share are only read (the movability guard);
+//   * a sweep: the impulse lanes of groups `[lo, hi)` of one colour and their dynamic bodies' rows,
+//     disjoint the same way (distinct groups of a colour touch disjoint dynamic bodies, O4, and
+//     the movability guard skips the shared static rows);
+//   * a fill: cohorts `[lo, hi)`, their rank rows and their lanes' `plan` / `tags` / record entries,
+//     and its own `outs` slot; the cuts partition the cohorts, each cohort owns consecutive ranks
+//     and each laid-out manifold is one lane of one cohort (`fill_range`'s contract), and the body
+//     rows it reads are written by no block of its item;
+//   * a store: the records of its cohort range's lanes' (solved) manifolds and of its manifold
+//     range's unsolved manifolds — two disjoint sets, each partitioned by the ranges — and its
+//     own carry slot; it reads the read side, the restore source, `plan`, `tags` and the rank
+//     blocks, which no block of its item writes;
+//   * the digest (test builds): its own slot, one inline block.
+//   No block writes the table, the cuts, the cohort heads outside the fill, the CSRs or the struct
+//   `cols` names, and two items never overlap (the region's barrier), so a block reads nothing
+//   another block of its item writes. The bases are address-stable `ScratchColumn` reservations
+//   taken after the step's last grow and outlive the region; the out slots live on
+//   `solve_region`'s frame, which outlives the region. `hooks` is dereferenced only by
+//   `item_begin` / `item_end`, which run on participant 0 alone. Under Miri the tally is atomics.
+unsafe impl Sync for SolveStages<'_> {}
+
+/// SR: participant 0's open spans during an armed region, and the in-zone canary its fill span
+/// carries. The region calls the hooks on participant 0 only, so the slots need no
+/// synchronisation; they live on `solve_region`'s frame. `ZoneGuard` closes its span on drop, so a
+/// slot set to `None` closes it.
+struct RegionHooks {
+    /// A substep's warm-start span or a pass's span.
+    outer: Option<ZoneGuard>,
+    /// A gravity, integrate, colour or fill span.
+    inner: Option<ZoneGuard>,
+    /// The solver's in-zone canary (W8S): `PHYS_SB_PC`'s follows its span into the fill's hook.
+    canary: *mut ZoneCanary,
+}
+
+impl SolveStages<'_> {
+    /// Gravity on rows `[lo, hi)`.
+    #[inline]
+    fn gravity_rows(&self, lo: usize, hi: usize) {
+        let n = hi - lo;
+        // SAFETY: `lo < hi <= n_rows` (the row cut) and both columns hold `n_rows` rows
+        //   (`build_bodies` filled the body column from the snapshot), so both ranges are live
+        //   rows on the columns' address-stable bases. Rows `[lo, hi)` are this block's alone for
+        //   the item (the cut partitions the rows; no other stage runs in the item), so the
+        //   exclusive slice aliases no access, and both slices die before the block returns.
+        let (eff, snap) = unsafe {
+            (
+                slice::from_raw_parts_mut(self.bodies.row_ptr(lo), n),
+                slice::from_raw_parts(self.snapshot.row_ptr(lo), n),
+            )
+        };
+        simd::apply_gravity(eff, snap, self.gravity, self.h, self.simd);
+    }
+
+    /// The position integrate (tracked on a speculative step) and the inertia refresh on rows
+    /// `[lo, hi)`.
+    #[inline]
+    fn integrate_rows(&self, lo: usize, hi: usize) {
+        let n = hi - lo;
+        // SAFETY: as `gravity_rows`: rows `[lo, hi)` are live on all three columns (the delta
+        //   column holds every row on a speculative step, `reset_deltas`) and this block's alone;
+        //   the body rows are read through the shared slice, which dies before the exclusive one
+        //   below is formed.
+        let snap = unsafe { slice::from_raw_parts_mut(self.snapshot.row_ptr(lo), n) };
+        {
+            // SAFETY: see above.
+            let eff = unsafe { slice::from_raw_parts(self.bodies.row_ptr(lo), n) };
+            if self.step.spec {
+                // SAFETY: see above.
+                let deltas = unsafe { slice::from_raw_parts_mut(self.step.deltas.row_ptr(lo), n) };
+                simd::position_integrate_tracked(eff, snap, deltas, self.h);
+            } else {
+                simd::position_integrate(eff, snap, self.h, false);
+            }
+        }
+        // SAFETY: see above.
+        let eff = unsafe { slice::from_raw_parts_mut(self.bodies.row_ptr(lo), n) };
+        simd::refresh_inertia(eff, snap, self.simd);
+    }
+
+    /// V2's per-step reset of rows `[lo, hi)`'s accumulated movement to `(0, IDENTITY)`: the first
+    /// substep's gravity stage on a speculative step (SR C5), before the step's first sweep.
+    #[inline]
+    fn reset_delta_rows(&self, lo: usize, hi: usize) {
+        debug_assert!(hi <= self.step.deltas.len(), "invariant: the step's reset sized the delta column to the rows");
+        // SAFETY: `lo < hi <= deltas.len()` (the row cut over `[0, n_rows)`; `reset_deltas` sized the
+        //   column to the rows before the region), so the range is live on the column's
+        //   address-stable base. Rows `[lo, hi)` are this block's alone for the item (the cut
+        //   partitions the rows; the item is the first substep's gravity, which no sweep and no
+        //   integrate shares), so the exclusive slice aliases no access, and it dies before the
+        //   block returns.
+        let deltas = unsafe { slice::from_raw_parts_mut(self.step.deltas.row_ptr(lo), hi - lo) };
+        deltas.fill(BodyDelta::ZERO);
+    }
+
+    /// The fill of cohorts `[lo, hi)` (P-c, stage 0): a block-local [`FillCtx`] over body slices
+    /// formed here from the raw views (the W5 rule), [`fill_range`](ColoredSoftStepSolver::fill_range),
+    /// and the range's report into Fill block `block`'s slot.
+    fn fill_block(&self, block: u32, lo: usize, hi: usize) {
+        let f = self.fill;
+        let n_rows = self.bodies.len();
+        debug_assert_eq!(n_rows, self.snapshot.len(), "invariant: one body row per gathered row");
+        // SAFETY: both columns hold `n_rows >= 1` live rows (a solving step has a dynamic body, and
+        //   `build_bodies` filled the body column from the snapshot); no block of the Fill item
+        //   writes either column (the fill reads the bodies only), and both slices die at this
+        //   block's end, before any later item's row writes — no shared reference to them spans
+        //   the region (the W5 rule).
+        let (bodies, bodies_eff) = unsafe {
+            (
+                slice::from_raw_parts(self.snapshot.row_ptr(0), n_rows),
+                slice::from_raw_parts(self.bodies.row_ptr(0), n_rows),
+            )
+        };
+        let ctx = FillCtx {
+            heads: f.heads,
+            cold: f.cold,
+            blocks: f.blocks,
+            vn0: f.vn0,
+            plan: f.plan,
+            tags: f.tags,
+            recs_w: f.recs_w,
+            n_heads: f.n_heads,
+            n_blocks: f.n_blocks,
+            manifolds: f.manifolds,
+            bodies,
+            bodies_eff,
+            lookup: f.lookup,
+            restore: f.restore,
+            remap: f.remap,
+            fused: f.fused,
+            outs: f.outs,
+        };
+        // SAFETY: `fill_range`'s contract — the Fill entry's cuts are S4's setup cut (consecutive
+        //   cohort ranges covering `[0, n_heads)`), so cohorts `[lo, hi)`, their rank rows and their
+        //   lanes' `plan` / `tags` / record entries are this block's alone for the item, and the
+        //   bases were taken after the step's last grow.
+        let out = unsafe { ColoredSoftStepSolver::fill_range(&ctx, lo, hi) };
+        debug_assert!((block as usize) < SETUP_MAX_TASKS, "invariant: a Fill block has a slot");
+        // SAFETY: slot `block` is this block's alone (one slot per Fill block, at most
+        //   `SETUP_MAX_TASKS`), on `solve_region`'s frame, and is read only after the region's END.
+        unsafe { ptr::write(f.outs.add(block as usize), out) };
+    }
+
+    /// The warm store of Store block `block` (`store_and_swap`'s passes, split by range): pass 1
+    /// writes the converged impulses of every live lane of cohorts `[k_lo, k_hi)` into its solved
+    /// manifold's record (whose shape the fill wrote); pass 2 writes every unsolved manifold of
+    /// `[m_lo, m_hi)` — a frozen one's carry (B1), an empty one's `EMPTY` — and the carry's hits
+    /// into the block's slot.
+    fn store_block(&self, block: u32, k_lo: usize, k_hi: usize, m_lo: usize, m_hi: usize) {
+        let st = self.store;
+        let heads = &self.cols.heads()[k_lo..k_hi];
+        let colds = &self.cols.cold.as_read_slice()[k_lo..k_hi];
+        let blocks = self.cols.blocks();
+        let tags = self.cols.tags();
+        for (head, cold) in heads.iter().zip(colds) {
+            let rank_base = head.rank_base as usize;
+            for l in 0..head.nlanes as usize {
+                debug_assert!(
+                    tags[cold.mi[l] as usize].solved(),
+                    "invariant: a laid-out lane's manifold is tagged solved, so pass 2 never writes its record"
+                );
+                // SAFETY: the write side holds one record per manifold of the step and `cold.mi[l]`
+                //   is a laid-out manifold, so the record is live; it is this lane's alone — each
+                //   laid-out manifold is one lane of one cohort, the Store blocks' cohort ranges
+                //   partition the cohorts, and pass 2 writes only unsolved manifolds' records — so
+                //   the one-element `&mut` aliases nothing.
+                let rec = unsafe { &mut *st.recs_w.add(cold.mi[l] as usize) };
+                debug_assert_eq!(
+                    usize::from(rec.count()),
+                    head.width[l] as usize,
+                    "invariant: the fill wrote the solved record's shape"
+                );
+                for (p, blk) in blocks[rank_base..rank_base + head.width[l] as usize].iter().enumerate() {
+                    rec.set_impulses(p, [blk.ni[l], blk.ti1[l], blk.ti2[l]]);
+                }
+            }
+        }
+        let sources = WarmSources { lookup: st.lookup, restore: st.restore, plan: self.cols.plan(), tags };
+        let mut hits = 0u32;
+        for (mi, (m, &tag)) in st.manifolds.iter().zip(tags).enumerate().take(m_hi).skip(m_lo) {
+            if tag.solved() {
+                continue;
+            }
+            let rec = if tag.frozen() && tag.count != 0 {
+                debug_assert_eq!(tag.count, m.count, "invariant: a frozen tag holds its manifold's live-point count");
+                let (lookup, run) = sources.of(mi);
+                let (rec, h) = lookup.carry(run, m, usize::from(tag.count));
+                hits += h;
+                rec
+            } else {
+                WarmRecord::EMPTY
+            };
+            // SAFETY: record `mi` is live (one per manifold) and this block's alone: the Store
+            //   blocks' manifold ranges partition `[0, M)`, and pass 1 writes only solved
+            //   manifolds' records. A plain write of a `Copy` record forms no reference.
+            unsafe { ptr::write(st.recs_w.add(mi), rec) };
+        }
+        debug_assert!((block as usize) < SETUP_MAX_TASKS, "invariant: a Store block has a slot");
+        // SAFETY: slot `block` is this block's alone, on `solve_region`'s frame, read after END.
+        unsafe { ptr::write(st.carry.add(block as usize), hits) };
+    }
+
+    /// Colour `c`'s place in the group and cohort tables.
+    #[inline]
+    fn colour_ctx(&self, c: usize) -> ColorCtx {
+        ColorCtx {
+            g_base: self.cols.color_group_start()[c] as usize,
+            k_base: self.cols.color_cohort_start()[c] as usize,
+        }
+    }
+
+    /// Colour `c`'s span, classed by the inline floor's own predicate (the serial sweep's rule).
+    fn colour_zone(&self, c: usize) -> Option<ZoneGuard> {
+        let offsets = self.cols.color_offsets();
+        if offsets[c + 1] - offsets[c] < MIN_PARALLEL_SLOTS_PER_COLOR {
+            zone!(PHYS_COLOR_NARROW)
+        } else {
+            zone!(PHYS_COLOR_WIDE)
+        }
+    }
+
+    /// The entry item `item` executes.
+    #[inline]
+    fn item_entry(&self, item: u32) -> StageEntry {
+        self.entries[usize::from(self.schedule[item as usize].entry)]
+    }
+}
+
+impl RegionStages for SolveStages<'_> {
+    // Out of line: one copy serves both `ARMED` monomorphs' orchestrator and helper loops, which
+    // the kernels' bodies would otherwise bloat (I-cache).
+    #[inline(never)]
+    fn run_block(&self, entry: u32, block: u32, participant: u32) {
+        let e = self.entries[entry as usize];
+        let at = e.first_cut as usize + block as usize;
+        let (lo, hi) = (self.cuts[at] as usize, self.cuts[at + 1] as usize);
+        #[cfg(miri)]
+        if participant != 0 {
+            self.tally[usize::from(e.kind)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+        #[cfg(not(miri))]
+        let _ = participant;
+        match e.kind {
+            SK_GRAVITY => self.gravity_rows(lo, hi),
+            SK_GRAVITY_FIRST => {
+                self.gravity_rows(lo, hi);
+                if self.step.spec {
+                    self.reset_delta_rows(lo, hi);
+                }
+            }
+            SK_WARM => ColoredSoftStepSolver::warm_start_apply(self.cols, self.bodies, self.simd_solve, lo, hi),
+            SK_BIASED | SK_RELAX => ColoredSoftStepSolver::solve_color_dispatch(
+                self.view,
+                self.bodies,
+                self.colour_ctx(usize::from(e.color)),
+                lo,
+                hi,
+                &self.step,
+                e.kind == SK_BIASED,
+                self.simd_solve,
+            ),
+            SK_INTEGRATE => self.integrate_rows(lo, hi),
+            SK_FILL => self.fill_block(block, lo, hi),
+            SK_STORE => {
+                // The manifold ranges follow the cohort ranges in the cut column.
+                let m = e.first_cut as usize + usize::from(e.n_blocks) + 1 + block as usize;
+                self.store_block(block, lo, hi, self.cuts[m] as usize, self.cuts[m + 1] as usize);
+            }
+            #[cfg(test)]
+            SK_DIGEST => {
+                // SAFETY: the digest's slot is written by this one inline block, on
+                //   `solve_region`'s frame, and read after the region's END; the tables it hashes
+                //   are written by no block of its item.
+                unsafe { ptr::write(self.fill.digest, self.cols.setup_digest()) };
+            }
+            kind => unknown_stage(kind),
+        }
+    }
+
+    fn item_begin(&self, item: u32) {
+        let e = self.item_entry(item);
+        // SAFETY: the hooks run on participant 0 only (`RegionStages`' contract), so this is the
+        //   one access to the slots, which `solve_region` keeps alive for the whole region.
+        let hooks = unsafe { &mut *self.hooks };
+        let first = e.color == 0;
+        match e.kind {
+            SK_FILL => {
+                hooks.inner = zone!(PHYS_SB_PC);
+                // SAFETY: `canary` is the solver's own, borrowed `&mut` by `solve_region` for the
+                //   region and reached by participant 0's hooks alone.
+                unsafe { (*hooks.canary).at(&PHYS_SB_PC, hooks.inner.is_some()) };
+            }
+            SK_GRAVITY | SK_GRAVITY_FIRST => hooks.inner = zone!(PHYS_GRAVITY),
+            SK_STORE => hooks.inner = zone!(PHYS_STORE),
+            SK_WARM if first => hooks.outer = zone!(PHYS_WARM_APPLY),
+            SK_BIASED | SK_RELAX => {
+                if first {
+                    hooks.outer = if e.kind == SK_BIASED { zone!(PHYS_PASS_BIASED) } else { zone!(PHYS_PASS_RELAX) };
+                }
+                hooks.inner = self.colour_zone(usize::from(e.color));
+            }
+            SK_INTEGRATE => hooks.inner = zone!(PHYS_INTEGRATE),
+            _ => {}
+        }
+    }
+
+    fn item_end(&self, item: u32) {
+        let e = self.item_entry(item);
+        // SAFETY: as `item_begin`.
+        let hooks = unsafe { &mut *self.hooks };
+        hooks.inner = None;
+        if matches!(e.kind, SK_WARM | SK_BIASED | SK_RELAX) && e.color == self.last_colour {
+            hooks.outer = None;
+        }
+    }
+}
+
+/// A table entry of a kind no stage runs: a table-build bug.
+#[cold]
+#[inline(never)]
+fn unknown_stage(kind: u8) -> ! {
+    panic!("invariant: the region's table names only the solver's stage kinds (got {kind})")
+}
+
+/// SR: the step's `PHYS_REGION_*` counters, once per solving step — the region's report, or
+/// zeros on a step that opened none (B-F3: `profiling_bit_identity` needs a sample of every counter
+/// in its armed run).
+#[cold]
+#[inline(never)]
+fn push_region_counters(report: Option<RegionReport>) {
+    let r = report.unwrap_or_default();
+    counter!(PHYS_REGION_OPENS, u64::from(report.is_some()));
+    counter!(PHYS_REGION_PUBLISHED, u64::from(r.published));
+    counter!(PHYS_REGION_INLINE, u64::from(r.inline));
+    counter!(PHYS_REGION_HELPER_BLOCKS, r.helper_blocks);
+    counter!(PHYS_REGION_BLOCKS_MAX, u64::from(r.max_blocks));
+    counter!(PHYS_REGION_STALLS, r.stalls);
+    counter!(PHYS_REGION_MAX_WAIT, r.max_wait_ns);
+}
+
+impl ColoredSoftStepSolver {
+    /// SR: builds this step's stage table into the region columns and sizes the frame lines for
+    /// `p` participants. Serial, before the region. `fill` is the fill's cohort ranges, which the
+    /// Fill entry takes as its blocks, and the Store entry too (its pass 1), beside as many equal
+    /// manifold ranges (its pass 2); `store` schedules the store as the region's last item.
+    fn build_region_table(&mut self, p: u32, k: &RegionStep, fill: &FillPlan, store: bool) -> RegionTable {
+        let Self { columns: cols, region: rc, grain, bodies, .. } = self;
+        let grain = *grain;
+        let color_offsets = cols.color_offsets();
+        let color_group_start = cols.color_group_start();
+        let color_cohort_start = cols.color_cohort_start();
+        let group_start = cols.group_start();
+        let heads = cols.heads();
+        let n_colors = color_offsets.len().saturating_sub(1);
+        let rows = bodies.len();
+
+        let mut t = TableBuilder { entries: rc.entries.build_view(), cuts: rc.cuts.build_view(), claims: 0, p };
+        t.entries.clear();
+        t.cuts.clear();
+        let n_body = t.body_cuts(rows, grain);
+        t.entry(SK_GRAVITY, 0, n_body, 0);
+        t.entry(SK_GRAVITY_FIRST, 0, n_body, 0);
+        t.entry(SK_INTEGRATE, 0, n_body, 0);
+        // The fill: S4's ranges, consecutive from cohort 0 (one range covering every cohort under
+        // two, which runs inline).
+        debug_assert!(
+            fill.n_ranges >= 1
+                && fill.cuts[0].0 == 0
+                && fill.cuts[fill.n_ranges - 1].1 as usize == heads.len()
+                && fill.cuts[..fill.n_ranges].windows(2).all(|w| w[0].1 == w[1].0),
+            "invariant: the fill's ranges are consecutive and cover every cohort"
+        );
+        let fill_first = t.cuts.len();
+        t.cuts.push(fill.cuts[0].0);
+        for &(_, hi) in &fill.cuts[..fill.n_ranges] {
+            t.cuts.push(hi);
+        }
+        t.entry(SK_FILL, 0, fill.n_ranges, fill_first);
+        // The store: the fill's cohort ranges (pass 1), then as many equal manifold ranges (pass
+        // 2's carry). The entry exists on every region step; its item is scheduled only when no
+        // row can bounce.
+        let store_first = t.cuts.len();
+        t.cuts.push(fill.cuts[0].0);
+        for &(_, hi) in &fill.cuts[..fill.n_ranges] {
+            t.cuts.push(hi);
+        }
+        let n_manifolds = cols.tags().len();
+        for b in 0..=fill.n_ranges {
+            t.cuts.push(u32::try_from(b * n_manifolds / fill.n_ranges).expect("invariant: manifold indices fit a u32"));
+        }
+        t.entry(SK_STORE, 0, fill.n_ranges, store_first);
+        #[cfg(test)]
+        {
+            let digest_first = t.cuts.len();
+            t.cuts.push(0);
+            t.cuts.push(1);
+            t.entry(SK_DIGEST, 0, 1, digest_first);
+        }
+        debug_assert_eq!(t.entries.len(), E_COLOURS, "invariant: the fixed entries sit at their `E_*` indices");
+        for c in 0..n_colors {
+            let (g_lo, g_hi) = (color_group_start[c] as usize, color_group_start[c + 1] as usize);
+            let (k_lo, k_hi) = (color_cohort_start[c] as usize, color_cohort_start[c + 1] as usize);
+            let groups = g_hi - g_lo;
+            let points = color_offsets[c + 1] - color_offsets[c];
+            let sweep_first = t.cuts.len();
+            let n_sweep = if groups == 0 {
+                0
+            } else {
+                let n_target = if points >= grain.wide_floor {
+                    (grain.max_bpp as usize * p as usize)
+                        .min((points / grain.colour_min_points) as usize)
+                        .clamp(1, groups)
+                } else {
+                    1
+                };
+                t.colour_cuts(group_start, g_lo, g_hi, n_target, k.simd_solve)
+            };
+            let warm_first = t.cuts.len();
+            let n_warm = if n_sweep == 0 { 0 } else { t.cohort_cuts(heads, k_lo, k_hi, n_sweep.min(k_hi - k_lo)) };
+            t.entry(SK_WARM, c, n_warm, warm_first);
+            t.entry(SK_BIASED, c, n_sweep, sweep_first);
+            t.entry(SK_RELAX, c, n_sweep, sweep_first);
+        }
+        let entries = t.entries.len();
+        let claims = t.claims as usize;
+        drop(t);
+
+        // The schedule: the serial loop's order, every pass of an entry one item.
+        let colour = |c: usize, kind: usize| u16::try_from(E_COLOURS + 3 * c + kind).expect("invariant: entry indices fit a u16");
+        let mut schedule = rc.schedule.build_view();
+        schedule.clear();
+        // Stage 0: the fill, then (test builds) the digest of the seeds before the first sweep.
+        schedule.push(SchedItem::new(E_FILL, None));
+        #[cfg(test)]
+        schedule.push(SchedItem::new(E_DIGEST, None));
+        for s in 0..k.substeps {
+            schedule.push(SchedItem::new(if s == 0 { E_GRAVITY_FIRST } else { E_GRAVITY }, None));
+            for c in 0..n_colors {
+                schedule.push(SchedItem::new(colour(c, 0), None));
+            }
+            for _ in 0..k.biased {
+                for c in 0..n_colors {
+                    schedule.push(SchedItem::new(colour(c, 1), None));
+                }
+            }
+            schedule.push(SchedItem::new(E_INTEGRATE, None));
+            for _ in 0..k.relax {
+                for c in 0..n_colors {
+                    schedule.push(SchedItem::new(colour(c, 2), None));
+                }
+            }
+        }
+        // The store, after the last relax item: its pass 1 reads the converged impulses.
+        if store {
+            schedule.push(SchedItem::new(E_STORE, None));
+        }
+        grow_to(&mut rc.hints, entries, 0);
+        {
+            let mut hints = rc.hints.build_view();
+            link_hints(schedule.as_mut_slice(), &mut hints.as_mut_slice()[..entries]);
+        }
+        let items = schedule.len();
+        drop(schedule);
+
+        // The frame lines, grown to this table and `p` (never shrunk).
+        grow_to(&mut rc.sync, 1, RegionLine::ZERO);
+        grow_to(&mut rc.done, entries, RegionLine::ZERO);
+        grow_to(&mut rc.receipts, p as usize, RegionLine::ZERO);
+        grow_to(&mut rc.claims, claims, RegionLine::ZERO);
+        RegionTable { entries, items, claims }
+    }
+
+    /// SR: one step's fill and substeps as ONE region (`02-SR-DESIGN.md` §2): the table is built
+    /// serially, then the fill (stage 0, KD5), gravity, every colour's warm start, the biased and
+    /// relax sweeps and integrate + the inertia refresh run as its stages on the ambient pool's
+    /// workers; after its END the fill's tail reduces the ranges' reports. `build_columns` decided the
+    /// region (its `FillPlan`), which it admits only for a colour count the table's `u16` indices
+    /// name. Returns the region's report, the plan counts with the ranges' searches added (L10's
+    /// restore counts among them), and whether the warm store ran in the region — on a warm step
+    /// where no row can bounce (`restitution_possible`, an O(rows) scan of every row's coefficient,
+    /// statics included, on the region path only): the restitution pass then has no work and the
+    /// store is the region's last stage; otherwise the caller runs both serially, as before.
+    ///
+    /// Out of line on purpose: the one-worker step's instruction stream (`solve_colored_inner`)
+    /// stays the serial loop's, with one predicate and a call it never takes. Takes no body slice
+    /// (the W5 rule, [`SolveStages`]).
+    #[inline(never)]
+    fn solve_region(
+        &mut self,
+        scratch: &SolverScratch,
+        k: &RegionStep,
+        fill: &FillPlan,
+        src: RegionSources<'_>,
+    ) -> (RegionReport, PlanCounts, bool) {
+        let n_colors = self.columns.color_offsets().len().saturating_sub(1);
+        debug_assert!(region_fits(n_colors), "invariant: build_columns admits only a table a u16 names");
+        // A contact's coefficient is the max of its two rows' (`fill_cohort`), so a superset test
+        // over every row; the written form is the restitution pass's skip rule's complement, NaN
+        // included (review O3).
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        let restitution_possible = scratch.bodies().iter().any(|b| !(b.restitution <= 0.0));
+        let store = self.warm_effective && !restitution_possible && k.substeps > 0;
+        #[cfg(all(test, miri))]
+        let route = self.region_route;
+        let p = try_with_active_pool(|pool| pool.num_threads());
+        // The Stacked Borrows route has no pool: its participants are the route's threads.
+        #[cfg(all(test, miri))]
+        let p = match route {
+            RegionRoute::Pool => p,
+            RegionRoute::Threads(n) => Some(n as usize),
+        };
+        let p = u32::try_from(p.expect("invariant: the region path runs only where P2 saw a pool of two workers or more"))
+            .expect("invariant: a pool's workers fit a u32");
+        let table = self.build_region_table(p, k, fill, store);
+
+        let armed = zone_enabled!(PHYS_REGION_OPENS);
+        let Self {
+            bodies,
+            deltas,
+            columns,
+            region: rc,
+            region_dispatches,
+            region_store_dispatches,
+            region_last,
+            warm,
+            warm_cur,
+            warm_index,
+            warm_effective,
+            warm_cursor,
+            warm_stats,
+            counters,
+            canary,
+            #[cfg(test)]
+            step_digest,
+            #[cfg(miri)]
+            region_tally,
+            ..
+        } = self;
+        let columns: &CohortColumns = columns;
+        #[cfg(miri)]
+        let tally: [core::sync::atomic::AtomicU64; SK_COUNT] = Default::default();
+        let mut hooks = RegionHooks { outer: None, inner: None, canary: &raw mut *canary };
+        // The fill's inputs: the read side and the restore source are read, the write side's
+        // records written per lane manifold through their raw base (S4's `FillCtx`).
+        let (read, write) = Self::warm_sides(warm, *warm_cur);
+        let index: &WarmIndex = warm_index;
+        debug_assert!(
+            !store
+                || (write.recs().len() == src.manifolds.len()
+                    && columns.tags.len() == src.manifolds.len()
+                    && columns.plan.len() == src.manifolds.len()),
+            "invariant: the write side, the tags and the plan hold one row per manifold of this step"
+        );
+        let mut outs = [RangeOut::default(); SETUP_MAX_TASKS];
+        let mut carry = [0u32; SETUP_MAX_TASKS];
+        #[cfg(test)]
+        let mut digest = 0u64;
+        let fill_parts = FillParts {
+            heads: columns.heads.solve_base(),
+            cold: columns.cold.solve_base(),
+            blocks: columns.blocks.solve_base(),
+            vn0: columns.rank_cold.solve_base(),
+            plan: columns.plan.solve_base(),
+            tags: columns.tags.solve_base(),
+            recs_w: if *warm_effective { Some(write.recs_base()) } else { None },
+            n_heads: columns.heads.len(),
+            n_blocks: columns.blocks.len(),
+            manifolds: src.manifolds,
+            lookup: WarmLookup { read, index },
+            restore: src.restore.map(|read| WarmLookup { read, index }),
+            remap: src.remap,
+            fused: fill.fused,
+            outs: outs.as_mut_ptr(),
+            #[cfg(test)]
+            digest: &raw mut digest,
+        };
+        let store_parts = StoreParts {
+            recs_w: if store { write.recs_base() } else { ptr::null_mut() },
+            manifolds: src.manifolds,
+            lookup: WarmLookup { read, index },
+            restore: src.restore.map(|read| WarmLookup { read, index }),
+            carry: carry.as_mut_ptr(),
+        };
+        let RegionColumns { sync, done, receipts, claims, entries, schedule, cuts, epoch, .. } = rc;
+        let entries = &entries.as_read_slice()[..table.entries];
+        let schedule = &schedule.as_read_slice()[..table.items];
+        let stages = SolveStages {
+            entries,
+            schedule,
+            cuts: cuts.as_read_slice(),
+            cols: columns,
+            view: columns.solve_view(),
+            bodies: bodies.solve_view(),
+            snapshot: scratch.bodies.solve_view(),
+            step: SolveStep {
+                bias_rate: k.bias_rate,
+                mass_coeff: k.mass_coeff,
+                impulse_coeff: k.impulse_coeff,
+                inv_h: k.inv_h,
+                spec: k.spec,
+                deltas: deltas.solve_view(),
+            },
+            gravity: k.gravity,
+            h: k.h,
+            simd: k.simd,
+            simd_solve: k.simd_solve,
+            last_colour: u16::try_from(n_colors.saturating_sub(1)).expect("invariant: checked above"),
+            fill: fill_parts,
+            store: store_parts,
+            hooks: &raw mut hooks,
+            #[cfg(miri)]
+            tally: &tally,
+        };
+        let mut sync = sync.build_view();
+        let mut done = done.build_view();
+        let mut receipts = receipts.build_view();
+        let mut claims = claims.build_view();
+        let lines = RegionLines {
+            sync: &mut sync.as_mut_slice()[0],
+            done: &mut done.as_mut_slice()[..table.entries],
+            receipts: &mut receipts.as_mut_slice()[..p as usize],
+            claims: &mut claims.as_mut_slice()[..table.claims],
+        };
+        // SAFETY (ruling 17 A3, the three clauses of `RegionFrame::new`'s contract):
+        //   * exclusively owned: the four line groups are this Resource's own `ScratchColumn`s
+        //     (`region.sync`, `.done`, `.receipts`, `.claims`), borrowed `&mut` here; no other frame
+        //     or owner is ever handed them, and `region.epoch` is the counter created with them;
+        //   * sized for the schedule: `build_region_table` grew them to this table — a done line per
+        //     entry, a receipt per participant, and `claim_lines::<V2Policy>` lines per published
+        //     entry from its `first_claim` — and the region below runs `V2Policy` with `p`
+        //     participants;
+        //   * the counter is the claim column's own: `region.epoch` starts at 0 with the column
+        //     zeroed, is never reset, and every region advances it past every epoch it writes, so
+        //     it is at or above every epoch the claim lines hold.
+        let frame = unsafe { RegionFrame::new(lines, entries, schedule, epoch, p) };
+        #[cfg(all(test, miri))]
+        let report = match route {
+            RegionRoute::Threads(_) => Some(if armed {
+                boyko_threadpool::region_on_threads::<_, V2Policy, true>(frame, &stages)
+            } else {
+                boyko_threadpool::region_on_threads::<_, V2Policy, false>(frame, &stages)
+            }),
+            RegionRoute::Pool => Self::region_on_pool(frame, &stages, armed),
+        };
+        #[cfg(not(all(test, miri)))]
+        let report = Self::region_on_pool(frame, &stages, armed);
+        let report = report.expect("invariant: the pool P2 saw is still the ambient one");
+        *region_dispatches += 1;
+        *region_last = report;
+        // The fill's tail, after END: the ranges' reports in range order (the serial fill's own
+        // routine), and S4's task counter — the Fill entry's blocks when it was published, 0 inline.
+        let plan_counts = fill_tail(
+            &outs[..fill.n_ranges],
+            fill.plan_counts,
+            fill.tail,
+            counters,
+            warm_stats,
+            warm_cursor.resets(),
+        );
+        counter!(PHYS_SETUP_CHUNKS, if fill.n_ranges >= 2 { fill.n_ranges as u64 } else { 0 });
+        // The store's carry hits, in block order (integer sums), as `store_and_swap` counts them.
+        if store {
+            *region_store_dispatches += 1;
+            let carry_hits: u32 = carry[..fill.n_ranges].iter().sum();
+            warm_stats.carry_hits = carry_hits;
+            counters.carry(carry_hits);
+            debug_assert!(
+                carry_hits <= warm_stats.carry_points,
+                "invariant: the carry keeps at most the frozen manifolds' live points"
+            );
+        }
+        #[cfg(test)]
+        {
+            *step_digest = digest;
+        }
+        #[cfg(miri)]
+        {
+            for (kind, count) in region_tally.iter_mut().enumerate() {
+                count.kind = SK_NAMES[kind];
+                count.helper_blocks += tally[kind].load(core::sync::atomic::Ordering::Relaxed);
+            }
+            for e in entries {
+                let count = &mut region_tally[usize::from(e.kind)];
+                count.max_blocks = count.max_blocks.max(u32::from(e.n_blocks));
+            }
+        }
+        (report, plan_counts, store)
+    }
+
+    /// SR, test builds: the fill alone as a region — `fill` (a `FillPlan` `build_columns` returned)
+    /// run through [`solve_region`](Self::solve_region) with zero substeps, so the schedule is the
+    /// Fill item (and the digest) on the ambient pool, then the fill's tail. G4-A's region modes
+    /// drive the stage-0 fill through this, the same `SolveStages` arm a solve runs.
+    #[cfg(test)]
+    fn fill_in_region(
+        &mut self,
+        scratch: &SolverScratch,
+        fill: &FillPlan,
+        src: RegionSources<'_>,
+    ) -> (RegionReport, PlanCounts) {
+        let none = RegionStep {
+            bias_rate: 0.0,
+            mass_coeff: 0.0,
+            impulse_coeff: 0.0,
+            inv_h: 0.0,
+            spec: false,
+            gravity: Vec3::ZERO,
+            h: 0.0,
+            simd: false,
+            simd_solve: false,
+            substeps: 0,
+            biased: 0,
+            relax: 0,
+        };
+        let (report, counts, _) = self.solve_region(scratch, &none, fill, src);
+        (report, counts)
+    }
+
+    /// SR: runs `frame` on the ambient pool, armed or not. `None` without a pool.
+    #[inline]
+    fn region_on_pool(frame: RegionFrame<'_>, stages: &SolveStages<'_>, armed: bool) -> Option<RegionReport> {
+        try_with_active_pool(move |pool| {
+            if armed {
+                pool.region::<_, V2Policy, true>(frame, stages)
+            } else {
+                pool.region::<_, V2Policy, false>(frame, stages)
+            }
+        })
     }
 }
 

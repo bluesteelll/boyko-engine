@@ -6,10 +6,10 @@
 //! hook wiring + entity-remap metadata are folded into the `Component` derive via
 //! [`RelationshipRole`] (re-exported to [`crate::component`]).
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, Ident, Path, Type, Visibility, parse_macro_input};
+use syn::{Data, DeriveInput, Fields, Ident, Path, Type, Visibility};
 
 use crate::common::FieldAccess;
 use crate::component::ComponentHookPaths;
@@ -100,7 +100,19 @@ impl RelationshipRole {
     /// each monomorphizes to one bare `HookFn` per relation type (no `dyn`). A SOURCE
     /// wires `on_insert` (link) + `on_replace` (unlink); a TARGET wires ONLY
     /// `on_replace` (the cascade — never `on_add`/`on_insert`, B7).
-    pub(crate) fn hook_items_codegen(&self) -> TokenStream2 {
+    ///
+    /// KM2 — the user's NON-OWNED hooks are MERGED in. This body is the only
+    /// `register_hooks` emitted for a relationship side (`component.rs` picks
+    /// EITHER this or `ComponentHookPaths::codegen`, never both), so before the
+    /// merge a `#[component(on_add = …)]` on a relationship type compiled and
+    /// then never fired — measured, `km2_on_despawn_derive.rs`
+    /// `relationship_non_owned_hooks_fire`. That silently contradicted
+    /// [`Self::reject_hook_collision`]'s own doc, which states the non-owned
+    /// slots "compose without conflict". `on_insert` / `on_replace` cannot reach
+    /// here: `reject_hook_collision` refuses a user value for either before this
+    /// is called, so the owned assignments below can never be clobbered.
+    pub(crate) fn hook_items_codegen(&self, user: &ComponentHookPaths) -> TokenStream2 {
+        let user_assigns = user.non_relationship_owned_assigns();
         let assigns = match self {
             RelationshipRole::Source(_) => quote! {
                 hooks.on_insert = ::std::option::Option::Some(
@@ -127,6 +139,7 @@ impl RelationshipRole {
                 hooks: &mut boyko_ecs::ecs::core::component::hooks::ComponentHooks,
             ) {
                 #assigns
+                #(#user_assigns)*
             }
         }
     }
@@ -134,8 +147,11 @@ impl RelationshipRole {
     /// Rejects a user `#[component(on_insert=…)]` / `#[component(on_replace=…)]`
     /// alongside the relationship attribute (R5 `relationship_hook_collision`): the
     /// relationship OWNS those slots, so a user hook would be silently dropped or
-    /// double-install. The other two slots (`on_add` / `on_remove`) are free — a
-    /// relationship does not wire them, so they compose without conflict.
+    /// double-install. The other three slots (`on_add` / `on_remove` /
+    /// `on_despawn`) are free — a relationship does not wire them, and
+    /// [`Self::hook_items_codegen`] merges the user's values for them into the
+    /// generated body, so they compose without conflict. (Until KM2 that last
+    /// clause was false: the generated body replaced the user's wholesale.)
     pub(crate) fn reject_hook_collision(
         &self,
         ident: &Ident,
@@ -154,8 +170,7 @@ impl RelationshipRole {
                  conflicting #[component(on_insert=...)] / #[component(on_replace=...)] \
                  — the generic relationship hook is installed automatically.",
             )
-            .to_compile_error()
-            .into());
+            .to_compile_error());
         }
         Ok(())
     }
@@ -205,8 +220,7 @@ pub(crate) fn parse_relationship_role(input: &DeriveInput) -> Result<Option<Rela
              #[relationship_target(...)] (the reverse index); a relation has two \
              distinct component types",
         )
-        .to_compile_error()
-        .into());
+        .to_compile_error());
     }
 
     if has_rel {
@@ -226,7 +240,7 @@ pub(crate) fn parse_relationship_role(input: &DeriveInput) -> Result<Option<Rela
 /// foreign-key `Entity` field (Relations v1, Decision 4). `target` is required.
 fn parse_relationship_source(input: &DeriveInput) -> Result<RelationshipSourceSpec, TokenStream> {
     let err = |span: Span, msg: &str| -> TokenStream {
-        syn::Error::new(span, msg).to_compile_error().into()
+        syn::Error::new(span, msg).to_compile_error()
     };
 
     let mut target: Option<Path> = None;
@@ -255,7 +269,7 @@ fn parse_relationship_source(input: &DeriveInput) -> Result<RelationshipSourceSp
             ))
         });
         if let Err(e) = result {
-            return Err(e.to_compile_error().into());
+            return Err(e.to_compile_error());
         }
     }
 
@@ -285,7 +299,7 @@ fn parse_relationship_source(input: &DeriveInput) -> Result<RelationshipSourceSp
 /// error at the user's struct.
 fn select_relationship_field(input: &DeriveInput) -> Result<FieldAccess, TokenStream> {
     let err = |span: Span, msg: &str| -> TokenStream {
-        syn::Error::new(span, msg).to_compile_error().into()
+        syn::Error::new(span, msg).to_compile_error()
     };
     let fields = match &input.data {
         Data::Struct(s) => &s.fields,
@@ -375,7 +389,7 @@ fn select_relationship_field(input: &DeriveInput) -> Result<FieldAccess, TokenSt
 /// `retain_empty` (W1 — `RETAIN_EMPTY = false` is deferred to v1.1).
 fn parse_relationship_target(input: &DeriveInput) -> Result<RelationshipTargetSpec, TokenStream> {
     let err = |span: Span, msg: &str| -> TokenStream {
-        syn::Error::new(span, msg).to_compile_error().into()
+        syn::Error::new(span, msg).to_compile_error()
     };
 
     let mut source: Option<Path> = None;
@@ -409,7 +423,7 @@ fn parse_relationship_target(input: &DeriveInput) -> Result<RelationshipTargetSp
             ))
         });
         if let Err(e) = result {
-            return Err(e.to_compile_error().into());
+            return Err(e.to_compile_error());
         }
     }
 
@@ -454,7 +468,7 @@ fn select_relationship_target_field(
     input: &DeriveInput,
 ) -> Result<(FieldAccess, Type), TokenStream> {
     let err = |span: Span, msg: &str| -> TokenStream {
-        syn::Error::new(span, msg).to_compile_error().into()
+        syn::Error::new(span, msg).to_compile_error()
     };
     let fields = match &input.data {
         Data::Struct(s) => &s.fields,
@@ -507,8 +521,8 @@ fn select_relationship_target_field(
 }
 
 /// Implementation of `#[derive(Relationship)]` (see the public entry in `lib.rs`).
-pub(crate) fn expand(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+pub(crate) fn relationship_macro_impl(input: TokenStream) -> TokenStream {
+    let input = crate::common::parse2_or_compile_error!(input as DeriveInput);
 
     let spec = match parse_relationship_source(&input) {
         Ok(s) => s,
@@ -592,12 +606,12 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
     };
 
-    expanded.into()
+    expanded
 }
 
 /// Implementation of `#[derive(RelationshipTarget)]` (see the public entry in `lib.rs`).
-pub(crate) fn expand_target(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+pub(crate) fn relationship_target_macro_impl(input: TokenStream) -> TokenStream {
+    let input = crate::common::parse2_or_compile_error!(input as DeriveInput);
 
     let spec = match parse_relationship_target(&input) {
         Ok(s) => s,
@@ -654,7 +668,7 @@ pub(crate) fn expand_target(input: TokenStream) -> TokenStream {
         }
     };
 
-    expanded.into()
+    expanded
 }
 
 /// `true` iff the derive input is a struct with exactly one field (tuple or named).

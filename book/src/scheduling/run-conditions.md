@@ -160,9 +160,25 @@ machine records the matching edge — including the synthesized initial
 > See [States](./states.md) for the full lifecycle.
 
 The full set of built-ins lives in
-[`common_conditions.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/common_conditions.rs#L1).
-Resource-existence and typed `.and`/`.or`/`.not` combinators are intentionally
-not shipped yet — AND-via-chaining (next section) covers the common case.
+[`common_conditions.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/common_conditions.rs).
+
+### Resource existence
+
+There is no dedicated `resource_exists` built-in; an optional resource
+parameter expresses it directly. `Option<Res<R>>` is `None` when `R` was never
+inserted, instead of panicking like `Res<R>`:
+
+```rust,ignore
+use boyko_ecs::prelude::*;
+# use boyko_macros::Resource;
+# #[derive(Resource)] struct Level(u32);
+# fn spawn_wave() {}
+# let mut builder = ScheduleBuilder::new(ThreadPoolBuilder::new().num_threads(1).build());
+
+builder
+    .add_system(spawn_wave)
+    .run_if(|level: Option<Res<Level>>| level.is_some());
+```
 
 ## Multiple conditions: the eager AND-fold
 
@@ -200,6 +216,41 @@ on a later frame instead of the first one. Evaluating every condition keeps
 stateful predicates advancing on schedule. The trade-off: you cannot rely on a
 cheap condition guarding an expensive one. Put cheap, side-effect-free
 predicates first only for clarity; both still run.
+
+## Combinators: `.and()` / `.or()` / `not()`
+
+Chaining `.run_if` can only AND. For OR and negation, combine conditions into
+one before attaching it. The combinators live in
+`boyko_ecs::ecs::core::schedule` and are **not** in the prelude:
+
+```rust,ignore
+use boyko_ecs::prelude::*;
+use boyko_ecs::ecs::core::schedule::{ConditionExt, not};
+# use boyko_macros::Resource;
+# #[derive(Resource)] struct Paused(bool);
+# #[derive(Resource)] struct InMenu(bool);
+# fn ambient_music() {}
+# let mut builder = ScheduleBuilder::new(ThreadPoolBuilder::new().num_threads(1).build());
+
+fn paused(p: Res<Paused>) -> bool { p.0 }
+fn in_menu(m: Res<InMenu>) -> bool { m.0 }
+
+// Runs when the game is paused OR the menu is open, but not on the first frame.
+builder
+    .add_system(ambient_music)
+    .run_if(paused.or(in_menu).and(not(run_once)));
+```
+
+- `ConditionExt` is blanket-implemented for every condition (a `fn`, a closure,
+  or an already-built condition system), so `a.and(b)` and `a.or(b)` work on
+  any of them. The result is itself a condition, so combinators nest.
+- `not(c)` negates a condition.
+- **The fold is eager here too.** `a.or(b)` runs `b` even on a frame where `a`
+  already returned `true`, and `a.and(b)` runs `b` when `a` returned `false`.
+  A skipped condition would freeze its change-tick window and later report a
+  burst of stale `Changed` results, so neither side is ever skipped.
+- A combined condition declares the union of its children's access, and it is
+  still held to the read-only rule below.
 
 ## Conditions on a whole set
 
@@ -274,8 +325,8 @@ Two properties carry the design:
   unaffected.
 
 Source:
-[`schedule.rs` `evaluate_ready_conditions`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs#L779),
-[`system_config.rs` `run_if`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/system_config.rs#L183).
+[`schedule.rs` `evaluate_ready_conditions`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs),
+[`system_config.rs` `run_if`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/system_config.rs).
 
 ## Conditions must be read-only
 

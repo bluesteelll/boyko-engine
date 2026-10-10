@@ -37,7 +37,18 @@ use crate::ffi::{
 };
 
 mod frame_driver;
-pub mod gpu_timing;
+// Profiling rung 5b -- the command census.
+//
+// Rung 5c moved the module OUT of `#[cfg(feature = "profiling-census")]` and left the feature on
+// the ~200 counter increments at `vb.rs`'s record sites, which are the actual perturbation. The
+// type existing costs nothing (it is instantiated only where a gate constructs one), and gating it
+// cost a cross-crate hazard: `GBufferScene` must carry an `Option<&CommandWitness>`, features unify
+// per PACKAGE, and a `#[cfg]`'d field appears or vanishes for `boyko_app`'s construction site
+// depending on a flag no `boyko_app` source names. See that field's doc.
+pub mod command_witness;
+// Profiling rung 5a — the GPU zone recorder. Rung 7 finished replacing the three
+// per-harness collectors it was written against; `gpu_timing.rs` is deleted.
+pub mod gpu_zone;
 mod graph_bridge;
 mod passes;
 mod scene_types;
@@ -46,17 +57,27 @@ mod swapchain;
 mod targets;
 
 pub use frame_driver::{FrameWriteToken, Renderer};
-pub use gpu_timing::{PASS_COUNT, TimedPass, TimestampCollector};
+/// VG R3 piece 2 step P2-6: gate G2's recorder-authored count sink, threaded into
+/// [`Renderer::render_gbuffer_frame`] as `Option<&mut VbRecordProbe>`.
+pub use passes::vb::VbRecordProbe;
 pub use scene_types::{
-    BrickActivation, CsmDepthActivation, DdgiUpdateActivation, GBUFFER_IDENTITY_INSTANCE,
-    GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene,
-    InterpActivation, PunctualDepthActivation, SCENE_MVP_BYTES, SampledComposite, Scene,
-    SsaoActivation, UiPass,
+    AaActivation, BrickActivation, ClusterCullHierDispatch, CsmDepthActivation, DdgiUpdateActivation,
+    GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
+    GBufferMeshDraw, GBufferScene, HZB_DUMP_FLAG_DEPTH_EARLY, HZB_DUMP_HEADER_BYTES,
+    HZB_DUMP_HEADER_SCALAR_WORDS, HZB_DUMP_HEADER_WORDS, HZB_DUMP_MAGIC,
+    HZB_DUMP_SAMPLE_BYTES, HZB_DUMP_WORD_FLAGS, HZB_DUMP_WORD_FRAME_INDEX,
+    HZB_PYRAMID_POISON, HzbDumpLayout, HzbPlan, InterpActivation,
+    MAX_HZB_LEVELS, MaterialUploadProbe, MaterialUploadScene,
+    ParticleActivation, PunctualDepthActivation,
+    RcasActivation, ResolvedRenderPathGpu, SCENE_MVP_BYTES, SHADOW_SOURCE_SDF_SOFT_MARCH,
+    SampledComposite, Scene, SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation, UiPass,
+    VB_CULL_OCC_ARMED, VB_CULL_OCC_FORCE_KEEP, VB_CULL_OCC_FORCE_LATE, VbCullUniform,
+    VbOcclusionArm, ViewtFromDepthActivation, ViewtFromVbDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 pub use scene_types::{ShadowVisActivation, TlasBuildActivation};
 pub use surface::Surface;
-pub use swapchain::Swapchain;
+pub use swapchain::{PresentModeConfig, Swapchain};
 pub use targets::{GBufferFrame, GBufferTargets};
 
 /// The number of frames the [`Renderer`] keeps in flight (double-buffered CPU↔GPU
@@ -65,7 +86,7 @@ pub use targets::{GBufferFrame, GBufferTargets};
 /// semaphore still pending another image's present).
 ///
 /// Exported so a host can size its per-frame UBO RING (one slot per in-flight frame)
-/// to match the renderer's round-robin [`Swapchain::frame_index`] — the lock-free
+/// to match the renderer's round-robin [`Renderer::frame_index`] — the lock-free
 /// write-after-read fix: each frame writes `ring[frame_index]` and the GPU binds that
 /// same slot, so the sibling in-flight frame reads a DIFFERENT slot (no overlap).
 pub const FRAMES_IN_FLIGHT: usize = 2;
@@ -80,6 +101,81 @@ pub const FRAMES_IN_FLIGHT: usize = 2;
 /// invariant at the record site). Kept equal to `boyko_render::MAX_ATROUS_LEVELS` (5).
 #[cfg(feature = "hwrt")]
 pub const MAX_ATROUS_LEVELS: u32 = 5;
+
+/// The SSAO edge-avoiding à-trous denoise chain: the max pass count the recorder can dispatch —
+/// the RHI-layer MIRROR of `boyko_render::ssao_config::MAX_SSAO_ATROUS_LEVELS` (the RHI cannot
+/// depend on `boyko_render`, mirroring `MAX_ATROUS_LEVELS`'s duplication rationale). Kept equal
+/// (5); a cross-crate integration test asserts the equality. Software (NOT `hwrt`-gated) — unlike
+/// `MAX_ATROUS_LEVELS`, every leg builds this. [`ssao_atrous_step`]'s 5 ROLE-KEYED
+/// pipelines/sets are N-INDEPENDENT, so a level count up to this max is a LIVE per-frame choice
+/// (no rebuild) — see `present::scene_types::SsaoActivation`.
+pub const MAX_SSAO_ATROUS_LEVELS: u32 = 5;
+
+/// The SSAO à-trous chain's C1 role selection for dispatch level `level` of `n` total passes
+/// (`n` in `{0} ∪ {2..=`[`MAX_SSAO_ATROUS_LEVELS`]`}` — `boyko_render::SsaoConfig::clamped_atrous_levels`'s
+/// contract). PURE (no GPU handle): the recorder (`crate::present::passes::gbuffer`), the
+/// descriptor-set builder ([`GBufferTargets::build_ssao_atrous_sets`]), the framegraph declarator
+/// (`GbufferPassPlan::ssao_atrous`'s ResId chain), and any headless test harness that dispatches
+/// the SAME N-pass chain all call THIS one function for the level→role mapping, so they can never
+/// diverge.
+///
+/// Because the intermediate ping-pong is TWO rings (not one uniform format like the shadow
+/// à-trous), the two chain ENDPOINTS need DIFFERENT pipeline variants from the interior:
+/// - `level == 0`: [`AtrousStepRole::Read8`] — reads the frozen R8 `gSsao` endpoint, writes ring 0.
+/// - `level == n - 1` (`n >= 2`): [`AtrousStepRole::Write8`] — reads `ring[in_ring]`, writes BACK
+///   into the frozen R8 `gSsao` endpoint.
+/// - otherwise (`0 < level < n - 1`): [`AtrousStepRole::Interior`] — reads `ring[in_ring]`, writes
+///   `ring[1 - in_ring]` (both R16).
+///
+/// `in_ring = (level - 1) % 2` for every non-`Read8` role: level `k`'s input is whatever level
+/// `k - 1` wrote (level 0 always writes ring 0, so level 1 reads ring 0 == `(1-1)%2`, level 2
+/// reads ring 1 == `(2-1)%2`, etc. — a uniform ping-pong once you fold the two R8 endpoints in as
+/// virtual "ring -1" / "ring n" slots).
+///
+/// # Panics (debug only)
+///
+/// `debug_assert!`s `level < n` — the caller's loop bound (`0..n`) already guarantees this; a
+/// violation is a caller bug, not a runtime condition.
+#[inline]
+pub fn ssao_atrous_step(level: u32, n: u32) -> AtrousStepRole {
+    debug_assert!(
+        level < n,
+        "invariant: ssao_atrous_step is called for level in 0..n"
+    );
+    if level == 0 {
+        AtrousStepRole::Read8
+    } else if level == n - 1 {
+        AtrousStepRole::Write8 { in_ring: (level - 1) % 2 }
+    } else {
+        AtrousStepRole::Interior { in_ring: (level - 1) % 2 }
+    }
+}
+
+/// The role [`ssao_atrous_step`] selects for one SSAO à-trous dispatch level — which of the 5
+/// role-keyed pipeline/descriptor-set pairs ([`present::scene_types::SsaoActivation`](SsaoActivation)'s
+/// `atrous_read8_pipeline`/`atrous_interior_pipeline`/`atrous_write8_pipeline` +
+/// [`GBufferTargets`]'s five `ssao_atrous_*_set` rings) the caller binds for that level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtrousStepRole {
+    /// Level 0: `gAoIn` = the frozen R8 `gSsao` endpoint, `gAoOut` = R16 ring 0. Selects the
+    /// `read8` pipeline variant + the `ssao_atrous_read8_set`.
+    Read8,
+    /// An interior level (`0 < level < n - 1`): `gAoIn` = R16 `ring[in_ring]`, `gAoOut` = R16
+    /// `ring[1 - in_ring]`. Selects the `interior` pipeline variant + `ssao_atrous_interior_from0_set`
+    /// (`in_ring == 0`) or `ssao_atrous_interior_from1_set` (`in_ring == 1`).
+    Interior {
+        /// The ring index (0 or 1) `gAoIn` reads from; `gAoOut` writes the OTHER ring.
+        in_ring: u32,
+    },
+    /// The last level (`level == n - 1`, `n >= 2`): `gAoIn` = R16 `ring[in_ring]`, `gAoOut` = the
+    /// frozen R8 `gSsao` endpoint (the write-back). Selects the `write8` pipeline variant +
+    /// `ssao_atrous_write8_from0_set` (`in_ring == 0`) or `ssao_atrous_write8_from1_set`
+    /// (`in_ring == 1`).
+    Write8 {
+        /// The ring index (0 or 1) `gAoIn` reads from.
+        in_ring: u32,
+    },
+}
 
 /// HW-RT rung 3a: the byte size of the à-trous edge-stop UBO — the RHI-layer MIRROR of
 /// `boyko_render::RESOLVED_SHADOW_DENOISE_BYTES` (`size_of::<ResolvedShadowDenoise>()`, one std140
@@ -98,6 +194,24 @@ pub const SHADOW_DENOISE_UBO_BYTES: u64 = 16;
 /// `boyko_render::RESOLVED_TEMPORAL_SHADOW_BYTES` (16).
 #[cfg(feature = "hwrt")]
 pub const TEMPORAL_SHADOW_UBO_BYTES: u64 = 16;
+
+/// Anti-aliasing Stage 4 (TAA W5) + rung T2: the byte size of the TAA resolve's tunables UBO —
+/// the RHI-layer MIRROR of `boyko_render::RESOLVED_TAA_BYTES` (`size_of::<ResolvedTaa>()`,
+/// THREE std140 vec4 slots = 48 B; grew from 16 B at rung T2). The RHI cannot depend on
+/// `boyko_render` (the render crate sits ABOVE it), so the value is duplicated here — mirrors
+/// `TEMPORAL_SHADOW_UBO_BYTES`'s pattern, UNCONDITIONAL (TAA is NOT `hwrt`-gated). The RHI
+/// mints the per-FIF `taa_ubo` ring at this size (`default_blend` @0, `min_blend` @4,
+/// `variance_gamma` @8, pad @12, then the T2 mode words `clamp_word`/`clamp_space_word`/
+/// `clip_word`/`blend_word` @16..32, `disable_luma_weight`/`history_filter_word`/
+/// `disocclusion_word`/`depth_tol` @32..48); the host writes `ResolvedTaa`'s 48 bytes into the
+/// fenced slot.
+pub const TAA_UBO_BYTES: u64 = 48;
+
+/// Anti-aliasing Stage 4 (TAA W5): the byte size of the TAA resolve's DEDICATED `MotionCam` UBO —
+/// the RHI-layer MIRROR of `boyko_render::MOTION_CAM_UBO_BYTES` (two `float4x4`, 128 B). A
+/// SEPARATE ring from the hwrt mesh-shadow `motion_cam_ubo` (see `TaaActivation`'s doc for the
+/// "why a dedicated ring" rationale) — UNCONDITIONAL (both feature legs).
+pub const TAA_MOTION_CAM_UBO_BYTES: u64 = 128;
 
 /// Errors from surface / swapchain / present operations.
 #[derive(Debug)]

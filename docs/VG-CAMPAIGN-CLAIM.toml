@@ -1,0 +1,184 @@
+# VG campaign claim — the owner VALUES calls that block a rung of R0. Nothing else.
+#
+# WHAT THIS FILE WAS, AND WHY IT IS SMALLER AT REV 8.
+#
+# It was created at Rev 2 as the RIGHT-HAND SIDE of the campaign's ONE gate:
+#
+#     joint decidability floor  <  the delta we intend to claim
+#
+# Rev 1 defined only the left side, so the right side would have been set by the same author who
+# measures the left — the campaign's P0. Rev 2 answered it with a sha256 around a file whose every
+# field was the literal PENDING. Rev 3 answered it with ordering. Rev 4 retracted Rev 3's claim
+# that ordering "does not depend on anyone noticing an edit" (it constrains COMMITS, not
+# KNOWLEDGE). Rev 5 and Rev 6 each moved the rule to a different rung. Rev 7's adversarial review
+# found the post-fill edit window still wide open on the branch section 11 measures as expected.
+#
+# REV 8 STOPS ANSWERING THE QUESTION AND REMOVES IT FROM R0, because the gate it guarded has no
+# left-hand side yet. `our_floor` needs the ARMED PAIRED DELTA as its denominator, and R0's arm is
+# not merely unstated — it is UNCONSTRUCTED. R0 lands no meshlet, no cluster and no LOD, so there
+# is nothing to contrast against. Six revisions of pre-registration machinery were protecting a
+# number that cannot yet be measured.
+#
+# So [claim] and [quality] are gone, together with the gating rows for R0e/R0f/R0f'. They return —
+# specification, denominators, two-sided gate form and the eight P0s that refuted the last attempt
+# — in the plan's section 14, to be frozen AT THE RUNG THAT LANDS AN ARM, where the arm, the
+# denominator and the floor are all defined at once. Pre-registration is cheaper and stronger
+# there, and it is honest there.
+#
+# WHAT REMAINS IS EXACTLY THE OWNER CALLS THAT BLOCK A RUNG R0 ACTUALLY HAS.
+#
+# THIS FILE IS NOT HASHED, DELIBERATELY. Its fields are REQUIRED to change exactly once, from
+# PENDING to a value. Hashing a file whose schedule requires it to change makes re-recording the
+# hash routine, and a tripwire that fires routinely carries no signal — Rev 2 learned this by
+# having its recorded hash guaranteed to break at the `corpus.arrangement` fill, before the first
+# rung that asserted it. The author-frozen thresholds live in docs/VG-CAMPAIGN-THRESHOLDS.toml and
+# that file is hashed.
+#
+# The gate here is the sentinel rule the repo already uses: goldens/PINS.toml:15 defines that a pin
+# whose hash is the literal PENDING is UNBLESSED and makes the checker EXIT 2 rather than pass.
+# Same discipline: a rung that needs a field below asserts it is not PENDING, and fails if it is.
+
+# ⚠️ STALE IN FIVE CONSECUTIVE REVISIONS. The fifth was Rev 12 -- the revision that landed the
+# marker-binding check built to end exactly this, and pointed it at the HASHED file, which already
+# had a digest tripwire, while this one had nothing. Rev 12 edited the [corpus] header here and
+# left both fields at Rev 10.
+#
+# REV 13 binds them: `the_provenance_fields_name_the_revision_that_last_edited_the_file` in
+# tests/vg_symbol_reachability.rs asserts that the newest `REV N` marker below and
+# `authored_at_revision` name the same revision, over THIS file as well as the hashed one, and it
+# ships a control that fires in both directions. It red on this file the first time it ran.
+# REV 32 -- THE OWNER ANSWERS ALL THREE FIELDS (2026-07-31). Each moves PENDING -> value exactly
+# once, which is the schedule this file's header requires. No field below is PENDING any more, so
+# no rung of R0 -- and not R1 -- is blocked by this file.
+schema_version = 8
+authored_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 32"
+
+# REV 13 -- the surviving dead index. Rev 12 converted every section-13 citation to name its
+# question instead of its index, and stated that as a universal; one dead index survived sixteen
+# lines below the note announcing the removal, in this file, and three more survived in the plan's
+# own paragraph making the same universal. N-1 of N, on both sides of the same repair.
+#
+# REV 14: and the note you are reading QUOTED the surviving index while announcing its removal --
+# re-creating a member of the class in the act of describing the class's repair, four lines from
+# the rule ("described, never quoted") that forbids it. Third consecutive revision to breach the
+# rule it was landing. The indices are described here now.
+authored_date = "2026-07-31"
+
+# ---------------------------------------------------------------------------------------------
+# [corpus] — plan section 13, the CORPUS PROVENANCE AND LICENCE question. BLOCKS R0b.
+#
+# ⚠️ REV 12: this header cited the wrong index for the corpus question, and its neighbour below
+# cited one that does not exist at all. Both were Rev 7 indices kept across a renumbering of the
+# list they point into -- a renumbering is a deletion event, and an index does not survive one.
+# Every reference into that section names the question instead. ⚠️ REV 14 stopped QUOTING the dead
+# indices in this note: quoting one re-creates it, which is why the class was still non-empty two
+# revisions after it was declared repaired. No universal is claimed here; the enforceable statement
+# is the rule, not a census of the texts obeying it.
+# ---------------------------------------------------------------------------------------------
+[corpus]
+# Whether a fetched-and-gitignored payload with pinned hashes is acceptable as the permanent
+# arrangement, and who selects and licenses the high-poly assets. Without an answer R0b cannot
+# author CORPUS.toml, so this is the one early block in the ladder.
+# REV 32 -- ANSWERED 2026-07-31: yes, fetched + gitignored + pinned sha256 is the permanent
+# arrangement. The agent selects the assets; licences are CC0 / CC-BY with the attribution and
+# licence id + URL recorded per asset in CORPUS.toml (the schema plan section 4.3 already fixes).
+arrangement = "fetched_gitignored_pinned_hashes"
+
+# ---------------------------------------------------------------------------------------------
+# [k1_outcome] — plan section 13, the K1-UNDECIDED question. BLOCKS R1.
+#
+# REV 8 -- THIS FIELD IS NEW, AND ITS ABSENCE WAS A REAL HOLE. Section 9's disposition for K1
+# UNDECIDED pointed at that question; section 13's preamble asserted that every question below has a field
+# waiting for it in this file; and that question had no field and no gating row. So the ONE outcome R0 is most
+# likely to produce — `D_est < 1.0`, which R0 cannot distinguish from its own instrument ceiling
+# seen from below — had no sentinel and blocked nothing. The enforcement predicate was vacuously
+# true for every input.
+#
+# R0 can REFUTE K1 (`D_est >= [k1].d_est_min` proves density >= 1 tri/pixel) and CANNOT FIRE it:
+# firing needs an upper bound on visible density, and the instrument for that is unsolved, not
+# merely unscheduled ([k1].k1_fire_instrument_status). UNDECIDED is therefore not a corner case.
+#
+# The three dispositions, and the owner picks one BEFORE the number exists — for the same reason
+# every other pre-registration in this campaign is early: after the census runs, this choice is
+# made by someone who has seen the answer.
+#   "proceed_unadjudicated" — accept the premise untested and go to R1 knowing K1 was never tested
+#   "change_content_class"  — pick a different target content class and re-run R0b..R0d against it
+#   "fund_upper_bound"      — make the upper-bound instrument its own campaign
+# The route deliberately NOT offered is the one this document forecloses everywhere else: re-run
+# the census until a number comes out favourable.
+#
+# ⚠️ REV 9 -- THE TABLE HEADER BELOW WAS MISSING IN REV 8, and the field was therefore parsed under
+# [corpus]. So the plan cited `k1_outcome.undecided_disposition` while this file defined
+# `corpus.undecided_disposition`: the sentinel that blocks R1 did not resolve, in the revision that
+# added it to close exactly that hole. Two blind spots had to line up for it to ship -- the
+# reachability gate's class 1 recognised only the bracketed `[table].field` spelling and this
+# citation is unbracketed, while class 3 was satisfied because the key existed under SOME table.
+# Widening class 1 found it on the first run.
+# REV 32 -- ANSWERED 2026-07-31: fund_upper_bound. If the census leaves K1 UNDECIDED, the
+# upper-bound instrument becomes its own campaign; R1 does not proceed on an unadjudicated
+# premise, and the content class is not changed to dodge the answer. This was chosen BEFORE the
+# census number exists, which is the whole point of the field.
+[k1_outcome]
+undecided_disposition = "fund_upper_bound"
+
+# ---------------------------------------------------------------------------------------------
+# [gating] — which field blocks which rung.
+#
+# REV 8 -- the rows for R0e / R0f / R0f' left with the rungs themselves, and so did
+# `gating_must_agree_with_hashed_ordering`. That flag asserted this table agreed with [ordering] on
+# the hashed side; [ordering] is gone, there is no duplication left to reconcile, and a flag naming
+# an agreement between one table and nothing is exactly the class of field this revision removed.
+# When the decidability apparatus is re-authored at its own rung, its gating rows and any hashed
+# counterpart are authored together — and whoever writes them implements the cross-check, because
+# a duplication nobody asserts is decoration.
+#
+# ⚠️ Two of the rows below were English sentences rather than resolvable field paths, which the
+# PENDING-sentinel checker they exist to drive cannot resolve. Every row here is now a list of
+# plain `table.field` paths; a conditional applies to the whole row or it is a separate row.
+# ---------------------------------------------------------------------------------------------
+[gating]
+r0a_blocked_by = []
+r0b_blocked_by = ["corpus.arrangement", "ingest_ceiling.disposition"]
+r0c_blocked_by = []
+r0d_blocked_by = []
+
+# R1 is the first rung after R0 and is out of this document's scope, but the block belongs here:
+# it is what stops an UNDECIDED K1 from being walked past silently. Section 9's disposition table
+# and this row are the same rule stated in two places, and the rung that reads this table asserts
+# they agree.
+r1_blocked_by = ["k1_outcome.undecided_disposition"]
+
+# ---------------------------------------------------------------------------------------------
+# [ingest_ceiling] -- plan section 3.4 / section 13, the INGEST CEILING question. BLOCKS R0b.
+#
+# REV 24 -- THIS FIELD IS NEW, AND WITHOUT IT REV 23'S FINDING HAD NO CONSUMER. Rev 23 established
+# that mesh buffers route to ONE 64 MiB first-fit host block with no growth path, so the corpus a
+# density census needs cannot be resident: the whole corpus must satisfy
+# sum(T_i) <~ 1.5 M triangles minus the already-resident remainder. It then called the
+# device-local + staging path "a precondition of R0b" -- and gave it no producer. R0b's Lands list
+# was unchanged, no rung preceded it, this table had no row, and section 13 had no question. By the
+# plan's own rule (a rule is landed only when some consumer reads the symbol it defines) the
+# precondition was not landed. This row and this field are that consumer.
+#
+# It is an owner SCOPE call and not an architecture fork, which is why it is here rather than
+# decided in the plan: the routes differ in what the campaign IS, not in how a component is built.
+#   "extend_r0b"     -- the upload path + a capacity or growth change land INSIDE R0b, whose Lands
+#                       list, gate and blocked-by row are then re-derived together. R0b's Rev 17
+#                       approval does not survive this and must be re-earned.
+#   "new_rung"       -- a rung precedes R0b with its own gate and demonstrated red mutation, and
+#                       R0b keeps its approval unchanged.
+#   "rescope_corpus" -- the corpus is bounded to what today's allocator holds, and the campaign
+#                       records that K1 is being decided on content far below the regime the
+#                       premise is about. This is the route the document forecloses everywhere
+#                       else and is listed only so that choosing it is deliberate.
+# The route deliberately NOT offered is deferring it again: section 3.4 called this work a
+# "named follow-up, not R0 work" from the day it was written, and that sentence is what let three
+# rungs be specified on top of an ingest that cannot run.
+# REV 32 -- ANSWERED 2026-07-31: new_rung, with an owner amplification: the answer explicitly
+# licenses splitting the work into MORE, SMALLER stages than one ("it can be split into a larger
+# number of stages to make it easier"). So the device-local + staging path precedes R0b as its own
+# rung -- or several small rungs -- each with its own gate and demonstrated red mutation, and R0b
+# keeps its Rev 17 approval unchanged. The rung specs land when the rungs land (plan Status:
+# further plan changes are rung-driven, not review-driven).
+[ingest_ceiling]
+disposition = "new_rung"

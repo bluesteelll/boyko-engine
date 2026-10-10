@@ -13,9 +13,9 @@ use core::ffi::c_void;
 use core::ptr;
 
 use boyko_rhi::{
-    BarrierDesc, BufferBarrier, BufferCopy, BufferImageCopy, ImageBarrierDesc, ImageLayout,
-    ImageSubresourceRange, IndexType, RenderArea, RenderingDesc, RhiCommandEncoder, ShaderStage,
-    TimestampStage, Viewport,
+    BarrierDesc, BufferBarrier, BufferCopy, BufferImageCopy, ImageBarrierDesc, ImageBlitDesc,
+    ImageLayout, ImageSubresourceRange, IndexType, RenderArea, RenderingDesc, RhiCommandEncoder,
+    ShaderStage, TimestampStage, Viewport,
 };
 
 use crate::device::DeviceFns;
@@ -748,20 +748,22 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         }
     }
 
-    fn bind_descriptor_set(
+    fn bind_descriptor_set_at(
         &mut self,
+        set_index: u32,
         group: &VulkanBindGroup,
         pipeline: &VulkanGraphicsPipeline,
     ) {
         // SAFETY: recording is open and inside a `begin_rendering` scope with the
         // matching graphics pipeline bound (caller contract); `pipeline.layout` is
-        // that pipeline's own layout, built with the same bind-group set-layout at
-        // `set 0` (`GraphicsPipelineDesc::bind_group_layout`), so binding
+        // that pipeline's own layout, whose set `set_index` was declared with a
+        // layout compatible with `group`'s (`GraphicsPipelineDesc::bind_group_layout`
+        // for index 0, the `create_graphics_pipeline_*` `set1_layout` argument for
+        // index 1 — the trait method's caller contract), so binding
         // `group.descriptor_set` there for the GRAPHICS bind point is type-compatible.
         // `&group.descriptor_set` is a single-element local (alive for the call), so
-        // `first_set = 0`, `descriptor_set_count = 1` matches it; zero dynamic offsets
-        // (null valid for count 0). `self.fns` points into the context's boxed
-        // fn-table (alive per the type contract).
+        // `first_set = set_index`, `descriptor_set_count = 1` matches it; zero dynamic
+        // offsets (null valid for count 0).
         // SAFETY: `self.fns` points into the owning context's boxed `DeviceFns` — a stable
         // heap address that outlives this encoder (context teardown order); deref is valid.
         let fns = unsafe { &*self.fns };
@@ -770,7 +772,7 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
                 self.command_buffer,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 pipeline.layout,
-                0,
+                set_index,
                 1,
                 &group.descriptor_set,
                 0,
@@ -903,11 +905,17 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         // The agnostic `ShaderStage` bits equal `VK_SHADER_STAGE_*` (plan D5,
         // asserted in `abi_guard.rs`).
         let stage_flags: VkFlags = stage.bits();
+        // The pipeline records its push range's stage flags, and a push must name exactly
+        // those (a missing stage is VUID-vkCmdPushConstants-offset-01796, an extra one -01795).
+        debug_assert_eq!(
+            stage_flags, pipeline.push_stages,
+            "invariant: a graphics push names exactly the pipeline's push-range stages"
+        );
         // SAFETY: recording is open; `pipeline.layout` is the graphics pipeline's own
-        // layout (created in `create_graphics_pipeline` with a VERTEX-stage push range
-        // at offset 0). The encoder does NOT carry the layout's declared push size, so
-        // it cannot statically bound `stage`/`offset`/`bytes` against it — an over-range
-        // or wrong-stage push is caught at runtime by the Vulkan validation layer (the
+        // layout (created by `build_graphics_pipeline` with a `pipeline.push_stages` push
+        // range at offset 0, stage-checked above). The encoder does NOT carry the layout's
+        // declared push size, so it cannot statically bound `offset`/`bytes` against it — an
+        // over-range push is caught at runtime by the Vulkan validation layer (the
         // GPU-half soundness oracle), not by a debug_assert here (contrast the compute
         // sibling, whose FIXED 4-byte/COMPUTE layout makes a static assert trivial).
         // `bytes.as_ptr()` points to `bytes.len()` bytes alive for the call; `self.fns`
@@ -1124,6 +1132,63 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         }
         self.copy_buffer_to_image_many(src.buffer, dst.image, dst_layout.as_i32(), regions);
     }
+
+    fn blit_image(&mut self, desc: &ImageBlitDesc<Vulkan>) {
+        debug_assert!(
+            desc.src_extent_w > 0 && desc.src_extent_h > 0,
+            "invariant: blit_image source extent must be non-zero"
+        );
+        debug_assert!(
+            desc.dst_extent_w > 0 && desc.dst_extent_h > 0,
+            "invariant: blit_image destination extent must be non-zero"
+        );
+        let subresource = |mip_level: u32| VkImageSubresourceLayers {
+            aspect_mask: desc.aspect.bits(),
+            mip_level,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        let blit = VkImageBlit {
+            src_subresource: subresource(desc.src_mip_level),
+            src_offsets: [
+                VkOffset3D::default(),
+                VkOffset3D {
+                    x: desc.src_extent_w as i32,
+                    y: desc.src_extent_h as i32,
+                    z: 1,
+                },
+            ],
+            dst_subresource: subresource(desc.dst_mip_level),
+            dst_offsets: [
+                VkOffset3D::default(),
+                VkOffset3D {
+                    x: desc.dst_extent_w as i32,
+                    y: desc.dst_extent_h as i32,
+                    z: 1,
+                },
+            ],
+        };
+        // SAFETY: recording is open; `desc.texture.image` is a live image whose
+        // `src_mip_level` is currently in `desc.src_layout` and whose `dst_mip_level`
+        // is currently in `desc.dst_layout` (the caller transitioned each via a prior
+        // `image_barrier`, per this fn's own doc); one fully-initialized `VkImageBlit`
+        // (the `blit` local, alive for the call) names both in-bounds full-extent
+        // regions. `self.fns` points into the context's boxed fn-table (alive per the
+        // type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_blit_image)(
+                self.command_buffer,
+                desc.texture.image,
+                desc.src_layout.as_i32(),
+                desc.texture.image,
+                desc.dst_layout.as_i32(),
+                1,
+                &blit,
+                VK_FILTER_LINEAR,
+            );
+        }
+    }
 }
 
 impl VulkanCommandEncoder {
@@ -1178,6 +1243,82 @@ impl VulkanCommandEncoder {
         let fns = unsafe { &*self.fns };
         unsafe {
             (fns.cmd_fill_buffer)(self.command_buffer, buffer.buffer, 0, buffer.size, pattern);
+        }
+    }
+
+    /// Records one CLEAR-only dynamic-rendering scope per array layer of the depth `texture`
+    /// (`[0, active_layers)`, each through its per-layer render view), clearing every texel of
+    /// every layer to `depth` with zero draws.
+    ///
+    /// The per-layer view is what the public [`RhiCommandEncoder::begin_rendering`] cannot
+    /// reach (its depth attachment is the texture's layer-0 `view`), and a render-pass clear is
+    /// what lets a depth image be filled WITHOUT `TRANSFER_DST` usage — a transfer clear of an
+    /// image created without it is the missing-usage validation error already found once on
+    /// `taa_hist`.
+    ///
+    /// Cold diagnostic seam: its one caller is `boyko_app`'s shadow-map poison knob
+    /// (`BOYKO_SHADOW_POISON`), which fills never-written shadow layers with a chosen depth so a
+    /// gate can prove a frame does not depend on them. The caller MUST have transitioned every
+    /// layer of `texture` to `DEPTH_ATTACHMENT_OPTIMAL` (with depth-attachment-write access)
+    /// before this call and owns every transition after it. `extent` is the texture's square
+    /// side in texels (`VulkanTexture` does not carry its own extent).
+    #[cold]
+    #[inline(never)]
+    pub fn clear_depth_layers(&mut self, texture: &VulkanTexture, extent: u32, depth: f32) {
+        debug_assert!(
+            texture.aspect_mask & VK_IMAGE_ASPECT_DEPTH_BIT != 0,
+            "invariant: clear_depth_layers clears a DEPTH image"
+        );
+        debug_assert!(
+            (0.0..=1.0).contains(&depth),
+            "invariant: a D32 clear value lies in the [0, 1] depth range"
+        );
+        let area = VkRect2D {
+            offset: VkOffset2D { x: 0, y: 0 },
+            extent: VkExtent2D { width: extent, height: extent },
+        };
+        // SAFETY: `self.fns` points into the context's boxed fn-table, alive per the type
+        // contract (the same deref every recording helper here performs).
+        let fns = unsafe { &*self.fns };
+        for layer in 0..texture.active_layers {
+            let attachment = VkRenderingAttachmentInfo {
+                s_type: VkStructureType::RenderingAttachmentInfo,
+                p_next: ptr::null(),
+                image_view: texture.layer_render_view(layer),
+                image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                resolve_mode: 0,
+                resolve_image_view: VkImageView::NULL,
+                resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+                store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                clear_value: VkClearValue {
+                    depth_stencil: VkClearDepthStencilValue { depth, stencil: 0 },
+                },
+            };
+            let rendering = VkRenderingInfo {
+                s_type: VkStructureType::RenderingInfo,
+                p_next: ptr::null(),
+                flags: 0,
+                render_area: area,
+                layer_count: 1,
+                view_mask: 0,
+                color_attachment_count: 0,
+                p_color_attachments: ptr::null(),
+                p_depth_attachment: (&attachment as *const VkRenderingAttachmentInfo).cast(),
+                p_stencil_attachment: ptr::null(),
+            };
+            // SAFETY: recording is open (the caller's `begin`); `rendering` is fully initialized,
+            // names NO color attachment and one depth attachment — the live per-layer render view
+            // of `texture` (`layer < active_layers`, so `layer_render_view` returns a real view,
+            // not the NULL tail), which the caller transitioned to DEPTH_ATTACHMENT_OPTIMAL (the
+            // layout named here). No pipeline is bound and nothing is drawn: the scope exists
+            // only for its CLEAR load op. `attachment` and `rendering` are locals that outlive
+            // both calls. Dynamic rendering is enabled on the device (Vulkan 1.3 core, required
+            // at boot).
+            unsafe {
+                (fns.cmd_begin_rendering)(self.command_buffer, &rendering);
+                (fns.cmd_end_rendering)(self.command_buffer);
+            }
         }
     }
 

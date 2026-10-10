@@ -1,0 +1,21 @@
+2026-10-01T03:08:17.789+03:00 WINDOW START cutoff 2026-10-01T23:59:00 blocks ['C4-CGU'] test True resume False
+2026-10-01T03:08:18.075+03:00 C4-CGU-p0: idle rule (wait_idle9a.ps1, up to 30 polls)
+2026-10-01T03:08:18.091+03:00 C4-CGU-p0: idle reached; {'time': '2026-10-01T03:08:18.091+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-10-01T03:08:18.677+03:00 C4-CGU-p0: opening receipt 45.12% (build procs busy [], presence {'build': [], 'lane': []})
+2026-10-01T03:08:19.317+03:00   C4-CGU-p0 warm-up C4-JDcgu#tip W=8 (untimed): pose 0x3c1f644743b89079 expect none rb 45.12% ra 59.38% others 63.38% exit 0 waited 0.0s CONTAMINATED-before(45.12%) CONTAMINATED-after(59.38%) OTHERS-BUSY(63.38%)
+2026-10-01T03:08:19.983+03:00   C4-CGU-p0 warm-up C4-JDcgu#tipcgu1 W=8 (untimed): pose 0x3c1f644743b89079 expect none rb 59.38% ra 42.58% others 106.63% exit 0 waited 0.0s CONTAMINATED-before(59.38%) CONTAMINATED-after(42.58%) OTHERS-BUSY(106.63%)
+2026-10-01T03:08:20.624+03:00   C4-CGU-p0 r0 [  1] C4-JDcgu#tipcgu1 W=16: pose 0x3c1f644743b89079 expect none rb 42.58% ra 22.24% others 61.05% exit 0 waited 0.0s CONTAMINATED-before(42.58%) CONTAMINATED-after(22.24%) OTHERS-BUSY(61.05%)
+2026-10-01T03:08:21.239+03:00   C4-CGU-p0 r0 [  2] C4-JDcgu#tip W=16: pose 0x3c1f644743b89079 expect none rb 22.24% ra 11.55% others 30.42% exit 0 waited 0.0s CONTAMINATED-before(22.24%) CONTAMINATED-after(11.55%) OTHERS-BUSY(30.42%)
+2026-10-01T03:08:21.844+03:00   C4-CGU-p0 r0 [  3] C4-JDcgu#tipcgu1 W=8: pose 0x3c1f644743b89079 expect none rb 11.55% ra 13.35% others 15.3% exit 0 waited 0.0s CONTAMINATED-before(11.55%) CONTAMINATED-after(13.35%) OTHERS-BUSY(15.3%)
+2026-10-01T03:08:22.456+03:00   C4-CGU-p0 r0 [  4] C4-JDcgu#tip W=8: pose 0x3c1f644743b89079 expect none rb 13.35% ra 11.55% others 22.19% exit 0 waited 0.0s CONTAMINATED-before(13.35%) CONTAMINATED-after(11.55%) OTHERS-BUSY(22.19%)
+2026-10-01T03:08:23.068+03:00   C4-CGU-p0 r0 [  5] C4-JDcgu#tipcgu1 W=4: pose 0x3c1f644743b89079 expect none rb 11.55% ra 14.29% others 18.17% exit 0 waited 0.0s CONTAMINATED-before(11.55%) CONTAMINATED-after(14.29%) OTHERS-BUSY(18.17%)
+2026-10-01T03:08:23.679+03:00   C4-CGU-p0 r0 [  6] C4-JDcgu#tip W=4: pose 0x3c1f644743b89079 expect none rb 14.29% ra 9.68% others 26.07% exit 0 waited 0.0s CONTAMINATED-before(14.29%) CONTAMINATED-after(9.68%) OTHERS-BUSY(26.07%)
+2026-10-01T03:08:24.309+03:00   C4-CGU-p0 r0 [  7] C4-JDcgu#tipcgu1 W=2: pose 0x3c1f644743b89079 expect none rb 9.68% ra 10.61% others 25.83% exit 0 waited 0.0s CONTAMINATED-before(9.68%) CONTAMINATED-after(10.61%) OTHERS-BUSY(25.83%)
+2026-10-01T03:08:24.929+03:00   C4-CGU-p0 r0 [  8] C4-JDcgu#tip W=2: pose 0x3c1f644743b89079 expect none rb 10.61% ra 11.39% others 29.48% exit 0 waited 0.0s CONTAMINATED-before(10.61%) CONTAMINATED-after(11.39%) OTHERS-BUSY(29.48%)
+2026-10-01T03:08:25.574+03:00   C4-CGU-p0 r0 [  9] C4-JDcgu#tipcgu1 W=1: pose 0x3c1f644743b89079 expect none rb 11.39% ra 14.48% others 19.76% exit 0 waited 0.0s CONTAMINATED-before(11.39%) CONTAMINATED-after(14.48%) OTHERS-BUSY(19.76%)
+2026-10-01T03:08:26.218+03:00   C4-CGU-p0 r0 [ 10] C4-JDcgu#tip W=1: pose 0x3c1f644743b89079 expect none rb 14.48% ra 12.87% others 17.06% exit 0 waited 0.0s CONTAMINATED-before(14.48%) CONTAMINATED-after(12.87%) OTHERS-BUSY(17.06%)
+2026-10-01T03:08:26.219+03:00 C4-CGU-p0: re-run wave 1: 1 slot(s) unclean: [(0, 'C4-JDcgu', 'tipcgu1', 8, 'contaminated')]
+2026-10-01T03:08:26.825+03:00   C4-CGU-p0 r0 [  3] C4-JDcgu#tipcgu1 W=8 RERUN 1 (contaminated): pose 0x3c1f644743b89079 expect none rb 12.87% ra 10.18% others 20.56% exit 0 waited 0.0s CONTAMINATED-before(12.87%) CONTAMINATED-after(10.18%) OTHERS-BUSY(20.56%)
+2026-10-01T03:08:26.828+03:00 C4-CGU-p0: re-run stage ended after 1 wave(s); 0 pass-cell(s) short of their slots (k_clean < k_target; K < 3 does not gate): []
+2026-10-01T03:08:26.828+03:00 C4-CGU-p0: done
+2026-10-01T03:08:26.868+03:00 WINDOW END exit 0: complete; counters {'timed': 11, 'rerun': 1, 'warm': 2, 'voided_processes': 0}; binaries after all match

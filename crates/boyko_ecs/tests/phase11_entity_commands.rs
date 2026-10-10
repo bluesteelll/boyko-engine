@@ -36,6 +36,13 @@
 //!
 //! 600..=619, away from the existing Phase 8.5 / 8c+8d / 10 ranges.
 
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::component::component_registry::register_layout;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;

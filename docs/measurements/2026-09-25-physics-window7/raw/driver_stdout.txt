@@ -1,0 +1,590 @@
+2026-09-25T01:02:16.389+03:00 WINDOW START cutoff 2026-09-25T10:00:00 blocks ['P1A-jolt', 'P2-L9GTW', 'P3-G9JA', 'P4-trkspans', 'P5-joltprof', 'P1B-jolt'] test False resume False
+2026-09-25T01:02:16.551+03:00 P1A-jolt-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-25T01:09:27.139+03:00 P1A-jolt-p0: idle reached; {'time': '2026-09-25T01:09:27.139+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T01:09:37.211+03:00 P1A-jolt-p0: opening receipt 2.27% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T01:09:43.473+03:00   P1A-jolt-p0 warm-up H-trk-tree#trk W=8 (untimed): stat 2.3828 ms pose 0x32d5e235342b4143 expect match rb 2.27% ra 0.92% others 0.41% cpu_s 4.578 wall 1.202s waited 0.0s
+2026-09-25T01:09:51.643+03:00   P1A-jolt-p0 r0 [  1] H-trk-tree#trk W=1: stat 6.1973 ms pose 0x32d5e235342b4143 expect match rb 0.92% ra 1.58% others 0.88% cpu_s 3.109 wall 3.108s waited 0.0s
+2026-09-25T01:10:01.928+03:00   P1A-jolt-p0 r0 [  2] H-jolt56#j56 W=1: stat 10.4047 ms jolt hash 0xb8522b4e3fc62cfe threads 1 rb 1.58% ra 5.94% others 4.49% cpu_s 5.219 wall 5.226s waited 0.0s CONTAMINATED-after(5.94%)
+2026-09-25T01:10:35.937+03:00   P1A-jolt-p0 r0 [  3] H-trk-ap#trk W=1: stat 7.8298 ms pose 0x32d5e235342b4143 expect match rb 0.8% ra 4.3% others 0.5% cpu_s 3.969 wall 3.924s waited 25.0s
+2026-09-25T01:10:43.012+03:00   P1A-jolt-p0 r0 [  4] H-trk-tree#trk W=2: stat 4.0114 ms pose 0x32d5e235342b4143 expect match rb 4.3% ra 7.07% others 4.22% cpu_s 3.453 wall 2.015s waited 0.0s CONTAMINATED-after(7.07%)
+2026-09-25T01:11:16.089+03:00   P1A-jolt-p0 r0 [  5] H-jolt56#j56 W=2: stat 5.9318 ms jolt hash 0xb8522b4e3fc62cfe threads 2 rb 3.1% ra 0.82% others 0.85% cpu_s 5.938 wall 2.988s waited 25.0s
+2026-09-25T01:11:24.128+03:00   P1A-jolt-p0 r0 [  6] H-trk-ap#trk W=2: stat 5.9408 ms pose 0x32d5e235342b4143 expect match rb 0.82% ra 5.95% others 2.69% cpu_s 4.516 wall 2.979s waited 0.0s CONTAMINATED-after(5.95%)
+2026-09-25T01:11:55.698+03:00   P1A-jolt-p0 r0 [  7] H-trk-tree#trk W=4: stat 2.9305 ms pose 0x32d5e235342b4143 expect match rb 1.35% ra 1.73% others 0.6% cpu_s 4.0 wall 1.475s waited 25.0s
+2026-09-25T01:12:02.728+03:00   P1A-jolt-p0 r0 [  8] H-jolt56#j56 W=4: stat 3.8957 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 1.73% ra 2.87% others 0.89% cpu_s 7.688 wall 1.97s waited 0.0s
+2026-09-25T01:12:10.210+03:00   P1A-jolt-p0 r0 [  9] H-trk-ap#trk W=4: stat 4.8262 ms pose 0x32d5e235342b4143 expect match rb 2.87% ra 7.61% others 5.08% cpu_s 4.844 wall 2.422s waited 0.0s CONTAMINATED-after(7.61%)
+2026-09-25T01:12:41.545+03:00   P1A-jolt-p0 r0 [ 10] H-trk-tree#trk W=8: stat 2.4741 ms pose 0x32d5e235342b4143 expect match rb 0.8% ra 4.28% others 2.98% cpu_s 6.25 wall 1.247s waited 25.0s
+2026-09-25T01:12:48.070+03:00   P1A-jolt-p0 r0 [ 11] H-jolt56#j56 W=8: stat 2.8880 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 4.28% ra 5.66% others 0.47% cpu_s 11.328 wall 1.466s waited 0.0s CONTAMINATED-after(5.66%)
+2026-09-25T01:13:20.271+03:00   P1A-jolt-p0 r0 [ 12] H-trk-ap#trk W=8: stat 4.2040 ms pose 0x32d5e235342b4143 expect match rb 2.34% ra 0.72% others 0.6% cpu_s 6.641 wall 2.111s waited 25.0s
+2026-09-25T01:13:26.674+03:00   P1A-jolt-p0 r0 [ 13] H-trk-tree#trk W=16: stat 2.6739 ms pose 0x32d5e235342b4143 expect match rb 0.72% ra 1.47% others 0.51% cpu_s 10.891 wall 1.347s waited 0.0s
+2026-09-25T01:13:33.252+03:00   P1A-jolt-p0 r0 [ 14] H-jolt56#j56 W=16: stat 3.0014 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 1.47% ra 6.3% others 4.11% cpu_s 19.547 wall 1.522s waited 0.0s CONTAMINATED-after(6.3%)
+2026-09-25T01:14:05.679+03:00   P1A-jolt-p0 r0 [ 15] H-trk-ap#trk W=16: stat 4.6552 ms pose 0x32d5e235342b4143 expect match rb 0.98% ra 1.09% others 0.83% cpu_s 12.094 wall 2.337s waited 25.0s
+2026-09-25T01:14:13.840+03:00   P1A-jolt-p0 r1 [ 16] H-trk-tree#trk W=1: stat 6.1879 ms pose 0x32d5e235342b4143 expect match rb 1.09% ra 7.66% others 0.63% cpu_s 3.141 wall 3.104s waited 0.0s CONTAMINATED-after(7.66%)
+2026-09-25T01:14:49.067+03:00   P1A-jolt-p0 r1 [ 17] H-jolt56#j56 W=1: stat 10.2366 ms jolt hash 0xb8522b4e3fc62cfe threads 1 rb 1.72% ra 0.92% others 1.41% cpu_s 5.141 wall 5.141s waited 25.0s
+2026-09-25T01:14:58.118+03:00   P1A-jolt-p0 r1 [ 18] H-trk-ap#trk W=1: stat 7.9607 ms pose 0x32d5e235342b4143 expect match rb 0.92% ra 5.65% others 1.45% cpu_s 4.0 wall 3.99s waited 0.0s CONTAMINATED-after(5.65%)
+2026-09-25T01:15:30.283+03:00   P1A-jolt-p0 r1 [ 19] H-trk-tree#trk W=2: stat 4.1331 ms pose 0x32d5e235342b4143 expect match rb 1.84% ra 1.46% others 0.71% cpu_s 3.5 wall 2.076s waited 25.0s
+2026-09-25T01:15:38.404+03:00   P1A-jolt-p0 r1 [ 20] H-jolt56#j56 W=2: stat 6.0883 ms jolt hash 0xb8522b4e3fc62cfe threads 2 rb 1.46% ra 4.75% others 0.71% cpu_s 6.031 wall 3.067s waited 0.0s
+2026-09-25T01:15:46.445+03:00   P1A-jolt-p0 r1 [ 21] H-trk-ap#trk W=2: stat 5.9502 ms pose 0x32d5e235342b4143 expect match rb 4.75% ra 7.43% others 5.5% cpu_s 4.594 wall 2.984s waited 0.0s CONTAMINATED-after(7.43%)
+2026-09-25T01:16:17.995+03:00   P1A-jolt-p0 r1 [ 22] H-trk-tree#trk W=4: stat 2.9068 ms pose 0x32d5e235342b4143 expect match rb 1.14% ra 3.65% others 0.34% cpu_s 4.203 wall 1.462s waited 25.0s
+2026-09-25T01:16:24.984+03:00   P1A-jolt-p0 r1 [ 23] H-jolt56#j56 W=4: stat 3.8273 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 3.65% ra 6.4% others 4.85% cpu_s 7.438 wall 1.934s waited 0.0s CONTAMINATED-after(6.4%)
+2026-09-25T01:16:57.466+03:00   P1A-jolt-p0 r1 [ 24] H-trk-ap#trk W=4: stat 4.7667 ms pose 0x32d5e235342b4143 expect match rb 1.88% ra 1.05% others 0.82% cpu_s 4.516 wall 2.393s waited 25.0s
+2026-09-25T01:17:03.696+03:00   P1A-jolt-p0 r1 [ 25] H-trk-tree#trk W=8: stat 2.3290 ms pose 0x32d5e235342b4143 expect match rb 1.05% ra 4.16% others 0.67% cpu_s 4.953 wall 1.174s waited 0.0s
+2026-09-25T01:17:10.210+03:00   P1A-jolt-p0 r1 [ 26] H-jolt56#j56 W=8: stat 2.8810 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 4.16% ra 6.16% others 5.09% cpu_s 10.766 wall 1.461s waited 0.0s CONTAMINATED-after(6.16%)
+2026-09-25T01:17:42.427+03:00   P1A-jolt-p0 r1 [ 27] H-trk-ap#trk W=8: stat 4.2356 ms pose 0x32d5e235342b4143 expect match rb 1.03% ra 1.28% others 0.78% cpu_s 5.688 wall 2.128s waited 25.0s
+2026-09-25T01:17:48.825+03:00   P1A-jolt-p0 r1 [ 28] H-trk-tree#trk W=16: stat 2.6593 ms pose 0x32d5e235342b4143 expect match rb 1.28% ra 7.54% others 2.48% cpu_s 9.891 wall 1.34s waited 0.0s CONTAMINATED-after(7.54%)
+2026-09-25T01:18:20.460+03:00   P1A-jolt-p0 r1 [ 29] H-jolt56#j56 W=16: stat 3.0457 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.98% ra 3.7% others 0.76% cpu_s 22.688 wall 1.545s waited 25.0s
+2026-09-25T01:18:27.816+03:00   P1A-jolt-p0 r1 [ 30] H-trk-ap#trk W=16: stat 4.5748 ms pose 0x32d5e235342b4143 expect match rb 3.7% ra 3.14% others 0.98% cpu_s 12.875 wall 2.297s waited 0.0s
+2026-09-25T01:18:35.968+03:00   P1A-jolt-p0 r2 [ 31] H-trk-tree#trk W=1: stat 6.1755 ms pose 0x32d5e235342b4143 expect match rb 3.14% ra 5.79% others 4.54% cpu_s 3.125 wall 3.097s waited 0.0s CONTAMINATED-after(5.79%)
+2026-09-25T01:19:11.340+03:00   P1A-jolt-p0 r2 [ 32] H-jolt56#j56 W=1: stat 10.5267 ms jolt hash 0xb8522b4e3fc62cfe threads 1 rb 1.92% ra 3.22% others 0.57% cpu_s 5.281 wall 5.286s waited 25.0s
+2026-09-25T01:19:20.365+03:00   P1A-jolt-p0 r2 [ 33] H-trk-ap#trk W=1: stat 7.9187 ms pose 0x32d5e235342b4143 expect match rb 3.22% ra 9.61% others 5.24% cpu_s 4.0 wall 3.969s waited 0.0s CONTAMINATED-after(9.61%)
+2026-09-25T01:19:52.553+03:00   P1A-jolt-p0 r2 [ 34] H-trk-tree#trk W=2: stat 4.1775 ms pose 0x32d5e235342b4143 expect match rb 1.21% ra 3.92% others 1.17% cpu_s 3.656 wall 2.098s waited 25.0s
+2026-09-25T01:20:00.662+03:00   P1A-jolt-p0 r2 [ 35] H-jolt56#j56 W=2: stat 6.0544 ms jolt hash 0xb8522b4e3fc62cfe threads 2 rb 3.92% ra 7.26% others 4.39% cpu_s 6.031 wall 3.05s waited 0.0s CONTAMINATED-after(7.26%)
+2026-09-25T01:20:33.715+03:00   P1A-jolt-p0 r2 [ 36] H-trk-ap#trk W=2: stat 5.9096 ms pose 0x32d5e235342b4143 expect match rb 3.01% ra 0.68% others 0.86% cpu_s 4.281 wall 2.964s waited 25.0s
+2026-09-25T01:20:40.253+03:00   P1A-jolt-p0 r2 [ 37] H-trk-tree#trk W=4: stat 2.9415 ms pose 0x32d5e235342b4143 expect match rb 0.68% ra 5.45% others 2.45% cpu_s 4.234 wall 1.48s waited 0.0s CONTAMINATED-after(5.45%)
+2026-09-25T01:21:12.235+03:00   P1A-jolt-p0 r2 [ 38] H-jolt56#j56 W=4: stat 3.7579 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 1.46% ra 2.11% others 0.82% cpu_s 7.234 wall 1.899s waited 25.0s
+2026-09-25T01:21:19.706+03:00   P1A-jolt-p0 r2 [ 39] H-trk-ap#trk W=4: stat 4.8118 ms pose 0x32d5e235342b4143 expect match rb 2.11% ra 3.01% others 0.53% cpu_s 5.125 wall 2.415s waited 0.0s
+2026-09-25T01:21:25.975+03:00   P1A-jolt-p0 r2 [ 40] H-trk-tree#trk W=8: stat 2.4046 ms pose 0x32d5e235342b4143 expect match rb 3.01% ra 9.09% others 5.24% cpu_s 5.156 wall 1.212s waited 0.0s CONTAMINATED-after(9.09%)
+2026-09-25T01:21:57.514+03:00   P1A-jolt-p0 r2 [ 41] H-jolt56#j56 W=8: stat 2.8616 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 1.21% ra 3.11% others 0.68% cpu_s 11.188 wall 1.451s waited 25.0s
+2026-09-25T01:22:04.717+03:00   P1A-jolt-p0 r2 [ 42] H-trk-ap#trk W=8: stat 4.2592 ms pose 0x32d5e235342b4143 expect match rb 3.11% ra 5.51% others 0.73% cpu_s 6.922 wall 2.139s waited 0.0s CONTAMINATED-after(5.51%)
+2026-09-25T01:22:36.134+03:00   P1A-jolt-p0 r2 [ 43] H-trk-tree#trk W=16: stat 2.6322 ms pose 0x32d5e235342b4143 expect match rb 2.87% ra 1.19% others 0.74% cpu_s 10.156 wall 1.326s waited 25.0s
+2026-09-25T01:22:42.660+03:00   P1A-jolt-p0 r2 [ 44] H-jolt56#j56 W=16: stat 2.8904 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 1.19% ra 0.74% others 1.34% cpu_s 21.734 wall 1.469s waited 0.0s
+2026-09-25T01:22:50.023+03:00   P1A-jolt-p0 r2 [ 45] H-trk-ap#trk W=16: stat 4.5877 ms pose 0x32d5e235342b4143 expect match rb 0.74% ra 7.52% others 3.18% cpu_s 11.188 wall 2.304s waited 0.0s CONTAMINATED-after(7.52%)
+2026-09-25T01:22:50.024+03:00 P1A-jolt-p0: re-running 19 process(es) at the end of the pass: [(2, 0, 'H-jolt56', 'j56', 1, 'contaminated'), (4, 0, 'H-trk-tree', 'trk', 2, 'contaminated'), (6, 0, 'H-trk-ap', 'trk', 2, 'contaminated'), (9, 0, 'H-trk-ap', 'trk', 4, 'contaminated'), (11, 0, 'H-jolt56', 'j56', 8, 'contaminated'), (14, 0, 'H-jolt56', 'j56', 16, 'contaminated'), (16, 1, 'H-trk-tree', 'trk', 1, 'contaminated'), (18, 1, 'H-trk-ap', 'trk', 1, 'contaminated'), (21, 1, 'H-trk-ap', 'trk', 2, 'contaminated'), (23, 1, 'H-jolt56', 'j56', 4, 'contaminated'), (26, 1, 'H-jolt56', 'j56', 8, 'contaminated'), (28, 1, 'H-trk-tree', 'trk', 16, 'contaminated'), (31, 2, 'H-trk-tree', 'trk', 1, 'contaminated'), (33, 2, 'H-trk-ap', 'trk', 1, 'contaminated'), (35, 2, 'H-jolt56', 'j56', 2, 'contaminated'), (37, 2, 'H-trk-tree', 'trk', 4, 'contaminated'), (40, 2, 'H-trk-tree', 'trk', 8, 'contaminated'), (42, 2, 'H-trk-ap', 'trk', 8, 'contaminated'), (45, 2, 'H-trk-ap', 'trk', 16, 'contaminated')]
+2026-09-25T01:23:25.617+03:00   P1A-jolt-p0 r0 [  2] H-jolt56#j56 W=1 RERUN (contaminated): stat 10.9661 ms jolt hash 0xb8522b4e3fc62cfe threads 1 rb 0.94% ra 1.03% others 1.24% cpu_s 5.5 wall 5.506s waited 25.0s
+2026-09-25T01:23:32.963+03:00   P1A-jolt-p0 r0 [  4] H-trk-tree#trk W=2 RERUN (contaminated): stat 4.5559 ms pose 0x32d5e235342b4143 expect match rb 1.03% ra 7.89% others 2.99% cpu_s 3.781 wall 2.288s waited 0.0s CONTAMINATED-after(7.89%)
+2026-09-25T01:24:06.144+03:00   P1A-jolt-p0 r0 [  6] H-trk-ap#trk W=2 RERUN (contaminated): stat 6.1572 ms pose 0x32d5e235342b4143 expect match rb 4.0% ra 1.25% others 0.98% cpu_s 4.562 wall 3.087s waited 25.0s
+2026-09-25T01:24:13.623+03:00   P1A-jolt-p0 r0 [  9] H-trk-ap#trk W=4 RERUN (contaminated): stat 4.8238 ms pose 0x32d5e235342b4143 expect match rb 1.25% ra 5.53% others 0.69% cpu_s 5.141 wall 2.421s waited 0.0s CONTAMINATED-after(5.53%)
+2026-09-25T01:24:45.185+03:00   P1A-jolt-p0 r0 [ 11] H-jolt56#j56 W=8 RERUN (contaminated): stat 2.9051 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 1.07% ra 1.08% others 0.92% cpu_s 11.438 wall 1.477s waited 25.0s
+2026-09-25T01:24:51.750+03:00   P1A-jolt-p0 r0 [ 14] H-jolt56#j56 W=16 RERUN (contaminated): stat 2.9684 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 1.08% ra 1.09% others 1.1% cpu_s 21.656 wall 1.508s waited 0.0s
+2026-09-25T01:24:59.946+03:00   P1A-jolt-p0 r1 [ 16] H-trk-tree#trk W=1 RERUN (contaminated): stat 6.2602 ms pose 0x32d5e235342b4143 expect match rb 1.09% ra 8.58% others 3.96% cpu_s 3.156 wall 3.139s waited 0.0s CONTAMINATED-after(8.58%)
+2026-09-25T01:25:33.973+03:00   P1A-jolt-p0 r1 [ 18] H-trk-ap#trk W=1 RERUN (contaminated): stat 7.8555 ms pose 0x32d5e235342b4143 expect match rb 1.08% ra 3.04% others 1.41% cpu_s 3.953 wall 3.937s waited 25.0s
+2026-09-25T01:25:42.026+03:00   P1A-jolt-p0 r1 [ 21] H-trk-ap#trk W=2 RERUN (contaminated): stat 5.9687 ms pose 0x32d5e235342b4143 expect match rb 3.04% ra 6.04% others 3.46% cpu_s 4.312 wall 2.994s waited 0.0s CONTAMINATED-after(6.04%)
+2026-09-25T01:26:14.079+03:00   P1A-jolt-p0 r1 [ 23] H-jolt56#j56 W=4 RERUN (contaminated): stat 3.8928 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 1.02% ra 0.7% others 1.49% cpu_s 7.5 wall 1.967s waited 25.0s
+2026-09-25T01:26:20.637+03:00   P1A-jolt-p0 r1 [ 26] H-jolt56#j56 W=8 RERUN (contaminated): stat 2.9664 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 0.7% ra 3.88% others 0.91% cpu_s 11.672 wall 1.504s waited 0.0s
+2026-09-25T01:26:27.035+03:00   P1A-jolt-p0 r1 [ 28] H-trk-tree#trk W=16 RERUN (contaminated): stat 2.6562 ms pose 0x32d5e235342b4143 expect match rb 3.88% ra 6.15% others 5.47% cpu_s 7.547 wall 1.339s waited 0.0s CONTAMINATED-after(6.15%)
+2026-09-25T01:27:00.261+03:00   P1A-jolt-p0 r2 [ 31] H-trk-tree#trk W=1 RERUN (contaminated): stat 6.2567 ms pose 0x32d5e235342b4143 expect match rb 1.77% ra 1.33% others 0.69% cpu_s 3.156 wall 3.137s waited 25.0s
+2026-09-25T01:27:09.370+03:00   P1A-jolt-p0 r2 [ 33] H-trk-ap#trk W=1 RERUN (contaminated): stat 8.0815 ms pose 0x32d5e235342b4143 expect match rb 1.33% ra 5.95% others 4.2% cpu_s 4.094 wall 4.051s waited 0.0s CONTAMINATED-after(5.95%)
+2026-09-25T01:27:42.654+03:00   P1A-jolt-p0 r2 [ 35] H-jolt56#j56 W=2 RERUN (contaminated): stat 6.3279 ms jolt hash 0xb8522b4e3fc62cfe threads 2 rb 2.42% ra 1.76% others 0.62% cpu_s 6.281 wall 3.189s waited 25.0s
+2026-09-25T01:27:49.180+03:00   P1A-jolt-p0 r2 [ 37] H-trk-tree#trk W=4 RERUN (contaminated): stat 2.9200 ms pose 0x32d5e235342b4143 expect match rb 1.76% ra 6.9% others 2.73% cpu_s 3.672 wall 1.47s waited 0.0s CONTAMINATED-after(6.9%)
+2026-09-25T01:29:10.554+03:00   P1A-jolt-p0 r2 [ 40] H-trk-tree#trk W=8 RERUN (contaminated): stat 2.4068 ms pose 0x32d5e235342b4143 expect match rb 1.07% ra 4.43% others 0.65% cpu_s 4.531 wall 1.212s waited 75.1s
+2026-09-25T01:29:17.741+03:00   P1A-jolt-p0 r2 [ 42] H-trk-ap#trk W=8 RERUN (contaminated): stat 4.2293 ms pose 0x32d5e235342b4143 expect match rb 4.43% ra 10.02% others 5.01% cpu_s 4.969 wall 2.124s waited 0.0s CONTAMINATED-after(10.02%)
+2026-09-25T01:29:50.173+03:00   P1A-jolt-p0 r2 [ 45] H-trk-ap#trk W=16 RERUN (contaminated): stat 4.6583 ms pose 0x32d5e235342b4143 expect match rb 4.27% ra 8.24% others 2.96% cpu_s 11.281 wall 2.34s waited 25.0s CONTAMINATED-after(8.24%)
+2026-09-25T01:29:50.174+03:00 P1A-jolt-p0: done
+2026-09-25T01:29:50.175+03:00 P1A-jolt-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-25T01:59:50.946+03:00 WINDOW END exit 3: STOP before P1A-jolt-p1: idle rule not met in 30 min (wait_idle exit 1); last finished: P1A-jolt-p0 r2 H-trk-ap#trk@W16; counters {'timed': 64, 'rerun': 19, 'warm': 1, 'voided_processes': 0}; binaries after all match
+2026-09-25T02:45:53.777+03:00 WINDOW START cutoff 2026-09-25T10:30:00 blocks ['P1A-jolt', 'P2-L9GTW', 'P3-G9JA', 'P4-trkspans', 'P5-joltprof', 'P1B-jolt'] test False resume True
+2026-09-25T02:45:53.783+03:00 --resume: canary references restored [('H-trk-ap', 'trk', 1), ('H-trk-ap', 'trk', 2), ('H-trk-ap', 'trk', 4), ('H-trk-ap', 'trk', 8), ('H-trk-ap', 'trk', 16), ('H-trk-tree', 'trk', 1), ('H-trk-tree', 'trk', 2), ('H-trk-tree', 'trk', 4), ('H-trk-tree', 'trk', 8), ('H-trk-tree', 'trk', 16)]
+2026-09-25T02:45:55.061+03:00 P1A-jolt-p0: already done (--resume), skipped
+2026-09-25T02:45:55.062+03:00 P1A-jolt-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-25T02:54:06.631+03:00 P1A-jolt-p1: idle reached; {'time': '2026-09-25T02:54:06.631+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T02:54:16.823+03:00 P1A-jolt-p1: opening receipt 6.13% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T02:54:48.214+03:00   P1A-jolt-p1 warm-up H-trk-tree#trk W=8 (untimed): stat 2.5686 ms pose 0x32d5e235342b4143 expect match rb 2.41% ra 5.72% others 2.49% cpu_s 5.328 wall 1.298s waited 25.0s CONTAMINATED-after(5.72%)
+2026-09-25T02:55:20.851+03:00   P1A-jolt-p1 r0 [  1] H-trk-ap#trk W=16: stat 5.0564 ms pose 0x32d5e235342b4143 expect match rb 2.11% ra 5.1% others 2.38% cpu_s 11.156 wall 2.541s waited 25.0s CONTAMINATED-after(5.1%)
+2026-09-25T02:55:53.938+03:00   P1A-jolt-p1 r0 [  2] H-jolt56#j56 W=16: stat 5.3684 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 4.11% ra 2.38% others 8.87% cpu_s 31.906 wall 2.874s waited 25.0s
+2026-09-25T02:56:00.492+03:00   P1A-jolt-p1 r0 [  3] H-trk-tree#trk W=16: stat 2.9531 ms pose 0x32d5e235342b4143 expect match rb 2.38% ra 4.2% others 3.09% cpu_s 11.531 wall 1.488s waited 0.0s
+2026-09-25T02:56:07.725+03:00   P1A-jolt-p1 r0 [  4] H-trk-ap#trk W=8: stat 4.3273 ms pose 0x32d5e235342b4143 expect match rb 4.2% ra 4.02% others 2.83% cpu_s 6.391 wall 2.173s waited 0.0s
+2026-09-25T02:56:14.451+03:00   P1A-jolt-p1 r0 [  5] H-jolt56#j56 W=8: stat 3.2679 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 4.02% ra 1.58% others 2.06% cpu_s 12.594 wall 1.66s waited 0.0s
+2026-09-25T02:56:20.819+03:00   P1A-jolt-p1 r0 [  6] H-trk-tree#trk W=8: stat 2.5842 ms pose 0x32d5e235342b4143 expect match rb 1.58% ra 9.35% others 1.8% cpu_s 5.188 wall 1.303s waited 0.0s CONTAMINATED-after(9.35%)
+2026-09-25T02:56:53.505+03:00   P1A-jolt-p1 r0 [  7] H-trk-ap#trk W=4: stat 5.1485 ms pose 0x32d5e235342b4143 expect match rb 3.66% ra 5.39% others 2.04% cpu_s 4.828 wall 2.585s waited 25.0s CONTAMINATED-after(5.39%)
+2026-09-25T02:57:25.654+03:00   P1A-jolt-p1 r0 [  8] H-jolt56#j56 W=4: stat 4.0497 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 3.83% ra 7.08% others 4.15% cpu_s 8.062 wall 2.046s waited 25.0s CONTAMINATED-after(7.08%)
+2026-09-25T02:58:22.467+03:00   P1A-jolt-p1 r0 [  9] H-trk-tree#trk W=4: stat 3.3550 ms pose 0x32d5e235342b4143 expect match rb 2.63% ra 2.92% others 1.91% cpu_s 4.062 wall 1.687s waited 50.1s
+2026-09-25T02:58:30.679+03:00   P1A-jolt-p1 r0 [ 10] H-trk-ap#trk W=2: stat 6.2787 ms pose 0x32d5e235342b4143 expect match rb 2.92% ra 7.12% others 2.08% cpu_s 4.531 wall 3.149s waited 0.0s CONTAMINATED-after(7.12%)
+2026-09-25T02:59:03.818+03:00   P1A-jolt-p1 r0 [ 11] H-jolt56#j56 W=2: stat 6.0232 ms jolt hash 0xb8522b4e3fc62cfe threads 2 rb 4.55% ra 1.68% others 1.83% cpu_s 6.016 wall 3.04s waited 25.0s
+2026-09-25T02:59:10.948+03:00   P1A-jolt-p1 r0 [ 12] H-trk-tree#trk W=2: stat 4.1195 ms pose 0x32d5e235342b4143 expect match rb 1.68% ra 4.22% others 1.23% cpu_s 3.578 wall 2.07s waited 0.0s
+2026-09-25T02:59:20.024+03:00   P1A-jolt-p1 r0 [ 13] H-trk-ap#trk W=1: stat 7.9966 ms pose 0x32d5e235342b4143 expect match rb 4.22% ra 4.63% others 3.63% cpu_s 4.0 wall 4.008s waited 0.0s
+2026-09-25T02:59:30.755+03:00   P1A-jolt-p1 r0 [ 14] H-jolt56#j56 W=1: stat 11.2839 ms jolt hash 0xb8522b4e3fc62cfe threads 1 rb 4.63% ra 3.4% others 3.24% cpu_s 5.594 wall 5.669s waited 0.0s
+2026-09-25T02:59:38.981+03:00   P1A-jolt-p1 r0 [ 15] H-trk-tree#trk W=1: stat 6.2917 ms pose 0x32d5e235342b4143 expect match rb 3.4% ra 2.64% others 1.89% cpu_s 3.188 wall 3.156s waited 0.0s
+2026-09-25T02:59:46.507+03:00   P1A-jolt-p1 r1 [ 16] H-trk-ap#trk W=16: stat 4.8962 ms pose 0x32d5e235342b4143 expect match rb 2.64% ra 2.42% others 2.39% cpu_s 9.438 wall 2.458s waited 0.0s
+2026-09-25T02:59:53.298+03:00   P1A-jolt-p1 r1 [ 17] H-jolt56#j56 W=16: stat 3.4116 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 2.42% ra 2.44% others 6.2% cpu_s 23.562 wall 1.731s waited 0.0s
+2026-09-25T02:59:59.715+03:00   P1A-jolt-p1 r1 [ 18] H-trk-tree#trk W=16: stat 2.6900 ms pose 0x32d5e235342b4143 expect match rb 2.44% ra 7.43% others 5.7% cpu_s 9.672 wall 1.356s waited 0.0s CONTAMINATED-after(7.43%)
+2026-09-25T03:00:31.970+03:00   P1A-jolt-p1 r1 [ 19] H-trk-ap#trk W=8: stat 4.3056 ms pose 0x32d5e235342b4143 expect match rb 2.27% ra 5.07% others 3.57% cpu_s 6.328 wall 2.162s waited 25.0s CONTAMINATED-after(5.07%)
+2026-09-25T03:01:03.691+03:00   P1A-jolt-p1 r1 [ 20] H-jolt56#j56 W=8: stat 3.2025 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 1.93% ra 5.46% others 2.05% cpu_s 12.391 wall 1.625s waited 25.0s CONTAMINATED-after(5.46%)
+2026-09-25T03:01:35.287+03:00   P1A-jolt-p1 r1 [ 21] H-trk-tree#trk W=8: stat 2.9626 ms pose 0x32d5e235342b4143 expect match rb 3.6% ra 3.95% others 4.52% cpu_s 5.766 wall 1.491s waited 25.0s
+2026-09-25T03:01:42.780+03:00   P1A-jolt-p1 r1 [ 22] H-trk-ap#trk W=4: stat 4.8252 ms pose 0x32d5e235342b4143 expect match rb 3.95% ra 2.77% others 1.33% cpu_s 5.016 wall 2.423s waited 0.0s
+2026-09-25T03:01:49.737+03:00   P1A-jolt-p1 r1 [ 23] H-jolt56#j56 W=4: stat 3.7629 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 2.77% ra 2.3% others 3.29% cpu_s 7.391 wall 1.903s waited 0.0s
+2026-09-25T03:01:56.333+03:00   P1A-jolt-p1 r1 [ 24] H-trk-tree#trk W=4: stat 3.0390 ms pose 0x32d5e235342b4143 expect match rb 2.3% ra 1.58% others 1.79% cpu_s 3.719 wall 1.53s waited 0.0s
+2026-09-25T03:02:04.415+03:00   P1A-jolt-p1 r1 [ 25] H-trk-ap#trk W=2: stat 6.0223 ms pose 0x32d5e235342b4143 expect match rb 1.58% ra 7.37% others 2.66% cpu_s 4.453 wall 3.021s waited 0.0s CONTAMINATED-after(7.37%)
+2026-09-25T03:02:37.998+03:00   P1A-jolt-p1 r1 [ 26] H-jolt56#j56 W=2: stat 6.9120 ms jolt hash 0xb8522b4e3fc62cfe threads 2 rb 3.89% ra 3.2% others 3.11% cpu_s 6.75 wall 3.485s waited 25.0s
+2026-09-25T03:02:45.119+03:00   P1A-jolt-p1 r1 [ 27] H-trk-tree#trk W=2: stat 4.0934 ms pose 0x32d5e235342b4143 expect match rb 3.2% ra 3.91% others 1.57% cpu_s 3.391 wall 2.056s waited 0.0s
+2026-09-25T03:02:54.166+03:00   P1A-jolt-p1 r1 [ 28] H-trk-ap#trk W=1: stat 7.9549 ms pose 0x32d5e235342b4143 expect match rb 3.91% ra 3.89% others 4.36% cpu_s 4.0 wall 3.988s waited 0.0s
+2026-09-25T03:03:04.510+03:00   P1A-jolt-p1 r1 [ 29] H-jolt56#j56 W=1: stat 10.5086 ms jolt hash 0xb8522b4e3fc62cfe threads 1 rb 3.89% ra 7.02% others 3.24% cpu_s 5.266 wall 5.28s waited 0.0s CONTAMINATED-after(7.02%)
+2026-09-25T03:03:37.823+03:00   P1A-jolt-p1 r1 [ 30] H-trk-tree#trk W=1: stat 6.4102 ms pose 0x32d5e235342b4143 expect match rb 4.97% ra 6.44% others 3.95% cpu_s 3.219 wall 3.214s waited 25.0s CONTAMINATED-after(6.44%)
+2026-09-25T03:04:35.291+03:00   P1A-jolt-p1 r2 [ 31] H-trk-ap#trk W=16: stat 4.6393 ms pose 0x32d5e235342b4143 expect match rb 4.09% ra 3.27% others 1.42% cpu_s 10.906 wall 2.33s waited 50.1s
+2026-09-25T03:04:42.040+03:00   P1A-jolt-p1 r2 [ 32] H-jolt56#j56 W=16: stat 3.3047 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 3.27% ra 3.2% others 4.34% cpu_s 22.219 wall 1.686s waited 0.0s
+2026-09-25T03:04:48.523+03:00   P1A-jolt-p1 r2 [ 33] H-trk-tree#trk W=16: stat 2.8164 ms pose 0x32d5e235342b4143 expect match rb 3.2% ra 1.4% others 1.73% cpu_s 9.625 wall 1.419s waited 0.0s
+2026-09-25T03:04:55.729+03:00   P1A-jolt-p1 r2 [ 34] H-trk-ap#trk W=8: stat 4.2639 ms pose 0x32d5e235342b4143 expect match rb 1.4% ra 5.14% others 1.42% cpu_s 5.781 wall 2.141s waited 0.0s CONTAMINATED-after(5.14%)
+2026-09-25T03:05:27.260+03:00   P1A-jolt-p1 r2 [ 35] H-jolt56#j56 W=8: stat 2.8382 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 3.51% ra 3.77% others 2.11% cpu_s 10.375 wall 1.44s waited 25.0s
+2026-09-25T03:05:33.559+03:00   P1A-jolt-p1 r2 [ 36] H-trk-tree#trk W=8: stat 2.4529 ms pose 0x32d5e235342b4143 expect match rb 3.77% ra 2.39% others 1.98% cpu_s 4.547 wall 1.237s waited 0.0s
+2026-09-25T03:05:41.151+03:00   P1A-jolt-p1 r2 [ 37] H-trk-ap#trk W=4: stat 5.0442 ms pose 0x32d5e235342b4143 expect match rb 2.39% ra 7.15% others 1.77% cpu_s 5.156 wall 2.532s waited 0.0s CONTAMINATED-after(7.15%)
+2026-09-25T03:06:13.383+03:00   P1A-jolt-p1 r2 [ 38] H-jolt56#j56 W=4: stat 4.2187 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 2.63% ra 6.46% others 2.29% cpu_s 8.156 wall 2.136s waited 25.0s CONTAMINATED-after(6.46%)
+2026-09-25T03:06:45.139+03:00   P1A-jolt-p1 r2 [ 39] H-trk-tree#trk W=4: stat 3.2895 ms pose 0x32d5e235342b4143 expect match rb 3.79% ra 3.87% others 6.91% cpu_s 3.75 wall 1.656s waited 25.0s
+2026-09-25T03:06:53.296+03:00   P1A-jolt-p1 r2 [ 40] H-trk-ap#trk W=2: stat 6.1655 ms pose 0x32d5e235342b4143 expect match rb 3.87% ra 1.5% others 2.28% cpu_s 4.672 wall 3.092s waited 0.0s
+2026-09-25T03:07:01.458+03:00   P1A-jolt-p1 r2 [ 41] H-jolt56#j56 W=2: stat 6.1343 ms jolt hash 0xb8522b4e3fc62cfe threads 2 rb 1.5% ra 3.07% others 2.34% cpu_s 6.062 wall 3.097s waited 0.0s
+2026-09-25T03:07:08.623+03:00   P1A-jolt-p1 r2 [ 42] H-trk-tree#trk W=2: stat 4.1831 ms pose 0x32d5e235342b4143 expect match rb 3.07% ra 6.77% others 4.14% cpu_s 3.531 wall 2.101s waited 0.0s CONTAMINATED-after(6.77%)
+2026-09-25T03:07:42.750+03:00   P1A-jolt-p1 r2 [ 43] H-trk-ap#trk W=1: stat 8.0316 ms pose 0x32d5e235342b4143 expect match rb 2.21% ra 1.46% others 1.65% cpu_s 4.047 wall 4.026s waited 25.0s
+2026-09-25T03:07:54.524+03:00   P1A-jolt-p1 r2 [ 44] H-jolt56#j56 W=1: stat 13.3711 ms jolt hash 0xb8522b4e3fc62cfe threads 1 rb 1.46% ra 2.9% others 4.82% cpu_s 6.688 wall 6.712s waited 0.0s
+2026-09-25T03:08:02.912+03:00   P1A-jolt-p1 r2 [ 45] H-trk-tree#trk W=1: stat 6.6359 ms pose 0x32d5e235342b4143 expect match rb 2.9% ra 4.89% others 3.46% cpu_s 3.344 wall 3.328s waited 0.0s
+2026-09-25T03:08:02.912+03:00 P1A-jolt-p1: re-running 15 process(es) at the end of the pass: [(1, 0, 'H-trk-ap', 'trk', 16, 'contaminated'), (6, 0, 'H-trk-tree', 'trk', 8, 'contaminated'), (7, 0, 'H-trk-ap', 'trk', 4, 'contaminated'), (8, 0, 'H-jolt56', 'j56', 4, 'contaminated'), (10, 0, 'H-trk-ap', 'trk', 2, 'contaminated'), (18, 1, 'H-trk-tree', 'trk', 16, 'contaminated'), (19, 1, 'H-trk-ap', 'trk', 8, 'contaminated'), (20, 1, 'H-jolt56', 'j56', 8, 'contaminated'), (25, 1, 'H-trk-ap', 'trk', 2, 'contaminated'), (29, 1, 'H-jolt56', 'j56', 1, 'contaminated'), (30, 1, 'H-trk-tree', 'trk', 1, 'contaminated'), (34, 2, 'H-trk-ap', 'trk', 8, 'contaminated'), (37, 2, 'H-trk-ap', 'trk', 4, 'contaminated'), (38, 2, 'H-jolt56', 'j56', 4, 'contaminated'), (42, 2, 'H-trk-tree', 'trk', 2, 'contaminated')]
+2026-09-25T03:08:10.335+03:00   P1A-jolt-p1 r0 [  1] H-trk-ap#trk W=16 RERUN (contaminated): stat 4.7065 ms pose 0x32d5e235342b4143 expect match rb 4.89% ra 3.56% others 2.07% cpu_s 11.766 wall 2.363s waited 0.0s
+2026-09-25T03:08:16.657+03:00   P1A-jolt-p1 r0 [  6] H-trk-tree#trk W=8 RERUN (contaminated): stat 2.4936 ms pose 0x32d5e235342b4143 expect match rb 3.56% ra 5.6% others 0.79% cpu_s 4.438 wall 1.257s waited 0.0s CONTAMINATED-after(5.6%)
+2026-09-25T03:08:49.176+03:00   P1A-jolt-p1 r0 [  7] H-trk-ap#trk W=4 RERUN (contaminated): stat 4.8033 ms pose 0x32d5e235342b4143 expect match rb 3.81% ra 5.5% others 2.07% cpu_s 4.531 wall 2.411s waited 25.0s CONTAMINATED-after(5.5%)
+2026-09-25T03:09:46.370+03:00   P1A-jolt-p1 r0 [  8] H-jolt56#j56 W=4 RERUN (contaminated): stat 4.0694 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 3.91% ra 1.98% others 2.89% cpu_s 7.984 wall 2.062s waited 50.1s
+2026-09-25T03:09:54.736+03:00   P1A-jolt-p1 r0 [ 10] H-trk-ap#trk W=2 RERUN (contaminated): stat 6.5902 ms pose 0x32d5e235342b4143 expect match rb 1.98% ra 4.02% others 2.04% cpu_s 4.562 wall 3.305s waited 0.0s
+2026-09-25T03:10:01.153+03:00   P1A-jolt-p1 r1 [ 18] H-trk-tree#trk W=16 RERUN (contaminated): stat 2.6882 ms pose 0x32d5e235342b4143 expect match rb 4.02% ra 5.69% others 3.47% cpu_s 8.938 wall 1.354s waited 0.0s CONTAMINATED-after(5.69%)
+2026-09-25T03:10:33.423+03:00   P1A-jolt-p1 r1 [ 19] H-trk-ap#trk W=8 RERUN (contaminated): stat 4.3307 ms pose 0x32d5e235342b4143 expect match rb 1.72% ra 1.58% others 1.26% cpu_s 6.234 wall 2.176s waited 25.0s
+2026-09-25T03:10:39.988+03:00   P1A-jolt-p1 r1 [ 20] H-jolt56#j56 W=8 RERUN (contaminated): stat 2.9805 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 1.58% ra 4.34% others 0.91% cpu_s 11.406 wall 1.51s waited 0.0s
+2026-09-25T03:10:48.155+03:00   P1A-jolt-p1 r1 [ 25] H-trk-ap#trk W=2 RERUN (contaminated): stat 6.1827 ms pose 0x32d5e235342b4143 expect match rb 4.34% ra 3.46% others 6.05% cpu_s 4.594 wall 3.102s waited 0.0s
+2026-09-25T03:10:59.223+03:00   P1A-jolt-p1 r1 [ 29] H-jolt56#j56 W=1 RERUN (contaminated): stat 11.9685 ms jolt hash 0xb8522b4e3fc62cfe threads 1 rb 3.46% ra 2.71% others 3.22% cpu_s 6.0 wall 6.01s waited 0.0s
+2026-09-25T03:11:07.566+03:00   P1A-jolt-p1 r1 [ 30] H-trk-tree#trk W=1 RERUN (contaminated): stat 6.5465 ms pose 0x32d5e235342b4143 expect match rb 2.71% ra 2.75% others 2.11% cpu_s 3.344 wall 3.284s waited 0.0s
+2026-09-25T03:11:14.857+03:00   P1A-jolt-p1 r2 [ 34] H-trk-ap#trk W=8 RERUN (contaminated): stat 4.4244 ms pose 0x32d5e235342b4143 expect match rb 2.75% ra 1.96% others 1.49% cpu_s 6.781 wall 2.225s waited 0.0s
+2026-09-25T03:11:22.316+03:00   P1A-jolt-p1 r2 [ 37] H-trk-ap#trk W=4 RERUN (contaminated): stat 4.7734 ms pose 0x32d5e235342b4143 expect match rb 1.96% ra 8.25% others 1.22% cpu_s 4.859 wall 2.396s waited 0.0s CONTAMINATED-after(8.25%)
+2026-09-25T03:11:54.460+03:00   P1A-jolt-p1 r2 [ 38] H-jolt56#j56 W=4 RERUN (contaminated): stat 4.0400 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 2.4% ra 5.74% others 1.83% cpu_s 7.875 wall 2.041s waited 25.0s CONTAMINATED-after(5.74%)
+2026-09-25T03:12:26.709+03:00   P1A-jolt-p1 r2 [ 42] H-trk-tree#trk W=2 RERUN (contaminated): stat 4.2754 ms pose 0x32d5e235342b4143 expect match rb 1.62% ra 6.69% others 1.82% cpu_s 3.641 wall 2.148s waited 25.0s CONTAMINATED-after(6.69%)
+2026-09-25T03:12:26.710+03:00 P1A-jolt-p1: done
+2026-09-25T03:12:26.711+03:00 P2-L9GTW-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-25T03:14:37.324+03:00 P2-L9GTW-p0: idle reached; {'time': '2026-09-25T03:14:37.324+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T03:14:47.399+03:00 P2-L9GTW-p0: opening receipt 3.07% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T03:14:55.597+03:00   P2-L9GTW-p0 warm-up L9-JA-off#c4 W=8 (untimed): stat 6.2305 ms pose 0x32d5e235342b4143 expect match rb 3.07% ra 4.91% others 1.78% cpu_s 12.141 wall 3.133s waited 0.0s
+2026-09-25T03:15:10.152+03:00   P2-L9GTW-p0 r0 [  1] L9-JA-off#c4 W=1: stat 18.9680 ms pose 0x32d5e235342b4143 expect match rb 4.91% ra 3.95% others 2.97% cpu_s 9.438 wall 9.5s waited 0.0s
+2026-09-25T03:15:23.683+03:00   P2-L9GTW-p0 r0 [  2] L9-JA-on#c4 W=1: stat 16.9076 ms pose 0x30c5438bc6ad9ffa expect match rb 3.95% ra 1.33% others 2.11% cpu_s 8.438 wall 8.471s waited 0.0s
+2026-09-25T03:15:32.859+03:00   P2-L9GTW-p0 r0 [  3] L9-JD-off#c4 W=1: stat 8.1873 ms pose 0x32d5e235342b4143 expect match rb 1.33% ra 4.43% others 1.76% cpu_s 4.109 wall 4.11s waited 0.0s
+2026-09-25T03:15:41.260+03:00   P2-L9GTW-p0 r0 [  4] L9-JD-on#c4 W=1: stat 6.6445 ms pose 0x30c5438bc6ad9ffa expect match rb 4.43% ra 5.37% others 2.4% cpu_s 3.312 wall 3.34s waited 0.0s CONTAMINATED-after(5.37%)
+2026-09-25T03:16:23.665+03:00   P2-L9GTW-p0 r0 [  5] L9-R-off#c4 W=1: stat 11.3444 ms pose 0x87e561d20589d4a5 expect match rb 2.19% ra 5.01% others 1.61% cpu_s 12.359 wall 12.306s waited 25.0s CONTAMINATED-after(5.01%)
+2026-09-25T03:17:03.143+03:00   P2-L9GTW-p0 r0 [  6] L9-R-on#c4 W=1: stat 8.7313 ms pose 0xc8bbe34cf6a8afc6 expect match rb 2.42% ra 5.86% others 1.96% cpu_s 9.406 wall 9.384s waited 25.0s CONTAMINATED-after(5.86%)
+2026-09-25T03:17:42.750+03:00   P2-L9GTW-p0 r0 [  7] L9-JA-a-off#c4 W=1: stat 18.8101 ms pose 0x32d5e235342b4143 expect match rb 4.37% ra 2.62% others 2.11% cpu_s 9.547 wall 9.488s waited 25.0s
+2026-09-25T03:17:56.508+03:00   P2-L9GTW-p0 r0 [  8] L9-JA-a-on#c4 W=1: stat 17.1805 ms pose 0x30c5438bc6ad9ffa expect match rb 2.62% ra 3.28% others 4.13% cpu_s 8.625 wall 8.676s waited 0.0s
+2026-09-25T03:18:10.668+03:00   P2-L9GTW-p0 r0 [  9] L9-JC#c4 W=1: stat 17.9720 ms pose 0x30c5438bc6ad9ffa expect match rb 3.28% ra 2.76% others 2.53% cpu_s 9.047 wall 9.07s waited 0.0s
+2026-09-25T03:18:21.654+03:00   P2-L9GTW-p0 r0 [ 10] L9-JA-off#c4 W=2: stat 11.8129 ms pose 0x32d5e235342b4143 expect match rb 2.76% ra 2.09% others 2.26% cpu_s 9.75 wall 5.922s waited 0.0s
+2026-09-25T03:18:32.141+03:00   P2-L9GTW-p0 r0 [ 11] L9-JA-on#c4 W=2: stat 10.8083 ms pose 0x30c5438bc6ad9ffa expect match rb 2.09% ra 6.23% others 1.46% cpu_s 8.906 wall 5.421s waited 0.0s CONTAMINATED-after(6.23%)
+2026-09-25T03:19:05.334+03:00   P2-L9GTW-p0 r0 [ 12] L9-JD-off#c4 W=2: stat 6.1519 ms pose 0x32d5e235342b4143 expect match rb 3.45% ra 1.49% others 1.83% cpu_s 4.453 wall 3.095s waited 25.0s
+2026-09-25T03:19:13.195+03:00   P2-L9GTW-p0 r0 [ 13] L9-JD-on#c4 W=2: stat 5.5631 ms pose 0x30c5438bc6ad9ffa expect match rb 1.49% ra 4.4% others 2.58% cpu_s 3.859 wall 2.799s waited 0.0s
+2026-09-25T03:19:27.320+03:00   P2-L9GTW-p0 r0 [ 14] L9-R-off#c4 W=2: stat 8.3190 ms pose 0x87e561d20589d4a5 expect match rb 4.4% ra 3.99% others 3.05% cpu_s 13.547 wall 9.066s waited 0.0s
+2026-09-25T03:19:40.278+03:00   P2-L9GTW-p0 r0 [ 15] L9-R-on#c4 W=2: stat 6.8369 ms pose 0xc8bbe34cf6a8afc6 expect match rb 3.99% ra 4.89% others 2.95% cpu_s 11.266 wall 7.892s waited 0.0s
+2026-09-25T03:19:49.402+03:00   P2-L9GTW-p0 r0 [ 16] L9-JA-off#c4 W=4: stat 8.0869 ms pose 0x32d5e235342b4143 expect match rb 4.89% ra 2.66% others 2.39% cpu_s 10.609 wall 4.063s waited 0.0s
+2026-09-25T03:19:58.444+03:00   P2-L9GTW-p0 r0 [ 17] L9-JA-on#c4 W=4: stat 7.9176 ms pose 0x30c5438bc6ad9ffa expect match rb 2.66% ra 4.4% others 2.76% cpu_s 9.75 wall 3.977s waited 0.0s
+2026-09-25T03:20:06.081+03:00   P2-L9GTW-p0 r0 [ 18] L9-JD-off#c4 W=4: stat 5.1063 ms pose 0x32d5e235342b4143 expect match rb 4.4% ra 4.33% others 4.03% cpu_s 5.672 wall 2.571s waited 0.0s
+2026-09-25T03:20:13.627+03:00   P2-L9GTW-p0 r0 [ 19] L9-JD-on#c4 W=4: stat 4.9233 ms pose 0x30c5438bc6ad9ffa expect match rb 4.33% ra 5.56% others 3.32% cpu_s 4.734 wall 2.478s waited 0.0s CONTAMINATED-after(5.56%)
+2026-09-25T03:20:51.212+03:00   P2-L9GTW-p0 r0 [ 20] L9-R-off#c4 W=4: stat 6.3262 ms pose 0x87e561d20589d4a5 expect match rb 3.25% ra 3.81% others 3.69% cpu_s 15.953 wall 7.492s waited 25.0s
+2026-09-25T03:21:02.965+03:00   P2-L9GTW-p0 r0 [ 21] L9-R-on#c4 W=4: stat 5.9879 ms pose 0xc8bbe34cf6a8afc6 expect match rb 3.81% ra 2.92% others 2.5% cpu_s 12.656 wall 6.691s waited 0.0s
+2026-09-25T03:21:11.219+03:00   P2-L9GTW-p0 r0 [ 22] L9-JA-off#c4 W=8: stat 6.3396 ms pose 0x32d5e235342b4143 expect match rb 2.92% ra 5.41% others 1.38% cpu_s 11.531 wall 3.186s waited 0.0s CONTAMINATED-after(5.41%)
+2026-09-25T03:21:44.463+03:00   P2-L9GTW-p0 r0 [ 23] L9-JA-on#c4 W=8: stat 6.2522 ms pose 0x30c5438bc6ad9ffa expect match rb 2.34% ra 6.56% others 1.83% cpu_s 11.734 wall 3.141s waited 25.0s CONTAMINATED-after(6.56%)
+2026-09-25T03:22:16.863+03:00   P2-L9GTW-p0 r0 [ 24] L9-JD-off#c4 W=8: stat 4.5694 ms pose 0x32d5e235342b4143 expect match rb 3.32% ra 6.91% others 3.95% cpu_s 6.344 wall 2.302s waited 25.0s CONTAMINATED-after(6.91%)
+2026-09-25T03:22:49.430+03:00   P2-L9GTW-p0 r0 [ 25] L9-JD-on#c4 W=8: stat 4.9102 ms pose 0x30c5438bc6ad9ffa expect match rb 2.32% ra 5.21% others 3.91% cpu_s 6.266 wall 2.473s waited 25.0s CONTAMINATED-after(5.21%)
+2026-09-25T03:24:15.900+03:00   P2-L9GTW-p0 r0 [ 26] L9-R-off#c4 W=8: stat 5.5025 ms pose 0x87e561d20589d4a5 expect match rb 3.5% ra 5.05% others 2.33% cpu_s 17.391 wall 6.292s waited 75.1s CONTAMINATED-after(5.05%)
+2026-09-25T03:24:51.879+03:00   P2-L9GTW-p0 r0 [ 27] L9-R-on#c4 W=8: stat 5.5989 ms pose 0xc8bbe34cf6a8afc6 expect match rb 1.63% ra 4.65% others 2.06% cpu_s 17.641 wall 5.876s waited 25.0s
+2026-09-25T03:25:00.153+03:00   P2-L9GTW-p0 r0 [ 28] L9-JA-a-off#c4 W=8: stat 6.2555 ms pose 0x32d5e235342b4143 expect match rb 4.65% ra 2.28% others 3.52% cpu_s 12.156 wall 3.196s waited 0.0s
+2026-09-25T03:25:08.108+03:00   P2-L9GTW-p0 r0 [ 29] L9-JA-a-on#c4 W=8: stat 5.6332 ms pose 0x30c5438bc6ad9ffa expect match rb 2.28% ra 1.88% others 0.68% cpu_s 10.719 wall 2.877s waited 0.0s
+2026-09-25T03:25:16.012+03:00   P2-L9GTW-p0 r0 [ 30] L9-JA-off#c4 W=16: stat 5.6725 ms pose 0x32d5e235342b4143 expect match rb 1.88% ra 1.51% others 1.47% cpu_s 17.875 wall 2.85s waited 0.0s
+2026-09-25T03:25:23.883+03:00   P2-L9GTW-p0 r0 [ 31] L9-JA-on#c4 W=16: stat 5.6009 ms pose 0x30c5438bc6ad9ffa expect match rb 1.51% ra 3.2% others 0.66% cpu_s 17.875 wall 2.814s waited 0.0s
+2026-09-25T03:25:31.027+03:00   P2-L9GTW-p0 r0 [ 32] L9-JD-off#c4 W=16: stat 4.1501 ms pose 0x32d5e235342b4143 expect match rb 3.2% ra 0.51% others 1.04% cpu_s 10.453 wall 2.089s waited 0.0s
+2026-09-25T03:25:38.079+03:00   P2-L9GTW-p0 r0 [ 33] L9-JD-on#c4 W=16: stat 3.9643 ms pose 0x30c5438bc6ad9ffa expect match rb 0.51% ra 1.23% others 1.08% cpu_s 7.484 wall 1.996s waited 0.0s
+2026-09-25T03:25:48.754+03:00   P2-L9GTW-p0 r0 [ 34] L9-R-off#c4 W=16: stat 5.0704 ms pose 0x87e561d20589d4a5 expect match rb 1.23% ra 2.46% others 0.71% cpu_s 32.578 wall 5.621s waited 0.0s
+2026-09-25T03:25:59.433+03:00   P2-L9GTW-p0 r0 [ 35] L9-R-on#c4 W=16: stat 4.9133 ms pose 0xc8bbe34cf6a8afc6 expect match rb 2.46% ra 1.35% others 1.01% cpu_s 26.688 wall 5.622s waited 0.0s
+2026-09-25T03:26:13.691+03:00   P2-L9GTW-p0 r1 [ 36] L9-JA-off#c4 W=1: stat 18.3765 ms pose 0x32d5e235342b4143 expect match rb 1.35% ra 0.88% others 0.74% cpu_s 9.188 wall 9.203s waited 0.0s
+2026-09-25T03:26:27.119+03:00   P2-L9GTW-p0 r1 [ 37] L9-JA-on#c4 W=1: stat 16.6997 ms pose 0x30c5438bc6ad9ffa expect match rb 0.88% ra 3.0% others 0.99% cpu_s 8.422 wall 8.365s waited 0.0s
+2026-09-25T03:26:36.028+03:00   P2-L9GTW-p0 r1 [ 38] L9-JD-off#c4 W=1: stat 7.6814 ms pose 0x32d5e235342b4143 expect match rb 3.0% ra 1.07% others 0.56% cpu_s 3.859 wall 3.855s waited 0.0s
+2026-09-25T03:26:44.152+03:00   P2-L9GTW-p0 r1 [ 39] L9-JD-on#c4 W=1: stat 6.1160 ms pose 0x30c5438bc6ad9ffa expect match rb 1.07% ra 0.8% others 0.45% cpu_s 3.078 wall 3.072s waited 0.0s
+2026-09-25T03:27:01.119+03:00   P2-L9GTW-p0 r1 [ 40] L9-R-off#c4 W=1: stat 10.8667 ms pose 0x87e561d20589d4a5 expect match rb 0.8% ra 2.67% others 0.83% cpu_s 11.953 wall 11.911s waited 0.0s
+2026-09-25T03:27:14.791+03:00   P2-L9GTW-p0 r1 [ 41] L9-R-on#c4 W=1: stat 7.8048 ms pose 0xc8bbe34cf6a8afc6 expect match rb 2.67% ra 0.9% others 0.74% cpu_s 8.609 wall 8.619s waited 0.0s
+2026-09-25T03:27:29.170+03:00   P2-L9GTW-p0 r1 [ 42] L9-JA-a-off#c4 W=1: stat 18.4670 ms pose 0x32d5e235342b4143 expect match rb 0.9% ra 2.4% others 0.58% cpu_s 9.297 wall 9.3s waited 0.0s
+2026-09-25T03:27:42.558+03:00   P2-L9GTW-p0 r1 [ 43] L9-JA-a-on#c4 W=1: stat 16.4962 ms pose 0x30c5438bc6ad9ffa expect match rb 2.4% ra 1.22% others 0.62% cpu_s 8.328 wall 8.312s waited 0.0s
+2026-09-25T03:27:56.446+03:00   P2-L9GTW-p0 r1 [ 44] L9-JC#c4 W=1: stat 17.4890 ms pose 0x30c5438bc6ad9ffa expect match rb 1.22% ra 4.36% others 0.59% cpu_s 8.781 wall 8.811s waited 0.0s
+2026-09-25T03:28:07.110+03:00   P2-L9GTW-p0 r1 [ 45] L9-JA-off#c4 W=2: stat 11.1869 ms pose 0x32d5e235342b4143 expect match rb 4.36% ra 1.15% others 0.65% cpu_s 9.25 wall 5.608s waited 0.0s
+2026-09-25T03:28:17.500+03:00   P2-L9GTW-p0 r1 [ 46] L9-JA-on#c4 W=2: stat 10.6398 ms pose 0x30c5438bc6ad9ffa expect match rb 1.15% ra 0.9% others 2.88% cpu_s 8.797 wall 5.334s waited 0.0s
+2026-09-25T03:28:25.404+03:00   P2-L9GTW-p0 r1 [ 47] L9-JD-off#c4 W=2: stat 5.6719 ms pose 0x32d5e235342b4143 expect match rb 0.9% ra 3.13% others 0.59% cpu_s 3.953 wall 2.849s waited 0.0s
+2026-09-25T03:28:32.874+03:00   P2-L9GTW-p0 r1 [ 48] L9-JD-on#c4 W=2: stat 4.8092 ms pose 0x30c5438bc6ad9ffa expect match rb 3.13% ra 0.6% others 1.34% cpu_s 3.469 wall 2.419s waited 0.0s
+2026-09-25T03:28:46.082+03:00   P2-L9GTW-p0 r1 [ 49] L9-R-off#c4 W=2: stat 7.3831 ms pose 0x87e561d20589d4a5 expect match rb 0.6% ra 1.0% others 0.38% cpu_s 12.656 wall 8.154s waited 0.0s
+2026-09-25T03:28:58.039+03:00   P2-L9GTW-p0 r1 [ 50] L9-R-on#c4 W=2: stat 6.2315 ms pose 0xc8bbe34cf6a8afc6 expect match rb 1.0% ra 6.27% others 0.52% cpu_s 10.266 wall 6.903s waited 0.0s CONTAMINATED-after(6.27%)
+2026-09-25T03:29:31.964+03:00   P2-L9GTW-p0 r1 [ 51] L9-JA-off#c4 W=4: stat 7.6506 ms pose 0x32d5e235342b4143 expect match rb 0.61% ra 1.96% others 0.82% cpu_s 10.016 wall 3.839s waited 25.0s
+2026-09-25T03:29:40.604+03:00   P2-L9GTW-p0 r1 [ 52] L9-JA-on#c4 W=4: stat 7.1413 ms pose 0x30c5438bc6ad9ffa expect match rb 1.96% ra 1.39% others 0.74% cpu_s 9.594 wall 3.585s waited 0.0s
+2026-09-25T03:29:47.973+03:00   P2-L9GTW-p0 r1 [ 53] L9-JD-off#c4 W=4: stat 4.5544 ms pose 0x32d5e235342b4143 expect match rb 1.39% ra 14.97% others 0.9% cpu_s 4.781 wall 2.291s waited 0.0s CONTAMINATED-after(14.97%)
+2026-09-25T03:30:20.442+03:00   P2-L9GTW-p0 r1 [ 54] L9-JD-on#c4 W=4: stat 4.7069 ms pose 0x30c5438bc6ad9ffa expect match rb 3.9% ra 5.57% others 3.71% cpu_s 4.484 wall 2.371s waited 25.0s CONTAMINATED-after(5.57%)
+2026-09-25T03:32:13.240+03:00   P2-L9GTW-p0 r1 [ 55] L9-R-off#c4 W=4: stat 6.9797 ms pose 0x87e561d20589d4a5 expect match rb 1.28% ra 4.54% others 5.37% cpu_s 16.734 wall 7.586s waited 100.2s
+2026-09-25T03:32:24.974+03:00   P2-L9GTW-p0 r1 [ 56] L9-R-on#c4 W=4: stat 6.1540 ms pose 0xc8bbe34cf6a8afc6 expect match rb 4.54% ra 3.58% others 3.31% cpu_s 12.375 wall 6.664s waited 0.0s
+2026-09-25T03:32:33.296+03:00   P2-L9GTW-p0 r1 [ 57] L9-JA-off#c4 W=8: stat 6.4863 ms pose 0x32d5e235342b4143 expect match rb 3.58% ra 3.22% others 2.31% cpu_s 13.547 wall 3.259s waited 0.0s
+2026-09-25T03:32:41.615+03:00   P2-L9GTW-p0 r1 [ 58] L9-JA-on#c4 W=8: stat 6.4809 ms pose 0x30c5438bc6ad9ffa expect match rb 3.22% ra 3.11% others 1.44% cpu_s 12.078 wall 3.257s waited 0.0s
+2026-09-25T03:32:48.910+03:00   P2-L9GTW-p0 r1 [ 59] L9-JD-off#c4 W=8: stat 4.4317 ms pose 0x32d5e235342b4143 expect match rb 3.11% ra 5.07% others 1.01% cpu_s 5.781 wall 2.231s waited 0.0s CONTAMINATED-after(5.07%)
+2026-09-25T03:33:21.097+03:00   P2-L9GTW-p0 r1 [ 60] L9-JD-on#c4 W=8: stat 4.1500 ms pose 0x30c5438bc6ad9ffa expect match rb 3.22% ra 2.83% others 1.31% cpu_s 5.141 wall 2.091s waited 25.0s
+2026-09-25T03:33:32.414+03:00   P2-L9GTW-p0 r1 [ 61] L9-R-off#c4 W=8: stat 5.5132 ms pose 0x87e561d20589d4a5 expect match rb 2.83% ra 7.24% others 1.49% cpu_s 19.953 wall 6.248s waited 0.0s CONTAMINATED-after(7.24%)
+2026-09-25T03:34:08.650+03:00   P2-L9GTW-p0 r1 [ 62] L9-R-on#c4 W=8: stat 5.5862 ms pose 0xc8bbe34cf6a8afc6 expect match rb 1.85% ra 3.81% others 2.31% cpu_s 18.359 wall 6.138s waited 25.0s
+2026-09-25T03:34:17.093+03:00   P2-L9GTW-p0 r1 [ 63] L9-JA-a-off#c4 W=8: stat 6.5563 ms pose 0x32d5e235342b4143 expect match rb 3.81% ra 5.06% others 3.56% cpu_s 12.844 wall 3.35s waited 0.0s CONTAMINATED-after(5.06%)
+2026-09-25T03:35:15.533+03:00   P2-L9GTW-p0 r1 [ 64] L9-JA-a-on#c4 W=8: stat 6.4260 ms pose 0x30c5438bc6ad9ffa expect match rb 2.7% ra 2.83% others 3.92% cpu_s 12.703 wall 3.289s waited 50.1s
+2026-09-25T03:35:23.772+03:00   P2-L9GTW-p0 r1 [ 65] L9-JA-off#c4 W=16: stat 6.3161 ms pose 0x32d5e235342b4143 expect match rb 2.83% ra 4.17% others 1.27% cpu_s 21.344 wall 3.173s waited 0.0s
+2026-09-25T03:35:32.048+03:00   P2-L9GTW-p0 r1 [ 66] L9-JA-on#c4 W=16: stat 6.3957 ms pose 0x30c5438bc6ad9ffa expect match rb 4.17% ra 2.64% others 1.1% cpu_s 19.5 wall 3.213s waited 0.0s
+2026-09-25T03:35:39.578+03:00   P2-L9GTW-p0 r1 [ 67] L9-JD-off#c4 W=16: stat 4.9031 ms pose 0x32d5e235342b4143 expect match rb 2.64% ra 4.04% others 1.98% cpu_s 11.781 wall 2.468s waited 0.0s
+2026-09-25T03:35:47.173+03:00   P2-L9GTW-p0 r1 [ 68] L9-JD-on#c4 W=16: stat 5.0217 ms pose 0x30c5438bc6ad9ffa expect match rb 4.04% ra 3.66% others 4.29% cpu_s 11.875 wall 2.528s waited 0.0s
+2026-09-25T03:35:58.929+03:00   P2-L9GTW-p0 r1 [ 69] L9-R-off#c4 W=16: stat 6.2804 ms pose 0x87e561d20589d4a5 expect match rb 3.66% ra 2.53% others 2.18% cpu_s 38.062 wall 6.693s waited 0.0s
+2026-09-25T03:36:12.125+03:00   P2-L9GTW-p0 r1 [ 70] L9-R-on#c4 W=16: stat 8.2708 ms pose 0xc8bbe34cf6a8afc6 expect match rb 2.53% ra 7.85% others 6.59% cpu_s 35.906 wall 8.12s waited 0.0s CONTAMINATED-after(7.85%)
+2026-09-25T03:36:51.658+03:00   P2-L9GTW-p0 r2 [ 71] L9-JA-off#c4 W=1: stat 18.7909 ms pose 0x32d5e235342b4143 expect match rb 2.87% ra 3.89% others 4.03% cpu_s 9.391 wall 9.415s waited 25.0s
+2026-09-25T03:37:06.291+03:00   P2-L9GTW-p0 r2 [ 72] L9-JA-on#c4 W=1: stat 19.0792 ms pose 0x30c5438bc6ad9ffa expect match rb 3.89% ra 13.11% others 11.06% cpu_s 9.5 wall 9.559s waited 0.0s CONTAMINATED-after(13.11%)
+2026-09-25T03:38:05.704+03:00   P2-L9GTW-p0 r2 [ 73] L9-JD-off#c4 W=1: stat 8.5182 ms pose 0x32d5e235342b4143 expect match rb 2.58% ra 8.79% others 4.34% cpu_s 4.312 wall 4.279s waited 50.1s CONTAMINATED-after(8.79%)
+2026-09-25T03:39:04.276+03:00   P2-L9GTW-p0 r2 [ 74] L9-JD-on#c4 W=1: stat 6.8339 ms pose 0x30c5438bc6ad9ffa expect match rb 4.73% ra 5.87% others 2.02% cpu_s 3.469 wall 3.435s waited 50.1s CONTAMINATED-after(5.87%)
+2026-09-25T03:40:11.731+03:00   P2-L9GTW-p0 r2 [ 75] L9-R-off#c4 W=1: stat 10.9951 ms pose 0x87e561d20589d4a5 expect match rb 3.29% ra 5.76% others 3.81% cpu_s 12.281 wall 12.298s waited 50.1s CONTAMINATED-after(5.76%)
+2026-09-25T03:40:51.256+03:00   P2-L9GTW-p0 r2 [ 76] L9-R-on#c4 W=1: stat 8.4102 ms pose 0xc8bbe34cf6a8afc6 expect match rb 3.26% ra 6.36% others 4.31% cpu_s 9.438 wall 9.426s waited 25.0s CONTAMINATED-after(6.36%)
+2026-09-25T03:41:30.933+03:00   P2-L9GTW-p0 r2 [ 77] L9-JA-a-off#c4 W=1: stat 18.9346 ms pose 0x32d5e235342b4143 expect match rb 1.67% ra 2.6% others 3.82% cpu_s 9.516 wall 9.556s waited 25.0s
+2026-09-25T03:41:44.684+03:00   P2-L9GTW-p0 r2 [ 78] L9-JA-a-on#c4 W=1: stat 17.1343 ms pose 0x30c5438bc6ad9ffa expect match rb 2.6% ra 3.56% others 3.32% cpu_s 8.609 wall 8.655s waited 0.0s
+2026-09-25T03:41:58.925+03:00   P2-L9GTW-p0 r2 [ 79] L9-JC#c4 W=1: stat 18.1249 ms pose 0x30c5438bc6ad9ffa expect match rb 3.56% ra 2.88% others 2.66% cpu_s 9.109 wall 9.148s waited 0.0s
+2026-09-25T03:42:10.156+03:00   P2-L9GTW-p0 r2 [ 80] L9-JA-off#c4 W=2: stat 12.2819 ms pose 0x32d5e235342b4143 expect match rb 2.88% ra 2.78% others 4.3% cpu_s 10.234 wall 6.158s waited 0.0s
+2026-09-25T03:42:20.696+03:00   P2-L9GTW-p0 r2 [ 81] L9-JA-on#c4 W=2: stat 10.9130 ms pose 0x30c5438bc6ad9ffa expect match rb 2.78% ra 4.35% others 3.02% cpu_s 8.891 wall 5.474s waited 0.0s
+2026-09-25T03:42:28.942+03:00   P2-L9GTW-p0 r2 [ 82] L9-JD-off#c4 W=2: stat 6.3272 ms pose 0x32d5e235342b4143 expect match rb 4.35% ra 10.17% others 2.18% cpu_s 4.672 wall 3.181s waited 0.0s CONTAMINATED-after(10.17%)
+2026-09-25T03:44:16.797+03:00   P2-L9GTW-p0 r2 [ 83] L9-JD-on#c4 W=2: stat 5.2055 ms pose 0x30c5438bc6ad9ffa expect match rb 3.47% ra 7.13% others 2.49% cpu_s 3.75 wall 2.623s waited 100.2s CONTAMINATED-after(7.13%)
+2026-09-25T03:44:56.036+03:00   P2-L9GTW-p0 r2 [ 84] L9-R-off#c4 W=2: stat 7.9828 ms pose 0x87e561d20589d4a5 expect match rb 2.78% ra 5.8% others 2.11% cpu_s 13.891 wall 9.135s waited 25.0s CONTAMINATED-after(5.8%)
+2026-09-25T03:45:33.848+03:00   P2-L9GTW-p0 r2 [ 85] L9-R-on#c4 W=2: stat 6.7826 ms pose 0xc8bbe34cf6a8afc6 expect match rb 2.56% ra 4.43% others 1.86% cpu_s 11.062 wall 7.704s waited 25.0s
+2026-09-25T03:45:43.111+03:00   P2-L9GTW-p0 r2 [ 86] L9-JA-off#c4 W=4: stat 8.3523 ms pose 0x32d5e235342b4143 expect match rb 4.43% ra 4.46% others 4.47% cpu_s 11.203 wall 4.196s waited 0.0s
+2026-09-25T03:45:52.204+03:00   P2-L9GTW-p0 r2 [ 87] L9-JA-on#c4 W=4: stat 7.9901 ms pose 0x30c5438bc6ad9ffa expect match rb 4.46% ra 3.94% others 3.36% cpu_s 10.453 wall 4.014s waited 0.0s
+2026-09-25T03:45:59.880+03:00   P2-L9GTW-p0 r2 [ 88] L9-JD-off#c4 W=4: stat 5.1835 ms pose 0x32d5e235342b4143 expect match rb 3.94% ra 3.5% others 3.18% cpu_s 5.656 wall 2.609s waited 0.0s
+2026-09-25T03:46:07.448+03:00   P2-L9GTW-p0 r2 [ 89] L9-JD-on#c4 W=4: stat 4.9760 ms pose 0x30c5438bc6ad9ffa expect match rb 3.5% ra 1.84% others 3.16% cpu_s 4.719 wall 2.506s waited 0.0s
+2026-09-25T03:46:20.028+03:00   P2-L9GTW-p0 r2 [ 90] L9-R-off#c4 W=4: stat 6.9528 ms pose 0x87e561d20589d4a5 expect match rb 1.84% ra 4.23% others 1.72% cpu_s 16.188 wall 7.516s waited 0.0s
+2026-09-25T03:46:32.093+03:00   P2-L9GTW-p0 r2 [ 91] L9-R-on#c4 W=4: stat 6.3554 ms pose 0xc8bbe34cf6a8afc6 expect match rb 4.23% ra 5.82% others 4.67% cpu_s 13.125 wall 6.996s waited 0.0s CONTAMINATED-after(5.82%)
+2026-09-25T03:47:05.343+03:00   P2-L9GTW-p0 r2 [ 92] L9-JA-off#c4 W=8: stat 6.2736 ms pose 0x32d5e235342b4143 expect match rb 2.6% ra 7.72% others 1.11% cpu_s 13.125 wall 3.152s waited 25.0s CONTAMINATED-after(7.72%)
+2026-09-25T03:47:38.658+03:00   P2-L9GTW-p0 r2 [ 93] L9-JA-on#c4 W=8: stat 6.4051 ms pose 0x30c5438bc6ad9ffa expect match rb 1.92% ra 5.26% others 4.13% cpu_s 12.297 wall 3.219s waited 25.0s CONTAMINATED-after(5.26%)
+2026-09-25T03:48:11.162+03:00   P2-L9GTW-p0 r2 [ 94] L9-JD-off#c4 W=8: stat 4.7813 ms pose 0x32d5e235342b4143 expect match rb 2.56% ra 2.99% others 3.21% cpu_s 6.188 wall 2.407s waited 25.0s
+2026-09-25T03:48:18.367+03:00   P2-L9GTW-p0 r2 [ 95] L9-JD-on#c4 W=8: stat 4.2282 ms pose 0x30c5438bc6ad9ffa expect match rb 2.99% ra 4.64% others 1.61% cpu_s 5.141 wall 2.132s waited 0.0s
+2026-09-25T03:48:29.661+03:00   P2-L9GTW-p0 r2 [ 96] L9-R-off#c4 W=8: stat 5.7358 ms pose 0x87e561d20589d4a5 expect match rb 4.64% ra 6.07% others 1.3% cpu_s 16.312 wall 6.228s waited 0.0s CONTAMINATED-after(6.07%)
+2026-09-25T03:49:05.732+03:00   P2-L9GTW-p0 r2 [ 97] L9-R-on#c4 W=8: stat 5.2333 ms pose 0xc8bbe34cf6a8afc6 expect match rb 1.65% ra 1.41% others 1.9% cpu_s 16.031 wall 5.963s waited 25.0s
+2026-09-25T03:49:14.414+03:00   P2-L9GTW-p0 r2 [ 98] L9-JA-a-off#c4 W=8: stat 7.0375 ms pose 0x32d5e235342b4143 expect match rb 1.41% ra 5.43% others 3.21% cpu_s 15.016 wall 3.596s waited 0.0s CONTAMINATED-after(5.43%)
+2026-09-25T03:49:47.724+03:00   P2-L9GTW-p0 r2 [ 99] L9-JA-a-on#c4 W=8: stat 6.1743 ms pose 0x30c5438bc6ad9ffa expect match rb 3.89% ra 5.26% others 3.34% cpu_s 11.359 wall 3.16s waited 25.0s CONTAMINATED-after(5.26%)
+2026-09-25T03:50:46.332+03:00   P2-L9GTW-p0 r2 [100] L9-JA-off#c4 W=16: stat 6.9361 ms pose 0x32d5e235342b4143 expect match rb 4.67% ra 4.61% others 5.61% cpu_s 21.547 wall 3.484s waited 50.1s
+2026-09-25T03:50:54.680+03:00   P2-L9GTW-p0 r2 [101] L9-JA-on#c4 W=16: stat 6.5378 ms pose 0x30c5438bc6ad9ffa expect match rb 4.61% ra 2.14% others 2.77% cpu_s 21.422 wall 3.286s waited 0.0s
+2026-09-25T03:51:02.113+03:00   P2-L9GTW-p0 r2 [102] L9-JD-off#c4 W=16: stat 4.7064 ms pose 0x32d5e235342b4143 expect match rb 2.14% ra 3.1% others 2.06% cpu_s 13.141 wall 2.368s waited 0.0s
+2026-09-25T03:51:09.427+03:00   P2-L9GTW-p0 r2 [103] L9-JD-on#c4 W=16: stat 4.4771 ms pose 0x30c5438bc6ad9ffa expect match rb 3.1% ra 3.45% others 1.18% cpu_s 11.812 wall 2.254s waited 0.0s
+2026-09-25T03:51:21.281+03:00   P2-L9GTW-p0 r2 [104] L9-R-off#c4 W=16: stat 5.8516 ms pose 0x87e561d20589d4a5 expect match rb 3.45% ra 5.88% others 1.96% cpu_s 36.406 wall 6.788s waited 0.0s CONTAMINATED-after(5.88%)
+2026-09-25T03:51:58.327+03:00   P2-L9GTW-p0 r2 [105] L9-R-on#c4 W=16: stat 6.2402 ms pose 0xc8bbe34cf6a8afc6 expect match rb 3.72% ra 2.3% others 2.41% cpu_s 32.375 wall 6.95s waited 25.0s
+2026-09-25T03:51:58.328+03:00 P2-L9GTW-p0: re-running 32 process(es) at the end of the pass: [(4, 0, 'L9-JD-on', 'c4', 1, 'contaminated'), (5, 0, 'L9-R-off', 'c4', 1, 'contaminated'), (6, 0, 'L9-R-on', 'c4', 1, 'contaminated'), (11, 0, 'L9-JA-on', 'c4', 2, 'contaminated'), (19, 0, 'L9-JD-on', 'c4', 4, 'contaminated'), (22, 0, 'L9-JA-off', 'c4', 8, 'contaminated'), (23, 0, 'L9-JA-on', 'c4', 8, 'contaminated'), (24, 0, 'L9-JD-off', 'c4', 8, 'contaminated'), (25, 0, 'L9-JD-on', 'c4', 8, 'contaminated'), (26, 0, 'L9-R-off', 'c4', 8, 'contaminated'), (50, 1, 'L9-R-on', 'c4', 2, 'contaminated'), (53, 1, 'L9-JD-off', 'c4', 4, 'contaminated'), (54, 1, 'L9-JD-on', 'c4', 4, 'contaminated'), (59, 1, 'L9-JD-off', 'c4', 8, 'contaminated'), (61, 1, 'L9-R-off', 'c4', 8, 'contaminated'), (63, 1, 'L9-JA-a-off', 'c4', 8, 'contaminated'), (70, 1, 'L9-R-on', 'c4', 16, 'contaminated'), (72, 2, 'L9-JA-on', 'c4', 1, 'contaminated'), (73, 2, 'L9-JD-off', 'c4', 1, 'contaminated'), (74, 2, 'L9-JD-on', 'c4', 1, 'contaminated'), (75, 2, 'L9-R-off', 'c4', 1, 'contaminated'), (76, 2, 'L9-R-on', 'c4', 1, 'contaminated'), (82, 2, 'L9-JD-off', 'c4', 2, 'contaminated'), (83, 2, 'L9-JD-on', 'c4', 2, 'contaminated'), (84, 2, 'L9-R-off', 'c4', 2, 'contaminated'), (91, 2, 'L9-R-on', 'c4', 4, 'contaminated'), (92, 2, 'L9-JA-off', 'c4', 8, 'contaminated'), (93, 2, 'L9-JA-on', 'c4', 8, 'contaminated'), (96, 2, 'L9-R-off', 'c4', 8, 'contaminated'), (98, 2, 'L9-JA-a-off', 'c4', 8, 'contaminated'), (99, 2, 'L9-JA-a-on', 'c4', 8, 'contaminated'), (104, 2, 'L9-R-off', 'c4', 16, 'contaminated')]
+2026-09-25T03:52:06.806+03:00   P2-L9GTW-p0 r0 [  4] L9-JD-on#c4 W=1 RERUN (contaminated): stat 6.7890 ms pose 0x30c5438bc6ad9ffa expect match rb 2.3% ra 4.65% others 5.59% cpu_s 3.422 wall 3.413s waited 0.0s
+2026-09-25T03:52:24.245+03:00   P2-L9GTW-p0 r0 [  5] L9-R-off#c4 W=1 RERUN (contaminated): stat 11.2663 ms pose 0x87e561d20589d4a5 expect match rb 4.65% ra 5.68% others 3.64% cpu_s 12.375 wall 12.371s waited 0.0s CONTAMINATED-after(5.68%)
+2026-09-25T03:53:28.900+03:00   P2-L9GTW-p0 r0 [  6] L9-R-on#c4 W=1 RERUN (contaminated): stat 8.5022 ms pose 0xc8bbe34cf6a8afc6 expect match rb 4.89% ra 2.46% others 2.92% cpu_s 9.484 wall 9.52s waited 50.1s
+2026-09-25T03:53:39.575+03:00   P2-L9GTW-p0 r0 [ 11] L9-JA-on#c4 W=2 RERUN (contaminated): stat 11.1881 ms pose 0x30c5438bc6ad9ffa expect match rb 2.46% ra 2.69% others 5.35% cpu_s 9.328 wall 5.61s waited 0.0s
+2026-09-25T03:53:46.936+03:00   P2-L9GTW-p0 r0 [ 19] L9-JD-on#c4 W=4 RERUN (contaminated): stat 4.5598 ms pose 0x30c5438bc6ad9ffa expect match rb 2.69% ra 2.61% others 2.77% cpu_s 3.922 wall 2.299s waited 0.0s
+2026-09-25T03:53:55.444+03:00   P2-L9GTW-p0 r0 [ 22] L9-JA-off#c4 W=8 RERUN (contaminated): stat 6.8497 ms pose 0x32d5e235342b4143 expect match rb 2.61% ra 2.84% others 4.12% cpu_s 14.359 wall 3.441s waited 0.0s
+2026-09-25T03:54:03.627+03:00   P2-L9GTW-p0 r0 [ 23] L9-JA-on#c4 W=8 RERUN (contaminated): stat 6.1990 ms pose 0x30c5438bc6ad9ffa expect match rb 2.84% ra 4.03% others 2.13% cpu_s 11.281 wall 3.115s waited 0.0s
+2026-09-25T03:54:10.864+03:00   P2-L9GTW-p0 r0 [ 24] L9-JD-off#c4 W=8 RERUN (contaminated): stat 4.3176 ms pose 0x32d5e235342b4143 expect match rb 4.03% ra 3.99% others 1.36% cpu_s 5.234 wall 2.174s waited 0.0s
+2026-09-25T03:54:18.100+03:00   P2-L9GTW-p0 r0 [ 25] L9-JD-on#c4 W=8 RERUN (contaminated): stat 4.2370 ms pose 0x30c5438bc6ad9ffa expect match rb 3.99% ra 4.99% others 4.95% cpu_s 5.844 wall 2.135s waited 0.0s
+2026-09-25T03:54:29.735+03:00   P2-L9GTW-p0 r0 [ 26] L9-R-off#c4 W=8 RERUN (contaminated): stat 5.5367 ms pose 0x87e561d20589d4a5 expect match rb 4.99% ra 2.51% others 3.45% cpu_s 22.016 wall 6.56s waited 0.0s
+2026-09-25T03:54:42.595+03:00   P2-L9GTW-p0 r1 [ 50] L9-R-on#c4 W=2 RERUN (contaminated): stat 6.9655 ms pose 0xc8bbe34cf6a8afc6 expect match rb 2.51% ra 2.8% others 2.65% cpu_s 11.188 wall 7.787s waited 0.0s
+2026-09-25T03:54:50.111+03:00   P2-L9GTW-p0 r1 [ 53] L9-JD-off#c4 W=4 RERUN (contaminated): stat 4.8473 ms pose 0x32d5e235342b4143 expect match rb 2.8% ra 2.98% others 1.53% cpu_s 5.047 wall 2.44s waited 0.0s
+2026-09-25T03:54:57.551+03:00   P2-L9GTW-p0 r1 [ 54] L9-JD-on#c4 W=4 RERUN (contaminated): stat 4.7032 ms pose 0x30c5438bc6ad9ffa expect match rb 2.98% ra 5.86% others 1.65% cpu_s 4.5 wall 2.368s waited 0.0s CONTAMINATED-after(5.86%)
+2026-09-25T03:56:19.993+03:00   P2-L9GTW-p0 r1 [ 59] L9-JD-off#c4 W=8 RERUN (contaminated): stat 4.5307 ms pose 0x32d5e235342b4143 expect match rb 3.62% ra 2.56% others 4.1% cpu_s 6.812 wall 2.281s waited 75.1s
+2026-09-25T03:56:31.660+03:00   P2-L9GTW-p0 r1 [ 61] L9-R-off#c4 W=8 RERUN (contaminated): stat 5.6258 ms pose 0x87e561d20589d4a5 expect match rb 2.56% ra 5.7% others 4.66% cpu_s 17.922 wall 6.602s waited 0.0s CONTAMINATED-after(5.7%)
+2026-09-25T03:57:05.967+03:00   P2-L9GTW-p0 r1 [ 63] L9-JA-a-off#c4 W=8 RERUN (contaminated): stat 8.1646 ms pose 0x32d5e235342b4143 expect match rb 4.77% ra 21.98% others 9.8% cpu_s 16.266 wall 4.183s waited 25.0s CONTAMINATED-after(21.98%)
+2026-09-25T03:57:41.546+03:00   P2-L9GTW-p0 r1 [ 70] L9-R-on#c4 W=16 RERUN (contaminated): stat 4.9758 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.92% ra 0.8% others 0.87% cpu_s 25.484 wall 5.494s waited 25.0s
+2026-09-25T03:57:54.947+03:00   P2-L9GTW-p0 r2 [ 72] L9-JA-on#c4 W=1 RERUN (contaminated): stat 16.6623 ms pose 0x30c5438bc6ad9ffa expect match rb 0.8% ra 1.41% others 0.63% cpu_s 8.344 wall 8.346s waited 0.0s
+2026-09-25T03:58:03.944+03:00   P2-L9GTW-p0 r2 [ 73] L9-JD-off#c4 W=1 RERUN (contaminated): stat 7.8589 ms pose 0x32d5e235342b4143 expect match rb 1.41% ra 2.01% others 0.92% cpu_s 3.938 wall 3.943s waited 0.0s
+2026-09-25T03:58:12.039+03:00   P2-L9GTW-p0 r2 [ 74] L9-JD-on#c4 W=1 RERUN (contaminated): stat 6.0491 ms pose 0x30c5438bc6ad9ffa expect match rb 2.01% ra 2.23% others 0.42% cpu_s 3.047 wall 3.038s waited 0.0s
+2026-09-25T03:58:28.969+03:00   P2-L9GTW-p0 r2 [ 75] L9-R-off#c4 W=1 RERUN (contaminated): stat 10.7521 ms pose 0x87e561d20589d4a5 expect match rb 2.23% ra 3.51% others 0.72% cpu_s 11.875 wall 11.873s waited 0.0s
+2026-09-25T03:58:42.664+03:00   P2-L9GTW-p0 r2 [ 76] L9-R-on#c4 W=1 RERUN (contaminated): stat 7.8171 ms pose 0xc8bbe34cf6a8afc6 expect match rb 3.51% ra 0.84% others 0.64% cpu_s 8.672 wall 8.631s waited 0.0s
+2026-09-25T03:58:50.577+03:00   P2-L9GTW-p0 r2 [ 82] L9-JD-off#c4 W=2 RERUN (contaminated): stat 5.6901 ms pose 0x32d5e235342b4143 expect match rb 0.84% ra 1.19% others 0.45% cpu_s 4.016 wall 2.858s waited 0.0s
+2026-09-25T03:58:58.076+03:00   P2-L9GTW-p0 r2 [ 83] L9-JD-on#c4 W=2 RERUN (contaminated): stat 4.8519 ms pose 0x30c5438bc6ad9ffa expect match rb 1.19% ra 2.5% others 0.48% cpu_s 3.297 wall 2.44s waited 0.0s
+2026-09-25T03:59:11.527+03:00   P2-L9GTW-p0 r2 [ 84] L9-R-off#c4 W=2 RERUN (contaminated): stat 7.5224 ms pose 0x87e561d20589d4a5 expect match rb 2.5% ra 1.09% others 0.55% cpu_s 13.031 wall 8.393s waited 0.0s
+2026-09-25T03:59:22.287+03:00   P2-L9GTW-p0 r2 [ 91] L9-R-on#c4 W=4 RERUN (contaminated): stat 5.1664 ms pose 0xc8bbe34cf6a8afc6 expect match rb 1.09% ra 0.99% others 0.69% cpu_s 10.578 wall 5.704s waited 0.0s
+2026-09-25T03:59:30.244+03:00   P2-L9GTW-p0 r2 [ 92] L9-JA-off#c4 W=8 RERUN (contaminated): stat 5.7772 ms pose 0x32d5e235342b4143 expect match rb 0.99% ra 3.33% others 0.51% cpu_s 11.766 wall 2.902s waited 0.0s
+2026-09-25T03:59:38.133+03:00   P2-L9GTW-p0 r2 [ 93] L9-JA-on#c4 W=8 RERUN (contaminated): stat 5.6430 ms pose 0x30c5438bc6ad9ffa expect match rb 3.33% ra 1.08% others 0.66% cpu_s 10.391 wall 2.835s waited 0.0s
+2026-09-25T03:59:48.598+03:00   P2-L9GTW-p0 r2 [ 96] L9-R-off#c4 W=8 RERUN (contaminated): stat 4.8883 ms pose 0x87e561d20589d4a5 expect match rb 1.08% ra 1.73% others 0.43% cpu_s 17.266 wall 5.405s waited 0.0s
+2026-09-25T03:59:56.650+03:00   P2-L9GTW-p0 r2 [ 98] L9-JA-a-off#c4 W=8 RERUN (contaminated): stat 5.8295 ms pose 0x32d5e235342b4143 expect match rb 1.73% ra 2.35% others 0.63% cpu_s 11.75 wall 2.974s waited 0.0s
+2026-09-25T04:00:04.624+03:00   P2-L9GTW-p0 r2 [ 99] L9-JA-a-on#c4 W=8 RERUN (contaminated): stat 5.6576 ms pose 0x30c5438bc6ad9ffa expect match rb 2.35% ra 3.46% others 0.78% cpu_s 10.578 wall 2.888s waited 0.0s
+2026-09-25T04:00:15.306+03:00   P2-L9GTW-p0 r2 [104] L9-R-off#c4 W=16 RERUN (contaminated): stat 5.0696 ms pose 0x87e561d20589d4a5 expect match rb 3.46% ra 1.05% others 0.68% cpu_s 32.5 wall 5.626s waited 0.0s
+2026-09-25T04:00:15.306+03:00 P2-L9GTW-p0: done
+2026-09-25T04:00:15.309+03:00 P2-L9GTW-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-25T04:02:25.973+03:00 P2-L9GTW-p1: idle reached; {'time': '2026-09-25T04:02:25.973+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T04:02:36.131+03:00 P2-L9GTW-p1: opening receipt 1.96% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T04:02:44.094+03:00   P2-L9GTW-p1 warm-up L9-JA-off#c4 W=8 (untimed): stat 5.7871 ms pose 0x32d5e235342b4143 expect match rb 1.96% ra 1.79% others 0.81% cpu_s 11.203 wall 2.907s waited 0.0s
+2026-09-25T04:02:54.924+03:00   P2-L9GTW-p1 r0 [  1] L9-R-on#c4 W=16: stat 5.2229 ms pose 0xc8bbe34cf6a8afc6 expect match rb 1.79% ra 0.97% others 0.83% cpu_s 28.875 wall 5.774s waited 0.0s
+2026-09-25T04:03:05.616+03:00   P2-L9GTW-p1 r0 [  2] L9-R-off#c4 W=16: stat 5.0977 ms pose 0x87e561d20589d4a5 expect match rb 0.97% ra 2.25% others 0.52% cpu_s 29.953 wall 5.633s waited 0.0s
+2026-09-25T04:03:12.726+03:00   P2-L9GTW-p1 r0 [  3] L9-JD-on#c4 W=16: stat 4.0757 ms pose 0x30c5438bc6ad9ffa expect match rb 2.25% ra 0.84% others 1.05% cpu_s 11.766 wall 2.053s waited 0.0s
+2026-09-25T04:03:19.915+03:00   P2-L9GTW-p1 r0 [  4] L9-JD-off#c4 W=16: stat 4.2391 ms pose 0x32d5e235342b4143 expect match rb 0.84% ra 0.82% others 1.11% cpu_s 10.031 wall 2.134s waited 0.0s
+2026-09-25T04:03:27.752+03:00   P2-L9GTW-p1 r0 [  5] L9-JA-on#c4 W=16: stat 5.5361 ms pose 0x30c5438bc6ad9ffa expect match rb 0.82% ra 1.59% others 0.64% cpu_s 17.938 wall 2.782s waited 0.0s
+2026-09-25T04:03:35.643+03:00   P2-L9GTW-p1 r0 [  6] L9-JA-off#c4 W=16: stat 5.6452 ms pose 0x32d5e235342b4143 expect match rb 1.59% ra 1.45% others 0.62% cpu_s 19.469 wall 2.837s waited 0.0s
+2026-09-25T04:03:43.727+03:00   P2-L9GTW-p1 r0 [  7] L9-JA-a-on#c4 W=8: stat 5.8825 ms pose 0x30c5438bc6ad9ffa expect match rb 1.45% ra 1.49% others 0.91% cpu_s 11.922 wall 3.004s waited 0.0s
+2026-09-25T04:03:51.758+03:00   P2-L9GTW-p1 r0 [  8] L9-JA-a-off#c4 W=8: stat 5.7930 ms pose 0x32d5e235342b4143 expect match rb 1.49% ra 0.78% others 0.53% cpu_s 11.984 wall 2.955s waited 0.0s
+2026-09-25T04:04:01.891+03:00   P2-L9GTW-p1 r0 [  9] L9-R-on#c4 W=8: stat 4.5892 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.78% ra 1.37% others 0.64% cpu_s 13.984 wall 5.077s waited 0.0s
+2026-09-25T04:04:12.434+03:00   P2-L9GTW-p1 r0 [ 10] L9-R-off#c4 W=8: stat 5.0431 ms pose 0x87e561d20589d4a5 expect match rb 1.37% ra 2.9% others 0.7% cpu_s 15.641 wall 5.484s waited 0.0s
+2026-09-25T04:04:19.385+03:00   P2-L9GTW-p1 r0 [ 11] L9-JD-on#c4 W=8: stat 3.7638 ms pose 0x30c5438bc6ad9ffa expect match rb 2.9% ra 0.76% others 0.41% cpu_s 4.828 wall 1.896s waited 0.0s
+2026-09-25T04:04:26.455+03:00   P2-L9GTW-p1 r0 [ 12] L9-JD-off#c4 W=8: stat 4.0051 ms pose 0x32d5e235342b4143 expect match rb 0.76% ra 1.09% others 0.73% cpu_s 6.094 wall 2.016s waited 0.0s
+2026-09-25T04:04:34.327+03:00   P2-L9GTW-p1 r0 [ 13] L9-JA-on#c4 W=8: stat 5.6087 ms pose 0x30c5438bc6ad9ffa expect match rb 1.09% ra 1.78% others 0.52% cpu_s 10.625 wall 2.818s waited 0.0s
+2026-09-25T04:04:42.277+03:00   P2-L9GTW-p1 r0 [ 14] L9-JA-off#c4 W=8: stat 5.7649 ms pose 0x32d5e235342b4143 expect match rb 1.78% ra 3.11% others 0.78% cpu_s 11.016 wall 2.896s waited 0.0s
+2026-09-25T04:04:52.972+03:00   P2-L9GTW-p1 r0 [ 15] L9-R-on#c4 W=4: stat 5.1000 ms pose 0xc8bbe34cf6a8afc6 expect match rb 3.11% ra 1.03% others 0.64% cpu_s 10.969 wall 5.642s waited 0.0s
+2026-09-25T04:05:04.512+03:00   P2-L9GTW-p1 r0 [ 16] L9-R-off#c4 W=4: stat 5.8187 ms pose 0x87e561d20589d4a5 expect match rb 1.03% ra 1.21% others 1.2% cpu_s 14.547 wall 6.486s waited 0.0s
+2026-09-25T04:05:11.636+03:00   P2-L9GTW-p1 r0 [ 17] L9-JD-on#c4 W=4: stat 4.1112 ms pose 0x30c5438bc6ad9ffa expect match rb 1.21% ra 3.11% others 0.57% cpu_s 3.438 wall 2.069s waited 0.0s
+2026-09-25T04:05:18.974+03:00   P2-L9GTW-p1 r0 [ 18] L9-JD-off#c4 W=4: stat 4.5380 ms pose 0x32d5e235342b4143 expect match rb 3.11% ra 0.73% others 0.39% cpu_s 4.719 wall 2.283s waited 0.0s
+2026-09-25T04:05:27.606+03:00   P2-L9GTW-p1 r0 [ 19] L9-JA-on#c4 W=4: stat 7.1298 ms pose 0x30c5438bc6ad9ffa expect match rb 0.73% ra 1.66% others 0.63% cpu_s 9.594 wall 3.579s waited 0.0s
+2026-09-25T04:05:36.460+03:00   P2-L9GTW-p1 r0 [ 20] L9-JA-off#c4 W=4: stat 7.5668 ms pose 0x32d5e235342b4143 expect match rb 1.66% ra 3.62% others 0.96% cpu_s 10.25 wall 3.797s waited 0.0s
+2026-09-25T04:05:48.599+03:00   P2-L9GTW-p1 r0 [ 21] L9-R-on#c4 W=2: stat 6.3220 ms pose 0xc8bbe34cf6a8afc6 expect match rb 3.62% ra 1.05% others 0.97% cpu_s 10.344 wall 7.084s waited 0.0s
+2026-09-25T04:06:02.119+03:00   P2-L9GTW-p1 r0 [ 22] L9-R-off#c4 W=2: stat 7.5711 ms pose 0x87e561d20589d4a5 expect match rb 1.05% ra 1.74% others 0.73% cpu_s 12.703 wall 8.463s waited 0.0s
+2026-09-25T04:06:09.588+03:00   P2-L9GTW-p1 r0 [ 23] L9-JD-on#c4 W=2: stat 4.8010 ms pose 0x30c5438bc6ad9ffa expect match rb 1.74% ra 0.92% others 0.69% cpu_s 3.297 wall 2.414s waited 0.0s
+2026-09-25T04:06:17.575+03:00   P2-L9GTW-p1 r0 [ 24] L9-JD-off#c4 W=2: stat 5.8422 ms pose 0x32d5e235342b4143 expect match rb 0.92% ra 0.96% others 0.97% cpu_s 4.156 wall 2.935s waited 0.0s
+2026-09-25T04:06:27.776+03:00   P2-L9GTW-p1 r0 [ 25] L9-JA-on#c4 W=2: stat 10.2629 ms pose 0x30c5438bc6ad9ffa expect match rb 0.96% ra 1.74% others 0.65% cpu_s 8.625 wall 5.146s waited 0.0s
+2026-09-25T04:06:38.442+03:00   P2-L9GTW-p1 r0 [ 26] L9-JA-off#c4 W=2: stat 11.1894 ms pose 0x32d5e235342b4143 expect match rb 1.74% ra 0.74% others 0.65% cpu_s 9.484 wall 5.608s waited 0.0s
+2026-09-25T04:06:52.347+03:00   P2-L9GTW-p1 r0 [ 27] L9-JC#c4 W=1: stat 17.5225 ms pose 0x30c5438bc6ad9ffa expect match rb 0.74% ra 0.73% others 0.6% cpu_s 8.812 wall 8.828s waited 0.0s
+2026-09-25T04:07:05.802+03:00   P2-L9GTW-p1 r0 [ 28] L9-JA-a-on#c4 W=1: stat 16.6255 ms pose 0x30c5438bc6ad9ffa expect match rb 0.73% ra 1.63% others 0.58% cpu_s 8.375 wall 8.379s waited 0.0s
+2026-09-25T04:07:20.139+03:00   P2-L9GTW-p1 r0 [ 29] L9-JA-a-off#c4 W=1: stat 18.3789 ms pose 0x32d5e235342b4143 expect match rb 1.63% ra 1.46% others 0.76% cpu_s 9.281 wall 9.256s waited 0.0s
+2026-09-25T04:07:33.873+03:00   P2-L9GTW-p1 r0 [ 30] L9-R-on#c4 W=1: stat 7.8214 ms pose 0xc8bbe34cf6a8afc6 expect match rb 1.46% ra 0.94% others 0.61% cpu_s 8.656 wall 8.677s waited 0.0s
+2026-09-25T04:07:50.828+03:00   P2-L9GTW-p1 r0 [ 31] L9-R-off#c4 W=1: stat 10.8382 ms pose 0x87e561d20589d4a5 expect match rb 0.94% ra 0.7% others 0.7% cpu_s 11.906 wall 11.903s waited 0.0s
+2026-09-25T04:07:58.934+03:00   P2-L9GTW-p1 r0 [ 32] L9-JD-on#c4 W=1: stat 6.0751 ms pose 0x30c5438bc6ad9ffa expect match rb 0.7% ra 1.49% others 0.55% cpu_s 3.062 wall 3.051s waited 0.0s
+2026-09-25T04:08:07.917+03:00   P2-L9GTW-p1 r0 [ 33] L9-JD-off#c4 W=1: stat 7.8300 ms pose 0x32d5e235342b4143 expect match rb 1.49% ra 1.03% others 1.64% cpu_s 3.938 wall 3.929s waited 0.0s
+2026-09-25T04:08:21.321+03:00   P2-L9GTW-p1 r0 [ 34] L9-JA-on#c4 W=1: stat 16.6680 ms pose 0x30c5438bc6ad9ffa expect match rb 1.03% ra 1.9% others 0.67% cpu_s 8.281 wall 8.349s waited 0.0s
+2026-09-25T04:08:35.579+03:00   P2-L9GTW-p1 r0 [ 35] L9-JA-off#c4 W=1: stat 18.3741 ms pose 0x32d5e235342b4143 expect match rb 1.9% ra 1.37% others 0.48% cpu_s 9.172 wall 9.202s waited 0.0s
+2026-09-25T04:08:46.021+03:00   P2-L9GTW-p1 r1 [ 36] L9-R-on#c4 W=16: stat 4.8769 ms pose 0xc8bbe34cf6a8afc6 expect match rb 1.37% ra 2.61% others 0.64% cpu_s 27.531 wall 5.383s waited 0.0s
+2026-09-25T04:08:56.726+03:00   P2-L9GTW-p1 r1 [ 37] L9-R-off#c4 W=16: stat 5.0653 ms pose 0x87e561d20589d4a5 expect match rb 2.61% ra 1.21% others 0.83% cpu_s 29.828 wall 5.648s waited 0.0s
+2026-09-25T04:09:03.782+03:00   P2-L9GTW-p1 r1 [ 38] L9-JD-on#c4 W=16: stat 3.9707 ms pose 0x30c5438bc6ad9ffa expect match rb 1.21% ra 1.64% others 0.49% cpu_s 7.797 wall 2.001s waited 0.0s
+2026-09-25T04:09:10.926+03:00   P2-L9GTW-p1 r1 [ 39] L9-JD-off#c4 W=16: stat 4.1522 ms pose 0x32d5e235342b4143 expect match rb 1.64% ra 1.44% others 0.66% cpu_s 9.359 wall 2.09s waited 0.0s
+2026-09-25T04:09:18.771+03:00   P2-L9GTW-p1 r1 [ 40] L9-JA-on#c4 W=16: stat 5.5552 ms pose 0x30c5438bc6ad9ffa expect match rb 1.44% ra 3.77% others 0.95% cpu_s 17.125 wall 2.791s waited 0.0s
+2026-09-25T04:09:26.662+03:00   P2-L9GTW-p1 r1 [ 41] L9-JA-off#c4 W=16: stat 5.6473 ms pose 0x32d5e235342b4143 expect match rb 3.77% ra 0.72% others 0.83% cpu_s 19.75 wall 2.837s waited 0.0s
+2026-09-25T04:09:34.620+03:00   P2-L9GTW-p1 r1 [ 42] L9-JA-a-on#c4 W=8: stat 5.6414 ms pose 0x30c5438bc6ad9ffa expect match rb 0.72% ra 0.82% others 0.61% cpu_s 10.5 wall 2.881s waited 0.0s
+2026-09-25T04:09:42.652+03:00   P2-L9GTW-p1 r1 [ 43] L9-JA-a-off#c4 W=8: stat 5.7919 ms pose 0x32d5e235342b4143 expect match rb 0.82% ra 0.9% others 0.46% cpu_s 12.609 wall 2.954s waited 0.0s
+2026-09-25T04:09:52.855+03:00   P2-L9GTW-p1 r1 [ 44] L9-R-on#c4 W=8: stat 4.7867 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.9% ra 2.33% others 0.63% cpu_s 13.859 wall 5.146s waited 0.0s
+2026-09-25T04:10:03.316+03:00   P2-L9GTW-p1 r1 [ 45] L9-R-off#c4 W=8: stat 4.8844 ms pose 0x87e561d20589d4a5 expect match rb 2.33% ra 1.52% others 0.72% cpu_s 17.031 wall 5.407s waited 0.0s
+2026-09-25T04:10:10.269+03:00   P2-L9GTW-p1 r1 [ 46] L9-JD-on#c4 W=8: stat 3.7669 ms pose 0x30c5438bc6ad9ffa expect match rb 1.52% ra 1.39% others 0.72% cpu_s 5.125 wall 1.897s waited 0.0s
+2026-09-25T04:10:17.333+03:00   P2-L9GTW-p1 r1 [ 47] L9-JD-off#c4 W=8: stat 3.9901 ms pose 0x32d5e235342b4143 expect match rb 1.39% ra 1.09% others 0.64% cpu_s 5.297 wall 2.008s waited 0.0s
+2026-09-25T04:10:25.350+03:00   P2-L9GTW-p1 r1 [ 48] L9-JA-on#c4 W=8: stat 5.8958 ms pose 0x30c5438bc6ad9ffa expect match rb 1.09% ra 0.88% others 0.66% cpu_s 12.375 wall 2.962s waited 0.0s
+2026-09-25T04:10:33.303+03:00   P2-L9GTW-p1 r1 [ 49] L9-JA-off#c4 W=8: stat 5.7713 ms pose 0x32d5e235342b4143 expect match rb 0.88% ra 1.03% others 0.58% cpu_s 11.812 wall 2.899s waited 0.0s
+2026-09-25T04:10:43.986+03:00   P2-L9GTW-p1 r1 [ 50] L9-R-on#c4 W=4: stat 5.0916 ms pose 0xc8bbe34cf6a8afc6 expect match rb 1.03% ra 1.42% others 0.8% cpu_s 11.203 wall 5.627s waited 0.0s
+2026-09-25T04:10:55.699+03:00   P2-L9GTW-p1 r1 [ 51] L9-R-off#c4 W=4: stat 6.1874 ms pose 0x87e561d20589d4a5 expect match rb 1.42% ra 1.1% others 0.95% cpu_s 15.297 wall 6.659s waited 0.0s
+2026-09-25T04:11:02.820+03:00   P2-L9GTW-p1 r1 [ 52] L9-JD-on#c4 W=4: stat 4.1058 ms pose 0x30c5438bc6ad9ffa expect match rb 1.1% ra 1.49% others 1.0% cpu_s 4.078 wall 2.067s waited 0.0s
+2026-09-25T04:11:10.173+03:00   P2-L9GTW-p1 r1 [ 53] L9-JD-off#c4 W=4: stat 4.5711 ms pose 0x32d5e235342b4143 expect match rb 1.49% ra 1.64% others 0.51% cpu_s 4.75 wall 2.299s waited 0.0s
+2026-09-25T04:11:18.821+03:00   P2-L9GTW-p1 r1 [ 54] L9-JA-on#c4 W=4: stat 7.1576 ms pose 0x30c5438bc6ad9ffa expect match rb 1.64% ra 0.94% others 0.6% cpu_s 9.203 wall 3.593s waited 0.0s
+2026-09-25T04:11:27.741+03:00   P2-L9GTW-p1 r1 [ 55] L9-JA-off#c4 W=4: stat 7.7047 ms pose 0x32d5e235342b4143 expect match rb 0.94% ra 0.86% others 0.89% cpu_s 10.547 wall 3.866s waited 0.0s
+2026-09-25T04:11:39.652+03:00   P2-L9GTW-p1 r1 [ 56] L9-R-on#c4 W=2: stat 6.1998 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.86% ra 0.7% others 0.5% cpu_s 10.125 wall 6.858s waited 0.0s
+2026-09-25T04:11:52.935+03:00   P2-L9GTW-p1 r1 [ 57] L9-R-off#c4 W=2: stat 7.4655 ms pose 0x87e561d20589d4a5 expect match rb 0.7% ra 3.03% others 0.7% cpu_s 12.922 wall 8.228s waited 0.0s
+2026-09-25T04:12:00.407+03:00   P2-L9GTW-p1 r1 [ 58] L9-JD-on#c4 W=2: stat 4.8030 ms pose 0x30c5438bc6ad9ffa expect match rb 3.03% ra 1.3% others 0.85% cpu_s 3.438 wall 2.415s waited 0.0s
+2026-09-25T04:12:08.306+03:00   P2-L9GTW-p1 r1 [ 59] L9-JD-off#c4 W=2: stat 5.6613 ms pose 0x32d5e235342b4143 expect match rb 1.3% ra 1.37% others 0.49% cpu_s 4.25 wall 2.844s waited 0.0s
+2026-09-25T04:12:18.527+03:00   P2-L9GTW-p1 r1 [ 60] L9-JA-on#c4 W=2: stat 10.3078 ms pose 0x30c5438bc6ad9ffa expect match rb 1.37% ra 0.65% others 0.47% cpu_s 8.578 wall 5.168s waited 0.0s
+2026-09-25T04:12:29.261+03:00   P2-L9GTW-p1 r1 [ 61] L9-JA-off#c4 W=2: stat 11.3201 ms pose 0x32d5e235342b4143 expect match rb 0.65% ra 1.77% others 0.67% cpu_s 9.672 wall 5.674s waited 0.0s
+2026-09-25T04:12:43.178+03:00   P2-L9GTW-p1 r1 [ 62] L9-JC#c4 W=1: stat 17.5546 ms pose 0x30c5438bc6ad9ffa expect match rb 1.77% ra 0.76% others 0.6% cpu_s 8.812 wall 8.842s waited 0.0s
+2026-09-25T04:12:56.646+03:00   P2-L9GTW-p1 r1 [ 63] L9-JA-a-on#c4 W=1: stat 16.6518 ms pose 0x30c5438bc6ad9ffa expect match rb 0.76% ra 3.82% others 0.75% cpu_s 8.359 wall 8.391s waited 0.0s
+2026-09-25T04:13:10.979+03:00   P2-L9GTW-p1 r1 [ 64] L9-JA-a-off#c4 W=1: stat 18.3813 ms pose 0x32d5e235342b4143 expect match rb 3.82% ra 1.47% others 0.49% cpu_s 9.219 wall 9.256s waited 0.0s
+2026-09-25T04:13:24.877+03:00   P2-L9GTW-p1 r1 [ 65] L9-R-on#c4 W=1: stat 7.8750 ms pose 0xc8bbe34cf6a8afc6 expect match rb 1.47% ra 2.93% others 0.69% cpu_s 8.938 wall 8.841s waited 0.0s
+2026-09-25T04:13:41.803+03:00   P2-L9GTW-p1 r1 [ 66] L9-R-off#c4 W=1: stat 10.7594 ms pose 0x87e561d20589d4a5 expect match rb 2.93% ra 0.95% others 0.51% cpu_s 11.844 wall 11.867s waited 0.0s
+2026-09-25T04:13:49.951+03:00   P2-L9GTW-p1 r1 [ 67] L9-JD-on#c4 W=1: stat 6.1619 ms pose 0x30c5438bc6ad9ffa expect match rb 0.95% ra 0.99% others 1.05% cpu_s 3.156 wall 3.095s waited 0.0s
+2026-09-25T04:13:58.897+03:00   P2-L9GTW-p1 r1 [ 68] L9-JD-off#c4 W=1: stat 7.7543 ms pose 0x32d5e235342b4143 expect match rb 0.99% ra 3.73% others 0.45% cpu_s 3.938 wall 3.89s waited 0.0s
+2026-09-25T04:14:12.330+03:00   P2-L9GTW-p1 r1 [ 69] L9-JA-on#c4 W=1: stat 16.7147 ms pose 0x30c5438bc6ad9ffa expect match rb 3.73% ra 1.11% others 0.67% cpu_s 8.375 wall 8.372s waited 0.0s
+2026-09-25T04:14:26.596+03:00   P2-L9GTW-p1 r1 [ 70] L9-JA-off#c4 W=1: stat 18.3942 ms pose 0x32d5e235342b4143 expect match rb 1.11% ra 3.44% others 0.55% cpu_s 9.219 wall 9.212s waited 0.0s
+2026-09-25T04:14:37.113+03:00   P2-L9GTW-p1 r2 [ 71] L9-R-on#c4 W=16: stat 4.9444 ms pose 0xc8bbe34cf6a8afc6 expect match rb 3.44% ra 1.04% others 0.64% cpu_s 25.422 wall 5.46s waited 0.0s
+2026-09-25T04:14:47.814+03:00   P2-L9GTW-p1 r2 [ 72] L9-R-off#c4 W=16: stat 5.1068 ms pose 0x87e561d20589d4a5 expect match rb 1.04% ra 1.05% others 0.66% cpu_s 34.109 wall 5.647s waited 0.0s
+2026-09-25T04:14:54.869+03:00   P2-L9GTW-p1 r2 [ 73] L9-JD-on#c4 W=16: stat 3.9738 ms pose 0x30c5438bc6ad9ffa expect match rb 1.05% ra 1.78% others 0.49% cpu_s 7.844 wall 2.001s waited 0.0s
+2026-09-25T04:15:02.065+03:00   P2-L9GTW-p1 r2 [ 74] L9-JD-off#c4 W=16: stat 4.2494 ms pose 0x32d5e235342b4143 expect match rb 1.78% ra 1.99% others 1.1% cpu_s 13.172 wall 2.139s waited 0.0s
+2026-09-25T04:15:09.896+03:00   P2-L9GTW-p1 r2 [ 75] L9-JA-on#c4 W=16: stat 5.5243 ms pose 0x30c5438bc6ad9ffa expect match rb 1.99% ra 0.72% others 0.39% cpu_s 18.875 wall 2.776s waited 0.0s
+2026-09-25T04:15:17.786+03:00   P2-L9GTW-p1 r2 [ 76] L9-JA-off#c4 W=16: stat 5.6409 ms pose 0x32d5e235342b4143 expect match rb 0.72% ra 0.95% others 0.65% cpu_s 19.891 wall 2.834s waited 0.0s
+2026-09-25T04:15:25.746+03:00   P2-L9GTW-p1 r2 [ 77] L9-JA-a-on#c4 W=8: stat 5.6462 ms pose 0x30c5438bc6ad9ffa expect match rb 0.95% ra 1.18% others 0.75% cpu_s 12.703 wall 2.883s waited 0.0s
+2026-09-25T04:15:33.901+03:00   P2-L9GTW-p1 r2 [ 78] L9-JA-a-off#c4 W=8: stat 6.0315 ms pose 0x32d5e235342b4143 expect match rb 1.18% ra 1.01% others 0.67% cpu_s 12.547 wall 3.079s waited 0.0s
+2026-09-25T04:15:44.054+03:00   P2-L9GTW-p1 r2 [ 79] L9-R-on#c4 W=8: stat 4.5980 ms pose 0xc8bbe34cf6a8afc6 expect match rb 1.01% ra 0.86% others 0.86% cpu_s 14.078 wall 5.097s waited 0.0s
+2026-09-25T04:15:54.629+03:00   P2-L9GTW-p1 r2 [ 80] L9-R-off#c4 W=8: stat 4.9790 ms pose 0x87e561d20589d4a5 expect match rb 0.86% ra 1.58% others 0.51% cpu_s 17.594 wall 5.513s waited 0.0s
+2026-09-25T04:16:01.598+03:00   P2-L9GTW-p1 r2 [ 81] L9-JD-on#c4 W=8: stat 3.7983 ms pose 0x30c5438bc6ad9ffa expect match rb 1.58% ra 3.44% others 0.36% cpu_s 4.734 wall 1.913s waited 0.0s
+2026-09-25T04:16:08.670+03:00   P2-L9GTW-p1 r2 [ 82] L9-JD-off#c4 W=8: stat 4.0073 ms pose 0x32d5e235342b4143 expect match rb 3.44% ra 1.19% others 0.63% cpu_s 5.688 wall 2.017s waited 0.0s
+2026-09-25T04:16:16.557+03:00   P2-L9GTW-p1 r2 [ 83] L9-JA-on#c4 W=8: stat 5.6300 ms pose 0x30c5438bc6ad9ffa expect match rb 1.19% ra 1.11% others 0.52% cpu_s 10.547 wall 2.829s waited 0.0s
+2026-09-25T04:16:24.510+03:00   P2-L9GTW-p1 r2 [ 84] L9-JA-off#c4 W=8: stat 5.7694 ms pose 0x32d5e235342b4143 expect match rb 1.11% ra 0.89% others 0.54% cpu_s 11.812 wall 2.898s waited 0.0s
+2026-09-25T04:16:35.376+03:00   P2-L9GTW-p1 r2 [ 85] L9-R-on#c4 W=4: stat 5.4015 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.89% ra 0.78% others 0.98% cpu_s 10.5 wall 5.812s waited 0.0s
+2026-09-25T04:16:46.859+03:00   P2-L9GTW-p1 r2 [ 86] L9-R-off#c4 W=4: stat 5.8732 ms pose 0x87e561d20589d4a5 expect match rb 0.78% ra 1.78% others 0.65% cpu_s 14.625 wall 6.428s waited 0.0s
+2026-09-25T04:16:53.981+03:00   P2-L9GTW-p1 r2 [ 87] L9-JD-on#c4 W=4: stat 4.1086 ms pose 0x30c5438bc6ad9ffa expect match rb 1.78% ra 0.81% others 0.53% cpu_s 4.031 wall 2.068s waited 0.0s
+2026-09-25T04:17:01.338+03:00   P2-L9GTW-p1 r2 [ 88] L9-JD-off#c4 W=4: stat 4.5787 ms pose 0x32d5e235342b4143 expect match rb 0.81% ra 3.46% others 0.94% cpu_s 4.812 wall 2.303s waited 0.0s
+2026-09-25T04:17:09.997+03:00   P2-L9GTW-p1 r2 [ 89] L9-JA-on#c4 W=4: stat 7.1806 ms pose 0x30c5438bc6ad9ffa expect match rb 3.46% ra 1.07% others 0.65% cpu_s 9.172 wall 3.604s waited 0.0s
+2026-09-25T04:17:18.855+03:00   P2-L9GTW-p1 r2 [ 90] L9-JA-off#c4 W=4: stat 7.5775 ms pose 0x32d5e235342b4143 expect match rb 1.07% ra 1.46% others 0.62% cpu_s 10.547 wall 3.803s waited 0.0s
+2026-09-25T04:17:30.658+03:00   P2-L9GTW-p1 r2 [ 91] L9-R-on#c4 W=2: stat 6.1217 ms pose 0xc8bbe34cf6a8afc6 expect match rb 1.46% ra 1.01% others 0.68% cpu_s 10.0 wall 6.749s waited 0.0s
+2026-09-25T04:17:43.975+03:00   P2-L9GTW-p1 r2 [ 92] L9-R-off#c4 W=2: stat 7.3729 ms pose 0x87e561d20589d4a5 expect match rb 1.01% ra 1.79% others 0.59% cpu_s 12.547 wall 8.262s waited 0.0s
+2026-09-25T04:17:51.500+03:00   P2-L9GTW-p1 r2 [ 93] L9-JD-on#c4 W=2: stat 4.9044 ms pose 0x30c5438bc6ad9ffa expect match rb 1.79% ra 0.76% others 0.96% cpu_s 3.438 wall 2.466s waited 0.0s
+2026-09-25T04:17:59.414+03:00   P2-L9GTW-p1 r2 [ 94] L9-JD-off#c4 W=2: stat 5.6955 ms pose 0x32d5e235342b4143 expect match rb 0.76% ra 0.9% others 0.41% cpu_s 4.359 wall 2.862s waited 0.0s
+2026-09-25T04:18:09.696+03:00   P2-L9GTW-p1 r2 [ 95] L9-JA-on#c4 W=2: stat 10.4285 ms pose 0x30c5438bc6ad9ffa expect match rb 0.9% ra 1.14% others 1.01% cpu_s 8.953 wall 5.229s waited 0.0s
+2026-09-25T04:18:20.378+03:00   P2-L9GTW-p1 r2 [ 96] L9-JA-off#c4 W=2: stat 11.2306 ms pose 0x32d5e235342b4143 expect match rb 1.14% ra 0.88% others 0.78% cpu_s 9.562 wall 5.629s waited 0.0s
+2026-09-25T04:18:34.303+03:00   P2-L9GTW-p1 r2 [ 97] L9-JC#c4 W=1: stat 17.5392 ms pose 0x30c5438bc6ad9ffa expect match rb 0.88% ra 3.86% others 0.75% cpu_s 8.797 wall 8.835s waited 0.0s
+2026-09-25T04:18:47.770+03:00   P2-L9GTW-p1 r2 [ 98] L9-JA-a-on#c4 W=1: stat 16.6498 ms pose 0x30c5438bc6ad9ffa expect match rb 3.86% ra 0.82% others 0.56% cpu_s 8.375 wall 8.39s waited 0.0s
+2026-09-25T04:19:02.114+03:00   P2-L9GTW-p1 r2 [ 99] L9-JA-a-off#c4 W=1: stat 18.4044 ms pose 0x32d5e235342b4143 expect match rb 0.82% ra 1.49% others 0.54% cpu_s 9.234 wall 9.269s waited 0.0s
+2026-09-25T04:19:16.041+03:00   P2-L9GTW-p1 r2 [100] L9-R-on#c4 W=1: stat 7.9295 ms pose 0xc8bbe34cf6a8afc6 expect match rb 1.49% ra 1.74% others 0.79% cpu_s 8.906 wall 8.872s waited 0.0s
+2026-09-25T04:19:32.968+03:00   P2-L9GTW-p1 r2 [101] L9-R-off#c4 W=1: stat 10.7508 ms pose 0x87e561d20589d4a5 expect match rb 1.74% ra 1.47% others 0.59% cpu_s 11.922 wall 11.873s waited 0.0s
+2026-09-25T04:19:41.147+03:00   P2-L9GTW-p1 r2 [102] L9-JD-on#c4 W=1: stat 6.2217 ms pose 0x30c5438bc6ad9ffa expect match rb 1.47% ra 1.42% others 0.75% cpu_s 3.125 wall 3.125s waited 0.0s
+2026-09-25T04:19:50.027+03:00   P2-L9GTW-p1 r2 [103] L9-JD-off#c4 W=1: stat 7.6252 ms pose 0x32d5e235342b4143 expect match rb 1.42% ra 1.0% others 0.56% cpu_s 3.828 wall 3.826s waited 0.0s
+2026-09-25T04:20:03.407+03:00   P2-L9GTW-p1 r2 [104] L9-JA-on#c4 W=1: stat 16.6192 ms pose 0x30c5438bc6ad9ffa expect match rb 1.0% ra 1.23% others 0.66% cpu_s 8.344 wall 8.325s waited 0.0s
+2026-09-25T04:20:17.652+03:00   P2-L9GTW-p1 r2 [105] L9-JA-off#c4 W=1: stat 18.3518 ms pose 0x32d5e235342b4143 expect match rb 1.23% ra 0.9% others 0.78% cpu_s 9.156 wall 9.191s waited 0.0s
+2026-09-25T04:20:17.653+03:00 P2-L9GTW-p1: done
+2026-09-25T04:20:17.656+03:00 P3-G9JA-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-25T04:22:28.138+03:00 P3-G9JA-p0: idle reached; {'time': '2026-09-25T04:22:28.138+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T04:22:38.206+03:00 P3-G9JA-p0: opening receipt 1.26% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T04:22:47.199+03:00   P3-G9JA-p0 warm-up G9-JA-mid#g9t W=4 (untimed): stat 7.8525 ms pose 0x32d5e235342b4143 expect match rb 1.26% ra 1.4% others 0.72% cpu_s 11.391 wall 3.936s waited 0.0s
+2026-09-25T04:22:58.037+03:00   P3-G9JA-p0 r0 [  1] G9-JA-mid#g9p W=2: stat 11.5443 ms pose 0x32d5e235342b4143 expect match rb 1.4% ra 1.36% others 0.78% cpu_s 9.969 wall 5.782s waited 0.0s
+2026-09-25T04:23:08.875+03:00   P3-G9JA-p0 r0 [  2] G9-JA-mid#g9t W=2: stat 11.5536 ms pose 0x32d5e235342b4143 expect match rb 1.36% ra 1.06% others 0.71% cpu_s 9.984 wall 5.785s waited 0.0s
+2026-09-25T04:23:17.966+03:00   P3-G9JA-p0 r0 [  3] G9-JA-mid#g9p W=4: stat 8.0413 ms pose 0x32d5e235342b4143 expect match rb 1.06% ra 7.74% others 0.71% cpu_s 11.344 wall 4.03s waited 0.0s CONTAMINATED-after(7.74%)
+2026-09-25T04:23:51.955+03:00   P3-G9JA-p0 r0 [  4] G9-JA-mid#g9t W=4: stat 7.7728 ms pose 0x32d5e235342b4143 expect match rb 2.49% ra 1.62% others 0.81% cpu_s 11.188 wall 3.895s waited 25.0s
+2026-09-25T04:23:59.883+03:00   P3-G9JA-p0 r0 [  5] G9-JA-mid#g9p W=16: stat 5.7199 ms pose 0x32d5e235342b4143 expect match rb 1.62% ra 1.52% others 0.79% cpu_s 19.594 wall 2.87s waited 0.0s
+2026-09-25T04:24:07.810+03:00   P3-G9JA-p0 r0 [  6] G9-JA-mid#g9t W=16: stat 5.7181 ms pose 0x32d5e235342b4143 expect match rb 1.52% ra 1.58% others 0.65% cpu_s 19.703 wall 2.868s waited 0.0s
+2026-09-25T04:24:18.676+03:00   P3-G9JA-p0 r1 [  7] G9-JA-mid#g9p W=2: stat 11.6012 ms pose 0x32d5e235342b4143 expect match rb 1.58% ra 3.14% others 0.59% cpu_s 9.625 wall 5.809s waited 0.0s
+2026-09-25T04:24:29.519+03:00   P3-G9JA-p0 r1 [  8] G9-JA-mid#g9t W=2: stat 11.5613 ms pose 0x32d5e235342b4143 expect match rb 3.14% ra 1.29% others 0.64% cpu_s 9.797 wall 5.789s waited 0.0s
+2026-09-25T04:24:38.448+03:00   P3-G9JA-p0 r1 [  9] G9-JA-mid#g9p W=4: stat 7.7283 ms pose 0x32d5e235342b4143 expect match rb 1.29% ra 1.48% others 0.3% cpu_s 11.594 wall 3.873s waited 0.0s
+2026-09-25T04:24:47.381+03:00   P3-G9JA-p0 r1 [ 10] G9-JA-mid#g9t W=4: stat 7.7401 ms pose 0x32d5e235342b4143 expect match rb 1.48% ra 3.22% others 0.58% cpu_s 10.734 wall 3.879s waited 0.0s
+2026-09-25T04:24:55.295+03:00   P3-G9JA-p0 r1 [ 11] G9-JA-mid#g9p W=16: stat 5.6992 ms pose 0x32d5e235342b4143 expect match rb 3.22% ra 1.4% others 0.83% cpu_s 20.062 wall 2.859s waited 0.0s
+2026-09-25T04:25:03.212+03:00   P3-G9JA-p0 r1 [ 12] G9-JA-mid#g9t W=16: stat 5.7049 ms pose 0x32d5e235342b4143 expect match rb 1.4% ra 1.73% others 0.38% cpu_s 19.562 wall 2.862s waited 0.0s
+2026-09-25T04:25:14.087+03:00   P3-G9JA-p0 r2 [ 13] G9-JA-mid#g9p W=2: stat 11.6217 ms pose 0x32d5e235342b4143 expect match rb 1.73% ra 1.73% others 0.51% cpu_s 9.984 wall 5.82s waited 0.0s
+2026-09-25T04:25:24.968+03:00   P3-G9JA-p0 r2 [ 14] G9-JA-mid#g9t W=2: stat 11.6398 ms pose 0x32d5e235342b4143 expect match rb 1.73% ra 1.12% others 0.59% cpu_s 9.984 wall 5.829s waited 0.0s
+2026-09-25T04:25:33.891+03:00   P3-G9JA-p0 r2 [ 15] G9-JA-mid#g9p W=4: stat 7.7238 ms pose 0x32d5e235342b4143 expect match rb 1.12% ra 1.18% others 0.63% cpu_s 10.0 wall 3.87s waited 0.0s
+2026-09-25T04:25:42.819+03:00   P3-G9JA-p0 r2 [ 16] G9-JA-mid#g9t W=4: stat 7.7278 ms pose 0x32d5e235342b4143 expect match rb 1.18% ra 1.64% others 0.96% cpu_s 10.922 wall 3.873s waited 0.0s
+2026-09-25T04:25:50.731+03:00   P3-G9JA-p0 r2 [ 17] G9-JA-mid#g9p W=16: stat 5.6905 ms pose 0x32d5e235342b4143 expect match rb 1.64% ra 3.99% others 0.58% cpu_s 19.969 wall 2.855s waited 0.0s
+2026-09-25T04:25:58.630+03:00   P3-G9JA-p0 r2 [ 18] G9-JA-mid#g9t W=16: stat 5.6670 ms pose 0x32d5e235342b4143 expect match rb 3.99% ra 1.5% others 0.69% cpu_s 20.391 wall 2.843s waited 0.0s
+2026-09-25T04:25:58.630+03:00 P3-G9JA-p0: re-running 1 process(es) at the end of the pass: [(3, 0, 'G9-JA-mid', 'g9p', 4, 'contaminated')]
+2026-09-25T04:26:07.563+03:00   P3-G9JA-p0 r0 [  3] G9-JA-mid#g9p W=4 RERUN (contaminated): stat 7.7429 ms pose 0x32d5e235342b4143 expect match rb 1.5% ra 1.87% others 0.81% cpu_s 11.094 wall 3.88s waited 0.0s
+2026-09-25T04:26:07.564+03:00 P3-G9JA-p0: done
+2026-09-25T04:26:07.565+03:00 P3-G9JA-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-25T04:31:18.051+03:00 P3-G9JA-p1: idle reached; {'time': '2026-09-25T04:31:18.051+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T04:31:28.122+03:00 P3-G9JA-p1: opening receipt 2.08% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T04:31:37.044+03:00   P3-G9JA-p1 warm-up G9-JA-mid#g9t W=4 (untimed): stat 7.7031 ms pose 0x32d5e235342b4143 expect match rb 2.08% ra 0.79% others 0.71% cpu_s 10.938 wall 3.867s waited 0.0s
+2026-09-25T04:31:44.949+03:00   P3-G9JA-p1 r0 [  1] G9-JA-mid#g9t W=16: stat 5.6852 ms pose 0x32d5e235342b4143 expect match rb 0.79% ra 5.1% others 0.59% cpu_s 19.281 wall 2.852s waited 0.0s CONTAMINATED-after(5.1%)
+2026-09-25T04:32:17.892+03:00   P3-G9JA-p1 r0 [  2] G9-JA-mid#g9p W=16: stat 5.6994 ms pose 0x32d5e235342b4143 expect match rb 0.8% ra 0.9% others 0.55% cpu_s 20.328 wall 2.859s waited 25.0s
+2026-09-25T04:32:26.822+03:00   P3-G9JA-p1 r0 [  3] G9-JA-mid#g9t W=4: stat 7.7380 ms pose 0x32d5e235342b4143 expect match rb 0.9% ra 3.24% others 0.98% cpu_s 10.172 wall 3.878s waited 0.0s
+2026-09-25T04:32:35.829+03:00   P3-G9JA-p1 r0 [  4] G9-JA-mid#g9p W=4: stat 7.8875 ms pose 0x32d5e235342b4143 expect match rb 3.24% ra 0.87% others 0.69% cpu_s 10.406 wall 3.953s waited 0.0s
+2026-09-25T04:32:46.679+03:00   P3-G9JA-p1 r0 [  5] G9-JA-mid#g9t W=2: stat 11.5548 ms pose 0x32d5e235342b4143 expect match rb 0.87% ra 1.92% others 0.44% cpu_s 9.719 wall 5.786s waited 0.0s
+2026-09-25T04:32:57.514+03:00   P3-G9JA-p1 r0 [  6] G9-JA-mid#g9p W=2: stat 11.5403 ms pose 0x32d5e235342b4143 expect match rb 1.92% ra 1.25% others 0.76% cpu_s 9.859 wall 5.779s waited 0.0s
+2026-09-25T04:33:05.571+03:00   P3-G9JA-p1 r1 [  7] G9-JA-mid#g9t W=16: stat 5.9873 ms pose 0x32d5e235342b4143 expect match rb 1.25% ra 1.24% others 0.75% cpu_s 19.078 wall 3.003s waited 0.0s
+2026-09-25T04:33:13.485+03:00   P3-G9JA-p1 r1 [  8] G9-JA-mid#g9p W=16: stat 5.6986 ms pose 0x32d5e235342b4143 expect match rb 1.24% ra 1.07% others 0.62% cpu_s 21.047 wall 2.859s waited 0.0s
+2026-09-25T04:33:22.419+03:00   P3-G9JA-p1 r1 [  9] G9-JA-mid#g9t W=4: stat 7.7447 ms pose 0x32d5e235342b4143 expect match rb 1.07% ra 0.74% others 0.68% cpu_s 10.781 wall 3.881s waited 0.0s
+2026-09-25T04:33:31.356+03:00   P3-G9JA-p1 r1 [ 10] G9-JA-mid#g9p W=4: stat 7.7435 ms pose 0x32d5e235342b4143 expect match rb 0.74% ra 3.25% others 0.61% cpu_s 10.312 wall 3.881s waited 0.0s
+2026-09-25T04:33:42.191+03:00   P3-G9JA-p1 r1 [ 11] G9-JA-mid#g9t W=2: stat 11.5423 ms pose 0x32d5e235342b4143 expect match rb 3.25% ra 1.54% others 0.59% cpu_s 9.938 wall 5.78s waited 0.0s
+2026-09-25T04:33:53.016+03:00   P3-G9JA-p1 r1 [ 12] G9-JA-mid#g9p W=2: stat 11.5278 ms pose 0x32d5e235342b4143 expect match rb 1.54% ra 1.0% others 0.61% cpu_s 9.844 wall 5.773s waited 0.0s
+2026-09-25T04:34:00.927+03:00   P3-G9JA-p1 r2 [ 13] G9-JA-mid#g9t W=16: stat 5.6919 ms pose 0x32d5e235342b4143 expect match rb 1.0% ra 2.06% others 0.35% cpu_s 20.297 wall 2.855s waited 0.0s
+2026-09-25T04:34:08.916+03:00   P3-G9JA-p1 r2 [ 14] G9-JA-mid#g9p W=16: stat 5.8470 ms pose 0x32d5e235342b4143 expect match rb 2.06% ra 0.94% others 0.57% cpu_s 20.25 wall 2.933s waited 0.0s
+2026-09-25T04:34:17.863+03:00   P3-G9JA-p1 r2 [ 15] G9-JA-mid#g9t W=4: stat 7.7704 ms pose 0x32d5e235342b4143 expect match rb 0.94% ra 0.82% others 0.58% cpu_s 11.719 wall 3.894s waited 0.0s
+2026-09-25T04:34:26.793+03:00   P3-G9JA-p1 r2 [ 16] G9-JA-mid#g9p W=4: stat 7.7386 ms pose 0x32d5e235342b4143 expect match rb 0.82% ra 0.92% others 0.61% cpu_s 10.953 wall 3.878s waited 0.0s
+2026-09-25T04:34:37.675+03:00   P3-G9JA-p1 r2 [ 17] G9-JA-mid#g9t W=2: stat 11.6426 ms pose 0x32d5e235342b4143 expect match rb 0.92% ra 1.9% others 0.64% cpu_s 10.109 wall 5.83s waited 0.0s
+2026-09-25T04:34:48.495+03:00   P3-G9JA-p1 r2 [ 18] G9-JA-mid#g9p W=2: stat 11.5165 ms pose 0x32d5e235342b4143 expect match rb 1.9% ra 0.92% others 0.49% cpu_s 9.875 wall 5.767s waited 0.0s
+2026-09-25T04:34:48.495+03:00 P3-G9JA-p1: re-running 1 process(es) at the end of the pass: [(1, 0, 'G9-JA-mid', 'g9t', 16, 'contaminated')]
+2026-09-25T04:34:56.397+03:00   P3-G9JA-p1 r0 [  1] G9-JA-mid#g9t W=16 RERUN (contaminated): stat 5.6778 ms pose 0x32d5e235342b4143 expect match rb 0.92% ra 0.89% others 1.0% cpu_s 19.156 wall 2.848s waited 0.0s
+2026-09-25T04:34:56.397+03:00 P3-G9JA-p1: done
+2026-09-25T04:34:56.398+03:00 P4-trkspans-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-25T04:37:06.881+03:00 P4-trkspans-p0: idle reached; {'time': '2026-09-25T04:37:06.881+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T04:37:16.954+03:00 P4-trkspans-p0: opening receipt 0.98% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T04:37:23.193+03:00   P4-trkspans-p0 warm-up S-trk-tree-a#trk W=8 (untimed): stat 2.2113 ms pose 0x32d5e235342b4143 expect match rb 0.98% ra 1.45% others 0.33% cpu_s 4.203 wall 1.162s waited 0.0s
+2026-09-25T04:37:31.344+03:00   P4-trkspans-p0 r0 [  1] S-trk-tree-a#trk W=1: stat 6.0401 ms pose 0x32d5e235342b4143 expect match rb 1.45% ra 1.09% others 0.54% cpu_s 3.047 wall 3.076s waited 0.0s
+2026-09-25T04:37:37.603+03:00   P4-trkspans-p0 r0 [  2] S-trk-tree-a#trk W=8: stat 2.2398 ms pose 0x32d5e235342b4143 expect match rb 1.09% ra 1.87% others 0.5% cpu_s 4.688 wall 1.175s waited 0.0s
+2026-09-25T04:37:45.762+03:00   P4-trkspans-p0 r1 [  3] S-trk-tree-a#trk W=1: stat 6.0509 ms pose 0x32d5e235342b4143 expect match rb 1.87% ra 0.94% others 0.54% cpu_s 3.078 wall 3.082s waited 0.0s
+2026-09-25T04:37:52.007+03:00   P4-trkspans-p0 r1 [  4] S-trk-tree-a#trk W=8: stat 2.2241 ms pose 0x32d5e235342b4143 expect match rb 0.94% ra 0.75% others 1.1% cpu_s 4.391 wall 1.168s waited 0.0s
+2026-09-25T04:38:00.194+03:00   P4-trkspans-p0 r2 [  5] S-trk-tree-a#trk W=1: stat 6.1042 ms pose 0x32d5e235342b4143 expect match rb 0.75% ra 1.4% others 0.38% cpu_s 3.094 wall 3.108s waited 0.0s
+2026-09-25T04:38:06.599+03:00   P4-trkspans-p0 r2 [  6] S-trk-tree-a#trk W=8: stat 2.5288 ms pose 0x32d5e235342b4143 expect match rb 1.4% ra 1.51% others 6.34% cpu_s 5.062 wall 1.324s waited 0.0s
+2026-09-25T04:38:06.599+03:00 P4-trkspans-p0: done
+2026-09-25T04:38:06.600+03:00 P4-trkspans-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-25T04:40:17.049+03:00 P4-trkspans-p1: idle reached; {'time': '2026-09-25T04:40:17.049+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T04:40:27.117+03:00 P4-trkspans-p1: opening receipt 1.07% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T04:40:33.360+03:00   P4-trkspans-p1 warm-up S-trk-tree-a#trk W=8 (untimed): stat 2.2212 ms pose 0x32d5e235342b4143 expect match rb 1.07% ra 0.64% others 0.33% cpu_s 4.875 wall 1.166s waited 0.0s
+2026-09-25T04:40:39.611+03:00   P4-trkspans-p1 r0 [  1] S-trk-tree-a#trk W=8: stat 2.2342 ms pose 0x32d5e235342b4143 expect match rb 0.64% ra 0.95% others 0.59% cpu_s 5.094 wall 1.173s waited 0.0s
+2026-09-25T04:40:47.742+03:00   P4-trkspans-p1 r0 [  2] S-trk-tree-a#trk W=1: stat 5.9890 ms pose 0x32d5e235342b4143 expect match rb 0.95% ra 2.66% others 0.9% cpu_s 3.031 wall 3.051s waited 0.0s
+2026-09-25T04:40:53.992+03:00   P4-trkspans-p1 r1 [  3] S-trk-tree-a#trk W=8: stat 2.2363 ms pose 0x32d5e235342b4143 expect match rb 2.66% ra 0.64% others 0.67% cpu_s 4.625 wall 1.174s waited 0.0s
+2026-09-25T04:41:02.135+03:00   P4-trkspans-p1 r1 [  4] S-trk-tree-a#trk W=1: stat 6.0242 ms pose 0x32d5e235342b4143 expect match rb 0.64% ra 1.28% others 0.67% cpu_s 3.094 wall 3.068s waited 0.0s
+2026-09-25T04:41:08.378+03:00   P4-trkspans-p1 r2 [  5] S-trk-tree-a#trk W=8: stat 2.2185 ms pose 0x32d5e235342b4143 expect match rb 1.28% ra 1.44% others 0.42% cpu_s 3.547 wall 1.165s waited 0.0s
+2026-09-25T04:41:16.526+03:00   P4-trkspans-p1 r2 [  6] S-trk-tree-a#trk W=1: stat 6.0298 ms pose 0x32d5e235342b4143 expect match rb 1.44% ra 3.67% others 0.64% cpu_s 3.047 wall 3.071s waited 0.0s
+2026-09-25T04:41:16.526+03:00 P4-trkspans-p1: done
+2026-09-25T04:41:16.527+03:00 P5-joltprof-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-25T04:43:26.970+03:00 P5-joltprof-p0: idle reached; {'time': '2026-09-25T04:43:26.970+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T04:43:37.039+03:00 P5-joltprof-p0: opening receipt 1.13% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T04:43:44.038+03:00   P5-joltprof-p0 warm-up P-jolt56-prof#j56p W=8 (untimed): stat 2.9074 ms jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 1.13% ra 1.07% others 0.76% cpu_s 11.328 wall 1.556s waited 0.0s
+2026-09-25T04:43:56.123+03:00   P5-joltprof-p0 r0 [  1] P-jolt56-prof#j56p W=1: stat 13.1329 ms jolt hash 0xb8522b4e3fc62cfe threads 1 dumps 5 rb 1.07% ra 1.13% others 0.83% cpu_s 6.656 wall 6.655s waited 0.0s
+2026-09-25T04:44:03.084+03:00   P5-joltprof-p0 r0 [  2] P-jolt56-prof#j56p W=8: stat 2.8726 ms jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 1.13% ra 2.81% others 0.84% cpu_s 11.016 wall 1.524s waited 0.0s
+2026-09-25T04:44:14.922+03:00   P5-joltprof-p0 r1 [  3] P-jolt56-prof#j56p W=1: stat 12.6448 ms jolt hash 0xb8522b4e3fc62cfe threads 1 dumps 5 rb 2.81% ra 0.8% others 0.58% cpu_s 6.406 wall 6.409s waited 0.0s
+2026-09-25T04:44:21.884+03:00   P5-joltprof-p0 r1 [  4] P-jolt56-prof#j56p W=8: stat 2.8885 ms jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 0.8% ra 2.81% others 0.64% cpu_s 11.25 wall 1.532s waited 0.0s
+2026-09-25T04:44:33.915+03:00   P5-joltprof-p0 r2 [  5] P-jolt56-prof#j56p W=1: stat 13.0221 ms jolt hash 0xb8522b4e3fc62cfe threads 1 dumps 5 rb 2.81% ra 1.1% others 0.55% cpu_s 6.609 wall 6.6s waited 0.0s
+2026-09-25T04:44:40.953+03:00   P5-joltprof-p0 r2 [  6] P-jolt56-prof#j56p W=8: stat 3.0293 ms jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 1.1% ra 0.83% others 1.17% cpu_s 11.781 wall 1.604s waited 0.0s
+2026-09-25T04:44:40.953+03:00 P5-joltprof-p0: done
+2026-09-25T04:44:40.954+03:00 P5-joltprof-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-25T04:46:51.428+03:00 P5-joltprof-p1: idle reached; {'time': '2026-09-25T04:46:51.428+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T04:47:01.498+03:00 P5-joltprof-p1: opening receipt 2.39% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T04:47:08.457+03:00   P5-joltprof-p1 warm-up P-jolt56-prof#j56p W=8 (untimed): stat 2.8840 ms jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 2.39% ra 0.72% others 0.58% cpu_s 10.875 wall 1.529s waited 0.0s
+2026-09-25T04:47:15.488+03:00   P5-joltprof-p1 r0 [  1] P-jolt56-prof#j56p W=8: stat 3.0233 ms jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 0.72% ra 1.08% others 0.49% cpu_s 11.656 wall 1.599s waited 0.0s
+2026-09-25T04:47:27.512+03:00   P5-joltprof-p1 r0 [  2] P-jolt56-prof#j56p W=1: stat 13.0093 ms jolt hash 0xb8522b4e3fc62cfe threads 1 dumps 5 rb 1.08% ra 4.56% others 0.67% cpu_s 6.594 wall 6.592s waited 0.0s
+2026-09-25T04:47:34.539+03:00   P5-joltprof-p1 r1 [  3] P-jolt56-prof#j56p W=8: stat 3.0058 ms jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 4.56% ra 0.66% others 0.5% cpu_s 11.984 wall 1.59s waited 0.0s
+2026-09-25T04:47:46.628+03:00   P5-joltprof-p1 r1 [  4] P-jolt56-prof#j56p W=1: stat 13.1381 ms jolt hash 0xb8522b4e3fc62cfe threads 1 dumps 5 rb 0.66% ra 1.66% others 0.53% cpu_s 6.641 wall 6.658s waited 0.0s
+2026-09-25T04:47:53.585+03:00   P5-joltprof-p1 r2 [  5] P-jolt56-prof#j56p W=8: stat 2.8761 ms jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 1.66% ra 0.8% others 1.22% cpu_s 11.234 wall 1.525s waited 0.0s
+2026-09-25T04:48:05.534+03:00   P5-joltprof-p1 r2 [  6] P-jolt56-prof#j56p W=1: stat 12.8594 ms jolt hash 0xb8522b4e3fc62cfe threads 1 dumps 5 rb 0.8% ra 0.72% others 0.75% cpu_s 6.516 wall 6.518s waited 0.0s
+2026-09-25T04:48:05.534+03:00 P5-joltprof-p1: done
+2026-09-25T04:48:05.535+03:00 P1B-jolt-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-25T04:50:16.033+03:00 P1B-jolt-p0: idle reached; {'time': '2026-09-25T04:50:16.033+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T04:50:26.099+03:00 P1B-jolt-p0: opening receipt 0.99% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T04:50:32.252+03:00   P1B-jolt-p0 warm-up H-trk-tree#trk W=8 (untimed): stat 2.1808 ms pose 0x32d5e235342b4143 expect match rb 0.99% ra 4.45% others 0.62% cpu_s 3.859 wall 1.099s waited 0.0s
+2026-09-25T04:50:40.305+03:00   P1B-jolt-p0 r0 [  1] H-trk-tree#trk W=1: stat 5.9701 ms pose 0x32d5e235342b4143 expect match rb 4.45% ra 1.82% others 1.24% cpu_s 3.016 wall 2.994s waited 0.0s
+2026-09-25T04:50:50.306+03:00   P1B-jolt-p0 r0 [  2] H-jolt56#j56 W=1: stat 9.5972 ms jolt hash 0xb8522b4e3fc62cfe threads 1 rb 1.82% ra 1.29% others 0.55% cpu_s 4.828 wall 4.945s waited 0.0s
+2026-09-25T04:50:59.203+03:00   P1B-jolt-p0 r0 [  3] H-trk-ap#trk W=1: stat 7.6709 ms pose 0x32d5e235342b4143 expect match rb 1.29% ra 1.56% others 0.54% cpu_s 3.859 wall 3.844s waited 0.0s
+2026-09-25T04:51:06.267+03:00   P1B-jolt-p0 r0 [  4] H-trk-tree#trk W=2: stat 3.9958 ms pose 0x32d5e235342b4143 expect match rb 1.56% ra 2.42% others 1.12% cpu_s 3.312 wall 2.007s waited 0.0s
+2026-09-25T04:51:14.251+03:00   P1B-jolt-p0 r0 [  5] H-jolt56#j56 W=2: stat 5.8346 ms jolt hash 0xb8522b4e3fc62cfe threads 2 rb 2.42% ra 0.76% others 0.64% cpu_s 5.797 wall 2.933s waited 0.0s
+2026-09-25T04:51:22.156+03:00   P1B-jolt-p0 r0 [  6] H-trk-ap#trk W=2: stat 5.6813 ms pose 0x32d5e235342b4143 expect match rb 0.76% ra 1.07% others 0.79% cpu_s 4.359 wall 2.85s waited 0.0s
+2026-09-25T04:51:28.600+03:00   P1B-jolt-p0 r0 [  7] H-trk-tree#trk W=4: stat 2.7559 ms pose 0x32d5e235342b4143 expect match rb 1.07% ra 1.48% others 0.36% cpu_s 3.859 wall 1.387s waited 0.0s
+2026-09-25T04:51:35.494+03:00   P1B-jolt-p0 r0 [  8] H-jolt56#j56 W=4: stat 3.6461 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 1.48% ra 4.03% others 0.96% cpu_s 7.094 wall 1.839s waited 0.0s
+2026-09-25T04:51:42.833+03:00   P1B-jolt-p0 r0 [  9] H-trk-ap#trk W=4: stat 4.5507 ms pose 0x32d5e235342b4143 expect match rb 4.03% ra 0.7% others 0.39% cpu_s 5.094 wall 2.284s waited 0.0s
+2026-09-25T04:51:48.992+03:00   P1B-jolt-p0 r0 [ 10] H-trk-tree#trk W=8: stat 2.1877 ms pose 0x32d5e235342b4143 expect match rb 0.7% ra 0.91% others 0.62% cpu_s 4.312 wall 1.103s waited 0.0s
+2026-09-25T04:51:55.325+03:00   P1B-jolt-p0 r0 [ 11] H-jolt56#j56 W=8: stat 2.5264 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 0.91% ra 0.89% others 0.7% cpu_s 9.828 wall 1.279s waited 0.0s
+2026-09-25T04:52:02.376+03:00   P1B-jolt-p0 r0 [ 12] H-trk-ap#trk W=8: stat 3.9760 ms pose 0x32d5e235342b4143 expect match rb 0.89% ra 1.59% others 0.34% cpu_s 6.578 wall 1.997s waited 0.0s
+2026-09-25T04:52:08.732+03:00   P1B-jolt-p0 r0 [ 13] H-trk-tree#trk W=16: stat 2.5798 ms pose 0x32d5e235342b4143 expect match rb 1.59% ra 1.28% others 1.27% cpu_s 8.75 wall 1.3s waited 0.0s
+2026-09-25T04:52:14.970+03:00   P1B-jolt-p0 r0 [ 14] H-jolt56#j56 W=16: stat 2.3421 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 1.28% ra 0.79% others 0.91% cpu_s 17.594 wall 1.185s waited 0.0s
+2026-09-25T04:52:22.091+03:00   P1B-jolt-p0 r0 [ 15] H-trk-ap#trk W=16: stat 4.1139 ms pose 0x32d5e235342b4143 expect match rb 0.79% ra 0.94% others 0.71% cpu_s 9.719 wall 2.067s waited 0.0s
+2026-09-25T04:52:30.184+03:00   P1B-jolt-p0 r1 [ 16] H-trk-tree#trk W=1: stat 6.0435 ms pose 0x32d5e235342b4143 expect match rb 0.94% ra 1.65% others 0.9% cpu_s 3.062 wall 3.03s waited 0.0s
+2026-09-25T04:52:40.198+03:00   P1B-jolt-p0 r1 [ 17] H-jolt56#j56 W=1: stat 9.8963 ms jolt hash 0xb8522b4e3fc62cfe threads 1 rb 1.65% ra 0.8% others 0.77% cpu_s 4.969 wall 4.963s waited 0.0s
+2026-09-25T04:52:49.077+03:00   P1B-jolt-p0 r1 [ 18] H-trk-ap#trk W=1: stat 7.6368 ms pose 0x32d5e235342b4143 expect match rb 0.8% ra 1.17% others 0.54% cpu_s 3.828 wall 3.827s waited 0.0s
+2026-09-25T04:52:56.084+03:00   P1B-jolt-p0 r1 [ 19] H-trk-tree#trk W=2: stat 3.8892 ms pose 0x32d5e235342b4143 expect match rb 1.17% ra 0.99% others 0.55% cpu_s 3.172 wall 1.954s waited 0.0s
+2026-09-25T04:53:03.989+03:00   P1B-jolt-p0 r1 [ 20] H-jolt56#j56 W=2: stat 5.6812 ms jolt hash 0xb8522b4e3fc62cfe threads 2 rb 0.99% ra 1.46% others 0.62% cpu_s 5.703 wall 2.855s waited 0.0s
+2026-09-25T04:53:11.973+03:00   P1B-jolt-p0 r1 [ 21] H-trk-ap#trk W=2: stat 5.8450 ms pose 0x32d5e235342b4143 expect match rb 1.46% ra 0.78% others 1.34% cpu_s 4.375 wall 2.932s waited 0.0s
+2026-09-25T04:53:18.423+03:00   P1B-jolt-p0 r1 [ 22] H-trk-tree#trk W=4: stat 2.7760 ms pose 0x32d5e235342b4143 expect match rb 0.78% ra 0.84% others 0.49% cpu_s 3.953 wall 1.397s waited 0.0s
+2026-09-25T04:53:25.251+03:00   P1B-jolt-p0 r1 [ 23] H-jolt56#j56 W=4: stat 3.5250 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 0.84% ra 1.7% others 0.55% cpu_s 6.938 wall 1.776s waited 0.0s
+2026-09-25T04:53:32.598+03:00   P1B-jolt-p0 r1 [ 24] H-trk-ap#trk W=4: stat 4.5691 ms pose 0x32d5e235342b4143 expect match rb 1.7% ra 1.03% others 0.43% cpu_s 4.734 wall 2.294s waited 0.0s
+2026-09-25T04:53:38.756+03:00   P1B-jolt-p0 r1 [ 25] H-trk-tree#trk W=8: stat 2.1850 ms pose 0x32d5e235342b4143 expect match rb 1.03% ra 3.31% others 0.27% cpu_s 4.781 wall 1.101s waited 0.0s
+2026-09-25T04:53:45.059+03:00   P1B-jolt-p0 r1 [ 26] H-jolt56#j56 W=8: stat 2.4711 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 3.31% ra 0.64% others 0.78% cpu_s 9.609 wall 1.251s waited 0.0s
+2026-09-25T04:53:52.118+03:00   P1B-jolt-p0 r1 [ 27] H-trk-ap#trk W=8: stat 3.9911 ms pose 0x32d5e235342b4143 expect match rb 0.64% ra 1.19% others 0.39% cpu_s 5.797 wall 2.004s waited 0.0s
+2026-09-25T04:53:58.364+03:00   P1B-jolt-p0 r1 [ 28] H-trk-tree#trk W=16: stat 2.3631 ms pose 0x32d5e235342b4143 expect match rb 1.19% ra 0.68% others 0.66% cpu_s 8.672 wall 1.191s waited 0.0s
+2026-09-25T04:54:04.663+03:00   P1B-jolt-p0 r1 [ 29] H-jolt56#j56 W=16: stat 2.4624 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.68% ra 1.46% others 0.55% cpu_s 18.469 wall 1.248s waited 0.0s
+2026-09-25T04:54:11.798+03:00   P1B-jolt-p0 r1 [ 30] H-trk-ap#trk W=16: stat 4.1412 ms pose 0x32d5e235342b4143 expect match rb 1.46% ra 3.42% others 0.71% cpu_s 8.484 wall 2.08s waited 0.0s
+2026-09-25T04:54:19.833+03:00   P1B-jolt-p0 r2 [ 31] H-trk-tree#trk W=1: stat 5.9429 ms pose 0x32d5e235342b4143 expect match rb 3.42% ra 1.49% others 0.56% cpu_s 3.0 wall 2.98s waited 0.0s
+2026-09-25T04:54:29.702+03:00   P1B-jolt-p0 r2 [ 32] H-jolt56#j56 W=1: stat 9.6107 ms jolt hash 0xb8522b4e3fc62cfe threads 1 rb 1.49% ra 0.78% others 0.55% cpu_s 4.812 wall 4.82s waited 0.0s
+2026-09-25T04:54:38.595+03:00   P1B-jolt-p0 r2 [ 33] H-trk-ap#trk W=1: stat 7.6646 ms pose 0x32d5e235342b4143 expect match rb 0.78% ra 2.96% others 0.69% cpu_s 3.844 wall 3.841s waited 0.0s
+2026-09-25T04:54:45.595+03:00   P1B-jolt-p0 r2 [ 34] H-trk-tree#trk W=2: stat 3.8712 ms pose 0x32d5e235342b4143 expect match rb 2.96% ra 1.01% others 0.66% cpu_s 3.219 wall 1.945s waited 0.0s
+2026-09-25T04:54:53.592+03:00   P1B-jolt-p0 r2 [ 35] H-jolt56#j56 W=2: stat 5.8628 ms jolt hash 0xb8522b4e3fc62cfe threads 2 rb 1.01% ra 1.47% others 0.63% cpu_s 5.859 wall 2.947s waited 0.0s
+2026-09-25T04:55:01.490+03:00   P1B-jolt-p0 r2 [ 36] H-trk-ap#trk W=2: stat 5.6651 ms pose 0x32d5e235342b4143 expect match rb 1.47% ra 1.33% others 0.59% cpu_s 4.281 wall 2.841s waited 0.0s
+2026-09-25T04:55:07.943+03:00   P1B-jolt-p0 r2 [ 37] H-trk-tree#trk W=4: stat 2.7824 ms pose 0x32d5e235342b4143 expect match rb 1.33% ra 1.0% others 0.63% cpu_s 3.797 wall 1.4s waited 0.0s
+2026-09-25T04:55:15.006+03:00   P1B-jolt-p0 r2 [ 38] H-jolt56#j56 W=4: stat 3.9810 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 1.0% ra 1.54% others 1.37% cpu_s 7.844 wall 2.01s waited 0.0s
+2026-09-25T04:55:22.349+03:00   P1B-jolt-p0 r2 [ 39] H-trk-ap#trk W=4: stat 4.5600 ms pose 0x32d5e235342b4143 expect match rb 1.54% ra 1.36% others 0.64% cpu_s 4.516 wall 2.289s waited 0.0s
+2026-09-25T04:55:28.507+03:00   P1B-jolt-p0 r2 [ 40] H-trk-tree#trk W=8: stat 2.1873 ms pose 0x32d5e235342b4143 expect match rb 1.36% ra 0.96% others 0.62% cpu_s 3.781 wall 1.103s waited 0.0s
+2026-09-25T04:55:34.813+03:00   P1B-jolt-p0 r2 [ 41] H-jolt56#j56 W=8: stat 2.4776 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 0.96% ra 0.85% others 0.63% cpu_s 9.688 wall 1.255s waited 0.0s
+2026-09-25T04:55:41.865+03:00   P1B-jolt-p0 r2 [ 42] H-trk-ap#trk W=8: stat 3.9759 ms pose 0x32d5e235342b4143 expect match rb 0.85% ra 3.68% others 0.69% cpu_s 6.438 wall 1.997s waited 0.0s
+2026-09-25T04:55:48.108+03:00   P1B-jolt-p0 r2 [ 43] H-trk-tree#trk W=16: stat 2.3575 ms pose 0x32d5e235342b4143 expect match rb 3.68% ra 0.69% others 0.58% cpu_s 10.203 wall 1.188s waited 0.0s
+2026-09-25T04:55:54.391+03:00   P1B-jolt-p0 r2 [ 44] H-jolt56#j56 W=16: stat 2.4360 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.69% ra 0.75% others 0.96% cpu_s 18.859 wall 1.233s waited 0.0s
+2026-09-25T04:56:01.519+03:00   P1B-jolt-p0 r2 [ 45] H-trk-ap#trk W=16: stat 4.1301 ms pose 0x32d5e235342b4143 expect match rb 0.75% ra 1.25% others 0.61% cpu_s 10.047 wall 2.075s waited 0.0s
+2026-09-25T04:56:01.520+03:00 P1B-jolt-p0: done
+2026-09-25T04:56:01.521+03:00 P1B-jolt-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-25T04:58:11.969+03:00 P1B-jolt-p1: idle reached; {'time': '2026-09-25T04:58:11.969+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-25T04:58:22.038+03:00 P1B-jolt-p1: opening receipt 1.86% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-25T04:58:28.199+03:00   P1B-jolt-p1 warm-up H-trk-tree#trk W=8 (untimed): stat 2.1956 ms pose 0x32d5e235342b4143 expect match rb 1.86% ra 1.47% others 0.88% cpu_s 4.375 wall 1.107s waited 0.0s
+2026-09-25T04:58:35.323+03:00   P1B-jolt-p1 r0 [  1] H-trk-ap#trk W=16: stat 4.1202 ms pose 0x32d5e235342b4143 expect match rb 1.47% ra 0.93% others 0.62% cpu_s 8.875 wall 2.069s waited 0.0s
+2026-09-25T04:58:41.577+03:00   P1B-jolt-p1 r0 [  2] H-jolt56#j56 W=16: stat 2.3738 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.93% ra 0.95% others 0.65% cpu_s 17.406 wall 1.204s waited 0.0s
+2026-09-25T04:58:47.820+03:00   P1B-jolt-p1 r0 [  3] H-trk-tree#trk W=16: stat 2.3624 ms pose 0x32d5e235342b4143 expect match rb 0.95% ra 3.69% others 0.82% cpu_s 8.562 wall 1.191s waited 0.0s
+2026-09-25T04:58:54.885+03:00   P1B-jolt-p1 r0 [  4] H-trk-ap#trk W=8: stat 3.9923 ms pose 0x32d5e235342b4143 expect match rb 3.69% ra 1.29% others 0.64% cpu_s 5.938 wall 2.006s waited 0.0s
+2026-09-25T04:59:01.215+03:00   P1B-jolt-p1 r0 [  5] H-jolt56#j56 W=8: stat 2.5282 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 1.29% ra 1.9% others 0.69% cpu_s 9.172 wall 1.279s waited 0.0s
+2026-09-25T04:59:07.379+03:00   P1B-jolt-p1 r0 [  6] H-trk-tree#trk W=8: stat 2.2027 ms pose 0x32d5e235342b4143 expect match rb 1.9% ra 1.06% others 0.44% cpu_s 4.766 wall 1.111s waited 0.0s
+2026-09-25T04:59:14.716+03:00   P1B-jolt-p1 r0 [  7] H-trk-ap#trk W=4: stat 4.5484 ms pose 0x32d5e235342b4143 expect match rb 1.06% ra 1.01% others 0.86% cpu_s 4.672 wall 2.283s waited 0.0s
+2026-09-25T04:59:21.629+03:00   P1B-jolt-p1 r0 [  8] H-jolt56#j56 W=4: stat 3.6864 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 1.01% ra 1.88% others 0.58% cpu_s 7.125 wall 1.859s waited 0.0s
+2026-09-25T04:59:28.080+03:00   P1B-jolt-p1 r0 [  9] H-trk-tree#trk W=4: stat 2.7777 ms pose 0x32d5e235342b4143 expect match rb 1.88% ra 1.37% others 0.49% cpu_s 3.812 wall 1.398s waited 0.0s
+2026-09-25T04:59:35.982+03:00   P1B-jolt-p1 r0 [ 10] H-trk-ap#trk W=2: stat 5.6760 ms pose 0x32d5e235342b4143 expect match rb 1.37% ra 0.94% others 0.55% cpu_s 4.219 wall 2.847s waited 0.0s
+2026-09-25T04:59:43.921+03:00   P1B-jolt-p1 r0 [ 11] H-jolt56#j56 W=2: stat 5.7491 ms jolt hash 0xb8522b4e3fc62cfe threads 2 rb 0.94% ra 0.49% others 0.51% cpu_s 5.734 wall 2.89s waited 0.0s
+2026-09-25T04:59:50.947+03:00   P1B-jolt-p1 r0 [ 12] H-trk-tree#trk W=2: stat 3.9285 ms pose 0x32d5e235342b4143 expect match rb 0.49% ra 2.87% others 0.4% cpu_s 3.172 wall 1.973s waited 0.0s
+2026-09-25T04:59:59.880+03:00   P1B-jolt-p1 r0 [ 13] H-trk-ap#trk W=1: stat 7.7412 ms pose 0x32d5e235342b4143 expect match rb 2.87% ra 2.23% others 0.75% cpu_s 3.922 wall 3.879s waited 0.0s
+2026-09-25T05:00:09.691+03:00   P1B-jolt-p1 r0 [ 14] H-jolt56#j56 W=1: stat 9.4890 ms jolt hash 0xb8522b4e3fc62cfe threads 1 rb 2.23% ra 0.76% others 0.51% cpu_s 4.719 wall 4.759s waited 0.0s
+2026-09-25T05:00:17.720+03:00   P1B-jolt-p1 r0 [ 15] H-trk-tree#trk W=1: stat 5.9353 ms pose 0x32d5e235342b4143 expect match rb 0.76% ra 1.13% others 0.63% cpu_s 2.984 wall 2.976s waited 0.0s
+2026-09-25T05:00:24.941+03:00   P1B-jolt-p1 r1 [ 16] H-trk-ap#trk W=16: stat 4.3143 ms pose 0x32d5e235342b4143 expect match rb 1.13% ra 0.99% others 1.09% cpu_s 11.188 wall 2.167s waited 0.0s
+2026-09-25T05:00:31.224+03:00   P1B-jolt-p1 r1 [ 17] H-jolt56#j56 W=16: stat 2.4375 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.99% ra 0.72% others 0.64% cpu_s 18.562 wall 1.234s waited 0.0s
+2026-09-25T05:00:37.464+03:00   P1B-jolt-p1 r1 [ 18] H-trk-tree#trk W=16: stat 2.3507 ms pose 0x32d5e235342b4143 expect match rb 0.72% ra 1.04% others 0.74% cpu_s 9.812 wall 1.185s waited 0.0s
+2026-09-25T05:00:44.517+03:00   P1B-jolt-p1 r1 [ 19] H-trk-ap#trk W=8: stat 3.9768 ms pose 0x32d5e235342b4143 expect match rb 1.04% ra 0.86% others 0.59% cpu_s 5.531 wall 1.998s waited 0.0s
+2026-09-25T05:00:50.881+03:00   P1B-jolt-p1 r1 [ 20] H-jolt56#j56 W=8: stat 2.5936 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 0.86% ra 3.35% others 0.67% cpu_s 10.281 wall 1.313s waited 0.0s
+2026-09-25T05:00:57.042+03:00   P1B-jolt-p1 r1 [ 21] H-trk-tree#trk W=8: stat 2.1896 ms pose 0x32d5e235342b4143 expect match rb 3.35% ra 1.65% others 0.53% cpu_s 4.047 wall 1.104s waited 0.0s
+2026-09-25T05:01:04.384+03:00   P1B-jolt-p1 r1 [ 22] H-trk-ap#trk W=4: stat 4.5532 ms pose 0x32d5e235342b4143 expect match rb 1.65% ra 1.0% others 0.56% cpu_s 5.078 wall 2.286s waited 0.0s
+2026-09-25T05:01:11.278+03:00   P1B-jolt-p1 r1 [ 23] H-jolt56#j56 W=4: stat 3.6604 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 1.0% ra 0.58% others 0.69% cpu_s 7.125 wall 1.844s waited 0.0s
+2026-09-25T05:01:17.723+03:00   P1B-jolt-p1 r1 [ 24] H-trk-tree#trk W=4: stat 2.7608 ms pose 0x32d5e235342b4143 expect match rb 0.58% ra 1.1% others 0.36% cpu_s 3.703 wall 1.389s waited 0.0s
+2026-09-25T05:01:25.722+03:00   P1B-jolt-p1 r1 [ 25] H-trk-ap#trk W=2: stat 5.8691 ms pose 0x32d5e235342b4143 expect match rb 1.1% ra 1.47% others 1.13% cpu_s 4.547 wall 2.943s waited 0.0s
+2026-09-25T05:01:33.657+03:00   P1B-jolt-p1 r1 [ 26] H-jolt56#j56 W=2: stat 5.7393 ms jolt hash 0xb8522b4e3fc62cfe threads 2 rb 1.47% ra 1.09% others 0.62% cpu_s 5.703 wall 2.885s waited 0.0s
+2026-09-25T05:01:40.674+03:00   P1B-jolt-p1 r1 [ 27] H-trk-tree#trk W=2: stat 3.9088 ms pose 0x32d5e235342b4143 expect match rb 1.09% ra 0.8% others 0.5% cpu_s 3.391 wall 1.963s waited 0.0s
+2026-09-25T05:01:49.595+03:00   P1B-jolt-p1 r1 [ 28] H-trk-ap#trk W=1: stat 7.7173 ms pose 0x32d5e235342b4143 expect match rb 0.8% ra 3.57% others 0.79% cpu_s 3.859 wall 3.868s waited 0.0s
+2026-09-25T05:02:00.025+03:00   P1B-jolt-p1 r1 [ 29] H-jolt56#j56 W=1: stat 10.7011 ms jolt hash 0xb8522b4e3fc62cfe threads 1 rb 3.57% ra 1.47% others 0.71% cpu_s 5.359 wall 5.369s waited 0.0s
+2026-09-25T05:02:08.099+03:00   P1B-jolt-p1 r1 [ 30] H-trk-tree#trk W=1: stat 6.0230 ms pose 0x32d5e235342b4143 expect match rb 1.47% ra 1.09% others 0.68% cpu_s 3.062 wall 3.021s waited 0.0s
+2026-09-25T05:02:15.222+03:00   P1B-jolt-p1 r2 [ 31] H-trk-ap#trk W=16: stat 4.1197 ms pose 0x32d5e235342b4143 expect match rb 1.09% ra 0.81% others 0.61% cpu_s 10.828 wall 2.069s waited 0.0s
+2026-09-25T05:02:21.477+03:00   P1B-jolt-p1 r2 [ 32] H-jolt56#j56 W=16: stat 2.3791 ms jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.81% ra 0.63% others 0.65% cpu_s 18.25 wall 1.204s waited 0.0s
+2026-09-25T05:02:27.817+03:00   P1B-jolt-p1 r2 [ 33] H-trk-tree#trk W=16: stat 2.5532 ms pose 0x32d5e235342b4143 expect match rb 0.63% ra 3.27% others 0.99% cpu_s 9.375 wall 1.286s waited 0.0s
+2026-09-25T05:02:34.869+03:00   P1B-jolt-p1 r2 [ 34] H-trk-ap#trk W=8: stat 3.9711 ms pose 0x32d5e235342b4143 expect match rb 3.27% ra 1.16% others 0.59% cpu_s 6.531 wall 1.994s waited 0.0s
+2026-09-25T05:02:41.180+03:00   P1B-jolt-p1 r2 [ 35] H-jolt56#j56 W=8: stat 2.4906 ms jolt hash 0xb8522b4e3fc62cfe threads 8 rb 1.16% ra 0.65% others 0.78% cpu_s 9.391 wall 1.261s waited 0.0s
+2026-09-25T05:02:47.338+03:00   P1B-jolt-p1 r2 [ 36] H-trk-tree#trk W=8: stat 2.1879 ms pose 0x32d5e235342b4143 expect match rb 0.65% ra 1.82% others 0.36% cpu_s 4.594 wall 1.103s waited 0.0s
+2026-09-25T05:02:54.682+03:00   P1B-jolt-p1 r2 [ 37] H-trk-ap#trk W=4: stat 4.5562 ms pose 0x32d5e235342b4143 expect match rb 1.82% ra 3.18% others 0.69% cpu_s 4.828 wall 2.287s waited 0.0s
+2026-09-25T05:03:01.514+03:00   P1B-jolt-p1 r2 [ 38] H-jolt56#j56 W=4: stat 3.5361 ms jolt hash 0xb8522b4e3fc62cfe threads 4 rb 3.18% ra 1.41% others 0.5% cpu_s 7.078 wall 1.782s waited 0.0s
+2026-09-25T05:03:07.956+03:00   P1B-jolt-p1 r2 [ 39] H-trk-tree#trk W=4: stat 2.7601 ms pose 0x32d5e235342b4143 expect match rb 1.41% ra 1.03% others 0.7% cpu_s 4.016 wall 1.389s waited 0.0s
+2026-09-25T05:03:15.845+03:00   P1B-jolt-p1 r2 [ 40] H-trk-ap#trk W=2: stat 5.6466 ms pose 0x32d5e235342b4143 expect match rb 1.03% ra 0.84% others 0.52% cpu_s 4.297 wall 2.833s waited 0.0s
+2026-09-25T05:03:23.771+03:00   P1B-jolt-p1 r2 [ 41] H-jolt56#j56 W=2: stat 5.7259 ms jolt hash 0xb8522b4e3fc62cfe threads 2 rb 0.84% ra 0.62% others 0.58% cpu_s 5.641 wall 2.878s waited 0.0s
+2026-09-25T05:03:30.865+03:00   P1B-jolt-p1 r2 [ 42] H-trk-tree#trk W=2: stat 4.0649 ms pose 0x32d5e235342b4143 expect match rb 0.62% ra 1.33% others 0.91% cpu_s 3.375 wall 2.042s waited 0.0s
+2026-09-25T05:03:39.750+03:00   P1B-jolt-p1 r2 [ 43] H-trk-ap#trk W=1: stat 7.6480 ms pose 0x32d5e235342b4143 expect match rb 1.33% ra 1.33% others 0.67% cpu_s 3.859 wall 3.833s waited 0.0s
+2026-09-25T05:03:49.589+03:00   P1B-jolt-p1 r2 [ 44] H-jolt56#j56 W=1: stat 9.5517 ms jolt hash 0xb8522b4e3fc62cfe threads 1 rb 1.33% ra 0.92% others 0.61% cpu_s 4.781 wall 4.79s waited 0.0s
+2026-09-25T05:03:57.625+03:00   P1B-jolt-p1 r2 [ 45] H-trk-tree#trk W=1: stat 5.9427 ms pose 0x32d5e235342b4143 expect match rb 0.92% ra 3.23% others 0.53% cpu_s 3.016 wall 2.98s waited 0.0s
+2026-09-25T05:03:57.626+03:00 P1B-jolt-p1: done
+2026-09-25T05:03:57.661+03:00 WINDOW END exit 0: complete; counters {'timed': 454, 'rerun': 49, 'warm': 11, 'voided_processes': 0}; binaries after all match

@@ -16,7 +16,7 @@
 //! ([`Cloneability::CloneViaFn`]) or a layout-driven memcpy
 //! ([`Cloneability::TriviallyCopyable`]), exactly as the live clone path does, so it
 //! is correct for all `Clone` components by construction. It also reuses
-//! [`deep::link_child`] (Children rebuild) and [`deep::remap_clone_child_of`]
+//! `deep::link_child` (Children rebuild) and `deep::remap_clone_child_of`
 //! (ChildOf remap) VERBATIM rather than re-implementing them (Principle 0).
 //!
 //! # Cold capture-time structure (NOT a parallel hot-path data system)
@@ -772,6 +772,9 @@ pub(crate) fn instantiate(world: &mut EcsMaster, prefab: &Prefab) -> Entity {
                 let target: &mut Archetype = &mut *target_ptr;
                 target.entity_ids.push(entity.id());
                 target.current_index = new_row + 1;
+                // KE6 write site 5/9 — same confined `&mut Archetype` reborrow
+                // as the `current_index` advance.
+                target.stamp_arch_added(current_tick);
             }
             guard.disarm();
         }

@@ -1,0 +1,5 @@
+error: a reflected fieldless enum needs a guaranteed discriminant width, and this one has no `#[repr(Int)]`: add `#[repr(u8)]` (or another integer repr), or drop `reflect` from this item.
+  --> tests/reflect_compile_fail/fieldless_enum_without_repr_rejected.rs:23:5
+   |
+23 | pub enum NoRepr {
+   |     ^^^^

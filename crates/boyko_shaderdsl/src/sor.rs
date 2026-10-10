@@ -75,7 +75,7 @@
 //! - `<EvalCf>` — the CPU oracle (real `if`/`else`/`continue`/`break`/`Cell`). The eval sweep
 //!   reproduces the committed sor-retreat CONTROL FLOW (scoped to control flow — the cmp-`.spv` is
 //!   the byte-identity oracle).
-//! - `<EmitCf>` — the HLSL recorder; the printer ([`crate::emit::emit_hlsl_b1_sor_retreat`]) walks
+//! - `<EmitCf>` — the HLSL recorder; the printer (`crate::emit::emit_hlsl_b1_sor_retreat`) walks
 //!   the STMT IR into the span (byte-identical to the committed `.comp.spv`, proven by the cmp-`.spv`).
 //!
 //! # `it` is a CAPTURED `uint` local (NO iv-id refactor)

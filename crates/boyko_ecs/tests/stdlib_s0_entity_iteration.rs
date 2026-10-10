@@ -31,6 +31,13 @@
 //! ids at registration time — no manual id reservation, so there is zero risk
 //! of colliding with the hand-numbered in-module tests.
 
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
@@ -499,7 +506,7 @@ fn zero_pct_gate_non_entity_variants_unchanged() {
 /// the per-archetype `entity_ids` raw-base re-capture and the per-row
 /// `*entity_ids.add(row)` raw read. The grid is small so Miri stays fast.
 ///
-/// Run: `RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-gnu cargo miri test -p
+/// Run: `RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-msvc cargo miri test -p
 /// boyko-ecs --test stdlib_s0_entity_iteration miri_tb`
 /// (the repo's `.cargo/config` supplies `-Zmiri-tree-borrows`).
 #[test]

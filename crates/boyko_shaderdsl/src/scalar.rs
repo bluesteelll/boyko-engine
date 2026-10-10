@@ -10,7 +10,7 @@
 //!   single `core` f32 op, BYTE-MIRRORING the frozen `boyko_sdf_math` bodies, so a
 //!   monomorphization over `f32` produces the same machine code (and the same
 //!   floating-point result) as the hand-written field.
-//! - `impl FieldScalar for Emit` ([`crate::emit`], `feature = "emit"`) — the HLSL
+//! - `impl FieldScalar for Emit` (`crate::emit`, `feature = "emit"`) — the HLSL
 //!   SSA recorder: each method pushes one SSA node and returns its handle.
 //!
 //! # `no_std`
@@ -44,8 +44,9 @@ pub trait FieldScalar: Copy {
     /// The INTEGER value type the bit/brick leaves ([`crate::brick`]) operate on — a
     /// packed atlas byte / index. `i32` for the Eval backend (so the snorm `q as f32`
     /// numeric cast and the `q == i8::MIN` sentinel compare are byte-mirrors of the
-    /// host); a `uint` SSA node for `Emit`. The A2 leaf only uses [`int_lit`](Self::
-    /// int_lit) / [`int_eq`](Self::int_eq) / [`int_to_float`](Self::int_to_float); the
+    /// host); a `uint` SSA node for `Emit`. The A2 leaf only uses
+    /// [`int_lit`](Self::int_lit) / [`int_eq`](Self::int_eq) /
+    /// [`int_to_float`](Self::int_to_float); the
     /// bitwise AND / shift the printer already supports are added to the trait when
     /// A3's brick-index math needs them.
     type Int: Copy;
