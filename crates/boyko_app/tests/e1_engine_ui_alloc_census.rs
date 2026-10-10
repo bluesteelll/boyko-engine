@@ -399,12 +399,21 @@ fn pool(workers: usize) -> Arc<ThreadPool> {
 
 /// The copied chunk predicate's literals are the pool's published receipt, and raw install
 /// frames price exactly as the classes claim (census `class_predicates_match_the_threadpool_receipt`).
+///
+/// The 400 warm frames give both workers work, but they do not promise each worker's first touch
+/// before the priced frames when the threads outnumber the CPUs. MEASURED 2026-10-10 on the dev
+/// host under a 2-CPU affinity mask (release, 100 runs each): a first touch landed in the priced
+/// frames in 5 runs at `150fc2cb` and in 34 once the driver was touched first, inside the budget
+/// every time; under 4 CPUs and at full width, in none. So the warm-up is followed by
+/// [`force_first_touch`], counted from a snapshot taken before the pool exists (the driver's own
+/// `Local` is already registered), and the budget below is left for nothing to spend.
 fn class_predicates_match_the_threadpool_receipt() {
     const _: () = assert!(CHUNK0 == boyko_threadpool::__layout_receipt::CHUNK0);
     const _: () = assert!(CHUNK_ALIGN == boyko_threadpool::__layout_receipt::CHUNK_ALIGN);
 
     const WORKERS: u64 = 2;
     const REPS: usize = 64;
+    let base = Snap::now();
     let p = pool(WORKERS as usize);
     for _ in 0..400 {
         p.install(|s| {
@@ -413,6 +422,14 @@ fn class_predicates_match_the_threadpool_receipt() {
             }
         });
     }
+    force_first_touch(&p, WORKERS as usize, base);
+    assert_eq!(
+        Snap::now().since(base).epoch,
+        WORKERS,
+        "E1: the class control's {WORKERS}-worker pool registered {} epoch Locals — one per worker \
+         is the claim its OTHER budget rests on",
+        Snap::now().since(base).epoch
+    );
     let mut empty_other = 0u64;
     let mut one_other = 0u64;
     for i in 0..REPS {
