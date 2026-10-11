@@ -10,11 +10,26 @@
 //!   handed — at W 2, 3, 4, 8 and 16, with `simd_solve` on and off, under the default grain and
 //!   under `max_bpp` 2 and 4 and a lowered grain. The largest entry is at most the per-participant
 //!   cap times the participants.
-//! * **The helpers run blocks** on every step of a J-T-sized pile at W8 and W16
-//!   (`helper_blocks > 0`). **Load-sensitive** (the phase A finding: a helper that is not
-//!   scheduled for a whole region runs no block of it): a red here is re-run alone before it is
-//!   called —
-//!   `cargo test -p boyko-physics --test sr_region_counters helpers -- --test-threads=1`.
+//! * **The helpers run blocks** of a J-T-sized pile at W8 and W16 (`helper_blocks > 0`): on EVERY
+//!   step where each of the W participants has a usable CPU (`usable_cpus() >= W`: the 16-CPU dev
+//!   host, at both widths), and on at least one step within [`OVERSUBSCRIBED_HORIZON_STEPS`] where
+//!   they outnumber the CPUs (a 4-vCPU runner, at both widths). A region step lasts about a
+//!   millisecond, and a helper that is not scheduled for a whole region runs no block of it (the
+//!   phase A finding). With more participants than CPUs, and a runner's steal time on top, the
+//!   caller can run every block of a step inline before any helper gets a CPU, and no width the
+//!   process can read rules that out; a pool whose helpers never join still reds there. Every test
+//!   of this file runs one at a time ([`serial`]), so the binary's own pools never take its
+//!   helpers' CPUs. MEASURED 2026-10-11 on the 16-CPU dev host, release, under a 4-CPU affinity
+//!   mask (`start /affinity F`) with busy threads under the same mask standing in for steal time.
+//!   Before this split and [`serial`], at `--test-threads=4` (a 4-vCPU runner's libtest width):
+//!   10 of 10 green with no busy thread, 3 of 10 red with one, 7 of 10 with two and 10 of 10 with
+//!   three, each "W8/W16 step N: no helper ran a block" (the red of `windows-latest`'s release leg
+//!   in CI runs 5 and 6, at W8 step 0 and step 5). One test at a time already cleared two busy
+//!   threads (10 of 10 green, no helper-less step in 1,000), but not three (8 of 10 red on the
+//!   every-step check). After: 20 of 20 green at `--test-threads=4` with zero, one, two, three and
+//!   four busy threads, and 20 of 20 at full width with the every-step check. With three and four
+//!   the gate stepped past [`HELPER_STEPS`] in one run each, the first after the busy threads
+//!   started, at both widths: the first step with a helper block was step 11 and step 17.
 //! * **The scope count** of a warmed region step at W4, under a thread-local counting
 //!   allocator: two allocations (the scope's shared frame and its first task chunk) for the one
 //!   scope the step opens, the region's — the fill is the region's stage 0 (SR commit 7) and SR's
@@ -258,6 +273,74 @@ fn predict(
     out
 }
 
+// ── The machine ──────────────────────────────────────────────────────────────
+
+/// The region steps each width of the helper gate runs, and checks one by one where every
+/// participant has a usable CPU.
+const HELPER_STEPS: usize = 10;
+
+/// Where the participants outnumber the usable CPUs, the helper gate keeps stepping past
+/// [`HELPER_STEPS`] until a helper has run a block, up to this many steps in all (about 0.4 s at
+/// the 2 ms such a step took under four busy threads on 4 CPUs). MEASURED 2026-10-11 (module docs):
+/// the first step with a helper block came at step 17 at the latest, so a pool whose helpers join
+/// at all clears it with a wide margin, and one whose helpers never do reds once it is spent.
+const OVERSUBSCRIBED_HORIZON_STEPS: usize = 200;
+
+/// The logical CPUs this process may run on: `available_parallelism`, narrowed on Windows by the
+/// process affinity mask, which std does not read there (MEASURED 2026-10-10, Rust 1.98.1, msvc,
+/// 16-CPU dev host: under `start /affinity F` the mask is `0xf` and `available_parallelism` still
+/// reads 16). On Linux std already reads the affinity mask and the cgroup quota. The same helper
+/// as `boyko_threadpool`'s `ke16_nested_scope_occupancy`.
+fn usable_cpus() -> usize {
+    let available = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+    #[cfg(windows)]
+    {
+        if let Some(mask_cpus) = affinity_cpus() {
+            return available.min(mask_cpus);
+        }
+    }
+    available
+}
+
+/// The CPU count of this process's affinity mask, or `None` if the call fails. A process spanning
+/// several processor groups reports its current group's mask only; the machines this runs on have
+/// at most 64 logical CPUs, one group.
+#[cfg(windows)]
+fn affinity_cpus() -> Option<usize> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn GetProcessAffinityMask(
+            process: *mut std::ffi::c_void,
+            process_mask: *mut usize,
+            system_mask: *mut usize,
+        ) -> i32;
+    }
+    let (mut process_mask, mut system_mask) = (0usize, 0usize);
+    // SAFETY: `GetCurrentProcess` takes no argument and returns the current process's
+    // pseudo-handle, which is always valid and needs no closing. `GetProcessAffinityMask` reads that
+    // handle and writes one `DWORD_PTR` (`usize` on every Windows target) through each of its two
+    // out-pointers, which point at live, aligned, writable `usize` locals for the whole call.
+    let ok = unsafe {
+        GetProcessAffinityMask(GetCurrentProcess(), &raw mut process_mask, &raw mut system_mask)
+    };
+    (ok != 0 && process_mask != 0).then(|| process_mask.count_ones() as usize)
+}
+
+/// Holds every test of this binary apart from the others: the guard lives for the whole test
+/// body. Each test spins pools of up to 16 workers, and libtest runs as many tests at once as
+/// there are CPUs, so without it the replica's pools take the CPUs the helper gate's helpers need
+/// (MEASURED, module docs). A poisoned lock still serialises, so one red test does not red the
+/// rest.
+///
+/// `clippy::disallowed_types`: a test-only gate between test bodies, taken once per test and never
+/// on a measured path; the hot-path ban is about engine code.
+#[allow(clippy::disallowed_types)]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 // ── The gates ────────────────────────────────────────────────────────────────
 
 fn cfg(simd_solve: bool) -> PhysicsConfig {
@@ -279,6 +362,7 @@ fn grains() -> [(&'static str, RegionGrain); 4] {
 
 #[test]
 fn region_counts_equal_the_builder_replica() {
+    let _serial = serial();
     let (bodies, manifolds) = pile(400, 40);
     let graph = build_graph(&bodies, &manifolds);
     assert!(graph.n_colors() >= 2, "non-vacuity: the pile has a wide colour and a narrow one");
@@ -322,35 +406,52 @@ fn region_counts_equal_the_builder_replica() {
     assert!(published_seen > 0, "non-vacuity: some region published an item");
 }
 
+/// The name is the every-step check's, which runs wherever every participant has a usable CPU;
+/// where they outnumber the CPUs the check is the oversubscribed one (module docs).
 #[test]
 fn helpers_run_blocks_on_every_step_at_w8_and_w16() {
+    let _serial = serial();
     // A J-T-sized pile: 1,240 floor contacts, most of them in one wide colour.
     let (bodies, manifolds) = pile(1200, 40);
     let graph = build_graph(&bodies, &manifolds);
+    let cpus = usable_cpus();
     for workers in [8usize, 16] {
+        let every_step = cpus >= workers;
         let mut solver = ColoredSoftStepSolver::default();
         let mut scratch = SolverScratch::with_capacity(bodies.len());
         scratch.set_bodies(&bodies);
         let pool = ThreadPoolBuilder::new().num_threads(workers).build();
-        pool.install(|_| {
-            for step in 0..10 {
+        let (steps, helped) = pool.install(|_| {
+            let (mut step, mut helped) = (0usize, 0usize);
+            while step < HELPER_STEPS || (!every_step && helped == 0 && step < OVERSUBSCRIBED_HORIZON_STEPS) {
                 scratch.touched.reset(scratch.bodies().len());
                 let before = solver.region_dispatches();
                 solver.solve_colored(&cfg(true), &manifolds, &graph, &mut scratch);
                 assert_eq!(solver.region_dispatches() - before, 1, "W{workers} step {step}: a region step");
                 let r = solver.last_region_report();
                 assert!(
-                    r.helper_blocks > 0,
-                    "W{workers} step {step}: no helper ran a block of the region ({r:?}); a red here is \
-                     re-run alone (module docs) before it is called"
+                    !every_step || r.helper_blocks > 0,
+                    "W{workers} step {step}: no helper ran a block of the region ({r:?}), with {cpus} usable \
+                     CPUs for its {workers} participants"
                 );
+                helped += usize::from(r.helper_blocks > 0);
+                step += 1;
             }
+            (step, helped)
         });
+        let check = if every_step { "every step" } else { "oversubscribed" };
+        eprintln!("[SR] W{workers} on {cpus} usable CPUs ({check}): a helper ran blocks on {helped} of {steps} steps");
+        assert!(
+            helped > 0,
+            "W{workers}: no helper ran a block of the region in {steps} steps on {cpus} usable CPUs; a pool's \
+             helpers join a region even when its participants outnumber the CPUs"
+        );
     }
 }
 
 #[test]
 fn a_warmed_region_step_allocates_two_per_scope_it_opened() {
+    let _serial = serial();
     let (bodies, manifolds) = pile(400, 40);
     let graph = build_graph(&bodies, &manifolds);
     let mut solver = ColoredSoftStepSolver::default();
