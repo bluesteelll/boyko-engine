@@ -508,7 +508,9 @@ pub struct PhysicsConfig {
     /// that puts its island to sleep zeroes it, so a later wake starts the body from rest. A
     /// manifold count that the zero itself changes on the first frozen step does not wake the
     /// island when nothing outside the solver changed on that step (the seal,
-    /// `IslandSleep::begin_step`, "The settle and the seal").
+    /// `IslandSleep::begin_step`, "The settle and the seal"). A velocity written into a
+    /// sleeping body (a kick, an impulse, a soft→rigid reaction) wakes its island on the next
+    /// step, whatever its size (lane SL-1b, "The write-wake").
     ///
     /// **Determinism:** the speed² compare is EXACT (no `sqrt`/`rsqrt`/`algebraic_*`),
     /// the debounce is a per-row integer, and the freeze decision is a pure function of
@@ -4112,6 +4114,16 @@ pub(crate) struct SealArm<'a> {
     pub(crate) field: Option<&'a SdfField>,
 }
 
+/// Whether a resting row's gathered velocity was written (lane SL-1b): any of its six components
+/// `!= 0.0`. The settle stores `+0.0` in every component, and a frozen row is never solved, so
+/// only a write from outside the solver makes one non-zero. `-0.0` reads as zero; a NaN reads
+/// as a write.
+#[inline]
+fn velocity_written(b: &BodyState) -> bool {
+    let (v, w) = (b.linear_velocity, b.angular_velocity);
+    v.x != 0.0 || v.y != 0.0 || v.z != 0.0 || w.x != 0.0 || w.y != 0.0 || w.z != 0.0
+}
+
 /// One island's per-step sleep scratch (L10 C0, design D14): the frozen decision and the
 /// speed² metric of [`IslandSleep`]'s per-island column. 8 B, align 4, every byte a named
 /// field.
@@ -4629,19 +4641,33 @@ impl IslandSleep {
     /// solve arms the seal ([`begin_step_armed`](Self::begin_step_armed) with a [`SealArm`]);
     /// direct drive zeroes at the settle but never seals.
     ///
+    /// # The write-wake (lane SL-1b)
+    ///
+    /// A resting row's velocity is zero, so a simulated resting row whose gathered velocity has
+    /// any component `!= 0.0` was written from outside the solver: it wakes before its count is
+    /// compared (its debounce restarts and [`write_wakes`](Self::write_wakes) counts it), and
+    /// its island is solved on this step. A kick is therefore counted as a write, never as a
+    /// contact change, and a write below the sleep threshold wakes too, as Jolt's
+    /// `AddLinearVelocity` and Rapier's `set_linvel(.., true)` do. `-0.0` reads as zero; a NaN
+    /// reads as a write. A parked (non-simulated) row is exempt: nothing integrates it. Only
+    /// the armed (pipeline) step runs the test; direct drive does not.
+    ///
+    /// A soft→rigid coupling reaction (`add_physics_soft(.., true)`) is such a write. Soft
+    /// bodies never sleep, so a rigid island under a resting soft load cycles: it settles after
+    /// the debounce, the next non-zero reaction wakes it, and it is solved again. While the
+    /// reaction stays non-zero it is never frozen on two consecutive steps.
+    ///
     /// Not covered:
     /// - a support that moves but keeps its island's manifold count (Box2D's
     ///   `b2Body_SetTransform` does not wake either); call [`wake_all`](Self::wake_all);
-    /// - a user write to a sleeping body that changes no contact;
+    /// - a pose-only write to a sleeping body that changes no contact;
     /// - a step whose changes to one frozen island add exactly as many manifolds as they
     ///   remove;
     /// - a parked support resting on the SDF field loses its field contact, so its
     ///   island wakes; the solve's effect on the load it carries is unmeasured. Since
     ///   2026-09-18 this is reachable through
     ///   `add_physics_sdf::<DefaultRigidSolver>` with `sleeping` on (a recorded gap;
-    ///   sleeping defaults off);
-    /// - a soft→rigid coupling reaction (`add_physics_soft(.., true)`) landing on a
-    ///   sleeping body does not wake it (a recorded gap, reachable the same way).
+    ///   sleeping defaults off).
     ///
     /// `awake_rows[row]` is set for every body in an ACTIVE island and for every row
     /// with no island (static / out-of-island bodies — they cost nothing to keep
@@ -4654,16 +4680,17 @@ impl IslandSleep {
     /// [`begin_step`](Self::begin_step) serving the requests counted up to `upto` (L10 D9b,
     /// Decision 5): the count the step's broadphase latched. A request raised after the latch
     /// stays pending, and the next step serves it in every sleep-skip mode. Disarmed: it never
-    /// seals, and a live seal it finds is spent as a break (lane SL).
+    /// seals, a live seal it finds is spent as a break (lane SL), and it runs no write test
+    /// (lane SL-1b).
     pub(crate) fn begin_step_upto(&mut self, graph: &ConstraintGraph, n_rows: usize, upto: u64) {
         self.begin_step_armed(graph, n_rows, upto, &[], None);
     }
 
     /// [`begin_step_upto`](Self::begin_step_upto) with the seal armed (lane SL, "The settle and
-    /// the seal" on [`begin_step`](Self::begin_step)): `arm` is the configuration and the SDF
-    /// field this step's narrowphase read, and `bodies` this step's gathered snapshot. The
-    /// pipeline's solve is the only caller; with `arm == None` the step never seals and reads no
-    /// body.
+    /// the seal" on [`begin_step`](Self::begin_step)) and the write-wake (lane SL-1b, "The
+    /// write-wake"): `arm` is the configuration and the SDF field this step's narrowphase read,
+    /// and `bodies` this step's gathered snapshot. The pipeline's solve is the only caller; with
+    /// `arm == None` the step never seals, runs no write test and reads no body.
     pub(crate) fn begin_step_armed(
         &mut self,
         graph: &ConstraintGraph,
@@ -4684,12 +4711,15 @@ impl IslandSleep {
         self.reset_wake = false;
         let sealed = self.take_seal(bodies, arm);
         self.debug_assert_seal_accounting();
+        // Disarmed (direct drive): no write test (cut C-6).
+        let bodies = if arm.is_some() { bodies } else { &[] };
         let Self {
             latch,
             island_scratch,
             awake_rows,
             contact_wakes,
             settle_rekeys,
+            write_wakes,
             ..
         } = self;
         let mut latch_view = latch.build_view();
@@ -4741,13 +4771,26 @@ impl IslandSleep {
             l.island_key = NO_ISLAND_KEY;
             l.rest = REST_NONE;
         }
-        for (l, &isl) in in_graph.iter_mut().zip(ids) {
+        for (row, (l, &isl)) in in_graph.iter_mut().zip(ids).enumerate() {
             if isl == ConstraintGraph::NO_ISLAND {
                 // The sentinel is what unlatches a row that returns to an island after a
                 // static phase.
                 l.island_key = NO_ISLAND_KEY;
                 l.rest = REST_NONE;
                 continue;
+            }
+            // Lane SL-1b, the write-wake: a resting row's velocity is zero unless something
+            // outside the solver wrote it, so a written one wakes its row before the count is
+            // compared (a kick is a write, not a contact change). Disarmed, `bodies` is empty.
+            if l.rest != REST_NONE
+                && let Some(b) = bodies.get(row)
+                && b.simulated
+                && velocity_written(b)
+            {
+                l.asleep = false;
+                l.below_count = 0;
+                l.rest = REST_NONE;
+                *write_wakes += 1;
             }
             let i = isl as usize;
             // `i + 1` first: its bound check implies the one on `i`.

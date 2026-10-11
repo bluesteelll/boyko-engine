@@ -404,7 +404,8 @@
 //!   settle and the seal's counters after the run — `rows_put_to_sleep`, `settles`,
 //!   `settle_rekeys`, `seal_held`, `seal_breaks`, `write_wakes` — and `settle_steps`, the
 //!   `[step + 1, rows]` of every step on which `rows_put_to_sleep` rose (at most 256,
-//!   `settle_steps_truncated` past that).
+//!   `settle_steps_truncated` past that). SL-1b adds `write_wake_rises`, the steps on which
+//!   `write_wakes` rose, like `contact_wake_rises` (`write_wake_rises_truncated` past 256).
 //! * exit code: 0 ok; 2 bad flags; 3 void (anti-vacuity, frozen-by, disarmed ring traffic,
 //!   dropped samples, a reuse-on row that collided box pairs over steps [100, 500) and reused no
 //!   record there, or whose window collided none and whose whole run reused no record, an S5
@@ -2386,6 +2387,12 @@ struct SleepReceipt {
     settle_steps: Vec<(usize, u64)>,
     /// A settle step past [`SLEEP_RISES_MAX`] was dropped.
     settle_truncated: bool,
+    /// `IslandSleep::write_wakes` after the previous step (SL-1b).
+    write_prev: u64,
+    /// The steps (`step + 1`) on which `write_wakes` rose, at most [`SLEEP_RISES_MAX`].
+    write_rises: Vec<usize>,
+    /// A write-wake rise past [`SLEEP_RISES_MAX`] was dropped.
+    write_truncated: bool,
 }
 
 impl SleepReceipt {
@@ -2398,6 +2405,9 @@ impl SleepReceipt {
             put_prev: 0,
             settle_steps: Vec::with_capacity(SLEEP_RISES_MAX),
             settle_truncated: false,
+            write_prev: 0,
+            write_rises: Vec::with_capacity(SLEEP_RISES_MAX),
+            write_truncated: false,
         }
     }
 
@@ -2422,6 +2432,15 @@ impl SleepReceipt {
             }
         }
         self.put_prev = put;
+        let writes = sleep.write_wakes();
+        if writes > self.write_prev {
+            if self.write_rises.len() < SLEEP_RISES_MAX {
+                self.write_rises.push(step + 1);
+            } else {
+                self.write_truncated = true;
+            }
+        }
+        self.write_prev = writes;
         let rows = world.resource::<SolverScratch>().bodies();
         for (r, b) in rows.iter().enumerate() {
             if b.simulated && b.inv_mass != 0.0 && !sleep.is_row_awake(r) {
@@ -2438,7 +2457,7 @@ impl SleepReceipt {
             ",\"sleep\":{{\"contact_wakes\":{},\"contact_wake_rises\":[{}],\"contact_wake_rises_truncated\":{},\
              \"remap_resets\":{},\"frozen_v_max\":{},\"rows_put_to_sleep\":{},\"settles\":{},\
              \"settle_steps\":[{}],\"settle_steps_truncated\":{},\"settle_rekeys\":{},\"seal_held\":{},\
-             \"seal_breaks\":{},\"write_wakes\":{}}}",
+             \"seal_breaks\":{},\"write_wakes\":{},\"write_wake_rises\":[{}],\"write_wake_rises_truncated\":{}}}",
             sleep.contact_wakes(),
             self.rises.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
             self.truncated,
@@ -2452,6 +2471,8 @@ impl SleepReceipt {
             sleep.seal_held(),
             sleep.seal_breaks(),
             sleep.write_wakes(),
+            self.write_rises.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
+            self.write_truncated,
         )
     }
 }

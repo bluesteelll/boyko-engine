@@ -4862,6 +4862,15 @@ impl ColoredSoftStepSolver {
                         continue;
                     }
                     if !sleep.is_row_awake(row) {
+                        // SL-INV (lane SL-1b, cut C-2): the settle zeroed it and the write-wake
+                        // woke any row written since. Direct drive runs no write test, so a
+                        // caller may write a frozen row there.
+                        debug_assert!(
+                            seal.is_none()
+                                || !b.simulated
+                                || (b.linear_velocity == Vec3::ZERO && b.angular_velocity == Vec3::ZERO),
+                            "invariant: a frozen row's velocity is zero (SL-INV), row {row}"
+                        );
                         frozen.push((row as u32, *b));
                     }
                 }
