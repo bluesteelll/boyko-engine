@@ -1394,7 +1394,8 @@ fn g_p7_single_box_slide_per_point() {
 // characterization: OQ2's rule is the per-point base's). Every run first meets the harness's route
 // and engagement premises (module header, `Sim::step`, `trace_on`).
 
-/// G-P1, stick arm under FM: inside the friction cone the box holds.
+/// G-P1, stick arm under FM: inside the friction cone the box holds. Red under M1 (the AVX2
+/// patch sweep's tangent limit at ½μ: the box creeps 5.2 m at μ 0.2, against 5 mm).
 #[test]
 fn g_p1_incline_stick_fm() {
     for form in FM_FORMS {
@@ -1402,8 +1403,8 @@ fn g_p1_incline_stick_fm() {
     }
 }
 
-/// G-P1, slide arm under FM: just outside the cone the box slides about `½·a·t²`. Red under M1
-/// (the patch's μ halved: it sticks).
+/// G-P1, slide arm under FM: just outside the cone the box slides about `½·a·t²`. Red under M2
+/// (the AVX2 patch sweep's tangent limit at 2μ: it sticks, displacement 0).
 #[test]
 fn g_p1_incline_slide_fm() {
     for form in FM_FORMS {
@@ -1412,7 +1413,8 @@ fn g_p1_incline_slide_fm() {
 }
 
 /// G-P1, accel arm under FM: well outside the cone the box accelerates at `a` ±5 %. Red under M2
-/// (the patch's μ doubled).
+/// (the tangent limit at 2μ holds the box at `tan θ = 2μ`: acceleration −2.8e-7 m/s² at μ 0.2,
+/// against [1.73, 1.91]).
 #[test]
 fn g_p1_incline_accel_fm() {
     for form in FM_FORMS {
@@ -1432,7 +1434,9 @@ fn g_p2_twist_stops_and_holds_fm() {
 }
 
 /// G-P2's drift under FM (design OQ1): the patch's tangent rows act at the centre, on the spin
-/// axis, so the centre does not wander.
+/// axis, so the centre does not wander. Red under M5b (the tangent rows at the first point's
+/// `ra₀` / `rb₀` instead of the centre: a corner moves at `ω × r`, and friction there drives the
+/// centre of mass, drift 0.243 m against 1 mm).
 #[test]
 fn g_p2_twist_drift_fm() {
     for form in FM_FORMS {
@@ -1443,7 +1447,9 @@ fn g_p2_twist_drift_fm() {
 }
 
 /// G-P3 under FM (Jolt #983): a yawed box launched along +x slides straight and stops at
-/// `v₀² / (2μg)`. Red under M5 (the tangent rows at `ra₀` instead of the centre).
+/// `v₀² / (2μg)`. Red under M2 (the tangent limit at 2μ: stop distance 0.758 m against 1.529 m
+/// ±5 %). M5 (the tangent rows at `ra₀`) leaves it green, since the twist row resists the yaw a
+/// corner impulse drives; that class is G-P2 drift's (M5b).
 #[test]
 fn g_p3_yaw_while_sliding_fm() {
     for form in FM_FORMS {

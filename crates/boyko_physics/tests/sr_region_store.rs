@@ -330,8 +330,12 @@ fn region_store_seeds_equal_the_one_worker_run() {
 
 /// FM C1 (fm/cut.md Q1): every arm under both per-manifold friction models. The sleeping arm's
 /// frozen manifolds carry their friction triples (`carry_fm`) in the region's Store blocks on W ≥ 2
-/// and in the serial store on W 1. Red-first RF-srs: the region's pass 2 carrying with the
-/// per-point `carry` under FM reds the sleeping arm's W ≥ 2 hashes.
+/// and in the serial store on W 1. Red under RF-srs' (the region's pass 2 drops the carried
+/// triple) and RF-srs'' (it does not count `manifold_carry_hits`): "sleeping at W4: frame 73's
+/// bodies, next-step seeds and warm statistics differ from W1's". RF-srs (pass 2 with the
+/// per-point `carry`) is an equivalent mutant and stays green: a frozen manifold keeps its points
+/// in order, so `carry` copies `carry_fm`'s record bit for bit (the C1 record,
+/// `docs/physics/perf-campaign/levers/FM-manifold-friction/02-C1-RECORD.md`).
 #[test]
 fn region_store_seeds_equal_the_one_worker_run_fm() {
     for friction in [FrictionModel::PerManifold, FrictionModel::PerManifoldTouch] {

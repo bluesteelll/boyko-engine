@@ -7279,9 +7279,14 @@
         /// a zero limit; under C-TOUCH 1, 3 and 4 touching points of 4, a wholly speculative lane
         /// (the fallback), `sep = −0` and `+0`, a width-1 touching and a width-1 speculative lane.
         /// Every width-1 lane of a patched cohort has its centre equal to its anchor bit for bit
-        /// (D2 (1)). Red under M11 (plain `f32::max` / `min` in the scalar clamp), M15 (`S·(1/c)`
-        /// in the 8-lane geometry), M-T1 (the touch sum started from `+0`), M-T2 (the fallback
-        /// divides by `c_t = 0`) and M-T3 (touching taken as `sep < 0`).
+        /// (D2 (1)). Red under M15 (`S·(1/c)` in the 8-lane geometry) and M-T2 (the fallback
+        /// divides by `c_t = 0`). M-T1 and M-T3 were run against the hand cases, which they red
+        /// (`patch_geometry_hand_cases_on_both_paths`), not against this unit. M11 (plain
+        /// `f32::max` / `min` in the scalar clamp) is an equivalent mutant on x86-64 and stays
+        /// green: `maxnum` / `minnum` lower to the compare-selects of `max_sel` / `min_sel`, equal
+        /// bit for bit on every finite and ±0 input, and differ only on a NaN limit, which finite
+        /// inputs never produce (the C1 record). The selects stay: IEEE leaves the ±0 tie of
+        /// max / min unspecified, so another target may break it the other way.
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         #[test]
         // `assertions_on_constants`: the `cfg!` is constant per build, and asserting it is the point —
@@ -7434,7 +7439,10 @@
         /// (the per-point rank's `ti1` / `ti2`, the patch's `λt1` / `λt2`) and both bodies'
         /// velocities, a `−0` anchor component and a `−0` spin included. Lanes are body-disjoint,
         /// so the width-4 lane cannot reach them. Red under M7 (a width-1 lane takes the merged warm
-        /// torque) and M-C3 (the twist row runs at width 1).
+        /// torque). M-C3 (the twist row runs at width 1) is an equivalent mutant and stays green: at
+        /// width 1 the twist's limit is `+0` and its Δλ `+0`, so it adds only signed zeros to ω; a
+        /// `−0` spin component reaches it only if it survived the lane's warm apply and normal row
+        /// unchanged, which the gates' scenes never produce (the C1 record). The guard stays.
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         #[test]
         // `assertions_on_constants`: as `patch_probe_scalar_equals_x8`'s.
