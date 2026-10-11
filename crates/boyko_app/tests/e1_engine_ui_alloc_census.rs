@@ -35,8 +35,12 @@
 //! on this tree: all four workers register while the app is composed (1–2 after the pool is built,
 //! 4 after composition), so the forcing takes 0 rounds today; it is there so a tree that stops
 //! touching every worker before frame 0 still takes first touch out of the window, and
-//! [`epoch_class_matches_a_fresh_pool`] proves on a fresh pool that it does (one `Local` per worker
-//! within two rounds, none after). A worker that has registered its `Local` has also booted (std's
+//! [`epoch_class_matches_a_fresh_pool`] proves on a fresh pool that it does (one `Local` per
+//! worker, none after). How many forcing rounds that takes is the schedule's choice, and the only
+//! bound asserted is [`FORCE_ROUNDS`]. MEASURED 2026-10-10 on the dev host (release CI round 11,
+//! release builds, every run green): 1 to 4 rounds under a 4-CPU affinity mask (400 runs), 1 to 3
+//! at one CPU and at all 16 (300 runs each), and 1 to 448 under a 2-CPU mask (300 runs); debug
+//! builds took 1 or 2 (600 runs). A worker that has registered its `Local` has also booted (std's
 //! `SetThreadDescription` name copy happens at thread start), so no per-thread first-touch object
 //! remains to land in the window. The gate then asserts `EPOCH == 0` in the steady window and
 //! budgets **no** first-touch allowance on `OTHER`: `OTHER ≤ other_per_frame × 10`, exactly.
