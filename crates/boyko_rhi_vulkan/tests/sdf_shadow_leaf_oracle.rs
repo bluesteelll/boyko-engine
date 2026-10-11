@@ -389,9 +389,13 @@ fn v_dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 ///
 /// The march is `min` / `max` / `*` / `/` / `+` / `clamp` over the analytic field — every
 /// operation IEEE-exact or correctly rounded, no transcendental anywhere. `EvalCf`'s scalar ops
-/// are `f32::min` / `f32::max` / `clamp(0, 1)` and the arithmetic is associated identically on
-/// both sides (`SHADOW_K * d / t` is `(SHADOW_K * d) / t` in each), so equality is `to_bits()` and
-/// never an epsilon. Layer 3b is the tolerance case, and its reason is written down there.
+/// are `FieldScalar for f32`'s `min` / `max` (the first operand on a `±0` tie) and `clamp(0, 1)`;
+/// `host_soft_shadow_ranged`'s are `f32::min` / `f32::max`, which may return either zero on a tie.
+/// No tie reaches the output: `res` can only meet a zero through `SHADOW_K * d / t` with `d` below
+/// `SHADOW_HIT_EPS`, and that step returns the literal `0.0`. The arithmetic is associated
+/// identically on both sides (`SHADOW_K * d / t` is `(SHADOW_K * d) / t` in each), so equality is
+/// `to_bits()` and never an epsilon. Layer 3b is the tolerance case, and its reason is written down
+/// there.
 ///
 /// # The fixture's domain, stated because it is a scoping decision
 ///
