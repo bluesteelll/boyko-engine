@@ -18,6 +18,7 @@ decisions, the red-first readings and every deviation); the implementation repor
 | C1c `e4513ef1` | `test(physics): FM (1c) - the sleep-skip compare sees friction …` | `Obs.fseeds` / `fstats`; FM-on fixture arms; T-SLEEP-TOGGLE A/B/C; `sr_region_store`'s FM fold and arms (cut Q1) |
 | C1d `7a7f7fa0` | `bench(physics): FM (1d) - the runner's --friction and its armed layout census; colored_solve's fm_depth_ab` | the parity runner's `--friction`, `config.friction_model`, the armed `layout_census`; `colored_solve`'s `fm_depth_ab` group |
 | C1f | `docs(physics): FM (1f) - C1 record …` | this directory |
+| r1 `a7b3cb39`, `8220e92c`, `823041ff`, and this file's §7 | `test(physics): FM r1 …` | round 1's fixes (triage r1 F1, F2, F3, W1); test files only, see §7 |
 
 **Parked (cut Q5):** C1e (`frozen_island_warm_start`'s FM arms on `sl`'s B1-exact re-expression)
 needs the `sl` lane merged; the trunk sync and the codegen receipt (cut §3.8) follow it. See §6.
@@ -129,3 +130,67 @@ both arms), RF-d3 (receipt 5 exits 0), RF-d4 (`fm_depth_ab`'s anti-vacuity at w 
   `multi_lanes`, summed over the metric window) — SCREEN-L's K1 reads `cohorts_by_depth`;
   `colored_solve`'s `fm_depth_ab` rows (depths 1-4 x {PerPoint, PerManifold} x {single, 4 workers})
   for the timed A/B (design Q3), outside the lane.
+
+---
+
+## 7. Round 1 (tester r1, review r1, triage r1): the fixes
+
+Four items were confirmed (`fm/triage_r1.md`). All four are test-only, and no production byte
+changed. Each red-first was predicted before its run (`fm/tools/r1_*_mutations.py`,
+`fm/mut/r1_results.md`, `fm/logs/mut/r1-*`). Every mutated file was restored by content, md5
+checked. The branch first took a trunk sync over two `boyko_ui` test commits (`6e8912a7`, no
+physics file). That is not the sync §6 means, which still follows `sl`'s merge.
+
+- **F1** (`a7b3cb39`): the FM arms of `friction_manifold.rs` could pass with no FM engaged.
+  - Pre-fix, the harness's model write was dropped (r1-F1-pre): `running 21 tests`, 21 passed, and
+    G-P4 read "stop step 52, ratio 1" for both forms.
+  - Two harness premises now close it. The route premise (`Sim::step`): on every colored step,
+    `friction_seed_stats().is_some()` equals the arm's form. The engagement premise (`trace_on`):
+    the box holds a manifold of two points or more on some step, and every such step lays out a
+    friction patch (`layout_census`).
+  - Reds, each against 21 tests:
+    - r1-F1-route (write dropped): 11 FM tests red, 10 ok.
+    - r1-F1-route-rev (every written model `PerManifold`): the 10 tests with a per-point colored
+      arm red, 11 ok.
+    - r1-F1-engage (the census's patch term at 0): the 9 FM behaviour tests red, 12 ok.
+    - r1-F1-multi (the multi-point test at 5): the same 9 red, 12 ok.
+  - Not caught: the route premise reads the form bit, not the centre. A harness that turned
+    `PerManifoldTouch` into `PerManifold` stays green (r1-F1-route-rev's Touch arms).
+    The solver exposes no read of its centre.
+- **F2** (`8220e92c`): `sr_region_sb_route_runs_every_kind_on_both_threads_fm` was red in both
+  Miri models, because `warm` had one block.
+  - A colour's warm entry cuts its cohorts at a point quota (`cohort_cuts`). With two-point stacked
+    pairs, colour 0's only cut fell after its last cohort.
+  - The stacked pairs now hold three points. Both models pass, with `simd_solve` off and on.
+- **F3** (`8220e92c`): `patch_probe_scalar_equals_x8` was red in both Miri models.
+  - At 2 cases the coverage read `touch(of 4) [0, 1, 2, 2, 0]`.
+  - Miri now runs 3 cases, which reach every named case (`[0, 1, 2, 4, 1]`). Both models pass.
+  - Native runs keep 160 cases.
+- **W1** (`823041ff`): eight headers now name the mutants measured red on them.
+  - The two gates with no receipt are now shown able to fail. M2 (the tangent limit at 2μ) reds
+    `g_p1_incline_accel_fm` (acceleration −2.8e-7 against [1.73, 1.91]) and
+    `g_p3_yaw_while_sliding_fm` (stop distance 0.758 m against 1.529 m ±5 %).
+  - Corrected: G-P1 stick (M1), G-P1 slide (M2, not M1), G-P2 drift (M5b), G-P3 (M2; M5 leaves
+    it green).
+  - `patch_probe` names M15 and M-T2. M-T1 and M-T3 were run only on the hand cases, which name
+    them.
+  - M11, M-C3 and RF-srs are now marked equivalent in their headers, and `sr_region_store` names
+    RF-srs' and RF-srs''.
+  - The derivations behind the three equivalent mutants:
+    - **M11** (plain `f32::max` / `min` in the scalar twist clamp). `maxnum` / `minnum` lower on
+      x86-64 to the compare-selects of `max_sel` / `min_sel`. These are equal bit for bit on every
+      finite and ±0 input, and differ only on a NaN limit, which finite inputs never produce. The
+      selects stay, because IEEE leaves the ±0 tie unspecified.
+    - **M-C3** (the twist row at width 1). At width 1 the twist's limit is `+0` and its Δλ `+0`, so
+      it adds only signed zeros to ω. A `−0` spin component reaches it only if it survived the
+      lane's warm apply and normal row unchanged, which the gates' scenes never produce.
+    - **RF-srs** (the region's pass 2 with the per-point `carry` under FM). A frozen manifold keeps
+      its points in order, so `carry` copies `carry_fm`'s record bit for bit.
+
+**Round 1's gates** (msvc; logs in `fm/logs/`):
+- `friction_manifold`, release and debug: `running 21 tests`, 21 passed.
+- `sr_region_store`, release: 2/2.
+- Native `patch_probe`, release: ok, with coverage `[6, 70, 199, 229, 89]` as before.
+- Miri SB and TB, the two units: `running 1 test`, ok in each leg (kit gate `fm/k/r1-miri-1`,
+  `VERDICT GREEN exit_code 0`).
+- `cargo check` and `clippy --workspace --all-targets -D warnings`: clean.
