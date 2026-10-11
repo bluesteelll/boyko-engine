@@ -113,8 +113,8 @@ use boyko_physics::plugin::{
 };
 use boyko_physics::broadphase_tree::{BroadphaseTree, TREE_BRUTE_MAX_ROWS, TreeDiag, all_pairs_into};
 use boyko_physics::resources::{
-    BodyState, BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
-    PairTagProbe, PhysicsConfig, SdfNarrowphaseKernel, SleepSkip, SolverScratch,
+    BodyState, BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, FrictionModel, IslandSleep,
+    Manifolds, PairTagProbe, PhysicsConfig, SdfNarrowphaseKernel, SleepSkip, SolverScratch,
 };
 use boyko_physics::sdf_query::SdfField;
 use boyko_physics::sleep_sets::{SleepRuleCounts, SleepSets, SleepSkipStats};
@@ -3105,6 +3105,7 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         dt: _,
         substeps: _,
         relax_iterations: _,
+        friction_model: _,
         contact_hertz: _,
         contact_damping: _,
         broadphase: _,
@@ -3144,6 +3145,16 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         Row { name: "dt", write: |c| c.dt = 2.0 * DT, class: O },
         Row { name: "substeps", write: |c| c.substeps += 1, class: O },
         Row { name: "relax_iterations", write: |c| c.relax_iterations += 1, class: O },
+        // FM: a toggle between the two forms, so it perturbs on both sides of FM's flip of the
+        // default. No stage reads it until FM (1b).
+        Row {
+            name: "friction_model",
+            write: |c| {
+                c.friction_model =
+                    if c.friction_model == FrictionModel::PerPoint { FrictionModel::PerManifold } else { FrictionModel::PerPoint };
+            },
+            class: U,
+        },
         Row { name: "contact_hertz", write: |c| c.contact_hertz *= 0.5, class: O },
         Row { name: "contact_damping", write: |c| c.contact_damping *= 0.5, class: O },
         // The coupling path requires the grid (`soft/solver.rs`): wiring there. Elsewhere every

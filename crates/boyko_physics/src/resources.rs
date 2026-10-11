@@ -200,6 +200,21 @@ pub struct PhysicsConfig {
     /// Relaxation passes per substep (default `2`): post-solve iterations that
     /// re-solve the constraints bias-free to remove soft-bias energy.
     pub relax_iterations: u32,
+    /// FM: the colored solver's friction model (default [`FrictionModel::PerPoint`],
+    /// `docs/physics/perf-campaign/levers/FM-manifold-friction/`). **It changes values**:
+    /// [`PerManifold`](FrictionModel::PerManifold) solves a manifold of two or more points with
+    /// one friction patch — two tangent rows at the manifold's friction centre, limited by the
+    /// sweep's summed normal impulse, and one twist row about the normal — in place of two
+    /// tangent rows per point (Jolt 5.6's and Rapier's model). A one-point manifold keeps its
+    /// per-point rows bit for bit, so a scene whose manifolds all stay one-point steps the same
+    /// bits under either model.
+    ///
+    /// A change takes effect at the next broadphase (the step latches its configuration). A
+    /// change between the per-point and the per-manifold form zeroes the friction of every warm
+    /// record once, the solver's and the held store's; the normal impulses keep their warm start,
+    /// friction is cold for that one step, and no held island is restored. The reference
+    /// [`SoftStepSolver`](crate::solver::SoftStepSolver) is per point and ignores this field.
+    pub friction_model: FrictionModel,
     /// Soft-constraint stiffness, in hertz (default `30.0`): the natural
     /// frequency of the contact's penetration-recovery spring. Higher = stiffer
     /// (faster recovery, less squish).
@@ -668,6 +683,8 @@ impl Default for PhysicsConfig {
             dt: 0.0,
             substeps: 4,
             relax_iterations: 2,
+            // FM C1: the per-point model until the flip commit (rulings 2026-10-01, item 25).
+            friction_model: FrictionModel::PerPoint,
             contact_hertz: 30.0,
             contact_damping: 10.0,
             // L10 D5b: warm start on, as the solvers' own default; the effective value is this AND
@@ -770,6 +787,30 @@ impl Default for PhysicsConfig {
             soft_self_collision_colored: false,
         }
     }
+}
+
+/// FM: how the colored solver solves friction ([`PhysicsConfig::friction_model`]).
+///
+/// Every model keeps each contact point's normal row. They differ in the friction rows of a
+/// manifold of two or more points; a one-point manifold has the same rows under every model.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FrictionModel {
+    /// Two tangent rows per contact point, each limited by that point's normal impulse (the
+    /// engine before FM).
+    #[default]
+    PerPoint,
+    /// One friction patch per manifold of two or more points: two tangent rows at the
+    /// per-body mean of the anchors, solved as one disc limited by the sweep's summed normal
+    /// impulse, and one twist row about the normal limited by the normal impulses' moment
+    /// about that centre. The normal rows run first in every sweep, then the twist, then the
+    /// tangent pair.
+    PerManifold,
+    /// [`PerManifold`](Self::PerManifold) with the patch centre at the mean of the touching
+    /// points only (separation `<= 0`; every point when none touches). A screen arm of the FM
+    /// lever, not a supported model.
+    #[doc(hidden)]
+    PerManifoldTouch,
 }
 
 /// Whether the pipeline's [`physics_integrate`](crate::systems::physics_integrate)
