@@ -325,7 +325,9 @@ does not — a bare `#[ignore]` is the **third** way to make a check disappear, 
 - `workstation` — the test checks a record of the author's own installation (a registry key, an
   installed tool) that a clean machine does not have, so it runs on the dev host only, on demand and
   by name (`-- --ignored --exact`); added 2026-10-10, when the CI move to `windows-latest` first ran
-  such a test (`vg_r0_reference_rig`'s `the_record_matches_a_live_probe`) on a clean image;
+  such a test (`vg_r0_reference_rig`'s `the_record_matches_a_live_probe`) on a clean image. Since
+  2026-10-11 it also holds an absolute timing budget recorded on the dev host (`G26`'s), which a
+  shared runner's preemptions decide;
 - `generator`, `deferred`, `flaky` — no leg (below).
 
 The only multi-class spellings are `feature+<class>` and `gpu-windowed+gpu-cap` (so
@@ -435,7 +437,15 @@ run, it runs only through `scripts/tb_neg_gate.sh` (Miri, `--features tb-neg-m2w
 there, by name: `cargo test -p boyko-app --test vg_r0_reference_rig -- --ignored --exact
 the_record_matches_a_live_probe` must print `running 1 test` and pass (measured 2026-10-10). On a
 clean image it is red by construction (the probe reads `false` / `0` against the recorded `true` /
-`1`), which is why no CI job may sweep it in.
+`1`), which is why no CI job may sweep it in. Since 2026-10-11 a second site:
+`profiling_telemetry_stream`'s `g26_the_telemetry_window_meets_its_budget_on_the_dev_host`, `G26`'s
+budget (reduce p95 <= 150 us at 64 quantile zones), a claim about the dev host's release build. It
+runs there in release, on a quiet box: `cargo test --release -p boyko-app --test
+profiling_telemetry_stream -- --ignored --exact g26_the_telemetry_window_meets_its_budget_on_the_dev_host`
+must print `running 1 test` and pass (measured 2026-10-11: 10 of 10, reduce p95 58 to 86 us). CI
+run 6's 4-vCPU runner read 270 us for a reduce whose floor is 56 us, and a busy dev host reds it
+too, which is why no CI job may sweep it in; every leg still runs the gate's profile-independent
+clause, `g26_the_reduce_dominates_and_scales_with_the_quantile_count`.
 
 **No leg: `generator`, `deferred`, `flaky`** (`rg -n '^[^/]*ignore = "(generator|deferred|flaky):'
 -g '*.rs'`, 27 at `7d5a0015`). They must not be swept into a leg. *Generators* assert nothing

@@ -410,17 +410,21 @@ fn g26_an_unsubscribed_zone_has_no_quantile_rather_than_a_zero_one() {
 /// the claim is a **duration**, so a colliding per-system zone could only make the measured cost
 /// larger — never make a failing budget pass. The bet is safe for this clause and for no other.
 ///
-/// # What is asserted, and in which profile
+/// # What is asserted, in which profile and on which machine
 ///
 /// The budget (`reduce` <= 150 us, `write` <= 200 us, **sum <= 350 us**) is a claim about a RELEASE
-/// build. A debug build's timings are an order of magnitude larger, and asserting the budget there
-/// would red on every developer's machine while proving nothing about the shipped one — the
-/// vacuous-gate pattern pointed the other way.
+/// build on ONE machine, the dev host the table below was measured on. A debug build's timings are
+/// an order of magnitude larger, and asserting the budget there would red on every developer's
+/// machine while proving nothing about the shipped one — the vacuous-gate pattern pointed the
+/// other way. A p95 over 32 runs of a window this short is also a claim about how quiet the
+/// machine is: two preemptions in 32 runs decide it (2026-10-11, below).
 ///
-/// So the budget is asserted only under `not(debug_assertions)`, and what is asserted in **every**
-/// profile is the property the budget encodes and a profile cannot change: **the reduce is the
-/// dominant term and it is the one that scales with the quantile count.** That is M7's whole
-/// finding, and a build where it stopped holding is a build where the cap protects nothing.
+/// So the budget is asserted by [`g26_the_telemetry_window_meets_its_budget_on_the_dev_host`], a
+/// release-only `workstation` test run on the dev host by name, and what this gate asserts in
+/// **every** profile and on every CI leg is the property the budget encodes and neither a profile
+/// nor a machine can change: **the reduce is the dominant term and it is the one that scales with
+/// the quantile count.** That is M7's whole finding, and a build where it stopped holding is a
+/// build where the cap protects nothing.
 ///
 /// The three figures print either way, because a gate that measures and does not report has thrown
 /// the measurement away.
@@ -448,46 +452,100 @@ fn g26_an_unsubscribed_zone_has_no_quantile_rather_than_a_zero_one() {
 /// under the 350 µs total.** The gate reds, but on the *reduce* term, not on the sum. After the
 /// row-major fix the sum has enough headroom to absorb six times the cap's worth of zones, so a
 /// gate that watched only the total would have let 400 through.
+///
+/// # 2026-10-11: CI run 6's 270 us was the runner, and the absolute number left the default run
+///
+/// CI run 6 (`windows-latest`, 4 vCPUs) read `reduce(with) 270000 ns` in its `force-alloc-panic`
+/// leg, while its plain release leg passed this gate. Neither the cfg nor the code was the cause:
+/// no source line reads `cfg(force_alloc_panic)` (it is only registered in the workspace
+/// `check-cfg`), and the dev host's two builds of this binary, plain release and with that leg's
+/// exact `RUSTFLAGS`, differ in 40 bytes, every one in the PE timestamp and the debug directory;
+/// their `.text` is identical. MEASURED on the dev host, msvc 1.98.1, this gate's own output, 10
+/// runs per row, ONE process at a time:
+///
+/// | p95 over 32 runs, 64 quantile zones | reduce | walk alone | write | reduce > 150 µs |
+/// |---|---|---|---|---|
+/// | release, idle box (load ~2 %), the budget test, median | **67.5 µs** (58.2-86.4) | 17.6 µs | 6.1 µs | 0 of 10 |
+/// | release, quiet box (load 4-9 %), median | 92.8 µs (68.6-164.4) | 17.9 µs | 7.6 µs | 1 of 10 |
+/// | the `force_alloc_panic` leg's `RUSTFLAGS`, quiet | 96.0 µs (62.8-134.3) | 17.8 µs | 6.6 µs | 0 of 10 |
+/// | the same under a 4-CPU affinity mask, quiet | 91.0 µs (69.4-394.1) | 22.2 µs | 7.0 µs | 1 of 10 |
+/// | release, another build and a scan on the box (~45 %) | 186.1 µs (88.5-373.1) | 21.9 µs | 8.9 µs | 8 of 10 |
+///
+/// Nothing regressed: on the idle box the p95 itself reads 58-86 µs, below the 128.0 µs this table
+/// recorded at rung 13, and the fastest of 32 runs reads 54.9-56.3 µs (48 sets of 32 on the quiet
+/// box, their medians 56.5 µs). What a p95 over 32 runs reads is the second-slowest run, and two
+/// preemptions of a 60 µs window put it anywhere from 70 to 400 µs: on a shared 4-vCPU runner, and
+/// on the dev host whenever it is busy.
 #[test]
 fn g26_the_reduce_dominates_and_scales_with_the_quantile_count() {
     let (_g, mut p) = armed();
-    let zones: Vec<u16> = (4000..4000 + MAX_TELEMETRY_QUANTILE_ZONES as u16).collect();
-    drive(&mut p, &zones, WINDOW as u32);
-
-    // The SAME window reduced twice: once with every zone's quantiles, once with none. The store,
-    // the record count, the encode and the sink are identical, so the difference is the gather and
-    // the sort and nothing else.
-    // p95 over 32 runs, because the budget is stated as a p95. One `Instant::now()` pair is one
-    // sample, and a single sample compared against a p95 is a category error the first draft made.
-    let with = p95_ns(&mut p, &zones, &zones, time_reduce);
-    let without = p95_ns(&mut p, &zones, &zones_empty(), time_reduce);
-    let write_ns = p95_ns(&mut p, &zones, &zones, time_write);
-
-    println!(
-        "G26 measured at {} quantile zones: reduce(with) {with} ns - reduce(none) {without} ns - \
-         write {write_ns} ns - sum {} ns",
-        zones.len(),
-        with + write_ns
-    );
-
+    let G26Costs { with, without, .. } = g26_costs(&mut p);
     assert!(
         with > without,
         "the reduce with quantiles ({with} ns) must cost MORE than the reduce without \
          ({without} ns) -- if it does not, the gather and the sort are not happening and the cap \
          protects nothing"
     );
+}
 
+/// **`G26`'s budget**, in the profile and on the machine it was written for: the release build on
+/// the dev host ([`g26_the_reduce_dominates_and_scales_with_the_quantile_count`] has the
+/// measurements, and why no CI leg asserts it). Run it on a quiet box; a busy one reds it the way a
+/// shared runner does. A debug build reds it with an instruction instead of timing a build the
+/// budget says nothing about.
+#[test]
+#[ignore = "workstation: G26's budget (reduce p95 <= 150 us, write <= 200 us, sum <= 350 us at 64 quantile zones) is a claim about the dev host's release build, recorded in the doc table above; on a shared 4-vCPU runner preemptions decide a p95 of 32 runs (CI run 6: 270 us, where the reduce's own floor is 56 us). Run on the dev host, quiet, in release: cargo test --release -p boyko-app --test profiling_telemetry_stream -- --ignored --exact g26_the_telemetry_window_meets_its_budget_on_the_dev_host"]
+fn g26_the_telemetry_window_meets_its_budget_on_the_dev_host() {
+    #[cfg(debug_assertions)]
+    panic!("G26's budget is a claim about a release build: run this test with --release");
     #[cfg(not(debug_assertions))]
     {
-        // The budget, in the profile it was written for.
+        let (_g, mut p) = armed();
+        let G26Costs { with, write, .. } = g26_costs(&mut p);
         assert!(with <= 150_000, "__telemetry_reduce p95 budget is 150 us, measured {with} ns");
-        assert!(write_ns <= 200_000, "__telemetry_write budget is 200 us, measured {write_ns} ns");
+        assert!(write <= 200_000, "__telemetry_write budget is 200 us, measured {write} ns");
         assert!(
-            with + write_ns <= 350_000,
+            with + write <= 350_000,
             "the telemetry window's total budget is 350 us, measured {} ns",
-            with + write_ns
+            with + write
         );
     }
+}
+
+/// `G26`'s three p95s at the cap, in nanoseconds.
+struct G26Costs {
+    /// `__telemetry_reduce` with every zone's quantiles subscribed.
+    with: u64,
+    /// The same reduce with none subscribed: the walk alone.
+    without: u64,
+    /// `__telemetry_write`, the reduce excluded. Read only by the release-only budget test (the
+    /// property test prints it through [`g26_costs`]), hence the debug-only allow.
+    #[cfg_attr(debug_assertions, allow(dead_code))]
+    write: u64,
+}
+
+/// Drives one window at [`MAX_TELEMETRY_QUANTILE_ZONES`] zones, measures `G26`'s three p95s and
+/// prints them.
+fn g26_costs(p: &mut Profiler) -> G26Costs {
+    let zones: Vec<u16> = (4000..4000 + MAX_TELEMETRY_QUANTILE_ZONES as u16).collect();
+    drive(p, &zones, WINDOW as u32);
+
+    // The SAME window reduced twice: once with every zone's quantiles, once with none. The store,
+    // the record count, the encode and the sink are identical, so the difference is the gather and
+    // the sort and nothing else.
+    // p95 over 32 runs, because the budget is stated as a p95. One `Instant::now()` pair is one
+    // sample, and a single sample compared against a p95 is a category error the first draft made.
+    let with = p95_ns(p, &zones, &zones, time_reduce);
+    let without = p95_ns(p, &zones, &zones_empty(), time_reduce);
+    let write = p95_ns(p, &zones, &zones, time_write);
+
+    println!(
+        "G26 measured at {} quantile zones: reduce(with) {with} ns - reduce(none) {without} ns - \
+         write {write} ns - sum {} ns",
+        zones.len(),
+        with + write
+    );
+    G26Costs { with, without, write }
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════

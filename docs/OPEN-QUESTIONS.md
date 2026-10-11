@@ -7185,6 +7185,19 @@ The note is struck through rather than deleted because the false claim is the us
 `profile-legs` matrix is still net new and still worth having; what it does **not** do is close a gap
 that was never open.
 
+**2026-10-11 (release CI round 12): the budget clause left the CI legs, on a measurement.** CI run 6
+(`windows-latest`, 4 vCPUs) read `__telemetry_reduce` p95 270 µs in its `force-alloc-panic` leg while
+its plain release leg passed. The two legs run the same machine code: no source line reads
+`cfg(force_alloc_panic)`, and the dev host's two builds of the test differ only in the PE timestamp
+and the debug directory. On the dev host the reduce's fastest run of 32 reads 55-56 µs, and the p95
+(the second-slowest of 32; release, 10 runs each) reads 58-86 µs on an idle box, 69-164 µs at 4-9 %
+load and 89-373 µs at ~45 %, so the budget is a claim about the dev host and how quiet it is, not
+about the code. The absolute numbers (150 / 200 / 350 µs, unchanged) are now asserted by
+`g26_the_telemetry_window_meets_its_budget_on_the_dev_host`, a `workstation`-class test run there by
+name; every CI leg still asserts the profile-independent clause (the reduce with quantiles costs more
+than the walk alone). The measurements are in the gate's doc comment in
+`crates/boyko_app/tests/profiling_telemetry_stream.rs`.
+
 ## Rung 13 — `W9214` has an emitter and a doc page, but no test observes it
 
 `W9214` (telemetry path unwritable) is `Live` in the registry, is raised by `TelemetryStream::open`
@@ -10996,7 +11009,7 @@ wrong by the time they were re-measured here.** (i) The site count was **327**, 
 `g12c` ignore this rung just wrote is itself the 327th, so the figure moved *because of* the change
 it was describing, and it moved again for the same reason: EG2-R round 3's `g17` takes it to
 **328** (`grep -rn '#\[ignore' --include=*.rs crates/ | wc -l` → 328, re-measured at that round).
-It is **422** on the tree today (421 at `d92fb63a`, and release CI round 10's `workstation:` ignore on `vg_r0_reference_rig` adds one; 417 at `16191fda`, and V2's J-T fidelity gate adds four; 401 at `2431c570`; A7 adds three, D-M0's `solo:` test one; 405 at `ba39571d`, DM1's eight windowed red-first gates add eight, its two D-3 grow-repoint gates two, and its grow-frame gate and timing instrument two) <!-- measure: tree-lines crates rs #[ignore = 422 -->, and that
+It is **423** on the tree today (422 at `035ca0b9`, and release CI round 12's `workstation:` ignore on `G26`'s budget in `profiling_telemetry_stream` adds one; 421 at `d92fb63a`, and release CI round 10's `workstation:` ignore on `vg_r0_reference_rig` adds one; 417 at `16191fda`, and V2's J-T fidelity gate adds four; 401 at `2431c570`; A7 adds three, D-M0's `solo:` test one; 405 at `ba39571d`, DM1's eight windowed red-first gates add eight, its two D-3 grow-repoint gates two, and its grow-frame gate and timing instrument two) <!-- measure: tree-lines crates rs #[ignore = 423 -->, and that
 half is no longer prose: the round stamp keeps the historical sentence true, and the marker keeps
 the live one checkable — a paragraph whose whole subject is that a count rots should not carry one
 that nothing re-takes.
