@@ -443,9 +443,9 @@ budget (reduce p95 <= 150 us at 64 quantile zones), a claim about the dev host's
 runs there in release, on a quiet box: `cargo test --release -p boyko-app --test
 profiling_telemetry_stream -- --ignored --exact g26_the_telemetry_window_meets_its_budget_on_the_dev_host`
 must print `running 1 test` and pass (measured 2026-10-11: 10 of 10, reduce p95 58 to 86 us). CI
-run 6's 4-vCPU runner read 270 us for a reduce whose floor is 56 us, and a busy dev host reds it
-too, which is why no CI job may sweep it in; every leg still runs the gate's profile-independent
-clause, `g26_the_reduce_dominates_and_scales_with_the_quantile_count`.
+run 6's 4-vCPU runner read 270 us for a reduce whose fastest run is 56 us on the dev host, and a
+busy dev host reds it too, which is why no CI job may sweep it in. Every leg runs the gate's
+ratios on the fastest of 32 runs, `g26_the_reduce_dominates_and_scales_with_the_quantile_count`.
 
 **No leg: `generator`, `deferred`, `flaky`** (`rg -n '^[^/]*ignore = "(generator|deferred|flaky):'
 -g '*.rs'`, 27 at `7d5a0015`). They must not be swept into a leg. *Generators* assert nothing

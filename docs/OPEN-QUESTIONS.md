@@ -7194,9 +7194,11 @@ and the debug directory. On the dev host the reduce's fastest run of 32 reads 55
 load and 89-373 µs at ~45 %, so the budget is a claim about the dev host and how quiet it is, not
 about the code. The absolute numbers (150 / 200 / 350 µs, unchanged) are now asserted by
 `g26_the_telemetry_window_meets_its_budget_on_the_dev_host`, a `workstation`-class test run there by
-name; every CI leg still asserts the profile-independent clause (the reduce with quantiles costs more
-than the walk alone). The measurements are in the gate's doc comment in
-`crates/boyko_app/tests/profiling_telemetry_stream.rs`.
+name. Every CI leg asserts the budget's shape on the fastest of 32 interleaved runs, which a
+preemption cannot move: the reduce with quantiles costs more than both the walk alone and the write,
+and at most 8 times the walk (150 us over the dev host's fastest walk, 17.4 us), so a slower
+quantile path still reds a CI leg. The measurements and the mutations each clause reds are in the
+gate's doc comment in `crates/boyko_app/tests/profiling_telemetry_stream.rs`.
 
 ## Rung 13 — `W9214` has an emitter and a doc page, but no test observes it
 

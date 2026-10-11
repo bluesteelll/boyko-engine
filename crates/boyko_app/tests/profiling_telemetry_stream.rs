@@ -420,14 +420,27 @@ fn g26_an_unsubscribed_zone_has_no_quantile_rather_than_a_zero_one() {
 /// machine is: two preemptions in 32 runs decide it (2026-10-11, below).
 ///
 /// So the budget is asserted by [`g26_the_telemetry_window_meets_its_budget_on_the_dev_host`], a
-/// release-only `workstation` test run on the dev host by name, and what this gate asserts in
-/// **every** profile and on every CI leg is the property the budget encodes and neither a profile
-/// nor a machine can change: **the reduce is the dominant term and it is the one that scales with
-/// the quantile count.** That is M7's whole finding, and a build where it stopped holding is a
-/// build where the cap protects nothing.
+/// release-only `workstation` test run on the dev host by name. What this gate asserts in **every**
+/// profile and on every CI leg is the shape the budget encodes, on the **fastest** of 32 runs of
+/// each cost (one undisturbed run decides a minimum, so a preemption cannot red it), and the three
+/// series are interleaved run by run so a change in the machine's load reaches them alike:
 ///
-/// The three figures print either way, because a gate that measures and does not report has thrown
-/// the measurement away.
+/// 1. the reduce with every zone's quantiles costs more than the walk alone (the gather and the
+///    sort happen, and the cost moves with the quantile count, 0 against 64);
+/// 2. the reduce costs more than the write (it is the dominant term of the window);
+/// 3. the reduce with quantiles costs at most [`G26_QUANTILE_COST_CEILING`] = 8 times the walk
+///    alone. Eight is the 150 us budget over the dev host's fastest walk (17.4 us), rounded down:
+///    a quantile path that grows past it puts the dev host's FASTEST reduce within 8 % of the
+///    budget (8 x 17.4 = 139 us), and a ratio of two costs measured on the same machine in the
+///    same profile does not move with the machine's speed (the 2026-10-11 round-2 table, below).
+///
+/// That is M7's whole finding, and a build where it stopped holding is a build where the cap
+/// protects nothing. What no ratio can see is a regression that slows the walk and the quantile
+/// path alike (a spin at the top of `reduce`: 1.33 against 3.31); only the absolute budget sees it,
+/// and that is the `workstation` test's.
+///
+/// Every figure prints either way, the p95s and the fastest runs, because a gate that measures and
+/// does not report has thrown the measurement away.
 ///
 /// # MEASURED, this box, release, 64 quantile zones — and the budget was MISSED before the fix
 ///
@@ -476,15 +489,58 @@ fn g26_an_unsubscribed_zone_has_no_quantile_rather_than_a_zero_one() {
 /// box, their medians 56.5 µs). What a p95 over 32 runs reads is the second-slowest run, and two
 /// preemptions of a 60 µs window put it anywhere from 70 to 400 µs: on a shared 4-vCPU runner, and
 /// on the dev host whenever it is busy.
+///
+/// # 2026-10-11, round 2: the fastest run keeps the gate's teeth where the p95 lost them
+///
+/// With only `with > without` on p95s left on the CI legs, no automated run could see a slower
+/// quantile path: every mutation below was green against that gate. The fastest of 32 can: the
+/// "busy threads" rows put 2-4 spinning threads on the 4 CPUs of the mask (their SMT siblings): they
+/// slow the reduce 1.7x and the walk 1.9x, and the ratio moves from 3.3 to 3.0. MEASURED on the dev
+/// host, msvc 1.98.1, this gate's own output, one process at a time, 20 runs per row (debug 10):
+///
+/// | fastest of 32, interleaved | reduce | walk alone | write | with / walk: median (range) |
+/// |---|---|---|---|---|
+/// | release, full width | 57.5 µs | 17.4 µs | 5.5 µs | 3.31 (3.26-3.38) |
+/// | the `force_alloc_panic` leg's `RUSTFLAGS`, full width | 57.4 µs | 17.4 µs | 5.5 µs | 3.32 (3.26-3.38) |
+/// | the same under a 4-CPU affinity mask | 57.1 µs | 17.1 µs | 5.5 µs | 3.34 (3.30-3.39) |
+/// | the same, mask + 2 / 3 / 4 busy threads | 93.8-95.5 µs | 32.2 µs | 6.5 µs | 2.95-2.96 (2.65-3.33) |
+/// | release, mask + 3 busy threads | 95.9 µs | 32.6 µs | 6.6 µs | 2.95 (2.86-3.45) |
+/// | debug, full width | 2087 µs | 487 µs | 53.6 µs | 4.29 (3.99-4.39) |
+/// | debug, mask + 0 / 2 / 3 / 4 busy threads | 2082-3358 µs | 491-687 µs | 54-94 µs | 4.24-4.94 (4.00-5.01) |
+///
+/// The mutations of `TelemetryStream::reduce`, each against this gate and against its p95-only
+/// predecessor (`with > without`; green in every row, 5 release and 3 debug runs each):
+///
+/// | mutation | with / walk, release | debug |
+/// |---|---|---|
+/// | a quadratic exchange sort in place of `sort_unstable` | 8.00-8.38, red 4 of 5 (the fastest reduce at 138-141 µs) | 12.9-16.2, red 3 of 3 |
+/// | 100 µs spent in the quantile path | 8.98-9.24, red 5 of 5 | 4.49-4.65, green |
+/// | the gather zone-major, for the quantile zones only | 4.70-4.95, green (fastest 67 µs, inside the budget) | 5.21-5.35, green |
+/// | 100 µs at the top of `reduce`, the walk and the quantiles alike | 1.33-1.34, green | 3.44-3.67, green |
+///
+/// A CI run carries both profiles, so the quadratic sort reds its debug legs and the slow quantile
+/// path its release legs. The last row is the regression only the `workstation` budget sees.
 #[test]
 fn g26_the_reduce_dominates_and_scales_with_the_quantile_count() {
     let (_g, mut p) = armed();
-    let G26Costs { with, without, .. } = g26_costs(&mut p);
+    let G26Costs { with, without, write } = g26_costs(&mut p);
+    let (with, without, write) = (with.fastest, without.fastest, write.fastest);
     assert!(
         with > without,
-        "the reduce with quantiles ({with} ns) must cost MORE than the reduce without \
-         ({without} ns) -- if it does not, the gather and the sort are not happening and the cap \
-         protects nothing"
+        "the reduce with quantiles (fastest of {G26_RUNS}: {with} ns) must cost MORE than the \
+         reduce without ({without} ns) -- if it does not, the gather and the sort are not happening \
+         and the cap protects nothing"
+    );
+    assert!(
+        with > write,
+        "the reduce (fastest of {G26_RUNS}: {with} ns) must be the dominant term of the telemetry \
+         window, and the write ({write} ns) costs at least as much"
+    );
+    assert!(
+        with <= G26_QUANTILE_COST_CEILING * without,
+        "the reduce with quantiles (fastest of {G26_RUNS}: {with} ns) costs more than \
+         {G26_QUANTILE_COST_CEILING} times the walk alone ({without} ns): the gather or the sort \
+         has grown past what the 150 us budget leaves it on the dev host"
     );
 }
 
@@ -494,7 +550,7 @@ fn g26_the_reduce_dominates_and_scales_with_the_quantile_count() {
 /// shared runner does. A debug build reds it with an instruction instead of timing a build the
 /// budget says nothing about.
 #[test]
-#[ignore = "workstation: G26's budget (reduce p95 <= 150 us, write <= 200 us, sum <= 350 us at 64 quantile zones) is a claim about the dev host's release build, recorded in the doc table above; on a shared 4-vCPU runner preemptions decide a p95 of 32 runs (CI run 6: 270 us, where the reduce's own floor is 56 us). Run on the dev host, quiet, in release: cargo test --release -p boyko-app --test profiling_telemetry_stream -- --ignored --exact g26_the_telemetry_window_meets_its_budget_on_the_dev_host"]
+#[ignore = "workstation: G26's budget (reduce p95 <= 150 us, write <= 200 us, sum <= 350 us at 64 quantile zones) is a claim about the dev host's release build, recorded in the doc table above; on a shared 4-vCPU runner preemptions decide a p95 of 32 runs (CI run 6: 270 us, where the dev host's fastest reduce is 56 us). Run on the dev host, quiet, in release: cargo test --release -p boyko-app --test profiling_telemetry_stream -- --ignored --exact g26_the_telemetry_window_meets_its_budget_on_the_dev_host"]
 fn g26_the_telemetry_window_meets_its_budget_on_the_dev_host() {
     #[cfg(debug_assertions)]
     panic!("G26's budget is a claim about a release build: run this test with --release");
@@ -502,6 +558,7 @@ fn g26_the_telemetry_window_meets_its_budget_on_the_dev_host() {
     {
         let (_g, mut p) = armed();
         let G26Costs { with, write, .. } = g26_costs(&mut p);
+        let (with, write) = (with.p95, write.p95);
         assert!(with <= 150_000, "__telemetry_reduce p95 budget is 150 us, measured {with} ns");
         assert!(write <= 200_000, "__telemetry_write budget is 200 us, measured {write} ns");
         assert!(
@@ -512,19 +569,34 @@ fn g26_the_telemetry_window_meets_its_budget_on_the_dev_host() {
     }
 }
 
-/// `G26`'s three p95s at the cap, in nanoseconds.
-struct G26Costs {
-    /// `__telemetry_reduce` with every zone's quantiles subscribed.
-    with: u64,
-    /// The same reduce with none subscribed: the walk alone.
-    without: u64,
-    /// `__telemetry_write`, the reduce excluded. Read only by the release-only budget test (the
-    /// property test prints it through [`g26_costs`]), hence the debug-only allow.
-    #[cfg_attr(debug_assertions, allow(dead_code))]
-    write: u64,
+/// Runs per `G26` cost: the budget's p95 is taken over this many, and so is the fastest run.
+const G26_RUNS: usize = 32;
+
+/// The every-leg ceiling on the quantile path, as a multiple of the walk alone, both the fastest of
+/// [`G26_RUNS`]: the ratio at which the dev host's fastest reduce would reach the 150 us budget
+/// (`g26_the_reduce_dominates_and_scales_with_the_quantile_count`'s doc has the measurements).
+const G26_QUANTILE_COST_CEILING: u64 = 8;
+
+/// One `G26` cost over [`G26_RUNS`] runs, in nanoseconds.
+struct G26Cost {
+    /// The p95, the statistic the budget is stated in: asserted by the release-only budget test,
+    /// printed by [`g26_costs`] in every profile.
+    p95: u64,
+    /// The fastest run: one undisturbed run of the 32 decides it, so a preemption cannot move it.
+    fastest: u64,
 }
 
-/// Drives one window at [`MAX_TELEMETRY_QUANTILE_ZONES`] zones, measures `G26`'s three p95s and
+/// `G26`'s three costs at the cap.
+struct G26Costs {
+    /// `__telemetry_reduce` with every zone's quantiles subscribed.
+    with: G26Cost,
+    /// The same reduce with none subscribed: the walk alone.
+    without: G26Cost,
+    /// `__telemetry_write`, the reduce excluded.
+    write: G26Cost,
+}
+
+/// Drives one window at [`MAX_TELEMETRY_QUANTILE_ZONES`] zones, measures `G26`'s three costs and
 /// prints them.
 fn g26_costs(p: &mut Profiler) -> G26Costs {
     let zones: Vec<u16> = (4000..4000 + MAX_TELEMETRY_QUANTILE_ZONES as u16).collect();
@@ -535,15 +607,34 @@ fn g26_costs(p: &mut Profiler) -> G26Costs {
     // the sort and nothing else.
     // p95 over 32 runs, because the budget is stated as a p95. One `Instant::now()` pair is one
     // sample, and a single sample compared against a p95 is a category error the first draft made.
-    let with = p95_ns(p, &zones, &zones, time_reduce);
-    let without = p95_ns(p, &zones, &zones_empty(), time_reduce);
-    let write = p95_ns(p, &zones, &zones, time_write);
+    // One run of each per round, interleaved: a change in what else the machine runs reaches the
+    // three series alike, so their fastest runs come from the same quiet stretches and the ratio
+    // the every-leg gate asserts is the code's, not the scheduler's.
+    let none = zones_empty();
+    let (mut with, mut without, mut write) = ([0u64; G26_RUNS], [0u64; G26_RUNS], [0u64; G26_RUNS]);
+    for ((w, n), r) in with.iter_mut().zip(without.iter_mut()).zip(write.iter_mut()) {
+        *w = time_reduce(p, &zones, &zones);
+        *n = time_reduce(p, &zones, &none);
+        *r = time_write(p, &zones, &zones);
+    }
+    let (with, without, write) = (cost_ns(with), cost_ns(without), cost_ns(write));
 
     println!(
-        "G26 measured at {} quantile zones: reduce(with) {with} ns - reduce(none) {without} ns - \
-         write {write} ns - sum {} ns",
+        "G26 measured at {} quantile zones: reduce(with) {} ns - reduce(none) {} ns - write {} ns - \
+         sum {} ns",
         zones.len(),
-        with + write
+        with.p95,
+        without.p95,
+        write.p95,
+        with.p95 + write.p95
+    );
+    println!(
+        "G26 fastest of {G26_RUNS}: reduce(with) {} ns - reduce(none) {} ns - write {} ns - \
+         with/none {:.2} (ceiling {G26_QUANTILE_COST_CEILING})",
+        with.fastest,
+        without.fastest,
+        write.fastest,
+        with.fastest as f64 / without.fastest.max(1) as f64
     );
     G26Costs { with, without, write }
 }
@@ -673,23 +764,16 @@ fn zones_empty() -> Vec<u16> {
     Vec::new()
 }
 
-/// The p95 of 32 runs of `f`, in nanoseconds.
+/// The p95 and the fastest of [`G26_RUNS`] timed runs, in nanoseconds.
 ///
 /// The budget is a p95, so the measurement is one. `sorted[(n * 0.95) as usize]` is `reduce.rs`'s
 /// own convention, kept identical so two figures in this repository are never two conventions.
-fn p95_ns(
-    p: &mut Profiler,
-    zones: &[u16],
-    quantiles: &[u16],
-    f: fn(&mut Profiler, &[u16], &[u16]) -> u64,
-) -> u64 {
-    const RUNS: usize = 32;
-    let mut samples = [0u64; RUNS];
-    for s in &mut samples {
-        *s = f(p, zones, quantiles);
-    }
+fn cost_ns(mut samples: [u64; G26_RUNS]) -> G26Cost {
     samples.sort_unstable();
-    samples[((RUNS as f64 * 0.95) as usize).min(RUNS - 1)]
+    G26Cost {
+        p95: samples[((G26_RUNS as f64 * 0.95) as usize).min(G26_RUNS - 1)],
+        fastest: samples[0],
+    }
 }
 
 /// Wall-clock nanoseconds for one `reduce` over `zones`, with `quantiles` subscribed.
