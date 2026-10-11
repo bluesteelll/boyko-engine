@@ -188,7 +188,9 @@ const FN_LOOKAHEAD: usize = 24;
 /// `instrument`, `M2`, `calibration`, `miri-arm`) rather than admitting them. It grows only where
 /// CLAUDE.md's list grows first: `workstation` (2026-10-10, release CI round 10) names a leg no
 /// other class names, a test whose record describes the author's own machine. The CI move to
-/// `windows-latest` was the first run of such a test on a machine without that installation.
+/// `windows-latest` was the first run of such a test on a machine without that installation. Since
+/// 2026-10-11 (round 12) the record may also be a timing budget measured on the dev host (`G26`'s),
+/// which a shared runner's preemptions decide.
 const IGNORE_CLASSES: [(&str, &str); 12] = [
     ("gpu", "device leg, headless: a Vulkan device and no window; per binary, `-- --ignored --test-threads=1`"),
     ("gpu-windowed", "device leg on a desktop session: a device, a window and a swapchain"),
@@ -221,9 +223,9 @@ const IGNORE_CLASSES: [(&str, &str); 12] = [
     ),
     (
         "workstation",
-        "on demand on the dev host: the test checks a record of the author's own installation (a \
-         registry key, an installed tool) that a clean machine does not have; run it there by name, \
-         `-- --ignored --exact`",
+        "on demand on the dev host: the test checks a record of the author's own machine that \
+         another machine does not reproduce, an installation (a registry key, an installed tool) or a \
+         timing budget measured there; run it there by name, `-- --ignored --exact`",
     ),
     (
         "generator",

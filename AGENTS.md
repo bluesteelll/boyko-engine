@@ -87,7 +87,7 @@ cargo check -p boyko-render     --features hwrt --all-targets    # the example's
   `reflect-dogfood`, `feature-count-tests`, `force-alloc-panic`. On `ubuntu-latest`, all blocking:
   the build-only `check`, `clippy`, `profile-legs`, `feature-legs`, `bench-compile` (and `docs.yml`),
   the two Python registry jobs, and the test-running `miri` and `loom`. `test-linux` (also
-  `ubuntu-latest`) runs the debug `test` selection as information only (`continue-on-error`).
+  `ubuntu-latest`, `continue-on-error`) runs `test`'s debug and release selections, information only.
 - No CI clippy lint runs over a `#[cfg(windows)]` item (the `clippy` job is on `ubuntu-latest`), nor
   over feature-gated code beyond `boyko-ecs/profiling-analysis`. The dev-host gate in *Build commands*
   (`cargo clippy --workspace --all-targets -- -D warnings`, MSVC) lints the `#[cfg(windows)]` items
@@ -107,10 +107,10 @@ Quote the census's printed lines, never a prose count:
 - **Classes** (closed list): `gpu`, `gpu-windowed` (device + window + swapchain), `gpu-cap` (RT / ray
   query / `VK_KHR_pipeline_executable_properties`), `feature` (names its `--features <name>`), `solo`
   (device-free, `--test-threads=1`), `slow` (device-free, wall-clock budget), `miri-slow`,
-  `miri-unsupported`, `workstation` (checks a record of the author's own installation; on demand on
-  the dev host), and the no-leg `generator`, `deferred`, `flaky`. The only composites are
-  `feature+<class>` and `gpu-windowed+gpu-cap`. One site is exempt: it is ignored only in release and
-  names no leg (`boyko_app/src/profiling/reduce.rs`).
+  `miri-unsupported`, `workstation` (checks a record of the dev host, its installation or a timing
+  budget measured there; on demand there), and the no-leg `generator`, `deferred`, `flaky`. The only
+  composites are `feature+<class>` and `gpu-windowed+gpu-cap`. One site is exempt: it is ignored only
+  in release and names no leg (`boyko_app/src/profiling/reduce.rs`).
 - **Device-free** (any machine): `rg -n '^[^/]*#\[ignore = "(solo|slow):' -g '*.rs'`; each reason names
   its command. The two `solo` sites:
   `cargo test -p boyko-log --test l14_sink_policy -- --ignored --test-threads=1` and
@@ -123,7 +123,7 @@ Quote the census's printed lines, never a prose count:
   compiled without its flag (`--features hwrt` / `spec_constant_smoke`); most device sites are
   `#![cfg(windows)]`.
 - **Workstation** (the dev host only, on demand): `rg -n '^[^/]*#\[ignore = "workstation:' -g '*.rs'`;
-  each reason names its command, by name with `--exact`. A clean machine reds them by construction.
+  each reason names its `--exact` command. A clean machine reds a record; a busy one, a timing budget.
 - **Physics release:** `cargo test --release -p boyko-physics --no-fail-fast`. The six
   `cfg_attr(any(miri, debug_assertions), ignore = "slow: …")` tests in
   `crates/boyko_physics/tests/sleep_settles_box_piles.rs` run only here (`running 13 tests`,
