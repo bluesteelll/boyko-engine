@@ -50,6 +50,48 @@
 //!    steps.
 //! 5. The row translation is the table's own (`manifold_pair`); an untranslatable
 //!    pair is a miss on both sides.
+//!
+//! # Friction per manifold (FM, `PhysicsConfig::friction_model`; design D9, D15)
+//!
+//! Under the per-manifold form a record keeps its 64 bytes and gains no field:
+//! `n[0..count]` holds the per-point normal impulses, matched by feature id as above,
+//! and the manifold's friction triple sits in three fixed slots — λt1 in `t1[0]`, λt2
+//! in `t2[0]`, λtw in `t1[1]` — every other tangent slot `+0`. Two properties hold by
+//! construction: a one-point record the store writes has the same bytes in both forms
+//! (its λtw is `+0`, and `t1[0]`, `t2[0]` are its tangent impulses either way), and a
+//! record whose tangent words are all zero is valid in both. So the read side's form is
+//! one solver-level fact (the colored solver's `stored_fm`), never a per-record byte; a
+//! step whose form differs from it zeroes the friction of every record that can be read
+//! across the step ([`zero_friction`]): the solver's read side and the held store's kept
+//! records.
+//!
+//! **Lemma W-F** (the friction seed is a pure function of the stream and the read side).
+//! A manifold's patch is seeded with the triple of the first record of Lemma W's walk —
+//! records by descending manifold index over the run — that holds at least one of the
+//! manifold's stored feature ids ([`WarmLookup::friction_seed`]), λtw replaced by `+0`
+//! below two points; no such record seeds `[+0; 3]`. The walk and its stopping rule read
+//! stored keys and feature ids only, so by facts 1–3 the source is the last insert of
+//! the pair key that shares a point with the new manifold, and by fact 4 a carried
+//! triple is the one the previous lookup returned. For a one-point manifold whose source
+//! record holds one point, the triple's first two words are [`WarmRecord::seed_of`]'s
+//! tangent pair bit for bit (one feature id, one stored point, index 0).
+//!
+//! The B1 carry under FM ([`WarmLookup::carry_fm`]) compacts the normal hits exactly as
+//! [`WarmLookup::carry`] does and copies its source's triple whole iff a point hit. It
+//! is idempotent: on its own output the hits are the compacted feature ids again and
+//! the source is that record, so `carry_fm(carry_fm(r, m), m) == carry_fm(r, m)` in all
+//! sixteen words — what L10's held store rests on, since `Off` re-carries a frozen
+//! manifold every step while the held store captured it once.
+//!
+//! *Domain.* That held = `Off` equality is proved for a run of at most one record:
+//! every strict read side, i.e. every stream the narrowphase emits. Across a run of two
+//! or more records (duplicate-pair streams, hand-built only) "the first record with a
+//! feature-id hit" can move along a chain of shared ids from one carry to the next
+//! (`m1{a, b}`, `m2{b, c}`, `m3{c, d}`: the capture takes `m2`'s triple, and `Off`'s next
+//! carry `m3`'s), so it is not claimed there, and the colored solver's capture refuses
+//! such a run with a `debug_assert!`. The seed walk on non-strict sides is covered by
+//! the lookup units and by the G1 scene with duplicate keys, which drives the solver
+//! directly and never captures.
 
 use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn};
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
@@ -206,6 +248,40 @@ impl WarmRecord {
     #[inline]
     pub(crate) fn count(&self) -> u8 {
         self.count
+    }
+
+    /// FM (D9): the friction triple `(λt1, λt2, λtw)` of a record in the per-manifold form,
+    /// from its fixed slots `t1[0]`, `t2[0]`, `t1[1]`.
+    #[inline]
+    pub(crate) fn friction(&self) -> [f32; 3] {
+        [self.t1[0], self.t2[0], self.t1[1]]
+    }
+
+    /// FM (D11): writes the friction triple `(λt1, λt2, λtw)` into its fixed slots `t1[0]`,
+    /// `t2[0]`, `t1[1]` (the store of a patched lane, after [`set_shape`](Self::set_shape)
+    /// left every tangent slot `+0`).
+    #[inline]
+    pub(crate) fn set_friction(&mut self, triple: [f32; 3]) {
+        self.t1[0] = triple[0];
+        self.t2[0] = triple[1];
+        self.t1[1] = triple[2];
+    }
+
+    /// FM (D11): writes stored point `p`'s converged normal impulse (the store of a patched
+    /// lane; its tangent slots hold the manifold's triple).
+    #[inline]
+    pub(crate) fn set_normal(&mut self, p: usize, lambda_n: f32) {
+        debug_assert!(
+            p < self.count as usize,
+            "invariant: the store writes a stored point of the record's shape"
+        );
+        self.n[p] = lambda_n;
+    }
+
+    /// Whether a stored point carries feature id `fid`.
+    #[inline]
+    pub(crate) fn has_fid(&self, fid: u16) -> bool {
+        self.fid[..self.count as usize].contains(&fid)
     }
 
     /// The record's 64 bytes as sixteen little-endian words, field by field (the G3
@@ -580,6 +656,92 @@ impl WarmLookup<'_> {
         }
         let hits = u32::from(rec.count);
         (rec, hits)
+    }
+}
+
+impl<'a> WarmLookup<'a> {
+    /// FM (D9, Lemma W-F): the record a manifold's friction comes from — the first record of
+    /// Lemma W's walk over `run` (descending manifold index) holding at least one of the feature
+    /// ids of `m`'s points `0..count` — or `None`.
+    #[inline]
+    fn friction_source(self, run: WarmRun, m: &Manifold, count: usize) -> Option<&'a WarmRecord> {
+        let recs: &'a [WarmRecord] = self.read.recs();
+        for pos in (run.lo..run.hi).rev() {
+            let mi = if self.read.strict() {
+                pos as usize
+            } else {
+                self.index.sorted()[pos as usize].1 as usize
+            };
+            let rec = &recs[mi];
+            if (0..count).any(|p| rec.has_fid(point_fid(m, p))) {
+                return Some(rec);
+            }
+        }
+        None
+    }
+
+    /// FM (D9): the friction seed `(λt1, λt2, λtw)` of manifold `m`'s `count` live points — the
+    /// triple of the first record of the walk holding one of their feature ids, with λtw replaced
+    /// by `+0` when `count < 2` (a manifold of one point has no twist row) — or `None` when no
+    /// record of the run holds one (the caller seeds `[+0; 3]`). For a one-point manifold whose
+    /// source record holds one point, the first two words are
+    /// [`seed_of`](WarmRecord::seed_of)'s tangent pair bit for bit.
+    #[inline]
+    pub(crate) fn friction_seed(self, run: WarmRun, m: &Manifold, count: usize) -> Option<[f32; 3]> {
+        self.friction_source(run, m, count).map(|rec| {
+            let mut triple = rec.friction();
+            if count < 2 {
+                triple[2] = 0.0;
+            }
+            triple
+        })
+    }
+
+    /// FM (D9): the record of a FROZEN manifold under the per-manifold form (B1). Each of its
+    /// `count` points' normal impulse is looked up through [`seed`](Self::seed) and the hits
+    /// compact in point order, exactly as [`carry`](Self::carry) compacts them (their tangent
+    /// words `+0`); the friction triple of the run's [`friction_source`](Self::friction_source)
+    /// is copied whole — λtw kept below two hits, so a woken manifold of two or more points finds
+    /// it — iff a point hit, else the triple is `+0`. Returns the record and the hit count.
+    ///
+    /// Idempotent (Lemma W-F): on its own output the hits are the compacted feature ids again
+    /// and the source is that record, so a second carry returns the same sixteen words. Out of
+    /// line: the per-point paths call [`carry`](Self::carry), and this only under FM.
+    #[inline(never)]
+    pub(crate) fn carry_fm(self, run: WarmRun, m: &Manifold, count: usize) -> (WarmRecord, u32) {
+        let mut rec = WarmRecord::EMPTY;
+        for p in 0..count {
+            let fid = point_fid(m, p);
+            if let Some(seed) = self.seed(run, fid) {
+                rec.push(fid, [seed[0], 0.0, 0.0]);
+            }
+        }
+        let hits = u32::from(rec.count);
+        if hits > 0 {
+            let source = self.friction_source(run, m, count);
+            debug_assert!(
+                source.is_some(),
+                "invariant: a point hit names a record holding one of the manifold's feature ids"
+            );
+            if let Some(source) = source {
+                rec.set_friction(source.friction());
+            }
+        }
+        (rec, hits)
+    }
+}
+
+/// FM (D15): zeroes the friction words of `recs` — every `t1` and `t2` slot `+0` — and leaves the
+/// normal impulses, the feature ids and the counts alone. A record whose tangent words are all
+/// zero is valid in the per-point and the per-manifold form alike, so a toggle between the two
+/// runs this once over every warm store that can hold a record across the step: the solver's read
+/// side and the held store's kept records. Cold: only a model toggle reaches it.
+#[cold]
+#[inline(never)]
+pub(crate) fn zero_friction(recs: &mut [WarmRecord]) {
+    for rec in recs {
+        rec.t1 = [0.0; MAX_CONTACT_POINTS];
+        rec.t2 = [0.0; MAX_CONTACT_POINTS];
     }
 }
 

@@ -823,14 +823,36 @@
 
     /// Audits every cohort's padding (G3's release half: the same predicate as the
     /// fill's debug assertion, evaluated here in every profile).
+    ///
+    /// FM: a cohort allotted a patch block (the next `rank_base`, or the column's end, past its
+    /// ranks) is also held to the patch's rules — its padding lanes zero in every row, its `ti2`
+    /// and `vn0` rows zero, λtw `+0` on a lane of width `< 2`, and its live ranks' `ti2` zero.
     fn audit_padding(cols: &CohortColumns) -> PaddingAudit {
         let blocks = cols.blocks();
         let vn0 = cols.rank_cold.as_read_slice();
+        let heads = cols.heads();
         let mut audit = PaddingAudit { zero: true, partial_cohorts: 0, padded_ranks: 0 };
-        for (head, cold) in cols.heads().iter().zip(cols.cold.as_read_slice()) {
+        for (k, (head, cold)) in heads.iter().zip(cols.cold.as_read_slice()).enumerate() {
             let nlanes = head.nlanes as usize;
             let depth = head.depth as usize;
             let rank_base = head.rank_base as usize;
+            let end = heads.get(k + 1).map_or(blocks.len(), |next| next.rank_base as usize);
+            if end - rank_base > depth {
+                let patch = &blocks[rank_base + depth];
+                for (l, vn) in vn0[rank_base + depth].iter().enumerate() {
+                    let width = head.width[l] as usize;
+                    audit.zero &= patch.ti2[l].to_bits() == 0 && vn.to_bits() == 0;
+                    if l >= nlanes {
+                        audit.zero &= (0..3).all(|c| patch.ra[c][l].to_bits() == 0 && patch.rb[c][l].to_bits() == 0)
+                            && patch.sep[l].to_bits() == 0
+                            && patch.ni[l].to_bits() == 0
+                            && patch.ti1[l].to_bits() == 0;
+                    } else {
+                        audit.zero &= width >= 2 || patch.ti1[l].to_bits() == 0;
+                        audit.zero &= blocks[rank_base..rank_base + width].iter().all(|b| b.ti2[l].to_bits() == 0);
+                    }
+                }
+            }
             audit.partial_cohorts += usize::from(nlanes < COHORT);
             for (l, &width) in head.width.iter().enumerate() {
                 let width = width as usize;
@@ -1582,6 +1604,81 @@
         assert_eq!(region, serial, "the region's bits are the serial solve's");
     }
 
+    /// FM (fm/cut.md §3.9, W4): the Stacked Borrows route of the region's stages under friction
+    /// per manifold — the twenty spheres of the per-point route above, every manifold widened to
+    /// two points so its cohorts carry patches, on two std threads, with `simd_solve` off (the
+    /// scalar patch: group-granular colour cuts, two workers on one patch block) and on (the AVX2
+    /// patch, the 8-lane warm apply and the 8-lane fill geometry). The per-kind guard reads first;
+    /// the region's bits equal the serial solve's. Run under both models, as the per-point route.
+    #[test]
+    #[cfg(miri)]
+    fn sr_region_sb_route_runs_every_kind_on_both_threads_fm() {
+        let mut bodies = Vec::new();
+        for i in 0..16u32 {
+            let mut b = dyn_sphere(Vec3::new(i as f32 * 3.0, 0.6, 0.0), 1.0, 0.5, 0.0);
+            b.inv_inertia = Mat3::from_diagonal(Vec3::new(0.8, 1.1, 0.9));
+            b.linear_velocity = Vec3::new(0.3, -0.5, 0.1);
+            b.angular_velocity = Vec3::new(0.0, 0.4, 0.0);
+            bodies.push(b);
+        }
+        for i in 0..4u32 {
+            let mut b = dyn_sphere(Vec3::new(i as f32 * 3.0, 2.4, 0.0), 1.0, 0.5, 0.0);
+            b.inv_inertia = Mat3::from_diagonal(Vec3::new(1.2, 0.7, 1.0));
+            b.linear_velocity = Vec3::new(0.1, -0.5, 0.0);
+            bodies.push(b);
+        }
+        bodies.push(static_body(Vec3::new(0.0, -1.0, 0.0)));
+        let mut manifolds = Vec::new();
+        for i in 0..16u32 {
+            manifolds.push(box_manifold(i, 20, Vec3::new(0.0, -1.0, 0.0), -0.2, Vec3::new(i as f32 * 3.0, 0.0, 0.0), 2 + (i % 2) as u8));
+        }
+        for i in 0..4u32 {
+            manifolds.push(box_manifold(i, 16 + i, Vec3::new(0.0, 1.0, 0.0), -0.1, Vec3::new(i as f32 * 3.0, 1.5, 0.0), 2));
+        }
+        manifolds.sort_by_key(|m| (m.body_a.0, m.body_b.0));
+        let graph = build_graph(&bodies, &manifolds);
+        let lowered =
+            RegionGrain { wide_floor: 1, colour_min_points: 1, max_bpp: 6, body_bpp: 8, body_rows: 8, fill_points: 1 };
+        for simd_solve in [false, true] {
+            let run = |route: Option<RegionRoute>| {
+                let cfg = PhysicsConfig {
+                    dt: 1.0 / 60.0,
+                    parallel_solve: route.is_some(),
+                    simd_solve,
+                    friction_model: FrictionModel::PerManifold,
+                    ..PhysicsConfig::default()
+                };
+                let mut solver = ColoredSoftStepSolver::default();
+                assert!(solver.set_region_grain(lowered));
+                if let Some(route) = route {
+                    solver.region_route = route;
+                }
+                let mut scratch = SolverScratch::with_capacity(bodies.len());
+                scratch.set_bodies(&bodies);
+                for _ in 0..2 {
+                    scratch.touched.reset(scratch.bodies().len());
+                    solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+                }
+                (snapshot_bits(&scratch), solver)
+            };
+            let (serial, _) = run(None);
+            let (region, solver) = run(Some(RegionRoute::Threads(2)));
+            assert_eq!(solver.region_dispatches(), 2, "a region per step (the premise)");
+            assert!(solver.layout_census().patch_blocks > 0, "anti-vacuity: the cohorts carry patches");
+            let tally = solver.region_kind_tally();
+            for name in ["gravity", "gravity_first", "warm", "biased", "integrate", "relax", "fill", "store"] {
+                let k = tally.iter().find(|k| k.kind == name).expect("the tally names every kind it ran");
+                assert!(
+                    k.max_blocks >= 2 && k.helper_blocks > 0,
+                    "the per-kind guard (simd_solve {simd_solve}): `{name}` had at most {} blocks and the helper ran {} of them",
+                    k.max_blocks,
+                    k.helper_blocks
+                );
+            }
+            assert_eq!(region, serial, "FM (simd_solve {simd_solve}): the region's bits are the serial solve's");
+        }
+    }
+
     /// Gate 5 (extended to the PARALLEL multi-worker path over random scenes): every
     /// static body (`inv_mass == 0`) AND the SDF sentinel stay EXACTLY put under the
     /// parallel colored solve driven through a 4-worker pool. The `*_movable` guard
@@ -1836,7 +1933,7 @@
                 for c in 0..n_colors {
                     let ctx = cols_scalar.color_ctx(c);
                     let g_hi = cols_scalar.color_group_start()[c + 1] as usize;
-                    ColoredSoftStepSolver::solve_color(
+                    ColoredSoftStepSolver::solve_color::<false>(
                         view,
                         body_view,
                         ctx,
@@ -1865,7 +1962,7 @@
                     //   the host running these tests supports AVX2; the cohort range is a
                     //   color's own (body-disjoint) cohorts.
                     unsafe {
-                        ColoredSoftStepSolver::solve_color_avx2(
+                        ColoredSoftStepSolver::solve_color_avx2::<false>(
                             view,
                             body_view,
                             k_lo,
@@ -1939,6 +2036,7 @@
             impulse_coeff: soft.impulse_coeff,
             inv_h: 0.0,
             spec: false,
+            fm: false,
             deltas: deltas.solve_view(),
         }
     }
@@ -2279,7 +2377,7 @@
         let step = pre_v2_step(&soft, &no_deltas);
         let cols_scalar = clone_columns(cols);
         let bodies_scalar = body_scratch_from(bodies);
-        ColoredSoftStepSolver::solve_color(
+        ColoredSoftStepSolver::solve_color::<false>(
             cols_scalar.solve_view(),
             bodies_scalar.solve_view(),
             ctx,
@@ -2296,7 +2394,7 @@
         //   supports AVX2; `[k_lo, k_hi)` are the single color's body-disjoint
         //   cohorts.
         unsafe {
-            ColoredSoftStepSolver::solve_color_avx2(
+            ColoredSoftStepSolver::solve_color_avx2::<false>(
                 cols_simd.solve_view(),
                 bodies_simd.solve_view(),
                 k_lo,
@@ -2655,6 +2753,7 @@
             impulse_coeff: soft.impulse_coeff,
             inv_h,
             spec: true,
+            fm: false,
             deltas: deltas.solve_view(),
         };
         let delta_rows = deltas.as_read_slice();
@@ -2682,7 +2781,7 @@
         let (k_lo, k_hi) = ctx.cohorts_of(ctx.g_base, g_hi);
         let cols_scalar = clone_columns(cols);
         let bodies_scalar = body_scratch_from(bodies);
-        ColoredSoftStepSolver::solve_color_k::<true, K3>(
+        ColoredSoftStepSolver::solve_color_k::<true, K3, false>(
             cols_scalar.solve_view(),
             bodies_scalar.solve_view(),
             ctx,
@@ -2697,7 +2796,7 @@
         //   `[k_lo, k_hi)` are the single colour's body-disjoint cohorts, and `deltas` holds a row
         //   for every body the cohorts name.
         unsafe {
-            ColoredSoftStepSolver::solve_color_avx2_k::<true, K3>(
+            ColoredSoftStepSolver::solve_color_avx2_k::<true, K3, false>(
                 cols_simd.solve_view(),
                 bodies_simd.solve_view(),
                 k_lo,
@@ -2812,7 +2911,7 @@
         // apply surfaces as an impulse-bit difference instead of being shared.
         let cols_scalar = clone_columns(cols);
         let bodies_scalar = body_scratch_from(bodies);
-        ColoredSoftStepSolver::warm_apply_scalar(&cols_scalar, bodies_scalar.solve_view(), 0, cols.heads().len());
+        ColoredSoftStepSolver::warm_apply_scalar::<false>(&cols_scalar, bodies_scalar.solve_view(), 0, cols.heads().len());
 
         let cols_simd = clone_columns(cols);
         let bodies_simd = body_scratch_from(bodies);
@@ -2821,7 +2920,7 @@
         //   cohort table (every head's `rank_base + depth` within its blocks), and
         //   this thread is the only accessor of `bodies_simd`.
         unsafe {
-            ColoredSoftStepSolver::warm_apply_avx2(&cols_simd, bodies_simd.solve_view(), 0, cols.heads().len())
+            ColoredSoftStepSolver::warm_apply_avx2::<false>(&cols_simd, bodies_simd.solve_view(), 0, cols.heads().len())
         };
 
         let (b_scalar, i_scalar) = body_impulse_bits(bodies_scalar.as_read_slice(), &cols_scalar);
@@ -2931,12 +3030,12 @@
             let cols = &solver.columns;
             let n = cols.heads().len();
             let whole_scalar = body_scratch_from(&bodies);
-            ColoredSoftStepSolver::warm_apply_scalar(cols, whole_scalar.solve_view(), 0, n);
+            ColoredSoftStepSolver::warm_apply_scalar::<false>(cols, whole_scalar.solve_view(), 0, n);
             let whole_simd = body_scratch_from(&bodies);
             // SAFETY: the test target is `target_feature = "avx2"`-gated, so the host supports
             //   AVX2; `cols` is a fully built cohort table and this thread is the only accessor
             //   of `whole_simd`.
-            unsafe { ColoredSoftStepSolver::warm_apply_avx2(cols, whole_simd.solve_view(), 0, n) };
+            unsafe { ColoredSoftStepSolver::warm_apply_avx2::<false>(cols, whole_simd.solve_view(), 0, n) };
             let whole: Vec<[u32; 6]> = whole_scalar.as_read_slice().iter().map(vel_bits).collect();
             assert_eq!(
                 whole,
@@ -2945,13 +3044,13 @@
             );
             for k in 0..=n {
                 let split_scalar = body_scratch_from(&bodies);
-                ColoredSoftStepSolver::warm_apply_scalar(cols, split_scalar.solve_view(), 0, k);
-                ColoredSoftStepSolver::warm_apply_scalar(cols, split_scalar.solve_view(), k, n);
+                ColoredSoftStepSolver::warm_apply_scalar::<false>(cols, split_scalar.solve_view(), 0, k);
+                ColoredSoftStepSolver::warm_apply_scalar::<false>(cols, split_scalar.solve_view(), k, n);
                 let split_simd = body_scratch_from(&bodies);
                 // SAFETY: as the whole apply above.
                 unsafe {
-                    ColoredSoftStepSolver::warm_apply_avx2(cols, split_simd.solve_view(), 0, k);
-                    ColoredSoftStepSolver::warm_apply_avx2(cols, split_simd.solve_view(), k, n);
+                    ColoredSoftStepSolver::warm_apply_avx2::<false>(cols, split_simd.solve_view(), 0, k);
+                    ColoredSoftStepSolver::warm_apply_avx2::<false>(cols, split_simd.solve_view(), k, n);
                 }
                 for (name, got) in [("scalar", &split_scalar), ("avx2", &split_simd)] {
                     let got: Vec<[u32; 6]> = got.as_read_slice().iter().map(vel_bits).collect();
@@ -2961,7 +3060,7 @@
                 if k > 0 && k < n {
                     // The cut's left cohort moves a row: a skipped cohort would show here.
                     let alone = body_scratch_from(&bodies);
-                    ColoredSoftStepSolver::warm_apply_scalar(cols, alone.solve_view(), k - 1, k);
+                    ColoredSoftStepSolver::warm_apply_scalar::<false>(cols, alone.solve_view(), k - 1, k);
                     interior_moving_cuts += usize::from(
                         alone.as_read_slice().iter().zip(&bodies).any(|(a, b)| vel_bits(a) != vel_bits(b)),
                     );
@@ -3044,7 +3143,7 @@
         // And the `-0.0` row is byte-frozen on the ORACLE path too (the differential
         // above only pins the two paths to each other).
         let scalar = body_scratch_from(&bodies);
-        ColoredSoftStepSolver::warm_apply_scalar(&solver.columns, scalar.solve_view(), 0, solver.columns.heads().len());
+        ColoredSoftStepSolver::warm_apply_scalar::<false>(&solver.columns, scalar.solve_view(), 0, solver.columns.heads().len());
         assert_eq!(
             vel_bits(&scalar.as_read_slice()[0]),
             vel_bits(&bodies[0]),
@@ -3188,7 +3287,7 @@
 
         // The oracle's answer for the lanes, computed with no writer in sight.
         let oracle = body_scratch_from(&bodies);
-        ColoredSoftStepSolver::warm_apply_scalar(&solver.columns, oracle.solve_view(), 0, solver.columns.heads().len());
+        ColoredSoftStepSolver::warm_apply_scalar::<false>(&solver.columns, oracle.solve_view(), 0, solver.columns.heads().len());
 
         const WRITES: usize = 32;
         let simd = body_scratch_from(&bodies);
@@ -3206,7 +3305,7 @@
             //   supports AVX2; `solver.columns` is a fully built cohort table; the rows
             //   this apply touches are the cohort's two lanes' (rows 1..=4), disjoint
             //   from the writer's row 0.
-            unsafe { ColoredSoftStepSolver::warm_apply_avx2(&solver.columns, view, 0, solver.columns.heads().len()) };
+            unsafe { ColoredSoftStepSolver::warm_apply_avx2::<false>(&solver.columns, view, 0, solver.columns.heads().len()) };
         });
 
         let applied = simd.as_read_slice();
@@ -5181,20 +5280,32 @@
         /// S-g: bouncing spheres with restitution 0.6.
         const PIN_S_G: u64 = 0x246a_964a_2b43_e9c1;
 
-        /// One arm of a G1 scene: the pool size and the kernel selection.
+        /// One arm of a G1 scene: the pool size, the kernel selection and the friction model
+        /// (`None`: the configuration's default, so the pins track the shipped default).
         #[derive(Clone, Copy, Debug)]
         struct Arm {
             workers: usize,
             simd_solve: bool,
+            friction: Option<FrictionModel>,
         }
 
         /// The four arms every scene runs: W ∈ {1, 8} × `simd_solve` ∈ {off, on}.
-        const ARMS: [Arm; 4] = [
-            Arm { workers: 1, simd_solve: false },
-            Arm { workers: 1, simd_solve: true },
-            Arm { workers: 8, simd_solve: false },
-            Arm { workers: 8, simd_solve: true },
-        ];
+        const ARMS: [Arm; 4] = arms_of(None);
+
+        /// The four arms under friction model `friction` (FM's arms of the G1 scenes).
+        const fn fm_arms(friction: FrictionModel) -> [Arm; 4] {
+            arms_of(Some(friction))
+        }
+
+        /// The four arms under `friction`.
+        const fn arms_of(friction: Option<FrictionModel>) -> [Arm; 4] {
+            [
+                Arm { workers: 1, simd_solve: false, friction },
+                Arm { workers: 1, simd_solve: true, friction },
+                Arm { workers: 8, simd_solve: false, friction },
+                Arm { workers: 8, simd_solve: true, friction },
+            ]
+        }
 
         /// What one arm of a scene produced: the pin hash, the counters at the end and
         /// at the scene's own phase mark (zero when it has none), the last step's warm
@@ -5207,6 +5318,8 @@
             marked: SetupCounters,
             stats: WarmSeedStats,
             wide_steps: usize,
+            /// FM: the most friction patch blocks one step laid out.
+            patch_blocks: u32,
         }
 
         /// Runs `scene` on `arm`: inside an installed pool of `arm.workers` threads when
@@ -5224,8 +5337,13 @@
         /// Runs every arm of `scene` and checks each against `pin`, reporting all four
         /// hashes on a mismatch so the report can quote the measured values.
         fn assert_pinned(name: &str, pin: u64, scene: fn(Arm) -> ArmResult) -> [ArmResult; 4] {
-            let results = ARMS.map(|arm| run_arm(arm, scene));
-            for (arm, r) in ARMS.iter().zip(&results) {
+            assert_pinned_on(name, pin, ARMS, scene)
+        }
+
+        /// [`assert_pinned`] on the given four arms.
+        fn assert_pinned_on(name: &str, pin: u64, arms: [Arm; 4], scene: fn(Arm) -> ArmResult) -> [ArmResult; 4] {
+            let results = arms.map(|arm| run_arm(arm, scene));
+            for (arm, r) in arms.iter().zip(&results) {
                 eprintln!(
                     "{name} {arm:?}: hash {:#018x}, wide steps {}, {:?}",
                     r.hash, r.wide_steps, r.counters
@@ -5236,7 +5354,24 @@
                 results.iter().all(|r| r.hash == pin),
                 "{name}: the per-step setup digest + body bits hash must equal the C0 pin \
                  {pin:#018x} on every arm (W {{1, 8}} × simd {{off, on}}); measured {hashes:?} \
-                 for arms {ARMS:?}. A red pin is a defect, not a re-bless."
+                 for arms {arms:?}. A red pin is a defect, not a re-bless."
+            );
+            results
+        }
+
+        /// FM's arms of a G1 scene (§8 C1 (e)): the four arms under `friction` must agree with each
+        /// other — W {1, 8} × `simd_solve` {off, on}, the {1, N} and scalar/SIMD contracts under the
+        /// patch — with no pin (FM moves these values; C3 pins them). The hash is printed.
+        fn assert_fm_arms_agree(name: &str, friction: FrictionModel, scene: fn(Arm) -> ArmResult) -> [ArmResult; 4] {
+            let arms = fm_arms(friction);
+            let results = arms.map(|arm| run_arm(arm, scene));
+            for (arm, r) in arms.iter().zip(&results) {
+                eprintln!("{name} {arm:?}: hash {:#018x}, patch blocks {}", r.hash, r.patch_blocks);
+            }
+            let hashes: Vec<String> = results.iter().map(|r| format!("{:#018x}", r.hash)).collect();
+            assert!(
+                results.iter().all(|r| r.hash == results[0].hash),
+                "{name} ({friction:?}): the four arms must produce one hash; measured {hashes:?} for {arms:?}"
             );
             results
         }
@@ -5384,6 +5519,7 @@
             hash: u64,
             wide_steps: usize,
             marked: SetupCounters,
+            patch_blocks: u32,
         }
 
         impl G1 {
@@ -5399,6 +5535,7 @@
                     sleeping,
                     speculative_distance: 0.0,
                     speculative_velocity_cap: 0.0,
+                    friction_model: arm.friction.unwrap_or(PhysicsConfig::default().friction_model),
                     ..PhysicsConfig::default()
                 };
                 let mut scratch = SolverScratch::with_capacity(bodies.len());
@@ -5416,6 +5553,7 @@
                     hash: FNV_OFFSET,
                     wide_steps: 0,
                     marked: SetupCounters::default(),
+                    patch_blocks: 0,
                 }
             }
 
@@ -5427,8 +5565,8 @@
             /// One step over `manifolds`: the graph, the solve, then the digest and the body
             /// bits folded into the hash.
             fn solve(&mut self, manifolds: &[Manifold]) {
-                let Self { cfg, solver, scratch, sleep, hash, wide_steps, .. } = self;
-                Self::solve_parts(cfg, solver, scratch, sleep.as_mut(), manifolds, hash, wide_steps);
+                let Self { cfg, solver, scratch, sleep, hash, wide_steps, patch_blocks, .. } = self;
+                Self::solve_parts(cfg, solver, scratch, sleep.as_mut(), manifolds, hash, (wide_steps, patch_blocks));
             }
 
             fn solve_parts(
@@ -5438,7 +5576,7 @@
                 sleep: Option<&mut IslandSleep>,
                 manifolds: &[Manifold],
                 hash: &mut u64,
-                wide_steps: &mut usize,
+                (wide_steps, patch_blocks): (&mut usize, &mut u32),
             ) {
                 let graph = build_graph(scratch.bodies(), manifolds);
                 scratch.touched.reset(scratch.bodies().len());
@@ -5449,6 +5587,7 @@
                 if solver.columns.widest_color_slots() >= MIN_PARALLEL_SLOTS_PER_COLOR {
                     *wide_steps += 1;
                 }
+                *patch_blocks = (*patch_blocks).max(solver.layout_census().patch_blocks);
                 *hash = fnv_u64(*hash, solver.step_digest());
                 *hash = fold_body_bits(*hash, scratch.bodies());
             }
@@ -5468,6 +5607,7 @@
                     manifolds,
                     hash,
                     wide_steps,
+                    patch_blocks,
                     ..
                 } = self;
                 grid.build(scratch.bodies(), pairs);
@@ -5501,7 +5641,7 @@
                     sleep.as_mut(),
                     manifolds.solver_manifolds(),
                     hash,
-                    wide_steps,
+                    (wide_steps, patch_blocks),
                 );
             }
 
@@ -5512,6 +5652,7 @@
                     marked: self.marked,
                     stats: self.solver.warm_seed_stats(),
                     wide_steps: self.wide_steps,
+                    patch_blocks: self.patch_blocks,
                 }
             }
         }
@@ -5824,6 +5965,171 @@
                     "anti-vacuity: S-g's restitution pass must apply an impulse: {:?}",
                     r.counters
                 );
+            }
+        }
+
+        // ── FM's G1 arms, G-TOGGLE and the depth-1 structure (fm/cut.md §3 C1b (e), (h), (k), (k')) ──
+
+        /// FM's arms of S-a..S-f (§8 C1 (e)): under each per-manifold model the four arms agree,
+        /// and the multi-point scenes lay out patches.
+        /// A G1 scene's name, its drive, and whether it lays out friction patches.
+        type FmScene = (&'static str, fn(Arm) -> ArmResult, bool);
+
+        #[test]
+        fn g1_fm_arms_agree_across_w_and_simd() {
+            let scenes: [FmScene; 6] = [
+                ("S-a", scene_s_a, true),
+                ("S-b", scene_s_b, true),
+                ("S-c", scene_s_c, false),
+                ("S-d", scene_s_d, true),
+                ("S-e", scene_s_e, false),
+                ("S-f", scene_s_f, false),
+            ];
+            for friction in [FrictionModel::PerManifold, FrictionModel::PerManifoldTouch] {
+                for (name, scene, patched) in scenes {
+                    let results = assert_fm_arms_agree(name, friction, scene);
+                    if patched {
+                        assert!(
+                            results.iter().all(|r| r.patch_blocks > 0),
+                            "anti-vacuity: {name} ({friction:?}) must lay out friction patches"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// (k′, critique O3): S-g's bouncing spheres hold one-point manifolds only, so every cohort
+        /// is depth 1 and runs the per-point code under FM (D16): its pin is unchanged under both
+        /// per-manifold models, setup digest included. Red under N-D1 (a patch for every cohort:
+        /// the digest hashes the patch form).
+        #[test]
+        fn g1_s_g_restitution_pins_under_fm() {
+            for friction in [FrictionModel::PerManifold, FrictionModel::PerManifoldTouch] {
+                let results = assert_pinned_on("S-g (FM)", PIN_S_G, fm_arms(friction), scene_s_g);
+                for r in &results {
+                    assert!(r.counters.restitution_applied > 0, "anti-vacuity: S-g bounces under {friction:?}");
+                    assert_eq!(r.patch_blocks, 0, "S-g lays out no patch under {friction:?} (D16)");
+                }
+            }
+        }
+
+        /// G-TOGGLE's world (§1.4 W2): a three-layer box pile (box-floor and box-box manifolds of
+        /// four points: depth-4 cohorts) beside sixteen spheres on the floor (one-point manifolds:
+        /// depth-1 cohorts), under a gravity tilted a few degrees so every contact carries friction.
+        fn toggle_world(arm: Arm) -> G1 {
+            let mut bodies = pyramid_bodies(3, 0.0, 0.5);
+            for i in 0..16 {
+                let p = Vec3::new(8.0 + 2.5 * (i % 4) as f32, 1.0, -4.0 + 2.5 * (i / 4) as f32);
+                bodies.push(sphere_body(p, 1.0, 1.0, 0.5, 0.0));
+            }
+            let mut g = G1::new(&bodies, arm, false);
+            g.cfg.gravity = Vec3::new(0.5, -9.79, 0.3);
+            g
+        }
+
+        /// One step of G-TOGGLE's world under `friction`, returning the solve's seed census and its
+        /// normal point hits.
+        fn toggle_step(g: &mut G1, friction: FrictionModel) -> (FrictionSeedCensus, u32) {
+            g.cfg.friction_model = friction;
+            g.step_pipeline(false);
+            (g.solver.friction_census(), g.solver.warm_seed_stats().point_hits)
+        }
+
+        /// G-TOGGLE on one arm: three lockstep worlds — T (toggled: FM to step 30, per point at
+        /// 31–32, FM from 33), A (FM throughout) and B (FM to 30, per point from 31) — whose poses
+        /// agree through step 30. A toggle zeroes friction once in the warm store and keeps the
+        /// normals warm (D15): at step 31 T seeds no friction and its normal hits equal A's (the
+        /// same contact set); at 32 it seeds friction again; at 33 it seeds no friction, patch or
+        /// rank, and its normal hits equal B's; at 34 both are back. Red under N-T1 (the zeroing
+        /// skipped). Returns a dummy result for `run_arm`.
+        fn g_toggle(arm: Arm) -> ArmResult {
+            let (pm, pp) = (FrictionModel::PerManifold, FrictionModel::PerPoint);
+            let arm = Arm { friction: Some(pm), ..arm };
+            let (mut t, mut a, mut b) = (toggle_world(arm), toggle_world(arm), toggle_world(arm));
+            let mut last = (FrictionSeedCensus::default(), 0);
+            for _ in 1..=30 {
+                last = toggle_step(&mut t, pm);
+                toggle_step(&mut a, pm);
+                toggle_step(&mut b, pm);
+            }
+            assert!(t.hash == a.hash && t.hash == b.hash, "premise: T, A and B are identical through step 30 ({arm:?})");
+            let census = t.solver.layout_census();
+            assert!(
+                census.cohorts_by_depth[0] > 0 && census.cohorts_by_depth[3] > 0,
+                "premise: step 30 lays out depth-1 and depth-4 cohorts: {census:?}"
+            );
+            assert!(
+                last.0.nonzero_patch_friction > 0 && last.0.nonzero_rank_friction > 0,
+                "premise: step 30 seeds patch friction and depth-1 rank friction ({arm:?}): {:?}",
+                last.0
+            );
+            // Step 31: T and B to per point.
+            let (t31, t31_hits) = toggle_step(&mut t, pp);
+            let (_, a31_hits) = toggle_step(&mut a, pm);
+            toggle_step(&mut b, pp);
+            assert_eq!(
+                (t31.nonzero_rank_friction, t31.nonzero_patch_friction),
+                (0, 0),
+                "step 31: the first per-point step after FM seeds no friction ({arm:?})"
+            );
+            assert_eq!(t31_hits, a31_hits, "step 31: the normals keep their warm start (T vs A, {arm:?})");
+            assert!(t31_hits > 0, "anti-vacuity: step 31 seeds normals");
+            // Step 32: per point again.
+            let (t32, _) = toggle_step(&mut t, pp);
+            toggle_step(&mut a, pm);
+            toggle_step(&mut b, pp);
+            assert!(t32.nonzero_rank_friction > 0, "step 32: per-point friction is seeded again ({arm:?})");
+            assert_eq!(t.hash, b.hash, "premise: T and B are identical through step 32 ({arm:?})");
+            // Step 33: T back to FM.
+            let (t33, t33_hits) = toggle_step(&mut t, pm);
+            toggle_step(&mut a, pm);
+            let (_, b33_hits) = toggle_step(&mut b, pp);
+            assert_eq!(
+                (t33.nonzero_rank_friction, t33.nonzero_patch_friction),
+                (0, 0),
+                "step 33: the first FM step after per point seeds no friction, patch or rank ({arm:?})"
+            );
+            assert_eq!(t33_hits, b33_hits, "step 33: the normals keep their warm start (T vs B, {arm:?})");
+            // Step 34: FM again.
+            let (t34, _) = toggle_step(&mut t, pm);
+            assert!(
+                t34.nonzero_rank_friction > 0 && t34.nonzero_patch_friction > 0,
+                "step 34: FM friction is seeded again, patch and depth-1 rank ({arm:?}): {t34:?}"
+            );
+            t.finish()
+        }
+
+        /// G-TOGGLE (§8 C1 (h), §1.4 W2) on every arm.
+        #[test]
+        fn g_toggle_zeroes_friction_once_and_keeps_normals_warm() {
+            for arm in ARMS {
+                run_arm(arm, g_toggle);
+            }
+        }
+
+        /// (k) D16's structure on G-TOGGLE's world under FM: a patch for every cohort of depth two
+        /// or more and none for a depth-1 cohort, the blocks column the ranks plus the patches.
+        /// Red under N-D1 (every cohort patched) and N-D1b (a partial cohort's patch dropped).
+        #[test]
+        fn depth1_cohorts_get_no_patch() {
+            for friction in [FrictionModel::PerManifold, FrictionModel::PerManifoldTouch] {
+                let arm = Arm { workers: 1, simd_solve: true, friction: Some(friction) };
+                let mut g = toggle_world(arm);
+                let mut saw = [0u32; MAX_CONTACT_POINTS];
+                for _ in 0..20 {
+                    g.step_pipeline(false);
+                    let c = g.solver.layout_census();
+                    assert_eq!(
+                        c.patch_blocks,
+                        c.cohorts_by_depth[1] + c.cohorts_by_depth[2] + c.cohorts_by_depth[3],
+                        "one patch per cohort of depth >= 2 ({friction:?}): {c:?}"
+                    );
+                    assert_eq!(g.solver.columns.blocks().len() as u32, c.rank_slots + c.patch_blocks, "ranks plus patches");
+                    for (s, n) in saw.iter_mut().zip(c.cohorts_by_depth) {
+                        *s += n;
+                    }
+                }
+                assert!(saw[0] > 0 && saw[3] > 0, "anti-vacuity: depth-1 and depth-4 cohorts ({friction:?}): {saw:?}");
             }
         }
     }
@@ -6346,5 +6652,1016 @@
                  frozen manifold, and meet a non-strict read side, a Reset and warm start off: \
                  {tally:?}"
             );
+        }
+    }
+
+    // ── FM: friction per manifold (`levers/FM-manifold-friction/`, fm/cut.md §3 C1b) ──────────
+    //
+    // The lever's units: the warm-record helpers (D9, D15, Lemma W-F), the patch's structural
+    // gates (D7, D16), the scalar = AVX2 differentials of the patch kernel, warm apply and
+    // geometry (D2–D5, D8, D10), the width-1 lane identity (§5 (3)), the scalar patch's disjoint
+    // lane writes on two threads (the G-S4 Miri unit), and the `contact.rs` no-FMA census.
+    mod fm {
+        use super::*;
+        use crate::scratch_ids::warm_table_id;
+        use crate::solver::warm_records::{WarmIndex, WarmLookup, WarmRecords};
+
+        /// A manifold between rows 0 and 1 whose points carry the feature ids `fids`, in order.
+        fn fid_manifold(fids: &[u32]) -> Manifold {
+            let mut m = Manifold::new(BodyIndex(0), BodyIndex(1));
+            m.normal = Vec3::new(0.0, 1.0, 0.0);
+            for (p, &fid) in fids.iter().enumerate() {
+                m.points[p] = ContactPoint {
+                    anchor_a: Vec3::ZERO,
+                    anchor_b: Vec3::ZERO,
+                    separation: -0.01,
+                    feature_id: fid,
+                };
+            }
+            m.count = fids.len() as u8;
+            m
+        }
+
+        /// A per-manifold record of the points `fids` with the normal impulses `normals` and the
+        /// friction triple `triple` in its fixed slots.
+        fn fm_record(fids: &[u32], normals: &[f32], triple: [f32; 3]) -> WarmRecord {
+            let mut rec = WarmRecord::EMPTY;
+            rec.set_shape(&fid_manifold(fids));
+            for (p, &n) in normals.iter().enumerate() {
+                rec.set_normal(p, n);
+            }
+            rec.set_friction(triple);
+            rec
+        }
+
+        /// A read side of `recs` under `keys` (strict iff the keys strictly increase) and the cold
+        /// index over its keys.
+        fn read_side(keys: &[u64], recs: &[WarmRecord]) -> (WarmRecords, WarmIndex) {
+            let mut side = WarmRecords::with_capacity(warm_table_id(4), warm_table_id(2), keys.len().max(1));
+            side.resize(keys.len());
+            side.keys_mut().as_mut_slice().copy_from_slice(keys);
+            side.recs_mut().as_mut_slice().copy_from_slice(recs);
+            side.set_strict(keys.windows(2).all(|w| w[0] < w[1]));
+            let mut index = WarmIndex::with_capacity(warm_table_id(6), keys.len().max(1));
+            index.build(keys);
+            (side, index)
+        }
+
+        /// Lemma W-F's lookup: the triple of the first record of the walk holding one of the
+        /// manifold's feature ids, λtw `+0` below two points; nothing without a shared feature
+        /// id. Red under M9 (seeded without a feature-id hit) and M10 (λtw seeded at count 1).
+        #[test]
+        fn friction_seed_takes_the_first_record_holding_a_feature_id() {
+            let t = [0.25f32, -0.5, 0.75];
+            let (side, index) = read_side(&[7], &[fm_record(&[1, 2, 3], &[1.0, 2.0, 3.0], t)]);
+            let lookup = WarmLookup { read: &side, index: &index };
+            let run = WarmRun { lo: 0, hi: 1 };
+            assert_eq!(lookup.friction_seed(run, &fid_manifold(&[7, 8]), 2), None, "no shared feature id: no seed (M9)");
+            assert_eq!(lookup.friction_seed(WarmRun::MISS, &fid_manifold(&[1, 2]), 2), None, "an empty run: no seed");
+            let two = lookup.friction_seed(run, &fid_manifold(&[9, 3]), 2).expect("feature id 3 is held");
+            assert_eq!(two.map(f32::to_bits), t.map(f32::to_bits), "two points: the whole triple");
+            let one = lookup.friction_seed(run, &fid_manifold(&[2]), 1).expect("feature id 2 is held");
+            assert_eq!(
+                one.map(f32::to_bits),
+                [t[0].to_bits(), t[1].to_bits(), 0.0f32.to_bits()],
+                "one point: λtw is +0, a one-point manifold has no twist row (M10)"
+            );
+
+            // A one-point source record (the per-point store's bytes): the seed's pair is
+            // `seed_of`'s tangent pair bit for bit, a −0 word included (D9).
+            let mut single = WarmRecord::EMPTY;
+            single.set_shape(&fid_manifold(&[5]));
+            single.set_impulses(0, [1.5, -0.0, 0.125]);
+            let (side1, index1) = read_side(&[3], &[single]);
+            let fs = WarmLookup { read: &side1, index: &index1 }
+                .friction_seed(run, &fid_manifold(&[5]), 1)
+                .expect("feature id 5 is held");
+            let ps = single.seed_of(5).expect("feature id 5 is held");
+            assert_eq!(
+                [fs[0].to_bits(), fs[1].to_bits(), fs[2].to_bits()],
+                [ps[1].to_bits(), ps[2].to_bits(), 0],
+                "a one-point source: the per-point tangent pair, λtw +0"
+            );
+
+            // A non-strict side: the walk descends the manifold indices of the key's run, and the
+            // first record holding one of the feature ids wins.
+            let older = fm_record(&[1, 2], &[1.0, 1.0], [1.0, 1.0, 1.0]);
+            let newer = fm_record(&[4], &[1.0], [2.0, 2.0, 2.0]);
+            let (side2, index2) = read_side(&[9, 9], &[older, newer]);
+            assert!(!side2.strict(), "premise: a duplicate key is a non-strict side");
+            let lookup2 = WarmLookup { read: &side2, index: &index2 };
+            let run2 = index2.run(9);
+            assert_eq!(lookup2.friction_seed(run2, &fid_manifold(&[2, 4]), 2), Some([2.0, 2.0, 2.0]), "the later record wins");
+            assert_eq!(
+                lookup2.friction_seed(run2, &fid_manifold(&[1, 3]), 2),
+                Some([1.0, 1.0, 1.0]),
+                "a later record sharing no feature id is passed over"
+            );
+        }
+
+        /// D9's carry: the normal hits are compacted as `carry` compacts them, and the triple is
+        /// copied whole — λtw too, below two hits — iff a point hits. Red under M8′ (the carry
+        /// drops the triple).
+        #[test]
+        fn carry_fm_keeps_the_triple_iff_a_point_hits() {
+            let t = [0.5f32, 0.25, -0.125];
+            let (side, index) = read_side(&[11], &[fm_record(&[1, 2, 3, 4], &[1.0, 2.0, 3.0, 4.0], t)]);
+            let lookup = WarmLookup { read: &side, index: &index };
+            let run = WarmRun { lo: 0, hi: 1 };
+            let (rec, hits) = lookup.carry_fm(run, &fid_manifold(&[9, 2]), 2);
+            assert_eq!((hits, rec.count()), (1, 1), "one of two points hits");
+            assert_eq!(rec.seed_of(2).map(|s| s[0].to_bits()), Some(2.0f32.to_bits()), "its normal impulse");
+            assert_eq!(rec.friction().map(f32::to_bits), t.map(f32::to_bits), "a point hit keeps the whole triple");
+            let (rec, hits) = lookup.carry_fm(run, &fid_manifold(&[8, 9]), 2);
+            assert_eq!(hits, 0, "no point hits");
+            assert_eq!(rec.words(), WarmRecord::EMPTY.words(), "no hit: an empty record, no friction");
+        }
+
+        /// D15's conversion: every tangent word `+0`; the normals, the feature ids and the count
+        /// untouched.
+        #[test]
+        fn zero_friction_zeroes_the_tangent_words_only() {
+            let mut recs = [
+                fm_record(&[1, 2], &[3.0, 4.0], [0.5, -0.25, 0.125]),
+                fm_record(&[7], &[1.0], [-1.0, 2.0, 0.0]),
+            ];
+            let before: Vec<[u32; 16]> = recs.iter().map(WarmRecord::words).collect();
+            assert!(before.iter().any(|w| w[4..12].iter().any(|&x| x != 0)), "premise: some tangent word is non-zero");
+            zero_friction(&mut recs);
+            for (rec, was) in recs.iter().zip(&before) {
+                let w = rec.words();
+                assert_eq!(w[0..4], was[0..4], "the normal impulses stay");
+                assert!(w[4..12].iter().all(|&x| x == 0), "every t1 / t2 word is +0");
+                assert_eq!(w[12..16], was[12..16], "the feature ids and the count stay");
+            }
+        }
+
+        /// Lemma W-F's idempotence (D9): over random sources of one to four points, random
+        /// feature ids from a small alphabet (so the frozen manifold shares zero to four of them)
+        /// and random impulses, `carry_fm(carry_fm(r, m), m) == carry_fm(r, m)` in all sixteen
+        /// words. Red under N-IDEM (λtw zeroed when the SOURCE holds fewer than two points): a
+        /// source of two or more points with one hit keeps λtw on the first carry and would drop
+        /// it on the second.
+        #[test]
+        fn carry_fm_is_idempotent() {
+            use proptest::prelude::*;
+            let shrink_cases = std::cell::Cell::new(0u32);
+            let miss_cases = std::cell::Cell::new(0u32);
+            proptest!(ProptestConfig::with_cases(512), |(seed in any::<u64>())| {
+                let mut rng = Lcg(seed);
+                let n_src = rng.range(1, 5) as usize;
+                let src_fids: Vec<u32> = (0..n_src).map(|_| rng.range(0, 6)).collect();
+                let normals: Vec<f32> = (0..n_src).map(|_| rng.f01() * 4.0).collect();
+                let triple = [rng.f01() - 0.5, rng.f01() - 0.5, rng.f01() - 0.25];
+                let n_m = rng.range(1, 5) as usize;
+                let m_fids: Vec<u32> = (0..n_m).map(|_| rng.range(0, 8)).collect();
+                let m = fid_manifold(&m_fids);
+                let run = WarmRun { lo: 0, hi: 1 };
+                let (side, index) = read_side(&[5], &[fm_record(&src_fids, &normals, triple)]);
+                let (once, hits) = WarmLookup { read: &side, index: &index }.carry_fm(run, &m, n_m);
+                let (side2, index2) = read_side(&[5], &[once]);
+                let (twice, hits2) = WarmLookup { read: &side2, index: &index2 }.carry_fm(run, &m, n_m);
+                prop_assert_eq!(twice.words(), once.words(), "seed {}: the carry is not idempotent", seed);
+                prop_assert_eq!(hits2, hits);
+                if n_src >= 2 && once.count() == 1 && triple[2] != 0.0 {
+                    shrink_cases.set(shrink_cases.get() + 1);
+                }
+                if hits == 0 {
+                    miss_cases.set(miss_cases.get() + 1);
+                }
+            });
+            assert!(
+                shrink_cases.get() > 0 && miss_cases.get() > 0,
+                "anti-vacuity: the cases must hold a multi-point source carried down to one hit with a \
+                 non-zero λtw ({}) and a full miss ({})",
+                shrink_cases.get(),
+                miss_cases.get()
+            );
+        }
+
+        /// The no-FMA census of `contact.rs` (L8 review O3): the scalar oracle of the FM patch's
+        /// twist mass and angular apply lives there, and the colored census scans `colored.rs`
+        /// only. Same needles and the same assembled-witness rule as `colored_has_no_fma_or_approx_callsites`.
+        #[test]
+        fn contact_has_no_fma_or_approx_callsites() {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("solver")
+                .join("contact.rs");
+            let contents = std::fs::read_to_string(&path).expect("solver/contact.rs must be readable");
+            let suffix = "_ps(";
+            let widths = ["_mm256_", "_mm_"];
+            let stems = ["fmadd", "fmsub", "fnmadd", "fnmsub", "fmaddsub", "fmsubadd", "rsqrt", "rcp"];
+            let mut banned: Vec<String> = Vec::with_capacity(widths.len() * stems.len() + 2);
+            for w in widths {
+                for st in stems {
+                    banned.push(format!("{w}{st}{suffix}"));
+                }
+            }
+            banned.push(format!("{}{}", "mul_add", "("));
+            banned.push(format!("{}{}", "algebraic", "_"));
+            let mut hits = Vec::new();
+            for (i, line) in contents.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                for b in &banned {
+                    if line.contains(b.as_str()) {
+                        hits.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                    }
+                }
+            }
+            assert!(
+                hits.is_empty(),
+                "no-FMA/no-approx invariant violated in solver/contact.rs (the colored kernels' scalar \
+                 oracle; a fused or approximate op ends their bit claim):\n{}",
+                hits.join("\n")
+            );
+            // Non-vacuity: the twist mass's own body, assembled so this file's text cannot satisfy it.
+            let witness = format!("{}{}", "fn twist", "_mass(");
+            assert!(contents.contains(&witness), "census scanned {} but found no `{witness}`", path.display());
+        }
+
+        // ── The patch on hand-built cohorts (scalar = AVX2, the width-1 identity, G-S4) ──
+
+        /// The bodies and manifolds of `groups` over `bodies`, as `build_cohort_solver` builds them.
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        fn cohort_inputs(groups: &[GroupSpec], bodies: &[BodyEffective]) -> (Vec<BodyState>, Vec<Manifold>) {
+            let mut states: Vec<BodyState> = bodies
+                .iter()
+                .map(|b| BodyState {
+                    inv_inertia: b.inv_inertia,
+                    inv_inertia_local: b.inv_inertia,
+                    position: Vec3::ZERO,
+                    linear_velocity: b.linear_velocity,
+                    angular_velocity: b.angular_velocity,
+                    rotation: Quat::IDENTITY,
+                    inv_mass: b.inv_mass,
+                    restitution: 0.0,
+                    friction: 0.0,
+                    simulated: true,
+                    kinematic: false,
+                    is_sensor: false,
+                    bp_margin: 0.0,
+                    shape: ColliderShape::Sphere { radius: 1.0 },
+                })
+                .collect();
+            let mut manifolds = Vec::with_capacity(groups.len());
+            for g in groups {
+                states[g.ia as usize].friction = g.friction;
+                if !g.sentinel {
+                    states[g.ib as usize].friction = g.friction;
+                }
+                let mut m = Manifold::new(BodyIndex(g.ia), if g.sentinel { SDF_SENTINEL } else { BodyIndex(g.ib) });
+                m.normal = g.normal;
+                for (p, ps) in g.points.iter().enumerate() {
+                    m.points[p] = ContactPoint {
+                        anchor_a: ps.ra,
+                        anchor_b: ps.rb,
+                        separation: ps.separation,
+                        feature_id: p as u32,
+                    };
+                }
+                m.count = g.points.len() as u8;
+                manifolds.push(m);
+            }
+            (states, manifolds)
+        }
+
+        /// [`build_cohort_solver`] under friction per manifold: the solver's form is set before
+        /// the build, so the layout allots the patches and the `FM = true` fill computes the
+        /// geometry (`x8` picks the 8-lane pass) with the given centre; then the specs' seeds are
+        /// written — normals per rank, and per lane the friction triple `(points[0].seed.1,
+        /// points[0].seed.2, λtw)`: into the patch on a patched cohort (`λtw = twist(g)` on a lane
+        /// of two points or more, `+0` below), into rank 0's `ti1` / `ti2` on a depth-1 cohort.
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        fn build_fm_cohort_solver(
+            groups: &[GroupSpec],
+            bodies: &[BodyEffective],
+            centre: FrictionCentre,
+            x8: bool,
+            twist: impl Fn(usize) -> f32,
+        ) -> ColoredSoftStepSolver {
+            let (states, manifolds) = cohort_inputs(groups, bodies);
+            let graph = build_graph(&states, &manifolds);
+            let mut solver =
+                ColoredSoftStepSolver { stored_fm: true, fm_fill: FmFill { centre, x8 }, ..ColoredSoftStepSolver::default() };
+            solver.build_bodies(&states, &[]);
+            solver.build_columns(&manifolds, &graph, &states, None, RowRemap::Identity, None, false);
+            assert_eq!(solver.columns.color_offsets().len(), 2, "body-disjoint specs form one color");
+            let ctx = solver.columns.color_ctx(0);
+            let heads: Vec<(usize, usize)> =
+                solver.columns.heads().iter().map(|h| (h.rank_base as usize, h.depth as usize)).collect();
+            {
+                let mut blocks = solver.columns.blocks.build_view();
+                let blocks = blocks.as_mut_slice();
+                for (g, spec) in groups.iter().enumerate() {
+                    let (k, l) = ctx.lane_of(g);
+                    let (rank_base, depth) = heads[k];
+                    for (r, ps) in spec.points.iter().enumerate() {
+                        blocks[rank_base + r].ni[l] = ps.seed.0;
+                    }
+                    let first = spec.points[0].seed;
+                    if depth >= 2 {
+                        let tw = if spec.points.len() >= 2 { twist(g) } else { 0.0 };
+                        blocks[rank_base + depth].set_patch_triple(l, [first.1, first.2, tw]);
+                    } else {
+                        blocks[rank_base].ti1[l] = first.1;
+                        blocks[rank_base].ti2[l] = first.2;
+                    }
+                }
+            }
+            solver
+        }
+
+        /// The coverage a scalar replay of one patched lane's sweep reads (the `cone_probe` of the
+        /// patch): the twist row clamped, the twist row inside its box, a `−0` twist candidate
+        /// meeting a zero limit, and the tangent disc clamped.
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[derive(Clone, Copy, Debug, Default)]
+        struct PatchProbe {
+            twist_clamped: usize,
+            twist_inside: usize,
+            neg_zero_on_zero_limit: usize,
+            disc_clamped: usize,
+        }
+
+        /// Replays `solve_color_k::<false, false, true>`'s lane `l` of patched cohort `k` from the
+        /// pristine `bodies` (bias on) and reports what its twist and disc did. The kernel is
+        /// lane-local, so a replay on copies of the lane's two bodies is exact.
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        fn patch_probe(cols: &CohortColumns, bodies: &[BodyEffective], k: usize, l: usize, soft: &SoftCoefficients) -> PatchProbe {
+            let head = &cols.heads()[k];
+            let rank_base = head.rank_base as usize;
+            let depth = head.depth as usize;
+            let blocks = cols.blocks();
+            let normal = head.normal(l);
+            let t1 = head.tangent1(l);
+            let t2 = normal.cross(t1);
+            let ia = head.body_a[l] as usize;
+            let sent = head.is_sentinel(l);
+            let ib = head.body_b[l] as usize;
+            let friction = head.friction[l];
+            let mut ba = bodies[ia];
+            let mut bb = if sent { IMMOVABLE_AT_REST } else { bodies[ib] };
+            let a_mov = is_dynamic_row(ba.inv_mass);
+            let b_mov = !sent && is_dynamic_row(bb.inv_mass);
+            let (mut s_n, mut s_d) = (0.0f32, 0.0f32);
+            for blk in &blocks[rank_base..rank_base + head.width[l] as usize] {
+                let (ra, rb, sep) = (blk.ra(l), blk.rb(l), blk.sep[l]);
+                let m_eff = effective_mass(normal, ra, rb, &ba, &bb);
+                let vn = (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal);
+                let bias = (soft.bias_rate * sep).max(-MAX_BIAS_VELOCITY);
+                let d = -soft.mass_coeff * m_eff * (vn + bias) - soft.impulse_coeff * blk.ni[l];
+                let new_lambda = (blk.ni[l] + d).max(0.0);
+                let imp = normal * (new_lambda - blk.ni[l]);
+                if a_mov {
+                    ba.apply_impulse(ra, imp * -1.0);
+                }
+                if b_mov {
+                    bb.apply_impulse(rb, imp);
+                }
+                s_n += new_lambda;
+                s_d += blk.ti1[l] * new_lambda;
+            }
+            let patch = &blocks[rank_base + depth];
+            let [lt1, lt2, ltw] = patch.patch_triple(l);
+            let mut probe = PatchProbe::default();
+            if head.width[l] >= 2 {
+                let m_tw = twist_mass(normal, &ba, &bb);
+                let w = (bb.angular_velocity - ba.angular_velocity).dot(normal);
+                let limit = friction * s_d;
+                let candidate = ltw - m_tw * w;
+                #[allow(clippy::neg_multiply)]
+                let lower = limit * -1.0;
+                let new_tw = min_sel(max_sel(candidate, lower), limit);
+                probe.twist_clamped += usize::from(limit > 0.0 && candidate.abs() > limit);
+                probe.twist_inside += usize::from(candidate.abs() < limit);
+                probe.neg_zero_on_zero_limit +=
+                    usize::from(candidate.to_bits() == (-0.0f32).to_bits() && limit.to_bits() == 0);
+                let torque = normal * (new_tw - ltw);
+                if a_mov {
+                    ba.apply_angular_impulse(torque * -1.0);
+                }
+                if b_mov {
+                    bb.apply_angular_impulse(torque);
+                }
+            }
+            let (rc_a, rc_b) = (patch.ra(l), patch.rb(l));
+            let max_friction = friction * s_n;
+            let dv = bb.point_velocity(rc_b) - ba.point_velocity(rc_a);
+            let new_t1 = lt1 - effective_mass(t1, rc_a, rc_b, &ba, &bb) * dv.dot(t1);
+            let new_t2 = lt2 - effective_mass(t2, rc_a, rc_b, &ba, &bb) * dv.dot(t2);
+            let len_sq = new_t1 * new_t1 + new_t2 * new_t2;
+            probe.disc_clamped += usize::from(len_sq > max_friction * max_friction && len_sq > 0.0);
+            probe
+        }
+
+        /// The FM warm apply over `cols` from the pristine `bodies`, then (separately, again from
+        /// the pristine bodies) one FM sweep (`bias_active`): each run by the scalar oracle and by
+        /// the AVX2 kernel on its own copy, asserting byte-equal tables and bit-equal bodies. Returns
+        /// the scalar sweep's bodies.
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        fn fm_differential(cols: &CohortColumns, bodies: &[BodyEffective], bias_active: bool) -> Vec<BodyEffective> {
+            let soft = SoftCoefficients::new(
+                PhysicsConfig::default().contact_hertz,
+                PhysicsConfig::default().contact_damping,
+                (1.0 / 60.0) / 4.0,
+            );
+            let no_deltas = delta_scratch_from(&[]);
+            let step = SolveStep { fm: true, ..pre_v2_step(&soft, &no_deltas) };
+            let ctx = cols.color_ctx(0);
+            let g_hi = cols.color_group_start()[1] as usize;
+            let (k_lo, k_hi) = ctx.cohorts_of(ctx.g_base, g_hi);
+            let n = cols.heads().len();
+            let bits = |b: &ScratchColumn<BodyEffective>| b.as_read_slice().iter().map(vel_bits).collect::<Vec<_>>();
+
+            // The warm apply.
+            let warm_scalar = body_scratch_from(bodies);
+            ColoredSoftStepSolver::warm_apply_scalar::<true>(cols, warm_scalar.solve_view(), 0, n);
+            let warm_simd = body_scratch_from(bodies);
+            // SAFETY: the test target is `target_feature = "avx2"`-gated, so the host supports AVX2;
+            //   `cols` is a fully built FM layout, and this thread is the only accessor of the bodies.
+            unsafe { ColoredSoftStepSolver::warm_apply_avx2::<true>(cols, warm_simd.solve_view(), 0, n) };
+            assert_eq!(bits(&warm_scalar), bits(&warm_simd), "FM warm apply: body bits");
+
+            // One sweep.
+            let cols_scalar = clone_columns(cols);
+            let bodies_scalar = body_scratch_from(bodies);
+            ColoredSoftStepSolver::solve_color::<true>(
+                cols_scalar.solve_view(),
+                bodies_scalar.solve_view(),
+                ctx,
+                ctx.g_base,
+                g_hi,
+                &step,
+                bias_active,
+            );
+            let cols_simd = clone_columns(cols);
+            let bodies_simd = body_scratch_from(bodies);
+            // SAFETY: as above; `[k_lo, k_hi)` are the single colour's body-disjoint cohorts.
+            unsafe {
+                ColoredSoftStepSolver::solve_color_avx2::<true>(
+                    cols_simd.solve_view(),
+                    bodies_simd.solve_view(),
+                    k_lo,
+                    k_hi,
+                    &step,
+                    bias_active,
+                );
+            }
+            assert_eq!(
+                layout_snapshot(&cols_scalar),
+                layout_snapshot(&cols_simd),
+                "FM sweep: the scalar and AVX2 patch leave byte-equal tables (bias_active {bias_active})"
+            );
+            assert_eq!(bits(&bodies_scalar), bits(&bodies_simd), "FM sweep: body bits (bias_active {bias_active})");
+            bodies_scalar.as_read_slice().to_vec()
+        }
+
+        /// D3's hand cases, each on the scalar geometry AND the 8-lane one, against its exact bits:
+        /// under C-TOUCH a lone touching anchor with a `−0` component is the centre bit for bit (the
+        /// first-contributor rule; M-T1 starts the sum from `+0`); `sep = −0` touches (M-T3 tests
+        /// `sep < 0`); a wholly speculative lane takes the C-ALL centre, finite (M-T2 divides by
+        /// `c_t = 0`); and C-ALL of three points divides `S / 3` (M15 multiplies by `1/3`).
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[test]
+        fn patch_geometry_hand_cases_on_both_paths() {
+            use core::arch::x86_64::{_mm256_set1_epi32, _mm256_set1_ps, _mm256_storeu_ps};
+            let n = OBLIQUE_NORMAL;
+            let bits = |v: Vec3| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()];
+            // The 8-lane geometry of one lane broadcast to all eight, read back from lane 0.
+            let x8 = |ra: &[Vec3], rb: &[Vec3], sep: &[f32], touch: bool| -> (Vec3, Vec3, [f32; MAX_CONTACT_POINTS]) {
+                let width = ra.len();
+                // SAFETY: the test target is `target_feature = "avx2"`-gated, so the host supports
+                //   AVX2; every store writes 8 `f32` into an in-bounds `[f32; 8]`.
+                unsafe {
+                    let zero = _mm256_set1_ps(0.0);
+                    let mut rav = [[zero; 3]; 4];
+                    let mut rbv = [[zero; 3]; 4];
+                    let mut sepv = [zero; 4];
+                    for r in 0..width {
+                        rav[r] = [_mm256_set1_ps(ra[r].x), _mm256_set1_ps(ra[r].y), _mm256_set1_ps(ra[r].z)];
+                        rbv[r] = [_mm256_set1_ps(rb[r].x), _mm256_set1_ps(rb[r].y), _mm256_set1_ps(rb[r].z)];
+                        sepv[r] = _mm256_set1_ps(sep[r]);
+                    }
+                    let nv = [_mm256_set1_ps(n.x), _mm256_set1_ps(n.y), _mm256_set1_ps(n.z)];
+                    let w = _mm256_set1_epi32(width as i32);
+                    let (rc_a, rc_b, d) = if touch {
+                        crate::solver::simd::patch_geometry_x8::<true>(&rav, &rbv, &sepv, w, width.max(2), nv)
+                    } else {
+                        crate::solver::simd::patch_geometry_x8::<false>(&rav, &rbv, &sepv, w, width.max(2), nv)
+                    };
+                    let lane0 = |v| {
+                        let mut out = [0.0f32; 8];
+                        _mm256_storeu_ps(out.as_mut_ptr(), v);
+                        out[0]
+                    };
+                    let mut dd = [0.0f32; MAX_CONTACT_POINTS];
+                    for (r, slot) in dd.iter_mut().enumerate() {
+                        *slot = lane0(d[r]);
+                    }
+                    (
+                        Vec3::new(lane0(rc_a[0]), lane0(rc_a[1]), lane0(rc_a[2])),
+                        Vec3::new(lane0(rc_b[0]), lane0(rc_b[1]), lane0(rc_b[2])),
+                        dd,
+                    )
+                }
+            };
+            let both = |ra: &[Vec3], rb: &[Vec3], sep: &[f32], centre: FrictionCentre| {
+                let s = patch_geometry(ra, rb, sep, n, centre);
+                let v = x8(ra, rb, sep, centre == FrictionCentre::Touch);
+                assert_eq!((bits(s.0), bits(s.1)), (bits(v.0), bits(v.1)), "scalar = x8 centres ({centre:?}, sep {sep:?})");
+                assert_eq!(s.2.map(f32::to_bits), v.2.map(f32::to_bits), "scalar = x8 twist arms ({centre:?})");
+                s
+            };
+
+            // A lone touching anchor with a −0 component is the centre bit for bit (M-T1).
+            let ra = [Vec3::new(-0.0, 0.25, 0.5), Vec3::new(0.75, -0.5, 0.25)];
+            let rb = [Vec3::new(0.5, -0.0, 0.125), Vec3::new(-0.25, 0.5, 1.0)];
+            let (rc_a, rc_b, _) = both(&ra, &rb, &[-0.01, 0.02], FrictionCentre::Touch);
+            assert_eq!(bits(rc_a), bits(ra[0]), "one touching point: rc_a is its anchor, −0 kept (M-T1)");
+            assert_eq!(bits(rc_b), bits(rb[0]), "one touching point: rc_b is its anchor, −0 kept (M-T1)");
+
+            // `sep = −0` touches: the centre is that point alone (M-T3 would take the C-ALL mean).
+            let (rc_a, _, _) = both(&ra, &rb, &[-0.0, 0.02], FrictionCentre::Touch);
+            assert_eq!(bits(rc_a), bits(ra[0]), "sep = −0 is a touching point (M-T3)");
+            let (rc_a, _, _) = both(&ra, &rb, &[0.0, 0.02], FrictionCentre::Touch);
+            let all = patch_geometry(&ra, &rb, &[0.0, 0.02], n, FrictionCentre::All).0;
+            assert_eq!(bits(rc_a), bits(ra[0]), "sep = +0 is a touching point (`<= 0`)");
+            assert_ne!(bits(rc_a), bits(all), "premise: the touch centre differs from C-ALL here");
+
+            // A wholly speculative lane takes the C-ALL centre, finite (M-T2).
+            let (rc_a, rc_b, _) = both(&ra, &rb, &[0.01, 0.02], FrictionCentre::Touch);
+            let (all_a, all_b, _) = both(&ra, &rb, &[0.01, 0.02], FrictionCentre::All);
+            assert!(rc_a.is_finite() && rc_b.is_finite(), "the all-speculative fallback is finite (M-T2)");
+            assert_eq!((bits(rc_a), bits(rc_b)), (bits(all_a), bits(all_b)), "the fallback is C-ALL");
+
+            // C-ALL of three points divides `S / 3` (M15 multiplies by `1/3`).
+            let ra3 = [Vec3::new(0.1, 0.7, 0.3), Vec3::new(0.2, 0.4, 0.9), Vec3::new(0.3, 0.1, 0.6)];
+            let rb3 = [Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0), Vec3::new(7.0, 8.0, 10.0)];
+            let (rc_a, rc_b, _) = both(&ra3, &rb3, &[-0.1, -0.1, -0.1], FrictionCentre::All);
+            let sum = |r: &[Vec3]| (r[0] + r[1]) + r[2];
+            let (sa, sb) = (sum(&ra3), sum(&rb3));
+            let want = |s: Vec3| [(s.x / 3.0).to_bits(), (s.y / 3.0).to_bits(), (s.z / 3.0).to_bits()];
+            assert_eq!((bits(rc_a), bits(rc_b)), (want(sa), want(sb)), "C-ALL is S / c");
+            let third = 1.0f32 / 3.0;
+            assert!(
+                [sa.x, sa.y, sa.z, sb.x, sb.y, sb.z].iter().any(|&v| (v / 3.0).to_bits() != (v * third).to_bits()),
+                "premise: S / 3 and S·(1/3) differ in some word here, so M15 is visible"
+            );
+        }
+
+        /// One body for the probe corpus: dynamic unless `fixed`, with an isotropic inertia.
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        fn probe_body(rng: &mut SplitMix64, fixed: bool) -> BodyEffective {
+            if fixed {
+                BodyEffective {
+                    inv_mass: 0.0,
+                    inv_inertia: Mat3::ZERO,
+                    linear_velocity: Vec3::ZERO,
+                    angular_velocity: Vec3::ZERO,
+                }
+            } else {
+                dyn_eff(0.5 + rng.f01(), 0.5 + rng.f01() * 2.0, rand_vel(rng), rand_vel(rng))
+            }
+        }
+
+        /// A random FM probe cohort set: the O7 corpus with every separation redrawn among
+        /// touching (`< 0`), speculative (`> 0`), `−0` and `+0`, every λtw seed random, plus one
+        /// hand-built lane whose twist candidate is `−0` on a zero limit (a static A against a
+        /// sentinel: no normal push, no spin, a `−0` λtw seed).
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        fn probe_corpus(rng: &mut SplitMix64) -> (Vec<GroupSpec>, Vec<BodyEffective>, Vec<f32>) {
+            let (mut groups, mut bodies) = random_cohort_corpus(rng, OBLIQUE_NORMAL);
+            for g in &mut groups {
+                for p in &mut g.points {
+                    p.separation = match rng.range(0, 8) {
+                        0 => -0.0,
+                        1 => 0.0,
+                        2..=4 => -(0.01 + rng.f01() * 0.2),
+                        _ => 0.005 + rng.f01() * 0.05,
+                    };
+                }
+            }
+            let ia = bodies.len() as u32;
+            bodies.push(probe_body(rng, true));
+            groups.push(GroupSpec {
+                ia,
+                ib: u32::MAX,
+                sentinel: true,
+                normal: OBLIQUE_NORMAL,
+                friction: 0.5,
+                points: vec![
+                    PointSpec { ra: Vec3::new(0.3, 0.0, 0.1), rb: Vec3::ZERO, separation: 0.02, seed: (0.0, 0.0, 0.0) },
+                    PointSpec { ra: Vec3::new(-0.3, 0.0, -0.1), rb: Vec3::ZERO, separation: 0.03, seed: (0.0, 0.0, 0.0) },
+                ],
+            });
+            let mut twist: Vec<f32> = (0..groups.len()).map(|_| (rng.f01() - 0.5) * 2.0).collect();
+            *twist.last_mut().expect("the hand-built lane") = -0.0;
+            (groups, bodies, twist)
+        }
+
+        /// `patch_probe` (design §8 C1 (d)): over random FM cohorts and both centres, the scalar
+        /// oracle and the AVX2 kernel of the warm apply and the sweep agree bit for bit, and the
+        /// scalar geometry and the 8-lane one leave byte-equal layouts. The corpus is shown to
+        /// reach every case named by the design: a disc clamp, a twist clamp and an unclamped
+        /// twist, widths 1 and 4 in one patched cohort, a sentinel lane, a `−0` twist candidate on
+        /// a zero limit; under C-TOUCH 1, 3 and 4 touching points of 4, a wholly speculative lane
+        /// (the fallback), `sep = −0` and `+0`, a width-1 touching and a width-1 speculative lane.
+        /// Every width-1 lane of a patched cohort has its centre equal to its anchor bit for bit
+        /// (D2 (1)). Red under M11 (plain `f32::max` / `min` in the scalar clamp), M15 (`S·(1/c)`
+        /// in the 8-lane geometry), M-T1 (the touch sum started from `+0`), M-T2 (the fallback
+        /// divides by `c_t = 0`) and M-T3 (touching taken as `sep < 0`).
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[test]
+        // `assertions_on_constants`: the `cfg!` is constant per build, and asserting it is the point —
+        // a build without the AVX2 arm must red here, never pass vacuously (W4).
+        #[allow(clippy::assertions_on_constants)]
+        fn patch_probe_scalar_equals_x8() {
+            assert!(cfg!(target_feature = "avx2"), "the probe must run the AVX2 kernels");
+            let soft = SoftCoefficients::new(
+                PhysicsConfig::default().contact_hertz,
+                PhysicsConfig::default().contact_damping,
+                (1.0 / 60.0) / 4.0,
+            );
+            let mut rng = SplitMix64(0xF0F0_7A7C_4000_0001);
+            let mut seen = PatchProbe::default();
+            let (mut mixed_widths, mut sentinel_patched) = (0usize, 0usize);
+            let mut touch = [0usize; MAX_CONTACT_POINTS + 1];
+            let (mut all_speculative, mut sep_neg_zero, mut sep_pos_zero) = (0usize, 0usize, 0usize);
+            let (mut w1_touching, mut w1_speculative) = (0usize, 0usize);
+            let cases = if cfg!(miri) { 2 } else { 160 };
+            for _ in 0..cases {
+                let (groups, bodies, twist) = probe_corpus(&mut rng);
+                for centre in [FrictionCentre::All, FrictionCentre::Touch] {
+                    let scalar = build_fm_cohort_solver(&groups, &bodies, centre, false, |g| twist[g]);
+                    let x8 = build_fm_cohort_solver(&groups, &bodies, centre, true, |g| twist[g]);
+                    assert_eq!(
+                        layout_snapshot(&scalar.columns),
+                        layout_snapshot(&x8.columns),
+                        "FM ({centre:?}): the scalar and the 8-lane geometry leave byte-equal layouts"
+                    );
+                    let cols = &scalar.columns;
+                    let ctx = cols.color_ctx(0);
+                    for (g, spec) in groups.iter().enumerate() {
+                        let (k, l) = ctx.lane_of(g);
+                        let head = &cols.heads()[k];
+                        if head.depth < 2 {
+                            continue;
+                        }
+                        let patch = &cols.blocks()[head.rank_base as usize + head.depth as usize];
+                        let width = spec.points.len();
+                        let touching = spec.points.iter().filter(|p| p.separation <= 0.0).count();
+                        if width == 1 {
+                            let ra0 = cols.blocks()[head.rank_base as usize].ra(l);
+                            let rc = patch.ra(l);
+                            assert_eq!(
+                                [rc.x.to_bits(), rc.y.to_bits(), rc.z.to_bits()],
+                                [ra0.x.to_bits(), ra0.y.to_bits(), ra0.z.to_bits()],
+                                "D2 (1): a width-1 lane's centre is its anchor bit for bit ({centre:?})"
+                            );
+                            w1_touching += usize::from(touching == 1);
+                            w1_speculative += usize::from(touching == 0);
+                        }
+                        if centre == FrictionCentre::Touch && width == MAX_CONTACT_POINTS {
+                            touch[touching] += 1;
+                        }
+                        all_speculative += usize::from(centre == FrictionCentre::Touch && width >= 2 && touching == 0);
+                        sep_neg_zero += usize::from(spec.points.iter().any(|p| p.separation.to_bits() == (-0.0f32).to_bits()));
+                        sep_pos_zero += usize::from(spec.points.iter().any(|p| p.separation.to_bits() == 0));
+                        sentinel_patched += usize::from(spec.sentinel);
+                        let p = patch_probe(cols, &bodies, k, l, &soft);
+                        seen.twist_clamped += p.twist_clamped;
+                        seen.twist_inside += p.twist_inside;
+                        seen.neg_zero_on_zero_limit += p.neg_zero_on_zero_limit;
+                        seen.disc_clamped += p.disc_clamped;
+                    }
+                    mixed_widths += cols.heads().iter().filter(|h| {
+                        let w = &h.width[..h.nlanes as usize];
+                        h.depth >= 2 && w.contains(&1) && w.contains(&(MAX_CONTACT_POINTS as u8))
+                    }).count();
+                    for bias_active in [true, false] {
+                        fm_differential(cols, &bodies, bias_active);
+                    }
+                }
+            }
+            eprintln!(
+                "patch_probe coverage: {seen:?} mixed {mixed_widths} sentinel {sentinel_patched} touch(of 4) {touch:?} \
+                 all-speculative {all_speculative} sep -0 {sep_neg_zero} +0 {sep_pos_zero} width-1 touching \
+                 {w1_touching} speculative {w1_speculative}"
+            );
+            assert!(
+                seen.disc_clamped > 0
+                    && seen.twist_clamped > 0
+                    && seen.twist_inside > 0
+                    && seen.neg_zero_on_zero_limit > 0
+                    && mixed_widths > 0
+                    && sentinel_patched > 0
+                    && touch[1] > 0
+                    && touch[3] > 0
+                    && touch[4] > 0
+                    && all_speculative > 0
+                    && sep_neg_zero > 0
+                    && sep_pos_zero > 0
+                    && w1_touching > 0
+                    && w1_speculative > 0,
+                "anti-vacuity: the probe corpus must reach every case the design names"
+            );
+        }
+
+        /// The width-1 identity's lanes (§5 (3)): seven body-disjoint groups in ONE cohort — six of
+        /// one point and one of four (the cohort is depth 4, so it carries a patch) — and one
+        /// padding lane. Lane 1's anchor has a `−0` component and lane 2's body B spins at `−0`.
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        fn width1_cohort() -> (Vec<GroupSpec>, Vec<BodyEffective>) {
+            let n = OBLIQUE_NORMAL;
+            let mut groups = Vec::new();
+            let mut bodies = Vec::new();
+            for g in 0..7u32 {
+                let ia = bodies.len() as u32;
+                let f = g as f32;
+                bodies.push(dyn_eff(
+                    0.7 + 0.05 * f,
+                    0.9 + 0.1 * f,
+                    Vec3::new(0.3 - 0.07 * f, -0.4 + 0.03 * f, 0.2),
+                    Vec3::new(0.05 * f, -0.12, 0.08 + 0.01 * f),
+                ));
+                let ib = bodies.len() as u32;
+                let mut b = dyn_eff(0.6 + 0.04 * f, 1.1, Vec3::new(-0.2, 0.1 * f, -0.3), Vec3::new(-0.06, 0.04 * f, 0.1));
+                if g == 2 {
+                    b.angular_velocity = Vec3::new(-0.0, -0.0, -0.0);
+                }
+                bodies.push(b);
+                let width = if g == 4 { 4 } else { 1 };
+                let points = (0..width)
+                    .map(|p| {
+                        let q = p as f32;
+                        let ra = if g == 1 && p == 0 {
+                            Vec3::new(-0.0, 0.0, 0.3)
+                        } else {
+                            Vec3::new(0.2 - 0.15 * q, 0.05 * f, -0.1 + 0.2 * q)
+                        };
+                        PointSpec {
+                            ra,
+                            rb: Vec3::new(-0.1 + 0.05 * q, 0.1, 0.2 - 0.05 * f),
+                            separation: -0.05 - 0.01 * q,
+                            seed: (0.4 + 0.1 * f + 0.05 * q, 0.3 - 0.07 * f, -0.2 + 0.05 * f),
+                        }
+                    })
+                    .collect();
+                groups.push(GroupSpec { ia, ib, sentinel: false, normal: n, friction: 0.4 + 0.05 * f, points });
+            }
+            (groups, bodies)
+        }
+
+        /// §8 C1 (c), the lane-level identity: inside a patched cohort every width-1 lane takes
+        /// the per-point lane's values bit for bit — after the warm apply, and after the warm apply
+        /// plus one sweep — on the scalar path and on the AVX2 one: its `λn`, its tangent pair
+        /// (the per-point rank's `ti1` / `ti2`, the patch's `λt1` / `λt2`) and both bodies'
+        /// velocities, a `−0` anchor component and a `−0` spin included. Lanes are body-disjoint,
+        /// so the width-4 lane cannot reach them. Red under M7 (a width-1 lane takes the merged warm
+        /// torque) and M-C3 (the twist row runs at width 1).
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[test]
+        // `assertions_on_constants`: as `patch_probe_scalar_equals_x8`'s.
+        #[allow(clippy::assertions_on_constants)]
+        fn patch_width1_lanes_equal_per_point() {
+            assert!(cfg!(target_feature = "avx2"), "the unit must run the AVX2 kernels (W4)");
+            let (groups, bodies) = width1_cohort();
+            let per_point = build_cohort_solver(&groups, &bodies);
+            let fm = build_fm_cohort_solver(&groups, &bodies, FrictionCentre::All, false, |g| 0.05 * g as f32);
+            assert_eq!(fm.columns.heads().len(), 1, "premise: one cohort");
+            let head = fm.columns.heads()[0];
+            assert!(head.depth == 4 && head.nlanes == 7, "premise: a depth-4 cohort with a padding lane");
+            assert_eq!(fm.layout_census().patch_blocks, 1, "premise: the cohort carries its patch");
+            let soft = SoftCoefficients::new(
+                PhysicsConfig::default().contact_hertz,
+                PhysicsConfig::default().contact_damping,
+                (1.0 / 60.0) / 4.0,
+            );
+            let no_deltas = delta_scratch_from(&[]);
+            let step_pp = pre_v2_step(&soft, &no_deltas);
+            let step_fm = SolveStep { fm: true, ..pre_v2_step(&soft, &no_deltas) };
+            let ctx = fm.columns.color_ctx(0);
+            let g_hi = fm.columns.color_group_start()[1] as usize;
+            let width1: Vec<usize> = (0..groups.len()).filter(|&g| groups[g].points.len() == 1).collect();
+
+            // (λn, λt1, λt2) of lane `l`'s one point, per form.
+            let pp_impulses = |cols: &CohortColumns, l: usize| {
+                let blk = &cols.blocks()[0];
+                [blk.ni[l].to_bits(), blk.ti1[l].to_bits(), blk.ti2[l].to_bits()]
+            };
+            let fm_impulses = |cols: &CohortColumns, l: usize| {
+                let patch = &cols.blocks()[4];
+                [cols.blocks()[0].ni[l].to_bits(), patch.sep[l].to_bits(), patch.ni[l].to_bits()]
+            };
+            for simd in [false, true] {
+                for sweep in [false, true] {
+                    let run = |solver: &ColoredSoftStepSolver, form_fm: bool| -> (CohortColumns, Vec<BodyEffective>) {
+                        let cols = clone_columns(&solver.columns);
+                        let body = body_scratch_from(&bodies);
+                        let step = if form_fm { &step_fm } else { &step_pp };
+                        if simd {
+                            // SAFETY: the test target is `target_feature = "avx2"`-gated, so the
+                            //   host supports AVX2; `cols` is a fully built table of one colour
+                            //   (an FM layout for the FM form) and this thread its only accessor.
+                            unsafe {
+                                if form_fm {
+                                    ColoredSoftStepSolver::warm_apply_avx2::<true>(&cols, body.solve_view(), 0, 1);
+                                } else {
+                                    ColoredSoftStepSolver::warm_apply_avx2::<false>(&cols, body.solve_view(), 0, 1);
+                                }
+                                if sweep {
+                                    if form_fm {
+                                        ColoredSoftStepSolver::solve_color_avx2::<true>(cols.solve_view(), body.solve_view(), 0, 1, step, true);
+                                    } else {
+                                        ColoredSoftStepSolver::solve_color_avx2::<false>(cols.solve_view(), body.solve_view(), 0, 1, step, true);
+                                    }
+                                }
+                            }
+                        } else {
+                            if form_fm {
+                                ColoredSoftStepSolver::warm_apply_scalar::<true>(&cols, body.solve_view(), 0, 1);
+                            } else {
+                                ColoredSoftStepSolver::warm_apply_scalar::<false>(&cols, body.solve_view(), 0, 1);
+                            }
+                            if sweep {
+                                if form_fm {
+                                    ColoredSoftStepSolver::solve_color::<true>(cols.solve_view(), body.solve_view(), ctx, ctx.g_base, g_hi, step, true);
+                                } else {
+                                    ColoredSoftStepSolver::solve_color::<false>(cols.solve_view(), body.solve_view(), ctx, ctx.g_base, g_hi, step, true);
+                                }
+                            }
+                        }
+                        (cols, body.as_read_slice().to_vec())
+                    };
+                    let (cols_pp, bodies_pp) = run(&per_point, false);
+                    let (cols_fm, bodies_fm) = run(&fm, true);
+                    let mut moved = 0usize;
+                    for &g in &width1 {
+                        let l = g;
+                        let spec = &groups[g];
+                        assert_eq!(
+                            pp_impulses(&cols_pp, l),
+                            fm_impulses(&cols_fm, l),
+                            "width-1 lane {l}: impulses (simd {simd}, sweep {sweep})"
+                        );
+                        for row in [spec.ia as usize, spec.ib as usize] {
+                            assert_eq!(
+                                vel_bits(&bodies_pp[row]),
+                                vel_bits(&bodies_fm[row]),
+                                "width-1 lane {l}: body row {row} (simd {simd}, sweep {sweep})"
+                            );
+                            moved += usize::from(vel_bits(&bodies_pp[row]) != vel_bits(&bodies[row]));
+                        }
+                    }
+                    assert!(moved > 0, "non-vacuity: the width-1 lanes' bodies moved (simd {simd}, sweep {sweep})");
+                }
+            }
+        }
+
+        /// §8 C1 (e) and SR C1's range bound under FM: the FM warm apply over cohorts `[0, k)` then
+        /// `[k, n)` is the whole apply, bit for bit, at every cut, for both kernels and both
+        /// centres, over FM layouts of the warm-apply corpus.
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[test]
+        fn warm_range_partition_equals_the_whole_apply_fm() {
+            let mut rng = SplitMix64(0x5B05_C0B0_7A11_0F01);
+            let mut interior_moving_cuts = 0usize;
+            let mut patched = 0usize;
+            let cases = if cfg!(miri) { 2 } else { 60 };
+            for case in 0..cases {
+                let (groups, bodies) = random_cohort_corpus(&mut rng, OBLIQUE_NORMAL);
+                let centre = if case % 2 == 0 { FrictionCentre::All } else { FrictionCentre::Touch };
+                let solver = build_fm_cohort_solver(&groups, &bodies, centre, true, |g| 0.1 * (g % 5) as f32 - 0.2);
+                let cols = &solver.columns;
+                patched += solver.layout_census().patch_blocks as usize;
+                let n = cols.heads().len();
+                let whole = body_scratch_from(&bodies);
+                ColoredSoftStepSolver::warm_apply_scalar::<true>(cols, whole.solve_view(), 0, n);
+                let whole: Vec<[u32; 6]> = whole.as_read_slice().iter().map(vel_bits).collect();
+                for k in 0..=n {
+                    let split_scalar = body_scratch_from(&bodies);
+                    ColoredSoftStepSolver::warm_apply_scalar::<true>(cols, split_scalar.solve_view(), 0, k);
+                    ColoredSoftStepSolver::warm_apply_scalar::<true>(cols, split_scalar.solve_view(), k, n);
+                    let split_simd = body_scratch_from(&bodies);
+                    // SAFETY: the test target is `target_feature = "avx2"`-gated, so the host
+                    //   supports AVX2; `cols` is a fully built FM table and this thread is the only
+                    //   accessor of `split_simd`.
+                    unsafe {
+                        ColoredSoftStepSolver::warm_apply_avx2::<true>(cols, split_simd.solve_view(), 0, k);
+                        ColoredSoftStepSolver::warm_apply_avx2::<true>(cols, split_simd.solve_view(), k, n);
+                    }
+                    for (name, got) in [("scalar", &split_scalar), ("avx2", &split_simd)] {
+                        let got: Vec<[u32; 6]> = got.as_read_slice().iter().map(vel_bits).collect();
+                        assert_eq!(got, whole, "FM {name}: [0, {k}) then [{k}, {n}) must equal the whole apply");
+                    }
+                    if k > 0 && k < n {
+                        let alone = body_scratch_from(&bodies);
+                        ColoredSoftStepSolver::warm_apply_scalar::<true>(cols, alone.solve_view(), k - 1, k);
+                        interior_moving_cuts += usize::from(
+                            alone.as_read_slice().iter().zip(&bodies).any(|(a, b)| vel_bits(a) != vel_bits(b)),
+                        );
+                    }
+                }
+            }
+            assert!(
+                interior_moving_cuts > 0 && patched > 0,
+                "anti-vacuity: an interior cut moved a row ({interior_moving_cuts}) and the layouts carried \
+                 patches ({patched})"
+            );
+        }
+
+        /// G-S4 (design §6, the Miri unit): two std threads run the scalar FM kernel
+        /// `solve_color_k::<false, false, true>` over disjoint group ranges of ONE depth-4 cohort, so
+        /// both write lanes of its one patch block at once, through single-lane raw projections; the
+        /// bits equal the one-thread sweep's. Red under M-S4 (the scalar patch write takes `&mut` of
+        /// the whole block) in Miri's Stacked Borrows leg.
+        ///
+        /// ```text
+        /// MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-ignore-leaks" cargo +nightly-x86_64-pc-windows-msvc \
+        ///   miri test -p boyko-physics --lib -- solver::colored::tests::fm::patch_scalar_workers_write_disjoint_lanes --exact
+        /// ```
+        /// and with `-Zmiri-tree-borrows` prepended.
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[test]
+        fn patch_scalar_workers_write_disjoint_lanes() {
+            let (mut groups, bodies) = width1_cohort();
+            for (g, spec) in groups.iter_mut().enumerate() {
+                if g % 3 == 0 && spec.points.len() == 1 {
+                    let p = spec.points[0];
+                    spec.points.push(PointSpec { ra: p.ra + Vec3::new(0.3, 0.0, -0.2), ..p });
+                }
+            }
+            let fm = build_fm_cohort_solver(&groups, &bodies, FrictionCentre::All, false, |g| 0.1 - 0.03 * g as f32);
+            assert_eq!(fm.columns.heads().len(), 1, "premise: one cohort, one patch block");
+            let soft = SoftCoefficients::new(
+                PhysicsConfig::default().contact_hertz,
+                PhysicsConfig::default().contact_damping,
+                (1.0 / 60.0) / 4.0,
+            );
+            let no_deltas = delta_scratch_from(&[]);
+            let step = SolveStep { fm: true, ..pre_v2_step(&soft, &no_deltas) };
+            let ctx = fm.columns.color_ctx(0);
+            let g_hi = fm.columns.color_group_start()[1] as usize;
+
+            let one_cols = clone_columns(&fm.columns);
+            let one_bodies = body_scratch_from(&bodies);
+            ColoredSoftStepSolver::solve_color_k::<false, false, true>(
+                one_cols.solve_view(),
+                one_bodies.solve_view(),
+                ctx,
+                ctx.g_base,
+                g_hi,
+                &step,
+                true,
+            );
+
+            let two_cols = clone_columns(&fm.columns);
+            let two_bodies = body_scratch_from(&bodies);
+            let (view, body_view) = (two_cols.solve_view(), two_bodies.solve_view());
+            let mid = ctx.g_base + 4;
+            std::thread::scope(|s| {
+                let step = &step;
+                s.spawn(move || {
+                    ColoredSoftStepSolver::solve_color_k::<false, false, true>(view, body_view, ctx, mid, g_hi, step, true);
+                });
+                ColoredSoftStepSolver::solve_color_k::<false, false, true>(view, body_view, ctx, ctx.g_base, mid, step, true);
+            });
+            assert_eq!(layout_snapshot(&two_cols), layout_snapshot(&one_cols), "two workers leave the one-thread tables");
+            assert_eq!(
+                two_bodies.as_read_slice().iter().map(vel_bits).collect::<Vec<_>>(),
+                one_bodies.as_read_slice().iter().map(vel_bits).collect::<Vec<_>>(),
+                "two workers leave the one-thread bodies"
+            );
+        }
+
+        /// The FM layout's structure on a hand-built cohort set (D7, D16): a depth-1 cohort gets
+        /// no patch, every deeper cohort exactly one, the blocks column is the ranks plus the
+        /// patches, and the post-solve padding audit holds the patch rules (padding lanes zero,
+        /// λtw `+0` below two points). `layout` itself writes no census: `layout_census` reads the
+        /// heads and the allotments.
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[test]
+        fn fm_layout_allots_one_patch_per_deep_cohort() {
+            let mut rng = SplitMix64(0xD16D_0001_C0C0_0001);
+            let mut by_depth = [0u32; MAX_CONTACT_POINTS];
+            for _ in 0..40 {
+                let (groups, bodies) = random_cohort_corpus(&mut rng, OBLIQUE_NORMAL);
+                let fm = build_fm_cohort_solver(&groups, &bodies, FrictionCentre::All, true, |_| 0.25);
+                let c = fm.layout_census();
+                assert_eq!(c.patch_blocks, c.cohorts_by_depth[1..].iter().sum::<u32>(), "one patch per cohort of depth >= 2");
+                assert_eq!(fm.columns.blocks().len() as u32, c.rank_slots + c.patch_blocks, "ranks plus patches");
+                assert_eq!(c.cohorts, fm.columns.heads().len() as u32);
+                let audit = audit_padding(&fm.columns);
+                assert!(audit.zero, "the FM layout's padding is zero: {audit:?}");
+                for (d, n) in by_depth.iter_mut().zip(c.cohorts_by_depth) {
+                    *d += n;
+                }
+                let per_point = build_cohort_solver(&groups, &bodies);
+                assert_eq!(per_point.layout_census().patch_blocks, 0, "the per-point layout carries no patch");
+            }
+            assert!(by_depth[0] > 0 && by_depth[3] > 0, "anti-vacuity: depth-1 and depth-4 cohorts: {by_depth:?}");
         }
     }

@@ -149,7 +149,7 @@ use boyko_physics::components::{
 use boyko_physics::manifold::{Manifold, SDF_SENTINEL};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::{add_physics_sdf, add_physics_systems};
-use boyko_physics::resources::{Manifolds, PhysicsConfig};
+use boyko_physics::resources::{FrictionModel, Manifolds, PhysicsConfig};
 use boyko_physics::sdf_query::SdfField;
 use boyko_physics::solver::{DefaultRigidSolver, RigidSolver, SoftStepSolver};
 use boyko_sdf_math::{SdfEdit, sdf_op};
@@ -276,16 +276,18 @@ struct Scene {
     ground: Ground,
 }
 
-/// The configuration one run of a scene uses: the pool's worker count and `simd_solve`. Every
-/// other [`PhysicsConfig`] field keeps its default, except `sleeping`, written off explicitly.
+/// The configuration one run of a scene uses: the pool's worker count, `simd_solve` and (FM C1)
+/// the friction model, `None` for the configuration's default. Every other [`PhysicsConfig`] field
+/// keeps its default, except `sleeping`, written off explicitly.
 #[derive(Clone, Copy, Debug)]
 struct Arm {
     workers: usize,
     simd_solve: bool,
+    friction: Option<FrictionModel>,
 }
 
 /// The shipped default on one worker.
-const DEFAULT_ARM: Arm = Arm { workers: 1, simd_solve: true };
+const DEFAULT_ARM: Arm = Arm { workers: 1, simd_solve: true, friction: None };
 
 /// A built world and its physics schedule.
 struct Sim {
@@ -329,6 +331,9 @@ impl Sim {
             cfg.gravity = scene.gravity;
             cfg.simd_solve = arm.simd_solve;
             cfg.sleeping = false;
+            if let Some(friction) = arm.friction {
+                cfg.friction_model = friction;
+            }
         }
         let mut sim = Self { world, schedule };
         let walked = sim.bodies();
@@ -408,12 +413,18 @@ const COUNT1_DT: f32 = 1.0 / 60.0;
 const COUNT1_STEPS: usize = 240;
 /// The four cells every count-1 scene runs on; the first is the shipped default, whose final hash
 /// is the pin and whose μ = 0 twin is P3's.
-const COUNT1_CELLS: [Arm; 4] = [
-    DEFAULT_ARM,
-    Arm { workers: 1, simd_solve: false },
-    Arm { workers: 8, simd_solve: false },
-    Arm { workers: 8, simd_solve: true },
-];
+const COUNT1_CELLS: [Arm; 4] = count1_cells(None);
+
+/// The four count-1 cells under friction model `friction` (`None`: the default), the default cell
+/// first.
+const fn count1_cells(friction: Option<FrictionModel>) -> [Arm; 4] {
+    [
+        Arm { workers: 1, simd_solve: true, friction },
+        Arm { workers: 1, simd_solve: false, friction },
+        Arm { workers: 8, simd_solve: false, friction },
+        Arm { workers: 8, simd_solve: true, friction },
+    ]
+}
 /// The count-1 spheres' radius.
 const COUNT1_RADIUS: f32 = 0.5;
 
@@ -712,7 +723,12 @@ impl Trace {
 
 /// Runs `scene` for `steps` on solver `S` (W 1, `simd_solve` on) and records the box.
 fn trace<S: RigidSolver + Default>(scene: &Scene, steps: usize) -> Trace {
-    let mut sim = Sim::new::<S>(scene, DEFAULT_ARM);
+    trace_on::<S>(scene, steps, DEFAULT_ARM)
+}
+
+/// [`trace`] on `arm`.
+fn trace_on<S: RigidSolver + Default>(scene: &Scene, steps: usize, arm: Arm) -> Trace {
+    let mut sim = Sim::new::<S>(scene, arm);
     let mut states = Vec::with_capacity(steps + 1);
     let mut points = Vec::with_capacity(steps + 1);
     let mut first_non_finite = None;
@@ -739,16 +755,77 @@ fn trace<S: RigidSolver + Default>(scene: &Scene, steps: usize) -> Trace {
     Trace { states, points, first_non_finite }
 }
 
-/// Runs one G-P cell: the reference first, printed as a receipt and never asserted, then the
-/// colored default, whose premises `read` asserts (a premise red is a STOP). Prints every colored
-/// reading against its bound and returns them with the colored trace.
+/// Which colored form a G-P cell runs (FM C1): the per-point base, with the reference receipt, or
+/// a per-manifold friction model, against the same bounds.
+#[derive(Clone, Copy, Debug)]
+enum Form {
+    /// The shipped per-point solver (the C0 base).
+    PerPoint,
+    /// Friction per manifold under this model.
+    Fm(FrictionModel),
+}
+
+impl Form {
+    /// The arm a colored cell of this form runs on: W 1, `simd_solve` on, the form's model.
+    fn arm(self) -> Arm {
+        match self {
+            Self::PerPoint => Arm { friction: Some(FrictionModel::PerPoint), ..DEFAULT_ARM },
+            Self::Fm(friction) => Arm { friction: Some(friction), ..DEFAULT_ARM },
+        }
+    }
+
+    /// The form's name in the printed record.
+    fn label(self) -> String {
+        match self {
+            Self::PerPoint => "per-point base".to_string(),
+            Self::Fm(model) => format!("FM {model:?}"),
+        }
+    }
+}
+
+/// Both per-manifold models (C2 screens both centres; C3 deletes the loser).
+const FM_FORMS: [Form; 2] = [Form::Fm(FrictionModel::PerManifold), Form::Fm(FrictionModel::PerManifoldTouch)];
+
+/// Runs one G-P cell: on the per-point base the reference first, printed as a receipt and never
+/// asserted, then the colored solver in `form`, whose premises `read` asserts (a premise red is a
+/// STOP). Prints every colored reading against its bound and returns them with the colored trace.
 fn run_gate_cell<F>(
     gate: &str,
     cell: &str,
     scene: &Scene,
     steps: usize,
+    form: Form,
     read: F,
 ) -> (Vec<Reading>, Trace)
+where
+    F: Fn(&Trace) -> Result<Vec<Reading>, String>,
+{
+    if let Form::PerPoint = form {
+        reference_receipt(gate, cell, scene, steps, &read);
+    }
+    let colored = trace_on::<DefaultRigidSolver>(scene, steps, form.arm());
+    let readings = read(&colored).unwrap_or_else(|premise| {
+        panic!(
+            "{gate}, {cell}, {}: premise: {premise}. The scene does not stand: a fixture or engine \
+             finding. STOP; never edit a bound or the fixture to make it stand",
+            form.label()
+        )
+    });
+    for r in &readings {
+        println!(
+            "{gate}, {}: {} = {} (bound {:?}; {})",
+            form.label(),
+            r.pair,
+            r.value,
+            r.bound,
+            r.verdict()
+        );
+    }
+    (readings, colored)
+}
+
+/// The reference solver's readings of a G-P cell, printed as a receipt and never asserted.
+fn reference_receipt<F>(gate: &str, cell: &str, scene: &Scene, steps: usize, read: &F)
 where
     F: Fn(&Trace) -> Result<Vec<Reading>, String>,
 {
@@ -768,23 +845,6 @@ where
             "{gate} reference receipt (SoftStepSolver), {cell}: a premise fails: {premise}"
         ),
     }
-    let colored = trace::<DefaultRigidSolver>(scene, steps);
-    let readings = read(&colored).unwrap_or_else(|premise| {
-        panic!(
-            "{gate}, {cell}, premise: {premise}. The scene does not stand: a fixture or engine \
-             finding. STOP; never edit a bound or the fixture to make it stand"
-        )
-    });
-    for r in &readings {
-        println!(
-            "{gate}, per-point base: {} = {} (bound {:?}; {})",
-            r.pair,
-            r.value,
-            r.bound,
-            r.verdict()
-        );
-    }
-    (readings, colored)
 }
 
 /// The plain per-point gate: every pair meets its bound.
@@ -801,6 +861,26 @@ fn assert_gate(gate: &str, readings: &[Reading]) {
          run (fm/design_r2.md §8 C0): {}. The per-point base met every pair when this file was \
          written, so a miss is a change in the per-point solver; never edit a bound to follow a \
          reading",
+        misses.len(),
+        readings.len(),
+        misses.join("; ")
+    );
+}
+
+/// The FM arm of a gate (FM C1, §8 C1 (j)): every pair meets the C0 bound the per-point base met.
+/// A miss is a STOP with the reading, never a bound edit and never a characterization.
+fn assert_fm_gate(gate: &str, form: Form, readings: &[Reading]) {
+    assert!(!readings.is_empty(), "harness: {gate} read no pair, so it would pass vacuously");
+    let misses: Vec<String> = readings
+        .iter()
+        .filter(|r| r.miss().is_some())
+        .map(|r| format!("{} = {} ({:?}; {})", r.pair, r.value, r.bound, r.verdict()))
+        .collect();
+    assert!(
+        misses.is_empty(),
+        "{gate}, {}: {} of {} pairs miss the C0 bounds (fm/design_r2.md §8 C0): {}. An FM arm that \
+         misses a bound is a STOP with the reading; never edit a bound",
+        form.label(),
         misses.len(),
         readings.len(),
         misses.join("; ")
@@ -894,6 +974,11 @@ fn g_p1_scene(arm: Incline, mu: f64, yaw_deg: f64) -> Scene {
 
 /// G-P1's readings for `arm`: one pair per (μ, yaw) cell.
 fn g_p1_readings(arm: Incline) -> Vec<Reading> {
+    g_p1_readings_in(arm, Form::PerPoint)
+}
+
+/// [`g_p1_readings`] in `form`.
+fn g_p1_readings_in(arm: Incline, form: Form) -> Vec<Reading> {
     let gate = format!("G-P1 {arm:?}");
     let mut out = Vec::new();
     for mu in G_P1_MU {
@@ -901,7 +986,7 @@ fn g_p1_readings(arm: Incline) -> Vec<Reading> {
             let cell = format!("μ {mu}, yaw {yaw_deg}°");
             let a = incline_acceleration(mu, arm.k() * mu);
             let scene = g_p1_scene(arm, mu, yaw_deg);
-            let (readings, _) = run_gate_cell(&gate, &cell, &scene, G_P1_FRAMES, |t| match arm {
+            let (readings, _) = run_gate_cell(&gate, &cell, &scene, G_P1_FRAMES, form, |t| match arm {
                 Incline::Stick => {
                     t.standing(G_P1_HALF + 1..=G_P1_FRAMES)?;
                     Ok(vec![Reading {
@@ -1001,7 +1086,12 @@ fn g_p2_scene() -> Scene {
 /// over the [`G_P2_HOLD_STEPS`] after it (`INFINITY` if they do not fit in the run), and the COM
 /// drift at `s* + 60` (at the last step if that does not fit).
 fn g_p2_readings() -> Vec<Reading> {
-    let (readings, _) = run_gate_cell("G-P2", "twist", &g_p2_scene(), G_P2_STEPS, |t| {
+    g_p2_readings_in(Form::PerPoint)
+}
+
+/// [`g_p2_readings`] in `form`.
+fn g_p2_readings_in(form: Form) -> Vec<Reading> {
+    let (readings, _) = run_gate_cell("G-P2", "twist", &g_p2_scene(), G_P2_STEPS, form, |t| {
         if t.points[1] != 4 {
             return Err(format!(
                 "the box-floor manifold holds {} points at step 1, not the 4 corners the analytic \
@@ -1098,7 +1188,12 @@ fn heading_deg(rotation: Quat) -> f64 {
 
 /// G-P3's readings: the heading change, the lateral displacement and the stop distance.
 fn g_p3_readings() -> Vec<Reading> {
-    let (readings, _) = run_gate_cell("G-P3", "slide", &g_p3_scene(), G_P3_STEPS, |t| {
+    g_p3_readings_in(Form::PerPoint)
+}
+
+/// [`g_p3_readings`] in `form`.
+fn g_p3_readings_in(form: Form) -> Vec<Reading> {
+    let (readings, _) = run_gate_cell("G-P3", "slide", &g_p3_scene(), G_P3_STEPS, form, |t| {
         t.standing(1..=G_P3_STEPS)?;
         let speed = norm(t.at(G_P3_STEPS).linear_velocity);
         if speed >= G_P3_REST {
@@ -1188,10 +1283,15 @@ fn tilt_deg(rotation: Quat) -> f64 {
 
 /// G-P7's reading, and the displacement-form receipt read from the same colored trace.
 fn g_p7_reading() -> (Vec<Reading>, f64) {
+    g_p7_reading_in(Form::PerPoint)
+}
+
+/// [`g_p7_reading`] in `form`.
+fn g_p7_reading_in(form: Form) -> (Vec<Reading>, f64) {
     let window = (G_P7_TO - G_P7_FROM) as f64 * G_P7_DT_S;
     let theta = 0.5f64.atan();
     let expected = G * (theta.sin() - G_P7_MU * theta.cos());
-    let (readings, t) = run_gate_cell("G-P7", "slide", &g_p7_scene(), G_P7_TO, |t| {
+    let (readings, t) = run_gate_cell("G-P7", "slide", &g_p7_scene(), G_P7_TO, form, |t| {
         t.standing(1..=G_P7_TO)?;
         let worst = (0..=G_P7_TO).map(|s| tilt_deg(t.at(s).rotation)).fold(0.0, f64::max);
         if worst > G_P7_TILT_DEG {
@@ -1224,4 +1324,260 @@ fn g_p7_single_box_slide_per_point() {
          {displacement_form} m/s² (biased by +1/N under symplectic Euler; not the gate)"
     );
     assert_gate("G-P7", &readings);
+}
+
+// ── FM C1: the per-manifold arms of the friction gates (fm/cut.md §3 C1b (c), (j)) ──────────
+//
+// Each FM arm runs the gate's scenes on the colored solver with `friction_model` per manifold, both
+// centres (C-ALL, `PerManifold`; C-TOUCH, `PerManifoldTouch`), against the C0 bounds above, which
+// the per-point base met. A miss is a STOP with the reading (never a bound edit, never a
+// characterization: OQ2's rule is the per-point base's).
+
+/// G-P1, stick arm under FM: inside the friction cone the box holds.
+#[test]
+fn g_p1_incline_stick_fm() {
+    for form in FM_FORMS {
+        assert_fm_gate("G-P1 Stick", form, &g_p1_readings_in(Incline::Stick, form));
+    }
+}
+
+/// G-P1, slide arm under FM: just outside the cone the box slides about `½·a·t²`. Red under M1
+/// (the patch's μ halved: it sticks).
+#[test]
+fn g_p1_incline_slide_fm() {
+    for form in FM_FORMS {
+        assert_fm_gate("G-P1 Slide", form, &g_p1_readings_in(Incline::Slide, form));
+    }
+}
+
+/// G-P1, accel arm under FM: well outside the cone the box accelerates at `a` ±5 %. Red under M2
+/// (the patch's μ doubled).
+#[test]
+fn g_p1_incline_accel_fm() {
+    for form in FM_FORMS {
+        assert_fm_gate("G-P1 Accel", form, &g_p1_readings_in(Incline::Accel, form));
+    }
+}
+
+/// G-P2 under FM: the spun box stops inside the analytic band and stays stopped. Red under M3
+/// (the twist row dropped: it never stops).
+#[test]
+fn g_p2_twist_stops_and_holds_fm() {
+    for form in FM_FORMS {
+        let readings: Vec<Reading> =
+            g_p2_readings_in(form).into_iter().filter(|r| !r.pair.ends_with("COM drift")).collect();
+        assert_fm_gate("G-P2 stop", form, &readings);
+    }
+}
+
+/// G-P2's drift under FM (design OQ1): the patch's tangent rows act at the centre, on the spin
+/// axis, so the centre does not wander.
+#[test]
+fn g_p2_twist_drift_fm() {
+    for form in FM_FORMS {
+        let readings: Vec<Reading> =
+            g_p2_readings_in(form).into_iter().filter(|r| r.pair.ends_with("COM drift")).collect();
+        assert_fm_gate("G-P2 drift", form, &readings);
+    }
+}
+
+/// G-P3 under FM (Jolt #983): a yawed box launched along +x slides straight and stops at
+/// `v₀² / (2μg)`. Red under M5 (the tangent rows at `ra₀` instead of the centre).
+#[test]
+fn g_p3_yaw_while_sliding_fm() {
+    for form in FM_FORMS {
+        assert_fm_gate("G-P3", form, &g_p3_readings_in(form));
+    }
+}
+
+/// G-P7 under FM: one J-T box under S-SLIDE's gravity accelerates at 2.632 m/s² ±3 %. Red under
+/// Mμ0 (μ = 0 in the patch: a = 4.387 m/s²).
+#[test]
+fn g_p7_single_box_slide_fm() {
+    for form in FM_FORMS {
+        let (readings, displacement_form) = g_p7_reading_in(form);
+        println!("G-P7, {}: displacement-form receipt {displacement_form} m/s² (not the gate)", form.label());
+        assert_fm_gate("G-P7", form, &readings);
+    }
+}
+
+// G-P4: slide plus spin (FM C1, design §8 C1 (j)).
+
+/// G-P4's box: 2 m × 0.5 m × 2 m.
+const G_P4_BOX_HALF: Vec3 = Vec3::new(1.0, 0.25, 1.0);
+/// G-P4's friction coefficient.
+const G_P4_MU: f32 = 0.3;
+/// G-P4's launch speed along +x, in m/s.
+const G_P4_V0: f32 = 2.0;
+/// G-P4's initial spin about +y, in rad/s.
+const G_P4_OMEGA0: f32 = 2.0;
+/// G-P4's step, in seconds.
+const G_P4_DT_S: f32 = 1.0 / 60.0;
+/// G-P4's run: the per-point box stops well inside it.
+const G_P4_STEPS: usize = 300;
+/// `|v|` (m/s) and `|ω|` (rad/s) below this are at rest.
+const G_P4_REST: f64 = 1.0e-3;
+/// The stop-time ratio's band, FM / per point: a symmetric patch dissipates 1× to 2× the
+/// per-point rate (`levers/L8-patch-friction/02-DESIGN-REV1.md`, P_coulomb ≤ P_patch ≤ 2·P_coulomb),
+/// with 5 % allowed above 1.
+const G_P4_RATIO_BAND: [f64; 2] = [0.5, 1.05];
+
+/// G-P4's scene: the box at rest on the floor, launched along +x and spun about +y.
+fn g_p4_scene() -> Scene {
+    let mut body = BodySpec::dynamic_box(Vec3::new(0.0, G_P4_BOX_HALF.y, 0.0), Quat::IDENTITY, G_P4_BOX_HALF, 1.0, G_P4_MU);
+    body.linear_velocity = Vec3::new(G_P4_V0, 0.0, 0.0);
+    body.angular_velocity = Vec3::new(0.0, G_P4_OMEGA0, 0.0);
+    on_floor(body, DOWN, G_P4_DT_S)
+}
+
+/// The first step at whose end the box is at rest, linearly AND angularly (`INFINITY`: never).
+fn g_p4_stop(form: Form) -> f64 {
+    let t = trace_on::<DefaultRigidSolver>(&g_p4_scene(), G_P4_STEPS, form.arm());
+    if let Err(premise) = t.standing(1..=10) {
+        panic!("G-P4, {}: premise: {premise}. STOP", form.label());
+    }
+    (1..=G_P4_STEPS)
+        .find(|&s| norm(t.at(s).linear_velocity) < G_P4_REST && norm(t.at(s).angular_velocity) < G_P4_REST)
+        .map_or(f64::INFINITY, |s| s as f64)
+}
+
+/// G-P4 (design §8 C1 (j)): a box launched sliding AND spinning stops, under FM, within
+/// `[0.5, 1.05]` of the per-point stop time. Red under M3 (the twist dropped: ratio > 1.05) and M6
+/// (both limits ×3: ratio < 0.5).
+#[test]
+fn g_p4_slide_and_spin_stop_ratio_fm() {
+    let base = g_p4_stop(Form::PerPoint);
+    assert!(base.is_finite(), "G-P4 premise: the per-point box stops within {G_P4_STEPS} steps");
+    println!("G-P4, per-point base: stop step {base}");
+    for form in FM_FORMS {
+        let stop = g_p4_stop(form);
+        let ratio = stop / base;
+        println!("G-P4, {}: stop step {stop}, ratio {ratio} (band {G_P4_RATIO_BAND:?})", form.label());
+        assert_fm_gate(
+            "G-P4",
+            form,
+            &[Reading {
+                pair: "slide+spin: stop-time ratio FM / per point".to_string(),
+                value: ratio,
+                bound: Bound::Within(G_P4_RATIO_BAND[0], G_P4_RATIO_BAND[1]),
+            }],
+        );
+    }
+}
+
+/// G-P6's tilt about +z: two corners touch the floor, the other two sit about 10 mm above it,
+/// inside V2's speculative distance (20 mm).
+const G_P6_TILT_RAD: f64 = 0.005;
+
+/// G-P6 (design §8 C1 (j), a receipt): a box resting on one edge — two loaded corners, two
+/// speculative — spun about the normal; the twist stop step under C-ALL and C-TOUCH is printed
+/// for the centre rule (C2), never asserted.
+#[test]
+fn g_p6_edge_resting_spin_receipt() {
+    let half = (G_P6_TILT_RAD / 2.0) as f32;
+    let rotation = Quat::new(0.0, 0.0, half.sin(), half.cos());
+    let mut body = BodySpec::dynamic_box(Vec3::new(0.0, 0.25, 0.0), rotation, G_P2_BOX_HALF, G_P2_INV_MASS, G_P2_MU as f32);
+    body.angular_velocity = Vec3::new(0.0, G_P2_OMEGA0, 0.0);
+    let scene = on_floor(body, DOWN, G_P2_DT_S as f32);
+    for form in [Form::PerPoint, FM_FORMS[0], FM_FORMS[1]] {
+        let t = trace_on::<DefaultRigidSolver>(&scene, G_P2_STEPS, form.arm());
+        let stop = (1..=G_P2_STEPS).find(|&s| norm(t.at(s).angular_velocity) < G_P2_REST);
+        println!(
+            "G-P6 receipt, {}: twist stop step {stop:?}; points at step 1 {}",
+            form.label(),
+            t.points.get(1).copied().unwrap_or(0)
+        );
+    }
+}
+
+/// G-P5 under FM (D16, §8 C1 (c)): the count-1 scenes hold one-point manifolds only, so every
+/// cohort is depth 1 and runs the per-point code: on every cell, under both per-manifold models,
+/// each scene ends on its per-point pin. Red under M-D16 (the FM depth-1 store swaps λt1 and λt2).
+#[test]
+fn count1_scenes_keep_their_pins_under_fm() {
+    let scenes: [(&str, Scene, u64); 3] = [
+        ("count-1 sphere pile (FM)", sphere_pile(0.5), PIN_COUNT1_SPHERE_PILE),
+        ("count-1 sphere-SDF (FM)", sphere_sdf(0.3), PIN_COUNT1_SPHERE_SDF),
+        ("count-1 sphere-on-box (FM)", sphere_on_box(0.4), PIN_COUNT1_SPHERE_ON_BOX),
+    ];
+    for friction in [FrictionModel::PerManifold, FrictionModel::PerManifoldTouch] {
+        for (name, scene, pin) in &scenes {
+            let finals: Vec<u64> = count1_cells(Some(friction))
+                .iter()
+                .map(|&arm| *run_count1(name, scene, arm).last().expect("invariant: at least one step"))
+                .collect();
+            println!("{name} {friction:?}: final hashes {finals:x?}");
+            assert!(
+                finals.iter().all(|&h| h == *pin),
+                "{name} ({friction:?}): every cell must end on the per-point pin {pin:#018x}; measured \
+                 {finals:x?}. D16 makes a one-point scene's values the per-point ones: a moved pin is a \
+                 defect, never a re-pin"
+            );
+        }
+    }
+}
+
+/// G-P5w's sphere grid: 25 × 25 spheres in one layer on the floor (625 sphere-floor manifolds of
+/// one point, one colour above the solve region's floor), every sphere sliding at (2, 0, 1) m/s.
+fn g_p5w_scene() -> Scene {
+    let mut bodies = vec![floor(0.5)];
+    for i in 0..25 {
+        for j in 0..25 {
+            let mut s = BodySpec::sphere(
+                Vec3::new(-18.0 + 1.5 * i as f32, COUNT1_RADIUS, -18.0 + 1.5 * j as f32),
+                COUNT1_RADIUS,
+                1.0,
+                0.5,
+            );
+            s.linear_velocity = Vec3::new(2.0, 0.0, 1.0);
+            bodies.push(s);
+        }
+    }
+    Scene { bodies, gravity: DOWN, dt: COUNT1_DT, ground: Ground::Bodies }
+}
+
+/// G-P5w's length.
+const G_P5W_STEPS: usize = 60;
+
+/// One G-P5w run: the per-step hashes, every manifold of every step asserted one-point (P1), and
+/// the solve regions opened.
+fn g_p5w_run(arm: Arm) -> (Vec<u64>, u64) {
+    let scene = g_p5w_scene();
+    let mut sim = Sim::new::<DefaultRigidSolver>(&scene, arm);
+    let mut hashes = Vec::with_capacity(G_P5W_STEPS);
+    for step in 1..=G_P5W_STEPS {
+        sim.step();
+        let ms = sim.manifolds();
+        assert!(
+            !ms.is_empty() && ms.iter().all(|m| m.count == 1),
+            "G-P5w premise P1 ({arm:?}): every manifold of step {step} holds one point"
+        );
+        hashes.push(state_hash(&sim.bodies()));
+    }
+    let regions = sim.world.resource::<DefaultRigidSolver>().region_dispatches();
+    (hashes, regions)
+}
+
+/// G-P5w (fm/cut.md D-C10): a dispatching count-1 scene. On every cell — W {1, 8} × `simd_solve`
+/// {off, on} — the per-manifold models' per-step hashes equal the per-point ones of the same cell,
+/// and the W 8 cells run the solve region on every step, so D16's depth-1 path is covered through
+/// the region's Fill, Warm, sweep and Store stages. Red under M-D16.
+#[test]
+fn count1_dispatching_grid_is_per_point_under_fm() {
+    for cell in count1_cells(Some(FrictionModel::PerPoint)) {
+        let (base, regions) = g_p5w_run(cell);
+        if cell.workers >= 2 {
+            assert_eq!(regions, G_P5W_STEPS as u64, "G-P5w premise ({cell:?}): a solve region on every step");
+        }
+        for friction in [FrictionModel::PerManifold, FrictionModel::PerManifoldTouch] {
+            let (fm, fm_regions) = g_p5w_run(Arm { friction: Some(friction), ..cell });
+            assert_eq!(fm_regions, regions, "G-P5w ({cell:?}, {friction:?}): the same regions");
+            if let Some(step) = first_divergence(&base, &fm) {
+                panic!(
+                    "G-P5w ({cell:?}, {friction:?}): FM diverges from per point first at step {step}; a \
+                     one-point scene must step the per-point bits under FM (D16)"
+                );
+            }
+        }
+    }
 }

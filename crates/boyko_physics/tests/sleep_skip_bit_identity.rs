@@ -3146,14 +3146,15 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         Row { name: "substeps", write: |c| c.substeps += 1, class: O },
         Row { name: "relax_iterations", write: |c| c.relax_iterations += 1, class: O },
         // FM: a toggle between the two forms, so it perturbs on both sides of FM's flip of the
-        // default. No stage reads it until FM (1b).
+        // default. Every shape holds a three-box tower, whose four-point manifolds the per-manifold
+        // form solves with a friction patch.
         Row {
             name: "friction_model",
             write: |c| {
                 c.friction_model =
                     if c.friction_model == FrictionModel::PerPoint { FrictionModel::PerManifold } else { FrictionModel::PerPoint };
             },
-            class: U,
+            class: O,
         },
         Row { name: "contact_hertz", write: |c| c.contact_hertz *= 0.5, class: O },
         Row { name: "contact_damping", write: |c| c.contact_damping *= 0.5, class: O },
