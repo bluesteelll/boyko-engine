@@ -1606,10 +1606,19 @@
 
     /// FM (fm/cut.md §3.9, W4): the Stacked Borrows route of the region's stages under friction
     /// per manifold — the twenty spheres of the per-point route above, every manifold widened to
-    /// two points so its cohorts carry patches, on two std threads, with `simd_solve` off (the
-    /// scalar patch: group-granular colour cuts, two workers on one patch block) and on (the AVX2
-    /// patch, the 8-lane warm apply and the 8-lane fill geometry). The per-kind guard reads first;
-    /// the region's bits equal the serial solve's. Run under both models, as the per-point route.
+    /// two points or more so its cohorts carry patches, on two std threads, with `simd_solve` off
+    /// (the scalar patch: group-granular colour cuts, two workers on one patch block) and on (the
+    /// AVX2 patch, the 8-lane warm apply and the 8-lane fill geometry). The per-kind guard reads
+    /// first; the region's bits equal the serial solve's. Run under both models, as the per-point
+    /// route.
+    ///
+    /// The floor pairs alternate two and three points and the four stacked pairs hold three. A
+    /// colour's warm-start entry cuts its cohorts at a point quota (`cohort_cuts`; colour 0 here has
+    /// two cohorts, so the quota is half its points), and the stacked pairs' width decides where
+    /// colour 0 splits: at two points its first cohort fell short of the quota, the one cut fell
+    /// after its last cohort, and `warm` ran as one block on the main thread (tester r1 F2: red in
+    /// both models, "`warm` had at most 1 blocks and the helper ran 0 of them"); at three the cut
+    /// falls after the first cohort and the helper runs warm blocks in both `simd_solve` halves.
     #[test]
     #[cfg(miri)]
     fn sr_region_sb_route_runs_every_kind_on_both_threads_fm() {
@@ -1633,7 +1642,7 @@
             manifolds.push(box_manifold(i, 20, Vec3::new(0.0, -1.0, 0.0), -0.2, Vec3::new(i as f32 * 3.0, 0.0, 0.0), 2 + (i % 2) as u8));
         }
         for i in 0..4u32 {
-            manifolds.push(box_manifold(i, 16 + i, Vec3::new(0.0, 1.0, 0.0), -0.1, Vec3::new(i as f32 * 3.0, 1.5, 0.0), 2));
+            manifolds.push(box_manifold(i, 16 + i, Vec3::new(0.0, 1.0, 0.0), -0.1, Vec3::new(i as f32 * 3.0, 1.5, 0.0), 3));
         }
         manifolds.sort_by_key(|m| (m.body_a.0, m.body_b.0));
         let graph = build_graph(&bodies, &manifolds);
@@ -7291,7 +7300,11 @@
             let mut touch = [0usize; MAX_CONTACT_POINTS + 1];
             let (mut all_speculative, mut sep_neg_zero, mut sep_pos_zero) = (0usize, 0usize, 0usize);
             let (mut w1_touching, mut w1_speculative) = (0usize, 0usize);
-            let cases = if cfg!(miri) { 2 } else { 160 };
+            // The corpus is a pure function of the seed and first reaches every case below after
+            // three (tester r1 F3: at two, the coverage read `touch(of 4) [0, 1, 2, 2, 0]`, no
+            // 4-of-4 touching lane, and the anti-vacuity red in both Miri models). Miri runs three,
+            // so the coverage assertion stays live there too.
+            let cases = if cfg!(miri) { 3 } else { 160 };
             for _ in 0..cases {
                 let (groups, bodies, twist) = probe_corpus(&mut rng);
                 for centre in [FrictionCentre::All, FrictionCentre::Touch] {
