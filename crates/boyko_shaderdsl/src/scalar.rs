@@ -79,12 +79,18 @@ pub trait FieldScalar: Copy {
     fn neg(self) -> Self;
 
     /// `min(self, rhs)` — HLSL `min`, which DXC lowers to GLSL.std.450 `NMin`: `rhs` if
-    /// `rhs < self`, else `self`; a NaN operand yields the other one. On a `±0.0` tie the
-    /// result is `self` (the FIRST operand) — a defined sign, unlike `f32::min`'s.
+    /// `rhs < self`, else `self`; a NaN operand yields the other one (`NMin`'s rule, and
+    /// `f32::min`'s). On a `±0.0` tie the host returns `self`, the FIRST operand, in every build.
+    /// That sign is a host convention, not `NMin`'s: the spec's "-0 compares less than +0" (so
+    /// `-0.0` in either order) holds only under `SPV_KHR_float_controls2`, which no shader here
+    /// declares, and without it a device may return either zero. The convention is the one the
+    /// physics AVX2 narrowphase (`boyko_physics::sdf_simd`) reproduces by swapping `MINPS`'s
+    /// operands, so the scalar oracle and that kernel pick the same zero.
     fn min(self, rhs: Self) -> Self;
     /// `max(self, rhs)` — HLSL `max`, which DXC lowers to GLSL.std.450 `NMax`: `rhs` if
-    /// `self < rhs`, else `self`; a NaN operand yields the other one. On a `±0.0` tie the
-    /// result is `self` (the FIRST operand) — a defined sign, unlike `f32::max`'s.
+    /// `self < rhs`, else `self`; a NaN operand yields the other one. On a `±0.0` tie the host
+    /// returns `self`, the FIRST operand: the convention of [`FieldScalar::min`], where `NMax`
+    /// gives `+0.0` under `SPV_KHR_float_controls2` and either zero without it.
     fn max(self, rhs: Self) -> Self;
 
     /// `clamp(self, 0.0, 1.0)` — the FIXED-bounds clamp `smin` uses for its blend
@@ -290,8 +296,12 @@ impl FieldScalar for f32 {
     // non-deterministically"), so the SAME expression lowered at two call sites can return
     // opposite zeros — release CI run 5's `m2_brick_span` red (`max(+0.0, -0.0)` was `+0.0` in
     // the eDSL's unrolled copy and `-0.0` in the mirror's rolled loop, while a debug build gave
-    // `-0.0` in both). Spelling the `NMin`/`NMax` select keeps the NaN rule `f32::min`/`max`
-    // documents and fixes the tie to the first operand, in every build.
+    // `-0.0` in both). Spelling the select keeps the NaN rule `f32::min`/`max` document and fixes
+    // the tie to the first operand, in every build: the trait's host convention, not `NMin`/
+    // `NMax`'s (they leave that sign to the device unless `SPV_KHR_float_controls2` is on, and put
+    // `-0` below `+0` when it is). It is what `boyko_physics::sdf_simd`'s swapped `MINPS`/`MAXPS`
+    // operands reproduce: with `f32::min`/`max` back here, that module's deferred
+    // `x8_bits_eq_scalar_bits_widened_proptest` reds again (lane 6, `+0` against `-0`).
     #[inline]
     fn min(self, rhs: Self) -> Self {
         if self.is_nan() || rhs < self {

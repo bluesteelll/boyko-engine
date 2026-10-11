@@ -63,13 +63,18 @@ struct FrozenEdit {
 fn frozen_sqrt(x: f32) -> f32 {
     x.sqrt()
 }
-/// Every `a.max(b)` of a mirror below, with the sign of a `±0.0` tie DEFINED: GLSL.std.450
-/// `NMax` ("`b` if `a < b`, otherwise `a`; if one operand is a NaN, the other is the result"),
-/// the instruction DXC lowers HLSL `max` to. `f32::max` cannot be the mirror: on rustc 1.98.1 it
-/// may return either zero on a tie, and two call sites of it disagreed in a release build (CI
-/// run 5, `m2_brick_span_ci_run5_signed_zero_tie`), while this file compares `±0.0` exactly.
-/// Spelled here from the specification, not imported, so the oracle stays independent of the
-/// Eval backend it checks. Operand order at each call site is the snapshot's.
+/// Every `a.max(b)` of a mirror below: `b` if `a < b`, otherwise `a`; a NaN operand yields the
+/// other one; a `±0.0` tie yields `a`, the FIRST operand. That is the host convention of
+/// `FieldScalar for f32`, NOT the full rule of GLSL.std.450 `NMax`, the instruction DXC lowers
+/// HLSL `max` to, which reads: "Result is y if x < y, otherwise x. -0 compares less than +0. If
+/// one operand is a NaN, the other operand is the result. If both operands are NaN, the result is
+/// a NaN." Its `-0 < +0` (`+0.0` on a tie, in either order) is observable only under
+/// `SPV_KHR_float_controls2`, which no shader here declares; without it the spec lets `NMax`
+/// "return either operand when both are zeros" (Revision 8). `f32::max` cannot be the mirror: on
+/// rustc 1.98.1 it may return either zero on a tie, and two call sites of it disagreed in a
+/// release build (CI run 5, `m2_brick_span_ci_run5_signed_zero_tie`), while this file compares
+/// `±0.0` exactly. Spelled here, not imported, so the oracle stays independent of the Eval
+/// backend it checks. Operand order at each call site is the snapshot's.
 fn frozen_max(a: f32, b: f32) -> f32 {
     if a.is_nan() {
         b
@@ -81,8 +86,10 @@ fn frozen_max(a: f32, b: f32) -> f32 {
         a
     }
 }
-/// [`frozen_max`]'s counterpart for `a.min(b)`: GLSL.std.450 `NMin` ("`b` if `b < a`, otherwise
-/// `a`; if one operand is a NaN, the other is the result").
+/// [`frozen_max`]'s counterpart for `a.min(b)`, with the same first-operand tie. GLSL.std.450
+/// `NMin` reads: "Result is y if y < x, otherwise x. -0 compares less than +0. If one operand is a
+/// NaN, the other operand is the result. If both operands are NaN, the result is a NaN." Its
+/// `-0.0` on a tie holds only under `SPV_KHR_float_controls2`, as for [`frozen_max`].
 fn frozen_min(a: f32, b: f32) -> f32 {
     if a.is_nan() {
         b
@@ -2606,9 +2613,10 @@ fn m2_brick_span_directed_hit_miss_swap_parallel() {
 /// y/z axes only lower `tmax`, so the tie's sign is what `t_enter` reports). Rust's `f32::max`
 /// leaves the sign of a zero result unspecified (it lowers to `llvm.maximumnum` with `nsz`), and
 /// the eDSL's unrolled copy and the mirror's rolled loop were lowered to opposite answers in a
-/// release build. Both now spell the GLSL.std.450 `NMax`/`NMin` rule the emitted HLSL
-/// `max`/`min` lower to — the FIRST operand on a tie — so `t_enter` is `tmin`'s `+0.0` on both
-/// sides, in every profile.
+/// release build. Both now spell one rule, the FIRST operand on a tie (`FieldScalar for f32`'s
+/// host convention; the `NMax`/`NMin` the emitted HLSL lowers to leave that sign to the device
+/// unless `SPV_KHR_float_controls2` is on), so `t_enter` is `tmin`'s `+0.0` on both sides, in
+/// every profile.
 #[test]
 fn m2_brick_span_ci_run5_signed_zero_tie() {
     use std::hint::black_box;
@@ -2628,7 +2636,9 @@ fn m2_brick_span_ci_run5_signed_zero_tie() {
     );
     assert_bits(r.1, 0.0, "ci-run5-t_enter-is-tmin's-+0");
     // The tie rule at the op level, through `black_box` so it is the runtime lowering that is
-    // pinned, not a constant fold: the first operand's zero wins in both orders, for both ops.
+    // pinned, not a constant fold: the first operand's zero wins in both orders, for both ops
+    // (the host convention; GLSL.std.450 under `SPV_KHR_float_controls2` gives max = +0 and
+    // min = -0 in both orders).
     let (pz, nz) = (black_box(0.0_f32), black_box(-0.0_f32));
     assert_bits(FieldScalar::max(pz, nz), 0.0, "eval-max(+0,-0)");
     assert_bits(FieldScalar::max(nz, pz), -0.0, "eval-max(-0,+0)");

@@ -187,9 +187,9 @@ jobs:
   # pin has to be measured on Linux as well or scoped to the platform it was taken on.
   # THE REST ARE CLOSED in the tests, measured on Windows and not yet re-run here (WORKFLOW.md, the
   # CI run 4 paragraph): `eval_byte_identity`'s `m2_brick_span` (`f32::max`'s unspecified sign on a
-  # ±0 tie, red on `windows-latest` too; the Eval spells NMin/NMax), the allocation censuses (e1,
-  # alloc_frame_attribution, ui_no_realloc), the threadpool timing tests (ke16, region_protocol,
-  # a6) and `narrowphase_classes`.
+  # ±0 tie, red on `windows-latest` too; the Eval keeps the first operand), the allocation
+  # censuses (e1, alloc_frame_attribution, ui_no_realloc), the threadpool timing tests (ke16,
+  # region_protocol, a6) and `narrowphase_classes`.
   # A red here is a finding to read, not a reason to weaken a pin. The release leg can see the open
   # class: when both legs of a run read green it has held on Linux in the profile it failed in, and
   # dropping `continue-on-error` makes this job a gate.

@@ -253,8 +253,10 @@ has two legs now, debug and release. One float pin is the class still open
 (`perspective_bridge_reproduces_legacy_push_constants`, one ulp apart on Linux), and making it
 hold there is a follow-up. The other, `m2_brick_span`, was no platform difference: `f32::max` may
 return either zero of a tie, it went red in the `windows-latest` release legs too (CI runs 5 and
-6), and the Eval now spells NMin/NMax. Every class but the open pin is closed in the tests, and
-none has been re-run on `ubuntu-latest` in release.
+6), and the Eval now keeps the first operand of a tie in every build. That is a host convention
+(GLSL.std.450's NMin/NMax put -0 below +0 only under `SPV_KHR_float_controls2`, and leave the sign
+to the device without it), the one the physics AVX2 narrowphase reproduces. Every class but the
+open pin is closed in the tests, and none has been re-run on `ubuntu-latest` in release.
 
 **`boyko-render` was not in that position, and saying it was is the error the scope table above
 corrected.** Its lib builds on the runner, and its feature legs compile it, `cfg(not(windows))` arms
