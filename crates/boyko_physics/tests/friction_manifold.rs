@@ -123,6 +123,11 @@
 //! other field keeps its default. The per-arm configuration is the one [`Arm`] parameter, so an arm
 //! that later needs one more flag is one hunk in [`Sim::new`].
 //!
+//! The FM arms meet the bounds the per-point base met, so a harness that lost an arm's model would
+//! pass them running per point. Two premises close that (FM C1, triage r1 F1): every colored step
+//! asserts that its solve ran the arm's friction form ([`Sim::step`]), and every FM trace asserts
+//! that the box's manifolds of two points or more carried a friction patch ([`trace_on`]).
+//!
 //! The gather walks the single `RigidBodyBundle` archetype in spawn order, so a manifold's row
 //! index is the body's spawn index; [`Sim::new`] asserts that the walk reproduces the spawn
 //! positions bit for bit before any step, which is what makes that mapping a checked fact.
@@ -293,6 +298,8 @@ const DEFAULT_ARM: Arm = Arm { workers: 1, simd_solve: true, friction: None };
 struct Sim {
     world: EcsMaster,
     schedule: Schedule,
+    /// Whether the arm runs friction per manifold: the form [`Sim::step`] asserts the solve ran.
+    fm: bool,
 }
 
 impl Sim {
@@ -335,7 +342,8 @@ impl Sim {
                 cfg.friction_model = friction;
             }
         }
-        let mut sim = Self { world, schedule };
+        let fm = matches!(arm.friction, Some(FrictionModel::PerManifold | FrictionModel::PerManifoldTouch));
+        let mut sim = Self { world, schedule, fm };
         let walked = sim.bodies();
         assert_eq!(
             walked.len(),
@@ -355,9 +363,34 @@ impl Sim {
         sim
     }
 
-    /// One physics step.
+    /// One physics step, then the harness's route premise (FM C1, triage r1 F1): the step's solve ran
+    /// the arm's friction form. The colored solver reports it: `friction_seed_stats` is `Some`
+    /// exactly when its last solve ran friction per manifold, and every scene here holds a simulated
+    /// dynamic body, so every step's solve gets past the idle early return to that latch. The FM
+    /// arms are held to the bounds the per-point base met, so an arm whose model never reached the
+    /// solve (a dropped or overwritten write, or a solver without the model) would pass them all
+    /// running per point; this makes it a red on its first step.
     fn step(&mut self) {
         self.schedule.run(&mut self.world);
+        match self.world.try_resource::<DefaultRigidSolver>() {
+            Some(solver) => assert_eq!(
+                solver.friction_seed_stats().is_some(),
+                self.fm,
+                "harness: route premise: the arm asks for friction per manifold = {}, and the colored \
+                 solve ran the other form, so the arm's gate would test the wrong rows. STOP",
+                self.fm
+            ),
+            None => assert!(
+                !self.fm,
+                "harness: route premise: an arm asks for friction per manifold on a solver that is not \
+                 the colored one, which has no such model. STOP"
+            ),
+        }
+    }
+
+    /// The last solve's friction patch blocks; the world runs the colored solver.
+    fn patch_blocks(&self) -> u32 {
+        self.world.resource::<DefaultRigidSolver>().layout_census().patch_blocks
     }
 
     /// Every body, in walk (= spawn) order.
@@ -726,12 +759,19 @@ fn trace<S: RigidSolver + Default>(scene: &Scene, steps: usize) -> Trace {
     trace_on::<S>(scene, steps, DEFAULT_ARM)
 }
 
-/// [`trace`] on `arm`.
+/// [`trace`] on `arm`. An FM arm also asserts the harness's engagement premise (FM C1, triage r1
+/// F1): the box holds a manifold of two points or more on some step, and on every such step the
+/// colored layout carries a friction patch. A one-point manifold has no patch and runs the
+/// per-point rows (D16), so without it an FM arm could meet its bounds without ever running a
+/// patch row.
 fn trace_on<S: RigidSolver + Default>(scene: &Scene, steps: usize, arm: Arm) -> Trace {
     let mut sim = Sim::new::<S>(scene, arm);
     let mut states = Vec::with_capacity(steps + 1);
     let mut points = Vec::with_capacity(steps + 1);
     let mut first_non_finite = None;
+    // FM: the steps on which the box held a manifold of two points or more, and the first of
+    // them whose layout carried no patch.
+    let (mut multi_steps, mut unpatched) = (0usize, None);
     states.push(sim.bodies()[BOX_ROW]);
     points.push(0);
     for step in 1..=steps {
@@ -751,6 +791,26 @@ fn trace_on<S: RigidSolver + Default>(scene: &Scene, steps: usize, arm: Arm) -> 
             .max()
             .unwrap_or(0);
         points.push(box_points);
+        if sim.fm && box_points >= 2 {
+            multi_steps += 1;
+            if unpatched.is_none() && sim.patch_blocks() == 0 {
+                unpatched = Some(step);
+            }
+        }
+    }
+    if sim.fm {
+        assert!(
+            multi_steps > 0,
+            "harness: engagement premise ({arm:?}): the box never held a manifold of two points or \
+             more, so no friction patch exists and the FM arm tests the per-point rows. STOP"
+        );
+        if let Some(step) = unpatched {
+            panic!(
+                "harness: engagement premise ({arm:?}): on step {step} the box held a manifold of two \
+                 points or more and the colored layout carried no friction patch, so the FM arm tests \
+                 the per-point rows. STOP"
+            );
+        }
     }
     Trace { states, points, first_non_finite }
 }
@@ -1331,7 +1391,8 @@ fn g_p7_single_box_slide_per_point() {
 // Each FM arm runs the gate's scenes on the colored solver with `friction_model` per manifold, both
 // centres (C-ALL, `PerManifold`; C-TOUCH, `PerManifoldTouch`), against the C0 bounds above, which
 // the per-point base met. A miss is a STOP with the reading (never a bound edit, never a
-// characterization: OQ2's rule is the per-point base's).
+// characterization: OQ2's rule is the per-point base's). Every run first meets the harness's route
+// and engagement premises (module header, `Sim::step`, `trace_on`).
 
 /// G-P1, stick arm under FM: inside the friction cone the box holds.
 #[test]
