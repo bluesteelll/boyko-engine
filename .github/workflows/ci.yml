@@ -58,9 +58,10 @@ env:
 # `ubuntu-latest` and stay blocking, so the engine keeps compiling for Linux: `check`, `clippy`,
 # `profile-legs`, `feature-legs` and `bench-compile` (and `docs.yml`'s `cargo doc`). So do the two
 # Python registry jobs. `miri` and `loom` run test binaries but stay on `ubuntu-latest`, where they
-# pass. `test-linux` runs the debug `test` selection there as information only (its header lists
-# run 4's reds). These jobs are the first to run `#[cfg(windows)]` tests on a clean image: a test
-# that checks a record of the author's own installation is `workstation`-ignored (vg_r0's probe).
+# pass. `test-linux` runs the `test` job's two selections there, debug and release, as information
+# only (its header lists what they measured). These jobs are the first to run `#[cfg(windows)]`
+# tests on a clean image: a test that checks a record of the author's own installation is
+# `workstation`-ignored (vg_r0's probe).
 #
 # Every `windows-latest` job sets `defaults.run.shell: bash`, so its steps keep their bash
 # syntax (Git Bash on that image). Its toolchain step resolves to the msvc host there. Caches
@@ -172,18 +173,33 @@ jobs:
           fi
 
   # INFORMATIONAL, NOT A GATE: `continue-on-error: true` on the job, so a red here never fails the
-  # workflow. This is the debug `test` selection, on `ubuntu-latest`. The suite's gating legs run on
-  # `windows-latest` (see the note above `jobs:`), and this job keeps a Linux test run visible.
+  # workflow. Its two legs run the `test` job's two selections, debug and release, with the same
+  # flags (`--no-fail-fast`, and `fail-fast: false` so one leg's red does not cancel the other), on
+  # `ubuntu-latest`. The suite's gating legs run on `windows-latest` (see the note above `jobs:`),
+  # and this job keeps a Linux test run visible in both profiles.
   #
-  # WHY IT CANNOT GATE YET. CI run 4 (38026578745, on ae9c1dc3) was the first run of all 917 targets
-  # on `ubuntu-latest`. Per leg: debug failed 1 target, release 7, and `force-alloc-panic` 7. They
-  # fell in four classes. ONE IS OPEN, and fixing it is a follow-up that is not done here:
-  #   * Float byte identity across C runtimes. `boyko_shaderdsl --test eval_byte_identity`
-  #     (`m2_brick_span_matches_host_on_random_sweep` computes 0 where the frozen value is -0) and
-  #     `boyko-render --lib` (`view::tests::perspective_bridge_reproduces_legacy_push_constants`:
-  #     0.5773503 against 0.57735026). Both failed in release and in `force-alloc-panic`. Each pin
-  #     has to be measured on Linux as well or scoped to the platform it was taken on.
-  # THREE ARE CLOSED in the tests, measured on the Windows MSVC dev host and not yet re-run here:
+  # WHAT IT HAS MEASURED. Until 2026-10-11 this job ran the debug selection only, and on Linux every
+  # red of the classes below except `narrowphase_classes` came from a release-profile leg. CI run 4
+  # (38026578745, on ae9c1dc3) is the one run of all 917 targets on `ubuntu-latest` in both
+  # profiles. Its debug leg failed 1 target, `boyko-physics --bench narrowphase_classes` (closed,
+  # below); the float pins, the censuses and the timing tests all passed in it. Its release leg
+  # failed 7 targets and its `force-alloc-panic` leg 7, in the classes below, and no release
+  # selection has run on Linux since. The debug-only job read green in CI runs 5 and 6 (on 150fc2cb
+  # and ed30f3e7), after the `narrowphase_classes` fix.
+  #
+  # ONE CLASS IS OPEN, and fixing it is a follow-up that is not done here:
+  #   * Float byte identity across C runtimes: `boyko-render --lib`
+  #     (`view::tests::perspective_bridge_reproduces_legacy_push_constants`, 0.5773503 against
+  #     0.57735026, one ulp apart). Red in run 4's release and `force-alloc-panic` legs on Linux;
+  #     green in every `windows-latest` leg. The pin has to be measured on Linux as well or scoped
+  #     to the platform it was taken on.
+  # THE OTHERS ARE CLOSED in the tests, measured on the Windows MSVC dev host and on
+  # `windows-latest`, and not yet re-run here:
+  #   * `boyko_shaderdsl --test eval_byte_identity` (`m2_brick_span_matches_host_on_random_sweep`, 0
+  #     where the frozen value is -0) was not a C runtime: `f32::max` may return either zero of a
+  #     `±0.0` tie, and a release build lowered the eDSL's copy and the test's mirror to opposite
+  #     ones. Red in both release legs on `windows-latest` as well (CI runs 5 and 6). Closed
+  #     2026-10-10: the Eval spells HLSL's NMin/NMax, so a tie returns its first operand.
   #   * Allocation censuses that counted the schedule, not a pin (closed 2026-10-10). Each went red
   #     in ONE of the two release-profile legs, which compile the same code: `boyko-app --test
   #     e1_engine_ui_alloc_census` ("1 more epoch Locals"), `boyko-physics --test
@@ -195,25 +211,38 @@ jobs:
   #   * Timing and occupancy: runner width, not the OS (4 vCPUs here and on `windows-latest`).
   #     `boyko-threadpool --test ke16_nested_scope_occupancy`'s floor reads the usable CPUs and its
   #     tests run one at a time, as `--test region_protocol`'s do; `--test a6_panic_propagation`
-  #     accepts the task's own panic text when the abort beats its marker.
+  #     accepts the task's own panic text when the abort beats its marker. `boyko-physics --test
+  #     sr_region_counters` (green in all three legs of run 4 here; red in the `windows-latest`
+  #     release leg of CI runs 5 and 6) checks its helpers on every step only where each
+  #     participant has a usable CPU, and runs its tests one at a time.
   #   * `boyko-physics --bench narrowphase_classes` (75 touching pairs, 140 manifolds), red on the
   #     dev host too: its assert predated V2's speculative contacts. It now runs the overlap-only
   #     rule, speculative_distance = 0 AND speculative_velocity_cap = 0.
-  # Until the open class is closed a red here is a finding to read, not a reason to weaken a pin,
-  # and its targets are not the only ones it can turn up. When this job reads green, drop
-  # `continue-on-error` and it becomes a gate.
+  # A red here is a finding to read, not a reason to weaken a pin, and its targets are not the only
+  # ones it can turn up. The release leg is the one that can see the open class: when both legs of
+  # a run read green, that class has held on Linux in the profile it failed in, and dropping
+  # `continue-on-error` makes this job a gate.
   test-linux:
-    name: cargo test (linux, informational)
+    name: cargo test (linux, ${{ matrix.profile }}, informational)
     runs-on: ubuntu-latest
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [debug, release]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rust-src, llvm-tools
       - uses: Swatinem/rust-cache@v2
-      - name: cargo test (linux, informational)
-        run: cargo test --locked --workspace --all-targets --no-fail-fast --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
+      - name: cargo test (linux, ${{ matrix.profile }}, informational)
+        run: |
+          if [ "${{ matrix.profile }}" = "release" ]; then
+            cargo test --locked --workspace --all-targets --no-fail-fast --release --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
+          else
+            cargo test --locked --workspace --all-targets --no-fail-fast --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
+          fi
 
   # ---------------------------------------------------------------------------------------------
   # The BOYKO_PROFILE axis — profiling rung 14 / logging L17, the joint rung J1

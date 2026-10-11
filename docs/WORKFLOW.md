@@ -246,9 +246,15 @@ child's marker. One more red, `boyko-physics --bench narrowphase_classes`,
 was no pin: it failed on the Windows MSVC dev host with the same numbers, because its
 `touching == manifolds` assert predated V2's speculative contacts, and the bench now runs the
 overlap-only rule it was written for. So the Linux test run is kept as `test-linux`, an
-informational job (`continue-on-error: true`). Its header in `ci.yml` lists each red. The float
-pins are the class still open, and making them hold on Linux is a follow-up; the other three are
-closed in the tests and have not been re-run on `ubuntu-latest`.
+informational job (`continue-on-error: true`). Its header in `ci.yml` lists each red. Until
+2026-10-11 it ran the debug selection only, and on Linux that selection reached
+`narrowphase_classes` alone (run 4's debug leg); every other class failed there in release. So it
+has two legs now, debug and release. One float pin is the class still open
+(`perspective_bridge_reproduces_legacy_push_constants`, one ulp apart on Linux), and making it
+hold there is a follow-up. The other, `m2_brick_span`, was no platform difference: `f32::max` may
+return either zero of a tie, it went red in the `windows-latest` release legs too (CI runs 5 and
+6), and the Eval now spells NMin/NMax. Every class but the open pin is closed in the tests, and
+none has been re-run on `ubuntu-latest` in release.
 
 **`boyko-render` was not in that position, and saying it was is the error the scope table above
 corrected.** Its lib builds on the runner, and its feature legs compile it, `cfg(not(windows))` arms

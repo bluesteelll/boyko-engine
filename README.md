@@ -117,8 +117,10 @@ skinning and animation; audio; an editor; virtual geometry.
 - **Linux x86_64:** no GPU path yet — the Vulkan loader and the window are Windows-only. The
   CPU-side crates (the ECS, physics, math, scene and the rest) compile there. CI checks that on
   every push and pull request to `master`. CI runs the test suite on Windows, where its float pins
-  were measured. A Linux test run is reported for information only, because two of those pins do
-  not hold there yet.
+  were measured, in debug and release. It runs the same two selections on Linux for information
+  only. The last Linux run of the release selection failed seven targets: six causes are fixed and
+  not yet re-run there, and one float pin, a projection constant one ulp apart, is open. The Linux
+  debug selection reads green.
 - **macOS and wasm32:** not supported.
 - **Rust:** stable ([`rust-toolchain.toml`](rust-toolchain.toml) pins the `stable` channel),
   edition 2024. No minimum supported Rust version is declared.
