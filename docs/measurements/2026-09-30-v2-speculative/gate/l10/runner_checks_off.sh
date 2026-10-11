@@ -55,7 +55,7 @@ run off_armed_R-S_sets_W1 0 --scene rest --sleeping on $RU --arm-profiler --step
 run off_armed_R-S_sets_W8 0 --scene rest --sleeping on $RU --arm-profiler --steps 600 --workers 8 --expect-pose $L10OFF/R-S_W8.pose
 run off_armed_R-S_off_W1 0 --scene rest --sleeping on --sleep-skip off $RU --arm-profiler --steps 600 --workers 1 --expect-pose $L10OFF/R-S_W1.pose
 run off_armed_J-Son_sets_W8 0 --scene jolt --gap 0.5 --cfg a --sleeping on $RU --arm-profiler --steps 600 --workers 8 --expect-pose $L10OFF/J-Son_W8.pose
-run off_armed_J-A_sleep_off_W8 0 --scene jolt --gap 0.5 --cfg a $RU --arm-profiler --steps 300 --workers 8
+run off_armed_J-A_sleep_off_W8 0 --scene jolt --gap 0.5 --cfg a --sleeping off $RU --arm-profiler --steps 300 --workers 8
 for w in 1 8; do
   run off_armed_R-S_tree_sets_W$w 0 --scene rest --sleeping on --broadphase tree $RU --arm-profiler --steps 600 --workers $w --expect-pose $L10OFF/R-S_W$w.pose
   run off_armed_R-S_tree_off_W$w 0 --scene rest --sleeping on --sleep-skip off --broadphase tree $RU --arm-profiler --steps 600 --workers $w --expect-pose $L10OFF/R-S_W$w.pose

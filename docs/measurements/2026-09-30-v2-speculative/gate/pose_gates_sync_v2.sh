@@ -6,7 +6,8 @@
 # on) against the reuse-on fixtures, and with --contact-reuse off against the pre-C4 fixtures.
 # G3's sleeping-on rows run under --sleep-skip {unset, off, sets} x --broadphase {unset, tree,
 # grid} in both arms. G4: window 6's 1000/800-step sleeping rows (item 1) in both arms and every
-# sleep-skip mode, and its Off' rows (explicit --contact-reuse on), which must not move.
+# sleep-skip mode, and its Off' rows (explicit --contact-reuse on), which must not move. Every
+# sleeping-off row names --sleeping off (lane SL, SL-2a), so the default's flip (SL-3) moves none.
 # usage: pose_gates_sync.sh [--root DIR] <exe> <outdir>   (fixtures from ROOT: the gate-root block)
 # Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = every row PASS, all EXPECT_RUNS rows ran and
 # both negative controls exited 4; 1 = red; 2 = could not run (usage, no exe, a fixture missing),
@@ -70,16 +71,16 @@ for w in 1 8; do
     if [ "$arm" = on ]; then RU=; J=0x441a568e91a4f9c9; F9=$L9C4; F10=$L10; else RU="--contact-reuse off"; J=0xbc09a1faf7b413a8; F9=$L9; F10=$L10OFF; fi
     # G1: the J pose, 500 steps, cfg default/as x allpairs/tree.
     for c in default as; do for bp in allpairs tree; do
-      chk "G1_${arm}_J500_${c}_${bp}" "$w" $J --scene jolt --gap 0.5 --cfg $c --broadphase $bp --steps 500 $RU
+      chk "G1_${arm}_J500_${c}_${bp}" "$w" $J --scene jolt --gap 0.5 --cfg $c --broadphase $bp --sleeping off --steps 500 $RU
     done; done
     # G2: L9's C0-family rows, 600 steps.
-    chk G2_${arm}_J-A "$w" - --scene jolt --gap 0.5 --cfg a --steps 600 $RU --expect-pose $F9/J-A_W$w.pose
-    chk G2_${arm}_J-D "$w" - --scene jolt --gap 0.5 --cfg default --steps 600 $RU --expect-pose $F9/J-D_W$w.pose
-    chk G2_${arm}_R "$w" - --scene rest --solver colored $PS --steps 600 $RU --expect-pose $F9/R_W$w.pose
+    chk G2_${arm}_J-A "$w" - --scene jolt --gap 0.5 --cfg a --sleeping off --steps 600 $RU --expect-pose $F9/J-A_W$w.pose
+    chk G2_${arm}_J-D "$w" - --scene jolt --gap 0.5 --cfg default --sleeping off --steps 600 $RU --expect-pose $F9/J-D_W$w.pose
+    chk G2_${arm}_R "$w" - --scene rest --solver colored $PS --sleeping off --steps 600 $RU --expect-pose $F9/R_W$w.pose
     chk G2_${arm}_R-S "$w" - --scene rest $SON --steps 600 $RU --expect-pose $F9/R-S_W$w.pose
     chk G2_${arm}_J-Son "$w" - --scene jolt --gap 0.5 --cfg a $SON --steps 600 $RU --expect-pose $F9/J-Son_W$w.pose
     # G3: the L10 lane fixtures, 600 steps.
-    chk G3_${arm}_R "$w" - --scene rest --solver colored $PS --steps 600 $RU --expect-pose $F10/R_W$w.pose
+    chk G3_${arm}_R "$w" - --scene rest --solver colored $PS --sleeping off --steps 600 $RU --expect-pose $F10/R_W$w.pose
     for bp in "" tree grid; do
       if [ -z "$bp" ]; then BP=; BTAG=; else BP="--broadphase $bp"; BTAG="_bp-$bp"; fi
       for skip in "" off sets; do
