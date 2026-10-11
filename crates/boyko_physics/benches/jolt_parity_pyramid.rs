@@ -344,6 +344,10 @@
 //! --bp-kernel rowwalk|leaflist
 //!                              select the tree query kernel (with --broadphase tree); unset, the
 //!                              tree's default
+//! --friction point|manifold|manifold-touch
+//!                              set friction_model (FM: per point, per manifold, per manifold with
+//!                              the touching-point centre), under any --cfg; colored solver only (the
+//!                              reference solver is per point). Unset, the config's default
 //! --sr-floor N                 SR: the solve region grain's wide floor (also the parallel
 //!                              gate's), >= 1; colored solver only, as the two below
 //! --sr-bpp N                   its blocks per participant of a colour entry, 1..=8
@@ -377,6 +381,12 @@
 //!   `full`, `full_contacts`, `records_built`, `non_box`, `pairs` — and `h`, the share of the
 //!   touching box pairs served from a record, `reused / (reused + full_contacts)`. A counter, not a
 //!   time, so it is a result on a shared machine.
+//! * `config.friction_model` (every row): the friction model the row ran (FM).
+//! * `layout_census` (armed colored rows; `null` otherwise): the colored solve's cohort layout
+//!   summed over the window (`ColoredSoftStepSolver::layout_census`, read after every step,
+//!   untimed) — `steps`, `cohorts`, `cohorts_by_depth` (depths 1..4), `rank_slots`,
+//!   `patch_blocks`, `multi_lanes`. Integers: the FM screen's structural inputs (its K1 reads
+//!   `cohorts_by_depth`).
 //! * `fallback_census` (a runner built with `--features narrowphase-counts`; `null` otherwise): the
 //!   box-box edge fallback's census over the whole run (`narrowphase::box_box::fallback_census`,
 //!   the `thinbox` lane) — `calls`, `phantom`, `hint_capped`, `corner`, `refresh_stale`,
@@ -547,8 +557,8 @@ use boyko_physics::profiling::{
     ZONES_COMPILED, hist_bin,
 };
 use boyko_physics::resources::{
-    BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
-    PairClasses, PhysicsConfig, SleepSkip, SolverScratch,
+    BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, FrictionModel, IslandSleep,
+    Manifolds, PairClasses, PhysicsConfig, SleepSkip, SolverScratch,
 };
 use boyko_physics::sleep_sets::SleepSets;
 use boyko_physics::broadphase_tree::{
@@ -560,7 +570,7 @@ use boyko_physics::profiling::{
     PHYS_REGION_BLOCKS_MAX, PHYS_REGION_HELPER_BLOCKS, PHYS_REGION_INLINE, PHYS_REGION_MAX_WAIT,
     PHYS_REGION_OPENS, PHYS_REGION_PUBLISHED, PHYS_REGION_STALLS,
 };
-use boyko_physics::solver::colored::RegionGrain;
+use boyko_physics::solver::colored::{LayoutCensus, RegionGrain};
 
 // The dynamic parity scenes (lane DYN-SCENES). `#[path]` from this crate root resolves next to it,
 // in `benches/jolt_parity_pyramid/`, a directory Cargo does not take for a target (it has no
@@ -767,6 +777,8 @@ struct Args {
     canary_zone_ns: Option<u64>,
     /// `--bp-kernel`: the tree query kernel; `None` leaves the tree's default.
     bp_kernel: Option<QueryKernel>,
+    /// `--friction` (FM): the friction model; `None` leaves the config's default.
+    friction: Option<FrictionModel>,
     /// SR: the region grain the `--sr-*` flags set (the default grain otherwise).
     sr_grain: RegionGrain,
     csv: Option<PathBuf>,
@@ -812,6 +824,7 @@ fn usage_error(msg: &str) -> ExitCode {
          [--threshold T] \
          [--frozen-by K] [--arm-profiler] [--canary-frac F --canary-ref-ns T] \
          [--canary-zone Z --canary-ns N] [--bp-kernel rowwalk|leaflist] \
+         [--friction point|manifold|manifold-touch] \
          [--sr-floor N] [--sr-bpp N] [--sr-min-points N] [--csv PATH] \
          [--pose-out PATH] [--expect-pose PATH] [--label TEXT] [--dyn kick|shoot|slide] \
          [--sanity PATH] [--scene-dump PATH]"
@@ -863,6 +876,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     let mut canary_zone = None;
     let mut canary_zone_ns = None;
     let mut bp_kernel = None;
+    let mut friction = None;
     let mut sr_grain = RegionGrain::DEFAULT;
     let mut csv = None;
     let mut pose_out = None;
@@ -976,6 +990,16 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
             "--canary-zone" => canary_zone = Some(it.next().ok_or("--canary-zone needs a zone name")?),
             "--canary-ns" => canary_zone_ns = Some(parse_num::<u64>("--canary-ns", it.next())?),
             "--bp-kernel" => bp_kernel = Some(parse_bp_kernel(it.next())?),
+            "--friction" => {
+                friction = Some(match it.next().as_deref() {
+                    Some("point") => FrictionModel::PerPoint,
+                    Some("manifold") => FrictionModel::PerManifold,
+                    Some("manifold-touch") => FrictionModel::PerManifoldTouch,
+                    other => {
+                        return Err(format!("--friction: expected point|manifold|manifold-touch, got {other:?}"));
+                    }
+                });
+            }
             "--sr-floor" => sr_grain.wide_floor = parse_num("--sr-floor", it.next())?,
             "--sr-bpp" => sr_grain.max_bpp = parse_num("--sr-bpp", it.next())?,
             "--sr-min-points" => sr_grain.colour_min_points = parse_num("--sr-min-points", it.next())?,
@@ -1029,6 +1053,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
         canary_zone,
         canary_zone_ns,
         bp_kernel,
+        friction,
         sr_grain,
         csv,
         pose_out,
@@ -1078,6 +1103,13 @@ fn validate(a: &Args) -> Result<(), String> {
                     .into(),
             );
         }
+    }
+    if a.friction.is_some() && a.solver == SolverKind::Reference {
+        return Err(
+            "--friction needs the colored solver: the reference solver is per point and ignores \
+             friction_model (FM design Q9), so the row would carry a model it never ran"
+                .into(),
+        );
     }
     if a.parallel_solve && a.workers == 1 {
         return Err(
@@ -1443,6 +1475,9 @@ fn configure(cfg: &mut PhysicsConfig, args: &Args) {
     if let Some(kind) = args.broadphase {
         cfg.broadphase_select = BroadphaseSelectMode::Manual;
         cfg.broadphase = kind;
+    }
+    if let Some(model) = args.friction {
+        cfg.friction_model = model;
     }
 }
 
@@ -2405,6 +2440,41 @@ fn main() -> ExitCode {
     }
 }
 
+/// FM: the colored layout's census summed over a row's window (the summary's `layout_census`).
+#[derive(Clone, Copy, Debug, Default)]
+struct LayoutSum {
+    steps: u64,
+    cohorts: u64,
+    cohorts_by_depth: [u64; 4],
+    rank_slots: u64,
+    patch_blocks: u64,
+    multi_lanes: u64,
+}
+
+impl LayoutSum {
+    /// Adds one step's census.
+    fn add(&mut self, c: LayoutCensus) {
+        self.steps += 1;
+        self.cohorts += u64::from(c.cohorts);
+        for (sum, n) in self.cohorts_by_depth.iter_mut().zip(c.cohorts_by_depth) {
+            *sum += u64::from(n);
+        }
+        self.rank_slots += u64::from(c.rank_slots);
+        self.patch_blocks += u64::from(c.patch_blocks);
+        self.multi_lanes += u64::from(c.multi_lanes);
+    }
+
+    /// The summary's object.
+    fn json(&self) -> String {
+        let [d1, d2, d3, d4] = self.cohorts_by_depth;
+        format!(
+            "{{\"steps\":{},\"cohorts\":{},\"cohorts_by_depth\":[{d1},{d2},{d3},{d4}],\"rank_slots\":{},\
+             \"patch_blocks\":{},\"multi_lanes\":{}}}",
+            self.steps, self.cohorts, self.rank_slots, self.patch_blocks, self.multi_lanes
+        )
+    }
+}
+
 /// The no-`--scene` path (module docs, "Self-check").
 fn self_check() -> ExitCode {
     let args = Args {
@@ -2433,6 +2503,7 @@ fn self_check() -> ExitCode {
         canary_zone: None,
         canary_zone_ns: None,
         bp_kernel: None,
+        friction: None,
         sr_grain: RegionGrain::DEFAULT,
         csv: None,
         pose_out: None,
@@ -2497,7 +2568,7 @@ fn run(args: &Args) -> ExitCode {
              \"contact_reuse_distance\":{},\
              \"speculative_distance\":{},\"speculative_velocity_cap\":{},\
              \"sleeping\":{},\"sleep_skip\":{},\"sleep_threshold\":{},\"sleep_frames\":{},\
-             \"colored\":{},\"contact_hertz\":{},\"contact_damping\":{}}}",
+             \"colored\":{},\"contact_hertz\":{},\"contact_damping\":{},\"friction_model\":{}}}",
             cfg.substeps,
             cfg.relax_iterations,
             json_str(&format!("{:?}", cfg.broadphase)),
@@ -2519,6 +2590,7 @@ fn run(args: &Args) -> ExitCode {
             cfg.colored,
             json_f64(f64::from(cfg.contact_hertz)),
             json_f64(f64::from(cfg.contact_damping)),
+            json_str(&format!("{:?}", cfg.friction_model)),
         );
         (
             u64::from(cfg.substeps),
@@ -2583,6 +2655,8 @@ fn run(args: &Args) -> ExitCode {
     let mut counts = vec![0u64; n_cols];
     let mut values = vec![0u64; n_cols];
     let mut void_steps = 0usize;
+    // FM: the colored layout's census summed over the window, on armed colored rows (untimed).
+    let mut layout = LayoutSum::default();
     let mut first_void: Option<String> = None;
     let mut solve_on_dispatcher_steps = 0usize;
     // L10 C3a: armed steps whose recomputed structure is the no-awake fast path.
@@ -2679,6 +2753,9 @@ fn run(args: &Args) -> ExitCode {
         }
         if read_classes {
             classes.push(rig.world.resource::<Manifolds>().pair_classes());
+        }
+        if armed && colored && (window.0..window.1).contains(&step) {
+            layout.add(rig.world.resource::<ColoredSoftStepSolver>().layout_census());
         }
 
         if let Some(zones) = &zones {
@@ -3113,7 +3190,7 @@ fn run(args: &Args) -> ExitCode {
          \"broadphase_tree\":{bp_json},\"bp_kernel_flag\":{},\"fallback_census\":{census_json},\
          \"bp_query_dispatches\":{{\"run\":{},\"window\":{},\"expected_run\":{},\"expected_window\":{}}},\
          \"bp_query_tail_leaves\":{{\"run\":{},\"window\":{}}},\
-         \"pair_classes\":{classes_json},\"w8s\":{w8s_json},\
+         \"pair_classes\":{classes_json},\"layout_census\":{},\"w8s\":{w8s_json},\
          \"canary_zone\":{},\"canary_zone_ns\":{},\"route_note\":{},\
          \"host\":{{\"logical_cores\":{logical_cores}}},\
          \"threads\":{{\"pool_workers\":{},\"dispatcher\":1,\"solve_on_dispatcher_steps\":\
@@ -3167,6 +3244,7 @@ fn run(args: &Args) -> ExitCode {
         s5.expected.1,
         s5.tail.0,
         s5.tail.1,
+        if armed && colored { layout.json() } else { "null".to_owned() },
         args.canary_zone.as_deref().map_or_else(|| "null".to_owned(), json_str),
         args.canary_zone_ns.map_or_else(|| "null".to_owned(), |n| n.to_string()),
         json_str(ROUTE_NOTE),
