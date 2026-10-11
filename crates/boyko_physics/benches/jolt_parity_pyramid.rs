@@ -400,7 +400,11 @@
 //!   `contact_wake_rises` (the steps on which it rose, as `step + 1` like `first_frozen_step`, at
 //!   most 256, `contact_wake_rises_truncated` past that), `remap_resets`, and `frozen_v_max`: the
 //!   largest `|v|² + |ω|²` of a frozen (not awake) simulated dynamic row of the solver's snapshot
-//!   over all steps, i.e. the stored velocity a frozen body keeps.
+//!   over all steps, i.e. the stored velocity a frozen body keeps (zero since SL-1). SL-1 adds the
+//!   settle and the seal's counters after the run — `rows_put_to_sleep`, `settles`,
+//!   `settle_rekeys`, `seal_held`, `seal_breaks`, `write_wakes` — and `settle_steps`, the
+//!   `[step + 1, rows]` of every step on which `rows_put_to_sleep` rose (at most 256,
+//!   `settle_steps_truncated` past that).
 //! * exit code: 0 ok; 2 bad flags; 3 void (anti-vacuity, frozen-by, disarmed ring traffic,
 //!   dropped samples, a reuse-on row that collided box pairs over steps [100, 500) and reused no
 //!   record there, or whose window collided none and whose whole run reused no record, an S5
@@ -2375,11 +2379,26 @@ struct SleepReceipt {
     truncated: bool,
     /// The largest `|v|² + |ω|²` of a frozen simulated dynamic row over all steps.
     frozen_v_max: f32,
+    /// `IslandSleep::rows_put_to_sleep` after the previous step.
+    put_prev: u64,
+    /// `[step + 1, rows]` of every step on which `rows_put_to_sleep` rose, at most
+    /// [`SLEEP_RISES_MAX`].
+    settle_steps: Vec<(usize, u64)>,
+    /// A settle step past [`SLEEP_RISES_MAX`] was dropped.
+    settle_truncated: bool,
 }
 
 impl SleepReceipt {
     fn new() -> Self {
-        Self { wakes_prev: 0, rises: Vec::with_capacity(SLEEP_RISES_MAX), truncated: false, frozen_v_max: 0.0 }
+        Self {
+            wakes_prev: 0,
+            rises: Vec::with_capacity(SLEEP_RISES_MAX),
+            truncated: false,
+            frozen_v_max: 0.0,
+            put_prev: 0,
+            settle_steps: Vec::with_capacity(SLEEP_RISES_MAX),
+            settle_truncated: false,
+        }
     }
 
     /// Reads one finished step.
@@ -2394,6 +2413,15 @@ impl SleepReceipt {
             }
         }
         self.wakes_prev = wakes;
+        let put = sleep.rows_put_to_sleep();
+        if put > self.put_prev {
+            if self.settle_steps.len() < SLEEP_RISES_MAX {
+                self.settle_steps.push((step + 1, put - self.put_prev));
+            } else {
+                self.settle_truncated = true;
+            }
+        }
+        self.put_prev = put;
         let rows = world.resource::<SolverScratch>().bodies();
         for (r, b) in rows.iter().enumerate() {
             if b.simulated && b.inv_mass != 0.0 && !sleep.is_row_awake(r) {
@@ -2408,12 +2436,22 @@ impl SleepReceipt {
         let sleep = world.resource::<IslandSleep>();
         format!(
             ",\"sleep\":{{\"contact_wakes\":{},\"contact_wake_rises\":[{}],\"contact_wake_rises_truncated\":{},\
-             \"remap_resets\":{},\"frozen_v_max\":{}}}",
+             \"remap_resets\":{},\"frozen_v_max\":{},\"rows_put_to_sleep\":{},\"settles\":{},\
+             \"settle_steps\":[{}],\"settle_steps_truncated\":{},\"settle_rekeys\":{},\"seal_held\":{},\
+             \"seal_breaks\":{},\"write_wakes\":{}}}",
             sleep.contact_wakes(),
             self.rises.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
             self.truncated,
             sleep.remap_resets(),
             json_f64(f64::from(self.frozen_v_max)),
+            sleep.rows_put_to_sleep(),
+            sleep.settles(),
+            self.settle_steps.iter().map(|(s, r)| format!("[{s},{r}]")).collect::<Vec<_>>().join(","),
+            self.settle_truncated,
+            sleep.settle_rekeys(),
+            sleep.seal_held(),
+            sleep.seal_breaks(),
+            sleep.write_wakes(),
         )
     }
 }

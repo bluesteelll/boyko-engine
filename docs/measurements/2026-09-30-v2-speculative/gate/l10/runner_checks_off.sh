@@ -2,6 +2,10 @@
 # The reuse-off arm of the lane's runner_checks_c3c.sh armed rows (untimed): each armed
 # expect-pose row with --contact-reuse off against the pre-C4 fixtures; void steps must be 0.
 # usage: runner_checks_off.sh [--root DIR] <exe> <outdir>   (fixtures from ROOT: the gate-root block)
+# Fixtures (lane SL, ruling 39): lane SL's mirror docs/measurements/2026-10-11-sl-sleeping - the
+# record directories' sleeping-off files as byte copies, the sleeping-on files and their pinned
+# hashes SL-1's re-recordings (a sleeping body's velocity is zero); the record directories are not
+# edited.
 # Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = every check PASS and all EXPECT_CHECKS ran;
 # 1 = red; 2 = could not run (usage, no exe, a fixture missing), decided before the first check.
 set -u
@@ -28,7 +32,7 @@ if [ ! -d "$ROOT/docs/measurements" ]; then echo "$(basename "$0"): '$ROOT' is n
 if [ $# -ne 2 ]; then echo "usage: $ME [--root DIR] <exe> <outdir>" >&2; exit 2; fi
 EXE=$1
 OUT=$2
-L10OFF=$ROOT/docs/measurements/2026-09-23-l10-sleeping/fixtures-reuse-off
+L10OFF=$ROOT/docs/measurements/2026-10-11-sl-sleeping/d0/l10-fixtures-reuse-off
 if [ ! -f "$EXE" ]; then echo "$ME: no runner exe at $EXE" >&2; exit 2; fi
 missing=0
 for w in 1 8; do for n in R-S J-Son J-D-on; do

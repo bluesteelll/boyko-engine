@@ -1033,3 +1033,428 @@
             assert_eq!(sleep.wake_served, 2, "both requests are served");
         }
     }
+
+    // Lane SL (design `sl/design_r2.md` §3, cut `sl/cut.md` C-1..C-6): the rest state, the settle
+    // and the seal, driven directly through `begin_step` / `end_step` / `settle`. The pipeline's
+    // behaviour is gated by `tests/sleep_velocity_zero.rs` and `tests/sleep_seal.rs`; these units
+    // pin the state machine. Miri filter: `resources::tests::sl::`.
+    mod sl {
+        use crate::components::ColliderShape;
+        use crate::manifold::{BodyIndex, Manifold};
+        use crate::math::Vec3;
+        use crate::resources::{
+            BodyState, ConstraintGraph, DEFAULT_SLEEP_THRESHOLD, IslandSleep, PhysicsConfig,
+            SdfNarrowphaseKernel, SealArm, SealEpoch, SleepSkip, TouchedMask,
+        };
+        use crate::row_identity::{REST_FROZEN, REST_NONE, REST_SETTLED};
+        use crate::scratch_ids::touched_solver_id;
+        use crate::sdf_query::SdfField;
+        use boyko_sdf_math::{SdfEdit, sdf_op};
+
+        /// The debounce every unit runs with: short, so a latch takes three steps.
+        const FRAMES: u16 = 3;
+
+        /// A unit dynamic box at `x`, carrying a sub-threshold velocity (W4c: speed²
+        /// `1.25e-6 < 1e-4`), so a stash taken before the zero differs from the zeroed body.
+        fn dynamic(x: f32) -> BodyState {
+            BodyState {
+                position: Vec3::new(x, 0.5, 0.0),
+                linear_velocity: Vec3::new(1e-3, 0.0, 0.0),
+                angular_velocity: Vec3::new(0.0, 5e-4, 0.0),
+                inv_mass: 1.0,
+                simulated: true,
+                shape: ColliderShape::Box { half_extents: Vec3::new(0.5, 0.5, 0.5) },
+                ..BodyState::default()
+            }
+        }
+
+        /// The static floor box.
+        fn floor() -> BodyState {
+            BodyState {
+                position: Vec3::new(0.0, -1.0, 0.0),
+                shape: ColliderShape::Box { half_extents: Vec3::new(50.0, 1.0, 50.0) },
+                ..BodyState::default()
+            }
+        }
+
+        /// Three dynamic boxes (rows 0 to 2), then the floor (row 3).
+        fn scene() -> Vec<BodyState> {
+            vec![dynamic(0.0), dynamic(1.0), dynamic(2.0), floor()]
+        }
+
+        /// The graph of `pairs` over `bodies` (the partition reads only the two rows).
+        fn graph(pairs: &[(u32, u32)], bodies: &[BodyState]) -> ConstraintGraph {
+            let manifolds: Vec<Manifold> = pairs
+                .iter()
+                .map(|&(a, b)| Manifold::new(BodyIndex(a), BodyIndex(b)))
+                .collect();
+            let mut g = ConstraintGraph::with_capacity(0);
+            g.build(&manifolds, bodies.len(), |r| {
+                bodies.get(r as usize).is_some_and(|b| b.inv_mass != 0.0)
+            });
+            g
+        }
+
+        /// A touched mask with every one of `n` rows set: every unit's settling rows were solved
+        /// (C-4: the settle's debug assert is its contract).
+        fn touched_all(n: usize) -> TouchedMask {
+            let mut t = TouchedMask::with_capacity(touched_solver_id(), n);
+            t.reset(n);
+            for r in 0..n {
+                t.set(r);
+            }
+            t
+        }
+
+        fn arm(cfg: &PhysicsConfig) -> Option<SealArm<'_>> {
+            Some(SealArm { cfg, field: None })
+        }
+
+        /// One direct step: `begin_step` then `end_step` over `g`.
+        fn step(sleep: &mut IslandSleep, g: &ConstraintGraph, bodies: &[BodyState]) {
+            sleep.begin_step(g, bodies.len());
+            sleep.end_step(bodies, g, DEFAULT_SLEEP_THRESHOLD, FRAMES);
+        }
+
+        fn zero(b: &BodyState) -> bool {
+            [b.linear_velocity, b.angular_velocity]
+                .iter()
+                .all(|v| v.x.to_bits() == 0 && v.y.to_bits() == 0 && v.z.to_bits() == 0)
+        }
+
+        /// The island `{0, 1, 2}` on the floor (three manifolds), latched through `end_step`:
+        /// on return its rows are `REST_SETTLED` and the settle is pending.
+        fn settled_island(bodies: &[BodyState]) -> (IslandSleep, ConstraintGraph) {
+            let g = graph(&[(0, 3), (0, 1), (1, 2)], bodies);
+            let mut sleep = IslandSleep::with_capacity(4, 4);
+            for _ in 0..FRAMES {
+                step(&mut sleep, &g, bodies);
+            }
+            assert!(
+                (0..3).all(|r| sleep.rest_of(r) == REST_SETTLED) && sleep.settle_pending,
+                "construction: the island went to sleep at the last end_step (rest {:?})",
+                (0..3).map(|r| sleep.rest_of(r)).collect::<Vec<_>>()
+            );
+            (sleep, g)
+        }
+
+        /// T-SL2 (M-SL3): rows that latched while their island still had an unlatched member are
+        /// not frozen when a later graph files them alone under a count equal to their key. They
+        /// are solved one more step, settle (zeroed) at its `end_step`, and freeze at the next
+        /// `begin_step`. The trunk froze them at once, with their solved velocity.
+        #[test]
+        fn an_island_that_never_went_to_sleep_does_not_freeze() {
+            let mut bodies = scene();
+            let n = bodies.len();
+            // {0, 1} rest on the floor, row 2 moves on its own.
+            bodies[2].linear_velocity = Vec3::new(1.0, 0.0, 0.0);
+            let g_apart = graph(&[(0, 3), (0, 1), (2, 3)], &bodies);
+            let mut sleep = IslandSleep::with_capacity(4, 4);
+            for _ in 0..FRAMES - 1 {
+                step(&mut sleep, &g_apart, &bodies);
+            }
+            // Row 2 stops and joins: {0, 1, 2}, three manifolds. Rows 0 and 1 latch, row 2 does
+            // not, so the island does not go to sleep.
+            bodies[2].linear_velocity = Vec3::ZERO;
+            let g_merged = graph(&[(0, 3), (0, 1), (1, 2)], &bodies);
+            step(&mut sleep, &g_merged, &bodies);
+            assert_eq!(
+                (
+                    [0, 1, 2].map(|r| sleep.is_row_latched(r)),
+                    [0, 1, 2].map(|r| sleep.rest_of(r)),
+                    sleep.rows_put_to_sleep(),
+                ),
+                ([true, true, false], [REST_NONE; 3], 0),
+                "construction: rows 0 and 1 latched inside an island with an unlatched member, and \
+                 nothing went to sleep"
+            );
+            // {0, 1} alone, under three manifolds: the count their key holds.
+            let g_alone = graph(&[(0, 3), (0, 1), (1, 3)], &bodies);
+            sleep.begin_step(&g_alone, n);
+            let isl = g_alone.island_of(0);
+            assert_eq!(g_alone.island_of(1), isl, "construction: rows 0 and 1 share an island");
+            assert!(
+                !sleep.is_island_frozen(isl) && sleep.is_row_awake(0) && sleep.is_row_awake(1),
+                "T-SL2: the island froze although it never went to sleep (its rows latched while \
+                 row 2 was unlatched): it would freeze with its solved velocity"
+            );
+            assert_eq!(sleep.contact_wakes(), 0, "anti-vacuity: no contact wake kept it active");
+            // It is solved this step, goes to sleep, and the settle zeroes it.
+            sleep.end_step(&bodies, &g_alone, DEFAULT_SLEEP_THRESHOLD, FRAMES);
+            sleep.settle(&mut bodies, &touched_all(n), None);
+            assert_eq!(
+                ([0, 1].map(|r| sleep.rest_of(r)), sleep.rows_put_to_sleep()),
+                ([REST_SETTLED; 2], 2),
+                "T-SL2: the island goes to sleep at the end of the step it was solved"
+            );
+            assert!(
+                zero(&bodies[0]) && zero(&bodies[1]) && !zero(&bodies[2]),
+                "T-SL2: the settle zeroes the sleeping island's rows and only them: {:?}",
+                &bodies[..3]
+            );
+            sleep.begin_step(&g_alone, n);
+            assert!(
+                sleep.is_island_frozen(isl)
+                    && !sleep.is_row_awake(0)
+                    && [0, 1].map(|r| sleep.rest_of(r)) == [REST_FROZEN; 2],
+                "T-SL2: the settled island freezes at the next begin_step"
+            );
+        }
+
+        /// T-SL10 (M-SL9, M-SL11): on the sealed first step after a settle, a count change
+        /// re-keys every settled row and the island freezes; with one watched row's position one
+        /// ulp off, the same change wakes it by the trunk's rule.
+        #[test]
+        fn a_count_change_on_the_first_step_after_a_settle_is_rekeyed_when_sealed() {
+            let cfg = PhysicsConfig::default();
+            for nudge in [false, true] {
+                let mut bodies = scene();
+                let n = bodies.len();
+                let (mut sleep, _) = settled_island(&bodies);
+                sleep.settle(&mut bodies, &touched_all(n), arm(&cfg));
+                assert!(
+                    bodies[..3].iter().all(zero) && sleep.settles() == 1,
+                    "construction: the armed settle zeroed the island and stashed a seal"
+                );
+                sleep.arm_seal_for_test();
+                if nudge {
+                    let x = &mut bodies[2].position.x;
+                    *x = f32::from_bits(x.to_bits() + 1);
+                }
+                // Row 0 loses its floor manifold: the count falls from 3 to 2.
+                let g_less = graph(&[(0, 1), (1, 2)], &bodies);
+                let upto = sleep.wake_requests();
+                sleep.begin_step_armed(&g_less, n, upto, &bodies, arm(&cfg));
+                let isl = g_less.island_of(0);
+                let read = (
+                    sleep.is_island_frozen(isl),
+                    [0, 1, 2].map(|r| sleep.is_row_latched(r)),
+                    sleep.settle_rekeys(),
+                    sleep.contact_wakes(),
+                    sleep.seal_held(),
+                    sleep.seal_breaks(),
+                );
+                if nudge {
+                    assert_eq!(
+                        read,
+                        (false, [false; 3], 0, 3, 0, 1),
+                        "T-SL10, a watched row moved by one ulp: the seal breaks and the count \
+                         change wakes every row (frozen, latched, settle_rekeys, contact_wakes, \
+                         seal_held, seal_breaks)"
+                    );
+                } else {
+                    assert_eq!(
+                        read,
+                        (true, [true; 3], 3, 0, 1, 0),
+                        "T-SL10, sealed: the count change re-keys the three settled rows and the \
+                         island freezes (frozen, latched, settle_rekeys, contact_wakes, seal_held, \
+                         seal_breaks)"
+                    );
+                    assert!(
+                        [0, 1, 2].map(|r| sleep.rest_of(r)) == [REST_FROZEN; 3],
+                        "T-SL10: the re-keyed rows are frozen"
+                    );
+                }
+            }
+        }
+
+        /// T-SL17 (M-SL13): a seal serves only the first step after its settle. Island A
+        /// (`{0, 1}`) settles armed and its seal holds on the next step; island B (`{2}`) settles
+        /// at that step's end through a disarmed settle, so no new seal exists; B's count then
+        /// changes on the step after, which must wake B by the trunk's rule, not re-key it with
+        /// A's spent seal.
+        #[test]
+        fn a_seal_is_used_only_on_the_step_right_after_its_settle() {
+            let cfg = PhysicsConfig::default();
+            let mut bodies = scene();
+            let n = bodies.len();
+            let touched = touched_all(n);
+            let g = graph(&[(0, 3), (0, 1), (2, 3)], &bodies);
+            let mut sleep = IslandSleep::with_capacity(4, 4);
+            // B moves on the first step, so it latches one step after A.
+            bodies[2].linear_velocity = Vec3::new(1.0, 0.0, 0.0);
+            step(&mut sleep, &g, &bodies);
+            bodies[2].linear_velocity = Vec3::new(1e-3, 0.0, 0.0);
+            for _ in 1..FRAMES {
+                sleep.begin_step(&g, n);
+                sleep.end_step(&bodies, &g, DEFAULT_SLEEP_THRESHOLD, FRAMES);
+            }
+            assert_eq!(
+                [0, 1, 2].map(|r| sleep.rest_of(r)),
+                [REST_SETTLED, REST_SETTLED, REST_NONE],
+                "construction: A went to sleep, B did not"
+            );
+            sleep.settle(&mut bodies, &touched, arm(&cfg));
+            sleep.arm_seal_for_test();
+            let upto = sleep.wake_requests();
+            sleep.begin_step_armed(&g, n, upto, &bodies, arm(&cfg));
+            sleep.end_step(&bodies, &g, DEFAULT_SLEEP_THRESHOLD, FRAMES);
+            sleep.settle(&mut bodies, &touched, None);
+            assert_eq!(
+                (
+                    sleep.is_island_frozen(g.island_of(0)),
+                    sleep.rest_of(2),
+                    sleep.seal_held(),
+                    sleep.seal_breaks(),
+                ),
+                (true, REST_SETTLED, 1, 0),
+                "construction: A's seal held and A froze; B went to sleep through a disarmed \
+                 settle (A frozen, B's rest, seal_held, seal_breaks)"
+            );
+            // B gains a manifold: its count changes on the first step after its settle.
+            let g_b = graph(&[(0, 3), (0, 1), (2, 3), (2, 3)], &bodies);
+            let upto = sleep.wake_requests();
+            sleep.begin_step_armed(&g_b, n, upto, &bodies, arm(&cfg));
+            assert_eq!(
+                (
+                    sleep.is_row_awake(2),
+                    sleep.is_row_latched(2),
+                    sleep.contact_wakes(),
+                    sleep.settle_rekeys(),
+                    sleep.seal_held(),
+                ),
+                (true, false, 1, 0, 1),
+                "T-SL17: B's count change on an unsealed step wakes it (awake, latched, \
+                 contact_wakes, settle_rekeys, seal_held): a spent seal must not serve a later step"
+            );
+        }
+
+        /// T-SL18 (M-SL14, cut C-1): `end_step` unlatching a frozen row clears its rest state, so
+        /// the fold, which reads `rest`, makes its island active on the next step: the one-step-late
+        /// energy wake of a velocity written into a frozen body.
+        #[test]
+        fn an_end_step_unlatch_of_a_frozen_row_leaves_its_rest_state() {
+            let mut bodies = scene();
+            let n = bodies.len();
+            let g = graph(&[(0, 3), (0, 1), (1, 2)], &bodies);
+            let mut sleep = IslandSleep::with_capacity(4, 4);
+            sleep.begin_step(&g, n);
+            for r in 0..3 {
+                sleep.force_sleep_row(r);
+            }
+            sleep.begin_step(&g, n);
+            let isl = g.island_of(0);
+            assert!(sleep.is_island_frozen(isl), "construction: the island is frozen");
+            // A velocity above the threshold reaches the frozen island's energy.
+            bodies[1].linear_velocity = Vec3::new(1.0, 0.0, 0.0);
+            sleep.end_step(&bodies, &g, DEFAULT_SLEEP_THRESHOLD, FRAMES);
+            assert_eq!(
+                ([0, 1, 2].map(|r| sleep.is_row_latched(r)), [0, 1, 2].map(|r| sleep.rest_of(r))),
+                ([false; 3], [REST_NONE; 3]),
+                "T-SL18: an unlatched row keeps no rest state (latched, rest)"
+            );
+            sleep.begin_step(&g, n);
+            assert!(
+                !sleep.is_island_frozen(isl) && sleep.is_row_awake(1),
+                "T-SL18: the island must be solved on the step after its energy unlatched it"
+            );
+        }
+
+        /// T-SL19a (M-SL15a): a disarmed settle zeroes but stashes nothing, so even an armed
+        /// `begin_step` with the test hook finds no seal: the count change wakes by the trunk's
+        /// rule and no seal is evaluated.
+        #[test]
+        fn a_disarmed_settle_arms_no_seal() {
+            let cfg = PhysicsConfig::default();
+            let mut bodies = scene();
+            let n = bodies.len();
+            let (mut sleep, _) = settled_island(&bodies);
+            sleep.settle(&mut bodies, &touched_all(n), None);
+            assert!(bodies[..3].iter().all(zero), "T-SL19a: a disarmed settle still zeroes");
+            sleep.arm_seal_for_test();
+            let g_less = graph(&[(0, 1), (1, 2)], &bodies);
+            let upto = sleep.wake_requests();
+            sleep.begin_step_armed(&g_less, n, upto, &bodies, arm(&cfg));
+            assert_eq!(
+                (
+                    sleep.contact_wakes(),
+                    sleep.settle_rekeys(),
+                    sleep.settles(),
+                    sleep.seal_held(),
+                    sleep.seal_breaks(),
+                ),
+                (3, 0, 0, 0, 0),
+                "T-SL19a: (contact_wakes, settle_rekeys, settles, seal_held, seal_breaks): no seal \
+                 exists, so none is evaluated, and the count change wakes every row"
+            );
+        }
+
+        /// T-SL19b (M-SL15b): a disarmed `begin_step` never seals; a live seal reaching it is
+        /// spent as a break, and the count change wakes by the trunk's rule.
+        #[test]
+        fn a_disarmed_begin_step_never_seals() {
+            let cfg = PhysicsConfig::default();
+            let mut bodies = scene();
+            let n = bodies.len();
+            let (mut sleep, _) = settled_island(&bodies);
+            sleep.settle(&mut bodies, &touched_all(n), arm(&cfg));
+            sleep.arm_seal_for_test();
+            let g_less = graph(&[(0, 1), (1, 2)], &bodies);
+            sleep.begin_step(&g_less, n);
+            assert_eq!(
+                (sleep.contact_wakes(), sleep.settle_rekeys(), sleep.seal_held(), sleep.seal_breaks()),
+                (3, 0, 0, 1),
+                "T-SL19b: (contact_wakes, settle_rekeys, seal_held, seal_breaks)"
+            );
+        }
+
+        /// T-SL20 (cut C-5, O5): the seal's epoch is L10's epoch without its mode and warm
+        /// fields. It differs for every narrowphase configuration field and for the SDF edits,
+        /// and is equal across the sleep-skip modes and the warm start.
+        #[test]
+        fn the_seal_epoch_reads_every_narrowphase_input_and_no_mode() {
+            let base = PhysicsConfig::default();
+            let of = |cfg: &PhysicsConfig| SealEpoch::of(cfg, None);
+            let edits = |w: f32| {
+                SdfField::from_edits(&[SdfEdit::box_shape(
+                    [0.0, -1.0, 0.0],
+                    [w, 1.0, w],
+                    sdf_op::UNION,
+                    0.0,
+                )])
+            };
+            let changed: [(&str, PhysicsConfig); 6] = [
+                ("speculative_distance", PhysicsConfig { speculative_distance: 0.01, ..base }),
+                (
+                    "speculative_velocity_cap",
+                    PhysicsConfig { speculative_velocity_cap: 0.25, ..base },
+                ),
+                ("contact_reuse", PhysicsConfig { contact_reuse: !base.contact_reuse, ..base }),
+                ("contact_reuse_distance", PhysicsConfig { contact_reuse_distance: 0.002, ..base }),
+                ("dt", PhysicsConfig { dt: base.dt + 1.0 / 60.0, ..base }),
+                (
+                    "sdf_narrowphase",
+                    PhysicsConfig {
+                        sdf_narrowphase: match base.sdf_narrowphase {
+                            SdfNarrowphaseKernel::Scalar => SdfNarrowphaseKernel::Avx2,
+                            SdfNarrowphaseKernel::Avx2 => SdfNarrowphaseKernel::Scalar,
+                        },
+                        ..base
+                    },
+                ),
+            ];
+            for (field, cfg) in &changed {
+                assert_ne!(of(cfg), of(&base), "T-SL20: the seal epoch ignores `{field}`");
+            }
+            let (a, b) = (edits(50.0), edits(49.0));
+            assert_ne!(SealEpoch::of(&base, Some(&a)), of(&base), "T-SL20: a field and none");
+            assert_ne!(
+                SealEpoch::of(&base, Some(&a)),
+                SealEpoch::of(&base, Some(&b)),
+                "T-SL20: an SDF edit's bits"
+            );
+            assert_eq!(SealEpoch::of(&base, Some(&a)), SealEpoch::of(&base, Some(&edits(50.0))));
+            for cfg in [
+                PhysicsConfig { sleep_skip: SleepSkip::Off, ..base },
+                PhysicsConfig { sleep_skip: SleepSkip::Sets, ..base },
+                PhysicsConfig { warm_start: !base.warm_start, ..base },
+                PhysicsConfig { gravity: Vec3::ZERO, ..base },
+            ] {
+                assert_eq!(
+                    of(&cfg),
+                    of(&base),
+                    "T-SL20: the seal epoch must not read the mode, the warm start or the gravity"
+                );
+            }
+        }
+    }

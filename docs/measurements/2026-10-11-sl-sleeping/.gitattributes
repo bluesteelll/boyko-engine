@@ -1,0 +1,3 @@
+# The recorder runs under Git Bash on Windows: LF in every checkout, whatever core.autocrlf says
+# (docs/physics/perf-campaign/GATE-KIT.md, "Line endings").
+*.sh text eol=lf

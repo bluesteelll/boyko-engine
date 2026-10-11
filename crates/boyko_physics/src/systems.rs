@@ -2117,6 +2117,7 @@ pub fn physics_solve_colored(
             &mut sleep,
             held,
             inputs.wake_requests(),
+            inputs.sdf_field(),
         );
     } else {
         // Sleeping off at the broadphase: byte-identical to the O6/O7 colored path;

@@ -114,12 +114,16 @@ const ANCHOR_REUSE_ON_SLEEP_OFF: u64 = 0x441a_568e_91a4_f9c9;
 const ANCHOR_REUSE_OFF_SLEEP_OFF: u64 = 0xbc09_a1fa_f7b4_13a8;
 /// `JSonT500`: J-T with sleeping on (recorded as `--cfg a --broadphase tree --sleeping on`, which
 /// the engine's scalar/SIMD and worker-count identities make the default configuration's bits;
-/// this file's run is the measurement that they are). Pre-V2: `0x3db4_7fae_414b_655c`.
-const ANCHOR_REUSE_ON_SLEEP_ON: u64 = 0x130c_76cb_6b46_3ab8;
+/// this file's run is the measurement that they are). Pre-V2: `0x3db4_7fae_414b_655c`. Re-pinned by
+/// lane SL-1 (ruling 25; A7-R1's rule) from V2's `0x130c_76cb_6b46_3ab8`: the step that puts the
+/// pile to sleep zeroes its velocities, so the frozen boxes' velocity bytes moved. The fixture is
+/// lane SL's re-recording, `docs/measurements/2026-10-11-sl-sleeping/v2/w8/JSonT500.pose`.
+const ANCHOR_REUSE_ON_SLEEP_ON: u64 = 0xc637_a051_7ada_bab7;
 /// `JSonToff500`: `JSonT500` with `--contact-reuse off`, 500 steps (V2's recorder adds the row; the
 /// pre-V2 anchor was window 6's 1000-step `Son-J1000`, `0xcc2a_5400_c66e_ecce`, whose pile was frozen
-/// before step 500).
-const ANCHOR_REUSE_OFF_SLEEP_ON: u64 = 0xc671_8318_9439_4df6;
+/// before step 500). Re-pinned by lane SL-1 from V2's `0xc671_8318_9439_4df6`, as
+/// [`ANCHOR_REUSE_ON_SLEEP_ON`] (`docs/measurements/2026-10-11-sl-sleeping/v2/w8/JSonToff500.pose`).
+const ANCHOR_REUSE_OFF_SLEEP_ON: u64 = 0x4aec_2a5f_78f4_88d0;
 
 /// FNV-1a 64 offset basis (the runner's).
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
