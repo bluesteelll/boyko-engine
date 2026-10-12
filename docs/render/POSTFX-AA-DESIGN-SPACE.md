@@ -474,7 +474,8 @@ pre_{N−1} units is then about 27 % off:
   - The consumers are:
     - TAA's `taa_hist[1-fi]` (this design);
     - SSR's `lit_prev[1-fi]` and the reflection denoiser's history (REFLECTIONS R5, R7);
-    - the volumetric fog history (VOLUMETRICS V3, once V9 applies the scalar at injection).
+    - the volumetric fog history (VOLUMETRICS V3, once V2 applies the scalar at injection, taken
+      from `ResolvedPost`; amended 2026-10-12, AD-6: V2, not V9).
 - **E3 — caches that outlive frames.** A cache that persists many frames, such as the DDGI probes,
   stores **un-exposed** radiance. Exposure stays the final multiply after the cache read, as it is
   today. Such a cache never reads `lit`, so E2 does not apply to it.
@@ -1546,7 +1547,8 @@ PX12. PX13–PX17 and PU follow owner scope or measurement. The order is chosen 
 - `docs/OPTIMIZATION-PLAN-RENDER.md:44`; `docs/SDF-PERF-AUDIT.md` §1;
   `docs/VB-SV0-SDF-SHADOW-PLAN.md` (the `NMax` lowering).
 - `docs/render/REFLECTIONS-DESIGN-SPACE.md`: R4a's gate and its SSAA leg, R5's `lit_prev`.
-- `docs/render/VOLUMETRICS-DESIGN-SPACE.md`: V3's history, V9's pre-exposure, K6.
+- `docs/render/VOLUMETRICS-DESIGN-SPACE.md`: V3's history, V2's pre-exposure (amended 2026-10-12,
+  AD-6: V2, not V9), K6.
 - `docs/render/REFLECTIONS-UPDATE-2026-09-25.md`: RK-16 and U7.
 
 **Fetched in pass 2** (RESEARCH §6, C13–C27):
@@ -1571,7 +1573,7 @@ The WebSearch budget was exhausted, so only known URLs were fetched.
 
 | # | Remark | Disposition | Where |
 |---|---|---|---|
-| C1 | Pre-exposure is not exact for anything that keeps history; D5 and the PX3 gate are wrong | **Accepted.** The temporal contract E1–E4 (rescale on read, as FSR2 does); a histogram of absolute luminance; ramp fixtures at PX1 and PX3, each red without the rescale; D5 re-worded; D22. **Hand-off:** this pass may write only these two documents. The obligations of E1/E2 go to VOLUMETRICS V3/V9, REFLECTIONS R5/R7 and the VFX/particles campaigns; §5.3 lists them. | §5.3, §5.5, §10 PX1/PX3, D5, D22 |
+| C1 | Pre-exposure is not exact for anything that keeps history; D5 and the PX3 gate are wrong | **Accepted.** The temporal contract E1–E4 (rescale on read, as FSR2 does); a histogram of absolute luminance; ramp fixtures at PX1 and PX3, each red without the rescale; D5 re-worded; D22. **Hand-off:** this pass may write only these two documents. The obligations of E1/E2 go to VOLUMETRICS V3/V2 (amended 2026-10-12, AD-6: V2, not V9), REFLECTIONS R5/R7 and the VFX/particles campaigns; §5.3 lists them. | §5.3, §5.5, §10 PX1/PX3, D5, D22 |
 | W1 | PX1 removes an implicit NaN sanitiser; K2 cites a clamp that does not exist | **Accepted, and strengthened by a trace.** The NaN survives the Catmull-Rom sum (0 × NaN) and `clip_toward_aabb_center` (`NaN > 1.0` is false), so the blob grows even under a static camera. A NaN reaching `exposure_state` blacks the image permanently. The fix is `hdr_sanitize` at every first reader plus guarded state writes, costed. There is a red-first NaN fixture. K2 and RESEARCH §3 are corrected. | §5.2, K2, K13, D23, RESEARCH §0.2, §3 |
 | W2 | SSAA's pre-tonemap output goes through an 8-bit image | **Accepted.** `lit_native` is named, with its format, sizing, memory row and manifest row. It is a fragment colour attachment, so P21's per-format split does not apply; that is stated in the manifest row. The 50× sun fixture runs under SSAA too. | §4, §9.2, §10 PX1, D24 |
 | W3 | The fused-RCAS gate cannot pass on a real edge | **Accepted, with a correction to the premise.** The tree's standalone kernel is AMD CAS (3×3, 9 taps), not FSR 1 RCAS. Re-derived on CAS, the difference is about 0.95/255 on the critique's edge and about 6/255 on a 0.1 \| 0.9 edge, so the conclusion holds. The gates are replaced: a declared diff, oracle agreement and acutance. The fused kernel becomes FSR 1 RCAS (5 taps), whose [0, 1] requirement the reversible space meets. | §5.11, §1, D12 |
