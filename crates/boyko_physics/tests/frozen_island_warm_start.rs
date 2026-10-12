@@ -37,6 +37,9 @@
 //! | `a_woken_pile_steps_exactly_as_its_twin_stepped_from_the_frozen_state` | wake-step state = the twin's state after the sleeper's first frozen step, as bits | differs at box 0, field 0 |
 //! | `a_frozen_island_whose_row_moves_while_held_carries_every_warm_entry` | the carry through a row move while frozen | 0 of 24 |
 //! | `frozen_islands_carried_beside_a_parallel_solve_are_bit_identical_across_worker_counts` | W = 1 and W = 8 bit-identical on every step | anti-vacuity red: nothing carried |
+//! | `a_woken_pile_steps_exactly_as_its_twin_stepped_from_the_frozen_state_fm` | the exactness test with friction per manifold (lane FM) | — (added at FM C1e) |
+//! | `a_woken_pile_steps_exactly_as_its_twin_stepped_from_the_frozen_state_fm_touch` | the same with the touching-point centre | — (added at FM C1e) |
+//! | `frozen_islands_carried_beside_a_parallel_solve_are_bit_identical_across_worker_counts_fm` | the determinism test with friction per manifold | — (added at FM C1e) |
 //!
 //! Each carry mutation was run against all six (2026-09-19, msvc, debug), and each is red in
 //! at least one, on its B1 assertion with every control green:
@@ -52,6 +55,30 @@
 //!
 //! Lane SL re-expressed the scenario's pre-freeze equality (the twin's zero after each settle,
 //! above); the list above is re-run against it and must stay red as stated.
+//!
+//! # Friction per manifold (lane FM, C1e)
+//!
+//! Under `PhysicsConfig::friction_model` `PerManifold` (and `PerManifoldTouch`, its screen arm)
+//! a frozen manifold's carry is `WarmLookup::carry_fm`: each hit point's normal impulse, plus the
+//! manifold's friction triple `(λt1, λt2, λtw)` from the record its friction seed reads. The FM
+//! arms run the exactness test and the determinism test with both worlds on that model, so the
+//! wake step must read the triple the island froze with, bit for bit, and the carry must not see
+//! the worker count. Their premises: every compared step ran the per-manifold form
+//! (`friction_seed_stats` is `Some`), the column's four-point manifolds carry a friction patch
+//! (`layout_census().patch_blocks > 0`), the step an island froze on carried a triple for each of
+//! its manifolds, and the wake step found the friction seed of every manifold it solved
+//! (`manifold_hits == manifolds`; in the exactness arms the never-slept twin's, with every point
+//! warm, so every manifold has a persistent feature id).
+//!
+//! `manifold_carry_hits` is a physical count (FM cut Q2): it counts the solver's own carries. On
+//! the freeze step the solver carries the island's records and the held store captures them; on
+//! every held step after it the held store keeps them, which the count does not see, so it reads
+//! 0 there. The held store's triples are compared through the wake step that reads them.
+//!
+//! Red-first (2026-10-12, msvc, release; the predictions were written before the run): the carry
+//! dropping the triple (`carry_fm` without its `set_friction`, M8) reds both FM exactness arms at
+//! the wake step, first difference at box 0, field 0, and nothing else in this file (7 of 9
+//! green): the dropped triple keeps the record's feature ids, so every premise still holds.
 //!
 //! # The twin
 //!
@@ -98,7 +125,8 @@
 //!
 //! All three run through the real `add_physics_colored_solve` schedule, dt = 1/60, gravity
 //! (0, -9.81, 0), sleeping on, on a static floor box with its top face at `y = 0`. Nothing
-//! else in the configuration is set, except the parallel dispatch in the third.
+//! else in the configuration is set, except the parallel dispatch in the third and the friction
+//! model in the FM arms (the default, `PerPoint`, elsewhere).
 //!
 //! * **The column** (the twin tests and the carry test): [`COLUMN_HEIGHT`] unit-half-extent
 //!   boxes exactly touching (gap 0), on a serial pool. A column rather than a pyramid: a
@@ -146,8 +174,10 @@ use boyko_physics::components::{
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_colored_solve;
 use boyko_physics::resources::{
-    ConstraintGraph, DEFAULT_SLEEP_THRESHOLD, IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
+    ConstraintGraph, DEFAULT_SLEEP_THRESHOLD, FrictionModel, IslandSleep, Manifolds, PhysicsConfig,
+    SolverScratch,
 };
+use boyko_physics::solver::colored::FrictionSeedStats;
 use boyko_physics::solver::{ColoredSoftStepSolver, WarmSeedStats};
 
 // ── Scene constants ──────────────────────────────────────────────────────────
@@ -279,12 +309,14 @@ struct Pile {
 }
 
 /// A world on the real `add_physics_colored_solve` schedule over `pool`, with sleeping on and
-/// the given threshold, dt = [`DT`] and gravity (0, -9.81, 0); `parallel_solve` opts the
-/// colored solve's parallel dispatch in. Nothing else in the configuration is touched.
+/// the given threshold, dt = [`DT`], gravity (0, -9.81, 0) and the friction model `friction`;
+/// `parallel_solve` opts the colored solve's parallel dispatch in. Nothing else in the
+/// configuration is touched.
 fn colored_world(
     pool: Arc<ThreadPool>,
     sleep_threshold: f32,
     parallel_solve: bool,
+    friction: FrictionModel,
 ) -> (EcsMaster, Schedule) {
     let mut world = EcsMaster::new();
     let mut builder = ScheduleBuilder::new(pool);
@@ -300,14 +332,15 @@ fn colored_world(
         }
         cfg.gravity = Vec3::new(0.0, -9.81, 0.0);
         cfg.dt = DT;
+        cfg.friction_model = friction;
     }
     (world, physics)
 }
 
 impl Pile {
-    /// Builds the scene with sleeping on and the given sleep threshold.
-    fn new(sleep_threshold: f32) -> Self {
-        let (world, physics) = colored_world(serial_pool(), sleep_threshold, false);
+    /// Builds the scene with sleeping on, the given sleep threshold and the given friction model.
+    fn new(sleep_threshold: f32, friction: FrictionModel) -> Self {
+        let (world, physics) = colored_world(serial_pool(), sleep_threshold, false, friction);
         let mut pile = Self {
             world,
             physics,
@@ -388,6 +421,21 @@ impl Pile {
         self.world
             .resource::<ColoredSoftStepSolver>()
             .warm_seed_stats()
+    }
+
+    /// FM: the last solve's friction-seed counts, `None` when it ran friction per point.
+    fn fm_stats(&self) -> Option<FrictionSeedStats> {
+        self.world
+            .resource::<ColoredSoftStepSolver>()
+            .friction_seed_stats()
+    }
+
+    /// FM: the friction patch blocks of the last solve's cohort layout.
+    fn patch_blocks(&self) -> u32 {
+        self.world
+            .resource::<ColoredSoftStepSolver>()
+            .layout_census()
+            .patch_blocks
     }
 
     fn body(&self, e: Entity) -> RigidBody {
@@ -473,11 +521,19 @@ struct Observation {
     /// The sleeper's warm-seed statistics on its first frozen step and each held step, in
     /// step order.
     sleeper_frozen_steps: Vec<WarmSeedStats>,
+    /// FM: the sleeper's friction-seed counts on the same steps (`None` under `PerPoint`).
+    sleeper_fm_frozen_steps: Vec<Option<FrictionSeedStats>>,
+    /// FM: the sleeper's friction-seed counts on the wake step.
+    sleeper_fm: Option<FrictionSeedStats>,
+    /// FM: the twin's friction-seed counts on the wake step.
+    twin_fm: Option<FrictionSeedStats>,
+    /// FM: the twin's friction patch blocks on the wake step.
+    twin_patch_blocks: u32,
 }
 
-fn run_scenario() -> Observation {
-    let mut sleeper = Pile::new(DEFAULT_SLEEP_THRESHOLD);
-    let mut twin = Pile::new(0.0);
+fn run_scenario(friction: FrictionModel) -> Observation {
+    let mut sleeper = Pile::new(DEFAULT_SLEEP_THRESHOLD, friction);
+    let mut twin = Pile::new(0.0, friction);
     let mut twin_never_slept = true;
 
     let mut freeze_step = None;
@@ -534,6 +590,8 @@ fn run_scenario() -> Observation {
     let sleeper_state_frozen = sleeper.state();
     let mut sleeper_frozen_steps = Vec::with_capacity(HOLD_STEPS + 1);
     sleeper_frozen_steps.push(sleeper.stats());
+    let mut sleeper_fm_frozen_steps = Vec::with_capacity(HOLD_STEPS + 1);
+    sleeper_fm_frozen_steps.push(sleeper.fm_stats());
 
     for held in 1..=HOLD_STEPS {
         sleeper.step();
@@ -550,6 +608,7 @@ fn run_scenario() -> Observation {
             "the frozen sleeper moved {held} steps into the hold"
         );
         sleeper_frozen_steps.push(sleeper.stats());
+        sleeper_fm_frozen_steps.push(sleeper.fm_stats());
     }
 
     let resets_before_wake = (sleeper.stats().remap_resets, twin.stats().remap_resets);
@@ -576,6 +635,10 @@ fn run_scenario() -> Observation {
         sleeper_state_at_wake: sleeper.state(),
         twin_state_at_wake: twin.state(),
         sleeper_frozen_steps,
+        sleeper_fm_frozen_steps,
+        sleeper_fm: sleeper.fm_stats(),
+        twin_fm: twin.fm_stats(),
+        twin_patch_blocks: twin.patch_blocks(),
     }
 }
 
@@ -606,10 +669,10 @@ where
     }
 }
 
-/// Runs the scenario, prints what both worlds saw, and checks the preconditions that make
-/// the wake step's numbers mean what the tests read them as.
-fn observe(what: &'static str) -> Observation {
-    let obs = under_watchdog(what, SCENARIO_TIMEOUT, run_scenario);
+/// Runs the scenario with both worlds on `friction`, prints what both worlds saw, and checks the
+/// preconditions that make the wake step's numbers mean what the tests read them as.
+fn observe(what: &'static str, friction: FrictionModel) -> Observation {
+    let obs = under_watchdog(what, SCENARIO_TIMEOUT, move || run_scenario(friction));
     let down = max_downward;
     println!(
         "{what}: froze at step {}, woken at step {}\n  \
@@ -647,6 +710,19 @@ fn observe(what: &'static str) -> Observation {
             .collect::<Vec<_>>(),
         obs.sleeper_state_at_wake == obs.twin_state_at_freeze,
     );
+    if friction != FrictionModel::PerPoint {
+        println!(
+            "  {friction:?}: friction-seed counts, wake step: sleeper {:?}, twin {:?}; twin patch \
+             blocks {}; sleeper manifold_carry_hits on its frozen steps: {:?}",
+            obs.sleeper_fm,
+            obs.twin_fm,
+            obs.twin_patch_blocks,
+            obs.sleeper_fm_frozen_steps
+                .iter()
+                .map(|s| s.map(|s| s.manifold_carry_hits))
+                .collect::<Vec<_>>(),
+        );
+    }
 
     assert!(
         obs.twin_never_slept,
@@ -687,7 +763,7 @@ fn observe(what: &'static str) -> Observation {
 /// never-slept twin's same step is.
 #[test]
 fn a_woken_pile_is_warm_started_at_every_point_like_its_never_slept_twin() {
-    let obs = observe("B1 hits");
+    let obs = observe("B1 hits", FrictionModel::PerPoint);
     assert_eq!(
         obs.twin.point_hits, obs.twin.points,
         "control: the never-slept twin must be warm-started at every point on the wake step \
@@ -708,7 +784,7 @@ fn a_woken_pile_is_warm_started_at_every_point_like_its_never_slept_twin() {
 /// never-slept twin on the same step by more than the engine's at-rest speed.
 #[test]
 fn a_woken_pile_does_not_sag_faster_than_its_never_slept_twin() {
-    let obs = observe("B1 velocity");
+    let obs = observe("B1 velocity", FrictionModel::PerPoint);
     let bound = at_rest_speed();
     let twin = max_downward(&obs.twin_velocity);
     let warm_wake = max_downward(&obs.twin_velocity_at_freeze);
@@ -737,7 +813,7 @@ fn a_woken_pile_does_not_sag_faster_than_its_never_slept_twin() {
 /// happens.
 #[test]
 fn a_frozen_pile_carries_every_warm_entry_on_every_frozen_step() {
-    let obs = observe("B1 carry");
+    let obs = observe("B1 carry", FrictionModel::PerPoint);
     let solved_before = obs.sleeper_before_freeze.points;
     for (k, s) in obs.sleeper_frozen_steps.iter().enumerate() {
         assert_eq!(
@@ -782,7 +858,7 @@ fn first_difference(a: &[[u32; 13]], b: &[[u32; 13]]) -> Option<(usize, usize)> 
 /// fails it even where the bound passes.
 #[test]
 fn a_woken_pile_steps_exactly_as_its_twin_stepped_from_the_frozen_state() {
-    let obs = observe("B1 exact");
+    let obs = observe("B1 exact", FrictionModel::PerPoint);
     assert!(
         obs.twin_state_at_wake != obs.twin_state_at_freeze
             && obs.sleeper_state_at_wake != obs.sleeper_state_frozen,
@@ -800,6 +876,84 @@ fn a_woken_pile_steps_exactly_as_its_twin_stepped_from_the_frozen_state() {
         obs.sleeper_velocity,
         obs.twin_velocity_at_freeze
     );
+}
+
+/// FM C1e: [`a_woken_pile_steps_exactly_as_its_twin_stepped_from_the_frozen_state`] with both
+/// worlds on `friction`, a per-manifold model. The frozen column's carry is `carry_fm`, so the
+/// wake step must read the friction triple the island froze with as well as its normal
+/// impulses, bit for bit.
+///
+/// Premises, before the equality: both worlds ran the per-manifold form on the wake step and on
+/// every frozen step; the twin's wake step laid out a friction patch (the column's manifolds have
+/// four points); the first frozen step's carry kept a triple for each of the column's
+/// [`COLUMN_HEIGHT`] manifolds (the floor's and the four between boxes; on the held steps after
+/// it the held store keeps them, which the physical count does not see); and the never-slept
+/// twin's wake step was warm at every point and found the friction seed of every manifold it
+/// solved, so the equality is asked of a step that reads a triple for every manifold.
+fn b1_exact_fm(what: &'static str, friction: FrictionModel) {
+    let obs = observe(what, friction);
+    let (Some(sleeper_fm), Some(twin_fm)) = (obs.sleeper_fm, obs.twin_fm) else {
+        panic!(
+            "{what}: route: a world's wake step did not run friction per manifold (sleeper {:?}, \
+             twin {:?})",
+            obs.sleeper_fm, obs.twin_fm
+        );
+    };
+    assert!(
+        obs.twin_patch_blocks > 0,
+        "{what}: anti-vacuity: the twin's wake step laid out no friction patch, so no friction \
+         triple was solved"
+    );
+    assert!(
+        obs.sleeper_fm_frozen_steps.iter().all(Option::is_some),
+        "{what}: route: a frozen step did not run friction per manifold ({:?})",
+        obs.sleeper_fm_frozen_steps
+    );
+    assert_eq!(
+        obs.sleeper_fm_frozen_steps[0].map(|s| s.manifold_carry_hits),
+        Some(COLUMN_HEIGHT as u32),
+        "{what}: route: the first frozen step did not carry a friction triple for each of the \
+         column's {COLUMN_HEIGHT} manifolds"
+    );
+    assert!(
+        obs.twin.manifolds > 0
+            && obs.twin.point_hits == obs.twin.points
+            && twin_fm.manifold_hits == obs.twin.manifolds,
+        "{what}: non-vacuity: the never-slept twin's wake step must be warm at every point and \
+         find the friction seed of every manifold it solved ({:?}, {twin_fm:?})",
+        obs.twin
+    );
+    assert!(
+        obs.twin_state_at_wake != obs.twin_state_at_freeze
+            && obs.sleeper_state_at_wake != obs.sleeper_state_frozen,
+        "{what}: control: the pile must still move at the bit level, the twin between the \
+         sleeper's first frozen step and the wake step, and the sleeper across the wake step; \
+         otherwise the equality below could hold for a pile that never moves"
+    );
+    assert!(
+        obs.sleeper_state_at_wake == obs.twin_state_at_freeze,
+        "{what}: B1 under {friction:?}: the woken pile did not step as its twin stepped from the \
+         same frozen state. First difference (box bottom-first, field of 13: position, velocity, \
+         rotation, angular velocity): {:?}; sleeper velocities after the wake step {:?}, twin \
+         velocities after the sleeper's first frozen step {:?}; the sleeper's wake-step friction \
+         seeds {sleeper_fm:?}",
+        first_difference(&obs.sleeper_state_at_wake, &obs.twin_state_at_freeze),
+        obs.sleeper_velocity,
+        obs.twin_velocity_at_freeze
+    );
+}
+
+/// FM C1e: B1's exactness under friction per manifold ([`b1_exact_fm`]).
+#[test]
+fn a_woken_pile_steps_exactly_as_its_twin_stepped_from_the_frozen_state_fm() {
+    b1_exact_fm("B1 exact FM", FrictionModel::PerManifold);
+}
+
+/// FM C1e: B1's exactness under friction per manifold with the touching-point centre
+/// ([`b1_exact_fm`]).
+#[test]
+fn a_woken_pile_steps_exactly_as_its_twin_stepped_from_the_frozen_state_fm_touch() {
+    b1_exact_fm("B1 exact FM touch", FrictionModel::PerManifoldTouch);
 }
 
 // ── A row move while frozen ──────────────────────────────────────────────────
@@ -863,7 +1017,12 @@ fn awake_dynamic_rows(world: &EcsMaster) -> usize {
 /// order and the warm cursor can translate it; the column's rows do not move. The static box
 /// has no contact, so no entry of the previous table is keyed by row 1.
 fn run_row_move() -> RowMoveObservation {
-    let (mut world, mut physics) = colored_world(serial_pool(), DEFAULT_SLEEP_THRESHOLD, false);
+    let (mut world, mut physics) = colored_world(
+        serial_pool(),
+        DEFAULT_SLEEP_THRESHOLD,
+        false,
+        FrictionModel::PerPoint,
+    );
     spawn_box(
         &mut world,
         Vec3::new(0.0, -1.0, 0.0),
@@ -1035,7 +1194,7 @@ const CROWD_HOLD_STEPS: usize = 10;
 const CROWD_AFTER_WAKE_STEPS: usize = 60;
 
 /// One world of the determinism scene, on a pool of `workers` threads, with the colored
-/// solve's parallel dispatch opted in.
+/// solve's parallel dispatch opted in and the friction model `friction`.
 struct Crowd {
     world: EcsMaster,
     physics: Schedule,
@@ -1044,9 +1203,10 @@ struct Crowd {
 }
 
 impl Crowd {
-    fn new(workers: usize) -> Self {
+    fn new(workers: usize, friction: FrictionModel) -> Self {
         let pool = ThreadPoolBuilder::new().num_threads(workers).build();
-        let (mut world, physics) = colored_world(Arc::clone(&pool), DEFAULT_SLEEP_THRESHOLD, true);
+        let (mut world, physics) =
+            colored_world(Arc::clone(&pool), DEFAULT_SLEEP_THRESHOLD, true, friction);
         spawn_box(
             &mut world,
             Vec3::new(0.0, -1.0, 0.0),
@@ -1089,6 +1249,21 @@ impl Crowd {
         self.world
             .resource::<ColoredSoftStepSolver>()
             .warm_seed_stats()
+    }
+
+    /// FM: the last solve's friction-seed counts, `None` when it ran friction per point.
+    fn fm_stats(&self) -> Option<FrictionSeedStats> {
+        self.world
+            .resource::<ColoredSoftStepSolver>()
+            .friction_seed_stats()
+    }
+
+    /// FM: the friction patch blocks of the last solve's cohort layout.
+    fn patch_blocks(&self) -> u32 {
+        self.world
+            .resource::<ColoredSoftStepSolver>()
+            .layout_census()
+            .patch_blocks
     }
 
     /// Every box's full state, in spawn order, as bits.
@@ -1171,16 +1346,31 @@ struct CrowdObservation {
     /// Per compared world, in `CROWD_WORKERS` order: the steps whose solve ran as one solve
     /// region (SR's `ColoredSoftStepSolver::region_dispatches`).
     region_dispatches: Vec<u64>,
+    /// Steps tallied: every step before the wake.
+    tallied_steps: usize,
+    /// FM: of those, the steps whose solve ran friction per manifold.
+    fm_steps: usize,
+    /// FM: the most friction patch blocks a step laid out.
+    most_patch_blocks: u32,
+    /// FM: the most frozen manifolds whose carry by the solver kept a friction triple on one step
+    /// (a physical count: the held store's carries are not in it).
+    most_manifold_carry_hits: u32,
+    /// FM: the same, on the steps that carried while a pushed color reached the dispatch floor.
+    /// Reported, not asserted: the solver carries an island's records on the step it freezes, and
+    /// the held store holds them after it.
+    most_manifold_carry_hits_while_dispatching: u32,
+    /// FM: the friction-seed counts of the wake step.
+    wake_fm: Option<FrictionSeedStats>,
 }
 
 /// Steps every world once and asserts each is bit-identical to the first: every box's full
-/// state and the warm-seed statistics.
+/// state, the warm-seed statistics and the friction-seed counts.
 fn step_all(worlds: &mut [Crowd], step: usize, phase: &str) {
     for w in worlds.iter_mut() {
         w.step();
     }
     let (reference, rest) = worlds.split_first().expect("harness: at least one world");
-    let (state, stats) = (reference.state(), reference.stats());
+    let (state, stats, fm) = (reference.state(), reference.stats(), reference.fm_stats());
     for other in rest {
         let other_state = other.state();
         assert!(
@@ -1197,24 +1387,47 @@ fn step_all(worlds: &mut [Crowd], step: usize, phase: &str) {
              ({phase})",
             other.pool.num_threads()
         );
+        assert_eq!(
+            other.fm_stats(),
+            fm,
+            "determinism: the {}-worker world's friction-seed counts diverged at step {step} \
+             ({phase})",
+            other.pool.num_threads()
+        );
     }
 }
 
-fn run_crowd() -> CrowdObservation {
-    let mut worlds: Vec<Crowd> = CROWD_WORKERS.iter().map(|&w| Crowd::new(w)).collect();
+fn run_crowd(friction: FrictionModel) -> CrowdObservation {
+    let mut worlds: Vec<Crowd> = CROWD_WORKERS
+        .iter()
+        .map(|&w| Crowd::new(w, friction))
+        .collect();
     let pool_threads = worlds.iter().map(|w| w.pool.num_threads()).collect();
     let column_boxes = worlds[0].boxes.len();
     let mut step = 0usize;
     let mut carried_while_dispatching = 0usize;
     let mut most_carry_hits_while_dispatching = 0u32;
     let mut steps_with_carry_misses = 0usize;
+    let mut tallied_steps = 0usize;
+    let mut fm_steps = 0usize;
+    let mut most_patch_blocks = 0u32;
+    let mut most_manifold_carry_hits = 0u32;
+    let mut most_manifold_carry_hits_while_dispatching = 0u32;
     let mut tally = |w: &Crowd| {
         let s = w.stats();
+        let fm = w.fm_stats();
+        let fm_carry = fm.map_or(0, |f| f.manifold_carry_hits);
         if s.carry_points > 0 && w.widest_awake_color_slots() >= MIN_PARALLEL_SLOTS_PER_COLOR {
             carried_while_dispatching += 1;
             most_carry_hits_while_dispatching = most_carry_hits_while_dispatching.max(s.carry_hits);
+            most_manifold_carry_hits_while_dispatching =
+                most_manifold_carry_hits_while_dispatching.max(fm_carry);
         }
         steps_with_carry_misses += usize::from(s.carry_hits != s.carry_points);
+        tallied_steps += 1;
+        fm_steps += usize::from(fm.is_some());
+        most_patch_blocks = most_patch_blocks.max(w.patch_blocks());
+        most_manifold_carry_hits = most_manifold_carry_hits.max(fm_carry);
     };
 
     // The columns settle and freeze, island by island.
@@ -1275,6 +1488,7 @@ fn run_crowd() -> CrowdObservation {
     step += 1;
     step_all(&mut worlds, step, "wake step");
     let wake = worlds[0].stats();
+    let wake_fm = worlds[0].fm_stats();
     for _ in 0..CROWD_AFTER_WAKE_STEPS {
         step += 1;
         step_all(&mut worlds, step, "after the wake");
@@ -1294,6 +1508,12 @@ fn run_crowd() -> CrowdObservation {
             .iter()
             .map(|w| w.world.resource::<ColoredSoftStepSolver>().region_dispatches())
             .collect(),
+        tallied_steps,
+        fm_steps,
+        most_patch_blocks,
+        most_manifold_carry_hits,
+        most_manifold_carry_hits_while_dispatching,
+        wake_fm,
     }
 }
 
@@ -1307,9 +1527,16 @@ fn run_crowd() -> CrowdObservation {
 /// work by the pool's thread count.
 #[test]
 fn frozen_islands_carried_beside_a_parallel_solve_are_bit_identical_across_worker_counts() {
-    let obs = under_watchdog("B1 determinism", SCENARIO_TIMEOUT, run_crowd);
+    check_crowd("B1 determinism", FrictionModel::PerPoint);
+}
+
+/// Runs the determinism scenario with every world on `friction` (its bit-identity is asserted
+/// on every step, in [`step_all`]), prints what it observed, and asserts its construction and
+/// its anti-vacuity.
+fn check_crowd(what: &'static str, friction: FrictionModel) -> CrowdObservation {
+    let obs = under_watchdog(what, SCENARIO_TIMEOUT, move || run_crowd(friction));
     println!(
-        "B1 determinism: {} steps carried with a feature-id miss (reported, not asserted); \
+        "{what}: {} steps carried with a feature-id miss (reported, not asserted); \
          {obs:?}",
         obs.steps_with_carry_misses
     );
@@ -1354,5 +1581,50 @@ fn frozen_islands_carried_beside_a_parallel_solve_are_bit_identical_across_worke
         "anti-vacuity: the wake step must read exactly the entries the last held step carried, \
          and there must be some, or the compared steps never consumed what the carry kept \
          ({obs:?})"
+    );
+    obs
+}
+
+/// FM C1e: the determinism test with every world on friction per manifold. A freezing island's
+/// carry is `carry_fm`, which keeps each frozen manifold's friction triple beside its points'
+/// normal impulses, and the held store keeps the triples while the island is held; neither may
+/// see the worker count.
+///
+/// Premises beside [`check_crowd`]'s: every tallied step ran the per-manifold form; some step
+/// laid out a friction patch; some step's carry by the solver kept a triple (`carry_fm` ran in
+/// the compared worlds); and the wake step, which solves every manifold of the crowd after the
+/// hold, found the friction seed of every one of them, so the triples the islands froze with
+/// reached it. `manifold_carry_hits` is physical (cut Q2), so the last held step, whose records
+/// the held store keeps, reads 0 and is not compared with the wake.
+#[test]
+fn frozen_islands_carried_beside_a_parallel_solve_are_bit_identical_across_worker_counts_fm() {
+    let obs = check_crowd("B1 determinism FM", FrictionModel::PerManifold);
+    println!(
+        "B1 determinism FM: the solver's own friction carry kept at most {} triples on a step, {} \
+         on a step that carried while a pushed color reached the dispatch floor (reported, not \
+         asserted)",
+        obs.most_manifold_carry_hits, obs.most_manifold_carry_hits_while_dispatching
+    );
+    assert!(
+        obs.fm_steps == obs.tallied_steps && obs.wake_fm.is_some(),
+        "route: {} of the {} tallied steps (and the wake step: {:?}) ran friction per manifold",
+        obs.fm_steps,
+        obs.tallied_steps,
+        obs.wake_fm
+    );
+    assert!(
+        obs.most_patch_blocks > 0,
+        "anti-vacuity: no step laid out a friction patch, so no triple was solved ({obs:?})"
+    );
+    assert!(
+        obs.most_manifold_carry_hits > 0,
+        "anti-vacuity: no step's carry by the solver kept a friction triple ({obs:?})"
+    );
+    let wake = obs.wake_fm;
+    assert!(
+        obs.wake.manifolds > 0 && wake.map(|w| w.manifold_hits) == Some(obs.wake.manifolds),
+        "anti-vacuity: the wake step must find the friction seed of every manifold it solves, \
+         and solve some ({:?}, {wake:?})",
+        obs.wake
     );
 }
