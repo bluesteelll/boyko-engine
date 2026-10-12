@@ -1576,9 +1576,14 @@ BOYKO_RENDER_PATH        = "vb"
 #
 # PINNED ON DEFERRED, not on VB like its sibling. That path marches the `SdfPrimitive` into the
 # G-buffer, so the collider the particles hit is VISIBLE in the same image as the collision -- which
-# is the whole point of an image pin for this rung. (Its own known property, unchanged by P1: SDF
-# surfaces do not write depth on this leg, so the billboards are not occluded BY the slab; the
-# claim here is about trajectories, and gate #12's dumps are where occlusion is judged.)
+# is the whole point of an image pin for this rung. The claim here is about trajectories; occlusion
+# is judged by gate #12's dumps and, since RD1, by the R0b gates (r0b_sdf_occludes_particles.rs).
+# RD1 (R0b, 281cc086, 2026-10-12): SDF surfaces now occlude transparents on this leg too (the
+# depth-only sdf_depth_merge pass). RE-CHECKED, NOT MOVED: 6 of 6 armed runs and both disarmed runs
+# (BOYKO_TEST_FORCE=disarm_sdf_merge, the pre-RD1 regime) render c6a055a1 on the software leg; the
+# merged depth differs from the disarmed depth on 19176 pixels of frame 30 while 0 colour pixels
+# change - no billboard sits behind the slab from this camera. Nothing to re-bless (golden.ps1
+# -Pin particle_sdf_collide -Check, run from the lane's tree).
 crate           = "boyko-app"
 test_binary     = "particle_lab"
 test_name       = "particle_lab_screenshot_dump"
