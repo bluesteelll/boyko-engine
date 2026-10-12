@@ -66,7 +66,9 @@
 //! # What this gate cannot claim
 //!
 //! * Synchronization hazards: sync validation is measured dead on this machine.
-//! * Configurations it does not boot: particles, `--features hwrt`, SSAA, SSAO, and every TAA arm
+//! * Configurations it does not boot: particles OUTSIDE the three RD1 workers (Forward x Sdf,
+//!   VisibilityBuffer x Sdf and Deferred x Both, each with one alpha emitter behind an SDF sphere),
+//!   `--features hwrt`, SSAA, SSAO, and every TAA arm
 //!   but the one `deferred_taa` boots (Deferred, default `TaaConfig`): RCAS sharpening and TAA on
 //!   the VisibilityBuffer path are not booted.
 //! * That `deferred_taa` booted a TAA HISTORY. Its degrade witness is `JitterState.armed`, and
@@ -94,8 +96,10 @@ use boyko_macros::Resource;
 use boyko_render::generate_tangents;
 use boyko_render::mesh::Vertex;
 use boyko_render::{
-    AaConfig, AaMode, BindlessTextureTable, ClusterConfig, GeometryLegs, JitterState, LightingConfig,
-    Material, MaterialGpu, MeshAssetsVbExt, MeshGeometryTableSlot, RenderPath, RenderPathConfig,
+    AaConfig, AaMode, BindlessTextureTable, ClusterConfig, EmitterActive, GeometryLegs, JitterState,
+    LightingConfig, Material, MaterialGpu, MeshAssetsVbExt, MeshGeometryTableSlot,
+    PARTICLE_BLEND_ALPHA, PARTICLE_SHAPE_CONE, ParticleConfig, ParticleEffect, ParticleEffectHandle,
+    ParticleEffectsExt, ParticleEmitter, ParticleMode, RenderPath, RenderPathConfig,
     ResolvedRenderPath, TextureGpu, load_material_folder,
 };
 use boyko_rhi::RhiDevice;
@@ -162,17 +166,30 @@ enum Worker {
     /// history slot, legal only with `TRANSFER_DST` usage), the jittered raster and the temporal
     /// resolve dispatch.
     DeferredTaa,
+    /// RD1 (R0b): `Forward × Sdf` with particles armed — the `SV_Depth` merge pipeline (`GREATER`,
+    /// `LOAD`), its `SampledImageAtGeneral` read of `viewt`, and the Forward `viewt` barrier the
+    /// VIEWT marcher's write now derives.
+    ForwardSdfParticles,
+    /// RD1 (R0b): `VisibilityBuffer × Sdf` with particles armed — the merge as `vb_depth`'s FIRST
+    /// writer, recorded with `loadOp = CLEAR`.
+    VbSdfParticles,
+    /// RD1 (R0b): `Deferred × Both` with particles armed — the `LESS` merge pipeline and the
+    /// `SHADER_READ_ONLY → DEPTH_ATTACHMENT` transition the merge now takes over from the draw.
+    DeferredSdfParticles,
 }
 
 impl Worker {
     /// Spawn order: the canary first, so a deaf oracle is the first line of the report.
-    const ALL: [Worker; 6] = [
+    const ALL: [Worker; 9] = [
         Worker::Canary,
         Worker::VbFroxel,
         Worker::ForwardBoth,
         Worker::ForwardPlus,
         Worker::DeferredSmaa,
         Worker::DeferredTaa,
+        Worker::ForwardSdfParticles,
+        Worker::VbSdfParticles,
+        Worker::DeferredSdfParticles,
     ];
 
     /// The `#[test]` fn name the driver passes to `--exact`.
@@ -184,6 +201,9 @@ impl Worker {
             Worker::ForwardPlus => "boot_validation_worker_forward_plus",
             Worker::DeferredSmaa => "boot_validation_worker_deferred_smaa",
             Worker::DeferredTaa => "boot_validation_worker_deferred_taa",
+            Worker::ForwardSdfParticles => "boot_validation_worker_forward_sdf_particles",
+            Worker::VbSdfParticles => "boot_validation_worker_vb_sdf_particles",
+            Worker::DeferredSdfParticles => "boot_validation_worker_deferred_sdf_particles",
         }
     }
 
@@ -378,6 +398,39 @@ fn vb_textured_sphere(
         .insert(MaterialHandle(textured.index() as u16));
 }
 
+/// RD1 (R0b): the three particle workers' addition — an SDF sphere in front of the camera and one
+/// ALPHA-class emitter behind it, so the frame declares the SDF depth merge and a depth-tested
+/// consumer the merge occludes.
+fn sdf_particle_extras(mut commands: Commands, mut effects: ResMut<Assets<ParticleEffect>>) {
+    commands.spawn(SdfPrimitive(SdfEdit::sphere([0.0, 1.0, 2.0], 0.6, sdf_op::UNION, 0.0)));
+    let effect = effects.register_effect(ParticleEffect {
+        gravity: [0.0; 3],
+        drag: 0.0,
+        rot_speed: 0.0,
+        lifetime_min: 1.0e6,
+        lifetime_max: 1.0e6,
+        speed_min: 0.0,
+        speed_max: 0.0,
+        size_base: 0.15,
+        cone_cos: 1.0,
+        collision_radius: 0.0,
+        restitution: 0.0,
+        friction: 0.0,
+        color_keys: [0xFFFF_FFFF; 4],
+        color_times: [0.0, 0.333_333_34, 0.666_666_7, 1.0],
+        size_keys: [1.0; 4],
+        tex_index: 0,
+        blend_class: PARTICLE_BLEND_ALPHA,
+        flags: 0,
+        emitter_shape: PARTICLE_SHAPE_CONE,
+    });
+    commands
+        .spawn(ParticleEmitter { rate: 0.0, accumulator: 0.0, burst: 8, speed_scale: 1.0 })
+        .insert(Transform::from_translation(Vec3::new(0.0, 1.0, 1.0)))
+        .insert(ParticleEffectHandle(effect.index()))
+        .enable::<EmitterActive>();
+}
+
 /// The canary's scene: a floor and the camera — the smallest Deferred frame — plus the deliberate
 /// leak.
 ///
@@ -457,6 +510,13 @@ fn run_worker(worker: Worker) {
     if worker == Worker::VbFroxel {
         app.add_startup_system(vb_textured_sphere);
     }
+    let particles = matches!(
+        worker,
+        Worker::ForwardSdfParticles | Worker::VbSdfParticles | Worker::DeferredSdfParticles
+    );
+    if particles {
+        app.add_startup_system(sdf_particle_extras);
+    }
     app.add_plugins(EnginePlugins::window(name, 320, 240));
     // Configuration is inserted AFTER `add_plugins`, so it overwrites the plugins' defaults.
     if worker != Worker::Canary {
@@ -476,6 +536,18 @@ fn run_worker(worker: Worker) {
         Worker::ForwardPlus => {
             app.insert_resource(RenderPathConfig { path: RenderPath::ForwardPlus, legs: GeometryLegs::Mesh });
         }
+        Worker::ForwardSdfParticles => {
+            app.insert_resource(RenderPathConfig { path: RenderPath::Forward, legs: GeometryLegs::Sdf });
+        }
+        Worker::VbSdfParticles => {
+            app.insert_resource(RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Sdf });
+        }
+        Worker::DeferredSdfParticles => {
+            app.insert_resource(RenderPathConfig { path: RenderPath::Deferred, legs: GeometryLegs::Both });
+        }
+    }
+    if particles {
+        app.insert_resource(ParticleConfig { mode: ParticleMode::GpuUnlit, capacity: 4096, ..ParticleConfig::default() });
     }
     if worker == Worker::DeferredSmaa {
         app.insert_resource(AaConfig { mode: AaMode::Smaa });
@@ -557,6 +629,18 @@ fn run_worker(worker: Worker) {
                 resolved.path == RenderPath::Deferred
                     && app.world().try_resource::<JitterState>().is_some_and(|j| j.armed),
             ),
+            Worker::ForwardSdfParticles => (
+                "Forward with only the SDF leg, forward-marched",
+                resolved.path == RenderPath::Forward && resolved.sdf_forward_marched && !resolved.mesh_leg,
+            ),
+            Worker::VbSdfParticles => (
+                "VisibilityBuffer with only the SDF leg",
+                resolved.path == RenderPath::VisibilityBuffer && resolved.sdf_leg && !resolved.mesh_leg,
+            ),
+            Worker::DeferredSdfParticles => (
+                "Deferred with both legs",
+                resolved.path == RenderPath::Deferred && resolved.sdf_leg && resolved.mesh_leg,
+            ),
             Worker::Canary => unreachable!("invariant: the canary took the branch above"),
         };
         assert!(
@@ -611,6 +695,24 @@ fn boot_validation_worker_deferred_smaa() {
 #[ignore = "gpu-windowed: worker spawned by every_validated_boot_is_clean; returns at once unless BOYKO_BOOT_VALIDATION_DRIVEN is set"]
 fn boot_validation_worker_deferred_taa() {
     run_worker(Worker::DeferredTaa);
+}
+
+#[test]
+#[ignore = "gpu-windowed: worker spawned by every_validated_boot_is_clean; returns at once unless BOYKO_BOOT_VALIDATION_DRIVEN is set"]
+fn boot_validation_worker_forward_sdf_particles() {
+    run_worker(Worker::ForwardSdfParticles);
+}
+
+#[test]
+#[ignore = "gpu-windowed: worker spawned by every_validated_boot_is_clean; returns at once unless BOYKO_BOOT_VALIDATION_DRIVEN is set"]
+fn boot_validation_worker_vb_sdf_particles() {
+    run_worker(Worker::VbSdfParticles);
+}
+
+#[test]
+#[ignore = "gpu-windowed: worker spawned by every_validated_boot_is_clean; returns at once unless BOYKO_BOOT_VALIDATION_DRIVEN is set"]
+fn boot_validation_worker_deferred_sdf_particles() {
+    run_worker(Worker::DeferredSdfParticles);
 }
 
 // ===============================================================================================
@@ -756,10 +858,10 @@ fn tail(path: &Path) -> String {
     out
 }
 
-/// **The driver.** Spawns the canary, then the five path workers, each in its own process with the
-/// validation layer armed, and asserts once over all six outcomes.
+/// **The driver.** Spawns the canary, then the eight path workers, each in its own process with the
+/// validation layer armed, and asserts once over all nine outcomes.
 #[test]
-#[ignore = "gpu-windowed: live GPU gate; the driver arms VK_LAYER_KHRONOS_validation itself and spawns six windowed workers; run with --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU gate; the driver arms VK_LAYER_KHRONOS_validation itself and spawns nine windowed workers; run with --test-threads=1"]
 fn every_validated_boot_is_clean() {
     let cwd = std::env::current_dir().expect("invariant: the test process has a working directory");
     let settings = cwd.join(LAYER_SETTINGS_FILE);
