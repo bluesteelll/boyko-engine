@@ -10093,6 +10093,12 @@ impl GBufferFrame {
 /// `depth`, `viewt` and `taa_hist`, added ONLY when the instrument is armed at boot — a shipped
 /// run creates those images with today's usage set (no compression-state change in any shipped
 /// frame).
+///
+/// What gates it: `dump_transfer_src_adds_nothing_when_unarmed` fails if this fn adds a bit when
+/// unarmed. The plumbing that feeds `dump_usage` (`render_gbuffer_frame` passes
+/// `self.image_dump.is_some()`, and `Renderer::new` leaves `image_dump` `None`) is checked by review
+/// only: no host test can build a `Renderer`, no receipt field records a created usage, and a usage
+/// bit moves no pixel, so no golden sees a leak.
 const fn dump_transfer_src(dump_usage: bool) -> ImageUsage {
     if dump_usage { ImageUsage::TRANSFER_SRC } else { ImageUsage::NONE }
 }
@@ -10857,6 +10863,16 @@ mod tests {
             "nothing writes this image after the boot clear; STORAGE would advertise a producer \
              that does not exist"
         );
+    }
+
+    /// OBS (D): the armed-only `TRANSFER_SRC` on Deferred `depth` / `viewt` / `taa_hist` is added
+    /// ONLY when armed. No golden can see a leak (a usage bit moves no pixel: with this fn
+    /// returning `TRANSFER_SRC` unconditionally the `grand_showcase` pin stayed byte-identical,
+    /// OBS triage r1 F2), so this is the gate for the unarmed usage set.
+    #[test]
+    fn dump_transfer_src_adds_nothing_when_unarmed() {
+        assert_eq!(dump_transfer_src(false), ImageUsage::NONE, "an unarmed run keeps today's usage set");
+        assert_eq!(dump_transfer_src(true), ImageUsage::TRANSFER_SRC);
     }
 }
 

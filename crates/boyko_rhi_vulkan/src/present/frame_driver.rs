@@ -950,7 +950,8 @@ impl<'ctx> Renderer<'ctx> {
             arm.copies.set([ImageDumpCopy::NONE; IMAGE_DUMP_MAX]);
         }
         // OBS (D): the armed-only `TRANSFER_SRC` usage on the dumped Deferred targets — read here,
-        // before the closure borrows `self`.
+        // before the closure borrows `self`. No test sees this line: an unarmed run that passed
+        // `true` would ship the usage bit with every gate green (see `dump_transfer_src`'s doc).
         let dump_usage = self.image_dump.is_some();
         // Thin adapter over the shared [`drive_frame`](Self::drive_frame) skeleton, with
         // `frame` (the G-buffer targets) threaded as the payload: pre-record syncs the
