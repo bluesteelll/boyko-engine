@@ -94,6 +94,10 @@ pub struct Renderer<'ctx> {
     /// `TRANSFER` read into its seed — a boot decision of the `BOYKO_IMAGE_DUMP` instrument,
     /// `false` in every shipped run (seeds and barrier streams untouched).
     pub(crate) obs_dump_widen: bool,
+    /// OBS (R): the `BOYKO_GRAPH_RECEIPT` capture — `Some` only after
+    /// [`arm_graph_receipt`](Self::arm_graph_receipt) (boot, armed runs only), refreshed inside
+    /// every recorded frame. `None` in every shipped run: one branch per frame.
+    pub(crate) receipt: Option<ReceiptCapture>,
 }
 
 impl<'ctx> Renderer<'ctx> {
@@ -260,7 +264,21 @@ impl<'ctx> Renderer<'ctx> {
             vb_pass_plan: None,
             material_upload_probe: core::cell::Cell::new(super::MaterialUploadProbe::default()),
             obs_dump_widen: false,
+            receipt: None,
         })
+    }
+
+    /// OBS (R): arms the `BOYKO_GRAPH_RECEIPT` capture. Cold — called once at boot by the
+    /// instrument; every later recorded frame refreshes [`last_receipt_capture`](Self::last_receipt_capture).
+    pub fn arm_graph_receipt(&mut self) {
+        self.receipt = Some(ReceiptCapture::EMPTY);
+    }
+
+    /// OBS (R): the capture of the LAST recorded frame (`None` unless the receipt was armed). Read
+    /// beside [`last_frame_graph`](Self::last_frame_graph), after the frame returned.
+    #[inline]
+    pub fn last_receipt_capture(&self) -> Option<&ReceiptCapture> {
+        self.receipt.as_ref()
     }
 
     /// Dynamic-materials DM1: what the recorder did with the LAST
@@ -951,7 +969,7 @@ impl<'ctx> Renderer<'ctx> {
                     // `declare_deferred_graph` — used, the W1 single-predicate discipline). A
                     // `Forward`-resolved frame records `record_forward` instead of
                     // `record_gbuffer`; the two are mutually exclusive per boot (Decision 1).
-                    if scene.path_is_vb() {
+                    let recorded = if scene.path_is_vb() {
                         // Multi-paradigm render-path plan, rung R8: mirrors the `path_is_forward()`
                         // dispatch immediately below (the SAME W1 single-predicate discipline) — a
                         // `VisibilityBuffer`-resolved frame records `record_vb` instead of
@@ -1023,7 +1041,13 @@ impl<'ctx> Renderer<'ctx> {
                             #[cfg(feature = "hwrt")]
                             ctx.accel_fns_opt(),
                         )
+                    };
+                    // OBS (R): refresh the receipt capture from THIS frame's scene and sink fills
+                    // (`None` on every shipped run — one branch, the capture itself is cold).
+                    if this.receipt.is_some() {
+                        this.capture_receipt(scene, targets);
                     }
+                    recorded
                 },
             )
         }
@@ -1233,3 +1257,204 @@ pub struct FrameGraphCapacity {
 /// The reserve every [`Renderer`] boots its frame graph with (see [`FrameGraphCapacity`]).
 pub const FRAME_GRAPH_CAPACITY: FrameGraphCapacity =
     FrameGraphCapacity { max_res: 96, max_pass: 64, max_acc: 384 };
+
+// --- OBS (R): the `BOYKO_GRAPH_RECEIPT` capture ---------------------------------------------
+
+/// The `[config]` keys of a graph receipt, in the order they are written: the values of the
+/// single-predicate functions the declarator and the recorder both read (`GBufferScene::path_*`),
+/// then the per-frame arming facts the conditional tails key on. Each later rung APPENDS its keys
+/// (a reordering would silently re-label a parsed column).
+///
+/// SkyLight presence is recorded as the presence of the two sky-background pipelines
+/// (`forward_sky`, `vb_sky`): the scene carries no SkyLight bit of its own at HEAD.
+pub const RECEIPT_CONFIG_KEYS: [&str; RECEIPT_CONFIG_LEN] = [
+    "path",
+    "legs",
+    "mesh_leg",
+    "sdf_leg",
+    "path_is_forward",
+    "path_is_forward_plus",
+    "path_is_vb",
+    "path_has_raster",
+    "path_has_marcher",
+    "path_has_mesh_depth_neutral_clear",
+    "path_needs_depth_prepass",
+    "path_has_sdf_forward",
+    "path_sdf_forward_writes_viewt",
+    "path_vb_split",
+    "path_vb_fused",
+    "path_vb_ssao",
+    "path_vb_ddgi",
+    "path_vb_hwrt_shadow",
+    "path_vb_occlusion_split",
+    "path_has_particles",
+    "material_upload",
+    "interp",
+    "csm",
+    "atlas_punctual",
+    "ssao",
+    "ddgi",
+    "taa",
+    "fxaa",
+    "smaa",
+    "ssaa",
+    "rcas",
+    "hzb",
+    "tlas",
+    "shadow_vis",
+    "forward_sky",
+    "vb_sky",
+    "froxel_light_cull",
+    "light_cull",
+    "cluster_cull_hier",
+    "lighting_flags",
+    "hwrt",
+];
+
+/// How many `[config]` entries a receipt carries (the length of [`RECEIPT_CONFIG_KEYS`]).
+pub const RECEIPT_CONFIG_LEN: usize = 41;
+
+/// One frame's `[config]` values, index for index with [`RECEIPT_CONFIG_KEYS`] (`bool`s as 0/1).
+/// POD: a burst copies one per presented frame.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ReceiptConfig {
+    /// The values, in key order.
+    pub values: [u32; RECEIPT_CONFIG_LEN],
+}
+
+impl ReceiptConfig {
+    /// The all-zero table (no frame captured yet).
+    pub const EMPTY: Self = Self { values: [0; RECEIPT_CONFIG_LEN] };
+
+    /// The value of `key`, or `None` for a key this build does not record.
+    pub fn get(&self, key: &str) -> Option<u32> {
+        RECEIPT_CONFIG_KEYS.iter().position(|k| *k == key).map(|i| self.values[i])
+    }
+
+    /// `(key, value)` pairs in key order.
+    pub fn iter(&self) -> impl Iterator<Item = (&'static str, u32)> + '_ {
+        RECEIPT_CONFIG_KEYS.iter().copied().zip(self.values.iter().copied())
+    }
+
+    /// Reads one frame's scene through the same predicates its declarator and recorder use.
+    pub(crate) fn capture(scene: &GBufferScene<'_>) -> Self {
+        let rp = &scene.resolved_render_path;
+        #[cfg(feature = "hwrt")]
+        let (vb_hwrt_shadow, tlas, shadow_vis) =
+            (scene.path_vb_hwrt_shadow(), scene.tlas.is_some(), scene.shadow.is_some());
+        #[cfg(not(feature = "hwrt"))]
+        let (vb_hwrt_shadow, tlas, shadow_vis) = (false, false, false);
+        let values = [
+            rp.path,
+            rp.legs,
+            u32::from(rp.mesh_leg),
+            u32::from(rp.sdf_leg),
+            u32::from(scene.path_is_forward()),
+            u32::from(scene.path_is_forward_plus()),
+            u32::from(scene.path_is_vb()),
+            u32::from(scene.path_has_raster()),
+            u32::from(scene.path_has_marcher()),
+            u32::from(scene.path_has_mesh_depth_neutral_clear()),
+            u32::from(scene.path_needs_depth_prepass()),
+            u32::from(scene.path_has_sdf_forward()),
+            u32::from(scene.path_sdf_forward_writes_viewt()),
+            u32::from(scene.path_vb_split()),
+            u32::from(scene.path_vb_fused()),
+            u32::from(scene.path_vb_ssao()),
+            u32::from(scene.path_vb_ddgi()),
+            u32::from(vb_hwrt_shadow),
+            u32::from(scene.path_vb_occlusion_split()),
+            u32::from(scene.path_has_particles()),
+            u32::from(scene.material_upload.is_some()),
+            u32::from(scene.interp.is_some()),
+            u32::from(scene.csm.is_some()),
+            u32::from(scene.atlas_punctual.is_some()),
+            u32::from(scene.ssao.is_some()),
+            u32::from(scene.ddgi_update.is_some()),
+            u32::from(scene.taa.is_some()),
+            u32::from(scene.aa.is_some()),
+            u32::from(scene.smaa.is_some()),
+            u32::from(scene.ssaa.is_some()),
+            u32::from(scene.rcas.is_some()),
+            u32::from(scene.hzb.is_some()),
+            u32::from(tlas),
+            u32::from(shadow_vis),
+            u32::from(scene.forward_sky_pipeline.is_some()),
+            u32::from(scene.vb_sky_pipeline.is_some()),
+            u32::from(rp.froxel_light_cull),
+            u32::from(scene.cluster_cull.is_some()),
+            u32::from(scene.cluster_cull_hier.is_some()),
+            scene.lighting_flags,
+            u32::from(cfg!(feature = "hwrt")),
+        ];
+        Self { values }
+    }
+}
+
+/// The most sink slots of one kind a receipt records — every declarator's image and buffer array
+/// fits (asserted where the capture copies them).
+pub const RECEIPT_MAX_SINK_SLOTS: usize = 48;
+
+/// One frame's receipt capture, refreshed inside every recorded frame while the
+/// `BOYKO_GRAPH_RECEIPT` instrument is armed ([`Renderer::arm_graph_receipt`]).
+///
+/// It holds what the instrument cannot read from outside this crate: the `[config]` predicates
+/// (`pub(crate)` on `GBufferScene`) and the sink fills' name / `Fif` columns. Inline POD — no
+/// heap; a run without the instrument never builds one.
+#[derive(Clone, Copy, Debug)]
+pub struct ReceiptCapture {
+    /// The last recorded frame's `[config]`.
+    pub config: ReceiptConfig,
+    /// The declarator that frame dispatched to (`seed_class::DECL_*`).
+    pub declarator: u8,
+    /// Frames captured since arming (a stale capture is visible as an unchanged count).
+    pub frames: u64,
+    /// `true` iff the sink columns below were filled: the slot metadata exists only in debug
+    /// builds (release fills compile to handle-only arrays), so a release receipt has NO sink
+    /// rows and must say so rather than read as an empty, clean table.
+    pub sink_rows: bool,
+    /// The declarator's image-array length: buffer slot `b` resolves `ResId(image_slots + b)`.
+    pub image_slots: u16,
+    /// The buffer-array length.
+    pub buffer_slots: u16,
+    /// The image slots' metadata (`None` past `image_slots`, or for a slot the fill left empty).
+    pub image_sinks: [Option<super::seed_class::SinkMeta>; RECEIPT_MAX_SINK_SLOTS],
+    /// The buffer slots' metadata.
+    pub buffer_sinks: [Option<super::seed_class::SinkMeta>; RECEIPT_MAX_SINK_SLOTS],
+}
+
+impl ReceiptCapture {
+    /// Nothing captured yet.
+    pub const EMPTY: Self = Self {
+        config: ReceiptConfig::EMPTY,
+        declarator: 0,
+        frames: 0,
+        sink_rows: false,
+        image_slots: 0,
+        buffer_slots: 0,
+        image_sinks: [None; RECEIPT_MAX_SINK_SLOTS],
+        buffer_sinks: [None; RECEIPT_MAX_SINK_SLOTS],
+    };
+
+    /// Copies one declarator's sink metadata (debug builds only — the columns exist only there).
+    #[cfg(debug_assertions)]
+    pub(crate) fn set_sinks(
+        &mut self,
+        declarator: u8,
+        images: &[Option<super::seed_class::SinkMeta>],
+        buffers: &[Option<super::seed_class::SinkMeta>],
+    ) {
+        assert!(
+            images.len() <= RECEIPT_MAX_SINK_SLOTS && buffers.len() <= RECEIPT_MAX_SINK_SLOTS,
+            "invariant: RECEIPT_MAX_SINK_SLOTS covers every declarator's sink arrays"
+        );
+        self.declarator = declarator;
+        self.sink_rows = true;
+        self.image_slots = images.len() as u16;
+        self.buffer_slots = buffers.len() as u16;
+        self.image_sinks = [None; RECEIPT_MAX_SINK_SLOTS];
+        self.buffer_sinks = [None; RECEIPT_MAX_SINK_SLOTS];
+        self.image_sinks[..images.len()].copy_from_slice(images);
+        self.buffer_sinks[..buffers.len()].copy_from_slice(buffers);
+    }
+}

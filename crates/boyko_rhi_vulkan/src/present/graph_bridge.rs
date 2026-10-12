@@ -7048,6 +7048,52 @@ impl Renderer<'_> {
         };
         self.frame_graph.record_pass(pass, &mut sink);
     }
+
+    /// OBS (R): refreshes the armed `BOYKO_GRAPH_RECEIPT` capture from this frame's scene (the
+    /// `[config]` predicates) and — debug builds only — the dispatched declarator's sink fill (the
+    /// `[[sink]]` name and `Fif` columns, re-run for this slot exactly as the (P) check runs it).
+    /// Called after the frame recorded, only when armed.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn capture_receipt(&mut self, scene: &GBufferScene<'_>, targets: &GBufferTargets) {
+        let fi = self.frame_index;
+        let Some(cap) = self.receipt.as_mut() else {
+            return;
+        };
+        cap.config = super::frame_driver::ReceiptConfig::capture(scene);
+        cap.frames += 1;
+        let declarator = if scene.path_is_vb() {
+            super::seed_class::DECL_VB
+        } else if scene.path_is_forward() {
+            super::seed_class::DECL_FORWARD
+        } else {
+            super::seed_class::DECL_DEFERRED
+        };
+        cap.declarator = declarator;
+        #[cfg(debug_assertions)]
+        match declarator {
+            super::seed_class::DECL_VB => {
+                let (Some(fwd), Some(vb)) = (targets.forward.as_ref(), targets.vb.as_ref()) else {
+                    return;
+                };
+                let (images, buffers) = vb_sink(targets, fwd, vb, scene, fi);
+                cap.set_sinks(declarator, &images.meta, &buffers.meta);
+            }
+            super::seed_class::DECL_FORWARD => {
+                let Some(fwd) = targets.forward.as_ref() else {
+                    return;
+                };
+                let (images, buffers) = forward_sink(targets, fwd, scene, fi);
+                cap.set_sinks(declarator, &images.meta, &buffers.meta);
+            }
+            _ => {
+                let (images, buffers) = gbuffer_sink(targets, scene, fi);
+                cap.set_sinks(declarator, &images.meta, &buffers.meta);
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = (targets, fi);
+    }
 }
 
 /// Particles P0: appends the ten-buffer particle tail to the VB sink's unconditional prefix, and

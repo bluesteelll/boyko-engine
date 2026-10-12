@@ -114,6 +114,11 @@ mod vb_probe_dump;
 #[cfg(windows)]
 mod vg_census_dump;
 mod window_info;
+// Render-wave plan H0 Scope 5 (OBS): the `BOYKO_GRAPH_RECEIPT` production frame-graph receipt.
+// `#[cfg(windows)]` for the same reason `vb_probe_dump` above is — its only caller is the windowed
+// frame loop.
+#[cfg(windows)]
+mod graph_receipt_dump;
 
 /// The host half of the light-table generation protocol (host plan D5/R4):
 /// the pure per-slot [`light_upload_due`](light_gate::light_upload_due) gate

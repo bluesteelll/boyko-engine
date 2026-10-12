@@ -1163,6 +1163,14 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         host.gpu.vb_cull_readback.is_some(),
         "invariant: the cull-probe driver and its staging are armed by one variable"
     );
+    // OBS (render-wave plan H0 Scope 5): the env-gated production frame-graph receipt
+    // (`BOYKO_GRAPH_RECEIPT`). `None` on the steady path. The renderer's capture is armed in the
+    // same step, so the driver and the capture it reads are armed by one variable; it copies
+    // nothing off the device, so it needs no staging and no drain (the `vb_probe_dump` shape).
+    let mut graph_receipt = crate::graph_receipt_dump::GraphReceiptDump::from_env();
+    if graph_receipt.is_some() {
+        host.renderer.arm_graph_receipt();
+    }
     // Automated-run frame cap (the `BOYKO_WIN_HIDDEN` companion, and the app-level
     // twin of `window_present_gbuffer`'s own `BOYKO_WINDOW_FRAMES`): `BOYKO_WINDOW_FRAMES=<n>`
     // bounds this loop to `n` iterations, then exits cleanly. Without it an
@@ -3640,6 +3648,19 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             probe.finish(&record);
         }
 
+        // OBS (cold): the graph receipt. Settle → the receipt frame → the burst's records, all
+        // read from host memory the frame just left behind (no drain: nothing was copied).
+        let graph_receipt_ready = match graph_receipt.as_mut() {
+            Some(r) => r.after_present(presented_ok, &host.renderer),
+            None => false,
+        };
+        if graph_receipt_ready {
+            graph_receipt
+                .take()
+                .expect("invariant: the graph receipt just reported ready")
+                .finish();
+        }
+
         // Exit once EVERY armed capture has completed. Each driver `take()`s itself on completion,
         // so `is_none()` reads "not armed, or already finished".
         //
@@ -3660,7 +3681,8 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             || vb_probe_ready
             || vb_cull_ready
             || particle_readback_ready
-            || shadow_probe_ready)
+            || shadow_probe_ready
+            || graph_receipt_ready)
             && dump.is_none()
             && census.is_none()
             && hzb_dump.is_none()
@@ -3668,6 +3690,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             && vb_cull_probe.is_none()
             && particle_readback.is_none()
             && shadow_probe.is_none()
+            && graph_receipt.is_none()
         {
             return;
         }
