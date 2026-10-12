@@ -450,6 +450,23 @@ fn bit_equal(a: &BodyState, b: &BodyState) -> bool {
 /// Whether a watched row gathered on the first step after a settle equals its stash (lane SL's
 /// seal, `IslandSleep::begin_step`): bit-equal on every field a user can write. The destructure is
 /// exhaustive, so a field added to [`BodyState`] fails to compile here until it is classified.
+///
+/// What a change of each compared field can reach, at a fixed configuration and SDF field (the
+/// unit T-SL21 pins every comparison; the `sleep_seal.rs` scene named beside a field shows its
+/// count change end to end):
+/// - **whether a manifold exists**, so the island's count: `position` (T-SL12, T-SL13, and
+///   T-SL24 on `z`), `rotation` (T-SL22) and `shape` (T-SL23), which the narrowphase reads;
+///   `linear_velocity` and `angular_velocity` (T-SL25, T-SL26), which widen a pair's speculative
+///   margin, a non-member's too (a simulated member's write is woken first, by `begin_step`'s
+///   write test); `is_sensor` (T-SL27), which routes a pair to the overlap report; `simulated`
+///   (T-SL28), without which a body collides with no SDF field; and `inv_mass` (T-SL29), whose
+///   zero takes a member out of the island its manifolds are filed under (a row it makes
+///   dynamic joins the island it touches, and the fold keeps that island active);
+/// - **no manifold**, compared conservatively: `inv_inertia_local`, which the gather derives from
+///   `shape` and `inv_mass`, so on a gathered row it changes only with one of them (T-SL29 is red
+///   only without both comparisons); `kinematic`, which the narrowphase never reads and the tree
+///   broadphase reads only to choose the set an immovable row is filed in (its candidate pairs are
+///   the all-pairs set either way); `restitution` and `friction`, which only the solve reads.
 #[inline]
 pub(crate) fn seal_equal(a: &BodyState, b: &BodyState) -> bool {
     let BodyState {

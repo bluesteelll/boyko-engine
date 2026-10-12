@@ -1457,4 +1457,124 @@
                 );
             }
         }
+
+        /// One component of `v`, `i` in `0..3`.
+        fn axis(v: &mut Vec3, i: usize) -> &mut f32 {
+            match i {
+                0 => &mut v.x,
+                1 => &mut v.y,
+                _ => &mut v.z,
+            }
+        }
+
+        /// `x` with its lowest bit flipped: the smallest change a bit comparison can see.
+        fn flip(x: &mut f32) {
+            *x = f32::from_bits(x.to_bits() ^ 1);
+        }
+
+        /// T-SL21 (round-1 F2): `seal_equal` compares every field a user can write, by bits, in
+        /// every component (each axis of a vector, each quaternion component, each matrix entry,
+        /// each shape parameter and the shape's kind), and neither derived field. One flipped bit
+        /// in any compared datum, alone, unseals, in both argument orders; a change of
+        /// `inv_inertia` or `bp_margin` alone does not. A seal blind to one field or to one axis
+        /// reds here whatever form the blind spot takes (a `field: _` binding, a dropped
+        /// comparison, an axis dropped from a helper).
+        #[test]
+        fn the_seal_compares_every_user_writable_field_by_bits_and_no_derived_one() {
+            use crate::math::{Mat3, Quat};
+            use crate::sleep_sets::seal_equal;
+
+            let row = |r: f32| Vec3::new(r, r + 0.5, r + 0.25);
+            let base = BodyState {
+                inv_inertia: Mat3 { rows: [row(1.0), row(2.0), row(3.0)] },
+                inv_inertia_local: Mat3 { rows: [row(4.0), row(5.0), row(6.0)] },
+                position: Vec3::new(1.0, 2.0, 3.0),
+                linear_velocity: Vec3::new(0.25, 0.5, 0.75),
+                angular_velocity: Vec3::new(1.25, 1.5, 1.75),
+                rotation: Quat { x: 0.125, y: 0.25, z: 0.375, w: 0.875 },
+                inv_mass: 0.125,
+                restitution: 0.25,
+                friction: 0.5,
+                simulated: true,
+                kinematic: false,
+                is_sensor: false,
+                bp_margin: 0.01,
+                shape: ColliderShape::Box { half_extents: Vec3::new(0.5, 0.75, 1.0) },
+            };
+            let sphere = BodyState { shape: ColliderShape::Sphere { radius: 0.5 }, ..base };
+            assert!(
+                seal_equal(&base, &base) && seal_equal(&sphere, &sphere),
+                "T-SL21: anti-vacuity: a state equals itself"
+            );
+
+            // Every compared datum, changed alone: (name, the reference state, the changed one).
+            let mut compared: Vec<(String, BodyState, BodyState)> = Vec::new();
+            let mut change = |name: String, reference: BodyState, edit: &dyn Fn(&mut BodyState)| {
+                let mut b = reference;
+                edit(&mut b);
+                compared.push((name, reference, b));
+            };
+            for i in 0..3 {
+                change(format!("position[{i}]"), base, &|b| flip(axis(&mut b.position, i)));
+                change(format!("linear_velocity[{i}]"), base, &|b| {
+                    flip(axis(&mut b.linear_velocity, i));
+                });
+                change(format!("angular_velocity[{i}]"), base, &|b| {
+                    flip(axis(&mut b.angular_velocity, i));
+                });
+                change(format!("half_extents[{i}]"), base, &|b| {
+                    if let ColliderShape::Box { half_extents } = &mut b.shape {
+                        flip(axis(half_extents, i));
+                    }
+                });
+                for c in 0..3 {
+                    change(format!("inv_inertia_local[{i}][{c}]"), base, &|b| {
+                        flip(axis(&mut b.inv_inertia_local.rows[i], c));
+                    });
+                }
+            }
+            change("rotation.x".into(), base, &|b| flip(&mut b.rotation.x));
+            change("rotation.y".into(), base, &|b| flip(&mut b.rotation.y));
+            change("rotation.z".into(), base, &|b| flip(&mut b.rotation.z));
+            change("rotation.w".into(), base, &|b| flip(&mut b.rotation.w));
+            change("inv_mass".into(), base, &|b| flip(&mut b.inv_mass));
+            change("restitution".into(), base, &|b| flip(&mut b.restitution));
+            change("friction".into(), base, &|b| flip(&mut b.friction));
+            change("simulated".into(), base, &|b| b.simulated = !b.simulated);
+            change("kinematic".into(), base, &|b| b.kinematic = !b.kinematic);
+            change("is_sensor".into(), base, &|b| b.is_sensor = !b.is_sensor);
+            change("shape kind".into(), base, &|b| b.shape = sphere.shape);
+            change("radius".into(), sphere, &|b| {
+                if let ColliderShape::Sphere { radius } = &mut b.shape {
+                    flip(radius);
+                }
+            });
+            assert_eq!(compared.len(), 33, "T-SL21: anti-vacuity: every compared datum is listed");
+            let blind: Vec<&str> = compared
+                .iter()
+                .filter(|(_, a, b)| a == b || seal_equal(a, b) || seal_equal(b, a))
+                .map(|(name, ..)| name.as_str())
+                .collect();
+            assert!(blind.is_empty(), "T-SL21: the seal does not see a change of {blind:?}");
+
+            // The derived fields: the gather recomputes them, so neither unseals alone.
+            let mut derived = vec![{
+                let mut b = base;
+                flip(&mut b.bp_margin);
+                ("bp_margin".to_string(), b)
+            }];
+            for r in 0..3 {
+                for c in 0..3 {
+                    let mut b = base;
+                    flip(axis(&mut b.inv_inertia.rows[r], c));
+                    derived.push((format!("inv_inertia[{r}][{c}]"), b));
+                }
+            }
+            let read: Vec<&str> = derived
+                .iter()
+                .filter(|(_, b)| *b == base || !seal_equal(&base, b) || !seal_equal(b, &base))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            assert!(read.is_empty(), "T-SL21: the seal reads the derived {read:?}");
+        }
     }
