@@ -87,6 +87,12 @@ fn pairs() -> impl Iterator<Item = (&'static SeedClassRow, u8)> {
         .flat_map(|row| DECLARATORS.iter().filter(move |&&d| row.declarators & d != 0).map(move |&d| (row, d)))
 }
 
+/// The pair count the table implies, computed apart from [`pairs`] so a narrowed `pairs()` cannot
+/// shrink the anti-vacuity bound with it.
+fn expected_pairs() -> usize {
+    SEED_CLASS_TABLE.iter().map(|r| (0..8).filter(|b| r.declarators & (1u8 << b) != 0 && DECLARATORS.contains(&(1u8 << b))).count()).sum()
+}
+
 #[test]
 fn every_row_declared_bare_is_a_violation() {
     for name in ["fog_sun_far", "fog_scatter[0]", "exposure_hist", "easu_out", "material_table"] {
@@ -112,7 +118,7 @@ fn every_row_declared_bare_is_a_violation() {
         checked += 1;
     }
     assert!(silent.is_empty(), "rows declared bare that the class table did NOT catch: {silent:?}");
-    assert!(checked >= SEED_CLASS_TABLE.len(), "anti-vacuity: {checked} (row, declarator) pairs");
+    assert_eq!(checked, expected_pairs(), "anti-vacuity: every (row, declarator) pair of the table is checked");
 }
 
 #[test]
@@ -197,7 +203,7 @@ fn a_stateful_seed_without_stages_is_a_violation() {
         assert_eq!(v.rule, ClassRule::SeedWithoutStages, "'{}' on {}", row.name, declarator_name(d));
         checked += 1;
     }
-    assert!(checked >= SEED_CLASS_TABLE.len(), "anti-vacuity: {checked} (row, declarator) pairs");
+    assert_eq!(checked, expected_pairs(), "anti-vacuity: every (row, declarator) pair of the table is checked");
 }
 
 /// An image row declared as a buffer (or the reverse), with the row's class and a valid seed, is
@@ -233,7 +239,7 @@ fn a_row_declared_with_the_other_kind_is_a_violation() {
         assert_eq!(v.rule, ClassRule::WrongKind, "'{}' on {}", row.name, declarator_name(d));
         checked += 1;
     }
-    assert!(checked >= SEED_CLASS_TABLE.len(), "anti-vacuity: {checked} (row, declarator) pairs");
+    assert_eq!(checked, expected_pairs(), "anti-vacuity: every (row, declarator) pair of the table is checked");
 }
 
 #[test]
