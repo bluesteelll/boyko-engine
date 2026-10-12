@@ -4242,7 +4242,9 @@ impl GBufferScene<'_> {
 
     /// Render wave RD1: the test-only `disarm_sdf_merge` key as this frame carries it — `false` on
     /// every production run and on a boot without the merge's GPU objects. The (P) order guard is
-    /// silent under it, by name (its red control must render).
+    /// silent under it, by name (its red control must render). Debug builds only: the guard is its
+    /// one reader (the predicate itself reads the activation's field directly).
+    #[cfg(debug_assertions)]
     #[inline]
     pub(crate) fn sdf_depth_merge_disarmed(&self) -> bool {
         self.sdf_depth_merge.as_ref().is_some_and(|m| m.disarmed)
