@@ -13,7 +13,7 @@
 //!
 //! | id | test | asserts | red before SL-1b | kills |
 //! |---|---|---|---|---|
-//! | T-SL3 | `a_velocity_written_into_a_sleeping_body_is_solved_on_the_next_step` | a lone 4-box column, frozen; six variants, each writing ONE velocity component into its top box: 0.5 m/s along `x`, `y` or `z` (linear) or 0.5 rad/s about `x`, `y` or `z` (angular): on the next step every row of the column is awake, the top box moved, one write wake and no contact wake | frozen on the write's step | M-SL5 (ω ignored, angular), M-SL8 (the post-solve snapshot), no write test (and, in debug, the capture assert), a write test blind to any one of the six components (that component's variant alone, round-1 F1) |
+//! | T-SL3 | `a_velocity_written_into_a_sleeping_body_is_solved_on_the_next_step` | a lone 4-box column, frozen; twelve variants, each writing ONE velocity component in ONE sign into its top box: ±0.5 m/s along `x`, `y` or `z` (linear) or ±0.5 rad/s about `x`, `y` or `z` (angular): on the next step every row of the column is awake, the top box moved, one write wake and no contact wake | frozen on the write's step | M-SL5 (ω ignored, angular), M-SL8 (the post-solve snapshot), no write test (and, in debug, the capture assert), a write test blind to any one of the six components (that component's variants alone, round-1 F1) or to one sign of one (that cell alone, round-2 N1; the unit T-SL30 pins every component in both signs, NaN and `-0.0`) |
 //! | T-SL4 | `a_sub_threshold_write_wakes_a_sleeping_body` | a lone box, frozen; 5 mm/s written (`|v|² = 2.5e-5`, below the threshold): awake on the next step, one write wake | never woken | no write test |
 //! | T-SL5 | `a_write_right_after_the_island_goes_to_sleep_is_kept` | a lone box; 0.5 m/s written right after the step that puts it to sleep: on the next step it is awake and solved from that velocity | frozen there, solved one step later | no write test |
 //! | T-SL6 | `a_soft_body_reaction_wakes_a_sleeping_rigid_body` | a soft cube dropped on a frozen box (`add_physics_soft(.., true)`): the step after the first reaction lands on the frozen box, the box is awake | the recorded gap (`plugin.rs`): frozen with the reaction stored | no write test |
@@ -85,9 +85,10 @@ const SETTLE_LIMIT: usize = 400;
 const HOLD: usize = 5;
 /// Steps run after a write (T-SL8 compares them too).
 const AFTER: usize = 20;
-/// The speed of T-SL3's linear writes (one axis each) and of T-SL5's lateral write, m/s.
+/// The speed of T-SL3's linear writes (one axis each, in either sign) and of T-SL5's lateral
+/// write, m/s.
 const KICK: f32 = 0.5;
-/// The rate of T-SL3's angular writes (one axis each), rad/s.
+/// The rate of T-SL3's angular writes (one axis each, in either sign), rad/s.
 const SPIN: f32 = 0.5;
 /// T-SL4's lateral write, m/s: `|v|² = 2.5e-5`, below the default threshold `1e-4`.
 const NUDGE: Vec3 = Vec3::new(0.005, 0.0, 0.0);
@@ -460,37 +461,69 @@ impl Axis {
     }
 }
 
+/// The sign of one T-SL3 write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sign {
+    Pos,
+    Neg,
+}
+
+impl Sign {
+    /// `s` with this sign.
+    fn of(self, s: f32) -> f32 {
+        match self {
+            Sign::Pos => s,
+            Sign::Neg => -s,
+        }
+    }
+}
+
 /// What a write scene writes, and when.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Write {
-    /// T-SL3, linear: [`KICK`] along one axis into the frozen top box of a 4-box column.
-    Kick(Axis),
-    /// T-SL3, angular: [`SPIN`] about one axis into the frozen top box of a 4-box column.
-    Spin(Axis),
+    /// T-SL3, linear: [`KICK`] along one axis, in one sign, into the frozen top box of a 4-box
+    /// column.
+    Kick(Axis, Sign),
+    /// T-SL3, angular: [`SPIN`] about one axis, in one sign, into the frozen top box of a 4-box
+    /// column.
+    Spin(Axis, Sign),
     /// T-SL4: [`NUDGE`] into a frozen lone box.
     Nudge,
     /// T-SL5: [`KICK`] along `+x` into a lone box right after the step that puts it to sleep.
     AfterSettle,
 }
 
-/// T-SL3's six writes: one per velocity component the write test reads, each alone.
-const AXIS_WRITES: [Write; 6] = [
-    Write::Kick(Axis::X),
-    Write::Kick(Axis::Y),
-    Write::Kick(Axis::Z),
-    Write::Spin(Axis::X),
-    Write::Spin(Axis::Y),
-    Write::Spin(Axis::Z),
+/// T-SL3's twelve writes: one per velocity component the write test reads and per sign, each
+/// alone.
+const AXIS_WRITES: [Write; 12] = [
+    Write::Kick(Axis::X, Sign::Pos),
+    Write::Kick(Axis::X, Sign::Neg),
+    Write::Kick(Axis::Y, Sign::Pos),
+    Write::Kick(Axis::Y, Sign::Neg),
+    Write::Kick(Axis::Z, Sign::Pos),
+    Write::Kick(Axis::Z, Sign::Neg),
+    Write::Spin(Axis::X, Sign::Pos),
+    Write::Spin(Axis::X, Sign::Neg),
+    Write::Spin(Axis::Y, Sign::Pos),
+    Write::Spin(Axis::Y, Sign::Neg),
+    Write::Spin(Axis::Z, Sign::Pos),
+    Write::Spin(Axis::Z, Sign::Neg),
 ];
 
-/// Every write scene, as T-SL8 compares them.
-const WRITES: [Write; 8] = [
+/// Every write scene, as T-SL8 compares them: T-SL3's twelve, then T-SL4's and T-SL5's.
+const WRITES: [Write; 14] = [
     AXIS_WRITES[0],
     AXIS_WRITES[1],
     AXIS_WRITES[2],
     AXIS_WRITES[3],
     AXIS_WRITES[4],
     AXIS_WRITES[5],
+    AXIS_WRITES[6],
+    AXIS_WRITES[7],
+    AXIS_WRITES[8],
+    AXIS_WRITES[9],
+    AXIS_WRITES[10],
+    AXIS_WRITES[11],
     Write::Nudge,
     Write::AfterSettle,
 ];
@@ -519,7 +552,7 @@ fn write_scene(write: Write, mode: SleepSkip, workers: usize) -> WriteOutcome {
     let what = format!("{write:?} {mode:?} W{workers}");
     let mut h = Harness::new(Pipeline::Colored, mode, workers);
     h.floor();
-    let island = h.column(if matches!(write, Write::Kick(_) | Write::Spin(_)) { 4 } else { 1 });
+    let island = h.column(if matches!(write, Write::Kick(..) | Write::Spin(..)) { 4 } else { 1 });
     let top = *island.last().expect("construction: a column has a top box");
     let mut records = Vec::new();
     let mut never_frozen_before = true;
@@ -543,8 +576,8 @@ fn write_scene(write: Write, mode: SleepSkip, workers: usize) -> WriteOutcome {
     {
         let mut b = h.body_mut(top);
         match write {
-            Write::Kick(axis) => b.linear_velocity = axis.times(KICK),
-            Write::Spin(axis) => b.angular_velocity = axis.times(SPIN),
+            Write::Kick(axis, sign) => b.linear_velocity = axis.times(sign.of(KICK)),
+            Write::Spin(axis, sign) => b.angular_velocity = axis.times(sign.of(SPIN)),
             Write::AfterSettle => b.linear_velocity = Axis::X.times(KICK),
             Write::Nudge => b.linear_velocity = NUDGE,
         }
@@ -580,13 +613,14 @@ fn wake_rises(o: &WriteOutcome) -> (u64, u64) {
     )
 }
 
-/// T-SL3: 0.5 m/s along one axis (linear) or 0.5 rad/s about one axis (angular), one velocity
-/// component per variant, all six of them, written into the frozen top box of a lone 4-box column
-/// is solved on the next step: the column is awake, the top box moved (its position along the
-/// written axis, or its rotation), one write wake, no contact wake. Red before SL-1b: the column
-/// stays frozen on that step and `end_step`'s energy wakes it one step later. Every cell runs
-/// before the verdict, so a write test blind to one component reds exactly that component's
-/// variant (round-1 F1).
+/// T-SL3: ±0.5 m/s along one axis (linear) or ±0.5 rad/s about one axis (angular), one velocity
+/// component in one sign per variant, all twelve of them, written into the frozen top box of a
+/// lone 4-box column is solved on the next step: the column is awake, the top box moved (its
+/// position along the written axis, or its rotation), one write wake, no contact wake. Red before
+/// SL-1b: the column stays frozen on that step and `end_step`'s energy wakes it one step later.
+/// Every cell runs before the verdict, so a write test blind to one component reds exactly that
+/// component's variants (round-1 F1), and one blind to one sign of one component reds exactly
+/// that cell (round-2 N1).
 #[test]
 fn a_velocity_written_into_a_sleeping_body_is_solved_on_the_next_step() {
     let mut failed = Vec::new();
@@ -595,7 +629,7 @@ fn a_velocity_written_into_a_sleeping_body_is_solved_on_the_next_step() {
             let what = format!("T-SL3 {write:?} {mode:?} W{workers}");
             let o = under_watchdog(&what, move || write_scene(write, mode, workers));
             let moved = match write {
-                Write::Kick(axis) => {
+                Write::Kick(axis, _) => {
                     axis.of(o.after.position).to_bits() != axis.of(o.before.position).to_bits()
                 }
                 _ => {

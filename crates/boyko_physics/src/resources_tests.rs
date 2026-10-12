@@ -1577,4 +1577,85 @@
                 .collect();
             assert!(read.is_empty(), "T-SL21: the seal reads the derived {read:?}");
         }
+
+        /// Velocity component `c` of `b`, `c` in `0..6`: linear `x, y, z`, then angular.
+        fn velocity(b: &mut BodyState, c: usize) -> &mut f32 {
+            if c < 3 {
+                axis(&mut b.linear_velocity, c)
+            } else {
+                axis(&mut b.angular_velocity, c - 3)
+            }
+        }
+
+        /// T-SL30 (round-2 N1): the write test reads each of the six velocity components in both
+        /// signs. Any non-zero value, alone in one component, reads as a write: either sign of
+        /// one, of the smallest normal, of the smallest subnormal and of an infinity, and a NaN
+        /// of either sign. `-0.0` reads as zero, alone in one component and in all six at once
+        /// (design §3.5: "-0.0 reads as zero; NaN reads as a write"). A test blind to one sign of
+        /// one component (`> 0.0`) or to a NaN (`.abs() > 0.0`) reds here, and so does one that
+        /// reads `-0.0` as a write (`.to_bits() != 0`), which would wake a resting body on a
+        /// `v = -v` write of its `+0.0`.
+        #[test]
+        fn the_write_test_reads_both_signs_of_every_component_and_a_nan_and_neg_zero_as_zero() {
+            use crate::resources::velocity_written;
+
+            let at_rest = BodyState::default();
+            assert!(zero(&at_rest), "T-SL30: anti-vacuity: the default state is at rest by bits");
+            assert!(!velocity_written(&at_rest), "T-SL30: a `+0.0` velocity reads as unwritten");
+
+            let written: [(&str, f32); 10] = [
+                ("+1", 1.0),
+                ("-1", -1.0),
+                ("+min normal", f32::MIN_POSITIVE),
+                ("-min normal", -f32::MIN_POSITIVE),
+                ("+min subnormal", f32::from_bits(1)),
+                ("-min subnormal", f32::from_bits(0x8000_0001)),
+                ("+inf", f32::INFINITY),
+                ("-inf", f32::NEG_INFINITY),
+                ("+nan", f32::NAN),
+                ("-nan", -f32::NAN),
+            ];
+            let (pos_nan, neg_nan) = (written[8].1, written[9].1);
+            assert!(
+                pos_nan.is_nan()
+                    && neg_nan.is_nan()
+                    && pos_nan.is_sign_positive()
+                    && neg_nan.is_sign_negative(),
+                "T-SL30: anti-vacuity: a NaN of each sign is listed"
+            );
+            let mut missed = Vec::new();
+            let mut cells = 0;
+            for c in 0..6 {
+                for (name, value) in written {
+                    let mut b = at_rest;
+                    *velocity(&mut b, c) = value;
+                    cells += 1;
+                    if !velocity_written(&b) {
+                        missed.push(format!("component {c} = {name}"));
+                    }
+                }
+            }
+            assert_eq!(cells, 60, "T-SL30: anti-vacuity: six components, ten values each");
+            assert!(missed.is_empty(), "T-SL30: the write test misses {missed:?}");
+
+            let mut misread = Vec::new();
+            let mut all_neg_zero = at_rest;
+            for c in 0..6 {
+                let mut b = at_rest;
+                *velocity(&mut b, c) = -0.0;
+                *velocity(&mut all_neg_zero, c) = -0.0;
+                assert_eq!(
+                    velocity(&mut b, c).to_bits(),
+                    0x8000_0000,
+                    "T-SL30: anti-vacuity: the edit stores `-0.0`"
+                );
+                if velocity_written(&b) {
+                    misread.push(format!("component {c} = -0.0"));
+                }
+            }
+            if velocity_written(&all_neg_zero) {
+                misread.push("all six = -0.0".to_string());
+            }
+            assert!(misread.is_empty(), "T-SL30: the write test reads as written {misread:?}");
+        }
     }
