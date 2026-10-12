@@ -17,8 +17,9 @@
 //! `obs_graph_receipt_burst16` reads a 16-frame burst: 16 `[[frame]]` records over consecutive
 //! presented frames, `submission_epoch` strictly increasing, the whole `[config]` in each.
 //!
-//! The three non-ignored tests run the reader, the census and the burst check over inline
-//! fixtures, so "these checks can fail" is proven on every run, not only at a red-first.
+//! The five non-ignored tests run the reader, the census, every `[counts]` bound, the sink check's
+//! two halves and the burst check over inline fixtures, so "these checks can fail" is proven on
+//! every run, not only at a red-first.
 //!
 //! Windowed-test conventions: the device tests are ignored by default, `--test-threads=1`,
 //! `BOYKO_DISABLE_VALIDATION=1`, `BOYKO_WINDOW_FRAMES` set (each driver also sets a per-worker
@@ -224,6 +225,33 @@ fn class_table_census_reds_a_bare_row_fixture() {
         v.iter().any(|x| x.name == "material_table" && x.declarator == "Forward" && x.rule == "WrongClass" && x.derived == "Bare"),
         "a bare material_table on Forward must be reported as WrongClass/Bare: {v:?}"
     );
+}
+
+/// Every counter of `[counts]` is red on its own past its bound, so the capacity half of the
+/// device drivers is not only the `resources` line (OBS triage r1 F3: `passes` and `accesses`
+/// were red nowhere, `res_state_total` only on the device).
+#[test]
+fn counts_check_reds_each_counter_past_its_bound() {
+    for (from, to, needle) in [
+        ("resources = 2", "resources = 97", "[counts] resources 97 > 96"),
+        ("res_state_total = 2", "res_state_total = 97", "[counts] res_state_total 97 > 96"),
+        ("passes = 2", "passes = 65", "[counts] passes 65 > 64"),
+        ("accesses = 2", "accesses = 385", "[counts] accesses 385 > 384"),
+    ] {
+        let r = Receipt::parse(&FIXTURE.replacen(from, to, 1)).expect("parses");
+        let msg = counts_check(&r).expect_err(needle);
+        assert!(msg.contains(needle), "{needle}: {msg}");
+    }
+}
+
+/// A declared resource that some pass touches but no resolved `[[sink]]` slot names is red: the
+/// "every touched resource has a slot" half of the sink gate (OBS triage r1 F3).
+#[test]
+fn sink_check_reds_a_touched_resource_without_a_slot() {
+    let unresolved = FIXTURE.replacen("graph_name = \"fog_sun_far\"", "graph_name = \"\"", 1);
+    let err = sink_check(&Receipt::parse(&unresolved).expect("parses"))
+        .expect_err("ResId 1 is touched by pass 0 and its only slot resolves nothing");
+    assert!(err.contains("declared resource 1 (`fog_sun_far`) is touched but has no sink slot"), "{err}");
 }
 
 /// M5.1's shape: a burst whose records repeat the first frame is red on `submission_epoch`.
