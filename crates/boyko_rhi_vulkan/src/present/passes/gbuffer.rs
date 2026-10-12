@@ -369,7 +369,10 @@ impl Renderer<'_> {
     /// (and `scene.camera_uniform`'s `count`) cover `present_extent`'s pixel count.
     /// `extent` is the swapchain extent and governs ONLY pass C's clear render-area and the
     /// readback region; a `Some(readback)` buffer is host-visible and ≥ the swapchain
-    /// image's (`extent`-sized) byte size.
+    /// image's (`extent`-sized) byte size. A pending image-dump request on `self` meets the
+    /// image-dump clause of
+    /// [`render_gbuffer_frame`](super::super::frame_driver::Renderer::render_gbuffer_frame)'s
+    /// `# Safety` (that fn is the only caller).
     #[allow(clippy::too_many_arguments)]
     #[cfg_attr(feature = "hwrt", allow(clippy::too_many_arguments))]
     pub(crate) unsafe fn record_gbuffer(
@@ -3257,7 +3260,7 @@ impl Renderer<'_> {
             // source is THIS slot's ring image (or the `[fi]` TAA write slot), created at
             // `present_extent` (`taa_hist` at `aa_extent`) with `TRANSFER_SRC` usage because the
             // dump was armed at boot (`Renderer::arm_image_dump` → `sync_gbuffer`'s `dump_usage`);
-            // the requested staging obeys `request_image_dump`'s caller contract.
+            // the requested staging meets the image-dump clause of this fn's `# Safety`.
             ts.cmd();
             unsafe { self.record_image_dump_copies(cmd, dump, &sources, scene.engine_frame_index) };
             if let Some(restore) = dump.restore {

@@ -76,7 +76,10 @@ impl Renderer<'_> {
     /// [`record_gbuffer`](super::gbuffer)'s doc states, restricted to Forward's own images/sets).
     /// `extent` is the swapchain extent and governs ONLY the present-blit's clear render-area and
     /// the readback region; a `Some(readback)` buffer is host-visible and ≥ the swapchain image's
-    /// (`extent`-sized) byte size.
+    /// (`extent`-sized) byte size. A pending image-dump request on `self` meets the image-dump
+    /// clause of
+    /// [`render_gbuffer_frame`](super::super::frame_driver::Renderer::render_gbuffer_frame)'s
+    /// `# Safety` (that fn is the only caller).
     #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn record_forward(
         &self,
@@ -1171,7 +1174,7 @@ impl Renderer<'_> {
             // derived barriers, so each declared source is in its `plan.layouts` layout; both
             // sources are THIS slot's ring images at `present_extent`, and both carry
             // `TRANSFER_SRC` usage unconditionally (`ForwardTargets::build`'s depth, the `lit`
-            // ring); the requested staging obeys `request_image_dump`'s caller contract.
+            // ring); the requested staging meets the image-dump clause of this fn's `# Safety`.
             unsafe { self.record_image_dump_copies(cmd, dump, &sources, scene.engine_frame_index) };
             if let Some(restore) = dump.restore {
                 self.record_forward_pass(restore, cmd, targets, forward, scene, fi);

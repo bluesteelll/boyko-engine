@@ -7267,8 +7267,11 @@ impl Renderer<'_> {
     /// recorded into it, so every copied source is in `plan.layouts[name]`. Every `Some` source
     /// is the live image this frame's slot names for that graph resource, created with
     /// `TRANSFER_SRC` usage (the targets carry it when the dump is armed) and at least `extent`
-    /// large. Every requested staging buffer is live, host-visible, created with `TRANSFER_DST`,
-    /// and referenced by no other submission (`request_image_dump`'s caller contract).
+    /// large. Every non-null staging buffer of the pending request meets the image-dump clause of
+    /// [`Renderer::render_gbuffer_frame`](super::frame_driver::Renderer::render_gbuffer_frame)'s
+    /// `# Safety`: live on this device, host-visible, created with `TRANSFER_DST`, at least
+    /// `capacity[i]` bytes, and referenced by no other pending submission. The three recorders,
+    /// the only callers, run inside that fn and state the clause in their own `# Safety`.
     pub(crate) unsafe fn record_image_dump_copies(
         &self,
         cmd: VkCommandBuffer,
@@ -7312,10 +7315,11 @@ impl Renderer<'_> {
             };
             // SAFETY: the caller guarantees `cmd` is recording outside any render scope, `tex` is
             // live with `TRANSFER_SRC` usage, at least `extent` large and in `plan.layouts[i]`
-            // (the pass's derived barrier just recorded), and `staging` is a live TRANSFER_DST
-            // host-visible buffer no other submission touches; `bytes <= capacity` is checked
-            // above, so the one tightly-packed mip-0 region lands inside it; `&region` outlives
-            // the call. The host-read barrier recorded after the copy names the same live
+            // (the pass's derived barrier just recorded), and, by the image-dump clause of
+            // `render_gbuffer_frame`'s `# Safety`, that `staging` is a live TRANSFER_DST
+            // host-visible buffer of at least `capacity[i]` bytes that no other pending submission
+            // touches; `bytes <= capacity[i]` is checked above, so the one tightly-packed mip-0
+            // region lands inside it; `&region` outlives the call. The host-read barrier recorded after the copy names the same live
             // destination on the same open command buffer, outside any render scope
             // (`record_host_read_barrier`'s contract).
             unsafe {

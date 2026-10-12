@@ -294,6 +294,11 @@ impl<'ctx> Renderer<'ctx> {
     /// OBS (D): this frame's dump request — the staging each named image is copied into by the
     /// NEXT [`render_gbuffer_frame`](Self::render_gbuffer_frame), which consumes it (a frame that
     /// does not record drops it; the instrument re-requests). A no-op unless armed.
+    ///
+    /// Storing the handles is safe; recording copies into them is not. The obligations on
+    /// `request.staging` and `request.capacity` are the image-dump clause of
+    /// [`render_gbuffer_frame`](Self::render_gbuffer_frame)'s `# Safety`, which the `unsafe` call
+    /// that consumes the request accepts.
     pub fn request_image_dump(&mut self, request: ImageDumpRequest) {
         if let Some(arm) = self.image_dump.as_mut() {
             arm.request = Some(request);
@@ -913,6 +918,20 @@ impl<'ctx> Renderer<'ctx> {
     /// DIFFERENT texel width from the swapchain readback's, which is why the two contracts are
     /// stated separately).
     ///
+    /// **The image-dump clause (OBS).** If the image dump is armed and a request is pending (handed
+    /// by [`request_image_dump`](Self::request_image_dump) since the previous call; storing it
+    /// checks nothing), every non-null `staging[i]` of that [`ImageDumpRequest`]:
+    /// - is a live buffer created on this renderer's device, with its memory bound, host-visible,
+    ///   and created with `TRANSFER_DST` usage;
+    /// - is at least `capacity[i]` bytes large — the copy into it is bounded by `capacity[i]` and
+    ///   by nothing else;
+    /// - is referenced by no submission still pending on the device;
+    /// - is neither destroyed nor used by another submission until the fence of the submission
+    ///   carrying this frame has been waited (the next
+    ///   [`wait_frame_in_flight`](Self::wait_frame_in_flight) of this slot, or a device-idle wait).
+    ///
+    /// This call consumes the request whether or not it records.
+    ///
     /// VG R3 piece 2 step P2-6: `vb_record_probe` is gate G2's count sink
     /// ([`VbRecordProbe`](super::VbRecordProbe)) — host memory, no device resource, no contract
     /// beyond "the borrow outlives the call". It reaches only the `VisibilityBuffer` arm below;
@@ -961,8 +980,11 @@ impl<'ctx> Renderer<'ctx> {
         // submittable command buffer into the recordable `cmd` naming the acquired
         // swapchain `image`/`view`; `scene`'s resources + the synced `targets` were
         // created on this device; any readback buffer is host-visible and ≥ the image's
-        // byte size (caller contract); an armed image-dump request names live host-visible
-        // staging (`request_image_dump`'s caller contract, bounded again at the copy).
+        // byte size (caller contract); a pending image-dump request's staging meets the image-dump
+        // clause of this fn's `# Safety` (caller contract): live on this device, host-visible,
+        // `TRANSFER_DST`, at least `capacity[i]` bytes, referenced by no pending submission and
+        // kept until this frame's fence is waited. The recorders state the same clause in their
+        // own `# Safety`, and `record_image_dump_copies` bounds each copy by `capacity[i]`.
         let result = unsafe {
             self.drive_frame(
                 surface,
@@ -1592,12 +1614,15 @@ pub const fn image_dump_texel_bytes(vk_format: i32) -> Option<u32> {
 }
 
 /// One frame's dump request: per [`ImageDumpName`] (index = `name as usize`), the staging buffer
-/// the copy writes and its capacity (`VkBuffer::NULL` = not requested).
+/// the copy writes and its capacity (`VkBuffer::NULL` = not requested). What each non-null handle
+/// must satisfy is the image-dump clause of
+/// [`Renderer::render_gbuffer_frame`](Renderer::render_gbuffer_frame)'s `# Safety`.
 #[derive(Clone, Copy)]
 pub struct ImageDumpRequest {
     /// The destination per name.
     pub staging: [VkBuffer; IMAGE_DUMP_MAX],
-    /// Each destination's size in bytes.
+    /// Each destination's size in bytes. It must not exceed the buffer's real size: it is the
+    /// only bound on the copy.
     pub capacity: [u64; IMAGE_DUMP_MAX],
 }
 

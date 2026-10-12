@@ -979,7 +979,10 @@ impl Renderer<'_> {
     /// the readback region; a `Some(readback)` buffer is host-visible and ≥ the swapchain image's
     /// (`extent`-sized) byte size. Rung R9d: `accel_fns` is the AS command table for the split's
     /// own per-frame TLAS build (`Some` only on an RT device) — the SAME contract
-    /// [`record_gbuffer`](super::gbuffer)'s own `accel_fns` param documents.
+    /// [`record_gbuffer`](super::gbuffer)'s own `accel_fns` param documents. A pending image-dump
+    /// request on `self` meets the image-dump clause of
+    /// [`render_gbuffer_frame`](super::super::frame_driver::Renderer::render_gbuffer_frame)'s
+    /// `# Safety` (that fn is the only caller).
     ///
     /// VG-R0 rung R0c: a `Some(vb_id_readback)` buffer is host-visible and ≥
     /// `present_extent.width * present_extent.height * 8` bytes (`R32G32_UINT`, 8 B/texel — the
@@ -5449,8 +5452,8 @@ impl Renderer<'_> {
             // source is THIS slot's image (`taa_hist` the `[fi]` write slot) at `present_extent`
             // (`taa_hist` at `aa_extent`), with `TRANSFER_SRC` usage — `vb_depth` and `lit`
             // unconditionally, `viewt` / `taa_hist` because the dump was armed at boot
-            // (`sync_gbuffer`'s `dump_usage`); the requested staging obeys `request_image_dump`'s
-            // caller contract.
+            // (`sync_gbuffer`'s `dump_usage`); the requested staging meets the image-dump clause of
+            // this fn's `# Safety`.
             ts.cmd();
             unsafe { self.record_image_dump_copies(cmd, dump, &sources, scene.engine_frame_index) };
             if let Some(restore) = dump.restore {

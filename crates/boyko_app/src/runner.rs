@@ -2954,7 +2954,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // `HostDump::request` (`None` on the steady path); a `Some(vb_id_readback)` is the
             // VG-R0 census's own host-visible staging, sized by `VgCensusDump::request` to
             // `present_extent * 8 B` — the COMPOSITE extent the `vb_id` ring is built at, which is
-            // the extent the recorder's copy region names (`None` on the steady path).
+            // the extent the recorder's copy region names (`None` on the steady path); an
+            // image-dump request handed below meets the image-dump clause: each staging is
+            // `ImageDump::request`'s ring buffer, created on `ctx` host-visible with `TRANSFER_DST`,
+            // its `capacity` the buffer's own `size`, and its slot not pending (no submission
+            // references it — `Schedule::request_slot` asserts it); the slot is read and reused
+            // only after `DRAIN_FRAMES > FRAMES_IN_FLIGHT` presented frames, past this frame's
+            // fence, and an unpresented frame (`Ok(false)`) passed `recreate`'s device-idle wait.
             let aa_extent = VkExtent2D {
                 width: host.native_extent.0,
                 height: host.native_extent.1,
