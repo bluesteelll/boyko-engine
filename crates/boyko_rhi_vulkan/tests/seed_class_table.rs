@@ -13,7 +13,11 @@
 //!    the row's minimum stages, a writer seed where the row needs one) — including a mip chain
 //!    declared with ONE level against an image row (`hzb_pyramid` on an HZB-off frame; critique
 //!    W3: the kind column is {image, buffer}).
-//! 3. **A seed missing its minimum stages is a violation**, for every row that states a minimum.
+//! 3. **A seed missing its minimum stages is a violation**, for every row that states a minimum;
+//!    so are a writer row declared with a reader seed, a stateful seed that names no stage
+//!    (`SeedWithoutStages`, on every row), and a row declared as the other kind (`WrongKind`, an
+//!    image row as a buffer or the reverse) — each rule of `class_table_violation` has a fixture
+//!    that fails when the rule is dropped (OBS triage r1 F1).
 //! 4. **The table is well-formed:** one row per (name, declarator); pre-registered wave rows carry
 //!    the all-declarators mask (critique W5); the classes are CrossFrame or FrameLocal only.
 
@@ -174,6 +178,62 @@ fn a_reader_seed_on_a_writer_row_is_a_violation() {
         checked += 1;
     }
     assert!(checked >= 10, "anti-vacuity: {checked} writer rows");
+}
+
+/// A stateful seed that names no stage (a layout or a visible access only) leaves the next
+/// frame's first access with nothing to wait on. Every row, declared by its class, must report it
+/// as `SeedWithoutStages` — including the rows whose minimum is 0, where no other rule fires.
+#[test]
+fn a_stateful_seed_without_stages_is_a_violation() {
+    let mut checked = 0;
+    for (row, d) in pairs() {
+        let seed = match row.kind {
+            SeedKind::Image => ResSync { layout: VK_IMAGE_LAYOUT_GENERAL, ..ResSync::undefined() },
+            SeedKind::Buffer => ResSync { visible_access: VK_ACCESS_SHADER_READ_BIT, ..ResSync::undefined() },
+        };
+        let g = frame(row, |g| declare_by_class(g, row, seed, 1));
+        let v = class_table_violation(&g, d)
+            .unwrap_or_else(|| panic!("'{}' on {} with a stage-less seed", row.name, declarator_name(d)));
+        assert_eq!(v.rule, ClassRule::SeedWithoutStages, "'{}' on {}", row.name, declarator_name(d));
+        checked += 1;
+    }
+    assert!(checked >= SEED_CLASS_TABLE.len(), "anti-vacuity: {checked} (row, declarator) pairs");
+}
+
+/// An image row declared as a buffer (or the reverse), with the row's class and a valid seed, is
+/// `WrongKind` — the only rule that sees a kind mismatch (the sink check compares names inside one
+/// kind's array).
+#[test]
+fn a_row_declared_with_the_other_kind_is_a_violation() {
+    let mut checked = 0;
+    for (row, d) in pairs() {
+        let seed = row_seed(row, row.seed_stages_min);
+        let mut g = FrameGraph::with_capacity(4, 4, 4);
+        let res = match (row.kind, row.class) {
+            (SeedKind::Image, SeedClass::CrossFrame) => g.add_buffer_seeded(row.name, seed),
+            (SeedKind::Image, _) => g.add_buffer_seeded_frame_local(row.name, seed),
+            (SeedKind::Buffer, SeedClass::CrossFrame) => g.add_image_seeded(row.name, seed),
+            (SeedKind::Buffer, _) => g.add_image_seeded_frame_local(row.name, seed),
+        };
+        g.add_pass("writer");
+        match row.kind {
+            SeedKind::Image => {
+                g.buffer_access(res, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT)
+            }
+            SeedKind::Buffer => g.image_access(
+                res,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            ),
+        }
+        let v = class_table_violation(&g, d)
+            .unwrap_or_else(|| panic!("'{}' on {} declared as the other kind", row.name, declarator_name(d)));
+        assert_eq!(v.rule, ClassRule::WrongKind, "'{}' on {}", row.name, declarator_name(d));
+        checked += 1;
+    }
+    assert!(checked >= SEED_CLASS_TABLE.len(), "anti-vacuity: {checked} (row, declarator) pairs");
 }
 
 #[test]
