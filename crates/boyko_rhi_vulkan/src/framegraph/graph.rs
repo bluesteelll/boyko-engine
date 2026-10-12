@@ -140,8 +140,7 @@ pub struct FrameGraph {
     /// intentionally cross-frame, so `compile`'s DEBUG-ONLY unwritten-transient-
     /// read guard exempts it. Populated at declare time in every profile
     /// (negligible once-per-resource-per-frame cost, matching `res_seed`/
-    /// `res_name`); only ever READ under `cfg(debug_assertions)`.
-    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    /// `res_name`); read by that guard and by the derived seed class (OBS).
     res_seeded: Vec<bool>,
     /// Where each resource's block of per-mip sync entries starts in `state` /
     /// `res_written`, and how long it is. See [`ResShape`].
@@ -198,6 +197,11 @@ pub struct FrameGraph {
     /// keyed by anything.
     #[cfg(debug_assertions)]
     res_sub_witness: Vec<Option<SubWitness>>,
+    /// DEBUG-ONLY OBS registries (`super::seeded`): the wrapper declarations the trailing-scope
+    /// check walks, each with its per-frame init bit, and the restored opt-outs the seeded-layout
+    /// invariant skips. Fixed inline arrays — no heap field — cleared by `reset`.
+    #[cfg(debug_assertions)]
+    obs: super::seeded::ObsRegistry,
 
     // --- compile output ---
     img_barriers: Vec<ImgBarrier>,
@@ -275,6 +279,8 @@ impl FrameGraph {
             res_written: Vec::with_capacity(max_res),
             #[cfg(debug_assertions)]
             res_sub_witness: Vec::with_capacity(max_res),
+            #[cfg(debug_assertions)]
+            obs: super::seeded::ObsRegistry::new(),
             img_barriers: Vec::with_capacity(max_acc),
             buf_barriers: Vec::with_capacity(max_acc),
             pass_barriers: Vec::with_capacity(max_pass),
@@ -320,6 +326,8 @@ impl FrameGraph {
         self.res_written.clear();
         #[cfg(debug_assertions)]
         self.res_sub_witness.clear();
+        #[cfg(debug_assertions)]
+        self.obs.clear();
         self.img_barriers.clear();
         self.buf_barriers.clear();
         self.pass_barriers.clear();
@@ -414,6 +422,66 @@ impl FrameGraph {
     #[inline]
     pub fn add_buffer_seeded(&mut self, name: &'static str, seed: ResSync) -> ResId {
         self.push_res(false, name, seed, true, 1)
+    }
+
+    /// Declare a single IMAGE shared by both in-flight frames whose CONTENT this graph rebuilds
+    /// every frame (OBS, [`SeedClass::FrameLocal`](super::seeded::SeedClass::FrameLocal)): the
+    /// WAR `seed` is kept exactly as [`add_image_seeded`](FrameGraph::add_image_seeded) keeps it
+    /// — the start state reads only `res_seed`, so the derived barrier stream is identical — but
+    /// the resource is NOT exempt from `compile`'s unwritten-read guard, so a reader on a frame
+    /// whose writer was not declared fires instead of reading stale content.
+    #[inline]
+    pub fn add_image_seeded_frame_local(&mut self, name: &'static str, seed: ResSync) -> ResId {
+        self.push_res(true, name, seed, false, 1)
+    }
+
+    /// The mipped twin of
+    /// [`add_image_seeded_frame_local`](FrameGraph::add_image_seeded_frame_local) (a chain
+    /// rebuilt every frame: `scene_color_mips`, `post_chain`). The guard runs per mip.
+    ///
+    /// # Panics
+    ///
+    /// If `mips == 0`, in every profile, as [`add_image_mipped`](FrameGraph::add_image_mipped).
+    #[inline]
+    pub fn add_image_mipped_frame_local(
+        &mut self,
+        name: &'static str,
+        mips: u32,
+        seed: ResSync,
+    ) -> ResId {
+        if mips == 0 {
+            zero_mip_declaration(name);
+        }
+        self.push_res(true, name, seed, false, mips)
+    }
+
+    /// The buffer twin of
+    /// [`add_image_seeded_frame_local`](FrameGraph::add_image_seeded_frame_local): a SINGLE
+    /// buffer shared by both frames in flight whose content the graph rebuilds every frame.
+    /// [`add_buffer`](FrameGraph::add_buffer) is right only for a frame-private, per-FIF buffer;
+    /// [`add_buffer_seeded`](FrameGraph::add_buffer_seeded) takes the cross-frame exemption.
+    #[inline]
+    pub fn add_buffer_seeded_frame_local(&mut self, name: &'static str, seed: ResSync) -> ResId {
+        self.push_res(false, name, seed, false, 1)
+    }
+
+    /// [`add_image_seeded`](FrameGraph::add_image_seeded) for an image whose layout is restored
+    /// to its seed OUTSIDE the graph, by `site`: the explicit opt-out from the seeded-layout
+    /// invariant `compile` checks in debug builds (OBS). `site` names the restoring code so the
+    /// opt-out is reviewable; nothing else changes.
+    #[inline]
+    pub fn add_image_seeded_restored(
+        &mut self,
+        name: &'static str,
+        seed: ResSync,
+        site: &'static str,
+    ) -> ResId {
+        let id = self.add_image_seeded(name, seed);
+        #[cfg(debug_assertions)]
+        self.obs.register_restored(id, site);
+        #[cfg(not(debug_assertions))]
+        let _ = site;
+        id
     }
 
     /// The SOLE writer of every per-resource arena — all five public declarators funnel
@@ -917,6 +985,20 @@ impl FrameGraph {
                 buf_count: self.buf_barriers.len() as u32 - buf_begin,
             });
         }
+
+        // OBS (P), debug-only, after the pass walk: the seeded-layout invariant over every image
+        // and the trailing-scope seed coverage over every wrapper-declared resource
+        // (`super::seeded`). Every golden run is a dev-profile run, so the production
+        // declarators are checked on every golden frame; release pays nothing.
+        #[cfg(debug_assertions)]
+        {
+            if let Some(v) = super::seeded::seeded_layout_violation(self) {
+                super::seeded::fire_seeded_layout(v);
+            }
+            if let Some(v) = super::seeded::trailing_scope_violation(self) {
+                super::seeded::fire_trailing_scope(v);
+            }
+        }
     }
 
     /// **FROZEN REFERENCE — a verbatim copy of [`compile`](FrameGraph::compile) as it stood at
@@ -1260,4 +1342,102 @@ impl FrameGraph {
         );
         self.resolved_layout_mip(res, 0)
     }
+
+    // --- OBS read-only accessors (render-wave plan H0 Scope 1) ---
+
+    /// How many resources this frame declared.
+    #[inline]
+    pub fn res_count(&self) -> usize {
+        self.res_is_image.len()
+    }
+
+    /// `true` iff `res` is an image (else a buffer).
+    #[inline]
+    pub fn res_is_image(&self, res: ResId) -> bool {
+        self.res_is_image[res.index()]
+    }
+
+    /// The mip count `res` was declared with (1 for every buffer and single-mip image).
+    #[inline]
+    pub fn res_mips(&self, res: ResId) -> u32 {
+        self.res_shape[res.index()].mip_count
+    }
+
+    /// The cross-frame seed `res` was declared with — the start state `compile` derives from.
+    #[inline]
+    pub fn res_seed(&self, res: ResId) -> ResSync {
+        self.res_seed[res.index()]
+    }
+
+    /// The declared provenance bit: `true` for the CrossFrame declarators
+    /// (`add_image_seeded` / `add_image_mipped` / `add_buffer_seeded`).
+    #[inline]
+    pub fn res_seeded(&self, res: ResId) -> bool {
+        self.res_seeded[res.index()]
+    }
+
+    /// The seed class of `res`, derived from its seed and provenance bit (never stored).
+    #[inline]
+    pub fn res_class(&self, res: ResId) -> super::seeded::SeedClass {
+        super::seeded::SeedClass::derive(self.res_seeded[res.index()], self.res_seed[res.index()])
+    }
+
+    /// How many passes this frame declared.
+    #[inline]
+    pub fn pass_count(&self) -> usize {
+        self.pass_name.len()
+    }
+
+    /// The name of pass `p`.
+    #[inline]
+    pub fn pass_name(&self, p: PassId) -> &'static str {
+        self.pass_name[p.index()]
+    }
+
+    /// The accesses pass `p` declared, in declaration order — built from the SoA arenas on the
+    /// fly; nothing is allocated.
+    #[inline]
+    pub fn pass_accesses(
+        &self,
+        p: PassId,
+    ) -> impl DoubleEndedIterator<Item = Access> + ExactSizeIterator + '_ {
+        let begin = self.pass_access_begin[p.index()] as usize;
+        let count = self.pass_access_count[p.index()] as usize;
+        (begin..begin + count).map(move |a| Access {
+            res: self.acc_res[a],
+            stage: self.acc_stage[a],
+            access: self.acc_access[a],
+            layout: self.acc_layout[a],
+            sub: self.acc_sub[a],
+        })
+    }
+
+    /// The debug-only OBS registries (`super::seeded`).
+    #[cfg(debug_assertions)]
+    #[inline]
+    pub(crate) fn obs_registry(&self) -> &super::seeded::ObsRegistry {
+        &self.obs
+    }
+
+    /// The debug-only OBS registries, mutably (the wrappers register and mark init here).
+    #[cfg(debug_assertions)]
+    #[inline]
+    pub(crate) fn obs_registry_mut(&mut self) -> &mut super::seeded::ObsRegistry {
+        &mut self.obs
+    }
+}
+
+/// One declared access, as [`FrameGraph::pass_accesses`] yields it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Access {
+    /// The resource touched.
+    pub res: ResId,
+    /// `VkPipelineStageFlags` of the access.
+    pub stage: u32,
+    /// `VkAccessFlags` of the access (read and/or write bits).
+    pub access: u32,
+    /// `VkImageLayout` (the UNDEFINED sentinel for buffers).
+    pub layout: i32,
+    /// The subresource span (`SubRange::COLOR` for buffers).
+    pub sub: SubRange,
 }

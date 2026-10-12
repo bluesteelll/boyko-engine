@@ -7,6 +7,11 @@
 > No build, test, timing or GPU run was taken, because three build lanes were running on the
 > machine.
 >
+> **Amended 2026-10-12 by the render-wave plan (RD4 Part C):** D22's stale-comment count is three
+> code sites plus one document (§4 D22); the F2/F6 numbers are the volumetrics design's pass-2
+> figures; the `dispatch_indirect` trait no-op is called **RK-16** everywhere (G7 here is an
+> unrelated particle row; POSTFX's §8 G7 is the no-op).
+>
 > **Citations.** Every `crates/…` path below was checked to exist at `6394bc5e`. Code is cited as a
 > **path plus a symbol**. A `path:line` appears only where this revision re-read that line by
 > content at `6394bc5e`. This document is not in `GATED_DOCS` (`tests/internal_docs_anchors.rs`),
@@ -338,7 +343,7 @@ The ECS core itself is PRESENT. It is catalogued in [FEATURE_MAP.md](FEATURE_MAP
 | D19 | Render debug views (buffers, overdraw, light complexity) | HDRP Rendering Debugger [S3] | **PARTIAL** | developer dumps only: `crates/boyko_app/src/hzb_dump.rs`, `host_dump.rs` | P1 | D18 | S–M |
 | D20 | GPU timestamps and zones | — | **PRESENT** | `crates/boyko_rhi_vulkan/src/present/gpu_zone.rs`; no zone covers an AA or post pass yet | P0 | — | — |
 | D21 | Async compute queue, timeline semaphores | Wronski: fog "in parallel with regular scene rendering … using asynchronous compute" [S18] | **ABSENT** | one GRAPHICS\|COMPUTE queue (`find_queue_family`, `crates/boyko_rhi_vulkan/src/device.rs`); no timeline semaphores | P2 | — | M |
-| D22 | Indirect draws/dispatch with GPU-side counts; mesh shaders | — | **PARTIAL** | `cmd_dispatch_indirect` and `vkCmdDrawIndexedIndirect` are present; `DrawIndirectCount` and mesh shaders are absent. Two comments say of `vkCmdDispatchIndirect` and `vkCmdDrawIndexedIndirectCount` that "neither is in this device's fn table", and the dispatch half is stale in both: one in `present/passes/vb.rs`, and the late batch-cull comment in `present/graph_bridge.rs` (`declare_vb_graph`) | P2 | — | S |
+| D22 | Indirect draws/dispatch with GPU-side counts; mesh shaders | — | **PARTIAL** | `cmd_dispatch_indirect` and `vkCmdDrawIndexedIndirect` are present; `DrawIndirectCount` and mesh shaders are absent. Two comments say of `vkCmdDispatchIndirect` and `vkCmdDrawIndexedIndirectCount` that "neither is in this device's fn table", and the dispatch half is stale in both: one in `present/passes/vb.rs`, and the late batch-cull comment in `present/graph_bridge.rs` (`declare_vb_graph`). **Amended 2026-10-12: three code sites + one document, not two** — `present/passes/vb.rs:2810-2811` and `present/graph_bridge.rs:5323-5324` (fixed at the render-wave plan's PX0), `shaders/vb_shade.comp.hlsl:6` (fixed at PX1a), and `docs/VB-P2-CLASSIFICATION-PLAN.md:37` (RD3) | P2 | — | S |
 | D23 | Dynamic resolution | HDRP [S3] | **ABSENT** | render scale is fixed at boot (`EnginePlugins::with_ssaa_scale`) | P1 | E14 | M |
 | D24 | HDR display output (scRGB / HDR10) | Godot, HDRP [S2][S3] | **ABSENT** | the swapchain prefers `*_UNORM` in `SRGB_NONLINEAR`; no `VK_EXT_swapchain_colorspace` | P2 | E1 | M |
 | D25 | Multiple views: split-screen, render-to-texture cameras, mirrors | — | **PARTIAL** | seam: `Camera { order, is_active, viewport: Option<Viewport> }` and `ActiveCamera` / `resolve_active_camera` select one camera per frame (`crates/boyko_scene/src/camera.rs`). There is no second view, per-camera target or viewport-sized pass | P2 | — | M |
@@ -742,12 +747,15 @@ quality is not among them, because the measurement refuted it. Two rules follow:
   console target. Density and lighting were about 0.43 ms of that, and double resolution cost
   1.6 ms [S18].
 - **F2, normalized.** The volumetrics survey §4.2–4.3 normalizes AC4, Frostbite and UE to
-  0.42–1.07 ns per froxel on the reference GPU [E]. That gives:
+  0.42–1.07 ns per froxel on the reference GPU [E] (pass 1; **amended 2026-10-12 to the
+  volumetrics design's pass 2: 0.42–1.03 ns per froxel, 0.39–0.95 ms, ≈ 27.0 MB at Low**). Pass 1
+  gave:
   - **0.39–0.99 ms** to inject and integrate the 160×90×64 grid;
   - 29.5 MB for four RGBA16F volumes;
   - an apply pass of 0.07–0.10 / 0.13–0.18 / 0.30–0.40 ms at 1080p / 1440p / 4K.
 - **F6, Nubis.** About 2 ms and 20 MB [S20]. The volumetrics survey scales a 2.5D variant to
-  0.6–0.95 ms at 1440p [E]. Any full-3D figure for the reference GPU is an estimate at best; the
+  0.6–0.95 ms at 1440p [E] (pass 1, the optimistic ratio; **amended 2026-10-12: the volumetrics
+  design's pass 2 says 0.60–1.86 ms at 1440p**, conservative scaling). Any full-3D figure for the reference GPU is an estimate at best; the
   campaign must measure it.
 
 **Two defects in the E-FOG plan row.** Both are recorded here and not fixed, because this pass
@@ -795,7 +803,7 @@ provisional.
 | G4 | Flipbook animation (sprite sheets, motion-vector frame blending) | Niagara modules [S14]; motion-vector flipbooks, > 10× frame extension (VFX survey §8) | **ABSENT** | one bindless texture per effect (`tex_index`) | all | P0 | — | S |
 | G5 | Colour and size over life | Niagara [S14] | **PARTIAL** | a size ramp and 4 colour keys; only key 0 is rendered | all | P1 | — | S |
 | G6 | Sub-emitters and particle events (spawn on death or collision) | Godot sub-emitters [S2]; Niagara events [S14] | **ABSENT** | — | all | P1 | G1 | M |
-| G7 | Trails, ribbons, mesh particles | Godot ribbon and tube trails [S2] | **PLANNED** | P4 | all | P1 | G1 | L |
+| G7 | Trails, ribbons, mesh particles (naming note, amended 2026-10-12: POSTFX's §8 "G7" is the `dispatch_indirect` trait no-op, which the render-wave plan calls RK-16 everywhere) | Godot ribbon and tube trails [S2] | **PLANNED** | P4 | all | P1 | G1 | L |
 | G8 | Forces: vector fields, curl noise, attractors | Godot 3D attractors [S2] | **ABSENT** | — | all | P2 | G1, G16 | S–M |
 | G9 | Depth-buffer collision (mesh-only scenes, rain splashes) | Godot particle collision [S2] | **ABSENT** | SDF collision only (`ParticleCollision::Sdf`). The particle research's fact R6 says "SDF collision beats depth-buffer collision", but the mesh leg has no SDF a particle can query (D26: the MDF path is off in the host). A hybrid fork (§5.3) | per path's depth proxy | P1 | G1 | S–M |
 | G10 | HDR compositing of additive and blended particles | — | **ABSENT** | particles draw into the 8-bit `lit` (§3.1); lands with E1 | all | P0 | E1 | S |
@@ -867,11 +875,11 @@ costs are at 1080p / 1440p / 4K on the reference GPU.
 | Specular AA, mesh leg | NDF filtering from quad or analytic normal derivatives (E18) | ALU in a bandwidth-dominated pass. The authors state that the filter's arithmetic is typically not the bottleneck of a G-buffer pass [S52]. No ms | [P] |
 | SDF edge AA | C-AA (E19, parked) | 4 frozen-field taps per SDF hit pixel | [T] [RENDER-C-AA-DESIGN-PARKED.md](RENDER-C-AA-DESIGN-PARKED.md) |
 | Height fog | analytic closed form, in the tail pass (F1) | reading a 4 B/px depth proxy adds 0.03 / 0.06 / 0.13 ms; the ALU is a few operations | [E] |
-| Froxel fog | E-FOG at 160×90×64 (F2) | inject and integrate 0.39–0.99 ms, flat in resolution; apply 0.07–0.10 / 0.13–0.18 / 0.30–0.40 ms; 29.5 MB | [E] volumetrics survey §4.3 |
+| Froxel fog | E-FOG at 160×90×64 (F2) | inject and integrate 0.39–0.99 ms, flat in resolution; apply 0.07–0.10 / 0.13–0.18 / 0.30–0.40 ms; 29.5 MB (pass 1; **amended 2026-10-12, pass 2: 0.42–1.03 ns/froxel, 0.39–0.95 ms, ≈ 27.0 MB at Low**) | [E] volumetrics survey §4.3 |
 | Sky and aerial perspective | Hillaire 2020 LUTs (F5) | ≈ 0.2 ms, taken from 0.17 ms on a GTX 1080 and used unscaled | [E] volumetrics survey §4.4 |
 | Sun shafts, screen-space | radial blur at half resolution, sun only (F4 route b) | 0.2–0.4 ms at 1440p | [E] volumetrics survey §4.4 |
 | Sun shafts, per-pixel march | shadow-map march per pixel | 1.4–2.8 ms per light at 1440p (the texel rate was not fetched) | [E] volumetrics survey §4.4 |
-| Clouds | 2.5D, Nubis-class (F6) | 0.6–0.95 ms at 1440p; 8.5 MB of noise | [E] volumetrics survey §4.4 |
+| Clouds | 2.5D, Nubis-class (F6) | 0.6–0.95 ms at 1440p (pass 1; **amended 2026-10-12, pass 2: 0.60–1.86 ms**); 8.5 MB of noise | [E] volumetrics survey §4.4 |
 | Blended particles | one full screen of blended coverage | 0.049–0.137 / 0.088–0.244 / 0.198–0.549 ms at 4 B/px (bandwidth-bound: a 3 MB L2 against an 8.3 MB target). R4a's fallback arm doubles it | [E] VFX survey §2 |
 | Rain | layers + an occlusion map + ripples (Remember Me) | the whole system ≈ 2.8 ms on PS3 at 720p; occlusion map 0.32 ms | [P] VFX survey §8 |
 

@@ -20,6 +20,12 @@
 > §10 separates the PERF/ARCHITECTURE decisions taken here (with the number that decides each)
 > from the VALUES/SCOPE questions that go to the owner.
 >
+> **Amended 2026-10-12 by the render-wave plan, AD-8 and AD-12:** the `-D PARTICLE_FOG` axis is withdrawn
+> (AD-8, VOLUMETRICS pass-2 D24), so `particle_draw.vs` is 6 variants and `particle_draw.fs`
+> ≤ 36; new graph tails go after the DM1 material tail and are covered by OBS's name-checked
+> sinks; E1 (particle × pre-exposure, POSTFX) is landed by PX1a in `particle_draw` and inherited
+> here.
+>
 > **Boundaries with the sibling threads of the same date.** Post-processing, anti-aliasing, sun
 > rays and volumetric fog are separate research threads. This document consumes them only through
 > named seams:
@@ -32,8 +38,9 @@
 > designs bear directly on this one:
 > - `docs/render/POSTFX-AA-DESIGN-SPACE.md` adopts the HDR move as its first rung **PX1**;
 > - `docs/render/VOLUMETRICS-DESIGN-SPACE.md` owns the fog grid, particle density injection, hero
->   dense volumes and the `-D PARTICLE_FOG` draw axis. Its D18 has already decided that axis: one
->   fetch per vertex at the particle centre;
+>   dense volumes and the particle fog fetch (the `-D PARTICLE_FOG` draw axis is withdrawn, AD-8:
+>   its pass-2 D24 replaced it with an always-bound binding). Its D18 decides only the fetch site:
+>   one fetch per vertex at the particle centre;
 > - `docs/render/DYNAMIC-MATERIALS-DESIGN-SPACE.md` (with its survey
 >   `docs/render/DYNAMIC-MATERIALS-RESEARCH.md`) places rain wetness in its rung **DM2**: a `Wetness`
 >   driver curve and a `SurfaceWetness { level }` resource. It asks its owner question Q5 about
@@ -101,9 +108,10 @@
     it, pending its own owner question.
   - The volumetrics design replaces `E-FOG`'s "fog grid == cluster grid" with a fog-owned
     160×90×64 grid. It schedules particle density injection (its **V10**), dense local volumes
-    for hero explosions (its **V12**), and a per-vertex fog fetch in the particle VS behind
-    `-D PARTICLE_FOG` (its **V8**). That fetch is decided there as VS-only, at the particle
-    centre (its D18).
+    for hero explosions (its **V12**), and a per-vertex fog fetch in the particle VS (its **V8**)
+    through an always-bound `fog_integrated` binding and a boot-resolved gate word; no
+    `-D PARTICLE_FOG` axis (withdrawn, AD-8: its D24). The fetch is decided there as VS-only, at
+    the particle centre (its D18).
   - The dynamic-materials design owns per-material parameters. Its DM2 carries a `Wetness` curve
     and the `SurfaceWetness { level }` resource. Its F10 records that transparency's
     `MaterialXGpu` lanes "are full, and the opaque producers never bind it". It puts per-pixel
@@ -841,7 +849,7 @@ No `Vec`, `HashMap` or side store exists anywhere in the layer. The only CPU/GPU
 - The weather draw on Deferred needs its own `-D DEPTH_LINEAR` arm (plan D7's contract) and
   inherits the 64-unit Deferred horizon. The rain box is ≤ 32 m, so the horizon never binds.
 
-### 4.2 New resources (appended last, conditional tail; the `declare_particle_*` template in `graph_bridge.rs`)
+### 4.2 New resources (a conditional tail declared after the DM1 material tail, which is last since `40e7577d`; covered by OBS's name-checked sinks, AD-12; the `declare_particle_*` template in `graph_bridge.rs`)
 
 | ResId | Kind | Size (1080p) | Seeded (cross-frame) | Rung |
 |---|---|---|---|---|
@@ -1009,7 +1017,7 @@ the point of choosing the analytic model.
 | Family | Axes after this design | `.spv` count |
 |---|---|---|
 | `particle_draw.fs` | `DEPTH_LINEAR (2) × SOFT (2) × OIT_STAGE (3) × PARTICLE_FX (3: off, FLIP, SIXWAY)` | **≤ 36** at the top of both ladders (transparency D18: 12). `SIXWAY` is legal on the alpha class only; FX6's resolver writes the legal table |
-| `particle_draw.vs` | `DEPTH_LINEAR (2) × PARTICLE_FX (3) × PARTICLE_FOG (2)` | **12** (today 2). The fog axis is the volumetrics sibling's, decided VS-only (its D18) |
+| `particle_draw.vs` | `DEPTH_LINEAR (2) × PARTICLE_FX (3)` | **6** (today 2). No fog axis: the former `PARTICLE_FOG (2)` axis is withdrawn (AD-8, the volumetrics sibling's D24); the VS fog fetch reads an always-bound binding under a gate word |
 | `weather_probe.{vs,fs}` (test-only) | the rain VS with its clip-position line replaced; an FS writing position bits to `R32G32Uint` + `R32Sfloat` | 1 + 1 (FX9) |
 | `particle_sim.comp` | today: base / `SDF_COLLIDE` / `SDF_COLLIDE_STATS`; adds `HEIGHT_COLLIDE`, `EVENTS` as **boot-resolved arms**, not a full product | ≤ +4 rows; the product is bounded by the resolver's legal table, written at FX5/FX8 |
 | `particle_kickoff`, `particle_emit` | `+EVENTS` | +2 |
@@ -1039,10 +1047,12 @@ class pipeline**, because the additive and alpha classes are separate pipelines 
   alpha particles with no six-way effect present, armed vs plain. The ceiling is ≤ 5 % of
   `ZONE_PARTICLE_DRAW`. Above it, `SixWay` arming becomes an owner-visible cost line in B9.
 
-**`-D PARTICLE_FOG` is decided by the volumetrics sibling** (its D18): one fetch per vertex at the
-particle centre, VS-only. Additive particles take `c·T`, and alpha particles `c·T + S·α`, both
-folded into the interpolated colour. So the axis multiplies the VS bound only (4 → 12 with the
-three `PARTICLE_FX` values) and adds no FS arm. Pass 1 treated this as pending.
+**The particle fog fetch is decided by the volumetrics sibling** (its D18 site, its D24 binding):
+one fetch per vertex at the particle centre, VS-only. Additive particles take `c·T`, and alpha
+particles `c·T + S·α`, both folded into the interpolated colour. The axis this paragraph once
+priced, `-D PARTICLE_FOG`, is withdrawn (AD-8): an always-bound `fog_integrated` binding and a
+boot-resolved gate word replace it, so the VS bound stays 6 and no FS arm is added. Pass 1 treated
+this as pending.
 
 ---
 
@@ -1302,7 +1312,7 @@ to be tonemapped per fragment and blended display-referred.
 | X8 | Wind is analytic: a `FieldScalar` vorticle leaf (`mul`/`add`/`sub`/`clamp01`, no `sqrt`) shared by CPU and GPU; turbulence is GPU-only; rain sees the global term only | 1 KB; one op tree, `\|Δv\| ≤ 2⁻¹⁸·s·r`; no CPU mirror (§2.7) |
 | X9 | Events arrive next frame through a double-buffered ring, one child per record; the collide flag is latched in the substep loop and appended in the retirement block | D3 preserved; 1.05 MB; +1 atomic site, +1 atomic per wave (§2.8) |
 | X10 | Authoring is POD rows; mode and mask bits in `EffectParamsGpu::flags`, values in its five spare words (including the ramp's reciprocals); `ParticleSim.color_rgba8` becomes `life_total` | 1 dispatch; row stays 128 B; zero `OpFDiv` in the sim (§2.9, §4.4) |
-| X11 | One `PARTICLE_FX` draw axis with three values, armed per class pipeline | FS bound ≤ 36, not 96; VS 12 with `PARTICLE_FOG`; six-way interpolants never on the additive class (§6.3) |
+| X11 | One `PARTICLE_FX` draw axis with three values, armed per class pipeline | FS bound ≤ 36, not 96; VS 6 (the `PARTICLE_FOG` axis is withdrawn, AD-8); six-way interpolants never on the additive class (§6.3) |
 | X12 | Per-effect draw table; `fade_distance`, band, coverage bound become per-effect | 12 KB total, 0 B per particle (C1) |
 | X13 | Per-contact one-shots are burst requests; A1 skips zero-count requests | 0.5 µs vs 3–10 µs at 50 contacts per frame; idle emitters no longer consume `MAX_EMITTERS` (§2.12) |
 | X14 | In-sim conservative frustum culling | ≈ −0.013 to −0.09 ms at 100k with half culled (§7.5) |
@@ -1356,8 +1366,9 @@ to be tonemapped per fragment and blended display-referred.
 - **The per-drop VS cost of 1.5 ns** is inferred from a VS that reads a 32 B record. The rain VS
   replaces that read with a hash and one map fetch, and FX9 measures it.
 - **`E-FOG`'s grid inconsistency** (risk 16) is resolved by the volumetrics sibling, not here. The
-  `PARTICLE_FOG` variant bound (§6.3) follows that design's D18: VS-only, so the VS bound is 12
-  and the FS has no fog arm.
+  former `PARTICLE_FOG` variant bound (§6.3) is withdrawn (AD-8, that design's D24): the fetch
+  stays VS-only (its D18) behind an always-bound binding, so the VS bound is 6 and the FS has no
+  fog arm.
 - **The research could not retrieve** God of War's wind numbers, Epic's ribbon and light renderer
   pages, or any Frostbite or Decima particle-authoring source (research header).
 - **Kernel and crate requests** born from this design, each its own pass:
@@ -1399,7 +1410,7 @@ recorded under W1.
 | O1 | C3 never compared against `ParticleEmitter::burst`; the persistent slot is an artefact of A1 | **Accepted.** Both of pass 1's arguments are withdrawn. C12 (A1 skips zero-count requests) fixes the real defect, with a red test at FX3. Bursts are re-argued on per-contact sparks | §0.3 C3/C12, §2.12, FX3 |
 | O2 | Additive snow vanishes in LDR against bright sky | **Accepted.** Snow is premultiplied "over", unsorted: order-independent because flakes share one colour. It draws before the additive tail | §2.2, §4.1, §7.3, X18, FX9 |
 | O3 | Local-vs-global wind contradiction for rain | **Accepted.** Rain uses the global term in both position and orientation | §2.2, §4.4, §6.1 |
-| O4 | `PARTICLE_FOG` already decided (VS, per vertex) | **Accepted.** VS bound 12, no FS arm | header, §0.1, §6.3, §11 |
+| O4 | `PARTICLE_FOG` already decided (VS, per vertex); the axis is withdrawn since (AD-8) | **Accepted.** The fetch is VS-only, no FS arm; the VS bound is 6 under AD-8 (pass 2 said 12) | header, §0.1, §6.3, §11 |
 | O5 | "Particles become `csm_trans` casters" contradicts transparency's matrix | **Accepted.** Withdrawn; C8's caster exemption noted | §2.5, §8 |
 | O6 | FX3's absence test cannot fail | **Accepted.** `ParticleBursts` is inserted only by `VfxPlugin`; the gate tests resource presence, with a named red mutation | §3.1, FX3 |
 | O7 | FP32 range inconsistent with the clock pair | **Accepted.** 10.65–13.08 TFLOPS at 1.387–1.703 GHz; the strip march carries 6.9–13.1 | research §2; §2.3 |

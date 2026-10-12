@@ -369,7 +369,10 @@ impl Renderer<'_> {
     /// (and `scene.camera_uniform`'s `count`) cover `present_extent`'s pixel count.
     /// `extent` is the swapchain extent and governs ONLY pass C's clear render-area and the
     /// readback region; a `Some(readback)` buffer is host-visible and ≥ the swapchain
-    /// image's (`extent`-sized) byte size.
+    /// image's (`extent`-sized) byte size. A pending image-dump request on `self` meets the
+    /// image-dump clause of
+    /// [`render_gbuffer_frame`](super::super::frame_driver::Renderer::render_gbuffer_frame)'s
+    /// `# Safety` (that fn is the only caller).
     #[allow(clippy::too_many_arguments)]
     #[cfg_attr(feature = "hwrt", allow(clippy::too_many_arguments))]
     pub(crate) unsafe fn record_gbuffer(
@@ -3237,6 +3240,35 @@ impl Renderer<'_> {
             (self.fns.cmd_end_rendering)(cmd);
         }
 
+        // OBS (D, H0 Scope 6): the image dump — recorded AFTER the present blit (critique O2, the
+        // `hzb_dump` parity rule: the blit samples `lit`, so the copy's transition must follow it)
+        // and before the swapchain's own present / readback transition. The pass is declared LAST,
+        // so nothing later this frame consumes the layouts it leaves. An unarmed frame (every
+        // shipped one) declares no `image_dump` and records nothing here.
+        if let Some(dump) = self.gbuffer_pass_plan.as_ref().and_then(|p| p.image_dump) {
+            ts.cmd();
+            self.record_graph_pass(dump.pass, cmd, targets, scene, fi);
+            let sources = [
+                (super::super::frame_driver::ImageDumpName::DeferredDepth, Some(&targets.depth[fi]), present_extent),
+                (super::super::frame_driver::ImageDumpName::Viewt, Some(&targets.viewt[fi]), present_extent),
+                (super::super::frame_driver::ImageDumpName::Lit, Some(&targets.lit[fi]), present_extent),
+                (super::super::frame_driver::ImageDumpName::TaaHist, targets.taa_hist.as_ref().map(|r| &r[fi]), aa_extent),
+            ];
+            // SAFETY: recording is open and no render scope is active (the blit's
+            // `cmd_end_rendering` is above); `record_graph_pass` just recorded the dump pass's
+            // derived barriers, so each declared source is in its `plan.layouts` layout; every
+            // source is THIS slot's ring image (or the `[fi]` TAA write slot), created at
+            // `present_extent` (`taa_hist` at `aa_extent`) with `TRANSFER_SRC` usage because the
+            // dump was armed at boot (`Renderer::arm_image_dump` → `sync_gbuffer`'s `dump_usage`);
+            // the requested staging meets the image-dump clause of this fn's `# Safety`.
+            ts.cmd();
+            unsafe { self.record_image_dump_copies(cmd, dump, &sources, scene.engine_frame_index) };
+            if let Some(restore) = dump.restore {
+                ts.cmd();
+                self.record_graph_pass(restore, cmd, targets, scene, fi);
+            }
+        }
+
         // (9) The post-draw swapchain transition: steady → PRESENT, or the readback
         // path → TRANSFER_SRC, copy-to-buffer, → PRESENT (identical to
         // `record_present_sampled`'s branch — the swapchain still presents after the
@@ -3329,6 +3361,9 @@ impl Renderer<'_> {
                 // size per this fn's contract); `&region` outlives the call. This copies
                 // the SWAPCHAIN image (the on-screen golden) — NOT the depth (the depth
                 // copy is the deletion target this path proves absent).
+                // The host-read barrier recorded after the copy names the same live destination on
+                // the same open command buffer, outside any render scope
+                // (`record_host_read_barrier`'s contract).
                 unsafe {
                     ts.cmd();
                     (self.fns.cmd_copy_image_to_buffer)(
@@ -3339,6 +3374,10 @@ impl Renderer<'_> {
                         1,
                         &region,
                     );
+                    // OBS (H0 Scope 7): make the copy's writes VISIBLE to the host read that
+                    // follows the fence wait (a fence only makes them available).
+                    ts.cmd();
+                    crate::host_read::record_host_read_barrier(self.fns, cmd, &[staging.buffer]);
                 }
 
                 let to_present = VkImageMemoryBarrier {

@@ -114,6 +114,15 @@ mod vb_probe_dump;
 #[cfg(windows)]
 mod vg_census_dump;
 mod window_info;
+// Render-wave plan H0 Scope 5 (OBS): the `BOYKO_GRAPH_RECEIPT` production frame-graph receipt.
+// `#[cfg(windows)]` for the same reason `vb_probe_dump` above is — its only caller is the windowed
+// frame loop.
+#[cfg(windows)]
+mod graph_receipt_dump;
+// Render-wave plan H0 Scope 6 (OBS): the `BOYKO_IMAGE_DUMP` readback of named frame-graph images.
+// `#[cfg(windows)]` for the same reason — its only caller is the windowed frame loop.
+#[cfg(windows)]
+mod image_dump;
 
 /// The host half of the light-table generation protocol (host plan D5/R4):
 /// the pure per-slot [`light_upload_due`](light_gate::light_upload_due) gate
@@ -135,6 +144,9 @@ pub mod plugins;
 /// Profiling rung 7: the measurement artifact that replaces the stdout channel.
 pub mod profiling;
 pub mod prelude;
+/// Render-wave plan H0 Scope 8: the test-only force-key set (`TestForce`) and its pure parser; the
+/// `BOYKO_TEST_FORCE` decode lives in the fixtures that need it.
+pub mod test_force;
 
 // Profiling rung 13: this crate declares zones of its own (`__telemetry_reduce` and
 // `__telemetry_write`), so it must name its partition — the same one line every engine crate that

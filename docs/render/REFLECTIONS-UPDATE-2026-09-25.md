@@ -14,6 +14,11 @@
 > - the pre-light depth on VB × Both is mesh-only (U19, §3.12);
 > - the binding budget is re-derived (U5).
 >
+> **Amended 2026-10-12 by the render-wave plan, AD-1:** RK-14 becomes a **required** row with no
+> fallback arm — `lit` has one format per build, REQUIRED at boot (storage, attachment and
+> `COLOR_ATTACHMENT_BLEND`), and the format itself is decided at PX0. The "else RGBA16F" fallback
+> below (the scene-colour row, the RK-14 row of the probe table, U18, U22) is superseded.
+>
 > **Relation to the earlier documents.** The survey
 > [`REFLECTIONS-RESEARCH.md`](REFLECTIONS-RESEARCH.md) and the design
 > [`REFLECTIONS-DESIGN-SPACE.md`](REFLECTIONS-DESIGN-SPACE.md) (both 2026-09-10, at `ed0bed45`) stay
@@ -1000,7 +1005,7 @@ axis (§8 K2).
 |---|---|---|---|
 | Trilinear sampler | `crates/boyko_rhi/src/device.rs:248-252` (`MipMode::None` only) | R1–R3 | RK-1 (09-10) |
 | Mipped raw upload | `crates/boyko_render/src/texture.rs:403` | R1 | RK-11 (09-10) |
-| B10G11R11 storage and attachment probe | `crates/boyko_rhi_vulkan/src/device.rs:276-281` (storage optional); attachment bit still unread in the spec (§12) | R4a, captured atlases (U22) | RK-14 (09-10): probe both bits, fallback RGBA16F |
+| B10G11R11 storage and attachment probe | `crates/boyko_rhi_vulkan/src/device.rs:276-281` (storage optional); attachment bit still unread in the spec (§12) | R4a, captured atlases (U22) | RK-14 (09-10): probe both bits, fallback RGBA16F. **Amended 2026-10-12, AD-1:** a required row, no fallback arm (the format is decided at PX0) |
 | Binding cap, in **two** copies | `crates/boyko_rhi/src/device.rs:76` and `crates/boyko_rhi_vulkan/src/rhi_impl/mod.rs:97`, both 25 | R1+ | **RK-15** 25 → 28, the pinned test re-aimed, the per-type need constants re-derived and census-gated (U5) |
 | No `Format::R32Uint` | `crates/boyko_rhi/src/enums.rs:270` `Format`: `R32Sfloat = 100` (`:380`), `R32G32Uint = 101` (`:386`), no 98 | U2 `thin_refl_n`, RP hash | **RK-17** add `R32Uint = 98` (storage and 32-bit image atomics are required for it by the spec [R]; RP still probes `STORAGE_IMAGE_ATOMIC` at boot) |
 | No standalone sampler descriptor | `enums.rs:723-738` `DescriptorKind` | U5 | none: combined image samplers (the DDGI shape), so REFL adds 5 bindings |

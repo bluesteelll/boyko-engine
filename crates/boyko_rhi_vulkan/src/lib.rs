@@ -147,3 +147,5 @@ pub mod suballocator;
 pub mod swapchain;
 pub mod texture;
 pub mod window;
+// OBS (render-wave plan H0 Scope 7): the host-read barrier every GPU->host copy records.
+pub(crate) mod host_read;

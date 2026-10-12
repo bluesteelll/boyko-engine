@@ -90,6 +90,18 @@ pub struct Renderer<'ctx> {
     /// recorders borrow the renderer shared, not because anything else touches it (one thread
     /// records).
     material_upload_probe: core::cell::Cell<super::MaterialUploadProbe>,
+    /// OBS (H0 Scope 6): every `SeededImage` / `SeededBuffer` declaration ORs the image dump's
+    /// `TRANSFER` read into its seed — a boot decision of the `BOYKO_IMAGE_DUMP` instrument,
+    /// `false` in every shipped run (seeds and barrier streams untouched).
+    pub(crate) obs_dump_widen: bool,
+    /// OBS (R): the `BOYKO_GRAPH_RECEIPT` capture — `Some` only after
+    /// [`arm_graph_receipt`](Self::arm_graph_receipt) (boot, armed runs only), refreshed inside
+    /// every recorded frame. `None` in every shipped run: one branch per frame.
+    pub(crate) receipt: Option<ReceiptCapture>,
+    /// OBS (D): the `BOYKO_IMAGE_DUMP` arming — `Some` only after
+    /// [`arm_image_dump`](Self::arm_image_dump) (boot, armed runs only); holds this frame's request
+    /// and what the recorder copied. `None` in every shipped run: one branch per frame.
+    pub(crate) image_dump: Option<ImageDumpArm>,
 }
 
 impl<'ctx> Renderer<'ctx> {
@@ -194,14 +206,16 @@ impl<'ctx> Renderer<'ctx> {
         // TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT, then depth UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL
         // at TOP_OF_PIPE→(EARLY|LATE)_FRAGMENT_TESTS.
         //
-        // Particles P0 raised this from `(16, 16, 64)` to `(48, 32, 192)`. The reserve is a
-        // FIRST-FRAME ALLOCATION HINT, not a bound — `Vec::with_capacity` grows on demand — so an
-        // undersized one costs a reallocation on the frame that overflows it and nothing else. It
-        // was already undersized before this rung (`declare_vb_graph` alone declares 33
-        // resources), and the particle tail adds ten more resources, five more passes and ~25 more
-        // accesses on an armed frame. The new numbers cover the widest declarator with the tail
-        // armed, with room left so the next append does not re-open the question.
-        let mut frame_graph = crate::framegraph::FrameGraph::with_capacity(48, 32, 192);
+        // OBS names the reserve: `FRAME_GRAPH_CAPACITY` (end of this file). It is a FIRST-FRAME
+        // ALLOCATION HINT, not a bound — `Vec::with_capacity` grows on demand — so an undersized
+        // one costs a reallocation on the frame that overflows it and nothing else. The parent's
+        // `(48, 32, 192)` was undersized: VB under `hwrt` with every tail armed declares 53
+        // resources (69 mip-weighted entries); the receipt's `[counts]` gates the high-water mark.
+        let mut frame_graph = crate::framegraph::FrameGraph::with_capacity(
+            FRAME_GRAPH_CAPACITY.max_res,
+            FRAME_GRAPH_CAPACITY.max_pass,
+            FRAME_GRAPH_CAPACITY.max_acc,
+        );
         let albedo = frame_graph.add_image("albedo");
         let normal = frame_graph.add_image("normal");
         let material = frame_graph.add_image("material");
@@ -253,7 +267,62 @@ impl<'ctx> Renderer<'ctx> {
             forward_pass_plan: None,
             vb_pass_plan: None,
             material_upload_probe: core::cell::Cell::new(super::MaterialUploadProbe::default()),
+            obs_dump_widen: false,
+            receipt: None,
+            image_dump: None,
         })
+    }
+
+    /// OBS (D): arms the `BOYKO_IMAGE_DUMP` instrument — the boot decisions H0 Scope 6 names:
+    /// every `SeededImage` / `SeededBuffer` declaration widens its seed with the dump's `TRANSFER`
+    /// read ([`obs_dump_widen`](Self::obs_dump_widen)), and the targets created from now on carry
+    /// `TRANSFER_SRC` on Deferred `depth`, `viewt` and `taa_hist`. Cold — called once, before the
+    /// first frame (the targets are created on the first frame; arming later would leave them
+    /// without the usage bit the copies need).
+    pub fn arm_image_dump(&mut self) {
+        debug_assert_eq!(
+            self.submission_epoch, 0,
+            "invariant: the image dump is armed before the first frame creates the targets"
+        );
+        self.obs_dump_widen = true;
+        self.image_dump = Some(ImageDumpArm {
+            request: None,
+            copies: core::cell::Cell::new([ImageDumpCopy::NONE; IMAGE_DUMP_MAX]),
+        });
+    }
+
+    /// OBS (D): this frame's dump request — the staging each named image is copied into by the
+    /// NEXT [`render_gbuffer_frame`](Self::render_gbuffer_frame), which consumes it (a frame that
+    /// does not record drops it; the instrument re-requests). A no-op unless armed.
+    ///
+    /// Storing the handles is safe; recording copies into them is not. The obligations on
+    /// `request.staging` and `request.capacity` are the image-dump clause of
+    /// [`render_gbuffer_frame`](Self::render_gbuffer_frame)'s `# Safety`, which the `unsafe` call
+    /// that consumes the request accepts.
+    pub fn request_image_dump(&mut self, request: ImageDumpRequest) {
+        if let Some(arm) = self.image_dump.as_mut() {
+            arm.request = Some(request);
+        }
+    }
+
+    /// OBS (D): what the LAST [`render_gbuffer_frame`](Self::render_gbuffer_frame) copied, per
+    /// [`ImageDumpName`] (index = `name as usize`); `None` unless armed.
+    #[inline]
+    pub fn last_image_dump(&self) -> Option<[ImageDumpCopy; IMAGE_DUMP_MAX]> {
+        self.image_dump.as_ref().map(|a| a.copies.get())
+    }
+
+    /// OBS (R): arms the `BOYKO_GRAPH_RECEIPT` capture. Cold — called once at boot by the
+    /// instrument; every later recorded frame refreshes [`last_receipt_capture`](Self::last_receipt_capture).
+    pub fn arm_graph_receipt(&mut self) {
+        self.receipt = Some(ReceiptCapture::EMPTY);
+    }
+
+    /// OBS (R): the capture of the LAST recorded frame (`None` unless the receipt was armed). Read
+    /// beside [`last_frame_graph`](Self::last_frame_graph), after the frame returned.
+    #[inline]
+    pub fn last_receipt_capture(&self) -> Option<&ReceiptCapture> {
+        self.receipt.as_ref()
     }
 
     /// Dynamic-materials DM1: what the recorder did with the LAST
@@ -263,6 +332,15 @@ impl<'ctx> Renderer<'ctx> {
     #[inline]
     pub fn material_upload_probe(&self) -> super::MaterialUploadProbe {
         self.material_upload_probe.get()
+    }
+
+    /// OBS (R): the frame graph the LAST [`render_gbuffer_frame`](Self::render_gbuffer_frame)
+    /// declared and compiled — the production declarator's plan, read by the
+    /// `BOYKO_GRAPH_RECEIPT` instrument. It holds that frame's plan from `compile` until the next
+    /// frame's `reset`.
+    #[inline]
+    pub fn last_frame_graph(&self) -> &crate::framegraph::FrameGraph {
+        &self.frame_graph
     }
 
     /// Records one `material_upload` pass that handed `regions` regions to `vkCmdCopyBuffer` —
@@ -840,6 +918,20 @@ impl<'ctx> Renderer<'ctx> {
     /// DIFFERENT texel width from the swapchain readback's, which is why the two contracts are
     /// stated separately).
     ///
+    /// **The image-dump clause (OBS).** If the image dump is armed and a request is pending (handed
+    /// by [`request_image_dump`](Self::request_image_dump) since the previous call; storing it
+    /// checks nothing), every non-null `staging[i]` of that [`ImageDumpRequest`]:
+    /// - is a live buffer created on this renderer's device, with its memory bound, host-visible,
+    ///   and created with `TRANSFER_DST` usage;
+    /// - is at least `capacity[i]` bytes large — the copy into it is bounded by `capacity[i]` and
+    ///   by nothing else;
+    /// - is referenced by no submission still pending on the device;
+    /// - is neither destroyed nor used by another submission until the fence of the submission
+    ///   carrying this frame has been waited (the next
+    ///   [`wait_frame_in_flight`](Self::wait_frame_in_flight) of this slot, or a device-idle wait).
+    ///
+    /// This call consumes the request whether or not it records.
+    ///
     /// VG R3 piece 2 step P2-6: `vb_record_probe` is gate G2's count sink
     /// ([`VbRecordProbe`](super::VbRecordProbe)) — host memory, no device resource, no contract
     /// beyond "the borrow outlives the call". It reaches only the `VisibilityBuffer` arm below;
@@ -872,6 +964,14 @@ impl<'ctx> Renderer<'ctx> {
         let _ = token;
         // Dynamic-materials DM1: a call that returns before recording reports nothing.
         self.material_upload_probe.set(super::MaterialUploadProbe::default());
+        // OBS (D): likewise the image dump's copy record (`None` unless armed).
+        if let Some(arm) = self.image_dump.as_ref() {
+            arm.copies.set([ImageDumpCopy::NONE; IMAGE_DUMP_MAX]);
+        }
+        // OBS (D): the armed-only `TRANSFER_SRC` usage on the dumped Deferred targets — read here,
+        // before the closure borrows `self`. No test sees this line: an unarmed run that passed
+        // `true` would ship the usage bit with every gate green (see `dump_transfer_src`'s doc).
+        let dump_usage = self.image_dump.is_some();
         // Thin adapter over the shared [`drive_frame`](Self::drive_frame) skeleton, with
         // `frame` (the G-buffer targets) threaded as the payload: pre-record syncs the
         // targets, the record body re-declares the whole-frame graph then records the
@@ -880,8 +980,12 @@ impl<'ctx> Renderer<'ctx> {
         // submittable command buffer into the recordable `cmd` naming the acquired
         // swapchain `image`/`view`; `scene`'s resources + the synced `targets` were
         // created on this device; any readback buffer is host-visible and ≥ the image's
-        // byte size (caller contract).
-        unsafe {
+        // byte size (caller contract); a pending image-dump request's staging meets the image-dump
+        // clause of this fn's `# Safety` (caller contract): live on this device, host-visible,
+        // `TRANSFER_DST`, at least `capacity[i]` bytes, referenced by no pending submission and
+        // kept until this frame's fence is waited. The recorders state the same clause in their
+        // own `# Safety`, and `record_image_dump_copies` bounds each copy by `capacity[i]`.
+        let result = unsafe {
             self.drive_frame(
                 surface,
                 swapchain,
@@ -911,6 +1015,7 @@ impl<'ctx> Renderer<'ctx> {
                         present_extent,
                         aa_extent,
                         TargetsProfile::from_scene(scene),
+                        dump_usage,
                     )
                 },
                 |this, frame, cmd, image, view, extent| {
@@ -935,7 +1040,7 @@ impl<'ctx> Renderer<'ctx> {
                     // `declare_deferred_graph` — used, the W1 single-predicate discipline). A
                     // `Forward`-resolved frame records `record_forward` instead of
                     // `record_gbuffer`; the two are mutually exclusive per boot (Decision 1).
-                    if scene.path_is_vb() {
+                    let recorded = if scene.path_is_vb() {
                         // Multi-paradigm render-path plan, rung R8: mirrors the `path_is_forward()`
                         // dispatch immediately below (the SAME W1 single-predicate discipline) — a
                         // `VisibilityBuffer`-resolved frame records `record_vb` instead of
@@ -1007,10 +1112,21 @@ impl<'ctx> Renderer<'ctx> {
                             #[cfg(feature = "hwrt")]
                             ctx.accel_fns_opt(),
                         )
+                    };
+                    // OBS (R): refresh the receipt capture from THIS frame's scene and sink fills
+                    // (`None` on every shipped run — one branch, the capture itself is cold).
+                    if this.receipt.is_some() {
+                        this.capture_receipt(scene, targets);
                     }
+                    recorded
                 },
             )
+        };
+        // OBS (D): a request is for ONE frame — consumed by this call whether or not it recorded.
+        if let Some(arm) = self.image_dump.as_mut() {
+            arm.request = None;
         }
+        result
     }
 
     /// Waits the device idle, recreates the swapchain to `width`×`height`, and
@@ -1190,4 +1306,366 @@ unsafe fn destroy_partial_frames(
             }
         }
     }
+}
+
+/// The named frame-graph reserve (OBS, AD-12): the `(max_res, max_pass, max_acc)`
+/// [`FrameGraph::with_capacity`](crate::framegraph::FrameGraph::with_capacity) is called with at
+/// boot, replacing the literal `(48, 32, 192)`.
+///
+/// A FIRST-FRAME ALLOCATION HINT, not a bound: a frame past it regrows an arena once (cold) and is
+/// never incorrect. `max_res` covers VB under `hwrt` with every tail armed (53 resources, 69
+/// mip-weighted `(ResId, mip)` entries with the 17-level HZB pyramid) with headroom; `max_pass`
+/// and `max_acc` double the parent's literal. The cost is a one-time boot reservation of roughly
+/// 50 KB across the arenas (the access-sized ones dominate: five access columns plus the image
+/// and buffer barrier arenas at `max_acc`). The `BOYKO_GRAPH_RECEIPT` instrument prints each
+/// declarator's high-water marks beside these numbers; if a receipt shows a mark past one of
+/// them, raise the constant to that mark plus headroom in the same commit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FrameGraphCapacity {
+    /// Resources (the per-resource arenas; the sync arenas are mip-weighted past it).
+    pub max_res: usize,
+    /// Passes.
+    pub max_pass: usize,
+    /// Accesses, summed over every pass of the frame (also sizes the barrier arenas).
+    pub max_acc: usize,
+}
+
+/// The reserve every [`Renderer`] boots its frame graph with (see [`FrameGraphCapacity`]).
+pub const FRAME_GRAPH_CAPACITY: FrameGraphCapacity =
+    FrameGraphCapacity { max_res: 96, max_pass: 64, max_acc: 384 };
+
+// --- OBS (R): the `BOYKO_GRAPH_RECEIPT` capture ---------------------------------------------
+
+/// The `[config]` keys of a graph receipt, in the order they are written: the values of the
+/// single-predicate functions the declarator and the recorder both read (`GBufferScene::path_*`),
+/// then the per-frame arming facts the conditional tails key on. Each later rung APPENDS its keys
+/// (a reordering would silently re-label a parsed column).
+///
+/// SkyLight presence is recorded as the presence of the two sky-background pipelines
+/// (`forward_sky`, `vb_sky`): the scene carries no SkyLight bit of its own at HEAD.
+pub const RECEIPT_CONFIG_KEYS: [&str; RECEIPT_CONFIG_LEN] = [
+    "path",
+    "legs",
+    "mesh_leg",
+    "sdf_leg",
+    "path_is_forward",
+    "path_is_forward_plus",
+    "path_is_vb",
+    "path_has_raster",
+    "path_has_marcher",
+    "path_has_mesh_depth_neutral_clear",
+    "path_needs_depth_prepass",
+    "path_has_sdf_forward",
+    "path_sdf_forward_writes_viewt",
+    "path_vb_split",
+    "path_vb_fused",
+    "path_vb_ssao",
+    "path_vb_ddgi",
+    "path_vb_hwrt_shadow",
+    "path_vb_occlusion_split",
+    "path_has_particles",
+    "material_upload",
+    "interp",
+    "csm",
+    "atlas_punctual",
+    "ssao",
+    "ddgi",
+    "taa",
+    "fxaa",
+    "smaa",
+    "ssaa",
+    "rcas",
+    "hzb",
+    "tlas",
+    "shadow_vis",
+    "forward_sky",
+    "vb_sky",
+    "froxel_light_cull",
+    "light_cull",
+    "cluster_cull_hier",
+    "lighting_flags",
+    "hwrt",
+];
+
+/// How many `[config]` entries a receipt carries (the length of [`RECEIPT_CONFIG_KEYS`]).
+pub const RECEIPT_CONFIG_LEN: usize = 41;
+
+/// One frame's `[config]` values, index for index with [`RECEIPT_CONFIG_KEYS`] (`bool`s as 0/1).
+/// POD: a burst copies one per presented frame.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ReceiptConfig {
+    /// The values, in key order.
+    pub values: [u32; RECEIPT_CONFIG_LEN],
+}
+
+impl ReceiptConfig {
+    /// The all-zero table (no frame captured yet).
+    pub const EMPTY: Self = Self { values: [0; RECEIPT_CONFIG_LEN] };
+
+    /// The value of `key`, or `None` for a key this build does not record.
+    pub fn get(&self, key: &str) -> Option<u32> {
+        RECEIPT_CONFIG_KEYS.iter().position(|k| *k == key).map(|i| self.values[i])
+    }
+
+    /// `(key, value)` pairs in key order.
+    pub fn iter(&self) -> impl Iterator<Item = (&'static str, u32)> + '_ {
+        RECEIPT_CONFIG_KEYS.iter().copied().zip(self.values.iter().copied())
+    }
+
+    /// Reads one frame's scene through the same predicates its declarator and recorder use.
+    pub(crate) fn capture(scene: &GBufferScene<'_>) -> Self {
+        let rp = &scene.resolved_render_path;
+        #[cfg(feature = "hwrt")]
+        let (vb_hwrt_shadow, tlas, shadow_vis) =
+            (scene.path_vb_hwrt_shadow(), scene.tlas.is_some(), scene.shadow.is_some());
+        #[cfg(not(feature = "hwrt"))]
+        let (vb_hwrt_shadow, tlas, shadow_vis) = (false, false, false);
+        let values = [
+            rp.path,
+            rp.legs,
+            u32::from(rp.mesh_leg),
+            u32::from(rp.sdf_leg),
+            u32::from(scene.path_is_forward()),
+            u32::from(scene.path_is_forward_plus()),
+            u32::from(scene.path_is_vb()),
+            u32::from(scene.path_has_raster()),
+            u32::from(scene.path_has_marcher()),
+            u32::from(scene.path_has_mesh_depth_neutral_clear()),
+            u32::from(scene.path_needs_depth_prepass()),
+            u32::from(scene.path_has_sdf_forward()),
+            u32::from(scene.path_sdf_forward_writes_viewt()),
+            u32::from(scene.path_vb_split()),
+            u32::from(scene.path_vb_fused()),
+            u32::from(scene.path_vb_ssao()),
+            u32::from(scene.path_vb_ddgi()),
+            u32::from(vb_hwrt_shadow),
+            u32::from(scene.path_vb_occlusion_split()),
+            u32::from(scene.path_has_particles()),
+            u32::from(scene.material_upload.is_some()),
+            u32::from(scene.interp.is_some()),
+            u32::from(scene.csm.is_some()),
+            u32::from(scene.atlas_punctual.is_some()),
+            u32::from(scene.ssao.is_some()),
+            u32::from(scene.ddgi_update.is_some()),
+            u32::from(scene.taa.is_some()),
+            u32::from(scene.aa.is_some()),
+            u32::from(scene.smaa.is_some()),
+            u32::from(scene.ssaa.is_some()),
+            u32::from(scene.rcas.is_some()),
+            u32::from(scene.hzb.is_some()),
+            u32::from(tlas),
+            u32::from(shadow_vis),
+            u32::from(scene.forward_sky_pipeline.is_some()),
+            u32::from(scene.vb_sky_pipeline.is_some()),
+            u32::from(rp.froxel_light_cull),
+            u32::from(scene.cluster_cull.is_some()),
+            u32::from(scene.cluster_cull_hier.is_some()),
+            scene.lighting_flags,
+            u32::from(cfg!(feature = "hwrt")),
+        ];
+        Self { values }
+    }
+}
+
+/// The most sink slots of one kind a receipt records — every declarator's image and buffer array
+/// fits (asserted where the capture copies them).
+pub const RECEIPT_MAX_SINK_SLOTS: usize = 48;
+
+/// One frame's receipt capture, refreshed inside every recorded frame while the
+/// `BOYKO_GRAPH_RECEIPT` instrument is armed ([`Renderer::arm_graph_receipt`]).
+///
+/// It holds what the instrument cannot read from outside this crate: the `[config]` predicates
+/// (`pub(crate)` on `GBufferScene`) and the sink fills' name / `Fif` columns. Inline POD — no
+/// heap; a run without the instrument never builds one.
+#[derive(Clone, Copy, Debug)]
+pub struct ReceiptCapture {
+    /// The last recorded frame's `[config]`.
+    pub config: ReceiptConfig,
+    /// The declarator that frame dispatched to (`seed_class::DECL_*`).
+    pub declarator: u8,
+    /// Frames captured since arming (a stale capture is visible as an unchanged count).
+    pub frames: u64,
+    /// `true` iff the sink columns below were filled: the slot metadata exists only in debug
+    /// builds (release fills compile to handle-only arrays), so a release receipt has NO sink
+    /// rows and must say so rather than read as an empty, clean table.
+    pub sink_rows: bool,
+    /// The declarator's image-array length: buffer slot `b` resolves `ResId(image_slots + b)`.
+    pub image_slots: u16,
+    /// The buffer-array length.
+    pub buffer_slots: u16,
+    /// The image slots' metadata (`None` past `image_slots`, or for a slot the fill left empty).
+    pub image_sinks: [Option<super::seed_class::SinkMeta>; RECEIPT_MAX_SINK_SLOTS],
+    /// The buffer slots' metadata.
+    pub buffer_sinks: [Option<super::seed_class::SinkMeta>; RECEIPT_MAX_SINK_SLOTS],
+}
+
+impl ReceiptCapture {
+    /// Nothing captured yet.
+    pub const EMPTY: Self = Self {
+        config: ReceiptConfig::EMPTY,
+        declarator: 0,
+        frames: 0,
+        sink_rows: false,
+        image_slots: 0,
+        buffer_slots: 0,
+        image_sinks: [None; RECEIPT_MAX_SINK_SLOTS],
+        buffer_sinks: [None; RECEIPT_MAX_SINK_SLOTS],
+    };
+
+    /// Copies one declarator's sink metadata (debug builds only — the columns exist only there).
+    #[cfg(debug_assertions)]
+    pub(crate) fn set_sinks(
+        &mut self,
+        declarator: u8,
+        images: &[Option<super::seed_class::SinkMeta>],
+        buffers: &[Option<super::seed_class::SinkMeta>],
+    ) {
+        assert!(
+            images.len() <= RECEIPT_MAX_SINK_SLOTS && buffers.len() <= RECEIPT_MAX_SINK_SLOTS,
+            "invariant: RECEIPT_MAX_SINK_SLOTS covers every declarator's sink arrays"
+        );
+        self.declarator = declarator;
+        self.sink_rows = true;
+        self.image_slots = images.len() as u16;
+        self.buffer_slots = buffers.len() as u16;
+        self.image_sinks = [None; RECEIPT_MAX_SINK_SLOTS];
+        self.buffer_sinks = [None; RECEIPT_MAX_SINK_SLOTS];
+        self.image_sinks[..images.len()].copy_from_slice(images);
+        self.buffer_sinks[..buffers.len()].copy_from_slice(buffers);
+    }
+}
+
+// --- OBS (D): the `BOYKO_IMAGE_DUMP` instrument ---------------------------------------------
+
+/// A frame-graph image the `BOYKO_IMAGE_DUMP` instrument can read back (H0 Scope 6). The env
+/// word is the image's literal graph name; a declarator copies only the names it declares.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum ImageDumpName {
+    /// Deferred `depth` (D32, the Euclidean `t / 64` encode).
+    DeferredDepth = 0,
+    /// `viewt` (Deferred and VB; R32_SFLOAT).
+    Viewt = 1,
+    /// `lit` (every path).
+    Lit = 2,
+    /// `taa_hist` — the `[fi]` write slot (Deferred and VB, under TAA).
+    TaaHist = 3,
+    /// Forward / ForwardPlus `forward_depth` (D32 reverse-Z).
+    ForwardDepth = 4,
+    /// VB `vb_depth` (D32 reverse-Z).
+    VbDepth = 5,
+}
+
+/// How many [`ImageDumpName`]s exist.
+pub const IMAGE_DUMP_MAX: usize = 6;
+
+impl ImageDumpName {
+    /// Every name, index for index with `name as usize`.
+    pub const ALL: [Self; IMAGE_DUMP_MAX] =
+        [Self::DeferredDepth, Self::Viewt, Self::Lit, Self::TaaHist, Self::ForwardDepth, Self::VbDepth];
+
+    /// The literal graph name — the env word and the dump file's stem.
+    pub const fn graph_name(self) -> &'static str {
+        match self {
+            Self::DeferredDepth => "depth",
+            Self::Viewt => "viewt",
+            Self::Lit => "lit",
+            Self::TaaHist => "taa_hist",
+            Self::ForwardDepth => "forward_depth",
+            Self::VbDepth => "vb_depth",
+        }
+    }
+
+    /// The name an env word spells, if any.
+    pub fn parse(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|n| n.graph_name() == word)
+    }
+
+    /// `true` for the depth attachments (copied through the DEPTH aspect).
+    pub const fn is_depth(self) -> bool {
+        matches!(self, Self::DeferredDepth | Self::ForwardDepth | Self::VbDepth)
+    }
+
+    /// The bytes per texel the instrument sizes this name's staging for: 8 for `taa_hist`
+    /// (RGBA16F), 4 for every other name. The recorder re-bounds every copy against the texel
+    /// size of the image's actual format, so a format change can only skip a copy, never overrun.
+    pub const fn staging_texel_bytes(self) -> u64 {
+        match self {
+            Self::TaaHist => 8,
+            _ => 4,
+        }
+    }
+}
+
+/// The texel size of a `VkFormat` the image dump can copy, or `None` for a format it does not
+/// decode (the copy is then skipped and reported as not copied).
+pub const fn image_dump_texel_bytes(vk_format: i32) -> Option<u32> {
+    match vk_format {
+        VK_FORMAT_R8G8B8A8_UNORM
+        | VK_FORMAT_R8G8B8A8_SRGB
+        | VK_FORMAT_B8G8R8A8_UNORM
+        | VK_FORMAT_B8G8R8A8_SRGB
+        | VK_FORMAT_R32_SFLOAT
+        | VK_FORMAT_D32_SFLOAT => Some(4),
+        VK_FORMAT_R16G16B16A16_SFLOAT => Some(8),
+        VK_FORMAT_R32G32B32A32_SFLOAT => Some(16),
+        _ => None,
+    }
+}
+
+/// One frame's dump request: per [`ImageDumpName`] (index = `name as usize`), the staging buffer
+/// the copy writes and its capacity (`VkBuffer::NULL` = not requested). What each non-null handle
+/// must satisfy is the image-dump clause of
+/// [`Renderer::render_gbuffer_frame`](Renderer::render_gbuffer_frame)'s `# Safety`.
+#[derive(Clone, Copy)]
+pub struct ImageDumpRequest {
+    /// The destination per name.
+    pub staging: [VkBuffer; IMAGE_DUMP_MAX],
+    /// Each destination's size in bytes. It must not exceed the buffer's real size: it is the
+    /// only bound on the copy.
+    pub capacity: [u64; IMAGE_DUMP_MAX],
+}
+
+impl ImageDumpRequest {
+    /// `true` iff `name` was requested.
+    #[inline]
+    pub fn wants(&self, name: ImageDumpName) -> bool {
+        !self.staging[name as usize].is_null()
+    }
+}
+
+/// What the recorder copied for one name on the last frame — the dump file's header fields.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ImageDumpCopy {
+    /// `true` iff the copy was recorded (the declarator declared the name and the staging held it).
+    pub copied: bool,
+    /// The image's `VkFormat`.
+    pub vk_format: i32,
+    /// The copied extent (mip 0).
+    pub width: u32,
+    /// See [`Self::width`].
+    pub height: u32,
+    /// The mip copied.
+    pub mip: u32,
+    /// The array layers copied.
+    pub layers: u32,
+    /// The engine frame index the recording frame carried.
+    pub frame_index: u32,
+    /// Bytes written into the staging (tightly packed rows).
+    pub bytes: u64,
+}
+
+impl ImageDumpCopy {
+    /// Nothing copied.
+    pub const NONE: Self =
+        Self { copied: false, vk_format: 0, width: 0, height: 0, mip: 0, layers: 0, frame_index: 0, bytes: 0 };
+}
+
+/// The armed instrument's per-frame state on the [`Renderer`].
+pub(crate) struct ImageDumpArm {
+    /// This frame's request (consumed by `render_gbuffer_frame`).
+    pub(crate) request: Option<ImageDumpRequest>,
+    /// What the recorder copied this frame — a `Cell` because the recorders borrow the renderer
+    /// shared (one thread records), the `material_upload_probe` precedent.
+    pub(crate) copies: core::cell::Cell<[ImageDumpCopy; IMAGE_DUMP_MAX]>,
 }
