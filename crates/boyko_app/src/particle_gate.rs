@@ -1,10 +1,11 @@
 //! The host half of the particle EFFECT-TABLE generation protocol
 //! (`docs/PARTICLES-PLAN.md` Rev 4, §Host → GPU).
 //!
-//! Writer side ([`boyko_render`]): `particle_bake_effects` bumps
-//! `ParticleEffectScratch::rows_gen()` exactly once per ACTUAL rebuild — an asset edit, a new
-//! effect, or a clock-timestep change (the bake is a function of BOTH inputs, since `damping` and
-//! the rotation multiplier are per-substep constants). A static frame never bumps it. Host side
+//! Writer side ([`boyko_render`]): `particle_pack_effects` bumps
+//! `ParticleEffectScratch::rows_gen()` exactly once per ACTUAL rebuild, keyed on
+//! `Assets<ParticleEffect>`'s edited set and the clock's timestep — an asset edit, an effect added
+//! or removed, or a clock-timestep change (the bake is a function of BOTH inputs, since `damping`
+//! and the rotation multiplier are per-substep constants). A static frame never bumps it. Host side
 //! (here): a per-in-flight-slot record of the last generation whose bytes were written into that
 //! slot's effect staging decides, deterministically, whether the fenced slot must be rewritten —
 //! never a hash, never a byte-compare.
