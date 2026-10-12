@@ -135,6 +135,9 @@ pub mod plugins;
 /// Profiling rung 7: the measurement artifact that replaces the stdout channel.
 pub mod profiling;
 pub mod prelude;
+/// Render-wave plan H0 Scope 8: the test-only force-key set (`TestForce`) and its pure parser; the
+/// `BOYKO_TEST_FORCE` decode lives in the fixtures that need it.
+pub mod test_force;
 
 // Profiling rung 13: this crate declares zones of its own (`__telemetry_reduce` and
 // `__telemetry_write`), so it must name its partition — the same one line every engine crate that
