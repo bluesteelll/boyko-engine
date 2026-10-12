@@ -6139,7 +6139,7 @@ again the next time somebody improves it.
 scoped.** Step P1-5 (declare the HZB build passes) cannot be written against the framegraph as it
 stands, and the framegraph says so itself.
 
-**The wall.** `framegraph/graph.rs:360-445` carries `INVARIANT HZB-SUBRESOURCE-UNIFORM`: every
+**The wall.** `framegraph/graph.rs:368-453` carries `INVARIANT HZB-SUBRESOURCE-UNIFORM`: every
 access to one `ResId` must declare the same `(base_mip, mip_count, base_layer, layer_count)`,
 because `FrameGraph::state` is a `Vec<ResSync>` indexed by `ResId` alone and `transition` never
 receives the span. The HZB build needs, on ONE image in ONE pass, a read of mip `6p-1` and a write

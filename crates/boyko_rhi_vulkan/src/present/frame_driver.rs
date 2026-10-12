@@ -194,14 +194,16 @@ impl<'ctx> Renderer<'ctx> {
         // TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT, then depth UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL
         // at TOP_OF_PIPE→(EARLY|LATE)_FRAGMENT_TESTS.
         //
-        // Particles P0 raised this from `(16, 16, 64)` to `(48, 32, 192)`. The reserve is a
-        // FIRST-FRAME ALLOCATION HINT, not a bound — `Vec::with_capacity` grows on demand — so an
-        // undersized one costs a reallocation on the frame that overflows it and nothing else. It
-        // was already undersized before this rung (`declare_vb_graph` alone declares 33
-        // resources), and the particle tail adds ten more resources, five more passes and ~25 more
-        // accesses on an armed frame. The new numbers cover the widest declarator with the tail
-        // armed, with room left so the next append does not re-open the question.
-        let mut frame_graph = crate::framegraph::FrameGraph::with_capacity(48, 32, 192);
+        // OBS names the reserve: `FRAME_GRAPH_CAPACITY` (end of this file). It is a FIRST-FRAME
+        // ALLOCATION HINT, not a bound — `Vec::with_capacity` grows on demand — so an undersized
+        // one costs a reallocation on the frame that overflows it and nothing else. The parent's
+        // `(48, 32, 192)` was undersized: VB under `hwrt` with every tail armed declares 53
+        // resources (69 mip-weighted entries); the receipt's `[counts]` gates the high-water mark.
+        let mut frame_graph = crate::framegraph::FrameGraph::with_capacity(
+            FRAME_GRAPH_CAPACITY.max_res,
+            FRAME_GRAPH_CAPACITY.max_pass,
+            FRAME_GRAPH_CAPACITY.max_acc,
+        );
         let albedo = frame_graph.add_image("albedo");
         let normal = frame_graph.add_image("normal");
         let material = frame_graph.add_image("material");
@@ -263,6 +265,15 @@ impl<'ctx> Renderer<'ctx> {
     #[inline]
     pub fn material_upload_probe(&self) -> super::MaterialUploadProbe {
         self.material_upload_probe.get()
+    }
+
+    /// OBS (R): the frame graph the LAST [`render_gbuffer_frame`](Self::render_gbuffer_frame)
+    /// declared and compiled — the production declarator's plan, read by the
+    /// `BOYKO_GRAPH_RECEIPT` instrument. It holds that frame's plan from `compile` until the next
+    /// frame's `reset`.
+    #[inline]
+    pub fn last_frame_graph(&self) -> &crate::framegraph::FrameGraph {
+        &self.frame_graph
     }
 
     /// Records one `material_upload` pass that handed `regions` regions to `vkCmdCopyBuffer` —
@@ -1191,3 +1202,29 @@ unsafe fn destroy_partial_frames(
         }
     }
 }
+
+/// The named frame-graph reserve (OBS, AD-12): the `(max_res, max_pass, max_acc)`
+/// [`FrameGraph::with_capacity`](crate::framegraph::FrameGraph::with_capacity) is called with at
+/// boot, replacing the literal `(48, 32, 192)`.
+///
+/// A FIRST-FRAME ALLOCATION HINT, not a bound: a frame past it regrows an arena once (cold) and is
+/// never incorrect. `max_res` covers VB under `hwrt` with every tail armed (53 resources, 69
+/// mip-weighted `(ResId, mip)` entries with the 17-level HZB pyramid) with headroom; `max_pass`
+/// and `max_acc` double the parent's literal. The cost is a one-time boot reservation of roughly
+/// 50 KB across the arenas (the access-sized ones dominate: five access columns plus the image
+/// and buffer barrier arenas at `max_acc`). The `BOYKO_GRAPH_RECEIPT` instrument prints each
+/// declarator's high-water marks beside these numbers; if a receipt shows a mark past one of
+/// them, raise the constant to that mark plus headroom in the same commit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FrameGraphCapacity {
+    /// Resources (the per-resource arenas; the sync arenas are mip-weighted past it).
+    pub max_res: usize,
+    /// Passes.
+    pub max_pass: usize,
+    /// Accesses, summed over every pass of the frame (also sizes the barrier arenas).
+    pub max_acc: usize,
+}
+
+/// The reserve every [`Renderer`] boots its frame graph with (see [`FrameGraphCapacity`]).
+pub const FRAME_GRAPH_CAPACITY: FrameGraphCapacity =
+    FrameGraphCapacity { max_res: 96, max_pass: 64, max_acc: 384 };
