@@ -35,7 +35,7 @@ The definitions of the screens are design rev 2 §10.1-§10.3 (`01-DESIGN.md` Pa
 | pre-registrations, pinned before the runs | `screens/s-sl1/PREREG.md` `b2adfe478e9948481dcefa9387ae0c8ea9647d8a3e5c64ad16bfcb417a30627b`; `screens/s-sl3/PREREG.md` (S-SL2 + S-SL3, with amendment A1) `e8d20b9f69bafca1ef1a12eb5628b33710dcc0af69cb315e562510435c97d085` (first pin `8a811b6b…`) |
 | the analysis script | `sl_screens.py` `86c4808b6ce2e4fbebf207268a740f74067d1e82811ec127dd4ff459f24322e0`. Every run's `job.json` carries `prereg_sha256`; the driver refuses a changed PREREG or a changed analysis script |
 
-Paths are relative to `D:/tmp/phys-orch/sl/screens/` (and `D:/tmp/phys-orch/sl/` for `bin/` and `tc/`).
+Paths are relative to `D:/tmp/phys-orch/sl/screens/`: the four perturbed arm exes (`*_pert.exe`) are in `screens/bin/`; the S-SL3 lane exes are in `D:/tmp/phys-orch/sl/bin/` and `D:/tmp/phys-orch/sl/tc/bin/`.
 
 What the reader needs to know:
 1. **L+b is built at `493be29a`, not at the cut's `3bbd9334` (`runner_C3`).**
@@ -272,8 +272,10 @@ The S-SL3 pose hashes, W1 (each equal at W8 and in the `--sanity` run):
   runs.
 - **S-SL3, `frozen_v_max`:** L's value on S-KICK (21.43) is the mutation "no write test", and it reads
   non-zero. So the L+b bar cannot be met by an engine without SL-1b.
-- **S-SL3, (ii-dyn):** its prefix cannot go red by construction, because the arms are bit-identical before
-  the first event. It is the structural bar the W1 addendum makes it. The reported part beyond `s*` is
+- **S-SL3, (ii-dyn):** its prefix cannot go red by construction, because every untimed CSV column of the arms is
+  identical before the first event (the first divergence is at step 201 on S-KICK). The bodies' bits are not: P keeps
+  the stored velocity in the frozen rows from the settle at 146/147, which L and L+b zero, so the full pose differs
+  while the masked posrot is equal. It is the structural bar the W1 addendum makes it. The reported part beyond `s*` is
   where the comparison has content.
 
 ## 6. Findings (no scope growth; each is a PC line or a note in `04-LANE-RECORD.md`)

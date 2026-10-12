@@ -276,6 +276,10 @@ window under the pre-registered rule.
 > - **Launch:** per the window's own `PREP.md` (`Start-Process`, `--cutoff`, no agent alive, the Claude app minimized or closed, ruling 37 R10).
 
 **Resolved for the record** (facts read by the lane; nothing here changes the cut's rows or rule):
+- **The prep command above needs its directory first** (record review W1): `tar -x -C` does not create it, so GNU tar
+  exits 2 ("Cannot open: No such file or directory") as quoted. Run `mkdir -p D:/wt/_scratch/sl-win/<sha>` before
+  `git -C D:/wt/sl archive <sha> | tar -x -C D:/wt/_scratch/sl-win/<sha>`. If `D:/wt/sl` no longer exists when the
+  window is prepared, `git -C D:/claude/BoykoEngine archive <sha>` reads the same commit.
 - `slP` = C1 `f1f733f6`. `slT` = the merged lane tip, i.e. the commit the lane merges as. Its engine and
   runner code equals `493be29a`'s (and `3bbd9334`'s): every later commit is docs or tests, unless the
   merge's trunk sync brings a physics change.
