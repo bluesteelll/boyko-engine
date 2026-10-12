@@ -152,6 +152,9 @@ pub(crate) struct GbufferPassPlan {
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame
     /// (nothing declared at all — see [`ParticlePassPlan`]).
     pub(crate) particle: ParticlePassPlan,
+    /// OBS (D): the `image_dump` pass — declared LAST, on a `BOYKO_IMAGE_DUMP` request frame only
+    /// (`None` on every other frame of every run), with the names it copies.
+    pub(crate) image_dump: Option<ImageDumpPlan>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -717,6 +720,9 @@ pub(crate) struct ForwardPassPlan {
     pub(crate) present_sample: crate::framegraph::PassId,
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame.
     pub(crate) particle: ParticlePassPlan,
+    /// OBS (D): the `image_dump` pass — declared LAST, on a `BOYKO_IMAGE_DUMP` request frame only
+    /// (`None` on every other frame of every run), with the names it copies.
+    pub(crate) image_dump: Option<ImageDumpPlan>,
 }
 
 /// The number of IMAGE resources the whole-frame graph declares (Steps 1d/1e), in the
@@ -861,39 +867,139 @@ const VB_MATERIAL_READ_STAGES: u32 = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 /// validation leg printed zero messages). So the pairing is checked structurally instead: every
 /// read goes through [`Self::read`], which debug-asserts the reader's stage lies inside the seed.
 /// Every debug run exercises it, because frame 0 is an upload frame on every path.
+///
+/// OBS (F7): the table is declared through the production `SeededBuffer` wrapper
+/// (`SeedContent::CrossFrame`) — barrier-identical to the `add_buffer_seeded` it replaces — so the
+/// trailing-scope check covers it on every debug frame 0 and the image dump's seed widening has a
+/// production carrier. The per-read seed assert is the wrapper's CrossFrame `read`.
 #[derive(Clone, Copy)]
-struct MaterialTableRes {
-    id: crate::framegraph::ResId,
-    seed_stages: u32,
-}
+struct MaterialTableRes(crate::framegraph::SeededBuffer);
 
 impl MaterialTableRes {
     /// Declares `material_table` (the last buffer, on an upload frame only) seeded as read at
-    /// `seed_stages` by the previous frame.
-    fn declare(g: &mut crate::framegraph::FrameGraph, seed_stages: u32) -> Self {
-        let id = g.add_buffer_seeded(
+    /// `seed_stages` by the previous frame; `dump_widen` ORs the image dump's `TRANSFER` into the
+    /// seed (armed at boot only when the instrument is).
+    fn declare(g: &mut crate::framegraph::FrameGraph, seed_stages: u32, dump_widen: bool) -> Self {
+        Self(crate::framegraph::SeededBuffer::declare(
+            g,
             "material_table",
             crate::framegraph::ResSync::seeded_readers(seed_stages, VK_ACCESS_SHADER_READ_BIT),
-        );
-        Self { id, seed_stages }
+            crate::framegraph::SeedContent::CrossFrame,
+            dump_widen,
+        ))
     }
 
     /// Declares the `staging → table` copy's write (the `material_upload` pass).
     fn copy_write(self, g: &mut crate::framegraph::FrameGraph) {
-        g.buffer_access(self.id, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        self.0.write(g, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
     }
 
-    /// Declares a shader read of the table at `stage`, which the seed must cover.
+    /// Declares a shader read of the table at `stage`, which the seed must cover (debug-asserted
+    /// by the wrapper's CrossFrame `read`).
     fn read(self, g: &mut crate::framegraph::FrameGraph, stage: u32) {
-        debug_assert_eq!(
-            stage & !self.seed_stages,
-            0,
-            "invariant (DM1): a material_table reader at stage {stage:#x} lies outside the table's \
-             cross-frame seed {:#x} — next frame's copy would not wait for this read",
-            self.seed_stages
-        );
-        g.buffer_access(self.id, stage, VK_ACCESS_SHADER_READ_BIT);
+        self.0.read(g, stage, VK_ACCESS_SHADER_READ_BIT);
     }
+}
+
+/// OBS (D, H0 Scope 6): the declared `image_dump` pass of a request frame — the names it copies
+/// (bit `name as u8`), the layout each is copied at, and the optional restore pass that returns a
+/// non-`GENERAL` seeded image to its frame-boundary layout.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ImageDumpPlan {
+    /// The copy pass (`image_dump`), declared LAST.
+    pub(crate) pass: crate::framegraph::PassId,
+    /// The restore pass (`image_dump_restore`), declared after it iff a copied image is seeded at
+    /// a layout other than `GENERAL` — no production instance at OBS (PX1a's `display` is the
+    /// first); the host tests carry the shape.
+    pub(crate) restore: Option<crate::framegraph::PassId>,
+    /// The names copied, as bits.
+    pub(crate) names: u8,
+    /// Per name, the layout the copy reads the image in.
+    pub(crate) layouts: [i32; super::frame_driver::IMAGE_DUMP_MAX],
+}
+
+impl ImageDumpPlan {
+    /// `true` iff `name` is copied on this frame.
+    #[inline]
+    pub(crate) fn has(self, name: super::frame_driver::ImageDumpName) -> bool {
+        self.names & (1 << name as u8) != 0
+    }
+}
+
+/// `true` iff some pass declared so far this frame touches `res` — the dump reads only what the
+/// frame produced or carried in (a bare image nothing wrote would take `compile`'s unwritten-read
+/// guard, which is right: there is nothing to dump).
+fn touched_this_frame(g: &crate::framegraph::FrameGraph, res: crate::framegraph::ResId) -> bool {
+    (0..g.pass_count()).any(|p| {
+        g.pass_accesses(crate::framegraph::PassId(p as u16)).any(|a| a.res == res)
+    })
+}
+
+/// OBS (D, H0 Scope 6): declares the `image_dump` pass LAST on a request frame — one `TRANSFER`
+/// read per requested name this declarator has and touched this frame (`None` when none of them
+/// qualifies). Called only on a request frame: every other frame of every run skips the call.
+///
+/// - A seeded image whose frame-boundary layout is `GENERAL` (`taa_hist`) is copied AT `GENERAL`,
+///   a legal copy source, so its end state is untouched and the seeded-layout invariant holds.
+/// - Any other seeded image is copied at `TRANSFER_SRC_OPTIMAL` and `image_dump_restore` declares
+///   a READ back at its boundary layout, at a stage inside its seed (verify OQ2: a restore
+///   declared as a write would end a reader-seeded image's frame on a write).
+/// - A per-FIF ring slot (unseeded) needs no restore: its next first touch discards it.
+#[cold]
+#[inline(never)]
+fn declare_image_dump(
+    g: &mut crate::framegraph::FrameGraph,
+    request: &super::frame_driver::ImageDumpRequest,
+    sources: &[(super::frame_driver::ImageDumpName, crate::framegraph::ResId)],
+) -> Option<ImageDumpPlan> {
+    use crate::framegraph::{seed_stages, SubRange};
+    let mut names = 0u8;
+    for &(name, res) in sources {
+        if request.wants(name) && touched_this_frame(g, res) {
+            names |= 1 << name as u8;
+        }
+    }
+    if names == 0 {
+        return None;
+    }
+    let sub_of = |name: super::frame_driver::ImageDumpName| {
+        if name.is_depth() { SubRange::DEPTH } else { SubRange::COLOR }
+    };
+    let mut layouts = [VK_IMAGE_LAYOUT_UNDEFINED; super::frame_driver::IMAGE_DUMP_MAX];
+    let mut needs_restore = false;
+    let pass = g.add_pass("image_dump");
+    for &(name, res) in sources {
+        if names & (1 << name as u8) == 0 {
+            continue;
+        }
+        let seed = g.res_seed(res);
+        let layout = if g.res_seeded(res) && seed.layout == VK_IMAGE_LAYOUT_GENERAL {
+            VK_IMAGE_LAYOUT_GENERAL
+        } else {
+            needs_restore |= g.res_seeded(res) && seed.layout != VK_IMAGE_LAYOUT_UNDEFINED;
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+        };
+        layouts[name as usize] = layout;
+        g.image_access(res, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, layout, sub_of(name));
+    }
+    let restore = needs_restore.then(|| {
+        let p = g.add_pass("image_dump_restore");
+        for &(name, res) in sources {
+            let seed = g.res_seed(res);
+            if names & (1 << name as u8) != 0
+                && layouts[name as usize] == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                && g.res_seeded(res)
+                && seed.layout != VK_IMAGE_LAYOUT_UNDEFINED
+            {
+                let stages = seed_stages(seed);
+                // The lowest stage the seed names (a stage INSIDE it); FRAGMENT when it names none.
+                let stage = if stages == 0 { VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT } else { stages.isolate_lowest_one() };
+                g.image_access(res, stage, VK_ACCESS_SHADER_READ_BIT, seed.layout, sub_of(name));
+            }
+        }
+        p
+    });
+    Some(ImageDumpPlan { pass, restore, names, layouts })
 }
 
 // The recorders hand a `&[boyko_rhi::BufferCopy]` straight to `vkCmdCopyBuffer` as
@@ -940,21 +1046,376 @@ pub(crate) const GBUFFER_SINK_BUFFER_COUNT: usize =
 #[inline]
 fn particle_sink_buffers(
     act: &super::scene_types::ParticleActivation<'_>,
-) -> [VkBuffer; PARTICLE_BUFFER_COUNT] {
+) -> [super::seed_class::Slot<VkBuffer>; PARTICLE_BUFFER_COUNT] {
+    use super::seed_class::slot;
+    // Every particle buffer is ONE instance both frames in flight share (the activation swaps the
+    // alive pair's roles per frame, not per slot), so every slot is `Single`.
     [
-        act.counters.buffer,
-        act.dispatch_args.buffer,
-        act.draw_args.buffer,
-        act.dead.buffer,
-        act.alive_read.buffer,
-        act.alive_write.buffer,
-        act.particle_records.buffer,
-        act.render_records.buffer,
-        act.emit_req_device.buffer,
-        act.effects_device.buffer,
-        act.sorted_render_records.map_or(VkBuffer::NULL, |b| b.buffer),
-        act.sort_bins.map_or(VkBuffer::NULL, |b| b.buffer),
+        slot!("p_counters", Single, act.counters.buffer),
+        slot!("p_dispatch_args", Single, act.dispatch_args.buffer),
+        slot!("p_draw_args", Single, act.draw_args.buffer),
+        slot!("p_dead", Single, act.dead.buffer),
+        slot!("p_alive_read", Single, act.alive_read.buffer),
+        slot!("p_alive_write", Single, act.alive_write.buffer),
+        slot!("p_particle", Single, act.particle_records.buffer),
+        slot!("p_render", Single, act.render_records.buffer),
+        slot!("p_emit_req", Single, act.emit_req_device.buffer),
+        slot!("p_effects", Single, act.effects_device.buffer),
+        slot!("p_render_sorted", Single, act.sorted_render_records.map_or(VkBuffer::NULL, |b| b.buffer)),
+        slot!("p_sort_bins", Single, act.sort_bins.map_or(VkBuffer::NULL, |b| b.buffer)),
     ]
+}
+
+/// OBS (H0 Scope 3): the Deferred sink's positional fill for frame-in-flight slot `fi` — a pure
+/// function of `(targets, scene, fi)`, so the (P) sink check can re-run it for `fi ^ 1` (arm (c)).
+/// Each slot's name and `Fif` are written beside its handle expression (`slot!`); release builds
+/// keep the handle-only arrays.
+///
+/// Particles P0: the buffer array is filled POSITIONALLY rather than written as one fixed
+/// literal, because the declarator's buffer tail is now conditional TWICE — the interp trio
+/// and, after it, the ten-buffer particle span. A fixed literal cannot express that: on an
+/// interp-OFF frame the particle ResIds shift down by three, and a literal would resolve
+/// every particle barrier to a LIVE WRONG buffer (every slot here holds a real handle, so
+/// there is no VUID and no validation message — the failure mode `VB_BUFFER_COUNT`'s doc
+/// spells out). The fill below walks the SAME two conditions in the SAME order the
+/// declarator does, which is the only shape that cannot drift from it.
+fn gbuffer_sink(
+    targets: &GBufferTargets,
+    scene: &GBufferScene<'_>,
+    fi: usize,
+) -> (
+    super::seed_class::SinkFill<VkImage, FRAMEGRAPH_IMAGE_COUNT>,
+    super::seed_class::SinkFill<VkBuffer, GBUFFER_SINK_BUFFER_COUNT>,
+) {
+    use super::seed_class::{slot, SinkFill};
+    let images = SinkFill::from_slots([
+        slot!("albedo", Ring, targets.albedo[fi].image),
+        slot!("normal", Ring, targets.normal[fi].image),
+        slot!("material", Ring, targets.material[fi].image),
+        slot!("depth", Ring, targets.depth[fi].image),
+        slot!("viewt", Ring, targets.viewt[fi].image),
+        slot!("lit", Ring, targets.lit[fi].image),
+        slot!("ssao", Ring, targets.ssao[fi].image),
+        // cascade / atlas are single-instance (NOT ringed) world-fixed maps.
+        slot!("cascade", Single, scene.csm_cascade_texture.image),
+        slot!("atlas", Single, scene.shadow_atlas_texture.image),
+        // SDFDDGI I2 (ResIds 9/10): the two DDGI atlas storage images — single-instance
+        // (NOT ringed) world-fixed atlases, the SAME textures the resolve set samples. Only
+        // named by a derived barrier on the `ddgi_update` ON path; on the OFF path they are
+        // unreferenced (their slots inert, like cascade/atlas when those maps are off).
+        slot!("ddgi_irr", Single, scene.ddgi_irr_texture.image),
+        slot!("ddgi_depth", Single, scene.ddgi_depth_texture.image),
+        // Rung 3a (`hwrt`, ResIds 11/12): the two RT soft-shadow-visibility targets — ringed
+        // per-FIF STORAGE images (BOTH R16G16_UNORM — the uniform-RG16 ping-pong), so bind
+        // the CURRENT frame slot's handle (like the G-buffer ring slots above). `Option`-
+        // guarded (the DDGI-degrade mirror): `None` — resolving to [`VkImage::NULL`] — when
+        // the device lacks `RG16` UNORM storage
+        // (`shadow_denoise_storage_ok() == false`), the target is not allocated and the
+        // denoise stays disabled. In THIS step no pass names ResId 11/12, so these slots are
+        // never handed to the driver either way (a NULL there is inert, like cascade/atlas
+        // when those maps are off); steps 4-6 add the passes, gated on the same predicate.
+        #[cfg(feature = "hwrt")]
+        slot!("shadow_vis", Ring, targets.shadow_vis.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        #[cfg(feature = "hwrt")]
+        slot!("shadow_vis2", Ring, targets.shadow_vis2.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        // Rung 3b (`hwrt`, ResIds 13/14/15): the temporal reproject target rings — bind the
+        // CURRENT frame slot's handle (like the G-buffer / shadow-vis ring slots above).
+        // `Option`-guarded (degrade-to-`NULL` when the device lacks the storage format). NO
+        // pass names ResId 13/14/15 this step, so these slots are never handed to the driver
+        // (a NULL there is inert, like the shadow-vis slots when the denoise is off).
+        #[cfg(feature = "hwrt")]
+        slot!("motion_vec", Ring, targets.motion_vec.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        #[cfg(feature = "hwrt")]
+        slot!("shadow_temporal_hist", Ring, targets.shadow_temporal_hist.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        #[cfg(feature = "hwrt")]
+        slot!("temporal_out", Ring, targets.temporal_out.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        // C1 fix — ResId 16 `shadow_temporal_hist_read`: the CROSS-FRAME READ image = the
+        // SIBLING parity slot `hist[fi ^ 1]` (the image frame N-1 wrote). THIS IS THE ONE SINK
+        // ENTRY THAT IS NOT `r[fi]`. Binding `r[fi]` here (the natural copy-paste mistake)
+        // would land ResId 16's RAW barrier on the WRITE image, NOT the read image — the
+        // barrier count would look right and a static scene would pass, but the cross-frame
+        // read would stay unsynchronized and shimmer in motion (the exact false-green that
+        // shipped twice). The temporal set @3 (`gHistIn`) binds this SAME sibling slot.
+        #[cfg(feature = "hwrt")]
+        slot!("shadow_temporal_hist_read", Ring, targets.shadow_temporal_hist.as_ref().map_or(VkImage::NULL, |r| r[fi ^ 1].image)),
+        // Textured-PBR T6a: `pbr` (the `gPbr` deferred-resolve MRT lane) — declared LAST in
+        // the image block (ResId 11 `not(hwrt)` / 17 `hwrt`, past every `hwrt`-only image
+        // above), so it is bound here LAST too, UNCONDITIONALLY (both feature legs). RINGED
+        // (per-FIF), like albedo/normal/etc. above — bind the CURRENT frame slot's handle.
+        slot!("pbr", Ring, targets.pbr[fi].image),
+        // Anti-aliasing Stage 4 (TAA W4/W5): `taa_hist` — the `[fi]` WRITE slot. `Option`-
+        // guarded (`None` when `AaMode::Taa` is off, or on an allocation-degraded device —
+        // resolves to [`VkImage::NULL`], inert since no pass names this ResId then).
+        // UNCONDITIONAL (both feature legs — TAA is not `hwrt`-only).
+        slot!("taa_hist", Ring, targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        // TAA W4 (C1-fix shape): `taa_hist_read` — the CROSS-FRAME READ image = the SIBLING
+        // parity slot `taa_hist[fi ^ 1]` (the image frame N-1 wrote). Mirrors
+        // `shadow_temporal_hist_read`'s `[fi ^ 1]` bind EXACTLY — the one sink entry that is
+        // NOT `r[fi]` (binding `r[fi]` here would land the cross-frame RAW barrier on the
+        // WRITE image, not the read image — the exact false-green the C1 fix closed for the
+        // shadow-temporal precedent).
+        slot!("taa_hist_read", Ring, targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi ^ 1].image)),
+        // The SSAO à-trous denoise chain's two interior ping-pong rings — declared LAST in
+        // the image block (ResId 14/15 `not(hwrt)` / 20/21 `hwrt`, past every earlier
+        // image), bound here LAST too, UNCONDITIONALLY (both feature legs). RINGED
+        // (per-FIF) — bind the CURRENT frame slot's handle. `Option`-guarded (`None` on a
+        // device lacking `R16_UNORM` storage — resolves to [`VkImage::NULL`], inert since
+        // no pass names either ResId when `atrous_levels == 0`).
+        slot!("ssao_ring_a", Ring, targets.ssao_ring_a.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        slot!("ssao_ring_b", Ring, targets.ssao_ring_b.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+    ]);
+    #[cfg(not(feature = "hwrt"))]
+    let fixed = [
+        slot!("light_table", Single, scene.light_table.buffer),
+        slot!("tiles", Single, scene.tiles_buffer.buffer),
+        slot!("grid", Single, scene.cluster_grid.map_or(VkBuffer::NULL, |b| b.buffer)),
+        slot!("index", Single, scene.light_index.map_or(VkBuffer::NULL, |b| b.buffer)),
+        slot!("alloc", Single, scene.light_index_alloc.map_or(VkBuffer::NULL, |b| b.buffer)),
+        // SDFDDGI I2: the single-instance classification + Fibonacci ray-table buffers, ALWAYS
+        // resolved (declared unconditionally in the graph). Named by a derived barrier ONLY on
+        // the `ddgi_update` ON path.
+        slot!("ddgi_classification", Single, scene.ddgi_classification.buffer),
+        slot!("ddgi_ray_table", Single, scene.ddgi_ray_table.buffer),
+    ];
+    // HW-RT rung R2a-3 (RISK-2): `tlas_instances` is declared UNCONDITIONALLY right after the
+    // DDGI buffers, so its slot is FIXED regardless of the conditional tails after it. NULL on
+    // the tlas-OFF path (never named by a derived barrier there); on the ON path the pack
+    // write → build read barrier is derived on this slot.
+    #[cfg(feature = "hwrt")]
+    let fixed = [
+        slot!("light_table", Single, scene.light_table.buffer),
+        slot!("tiles", Single, scene.tiles_buffer.buffer),
+        slot!("grid", Single, scene.cluster_grid.map_or(VkBuffer::NULL, |b| b.buffer)),
+        slot!("index", Single, scene.light_index.map_or(VkBuffer::NULL, |b| b.buffer)),
+        slot!("alloc", Single, scene.light_index_alloc.map_or(VkBuffer::NULL, |b| b.buffer)),
+        slot!("ddgi_classification", Single, scene.ddgi_classification.buffer),
+        slot!("ddgi_ray_table", Single, scene.ddgi_ray_table.buffer),
+        slot!("tlas_instances", RingPreSliced, scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer)),
+    ];
+    let mut buffers = SinkFill::new(VkBuffer::NULL);
+    buffers.push_all(&fixed);
+    // Pillar B B3 (refined-B): the CURRENT frame slot's FIF-ringed interp SSBOs — sliced to this
+    // slot before the scene reaches the fill, hence `RingPreSliced`. On the ON path the ONLY
+    // derived barrier is the COMPUTE→VERTEX RAW on `interp_model_out` (the shared instance ring)
+    // at the raster pass; `interp_pairs` and `interp_out_slot` are declared but never barriered.
+    if let Some(a) = scene.interp {
+        buffers.push_all(&[
+            slot!("interp_pairs", RingPreSliced, a.pair_buffer.buffer),
+            slot!("interp_out_slot", RingPreSliced, a.out_slot_buffer.buffer),
+            slot!("interp_model_out", RingPreSliced, a.model_out_buffer.buffer),
+        ]);
+    }
+    if let Some(p) = scene.particle.as_ref() {
+        buffers.push_all(&particle_sink_buffers(p));
+    }
+    // Dynamic-materials DM1: the material tail, after both conditional tails — the declarator's
+    // order and condition (`scene.material_upload`).
+    if scene.material_upload.is_some() {
+        buffers.push_all(&[slot!("material_table", Single, scene.material_table.buffer)]);
+    }
+    (images, buffers)
+}
+
+/// OBS (H0 Scope 3): the Forward / ForwardPlus sink's positional fill for slot `fi` — pure, like
+/// [`gbuffer_sink`]: the five unconditional slots, then the conditional particle span, then the
+/// material tail.
+fn forward_sink(
+    targets: &GBufferTargets,
+    forward: &super::targets::ForwardTargets,
+    scene: &GBufferScene<'_>,
+    fi: usize,
+) -> (
+    super::seed_class::SinkFill<VkImage, FORWARD_IMAGE_COUNT>,
+    super::seed_class::SinkFill<VkBuffer, FORWARD_SINK_BUFFER_COUNT>,
+) {
+    use super::seed_class::{slot, SinkFill};
+    let images = SinkFill::from_slots([
+        slot!("lit", Ring, targets.lit[fi].image),
+        slot!("forward_depth", Ring, forward.depth[fi].image),
+        slot!("cascade", Single, scene.csm_cascade_texture.image),
+        slot!("atlas", Single, scene.shadow_atlas_texture.image),
+    ]);
+    let mut buffers = SinkFill::new(VkBuffer::NULL);
+    buffers.push_all(&[
+        slot!("light_table", Single, scene.light_table.buffer),
+        // The SAME physical buffer `forward_opaque`'s VS reads at Set-0 binding 0
+        // (`scene.forward_instance_ring[fi]`) AND (when armed) the interp compute pass
+        // writes into (`GBufferScene::forward_instance_ring`'s doc — the "SAME shared
+        // model-out ring" the Deferred raster/interp precedent already establishes).
+        // This fn is called ONLY on a `Forward`-resolved frame (the caller's `forward:
+        // &ForwardTargets` param already required unwrapping `TargetsProfile::ForwardMesh`),
+        // so `Some(...)` is a production invariant here (`GBufferScene::forward_pipeline`'s
+        // doc).
+        slot!("instance_model_ring", Ring, scene.forward_instance_ring.expect("invariant: a Forward-resolved scene always carries forward_instance_ring") [fi].buffer),
+        // Multi-paradigm render-path plan, rung R5 (ForwardPlus): the L1 cluster-cull
+        // trio, single-instance (NOT ringed) — the SAME physical buffers
+        // `record_graph_pass`'s own `[cluster_grid, light_index, light_index_alloc]`
+        // slots resolve for Deferred.
+        slot!("light_index_alloc", Single, scene.light_index_alloc.map_or(scene.light_table.buffer, |b| b.buffer)),
+        slot!("cluster_grid", Single, scene.cluster_grid.map_or(scene.light_table.buffer, |b| b.buffer)),
+        slot!("light_index", Single, scene.light_index.map_or(scene.light_table.buffer, |b| b.buffer)),
+    ]);
+    if let Some(p) = scene.particle.as_ref() {
+        buffers.push_all(&particle_sink_buffers(p));
+    }
+    // Dynamic-materials DM1: the material tail, after the conditional particle tail.
+    if scene.material_upload.is_some() {
+        buffers.push_all(&[slot!("material_table", Single, scene.material_table.buffer)]);
+    }
+    (images, buffers)
+}
+
+/// OBS (H0 Scope 3): the visibility-buffer sink's positional fill for slot `fi` — pure, like
+/// [`gbuffer_sink`]. The unconditional prefix is written once per `hwrt` arm; the conditional
+/// tails are appended by [`vb_sink_buffers`].
+fn vb_sink(
+    targets: &GBufferTargets,
+    forward: &super::targets::ForwardTargets,
+    vb: &super::targets::VbTargets,
+    scene: &GBufferScene<'_>,
+    fi: usize,
+) -> (
+    super::seed_class::SinkFill<VkImage, VB_IMAGE_COUNT>,
+    super::seed_class::SinkFill<VkBuffer, VB_BUFFER_COUNT>,
+) {
+    use super::seed_class::{slot, SinkFill};
+    let images = SinkFill::from_slots([
+        slot!("lit", Ring, targets.lit[fi].image),
+        slot!("vb_id", Ring, vb.vb_id[fi].image),
+        slot!("vb_depth", Ring, forward.depth[fi].image),
+        slot!("cascade", Single, scene.csm_cascade_texture.image),
+        slot!("atlas", Single, scene.shadow_atlas_texture.image),
+        // TAA-under-VB: `viewt` is always allocated (VbMesh runs the DeferredFull-shaped
+        // body); the `taa_hist` parity pair is `Option`-guarded — `NULL` when TAA is off
+        // (inert: no pass names those ResIds then, the deferred sink precedent).
+        slot!("viewt", Ring, targets.viewt[fi].image),
+        slot!("taa_hist", Ring, targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        slot!("taa_hist_read", Ring, targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi ^ 1].image)),
+        // Rung R9b (ResIds 8..=11): `thin_normal` is `Option`-guarded (allocated iff the
+        // boot-frozen split armed); `ssao` is ALWAYS allocated (the deferred ring reused);
+        // the à-trous interior rings are `Option`-guarded on the atrous-storage probe.
+        // NULL slots stay inert — with the split off no pass names these ResIds.
+        slot!("thin_normal", Ring, targets.thin_normal.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        slot!("ssao", Ring, targets.ssao[fi].image),
+        slot!("ssao_ring_a", Ring, targets.ssao_ring_a.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        slot!("ssao_ring_b", Ring, targets.ssao_ring_b.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        // Rung R9c (ResIds 12/13): the DDGI probe atlases — single-instance, always
+        // allocated (the GI-off frames name their ResIds with NOTHING ⇒ inert).
+        slot!("ddgi_irr", Single, scene.ddgi_irr_texture.image),
+        slot!("ddgi_depth", Single, scene.ddgi_depth_texture.image),
+        // Rung R9d (ResIds 14..19): the VB hardware shadow chain's own image tail —
+        // the SAME `GBufferTargets` rings the deferred path shares (`Option`-guarded on
+        // the device's `RG16`/`RG16F`/`RGBA16` storage probe). NULL slots stay inert —
+        // with the chain off no pass names these ResIds.
+        #[cfg(feature = "hwrt")]
+        slot!("shadow_vis", Ring, targets.shadow_vis.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        #[cfg(feature = "hwrt")]
+        slot!("shadow_vis2", Ring, targets.shadow_vis2.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        #[cfg(feature = "hwrt")]
+        slot!("motion_vec", Ring, targets.motion_vec.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        #[cfg(feature = "hwrt")]
+        slot!("shadow_temporal_hist", Ring, targets.shadow_temporal_hist.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        #[cfg(feature = "hwrt")]
+        slot!("temporal_out", Ring, targets.temporal_out.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        // ResId 19 `shadow_temporal_hist_read` — the CROSS-FRAME READ image = the
+        // SIBLING parity slot `hist[fi ^ 1]` (the deferred sink's own C1-fix rule — see
+        // [`Renderer::record_graph_pass`]'s doc for why `[fi]` here would be a bug).
+        #[cfg(feature = "hwrt")]
+        slot!("shadow_temporal_hist_read", Ring, targets.shadow_temporal_hist.as_ref().map_or(VkImage::NULL, |r| r[fi ^ 1].image)),
+        // VG R3 piece 1 step P1-5 (LAST in both `cfg` arms — ResId 14, or 20 under
+        // `hwrt`): the HZB depth pyramid. NON-RINGED, so there is no `[fi]` here — one
+        // image serves both frames in flight. `Option`-guarded on the `HzbMode::Off`
+        // 0%-gate (the `taa_hist`/`thin_normal`/`ssao_ring_a` shape, NOT `viewt`'s bare
+        // always-allocated one): with the pyramid disarmed no pass names its ResId, so
+        // the NULL is inert.
+        slot!("hzb_pyramid", Single, targets.hzb.as_ref().map_or(VkImage::NULL, |h| h.pyramid.image)),
+        // VB-SV0 DP3b (LAST in both `cfg` arms — ResId 15, or 21 under `hwrt`): the R8G8
+        // term ring the dedicated pass writes and the tails read. RINGED (`[fi]`), always
+        // allocated on a VB boot (`VbTargets::sdf_term`); with SV0 disarmed no pass names
+        // its ResId, so the live handle is as inert as a NULL would be.
+        slot!("sdf_term", Ring, vb.sdf_term[fi].image),
+    ]);
+    // Particles P0: the ten-buffer particle tail is appended by `vb_sink_buffers`, which
+    // takes the unconditional prefix below and returns the full-length array. Every VB
+    // buffer ResId ahead of the tail is unconditional, so the tail's base slot is the same
+    // on every frame — the arrangement `record_graph_pass`'s conditional interp trio
+    // denies the deferred sink.
+    #[cfg(not(feature = "hwrt"))]
+    let buffers = vb_sink_buffers(scene, [
+        slot!("light_table", Single, scene.light_table.buffer),
+        slot!("vb_instance_ring", Ring, scene.vb_instance_ring.expect("invariant: a VisibilityBuffer-resolved scene always carries vb_instance_ring") [fi].buffer),
+        slot!("gclassify", Ring, targets.vb_classify.as_ref().expect("invariant: a VisibilityBuffer-resolved scene always carries targets.vb_classify").gclassify[fi].buffer),
+        // Rung R9c (buffer ResIds 3/4): the DDGI classification + Fibonacci ray table
+        // (the deferred sink's own sources — placeholder-backed on GI-off boots).
+        slot!("ddgi_classification", Single, scene.ddgi_classification.buffer),
+        slot!("ddgi_ray_table", Single, scene.ddgi_ray_table.buffer),
+        // VB-P1a ("dark infra"): the L1 froxel trio — the light-table placeholder when
+        // unarmed (hardcoded today).
+        slot!("cluster_grid", Single, scene.cluster_grid.map_or(scene.light_table.buffer, |b| b.buffer)),
+        slot!("light_index", Single, scene.light_index.map_or(scene.light_table.buffer, |b| b.buffer)),
+        slot!("light_index_alloc", Single, scene.light_index_alloc.map_or(scene.light_table.buffer, |b| b.buffer)),
+        // Rung R2a': the indirect record buffer, declared LAST so no slot above moved.
+        // Placeholder-backed when unarmed, the same bound-but-unread idiom the froxel trio
+        // uses -- an unarmed frame declares no pass naming this ResId, so it is inert.
+        slot!("vb_indirect", Ring, scene.vb_indirect.map_or(scene.light_table.buffer, |r| r[fi].buffer)),
+        // Rung R2c0: the batch-cull trio, appended after `vb_indirect` for the same reason.
+        slot!("vb_batch_desc", Ring, scene.vb_batch_desc.map_or(scene.light_table.buffer, |r| r[fi].buffer)),
+        slot!("vb_cull_visible", Ring, scene.vb_cull_visible.map_or(scene.light_table.buffer, |r| r[fi].buffer)),
+        slot!("vb_cull_count", Ring, scene.vb_cull_count.map_or(scene.light_table.buffer, |r| r[fi].buffer)),
+        // Rung R2d-3: the per-INSTANCE survivor list, appended LAST. `.expect()`ed rather
+        // than placeholder-backed because it is MANDATORY on every VB boot (its own field
+        // doc), the same wiring `vb_instance_ring` at index 1 has and the same `.expect()`
+        // every VB Set-0 builder already applies to it.
+        slot!("vb_visible_instance", Ring, scene.vb_visible_instance.expect("invariant: a VisibilityBuffer-resolved scene always carries vb_visible_instance") [fi].buffer),
+        // VG R3 piece 2 step P2-3: the LATE indirect record array, appended LAST so no
+        // slot above moved. `.expect()`ed rather than placeholder-backed for the SAME
+        // reason as `vb_visible_instance` directly above — `GpuSceneBundles::boot` mints
+        // it unconditionally — and the placeholder would be worse here than a `None`: it
+        // resolves to `scene.light_table.buffer`, so a mis-keyed barrier would silently
+        // synchronise a live wrong buffer with no VUID.
+        slot!("vb_indirect_late", Ring, scene.vb_indirect_late.expect("invariant: a VisibilityBuffer-resolved scene always carries vb_indirect_late") [fi].buffer),
+        // VG R3 piece 3 step P3-3: the occlusion split's trio, appended LAST in declaration
+        // order — `.expect()`ed for verbatim the reason the two entries above are.
+        slot!("vb_late_visible", Ring, scene.vb_late_visible.expect("invariant: a VisibilityBuffer-resolved scene always carries vb_late_visible") [fi].buffer),
+        slot!("vb_late_count", Ring, scene.vb_late_count.expect("invariant: a VisibilityBuffer-resolved scene always carries vb_late_count") [fi].buffer),
+        slot!("vb_cull_uniform", Ring, scene.vb_cull_uniform.expect("invariant: a VisibilityBuffer-resolved scene always carries vb_cull_uniform") [fi].buffer),
+    ]);
+    // Rung R9d (buffer ResId 5): `tlas_instances` — mirrors [`GbufferBarrierSink`]'s own
+    // `scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer)` source.
+    #[cfg(feature = "hwrt")]
+    let buffers = vb_sink_buffers(scene, [
+        slot!("light_table", Single, scene.light_table.buffer),
+        slot!("vb_instance_ring", Ring, scene.vb_instance_ring.expect("invariant: a VisibilityBuffer-resolved scene always carries vb_instance_ring") [fi].buffer),
+        slot!("gclassify", Ring, targets.vb_classify.as_ref().expect("invariant: a VisibilityBuffer-resolved scene always carries targets.vb_classify").gclassify[fi].buffer),
+        slot!("ddgi_classification", Single, scene.ddgi_classification.buffer),
+        slot!("ddgi_ray_table", Single, scene.ddgi_ray_table.buffer),
+        slot!("tlas_instances", RingPreSliced, scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer)),
+        // VB-P1a ("dark infra"): the L1 froxel trio — see the `not(hwrt)` variant's own
+        // comment.
+        slot!("cluster_grid", Single, scene.cluster_grid.map_or(scene.light_table.buffer, |b| b.buffer)),
+        slot!("light_index", Single, scene.light_index.map_or(scene.light_table.buffer, |b| b.buffer)),
+        slot!("light_index_alloc", Single, scene.light_index_alloc.map_or(scene.light_table.buffer, |b| b.buffer)),
+        // Rung R2a': the indirect record buffer, declared LAST so no slot above moved.
+        // Placeholder-backed when unarmed, the same bound-but-unread idiom the froxel trio
+        // uses -- an unarmed frame declares no pass naming this ResId, so it is inert.
+        slot!("vb_indirect", Ring, scene.vb_indirect.map_or(scene.light_table.buffer, |r| r[fi].buffer)),
+        // Rung R2c0: the batch-cull trio, appended after `vb_indirect` for the same reason.
+        slot!("vb_batch_desc", Ring, scene.vb_batch_desc.map_or(scene.light_table.buffer, |r| r[fi].buffer)),
+        slot!("vb_cull_visible", Ring, scene.vb_cull_visible.map_or(scene.light_table.buffer, |r| r[fi].buffer)),
+        slot!("vb_cull_count", Ring, scene.vb_cull_count.map_or(scene.light_table.buffer, |r| r[fi].buffer)),
+        // Rung R2d-3: see the `not(hwrt)` variant's own comment for why this one is
+        // `.expect()`ed rather than placeholder-backed.
+        slot!("vb_visible_instance", Ring, scene.vb_visible_instance.expect("invariant: a VisibilityBuffer-resolved scene always carries vb_visible_instance") [fi].buffer),
+        // VG R3 piece 2 step P2-3: the LATE indirect record array, appended LAST — see the
+        // `not(hwrt)` variant's own comment.
+        slot!("vb_indirect_late", Ring, scene.vb_indirect_late.expect("invariant: a VisibilityBuffer-resolved scene always carries vb_indirect_late") [fi].buffer),
+        // VG R3 piece 3 step P3-3: the occlusion split's trio — see the `not(hwrt)`
+        // variant's own comment.
+        slot!("vb_late_visible", Ring, scene.vb_late_visible.expect("invariant: a VisibilityBuffer-resolved scene always carries vb_late_visible") [fi].buffer),
+        slot!("vb_late_count", Ring, scene.vb_late_count.expect("invariant: a VisibilityBuffer-resolved scene always carries vb_late_count") [fi].buffer),
+        slot!("vb_cull_uniform", Ring, scene.vb_cull_uniform.expect("invariant: a VisibilityBuffer-resolved scene always carries vb_cull_uniform") [fi].buffer),
+    ]);
+    (images, buffers)
 }
 
 /// Compile-time guard that [`GbufferBarrierSink::images`] is exactly [`FRAMEGRAPH_IMAGE_COUNT`]
@@ -1714,7 +2175,9 @@ impl Renderer<'_> {
         // the `light_table` seed-WAR). `record_graph_pass` fills its sink slot positionally, after
         // the two conditional tails ahead of it.
         let material_table =
-            scene.material_upload.map(|_| MaterialTableRes::declare(g, DEFERRED_MATERIAL_READ_STAGES));
+            scene.material_upload.map(|_| {
+                MaterialTableRes::declare(g, DEFERRED_MATERIAL_READ_STAGES, self.obs_dump_widen)
+            });
 
         // Pass `interp` (Pillar B B3, refined-B) — gated `scene.interp.is_some()`. Runs FIRST
         // (before raster): reads the pair + out-slot SSBOs (COMPUTE/SHADER_READ — first touch, no
@@ -2686,7 +3149,26 @@ impl Renderer<'_> {
             SubRange::COLOR,
         );
 
+        // OBS (D, H0 Scope 6): the `image_dump` pass, LAST — on a `BOYKO_IMAGE_DUMP` request
+        // frame only (`None` on every other frame of every run: no pass, no barrier).
+        let image_dump = match self.image_dump.as_ref().and_then(|a| a.request.as_ref()) {
+            Some(request) => declare_image_dump(
+                g,
+                request,
+                &[
+                    (super::frame_driver::ImageDumpName::DeferredDepth, depth),
+                    (super::frame_driver::ImageDumpName::Viewt, viewt),
+                    (super::frame_driver::ImageDumpName::Lit, lit),
+                    (super::frame_driver::ImageDumpName::TaaHist, taa_hist),
+                ],
+            ),
+            None => None,
+        };
+
         g.compile();
+        // OBS (P): the class table over this declarator's compiled frame (debug builds).
+        #[cfg(debug_assertions)]
+        super::seed_class::assert_class_table(g, super::seed_class::DECL_DEFERRED);
 
         self.gbuffer_pass_plan = Some(GbufferPassPlan {
             interp,
@@ -2717,6 +3199,7 @@ impl Renderer<'_> {
             taa_resolve: taa_resolve_pass,
             present_sample,
             particle: particle_plan,
+            image_dump,
         });
     }
 
@@ -2830,7 +3313,9 @@ impl Renderer<'_> {
         // path's readers are `forward_opaque.fs` (FRAGMENT) and `sdf_forward_march` (COMPUTE), so
         // the `light_table`'s FRAGMENT-only seed here is not the model (cut C-7).
         let material_table =
-            scene.material_upload.map(|_| MaterialTableRes::declare(g, FORWARD_MATERIAL_READ_STAGES));
+            scene.material_upload.map(|_| {
+                MaterialTableRes::declare(g, FORWARD_MATERIAL_READ_STAGES, self.obs_dump_widen)
+            });
 
         // Pass `interp` — gated `scene.interp.is_some()`, the SAME activation
         // `declare_deferred_graph`'s own `interp` pass reads. Writes `instance_model_ring`
@@ -3182,7 +3667,24 @@ impl Renderer<'_> {
             SubRange::COLOR,
         );
 
+        // OBS (D, H0 Scope 6): the `image_dump` pass, LAST — on a `BOYKO_IMAGE_DUMP` request
+        // frame only (`None` on every other frame of every run: no pass, no barrier).
+        let image_dump = match self.image_dump.as_ref().and_then(|a| a.request.as_ref()) {
+            Some(request) => declare_image_dump(
+                g,
+                request,
+                &[
+                    (super::frame_driver::ImageDumpName::ForwardDepth, forward_depth),
+                    (super::frame_driver::ImageDumpName::Lit, lit),
+                ],
+            ),
+            None => None,
+        };
+
         g.compile();
+        // OBS (P): the class table over this declarator's compiled frame (debug builds).
+        #[cfg(debug_assertions)]
+        super::seed_class::assert_class_table(g, super::seed_class::DECL_FORWARD);
 
         self.forward_pass_plan = Some(ForwardPassPlan {
             interp,
@@ -3196,6 +3698,7 @@ impl Renderer<'_> {
             sdf_forward_march,
             present_sample,
             particle: particle_plan,
+            image_dump,
         });
     }
 
@@ -3231,162 +3734,23 @@ impl Renderer<'_> {
                 .is_none_or(|r| r[fi].image != r[fi ^ 1].image),
             "invariant: the temporal history pool's [fi] write slot and [fi^1] read slot must be distinct images"
         );
-        // Particles P0: the buffer array is filled POSITIONALLY rather than written as one fixed
-        // literal, because the declarator's buffer tail is now conditional TWICE — the interp trio
-        // and, after it, the ten-buffer particle span. A fixed literal cannot express that: on an
-        // interp-OFF frame the particle ResIds shift down by three, and a literal would resolve
-        // every particle barrier to a LIVE WRONG buffer (every slot here holds a real handle, so
-        // there is no VUID and no validation message — the failure mode `VB_BUFFER_COUNT`'s doc
-        // spells out). The fill below walks the SAME two conditions in the SAME order the
-        // declarator does, which is the only shape that cannot drift from it.
-        #[cfg(not(feature = "hwrt"))]
-        let fixed: [VkBuffer; 7] = [
-            scene.light_table.buffer,
-            scene.tiles_buffer.buffer,
-            scene.cluster_grid.map_or(VkBuffer::NULL, |b| b.buffer),
-            scene.light_index.map_or(VkBuffer::NULL, |b| b.buffer),
-            scene.light_index_alloc.map_or(VkBuffer::NULL, |b| b.buffer),
-            // SDFDDGI I2: the single-instance classification + Fibonacci ray-table buffers, ALWAYS
-            // resolved (declared unconditionally in the graph). Named by a derived barrier ONLY on
-            // the `ddgi_update` ON path.
-            scene.ddgi_classification.buffer,
-            scene.ddgi_ray_table.buffer,
-        ];
-        // HW-RT rung R2a-3 (RISK-2): `tlas_instances` is declared UNCONDITIONALLY right after the
-        // DDGI buffers, so its slot is FIXED regardless of the conditional tails after it. NULL on
-        // the tlas-OFF path (never named by a derived barrier there); on the ON path the pack
-        // write → build read barrier is derived on this slot.
-        #[cfg(feature = "hwrt")]
-        let fixed: [VkBuffer; 8] = [
-            scene.light_table.buffer,
-            scene.tiles_buffer.buffer,
-            scene.cluster_grid.map_or(VkBuffer::NULL, |b| b.buffer),
-            scene.light_index.map_or(VkBuffer::NULL, |b| b.buffer),
-            scene.light_index_alloc.map_or(VkBuffer::NULL, |b| b.buffer),
-            scene.ddgi_classification.buffer,
-            scene.ddgi_ray_table.buffer,
-            scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer),
-        ];
-        let mut buffers = [VkBuffer::NULL; GBUFFER_SINK_BUFFER_COUNT];
-        buffers[..fixed.len()].copy_from_slice(&fixed);
-        let mut next = fixed.len();
-        // Pillar B B3 (refined-B): the CURRENT frame slot's FIF-ringed interp SSBOs. On the ON
-        // path the ONLY derived barrier is the COMPUTE→VERTEX RAW on `interp_model_out` (the
-        // shared instance ring) at the raster pass; `interp_pairs` and `interp_out_slot` are
-        // declared but never barriered (first-touch reads).
-        if let Some(a) = scene.interp {
-            buffers[next] = a.pair_buffer.buffer;
-            buffers[next + 1] = a.out_slot_buffer.buffer;
-            buffers[next + 2] = a.model_out_buffer.buffer;
-            next += 3;
-        }
-        if let Some(p) = scene.particle.as_ref() {
-            buffers[next..next + PARTICLE_BUFFER_COUNT].copy_from_slice(&particle_sink_buffers(p));
-            next += PARTICLE_BUFFER_COUNT;
-        }
-        // Dynamic-materials DM1: the material tail, after both conditional tails — the declarator's
-        // order and condition (`scene.material_upload`).
-        if scene.material_upload.is_some() {
-            buffers[next] = scene.material_table.buffer;
+        let (images, buffers) = gbuffer_sink(targets, scene, fi);
+        // OBS (P), once per frame (the frame's first pass), debug builds: arms (a), (b), (c).
+        #[cfg(debug_assertions)]
+        if pass.index() == 0 {
+            let (other_images, other_buffers) = gbuffer_sink(targets, scene, fi ^ 1);
+            super::seed_class::assert_sink(
+                &self.frame_graph,
+                super::seed_class::DECL_DEFERRED,
+                (&images.meta, &images.handles.map(|h| h.0), &other_images.handles.map(|h| h.0)),
+                (&buffers.meta, &buffers.handles.map(|h| h.0), &other_buffers.handles.map(|h| h.0)),
+            );
         }
         let mut sink = GbufferBarrierSink {
             fns: self.fns,
             cmd,
-            images: [
-                targets.albedo[fi].image,
-                targets.normal[fi].image,
-                targets.material[fi].image,
-                targets.depth[fi].image,
-                targets.viewt[fi].image,
-                targets.lit[fi].image,
-                targets.ssao[fi].image,
-                // cascade / atlas are single-instance (NOT ringed) world-fixed maps.
-                scene.csm_cascade_texture.image,
-                scene.shadow_atlas_texture.image,
-                // SDFDDGI I2 (ResIds 9/10): the two DDGI atlas storage images — single-instance
-                // (NOT ringed) world-fixed atlases, the SAME textures the resolve set samples. Only
-                // named by a derived barrier on the `ddgi_update` ON path; on the OFF path they are
-                // unreferenced (their slots inert, like cascade/atlas when those maps are off).
-                scene.ddgi_irr_texture.image,
-                scene.ddgi_depth_texture.image,
-                // Rung 3a (`hwrt`, ResIds 11/12): the two RT soft-shadow-visibility targets — ringed
-                // per-FIF STORAGE images (BOTH R16G16_UNORM — the uniform-RG16 ping-pong), so bind
-                // the CURRENT frame slot's handle (like the G-buffer ring slots above). `Option`-
-                // guarded (the DDGI-degrade mirror): `None` — resolving to [`VkImage::NULL`] — when
-                // the device lacks `RG16` UNORM storage
-                // (`shadow_denoise_storage_ok() == false`), the target is not allocated and the
-                // denoise stays disabled. In THIS step no pass names ResId 11/12, so these slots are
-                // never handed to the driver either way (a NULL there is inert, like cascade/atlas
-                // when those maps are off); steps 4-6 add the passes, gated on the same predicate.
-                #[cfg(feature = "hwrt")]
-                targets
-                    .shadow_vis
-                    .as_ref()
-                    .map_or(VkImage::NULL, |r| r[fi].image),
-                #[cfg(feature = "hwrt")]
-                targets
-                    .shadow_vis2
-                    .as_ref()
-                    .map_or(VkImage::NULL, |r| r[fi].image),
-                // Rung 3b (`hwrt`, ResIds 13/14/15): the temporal reproject target rings — bind the
-                // CURRENT frame slot's handle (like the G-buffer / shadow-vis ring slots above).
-                // `Option`-guarded (degrade-to-`NULL` when the device lacks the storage format). NO
-                // pass names ResId 13/14/15 this step, so these slots are never handed to the driver
-                // (a NULL there is inert, like the shadow-vis slots when the denoise is off).
-                #[cfg(feature = "hwrt")]
-                targets
-                    .motion_vec
-                    .as_ref()
-                    .map_or(VkImage::NULL, |r| r[fi].image),
-                #[cfg(feature = "hwrt")]
-                targets
-                    .shadow_temporal_hist
-                    .as_ref()
-                    .map_or(VkImage::NULL, |r| r[fi].image),
-                #[cfg(feature = "hwrt")]
-                targets
-                    .temporal_out
-                    .as_ref()
-                    .map_or(VkImage::NULL, |r| r[fi].image),
-                // C1 fix — ResId 16 `shadow_temporal_hist_read`: the CROSS-FRAME READ image = the
-                // SIBLING parity slot `hist[fi ^ 1]` (the image frame N-1 wrote). THIS IS THE ONE SINK
-                // ENTRY THAT IS NOT `r[fi]`. Binding `r[fi]` here (the natural copy-paste mistake)
-                // would land ResId 16's RAW barrier on the WRITE image, NOT the read image — the
-                // barrier count would look right and a static scene would pass, but the cross-frame
-                // read would stay unsynchronized and shimmer in motion (the exact false-green that
-                // shipped twice). The temporal set @3 (`gHistIn`) binds this SAME sibling slot.
-                #[cfg(feature = "hwrt")]
-                targets
-                    .shadow_temporal_hist
-                    .as_ref()
-                    .map_or(VkImage::NULL, |r| r[fi ^ 1].image),
-                // Textured-PBR T6a: `pbr` (the `gPbr` deferred-resolve MRT lane) — declared LAST in
-                // the image block (ResId 11 `not(hwrt)` / 17 `hwrt`, past every `hwrt`-only image
-                // above), so it is bound here LAST too, UNCONDITIONALLY (both feature legs). RINGED
-                // (per-FIF), like albedo/normal/etc. above — bind the CURRENT frame slot's handle.
-                targets.pbr[fi].image,
-                // Anti-aliasing Stage 4 (TAA W4/W5): `taa_hist` — the `[fi]` WRITE slot. `Option`-
-                // guarded (`None` when `AaMode::Taa` is off, or on an allocation-degraded device —
-                // resolves to [`VkImage::NULL`], inert since no pass names this ResId then).
-                // UNCONDITIONAL (both feature legs — TAA is not `hwrt`-only).
-                targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
-                // TAA W4 (C1-fix shape): `taa_hist_read` — the CROSS-FRAME READ image = the SIBLING
-                // parity slot `taa_hist[fi ^ 1]` (the image frame N-1 wrote). Mirrors
-                // `shadow_temporal_hist_read`'s `[fi ^ 1]` bind EXACTLY — the one sink entry that is
-                // NOT `r[fi]` (binding `r[fi]` here would land the cross-frame RAW barrier on the
-                // WRITE image, not the read image — the exact false-green the C1 fix closed for the
-                // shadow-temporal precedent).
-                targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi ^ 1].image),
-                // The SSAO à-trous denoise chain's two interior ping-pong rings — declared LAST in
-                // the image block (ResId 14/15 `not(hwrt)` / 20/21 `hwrt`, past every earlier
-                // image), bound here LAST too, UNCONDITIONALLY (both feature legs). RINGED
-                // (per-FIF) — bind the CURRENT frame slot's handle. `Option`-guarded (`None` on a
-                // device lacking `R16_UNORM` storage — resolves to [`VkImage::NULL`], inert since
-                // no pass names either ResId when `atrous_levels == 0`).
-                targets.ssao_ring_a.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
-                targets.ssao_ring_b.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
-            ],
-            buffers,
+            images: images.handles,
+            buffers: buffers.handles,
         };
         self.frame_graph.record_pass(pass, &mut sink);
     }
@@ -3415,54 +3779,23 @@ impl Renderer<'_> {
         scene: &GBufferScene<'_>,
         fi: usize,
     ) {
-        // Particles P0: the five unconditional slots, then the conditional particle span. Filled
-        // positionally (rather than as one literal) for the SAME reason `record_graph_pass` does
-        // it — one fill shape across all three sinks, so no reader has to check which sink uses
-        // which.
-        let mut buffers = [VkBuffer::NULL; FORWARD_SINK_BUFFER_COUNT];
-        let fixed: [VkBuffer; 5] = [
-            scene.light_table.buffer,
-            // The SAME physical buffer `forward_opaque`'s VS reads at Set-0 binding 0
-            // (`scene.forward_instance_ring[fi]`) AND (when armed) the interp compute pass
-            // writes into (`GBufferScene::forward_instance_ring`'s doc — the "SAME shared
-            // model-out ring" the Deferred raster/interp precedent already establishes).
-            // This fn is called ONLY on a `Forward`-resolved frame (the caller's `forward:
-            // &ForwardTargets` param already required unwrapping `TargetsProfile::ForwardMesh`),
-            // so `Some(...)` is a production invariant here (`GBufferScene::forward_pipeline`'s
-            // doc).
-            scene
-                .forward_instance_ring
-                .expect("invariant: a Forward-resolved scene always carries forward_instance_ring")
-                [fi]
-                .buffer,
-            // Multi-paradigm render-path plan, rung R5 (ForwardPlus): the L1 cluster-cull
-            // trio, single-instance (NOT ringed) — the SAME physical buffers
-            // `record_graph_pass`'s own `[cluster_grid, light_index, light_index_alloc]`
-            // slots resolve for Deferred.
-            scene.light_index_alloc.map_or(scene.light_table.buffer, |b| b.buffer),
-            scene.cluster_grid.map_or(scene.light_table.buffer, |b| b.buffer),
-            scene.light_index.map_or(scene.light_table.buffer, |b| b.buffer),
-        ];
-        buffers[..fixed.len()].copy_from_slice(&fixed);
-        let mut next = fixed.len();
-        if let Some(p) = scene.particle.as_ref() {
-            buffers[next..next + PARTICLE_BUFFER_COUNT].copy_from_slice(&particle_sink_buffers(p));
-            next += PARTICLE_BUFFER_COUNT;
-        }
-        // Dynamic-materials DM1: the material tail, after the conditional particle tail.
-        if scene.material_upload.is_some() {
-            buffers[next] = scene.material_table.buffer;
+        let (images, buffers) = forward_sink(targets, forward, scene, fi);
+        // OBS (P), once per frame (the frame's first pass), debug builds: arms (a), (b), (c).
+        #[cfg(debug_assertions)]
+        if pass.index() == 0 {
+            let (other_images, other_buffers) = forward_sink(targets, forward, scene, fi ^ 1);
+            super::seed_class::assert_sink(
+                &self.frame_graph,
+                super::seed_class::DECL_FORWARD,
+                (&images.meta, &images.handles.map(|h| h.0), &other_images.handles.map(|h| h.0)),
+                (&buffers.meta, &buffers.handles.map(|h| h.0), &other_buffers.handles.map(|h| h.0)),
+            );
         }
         let mut sink = ForwardBarrierSink {
             fns: self.fns,
             cmd,
-            images: [
-                targets.lit[fi].image,
-                forward.depth[fi].image,
-                scene.csm_cascade_texture.image,
-                scene.shadow_atlas_texture.image,
-            ],
-            buffers,
+            images: images.handles,
+            buffers: buffers.handles,
         };
         self.frame_graph.record_pass(pass, &mut sink);
     }
@@ -3856,6 +4189,9 @@ pub(crate) struct VbPassPlan {
     pub(crate) taa_resolve: Option<crate::framegraph::PassId>,
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame.
     pub(crate) particle: ParticlePassPlan,
+    /// OBS (D): the `image_dump` pass — declared LAST, on a `BOYKO_IMAGE_DUMP` request frame only
+    /// (`None` on every other frame of every run), with the names it copies.
+    pub(crate) image_dump: Option<ImageDumpPlan>,
 }
 
 /// Multi-paradigm render-path plan, rung R8: the [`BarrierSink`](crate::framegraph::BarrierSink)
@@ -4697,7 +5033,9 @@ impl Renderer<'_> {
         // upload frame (see `declare_deferred_graph`'s own site). Every VB reader of `Materials`
         // (`vb_shade`, `vb_resolve`, `vb_geo`, `vb_shade_split`, `sdf_forward_march`) is COMPUTE.
         let material_table =
-            scene.material_upload.map(|_| MaterialTableRes::declare(g, VB_MATERIAL_READ_STAGES));
+            scene.material_upload.map(|_| {
+                MaterialTableRes::declare(g, VB_MATERIAL_READ_STAGES, self.obs_dump_widen)
+            });
         // The buffer-side sibling of the `hzb_pyramid` assert above, and the buffer side is where
         // it matters more: a mis-keyed buffer barrier names a LIVE WRONG buffer (every sink slot
         // resolves to a real handle) instead of faulting on a NULL. `- VB_IMAGE_COUNT` is exactly
@@ -4732,7 +5070,7 @@ impl Renderer<'_> {
         // DM1: the material tail lands on the slot `vb_sink_buffers` fills for it — right after
         // the particle span when armed, else right after the unconditional prefix.
         debug_assert!(
-            material_table.is_none_or(|t| t.id.index() - VB_IMAGE_COUNT
+            material_table.is_none_or(|t| t.0.id().index() - VB_IMAGE_COUNT
                 == VB_BUFFER_COUNT - PARTICLE_BUFFER_COUNT - MATERIAL_TAIL_BUFFER_COUNT
                     + if particle_res.is_some() { PARTICLE_BUFFER_COUNT } else { 0 }),
             "invariant: material_table's buffer ResId must be the sink slot vb_sink_buffers fills"
@@ -6749,7 +7087,26 @@ impl Renderer<'_> {
              one that ships"
         );
 
+        // OBS (D, H0 Scope 6): the `image_dump` pass, LAST — on a `BOYKO_IMAGE_DUMP` request
+        // frame only (`None` on every other frame of every run: no pass, no barrier).
+        let image_dump = match self.image_dump.as_ref().and_then(|a| a.request.as_ref()) {
+            Some(request) => declare_image_dump(
+                g,
+                request,
+                &[
+                    (super::frame_driver::ImageDumpName::VbDepth, vb_depth),
+                    (super::frame_driver::ImageDumpName::Viewt, viewt),
+                    (super::frame_driver::ImageDumpName::Lit, lit),
+                    (super::frame_driver::ImageDumpName::TaaHist, taa_hist),
+                ],
+            ),
+            None => None,
+        };
+
         g.compile();
+        // OBS (P): the class table over this declarator's compiled frame (debug builds).
+        #[cfg(debug_assertions)]
+        super::seed_class::assert_class_table(g, super::seed_class::DECL_VB);
 
         self.vb_pass_plan = Some(VbPassPlan {
             light_upload,
@@ -6800,6 +7157,7 @@ impl Renderer<'_> {
             taa_resolve: taa_resolve_pass,
             present_sample,
             particle: particle_plan,
+            image_dump,
         });
     }
 
@@ -6829,221 +7187,157 @@ impl Renderer<'_> {
         scene: &GBufferScene<'_>,
         fi: usize,
     ) {
+        let (images, buffers) = vb_sink(targets, forward, vb, scene, fi);
+        // OBS (P), once per frame (the frame's first pass), debug builds: arms (a), (b), (c).
+        #[cfg(debug_assertions)]
+        if pass.index() == 0 {
+            let (other_images, other_buffers) = vb_sink(targets, forward, vb, scene, fi ^ 1);
+            super::seed_class::assert_sink(
+                &self.frame_graph,
+                super::seed_class::DECL_VB,
+                (&images.meta, &images.handles.map(|h| h.0), &other_images.handles.map(|h| h.0)),
+                (&buffers.meta, &buffers.handles.map(|h| h.0), &other_buffers.handles.map(|h| h.0)),
+            );
+        }
         let mut sink = VbBarrierSink {
             fns: self.fns,
             cmd,
-            images: [
-                targets.lit[fi].image,
-                vb.vb_id[fi].image,
-                forward.depth[fi].image,
-                scene.csm_cascade_texture.image,
-                scene.shadow_atlas_texture.image,
-                // TAA-under-VB: `viewt` is always allocated (VbMesh runs the DeferredFull-shaped
-                // body); the `taa_hist` parity pair is `Option`-guarded — `NULL` when TAA is off
-                // (inert: no pass names those ResIds then, the deferred sink precedent).
-                targets.viewt[fi].image,
-                targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
-                targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi ^ 1].image),
-                // Rung R9b (ResIds 8..=11): `thin_normal` is `Option`-guarded (allocated iff the
-                // boot-frozen split armed); `ssao` is ALWAYS allocated (the deferred ring reused);
-                // the à-trous interior rings are `Option`-guarded on the atrous-storage probe.
-                // NULL slots stay inert — with the split off no pass names these ResIds.
-                targets.thin_normal.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
-                targets.ssao[fi].image,
-                targets.ssao_ring_a.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
-                targets.ssao_ring_b.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
-                // Rung R9c (ResIds 12/13): the DDGI probe atlases — single-instance, always
-                // allocated (the GI-off frames name their ResIds with NOTHING ⇒ inert).
-                scene.ddgi_irr_texture.image,
-                scene.ddgi_depth_texture.image,
-                // Rung R9d (ResIds 14..19): the VB hardware shadow chain's own image tail —
-                // the SAME `GBufferTargets` rings the deferred path shares (`Option`-guarded on
-                // the device's `RG16`/`RG16F`/`RGBA16` storage probe). NULL slots stay inert —
-                // with the chain off no pass names these ResIds.
-                #[cfg(feature = "hwrt")]
-                targets.shadow_vis.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
-                #[cfg(feature = "hwrt")]
-                targets.shadow_vis2.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
-                #[cfg(feature = "hwrt")]
-                targets.motion_vec.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
-                #[cfg(feature = "hwrt")]
-                targets.shadow_temporal_hist.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
-                #[cfg(feature = "hwrt")]
-                targets.temporal_out.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
-                // ResId 19 `shadow_temporal_hist_read` — the CROSS-FRAME READ image = the
-                // SIBLING parity slot `hist[fi ^ 1]` (the deferred sink's own C1-fix rule — see
-                // [`Renderer::record_graph_pass`]'s doc for why `[fi]` here would be a bug).
-                #[cfg(feature = "hwrt")]
-                targets.shadow_temporal_hist.as_ref().map_or(VkImage::NULL, |r| r[fi ^ 1].image),
-                // VG R3 piece 1 step P1-5 (LAST in both `cfg` arms — ResId 14, or 20 under
-                // `hwrt`): the HZB depth pyramid. NON-RINGED, so there is no `[fi]` here — one
-                // image serves both frames in flight. `Option`-guarded on the `HzbMode::Off`
-                // 0%-gate (the `taa_hist`/`thin_normal`/`ssao_ring_a` shape, NOT `viewt`'s bare
-                // always-allocated one): with the pyramid disarmed no pass names its ResId, so
-                // the NULL is inert.
-                targets.hzb.as_ref().map_or(VkImage::NULL, |h| h.pyramid.image),
-                // VB-SV0 DP3b (LAST in both `cfg` arms — ResId 15, or 21 under `hwrt`): the R8G8
-                // term ring the dedicated pass writes and the tails read. RINGED (`[fi]`), always
-                // allocated on a VB boot (`VbTargets::sdf_term`); with SV0 disarmed no pass names
-                // its ResId, so the live handle is as inert as a NULL would be.
-                vb.sdf_term[fi].image,
-            ],
-            // Particles P0: the ten-buffer particle tail is appended by `vb_sink_buffers`, which
-            // takes the unconditional prefix below and returns the full-length array. Every VB
-            // buffer ResId ahead of the tail is unconditional, so the tail's base slot is the same
-            // on every frame — the arrangement `record_graph_pass`'s conditional interp trio
-            // denies the deferred sink.
-            #[cfg(not(feature = "hwrt"))]
-            buffers: vb_sink_buffers(scene, [
-                scene.light_table.buffer,
-                scene
-                    .vb_instance_ring
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_instance_ring")
-                    [fi]
-                    .buffer,
-                targets
-                    .vb_classify
-                    .as_ref()
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries targets.vb_classify")
-                    .gclassify[fi]
-                    .buffer,
-                // Rung R9c (buffer ResIds 3/4): the DDGI classification + Fibonacci ray table
-                // (the deferred sink's own sources — placeholder-backed on GI-off boots).
-                scene.ddgi_classification.buffer,
-                scene.ddgi_ray_table.buffer,
-                // VB-P1a ("dark infra"): the L1 froxel trio — the light-table placeholder when
-                // unarmed (hardcoded today).
-                scene.cluster_grid.map_or(scene.light_table.buffer, |b| b.buffer),
-                scene.light_index.map_or(scene.light_table.buffer, |b| b.buffer),
-                scene.light_index_alloc.map_or(scene.light_table.buffer, |b| b.buffer),
-                // Rung R2a': the indirect record buffer, declared LAST so no slot above moved.
-                // Placeholder-backed when unarmed, the same bound-but-unread idiom the froxel trio
-                // uses -- an unarmed frame declares no pass naming this ResId, so it is inert.
-                scene
-                    .vb_indirect
-                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
-                // Rung R2c0: the batch-cull trio, appended after `vb_indirect` for the same reason.
-                scene
-                    .vb_batch_desc
-                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
-                scene
-                    .vb_cull_visible
-                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
-                scene
-                    .vb_cull_count
-                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
-                // Rung R2d-3: the per-INSTANCE survivor list, appended LAST. `.expect()`ed rather
-                // than placeholder-backed because it is MANDATORY on every VB boot (its own field
-                // doc), the same wiring `vb_instance_ring` at index 1 has and the same `.expect()`
-                // every VB Set-0 builder already applies to it.
-                scene
-                    .vb_visible_instance
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_visible_instance")
-                    [fi]
-                    .buffer,
-                // VG R3 piece 2 step P2-3: the LATE indirect record array, appended LAST so no
-                // slot above moved. `.expect()`ed rather than placeholder-backed for the SAME
-                // reason as `vb_visible_instance` directly above — `GpuSceneBundles::boot` mints
-                // it unconditionally — and the placeholder would be worse here than a `None`: it
-                // resolves to `scene.light_table.buffer`, so a mis-keyed barrier would silently
-                // synchronise a live wrong buffer with no VUID.
-                scene
-                    .vb_indirect_late
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_indirect_late")
-                    [fi]
-                    .buffer,
-                // VG R3 piece 3 step P3-3: the occlusion split's trio, appended LAST in declaration
-                // order — `.expect()`ed for verbatim the reason the two entries above are.
-                scene
-                    .vb_late_visible
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_late_visible")
-                    [fi]
-                    .buffer,
-                scene
-                    .vb_late_count
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_late_count")
-                    [fi]
-                    .buffer,
-                scene
-                    .vb_cull_uniform
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_cull_uniform")
-                    [fi]
-                    .buffer,
-            ]),
-            // Rung R9d (buffer ResId 5): `tlas_instances` — mirrors [`GbufferBarrierSink`]'s own
-            // `scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer)` source.
-            #[cfg(feature = "hwrt")]
-            buffers: vb_sink_buffers(scene, [
-                scene.light_table.buffer,
-                scene
-                    .vb_instance_ring
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_instance_ring")
-                    [fi]
-                    .buffer,
-                targets
-                    .vb_classify
-                    .as_ref()
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries targets.vb_classify")
-                    .gclassify[fi]
-                    .buffer,
-                scene.ddgi_classification.buffer,
-                scene.ddgi_ray_table.buffer,
-                scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer),
-                // VB-P1a ("dark infra"): the L1 froxel trio — see the `not(hwrt)` variant's own
-                // comment.
-                scene.cluster_grid.map_or(scene.light_table.buffer, |b| b.buffer),
-                scene.light_index.map_or(scene.light_table.buffer, |b| b.buffer),
-                scene.light_index_alloc.map_or(scene.light_table.buffer, |b| b.buffer),
-                // Rung R2a': the indirect record buffer, declared LAST so no slot above moved.
-                // Placeholder-backed when unarmed, the same bound-but-unread idiom the froxel trio
-                // uses -- an unarmed frame declares no pass naming this ResId, so it is inert.
-                scene
-                    .vb_indirect
-                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
-                // Rung R2c0: the batch-cull trio, appended after `vb_indirect` for the same reason.
-                scene
-                    .vb_batch_desc
-                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
-                scene
-                    .vb_cull_visible
-                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
-                scene
-                    .vb_cull_count
-                    .map_or(scene.light_table.buffer, |r| r[fi].buffer),
-                // Rung R2d-3: see the `not(hwrt)` variant's own comment for why this one is
-                // `.expect()`ed rather than placeholder-backed.
-                scene
-                    .vb_visible_instance
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_visible_instance")
-                    [fi]
-                    .buffer,
-                // VG R3 piece 2 step P2-3: the LATE indirect record array, appended LAST — see the
-                // `not(hwrt)` variant's own comment.
-                scene
-                    .vb_indirect_late
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_indirect_late")
-                    [fi]
-                    .buffer,
-                // VG R3 piece 3 step P3-3: the occlusion split's trio — see the `not(hwrt)`
-                // variant's own comment.
-                scene
-                    .vb_late_visible
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_late_visible")
-                    [fi]
-                    .buffer,
-                scene
-                    .vb_late_count
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_late_count")
-                    [fi]
-                    .buffer,
-                scene
-                    .vb_cull_uniform
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_cull_uniform")
-                    [fi]
-                    .buffer,
-            ]),
+            images: images.handles,
+            buffers: buffers.handles,
         };
         self.frame_graph.record_pass(pass, &mut sink);
+    }
+
+    /// OBS (R): refreshes the armed `BOYKO_GRAPH_RECEIPT` capture from this frame's scene (the
+    /// `[config]` predicates) and — debug builds only — the dispatched declarator's sink fill (the
+    /// `[[sink]]` name and `Fif` columns, re-run for this slot exactly as the (P) check runs it).
+    /// Called after the frame recorded, only when armed.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn capture_receipt(&mut self, scene: &GBufferScene<'_>, targets: &GBufferTargets) {
+        let fi = self.frame_index;
+        let Some(cap) = self.receipt.as_mut() else {
+            return;
+        };
+        cap.config = super::frame_driver::ReceiptConfig::capture(scene);
+        cap.frames += 1;
+        let declarator = if scene.path_is_vb() {
+            super::seed_class::DECL_VB
+        } else if scene.path_is_forward() {
+            super::seed_class::DECL_FORWARD
+        } else {
+            super::seed_class::DECL_DEFERRED
+        };
+        cap.declarator = declarator;
+        #[cfg(debug_assertions)]
+        match declarator {
+            super::seed_class::DECL_VB => {
+                let (Some(fwd), Some(vb)) = (targets.forward.as_ref(), targets.vb.as_ref()) else {
+                    return;
+                };
+                let (images, buffers) = vb_sink(targets, fwd, vb, scene, fi);
+                cap.set_sinks(declarator, &images.meta, &buffers.meta);
+            }
+            super::seed_class::DECL_FORWARD => {
+                let Some(fwd) = targets.forward.as_ref() else {
+                    return;
+                };
+                let (images, buffers) = forward_sink(targets, fwd, scene, fi);
+                cap.set_sinks(declarator, &images.meta, &buffers.meta);
+            }
+            _ => {
+                let (images, buffers) = gbuffer_sink(targets, scene, fi);
+                cap.set_sinks(declarator, &images.meta, &buffers.meta);
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = (targets, fi);
+    }
+
+    /// OBS (D, H0 Scope 6): records the image dump's copies for `plan` — one tightly-packed
+    /// mip-0 / layer-0 `vkCmdCopyImageToBuffer` per copied name into that name's requested
+    /// staging, each followed by the host-read barrier (H0 Scope 7) — and notes what it copied
+    /// (format, extent, `frame_index`) for the instrument's file header. A name whose source is
+    /// absent, whose format the dump does not decode, or whose staging is too small is skipped
+    /// and reported as not copied: the copy is never recorded past the staging.
+    ///
+    /// # Safety
+    ///
+    /// `cmd` is recording, outside any render scope, and `plan.pass`'s derived barriers were just
+    /// recorded into it, so every copied source is in `plan.layouts[name]`. Every `Some` source
+    /// is the live image this frame's slot names for that graph resource, created with
+    /// `TRANSFER_SRC` usage (the targets carry it when the dump is armed) and at least `extent`
+    /// large. Every non-null staging buffer of the pending request meets the image-dump clause of
+    /// [`Renderer::render_gbuffer_frame`](super::frame_driver::Renderer::render_gbuffer_frame)'s
+    /// `# Safety`: live on this device, host-visible, created with `TRANSFER_DST`, at least
+    /// `capacity[i]` bytes, and referenced by no other pending submission. The three recorders,
+    /// the only callers, run inside that fn and state the clause in their own `# Safety`.
+    pub(crate) unsafe fn record_image_dump_copies(
+        &self,
+        cmd: VkCommandBuffer,
+        plan: ImageDumpPlan,
+        sources: &[(super::frame_driver::ImageDumpName, Option<&crate::texture::VulkanTexture>, VkExtent2D)],
+        frame_index: u32,
+    ) {
+        use super::frame_driver::{image_dump_texel_bytes, ImageDumpCopy, IMAGE_DUMP_MAX};
+        let Some(arm) = self.image_dump.as_ref() else {
+            return;
+        };
+        let Some(request) = arm.request.as_ref() else {
+            return;
+        };
+        let mut copies = [ImageDumpCopy::NONE; IMAGE_DUMP_MAX];
+        for &(name, tex, extent) in sources {
+            let i = name as usize;
+            let (Some(tex), true) = (tex, plan.has(name)) else {
+                continue;
+            };
+            let staging = request.staging[i];
+            let Some(texel) = image_dump_texel_bytes(tex.view_format) else {
+                continue;
+            };
+            let bytes = u64::from(extent.width) * u64::from(extent.height) * u64::from(texel);
+            if staging.is_null() || request.capacity[i] < bytes {
+                continue;
+            }
+            let region = VkBufferImageCopy {
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: VkImageSubresourceLayers {
+                    aspect_mask: if name.is_depth() { VK_IMAGE_ASPECT_DEPTH_BIT } else { VK_IMAGE_ASPECT_COLOR_BIT },
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: VkOffset3D { x: 0, y: 0, z: 0 },
+                image_extent: VkExtent3D { width: extent.width, height: extent.height, depth: 1 },
+            };
+            // SAFETY: the caller guarantees `cmd` is recording outside any render scope, `tex` is
+            // live with `TRANSFER_SRC` usage, at least `extent` large and in `plan.layouts[i]`
+            // (the pass's derived barrier just recorded), and, by the image-dump clause of
+            // `render_gbuffer_frame`'s `# Safety`, that `staging` is a live TRANSFER_DST
+            // host-visible buffer of at least `capacity[i]` bytes that no other pending submission
+            // touches; `bytes <= capacity[i]` is checked above, so the one tightly-packed mip-0
+            // region lands inside it; `&region` outlives the call. The host-read barrier recorded after the copy names the same live
+            // destination on the same open command buffer, outside any render scope
+            // (`record_host_read_barrier`'s contract).
+            unsafe {
+                (self.fns.cmd_copy_image_to_buffer)(cmd, tex.image, plan.layouts[i], staging, 1, &region);
+                crate::host_read::record_host_read_barrier(self.fns, cmd, &[staging]);
+            }
+            copies[i] = ImageDumpCopy {
+                copied: true,
+                vk_format: tex.view_format,
+                width: extent.width,
+                height: extent.height,
+                mip: 0,
+                layers: 1,
+                frame_index,
+                bytes,
+            };
+        }
+        arm.copies.set(copies);
     }
 }
 
@@ -7059,17 +7353,16 @@ impl Renderer<'_> {
 #[inline]
 fn vb_sink_buffers(
     scene: &GBufferScene<'_>,
-    fixed: [VkBuffer; VB_BUFFER_COUNT - PARTICLE_BUFFER_COUNT - MATERIAL_TAIL_BUFFER_COUNT],
-) -> [VkBuffer; VB_BUFFER_COUNT] {
-    let mut buffers = [VkBuffer::NULL; VB_BUFFER_COUNT];
-    buffers[..fixed.len()].copy_from_slice(&fixed);
-    let mut next = fixed.len();
+    fixed: [super::seed_class::Slot<VkBuffer>; VB_BUFFER_COUNT - PARTICLE_BUFFER_COUNT - MATERIAL_TAIL_BUFFER_COUNT],
+) -> super::seed_class::SinkFill<VkBuffer, VB_BUFFER_COUNT> {
+    use super::seed_class::{slot, SinkFill};
+    let mut buffers = SinkFill::new(VkBuffer::NULL);
+    buffers.push_all(&fixed);
     if let Some(p) = scene.particle.as_ref() {
-        buffers[next..next + PARTICLE_BUFFER_COUNT].copy_from_slice(&particle_sink_buffers(p));
-        next += PARTICLE_BUFFER_COUNT;
+        buffers.push_all(&particle_sink_buffers(p));
     }
     if scene.material_upload.is_some() {
-        buffers[next] = scene.material_table.buffer;
+        buffers.push_all(&[slot!("material_table", Single, scene.material_table.buffer)]);
     }
     buffers
 }

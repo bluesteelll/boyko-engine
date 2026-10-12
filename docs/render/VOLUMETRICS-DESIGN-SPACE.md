@@ -19,7 +19,12 @@
 > - **Siblings.** The pair [`REFLECTIONS-DESIGN-SPACE.md`](REFLECTIONS-DESIGN-SPACE.md) R4a /
 >   [`TRANSPARENCY-DESIGN-SPACE.md`](TRANSPARENCY-DESIGN-SPACE.md) R11 owns the one prerequisite
 >   this campaign cannot do without: the HDR scene colour. [`POSTFX-AA-DESIGN-SPACE.md`](POSTFX-AA-DESIGN-SPACE.md)
->   §5.2 owns the pre-exposure scalar this design consumes from V2 (D23).
+>   §5.3 owns the pre-exposure scalar this design consumes from V2 (D23; amended 2026-10-12: §5.3, not
+>   §5.2, and V2 reads it from `ResolvedPost`, AD-6).
+> - **Amended 2026-10-12 by the render-wave plan (AD-1, AD-6, AD-8; owner answers of 2026-10-11):** no
+>   `PARTICLE_FOG` axis (withdrawn, AD-8) and the particle counts follow VFX's final 6 / ≤ 36; no
+>   `LIT_FORMAT` axis on `fog_apply` (AD-1: `lit` has one format per build); `vb_viewt` arming
+>   corrected (§4.1); D16 is a fixed-point integer scatter (V10); §10.B's questions are decided.
 > - **Anchors.** This directory is not machine-anchored: `GATED_DOCS`
 >   (`tests/internal_docs_anchors.rs:349`) names no `render/` document.
 
@@ -374,7 +379,7 @@ pub struct GlobalMedium {                 // the world's height fog; density 0 =
 
 **Arming.** `RenderPathConsumers` (`render_path_config.rs:832`) gains `fog_on`. Following the rule that a consumer arms its producer (TRANSPARENCY §2.4), it arms:
 
-- the path's `gViewT` producer: on VB, `vb_viewt`, which today runs only when SSAO arms it (`passes/vb.rs:3911-3919`);
+- the path's `gViewT` producer: on VB, `vb_viewt`, which TAA **or** split + SSAO arm today (`gpu_scene/mod.rs:6663-6680`; amended 2026-10-12 — pass 2 said "only when SSAO arms it"); on SDF legs the producer is the marcher VIEWT variant, and `fog_on` ORs into **both** predicates, each on its own legs (the render-wave plan's V2);
 - the `MotionCamState` carry (`motion_cam.rs:101`), which the history needs;
 - `fog_sun_far_depth`, when D21 says so.
 
@@ -648,7 +653,7 @@ A fog lookup written from the header comment would be mirrored and would bless i
   - an absent input binds a valid placeholder (`targets.rs:204-208`);
   - `csm_pcf_disc` selects by a wave-uniform word, not a variant.
 - **Axes vs gating, priced.** The axis alternative is +4 particle VS and +8 translucent FS `.spv`. The runtime gate costs one wave-uniform branch per vertex or fragment when fog is off.
-- **Fog's own passes** use axes only where their interface differs (`FOG_DDGI`, `FOG_SDF_SUN`, `LIT_FORMAT`, §5).
+- **Fog's own passes** use axes only where their interface differs (`FOG_DDGI`, `FOG_SDF_SUN`, §5; the former `LIT_FORMAT` axis is removed by AD-1, amended 2026-10-12).
 
 **Translucent meshes.** The transparency design's `forward_translucent.fs` fetches per fragment. **No new axis**, so TRANSPARENCY D18's variant bound stands.
 
@@ -669,7 +674,7 @@ The `-D REFRACT` variant keeps its transmitted and own terms separate before the
 - **Alpha particles** take `color.rgb·T + S`. The FS then yields `(c·T + S)·tex.rgb·α`, against the exact `c·tex.rgb·α·T + S·α`.
   - **The error is `S·α·(tex.rgb − 1)`.** It is zero for white or greyscale-mask smoke sprites and darkens in-scatter in proportion on dark-textured sprites.
   - **This is the VS-only fold VFX-DESIGN-SPACE records** (`VFX-DESIGN-SPACE.md:1042-1044`), taken here with the approximation stated.
-  - **The exact escape** is an FS interpolant (FS 24 → 48), taken only if a V8 golden shows the error.
+  - **The exact escape** is an FS interpolant (VS 6 → 12 and FS 36 → 72 against VFX's final numbers; amended 2026-10-12, AD-8 — pass 2 quoted VFX pass 1's smaller counts), taken only if a V8 golden shows the error.
 - **Rejected: evaluating (T, S) per particle in `particle_sim`** (the PARTICLES D11 site). The render record's colour lane is RGBA8 (`ParticleRender::color_rgba8`, `particle.rs`), so S would clip at 1.0 and T and S would quantize to 1/255, the F2 trade-off class. It would also force `particle_sim` after `fog_integrate`.
 - **Cost:** 100 k particles × 4 vertices = 400 k trilinear fetches, **< 0.02 ms** [E].
 
@@ -782,18 +787,18 @@ The sibling effects survey written the same day, [`VFX-RESEARCH.md`](VFX-RESEARC
 | | `FOG_SDF_SUN` | 0, 1 | ×2 = **4** | +`fog_sdf_sunvis` `Texture3D` + sampler |
 | `fog_sdf_sunvis.comp.hlsl` | — | — | 1 | edit-list `Buf` (the gateway's) + `RWTexture3D` |
 | `fog_integrate.comp.hlsl` | — | — | 1 | two 3D images |
-| `fog_apply.comp.hlsl` | `LIT_FORMAT` (REFLECTIONS R4a's axis) | b10g11r11, rgba16f | 2 | the `lit` image format |
+| `fog_apply.comp.hlsl` | — (the former `LIT_FORMAT` row is removed by AD-1, amended 2026-10-12: `lit` has one format per build, REQUIRED at boot) | — | 1 | the `lit` image (its one format) |
 | `fog_sun_far_depth` | — | — | **0 new** (the shipped `csm_depth` pipeline, recorded once more) | none |
 | `cluster_cull.hlsl` | — | — | **0 new** (same `.spv`, second dispatch) | none (D3) |
-| `particle_draw.vs.hlsl` (V8) | — (**no axis**, D24) | — | count unchanged (VFX's 4); **re-emitted once** at V8 | +`fog_integrated` + sampler + a gate word, always bound |
+| `particle_draw.vs.hlsl` (V8) | — (**no axis**, D24) | — | count unchanged (VFX's final 6, AD-8; pass 2 quoted VFX pass 1's 4); **re-emitted once** at V8 | +`fog_integrated` + sampler + a gate word, always bound |
 | `forward_translucent.fs.hlsl` (V8) | — (no axis, D24) | — | count unchanged (TRANSPARENCY D18's 8) | same, always bound; `REFRACT` composes per §4.9 |
 | V9 `atmo_lut_*.comp.hlsl` | — | — | 4 | LUT images |
 | V11 `cloud_*.comp.hlsl` | — | — | 4 | noise, trace, reconstruct, shadow |
 | V13 `far_shaft_mask.comp.hlsl` | — | — | 1–2 | depth in, mask out |
 
-That is **8 new `.spv` through V8**, plus one re-emit of `particle_draw.vs`. Pass 1 said 10: it counted a `PARTICLE_FOG` axis "+2 on top of `DEPTH_LINEAR`" that would in fact have been 4 → 8 on top of VFX's `PARTICLE_FX` (the `particle_draw.vs` row, `VFX-DESIGN-SPACE.md:1012`). The test-only kernels (`volume_roundtrip.comp.hlsl`, `fog_shadow_probe.comp.hlsl`) are not manifest rows.
+That is **8 new `.spv` through V8**, plus one re-emit of `particle_draw.vs`. Pass 1 said 10: it counted a `PARTICLE_FOG` axis (withdrawn, AD-8) "+2 on top of `DEPTH_LINEAR`" that would in fact have doubled VFX's `PARTICLE_FX` count (6 → 12 against VFX's final numbers; the `particle_draw.vs` row of `VFX-DESIGN-SPACE.md` §6.3). The test-only kernels (`volume_roundtrip.comp.hlsl`, `fog_shadow_probe.comp.hlsl`) are not manifest rows.
 
-**A cross-document note.** VFX-DESIGN-SPACE §6.3 carries this rung's `PARTICLE_FOG` as "VS 4 → 8". Under D24 its number is **4**, and its FS bound stays 24.
+**A cross-document note** (amended 2026-10-12, AD-8). VFX-DESIGN-SPACE §6.3 once carried this rung's `PARTICLE_FOG` axis (withdrawn, AD-8); under D24 the particle VS stays at VFX's final **6** and the FS bound at **≤ 36** (VFX's `PARTICLE_FX` is three-valued; the earlier "4 / 24" quoted VFX pass 1).
 
 ---
 
@@ -818,7 +823,7 @@ That is **8 new `.spv` through V8**, plus one re-emit of `particle_draw.vs`. Pas
 
 Every gate is **red-first**: the test lands before the code it pins and is shown red, by absence or by a named mutation, before it is accepted. Goldens are byte goldens only where history is Off (P14). Perf gates are GPU timestamps on the RTX 3060 Laptop at 1080p / 1440p / 4K, run **with the owner's consent in a quiet window**: three build lanes share the machine. **Every perf gate is set at the conservative end of its estimate** (RESEARCH §4.1), so a correct implementation cannot fail it on the estimate's spread.
 
-**Tolerances are derived, not chosen.** Pixel-level oracles run with the `LIT_FORMAT = rgba16f` arm forced, because B10G11R11's 6-bit mantissa (5 bits on blue) cannot resolve 1e-3. Probe quads sit at exact slice far edges and probe pixels at column centres, so every filter weight is exactly 0 or 1 whatever the device's `subTexelPrecisionBits`. What remains is at most four fp16 roundings on the path (scatter, integrated, `lit`, each ≤ 2⁻¹¹ relative) plus the σt rounding's optical-depth term τ·2⁻¹¹ with τ ≤ 2 in the fixtures, which is **≤ 2e-3 relative**.
+**Tolerances are derived, not chosen.** Pixel-level oracles read a test-only RGBA32F probe kernel (amended 2026-10-12, AD-1: there is no `LIT_FORMAT` arm to force), because B10G11R11's 6-bit mantissa (5 bits on blue) cannot resolve 1e-3. Probe quads sit at exact slice far edges and probe pixels at column centres, so every filter weight is exactly 0 or 1 whatever the device's `subTexelPrecisionBits`. What remains is at most four fp16 roundings on the path (scatter, integrated, `lit`, each ≤ 2⁻¹¹ relative) plus the σt rounding's optical-depth term τ·2⁻¹¹ with τ ≤ 2 in the fixtures, which is **≤ 2e-3 relative**.
 
 ### V0 — 3D storage images (RHI)
 
@@ -1016,8 +1021,8 @@ Every gate is **red-first**: the test lands before the code it pins and is shown
 | K11 | The estimates are wrong by the anchors' spread (0.42–1.03 ns per froxel, 2.5×) | V2's perf gate records the first real number. The default preset (Low) is chosen so even the upper end fits, and every gate sits at the conservative end. |
 | K12 | The far cascade's near edge coarsens under `Shrink` (texel > froxel below ≈ 12 m) | Stated (§4.6.1). The history smooths it; HWRT (§4.6.2) or a 2048² far map is the escape if a golden shows it. |
 | K13 | The fp16 EMA floor leaves a ≤ 10 ULP bias (≈ 0.5–1 %) (P27) | Stated. Dithered rounding before the store is the escape if it is ever visible. |
-| K14 | Froxel-scale leaking across thin screen-space edges (P25) | The depth half is removed by the far-edge mapping (§4.3). The XY half is accepted at V2. The escape is a depth-aware XY weight from the HZB tile range, ≈ +0.01–0.03 ms at 1440p [E]. |
-| K15 | The alpha-particle fold darkens in-scatter on dark sprites | Stated error `S·α·(tex.rgb − 1)`. The FS interpolant (FS 24 → 48) is the escape. |
+| K14 | Froxel-scale leaking across thin screen-space edges (P25) | The depth half is removed by the far-edge mapping (§4.3). The XY half is accepted at V2. The escape is a depth-aware XY weight from the HZB tile range, ≈ +0.01–0.03 ms at 1440p [E]. **Note (amended 2026-10-12):** the shipped HZB is min-only (farthest), VB-only and default Off, so it has no tile *range*; the escape is re-priced in the render-wave plan's `V-TAIL`. |
+| K15 | The alpha-particle fold darkens in-scatter on dark sprites | Stated error `S·α·(tex.rgb − 1)`. The FS interpolant (VS 6 → 12, FS 36 → 72; amended 2026-10-12, AD-8) is the escape. |
 
 ---
 
@@ -1042,14 +1047,14 @@ Every gate is **red-first**: the test lands before the code it pins and is shown
 | D13 | Serial column integrate; a scan only if > 0.1 ms measured. | ≈ 0.13 ms estimated; marginal, so measure first. |
 | D14 | Procedural one-octave noise; no noise texture before clouds. | AC4's measured-sufficient choice; saves a generation pass and a texture. |
 | D15 | Local volumes: CPU cull, cap 32 visible, loop in inject. | ≈ 0.02–0.05 ms. UE's `r.LocalFogVolume.TileMaxInstanceCount` defaults to 32 "per view (and per tile for consistency)" (T13): a global cap, as here. Binning waits for a scene that needs more. |
-| D16 | Particle density: gather via cell bins. | Deterministic, no `VK_EXT_shader_atomic_float`. |
+| D16 | Particle density: ~~gather via cell bins~~ **a fixed-point integer scatter** (`InterlockedAdd` on `u32` accumulators; amended 2026-10-12 by the render-wave plan's V10). | Deterministic (an integer sum is order-independent), no `VK_EXT_shader_atomic_float`: both reasons hold, with no bins, sort or per-froxel cap. The accumulator lives in the fog bundle, armed by the boot-frozen `VolumetricsConfig::particle_media`, as a seeded FrameLocal single buffer, armed per frame by a presence count of every particle whose event lineage can inject. |
 | D17 | The scene-colour / `lit_prev` copy stays single and runs **after** `fog_apply`. `REFRACT` composes as `T(d)·L_s + τ·B + (1 − τ)·S(d)`. | Refraction is correct with that formula; the generic rule would double-fog `[0, d]` (§4.9). The SSR approximation is recorded (K7). A second copy costs 8–16 MB. |
-| D18 | Translucents fetch per fragment; particles fetch per vertex at the centre and fold into the vertex colour (alpha: the stated `tex.rgb` approximation). | < 0.02 ms for 100 k particles; FS bounds unchanged (24 particle, 8 translucent). |
+| D18 | Translucents fetch per fragment; particles fetch per vertex at the centre and fold into the vertex colour (alpha: the stated `tex.rgb` approximation). | < 0.02 ms for 100 k particles; FS bounds unchanged (≤ 36 particle under VFX's final numbers, AD-8 — pass 2 said 24; 8 translucent). |
 | D19 | The sun colour is computed on the host from the transmittance leaf's f32 instance. | < 1 µs, no readback; every consumer of the light table sees it. |
 | D20 | RGBA16F volumes, RGBA8 SDF-visibility volume. | Both core-storage formats in the tree's own usage; R8/R16F would need a probe and a fallback arm to save 0.35 MB. |
 | D21 | **Sun coverage:** no froxel is lit for lack of a cascade. When the CSM is armed and `s < z_far`, a fog-owned 1024² far cascade covers `[s, z_far]`, fitted per frame. | ≤ 0.067 ms [M anchor] + 4.19 MB, no surface byte moved. Clamping `z_far` relocates the defect, raising the shadow distance moves every surface golden in the last cascade, and fading is wrong for lit haze (§4.6.1). |
 | D22 | History-On correctness is gated at the scatter level by the EMA-recursion oracle with a derived 20-ULP bound; image goldens are history-Off byte goldens. | The fp16/EMA arithmetic fixes the tolerance (§4.8), so no statistical image bar and no owner tolerance call is needed (the former Q4, withdrawn: O4 of the review). |
-| D23 | **Pre-exposure from V2:** `fog_inject` and the tail multiply by the frame's pre-exposure, and the history is rescaled by `pre_N / pre_{N−1}`. | Surfaces already multiply by `H.exposure` (`deferred_pbr.hlsl:1479`, `:1481`; `forward_opaque.fs.hlsl:436`), a live knob (`light.rs:562-564`) that POSTFX §5.2 makes the per-frame pre-exposure. Without it, fog is 2× too bright at exposure 0.5 and stale for 45+ frames after a change. It also settles P23 from day one. |
+| D23 | **Pre-exposure from V2:** `fog_inject` and the tail multiply by the frame's pre-exposure, and the history is rescaled by `pre_N / pre_{N−1}`. | Surfaces already multiply by `H.exposure` (`deferred_pbr.hlsl:1479`, `:1481`; `forward_opaque.fs.hlsl:436`), a live knob (`light.rs:562-564`) that POSTFX §5.3 makes the per-frame pre-exposure (amended 2026-10-12: §5.3, not §5.2; V2 takes the scalar from `ResolvedPost`, AD-6). Without it, fog is 2× too bright at exposure 0.5 and stale for 45+ frames after a change. It also settles P23 from day one. |
 | D24 | **One gating rule:** consumer draw shaders take fog through an always-bound binding with a boot-resolved gate, never a `-D` axis. | +0 `.spv` against +12 for axes; the cost when off is one wave-uniform branch. It is the tree's rule (TRANSPARENCY D18, the placeholder pattern, `csm_pcf_disc`'s selector). |
 | D25 | ORTHO cameras are supported, with the cull's own convention; reprojection takes the previous slice from view-z, never NDC z. | The cull already handles ORTHO (`cluster_cull.hlsl:110-114`). On Deferred the marcher projection pins NDC z (`SHADER-VARIANT-MANIFEST.md:84`). A degrade path would need per-frame detection and costs more than the branch. |
 | D26 | Overflows are counters, never frame-loop log lines: `FogStats` on the host, the fog cull's alloc word and V10's bin drop word on the GPU, read on a cold path. | The `ParticleCounters::clamped_spawns` precedent (`particle.rs:444`). The unchanged cull kernel already accumulates the full demand (`cluster_cull.hlsl:376`). |
@@ -1071,6 +1076,12 @@ Every gate is **red-first**: the test lands before the code it pins and is shown
    - **a longer fog range** (`z_far` 128–256 m: no volume cost; the far cascade draws more distant casters; fewer depth slices near the camera, 36.6 → 28.4 within 8 m at 256 m).
 
    Former Q4 (the temporal golden tolerance) is withdrawn: it is decided by arithmetic in D22.
+
+**Decided by the owner, 2026-10-11 (render-wave plan index §9 item 5; amended 2026-10-12):**
+- **Q1:** YES, V9 after V3; the engine default is `AtmosphereMode::Off` (confirmation C2 pending).
+- **Q2:** none in this wave (V11 is out).
+- **Q3:** flipbooks + six-way cards + V10's froxel injection; V12 unscheduled.
+- **Q4:** V13 is not built in this wave (confirmation C1 pending); `z_far` is configurable to 256 m (V2).
 
 ---
 
@@ -1098,12 +1109,12 @@ Every remark was re-checked against the tree at `6394bc5e` or the cited source b
 | Remark | Verdict | What changed |
 |---|---|---|
 | **C1** fog past the CSM range is fully lit | **Accepted, confirmed.** `csm_visibility` returns 1 past the last split (`shadow_apply.hlsli:281`, `:313`); `DEFAULT_SHADOW_DISTANCE = 30.0` (`csm_config.rs:157`); every CSM example uses 3 cascades with that default. | D21, §4.6.1 (four options priced), a fog far cascade, the V2 (f) far-coverage gate with its red mutation and the `Shrink` handover test, the participation matrix, §3.1/§3.2 costs. |
-| **W1** exposure missing until V9, no history rescale | **Accepted, confirmed.** Surfaces multiply by `H.exposure` (`deferred_pbr.hlsl:1479`, `:1481`); POSTFX §5.2 makes it the pre-exposure. | D23: pre-exposure at injection and in the tail from V2; the history rescale by `pre_N/pre_{N−1}`; V2 (e) exposure consistency; the V3 pre-exposure-invariance gate; K6 closed at V2. **Cross-document:** POSTFX §5.2 still names V9 as this campaign's consumer; it is now V2, which its owner should update. |
+| **W1** exposure missing until V9, no history rescale | **Accepted, confirmed.** Surfaces multiply by `H.exposure` (`deferred_pbr.hlsl:1479`, `:1481`); POSTFX §5.3 makes it the pre-exposure (amended 2026-10-12: §5.3; V2 reads it from `ResolvedPost`, AD-6). | D23: pre-exposure at injection and in the tail from V2; the history rescale by `pre_N/pre_{N−1}`; V2 (e) exposure consistency; the V3 pre-exposure-invariance gate; K6 closed at V2. **Cross-document (closed 2026-10-12, AD-6):** POSTFX §5.3 E2, its hand-off paragraph and its cross-reference list name V2 as this campaign's consumer. |
 | **W2** V3's convergence gate cannot pass | **Accepted, confirmed by arithmetic.** The reset weight is 0.95¹⁵ ≈ 0.46, the steady-state weights are ∝ 0.95ᵏ, and the fp16 floor is 10 ULP. | V3 now uses the EMA recursion over history-Off readbacks at the scatter level, with a derived 20-ULP bound and an asserted non-vacuity precondition; §4.8 states the floor (P27) and the weighting. |
 | **W3** no oracle for the fog's shadow taps | **Accepted, and stronger than stated.** The tree's own header comment describes the Y-flip the body removes (`shadow_apply.hlsli:114-115` vs `:260`). | V2 (g) visibility probe fixture: a host ray-box oracle, a cross-check against `csm_visibility`, an off-axis caster, and four red mutations; V4's atlas probe; shaft goldens blessed only after the probe, with a semantic assertion. |
 | **W4** sun rays stop at min(30 m, 64 m); "converged" overstated; T3 mispriced | **Accepted.** The UE Sky Atmosphere page's shaft sentence was re-fetched and confirmed. UE's Light Shafts page publishes 0.5 ms (occlusion) at 1080p on a GTX 680, which RESEARCH §7 had called absent. | §0.2 wording; §4.6.3 far-field options priced; V13 and owner Q4; §4.6.4 the sharpness ceiling (16 px at 1440p, 24 px at 4K); T3 re-priced from the listed texture rate (166.4 GT/s): 1.42–2.8 ms full resolution, 0.18–0.35 ms at half resolution × 32 steps; D1 rewritten. |
 | **W5** V7 bounds, march segment, typical fraction, edit regime, comparator | **Accepted, all five**, plus a sixth defect found while fixing (a): the leaf's penumbra reaches `T_MAX/SHADOW_K = 1.25 m` past the tight bound, so even per-kind bounds were unsound (P29). | §3.3 rewritten: a per-kind bound table (`boyko_sdf_math/src/lib.rs:150-153`, `sdf_field.hlsli:55`, `:84`), Σk/4 smoothness from the generated `smin` (`:151-162`), penumbra inflation, a soundness proof, the march origin stated (the cell centre, `T_MAX`, approach cost ≈ 5 steps), scenario fractions (2.5 % / 57 % / 100 %), validity ≤ 16 edits and the 256–4096 cost; §2.2 replaces the 36× claim with L′ at 0.05–0.18 ms; D9; V7 gates with three bound mutations. |
-| **W6** particle variants undercounted; the FS decision not taken | **Accepted.** The decision is taken. The review's untried option (per-particle in `particle_sim`) was evaluated and **rejected on a measured layout fact**: the render record's colour lane is RGBA8 (`ParticleRender::color_rgba8`), so S would clip at 1.0. | D24 (one rule: always-bound + gate for every consumer draw shader, so no `PARTICLE_FOG` axis); D18 (the VS fold with the `S·α·(tex.rgb − 1)` error stated); the manifest recounted at 8 new `.spv` + one re-emit; a VFX cross-note (its VS stays 4, FS 24). |
+| **W6** particle variants undercounted; the FS decision not taken | **Accepted.** The decision is taken. The review's untried option (per-particle in `particle_sim`) was evaluated and **rejected on a measured layout fact**: the render record's colour lane is RGBA8 (`ParticleRender::color_rgba8`), so S would clip at 1.0. | D24 (one rule: always-bound + gate for every consumer draw shader, so the `PARTICLE_FOG` axis is withdrawn, AD-8); D18 (the VS fold with the `S·α·(tex.rgb − 1)` error stated); the manifest recounted at 8 new `.spv` + one re-emit; a VFX cross-note (its VS stays 6, FS ≤ 36 under AD-8; pass 2 said 4 / 24). |
 | **W7** clouds scaled by the optimistic ratio | **Accepted, confirmed by arithmetic.** | One scaling method (RESEARCH §4.1): conservative = smallest applicable ratio. Clouds 0.60–1.86 ms at 1440p; Q2 and the V11 gate (≤ 1.9 ms) follow; the sky LUTs and T1 are re-scaled by the same method (GTX 1080 and GTX 680 specs fetched). |
 | **O1** single `fog_integrated` | **Adopted** (`graph.rs:353-360`, `ddgi.rs:155-156`). | D5, §4.2, §3.2: 27.0 / 49.6 MB. |
 | **O2** REFRACT double-fogs `[0, d]` | **Adopted, confirmed**: TRANSPARENCY R5 is α = 1 replace. | §4.9 formula `T(d)·L_s + τ·B + (1 − τ)·S(d)`, D17, the V8 clear-glass gate. |

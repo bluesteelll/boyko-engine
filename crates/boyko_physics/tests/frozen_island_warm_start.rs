@@ -50,6 +50,9 @@
 //!   load `debug_assert!` (a debug-only red: in release the load stays below 1);
 //! * scaled by 0.9999 only on a pool of more than one thread: the determinism test only.
 //!
+//! Lane SL re-expressed the scenario's pre-freeze equality (the twin's zero after each settle,
+//! above); the list above is re-run against it and must stay red as stated.
+//!
 //! # The twin
 //!
 //! Two worlds, the same scene spawned in the same order, stepped in lockstep:
@@ -61,11 +64,14 @@
 //!   `0`, so its debounce never ticks and it never sleeps, but it takes the same
 //!   sleeping-on solve path as the sleeper.
 //!
-//! Before the sleeper's first frozen step nothing distinguishes the two worlds, and the
-//! scenario asserts that they are bit-identical on every one of those steps. So the twin
-//! is exactly what the sleeper would have been had it never slept, and on the wake step
-//! it is the control: it must show `point_hits == points`, which proves the assertion
-//! under test can pass on this scene at this step.
+//! Before the sleeper's first frozen step only one thing distinguishes the two worlds: the step
+//! that puts the sleeper's island to sleep zeroes its velocities (lane SL's settle). So on every
+//! step on which the sleeper's `IslandSleep::rows_put_to_sleep` rises, the scenario asserts the
+//! two worlds equal on every field but the sleeper's velocities, which must be `+0.0` bits, then
+//! writes the same zero into the twin's boxes; on every step, after that write, it asserts them
+//! bit-identical. So the twin is exactly what the sleeper would have been had it never slept, and
+//! on the wake step it is the control: it must show `point_hits == points`, which proves the
+//! assertion under test can pass on this scene at this step.
 //!
 //! The scenario also checks that a zero hit count cannot come from anything but the lost
 //! impulses: neither warm cursor records a `Reset`, and every pushed manifold's lookup
@@ -399,6 +405,23 @@ impl Pile {
             .collect()
     }
 
+    /// `IslandSleep::rows_put_to_sleep` after the last step.
+    fn rows_put_to_sleep(&self) -> u64 {
+        self.world.resource::<IslandSleep>().rows_put_to_sleep()
+    }
+
+    /// Writes a zero velocity into every box: the twin's copy of the sleeper's settle.
+    fn zero_velocities(&mut self) {
+        for &e in &self.boxes {
+            let mut b = self
+                .world
+                .get_component_mut::<RigidBody>(e)
+                .expect("harness: a column box is live");
+            b.linear_velocity = Vec3::ZERO;
+            b.angular_velocity = Vec3::ZERO;
+        }
+    }
+
     /// Every box's linear velocity, bottom first.
     fn velocities(&self) -> Vec<Vec3> {
         self.boxes
@@ -459,13 +482,32 @@ fn run_scenario() -> Observation {
 
     let mut freeze_step = None;
     let mut sleeper_before_freeze = WarmSeedStats::default();
+    let mut settles = 0;
     for step in 1..=SETTLE_LIMIT {
+        let put = sleeper.rows_put_to_sleep();
         sleeper.step();
         twin.step();
         twin_never_slept &= twin.all_awake();
         if sleeper.frozen() {
             freeze_step = Some(step);
             break;
+        }
+        if sleeper.rows_put_to_sleep() != put {
+            // Lane SL: the sleeper's island went to sleep at this step's end, and the settle
+            // zeroed its velocities. Every other field is the twin's; then the twin takes the
+            // same zero.
+            let (s, t) = (sleeper.state(), twin.state());
+            for (i, (sb, tb)) in s.iter().zip(&t).enumerate() {
+                let kept = [0, 1, 2, 6, 7, 8, 9];
+                assert!(
+                    kept.iter().all(|&f| sb[f] == tb[f])
+                        && [3, 4, 5, 10, 11, 12].iter().all(|&f| sb[f] == 0),
+                    "the settle step {step}: box {i} (bottom first) must equal the twin's but for \
+                     its velocities, which must be +0.0 bits; sleeper {sb:?}, twin {tb:?}"
+                );
+            }
+            twin.zero_velocities();
+            settles += 1;
         }
         assert_eq!(
             sleeper.state(),
@@ -482,6 +524,10 @@ fn run_scenario() -> Observation {
             sleeper.awake_rows()
         )
     });
+    assert!(
+        settles >= 1,
+        "anti-vacuity: the sleeper froze without a settle step, so the twin never took its zero"
+    );
     let twin_velocity_at_freeze = twin.velocities();
     let twin_at_freeze = twin.stats();
     let twin_state_at_freeze = twin.state();

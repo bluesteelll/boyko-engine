@@ -12,7 +12,11 @@
 //!   records its contact-change wake events. G2 (one height-5 pile) and G7 (sixteen
 //!   height-4 draws) cap them, with budgets sized against the re-draw distribution that the
 //!   `flicker_redraw_distribution` generator prints, and a budget overrun is reported the
-//!   moment it happens rather than as a missed freeze.
+//!   moment it happens rather than as a missed freeze. Since lane SL's seal a count change at
+//!   a latch attempt can be re-keyed instead of woken (`IslandSleep::begin_step`, "The settle
+//!   and the seal"), so the event G2, G7 and the generator count is an ATTEMPT EVENT: a step on
+//!   which `contact_wakes` or `settle_rekeys` rose ([`attempt_event`]), the count change
+//!   however it is resolved. Counted the old way the budgets would read 0 by construction.
 //!
 //! # What a red G2 or G7 means until A4's Decision 3 is decided again
 //!
@@ -190,7 +194,7 @@
 //!   1240 boxes) run ONLY in release, as part of the physics release run that `CLAUDE.md`
 //!   names as their leg: `cargo test --release -p boyko-physics --no-fail-fast` (this file
 //!   alone: `cargo test --release -p boyko-physics --test sleep_settles_box_piles`). There
-//!   this binary prints `running 16 tests` and `15 passed; 0 failed; 1 ignored` (the
+//!   this binary prints `running 17 tests` and `16 passed; 0 failed; 1 ignored` (the
 //!   generator). In a debug build they are ignored, and `-- --ignored` in a debug build is NOT
 //!   their leg. A7-R1 is the long one: ~73 s in release, ~80 s for the whole binary before
 //!   the SIMD on/off differential below was added (it runs A7-R1's scene twice more; its
@@ -322,7 +326,9 @@ const OVERLAP_ONLY_MEDIUM_SETTLE_LIMIT: usize = 2 * 243;
 /// 8 x 127 (the A7b tree's latest height-4 freeze); before A7b it was eight times step 750,
 /// [`LONG_SETTLE_LIMIT`].
 const G7_SETTLE_LIMIT: usize = 8 * 61;
-/// G2's cap on contact-change wake events (steps on which `contact_wakes` rose), re-derived
+/// G2's cap on attempt events ([`attempt_event`]: steps on which `contact_wakes` or, since lane
+/// SL, `settle_rekeys` rose — a count change at a latch attempt however it is resolved; the
+/// budget and its readings below were taken when the only resolution was a wake), re-derived
 /// from the generator's run on V2's flip (msvc release, 2026-10-01; rulings 2026-09-30, item
 /// 10e). This file's rule is the smallest budget whose tail `P(>= budget + 1 events)`
 /// ([`tail_probability`]) is below 1 % at the measured wake probability plus one standard error,
@@ -338,7 +344,7 @@ const G7_SETTLE_LIMIT: usize = 8 * 61;
 /// a budget sized for a flicker is one that flicker passes. G2's own draw takes 0, as on the A7b
 /// tree and at L9 C4.
 const G2_MAX_EVENTS: usize = 0;
-/// G7's cap on the contact-change wake events summed over its sixteen draws, re-derived by
+/// G7's cap on the attempt events ([`attempt_event`]) summed over its sixteen draws, re-derived by
 /// the same rule from the same run: no height-4 draw woke (0 events in 30 attempts), so
 /// [`MEASURED_P_HEIGHT_4`] = 0 and the rule gives 0, degenerate as [`G2_MAX_EVENTS`]'s is (the
 /// rule-of-three bound p = 3/30 would give 6, `P(>= 7)` over sixteen draws = 0.44 %). G7's own
@@ -526,7 +532,7 @@ where
 
 // ── Flicker budgets ──────────────────────────────────────────────────────────
 
-/// A cap on contact-change wake events, checked the moment an event is counted.
+/// A cap on attempt events ([`attempt_event`]), checked the moment an event is counted.
 #[derive(Clone, Copy, Debug)]
 struct Budget {
     /// The largest allowed number of events, summed over every draw of the test.
@@ -697,6 +703,29 @@ struct Settled {
     freeze_step: usize,
     contact_wake_rises: Vec<usize>,
     contact_wakes: u64,
+    /// The steps on which a count changed at a latch attempt ([`attempt_event`]): what G2's
+    /// and G7's budgets count.
+    attempt_events: Vec<usize>,
+}
+
+/// Whether a step was an attempt event (lane SL, cut C-3): `contact_wakes` or `settle_rekeys`
+/// rose across it, i.e. a latched island's manifold count changed, whether the change woke it or
+/// the seal re-keyed it. `prev` and `now` are `(contact_wakes, settle_rekeys)` before and after
+/// the step. The only reader of the two counters in `settle_until_frozen`.
+fn attempt_event(prev: (u64, u64), now: (u64, u64)) -> bool {
+    now.0 != prev.0 || now.1 != prev.1
+}
+
+/// Lane SL (cut C-3, mutation M-SL12): a settle re-key is an attempt event exactly as a contact
+/// wake is, so G2's and G7's budgets still see a count change the seal resolves without a wake.
+/// The end-to-end witness that re-keys happen on real piles is `sleep_velocity_zero.rs`'s
+/// T-SL10p.
+#[test]
+fn the_attempt_event_counts_a_settle_rekey() {
+    assert!(attempt_event((4, 0), (4, 1)), "a settle re-key alone is an attempt event");
+    assert!(attempt_event((4, 0), (5, 0)), "a contact wake alone is an attempt event");
+    assert!(attempt_event((4, 0), (5, 3)), "both on one step are one event");
+    assert!(!attempt_event((4, 2), (4, 2)), "a step with neither is no event");
 }
 
 /// What a hold observed.
@@ -978,6 +1007,12 @@ impl Harness {
         self.world.resource::<IslandSleep>().contact_wakes()
     }
 
+    /// `(contact_wakes, settle_rekeys)`: what an attempt event ([`attempt_event`]) reads.
+    fn attempt_counters(&self) -> (u64, u64) {
+        let sleep = self.world.resource::<IslandSleep>();
+        (sleep.contact_wakes(), sleep.settle_rekeys())
+    }
+
     /// `(box-axis cache remap resets, sleep latch remap resets)`.
     fn remap_resets(&self) -> (u64, u64) {
         (
@@ -1105,11 +1140,13 @@ impl Harness {
     }
 
     /// Phase 1: steps until no dynamic row is awake, recording every step on which
-    /// `contact_wakes` rose. With a `budget`, an event past it fails on the step it is
-    /// counted, before the step limit can.
+    /// `contact_wakes` rose and every attempt event ([`attempt_event`]). With a `budget`, an
+    /// attempt event past it fails on the step it is counted, before the step limit can.
     fn settle_until_frozen(&mut self, limit: usize, what: &str, budget: Option<Budget>) -> Settled {
         let mut rises = Vec::new();
-        let mut last = self.contact_wakes();
+        let mut events = Vec::new();
+        let mut counted = self.attempt_counters();
+        let mut last = counted.0;
         // Diagnostics for a timeout: the largest dynamic-row speed² over the final
         // `sleep_frames` steps, against the sleep threshold.
         let (threshold, frames) = {
@@ -1119,32 +1156,38 @@ impl Harness {
         let mut tail_peak = 0.0f32;
         for step in 1..=limit {
             self.step();
-            let now = self.contact_wakes();
+            let now_counted = self.attempt_counters();
+            let now = now_counted.0;
             if now != last {
                 rises.push(step);
                 last = now;
+            }
+            if attempt_event(counted, now_counted) {
+                events.push(step);
                 if let Some(b) = budget {
-                    let events = b.spent + rises.len();
-                    if events > b.max {
-                        // Every attempt of this draw so far was woken; each earlier frozen
+                    let spent = b.spent + events.len();
+                    if spent > b.max {
+                        // Every attempt of this draw so far was an event; each earlier frozen
                         // draw adds its one successful attempt.
-                        let attempts = events + b.frozen_draws;
+                        let attempts = spent + b.frozen_draws;
                         panic!(
-                            "{what}, {} {events} contact-change wake events (budget {}), the last \
-                             at step {step} of this draw (its rises at {rises:?}, contact_wakes \
-                             {now}). {}",
+                            "{what}, {} {spent} attempt events (budget {}), the last at step \
+                             {step} of this draw (its events at {events:?}; (contact_wakes, \
+                             settle_rekeys) {now_counted:?}). {}",
                             b.label,
                             b.max,
-                            flicker_triage(events, attempts, &b)
+                            flicker_triage(spent, attempts, &b)
                         );
                     }
                 }
             }
+            counted = now_counted;
             if self.dynamic_rows_awake().is_empty() {
                 return Settled {
                     freeze_step: step,
                     contact_wake_rises: rises,
                     contact_wakes: now,
+                    attempt_events: events,
                 };
             }
             if step + frames > limit {
@@ -1375,17 +1418,20 @@ fn freeze_and_hold(
 ) -> Settled {
     let settled = h.settle_until_frozen(settle_limit, what, budget);
     println!(
-        "{what}: froze at step {} (contact_wakes {}, {} rise events at {:?})",
+        "{what}: froze at step {} (contact_wakes {}, {} rise events at {:?}, {} attempt events at \
+         {:?})",
         settled.freeze_step,
         settled.contact_wakes,
         settled.contact_wake_rises.len(),
-        settled.contact_wake_rises
+        settled.contact_wake_rises,
+        settled.attempt_events.len(),
+        settled.attempt_events
     );
     if let Some(b) = budget {
         // `settle_until_frozen` already failed on the first event past the budget; this is
         // the same bound, restated where the phase ends.
         assert!(
-            b.spent + settled.contact_wake_rises.len() <= b.max,
+            b.spent + settled.attempt_events.len() <= b.max,
             "{what}, phase 1: {} past the budget after the freeze",
             b.label
         );
@@ -1709,11 +1755,11 @@ fn sixteen_height_4_draws_freeze_within_the_onset_flicker_budget() {
                 label: "flicker budget: the sixteen height-4 draws took",
             };
             let settled = h.settle_until_frozen(G7_SETTLE_LIMIT, "G7", Some(budget));
-            spent += settled.contact_wake_rises.len();
+            spent += settled.attempt_events.len();
             rows.push((
                 mover,
                 settled.freeze_step,
-                settled.contact_wake_rises.len(),
+                settled.attempt_events.len(),
                 settled.contact_wakes,
             ));
         }
@@ -1736,8 +1782,8 @@ fn sixteen_height_4_draws_freeze_within_the_onset_flicker_budget() {
         // where the loop ends, and carries the triage paragraph for a reader who arrives here.
         assert!(
             spent <= budget.max,
-            "G7, {} {spent} contact-change wake events (budget {}); (mover, freeze \
-             step, events, K) {rows:?}. {}",
+            "G7, {} {spent} attempt events (budget {}); (mover, freeze step, events, K) \
+             {rows:?}. {}",
             budget.label,
             budget.max,
             flicker_triage(spent, spent + rows.len(), &budget)
@@ -2543,7 +2589,7 @@ fn flicker_redraw_distribution() {
                     let settled = h.settle_until_frozen(GENERATOR_SETTLE_LIMIT, "generator", None);
                     (
                         settled.freeze_step,
-                        settled.contact_wake_rises,
+                        settled.attempt_events,
                         settled.contact_wakes,
                     )
                 })
@@ -2552,8 +2598,8 @@ fn flicker_redraw_distribution() {
                 match outcome {
                     Some((freeze, rises, k)) => {
                         println!(
-                            "generator h={height} last={last:?}: froze at {freeze}, {} events at \
-                             {rises:?}, K {k}",
+                            "generator h={height} last={last:?}: froze at {freeze}, {} attempt \
+                             events at {rises:?}, K {k}",
                             rises.len()
                         );
                         draws.push((last, Some(freeze), rises.len(), k));

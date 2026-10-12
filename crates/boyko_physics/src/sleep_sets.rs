@@ -312,8 +312,9 @@ pub(crate) struct SleepEpoch {
     /// separation is at most it, so `Off` would recompute a held island's manifolds differently.
     spec_bits: u32,
     /// `PhysicsConfig::speculative_velocity_cap`'s bits (V2, the approach-velocity margin): a held
-    /// row keeps the velocity it froze with (`IslandSleep`), which the margin reads, so a change
-    /// of the cap can change what `Off` would recompute for a held island's pairs.
+    /// row's velocity is zero (lane SL's settle), but a kinematic anchor's is not, and the margin
+    /// reads it, so a change of the cap can change what `Off` would recompute for a held island's
+    /// pairs.
     vcap_bits: u32,
     /// The live SDF edits by bits; the entries past `sdf_len` are zero.
     sdf_edits: [[u32; SDF_EDIT_WORDS]; MAX_SDF_EDITS],
@@ -443,6 +444,80 @@ fn bit_equal(a: &BodyState, b: &BodyState) -> bool {
         && bp_margin.to_bits() == b.bp_margin.to_bits()
         && shapes
         && m(inv_inertia, &b.inv_inertia)
+        && m(inv_inertia_local, &b.inv_inertia_local)
+}
+
+/// Whether a watched row gathered on the first step after a settle equals its stash (lane SL's
+/// seal, `IslandSleep::begin_step`): bit-equal on every field a user can write. The destructure is
+/// exhaustive, so a field added to [`BodyState`] fails to compile here until it is classified.
+///
+/// What a change of each compared field can reach, at a fixed configuration and SDF field (the
+/// unit T-SL21 pins every comparison; the `sleep_seal.rs` scene named beside a field shows its
+/// count change end to end):
+/// - **whether a manifold exists**, so the island's count: `position` (T-SL12, T-SL13, and
+///   T-SL24 on `z`), `rotation` (T-SL22) and `shape` (T-SL23), which the narrowphase reads;
+///   `linear_velocity` and `angular_velocity` (T-SL25, T-SL26), which widen a pair's speculative
+///   margin, a non-member's too (a simulated member's write is woken first, by `begin_step`'s
+///   write test); `is_sensor` (T-SL27), which routes a pair to the overlap report; `simulated`
+///   (T-SL28), without which a body collides with no SDF field; and `inv_mass` (T-SL29), whose
+///   zero takes a member out of the island its manifolds are filed under (a row it makes
+///   dynamic joins the island it touches, and the fold keeps that island active);
+/// - **no manifold**, compared conservatively: `inv_inertia_local`, which the gather derives from
+///   `shape` and `inv_mass`, so on a gathered row it changes only with one of them (T-SL29 is red
+///   only without both comparisons); `kinematic`, which the narrowphase never reads and the tree
+///   broadphase reads only to choose the set an immovable row is filed in (its candidate pairs are
+///   the all-pairs set either way); `restitution` and `friction`, which only the solve reads.
+#[inline]
+pub(crate) fn seal_equal(a: &BodyState, b: &BodyState) -> bool {
+    let BodyState {
+        // Derived: the gather recomputes the world tensor from `rotation` and `inv_inertia_local`,
+        // and the solver's inertia refresh need not reproduce the gather's bits.
+        inv_inertia: _,
+        inv_inertia_local,
+        position,
+        linear_velocity,
+        angular_velocity,
+        rotation,
+        inv_mass,
+        restitution,
+        friction,
+        simulated,
+        kinematic,
+        is_sensor,
+        // Derived: the gather recomputes it from the velocities, the shape and the speculative
+        // configuration, which the seal's epoch holds.
+        bp_margin: _,
+        shape,
+    } = a;
+    let v = |x: &crate::math::Vec3, y: &crate::math::Vec3| {
+        x.x.to_bits() == y.x.to_bits() && x.y.to_bits() == y.y.to_bits() && x.z.to_bits() == y.z.to_bits()
+    };
+    let m = |x: &crate::math::Mat3, y: &crate::math::Mat3| {
+        v(&x.rows[0], &y.rows[0]) && v(&x.rows[1], &y.rows[1]) && v(&x.rows[2], &y.rows[2])
+    };
+    let shapes = match (shape, &b.shape) {
+        (ColliderShape::Sphere { radius: ra }, ColliderShape::Sphere { radius: rb }) => {
+            ra.to_bits() == rb.to_bits()
+        }
+        (ColliderShape::Box { half_extents: ha }, ColliderShape::Box { half_extents: hb }) => {
+            v(ha, hb)
+        }
+        _ => false,
+    };
+    v(position, &b.position)
+        && v(linear_velocity, &b.linear_velocity)
+        && v(angular_velocity, &b.angular_velocity)
+        && rotation.x.to_bits() == b.rotation.x.to_bits()
+        && rotation.y.to_bits() == b.rotation.y.to_bits()
+        && rotation.z.to_bits() == b.rotation.z.to_bits()
+        && rotation.w.to_bits() == b.rotation.w.to_bits()
+        && inv_mass.to_bits() == b.inv_mass.to_bits()
+        && restitution.to_bits() == b.restitution.to_bits()
+        && friction.to_bits() == b.friction.to_bits()
+        && *simulated == b.simulated
+        && *kinematic == b.kinematic
+        && *is_sensor == b.is_sensor
+        && shapes
         && m(inv_inertia_local, &b.inv_inertia_local)
 }
 
@@ -2076,9 +2151,10 @@ mod tests {
     }
 
     /// V2: a change of either speculative parameter — the distance, or the approach-velocity cap
-    /// (ruling 9: a held row keeps the velocity it froze with, which the margin reads) — changes
-    /// the epoch, so it flushes every held island; a field the held outputs do not read (gravity)
-    /// does not. Red when the epoch drops the cap's bits.
+    /// (ruling 9: a held row's velocity is zero since lane SL's settle, but a kinematic anchor's
+    /// is not, and the margin reads it) — changes the epoch, so it flushes every held island; a
+    /// field the held outputs do not read (gravity) does not. Red when the epoch drops the cap's
+    /// bits.
     #[test]
     fn v2_the_epoch_carries_both_speculative_parameters() {
         use super::SleepEpoch;

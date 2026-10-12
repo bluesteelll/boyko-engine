@@ -7,6 +7,14 @@
 > (§1.1, §1.6, §1.9), added two live defects the critique traced (§1.11), and corrected four numbers
 > (the 3060/3070 bandwidth ratio, the Hable scaling, the f32 phase error, the `SdfEdit` free lanes).
 >
+> **Amended 2026-10-12 by the render-wave plan (RD4, owner defect item 4):** the Tier-1 path this
+> survey found broken is **fixed on trunk** — `40e7577d` (2026-09-26) removed
+> `MaterialTable::flush_if_dirty` and landed a `material_upload` copy pass in all three graphs, fed
+> by `stage_material_edits` (`crates/boyko_render/src/material_upload.rs`) from the kernel's
+> per-row edited set; D-1 and D-2 (`062eafcb`) and the later-found D-3 use-after-free (`7f044ac7`)
+> are fixed; the table is device-local (`97ee830f`); merged as `d95ee579`. §0 item 1 and the
+> §1.1 rows below are corrected in place; §1.11 stays as the record of the defects.
+>
 > **How it was checked.** Every repository claim was re-opened at trunk commit **`6394bc5e`** through
 > the `D:/wt/docs` worktree (branch `u/research-0925`, identical to the trunk). A `path:line` appears
 > only where that line was re-read by content at that commit; everywhere else the citation is a path
@@ -70,7 +78,10 @@ allocation unit, and measured that **+2 registers crossed an allocation step** o
 
 ## 0. The reading in six lines
 
-1. **The tree cannot animate a material through its GPU table today** [T].
+1. **At pass 2 the tree could not animate a material through its GPU table** [T] — **fixed since
+   (amended 2026-10-12):** `40e7577d` removed `flush_if_dirty` and landed a `material_upload` copy
+   pass in all three graphs, fed by `stage_material_edits` from the per-row edited set, so a
+   Tier-1 edit reaches `Materials[id]` on the next frame. The pass-2 reading was:
    - `MaterialTable::flush_if_dirty` has no production caller.
    - The staging ring it would fill is copied by no pass.
    - Every shader that reads `Materials[id]` therefore sees the boot values forever.
@@ -79,7 +90,7 @@ allocation unit, and measured that **+2 registers crossed an allocation step** o
      textured paths, and nothing else (§1.2).
    - The same path has two live defects, traced but not reproduced (§1.11): materials minted into
      the table's headroom stay all-zero on the GPU, and the per-instance material ring goes stale when
-     its upload flag falls.
+     its upload flag falls. **Both are fixed since (D-1 in the DM1 landing, D-2 in `062eafcb`).**
 2. **Shipped engines split dynamic material data into three frequency classes.**
    - Global: UE Material Parameter Collections, Unity `_Time`, Godot `TIME`.
    - Per material: material instances.
@@ -124,13 +135,13 @@ allocation unit, and measured that **+2 registers crossed an allocation step** o
 |---|---|---|
 | **The CPU authority.** `Assets<Material>` holds `Material { gpu: MaterialGpu, textures: MaterialTextures }`. `MaterialGpu` is `#[repr(C, align(16))]`, 48 B, three `vec4` lanes: `base_color` (`w` = alpha/cutoff), `mrr` = `[metallic, roughness, reflectance, bitcast(flags)]`, `emissive` (`w` unused). | `crates/boyko_render/src/material.rs:51-70`, size assert `:83` | The record is frozen. Its free space is `emissive.w`, the unread `base_color.w`, and flag bits 1..31. |
 | **Only one flag bit is used.** `MATERIAL_FLAG_TEXTURED = 1` is re-derived at the upload boundary from `textures.any()`. `Material::new` passes `flags` through verbatim. | `crates/boyko_render/src/material.rs:121`, `Material::new` `:209`, `MaterialTable::seed_rows` | A bare `flags: 1` claims textures the material does not have. The host re-derives the bit for the GPU; a CPU reader of `gpu.mrr[3]` before upload is misled. |
-| **Edits bump a whole-table generation.** `Assets::get_mut` bumps `dirty_gen` on every call that resolves to a live row (`add` does not; `fill` does). | `crates/boyko_ecs/src/ecs/core/asset/assets.rs:497-502` | Dirtiness is per table, not per row. |
+| **Edits bump a whole-table generation.** `Assets::get_mut` bumps `dirty_gen` on every call that resolves to a live row (`add` does not; `fill` does). **Amended 2026-10-12:** the kernel now also keeps a per-row edited set (`Assets::mark_edited` / `edited_any` / `drain_edited`, `assets.rs`), which the material stager drains. | `crates/boyko_ecs/src/ecs/core/asset/assets.rs:497-502` (pass 2) | Dirtiness was per table, not per row, at pass 2; the edited set is per row. |
 | **The `dirty` bitmap is not an edit set.** `Assets` does carry a `dirty: LiveBitmap`, but it is streaming-lifetime plumbing: it is set on free and retire (`assets.rs:575`), and the struct doc says it "lands inert … (F2+ wires the readers)". | `assets.rs:189`, `:207` | No per-row "value edited" set exists. The `LiveBitmap` type such a set would use does. |
-| **`flush_if_dirty` has no production caller.** Its only mention outside `material_table.rs` is a comment in `crates/boyko_app/tests/asset_streaming_f7_grow_headless.rs`. Its own doc says that at rung A1 it "never actually runs". | `crates/boyko_render/src/material_table.rs:255` | Tier 1 animation cannot reach the SSBO. |
-| **The staging ring is read by nothing.** Per the type's own words it is read by nothing "until a staging→table GPU copy is wired" (section "O3, deferred"). | `material_table.rs:377-386` | Even a caller would fill buffers nobody copies. The same doc flags that staging must adopt per-slot fenced growth when that copy lands. |
-| **The table and the staging ring are host-visible.** Both are created `MemoryLocation::HostVisibleCoherent`, at boot and on grow. The allocator takes the **first** memory type with `HOST_VISIBLE|HOST_COHERENT` (`select_memory_type`, `crates/boyko_rhi_vulkan/src/memory.rs`). On common NVIDIA type orders that is system memory, not the 256 MB BAR heap. **Inference, not measured on the rig.** | `material_table.rs:179, 199, 425, 447` | Every lit producer's per-pixel material fetch may be crossing PCIe on a cache miss. |
+| **`flush_if_dirty` has no production caller** (pass 2). **Amended 2026-10-12:** the function is gone (`40e7577d`); `stage_material_edits` stages the edited rows and a `material_upload` graph pass copies them on every path. | `crates/boyko_render/src/material_upload.rs` (`stage_material_edits`) | Tier 1 animation reaches the SSBO. |
+| **The staging ring is read by nothing** (pass 2). **Amended 2026-10-12:** the `material_upload` pass copies it into the table on every frame that has edits (Deferred, Forward and VB declarators). | `material_table.rs:377-386` (pass 2) | The copy is wired; the staging contract is gated by `dm1_slot_invariant`. |
+| **The table and the staging ring are host-visible** (pass 2). **Amended 2026-10-12:** the table is `DeviceLocal` since `97ee830f`; the staging ring stays `HostVisibleCoherent`. At pass 2 both were created `MemoryLocation::HostVisibleCoherent`, at boot and on grow. The allocator takes the **first** memory type with `HOST_VISIBLE|HOST_COHERENT` (`select_memory_type`, `crates/boyko_rhi_vulkan/src/memory.rs`). On common NVIDIA type orders that is system memory, not the 256 MB BAR heap. **Inference, not measured on the rig.** | `material_table.rs:179, 199, 425, 447` | Every lit producer's per-pixel material fetch may be crossing PCIe on a cache miss. |
 | **There is a hard row cap.** `MAX_MATERIAL_ROWS = 1 << 16`, because `MaterialId` is 16-bit. | `crates/boyko_render/src/material_table.rs:65` | Worst-case whole table: 65,536 × 48 B = **3.0 MiB**. |
-| **The light table is the working precedent.** A per-FIF host staging slot is written only when its generation lags; a `light_upload` graph pass records `cmd_copy_buffer(light_staging → light_table)` into a device-local table on dirty frames only. It is recorded identically in `record_vb` (`crates/boyko_rhi_vulkan/src/present/passes/vb.rs:1107-1125`), `gbuffer.rs` and `forward.rs`; the host write lives in `crates/boyko_app/src/runner.rs` (`light_upload_due`, `upload_light_table`). | as cited | This is exactly the missing material copy, already built once. |
+| **The light table is the working precedent.** A per-FIF host staging slot is written only when its generation lags; a `light_upload` graph pass records `cmd_copy_buffer(light_staging → light_table)` into the light table on dirty frames only (**amended 2026-10-12:** the light table is `HostVisibleCoherent`, not device-local — `crates/boyko_app/src/gpu_scene/mod.rs`, the `light_table` `create_buffer`). It is recorded identically in `record_vb` (`crates/boyko_rhi_vulkan/src/present/passes/vb.rs:1107-1125`), `gbuffer.rs` and `forward.rs`; the host write lives in `crates/boyko_app/src/runner.rs` (`light_upload_due`, `upload_light_table`). | as cited | This is exactly the missing material copy, already built once. |
 | **Eight shader sources bind and index `Materials[...]`:** `deferred_pbr`, `forward_opaque.fs`, `sdf_forward_march`, `sdf_gbuffer_composite`, `vb_geo`, `vb_resolve`, `vb_shade`, `vb_shade_split`. Pass 1 said eleven: `forward_opaque.vs` names the table only in comments, `gbuffer_mrt.fs` does not bind it, and `sdf_probe_update` does not bind it (next row). | `crates/boyko_rhi_vulkan/shaders/` (a grep for the declaration and the index, re-run in pass 2) | This is the blast radius of any `MaterialGpu` layout change. |
 | **SDF-DDGI never sees a material value.** The probe update bounces a constant, `GI_BOUNCE_ALBEDO`, because "the update bind-set carries no material table". | `crates/boyko_rhi_vulkan/shaders/sdf_probe_update.comp.hlsl:164` | No material edit, static or animated, changes the indirect light. An animated emissive does not light its surroundings through DDGI. |
 | **The per-instance lanes are denormalized material copies.** `gather_mesh_draws` (two `cfg(hwrt)` twins, `crates/boyko_render/src/mesh_draw.rs:1300` and `:1518`) takes `Res<Assets<Material>>` and fills two lanes. `PerInstanceMaterial { base_color, id, _pad: [u32; 3] }` is 32 B with **12 B spare** (`mesh_draw.rs:122-133`). `PerInstanceMaterialTex` is 48 B with no spare: `base_color`, `material_id`, five bindless slots, `metallic`, `roughness`. | `mesh_draw.rs` | These lanes are the only path that already carries live material values. |
@@ -324,7 +335,7 @@ red-first test for each.
 - A grow rounds capacity up to the next power of two (`:407`) and seeds only the rows that are
   `Loaded` at that moment.
 - Nothing else writes the table after boot. `flush_if_dirty` has no caller (§1.1), and `add` does not
-  bump `dirty_gen`.
+  bump `dirty_gen`. (Pass-2 record; **D-1 is fixed** by the DM1 landing — amended 2026-10-12.)
 - So a material minted, or streamed in by `fill`, into the headroom `[need, capacity)` after a grow
   keeps an all-zero row: black base colour, zero roughness. If no later grow re-seeds it, that is
   forever.

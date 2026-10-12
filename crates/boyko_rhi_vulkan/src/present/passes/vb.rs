@@ -979,7 +979,10 @@ impl Renderer<'_> {
     /// the readback region; a `Some(readback)` buffer is host-visible and ≥ the swapchain image's
     /// (`extent`-sized) byte size. Rung R9d: `accel_fns` is the AS command table for the split's
     /// own per-frame TLAS build (`Some` only on an RT device) — the SAME contract
-    /// [`record_gbuffer`](super::gbuffer)'s own `accel_fns` param documents.
+    /// [`record_gbuffer`](super::gbuffer)'s own `accel_fns` param documents. A pending image-dump
+    /// request on `self` meets the image-dump clause of
+    /// [`render_gbuffer_frame`](super::super::frame_driver::Renderer::render_gbuffer_frame)'s
+    /// `# Safety` (that fn is the only caller).
     ///
     /// VG-R0 rung R0c: a `Some(vb_id_readback)` buffer is host-visible and ≥
     /// `present_extent.width * present_extent.height * 8` bytes (`R32G32_UINT`, 8 B/texel — the
@@ -2415,6 +2418,16 @@ impl Renderer<'_> {
                             (self.fns.cmd_copy_buffer)(cmd, src, rb[fi].buffer, 1, &region);
                         }
                     }
+                    // OBS (H0 Scope 7): make the copy's writes VISIBLE to the host read that
+                    // follows the fence wait (a fence only makes them available). One barrier after
+                    // every region of the loop.
+                    // SAFETY: recording is open and outside any render scope (the copies above were
+                    // recorded on the same `cmd`); `rb[fi].buffer` is the live host-visible staging every
+                    // region of the loop wrote.
+                    unsafe {
+                        ts.cmd();
+                        crate::host_read::record_host_read_barrier(self.fns, cmd, &[rb[fi].buffer]);
+                    }
                 }
 
                 // The cull's `vb_indirect` write is made visible to the raster's indirect FETCH by
@@ -2769,6 +2782,9 @@ impl Renderer<'_> {
                     // region `total_bytes` covers and the branch condition bounds, disjoint from the
                     // final-depth and pyramid regions by `HzbDumpLayout`'s own offsets;
                     // `&early_region` outlives the call.
+                    // The host-read barrier recorded after the copy names the same live destination
+                    // on the same open command buffer, outside any render scope
+                    // (`record_host_read_barrier`'s contract).
                     unsafe {
                         ts.cmd();
                         (self.fns.cmd_copy_image_to_buffer)(
@@ -2779,6 +2795,10 @@ impl Renderer<'_> {
                             1,
                             &early_region,
                         );
+                        // OBS (H0 Scope 7): make the copy's writes VISIBLE to the host read that
+                        // follows the fence wait (a fence only makes them available).
+                        ts.cmd();
+                        crate::host_read::record_host_read_barrier(self.fns, cmd, &[staging.buffer]);
                     }
                     // RECORDED, not assumed. The header's `flags` bit is stamped from this local at
                     // the frame-end block, so it says "a copy was issued into that region" rather
@@ -3278,6 +3298,16 @@ impl Renderer<'_> {
                         ts.cmd();
                         (self.fns.cmd_copy_buffer)(cmd, src, rb[fi].buffer, 1, &region);
                     }
+                }
+                // OBS (H0 Scope 7): make the copy's writes VISIBLE to the host read that follows
+                // the fence wait (a fence only makes them available). One barrier after every
+                // region of the loop.
+                // SAFETY: recording is open and outside any render scope (the copies above were
+                // recorded on the same `cmd`); `rb[fi].buffer` is the live host-visible staging every
+                // region of the loop wrote.
+                unsafe {
+                    ts.cmd();
+                    crate::host_read::record_host_read_barrier(self.fns, cmd, &[rb[fi].buffer]);
                 }
             }
 
@@ -5160,6 +5190,9 @@ impl Renderer<'_> {
             // above; one full-image tightly-packed color region copies into the live host-visible
             // `census.buffer`, which is ≥ `present_extent.width * present_extent.height * 8` bytes
             // per this fn's contract; `&census_region` outlives the call.
+            // The host-read barrier recorded after the copy names the same live destination on the
+            // same open command buffer, outside any render scope (`record_host_read_barrier`'s
+            // contract).
             unsafe {
                 ts.cmd();
                 (self.fns.cmd_copy_image_to_buffer)(
@@ -5170,6 +5203,10 @@ impl Renderer<'_> {
                     1,
                     &census_region,
                 );
+                // OBS (H0 Scope 7): make the copy's writes VISIBLE to the host read that follows
+                // the fence wait (a fence only makes them available).
+                ts.cmd();
+                crate::host_read::record_host_read_barrier(self.fns, cmd, &[census.buffer]);
             }
         }
 
@@ -5322,6 +5359,9 @@ impl Renderer<'_> {
                 // which `total_bytes` covers and the branch condition bounds, and which is disjoint
                 // from the early-depth and pyramid regions by `HzbDumpLayout`'s own offsets;
                 // `&depth_region` outlives the call.
+                // The host-read barrier recorded after the copy names the same live destination on
+                // the same open command buffer, outside any render scope
+                // (`record_host_read_barrier`'s contract).
                 unsafe {
                     ts.cmd();
                     (self.fns.cmd_copy_image_to_buffer)(
@@ -5332,6 +5372,10 @@ impl Renderer<'_> {
                         1,
                         &depth_region,
                     );
+                    // OBS (H0 Scope 7): make the copy's writes VISIBLE to the host read that
+                    // follows the fence wait (a fence only makes them available).
+                    ts.cmd();
+                    crate::host_read::record_host_read_barrier(self.fns, cmd, &[staging.buffer]);
                 }
 
                 // ONE region per mip, all in one call. The buffer offsets are
@@ -5369,6 +5413,9 @@ impl Renderer<'_> {
                 // staging per the branch condition. `levels <= MAX_HZB_LEVELS` (the plan's own
                 // invariant) bounds the region count to the array's length. `regions` is a local
                 // that outlives the call.
+                // The host-read barrier recorded after the copy names the same live destination on
+                // the same open command buffer, outside any render scope
+                // (`record_host_read_barrier`'s contract).
                 unsafe {
                     ts.cmd();
                     (self.fns.cmd_copy_image_to_buffer)(
@@ -5379,7 +5426,39 @@ impl Renderer<'_> {
                         levels,
                         regions.as_ptr(),
                     );
+                    // OBS (H0 Scope 7): make the copy's writes VISIBLE to the host read that
+                    // follows the fence wait (a fence only makes them available).
+                    ts.cmd();
+                    crate::host_read::record_host_read_barrier(self.fns, cmd, &[staging.buffer]);
                 }
+            }
+        }
+
+        // OBS (D, H0 Scope 6): the image dump — AFTER the present blit and the HZB dump block
+        // (critique O2; declared LAST, after `hzb_dump`), before the swapchain's own transition.
+        // An unarmed frame declares no `image_dump` and records nothing here.
+        if let Some(dump) = plan.image_dump {
+            ts.cmd();
+            self.record_vb_pass(dump.pass, cmd, targets, forward, vb, scene, fi);
+            let sources = [
+                (super::super::frame_driver::ImageDumpName::VbDepth, Some(&forward.depth[fi]), present_extent),
+                (super::super::frame_driver::ImageDumpName::Viewt, Some(&targets.viewt[fi]), present_extent),
+                (super::super::frame_driver::ImageDumpName::Lit, Some(&targets.lit[fi]), present_extent),
+                (super::super::frame_driver::ImageDumpName::TaaHist, targets.taa_hist.as_ref().map(|r| &r[fi]), aa_extent),
+            ];
+            // SAFETY: recording is open and no render scope is active (the blit's
+            // `cmd_end_rendering` is above); `record_vb_pass` just recorded the dump pass's
+            // derived barriers, so each declared source is in its `plan.layouts` layout; every
+            // source is THIS slot's image (`taa_hist` the `[fi]` write slot) at `present_extent`
+            // (`taa_hist` at `aa_extent`), with `TRANSFER_SRC` usage — `vb_depth` and `lit`
+            // unconditionally, `viewt` / `taa_hist` because the dump was armed at boot
+            // (`sync_gbuffer`'s `dump_usage`); the requested staging meets the image-dump clause of
+            // this fn's `# Safety`.
+            ts.cmd();
+            unsafe { self.record_image_dump_copies(cmd, dump, &sources, scene.engine_frame_index) };
+            if let Some(restore) = dump.restore {
+                ts.cmd();
+                self.record_vb_pass(restore, cmd, targets, forward, vb, scene, fi);
             }
         }
 
@@ -5465,6 +5544,9 @@ impl Renderer<'_> {
                 // barrier above; one full-image tightly-packed color region copies into the live
                 // host-visible `staging.buffer` (≥ the image's byte size per this fn's contract);
                 // `&region` outlives the call.
+                // The host-read barrier recorded after the copy names the same live destination on
+                // the same open command buffer, outside any render scope
+                // (`record_host_read_barrier`'s contract).
                 unsafe {
                     ts.cmd();
                     (self.fns.cmd_copy_image_to_buffer)(
@@ -5475,6 +5557,10 @@ impl Renderer<'_> {
                         1,
                         &region,
                     );
+                    // OBS (H0 Scope 7): make the copy's writes VISIBLE to the host read that
+                    // follows the fence wait (a fence only makes them available).
+                    ts.cmd();
+                    crate::host_read::record_host_read_barrier(self.fns, cmd, &[staging.buffer]);
                 }
 
                 let to_present = VkImageMemoryBarrier {

@@ -41,9 +41,16 @@
 pub mod graph;
 pub mod ids;
 pub mod record;
+pub mod seeded;
 pub mod sync;
 
-pub use graph::{FrameGraph, PassBarrierRange};
+pub use graph::{Access, FrameGraph, PassBarrierRange};
 pub use ids::{PassId, ResId};
 pub use record::{BarrierSink, MAX_PASS_BARRIERS};
+pub use seeded::{
+    seed_is_stateful, seed_stages, seeded_layout_violation, trailing_scope,
+    trailing_scope_violation_of, widen_for_dump, SeedClass, SeedContent, SeededBuffer,
+    SeededImage, SeededLayoutViolation, TrailingScopeRule, TrailingScopeViolation,
+    MAX_RESTORED_IMAGES, MAX_SEEDED_WRAPPERS,
+};
 pub use sync::{BufBarrier, ImgBarrier, ResSync, SubRange, Trans, WRITE_ACCESS_MASK};

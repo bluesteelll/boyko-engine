@@ -170,9 +170,11 @@ use crate::profiling::{
     PHYS_SETUP_CHUNKS, PHYS_WRITE_BACK, ZoneCanary, counter, hist_bin,
 };
 use crate::resources::{
-    BodyState, ConstraintGraph, FrictionModel, IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
+    BodyState, ConstraintGraph, FrictionModel, IslandSleep, Manifolds, PhysicsConfig, SealArm,
+    SolverScratch,
 };
 use crate::row_identity::{RemapCursor, RowIdentity, RowRemap, WarmSeedStats};
+use crate::sdf_query::SdfField;
 use crate::scratch_ids::{
     body_delta_colored_id, body_eff_colored_id, colored_frozen_rows_id, contact_column_id,
     region_entry_id, region_line_id, region_sched_id, region_u32_id, register_scratch_layouts,
@@ -5742,7 +5744,7 @@ impl ColoredSoftStepSolver {
         scratch: &mut SolverScratch,
     ) {
         // Sleeping OFF (or no resource): the byte-identical O6/O7 colored path.
-        self.solve_colored_inner(config, manifolds, graph, scratch, None, None, None);
+        self.solve_colored_inner(config, manifolds, graph, scratch, None, None, None, None);
     }
 
     /// The colored solve with O8 sleeping (plan O8 / Decision 5), with no L10 held inputs. The
@@ -5764,7 +5766,10 @@ impl ColoredSoftStepSolver {
     ///
     /// Direct drive: the solve serves every `IslandSleep::wake_all` request made so far, and after
     /// a cold step (`config.warm_start` false, L10 D5b) it resumes from the impulses its last warm
-    /// solve stored.
+    /// solve stored. The step that puts an island to sleep zeroes its bodies' velocities, as the
+    /// pipeline's does (lane SL), but direct drive arms no seal: a manifold count that changes on
+    /// the first step after that wakes the island as on every other step, and a velocity written
+    /// into a sleeping body does not wake it.
     pub fn solve_colored_sleeping(
         &mut self,
         config: &PhysicsConfig,
@@ -5773,7 +5778,7 @@ impl ColoredSoftStepSolver {
         scratch: &mut SolverScratch,
         sleep: &mut IslandSleep,
     ) {
-        self.solve_colored_inner(config, manifolds, graph, scratch, Some(sleep), None, None);
+        self.solve_colored_inner(config, manifolds, graph, scratch, Some(sleep), None, None, None);
     }
 
     /// [`solve_colored_sleeping`](Self::solve_colored_sleeping) with L10's sleep-skip (design
@@ -5783,7 +5788,9 @@ impl ColoredSoftStepSolver {
     /// [`WarmSeedStats`] add the held store's points and hits (E6′). The
     /// [`physics_solve_colored`](crate::systems::physics_solve_colored) stage's sleeping arm,
     /// which passes the `IslandSleep::wake_all` request count its broadphase latched as
-    /// `wake_upto`: the step serves exactly those requests (L10 D9b, Decision 5).
+    /// `wake_upto`: the step serves exactly those requests (L10 D9b, Decision 5). `field` is the
+    /// SDF field the step's narrowphase read (`None` on a world without one): with `config` it
+    /// arms lane SL's seal.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn solve_colored_held(
         &mut self,
@@ -5794,6 +5801,7 @@ impl ColoredSoftStepSolver {
         sleep: &mut IslandSleep,
         held: HeldSolve<'_>,
         wake_upto: u64,
+        field: Option<&SdfField>,
     ) {
         self.solve_colored_inner(
             config,
@@ -5803,6 +5811,7 @@ impl ColoredSoftStepSolver {
             Some(sleep),
             Some(held),
             Some(wake_upto),
+            Some(SealArm { cfg: config, field }),
         );
     }
 
@@ -5811,7 +5820,7 @@ impl ColoredSoftStepSolver {
     /// for slept islands (gather stays full — IM-1), and `held == Some(_)` L10's
     /// sleep-skip on top of it. `wake_upto` is the wake request count the step serves: `Some` of
     /// the count the pipeline's broadphase latched, or `None` in direct drive, which serves every
-    /// request made so far.
+    /// request made so far. `seal` arms lane SL's seal (the pipeline only); `None` disarms it.
     #[allow(clippy::too_many_arguments)]
     fn solve_colored_inner(
         &mut self,
@@ -5822,6 +5831,7 @@ impl ColoredSoftStepSolver {
         mut sleep: Option<&mut IslandSleep>,
         mut held: Option<HeldSolve<'_>>,
         wake_upto: Option<u64>,
+        seal: Option<SealArm<'_>>,
     ) {
         let substeps = config.substeps.max(1);
         let h = config.dt / substeps as f32;
@@ -5882,7 +5892,7 @@ impl ColoredSoftStepSolver {
         if let Some(sleep) = sleep.as_mut() {
             let _z = zone!(PHYS_SLEEP_BEGIN);
             match wake_upto {
-                Some(upto) => sleep.begin_step_upto(graph, n_rows, upto),
+                Some(upto) => sleep.begin_step_armed(graph, n_rows, upto, scratch.bodies(), seal),
                 None => sleep.begin_step(graph, n_rows),
             }
             // L10 A1.1 (design 04 D9): the awake mask is now this gather's; the next
@@ -5964,12 +5974,12 @@ impl ColoredSoftStepSolver {
         // L10 C3a (design 06 D-A, 08 A1′/O10): the no-awake fast path. With sleeping on, no
         // dynamic row awake and no point laid out, the freeze capture, the substep loop, the
         // restitution pass and the freeze restore change no state: every row the loop integrates
-        // is a frozen row the restore puts back (with its velocity), no cohort is swept, and the
-        // write-back skips every frozen row. So they are skipped, and what does change state
-        // still runs, in order: the build above (P-a's write-side keys, the tags, the empty
-        // layout), the store's carry and swap and the cursor's stamp, the write-back and
-        // `end_step`. A manifold with no dynamic side is solved on every step, so a layout with a
-        // point keeps the full path.
+        // is a frozen row the restore puts back (with its zero velocity, lane SL), no cohort is
+        // swept, and the write-back skips every frozen row. So they are skipped, and what does
+        // change state still runs, in order: the build above (P-a's write-side keys, the tags,
+        // the empty layout), the store's carry and swap and the cursor's stamp, the write-back
+        // and `end_step`. A manifold with no dynamic side is solved on every step, so a layout
+        // with a point keeps the full path.
         let fast = self.columns.len() == 0
             && sleep_view.is_some_and(|sleep| Self::no_awake_dynamic_row(sleep, scratch.bodies()));
         self.fast_path_steps += u64::from(fast);
@@ -5999,6 +6009,15 @@ impl ColoredSoftStepSolver {
                         continue;
                     }
                     if !sleep.is_row_awake(row) {
+                        // SL-INV (lane SL-1b, cut C-2): the settle zeroed it and the write-wake
+                        // woke any row written since. Direct drive runs no write test, so a
+                        // caller may write a frozen row there.
+                        debug_assert!(
+                            seal.is_none()
+                                || !b.simulated
+                                || (b.linear_velocity == Vec3::ZERO && b.angular_velocity == Vec3::ZERO),
+                            "invariant: a frozen row's velocity is zero (SL-INV), row {row}"
+                        );
                         frozen.push((row as u32, *b));
                     }
                 }
@@ -6257,7 +6276,7 @@ impl ColoredSoftStepSolver {
         // their captured pre-solve hot state into `scratch.bodies` (position /
         // rotation / velocities) — so a slept island advances by exactly nothing. The
         // matching `BodyEffective` velocity (which `write_back` would copy out) is also
-        // restored so the slept body keeps its frozen velocity. Then `write_back` is
+        // restored so the slept body keeps its zero velocity (lane SL). Then `write_back` is
         // told to SKIP slept rows, so `physics_apply` leaves the live component
         // untouched (frozen) — and the gather-walked-every-row IM-1 invariant holds. The fast
         // path captured nothing and integrated nothing, so it has nothing to restore.
@@ -6295,6 +6314,10 @@ impl ColoredSoftStepSolver {
         if let Some(sleep) = sleep.as_mut() {
             let _z = zone!(PHYS_SLEEP_END);
             sleep.end_step(scratch.bodies(), graph, config.sleep_threshold, config.sleep_frames);
+            // Lane SL: an island that went to sleep at this `end_step` is zeroed in the snapshot
+            // `physics_apply` writes back; its rows were solved, so the write-back touched them.
+            let SolverScratch { bodies, touched, .. } = &mut *scratch;
+            sleep.settle(bodies.build_view().as_mut_slice(), touched, seal);
         }
     }
 }

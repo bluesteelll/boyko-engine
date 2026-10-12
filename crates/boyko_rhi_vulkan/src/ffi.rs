@@ -4073,3 +4073,10 @@ pub type PfnVkGetPhysicalDeviceFormatProperties = unsafe extern "system" fn(
     format: i32,
     p_format_properties: *mut VkFormatProperties,
 );
+
+/// `VK_PIPELINE_STAGE_HOST_BIT` — the host's pseudo-stage: the destination stage of the dependency
+/// that makes device writes visible to a host read after a fence wait (OBS, `host_read.rs`).
+pub const VK_PIPELINE_STAGE_HOST_BIT: VkFlags = 0x0000_4000;
+/// `VK_ACCESS_HOST_READ_BIT` — a host read of device memory, the destination access of that
+/// dependency (OBS, `host_read.rs`).
+pub const VK_ACCESS_HOST_READ_BIT: VkFlags = 0x0000_2000;

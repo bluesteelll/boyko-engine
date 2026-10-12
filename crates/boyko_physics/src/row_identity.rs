@@ -248,8 +248,20 @@ pub(crate) struct SleepLatch {
     pub(crate) below_count: u16,
     /// Whether the row is latched asleep.
     pub(crate) asleep: bool,
-    _pad: u8,
+    /// The row's rest state (lane SL): [`REST_NONE`], [`REST_SETTLED`] or [`REST_FROZEN`].
+    /// `rest != REST_NONE` implies `asleep`; the freeze fold reads `rest`, not `asleep`.
+    pub(crate) rest: u8,
 }
+
+/// Not resting: the row never settled, was solved since its settle, or was woken.
+pub(crate) const REST_NONE: u8 = 0;
+/// The row's island went to sleep at the last `end_step`, and the settle zeroed its velocity.
+/// Its stored key was sampled on that step's gather, before the zero; it lives only from that
+/// `end_step` to the next `begin_step`, where the seal decides a count change.
+pub(crate) const REST_SETTLED: u8 = 1;
+/// The row has passed a `begin_step` since its settle: its stored key was sampled with the
+/// settled, zero velocities, and the trunk's wake-on-contact-change rule applies to it.
+pub(crate) const REST_FROZEN: u8 = 2;
 
 impl SleepLatch {
     /// A row whose body held no row one gather ago: awake, no debounce, no key.
@@ -262,7 +274,7 @@ impl SleepLatch {
             island_key,
             below_count,
             asleep,
-            _pad: 0,
+            rest: REST_NONE,
         }
     }
 }

@@ -10,6 +10,13 @@
 > PERF/ARCHITECTURE decisions taken here from the VALUES/SCOPE decisions that go to the owner.
 > This directory is not machine-anchored (`tests/internal_docs_anchors.rs:231`).
 >
+> **Amended 2026-10-12 by the render-wave plan (AD-22 … AD-25; the owner's answers of 2026-10-11,
+> index §9 item 6):** the owner chose **the full glTF stack**, not a thin v1. §1.2's 48-B row is
+> superseded by AD-22's 80-B extension row (frozen at R2, carrying diffuse transmission); the
+> grey translucent-shadow arm (D13, the §3 R9 single-channel row) is deleted by AD-25; D16's
+> thin-first order is replaced by AD-23 (thin is a volume of thickness 0) and R8; §13.B ballots 3,
+> 4, 10, 13 and 14 are decided (the block at the end of §13.B).
+>
 > **Anchor re-verification (a second architect pass, same day, same commit).** The pass that
 > wrote this document did not return, so a second pass re-opened every `file:line` here before
 > accepting it. Four anchors had drifted (`RESEARCH.md` §13 lists them with the lines they moved
@@ -97,7 +104,8 @@ MaterialXGpu {                    // 48 B, #[repr(C, align(16))], 3 std430 lanes
 //             4..5 = BLEND_CLASS {0 premultiplied OVER, 1 additive, 2 multiply (TK-1)}
 // sort_bias: authored order override (UE "Translucency Sort Priority" [D]), applied in the key
 // diffuse_transmission (glTF KHR_materials_diffuse_transmission, Bevy `diffuse_transmission`)
-// is NOT in this row: it needs a fourth lane (64 B, a 4.2 MB ceiling) — ballot 13, priced there.
+// was left out of this 48-B row at pass 1 (a fourth lane, ballot 13). Amended 2026-10-12, AD-22:
+// the extension row is frozen at R2 at 80 B (5 lanes) and carries it (lane1.w = dt_factor).
 ```
 
 Numbers: 48 B × 65 536 rows (the `MaterialId` ceiling) = **3.1 MB** worst case, 48 B × the live
@@ -196,7 +204,7 @@ on this box replaces, and the GPU-sorted multi-draw-indirect route is the rung t
 | 7 | `oit_b0` | `R32_SFLOAT` **if the boot probe says it blends** (TK-13), else `R16_SFLOAT` | 4 (2) | 8.3 (4.1) MB | 14.7 (7.4) MB | single |
 | 7 | `oit_moments` | `R16G16B16A16_SFLOAT` | 8 | 16.6 MB | 29.5 MB | single |
 | 7 | `oit_accum` | `R16G16B16A16_SFLOAT` | 8 | 16.6 MB | 29.5 MB | single |
-| 9 | `csm_trans` (per cascade) | `R8_UNORM` grey (`R8G8B8A8` colour) | 1 (4) per cascade texel | 4.2 MB per 2048² cascade (16.8 colour) | — | as `csm` |
+| 9 | `csm_trans` (per cascade) | **amended 2026-10-12, AD-25:** `A2B10G10R10_UNORM` colour only — the pass-1 single-channel grey arm is deleted — plus a nearest-translucent-caster depth map per layer | 4 per cascade texel | 16.8 MB per 2048² cascade (colour) | — | as `csm` |
 
 All `[D-arith]`; 1080p = 2 073 600 px, 1440p = 3 686 400 px. Rung 7's full set is **41.5 MB** at
 1080p (37.3 with a 16-bit `b0`), in the published MBOIT-4 fp16 range (~20 MB moments + the
@@ -900,10 +908,10 @@ TK-13 (the `R32_SFLOAT` blend probe) precede R1 and R7 respectively.
 | D10 | Refraction = the opaque colour mip chain, opaque + sky only; no half-res transparency tier | 11.1 MB, ≈ 0.05–0.15 ms (estimate); Doom Eternal's choice [B]; HDRP's pre-refraction sub-pass is ballot 7 |
 | D11 | **MBOIT** is the OIT rung; alpha particles and premultiplied meshes merge under it; transmissive meshes stay a sorted pass in front of it; the additive class draws after its composite | RESEARCH §4.2: the only family with all-additive blend on this RHI — **that fit table decides it, not the millisecond**: the published 3.5 ms / ~20 MB is one 1080p scene on a 3080 laptop [B] and the owner's box is 1440p on a 3060 (§1.5, 1.78× the pixels); two pipelines cannot share a permutation, but they share a moment sum; `a = 1` has no finite absorbance (R5) |
 | D12 | UI / MSDF text stays outside the frame graph | it must be neither temporally filtered nor tonemapped (`present_blit.rs:185-200`) |
-| D13 | Grey translucent shadows first, colour behind one enum growth | `(ZERO, 1−SRC_A)` exists; colour needs `OneMinusSrcColor`; ≤ 1 LSB order dependence stated |
+| D13 | ~~Grey translucent shadows first, colour behind one enum growth~~ **Superseded 2026-10-12 (AD-25, owner index §9 item 6):** coloured translucent shadows at R9, one `Coloured` arm (grey casters are its equal-channel case) | `(ZERO, 1−SRC_A)` exists; colour needs `OneMinusSrcColor`; ≤ 1 LSB order dependence stated |
 | D14 | Translucents are frustum-culled only in v1; HZB occludee test is a later rung | the batch cull is GPU over VB batches (`vb_batch_cull`) and translucents are CPU-gathered; an occlusion-only cull mode is a separate piece |
 | D15 | No depth peeling, no PPLL, no MLAB, no stochastic — rejected, not deferred | geometry passes / unbounded memory / an extension not queried / MSAA literals (RESEARCH §4.2) |
-| D16 | Thin-only transmission before volume; box/thin shape only | avoids the manifold contract, the thickness column and the upside-down sphere (RESEARCH P14/P15) |
+| D16 | ~~Thin before volume; box/thin shape only~~ **Superseded 2026-10-12 (AD-23, owner index §9 item 6): the full glTF stack** — specular transmission is one screen-space body (thin = a volume of thickness 0), volume + IOR + dispersion at R8 | avoids the manifold contract, the thickness column and the upside-down sphere (RESEARCH P14/P15) |
 | D17 | SDF shadows and SDFDDGI never see a translucent as an occluder or emitter | no published precedent for a transmissive SDF occluder (RESEARCH §7); receiving is one probe sample |
 | D18 | The variant space is bounded to **8** `forward_translucent.fs` `.spv` (4 manifest rows) + **12** `particle_draw.fs` `.spv` at the top of the ladder, 2 at R1 | the four `REFRACT × OIT_STAGE ∈ {1,2}` builds are dead (R5) and removed; `particle_draw.fs` gains `OIT_STAGE` on top of `DEPTH_LINEAR` × `SOFT` (§4); `FROXEL`/`TEXTURED` are not axes because the bindings are always bound and the gate is runtime (§2.4); every row in the manifest |
 
@@ -915,7 +923,7 @@ TK-13 (the `R32_SFLOAT` blend probe) precede R1 and R7 respectively.
    before R7 is armed by default.
 2. **Deferred's 64-unit horizon** for translucents — accept (pinned by G7) or move
    `MESH_DEPTH_T_MAX` at both sites and re-bless every Deferred pin.
-3. **Thin-only v1** (stop at R5) or the full glTF stack (R8).
+3. **Thin v1** (stop at R5) or the full glTF stack (R8).
 4. **Manifoldness on `thickness ≠ 0`** — bake **refusal** (recommended, eager/closed) or a warn.
 5. **OIT in this campaign or its own** — R7 is the largest rung (three images, two passes, one
    composite, new variants of two FS families) and its published number is one scene on one laptop.
@@ -937,6 +945,15 @@ TK-13 (the `R32_SFLOAT` blend probe) precede R1 and R7 respectively.
 15. **A cheap translucent lighting tier** (R1c, per-vertex or a translucency volume) — whether
     the owner's content has the smoke-class depth complexity that makes the per-pixel tier the
     wrong default.
+
+**Decided by the owner, 2026-10-11 (render-wave plan index §9 item 6; amended 2026-10-12):**
+- **3:** the full glTF stack — R8 (volume, attenuation, IOR, dispersion; AD-23).
+- **4:** not a refusal — a non-manifold volume primitive renders as thin glass (a demoted
+  per-primitive material copy, counted, never silent).
+- **10:** coloured translucent shadows in R9, one `Coloured` arm (AD-25).
+- **13:** diffuse transmission in this wave as R5b, on every lit path and route (AD-24), carried
+  by AD-22's 80-B extension row.
+- **14:** R3b (the transparent depth pre/post-pass) stays in the tail (`T-TAIL`).
 
 ## 14. Unverified / open
 

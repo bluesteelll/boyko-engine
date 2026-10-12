@@ -3467,14 +3467,42 @@ fn s3_mid_step_speculative_distance_lands_next_step() {
     }
 }
 
-/// LB5's written step: long enough that L9's `is_fast` classes the held towers' box pairs as fast
-/// (checked by the reach world, below).
+/// LB5's written step: long enough that L9's `is_fast` classes the held kinematic pair of
+/// [`towers_beside_a_moving_kinematic`] as fast (checked by the reach world, below).
 const DT_W: f32 = 1.0e3;
+
+/// LB5's kinematic neighbour's speed, metres per second, away from tower 2. The pair is slow at
+/// `DT` and fast at `DT_W`: with `τ_eff = 1 mm` the fast bound is `(τ_eff / 2)² = 2.5e-7`, which
+/// `3·dt²·v²` stays under at `DT` (`8.3e-10`) and passes at `DT_W` (`3`).
+const LB5_KINEMATIC_SPEED: f32 = 1.0e-3;
+
+/// LB5's scene: [`towers`] and a kinematic box beside tower 2's middle cube, 5 mm off its +x
+/// face and clear of the floor, moving away from the tower at [`LB5_KINEMATIC_SPEED`].
+///
+/// The physics never integrates a kinematic body's pose, so the box stays put and keeps its
+/// velocity, which L9's `is_fast` reads. The pair is a V2 speculative pair (separated by less
+/// than `speculative_distance`), so it carries a point and is filed under tower 2's island. It
+/// separates, so it takes no impulse, and the tower settles and freezes as it does alone. The
+/// box's gathered state never changes, so it rests and anchors tower 2's held island, whose
+/// pair to it `Sets` skips.
+fn towers_beside_a_moving_kinematic() -> Vec<Spec> {
+    let mut v = towers();
+    let mut neighbour = Spec::wall(Vec3::new(7.005, 1.5, 0.0), Vec3::new(0.5, 0.5, 0.5))
+        .moving(Vec3::new(LB5_KINEMATIC_SPEED, 0.0, 0.0));
+    neighbour.kinematic = true;
+    v.push(neighbour);
+    v
+}
 
 /// LB5: `dt = DT_W` Early, then `dt = DT` Late, at `HELD_BY`: the solve runs with `DT` on either
 /// tree, so only the narrowphase's `is_fast` can see `DT_W`. Red before D9b at `HELD_BY`: `Off`'s
-/// narrowphase classed the frozen box pairs as fast and ran their full collision, while `Sets`
-/// skipped them.
+/// narrowphase classed a held island's box pair as fast and ran its full collision, while `Sets`
+/// skipped it.
+///
+/// The pair that can flip is the kinematic neighbour's ([`towers_beside_a_moving_kinematic`]).
+/// `is_fast` reads only the two bodies' velocities. Since lane SL's settle, a frozen dynamic row's
+/// velocity is exactly zero, so no `dt` makes a pair of two frozen dynamic rows fast. A kinematic
+/// anchor keeps its velocity. On the towers alone, (ii) could not hold (ruling 40).
 ///
 /// Anti-vacuity, per run: (i) the Late writer saw `DT_W`; (ii) a reach world R (`Off`, idle
 /// writers) run with the clock at `DT_W` on step `HELD_BY` loses a reuse among an unchanged or
@@ -3482,6 +3510,7 @@ const DT_W: f32 = 1.0e3;
 /// shapes and poses, so that is an `is_fast` flip); (iii) the epoch is unchanged at `HELD_BY + 1`.
 #[test]
 fn s3_mid_step_dt_write_is_invisible() {
+    let specs = towers_beside_a_moving_kinematic();
     for variant in [BroadphaseKind::Tree, BroadphaseKind::Grid].into_iter().flat_map(|k| [1, 8].map(|w| Variant::cell(k, true, w))) {
         let label = format!("LB5 dt [{:?} W{}]", variant.kind, variant.workers);
         let mut script = |step: usize, rig: &mut Rig| {
@@ -3491,7 +3520,7 @@ fn s3_mid_step_dt_write_is_invisible() {
             }
         };
         let mut saw = false;
-        let ev = lockstep_probed(&label, Pipeline::Default, variant, &towers(), HELD_BY + 11, &mut script, &mut |step, _, sets| {
+        let ev = lockstep_probed(&label, Pipeline::Default, variant, &specs, HELD_BY + 11, &mut script, &mut |step, _, sets| {
             if step == HELD_BY {
                 saw = sets.mid_ref(Place::Late).seen.is_some_and(|(c, _)| c.dt == DT_W);
             }
@@ -3502,7 +3531,7 @@ fn s3_mid_step_dt_write_is_invisible() {
             ev.rules_at[HELD_BY].d5_epoch,
             "{label}: (iii) the restored dt changed the epoch"
         );
-        let mut reach = Rig::new(Pipeline::Default, variant, SleepSkip::Off, &towers());
+        let mut reach = Rig::new(Pipeline::Default, variant, SleepSkip::Off, &specs);
         let (mut frozen, mut pairs, mut reused) = ((0, 1), [0; 2], [0; 2]);
         for step in 0..=HELD_BY {
             if step == HELD_BY {
@@ -3521,6 +3550,7 @@ fn s3_mid_step_dt_write_is_invisible() {
             frozen.0 == frozen.1 && pairs[1] >= pairs[0] && reused[1] < reused[0],
             "{label}: void (ii): DT_W does not flip is_fast here: frozen {frozen:?}, pairs {pairs:?}, reused {reused:?}"
         );
+        println!("{label}: (ii) frozen {frozen:?}, pairs {pairs:?}, reused {reused:?}");
     }
 }
 

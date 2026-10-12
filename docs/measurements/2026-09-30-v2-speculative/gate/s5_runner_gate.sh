@@ -4,7 +4,8 @@
 # count (counted == recomputed; on at W >= 2 dispatches on every step after the first).
 # usage: s5_runner_gate.sh [--root DIR] <exe> <outdir>   (fixtures from ROOT: the gate-root block)
 # Committed from D:/tmp/phys-orch/s5/r3/tools/s5_runner_gate.sh (md5 7c692a8ff641ae7137586ea824dfa4fa); the rows,
-# their hashes and the row format are r3's byte for byte.
+# their hashes and the row format are r3's byte for byte, but for R1100_v2's explicit --sleeping off
+# (lane SL, SL-2a: every pinned row names its sleeping arm, so the default's flip moves none).
 # Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = every row PASS and all EXPECT_ROWS rows ran; 1 = red;
 # 2 = could not run (usage, no exe, a fixture missing), decided before the first row.
 set -u
@@ -65,7 +66,7 @@ for w in 1 2 3 4 5 8 16; do
 done
 for w in 1 8 16; do
   for arm in on off; do
-    row R1100_v2 $w $arm 0x21bc7ecb642b0090 --scene rest --solver colored --steps 1100
+    row R1100_v2 $w $arm 0x21bc7ecb642b0090 --scene rest --solver colored --sleeping off --steps 1100
   done
 done
 # Fix r1 (triage G3): the RowWalk kernel with the switch on stays serial - exit 0, the fixture pose,

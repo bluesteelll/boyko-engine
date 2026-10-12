@@ -2,6 +2,10 @@
 # The reuse-off arm of the lane's runner_checks_c3c.sh armed rows (untimed): each armed
 # expect-pose row with --contact-reuse off against the pre-C4 fixtures; void steps must be 0.
 # usage: runner_checks_off.sh [--root DIR] <exe> <outdir>   (fixtures from ROOT: the gate-root block)
+# Fixtures (lane SL, ruling 39): lane SL's mirror docs/measurements/2026-10-11-sl-sleeping - the
+# record directories' sleeping-off files as byte copies, the sleeping-on files and their pinned
+# hashes SL-1's re-recordings (a sleeping body's velocity is zero); the record directories are not
+# edited.
 # Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = every check PASS and all EXPECT_CHECKS ran;
 # 1 = red; 2 = could not run (usage, no exe, a fixture missing), decided before the first check.
 set -u
@@ -28,7 +32,7 @@ if [ ! -d "$ROOT/docs/measurements" ]; then echo "$(basename "$0"): '$ROOT' is n
 if [ $# -ne 2 ]; then echo "usage: $ME [--root DIR] <exe> <outdir>" >&2; exit 2; fi
 EXE=$1
 OUT=$2
-L10OFF=$ROOT/docs/measurements/2026-09-23-l10-sleeping/fixtures-reuse-off
+L10OFF=$ROOT/docs/measurements/2026-10-11-sl-sleeping/d0/l10-fixtures-reuse-off
 if [ ! -f "$EXE" ]; then echo "$ME: no runner exe at $EXE" >&2; exit 2; fi
 missing=0
 for w in 1 8; do for n in R-S J-Son J-D-on; do
@@ -55,7 +59,7 @@ run off_armed_R-S_sets_W1 0 --scene rest --sleeping on $RU --arm-profiler --step
 run off_armed_R-S_sets_W8 0 --scene rest --sleeping on $RU --arm-profiler --steps 600 --workers 8 --expect-pose $L10OFF/R-S_W8.pose
 run off_armed_R-S_off_W1 0 --scene rest --sleeping on --sleep-skip off $RU --arm-profiler --steps 600 --workers 1 --expect-pose $L10OFF/R-S_W1.pose
 run off_armed_J-Son_sets_W8 0 --scene jolt --gap 0.5 --cfg a --sleeping on $RU --arm-profiler --steps 600 --workers 8 --expect-pose $L10OFF/J-Son_W8.pose
-run off_armed_J-A_sleep_off_W8 0 --scene jolt --gap 0.5 --cfg a $RU --arm-profiler --steps 300 --workers 8
+run off_armed_J-A_sleep_off_W8 0 --scene jolt --gap 0.5 --cfg a --sleeping off $RU --arm-profiler --steps 300 --workers 8
 for w in 1 8; do
   run off_armed_R-S_tree_sets_W$w 0 --scene rest --sleeping on --broadphase tree $RU --arm-profiler --steps 600 --workers $w --expect-pose $L10OFF/R-S_W$w.pose
   run off_armed_R-S_tree_off_W$w 0 --scene rest --sleeping on --sleep-skip off --broadphase tree $RU --arm-profiler --steps 600 --workers $w --expect-pose $L10OFF/R-S_W$w.pose

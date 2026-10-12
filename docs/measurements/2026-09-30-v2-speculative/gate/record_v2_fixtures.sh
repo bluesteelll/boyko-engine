@@ -2,7 +2,8 @@
 # V2 C6: record the V2 pose fixtures with the tip's parity runner, at W1 (every W8 file is a copy
 # of its W1 recording, so a W8 gate row checks worker-count identity against the W1 bytes, never a
 # W8 recording against itself - critique W5). Rows and args are the ones the L9/L10/W6/W8 gate
-# scripts check, verbatim, minus --workers / --expect-pose.
+# scripts check, verbatim, minus --workers / --expect-pose. Every sleeping-off row names --sleeping off
+# since lane SL's SL-2a, as the gate scripts do (the recorded bytes are unchanged: off was the default).
 # usage: record_v2_fixtures.sh <exe> <outdir>  (outdir = docs/measurements/2026-09-30-v2-speculative)
 set -u
 EXE=$1
@@ -26,13 +27,13 @@ w1w8() { # dir name flags... : W1 recording, W8 copy
 for arm in on off; do
   if [ "$arm" = on ]; then RU=; else RU="--contact-reuse off"; fi
   # L9's C0 family (pose_gates_sync.sh G2), 600 steps.
-  w1w8 l9-reuse-$arm J-A --scene jolt --gap 0.5 --cfg a --steps 600 $RU
-  w1w8 l9-reuse-$arm J-D --scene jolt --gap 0.5 --cfg default --steps 600 $RU
-  w1w8 l9-reuse-$arm R --scene rest --solver colored --steps 600 $RU
+  w1w8 l9-reuse-$arm J-A --scene jolt --gap 0.5 --cfg a --sleeping off --steps 600 $RU
+  w1w8 l9-reuse-$arm J-D --scene jolt --gap 0.5 --cfg default --sleeping off --steps 600 $RU
+  w1w8 l9-reuse-$arm R --scene rest --solver colored --sleeping off --steps 600 $RU
   w1w8 l9-reuse-$arm R-S --scene rest $SON --steps 600 $RU
   w1w8 l9-reuse-$arm J-Son --scene jolt --gap 0.5 --cfg a $SON --steps 600 $RU
   # L10's fixtures (G3 and the runner checks), 600 steps.
-  w1w8 l10-reuse-$arm R --scene rest --solver colored --steps 600 $RU
+  w1w8 l10-reuse-$arm R --scene rest --solver colored --sleeping off --steps 600 $RU
   w1w8 l10-reuse-$arm R-S --scene rest $SON --steps 600 $RU
   w1w8 l10-reuse-$arm J-Son --scene jolt --gap 0.5 --cfg a $SON --steps 600 $RU
   w1w8 l10-reuse-$arm J-A-on --scene jolt --gap 0.5 --cfg a $SON --steps 600 $RU
@@ -47,14 +48,14 @@ rec w6 RS800 --scene rest --sleeping --contact-reuse off --steps 800
 # Window 8 / 8b's gate fixtures, 500 steps.
 rec w8 JT500 --scene jolt --gap 0.5 --cfg default --broadphase tree --sleeping off --steps 500
 rec w8 JToff500 --scene jolt --gap 0.5 --cfg default --broadphase tree --sleeping off --contact-reuse off --steps 500
-rec w8 JA500 --scene jolt --gap 0.5 --cfg a --steps 500
+rec w8 JA500 --scene jolt --gap 0.5 --cfg a --sleeping off --steps 500
 rec w8 JSonT500 --scene jolt --gap 0.5 --cfg a --broadphase tree --sleeping on --steps 500
 # The fidelity gate's fourth anchor (gap 0.5, sleeping on, contact reuse off), 500 steps.
 rec w8 JSonToff500 --scene jolt --gap 0.5 --cfg a --broadphase tree --sleeping on --contact-reuse off --steps 500
-rec w8 RT500 --scene rest --cfg default --broadphase tree --bp-kernel leaflist --steps 500
+rec w8 RT500 --scene rest --cfg default --broadphase tree --bp-kernel leaflist --sleeping off --steps 500
 # The parity runner's R1100 (window 6's Ron1100 row, flagless on the trunk).
-rec w6 R1100 --scene rest --solver colored --steps 1100
+rec w6 R1100 --scene rest --solver colored --sleeping off --steps 1100
 # The flagless J500 hashes the sync gate pins (G1).
-rec w8 J500 --scene jolt --gap 0.5 --cfg default --broadphase tree --steps 500
-rec w8 J500off --scene jolt --gap 0.5 --cfg default --broadphase tree --steps 500 --contact-reuse off
+rec w8 J500 --scene jolt --gap 0.5 --cfg default --broadphase tree --sleeping off --steps 500
+rec w8 J500off --scene jolt --gap 0.5 --cfg default --broadphase tree --sleeping off --steps 500 --contact-reuse off
 echo "recorded $(wc -l < "$LOG"), nonzero exits $(grep -vc 'exit=0' "$LOG")"
