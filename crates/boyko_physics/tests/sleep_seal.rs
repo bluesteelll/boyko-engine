@@ -27,13 +27,17 @@
 //! | T-SL24 | `a_static_slid_along_z_into_a_settled_pile_on_the_first_step_after_a_settle_wakes_it` | a static box beside the top box moved along `-z`, into it | `seal_equal` blind to a vector's `z` |
 //! | T-SL25 | `a_static_given_a_velocity_toward_a_settled_pile_on_the_first_step_after_a_settle_wakes_it` | a static box 50 mm from the top box given 6 m/s toward it: its speculative margin reaches the box | `seal_equal` without `linear_velocity` |
 //! | T-SL26 | `a_static_given_a_spin_beside_a_settled_pile_on_the_first_step_after_a_settle_wakes_it` | the same box given 30 rad/s about `z`: its corners' speculative margin reaches the box | `seal_equal` without `angular_velocity` |
-//! | T-SL27 | `a_support_turned_sensor_on_the_first_step_after_a_settle_wakes_the_pile` | the static floor, the last row, gains `Sensor`: its contact becomes an overlap report, and the walk order is kept | `seal_equal` without `is_sensor` |
+//! | T-SL27 | `a_support_turned_sensor_on_the_first_step_after_a_settle_wakes_the_pile` | the static floor, the last row, gains `Sensor`: its contact becomes an overlap report, and the walk order read before the move equals the one after the step | `seal_equal` without `is_sensor` |
+//! | T-SL27c | `a_support_given_a_test_local_tag_on_the_first_step_after_a_settle_keeps_the_seal` | T-SL27's control: the same floor gains a test-local tag instead, an archetype move that changes no gathered field: the seal holds, nothing wakes | the control of T-SL27's attribution: a rows-stable test that an order-keeping archetype move breaks (round-2 W1) |
 //! | T-SL28 | `a_support_parked_on_the_sdf_floor_on_the_first_step_after_a_settle_wakes_the_pile` | the bottom box on the SDF floor loses `Simulated`: its field contact goes | `seal_equal` without `simulated` |
 //! | T-SL29 | `a_support_made_immovable_on_the_first_step_after_a_settle_wakes_the_pile` | the bottom box's inverse mass set to 0: it leaves the island, whose count changes | `seal_equal` without `inv_mass` and `inv_inertia_local` (each alone is the other's derivative, `seal_equal`'s docs) |
 //! | T-SL8a | `off_and_sets_agree_through_every_seal_event` | every scene above, `Off` against `Sets` at W1 and W8: equal on every step | a mode leak |
 //!
 //! T-SL22 to T-SL29 close round 1's F2: each pins, end to end, one field of `seal_equal` that can
-//! change a manifold count, and each is red under that field's warning-free removal. The unit
+//! change a manifold count, and each is red under that field's warning-free removal. T-SL27's
+//! change is also an archetype move, so its break could come from the rows-stable test instead;
+//! T-SL27c makes the same move with a tag no field reads and requires the seal to hold, so
+//! T-SL27's break is `is_sensor`'s (round-2 W1). The unit
 //! T-SL21 (`resources_tests.rs`) pins every compared field and both derived exclusions directly;
 //! the fields no scene can reach (`kinematic`, `restitution`, `friction`) are named in
 //! `seal_equal`'s docs.
@@ -122,6 +126,11 @@ const SCENE_TIMEOUT: Duration = Duration::from_secs(if cfg!(debug_assertions) { 
 struct BodyId {
     id: u32,
 }
+
+/// T-SL27c's tag: a zero-sized component no physics system reads, so gaining it is an archetype
+/// move that changes no gathered field.
+#[derive(Component, Clone, Copy, Debug)]
+struct Tag;
 
 /// Runs `scene` on its own thread and fails if it has not finished within [`SCENE_TIMEOUT`]; a
 /// panic on the scene thread is re-raised with its own payload.
@@ -411,13 +420,15 @@ enum Change {
     SpinStatic,
     /// T-SL27: the static floor, spawned last, gains [`Sensor`].
     SensorFloor,
+    /// T-SL27c: the static floor, spawned last, gains [`Tag`].
+    TagFloor,
     /// T-SL28: the bottom box on the SDF floor loses [`Simulated`].
     ParkSupport,
     /// T-SL29: the bottom box's inverse mass (and authored inertia) set to 0.
     DemoteSupport,
 }
 
-const CHANGES: [Change; 15] = [
+const CHANGES: [Change; 16] = [
     Change::DespawnSupport,
     Change::SpawnStatic,
     Change::LowerFloor,
@@ -431,6 +442,7 @@ const CHANGES: [Change; 15] = [
     Change::SpeedStatic,
     Change::SpinStatic,
     Change::SensorFloor,
+    Change::TagFloor,
     Change::ParkSupport,
     Change::DemoteSupport,
 ];
@@ -439,6 +451,12 @@ impl Change {
     /// Whether the scene runs the SDF pipeline on an SDF floor instead of a static floor box.
     fn sdf(self) -> bool {
         matches!(self, Change::LowerSdfFloor | Change::ParkSupport)
+    }
+
+    /// Whether the change moves the floor into another archetype (T-SL27, T-SL27c): the scene
+    /// spawns the floor last and checks that the move keeps the walk order.
+    fn moves_floor(self) -> bool {
+        matches!(self, Change::SensorFloor | Change::TagFloor)
     }
 
     /// The static bystander a scene places beside the pile's top box (centre, half-extents),
@@ -482,8 +500,8 @@ struct Outcome {
     drop: f32,
     /// T-SL11s's anti-vacuity: the row count rose by one and the last row is the spawned box.
     appended: Option<bool>,
-    /// T-SL27's anti-vacuity: the floor's archetype move kept the gather's walk order, so only
-    /// `is_sensor` can break the seal.
+    /// T-SL27 and T-SL27c's anti-vacuity: the gather's walk order read before the floor's
+    /// archetype move equals the one after the step, so the move did not reorder the rows.
     order_kept: Option<bool>,
     /// Every step's record, for T-SL8a.
     records: Vec<StepRecord>,
@@ -492,9 +510,9 @@ struct Outcome {
 fn scene(change: Change, mode: SleepSkip, workers: usize) -> Outcome {
     let sdf = change.sdf();
     let mut h = Harness::new(mode, workers, sdf);
-    // T-SL27's floor is spawned after every other body: as the last row, its move into the
-    // `Sensor` archetype (walked after this one) keeps the walk order.
-    let floor_last = change == Change::SensorFloor;
+    // T-SL27 and T-SL27c's floor is spawned after every other body: as the last row, its move
+    // into the `Sensor` or `Tag` archetype (walked after this one) keeps the walk order.
+    let floor_last = change.moves_floor();
     let floor = if sdf || floor_last { None } else { Some(h.floor()) };
     let mut records = Vec::new();
     // B, the other island of T-SL15, first: it freezes before A is spawned.
@@ -544,6 +562,9 @@ fn scene(change: Change, mode: SleepSkip, workers: usize) -> Outcome {
         assert!(h.all_frozen(&other), "construction: island B is frozen when A settles");
     }
 
+    // Read before the change: an archetype move that reorders the walk is seen only against the
+    // order before it.
+    let order_before = h.walk_ids();
     // The change, between the settle step and the next one.
     let (moved, spawned_at) = match change {
         Change::DespawnSupport => {
@@ -614,6 +635,16 @@ fn scene(change: Change, mode: SleepSkip, workers: usize) -> Outcome {
             );
             (pile[0], None)
         }
+        Change::TagFloor => {
+            let e = floor.expect("construction: a box floor");
+            let tag = Tag::component_id();
+            let outcome = h.world.add_component_by_id(e, tag, &[]);
+            assert!(
+                h.world.has_component(e, tag),
+                "construction: the floor gains `Tag` ({outcome:?})"
+            );
+            (pile[0], None)
+        }
         Change::ParkSupport => {
             h.world.disable::<Simulated>(pile[0]);
             (pile[0], None)
@@ -629,7 +660,6 @@ fn scene(change: Change, mode: SleepSkip, workers: usize) -> Outcome {
         }
     };
     let rows_before = h.world.resource::<SolverScratch>().bodies_len();
-    let order_before = h.walk_ids();
     let before = counters(h.sleep());
     let y0 = h.body(moved).position.y;
     h.step();
@@ -641,7 +671,7 @@ fn scene(change: Change, mode: SleepSkip, workers: usize) -> Outcome {
         bodies.len() == rows_before + 1
             && [last.x, last.y, last.z].map(f32::to_bits) == [at.x, at.y, at.z].map(f32::to_bits)
     });
-    let order_kept = (change == Change::SensorFloor).then(|| h.walk_ids() == order_before);
+    let order_kept = change.moves_floor().then(|| h.walk_ids() == order_before);
     let concerned: Vec<Entity> =
         if change == Change::LiftOtherIsland { other.clone() } else { watched.clone() };
     let woke = h.all_awake(&concerned);
@@ -841,7 +871,8 @@ fn a_static_given_a_spin_beside_a_settled_pile_on_the_first_step_after_a_settle_
 
 /// T-SL27 (round-1 F2, `is_sensor`): the static floor, spawned after every other body, gains
 /// [`Sensor`] on the first step after the pile's settle. As the last row, its move into the
-/// `Sensor` archetype keeps the gather's walk order (asserted), so the rows-stable test holds and
+/// `Sensor` archetype keeps the gather's walk order (asserted against the order read before the
+/// move), so the rows-stable test holds (T-SL27c: the same move with a tag holds the seal) and
 /// only the seal's `is_sensor` sees the change. The floor's contact becomes an overlap report: the
 /// pile's count changes, the pile wakes and falls through the floor.
 #[test]
@@ -851,6 +882,53 @@ fn a_support_turned_sensor_on_the_first_step_after_a_settle_wakes_the_pile() {
             o.order_kept,
             Some(true),
             "anti-vacuity: the floor's archetype move must keep the walk order"
+        );
+    }
+}
+
+/// T-SL27c (round-2 W1, T-SL27's control): the static floor, spawned after every other body,
+/// gains the test-local [`Tag`] on the first step after the pile's settle: T-SL27's archetype
+/// move with a component no physics system reads. The walk order is kept and no `RigidBody`
+/// reads as added, so the rows-stable test holds; every stashed row gathers bit-equal, so the
+/// seal holds (`seal_held +1`, no break) and nothing wakes. Red if an order-keeping archetype
+/// move breaks the seal, which would let T-SL27 pass without `is_sensor`.
+#[test]
+fn a_support_given_a_test_local_tag_on_the_first_step_after_a_settle_keeps_the_seal() {
+    for (mode, workers) in ARMS {
+        let what = format!("T-SL27c, {mode:?}, W{workers}");
+        let o = under_watchdog(&what, move || scene(Change::TagFloor, mode, workers));
+        let d = |i: usize| o.after[i] - o.before[i];
+        println!(
+            "{what}: settle at step {}; on the next step contact_wakes +{}, write_wakes +{}, \
+             settle_rekeys +{}, seal_held +{}, seal_breaks +{}; order kept {:?}; pile frozen {}",
+            o.settle_step,
+            d(0),
+            d(1),
+            d(4),
+            d(5),
+            d(6),
+            o.order_kept,
+            o.pile_frozen
+        );
+        assert_eq!(
+            o.order_kept,
+            Some(true),
+            "{what}: anti-vacuity: the floor's archetype move must keep the walk order"
+        );
+        assert!(
+            d(5) == 1 && d(6) == 0,
+            "{what}: an archetype move that keeps the walk order and changes no gathered field \
+             must keep the settle's seal (seal_held +{}, seal_breaks +{})",
+            d(5),
+            d(6)
+        );
+        assert!(
+            o.pile_frozen && d(0) == 0 && d(1) == 0,
+            "{what}: the tag changes no contact and writes no velocity, so the pile stays frozen \
+             (frozen {}, contact_wakes +{}, write_wakes +{})",
+            o.pile_frozen,
+            d(0),
+            d(1)
         );
     }
 }
