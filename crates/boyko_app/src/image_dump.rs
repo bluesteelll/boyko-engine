@@ -443,6 +443,16 @@ mod tests {
         }
     }
 
+    /// The image-dump clause of `render_gbuffer_frame` (OBS review W1) rests on a staging slot being
+    /// reused only after its frame's fence was re-waited: the drain must outlast the frames in flight.
+    #[test]
+    fn the_drain_outlasts_the_frames_in_flight() {
+        assert!(
+            DRAIN_FRAMES as usize > boyko_rhi_vulkan::present::FRAMES_IN_FLIGHT,
+            "a staging slot would be reused while its frame is still in flight"
+        );
+    }
+
     #[test]
     fn the_header_carries_the_recorded_fields() {
         let c = ImageDumpCopy {
