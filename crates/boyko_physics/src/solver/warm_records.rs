@@ -627,8 +627,17 @@ impl WarmLookup<'_> {
     /// The stored impulses for feature `fid` inside `run`: records by descending
     /// manifold index, points last to first, the first match wins (Lemma W). `None`
     /// when no stored point of the run carries `fid` (an empty run misses at once).
+    ///
+    /// `FM` only splits the instances (the body does not read it): the per-point callers —
+    /// [`carry`](Self::carry) and the `FM = false` fill — take `seed::<false>`, the per-manifold
+    /// ones — [`carry_fm`](Self::carry_fm) and the `FM = true` fill — `seed::<true>`, so the
+    /// per-point instance keeps the callers it had before FM. Measured, not doctrinal (FM C1's
+    /// codegen receipt, 2026-10-12, ruling 41; the FM lane record's §8): before FM, LLVM inlined
+    /// this into `carry` (644 instructions) and the fill; with `carry_fm` a caller of the one
+    /// instance, it kept it out of line (246 instructions) and `carry` called it four times (149
+    /// instructions).
     #[inline]
-    pub(crate) fn seed(self, run: WarmRun, fid: u16) -> Option<[f32; 3]> {
+    pub(crate) fn seed<const FM: bool>(self, run: WarmRun, fid: u16) -> Option<[f32; 3]> {
         let recs = self.read.recs();
         for pos in (run.lo..run.hi).rev() {
             let mi = if self.read.strict() {
@@ -650,7 +659,7 @@ impl WarmLookup<'_> {
         let mut rec = WarmRecord::EMPTY;
         for p in 0..count {
             let fid = point_fid(m, p);
-            if let Some(seed) = self.seed(run, fid) {
+            if let Some(seed) = self.seed::<false>(run, fid) {
                 rec.push(fid, seed);
             }
         }
@@ -712,7 +721,7 @@ impl<'a> WarmLookup<'a> {
         let mut rec = WarmRecord::EMPTY;
         for p in 0..count {
             let fid = point_fid(m, p);
-            if let Some(seed) = self.seed(run, fid) {
+            if let Some(seed) = self.seed::<true>(run, fid) {
                 rec.push(fid, [seed[0], 0.0, 0.0]);
             }
         }

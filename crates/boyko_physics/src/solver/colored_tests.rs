@@ -5064,12 +5064,12 @@
                     let run = plan[mi];
                     for p in 0..c as usize {
                         let fid = point_fid(m, p);
-                        let seed = lookup.seed(run, fid);
+                        let seed = lookup.seed::<false>(run, fid);
                         if seed.is_some() {
                             rec_hits += 1;
                             // W1: the whole run was needed — the last record alone misses.
                             if run.hi - run.lo >= 2
-                                && lookup.seed(WarmRun { lo: run.hi - 1, hi: run.hi }, fid).is_none()
+                                && lookup.seed::<false>(WarmRun { lo: run.hi - 1, hi: run.hi }, fid).is_none()
                             {
                                 Tally::bump(&tally.w1_cases, 1);
                             }

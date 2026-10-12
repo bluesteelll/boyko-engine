@@ -1966,11 +1966,17 @@ impl<'a> FillCtx<'a> {
     /// stream-order walk finds; only the `backward` count differs — and records it in `plan` and
     /// `tags` as P-a would. Otherwise P-a planned it, and it is read back.
     ///
+    /// `FM` only splits the instances (the body does not read it): `fill_range::<FM>` calls
+    /// `source::<FM>`, so each instance keeps one caller. Measured, not doctrinal (FM C1's codegen
+    /// receipt, 2026-10-12, ruling 41; the FM lane record's §8): before FM, LLVM inlined this into
+    /// its one caller, `fill_range`; with `fill_range::<true>` a second caller of the one instance,
+    /// it kept it out of line (250 instructions) and `fill_range::<false>` called it.
+    ///
     /// # Safety
     /// `mi` is the manifold of a lane of a cohort the calling range owns, so no other thread
     /// reads or writes `plan[mi]` or `tags[mi]` while it runs.
     #[inline]
-    unsafe fn source(
+    unsafe fn source<const FM: bool>(
         &self,
         mi: usize,
         cursors: &mut SearchCursors,
@@ -3221,7 +3227,7 @@ impl ColoredSoftStepSolver {
                     ctx.manifolds,
                     ctx.bodies,
                     ctx.bodies_eff,
-                    |mi| ctx.source(mi, &mut cursors, &mut counts),
+                    |mi| ctx.source::<FM>(mi, &mut cursors, &mut counts),
                     ctx.recs_w,
                     &mut setup,
                     patch,
@@ -3439,7 +3445,7 @@ impl ColoredSoftStepSolver {
                 // The seed: the last stored point of the manifold's run carrying this
                 // feature id (Lemma W), zero on a miss or when nothing was looked up
                 // (an empty run).
-                let seed = match lookup.seed(run, point_fid(m, r)) {
+                let seed = match lookup.seed::<FM>(run, point_fid(m, r)) {
                     Some(seed) => {
                         lane_hits += 1;
                         seed
@@ -3707,6 +3713,14 @@ impl ColoredSoftStepSolver {
     /// FM (D10, D16): the `FM = true` instance applies a patched cohort's lanes through
     /// [`warm_apply_patch_scalar`](Self::warm_apply_patch_scalar) and every other cohort as
     /// `FM = false` does.
+    // `inline(never)` is measured, not doctrinal (FM C1's codegen receipt, 2026-10-12, ruling 41;
+    // the FM lane record's §8): before FM this kernel had one instance, called from
+    // `warm_start_apply`'s two inlined copies, and LLVM kept it out of line (251 instructions) with
+    // `warm_start_apply` inlined into `solve_colored_inner` and `run_block`. FM's second instance
+    // left each instance one caller, so LLVM inlined all four kernels into an out-of-line
+    // `warm_start_apply` (2724 instructions). This keeps every instance out of line and
+    // `warm_start_apply` small enough to inline, as before FM.
+    #[inline(never)]
     fn warm_apply_scalar<const FM: bool>(
         cols: &CohortColumns,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
@@ -3878,8 +3892,11 @@ impl ColoredSoftStepSolver {
     /// FM (D10): the `FM = true` instance applies a patched cohort through
     /// [`warm_apply_patch_scalar`](Self::warm_apply_patch_scalar)'s ops eight lanes at a time,
     /// between the shared gather and scatter; every other cohort as `FM = false` does.
+    // `inline(never)`: measured, as on `warm_apply_scalar` (FM C1's codegen receipt, ruling 41):
+    // before FM this kernel was out of line (818 instructions) and `warm_start_apply` inlined.
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[target_feature(enable = "avx2")]
+    #[inline(never)]
     unsafe fn warm_apply_avx2<const FM: bool>(
         cols: &CohortColumns,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
