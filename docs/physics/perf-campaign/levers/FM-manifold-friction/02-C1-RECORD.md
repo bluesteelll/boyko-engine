@@ -22,14 +22,16 @@ decisions, the red-first readings and every deviation); the implementation repor
 | sync `190aedce` | `merge: integ/unified into u/phys-fm-c1 (trunk sync)` | the trunk with `sl` (`d3701e6b`) and render OBS; one conflict (a `use` list), both sides kept; §8.1 |
 | C1e `e43e7411` | `test(physics): FM (1e) - frozen_island_warm_start's FM arms on SL's B1-exact re-expression` | the FM twins of B1-exact (both centres) and of the crowd test; test file only; §8.2 |
 | r41 `d025f93c` | `perf(physics): FM ruling 41 - restore the pre-FM inlining of the FM = false instances …` | `#[inline(never)]` on the two warm kernels; `seed` and `FillCtx::source` split per `FM`; §8.4 |
+| r42 `2954ec62` | `perf(physics): FM ruling 42 - remedy D2: the kernels' patch blocks test …` | the four patch-block sites of `solve_color_k` / `solve_color_avx2_k` re-test the const; §8.5 |
+| sync 2 `f1d0fbd0` | `merge: integ/unified (0dac974f) into u/phys-fm-c1 (trunk sync 2, ruling 42 …)` | render RD1 over the sl merge; no conflict, no `boyko_physics` file; §8.5 |
 
 **Close (§8):** `sl` merged; the trunk sync (`190aedce`) and C1e (`e43e7411`) are in, every pin
 byte-identical on the synced tree. The first codegen receipt (cut §3.8) was RED with a STOP on Tier
-1's status rule (§8.3). Ruling 41's fix (`d025f93c`) restored the pre-FM inlining, and Tier 0 and four
-of Tier 1's five bodies are now exact. **The amended receipt is RED and STOPs on
-`solve_color_dispatch::<false>` (§8.4)**: a corrected normalisation shows that its residue references
-a new vector constant, a different SLP vectorisation on the FM = false path. No value moved. A
-measured four-line remedy makes Tier 1 exact; it is the orchestrator's call (§8.4).
+1's status rule (§8.3). Ruling 41's fix (`d025f93c`) restored the pre-FM inlining; the amended
+receipt then STOPped on `solve_color_dispatch::<false>`'s residue (§8.4). Ruling 42 applied the
+measured remedy D2 (`2954ec62`), and the lane synced again over render RD1 (`f1d0fbd0`). **The final
+receipt PASSes (§8.5):** Tiers 0 and 1 are exact against PARENT `0dac974f`, and every other residue
+is inside rulings 41/42's admitted classes. No value moved.
 
 ---
 
@@ -126,8 +128,9 @@ both arms), RF-d3 (receipt 5 exits 0), RF-d4 (`fm_depth_ab`'s anti-vacuity at w 
 ## 6. Parked, and what C2 reads
 
 - **C1e, the trunk sync, the codegen receipt:** done after `sl` merged (§8). The first receipt
-  stopped at Tier 1's status rule (§8.3). After ruling 41's fix, the amended receipt stops on
-  `solve_color_dispatch::<false>`'s residue (§8.4).
+  stopped at Tier 1's status rule (§8.3). After ruling 41's fix, the amended receipt stopped on
+  `solve_color_dispatch::<false>`'s residue (§8.4). After ruling 42's D2 and the second sync, the
+  final receipt passes (§8.5).
 - **C2 inputs:** the runner's `--friction point|manifold|manifold-touch` and, on armed colored rows,
   `layout_census` (`steps`, `cohorts`, `cohorts_by_depth`, `rank_slots`, `patch_blocks`,
   `multi_lanes`, summed over the metric window) — SCREEN-L's K1 reads `cohorts_by_depth`;
@@ -412,7 +415,7 @@ exactly as the receipt builds it:
   - rustc does not lower a block behind a switch on a const parameter that monomorphisation makes
     dead.
 
-**The lane stops.** Ruling 41 (3) makes a residue that changes a reference on the FM = false path a
+**The lane stops** (resolved by ruling 42, §8.5). Ruling 41 (3) makes a residue that changes a reference on the FM = false path a
 STOP. D2 is a source change in the hot kernels, outside step 1's inlining scope. The `ARM_MASK`
 reloads are a register-allocation count change in a Tier 2 body on the FM = false path. Both are the
 orchestrator's call.
@@ -422,3 +425,72 @@ The trunk has since moved to `0dac974f`, render RD1. It touches `boyko_app`, `bo
 through `boyko_sdf_math`. RD1's change there only adds lines: a new depth leaf, its emitter and a
 bin. Whether the lib's asm moves at the next sync was not measured; cut §3.8 step 1 re-takes the
 receipt after that sync.
+
+### 8.5 Ruling 42: remedy D2, the second trunk sync, the final receipt — PASS (`fm/cg/receipt3.md`)
+
+Ruling 42 (`phys-next/RULINGS-2026-10-01.md`, item 42) set four steps:
+1. Apply D2.
+2. Admit the six `ARM_MASK` reloads as register allocation: "changes a reference" means a new
+   referenced symbol or a new reference kind, not more loads of an already-referenced address.
+   FM-ZC in window IB(+FM) insures them.
+3. Accept the `fm-pick` table's broad reading (`K`, `FC`).
+4. Sync with the trunk again and re-take the receipt on the new merge-base.
+
+The run's report is `fm/close_dev3.md`; its files are `fm/close3/` and `fm/cg/`.
+
+**D2 (`2954ec62`).** The four patch-block sites of `solve_color_k` and `solve_color_avx2_k` test
+`if FM && patched {`; a comment at both `let patched` sites says why and cites the receipt. The
+const switch is resolved at monomorphisation, so the FM = false instance never lowers the blocks.
+`patched` already implies `FM`, so no value moves in either instance.
+- Gates at the default (cut C1b (a), both profiles) are byte-identical to the synced references
+  (kit `fm/close3/k/d2-verify-1`, 31 / 31 runs exit 0):
+  - lib 366 / 364 run;
+  - P1 `0x211297c3d16c603c` / `0xe5d8a7d5f4694f08`, with the reuse-off and d0 hashes unchanged;
+  - P2's three D_max (0.0007244835 / 0.0005266388 / 0.0006670445); P3; P6; P7; P8;
+  - `d0_identity`, `v2_contacts`, `o5`, `sdf`, `frozen_island_warm_start`, `sr_region_*` and
+    `default_world_worker_invariance`;
+  - `friction_manifold` 21/21, with the count-1 pins.
+  - Check and clippy are clean; UG-10 24/24; census 12/12.
+
+**The second sync (`f1d0fbd0`).** `integ/unified` = `0dac974f` adds render RD1 on top of the sl merge.
+It touches `boyko_app`, `boyko_rhi_vulkan` and `boyko_shaderdsl`, and no file of `boyko_physics`,
+`boyko_sdf_math`, `Cargo.toml` or `Cargo.lock`. The merge has no conflict. Check and clippy are clean
+on the merged tree.
+
+**The amendment** (cut addendum 6, written before the sync and the builds):
+- **(a)** Tiers 0 and 1 must be exact. The ruling-41 (3) pin is withdrawn.
+- **(b)** `solve_colored_inner`'s census changes outside the Tier 2 table are admitted only as
+  receipt 2's ten. Both PARENT's and TIP's bodies, funclets included, must equal receipt 2's, so the
+  instructions classed there are the ones read now. The ten are:
+  - on the FM = true path, the inlined `solve_all_colors::<true>` copy and `build_columns`' FM
+    reduce;
+  - on the FM = false path, the six `ARM_MASK` reloads.
+- **(c)** Tier 4 is unchanged.
+
+**The receipt.** PARENT = `0dac974f`; its asm is byte-identical to receipt 2's `d3701e6b` (md5
+`5cccad2e…`): RD1 moves no byte of the physics lib. TIP = `f1d0fbd0` (md5 `71a86df8…`). It equals
+the scratch D2 build function for function under the receipt's normal form.
+
+| tier | reading |
+|---|---|
+| step 4 | PARENT has no out-of-line kernel symbol |
+| 0 `carry` | exact, 644 / 644 |
+| 1 | **all five exact**: `solve_color_dispatch` 4851 / 4851, `solve_all_colors` 115 / 115, `warm_apply_scalar` 251 / 251, `warm_apply_avx2` 818 / 818, `fill_range` 1096 / 1096; the status rule holds |
+| 2 | `run_block`, `solve_region`, `broadphase_sets` and the constructors pass. `solve_colored_inner`: the table's 8 rises plus the ten carried changes, admitted (equal to receipt 2's, on receipt 2's bodies) |
+| 3 | 16 / 16 equal; the disarmed walk PASSes |
+| every other function | 5 differ, all B-admitted; the 15 FM-only functions are ok |
+| 4 | PASS: 72 `fm-pick` lines, 0 table entries unused; 2 `r41-attr`; D2's lines are comments and fm regions |
+
+Verdict: PASS, exit 0. TIP has 176 666 instructions to PARENT's 162 485.
+
+**Red-first**, each red as predicted:
+- R1, built end to end: Tier 1 `solve_color_dispatch` 4861 instructions, 13 hunks, "no pinned
+  residue".
+- R2-R5.
+- The amendment's own:
+  - RA6-exact: receipt 2's TIP reds on Tier 1 alone;
+  - RA6-body: one register in `solve_colored_inner` → the carried set red;
+  - RA6-arm: a seventh `ARM_MASK` reload → red.
+
+**Not run here** (the tester's): §3.7's final-HEAD workspace and both-profile physics runs, P4/P5/P11
+and the FM receipts on the runner, and Miri (no `unsafe` changed).
