@@ -351,6 +351,7 @@ pub fn trailing_scope_violation(g: &FrameGraph) -> Option<TrailingScopeViolation
         .find_map(|w| trailing_scope_violation_of(g, w.res))
 }
 
+#[cfg(debug_assertions)]
 #[cold]
 #[inline(never)]
 pub(crate) fn fire_seeded_layout(v: SeededLayoutViolation) -> ! {
@@ -366,6 +367,7 @@ pub(crate) fn fire_seeded_layout(v: SeededLayoutViolation) -> ! {
     )
 }
 
+#[cfg(debug_assertions)]
 #[cold]
 #[inline(never)]
 pub(crate) fn fire_trailing_scope(v: TrailingScopeViolation) -> ! {

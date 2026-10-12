@@ -52,6 +52,7 @@ pub mod gpu_zone;
 mod graph_bridge;
 mod passes;
 mod scene_types;
+pub mod seed_class;
 mod surface;
 mod swapchain;
 mod targets;

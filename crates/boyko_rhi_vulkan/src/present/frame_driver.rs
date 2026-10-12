@@ -90,6 +90,10 @@ pub struct Renderer<'ctx> {
     /// recorders borrow the renderer shared, not because anything else touches it (one thread
     /// records).
     material_upload_probe: core::cell::Cell<super::MaterialUploadProbe>,
+    /// OBS (H0 Scope 6): every `SeededImage` / `SeededBuffer` declaration ORs the image dump's
+    /// `TRANSFER` read into its seed — a boot decision of the `BOYKO_IMAGE_DUMP` instrument,
+    /// `false` in every shipped run (seeds and barrier streams untouched).
+    pub(crate) obs_dump_widen: bool,
 }
 
 impl<'ctx> Renderer<'ctx> {
@@ -255,6 +259,7 @@ impl<'ctx> Renderer<'ctx> {
             forward_pass_plan: None,
             vb_pass_plan: None,
             material_upload_probe: core::cell::Cell::new(super::MaterialUploadProbe::default()),
+            obs_dump_widen: false,
         })
     }
 
