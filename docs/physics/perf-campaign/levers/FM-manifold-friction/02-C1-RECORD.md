@@ -19,9 +19,13 @@ decisions, the red-first readings and every deviation); the implementation repor
 | C1d `7a7f7fa0` | `bench(physics): FM (1d) - the runner's --friction and its armed layout census; colored_solve's fm_depth_ab` | the parity runner's `--friction`, `config.friction_model`, the armed `layout_census`; `colored_solve`'s `fm_depth_ab` group |
 | C1f | `docs(physics): FM (1f) - C1 record …` | this directory |
 | r1 `a7b3cb39`, `8220e92c`, `823041ff`, and this file's §7 | `test(physics): FM r1 …` | round 1's fixes (triage r1 F1, F2, F3, W1); test files only, see §7 |
+| sync `190aedce` | `merge: integ/unified into u/phys-fm-c1 (trunk sync)` | the trunk with `sl` (`d3701e6b`) and render OBS; one conflict (a `use` list), both sides kept; §8.1 |
+| C1e `e43e7411` | `test(physics): FM (1e) - frozen_island_warm_start's FM arms on SL's B1-exact re-expression` | the FM twins of B1-exact (both centres) and of the crowd test; test file only; §8.2 |
 
-**Parked (cut Q5):** C1e (`frozen_island_warm_start`'s FM arms on `sl`'s B1-exact re-expression)
-needs the `sl` lane merged; the trunk sync and the codegen receipt (cut §3.8) follow it. See §6.
+**Close (§8):** `sl` merged; the trunk sync (`190aedce`) and C1e (`e43e7411`) are in, every pin
+byte-identical on the synced tree. **The codegen receipt (cut §3.8) is RED, with a STOP on Tier 1's
+status rule**: the FM-off codegen moved where FM gave a helper a second caller, with no value moved.
+The decision is the orchestrator's (§8.3).
 
 ---
 
@@ -117,14 +121,8 @@ both arms), RF-d3 (receipt 5 exits 0), RF-d4 (`fm_depth_ab`'s anti-vacuity at w 
 
 ## 6. Parked, and what C2 reads
 
-- **C1e** waits for `sl`'s merge: FM twins of `sl`'s B1-exact re-expression and of the crowd test in
-  `frozen_island_warm_start.rs`; red-first M8 (`carry_fm` drops the triple) at the wake step.
-- **The trunk sync** (`merge --no-ff integ/unified`): the runner's `--friction` hunks union with
-  `sl`'s SL-2a validate lift and SUMMARY keys; C1b's gates and P2/P10 re-run on the synced tree's pin
-  values.
-- **The codegen receipt** (cut §3.8, Tiers 0-4 with the pair map, R1-R5 red-firsts) is taken after
-  the last trunk sync; addendum 3 pre-registers two more Tier 2/4 admissions
-  (`for_each_warm_seed`'s diagnostic mapping, `use` lists gaining names).
+- **C1e, the trunk sync, the codegen receipt:** done after `sl` merged (§8). The receipt is red and
+  stops at Tier 1's status rule (§8.3).
 - **C2 inputs:** the runner's `--friction point|manifold|manifold-touch` and, on armed colored rows,
   `layout_census` (`steps`, `cohorts`, `cohorts_by_depth`, `rank_slots`, `patch_blocks`,
   `multi_lanes`, summed over the metric window) — SCREEN-L's K1 reads `cohorts_by_depth`;
@@ -194,3 +192,124 @@ physics file). That is not the sync §6 means, which still follows `sl`'s merge.
 - Miri SB and TB, the two units: `running 1 test`, ok in each leg (kit gate `fm/k/r1-miri-1`,
   `VERDICT GREEN exit_code 0`).
 - `cargo check` and `clippy --workspace --all-targets -D warnings`: clean.
+
+---
+
+## 8. Close (2026-10-12): the trunk sync, C1e and the codegen receipt
+
+The close run's report is `fm/close_dev.md`; its logs are `fm/close/` and the receipt's files
+`fm/cg/` (all under `D:/tmp/phys-orch/`).
+
+### 8.1 The trunk sync (`190aedce`)
+
+`integ/unified` = `d3701e6b` carries `sl` (SL-2a, SL-1, C2b, SL-1b; rulings 39 and 40) and render
+OBS (`410c30ef`, no physics file).
+- One textual conflict: `solver/colored.rs`'s `use crate::resources::{..}`. Both names were kept
+  (FM's `FrictionModel`, SL's `SealArm`).
+- Read hunk by hunk where the cut expected conflicts, and auto-merged:
+  - the runner: FM's `--friction` refusal is in `validate`, SL's lift in `validate_dyn`. SL's
+    `sleep` member is a named argument at the SUMMARY's end, so FM's positional `layout_census`
+    argument keeps its slot;
+  - `solve_colored_inner`: SL's seal argument, `begin_step_armed`, the SL-INV capture assert and the
+    settle, beside FM's form latch, D15's cold zeroing and `fm_fill`;
+  - `resources.rs`, `sleep_sets.rs`, `colored_tests.rs` (SL's `PIN_S_B` re-pin);
+  - `sleep_skip_bit_identity.rs`: SL's LB5 re-expression beside FM's DA9 row, `Obs.fseeds` /
+    `fstats` and FM arms.
+- `sl`'s values are the reference after the sync (cut §4): `PIN_S_B` `0xe9bd_c7f6_80f7_80ca`;
+  JSonT500 `0xc637_a051_7ada_bab7`, JSonToff500 `0x4aec_2a5f_78f4_88d0`; the E3 sleeping-on
+  fixtures. No FM commit after the sync edits a source file outside the one C1e test file.
+
+Gates on the synced tree (`fm/close/logs/sync/summary.txt`, 53 rows, every exit 0):
+- check and clippy (`--workspace --all-targets -D warnings`): clean.
+- `boyko-physics --lib`: debug 366 run (365 passed, 1 deferred ignore); release 364 (363 + 1).
+- Pins:
+  - P1, both profiles: the trunk's hashes.
+  - P2: A7-R1's D_max 0.0007244835 / 0.0005266388 / 0.0006670445 m. It runs inside
+    `sleep_settles_box_piles`, which reads 16/16 with its generator ignored.
+  - P3 3/3 and P6 "GATE: GREEN — 19 scenes", both profiles; P7 2/2; P8 1/1.
+  - P9 49/49. The ledger's last row is now `OBS-C6 5 7`, so the pool-site columns are unchanged.
+  - P10 4/4 at the synced anchors.
+- Both profiles: `v2_speculative_d0_identity` 10/10, `v2_speculative_contacts` 8/8,
+  `colored_acceptance_o5` 9/9, `sdf_collision` 13/13, `frozen_island_warm_start` 6/6,
+  `sr_region_worker_invariance` 1/1, `sr_region_store` 2/2, `sr_region_counters` 3/3,
+  `friction_manifold` 21/21, `default_world_worker_invariance` 3/3, `sleep_skip_bit_identity`
+  63/63.
+- `sl`'s own tests over the merged solve path, both profiles: `sleep_velocity_zero` 4/4,
+  `sleep_write_wake` 6/6, `sleep_seal` 17/17, `row_identity_remap` 12/12.
+- The runner:
+  - P4 12/12;
+  - P5, both sets: runs 264/264, both negatives exit 4, checks 26/26 and 17/17, `ALL_DONE`;
+  - P11: `ours_gates` 49/49, `s5_runner_gate` 54/54;
+  - the FM receipts 21/21, and `fm_depth_ab` in test mode.
+- UG-10 24/24; `ignore_reasons_census` 12/12.
+
+### 8.2 C1e (`e43e7411`)
+
+`frozen_island_warm_start.rs` gains three tests. The harness now takes the friction model;
+the per-point tests pass `PerPoint`, so their assertions are unchanged.
+
+- `a_woken_pile_steps_exactly_as_its_twin_stepped_from_the_frozen_state_fm` and `_fm_touch`: SL's
+  B1-exact scenario with both worlds on `PerManifold` / `PerManifoldTouch`. Premises come first:
+  - both worlds ran the per-manifold form on the wake step and on every frozen step;
+  - the twin laid out a patch (`patch_blocks` 2);
+  - the first frozen step carried a triple for each of the column's 5 manifolds;
+  - the twin's wake step was warm at every point, with `manifold_hits == manifolds` (5 == 5).
+  Then the woken pile's state equals the twin's step from the frozen state, bit for bit.
+- `frozen_islands_carried_beside_a_parallel_solve_are_bit_identical_across_worker_counts_fm`: W1
+  and W8 are bit-identical on every step, in bodies, warm-seed statistics and friction-seed counts.
+  - Every tallied step ran FM (154/154). `patch_blocks` reached 8. The solver's own friction carry
+    reached 64 triples on a step.
+  - The wake's `manifold_hits` equals its manifolds (88).
+  - Reported, not asserted: no physical friction carry fell on a step where a colour reached the
+    dispatch floor.
+- `manifold_carry_hits` is physical (cut Q2). On held steps the held store keeps the records, so the
+  count reads 0 there. The arms' first unmutated run asked more and was red on that premise. The
+  corrected premises ran before the red-first.
+- Red-first M8 (`carry_fm` drops the triple), predicted before the run: 9 tests, 7 passed, 2 FAILED.
+  The two failures are the FM exactness arms, at the exactness assertion. The first difference is
+  box 0, field 0, and every premise held.
+  - Design §8 (f)'s "`manifold_carry_hits` changes" was withdrawn before the run. The count is of
+    carries with a point hit, which M8 leaves alone.
+- Gates: the file, release 9/9 and debug 9/9; clippy on the target, clean.
+  - P2, P10 and P5's sleeping-on rows ran on the synced tree. C1e changes no engine or runner byte.
+
+### 8.3 The codegen receipt — RED, STOP (`fm/cg/receipt.md`)
+
+PARENT = `git merge-base HEAD integ/unified` = `d3701e6b`; TIP = `e43e7411`. Both were built as cut
+§3.8 step 2 (release, no LTO, one CGU, exports deleted), with the tiers and addendum 3's note as
+pre-registered.
+- **Step 4:** PARENT has no out-of-line `solve_color{,_avx2}{,_k}`, as predicted.
+- **Tier 3 passes:** all 16 region-monomorph functions are equal, and `disarmed.py` reads PASS.
+- **Tier 1:**
+  - `solve_all_colors` ↔ `::<false>` is equal.
+  - **STOP:** `warm_apply_scalar` and `warm_apply_avx2` are out of line in PARENT and have no symbol
+    in TIP. TIP outlines `warm_start_apply` (2724 instructions) and inlines all four kernels in it.
+  - `fill_range::<false>` differs (1096 → 814 instructions): `FillCtx::source` is now out of line.
+  - `solve_color_dispatch::<false>` differs (4851 → 4852 instructions, 120 hunks). No symbol
+    reference changed: register allocation and scheduling only.
+- **Tier 0 red:** `WarmLookup::carry` now calls an out-of-line `WarmLookup::seed`.
+- **Tier 2 red:**
+  - the warm-kernel calls moved into `warm_start_apply`;
+  - the inlined `solve_all_colors::<true>` copy in `solve_colored_inner` raises its zone-handle
+    references (forbidden by rule; FM arm only);
+  - bounds-check references rose.
+  - `solve_region`, `broadphase_sets` and the three constructors pass.
+- **Addendum W1's "every other function" red:** `Resources::insert` and
+  `insert_physics_resources` of the solver (its size went 3576 → 3584), and the `resource_id`
+  initialisers of `PhysicsConfig`, `SleepSets` and the solver (their `TypeId`: rustc hashes an
+  ADT's fields). `FillCtx::source` and `WarmLookup::seed` show as new symbols called from Tier
+  0/1 bodies.
+- **Tier 4 red:** 15 removed and 67 unclassified added lines, at the cut's own caller-side picks and
+  at the FM-only parameters and locals of the `<const FM: bool>` instances.
+- **Red-first:** R1 (built), R3, R4 and R5 red as predicted. R2 is not applicable, because TIP has no
+  `warm_apply_avx2::<false>`.
+
+Three causes cover every red, and none moves a value:
+1. A helper that gained a second caller or instantiation under FM is now outlined by LLVM:
+   `seed`, `FillCtx::source`, `warm_start_apply`.
+2. The FM fields change three resources' size and `TypeId`.
+3. Tier 4's named transformations do not cover the picks the cut placed at the callers.
+
+The lane stops here and makes no change. Any fix needs an architect's decision:
+- inlining attributes on the outlined helpers (principle 7: this receipt is the measurement);
+- or a receipt amendment for causes 2 and 3.
