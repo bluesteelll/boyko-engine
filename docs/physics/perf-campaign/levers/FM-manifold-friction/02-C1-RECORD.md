@@ -21,11 +21,15 @@ decisions, the red-first readings and every deviation); the implementation repor
 | r1 `a7b3cb39`, `8220e92c`, `823041ff`, and this file's §7 | `test(physics): FM r1 …` | round 1's fixes (triage r1 F1, F2, F3, W1); test files only, see §7 |
 | sync `190aedce` | `merge: integ/unified into u/phys-fm-c1 (trunk sync)` | the trunk with `sl` (`d3701e6b`) and render OBS; one conflict (a `use` list), both sides kept; §8.1 |
 | C1e `e43e7411` | `test(physics): FM (1e) - frozen_island_warm_start's FM arms on SL's B1-exact re-expression` | the FM twins of B1-exact (both centres) and of the crowd test; test file only; §8.2 |
+| r41 `d025f93c` | `perf(physics): FM ruling 41 - restore the pre-FM inlining of the FM = false instances …` | `#[inline(never)]` on the two warm kernels; `seed` and `FillCtx::source` split per `FM`; §8.4 |
 
 **Close (§8):** `sl` merged; the trunk sync (`190aedce`) and C1e (`e43e7411`) are in, every pin
-byte-identical on the synced tree. **The codegen receipt (cut §3.8) is RED, with a STOP on Tier 1's
-status rule**: the FM-off codegen moved where FM gave a helper a second caller, with no value moved.
-The decision is the orchestrator's (§8.3).
+byte-identical on the synced tree. The first codegen receipt (cut §3.8) was RED with a STOP on Tier
+1's status rule (§8.3). Ruling 41's fix (`d025f93c`) restored the pre-FM inlining, and Tier 0 and four
+of Tier 1's five bodies are now exact. **The amended receipt is RED and STOPs on
+`solve_color_dispatch::<false>` (§8.4)**: a corrected normalisation shows that its residue references
+a new vector constant, a different SLP vectorisation on the FM = false path. No value moved. A
+measured four-line remedy makes Tier 1 exact; it is the orchestrator's call (§8.4).
 
 ---
 
@@ -121,8 +125,9 @@ both arms), RF-d3 (receipt 5 exits 0), RF-d4 (`fm_depth_ab`'s anti-vacuity at w 
 
 ## 6. Parked, and what C2 reads
 
-- **C1e, the trunk sync, the codegen receipt:** done after `sl` merged (§8). The receipt is red and
-  stops at Tier 1's status rule (§8.3).
+- **C1e, the trunk sync, the codegen receipt:** done after `sl` merged (§8). The first receipt
+  stopped at Tier 1's status rule (§8.3). After ruling 41's fix, the amended receipt stops on
+  `solve_color_dispatch::<false>`'s residue (§8.4).
 - **C2 inputs:** the runner's `--friction point|manifold|manifold-touch` and, on armed colored rows,
   `layout_census` (`steps`, `cohorts`, `cohorts_by_depth`, `rank_slots`, `patch_blocks`,
   `multi_lanes`, summed over the metric window) — SCREEN-L's K1 reads `cohorts_by_depth`;
@@ -286,7 +291,8 @@ pre-registered.
     in TIP. TIP outlines `warm_start_apply` (2724 instructions) and inlines all four kernels in it.
   - `fill_range::<false>` differs (1096 → 814 instructions): `FillCtx::source` is now out of line.
   - `solve_color_dispatch::<false>` differs (4851 → 4852 instructions, 120 hunks). No symbol
-    reference changed: register allocation and scheduling only.
+    reference changed: register allocation and scheduling only. *(Withdrawn in §8.4: the tool's
+    normalisation hid a changed constant.)*
 - **Tier 0 red:** `WarmLookup::carry` now calls an out-of-line `WarmLookup::seed`.
 - **Tier 2 red:**
   - the warm-kernel calls moved into `warm_start_apply`;
@@ -313,3 +319,106 @@ Three causes cover every red, and none moves a value:
 The lane stops here and makes no change. Any fix needs an architect's decision:
 - inlining attributes on the outlined helpers (principle 7: this receipt is the measurement);
 - or a receipt amendment for causes 2 and 3.
+
+### 8.4 Ruling 41: the inlining restored, the receipt amended and re-run — RED, STOP (`fm/cg/receipt2.md`)
+
+Ruling 41 (`phys-next/RULINGS-2026-10-01.md`, item 41) set three steps:
+1. Restore the pre-FM inlining of the FM = false instances, with the least attributes.
+2. Amend the receipt for causes 2 and 3 before re-running.
+3. Admit a Tier 0/1 residue that changes no symbol reference. A residue that changes a reference on
+   the FM = false path stays a STOP.
+
+The run's report is `fm/close_dev2.md`; its files are `fm/close2/` and `fm/cg/`.
+
+**The fix (`d025f93c`).** The candidates were measured on lib asm built from the working tree,
+exactly as the receipt builds it:
+- `#[inline(never)]` on `warm_apply_scalar` and `warm_apply_avx2`. Every instance is out of line
+  again: the FM = false ones are 251 and 818 instructions, equal to PARENT's. `warm_start_apply` is
+  inlined into its two callers again.
+- `WarmLookup::seed` and `FillCtx::source` gain a `const FM: bool` that their bodies do not read.
+  The per-point callers take the `false` instance, so it keeps exactly its pre-FM callers and LLVM's
+  pre-FM decision:
+  - `carry` is 644 instructions, equal to PARENT;
+  - `fill_range::<false>` is 1096, equal to PARENT.
+- `#[inline(always)]` on `seed` and `source` was measured first and rejected: `carry` kept 7 hunks
+  and `fill_range::<false>` 176.
+- Gates at the default (cut C1b (a), both profiles) are byte-identical to the synced references:
+  - lib 366 / 364 run;
+  - P1 `0x211297c3d16c603c` / `0xe5d8a7d5f4694f08`, with the reuse-off and d0 hashes unchanged;
+  - P2's three D_max; P3; P6; P7; P8;
+  - `d0_identity`, `v2_contacts`, `o5`, `sdf`, `frozen_island_warm_start`, `sr_region_*` and
+    `default_world_worker_invariance`;
+  - `friction_manifold` 21/21, with the count-1 pins.
+  - Check and clippy are clean; UG-10 24/24; census 12/12.
+
+**The amendment** (cut addendum 5 and its correction 1, written before the re-run):
+- **M1, the normalisation.** A displacement is now a number not glued to a name. The first form read
+  `__real@3f800000(%rip)` as `__real@3fD(%rip)`, which hid any changed constant in a Tier 0/1 body.
+  This withdraws §8.3's "no symbol reference changed" for `solve_color_dispatch`.
+- **M2:** Tier 4 pairs a removed line with the FM = false copy first.
+- **M3:** the output names carry an index.
+- **M4:** an aid that decodes panic `Location`s.
+- **B (ruling 41 (2) (b)):** nine named functions are admitted when their census is unchanged
+  except for constant-pool names. They are `Resources::insert`, `insert_physics_resources` and the
+  `resource_id` initialiser, for each of the three types whose fields FM changed.
+- **C (ruling 41 (2) (c)):**
+  - `fm-pick` admits 72 lines, traced to the cut's named picks under 15 pick ids;
+  - `r41-attr` admits the ruling's two attributes;
+  - every other line stays red.
+- **D (ruling 41 (3)):** a Tier 0/1 residue is admitted only when both hold:
+  - it equals, byte for byte, the first receipt's `solve_color_dispatch` residue, pinned under M1;
+  - no changed line names a symbol, a constant or rodata.
+- **E:** each Tier 2 red is classed by path.
+
+**The re-run.** PARENT `d3701e6b` was rebuilt, and its md5 equals the first receipt's
+(`5cccad2e…`). TIP is `d025f93c` (asm md5 `dbcf3783…`).
+
+| tier | reading |
+|---|---|
+| step 4 | PARENT has no out-of-line kernel symbol, as before |
+| 0 `carry` | exact, 644 / 644 |
+| 1 | `solve_all_colors`, `warm_apply_scalar`, `warm_apply_avx2` and `fill_range` are exact, and the status rule holds. **`solve_color_dispatch::<false>` is RED — a STOP:** its residue is the pinned one (4851 → 4852 instructions, 120 hunks), but 7 changed lines name constants. `__xmm@00000007000000060000000300000007` (a `vpermps` index vector) goes 0 → 1. This is a different SLP vectorisation, not register allocation. |
+| 2 | `run_block`, `solve_region`, `broadphase_sets` and the constructors pass. `solve_colored_inner` is red; its reds are classed in the two items below the table. |
+| 3 | 16 / 16 equal; the disarmed walk PASSes |
+| every other function | 5 differ, and all 5 are B-admitted; the FM-only functions are ok |
+| 4 | PASS: 72 `fm-pick` lines + 2 `r41-attr`, 0 table entries unused |
+
+`solve_colored_inner`'s Tier 2 reds, by path:
+- **FM = true path:**
+  - the inlined `solve_all_colors::<true>` copy, which mirrors PARENT's own inlined `::<false>` copy:
+    `PHYS_COLOR_WIDE` / `NARROW`, `zone_id`, the `LANE` TLS ×2, `LANES`, `CELLS`, one `ARM_MASK`,
+    and four bounds checks at `solve_all_colors`' lines;
+  - `build_columns`' FM reduce: one `slice_index_fail` in an fm region.
+- **FM = false path:** six more `__imp_ARM_MASK` loads. The substep loop's zone opens reload the
+  profiler's arm-mask address where PARENT held it in `%r12`. That is register allocation: it adds
+  no zone, call or panic site.
+
+**Red-first:**
+- R1, built end to end: 4862 instructions, 133 hunks, "not the pinned one". TIP and R1-TIP differ in
+  that function alone.
+- R2 (now applicable), R3, R4 and R5 red as predicted.
+- The amendment's RA-b1, RA-b2, RA-pin, RA-c1, RA-c2' and RA-attr red as predicted.
+
+**The cause, and a measured remedy** (scratch exports, not committed):
+- **D1:** with the FM code deleted from `solve_color_k` and `solve_color_avx2_k`,
+  `solve_color_dispatch::<false>` equals PARENT (4851 instructions, 0 hunks). So the residue comes
+  from the kernels' dead FM code:
+  - `let patched = FM && depth >= 2;` is a runtime local;
+  - so `if patched { … }` reaches LLVM in the FM = false instance;
+  - it folds away there, but it still changes the SLP vectorizer's choices.
+- **D2:** `if patched {` becomes `if FM && patched {` at the four sites.
+  - `solve_color_dispatch::<false>` then equals PARENT, and every other Tier 0/1 body stays exact.
+  - Against `d025f93c`'s asm, only that one function differs; the FM = true copies are unchanged.
+  - rustc does not lower a block behind a switch on a const parameter that monomorphisation makes
+    dead.
+
+**The lane stops.** Ruling 41 (3) makes a residue that changes a reference on the FM = false path a
+STOP. D2 is a source change in the hot kernels, outside step 1's inlining scope. The `ARM_MASK`
+reloads are a register-allocation count change in a Tier 2 body on the FM = false path. Both are the
+orchestrator's call.
+
+The trunk has since moved to `0dac974f`, render RD1. It touches `boyko_app`, `boyko_rhi_vulkan` and
+`boyko_shaderdsl`, and no file of `boyko_physics`. `boyko_physics` depends on `boyko_shaderdsl`
+through `boyko_sdf_math`. RD1's change there only adds lines: a new depth leaf, its emitter and a
+bin. Whether the lib's asm moves at the next sync was not measured; cut §3.8 step 1 re-takes the
+receipt after that sync.
