@@ -3376,6 +3376,7 @@ impl Renderer<'_> {
                     );
                     // OBS (H0 Scope 7): make the copy's writes VISIBLE to the host read that
                     // follows the fence wait (a fence only makes them available).
+                    ts.cmd();
                     crate::host_read::record_host_read_barrier(self.fns, cmd, &[staging.buffer]);
                 }
 
