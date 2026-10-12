@@ -4558,7 +4558,9 @@ impl IslandSleep {
     /// A pending wake — an explicit [`wake_all`](Self::wake_all) request this call serves, or a
     /// `Reset` re-key's — clears every row's latch first, so no island can be frozen this frame.
     /// This entry serves every request made so far (direct drive);
-    /// [`begin_step_upto`](Self::begin_step_upto) serves a latched count (the pipeline).
+    /// [`begin_step_upto`](Self::begin_step_upto) serves a latched count, disarmed; and
+    /// [`begin_step_armed`](Self::begin_step_armed), the solve's entry, serves a latched count
+    /// and, given a [`SealArm`] (the pipeline), arms the seal and the write test.
     ///
     /// The `Changed<RigidBody>` route is intentionally NOT a wake condition: the
     /// solver writes velocities back through `Mut<RigidBody>` every step for every
