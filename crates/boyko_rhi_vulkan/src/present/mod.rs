@@ -80,7 +80,7 @@ pub use scene_types::{
     MAX_HZB_LEVELS, MaterialUploadProbe, MaterialUploadScene,
     ParticleActivation, PunctualDepthActivation,
     RcasActivation, ResolvedRenderPathGpu, SCENE_MVP_BYTES, SHADOW_SOURCE_SDF_SOFT_MARCH,
-    SampledComposite, Scene, SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation, UiPass,
+    SampledComposite, Scene, SdfDepthMergeActivation, SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation, UiPass,
     VB_CULL_OCC_ARMED, VB_CULL_OCC_FORCE_KEEP, VB_CULL_OCC_FORCE_LATE, VbCullUniform,
     VbOcclusionArm, ViewtFromDepthActivation, ViewtFromVbDepthActivation,
 };

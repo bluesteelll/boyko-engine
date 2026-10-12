@@ -605,6 +605,43 @@ fn the_deferred_norms_are_the_composites_decode_constants() {
 }
 
 #[test]
+fn the_host_push_and_mode_words_are_the_shaders() {
+    use boyko_rhi_vulkan::compute::{
+        SDF_DEPTH_MERGE_MODE_LINEAR, SDF_DEPTH_MERGE_MODE_REVERSE_Z, SDF_DEPTH_MERGE_PUSH_BYTES,
+        SdfDepthEncode, SdfDepthMergePush,
+    };
+    // One number, two homes: the host push's mode words ARE the generator inputs.
+    assert_eq!(SDF_DEPTH_MERGE_MODE_LINEAR, boyko_shaderdsl::depth::SDF_DEPTH_MERGE_MODE_LINEAR);
+    assert_eq!(SDF_DEPTH_MERGE_MODE_REVERSE_Z, boyko_shaderdsl::depth::SDF_DEPTH_MERGE_MODE_REVERSE_Z);
+    // The shader's push block, field for field, in the host struct's order (20 B, no padding).
+    let src = code_only(&read_shader(&format!("{STEM}.hlsl")));
+    let block = src
+        .split("struct SdfDepthMergePush {")
+        .nth(1)
+        .and_then(|rest| rest.split("};").next())
+        .expect("the shader declares `struct SdfDepthMergePush`");
+    let fields: Vec<String> =
+        block.split(';').map(|f| f.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|f| !f.is_empty()).collect();
+    assert_eq!(fields, ["uint mode", "float k0", "float k1", "uint img_w", "uint img_h"], "the shader's push block");
+    assert_eq!(SDF_DEPTH_MERGE_PUSH_BYTES, 20);
+    // Each encode arm lands its words where the shader reads them.
+    let word = |b: &[u8], i: usize| u32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().expect("4 bytes"));
+    let lin = SdfDepthMergePush::new(SdfDepthEncode::Linear { norm: 64.0 }, 2560, 1440);
+    let b = lin.as_bytes();
+    assert_eq!(b.len(), 20);
+    assert_eq!(
+        [word(b, 0), word(b, 1), word(b, 2), word(b, 3), word(b, 4)],
+        [SDF_DEPTH_MERGE_MODE_LINEAR, 64.0f32.to_bits(), 0, 2560, 1440]
+    );
+    let rz = SdfDepthMergePush::new(SdfDepthEncode::ReverseZ { a: -0.001, b: 0.1 }, 7, 9);
+    let b = rz.as_bytes();
+    assert_eq!(
+        [word(b, 0), word(b, 1), word(b, 2), word(b, 3), word(b, 4)],
+        [SDF_DEPTH_MERGE_MODE_REVERSE_Z, (-0.001f32).to_bits(), 0.1f32.to_bits(), 7, 9]
+    );
+}
+
+#[test]
 fn the_bias_is_the_leafs_constant() {
     let src = read_shader(&format!("{STEM}.hlsl"));
     assert!(src.contains("static const float SDF_DEPTH_MERGE_BIAS = 1.0 / 65536.0;"));

@@ -20,6 +20,10 @@ use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS, VulkanTexture};
 
 use super::command_witness::CommandWitness;
 use super::gpu_zone::GpuZoneRecorder;
+use super::transparent_depth::{
+    TRANSPARENT_CLASS_PARTICLES, TransparentDepthCapability, TransparentDepthFrame,
+    sdf_forward_writes_viewt,
+};
 use super::{FRAMES_IN_FLIGHT, SwapchainError};
 
 // Doc-link scope: types referenced only from doc-comments in this module (the render
@@ -3712,6 +3716,32 @@ pub struct GBufferScene<'a> {
     /// argument about untaken branches (plan invariant 2 / D13). [`Self::path_has_particles`] is
     /// the ONE predicate both the declare and the record site read.
     pub particle: Option<ParticleActivation<'a>>,
+    /// Render wave RD1 (defect R0b): the SDF depth merge's boot-built GPU objects and this frame's
+    /// encode, or `None` when the boot armed no depth-tested transparent consumer class.
+    ///
+    /// `Some` iff the boot built the merge's pipeline (iff some consumer class's GPU bundle exists
+    /// — at RD1 iff the particle bundle does), so a default boot carries `None`: no pipeline, no
+    /// layout, no set, no `SAMPLED` usage bit on `viewt`, the non-VIEWT marcher — the 0%-gate.
+    /// Whether the merge is DECLARED this frame is [`Self::sdf_depth_merge`], never this field.
+    pub sdf_depth_merge: Option<SdfDepthMergeActivation<'a>>,
+}
+
+/// Render wave RD1 (defect R0b): the SDF depth merge's activation — what the boot built for it and
+/// what this frame encodes.
+pub struct SdfDepthMergeActivation<'a> {
+    /// The boot-frozen transparent-depth capability (`present::transparent_depth`): the classes
+    /// whose GPU bundles exist. Drives the marcher's VIEWT variant and bounds the frame set.
+    pub capability: TransparentDepthCapability,
+    /// The depth-only `SV_Depth` pipeline — ONE per boot, its compare op frozen by the path
+    /// (`LESS` Deferred, `GREATER` reverse-Z).
+    pub pipeline: &'a VulkanGraphicsPipeline,
+    /// The merge's set-0 layout: `{ Texture2D gViewT @0 (SampledImageAtGeneral), Camera UBO @1 }`,
+    /// FRAGMENT. `GBufferTargets` writes the per-FIF set ring against it.
+    pub layout: &'a VulkanBindGroupLayout,
+    /// This frame's encode (the extent half of the push is the recorder's).
+    pub encode: crate::compute::SdfDepthEncode,
+    /// `TestForce::disarm_sdf_merge` — `false` on every production run.
+    pub disarmed: bool,
 }
 
 /// Particles P0 (`docs/PARTICLES-PLAN.md` Rev 4, §Host-side): everything the recorder needs to
@@ -4148,9 +4178,49 @@ impl GBufferScene<'_> {
     /// by construction, mirroring the Deferred `viewt_from_depth` / `sdf_gbuffer_composite`
     /// split). With TAA off nothing reads `viewt`, so the no-`VIEWT` marcher variants keep the
     /// lane untouched (the 0%-gate).
+    ///
+    /// Render wave RD1: widened from `path_has_sdf_forward() ∧ taa` to the pure rule
+    /// [`sdf_forward_writes_viewt`] — `∧ (taa ∨ capability.any())` — because the SDF depth merge
+    /// reads the lane too, on every path. Keyed on the boot-frozen CAPABILITY, never the frame set,
+    /// so the marcher never flips variants frame to frame; a default boot (empty capability) keeps
+    /// the pre-RD1 value exactly.
     #[inline]
     pub(crate) fn path_sdf_forward_writes_viewt(&self) -> bool {
-        self.path_has_sdf_forward() && self.taa.is_some()
+        sdf_forward_writes_viewt(
+            self.path_has_sdf_forward(),
+            self.taa.is_some(),
+            self.transparent_depth_capability(),
+        )
+    }
+
+    /// Render wave RD1: the boot's transparent-depth capability — empty without the merge's GPU
+    /// objects (a default boot).
+    #[inline]
+    pub(crate) fn transparent_depth_capability(&self) -> TransparentDepthCapability {
+        self.sdf_depth_merge.as_ref().map_or(TransparentDepthCapability::NONE, |m| m.capability)
+    }
+
+    /// Render wave RD1: this frame's transparent-depth set, read from the SAME per-frame field each
+    /// consumer's own declaration reads — `PARTICLES` iff [`Self::path_has_particles`] (the
+    /// `particle_res` the three declarators key `particle_draw` on). Debug-asserted within the
+    /// capability.
+    #[inline]
+    pub(crate) fn transparent_depth_frame(&self) -> TransparentDepthFrame {
+        let particles = u8::from(self.path_has_particles()) << TRANSPARENT_CLASS_PARTICLES;
+        TransparentDepthFrame::within(self.transparent_depth_capability(), particles)
+    }
+
+    /// Render wave RD1 (cut F8): the SINGLE source of "this frame declares the HZB dump pass" —
+    /// `hzb_dump ∧ hzb ∧ mesh_leg` on the VisibilityBuffer declarator, the conjunction its dump arm
+    /// reads (`hzb_dump` alone is necessary but not sufficient). The merge exempts exactly these
+    /// frames; reading the raw field instead would drop the merge on a VB × Sdf dump boot and read
+    /// `vb_depth` unwritten again.
+    #[inline]
+    pub(crate) fn hzb_dump_declared(&self) -> bool {
+        self.path_is_vb()
+            && self.resolved_render_path.mesh_leg
+            && self.hzb.is_some()
+            && self.hzb_dump.is_some()
     }
 
     /// Rung R9b — the SINGLE source of "this frame runs the VB geo/shade SPLIT pair"

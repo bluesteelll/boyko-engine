@@ -2303,6 +2303,31 @@ impl VulkanContext {
         self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_GREATER, true, GRAPHICS_PUSH_STAGES_DEFAULT)
     }
 
+    /// Render wave RD1 (defect R0b): builds the SDF DEPTH-MERGE pipeline — DEPTH-ONLY
+    /// (`desc.color_formats` empty), set 0 only (`desc.bind_group_layout`: the merge's
+    /// `{ gViewT @0, Camera @1 }`, FRAGMENT), depth test ON with `depth_compare` and depth WRITE ON,
+    /// and a FRAGMENT-only push range (`fullscreen_sample.vs` declares no push block, and the
+    /// recorder pushes with [`VulkanGraphicsPipeline::push_stages`] —
+    /// `VUID-vkCmdPushConstants-offset-01796`).
+    ///
+    /// `depth_compare` is a PARAMETER because it is the render path's, resolved ONCE at boot
+    /// (`VK_COMPARE_OP_LESS` under Deferred's custom-linear depth, `VK_COMPARE_OP_GREATER` under the
+    /// three reverse-Z paths) — exactly one `VkPipeline` per process, the particle pipeline's own
+    /// rule. No existing builder pairs a caller-chosen compare op with a depth write and a
+    /// FRAGMENT push range, and reusing a `_forward_prepass` / `_vb_raster` builder for it would be
+    /// the misnaming [`Self::create_graphics_pipeline_vb_raster`]'s doc warns against.
+    pub fn create_graphics_pipeline_depth_merge(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+        depth_compare: i32,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        debug_assert!(
+            desc.color_formats.is_empty() && desc.depth_format.is_some(),
+            "invariant: the SDF depth merge is a depth-only pipeline"
+        );
+        self.build_graphics_pipeline(desc, None, depth_compare, true, VK_SHADER_STAGE_FRAGMENT_BIT)
+    }
+
     /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): builds the `forward_opaque`
     /// FROXEL pipeline variant — the SAME 2-set `[Set0, Set1]` shape
     /// [`Self::create_graphics_pipeline_forward`] builds (`set1_layout` = the UNCHANGED

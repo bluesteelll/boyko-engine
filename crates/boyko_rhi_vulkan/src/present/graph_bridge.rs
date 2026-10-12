@@ -1234,6 +1234,9 @@ fn forward_sink(
         slot!("forward_depth", Ring, forward.depth[fi].image),
         slot!("cascade", Single, scene.csm_cascade_texture.image),
         slot!("atlas", Single, scene.shadow_atlas_texture.image),
+        // Render wave RD1: the `gViewT` lane the VIEWT marcher writes and the SDF depth merge reads
+        // — the core per-FIF ring every path allocates (`sdf_forward_set` binds it at @13).
+        slot!("viewt", Ring, targets.viewt[fi].image),
     ]);
     let mut buffers = SinkFill::new(VkBuffer::NULL);
     buffers.push_all(&[
@@ -1601,8 +1604,8 @@ impl crate::framegraph::BarrierSink for GbufferBarrierSink<'_> {
 /// graph (see [`ForwardPassPlan`]'s doc for why this is a SEPARATE sink type from
 /// [`GbufferBarrierSink`], not a shared/extended one). Resolves the FIXED local ResId order
 /// [`Renderer::declare_forward_graph`] declares — images `[lit=0, forward_depth=1, cascade=2,
-/// atlas=3]` (UNCHANGED at rung R5: `depth_prepass` writes the SAME `forward_depth` ResId, no
-/// new image), buffers `[light_table=0, instance_model_ring=1, light_index_alloc=2,
+/// atlas=3, viewt=4]` (UNCHANGED at rung R5: `depth_prepass` writes the SAME `forward_depth` ResId,
+/// no new image; render wave RD1 appended `viewt`), buffers `[light_table=0, instance_model_ring=1, light_index_alloc=2,
 /// cluster_grid=3, light_index=4]` (buffer ResIds offset by `FORWARD_IMAGE_COUNT`; the 3 L1
 /// cluster-cull buffers appended at rung R5, mirroring `GbufferBarrierSink`'s OWN
 /// `[grid, index, alloc]` ordering for the SAME resources) — to the current frame's physical
@@ -1611,11 +1614,12 @@ impl crate::framegraph::BarrierSink for GbufferBarrierSink<'_> {
 pub(crate) struct ForwardBarrierSink<'a> {
     pub(crate) fns: &'a DeviceFns,
     pub(crate) cmd: VkCommandBuffer,
-    /// `[lit, forward_depth, cascade, atlas]` — see this type's doc for the fixed order. `lit`
-    /// and `forward_depth` are the current frame slot's [`ForwardTargets`](super::targets::ForwardTargets)
-    /// images; `cascade`/`atlas` are the SAME single-instance, world-fixed textures the deferred
-    /// resolve's Set-2-equivalent bindings reference (`scene.csm_cascade_texture`/
-    /// `scene.shadow_atlas_texture`).
+    /// `[lit, forward_depth, cascade, atlas, viewt]` — see this type's doc for the fixed order.
+    /// `lit` and `forward_depth` are the current frame slot's
+    /// [`ForwardTargets`](super::targets::ForwardTargets) images; `cascade`/`atlas` are the SAME
+    /// single-instance, world-fixed textures the deferred resolve's Set-2-equivalent bindings
+    /// reference (`scene.csm_cascade_texture`/`scene.shadow_atlas_texture`); `viewt` is the core
+    /// per-FIF `gViewT` ring (render wave RD1).
     pub(crate) images: [VkImage; FORWARD_IMAGE_COUNT],
     /// `[light_table, instance_model_ring, light_index_alloc, cluster_grid, light_index]`. A
     /// pass that does not declare an access on an unarmed resource (e.g. `instance_model_ring`
@@ -1635,7 +1639,7 @@ pub(crate) struct ForwardBarrierSink<'a> {
 /// [`ForwardBarrierSink::images`]'s doc for the fixed order. A PRIVATE, per-frame ResId space
 /// (Forward's `self.frame_graph` is fully `reset()` + re-declared every frame, so this constant
 /// has no relationship to [`FRAMEGRAPH_IMAGE_COUNT`] and never grows it).
-const FORWARD_IMAGE_COUNT: usize = 4;
+const FORWARD_IMAGE_COUNT: usize = 5;
 
 /// The length of [`ForwardBarrierSink::buffers`] — the five unconditional Forward buffers plus
 /// the [`PARTICLE_BUFFER_COUNT`] particle tail and the [`MATERIAL_TAIL_BUFFER_COUNT`] material
@@ -3236,8 +3240,8 @@ impl Renderer<'_> {
         let g = &mut self.frame_graph;
         g.reset();
 
-        // --- Images (FIXED local ResId order: lit=0, forward_depth=1, cascade=2, atlas=3 —
-        // see `ForwardBarrierSink::images`'s doc). `lit` is a FRESH `add_image` (undefined first
+        // --- Images (FIXED local ResId order: lit=0, forward_depth=1, cascade=2, atlas=3, viewt=4
+        // — see `ForwardBarrierSink::images`'s doc). `lit` is a FRESH `add_image` (undefined first
         // touch) here — Forward's OWN producer access (`ColorAttachmentWrite`), never the
         // Deferred `StorageWrite` this same physical image carries on a Deferred boot (C5: the
         // two paths are boot-mutually-exclusive). `cascade`/`atlas` mirror
@@ -3253,12 +3257,17 @@ impl Renderer<'_> {
             "atlas",
             ResSync::seeded_readers(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
         );
+        // Render wave RD1 (cut F6): the `gViewT` lane — a FRESH per-FIF `add_image` (the core ring,
+        // the VB declarator's own spelling). Declared on every Forward frame and touched only when
+        // the VIEWT marcher writes it (an armed boot's SDF leg), so an unarmed frame derives no
+        // barrier on it.
+        let viewt = g.add_image("viewt");
         // Code-review P2-2: pins the declared image count against `FORWARD_IMAGE_COUNT`
         // (`ForwardBarrierSink`'s doc) — a silent divergence here would offset every buffer ResId
         // (`res.index() - FORWARD_IMAGE_COUNT` in `ForwardBarrierSink::buffer_barriers`) without
         // any other compile-time signal.
         debug_assert_eq!(
-            atlas.index() + 1,
+            viewt.index() + 1,
             FORWARD_IMAGE_COUNT,
             "invariant: declare_forward_graph's image declarations must match FORWARD_IMAGE_COUNT"
         );
@@ -3596,14 +3605,11 @@ impl Renderer<'_> {
         // (the SDF field/material/brick buffers are boot-seeded/untracked, the SAME precedent the
         // deferred `marcher` pass's own declaration establishes — this file's `marcher` pass doc).
         //
-        // TAA-under-VB tripwire: the Forward family has NO AA seam, so the VIEWT-variant marcher
-        // (whose `viewt` write only `declare_vb_graph` declares) must never arm here — a future
-        // Forward-TAA rung must extend THIS declarator with the `viewt` access first.
-        debug_assert!(
-            !scene.path_sdf_forward_writes_viewt(),
-            "invariant: path_sdf_forward_writes_viewt() under a Forward-family declarator — \
-             the Forward graph declares no viewt write for the marcher"
-        );
+        // Render wave RD1 (cut F6): the TAA-under-VB tripwire that stood here (the VIEWT marcher
+        // must never arm under a Forward-family declarator) is LIFTED — the SDF depth merge reads
+        // `gViewT` on every path, so an armed boot's Forward marcher writes it, declared below
+        // under the SAME `path_sdf_forward_writes_viewt` predicate `record_forward` selects the
+        // VIEWT pipeline by.
         let sdf_forward_march = if scene.path_has_sdf_forward() {
             let p = g.add_pass("sdf_forward_march");
             g.image_access(
@@ -3613,6 +3619,15 @@ impl Renderer<'_> {
                 VK_IMAGE_LAYOUT_GENERAL,
                 SubRange::COLOR,
             );
+            if scene.path_sdf_forward_writes_viewt() {
+                g.image_access(
+                    viewt,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+            }
             if scene.resolved_render_path.mesh_leg {
                 g.image_access(
                     forward_depth,
@@ -6878,8 +6893,11 @@ impl Renderer<'_> {
         // ⚠️ `plan.levels`, NEVER `MAX_HZB_LEVELS` — see `hzb_mips`'s own doc. The capacity is 17
         // and the live count is 10 at 512×512; a capacity-wide span is out of range at every real
         // extent, and the barrier path bounds nothing.
-        let hzb_dump = match (scene.hzb.filter(|_| mesh_leg), scene.hzb_dump) {
-            (Some(hzb_plan), Some(_)) => {
+        // Render wave RD1 (cut F8): spelled through `GBufferScene::hzb_dump_declared` — the SAME
+        // conjunction (`hzb_dump ∧ hzb ∧ mesh_leg` on this declarator), now the one predicate the
+        // SDF depth merge's exemption reads too.
+        let hzb_dump = match scene.hzb.filter(|_| scene.hzb_dump_declared()) {
+            Some(hzb_plan) => {
                 let p = g.add_pass("hzb_dump");
                 // The SOURCE depth. Its tracked layout here is whatever the last TOUCHER left, and
                 // the graph DERIVES the transition rather than this site assuming it. No restore is
