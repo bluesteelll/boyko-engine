@@ -4445,10 +4445,12 @@ impl IslandSleep {
     /// `match`, unconditionally.
     ///
     /// Lane SL, the seal's rows-stable test: a seal the last armed settle stashed becomes live
-    /// iff its cursor classifies `Identity` against this gather — the same entities in the same
-    /// rows, exactly one gather later. Any spawn, despawn or archetype move anywhere in the
-    /// world, or a missed gather, breaks it, and so does a live seal no `begin_step` consumed
-    /// (the solve returned early).
+    /// iff its cursor classifies `Identity` against this gather — the same gathered keys in the
+    /// same order with no row's `RigidBody` reading as added, exactly one gather later. The
+    /// spawn or despawn of a gathered body breaks it; an archetype move breaks it only when it
+    /// reorders the walk (one that keeps the order holds the seal, `sleep_seal.rs` T-SL27c); a
+    /// missed gather breaks it, and so does a live seal no `begin_step` consumed (the solve
+    /// returned early).
     pub(crate) fn rekey_rows(&mut self, rows: &RowIdentity) {
         match self.cursor.remap(rows) {
             RowRemap::Identity => {}
