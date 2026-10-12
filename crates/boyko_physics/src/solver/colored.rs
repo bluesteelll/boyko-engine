@@ -4464,6 +4464,11 @@ impl ColoredSoftStepSolver {
 
             let rank_base = head.rank_base as usize;
             // FM (D16): a cohort of depth >= 2 carries a friction patch past its ranks.
+            // The patch blocks below test `FM && patched`, not `patched`: the const switch
+            // keeps the FM = false instance from lowering them at all. On `patched` alone
+            // they reached LLVM there and, though folded, moved its SLP choices in
+            // `solve_color_dispatch::<false>` (measured: FM C1 codegen receipt 2, remedy D2,
+            // ruling 42; the FM lane record's §8).
             let patched = FM && head.depth >= 2;
             let (mut s_n, mut s_d) = (0.0f32, 0.0f32);
             for r in 0..head.width[l] as usize {
@@ -4541,7 +4546,7 @@ impl ColoredSoftStepSolver {
                         body_mut(bodies_eff, ib).apply_impulse(rb, impulse);
                     }
                 }
-                if patched {
+                if FM && patched {
                     // FM (D2): this sweep's normal impulse feeds the patch's limits; the rank's
                     // `ti1` holds its twist arm `dᵣ`.
                     // SAFETY: a single-lane raw read of a live element of lane `l`, this worker's.
@@ -4605,7 +4610,7 @@ impl ColoredSoftStepSolver {
                     }
                 }
             }
-            if patched {
+            if FM && patched {
                 // FM (D7): the cohort's patch block, past its ranks.
                 // SAFETY: under FM a cohort of depth >= 2 was allotted `depth + 1` consecutive
                 //   blocks (`CohortColumns::layout`), so `rank_base + depth < n_blocks` is its own
@@ -4867,6 +4872,11 @@ impl ColoredSoftStepSolver {
             debug_assert!((1..=W).contains(&nlanes), "cohort has 1..=8 lanes");
             debug_assert!(rank_base + depth <= view.n_blocks, "invariant: the cohort's ranks are built");
             // FM (D16): a cohort of depth >= 2 carries a friction patch past its ranks.
+            // The patch blocks below test `FM && patched`, not `patched`: the const switch
+            // keeps the FM = false instance from lowering them at all. On `patched` alone
+            // they reached LLVM there and, though folded, moved its SLP choices in
+            // `solve_color_dispatch::<false>` (measured: FM C1 codegen receipt 2, remedy D2,
+            // ruling 42; the FM lane record's §8).
             let patched = FM && depth >= 2;
 
             // ── Gather-ONCE (cohort entry) ──────────────────────────────────────
@@ -5110,7 +5120,7 @@ impl ColoredSoftStepSolver {
                     apply_impulse_blend_x8(b_lin, b_ang, rb, imp_n, b_invm, b_ii, mask_b);
                 b_lin = nb_lin;
                 b_ang = nb_ang;
-                if patched {
+                if FM && patched {
                     // FM (D2): the scalar's `s_n + λn`, `s_d + dᵣ·λn` on the live lanes; the rank's
                     // `ti1` row is its twist arm, so only `λn` is stored.
                     s_n = _mm256_blendv_ps(s_n, _mm256_add_ps(s_n, ni), active);
@@ -5200,7 +5210,7 @@ impl ColoredSoftStepSolver {
                 }
             }
 
-            if patched {
+            if FM && patched {
                 // FM (D5, D4): the cohort's patch, after its normal rows — the scalar's twist then
                 // tangent pair, lane for lane.
                 // SAFETY: under FM a cohort of depth >= 2 was allotted `depth + 1` consecutive
