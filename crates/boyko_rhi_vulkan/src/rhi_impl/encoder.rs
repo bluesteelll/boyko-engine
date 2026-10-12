@@ -338,39 +338,34 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         // SAFETY: `self.fns` points into the owning context's boxed `DeviceFns` — a stable
         // heap address that outlives this encoder (context teardown order); deref is valid.
         let fns = unsafe { &*self.fns };
-        // The packed-buffer path binds its STORAGE_BUFFER via `bind_storage_buffer`
-        // (so `bound_buffer != NULL`) before every dispatch — for it the recorded
-        // command stream is byte-identical to before: bind the fixed set against the
-        // device-shared `pipeline_layout`, then dispatch. The Render P1a
-        // vocabulary-compute path instead binds its set via
-        // `bind_descriptor_set_compute` (against the pipeline's OWN layout) and never
-        // calls `bind_storage_buffer` (`bound_buffer == NULL`), so the fixed-set rebind
-        // is skipped — it would otherwise clobber the vocabulary set 0 and bind against
-        // an incompatible layout. The two paths thus coexist without touching each
-        // other's recorded commands.
-        if self.bound_buffer != VkBuffer::NULL {
-            // SAFETY: recording is open; the fixed STORAGE_BUFFER set was pointed at the
-            // bound buffer by `bind_storage_buffer` and is bound at the cached set index
-            // for the COMPUTE bind point against the live device-shared `pipeline_layout`;
-            // zero dynamic offsets (null valid for count 0). `self.fns` borrows the live
-            // device fn-table.
-            unsafe {
-                (fns.cmd_bind_descriptor_sets)(
-                    self.command_buffer,
-                    VK_PIPELINE_BIND_POINT_COMPUTE,
-                    self.pipeline_layout,
-                    self.bound_set_index,
-                    1,
-                    &self.descriptor_set,
-                    0,
-                    ptr::null(),
-                );
-            }
-        }
+        self.rebind_fixed_set_if_packed(fns);
         // SAFETY: recording is open; the bound compute pipeline + its descriptor set
-        // (the fixed set just bound above for the packed path, or the vocabulary set
-        // bound earlier via `bind_descriptor_set_compute`) cover the dispatch.
+        // (the fixed set just rebound for the packed path, or the vocabulary set bound
+        // earlier via `bind_descriptor_set_compute`) cover the dispatch.
         unsafe { (fns.cmd_dispatch)(self.command_buffer, gx, gy, gz) };
+    }
+
+    fn dispatch_indirect(&mut self, buffer: &BoundBuffer, offset: u64) {
+        debug_assert!(
+            Self::dispatch_indirect_args_fit(offset, buffer.size),
+            "invariant: dispatch_indirect args must be 4-byte aligned and lie inside the buffer \
+             (VUID-vkCmdDispatchIndirect-offset-02710 / -00407)"
+        );
+        // SAFETY: `self.fns` points into the owning context's boxed `DeviceFns` — a stable
+        // heap address that outlives this encoder (context teardown order); deref is valid.
+        let fns = unsafe { &*self.fns };
+        self.rebind_fixed_set_if_packed(fns);
+        // SAFETY: recording is open (the caller's `begin`). `buffer.buffer` is a live `VkBuffer`
+        // created on this device with INDIRECT usage that outlives the submission — the trait's
+        // caller contract; `BoundBuffer` carries no usage bits, so validation checks it
+        // (VUID-vkCmdDispatchIndirect-buffer-02709). `offset` is buffer-relative (never
+        // `BoundBuffer::offset`, a memory-bind offset), 4-aligned, and leaves the 12-byte
+        // `VkDispatchIndirectCommand` inside the buffer (asserted above). A compute pipeline is
+        // bound and so is its set 0: the fixed set rebound just above on the packed path, or the
+        // vocabulary set bound earlier via `bind_descriptor_set_compute`. Every argument is
+        // passed by value; `fns` is a shared borrow of the context-owned table, which nothing
+        // mutates while the encoder lives, so no Rust reference is invalidated by the call.
+        unsafe { (fns.cmd_dispatch_indirect)(self.command_buffer, buffer.buffer, offset) };
     }
 
     fn reset_query_pool(&mut self, pool: &VulkanQueryPool, first: u32, count: u32) {
@@ -1467,5 +1462,107 @@ impl VulkanCommandEncoder {
                 heap_regions.as_ptr(),
             );
         }
+    }
+
+    /// The pre-dispatch fixed-set rebind shared by [`RhiCommandEncoder::dispatch`] and
+    /// [`RhiCommandEncoder::dispatch_indirect`] (RK-16): one guard, one command.
+    ///
+    /// The packed-buffer path binds its STORAGE_BUFFER via `bind_storage_buffer` (so
+    /// `bound_buffer != NULL`) before every dispatch — for it the recorded command stream is
+    /// byte-identical to before: bind the fixed set against the device-shared
+    /// `pipeline_layout`, then dispatch. The Render P1a vocabulary-compute path instead binds
+    /// its set via `bind_descriptor_set_compute` (against the pipeline's OWN layout) and never
+    /// calls `bind_storage_buffer` (`bound_buffer == NULL`), so the fixed-set rebind is skipped
+    /// — it would otherwise clobber the vocabulary set 0 and bind against an incompatible
+    /// layout. The two paths thus coexist without touching each other's recorded commands.
+    #[inline]
+    fn rebind_fixed_set_if_packed(&self, fns: &DeviceFns) {
+        if self.bound_buffer != VkBuffer::NULL {
+            // SAFETY: recording is open; the fixed STORAGE_BUFFER set was pointed at the
+            // bound buffer by `bind_storage_buffer` and is bound at the cached set index
+            // for the COMPUTE bind point against the live device-shared `pipeline_layout`;
+            // zero dynamic offsets (null valid for count 0). `fns` is this encoder's device
+            // fn-table (the caller derefs `self.fns`, alive per the type contract).
+            unsafe {
+                (fns.cmd_bind_descriptor_sets)(
+                    self.command_buffer,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    self.pipeline_layout,
+                    self.bound_set_index,
+                    1,
+                    &self.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+            }
+        }
+    }
+
+    /// `true` iff a `VkDispatchIndirectCommand` (12 bytes) at buffer-relative `offset` is
+    /// 4-byte aligned and lies inside a buffer of `size` bytes
+    /// (VUID-vkCmdDispatchIndirect-offset-02710 and -00407).
+    ///
+    /// Written so it cannot overflow: `offset + 12` wraps near `u64::MAX`, so the room left
+    /// after `offset` is computed with `checked_sub` instead.
+    const fn dispatch_indirect_args_fit(offset: u64, size: u64) -> bool {
+        offset.is_multiple_of(4)
+            && match size.checked_sub(offset) {
+                Some(room) => room >= 12,
+                None => false,
+            }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VulkanCommandEncoder;
+
+    /// In-bounds, aligned args are accepted, up to the exact end of the buffer.
+    #[test]
+    fn dispatch_indirect_args_fit_accepts_aligned_args_inside_the_buffer() {
+        for (offset, size) in [(16, 32), (20, 32), (0, 12), (u64::MAX - 15, u64::MAX)] {
+            assert!(
+                VulkanCommandEncoder::dispatch_indirect_args_fit(offset, size),
+                "{offset}/{size} must fit"
+            );
+        }
+    }
+
+    /// A misaligned offset is refused even when the 12 bytes would fit.
+    #[test]
+    fn dispatch_indirect_args_fit_rejects_a_misaligned_offset() {
+        for (offset, size) in [(18, 32), (2, 64), (u64::MAX, 32)] {
+            assert!(
+                !VulkanCommandEncoder::dispatch_indirect_args_fit(offset, size),
+                "{offset}/{size} is misaligned"
+            );
+        }
+    }
+
+    /// Args that run past the end of the buffer are refused, including an empty buffer.
+    #[test]
+    fn dispatch_indirect_args_fit_rejects_args_past_the_end() {
+        for (offset, size) in [(24, 32), (32, 32), (0, 8), (0, 0)] {
+            assert!(
+                !VulkanCommandEncoder::dispatch_indirect_args_fit(offset, size),
+                "{offset}/{size} runs past the end"
+            );
+        }
+    }
+
+    /// ALIGNED offsets near `u64::MAX`: on the first two rows an `offset + 12 <= size` form
+    /// overflows (a panic with overflow checks on), so they are what tells it from the
+    /// `checked_sub` form — an unaligned offset is refused by the alignment term before any sum
+    /// is formed, so `u64::MAX` itself cannot.
+    #[test]
+    fn dispatch_indirect_args_fit_never_overflows_near_u64_max() {
+        // The highest 4-aligned offset (`u64::MAX` with the low two bits cleared).
+        let top: u64 = !3;
+        assert!(!VulkanCommandEncoder::dispatch_indirect_args_fit(top, 32), "past a 32-byte buffer");
+        assert!(!VulkanCommandEncoder::dispatch_indirect_args_fit(top, u64::MAX), "3 bytes of room");
+        assert!(
+            VulkanCommandEncoder::dispatch_indirect_args_fit(u64::MAX - 15, u64::MAX),
+            "15 bytes of room hold the 12-byte command"
+        );
     }
 }
