@@ -17,9 +17,9 @@
 //! `obs_graph_receipt_burst16` reads a 16-frame burst: 16 `[[frame]]` records over consecutive
 //! presented frames, `submission_epoch` strictly increasing, the whole `[config]` in each.
 //!
-//! The five non-ignored tests run the reader, the census, every `[counts]` bound, the sink check's
-//! two halves and the burst check over inline fixtures, so "these checks can fail" is proven on
-//! every run, not only at a red-first.
+//! The six non-ignored tests run the reader, the census, every `[counts]` bound (clean at it, red
+//! past it), the sink check's two halves and the burst check over inline fixtures, so "these
+//! checks can fail" is proven on every run, not only at a red-first.
 //!
 //! Windowed-test conventions: the device tests are ignored by default, `--test-threads=1`,
 //! `BOYKO_DISABLE_VALIDATION=1`, `BOYKO_WINDOW_FRAMES` set (each driver also sets a per-worker
@@ -252,6 +252,20 @@ fn sink_check_reds_a_touched_resource_without_a_slot() {
     let err = sink_check(&Receipt::parse(&unresolved).expect("parses"))
         .expect_err("ResId 1 is touched by pass 0 and its only slot resolves nothing");
     assert!(err.contains("declared resource 1 (`fog_sun_far`) is touched but has no sink slot"), "{err}");
+}
+
+/// A counter exactly at its bound is clean, and each counter is compared with its OWN limit: a
+/// frame that fills `FRAME_GRAPH_CAPACITY` is not a regrow (OBS tester r2: `>` not `>=`, and not a
+/// smaller counter's limit).
+#[test]
+fn counts_check_accepts_each_counter_at_its_bound() {
+    let at = FIXTURE
+        .replacen("resources = 2", "resources = 96", 1)
+        .replacen("res_state_total = 2", "res_state_total = 96", 1)
+        .replacen("passes = 2", "passes = 64", 1)
+        .replacen("accesses = 2", "accesses = 384", 1);
+    let r = Receipt::parse(&at).expect("parses");
+    counts_check(&r).expect("every counter at its bound is within capacity");
 }
 
 /// M5.1's shape: a burst whose records repeat the first frame is red on `submission_epoch`.
