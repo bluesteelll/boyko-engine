@@ -61,6 +61,9 @@ pub use frame_driver::{FRAME_GRAPH_CAPACITY, FrameGraphCapacity, FrameWriteToken
 pub use frame_driver::{
     RECEIPT_CONFIG_KEYS, RECEIPT_CONFIG_LEN, RECEIPT_MAX_SINK_SLOTS, ReceiptCapture, ReceiptConfig,
 };
+pub use frame_driver::{
+    IMAGE_DUMP_MAX, ImageDumpCopy, ImageDumpName, ImageDumpRequest, image_dump_texel_bytes,
+};
 /// VG R3 piece 2 step P2-6: gate G2's recorder-authored count sink, threaded into
 /// [`Renderer::render_gbuffer_frame`] as `Option<&mut VbRecordProbe>`.
 pub use passes::vb::VbRecordProbe;

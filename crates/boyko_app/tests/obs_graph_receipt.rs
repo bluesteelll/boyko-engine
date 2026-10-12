@@ -288,7 +288,7 @@ fn receipt_of(path: RenderPath, frames: u32, tag: &str) -> Receipt {
 
 /// Device test 1 on one declarator.
 fn check_declarator(path: RenderPath) {
-    let arming = ObsArming { path, interp: true, particles: true, upload: true };
+    let arming = ObsArming { path, interp: true, particles: true, upload: true, taa: true, ddgi: true };
     let declarator = arming.declarator();
     let r = receipt_of(path, 1, "single");
     let mut failures = Vec::new();

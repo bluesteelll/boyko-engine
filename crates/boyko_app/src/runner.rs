@@ -1171,6 +1171,21 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     if graph_receipt.is_some() {
         host.renderer.arm_graph_receipt();
     }
+    // OBS (render-wave plan H0 Scope 6): the env-gated image dump (`BOYKO_IMAGE_DUMP`). `None` on
+    // the steady path. Armed here, before the first frame, because arming is a BOOT decision of
+    // the instrument: the targets the first frame creates carry `TRANSFER_SRC` on the dumped
+    // Deferred images and every wrapper-declared seed gains the dump's `TRANSFER` read. A refusal
+    // (an unknown name, no `_PATH`, or another last-pass dump armed beside it) ends the run here.
+    let mut image_dump = match crate::image_dump::ImageDump::from_env() {
+        Ok(d) => d,
+        Err(refusal) => {
+            crate::diag::report_boot_stage_failed("BOYKO_IMAGE_DUMP", &refusal);
+            return;
+        }
+    };
+    if image_dump.is_some() {
+        host.renderer.arm_image_dump();
+    }
     // Automated-run frame cap (the `BOYKO_WIN_HIDDEN` companion, and the app-level
     // twin of `window_present_gbuffer`'s own `BOYKO_WINDOW_FRAMES`): `BOYKO_WINDOW_FRAMES=<n>`
     // bounds this loop to `n` iterations, then exits cleanly. Without it an
@@ -2944,6 +2959,11 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 width: host.native_extent.0,
                 height: host.native_extent.1,
             };
+            // OBS (D): this frame's image-dump request — `Some` only on a capture frame of an
+            // armed run — handed to the renderer for the render call below, which consumes it.
+            if let Some(request) = image_dump.as_mut().and_then(|d| d.request(ctx, present_extent)) {
+                host.renderer.request_image_dump(request);
+            }
             unsafe {
                 host.renderer.render_gbuffer_frame(
                     token,
@@ -3661,6 +3681,19 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 .finish();
         }
 
+        // OBS (cold): the image dump. Settle → request → drain, `host_dump`'s ring: a capture is
+        // read `DRAIN_FRAMES` presented frames later, once its frame's fence was re-waited.
+        let image_dump_ready = match image_dump.as_mut() {
+            Some(d) => d.after_present(ctx, presented_ok, &host.renderer),
+            None => false,
+        };
+        if image_dump_ready {
+            image_dump
+                .take()
+                .expect("invariant: the image dump just reported ready")
+                .finish(ctx);
+        }
+
         // Exit once EVERY armed capture has completed. Each driver `take()`s itself on completion,
         // so `is_none()` reads "not armed, or already finished".
         //
@@ -3682,7 +3715,8 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             || vb_cull_ready
             || particle_readback_ready
             || shadow_probe_ready
-            || graph_receipt_ready)
+            || graph_receipt_ready
+            || image_dump_ready)
             && dump.is_none()
             && census.is_none()
             && hzb_dump.is_none()
@@ -3691,6 +3725,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             && particle_readback.is_none()
             && shadow_probe.is_none()
             && graph_receipt.is_none()
+            && image_dump.is_none()
         {
             return;
         }

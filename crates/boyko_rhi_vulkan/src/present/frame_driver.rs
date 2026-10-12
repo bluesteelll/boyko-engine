@@ -98,6 +98,10 @@ pub struct Renderer<'ctx> {
     /// [`arm_graph_receipt`](Self::arm_graph_receipt) (boot, armed runs only), refreshed inside
     /// every recorded frame. `None` in every shipped run: one branch per frame.
     pub(crate) receipt: Option<ReceiptCapture>,
+    /// OBS (D): the `BOYKO_IMAGE_DUMP` arming — `Some` only after
+    /// [`arm_image_dump`](Self::arm_image_dump) (boot, armed runs only); holds this frame's request
+    /// and what the recorder copied. `None` in every shipped run: one branch per frame.
+    pub(crate) image_dump: Option<ImageDumpArm>,
 }
 
 impl<'ctx> Renderer<'ctx> {
@@ -265,7 +269,42 @@ impl<'ctx> Renderer<'ctx> {
             material_upload_probe: core::cell::Cell::new(super::MaterialUploadProbe::default()),
             obs_dump_widen: false,
             receipt: None,
+            image_dump: None,
         })
+    }
+
+    /// OBS (D): arms the `BOYKO_IMAGE_DUMP` instrument — the boot decisions H0 Scope 6 names:
+    /// every `SeededImage` / `SeededBuffer` declaration widens its seed with the dump's `TRANSFER`
+    /// read ([`obs_dump_widen`](Self::obs_dump_widen)), and the targets created from now on carry
+    /// `TRANSFER_SRC` on Deferred `depth`, `viewt` and `taa_hist`. Cold — called once, before the
+    /// first frame (the targets are created on the first frame; arming later would leave them
+    /// without the usage bit the copies need).
+    pub fn arm_image_dump(&mut self) {
+        debug_assert_eq!(
+            self.submission_epoch, 0,
+            "invariant: the image dump is armed before the first frame creates the targets"
+        );
+        self.obs_dump_widen = true;
+        self.image_dump = Some(ImageDumpArm {
+            request: None,
+            copies: core::cell::Cell::new([ImageDumpCopy::NONE; IMAGE_DUMP_MAX]),
+        });
+    }
+
+    /// OBS (D): this frame's dump request — the staging each named image is copied into by the
+    /// NEXT [`render_gbuffer_frame`](Self::render_gbuffer_frame), which consumes it (a frame that
+    /// does not record drops it; the instrument re-requests). A no-op unless armed.
+    pub fn request_image_dump(&mut self, request: ImageDumpRequest) {
+        if let Some(arm) = self.image_dump.as_mut() {
+            arm.request = Some(request);
+        }
+    }
+
+    /// OBS (D): what the LAST [`render_gbuffer_frame`](Self::render_gbuffer_frame) copied, per
+    /// [`ImageDumpName`] (index = `name as usize`); `None` unless armed.
+    #[inline]
+    pub fn last_image_dump(&self) -> Option<[ImageDumpCopy; IMAGE_DUMP_MAX]> {
+        self.image_dump.as_ref().map(|a| a.copies.get())
     }
 
     /// OBS (R): arms the `BOYKO_GRAPH_RECEIPT` capture. Cold — called once at boot by the
@@ -906,6 +945,13 @@ impl<'ctx> Renderer<'ctx> {
         let _ = token;
         // Dynamic-materials DM1: a call that returns before recording reports nothing.
         self.material_upload_probe.set(super::MaterialUploadProbe::default());
+        // OBS (D): likewise the image dump's copy record (`None` unless armed).
+        if let Some(arm) = self.image_dump.as_ref() {
+            arm.copies.set([ImageDumpCopy::NONE; IMAGE_DUMP_MAX]);
+        }
+        // OBS (D): the armed-only `TRANSFER_SRC` usage on the dumped Deferred targets — read here,
+        // before the closure borrows `self`.
+        let dump_usage = self.image_dump.is_some();
         // Thin adapter over the shared [`drive_frame`](Self::drive_frame) skeleton, with
         // `frame` (the G-buffer targets) threaded as the payload: pre-record syncs the
         // targets, the record body re-declares the whole-frame graph then records the
@@ -914,8 +960,9 @@ impl<'ctx> Renderer<'ctx> {
         // submittable command buffer into the recordable `cmd` naming the acquired
         // swapchain `image`/`view`; `scene`'s resources + the synced `targets` were
         // created on this device; any readback buffer is host-visible and ≥ the image's
-        // byte size (caller contract).
-        unsafe {
+        // byte size (caller contract); an armed image-dump request names live host-visible
+        // staging (`request_image_dump`'s caller contract, bounded again at the copy).
+        let result = unsafe {
             self.drive_frame(
                 surface,
                 swapchain,
@@ -945,6 +992,7 @@ impl<'ctx> Renderer<'ctx> {
                         present_extent,
                         aa_extent,
                         TargetsProfile::from_scene(scene),
+                        dump_usage,
                     )
                 },
                 |this, frame, cmd, image, view, extent| {
@@ -1050,7 +1098,12 @@ impl<'ctx> Renderer<'ctx> {
                     recorded
                 },
             )
+        };
+        // OBS (D): a request is for ONE frame — consumed by this call whether or not it recorded.
+        if let Some(arm) = self.image_dump.as_mut() {
+            arm.request = None;
         }
+        result
     }
 
     /// Waits the device idle, recreates the swapchain to `width`×`height`, and
@@ -1457,4 +1510,136 @@ impl ReceiptCapture {
         self.image_sinks[..images.len()].copy_from_slice(images);
         self.buffer_sinks[..buffers.len()].copy_from_slice(buffers);
     }
+}
+
+// --- OBS (D): the `BOYKO_IMAGE_DUMP` instrument ---------------------------------------------
+
+/// A frame-graph image the `BOYKO_IMAGE_DUMP` instrument can read back (H0 Scope 6). The env
+/// word is the image's literal graph name; a declarator copies only the names it declares.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum ImageDumpName {
+    /// Deferred `depth` (D32, the Euclidean `t / 64` encode).
+    DeferredDepth = 0,
+    /// `viewt` (Deferred and VB; R32_SFLOAT).
+    Viewt = 1,
+    /// `lit` (every path).
+    Lit = 2,
+    /// `taa_hist` — the `[fi]` write slot (Deferred and VB, under TAA).
+    TaaHist = 3,
+    /// Forward / ForwardPlus `forward_depth` (D32 reverse-Z).
+    ForwardDepth = 4,
+    /// VB `vb_depth` (D32 reverse-Z).
+    VbDepth = 5,
+}
+
+/// How many [`ImageDumpName`]s exist.
+pub const IMAGE_DUMP_MAX: usize = 6;
+
+impl ImageDumpName {
+    /// Every name, index for index with `name as usize`.
+    pub const ALL: [Self; IMAGE_DUMP_MAX] =
+        [Self::DeferredDepth, Self::Viewt, Self::Lit, Self::TaaHist, Self::ForwardDepth, Self::VbDepth];
+
+    /// The literal graph name — the env word and the dump file's stem.
+    pub const fn graph_name(self) -> &'static str {
+        match self {
+            Self::DeferredDepth => "depth",
+            Self::Viewt => "viewt",
+            Self::Lit => "lit",
+            Self::TaaHist => "taa_hist",
+            Self::ForwardDepth => "forward_depth",
+            Self::VbDepth => "vb_depth",
+        }
+    }
+
+    /// The name an env word spells, if any.
+    pub fn parse(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|n| n.graph_name() == word)
+    }
+
+    /// `true` for the depth attachments (copied through the DEPTH aspect).
+    pub const fn is_depth(self) -> bool {
+        matches!(self, Self::DeferredDepth | Self::ForwardDepth | Self::VbDepth)
+    }
+
+    /// The bytes per texel the instrument sizes this name's staging for: 8 for `taa_hist`
+    /// (RGBA16F), 4 for every other name. The recorder re-bounds every copy against the texel
+    /// size of the image's actual format, so a format change can only skip a copy, never overrun.
+    pub const fn staging_texel_bytes(self) -> u64 {
+        match self {
+            Self::TaaHist => 8,
+            _ => 4,
+        }
+    }
+}
+
+/// The texel size of a `VkFormat` the image dump can copy, or `None` for a format it does not
+/// decode (the copy is then skipped and reported as not copied).
+pub const fn image_dump_texel_bytes(vk_format: i32) -> Option<u32> {
+    match vk_format {
+        VK_FORMAT_R8G8B8A8_UNORM
+        | VK_FORMAT_R8G8B8A8_SRGB
+        | VK_FORMAT_B8G8R8A8_UNORM
+        | VK_FORMAT_B8G8R8A8_SRGB
+        | VK_FORMAT_R32_SFLOAT
+        | VK_FORMAT_D32_SFLOAT => Some(4),
+        VK_FORMAT_R16G16B16A16_SFLOAT => Some(8),
+        VK_FORMAT_R32G32B32A32_SFLOAT => Some(16),
+        _ => None,
+    }
+}
+
+/// One frame's dump request: per [`ImageDumpName`] (index = `name as usize`), the staging buffer
+/// the copy writes and its capacity (`VkBuffer::NULL` = not requested).
+#[derive(Clone, Copy)]
+pub struct ImageDumpRequest {
+    /// The destination per name.
+    pub staging: [VkBuffer; IMAGE_DUMP_MAX],
+    /// Each destination's size in bytes.
+    pub capacity: [u64; IMAGE_DUMP_MAX],
+}
+
+impl ImageDumpRequest {
+    /// `true` iff `name` was requested.
+    #[inline]
+    pub fn wants(&self, name: ImageDumpName) -> bool {
+        !self.staging[name as usize].is_null()
+    }
+}
+
+/// What the recorder copied for one name on the last frame — the dump file's header fields.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ImageDumpCopy {
+    /// `true` iff the copy was recorded (the declarator declared the name and the staging held it).
+    pub copied: bool,
+    /// The image's `VkFormat`.
+    pub vk_format: i32,
+    /// The copied extent (mip 0).
+    pub width: u32,
+    /// See [`Self::width`].
+    pub height: u32,
+    /// The mip copied.
+    pub mip: u32,
+    /// The array layers copied.
+    pub layers: u32,
+    /// The engine frame index the recording frame carried.
+    pub frame_index: u32,
+    /// Bytes written into the staging (tightly packed rows).
+    pub bytes: u64,
+}
+
+impl ImageDumpCopy {
+    /// Nothing copied.
+    pub const NONE: Self =
+        Self { copied: false, vk_format: 0, width: 0, height: 0, mip: 0, layers: 0, frame_index: 0, bytes: 0 };
+}
+
+/// The armed instrument's per-frame state on the [`Renderer`].
+pub(crate) struct ImageDumpArm {
+    /// This frame's request (consumed by `render_gbuffer_frame`).
+    pub(crate) request: Option<ImageDumpRequest>,
+    /// What the recorder copied this frame — a `Cell` because the recorders borrow the renderer
+    /// shared (one thread records), the `material_upload_probe` precedent.
+    pub(crate) copies: core::cell::Cell<[ImageDumpCopy; IMAGE_DUMP_MAX]>,
 }

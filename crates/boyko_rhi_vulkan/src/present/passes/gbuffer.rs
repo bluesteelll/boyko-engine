@@ -3237,6 +3237,35 @@ impl Renderer<'_> {
             (self.fns.cmd_end_rendering)(cmd);
         }
 
+        // OBS (D, H0 Scope 6): the image dump — recorded AFTER the present blit (critique O2, the
+        // `hzb_dump` parity rule: the blit samples `lit`, so the copy's transition must follow it)
+        // and before the swapchain's own present / readback transition. The pass is declared LAST,
+        // so nothing later this frame consumes the layouts it leaves. An unarmed frame (every
+        // shipped one) declares no `image_dump` and records nothing here.
+        if let Some(dump) = self.gbuffer_pass_plan.as_ref().and_then(|p| p.image_dump) {
+            ts.cmd();
+            self.record_graph_pass(dump.pass, cmd, targets, scene, fi);
+            let sources = [
+                (super::super::frame_driver::ImageDumpName::DeferredDepth, Some(&targets.depth[fi]), present_extent),
+                (super::super::frame_driver::ImageDumpName::Viewt, Some(&targets.viewt[fi]), present_extent),
+                (super::super::frame_driver::ImageDumpName::Lit, Some(&targets.lit[fi]), present_extent),
+                (super::super::frame_driver::ImageDumpName::TaaHist, targets.taa_hist.as_ref().map(|r| &r[fi]), aa_extent),
+            ];
+            // SAFETY: recording is open and no render scope is active (the blit's
+            // `cmd_end_rendering` is above); `record_graph_pass` just recorded the dump pass's
+            // derived barriers, so each declared source is in its `plan.layouts` layout; every
+            // source is THIS slot's ring image (or the `[fi]` TAA write slot), created at
+            // `present_extent` (`taa_hist` at `aa_extent`) with `TRANSFER_SRC` usage because the
+            // dump was armed at boot (`Renderer::arm_image_dump` → `sync_gbuffer`'s `dump_usage`);
+            // the requested staging obeys `request_image_dump`'s caller contract.
+            ts.cmd();
+            unsafe { self.record_image_dump_copies(cmd, dump, &sources, scene.engine_frame_index) };
+            if let Some(restore) = dump.restore {
+                ts.cmd();
+                self.record_graph_pass(restore, cmd, targets, scene, fi);
+            }
+        }
+
         // (9) The post-draw swapchain transition: steady → PRESENT, or the readback
         // path → TRANSFER_SRC, copy-to-buffer, → PRESENT (identical to
         // `record_present_sampled`'s branch — the swapchain still presents after the

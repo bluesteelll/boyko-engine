@@ -2845,7 +2845,7 @@ impl CoreImages {
     /// failure the slots already built in THAT ring are drained AND every fully-built prior ring is
     /// destroyed (reverse acquisition), so nothing leaks; the orchestrator has no partials to
     /// reason about beyond the bundles it built before this call.
-    fn build(ctx: &VulkanContext, extent: VkExtent2D) -> Result<Self, SwapchainError> {
+    fn build(ctx: &VulkanContext, extent: VkExtent2D, dump_usage: bool) -> Result<Self, SwapchainError> {
         // SAFETY (shared by both closures): `ctx` is the live context each texture was created on;
         // none is referenced by any submission (the build phase, before any record/submit); each ring
         // slot is destroyed exactly once — a completed ring is consumed by value (`destroy_ring`), a
@@ -2863,14 +2863,18 @@ impl CoreImages {
             }
         };
 
-        // Depth: DEPTH_STENCIL_ATTACHMENT (rasterize into) | SAMPLED (marcher .Load).
+        // Depth: DEPTH_STENCIL_ATTACHMENT (rasterize into) | SAMPLED (marcher .Load); OBS (D):
+        // `TRANSFER_SRC` only when the image dump is armed at boot (`dump_transfer_src`), so a
+        // shipped run keeps today's usage set.
         let depth_desc = TextureDesc {
             width: extent.width,
             height: extent.height,
             depth: 1,
             format: Format::D32Sfloat,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT
+                | ImageUsage::SAMPLED
+                | dump_transfer_src(dump_usage),
             array_layers: 1,
             mip_levels: 1,
             view_format: None,
@@ -2991,7 +2995,7 @@ impl CoreImages {
         let mut viewt_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for slot in viewt_slots.iter_mut() {
-            match GBufferTargets::create_viewt_image(ctx, extent) {
+            match GBufferTargets::create_viewt_image(ctx, extent, dump_usage) {
                 Ok(t) => *slot = Some(t),
                 Err(e) => {
                     drain_partial(&mut viewt_slots);
@@ -7401,6 +7405,7 @@ impl GBufferTargets {
     fn create_viewt_image(
         ctx: &VulkanContext,
         extent: VkExtent2D,
+        dump_usage: bool,
     ) -> Result<VulkanTexture, SwapchainError> {
         let desc = TextureDesc {
             width: extent.width,
@@ -7408,7 +7413,7 @@ impl GBufferTargets {
             depth: 1,
             format: GVIEWT_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE,
+            usage: ImageUsage::STORAGE | dump_transfer_src(dump_usage),
             array_layers: 1,
             mip_levels: 1,
             view_format: None,
@@ -7620,6 +7625,7 @@ impl GBufferTargets {
     fn create_taa_hist_image(
         ctx: &VulkanContext,
         extent: VkExtent2D,
+        dump_usage: bool,
     ) -> Result<VulkanTexture, SwapchainError> {
         let desc = TextureDesc {
             width: extent.width,
@@ -7627,7 +7633,10 @@ impl GBufferTargets {
             depth: 1,
             format: TAA_HIST_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+            usage: ImageUsage::STORAGE
+                | ImageUsage::SAMPLED
+                | ImageUsage::TRANSFER_DST
+                | dump_transfer_src(dump_usage),
             array_layers: 1,
             mip_levels: 1,
             view_format: None,
@@ -7643,11 +7652,12 @@ impl GBufferTargets {
     fn build_taa_hist_ring(
         ctx: &VulkanContext,
         extent: VkExtent2D,
+        dump_usage: bool,
     ) -> Option<[VulkanTexture; FRAMES_IN_FLIGHT]> {
         let mut slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for slot in slots.iter_mut() {
-            match Self::create_taa_hist_image(ctx, extent) {
+            match Self::create_taa_hist_image(ctx, extent, dump_usage) {
                 Ok(t) => *slot = Some(t),
                 Err(_) => {
                     // SAFETY: each `Some` slot was created on `ctx` just above, is referenced by no
@@ -7683,8 +7693,9 @@ impl GBufferTargets {
     fn build_and_clear_taa_hist(
         ctx: &VulkanContext,
         extent: VkExtent2D,
+        dump_usage: bool,
     ) -> Option<[VulkanTexture; FRAMES_IN_FLIGHT]> {
-        let pool = Self::build_taa_hist_ring(ctx, extent)?;
+        let pool = Self::build_taa_hist_ring(ctx, extent, dump_usage)?;
 
         match Self::boot_clear_taa_hist(ctx, &pool) {
             Ok(()) => Some(pool),
@@ -8389,6 +8400,7 @@ impl GBufferTargets {
         extent: VkExtent2D,
         aa_extent: VkExtent2D,
         profile: TargetsProfile,
+        dump_usage: bool,
     ) -> Result<Self, SwapchainError> {
         // Multi-paradigm render-path plan, rung R2: the threaded `profile` must match what
         // `scene.resolved_render_path` would derive directly — the SAME "declare/record can
@@ -8485,7 +8497,7 @@ impl GBufferTargets {
         // shadow-vis images → SSAO à-trous ring images → deferred sets → (hwrt) denoise sets → SSAO
         // à-trous sets → temporal images → mv set → temporal sets, so the render stays
         // byte-identical.
-        let core = CoreImages::build(ctx, extent)?;
+        let core = CoreImages::build(ctx, extent, dump_usage)?;
 
         #[cfg(feature = "hwrt")]
         let shadow_vis_imgs = match ShadowVisImages::build(ctx, extent) {
@@ -8946,7 +8958,7 @@ impl GBufferTargets {
         // seed assumes a REAL GENERAL layout, not a fresh UNDEFINED image, on the first
         // cross-frame read).
         let taa_hist: Option<[VulkanTexture; FRAMES_IN_FLIGHT]> =
-            if scene.taa.is_some() { Self::build_and_clear_taa_hist(ctx, aa_extent) } else { None };
+            if scene.taa.is_some() { Self::build_and_clear_taa_hist(ctx, aa_extent, dump_usage) } else { None };
 
         // TAA rung T3: `GBufferScene::rcas` is a pure post-process over the resolve's OWN
         // output — it can never be armed without the resolve itself (`GBufferScene::taa`)
@@ -9485,6 +9497,7 @@ impl GBufferTargets {
         extent: VkExtent2D,
         aa_extent: VkExtent2D,
         profile: TargetsProfile,
+        dump_usage: bool,
     ) -> Result<(), SwapchainError> {
         if let Some(t) = targets.as_ref()
             && t.extent.width == extent.width
@@ -9507,7 +9520,7 @@ impl GBufferTargets {
 
         // Build the new targets BEFORE tearing down the old ones, so an allocation
         // failure leaves the previous (still-valid) targets in place.
-        let fresh = Self::create(ctx, scene, extent, aa_extent, profile)?;
+        let fresh = Self::create(ctx, scene, extent, aa_extent, profile, dump_usage)?;
 
         // Asset-streaming plan F7 §5 (C1, review O1), widened by DM1 D-3: a SECONDARY
         // self-consistency net — every material-bearing ring `create` just built must be
@@ -10074,6 +10087,14 @@ impl GBufferFrame {
             unsafe { targets.destroy(ctx) };
         }
     }
+}
+
+/// OBS (D, H0 Scope 6): the `TRANSFER_SRC` usage the image dump's copies need on Deferred
+/// `depth`, `viewt` and `taa_hist`, added ONLY when the instrument is armed at boot — a shipped
+/// run creates those images with today's usage set (no compression-state change in any shipped
+/// frame).
+const fn dump_transfer_src(dump_usage: bool) -> ImageUsage {
+    if dump_usage { ImageUsage::TRANSFER_SRC } else { ImageUsage::NONE }
 }
 
 #[cfg(test)]

@@ -119,6 +119,10 @@ mod window_info;
 // frame loop.
 #[cfg(windows)]
 mod graph_receipt_dump;
+// Render-wave plan H0 Scope 6 (OBS): the `BOYKO_IMAGE_DUMP` readback of named frame-graph images.
+// `#[cfg(windows)]` for the same reason — its only caller is the windowed frame loop.
+#[cfg(windows)]
+mod image_dump;
 
 /// The host half of the light-table generation protocol (host plan D5/R4):
 /// the pure per-slot [`light_upload_due`](light_gate::light_upload_due) gate

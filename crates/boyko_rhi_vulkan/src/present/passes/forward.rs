@@ -1158,6 +1158,26 @@ impl Renderer<'_> {
             (self.fns.cmd_end_rendering)(cmd);
         }
 
+        // OBS (D, H0 Scope 6): the image dump — AFTER the present blit (critique O2), before the
+        // swapchain transition; the pass is declared LAST. Nothing is recorded on an unarmed frame.
+        if let Some(dump) = plan.image_dump {
+            self.record_forward_pass(dump.pass, cmd, targets, forward, scene, fi);
+            let sources = [
+                (super::super::frame_driver::ImageDumpName::ForwardDepth, Some(&forward.depth[fi]), present_extent),
+                (super::super::frame_driver::ImageDumpName::Lit, Some(&targets.lit[fi]), present_extent),
+            ];
+            // SAFETY: recording is open and no render scope is active (the blit's
+            // `cmd_end_rendering` is above); `record_forward_pass` just recorded the dump pass's
+            // derived barriers, so each declared source is in its `plan.layouts` layout; both
+            // sources are THIS slot's ring images at `present_extent`, and both carry
+            // `TRANSFER_SRC` usage unconditionally (`ForwardTargets::build`'s depth, the `lit`
+            // ring); the requested staging obeys `request_image_dump`'s caller contract.
+            unsafe { self.record_image_dump_copies(cmd, dump, &sources, scene.engine_frame_index) };
+            if let Some(restore) = dump.restore {
+                self.record_forward_pass(restore, cmd, targets, forward, scene, fi);
+            }
+        }
+
         match readback {
             None => {
                 let to_present = VkImageMemoryBarrier {

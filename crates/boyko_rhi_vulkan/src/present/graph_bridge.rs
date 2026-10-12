@@ -152,6 +152,9 @@ pub(crate) struct GbufferPassPlan {
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame
     /// (nothing declared at all — see [`ParticlePassPlan`]).
     pub(crate) particle: ParticlePassPlan,
+    /// OBS (D): the `image_dump` pass — declared LAST, on a `BOYKO_IMAGE_DUMP` request frame only
+    /// (`None` on every other frame of every run), with the names it copies.
+    pub(crate) image_dump: Option<ImageDumpPlan>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -717,6 +720,9 @@ pub(crate) struct ForwardPassPlan {
     pub(crate) present_sample: crate::framegraph::PassId,
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame.
     pub(crate) particle: ParticlePassPlan,
+    /// OBS (D): the `image_dump` pass — declared LAST, on a `BOYKO_IMAGE_DUMP` request frame only
+    /// (`None` on every other frame of every run), with the names it copies.
+    pub(crate) image_dump: Option<ImageDumpPlan>,
 }
 
 /// The number of IMAGE resources the whole-frame graph declares (Steps 1d/1e), in the
@@ -893,6 +899,107 @@ impl MaterialTableRes {
     fn read(self, g: &mut crate::framegraph::FrameGraph, stage: u32) {
         self.0.read(g, stage, VK_ACCESS_SHADER_READ_BIT);
     }
+}
+
+/// OBS (D, H0 Scope 6): the declared `image_dump` pass of a request frame — the names it copies
+/// (bit `name as u8`), the layout each is copied at, and the optional restore pass that returns a
+/// non-`GENERAL` seeded image to its frame-boundary layout.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ImageDumpPlan {
+    /// The copy pass (`image_dump`), declared LAST.
+    pub(crate) pass: crate::framegraph::PassId,
+    /// The restore pass (`image_dump_restore`), declared after it iff a copied image is seeded at
+    /// a layout other than `GENERAL` — no production instance at OBS (PX1a's `display` is the
+    /// first); the host tests carry the shape.
+    pub(crate) restore: Option<crate::framegraph::PassId>,
+    /// The names copied, as bits.
+    pub(crate) names: u8,
+    /// Per name, the layout the copy reads the image in.
+    pub(crate) layouts: [i32; super::frame_driver::IMAGE_DUMP_MAX],
+}
+
+impl ImageDumpPlan {
+    /// `true` iff `name` is copied on this frame.
+    #[inline]
+    pub(crate) fn has(self, name: super::frame_driver::ImageDumpName) -> bool {
+        self.names & (1 << name as u8) != 0
+    }
+}
+
+/// `true` iff some pass declared so far this frame touches `res` — the dump reads only what the
+/// frame produced or carried in (a bare image nothing wrote would take `compile`'s unwritten-read
+/// guard, which is right: there is nothing to dump).
+fn touched_this_frame(g: &crate::framegraph::FrameGraph, res: crate::framegraph::ResId) -> bool {
+    (0..g.pass_count()).any(|p| {
+        g.pass_accesses(crate::framegraph::PassId(p as u16)).any(|a| a.res == res)
+    })
+}
+
+/// OBS (D, H0 Scope 6): declares the `image_dump` pass LAST on a request frame — one `TRANSFER`
+/// read per requested name this declarator has and touched this frame (`None` when none of them
+/// qualifies). Called only on a request frame: every other frame of every run skips the call.
+///
+/// - A seeded image whose frame-boundary layout is `GENERAL` (`taa_hist`) is copied AT `GENERAL`,
+///   a legal copy source, so its end state is untouched and the seeded-layout invariant holds.
+/// - Any other seeded image is copied at `TRANSFER_SRC_OPTIMAL` and `image_dump_restore` declares
+///   a READ back at its boundary layout, at a stage inside its seed (verify OQ2: a restore
+///   declared as a write would end a reader-seeded image's frame on a write).
+/// - A per-FIF ring slot (unseeded) needs no restore: its next first touch discards it.
+#[cold]
+#[inline(never)]
+fn declare_image_dump(
+    g: &mut crate::framegraph::FrameGraph,
+    request: &super::frame_driver::ImageDumpRequest,
+    sources: &[(super::frame_driver::ImageDumpName, crate::framegraph::ResId)],
+) -> Option<ImageDumpPlan> {
+    use crate::framegraph::{seed_stages, SubRange};
+    let mut names = 0u8;
+    for &(name, res) in sources {
+        if request.wants(name) && touched_this_frame(g, res) {
+            names |= 1 << name as u8;
+        }
+    }
+    if names == 0 {
+        return None;
+    }
+    let sub_of = |name: super::frame_driver::ImageDumpName| {
+        if name.is_depth() { SubRange::DEPTH } else { SubRange::COLOR }
+    };
+    let mut layouts = [VK_IMAGE_LAYOUT_UNDEFINED; super::frame_driver::IMAGE_DUMP_MAX];
+    let mut needs_restore = false;
+    let pass = g.add_pass("image_dump");
+    for &(name, res) in sources {
+        if names & (1 << name as u8) == 0 {
+            continue;
+        }
+        let seed = g.res_seed(res);
+        let layout = if g.res_seeded(res) && seed.layout == VK_IMAGE_LAYOUT_GENERAL {
+            VK_IMAGE_LAYOUT_GENERAL
+        } else {
+            needs_restore |= g.res_seeded(res) && seed.layout != VK_IMAGE_LAYOUT_UNDEFINED;
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+        };
+        layouts[name as usize] = layout;
+        g.image_access(res, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, layout, sub_of(name));
+    }
+    let restore = needs_restore.then(|| {
+        let p = g.add_pass("image_dump_restore");
+        for &(name, res) in sources {
+            let seed = g.res_seed(res);
+            if names & (1 << name as u8) != 0
+                && layouts[name as usize] == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                && g.res_seeded(res)
+                && seed.layout != VK_IMAGE_LAYOUT_UNDEFINED
+            {
+                let stages = seed_stages(seed);
+                // The lowest stage the seed names (a stage INSIDE it); FRAGMENT when it names none.
+                let stage = if stages == 0 { VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT } else { stages.isolate_lowest_one() };
+                g.image_access(res, stage, VK_ACCESS_SHADER_READ_BIT, seed.layout, sub_of(name));
+            }
+        }
+        p
+    });
+    Some(ImageDumpPlan { pass, restore, names, layouts })
 }
 
 // The recorders hand a `&[boyko_rhi::BufferCopy]` straight to `vkCmdCopyBuffer` as
@@ -3042,6 +3149,22 @@ impl Renderer<'_> {
             SubRange::COLOR,
         );
 
+        // OBS (D, H0 Scope 6): the `image_dump` pass, LAST — on a `BOYKO_IMAGE_DUMP` request
+        // frame only (`None` on every other frame of every run: no pass, no barrier).
+        let image_dump = match self.image_dump.as_ref().and_then(|a| a.request.as_ref()) {
+            Some(request) => declare_image_dump(
+                g,
+                request,
+                &[
+                    (super::frame_driver::ImageDumpName::DeferredDepth, depth),
+                    (super::frame_driver::ImageDumpName::Viewt, viewt),
+                    (super::frame_driver::ImageDumpName::Lit, lit),
+                    (super::frame_driver::ImageDumpName::TaaHist, taa_hist),
+                ],
+            ),
+            None => None,
+        };
+
         g.compile();
         // OBS (P): the class table over this declarator's compiled frame (debug builds).
         #[cfg(debug_assertions)]
@@ -3076,6 +3199,7 @@ impl Renderer<'_> {
             taa_resolve: taa_resolve_pass,
             present_sample,
             particle: particle_plan,
+            image_dump,
         });
     }
 
@@ -3543,6 +3667,20 @@ impl Renderer<'_> {
             SubRange::COLOR,
         );
 
+        // OBS (D, H0 Scope 6): the `image_dump` pass, LAST — on a `BOYKO_IMAGE_DUMP` request
+        // frame only (`None` on every other frame of every run: no pass, no barrier).
+        let image_dump = match self.image_dump.as_ref().and_then(|a| a.request.as_ref()) {
+            Some(request) => declare_image_dump(
+                g,
+                request,
+                &[
+                    (super::frame_driver::ImageDumpName::ForwardDepth, forward_depth),
+                    (super::frame_driver::ImageDumpName::Lit, lit),
+                ],
+            ),
+            None => None,
+        };
+
         g.compile();
         // OBS (P): the class table over this declarator's compiled frame (debug builds).
         #[cfg(debug_assertions)]
@@ -3560,6 +3698,7 @@ impl Renderer<'_> {
             sdf_forward_march,
             present_sample,
             particle: particle_plan,
+            image_dump,
         });
     }
 
@@ -4050,6 +4189,9 @@ pub(crate) struct VbPassPlan {
     pub(crate) taa_resolve: Option<crate::framegraph::PassId>,
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame.
     pub(crate) particle: ParticlePassPlan,
+    /// OBS (D): the `image_dump` pass — declared LAST, on a `BOYKO_IMAGE_DUMP` request frame only
+    /// (`None` on every other frame of every run), with the names it copies.
+    pub(crate) image_dump: Option<ImageDumpPlan>,
 }
 
 /// Multi-paradigm render-path plan, rung R8: the [`BarrierSink`](crate::framegraph::BarrierSink)
@@ -6945,6 +7087,22 @@ impl Renderer<'_> {
              one that ships"
         );
 
+        // OBS (D, H0 Scope 6): the `image_dump` pass, LAST — on a `BOYKO_IMAGE_DUMP` request
+        // frame only (`None` on every other frame of every run: no pass, no barrier).
+        let image_dump = match self.image_dump.as_ref().and_then(|a| a.request.as_ref()) {
+            Some(request) => declare_image_dump(
+                g,
+                request,
+                &[
+                    (super::frame_driver::ImageDumpName::VbDepth, vb_depth),
+                    (super::frame_driver::ImageDumpName::Viewt, viewt),
+                    (super::frame_driver::ImageDumpName::Lit, lit),
+                    (super::frame_driver::ImageDumpName::TaaHist, taa_hist),
+                ],
+            ),
+            None => None,
+        };
+
         g.compile();
         // OBS (P): the class table over this declarator's compiled frame (debug builds).
         #[cfg(debug_assertions)]
@@ -6999,6 +7157,7 @@ impl Renderer<'_> {
             taa_resolve: taa_resolve_pass,
             present_sample,
             particle: particle_plan,
+            image_dump,
         });
     }
 
@@ -7093,6 +7252,88 @@ impl Renderer<'_> {
         }
         #[cfg(not(debug_assertions))]
         let _ = (targets, fi);
+    }
+
+    /// OBS (D, H0 Scope 6): records the image dump's copies for `plan` — one tightly-packed
+    /// mip-0 / layer-0 `vkCmdCopyImageToBuffer` per copied name into that name's requested
+    /// staging, each followed by the host-read barrier (H0 Scope 7) — and notes what it copied
+    /// (format, extent, `frame_index`) for the instrument's file header. A name whose source is
+    /// absent, whose format the dump does not decode, or whose staging is too small is skipped
+    /// and reported as not copied: the copy is never recorded past the staging.
+    ///
+    /// # Safety
+    ///
+    /// `cmd` is recording, outside any render scope, and `plan.pass`'s derived barriers were just
+    /// recorded into it, so every copied source is in `plan.layouts[name]`. Every `Some` source
+    /// is the live image this frame's slot names for that graph resource, created with
+    /// `TRANSFER_SRC` usage (the targets carry it when the dump is armed) and at least `extent`
+    /// large. Every requested staging buffer is live, host-visible, created with `TRANSFER_DST`,
+    /// and referenced by no other submission (`request_image_dump`'s caller contract).
+    pub(crate) unsafe fn record_image_dump_copies(
+        &self,
+        cmd: VkCommandBuffer,
+        plan: ImageDumpPlan,
+        sources: &[(super::frame_driver::ImageDumpName, Option<&crate::texture::VulkanTexture>, VkExtent2D)],
+        frame_index: u32,
+    ) {
+        use super::frame_driver::{image_dump_texel_bytes, ImageDumpCopy, IMAGE_DUMP_MAX};
+        let Some(arm) = self.image_dump.as_ref() else {
+            return;
+        };
+        let Some(request) = arm.request.as_ref() else {
+            return;
+        };
+        let mut copies = [ImageDumpCopy::NONE; IMAGE_DUMP_MAX];
+        for &(name, tex, extent) in sources {
+            let i = name as usize;
+            let (Some(tex), true) = (tex, plan.has(name)) else {
+                continue;
+            };
+            let staging = request.staging[i];
+            let Some(texel) = image_dump_texel_bytes(tex.view_format) else {
+                continue;
+            };
+            let bytes = u64::from(extent.width) * u64::from(extent.height) * u64::from(texel);
+            if staging.is_null() || request.capacity[i] < bytes {
+                continue;
+            }
+            let region = VkBufferImageCopy {
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: VkImageSubresourceLayers {
+                    aspect_mask: if name.is_depth() { VK_IMAGE_ASPECT_DEPTH_BIT } else { VK_IMAGE_ASPECT_COLOR_BIT },
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: VkOffset3D { x: 0, y: 0, z: 0 },
+                image_extent: VkExtent3D { width: extent.width, height: extent.height, depth: 1 },
+            };
+            // SAFETY: the caller guarantees `cmd` is recording outside any render scope, `tex` is
+            // live with `TRANSFER_SRC` usage, at least `extent` large and in `plan.layouts[i]`
+            // (the pass's derived barrier just recorded), and `staging` is a live TRANSFER_DST
+            // host-visible buffer no other submission touches; `bytes <= capacity` is checked
+            // above, so the one tightly-packed mip-0 region lands inside it; `&region` outlives
+            // the call. The host-read barrier recorded after the copy names the same live
+            // destination on the same open command buffer, outside any render scope
+            // (`record_host_read_barrier`'s contract).
+            unsafe {
+                (self.fns.cmd_copy_image_to_buffer)(cmd, tex.image, plan.layouts[i], staging, 1, &region);
+                crate::host_read::record_host_read_barrier(self.fns, cmd, &[staging]);
+            }
+            copies[i] = ImageDumpCopy {
+                copied: true,
+                vk_format: tex.view_format,
+                width: extent.width,
+                height: extent.height,
+                mip: 0,
+                layers: 1,
+                frame_index,
+                bytes,
+            };
+        }
+        arm.copies.set(copies);
     }
 }
 

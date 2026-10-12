@@ -483,6 +483,13 @@ pub const ENV_INTERP: &str = "BOYKO_OBS_INTERP";
 pub const ENV_PARTICLES: &str = "BOYKO_OBS_PARTICLES";
 /// `0` stops the per-frame material edit, so no frame past 0 uploads (default: edit every frame).
 pub const ENV_UPLOAD: &str = "BOYKO_OBS_UPLOAD";
+/// `0` disarms TAA where the path would run it (default armed) — a jitter-free frame.
+pub const ENV_TAA: &str = "BOYKO_OBS_TAA";
+/// `0` disarms DDGI (default armed). A gate comparing two RUNS texel for texel turns it off:
+/// measured on the Deferred OBS scene at frame 30, two runs with DDGI armed differed in 821 texels
+/// by one LSB, and with it off they agreed exactly in 3 of 3 runs (the probe update is a
+/// round-robin accumulator).
+pub const ENV_DDGI: &str = "BOYKO_OBS_DDGI";
 
 /// The window edge every OBS worker renders at.
 pub const OBS_WIN: u32 = 256;
@@ -494,6 +501,8 @@ pub struct ObsArming {
     pub interp: bool,
     pub particles: bool,
     pub upload: bool,
+    pub taa: bool,
+    pub ddgi: bool,
 }
 
 impl ObsArming {
@@ -507,7 +516,14 @@ impl ObsArming {
             Ok("deferred") | Err(_) => RenderPath::Deferred,
             Ok(other) => panic!("{ENV_PATH}={other} is not deferred|forward|forwardplus|vb"),
         };
-        Self { path, interp: flag(ENV_INTERP), particles: flag(ENV_PARTICLES), upload: flag(ENV_UPLOAD) }
+        Self {
+            path,
+            interp: flag(ENV_INTERP),
+            particles: flag(ENV_PARTICLES),
+            upload: flag(ENV_UPLOAD),
+            taa: flag(ENV_TAA),
+            ddgi: flag(ENV_DDGI),
+        }
     }
 
     /// The env word of `path`.
@@ -677,14 +693,22 @@ pub fn build_obs_app(title: &'static str, arming: ObsArming) -> App {
     app.insert_resource(ShadowConfig { enabled: true, ..ShadowConfig::default() });
     match arming.path {
         RenderPath::Deferred => {
-            app.insert_resource(AaConfig { mode: AaMode::Taa });
+            if arming.taa {
+                app.insert_resource(AaConfig { mode: AaMode::Taa });
+            }
             app.insert_resource(SsaoConfig { quality: SsaoQuality::High, ..Default::default() });
-            app.insert_resource(DdgiConfig { ddgi_indirect: true, ..Default::default() });
+            if arming.ddgi {
+                app.insert_resource(DdgiConfig { ddgi_indirect: true, ..Default::default() });
+            }
         }
         RenderPath::VisibilityBuffer => {
-            app.insert_resource(AaConfig { mode: AaMode::Taa });
+            if arming.taa {
+                app.insert_resource(AaConfig { mode: AaMode::Taa });
+            }
             app.insert_resource(SsaoConfig { quality: SsaoQuality::High, atrous_levels: 3 });
-            app.insert_resource(DdgiConfig { ddgi_indirect: true, ..Default::default() });
+            if arming.ddgi {
+                app.insert_resource(DdgiConfig { ddgi_indirect: true, ..Default::default() });
+            }
             app.insert_resource(HzbConfig { mode: HzbMode::Build });
             app.insert_resource(boyko_render::LightingConfig { clusters_enabled: true, ..boyko_render::LightingConfig::default() });
             app.insert_resource(boyko_render::ClusterConfig::default());
@@ -743,8 +767,9 @@ pub fn fresh_out(name: &str) -> PathBuf {
 }
 
 /// Spawns this test binary's `worker` (by name, `--exact`) with `env` over a cleaned instrument
-/// environment, and asserts it exited 0. Validation is disabled unless the caller's `env` sets
-/// `BOYKO_DISABLE_VALIDATION` itself or `validation_on` removes it.
+/// environment, and asserts it exited 0. `validation_on` arms the layer for the child
+/// (`BOYKO_ENABLE_VALIDATION`, the parent's `BOYKO_DISABLE_VALIDATION` removed — critique O7 — and
+/// the layer's message limit off, the `boot_validation_clean` recipe); otherwise it is disabled.
 pub fn run_worker(worker: &str, env: &[(&str, String)], validation_on: bool) {
     let exe = std::env::current_exe().expect("invariant: the test binary knows its own path");
     let mut cmd = Command::new(&exe);
@@ -753,7 +778,9 @@ pub fn run_worker(worker: &str, env: &[(&str, String)], validation_on: bool) {
         cmd.env_remove(k);
     }
     if validation_on {
-        cmd.env_remove("BOYKO_DISABLE_VALIDATION");
+        cmd.env_remove("BOYKO_DISABLE_VALIDATION")
+            .env("BOYKO_ENABLE_VALIDATION", "1")
+            .env("VK_KHRONOS_VALIDATION_ENABLE_MESSAGE_LIMIT", "false");
     } else {
         cmd.env("BOYKO_DISABLE_VALIDATION", "1");
     }

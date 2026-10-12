@@ -5431,6 +5431,34 @@ impl Renderer<'_> {
             }
         }
 
+        // OBS (D, H0 Scope 6): the image dump — AFTER the present blit and the HZB dump block
+        // (critique O2; declared LAST, after `hzb_dump`), before the swapchain's own transition.
+        // An unarmed frame declares no `image_dump` and records nothing here.
+        if let Some(dump) = plan.image_dump {
+            ts.cmd();
+            self.record_vb_pass(dump.pass, cmd, targets, forward, vb, scene, fi);
+            let sources = [
+                (super::super::frame_driver::ImageDumpName::VbDepth, Some(&forward.depth[fi]), present_extent),
+                (super::super::frame_driver::ImageDumpName::Viewt, Some(&targets.viewt[fi]), present_extent),
+                (super::super::frame_driver::ImageDumpName::Lit, Some(&targets.lit[fi]), present_extent),
+                (super::super::frame_driver::ImageDumpName::TaaHist, targets.taa_hist.as_ref().map(|r| &r[fi]), aa_extent),
+            ];
+            // SAFETY: recording is open and no render scope is active (the blit's
+            // `cmd_end_rendering` is above); `record_vb_pass` just recorded the dump pass's
+            // derived barriers, so each declared source is in its `plan.layouts` layout; every
+            // source is THIS slot's image (`taa_hist` the `[fi]` write slot) at `present_extent`
+            // (`taa_hist` at `aa_extent`), with `TRANSFER_SRC` usage — `vb_depth` and `lit`
+            // unconditionally, `viewt` / `taa_hist` because the dump was armed at boot
+            // (`sync_gbuffer`'s `dump_usage`); the requested staging obeys `request_image_dump`'s
+            // caller contract.
+            ts.cmd();
+            unsafe { self.record_image_dump_copies(cmd, dump, &sources, scene.engine_frame_index) };
+            if let Some(restore) = dump.restore {
+                ts.cmd();
+                self.record_vb_pass(restore, cmd, targets, forward, vb, scene, fi);
+            }
+        }
+
         match readback {
             None => {
                 let to_present = VkImageMemoryBarrier {
