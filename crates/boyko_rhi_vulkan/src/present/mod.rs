@@ -56,6 +56,9 @@ pub mod seed_class;
 mod surface;
 mod swapchain;
 mod targets;
+// Render wave RD1 (defect R0b): the transparent-depth rule as data + pure functions, public so
+// host tests reach the predicate and the guards (the `seed_class` precedent).
+pub mod transparent_depth;
 
 pub use frame_driver::{FRAME_GRAPH_CAPACITY, FrameGraphCapacity, FrameWriteToken, Renderer};
 pub use frame_driver::{
