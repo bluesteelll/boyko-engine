@@ -291,7 +291,10 @@ pub(crate) const SCRATCH_ID_SERIAL_POINT_CONSTRAINTS: usize =
 
 /// Synthetic id for the colored solver's O8 integrate-freeze snapshot
 /// (`ColoredSoftStepSolver::frozen`) — the `(row, BodyState)` pairs of slept
-/// bodies, captured before the substep loop and restored after it.
+/// bodies, captured before the substep loop and restored after it — and for lane SL's
+/// seal stash (`IslandSleep`'s `seal_stash`), the same element type. The two share this
+/// id's cache-set stagger harmlessly: they are never streamed together (the stash is
+/// written by the settle and read by the next step's seal, each against the body snapshot).
 pub(crate) const SCRATCH_ID_COLORED_FROZEN_ROWS: usize =
     SCRATCH_ID_SERIAL_POINT_CONSTRAINTS - 1;
 

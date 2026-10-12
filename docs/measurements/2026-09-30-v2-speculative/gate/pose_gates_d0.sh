@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# V2: the trunk's L10 pose gates under the overlap-only rule - the three scripts in l10/ unchanged,
-# their fixtures unchanged (the pre-V2 references), every row run with both overlap-only flags
-# through runner_d0.sh. Want: 264/264, both negatives exit 4, 26/26, 17/17.
+# V2: the trunk's L10 pose gates under the overlap-only rule - the three scripts in l10/, their
+# fixtures the pre-V2 references (since lane SL, ruling 39: the mirror
+# docs/measurements/2026-10-11-sl-sleeping/d0, sleeping-off files byte copies, sleeping-on rows
+# SL-1's), every row run with both overlap-only flags through runner_d0.sh. Want: 264/264, both
+# negatives exit 4, 26/26, 17/17.
 # usage: pose_gates_d0.sh [--root DIR] <exe> <outdir>   (ROOT from the gate-root block, passed to every child)
 # Exit (docs/physics/perf-campaign/GATE-KIT.md): 2 if <exe> is missing or a child could not run
 # (exit 2; each child decides that before its first row, the other children still run); else 1 if

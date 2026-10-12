@@ -431,9 +431,11 @@ pub fn add_physics_sdf<S: RigidSolver + Default>(
 /// The rigid solve stage follows `S` as in [`add_physics_systems`]; the soft
 /// stages do not depend on it.
 ///
-/// ⚠ Coupling + [`PhysicsConfig::sleeping`] on the colored solve is reachable and
-/// has a recorded gap: a soft→rigid reaction does not wake a sleeping body. No
-/// gate covers the combination. Sleeping defaults off.
+/// ⚠ Coupling + [`PhysicsConfig::sleeping`] on the colored solve: a soft→rigid
+/// reaction is a velocity write, so it wakes a sleeping body on the next step (lane
+/// SL-1b, `IslandSleep::begin_step`, "The write-wake"). Soft bodies never sleep, so a
+/// rigid island under a resting soft load cycles between a settle and a wake.
+/// Sleeping defaults off.
 pub fn add_physics_soft<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,

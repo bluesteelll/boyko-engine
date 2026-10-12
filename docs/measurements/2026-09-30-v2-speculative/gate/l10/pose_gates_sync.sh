@@ -4,8 +4,14 @@
 # on) against the reuse-on fixtures, and with --contact-reuse off against the pre-C4 fixtures.
 # G3's sleeping-on rows run under --sleep-skip {unset, off, sets} x --broadphase {unset, tree,
 # grid} in both arms. G4: window 6's 1000/800-step sleeping rows (item 1) in both arms and every
-# sleep-skip mode, and its Off' rows (explicit --contact-reuse on), which must not move.
+# sleep-skip mode, and its Off' rows (explicit --contact-reuse on), which must equal the flagless
+# rows' hashes. Every sleeping-off row names --sleeping off (lane SL, SL-2a), so the default's flip
+# (SL-3) moves none.
 # usage: pose_gates_sync.sh [--root DIR] <exe> <outdir>   (fixtures from ROOT: the gate-root block)
+# Fixtures (lane SL, ruling 39): lane SL's mirror docs/measurements/2026-10-11-sl-sleeping - the
+# record directories' sleeping-off files as byte copies, the sleeping-on files and their pinned
+# hashes SL-1's re-recordings (a sleeping body's velocity is zero); the record directories are not
+# edited.
 # Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = every row PASS, all EXPECT_RUNS rows ran and
 # both negative controls exited 4; 1 = red; 2 = could not run (usage, no exe, a fixture missing),
 # decided before the first row.
@@ -34,11 +40,11 @@ if [ $# -ne 2 ]; then echo "usage: $ME [--root DIR] <exe> <outdir>" >&2; exit 2;
 EXE=$1
 OUT=$2
 SON="--sleeping on"
-L9=$ROOT/docs/measurements/2026-09-23-l9-contact-reuse/fixtures
-L9C4=$ROOT/docs/measurements/2026-09-23-l9-contact-reuse/fixtures-c4
-L10=$ROOT/docs/measurements/2026-09-23-l10-sleeping/fixtures
-L10OFF=$ROOT/docs/measurements/2026-09-23-l10-sleeping/fixtures-reuse-off
-W6=$ROOT/docs/measurements/2026-09-24-physics-window6/gate/fixtures
+L9=$ROOT/docs/measurements/2026-10-11-sl-sleeping/d0/l9-fixtures
+L9C4=$ROOT/docs/measurements/2026-10-11-sl-sleeping/d0/l9-fixtures-c4
+L10=$ROOT/docs/measurements/2026-10-11-sl-sleeping/d0/l10-fixtures
+L10OFF=$ROOT/docs/measurements/2026-10-11-sl-sleeping/d0/l10-fixtures-reuse-off
+W6=$ROOT/docs/measurements/2026-10-11-sl-sleeping/d0/w6-fixtures
 if [ ! -f "$EXE" ]; then echo "$ME: no runner exe at $EXE" >&2; exit 2; fi
 missing=0
 need() { [ -f "$1" ] || { echo "$ME: missing fixture $1" >&2; missing=1; }; }
@@ -68,16 +74,16 @@ for w in 1 8; do
     if [ "$arm" = on ]; then RU=; J=0x30c5438bc6ad9ffa; F9=$L9C4; F10=$L10; else RU="--contact-reuse off"; J=0x32d5e235342b4143; F9=$L9; F10=$L10OFF; fi
     # G1: the J pose, 500 steps, cfg default/as x allpairs/tree.
     for c in default as; do for bp in allpairs tree; do
-      chk "G1_${arm}_J500_${c}_${bp}" "$w" $J --scene jolt --gap 0.5 --cfg $c --broadphase $bp --steps 500 $RU
+      chk "G1_${arm}_J500_${c}_${bp}" "$w" $J --scene jolt --gap 0.5 --cfg $c --broadphase $bp --sleeping off --steps 500 $RU
     done; done
     # G2: L9's C0-family rows, 600 steps.
-    chk G2_${arm}_J-A "$w" - --scene jolt --gap 0.5 --cfg a --steps 600 $RU --expect-pose $F9/J-A_W$w.pose
-    chk G2_${arm}_J-D "$w" - --scene jolt --gap 0.5 --cfg default --steps 600 $RU --expect-pose $F9/J-D_W$w.pose
-    chk G2_${arm}_R "$w" - --scene rest --solver colored $PS --steps 600 $RU --expect-pose $F9/R_W$w.pose
+    chk G2_${arm}_J-A "$w" - --scene jolt --gap 0.5 --cfg a --sleeping off --steps 600 $RU --expect-pose $F9/J-A_W$w.pose
+    chk G2_${arm}_J-D "$w" - --scene jolt --gap 0.5 --cfg default --sleeping off --steps 600 $RU --expect-pose $F9/J-D_W$w.pose
+    chk G2_${arm}_R "$w" - --scene rest --solver colored $PS --sleeping off --steps 600 $RU --expect-pose $F9/R_W$w.pose
     chk G2_${arm}_R-S "$w" - --scene rest $SON --steps 600 $RU --expect-pose $F9/R-S_W$w.pose
     chk G2_${arm}_J-Son "$w" - --scene jolt --gap 0.5 --cfg a $SON --steps 600 $RU --expect-pose $F9/J-Son_W$w.pose
     # G3: the L10 lane fixtures, 600 steps.
-    chk G3_${arm}_R "$w" - --scene rest --solver colored $PS --steps 600 $RU --expect-pose $F10/R_W$w.pose
+    chk G3_${arm}_R "$w" - --scene rest --solver colored $PS --sleeping off --steps 600 $RU --expect-pose $F10/R_W$w.pose
     for bp in "" tree grid; do
       if [ -z "$bp" ]; then BP=; BTAG=; else BP="--broadphase $bp"; BTAG="_bp-$bp"; fi
       for skip in "" off sets; do
@@ -90,24 +96,24 @@ for w in 1 8; do
       done
     done
     # G4: window 6 item 1 (Son-J1000 / RS800), every sleep-skip mode, both arms.
-    if [ "$arm" = on ]; then HS=0x3db47fae414b655c; HR=0xb7f1e9e8f91f75ab; else HS=0xcc2a5400c66eecce; HR=0x2a2b7926a48aab00; fi
+    if [ "$arm" = on ]; then HS=0x74c14f3a08e24421; HR=0xa42b663994f7b36d; else HS=0x13d95ddbd8f6907e; HR=0xd70e51f6ae4dd2b8; fi
     for skip in "" off sets; do
       if [ -z "$skip" ]; then SK=; TAG=; else SK="--sleep-skip $skip"; TAG="_skip-$skip"; fi
       chk G4_${arm}_Son-J1000$TAG "$w" $HS --scene jolt --gap 0.5 --cfg a --sleeping $SK --steps 1000 $RU
       chk G4_${arm}_RS800$TAG "$w" $HR --scene rest --sleeping $SK --steps 800 $RU
     done
   done
-  # G4': window 6's Off' rows (explicit --contact-reuse on, tree): must not move.
+  # G4': window 6's Off' rows (explicit --contact-reuse on, tree): equal to the flagless G4 rows.
   for skip in "" off sets; do
     if [ -z "$skip" ]; then SK=; TAG=; else SK="--sleep-skip $skip"; TAG="_skip-$skip"; fi
-    chk G4p_Offp-J1000$TAG "$w" 0x3db47fae414b655c --scene jolt --gap 0.5 --cfg a --sleeping --broadphase tree --contact-reuse on $SK --steps 1000 --expect-pose $W6/Offp-J1000.pose
-    chk G4p_RSOffp800$TAG "$w" 0xb7f1e9e8f91f75ab --scene rest --sleeping --broadphase tree --contact-reuse on $SK --steps 800 --expect-pose $W6/RSOffp800.pose
+    chk G4p_Offp-J1000$TAG "$w" 0x74c14f3a08e24421 --scene jolt --gap 0.5 --cfg a --sleeping --broadphase tree --contact-reuse on $SK --steps 1000 --expect-pose $W6/Offp-J1000.pose
+    chk G4p_RSOffp800$TAG "$w" 0xa42b663994f7b36d --scene rest --sleeping --broadphase tree --contact-reuse on $SK --steps 800 --expect-pose $W6/RSOffp800.pose
   done
   # G4 fixtures (window 6's files) for the flagless and reuse-off 1000/800-step rows.
-  chk G4f_on_Son-J1000 "$w" 0x3db47fae414b655c --scene jolt --gap 0.5 --cfg a --sleeping --steps 1000 --expect-pose $W6/Offp-J1000.pose
-  chk G4f_off_Son-J1000 "$w" 0xcc2a5400c66eecce --scene jolt --gap 0.5 --cfg a --sleeping --steps 1000 --contact-reuse off --expect-pose $W6/Son-J1000.pose
-  chk G4f_on_RS800 "$w" 0xb7f1e9e8f91f75ab --scene rest --sleeping --steps 800 --expect-pose $W6/RSOffp800.pose
-  chk G4f_off_RS800 "$w" 0x2a2b7926a48aab00 --scene rest --sleeping --steps 800 --contact-reuse off --expect-pose $W6/RS800.pose
+  chk G4f_on_Son-J1000 "$w" 0x74c14f3a08e24421 --scene jolt --gap 0.5 --cfg a --sleeping --steps 1000 --expect-pose $W6/Offp-J1000.pose
+  chk G4f_off_Son-J1000 "$w" 0x13d95ddbd8f6907e --scene jolt --gap 0.5 --cfg a --sleeping --steps 1000 --contact-reuse off --expect-pose $W6/Son-J1000.pose
+  chk G4f_on_RS800 "$w" 0xa42b663994f7b36d --scene rest --sleeping --steps 800 --expect-pose $W6/RSOffp800.pose
+  chk G4f_off_RS800 "$w" 0xd70e51f6ae4dd2b8 --scene rest --sleeping --steps 800 --contact-reuse off --expect-pose $W6/RS800.pose
 done
 # Negative controls: the flagless row against its reuse-off file, and the reverse, must exit 4.
 "$EXE" --scene rest --sleeping --workers 1 --steps 600 --expect-pose $L10OFF/R-S_W1.pose > "$OUT/neg_flagless_vs_off.out" 2>&1; neg1=$?

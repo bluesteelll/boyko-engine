@@ -4216,9 +4216,19 @@
     /// renumbering. Drives `begin_step` over a sequence of random manifold sets over a
     /// fixed body set, latching/waking rows, and asserts the freeze decision is ALWAYS
     /// a pure function of the per-row latch — an island is frozen IFF every member row
-    /// is latched, never otherwise.
+    /// is resting, never otherwise.
+    ///
+    /// Lane SL (design O5): the fold reads the rest state, so the oracle does too: an island
+    /// is frozen iff every member row is `REST_FROZEN`. Rows latch two ways: the test hook
+    /// (`force_sleep_row`, latched and `REST_FROZEN` at once) and the energy path
+    /// (`end_step` + `settle`), which leaves a row of a settled island `REST_SETTLED` until the
+    /// next `begin_step` and a row that latched beside an unlatched island-mate latched but not
+    /// resting. Such a row must keep its island active (M-SL3, a fold on `asleep`, freezes it);
+    /// the test counts the oracle points that saw one, so it cannot pass without them.
     #[test]
     fn topology_churn_freeze_is_pure_function_of_row_latch() {
+        use crate::row_identity::REST_FROZEN;
+        let latched_not_resting = std::cell::Cell::new(0usize);
         proptest!(ProptestConfig::with_cases(300), |(seed in any::<u64>())| {
             let mut rng = Lcg(seed ^ 0x5DEE_CE66_D1CE_4B27);
             // A fixed set of dynamic bodies that we re-island with random manifolds.
@@ -4230,6 +4240,14 @@
             let n_rows = bodies.len();
 
             let mut sleep = IslandSleep::with_capacity(n_rows, n_rows);
+            let mut touched = crate::resources::TouchedMask::with_capacity(
+                crate::scratch_ids::touched_solver_id(),
+                n_rows,
+            );
+            touched.reset(n_rows);
+            for row in 0..n_rows {
+                touched.set(row);
+            }
 
             // Run several frames; each frame re-derive a random manifold set (random
             // merges/splits), randomly latch/wake rows via the energy path, then assert
@@ -4251,7 +4269,7 @@
                 sleep.begin_step(&graph, n_rows);
 
                 // The per-island freeze decision must be EXACTLY: island frozen iff
-                // every member dynamic row is latched asleep (and the island is non-empty).
+                // every member dynamic row is resting (and the island is non-empty).
                 let n_islands = graph.n_islands() as usize;
                 let mut member_count = vec![0usize; n_islands];
                 let mut all_asleep = vec![true; n_islands];
@@ -4261,8 +4279,11 @@
                         continue;
                     }
                     member_count[isl as usize] += 1;
-                    if !sleep.is_row_asleep(row) {
+                    if sleep.rest_of(row) != REST_FROZEN {
                         all_asleep[isl as usize] = false;
+                        if sleep.is_row_asleep(row) {
+                            latched_not_resting.set(latched_not_resting.get() + 1);
+                        }
                     }
                 }
                 for isl in 0..n_islands {
@@ -4278,10 +4299,12 @@
                             isl, _frame, seed, member_count[isl], all_asleep[isl]
                         );
                     }
-                    // Every awake row's island must NOT be frozen (C3): no member of an
-                    // active partition is frozen because of a stale latch.
+                    // Every row that is not resting keeps its island unfrozen (C3): no member of
+                    // an active partition is frozen because of a stale latch.
                     for row in 0..n_dyn {
-                        if graph.island_of(row as u32) == isl as u32 && !sleep.is_row_asleep(row) {
+                        if graph.island_of(row as u32) == isl as u32
+                            && sleep.rest_of(row) != REST_FROZEN
+                        {
                             prop_assert!(
                                 sleep.is_row_awake(row),
                                 "C3: awake row {} was frozen by a stale latch (seed {}, frame {})",
@@ -4291,14 +4314,25 @@
                     }
                 }
 
+                // Lane SL: half the frames advance the debounce through the energy path (every
+                // body at rest, a two-frame debounce) and settle what went to sleep.
+                if rng.f01() < 0.5 {
+                    sleep.end_step(&bodies, &graph, DEFAULT_SLEEP_THRESHOLD, 2);
+                    sleep.settle(&mut bodies, &touched, None);
+                }
                 // Randomly latch / wake some rows for the next frame (drive churn).
                 for row in 0..n_dyn {
-                    if rng.f01() < 0.5 {
+                    if rng.f01() < 0.25 {
                         sleep.force_sleep_row(row);
                     }
                 }
             }
         });
+        assert!(
+            latched_not_resting.get() > 0,
+            "anti-vacuity: no oracle point saw a latched row that is not resting, so the fold's \
+             predicate (rest, not asleep) was never exercised"
+        );
     }
 
     /// No-FMA / no-approx grep gate: `solver/colored.rs` must contain ZERO fused
@@ -5152,7 +5186,11 @@
         // equal, so one constant per scene pins all four — an arm that differs from the
         // others is as red as an arm that differs from the pin.
         //
-        // A red pin is a defect, never a re-bless (`00-RULINGS.md`, per-contact parity).
+        // A red pin is a defect, never a re-bless (`00-RULINGS.md`, per-contact parity). The one
+        // exception is an owner-approved value-changing lever whose purpose is the move (ruling 39,
+        // lane SL): its commit re-reads the value from this gate's own output, re-pins it and names
+        // the lever and the old value (A7-R1's rule, `tests/sleep_settles_box_piles.rs`). Any
+        // other red is a defect.
         // Every scene also asserts the anti-vacuity counter G1 names for it
         // (`SetupCounters`), so a scene that stopped exercising its path goes red too.
         // The eight-worker arms need a pool, so the suite is native only.
@@ -5168,8 +5206,11 @@
 
         /// S-a: the six-layer Jolt pyramid (91 boxes, gap 0.5, friction 0.2), 300 steps.
         const PIN_S_A: u64 = 0xa9bd_a9e4_ee00_d272;
-        /// S-b: a resting three-layer pile that freezes under sleeping, then `wake_all`.
-        const PIN_S_B: u64 = 0x40e4_a08c_7eb6_f631;
+        /// S-b: a resting three-layer pile that freezes under sleeping, then `wake_all`. Re-pinned
+        /// by lane SL-1 (ruling 25; ruling 39 Q4) from `0x40e4_a08c_7eb6_f631`: direct drive zeroes
+        /// a sleeping island's velocities at its settle, so the frozen steps' body bits and the
+        /// wake's start moved.
+        const PIN_S_B: u64 = 0xe9bd_c7f6_80f7_80ca;
         /// S-c: spawn / despawn / migrate with order flips and jumpers (`Rows` and `Reset`).
         const PIN_S_C: u64 = 0x8378_83c0_d3d6_6662;
         /// S-d: a two-layer box pile on a plane SDF (box-box plus SDF manifolds).

@@ -65,8 +65,11 @@
 //! on purpose and their extra broadphase and narrowphase work is part of what S-SHOOT and S-SLIDE
 //! measure (ruling 22); `--sanity` reports it. A `--dyn` row's L9 reuse probe is the whole run
 //! (void iff no record was reused anywhere): S-SLIDE moves from step 0, so J-T's [100, 500) premise
-//! does not hold for it. Refused (exit 2) off `--scene jolt`, at another `--gap`, with sleeping on,
-//! `--threshold`, `--frozen-by` or `--solver reference`; every other flag composes with it.
+//! does not hold for it. Refused (exit 2) off `--scene jolt`, at another `--gap`, with
+//! `--threshold`, `--frozen-by` or `--solver reference`, and `--scene-dump` with sleeping on (the
+//! dump is the program's created values, which sleeping cannot change); every other flag composes
+//! with it. Sleeping on is accepted since lane SL's SL-2a: such a row is a structural screen of the
+//! sleeping arm (S-SL3), never a parity row, since every engine runs the parity scenes awake.
 //!
 //! * `--sanity PATH` (any `jolt` row, `--dyn` or not): one CSV row per state for the shared bar
 //!   `scenes/gate/dyn_sanity.py` scores (energies per unit box mass, bounds, speeds, the launch
@@ -391,6 +394,18 @@
 //!   receipts (non-finite bodies, lowest centre, top speed, escaped) and, with `--sanity`, the
 //!   per-state receipts and the static-pair receipts over the metric window. Receipts, not a
 //!   verdict: the bar is the scorer's, one authority for every engine.
+//! * `sleep` (only on a colored row with sleeping on; no key at all elsewhere, so every
+//!   sleeping-off summary is byte-unchanged; lane SL, SL-2a): the sleeping arm's receipts, read
+//!   untimed after every step — `contact_wakes` (`IslandSleep::contact_wakes` after the run),
+//!   `contact_wake_rises` (the steps on which it rose, as `step + 1` like `first_frozen_step`, at
+//!   most 256, `contact_wake_rises_truncated` past that), `remap_resets`, and `frozen_v_max`: the
+//!   largest `|v|² + |ω|²` of a frozen (not awake) simulated dynamic row of the solver's snapshot
+//!   over all steps, i.e. the stored velocity a frozen body keeps (zero since SL-1). SL-1 adds the
+//!   settle and the seal's counters after the run — `rows_put_to_sleep`, `settles`,
+//!   `settle_rekeys`, `seal_held`, `seal_breaks`, `write_wakes` — and `settle_steps`, the
+//!   `[step + 1, rows]` of every step on which `rows_put_to_sleep` rose (at most 256,
+//!   `settle_steps_truncated` past that). SL-1b adds `write_wake_rises`, the steps on which
+//!   `write_wakes` rose, like `contact_wake_rises` (`write_wake_rises_truncated` past 256).
 //! * exit code: 0 ok; 2 bad flags; 3 void (anti-vacuity, frozen-by, disarmed ring traffic,
 //!   dropped samples, a reuse-on row that collided box pairs over steps [100, 500) and reused no
 //!   record there, or whose window collided none and whose whole run reused no record, an S5
@@ -1228,15 +1243,22 @@ fn validate_dyn(a: &Args) -> Result<(), String> {
                 .into(),
         );
     }
+    if a.threshold.is_some() || a.frozen_by.is_some() || a.solver == SolverKind::Reference {
+        return Err(
+            "--dyn, --sanity and --scene-dump run the colored solver at the shipped sleep threshold: \
+             --threshold, --frozen-by and --solver reference are refused"
+                .into(),
+        );
+    }
     let sleeping = match (a.sleeping, a.cfg) {
         (Some(on), _) => on,
         (None, CfgKind::Default) => PhysicsConfig::default().sleeping,
         (None, _) => false,
     };
-    if sleeping || a.threshold.is_some() || a.frozen_by.is_some() || a.solver == SolverKind::Reference {
+    if sleeping && a.scene_dump.is_some() {
         return Err(
-            "--dyn, --sanity and --scene-dump run the colored solver with sleeping off: every engine \
-             runs the scenes awake"
+            "--scene-dump writes the program's created values, which sleeping cannot change: run it \
+             with sleeping off"
                 .into(),
         );
     }
@@ -2344,6 +2366,117 @@ fn awake_rows(world: &EcsMaster, sleeping: bool) -> Option<u64> {
     )
 }
 
+/// The most contact-wake rise steps the summary's `sleep` object lists.
+const SLEEP_RISES_MAX: usize = 256;
+
+/// The summary's `sleep` object (module docs, "Output"; lane SL, SL-2a): the sleeping arm's
+/// receipts, built only on a colored row with sleeping on and read untimed after every step.
+struct SleepReceipt {
+    /// `IslandSleep::contact_wakes` after the previous step.
+    wakes_prev: u64,
+    /// The steps (`step + 1`) on which `contact_wakes` rose, at most [`SLEEP_RISES_MAX`].
+    rises: Vec<usize>,
+    /// A rise past [`SLEEP_RISES_MAX`] was dropped.
+    truncated: bool,
+    /// The largest `|v|² + |ω|²` of a frozen simulated dynamic row over all steps.
+    frozen_v_max: f32,
+    /// `IslandSleep::rows_put_to_sleep` after the previous step.
+    put_prev: u64,
+    /// `[step + 1, rows]` of every step on which `rows_put_to_sleep` rose, at most
+    /// [`SLEEP_RISES_MAX`].
+    settle_steps: Vec<(usize, u64)>,
+    /// A settle step past [`SLEEP_RISES_MAX`] was dropped.
+    settle_truncated: bool,
+    /// `IslandSleep::write_wakes` after the previous step (SL-1b).
+    write_prev: u64,
+    /// The steps (`step + 1`) on which `write_wakes` rose, at most [`SLEEP_RISES_MAX`].
+    write_rises: Vec<usize>,
+    /// A write-wake rise past [`SLEEP_RISES_MAX`] was dropped.
+    write_truncated: bool,
+}
+
+impl SleepReceipt {
+    fn new() -> Self {
+        Self {
+            wakes_prev: 0,
+            rises: Vec::with_capacity(SLEEP_RISES_MAX),
+            truncated: false,
+            frozen_v_max: 0.0,
+            put_prev: 0,
+            settle_steps: Vec::with_capacity(SLEEP_RISES_MAX),
+            settle_truncated: false,
+            write_prev: 0,
+            write_rises: Vec::with_capacity(SLEEP_RISES_MAX),
+            write_truncated: false,
+        }
+    }
+
+    /// Reads one finished step.
+    fn step(&mut self, world: &EcsMaster, step: usize) {
+        let sleep = world.resource::<IslandSleep>();
+        let wakes = sleep.contact_wakes();
+        if wakes > self.wakes_prev {
+            if self.rises.len() < SLEEP_RISES_MAX {
+                self.rises.push(step + 1);
+            } else {
+                self.truncated = true;
+            }
+        }
+        self.wakes_prev = wakes;
+        let put = sleep.rows_put_to_sleep();
+        if put > self.put_prev {
+            if self.settle_steps.len() < SLEEP_RISES_MAX {
+                self.settle_steps.push((step + 1, put - self.put_prev));
+            } else {
+                self.settle_truncated = true;
+            }
+        }
+        self.put_prev = put;
+        let writes = sleep.write_wakes();
+        if writes > self.write_prev {
+            if self.write_rises.len() < SLEEP_RISES_MAX {
+                self.write_rises.push(step + 1);
+            } else {
+                self.write_truncated = true;
+            }
+        }
+        self.write_prev = writes;
+        let rows = world.resource::<SolverScratch>().bodies();
+        for (r, b) in rows.iter().enumerate() {
+            if b.simulated && b.inv_mass != 0.0 && !sleep.is_row_awake(r) {
+                let e = b.linear_velocity.length_squared() + b.angular_velocity.length_squared();
+                self.frozen_v_max = self.frozen_v_max.max(e);
+            }
+        }
+    }
+
+    /// The `,"sleep":{...}` member, after the run.
+    fn json(&self, world: &EcsMaster) -> String {
+        let sleep = world.resource::<IslandSleep>();
+        format!(
+            ",\"sleep\":{{\"contact_wakes\":{},\"contact_wake_rises\":[{}],\"contact_wake_rises_truncated\":{},\
+             \"remap_resets\":{},\"frozen_v_max\":{},\"rows_put_to_sleep\":{},\"settles\":{},\
+             \"settle_steps\":[{}],\"settle_steps_truncated\":{},\"settle_rekeys\":{},\"seal_held\":{},\
+             \"seal_breaks\":{},\"write_wakes\":{},\"write_wake_rises\":[{}],\"write_wake_rises_truncated\":{}}}",
+            sleep.contact_wakes(),
+            self.rises.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
+            self.truncated,
+            sleep.remap_resets(),
+            json_f64(f64::from(self.frozen_v_max)),
+            sleep.rows_put_to_sleep(),
+            sleep.settles(),
+            self.settle_steps.iter().map(|(s, r)| format!("[{s},{r}]")).collect::<Vec<_>>().join(","),
+            self.settle_truncated,
+            sleep.settle_rekeys(),
+            sleep.seal_held(),
+            sleep.seal_breaks(),
+            sleep.write_wakes(),
+            self.write_rises.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
+            self.write_truncated,
+        )
+    }
+}
+
 /// A JSON string literal.
 fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -2616,6 +2749,8 @@ fn run(args: &Args) -> ExitCode {
             args.scene_dump.is_some(),
         )
     });
+    // SL-2a: the sleeping arm's receipts (module docs, "Output", `sleep`), colored + sleeping only.
+    let mut sleep_receipt = (colored && sleeping).then(SleepReceipt::new);
 
     for step in 0..args.steps {
         if let Some(d) = dyn_run.as_mut() {
@@ -2665,6 +2800,9 @@ fn run(args: &Args) -> ExitCode {
         }
         if let Some(d) = dyn_run.as_mut() {
             d.after_step(step, &rig);
+        }
+        if let Some(r) = sleep_receipt.as_mut() {
+            r.step(&rig.world, step);
         }
         if let Some(sets) = rig.world.try_resource::<SleepSets>() {
             let stats = sets.stats();
@@ -2980,6 +3118,8 @@ fn run(args: &Args) -> ExitCode {
         },
     };
 
+    let sleep_json = sleep_receipt.as_ref().map_or_else(String::new, |r| r.json(&rig.world));
+
     // The summary.
     let win = &rows[window.0..window.1];
     let win_ns: u64 = win.iter().map(|r| r.wall_ns).sum();
@@ -3117,7 +3257,7 @@ fn run(args: &Args) -> ExitCode {
          \"canary_zone\":{},\"canary_zone_ns\":{},\"route_note\":{},\
          \"host\":{{\"logical_cores\":{logical_cores}}},\
          \"threads\":{{\"pool_workers\":{},\"dispatcher\":1,\"solve_on_dispatcher_steps\":\
-         {solve_on_dispatcher_steps},\"armed_steps\":{},\"dispatcher_lane_samples_max\":{disp_max}}}{dyn_json}}}",
+         {solve_on_dispatcher_steps},\"armed_steps\":{},\"dispatcher_lane_samples_max\":{disp_max}}}{dyn_json}{sleep_json}}}",
         json_str(RUNNER_ID),
         args.label.as_deref().map_or_else(|| "null".to_owned(), json_str),
         args.raw.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","),

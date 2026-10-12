@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # L10 C3c runner checks (untimed): C3b's fourteen, plus the tree seam's armed rows (every step's
-# structure checked, void steps must be 0) and its TreeDiag receipts.
+# structure checked, void steps must be 0) and its TreeDiag receipts. Every row names its sleeping
+# arm (lane SL, SL-2a) but the bare self check and the two refusals whose subject is the unset flag
+# (refuse_skip_default_cfg_sleeping_unset, refuse_skip_cfg_a_unset).
 # usage: runner_checks_c3c.sh [--root DIR] <exe> <outdir>   (fixtures from ROOT: the gate-root block)
+# Fixtures (lane SL, ruling 39): lane SL's mirror docs/measurements/2026-10-11-sl-sleeping - the
+# record directories' sleeping-off files as byte copies, the sleeping-on files and their pinned
+# hashes SL-1's re-recordings (a sleeping body's velocity is zero); the record directories are not
+# edited.
 # Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = every check PASS and all EXPECT_CHECKS ran;
 # 1 = red; 2 = could not run (usage, no exe, a fixture missing), decided before the first check.
 set -u
@@ -28,7 +34,7 @@ if [ ! -d "$ROOT/docs/measurements" ]; then echo "$(basename "$0"): '$ROOT' is n
 if [ $# -ne 2 ]; then echo "usage: $ME [--root DIR] <exe> <outdir>" >&2; exit 2; fi
 EXE=$1
 OUT=$2
-L10=$ROOT/docs/measurements/2026-09-23-l10-sleeping/fixtures
+L10=$ROOT/docs/measurements/2026-10-11-sl-sleeping/d0/l10-fixtures
 if [ ! -f "$EXE" ]; then echo "$ME: no runner exe at $EXE" >&2; exit 2; fi
 missing=0
 for w in 1 8; do for n in R-S J-Son J-D-on; do
@@ -52,7 +58,7 @@ run() { # label want-exit flags...
 run refuse_skip_default_cfg_sleeping_unset 2 --scene rest --sleep-skip sets --steps 10
 run refuse_skip_sleeping_off 2 --scene rest --sleeping off --sleep-skip off --steps 10
 run refuse_skip_cfg_a_unset 2 --scene jolt --gap 0.5 --cfg a --sleep-skip sets --steps 10
-run refuse_skip_reference 2 --scene rest --solver reference --sleep-skip off --steps 10
+run refuse_skip_reference 2 --scene rest --solver reference --sleeping off --sleep-skip off --steps 10
 run refuse_skip_bad 2 --scene rest --sleeping on --sleep-skip replay --steps 10
 run accept_skip_sets 0 --scene rest --sleeping on --sleep-skip sets --steps 600 --workers 1 --expect-pose $L10/R-S_W1.pose
 run accept_skip_off 0 --scene rest --sleeping on --sleep-skip off --steps 600 --workers 1 --expect-pose $L10/R-S_W1.pose
@@ -60,8 +66,8 @@ run armed_R-S_sets_W1 0 --scene rest --sleeping on --arm-profiler --steps 600 --
 run armed_R-S_sets_W8 0 --scene rest --sleeping on --arm-profiler --steps 600 --workers 8 --expect-pose $L10/R-S_W8.pose
 run armed_R-S_off_W1 0 --scene rest --sleeping on --sleep-skip off --arm-profiler --steps 600 --workers 1 --expect-pose $L10/R-S_W1.pose
 run armed_J-Son_sets_W8 0 --scene jolt --gap 0.5 --cfg a --sleeping on --arm-profiler --steps 600 --workers 8 --expect-pose $L10/J-Son_W8.pose
-run armed_J-A_sleep_off_W8 0 --scene jolt --gap 0.5 --cfg a --arm-profiler --steps 300 --workers 8
-run armed_reference_s16 0 --scene s16 --solver reference --arm-profiler --steps 50 --workers 1
+run armed_J-A_sleep_off_W8 0 --scene jolt --gap 0.5 --cfg a --sleeping off --arm-profiler --steps 300 --workers 8
+run armed_reference_s16 0 --scene s16 --solver reference --sleeping off --arm-profiler --steps 50 --workers 1
 run self_check 0
 # C3c: the tree seam, armed (the per-path structure on every step, PHYS_NP_PAIRS from the stream,
 # PHYS_BP_PAIRS the logical count, q + m == N with the sleepers counted).
@@ -72,7 +78,7 @@ for w in 1 8; do
   run armed_J-D-on_tree_sets_W$w 0 --scene jolt --gap 0.5 --cfg default --sleeping on --broadphase tree --arm-profiler --steps 600 --workers $w --expect-pose $L10/J-D-on_W$w.pose
   run armed_R-S_grid_sets_W$w 0 --scene rest --sleeping on --broadphase grid --arm-profiler --steps 600 --workers $w --expect-pose $L10/R-S_W$w.pose
   # The receipt with sleeping off on the tree: sleeper_rebuilds 0 (design 04 T(W) row, untimed).
-  run J-A_sleep_off_tree_W$w 0 --scene jolt --gap 0.5 --cfg a --broadphase tree --steps 600 --workers $w
+  run J-A_sleep_off_tree_W$w 0 --scene jolt --gap 0.5 --cfg a --sleeping off --broadphase tree --steps 600 --workers $w
 done
 checks=$(wc -l < "$T"); pass=$(grep -c 'PASS' "$T"); fail=$(grep -c 'FAIL' "$T")
 echo "checks $checks, pass $pass, fail $fail"
