@@ -542,6 +542,16 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
                 vk_regions,
             );
         }
+        // OBS (H0 Scope 7): a MAPPED destination is a host readback (`particle_readback`, the
+        // shadow-poison probe, every harness) — make the copy's writes visible to the host read
+        // that follows the fence wait. No frame copies through the encoder into a mapped buffer,
+        // so no shipped frame records it.
+        if dst.mapped.is_some() {
+            // SAFETY: recording is open (the copy above was just recorded on it) and outside any
+            // render scope (`vkCmdCopyBuffer` is illegal inside one); `dst.buffer` is the live
+            // buffer that copy wrote, created on this device.
+            unsafe { crate::host_read::record_host_read_barrier(fns, self.command_buffer, &[dst.buffer]) };
+        }
     }
 
     fn image_barrier(&mut self, barrier: &ImageBarrierDesc<Vulkan>) {
@@ -1079,9 +1089,26 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
                     inline_regions.as_ptr(),
                 );
             }
+            // OBS (H0 Scope 7): the mapped-destination host-read barrier (see `copy_buffer`).
+            if dst.mapped.is_some() {
+                // SAFETY: recording is open (the copy above was just recorded on it) and outside
+                // any render scope; `dst.buffer` is the live buffer that copy wrote.
+                unsafe { crate::host_read::record_host_read_barrier(fns, self.command_buffer, &[dst.buffer]) };
+            }
             return;
         }
         self.copy_image_to_buffer_many(src.image, src_layout.as_i32(), dst.buffer, regions);
+        // OBS (H0 Scope 7): the `_many` branch's copy needs the same barrier; `_many` takes the
+        // bare `VkBuffer`, so the mapped check lives here, after it returns.
+        if dst.mapped.is_some() {
+            // SAFETY: `self.fns` points into the context's boxed fn-table (alive per the type
+            // contract); recording is open (`_many` just recorded its copy on it) and outside any
+            // render scope; `dst.buffer` is the live buffer that copy wrote.
+            unsafe {
+                let fns = &*self.fns;
+                crate::host_read::record_host_read_barrier(fns, self.command_buffer, &[dst.buffer]);
+            }
+        }
     }
 
     fn copy_buffer_to_image(

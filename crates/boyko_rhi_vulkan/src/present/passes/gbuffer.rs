@@ -3329,6 +3329,9 @@ impl Renderer<'_> {
                 // size per this fn's contract); `&region` outlives the call. This copies
                 // the SWAPCHAIN image (the on-screen golden) — NOT the depth (the depth
                 // copy is the deletion target this path proves absent).
+                // The host-read barrier recorded after the copy names the same live destination on
+                // the same open command buffer, outside any render scope
+                // (`record_host_read_barrier`'s contract).
                 unsafe {
                     ts.cmd();
                     (self.fns.cmd_copy_image_to_buffer)(
@@ -3339,6 +3342,9 @@ impl Renderer<'_> {
                         1,
                         &region,
                     );
+                    // OBS (H0 Scope 7): make the copy's writes VISIBLE to the host read that
+                    // follows the fence wait (a fence only makes them available).
+                    crate::host_read::record_host_read_barrier(self.fns, cmd, &[staging.buffer]);
                 }
 
                 let to_present = VkImageMemoryBarrier {

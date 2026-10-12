@@ -1238,6 +1238,9 @@ impl Renderer<'_> {
                 // barrier above; one full-image tightly-packed color region copies into the live
                 // host-visible `staging.buffer` (≥ the image's byte size per this fn's contract);
                 // `&region` outlives the call.
+                // The host-read barrier recorded after the copy names the same live destination on
+                // the same open command buffer, outside any render scope
+                // (`record_host_read_barrier`'s contract).
                 unsafe {
                     (self.fns.cmd_copy_image_to_buffer)(
                         cmd,
@@ -1247,6 +1250,9 @@ impl Renderer<'_> {
                         1,
                         &region,
                     );
+                    // OBS (H0 Scope 7): make the copy's writes VISIBLE to the host read that
+                    // follows the fence wait (a fence only makes them available).
+                    crate::host_read::record_host_read_barrier(self.fns, cmd, &[staging.buffer]);
                 }
 
                 let to_present = VkImageMemoryBarrier {
