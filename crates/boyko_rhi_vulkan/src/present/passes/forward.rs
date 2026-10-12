@@ -948,10 +948,21 @@ impl Renderer<'_> {
             // reverse-Z decode `A`/`B` (`scene.sdf_forward_view_z_a`/`_b`,
             // `boyko_render::view::forward_view_z_coeffs`); the mesh-less variant never reads
             // them (`SdfForwardMarchPush::sdf_only`'s doc).
+            // Render wave RD1 (cut F6): `writes_viewt` — the SAME predicate `declare_forward_graph`
+            // declared this pass's `viewt` write under — selects the `VIEWT` gViewT-producing
+            // sibling (same layout, same push, plus the binding-13 store), `record_vb`'s selection
+            // verbatim. A default boot keeps the no-VIEWT pipelines.
+            let writes_viewt = scene.path_sdf_forward_writes_viewt();
             let (pipeline, push) = if scene.resolved_render_path.mesh_leg {
-                let p = scene.sdf_forward_march_pipeline.expect(
-                    "invariant: scene.path_has_sdf_forward() requires scene.sdf_forward_march_pipeline",
-                );
+                let p = if writes_viewt {
+                    scene.sdf_forward_march_viewt_pipeline.expect(
+                        "invariant: path_sdf_forward_writes_viewt() requires scene.sdf_forward_march_viewt_pipeline",
+                    )
+                } else {
+                    scene.sdf_forward_march_pipeline.expect(
+                        "invariant: scene.path_has_sdf_forward() requires scene.sdf_forward_march_pipeline",
+                    )
+                };
                 let push = crate::compute::SdfForwardMarchPush::has_mesh(
                     present_extent.width,
                     present_extent.height,
@@ -961,9 +972,15 @@ impl Renderer<'_> {
                 );
                 (p, push)
             } else {
-                let p = scene.sdf_forward_march_sdfonly_pipeline.expect(
-                    "invariant: scene.path_has_sdf_forward() requires scene.sdf_forward_march_sdfonly_pipeline",
-                );
+                let p = if writes_viewt {
+                    scene.sdf_forward_march_sdfonly_viewt_pipeline.expect(
+                        "invariant: path_sdf_forward_writes_viewt() requires scene.sdf_forward_march_sdfonly_viewt_pipeline",
+                    )
+                } else {
+                    scene.sdf_forward_march_sdfonly_pipeline.expect(
+                        "invariant: scene.path_has_sdf_forward() requires scene.sdf_forward_march_sdfonly_pipeline",
+                    )
+                };
                 let push = crate::compute::SdfForwardMarchPush::sdf_only(
                     present_extent.width,
                     present_extent.height,
@@ -976,8 +993,10 @@ impl Renderer<'_> {
                 .as_ref()
                 .expect("invariant: scene.path_has_sdf_forward() ⇒ targets.sdf_forward_set is built");
             let push_bytes = push.as_bytes();
-            // SAFETY: recording is open; `pipeline` (the `HAS_MESH` or mesh-less compute variant,
-            // selected by `mesh_leg`) + its 2-set layout (Set 0 = `sdf_forward_set[fi]`, Set 1 =
+            // SAFETY: recording is open; `pipeline` (one of the four `{HAS_MESH} x {VIEWT}` compute
+            // variants, selected by `mesh_leg` x `writes_viewt`; a VIEWT variant's binding-13
+            // `viewt` write was declared by the graph and transitioned to GENERAL by the barrier
+            // above) + its 2-set layout (Set 0 = `sdf_forward_set[fi]`, Set 1 =
             // `forward.set1[fi]` — the Forward-family shadow set REUSED VERBATIM by BOTH pipeline
             // variants, `GBufferScene::sdf_forward_march_layout`'s doc) belong to this device
             // (caller contract); `sdf_forward_set[fi]`/`forward.set1[fi]` are live descriptor sets
@@ -1016,6 +1035,48 @@ impl Renderer<'_> {
                     push_bytes.as_ptr().cast(),
                 );
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            }
+        }
+
+        // === Render wave RD1 (defect R0b): the SDF depth merge, IMMEDIATELY before the particle
+        // draw — the declarator's own position. It writes the composite `t`'s reverse-Z encode
+        // into `forward_depth` so SDF surfaces occlude every depth-tested transparent after it. ===
+        let merge_shape = scene.sdf_depth_merge();
+        let merge_pass = plan.sdf_depth_merge;
+        debug_assert_eq!(
+            merge_pass.is_some(),
+            merge_shape != super::super::transparent_depth::SdfDepthMerge::Absent,
+            "invariant: declare/record parity — the merge is recorded iff it was declared"
+        );
+        if let (Some(act), Some(pass)) = (scene.sdf_depth_merge.as_ref(), merge_pass) {
+            let set = targets
+                .sdf_depth_merge_set
+                .as_ref()
+                .expect("invariant: a boot with the merge's GPU objects builds its set ring");
+            let merge_targets = super::sdf_depth_merge::MergeTargets {
+                depth_view: forward.depth[fi].view,
+                set: &set[fi],
+                clear_depth: 0.0,
+                extent: present_extent,
+            };
+            // SAFETY: recording is open and outside any dynamic-rendering scope (the merge opens and
+            // closes its own); `depth_view` is this frame slot's live `forward_depth` — the image the
+            // declarator named in the merge pass, left at DEPTH_ATTACHMENT_OPTIMAL by the derived
+            // barrier the callback records; `set[fi]` binds this slot's `gViewT` and camera ring,
+            // written against `act.layout`, which `act.pipeline` was built on. The zone arm is DISARMED: this path resets no query pool and seals no slot (the particle draw's own reason).
+            unsafe {
+                self.record_sdf_depth_merge(
+                    cmd,
+                    act,
+                    pass,
+                    merge_shape,
+                    scene.sdf_depth_merge_clears(),
+                    merge_targets,
+                    super::sdf_depth_merge::MergeZoneArm::disarmed(),
+                    |p| {
+                        self.record_forward_pass(p, cmd, targets, forward, scene, fi);
+                    },
+                );
             }
         }
 

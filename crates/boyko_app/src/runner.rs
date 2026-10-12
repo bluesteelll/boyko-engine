@@ -2560,9 +2560,14 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // WITHOUT re-enumerating paths. Don't-care (`0.0, 0.0`) off it: the `sdf_only` variant
             // ignores them, and a Deferred / camera-less frame never builds this pass at all
             // (`SdfForwardMarchPush::sdf_only`'s doc).
+            //
+            // Render wave RD1 (defect R0b): the `mesh_leg` conjunct is DROPPED. The SDF depth
+            // merge re-encodes the marcher's `t` through the SAME `(A, B)` on every SDF-carrying
+            // reverse-Z leg, mesh-less ones included (VB × Sdf is where it is `vb_depth`'s first
+            // writer). The marcher is unaffected: its mesh-less `sdf_only` push carries no A/B, so
+            // the pair still reaches a march only through the `HAS_MESH` push, as before.
             let (sdf_forward_view_z_a, sdf_forward_view_z_b) = if view.fov_y > 0.0
                 && host.resolved_render_path.sdf_forward_marched
-                && host.resolved_render_path.mesh_leg
             {
                 boyko_render::view::forward_view_z_coeffs(view.near, view.far)
             } else {
@@ -2727,6 +2732,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             let occ_force = world.try_resource::<OcclusionForce>().copied().unwrap_or_default();
             frame_occ_mode = occ_config.map_or(boyko_render::OcclusionMode::Off, |c| c.mode);
             frame_occ_force = occ_force;
+            // Render wave RD1 (defect R0b): the test-only `disarm_sdf_merge` key, read the SAME
+            // `try_resource` way — a READ of a Resource only a fixture inserts (absent on every
+            // shipping run, so `false`), threaded into the scene as a plain value (G-LOOP: no
+            // `world_mut()`).
+            let disarm_sdf_merge = world
+                .try_resource::<crate::test_force::TestForce>()
+                .is_some_and(|f| f.contains(crate::test_force::TestForceKey::DisarmSdfMerge));
             let hzb_plan = crate::hzb_plan::hzb_plan_for(
                 world.try_resource::<boyko_render::HzbConfig>().copied(),
                 occ_config,
@@ -2928,6 +2940,8 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // on a disarmed run, which is what makes the whole subsystem structurally absent
                 // from the declaration, the barrier stream and the command stream alike.
                 particle_inputs,
+                // Render wave RD1: the test-only merge disarm (`false` in every production run).
+                disarm_sdf_merge,
                 ctx,
             );
 

@@ -59,6 +59,14 @@ name = "emit_particles"
 path = "src/bin/emit_particles.rs"
 required-features = ["emit"]
 
+# Render wave RD1 (defect R0b): the SDF depth-merge fragment shader emitter -- writes ONE
+# committed file, `boyko_rhi_vulkan/shaders/sdf_depth_merge.fs.hlsl` (no `-D` axis; one `.spv`,
+# byte-gated by `boyko_rhi_vulkan/tests/sdf_depth_merge_edsl_sync.rs`).
+[[bin]]
+name = "emit_depth_merge"
+path = "src/bin/emit_depth_merge.rs"
+required-features = ["emit"]
+
 # The UI-rect shader emitter (`docs/UI-PLAN-SPRITES-S0-S2.md` rung S1, architecture D30) — writes
 # BOTH committed files: `boyko_render/shaders/ui_rect.{vs,fs}.hlsl` (no `-D` axis; one `.spv`
 # each, byte-gated by `boyko_render/tests/ui_rect_spv_sync.rs`).

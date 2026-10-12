@@ -62,6 +62,7 @@ pub mod brick;
 pub mod cf;
 pub mod cubic_hit;
 pub mod decl;
+pub mod depth;
 pub mod field;
 pub mod half;
 pub mod levels;
@@ -101,6 +102,11 @@ pub use cubic_hit::{
     M2_APRON, M2_ATLAS_BIAS, M2_MAX_CELLS as M2_CUBIC_MAX_CELLS, m2_brick_cubic_hit_body,
 };
 pub use decl::{b1_decl_exhausted_body, b1_decl_hit_body};
+pub use depth::{
+    SDF_DEPTH_MERGE_BIAS, SDF_DEPTH_MERGE_BIAS_DENOM, SDF_DEPTH_MERGE_MODE_LINEAR,
+    SDF_DEPTH_MERGE_MODE_REVERSE_Z, sdf_t_to_depth_linear,
+    sdf_t_to_depth_linear_body, sdf_t_to_depth_reverse_z, sdf_t_to_depth_reverse_z_body,
+};
 pub use field::{
     EditView, MAX_SDF_EDITS, SDF_FAR, combine, edit_distance, kind, op, sd_box, sd_sphere,
     sdf_field_body, smax, smin,

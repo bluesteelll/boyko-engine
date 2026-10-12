@@ -2951,6 +2951,53 @@ impl Renderer<'_> {
         // reset by this witness's own `open`; `fi` is this present's in-flight slot.
         unsafe { ts.end(self.fns, cmd, ZONE_GBUF_DEFERRED_RESOLVE) };
 
+        // === Render wave RD1 (defect R0b): the SDF depth merge, IMMEDIATELY before the particle
+        // draw — the declarator's own position (after the resolve, which reads `depth` at COMPUTE
+        // under hwrt). It writes the composite `t`'s custom-linear encode into `depth` so SDF
+        // surfaces occlude every depth-tested transparent after it. ===
+        let merge_shape = scene.sdf_depth_merge();
+        let merge_pass = self
+            .gbuffer_pass_plan
+            .as_ref()
+            .expect("invariant: declare_frame_graph ran before record_gbuffer")
+            .sdf_depth_merge;
+        debug_assert_eq!(
+            merge_pass.is_some(),
+            merge_shape != super::super::transparent_depth::SdfDepthMerge::Absent,
+            "invariant: declare/record parity — the merge is recorded iff it was declared"
+        );
+        if let (Some(act), Some(pass)) = (scene.sdf_depth_merge.as_ref(), merge_pass) {
+            let set = targets
+                .sdf_depth_merge_set
+                .as_ref()
+                .expect("invariant: a boot with the merge's GPU objects builds its set ring");
+            let merge_targets = super::sdf_depth_merge::MergeTargets {
+                depth_view: targets.depth[fi].view,
+                set: &set[fi],
+                clear_depth: 1.0,
+                extent: present_extent,
+            };
+            // SAFETY: recording is open and outside any dynamic-rendering scope (the merge opens and
+            // closes its own); `depth_view` is this frame slot's live `depth` — the image the
+            // declarator named in the merge pass, left at DEPTH_ATTACHMENT_OPTIMAL by the derived
+            // barrier the callback records; `set[fi]` binds this slot's `gViewT` and camera ring,
+            // written against `act.layout`, which `act.pipeline` was built on. The zone arm is ARMED, like the particle draw's: this call is ahead of `ts.finish()`.
+            unsafe {
+                self.record_sdf_depth_merge(
+                    cmd,
+                    act,
+                    pass,
+                    merge_shape,
+                    scene.sdf_depth_merge_clears(),
+                    merge_targets,
+                    super::sdf_depth_merge::MergeZoneArm::from_scene(scene),
+                    |p| {
+                        self.record_graph_pass(p, cmd, targets, scene, fi);
+                    },
+                );
+            }
+        }
+
         // Anti-aliasing Stage 4 (TAA W5): the temporal-resolve pass — recorded HERE, BEFORE
         // `present_sample`'s `lit` GENERAL→SHADER_READ_ONLY_OPTIMAL transition below. TAA is a
         // COMPUTE dispatch that reads `lit` at `GENERAL`, straight out of the resolve's write

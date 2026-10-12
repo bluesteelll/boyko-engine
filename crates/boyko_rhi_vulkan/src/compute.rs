@@ -1354,6 +1354,16 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// Render wave RD1 (defect R0b): the SDF depth-merge fragment SPIR-V
+    /// (`shaders/sdf_depth_merge.fs.hlsl`, GENERATED whole by `boyko_shaderdsl`'s
+    /// `emit_depth_merge`). Paired with [`fullscreen_sample_vs_spirv`]: a full-screen `SV_Depth`
+    /// pass that writes `encode(gViewT · (1 + 2⁻¹⁶))` so SDF surfaces occlude depth-tested
+    /// transparents. Built only on a boot that arms a transparent consumer class.
+    SDF_DEPTH_MERGE_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_depth_merge.fs.spv")
+}
+
+embed_spirv! {
     /// AA campaign Stage 3 — SSAA 2× downsample fragment SPIR-V
     /// (`shaders/ssaa_downsample.fs.hlsl`): a linear-light 2×2 box filter that resolves the
     /// 2× LIT ring into the native-size `aa_out`. Paired with [`fullscreen_sample_vs_spirv`]
@@ -2419,6 +2429,14 @@ pub fn fullscreen_sample_fs_spirv() -> &'static [u32] {
 #[inline]
 pub fn fxaa_fs_spirv() -> &'static [u32] {
     FXAA_FS_SPV.as_words()
+}
+
+/// Render wave RD1: the committed SDF depth-merge fragment SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Paired with
+/// [`fullscreen_sample_vs_spirv`]; pushes [`SdfDepthMergePush`] (FRAGMENT only).
+#[inline]
+pub fn sdf_depth_merge_fs_spirv() -> &'static [u32] {
+    SDF_DEPTH_MERGE_FS_SPV.as_words()
 }
 
 /// The committed SSAA 2× downsample fragment SPIR-V as a `u32` word stream, ready for
@@ -4069,6 +4087,98 @@ impl ViewtFromDepthPush {
         // offset + the 12-byte total pinned by the const-asserts above, no uninit padding), so
         // its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern. The
         // `&self` borrow keeps the struct alive for the slice's lifetime; read-only.
+        unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
+        }
+    }
+}
+
+/// Render wave RD1: the SDF depth merge's `mode` word for the Deferred custom-linear encode —
+/// the generator input `boyko_shaderdsl::depth::SDF_DEPTH_MERGE_MODE_LINEAR`, pinned to it by
+/// `tests/sdf_depth_merge_edsl_sync.rs`.
+pub const SDF_DEPTH_MERGE_MODE_LINEAR: u32 = 0;
+/// Render wave RD1: the SDF depth merge's `mode` word for the reverse-Z encode
+/// (`boyko_shaderdsl::depth::SDF_DEPTH_MERGE_MODE_REVERSE_Z`).
+pub const SDF_DEPTH_MERGE_MODE_REVERSE_Z: u32 = 1;
+
+/// Render wave RD1: the per-frame encode the SDF depth merge applies — the half of
+/// [`SdfDepthMergePush`] the scene knows (the extent is the recorder's).
+///
+/// `Linear` carries the Deferred composite's decode normalizer
+/// (`boyko_render::gbuffer_depth::mesh_view_t_norm(camera_mode)`: 64 perspective, 10 ortho);
+/// `ReverseZ` carries `boyko_render::view::forward_view_z_coeffs(near, far)` — the SAME pair the
+/// `sdf_forward_march` decode uses, never re-derived.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SdfDepthEncode {
+    /// Deferred: `depth = t·(1+β) / norm`.
+    Linear {
+        /// The marcher's mesh-depth normalizer.
+        norm: f32,
+    },
+    /// Forward / ForwardPlus / VisibilityBuffer: `depth = A + B / (t·(1+β)·cos_fwd)`.
+    ReverseZ {
+        /// `forward_view_z_coeffs(near, far).0`.
+        a: f32,
+        /// `forward_view_z_coeffs(near, far).1`.
+        b: f32,
+    },
+}
+
+/// Render wave RD1: the SDF depth merge's FRAGMENT push constants (mirrors
+/// `sdf_depth_merge.fs.hlsl`'s `SdfDepthMergePush`). `#[repr(C)]`, 20 B, offsets pinned below:
+///
+///   offset  0 : u32 mode   [`SDF_DEPTH_MERGE_MODE_LINEAR`] | [`SDF_DEPTH_MERGE_MODE_REVERSE_Z`]
+///   offset  4 : f32 k0     linear: the normalizer; reverse-Z: `A`
+///   offset  8 : f32 k1     reverse-Z: `B` (0 on the linear arm, unread)
+///   offset 12 : u32 img_w  the extent the marcher's `generate_ray` used
+///   offset 16 : u32 img_h
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SdfDepthMergePush {
+    /// The encode arm.
+    pub mode: u32,
+    /// Linear: the normalizer; reverse-Z: `A`.
+    pub k0: f32,
+    /// Reverse-Z: `B`.
+    pub k1: f32,
+    /// The ray-generation extent (the marcher's).
+    pub img_w: u32,
+    /// The ray-generation extent (the marcher's).
+    pub img_h: u32,
+}
+
+/// Byte size of [`SdfDepthMergePush`] — the merge pipeline's FRAGMENT push range (20 B).
+pub const SDF_DEPTH_MERGE_PUSH_BYTES: u32 = core::mem::size_of::<SdfDepthMergePush>() as u32;
+
+const _: () = assert!(core::mem::offset_of!(SdfDepthMergePush, mode) == 0);
+const _: () = assert!(core::mem::offset_of!(SdfDepthMergePush, k0) == 4);
+const _: () = assert!(core::mem::offset_of!(SdfDepthMergePush, k1) == 8);
+const _: () = assert!(core::mem::offset_of!(SdfDepthMergePush, img_w) == 12);
+const _: () = assert!(core::mem::offset_of!(SdfDepthMergePush, img_h) == 16);
+const _: () = assert!(SDF_DEPTH_MERGE_PUSH_BYTES == 20, "SdfDepthMergePush must be 20 bytes");
+
+impl SdfDepthMergePush {
+    /// The push for `encode` at the ray-generation extent `(img_w, img_h)`.
+    #[inline]
+    #[must_use]
+    pub const fn new(encode: SdfDepthEncode, img_w: u32, img_h: u32) -> Self {
+        match encode {
+            SdfDepthEncode::Linear { norm } => {
+                Self { mode: SDF_DEPTH_MERGE_MODE_LINEAR, k0: norm, k1: 0.0, img_w, img_h }
+            }
+            SdfDepthEncode::ReverseZ { a, b } => {
+                Self { mode: SDF_DEPTH_MERGE_MODE_REVERSE_Z, k0: a, k1: b, img_w, img_h }
+            }
+        }
+    }
+
+    /// Re-views the push constants as their raw 20-byte slice for `push_constants`.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` fields (all `Copy`, every offset
+        // and the 20-byte total pinned by the const-asserts above, no padding), so its `size_of`
+        // bytes are a fully-initialized POD bit pattern. The `&self` borrow keeps the struct alive
+        // for the slice's lifetime; read-only.
         unsafe {
             slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
         }
