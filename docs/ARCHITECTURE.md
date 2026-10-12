@@ -191,6 +191,16 @@ boyko_ui          ──→ boyko_ecs, boyko_macros,
                       boyko_input, boyko_scene, boyko_math, boyko_fontbake
 ```
 
+**Two data paths that cross all three render crates** (the conditional tails of the frame
+graph): GPU particles — ECS side in `boyko_render` ([particle.rs](../crates/boyko_render/src/particle.rs)
+and its siblings), GPU bundle in `boyko_app` ([gpu_scene/particle.rs](../crates/boyko_app/src/gpu_scene/particle.rs)),
+passes in `boyko_rhi_vulkan` ([present/passes/particles.rs](../crates/boyko_rhi_vulkan/src/present/passes/particles.rs));
+and Tier-1 material edits — `Assets<Material>`'s per-row edited set (`boyko_ecs`) →
+`stage_material_edits` ([material_upload.rs](../crates/boyko_render/src/material_upload.rs)) →
+the device-local `MaterialTable` ([material_table.rs](../crates/boyko_render/src/material_table.rs)) through the
+`material_upload` copy pass. Both tails are declared only on the frames that arm them, by every
+declarator in [present/graph_bridge.rs](../crates/boyko_rhi_vulkan/src/present/graph_bridge.rs); the material tail is last.
+
 External runtime deps of `boyko_ecs`: `fixedbitset` (scheduler conflict/condition
 bitsets), `crossbeam-queue` / `crossbeam-utils`, `static_assertions` (compile-time
 `Send`/`Unpin` pins), optional `mimalloc` (bench-only), `libc` (Unix

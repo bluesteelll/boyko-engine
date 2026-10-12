@@ -5,6 +5,11 @@
 > review log: every remark, what was done, and where. It targets trunk **`6394bc5e`** (branch
 > `integ/unified`), read through `D:/wt/docs`.
 >
+> **Amended 2026-10-12 by the render-wave plan (AD-1, AD-3, AD-4, AD-5, AD-6; owner answers of
+> 2026-10-11):** no `HDR_FMT` axis (§9.2, AD-1); the rung order is PXe → PX1a → PX1b → PXt, PX1
+> split and PX2 deleted (§10, AD-3/AD-4); AgX is decided and its licence accepted (§5.6, AD-5); the
+> pre-exposure hand-off is V2, not V9 (§5.3, AD-6); §13's questions are decided.
+>
 > **The survey it rests on** is [`POSTFX-AA-RESEARCH.md`](POSTFX-AA-RESEARCH.md). That document's
 > §0 lists what the tree holds today. It numbers the techniques **T1–T31** and the pitfalls
 > **P1–P29**, and this document cites both by number.
@@ -506,8 +511,9 @@ Two fixtures check the second guarantee. Each is red without the rescale:
   constant-pre-exposure run within 1/255.
 
 **One scalar, several campaigns.** The volumetrics design applies the same `LightHeader.exposure`
-scalar at fog injection as its pre-exposure (its V9). Whichever rung lands first (PX1/PX3 or V9)
-defines the writer: `resolve_post_policy` through `ResolvedPost`. The others consume it. They must
+scalar at fog injection as its pre-exposure (its V2 — amended 2026-10-12, AD-6: V2 takes it from
+`ResolvedPost`, not V9). `ResolvedPost` lands at PX1a and is the one writer:
+`resolve_post_policy` through `ResolvedPost`. The others consume it. They must
 not define a second one, and they take on the contract above:
 - **E2** for the volumetric fog history (V3);
 - **E2** for SSR's `lit_prev` (R5) and the reflection denoiser (R7);
@@ -661,7 +667,9 @@ It becomes a candidate only after PX3 ships and a scene shows the need.
   (`AgX_Default_Contrast.spi1d`), not a formula, and no licence statement was found in that
   repository. So AgX ships at PX5 **only after its licence is confirmed** (the owner's check, V2).
   Otherwise the curve is authored in-house as a parametric sigmoid on the same log2 range, and it
-  is named "AgX-like", not AgX.
+  is named "AgX-like", not AgX. **Decided 2026-10-11 (amended 2026-10-12, AD-5):** the licence is
+  accepted — the constants come from three.js (MIT) and Filament (Apache-2.0), attributed in
+  `NOTICE` — and AgX becomes the default curve at rung PXt; the "AgX-like" substitute is dropped.
 - **Tony McMapface** is dual MIT / Apache-2.0 and ships as a baked 48³ LUT; its generator is
   unpublished (T15). An offline converter in a tool crate (never the runtime) turns it into the
   engine's LUT asset: a small header plus RGBA16F texels, hash-gated like the reflections design's
@@ -1213,7 +1221,7 @@ Checked against `boyko_rhi_vulkan` and `boyko_rhi` at `6394bc5e` (RESEARCH §0.4
 | G4 | Framegraph appends: `display`, `lit_native`, `post_chain` (mipped), `post_lut`, `dof_*`, `post_hdr_*`, `mb_tiles`, `easu_out`, the exposure buffers. `aa_out` moves into the graph at PX6. | PX1–PX10, PX8s | M. The Deferred fixed ResId block (`FRAMEGRAPH_IMAGE_COUNT`, `graph_bridge.rs:765`/`:770`) and the private Forward and VB spaces. |
 | G5 | Texture mip bias as a shader-side uniform | PX7, PX8 | S. No RHI change; one float in a per-frame uniform the sampling shaders already bind, chosen at implementation. TAA-PLAN's constraints table recorded the camera UBO tail as occupied; this pass did not re-check it. |
 | G6 | `VK_EXT_swapchain_colorspace` (instance), `VK_EXT_hdr_metadata` (device), `QueryDisplayConfig` FFI, `IDXGIOutput6` COM FFI | PX13 | M |
-| **G7** | **`RhiCommandEncoder::dispatch_indirect` is a silent no-op** (`crates/boyko_rhi/src/encoder.rs:408`, a `#[cold]` default body). The Vulkan backend does not override it; particles call the loaded `fns.cmd_dispatch_indirect` directly. | PX9 tile classification; every §2.3 early-out | S. The sibling reflections update books the override as **RK-16** (its decision U7). PX9 depends on it, or lands it. |
+| **G7** (= **RK-16** in the render-wave plan, which uses that name everywhere — amended 2026-10-12; ENGINE-GAP-AUDIT's G7 is an unrelated particle row) | **`RhiCommandEncoder::dispatch_indirect` is a silent no-op** (`crates/boyko_rhi/src/encoder.rs:408`, a `#[cold]` default body). The Vulkan backend does not override it; particles call the loaded `fns.cmd_dispatch_indirect` directly. | PX9 tile classification; every §2.3 early-out | S. The sibling reflections update books the override as **RK-16** (its decision U7). PX9 depends on it, or lands it. |
 | G8 | The render-extent sub-rectangle contract (§5.13): the extent in the camera UBO, UV clamps on render-extent reads | PX8a | M. Not an RHI change; it touches every producer's extent source once. |
 | — | **Available, not a gap:** specialization constants. `rhi_impl/device.rs:821` builds a `VkSpecializationInfo` at pipeline creation, and the `spec_constant_smoke` feature smoke-tests it. O6's option of stripping `post_final`'s unused arms per `PostArm` is therefore open (§9.2). | PX1 measurement | — |
 | — | **Not needed:** MSAA sample counts, async compute, timeline semaphores, `synchronization2`, `DrawIndirectCount`, subgroup ARITHMETIC, `shaderFloat16`, `shaderStorageImageWriteWithoutFormat` | — | The histogram uses groupshared atomics; the percentile scan uses an LDS prefix; TAAU runs FP32. Async compute would hide post work as UE hides ~0.5 ms of TSR (T23). It stays with OPT-PLAN's P13. |
@@ -1286,8 +1294,8 @@ because there the format is pipeline state, not a shader qualifier.
 | Shader | `-D` axis | `.spv` | Why it cannot be one module |
 |---|---|---|---|
 | `post_final.comp` | `OUTPUT_PQ` (PX13 only) | 1, then 2 | the output format qualifier: `rgba8` or `rgb10_a2` |
-| `post_down.comp`, `bloom_down.comp`, `bloom_up.comp` | `HDR_FMT` ∈ {R11G11B10F, RGBA16F} | 2 each | RK-14 decides the storage format of `post_chain` |
-| `dof_composite.comp`, `mb_gather.comp` | `HDR_FMT` | 2 each | they write `post_hdr_*` in the `lit` format |
+| `post_down.comp`, `bloom_down.comp`, `bloom_up.comp` | — (the former `HDR_FMT` axis is removed by AD-1, amended 2026-10-12) | 1 each | `lit`'s one format per build is REQUIRED at boot, so the storage qualifier is spelled once |
+| `dof_composite.comp`, `mb_gather.comp` | — (`HDR_FMT` removed, AD-1) | 1 each | they write `post_hdr_*` in the `lit` format |
 | `ssaa_downsample.fs` (R4a's HDR body) | — | 1 | a fragment pass writing `lit_native` as a colour attachment: two pipelines (per RK-14) from one module. It is not a P21 storage writer. |
 | `easu.comp` | — | 1 | writes RGBA8 `easu_out` |
 | `dof_prefilter`, `dof_tiles`, `dof_gather`, `mb_tilemax`, `mb_neighbormax`, `exposure_histogram`, `exposure_adapt`, `post_lut_bake` | — | 1 each | fixed intermediate formats (RGBA16F, RG16F, buffers); not manifest rows |
@@ -1341,6 +1349,12 @@ is the PX0-calibrated prediction × 1.2.
 
 **Order.** PX0 → PX1 → PX2 → PX3 → PX4 → PX5 → PX6 → PX7 → PX8a → PX8 → PX8s → PX9 → PX10 → PX11 →
 PX12. PX13–PX17 and PU follow owner scope or measurement. The order is chosen for these reasons:
+
+> **Amended 2026-10-12 by the render-wave plan (AD-3, AD-4, AD-5):** the post eDSL rung **PXe**
+> lands before PX1, so `post_final` is generator-owned from its first commit and **PX2 is
+> deleted**; **PX1 is split** into PX1a (`lit` to HDR, the shipped CAS reading `display`) and PX1b
+> (FSR1 RCAS fused into `post_final`); **PXt** (AgX the default curve) follows PX1b. The wave
+> order is therefore PX0 → PXe → PX1a → PX1b → PXt → PX3 → …, as the plan's queue states.
 
 - **Measurement first**, so every later cost claim is checkable (P17), and so the texel-rate
   question is settled before any gate depends on it.
@@ -1447,6 +1461,18 @@ PX12. PX13–PX17 and PU follow owner scope or measurement. The order is chosen 
    that `Exposure::Physical` and physical presets become meaningful? It re-tunes and re-blesses
    every scene. The volumetrics design already assumes a physical sky, so the decision is shared.
    Recommended: yes, as one cross-campaign rung, after PX3.
+
+**Decided by the owner, 2026-10-11 (render-wave plan index §9 items 1–4; amended 2026-10-12):**
+- **Q1:** now — `lit` moves to HDR at PX1a (AD-1, AD-4).
+- **Q2:** AgX, the three.js / Filament formulation, licence accepted; the default from PXt (AD-5).
+- **Q3:** every post effect OFF on a new camera, `compensation_ev = 0`, the zero gate preserved;
+  dither on from PX6; a named `CinematicPost` preset bundle ships at PX6.
+- **Q4:** no vendor ML upscalers in this wave.
+- **Q5, Q6:** no HDR display output and no post volumes in this wave.
+- **Q7:** DOF and camera motion blur are tail rows, eligible after PX8; no lens flare.
+- **Q8:** ≤ 1.5 ms for the default look and ≤ 3.0 ms with `CinematicPost`, at 1440p on the RTX 3060
+  Laptop — a standing gate of every rung that adds or changes a post zone.
+- **Q9:** no physical units in this wave.
 
 ---
 

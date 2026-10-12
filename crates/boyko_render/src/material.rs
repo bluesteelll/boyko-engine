@@ -110,11 +110,13 @@ const _: () = assert!(MATERIAL_GPU_WORDS == 12, "MATERIAL_GPU_WORDS must equal t
 /// holds. The shader-side READ of this bit is a later rung (T6).
 ///
 /// AUTHORITATIVE derivation happens at the host→GPU upload boundary
-/// ([`MaterialTable::seed_rows`](crate::material_table::MaterialTable), grooming item
-/// B): every copy of a row's bytes into the device SSBO re-derives this bit from
-/// `textures.any()` — ORed in when a slot is bound, ANDed out otherwise — regardless of
-/// whatever value `gpu.mrr[3]` already carries, so direct field mutation of `gpu` or
-/// `textures` after construction can never desync the two on the device.
+/// (`material_table::derive_gpu_row`, the one function every packed row passes — called
+/// by `MaterialTable::seed_rows` at boot and grow and by `material_upload`'s staging of
+/// edited rows; grooming item B): every copy of a row's bytes into the device SSBO
+/// re-derives this bit from `textures.any()` — ORed in when a slot is bound, ANDed out
+/// otherwise — regardless of whatever value `gpu.mrr[3]` already carries, so direct field
+/// mutation of `gpu` or `textures` after construction can never desync the two on the
+/// device.
 /// [`Material::with_textures`] also sets it CPU-side, as a convenience mirror for a
 /// reader that inspects `gpu.mrr[3]` before the next upload — not the sole source of
 /// truth.
@@ -185,8 +187,9 @@ impl MaterialTextures {
 ///
 /// `gpu.mrr[3]`'s [`MATERIAL_FLAG_TEXTURED`] bit is RE-DERIVED from
 /// `textures.`[`any`](MaterialTextures::any)`()` at every host→GPU copy
-/// ([`MaterialTable::seed_rows`](crate::material_table::MaterialTable), the sole site
-/// that packs a row's bytes into the device SSBO) — set when a slot is bound, cleared
+/// (`material_table::derive_gpu_row`, the one function that packs a row's bytes for the
+/// device SSBO — `MaterialTable::seed_rows` at boot and grow, `material_upload`'s staging
+/// of edited rows) — set when a slot is bound, cleared
 /// otherwise — so direct field mutation of either `gpu` or `textures` after
 /// construction (e.g. `mat.textures.albedo = slot`) can never desync the two on the
 /// device; only the value staged for the next upload is authoritative.

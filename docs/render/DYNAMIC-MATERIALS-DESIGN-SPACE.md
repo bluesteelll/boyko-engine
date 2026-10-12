@@ -4,6 +4,12 @@
 > critique (CHANGES_REQUESTED: 1 critical, 10 important, 9 optional). Every remark is resolved in
 > the text; §11 (*Review log*) lists each one with its verdict and where it landed.
 >
+> **Amended 2026-10-12 by the render-wave plan (RD4, owner defect item 4):** DM1 has landed —
+> `40e7577d` (Tier 1 made real: a `material_upload` copy pass in all three graphs, fed by
+> `stage_material_edits`), `062eafcb` (D-2), `7f044ac7` (the later-found D-3), `97ee830f` (the
+> table device-local), merged as `d95ee579`. §1.3's first row, §10.1 and §10.2 are corrected in
+> place.
+>
 > **Survey.** The survey this design rests on is
 > [`DYNAMIC-MATERIALS-RESEARCH.md`](DYNAMIC-MATERIALS-RESEARCH.md). Tree facts are cited from its §1,
 > re-opened at trunk **`6394bc5e`**, and follow its anchor rule: a `path:line` appears only where the
@@ -105,7 +111,7 @@ site, F9), or a GPU time source.
 
 | Earlier statement | Now | Why |
 |---|---|---|
-| Tier 1 "works today" | Tier 1 does **not** work. **DM1** makes it work and fixes two live defects on the same path. | `flush_if_dirty` has no caller and nothing copies its staging ring (RESEARCH §1.1–§1.2). The defects are RESEARCH §1.11. |
+| Tier 1 "works today" | Tier 1 did **not** work at pass 2. **DM1** made it work and fixed two live defects on the same path — **landed (amended 2026-10-12):** `40e7577d`, `062eafcb`, merged as `d95ee579`. | At pass 2, `flush_if_dirty` had no caller and nothing copied its staging ring (RESEARCH §1.1–§1.2); the function is gone and the `material_upload` pass copies the staged rows. The defects are RESEARCH §1.11. |
 | Tier 2 = static permutations, 5–10 `.spv` | Tier 2 splits in two. **2a:** values that vary with time and a per-material or per-instance parameter, evaluated on the CPU (0 `.spv`). **2b:** the three per-pixel operations, as a **specialization constant** on the existing `.spv` (0 new `.spv`, one re-pin, a `false`/`true` pipeline pair). | Most requested effects have no per-pixel input (RESEARCH §2.12). A `-D` axis multiplies `.spv` across the existing axes *and* across the effects thread's `-D WEATHER`; a specialization multiplies only pipelines, and only the ones built (F9). |
 | Blocker 1: `vkCmdDispatchIndirect` is missing from the FFI | Stale. It is loaded and used by particles. What remains is the RHI trait's no-op `dispatch_indirect` (reflections RK-16) and `INDIRECT_BUFFER` usage on `gClassify`. | RESEARCH §1.4. |
 | VB-P2 is dark infrastructure | P2c is live. The classify chain already runs on every textured VB frame. | RESEARCH §1.5. This lowers Tier 3's incremental cost on VB (F12). |
@@ -1264,16 +1270,20 @@ Each item is left for its owner to correct: DM0 for the docs, the owner for the 
 
 | Where | Statement | Correction |
 |---|---|---|
-| Owner memo, 2026-08-27 | Tier 1 "WORKS TODAY" | It does not; DM1. |
+| Owner memo, 2026-08-27 | Tier 1 "WORKS TODAY" | It did not at pass 2; DM1 made it work (landed, `d95ee579`; amended 2026-10-12). |
 | Owner memo; `docs/VB-P2-CLASSIFICATION-PLAN.md:37` (D2) | The FFI lacks indirect dispatch | Loaded and used (particles). D2's over-dispatch is still a valid choice for one shader. |
-| `crates/boyko_rhi_vulkan/src/present/passes/vb.rs:2790-2791` | Neither `vkCmdDispatchIndirect` nor the Count variant is in the fn table | Only the Count variant is absent. |
+| `crates/boyko_rhi_vulkan/src/present/passes/vb.rs:2810-2811` (pass 2 cited `:2790-2791`; the comment moved — amended 2026-10-12) | Neither `vkCmdDispatchIndirect` nor the Count variant is in the fn table | Only the Count variant is absent. The render-wave plan fixes the comment at PX0 (ENGINE-GAP-AUDIT D22). |
 | Owner memo | VB-P2 is "dark infra, unwired" | P2c is live (`vb_use_classified`). |
-| `crates/boyko_render/src/material_table.rs` module doc and `flush_if_dirty` doc | "At this rung (A1) no caller ever mutates a material after boot" | False in effect: a post-boot `add` or `fill` into the power-of-two headroom is a change the table never sees (§10.2 D-1). |
+| `crates/boyko_render/src/material_table.rs` module doc and `flush_if_dirty` doc | "At this rung (A1) no caller ever mutates a material after boot" | False in effect: a post-boot `add` or `fill` into the power-of-two headroom is a change the table never sees (§10.2 D-1). **Resolved (amended 2026-10-12):** `flush_if_dirty` is removed (`40e7577d`). |
 | `crates/boyko_sdf_math/src/lib.rs:125`, `:135` (`SdfEdit` layout and `params` field docs) | `params.w` "unused" | It is the capsule radius (`edit_view`, `lib.rs:732`). |
 | Upstream research report | `ViewUniform`'s free lanes as a time carrier; spec constants "contradictory" | `CompositePushConstants` is the shader block; spec constants ship for compute only. |
 | This design's own pass 1 | the override slot in `PerInstanceMaterial` reaches "VB (all tails)" | The 4 textured VB tails bind `PerInstanceMaterialTex` at that binding (F7). |
 
 ### 10.2 Live defects (traced, not reproduced; RESEARCH §1.11)
+
+**Amended 2026-10-12: both are fixed on trunk** (D-1 by the DM1 landing `40e7577d`, D-2 by
+`062eafcb`; a third, D-3, a GPU use-after-free on a grow, was found and fixed in `7f044ac7`). The
+render-wave plan's RD4 re-runs the eleven windowed `dm1_*` binaries as the verification leg.
 
 | # | Defect | Where | Fixed by |
 |---|---|---|---|
