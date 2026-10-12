@@ -137,11 +137,19 @@ pub const ZONE_BASE_SV0: u16 = 2 * ZONE_FAMILY_WIDTH;
 /// particle id sharing a family with `record_vb`'s would be indistinguishable from a VB pass id in
 /// the artifact, on exactly the frames where both are recorded.
 pub const ZONE_BASE_PARTICLE: u16 = 3 * ZONE_FAMILY_WIDTH;
+/// Render wave RD1 (defect R0b): base for the TRANSPARENT-DEPTH family — the SDF depth merge today
+/// (later depth-tested transparent passes of the render wave append here).
+///
+/// The FIFTH family, for the particle family's own reason: the merge recorder is called from all
+/// three path recorders, so an id borrowed from one path's family would be indistinguishable from
+/// that path's own passes in the artifact on exactly the frames where both are recorded.
+pub const ZONE_BASE_TRANSPARENT: u16 = 4 * ZONE_FAMILY_WIDTH;
 
 const _: () = assert!(
     ZONE_BASE_VB + ZONE_FAMILY_WIDTH <= ZONE_BASE_GBUFFER
         && ZONE_BASE_GBUFFER + ZONE_FAMILY_WIDTH <= ZONE_BASE_SV0
-        && ZONE_BASE_SV0 + ZONE_FAMILY_WIDTH <= ZONE_BASE_PARTICLE,
+        && ZONE_BASE_SV0 + ZONE_FAMILY_WIDTH <= ZONE_BASE_PARTICLE
+        && ZONE_BASE_PARTICLE + ZONE_FAMILY_WIDTH <= ZONE_BASE_TRANSPARENT,
     "zone family ranges overlap, so one id would name two passes"
 );
 
@@ -545,6 +553,18 @@ pub const ZONE_PARTICLE_DRAW: u16 = ZONE_BASE_PARTICLE + 3;
 /// How many zone ids the particle family uses.
 pub const PARTICLE_ZONE_COUNT: u16 = 4;
 
+/// Render wave RD1 (defect R0b): the **SDF depth merge** — its derived barriers, its depth-only
+/// rendering scope and the one full-screen draw (or, on a `ClearOnly` frame, the scope alone),
+/// bracketed OUTSIDE the scope like [`ZONE_PARTICLE_DRAW`]. Recorded on Deferred and
+/// VisibilityBuffer; Forward's recorder opens no ring slot, so its merge is `NotBracketed`.
+///
+/// Opens at `BOTTOM_OF_PIPE`, by [`ZONE_PARTICLE_DRAW`]'s measured rule: it sits right after the
+/// path's last opaque producer, and a `TOP` begin there absorbs that producer's drain.
+pub const ZONE_SDF_DEPTH_MERGE: u16 = ZONE_BASE_TRANSPARENT;
+
+/// How many zone ids the transparent-depth family uses.
+pub const TRANSPARENT_ZONE_COUNT: u16 = 1;
+
 // One assert per family and not a conjunction: the widths are independent, so an `&&` would let the
 // wider one imply the narrower and clippy is right to call the second conjunct dead.
 const _: () = assert!(
@@ -559,16 +579,21 @@ const _: () = assert!(
     PARTICLE_ZONE_COUNT <= ZONE_FAMILY_WIDTH,
     "the particle family no longer fits its reserved zone-id range"
 );
+const _: () = assert!(
+    TRANSPARENT_ZONE_COUNT <= ZONE_FAMILY_WIDTH,
+    "the transparent-depth family no longer fits its reserved zone-id range"
+);
 
 /// One past the highest zone id any family can mint — the width a zone-KEYED array needs.
 ///
-/// FOUR families at [`ZONE_FAMILY_WIDTH`] apiece. Derived rather than written, and Particles P0
+/// FIVE families at [`ZONE_FAMILY_WIDTH`] apiece. Derived rather than written, and Particles P0
 /// gate #17 is the promise being kept: the fourth family widened every zone-keyed array
-/// (`CommandWitness`'s two `ZONE_ID_SPAN` tables) by changing one base and nothing else.
-pub const ZONE_ID_SPAN: usize = (ZONE_BASE_PARTICLE + ZONE_FAMILY_WIDTH) as usize;
+/// (`CommandWitness`'s two `ZONE_ID_SPAN` tables) by changing one base and nothing else, and render
+/// wave RD1's fifth did the same.
+pub const ZONE_ID_SPAN: usize = (ZONE_BASE_TRANSPARENT + ZONE_FAMILY_WIDTH) as usize;
 
 const _: () = assert!(
-    ZONE_ID_SPAN > (ZONE_BASE_PARTICLE + PARTICLE_ZONE_COUNT - 1) as usize,
+    ZONE_ID_SPAN > (ZONE_BASE_TRANSPARENT + TRANSPARENT_ZONE_COUNT - 1) as usize,
     "a zone-keyed array sized by ZONE_ID_SPAN must hold the highest id any family mints"
 );
 
@@ -721,6 +746,7 @@ pub const fn zone_begin_stage(zone: u16) -> TimestampStage {
             zone,
             ZONE_PARTICLE_KICKOFF | ZONE_PARTICLE_EMIT | ZONE_PARTICLE_SIM | ZONE_PARTICLE_DRAW
         )
+        || matches!(zone, ZONE_SDF_DEPTH_MERGE)
     {
         TimestampStage::BottomOfPipe
     } else {
@@ -792,6 +818,12 @@ const _: () = {
     assert!(
         bottoms(ZONE_PARTICLE_DRAW),
         "the particle draw bottoms since gate #17 — a TOP begin was measured absorbing the drain"
+    );
+    // Render wave RD1: the merge sits where the particle draw sat (right after the last opaque
+    // producer), so it takes the draw's measured rule rather than re-learning it.
+    assert!(
+        bottoms(ZONE_SDF_DEPTH_MERGE),
+        "the SDF depth merge opens at BOTTOM_OF_PIPE, the particle draw's measured rule"
     );
 };
 

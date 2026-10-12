@@ -769,6 +769,11 @@ pub struct GBufferTargets {
     /// the predicate already compares. With the default `Off` this is `false` on both sides
     /// forever, so no existing path gains a recreate.
     pub(crate) hzb_arm: bool,
+    /// Render wave RD1 (defect R0b): the SDF depth merge's per-FIF set ring — `gViewT[i]` @0
+    /// (`SampledImageAtGeneral`: the lane lives in `GENERAL`) and `camera_ring[i]` @1, written
+    /// against [`GBufferScene::sdf_depth_merge`]'s layout. `Some` iff that activation is (a boot
+    /// that armed a transparent consumer class); built LAST in [`Self::create`], destroyed FIRST.
+    pub(crate) sdf_depth_merge_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// The extent the images were created at (so [`GBufferTargets::sync_gbuffer`] can
     /// detect a resize and reallocate).
     pub(crate) extent: VkExtent2D,
@@ -2845,7 +2850,12 @@ impl CoreImages {
     /// failure the slots already built in THAT ring are drained AND every fully-built prior ring is
     /// destroyed (reverse acquisition), so nothing leaks; the orchestrator has no partials to
     /// reason about beyond the bundles it built before this call.
-    fn build(ctx: &VulkanContext, extent: VkExtent2D, dump_usage: bool) -> Result<Self, SwapchainError> {
+    fn build(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+        dump_usage: bool,
+        merge_sampled: bool,
+    ) -> Result<Self, SwapchainError> {
         // SAFETY (shared by both closures): `ctx` is the live context each texture was created on;
         // none is referenced by any submission (the build phase, before any record/submit); each ring
         // slot is destroyed exactly once — a completed ring is consumed by value (`destroy_ring`), a
@@ -2995,7 +3005,7 @@ impl CoreImages {
         let mut viewt_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for slot in viewt_slots.iter_mut() {
-            match GBufferTargets::create_viewt_image(ctx, extent, dump_usage) {
+            match GBufferTargets::create_viewt_image(ctx, extent, dump_usage, merge_sampled) {
                 Ok(t) => *slot = Some(t),
                 Err(e) => {
                     drain_partial(&mut viewt_slots);
@@ -7402,10 +7412,15 @@ impl GBufferTargets {
     /// [`GBUFFER_FORMAT`]. W2: `R32_SFLOAT`/`STORAGE_IMAGE` support is fail-fast-checked
     /// at device boot ([`crate::device::DeviceCaps::viewt_storage_format_ok`]), so this
     /// create can never fault on an unsupported format.
+    ///
+    /// Render wave RD1: `merge_sampled` adds `SAMPLED` — the SDF depth merge reads the lane as a
+    /// sampled image at `GENERAL` — on a boot that armed a transparent consumer class only
+    /// ([`merge_viewt_sampled`]), so an unarmed boot's image-create is byte-identical.
     fn create_viewt_image(
         ctx: &VulkanContext,
         extent: VkExtent2D,
         dump_usage: bool,
+        merge_sampled: bool,
     ) -> Result<VulkanTexture, SwapchainError> {
         let desc = TextureDesc {
             width: extent.width,
@@ -7413,7 +7428,7 @@ impl GBufferTargets {
             depth: 1,
             format: GVIEWT_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE | dump_transfer_src(dump_usage),
+            usage: ImageUsage::STORAGE | dump_transfer_src(dump_usage) | merge_viewt_sampled(merge_sampled),
             array_layers: 1,
             mip_levels: 1,
             view_format: None,
@@ -8497,7 +8512,7 @@ impl GBufferTargets {
         // shadow-vis images → SSAO à-trous ring images → deferred sets → (hwrt) denoise sets → SSAO
         // à-trous sets → temporal images → mv set → temporal sets, so the render stays
         // byte-identical.
-        let core = CoreImages::build(ctx, extent, dump_usage)?;
+        let core = CoreImages::build(ctx, extent, dump_usage, scene.sdf_depth_merge.is_some())?;
 
         #[cfg(feature = "hwrt")]
         let shadow_vis_imgs = match ShadowVisImages::build(ctx, extent) {
@@ -9385,6 +9400,8 @@ impl GBufferTargets {
             // states the argument in full).
             hzb: None,
             hzb_arm: scene.hzb.is_some(),
+            // Render wave RD1: built BELOW, after the pyramid — the last acquisition of `create`.
+            sdf_depth_merge_set: None,
             extent,
         };
 
@@ -9455,6 +9472,48 @@ impl GBufferTargets {
             targets.hzb.is_some()
         );
 
+        // === Render wave RD1 (defect R0b): the SDF depth merge's set ring, built LAST. ===
+        //
+        // A target-view set (it binds `viewt[i]`), so it lives here and is rebuilt with the
+        // targets. Built after every other acquisition for the pyramid's own reason: the only new
+        // failure edge is this one, and it tears down through `Self::destroy`, which destroys the
+        // ring FIRST (reverse acquisition). `None` without the activation — a default boot builds
+        // nothing here.
+        if let Some(merge) = scene.sdf_depth_merge.as_ref() {
+            let mut slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+            let mut failure: Option<crate::error::VulkanError> = None;
+            for (slot, dst) in slots.iter_mut().enumerate() {
+                let entries = [
+                    BindGroupEntry::SampledImageAtGeneral { texture: &targets.viewt[slot] },
+                    BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+                ];
+                let desc = BindGroupDesc::<Vulkan> { layout: merge.layout, entries: &entries };
+                match RhiDevice::create_bind_group(ctx, &desc) {
+                    Ok(g) => *dst = Some(g),
+                    Err(e) => {
+                        failure = Some(e);
+                        break;
+                    }
+                }
+            }
+            if let Some(e) = failure {
+                // SAFETY: the slots built so far and every resource in `targets` were created on
+                // `ctx` in this fn and are referenced by no submission; each is destroyed exactly
+                // once — the partial ring drained here, `targets` consumed by its own `destroy`.
+                unsafe {
+                    for s in slots.iter_mut() {
+                        if let Some(g) = s.take() {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    targets.destroy(ctx);
+                }
+                return Err(SwapchainError::DepthImage(e));
+            }
+            targets.sdf_depth_merge_set =
+                Some(slots.map(|s| s.expect("invariant: every merge ring slot built before here")));
+        }
+
         Ok(targets)
     }
 
@@ -9504,6 +9563,7 @@ impl GBufferTargets {
             && t.extent.height == extent.height
             && t.aa_arm == AaArm::from_scene(scene)
             && t.hzb_arm == scene.hzb.is_some()
+            && t.sdf_depth_merge_set.is_some() == scene.sdf_depth_merge.is_some()
         {
             return Ok(());
         }
@@ -9589,6 +9649,13 @@ impl GBufferTargets {
         // slots — every slot of every ring (and the single set) is drained. Rung 3a (`hwrt`) adds
         // the two `Option`-guarded shadow-vis image RINGS, drained before ssao (reverse acquisition).
         unsafe {
+            // Render wave RD1: the SDF depth merge's set ring — acquired after the pyramid, the
+            // last acquisition of `create`, so destroyed first. `None` on a default boot.
+            if let Some(s) = self.sdf_depth_merge_set {
+                for g in s {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
             // VG R3 piece 1 step P1-2: the depth pyramid — acquired LAST in `create` (it depends
             // on nothing but the extent; see the placement argument there), so destroyed FIRST
             // here. `Option`-guarded (`None` on the default `HzbMode::Off` 0%-gate). Its own
@@ -10103,6 +10170,17 @@ const fn dump_transfer_src(dump_usage: bool) -> ImageUsage {
     if dump_usage { ImageUsage::TRANSFER_SRC } else { ImageUsage::NONE }
 }
 
+/// Render wave RD1 (defect R0b): the `SAMPLED` usage the SDF depth merge's
+/// `SampledImageAtGeneral` read of `viewt` needs, added ONLY on a boot that armed a transparent
+/// consumer class (the activation exists) — the [`dump_transfer_src`] idiom, so an unarmed boot
+/// creates `viewt` with today's usage set (no compression-state change in any default frame).
+///
+/// What gates it: `merge_viewt_sampled_adds_nothing_when_unarmed` (critique O2: a usage bit moves
+/// no pixel, so no golden could see a leak).
+const fn merge_viewt_sampled(armed: bool) -> ImageUsage {
+    if armed { ImageUsage::SAMPLED } else { ImageUsage::NONE }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10212,6 +10290,7 @@ mod tests {
             hzb_null: null_texture(),
             hzb: None,
             hzb_arm: false,
+            sdf_depth_merge_set: None,
             extent: VkExtent2D::default(),
         }
     }
@@ -10607,6 +10686,7 @@ mod tests {
             hzb_null: null_texture(),
             hzb: None,
             hzb_arm: false,
+            sdf_depth_merge_set: None,
             extent: VkExtent2D::default(),
         }
     }
@@ -10873,6 +10953,12 @@ mod tests {
     fn dump_transfer_src_adds_nothing_when_unarmed() {
         assert_eq!(dump_transfer_src(false), ImageUsage::NONE, "an unarmed run keeps today's usage set");
         assert_eq!(dump_transfer_src(true), ImageUsage::TRANSFER_SRC);
+    }
+
+    #[test]
+    fn merge_viewt_sampled_adds_nothing_when_unarmed() {
+        assert_eq!(merge_viewt_sampled(false), ImageUsage::NONE, "a default boot keeps viewt's usage set");
+        assert_eq!(merge_viewt_sampled(true), ImageUsage::SAMPLED);
     }
 }
 

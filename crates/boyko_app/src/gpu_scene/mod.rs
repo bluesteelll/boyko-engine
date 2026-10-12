@@ -6412,6 +6412,9 @@ impl GpuSceneBundles {
         // bundle itself is `None`, the match below produces `None` regardless: two independent
         // reasons to be absent, neither of which can produce a half-armed frame).
         particle: Option<particle::ParticleFrameInputs>,
+        // Render wave RD1 (defect R0b): `TestForce::disarm_sdf_merge`, read by the runner off a
+        // Resource only a fixture inserts — `false` on every production run.
+        disarm_sdf_merge: bool,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -7379,7 +7382,7 @@ impl GpuSceneBundles {
                 } else {
                     SdfDepthEncode::ReverseZ { a: sdf_forward_view_z_a, b: sdf_forward_view_z_b }
                 },
-                disarmed: false,
+                disarmed: disarm_sdf_merge,
             }),
         };
 

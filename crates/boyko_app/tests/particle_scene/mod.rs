@@ -101,6 +101,7 @@
 //! | `BOYKO_PARTICLE_ALPHA` | unset | set ⇒ rung P2's SECOND emitter, carrying a second effect of the ALPHA blend class (blue, 75 % coverage, 1.6 units right of the additive fan). The only configuration in the tree where `alpha.instanceCount` is non-zero |
 //! | `BOYKO_PARTICLE_SORT` | unset | set ⇒ `ParticleSortMode::Radix` (rung P2 item 3's three-dispatch radix over the alpha class). REFUSES to arm without `BOYKO_PARTICLE_ALPHA` — see [`sort_arming`] |
 //! | `BOYKO_PARTICLE_READBACK_FRAME` | unset | the runner's own knob (gates #7/#9, rung P1b's skip-rate readback and rung P2 item 3's sort-monotonicity readback), not read here |
+//! | `BOYKO_TEST_FORCE` | unset | render wave RD1: the test-only force keys (`boyko_app::test_force`), decoded HERE (the env decode lives in fixtures) — `disarm_sdf_merge` renders the pre-RD1 regime the `particle_sdf_collide` re-bless adjudication compares against. An unknown key refuses the boot |
 //!
 //! The two P1 knobs are separate ON PURPOSE (see [`sdf_collider_armed`]): with the scene one set
 //! and the shader one unset, the control run renders a byte-identical scene whose particles fly
@@ -849,6 +850,17 @@ pub fn build_app(title: &'static str) -> App {
         b.add_system(lab_arm_burst).before_set(ParticleTickSet);
         b.add_system(lab_drive_clock).after_set(ParticleTickSet);
     });
+
+    // Render wave RD1: `BOYKO_TEST_FORCE`, decoded by the fixture (an unknown key is a boot
+    // refusal with the parser's own named error). Unset or empty inserts nothing — every pin.
+    let force = std::env::var("BOYKO_TEST_FORCE").unwrap_or_default();
+    match boyko_app::test_force::parse(&force) {
+        Ok(f) if f.is_empty() => {}
+        Ok(f) => {
+            app.insert_resource(f);
+        }
+        Err(e) => panic!("{e}"),
+    }
 
     app
 }

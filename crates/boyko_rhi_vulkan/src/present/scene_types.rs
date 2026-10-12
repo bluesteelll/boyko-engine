@@ -21,7 +21,7 @@ use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS, VulkanTexture};
 use super::command_witness::CommandWitness;
 use super::gpu_zone::GpuZoneRecorder;
 use super::transparent_depth::{
-    TRANSPARENT_CLASS_PARTICLES, TransparentDepthCapability, TransparentDepthFrame,
+    SdfDepthMerge, TRANSPARENT_CLASS_PARTICLES, TransparentDepthCapability, TransparentDepthFrame,
     sdf_forward_writes_viewt,
 };
 use super::{FRAMES_IN_FLIGHT, SwapchainError};
@@ -4221,6 +4221,42 @@ impl GBufferScene<'_> {
             && self.resolved_render_path.mesh_leg
             && self.hzb.is_some()
             && self.hzb_dump.is_some()
+    }
+
+    /// Render wave RD1: the SINGLE source of "this frame declares (and records) the SDF depth merge,
+    /// and how" — the pure [`super::transparent_depth::sdf_depth_merge`] over this frame's fields.
+    /// `Absent` without the merge's GPU objects (a default boot) whatever the frame says.
+    #[inline]
+    pub(crate) fn sdf_depth_merge(&self) -> SdfDepthMerge {
+        let Some(m) = self.sdf_depth_merge.as_ref() else {
+            return SdfDepthMerge::Absent;
+        };
+        super::transparent_depth::sdf_depth_merge(
+            self.resolved_render_path.sdf_leg,
+            self.path_is_vb() && !self.resolved_render_path.mesh_leg,
+            self.hzb_dump_declared(),
+            self.transparent_depth_frame(),
+            m.disarmed,
+        )
+    }
+
+    /// Render wave RD1: the test-only `disarm_sdf_merge` key as this frame carries it — `false` on
+    /// every production run and on a boot without the merge's GPU objects. The (P) order guard is
+    /// silent under it, by name (its red control must render).
+    #[inline]
+    pub(crate) fn sdf_depth_merge_disarmed(&self) -> bool {
+        self.sdf_depth_merge.as_ref().is_some_and(|m| m.disarmed)
+    }
+
+    /// Render wave RD1: whether this frame's merge CLEARs the path depth on load — exactly on
+    /// VisibilityBuffer without a mesh leg, where no pass writes `vb_depth` before it (the merge
+    /// is the transient's first touch). The recorder's load op; `debug_check_merge_clear` checks it
+    /// against the graph's own derivation (critique W1).
+    #[inline]
+    pub(crate) fn sdf_depth_merge_clears(&self) -> bool {
+        self.sdf_depth_merge() != SdfDepthMerge::Absent
+            && self.path_is_vb()
+            && !self.resolved_render_path.mesh_leg
     }
 
     /// Rung R9b — the SINGLE source of "this frame runs the VB geo/shade SPLIT pair"

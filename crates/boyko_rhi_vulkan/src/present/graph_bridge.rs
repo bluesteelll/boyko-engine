@@ -149,6 +149,9 @@ pub(crate) struct GbufferPassPlan {
     /// The always-present present-sample pass: only the `lit` GENERAL→SHADER_READ_ONLY
     /// transition (site 5c). The swapchain WSI barriers stay hand-recorded.
     pub(crate) present_sample: crate::framegraph::PassId,
+    /// Render wave RD1 (defect R0b): the SDF depth merge, declared IMMEDIATELY before
+    /// `particle_draw` — `Some` iff [`GBufferScene::sdf_depth_merge`] is not `Absent`.
+    pub(crate) sdf_depth_merge: Option<crate::framegraph::PassId>,
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame
     /// (nothing declared at all — see [`ParticlePassPlan`]).
     pub(crate) particle: ParticlePassPlan,
@@ -640,6 +643,55 @@ fn declare_particle_draw(
     p
 }
 
+/// Render wave RD1 (defect R0b): declares the SDF depth merge on the path's depth.
+///
+/// * the path depth at `(EARLY|LATE)_FRAGMENT_TESTS` / `DEPTH_STENCIL_ATTACHMENT_READ|WRITE` /
+///   `DEPTH_ATTACHMENT_OPTIMAL` — a depth-tested WRITE, so the graph derives Deferred's
+///   `SHADER_READ_ONLY → DEPTH_ATTACHMENT` transition, the reverse-Z paths' availability barrier
+///   after the opaque write, and on VisibilityBuffer × Sdf the FIRST touch (`UNDEFINED → …`): the
+///   merge is `vb_depth`'s first writer there, and its recorder CLEARs (the W1 check ties the two);
+/// * `viewt` at `FRAGMENT_SHADER` / `SHADER_READ` / `GENERAL` — the composite `t`, read as a
+///   sampled image the lane never leaves `GENERAL` for (the TAA resolve reads it there too).
+///   Omitted on a `ClearOnly` frame, which draws nothing.
+///
+/// The particle draw that follows then derives a RAW availability barrier on the depth on every
+/// path (ForwardPlus's "free" particle row becomes a barrier on merge frames only).
+fn declare_sdf_depth_merge(
+    g: &mut crate::framegraph::FrameGraph,
+    depth: ParticleDepthTarget,
+    viewt: crate::framegraph::ResId,
+    shape: super::transparent_depth::SdfDepthMerge,
+) -> crate::framegraph::PassId {
+    use crate::framegraph::SubRange;
+
+    // The depth-attachment stage pair every depth access in this file uses.
+    const FRAG: u32 =
+        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+
+    debug_assert!(
+        shape != super::transparent_depth::SdfDepthMerge::Absent,
+        "invariant: an Absent merge declares no pass"
+    );
+    let p = g.add_pass("sdf_depth_merge");
+    g.image_access(
+        depth.res,
+        FRAG,
+        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        depth.sub,
+    );
+    if shape == super::transparent_depth::SdfDepthMerge::Draw {
+        g.image_access(
+            viewt,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_GENERAL,
+            SubRange::COLOR,
+        );
+    }
+    p
+}
+
 /// Multi-paradigm render-path plan, rung R4b-b — the per-frame [`PassId`](crate::framegraph::PassId)
 /// map [`Renderer::declare_forward_graph`] produces, driving [`Renderer::record_forward`]'s
 /// derived barriers (the [`GbufferPassPlan`] sibling for the `Forward` v1 declarator).
@@ -718,6 +770,9 @@ pub(crate) struct ForwardPassPlan {
     /// source layout). The swapchain WSI barriers stay hand-recorded, exactly like
     /// [`GbufferPassPlan::present_sample`].
     pub(crate) present_sample: crate::framegraph::PassId,
+    /// Render wave RD1 (defect R0b): the SDF depth merge, declared IMMEDIATELY before
+    /// `particle_draw` — `Some` iff [`GBufferScene::sdf_depth_merge`] is not `Absent`.
+    pub(crate) sdf_depth_merge: Option<crate::framegraph::PassId>,
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame.
     pub(crate) particle: ParticlePassPlan,
     /// OBS (D): the `image_dump` pass — declared LAST, on a `BOYKO_IMAGE_DUMP` request frame only
@@ -3075,9 +3130,22 @@ impl Renderer<'_> {
         // `lit` write above and before `taa_resolve`/`present_sample` below, so the composite the
         // temporal resolve and the present blit see includes the particles.
         //
+        // Render wave RD1 (defect R0b, cut F7): the SDF depth merge, declared IMMEDIATELY before
+        // the first depth-tested transparent consumer — after every opaque / SDF producer, every
+        // compute depth reader and every HZB slot, so none of them ever sees merged depth.
+        let sdf_depth_merge = match scene.sdf_depth_merge() {
+            super::transparent_depth::SdfDepthMerge::Absent => None,
+            shape => Some(declare_sdf_depth_merge(
+                g,
+                ParticleDepthTarget { res: depth, sub: SubRange::DEPTH },
+                viewt,
+                shape,
+            )),
+        };
         // `depth` (ResId 3) is Deferred's depth image, which reaches this slot at
         // `SHADER_READ_ONLY_OPTIMAL` (three pre-lit consumers read it), so this attachment-read
-        // derives a real LAYOUT TRANSITION — the one path of the four where it does (D7).
+        // derives a real LAYOUT TRANSITION — the one path of the four where it does (D7). On an
+        // RD1 merge frame the merge took that transition and this read derives a RAW barrier.
         if let Some(ids) = particle_res {
             particle_plan.draw = Some(declare_particle_draw(
                 g,
@@ -3174,6 +3242,26 @@ impl Renderer<'_> {
         #[cfg(debug_assertions)]
         super::seed_class::assert_class_table(g, super::seed_class::DECL_DEFERRED);
 
+        // Render wave RD1 (P), debug builds: the transparent-depth ORDER guard (a depth-tested
+        // transparent consumer declared after the frame's SDF producer must follow a declared
+        // merge — classified by declared access, so a later rung's consumer needs no registration)
+        // and the PAIRING check (each consumer class declared iff its frame bit is set).
+        #[cfg(debug_assertions)]
+        {
+            super::transparent_depth::debug_check_transparent_depth_order(
+                g,
+                depth,
+                marcher,
+                sdf_depth_merge,
+                scene.hzb_dump_declared(),
+                scene.sdf_depth_merge_disarmed(),
+            );
+            super::transparent_depth::debug_check_transparent_depth_pairing(
+                scene.transparent_depth_frame(),
+                &[(super::transparent_depth::TRANSPARENT_CLASS_PARTICLES, particle_plan.draw.is_some())],
+            );
+        }
+
         self.gbuffer_pass_plan = Some(GbufferPassPlan {
             interp,
             raster,
@@ -3202,6 +3290,7 @@ impl Renderer<'_> {
             resolve,
             taa_resolve: taa_resolve_pass,
             present_sample,
+            sdf_depth_merge,
             particle: particle_plan,
             image_dump,
         });
@@ -3660,9 +3749,21 @@ impl Renderer<'_> {
         //
         // `forward_depth` (ResId 1) reaches this slot in one of TWO states, and the same access
         // covers both (D7): under `Forward` the opaque pass left a depth-stencil WRITE pending, so
+        // Render wave RD1 (defect R0b, cut F7): the SDF depth merge, declared IMMEDIATELY before
+        // the first depth-tested transparent consumer — after every opaque / SDF producer, every
+        // compute depth reader and every HZB slot, so none of them ever sees merged depth.
+        let sdf_depth_merge = match scene.sdf_depth_merge() {
+            super::transparent_depth::SdfDepthMerge::Absent => None,
+            shape => Some(declare_sdf_depth_merge(
+                g,
+                ParticleDepthTarget { res: forward_depth, sub: SubRange::DEPTH },
+                viewt,
+                shape,
+            )),
+        };
         // an AVAILABILITY barrier is derived (no layout change); under `ForwardPlus` the froxel
         // opaque pass already declared exactly this stage/access/layout, so NOTHING is derived —
-        // the one free path of the four.
+        // the one free path of the four (on an RD1 merge frame the merge's write makes it a RAW).
         if let Some(ids) = particle_res {
             particle_plan.draw = Some(declare_particle_draw(
                 g,
@@ -3701,6 +3802,26 @@ impl Renderer<'_> {
         #[cfg(debug_assertions)]
         super::seed_class::assert_class_table(g, super::seed_class::DECL_FORWARD);
 
+        // Render wave RD1 (P), debug builds: the transparent-depth ORDER guard (a depth-tested
+        // transparent consumer declared after the frame's SDF producer must follow a declared
+        // merge — classified by declared access, so a later rung's consumer needs no registration)
+        // and the PAIRING check (each consumer class declared iff its frame bit is set).
+        #[cfg(debug_assertions)]
+        {
+            super::transparent_depth::debug_check_transparent_depth_order(
+                g,
+                forward_depth,
+                sdf_forward_march,
+                sdf_depth_merge,
+                scene.hzb_dump_declared(),
+                scene.sdf_depth_merge_disarmed(),
+            );
+            super::transparent_depth::debug_check_transparent_depth_pairing(
+                scene.transparent_depth_frame(),
+                &[(super::transparent_depth::TRANSPARENT_CLASS_PARTICLES, particle_plan.draw.is_some())],
+            );
+        }
+
         self.forward_pass_plan = Some(ForwardPassPlan {
             interp,
             depth_prepass,
@@ -3712,6 +3833,7 @@ impl Renderer<'_> {
             forward_opaque,
             sdf_forward_march,
             present_sample,
+            sdf_depth_merge,
             particle: particle_plan,
             image_dump,
         });
@@ -4202,6 +4324,9 @@ pub(crate) struct VbPassPlan {
     /// `viewt`/`taa_hist_read` GENERAL reads + `taa_hist` GENERAL write; `aa_out`/`taa_resolved`
     /// hand-recorded in `record_taa`/`record_rcas`). `Some` iff `scene.taa.is_some()`.
     pub(crate) taa_resolve: Option<crate::framegraph::PassId>,
+    /// Render wave RD1 (defect R0b): the SDF depth merge, declared IMMEDIATELY before
+    /// `particle_draw` — `Some` iff [`GBufferScene::sdf_depth_merge`] is not `Absent`.
+    pub(crate) sdf_depth_merge: Option<crate::framegraph::PassId>,
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame.
     pub(crate) particle: ParticlePassPlan,
     /// OBS (D): the `image_dump` pass — declared LAST, on a `BOYKO_IMAGE_DUMP` request frame only
@@ -6808,8 +6933,22 @@ impl Renderer<'_> {
         // `present_sample`, so both of them see the composited particles.
         //
         // `vb_depth` (ResId 2) ends this frame on a depth-stencil write from `vb_raster` (or the
+        // Render wave RD1 (defect R0b, cut F7): the SDF depth merge, declared IMMEDIATELY before
+        // the first depth-tested transparent consumer — after every opaque / SDF producer, every
+        // compute depth reader and every HZB slot, so none of them ever sees merged depth.
+        let sdf_depth_merge = match scene.sdf_depth_merge() {
+            super::transparent_depth::SdfDepthMerge::Absent => None,
+            shape => Some(declare_sdf_depth_merge(
+                g,
+                ParticleDepthTarget { res: vb_depth, sub: SubRange::DEPTH },
+                viewt,
+                shape,
+            )),
+        };
         // late raster under the occlusion split), so this attachment-read derives an AVAILABILITY
         // barrier with no layout change — the Forward arm of D7's table, not Deferred's transition.
+        // On VB x Sdf the RD1 merge above is `vb_depth`'s first writer (before RD1 this read took
+        // the unwritten-transient assert in a dev build).
         if let Some(ids) = particle_res {
             particle_plan.draw = Some(declare_particle_draw(
                 g,
@@ -7126,6 +7265,26 @@ impl Renderer<'_> {
         #[cfg(debug_assertions)]
         super::seed_class::assert_class_table(g, super::seed_class::DECL_VB);
 
+        // Render wave RD1 (P), debug builds: the transparent-depth ORDER guard (a depth-tested
+        // transparent consumer declared after the frame's SDF producer must follow a declared
+        // merge — classified by declared access, so a later rung's consumer needs no registration)
+        // and the PAIRING check (each consumer class declared iff its frame bit is set).
+        #[cfg(debug_assertions)]
+        {
+            super::transparent_depth::debug_check_transparent_depth_order(
+                g,
+                vb_depth,
+                sdf_forward_march,
+                sdf_depth_merge,
+                scene.hzb_dump_declared(),
+                scene.sdf_depth_merge_disarmed(),
+            );
+            super::transparent_depth::debug_check_transparent_depth_pairing(
+                scene.transparent_depth_frame(),
+                &[(super::transparent_depth::TRANSPARENT_CLASS_PARTICLES, particle_plan.draw.is_some())],
+            );
+        }
+
         self.vb_pass_plan = Some(VbPassPlan {
             light_upload,
             material_upload,
@@ -7174,6 +7333,7 @@ impl Renderer<'_> {
             viewt_from_depth: vb_viewt_pre.or(vb_viewt),
             taa_resolve: taa_resolve_pass,
             present_sample,
+            sdf_depth_merge,
             particle: particle_plan,
             image_dump,
         });

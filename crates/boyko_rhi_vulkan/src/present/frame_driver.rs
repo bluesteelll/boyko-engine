@@ -1470,10 +1470,13 @@ impl ReceiptConfig {
             u32::from(cfg!(feature = "hwrt")),
             u32::from(scene.transparent_depth_capability().bits()),
             u32::from(scene.transparent_depth_frame().bits()),
-            // 0/1/2 = Absent/Draw/ClearOnly. The declarators do not declare the merge yet (RD1
-            // C4b wires it), so the honest value at this commit is Absent on every frame.
-            0,
-            0,
+            // 0/1/2 = Absent/Draw/ClearOnly — the predicate the declarators and the recorders read.
+            match scene.sdf_depth_merge() {
+                super::transparent_depth::SdfDepthMerge::Absent => 0,
+                super::transparent_depth::SdfDepthMerge::Draw => 1,
+                super::transparent_depth::SdfDepthMerge::ClearOnly => 2,
+            },
+            u32::from(scene.sdf_depth_merge_clears()),
             u32::from(scene.hzb_dump_declared()),
         ];
         Self { values }
