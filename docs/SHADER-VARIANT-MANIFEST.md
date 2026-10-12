@@ -287,6 +287,29 @@ binary: both re-DXC'd byte-identical from the generator's re-spliced sources.
 | S3 (the sprite lane) | 2408 → **2408**, byte-identical | 7136 → **8760** | the VS's only S3 edit is a COMMENT inside the shared mirror, and DXC's output is measurably indifferent to it; the FS gained the set-1 `g_sprites[]` array, the set-0 binding-3 sampler, the `FLAG_TEXTURED`/`UI_SLOT_*` constants and the `NonUniformResourceIndex` sprite branch |
 | S5 (the tiled lane) | 2408 → **2408**, byte-identical | 8760 → **9120** | again the VS moves only as a mirror COMMENT; the FS gained the `FLAG_TILED`/`UI_TILE_*` constants and the seventh leaf `ui_tile_uv`, into which the sprite branch's WHOLE UV computation moved from the generator's `main` template. The untiled arm still spells the same `lerp(uv.xy, uv.zw, t)` intrinsic on the same operands, which is why all SIX committed UI image pins reproduced byte-for-byte across this re-bless rather than needing one. **The `main`-template move is the point, not tidiness:** `ui_rect_edsl_sync` compares only the sentinel spans and `ui_rect_spv_sync` compares the committed `.hlsl` to its own `.spv`, so NOTHING in the workspace compared the generator's `main` to the committed `main` — an edit applied to one copy and not the other was green under `cargo test` and silently reverted by the next `emit_ui` run |
 
+## `sdf_depth_merge.fs.hlsl` — the SDF depth merge (raster, render wave RD1)
+
+One source, GENERATED WHOLE (`boyko_shaderdsl/src/bin/emit_depth_merge.rs`; the template is
+`boyko_shaderdsl::emit::emit_sdf_depth_merge_fs`, so the sync test compares the entire committed file,
+not only its spans), **NO `-D` axis** — Deferred's custom-linear encode and the reverse-Z encode are a
+push-constant `mode` word (wave-uniform), because the two arms change no interface. Defect R0b: SDF
+surfaces write the path's depth so depth-tested transparents are hidden behind them.
+
+| Variant | `-D` | `.spv` | dxc `-T` | Notes |
+|---|---|---|---|---|
+| the only one | — | `sdf_depth_merge.fs.spv` | `ps_6_0` | full-screen (`fullscreen_sample.vs.spv`, no push block) `SV_Depth`-only pass; set 0 = `Texture2D<float> gViewT` @0 (`SampledImageAtGeneral` — a SAMPLED read at `GENERAL`, never a storage image: a fragment storage image without `NonWritable` needs `fragmentStoresAndAtomics`, which the device does not enable) + `cbuffer Camera` @1 (the 80-B camera ring slot the marchers read; `#include "ray_gen.hlsli"`, so `rd` is the marcher's bit for bit); a 20-B FRAGMENT push `{mode, k0, k1, img_w, img_h}`. `discard` on the `1.0e30` background sentinel (lowered to `OpDemoteToHelperInvocation`, a `REQUIRED_V13` feature). Two eDSL leaves (`boyko_shaderdsl::depth`): `sdf_t_to_depth_linear` (mode 0, `t·(1+β)/norm`, norm 64 / 10) and `sdf_t_to_depth_reverse_z` (mode 1, `A + B/(t·(1+β)·max(dot(fwd,rd),1e-4))`), `β = SDF_DEPTH_MERGE_BIAS = 2⁻¹⁶`. |
+
+Frozen recipe (the header pins it verbatim; no `-O`, no `-D`):
+`dxc.exe -spirv -T ps_6_0 -E main -fspv-target-env=vulkan1.3 sdf_depth_merge.fs.hlsl`.
+
+*Byte gate:* `boyko_rhi_vulkan/tests/sdf_depth_merge_edsl_sync.rs` — the whole committed source IS the
+generator's output; each generated span is the printer's output inside the right function; the
+committed `.spv` is the re-DXC of its source (SKIPs with an `eprintln` when no dxc resolves — **a
+skipped run is not a pass**); the two leaves against an `f64` reference with a conditioning-scaled
+tolerance (oracle 1) and the `f32` stored-depth round trip (oracle 2, the discriminator); the
+interface census (no `RWTexture`, one `SV_Depth`, the `#include`d ray-gen, the marchers' decode
+constants).
+
 ## `sdf_forward_march.comp.hlsl` — the Forward/VB fused SDF march+shade (compute)
 
 One source `shaders/sdf_forward_march.comp.hlsl`; the `{HAS_MESH} x {VIEWT}` matrix, all four built

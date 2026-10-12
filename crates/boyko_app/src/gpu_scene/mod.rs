@@ -76,7 +76,11 @@ use boyko_rhi_vulkan::present::command_witness::CommandWitness;
 use boyko_rhi_vulkan::present::gpu_zone::{
     GPU_RING_DEPTH, GpuZoneRecorder, PairResult, QUERIES_PER_SLOT, RetireScratch, RetiredFrame,
 };
-use boyko_rhi_vulkan::present::{HzbPlan, VB_CULL_OCC_ARMED, VbOcclusionArm};
+use boyko_rhi_vulkan::present::{HzbPlan, SdfDepthMergeActivation, VB_CULL_OCC_ARMED, VbOcclusionArm};
+use boyko_rhi_vulkan::present::transparent_depth::{
+    TRANSPARENT_CLASS_PARTICLES, TransparentDepthCapability,
+};
+use boyko_rhi_vulkan::compute::SdfDepthEncode;
 use boyko_rhi_vulkan::rhi_impl::{
     ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline,
     VulkanQueryPool, VulkanSampler, VulkanShaderModule, rebind_storage_buffer,
@@ -143,12 +147,16 @@ mod marcher_sun;
 // Particles P0: the GPU-side bundle (buffers, pipelines, the two parity sets) + its one
 // fence-waited boot fill. Built ONLY when the owner armed the subsystem.
 mod particle;
+// Render wave RD1 (defect R0b): the SDF depth merge's layout + pipeline, built ONLY when a
+// transparent consumer class's bundle is (the particle one at RD1).
+mod sdf_depth_merge;
 #[cfg(feature = "hwrt")]
 mod tlas;
 
 use csm::CsmResources;
 use interp::InterpGpuProd;
 use marcher_sun::MarcherSun;
+use sdf_depth_merge::SdfDepthMergeGpu;
 // Particles P0: the runner assembles the frame's inputs, so both of these leave this module — as
 // does the raw readback the gate-#7 probe decodes.
 pub(crate) use particle::{ParticleCountersRaw, ParticleFrameInputs, ParticleFramePush};
@@ -948,6 +956,13 @@ pub(crate) struct GpuSceneBundles {
     /// because the arming lives in the World and `boot` runs before the World is readable
     /// (the `build_textured_resources` precedent).
     particle: Option<particle::ParticleGpuBundle>,
+    /// Render wave RD1 (defect R0b): the SDF depth merge's layout + pipeline, or `None` when no
+    /// depth-tested transparent consumer class is armed (every default boot).
+    ///
+    /// Built by [`Self::ensure_sdf_depth_merge`], which every consumer class's bundle builder calls
+    /// (idempotent) — so the merge exists iff some consumer can be declared, and the boot's
+    /// transparent-depth capability is read off the consumer bundles' own `Option`s in `scene()`.
+    sdf_depth_merge: Option<SdfDepthMergeGpu>,
     /// HW-RT rung R2a-3: the GPU-resident per-frame TLAS resources (the packer pipeline +
     /// FIF-ringed mesh-id / instance-array SSBOs + persistent per-slot TLASes + the frame-
     /// invariant BLAS-address table). Built at boot ONLY on an RT device (`ray_query_enabled`);
@@ -4620,6 +4635,8 @@ impl GpuSceneBundles {
             // is not readable here. `build_particle_bundle` fills this in after `setup`, or
             // leaves it `None` forever on a disarmed run.
             particle: None,
+            // Render wave RD1: built with the first consumer class's bundle, never at boot.
+            sdf_depth_merge: None,
             #[cfg(feature = "hwrt")]
             tlas,
             #[cfg(feature = "hwrt")]
@@ -4841,6 +4858,30 @@ impl GpuSceneBundles {
             collision,
             sort_mode,
         ));
+        // Render wave RD1: particles are a depth-tested transparent consumer class, so SDF
+        // surfaces must occlude them — the merge exists on exactly the boots that can declare one.
+        self.ensure_sdf_depth_merge(ctx, deferred_path);
+    }
+
+    /// Render wave RD1 (defect R0b): builds the SDF depth merge's layout + pipeline unless a
+    /// consumer class already did — the one call every depth-tested transparent consumer's bundle
+    /// builder makes (particles at RD1; R1's translucent meshes, FX9's weather, FX12's decals add
+    /// theirs). `deferred_path` freezes the compare op exactly as the particle pipeline's
+    /// (`particle::particle_depth_compare_for`).
+    ///
+    /// # Panics
+    /// On any RHI create failure (the boot contract), and — debug builds — on a second call with a
+    /// different `deferred_path` (the path is boot-frozen; two answers would be a bug).
+    pub(crate) fn ensure_sdf_depth_merge(&mut self, ctx: &VulkanContext, deferred_path: bool) {
+        if let Some(m) = self.sdf_depth_merge.as_ref() {
+            debug_assert_eq!(
+                m.deferred_path(),
+                deferred_path,
+                "invariant: the SDF depth merge is built for ONE boot-frozen render path"
+            );
+            return;
+        }
+        self.sdf_depth_merge = Some(SdfDepthMergeGpu::create(ctx, deferred_path));
     }
 
     /// Particles P0: this frame slot's two staging buffers — everything the runner needs to
@@ -6371,6 +6412,9 @@ impl GpuSceneBundles {
         // bundle itself is `None`, the match below produces `None` regardless: two independent
         // reasons to be absent, neither of which can produce a half-armed frame).
         particle: Option<particle::ParticleFrameInputs>,
+        // Render wave RD1 (defect R0b): `TestForce::disarm_sdf_merge`, read by the runner off a
+        // Resource only a fixture inserts — `false` on every production run.
+        disarm_sdf_merge: bool,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -7322,6 +7366,24 @@ impl GpuSceneBundles {
                 )),
                 _ => None,
             },
+
+            // Render wave RD1 (defect R0b): `Some` iff the merge's GPU objects exist. The
+            // capability is read off the consumer bundles' own `Option`s (boot-frozen: each is
+            // built once, after `setup`, before the frame loop); the encode is this frame's — the
+            // Deferred composite's decode normalizer for this camera mode, or the SAME reverse-Z
+            // `(A, B)` the forward marcher's decode uses.
+            sdf_depth_merge: self.sdf_depth_merge.as_ref().map(|m| SdfDepthMergeActivation {
+                capability: TransparentDepthCapability::NONE
+                    .with(TRANSPARENT_CLASS_PARTICLES, self.particle.is_some()),
+                pipeline: &m.pipeline,
+                layout: &m.layout,
+                encode: if resolved_render_path.path == boyko_render::RenderPath::Deferred {
+                    SdfDepthEncode::Linear { norm: mesh_view_t_norm(camera_mode) }
+                } else {
+                    SdfDepthEncode::ReverseZ { a: sdf_forward_view_z_a, b: sdf_forward_view_z_b }
+                },
+                disarmed: disarm_sdf_merge,
+            }),
         };
 
         // === VG R3 piece 3 step P3-6 (plan D9): THE ARMING, and why it is a post-assignment. ===
@@ -8172,6 +8234,11 @@ impl GpuSceneBundles {
             // resources further down) at its draw set's binding 1; the bindless set-1 table is
             // owned by `BindlessTextureTable` and is NOT touched here. `None` on a disarmed run
             // (no-op) — the arm that would otherwise leak the whole bundle at shutdown.
+            // Render wave RD1: the SDF depth merge's layout + pipeline. Every set built against
+            // the layout is a `GBufferTargets` ring, destroyed with the targets before the bundles.
+            if let Some(m) = self.sdf_depth_merge {
+                m.destroy(ctx);
+            }
             if let Some(p) = self.particle {
                 p.destroy(ctx);
             }

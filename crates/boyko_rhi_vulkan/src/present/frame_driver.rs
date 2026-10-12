@@ -1385,10 +1385,16 @@ pub const RECEIPT_CONFIG_KEYS: [&str; RECEIPT_CONFIG_LEN] = [
     "cluster_cull_hier",
     "lighting_flags",
     "hwrt",
+    // Render wave RD1 (defect R0b): the transparent-depth layers and the SDF depth merge.
+    "transparent_depth_capability",
+    "transparent_depth_frame",
+    "sdf_depth_merge",
+    "sdf_depth_merge_clear",
+    "hzb_dump_declared",
 ];
 
 /// How many `[config]` entries a receipt carries (the length of [`RECEIPT_CONFIG_KEYS`]).
-pub const RECEIPT_CONFIG_LEN: usize = 41;
+pub const RECEIPT_CONFIG_LEN: usize = 46;
 
 /// One frame's `[config]` values, index for index with [`RECEIPT_CONFIG_KEYS`] (`bool`s as 0/1).
 /// POD: a burst copies one per presented frame.
@@ -1462,6 +1468,16 @@ impl ReceiptConfig {
             u32::from(scene.cluster_cull_hier.is_some()),
             scene.lighting_flags,
             u32::from(cfg!(feature = "hwrt")),
+            u32::from(scene.transparent_depth_capability().bits()),
+            u32::from(scene.transparent_depth_frame().bits()),
+            // 0/1/2 = Absent/Draw/ClearOnly — the predicate the declarators and the recorders read.
+            match scene.sdf_depth_merge() {
+                super::transparent_depth::SdfDepthMerge::Absent => 0,
+                super::transparent_depth::SdfDepthMerge::Draw => 1,
+                super::transparent_depth::SdfDepthMerge::ClearOnly => 2,
+            },
+            u32::from(scene.sdf_depth_merge_clears()),
+            u32::from(scene.hzb_dump_declared()),
         ];
         Self { values }
     }

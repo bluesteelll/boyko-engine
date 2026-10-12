@@ -12,25 +12,37 @@
 //! inserts the resource at boot; an unknown key is the named [`UnknownTestForceKey`] error, which
 //! the fixture turns into its own boot refusal.
 //!
-//! # No keys yet
+//! # Keys
 //!
-//! [`TestForceKey`] is empty at the rung that added it. Each rung that needs a key adds its
-//! variant, its spelling in [`TestForceKey::ALL`] and its consumer's plumbing in one commit.
+//! Each rung that needs a key adds its variant, its spelling in [`TestForceKey::ALL`] and its
+//! consumer's plumbing in one commit:
+//!
+//! - `disarm_sdf_merge` (render wave RD1, defect R0b) — [`TestForceKey::DisarmSdfMerge`].
 
 use boyko_macros::Resource;
 
-/// One test-only force key. Empty until a rung adds the first (RD1's `disarm_sdf_merge`).
+/// One test-only force key.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TestForceKey {}
+pub enum TestForceKey {
+    /// Render wave RD1 (defect R0b): removes the SDF depth merge — the red control of G18 and the
+    /// mesh-depth gate, and the disarmed arm of the WR cost probe. On VisibilityBuffer × Sdf the
+    /// merge is `vb_depth`'s first writer, so there it stays declared as a CLEAR-only pass (the
+    /// pre-RD1 regime with a defined depth); every other path declares no merge. The renderer's
+    /// transparent-depth order guard is silent under it, by name.
+    DisarmSdfMerge,
+}
 
 impl TestForceKey {
     /// Every key with its `BOYKO_TEST_FORCE` spelling; a key's bit is its index here.
-    pub const ALL: &'static [(TestForceKey, &'static str)] = &[];
+    pub const ALL: &'static [(TestForceKey, &'static str)] =
+        &[(TestForceKey::DisarmSdfMerge, "disarm_sdf_merge")];
 
     /// This key's bit in [`TestForce`].
     #[inline]
     pub const fn bit(self) -> u64 {
-        match self {}
+        match self {
+            TestForceKey::DisarmSdfMerge => 1 << 0,
+        }
     }
 }
 
@@ -101,7 +113,20 @@ pub fn parse(value: &str) -> Result<TestForce, UnknownTestForceKey<'_>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, TestForce, UnknownTestForceKey};
+    use super::{parse, TestForce, TestForceKey, UnknownTestForceKey};
+
+    #[test]
+    fn every_key_round_trips_through_its_spelling() {
+        for (i, &(key, name)) in TestForceKey::ALL.iter().enumerate() {
+            assert_eq!(key.bit(), 1 << i, "a key's bit is its index in ALL ({name})");
+            let force = parse(name).unwrap_or_else(|e| panic!("{e}"));
+            assert!(force.contains(key), "`{name}` parses to a set containing its key");
+            assert!(!force.is_empty());
+        }
+        let disarm = parse(" disarm_sdf_merge ,").expect("RD1's key parses with separators");
+        assert!(disarm.contains(TestForceKey::DisarmSdfMerge));
+        assert!(!TestForce::EMPTY.contains(TestForceKey::DisarmSdfMerge));
+    }
 
     #[test]
     fn empty_string_is_the_empty_set() {

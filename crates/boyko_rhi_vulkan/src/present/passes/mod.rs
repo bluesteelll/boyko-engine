@@ -15,6 +15,9 @@ mod particles;
 mod present_blit;
 mod rcas;
 mod scene;
+// Render wave RD1 (defect R0b): the SDF depth merge, recorded immediately before the particle draw
+// by all three path recorders (the barrier callback is what differs per path).
+mod sdf_depth_merge;
 mod smaa;
 mod ssaa;
 mod taa;

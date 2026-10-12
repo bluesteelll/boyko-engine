@@ -33,9 +33,11 @@ use core::cell::RefCell;
 use crate::scalar::FieldScalar;
 
 mod cf;
+mod depth;
 mod shaders;
 mod vb;
 
+pub use depth::*;
 pub use shaders::*;
 pub use vb::*;
 
