@@ -52,7 +52,6 @@ use std::thread;
 use std::time::Duration;
 
 use boyko_ecs::ecs::core::component::component::Component;
-use boyko_ecs::ecs::core::ecs_master::AddOutcome;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::schedule::{Schedule, ScheduleBuilder};
@@ -607,9 +606,10 @@ fn scene(change: Change, mode: SleepSkip, workers: usize) -> Outcome {
         }
         Change::SensorFloor => {
             let e = floor.expect("construction: a box floor");
-            let outcome = h.world.add_component_by_id(e, Sensor::component_id(), &[]);
+            let sensor = Sensor::component_id();
+            let outcome = h.world.add_component_by_id(e, sensor, &[]);
             assert!(
-                matches!(outcome, AddOutcome::Attached),
+                h.world.has_component(e, sensor),
                 "construction: the floor gains `Sensor` ({outcome:?})"
             );
             (pile[0], None)
