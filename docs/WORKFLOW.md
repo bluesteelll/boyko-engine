@@ -91,6 +91,14 @@ mechanical, and afterwards each leg is a `grep` and every new ignore picks its o
 the `tester` runs on Sonnet 5.5 through the lane scripts' per-call `model`; `code-reviewer`, `results-analyst` and
 every verifier stay Opus. Watch the escape rate of Sonnet-tester GREENs.
 
+**Reasoning effort per role (owner, 2026-10-14):** the roles that think hardest run `effort: xhigh` —
+`architect`, `architecture-critic`, `developer`, `code-reviewer`, `results-analyst`, `project-analyst`;
+the rest run `effort: high` — `tester`, `researcher`, `doc-writer`. Set in each agent's frontmatter
+and mirrored by the `EFFORT` map in the lane templates (`D:/tmp/workflow-kit/lane_v2_body.js` →
+`phys-lane-d2*.js`, `render-lane.js`; `trunk-merge-v2.js` per call), so a workflow call never inherits
+the session's effort. One per-call override: the context-pack scout (`project-analyst` used to collect
+file:line facts) runs `high`. Nothing runs below `high` — lower effort was measured and rejected.
+
 **The measurement (2026-09-07).** 27 retrieval questions over this tree, each with a ripgrep-verified
 ground-truth passage and phrased WITHOUT the target's own distinctive vocabulary, run through an
 identical brief on three tiers. The task is the most *mechanical* thing an agent here ever does —

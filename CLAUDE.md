@@ -107,6 +107,9 @@ The main Claude in the chat acts as the **orchestrator** — chooses the right a
 measured 2026-09-07). **One exception** (owner, 2026-09-30; Sonnet 5.5 re-run: 26/27, 1 confident-wrong):
 the `tester` runs on Sonnet 5.5 through the lane scripts' per-call `model`; `code-reviewer`,
 `results-analyst` and every verifier stay Opus — watch the escape rate of Sonnet-tester GREENs.
+**Effort** (owner, 2026-10-14): `xhigh` for architect / critic / developer / code-reviewer /
+results-analyst / project-analyst, `high` for tester / researcher / doc-writer (frontmatter + the lane
+templates' `EFFORT` map); nothing below `high`.
 Never downgrade a role because it is "mechanical" (tested here and false) or without a measured
 before/after quality diff (≥ ~25 items, *confident-but-wrong* scored apart from *missed*);
 `code-reviewer` remains the last line against `unsafe`/atomics UB. Optimise effort, batch size and
