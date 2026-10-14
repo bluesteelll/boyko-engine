@@ -15,8 +15,9 @@
 //! `TANGENT`, `COLOR_0`, and indexed primitives with `u8`/`u16`/`u32` indices.
 //!
 //! **Unsupported, and a hard [`AssetError`] rather than a silent fallback:**
-//! sparse accessors, Draco/meshopt compression (any non-empty
-//! `extensionsRequired`), animation, skins, morph targets, non-triangle modes,
+//! sparse accessors, Draco/meshopt compression (any `extensionsRequired` entry other
+//! than the six KHR material extensions `decode_materials` imports — RD2 / R0a),
+//! animation, skins, morph targets, non-triangle modes,
 //! non-indexed primitives, and a scene graph that reaches one node twice
 //! (a cycle or a shared subtree — this decoder emits each mesh exactly once).
 //!
@@ -108,6 +109,17 @@ const CHUNK_BIN: u32 = u32::from_le_bytes(*b"BIN\0");
 
 /// glTF `primitive.mode` for triangles; the only mode this subset accepts.
 const MODE_TRIANGLES: u64 = 4;
+
+/// The required extensions this decoder imports (RD2 / R0a): a file listing only these in
+/// `extensionsRequired` decodes; any other name is refused.
+const IMPORTED_REQUIRED_EXTENSIONS: [&str; 6] = [
+    "KHR_materials_transmission",
+    "KHR_materials_ior",
+    "KHR_materials_volume",
+    "KHR_materials_specular",
+    "KHR_materials_dispersion",
+    "KHR_materials_diffuse_transmission",
+];
 
 fn err(msg: impl Into<String>) -> AssetError {
     AssetError::Decode(msg.into())
@@ -1181,17 +1193,35 @@ fn decode_scene_impl(bytes: &[u8], allow_skinned: bool) -> Result<GlbScene, Asse
             return Err(err(format!("glTF asset version {v}, expected 2.x")));
         }
 
+        // A REQUIRED extension this decoder implements is no reason to refuse: the six KHR
+        // material extensions are imported by `decode_materials` (RD2 / R0a, TK-14). Any other
+        // required extension (Draco, meshopt) makes the buffer contents something else
+        // entirely and stays the scope-cut refusal below.
+        if let Some(name) = root
+            .arr_at("extensionsRequired")
+            .iter()
+            .filter_map(|e| match e {
+                Json::Str(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .find(|name| !IMPORTED_REQUIRED_EXTENSIONS.contains(name))
+        {
+            return Err(err(format!(
+                "a required extension ({name}) is outside this decoder's subset (§3.3): \
+                 `extensionsRequired` names it"
+            )));
+        }
+
         // Every refusal below is a SCOPE CUT stated in §3.3, not a bug discovered
-        // later: an extension this decoder does not implement (Draco, meshopt)
-        // makes the buffer contents something else entirely.
+        // later.
         for (key, why) in [
-            ("extensionsRequired", "a required extension (Draco/meshopt?)"),
             ("animations", "animation"),
             ("skins", "skins"),
         ] {
-            // `decode_static_pose` keeps the extension row and drops the two animation rows:
-            // a rig it does not play is not a reason to refuse the geometry it poses.
-            if allow_skinned && (key == "animations" || key == "skins") {
+            // `decode_static_pose` drops the two animation rows (the extension refusal above
+            // applies to it too): a rig it does not play is not a reason to refuse the
+            // geometry it poses.
+            if allow_skinned {
                 continue;
             }
             if !root.arr_at(key).is_empty() {
@@ -1305,9 +1335,94 @@ fn decode_materials(root: &Json) -> Vec<GlbMaterial> {
             out.normal_image = image_of(m.get("normalTexture"));
             out.occlusion_image = image_of(m.get("occlusionTexture"));
             out.emissive_image = image_of(m.get("emissiveTexture"));
+
+            out.alpha_mode = match m.str_at("alphaMode") {
+                Some("MASK") => GlbAlphaMode::Mask,
+                Some("BLEND") => GlbAlphaMode::Blend,
+                // "OPAQUE", absent, or a value the spec does not define: glTF's default.
+                _ => GlbAlphaMode::Opaque,
+            };
+            out.alpha_cutoff = json_f32(m.get("alphaCutoff"), 0.5);
+            out.double_sided = matches!(m.get("doubleSided"), Some(Json::Bool(true)));
+            out.khr = decode_khr(m.get("extensions"), textures);
             out
         })
         .collect()
+}
+
+/// The image a texture reference names, through `textures[i].source`.
+fn texture_image(textures: &[Json], tex_ref: Option<&Json>) -> Option<usize> {
+    let index = tex_ref?.usize_at("index")?;
+    textures.get(index)?.usize_at("source")
+}
+
+/// A JSON number as `f32`, or `fallback` when absent or not a number.
+fn json_f32(v: Option<&Json>, fallback: f32) -> f32 {
+    v.and_then(Json::num).map_or(fallback, |n| n as f32)
+}
+
+/// Up to three JSON numbers as `[f32; 3]`, each missing lane keeping `fallback`'s.
+fn json_vec3(v: Option<&Json>, fallback: [f32; 3]) -> [f32; 3] {
+    let mut out = fallback;
+    if let Some(arr) = v.and_then(Json::arr) {
+        for (i, slot) in out.iter_mut().enumerate() {
+            if let Some(n) = arr.get(i).and_then(Json::num) {
+                *slot = n as f32;
+            }
+        }
+    }
+    out
+}
+
+/// Reads one material's six KHR material-extension blocks into [`GlbKhrFactors`]; an absent
+/// block (or field) keeps the glTF default.
+fn decode_khr(ext: Option<&Json>, textures: &[Json]) -> GlbKhrFactors {
+    let mut k = GlbKhrFactors::default();
+    let Some(ext) = ext else {
+        return k;
+    };
+    // A KHR texture reference: its image, read as `texCoord` 0 and counted when it names
+    // another set (AD-21: counted, never silent).
+    let mut texcoord1_refs = 0u32;
+    let mut tex = |r: Option<&Json>| -> Option<usize> {
+        let r = r?;
+        if r.u64_at("texCoord").unwrap_or(0) != 0 {
+            texcoord1_refs += 1;
+        }
+        texture_image(textures, Some(r))
+    };
+    if let Some(t) = ext.get("KHR_materials_transmission") {
+        k.transmission = json_f32(t.get("transmissionFactor"), k.transmission);
+        k.transmission_tex = tex(t.get("transmissionTexture"));
+    }
+    if let Some(i) = ext.get("KHR_materials_ior") {
+        k.ior = json_f32(i.get("ior"), k.ior);
+    }
+    if let Some(v) = ext.get("KHR_materials_volume") {
+        k.thickness = json_f32(v.get("thicknessFactor"), k.thickness);
+        k.thickness_tex = tex(v.get("thicknessTexture"));
+        k.attenuation_distance = json_f32(v.get("attenuationDistance"), k.attenuation_distance);
+        k.attenuation_color = json_vec3(v.get("attenuationColor"), k.attenuation_color);
+    }
+    if let Some(s) = ext.get("KHR_materials_specular") {
+        k.specular = json_f32(s.get("specularFactor"), k.specular);
+        k.specular_color = json_vec3(s.get("specularColorFactor"), k.specular_color);
+        // Not imported (T-TAIL): counted so the drop is visible in the spawn report.
+        k.specular_textures = u32::from(s.get("specularTexture").is_some())
+            + u32::from(s.get("specularColorTexture").is_some());
+    }
+    if let Some(d) = ext.get("KHR_materials_dispersion") {
+        k.dispersion = json_f32(d.get("dispersion"), k.dispersion);
+    }
+    if let Some(d) = ext.get("KHR_materials_diffuse_transmission") {
+        k.diffuse_transmission = json_f32(d.get("diffuseTransmissionFactor"), k.diffuse_transmission);
+        k.diffuse_transmission_tex = tex(d.get("diffuseTransmissionTexture"));
+        k.diffuse_transmission_color =
+            json_vec3(d.get("diffuseTransmissionColorFactor"), k.diffuse_transmission_color);
+        k.diffuse_transmission_color_tex = tex(d.get("diffuseTransmissionColorTexture"));
+    }
+    k.texcoord1_refs = texcoord1_refs;
+    k
 }
 
 /// Slices the `images` array out of the BIN chunk, in file order.
