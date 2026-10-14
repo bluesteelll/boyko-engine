@@ -145,7 +145,8 @@ Four items were confirmed (`fm/triage_r1.md`). All four are test-only, and no pr
 changed. Each red-first was predicted before its run (`fm/tools/r1_*_mutations.py`,
 `fm/mut/r1_results.md`, `fm/logs/mut/r1-*`). Every mutated file was restored by content, md5
 checked. The branch first took a trunk sync over two `boyko_ui` test commits (`6e8912a7`, no
-physics file). That is not the sync §6 means, which still follows `sl`'s merge.
+physics file). That is not the trunk sync of §6 and §8.1 (`190aedce`), which came after `sl`'s
+merge.
 
 - **F1** (`a7b3cb39`): the FM arms of `friction_manifold.rs` could pass with no FM engaged.
   - Pre-fix, the harness's model write was dropped (r1-F1-pre): `running 21 tests`, 21 passed, and
@@ -225,7 +226,29 @@ OBS (`410c30ef`, no physics file).
     `fstats` and FM arms.
 - `sl`'s values are the reference after the sync (cut §4): `PIN_S_B` `0xe9bd_c7f6_80f7_80ca`;
   JSonT500 `0xc637_a051_7ada_bab7`, JSonToff500 `0x4aec_2a5f_78f4_88d0`; the E3 sleeping-on
-  fixtures. No FM commit after the sync edits a source file outside the one C1e test file.
+  fixtures. Cut §4 compares them at the sync merge against the lane's HEAD.
+- Three first-parent commits after the sync touch `crates/boyko_physics`
+  (`git log --first-parent 190aedce..HEAD -- crates/boyko_physics`). C1e edits a test file; r41
+  and r42 edit source:
+  - C1e (`e43e7411`): the one test file, `frozen_island_warm_start.rs` (§8.2).
+  - r41 (`d025f93c`): `solver/colored.rs`, `solver/warm_records.rs` and `solver/colored_tests.rs`.
+    It puts `#[inline(never)]` on `warm_apply_scalar` / `warm_apply_avx2`. It also gives
+    `WarmLookup::seed` and `FillCtx::source` a const `FM` parameter that their bodies do not read
+    (§8.4). Value-neutral: an inlining attribute and an unread const parameter change no
+    arithmetic. The final receipt reads the per-point bodies exact against PARENT: Tier 0 `carry`,
+    and Tier 1's two warm kernels and `fill_range::<false>` (§8.5).
+  - r42 (`2954ec62`): `solver/colored.rs`. The four patch-block sites of `solve_color_k` /
+    `solve_color_avx2_k` test `if FM && patched` (§8.5). Value-neutral: `patched` already implies
+    `FM`, so the condition is unchanged in both instances.
+  - The second sync (`f1d0fbd0`) touches no `boyko_physics` file.
+- The sleeping-on values did not move. The tester's close run (`fm/close_test.md` §(3) and F-1;
+  every run `dirty 0`) was on HEAD `72f8ecfc`, which contains r41 and r42. It reads:
+  - P10 4/4: JSonT500 `0xc637a0517adabab7` and JSonToff500 `0x4aec2a5f78f488d0`, both `holds`;
+  - `sleep_skip_bit_identity` 63/63 in both profiles;
+  - P5's V2 and d0 sets, 264/264 each, with the armed sleeping-on rows among the runs;
+  - `PIN_S_B` (`g1_pins::g1_s_b_sleep_wake_pins`) ok in the lib run of both profiles.
+- `v2_speculative_fidelity.rs` and `sleep_skip_bit_identity.rs`, which carry the anchors, are
+  unchanged since `190aedce` (`git diff --stat 190aedce HEAD` on the two is empty).
 
 Gates on the synced tree (`fm/close/logs/sync/summary.txt`, 53 rows, every exit 0):
 - check and clippy (`--workspace --all-targets -D warnings`): clean.
@@ -258,7 +281,7 @@ the per-point tests pass `PerPoint`, so their assertions are unchanged.
 
 - `a_woken_pile_steps_exactly_as_its_twin_stepped_from_the_frozen_state_fm` and `_fm_touch`: SL's
   B1-exact scenario with both worlds on `PerManifold` / `PerManifoldTouch`. Premises come first:
-  - both worlds ran the per-manifold form on the wake step and on every frozen step;
+  - the sleeper ran the per-manifold form on every frozen step, and both worlds on the wake step;
   - the twin laid out a patch (`patch_blocks` 2);
   - the first frozen step carried a triple for each of the column's 5 manifolds;
   - the twin's wake step was warm at every point, with `manifold_hits == manifolds` (5 == 5).
@@ -493,4 +516,9 @@ Verdict: PASS, exit 0. TIP has 176 666 instructions to PARENT's 162 485.
   - RA6-arm: a seventh `ARM_MASK` reload → red.
 
 **Not run here** (the tester's): §3.7's final-HEAD workspace and both-profile physics runs, P4/P5/P11
-and the FM receipts on the runner, and Miri (no `unsafe` changed).
+and the FM receipts on the runner, and Miri (no `unsafe` changed). The tester ran them on HEAD
+`72f8ecfc`, GREEN (`fm/close_test.md`):
+- the debug workspace run, 870 of 870 targets ok;
+- the release leg of the 79 physics targets, all ok;
+- P4 12/12; P5's two sets, 264/264 each; P11 49/49 and 54/54; the FM receipts 21/21;
+- Miri SB and TB.
