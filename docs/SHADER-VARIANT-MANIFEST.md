@@ -561,6 +561,11 @@ these two files (`vb_raster.vs.hlsl` exports the flat instance id, `vb_raster.fs
 `(instance, meshlet, local_tri)` would give them a real axis for the first time — at which point they
 earn a section here, and every VB golden re-blesses with them.
 
+RD6 / D-DS left both files untouched: a double-sided or mirrored batch selects a different
+`vb_raster` **pipeline** (the same two `.spv` with `cull_mode` `None` / `Front` / `Back`), so facing
+adds pipeline members, not a variant axis. The facing bits travel in `VbInstanceRow::flags` bits 2–3
+(bit 0 = `VB_INST_FLAG_OCCLUSION_CULLING`) and are read by `vb_geom_fetch.hlsli`, not by the raster.
+
 ## Shadow-denoise compute (separate shaders, not `-D` variants of the resolve)
 
 These are distinct `.hlsl`, listed here for the temporal/spatial pipeline picture, not because they are
@@ -796,6 +801,27 @@ The gap is pinned executably by `the_light_index_list_capacity_bound_is_a_tracke
 (`tests/cluster_grid_read_bound.rs`), which asserts 0 `OpArrayLength` on `%LightIndexList` across
 all 10 artifacts that reference it. **A rise to 1 is the fix landing, not a regression** — re-bless
 the moved `.spv`, re-run the froxel pins, and re-pin that test.
+
+## RD6 / D-DS — the mesh-face re-emit (21 rows moved, no new variant)
+
+Render wave lane RD6 (glTF `doubleSided` on the opaque rail) re-emitted **21 existing rows** and
+added **none**: the facing logic is eDSL-generated (`boyko_shaderdsl::face`, generator
+`emit_mesh_face`) — `mesh_face_consts` and `mesh_face_flip` in all three sources, plus
+`vb_screen_front_ccw` in the VB fetch — spliced between their `// === GENERATED <name> BEGIN/END ===`
+sentinels, and the per-batch culling is
+**pipeline state** (`cull_mode`), not a `-D` axis — each camera-view family gains a `Front` and a
+`Back` member and each caster family a `None` and a `Back` member, all built from the SAME `.spv`
+(`gpu_scene/mod.rs` `CameraFaceMembers` / `CasterFaceMembers`). So no row is added and no `-D`
+appears; the rows below only changed bytes.
+
+| Source | Re-emitted `.spv` (bytes before → after) | What moved | Byte gate |
+|---|---|---|---|
+| `forward_opaque.fs.hlsl` | `forward_opaque.fs.spv` 33,652 → 34,404; `forward_opaque_froxel.fs.spv` 36,068 → 36,820 | `SV_IsFrontFace` + `mesh_face_flip` on the push word's bits 2–3 (`use_model_matrix` word, `[84, 88)`): a double-sided back face shades with the reversed normal | `cluster_grid_read_bound.rs`, `cluster_bound_arraylength.rs`, `mesh_face_edsl_sync.rs` |
+| `gbuffer_mrt.fs.hlsl` | `gbuffer_mrt.fs.spv` 2,252 → 3,132; `_mv` 2,732 → 3,612; `_pm` 2,536 → 3,400; `_mvpm` 3,016 → 3,880; `_tex` 6,096 → 6,944 | the same flip before the normal is packed; the push block now declares the `[80, 88)` tail the recorder writes per batch | `gbuffer_mrt_fs_spv_sync.rs` (+ the `SpirvBlob<3132>` harness sizes in `window_present_gbuffer.rs`, `sdf_gbuffer_hybrid.rs`) |
+| `vb_geom_fetch.hlsli` (included) | `vb_resolve.comp.spv` 48,596 → 49,304; `vb_resolve_froxel` 50,768 → 51,476; `vb_shade` 49,588 → 50,296; `vb_shade_froxel` 51,760 → 52,468; `vb_shade_tex` 56,740 → 57,592; `vb_shade_tex_froxel` 58,912 → 59,764; `vb_shade_split` 56,464 → 57,172; `vb_shade_split_hwrt` 46,652 → 47,360; `vb_shade_split_tex` 63,616 → 64,468; `vb_shade_split_tex_hwrt` 53,804 → 54,656; `vb_geo` 15,888 → 16,596; `vb_geo_mv` 17,864 → 18,572; `vb_geo_sv0` 28,292 → 29,000; `sdf_mesh_shadow.comp.spv` 26,312 → 27,020 | `VbInstanceRow::flags` bits 2–3 (`MESH_FACE_DOUBLE_SIDED`, `MESH_FACE_MIRRORED`) read in a `[branch]` (`DontFlatten`) region: a double-sided triangle whose screen winding is clockwise has its world normal, tangent and handedness negated. Every includer moved; the includer list is `rg -l vb_geom_fetch.hlsli shaders/` | `mesh_face_edsl_sync.rs` (+ the SPIR-V branch census), `vb_lit_producer_spv_sync.rs`, `vb_froxel_spv_sync.rs`, `vb_geo_preprocess_sync.rs`, `vb_raster_geo_classify_spv_sync.rs`, `sdf_mesh_shadow_spv_sync.rs` |
+
+`vb_raster.{vs,fs}` did **not** move: the id raster only rasterises, so its culling member is chosen
+by the recorder from `DrawBatch::face` and no face bit reaches it (see the `vb_raster` section above).
 
 ## Why these stay N `.spv` (do NOT try to spec-const-collapse)
 
