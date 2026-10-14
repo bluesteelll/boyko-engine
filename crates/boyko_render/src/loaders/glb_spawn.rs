@@ -26,11 +26,16 @@ use boyko_scene::Transform;
 use boyko_scene::render_caps::{MaterialHandle, MeshHandle};
 
 use crate::bindless::BindlessTextureTable;
+use crate::bundles::MeshBundle;
+use crate::csm_marker::ShadowCaster;
 use crate::loaders::PngTextureLoader;
-use crate::loaders::glb::{GlbImage, GlbScene};
-use crate::material::Material;
+use crate::loaders::glb::{GlbAlphaMode, GlbImage, GlbMaterial, GlbScene};
+use crate::material::{
+    AlphaMode, BlendClass, Material, MaterialGpu, MaterialRoute, MaterialTextures, MaterialX,
+};
 use crate::mesh::{MeshGpu, Vertex};
 use crate::mesh_assets::MeshAssetsExt;
+use crate::route::{AlphaMasked, Translucent};
 use crate::texture::{ColorSpace, TextureAssetsExt, TextureGpu};
 
 /// What [`spawn_glb_scene`] does besides spawning.
@@ -153,15 +158,194 @@ pub fn spawn_glb_scene(
     spawn_glb_scene_with(scene, commands, materials, &mut uploader, opts)
 }
 
-/// [`spawn_glb_scene`]'s body over any [`GlbUploader`].
+/// [`spawn_glb_scene`]'s body over any [`GlbUploader`]: see the module doc.
+///
+/// Only materials a non-empty primitive references are minted (once each, pinned — a glb is a
+/// load-time asset the scene keeps), and only their images are uploaded: once per colour space
+/// a referenced slot samples it in (sRGB for base colour, emissive and the diffuse-transmission
+/// colour; linear for normal, metallic-roughness, occlusion, transmission, thickness and the
+/// diffuse-transmission strength). A primitive with no material, or one naming a material the
+/// file does not have, takes [`GlbSpawnOptions::fallback_material`].
 pub fn spawn_glb_scene_with<U: GlbUploader>(
-    _scene: &GlbScene,
-    _commands: &mut Commands<'_>,
-    _materials: &mut Assets<Material>,
-    _uploader: &mut U,
-    _opts: GlbSpawnOptions,
+    scene: &GlbScene,
+    commands: &mut Commands<'_>,
+    materials: &mut Assets<Material>,
+    uploader: &mut U,
+    opts: GlbSpawnOptions,
 ) -> GlbSpawnReport {
-    GlbSpawnReport::default()
+    debug_assert!(
+        !opts.dilate_non_opaque_base,
+        "GlbSpawnOptions::dilate_non_opaque_base is R1's hook; RD2 ships the switch without the dilation"
+    );
+    let mut report = GlbSpawnReport::default();
+
+    // Which glTF materials a drawable primitive references.
+    let mut used = vec![false; scene.materials.len()];
+    for part in &scene.parts {
+        if let Some(i) = part.material
+            && !part.mesh.indices.is_empty()
+            && i < used.len()
+        {
+            used[i] = true;
+        }
+    }
+
+    // Each referenced image, uploaded once per colour space it is sampled in.
+    let mut uses = vec![[false; 2]; scene.images.len()];
+    for (m, _) in scene.materials.iter().zip(&used).filter(|(_, u)| **u) {
+        for (image, space) in image_uses(m) {
+            if let Some(lanes) = image.and_then(|i| uses.get_mut(i)) {
+                lanes[space_lane(space)] = true;
+            }
+        }
+    }
+    let mut slots = vec![[0u32; 2]; scene.images.len()];
+    for (i, image) in scene.images.iter().enumerate() {
+        let [srgb, linear] = uses[i];
+        report.dual_colour_space_images += u32::from(srgb && linear);
+        for (wanted, space) in [(srgb, ColorSpace::Srgb), (linear, ColorSpace::Linear)] {
+            if !wanted {
+                continue;
+            }
+            match uploader.upload_image(image, space) {
+                Some(slot) => {
+                    slots[i][space_lane(space)] = slot;
+                    report.images_uploaded += 1;
+                }
+                None => report.images_undecodable += 1,
+            }
+        }
+    }
+
+    // One `Material` row per referenced glTF material.
+    let mut handles: Vec<Option<(MaterialHandle, MaterialRoute)>> = vec![None; scene.materials.len()];
+    for (i, m) in scene.materials.iter().enumerate().filter(|(i, _)| used[*i]) {
+        let material = material_from_glb(m, &slots);
+        report.khr_texcoord1_ignored += m.khr.texcoord1_refs;
+        report.specular_textures_ignored += m.khr.specular_textures;
+        report.dispersion_without_volume += u32::from(m.khr.dispersion > 0.0 && m.khr.thickness == 0.0);
+        let route = material.route();
+        let handle = materials.add(material);
+        materials.pin(handle.index());
+        handles[i] = Some((MaterialHandle::from_handle(handle), route));
+        report.materials += 1;
+    }
+    let fallback_route = materials
+        .get_by_index(u32::from(opts.fallback_material.0))
+        .map_or(MaterialRoute::Opaque, Material::route);
+
+    // One drawable per non-empty primitive, with its route marker.
+    let centre = match (opts.recentre, glb_scene_bounds(scene)) {
+        (true, Some((lo, hi))) => [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5],
+        _ => [0.0; 3],
+    };
+    let mut shifted: Vec<Vertex> = Vec::new();
+    for part in &scene.parts {
+        if part.mesh.indices.is_empty() {
+            report.primitives_skipped += 1;
+            continue;
+        }
+        let vertices: &[Vertex] = if opts.recentre {
+            shifted.clear();
+            shifted.extend(part.mesh.vertices.iter().map(|v| {
+                let mut v = *v;
+                for (axis, c) in centre.iter().enumerate() {
+                    v.position[axis] -= c;
+                }
+                v
+            }));
+            &shifted
+        } else {
+            &part.mesh.vertices
+        };
+        let mesh = uploader.upload_mesh(vertices, &part.mesh.indices);
+        let (material, route) = part
+            .material
+            .and_then(|i| handles.get(i).copied().flatten())
+            .unwrap_or((opts.fallback_material, fallback_route));
+
+        let mut bundle = MeshBundle::new(mesh, opts.transform);
+        bundle.material = material;
+        let mut entity = commands.spawn(bundle);
+        entity.insert(ShadowCaster);
+        match route {
+            MaterialRoute::Opaque => report.opaque += 1,
+            MaterialRoute::Masked => {
+                entity.insert(AlphaMasked);
+                report.masked += 1;
+            }
+            MaterialRoute::Translucent => {
+                entity.insert(Translucent);
+                report.translucent += 1;
+            }
+        }
+        report.entities += 1;
+    }
+    report
+}
+
+/// The lane of `space` in a per-image `[sRGB, linear]` pair.
+fn space_lane(space: ColorSpace) -> usize {
+    usize::from(space != ColorSpace::Srgb)
+}
+
+/// Every image slot a material samples, with the colour space glTF fixes for that slot.
+fn image_uses(m: &GlbMaterial) -> [(Option<usize>, ColorSpace); 9] {
+    use ColorSpace::{Linear, Srgb};
+    [
+        (m.base_color_image, Srgb),
+        (m.emissive_image, Srgb),
+        (m.khr.diffuse_transmission_color_tex, Srgb),
+        (m.normal_image, Linear),
+        (m.metallic_roughness_image, Linear),
+        (m.occlusion_image, Linear),
+        (m.khr.transmission_tex, Linear),
+        (m.khr.thickness_tex, Linear),
+        (m.khr.diffuse_transmission_tex, Linear),
+    ]
+}
+
+/// The engine [`Material`] for one glTF material, its image slots resolved through `slots`
+/// (the `[sRGB, linear]` bindless slots per image; `0` = none or undecodable).
+fn material_from_glb(m: &GlbMaterial, slots: &[[u32; 2]]) -> Material {
+    use ColorSpace::{Linear, Srgb};
+    let slot = |image: Option<usize>, space: ColorSpace| -> u32 {
+        image.and_then(|i| slots.get(i)).map_or(0, |s| s[space_lane(space)])
+    };
+    let mut material = Material::with_textures(
+        MaterialGpu::new(m.base_color_factor, m.metallic, m.roughness, 0.5, m.emissive_factor, 0),
+        MaterialTextures {
+            albedo: slot(m.base_color_image, Srgb),
+            normal: slot(m.normal_image, Linear),
+            metal_rough: slot(m.metallic_roughness_image, Linear),
+            ao: slot(m.occlusion_image, Linear),
+            emissive: slot(m.emissive_image, Srgb),
+        },
+    );
+    material.alpha = match m.alpha_mode {
+        GlbAlphaMode::Opaque => AlphaMode::Opaque,
+        GlbAlphaMode::Mask => AlphaMode::Mask { cutoff: m.alpha_cutoff },
+        GlbAlphaMode::Blend => AlphaMode::Blend(BlendClass::PremulOver),
+    };
+    material.double_sided = m.double_sided;
+    let k = &m.khr;
+    material.x = MaterialX {
+        transmission: k.transmission,
+        ior: k.ior,
+        thickness: k.thickness,
+        attenuation_distance: k.attenuation_distance,
+        attenuation_color: k.attenuation_color,
+        specular: k.specular,
+        specular_color: k.specular_color,
+        dispersion: k.dispersion,
+        diffuse_transmission_color: k.diffuse_transmission_color,
+        diffuse_transmission: k.diffuse_transmission,
+        transmission_tex: slot(k.transmission_tex, Linear),
+        thickness_tex: slot(k.thickness_tex, Linear),
+        diffuse_transmission_tex: slot(k.diffuse_transmission_tex, Linear),
+        diffuse_transmission_color_tex: slot(k.diffuse_transmission_color_tex, Srgb),
+    };
+    material
 }
 
 /// The AABB of every part's vertices, as `(min, max)`; `None` for a scene with no vertex.

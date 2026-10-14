@@ -365,7 +365,12 @@ impl Material {
     /// the route.
     #[inline]
     pub fn route(&self) -> MaterialRoute {
-        MaterialRoute::Opaque
+        match self.alpha {
+            AlphaMode::Blend(_) => MaterialRoute::Translucent,
+            _ if self.x.transmission > 0.0 => MaterialRoute::Translucent,
+            AlphaMode::Mask { .. } => MaterialRoute::Masked,
+            AlphaMode::Opaque => MaterialRoute::Opaque,
+        }
     }
 }
 
