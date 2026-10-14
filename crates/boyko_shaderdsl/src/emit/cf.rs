@@ -970,6 +970,29 @@ impl Cf for EmitCf {
         Emit(push(Node::Rsqrt(x.0)))
     }
 
+    // ---- Render wave E0: the rounding / exponential primitives (recorder) ------------------
+    // The SAME nodes the `InterpBackend` recorder pushes — one node, one printer arm per op.
+
+    fn floor(x: Emit) -> Emit {
+        Emit(push(Node::Floor(x.0)))
+    }
+
+    fn frac(x: Emit) -> Emit {
+        Emit(push(Node::Frac(x.0)))
+    }
+
+    fn log2(x: Emit) -> Emit {
+        Emit(push(Node::Log2(x.0)))
+    }
+
+    fn exp2(x: Emit) -> Emit {
+        Emit(push(Node::Exp2(x.0)))
+    }
+
+    fn pow(x: Emit, y: Emit) -> Emit {
+        Emit(push(Node::Pow(x.0, y.0)))
+    }
+
     // ---- UI-ADVANCED S1: the `ui_rect` fragment-leaf facets ------------------------------
 
     // The `float4` return cell — a ZST; the expression travels in the recorded `Stmt::Return`.

@@ -72,6 +72,7 @@ pub mod oct;
 pub mod pack;
 pub mod particle;
 pub mod particle_facets;
+pub mod prims_probe;
 pub mod probe_blend;
 pub mod probe_march;
 pub mod refine;

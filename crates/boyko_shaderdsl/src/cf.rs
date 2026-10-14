@@ -1181,6 +1181,40 @@ pub trait Cf {
     /// [`crate::pack::pack_material_id_ba_body`] spells it).
     fn rsqrt(x: Self::Scalar) -> Self::Scalar;
 
+    // ---- Render wave E0: the shared rounding / exponential primitives (AD-7) -----------------
+    //
+    // One op growth for every render leaf of the wave (post OETF and AgX, exposure, volumetric
+    // fog, VFX flipbooks, hashed alpha). They live on THIS axis for the reason `sin` states:
+    // `FieldScalar` is the physics leaf and stays byte-frozen. Each is an intrinsic node that
+    // lowers to ONE `GLSL.std.450` instruction (`Floor`, `Fract`, `Log2`, `Exp2`, `Pow`); the
+    // Eval arms are the `sin` shim. `exp` / `ln` are leaf helpers ([`exp`], [`ln`]), not nodes.
+    //
+    // Precision: `floor` / `frac` are exact on both backends (`frac` is one subtract of two
+    // representable values). `log2` / `exp2` / `pow` are APPROXIMATE on the device (the Vulkan
+    // SPIR-V environment's precision table; `crate::prims_probe` single-sources those bounds), so
+    // a leaf spelling them carries a tolerance, never a bit-exact contract.
+
+    /// `floor(x)` — the HLSL `floor` intrinsic (`OpExtInst GLSL.std.450 Floor`). Exact.
+    fn floor(x: Self::Scalar) -> Self::Scalar;
+
+    /// `frac(x)` — the HLSL `frac` intrinsic (`OpExtInst GLSL.std.450 Fract`), `x - floor(x)`,
+    /// so a negative input wraps UP (`frac(-0.25) == 0.75`). On Eval exactly that subtract.
+    fn frac(x: Self::Scalar) -> Self::Scalar;
+
+    /// `log2(x)` — the HLSL `log2` intrinsic (`OpExtInst GLSL.std.450 Log2`). Approximate on
+    /// the device (3 ULP outside `[0.5, 2]`, absolute `2⁻²¹` inside).
+    fn log2(x: Self::Scalar) -> Self::Scalar;
+
+    /// `exp2(x)` — the HLSL `exp2` intrinsic (`OpExtInst GLSL.std.450 Exp2`). Approximate on
+    /// the device (`3 + 2·|x|` ULP).
+    fn exp2(x: Self::Scalar) -> Self::Scalar;
+
+    /// `pow(x, y)` — the HLSL `pow` intrinsic (`OpExtInst GLSL.std.450 Pow`), operand order
+    /// `pow(x, y)` = `x^y`. An INTRINSIC node, not `exp2(y·log2 x)`: the hand-written OETF lowers
+    /// to `Pow`, and a rewrite would change the SPIR-V a transition pin compares. Undefined on the
+    /// device for `x < 0` and for `x = 0, y <= 0`; its bound is inherited from `exp2(y·log2 x)`.
+    fn pow(x: Self::Scalar, y: Self::Scalar) -> Self::Scalar;
+
     // ---- UI-ADVANCED S1: the `ui_rect` fragment-leaf facets (`docs/UI-PLAN-SPRITES-S0-S2.md`) ----
     //
     // The six UI leaves (`crate::ui`) are the eDSL's first `float2`/`float4` VALUE math: the
@@ -1363,6 +1397,27 @@ pub trait Cf {
     // `m2_brick_cubic_hit` facet above) and is reused by the UI leaves rather than
     // re-declared; its Eval arm becomes the identity now that a leaf
     // (`ui_premultiplied_over_body`) legitimately runs over EvalCf.
+}
+
+/// `log2(e)` — the [`exp`] helper's base-change factor (the f32 nearest `1/ln 2`).
+pub const LOG2_E: f32 = core::f32::consts::LOG2_E;
+
+/// `ln(2)` — the [`ln`] helper's base-change factor (the f32 nearest `ln 2`).
+pub const LN_2: f32 = core::f32::consts::LN_2;
+
+/// `e^x` as the leaf helper `exp2(x · LOG2_E)` — a function, not a node: a GPU `exp` lowers to
+/// an `Exp2` and a multiply anyway (render wave E0). Two roundings beyond `exp2`'s own (the
+/// constant and the product), each amplified by `|x|` through the exponential, so its tolerance
+/// grows with `|x|`.
+#[inline]
+pub fn exp<C: Cf>(x: C::Scalar) -> C::Scalar {
+    C::exp2(x.mul(C::Scalar::lit(LOG2_E)))
+}
+
+/// `ln(x)` as the leaf helper `log2(x) · LN_2` — a function, not a node (render wave E0).
+#[inline]
+pub fn ln<C: Cf>(x: C::Scalar) -> C::Scalar {
+    C::log2(x).mul(C::Scalar::lit(LN_2))
 }
 
 /// The control-flow EVAL backend — REAL host `for`/`if`/`continue`, a unit ZST.
@@ -2250,6 +2305,37 @@ impl Cf for EvalCf {
         // so this arm stays `no_std`-clean. It is a CLOSE mirror of the GPU's approximate
         // `InverseSqrt` (2 ULP allowed), not a bit-exact one — see the trait doc.
         f32::lit(1.0).div(FieldScalar::sqrt(x))
+    }
+
+    // ---- Render wave E0: the rounding / exponential primitives (the `sin` shim) ---------------
+    //
+    // RED-FIRST STUBS (E0-1): each arm is the mutation its gate exists to catch — `floor` as a
+    // truncation, `frac` over that truncation, `log2` bound to `ln`, `exp2` to `exp`, `pow` with
+    // its operands swapped. Replaced by the real shims in E0-2.
+
+    #[inline]
+    fn floor(x: f32) -> f32 {
+        x.trunc()
+    }
+
+    #[inline]
+    fn frac(x: f32) -> f32 {
+        x - x.trunc()
+    }
+
+    #[inline]
+    fn log2(x: f32) -> f32 {
+        x.ln()
+    }
+
+    #[inline]
+    fn exp2(x: f32) -> f32 {
+        x.exp()
+    }
+
+    #[inline]
+    fn pow(x: f32, y: f32) -> f32 {
+        y.powf(x)
     }
 
     // ---- UI-ADVANCED S1: the `ui_rect` fragment-leaf facets ------------------------------

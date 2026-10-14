@@ -36,10 +36,12 @@ mod cf;
 mod depth;
 mod shaders;
 mod vb;
+mod prims;
 
 pub use depth::*;
 pub use shaders::*;
 pub use vb::*;
+pub use prims::*;
 
 thread_local! {
     /// The build-time SSA arena. Recorded into by [`Emit`]'s [`FieldScalar`] ops,
@@ -701,6 +703,24 @@ enum Node {
     /// `a + b` over two `float4`s (`src + dst * (1.0 - src.a)`, the premultiplied OVER) —
     /// component-wise. ADDITIVE. Result type [`EmitTy::Float4`].
     Vec4Add(u32, u32),
+
+    // ---- Render wave E0: the shared rounding / exponential primitives (AD-7) -------------
+    //
+    // Each is a call-shaped intrinsic node (NOT an inline leaf: a non-temp use inlines its
+    // `define_str` spelling, a function-call form that needs no wrap), recorded by BOTH the
+    // `Cf` and the `InterpBackend` recorders so the op spells identically on either axis. All
+    // five type `Float` (the `type_of` default arm). Each lowers to one `GLSL.std.450`
+    // instruction (`boyko_rhi_vulkan/tests/e0_prims_edsl_sync.rs` counts them).
+    /// `floor(a)` — `GLSL.std.450 Floor`.
+    Floor(u32),
+    /// `frac(a)` — `GLSL.std.450 Fract`.
+    Frac(u32),
+    /// `log2(a)` — `GLSL.std.450 Log2`.
+    Log2(u32),
+    /// `exp2(a)` — `GLSL.std.450 Exp2`.
+    Exp2(u32),
+    /// `pow(x, y)` — `GLSL.std.450 Pow`, stored `(x, y)` and printed in that order.
+    Pow(u32, u32),
 }
 
 /// One VECTOR (`float3`/`float2`) SSA node — the normal leaf is a vector expression
@@ -1211,6 +1231,28 @@ impl crate::interp::InterpBackend for Emit {
     #[inline]
     fn acos(self) -> Self {
         Emit(push(Node::Acos(self.0)))
+    }
+    // Render wave E0: the SAME five nodes `EmitCf` records, so the op spells identically on
+    // either axis.
+    #[inline]
+    fn floor(self) -> Self {
+        Emit(push(Node::Floor(self.0)))
+    }
+    #[inline]
+    fn frac(self) -> Self {
+        Emit(push(Node::Frac(self.0)))
+    }
+    #[inline]
+    fn log2(self) -> Self {
+        Emit(push(Node::Log2(self.0)))
+    }
+    #[inline]
+    fn exp2(self) -> Self {
+        Emit(push(Node::Exp2(self.0)))
+    }
+    #[inline]
+    fn pow(self, y: Self) -> Self {
+        Emit(push(Node::Pow(self.0, y.0)))
     }
     #[inline]
     fn select(cond: EmitMask, t: Self, e: Self) -> Self {
@@ -2327,6 +2369,30 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         | Node::Vec2Swizzle(_, _)
         | Node::Vec2Comp(_, _) => {
             unreachable!("inline leaves are spelled by operand_str, not defined")
+        }
+        // Render wave E0 — RED-FIRST STUB printers (E0-1): each spells the mutation its emit
+        // pin exists to catch (a truncation for `floor`/`frac`, `ln`/`exp` for `log2`/`exp2`,
+        // swapped `pow` operands). Replaced by the intrinsic spellings in E0-2.
+        Node::Floor(a) => {
+            chk(a, EmitTy::Float);
+            format!("trunc({})", op(a))
+        }
+        Node::Frac(a) => {
+            chk(a, EmitTy::Float);
+            format!("{} - trunc({})", op(a), op(a))
+        }
+        Node::Log2(a) => {
+            chk(a, EmitTy::Float);
+            format!("log({})", op(a))
+        }
+        Node::Exp2(a) => {
+            chk(a, EmitTy::Float);
+            format!("exp({})", op(a))
+        }
+        Node::Pow(x, y) => {
+            chk(x, EmitTy::Float);
+            chk(y, EmitTy::Float);
+            format!("pow({}, {})", op(y), op(x))
         }
     }
 }

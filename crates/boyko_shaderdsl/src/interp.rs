@@ -78,6 +78,20 @@ pub trait InterpBackend: Copy {
     /// `acos(self)` — the HLSL `acos` intrinsic / host `f32::acos`.
     fn acos(self) -> Self;
 
+    /// `floor(self)` — the HLSL `floor` intrinsic / host `f32::floor` (render wave E0). The
+    /// SAME `floor` / `frac` / `log2` / `exp2` / `pow` op-set [`crate::cf::Cf`] carries: the two
+    /// codegen-only axes that carry the transcendentals spell one identical HLSL, so a leaf may
+    /// be authored against either.
+    fn floor(self) -> Self;
+    /// `frac(self)` — the HLSL `frac` intrinsic, `self - floor(self)`.
+    fn frac(self) -> Self;
+    /// `log2(self)` — the HLSL `log2` intrinsic / host `f32::log2`.
+    fn log2(self) -> Self;
+    /// `exp2(self)` — the HLSL `exp2` intrinsic / host `f32::exp2`.
+    fn exp2(self) -> Self;
+    /// `pow(self, y)` — the HLSL `pow` intrinsic / host `f32::powf`, `self^y`.
+    fn pow(self, y: Self) -> Self;
+
     /// `cond ? t : e` — the value select (no data-dependent control flow; the GPU
     /// emits a ternary). Both arms are pure and always evaluated.
     fn select(cond: Self::Mask, t: Self, e: Self) -> Self;
@@ -147,6 +161,27 @@ impl InterpBackend for f32 {
     #[inline]
     fn acos(self) -> Self {
         f32::acos(self)
+    }
+    // RED-FIRST STUBS (E0-1): the same mutation-shaped stubs the `Cf` Eval arms carry.
+    #[inline]
+    fn floor(self) -> Self {
+        f32::trunc(self)
+    }
+    #[inline]
+    fn frac(self) -> Self {
+        self - f32::trunc(self)
+    }
+    #[inline]
+    fn log2(self) -> Self {
+        f32::ln(self)
+    }
+    #[inline]
+    fn exp2(self) -> Self {
+        f32::exp(self)
+    }
+    #[inline]
+    fn pow(self, y: Self) -> Self {
+        f32::powf(y, self)
     }
     #[inline]
     fn select(cond: bool, t: Self, e: Self) -> Self {
