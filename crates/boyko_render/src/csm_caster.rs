@@ -65,17 +65,20 @@ use boyko_ecs::ecs::core::schedule::system_config::SystemConfig;
 use boyko_ecs::ecs::core::system::{NonSendRes, Res, ResMut};
 use boyko_macros::{Resource, SystemSet};
 use boyko_scene::ViewUniform;
-use boyko_scene::render_caps::{MeshHandle, RenderEnabled};
+use boyko_rhi::enums::mesh_face_class;
+use boyko_scene::render_caps::{MaterialHandle, MeshHandle, RenderEnabled};
 
-use crate::asset_refcount::{AssetValidateSet, RenderStale};
+use crate::asset_refcount::{AssetValidateSet, MaterialStale, RenderStale};
 use crate::csm_config::{CsmCasterBounds, CsmConfig, CsmFitMode, ResolvedCsm};
 use crate::csm_marker::ShadowCaster;
 use crate::instance_model::InstanceModelCol;
 use crate::light::{LightTableDirty, LightingConfig};
 use crate::mesh::MeshGpu;
 use crate::mesh_assets::MeshAssetsExt;
-use crate::mesh_draw::{DrawBatch, MeshRenderScratch, PerInstanceMaterial};
-use crate::occlusion_marker::OcclusionCulling;
+use crate::material::Material;
+use crate::mesh_draw::{DrawBatch, MeshRenderScratch, PerInstanceMaterial, resolve_material_id};
+use crate::mesh_face::mesh_face_bits;
+use crate::occlusion_marker::{OcclusionCulling, VB_INST_FLAG_OCCLUSION_CULLING};
 
 /// The reused per-frame shadow-caster gather scratch (CSM Inc 2) — a SEPARATE
 /// [`Resource`] from the main [`MeshRenderScratch`]
@@ -219,24 +222,48 @@ impl ResolvedCsm {
 // Disabled<RenderStale>, With<ShadowCaster>)` tuple-AND filter is the whole point of this
 // gather (the structural caster term), so factoring it behind a `type` alias would hide
 // the load-bearing intent.
+///
+/// # The face class (RD6 / D-DS)
+///
+/// The production caster passes draw the CAMERA's batches and mark one as casting by walking it
+/// against this gather's batches on their shared `(face class, mesh)` key
+/// ([`batch_casts_shadow`]), so a caster row must land in the SAME class the camera gather gives
+/// it: the material's `doubleSided` through the same guarded
+/// [`resolve_material_id`](crate::mesh_draw) (OOB clamp, Loading guard), a `MaterialStale` row
+/// taking the pinned default exactly as the camera gather substitutes it (the `q_mat_stale` split
+/// below), and the mirror bit from the same `InstanceModelCol` determinant — the instance pack
+/// refreshes that column for every visible row, interpolated ones included, so neither gather
+/// reads `GpuTransform3D` for the class.
 #[allow(clippy::type_complexity, clippy::needless_pass_by_value)]
 pub fn gather_shadow_casters(
     q: Query<
+        (&MeshHandle, &InstanceModelCol, Option<&MaterialHandle>, Option<&OcclusionCulling>),
+        (Enabled<RenderEnabled>, Disabled<RenderStale>, Disabled<MaterialStale>, With<ShadowCaster>),
+    >,
+    q_mat_stale: Query<
         (&MeshHandle, &InstanceModelCol, Option<&OcclusionCulling>),
-        (Enabled<RenderEnabled>, Disabled<RenderStale>, With<ShadowCaster>),
+        (Enabled<RenderEnabled>, Disabled<RenderStale>, Enabled<MaterialStale>, With<ShadowCaster>),
     >,
     mesh_assets: NonSendRes<Assets<MeshGpu>>,
+    material_assets: Res<Assets<Material>>,
     mut scratch: ResMut<CsmCasterScratch>,
 ) {
     // asset-streaming plan F5: `high_water()`, not `len()` — a live `MeshHandle.0` can
     // exceed the live COUNT once a hole exists; see `mesh_draw::gather_mesh_draws`'s
     // identical fix for the full rationale.
     let mesh_count = mesh_assets.high_water();
+    // RD6 / D-DS: the camera gather's material resolution inputs, read once (see the doc).
+    let material_table: &Assets<Material> = &material_assets;
+    let material_high_water = material_table.high_water() as u32;
+    let default = (
+        material_table.get_by_index(0).map_or([0.8, 0.8, 0.8, 1.0], |m| m.gpu.base_color),
+        material_table.get_by_index(0).is_some_and(|m| m.double_sided),
+    );
     // The caster gather is ALL-STATIC (the CSM depth pass reads the caster affines from
     // this scratch's `batches`, never an interpolated ring), so every row takes the
     // `None` pair branch of the unified gather — `pair_ring` / `pair_out_slot` stay empty
     // and inert on the caster scratch. Reuses the one gather core (refined-B).
-    scratch.0.gather_mixed_into(
+    scratch.0.gather_faced_into(
         mesh_count,
         // INVARIANT (asset-streaming plan F6 FIX-2): never dereference a non-Loaded
         // slot — see `mesh_draw::gather_mesh_draws`'s identical fix for the full
@@ -254,9 +281,19 @@ pub fn gather_shadow_casters(
         // occlusion capability is NOT constant-folded the same way: it is the row's real
         // marker presence (see this fn's doc).
         || {
-            q.iter().map(|(h, col, occ)| {
-                (h.0, col, None, PerInstanceMaterial::default(), occ.is_some())
-            })
+            q.iter()
+                .map(move |(h, col, mat_h, occ)| {
+                    let (_id, _base_color, double_sided) =
+                        resolve_material_id(material_table, material_high_water, default, mat_h);
+                    let flags = (u32::from(occ.is_some()) * VB_INST_FLAG_OCCLUSION_CULLING)
+                        | mesh_face_bits(double_sided, col);
+                    (h.0, col, None, PerInstanceMaterial::default(), flags)
+                })
+                .chain(q_mat_stale.iter().map(move |(h, col, occ)| {
+                    let flags = (u32::from(occ.is_some()) * VB_INST_FLAG_OCCLUSION_CULLING)
+                        | mesh_face_bits(default.1, col);
+                    (h.0, col, None, PerInstanceMaterial::default(), flags)
+                }))
         },
     );
 }
@@ -356,13 +393,17 @@ pub fn arvo_transform(rows: &[[f32; 4]; 3], lc: [f32; 3], lh: [f32; 3]) -> ([f32
 /// `caster_batches` (`*cursor`, starting at 0 for the frame) answers every camera batch in
 /// order, O(camera + caster) per frame. Pure (no world access) so the walk has a host test.
 ///
-/// The key this commit walks on is HEAD's: the mesh id alone.
+/// RD6 / D-DS: the key is `(face class, mesh id)` — the gather core's class-major bucket order —
+/// so a mesh whose single-sided instances do not cast but whose double-sided ones do marks only
+/// its double-sided batch. Both gathers derive a row's class from the same material resolution
+/// and the same `InstanceModelCol` determinant ([`gather_shadow_casters`]).
 #[inline]
 pub fn batch_casts_shadow(cursor: &mut usize, caster_batches: &[DrawBatch], batch: &DrawBatch) -> bool {
-    while *cursor < caster_batches.len() && caster_batches[*cursor].mesh_id < batch.mesh_id {
+    let key = |b: &DrawBatch| (mesh_face_class(b.face), b.mesh_id);
+    while *cursor < caster_batches.len() && key(&caster_batches[*cursor]) < key(batch) {
         *cursor += 1;
     }
-    *cursor < caster_batches.len() && caster_batches[*cursor].mesh_id == batch.mesh_id
+    *cursor < caster_batches.len() && key(&caster_batches[*cursor]) == key(batch)
 }
 
 /// VG rung R2c: ONE batch's world-space AABB — the union of [`arvo_transform`] over that batch's

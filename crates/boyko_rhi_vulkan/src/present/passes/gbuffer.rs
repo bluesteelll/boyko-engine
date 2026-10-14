@@ -7,6 +7,7 @@ use core::ptr;
 
 use boyko_log::codes::{OnceSite, W2104};
 use boyko_rhi::TimestampStage;
+use boyko_rhi::enums::MeshPassKind;
 
 use crate::compute::{
     CoarseMode, DEFAULT_MARCHER_OMEGA, FineMarcherPush, INTERP_INSTANCES_PUSH_BYTES, LOCAL_SIZE_X,
@@ -1136,17 +1137,48 @@ impl Renderer<'_> {
                     // offset — NONZERO for every mesh after the first (the C1 proof) — then
                     // binds its own vertex+index buffers (with its O3 index width) and draws
                     // its instance bucket.
+                    //
+                    // RD6 / D-DS: with `scene.face_pipelines` (production) each batch binds the
+                    // cull member its face class selects (each member's layout is built from the
+                    // same set layouts and push range, so they are compatible: the bound sets and the
+                    // pushed matrix survive the switch) and re-pushes the WHOLE
+                    // `[80, 88)` tail — `base_instance` and the template's `use_model_matrix`
+                    // word with the batch's face bits OR-ed in (the fragment orients a
+                    // double-sided back face's normal by them). Without it (every harness) the
+                    // loop is HEAD's: one pipeline, the 4-byte `base_instance` re-push.
+                    let raster_members = scene.face_pipelines.and_then(|fp| fp.raster_family(raster_pipeline));
+                    let push_word = u32::from_le_bytes([scene.mvp[84], scene.mvp[85], scene.mvp[86], scene.mvp[87]]);
+                    let mut bound_pipe = raster_pipeline.pipeline;
                     for batch in scene.mesh_draw {
                         let base = batch.base_instance;
-                        ts.cmd();
-                        (self.fns.cmd_push_constants)(
-                            cmd,
-                            raster_pipeline.layout,
-                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                            GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
-                            4,
-                            (&base as *const u32).cast(),
-                        );
+                        if let Some(members) = raster_members {
+                            let member = members.for_face(batch.face, MeshPassKind::CameraView);
+                            if member.pipeline != bound_pipe {
+                                ts.cmd();
+                                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, member.pipeline);
+                                bound_pipe = member.pipeline;
+                            }
+                            let tail = [base, push_word | batch.face];
+                            ts.cmd();
+                            (self.fns.cmd_push_constants)(
+                                cmd,
+                                raster_pipeline.layout,
+                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                                8,
+                                tail.as_ptr().cast(),
+                            );
+                        } else {
+                            ts.cmd();
+                            (self.fns.cmd_push_constants)(
+                                cmd,
+                                raster_pipeline.layout,
+                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                                4,
+                                (&base as *const u32).cast(),
+                            );
+                        }
                         ts.cmd();
                         (self.fns.cmd_bind_vertex_buffers)(
                             cmd,
@@ -2216,6 +2248,10 @@ impl Renderer<'_> {
                         VK_PIPELINE_BIND_POINT_GRAPHICS,
                         csm.pipeline.pipeline,
                     );
+                    // RD6 / D-DS: the cascade starts on the existing (`Front`) caster pipeline;
+                    // with `scene.face_pipelines` each batch binds its face class's member.
+                    let csm_members = scene.face_pipelines.map(|fp| fp.caster_depth);
+                    let mut bound_pipe = csm.pipeline.pipeline;
                     ts.cmd();
                     (self.fns.cmd_bind_descriptor_sets)(
                         cmd,
@@ -2251,6 +2287,14 @@ impl Renderer<'_> {
                             continue;
                         }
                         let base = batch.base_instance;
+                        if let Some(members) = csm_members {
+                            let member = members.for_face(batch.face, MeshPassKind::LightView);
+                            if member.pipeline != bound_pipe {
+                                ts.cmd();
+                                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, member.pipeline);
+                                bound_pipe = member.pipeline;
+                            }
+                        }
                         csm_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
                             ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
                             .copy_from_slice(&base.to_le_bytes());
@@ -2379,6 +2423,9 @@ impl Renderer<'_> {
             // pipeline binds. `bound_point` tracks which pipeline is currently bound (`None` = none
             // yet).
             let mut bound_point: Option<bool> = None;
+            // RD6 / D-DS: the pipeline actually bound — a batch may have switched to a cull member
+            // of its family, which `bound_point` (the family) does not record.
+            let mut bound_pipe = VkPipeline::NULL;
             for s in 0..active {
                 // Shadow Phase 5 Inc-2: select this layer's pipeline by its TYPE. A SPOT face uses
                 // the `csm_depth` NDC-z pipeline; a POINT cube face uses the `punctual_depth`
@@ -2460,6 +2507,7 @@ impl Renderer<'_> {
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
                             face_pipeline.pipeline,
                         );
+                        bound_pipe = face_pipeline.pipeline;
                         ts.cmd();
                         (self.fns.cmd_bind_descriptor_sets)(
                             cmd,
@@ -2491,11 +2539,23 @@ impl Renderer<'_> {
                     // mesh (room floor/wall) is skipped so it does not stamp itself into this slot and
                     // cast a spurious omni/cone shadow. An EMPTY list (or all-receivers) records the
                     // depth scope with no draw (a cleared slot — every receiver in that cone fully lit).
+                    // RD6 / D-DS: the slot's family members (SPOT: the cascade family; POINT: the
+                    // point family) — each batch binds its face class's member.
+                    let slot_members =
+                        scene.face_pipelines.map(|fp| if is_point { fp.caster_point } else { fp.caster_depth });
                     for batch in scene.mesh_draw {
                         if !batch.casts_shadow {
                             continue;
                         }
                         let base = batch.base_instance;
+                        if let Some(members) = slot_members {
+                            let member = members.for_face(batch.face, MeshPassKind::LightView);
+                            if member.pipeline != bound_pipe {
+                                ts.cmd();
+                                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, member.pipeline);
+                                bound_pipe = member.pipeline;
+                            }
+                        }
                         atlas_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
                             ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
                             .copy_from_slice(&base.to_le_bytes());

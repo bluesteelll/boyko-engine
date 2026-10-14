@@ -828,17 +828,31 @@ impl CullMode {
     /// RD6 / D-DS: the cull a mesh draw of face class `face` (its
     /// [`MESH_FACE_DOUBLE_SIDED`] / [`MESH_FACE_MIRRORED`] bits; other bits ignored) takes in a
     /// pass of `kind` — the ONE table every camera-view and caster pipeline family selects its
-    /// member through.
+    /// member through (the pipelines keep `VK_FRONT_FACE_COUNTER_CLOCKWISE`; a mirrored
+    /// instance's screen winding is reversed, so its member swaps `Back` and `Front`).
     ///
-    /// The table this commit ships is HEAD's (every camera-view family `None`, every caster
-    /// family `Front`), so the red-first oracles (`boyko_render/tests/mesh_face_cull_table.rs`)
-    /// run against the behaviour the engine has today.
+    /// | face | camera view | light view |
+    /// |---|---|---|
+    /// | single-sided | `Back` | `Front` |
+    /// | single-sided, mirrored | `Front` | `Back` |
+    /// | double-sided (either handedness) | `None` | `None` |
+    ///
+    /// Camera: glTF 2.0 "Double Sided" — single-sided culls back faces, double-sided culls
+    /// nothing. Light: the light basis is mirrored relative to the camera's (`right × up =
+    /// +forward`), so a counter-clockwise face toward a light rasterises BACK-facing there; the
+    /// single-sided caster keeps the light-facing faces (`Front` culls the faces turned away —
+    /// HEAD's caster set, policy K1), and a double-sided caster draws both sides.
+    /// `boyko_render/tests/mesh_face_cull_table.rs` derives this table on the engine's real
+    /// view-projection builders.
     #[inline]
     pub const fn for_mesh_face(face: u32, kind: MeshPassKind) -> Self {
-        let _ = face;
-        match kind {
-            MeshPassKind::CameraView => Self::None,
-            MeshPassKind::LightView => Self::Front,
+        if face & MESH_FACE_DOUBLE_SIDED != 0 {
+            return Self::None;
+        }
+        let mirrored = face & MESH_FACE_MIRRORED != 0;
+        match (kind, mirrored) {
+            (MeshPassKind::CameraView, false) | (MeshPassKind::LightView, true) => Self::Back,
+            (MeshPassKind::CameraView, true) | (MeshPassKind::LightView, false) => Self::Front,
         }
     }
 }

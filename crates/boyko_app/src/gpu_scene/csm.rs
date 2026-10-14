@@ -44,6 +44,9 @@ pub(super) struct CsmResources {
     /// zero-seeded — bound-but-unread while the depth pass is OFF.
     pub(super) ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
     pub(super) depth_pipeline: VulkanGraphicsPipeline,
+    /// RD6 / D-DS: [`Self::depth_pipeline`]'s `None` / `Back` cull members (it is the `Front`
+    /// member) — the CSM cascade and SPOT atlas caster family.
+    pub(super) depth_faces: CasterFaceMembers,
     depth_vs: VulkanShaderModule,
     depth_fs: VulkanShaderModule,
     pub(super) atlas: VulkanTexture,
@@ -89,6 +92,8 @@ pub(super) struct CsmResources {
     pub(super) ddgi_update_pipeline: ComputePipeline,
     pub(super) ddgi_update_layout: VulkanBindGroupLayout,
     pub(super) point_depth_pipeline: VulkanGraphicsPipeline,
+    /// RD6 / D-DS: [`Self::point_depth_pipeline`]'s `None` / `Back` cull members.
+    pub(super) point_depth_faces: CasterFaceMembers,
     point_depth_vs: VulkanShaderModule,
     point_depth_fs: VulkanShaderModule,
     /// The `BOYKO_SHADOW_POISON` diagnostic knob, read once at boot. `None` on every steady run
@@ -165,7 +170,9 @@ impl CsmResources {
             slope_factor: 1.5,
             clamp: 0.0,
         });
-        let depth_pipeline = RhiDevice::create_graphics_pipeline(
+        // RD6 / D-DS: the family is built through one closure so its cull members differ from
+        // the existing pipeline in `cull_mode` ALONE (same modules, layout, push range).
+        let build_depth_pipeline = |cull_mode: CullMode| RhiDevice::create_graphics_pipeline(
             device,
             &GraphicsPipelineDesc {
                 vertex_module: &depth_vs,
@@ -182,11 +189,13 @@ impl CsmResources {
                 push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                 bind_group_layout: Some(instance_layout),
                 blend: None,
-                cull_mode: CullMode::Front,
+                cull_mode,
                 depth_bias,
             },
         )
         .expect("invariant: CSM depth-only graphics pipeline create");
+        let depth_pipeline = build_depth_pipeline(CullMode::Front);
+        let depth_faces = CasterFaceMembers::build(build_depth_pipeline);
 
         let atlas = RhiDevice::create_texture(
             device,
@@ -355,7 +364,9 @@ impl CsmResources {
             .expect("invariant: punctual point depth VS module create");
         let point_depth_fs = RhiDevice::create_shader_module(device, punctual_depth_fs_spirv())
             .expect("invariant: punctual point depth FS module create");
-        let point_depth_pipeline = RhiDevice::create_graphics_pipeline(
+        // RD6 / D-DS: the family is built through one closure so its cull members differ from
+        // the existing pipeline in `cull_mode` ALONE (same modules, layout, push range).
+        let build_point_depth_pipeline = |cull_mode: CullMode| RhiDevice::create_graphics_pipeline(
             device,
             &GraphicsPipelineDesc {
                 vertex_module: &point_depth_vs,
@@ -372,11 +383,13 @@ impl CsmResources {
                 push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                 bind_group_layout: Some(instance_layout),
                 blend: None,
-                cull_mode: CullMode::Front,
+                cull_mode,
                 depth_bias,
             },
         )
         .expect("invariant: punctual point depth-write graphics pipeline create");
+        let point_depth_pipeline = build_point_depth_pipeline(CullMode::Front);
+        let point_depth_faces = CasterFaceMembers::build(build_point_depth_pipeline);
 
         // ── One-time BOOT LAYOUT SEED (review R4-W1): transition the cascade array
         // + the shadow atlas from their created UNDEFINED layout to
@@ -407,6 +420,7 @@ impl CsmResources {
             sampler,
             ubo,
             depth_pipeline,
+            depth_faces,
             depth_vs,
             depth_fs,
             atlas,
@@ -419,6 +433,7 @@ impl CsmResources {
             ddgi_update_pipeline,
             ddgi_update_layout,
             point_depth_pipeline,
+            point_depth_faces,
             point_depth_vs,
             point_depth_fs,
             poison,
@@ -692,6 +707,7 @@ impl CsmResources {
         // references these resources; reverse creation order.
         unsafe {
             RhiDevice::destroy_graphics_pipeline(device, self.point_depth_pipeline);
+            self.point_depth_faces.destroy(device);
             RhiDevice::destroy_shader_module(device, self.point_depth_fs);
             RhiDevice::destroy_shader_module(device, self.point_depth_vs);
             // SDFDDGI I2 (arm): the probe-update pipeline + its bind-group layout (reverse creation
@@ -714,6 +730,7 @@ impl CsmResources {
             RhiDevice::destroy_sampler(device, self.atlas_sampler);
             RhiDevice::destroy_texture(device, self.atlas);
             RhiDevice::destroy_graphics_pipeline(device, self.depth_pipeline);
+            self.depth_faces.destroy(device);
             RhiDevice::destroy_shader_module(device, self.depth_fs);
             RhiDevice::destroy_shader_module(device, self.depth_vs);
             for slot in self.ubo {

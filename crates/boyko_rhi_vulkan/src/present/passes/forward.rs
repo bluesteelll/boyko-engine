@@ -33,6 +33,8 @@
 
 use core::ptr;
 
+use boyko_rhi::enums::MeshPassKind;
+
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
@@ -306,8 +308,20 @@ impl Renderer<'_> {
                     (self.fns.cmd_bind_vertex_buffers)(cmd, 0, 1, &scene.vertex_buffer.buffer, &vertex_offset);
                     (self.fns.cmd_draw)(cmd, scene.vertex_count, 1, 0, 0);
                 } else {
+                    // RD6 / D-DS: the prepass picks the SAME cull member per batch as the EQUAL
+                    // colour pass below (DS-D9): a back face culled here but drawn there would fail
+                    // EQUAL against the depth behind it and shade nothing.
+                    let prepass_members = scene.face_pipelines.map(|fp| fp.forward_prepass);
+                    let mut bound_pipe = prepass_pipeline.pipeline;
                     for batch in scene.mesh_draw {
                         let base = batch.base_instance;
+                        if let Some(members) = prepass_members {
+                            let member = members.for_face(batch.face, MeshPassKind::CameraView);
+                            if member.pipeline != bound_pipe {
+                                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, member.pipeline);
+                                bound_pipe = member.pipeline;
+                            }
+                        }
                         (self.fns.cmd_push_constants)(
                             cmd,
                             prepass_pipeline.layout,
@@ -559,6 +573,9 @@ impl Renderer<'_> {
                 unsafe {
                     (self.fns.cmd_begin_rendering)(cmd, &csm_rendering);
                     (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, csm.pipeline.pipeline);
+                    // RD6 / D-DS: each caster batch binds its face class's member.
+                    let csm_members = scene.face_pipelines.map(|fp| fp.caster_depth);
+                    let mut bound_pipe = csm.pipeline.pipeline;
                     (self.fns.cmd_bind_descriptor_sets)(
                         cmd,
                         VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -584,6 +601,13 @@ impl Renderer<'_> {
                             continue;
                         }
                         let base = batch.base_instance;
+                        if let Some(members) = csm_members {
+                            let member = members.for_face(batch.face, MeshPassKind::LightView);
+                            if member.pipeline != bound_pipe {
+                                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, member.pipeline);
+                                bound_pipe = member.pipeline;
+                            }
+                        }
                         csm_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
                             ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
                             .copy_from_slice(&base.to_le_bytes());
@@ -630,6 +654,8 @@ impl Renderer<'_> {
             };
             let mut atlas_push = atlas_act.push;
             let mut bound_point: Option<bool> = None;
+            // RD6 / D-DS: the pipeline actually bound (a batch may switch to a cull member).
+            let mut bound_pipe = VkPipeline::NULL;
             for s in 0..active {
                 let is_point = atlas_act.face_is_point[s as usize];
                 let face_pipeline = if is_point { atlas_act.point_pipeline } else { atlas_act.pipeline };
@@ -676,6 +702,7 @@ impl Renderer<'_> {
                     (self.fns.cmd_begin_rendering)(cmd, &atlas_rendering);
                     if bound_point != Some(is_point) {
                         (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, face_pipeline.pipeline);
+                        bound_pipe = face_pipeline.pipeline;
                         (self.fns.cmd_bind_descriptor_sets)(
                             cmd,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -698,11 +725,21 @@ impl Renderer<'_> {
                     );
                     (self.fns.cmd_set_viewport)(cmd, 0, 1, &atlas_viewport);
                     (self.fns.cmd_set_scissor)(cmd, 0, 1, &atlas_area);
+                    // RD6 / D-DS: the slot's family members; each batch binds its face's member.
+                    let slot_members =
+                        scene.face_pipelines.map(|fp| if is_point { fp.caster_point } else { fp.caster_depth });
                     for batch in scene.mesh_draw {
                         if !batch.casts_shadow {
                             continue;
                         }
                         let base = batch.base_instance;
+                        if let Some(members) = slot_members {
+                            let member = members.for_face(batch.face, MeshPassKind::LightView);
+                            if member.pipeline != bound_pipe {
+                                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, member.pipeline);
+                                bound_pipe = member.pipeline;
+                            }
+                        }
                         atlas_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
                             ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
                             .copy_from_slice(&base.to_le_bytes());
@@ -909,16 +946,40 @@ impl Renderer<'_> {
                 (self.fns.cmd_bind_vertex_buffers)(cmd, 0, 1, &scene.vertex_buffer.buffer, &vertex_offset);
                 (self.fns.cmd_draw)(cmd, scene.vertex_count, 1, 0, 0);
             } else {
+                // RD6 / D-DS: each batch binds its face class's member (the same member the
+                // ForwardPlus prepass bound) and re-pushes `[80, 88)`: `base_instance` and the
+                // template's `use_model_matrix` word with the face bits the fragment orients a
+                // double-sided back face's normal by. Without `face_pipelines` (harnesses): HEAD.
+                let colour_members = scene.face_pipelines.map(|fp| fp.forward);
+                let push_word = u32::from_le_bytes([scene.mvp[84], scene.mvp[85], scene.mvp[86], scene.mvp[87]]);
+                let mut bound_pipe = forward_pipeline.pipeline;
                 for batch in scene.mesh_draw {
                     let base = batch.base_instance;
-                    (self.fns.cmd_push_constants)(
-                        cmd,
-                        forward_pipeline.layout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
-                        4,
-                        (&base as *const u32).cast(),
-                    );
+                    if let Some(members) = colour_members {
+                        let member = members.for_face(batch.face, MeshPassKind::CameraView);
+                        if member.pipeline != bound_pipe {
+                            (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, member.pipeline);
+                            bound_pipe = member.pipeline;
+                        }
+                        let tail = [base, push_word | batch.face];
+                        (self.fns.cmd_push_constants)(
+                            cmd,
+                            forward_pipeline.layout,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                            GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                            8,
+                            tail.as_ptr().cast(),
+                        );
+                    } else {
+                        (self.fns.cmd_push_constants)(
+                            cmd,
+                            forward_pipeline.layout,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                            GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                            4,
+                            (&base as *const u32).cast(),
+                        );
+                    }
                     (self.fns.cmd_bind_vertex_buffers)(cmd, 0, 1, &batch.vertex_buffer.buffer, &vertex_offset);
                     (self.fns.cmd_bind_index_buffer)(cmd, batch.index_buffer.buffer, 0, batch.index_type);
                     (self.fns.cmd_draw_indexed)(cmd, batch.index_count, batch.instance_count, 0, 0, 0);

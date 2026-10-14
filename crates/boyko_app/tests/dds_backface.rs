@@ -20,7 +20,8 @@
 //!    card with its authored front AWAY from the light still casts on the floor (the lit ratio in
 //!    the host-predicted umbra, over pixels where the floor is visible in both runs, ≤ 0.5); the
 //!    single-sided controls keep HEAD's light-facing caster set (K1): toward the light casts,
-//!    away does not.
+//!    away does not — except the sun on a `hwrt` Deferred boot, whose traced shadow rays are
+//!    facing-agnostic (DS-D8), so there the away card casts too.
 //! 4. `dds_mirrored_cube_*` — the built-in cube at scale `(−1, 1, 1)` renders the pixels of the
 //!    unmirrored one (its X mirror is the same geometric cube). Green before the fix (culling is
 //!    off); the regression guard of a mirrored instance turned inside-out.
@@ -340,7 +341,22 @@ fn double_sided_caster(path: RenderPath, light: &str) {
     assert!(r <= 0.5, "CONTROL on {path:?} ({light}): a single-sided card facing the light must cast (ratio {r:.3})");
     let ss_away = caster(&[(ENV_FACING, "back")], &format!("{light}_ss_away"));
     let r = ratio(&ss_away, "single-sided, front away from the light");
-    assert!(r >= 0.95, "CONTROL on {path:?} ({light}): a single-sided card facing away must not cast (K1; ratio {r:.3})");
+    // DS-D8 (a stated narrowing): on a `hwrt` Deferred boot the sun's mesh shadow is also traced
+    // (`deferred_pbr.hlsl`'s `FORCE_OPAQUE` ray query) and RT shadow rays treat every triangle as
+    // two-sided, so there the away-facing single-sided card DOES occlude and K1's control inverts.
+    // The raster caster members this test is about are then gated by the software leg.
+    if cfg!(feature = "hwrt") && path == RenderPath::Deferred && !point {
+        assert!(
+            r <= 0.5,
+            "CONTROL on {path:?} ({light}, hwrt): RT shadow rays are facing-agnostic (DS-D8), so a single-sided card \
+             facing away must still cast here (ratio {r:.3})"
+        );
+    } else {
+        assert!(
+            r >= 0.95,
+            "CONTROL on {path:?} ({light}): a single-sided card facing away must not cast (K1; ratio {r:.3})"
+        );
+    }
     let ds_away = caster(&[(ENV_FACING, "back"), (ENV_DS, "1")], &format!("{light}_ds_away"));
     let r = ratio(&ds_away, "double-sided, front away from the light");
     assert!(

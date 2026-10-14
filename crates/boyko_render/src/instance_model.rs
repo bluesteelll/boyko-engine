@@ -255,14 +255,19 @@ pub struct VbInstanceRow {
     /// Bit 0 is
     /// [`VB_INST_FLAG_OCCLUSION_CULLING`](crate::occlusion_marker::VB_INST_FLAG_OCCLUSION_CULLING):
     /// set iff this instance's entity carries
-    /// [`OcclusionCulling`](crate::occlusion_marker::OcclusionCulling). Bits 1..31 are
-    /// reserved and written zero.
+    /// [`OcclusionCulling`](crate::occlusion_marker::OcclusionCulling). RD6 / D-DS: bits 2–3
+    /// are the instance's mesh-face class —
+    /// [`MESH_FACE_DOUBLE_SIDED`](boyko_rhi::enums::MESH_FACE_DOUBLE_SIDED) (its material is
+    /// glTF `doubleSided`) and [`MESH_FACE_MIRRORED`](boyko_rhi::enums::MESH_FACE_MIRRORED) (its
+    /// model determinant is negative), from
+    /// [`mesh_face_bits`](crate::mesh_face::mesh_face_bits). Every other bit is reserved and
+    /// written zero.
     ///
     /// It occupies the SAME 16-byte lane as `mesh_id` @48 — the batch cull's existing
     /// `gVbInstances[base_instance + j]` load already brings those bytes into cache, so the
-    /// flag costs ZERO extra device fetches. Read by NOTHING on the device as of P2-2: the
-    /// HLSL mirrors still spell offsets 52..64 `uint3 _pad` (a layout-identical spelling),
-    /// and piece 3 is what renames the field and reads the bit.
+    /// flag costs ZERO extra device fetches. `vb_geom_fetch.hlsli` reads the face bits (it
+    /// spells the word `uint flags; uint2 _pad;`) to orient a double-sided back face's normal;
+    /// the batch cull reads bit 0.
     ///
     /// A word rather than a `bool` so piece 3 adds a BIT, not a column.
     pub flags: u32,

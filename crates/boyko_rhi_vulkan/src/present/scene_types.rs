@@ -4,6 +4,7 @@
 //! `GBufferMeshDraw`), and the associated size/offset constants. Split out of the
 //! former monolithic `swapchain.rs` (audit W4).
 
+use boyko_rhi::enums::{CullMode, MeshPassKind};
 use boyko_rhi::{Format, ImageUsage, RhiDevice, TextureDesc, TextureDimension};
 
 #[cfg(feature = "hwrt")]
@@ -422,6 +423,93 @@ pub struct GBufferMeshDraw<'a> {
     /// cull's oracle and the shader read the SAME numbers, making any disagreement a shader bug
     /// rather than a math bug.
     pub world_aabb: Option<([f32; 3], [f32; 3])>,
+    /// RD6 / D-DS: this batch's mesh-face class (`boyko_rhi::enums::MESH_FACE_DOUBLE_SIDED` /
+    /// `MESH_FACE_MIRRORED`; `0` = single-sided, not mirrored). With
+    /// [`GBufferScene::face_pipelines`] `Some`, every camera-view and caster loop binds the
+    /// member [`CullMode::for_mesh_face`] selects for it, and the camera raster loops OR it into
+    /// the push word the fragment shaders orient their normal by. Ignored (as if `0`) when
+    /// `face_pipelines` is `None`.
+    pub face: u32,
+}
+
+/// RD6 / D-DS: the three cull members of one mesh pipeline family — the same
+/// `GraphicsPipelineDesc` built with `cull_mode` `None`, `Front` and `Back`, against the SAME
+/// descriptor-set layout object and push range, so the members' pipeline layouts are compatible
+/// for every set and for push constants: a member switch inside a pass keeps every bound set and
+/// pushed word valid. 0 new `.spv` — the cull is pipeline state.
+#[derive(Clone, Copy)]
+pub struct CullMembers<'a> {
+    /// The `CullMode::None` member.
+    pub none: &'a VulkanGraphicsPipeline,
+    /// The `CullMode::Front` member.
+    pub front: &'a VulkanGraphicsPipeline,
+    /// The `CullMode::Back` member.
+    pub back: &'a VulkanGraphicsPipeline,
+}
+
+impl<'a> CullMembers<'a> {
+    /// The member culling `cull`.
+    #[inline]
+    pub fn get(&self, cull: CullMode) -> &'a VulkanGraphicsPipeline {
+        match cull {
+            CullMode::None => self.none,
+            CullMode::Front => self.front,
+            CullMode::Back => self.back,
+        }
+    }
+
+    /// The member a batch of face class `face` takes in a pass of `kind`.
+    #[inline]
+    pub fn for_face(&self, face: u32, kind: MeshPassKind) -> &'a VulkanGraphicsPipeline {
+        self.get(CullMode::for_mesh_face(face, kind))
+    }
+}
+
+/// RD6 / D-DS: every mesh pipeline family's cull members (built once at boot by
+/// `boyko_app::gpu_scene`). `None` on [`GBufferScene::face_pipelines`] — every test harness that
+/// builds its own scene — keeps HEAD's recording: each loop binds its family's existing pipeline
+/// and the push word is untouched. `Some` (production) selects per batch.
+///
+/// The camera-view families' `none` member is the pipeline the scene already names
+/// (`raster_pipeline`, `forward_pipeline`, …); the caster families' `front` member is the existing
+/// caster pipeline. A family absent on this boot (an `hwrt`-only family on a software build) is
+/// `None`, and its loops fall back to the existing pipeline.
+#[derive(Clone, Copy)]
+pub struct MeshFacePipelines<'a> {
+    /// The Deferred base mesh raster (`gbuffer_mrt`).
+    pub raster: CullMembers<'a>,
+    /// The Deferred per-instance-material raster (`gbuffer_mrt_pm`).
+    pub raster_pm: CullMembers<'a>,
+    /// The Deferred textured raster (`gbuffer_mrt_tex`; built lazily with the bindless table).
+    pub raster_tex: Option<CullMembers<'a>>,
+    /// The Deferred motion-vector raster (`gbuffer_mrt_mv`, `hwrt`).
+    pub raster_mv: Option<CullMembers<'a>>,
+    /// The Deferred motion-vector + per-instance-material raster (`gbuffer_mrt_mvpm`, `hwrt`).
+    pub raster_mvpm: Option<CullMembers<'a>>,
+    /// The Forward / ForwardPlus colour pass (whichever `forward_pipeline` the boot resolved).
+    pub forward: CullMembers<'a>,
+    /// The ForwardPlus depth prepass.
+    pub forward_prepass: CullMembers<'a>,
+    /// The VisibilityBuffer id raster (`vb_raster`).
+    pub vb_raster: CullMembers<'a>,
+    /// The CSM cascade and SPOT atlas caster pipeline (`csm_depth`).
+    pub caster_depth: CullMembers<'a>,
+    /// The POINT atlas caster pipeline (`punctual_depth`).
+    pub caster_point: CullMembers<'a>,
+}
+
+impl<'a> MeshFacePipelines<'a> {
+    /// The Deferred raster family whose existing pipeline is `existing` — matched by identity
+    /// against each family's `none` member, so the recorder's own variant selection (base / PM /
+    /// TEX / MV / MVPM) stays the single source of truth.
+    #[inline]
+    pub fn raster_family(&self, existing: &VulkanGraphicsPipeline) -> Option<CullMembers<'a>> {
+        let same = |m: &CullMembers<'a>| core::ptr::eq(m.none, existing);
+        [Some(self.raster), Some(self.raster_pm), self.raster_tex, self.raster_mv, self.raster_mvpm]
+            .into_iter()
+            .flatten()
+            .find(same)
+    }
 }
 
 /// The byte size of the marcher's COMPUTE push constant — DERIVED from the
@@ -3121,6 +3209,10 @@ pub struct GBufferScene<'a> {
     /// the `instances`/`Camera` subset — the SAME bound-but-unread-subset idiom
     /// [`Self::forward_sky_pipeline`] establishes).
     pub vb_raster_pipeline: Option<&'a VulkanGraphicsPipeline>,
+    /// RD6 / D-DS: every mesh pipeline family's cull members ([`MeshFacePipelines`]). `None` in
+    /// every test harness (each loop binds its family's existing pipeline, the push word
+    /// untouched — the harness pins byte-identical by construction); `Some` in production.
+    pub face_pipelines: Option<MeshFacePipelines<'a>>,
     /// The VB v1 sky BACKGROUND pipeline — REUSES the EXISTING compiled `forward_sky.{vs,fs}.hlsl`
     /// SPIR-V verbatim (byte-identical shader modules to [`Self::forward_sky_pipeline`]'s own),
     /// built as a NEW pipeline OBJECT against [`Self::vb_layout0`] (a DIFFERENT descriptor-set

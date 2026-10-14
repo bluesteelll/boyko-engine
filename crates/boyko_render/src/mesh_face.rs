@@ -47,12 +47,11 @@ pub fn model_det(model: &InstanceModelCol) -> f32 {
 /// [`MESH_FACE_MIRRORED`] iff the model's determinant is negative (`det < 0`; a zero, `−0.0` or
 /// NaN determinant is not mirrored — a degenerate instance rasterises nothing either way).
 ///
-/// The bits this commit ships are HEAD's: every instance is class 0 (the red-first oracles run
-/// against the engine's behaviour today).
+/// Branch-free: two `bool` multiplies, the determinant's 14 flops on the 48 B the gather
+/// already reads.
 #[inline]
 pub fn mesh_face_bits(double_sided: bool, model: &InstanceModelCol) -> u32 {
-    let _ = (double_sided, model, MESH_FACE_DOUBLE_SIDED, MESH_FACE_MIRRORED);
-    0
+    u32::from(double_sided) * MESH_FACE_DOUBLE_SIDED + u32::from(model_det(model) < 0.0) * MESH_FACE_MIRRORED
 }
 
 /// How many triangles of a mesh agree with the counter-clockwise convention.

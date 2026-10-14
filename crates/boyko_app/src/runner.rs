@@ -2312,11 +2312,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             let instance_ring = scratch.ring.as_read_slice();
             let mut ci = 0usize;
             for b in scratch.batches.as_read_slice() {
-                while ci < caster_batches.len() && caster_batches[ci].mesh_id < b.mesh_id {
-                    ci += 1;
-                }
-                let casts_shadow =
-                    ci < caster_batches.len() && caster_batches[ci].mesh_id == b.mesh_id;
+                // RD6 / D-DS: both lists are class-major, so the merge walks the
+                // `(face class, mesh_id)` key the gathers sort by — a `mesh_id`-only walk would
+                // skip a class's casters once the cursor passed that mesh in an earlier class.
+                let casts_shadow = boyko_render::csm_caster::batch_casts_shadow(&mut ci, caster_batches, b);
                 // INVARIANT (asset-streaming plan F6 FIX-2): this resolve must NEVER
                 // dereference a non-Loaded slot. `scratch.batches` was gathered earlier
                 // THIS frame's `app.update_with_delta`, but `retire_deferred_frees` (run
@@ -2335,6 +2334,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     base_instance: b.base_instance,
                     instance_count: b.instance_count,
                     casts_shadow,
+                    face: b.face,
                     // VG rung R2c: this batch's world AABB, folded from the SAME instance ring the
                     // raster draws and through the SAME Arvo transform the CSM caster fit uses
                     // (`arvo_transform`, shared so the two can never drift). `None` when the fold

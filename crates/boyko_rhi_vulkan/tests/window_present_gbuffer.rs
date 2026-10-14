@@ -2331,6 +2331,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // .rs`'s doc) — `None` for every VB field, the same "Option lets a non-VB fixture say so
         // honestly" rationale as the Forward fields above.
         vb_raster_pipeline: None,
+        face_pipelines: None,
         vb_sky_pipeline: None,
         vb_resolve_pipeline: None,
         vb_classify_count_pipeline: None,
@@ -3466,6 +3467,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // .rs`'s doc) — `None` for every VB field, the same "Option lets a non-VB fixture say so
         // honestly" rationale as the Forward fields above.
         vb_raster_pipeline: None,
+        face_pipelines: None,
         vb_sky_pipeline: None,
         vb_resolve_pipeline: None,
         vb_classify_count_pipeline: None,
@@ -8457,6 +8459,7 @@ fn run_showcase_body_ddgi(
                     // every batch (UNBOUNDED corners survive every plane) — the conservative
                     // fallback, not a special case.
                     world_aabb: None,
+                    face: 0,
                 })
                 .collect()
         })
@@ -8525,6 +8528,7 @@ fn run_showcase_body_ddgi(
         // .rs`'s doc) — `None` for every VB field, the same "Option lets a non-VB fixture say so
         // honestly" rationale as the Forward fields above.
         vb_raster_pipeline: None,
+        face_pipelines: None,
         vb_sky_pipeline: None,
         vb_resolve_pipeline: None,
         vb_classify_count_pipeline: None,
@@ -9728,6 +9732,7 @@ fn run_showcase_body(
                     // every batch (UNBOUNDED corners survive every plane) — the conservative
                     // fallback, not a special case.
                     world_aabb: None,
+                    face: 0,
                 })
                 .collect()
         })
@@ -9800,6 +9805,7 @@ fn run_showcase_body(
         // .rs`'s doc) — `None` for every VB field, the same "Option lets a non-VB fixture say so
         // honestly" rationale as the Forward fields above.
         vb_raster_pipeline: None,
+        face_pipelines: None,
         vb_sky_pipeline: None,
         vb_resolve_pipeline: None,
         vb_classify_count_pipeline: None,

@@ -76,7 +76,9 @@ use boyko_rhi_vulkan::present::command_witness::CommandWitness;
 use boyko_rhi_vulkan::present::gpu_zone::{
     GPU_RING_DEPTH, GpuZoneRecorder, PairResult, QUERIES_PER_SLOT, RetireScratch, RetiredFrame,
 };
-use boyko_rhi_vulkan::present::{HzbPlan, SdfDepthMergeActivation, VB_CULL_OCC_ARMED, VbOcclusionArm};
+use boyko_rhi_vulkan::present::{
+    CullMembers, HzbPlan, MeshFacePipelines, SdfDepthMergeActivation, VB_CULL_OCC_ARMED, VbOcclusionArm,
+};
 use boyko_rhi_vulkan::present::transparent_depth::{
     TRANSPARENT_CLASS_PARTICLES, TransparentDepthCapability,
 };
@@ -818,6 +820,10 @@ pub(crate) struct MotionVecResources {
     /// `prev_instances`). Selected instead of [`Self::pipeline`] when a temporal frame ALSO
     /// carries a non-default material (F8-mv; MV+PM combined).
     mvpm_pipeline: VulkanGraphicsPipeline,
+    /// RD6 / D-DS: [`Self::pipeline`]'s `Back` / `Front` cull members.
+    mv_faces: CameraFaceMembers,
+    /// RD6 / D-DS: [`Self::mvpm_pipeline`]'s `Back` / `Front` cull members.
+    mvpm_faces: CameraFaceMembers,
     /// F8-mv: the 4-binding set-0 layout the mvpm pipeline declares: binding 0 = the current
     /// instance SSBO (VERTEX), binding 1 = the prev-instance SSBO (VERTEX), binding 2 = the
     /// motion-cam UBO (VERTEX), binding 3 = the per-instance material SSBO (VERTEX). A
@@ -930,6 +936,10 @@ impl MotionVecResources {
 /// VARIABLE slots (`camera_ring[s]`, `instance_rings[s]`) are written by the
 /// runner through `boyko_render`'s token-typed upload fns.
 pub(crate) struct GpuSceneBundles {
+    /// RD6 / D-DS: the camera-view families' `Back` / `Front` cull members ([`FaceMemberSet`]),
+    /// built at boot beside each family's existing pipeline; threaded into every frame's
+    /// `GBufferScene::face_pipelines`.
+    face_members: FaceMemberSet,
     // ── Raster (pass A) ──────────────────────────────────────────────────────
     raster_pipeline: VulkanGraphicsPipeline,
     instance_layout: VulkanBindGroupLayout,
@@ -1647,6 +1657,98 @@ pub(crate) struct GpuSceneBundles {
     vb_census: Option<CommandWitness>,
 }
 
+/// RD6 / D-DS: the two cull members a CAMERA-VIEW mesh pipeline family adds to its existing
+/// (`CullMode::None`) pipeline — the same `GraphicsPipelineDesc` with only `cull_mode` changed,
+/// so 0 new `.spv` and a layout compatible with the existing pipeline's (a mid-pass switch keeps
+/// every bound set and push valid).
+pub(crate) struct CameraFaceMembers {
+    /// The `CullMode::Front` member (a mirrored single-sided batch).
+    front: VulkanGraphicsPipeline,
+    /// The `CullMode::Back` member (a single-sided batch).
+    back: VulkanGraphicsPipeline,
+}
+
+impl CameraFaceMembers {
+    /// Builds both members through the family's own builder closure.
+    pub(crate) fn build(build: impl Fn(CullMode) -> VulkanGraphicsPipeline) -> Self {
+        Self { front: build(CullMode::Front), back: build(CullMode::Back) }
+    }
+
+    /// The family's three members, `none` being the existing pipeline.
+    pub(crate) fn members<'a>(&'a self, none: &'a VulkanGraphicsPipeline) -> CullMembers<'a> {
+        CullMembers { none, front: &self.front, back: &self.back }
+    }
+
+    /// # Safety
+    /// The device is idle and both pipelines were created on `ctx`; each is destroyed once.
+    pub(crate) unsafe fn destroy(self, ctx: &VulkanContext) {
+        // SAFETY: the caller's contract above.
+        unsafe {
+            RhiDevice::destroy_graphics_pipeline(ctx, self.front);
+            RhiDevice::destroy_graphics_pipeline(ctx, self.back);
+        }
+    }
+}
+
+/// RD6 / D-DS: the two cull members a CASTER pipeline family adds to its existing (`CullMode::Front`
+/// — HEAD's light-facing caster set) pipeline. See [`CameraFaceMembers`].
+pub(crate) struct CasterFaceMembers {
+    /// The `CullMode::None` member (a double-sided caster).
+    none: VulkanGraphicsPipeline,
+    /// The `CullMode::Back` member (a mirrored single-sided caster).
+    back: VulkanGraphicsPipeline,
+}
+
+impl CasterFaceMembers {
+    /// Builds both members through the family's own builder closure.
+    pub(crate) fn build(build: impl Fn(CullMode) -> VulkanGraphicsPipeline) -> Self {
+        Self { none: build(CullMode::None), back: build(CullMode::Back) }
+    }
+
+    /// The family's three members, `front` being the existing pipeline.
+    pub(crate) fn members<'a>(&'a self, front: &'a VulkanGraphicsPipeline) -> CullMembers<'a> {
+        CullMembers { none: &self.none, front, back: &self.back }
+    }
+
+    /// # Safety
+    /// The device is idle and both pipelines were created on `ctx`; each is destroyed once.
+    pub(crate) unsafe fn destroy(self, ctx: &VulkanContext) {
+        // SAFETY: the caller's contract above.
+        unsafe {
+            RhiDevice::destroy_graphics_pipeline(ctx, self.none);
+            RhiDevice::destroy_graphics_pipeline(ctx, self.back);
+        }
+    }
+}
+
+/// RD6 / D-DS: the boot-built cull members of the camera-view families [`GpuSceneBundles`] owns
+/// directly (the TEX, MV and MVPM families' members live beside their pipelines in
+/// [`TexturedResources`] / `MotionVecResources`, the casters' in `CsmResources`).
+pub(crate) struct FaceMemberSet {
+    raster: CameraFaceMembers,
+    raster_pm: CameraFaceMembers,
+    forward: CameraFaceMembers,
+    forward_plus: CameraFaceMembers,
+    forward_prepass: CameraFaceMembers,
+    vb_raster: CameraFaceMembers,
+}
+
+impl FaceMemberSet {
+    /// # Safety
+    /// As [`CameraFaceMembers::destroy`], for every family.
+    unsafe fn destroy(self, ctx: &VulkanContext) {
+        // SAFETY: the caller's contract above.
+        unsafe {
+            self.raster.destroy(ctx);
+            self.raster_pm.destroy(ctx);
+            self.forward.destroy(ctx);
+            self.forward_plus.destroy(ctx);
+            self.forward_prepass.destroy(ctx);
+            self.vb_raster.destroy(ctx);
+        }
+    }
+}
+
 /// Textured-PBR T6c: the TEXTURED gbuffer producer pipeline resources — see
 /// [`GpuSceneBundles::tex`] / [`GpuSceneBundles::build_textured_resources`] for the
 /// lazy-build rationale (the bindless texture-array table's descriptor-set LAYOUT, a
@@ -1658,6 +1760,8 @@ struct TexturedResources {
     /// set's layout (FRAGMENT), built via
     /// [`VulkanContext::create_graphics_pipeline_bindless`].
     raster_pipeline_tex: VulkanGraphicsPipeline,
+    /// RD6 / D-DS: [`Self::raster_pipeline_tex`]'s `Back` / `Front` cull members.
+    raster_tex_faces: CameraFaceMembers,
     /// The 2-binding set-0 layout [`Self::raster_pipeline_tex`] declares: instances @0
     /// (VERTEX, the SAME shared `instance_rings`) + instance_materials_tex @1 (VERTEX, its
     /// own per-slot ring). A SEPARATE layout from
@@ -1990,7 +2094,9 @@ impl GpuSceneBundles {
             VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
             VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
         ];
-        let raster_pipeline = RhiDevice::create_graphics_pipeline(
+        // RD6 / D-DS: the family is built through one closure so its cull members differ from
+        // the existing pipeline in `cull_mode` ALONE (same modules, layout, push range).
+        let build_raster_pipeline = |cull_mode: CullMode| RhiDevice::create_graphics_pipeline(
             device,
             &GraphicsPipelineDesc {
                 vertex_module: &vs,
@@ -2007,11 +2113,13 @@ impl GpuSceneBundles {
                 push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                 bind_group_layout: Some(&instance_layout),
                 blend: None,
-                cull_mode: CullMode::None,
+                cull_mode,
                 depth_bias: None,
             },
         )
         .expect("invariant: mesh-MRT graphics pipeline create");
+        let raster_pipeline = build_raster_pipeline(CullMode::None);
+        let raster_faces = CameraFaceMembers::build(build_raster_pipeline);
 
         // ── Asset-streaming plan F8: the PER_INSTANCE_MATERIAL gbuffer producer
         // pipeline — built UNCONDITIONALLY (materials are device-agnostic, unlike
@@ -2041,7 +2149,9 @@ impl GpuSceneBundles {
             .expect("invariant: PM mesh-MRT vertex shader module create");
         let pm_fs = RhiDevice::create_shader_module(device, gbuffer_mrt_pm_fs_spirv())
             .expect("invariant: PM mesh-MRT fragment shader module create");
-        let raster_pipeline_pm = RhiDevice::create_graphics_pipeline(
+        // RD6 / D-DS: the family is built through one closure so its cull members differ from
+        // the existing pipeline in `cull_mode` ALONE (same modules, layout, push range).
+        let build_raster_pipeline_pm = |cull_mode: CullMode| RhiDevice::create_graphics_pipeline(
             device,
             &GraphicsPipelineDesc {
                 vertex_module: &pm_vs,
@@ -2058,11 +2168,13 @@ impl GpuSceneBundles {
                 push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                 bind_group_layout: Some(&pm_instance_material_layout),
                 blend: None,
-                cull_mode: CullMode::None,
+                cull_mode,
                 depth_bias: None,
             },
         )
         .expect("invariant: PM mesh-MRT graphics pipeline create");
+        let raster_pipeline_pm = build_raster_pipeline_pm(CullMode::None);
+        let raster_pm_faces = CameraFaceMembers::build(build_raster_pipeline_pm);
         // SAFETY: both modules were created on `device` and are consumed by the pipeline
         // create; each is destroyed once; no GPU work is in flight yet.
         unsafe {
@@ -3345,7 +3457,9 @@ impl GpuSceneBundles {
             .expect("invariant: Forward mesh vertex shader module create");
         let forward_fs = RhiDevice::create_shader_module(device, forward_opaque_fs_spirv())
             .expect("invariant: Forward mesh fragment shader module create");
-        let forward_pipeline = ctx
+        // RD6 / D-DS: the family is built through one closure so its cull members differ from
+        // the existing pipeline in `cull_mode` ALONE (same modules, layout, push range).
+        let build_forward_pipeline = |cull_mode: CullMode| ctx
             .create_graphics_pipeline_forward(
                 &GraphicsPipelineDesc {
                     vertex_module: &forward_vs,
@@ -3366,12 +3480,14 @@ impl GpuSceneBundles {
                     push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                     bind_group_layout: Some(&forward_layout0),
                     blend: None,
-                    cull_mode: CullMode::None,
+                    cull_mode,
                     depth_bias: None,
                 },
                 forward_layout1.set_layout(),
             )
             .expect("invariant: Forward mesh graphics pipeline create");
+        let forward_pipeline = build_forward_pipeline(CullMode::None);
+        let forward_faces = CameraFaceMembers::build(build_forward_pipeline);
         // SAFETY: both modules were created on `device` and are consumed by the pipeline
         // create; each is destroyed once; no GPU work is in flight yet.
         unsafe {
@@ -3439,7 +3555,9 @@ impl GpuSceneBundles {
             .expect("invariant: ForwardPlus depth-prepass vertex shader module create");
         let prepass_fs = RhiDevice::create_shader_module(device, depth_prepass_fs_spirv())
             .expect("invariant: ForwardPlus depth-prepass fragment shader module create");
-        let forward_prepass_pipeline = ctx
+        // RD6 / D-DS: the family is built through one closure so its cull members differ from
+        // the existing pipeline in `cull_mode` ALONE (same modules, layout, push range).
+        let build_forward_prepass_pipeline = |cull_mode: CullMode| ctx
             .create_graphics_pipeline_forward_prepass(&GraphicsPipelineDesc {
                 vertex_module: &prepass_vs,
                 vertex_entry: c"main",
@@ -3455,10 +3573,12 @@ impl GpuSceneBundles {
                 push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                 bind_group_layout: Some(&forward_layout0),
                 blend: None,
-                cull_mode: CullMode::None,
+                cull_mode,
                 depth_bias: None,
             })
             .expect("invariant: ForwardPlus depth-prepass graphics pipeline create");
+        let forward_prepass_pipeline = build_forward_prepass_pipeline(CullMode::None);
+        let forward_prepass_faces = CameraFaceMembers::build(build_forward_prepass_pipeline);
         // SAFETY: both modules were created on `device` and are consumed by the pipeline
         // create; each is destroyed once; no GPU work is in flight yet.
         unsafe {
@@ -3476,7 +3596,9 @@ impl GpuSceneBundles {
         let forward_plus_fs =
             RhiDevice::create_shader_module(device, forward_opaque_froxel_fs_spirv())
                 .expect("invariant: ForwardPlus opaque froxel fragment shader module create");
-        let forward_plus_pipeline = ctx
+        // RD6 / D-DS: the family is built through one closure so its cull members differ from
+        // the existing pipeline in `cull_mode` ALONE (same modules, layout, push range).
+        let build_forward_plus_pipeline = |cull_mode: CullMode| ctx
             .create_graphics_pipeline_forward_plus(
                 &GraphicsPipelineDesc {
                     vertex_module: &forward_plus_vs,
@@ -3493,12 +3615,14 @@ impl GpuSceneBundles {
                     push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                     bind_group_layout: Some(&forward_layout0),
                     blend: None,
-                    cull_mode: CullMode::None,
+                    cull_mode,
                     depth_bias: None,
                 },
                 forward_layout1.set_layout(),
             )
             .expect("invariant: ForwardPlus opaque froxel graphics pipeline create");
+        let forward_plus_pipeline = build_forward_plus_pipeline(CullMode::None);
+        let forward_plus_faces = CameraFaceMembers::build(build_forward_plus_pipeline);
         // SAFETY: both modules were created on `device` and are consumed by the pipeline
         // create; each is destroyed once; no GPU work is in flight yet.
         unsafe {
@@ -3694,7 +3818,9 @@ impl GpuSceneBundles {
                     VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
                     VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
                 ];
-                let mv_pipeline = RhiDevice::create_graphics_pipeline(
+                // RD6 / D-DS: the family is built through one closure so its cull members differ from
+                // the existing pipeline in `cull_mode` ALONE (same modules, layout, push range).
+                let build_mv_pipeline = |cull_mode: CullMode| RhiDevice::create_graphics_pipeline(
                     device,
                     &GraphicsPipelineDesc {
                         vertex_module: &mv_vs,
@@ -3716,11 +3842,13 @@ impl GpuSceneBundles {
                         push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                         bind_group_layout: Some(&mv_layout),
                         blend: None,
-                        cull_mode: CullMode::None,
+                        cull_mode,
                         depth_bias: None,
                     },
                 )
                 .expect("invariant: motion-vector graphics pipeline create");
+                let mv_pipeline = build_mv_pipeline(CullMode::None);
+                let mv_faces = CameraFaceMembers::build(build_mv_pipeline);
                 // SAFETY: both modules were created on `device` and are consumed by the pipeline
                 // create; each is destroyed once; no GPU work is in flight yet.
                 unsafe {
@@ -3897,7 +4025,9 @@ impl GpuSceneBundles {
                     .expect("invariant: mvpm vertex shader module create");
                 let mvpm_fs = RhiDevice::create_shader_module(device, gbuffer_mrt_mvpm_fs_spirv())
                     .expect("invariant: mvpm fragment shader module create");
-                let mvpm_pipeline = RhiDevice::create_graphics_pipeline(
+                // RD6 / D-DS: the family is built through one closure so its cull members differ from
+                // the existing pipeline in `cull_mode` ALONE (same modules, layout, push range).
+                let build_mvpm_pipeline = |cull_mode: CullMode| RhiDevice::create_graphics_pipeline(
                     device,
                     &GraphicsPipelineDesc {
                         vertex_module: &mvpm_vs,
@@ -3919,11 +4049,13 @@ impl GpuSceneBundles {
                         push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                         bind_group_layout: Some(&mvpm_layout),
                         blend: None,
-                        cull_mode: CullMode::None,
+                        cull_mode,
                         depth_bias: None,
                     },
                 )
                 .expect("invariant: mvpm graphics pipeline create");
+                let mvpm_pipeline = build_mvpm_pipeline(CullMode::None);
+                let mvpm_faces = CameraFaceMembers::build(build_mvpm_pipeline);
                 // SAFETY: both modules were created on `device` and are consumed by the
                 // pipeline create; each is destroyed once; no GPU work is in flight yet.
                 unsafe {
@@ -3956,6 +4088,8 @@ impl GpuSceneBundles {
 
                 MotionVecResources {
                     pipeline: mv_pipeline,
+                    mv_faces,
+                    mvpm_faces,
                     layout: mv_layout,
                     vis_mv_pipeline,
                     vis_mv_layout,
@@ -4145,7 +4279,9 @@ impl GpuSceneBundles {
         // non-sentinel pixels even after the `mvp`-matrix fix). `create_graphics_pipeline_vb_raster`
         // (the 1-set GREATER-compare, write-ON builder — mirrors `create_graphics_pipeline_forward`'s
         // own reverse-Z contract) is the correct one.
-        let vb_raster_pipeline = ctx
+        // RD6 / D-DS: the family is built through one closure so its cull members differ from
+        // the existing pipeline in `cull_mode` ALONE (same modules, layout, push range).
+        let build_vb_raster_pipeline = |cull_mode: CullMode| ctx
             .create_graphics_pipeline_vb_raster(&GraphicsPipelineDesc {
                 vertex_module: &vb_raster_vs,
                 vertex_entry: c"main",
@@ -4163,10 +4299,12 @@ impl GpuSceneBundles {
                 push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                 bind_group_layout: Some(&vb_layout0),
                 blend: None,
-                cull_mode: CullMode::None,
+                cull_mode,
                 depth_bias: None,
             })
             .expect("invariant: VB raster graphics pipeline create");
+        let vb_raster_pipeline = build_vb_raster_pipeline(CullMode::None);
+        let vb_raster_faces = CameraFaceMembers::build(build_vb_raster_pipeline);
         // SAFETY: both modules were created on `device` and are consumed by the pipeline
         // create; each is destroyed once; no GPU work is in flight yet.
         unsafe {
@@ -4627,6 +4765,14 @@ impl GpuSceneBundles {
 
         Self {
             raster_pipeline,
+            face_members: FaceMemberSet {
+                raster: raster_faces,
+                raster_pm: raster_pm_faces,
+                forward: forward_faces,
+                forward_plus: forward_plus_faces,
+                forward_prepass: forward_prepass_faces,
+                vb_raster: vb_raster_faces,
+            },
             instance_layout,
             instance_rings,
             instance_bind_groups,
@@ -4987,7 +5133,9 @@ impl GpuSceneBundles {
             VertexAttribute { location: 3, offset: 40, format: VertexFormat::Float32x2 },
             VertexAttribute { location: 4, offset: 48, format: VertexFormat::Float32x4 },
         ];
-        let raster_pipeline_tex = ctx
+        // RD6 / D-DS: the family is built through one closure so its cull members differ from
+        // the existing pipeline in `cull_mode` ALONE (same modules, layout, push range).
+        let build_raster_pipeline_tex = |cull_mode: CullMode| ctx
             .create_graphics_pipeline_bindless(
                 &GraphicsPipelineDesc {
                     vertex_module: &tex_vs,
@@ -5012,12 +5160,14 @@ impl GpuSceneBundles {
                     push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                     bind_group_layout: Some(&tex_instance_material_layout),
                     blend: None,
-                    cull_mode: CullMode::None,
+                    cull_mode,
                     depth_bias: None,
                 },
                 bindless.set().set_layout(),
             )
             .expect("invariant: TEX mesh-MRT graphics pipeline create");
+        let raster_pipeline_tex = build_raster_pipeline_tex(CullMode::None);
+        let raster_tex_faces = CameraFaceMembers::build(build_raster_pipeline_tex);
         // SAFETY: both modules were created on `device` and are consumed by the pipeline
         // create; each is destroyed once; no GPU work is in flight yet.
         unsafe {
@@ -5058,6 +5208,7 @@ impl GpuSceneBundles {
 
         self.tex = Some(TexturedResources {
             raster_pipeline_tex,
+            raster_tex_faces,
             tex_instance_material_layout,
             tex_instance_material_rings,
             tex_bind_groups,
@@ -7190,6 +7341,31 @@ impl GpuSceneBundles {
             // device-cap armed); `vb_geometry_set` is threaded straight from this fn's own param
             // (the live table itself lives in `World`, not on `Self`).
             vb_raster_pipeline: Some(&self.vb_raster_pipeline),
+            // RD6 / D-DS: every mesh family's cull members — the recorders bind, per batch, the one
+            // `CullMode::for_mesh_face` selects. The `forward` family follows the same
+            // Forward / ForwardPlus split as `forward_pipeline` above.
+            face_pipelines: Some(MeshFacePipelines {
+                raster: self.face_members.raster.members(&self.raster_pipeline),
+                raster_pm: self.face_members.raster_pm.members(&self.raster_pipeline_pm),
+                raster_tex: self.tex.as_ref().map(|t| t.raster_tex_faces.members(&t.raster_pipeline_tex)),
+                #[cfg(feature = "hwrt")]
+                raster_mv: self.mv.as_ref().map(|m| m.mv_faces.members(&m.pipeline)),
+                #[cfg(not(feature = "hwrt"))]
+                raster_mv: None,
+                #[cfg(feature = "hwrt")]
+                raster_mvpm: self.mv.as_ref().map(|m| m.mvpm_faces.members(&m.mvpm_pipeline)),
+                #[cfg(not(feature = "hwrt"))]
+                raster_mvpm: None,
+                forward: if resolved_render_path.path == boyko_render::RenderPath::ForwardPlus {
+                    self.face_members.forward_plus.members(&self.forward_plus_pipeline)
+                } else {
+                    self.face_members.forward.members(&self.forward_pipeline)
+                },
+                forward_prepass: self.face_members.forward_prepass.members(&self.forward_prepass_pipeline),
+                vb_raster: self.face_members.vb_raster.members(&self.vb_raster_pipeline),
+                caster_depth: self.csm.depth_faces.members(&self.csm.depth_pipeline),
+                caster_point: self.csm.point_depth_faces.members(&self.csm.point_depth_pipeline),
+            }),
             vb_sky_pipeline: Some(&self.vb_sky_pipeline),
             vb_resolve_pipeline: self.vb_resolve_pipeline.as_ref(),
             vb_layout0: Some(&self.vb_layout0),
@@ -8157,6 +8333,7 @@ impl GpuSceneBundles {
             RhiDevice::destroy_compute_pipeline(ctx, self.marcher);
             RhiDevice::destroy_bind_group_layout(ctx, self.vocab_layout);
             RhiDevice::destroy_graphics_pipeline(ctx, self.raster_pipeline);
+            self.face_members.destroy(ctx);
             // Asset-streaming plan F8: the PM resources bind the SHARED `instance_rings` (@0)
             // plus their own instance-material ring (@1); torn down BEFORE the shared instance
             // bind groups/rings below (bind groups first, then the pipeline/layout, then the
@@ -8183,6 +8360,7 @@ impl GpuSceneBundles {
                     RhiDevice::destroy_bind_group(ctx, bg);
                 }
                 RhiDevice::destroy_graphics_pipeline(ctx, tex.raster_pipeline_tex);
+                tex.raster_tex_faces.destroy(ctx);
                 RhiDevice::destroy_bind_group_layout(ctx, tex.tex_instance_material_layout);
                 for b in tex.tex_instance_material_rings {
                     RhiDevice::destroy_buffer(ctx, b);
@@ -8202,11 +8380,13 @@ impl GpuSceneBundles {
                     RhiDevice::destroy_bind_group(ctx, bg);
                 }
                 RhiDevice::destroy_graphics_pipeline(ctx, mv.mvpm_pipeline);
+                mv.mvpm_faces.destroy(ctx);
                 RhiDevice::destroy_bind_group_layout(ctx, mv.mvpm_layout);
                 for bg in mv.bind_groups {
                     RhiDevice::destroy_bind_group(ctx, bg);
                 }
                 RhiDevice::destroy_graphics_pipeline(ctx, mv.pipeline);
+                mv.mv_faces.destroy(ctx);
                 RhiDevice::destroy_bind_group_layout(ctx, mv.layout);
                 // step 5b: the SDF motion-vector VIS resolve pipeline + its 25-binding layout
                 // (pipeline before layout; no bind groups — the VIS-MV set lives in `GBufferTargets`).
