@@ -2420,11 +2420,12 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
             chk(y, EmitTy::Float);
             format!("pow({}, {})", op(x), op(y))
         }
-        // Render wave PXe — RED-FIRST STUB printer (PXe-1): a 2-component `Load` coordinate.
+        // Render wave PXe: the resource facets (call-shaped; arguments at Root). `Load` takes an
+        // `int3` whose `.z` is the mip level, 0.
         Node::Tex2Load { tex, x, y } => {
             chk(x, EmitTy::Int);
             chk(y, EmitTy::Int);
-            format!("{}.Load(int2({}, {}))", names.res_in[tex as usize], op(x), op(y))
+            format!("{}.Load(int3({}, {}, 0))", names.res_in[tex as usize], op(x), op(y))
         }
         Node::Tex2SampleLinear { tex, smp, uv } => {
             chk(uv, EmitTy::Float2);

@@ -1488,10 +1488,15 @@ impl<'a> HostTex2<'a> {
     /// The texel at `(x, y)`; PANICS outside `[0, w) × [0, h)`.
     #[inline]
     pub fn load(&self, x: i32, y: i32) -> [f32; 4] {
-        // RED-FIRST STUB (PXe-1): a Load that silently clamps its coordinates.
-        let x = x.max(0).min(self.w as i32 - 1);
-        let y = y.max(0).min(self.h as i32 - 1);
-        self.texels[(y * self.w as i32 + x) as usize]
+        // Always on, not `debug_assert!`: at `x = w` the flattened index would silently read the
+        // next row's first texel — exactly the aliasing a host oracle must never have.
+        assert!(
+            x >= 0 && (x as u32) < self.w && y >= 0 && (y as u32) < self.h,
+            "tex2_load out of the texture: ({x}, {y}) on a {}x{} image",
+            self.w,
+            self.h
+        );
+        self.texels[(y as u32 * self.w + x as u32) as usize]
     }
 
     /// Bilinear, clamp-to-edge, texel centres at `(i + ½)/n`, exact f32 weights.
@@ -1549,8 +1554,7 @@ impl<'a> HostTex3<'a> {
 #[inline]
 fn linear_axis(u: f32, n: u32) -> (usize, usize, f32) {
     assert!(n > 0, "texture sample on an empty (disabled stand-in) texture");
-    // RED-FIRST STUB (PXe-1): texel centres at i/n (no half-texel).
-    let p = u * n as f32;
+    let p = u * n as f32 - 0.5;
     let f = <EvalCf as Cf>::floor(p);
     let hi = i64::from(n) - 1;
     // `f` is integral; `as` saturates the (unreachable) out-of-`i64` range.
