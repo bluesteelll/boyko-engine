@@ -740,6 +740,9 @@ enum Node {
     Tex3SampleLinear { tex: u32, smp: u32, uvw: u32 },
     /// `<v>.xyz` — a `float4` → `float3` swizzle, printed inline. Result type [`EmitTy::Float3`].
     Vec4Xyz(u32),
+    /// `a == b` over two `uint`s — a Mask, printed inline inside a condition / ternary. A bitwise
+    /// operand is printed WRAPPED (`==` binds tighter than `&`).
+    UEq(u32, u32),
 }
 
 /// One VECTOR (`float3`/`float2`) SSA node — the normal leaf is a vector expression
@@ -1538,8 +1541,10 @@ fn is_inline_leaf(node: Node) -> bool {
             | Node::Vec2Param(_)
             | Node::Vec4SwizzleV2(_, _)
             | Node::Vec4Alpha(_)
-            // Render wave PXe: the `.xyz` swizzle spells `<src>.xyz` at every use.
+            // Render wave PXe: the `.xyz` swizzle spells `<src>.xyz` at every use; the `uint ==`
+            // mask appears only inside a condition (inlined like `UGe`).
             | Node::Vec4Xyz(_)
+            | Node::UEq(_, _)
     )
 }
 
@@ -1721,6 +1726,13 @@ fn operand_str(
         Node::ArrName(n) => names.array[n as usize].to_string(),
         // Render wave PXe: `<src>.xyz` (the source is a leaf — a `float4` temp / param).
         Node::Vec4Xyz(v) => format!("{}.xyz", opl(v)),
+        // Render wave PXe: `a == b` over `uint`s; each comparand at the BITWISE position, so an
+        // `&`/`>>` operand wraps (`(asuint(x) & M) == M`) while a leaf or an arithmetic one does not.
+        Node::UEq(a, b) => format!(
+            "{} == {}",
+            operand_str(arena, names, temps, a, OperandPos::BitSide),
+            operand_str(arena, names, temps, b, OperandPos::BitSide)
+        ),
         // A non-leaf operand: if it was MATERIALIZED as a `tN` temp (the straight-line
         // field/normal/decode/cubic emit materializes every non-leaf via the SSA walk,
         // so `temps[id]` is always `Some` there), use the temp name. Otherwise — the CF
@@ -2436,6 +2448,7 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
             format!("{}.SampleLevel({}, {}, 0)", names.res_in[tex as usize], sampler_name(names, smp), op(uvw))
         }
         Node::Vec4Xyz(_) => unreachable!("Vec4Xyz is an inline leaf spelled by operand_str"),
+        Node::UEq(_, _) => unreachable!("UEq is an inline mask spelled by operand_str"),
     }
 }
 
@@ -2903,6 +2916,18 @@ enum Stmt {
     /// the `= +` form computes the access-chain TWICE at `-O0`, so it is NOT byte-identical. Recorded
     /// by [`EmitCf::arr_int_add_assign`] / [`EmitCf::arr_float_add_assign`].
     ArrayAddAssign { arr: u32, idx: u32, rhs: u32 },
+
+    // ---- Render wave PXe: the attributed two-arm branch ----------------------------------------
+    /// `<attr>\nif (<cond>) { <then> } else { <els> }` — [`Stmt::IfElse`] with an HLSL selection
+    /// attribute on its own line (`[branch]`: `OpSelectionMerge … DontFlatten`). A separate variant,
+    /// so the existing `IfElse` printing (and every committed body that uses it) is untouched.
+    /// Recorded by [`EmitCf::if_else_branch`].
+    IfElseAttr {
+        attr: &'static str,
+        cond: u32,
+        then: Block,
+        els: Block,
+    },
 }
 
 /// A sequence of [`Stmt`]s — a control-flow BLOCK (a `{ ... }`).
@@ -3359,6 +3384,20 @@ fn print_block(block: &Block, arena: &[Node], names: Names, depth: usize, out: &
                     "{pad}{}[{idx_s}] += {rhs_s};\n",
                     names.array[*arr as usize]
                 ));
+            }
+            Stmt::IfElseAttr {
+                attr,
+                cond,
+                then,
+                els,
+            } => {
+                let cond_s = inline_expr(arena, names, &[], *cond);
+                out.push_str(&format!("{pad}{attr}\n"));
+                out.push_str(&format!("{pad}if ({cond_s}) {{\n"));
+                print_block(then, arena, names, depth + 1, out);
+                out.push_str(&format!("{pad}}} else {{\n"));
+                print_block(els, arena, names, depth + 1, out);
+                out.push_str(&format!("{pad}}}\n"));
             }
         }
     }

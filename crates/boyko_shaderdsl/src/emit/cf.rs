@@ -1119,4 +1119,42 @@ impl Cf for EmitCf {
     fn vec4_xyz(v: Emit) -> Emit {
         Emit(push(Node::Vec4Xyz(v.0)))
     }
+
+    fn decl_var_vec3(name: &'static str, init: Emit) -> Var {
+        // A `float3 <name> = <init>;` decl — `record_decl_var` with `EmitTy::Float3`.
+        record_decl_var(name, EmitTy::Float3, init.0)
+    }
+
+    fn ueq(a: Emit, b: Emit) -> EmitMask {
+        EmitMask(push(Node::UEq(a.0, b.0)))
+    }
+
+    fn if_else_branch<T: FnOnce() -> Flow, E: FnOnce() -> Flow>(
+        cond: EmitMask,
+        then: T,
+        els: E,
+    ) -> Flow {
+        // `if_else`'s push/record/pop, recorded as the attributed statement.
+        STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+        let _ = then();
+        let then_block = STMTS.with(|s| {
+            s.borrow_mut()
+                .pop()
+                .expect("invariant: the if_else_branch then block was pushed above")
+        });
+        STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+        let _ = els();
+        let els_block = STMTS.with(|s| {
+            s.borrow_mut()
+                .pop()
+                .expect("invariant: the if_else_branch else block was pushed above")
+        });
+        record_stmt(Stmt::IfElseAttr {
+            attr: "[branch]",
+            cond: cond.0,
+            then: then_block,
+            els: els_block,
+        });
+        Flow::Continue(())
+    }
 }

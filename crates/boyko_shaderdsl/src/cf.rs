@@ -1430,6 +1430,31 @@ pub trait Cf {
 
     /// `v.xyz` — a `float4` → `float3` swizzle (a texel's colour). On Eval `[v[0], v[1], v[2]]`.
     fn vec4_xyz(v: Self::Vec4f) -> Self::Vec3f;
+
+    // ---- Render wave PXe: the three facets the traced post body adds --------------------------
+
+    /// Declares a mutable `float3` LOCAL (`float3 <name> = <init>;`) — the `float3` analogue of
+    /// [`decl_var_vec2`](Self::decl_var_vec2) ([`decl_param_vec3`](Self::decl_param_vec3) is the
+    /// suppressed-decl parameter form). Eval boxes `init` into a `Cell<[f32; 3]>`. The post
+    /// dispatch's result local.
+    fn decl_var_vec3(name: &'static str, init: Self::Vec3f) -> Self::Vec3Var;
+
+    /// `a == b` over two [`Uint`](Self::Uint)s, producing a [`Mask`](FieldScalar::Mask) (the post
+    /// mode test and the finite-bit test). On Emit a bitwise operand is printed WRAPPED: `==` binds
+    /// tighter than `&` in HLSL, so `(asuint(x) & M) == M` without the parentheses would test
+    /// `asuint(x) & (M == M)`.
+    fn ueq(a: Self::Uint, b: Self::Uint) -> <Self::Scalar as FieldScalar>::Mask;
+
+    /// `[branch] if (cond) { then } else { els }` — [`if_else`](Self::if_else) with the HLSL
+    /// `[branch]` attribute (`OpSelectionMerge … DontFlatten`), for a WAVE-UNIFORM condition where
+    /// a real branch costs no divergence and an if-converted select would run both arms. Eval runs
+    /// the real `if`/`else`; Emit records a `Stmt::IfElseAttr` (the existing `Stmt::IfElse` and its
+    /// printing are untouched).
+    fn if_else_branch<T: FnOnce() -> Flow, E: FnOnce() -> Flow>(
+        cond: <Self::Scalar as FieldScalar>::Mask,
+        then: T,
+        els: E,
+    ) -> Flow;
 }
 
 /// `log2(e)` — the [`exp`] helper's base-change factor (the f32 nearest `1/ln 2`).
@@ -2230,8 +2255,11 @@ impl Cf for EvalCf {
         unreachable!("Cf::vec3_dyn_index is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
     }
     #[inline]
-    fn vec3_from_scalars(_x: f32, _y: f32, _z: f32) -> [f32; 3] {
-        unreachable!("Cf::vec3_from_scalars is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    fn vec3_from_scalars(x: f32, y: f32, z: f32) -> [f32; 3] {
+        // Concrete since render wave PXe: the post leaves are per-channel scalar code rebuilt into
+        // a `float3`, and they ARE oracle-swept over EvalCf (`m2_brick_cubic_hit_body`, the first
+        // caller, still never is) — the same history `temp_vec4`'s arm records.
+        [x, y, z]
     }
     #[inline]
     fn temp_vec4(_name: &'static str, v: [f32; 4]) -> [f32; 4] {
@@ -2685,5 +2713,20 @@ impl Cf for EvalCf {
     #[inline]
     fn vec4_xyz(v: [f32; 4]) -> [f32; 3] {
         [v[0], v[1], v[2]]
+    }
+
+    #[inline]
+    fn decl_var_vec3(_name: &'static str, init: [f32; 3]) -> core::cell::Cell<[f32; 3]> {
+        core::cell::Cell::new(init)
+    }
+
+    #[inline]
+    fn ueq(a: u32, b: u32) -> bool {
+        a == b
+    }
+
+    #[inline]
+    fn if_else_branch<T: FnOnce() -> Flow, E: FnOnce() -> Flow>(cond: bool, then: T, els: E) -> Flow {
+        if cond { then() } else { els() }
     }
 }

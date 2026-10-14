@@ -72,6 +72,7 @@ pub mod oct;
 pub mod pack;
 pub mod particle;
 pub mod particle_facets;
+pub mod post;
 pub mod prims_probe;
 pub mod probe_blend;
 pub mod probe_march;
@@ -98,7 +99,7 @@ pub use brick::{
     BRICK_OUTSIDE_GRID, brick_cell_class_body, cubic_eval, decode_snorm8, jcgt_cubic_coeffs,
     snorm_normalize, snorm_scale,
 };
-pub use cf::{Cf, EvalCf, Flow, LoopOp};
+pub use cf::{Cf, EvalCf, Flow, HostTex2, HostTex3, LoopOp};
 pub use cubic_hit::{
     M2_APRON, M2_ATLAS_BIAS, M2_MAX_CELLS as M2_CUBIC_MAX_CELLS, m2_brick_cubic_hit_body,
 };
@@ -118,6 +119,10 @@ pub use marcher::{b1_marcher_fold_d_body, b1_marcher_mesh_p_body};
 pub use normal::sdf_normal_body;
 pub use oct::{oct_decode_body, oct_encode_body};
 pub use pack::pack_material_id_ba_body;
+pub use post::{
+    POST_FINAL_BINDINGS, POST_FINAL_STAGE_ORDER, POST_FINAL_UBO_LAYOUT, PostParams, PostRes,
+    PostStage, eval_params, post_final_eval, post_final_main,
+};
 pub use particle::{
     particle_billboard_corner_body, particle_curve_eval_body, particle_integrate_body,
     particle_rng_body, particle_rot_advance_body, particle_spawn_state_body,
