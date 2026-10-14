@@ -73,8 +73,7 @@ pub const LIT_STORAGE_FORMAT: &str = "r11g11b10f";
 pub const DISPLAY_STORAGE_FORMAT: &str = "rgba8";
 
 /// The manual OETF exponent `1/2.2`, as the f32 the shader spells (`OETF_GAMMA_EXP`).
-// RED-FIRST STUB (PXe-3): the wrong gamma.
-pub const OETF_GAMMA_EXP: f32 = 1.0 / 2.4;
+pub const OETF_GAMMA_EXP: f32 = 1.0 / 2.2;
 
 /// The tonemapper field of the post mode word: bits `TONEMAP_MODE_SHIFT..+4` — the same field the
 /// light header's word 7 carries (`boyko_render::light::TONEMAP_MODE_SHIFT`, pinned by a test).
@@ -116,8 +115,7 @@ const ACES_E: f32 = 0.238081;
 /// the shipped shader's `const float startCompression = 0.8 - 0.04;`.
 const NEUTRAL_START: f32 = 0.8 - 0.04;
 /// Khronos PBR Neutral: the desaturation speed.
-// RED-FIRST STUB (PXe-3): one coefficient digit off.
-const NEUTRAL_DESATURATION: f32 = 0.16;
+const NEUTRAL_DESATURATION: f32 = 0.15;
 /// `d = 1 − startCompression` (f32, like the shader's `const float d`).
 const NEUTRAL_D: f32 = 1.0 - NEUTRAL_START;
 /// `d·d`, folded once in f32 so host and device read one constant.
@@ -128,8 +126,7 @@ const NEUTRAL_TOE_K: f32 = 6.25;
 const NEUTRAL_F90: f32 = 0.04;
 
 /// Reinhard-Jodie's Rec.709 luma weights.
-// RED-FIRST STUB (PXe-3): one luma digit off.
-const REC709_LUMA: [f32; 3] = [0.2127, 0.7152, 0.0722];
+const REC709_LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 
 /// The sRGB EOTF's knee and its two branches' constants.
 const SRGB_EOTF_KNEE: f32 = 0.04045;
@@ -358,8 +355,7 @@ pub struct PostParams<C: Cf> {
 pub fn eval_params(words: [u32; 8]) -> PostParams<EvalCf> {
     PostParams {
         mode_words: words[MODE_WORDS_WORD],
-        // RED-FIRST STUB (PXe-3): the wrong word.
-        exposure_ratio: f32::from_bits(words[EXPOSURE_RATIO_WORD - 1]),
+        exposure_ratio: f32::from_bits(words[EXPOSURE_RATIO_WORD]),
         extent: [words[EXTENT_WORD], words[EXTENT_WORD + 1]],
     }
 }
@@ -398,17 +394,14 @@ pub fn hdr_sanitize<C: Cf>(c: C::Vec3f) -> C::Vec3f {
     let any_nonfinite = C::or(C::or(nonfinite(ch[0]), nonfinite(ch[1])), nonfinite(ch[2]));
     let zero = C::Scalar::lit(0.0);
     let hdr_max = C::named_lit("HDR_MAX", HDR_MAX);
-    // RED-FIRST STUB (PXe-3): a per-CHANNEL kill.
-    let _ = any_nonfinite;
-    from_channels::<C>(ch.map(|x| C::select(nonfinite(x), zero, x.max(zero).min(hdr_max))))
+    from_channels::<C>(ch.map(|x| C::select(any_nonfinite, zero, x.max(zero).min(hdr_max))))
 }
 
 /// `h · r` — the exposure ratio `E / pre` (POSTFX §5.3 E2). One rounding per channel; an identity
 /// at `r = 1`.
 #[inline]
 pub fn pre_ratio_apply<C: Cf>(h: C::Vec3f, r: C::Scalar) -> C::Vec3f {
-    // RED-FIRST STUB (PXe-3): a divide.
-    C::vec3_div_scalar(h, r)
+    C::vec3_mul_scalar(h, r)
 }
 
 /// `mul(m, v)` with row `i` dotted in column order 0, 1, 2, left-associated — the op order of the
@@ -436,8 +429,7 @@ pub fn aces_hill<C: Cf>(c: C::Vec3f) -> C::Vec3f {
         let b = C::temp(v.mul(lit(ACES_C).mul(v).add(lit(ACES_D))).add(lit(ACES_E)));
         C::temp(a.div(b))
     });
-    // RED-FIRST STUB (PXe-3): the output matrix is missing.
-    from_channels::<C>(q.map(FieldScalar::clamp01))
+    from_channels::<C>(mat3_rows::<C>(&ACES_OUT, q).map(FieldScalar::clamp01))
 }
 
 /// Khronos PBR Neutral (KhronosGroup/ToneMapping), as the resolve's `khronos_pbr_neutral`, with its
@@ -498,8 +490,7 @@ pub fn tonemapper<C: Cf>(mode_words: C::Uint) -> C::Uint {
 #[inline]
 pub fn tonemap_select<C: Cf>(c: C::Vec3f, mode: C::Uint) -> C::Vec3f {
     let out = C::decl_var_vec3("post_tonemapped", c);
-    // RED-FIRST STUB (PXe-3): Neutral and Reinhard-Jodie dispatched to each other.
-    let neutral = C::ueq(mode, C::named_uint_val("TONEMAP_REINHARD_JODIE", TONEMAP_REINHARD_JODIE));
+    let neutral = C::ueq(mode, C::named_uint_val("TONEMAP_NEUTRAL", TONEMAP_NEUTRAL));
     let _ = C::if_else_branch(
         neutral,
         || {
@@ -507,7 +498,7 @@ pub fn tonemap_select<C: Cf>(c: C::Vec3f, mode: C::Uint) -> C::Vec3f {
             Flow::Continue(())
         },
         || {
-            let jodie = C::ueq(mode, C::named_uint_val("TONEMAP_NEUTRAL", TONEMAP_NEUTRAL));
+            let jodie = C::ueq(mode, C::named_uint_val("TONEMAP_REINHARD_JODIE", TONEMAP_REINHARD_JODIE));
             C::if_else_branch(
                 jodie,
                 || {
@@ -540,9 +531,11 @@ pub fn oetf_gamma22<C: Cf>(c: C::Vec3f) -> C::Vec3f {
 pub fn srgb_eotf<C: Cf>(c: C::Vec3f) -> C::Vec3f {
     let lit = C::Scalar::lit;
     from_channels::<C>(channels::<C>(c).map(|v| {
-        // RED-FIRST STUB (PXe-3): the fallback written as `pow(x, 2.2)`.
-        let _ = (SRGB_EOTF_KNEE, SRGB_LINEAR_DIV, SRGB_OFFSET, SRGB_SCALE, SRGB_GAMMA);
-        C::pow(v, lit(2.2))
+        C::select(
+            v.le(lit(SRGB_EOTF_KNEE)),
+            v.div(lit(SRGB_LINEAR_DIV)),
+            C::pow(v.add(lit(SRGB_OFFSET)).div(lit(SRGB_SCALE)), lit(SRGB_GAMMA)),
+        )
     }))
 }
 
@@ -565,9 +558,8 @@ pub fn post_final_main<C: Cf>(
     );
     let s = stage3::<C>(PostStage::HdrSanitize, hdr_sanitize::<C>(C::vec4_xyz(scene)));
     let s = stage3::<C>(PostStage::PreRatio, pre_ratio_apply::<C>(s, p.exposure_ratio));
-    // RED-FIRST STUB (PXe-3): the OETF composed BEFORE the curve.
-    let s = stage3::<C>(PostStage::Oetf, oetf_gamma22::<C>(s));
     let s = stage3::<C>(PostStage::Tonemap, tonemap_select::<C>(s, tonemapper::<C>(p.mode_words)));
+    let s = stage3::<C>(PostStage::Oetf, oetf_gamma22::<C>(s));
     let o = channels::<C>(s);
     C::ret_vec4(ret_out, C::vec4_from_scalars(o[0], o[1], o[2], C::Scalar::lit(1.0)))
 }
