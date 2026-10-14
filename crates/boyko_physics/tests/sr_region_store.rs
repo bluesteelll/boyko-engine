@@ -5,7 +5,11 @@
 //! every frame the next step's seed of every point of every logical manifold — the stream's, whose
 //! records the store just wrote, and the held store's (`ColoredSoftStepSolver::for_each_warm_seed`)
 //! — and the step's `WarmSeedStats` are folded with the bodies' bits into one FNV-1a hash, which
-//! must equal W1's (W1 never opens a region). Arms:
+//! must equal W1's (W1 never opens a region). FM C1: the fold also takes every logical manifold's
+//! next friction seed (`ColoredSoftStepSolver::for_each_friction_seed`) and the step's
+//! `FrictionSeedStats`, and every arm runs again under both per-manifold friction models
+//! (`region_store_seeds_equal_the_one_worker_run_fm`): the region's Store blocks write the patch's
+//! records and carry the frozen ones' triples (`carry_fm`) as the serial store does. Arms:
 //!
 //! | arm | the store | what it covers |
 //! |---|---|---|
@@ -47,7 +51,7 @@ use boyko_physics::components::{
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_systems;
-use boyko_physics::resources::{Manifolds, PhysicsConfig};
+use boyko_physics::resources::{FrictionModel, Manifolds, PhysicsConfig};
 use boyko_physics::sleep_sets::SleepSets;
 use boyko_physics::solver::DefaultRigidSolver;
 
@@ -88,12 +92,14 @@ struct Arm {
     frames: usize,
     /// Whether the store runs in the region on a region step.
     region_store: bool,
+    /// FM: the friction model (`PerPoint` for the per-point arms).
+    friction: FrictionModel,
 }
 
 const ARMS: [Arm; 3] = [
-    Arm { name: "rest", restitution: 0.0, sliders: false, drop: 0.0, sleeping: false, frames: 30, region_store: true },
-    Arm { name: "bouncy", restitution: 0.5, sliders: false, drop: DROP, sleeping: false, frames: 30, region_store: false },
-    Arm { name: "sleeping", restitution: 0.0, sliders: true, drop: 0.0, sleeping: true, frames: 160, region_store: true },
+    Arm { name: "rest", restitution: 0.0, sliders: false, drop: 0.0, sleeping: false, frames: 30, region_store: true, friction: FrictionModel::PerPoint },
+    Arm { name: "bouncy", restitution: 0.5, sliders: false, drop: DROP, sleeping: false, frames: 30, region_store: false, friction: FrictionModel::PerPoint },
+    Arm { name: "sleeping", restitution: 0.0, sliders: true, drop: 0.0, sleeping: true, frames: 160, region_store: true, friction: FrictionModel::PerPoint },
 ];
 
 /// Returns the bytes of a `#[repr(C)]` POD value for the raw `create_entity` path.
@@ -222,6 +228,22 @@ fn frame_hash(world: &mut EcsMaster) -> (u64, u64) {
             None => h = fold(h, u64::MAX),
         }
     });
+    // FM: every logical manifold's next friction seed, after the point seeds (D14).
+    solver.for_each_friction_seed(manifolds, sets, |key, t| {
+        h = fold(h, key);
+        match t {
+            Some(t) => {
+                for v in t {
+                    h = fold(h, u64::from(v.to_bits()));
+                }
+            }
+            None => h = fold(h, u64::MAX - 1),
+        }
+    });
+    if let Some(f) = solver.friction_seed_stats() {
+        h = fold(h, u64::from(f.manifold_hits));
+        h = fold(h, u64::from(f.manifold_carry_hits));
+    }
     let s = solver.warm_seed_stats();
     for v in [s.manifolds, s.translated, s.points, s.point_hits, s.carry_points, s.carry_hits] {
         h = fold(h, u64::from(v));
@@ -241,6 +263,8 @@ struct Run {
     region_carried_frames: usize,
     /// The fastest upward body velocity over every frame.
     max_up: f32,
+    /// FM: frames whose store carried a frozen manifold's friction triple.
+    fm_carried_frames: usize,
 }
 
 fn run(arm: Arm, workers: usize) -> Run {
@@ -256,6 +280,7 @@ fn run(arm: Arm, workers: usize) -> Run {
         let cfg = world.resource_mut::<PhysicsConfig>();
         cfg.parallel_solve = true;
         cfg.sleeping = arm.sleeping;
+        cfg.friction_model = arm.friction;
     }
     let (r0, s0) = {
         let solver = world.resource::<DefaultRigidSolver>();
@@ -270,6 +295,7 @@ fn run(arm: Arm, workers: usize) -> Run {
         held_frames: 0,
         region_carried_frames: 0,
         max_up: f32::NEG_INFINITY,
+        fm_carried_frames: 0,
     };
     let mut stores = s0;
     for _ in 0..arm.frames {
@@ -285,6 +311,9 @@ fn run(arm: Arm, workers: usize) -> Run {
         out.region_carried_frames += usize::from(carrying && stores_now > stores);
         stores = stores_now;
         out.held_frames += usize::from(world.resource::<SleepSets>().stats().held_rows > 0);
+        out.fm_carried_frames += usize::from(
+            world.resource::<DefaultRigidSolver>().friction_seed_stats().is_some_and(|f| f.manifold_carry_hits > 0),
+        );
         let q = world.query::<&RigidBody, ()>();
         out.max_up = q.iter().map(|b| b.linear_velocity.y).fold(out.max_up, f32::max);
     }
@@ -296,7 +325,34 @@ fn run(arm: Arm, workers: usize) -> Run {
 
 #[test]
 fn region_store_seeds_equal_the_one_worker_run() {
-    for arm in ARMS {
+    check_arms(&ARMS);
+}
+
+/// FM C1 (fm/cut.md Q1): every arm under both per-manifold friction models. The sleeping arm's
+/// frozen manifolds carry their friction triples (`carry_fm`) in the region's Store blocks on W ≥ 2
+/// and in the serial store on W 1. Red under RF-srs' (the region's pass 2 drops the carried
+/// triple) and RF-srs'' (it does not count `manifold_carry_hits`): "sleeping at W4: frame 73's
+/// bodies, next-step seeds and warm statistics differ from W1's". RF-srs (pass 2 with the
+/// per-point `carry`) is an equivalent mutant and stays green: a frozen manifold keeps its points
+/// in order, so `carry` copies `carry_fm`'s record bit for bit (the C1 record,
+/// `docs/physics/perf-campaign/levers/FM-manifold-friction/02-C1-RECORD.md`).
+#[test]
+fn region_store_seeds_equal_the_one_worker_run_fm() {
+    for friction in [FrictionModel::PerManifold, FrictionModel::PerManifoldTouch] {
+        let arms = ARMS.map(|arm| Arm { friction, ..arm });
+        check_arms(&arms);
+        let sleeping = arms.iter().find(|a| a.sleeping).copied().expect("the sleeping arm");
+        let reference = run(sleeping, 1);
+        assert!(
+            reference.fm_carried_frames > 0,
+            "{friction:?}: non-vacuity: the sleeping arm carried a frozen manifold's friction triple on some frame"
+        );
+    }
+}
+
+/// The gate over `arms`: each arm's W 4 and W 8 runs against its W 1 run.
+fn check_arms(arms: &[Arm]) {
+    for &arm in arms {
         let reference = run(arm, 1);
         assert_eq!(reference.regions, 0, "{}: one worker opens no region", arm.name);
         assert!(reference.seed_hits > 0, "{}: non-vacuity: some next-step seed is a hit", arm.name);

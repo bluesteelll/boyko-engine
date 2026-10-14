@@ -143,7 +143,8 @@ mod tests {
         add_physics_soft_colored, add_physics_systems_with_scene_sync,
     };
     use crate::resources::{
-        BroadphaseKind, BroadphaseSelectMode, PhysicsConfig, SdfNarrowphaseKernel, SleepSkip,
+        BroadphaseKind, BroadphaseSelectMode, FrictionModel, PhysicsConfig, SdfNarrowphaseKernel,
+        SleepSkip,
     };
     use crate::row_identity::{RowIdentity, RowKey};
     use crate::scene_sync::{
@@ -172,6 +173,13 @@ mod tests {
             dt: 1.0 / 90.0,
             substeps: 7,
             relax_iterations: 5,
+            // Derived, not a literal: FM's flip moves the default, and a literal would then compare
+            // the default with itself (the `parallel_tree_query` lesson).
+            friction_model: if PhysicsConfig::default().friction_model == FrictionModel::PerPoint {
+                FrictionModel::PerManifold
+            } else {
+                FrictionModel::PerPoint
+            },
             contact_hertz: 41.0,
             contact_damping: 3.5,
             warm_start: false,
@@ -225,6 +233,7 @@ mod tests {
             dt,
             substeps,
             relax_iterations,
+            friction_model,
             contact_hertz,
             contact_damping,
             warm_start,
@@ -259,6 +268,7 @@ mod tests {
         assert_eq!(dt.to_bits(), b.dt.to_bits(), "dt");
         assert_eq!(substeps, b.substeps, "substeps");
         assert_eq!(relax_iterations, b.relax_iterations, "relax_iterations");
+        assert_eq!(friction_model, b.friction_model, "friction_model");
         assert_eq!(contact_hertz.to_bits(), b.contact_hertz.to_bits(), "contact_hertz");
         assert_eq!(contact_damping.to_bits(), b.contact_damping.to_bits(), "contact_damping");
         assert_eq!(warm_start, b.warm_start, "warm_start");
@@ -313,6 +323,7 @@ mod tests {
             dt,
             substeps,
             relax_iterations,
+            friction_model,
             contact_hertz,
             contact_damping,
             warm_start,
@@ -348,6 +359,7 @@ mod tests {
         assert_ne!(dt.to_bits(), b.dt.to_bits(), "{why} dt");
         assert_ne!(substeps, b.substeps, "{why} substeps");
         assert_ne!(relax_iterations, b.relax_iterations, "{why} relax_iterations");
+        assert_ne!(friction_model, b.friction_model, "{why} friction_model");
         assert_ne!(contact_hertz.to_bits(), b.contact_hertz.to_bits(), "{why} contact_hertz");
         assert_ne!(contact_damping.to_bits(), b.contact_damping.to_bits(), "{why} contact_damping");
         assert_ne!(warm_start, b.warm_start, "{why} warm_start");

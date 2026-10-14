@@ -89,10 +89,11 @@ impl Plugin for ParticlePlugin {
             // what an unordered fold costs.
             b.add_system(particle_tick_emitters).in_set(ParticleTickSet);
 
-            // The carrier refcount fold, ordered BEFORE the effect bake: a `+1`/`-1` can move the
-            // asset table's own dirty generation, and the bake's re-run gate reads it. Running the
-            // bake first would defer that change by a frame — invisible on a static scene, and a
-            // one-frame stale effect row on the frame an emitter rebinds.
+            // The carrier refcount fold, ordered BEFORE the effect bake. Both take
+            // `ResMut<Assets<ParticleEffect>>` (the bake drains the table's edited set), so they
+            // never run together, and the edge makes the bake see the frame's final table by
+            // declaration rather than by add order. (A `+1`/`-1` neither marks a row edited nor
+            // moves `dirty_gen`, so it does not itself trigger a re-bake.)
             let refs = b.add_system(particle_apply_effect_refs).key();
             b.add_system(particle_pack_effects).after(refs);
         });

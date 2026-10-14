@@ -34,7 +34,10 @@ bytes → `vb_mesh f4719cbf` / `vb_both f4719cbf` / `vb_sdf_only a1256bde` hold 
 - **D1 — full-screen per-material bins (count→scan→scatter), NOT tiled.** Full-screen bins give
   wave-uniform `mat_id` with zero in-kernel discard (the coherence textures need); tiled needs a
   per-tile `if(mat!=mine) return` discard. 1D dispatch matches the codebase idiom.
-- **D2 — regular over-dispatch, NOT `vkCmdDispatchIndirect`.** The FFI lacks indirect dispatch;
+- **D2 — regular over-dispatch, NOT `vkCmdDispatchIndirect`.** Chosen when the FFI was believed to
+  lack indirect dispatch. It has carried `vkCmdDispatchIndirect` since virtual-geometry rung R1
+  (`DeviceFns::cmd_dispatch_indirect`, used by the particle passes), and render-wave RD3 (RK-16) made
+  `RhiCommandEncoder::dispatch_indirect` record it; over-dispatch stays this shader's shipped choice:
   `vkCmdDispatch(G + present_material_count)` provably covers `total_groups ≤ ceil(w*h/64) +
   present_material_count` (each present material adds ≤1 partial group); surplus groups early-out on
   the SENTINEL read. **`present_material_count` = the frame's distinct material ids from

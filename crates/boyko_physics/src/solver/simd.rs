@@ -790,6 +790,172 @@ pub(super) fn apply_impulse_blend_x8(
     )
 }
 
+// ── FM: the friction patch's `x8` helpers ────────────────────────────────────
+//
+// Friction per manifold (`PhysicsConfig::friction_model`, `solver/colored.rs`'s module doc): the
+// twist row's mass and angular apply, and the patch geometry the fill computes once per patched
+// cohort. Each is `contact.rs`'s / `colored.rs`'s scalar oracle op for op, with the module's
+// no-FMA invariant (every `a*b + c` a separate `mul` then `add`).
+
+/// FM (D5): 8-wide [`twist_mass`](super::contact::twist_mass), bit-identical to the scalar:
+/// `k = n·(I⁻¹_A·n) + n·(I⁻¹_B·n)` (two [`mat3mulvec8`] and two [`dot8`], one `add`), then
+/// `blendv(0, 1/k, k > 0)` — a single divide, as the scalar `1.0 / k`.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+pub(super) fn twist_mass_x8(
+    n: [core::arch::x86_64::__m256; 3],
+    a_ii: [core::arch::x86_64::__m256; 9],
+    b_ii: [core::arch::x86_64::__m256; 9],
+) -> core::arch::x86_64::__m256 {
+    use core::arch::x86_64::{
+        _CMP_GT_OQ, _mm256_add_ps, _mm256_blendv_ps, _mm256_cmp_ps, _mm256_div_ps, _mm256_set1_ps,
+    };
+    let ia_n = mat3mulvec8(a_ii, n[0], n[1], n[2]);
+    let ib_n = mat3mulvec8(b_ii, n[0], n[1], n[2]);
+    let k = _mm256_add_ps(
+        dot8(n[0], n[1], n[2], ia_n[0], ia_n[1], ia_n[2]),
+        dot8(n[0], n[1], n[2], ib_n[0], ib_n[1], ib_n[2]),
+    );
+    let zero = _mm256_set1_ps(0.0);
+    // Where `k <= 0` the divide's Inf / NaN is discarded by the blend (the scalar `else 0.0`).
+    let inv_k = _mm256_div_ps(_mm256_set1_ps(1.0), k);
+    _mm256_blendv_ps(zero, inv_k, _mm256_cmp_ps::<_CMP_GT_OQ>(k, zero))
+}
+
+/// FM (D5, D10): 8-wide [`apply_angular_impulse`](super::contact::BodyEffective::apply_angular_impulse)
+/// under a blend: `ω + I⁻¹·t` ([`mat3mulvec8`], then an `add` per component) where `mask` is set,
+/// the original `ω` elsewhere.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+pub(super) fn apply_angular_blend_x8(
+    ang: [core::arch::x86_64::__m256; 3],
+    t: [core::arch::x86_64::__m256; 3],
+    inv_inertia: [core::arch::x86_64::__m256; 9],
+    mask: core::arch::x86_64::__m256,
+) -> [core::arch::x86_64::__m256; 3] {
+    use core::arch::x86_64::{_mm256_add_ps, _mm256_blendv_ps};
+    let dw = mat3mulvec8(inv_inertia, t[0], t[1], t[2]);
+    [
+        _mm256_blendv_ps(ang[0], _mm256_add_ps(ang[0], dw[0]), mask),
+        _mm256_blendv_ps(ang[1], _mm256_add_ps(ang[1], dw[1]), mask),
+        _mm256_blendv_ps(ang[2], _mm256_add_ps(ang[2], dw[2]), mask),
+    ]
+}
+
+/// FM (D3, D8): the friction-patch geometry of eight lanes, bit-identical to the scalar
+/// oracle `colored::patch_geometry` lane for lane. `ra` / `rb` / `sep` are the cohort's rank
+/// rows `0..depth` (`2 <= depth <= 4`; later entries unread), `width` each lane's live point
+/// count and `n` the lanes' normals. Returns `(rc_a, rc_b, d)`: the per-body centres and each
+/// rank's twist arm.
+///
+/// * **C-ALL** (`TOUCH = false`): `rc = (((r₀ + r₁) + r₂) + r₃) / c`, the sum started from rank
+///   0's value and each later rank added only on a lane it is live on (an unconditional `+0`
+///   would turn a `−0` sum into `+0`), the divide an IEEE `S / c` with `c` the width as `f32`.
+/// * **C-TOUCH** (`TOUCH = true`): the same over the points with `sep <= 0` (`−0` included,
+///   `_CMP_LE_OQ`), by the first-contributor rule — the first touching point's anchor is taken
+///   whole, never added to `+0` — and `c_t` their count; a lane with no touching point takes the
+///   C-ALL centre.
+/// * `d_r = |δ − (δ·n)·n|` with `δ = ra_r − rc_a`, `+0` on a rank past the lane's width; every
+///   output is `+0` on a padding lane (`width == 0`), whose `0 / 0` the blend discards.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::type_complexity)]
+pub(super) fn patch_geometry_x8<const TOUCH: bool>(
+    ra: &[[core::arch::x86_64::__m256; 3]; 4],
+    rb: &[[core::arch::x86_64::__m256; 3]; 4],
+    sep: &[core::arch::x86_64::__m256; 4],
+    width: core::arch::x86_64::__m256i,
+    depth: usize,
+    n: [core::arch::x86_64::__m256; 3],
+) -> (
+    [core::arch::x86_64::__m256; 3],
+    [core::arch::x86_64::__m256; 3],
+    [core::arch::x86_64::__m256; 4],
+) {
+    use core::arch::x86_64::{
+        _CMP_GT_OQ, _CMP_LE_OQ, _mm256_add_ps, _mm256_and_ps, _mm256_andnot_ps, _mm256_blendv_ps,
+        _mm256_castsi256_ps, _mm256_cmp_ps, _mm256_cmpgt_epi32, _mm256_cvtepi32_ps, _mm256_div_ps,
+        _mm256_mul_ps, _mm256_set1_epi32, _mm256_set1_ps, _mm256_sqrt_ps, _mm256_sub_ps,
+    };
+    debug_assert!((2..=4).contains(&depth), "invariant: a patched cohort has 2..=4 ranks");
+    let zero = _mm256_set1_ps(0.0);
+    let one = _mm256_set1_ps(1.0);
+    let active = |r: usize| _mm256_castsi256_ps(_mm256_cmpgt_epi32(width, _mm256_set1_epi32(r as i32)));
+    let present = active(0);
+
+    // C-ALL: the sums start from rank 0's value; a later rank adds only where it is live.
+    let mut sa = ra[0];
+    let mut sb = rb[0];
+    for r in 1..depth {
+        let live = active(r);
+        for c in 0..3 {
+            sa[c] = _mm256_blendv_ps(sa[c], _mm256_add_ps(sa[c], ra[r][c]), live);
+            sb[c] = _mm256_blendv_ps(sb[c], _mm256_add_ps(sb[c], rb[r][c]), live);
+        }
+    }
+    let count = _mm256_cvtepi32_ps(width);
+    let all_a = [_mm256_div_ps(sa[0], count), _mm256_div_ps(sa[1], count), _mm256_div_ps(sa[2], count)];
+    let all_b = [_mm256_div_ps(sb[0], count), _mm256_div_ps(sb[1], count), _mm256_div_ps(sb[2], count)];
+
+    let (rc_a, rc_b) = if TOUCH {
+        // The first-contributor rule: a lane's first touching anchor is taken whole.
+        let mut ta = [zero; 3];
+        let mut tb = [zero; 3];
+        let mut touching = zero;
+        let mut first = _mm256_cmp_ps::<_CMP_LE_OQ>(zero, zero);
+        for r in 0..depth {
+            let w = _mm256_and_ps(_mm256_cmp_ps::<_CMP_LE_OQ>(sep[r], zero), active(r));
+            for c in 0..3 {
+                let next_a = _mm256_blendv_ps(_mm256_add_ps(ta[c], ra[r][c]), ra[r][c], first);
+                let next_b = _mm256_blendv_ps(_mm256_add_ps(tb[c], rb[r][c]), rb[r][c], first);
+                ta[c] = _mm256_blendv_ps(ta[c], next_a, w);
+                tb[c] = _mm256_blendv_ps(tb[c], next_b, w);
+            }
+            touching = _mm256_blendv_ps(touching, _mm256_add_ps(touching, one), w);
+            first = _mm256_andnot_ps(w, first);
+        }
+        let any = _mm256_cmp_ps::<_CMP_GT_OQ>(touching, zero);
+        let mut rc_a = all_a;
+        let mut rc_b = all_b;
+        for c in 0..3 {
+            rc_a[c] = _mm256_blendv_ps(all_a[c], _mm256_div_ps(ta[c], touching), any);
+            rc_b[c] = _mm256_blendv_ps(all_b[c], _mm256_div_ps(tb[c], touching), any);
+        }
+        (rc_a, rc_b)
+    } else {
+        (all_a, all_b)
+    };
+    let rc_a = [
+        _mm256_blendv_ps(zero, rc_a[0], present),
+        _mm256_blendv_ps(zero, rc_a[1], present),
+        _mm256_blendv_ps(zero, rc_a[2], present),
+    ];
+    let rc_b = [
+        _mm256_blendv_ps(zero, rc_b[0], present),
+        _mm256_blendv_ps(zero, rc_b[1], present),
+        _mm256_blendv_ps(zero, rc_b[2], present),
+    ];
+
+    // The twist arms: the in-plane distance of each anchor from the side-A centre.
+    let mut d = [zero; 4];
+    for (r, d_r) in d.iter_mut().enumerate().take(depth) {
+        let delta = [
+            _mm256_sub_ps(ra[r][0], rc_a[0]),
+            _mm256_sub_ps(ra[r][1], rc_a[1]),
+            _mm256_sub_ps(ra[r][2], rc_a[2]),
+        ];
+        let dn = dot8(delta[0], delta[1], delta[2], n[0], n[1], n[2]);
+        let t = [
+            _mm256_sub_ps(delta[0], _mm256_mul_ps(n[0], dn)),
+            _mm256_sub_ps(delta[1], _mm256_mul_ps(n[1], dn)),
+            _mm256_sub_ps(delta[2], _mm256_mul_ps(n[2], dn)),
+        ];
+        let len = _mm256_sqrt_ps(dot8(t[0], t[1], t[2], t[0], t[1], t[2]));
+        *d_r = _mm256_blendv_ps(zero, len, active(r));
+    }
+    (rc_a, rc_b, d)
+}
+
 /// AVX2 batched gravity sub-pass — 8 bodies per iteration, bit-identical to
 /// [`apply_gravity_scalar`].
 ///
