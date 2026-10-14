@@ -2230,8 +2230,11 @@ impl Cf for EvalCf {
         unreachable!("Cf::usub is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
     }
     #[inline]
-    fn umin(_a: u32, _b: u32) -> u32 {
-        unreachable!("Cf::umin is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    fn umin(a: u32, b: u32) -> u32 {
+        // Concrete since render wave PXe: `post::hdr_sanitize` folds its whole-pixel finite test
+        // through it and IS oracle-swept over EvalCf (`m2_brick_cubic_hit_body`, the first caller,
+        // still never is).
+        a.min(b)
     }
     #[inline]
     fn sint_eq(_a: i32, _b: i32) -> bool {

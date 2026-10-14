@@ -84,5 +84,14 @@ name = "emit_e0_probe"
 path = "src/bin/emit_e0_probe.rs"
 required-features = ["emit"]
 
+# Render wave PXe: the post chain's final pass -- writes ONE committed file,
+# `boyko_rhi_vulkan/shaders/post_final.comp.hlsl` (the traced `post::post_final_main` body and
+# the declarations printed from `post`'s tables; no `-D` axis; byte-gated by
+# `boyko_rhi_vulkan/tests/post_edsl_sync.rs`). Not wired until PX1a.
+[[bin]]
+name = "emit_post"
+path = "src/bin/emit_post.rs"
+required-features = ["emit"]
+
 [lints]
 workspace = true

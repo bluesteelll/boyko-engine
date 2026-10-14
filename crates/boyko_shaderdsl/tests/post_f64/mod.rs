@@ -190,10 +190,11 @@ pub fn tonemap_f64(mode_words: u32, c: [Tracked; 3]) -> [Tracked; 3] {
     }
 }
 
-/// The OETF exponent the shader spells: `1/2.2` rounded to f32 (the reference models that constant
-/// exactly; its own rounding is not an evaluation error).
+/// The OETF exponent the shader spells: `1/2.2` rounded once to f32 — the value DXC folds the
+/// shipped `1.0 / 2.2` to (the reference models that constant exactly; its own rounding is not an
+/// evaluation error).
 pub fn oetf_exponent() -> f64 {
-    f64::from(1.0f32 / 2.2f32)
+    f64::from((1.0f64 / 2.2) as f32)
 }
 
 /// The f32 ULP at `|v|`.

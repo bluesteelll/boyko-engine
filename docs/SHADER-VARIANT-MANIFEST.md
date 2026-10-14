@@ -330,6 +330,33 @@ generator's output; the committed `.spv` is the re-DXC of its source (SKIPs with
 dxc resolves — **a skipped run is not a pass**); the `spirv-dis` lowering census (one instruction per op,
 no other extended instruction), whose census function is run against fixture mis-lowerings every run.
 
+## `post_final.comp.hlsl` — the post chain's final pass (compute, render wave PXe, NOT YET WIRED)
+
+One source, GENERATED WHOLE (`boyko_shaderdsl/src/bin/emit_post.rs`; the template is
+`boyko_shaderdsl::emit::emit_post_final_comp`), **no `-D` axis** (AD-1 removes the format axis; PX13
+would add `OUTPUT_PQ`; every on/off is a mode word). Its body is the trace of
+`boyko_shaderdsl::post::post_final_main` — the SAME function the host oracle (PX0's `post_eval`)
+evaluates over `EvalCf`; its declarations and constants are printed from `post::POST_FINAL_BINDINGS` /
+`POST_FINAL_UBO_LAYOUT` and from the symbols the trace references. PX1a creates its pipeline.
+
+| Variant | `-D` | `.spv` | dxc `-T` | Notes |
+|---|---|---|---|---|
+| the only one | — | `post_final.comp.spv` | `cs_6_0` | set 0 = `Texture2D<float4> gScene` @0 (`SampledImageAtGeneral`, `Load`; path-dependent: `lit` / `taa_hist[fi]` / `lit_native`) + `[[vk::image_format("rgba8")]] RWTexture2D<float4> gDisplay` @1 + `cbuffer PostFinal` @2 (32 B std140: `mode_words`, `exposure_ratio`, `uint2 extent`, four reserved words — `boyko_render::post::gpu::PostFinalGpu`). `[numthreads(8, 8, 1)]`; the skeleton is only the extent guard, one `post_final_main` call and the store. Per pixel: ONE `OpImageFetch`; the whole-pixel sanitize as integer ops (no branch); the tonemapper dispatch as two `[branch]` (`DontFlatten`) selections; the OETF as three `GLSL.std.450 Pow` on `OETF_GAMMA_EXP = 0x3EE8BA2F` (the value DXC folds the producers' `1.0 / 2.2` to). Measured at PXe (DXC 1.4.350): every HLSL 2021 ternary of the leaves lowers to a short branch + `OpPhi` (0 `OpSelect` in the module); `[flatten]` instead of `[branch]` prints `Flatten` merges and dropping it `None` merges, neither if-converts. |
+
+Frozen recipe (the header pins it verbatim; no `-O`, no `-D`):
+`dxc.exe -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 post_final.comp.hlsl`.
+
+*Byte gate:* `boyko_rhi_vulkan/tests/post_edsl_sync.rs` — the whole committed source IS the generator's
+output and each generated span the printer's; the committed `.spv` is the re-DXC of its source (SKIPs
+with an `eprintln` when no dxc resolves — **a skipped run is not a pass**); the `spirv-dis` censuses
+(three OETF `Pow`s on the gamma constant and no `Exp2`/`Log2`; two `DontFlatten` dispatch merges and no
+`float3` `OpSelect`; one `OpImageFetch`; the declared bindings and the UBO member offsets equal the
+tables); the skeleton census; the stage trace (the `post_stage_*` declarations equal
+`POST_FINAL_STAGE_ORDER` and chain into each other); `post.rs` free of backend introspection; the
+oracle census (no non-test caller of the traced body re-composes a stage); every census also run
+against fixtures it must reject. Host oracles: `boyko_shaderdsl/tests/{post_leaves,
+post_image_oracle, post_facets}.rs`.
+
 ## `sdf_forward_march.comp.hlsl` — the Forward/VB fused SDF march+shade (compute)
 
 One source `shaders/sdf_forward_march.comp.hlsl`; the `{HAS_MESH} x {VIEWT}` matrix, all four built

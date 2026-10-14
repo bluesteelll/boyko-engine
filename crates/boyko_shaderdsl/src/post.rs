@@ -72,8 +72,12 @@ pub const LIT_STORAGE_FORMAT: &str = "r11g11b10f";
 /// The display storage image's format (`gDisplay`, the post_final output).
 pub const DISPLAY_STORAGE_FORMAT: &str = "rgba8";
 
-/// The manual OETF exponent `1/2.2`, as the f32 the shader spells (`OETF_GAMMA_EXP`).
-pub const OETF_GAMMA_EXP: f32 = 1.0 / 2.2;
+/// The manual OETF exponent: `1/2.2` rounded ONCE to f32 (`0x3EE8BA2F`), the shader's
+/// `OETF_GAMMA_EXP`. It is the value DXC folds the shipped producers' `1.0 / 2.2` to (measured,
+/// Vulkan SDK 1.4.350: `OpConstant %float 0.454545468`), so `post_final` keeps today's device
+/// exponent; Rust's f32 QUOTIENT `1.0 / 2.2` (two roundings, the `goldens.rs` mirror's spelling) is
+/// one ULP below it.
+pub const OETF_GAMMA_EXP: f32 = 0.454_545_47;
 
 /// The tonemapper field of the post mode word: bits `TONEMAP_MODE_SHIFT..+4` — the same field the
 /// light header's word 7 carries (`boyko_render::light::TONEMAP_MODE_SHIFT`, pinned by a test).
@@ -386,12 +390,18 @@ fn from_channels<C: Cf>(c: [C::Scalar; 3]) -> C::Vec3f {
 /// three. `finite(x)` is the exponent-bit test `(asuint(x) & F32_EXP_MASK) != F32_EXP_MASK`. The
 /// clamp also removes the negatives a Catmull-Rom history with a variance clip can produce. `max` /
 /// `min` only ever matter on finite values (a non-finite pixel is selected away).
+///
+/// Branch-free on the device: `(asuint(x) & M) ^ M` is zero exactly for a non-finite channel, so
+/// the whole-pixel test is one unsigned `min` of the three words against zero — integer ops only.
+/// (A `||` of the three per-channel tests is a SHORT-CIRCUIT in HLSL; measured at PXe-5, DXC
+/// lowered it to two data-dependent branches per channel.)
 #[inline]
 pub fn hdr_sanitize<C: Cf>(c: C::Vec3f) -> C::Vec3f {
     let ch = channels::<C>(c);
     let mask = || C::named_uint_val("F32_EXP_MASK", F32_EXP_MASK);
-    let nonfinite = |x: C::Scalar| C::ueq(C::and_u(C::asuint(x), mask()), mask());
-    let any_nonfinite = C::or(C::or(nonfinite(ch[0]), nonfinite(ch[1])), nonfinite(ch[2]));
+    let finite_word = |x: C::Scalar| C::uxor(C::and_u(C::asuint(x), mask()), mask());
+    let lowest = C::umin(C::umin(finite_word(ch[0]), finite_word(ch[1])), finite_word(ch[2]));
+    let any_nonfinite = C::ueq(lowest, C::uint_lit(0));
     let zero = C::Scalar::lit(0.0);
     let hdr_max = C::named_lit("HDR_MAX", HDR_MAX);
     from_channels::<C>(ch.map(|x| C::select(any_nonfinite, zero, x.max(zero).min(hdr_max))))
