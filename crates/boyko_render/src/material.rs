@@ -193,6 +193,15 @@ impl MaterialTextures {
 /// otherwise — so direct field mutation of either `gpu` or `textures` after
 /// construction (e.g. `mat.textures.albedo = slot`) can never desync the two on the
 /// device; only the value staged for the next upload is authoritative.
+///
+/// # Route-defining fields (RD2 / R0a)
+///
+/// [`alpha`](Self::alpha) and [`x`](Self::x)`.transmission` decide [`Material::route`], and the
+/// route is a STRUCTURAL fact fixed at spawn (the `Translucent` / `AlphaMasked` markers,
+/// [`crate::route`]). Editing either at runtime through `Assets::get_mut` does not move the
+/// entities that reference the row: call [`reassign_route`](crate::route::reassign_route) for
+/// them. A debug build asserts the agreement every frame (`check_route_markers`); a release
+/// build renders a forgotten entity on its spawn-time rail.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Material {
@@ -200,6 +209,118 @@ pub struct Material {
     pub gpu: MaterialGpu,
     /// The CPU-only bindless-texture sidecar (textured-PBR T5/T7).
     pub textures: MaterialTextures,
+    /// How the base colour's alpha is interpreted (glTF `alphaMode` / `alphaCutoff`).
+    /// Route-defining: a runtime edit needs [`reassign_route`](crate::route::reassign_route)
+    /// for the entities it moves (see the type doc).
+    pub alpha: AlphaMode,
+    /// glTF `doubleSided`: `false` culls back faces, `true` renders both sides with the back
+    /// face's normal negated.
+    pub double_sided: bool,
+    /// The CPU copy of the KHR material-extension factors and their texture slots. Its GPU
+    /// rows are the material-table extension column a later rung creates; nothing uploads it
+    /// yet.
+    pub x: MaterialX,
+}
+
+/// The alpha interpretation of a [`Material`] (glTF `alphaMode`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum AlphaMode {
+    /// Alpha ignored — the glTF default and every pre-RD2 material.
+    #[default]
+    Opaque,
+    /// Alpha-tested: covered where `alpha >= cutoff`.
+    Mask {
+        /// The glTF `alphaCutoff` (default 0.5).
+        cutoff: f32,
+    },
+    /// Blended by the given class.
+    Blend(BlendClass),
+}
+
+/// The compositing operator of an [`AlphaMode::Blend`] material.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BlendClass {
+    /// Premultiplied "over" — glTF `BLEND`.
+    #[default]
+    PremulOver,
+    /// Additive.
+    Additive,
+}
+
+/// The rail a [`Material`] renders on, derived by [`Material::route`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaterialRoute {
+    /// The opaque rail (no marker).
+    Opaque,
+    /// The alpha-tested rail (`AlphaMasked` marker).
+    Masked,
+    /// The sorted translucent rail (`Translucent` marker).
+    Translucent,
+}
+
+/// The CPU copy of a material's KHR extension data (`KHR_materials_{transmission, ior,
+/// volume, specular, dispersion, diffuse_transmission}`), at glTF defaults unless imported.
+///
+/// Each `*_tex` field is a resolved bindless slot (`0` = none), like [`MaterialTextures`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialX {
+    /// `transmissionFactor`, default 0. Route-defining (`> 0` ⇒ translucent).
+    pub transmission: f32,
+    /// `ior`, default 1.5.
+    pub ior: f32,
+    /// `thicknessFactor`, default 0 (thin-walled).
+    pub thickness: f32,
+    /// `attenuationDistance`, default `+∞`.
+    pub attenuation_distance: f32,
+    /// `attenuationColor`, default `[1, 1, 1]`.
+    pub attenuation_color: [f32; 3],
+    /// `specularFactor`, default 1.
+    pub specular: f32,
+    /// `specularColorFactor` (linear), default `[1, 1, 1]`.
+    pub specular_color: [f32; 3],
+    /// `dispersion` (20 / Abbe number), default 0.
+    pub dispersion: f32,
+    /// `diffuseTransmissionColorFactor`, default `[1, 1, 1]`.
+    pub diffuse_transmission_color: [f32; 3],
+    /// `diffuseTransmissionFactor`, default 0. Not route-defining: diffuse transmission keeps
+    /// the material on its alpha route.
+    pub diffuse_transmission: f32,
+    /// Bindless slot of `transmissionTexture` (linear, R); `0` = none.
+    pub transmission_tex: u32,
+    /// Bindless slot of `thicknessTexture` (linear, G); `0` = none.
+    pub thickness_tex: u32,
+    /// Bindless slot of `diffuseTransmissionTexture` (linear, A); `0` = none.
+    pub diffuse_transmission_tex: u32,
+    /// Bindless slot of `diffuseTransmissionColorTexture` (sRGB, RGB); `0` = none.
+    pub diffuse_transmission_color_tex: u32,
+}
+
+impl MaterialX {
+    /// Every extension absent: the glTF defaults.
+    pub const DEFAULT: Self = Self {
+        transmission: 0.0,
+        ior: 1.5,
+        thickness: 0.0,
+        attenuation_distance: f32::INFINITY,
+        attenuation_color: [1.0; 3],
+        specular: 1.0,
+        specular_color: [1.0; 3],
+        dispersion: 0.0,
+        diffuse_transmission_color: [1.0; 3],
+        diffuse_transmission: 0.0,
+        transmission_tex: 0,
+        thickness_tex: 0,
+        diffuse_transmission_tex: 0,
+        diffuse_transmission_color_tex: 0,
+    };
+}
+
+impl Default for MaterialX {
+    #[inline]
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 impl Material {
@@ -220,6 +341,9 @@ impl Material {
         Self {
             gpu: MaterialGpu::new(base_color, metallic, roughness, reflectance, emissive, flags),
             textures: MaterialTextures::NONE,
+            alpha: AlphaMode::Opaque,
+            double_sided: false,
+            x: MaterialX::DEFAULT,
         }
     }
 
@@ -232,7 +356,16 @@ impl Material {
         if textures.any() {
             gpu.mrr[3] = f32::from_bits(gpu.mrr[3].to_bits() | MATERIAL_FLAG_TEXTURED);
         }
-        Self { gpu, textures }
+        Self { gpu, textures, alpha: AlphaMode::Opaque, double_sided: false, x: MaterialX::DEFAULT }
+    }
+
+    /// The rail this material renders on (RD2 / R0a, 09-10 §1.1): `Translucent` iff
+    /// [`alpha`](Self::alpha) is [`AlphaMode::Blend`] or `x.transmission > 0`; `Masked` iff
+    /// it is [`AlphaMode::Mask`]; else `Opaque`. Diffuse transmission alone does not change
+    /// the route.
+    #[inline]
+    pub fn route(&self) -> MaterialRoute {
+        MaterialRoute::Opaque
     }
 }
 
@@ -241,7 +374,13 @@ impl From<MaterialGpu> for Material {
     /// `gpu` bytes, no [`MATERIAL_FLAG_TEXTURED`] bit set.
     #[inline]
     fn from(gpu: MaterialGpu) -> Self {
-        Self { gpu, textures: MaterialTextures::NONE }
+        Self {
+            gpu,
+            textures: MaterialTextures::NONE,
+            alpha: AlphaMode::Opaque,
+            double_sided: false,
+            x: MaterialX::DEFAULT,
+        }
     }
 }
 
@@ -250,7 +389,7 @@ impl Default for Material {
     /// textures.
     #[inline]
     fn default() -> Self {
-        Self { gpu: MaterialGpu::default(), textures: MaterialTextures::NONE }
+        Self::from(MaterialGpu::default())
     }
 }
 
@@ -263,8 +402,8 @@ impl Asset for Material {
 
 // Asset-streaming plan F1 / textured-PBR T5: `Assets<Material>`'s store-owned
 // `ComponentPool` needs `Material: AssetBacking` to obtain its layout/`ComponentId`.
-// `Material` is plain-old-data (`#[repr(C)]`, `Copy`, no `Drop`, no device handle — both
-// `MaterialGpu` and `MaterialTextures` are POD) — the POD macro path
+// `Material` is plain-old-data (`#[repr(C)]`, `Copy`, no `Drop`, no device handle —
+// `MaterialGpu`, `MaterialTextures`, `MaterialX`, `AlphaMode` and the `bool` are POD) — the POD macro path
 // (`NEEDS_TEARDOWN = false`, no `drop_fn`) fits it exactly.
 boyko_ecs::impl_asset_pod_backing!(Material);
 

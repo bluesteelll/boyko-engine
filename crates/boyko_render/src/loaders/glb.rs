@@ -961,6 +961,99 @@ pub struct GlbMaterial {
     pub occlusion_image: Option<usize>,
     /// Image index of `emissiveTexture`.
     pub emissive_image: Option<usize>,
+    /// `alphaMode`, default [`GlbAlphaMode::Opaque`].
+    pub alpha_mode: GlbAlphaMode,
+    /// `alphaCutoff`, default 0.5 (glTF reads it only under `MASK`; it is carried for every
+    /// mode so a later re-route keeps the authored value).
+    pub alpha_cutoff: f32,
+    /// `doubleSided`, default `false` (back faces culled; `true` renders both sides with the
+    /// back face's normal negated — glTF 2.0 "Double Sided").
+    pub double_sided: bool,
+    /// The KHR material-extension factors and texture slots, at glTF defaults when absent.
+    pub khr: GlbKhrFactors,
+}
+
+/// glTF `material.alphaMode`: how the base colour's alpha is interpreted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GlbAlphaMode {
+    /// `"OPAQUE"` — alpha ignored (the glTF default).
+    #[default]
+    Opaque,
+    /// `"MASK"` — fully opaque where `alpha >= alphaCutoff`, else fully transparent.
+    Mask,
+    /// `"BLEND"` — composited with the "over" operator.
+    Blend,
+}
+
+/// The `KHR_materials_{transmission, ior, volume, specular, dispersion,
+/// diffuse_transmission}` data of one material, each field at its glTF default when the
+/// extension (or the field) is absent.
+///
+/// Every texture field is an image index (resolved through `textures[i].source`, like
+/// [`GlbMaterial`]'s own). A KHR texture reference whose `texCoord` is not 0 is read as
+/// `texCoord` 0 and counted in [`Self::texcoord1_refs`]; `KHR_materials_specular`'s two
+/// textures are not imported and are counted in [`Self::specular_textures`] — both reach
+/// [`GlbSpawnReport`](crate::loaders::glb_spawn::GlbSpawnReport) so neither drop is silent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlbKhrFactors {
+    /// `KHR_materials_transmission.transmissionFactor`, default 0.
+    pub transmission: f32,
+    /// `KHR_materials_ior.ior`, default 1.5 (0 is the extension's legal special value and
+    /// is carried verbatim).
+    pub ior: f32,
+    /// `KHR_materials_volume.thicknessFactor`, default 0 (thin-walled).
+    pub thickness: f32,
+    /// `KHR_materials_volume.attenuationColor`, default `[1, 1, 1]`.
+    pub attenuation_color: [f32; 3],
+    /// `KHR_materials_volume.attenuationDistance`, default `+∞`.
+    pub attenuation_distance: f32,
+    /// `KHR_materials_specular.specularFactor`, default 1.
+    pub specular: f32,
+    /// `KHR_materials_specular.specularColorFactor` (linear), default `[1, 1, 1]`.
+    pub specular_color: [f32; 3],
+    /// `KHR_materials_dispersion.dispersion` (20 / Abbe number), default 0.
+    pub dispersion: f32,
+    /// `KHR_materials_diffuse_transmission.diffuseTransmissionFactor`, default 0.
+    pub diffuse_transmission: f32,
+    /// `KHR_materials_diffuse_transmission.diffuseTransmissionColorFactor`, default `[1, 1, 1]`.
+    pub diffuse_transmission_color: [f32; 3],
+    /// Image index of `transmissionTexture` (R channel, linear).
+    pub transmission_tex: Option<usize>,
+    /// Image index of `thicknessTexture` (G channel, linear).
+    pub thickness_tex: Option<usize>,
+    /// Image index of `diffuseTransmissionTexture` (A channel, linear).
+    pub diffuse_transmission_tex: Option<usize>,
+    /// Image index of `diffuseTransmissionColorTexture` (RGB, sRGB).
+    pub diffuse_transmission_color_tex: Option<usize>,
+    /// KHR texture references above whose `texCoord` was not 0 (read as 0).
+    pub texcoord1_refs: u32,
+    /// `KHR_materials_specular` texture references present (`specularTexture`,
+    /// `specularColorTexture`) — not imported.
+    pub specular_textures: u32,
+}
+
+impl Default for GlbKhrFactors {
+    /// Every extension absent: the glTF defaults each README's property table states.
+    fn default() -> Self {
+        Self {
+            transmission: 0.0,
+            ior: 1.5,
+            thickness: 0.0,
+            attenuation_color: [1.0; 3],
+            attenuation_distance: f32::INFINITY,
+            specular: 1.0,
+            specular_color: [1.0; 3],
+            dispersion: 0.0,
+            diffuse_transmission: 0.0,
+            diffuse_transmission_color: [1.0; 3],
+            transmission_tex: None,
+            thickness_tex: None,
+            diffuse_transmission_tex: None,
+            diffuse_transmission_color_tex: None,
+            texcoord1_refs: 0,
+            specular_textures: 0,
+        }
+    }
 }
 
 impl Default for GlbMaterial {
@@ -977,6 +1070,10 @@ impl Default for GlbMaterial {
             metallic_roughness_image: None,
             occlusion_image: None,
             emissive_image: None,
+            alpha_mode: GlbAlphaMode::Opaque,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+            khr: GlbKhrFactors::default(),
         }
     }
 }
