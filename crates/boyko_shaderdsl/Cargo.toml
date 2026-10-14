@@ -75,5 +75,14 @@ name = "emit_ui"
 path = "src/bin/emit_ui.rs"
 required-features = ["emit"]
 
+# Render wave RD6 (defect D-DS): the facing leaves' emitter -- prints the
+# `mesh_face_consts` / `mesh_face_flip` / `vb_screen_front_ccw` spans spliced into
+# `forward_opaque.fs.hlsl`, `gbuffer_mrt.fs.hlsl` and `vb_geom_fetch.hlsli` (pinned by
+# `boyko_rhi_vulkan/tests/mesh_face_edsl_sync.rs`).
+[[bin]]
+name = "emit_mesh_face"
+path = "src/bin/emit_mesh_face.rs"
+required-features = ["emit"]
+
 [lints]
 workspace = true

@@ -2018,8 +2018,10 @@ impl Cf for EvalCf {
         unreachable!("Cf::captured_uint is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
     }
     #[inline]
-    fn select_uint(_cond: bool, _t: u32, _e: u32) -> u32 {
-        unreachable!("Cf::select_uint is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    fn select_uint(cond: bool, t: u32, e: u32) -> u32 {
+        // RD6's `vb_screen_front_ccw` is the first body with a host (`EvalCf`) instance that
+        // selects a `uint`; both arms are pure literals there, so the eager select is exact.
+        if cond { t } else { e }
     }
     #[inline]
     fn vec3_dyn_index(_v: [f32; 3], _idx: u32) -> f32 {

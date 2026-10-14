@@ -181,7 +181,7 @@ static MRT_VS_SPV: SpirvBlob<4480> = SpirvBlob(*include_bytes!(concat!(
 /// Render P5-r0: the mesh-MRT G-buffer PRODUCER fragment SPIR-V (`gbuffer_mrt.fs.spv`):
 /// writes albedo/normal/material as 3 MRT in the marcher's exact encoding (mask=1) + the
 /// marcher-aligned `SV_Depth` (euclidean under perspective, axial under ortho).
-static MRT_FS_SPV: SpirvBlob<2252> = SpirvBlob(*include_bytes!(concat!(
+static MRT_FS_SPV: SpirvBlob<3132> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/gbuffer_mrt.fs.spv"
 )));

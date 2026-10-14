@@ -63,6 +63,7 @@ pub mod cf;
 pub mod cubic_hit;
 pub mod decl;
 pub mod depth;
+pub mod face;
 pub mod field;
 pub mod half;
 pub mod levels;

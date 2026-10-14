@@ -34,10 +34,12 @@ use crate::scalar::FieldScalar;
 
 mod cf;
 mod depth;
+mod face;
 mod shaders;
 mod vb;
 
 pub use depth::*;
+pub use face::*;
 pub use shaders::*;
 pub use vb::*;
 
