@@ -310,6 +310,26 @@ tolerance (oracle 1) and the `f32` stored-depth round trip (oracle 2, the discri
 interface census (no `RWTexture`, one `SV_Depth`, the `#include`d ray-gen, the marchers' decode
 constants).
 
+## `e0_prims_probe.comp.hlsl` — the E0 primitive precision probe (compute, TEST-ONLY, render wave E0)
+
+One source, GENERATED WHOLE (`boyko_shaderdsl/src/bin/emit_e0_probe.rs`; the template is
+`boyko_shaderdsl::emit::emit_e0_prims_probe_comp`), **no `-D` axis**. No render path binds it: only the
+gpu-ignored `boyko_rhi_vulkan/tests/e0_prims_device.rs` dispatches it, to hold the five shared eDSL
+primitives `Cf::{floor, frac, log2, exp2, pow}` to "E0's bound" (`boyko_shaderdsl::prims_probe`, the
+Vulkan SPIR-V environment's precision table).
+
+| Variant | `-D` | `.spv` | dxc `-T` | Notes |
+|---|---|---|---|---|
+| the only one | — | `e0_prims_probe.comp.spv` | `cs_6_0` | the fixed compute layout: ONE `RWStructuredBuffer<uint> gData` @ set 0 / binding 0, 8 words per element (`x`, `y` in; the five results out), a 4-B push `{count}`, `[numthreads(64, 1, 1)]`. Five generated one-op functions `e0_floor` / `e0_frac` / `e0_log2` / `e0_exp2` / `e0_pow` (each the trace of its `prims_probe` body), lowering to exactly one `GLSL.std.450` `Floor` / `Fract` / `Log2` / `Exp2` / `Pow` each (gated). No float-controls execution mode, so the device test gates finite normal rows only and reports NaN / Inf / −0 / flushed rows. Measured maxima per op: pending GL-E0 (recorded here, dated, when it runs; a report, never a gate value). |
+
+Frozen recipe (the header pins it verbatim; no `-O`, no `-D`):
+`dxc.exe -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 e0_prims_probe.comp.hlsl`.
+
+*Byte gate:* `boyko_rhi_vulkan/tests/e0_prims_edsl_sync.rs` — the whole committed source IS the
+generator's output; the committed `.spv` is the re-DXC of its source (SKIPs with an `eprintln` when no
+dxc resolves — **a skipped run is not a pass**); the `spirv-dis` lowering census (one instruction per op,
+no other extended instruction), whose census function is run against fixture mis-lowerings every run.
+
 ## `sdf_forward_march.comp.hlsl` — the Forward/VB fused SDF march+shade (compute)
 
 One source `shaders/sdf_forward_march.comp.hlsl`; the `{HAS_MESH} x {VIEWT}` matrix, all four built
