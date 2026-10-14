@@ -1397,6 +1397,39 @@ pub trait Cf {
     // `m2_brick_cubic_hit` facet above) and is reused by the UI leaves rather than
     // re-declared; its Eval arm becomes the identity now that a leaf
     // (`ui_premultiplied_over_body`) legitimately runs over EvalCf.
+
+    // ---- Render wave PXe: the host-evaluable resource facets (AD-3, plan H2 rev 5) ------------
+    //
+    // `post_final`'s main body is a TRACED generic body (`crate::post::post_final_main`), so its
+    // fetches must run on the host too: PX0's `post_eval` instantiates the same function the
+    // shader prints. [`Buf`](Self::Buf) was the precedent (a real slice on Eval, a buffer name on
+    // Emit); these extend it to 2D / 3D textures. On Eval they are the stated sub-texel model of
+    // [`HostTex2`] / [`HostTex3`]; on Emit they name the texture through the printer's existing
+    // resource-name table.
+
+    /// A 2D texture PARAMETER — a borrow of a decoded image ([`HostTex2`]) on Eval, a texture (+
+    /// sampler) name handle on Emit. `Copy`.
+    type Tex2<'a>: Copy;
+
+    /// A 3D texture PARAMETER — a [`HostTex3`] borrow on Eval, a name handle on Emit.
+    type Tex3<'a>: Copy;
+
+    /// `t.Load(int3(x, y, 0))` — a texel fetch, no filtering. On Eval a direct read, and an
+    /// out-of-range coordinate PANICS (always on, not a `debug_assert!`): the body clamps its
+    /// coordinates itself (RCAS's border, PX1b), so a missing clamp is a host red, never a
+    /// device-only zero, and the flattened `y·w + x` never silently aliases the next row.
+    fn tex2_load(t: Self::Tex2<'_>, x: Self::Int, y: Self::Int) -> Self::Vec4f;
+
+    /// `t.SampleLevel(<linear-clamp sampler>, uv, 0)` — bilinear, clamp-to-edge. On Eval the stated
+    /// model: texel centres at `(i + ½)/w`, exact f32 weights. The device's `subTexelPrecisionBits`
+    /// weight quantisation is NOT modelled; it is the filter term PX0's tool adds.
+    fn tex2_sample_linear(t: Self::Tex2<'_>, uv: Self::Vec2f) -> Self::Vec4f;
+
+    /// The 3D `t.SampleLevel(<linear-clamp sampler>, uvw, 0)` — trilinear, the same model per axis.
+    fn tex3_sample_linear(t: Self::Tex3<'_>, uvw: Self::Vec3f) -> Self::Vec4f;
+
+    /// `v.xyz` — a `float4` → `float3` swizzle (a texel's colour). On Eval `[v[0], v[1], v[2]]`.
+    fn vec4_xyz(v: Self::Vec4f) -> Self::Vec3f;
 }
 
 /// `log2(e)` — the [`exp`] helper's base-change factor (the f32 nearest `1/ln 2`).
@@ -1418,6 +1451,118 @@ pub fn exp<C: Cf>(x: C::Scalar) -> C::Scalar {
 #[inline]
 pub fn ln<C: Cf>(x: C::Scalar) -> C::Scalar {
     C::log2(x).mul(C::Scalar::lit(LN_2))
+}
+
+/// A host 2D image the Eval texture facets read ([`Cf::tex2_load`], [`Cf::tex2_sample_linear`]) —
+/// a borrow of decoded RGBA `f32` texels, row-major (`texels[y·w + x]`). `no_std`-clean: a slice
+/// and two `u32`s. The length invariant `texels.len() == w·h` is checked once, at construction.
+#[derive(Clone, Copy, Debug)]
+pub struct HostTex2<'a> {
+    texels: &'a [[f32; 4]],
+    w: u32,
+    h: u32,
+}
+
+impl<'a> HostTex2<'a> {
+    /// The 0×0 stand-in a disabled binding row resolves to: every read of it PANICS, so a body
+    /// that reads a disabled resource is a red, never a silent zero (a 1×1 zero stand-in would
+    /// answer `(0, 0)`).
+    pub const EMPTY: HostTex2<'static> = HostTex2 { texels: &[], w: 0, h: 0 };
+
+    /// Wraps `texels` (row-major) as a `w × h` image. Panics unless `texels.len() == w·h`.
+    pub const fn new(texels: &'a [[f32; 4]], w: u32, h: u32) -> Self {
+        assert!(texels.len() == w as usize * h as usize, "HostTex2: texels.len() != w * h");
+        HostTex2 { texels, w, h }
+    }
+
+    /// Width in texels.
+    pub const fn width(&self) -> u32 {
+        self.w
+    }
+
+    /// Height in texels.
+    pub const fn height(&self) -> u32 {
+        self.h
+    }
+
+    /// The texel at `(x, y)`; PANICS outside `[0, w) × [0, h)`.
+    #[inline]
+    pub fn load(&self, x: i32, y: i32) -> [f32; 4] {
+        // RED-FIRST STUB (PXe-1): a Load that silently clamps its coordinates.
+        let x = x.max(0).min(self.w as i32 - 1);
+        let y = y.max(0).min(self.h as i32 - 1);
+        self.texels[(y * self.w as i32 + x) as usize]
+    }
+
+    /// Bilinear, clamp-to-edge, texel centres at `(i + ½)/n`, exact f32 weights.
+    #[inline]
+    pub fn sample_linear(&self, uv: [f32; 2]) -> [f32; 4] {
+        let (x0, x1, ax) = linear_axis(uv[0], self.w);
+        let (y0, y1, ay) = linear_axis(uv[1], self.h);
+        let w = self.w as usize;
+        let row = |y: usize| lerp4(self.texels[y * w + x0], self.texels[y * w + x1], ax);
+        lerp4(row(y0), row(y1), ay)
+    }
+}
+
+/// A host 3D image the Eval facet [`Cf::tex3_sample_linear`] reads — RGBA `f32` texels,
+/// `texels[(z·h + y)·w + x]`. `no_std`-clean.
+#[derive(Clone, Copy, Debug)]
+pub struct HostTex3<'a> {
+    texels: &'a [[f32; 4]],
+    w: u32,
+    h: u32,
+    d: u32,
+}
+
+impl<'a> HostTex3<'a> {
+    /// The 0×0×0 stand-in a disabled binding row resolves to: every read of it PANICS.
+    pub const EMPTY: HostTex3<'static> = HostTex3 { texels: &[], w: 0, h: 0, d: 0 };
+
+    /// Wraps `texels` as a `w × h × d` volume. Panics unless `texels.len() == w·h·d`.
+    pub const fn new(texels: &'a [[f32; 4]], w: u32, h: u32, d: u32) -> Self {
+        assert!(
+            texels.len() == w as usize * h as usize * d as usize,
+            "HostTex3: texels.len() != w * h * d"
+        );
+        HostTex3 { texels, w, h, d }
+    }
+
+    /// Trilinear, clamp-to-edge, the [`HostTex2::sample_linear`] model per axis.
+    #[inline]
+    pub fn sample_linear(&self, uvw: [f32; 3]) -> [f32; 4] {
+        let (x0, x1, ax) = linear_axis(uvw[0], self.w);
+        let (y0, y1, ay) = linear_axis(uvw[1], self.h);
+        let (z0, z1, az) = linear_axis(uvw[2], self.d);
+        let (w, h) = (self.w as usize, self.h as usize);
+        let at = |x: usize, y: usize, z: usize| self.texels[(z * h + y) * w + x];
+        let plane = |z: usize| {
+            lerp4(lerp4(at(x0, y0, z), at(x1, y0, z), ax), lerp4(at(x0, y1, z), at(x1, y1, z), ax), ay)
+        };
+        lerp4(plane(z0), plane(z1), az)
+    }
+}
+
+/// One axis of the linear-clamp filter: the texel-space coordinate `p = u·n − ½` (texel centres at
+/// the integers), its two taps `⌊p⌋`, `⌊p⌋ + 1` clamped to `[0, n − 1]`, and the upper tap's
+/// weight `p − ⌊p⌋`. Panics on an empty axis (a disabled stand-in has nothing to sample).
+#[inline]
+fn linear_axis(u: f32, n: u32) -> (usize, usize, f32) {
+    assert!(n > 0, "texture sample on an empty (disabled stand-in) texture");
+    // RED-FIRST STUB (PXe-1): texel centres at i/n (no half-texel).
+    let p = u * n as f32;
+    let f = <EvalCf as Cf>::floor(p);
+    let hi = i64::from(n) - 1;
+    // `f` is integral; `as` saturates the (unreachable) out-of-`i64` range.
+    let i0 = f as i64;
+    (i0.clamp(0, hi) as usize, (i0 + 1).clamp(0, hi) as usize, p - f)
+}
+
+/// `a·(1 − t) + b·t` per channel — the weights are exact f32 values, each product and the sum one
+/// rounding.
+#[inline]
+fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    core::array::from_fn(|i| a[i] * (1.0 - t) + b[i] * t)
 }
 
 /// The control-flow EVAL backend — REAL host `for`/`if`/`continue`, a unit ZST.
@@ -2512,5 +2657,29 @@ impl Cf for EvalCf {
             a[0] * (1.0 - t[0]) + b[0] * t[0],
             a[1] * (1.0 - t[1]) + b[1] * t[1],
         ]
+    }
+
+    // ---- Render wave PXe: the host-evaluable resource facets (native host) --------------------
+    type Tex2<'a> = HostTex2<'a>;
+    type Tex3<'a> = HostTex3<'a>;
+
+    #[inline]
+    fn tex2_load(t: HostTex2<'_>, x: i32, y: i32) -> [f32; 4] {
+        t.load(x, y)
+    }
+
+    #[inline]
+    fn tex2_sample_linear(t: HostTex2<'_>, uv: [f32; 2]) -> [f32; 4] {
+        t.sample_linear(uv)
+    }
+
+    #[inline]
+    fn tex3_sample_linear(t: HostTex3<'_>, uvw: [f32; 3]) -> [f32; 4] {
+        t.sample_linear(uvw)
+    }
+
+    #[inline]
+    fn vec4_xyz(v: [f32; 4]) -> [f32; 3] {
+        [v[0], v[1], v[2]]
     }
 }

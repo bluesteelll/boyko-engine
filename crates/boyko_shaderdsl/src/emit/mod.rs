@@ -37,11 +37,13 @@ mod depth;
 mod shaders;
 mod vb;
 mod prims;
+mod post;
 
 pub use depth::*;
 pub use shaders::*;
 pub use vb::*;
 pub use prims::*;
+pub use post::*;
 
 thread_local! {
     /// The build-time SSA arena. Recorded into by [`Emit`]'s [`FieldScalar`] ops,
@@ -721,6 +723,23 @@ enum Node {
     Exp2(u32),
     /// `pow(x, y)` — `GLSL.std.450 Pow`, stored `(x, y)` and printed in that order.
     Pow(u32, u32),
+
+    // ---- Render wave PXe: the host-evaluable resource facets (`crate::post`) ------------------
+    //
+    // A texture is named through [`Names::res_in`] (the Increment-5c resource table), so no
+    // printer name table is widened. The fetches are call-shaped (NOT inline leaves): the body
+    // materialises a fetch it reads more than once (`temp_vec4`).
+    /// `<tex>.Load(int3(<x>, <y>, 0))` — `tex` indexes [`Names::res_in`]; `x` / `y` are `int`
+    /// nodes. Result type [`EmitTy::Float4`].
+    Tex2Load { tex: u32, x: u32, y: u32 },
+    /// `<tex>.SampleLevel(<smp>, <uv>, 0)` — `tex` / `smp` index [`Names::res_in`]; `uv` is a
+    /// `float2`. Result type [`EmitTy::Float4`].
+    Tex2SampleLinear { tex: u32, smp: u32, uv: u32 },
+    /// The 3D `<tex>.SampleLevel(<smp>, <uvw>, 0)` — `uvw` is a `float3`. Result type
+    /// [`EmitTy::Float4`].
+    Tex3SampleLinear { tex: u32, smp: u32, uvw: u32 },
+    /// `<v>.xyz` — a `float4` → `float3` swizzle, printed inline. Result type [`EmitTy::Float3`].
+    Vec4Xyz(u32),
 }
 
 /// One VECTOR (`float3`/`float2`) SSA node — the normal leaf is a vector expression
@@ -967,6 +986,11 @@ fn type_of(node: Node) -> EmitTy {
         // by re-running the cmp-`.spv` gate); it closes the future hole where a `bool`-typed
         // consumer would otherwise mis-read `Float`.
         Node::BoolLit(_) => EmitTy::Bool,
+        // Render wave PXe: a texture fetch is a `float4`; its `.xyz` a `float3`.
+        Node::Tex2Load { .. } | Node::Tex2SampleLinear { .. } | Node::Tex3SampleLinear { .. } => {
+            EmitTy::Float4
+        }
+        Node::Vec4Xyz(_) => EmitTy::Float3,
         // `UintToFloat`/`Vec3Swizzle` PRODUCE a float; every other node is float.
         _ => EmitTy::Float,
     }
@@ -1514,6 +1538,8 @@ fn is_inline_leaf(node: Node) -> bool {
             | Node::Vec2Param(_)
             | Node::Vec4SwizzleV2(_, _)
             | Node::Vec4Alpha(_)
+            // Render wave PXe: the `.xyz` swizzle spells `<src>.xyz` at every use.
+            | Node::Vec4Xyz(_)
     )
 }
 
@@ -1693,6 +1719,8 @@ fn operand_str(
         // A resource ref / a by-name array arg spell their NAME (a call-through-only operand).
         Node::ResRef(n) => names.res_in[n as usize].to_string(),
         Node::ArrName(n) => names.array[n as usize].to_string(),
+        // Render wave PXe: `<src>.xyz` (the source is a leaf — a `float4` temp / param).
+        Node::Vec4Xyz(v) => format!("{}.xyz", opl(v)),
         // A non-leaf operand: if it was MATERIALIZED as a `tN` temp (the straight-line
         // field/normal/decode/cubic emit materializes every non-leaf via the SSA walk,
         // so `temps[id]` is always `Some` there), use the temp name. Otherwise — the CF
@@ -2392,6 +2420,21 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
             chk(y, EmitTy::Float);
             format!("pow({}, {})", op(x), op(y))
         }
+        // Render wave PXe — RED-FIRST STUB printer (PXe-1): a 2-component `Load` coordinate.
+        Node::Tex2Load { tex, x, y } => {
+            chk(x, EmitTy::Int);
+            chk(y, EmitTy::Int);
+            format!("{}.Load(int2({}, {}))", names.res_in[tex as usize], op(x), op(y))
+        }
+        Node::Tex2SampleLinear { tex, smp, uv } => {
+            chk(uv, EmitTy::Float2);
+            format!("{}.SampleLevel({}, {}, 0)", names.res_in[tex as usize], sampler_name(names, smp), op(uv))
+        }
+        Node::Tex3SampleLinear { tex, smp, uvw } => {
+            chk(uvw, EmitTy::Float3);
+            format!("{}.SampleLevel({}, {}, 0)", names.res_in[tex as usize], sampler_name(names, smp), op(uvw))
+        }
+        Node::Vec4Xyz(_) => unreachable!("Vec4Xyz is an inline leaf spelled by operand_str"),
     }
 }
 
@@ -2952,6 +2995,28 @@ pub struct ArrName(u32);
 /// operand (consumed by a [`Node::CallN`] `m2_corner` arg).
 #[derive(Clone, Copy)]
 pub struct ResTok(u32);
+
+/// A TEXTURE-PARAMETER handle on the Emit backend (render wave PXe) — the [`EmitCf`]'s
+/// [`Cf::Tex2`] and [`Cf::Tex3`]. `tex` indexes [`Names::res_in`] (the texture's name) and `smp`
+/// its linear-clamp sampler's name there, [`TexParam::NO_SAMPLER`] for a `Load`-only texture. The
+/// fields are private: the generator that declares the resources builds the handles.
+#[derive(Clone, Copy)]
+pub struct TexParam {
+    tex: u32,
+    smp: u32,
+}
+
+impl TexParam {
+    /// The `smp` of a texture declared without a sampler (read with `Load` only).
+    const NO_SAMPLER: u32 = u32::MAX;
+}
+
+/// The sampler name of a `SampleLevel`, or a generation-time panic when the texture was declared
+/// `Load`-only (a sampling body over it is a generator bug, not a valid shader).
+fn sampler_name<'a>(names: Names<'a>, smp: u32) -> &'a str {
+    assert!(smp != TexParam::NO_SAMPLER, "a SampleLevel on a texture declared without a sampler");
+    names.res_in[smp as usize]
+}
 
 thread_local! {
     /// The STMT block stack: the recorder pushes a [`Block`] on combinator entry

@@ -1097,4 +1097,26 @@ impl Cf for EmitCf {
         // already exists above (the Increment-5c facet) and is reused by the UI leaves.
         record_temp(Some(name), EmitTy::Float2, v)
     }
+
+    // ---- Render wave PXe: the resource facets (recorder) ---------------------------------------
+    // A texture handle names its texture (and sampler) through the printer's resource-name table
+    // `Names::res_in` — the table the Increment-5c `ResTok` resources already use.
+    type Tex2<'a> = TexParam;
+    type Tex3<'a> = TexParam;
+
+    fn tex2_load(t: TexParam, x: Emit, y: Emit) -> Emit {
+        Emit(push(Node::Tex2Load { tex: t.tex, x: x.0, y: y.0 }))
+    }
+
+    fn tex2_sample_linear(t: TexParam, uv: Emit) -> Emit {
+        Emit(push(Node::Tex2SampleLinear { tex: t.tex, smp: t.smp, uv: uv.0 }))
+    }
+
+    fn tex3_sample_linear(t: TexParam, uvw: Emit) -> Emit {
+        Emit(push(Node::Tex3SampleLinear { tex: t.tex, smp: t.smp, uvw: uvw.0 }))
+    }
+
+    fn vec4_xyz(v: Emit) -> Emit {
+        Emit(push(Node::Vec4Xyz(v.0)))
+    }
 }
