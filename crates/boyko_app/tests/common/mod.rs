@@ -50,10 +50,11 @@ pub fn uv_sphere(radius: f32, stacks: u32, slices: u32, color: [f32; 4]) -> (Vec
             let b = (i + 1) * stride + j;
             // Skip the degenerate pole-fan triangles — see this fn's doc.
             if i != 0 {
-                idx.extend_from_slice(&[a, b, a + 1]);
+                // RD6 / D-DS: counter-clockwise about the outward normal (the engine's front, glTF's).
+                idx.extend_from_slice(&[a, a + 1, b]);
             }
             if i != stacks - 1 {
-                idx.extend_from_slice(&[a + 1, b, b + 1]);
+                idx.extend_from_slice(&[a + 1, b + 1, b]);
             }
         }
     }
@@ -76,7 +77,8 @@ pub fn floor_plane(half: f32, color: [f32; 4]) -> (Vec<Vertex>, Vec<u32>) {
     verts[1].uv = [1.0, 0.0];
     verts[2].uv = [1.0, 1.0];
     verts[3].uv = [0.0, 1.0];
-    let idx = vec![0, 1, 2, 0, 2, 3];
+    // RD6 / D-DS: counter-clockwise about the outward normal (the engine's front, glTF's).
+    let idx = vec![0, 2, 1, 0, 3, 2];
     generate_tangents(&mut verts, &idx);
     (verts, idx)
 }

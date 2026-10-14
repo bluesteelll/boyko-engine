@@ -34,7 +34,8 @@ use crate::material::{
     AlphaMode, BlendClass, Material, MaterialGpu, MaterialRoute, MaterialTextures, MaterialX,
 };
 use crate::mesh::{MeshGpu, Vertex};
-use crate::mesh_assets::MeshAssetsExt;
+use crate::mesh_assets::build_mesh_gpu;
+use crate::mesh_face::winding_census;
 use crate::route::{AlphaMasked, Translucent};
 use crate::texture::{ColorSpace, TextureAssetsExt, TextureGpu};
 
@@ -95,6 +96,13 @@ pub struct GlbSpawnReport {
     pub dual_colour_space_images: u32,
     /// Materials with `dispersion > 0` and `thickness = 0` (dispersion needs a volume).
     pub dispersion_without_volume: u32,
+    /// RD6 / D-DS: spawned primitives whose triangles are mostly wound clockwise for their own
+    /// normals ([`winding_census`](crate::mesh_face::winding_census)) — counted, never re-wound
+    /// (glTF normals are free attributes).
+    pub winding_disagrees_primitives: u32,
+    /// RD6 / D-DS: spawned primitives whose node placement mirrored them (negative determinant),
+    /// re-wound with their tangent handedness negated at bake.
+    pub mirrored_placements_rewound: u32,
 }
 
 /// The device operations the spawn path needs — monomorphised, so the host test's uploader and
@@ -107,8 +115,10 @@ pub trait GlbUploader {
     fn upload_image(&mut self, image: &GlbImage, color_space: ColorSpace) -> Option<u32>;
 }
 
-/// The device [`GlbUploader`]: meshes through [`MeshAssetsExt::register_mesh`] (pinned — a glb
-/// part is a load-time asset the scene keeps), images through the in-house PNG decoder and
+/// The device [`GlbUploader`]: meshes through [`build_mesh_gpu`] into the world's mesh table
+/// (pinned — a glb part is a load-time asset the scene keeps; the same upload
+/// [`register_mesh`](crate::mesh_assets::MeshAssetsExt::register_mesh) performs, minus its
+/// debug winding assertion on code-authored geometry), images through the in-house PNG decoder and
 /// [`TextureAssetsExt::register_texture`].
 pub struct GlbDeviceUploader<'a> {
     /// The world's mesh table.
@@ -123,7 +133,11 @@ pub struct GlbDeviceUploader<'a> {
 
 impl GlbUploader for GlbDeviceUploader<'_> {
     fn upload_mesh(&mut self, vertices: &[Vertex], indices: &[u32]) -> MeshHandle {
-        let mesh = self.meshes.register_mesh(self.ctx, vertices, indices);
+        // `build_mesh_gpu` + `add`, NOT `register_mesh`: `register_mesh` debug-asserts the
+        // counter-clockwise convention on code-authored geometry, while FILE content is counted
+        // by the caller (`GlbSpawnReport::winding_disagrees_primitives`), never refused — glTF
+        // normals are free attributes.
+        let mesh = MeshHandle(self.meshes.add(build_mesh_gpu(self.ctx, vertices, indices, None)).index());
         self.meshes.pin(mesh.0);
         mesh
     }
@@ -259,6 +273,9 @@ pub fn spawn_glb_scene_with<U: GlbUploader>(
             &part.mesh.vertices
         };
         let mesh = uploader.upload_mesh(vertices, &part.mesh.indices);
+        report.mirrored_placements_rewound += u32::from(part.mirrored_rewound);
+        report.winding_disagrees_primitives +=
+            u32::from(winding_census(vertices, &part.mesh.indices).mostly_clockwise());
         let (material, route) = part
             .material
             .and_then(|i| handles.get(i).copied().flatten())

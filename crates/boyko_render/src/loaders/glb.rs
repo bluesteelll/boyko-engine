@@ -669,6 +669,14 @@ fn node_matrix(node: &Json) -> Mat4 {
     ]
 }
 
+/// The determinant of `m`'s upper-left 3×3 (column-major) — negative for a mirroring placement.
+fn mat3_det(m: &Mat4) -> f32 {
+    let (a, b, c) = (m[0], m[4], m[8]);
+    let (d, e, f) = (m[1], m[5], m[9]);
+    let (g, h, i) = (m[2], m[6], m[10]);
+    a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+}
+
 fn is_identity(m: &Mat4) -> bool {
     m.iter().zip(IDENTITY.iter()).all(|(a, b)| a == b)
 }
@@ -1098,6 +1106,10 @@ pub struct GlbPart {
     pub mesh: MeshData,
     /// Index into [`GlbScene::materials`], or `None` for a primitive with no material.
     pub material: Option<usize>,
+    /// RD6 / D-DS: this primitive's node placement had a negative determinant, so its
+    /// triangles were re-wound (2nd and 3rd index swapped) and its tangent handedness negated at
+    /// bake — glTF: "the determinant of the node's global transform defines the winding order".
+    pub mirrored_rewound: bool,
 }
 
 /// A decoded `.glb`, kept in the pieces the file describes.
@@ -1245,7 +1257,8 @@ fn decode_scene_impl(bytes: &[u8], allow_skinned: bool) -> Result<GlbScene, Asse
                 .ok_or_else(|| err(format!("node references mesh {mesh_index}, which does not exist")))?;
             for (pi, prim) in mesh.arr_at("primitives").iter().enumerate() {
                 let what = format!("mesh {mesh_index} primitive {pi}");
-                let (mut vs, is) = decode_primitive(&root, bin, prim, &what, allow_skinned)?;
+                let (mut vs, mut is) = decode_primitive(&root, bin, prim, &what, allow_skinned)?;
+                let mut mirrored_rewound = false;
 
                 // BAKE this placement into model space. The engine places instances itself, so a
                 // transform left in the file would be data nothing consumes -- and DROPPING it is
@@ -1268,11 +1281,27 @@ fn decode_scene_impl(bytes: &[u8], allow_skinned: bool) -> Result<GlbScene, Asse
                         let t = transform_dir(&tm, [v.tangent[0], v.tangent[1], v.tangent[2]]);
                         v.tangent = [t[0], t[1], t[2], v.tangent[3]];
                     }
+                    // RD6 / D-DS: glTF — "the determinant of the node's global transform defines
+                    // the winding order": a negative determinant authors CLOCKWISE fronts. The
+                    // engine renders counter-clockwise fronts, so the baked triangles are re-wound
+                    // (the 2nd and 3rd index swap; the provoking vertex stays) and the bitangent
+                    // handedness flips with the mirror (cross(M n, M t) = −M cross(n, t) for a
+                    // reflection, so B = cross(N, T)·w needs −w).
+                    if mat3_det(xform) < 0.0 {
+                        for tri in is.as_chunks_mut::<3>().0 {
+                            tri.swap(1, 2);
+                        }
+                        for v in &mut vs {
+                            v.tangent[3] = -v.tangent[3];
+                        }
+                        mirrored_rewound = true;
+                    }
                 }
 
                 parts.push(GlbPart {
                     mesh: MeshData { vertices: vs, indices: is },
                     material: prim.usize_at("material"),
+                    mirrored_rewound,
                 });
             }
         }

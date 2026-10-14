@@ -1743,10 +1743,11 @@ fn uv_sphere(radius: f32, stacks: u32, slices: u32) -> (Vec<Vertex>, Vec<u32>) {
             let a = i * stride + j;
             let b = (i + 1) * stride + j;
             if i != 0 {
-                idx.extend_from_slice(&[a, b, a + 1]);
+                // RD6 / D-DS: counter-clockwise about the outward normal (the engine's front, glTF's).
+                idx.extend_from_slice(&[a, a + 1, b]);
             }
             if i != stacks - 1 {
-                idx.extend_from_slice(&[a + 1, b, b + 1]);
+                idx.extend_from_slice(&[a + 1, b + 1, b]);
             }
         }
     }
