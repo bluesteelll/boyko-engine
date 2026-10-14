@@ -2309,33 +2309,62 @@ impl Cf for EvalCf {
 
     // ---- Render wave E0: the rounding / exponential primitives (the `sin` shim) ---------------
     //
-    // RED-FIRST STUBS (E0-1): each arm is the mutation its gate exists to catch — `floor` as a
-    // truncation, `frac` over that truncation, `log2` bound to `ln`, `exp2` to `exp`, `pow` with
-    // its operands swapped. Replaced by the real shims in E0-2.
+    // The same `nightly`/`std` shim `sin` uses: stable `core` has none of these, so a strictly
+    // `no_std` build takes the intrinsic and the default build links `std`.
 
     #[inline]
     fn floor(x: f32) -> f32 {
-        x.trunc()
+        #[cfg(feature = "nightly")]
+        {
+            core::intrinsics::floorf32(x)
+        }
+        #[cfg(not(feature = "nightly"))]
+        {
+            f32::floor(x)
+        }
     }
 
     #[inline]
     fn frac(x: f32) -> f32 {
-        x - x.trunc()
+        // HLSL's own definition (and `GLSL.std.450 Fract`'s): one subtract of two representable
+        // values, so a negative input wraps UP (`frac(-0.25) == 0.75`).
+        x - <Self as Cf>::floor(x)
     }
 
     #[inline]
     fn log2(x: f32) -> f32 {
-        x.ln()
+        #[cfg(feature = "nightly")]
+        {
+            core::intrinsics::log2f32(x)
+        }
+        #[cfg(not(feature = "nightly"))]
+        {
+            f32::log2(x)
+        }
     }
 
     #[inline]
     fn exp2(x: f32) -> f32 {
-        x.exp()
+        #[cfg(feature = "nightly")]
+        {
+            core::intrinsics::exp2f32(x)
+        }
+        #[cfg(not(feature = "nightly"))]
+        {
+            f32::exp2(x)
+        }
     }
 
     #[inline]
     fn pow(x: f32, y: f32) -> f32 {
-        y.powf(x)
+        #[cfg(feature = "nightly")]
+        {
+            core::intrinsics::powf32(x, y)
+        }
+        #[cfg(not(feature = "nightly"))]
+        {
+            f32::powf(x, y)
+        }
     }
 
     // ---- UI-ADVANCED S1: the `ui_rect` fragment-leaf facets ------------------------------

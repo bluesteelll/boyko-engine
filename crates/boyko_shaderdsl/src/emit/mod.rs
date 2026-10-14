@@ -2370,29 +2370,27 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         | Node::Vec2Comp(_, _) => {
             unreachable!("inline leaves are spelled by operand_str, not defined")
         }
-        // Render wave E0 — RED-FIRST STUB printers (E0-1): each spells the mutation its emit
-        // pin exists to catch (a truncation for `floor`/`frac`, `ln`/`exp` for `log2`/`exp2`,
-        // swapped `pow` operands). Replaced by the intrinsic spellings in E0-2.
+        // Render wave E0: the five intrinsic calls (the `Sqrt` arm's shape — arguments at Root).
         Node::Floor(a) => {
             chk(a, EmitTy::Float);
-            format!("trunc({})", op(a))
+            format!("floor({})", op(a))
         }
         Node::Frac(a) => {
             chk(a, EmitTy::Float);
-            format!("{} - trunc({})", op(a), op(a))
+            format!("frac({})", op(a))
         }
         Node::Log2(a) => {
             chk(a, EmitTy::Float);
-            format!("log({})", op(a))
+            format!("log2({})", op(a))
         }
         Node::Exp2(a) => {
             chk(a, EmitTy::Float);
-            format!("exp({})", op(a))
+            format!("exp2({})", op(a))
         }
         Node::Pow(x, y) => {
             chk(x, EmitTy::Float);
             chk(y, EmitTy::Float);
-            format!("pow({}, {})", op(y), op(x))
+            format!("pow({}, {})", op(x), op(y))
         }
     }
 }

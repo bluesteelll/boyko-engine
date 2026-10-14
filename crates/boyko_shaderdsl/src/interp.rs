@@ -162,26 +162,25 @@ impl InterpBackend for f32 {
     fn acos(self) -> Self {
         f32::acos(self)
     }
-    // RED-FIRST STUBS (E0-1): the same mutation-shaped stubs the `Cf` Eval arms carry.
     #[inline]
     fn floor(self) -> Self {
-        f32::trunc(self)
+        f32::floor(self)
     }
     #[inline]
     fn frac(self) -> Self {
-        self - f32::trunc(self)
+        self - f32::floor(self)
     }
     #[inline]
     fn log2(self) -> Self {
-        f32::ln(self)
+        f32::log2(self)
     }
     #[inline]
     fn exp2(self) -> Self {
-        f32::exp(self)
+        f32::exp2(self)
     }
     #[inline]
     fn pow(self, y: Self) -> Self {
-        f32::powf(y, self)
+        f32::powf(self, y)
     }
     #[inline]
     fn select(cond: bool, t: Self, e: Self) -> Self {
