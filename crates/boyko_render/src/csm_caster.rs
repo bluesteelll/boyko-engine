@@ -347,6 +347,24 @@ pub fn arvo_transform(rows: &[[f32; 4]; 3], lc: [f32; 3], lh: [f32; 3]) -> ([f32
     (wc, wh)
 }
 
+/// RD6 / D-DS: one step of the merge-walk that marks a CAMERA batch as casting — `true` iff the
+/// caster gather emitted a batch with the same key as `batch`.
+///
+/// The production caster passes draw the camera's batches, so each one needs to know whether any
+/// of its instances is a [`ShadowCaster`](crate::csm_marker::ShadowCaster). Both batch lists
+/// come out of the one gather core sorted on the same key, so a single forward cursor over
+/// `caster_batches` (`*cursor`, starting at 0 for the frame) answers every camera batch in
+/// order, O(camera + caster) per frame. Pure (no world access) so the walk has a host test.
+///
+/// The key this commit walks on is HEAD's: the mesh id alone.
+#[inline]
+pub fn batch_casts_shadow(cursor: &mut usize, caster_batches: &[DrawBatch], batch: &DrawBatch) -> bool {
+    while *cursor < caster_batches.len() && caster_batches[*cursor].mesh_id < batch.mesh_id {
+        *cursor += 1;
+    }
+    *cursor < caster_batches.len() && caster_batches[*cursor].mesh_id == batch.mesh_id
+}
+
 /// VG rung R2c: ONE batch's world-space AABB — the union of [`arvo_transform`] over that batch's
 /// slice of the instance ring. `None` when the batch has no instances, or when `mesh_aabb` is the
 /// C0 zero-vertex sentinel (an INVERTED box, `min > max`), which is skipped for the same reason
@@ -822,6 +840,7 @@ mod tests {
                 index_type: IndexType::Uint16,
                 base_instance: 0,
                 instance_count: 1,
+                face: 0,
             },
             DrawBatch {
                 mesh_id: 1,
@@ -829,6 +848,7 @@ mod tests {
                 index_type: IndexType::Uint16,
                 base_instance: 1,
                 instance_count: 1,
+                face: 0,
             },
         ];
         let ring = [
@@ -869,6 +889,7 @@ mod tests {
             index_type: IndexType::Uint16,
             base_instance: 0,
             instance_count: 1,
+            face: 0,
         }];
         let ring = [identity_instance_at([1.0, 2.0, 3.0])];
 
@@ -917,6 +938,7 @@ mod tests {
             index_type: IndexType::Uint16,
             base_instance: 0,
             instance_count: 1,
+            face: 0,
         }];
         let ring = [inst];
 
@@ -972,6 +994,7 @@ mod tests {
                 index_type: IndexType::Uint16,
                 base_instance: 0,
                 instance_count: 2,
+                face: 0,
             },
         ];
         let ring = [inst_a, inst_b];
@@ -1026,5 +1049,30 @@ mod tests {
                 casters.batch_count()
             );
         }
+    }
+
+    /// H4: the camera-batch caster walk keys on `(face, mesh_id)`: a mesh whose single-sided
+    /// instances do not cast but whose double-sided ones do marks only the double-sided batch.
+    #[test]
+    fn batch_casts_shadow_keys_on_face_and_mesh() {
+        use boyko_rhi::enums::MESH_FACE_DOUBLE_SIDED as DS;
+        let batch = |mesh_id: u32, face: u32| DrawBatch {
+            mesh_id,
+            index_count: 6,
+            index_type: IndexType::Uint16,
+            base_instance: 0,
+            instance_count: 1,
+            face,
+        };
+        // Class-major order on both sides: (class 0: m0, m1), (double-sided: m0, m1).
+        let camera = [batch(0, 0), batch(1, 0), batch(0, DS), batch(1, DS)];
+        let casters = [batch(1, 0), batch(0, DS)];
+        let mut cursor = 0usize;
+        let got: Vec<bool> = camera.iter().map(|b| batch_casts_shadow(&mut cursor, &casters, b)).collect();
+        assert_eq!(
+            got,
+            vec![false, true, true, false],
+            "RED: each camera batch casts iff a caster batch has its (face, mesh) key"
+        );
     }
 }

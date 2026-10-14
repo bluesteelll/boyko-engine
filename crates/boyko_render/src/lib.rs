@@ -245,6 +245,10 @@ pub mod mesh_data;
 /// half of the per-batch draw cull, and the oracle its GPU half is compared against.
 pub mod frustum;
 pub mod mesh_draw;
+/// RD6 / D-DS: the per-instance mesh-face class ([`mesh_face_bits`](mesh_face::mesh_face_bits) —
+/// glTF `doubleSided` and the mirrored-transform bit) and the winding census against the
+/// counter-clockwise convention.
+pub mod mesh_face;
 /// HW-RT rung 3b + TAA W3 — the camera view-proj carry for temporal reprojection
 /// ([`MotionCam`](motion_cam::MotionCam) UBO + [`MotionCamState`](motion_cam::MotionCamState)
 /// persist Resource). Un-walled from `#[cfg(feature = "hwrt")]` (TAA W3): the resolve's

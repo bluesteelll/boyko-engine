@@ -824,6 +824,71 @@ impl CullMode {
     pub const fn as_u32(self) -> u32 {
         self as u32
     }
+
+    /// RD6 / D-DS: the cull a mesh draw of face class `face` (its
+    /// [`MESH_FACE_DOUBLE_SIDED`] / [`MESH_FACE_MIRRORED`] bits; other bits ignored) takes in a
+    /// pass of `kind` — the ONE table every camera-view and caster pipeline family selects its
+    /// member through.
+    ///
+    /// The table this commit ships is HEAD's (every camera-view family `None`, every caster
+    /// family `Front`), so the red-first oracles (`boyko_render/tests/mesh_face_cull_table.rs`)
+    /// run against the behaviour the engine has today.
+    #[inline]
+    pub const fn for_mesh_face(face: u32, kind: MeshPassKind) -> Self {
+        let _ = face;
+        match kind {
+            MeshPassKind::CameraView => Self::None,
+            MeshPassKind::LightView => Self::Front,
+        }
+    }
+}
+
+/// RD6 / D-DS: the mesh-face bit meaning "this draw's material is glTF `doubleSided`" — its
+/// back faces are rasterised and lit with the negated normal (glTF 2.0 "Double Sided").
+///
+/// One spelling for three carriers: the per-batch `face` word of the host draw lists, bits 2–3
+/// of the `use_model_matrix` push word the raster shaders read (bit 0 = the instanced arm,
+/// bit 1 = the VB visible indirection), and bits 2–3 of `VbInstanceRow::flags` (bit 0 =
+/// occlusion culling). It lives in `boyko_rhi` because it is a shader ABI that both
+/// `boyko_render` (which derives it) and `boyko_rhi_vulkan` (whose recorders and shaders read
+/// it) must agree on, and this is the one crate both see.
+pub const MESH_FACE_DOUBLE_SIDED: u32 = 1 << 2;
+
+/// RD6 / D-DS: the mesh-face bit meaning "this instance's model transform has a negative
+/// determinant" — it reverses the screen winding of every triangle (glTF: "the determinant of
+/// the node's global transform defines the winding order"), so the cull and the facing test
+/// swap front for back. See [`MESH_FACE_DOUBLE_SIDED`] for the carriers.
+pub const MESH_FACE_MIRRORED: u32 = 1 << 3;
+
+/// Both mesh-face bits — the mask a carrier word is ANDed with to read the face class.
+pub const MESH_FACE_BITS: u32 = MESH_FACE_DOUBLE_SIDED | MESH_FACE_MIRRORED;
+
+/// The shift that turns a carrier word's face bits into a dense class index
+/// (`(word & MESH_FACE_BITS) >> MESH_FACE_CLASS_SHIFT`, see [`mesh_face_class`]).
+pub const MESH_FACE_CLASS_SHIFT: u32 = 2;
+
+/// The number of mesh-face classes (single-sided, double-sided, each optionally mirrored) — the
+/// bucket multiplier of the class-major draw gather.
+pub const MESH_FACE_CLASS_COUNT: usize = 4;
+
+/// The dense class index `0..MESH_FACE_CLASS_COUNT` of a carrier word's face bits; class `0` is
+/// single-sided and not mirrored (every pre-RD6 draw).
+#[inline]
+pub const fn mesh_face_class(word: u32) -> u32 {
+    (word & MESH_FACE_BITS) >> MESH_FACE_CLASS_SHIFT
+}
+
+/// The kind of view a mesh pass rasterises from — the input [`CullMode::for_mesh_face`] needs
+/// besides the face bits, because the camera and the light view builders produce opposite
+/// screen chiralities (camera basis `right × up = −forward`, light basis
+/// `right × up = +forward`, both with the same `clip.y = −up·` flip), so a counter-clockwise
+/// face toward the viewer is FRONT-facing in a camera pass and BACK-facing in a light pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MeshPassKind {
+    /// A camera-view pass (G-buffer, forward colour, the ForwardPlus depth prepass, VB raster).
+    CameraView,
+    /// A light-view depth pass (CSM cascades, spot and point atlas faces).
+    LightView,
 }
 
 /// A color-blend factor (the `VkBlendFactor` `i32` family, GUI P5a Decision 3).

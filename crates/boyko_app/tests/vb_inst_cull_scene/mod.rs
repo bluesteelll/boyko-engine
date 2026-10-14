@@ -338,6 +338,7 @@ pub fn batch_rejections(framing: &Framing) -> Vec<usize> {
                 index_type: boyko_rhi::IndexType::Uint32,
                 base_instance: (batch * BATCH_INSTANCES) as u32,
                 instance_count: BATCH_INSTANCES as u32,
+                face: 0,
             };
             boyko_render::frustum::batch_instance_count_after_cull(
                 &planes,
