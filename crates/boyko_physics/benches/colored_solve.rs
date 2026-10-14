@@ -32,7 +32,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, 
 
 use boyko_physics::manifold::{BodyIndex, ContactPoint, Manifold};
 use boyko_physics::math::{Mat3, Quat, Vec3};
-use boyko_physics::resources::{BodyState, ConstraintGraph, PhysicsConfig, SolverScratch};
+use boyko_physics::resources::{BodyState, ConstraintGraph, FrictionModel, PhysicsConfig, SolverScratch};
 use boyko_physics::solver::{ColoredSoftStepSolver, RigidSolver, SoftStepSolver};
 use boyko_threadpool::ThreadPoolBuilder;
 
@@ -363,5 +363,98 @@ fn bench_simd_ab(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_solve, bench_simd_ab);
+/// FM C1 (`levers/FM-manifold-friction/`, design Q3, `fm_depth_ab`): `pile_scene(128, 40)`'s graph
+/// with every manifold widened to `w ∈ {1, 2, 3, 4}` points — point `k` at the anchor plus an
+/// in-plane offset of ±0.2 m, feature id `k`, separation −0.05 — under `friction_model` {PerPoint,
+/// PerManifold}, on the single-threaded and the 4-worker `simd_solve` rows (`o7_simd_ab`'s). A
+/// depth-1 layout runs the per-point code under either model (D16), so its two rows are one path.
+///
+/// Anti-vacuity before timing: at least 95 % of the layout's cohorts are of depth `w`
+/// (`ColoredSoftStepSolver::layout_census`), and the per-manifold rows of `w ≥ 2` lay out patches.
+/// `-- --test fm_depth_ab` runs each row once, untimed (criterion's test mode).
+fn bench_fm_depth_ab(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fm_depth_ab");
+    group.sample_size(30);
+    let (bodies, base) = pile_scene(128, 40);
+    for w in 1..=4u8 {
+        let manifolds = widened(&base, w);
+        let graph = build_graph(&bodies, &manifolds);
+        let n_points = usize::from(w) * manifolds.len();
+        group.throughput(Throughput::Elements(n_points as u64));
+        for (model_label, model) in [("point", FrictionModel::PerPoint), ("manifold", FrictionModel::PerManifold)] {
+            for (row, parallel, workers) in [("simd_solve_single", false, 0usize), ("simd_solve_parallel_4w", true, 4)] {
+                let cfg = PhysicsConfig {
+                    dt: 1.0 / 60.0,
+                    simd_solve: true,
+                    parallel_solve: parallel,
+                    friction_model: model,
+                    ..PhysicsConfig::default()
+                };
+                let id = BenchmarkId::new(format!("{row}/{model_label}/w{w}"), n_points);
+                group.bench_with_input(id, &n_points, |b, &_n| {
+                    let mut solver = ColoredSoftStepSolver::default();
+                    let mut scratch = SolverScratch::with_capacity(bodies.len());
+                    scratch.set_bodies(&bodies);
+                    scratch.touched.reset(scratch.bodies().len());
+                    let warm_and_time =
+                        |b: &mut criterion::Bencher<'_>, solver: &mut ColoredSoftStepSolver, scratch: &mut SolverScratch| {
+                            for _ in 0..4 {
+                                scratch.touched.reset(scratch.bodies().len());
+                                solver.solve_colored(&cfg, &manifolds, &graph, scratch);
+                            }
+                            let census = solver.layout_census();
+                            assert!(
+                                census.cohorts > 0
+                                    && census.cohorts_by_depth[usize::from(w) - 1] * 100 >= census.cohorts * 95,
+                                "fm_depth_ab anti-vacuity: at least 95 % of the cohorts must be of depth {w}: {census:?}"
+                            );
+                            assert!(
+                                model == FrictionModel::PerPoint || w == 1 || census.patch_blocks > 0,
+                                "fm_depth_ab anti-vacuity: the per-manifold rows of w >= 2 lay out patches: {census:?}"
+                            );
+                            b.iter(|| {
+                                scratch.touched.reset(scratch.bodies().len());
+                                solver.solve_colored(black_box(&cfg), black_box(&manifolds), black_box(&graph), scratch);
+                            });
+                        };
+                    if parallel {
+                        let pool = ThreadPoolBuilder::new().num_threads(workers).build();
+                        pool.install(|_scope| warm_and_time(b, &mut solver, &mut scratch));
+                    } else {
+                        warm_and_time(b, &mut solver, &mut scratch);
+                    }
+                });
+            }
+        }
+    }
+    group.finish();
+}
+
+/// `manifolds` with every manifold widened to `w` points (`fm_depth_ab`): point `k` at the first
+/// point's anchor plus an in-plane offset of ±0.2 m along two axes perpendicular to the normal
+/// (`pile_scene`'s normals are ±y and +x), feature id `k`, separation −0.05.
+fn widened(manifolds: &[Manifold], w: u8) -> Vec<Manifold> {
+    let offsets = [(0.2f32, 0.2f32), (-0.2, 0.2), (-0.2, -0.2), (0.2, -0.2)];
+    manifolds
+        .iter()
+        .map(|m| {
+            let n = m.normal;
+            let (u, v) = if n.y.abs() > 0.5 {
+                (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+            } else {
+                (Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+            };
+            let anchor = m.points[0].anchor_a;
+            let mut out = *m;
+            for (k, &(a, b)) in offsets.iter().enumerate().take(usize::from(w)) {
+                let p = anchor + u * a + v * b;
+                out.points[k] = ContactPoint { anchor_a: p, anchor_b: p, separation: -0.05, feature_id: k as u32 };
+            }
+            out.count = w;
+            out
+        })
+        .collect()
+}
+
+criterion_group!(benches, bench_solve, bench_simd_ab, bench_fm_depth_ab);
 criterion_main!(benches);

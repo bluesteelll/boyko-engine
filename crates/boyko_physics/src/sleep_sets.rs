@@ -795,6 +795,10 @@ pub struct SleepSets {
     capture_seq: u64,
     /// Σ `kept_rec[s].count` over the live kept slots (the logical `carry_hits` share).
     held_warm: u32,
+    /// FM (D15): the friction form of `kept_rec` — whether the solve that captured the kept records
+    /// ran friction per manifold. A prologue whose step runs the other form zeroes their friction
+    /// once, before any restore reads them (`kept_friction_form_changed`).
+    kept_fric: bool,
     /// Whether this step's restore warm records must be drained into the solver's read side
     /// (a D-H flush with the mode `Off`, ruling open question 2).
     drain: bool,
@@ -855,6 +859,7 @@ impl SleepSets {
             capture: (0, 0),
             capture_seq: 0,
             held_warm: 0,
+            kept_fric: false,
             drain: false,
             stats: SleepSkipStats::default(),
             rules: SleepRuleCounts::default(),
@@ -1049,6 +1054,14 @@ impl SleepSets {
         let epoch = SleepEpoch::of(mode, p.warm.unwrap_or(false), cfg, p.field);
         let epoch_changed = epoch != self.epoch;
         self.epoch = epoch;
+        // FM (D15): the kept records are in the form of the solve that captured them; a step of the
+        // other form zeroes their friction here, before A1.2's restore or a D-H drain copies them. A
+        // centre change (`PerManifold` and `PerManifoldTouch`) is not a form change, and no record
+        // is flushed.
+        let fric = cfg.friction_model != crate::resources::FrictionModel::PerPoint;
+        if fric != self.kept_fric {
+            self.kept_friction_form_changed(fric);
+        }
         let wake_all = p.sleep.wake_pending(p.inputs.wake_requests());
         let flush = mode != SleepSkip::Sets || !cursors_ok || epoch_changed || wake_all;
         if held.live_records() > 0 && flush {
@@ -1106,6 +1119,17 @@ impl SleepSets {
         // prologue just marked for restore.
         let sleepers = self.mark_sleepers(held.view());
         StepPlan { sets: true, sleepers, identity: c == 0, resting_ok, scan, rows_step }
+    }
+
+    /// FM (D15): the step's friction form differs from the kept records': zero their friction
+    /// words (normals, feature ids and counts stay) and record the new form. Cold: only a model
+    /// toggle reaches it.
+    #[cold]
+    #[inline(never)]
+    fn kept_friction_form_changed(&mut self, fric: bool) {
+        let mut kept = self.kept_rec.build_view();
+        crate::solver::warm_records::zero_friction(kept.as_mut_slice());
+        self.kept_fric = fric;
     }
 
     /// Design 04 T1 (ruling W1 of rev 2.1): [`RowCls::SLEEPER`] on every member of a live record

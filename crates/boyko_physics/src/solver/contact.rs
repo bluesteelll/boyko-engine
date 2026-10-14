@@ -128,6 +128,38 @@ impl BodyEffective {
         self.linear_velocity = self.linear_velocity + p * self.inv_mass;
         self.angular_velocity = self.angular_velocity + self.inv_inertia.mul_vec(r.cross(p));
     }
+
+    /// FM (D5, D10): applies a world angular impulse `t` directly: `ω += I⁻¹ · t` — the angular
+    /// half of [`apply_impulse`](Self::apply_impulse) with the torque given (the twist row's
+    /// `n·Δλ`, the merged warm torque of a friction patch). Op for op the colored kernel's 8-lane
+    /// mirror (`simd::apply_angular_blend_x8`).
+    #[inline]
+    pub(crate) fn apply_angular_impulse(&mut self, t: Vec3) {
+        self.angular_velocity = self.angular_velocity + self.inv_inertia.mul_vec(t);
+    }
+}
+
+/// FM (D5): the effective mass of a manifold's twist row about the unit normal `n`:
+/// `1 / (n·(I⁻¹_A·n) + n·(I⁻¹_B·n))`, `0` when that sum is not positive (two immovable bodies) —
+/// Jolt's `AngularFrictionConstraintPart`. Op for op the 8-lane mirror (`simd::twist_mass_x8`).
+#[inline]
+pub(crate) fn twist_mass(n: Vec3, body_a: &BodyEffective, body_b: &BodyEffective) -> f32 {
+    let k = n.dot(body_a.inv_inertia.mul_vec(n)) + n.dot(body_b.inv_inertia.mul_vec(n));
+    if k > 0.0 { 1.0 / k } else { 0.0 }
+}
+
+/// FM (D5): `if a > b { a } else { b }` — AVX's `max_ps` select exactly: `b` wins a `±0` tie and
+/// every NaN, which `f32::max` does not promise. The twist clamp's scalar oracle.
+#[inline]
+pub(crate) fn max_sel(a: f32, b: f32) -> f32 {
+    if a > b { a } else { b }
+}
+
+/// FM (D5): `if a < b { a } else { b }` — AVX's `min_ps` select exactly (`b` wins a `±0` tie and
+/// every NaN).
+#[inline]
+pub(crate) fn min_sel(a: f32, b: f32) -> f32 {
+    if a < b { a } else { b }
 }
 
 /// The effective mass of a contact constraint along the unit direction `dir`,

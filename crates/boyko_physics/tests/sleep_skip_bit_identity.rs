@@ -19,6 +19,9 @@
 //! * the hysteresis table's lookup for every logical box pair (not its bytes);
 //! * the warm seed the next step would find for every point of every logical manifold
 //!   (`ColoredSoftStepSolver::for_each_warm_seed`: stream records ⊎ kept records);
+//! * FM: the friction seed the next step would find for every logical manifold
+//!   (`ColoredSoftStepSolver::for_each_friction_seed`, stream ⊎ kept; `None` under the per-point
+//!   form) and the solve's `FrictionSeedStats::manifold_hits` (FM C1, design D14);
 //! * the pair tags (`Manifolds::for_each_pair_tag`, over the LOGICAL pairs): a collided slot
 //!   byte-equal to `Off`'s; a held slot — or a pair the tree withheld, which has no slot (L10
 //!   C3c) — must carry the held-skip tag, and its kept copy must equal `Off`'s tag on every bit
@@ -113,8 +116,8 @@ use boyko_physics::plugin::{
 };
 use boyko_physics::broadphase_tree::{BroadphaseTree, TREE_BRUTE_MAX_ROWS, TreeDiag, all_pairs_into};
 use boyko_physics::resources::{
-    BodyState, BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
-    PairTagProbe, PhysicsConfig, SdfNarrowphaseKernel, SleepSkip, SolverScratch,
+    BodyState, BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, FrictionModel, IslandSleep,
+    Manifolds, PairTagProbe, PhysicsConfig, SdfNarrowphaseKernel, SleepSkip, SolverScratch,
 };
 use boyko_physics::sdf_query::SdfField;
 use boyko_physics::sleep_sets::{SleepRuleCounts, SleepSets, SleepSkipStats};
@@ -753,6 +756,10 @@ struct Obs {
     axes: Vec<Option<usize>>,
     /// `(key, fid, seed bits)`, sorted.
     seeds: Vec<(u64, u16, Option<[u32; 3]>)>,
+    /// FM: `(key, friction triple bits)`, sorted.
+    fseeds: Vec<(u64, Option<[u32; 3]>)>,
+    /// FM: the last solve's friction-seed manifold hits (`None` under the per-point form).
+    fstats: Option<u32>,
     tags: Vec<PairTagProbe>,
     /// Every soft particle's position and velocity bits, bodies in query order (design 10, Tests
     /// A); empty without soft bodies.
@@ -851,6 +858,12 @@ fn observe(world: &mut EcsMaster) -> Obs {
         });
     }
     seeds.sort_unstable();
+    let mut fseeds = Vec::new();
+    if let Some((solver, sets)) = solver {
+        solver.for_each_friction_seed(m, sets, |key, t| fseeds.push((key, t.map(|t| t.map(f32::to_bits)))));
+    }
+    fseeds.sort_unstable();
+    let fstats = solver.and_then(|(solver, _)| solver.friction_seed_stats()).map(|f| f.manifold_hits);
     let mut tags = Vec::new();
     m.for_each_pair_tag(pairs_res, |p| tags.push(p));
     Obs {
@@ -871,6 +884,8 @@ fn observe(world: &mut EcsMaster) -> Obs {
         warm: solver.map(|(solver, _)| solver.warm_seed_stats()),
         axes,
         seeds,
+        fseeds,
+        fstats,
         tags,
         soft,
     }
@@ -916,6 +931,8 @@ fn diff_named(off: &Obs, sets: &Obs, names: (&str, &str), lockstep: bool) -> Opt
     list!(frozen);
     list!(axes);
     list!(seeds);
+    list!(fseeds);
+    scalar!(fstats);
     scalar!(warm);
     list!(soft);
     if !lockstep {
@@ -3105,6 +3122,7 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         dt: _,
         substeps: _,
         relax_iterations: _,
+        friction_model: _,
         contact_hertz: _,
         contact_damping: _,
         broadphase: _,
@@ -3144,6 +3162,17 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         Row { name: "dt", write: |c| c.dt = 2.0 * DT, class: O },
         Row { name: "substeps", write: |c| c.substeps += 1, class: O },
         Row { name: "relax_iterations", write: |c| c.relax_iterations += 1, class: O },
+        // FM: a toggle between the two forms, so it perturbs on both sides of FM's flip of the
+        // default. Every shape holds a three-box tower, whose four-point manifolds the per-manifold
+        // form solves with a friction patch.
+        Row {
+            name: "friction_model",
+            write: |c| {
+                c.friction_model =
+                    if c.friction_model == FrictionModel::PerPoint { FrictionModel::PerManifold } else { FrictionModel::PerPoint };
+            },
+            class: O,
+        },
         Row { name: "contact_hertz", write: |c| c.contact_hertz *= 0.5, class: O },
         Row { name: "contact_damping", write: |c| c.contact_damping *= 0.5, class: O },
         // The coupling path requires the grid (`soft/solver.rs`): wiring there. Elsewhere every
@@ -3577,6 +3606,188 @@ fn s3_mid_step_sleep_threshold_is_mode_independent() {
             );
         },
     );
+}
+
+// ── FM C1c: the friction seeds under the sleep-skip (fm/cut.md §3 C1c) ─────────────────────
+
+/// The kept manifolds' friction triples the `Sets` world's next step would seed (the tail of
+/// `for_each_friction_seed`'s walk, after the stream's manifolds), as bits.
+fn kept_friction(rig: &Rig) -> Vec<Option<[u32; 3]>> {
+    let world = &rig.world;
+    let solver = world.resource::<ColoredSoftStepSolver>();
+    let sets = world.resource::<SleepSets>();
+    let m = world.resource::<Manifolds>();
+    let stream = m.solver_manifolds().len();
+    let mut out = Vec::new();
+    solver.for_each_friction_seed(m, sets, |_, t| out.push(t.map(|t| t.map(f32::to_bits))));
+    out.split_off(stream)
+}
+
+/// The kept manifolds' per-point warm seeds of the `Sets` world (the tail of
+/// `for_each_warm_seed`'s walk), as bits.
+fn kept_point_seeds(rig: &Rig) -> Vec<Option<[u32; 3]>> {
+    let world = &rig.world;
+    let solver = world.resource::<ColoredSoftStepSolver>();
+    let sets = world.resource::<SleepSets>();
+    let m = world.resource::<Manifolds>();
+    let stream: usize = m.solver_manifolds().iter().map(|m| usize::from(m.count)).sum();
+    let mut out = Vec::new();
+    solver.for_each_warm_seed(m, sets, |_, _, s| out.push(s.map(|s| s.map(f32::to_bits))));
+    out.split_off(stream)
+}
+
+/// A step-0 write of friction model `model` (FM's fixture arms: the model is on before anything is
+/// held).
+fn fm_from_start(model: FrictionModel) -> impl FnMut(usize, &mut Rig) {
+    move |step, rig| {
+        if step == 0 {
+            rig.cfg().friction_model = model;
+        }
+    }
+}
+
+/// `R-S` under FM (Q9): the rest pile, the default configuration with friction per manifold, at W ∈
+/// {1, 8}; `Off` ≡ `Sets` every step, the friction seeds included.
+#[test]
+fn fixture_rest_pile_fm() {
+    for w in [1, 8] {
+        let label = format!("R-S FM W{w}");
+        let ev = lockstep(
+            &label,
+            Pipeline::Default,
+            Variant::default_cfg(w),
+            &rest_pile(),
+            fixture_steps(),
+            &mut fm_from_start(FrictionModel::PerManifold),
+        );
+        assert_all_held_when_frozen(&label, &ev);
+    }
+}
+
+/// `J-Son` under FM (Q9): the Jolt pile, cfg-A with friction per manifold at W ∈ {1, 8}, and with
+/// the C-TOUCH centre at W 8; `Off` ≡ `Sets` every step. Anti-vacuity: some step's kept records
+/// hold a friction triple with a non-zero λtw (the friction carry is exercised, not just the
+/// normals).
+#[test]
+fn fixture_jolt_pile_cfg_a_fm() {
+    for (w, model) in [(1, FrictionModel::PerManifold), (8, FrictionModel::PerManifold), (8, FrictionModel::PerManifoldTouch)] {
+        let label = format!("J-Son FM {model:?} W{w}");
+        let mut twist_kept = 0usize;
+        let ev = lockstep_probed(
+            &label,
+            Pipeline::Default,
+            Variant::cfg_a(w),
+            &jolt_pile(),
+            fixture_steps(),
+            &mut fm_from_start(model),
+            &mut |_, _, sets| {
+                twist_kept += kept_friction(sets).iter().filter(|t| t.is_some_and(|t| f32::from_bits(t[2]) != 0.0)).count();
+            },
+        );
+        assert_all_held_when_frozen(&label, &ev);
+        assert!(twist_kept > 0, "{label}: void: no step's kept records held a triple with a non-zero λtw");
+        println!("{label}: kept triples with λtw != 0 over the run: {twist_kept}");
+    }
+}
+
+/// The step T-SLEEP-TOGGLE writes the friction model at (boundary writes; a window write lands
+/// at the next step), and the one A and B write it back at. FM is on from step 0, and under it the
+/// warm arms' Tree reuse-off cell settles later than [`HELD_BY`]: measured (msvc release, this
+/// test with a probe), every dynamic row is held from step 73 on the three reuse-on variants, from
+/// 258 on the reuse-off one (6 of 9 rows at [`HELD_BY`]) and from 63 on the SDF cells. The toggle
+/// takes [`HELD_BY_LATE`]'s settle margin (rulings 2026-09-30, item 10b: settle longer).
+const FM_TOGGLE_OFF: usize = HELD_BY_LATE;
+/// See [`FM_TOGGLE_OFF`].
+const FM_TOGGLE_ON: usize = FM_TOGGLE_OFF + 60;
+
+/// T-SLEEP-TOGGLE (§8 C1 (g), D5b's shape): friction per manifold from step 0, then on every warm
+/// arm cell, `Off` and `Sets` in lockstep and equal on every step — the friction seeds included —
+/// across a friction-model toggle while the towers are held. `arm` picks the toggle: A, the form
+/// to per point at [`FM_TOGGLE_OFF`] and back at [`FM_TOGGLE_ON`] as boundary writes; B, the same
+/// writes in the Early (then the Late) window; C, `PerManifold` to `PerManifoldTouch` at
+/// [`FM_TOGGLE_OFF`] (a centre change: no form change).
+fn sleep_toggle(arm: char, place: Option<Place>) {
+    let (pm, pp, touch) = (FrictionModel::PerManifold, FrictionModel::PerPoint, FrictionModel::PerManifoldTouch);
+    for (cell, pipeline, variant, specs, held) in warm_arm_cells() {
+        let label = format!("T-SLEEP-TOGGLE {arm}{} {cell}", place.map_or(String::new(), |p| format!(" {p:?}")));
+        let mut script = |step: usize, rig: &mut Rig| {
+            if step == 0 {
+                rig.cfg().friction_model = pm;
+            }
+            let (off, on) = if arm == 'C' { (touch, pm) } else { (pp, pm) };
+            let to = if step == FM_TOGGLE_OFF {
+                Some(off)
+            } else if step == FM_TOGGLE_ON && arm != 'C' {
+                Some(on)
+            } else {
+                None
+            };
+            if let Some(model) = to {
+                match place {
+                    None => rig.cfg().friction_model = model,
+                    Some(p) => {
+                        let write: fn(&mut PhysicsConfig) = if model == FrictionModel::PerPoint {
+                            |c| c.friction_model = FrictionModel::PerPoint
+                        } else {
+                            |c| c.friction_model = FrictionModel::PerManifold
+                        };
+                        rig.mid(p).cfg = Some(write);
+                    }
+                }
+            }
+        };
+        let mut kept_t: Vec<Vec<Option<[u32; 3]>>> = Vec::new();
+        let mut kept_p: Vec<Vec<Option<[u32; 3]>>> = Vec::new();
+        let ev = lockstep_probed(&label, pipeline, variant, &specs, FM_TOGGLE_ON + 3, &mut script, &mut |_, _, sets| {
+            kept_t.push(kept_friction(sets));
+            kept_p.push(kept_point_seeds(sets));
+        });
+        // A window write lands at the next step; a boundary write at its own.
+        let k = FM_TOGGLE_OFF + usize::from(place.is_some());
+        let back = FM_TOGGLE_ON + usize::from(place.is_some());
+        assert_eq!(ev.stats[k].held_rows, held, "{label}: void: not held at the toggle step {k}");
+        assert_eq!(ev.stats[k].flushes, 0, "{label}: the toggle flushed (D15 zeroes; it never flushes)");
+        let nonzero = |v: &[Option<[u32; 3]>], from: usize| v.iter().flatten().any(|t| t[from..].iter().any(|&w| f32::from_bits(w) != 0.0));
+        assert!(
+            kept_t[k - 1].iter().flatten().any(|t| f32::from_bits(t[2]) != 0.0),
+            "{label}: void: no kept triple with a non-zero λtw before the toggle"
+        );
+        if arm == 'C' {
+            assert_eq!(kept_t[k], kept_t[k - 1], "{label}: a centre change keeps the kept triples (no form change)");
+        } else {
+            assert!(
+                !kept_p[k].is_empty() && !nonzero(&kept_p[k], 1),
+                "{label}: the per-point step after FM seeds the kept manifolds no friction"
+            );
+            assert!(
+                !kept_t[back].is_empty() && !nonzero(&kept_t[back], 0),
+                "{label}: the FM step after per point seeds the kept manifolds no friction"
+            );
+        }
+    }
+}
+
+/// T-SLEEP-TOGGLE arm A: boundary writes (§8 C1 (g)). Red under N-T2 (the prologue skips the kept
+/// zeroing): `Sets`' kept records keep the old triples while `Off` carries zeroed ones.
+#[test]
+fn s3_friction_model_toggle_while_held_zeroes_both_stores() {
+    sleep_toggle('A', None);
+}
+
+/// T-SLEEP-TOGGLE arm B: the same writes in the Early, then the Late window; each lands at the next
+/// step.
+#[test]
+fn s3_mid_step_friction_model_toggle_lands_next_step() {
+    for place in [Place::Early, Place::Late] {
+        sleep_toggle('B', Some(place));
+    }
+}
+
+/// T-SLEEP-TOGGLE arm C (critique O1): a centre change while held is no form change — neither store
+/// zeroes. Red under RF-O1 (`kept_fric` compares the model, not the form).
+#[test]
+fn s3_friction_centre_toggle_while_held_keeps_the_triples() {
+    sleep_toggle('C', None);
 }
 
 // ── D5b: warm start as a latched input (L10 C3e; design 11, §4) ────────────────────────────
