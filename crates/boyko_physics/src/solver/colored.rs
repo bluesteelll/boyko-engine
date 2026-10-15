@@ -7132,6 +7132,15 @@ impl RegionStages for SolveStages<'_> {
     }
 
     fn item_begin(&self, item: u32) {
+        // MD2 (ruling 32): counted here, not at `region_on_pool`'s `armed` test, because only an
+        // `ARMED = true` monomorph calls this hook: the count follows the monomorph that ran, so a
+        // selector that lies and a swapped pair of arms both move it. Item 0 begins once per region.
+        #[cfg(feature = "region-armed-counts")]
+        if item == 0 {
+            // Relaxed: a count; its reader runs after `Schedule::run` returns, and the run's join
+            // orders every region of the step before that read.
+            ARMED_REGION_DISPATCHES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         let e = self.item_entry(item);
         // SAFETY: the hooks run on participant 0 only (`RegionStages`' contract), so this is the
         //   one access to the slots, which `solve_region` keeps alive for the whole region.
@@ -7610,6 +7619,25 @@ impl ColoredSoftStepSolver {
             }
         })
     }
+}
+
+/// MD2: the solve regions this process has run as an `ARMED = true` monomorph.
+#[cfg(feature = "region-armed-counts")]
+static ARMED_REGION_DISPATCHES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// MD2 (ruling 32), test-only: how many solve regions this process has run as an `ARMED = true`
+/// monomorph, since the process started — one per such region, counted by the solver's
+/// `item_begin` hook on item 0, which only that monomorph calls. A disarmed step adds 0, an armed
+/// region step adds 1. Process-wide, so its gate (`tests/sr_region_armed_dispatch.rs`) is the only
+/// test in its process. Exists only with the `region-armed-counts` feature, which no crate of the
+/// workspace enables; without it the counting statement is not compiled.
+#[cfg(feature = "region-armed-counts")]
+#[doc(hidden)]
+#[inline]
+pub fn armed_region_dispatches() -> u64 {
+    // Relaxed: as the increment's.
+    ARMED_REGION_DISPATCHES.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 impl RigidSolver for ColoredSoftStepSolver {
