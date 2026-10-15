@@ -1181,6 +1181,40 @@ pub trait Cf {
     /// [`crate::pack::pack_material_id_ba_body`] spells it).
     fn rsqrt(x: Self::Scalar) -> Self::Scalar;
 
+    // ---- Render wave E0: the shared rounding / exponential primitives (AD-7) -----------------
+    //
+    // One op growth for every render leaf of the wave (post OETF and AgX, exposure, volumetric
+    // fog, VFX flipbooks, hashed alpha). They live on THIS axis for the reason `sin` states:
+    // `FieldScalar` is the physics leaf and stays byte-frozen. Each is an intrinsic node that
+    // lowers to ONE `GLSL.std.450` instruction (`Floor`, `Fract`, `Log2`, `Exp2`, `Pow`); the
+    // Eval arms are the `sin` shim. `exp` / `ln` are leaf helpers ([`exp`], [`ln`]), not nodes.
+    //
+    // Precision: `floor` / `frac` are exact on both backends (`frac` is one subtract of two
+    // representable values). `log2` / `exp2` / `pow` are APPROXIMATE on the device (the Vulkan
+    // SPIR-V environment's precision table; `crate::prims_probe` single-sources those bounds), so
+    // a leaf spelling them carries a tolerance, never a bit-exact contract.
+
+    /// `floor(x)` — the HLSL `floor` intrinsic (`OpExtInst GLSL.std.450 Floor`). Exact.
+    fn floor(x: Self::Scalar) -> Self::Scalar;
+
+    /// `frac(x)` — the HLSL `frac` intrinsic (`OpExtInst GLSL.std.450 Fract`), `x - floor(x)`,
+    /// so a negative input wraps UP (`frac(-0.25) == 0.75`). On Eval exactly that subtract.
+    fn frac(x: Self::Scalar) -> Self::Scalar;
+
+    /// `log2(x)` — the HLSL `log2` intrinsic (`OpExtInst GLSL.std.450 Log2`). Approximate on
+    /// the device (3 ULP outside `[0.5, 2]`, absolute `2⁻²¹` inside).
+    fn log2(x: Self::Scalar) -> Self::Scalar;
+
+    /// `exp2(x)` — the HLSL `exp2` intrinsic (`OpExtInst GLSL.std.450 Exp2`). Approximate on
+    /// the device (`3 + 2·|x|` ULP).
+    fn exp2(x: Self::Scalar) -> Self::Scalar;
+
+    /// `pow(x, y)` — the HLSL `pow` intrinsic (`OpExtInst GLSL.std.450 Pow`), operand order
+    /// `pow(x, y)` = `x^y`. An INTRINSIC node, not `exp2(y·log2 x)`: the hand-written OETF lowers
+    /// to `Pow`, and a rewrite would change the SPIR-V a transition pin compares. Undefined on the
+    /// device for `x < 0` and for `x = 0, y <= 0`; its bound is inherited from `exp2(y·log2 x)`.
+    fn pow(x: Self::Scalar, y: Self::Scalar) -> Self::Scalar;
+
     // ---- UI-ADVANCED S1: the `ui_rect` fragment-leaf facets (`docs/UI-PLAN-SPRITES-S0-S2.md`) ----
     //
     // The six UI leaves (`crate::ui`) are the eDSL's first `float2`/`float4` VALUE math: the
@@ -1363,6 +1397,201 @@ pub trait Cf {
     // `m2_brick_cubic_hit` facet above) and is reused by the UI leaves rather than
     // re-declared; its Eval arm becomes the identity now that a leaf
     // (`ui_premultiplied_over_body`) legitimately runs over EvalCf.
+
+    // ---- Render wave PXe: the host-evaluable resource facets (AD-3, plan H2 rev 5) ------------
+    //
+    // `post_final`'s main body is a TRACED generic body (`crate::post::post_final_main`), so its
+    // fetches must run on the host too: PX0's `post_eval` instantiates the same function the
+    // shader prints. [`Buf`](Self::Buf) was the precedent (a real slice on Eval, a buffer name on
+    // Emit); these extend it to 2D / 3D textures. On Eval they are the stated sub-texel model of
+    // [`HostTex2`] / [`HostTex3`]; on Emit they name the texture through the printer's existing
+    // resource-name table.
+
+    /// A 2D texture PARAMETER — a borrow of a decoded image ([`HostTex2`]) on Eval, a texture (+
+    /// sampler) name handle on Emit. `Copy`.
+    type Tex2<'a>: Copy;
+
+    /// A 3D texture PARAMETER — a [`HostTex3`] borrow on Eval, a name handle on Emit.
+    type Tex3<'a>: Copy;
+
+    /// `t.Load(int3(x, y, 0))` — a texel fetch, no filtering. On Eval a direct read, and an
+    /// out-of-range coordinate PANICS (always on, not a `debug_assert!`): the body clamps its
+    /// coordinates itself (RCAS's border, PX1b), so a missing clamp is a host red, never a
+    /// device-only zero, and the flattened `y·w + x` never silently aliases the next row.
+    fn tex2_load(t: Self::Tex2<'_>, x: Self::Int, y: Self::Int) -> Self::Vec4f;
+
+    /// `t.SampleLevel(<linear-clamp sampler>, uv, 0)` — bilinear, clamp-to-edge. On Eval the stated
+    /// model: texel centres at `(i + ½)/w`, exact f32 weights. The device's `subTexelPrecisionBits`
+    /// weight quantisation is NOT modelled; it is the filter term PX0's tool adds.
+    fn tex2_sample_linear(t: Self::Tex2<'_>, uv: Self::Vec2f) -> Self::Vec4f;
+
+    /// The 3D `t.SampleLevel(<linear-clamp sampler>, uvw, 0)` — trilinear, the same model per axis.
+    fn tex3_sample_linear(t: Self::Tex3<'_>, uvw: Self::Vec3f) -> Self::Vec4f;
+
+    /// `v.xyz` — a `float4` → `float3` swizzle (a texel's colour). On Eval `[v[0], v[1], v[2]]`.
+    fn vec4_xyz(v: Self::Vec4f) -> Self::Vec3f;
+
+    // ---- Render wave PXe: the three facets the traced post body adds --------------------------
+
+    /// Declares a mutable `float3` LOCAL (`float3 <name> = <init>;`) — the `float3` analogue of
+    /// [`decl_var_vec2`](Self::decl_var_vec2) ([`decl_param_vec3`](Self::decl_param_vec3) is the
+    /// suppressed-decl parameter form). Eval boxes `init` into a `Cell<[f32; 3]>`. The post
+    /// dispatch's result local.
+    fn decl_var_vec3(name: &'static str, init: Self::Vec3f) -> Self::Vec3Var;
+
+    /// `a == b` over two [`Uint`](Self::Uint)s, producing a [`Mask`](FieldScalar::Mask) (the post
+    /// mode test and the finite-bit test). On Emit a bitwise operand is printed WRAPPED: `==` binds
+    /// tighter than `&` in HLSL, so `(asuint(x) & M) == M` without the parentheses would test
+    /// `asuint(x) & (M == M)`.
+    fn ueq(a: Self::Uint, b: Self::Uint) -> <Self::Scalar as FieldScalar>::Mask;
+
+    /// `[branch] if (cond) { then } else { els }` — [`if_else`](Self::if_else) with the HLSL
+    /// `[branch]` attribute (`OpSelectionMerge … DontFlatten`), for a WAVE-UNIFORM condition where
+    /// a real branch costs no divergence and an if-converted select would run both arms. Eval runs
+    /// the real `if`/`else`; Emit records a `Stmt::IfElseAttr` (the existing `Stmt::IfElse` and its
+    /// printing are untouched).
+    fn if_else_branch<T: FnOnce() -> Flow, E: FnOnce() -> Flow>(
+        cond: <Self::Scalar as FieldScalar>::Mask,
+        then: T,
+        els: E,
+    ) -> Flow;
+}
+
+/// `log2(e)` — the [`exp`] helper's base-change factor (the f32 nearest `1/ln 2`).
+pub const LOG2_E: f32 = core::f32::consts::LOG2_E;
+
+/// `ln(2)` — the [`ln`] helper's base-change factor (the f32 nearest `ln 2`).
+pub const LN_2: f32 = core::f32::consts::LN_2;
+
+/// `e^x` as the leaf helper `exp2(x · LOG2_E)` — a function, not a node: a GPU `exp` lowers to
+/// an `Exp2` and a multiply anyway (render wave E0). Two roundings beyond `exp2`'s own (the
+/// constant and the product), each amplified by `|x|` through the exponential, so its tolerance
+/// grows with `|x|`.
+#[inline]
+pub fn exp<C: Cf>(x: C::Scalar) -> C::Scalar {
+    C::exp2(x.mul(C::Scalar::lit(LOG2_E)))
+}
+
+/// `ln(x)` as the leaf helper `log2(x) · LN_2` — a function, not a node (render wave E0).
+#[inline]
+pub fn ln<C: Cf>(x: C::Scalar) -> C::Scalar {
+    C::log2(x).mul(C::Scalar::lit(LN_2))
+}
+
+/// A host 2D image the Eval texture facets read ([`Cf::tex2_load`], [`Cf::tex2_sample_linear`]) —
+/// a borrow of decoded RGBA `f32` texels, row-major (`texels[y·w + x]`). `no_std`-clean: a slice
+/// and two `u32`s. The length invariant `texels.len() == w·h` is checked once, at construction.
+#[derive(Clone, Copy, Debug)]
+pub struct HostTex2<'a> {
+    texels: &'a [[f32; 4]],
+    w: u32,
+    h: u32,
+}
+
+impl<'a> HostTex2<'a> {
+    /// The 0×0 stand-in a disabled binding row resolves to: every read of it PANICS, so a body
+    /// that reads a disabled resource is a red, never a silent zero (a 1×1 zero stand-in would
+    /// answer `(0, 0)`).
+    pub const EMPTY: HostTex2<'static> = HostTex2 { texels: &[], w: 0, h: 0 };
+
+    /// Wraps `texels` (row-major) as a `w × h` image. Panics unless `texels.len() == w·h`.
+    pub const fn new(texels: &'a [[f32; 4]], w: u32, h: u32) -> Self {
+        assert!(texels.len() == w as usize * h as usize, "HostTex2: texels.len() != w * h");
+        HostTex2 { texels, w, h }
+    }
+
+    /// Width in texels.
+    pub const fn width(&self) -> u32 {
+        self.w
+    }
+
+    /// Height in texels.
+    pub const fn height(&self) -> u32 {
+        self.h
+    }
+
+    /// The texel at `(x, y)`; PANICS outside `[0, w) × [0, h)`.
+    #[inline]
+    pub fn load(&self, x: i32, y: i32) -> [f32; 4] {
+        // Always on, not `debug_assert!`: at `x = w` the flattened index would silently read the
+        // next row's first texel — exactly the aliasing a host oracle must never have.
+        assert!(
+            x >= 0 && (x as u32) < self.w && y >= 0 && (y as u32) < self.h,
+            "tex2_load out of the texture: ({x}, {y}) on a {}x{} image",
+            self.w,
+            self.h
+        );
+        self.texels[(y as u32 * self.w + x as u32) as usize]
+    }
+
+    /// Bilinear, clamp-to-edge, texel centres at `(i + ½)/n`, exact f32 weights.
+    #[inline]
+    pub fn sample_linear(&self, uv: [f32; 2]) -> [f32; 4] {
+        let (x0, x1, ax) = linear_axis(uv[0], self.w);
+        let (y0, y1, ay) = linear_axis(uv[1], self.h);
+        let w = self.w as usize;
+        let row = |y: usize| lerp4(self.texels[y * w + x0], self.texels[y * w + x1], ax);
+        lerp4(row(y0), row(y1), ay)
+    }
+}
+
+/// A host 3D image the Eval facet [`Cf::tex3_sample_linear`] reads — RGBA `f32` texels,
+/// `texels[(z·h + y)·w + x]`. `no_std`-clean.
+#[derive(Clone, Copy, Debug)]
+pub struct HostTex3<'a> {
+    texels: &'a [[f32; 4]],
+    w: u32,
+    h: u32,
+    d: u32,
+}
+
+impl<'a> HostTex3<'a> {
+    /// The 0×0×0 stand-in a disabled binding row resolves to: every read of it PANICS.
+    pub const EMPTY: HostTex3<'static> = HostTex3 { texels: &[], w: 0, h: 0, d: 0 };
+
+    /// Wraps `texels` as a `w × h × d` volume. Panics unless `texels.len() == w·h·d`.
+    pub const fn new(texels: &'a [[f32; 4]], w: u32, h: u32, d: u32) -> Self {
+        assert!(
+            texels.len() == w as usize * h as usize * d as usize,
+            "HostTex3: texels.len() != w * h * d"
+        );
+        HostTex3 { texels, w, h, d }
+    }
+
+    /// Trilinear, clamp-to-edge, the [`HostTex2::sample_linear`] model per axis.
+    #[inline]
+    pub fn sample_linear(&self, uvw: [f32; 3]) -> [f32; 4] {
+        let (x0, x1, ax) = linear_axis(uvw[0], self.w);
+        let (y0, y1, ay) = linear_axis(uvw[1], self.h);
+        let (z0, z1, az) = linear_axis(uvw[2], self.d);
+        let (w, h) = (self.w as usize, self.h as usize);
+        let at = |x: usize, y: usize, z: usize| self.texels[(z * h + y) * w + x];
+        let plane = |z: usize| {
+            lerp4(lerp4(at(x0, y0, z), at(x1, y0, z), ax), lerp4(at(x0, y1, z), at(x1, y1, z), ax), ay)
+        };
+        lerp4(plane(z0), plane(z1), az)
+    }
+}
+
+/// One axis of the linear-clamp filter: the texel-space coordinate `p = u·n − ½` (texel centres at
+/// the integers), its two taps `⌊p⌋`, `⌊p⌋ + 1` clamped to `[0, n − 1]`, and the upper tap's
+/// weight `p − ⌊p⌋`. Panics on an empty axis (a disabled stand-in has nothing to sample).
+#[inline]
+fn linear_axis(u: f32, n: u32) -> (usize, usize, f32) {
+    assert!(n > 0, "texture sample on an empty (disabled stand-in) texture");
+    let p = u * n as f32 - 0.5;
+    let f = <EvalCf as Cf>::floor(p);
+    let hi = i64::from(n) - 1;
+    // `f` is integral; `as` saturates the (unreachable) out-of-`i64` range.
+    let i0 = f as i64;
+    (i0.clamp(0, hi) as usize, (i0 + 1).clamp(0, hi) as usize, p - f)
+}
+
+/// `a·(1 − t) + b·t` per channel — the weights are exact f32 values, each product and the sum one
+/// rounding.
+#[inline]
+fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    core::array::from_fn(|i| a[i] * (1.0 - t) + b[i] * t)
 }
 
 /// The control-flow EVAL backend — REAL host `for`/`if`/`continue`, a unit ZST.
@@ -2001,8 +2230,11 @@ impl Cf for EvalCf {
         unreachable!("Cf::usub is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
     }
     #[inline]
-    fn umin(_a: u32, _b: u32) -> u32 {
-        unreachable!("Cf::umin is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    fn umin(a: u32, b: u32) -> u32 {
+        // Concrete since render wave PXe: `post::hdr_sanitize` folds its whole-pixel finite test
+        // through it and IS oracle-swept over EvalCf (`m2_brick_cubic_hit_body`, the first caller,
+        // still never is).
+        a.min(b)
     }
     #[inline]
     fn sint_eq(_a: i32, _b: i32) -> bool {
@@ -2026,8 +2258,11 @@ impl Cf for EvalCf {
         unreachable!("Cf::vec3_dyn_index is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
     }
     #[inline]
-    fn vec3_from_scalars(_x: f32, _y: f32, _z: f32) -> [f32; 3] {
-        unreachable!("Cf::vec3_from_scalars is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    fn vec3_from_scalars(x: f32, y: f32, z: f32) -> [f32; 3] {
+        // Concrete since render wave PXe: the post leaves are per-channel scalar code rebuilt into
+        // a `float3`, and they ARE oracle-swept over EvalCf (`m2_brick_cubic_hit_body`, the first
+        // caller, still never is) — the same history `temp_vec4`'s arm records.
+        [x, y, z]
     }
     #[inline]
     fn temp_vec4(_name: &'static str, v: [f32; 4]) -> [f32; 4] {
@@ -2252,6 +2487,66 @@ impl Cf for EvalCf {
         f32::lit(1.0).div(FieldScalar::sqrt(x))
     }
 
+    // ---- Render wave E0: the rounding / exponential primitives (the `sin` shim) ---------------
+    //
+    // The same `nightly`/`std` shim `sin` uses: stable `core` has none of these, so a strictly
+    // `no_std` build takes the intrinsic and the default build links `std`.
+
+    #[inline]
+    fn floor(x: f32) -> f32 {
+        #[cfg(feature = "nightly")]
+        {
+            core::intrinsics::floorf32(x)
+        }
+        #[cfg(not(feature = "nightly"))]
+        {
+            f32::floor(x)
+        }
+    }
+
+    #[inline]
+    fn frac(x: f32) -> f32 {
+        // HLSL's own definition (and `GLSL.std.450 Fract`'s): one subtract of two representable
+        // values, so a negative input wraps UP (`frac(-0.25) == 0.75`).
+        x - <Self as Cf>::floor(x)
+    }
+
+    #[inline]
+    fn log2(x: f32) -> f32 {
+        #[cfg(feature = "nightly")]
+        {
+            core::intrinsics::log2f32(x)
+        }
+        #[cfg(not(feature = "nightly"))]
+        {
+            f32::log2(x)
+        }
+    }
+
+    #[inline]
+    fn exp2(x: f32) -> f32 {
+        #[cfg(feature = "nightly")]
+        {
+            core::intrinsics::exp2f32(x)
+        }
+        #[cfg(not(feature = "nightly"))]
+        {
+            f32::exp2(x)
+        }
+    }
+
+    #[inline]
+    fn pow(x: f32, y: f32) -> f32 {
+        #[cfg(feature = "nightly")]
+        {
+            core::intrinsics::powf32(x, y)
+        }
+        #[cfg(not(feature = "nightly"))]
+        {
+            f32::powf(x, y)
+        }
+    }
+
     // ---- UI-ADVANCED S1: the `ui_rect` fragment-leaf facets ------------------------------
 
     // The `float4` return cell — the same interior-mutability shape `RetCellV2` uses.
@@ -2397,5 +2692,44 @@ impl Cf for EvalCf {
             a[0] * (1.0 - t[0]) + b[0] * t[0],
             a[1] * (1.0 - t[1]) + b[1] * t[1],
         ]
+    }
+
+    // ---- Render wave PXe: the host-evaluable resource facets (native host) --------------------
+    type Tex2<'a> = HostTex2<'a>;
+    type Tex3<'a> = HostTex3<'a>;
+
+    #[inline]
+    fn tex2_load(t: HostTex2<'_>, x: i32, y: i32) -> [f32; 4] {
+        t.load(x, y)
+    }
+
+    #[inline]
+    fn tex2_sample_linear(t: HostTex2<'_>, uv: [f32; 2]) -> [f32; 4] {
+        t.sample_linear(uv)
+    }
+
+    #[inline]
+    fn tex3_sample_linear(t: HostTex3<'_>, uvw: [f32; 3]) -> [f32; 4] {
+        t.sample_linear(uvw)
+    }
+
+    #[inline]
+    fn vec4_xyz(v: [f32; 4]) -> [f32; 3] {
+        [v[0], v[1], v[2]]
+    }
+
+    #[inline]
+    fn decl_var_vec3(_name: &'static str, init: [f32; 3]) -> core::cell::Cell<[f32; 3]> {
+        core::cell::Cell::new(init)
+    }
+
+    #[inline]
+    fn ueq(a: u32, b: u32) -> bool {
+        a == b
+    }
+
+    #[inline]
+    fn if_else_branch<T: FnOnce() -> Flow, E: FnOnce() -> Flow>(cond: bool, then: T, els: E) -> Flow {
+        if cond { then() } else { els() }
     }
 }

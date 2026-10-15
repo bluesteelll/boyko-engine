@@ -970,6 +970,29 @@ impl Cf for EmitCf {
         Emit(push(Node::Rsqrt(x.0)))
     }
 
+    // ---- Render wave E0: the rounding / exponential primitives (recorder) ------------------
+    // The SAME nodes the `InterpBackend` recorder pushes — one node, one printer arm per op.
+
+    fn floor(x: Emit) -> Emit {
+        Emit(push(Node::Floor(x.0)))
+    }
+
+    fn frac(x: Emit) -> Emit {
+        Emit(push(Node::Frac(x.0)))
+    }
+
+    fn log2(x: Emit) -> Emit {
+        Emit(push(Node::Log2(x.0)))
+    }
+
+    fn exp2(x: Emit) -> Emit {
+        Emit(push(Node::Exp2(x.0)))
+    }
+
+    fn pow(x: Emit, y: Emit) -> Emit {
+        Emit(push(Node::Pow(x.0, y.0)))
+    }
+
     // ---- UI-ADVANCED S1: the `ui_rect` fragment-leaf facets ------------------------------
 
     // The `float4` return cell — a ZST; the expression travels in the recorded `Stmt::Return`.
@@ -1073,5 +1096,65 @@ impl Cf for EmitCf {
         // A NAMED `float2` temp (`float2 rx = ...;`). The `float4` analogue (`temp_vec4`)
         // already exists above (the Increment-5c facet) and is reused by the UI leaves.
         record_temp(Some(name), EmitTy::Float2, v)
+    }
+
+    // ---- Render wave PXe: the resource facets (recorder) ---------------------------------------
+    // A texture handle names its texture (and sampler) through the printer's resource-name table
+    // `Names::res_in` — the table the Increment-5c `ResTok` resources already use.
+    type Tex2<'a> = TexParam;
+    type Tex3<'a> = TexParam;
+
+    fn tex2_load(t: TexParam, x: Emit, y: Emit) -> Emit {
+        Emit(push(Node::Tex2Load { tex: t.tex, x: x.0, y: y.0 }))
+    }
+
+    fn tex2_sample_linear(t: TexParam, uv: Emit) -> Emit {
+        Emit(push(Node::Tex2SampleLinear { tex: t.tex, smp: t.smp, uv: uv.0 }))
+    }
+
+    fn tex3_sample_linear(t: TexParam, uvw: Emit) -> Emit {
+        Emit(push(Node::Tex3SampleLinear { tex: t.tex, smp: t.smp, uvw: uvw.0 }))
+    }
+
+    fn vec4_xyz(v: Emit) -> Emit {
+        Emit(push(Node::Vec4Xyz(v.0)))
+    }
+
+    fn decl_var_vec3(name: &'static str, init: Emit) -> Var {
+        // A `float3 <name> = <init>;` decl — `record_decl_var` with `EmitTy::Float3`.
+        record_decl_var(name, EmitTy::Float3, init.0)
+    }
+
+    fn ueq(a: Emit, b: Emit) -> EmitMask {
+        EmitMask(push(Node::UEq(a.0, b.0)))
+    }
+
+    fn if_else_branch<T: FnOnce() -> Flow, E: FnOnce() -> Flow>(
+        cond: EmitMask,
+        then: T,
+        els: E,
+    ) -> Flow {
+        // `if_else`'s push/record/pop, recorded as the attributed statement.
+        STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+        let _ = then();
+        let then_block = STMTS.with(|s| {
+            s.borrow_mut()
+                .pop()
+                .expect("invariant: the if_else_branch then block was pushed above")
+        });
+        STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+        let _ = els();
+        let els_block = STMTS.with(|s| {
+            s.borrow_mut()
+                .pop()
+                .expect("invariant: the if_else_branch else block was pushed above")
+        });
+        record_stmt(Stmt::IfElseAttr {
+            attr: "[branch]",
+            cond: cond.0,
+            then: then_block,
+            els: els_block,
+        });
+        Flow::Continue(())
     }
 }
