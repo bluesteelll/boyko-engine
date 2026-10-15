@@ -51,7 +51,7 @@
 
 use boyko_ecs::ecs::constants::pool_reserve_rows;
 use boyko_ecs::ecs::core::asset::{Assets, register_asset_layout};
-use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
+use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn};
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::iters::query::filter_enable::{Disabled, Enabled};
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
@@ -277,11 +277,16 @@ const _: () = assert!(
 #[derive(Resource)]
 pub struct MeshRenderScratch {
     /// `counts[k]` — the number of visible instances of bucket `k` (pass 1). RD6 / D-DS: a
-    /// bucket is a `(face class, mesh)` pair, `k = class · mesh_count + mesh_id`, so the lane
-    /// length is [`MESH_FACE_CLASS_COUNT`] × the mesh count; a frame whose instances are all
-    /// class 0 (every pre-RD6 scene) fills only `[0, mesh_count)` — HEAD's per-mesh lane.
+    /// bucket is a `(face class, mesh)` pair, `k = block · mesh_count + mesh_id`, where each face
+    /// class PRESENT this frame owns one `mesh_count` block (class 0 always block 0, a further
+    /// class the next block when its first row is counted — review W1). The lane length is
+    /// therefore (present classes) × the mesh count: a frame whose instances are all class 0
+    /// (every pre-RD6 scene) keys exactly `mesh_count` buckets, HEAD's per-mesh lane.
     /// `clear()` + re-fill with zeros.
     counts: ScratchColumn<u32>,
+    /// RD6 / D-DS (review W1): the `mesh_count` the bucket lanes were last keyed with, so a
+    /// later index-aligned pass recovers a key's mesh as `key % key_mesh_count`.
+    key_mesh_count: usize,
     /// `offsets[k]` — bucket `k`'s `base_instance` (the prefix-sum of `counts`). Reused.
     offsets: ScratchColumn<u32>,
     /// `cursors[k]` — the scatter write-head within bucket `k` (pass 2),
@@ -295,8 +300,9 @@ pub struct MeshRenderScratch {
     /// Indexed by row ordinal (input order, every row — an excluded mesh's rows too).
     /// `clear()` + push, backing reservation persists.
     row_keys: ScratchColumn<u32>,
-    /// The emitted [`DrawBatch`]es (one per non-empty mesh), in mesh-id order;
-    /// `clear()` + sequential `push`, never a fresh allocation.
+    /// The emitted [`DrawBatch`]es — one per non-empty, resolvable `(face class, mesh)` bucket,
+    /// CLASS-MAJOR (every class-0 batch in mesh-id order, then each further class's, RD6 /
+    /// D-DS); `clear()` + sequential `push`, never a fresh allocation.
     pub batches: ScratchColumn<DrawBatch>,
     /// The UNIFIED contiguous instance ring (refined-B) — EVERY visible instance's
     /// 48-byte [`InstanceModelCol`], STATIC and interpolated alike, in one
@@ -468,6 +474,7 @@ impl Default for MeshRenderScratch {
             counts: ScratchColumn::new(u32_id, u32_rows),
             offsets: ScratchColumn::new(u32_id, u32_rows),
             cursors: ScratchColumn::new(u32_id, u32_rows),
+            key_mesh_count: 0,
             row_keys: ScratchColumn::new(u32_id, u32_rows),
             batches: ScratchColumn::new(batch_id, batch_rows),
             ring: ScratchColumn::new(model_id, model_rows),
@@ -504,6 +511,19 @@ fn fit_len(col: &mut ScratchColumn<u32>, min_len: usize, fill: u32) {
     for _ in 0..min_len {
         view.push(fill);
     }
+}
+
+/// RD6 / D-DS (review W1): the `block_of` entry of a face class with no row this frame.
+const NO_FACE_BLOCK: u32 = u32::MAX;
+
+/// RD6 / D-DS (review W1): appends one zeroed `mesh_count` block to the count lane, for the first
+/// row of a further face class this frame. Out of line and cold: at most
+/// `MESH_FACE_CLASS_COUNT − 1` calls per gather, and none on an all-class-0 frame.
+#[cold]
+#[inline(never)]
+fn add_face_block(counts: &mut ScratchBuildView<'_, u32>, mesh_count: usize) {
+    let len = counts.len();
+    counts.resize(len + mesh_count, 0);
 }
 
 impl MeshRenderScratch {
@@ -561,9 +581,10 @@ impl MeshRenderScratch {
         }
     }
 
-    /// The number of distinct meshes with at least one visible instance this frame —
-    /// `batches.len()` after a [`gather_mixed_into`](Self::gather_mixed_into). The Principle-1
-    /// one-draw-per-mesh count.
+    /// The number of non-empty `(face class, mesh)` buckets this frame — `batches.len()` after a
+    /// [`gather_mixed_into`](Self::gather_mixed_into). On a frame whose instances are all face
+    /// class 0 this is the distinct-mesh count (the Principle-1 one-draw-per-mesh count); each
+    /// further face class a mesh's instances carry adds one draw for that mesh (RD6 / D-DS).
     #[inline]
     pub fn batch_count(&self) -> usize {
         self.batches.len()
@@ -723,8 +744,10 @@ impl MeshRenderScratch {
     ///
     /// # Class-major buckets (RD6 / D-DS)
     ///
-    /// A bucket is a `(face class, mesh)` pair keyed `class · mesh_count + mesh_id`, so the
-    /// emitted batches are CLASS-MAJOR — every single-sided batch first (in mesh order), then
+    /// A bucket is a `(face class, mesh)` pair keyed `block · mesh_count + mesh_id`, one
+    /// `mesh_count` block per face class present this frame (review W1: an all-class-0 frame keys
+    /// and walks HEAD's `mesh_count` buckets, never four times as many), and the emitted batches
+    /// are CLASS-MAJOR in class order — every single-sided batch first (in mesh order), then
     /// each face class's — and each carries its class in [`DrawBatch::face`]: a recorder binds at
     /// most one pipeline member per class. A frame whose rows are all class 0 produces HEAD's
     /// batches, bases and ring byte for byte. The flags word is scattered whole into
@@ -962,14 +985,20 @@ impl MeshRenderScratch {
         // base_color payload) is IGNORED on this pass — only the scatter pass (below, in
         // `gather_mixed_into`) reads and scatters it. The 5th (the P2-2 occlusion capability)
         // is ignored here for the same reason: counting it on BOTH passes would double it. ---
-        // RD6 / D-DS: the lanes are keyed `(face class, mesh)`, so they span
-        // `MESH_FACE_CLASS_COUNT × mesh_count`; the count pass also records each row's key in
-        // `row_keys` (critique W4: the class is derived ONCE per row, here).
-        let key_count = MESH_FACE_CLASS_COUNT * mesh_count;
-        fit_len(&mut self.counts, key_count, 0);
+        // RD6 / D-DS: the lanes are keyed `(face class, mesh)` — one `mesh_count` BLOCK per face
+        // class PRESENT this frame (review W1), `key = block · mesh_count + mesh`. Class 0 always
+        // owns block 0, so an all-class-0 frame keys exactly HEAD's `mesh_count` per-mesh lanes;
+        // a further class takes the next block the first time one of its rows is counted (at
+        // most `MESH_FACE_CLASS_COUNT − 1` cold grows per frame). The count pass also records
+        // each row's key in `row_keys` (critique W4: the class is derived ONCE per row, here).
+        self.key_mesh_count = mesh_count;
+        let mut block_of = [NO_FACE_BLOCK; MESH_FACE_CLASS_COUNT];
+        block_of[0] = 0;
+        let mut blocks: u32 = 1;
+        fit_len(&mut self.counts, mesh_count, 0);
         {
             let mut counts_view = self.counts.build_view();
-            let counts = counts_view.as_mut_slice();
+            let mut counts = counts_view.as_mut_slice();
             let mut keys_view = self.row_keys.build_view();
             keys_view.clear();
             for (mesh_id, _col, _pair, _material_id, flags) in iter_input() {
@@ -977,11 +1006,21 @@ impl MeshRenderScratch {
                     (mesh_id as usize) < mesh_count,
                     "invariant: a gathered mesh_id is in range of the registry"
                 );
-                let key = mesh_face_class(flags) as usize * mesh_count + mesh_id as usize;
+                let class = mesh_face_class(flags) as usize;
+                let mut block = block_of[class];
+                if block == NO_FACE_BLOCK {
+                    block = blocks;
+                    block_of[class] = block;
+                    blocks += 1;
+                    add_face_block(&mut counts_view, mesh_count);
+                    counts = counts_view.as_mut_slice();
+                }
+                let key = block as usize * mesh_count + mesh_id as usize;
                 counts[key] += 1;
                 keys_view.push(key as u32);
             }
         }
+        let key_count = blocks as usize * mesh_count;
 
         // --- Resolve + prefix-sum: offsets[m] = Σ counts[0..m] = mesh m's
         // base_instance (over RESOLVABLE meshes only). `meta` is called ONCE per
@@ -1006,30 +1045,46 @@ impl MeshRenderScratch {
         let mut counts_view = self.counts.build_view();
         let counts = counts_view.as_mut_slice();
         let mut batches_view = self.batches.build_view();
-        // Key order is class-major: `key = class · mesh_count + mesh`. `meta` is called once per
-        // non-empty bucket (at most `MESH_FACE_CLASS_COUNT` times per mesh, never per instance).
-        for key in 0..key_count {
-            offsets[key] = running;
-            let m = key % mesh_count;
-            // A bucket with zero instances this frame needs no `meta` call — its
-            // resolvability is moot (nothing would be excluded either way).
-            let resolved = if counts[key] != 0 { meta(m as u32) } else { None };
-            if resolved.is_none() {
-                counts[key] = 0;
+        // Emission is class-major in CLASS order (not block order — a block's index is the
+        // order its class first appeared in): every present class's block, mesh by mesh, so the
+        // batches, bases and ring are those of a `(class, mesh)`-keyed lane whatever the row
+        // order. Every key in `[0, key_count)` belongs to exactly one present class, so every
+        // `offsets` slot is written. `meta` is called once per non-empty bucket (at most once
+        // per present class per mesh, never per instance).
+        for (class, &block) in block_of.iter().enumerate() {
+            if block == NO_FACE_BLOCK {
+                continue;
             }
-            let c = counts[key];
-            if let Some((index_count, index_type)) = resolved {
-                batches_view.push(DrawBatch {
-                    mesh_id: m as u32,
-                    index_count,
-                    index_type,
-                    base_instance: running,
-                    instance_count: c,
-                    face: ((key / mesh_count) as u32) << MESH_FACE_CLASS_SHIFT,
-                });
+            let face = (class as u32) << MESH_FACE_CLASS_SHIFT;
+            let block_base = block as usize * mesh_count;
+            let block_offsets = &mut offsets[block_base..block_base + mesh_count];
+            let block_counts = &mut counts[block_base..block_base + mesh_count];
+            for (m, (offset, count)) in block_offsets.iter_mut().zip(block_counts.iter_mut()).enumerate() {
+                *offset = running;
+                // A bucket with zero instances this frame needs no `meta` call — its
+                // resolvability is moot (nothing would be excluded either way).
+                let resolved = if *count != 0 { meta(m as u32) } else { None };
+                match resolved {
+                    Some((index_count, index_type)) => {
+                        batches_view.push(DrawBatch {
+                            mesh_id: m as u32,
+                            index_count,
+                            index_type,
+                            base_instance: running,
+                            instance_count: *count,
+                            face,
+                        });
+                        running += *count;
+                    }
+                    None => *count = 0,
+                }
             }
-            running += c;
         }
+        debug_assert_eq!(
+            block_of.iter().filter(|&&b| b != NO_FACE_BLOCK).count(),
+            blocks as usize,
+            "invariant: the emit walk visits every keyed block once"
+        );
         running
     }
 
@@ -1074,10 +1129,11 @@ impl MeshRenderScratch {
         >,
     {
         let total = self.ring.len();
-        // A fresh cursor lane sized to the current mesh-lane length, reset to 0 (reuses the
-        // backing reservation — no per-frame alloc). `offsets.len()` is the mesh count the
-        // affine gather just fitted.
+        // A fresh cursor lane sized to the current bucket-lane length, reset to 0 (reuses the
+        // backing reservation — no per-frame alloc). `offsets.len()` is the bucket count the
+        // affine gather just keyed (one `mesh_count` block per face class present).
         fit_len(&mut self.prev_cursors, self.offsets.len(), 0);
+        let key_mesh_count = self.key_mesh_count;
 
         // Grow `prev_ring` to exactly `total` — same clear + fill-push equivalence as
         // `gather_mixed_into`'s `ring` grow (every slot is written once here, then
@@ -1101,7 +1157,7 @@ impl MeshRenderScratch {
                 // RD6 / D-DS: the count pass's key for this row — the same bucket `ring` used.
                 let m = row_keys[row] as usize;
                 debug_assert_eq!(
-                    m % (offsets.len() / MESH_FACE_CLASS_COUNT).max(1),
+                    m % key_mesh_count.max(1),
                     mesh_id as usize,
                     "invariant: this pass visits the count pass's rows in the count pass's order"
                 );
@@ -1176,9 +1232,10 @@ impl MeshRenderScratch {
         self.any_textured_material = false;
 
         let total = self.ring.len();
-        // A fresh cursor lane sized to the current mesh-lane length, reset to 0 —
+        // A fresh cursor lane sized to the current bucket-lane length, reset to 0 —
         // mirrors `gather_prev_ring_into`'s `prev_cursors` re-derivation exactly.
         fit_len(&mut self.material_tex_cursors, self.offsets.len(), 0);
+        let key_mesh_count = self.key_mesh_count;
 
         // Grow `material_tex` to exactly `total` — same clear + fill-push equivalence
         // as `gather_mixed_into`'s `ring`/`material_ids` grow.
@@ -1201,7 +1258,7 @@ impl MeshRenderScratch {
                 // RD6 / D-DS: the count pass's key for this row — the same bucket `ring` used.
                 let m = row_keys[row] as usize;
                 debug_assert_eq!(
-                    m % (offsets.len() / MESH_FACE_CLASS_COUNT).max(1),
+                    m % key_mesh_count.max(1),
                     mesh_id as usize,
                     "invariant: this pass visits the count pass's rows in the count pass's order"
                 );

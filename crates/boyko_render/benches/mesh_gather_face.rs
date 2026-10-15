@@ -12,6 +12,12 @@
 //! number derived from the per-row byte model, not a placeholder. Timing verdicts are window
 //! rows (the orchestrator's), never this file's.
 //!
+//! The `mesh_axis` rows (review W1) hold the drawables fixed and grow the REGISTERED mesh count
+//! instead (`Assets<MeshGpu>::high_water()` sizes the bucket lanes, visible or not): 1 k
+//! all-default drawables over 4 096 meshes. The per-key walk of the count / emit / cursor lanes is
+//! the term this axis prices; the 64-mesh rows above cannot see it. Like every row here it is
+//! read against the parent commit's build in the orchestrator's window.
+//!
 //! Run: `cargo bench -p boyko-render --bench mesh_gather_face`
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -28,8 +34,14 @@ use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_scene::Transform;
 use boyko_scene::render_caps::{MaterialHandle, MeshHandle, RenderEnabled};
 
-/// Distinct meshes the drawables spread over (each batch holds N / 64 instances).
+/// Distinct meshes the `all_default` drawables spread over (each batch holds N / 64 instances).
 const MESHES: u32 = 64;
+
+/// Registered meshes on the `mesh_axis` rows (review W1).
+const MESH_AXIS_MESHES: u32 = 4096;
+
+/// Drawables on the `mesh_axis` rows.
+const MESH_AXIS_DRAWABLES: u32 = 1_000;
 
 /// A device-inert `MeshGpu`: the gather reads only `index_count` / `index_type`.
 fn dummy_mesh_gpu() -> MeshGpu {
@@ -48,11 +60,12 @@ fn dummy_mesh_gpu() -> MeshGpu {
     }
 }
 
-/// N all-default drawables over [`MESHES`] meshes, interleaved so the scatter does real work.
-fn world(n: u32) -> EcsMaster {
+/// N all-default drawables over `mesh_total` registered meshes, interleaved so the scatter does
+/// real work.
+fn world(n: u32, mesh_total: u32) -> EcsMaster {
     let mut ecs = EcsMaster::new();
-    let mut meshes = Assets::<MeshGpu>::with_reserved(MESHES as usize);
-    for _ in 0..MESHES {
+    let mut meshes = Assets::<MeshGpu>::with_reserved(mesh_total as usize);
+    for _ in 0..mesh_total {
         meshes.add(dummy_mesh_gpu());
     }
     ecs.insert_non_send_resource(meshes);
@@ -68,7 +81,7 @@ fn world(n: u32) -> EcsMaster {
     ecs.run_system(move |mut cmds: Commands| {
         for i in 0..n {
             let t = Transform::from_translation(Vec3::new(i as f32, 0.0, 0.0));
-            cmds.spawn(MeshBundle::new(MeshHandle(i % MESHES), t)).enable::<RenderEnabled>();
+            cmds.spawn(MeshBundle::new(MeshHandle(i % mesh_total), t)).enable::<RenderEnabled>();
         }
     });
     ecs
@@ -77,12 +90,24 @@ fn world(n: u32) -> EcsMaster {
 fn bench_gather(c: &mut Criterion) {
     let mut group = c.benchmark_group("mesh_gather_face");
     for &n in &[1_000u32, 10_000, 100_000] {
-        let mut ecs = world(n);
+        let mut ecs = world(n, MESHES);
         let mut system = IntoSystem::into_system(gather_mesh_draws);
         // Warm: the first run initialises the system state and commits the scratch pages.
         ecs.run_cached_system(&mut system);
         assert_eq!(ecs.resource::<MeshRenderScratch>().instance_count(), n as usize, "the gather saw every row");
         group.bench_with_input(BenchmarkId::new("all_default", n), &n, |b, _| {
+            b.iter(|| ecs.run_cached_system(&mut system));
+        });
+    }
+    {
+        let n = MESH_AXIS_DRAWABLES;
+        let mut ecs = world(n, MESH_AXIS_MESHES);
+        let mut system = IntoSystem::into_system(gather_mesh_draws);
+        ecs.run_cached_system(&mut system);
+        let scratch = ecs.resource::<MeshRenderScratch>();
+        assert_eq!(scratch.instance_count(), n as usize, "the gather saw every row");
+        assert_eq!(scratch.batch_count(), n as usize, "one batch per visible mesh (n < meshes)");
+        group.bench_with_input(BenchmarkId::new("mesh_axis_4096", n), &n, |b, _| {
             b.iter(|| ecs.run_cached_system(&mut system));
         });
     }
