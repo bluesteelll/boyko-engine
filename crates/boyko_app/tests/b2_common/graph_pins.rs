@@ -19,6 +19,18 @@
 //! [`MAIN_HWRT_EXTRA`] to Main in BOTH apps (measured the same day, same tree: app (a) Main 36,
 //! app (b) Main 48, Fixed unchanged); [`main_a`] / [`main_b`] fold it in when the feature is on, so
 //! both shipped feature sets are pinned rather than one of them being red by construction.
+//!
+//! Re-derived on `u/render-rd2-rd6` (render wave RD2 = R0a): `ad308fa7` ("check_route_markers
+//! (debug) and reassign_route") registers `boyko_render::route::check_route_markers` in
+//! `boyko_app/src/plugins.rs` under `#[cfg(debug_assertions)]`, after `AssetValidateSet`, in
+//! BOTH apps. Measured at `55e4969a` (msvc, dev profile, default features): app (a) Main 37,
+//! app (b) Main 49, Fixed unchanged; the one name the measured lists gained is that system.
+//! Nothing else moved.
+//!
+//! **Profiles.** The system exists only where `debug_assertions` is on (a release-profile build
+//! compiles it out), so it is pinned as [`MAIN_DEBUG_EXTRA`], folded in by [`main_a`] /
+//! [`main_b`] under `cfg!(debug_assertions)` — the same switch the registration is compiled
+//! under — rather than as an unconditional row that a release-profile run would read as RED.
 
 use super::owned;
 
@@ -29,19 +41,31 @@ pub const MAIN_HWRT_EXTRA: &[(&str, u32)] = &[(
     1,
 )];
 
-/// `base` plus [`MAIN_HWRT_EXTRA`] when this build has the `hwrt` feature, sorted like an
-/// inventory.
+/// What a `debug_assertions` build adds to Main, in both apps (`boyko_app/src/plugins.rs`, the
+/// `#[cfg(debug_assertions)]` route-marker check, RD2 / R0a G3).
+pub const MAIN_DEBUG_EXTRA: &[(&str, u32)] = &[("boyko_render::route::check_route_markers", 1)];
+
+/// Adds `extra` to the inventory `v` (a name already present gains the count).
+fn fold(v: &mut Vec<(String, u32)>, extra: &[(&str, u32)]) {
+    for (n, c) in extra {
+        match v.iter_mut().find(|(vn, _)| vn == n) {
+            Some((_, vc)) => *vc += c,
+            None => v.push(((*n).to_string(), *c)),
+        }
+    }
+}
+
+/// `base` plus [`MAIN_HWRT_EXTRA`] when this build has the `hwrt` feature and
+/// [`MAIN_DEBUG_EXTRA`] when it has `debug_assertions`, sorted like an inventory.
 fn with_features(base: &[(&str, u32)]) -> Vec<(String, u32)> {
     let mut v = owned(base);
     if cfg!(feature = "hwrt") {
-        for (n, c) in MAIN_HWRT_EXTRA {
-            match v.iter_mut().find(|(vn, _)| vn == n) {
-                Some((_, vc)) => *vc += c,
-                None => v.push(((*n).to_string(), *c)),
-            }
-        }
-        v.sort();
+        fold(&mut v, MAIN_HWRT_EXTRA);
     }
+    if cfg!(debug_assertions) {
+        fold(&mut v, MAIN_DEBUG_EXTRA);
+    }
+    v.sort();
     v
 }
 
