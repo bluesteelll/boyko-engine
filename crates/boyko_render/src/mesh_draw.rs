@@ -942,19 +942,24 @@ impl MeshRenderScratch {
     /// The count → resolve → prefix-sum → batch-emit core of the unified gather
     /// (Decision 7; asset-streaming plan F6 FIX-C1 adds the resolve step).
     ///
-    /// Fills `counts` (pass 1); then, per mesh (pass 2, AT MOST `mesh_count` calls
-    /// to `meta`, NEVER per-instance): resolves `meta(m)` for every mesh with a
-    /// non-zero count, and — on `None` — ZEROES `counts[m]` BEFORE the
-    /// prefix-sum runs, so a non-resolvable mesh contributes NOTHING to
+    /// Fills `counts` (pass 1) per `(face class, mesh)` bucket, `key = block · mesh_count +
+    /// mesh`, one `mesh_count` block per face class present this frame (RD6 / D-DS); then, per
+    /// bucket (pass 2, AT MOST one `meta` call per present class per mesh, NEVER per-instance):
+    /// resolves `meta(m)` for every bucket with a non-zero count, and — on `None` — ZEROES
+    /// `counts[key]` BEFORE the prefix-sum runs, so a non-resolvable mesh contributes NOTHING to
     /// `offsets`/`running` (its instances are excluded from the ring by
     /// construction, not merely un-batched — see
     /// [`gather_mixed_into`](Self::gather_mixed_into)'s scatter, which consults
-    /// `counts[m] == 0` per instance: the zeroing here IS the resolvability
-    /// signal, so no separate lane is needed). Fills `offsets` (each mesh's
+    /// `counts[key] == 0` per instance: the zeroing here IS the resolvability
+    /// signal, so no separate lane is needed). Fills `offsets` (each bucket's
     /// `base_instance`), zeroed `cursors` (the scatter write-heads the caller
-    /// advances), and `batches` (one [`DrawBatch`] per resolvable non-empty mesh,
-    /// mesh-id order). Returns `Σ instance_count` over RESOLVABLE meshes only —
-    /// the ring length the caller sizes its scatter to.
+    /// advances), and `batches` (one [`DrawBatch`] per resolvable non-empty bucket,
+    /// CLASS-MAJOR in face-class order, mesh-id order within a class). The order is the
+    /// emit loop's job alone: a block's index is the order its class first appeared in, so
+    /// walking blocks instead of classes would break the class order that
+    /// [`batch_casts_shadow`](crate::csm_caster::batch_casts_shadow)'s merge-walk relies on (review
+    /// r2 W1-r2). Returns `Σ instance_count` over RESOLVABLE buckets only — the ring length the
+    /// caller sizes its scatter to.
     ///
     /// `iter_input` is invoked ONCE here (the count pass); the caller invokes it a
     /// second time for the scatter. Only the small `mesh_id` key is touched — neither
@@ -1022,14 +1027,14 @@ impl MeshRenderScratch {
         }
         let key_count = blocks as usize * mesh_count;
 
-        // --- Resolve + prefix-sum: offsets[m] = Σ counts[0..m] = mesh m's
-        // base_instance (over RESOLVABLE meshes only). `meta` is called ONCE per
-        // non-empty mesh (never per-instance, asset-streaming plan F6 FIX-C1) —
-        // `None` zeroes `counts[m]` BEFORE it feeds `running`/`offsets`, so a
-        // non-resolvable mesh's instances are excluded from the ring by
-        // construction (the zeroed `counts[m]` IS the scatter's per-instance
-        // exclusion signal — `counts[m] == 0`, no separate lane needed). Emits a
-        // DrawBatch per resolvable non-empty mesh (in mesh-id order) — the SAME
+        // --- Resolve + prefix-sum: offsets[key] = the instances of every bucket emitted before
+        // it (over RESOLVABLE buckets only, in the class-major order below) = bucket `key`'s
+        // base_instance. `meta` is called ONCE per non-empty bucket (never per-instance,
+        // asset-streaming plan F6 FIX-C1) — `None` zeroes `counts[key]` BEFORE it feeds
+        // `running`/`offsets`, so a non-resolvable mesh's instances are excluded from the ring by
+        // construction (the zeroed `counts[key]` IS the scatter's per-instance
+        // exclusion signal — `counts[key] == 0`, no separate lane needed). Emits a
+        // DrawBatch per resolvable non-empty bucket — the SAME
         // `meta` call drives both the batch emission and the exclusion, so there
         // is exactly one skip mechanism.
         fit_len(&mut self.offsets, key_count, 0);
@@ -2536,6 +2541,11 @@ mod tests {
     /// An all-class-0 frame keys `mesh_count` buckets (HEAD's per-mesh lanes, no 4× walk); each
     /// further class present adds one `mesh_count` block. The batches stay class-major whatever
     /// order the classes first appear in, with contiguous bases.
+    ///
+    /// Review r2 W1-r2: the last frame counts a higher class before lower ones, so its blocks'
+    /// first-appearance order differs from the class order. It is the only frame that fails when
+    /// the emit loop walks blocks instead of classes; the caster merge-walk
+    /// ([`batch_casts_shadow`](crate::csm_caster::batch_casts_shadow)) relies on class order.
     #[test]
     fn bucket_lanes_span_only_the_classes_present() {
         const MESHES: usize = 64;
@@ -2545,12 +2555,15 @@ mod tests {
         let mut materials = Assets::<Material>::with_reserved(1);
         materials.add(Material::default());
         // (the faces of the 12 rows, the classes they cover)
-        let frames: [(&[u32], usize); 4] = [
+        let frames: [(&[u32], usize); 5] = [
             (&[0; 12], 1),
             (&[0, 0, ds | mi, 0, 0, ds | mi, 0, 0, 0, 0, 0, 0], 2),
             // A non-zero class first: the lanes still hold the class-0 block plus one per class.
             (&[mi, 0, mi, 0, mi, 0, mi, 0, mi, 0, mi, 0], 2),
             (&[ds, mi, ds | mi, 0, ds, mi, ds | mi, 0, 0, 0, 0, 0], 4),
+            // A HIGHER class first: ds|mi (3) is counted before ds (1) and mi (2), so the blocks'
+            // first-appearance order (0, 3, 1, 2) is not the class order (0, 1, 2, 3).
+            (&[ds | mi, ds, mi, 0, ds | mi, ds, mi, 0, 0, 0, 0, 0], 4),
         ];
         let mut scratch = MeshRenderScratch::default();
         for (faces, classes) in frames {
