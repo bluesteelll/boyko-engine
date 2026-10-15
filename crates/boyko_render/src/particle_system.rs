@@ -211,14 +211,12 @@ pub struct ParticleEffectScratch {
     /// hole (a row that was never minted) is zero-filled rather than skipped — skipping would
     /// renumber every row after it.
     rows: ScratchColumn<EffectParamsGpu>,
-    /// The `Assets::dirty_gen()` this lane was last baked against.
-    seen_gen: u64,
     /// The `ParticleClock::timestep()` this lane was last baked against.
     ///
     /// Part of the gate because the bake is a function of BOTH inputs: `damping` and the rotation
     /// multiplier are per-substep constants, so a timestep change invalidates every row even
-    /// though `dirty_gen` did not move. Gating on the asset generation alone would silently keep
-    /// simulating at the old rate.
+    /// though no row of the asset table was edited. Gating on the table's edited set alone would
+    /// silently keep simulating at the old rate.
     seen_timestep: f32,
     /// Monotonic, bumped once per ACTUAL rebuild — the writer-side signal the host's per-in-flight
     /// slot upload gate compares against. A writer-side generation, never a hash and never a
@@ -234,7 +232,6 @@ impl Default for ParticleEffectScratch {
         let rows = pool_reserve_rows(size_of::<EffectParamsGpu>());
         Self {
             rows: ScratchColumn::new(id, rows),
-            seen_gen: u64::MAX,
             seen_timestep: f32::NAN,
             rows_gen: 0,
             dropped_effects: 0,
@@ -499,10 +496,20 @@ fn emitter_seed(id: EntityId) -> u32 {
 /// Bakes `Assets<ParticleEffect>` into the device's [`EffectParamsGpu`] table, rebuilding ONLY
 /// when an input actually changed.
 ///
-/// The gate is `(Assets::dirty_gen(), ParticleClock::timestep())` — a writer-side generation plus
-/// the bake's other input, never a hash and never a byte-compare. Both matter: `damping` and the
-/// rotation multiplier are PER-SUBSTEP constants, so a timestep change invalidates every row even
-/// though the asset table did not move.
+/// The gate is `(Assets::edited_any(), ParticleClock::timestep())` — the kernel's per-row edited
+/// set plus the bake's other input, never a hash and never a byte-compare. Both matter: `damping`
+/// and the rotation multiplier are PER-SUBSTEP constants, so a timestep change invalidates every
+/// row even though no row was edited. The edited set marks every change to the table — `add`
+/// (so `register_effect`), `remove`, `get_mut`, `fill`, `retire` — so an effect minted or removed
+/// after the first bake is re-baked too (PE-1, render-wave RD5). This bake no longer reads
+/// `Assets::dirty_gen()`, which moves only on `get_mut` / `fill`.
+///
+/// A rebuild drains the edited set, which makes this system the SINGLE drainer of
+/// `Assets<ParticleEffect>`'s edited set (AD-16; the root census
+/// `tests/drain_edited_single_consumer_census.rs` reds a second one). A further table baked from
+/// the same assets (FX1's `EffectDrawGpu`) is therefore baked INSIDE this system, under this gate,
+/// never by a second system. A user system that mints or edits effects in `Main` after this bake
+/// reaches the device on the next frame — the same latency for an add as for a `get_mut` edit.
 ///
 /// Rows are written INDEX-ADDRESSED over `0..high_water()`, with a never-minted or retired hole
 /// zero-filled rather than skipped: an effect index is a raw table index carried in a component,
@@ -514,14 +521,13 @@ fn emitter_seed(id: EntityId) -> u32 {
 #[allow(clippy::needless_pass_by_value)]
 pub fn particle_pack_effects(
     clock: Res<ParticleClock>,
-    effects: Res<Assets<ParticleEffect>>,
+    mut effects: ResMut<Assets<ParticleEffect>>,
     mut scratch: ResMut<ParticleEffectScratch>,
 ) {
-    let dirty_gen = effects.dirty_gen();
     let timestep = clock.timestep();
     // `to_bits` rather than `==`: the boot sentinel is NaN, and NaN != NaN would make the first
     // frame's "unchanged" branch unreachable for the wrong reason instead of the right one.
-    if scratch.seen_gen == dirty_gen && scratch.seen_timestep.to_bits() == timestep.to_bits() {
+    if !effects.edited_any() && scratch.seen_timestep.to_bits() == timestep.to_bits() {
         return;
     }
 
@@ -549,7 +555,9 @@ pub fn particle_pack_effects(
         }
     }
 
-    scratch.seen_gen = dirty_gen;
+    // The whole table was just rebuilt, so every marked row is already baked: the drain only
+    // clears the marks (O(marked rows), on rebuild frames only).
+    effects.drain_edited(|_, _| {});
     scratch.seen_timestep = timestep;
     scratch.rows_gen = scratch.rows_gen.wrapping_add(1);
 }

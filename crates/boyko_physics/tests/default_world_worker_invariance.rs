@@ -62,6 +62,15 @@
 //! parallelism. Its non-vacuity is the 4-worker witness above on the same step: the width term
 //! passes there, so a zero at one worker can only come from the lanes term.
 //!
+//! # FM C1 — the per-manifold form
+//!
+//! [`fm_default_world_is_worker_count_invariant`] runs the same scene under both per-manifold
+//! friction models (`PhysicsConfig::friction_model`) against a one-worker FM reference: the default
+//! grain at W 1–16 with `simd_solve` on and off, and every region grain term lowered at W 2, 3, 4, 8
+//! and 16, so the region's Fill, Warm, sweep and Store entries are cut into blocks and two scalar
+//! workers share a friction patch block. Every frame lays out patches, and every W ≥ 2 arm opens
+//! the region on every frame.
+//!
 //! Spins real thread pools (intractable under Miri), so `cfg(not(miri))`.
 
 #![cfg(not(miri))]
@@ -86,9 +95,10 @@ use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::narrowphase::NP_MIN_PAIRS_PER_CHUNK;
 use boyko_physics::plugin::add_physics_systems;
 use boyko_physics::resources::{
-    BodyState, ConstraintGraph, ContactPairs, Manifolds, PhysicsConfig, SolverScratch,
+    BodyState, ConstraintGraph, ContactPairs, FrictionModel, Manifolds, PhysicsConfig, SolverScratch,
 };
 use boyko_physics::solver::DefaultRigidSolver;
+use boyko_physics::solver::colored::RegionGrain;
 
 /// Frames each run steps.
 const FRAMES: usize = 60;
@@ -484,6 +494,98 @@ fn one_worker_parallel_solve_takes_the_inline_path() {
          {at_one} times; one lane must take the inline path (the whole-step gate's `lanes >= 2` \
          term), never a `pool.scope`"
     );
+}
+
+// ── FM C1: the per-manifold form is worker-count invariant too (fm/cut.md §3 C1b (e), W3) ──────
+
+/// The FM arms' grain: every term at its minimum, as `sr_region_worker_invariance.rs` lowers it, so
+/// every Fill, Warm, sweep and Store entry of the region is cut into blocks (the FM out slots'
+/// reduce across Fill and Store blocks, the patch carve per block, and two scalar workers on one
+/// patch block under `simd_solve = false`).
+const FM_LOWERED: RegionGrain =
+    RegionGrain { wide_floor: 1, colour_min_points: 1, max_bpp: 6, body_bpp: 8, body_rows: 8, fill_points: 1 };
+
+/// What one FM run produced.
+struct FmRun {
+    /// State hash after every frame.
+    hashes: Vec<u64>,
+    /// Regions opened over the frames.
+    region_dispatches: u64,
+    /// The fewest friction patch blocks a frame laid out.
+    min_patches: u32,
+    /// The last region's report.
+    report: boyko_threadpool::RegionReport,
+}
+
+/// The default world's scene on a `workers`-wide pool under `friction`, with `simd_solve` and the
+/// region grain given.
+fn run_fm(workers: usize, simd_solve: bool, friction: FrictionModel, grain: RegionGrain) -> FmRun {
+    let mut world = EcsMaster::new();
+    spawn_scene(&mut world);
+    let pool = ThreadPoolBuilder::new().num_threads(workers).build();
+    let mut builder = ScheduleBuilder::new(Arc::clone(&pool));
+    let _keys = add_physics_systems::<DefaultRigidSolver>(&mut builder, &mut world);
+    world.insert_resource(FixedTime::new(std::time::Duration::from_secs_f32(DT)));
+    let mut schedule = builder.build(&mut world);
+    {
+        let cfg = world.resource_mut::<PhysicsConfig>();
+        cfg.simd_solve = simd_solve;
+        cfg.friction_model = friction;
+    }
+    assert!(world.resource_mut::<DefaultRigidSolver>().set_region_grain(grain), "construction: a valid grain");
+    let mut hashes = Vec::with_capacity(FRAMES);
+    let mut min_patches = u32::MAX;
+    for _ in 0..FRAMES {
+        schedule.run(&mut world);
+        hashes.push(state_hash(&mut world));
+        min_patches = min_patches.min(world.resource::<DefaultRigidSolver>().layout_census().patch_blocks);
+    }
+    let solver = world.resource::<DefaultRigidSolver>();
+    FmRun { hashes, region_dispatches: solver.region_dispatches(), min_patches, report: solver.last_region_report() }
+}
+
+/// FM's W-invariance arm (§8 C1 (e); the cut's W3, option (b)): under both per-manifold models
+/// the default world's per-frame hashes equal the one-worker FM reference's on every arm — the
+/// default grain at W {1, 2, 3, 4, 5, 8, 16} with `simd_solve` on and at W {2, 3, 4, 5, 8, 16}
+/// with it off, and the lowered grain at W {2, 3, 4, 8, 16} with it on and off. Every frame lays
+/// out friction patches; every W ≥ 2 arm opens the solve region on every frame; every lowered
+/// arm's last region ran entries of two blocks or more and its helpers ran blocks.
+#[test]
+fn fm_default_world_is_worker_count_invariant() {
+    for friction in [FrictionModel::PerManifold, FrictionModel::PerManifoldTouch] {
+        let reference = run_fm(1, true, friction, RegionGrain::DEFAULT);
+        assert!(reference.min_patches > 0, "non-vacuity ({friction:?}): every frame lays out friction patches");
+        assert_eq!(reference.region_dispatches, 0, "the one-worker reference opens no region");
+        let mut arms: Vec<(usize, bool, bool)> = Vec::new();
+        arms.extend([2usize, 3, 4, 5, 8, 16].map(|w| (w, true, false)));
+        arms.extend([2usize, 3, 4, 5, 8, 16].map(|w| (w, false, false)));
+        for simd in [true, false] {
+            arms.extend([2usize, 3, 4, 8, 16].map(|w| (w, simd, true)));
+        }
+        let mut diverged = Vec::new();
+        for (workers, simd_solve, lowered) in arms {
+            let grain = if lowered { FM_LOWERED } else { RegionGrain::DEFAULT };
+            let r = run_fm(workers, simd_solve, friction, grain);
+            let label = format!("{friction:?} {workers}w simd_solve={simd_solve} lowered={lowered}");
+            assert_eq!(r.region_dispatches, FRAMES as u64, "{label}: a solve region on every frame");
+            assert!(r.min_patches > 0, "{label}: every frame lays out friction patches");
+            if lowered {
+                assert!(
+                    r.report.max_blocks >= 2 && r.report.helper_blocks > 0,
+                    "{label}: the lowered region must run multi-block entries on its helpers: {:?}",
+                    r.report
+                );
+            }
+            if let Some(i) = r.hashes.iter().zip(&reference.hashes).position(|(a, b)| a != b) {
+                diverged.push(format!("{label}: first differs after frame {}", i + 1));
+            }
+        }
+        assert!(
+            diverged.is_empty(),
+            "FM is not worker-count invariant against the one-worker reference:\n  {}",
+            diverged.join("\n  ")
+        );
+    }
 }
 
 /// The dispatch witness of `large_island_gate_p2.rs`, replayed on this scene: one

@@ -55,9 +55,9 @@ pub trait RhiCommandEncoder<A: RhiApi> {
     /// the test-only readback (device-local → host-visible) go through this.
     /// Only a backend that supports device-local transfers (Vulkan) overrides it;
     /// the default body is a no-op marked `#[cold] #[inline(never)]` so it never
-    /// touches the hot recording path's I-cache when not overridden, mirroring
-    /// [`Self::dispatch_indirect`]. The Mock backend and the trait ABI are
-    /// therefore unaffected by adding it.
+    /// touches the hot recording path's I-cache when not overridden (the seam census
+    /// `tests/encoder_default_seam_census.rs` holds Vulkan to overriding it). The
+    /// Mock backend and the trait ABI are therefore unaffected by adding it.
     #[cold]
     #[inline(never)]
     fn copy_buffer(&mut self, _src: &A::Buffer, _dst: &A::Buffer, _regions: &[BufferCopy]) {
@@ -395,19 +395,38 @@ pub trait RhiCommandEncoder<A: RhiApi> {
         // Mesh M0 default seam: overridden by the Vulkan backend.
     }
 
-    // ===== DEFERRED SEAM (Phase 6+) =====
+    // ===== INDIRECT DISPATCH (RK-16; required — no backend may inherit a silent no-op) =====
 
-    /// Records an indirect compute dispatch reading group counts from `buffer` at
-    /// byte `offset`. Seam: Phase 6+.
+    /// Records an indirect compute dispatch: the `(x, y, z)` group counts are three
+    /// consecutive `u32`s (`VkDispatchIndirectCommand`) read from `buffer` at byte
+    /// `offset` when the command executes.
     ///
-    /// The default body is a no-op marked `#[cold] #[inline(never)]` so it never
-    /// touches the hot recording path's I-cache when not overridden; a backend
-    /// fills it in when indirect dispatch lands.
-    #[cold]
-    #[inline(never)]
-    fn dispatch_indirect(&mut self, _buffer: &A::Buffer, _offset: u64) {
-        // Phase-6+ seam: no foundation code calls this.
-    }
+    /// A REQUIRED verb since render-wave RD3 (RK-16). It used to be a `#[cold]` no-op
+    /// default that no backend overrode, so every indirect dispatch recorded through the
+    /// trait dispatched nothing; a backend that omits it now fails to compile. It records
+    /// against the current compute binding exactly like [`Self::dispatch`]: the packed
+    /// [`Self::bind_storage_buffer`] path or a vocabulary set bound by
+    /// [`Self::bind_descriptor_set_compute`].
+    ///
+    /// # Caller contract
+    ///
+    /// - `buffer` was created with [`BufferUsage::INDIRECT`](crate::enums::BufferUsage::INDIRECT)
+    ///   and outlives the submission;
+    /// - `offset` is buffer-relative and a multiple of 4, and `offset + 12` does not exceed
+    ///   the buffer's size;
+    /// - it is recorded after a compute pipeline is bound and outside any
+    ///   [`Self::begin_rendering`] scope;
+    /// - each group count is at most the device's `maxComputeWorkGroupCount` in its
+    ///   dimension (`VUID-VkDispatchIndirectCommand-x-00417` and its `y`/`z` twins) — a
+    ///   GPU-written args buffer cannot be checked on the host;
+    /// - args written by the GPU earlier in the submission are made visible by a barrier
+    ///   whose destination is
+    ///   [`BarrierStage::DRAW_INDIRECT`](crate::enums::BarrierStage::DRAW_INDIRECT) /
+    ///   [`BarrierAccess::INDIRECT_COMMAND_READ`](crate::enums::BarrierAccess::INDIRECT_COMMAND_READ).
+    ///
+    /// A zero group count in any dimension is a legal no-op on the device, unlike
+    /// [`Self::dispatch`], which asserts non-zero counts.
+    fn dispatch_indirect(&mut self, buffer: &A::Buffer, offset: u64);
 
     // ===== GPU TIMESTAMP-QUERY SEAM (HW-RT rung R0; default bodies keep Mock + ABI) =====
 

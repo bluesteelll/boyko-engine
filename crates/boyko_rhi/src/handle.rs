@@ -570,6 +570,7 @@ mod tests {
         fn bind_storage_buffer(&mut self, _buffer: &u32, _set: u32, _binding: u32) {}
         fn push_constants(&mut self, _stage: ShaderStage, _offset: u32, _bytes: &[u8]) {}
         fn dispatch(&mut self, _gx: u32, _gy: u32, _gz: u32) {}
+        fn dispatch_indirect(&mut self, _buffer: &u32, _offset: u64) {}
         fn pipeline_barrier(&mut self, _barrier: &crate::descriptor::BarrierDesc<MockApi>) {}
     }
 
