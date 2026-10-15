@@ -630,13 +630,15 @@ jobs:
             exit 1
           fi
 
-  # The two physics count features gate test-only code. `feature-legs` above compiles it, but only
+  # The physics count features gate test-only code. `feature-legs` above compiles it, but only
   # `cargo test` runs it, and until this step existed nothing did: L9 C4's `bp_query_counts` red
   # went unseen until a lane ran it by hand. Each target must report its own count, because
   # `running 0 tests` from a feature that did not take effect is the vacuous green this file guards
-  # against. Both legs run even when the first fails, so the status is accumulated rather than left
-  # to `-e`. A red that shows only on this runner is a host-divergence finding for its own lane,
-  # never a reason to weaken the step (W8S cut, Q9).
+  # against. Every leg runs even when an earlier one fails, so the status is accumulated rather than
+  # left to `-e`. A red that shows only on this runner is a host-divergence finding for its own lane,
+  # never a reason to weaken the step (W8S cut, Q9). The third leg, `region-armed-counts`, is
+  # sr-policy's MD2 gate (orchestrator ruling 52): the solve region runs its `ARMED = true`
+  # monomorph exactly when the profiler is armed.
   #
   # Until 2026-10-10 this was the last step of `feature-legs`, behind `if: ${{ !cancelled() }}` so
   # that a red derived-leg compile could not skip it. It runs test binaries, so it moved with the
@@ -653,7 +655,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
-      - name: cargo test the physics count features (bp-query-counts, narrowphase-counts)
+      - name: cargo test the physics count features (bp-query-counts, narrowphase-counts, region-armed-counts)
         run: |
           set +e
           rc=0
@@ -661,8 +663,11 @@ jobs:
           [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "::error::bp_query_counts failed"; rc=1; }
           cargo test --locked -p boyko-physics --features narrowphase-counts --test narrowphase_census --no-fail-fast -- --nocapture 2>&1 | tee npc.log
           [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "::error::narrowphase_census failed"; rc=1; }
+          cargo test --locked -p boyko-physics --features region-armed-counts --test sr_region_armed_dispatch --no-fail-fast -- --nocapture 2>&1 | tee srad.log
+          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "::error::sr_region_armed_dispatch failed"; rc=1; }
           grep -qx 'running 2 tests' bpqc.log || { echo "::error::bp_query_counts did not run its 2 tests"; rc=1; }
           grep -qx 'running 1 test' npc.log || { echo "::error::narrowphase_census did not run its 1 test"; rc=1; }
+          grep -qx 'running 1 test' srad.log || { echo "::error::sr_region_armed_dispatch did not run its 1 test"; rc=1; }
           exit "$rc"
 
   bench-compile:

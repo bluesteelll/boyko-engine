@@ -30,6 +30,14 @@
 //!   four busy threads, and 20 of 20 at full width with the every-step check. With three and four
 //!   the gate stepped past [`HELPER_STEPS`] in one run each, the first after the busy threads
 //!   started, at both widths: the first step with a helper block was step 11 and step 17.
+//! * **The shipped policy's advance axis** (sr-policy S1): on the same pile at W8 and W16,
+//!   `region_helper_advances` reads 0 on every region step, because the shipped `SolvePolicy`'s
+//!   orchestrator publishes every item. The advances identity of `RegionReport::advances`
+//!   (`advances == published + 1`) is asserted on every step, in release too. The helpers must
+//!   have run blocks on some step at each width (the helper gate's rule above), or "no helper
+//!   advanced" would prove nothing. This is the first behavioural physics catch of a shipped policy
+//!   that takes the finisher axis (SR-B's close-test mutation MB). Shown red with the alias set to
+//!   `WithAdvance<V2Policy, true>` (sr-policy R-ADV).
 //! * **The scope count** of a warmed region step at W4, under a thread-local counting
 //!   allocator: two allocations (the scope's shared frame and its first task chunk) for the one
 //!   scope the step opens, the region's — the fill is the region's stage 0 (SR commit 7) and SR's
@@ -445,6 +453,51 @@ fn helpers_run_blocks_on_every_step_at_w8_and_w16() {
             helped > 0,
             "W{workers}: no helper ran a block of the region in {steps} steps on {cpus} usable CPUs; a pool's \
              helpers join a region even when its participants outnumber the CPUs"
+        );
+    }
+}
+
+/// sr-policy S1: the shipped `SolvePolicy` advances every item on participant 0, so
+/// `region_helper_advances` reads 0 on every region step while the helpers run blocks (module
+/// docs). Runs at least [`HELPER_STEPS`] steps per width, and on until a helper has run a block, up
+/// to [`OVERSUBSCRIBED_HORIZON_STEPS`].
+#[test]
+fn the_shipped_policy_advances_every_item_on_participant_0() {
+    let _serial = serial();
+    let (bodies, manifolds) = pile(1200, 40);
+    let graph = build_graph(&bodies, &manifolds);
+    for workers in [8usize, 16] {
+        let mut solver = ColoredSoftStepSolver::default();
+        let mut scratch = SolverScratch::with_capacity(bodies.len());
+        scratch.set_bodies(&bodies);
+        let pool = ThreadPoolBuilder::new().num_threads(workers).build();
+        let (steps, helped) = pool.install(|_| {
+            let (mut step, mut helped) = (0usize, 0usize);
+            while step < HELPER_STEPS || (helped == 0 && step < OVERSUBSCRIBED_HORIZON_STEPS) {
+                scratch.touched.reset(scratch.bodies().len());
+                let before = solver.region_dispatches();
+                solver.solve_colored(&cfg(true), &manifolds, &graph, &mut scratch);
+                assert_eq!(solver.region_dispatches() - before, 1, "W{workers} step {step}: a region step");
+                let r = solver.last_region_report();
+                assert_eq!(
+                    solver.region_helper_advances(),
+                    0,
+                    "W{workers} step {step}: a helper published an item of the shipped policy's region ({r:?})"
+                );
+                assert_eq!(
+                    r.advances,
+                    u64::from(r.published) + 1,
+                    "W{workers} step {step}: the advances identity, advances == published + 1 ({r:?})"
+                );
+                helped += usize::from(r.helper_blocks > 0);
+                step += 1;
+            }
+            (step, helped)
+        });
+        eprintln!("[SR-POLICY] W{workers}: 0 helper advances on {steps} steps, a helper ran blocks on {helped}");
+        assert!(
+            helped > 0,
+            "W{workers}: no helper ran a block of the region in {steps} steps, so 0 helper advances proves nothing"
         );
     }
 }
