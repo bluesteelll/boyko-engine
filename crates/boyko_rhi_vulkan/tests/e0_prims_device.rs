@@ -24,14 +24,26 @@
 //!   flush outcome, the report-only rows). A finite normal row over the bound is a driver out of
 //!   spec: STOP and report the row; the bound constants are never widened.
 //!
+//! # The readback route (OBS host-read rule)
+//!
+//! A fence wait makes the dispatch's writes available, not visible, to the host, and the RHI
+//! vocabulary has no `HOST` stage to name the missing dependency. So the results are never read
+//! through the probe buffer's own mapping: a `COMPUTE_SHADER/SHADER_WRITE → TRANSFER/TRANSFER_READ`
+//! barrier, then the trait's `copy_buffer` of the whole probe buffer into a MAPPED readback buffer,
+//! for which the Vulkan encoder records the `TRANSFER/TRANSFER_WRITE → HOST/HOST_READ` barrier
+//! itself (`rhi_impl/encoder.rs`, `host_read.rs`; the route of `rk16_dispatch_indirect.rs`). The
+//! readback is pre-filled with [`READBACK_SENTINEL`] and the copy carries the input words too, so a
+//! copy that never landed fails the input-echo check, by name, ahead of the precision verdict.
+//!
 //! Run (GL-E0): `BOYKO_DISABLE_VALIDATION=1 cargo test -p boyko_rhi_vulkan --test e0_prims_device
 //! --locked -- --ignored --test-threads=1`.
 
 use core::ptr::NonNull;
 
+use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 use boyko_rhi::{
-    BufferDesc, BufferUsage, ComputePipelineDesc, MemoryLocation, RhiCommandEncoder, RhiDevice,
-    RhiQueue, ShaderStage,
+    BarrierDesc, BufferBarrier, BufferCopy, BufferDesc, BufferUsage, ComputePipelineDesc,
+    MemoryLocation, RhiCommandEncoder, RhiDevice, RhiQueue, ShaderStage,
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_shaderdsl::cf::{Cf, EvalCf};
@@ -364,6 +376,9 @@ fn e0_bounds_comparator_flags_out_of_bound_results() {
 
 // ---- The device run ---------------------------------------------------------------------------
 
+/// The readback's every word before the submission; a copy that never landed leaves it in place.
+const READBACK_SENTINEL: u32 = 0xDEAD_BEEF;
+
 /// Writes the inputs into the probe buffer's persistent host-coherent mapping.
 fn write_inputs(base: NonNull<u8>, inputs: &[(f32, f32)]) {
     let words = base.as_ptr().cast::<u32>();
@@ -381,22 +396,63 @@ fn write_inputs(base: NonNull<u8>, inputs: &[(f32, f32)]) {
     }
 }
 
-/// Reads the five result words of every element back from the mapping.
-fn read_outputs(base: NonNull<u8>, n: usize) -> Vec<[f32; 5]> {
-    let words = base.as_ptr().cast::<u32>();
-    (0..n)
-        .map(|i| {
-            let at = i * E0_PROBE_STRIDE as usize + E0_PROBE_OUT_BASE as usize;
-            core::array::from_fn(|k| {
-                // SAFETY: `at + k < (i + 1) * E0_PROBE_STRIDE` (the five results sit inside the
-                // element's stride, const-asserted in `prims_probe`) and `i < n =
-                // E0_PROBE_ELEMENTS`, so the word is inside the mapping; the fence wait before this
-                // call completed the only submission, so the GPU writes are finished and visible
-                // through the coherent mapping; the pointer's provenance is the whole mapping.
-                f32::from_bits(unsafe { words.add(at + k).read_unaligned() })
-            })
-        })
-        .collect()
+/// Fills the first `words` words of the readback's persistent host-coherent mapping with
+/// [`READBACK_SENTINEL`].
+fn fill_sentinel(base: NonNull<u8>, words: usize) {
+    let p = base.as_ptr().cast::<u32>();
+    for i in 0..words {
+        // SAFETY: the caller passes the readback mapping, `words * 4` bytes long (the probe
+        // buffer's size), so word `i < words` is in bounds; no submission is in flight yet, so the
+        // host is the only accessor; the pointer comes from the live mapping (its provenance covers
+        // the whole buffer), and `write_unaligned` tolerates the sub-allocated offset's alignment.
+        unsafe { p.add(i).write_unaligned(READBACK_SENTINEL) };
+    }
+}
+
+/// What came back through the readback copy: every element's two input words (the echo) and its
+/// five result words.
+struct Readback {
+    echo: Vec<[u32; 2]>,
+    outputs: Vec<[f32; 5]>,
+}
+
+/// Reads every element of the readback mapping (`n` elements of `E0_PROBE_STRIDE` words).
+fn read_back(base: NonNull<u8>, n: usize) -> Readback {
+    let p = base.as_ptr().cast::<u32>().cast_const();
+    let len = n * E0_PROBE_STRIDE as usize;
+    let word = |w: usize| {
+        assert!(w < len, "invariant: readback word {w} is inside the {len}-word buffer");
+        // SAFETY: `w < len` is asserted above and the readback mapping is `len * 4` bytes, so the
+        // word is in bounds. Visibility: the probe's SHADER_WRITE is ordered before the copy's
+        // TRANSFER_READ by the recorded `pipeline_barrier`, the copy's TRANSFER_WRITE before this
+        // HOST_READ by the TRANSFER → HOST barrier the encoder records for a mapped destination,
+        // and the fence wait completed that only submission, so no device access is in flight.
+        // The pointer's provenance is the whole mapping; no reference into it is formed, and
+        // `read_unaligned` tolerates the sub-allocated offset's alignment.
+        unsafe { p.add(w).read_unaligned() }
+    };
+    let stride = E0_PROBE_STRIDE as usize;
+    let out_base = E0_PROBE_OUT_BASE as usize;
+    Readback {
+        echo: (0..n).map(|i| [word(i * stride), word(i * stride + 1)]).collect(),
+        outputs: (0..n)
+            .map(|i| core::array::from_fn(|k| f32::from_bits(word(i * stride + out_base + k))))
+            .collect(),
+    }
+}
+
+/// Every element whose echoed input words differ from the inputs that were written (a copy that
+/// never landed leaves [`READBACK_SENTINEL`] in every word): `(count, the first such element)`.
+fn echo_misses(inputs: &[(f32, f32)], echo: &[[u32; 2]]) -> (usize, Option<(usize, [u32; 2])>) {
+    let mut count = 0;
+    let mut first = None;
+    for (i, (&(x, y), &e)) in inputs.iter().zip(echo).enumerate() {
+        if e != [x.to_bits(), y.to_bits()] {
+            count += 1;
+            first.get_or_insert((i, e));
+        }
+    }
+    (count, first)
 }
 
 #[test]
@@ -417,10 +473,23 @@ fn e0_prims_match_host_within_vulkan_bounds() {
     let n = inputs.len();
     let bytes = (n as u64) * u64::from(E0_PROBE_STRIDE) * 4;
     let buffer = device
-        .create_buffer(&BufferDesc { size: bytes, usage: BufferUsage::STORAGE, location: MemoryLocation::HostVisibleCoherent })
+        .create_buffer(&BufferDesc {
+            size: bytes,
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
         .expect("probe storage buffer");
     let mapped = device.buffer_mapped_ptr(&buffer).expect("a host-visible buffer is mapped");
     write_inputs(mapped, &inputs);
+    let readback = device
+        .create_buffer(&BufferDesc {
+            size: bytes,
+            usage: BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("readback buffer");
+    let readback_ptr = device.buffer_mapped_ptr(&readback).expect("the readback buffer is mapped");
+    fill_sentinel(readback_ptr, n * E0_PROBE_STRIDE as usize);
 
     let module = device.create_shader_module(&spv_words()).expect("e0_prims_probe shader module");
     let pipeline = device
@@ -439,11 +508,22 @@ fn e0_prims_match_host_within_vulkan_bounds() {
     encoder.bind_storage_buffer(&buffer, 0, 0);
     encoder.push_constants(ShaderStage::COMPUTE, 0, &(n as u32).to_ne_bytes());
     encoder.dispatch((n as u32).div_ceil(E0_PROBE_LOCAL_SIZE), 1, 1);
+    encoder.pipeline_barrier(&BarrierDesc {
+        src_stage: BarrierStage::COMPUTE_SHADER,
+        dst_stage: BarrierStage::TRANSFER,
+        buffers: &[BufferBarrier {
+            buffer: &buffer,
+            src_access: BarrierAccess::SHADER_WRITE,
+            dst_access: BarrierAccess::TRANSFER_READ,
+        }],
+    });
+    encoder.copy_buffer(&buffer, &readback, &[BufferCopy { src_offset: 0, dst_offset: 0, size: bytes }]);
     encoder.end().expect("end");
     queue.submit(&encoder, &fence).expect("submit");
     device.wait_fence(&fence, u64::MAX).expect("wait_fence");
 
-    let outputs = read_outputs(mapped, n);
+    let Readback { echo, outputs } = read_back(readback_ptr, n);
+    let (missed, first_miss) = echo_misses(&inputs, &echo);
     let stats = judge_all(&inputs, &outputs);
     println!("op     gated  flushed  reported  worst |err|/bound  worst ULP");
     for (op, s) in E0Op::ALL.iter().zip(&stats) {
@@ -472,9 +552,22 @@ fn e0_prims_match_host_within_vulkan_bounds() {
         device.destroy_fence(fence);
         device.destroy_compute_pipeline(pipeline);
         device.destroy_shader_module(module);
+        device.destroy_buffer(readback);
         device.destroy_buffer(buffer);
     }
     drop(ctx);
+
+    // The copy's verdict comes first: on a readback that never landed every row below is noise.
+    if let Some((i, [wx, wy])) = first_miss {
+        let (x, y) = inputs[i];
+        panic!(
+            "the readback copy did not land: {missed} of {n} elements do not echo their input words \
+             (first: element {i} read {wx:#010x} {wy:#010x}, wrote {:#010x} {:#010x}; the pre-submit \
+             fill is {READBACK_SENTINEL:#010x})",
+            x.to_bits(),
+            y.to_bits()
+        );
+    }
 
     let fails: Vec<String> = E0Op::ALL
         .iter()
