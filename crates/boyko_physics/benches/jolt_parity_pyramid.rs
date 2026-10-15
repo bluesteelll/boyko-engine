@@ -390,6 +390,12 @@
 //!   untimed) — `steps`, `cohorts`, `cohorts_by_depth` (depths 1..4), `rank_slots`,
 //!   `patch_blocks`, `multi_lanes`. Integers: the FM screen's structural inputs (its K1 reads
 //!   `cohorts_by_depth`).
+//! * `helper_advances_per_step` (colored rows, armed or not; `null` on reference rows and on an
+//!   empty window): the solve region's helper advances per step over the window, the sum of
+//!   `ColoredSoftStepSolver::region_helper_advances` over the window's steps that opened a region
+//!   (`region_dispatches` rose; read after every step, untimed) divided by the window's steps
+//!   (sr-policy S1). It reads 0 under the shipped policy, whose orchestrator publishes every item,
+//!   and on W1 and armed rows. A counter, not a time.
 //! * `fallback_census` (a runner built with `--features narrowphase-counts`; `null` otherwise): the
 //!   box-box edge fallback's census over the whole run (`narrowphase::box_box::fallback_census`,
 //!   the `thinbox` lane) — `calls`, `phantom`, `hint_capped`, `corner`, `refresh_stale`,
@@ -2790,6 +2796,11 @@ fn run(args: &Args) -> ExitCode {
     let mut void_steps = 0usize;
     // FM: the colored layout's census summed over the window, on armed colored rows (untimed).
     let mut layout = LayoutSum::default();
+    // sr-policy S1: the region's helper advances summed over the window, on colored rows
+    // (untimed), and the region count after the previous step.
+    let mut helper_advances = 0u64;
+    let mut prev_regions =
+        if colored { rig.world.resource::<ColoredSoftStepSolver>().region_dispatches() } else { 0 };
     let mut first_void: Option<String> = None;
     let mut solve_on_dispatcher_steps = 0usize;
     // L10 C3a: armed steps whose recomputed structure is the no-awake fast path.
@@ -2894,6 +2905,14 @@ fn run(args: &Args) -> ExitCode {
         }
         if armed && colored && (window.0..window.1).contains(&step) {
             layout.add(rig.world.resource::<ColoredSoftStepSolver>().layout_census());
+        }
+        if colored {
+            let solver = rig.world.resource::<ColoredSoftStepSolver>();
+            let regions = solver.region_dispatches();
+            if regions != prev_regions && (window.0..window.1).contains(&step) {
+                helper_advances += solver.region_helper_advances();
+            }
+            prev_regions = regions;
         }
 
         if let Some(zones) = &zones {
@@ -3330,7 +3349,8 @@ fn run(args: &Args) -> ExitCode {
          \"broadphase_tree\":{bp_json},\"bp_kernel_flag\":{},\"fallback_census\":{census_json},\
          \"bp_query_dispatches\":{{\"run\":{},\"window\":{},\"expected_run\":{},\"expected_window\":{}}},\
          \"bp_query_tail_leaves\":{{\"run\":{},\"window\":{}}},\
-         \"pair_classes\":{classes_json},\"layout_census\":{},\"w8s\":{w8s_json},\
+         \"pair_classes\":{classes_json},\"layout_census\":{},\"helper_advances_per_step\":{},\
+         \"w8s\":{w8s_json},\
          \"canary_zone\":{},\"canary_zone_ns\":{},\"route_note\":{},\
          \"host\":{{\"logical_cores\":{logical_cores}}},\
          \"threads\":{{\"pool_workers\":{},\"dispatcher\":1,\"solve_on_dispatcher_steps\":\
@@ -3385,6 +3405,11 @@ fn run(args: &Args) -> ExitCode {
         s5.tail.0,
         s5.tail.1,
         if armed && colored { layout.json() } else { "null".to_owned() },
+        if colored {
+            json_f64(helper_advances as f64 / window.1.saturating_sub(window.0) as f64)
+        } else {
+            "null".to_owned()
+        },
         args.canary_zone.as_deref().map_or_else(|| "null".to_owned(), json_str),
         args.canary_zone_ns.map_or_else(|| "null".to_owned(), |n| n.to_string()),
         json_str(ROUTE_NOTE),
