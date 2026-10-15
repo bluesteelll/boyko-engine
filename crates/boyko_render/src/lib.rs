@@ -314,6 +314,11 @@ pub mod occlusion_config;
 /// seeds the occlusion-decision config substrate. System-less (the
 /// [`HzbPlugin`](hzb_plugin::HzbPlugin) shape).
 pub mod occlusion_plugin;
+/// Render wave PXe — the host side of the post chain's final pass `post_final` (generated whole by
+/// `boyko_shaderdsl::emit::emit_post_final_comp`, not wired until PX1a): the
+/// [`PostFinalGpu`](post::gpu::PostFinalGpu) constant-buffer mirror, pinned to the
+/// `boyko_shaderdsl::post::POST_FINAL_UBO_LAYOUT` table the shader's `cbuffer` is printed from.
+pub mod post;
 /// HW-RT rung R1 — the dormant unified ray / acceleration-structure backend seam:
 /// the [`RayBackendConfig`](ray_backend::RayBackendConfig) derived carrier +
 /// [`RayCaps`](ray_backend::RayCaps) device-tier input Resources, the pure

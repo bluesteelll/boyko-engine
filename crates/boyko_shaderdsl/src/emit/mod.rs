@@ -37,11 +37,15 @@ mod depth;
 mod face;
 mod shaders;
 mod vb;
+mod prims;
+mod post;
 
 pub use depth::*;
 pub use face::*;
 pub use shaders::*;
 pub use vb::*;
+pub use prims::*;
+pub use post::*;
 
 thread_local! {
     /// The build-time SSA arena. Recorded into by [`Emit`]'s [`FieldScalar`] ops,
@@ -703,6 +707,44 @@ enum Node {
     /// `a + b` over two `float4`s (`src + dst * (1.0 - src.a)`, the premultiplied OVER) —
     /// component-wise. ADDITIVE. Result type [`EmitTy::Float4`].
     Vec4Add(u32, u32),
+
+    // ---- Render wave E0: the shared rounding / exponential primitives (AD-7) -------------
+    //
+    // Each is a call-shaped intrinsic node (NOT an inline leaf: a non-temp use inlines its
+    // `define_str` spelling, a function-call form that needs no wrap), recorded by BOTH the
+    // `Cf` and the `InterpBackend` recorders so the op spells identically on either axis. All
+    // five type `Float` (the `type_of` default arm). Each lowers to one `GLSL.std.450`
+    // instruction (`boyko_rhi_vulkan/tests/e0_prims_edsl_sync.rs` counts them).
+    /// `floor(a)` — `GLSL.std.450 Floor`.
+    Floor(u32),
+    /// `frac(a)` — `GLSL.std.450 Fract`.
+    Frac(u32),
+    /// `log2(a)` — `GLSL.std.450 Log2`.
+    Log2(u32),
+    /// `exp2(a)` — `GLSL.std.450 Exp2`.
+    Exp2(u32),
+    /// `pow(x, y)` — `GLSL.std.450 Pow`, stored `(x, y)` and printed in that order.
+    Pow(u32, u32),
+
+    // ---- Render wave PXe: the host-evaluable resource facets (`crate::post`) ------------------
+    //
+    // A texture is named through [`Names::res_in`] (the Increment-5c resource table), so no
+    // printer name table is widened. The fetches are call-shaped (NOT inline leaves): the body
+    // materialises a fetch it reads more than once (`temp_vec4`).
+    /// `<tex>.Load(int3(<x>, <y>, 0))` — `tex` indexes [`Names::res_in`]; `x` / `y` are `int`
+    /// nodes. Result type [`EmitTy::Float4`].
+    Tex2Load { tex: u32, x: u32, y: u32 },
+    /// `<tex>.SampleLevel(<smp>, <uv>, 0)` — `tex` / `smp` index [`Names::res_in`]; `uv` is a
+    /// `float2`. Result type [`EmitTy::Float4`].
+    Tex2SampleLinear { tex: u32, smp: u32, uv: u32 },
+    /// The 3D `<tex>.SampleLevel(<smp>, <uvw>, 0)` — `uvw` is a `float3`. Result type
+    /// [`EmitTy::Float4`].
+    Tex3SampleLinear { tex: u32, smp: u32, uvw: u32 },
+    /// `<v>.xyz` — a `float4` → `float3` swizzle, printed inline. Result type [`EmitTy::Float3`].
+    Vec4Xyz(u32),
+    /// `a == b` over two `uint`s — a Mask, printed inline inside a condition / ternary. A bitwise
+    /// operand is printed WRAPPED (`==` binds tighter than `&`).
+    UEq(u32, u32),
 }
 
 /// One VECTOR (`float3`/`float2`) SSA node — the normal leaf is a vector expression
@@ -949,6 +991,11 @@ fn type_of(node: Node) -> EmitTy {
         // by re-running the cmp-`.spv` gate); it closes the future hole where a `bool`-typed
         // consumer would otherwise mis-read `Float`.
         Node::BoolLit(_) => EmitTy::Bool,
+        // Render wave PXe: a texture fetch is a `float4`; its `.xyz` a `float3`.
+        Node::Tex2Load { .. } | Node::Tex2SampleLinear { .. } | Node::Tex3SampleLinear { .. } => {
+            EmitTy::Float4
+        }
+        Node::Vec4Xyz(_) => EmitTy::Float3,
         // `UintToFloat`/`Vec3Swizzle` PRODUCE a float; every other node is float.
         _ => EmitTy::Float,
     }
@@ -1214,6 +1261,28 @@ impl crate::interp::InterpBackend for Emit {
     fn acos(self) -> Self {
         Emit(push(Node::Acos(self.0)))
     }
+    // Render wave E0: the SAME five nodes `EmitCf` records, so the op spells identically on
+    // either axis.
+    #[inline]
+    fn floor(self) -> Self {
+        Emit(push(Node::Floor(self.0)))
+    }
+    #[inline]
+    fn frac(self) -> Self {
+        Emit(push(Node::Frac(self.0)))
+    }
+    #[inline]
+    fn log2(self) -> Self {
+        Emit(push(Node::Log2(self.0)))
+    }
+    #[inline]
+    fn exp2(self) -> Self {
+        Emit(push(Node::Exp2(self.0)))
+    }
+    #[inline]
+    fn pow(self, y: Self) -> Self {
+        Emit(push(Node::Pow(self.0, y.0)))
+    }
     #[inline]
     fn select(cond: EmitMask, t: Self, e: Self) -> Self {
         Emit(push(Node::Select(cond.0, t.0, e.0)))
@@ -1474,6 +1543,10 @@ fn is_inline_leaf(node: Node) -> bool {
             | Node::Vec2Param(_)
             | Node::Vec4SwizzleV2(_, _)
             | Node::Vec4Alpha(_)
+            // Render wave PXe: the `.xyz` swizzle spells `<src>.xyz` at every use; the `uint ==`
+            // mask appears only inside a condition (inlined like `UGe`).
+            | Node::Vec4Xyz(_)
+            | Node::UEq(_, _)
     )
 }
 
@@ -1653,6 +1726,15 @@ fn operand_str(
         // A resource ref / a by-name array arg spell their NAME (a call-through-only operand).
         Node::ResRef(n) => names.res_in[n as usize].to_string(),
         Node::ArrName(n) => names.array[n as usize].to_string(),
+        // Render wave PXe: `<src>.xyz` (the source is a leaf — a `float4` temp / param).
+        Node::Vec4Xyz(v) => format!("{}.xyz", opl(v)),
+        // Render wave PXe: `a == b` over `uint`s; each comparand at the BITWISE position, so an
+        // `&`/`>>` operand wraps (`(asuint(x) & M) == M`) while a leaf or an arithmetic one does not.
+        Node::UEq(a, b) => format!(
+            "{} == {}",
+            operand_str(arena, names, temps, a, OperandPos::BitSide),
+            operand_str(arena, names, temps, b, OperandPos::BitSide)
+        ),
         // A non-leaf operand: if it was MATERIALIZED as a `tN` temp (the straight-line
         // field/normal/decode/cubic emit materializes every non-leaf via the SSA walk,
         // so `temps[id]` is always `Some` there), use the temp name. Otherwise — the CF
@@ -2330,6 +2412,45 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         | Node::Vec2Comp(_, _) => {
             unreachable!("inline leaves are spelled by operand_str, not defined")
         }
+        // Render wave E0: the five intrinsic calls (the `Sqrt` arm's shape — arguments at Root).
+        Node::Floor(a) => {
+            chk(a, EmitTy::Float);
+            format!("floor({})", op(a))
+        }
+        Node::Frac(a) => {
+            chk(a, EmitTy::Float);
+            format!("frac({})", op(a))
+        }
+        Node::Log2(a) => {
+            chk(a, EmitTy::Float);
+            format!("log2({})", op(a))
+        }
+        Node::Exp2(a) => {
+            chk(a, EmitTy::Float);
+            format!("exp2({})", op(a))
+        }
+        Node::Pow(x, y) => {
+            chk(x, EmitTy::Float);
+            chk(y, EmitTy::Float);
+            format!("pow({}, {})", op(x), op(y))
+        }
+        // Render wave PXe: the resource facets (call-shaped; arguments at Root). `Load` takes an
+        // `int3` whose `.z` is the mip level, 0.
+        Node::Tex2Load { tex, x, y } => {
+            chk(x, EmitTy::Int);
+            chk(y, EmitTy::Int);
+            format!("{}.Load(int3({}, {}, 0))", names.res_in[tex as usize], op(x), op(y))
+        }
+        Node::Tex2SampleLinear { tex, smp, uv } => {
+            chk(uv, EmitTy::Float2);
+            format!("{}.SampleLevel({}, {}, 0)", names.res_in[tex as usize], sampler_name(names, smp), op(uv))
+        }
+        Node::Tex3SampleLinear { tex, smp, uvw } => {
+            chk(uvw, EmitTy::Float3);
+            format!("{}.SampleLevel({}, {}, 0)", names.res_in[tex as usize], sampler_name(names, smp), op(uvw))
+        }
+        Node::Vec4Xyz(_) => unreachable!("Vec4Xyz is an inline leaf spelled by operand_str"),
+        Node::UEq(_, _) => unreachable!("UEq is an inline mask spelled by operand_str"),
     }
 }
 
@@ -2797,6 +2918,18 @@ enum Stmt {
     /// the `= +` form computes the access-chain TWICE at `-O0`, so it is NOT byte-identical. Recorded
     /// by [`EmitCf::arr_int_add_assign`] / [`EmitCf::arr_float_add_assign`].
     ArrayAddAssign { arr: u32, idx: u32, rhs: u32 },
+
+    // ---- Render wave PXe: the attributed two-arm branch ----------------------------------------
+    /// `<attr>\nif (<cond>) { <then> } else { <els> }` — [`Stmt::IfElse`] with an HLSL selection
+    /// attribute on its own line (`[branch]`: `OpSelectionMerge … DontFlatten`). A separate variant,
+    /// so the existing `IfElse` printing (and every committed body that uses it) is untouched.
+    /// Recorded by [`EmitCf::if_else_branch`].
+    IfElseAttr {
+        attr: &'static str,
+        cond: u32,
+        then: Block,
+        els: Block,
+    },
 }
 
 /// A sequence of [`Stmt`]s — a control-flow BLOCK (a `{ ... }`).
@@ -2890,6 +3023,28 @@ pub struct ArrName(u32);
 /// operand (consumed by a [`Node::CallN`] `m2_corner` arg).
 #[derive(Clone, Copy)]
 pub struct ResTok(u32);
+
+/// A TEXTURE-PARAMETER handle on the Emit backend (render wave PXe) — the [`EmitCf`]'s
+/// [`Cf::Tex2`] and [`Cf::Tex3`]. `tex` indexes [`Names::res_in`] (the texture's name) and `smp`
+/// its linear-clamp sampler's name there, [`TexParam::NO_SAMPLER`] for a `Load`-only texture. The
+/// fields are private: the generator that declares the resources builds the handles.
+#[derive(Clone, Copy)]
+pub struct TexParam {
+    tex: u32,
+    smp: u32,
+}
+
+impl TexParam {
+    /// The `smp` of a texture declared without a sampler (read with `Load` only).
+    const NO_SAMPLER: u32 = u32::MAX;
+}
+
+/// The sampler name of a `SampleLevel`, or a generation-time panic when the texture was declared
+/// `Load`-only (a sampling body over it is a generator bug, not a valid shader).
+fn sampler_name<'a>(names: Names<'a>, smp: u32) -> &'a str {
+    assert!(smp != TexParam::NO_SAMPLER, "a SampleLevel on a texture declared without a sampler");
+    names.res_in[smp as usize]
+}
 
 thread_local! {
     /// The STMT block stack: the recorder pushes a [`Block`] on combinator entry
@@ -3231,6 +3386,20 @@ fn print_block(block: &Block, arena: &[Node], names: Names, depth: usize, out: &
                     "{pad}{}[{idx_s}] += {rhs_s};\n",
                     names.array[*arr as usize]
                 ));
+            }
+            Stmt::IfElseAttr {
+                attr,
+                cond,
+                then,
+                els,
+            } => {
+                let cond_s = inline_expr(arena, names, &[], *cond);
+                out.push_str(&format!("{pad}{attr}\n"));
+                out.push_str(&format!("{pad}if ({cond_s}) {{\n"));
+                print_block(then, arena, names, depth + 1, out);
+                out.push_str(&format!("{pad}}} else {{\n"));
+                print_block(els, arena, names, depth + 1, out);
+                out.push_str(&format!("{pad}}}\n"));
             }
         }
     }
