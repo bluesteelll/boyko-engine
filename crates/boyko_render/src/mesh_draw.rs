@@ -2474,4 +2474,81 @@ mod tests {
         }
         assert_eq!(scratch.occlusion_instances(), 8, "the occlusion fold reads bit 0 only");
     }
+
+    /// RD6 / D-DS review W1: the bucket lanes span only the face classes PRESENT in the frame.
+    /// An all-class-0 frame keys `mesh_count` buckets (HEAD's per-mesh lanes, no 4× walk); each
+    /// further class present adds one `mesh_count` block. The batches stay class-major whatever
+    /// order the classes first appear in, with contiguous bases.
+    #[test]
+    fn bucket_lanes_span_only_the_classes_present() {
+        const MESHES: usize = 64;
+        let ds = MESH_FACE_DOUBLE_SIDED;
+        let mi = MESH_FACE_MIRRORED;
+        let cols: Vec<InstanceModelCol> = (0..12).map(|k| affine(k * 5 % MESHES as u32, k)).collect();
+        let mut materials = Assets::<Material>::with_reserved(1);
+        materials.add(Material::default());
+        // (the faces of the 12 rows, the classes they cover)
+        let frames: [(&[u32], usize); 4] = [
+            (&[0; 12], 1),
+            (&[0, 0, ds | mi, 0, 0, ds | mi, 0, 0, 0, 0, 0, 0], 2),
+            // A non-zero class first: the lanes still hold the class-0 block plus one per class.
+            (&[mi, 0, mi, 0, mi, 0, mi, 0, mi, 0, mi, 0], 2),
+            (&[ds, mi, ds | mi, 0, ds, mi, ds | mi, 0, 0, 0, 0, 0], 4),
+        ];
+        let mut scratch = MeshRenderScratch::default();
+        for (faces, classes) in frames {
+            let inputs: Vec<FacedRow<'_>> =
+                cols.iter().zip(faces.iter().copied()).map(|(c, f)| faced(c.rows[0][3] as u32, c, f)).collect();
+            scratch.gather_faced_into(MESHES, meta, || inputs.iter().copied());
+            scratch.gather_material_tex_into(&materials, [0.5; 4], 0.0, 0.5, || {
+                inputs.iter().map(|(m, _, _, pm, _)| (*m, pm.id))
+            });
+            #[cfg(feature = "hwrt")]
+            scratch.gather_prev_ring_into(|| inputs.iter().map(|&(m, c, _, _, _)| (m, c, None)));
+            let lanes = classes * MESHES;
+            assert_eq!(
+                scratch.counts.len(),
+                lanes,
+                "RED (W1): {classes} face class(es) present must key {lanes} buckets, not {} \
+                 (faces {faces:?})",
+                scratch.counts.len()
+            );
+            assert_eq!(scratch.offsets.len(), lanes, "the offsets lane spans the present classes only");
+            assert_eq!(scratch.cursors.len(), lanes, "the cursor lane spans the present classes only");
+            assert_eq!(scratch.material_tex_cursors.len(), lanes, "the textured cursor lane spans the present classes only");
+            #[cfg(feature = "hwrt")]
+            assert_eq!(scratch.prev_cursors.len(), lanes, "the prev cursor lane spans the present classes only");
+
+            // The reference: one batch per non-empty (class, mesh), ascending, contiguous bases.
+            let mut want: Vec<(u32, u32, u32)> = Vec::new();
+            for class in 0..MESH_FACE_CLASS_COUNT as u32 {
+                for m in 0..MESHES as u32 {
+                    let face = class << MESH_FACE_CLASS_SHIFT;
+                    let n = inputs.iter().filter(|r| r.0 == m && r.4 == face).count() as u32;
+                    if n != 0 {
+                        want.push((face, m, n));
+                    }
+                }
+            }
+            let got: Vec<(u32, u32, u32)> =
+                scratch.batches.as_read_slice().iter().map(|b| (b.face, b.mesh_id, b.instance_count)).collect();
+            assert_eq!(got, want, "the batches are class-major (face, mesh, count) for faces {faces:?}");
+            let mut base = 0;
+            for b in scratch.batches.as_read_slice() {
+                assert_eq!(b.base_instance, base, "contiguous bases for faces {faces:?}");
+                base += b.instance_count;
+                for slot in b.base_instance..b.base_instance + b.instance_count {
+                    let i = slot as usize;
+                    assert_eq!(scratch.mesh_ids.as_read_slice()[i], b.mesh_id, "mesh id lane at slot {slot}");
+                    assert_eq!(scratch.inst_flags.as_read_slice()[i] & MESH_FACE_BITS, b.face, "face bits at slot {slot}");
+                    assert_eq!(
+                        scratch.material_tex.as_read_slice()[i].material_id,
+                        100 * b.mesh_id + b.face,
+                        "textured lane at slot {slot}"
+                    );
+                }
+            }
+            assert_eq!(base as usize, inputs.len(), "every row reaches one slot");
+        }
+    }
 }
