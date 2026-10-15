@@ -272,7 +272,7 @@ impl Renderer<'_> {
             // against, no Set 1 — rung R5 code-review fix: exactly ONE Set-0 layout OBJECT for
             // every Forward-family pipeline, so this pipeline is layout-compatible with
             // `forward.set0[fi]` regardless of whether the boot path is `Forward`/`ForwardPlus`)
-            // + the 88-byte VERTEX push range belong to this device (caller contract);
+            // + the 88-byte `VERTEX | FRAGMENT` push range belong to this device (caller contract);
             // `forward.set0[fi]` is a live descriptor set written once per extent (the prepass VS
             // reads only its `instances` binding, a subset of what the set declares — the SAME
             // bound-but-unread-subset idiom `forward_sky_pipeline` already relies on). `scene.mvp`
@@ -281,6 +281,16 @@ impl Renderer<'_> {
             // calls; the legacy arm's `draw` reads the merged vertex buffer, the instanced arm's
             // per-batch `draw_indexed` reads each batch's bound vertex+index buffers. Begin/End
             // bracket the pass exactly.
+            //
+            // RD6 / D-DS cull members (`scene.face_pipelines` `Some`): per batch the loop may bind
+            // another cull member of `forward_prepass` (the `None` member is `prepass_pipeline`) and keeps binding sets and pushing through
+            // `prepass_pipeline.layout`. Every member of a family is built by the family's ONE builder closure
+            // from the same `GraphicsPipelineDesc` except `cull_mode` (same modules, same set-layout
+            // objects, same push range and stages), so the member layouts are identically defined for
+            // every bound set and for push constants (Vulkan "Pipeline Layout Compatibility"): the
+            // bound sets and the pushed bytes survive the switch. Each member is created on this
+            // device at boot and destroyed exactly once, at the device-idle `GpuSceneBundles` teardown
+            // beside its family's existing pipeline, so it outlives every frame recorded here.
             unsafe {
                 (self.fns.cmd_begin_rendering)(cmd, &prepass_rendering);
                 (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, prepass_pipeline.pipeline);
@@ -570,6 +580,16 @@ impl Renderer<'_> {
                 // == 1`; per caster batch the recorder re-pushes `base_instance` then
                 // `draw_indexed` reads that batch's bound vertex+index buffers. Begin/End bracket
                 // each cascade — byte-identical to `record_gbuffer`'s own csm loop.
+                //
+                // RD6 / D-DS cull members (`scene.face_pipelines` `Some`): per batch the loop may bind
+                // another cull member of `caster_depth` (the `Front` member is `csm.pipeline`) and keeps binding sets and pushing through
+                // `csm.pipeline.layout`. Every member of a family is built by the family's ONE builder closure
+                // from the same `GraphicsPipelineDesc` except `cull_mode` (same modules, same set-layout
+                // objects, same push range and stages), so the member layouts are identically defined for
+                // every bound set and for push constants (Vulkan "Pipeline Layout Compatibility"): the
+                // bound sets and the pushed bytes survive the switch. Each member is created on this
+                // device at boot and destroyed exactly once, at the device-idle `CsmResources` teardown
+                // beside its family's existing pipeline, so it outlives every frame recorded here.
                 unsafe {
                     (self.fns.cmd_begin_rendering)(cmd, &csm_rendering);
                     (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, csm.pipeline.pipeline);
@@ -698,6 +718,17 @@ impl Renderer<'_> {
                 // vertex+index buffers. The pipeline/set are (re)bound only when the face TYPE
                 // changes. Begin/End bracket each slot — byte-identical to `record_gbuffer`'s own
                 // atlas loop.
+                //
+                // RD6 / D-DS cull members (`scene.face_pipelines` `Some`): per batch the loop may bind
+                // another cull member of the slot's family (`caster_point` or `caster_depth`, whose `Front` member is the
+                // face-type pipeline) and keeps binding sets and pushing through
+                // `face_pipeline.layout`. Every member of a family is built by the family's ONE builder closure
+                // from the same `GraphicsPipelineDesc` except `cull_mode` (same modules, same set-layout
+                // objects, same push range and stages), so the member layouts are identically defined for
+                // every bound set and for push constants (Vulkan "Pipeline Layout Compatibility"): the
+                // bound sets and the pushed bytes survive the switch. Each member is created on this
+                // device at boot and destroyed exactly once, at the device-idle `CsmResources` teardown
+                // beside its family's existing pipeline, so it outlives every frame recorded here.
                 unsafe {
                     (self.fns.cmd_begin_rendering)(cmd, &atlas_rendering);
                     if bound_point != Some(is_point) {
@@ -871,7 +902,7 @@ impl Renderer<'_> {
         // descriptor-set-layout INCOMPATIBILITY bug: two structurally-identical-but-distinct
         // `VkDescriptorSetLayout` handles are not interchangeable, and the base FS's SPIR-V is
         // still valid against the grown 7-binding layout since it only references a SUBSET of
-        // it). The 88-byte VERTEX push range belongs to this device (caller contract);
+        // it). The 88-byte `VERTEX | FRAGMENT` push range belongs to this device (caller contract);
         // `forward.set0[fi]` (bound at set 0, ALWAYS the unified 7-binding shape) and
         // `forward.set1[fi]` (bound at set 1, unchanged shape) are live descriptor sets written
         // once per extent against `scene.forward_layout0`/`scene.forward_layout1`. `scene.mvp` is the
@@ -882,7 +913,19 @@ impl Renderer<'_> {
         // bracketed calls; the legacy arm's `draw` reads the merged vertex buffer, the instanced
         // arm's per-batch `draw_indexed` reads each batch's bound vertex+index buffers (created
         // on this device, VERTEX/INDEX usage). Begin/End bracket the WHOLE pass (both pipelines)
-        // exactly.
+        // exactly. With `face_pipelines` the instanced arm re-pushes the whole `[80, 88)` tail
+        // `[base_instance, use_model_matrix | face]` (8 bytes) instead of `base_instance` alone (4
+        // bytes) — both inside the 88-byte range, with exactly its `VERTEX | FRAGMENT` stages.
+        //
+        // RD6 / D-DS cull members (`scene.face_pipelines` `Some`): per batch the loop may bind
+        // another cull member of `forward` (the `None` member is `forward_pipeline`) and keeps binding sets and pushing through
+        // `forward_pipeline.layout`. Every member of a family is built by the family's ONE builder closure
+        // from the same `GraphicsPipelineDesc` except `cull_mode` (same modules, same set-layout
+        // objects, same push range and stages), so the member layouts are identically defined for
+        // every bound set and for push constants (Vulkan "Pipeline Layout Compatibility"): the
+        // bound sets and the pushed bytes survive the switch. Each member is created on this
+        // device at boot and destroyed exactly once, at the device-idle `GpuSceneBundles` teardown
+        // beside its family's existing pipeline, so it outlives every frame recorded here.
         unsafe {
             (self.fns.cmd_begin_rendering)(cmd, &forward_rendering);
             // Code-review follow-up (rung R4b-b): draw the sky BACKGROUND first, inside this
