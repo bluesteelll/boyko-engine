@@ -32,9 +32,11 @@
 //!
 //! W5 (one failing gate per pipeline family): the TEX family (`dds_back_face_lit_deferred_textured`),
 //! the ForwardPlus `Back` member (`dds_single_sided_back_culled_forwardplus`), the point-light
-//! caster family (`dds_double_sided_point_caster_*`), and under `hwrt` the MV / MVPM families
-//! (`dds_back_face_lit_deferred_denoised`: the temporal denoiser routes the camera raster through
-//! them).
+//! caster family (`dds_double_sided_point_caster_*`), and under `hwrt` the temporal denoiser's two
+//! camera families. A frame with a non-default material takes MVPM, so
+//! `dds_back_face_lit_deferred_denoised` (its double-sided card) gates MVPM only; the MV family
+//! (an all-default frame) is gated by `dds_single_sided_back_culled_deferred_denoised` (its `Back`
+//! member) and `dds_mirrored_cube_deferred_denoised` (its `Front` member) — triage r1 T-MV.
 //!
 //! Windowed-test conventions: ignored by default, `--test-threads=1`, `BOYKO_DISABLE_VALIDATION=1`,
 //! `BOYKO_WINDOW_FRAMES` set (each driver also sets a per-worker backstop).
@@ -143,6 +145,11 @@ fn max_diff(a: &Capture, b: &Capture, r: Rect) -> (f32, (u32, u32)) {
     worst
 }
 
+/// `base` followed by `extra` (an arm's own env, then the variant's).
+fn with_extra<'a>(extra: &[(&'a str, &'a str)], base: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+    base.iter().chain(extra).copied().collect()
+}
+
 // --- 1 / 5: a double-sided back face is lit like its front --------------------------------------
 
 /// `A` = the double-sided card's front toward the camera; `B` = its back (optionally mirrored).
@@ -235,12 +242,13 @@ fn dds_mirrored_card_lit_vb() {
 
 // --- 2 / 6: a single-sided back face is culled ---------------------------------------------------
 
-/// The single-sided card's back toward the camera with a backdrop, against the no-card run.
-fn single_sided_back_culled(path: RenderPath) {
+/// The single-sided card's back toward the camera with a backdrop, against the no-card run
+/// (`extra` arms both runs).
+fn single_sided_back_culled(path: RenderPath, extra: &[(&str, &str)]) {
     let mask = card_mask();
     let band = backdrop_band();
-    let with = capture(path, &[(ENV_SCENE, "card"), (ENV_FACING, "back"), (ENV_BACKDROP, "1")], "card");
-    let without = capture(path, &[(ENV_SCENE, "card"), (ENV_BACKDROP, "1"), (ENV_NOCARD, "1")], "nocard");
+    let with = capture(path, &with_extra(extra, &[(ENV_SCENE, "card"), (ENV_FACING, "back"), (ENV_BACKDROP, "1")]), "card");
+    let without = capture(path, &with_extra(extra, &[(ENV_SCENE, "card"), (ENV_BACKDROP, "1"), (ENV_NOCARD, "1")]), "nocard");
 
     let clear = with.depth.depth(EMPTY_PIXEL.0, EMPTY_PIXEL.1);
     let backdrop_missing = band.pixels().filter(|&(x, y)| with.depth.depth(x, y).to_bits() == clear.to_bits()).count();
@@ -258,26 +266,39 @@ fn single_sided_back_culled(path: RenderPath) {
 #[test]
 #[ignore = "gpu-windowed: RD6 test 2 on Deferred (spawns dds_worker); run with --test-threads=1 and BOYKO_DISABLE_VALIDATION=1"]
 fn dds_single_sided_back_culled_deferred() {
-    single_sided_back_culled(RenderPath::Deferred);
+    single_sided_back_culled(RenderPath::Deferred, &[]);
 }
 
 #[test]
 #[ignore = "gpu-windowed: RD6 test 2 on Forward (spawns dds_worker); run with --test-threads=1 and BOYKO_DISABLE_VALIDATION=1"]
 fn dds_single_sided_back_culled_forward() {
-    single_sided_back_culled(RenderPath::Forward);
+    single_sided_back_culled(RenderPath::Forward, &[]);
 }
 
 /// W5: the ForwardPlus `Back` member (the depth prepass) has its own gate.
 #[test]
 #[ignore = "gpu-windowed: RD6 test 2 on ForwardPlus (spawns dds_worker); run with --test-threads=1 and BOYKO_DISABLE_VALIDATION=1"]
 fn dds_single_sided_back_culled_forwardplus() {
-    single_sided_back_culled(RenderPath::ForwardPlus);
+    single_sided_back_culled(RenderPath::ForwardPlus, &[]);
 }
 
 #[test]
 #[ignore = "gpu-windowed: RD6 test 2 on VisibilityBuffer (spawns dds_worker); run with --test-threads=1 and BOYKO_DISABLE_VALIDATION=1"]
 fn dds_single_sided_back_culled_vb() {
-    single_sided_back_culled(RenderPath::VisibilityBuffer);
+    single_sided_back_culled(RenderPath::VisibilityBuffer, &[]);
+}
+
+/// Triage r1 T-MV: the MV family's `Back` member. Every material of this scene is the pinned
+/// default, so under the temporal denoiser the Deferred camera raster takes the MV family
+/// (`raster_pipeline_mvpm` is armed only when some instance carries a non-default material, and
+/// the recorder prefers it), which `dds_back_face_lit_deferred_denoised`'s double-sided card never
+/// reaches. Measured red on `raster_mv: None` (the loop falls back to the unculled `None`
+/// pipeline) and on the MV family built with `cull_mode: None` for every member.
+#[cfg(feature = "hwrt")]
+#[test]
+#[ignore = "feature+gpu-windowed+gpu-cap: RD6 test 2 on Deferred under the temporal denoiser (the MV family's Back member; needs ray query; spawns dds_worker); run with --features hwrt, --test-threads=1 and BOYKO_DISABLE_VALIDATION=1"]
+fn dds_single_sided_back_culled_deferred_denoised() {
+    single_sided_back_culled(RenderPath::Deferred, &[(dds_scene::ENV_DENOISE, "1")]);
 }
 
 /// Test 6: ForwardPlus prepass parity — the image over a culled single-sided card (an EMISSIVE
@@ -405,9 +426,10 @@ fn dds_double_sided_point_caster_vb() {
 
 // --- 4: a mirrored instance keeps its facing ------------------------------------------------------
 
-fn mirrored_cube(path: RenderPath) {
-    let a = capture(path, &[(ENV_SCENE, "cube")], "cube");
-    let b = capture(path, &[(ENV_SCENE, "cube"), (ENV_MIRROR, "1")], "cube_mirrored");
+/// `extra` arms both runs.
+fn mirrored_cube(path: RenderPath, extra: &[(&str, &str)]) {
+    let a = capture(path, &with_extra(extra, &[(ENV_SCENE, "cube")]), "cube");
+    let b = capture(path, &with_extra(extra, &[(ENV_SCENE, "cube"), (ENV_MIRROR, "1")]), "cube_mirrored");
     let clear = a.depth.depth(EMPTY_PIXEL.0, EMPTY_PIXEL.1);
     let covered = |x: u32, y: u32| a.depth.depth(x, y).to_bits() != clear.to_bits();
     // The cube mask, eroded by 2 px (every pixel within 2 px is the cube's too).
@@ -441,19 +463,30 @@ fn mirrored_cube(path: RenderPath) {
 #[test]
 #[ignore = "gpu-windowed: RD6 test 4 on Deferred (spawns dds_worker); run with --test-threads=1 and BOYKO_DISABLE_VALIDATION=1"]
 fn dds_mirrored_cube_deferred() {
-    mirrored_cube(RenderPath::Deferred);
+    mirrored_cube(RenderPath::Deferred, &[]);
 }
 
 #[test]
 #[ignore = "gpu-windowed: RD6 test 4 on Forward (spawns dds_worker); run with --test-threads=1 and BOYKO_DISABLE_VALIDATION=1"]
 fn dds_mirrored_cube_forward() {
-    mirrored_cube(RenderPath::Forward);
+    mirrored_cube(RenderPath::Forward, &[]);
 }
 
 #[test]
 #[ignore = "gpu-windowed: RD6 test 4 on VisibilityBuffer (spawns dds_worker); run with --test-threads=1 and BOYKO_DISABLE_VALIDATION=1"]
 fn dds_mirrored_cube_vb() {
-    mirrored_cube(RenderPath::VisibilityBuffer);
+    mirrored_cube(RenderPath::VisibilityBuffer, &[]);
+}
+
+/// Triage r1 T-MV: the MV family's `Front` member (a mirrored single-sided batch). The cube is the
+/// pinned default material, so under the temporal denoiser it is drawn by the MV family (see
+/// `dds_single_sided_back_culled_deferred_denoised`). Measured red on the MV family built with
+/// `cull_mode: Back` for every member (the mirrored cube's member culls its visible faces).
+#[cfg(feature = "hwrt")]
+#[test]
+#[ignore = "feature+gpu-windowed+gpu-cap: RD6 test 4 on Deferred under the temporal denoiser (the MV family's Front member; needs ray query; spawns dds_worker); run with --features hwrt, --test-threads=1 and BOYKO_DISABLE_VALIDATION=1"]
+fn dds_mirrored_cube_deferred_denoised() {
+    mirrored_cube(RenderPath::Deferred, &[(dds_scene::ENV_DENOISE, "1")]);
 }
 
 /// The fixture geometry the gates read, checked on every host: the card mask sits inside the
