@@ -1344,8 +1344,12 @@ pub const FRAME_GRAPH_CAPACITY: FrameGraphCapacity =
 /// then the per-frame arming facts the conditional tails key on. Each later rung APPENDS its keys
 /// (a reordering would silently re-label a parsed column).
 ///
-/// SkyLight presence is recorded as the presence of the two sky-background pipelines
-/// (`forward_sky`, `vb_sky`): the scene carries no SkyLight bit of its own at HEAD.
+/// `forward_sky` / `vb_sky` record whether the two sky-background PIPELINES were built — both are on
+/// every Forward / VisibilityBuffer boot, so they say nothing about a SkyLight (OBS's earlier note
+/// here claimed they did; render wave PX0 corrected it). SkyLight presence is `light_sky` (PX0,
+/// D-F1): the frame's light table holds a SKY row in its front block, the resolve's own `has_sky`
+/// predicate. `vb_classified` (PX0) is `path_vb_fused() ∧ vb_use_classified` — the `vb_shade` vs
+/// `vb_resolve` producer choice.
 pub const RECEIPT_CONFIG_KEYS: [&str; RECEIPT_CONFIG_LEN] = [
     "path",
     "legs",
@@ -1394,10 +1398,13 @@ pub const RECEIPT_CONFIG_KEYS: [&str; RECEIPT_CONFIG_LEN] = [
     "sdf_depth_merge",
     "sdf_depth_merge_clear",
     "hzb_dump_declared",
+    // Render wave PX0 (D-F1): the classified VB producer and the light table's SKY row.
+    "vb_classified",
+    "light_sky",
 ];
 
 /// How many `[config]` entries a receipt carries (the length of [`RECEIPT_CONFIG_KEYS`]).
-pub const RECEIPT_CONFIG_LEN: usize = 46;
+pub const RECEIPT_CONFIG_LEN: usize = 48;
 
 /// One frame's `[config]` values, index for index with [`RECEIPT_CONFIG_KEYS`] (`bool`s as 0/1).
 /// POD: a burst copies one per presented frame.
@@ -1481,6 +1488,8 @@ impl ReceiptConfig {
             },
             u32::from(scene.sdf_depth_merge_clears()),
             u32::from(scene.hzb_dump_declared()),
+            u32::from(scene.path_vb_fused() && scene.vb_use_classified),
+            u32::from(scene.light_sky),
         ];
         Self { values }
     }
