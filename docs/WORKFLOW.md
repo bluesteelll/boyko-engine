@@ -106,6 +106,13 @@ declared, 6 refused, 23 legs to run (0 of them at a narrowed target scope)`.
   Windows box does not. Both were green natively on msvc (2026-09-18). The tests behind
   `boyko-physics/{bp-query-counts, narrowphase-counts}` run in the `feature-count-tests` job on
   `windows-latest`. That job was the last step of `feature-legs` until 2026-10-10.
+  **2026-10-16, IB P0r:** `boyko-physics/bench-alloc` moved with its one consumer to
+  `boyko-physics-parity/bench-alloc`, and `boyko-physics-parity/narrowphase-counts` and
+  `boyko-physics-probe/scope-wide` are new legs. With sr-policy's `boyko-physics/region-armed-counts`
+  (added since the count above), the same derive over this tree's `cargo metadata --no-deps` gives
+  32 declared, 6 refused, 26 legs across 16 packages; the three new legs were clippy-green with
+  `-D warnings` from a Windows host with `--target x86_64-unknown-linux-gnu` (`bench-alloc` natively,
+  for the reason above). The 2026-10-09 measurement above is left as it was taken.
 - **NOT covered — 6, each with its reason in `ci.yml`:** `bench-bevy-vs-boyko/{bench-alloc,
   nightly}` — the bevy tree, excluded from every job but `bench-compile`;
   `boyko-threadpool/tb-neg-m2w` — `compile_error!` outside Miri, by design, gated instead by

@@ -64,7 +64,7 @@ bp-query-counts = []
 # corner backstop, the largest accepted edge excess, and the edge-record refreshes the bound turned
 # stale. OFF by default and enabled by no crate in the workspace; with it off the counting
 # statements do not exist. Its consumers are `tests/narrowphase_census.rs` (the positive control),
-# the census epilogues of the pinned targets and the `jolt_parity_pyramid` runner's summary:
+# the census epilogues of the pinned targets and the `jolt_parity_pyramid` runner's summary (crates/boyko_physics_parity forwards it):
 # `cargo test -p boyko-physics --features narrowphase-counts --test narrowphase_census`.
 narrowphase-counts = []
 # sr-policy MD2 (orchestrator ruling 32, the SR-B close test's carry-over): a process-wide count of

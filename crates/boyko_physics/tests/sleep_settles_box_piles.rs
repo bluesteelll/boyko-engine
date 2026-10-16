@@ -222,7 +222,7 @@
 //! `marked = {RigidBody, RigidBodyMass, Collider, BodyId, Marker}` is created FIRST, then
 //! `plain` without `Marker`, so anything spawned into `marked` is walked before every `plain`
 //! row. The floor is a static box of half-extents (50, 1, 50) at (0, -1, 0). The pile is the
-//! Jolt `PyramidScene` loop (`benches/jolt_parity_pyramid.rs`) with its height as a parameter
+//! Jolt `PyramidScene` loop (`boyko_physics_parity/src/bin/jolt_parity_pyramid.rs`) with its height as a parameter
 //! and `BOX_SEPARATION = 0`: unit-half-extent boxes, `inv_mass` 0.125, inverse inertia 0.1875
 //! on the diagonal, friction 0.5, restitution 0. Layer `i` of a height-`h` pile holds
 //! `(h - i)²` boxes.

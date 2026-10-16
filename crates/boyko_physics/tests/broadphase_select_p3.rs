@@ -395,7 +395,7 @@ fn spawn_box(world: &mut EcsMaster, position: Vec3, half_extents: Vec3, dynamic:
     }
 }
 
-/// The `jolt` scene of `benches/jolt_parity_pyramid.rs`: Jolt's `PyramidScene.h` placement
+/// The `jolt` scene of `boyko_physics_parity/src/bin/jolt_parity_pyramid.rs`: Jolt's `PyramidScene.h` placement
 /// loop, index for index, on a static (50, 1, 50) slab — the scene P0b §8 measured AllPairs
 /// beating Grid on by 2.46× at W=1.
 fn jolt_pyramid_world() -> (EcsMaster, Schedule) {

@@ -8992,6 +8992,8 @@ The `bench-alloc` feature is kept, off by default and in the same form as `boyko
 can be re-run (for the glibc arm, or on the pre-3b tree). The raw criterion data and receipts live
 outside the repository and are not reproduced here.
 
+**2026-10-16, IB P0r:** the feature moved with its one consumer: it is `boyko-physics-parity/bench-alloc` (`crates/boyko_physics_parity/Cargo.toml`), and `boyko-physics` no longer declares it.
+
 ---
 
 ## The msvc lane's rotted citations are repaired BY CONTENT - 166 of them, 69 refused, and the count was never 219 (2026-09-10; pass 2 the same day: 208 written, 19 refused, and pass 1's own clean-audit was wrong)

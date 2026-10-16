@@ -21,7 +21,7 @@
 //! | **G-P1** incline threshold | box half (0.5, 0.2, 0.5), 1 kg, spawned at (−40, 0.2, 0); yaw 0° and 30°; μ ∈ {0.2, 0.5, 0.8}; `tan θ = k·μ`; dt 1/120, 480 frames. 18 cells; tipping needs `tan θ > 2.5`, the largest is 1.6 | **stick** (k 0.95): creep `\|(x, z)(480) − (x, z)(240)\| < 5 mm`. **slide** (k 1.05): `x(480) − x(0) ∈ [0.5, 1.5]·½·a·(4 s)²`. **accel** (k 2): `(v_x(480) − v_x(240)) / 2 s` within ±5 % of `a`. Here `a = 9.81·(sin θ − μ cos θ)` |
 //! | **G-P2** twist stop | box half (1, 0.25, 1), 8 kg, μ 0.2, at rest with ω₀ = (0, 2, 0) rad/s; dt 1/60, 300 steps | **stop**: the first step `s*` at whose end `\|ω\| < 1e-3` lies in [25, 33]. **hold**: `\|ω\| < 1e-3` at the end of each of the 60 steps after `s*`. **drift**: `\|(x, z)(s* + 60) − (x, z)(0)\| ≤ 1 mm` |
 //! | **G-P3** yaw while sliding (Jolt #983) | box half (0.5, 0.25, 0.5), 1 kg, μ 0.3, yaw 30°, v₀ = (3, 0, 0) m/s; dt 1/60, 180 steps | **heading**: `ψ = atan2(−e.z, e.x)` with `e = R·x̂`, `\|ψ(180) − ψ(0)\| ≤ 0.5°`. **lateral**: `\|z(180) − z(0)\| ≤ 1 cm`. **stop distance**: `x(180) − x(0)` within ±5 % of `v₀² / (2μg)` = 1.529 m |
-//! | **G-P7** single-box slide | one J-T box (half 1, `inv_mass` 0.125), μ 0.2, at rest; gravity = S-SLIDE's literal bits (`tan θ = ½`, `benches/jolt_parity_pyramid/dyn_spec.rs`); dt 1/60, 70 steps | **acceleration**: `(v_x(70) − v_x(10)) / 1 s` within ±3 % of `9.81·(sin θ − 0.2 cos θ)` = 2.632 m/s² |
+//! | **G-P7** single-box slide | one J-T box (half 1, `inv_mass` 0.125), μ 0.2, at rest; gravity = S-SLIDE's literal bits (`tan θ = ½`, `boyko_physics_parity/src/bin/jolt_parity_pyramid/dyn_spec.rs`); dt 1/60, 70 steps | **acceleration**: `(v_x(70) − v_x(10)) / 1 s` within ±3 % of `9.81·(sin θ − 0.2 cos θ)` = 2.632 m/s² |
 //!
 //! Derivations and estimator choices:
 //!
@@ -1297,7 +1297,7 @@ fn g_p3_yaw_while_sliding_per_point() {
 // G-P7: the single-box slide.
 
 /// S-SLIDE's gravity, `9.81·(1, −2, 0) / √5`, as the literal bits the dynamic parity scenes run
-/// (`benches/jolt_parity_pyramid/dyn_spec.rs`, `SLIDE_GRAVITY_BITS`): `tan θ = ½`.
+/// (`boyko_physics_parity/src/bin/jolt_parity_pyramid/dyn_spec.rs`, `SLIDE_GRAVITY_BITS`): `tan θ = ½`.
 const G_P7_GRAVITY_BITS: [u32; 3] = [0x408c_63a9, 0xc10c_63a9, 0];
 /// G-P7's friction coefficient (S-SLIDE's).
 const G_P7_MU: f64 = 0.2;
