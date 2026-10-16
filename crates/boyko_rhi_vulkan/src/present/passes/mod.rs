@@ -21,6 +21,9 @@ mod sdf_depth_merge;
 mod smaa;
 mod ssaa;
 mod taa;
+// Render wave PX0: the zone arm every POST / FWD bracket records through, and Forward's frame
+// witness.
+mod zone_arm;
 // `pub(crate)` for ONE item: VG R3 piece 2 step P2-6's `VbRecordProbe`, which `super` re-exports
 // (gate G2's counts must reach `boyko_app`'s frame loop). Every other item in the module stays
 // `pub(crate)`/private exactly as before.

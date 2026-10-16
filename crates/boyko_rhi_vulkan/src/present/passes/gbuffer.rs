@@ -3236,14 +3236,16 @@ impl Renderer<'_> {
                 // under the same `scene.aa` that gates this branch; `present_extent` sizes
                 // `aa_out`.
                 ts.cmd();
-                unsafe { self.record_fxaa(cmd, targets, fxaa, present_extent, fi) };
+                let zone = super::zone_arm::ZoneArm::from_scene(scene);
+                unsafe { self.record_fxaa(cmd, targets, fxaa, present_extent, fi, zone) };
             } else if let Some(smaa) = scene.smaa.as_ref() {
                 // SAFETY: recording is open; `present_sample` above left `lit` in
                 // SHADER_READ_ONLY_OPTIMAL; `aa_out`/`smaa_edges`/`smaa_weights`/the three
                 // `smaa_*_set` rings were built by `create()` under the same `scene.smaa`
                 // that gates this branch; `present_extent` sizes every SMAA target.
                 ts.cmd();
-                unsafe { self.record_smaa(cmd, targets, smaa, present_extent, fi) };
+                let zone = super::zone_arm::ZoneArm::from_scene(scene);
+                unsafe { self.record_smaa(cmd, targets, smaa, present_extent, fi, zone) };
             } else if let Some(ssaa) = scene.ssaa.as_ref() {
                 debug_assert!(targets.aa_out.is_some() && targets.downsample_set.is_some());
                 // SAFETY: recording is open; `present_sample` above left `lit` (the 2× ring)
@@ -3252,7 +3254,8 @@ impl Renderer<'_> {
                 // `aa_extent` (the BOOT-FIXED native size, NOT `present_extent`, which is 2×
                 // under SSAA, and NOT the live `extent`, which tracks window resizes).
                 ts.cmd();
-                unsafe { self.record_ssaa(cmd, targets, ssaa, aa_extent, fi) };
+                let zone = super::zone_arm::ZoneArm::from_scene(scene);
+                unsafe { self.record_ssaa(cmd, targets, ssaa, aa_extent, fi, zone) };
             } else {
                 // `aa_out.is_some()` with none of aa/smaa/ssaa matched ⇒ TAA is the reason
                 // (the four arms are mutually exclusive by construction); `record_taa` already
@@ -3266,6 +3269,17 @@ impl Renderer<'_> {
 
         // === Pass C: present-blit the LIT image (the resolve's output, or `aa_out` when
         // AA is armed) into the swapchain. ===
+
+        // Render wave PX0: `ZONE_POST_PRESENT` brackets Pass C from the swapchain barrier through
+        // `cmd_end_rendering`; the image dump, the readback copy and the present transition are
+        // outside it.
+        let present_zone = super::zone_arm::ZoneArm::from_scene(scene);
+        // SAFETY: recording is open and no rendering scope is (the AA passes above closed
+        // theirs); `ts` reset this frame's pool at the frame top and seals the slot at
+        // `ts.finish()` below.
+        let present_pair = unsafe {
+            present_zone.begin(self.fns, cmd, super::super::gpu_zone::ZONE_POST_PRESENT)
+        };
 
         // (7) Barrier (swapchain color): UNDEFINED → COLOR_ATTACHMENT_OPTIMAL.
         let to_color = VkImageMemoryBarrier {
@@ -3389,6 +3403,10 @@ impl Renderer<'_> {
             (self.fns.cmd_draw)(cmd, 3, 1, 0, 0);
             ts.cmd();
             (self.fns.cmd_end_rendering)(cmd);
+        }
+        // SAFETY: as the begin above — the present scope closed on the line before.
+        unsafe {
+            present_zone.end(self.fns, cmd, super::super::gpu_zone::ZONE_POST_PRESENT, present_pair);
         }
 
         // OBS (D, H0 Scope 6): the image dump — recorded AFTER the present blit (critique O2, the

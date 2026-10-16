@@ -11,6 +11,7 @@ use crate::ffi::*;
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
 
 use super::frame_driver::Renderer;
+use super::gpu_zone::RENDER_DECLARE_FRAME_GRAPH;
 use super::scene_types::GBufferScene;
 use super::targets::GBufferTargets;
 use super::COLOR_SUBRESOURCE_RANGE;
@@ -1842,6 +1843,9 @@ impl Renderer<'_> {
     /// this one sits BELOW in the dependency graph, hence the plain-text reference rather than
     /// an intra-doc link) now reaches a real declarator.
     pub(crate) fn declare_frame_graph(&mut self, scene: &GBufferScene<'_>) {
+        // Render wave PX0 (D-Z4): the CPU zone over the whole declaration. `Dev` tier, so a
+        // shipped build folds the site away; otherwise one `Acquire` load while unarmed.
+        let _zone = boyko_diag::zone!(RENDER_DECLARE_FRAME_GRAPH);
         match scene.resolved_render_path.path {
             // RenderPath::Deferred == 0 (render_path_config.rs) — the only rung-landed path.
             0 => self.declare_deferred_graph(scene),

@@ -7,7 +7,9 @@ use core::ptr;
 use crate::ffi::*;
 
 use super::super::frame_driver::Renderer;
+use super::super::gpu_zone::ZONE_POST_SSAA_DOWNSAMPLE;
 use super::super::scene_types::SsaaActivation;
+use super::zone_arm::ZoneArm;
 use super::super::targets::GBufferTargets;
 use super::super::COLOR_SUBRESOURCE_RANGE;
 
@@ -36,7 +38,8 @@ impl Renderer<'_> {
     /// is live on this device and its layout matches `downsample_set`'s
     /// (`scene.present_layout`, 1 CIS, no push range); `aa_extent` is the NATIVE extent
     /// [`GBufferTargets::create`] allocated `aa_out` at under SSAA; `fi` is this frame's
-    /// in-flight slot.
+    /// in-flight slot; `zone` is the frame's [`ZoneArm`] (render wave PX0), whose reset/seal
+    /// contract the caller's witness upholds.
     pub(crate) unsafe fn record_ssaa(
         &self,
         cmd: VkCommandBuffer,
@@ -44,11 +47,15 @@ impl Renderer<'_> {
         activation: &SsaaActivation<'_>,
         aa_extent: VkExtent2D,
         fi: usize,
+        zone: ZoneArm<'_>,
     ) {
         debug_assert!(
             aa_extent.width > 0 && aa_extent.height > 0,
             "invariant: aa_out is sized to a non-empty native aa_extent under SSAA"
         );
+        // SAFETY: recording is open (this fn's contract), outside any rendering scope; `zone`'s
+        // contract (pool reset this frame, sealed after) is the caller's.
+        let zone_pair = unsafe { zone.begin(self.fns, cmd, ZONE_POST_SSAA_DOWNSAMPLE) };
         let aa = targets
             .aa_out
             .as_ref()
@@ -198,5 +205,7 @@ impl Renderer<'_> {
                 (&to_shader_read as *const VkImageMemoryBarrier).cast(),
             );
         }
+        // SAFETY: as the begin above; `zone_pair` is the pair it returned for this zone.
+        unsafe { zone.end(self.fns, cmd, ZONE_POST_SSAA_DOWNSAMPLE, zone_pair) };
     }
 }

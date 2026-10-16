@@ -10,7 +10,9 @@ use core::ptr;
 use crate::ffi::*;
 
 use super::super::frame_driver::Renderer;
+use super::super::gpu_zone::{ZONE_POST_SMAA_BLEND, ZONE_POST_SMAA_EDGE, ZONE_POST_SMAA_WEIGHT};
 use super::super::scene_types::SmaaActivation;
+use super::zone_arm::ZoneArm;
 use super::super::targets::GBufferTargets;
 use super::super::COLOR_SUBRESOURCE_RANGE;
 
@@ -41,7 +43,9 @@ impl Renderer<'_> {
     /// [`GBufferTargets::sync_gbuffer`]); `activation`'s pipelines/layouts are live on this
     /// device and match the sets' layouts; `present_extent` sizes every SMAA target (the
     /// extent [`GBufferTargets::create`] allocated them at); `fi` is this frame's in-flight
-    /// slot.
+    /// slot; `zone` is the frame's [`ZoneArm`] (render wave PX0), whose reset/seal contract the
+    /// caller's witness upholds. The three sub-passes are bracketed as a consecutive partition
+    /// (`ZONE_POST_SMAA_EDGE`, `_WEIGHT`, `_BLEND`), each with its own barriers.
     pub(crate) unsafe fn record_smaa(
         &self,
         cmd: VkCommandBuffer,
@@ -49,6 +53,7 @@ impl Renderer<'_> {
         activation: &SmaaActivation<'_>,
         present_extent: VkExtent2D,
         fi: usize,
+        zone: ZoneArm<'_>,
     ) {
         debug_assert!(
             present_extent.width > 0 && present_extent.height > 0,
@@ -101,6 +106,10 @@ impl Renderer<'_> {
         // --- Pass 1: edge detection. lit[fi] -> edges[fi]. CLEAR (Decision 4 — the PS
         // `discard`s non-edge texels, so an unwritten prior-frame texel must not leak into
         // pass 2's read). ---
+        // SAFETY (the three PX0 brackets below): recording is open (this fn's contract), outside
+        // any rendering scope at each begin/end; `zone`'s contract (pool reset this frame, sealed
+        // after) is the caller's; each end takes the pair its own begin returned.
+        let edge_pair = unsafe { zone.begin(self.fns, cmd, ZONE_POST_SMAA_EDGE) };
         // SAFETY: recording is open (caller contract); one image barrier on the live
         // `edges[fi]` texture (built by `create()` when `scene.smaa` was armed);
         // TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT with UNDEFINED→COLOR is the superset-correct
@@ -178,6 +187,12 @@ impl Renderer<'_> {
         unsafe {
             self.smaa_barrier_to_shader_read(cmd, edges[fi].image);
         }
+        // SAFETY: recording is open and no rendering scope is (the sub-pass's scope closed above);
+        // `zone`'s pool-reset/seal contract is the caller's; an end takes its own begin's pair.
+        unsafe { zone.end(self.fns, cmd, ZONE_POST_SMAA_EDGE, edge_pair) };
+        // SAFETY: recording is open and no rendering scope is (the sub-pass's scope closed above);
+        // `zone`'s pool-reset/seal contract is the caller's; an end takes its own begin's pair.
+        let weight_pair = unsafe { zone.begin(self.fns, cmd, ZONE_POST_SMAA_WEIGHT) };
 
         // --- Pass 2: blending-weight calculation. edges[fi] + area_tex + search_tex ->
         // weights[fi]. CLEAR (same discard-driven correctness requirement as pass 1). ---
@@ -248,6 +263,12 @@ impl Renderer<'_> {
         unsafe {
             self.smaa_barrier_to_shader_read(cmd, weights[fi].image);
         }
+        // SAFETY: recording is open and no rendering scope is (the sub-pass's scope closed above);
+        // `zone`'s pool-reset/seal contract is the caller's; an end takes its own begin's pair.
+        unsafe { zone.end(self.fns, cmd, ZONE_POST_SMAA_WEIGHT, weight_pair) };
+        // SAFETY: recording is open and no rendering scope is (the sub-pass's scope closed above);
+        // `zone`'s pool-reset/seal contract is the caller's; an end takes its own begin's pair.
+        let blend_pair = unsafe { zone.begin(self.fns, cmd, ZONE_POST_SMAA_BLEND) };
 
         // --- Pass 3: neighborhood blending. lit[fi] + weights[fi] -> aa_out[fi]. DONT_CARE
         // (every texel is written unconditionally — the FXAA precedent). ---
@@ -320,6 +341,9 @@ impl Renderer<'_> {
         unsafe {
             self.smaa_barrier_to_shader_read(cmd, aa_out[fi].image);
         }
+        // SAFETY: recording is open and no rendering scope is (the sub-pass's scope closed above);
+        // `zone`'s pool-reset/seal contract is the caller's; an end takes its own begin's pair.
+        unsafe { zone.end(self.fns, cmd, ZONE_POST_SMAA_BLEND, blend_pair) };
     }
 
     /// Barriers `image` UNDEFINED → COLOR_ATTACHMENT_OPTIMAL (TOP_OF_PIPE →

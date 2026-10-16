@@ -60,23 +60,14 @@ pub(crate) struct MergeZoneArm<'a> {
 
 impl<'a> MergeZoneArm<'a> {
     /// The arm for a path whose own witness reset this frame's pool and seals the slot after the
-    /// merge (Deferred, VisibilityBuffer).
+    /// merge — every path since render wave PX0 gave Forward its `FrameWitness` (the
+    /// `disarmed()` constructor Forward needed was deleted with its last caller).
     #[inline]
     pub(crate) fn from_scene(scene: &GBufferScene<'a>) -> MergeZoneArm<'a> {
         MergeZoneArm {
             zr: scene.gpu_zone,
             #[cfg(feature = "profiling-census")]
             cw: scene.vb_cmd_witness,
-        }
-    }
-
-    /// The arm for a path that opens no ring slot (Forward): no bracket, no census, no command.
-    #[inline]
-    pub(crate) const fn disarmed() -> MergeZoneArm<'a> {
-        MergeZoneArm {
-            zr: None,
-            #[cfg(feature = "profiling-census")]
-            cw: None,
         }
     }
 

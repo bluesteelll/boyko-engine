@@ -304,14 +304,16 @@ pub const ZONE_VB_SDF_MESH: u16 = ZONE_BASE_VB + 10;
 /// false when it was written. After DP6-0b's [`ZONE_VB_PRESHADE`] swallowed the SSAO + à-trous +
 /// DDGI + hwrt stretch, what remains outside every bracket is a LIST, not an empty set:
 ///
-/// * `sdf_forward_march` (`passes/vb.rs`, after the lit-producer chain closes) — an unbracketed
-///   compute dispatch on **both** legs of every `VB × Both` frame;
+/// * `sdf_forward_march` (`passes/vb.rs`, after the lit-producer chain closes) — outside every
+///   VB-family bracket on **both** legs of every `VB × Both` frame (render wave PX0 brackets it
+///   under the FWD family's [`ZONE_FWD_SDF_MARCH`], outside [`ZONE_VB_PRODUCE_RUN`]);
 /// * `vb_viewt`, at **both** of its sites — the split arm's pre-tail slot (inside
 ///   [`ZONE_VB_PRODUCE_RUN`], not inside any zone's own bracket) and the `ssao.is_none()` site
 ///   after the producer chain (outside the run entirely).
 ///
 /// Narrowing a falsehood to an enumerated residual is the doc-rot discipline, not a claim of
-/// repair: nothing here brackets those three sites.
+/// repair: no VB-family id brackets those three sites (PX0's FWD id covers the first, outside the
+/// VB family's chain).
 ///
 /// Recorded inside `record_vb`'s `if scene.path_vb_split()` arm, so a fused or classified leg
 /// never stamps it — `NotBracketed`, not a zero. The gate that checks WHICH legs stamp it is the
@@ -579,8 +581,9 @@ pub const PARTICLE_ZONE_COUNT: u16 = 4;
 
 /// Render wave RD1 (defect R0b): the **SDF depth merge** — its derived barriers, its depth-only
 /// rendering scope and the one full-screen draw (or, on a `ClearOnly` frame, the scope alone),
-/// bracketed OUTSIDE the scope like [`ZONE_PARTICLE_DRAW`]. Recorded on Deferred and
-/// VisibilityBuffer; Forward's recorder opens no ring slot, so its merge is `NotBracketed`.
+/// bracketed OUTSIDE the scope like [`ZONE_PARTICLE_DRAW`]. Recorded on all three paths since
+/// render wave PX0 gave the Forward recorder its frame witness (before it, Forward's merge was
+/// `NotBracketed`).
 ///
 /// Opens at `BOTTOM_OF_PIPE`, by [`ZONE_PARTICLE_DRAW`]'s measured rule: it sits right after the
 /// path's last opaque producer, and a `TOP` begin there absorbs that producer's drain.
