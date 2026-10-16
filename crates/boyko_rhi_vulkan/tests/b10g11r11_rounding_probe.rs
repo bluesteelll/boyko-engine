@@ -270,8 +270,14 @@ impl Rig<'_> {
         let mut gpipes = Vec::new();
         let mut layouts = Vec::new();
         let mut groups = Vec::new();
+        // Every barrier's destination scope names each access the next command makes to the image
+        // (triage r1 W1): A3's RMW dispatch READS the uploaded background (`gOut[id.xy]`) before it
+        // writes, each later RMW pass reads and re-writes the same texel, and a blend arm's
+        // `LoadOp::Load` and blend read the uploaded bits as a colour attachment.
+        let shader_rw = BarrierAccess::SHADER_READ | BarrierAccess::SHADER_WRITE;
+        let color_rw = BarrierAccess::COLOR_ATTACHMENT_READ | BarrierAccess::COLOR_ATTACHMENT_WRITE;
         if compute {
-            barrier(&mut enc, BarrierStage::TRANSFER, BarrierStage::COMPUTE_SHADER, BarrierAccess::TRANSFER_WRITE, BarrierAccess::SHADER_WRITE, layout, ImageLayout::General);
+            barrier(&mut enc, BarrierStage::TRANSFER, BarrierStage::COMPUTE_SHADER, BarrierAccess::TRANSFER_WRITE, shader_rw, layout, ImageLayout::General);
             let module = ctx.create_shader_module(&words(if target == Target::B10G11R11 { STORE_B10_SPV } else { STORE_F16_SPV })).expect("store module");
             let bgl = ctx
                 .create_bind_group_layout(&BindGroupLayoutDesc {
@@ -296,7 +302,7 @@ impl Rig<'_> {
                 let push: Vec<u8> = [job.w, job.h, u32::from(rmw), l].iter().flat_map(|v| v.to_le_bytes()).collect();
                 enc.push_compute_constants(&pipe, ShaderStage::COMPUTE, 0, &push);
                 enc.dispatch(job.w.div_ceil(8), job.h.div_ceil(8), 1);
-                barrier(&mut enc, BarrierStage::COMPUTE_SHADER, BarrierStage::COMPUTE_SHADER, BarrierAccess::SHADER_WRITE, BarrierAccess::SHADER_READ, ImageLayout::General, ImageLayout::General);
+                barrier(&mut enc, BarrierStage::COMPUTE_SHADER, BarrierStage::COMPUTE_SHADER, BarrierAccess::SHADER_WRITE, shader_rw, ImageLayout::General, ImageLayout::General);
             }
             barrier(&mut enc, BarrierStage::COMPUTE_SHADER, BarrierStage::TRANSFER, BarrierAccess::SHADER_WRITE, BarrierAccess::TRANSFER_READ, ImageLayout::General, ImageLayout::TransferSrcOptimal);
             modules.push(module);
@@ -306,7 +312,7 @@ impl Rig<'_> {
         } else {
             let src_stage = if job.dst.is_some() { BarrierStage::TRANSFER } else { BarrierStage::TOP_OF_PIPE };
             let src_access = if job.dst.is_some() { BarrierAccess::TRANSFER_WRITE } else { BarrierAccess::NONE };
-            barrier(&mut enc, src_stage, BarrierStage::COLOR_ATTACHMENT_OUTPUT, src_access, BarrierAccess::COLOR_ATTACHMENT_WRITE, layout, ImageLayout::ColorAttachmentOptimal);
+            barrier(&mut enc, src_stage, BarrierStage::COLOR_ATTACHMENT_OUTPUT, src_access, color_rw, layout, ImageLayout::ColorAttachmentOptimal);
             let full = RenderArea { x: 0, y: 0, width: job.w, height: job.h };
             if let Some(values) = clear_values {
                 for (i, v) in values.iter().enumerate() {
