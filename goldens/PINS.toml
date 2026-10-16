@@ -10,7 +10,12 @@
 #
 # Verify a pin (no write):  scripts\golden.ps1 -Pin <name> [-Hwrt]
 #   (checking IS the no-flag default -- there is no -Check parameter; passing one is a binding
-#    error. The script takes only -Pin / -Hwrt / -Bless.)
+#    error. The script takes -Pin / -Hwrt / -Bless / -ValidationOn, and -- render wave PX0, for
+#    the tolerance-mode self-test only -- -PinsFile / -CompareOnly, which refuse every pins file
+#    under goldens\.)
+#
+# A pin with a [<pin>.tolerance] block is a TOLERANCE-MODE pin: the schema is the comment block at
+# the END of this file.
 #
 # A pin whose sha256_* is the literal "PENDING" is UNBLESSED: -Check reports it and exits 2 with a
 # hint rather than passing. That is also the way to ADD a leg by hand -- -Bless only OVERWRITES an
@@ -25,11 +30,13 @@
 # ran on 2026-09-17 14:27 -- MEASURED 2026-09-18, `rustup toolchain list` prints
 # `stable-x86_64-pc-windows-msvc (active, default)`.) It had to move HERE and not only in rustup,
 # and it still had to after that step: golden.ps1 SETS every key of a pin's env block explicitly
-# (the loop at :147-154, whose `Set-Item` is :151), so a pin that still named the gnu toolchain
+# (the loop at :299-306, whose `Set-Item` is :303 -- re-anchored at render wave PX0, whose
+# tolerance branch moved them), so a pin that still named the gnu toolchain
 # would have kept the golden leg building gnu after the switch -- a split state the script's own
 # "never inherit" discipline would have hidden rather than exposed. ⚠ That citation read
-# `:143-150` until 2026-09-18, which is the tail of the env-WIPE loop (:141-146, which only
-# Remove-Items stray BOYKO_* vars) plus the head of the set loop, and stops one line SHORT of the
+# `:143-150` until 2026-09-18, which is the tail of the env-WIPE loop (:141-146 in that day's
+# numbering, :293-298 now, which only Remove-Items stray BOYKO_* vars) plus the head of the set
+# loop, and stops one line SHORT of the
 # `Set-Item` the sentence is about -- it cited neither of the two things it names.
 #
 # HOST BYTE-IDENTITY, MEASURED (rung AH (4), 2026-09-21; the ledger is docs/measurements/
@@ -1666,3 +1673,28 @@ BOYKO_WIN                = "512"
 BOYKO_RENDER_PATH        = "deferred"
 BOYKO_PARTICLE_SDF       = "1"
 BOYKO_PARTICLE_COLLIDE   = "1"
+
+# ===============================================================================================
+# TOLERANCE-MODE PINS - the schema (render wave PX0, AD-20; plan H3 Scope 6, px0/cut.md D-T3).
+# Kept at the END of this file so adding it moved no line any document cites.
+#
+# A pin is moved into tolerance mode ONLY by the K2 rule (index section 8), with its reason in the
+# block. It keeps its [<pin>] section (crate / test_binary / test_name / bmp) and gains:
+#
+#   [<pin>.tolerance]
+#   reason               = "<why this pin cannot be byte-pinned>"
+#   reference_software   = "goldens/ref/<pin>_software.bmp"   # and reference_hwrt per hwrt leg
+#   max_delta            = <int>     # min(observed + 1, max_delta_bound), observed over the 5-run probe
+#   max_changed_frac     = <float>   # 2 x the largest display-domain changed fraction of the 5 runs
+#   max_changed_frac_lit = <float>   # 2 x the largest lit-domain fraction at one format step
+#   order_noise_steps    = <int>     # the 5 runs' largest per-pixel spread in format steps, >= 1;
+#                                    # a value above 4 is flagged to the orchestrator before bless
+#   max_delta_bound      = <float>   # post_eval's joint forward difference at order_noise_steps
+#
+# Every measured field may be "PENDING" until its probe ran; -Bless refuses while one is.
+# scripts\golden.ps1 judges such a pin with `tools\golden_diff.py pin` against the reference BMP
+# (committed under goldens/ref/, `*.bmp binary` there): exit 0 within max_delta and
+# max_changed_frac, 1 past either, 4 past max_delta_bound -- a DEFECT (a race, a lost barrier),
+# NEVER re-blessed. -Bless copies the dumped BMP to reference_<leg>. Hash pins are unchanged.
+# tests/goldens_pins_wellformed.rs::every_tolerance_block_is_complete holds every block to this.
+# ===============================================================================================

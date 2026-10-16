@@ -46,6 +46,15 @@
     Do this ONLY after a visual owner sign-off on the dumped BMP. Without -Bless the script
     only CHECKS and reports PASS/FAIL.
 
+.PARAMETER PinsFile
+    The pins file to read (default: goldens\PINS.toml). Render wave PX0: the tolerance-mode
+    self-test points it at a scratch file.
+
+.PARAMETER CompareOnly
+    Skip the build and the render and judge THIS BMP against the pin instead of a fresh dump.
+    Refused unless -PinsFile lies OUTSIDE goldens\, so a real pin can never be checked or blessed
+    from a synthetic BMP (render wave PX0, the tolerance-mode self-test's entry point).
+
 .PARAMETER ValidationOn
     Validation-audit mode: render the SAME pin with the Vulkan validation layer ACTIVE
     (the pin's BOYKO_DISABLE_VALIDATION is stripped instead of set) and the window HIDDEN
@@ -53,6 +62,13 @@
     captured and scanned for [vk-validation] lines; ANY message fails the run (exit 3), in
     addition to the normal byte-identity gate (validation never changes pixels, so the hash
     must still match). Incompatible with -Bless (never bless from an audit run).
+
+.NOTES
+    TOLERANCE-MODE PINS (render wave PX0, AD-20): a pin with a [<pin>.tolerance] block is judged
+    by `tools\golden_diff.py pin` against its committed reference BMP instead of by SHA-256:
+    exit 0 within max_delta / max_changed_frac, 1 past either, 4 past max_delta_bound (a DEFECT,
+    never re-blessed). -Bless copies the BMP to the block's reference_<leg>, refused while any
+    measured field is PENDING. The schema is the comment block at the END of goldens\PINS.toml.
 
 .EXAMPLE
     scripts\golden.ps1                         # check grand_showcase (software leg)
@@ -65,11 +81,16 @@ param(
     [string]$Pin = 'grand_showcase',
     [switch]$Hwrt,
     [switch]$Bless,
-    [switch]$ValidationOn
+    [switch]$ValidationOn,
+    [string]$PinsFile = '',
+    [string]$CompareOnly = ''
 )
 
 if ($ValidationOn -and $Bless) {
     throw "[golden] -ValidationOn is an AUDIT mode; blessing from it is forbidden (run -Bless separately)."
+}
+if ($ValidationOn -and $CompareOnly) {
+    throw "[golden] -ValidationOn renders; -CompareOnly does not - the two cannot combine."
 }
 
 $ErrorActionPreference = 'Stop'
@@ -114,7 +135,14 @@ function Read-Pins([string]$path) {
 
 $repoRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 Write-Host "[golden] repo root = $repoRoot (pins are read and every cargo call runs here)" -ForegroundColor Cyan
-$pinsPath = Join-Path $repoRoot 'goldens\PINS.toml'
+$realPins = Join-Path $repoRoot 'goldens\PINS.toml'
+$pinsPath = if ($PinsFile) { [System.IO.Path]::GetFullPath($PinsFile) } else { $realPins }
+if ($CompareOnly) {
+    $goldensDir = (Join-Path $repoRoot 'goldens') + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $PinsFile -or $pinsPath.StartsWith($goldensDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "[golden] -CompareOnly is refused against a pins file under goldens\ ('$pinsPath'): a real pin is never judged or blessed from a synthetic BMP. Pass -PinsFile <scratch file outside goldens\>."
+    }
+}
 $pins = Read-Pins $pinsPath
 
 $bmp   = $pins["$Pin.bmp"]
@@ -131,6 +159,115 @@ $expected = $pins[$shaKey]
 $featArgs = if ($Hwrt) { @('--features', 'hwrt') } else { @() }
 
 Write-Host "[golden] pin=$Pin leg=$leg bmp=$bmp" -ForegroundColor Cyan
+
+# --- the interpreter tolerance pins need (px0/critique.md W6: never a Store alias stub) -------
+# A candidate counts only if `--version` exits 0 and reports Python >= 3.11 (tomllib).
+function Find-Python {
+    foreach ($c in @(@{ Exe = 'python'; Args = @() }, @{ Exe = 'py'; Args = @('-3') }, @{ Exe = 'python3'; Args = @() })) {
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $answer = ''
+        $ok = $false
+        try {
+            $answer = "$(& $c.Exe @($c.Args + @('--version')) 2>&1)"
+            $ok = ($LASTEXITCODE -eq 0)
+        } catch {
+            $ok = $false
+        } finally {
+            $ErrorActionPreference = $prev
+        }
+        if ($ok -and $answer -match 'Python 3\.(\d+)' -and [int]$Matches[1] -ge 11) { return $c }
+    }
+    throw "[golden] no Python >= 3.11 (tried python, py -3, python3) - a tolerance pin needs tools\golden_diff.py"
+}
+
+# --- (5) the verdict: SHA-256 compare / bless, or the tolerance branch ----------------------
+# A function so -CompareOnly reaches it without the build and the render. `exit` inside it ends
+# the script with the verdict's code.
+function Complete-Pin {
+    if ($pins.ContainsKey("$Pin.tolerance.max_delta")) {
+        $ref = $pins["$Pin.tolerance.reference_$leg"]
+        if (-not $ref) { throw "[golden] tolerance pin '$Pin' has no reference_$leg in $pinsPath" }
+        $refPath = if ([System.IO.Path]::IsPathRooted($ref)) { $ref } else { Join-Path $repoRoot $ref }
+        foreach ($f in @('max_changed_frac', 'max_delta_bound')) {
+            if (-not $pins.ContainsKey("$Pin.tolerance.$f")) { throw "[golden] tolerance pin '$Pin' has no $f in $pinsPath" }
+        }
+        $py = Find-Python
+        $pyArgs = $py.Args + @(
+            (Join-Path $repoRoot 'tools\golden_diff.py'), 'pin', '--pin', $Pin, '--leg', $leg,
+            '--bmp', $bmp, '--reference', $refPath,
+            '--max-delta', $pins["$Pin.tolerance.max_delta"],
+            '--max-changed-frac', $pins["$Pin.tolerance.max_changed_frac"],
+            '--max-delta-bound', $pins["$Pin.tolerance.max_delta_bound"])
+        if ($Bless) { $pyArgs += '--bless' }
+        Invoke-Native -Exe $py.Exe -Args $pyArgs -WorkDir $repoRoot
+        $rc = $LASTEXITCODE
+        switch ($rc) {
+            0 { Write-Host "[golden] PASS - $Pin/$leg within its tolerance block." -ForegroundColor Green; exit 0 }
+            1 { Write-Host "[golden] FAIL - $Pin/$leg past max_delta / max_changed_frac." -ForegroundColor Red; exit 1 }
+            4 { Write-Host "[golden] DEFECT - $Pin/$leg past max_delta_bound: a race or a lost barrier, NEVER re-bless." -ForegroundColor Red; exit 4 }
+            default { Write-Host "[golden] ERROR - golden_diff.py pin exited $rc for $Pin/$leg." -ForegroundColor Red; exit 2 }
+        }
+    }
+
+    $actual = (Get-FileHash -LiteralPath $bmp -Algorithm SHA256).Hash.ToLower()
+    Write-Host "[golden] $Pin/$leg actual = $actual"
+
+    if ($Bless) {
+        if ($expected -eq $actual) {
+            Write-Host "[golden] already blessed - hash unchanged, nothing to write." -ForegroundColor Green
+            exit 0
+        }
+        $keyName = "sha256_$leg"
+        $lines = Get-Content -LiteralPath $pinsPath
+        $sec = ''
+        $wrote = $false
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $t = $lines[$i].Trim()
+            if ($t -match '^\[(.+)\]$') { $sec = $Matches[1].Trim(); continue }
+            if ($sec -eq $Pin -and $t -match "^$keyName\s*=") {
+                $lines[$i] = ('{0,-15} = "{1}"' -f $keyName, $actual)
+                $wrote = $true
+                break
+            }
+        }
+        if (-not $wrote) { throw "[golden] could not find '$keyName' under [$Pin] in $pinsPath to bless." }
+        Set-Content -LiteralPath $pinsPath -Value $lines -Encoding UTF8
+        Write-Host "[golden] BLESSED $Pin/${leg}: $expected -> $actual" -ForegroundColor Yellow
+        Write-Host "[golden] goldens\PINS.toml updated. Review the diff and commit it deliberately." -ForegroundColor Yellow
+        exit 0
+    }
+
+    # -Check (default)
+    if ([string]::IsNullOrWhiteSpace($expected) -or $expected -eq 'PENDING') {
+        $hwrtFlag = if ($Hwrt) { '-Hwrt ' } else { '' }
+        Write-Host "[golden] NO PIN recorded for $Pin/$leg (value='$expected'). actual=$actual." -ForegroundColor Yellow
+        Write-Host "[golden] After a visual sign-off on '$bmp', run: scripts\golden.ps1 -Pin $Pin $hwrtFlag-Bless" -ForegroundColor Yellow
+        exit 2
+    }
+    if ($actual -eq $expected) {
+        Write-Host "[golden] PASS - $Pin/$leg byte-identical." -ForegroundColor Green
+        if ($ValidationOn -and $valCount -gt 0) {
+            Write-Host "[golden] ...but the -ValidationOn scan found $valCount message(s) - FAILING the audit." -ForegroundColor Red
+            exit 3
+        }
+        exit 0
+    } else {
+        Write-Host "[golden] FAIL - $Pin/$leg MISMATCH" -ForegroundColor Red
+        Write-Host "  expected: $expected" -ForegroundColor Red
+        Write-Host "  actual:   $actual"   -ForegroundColor Red
+        Write-Host "[golden] If this change is INTENTIONAL and visually verified, re-run with -Bless." -ForegroundColor Red
+        exit 1
+    }
+}
+
+if ($CompareOnly) {
+    $bmp = [System.IO.Path]::GetFullPath($CompareOnly)
+    if (-not (Test-Path -LiteralPath $bmp)) { throw "[golden] -CompareOnly BMP '$bmp' does not exist." }
+    Write-Host "[golden] -CompareOnly: no build, no render; judging '$bmp'" -ForegroundColor Cyan
+    $valCount = 0
+    Complete-Pin
+}
 
 # --- (3) explicit env: WIPE every stray BOYKO_*, then SET from the pin -------------------
 #
@@ -260,53 +397,5 @@ if ($ValidationOn) {
     }
 }
 
-# --- (5) hash + compare / bless --------------------------------------------------------
-$actual = (Get-FileHash -LiteralPath $bmp -Algorithm SHA256).Hash.ToLower()
-Write-Host "[golden] $Pin/$leg actual = $actual"
-
-if ($Bless) {
-    if ($expected -eq $actual) {
-        Write-Host "[golden] already blessed - hash unchanged, nothing to write." -ForegroundColor Green
-        exit 0
-    }
-    $keyName = "sha256_$leg"
-    $lines = Get-Content -LiteralPath $pinsPath
-    $sec = ''
-    $wrote = $false
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        $t = $lines[$i].Trim()
-        if ($t -match '^\[(.+)\]$') { $sec = $Matches[1].Trim(); continue }
-        if ($sec -eq $Pin -and $t -match "^$keyName\s*=") {
-            $lines[$i] = ('{0,-15} = "{1}"' -f $keyName, $actual)
-            $wrote = $true
-            break
-        }
-    }
-    if (-not $wrote) { throw "[golden] could not find '$keyName' under [$Pin] in $pinsPath to bless." }
-    Set-Content -LiteralPath $pinsPath -Value $lines -Encoding UTF8
-    Write-Host "[golden] BLESSED $Pin/${leg}: $expected -> $actual" -ForegroundColor Yellow
-    Write-Host "[golden] goldens\PINS.toml updated. Review the diff and commit it deliberately." -ForegroundColor Yellow
-    exit 0
-}
-
-# -Check (default)
-if ([string]::IsNullOrWhiteSpace($expected) -or $expected -eq 'PENDING') {
-    $hwrtFlag = if ($Hwrt) { '-Hwrt ' } else { '' }
-    Write-Host "[golden] NO PIN recorded for $Pin/$leg (value='$expected'). actual=$actual." -ForegroundColor Yellow
-    Write-Host "[golden] After a visual sign-off on '$bmp', run: scripts\golden.ps1 -Pin $Pin $hwrtFlag-Bless" -ForegroundColor Yellow
-    exit 2
-}
-if ($actual -eq $expected) {
-    Write-Host "[golden] PASS - $Pin/$leg byte-identical." -ForegroundColor Green
-    if ($ValidationOn -and $valCount -gt 0) {
-        Write-Host "[golden] ...but the -ValidationOn scan found $valCount message(s) - FAILING the audit." -ForegroundColor Red
-        exit 3
-    }
-    exit 0
-} else {
-    Write-Host "[golden] FAIL - $Pin/$leg MISMATCH" -ForegroundColor Red
-    Write-Host "  expected: $expected" -ForegroundColor Red
-    Write-Host "  actual:   $actual"   -ForegroundColor Red
-    Write-Host "[golden] If this change is INTENTIONAL and visually verified, re-run with -Bless." -ForegroundColor Red
-    exit 1
-}
+# --- (5) the verdict (Complete-Pin above: SHA-256 or the tolerance branch) ------------
+Complete-Pin

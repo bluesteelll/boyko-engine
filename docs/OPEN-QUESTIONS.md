@@ -5386,7 +5386,7 @@ questions; L7 can gate the first and nothing gates the second.
 > **saying that a golden run's validation was disabled is the entire reason the code exists.**
 > Suppressing it there would deliberately rebuild the defect the 2026-08-06 entry below describes.
 >
-> 1. **No collision is possible.** `scripts/golden.ps1:253` scans with the literal pattern
+> 1. **No collision is possible.** `scripts/golden.ps1:390` scans with the literal pattern
 >    `\[vk-validation\]`. `boyko-E2101` cannot match it.
 > 2. **In a golden run the line does not exist at all.** Measured: **no host calls
 >    `boyko_log::lifecycle::boot` or `enable`** — the only callers anywhere are `boyko_log`'s own
