@@ -1332,6 +1332,26 @@ impl VulkanContext {
         self.physical_device
     }
 
+    /// Render wave PX0 (`px0/cut.md` PX0-6): the OPTIMAL-tiling `VkFormatFeatureFlags` of
+    /// `format` on this device — what the float-format probe's premises read (B10G11R11 and
+    /// RGBA16F STORAGE / COLOR_ATTACHMENT / BLEND, each a named RED when absent). A cold query,
+    /// one driver call; nothing on a frame path calls it.
+    pub fn optimal_tiling_features(&self, format: i32) -> u32 {
+        let mut props = VkFormatProperties {
+            linear_tiling_features: 0,
+            optimal_tiling_features: 0,
+            buffer_features: 0,
+        };
+        // SAFETY: `self.physical_device` is the live physical device this context was booted on;
+        // `format` is passed through as the `VkFormat` the caller names (the query is defined for
+        // every value, reporting no features for an unknown one); `&mut props` is a valid
+        // out-pointer for the `#[repr(C)]` `VkFormatProperties` the driver fully overwrites.
+        unsafe {
+            (self.instance_fns.get_physical_device_format_properties)(self.physical_device, format, &mut props)
+        };
+        props.optimal_tiling_features
+    }
+
     /// The graphics+compute queue handle.
     #[inline]
     pub fn queue(&self) -> VkQueue {
