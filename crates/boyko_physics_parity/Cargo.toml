@@ -1,0 +1,63 @@
+[package]
+name = "boyko-physics-parity"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The Jolt parity runner (`jolt_parity_pyramid`) as a normal-dependency binary: it links boyko-physics the way a windowed game does, never through a bench's dev-dependencies (IB P0r)."
+license.workspace = true
+# The runner is ONE explicit `[[bin]]`. `autobins = false` because `src/bin/jolt_parity_pyramid/`
+# holds the runner's two child modules (`#[path]`), and an auto-discovered target there would be
+# a second binary nobody declared.
+autobins = false
+
+# The build class is a game's (IB design D14): `[dependencies]` and one `cfg(windows)` target
+# table, no `[dev-dependencies]` and no `[build-dependencies]`, so nothing a test or a bench asks
+# for (`boyko-log/test-probe`, the reason the runner left `boyko-physics/benches/`) reaches the
+# closure this binary links. Every entry is a path dependency with no keys: these are exactly the
+# crates the runner names in code, each already in boyko-physics's normal closure. `ug15 unit`
+# (V11 (a)) checks this shape, so a key added here is a red, not a silent closure change.
+[dependencies]
+boyko-diag = { path = "../boyko_diag" }
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+boyko-threadpool = { path = "../boyko_threadpool" }
+boyko-physics = { path = "../boyko_physics" }
+# Alloc A/B — optional bench-only global allocator, gated behind the
+# `bench-alloc` feature (OFF by default), mirroring `boyko_ecs`'s Phase X.E
+# arm. Moved verbatim from `boyko-physics` with its one consumer (IB P0r): the
+# runner's `#[cfg]`'d `#[global_allocator]` is a DIAGNOSTIC: it asks whether the
+# heap traffic of a parallel step costs time. Measured 2026-09-10: no effect at
+# any worker count (docs/OPEN-QUESTIONS.md, "the system heap against mimalloc").
+# See docs/BENCHMARKING.md.
+mimalloc = { version = "0.1", optional = true }
+
+# The host, so this binary resolves `windows-sys` — and through it `boyko-input`, `boyko-scene`
+# and `boyko-physics` — exactly as a windowed game does (IB design D14, W10): `boyko_rhi_vulkan`
+# adds its Win32 features to `windows-sys` in any build that links `boyko-app`. The runner's code
+# never names it, so rustc never loads it and the image gains no host code; the dependency acts
+# through cargo's resolution only (`ug15 unit` (f) checks that on every runner build).
+[target.'cfg(windows)'.dependencies]
+boyko-app = { path = "../boyko_app" }
+
+[features]
+default = []
+# Alloc A/B — opt-in low-variance bench allocator (see the dependency above). OFF by default so
+# a run measures the production system heap.
+bench-alloc = ["dep:mimalloc"]
+# Forwards to boyko-physics's box-box fallback census, for armed, untimed builds only: the
+# runner's summary prints the census under it. With it on, boyko-physics is another unit than a
+# game links, so no timed or V11 build carries it.
+narrowphase-counts = ["boyko-physics/narrowphase-counts"]
+
+[[bin]]
+name = "jolt_parity_pyramid"
+path = "src/bin/jolt_parity_pyramid.rs"
+# `cargo bench` has nothing to run here: the runner times its own fixed windows and is run by
+# path in a quiet window. `test` stays on: the self-check is the binary's one `#[test]`.
+bench = false
+# The binary's module docs are its manual, read in the source; rustdoc of a bin is not
+# published (`.github/workflows/docs.yml` documents libraries).
+doc = false
+
+[lints]
+workspace = true

@@ -77,6 +77,13 @@ const USER_PACKAGES: &[&str] = &[
     // runs inside a shipped process, so no runtime zone can exist in it — the `aether-lang`
     // argument. Recorded as a decision, per this gate's rule.
     "boyko-symcensus",
+    // IB P0r: the Jolt parity runner's package (`crates/boyko_physics_parity`), moved out of
+    // `boyko-physics/benches/`. A benchmark harness that consumes the engine the way a game does —
+    // the `bench-bevy-vs-boyko` precedent exactly.
+    "boyko-physics-parity",
+    // IB P0r: IB's game-shaped probe (`crates/boyko_physics_probe`), a stand-in for a game's own
+    // binary crate — the `profile-fixture` argument, verbatim.
+    "boyko-physics-probe",
 ];
 
 fn repo_root() -> PathBuf {

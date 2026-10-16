@@ -207,7 +207,7 @@ fn spawn_body(world: &mut EcsMaster, position: Vec3, mass: RigidBodyMass, half: 
 }
 
 /// Jolt's pyramid, index for index (the placement loop of
-/// `benches/jolt_parity_pyramid.rs`), on a static floor. Returns the dynamic count.
+/// `boyko_physics_parity/src/bin/jolt_parity_pyramid.rs`), on a static floor. Returns the dynamic count.
 fn spawn_pyramid(world: &mut EcsMaster) -> usize {
     spawn_body(
         world,

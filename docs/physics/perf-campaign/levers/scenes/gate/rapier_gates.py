@@ -46,7 +46,7 @@ import sys
 RP = 'D:/tmp/rapier-parity'
 FROZEN = RP + '/sweep/frozen9b.json'
 REPO = None  # main(): --root, else pose_pin.REPO (this script's own checkout)
-SPEC_BLOB = 'crates/boyko_physics/benches/jolt_parity_pyramid/dyn_spec.rs'
+SPEC_BLOB = 'crates/boyko_physics_parity/src/bin/jolt_parity_pyramid/dyn_spec.rs'
 COPIES = 'docs/physics/perf-campaign/levers/scenes/rapier/'
 # The repository's copy of each dyn source, by the name dyn/bin/SOURCES.sha256 gives it. The copies are
 # `-text` (.gitattributes), so a HEAD blob is the file's bytes.

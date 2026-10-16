@@ -1,14 +1,14 @@
 //! Dynamic parity scenes (lane DYN-SCENES), C1: the shared program specification's known answers
 //! and invariants.
 //!
-//! The spec lives beside the parity runner (`benches/jolt_parity_pyramid/dyn_spec.rs`) and is
+//! The spec lives beside the parity runner (`crates/boyko_physics_parity/src/bin/jolt_parity_pyramid/dyn_spec.rs`) and is
 //! included here by path, so this test reads the very file the runner and the Rapier harness
 //! compile. The four canonical-dump pins are the FNV-1a 64 values an independent Python derivation
 //! prints (`docs/physics/perf-campaign/levers/scenes/gate/dyn_spec_ref.py`): two derivations agreed
 //! before anything was pinned. A change to a program moves its pin, by design: re-derive it with
 //! the Python script, never by copying this test's output.
 
-#[path = "../benches/jolt_parity_pyramid/dyn_spec.rs"]
+#[path = "../../boyko_physics_parity/src/bin/jolt_parity_pyramid/dyn_spec.rs"]
 mod spec;
 
 use spec::{Program, SplitMix64};

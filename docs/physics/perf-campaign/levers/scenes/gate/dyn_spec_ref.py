@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Dynamic parity scenes: an INDEPENDENT Python derivation of the canonical scene dump.
 
-The Rust spec (crates/boyko_physics/benches/jolt_parity_pyramid/dyn_spec.rs) and Jolt's C++ hunk
+The Rust spec (crates/boyko_physics_parity/src/bin/jolt_parity_pyramid/dyn_spec.rs) and Jolt's C++ hunk
 derive the same text; this file is written from the record (01-DESIGN.md, "The programs"), not
 from either, so the known-answer pins of tests/dyn_scenes_spec.rs are two derivations agreeing.
 

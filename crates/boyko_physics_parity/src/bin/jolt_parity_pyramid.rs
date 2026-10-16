@@ -30,7 +30,7 @@
 //! | scene | bodies | layer gap (`--gap` default) | friction | what it is |
 //! |---|---|---|---|---|
 //! | `jolt` | 1240 + floor | 0.5 | 0.2 | Jolt's `PyramidScene.h`, index for index |
-//! | `rest` | 1240 + floor | 0 | 0.5 | `benches/sleeping_pipeline.rs`'s `pyramid_sleeping_off` pile: the same pyramid exactly touching, the A7-R1/R2 scene |
+//! | `rest` | 1240 + floor | 0 | 0.5 | `crates/boyko_physics/benches/sleeping_pipeline.rs`'s `pyramid_sleeping_off` pile: the same pyramid exactly touching, the A7-R1/R2 scene |
 //! | `s16` | 16 + floor | 0 | 0.5 | a single tower of 16 of the same boxes: the small-scene regression guard |
 //! | `pairs` | 400 + floor | 0 | 0.5 | a 20 × 20 grid of the same boxes resting on the floor 4 m apart: 400 box-floor manifolds that share no dynamic body, ONE colour of 1,600 slots (SR's one-wide-colour arm, ruling 8 Q7) |
 //!
@@ -244,7 +244,7 @@
 //! Refused (exit 2) unless the row's configuration resolves to the tree under `Manual` selection
 //! (`--broadphase tree`), where the kernel would be read: elsewhere the row would carry a kernel
 //! that never ran. With the flag, the run's cumulative `TreeDiag` must name the chosen kernel as the
-//! one that answered its active leaves and never the other (`benches/broadphase.rs`'s
+//! one that answered its active leaves and never the other (`crates/boyko_physics/benches/broadphase.rs`'s
 //! `assert_kernel_receipt` rule, read over the whole run so a step whose rows were all withheld
 //! asleep voids nothing), or the run is void (exit 3). The summary carries `bp_kernel` and the
 //! three leaf receipts (`leaf_list_leaves`, `fallback_leaves`, `row_walk_leaves`) in
@@ -362,7 +362,7 @@
 //! --dyn kick|shoot|slide       a dynamic parity scene on --scene jolt (see "Dynamic scenes")
 //! --sanity PATH                the per-state sanity CSV and the static-pair receipts (--scene jolt)
 //! --scene-dump PATH            the canonical scene dump, read back from the world (--scene jolt)
-//! --bench                      ignored (cargo bench passes it)
+//! --bench                      ignored (accepted for the pre-IB-P0r cargo bench recipe)
 //! ```
 //!
 //! # Output
@@ -431,15 +431,15 @@
 //!
 //! # Self-check (no `--scene`)
 //!
-//! `cargo test --all-targets` runs this binary with libtest's arguments, and `cargo bench` with
-//! `--bench`. Without `--scene` it therefore ignores its arguments and runs a small self-check —
-//! the `s16` scene, W = 1, 3 steps, disarmed — so the workspace test run exercises it in about a
-//! second without timing anything. `--list` prints nothing.
+//! Without `--scene` this binary ignores its arguments and runs a small self-check — the
+//! `s16` scene, W = 1, 3 steps, disarmed. `cargo test --all-targets` runs the same check as the
+//! binary's one `#[test]` (`tests::self_check`, libtest's harness since IB P0r), in about a
+//! second, timing nothing. Under libtest, `--list` is libtest's own.
 //!
 //! # Build (boyko)
 //!
 //! ```text
-//! cargo bench --no-run --profile parity -p boyko-physics --bench jolt_parity_pyramid
+//! cargo build --locked --profile parity -p boyko-physics-parity --bin jolt_parity_pyramid
 //! ```
 //!
 //! `[profile.parity]` (root `Cargo.toml`) inherits `release` — fat LTO, default codegen units, the
@@ -450,7 +450,7 @@
 //!
 //! # Build (Jolt)
 //!
-//! `benches/jolt_parity/pyramid_scene.patch` applies to Jolt v5.3.0 and v5.6.0 alike (its v2 hunks
+//! `crates/boyko_physics/benches/jolt_parity/pyramid_scene.patch` applies to Jolt v5.3.0 and v5.6.0 alike (its v2 hunks
 //! are checked on v5.6.0 only: the comparison is against Jolt 5.6). It:
 //!
 //! * sets `mLinearDamping = mAngularDamping = 0` in `PyramidScene.h` (H3);
@@ -594,8 +594,8 @@ use boyko_physics::profiling::{
 use boyko_physics::solver::colored::{LayoutCensus, RegionGrain};
 
 // The dynamic parity scenes (lane DYN-SCENES). `#[path]` from this crate root resolves next to it,
-// in `benches/jolt_parity_pyramid/`, a directory Cargo does not take for a target (it has no
-// `main.rs`); a move of this file must carry the directory, or the build fails loudly.
+// in `src/bin/jolt_parity_pyramid/`, which Cargo takes for no target (it has no `main.rs`, and the
+// package sets `autobins = false`); a move of this file must carry the directory or fail loudly.
 #[path = "jolt_parity_pyramid/dyn_scenes.rs"]
 mod dyn_scenes;
 #[path = "jolt_parity_pyramid/dyn_spec.rs"]
@@ -3049,7 +3049,7 @@ fn run(args: &Args) -> ExitCode {
         });
     }
     // `--bp-kernel`: the run's cumulative receipt names the chosen kernel as the one that answered
-    // its active leaves, and never the other (`benches/broadphase.rs`'s `assert_kernel_receipt`
+    // its active leaves, and never the other (`crates/boyko_physics/benches/broadphase.rs`'s `assert_kernel_receipt`
     // rule), over the whole run (module docs, "The query kernel"). An `if` chain, never an
     // exhaustive match (ruling Q10): a kernel the tree gains and this chain does not name voids the
     // run.
@@ -3476,4 +3476,14 @@ fn csv_text(
         s.push('\n');
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    /// The no-`--scene` path, run by `cargo test` (libtest's harness since IB P0r). One test: the
+    /// profiler binds one world per process.
+    #[test]
+    fn self_check() {
+        assert!(super::self_check() == std::process::ExitCode::SUCCESS);
+    }
 }

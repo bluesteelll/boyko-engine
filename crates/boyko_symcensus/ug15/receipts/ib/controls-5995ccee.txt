@@ -1,0 +1,256 @@
+ug15-ib-controls v1
+key	5995ccee448676cc80ec9b0b195e78afebc890f098bb97052ecf24d77bd7d3ad
+keyline	key          5995ccee448676cc80ec9b0b195e78afebc890f098bb97052ecf24d77bd7d3ad
+keyline	key source   46e208cfb1085b755d4ddbd3589154b213498aae3c2bf66e6c17b82179985ba9
+keyline	key file     crates/boyko_symcensus/Cargo.toml 1916 8e5f0280aec9f2207a6422e9713afc31ec8ed21a30d77450f72d818336d2c476
+keyline	key file     crates/boyko_symcensus/src/bin/ug15.rs 31156 13170abc7aca8498e06390e7e16e9675f6438cff2cd5509a373bff199248b610
+keyline	key file     crates/boyko_symcensus/src/candidates.rs 5062 b1668f3b29646960ec09674625117c96684b2bbfd43b03fadcd1ff94fcf1042c
+keyline	key file     crates/boyko_symcensus/src/closure.rs 9246 e764b225bfc32e1f7af7bc31b2e00b8271225881e57fecd2c15a8244f260388e
+keyline	key file     crates/boyko_symcensus/src/contain.rs 7093 66c1e816754a01a2db9a56cf58c67a8296852a47aec5a7c5f17a358cd759be06
+keyline	key file     crates/boyko_symcensus/src/controls.rs 44121 3a2fa39c44f9ada46ea3e0bfed42c7f78dca84284c8afc21d331946091b90179
+keyline	key file     crates/boyko_symcensus/src/host.rs 6663 6c0f51feaf94f8fe5559427b06aa8716edcd960e0357aaad32c8075215d26f98
+keyline	key file     crates/boyko_symcensus/src/json.rs 7948 9e505072166af906bfb61b0a3e0e5d9790b87c0e40dddf5ed542792c8d48cc73
+keyline	key file     crates/boyko_symcensus/src/key.rs 12757 49ff80cf31d4fae623a32a34bb1a00782b9b99a95d1c92a551320683ce23e922
+keyline	key file     crates/boyko_symcensus/src/leg7b.rs 7943 8d55ee86dcc50c93cb36b0a6eeda0696a28e0f4028fda2e08ef686b069eaa37f
+keyline	key file     crates/boyko_symcensus/src/lib.rs 1919 27273e28b5012dcb7d5ed6299e9395a2535023ec716d5dfbab644fd528209e81
+keyline	key file     crates/boyko_symcensus/src/llvm.rs 28855 443a8c74c22f22ee48b6a9939e9b711aa4cd2cbcfb167be5bd909343eca63c7a
+keyline	key file     crates/boyko_symcensus/src/maps.rs 13132 59615cba25a5a9a325ce2de934b706321f2a89c61ec03b65f847e89ed2be36d2
+keyline	key file     crates/boyko_symcensus/src/normalize.rs 12696 d0f873190ee34e860476c0a0c0344bd5763abcfe677d8cf13b3cef8587c941f1
+keyline	key file     crates/boyko_symcensus/src/objbuild.rs 36150 ee43232c2fd3db081e69a03c83fcc5d8d943bcdc58a01c7b8cc7a6e1f35ac42a
+keyline	key file     crates/boyko_symcensus/src/objview.rs 6036 b2a3a5544a6e4e65ffc64f8bd3bd764e975536c5d2b87af5c2ea9d9004031c3e
+keyline	key file     crates/boyko_symcensus/src/pe.rs 3127 ab6b438e1894d683c349bf2656d4bc83abc4203b481fa71290695e223d71fede
+keyline	key file     crates/boyko_symcensus/src/pins.rs 38907 b207f288f3c681f9dabb1296bd1c842a502c8483dd4b3fe57c3f0c1f6866c722
+keyline	key file     crates/boyko_symcensus/src/plain.rs 10972 0e97883d29009a94af1391ed66e0577aa8dcc2c6b6450eafcda0b3783b6d6fe5
+keyline	key file     crates/boyko_symcensus/src/probes.rs 29033 dcfba13a1434407e44471cac401e3afc14b1c5d1703446cdeef9bb916667709b
+keyline	key file     crates/boyko_symcensus/src/red.rs 4611 051afceba616cd5e53805a64ee35b5643cbe919fba51f9d36c32d915cb1d5d34
+keyline	key file     crates/boyko_symcensus/src/retain.rs 18321 3e8cf1722d4082fb131d4e47edf36a253e2d8ccaebb1288bf2753165dea61179
+keyline	key file     crates/boyko_symcensus/src/seam.rs 7655 374cca6a14827441a97983bbd9025302d4700bc8194ed4ffec605ffe6accb3cb
+keyline	key file     crates/boyko_symcensus/src/sha256.rs 5568 bd9d6f1d3ca00eb33bc67f3b1c0fb419b6f41fe1c9cf21f079aea120a52a643b
+keyline	key file     crates/boyko_symcensus/src/snapshot.rs 5730 94de82d9577f1645fed435c5b177cbc0ae4918cc8afcfb93f34817e2ed2ee76e
+keyline	key file     crates/boyko_symcensus/src/source.rs 45054 1eb8dac647d1bab2d01af34a33d34a3aa9636d12a847ba3d8820e7716908975e
+keyline	key file     crates/boyko_symcensus/src/tools.rs 8798 e2c2755658a8d472e7b2ab7a671728d644870d710951d71d2cc4878c2908b8a5
+keyline	key file     crates/boyko_symcensus/src/unit.rs 57661 9fda7234930d31e27d3ee868b06ea9c7380fd4dbe6fd9a805239ba31103ca868
+keyline	key rustc    rustc 1.98.1 (48a229cea 2026-09-01)
+keyline	key rustc    binary: rustc
+keyline	key rustc    commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
+keyline	key rustc    commit-date: 2026-09-01
+keyline	key rustc    host: x86_64-pc-windows-msvc
+keyline	key rustc    release: 1.98.1
+keyline	key rustc    LLVM version: 22.1.8
+keyline	key cargo    cargo 1.98.1 (797e8a9bc 2026-08-05)
+tree	HEAD e9978bb0adb04bf8bc992bbc3087e5c15c593ca4, 0 uncommitted path(s)
+partial	no
+control	g-b	as-expected	(b) green: two runner builds, nothing changed	(b) green: 36 unit(s) identical; floor missing []
+control	rc11c	as-expected	(b) red at boyko_diag: same path, different sha256; every other unit's path unchanged, every non-dependent's sha256 too	boyko_diag sha256 moved; 0 path change(s); 0 stray sha256 change(s); 13 dependent sha256 change(s)
+control	rc13	as-expected	the first build's check_intact RED [pair guard] after the second; its retained copies still hash to its own image and object sha256	check_intact pair guard; retained copies intact
+control	rc14a	as-expected	(c1) green, (c2) red: an extra codegen argument reaches the final image only	(c1) green, (c2) red
+control	rc14b	as-expected	(c1) red; the non-fresh set EQUALS boyko_input, its dependents in the runner's build, and the final unit	(c1) red; non-fresh 6 = expected 6 (equal); final unit rebuilt true
+control	rc11a	as-expected	(b) red: path differs at boyko_log and every target unit depending on it; host units and all others identical	(b) red, path differs at 13 unit(s): boyko-app@0.1.0, boyko-ecs@0.1.0, boyko-fontbake@0.1.0, boyko-input@0.1.0, boyko-log@0.1.0, boyko-physics@0.1.0, boyko-render@0.1.0, boyko-scene@0.1.0, boyko-threadpool@0.1.0, boyko-ui@0.1.0, boyko_image@0.1.0, boyko_rhi@0.1.0, boyko_rhi_vulkan@0.1.0 [scratch receipt D:/tmp/phys-orch/ib-p0r/rc/r61/rc11a/receipt.txt]
+control	rc11b	as-expected	(b) red at boyko_physics (path) only	(b) red, path differs at boyko-physics@0.1.0 [scratch receipt D:/tmp/phys-orch/ib-p0r/rc/r61/rc11b/receipt.txt]
+control	rc11d	as-expected	(e) red at windows_sys, boyko_input, boyko_scene, boyko_physics (paths); a further red crate is a second mechanism	(e) red at boyko_input, boyko_physics, boyko_scene, windows_sys (path at boyko_input, boyko_physics, boyko_scene, windows_sys) [scratch receipt D:/tmp/phys-orch/ib-p0r/rc/r61/rc11d/receipt.txt]
+control	rc11e	as-expected	(d1) red at every target closure unit, host units unchanged; (d2) red at every target workspace line, the proc-macro's unchanged; (d3) red; (d4) green	(d1) 20 target red / 5 host unchanged; (d2) 12 target red / 1 host unchanged; (d3) red; (d4) green [scratch receipt D:/tmp/phys-orch/ib-p0r/rc/r61/rc11e/receipt.txt]
+control	rc11f	as-expected	(d1) red at windows_sys, boyko_input, boyko_scene, boyko_physics only; (d2) red at those three workspace lines; (d3) red at the --extern names of boyko_physics and boyko_app; (d4) green; Cargo.lock unchanged	(d1) red at boyko_input, boyko_physics, boyko_scene, windows_sys; (d2) red at boyko_input, boyko_physics, boyko_scene; (d3) red at the boyko_physics/boyko_app --extern names only; (d4) green [scratch receipt D:/tmp/phys-orch/ib-p0r/rc/r61/rc11f/receipt.txt]
+control	rc14c	as-expected	(f) red: no boyko_app unused-crate diagnostic	(f) red: no boyko_app diagnostic [scratch receipt D:/tmp/phys-orch/ib-p0r/rc/r61/rc14c/receipt.txt]
+control	g-d	as-expected	(d1)-(d4) all green	(d1)-(d4) green [scratch receipt D:/tmp/phys-orch/ib-p0r/rc/r61/g-d/receipt.txt]
+edit	rc11a	crates/boyko_physics_parity/Cargo.toml: replace "[lints]\nworkspace = true\n" (1x) with "[lints]\nworkspace = true\n\n# RC-11 (a): boyko-physics's own dev line, the runner built as a [[bench]].\n[dev-dependencies]\nboyko-log = { path = \"../boyko_log\", features = [\"test-probe\"] }\n\n[[bench]]\nname = \"jolt_parity_pyramid_rc11a\"\npath = \"src/bin/jolt_parity_pyramid.rs\"\nharness = false\n"
+edit	rc11b	crates/boyko_physics_parity/Cargo.toml: replace "boyko-physics = { path = \"../boyko_physics\" }\n" (1x) with "boyko-physics = { path = \"../boyko_physics\", features = [\"narrowphase-counts\"] }\n"
+edit	rc11d	crates/boyko_physics_probe/Cargo.toml: replace "[target.'cfg(windows)'.dependencies]\nboyko-app = { path = \"../boyko_app\" }\n" (1x) with ""
+edit	rc11d	crates/boyko_physics_probe/src/bin/physics_probe.rs: replace "#[cfg(windows)]\n" (2x) with "#[cfg(any())]\n"
+edit	rc11d	crates/boyko_physics_probe/src/bin/physics_probe.rs: replace "#[cfg(not(windows))]\n" (1x) with "#[cfg(not(any()))]\n"
+edit	rc11e	Cargo.toml: replace "[profile.release]\nlto = \"fat\"\n" (1x) with "[profile.release]\nlto = \"fat\"\ncodegen-units = 8\n"
+edit	rc11f	crates/boyko_input/Cargo.toml: replace "windows-sys.workspace = true\n" (1x) with "windows-sys = { workspace = true, features = [\"Win32_System_Threading\"] }\n"
+edit	rc14c	crates/boyko_physics_parity/src/bin/jolt_parity_pyramid.rs: replace "use boyko_diag::lane::{LANE_COUNT, LANE_DISPATCHER, claim_lane};\n" (1x) with "#[cfg(windows)]\nuse boyko_app as _;\nuse boyko_diag::lane::{LANE_COUNT, LANE_DISPATCHER, claim_lane};\n"
+edit	g-d	no edit: a second checkout of HEAD at another path depth
+detail	rc11c	(b) same path, different sha256 at boyko_app
+detail	rc11c	(b) same path, different sha256 at boyko_diag
+detail	rc11c	(b) same path, different sha256 at boyko_ecs
+detail	rc11c	(b) same path, different sha256 at boyko_fontbake
+detail	rc11c	(b) same path, different sha256 at boyko_image
+detail	rc11c	(b) same path, different sha256 at boyko_input
+detail	rc11c	(b) same path, different sha256 at boyko_log
+detail	rc11c	(b) same path, different sha256 at boyko_physics
+detail	rc11c	(b) same path, different sha256 at boyko_render
+detail	rc11c	(b) same path, different sha256 at boyko_rhi
+detail	rc11c	(b) same path, different sha256 at boyko_rhi_vulkan
+detail	rc11c	(b) same path, different sha256 at boyko_scene
+detail	rc11c	(b) same path, different sha256 at boyko_threadpool
+detail	rc11c	(b) same path, different sha256 at boyko_ui
+detail	rc11c	(b) dependents of boyko_diag whose sha256 moved (recorded, not required): ["boyko-app@0.1.0", "boyko-ecs@0.1.0", "boyko-fontbake@0.1.0", "boyko_image@0.1.0", "boyko-input@0.1.0", "boyko-log@0.1.0", "boyko-physics@0.1.0", "boyko-render@0.1.0", "boyko_rhi@0.1.0", "boyko_rhi_vulkan@0.1.0", "boyko-scene@0.1.0", "boyko-threadpool@0.1.0", "boyko-ui@0.1.0"]
+detail	rc13	Err(Red { kind: PairGuard, detail: "D:/wt/_targets/fm-msvc\\release\\deps\\jolt_parity_pyramid.o changed while this command was reading it. Another recipe shares the target dir; re-run when it has finished." })
+detail	rc13	retained image 3247357421feb6d5179956c9e8b9631945ca6299391a22f3d4702f1ab7f1b638 recorded 3247357421feb6d5179956c9e8b9631945ca6299391a22f3d4702f1ab7f1b638; object b22ede38e54152a927c74a3445aae6313c20c8e892e68f3dc2c958e0e2f8192a recorded b22ede38e54152a927c74a3445aae6313c20c8e892e68f3dc2c958e0e2f8192a
+detail	rc14a	(c1) GREEN: 42 non-final artifact(s) fresh, the library set equals ug15's (36 member(s)) and re-hashes equal, the final unit rebuilt
+detail	rc14a	(c2) .text differs: ug15 baded2d7521c64f038bb9676bf11c05e062f9fd7311bad31e27d8a11d78ed1cc, plain cadc580d2db0c2e4c371e3349b027edc5442615b4aa2085957b30a8a93d409d9
+detail	rc14a	(c2)   the images differ in length (2362368 vs 1914880 B)
+detail	rc14b	(c1) non-fresh boyko_input (lib, path+file:///D:/wt/fm/crates/boyko_input#boyko-input@0.1.0)
+detail	rc14b	(c1) non-fresh boyko_scene (lib, path+file:///D:/wt/fm/crates/boyko_scene#boyko-scene@0.1.0)
+detail	rc14b	(c1) non-fresh boyko_render (lib, path+file:///D:/wt/fm/crates/boyko_render#boyko-render@0.1.0)
+detail	rc14b	(c1) non-fresh boyko_ui (lib, path+file:///D:/wt/fm/crates/boyko_ui#boyko-ui@0.1.0)
+detail	rc14b	(c1) non-fresh boyko_app (lib, path+file:///D:/wt/fm/crates/boyko_app#boyko-app@0.1.0)
+detail	rc14b	(c1) non-fresh boyko_physics (lib, path+file:///D:/wt/fm/crates/boyko_physics#boyko-physics@0.1.0)
+detail	rc14b	non-fresh 6 unit(s); expected 6; missing []; extra []; final unit fresh false
+detail	rc11a	(b) path differs at boyko_app: libboyko_app-a4412763014cb33b.rlib vs libboyko_app-1be36b4fdc99b794.rlib
+detail	rc11a	(b) path differs at boyko_ecs: libboyko_ecs-de49169f376cc796.rlib vs libboyko_ecs-4207f061a7986000.rlib
+detail	rc11a	(b) path differs at boyko_fontbake: libboyko_fontbake-7bf6f040de063476.rlib vs libboyko_fontbake-feace6537779c6f8.rlib
+detail	rc11a	(b) path differs at boyko_input: libboyko_input-7410cc5e193df1fc.rlib vs libboyko_input-ad02cb6e083f8fd9.rlib
+detail	rc11a	(b) path differs at boyko_log: libboyko_log-64926abcbf6a9ab1.rlib vs libboyko_log-d52904bfffa357e2.rlib
+detail	rc11a	(b) path differs at boyko_physics: libboyko_physics-4ace42f62e28ac68.rlib vs libboyko_physics-a144728eb645b34e.rlib
+detail	rc11a	(b) path differs at boyko_render: libboyko_render-c2f4cd9b3b44a7da.rlib vs libboyko_render-93813a4183879f91.rlib
+detail	rc11a	(b) path differs at boyko_scene: libboyko_scene-d053111aa83d3ab5.rlib vs libboyko_scene-0f7050e1cd880ace.rlib
+detail	rc11a	(b) path differs at boyko_threadpool: libboyko_threadpool-cb2f82ea77d07ccb.rlib vs libboyko_threadpool-a64270c06f5de4b0.rlib
+detail	rc11a	(b) path differs at boyko_ui: libboyko_ui-4f52fff865c19a27.rlib vs libboyko_ui-01fe5c5371f20e6e.rlib
+detail	rc11a	(b) path differs at boyko_image: libboyko_image-e2390cd172de9531.rlib vs libboyko_image-2378c00f8cebaf42.rlib
+detail	rc11a	(b) path differs at boyko_rhi: libboyko_rhi-8f04a45cab82b45e.rlib vs libboyko_rhi-e2c8f00289b21121.rlib
+detail	rc11a	(b) path differs at boyko_rhi_vulkan: libboyko_rhi_vulkan-de8f5eeea3fd23ae.rlib vs libboyko_rhi_vulkan-0714a53b7721b24b.rlib
+detail	rc11b	(b) path differs at boyko_physics: libboyko_physics-ba1ce5000309e9b7.rlib vs libboyko_physics-a144728eb645b34e.rlib
+detail	rc11d	(e) path differs at boyko_input: libboyko_input-ad02cb6e083f8fd9.rlib vs libboyko_input-cd78e13da1588572.rlib
+detail	rc11d	(e) path differs at boyko_physics: libboyko_physics-a144728eb645b34e.rlib vs libboyko_physics-2d12f8221945cf24.rlib
+detail	rc11d	(e) path differs at boyko_scene: libboyko_scene-0f7050e1cd880ace.rlib vs libboyko_scene-208cff2c9b59da81.rlib
+detail	rc11d	(e) path differs at windows_sys: libwindows_sys-438931091cde2c45.rlib vs libwindows_sys-6c94e68ae17c4d79.rlib
+detail	rc11e	(d1) 25 item(s), 20 red
+detail	rc11e	  (d1) RED  boyko_diag [target]: pre Some(["libboyko_diag-b560511677c8eafc.rlib"]) tip Some(["libboyko_diag-bdd9dec0363bfbb3.rlib"])
+detail	rc11e	  (d1) RED  boyko_ecs [target]: pre Some(["libboyko_ecs-4207f061a7986000.rlib"]) tip Some(["libboyko_ecs-47cbccbbd299df2a.rlib"])
+detail	rc11e	  (d1) RED  boyko_input [target]: pre Some(["libboyko_input-ad02cb6e083f8fd9.rlib"]) tip Some(["libboyko_input-9f90322fea92b311.rlib"])
+detail	rc11e	  (d1) RED  boyko_log [target]: pre Some(["libboyko_log-d52904bfffa357e2.rlib"]) tip Some(["libboyko_log-39db6e2faa0bf4b1.rlib"])
+detail	rc11e	  (d1) same boyko_macros [host]
+detail	rc11e	  (d1) RED  boyko_math [target]: pre Some(["libboyko_math-691a90f099553bba.rlib"]) tip Some(["libboyko_math-7bc3d46fa392732d.rlib"])
+detail	rc11e	  (d1) RED  boyko_memory [target]: pre Some(["libboyko_memory-571394c70e38abe9.rlib"]) tip Some(["libboyko_memory-cc1f9ed41ebd23ab.rlib"])
+detail	rc11e	  (d1) RED  boyko_physics [target]: pre Some(["libboyko_physics-a144728eb645b34e.rlib"]) tip Some(["libboyko_physics-7427f686ef01e0a8.rlib"])
+detail	rc11e	  (d1) RED  boyko_scene [target]: pre Some(["libboyko_scene-0f7050e1cd880ace.rlib"]) tip Some(["libboyko_scene-0beba39e0c6d6367.rlib"])
+detail	rc11e	  (d1) RED  boyko_sdf_math [target]: pre Some(["libboyko_sdf_math-33c564606409eae8.rlib"]) tip Some(["libboyko_sdf_math-d62fc2d4c6d00964.rlib"])
+detail	rc11e	  (d1) RED  boyko_shaderdsl [target]: pre Some(["libboyko_shaderdsl-ad6ba3404cad468c.rlib"]) tip Some(["libboyko_shaderdsl-5d46e4b225cee3c4.rlib"])
+detail	rc11e	  (d1) RED  boyko_threadpool [target]: pre Some(["libboyko_threadpool-a64270c06f5de4b0.rlib"]) tip Some(["libboyko_threadpool-fc214e9e31876050.rlib"])
+detail	rc11e	  (d1) RED  boyko_utils [target]: pre Some(["libboyko_utils-51889ff239bec636.rlib"]) tip Some(["libboyko_utils-fe01e5d0afd2da3e.rlib"])
+detail	rc11e	  (d1) RED  crossbeam_deque [target]: pre Some(["libcrossbeam_deque-272408b45ff90762.rlib"]) tip Some(["libcrossbeam_deque-70981f5ade3188b8.rlib"])
+detail	rc11e	  (d1) RED  crossbeam_epoch [target]: pre Some(["libcrossbeam_epoch-e51c0ffefa47461f.rlib"]) tip Some(["libcrossbeam_epoch-e8b6d01a2064de1b.rlib"])
+detail	rc11e	  (d1) RED  crossbeam_queue [target]: pre Some(["libcrossbeam_queue-2ffb2c6ef794751d.rlib"]) tip Some(["libcrossbeam_queue-92abbb24af84e03c.rlib"])
+detail	rc11e	  (d1) RED  crossbeam_utils [target]: pre Some(["libcrossbeam_utils-b5ab10e0cdae4b40.rlib"]) tip Some(["libcrossbeam_utils-23af6a3c2b003d70.rlib"])
+detail	rc11e	  (d1) RED  fixedbitset [target]: pre Some(["libfixedbitset-6438f21b34608389.rlib"]) tip Some(["libfixedbitset-34fa3d6487a7d735.rlib"])
+detail	rc11e	  (d1) same proc_macro2 [host]
+detail	rc11e	  (d1) same quote [host]
+detail	rc11e	  (d1) RED  static_assertions [target]: pre Some(["libstatic_assertions-8e4736a6d0969db2.rlib"]) tip Some(["libstatic_assertions-137f9ca2e38655df.rlib"])
+detail	rc11e	  (d1) same syn [host]
+detail	rc11e	  (d1) same unicode_ident [host]
+detail	rc11e	  (d1) RED  windows_link [target]: pre Some(["libwindows_link-c94b8bb201c9e678.rlib"]) tip Some(["libwindows_link-e5637560e8084370.rlib"])
+detail	rc11e	  (d1) RED  windows_sys [target]: pre Some(["libwindows_sys-438931091cde2c45.rlib"]) tip Some(["libwindows_sys-29b9cbc370fa13f2.rlib"])
+detail	rc11e	(d2) 13 item(s), 12 red
+detail	rc11e	  (d2) RED  boyko_diag: pre-only words ["metadata=2e808f4bd5d2c517", "extra-filename=-b560511677c8eafc"]; tip-only words ["codegen-units=8", "metadata=99124ec683f791d3", "extra-filename=-bdd9dec0363bfbb3", "-C"]
+detail	rc11e	  (d2) RED  boyko_ecs: pre-only words ["metadata=4572616d26d2ec42", "extra-filename=-4207f061a7986000", "'boyko_diag=<T>\\release\\deps\\libboyko_diag-b560511677c8eafc.rmeta'", "'boyko_log=<T>\\release\\deps\\libboyko_log-d52904bfffa357e2.rmeta'", "'boyko_memory=<T>\\release\\deps\\libboyko_memory-571394c70e38abe9.rmeta'", "'boyko_threadpool=<T>\\release\\deps\\libboyko_threadpool-a64270c06f5de4b0.rmeta'", "'boyko_utils=<T>\\release\\deps\\libboyko_utils-51889ff239bec636.rmeta'", "'crossbeam_queue=<T>\\release\\deps\\libcrossbeam_queue-2ffb2c6ef794751d.rmeta'", "'crossbeam_utils=<T>\\release\\deps\\libcrossbeam_utils-b5ab10e0cdae4b40.rmeta'", "'fixedbitset=<T>\\release\\deps\\libfixedbitset-6438f21b34608389.rmeta'", "'static_assertions=<T>\\release\\deps\\libstatic_assertions-8e4736a6d0969db2.rmeta'"]; tip-only words ["codegen-units=8", "metadata=5f76dd200ea03fd2", "extra-filename=-47cbccbbd299df2a", "'boyko_diag=<T>\\release\\deps\\libboyko_diag-bdd9dec0363bfbb3.rmeta'", "'boyko_log=<T>\\release\\deps\\libboyko_log-39db6e2faa0bf4b1.rmeta'", "'boyko_memory=<T>\\release\\deps\\libboyko_memory-cc1f9ed41ebd23ab.rmeta'", "'boyko_threadpool=<T>\\release\\deps\\libboyko_threadpool-fc214e9e31876050.rmeta'", "'boyko_utils=<T>\\release\\deps\\libboyko_utils-fe01e5d0afd2da3e.rmeta'", "'crossbeam_queue=<T>\\release\\deps\\libcrossbeam_queue-92abbb24af84e03c.rmeta'", "'crossbeam_utils=<T>\\release\\deps\\libcrossbeam_utils-23af6a3c2b003d70.rmeta'", "'fixedbitset=<T>\\release\\deps\\libfixedbitset-34fa3d6487a7d735.rmeta'", "'static_assertions=<T>\\release\\deps\\libstatic_assertions-137f9ca2e38655df.rmeta'", "-C"]
+detail	rc11e	  (d2) RED  boyko_input: pre-only words ["metadata=751cd9e7dde395a8", "extra-filename=-ad02cb6e083f8fd9", "'boyko_ecs=<T>\\release\\deps\\libboyko_ecs-4207f061a7986000.rmeta'", "'boyko_utils=<T>\\release\\deps\\libboyko_utils-51889ff239bec636.rmeta'", "'windows_sys=<T>\\release\\deps\\libwindows_sys-438931091cde2c45.rmeta'"]; tip-only words ["codegen-units=8", "metadata=b499326b2d333a54", "extra-filename=-9f90322fea92b311", "'boyko_ecs=<T>\\release\\deps\\libboyko_ecs-47cbccbbd299df2a.rmeta'", "'boyko_utils=<T>\\release\\deps\\libboyko_utils-fe01e5d0afd2da3e.rmeta'", "'windows_sys=<T>\\release\\deps\\libwindows_sys-29b9cbc370fa13f2.rmeta'", "-C"]
+detail	rc11e	  (d2) RED  boyko_log: pre-only words ["metadata=64e7bf697de508c4", "extra-filename=-d52904bfffa357e2", "'boyko_diag=<T>\\release\\deps\\libboyko_diag-b560511677c8eafc.rmeta'"]; tip-only words ["codegen-units=8", "metadata=df2e86d58923f3c1", "extra-filename=-39db6e2faa0bf4b1", "'boyko_diag=<T>\\release\\deps\\libboyko_diag-bdd9dec0363bfbb3.rmeta'", "-C"]
+detail	rc11e	  (d2) same boyko_macros
+detail	rc11e	  (d2) RED  boyko_math: pre-only words ["metadata=436d3ff973a6efd2", "extra-filename=-691a90f099553bba"]; tip-only words ["codegen-units=8", "metadata=4cca5be43b5f814c", "extra-filename=-7bc3d46fa392732d", "-C"]
+detail	rc11e	  (d2) RED  boyko_memory: pre-only words ["metadata=8dfcd946e9f9a0c0", "extra-filename=-571394c70e38abe9"]; tip-only words ["codegen-units=8", "metadata=1b482999350b9b55", "extra-filename=-cc1f9ed41ebd23ab", "-C"]
+detail	rc11e	  (d2) RED  boyko_physics: pre-only words ["metadata=ab86057708728205", "extra-filename=-a144728eb645b34e", "'boyko_diag=<T>\\release\\deps\\libboyko_diag-b560511677c8eafc.rmeta'", "'boyko_ecs=<T>\\release\\deps\\libboyko_ecs-4207f061a7986000.rmeta'", "'boyko_log=<T>\\release\\deps\\libboyko_log-d52904bfffa357e2.rmeta'", "'boyko_math=<T>\\release\\deps\\libboyko_math-691a90f099553bba.rmeta'", "'boyko_scene=<T>\\release\\deps\\libboyko_scene-0f7050e1cd880ace.rmeta'", "'boyko_threadpool=<T>\\release\\deps\\libboyko_threadpool-a64270c06f5de4b0.rmeta'", "'boyko_utils=<T>\\release\\deps\\libboyko_utils-51889ff239bec636.rmeta'", "'boyko_sdf_math=<T>\\release\\deps\\libboyko_sdf_math-33c564606409eae8.rmeta'"]; tip-only words ["codegen-units=8", "metadata=111cbc7f42775ab1", "extra-filename=-7427f686ef01e0a8", "'boyko_diag=<T>\\release\\deps\\libboyko_diag-bdd9dec0363bfbb3.rmeta'", "'boyko_ecs=<T>\\release\\deps\\libboyko_ecs-47cbccbbd299df2a.rmeta'", "'boyko_log=<T>\\release\\deps\\libboyko_log-39db6e2faa0bf4b1.rmeta'", "'boyko_math=<T>\\release\\deps\\libboyko_math-7bc3d46fa392732d.rmeta'", "'boyko_scene=<T>\\release\\deps\\libboyko_scene-0beba39e0c6d6367.rmeta'", "'boyko_threadpool=<T>\\release\\deps\\libboyko_threadpool-fc214e9e31876050.rmeta'", "'boyko_utils=<T>\\release\\deps\\libboyko_utils-fe01e5d0afd2da3e.rmeta'", "'boyko_sdf_math=<T>\\release\\deps\\libboyko_sdf_math-d62fc2d4c6d00964.rmeta'", "-C"]
+detail	rc11e	  (d2) RED  boyko_scene: pre-only words ["metadata=2e97ca584eed62b5", "extra-filename=-0f7050e1cd880ace", "'boyko_ecs=<T>\\release\\deps\\libboyko_ecs-4207f061a7986000.rmeta'", "'boyko_input=<T>\\release\\deps\\libboyko_input-ad02cb6e083f8fd9.rmeta'", "'boyko_math=<T>\\release\\deps\\libboyko_math-691a90f099553bba.rmeta'"]; tip-only words ["codegen-units=8", "metadata=9054b23c6e4486ac", "extra-filename=-0beba39e0c6d6367", "'boyko_ecs=<T>\\release\\deps\\libboyko_ecs-47cbccbbd299df2a.rmeta'", "'boyko_input=<T>\\release\\deps\\libboyko_input-9f90322fea92b311.rmeta'", "'boyko_math=<T>\\release\\deps\\libboyko_math-7bc3d46fa392732d.rmeta'", "-C"]
+detail	rc11e	  (d2) RED  boyko_sdf_math: pre-only words ["metadata=832f3c631791de0e", "extra-filename=-33c564606409eae8", "'boyko_shaderdsl=<T>\\release\\deps\\libboyko_shaderdsl-ad6ba3404cad468c.rmeta'"]; tip-only words ["codegen-units=8", "metadata=215af582b9b6068a", "extra-filename=-d62fc2d4c6d00964", "'boyko_shaderdsl=<T>\\release\\deps\\libboyko_shaderdsl-5d46e4b225cee3c4.rmeta'", "-C"]
+detail	rc11e	  (d2) RED  boyko_shaderdsl: pre-only words ["metadata=49537029d2d9f6af", "extra-filename=-ad6ba3404cad468c"]; tip-only words ["codegen-units=8", "metadata=9ebe7d7738072405", "extra-filename=-5d46e4b225cee3c4", "-C"]
+detail	rc11e	  (d2) RED  boyko_threadpool: pre-only words ["metadata=dd703f84b74e7a74", "extra-filename=-a64270c06f5de4b0", "'boyko_diag=<T>\\release\\deps\\libboyko_diag-b560511677c8eafc.rmeta'", "'boyko_log=<T>\\release\\deps\\libboyko_log-d52904bfffa357e2.rmeta'", "'crossbeam_deque=<T>\\release\\deps\\libcrossbeam_deque-272408b45ff90762.rmeta'", "'crossbeam_utils=<T>\\release\\deps\\libcrossbeam_utils-b5ab10e0cdae4b40.rmeta'"]; tip-only words ["codegen-units=8", "metadata=d921a6ec863398de", "extra-filename=-fc214e9e31876050", "'boyko_diag=<T>\\release\\deps\\libboyko_diag-bdd9dec0363bfbb3.rmeta'", "'boyko_log=<T>\\release\\deps\\libboyko_log-39db6e2faa0bf4b1.rmeta'", "'crossbeam_deque=<T>\\release\\deps\\libcrossbeam_deque-70981f5ade3188b8.rmeta'", "'crossbeam_utils=<T>\\release\\deps\\libcrossbeam_utils-23af6a3c2b003d70.rmeta'", "-C"]
+detail	rc11e	  (d2) RED  boyko_utils: pre-only words ["metadata=04070147b05b2dd5", "extra-filename=-51889ff239bec636"]; tip-only words ["codegen-units=8", "metadata=aa71f767c4ecee6a", "extra-filename=-fe01e5d0afd2da3e", "-C"]
+detail	rc11e	(d3) 2 item(s), 2 red
+detail	rc11e	  (d3) RED  runner: pre-only words ["'boyko_app=<T>\\release\\deps\\libboyko_app-1be36b4fdc99b794.rlib'", "'boyko_diag=<T>\\release\\deps\\libboyko_diag-b560511677c8eafc.rlib'", "'boyko_ecs=<T>\\release\\deps\\libboyko_ecs-4207f061a7986000.rlib'", "'boyko_physics=<T>\\release\\deps\\libboyko_physics-a144728eb645b34e.rlib'", "'boyko_threadpool=<T>\\release\\deps\\libboyko_threadpool-a64270c06f5de4b0.rlib'", "codegen-units=16"]; tip-only words ["codegen-units=8", "'boyko_app=<T>\\release\\deps\\libboyko_app-54414a410eeffe5a.rlib'", "'boyko_diag=<T>\\release\\deps\\libboyko_diag-bdd9dec0363bfbb3.rlib'", "'boyko_ecs=<T>\\release\\deps\\libboyko_ecs-47cbccbbd299df2a.rlib'", "'boyko_physics=<T>\\release\\deps\\libboyko_physics-7427f686ef01e0a8.rlib'", "'boyko_threadpool=<T>\\release\\deps\\libboyko_threadpool-fc214e9e31876050.rlib'", "codegen-units=8", "-C"]
+detail	rc11e	  (d3) RED  probe: pre-only words ["'boyko_app=<T>\\release\\deps\\libboyko_app-1be36b4fdc99b794.rlib'", "'boyko_ecs=<T>\\release\\deps\\libboyko_ecs-4207f061a7986000.rlib'", "'boyko_physics=<T>\\release\\deps\\libboyko_physics-a144728eb645b34e.rlib'", "codegen-units=16"]; tip-only words ["codegen-units=8", "'boyko_app=<T>\\release\\deps\\libboyko_app-54414a410eeffe5a.rlib'", "'boyko_ecs=<T>\\release\\deps\\libboyko_ecs-47cbccbbd299df2a.rlib'", "'boyko_physics=<T>\\release\\deps\\libboyko_physics-7427f686ef01e0a8.rlib'", "codegen-units=8", "-C"]
+detail	rc11e	(d4) 5 item(s), 0 red
+detail	rc11e	  (d4) same BOYKO_PROFILE
+detail	rc11e	  (d4) same rustc -vV
+detail	rc11e	  (d4) same receipt format
+detail	rc11e	  (d4) same .cargo/config.toml sha256
+detail	rc11e	  (d4) same Cargo.lock sha256
+detail	rc11f	(d1) 25 item(s), 4 red
+detail	rc11f	  (d1) same boyko_diag [target]
+detail	rc11f	  (d1) same boyko_ecs [target]
+detail	rc11f	  (d1) RED  boyko_input [target]: pre Some(["libboyko_input-ad02cb6e083f8fd9.rlib"]) tip Some(["libboyko_input-ac4bea1ec5258b2a.rlib"])
+detail	rc11f	  (d1) same boyko_log [target]
+detail	rc11f	  (d1) same boyko_macros [host]
+detail	rc11f	  (d1) same boyko_math [target]
+detail	rc11f	  (d1) same boyko_memory [target]
+detail	rc11f	  (d1) RED  boyko_physics [target]: pre Some(["libboyko_physics-a144728eb645b34e.rlib"]) tip Some(["libboyko_physics-a24d9f7e9cfa9693.rlib"])
+detail	rc11f	  (d1) RED  boyko_scene [target]: pre Some(["libboyko_scene-0f7050e1cd880ace.rlib"]) tip Some(["libboyko_scene-c2d62a062e338200.rlib"])
+detail	rc11f	  (d1) same boyko_sdf_math [target]
+detail	rc11f	  (d1) same boyko_shaderdsl [target]
+detail	rc11f	  (d1) same boyko_threadpool [target]
+detail	rc11f	  (d1) same boyko_utils [target]
+detail	rc11f	  (d1) same crossbeam_deque [target]
+detail	rc11f	  (d1) same crossbeam_epoch [target]
+detail	rc11f	  (d1) same crossbeam_queue [target]
+detail	rc11f	  (d1) same crossbeam_utils [target]
+detail	rc11f	  (d1) same fixedbitset [target]
+detail	rc11f	  (d1) same proc_macro2 [host]
+detail	rc11f	  (d1) same quote [host]
+detail	rc11f	  (d1) same static_assertions [target]
+detail	rc11f	  (d1) same syn [host]
+detail	rc11f	  (d1) same unicode_ident [host]
+detail	rc11f	  (d1) same windows_link [target]
+detail	rc11f	  (d1) RED  windows_sys [target]: pre Some(["libwindows_sys-438931091cde2c45.rlib"]) tip Some(["libwindows_sys-a881675fa40afddd.rlib"])
+detail	rc11f	(d2) 13 item(s), 3 red
+detail	rc11f	  (d2) same boyko_diag
+detail	rc11f	  (d2) same boyko_ecs
+detail	rc11f	  (d2) RED  boyko_input: pre-only words ["metadata=751cd9e7dde395a8", "extra-filename=-ad02cb6e083f8fd9", "'windows_sys=<T>\\release\\deps\\libwindows_sys-438931091cde2c45.rmeta'"]; tip-only words ["metadata=58f173de04c8cfdf", "extra-filename=-ac4bea1ec5258b2a", "'windows_sys=<T>\\release\\deps\\libwindows_sys-a881675fa40afddd.rmeta'"]
+detail	rc11f	  (d2) same boyko_log
+detail	rc11f	  (d2) same boyko_macros
+detail	rc11f	  (d2) same boyko_math
+detail	rc11f	  (d2) same boyko_memory
+detail	rc11f	  (d2) RED  boyko_physics: pre-only words ["metadata=ab86057708728205", "extra-filename=-a144728eb645b34e", "'boyko_scene=<T>\\release\\deps\\libboyko_scene-0f7050e1cd880ace.rmeta'"]; tip-only words ["metadata=f9224237d477dbc1", "extra-filename=-a24d9f7e9cfa9693", "'boyko_scene=<T>\\release\\deps\\libboyko_scene-c2d62a062e338200.rmeta'"]
+detail	rc11f	  (d2) RED  boyko_scene: pre-only words ["metadata=2e97ca584eed62b5", "extra-filename=-0f7050e1cd880ace", "'boyko_input=<T>\\release\\deps\\libboyko_input-ad02cb6e083f8fd9.rmeta'"]; tip-only words ["metadata=eb417f633155b949", "extra-filename=-c2d62a062e338200", "'boyko_input=<T>\\release\\deps\\libboyko_input-ac4bea1ec5258b2a.rmeta'"]
+detail	rc11f	  (d2) same boyko_sdf_math
+detail	rc11f	  (d2) same boyko_shaderdsl
+detail	rc11f	  (d2) same boyko_threadpool
+detail	rc11f	  (d2) same boyko_utils
+detail	rc11f	(d3) 2 item(s), 2 red
+detail	rc11f	  (d3) RED  runner: pre-only words ["'boyko_app=<T>\\release\\deps\\libboyko_app-1be36b4fdc99b794.rlib'", "'boyko_physics=<T>\\release\\deps\\libboyko_physics-a144728eb645b34e.rlib'"]; tip-only words ["'boyko_app=<T>\\release\\deps\\libboyko_app-6733fd968048c555.rlib'", "'boyko_physics=<T>\\release\\deps\\libboyko_physics-a24d9f7e9cfa9693.rlib'"]
+detail	rc11f	  (d3) RED  probe: pre-only words ["'boyko_app=<T>\\release\\deps\\libboyko_app-1be36b4fdc99b794.rlib'", "'boyko_physics=<T>\\release\\deps\\libboyko_physics-a144728eb645b34e.rlib'"]; tip-only words ["'boyko_app=<T>\\release\\deps\\libboyko_app-6733fd968048c555.rlib'", "'boyko_physics=<T>\\release\\deps\\libboyko_physics-a24d9f7e9cfa9693.rlib'"]
+detail	rc11f	(d4) 5 item(s), 0 red
+detail	rc11f	  (d4) same BOYKO_PROFILE
+detail	rc11f	  (d4) same rustc -vV
+detail	rc11f	  (d4) same receipt format
+detail	rc11f	  (d4) same .cargo/config.toml sha256
+detail	rc11f	  (d4) same Cargo.lock sha256
+detail	g-d	(d1) 25 item(s), 0 red
+detail	g-d	  (d1) same boyko_diag [target]
+detail	g-d	  (d1) same boyko_ecs [target]
+detail	g-d	  (d1) same boyko_input [target]
+detail	g-d	  (d1) same boyko_log [target]
+detail	g-d	  (d1) same boyko_macros [host]
+detail	g-d	  (d1) same boyko_math [target]
+detail	g-d	  (d1) same boyko_memory [target]
+detail	g-d	  (d1) same boyko_physics [target]
+detail	g-d	  (d1) same boyko_scene [target]
+detail	g-d	  (d1) same boyko_sdf_math [target]
+detail	g-d	  (d1) same boyko_shaderdsl [target]
+detail	g-d	  (d1) same boyko_threadpool [target]
+detail	g-d	  (d1) same boyko_utils [target]
+detail	g-d	  (d1) same crossbeam_deque [target]
+detail	g-d	  (d1) same crossbeam_epoch [target]
+detail	g-d	  (d1) same crossbeam_queue [target]
+detail	g-d	  (d1) same crossbeam_utils [target]
+detail	g-d	  (d1) same fixedbitset [target]
+detail	g-d	  (d1) same proc_macro2 [host]
+detail	g-d	  (d1) same quote [host]
+detail	g-d	  (d1) same static_assertions [target]
+detail	g-d	  (d1) same syn [host]
+detail	g-d	  (d1) same unicode_ident [host]
+detail	g-d	  (d1) same windows_link [target]
+detail	g-d	  (d1) same windows_sys [target]
+detail	g-d	(d2) 13 item(s), 0 red
+detail	g-d	  (d2) same boyko_diag
+detail	g-d	  (d2) same boyko_ecs
+detail	g-d	  (d2) same boyko_input
+detail	g-d	  (d2) same boyko_log
+detail	g-d	  (d2) same boyko_macros
+detail	g-d	  (d2) same boyko_math
+detail	g-d	  (d2) same boyko_memory
+detail	g-d	  (d2) same boyko_physics
+detail	g-d	  (d2) same boyko_scene
+detail	g-d	  (d2) same boyko_sdf_math
+detail	g-d	  (d2) same boyko_shaderdsl
+detail	g-d	  (d2) same boyko_threadpool
+detail	g-d	  (d2) same boyko_utils
+detail	g-d	(d3) 2 item(s), 0 red
+detail	g-d	  (d3) same runner
+detail	g-d	  (d3) same probe
+detail	g-d	(d4) 5 item(s), 0 red
+detail	g-d	  (d4) same BOYKO_PROFILE
+detail	g-d	  (d4) same rustc -vV
+detail	g-d	  (d4) same receipt format
+detail	g-d	  (d4) same .cargo/config.toml sha256
+detail	g-d	  (d4) same Cargo.lock sha256
+result	all as expected

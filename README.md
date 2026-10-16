@@ -328,8 +328,8 @@ processes per cell under a quiet-machine protocol. Every result, its method and 
 To run the benchmarks yourself:
 
 - **Harnesses:** [`crates/boyko_ecs/benches`](crates/boyko_ecs/benches) (31 targets),
-  [`crates/boyko_physics/benches`](crates/boyko_physics/benches) (17, including the
-  `jolt_parity_pyramid` comparison with Jolt Physics) and
+  [`crates/boyko_physics/benches`](crates/boyko_physics/benches) (16), the
+  `jolt_parity_pyramid` comparison with Jolt Physics ([`crates/boyko_physics_parity`](crates/boyko_physics_parity)) and
   [`crates/bench_bevy_vs_boyko/benches`](crates/bench_bevy_vs_boyko/benches) (9, against
   `bevy_ecs`).
 - **Profiles:** `release` is the shipped build (fat LTO). `bench` turns LTO off and uses one codegen

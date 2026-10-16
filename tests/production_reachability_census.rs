@@ -270,26 +270,51 @@ struct RecordedMember {
 ///
 /// Asserted for exact equality in both directions, so this list cannot rot: a new unreachable
 /// member reds the gate, and so does wiring one of these up.
-const KNOWN_UNREACHABLE_MEMBERS: [RecordedMember; 6] = [
+const KNOWN_UNREACHABLE_MEMBERS: [RecordedMember; 8] = [
     RecordedMember {
         package: "boyko-physics",
-        class: Reach::DevOnlyReferenced,
+        class: Reach::ReferencedOnlyByUnreachable,
         note: "Same shape, found by this census. Two reverse edges, both [dev-dependencies]: \
                boyko-render's (the Gpu3dInstance-packs test) and, since f37650a6, boyko-app's, \
                annotated 'DEV-ONLY on purpose' for the playground example. The in-house TGS-Soft \
                solver is compiled by no shipped path. The PhysicsPlugin wiring this row once \
                reported in flight has landed as that dev-only edge, by the host's layering \
-               invariant (boyko_app owns no simulation), so the class did not move.",
+               invariant (boyko_app owns no simulation), so the class did not move. Since IB P0r \
+               (2026-10-16) its only NORMAL reverse edges come from boyko-physics-parity and \
+               boyko-physics-probe, two unreachable members of their own, so the class reads \
+               ReferencedOnlyByUnreachable and the finding stands.",
     },
     RecordedMember {
         package: "boyko-serialize",
-        class: Reach::DevOnlyReferenced,
+        class: Reach::ReferencedOnlyByUnreachable,
         note: "Found by this census as `Unreferenced` — ZERO reverse edges of any kind, built \
                only because it is a workspace member. Reclassified when fix/asset-validate-prereqs \
                (419aaf2d, merged as A5.2) added it to crates/boyko_render/Cargo.toml's \
                [dev-dependencies] for the serialize version-skew gates \
                (tests/asset_streaming_prereq_validate.rs). Now the boyko_ui shape: its ONLY \
-               reverse edge is a dev one, and no shipped path loads a save file.",
+               reverse edge is a dev one, and no shipped path loads a save file. Since IB P0r \
+               (2026-10-16) boyko-physics-probe's optional `scope-wide` entry is a normal reverse \
+               edge, from an unreachable member, so the class reads ReferencedOnlyByUnreachable \
+               and the finding stands.",
+    },
+    RecordedMember {
+        package: "boyko-physics-parity",
+        class: Reach::Unreferenced,
+        note: "Entered with IB P0r (2026-10-16): the Jolt parity runner, moved out of \
+               boyko-physics/benches/ into a package of its own so it links boyko-physics as a \
+               normal dependency, the way a game does. Nothing depends on it BY DESIGN - it is a \
+               benchmark harness, run by path in a quiet window. Not a PRODUCT_ROOTS row, because \
+               a root would make boyko-physics ProductionReachable and delete the recorded \
+               finding on the row above as a side effect (IB design, Rev 5 item 8).",
+    },
+    RecordedMember {
+        package: "boyko-physics-probe",
+        class: Reach::Unreferenced,
+        note: "Entered with IB P0r (2026-10-16): IB's game-shaped probe, the reference binary \
+               `ug15 unit` compares the parity runner's library units with. Nothing depends on it \
+               BY DESIGN, and it is not a PRODUCT_ROOTS row for the parity runner's reason: a \
+               stand-in for a game is not a shipped product, and rooting it would make \
+               boyko-physics ProductionReachable by fiat.",
     },
     RecordedMember {
         package: "aether",
@@ -376,7 +401,9 @@ const EXEMPT_PLUGINS: [ExemptPlugin; 4] = [
         // scene adds `PhysicsPlugin::new()` itself — the `FlyCameraPlugin` shape. Two
         // `boyko_app/examples/*` (`playground.rs`, `_hud_probe.rs`) do exactly that, and every edge
         // into boyko-physics is dev-only, which is what the `KNOWN_UNREACHABLE_MEMBERS` row above
-        // records.
+        // records. Since IB P0r, `crates/boyko_physics_probe` registers `EnginePlugins` and
+        // `PhysicsPlugin` the way a game does, from an unreachable member's `src/`: an exemption
+        // is not a zero-registration claim, so that registration changes nothing here.
         reason: "opt-in simulation plugin added by the scene; boyko_app owns no simulation \
                  (its Cargo.toml [dev-dependencies] row, f37650a6)",
     },

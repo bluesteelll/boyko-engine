@@ -1,7 +1,7 @@
 boyko parity patch for Jolt's PerformanceTest (physics perf campaign, plan section 1: H3, H8, H10, O5; v2: lane DYN-SCENES).
 The v1 hunks apply with `git apply` to Jolt v5.3.0 and v5.6.0 (checked 2026-09-19); the v2 hunks, the dynamic parity
 scenes, are checked on v5.6.0 only (2026-10-06: the comparison is against Jolt 5.6 alone).
-Build recipe, flags and what each change is for: the header of ../jolt_parity_pyramid.rs, "Build (Jolt)".
+Build recipe, flags and what each change is for: the header of crates/boyko_physics_parity/src/bin/jolt_parity_pyramid.rs, "Build (Jolt)".
 
   PyramidScene.h         damping 0 (boyko has no rigid-body damping); mAllowSleeping from SetAllowSleeping;
                          v2: namespace BoykoDyn (the programs, an independent C++ derivation of boyko's

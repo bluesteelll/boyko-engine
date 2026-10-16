@@ -1,0 +1,80 @@
+[package]
+name = "boyko-physics-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "IB's game-shaped probe: a windowed physics game in the playground's shape plus a headless branch that steps Jolt's pyramid, the reference binary `ug15 unit` compares the parity runner's library units with (IB P0r)."
+license.workspace = true
+# One explicit `[[bin]]`, no auto-discovered target (the parity runner's rule).
+autobins = false
+
+# The game shape (IB design D14; `ug15 unit` (V11 (a)) checks it): `boyko-physics` and
+# `boyko-ecs` as the non-optional entries, `boyko-app` under `cfg(windows)`, and every other
+# `ENGINE_PACKAGES` crate except `boyko-reflect` (editor-only) as an optional entry that only
+# `scope-wide` activates. No entry carries a key: a `features = [...]` here would change the
+# closure the probe stands for.
+[dependencies]
+boyko-physics = { path = "../boyko_physics" }
+boyko-ecs = { path = "../boyko_ecs" }
+# V11 (e)'s reach: built with `scope-wide`, the probe links every engine library crate a game may
+# also link at default features, and (e) asks whether boyko-physics's closure is still the
+# runner's. Each entry is reached only through `dep:`, so cargo derives no feature per entry and
+# CI's feature census gains one leg (`scope-wide`), not eighteen.
+boyko-diag = { path = "../boyko_diag", optional = true }
+boyko-fontbake = { path = "../boyko_fontbake", optional = true }
+boyko-input = { path = "../boyko_input", optional = true }
+boyko-log = { path = "../boyko_log", optional = true }
+boyko-macros = { path = "../boyko_macros", optional = true }
+boyko-math = { path = "../boyko_math", optional = true }
+boyko-memory = { path = "../boyko_memory", optional = true }
+boyko-render = { path = "../boyko_render", optional = true }
+boyko-scene = { path = "../boyko_scene", optional = true }
+boyko-serialize = { path = "../boyko_serialize", optional = true }
+boyko-threadpool = { path = "../boyko_threadpool", optional = true }
+boyko-ui = { path = "../boyko_ui", optional = true }
+boyko-utils = { path = "../boyko_utils", optional = true }
+boyko_image = { path = "../boyko_image", optional = true }
+boyko_rhi = { path = "../boyko_rhi", optional = true }
+boyko_rhi_vulkan = { path = "../boyko_rhi_vulkan", optional = true }
+boyko_sdf_math = { path = "../boyko_sdf_math", optional = true }
+boyko_shaderdsl = { path = "../boyko_shaderdsl", optional = true }
+
+# The host: the windowed branch is a game (`EnginePlugins::window`), and linking it makes cargo
+# resolve `windows-sys`, `boyko-input`, `boyko-scene` and `boyko-physics` as a windowed game's.
+[target.'cfg(windows)'.dependencies]
+boyko-app = { path = "../boyko_app" }
+
+[features]
+default = []
+# V11 (e): every optional engine crate above, for one probe build (`probe-wide`).
+scope-wide = [
+    "dep:boyko-diag",
+    "dep:boyko-fontbake",
+    "dep:boyko-input",
+    "dep:boyko-log",
+    "dep:boyko-macros",
+    "dep:boyko-math",
+    "dep:boyko-memory",
+    "dep:boyko-render",
+    "dep:boyko-scene",
+    "dep:boyko-serialize",
+    "dep:boyko-threadpool",
+    "dep:boyko-ui",
+    "dep:boyko-utils",
+    "dep:boyko_image",
+    "dep:boyko_rhi",
+    "dep:boyko_rhi_vulkan",
+    "dep:boyko_sdf_math",
+    "dep:boyko_shaderdsl",
+]
+
+[[bin]]
+name = "physics_probe"
+path = "src/bin/physics_probe.rs"
+# Nothing to test or bench in a game stand-in; it is run by `ug15 unit` and by hand.
+test = false
+bench = false
+doc = false
+
+[lints]
+workspace = true
