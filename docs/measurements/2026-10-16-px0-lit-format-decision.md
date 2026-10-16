@@ -85,10 +85,19 @@ unsigned encodings.
 - **Blend premultiplied over:** `dst = trunc(value)`, `alpha = ½`, `src = value − dst · ½` — dyadic
   alpha, so every product and sum is exact in f32 and no FMA or factor precision moves an input
   (`px0/critique.md` O4).
-- **Clear** (`px0/critique.md` open question 1): one `vkCmdClearColorImage` per value, one array
-  layer per value (≤ 2048 layers), so the clear set is the subset at binades
+- **Clear** (`px0/critique.md` open question 1): one attachment clear per value — a dynamic-rendering
+  pass with `loadOp = CLEAR` over a one-texel render area at the value's texel of the 256-wide
+  classification image (`b10g11r11_rounding_probe.rs`, the clear branch of `Rig::run`), the route
+  the engine's own `lit` clears take (`passes/forward.rs`: the `lit` colour attachment's
+  `VK_ATTACHMENT_LOAD_OP_CLEAR` with `FORWARD_LIT_CLEAR` as its clear value); no
+  `vkCmdClearColorImage` is recorded. The clear set is the subset at binades
   `{−14, −10, −6, −2, −1, 0, 1, 2, 6, 10, 14, 15}` with 8 intervals each;
   `probe_inputs_separate_classes` runs on exactly that set.
+  *Erratum (PX0 triage r1 W6):* this paragraph read "one `vkCmdClearColorImage` per value, one array
+  layer per value (≤ 2048 layers)" at the model commit, a route the probe never ran. The frozen
+  model's own comment on `lit_format::clear_binades` (`crates/boyko_rhi_vulkan/tests/lit_format/mod.rs`)
+  still says so: it stays unedited, because §6's freeze check diffs the model's sources from the
+  model commit to the decision commit, and the subset it returns is the one the probe clears.
 
 ## 4. Expected (pinned — `b10g11r11_chain_model::expected_table_is_pinned`)
 
