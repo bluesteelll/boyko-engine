@@ -68,6 +68,13 @@ const BENCH_FRAMES: u32 = 61;
 const LABEL_WIN: u32 = 256;
 /// The line the worker prints at exit — the CPU zone's accumulated count and ticks.
 const CPU_LINE: &str = "PX0_CPU_ZONE";
+/// The frame backstop every label child runs under, as `BOYKO_WINDOW_FRAMES` — the runner counts it
+/// at its loop top, whether or not a frame retires. A healthy cell exits on its zone window first
+/// (`VB_BENCH_WARMUP` = 20 plus [`BENCH_FRAMES`] RETIRED frames, about 90 iterations with the ring's
+/// lag); a path whose frame witness never opens retires no frame, and without this bound its child
+/// rendered forever and GL-PX0-Z hung instead of reddening (triage r1 RF-1).
+const FRAME_BACKSTOP: u32 = 1_000;
+const _: () = assert!(FRAME_BACKSTOP > 4 * (20 + BENCH_FRAMES), "the backstop must sit far past a healthy window");
 
 // ===============================================================================================
 // Cells
@@ -523,12 +530,13 @@ fn run_cell(c: ZoneCell, validation_on: bool, profile_on: bool) -> Option<(Artif
         .env("BOYKO_PROFILE_ARTIFACT", &path)
         .env("BOYKO_PROFILE_RUN_TOKEN", &token)
         .env("BOYKO_PROFILE_WORKLOAD", format!("px0_{tag}"))
-        .env("BOYKO_VB_BENCH_FRAMES", BENCH_FRAMES.to_string());
+        .env("BOYKO_VB_BENCH_FRAMES", BENCH_FRAMES.to_string())
+        .env("BOYKO_WINDOW_FRAMES", FRAME_BACKSTOP.to_string());
     // Every knob an operator's shell might carry that would change the scene, the cell or the
-    // stream — removed rather than assumed unset (`vb_sv0_produce_run_timing`'s reason).
+    // stream — removed rather than assumed unset (`vb_sv0_produce_run_timing`'s reason). The
+    // operator's `BOYKO_WINDOW_FRAMES` is replaced by [`FRAME_BACKSTOP`] above, never inherited.
     for k in [
         "BOYKO_HOST_DUMP",
-        "BOYKO_WINDOW_FRAMES",
         "BOYKO_VB_BENCH",
         "BOYKO_VB_CULL_READBACK",
         "BOYKO_VB_PROBE",
@@ -569,11 +577,27 @@ fn run_cell(c: ZoneCell, validation_on: bool, profile_on: bool) -> Option<(Artif
         c.word(),
         out.status
     );
+    // The window writes its artifact as its last act; a clean exit without one is the backstop's.
+    if !path.exists() {
+        panic!("{}\n---- worker output ----\n{merged}", no_window_verdict(c));
+    }
     let art = Artifact::read(&path, &token).unwrap_or_else(|e| {
         panic!("`{}`: the worker completed but its artifact is unusable: {e}\n---- worker output ----\n{merged}", c.word())
     });
     let _ = std::fs::remove_file(&path);
     Some((art, merged))
+}
+
+/// The red of a child that exited at [`FRAME_BACKSTOP`] with no zone window retired (no artifact):
+/// every zone it should have bracketed is absent, and the message names the first Required one the
+/// way a present-but-short artifact would.
+fn no_window_verdict(c: ZoneCell) -> String {
+    let why = check_expectations(&[], &table(c)).err().unwrap_or_else(|| "the cell requires no zone".to_owned());
+    format!(
+        "[{}] the worker reached the {FRAME_BACKSTOP}-frame backstop without retiring a zone window \
+         (no artifact: no frame witness opened?) — {why}",
+        c.word()
+    )
 }
 
 /// One label driver: the cell's artifact against its table.
@@ -784,6 +808,20 @@ fn check_expectations_reds_both_ways() {
     let mut torn = exact;
     torn[0].label = ZoneLabel::Torn;
     assert!(check_expectations(&torn, &t).is_err(), "a non-Measured Required row must red");
+}
+
+/// **A child stopped by the frame backstop is red, never a hang** (triage r1 RF-1): for every cell
+/// the backstop's verdict names a Required zone as absent — so a path whose frame witness never
+/// opens (Forward before PX0-2) reds GL-PX0-Z — and a cell that required nothing would be caught
+/// here rather than pass silently.
+#[test]
+fn a_child_stopped_by_the_backstop_names_its_zones_absent() {
+    for c in CELLS {
+        let v = no_window_verdict(c);
+        assert!(v.contains("absent") && v.contains(&c.word()) && v.contains("backstop"), "{v}");
+    }
+    let v = no_window_verdict(ZoneCell { path: PathCell::ForwardPlus, aa: AaCell::Off });
+    assert!(v.contains(&format!("zone {ZONE_POST_PRESENT} ")), "the unwitnessed Forward path loses its present zone first: {v}");
 }
 
 /// The CPU-zone check and its line parser, both directions — the parser on the form the worker's
