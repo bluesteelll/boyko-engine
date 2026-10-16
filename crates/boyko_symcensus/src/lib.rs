@@ -24,6 +24,7 @@
 pub mod candidates;
 pub mod closure;
 pub mod contain;
+pub mod controls;
 pub mod host;
 pub mod json;
 pub mod key;

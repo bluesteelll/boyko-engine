@@ -67,6 +67,55 @@ ever deleted by the instrument.
 through cargo's `-C metadata`, measured, see the root `Cargo.toml`); `sensitivity-map` adds
 `debug = "line-tables-only"`, `strip = "none"`; `bench-shipped` is `inherits = "release"` alone.
 
+## IB V11 commands (IB P0r)
+
+V11 is IB's game-unit identity. `ug15` builds the parity runner (`boyko-physics-parity`, bin
+`jolt_parity_pyramid`) and the game-shaped probe (`boyko-physics-probe`, bin `physics_probe`) under
+`release`, retained per build. Windows (msvc) only.
+
+**Rebuild `ug15` before every IB command**: `cargo build -p boyko-symcensus --bin ug15 --locked`. An
+executable built from other sources than the tree holds is `RED [stale instrument]` before any build.
+This is because the instrument key K covers the bytes compiled into it (`src/key.rs`).
+
+| command | what it does |
+|---|---|
+| `$UG15 unit --retain DIR [--controls RECEIPT] [--out F]` | V11 (a), (b), (c), (e), (f) on this tree, runner against probe, then the certification. Exit 0 only when (a), (b), (c), (f) are green and the instrument is certified. A red (e) narrows the scope note and is never the verdict (D14) |
+| `$UG15 unit-compare PRE TIP` | V11 (d1)-(d4) between two `unit` receipts, under the closed normalisation list (`src/unit.rs` module docs) |
+| `$UG15 unit-controls --retain DIR --scratch DIR [--receipt-out F] [--only ids]` | the red controls RC-11 (a)-(f), RC-13 and RC-14 (a)-(c), and the green controls G-b and G-d. Writes the control receipt. Clean tree only |
+| `$UG15 unit-arm --arm reference\|runner\|bench --retain DIR --out F` | a scratch tree's builds for one control, recorded and not evaluated (`unit-controls` spawns it in each scratch tree) |
+
+**Retention.** `--retain` (and `--scratch`) must be absolute, outside the tree and the target dir, and
+empty or absent. Each build is copied to `<retain>/<tag>/` (image, object, pdb, and the `/MAP` the
+linker writes there), hashed, and checked intact before the next build starts. Tags come from a
+closed vocabulary: `runner`, `runner-<pin>`, `probe`, `probe-<pin>`, `probe-wide`, `plain-<tag>`,
+`rc<NN><x>-<tag>`.
+
+**Codegen units (orchestrator ruling 57).** With codegen-units unset, `--emit=obj` makes rustc
+codegen one unit. Every IB build therefore passes `-C codegen-units=<n>`, where n is the profile's
+effective value: its own `codegen-units`, or the nearest one up `inherits`, else rustc's
+non-incremental default of 16. After the build, the final unit's rustc line must carry that token
+exactly once, or twice when the profile sets it and cargo passes it as well. Every value must equal n,
+and the line must carry no `-C incremental`; anything else is RED. Under `release` this reproduces
+the plain `cargo build --release` `.text` byte for byte. That is V11 (c2), calibrated at IB P0r's
+RF-5a.
+
+**The UG-15 legs do not pass it (finding, owed decision).** Every leg above builds through the same
+`--emit=obj` with codegen-units unset, so each one censuses a codegen-units = 1 object, not the
+shipped codegen. `ug15 textcheck` compared two such builds. Its receipts stay valid as identity claims
+between two identically built trees. Whether to re-pin the legs on the shipped codegen or to state
+the scope is the orchestrator's decision (ruling 57 (2)).
+
+**Certification (W13).** `unit` is certified by a control receipt `ug15-ib-controls v1` that names
+K. The receipt must be complete (not `partial`), and every required control must have its expected
+verdict. Two locations satisfy the rule:
+
+- the committed `ug15/receipts/ib/controls-<K8>.txt`, tracked and clean in this tree;
+- `--controls <path>` outside both trees: the window directory, the prep fallback.
+
+`--only` writes a partial receipt, which never certifies. K is sha256 over this crate's `Cargo.toml`
+and `src/**` (`\r\n` normalised), `rustc -vV` of the compiler cargo invokes, and `cargo -V`. Any edit
+under `src/` changes K, so `unit-controls` must be re-run.
+
 ## UG-08 — Miri on `nightly-x86_64-pc-windows-msvc` (adopted form: the joined key)
 
 ```bash

@@ -1,12 +1,14 @@
 //! IB P0r, V11's pure pieces (no cargo build): the closed normalisation list of `ug15
 //! unit-compare` (O17's order, (d3)'s list), the instrument key, the retain directory's refusals,
-//! the tag vocabulary, (f)'s diagnostic match, the host/target premise, the receipt format, and
-//! ruling 57's codegen-units (the profile chain and the final-line check).
+//! the tag vocabulary, (f)'s diagnostic match, the host/target premise, the receipt format,
+//! ruling 57's codegen-units (the profile chain and the final-line check), and the controls'
+//! package key and scratch edits.
 //!
 //! Each assertion is the one its red-first mutation turned red (recorded in the commit message).
 
 use std::path::{Path, PathBuf};
 
+use boyko_symcensus::controls;
 use boyko_symcensus::key;
 use boyko_symcensus::objbuild::{self, CodegenUnits};
 use boyko_symcensus::red::RedKind;
@@ -207,6 +209,33 @@ fn the_final_line_carries_exactly_the_effective_codegen_units() {
     assert_eq!(check(&ours.replace("codegen-units=16", "codegen-units=8"), eight), Err(RedKind::Mismatch), "the profile's value but not cargo's token");
     assert_eq!(check(&ours.replace("-C lto=fat", "-C lto=fat -Ccodegen-units=8").replace("codegen-units=16", "codegen-units=8"), eight), Ok(()));
     assert_eq!(check(&ours.replace("-C lto=fat", "-C lto=fat -C 'incremental=D:/t/i'"), sixteen), Err(RedKind::Mismatch));
+}
+
+/// The controls compare a scratch tree's tables with this tree's through a tree-independent package
+/// key (a path package's id carries its checkout's path).
+#[test]
+fn package_keys_are_tree_independent() {
+    assert_eq!(controls::stable_pkg("path+file:///D:/wt/fm/crates/boyko_log#boyko-log@0.1.0"), "boyko-log@0.1.0");
+    assert_eq!(controls::stable_pkg("path+file:///D:/tmp/rc/g-d/tree/crates/boyko_log#boyko-log@0.1.0"), "boyko-log@0.1.0");
+    assert_eq!(controls::stable_pkg("path+file:///D:/wt/fm/crates/boyko_demo#0.1.0"), "boyko_demo@0.1.0");
+    assert_eq!(controls::stable_pkg("registry+https://github.com/rust-lang/crates.io-index#syn@2.0.106"), "syn@2.0.106");
+}
+
+/// Every scratch control's edit applies to this tree exactly as often as it says, so a 420-minute
+/// `unit-controls` cannot fail on a stale needle after its main-tree controls (critique W3 (i)).
+#[test]
+fn the_scratch_edits_apply_to_this_tree() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    assert_eq!(controls::SCRATCH.len(), 7);
+    for c in &controls::SCRATCH {
+        for e in c.edits {
+            let raw = std::fs::read(root.join(e.file)).expect("the edited file");
+            let text = String::from_utf8_lossy(&key::normalize_eol(&raw)).into_owned();
+            assert_eq!(text.matches(e.old).count(), e.count, "{}: {}", c.id, e.file);
+        }
+    }
+    let ids: Vec<&str> = controls::ORDER.to_vec();
+    assert_eq!(ids, unit::REQUIRED_CONTROLS.to_vec(), "every required control runs, in ORDER");
 }
 
 /// What `unit` writes, `unit-compare` reads back unchanged.

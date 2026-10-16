@@ -1088,6 +1088,9 @@ pub struct Cmp {
     pub same: bool,
     /// What differs (words, file names or values).
     pub detail: String,
+    /// (d2)/(d3): the words in one side's normalised line(s) and not in the other's, pre-only first
+    /// (RC-11 (f) reads which `--extern` names moved). Empty for (d1)/(d4) and for an equal item.
+    pub words: Vec<String>,
 }
 
 /// V11 (d), PRE against TIP.
@@ -1188,7 +1191,7 @@ pub fn unit_compare(pre: &Receipt, tip: &Receipt) -> CompareReport {
         let (a, b) = (np.get(k), nt.get(k));
         let same = a.is_some() && a == b;
         let detail = if same { String::new() } else { format!("pre {:?} tip {:?}", a.map(|s| s.iter().collect::<Vec<_>>()), b.map(|s| s.iter().collect::<Vec<_>>())) };
-        r.d1.push(Cmp { item: k.0.clone(), host: k.1, same, detail });
+        r.d1.push(Cmp { item: k.0.clone(), host: k.1, same, detail, words: Vec::new() });
     }
     // (d2): every workspace closure crate's line in the touched build, after the two substitutions.
     let lines = |rc: &Receipt, krate: &str| -> Vec<String> {
@@ -1203,8 +1206,10 @@ pub fn unit_compare(pre: &Receipt, tip: &Receipt) -> CompareReport {
             continue;
         }
         let same = a == b;
-        let detail = if same { String::new() } else { format!("pre-only words {:?}; tip-only words {:?}", word_difference(&a.join(" "), &b.join(" ")), word_difference(&b.join(" "), &a.join(" "))) };
-        r.d2.push(Cmp { item: c.crate_name.clone(), host: false, same, detail });
+        let (pre_only, tip_only) = (word_difference(&a.join(" "), &b.join(" ")), word_difference(&b.join(" "), &a.join(" ")));
+        let detail = if same { String::new() } else { format!("pre-only words {pre_only:?}; tip-only words {tip_only:?}") };
+        let words = if same { Vec::new() } else { pre_only.into_iter().chain(tip_only).collect() };
+        r.d2.push(Cmp { item: c.crate_name.clone(), host: false, same, detail, words });
     }
     // (d3): the final lines, runner with runner and probe with probe.
     for tag in ["runner", "probe"] {
@@ -1212,10 +1217,12 @@ pub fn unit_compare(pre: &Receipt, tip: &Receipt) -> CompareReport {
             (Some(a), Some(b)) => match (normalize_d3(a, &pre.target, &pre.root), normalize_d3(b, &tip.target, &tip.root)) {
                 (Ok(na), Ok(nb)) => {
                     let same = na == nb;
-                    let detail = if same { String::new() } else { format!("pre-only words {:?}; tip-only words {:?}", word_difference(&na, &nb), word_difference(&nb, &na)) };
-                    r.d3.push(Cmp { item: tag.to_owned(), host: false, same, detail });
+                    let (pre_only, tip_only) = (word_difference(&na, &nb), word_difference(&nb, &na));
+                    let detail = if same { String::new() } else { format!("pre-only words {pre_only:?}; tip-only words {tip_only:?}") };
+                    let words = if same { Vec::new() } else { pre_only.into_iter().chain(tip_only).collect() };
+                    r.d3.push(Cmp { item: tag.to_owned(), host: false, same, detail, words });
                 }
-                (Err(e), _) | (_, Err(e)) => r.d3.push(Cmp { item: tag.to_owned(), host: false, same: false, detail: e.to_string() }),
+                (Err(e), _) | (_, Err(e)) => r.d3.push(Cmp { item: tag.to_owned(), host: false, same: false, detail: e.to_string(), words: Vec::new() }),
             },
             _ => r.refusals.push(format!("(d3) a receipt has no `{tag}` final line")),
         }
@@ -1230,7 +1237,7 @@ pub fn unit_compare(pre: &Receipt, tip: &Receipt) -> CompareReport {
         ("Cargo.lock sha256", pre.lock_sha256.clone(), tip.lock_sha256.clone()),
     ] {
         let same = a == b;
-        r.d4.push(Cmp { item: item.to_owned(), host: false, same, detail: if same { String::new() } else { format!("pre {a} tip {b}") } });
+        r.d4.push(Cmp { item: item.to_owned(), host: false, same, detail: if same { String::new() } else { format!("pre {a} tip {b}") }, words: Vec::new() });
     }
     r
 }

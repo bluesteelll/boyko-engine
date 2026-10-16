@@ -42,6 +42,7 @@ pub const COMPILED_SOURCES: &[(&str, &[u8])] = &[
     ("src/candidates.rs", include_bytes!("candidates.rs")),
     ("src/closure.rs", include_bytes!("closure.rs")),
     ("src/contain.rs", include_bytes!("contain.rs")),
+    ("src/controls.rs", include_bytes!("controls.rs")),
     ("src/host.rs", include_bytes!("host.rs")),
     ("src/json.rs", include_bytes!("json.rs")),
     ("src/key.rs", include_bytes!("key.rs")),

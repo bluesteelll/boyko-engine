@@ -25,12 +25,15 @@
 //! ug15 map c capture|check                             # ug15/maps/containment.tsv
 //! ug15 unit --retain <dir> [--controls <receipt>] [--out <file>]   # IB V11 (a)(b)(c)(e)(f), certified
 //! ug15 unit-compare <pre-receipt> <tip-receipt>        # IB V11 (d1)-(d4), the closed list
+//! ug15 unit-controls --retain <dir> --scratch <dir> [--receipt-out <file>] [--only a,b,…]
+//!                                                      # IB V11's red and green controls, the control receipt
+//! ug15 unit-arm --arm reference|runner|bench --retain <dir> --out <file>   # one scratch tree's builds
 //! ```
 //!
-//! The IB commands (`unit`, `unit-compare`; IB P0r) refuse an executable built from other sources
-//! than the tree holds (RED [stale instrument]): rebuild with `cargo build -p boyko-symcensus --bin
-//! ug15 --locked` before every run. `--retain` is absolute, outside the tree and the target dir, and
-//! empty or absent.
+//! The IB commands (`unit`, `unit-compare`, `unit-controls`, `unit-arm`; IB P0r) refuse an
+//! executable built from other sources than the tree holds (RED [stale instrument]): rebuild with
+//! `cargo build -p boyko-symcensus --bin ug15 --locked` before every run. `--retain` and `--scratch`
+//! are absolute, outside the tree and the target dir, and empty or absent.
 //!
 //! Every command prints what it read and from where; a RED prints `RED [<kind>]: …` and exits 1.
 
@@ -39,6 +42,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use boyko_symcensus::contain;
+use boyko_symcensus::controls;
 use boyko_symcensus::leg7b;
 use boyko_symcensus::llvm;
 use boyko_symcensus::maps;
@@ -225,6 +229,8 @@ fn run(args: &[String]) -> Result<()> {
         "probe" => probe_cmd(args),
         "unit" => unit_cmd(args),
         "unit-compare" => unit_compare_cmd(args),
+        "unit-controls" => unit_controls_cmd(args),
+        "unit-arm" => unit_arm_cmd(args),
         other => Err(Red::new(RedKind::Usage, format!("unknown command `{other}`"))),
     }
 }
@@ -580,4 +586,41 @@ fn unit_compare_cmd(args: &[String]) -> Result<()> {
     } else {
         Err(Red::new(RedKind::Mismatch, "V11 (d) RED: see the per-item verdicts above"))
     }
+}
+
+fn unit_controls_cmd(args: &[String]) -> Result<()> {
+    let ctx = Ctx::new(echo_stderr)?;
+    let a = controls::ControlsArgs {
+        retain: PathBuf::from(required(args, "--retain")?),
+        scratch: PathBuf::from(required(args, "--scratch")?),
+        receipt_out: opt(args, "--receipt-out").map(PathBuf::from),
+        only: opt(args, "--only").map(|l| l.split(',').map(str::to_owned).collect()),
+    };
+    let (receipt, path, all) = controls::unit_controls(&ctx, &a)?;
+    eprintln!("ug15: wrote {}", path.display());
+    for c in &receipt.controls {
+        println!("{} {}: expected {}; observed {}", c.id, if c.as_expected { "as-expected" } else { "UNEXPECTED" }, c.expected, c.observed);
+    }
+    let unexpected = receipt.controls.iter().filter(|c| !c.as_expected).count();
+    if all {
+        println!(
+            "ug15 unit-controls: {} control(s), every one as expected; key {}; partial {} ({})",
+            receipt.controls.len(),
+            receipt.key,
+            if receipt.partial { "yes" } else { "no" },
+            path.display()
+        );
+        Ok(())
+    } else {
+        Err(Red::new(RedKind::Mismatch, format!("{unexpected} control(s) UNEXPECTED: an unexpected verdict STOPs (IB Rev 6); see {}", path.display())))
+    }
+}
+
+fn unit_arm_cmd(args: &[String]) -> Result<()> {
+    let ctx = Ctx::new(echo_stderr)?;
+    let arm = required(args, "--arm")?;
+    let retain = PathBuf::from(required(args, "--retain")?);
+    let text = controls::unit_arm(&ctx, arm, &retain)?;
+    let out = PathBuf::from(required(args, "--out")?);
+    write_receipt(&text, &out)
 }
