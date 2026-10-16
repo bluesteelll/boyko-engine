@@ -12,8 +12,9 @@
 //! - [`a_display_that_ignored_exposure_ratio_fails_where_it_is_not_one`] — and its control;
 //! - [`a_missing_binding_is_a_named_error`] — exit 2 naming the row, never a zero texture;
 //! - [`bound_equals_the_hand_joint_forward_difference`] — `bound --steps 2` against the joint
-//!   forward difference computed here, under three curve words, two of whose maxima sit at a
-//!   mixed-sign pattern.
+//!   forward difference computed here, under four word sets: the three curve words at exposure
+//!   ratio 1, two of whose maxima sit at a mixed-sign pattern, and ACES at ratio 2, whose maximum
+//!   is the all-up pattern alone.
 //!
 //! The synthetic scene is a B10G11R11 dump, the coarser of the two `lit` formats PX0 weighed.
 //! `bound` steps whatever encoding the dump's header names, not `post::LIT_STORAGE_FORMAT`
@@ -346,15 +347,30 @@ fn hand_patterns(w: [u32; 8], scene: &[[f32; 4]], steps: i32, channels: usize) -
     per
 }
 
-/// The word sets `bound` is checked under (ratio 1), and whether the set's maximum must sit at a
-/// MIXED-sign pattern — neither all-down (0) nor all-up (7). Under ACES the maximum on this scene is
-/// pattern 0, so that set alone cannot see a `bound` that stops enumerating the mixed patterns
-/// (triage r2 G1); under Neutral and Reinhard-Jodie it is mixed (patterns 2/3 and 4), and a
-/// uniform-sign-only `bound` would print 34 % and 24 % low.
-const BOUND_CASES: [(&str, u32, bool); 3] = [
-    ("aces", post::TONEMAP_ACES, false),
-    ("neutral", post::TONEMAP_NEUTRAL, true),
-    ("reinhard_jodie", post::TONEMAP_REINHARD_JODIE, true),
+/// Where a word set's per-pattern maximum must sit on this scene, so a `bound` that skips that
+/// pattern prints low and is told apart from the hand difference.
+#[derive(Clone, Copy)]
+enum Argmax {
+    /// No constraint.
+    Any,
+    /// A MIXED-sign pattern — neither all-down (0) nor all-up (7) — by more than 1e-3 LSB over
+    /// both (triage r2 G1).
+    Mixed,
+    /// The all-up pattern (7) alone, by more than 1e-3 LSB over every other (triage r3 W2).
+    AllUpAlone,
+}
+
+/// The word sets `bound` is checked under: (name, curve word, exposure ratio, where the maximum
+/// sits). Under ACES at ratio 1 the maximum on this scene is pattern 0, so that set alone cannot see
+/// a `bound` that stops enumerating the mixed patterns; under Neutral and Reinhard-Jodie it is mixed
+/// (patterns 2/3 and 4), and a uniform-sign-only `bound` would print 34 % and 24 % low. Under ACES
+/// at ratio 2 it is pattern 7 alone (by 0.0149 LSB), so a `bound` that enumerates `0..7` — the
+/// off-by-one that drops the all-up pattern — prints the second-largest pattern's maximum instead.
+const BOUND_CASES: [(&str, u32, f32, Argmax); 4] = [
+    ("aces", post::TONEMAP_ACES, 1.0, Argmax::Any),
+    ("neutral", post::TONEMAP_NEUTRAL, 1.0, Argmax::Mixed),
+    ("reinhard_jodie", post::TONEMAP_REINHARD_JODIE, 1.0, Argmax::Mixed),
+    ("aces_ratio2", post::TONEMAP_ACES, 2.0, Argmax::AllUpAlone),
 ];
 
 #[test]
@@ -369,8 +385,8 @@ fn bound_equals_the_hand_joint_forward_difference() {
     let bind = format!("gScene={}", scene.display());
     let texels = scene_texels();
     let max = |per: [f64; 8]| per.iter().copied().fold(0.0f64, f64::max);
-    for (name, mode, mixed) in BOUND_CASES {
-        let w = words(mode, 1.0);
+    for (name, mode, ratio, argmax) in BOUND_CASES {
+        let w = words(mode, ratio);
         let o = run(&["bound", "--words", &words_arg(w), "--bind", &bind, "--steps", &STEPS.to_string()]);
         assert_eq!(o.status.code(), Some(0), "[{name}] {}", text(&o));
         let out = String::from_utf8_lossy(&o.stdout);
@@ -387,14 +403,25 @@ fn bound_equals_the_hand_joint_forward_difference() {
         // a `bound` that perturbed one channel would be told apart here.
         assert!(joint > 0.5, "[{name}] two B10G11R11 steps must move the display: {joint}");
         assert!((joint - one_channel).abs() > 1e-3, "[{name}] joint {joint} vs one channel {one_channel}");
-        // ... and where the set's maximum is mixed-sign, a `bound` restricted to the uniform-sign
-        // patterns (or to pattern 0) would be told apart too.
-        if mixed {
-            let uniform = per[0].max(per[7]);
-            assert!(
-                joint - uniform > 1e-3,
-                "[{name}] the maximum must sit at a mixed-sign pattern: per-pattern maxima {per:?}"
-            );
+        // ... and where the set's maximum is pinned to a pattern, a `bound` that skips it would be
+        // told apart too: a mixed-sign maximum against one restricted to the uniform-sign patterns
+        // (or to pattern 0), the all-up maximum against one that stops at pattern 6.
+        match argmax {
+            Argmax::Any => {}
+            Argmax::Mixed => {
+                let uniform = per[0].max(per[7]);
+                assert!(
+                    joint - uniform > 1e-3,
+                    "[{name}] the maximum must sit at a mixed-sign pattern: per-pattern maxima {per:?}"
+                );
+            }
+            Argmax::AllUpAlone => {
+                let others = per[..7].iter().copied().fold(0.0f64, f64::max);
+                assert!(
+                    per[7] - others > 1e-3,
+                    "[{name}] the maximum must sit at the all-up pattern alone: per-pattern maxima {per:?}"
+                );
+            }
         }
         // `bound` prints six decimals.
         assert!((cli - joint).abs() <= 1e-6, "[{name}] post_eval bound {cli} != the hand joint forward difference {joint}");
