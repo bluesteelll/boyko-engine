@@ -320,9 +320,12 @@ fn check_cpu_zone(calls: u64, window_frames: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Parses the worker's `PX0_CPU_ZONE calls=<n> ticks=<t>` line.
+/// Parses the worker's `PX0_CPU_ZONE calls=<n> ticks=<t>` record wherever it sits in a line: the
+/// child runs under `--nocapture`, and libtest has already written `test <name> ... ` without a
+/// newline when the worker's `println!` lands, so the record is glued to that prefix — it never
+/// starts a line in the real output (triage r1 F2).
 fn parse_cpu_line(out: &str) -> Option<(u64, u64)> {
-    let line = out.lines().find(|l| l.starts_with(CPU_LINE))?;
+    let line = out.lines().find_map(|l| l.find(CPU_LINE).map(|at| &l[at..]))?;
     let field = |k: &str| -> Option<u64> {
         line.split_whitespace().find_map(|t| t.strip_prefix(k)).and_then(|v| v.parse().ok())
     };
@@ -783,11 +786,17 @@ fn check_expectations_reds_both_ways() {
     assert!(check_expectations(&torn, &t).is_err(), "a non-Measured Required row must red");
 }
 
-/// The CPU-zone check and its line parser, both directions.
+/// The CPU-zone check and its line parser, both directions — the parser on the form the worker's
+/// output really has: under `--nocapture` libtest has printed `test <name> ... ` with no newline
+/// when the worker's `println!` runs, so the record is glued to that prefix
+/// (`px0/gl/zones_af9146ee.log`, triage r1 F2), as well as on a line of its own.
 #[test]
 fn cpu_zone_check_and_parser() {
+    let glued = "running 1 test\ntest post_zone_labels_worker ... PX0_CPU_ZONE calls=83 ticks=23945031 mean_ns=87639.5\nok\n";
+    assert_eq!(parse_cpu_line(glued), Some((83, 23_945_031)), "the libtest-glued record must parse");
     assert_eq!(parse_cpu_line("x\nPX0_CPU_ZONE calls=70 ticks=12345 mean_ns=3.0\n"), Some((70, 12_345)));
     assert_eq!(parse_cpu_line("no line here"), None);
+    assert_eq!(parse_cpu_line("test w ... PX0_CPU_ZONE mean_ns=1.0\n"), None, "a record without its fields is no record");
     assert!(check_cpu_zone(70, 61).is_ok());
     let e = check_cpu_zone(0, 61).expect_err("a zero count must red");
     assert!(e.contains("lifetime count 0"), "{e}");
