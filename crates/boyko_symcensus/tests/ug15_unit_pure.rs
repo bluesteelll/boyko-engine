@@ -1,12 +1,14 @@
 //! IB P0r, V11's pure pieces (no cargo build): the closed normalisation list of `ug15
 //! unit-compare` (O17's order, (d3)'s list), the instrument key, the retain directory's refusals,
-//! the tag vocabulary, (f)'s diagnostic match, the host/target premise, and the receipt format.
+//! the tag vocabulary, (f)'s diagnostic match, the host/target premise, the receipt format, and
+//! ruling 57's codegen-units (the profile chain and the final-line check).
 //!
 //! Each assertion is the one its red-first mutation turned red (recorded in the commit message).
 
 use std::path::{Path, PathBuf};
 
 use boyko_symcensus::key;
+use boyko_symcensus::objbuild::{self, CodegenUnits};
 use boyko_symcensus::red::RedKind;
 use boyko_symcensus::retain::{self, RetainDir};
 use boyko_symcensus::unit::{self, ClosureRow, LibLine, Receipt};
@@ -160,6 +162,51 @@ fn the_host_split_and_its_premise() {
     assert!(retain::check_profile_premise("[profile.release]\nlto = \"fat\"\n[profile.parity]\ninherits = \"release\"\n").is_ok());
     assert!(retain::check_profile_premise("[profile.release.build-override]\nopt-level = 3\n").is_err());
     assert!(retain::check_profile_premise("[profile.release.package.\"*\"]\nopt-level = 2\n").is_err());
+}
+
+/// Ruling 57: an IB build's final unit gets the profile's effective codegen-units. That is the
+/// profile's own value, else the nearest one up `inherits`, else rustc's non-incremental 16.
+#[test]
+fn the_effective_codegen_units_follow_the_profile_chain() {
+    let cgu = |text: &str, p: &str| retain::profile_codegen_units(text, p).map(|c| (c.n, c.set_by_profile)).map_err(|e| e.kind);
+    let shaped = "[workspace]\nmembers = []\n[profile.release]\nlto = \"fat\"\n# codegen-units = 1\n[profile.bench]\ncodegen-units = 1 # explicit\nlto = false\n[profile.parity] # the runner's\ninherits = \"release\"\n[[bin]]\nname = \"x\"\ncodegen-units = 3\n";
+    assert_eq!(cgu(shaped, "release"), Ok((16, false)));
+    assert_eq!(cgu(shaped, "parity"), Ok((16, false)));
+    assert_eq!(cgu(shaped, "bench"), Ok((1, true)));
+    assert_eq!(cgu(shaped, "dev"), Ok((16, false)));
+    // RC-11 (e)'s edit: the value is inherited by every profile below `release`.
+    let rc11e = shaped.replace("lto = \"fat\"\n", "lto = \"fat\"\ncodegen-units = 8\n");
+    assert_eq!(cgu(&rc11e, "release"), Ok((8, true)));
+    assert_eq!(cgu(&rc11e, "parity"), Ok((8, true)));
+    assert_eq!(cgu("[profile.a]\ninherits = \"bench\"\n[profile.bench]\ncodegen-units = 4\n", "a"), Ok((4, true)));
+    assert_eq!(cgu("[profile.a]\nlto = true\n", "a"), Err(RedKind::Malformed));
+    assert_eq!(cgu("[profile.a]\ninherits = \"b\"\n[profile.b]\ninherits = \"a\"\n", "a"), Err(RedKind::Malformed));
+    assert_eq!(cgu("[profile.release]\ncodegen-units = 0\n", "release"), Err(RedKind::Malformed));
+    assert_eq!(cgu("[profile.release]\ncodegen-units = \"x\"\n", "release"), Err(RedKind::Malformed));
+    // This tree's own manifest, through its comments and its non-ASCII lines.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+    let text = std::fs::read_to_string(&root).expect("the root manifest");
+    assert_eq!(cgu(&text, "release"), Ok((16, false)), "the root [profile.release] sets no codegen-units (its comment says why)");
+    assert_eq!(cgu(&text, "bench"), Ok((1, true)));
+}
+
+/// Ruling 57's check on the final line: exactly our token (plus cargo's when the profile sets
+/// one), every value the effective one, and a non-incremental build.
+#[test]
+fn the_final_line_carries_exactly_the_effective_codegen_units() {
+    let (sixteen, eight) = (CodegenUnits { n: 16, set_by_profile: false }, CodegenUnits { n: 8, set_by_profile: true });
+    let check = |line: &str, c: CodegenUnits| objbuild::check_final_codegen_units(line, c).map_err(|e| e.kind);
+    let ours = "Running `rustc --crate-name r -C opt-level=3 -C lto=fat --emit=obj --print link-args -C codegen-units=16 -C 'link-arg=/MAP:D:/m/r.map' -C target-cpu=x86-64-v3`";
+    assert_eq!(check(ours, sixteen), Ok(()));
+    assert_eq!(check(&ours.replace(" -C codegen-units=16", ""), sixteen), Err(RedKind::Mismatch), "no token: rustc would codegen one unit");
+    assert_eq!(check(&ours.replace("codegen-units=16", "codegen-units=1"), sixteen), Err(RedKind::Mismatch));
+    let foreign = ours.replace("x86-64-v3`", "x86-64-v3 -C codegen-units=4`");
+    assert_eq!(check(&foreign, sixteen), Err(RedKind::Mismatch), "a rustflags value the manifest does not show");
+    let both = ours.replace("-C lto=fat", "-C lto=fat -C codegen-units=8").replace("codegen-units=16", "codegen-units=8");
+    assert_eq!(check(&both, eight), Ok(()));
+    assert_eq!(check(&ours.replace("codegen-units=16", "codegen-units=8"), eight), Err(RedKind::Mismatch), "the profile's value but not cargo's token");
+    assert_eq!(check(&ours.replace("-C lto=fat", "-C lto=fat -Ccodegen-units=8").replace("codegen-units=16", "codegen-units=8"), eight), Ok(()));
+    assert_eq!(check(&ours.replace("-C lto=fat", "-C lto=fat -C 'incremental=D:/t/i'"), sixteen), Err(RedKind::Mismatch));
 }
 
 /// What `unit` writes, `unit-compare` reads back unchanged.

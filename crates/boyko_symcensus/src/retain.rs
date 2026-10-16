@@ -219,6 +219,71 @@ pub fn check_profile_premise(root_manifest_text: &str) -> Result<()> {
     Ok(())
 }
 
+/// The value of `key` in a comment-stripped manifest line `key = value`, quotes removed.
+fn manifest_value<'t>(line: &'t str, key: &str) -> Option<&'t str> {
+    let (k, v) = line.split_once('=')?;
+    (k.trim() == key).then(|| v.trim().trim_matches('"'))
+}
+
+/// The codegen-units an IB build of `profile` passes to its final unit (orchestrator ruling 57).
+/// This is the profile's own `codegen-units`, or the nearest one up its `inherits` chain
+/// (`bench` → `release`, `test`/`doc` → `dev` when not stated). If none is set, it is rustc's
+/// non-incremental default, [`objbuild::RUSTC_NON_INCREMENTAL_CODEGEN_UNITS`].
+///
+/// Only the root manifest's `[profile.<name>]` tables are read. `objbuild::build` checks the
+/// result against the final unit's rustc line, so a value from anywhere else is RED there, never
+/// silently overridden ([`objbuild::check_final_codegen_units`]). RED [`Malformed`](RedKind::Malformed)
+/// on a value that is not a positive integer, on a custom profile without `inherits`, or on an
+/// `inherits` cycle.
+pub fn profile_codegen_units(root_manifest_text: &str, profile: &str) -> Result<objbuild::CodegenUnits> {
+    let mut tables: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+    let mut current: Option<usize> = None;
+    for line in root_manifest_text.lines() {
+        let t = line.split('#').next().unwrap_or("").trim();
+        if t.starts_with('[') {
+            current = t.strip_prefix("[profile.").and_then(|r| r.strip_suffix(']')).filter(|n| !n.contains(['.', '[', ']'])).map(|n| {
+                tables.push((n.trim().to_owned(), None, None));
+                tables.len() - 1
+            });
+            continue;
+        }
+        let Some(i) = current else { continue };
+        if let Some(v) = manifest_value(t, "codegen-units") {
+            tables[i].1 = Some(v.to_owned());
+        } else if let Some(v) = manifest_value(t, "inherits") {
+            tables[i].2 = Some(v.to_owned());
+        }
+    }
+    let mut name = profile.to_owned();
+    let mut seen: Vec<String> = Vec::new();
+    loop {
+        if seen.contains(&name) {
+            return Err(Red::new(RedKind::Malformed, format!("the profiles' `inherits` chain from `{profile}` loops at `{name}`")));
+        }
+        seen.push(name.clone());
+        let table = tables.iter().find(|(n, _, _)| *n == name);
+        if let Some(v) = table.and_then(|(_, c, _)| c.as_deref()) {
+            let n = v.parse::<u32>().ok().filter(|n| *n > 0).ok_or_else(|| {
+                Red::new(RedKind::Malformed, format!("[profile.{name}] codegen-units = {v} is not a positive integer"))
+            })?;
+            return Ok(objbuild::CodegenUnits { n, set_by_profile: true });
+        }
+        let parent = match (table.and_then(|(_, _, p)| p.clone()), name.as_str()) {
+            (Some(p), _) => Some(p),
+            (None, "bench") => Some("release".to_owned()),
+            (None, "test" | "doc") => Some("dev".to_owned()),
+            (None, "release" | "dev") => None,
+            (None, other) => {
+                return Err(Red::new(RedKind::Malformed, format!("[profile.{other}] has no `inherits` (from `{profile}`); its codegen-units cannot be read")));
+            }
+        };
+        match parent {
+            Some(p) => name = p,
+            None => return Ok(objbuild::CodegenUnits { n: objbuild::RUSTC_NON_INCREMENTAL_CODEGEN_UNITS, set_by_profile: false }),
+        }
+    }
+}
+
 fn mtime(p: &Path) -> Option<SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
@@ -236,10 +301,20 @@ fn copy_into(src: &Path, dir: &Path) -> Result<PathBuf> {
 /// stamps), so nothing that was read can have been rewritten by a foreign build in between.
 ///
 /// `ib_key`: the final unit's compiler must be the one the key names ([`key::check_invoked_rustc`]).
+///
+/// The final unit is compiled at the profile's effective codegen-units ([`profile_codegen_units`],
+/// orchestrator ruling 57). Without it, `--emit=obj` would make it a codegen-units = 1 build and not
+/// the shipped one. The value is the profile's, never the caller's: a request that already names
+/// one is RED.
 pub fn build_retained(ctx: &Ctx, req: &Request<'_>, retain: &RetainDir, tag: &str, ib_key: &Key) -> Result<Retained> {
     if ctx.host.env != "msvc" {
         return Err(Red::new(RedKind::Usage, "IB builds are Windows (msvc) only: the `/MAP` link argument and every IB claim are"));
     }
+    if req.codegen_units.is_some() {
+        return Err(Red::new(RedKind::Usage, "an IB build's codegen-units is the profile's effective value (ruling 57); a request does not choose it"));
+    }
+    let manifest = ctx.root.join("Cargo.toml");
+    let cgu = profile_codegen_units(&std::fs::read_to_string(&manifest).map_err(|e| Red::io(&manifest, &e))?, req.profile)?;
     let dir = retain.tag_dir(tag)?;
     let map = dir.join(format!("{tag}.map"));
     let mut extra: Vec<String> = req.extra_rustc.to_vec();
@@ -249,6 +324,7 @@ pub fn build_retained(ctx: &Ctx, req: &Request<'_>, retain: &RetainDir, tag: &st
         subject: req.subject,
         profile: req.profile,
         extra_rustc: &extra,
+        codegen_units: Some(cgu),
         features: req.features,
         env: req.env,
         locked: true,
