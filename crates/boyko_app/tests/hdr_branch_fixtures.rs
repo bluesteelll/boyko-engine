@@ -9,10 +9,11 @@
 //! `BOYKO_IMAGE_DUMP=lit`), or — for the SSAA box, whose output `aa_out` has no dump name — from
 //! the host dump BMP (`BOYKO_IMAGE_DUMP` and `BOYKO_HOST_DUMP` are exclusive).
 //!
-//! - **Constant branches** (`lit = base`, `BACKGROUND_BASE`, `FORWARD_LIT_CLEAR`): the region equals
-//!   the constant's 8-bit value exactly.
+//! - **Constant branches** (`lit = base`, `BACKGROUND_BASE`, `FORWARD_LIT_CLEAR`): every texel of
+//!   the region is a UNORM conversion of the constant the spec permits — per channel one of the two
+//!   codes nearest `f · 255` ([`constant8`]; a rounding mode is not the spec's).
 //! - **Producer branches**: the receipt keys that select them hold the fixture's values, and the
-//!   region equals no constant.
+//!   region is not all conversions of the background constant.
 //! - **Hot variants** (every lit-store producer and the SSAA box): an emissive-only surface (black
 //!   albedo, no light, no SkyLight, SSAO / DDGI off — rule xvi's zeroed terms) or a uniform sky
 //!   (`sky = ground = r`, no directional) at `r = 2.0`; the region equals
@@ -155,9 +156,23 @@ fn fixture(name: &str) -> &'static Fixture {
     FIXTURES.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("{ENV_FIXTURE}={name} names no fixture"))
 }
 
-/// The 8-bit value of a linear constant as the RGBA8 `lit` store writes it (round to nearest).
-fn constant8(c: [f32; 3]) -> [u8; 3] {
-    c.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+/// The 8-bit codes the RGBA8 `lit` store may write for a linear constant, per channel `(lo, hi)`.
+///
+/// Vulkan's float → UNORM conversion (Fundamentals, "Conversion from Floating-Point to Normalized
+/// Fixed-Point") returns ONE OF the two integers nearest `f · 255` — it "should" round to nearest,
+/// it must return the integer when the product is one — so the oracle is that pair, not a rounding
+/// mode (triage r1 F3: the RTX 3060 writes blue `0.1 · 255 = 25.5000004` as 25). The product is
+/// taken in f64, where it is exact for an f32 `f`; `lo == hi` exactly when it is integral.
+fn constant8(c: [f32; 3]) -> [(u8, u8); 3] {
+    c.map(|v| {
+        let r = f64::from(v.clamp(0.0, 1.0)) * 255.0;
+        (r.floor() as u8, r.ceil() as u8)
+    })
+}
+
+/// `p` is a texel the UNORM conversion of the constant `c` may produce ([`constant8`]).
+fn admits(c: [f32; 3], p: [u8; 3]) -> bool {
+    constant8(c).iter().zip(p).all(|(&(lo, hi), v)| (lo..=hi).contains(&v))
 }
 
 /// `quantize8(post_final_eval(r))` — the hot region's oracle: the traced body over a one-texel
@@ -350,10 +365,14 @@ fn check(f: &Fixture, hot: bool, c: &Capture) -> Result<(), String> {
         };
     }
     match f.expect {
-        Expect::Constant(k) => {
-            let want = constant8(k);
-            if all(want, 0) { Ok(()) } else { Err(format!("{}: the constant region is not {want:?} (first texel {:?})", f.name, c.region[0])) }
-        }
+        Expect::Constant(k) => match c.region.iter().find(|p| !admits(k, **p)) {
+            None => Ok(()),
+            Some(p) => Err(format!(
+                "{}: the constant region is not a UNORM conversion of {k:?} (per channel {:?}; first other texel {p:?})",
+                f.name,
+                constant8(k)
+            )),
+        },
         Expect::Producer(keys) => {
             for (k, v) in keys {
                 let got = c.receipt.config(k);
@@ -361,9 +380,12 @@ fn check(f: &Fixture, hot: bool, c: &Capture) -> Result<(), String> {
                     return Err(format!("{}: PREMISE [config] {k} = {got}, the fixture needs {v}", f.name));
                 }
             }
-            let base = constant8(BACKGROUND);
-            if c.region.iter().all(|p| *p == base) {
-                return Err(format!("{}: region empty — every texel is the background constant {base:?}", f.name));
+            if c.region.iter().all(|p| admits(BACKGROUND, *p)) {
+                return Err(format!(
+                    "{}: region empty — every texel is a UNORM conversion of the background constant (per channel {:?})",
+                    f.name,
+                    constant8(BACKGROUND)
+                ));
             }
             Ok(())
         }
@@ -688,7 +710,54 @@ fn the_hot_oracle_separates_hot_from_cold() {
     let cold = hot8(0.5);
     assert!(hot.iter().all(|v| (200..255).contains(v)), "ACES(2) through the OETF is ≈ 230: {hot:?}");
     assert!(hot.iter().zip(&cold).all(|(h, c)| h.abs_diff(*c) > 1), "{hot:?} vs {cold:?}");
-    assert_eq!(constant8(BACKGROUND), [13, 13, 26]);
+    assert_eq!(constant8(BACKGROUND), [(12, 13), (12, 13), (25, 26)]);
+    assert_eq!(constant8([0.0, 1.0, 0.5]), [(0, 0), (255, 255), (127, 128)], "an integral product has one code");
+}
+
+/// A host [`Capture`] whose region is `n` copies of `texel`, with a `[config]` of `keys`.
+fn synthetic_capture(texel: [u8; 3], n: usize, keys: &[(&str, u64)]) -> Capture {
+    let mut text = String::from("[config]\n");
+    for (k, v) in keys {
+        text.push_str(&format!("{k} = {v}\n"));
+    }
+    Capture { region: vec![texel; n], receipt: Receipt::parse(&text).expect("invariant: a synthetic receipt parses") }
+}
+
+/// **A constant region is judged by the spec's conversion, not by round-half-up** (triage r1 F3):
+/// Vulkan's float → UNORM conversion returns either integer nearest `f · 255` (exactly the integer
+/// when the product is one). The RTX 3060 writes BACKGROUND (`[0.05, 0.05, 0.1]`, blue `0.1 · 255 =
+/// 25.5000004`) as `[13, 13, 25]` (`px0/gl/fixtures.log`, the three constant drivers), which the
+/// round-half-up oracle `[13, 13, 26]` refused; both are permitted, a code two steps off is not.
+#[test]
+fn a_constant_region_admits_both_spec_neighbours() {
+    for name in ["deferred_base", "forward_sky_base", "forward_lit_clear"] {
+        let f = fixture(name);
+        for texel in [[13, 13, 25], [13, 13, 26], [12, 12, 25]] {
+            let c = synthetic_capture(texel, 64, &[]);
+            assert_eq!(check(f, false, &c), Ok(()), "{name}: {texel:?} is a permitted conversion of the background");
+        }
+        for texel in [[13, 13, 24], [14, 13, 25], [13, 11, 26]] {
+            let c = synthetic_capture(texel, 64, &[]);
+            assert!(check(f, false, &c).is_err(), "{name}: {texel:?} is no conversion of the background");
+        }
+    }
+}
+
+/// **A producer region showing only the background is empty, under the same conversion** (triage
+/// r1 F3): the guard compared with round-half-up `[13, 13, 26]`, so on the RTX 3060 — whose
+/// background is `[13, 13, 25]` — a producer fixture whose region showed nothing but background
+/// passed it. One producer texel in the region clears the guard.
+#[test]
+fn a_background_only_producer_region_is_empty() {
+    let f = fixture("forward_sky");
+    let keys = [("path_is_forward", 1), ("light_sky", 1)];
+    for texel in [[13, 13, 25], [13, 13, 26]] {
+        let e = check(f, false, &synthetic_capture(texel, 64, &keys)).expect_err("a background-only region must red");
+        assert!(e.contains("region empty"), "{texel:?}: {e}");
+    }
+    let mut lit = synthetic_capture([13, 13, 25], 64, &keys);
+    lit.region[7] = [90, 120, 200];
+    assert_eq!(check(f, false, &lit), Ok(()));
 }
 
 /// Every fixture name is unique and every lit-store producer has a hot fixture.
