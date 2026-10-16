@@ -1674,6 +1674,138 @@ BOYKO_RENDER_PATH        = "deferred"
 BOYKO_PARTICLE_SDF       = "1"
 BOYKO_PARTICLE_COLLIDE   = "1"
 
+[grand_showcase_2mat_fxaa]
+# Render wave PX0 (H3 Scope 7; px0/cut.md D-A1): the FXAA reference of [grand_showcase_2mat]'s pinned five-sphere scene (Deferred), the
+# frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
+# unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
+# ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
+# it after the owner's visual check.
+crate           = "boyko-app"
+test_binary     = "grand_showcase_2mat"
+test_name       = "grand_showcase_2mat_aa_pin_dump"
+bmp             = "D:\\tmp\\grand_showcase_2mat_fxaa.bmp"
+width           = 512
+height          = 512
+sha256_software = "PENDING"
+
+[grand_showcase_2mat_fxaa.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\grand_showcase_2mat_fxaa.bmp"
+BOYKO_AA                 = "fxaa"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[grand_showcase_2mat_smaa]
+# Render wave PX0 (H3 Scope 7; px0/cut.md D-A1): the SMAA reference of [grand_showcase_2mat]'s pinned five-sphere scene (Deferred), the
+# frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
+# unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
+# ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
+# it after the owner's visual check.
+crate           = "boyko-app"
+test_binary     = "grand_showcase_2mat"
+test_name       = "grand_showcase_2mat_aa_pin_dump"
+bmp             = "D:\\tmp\\grand_showcase_2mat_smaa.bmp"
+width           = 512
+height          = 512
+sha256_software = "PENDING"
+
+[grand_showcase_2mat_smaa.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\grand_showcase_2mat_smaa.bmp"
+BOYKO_AA                 = "smaa"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[grand_showcase_2mat_ssaa]
+# Render wave PX0 (H3 Scope 7; px0/cut.md D-A1): the SSAA (2x supersample, boot-fixed) reference of [grand_showcase_2mat]'s pinned five-sphere scene (Deferred), the
+# frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
+# unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
+# ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
+# it after the owner's visual check.
+crate           = "boyko-app"
+test_binary     = "grand_showcase_2mat"
+test_name       = "grand_showcase_2mat_aa_pin_dump"
+bmp             = "D:\\tmp\\grand_showcase_2mat_ssaa.bmp"
+width           = 512
+height          = 512
+sha256_software = "PENDING"
+
+[grand_showcase_2mat_ssaa.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\grand_showcase_2mat_ssaa.bmp"
+BOYKO_AA                 = "ssaa"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_mesh_tex_fxaa]
+# Render wave PX0 (H3 Scope 7; px0/cut.md D-A1): the FXAA reference of [vb_mesh_tex]'s pinned textured five-sphere scene (VisibilityBuffer x Mesh), the
+# frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
+# unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
+# ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
+# it after the owner's visual check.
+crate           = "boyko-app"
+test_binary     = "vb_mesh_tex"
+test_name       = "vb_mesh_tex_aa_pin_dump"
+bmp             = "D:\\tmp\\vb_mesh_tex_fxaa.bmp"
+width           = 512
+height          = 512
+sha256_software = "PENDING"
+
+[vb_mesh_tex_fxaa.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_tex_fxaa.bmp"
+BOYKO_AA                 = "fxaa"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_mesh_tex_smaa]
+# Render wave PX0 (H3 Scope 7; px0/cut.md D-A1): the SMAA reference of [vb_mesh_tex]'s pinned textured five-sphere scene (VisibilityBuffer x Mesh), the
+# frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
+# unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
+# ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
+# it after the owner's visual check.
+crate           = "boyko-app"
+test_binary     = "vb_mesh_tex"
+test_name       = "vb_mesh_tex_aa_pin_dump"
+bmp             = "D:\\tmp\\vb_mesh_tex_smaa.bmp"
+width           = 512
+height          = 512
+sha256_software = "PENDING"
+
+[vb_mesh_tex_smaa.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_tex_smaa.bmp"
+BOYKO_AA                 = "smaa"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
+[vb_mesh_tex_ssaa]
+# Render wave PX0 (H3 Scope 7; px0/cut.md D-A1): the SSAA (2x supersample, boot-fixed) reference of [vb_mesh_tex]'s pinned textured five-sphere scene (VisibilityBuffer x Mesh), the
+# frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
+# unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
+# ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
+# it after the owner's visual check.
+crate           = "boyko-app"
+test_binary     = "vb_mesh_tex"
+test_name       = "vb_mesh_tex_aa_pin_dump"
+bmp             = "D:\\tmp\\vb_mesh_tex_ssaa.bmp"
+width           = 512
+height          = 512
+sha256_software = "PENDING"
+
+[vb_mesh_tex_ssaa.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_tex_ssaa.bmp"
+BOYKO_AA                 = "ssaa"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
 # ===============================================================================================
 # TOLERANCE-MODE PINS - the schema (render wave PX0, AD-20; plan H3 Scope 6, px0/cut.md D-T3).
 # Kept at the END of this file so adding it moved no line any document cites.

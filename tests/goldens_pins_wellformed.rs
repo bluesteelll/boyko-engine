@@ -241,9 +241,10 @@ fn a_pin_that_names_its_own_dump_path_names_the_one_it_hashes() {
     // `BOYKO_HOST_DUMP`, the render lands somewhere else and the script either aborts on a missing
     // file or — with a stale artifact from an earlier run present — hashes the wrong image.
     //
-    // CONDITIONAL, and measured before it was written: 31 of the 34 pins name `BOYKO_HOST_DUMP` and
-    // all 31 agree (recounted 2026-09-18, after `deferred_sdf_casters` and `vb_mesh_shadows` were
-    // added; it was 29 of 32 before); three (`grand_showcase`, `deferred_sdf_only`,
+    // CONDITIONAL, and measured before it was written: 37 of the 40 pins name `BOYKO_HOST_DUMP` and
+    // all 37 agree (recounted at render wave PX0, which added the six AA reference pins, each with
+    // its own dump path; 31 of 34 on 2026-09-18, after `deferred_sdf_casters` and `vb_mesh_shadows`
+    // were added; 29 of 32 before); three (`grand_showcase`, `deferred_sdf_only`,
     // `deferred_mesh_only`) omit the key and let their fixture's own default path stand. Omission is
     // therefore legal and disagreement is not.
     let text = read_pins();

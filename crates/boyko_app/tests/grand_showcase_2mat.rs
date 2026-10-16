@@ -236,3 +236,50 @@ fn grand_showcase_2mat_screenshot_dump() {
     }
     app.run();
 }
+
+// ===============================================================================================
+// Render wave PX0 (H3 Scope 7; px0/cut.md D-A1): the AA REFERENCE pins
+// ===============================================================================================
+
+#[path = "common/aa_pin.rs"]
+mod aa_pin;
+
+/// **The FXAA / SMAA / SSAA reference pins** (`[grand_showcase_2mat_{fxaa,smaa,ssaa}]`, PENDING
+/// until GL-H0's bless): the pinned [`setup`] at 512², the AA mode REQUIRED from `BOYKO_AA`
+/// (`aa_pin::parse_aa_pin` panics naming the variable on an unset or unknown value), SSAA through
+/// `with_ssaa_scale(2)`. No eval knob is read: the frame is the pinned scene and the AA pass alone.
+#[test]
+#[ignore = "gpu-windowed: the PX0 AA reference pin dump (BOYKO_AA=fxaa|smaa|ssaa required); run through scripts/golden.ps1 with --test-threads=1"]
+fn grand_showcase_2mat_aa_pin_dump() {
+    let pin = aa_pin::aa_pin_from_env();
+    let mut app = App::new();
+    app.add_plugins(aa_pin::plugins("boyko_engine grand showcase materials AA pin", 512, 512, pin));
+    app.add_startup_system(setup);
+    if let Some(cfg) = aa_pin::config(pin) {
+        app.insert_resource(cfg);
+    }
+    app.run();
+}
+
+/// The pin fn's env reading, host-side: an unset `BOYKO_AA` panics naming it.
+#[test]
+#[should_panic(expected = "BOYKO_AA")]
+fn an_aa_pin_without_boyko_aa_panics_naming_it() {
+    aa_pin::parse_aa_pin(None);
+}
+
+/// A mistyped mode panics too — never an AA-off frame under an AA pin's name.
+#[test]
+#[should_panic(expected = "BOYKO_AA")]
+fn an_aa_pin_with_a_mistyped_mode_panics() {
+    aa_pin::parse_aa_pin(Some("fxa"));
+}
+
+/// Each of the three modes reads as itself.
+#[test]
+fn an_aa_pin_reads_each_mode() {
+    assert_eq!(aa_pin::parse_aa_pin(Some("fxaa")), aa_pin::AaPin::Fxaa);
+    assert_eq!(aa_pin::parse_aa_pin(Some("smaa")), aa_pin::AaPin::Smaa);
+    assert_eq!(aa_pin::parse_aa_pin(Some("ssaa")), aa_pin::AaPin::Ssaa);
+    assert!(aa_pin::config(aa_pin::AaPin::Ssaa).is_none(), "SSAA's AaConfig is the runner's");
+}
