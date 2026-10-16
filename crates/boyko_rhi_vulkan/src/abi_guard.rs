@@ -266,6 +266,12 @@ const _: () = assert!(
     Format::R32G32Uint.as_i32() == VK_FORMAT_R32G32_UINT,
     "Format::R32G32Uint must equal VK_FORMAT_R32G32_UINT"
 );
+// The one `Format` variant that had no pin (render wave PX0 triage r1 W3: `optimal_tiling_features`
+// takes a `Format` on the strength of every discriminant being a valid `VkFormat`).
+const _: () = assert!(
+    Format::R32G32B32Sfloat.as_i32() == VK_FORMAT_R32G32B32_SFLOAT,
+    "Format::R32G32B32Sfloat must equal VK_FORMAT_R32G32B32_SFLOAT"
+);
 // Render P7: the SSAO term `gSsao` format (`as_i32()` mapped in `create_texture`).
 const _: () = assert!(
     Format::R8Unorm.as_i32() == VK_FORMAT_R8_UNORM,

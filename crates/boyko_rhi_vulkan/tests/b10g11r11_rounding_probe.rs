@@ -509,7 +509,7 @@ fn b10g11r11_rounding_probe() {
 
     // The premises: AD-1 requires every path on both formats, so a missing feature is a RED.
     let mut missing = Vec::new();
-    for (name, fmt) in [("B10G11R11_UFLOAT_PACK32", 122), ("R16G16B16A16_SFLOAT", 97)] {
+    for (name, fmt) in [("B10G11R11_UFLOAT_PACK32", Format::B10G11R11UfloatPack32), ("R16G16B16A16_SFLOAT", Format::R16G16B16A16Sfloat)] {
         let f = ctx.optimal_tiling_features(fmt);
         for (bit, what) in [(FEAT_STORAGE, "STORAGE_IMAGE"), (FEAT_COLOR, "COLOR_ATTACHMENT"), (FEAT_BLEND, "COLOR_ATTACHMENT_BLEND")] {
             if f & bit == 0 {
