@@ -10,6 +10,13 @@
 //!   side and `<T>` on the other). Nothing is removed: `-C metadata`, `-C extra-filename` and every
 //!   `--extern` file name are tree-independent (cargo hashes a path package's id relative to the
 //!   workspace root), so they must match.
+//!
+//!   Its premise is checked, not assumed (orchestrator ruling 61): each of the two paths is written
+//!   in ONE separator form. A mixed form (`D:/s/rc\<id>\target`, which `Path::join` makes of a
+//!   forward-slash base on Windows) equals neither substituted form, so it would read as a
+//!   difference on every line. [`UnitRun::start`] is therefore RED [`Usage`](RedKind::Usage) on a
+//!   mixed `Ctx.target` or `Ctx.root`, and [`unit_compare`] refuses a receipt that carries one
+//!   ([`check_single_form`]). The list itself is unchanged.
 //! * (d3), a final unit's line: (d2), then exactly these: `-C metadata=…` and `-C extra-filename=…`
 //!   dropped (they hash the enabled pin feature); `ib-pin-*` dropped from `--cfg feature=` and from the
 //!   `--check-cfg` values; the one `-C link-arg=/MAP:…` value → `<MAP>` (the retain directory, per
@@ -37,6 +44,27 @@ pub const RECEIPT_FORMAT: &str = "ug15-ib-receipt v1";
 /// The diagnostic (f) requires on every runner build: rustc's `unused_crate_dependencies` for the
 /// host, which fires exactly when no path names the extern, i.e. when rustc never loads it.
 pub const F_NEEDLE: &str = "extern crate `boyko_app` is unused in crate `jolt_parity_pyramid`";
+
+/// Whether `path` carries both separator forms, `/` and `\`.
+#[must_use]
+pub fn mixes_separators(path: &str) -> bool {
+    path.contains('/') && path.contains('\\')
+}
+
+/// (d2)'s premise (orchestrator ruling 61): `path`, the tree's `CARGO_TARGET_DIR` or its root, is in
+/// one separator form. RED [`Usage`](RedKind::Usage) when it mixes `/` and `\`, because neither of
+/// the two forms [`normalize_d2`] substitutes would match it.
+pub fn check_single_form(what: &str, path: &str) -> Result<()> {
+    if mixes_separators(path) {
+        return Err(Red::new(
+            RedKind::Usage,
+            format!(
+                "{what} `{path}` mixes `/` and `\\`: (d2) substitutes a path in its two single-separator forms only, so a mixed form would read as a difference on every line. Write it in one form"
+            ),
+        ));
+    }
+    Ok(())
+}
 
 /// (d2): `target` → `<T>` and `root` → `<R>`, longer string first, both separator forms.
 #[must_use]
@@ -934,9 +962,13 @@ pub struct UnitRun<'c> {
 }
 
 impl<'c> UnitRun<'c> {
-    /// Computes the key (RED [`Stale`](RedKind::Stale) on a stale executable), checks the profile
-    /// premise, reads the closure, opens the retain directory and starts the receipt.
+    /// Checks that the target dir and the root are each in one separator form (RED
+    /// [`Usage`](RedKind::Usage) otherwise, before anything else: ruling 61), computes the key (RED
+    /// [`Stale`](RedKind::Stale) on a stale executable), checks the profile premise, reads the
+    /// closure, opens the retain directory and starts the receipt.
     pub fn start(ctx: &'c Ctx, retain: &Path, command: &str) -> Result<Self> {
+        check_single_form("the target dir (CARGO_TARGET_DIR)", &ctx.target.to_string_lossy())?;
+        check_single_form("the tree root", &ctx.root.to_string_lossy())?;
         let key = key::instrument_key(&ctx.root, &crate::objbuild::cargo_program())?;
         let manifest = ctx.root.join("Cargo.toml");
         retain::check_profile_premise(&std::fs::read_to_string(&manifest).map_err(|e| Red::io(&manifest, &e))?)?;
@@ -1160,6 +1192,15 @@ pub fn unit_compare(pre: &Receipt, tip: &Receipt) -> CompareReport {
     if !pre.builds.iter().any(|b| b.0 == TOUCHED) || !tip.builds.iter().any(|b| b.0 == TOUCHED) {
         r.refusals.push("a receipt has no `runner` build, the touched build (d1) and (d2) read".to_owned());
         return r;
+    }
+    // (d2)'s premise (ruling 61): a receipt written before the check, or by another tool, is
+    // refused by name instead of reading as a difference on every line.
+    for (which, rc) in [("pre", pre), ("tip", tip)] {
+        for (what, path) in [("target", &rc.target), ("root", &rc.root)] {
+            if let Err(red) = check_single_form(&format!("the {which} receipt's {what}"), path) {
+                r.refusals.push(red.to_string());
+            }
+        }
     }
     let closure_names = |rc: &Receipt| -> BTreeSet<(String, bool)> { rc.closure.iter().map(|c| (c.crate_name.clone(), c.workspace)).collect() };
     if closure_names(pre) != closure_names(tip) {

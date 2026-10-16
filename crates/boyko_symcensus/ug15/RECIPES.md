@@ -90,6 +90,13 @@ linker writes there), hashed, and checked intact before the next build starts. T
 closed vocabulary: `runner`, `runner-<pin>`, `probe`, `probe-<pin>`, `probe-wide`, `plain-<tag>`,
 `rc<NN><x>-<tag>`.
 
+**One separator form (orchestrator ruling 61).** `--scratch`, `CARGO_TARGET_DIR` and the tree root
+must each use one separator, `/` or `\`. (d2) substitutes the target dir and the root in their two
+single-separator forms, so a mixed path would read as a difference on every line. A mixed
+`--scratch` is RED before any build; every IB run is RED on a mixed target dir or root; and
+`unit-compare` refuses a receipt that carries one. The scratch trees' paths are appended in
+`--scratch`'s own form (a `Path::join` on Windows mixed them at C7's first run).
+
 **Codegen units (orchestrator ruling 57).** With codegen-units unset, `--emit=obj` makes rustc
 codegen one unit. Every IB build therefore passes `-C codegen-units=<n>`, where n is the profile's
 effective value: its own `codegen-units`, or the nearest one up `inherits`, else rustc's

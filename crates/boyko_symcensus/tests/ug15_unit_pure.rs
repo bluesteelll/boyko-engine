@@ -1,8 +1,8 @@
 //! IB P0r, V11's pure pieces (no cargo build): the closed normalisation list of `ug15
 //! unit-compare` (O17's order, (d3)'s list), the instrument key, the retain directory's refusals,
 //! the tag vocabulary, (f)'s diagnostic match, the host/target premise, the receipt format,
-//! ruling 57's codegen-units (the profile chain and the final-line check), and the controls'
-//! package key and scratch edits.
+//! ruling 57's codegen-units (the profile chain and the final-line check), the controls'
+//! package key and scratch edits, and ruling 61's one-separator-form premise and scratch paths.
 //!
 //! Each assertion is the one its red-first mutation turned red (recorded in the commit message).
 
@@ -277,4 +277,55 @@ fn the_receipt_round_trips() {
     assert_eq!(r.libs[0].file_name(), "libboyko_ecs-0123.rlib");
     assert_eq!(Receipt::parse("ug15-ib-receipt v0\n").map_err(|e| e.kind), Err(RedKind::Malformed));
     assert_eq!(Receipt::parse(&format!("{}bogus\tx\n", unit::RECEIPT_FORMAT.to_owned() + "\n")).map_err(|e| e.kind), Err(RedKind::Malformed));
+}
+
+/// Ruling 61: the scratch paths are appended in `--scratch`'s own separator form. The comparison
+/// is on the strings: `Path` equality on Windows treats `/` and `\` alike, and would not see it.
+#[test]
+fn scratch_paths_keep_the_scratch_separator_form() {
+    let s = |p: &Path| p.to_str().expect("utf-8").to_owned();
+    let fwd = controls::scratch_paths(Path::new("D:/tmp/ib/rc/"), "rc11e").expect("a forward-slash scratch");
+    assert_eq!(
+        [s(&fwd.dir), s(&fwd.tree), s(&fwd.target), s(&fwd.retained), s(&fwd.receipt)],
+        ["D:/tmp/ib/rc/rc11e", "D:/tmp/ib/rc/rc11e/tree", "D:/tmp/ib/rc/rc11e/target", "D:/tmp/ib/rc/rc11e/retained", "D:/tmp/ib/rc/rc11e/receipt.txt"]
+    );
+    let back = controls::scratch_paths(Path::new(r"D:\tmp\ib\rc"), "g-d").expect("a backslash scratch");
+    assert_eq!([s(&back.tree), s(&back.target)], [r"D:\tmp\ib\rc\g-d\tree", r"D:\tmp\ib\rc\g-d\target"]);
+    assert_eq!(controls::scratch_paths(Path::new(r"D:/tmp/ib\rc"), "rc11e").map_err(|e| e.kind), Err(RedKind::Usage));
+}
+
+/// Ruling 61: (d2)'s premise, one separator form per path, is RED wherever (d2) would read a
+/// mixed form: the check itself, an IB run's start (before the key, the graph or the retain
+/// directory), and `unit-compare` on a receipt that carries one.
+#[test]
+fn a_mixed_separator_path_is_refused() {
+    assert!(unit::check_single_form("t", "D:/a/b").is_ok());
+    assert!(unit::check_single_form("t", r"D:\a\b").is_ok());
+    assert_eq!(unit::check_single_form("t", r"D:/a\b").map_err(|e| e.kind), Err(RedKind::Usage));
+
+    let host = boyko_symcensus::host::Host { triple: "x86_64-pc-windows-msvc".to_owned(), env: "msvc", rustc_vv: String::new(), sysroot: PathBuf::new() };
+    let retain = scratch("mixed");
+    let tree = boyko_symcensus::host::workspace_root();
+    for (root, target) in [(tree.clone(), PathBuf::from(r"D:/t\x")), (PathBuf::from(r"D:/w\fm"), PathBuf::from("D:/t/x"))] {
+        let ctx = objbuild::Ctx { root, target, host: host.clone(), echo: |_| {} };
+        let got = unit::UnitRun::start(&ctx, &retain, "test").map(|_| ()).map_err(|e| e.kind);
+        let created = retain.exists();
+        if created {
+            std::fs::remove_dir_all(&retain).expect("scratch cleanup");
+        }
+        assert_eq!(got, Err(RedKind::Usage), "{}", ctx.target.display());
+        assert!(!created, "refused before the retain directory is opened");
+    }
+
+    let rc = |target: &str| Receipt {
+        target: target.to_owned(),
+        root: r"D:\w\fm".to_owned(),
+        builds: vec![("runner".to_owned(), "parity_runner".to_owned(), "-".to_owned())],
+        ..Receipt::default()
+    };
+    let mixed = |rep: &unit::CompareReport| rep.refusals.iter().filter(|r| r.contains("mixes")).cloned().collect::<Vec<_>>();
+    assert_eq!(mixed(&unit::unit_compare(&rc("D:/t/x"), &rc(r"D:\t\y"))), Vec::<String>::new());
+    let bad = mixed(&unit::unit_compare(&rc("D:/t/x"), &rc(r"D:/t\y")));
+    assert_eq!(bad.len(), 1, "{bad:?}");
+    assert!(bad[0].contains("the tip receipt's target"), "{bad:?}");
 }

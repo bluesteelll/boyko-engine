@@ -32,6 +32,15 @@
 //! not touch. Under RC-11 (e) the profile sets `codegen-units = 8`, so that tree's final lines carry
 //! `-C codegen-units=8` twice (cargo's and ours) against the reference's single `=16`. (d3)'s closed
 //! list does not normalise that token, so (d3) is red for that reason as well.
+//!
+//! # Scratch paths in one separator form (orchestrator ruling 61)
+//!
+//! A scratch tree's target dir is its receipt's `target`, which (d2) substitutes in its two
+//! single-separator forms. [`scratch_paths`] therefore appends below `--scratch` with `--scratch`'s
+//! own separator, never with `Path::join` (on Windows that gave `D:/…/rc\<id>\target`, and RC-11
+//! (e), RC-11 (f) and G-d read UNEXPECTED at C7's first run). A `--scratch` that mixes the forms is
+//! RED before any build, and so is a mixed `Ctx.target` or `Ctx.root` in any IB run
+//! ([`unit::check_single_form`]). The normalisation list is unchanged.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -328,12 +337,40 @@ fn guarded_prune(root: &Path, scratch: &Path) -> Option<String> {
     if st.is_ok_and(|s| s.success()) { None } else { Some("git worktree prune failed".to_owned()) }
 }
 
-/// The paths of one scratch control.
-struct ScratchPaths {
-    dir: PathBuf,
-    tree: PathBuf,
-    target: PathBuf,
-    retained: PathBuf,
+/// The paths of one scratch control, each in `--scratch`'s own separator form ([`scratch_paths`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScratchPaths {
+    /// `<scratch>/<id>`: the marker, the logs, the edit's diff and the receipt.
+    pub dir: PathBuf,
+    /// `<scratch>/<id>/tree`: the checkout, and so the scratch `ug15`'s root.
+    pub tree: PathBuf,
+    /// `<scratch>/<id>/target`: the scratch tree's `CARGO_TARGET_DIR`, and so its receipt's `target`.
+    pub target: PathBuf,
+    /// `<scratch>/<id>/retained`: the scratch arm's retain directory.
+    pub retained: PathBuf,
+    /// `<scratch>/<id>/receipt.txt`: the scratch arm's receipt.
+    pub receipt: PathBuf,
+}
+
+/// The paths of scratch control `id` below `scratch`, appended with `scratch`'s own separator
+/// (orchestrator ruling 61). `Path::join` appends `\` on Windows, so a forward-slash `--scratch`
+/// gave the target dir `D:/…/rc\<id>\target`, which (d2)'s two single-form substitutions cannot
+/// match: every (d2) line, and the path words of (d3), then differed. RED
+/// [`Usage`](RedKind::Usage) when `scratch` itself mixes the forms or is not UTF-8.
+pub fn scratch_paths(scratch: &Path, id: &str) -> Result<ScratchPaths> {
+    let s = scratch.to_str().ok_or_else(|| Red::new(RedKind::Usage, format!("--scratch {} is not UTF-8", scratch.display())))?;
+    unit::check_single_form("--scratch", s)?;
+    debug_assert!(!id.contains(['/', '\\']), "invariant: a control id is one path component");
+    let sep = if s.contains('\\') {
+        '\\'
+    } else if s.contains('/') {
+        '/'
+    } else {
+        std::path::MAIN_SEPARATOR
+    };
+    let base = format!("{}{sep}{id}", s.trim_end_matches(['/', '\\']));
+    let at = |name: &str| PathBuf::from(format!("{base}{sep}{name}"));
+    Ok(ScratchPaths { tree: at("tree"), target: at("target"), retained: at("retained"), receipt: at("receipt.txt"), dir: PathBuf::from(base) })
 }
 
 /// A scratch tree's steps: check out HEAD, edit, apply the lock rule, build ITS OWN ug15, run its
@@ -362,7 +399,6 @@ fn scratch_steps(ctx: &Ctx, c: &ScratchControl, p: &ScratchPaths) -> Result<Rece
     }
     run_logged(cargo().args(["build", "-p", "boyko-symcensus", "--bin", "ug15", "--locked"]), &p.dir.join("ug15-build.log"), "the scratch tree's ug15 build")?;
     let exe = p.target.join("debug").join(format!("ug15{}", std::env::consts::EXE_SUFFIX));
-    let out = p.dir.join("receipt.txt");
     run_logged(
         Command::new(&exe)
             .current_dir(&p.tree)
@@ -370,11 +406,11 @@ fn scratch_steps(ctx: &Ctx, c: &ScratchControl, p: &ScratchPaths) -> Result<Rece
             .args(["unit-arm", "--arm", c.arm, "--retain"])
             .arg(&p.retained)
             .arg("--out")
-            .arg(&out),
+            .arg(&p.receipt),
         &p.dir.join("arm.log"),
         &format!("the scratch tree's ug15 unit-arm --arm {}", c.arm),
     )?;
-    let text = std::fs::read_to_string(&out).map_err(|e| Red::io(&out, &e))?;
+    let text = std::fs::read_to_string(&p.receipt).map_err(|e| Red::io(&p.receipt, &e))?;
     Receipt::parse(&text)
 }
 
@@ -382,18 +418,20 @@ fn scratch_steps(ctx: &Ctx, c: &ScratchControl, p: &ScratchPaths) -> Result<Rece
 /// tree and its target dir whatever the steps returned. Returns the steps' receipt (or their RED)
 /// and the cleanup notes.
 fn scratch_tree(ctx: &Ctx, scratch: &Path, c: &ScratchControl, key_hex: &str) -> (Result<Receipt>, Vec<String>) {
-    let dir = scratch.join(c.id);
-    if dir.exists() {
-        return (Err(Red::new(RedKind::Usage, format!("{} exists; every scratch control starts from nothing", dir.display()))), Vec::new());
+    let p = match scratch_paths(scratch, c.id) {
+        Ok(p) => p,
+        Err(red) => return (Err(red), Vec::new()),
+    };
+    if p.dir.exists() {
+        return (Err(Red::new(RedKind::Usage, format!("{} exists; every scratch control starts from nothing", p.dir.display()))), Vec::new());
     }
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return (Err(Red::io(&dir, &e)), Vec::new());
+    if let Err(e) = std::fs::create_dir_all(&p.dir) {
+        return (Err(Red::io(&p.dir, &e)), Vec::new());
     }
-    let marker = dir.join(MARKER);
+    let marker = p.dir.join(MARKER);
     if let Err(e) = std::fs::write(&marker, format!("ug15 unit-controls scratch {} for key {key_hex}\n", c.id)) {
         return (Err(Red::io(&marker, &e)), Vec::new());
     }
-    let p = ScratchPaths { tree: dir.join("tree"), target: dir.join("target"), retained: dir.join("retained"), dir };
     (ctx.echo)(&format!("ug15 unit-controls: scratch {} at {}", c.id, p.dir.display()));
     let result = scratch_steps(ctx, c, &p);
     let mut notes = Vec::new();
@@ -584,7 +622,9 @@ pub fn unit_controls(ctx: &Ctx, args: &ControlsArgs) -> Result<(ControlsReceipt,
         }
         None => ORDER.to_vec(),
     };
-    // The scratch root obeys the retain directory's rules: absolute, outside both trees, empty.
+    // The scratch root obeys the retain directory's rules: absolute, outside both trees, empty. It
+    // is also in one separator form, checked before any build (ruling 61; [`scratch_paths`]).
+    unit::check_single_form("--scratch", &args.scratch.to_string_lossy())?;
     let scratch = RetainDir::open(&args.scratch, &ctx.root, &ctx.target)?.path().to_path_buf();
     let mut run = UnitRun::start(ctx, &args.retain, "unit-controls reference")?;
     let key_hex = run.key.hex.clone();
@@ -796,6 +836,8 @@ fn control_scratch(ctx: &Ctx, scratch: &Path, c: &ScratchControl, key_hex: &str,
     };
     lines.extend(notes);
     let mut obs = observed;
-    let _ = write!(obs, " [scratch receipt {}]", scratch.join(c.id).join("receipt.txt").display());
+    if let Ok(p) = scratch_paths(scratch, c.id) {
+        let _ = write!(obs, " [scratch receipt {}]", p.receipt.display());
+    }
     outcome(c.id, ok, expected, obs, lines)
 }
