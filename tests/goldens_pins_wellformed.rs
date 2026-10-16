@@ -345,6 +345,22 @@ fn every_tolerance_block_is_complete() {
     assert!(bad.is_empty(), "goldens/PINS.toml tolerance blocks:\n{}", bad.join("\n"));
 }
 
+/// **The header's lines stay where the documents cite them** (`px0/cut.md` D-T3: "no existing line
+/// moves"; triage r1 W4). Five live citations name `goldens/PINS.toml:15` as the `PENDING`-sentinel
+/// rule (`crates/boyko_app/tests/vg_r0_reference_rig.rs`, `docs/VG-CAMPAIGN-CLAIM.toml`,
+/// `docs/VB-SV0-SDF-SHADOW-PLAN.md`, `docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md` twice), and UG-10 checks
+/// that a cited line exists, not what it says — so a header edit that grows the header reds here,
+/// and new prose goes to the end-of-file block instead.
+#[test]
+fn the_pending_rule_is_still_at_line_15() {
+    let text = read_pins();
+    let line = text.lines().nth(14).expect("invariant: PINS.toml has a line 15");
+    assert!(
+        line.starts_with("# A pin whose sha256_* is the literal \"PENDING\" is UNBLESSED"),
+        "goldens/PINS.toml:15 is `{line}`, not the PENDING-sentinel rule five documents cite there"
+    );
+}
+
 #[cfg(test)]
 mod tolerance_checker_is_not_vacuous {
     use super::tolerance_defects;
