@@ -134,7 +134,7 @@ fn run(args: &[String]) -> Result<()> {
             } else {
                 Control::None
             };
-            let built = objbuild::build(&ctx, &Request { subject: s, profile, extra_rustc: &extra, control })?;
+            let built = objbuild::build(&ctx, &Request { control, ..Request::new(s, profile, &extra) })?;
             let llvm = Llvm::resolve(&ctx.host)?;
             let view = ObjView::load(&llvm, &built.object)?;
             let mut text = probes::header(&ctx, &llvm, "ug15 build");

@@ -46,6 +46,12 @@ pub enum RedKind {
     /// (read before any build), or a built object contradicts a disposition — a pair recorded
     /// absent is present, or a pinned candidate locates a name that is not frozen.
     PinSet,
+    /// The running `ug15` was compiled from other sources than the tree holds, so the instrument
+    /// key it computes would name code it does not run (IB P0r critique W4).
+    Stale,
+    /// Every V11 leg ran, but no green control receipt certifies this instrument key (IB design
+    /// Rev 6, ruling 15 W13): a verdict read through an uncertified instrument is not a verdict.
+    Uncertified,
 }
 
 impl RedKind {
@@ -69,6 +75,8 @@ impl RedKind {
             Self::Usage => "usage",
             Self::Mismatch => "mismatch",
             Self::PinSet => "pin set",
+            Self::Stale => "stale instrument",
+            Self::Uncertified => "uncertified",
         }
     }
 }

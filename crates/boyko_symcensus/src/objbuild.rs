@@ -105,10 +105,18 @@ pub const SUBJECTS: [Subject; 5] = [
     Subject { key: "phase9_scheduler", package: "boyko-ecs", kind: Kind::Bench, name: "phase9_scheduler" },
 ];
 
-/// The subject named `key`.
+/// IB's two subjects (IB P0r), kept out of [`SUBJECTS`] on purpose: `SUBJECTS` is leg (2)'s and
+/// map (a)'s sweep set, and the leg-2 closure test requires a pin file per member, so a subject added
+/// there would join UG-15's legs. These are built only by `ug15 unit` and `unit-controls`.
+pub const IB_SUBJECTS: [Subject; 2] = [
+    Subject { key: "parity_runner", package: "boyko-physics-parity", kind: Kind::Bin, name: "jolt_parity_pyramid" },
+    Subject { key: "physics_probe", package: "boyko-physics-probe", kind: Kind::Bin, name: "physics_probe" },
+];
+
+/// The subject named `key`, from [`SUBJECTS`] then [`IB_SUBJECTS`].
 pub fn subject(key: &str) -> Result<Subject> {
-    SUBJECTS.iter().copied().find(|s| s.key == key).ok_or_else(|| {
-        let keys: Vec<&str> = SUBJECTS.iter().map(|s| s.key).collect();
+    SUBJECTS.iter().chain(IB_SUBJECTS.iter()).copied().find(|s| s.key == key).ok_or_else(|| {
+        let keys: Vec<&str> = SUBJECTS.iter().chain(IB_SUBJECTS.iter()).map(|s| s.key).collect();
         Red::new(RedKind::Usage, format!("no subject `{key}`; the subjects are {keys:?}"))
     })
 }
@@ -165,6 +173,13 @@ pub struct Request<'a> {
     pub profile: &'a str,
     /// Extra rustc arguments for the final unit, after `--emit=obj --print link-args`.
     pub extra_rustc: &'a [String],
+    /// `cargo rustc --features <comma list>`; empty for every UG-15 leg.
+    pub features: &'a [String],
+    /// Environment set for this build only (RC-11 (c)'s `BOYKO_PROFILE`); empty for every leg.
+    pub env: &'a [(String, String)],
+    /// `--locked`: a manifest that needs a lock update is a build failure, not a silent rewrite
+    /// of `Cargo.lock` (every IB build; the UG-15 legs predate it and keep their recipe).
+    pub locked: bool,
     /// [`Control::None`] for every real leg.
     pub control: Control,
 }
@@ -173,8 +188,65 @@ impl<'a> Request<'a> {
     /// A real-leg request.
     #[must_use]
     pub const fn new(subject: Subject, profile: &'a str, extra_rustc: &'a [String]) -> Self {
-        Self { subject, profile, extra_rustc, control: Control::None }
+        Self { subject, profile, extra_rustc, features: &[], env: &[], locked: false, control: Control::None }
     }
+
+    /// The same request with `features` enabled on the subject's package.
+    #[must_use]
+    pub const fn with_features(mut self, features: &'a [String]) -> Self {
+        self.features = features;
+        self
+    }
+
+    /// The same request with `env` set for the build.
+    #[must_use]
+    pub const fn with_env(mut self, env: &'a [(String, String)]) -> Self {
+        self.env = env;
+        self
+    }
+}
+
+/// What a non-final artifact of a build is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArtifactKind {
+    /// A library unit (an rlib).
+    Lib,
+    /// A proc-macro crate (its dll on msvc).
+    ProcMacro,
+    /// A build script's executable.
+    BuildScript,
+    /// Anything else cargo reports.
+    Other,
+}
+
+impl ArtifactKind {
+    /// The receipt label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Lib => "lib",
+            Self::ProcMacro => "proc-macro",
+            Self::BuildScript => "build-script",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// One non-final `compiler-artifact` of a build, as cargo reported it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Artifact {
+    /// `target.name`, `-` → `_`.
+    pub crate_name: String,
+    /// cargo's package id.
+    pub package_id: String,
+    /// What it is.
+    pub kind: ArtifactKind,
+    /// The rlib, the proc-macro's dll or the build script's exe.
+    pub path: Option<PathBuf>,
+    /// `profile.opt_level` as cargo printed it: `"0"` for a host unit under `release`.
+    pub opt_level: String,
+    /// cargo's `fresh`.
+    pub fresh: bool,
 }
 
 /// A paired build.
@@ -203,6 +275,15 @@ pub struct Built {
     pub link_args: String,
     /// The final unit's rustc command line, from cargo's `-v` output.
     pub final_rustc: String,
+    /// The final unit's `profile.opt_level`, as cargo printed it.
+    pub final_opt_level: String,
+    /// Every non-final `compiler-artifact` cargo reported, in message order (IB's closure tables;
+    /// the census legs read [`Built::rlibs`]).
+    pub artifacts: Vec<Artifact>,
+    /// `(crate, line)` for every `Running` line that names a `--crate-name`, in order.
+    pub running: Vec<(String, String)>,
+    /// Every other line cargo wrote to stderr: progress and rendered diagnostics, raw.
+    pub stderr_lines: Vec<String>,
     /// sha256 of [`Built::object`].
     pub object_sha256: String,
     /// sha256 of [`Built::image`].
@@ -279,9 +360,14 @@ pub fn build(ctx: &Ctx, req: &Request<'_>) -> Result<Built> {
     let bumped = if req.control == Control::NoTouch { SystemTime::UNIX_EPOCH } else { touch(&src)? };
 
     let mut cmd = Command::new(cargo_program());
-    cmd.current_dir(&ctx.root)
-        .args(["rustc", "-v", "-p", s.package, s.kind.flag(), s.name, "--profile", req.profile])
-        .args(["--message-format=json-render-diagnostics", "--"]);
+    cmd.current_dir(&ctx.root).args(["rustc", "-v", "-p", s.package, s.kind.flag(), s.name, "--profile", req.profile]);
+    if !req.features.is_empty() {
+        cmd.arg("--features").arg(req.features.join(","));
+    }
+    if req.locked {
+        cmd.arg("--locked");
+    }
+    cmd.args(["--message-format=json-render-diagnostics", "--"]);
     if req.control != Control::DropEmitObj {
         cmd.arg("--emit=obj");
     }
@@ -291,6 +377,9 @@ pub fn build(ctx: &Ctx, req: &Request<'_>) -> Result<Built> {
         .env("CARGO_TARGET_DIR", &ctx.target)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (k, v) in req.env {
+        cmd.env(k, v);
+    }
     (ctx.echo)(&format!("ug15: building {} ({} {} {}) under `{}`", s.key, s.package, s.kind.flag(), s.name, req.profile));
     let mut child = cmd
         .spawn()
@@ -301,19 +390,25 @@ pub fn build(ctx: &Ctx, req: &Request<'_>) -> Result<Built> {
     let sink = ctx.echo;
     let echo = std::thread::spawn(move || {
         let mut kept = Vec::new();
+        let mut every: Vec<(String, String)> = Vec::new();
+        let mut other = Vec::new();
         for line in BufReader::new(stderr).lines().map_while(std::result::Result::ok) {
             let t = line.trim_start();
             if t.starts_with("Running `") {
                 if line.contains(&needle) {
                     kept.push(line.clone());
                 }
+                if let Some(name) = crate_name_of(&line) {
+                    every.push((name, line.clone()));
+                }
                 let cut: String = line.chars().take(160).collect();
                 sink(&format!("{cut}{}", if cut.len() < line.len() { " …" } else { "" }));
             } else {
                 sink(&line);
+                other.push(line);
             }
         }
-        kept
+        (kept, every, other)
     });
     let mut stdout = String::new();
     child
@@ -323,13 +418,14 @@ pub fn build(ctx: &Ctx, req: &Request<'_>) -> Result<Built> {
         .read_to_string(&mut stdout)
         .map_err(|e| Red::new(RedKind::Io, format!("reading cargo's stdout: {e}")))?;
     let status = child.wait().map_err(|e| Red::new(RedKind::Io, format!("waiting for cargo: {e}")))?;
-    let running = echo.join().unwrap_or_default();
+    let (running, every_running, stderr_lines) = echo.join().unwrap_or_default();
 
     let mut link_args = String::new();
     let mut artifact: Option<Json> = None;
     let mut finished_ok: Option<bool> = None;
     let mut rlibs: Vec<(String, PathBuf)> = Vec::new();
     let mut out_dirs: Vec<(String, PathBuf)> = Vec::new();
+    let mut artifacts: Vec<Artifact> = Vec::new();
     for line in stdout.lines() {
         let t = line.trim();
         if t.is_empty() {
@@ -351,12 +447,15 @@ pub fn build(ctx: &Ctx, req: &Request<'_>) -> Result<Built> {
                     .unwrap_or_default();
                 if tname == s.name && kinds.contains(&s.kind.cargo_kind()) && package_matches(&msg, s.package) {
                     artifact = Some(msg);
-                } else if CENSUS_CRATES.contains(&tname) {
-                    for f in msg.get("filenames").map(Json::items).unwrap_or(&[]) {
-                        if let Some(p) = f.as_str().filter(|p| p.ends_with(".rlib")) {
-                            rlibs.push((tname.to_owned(), PathBuf::from(p)));
+                } else {
+                    if CENSUS_CRATES.contains(&tname) {
+                        for f in msg.get("filenames").map(Json::items).unwrap_or(&[]) {
+                            if let Some(p) = f.as_str().filter(|p| p.ends_with(".rlib")) {
+                                rlibs.push((tname.to_owned(), PathBuf::from(p)));
+                            }
                         }
                     }
+                    artifacts.push(artifact_of(&msg, tname, &kinds));
                 }
             }
             Some("build-script-executed") => {
@@ -464,6 +563,7 @@ pub fn build(ctx: &Ctx, req: &Request<'_>) -> Result<Built> {
         }
         None => None,
     };
+    let final_opt_level = opt_level_of(&artifact);
     let object_sha256 = sha256::file_hex(&object)?;
     let image_sha256 = sha256::file_hex(&image)?;
     let mut stamps = Vec::with_capacity(2);
@@ -482,10 +582,51 @@ pub fn build(ctx: &Ctx, req: &Request<'_>) -> Result<Built> {
         out_dirs,
         link_args,
         final_rustc,
+        final_opt_level,
+        artifacts,
+        running: every_running,
+        stderr_lines,
         object_sha256,
         image_sha256,
         stamps,
     })
+}
+
+/// A non-final artifact message, classified.
+fn artifact_of(msg: &Json, tname: &str, kinds: &[&str]) -> Artifact {
+    let files: Vec<&str> = msg.get("filenames").map(Json::items).unwrap_or(&[]).iter().filter_map(Json::as_str).collect();
+    let (kind, path) = if kinds.contains(&"custom-build") {
+        (ArtifactKind::BuildScript, msg.get("executable").and_then(Json::as_str).or_else(|| files.first().copied()))
+    } else if kinds.contains(&"proc-macro") {
+        (ArtifactKind::ProcMacro, files.iter().copied().find(|f| f.ends_with(std::env::consts::DLL_SUFFIX)))
+    } else if kinds.iter().any(|k| matches!(*k, "lib" | "rlib")) {
+        (ArtifactKind::Lib, files.iter().copied().find(|f| f.ends_with(".rlib")))
+    } else {
+        (ArtifactKind::Other, files.first().copied())
+    };
+    Artifact {
+        crate_name: tname.replace('-', "_"),
+        package_id: msg.get("package_id").and_then(Json::as_str).unwrap_or("").to_owned(),
+        kind,
+        path: path.map(PathBuf::from),
+        opt_level: opt_level_of(msg),
+        fresh: msg.get("fresh").and_then(Json::as_bool).unwrap_or(false),
+    }
+}
+
+/// `profile.opt_level` of an artifact message, as printed (a string, or a number for `0`-`3`).
+fn opt_level_of(msg: &Json) -> String {
+    match msg.get("profile").and_then(|p| p.get("opt_level")) {
+        Some(Json::Str(s)) => s.clone(),
+        Some(Json::Num(n)) => format!("{n}"),
+        _ => String::new(),
+    }
+}
+
+/// The `--crate-name` of a `Running` line.
+fn crate_name_of(line: &str) -> Option<String> {
+    let i = line.find("--crate-name ")?;
+    line[i + 13..].split([' ', '\'']).next().filter(|n| !n.is_empty()).map(str::to_owned)
 }
 
 /// Bumps the modification time of each census crate's `src/lib.rs`, which makes cargo rebuild
@@ -500,7 +641,9 @@ pub fn touch_census_crate_roots(ctx: &Ctx) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-fn cargo_program() -> std::ffi::OsString {
+/// The cargo `ug15` spawns: `$CARGO`, else `cargo` from `PATH`.
+#[must_use]
+pub fn cargo_program() -> std::ffi::OsString {
     std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into())
 }
 
@@ -509,7 +652,7 @@ fn isa_baseline_expected(host: &Host) -> bool {
 }
 
 /// Sets `path`'s modification time to now without touching its content; returns the time set.
-fn touch(path: &Path) -> Result<SystemTime> {
+pub fn touch(path: &Path) -> Result<SystemTime> {
     let f = std::fs::OpenOptions::new().write(true).open(path).map_err(|e| Red::io(path, &e))?;
     let now = SystemTime::now();
     f.set_modified(now).map_err(|e| Red::io(path, &e))?;

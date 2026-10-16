@@ -13,14 +13,20 @@
 //! **RED, never skip.** An absent tool, an empty census, a missing object, an unpaired object, an
 //! unset target dir or a host mismatch is a [`Red`](red::Red) with its own kind.
 //!
+//! IB's V11 (`ug15 unit`, `unit-compare`, `unit-controls`; IB P0r) builds the parity runner and the
+//! game-shaped probe through the same instrument, retained per build ([`retain`]) and read through
+//! an instrument key a control receipt certifies ([`key`]).
+//!
 //! The heavy legs and the probes run through the `ug15` binary (`src/bin/ug15.rs`), invoked
 //! directly after `cargo build -p boyko-symcensus --bin ug15`, so no outer cargo holds the build
 //! lock while the nested `cargo rustc` runs in the same target dir.
 
 pub mod candidates;
+pub mod closure;
 pub mod contain;
 pub mod host;
 pub mod json;
+pub mod key;
 pub mod leg7b;
 pub mod llvm;
 pub mod maps;
@@ -29,10 +35,13 @@ pub mod objbuild;
 pub mod objview;
 pub mod pe;
 pub mod pins;
+pub mod plain;
 pub mod probes;
 pub mod red;
+pub mod retain;
 pub mod seam;
 pub mod sha256;
 pub mod snapshot;
 pub mod source;
 pub mod tools;
+pub mod unit;
