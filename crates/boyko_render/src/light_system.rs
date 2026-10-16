@@ -33,7 +33,7 @@ use boyko_log::codes::{OnceSite, W2201, W2204};
 use boyko_macros::{Resource, SystemSet};
 
 use crate::light::{
-    DirectionalLight, GpuLight, LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_MASK, LightEnabled,
+    DirectionalLight, GpuLight, LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_MASK, LIGHT_KIND_SKY, LightEnabled,
     LightHeaderGpu, LightTableDirty, LightingConfig, MAX_LIGHTS, PointLight, SkyLight, SpotLight,
 };
 use crate::shadow_atlas::{PunctualSlotAssignment, SLOT_NONE, pack_atlas_slot};
@@ -95,6 +95,10 @@ pub struct LightTableStaging {
     /// `true` until the FIRST seed upload has run (so the seed path can be distinguished
     /// from the async on-change path).
     seeded: bool,
+    /// Render wave PX0 (D-F1): whether the staged table holds a SKY row in its no-`P` front block —
+    /// [`table_has_sky`] over the bytes, recorded at FOLD time (the fold is the only writer, so an
+    /// idle frame pays nothing). The graph receipt's `light_sky` key.
+    sky_present: bool,
 }
 
 impl Default for LightTableStaging {
@@ -126,7 +130,7 @@ impl Default for LightTableStaging {
             &[],
             &LightingConfig::default(),
         );
-        Self { scratch, used_bytes: used, dirty: true, seeded: false }
+        Self { scratch, used_bytes: used, dirty: true, seeded: false, sky_present: false }
     }
 }
 
@@ -172,6 +176,13 @@ impl LightTableStaging {
     #[inline]
     pub fn primary_directional_dir(&self) -> Option<[f32; 3]> {
         primary_directional_dir(self.bytes())
+    }
+
+    /// Render wave PX0: whether the staged table holds a SKY row the resolve reads
+    /// ([`table_has_sky`], recorded at the last fold).
+    #[inline]
+    pub fn sky_present(&self) -> bool {
+        self.sky_present
     }
 }
 
@@ -243,6 +254,25 @@ pub fn primary_directional_dir(table: &[u8]) -> Option<[f32; 3]> {
         }
         let lane = |i: usize| table_word(table, base + DIR_KIND_OFFSET + i * 4).map(f32::from_bits);
         Some([lane(0)?, lane(1)?, lane(2)?])
+    })
+}
+
+/// Render wave PX0 (D-F1): whether a staged `[LightHeaderGpu || GpuLight[]]` table holds a SKY row —
+/// a row in `[0, l0a_count)` whose kind word, masked by [`LIGHT_KIND_MASK`], is [`LIGHT_KIND_SKY`].
+/// That is `deferred_pbr.hlsl`'s own `has_sky` predicate (its sky branch loops the same front block),
+/// so a receipt carrying this bit names the branch the resolve takes; a SKY kind word outside the
+/// front block does not count, as it does not for the shader. Clamped to the rows `table` holds,
+/// like [`primary_directional_dir`]: a parser, never a panic. A disabled `SkyLight` never reaches
+/// the table (the fold drops it), so it reads `false`.
+#[inline]
+pub fn table_has_sky(table: &[u8]) -> bool {
+    let Some(rows) = table.len().checked_sub(LIGHT_HEADER_BYTES).map(|b| b / GPU_LIGHT_BYTES) else {
+        return false;
+    };
+    let Some(l0a_count) = table_word(table, L0A_COUNT_OFFSET) else { return false };
+    (0..(l0a_count as usize).min(rows)).any(|row| {
+        table_word(table, LIGHT_HEADER_BYTES + row * GPU_LIGHT_BYTES + KIND_WORD_OFFSET)
+            .is_some_and(|w| w & LIGHT_KIND_MASK == LIGHT_KIND_SKY)
     })
 }
 
@@ -738,6 +768,10 @@ pub fn collect_lights(
         &cfg,
     );
     staging.used_bytes = used;
+    // Render wave PX0: the receipt's `light_sky`, decoded from the bytes just folded (the view's
+    // mutable borrow of `staging.scratch` ends first; nothing below uses it).
+    drop(scratch_view);
+    staging.sky_present = table_has_sky(staging.bytes());
     staging.dirty = true;
     // Consume the structural-change signal — always reached on every rebuild, so a set
     // bit is never stranded (W2).
@@ -1633,6 +1667,49 @@ mod tests {
         assert_eq!(used, LIGHT_HEADER_BYTES + MAX_LIGHTS as usize * GPU_LIGHT_BYTES);
         assert_eq!(read_header(&scratch).point_spot_count(), MAX_LIGHTS);
         assert_eq!(row_pos(&scratch, 0)[0], 0.0, "the first survivor is the first VALID light");
+    }
+}
+
+#[cfg(test)]
+mod px0_light_sky {
+    use super::*;
+
+    fn table(skies: &[SkyLight], dirs: &[DirectionalLight], points: &[PointLight]) -> Vec<u8> {
+        let mut dst = vec![0u8; LIGHT_HEADER_BYTES + (MAX_LIGHTS as usize) * GPU_LIGHT_BYTES];
+        let used = write_light_table(&mut dst, dirs, skies, points, &[], &LightingConfig::default());
+        dst.truncate(used);
+        dst
+    }
+
+    fn sun() -> DirectionalLight {
+        DirectionalLight::new([0.0, 1.0, 0.0], [1.0, 1.0, 1.0], 2.0)
+    }
+
+    /// The fold's tables, both directions: a sky (alone or behind a sun) is present; no sky, a
+    /// directional-only table, a point-only table and the empty default are not.
+    #[test]
+    fn sky_present_follows_the_folded_sky_row() {
+        let sky = SkyLight::new([0.3, 0.4, 0.5], [0.1, 0.1, 0.1]);
+        assert!(table_has_sky(&table(&[sky], &[], &[])));
+        assert!(table_has_sky(&table(&[sky], &[sun()], &[])));
+        assert!(!table_has_sky(&table(&[], &[sun()], &[])));
+        assert!(!table_has_sky(&table(&[], &[], &[PointLight::new([0.0; 3], [1.0; 3], 10.0, 5.0)])));
+        assert!(!table_has_sky(&table(&[], &[], &[])));
+        assert!(!LightTableStaging::default().sky_present(), "the seeded empty table holds no sky");
+    }
+
+    /// The shader's rule, not "any SKY word": a SKY kind word past `l0a_count` (in the point / spot
+    /// block, where the resolve's sky branch never looks) does not count; a truncated table is a
+    /// `false`, never a panic.
+    #[test]
+    fn only_the_front_block_counts_and_short_tables_do_not_panic() {
+        let sky = SkyLight::new([0.3, 0.4, 0.5], [0.1, 0.1, 0.1]);
+        let mut t = table(&[sky], &[], &[PointLight::new([0.0; 3], [1.0; 3], 10.0, 5.0)]);
+        // Shrink the front block to zero rows: the SKY row is now outside it.
+        t[L0A_COUNT_OFFSET..L0A_COUNT_OFFSET + 4].copy_from_slice(&0u32.to_ne_bytes());
+        assert!(!table_has_sky(&t));
+        assert!(!table_has_sky(&t[..LIGHT_HEADER_BYTES - 1]));
+        assert!(!table_has_sky(&[]));
     }
 }
 

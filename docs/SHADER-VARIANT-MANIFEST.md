@@ -357,6 +357,55 @@ oracle census (no non-test caller of the traced body re-composes a stage); every
 against fixtures it must reject. Host oracles: `boyko_shaderdsl/tests/{post_leaves,
 post_image_oracle, post_facets}.rs`.
 
+## `px0_probe_store.comp.hlsl` — the float-format probe's compute kernel (compute, TEST-ONLY, render wave PX0)
+
+One HAND-WRITTEN source (test HLSL, not eDSL-owned: it computes nothing the host model mirrors beyond
+arm A3's `lit * t + s`), one `-D` axis — the storage format. No render path binds it: only the
+gpu-ignored `boyko_rhi_vulkan/tests/b10g11r11_rounding_probe.rs` dispatches it (the storage-write
+classification and arm A3's RMW passes, H3 Scope 3 / 3b).
+
+| Variant | `-D` | `.spv` | dxc `-T` | Notes |
+|---|---|---|---|---|
+| B10G11R11 | `FMT_R11G11B10F` | `px0_probe_store_r11g11b10f.comp.spv` | `cs_6_0` | set 0: `RWTexture2D<float4> gOut` @0 (`r11g11b10f`), `StructuredBuffer<float4> gIn` @1 (one float4 per texel per layer); 16-B push `{width, height, mode, layer}`; mode 0 STORE `gOut = gIn.xyz`, mode 1 RMW `gOut = gOut.xyz * gIn.w + gIn.xyz`; `[numthreads(8, 8, 1)]` |
+| RGBA16F | `FMT_RGBA16F` | `px0_probe_store_rgba16f.comp.spv` | `cs_6_0` | the same with `gOut` `rgba16f` (the escape / `taa_hist` format) |
+
+Frozen recipe (the header pins it verbatim; no `-O`):
+`dxc.exe -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 -D <FMT_…> px0_probe_store.comp.hlsl`.
+
+*Byte gate:* `boyko_rhi_vulkan/tests/px0_probe_spv_sync.rs` — each committed `.spv` is the re-DXC of its
+source under its row's `-D` (SKIPs with an `eprintln` when no dxc resolves — **a skipped run is not a
+pass**).
+
+## `px0_probe_raster.fs.hlsl` — the float-format probe's raster paths (fragment, TEST-ONLY, render wave PX0)
+
+One HAND-WRITTEN source, **no `-D` axis**; paired with `fullscreen_sample.vs.spv`. It returns the
+host-generated float4 of its pixel and layer and computes nothing; the pipeline's blend state (none,
+`ONE + ONE`, premultiplied over) selects the path the probe classifies and the content arms run.
+
+| Variant | `-D` | `.spv` | dxc `-T` | Notes |
+|---|---|---|---|---|
+| the only one | — | `px0_probe_raster.fs.spv` | `ps_6_0` | set 0: `StructuredBuffer<float4> gIn` @0; 16-B FRAGMENT push `{width, height, layer, _pad}`; reads `SV_Position` only |
+
+Frozen recipe (the header pins it verbatim; no `-O`, no `-D`):
+`dxc.exe -spirv -T ps_6_0 -E main -fspv-target-env=vulkan1.3 px0_probe_raster.fs.hlsl`.
+
+*Byte gate:* `boyko_rhi_vulkan/tests/px0_probe_spv_sync.rs` (as above).
+
+## `px0_fetch_rate.comp.hlsl` — the fetch-rate probe's gather kernel (compute, TEST-ONLY, render wave PX0)
+
+One HAND-WRITTEN source, **no `-D` axis**. Dispatched only by the gpu-ignored
+`boyko_rhi_vulkan/tests/fetch_rate_probe.rs` (a WR-1 row: ns per fetch, read in a quiet window, never
+gated).
+
+| Variant | `-D` | `.spv` | dxc `-T` | Notes |
+|---|---|---|---|---|
+| the only one | — | `px0_fetch_rate.comp.spv` | `cs_6_0` | set 0: `Texture2D<float4>` + `SamplerState` collapsed to one combined image sampler @0, `RWStructuredBuffer<float> gSink` @1; 16-B push `{size, iters, filtered, _pad}`; `iters` fetches per invocation (`SampleLevel` linear or `Load`) along a scrambled walk, their sum stored; `[numthreads(64, 1, 1)]` |
+
+Frozen recipe (the header pins it verbatim; no `-O`, no `-D`):
+`dxc.exe -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 px0_fetch_rate.comp.hlsl`.
+
+*Byte gate:* `boyko_rhi_vulkan/tests/px0_probe_spv_sync.rs` (as above).
+
 ## `sdf_forward_march.comp.hlsl` — the Forward/VB fused SDF march+shade (compute)
 
 One source `shaders/sdf_forward_march.comp.hlsl`; the `{HAS_MESH} x {VIEWT}` matrix, all four built

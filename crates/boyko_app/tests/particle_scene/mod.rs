@@ -101,6 +101,7 @@
 //! | `BOYKO_PARTICLE_ALPHA` | unset | set ⇒ rung P2's SECOND emitter, carrying a second effect of the ALPHA blend class (blue, 75 % coverage, 1.6 units right of the additive fan). The only configuration in the tree where `alpha.instanceCount` is non-zero |
 //! | `BOYKO_PARTICLE_SORT` | unset | set ⇒ `ParticleSortMode::Radix` (rung P2 item 3's three-dispatch radix over the alpha class). REFUSES to arm without `BOYKO_PARTICLE_ALPHA` — see [`sort_arming`] |
 //! | `BOYKO_PARTICLE_READBACK_FRAME` | unset | the runner's own knob (gates #7/#9, rung P1b's skip-rate readback and rung P2 item 3's sort-monotonicity readback), not read here |
+//! | `BOYKO_PARTICLE_MODE` | unset (`GpuUnlit`) | render wave PX0 (GL-H0's particle-off set): `off` ⇒ `ParticleMode::Off` — the SAME scene with the subsystem disarmed, the comparison PX1a's particle transition rule reads. Any other value refuses the boot |
 //! | `BOYKO_TEST_FORCE` | unset | render wave RD1: the test-only force keys (`boyko_app::test_force`), decoded HERE (the env decode lives in fixtures) — `disarm_sdf_merge` renders the pre-RD1 regime the `particle_sdf_collide` re-bless adjudication compares against. An unknown key refuses the boot |
 //!
 //! The two P1 knobs are separate ON PURPOSE (see [`sdf_collider_armed`]): with the scene one set
@@ -817,7 +818,7 @@ pub fn build_app(title: &'static str) -> App {
     // ARMED — the whole point of the fixture. `capacity` is boot-frozen: the runner reads it once,
     // after every plugin's `build`, to decide whether to create the GPU bundle at all.
     app.insert_resource(ParticleConfig {
-        mode: ParticleMode::GpuUnlit,
+        mode: particle_mode_from_env(),
         capacity: pool_capacity(),
         // Rung P1's arm. Boot-frozen: the runner reads it once, beside `capacity`, to pick which
         // `particle_sim` module the pipeline is built from. Rung P1b's census is a THIRD value on
@@ -1112,4 +1113,35 @@ fn sha256(msg: &[u8]) -> [u8; 32] {
         out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
     }
     out
+}
+
+/// Render wave PX0 (`px0/cut.md` D-F3): `BOYKO_PARTICLE_MODE` — unset ⇒ the fixture's ARMED
+/// `GpuUnlit`; `off` ⇒ `ParticleMode::Off`, the particle-off twin of the same scene GL-H0 dumps for
+/// PX1a's particle transition rule. Any other value panics naming the variable: a typo must not
+/// render the armed scene under the off set's name.
+pub fn particle_mode_from_env() -> ParticleMode {
+    parse_particle_mode(std::env::var("BOYKO_PARTICLE_MODE").ok().as_deref())
+}
+
+/// [`particle_mode_from_env`]'s pure half.
+pub fn parse_particle_mode(v: Option<&str>) -> ParticleMode {
+    match v.map(str::trim) {
+        None => ParticleMode::GpuUnlit,
+        Some("off") => ParticleMode::Off,
+        Some(other) => panic!("BOYKO_PARTICLE_MODE={other} is not `off` (unset = the armed GpuUnlit fixture)"),
+    }
+}
+
+#[cfg(test)]
+mod px0_particle_mode {
+    use super::{ParticleMode, parse_particle_mode};
+
+    /// The particle-off knob (render wave PX0, D-F3) is closed: `off` and unset parse, a typo
+    /// refuses.
+    #[test]
+    fn the_particle_mode_knob_is_closed() {
+        assert_eq!(parse_particle_mode(Some("off")), ParticleMode::Off);
+        assert_eq!(parse_particle_mode(None), ParticleMode::GpuUnlit);
+        assert!(std::panic::catch_unwind(|| parse_particle_mode(Some("of"))).is_err());
+    }
 }

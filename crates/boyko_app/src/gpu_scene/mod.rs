@@ -6360,6 +6360,9 @@ impl GpuSceneBundles {
         // (`LightTableStaging::primary_directional_dir`) — the `dir_kind.xyz` bits of the first
         // directional row, the one the resolve takes as its primary. `None` on a sunless table.
         primary_sun: Option<[f32; 3]>,
+        // Render wave PX0 (D-F1): the staged table's SKY bit (`LightTableStaging::sky_present`,
+        // read by the runner beside `primary_sun`) — the graph receipt's `light_sky` key.
+        light_sky: bool,
         csm: Option<&ResolvedCsm>,
         atlas: Option<&ResolvedShadowAtlas>,
         interp_count: u32,
@@ -6900,6 +6903,7 @@ impl GpuSceneBundles {
             light_staging: &self.light_staging[slot],
             light_upload_bytes: light_upload.unwrap_or(0),
             light_dirty: light_upload.is_some(),
+            light_sky,
             material_upload: material_upload.map(|regions| boyko_rhi_vulkan::present::MaterialUploadScene {
                 staging: material_table.staging_slot(slot),
                 regions,

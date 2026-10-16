@@ -21,7 +21,8 @@ use boyko_rhi::enums::{
 };
 
 use crate::ffi::{
-    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+    VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
     VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
     VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
     VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE,
@@ -184,6 +185,10 @@ const _: () = assert!(
     BarrierAccess::COLOR_ATTACHMENT_WRITE.bits() == VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
     "BarrierAccess::COLOR_ATTACHMENT_WRITE must equal VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT"
 );
+const _: () = assert!(
+    BarrierAccess::COLOR_ATTACHMENT_READ.bits() == VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
+    "BarrierAccess::COLOR_ATTACHMENT_READ must equal VK_ACCESS_COLOR_ATTACHMENT_READ_BIT"
+);
 
 // --- TimestampStage `as_i32()` (identity-cast in `write_timestamp`, HW-RT rung R0). ---
 const _: () = assert!(
@@ -260,6 +265,12 @@ const _: () = assert!(
 const _: () = assert!(
     Format::R32G32Uint.as_i32() == VK_FORMAT_R32G32_UINT,
     "Format::R32G32Uint must equal VK_FORMAT_R32G32_UINT"
+);
+// The one `Format` variant that had no pin (render wave PX0 triage r1 W3: `optimal_tiling_features`
+// takes a `Format` on the strength of every discriminant being a valid `VkFormat`).
+const _: () = assert!(
+    Format::R32G32B32Sfloat.as_i32() == VK_FORMAT_R32G32B32_SFLOAT,
+    "Format::R32G32B32Sfloat must equal VK_FORMAT_R32G32B32_SFLOAT"
 );
 // Render P7: the SSAO term `gSsao` format (`as_i32()` mapped in `create_texture`).
 const _: () = assert!(

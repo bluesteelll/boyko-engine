@@ -1996,6 +1996,8 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // the marcher and the resolve take one sun and a rotating sun moves the shadow on the
             // next frame. `Copy`, so no borrow of the World outlives this line.
             let primary_sun = world.resource::<LightTableStaging>().primary_directional_dir();
+            // Render wave PX0 (D-F1): the receipt's `light_sky`, the bit the fold recorded.
+            let light_sky = world.resource::<LightTableStaging>().sky_present();
 
             // 5d-pre. The two shadow depth-pass armings (shadow gate SG2), computed HERE —
             //     before the two UBO uploads below — because each upload carries its pass's
@@ -2847,6 +2849,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 &draws,
                 light_upload,
                 primary_sun,
+                light_sky,
                 csm_armed.then_some(resolved_csm),
                 punctual_armed.then_some(resolved_atlas),
                 interp_count,

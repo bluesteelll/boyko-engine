@@ -55,7 +55,7 @@
 
 use core::cell::Cell;
 
-use crate::cf::{Cf, EvalCf, Flow, HostTex2};
+use crate::cf::{Cf, EvalCf, Flow, HostTex2, HostTex3};
 use crate::scalar::FieldScalar;
 
 // ---- Constants --------------------------------------------------------------------------------
@@ -66,8 +66,10 @@ use crate::scalar::FieldScalar;
 pub const HDR_MAX: f32 = 64512.0;
 
 /// The one string every generator emits into `[[vk::image_format(…)]]` on an HDR storage write.
-/// A PXe placeholder: PX0 re-values it if AD-1 takes RGBA16F; nothing emits it at PXe.
-pub const LIT_STORAGE_FORMAT: &str = "r11g11b10f";
+/// RGBA16F: PX0's lit-format decision took AD-1's escape (row 2 of
+/// `docs/measurements/2026-10-16-px0-lit-format-decision.md` §9, from the device arms). Nothing
+/// emits it before PX1a, so the change moves no shader.
+pub const LIT_STORAGE_FORMAT: &str = "rgba16f";
 
 /// The display storage image's format (`gDisplay`, the post_final output).
 pub const DISPLAY_STORAGE_FORMAT: &str = "rgba8";
@@ -364,6 +366,29 @@ pub fn eval_params(words: [u32; 8]) -> PostParams<EvalCf> {
     }
 }
 
+/// Render wave PX0 (`px0/cut.md` D-T4): `post_final`'s per-pass texel-footprint radius — the
+/// neighbourhood the body reads around a pixel through `gScene`. `0` while the body only `Load`s
+/// its own pixel; PX1b sets it to 1 with RCAS (DS-H5). `post_eval bound` perturbs that footprint
+/// jointly (verify r5 O2).
+pub const POST_FINAL_TAP_RADIUS: u32 = 0;
+
+/// Render wave PX0: the graph receipt's `[config]` keys of the eight `PostFinalGpu` words, in word
+/// order — single-sourced for PX1a's receipt writer and `tools/golden_diff.py eval-post`.
+pub const POST_FINAL_RECEIPT_KEYS: [&str; 8] =
+    ["post_word0", "post_word1", "post_word2", "post_word3", "post_word4", "post_word5", "post_word6", "post_word7"];
+
+/// Render wave PX0: what a dump resolves to for one fetching row of [`POST_FINAL_BINDINGS`] on the
+/// Eval backend — the input of [`eval_res`].
+#[derive(Clone, Copy, Debug)]
+pub enum EvalBinding<'a> {
+    /// A `Texture2D` row (`Tex2Load` / `Tex2Linear`).
+    Tex2(HostTex2<'a>),
+    /// A `Texture3D` row (`Tex3Linear`).
+    Tex3(HostTex3<'a>),
+    /// A `StructuredBuffer<uint>` row.
+    Buf(&'a [u32]),
+}
+
 /// The body's resources, one per fetching row of [`POST_FINAL_BINDINGS`]. A row whose mode bit is
 /// off resolves on Eval to [`HostTex2::EMPTY`] (0×0), whose every read is a bounds panic — a red,
 /// never a silent zero.
@@ -373,6 +398,28 @@ pub struct PostRes<'a, C: Cf> {
 }
 
 // ---- The leaves ---------------------------------------------------------------------------------------
+
+/// Render wave PX0 (`px0/cut.md` D-T4): the Eval [`PostRes`] from a resolver called once per
+/// FETCHING row of [`POST_FINAL_BINDINGS`] (every row but the UBO and the store) — so `post_eval`
+/// never names a resource. A rung that adds a `PostRes` field adds its arm here, in its own `post.rs`
+/// edit.
+///
+/// # Panics
+/// When the resolver hands a row the wrong kind of binding (a red naming the row, never a zero).
+pub fn eval_res<'a>(mut resolve: impl FnMut(&PostBinding) -> EvalBinding<'a>) -> PostRes<'a, EvalCf> {
+    let mut scene = None;
+    for row in POST_FINAL_BINDINGS {
+        if matches!(row.kind, PostBindingKind::Ubo | PostBindingKind::Store) {
+            continue;
+        }
+        let b = resolve(row);
+        match (row.name, b) {
+            ("gScene", EvalBinding::Tex2(t)) => scene = Some(t),
+            (name, other) => panic!("eval_res: row `{name}` resolved to {other:?}, not its kind {:?}", row.kind),
+        }
+    }
+    PostRes { scene: scene.expect("invariant: POST_FINAL_BINDINGS carries the gScene row") }
+}
 
 /// The three channels of a `float3`.
 #[inline]

@@ -2397,6 +2397,8 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         light_table: &light_table,
         light_staging: &light_staging,
         light_upload_bytes: light_table_bytes,
+        // Render wave PX0: the receipt-only SKY bit; this harness arms no graph receipt.
+        light_sky: false,
         // Static-scene 0%-gate: the table is seeded once (host-visible above); no
         // on-change re-upload this run, so the recorder records NO copy/barrier (the
         // command stream is byte-identical to before L0-r0).
@@ -3528,6 +3530,8 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         light_table: &light_table,
         light_staging: &light_staging,
         light_upload_bytes: light_table_bytes,
+        // Render wave PX0: the receipt-only SKY bit; this harness arms no graph receipt.
+        light_sky: false,
         light_dirty: false,
         // DM1: this harness host-seeds its own material table; it never uploads one per frame.
         material_upload: None,
@@ -8590,6 +8594,8 @@ fn run_showcase_body_ddgi(
         light_table: &light_table,
         light_staging: &light_staging,
         light_upload_bytes: light_table_bytes,
+        // Render wave PX0: the receipt-only SKY bit; this harness arms no graph receipt.
+        light_sky: false,
         light_dirty: false,
         // DM1: this harness host-seeds its own material table; it never uploads one per frame.
         material_upload: None,
@@ -9870,6 +9876,8 @@ fn run_showcase_body(
         light_table: &light_table,
         light_staging: &light_staging,
         light_upload_bytes: light_table_bytes,
+        // Render wave PX0: the receipt-only SKY bit; this harness arms no graph receipt.
+        light_sky: false,
         light_dirty: false,
         // DM1: this harness host-seeds its own material table; it never uploads one per frame.
         material_upload: None,

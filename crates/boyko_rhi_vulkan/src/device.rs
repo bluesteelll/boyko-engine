@@ -1332,6 +1332,35 @@ impl VulkanContext {
         self.physical_device
     }
 
+    /// Render wave PX0 (`px0/cut.md` PX0-6): the OPTIMAL-tiling `VkFormatFeatureFlags` of
+    /// `format` on this device — what the float-format probe's premises read (B10G11R11 and
+    /// RGBA16F STORAGE / COLOR_ATTACHMENT / BLEND, each a named RED when absent). A cold query,
+    /// one driver call; nothing on a frame path calls it.
+    ///
+    /// Takes a [`boyko_rhi::Format`], not a raw `i32`: `vkGetPhysicalDeviceFormatProperties`
+    /// requires a valid `VkFormat` (`VUID-vkGetPhysicalDeviceFormatProperties-format-parameter`),
+    /// and every `Format` discriminant is one (`abi_guard.rs` pins each against its `VK_FORMAT_*`).
+    pub fn optimal_tiling_features(&self, format: boyko_rhi::Format) -> u32 {
+        let mut props = VkFormatProperties {
+            linear_tiling_features: 0,
+            optimal_tiling_features: 0,
+            buffer_features: 0,
+        };
+        // SAFETY: `self.physical_device` is the live physical device this context was booted on;
+        // `format.as_i32()` is a valid `VkFormat` enumerant (every `boyko_rhi::Format` discriminant
+        // equals a `VK_FORMAT_*` constant, asserted in `abi_guard.rs`), which is the call's
+        // valid-usage requirement on `format`; `&mut props` is a valid out-pointer for the
+        // `#[repr(C)]` `VkFormatProperties` the driver fully overwrites.
+        unsafe {
+            (self.instance_fns.get_physical_device_format_properties)(
+                self.physical_device,
+                format.as_i32(),
+                &mut props,
+            )
+        };
+        props.optimal_tiling_features
+    }
+
     /// The graphics+compute queue handle.
     #[inline]
     pub fn queue(&self) -> VkQueue {

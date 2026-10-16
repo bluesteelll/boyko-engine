@@ -115,6 +115,14 @@ impl Renderer<'_> {
         // `forward.set1[fi]`/`targets.lit[fi]`).
         let fi = self.frame_index;
 
+        // Render wave PX0 (D-Z3): the frame witness — this frame's query-pool reset here, before
+        // every bracket, and the slot's seal before `vkEndCommandBuffer`. With it the Forward
+        // recorder arms its zones like the other two paths. A disarmed frame (`scene.gpu_zone`
+        // is `None` on every shipped / golden frame) records nothing for it.
+        // SAFETY: recording is open (`vkBeginCommandBuffer` succeeded above) and no rendering
+        // scope has been opened yet; `self.fns` is the live device fn-table.
+        let ts = unsafe { super::zone_arm::FrameWitness::open(scene, self.fns, cmd) };
+
         let plan = self
             .forward_pass_plan
             .as_ref()
@@ -183,21 +191,15 @@ impl Renderer<'_> {
             // `act.sets` is this frame parity's set; `record_forward_pass` is the Forward path's
             // own sink, so the barriers resolve through the ResId space THIS declarator built.
             //
-            // ⚠️ Particles P0 gate #17: the zone arm is **DISARMED**, and that is a statement about
-            // THIS file rather than about particles. `record_forward` is the one top-level path
-            // recorder with no timestamp witness at all — nothing here records the frame's
-            // `vkCmdResetQueryPool` and nothing seals the ring slot. A `vkCmdWriteTimestamp` into
-            // an unreset query reads an undefined value, and marks that are never sealed retire as
-            // `NotBracketed`, so arming here would produce commands with no number and a number
-            // with no meaning. Instrumenting Forward/ForwardPlus therefore needs the reset/seal
-            // pair `TsWitness::open`/`finish` gives the other two paths — a rung of its own, and a
-            // named residual of this one.
+            // The zone arm is ARMED since render wave PX0: `ts` (the frame witness above) reset
+            // this frame's pool and seals the slot after the last bracket — the reset/seal pair
+            // Particles P0 gate #17 named as this file's residual.
             unsafe {
                 self.record_particle_compute(
                     cmd,
                     act,
                     &plan.particle,
-                    super::particles::ParticleZoneArm::disarmed(),
+                    super::particles::ParticleZoneArm::from_scene(scene),
                     |p| {
                         self.record_forward_pass(p, cmd, targets, forward, scene, fi);
                     },
@@ -803,6 +805,13 @@ impl Renderer<'_> {
         // (`forward_depth`) barriers-in, plus the cascade/atlas →SHADER_READ_ONLY_OPTIMAL
         // barriers-out (this pass is their declared FRAGMENT reader) for the "forward_opaque"
         // pass into `cmd`.
+        //
+        // Render wave PX0: `ZONE_FWD_OPAQUE` brackets the pass from its derived barriers through
+        // the scope's `cmd_end_rendering` (the `forward_sky` draw inside the scope included).
+        let opaque_zone = super::zone_arm::ZoneArm::from_scene(scene);
+        // SAFETY: recording is open and no rendering scope is; `ts` reset this frame's pool above
+        // and seals the slot before `vkEndCommandBuffer`.
+        let opaque_pair = unsafe { opaque_zone.begin(self.fns, cmd, super::super::gpu_zone::ZONE_FWD_OPAQUE) };
         self.record_forward_pass(plan.forward_opaque, cmd, targets, forward, scene, fi);
 
         // `scene.path_is_forward()` gated this call site (`Renderer::render_gbuffer_frame`'s
@@ -1030,6 +1039,8 @@ impl Renderer<'_> {
             }
             (self.fns.cmd_end_rendering)(cmd);
         }
+        // SAFETY: as the begin above — the opaque scope closed on the line before.
+        unsafe { opaque_zone.end(self.fns, cmd, super::super::gpu_zone::ZONE_FWD_OPAQUE, opaque_pair) };
 
         // === Multi-paradigm render-path plan, rung R-SDFFWD: the fused SDF march-then-shade
         // COMPUTE pass. Recorded ONLY when `scene.path_has_sdf_forward()` holds — the O1
@@ -1046,6 +1057,13 @@ impl Renderer<'_> {
             // COLOR_ATTACHMENT_OPTIMAL→GENERAL barrier for `lit` (+ the DEPTH_ATTACHMENT_OPTIMAL→
             // SHADER_READ_ONLY_OPTIMAL barrier for `forward_depth`, when the mesh leg is present)
             // for the "sdf_forward_march" pass into `cmd`.
+            //
+            // Render wave PX0: `ZONE_FWD_SDF_MARCH` brackets the pass from its derived barriers
+            // through the dispatch (the id VB's site shares).
+            let march_zone = super::zone_arm::ZoneArm::from_scene(scene);
+            // SAFETY: recording is open and no rendering scope is; `ts` reset this frame's pool
+            // and seals the slot before `vkEndCommandBuffer`.
+            let march_pair = unsafe { march_zone.begin(self.fns, cmd, super::super::gpu_zone::ZONE_FWD_SDF_MARCH) };
             self.record_forward_pass(sdf_forward_pass, cmd, targets, forward, scene, fi);
 
             // Decision 4's ownership gate consumer half: the `HAS_MESH` variant needs the
@@ -1140,6 +1158,8 @@ impl Renderer<'_> {
                 );
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
             }
+            // SAFETY: as the begin above; `march_pair` is the pair it returned.
+            unsafe { march_zone.end(self.fns, cmd, super::super::gpu_zone::ZONE_FWD_SDF_MARCH, march_pair) };
         }
 
         // === Render wave RD1 (defect R0b): the SDF depth merge, IMMEDIATELY before the particle
@@ -1167,7 +1187,8 @@ impl Renderer<'_> {
             // closes its own); `depth_view` is this frame slot's live `forward_depth` — the image the
             // declarator named in the merge pass, left at DEPTH_ATTACHMENT_OPTIMAL by the derived
             // barrier the callback records; `set[fi]` binds this slot's `gViewT` and camera ring,
-            // written against `act.layout`, which `act.pipeline` was built on. The zone arm is DISARMED: this path resets no query pool and seals no slot (the particle draw's own reason).
+            // written against `act.layout`, which `act.pipeline` was built on. The zone arm is
+            // ARMED since render wave PX0: `ts` reset this frame's pool and seals the slot after.
             unsafe {
                 self.record_sdf_depth_merge(
                     cmd,
@@ -1176,7 +1197,7 @@ impl Renderer<'_> {
                     merge_shape,
                     scene.sdf_depth_merge_clears(),
                     merge_targets,
-                    super::sdf_depth_merge::MergeZoneArm::disarmed(),
+                    super::sdf_depth_merge::MergeZoneArm::from_scene(scene),
                     |p| {
                         self.record_forward_pass(p, cmd, targets, forward, scene, fi);
                     },
@@ -1208,15 +1229,15 @@ impl Renderer<'_> {
             // scope closed above; `record_particle_draw` opens and closes its own). The two views
             // are this frame slot's live `lit` and `forward_depth` — the SAME two the declarator
             // named in the `particle_draw` pass, so the layouts the graph leaves them in are the
-            // ones the attachments declare. The zone arm is **DISARMED** for the reason spelled
-            // out at the compute site above: this path resets no query pool and seals no slot.
+            // ones the attachments declare. The zone arm is ARMED since render wave PX0 (the
+            // compute site above states why it may be).
             unsafe {
                 self.record_particle_draw(
                     cmd,
                     act,
                     &plan.particle,
                     draw_targets,
-                    super::particles::ParticleZoneArm::disarmed(),
+                    super::particles::ParticleZoneArm::from_scene(scene),
                     |p| {
                         self.record_forward_pass(p, cmd, targets, forward, scene, fi);
                     },
@@ -1232,6 +1253,14 @@ impl Renderer<'_> {
         // COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL barrier for the "present_sample" pass
         // into `cmd`.
         self.record_forward_pass(plan.present_sample, cmd, targets, forward, scene, fi);
+
+        // Render wave PX0: `ZONE_POST_PRESENT` brackets the blit from the swapchain barrier
+        // through `cmd_end_rendering`; the image dump, the readback copy and the present
+        // transition are outside it.
+        let present_zone = super::zone_arm::ZoneArm::from_scene(scene);
+        // SAFETY: recording is open and no rendering scope is; `ts` reset this frame's pool and
+        // seals the slot before `vkEndCommandBuffer`.
+        let present_pair = unsafe { present_zone.begin(self.fns, cmd, super::super::gpu_zone::ZONE_POST_PRESENT) };
 
         let to_color = VkImageMemoryBarrier {
             s_type: VkStructureType::ImageMemoryBarrier,
@@ -1325,6 +1354,8 @@ impl Renderer<'_> {
             (self.fns.cmd_draw)(cmd, 3, 1, 0, 0);
             (self.fns.cmd_end_rendering)(cmd);
         }
+        // SAFETY: as the begin above — the present scope closed on the line before.
+        unsafe { present_zone.end(self.fns, cmd, super::super::gpu_zone::ZONE_POST_PRESENT, present_pair) };
 
         // OBS (D, H0 Scope 6): the image dump — AFTER the present blit (critique O2), before the
         // swapchain transition; the pass is declared LAST. Nothing is recorded on an unarmed frame.
@@ -1474,6 +1505,9 @@ impl Renderer<'_> {
                 }
             }
         }
+
+        // Render wave PX0: seal the frame's slot — after the last bracket, before the end.
+        ts.finish();
 
         // SAFETY: recording is open; ending it matches the `begin` above.
         let raw = unsafe { (self.fns.end_command_buffer)(cmd) };

@@ -43,70 +43,29 @@ pub struct DumpFile {
     pub texels: Vec<u8>,
 }
 
-/// Converts an IEEE half to `f32` (stdlib has no stable `f16`).
+/// Converts an IEEE half to `f32` — a one-line delegate to `boyko_shaderdsl::half`, the ONE binary16
+/// decoder (render wave PX0, OPEN-ITEMS #3; kept `pub` because `obs_image_dump_selfcheck.rs` asserts
+/// on it, `px0/critique.md` W5).
 pub fn f16_to_f32(h: u16) -> f32 {
-    let sign = u32::from(h >> 15) << 31;
-    let exp = u32::from((h >> 10) & 0x1f);
-    let man = u32::from(h & 0x3ff);
-    let bits = match (exp, man) {
-        (0, 0) => sign,
-        (0, m) => {
-            // Subnormal: normalise the mantissa.
-            let mut e = 127 - 15 + 1;
-            let mut m = m;
-            while m & 0x400 == 0 {
-                m <<= 1;
-                e -= 1;
-            }
-            sign | (e << 23) | ((m & 0x3ff) << 13)
-        }
-        (0x1f, 0) => sign | 0x7f80_0000,
-        (0x1f, m) => sign | 0x7f80_0000 | (m << 13),
-        (e, m) => sign | ((e + 127 - 15) << 23) | (m << 13),
-    };
-    f32::from_bits(bits)
+    boyko_shaderdsl::half::f16_bits_to_f32(u32::from(h))
 }
 
 impl DumpFile {
-    /// Parses a dump file's bytes.
+    /// Parses a dump file's bytes — the header and its length check are `boyko_shaderdsl::dump`'s
+    /// (one parser for every dump reader; render wave PX0, OPEN-ITEMS #3), the format table
+    /// `boyko_shaderdsl::pixfmt`'s.
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() < 32 {
-            return Err(format!("{} bytes is shorter than the 32-byte header", bytes.len()));
-        }
-        let w = |i: usize| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().expect("invariant: 4 bytes"));
-        if w(0) != MAGIC {
-            return Err(format!("bad magic {:#x}", w(0)));
-        }
-        let f = Self {
-            format: w(1),
-            width: w(2),
-            height: w(3),
-            mip: w(4),
-            layers: w(5),
-            frame: w(6),
-            texel_bytes: w(7),
-            texels: bytes[32..].to_vec(),
-        };
-        let want = u64::from(f.width) * u64::from(f.height) * u64::from(f.texel_bytes);
-        if f.texels.len() as u64 != want {
-            return Err(format!(
-                "{}x{} at {} B/texel needs {want} bytes, the file holds {}",
-                f.width,
-                f.height,
-                f.texel_bytes,
-                f.texels.len()
-            ));
-        }
-        let known = match f.format {
-            VK_R8G8B8A8_UNORM | VK_B8G8R8A8_UNORM | VK_R32_SFLOAT | VK_D32_SFLOAT => 4,
-            VK_R16G16B16A16_SFLOAT => 8,
-            VK_R32G32B32A32_SFLOAT => 16,
-            other => return Err(format!("VkFormat {other} has no decoder here")),
-        };
-        if known != f.texel_bytes {
-            return Err(format!("VkFormat {} is {known} B/texel, the header says {}", f.format, f.texel_bytes));
-        }
-        Ok(f)
+        let (h, texels) = boyko_shaderdsl::dump::parse(bytes).map_err(|e| e.to_string())?;
+        Ok(Self {
+            format: h.format,
+            width: h.width,
+            height: h.height,
+            mip: h.mip,
+            layers: h.layers,
+            frame: h.frame,
+            texel_bytes: h.texel_bytes,
+            texels: texels.to_vec(),
+        })
     }
 
     /// Reads and parses `path`; a missing or malformed file is RED.
@@ -133,18 +92,11 @@ impl DumpFile {
         }
     }
 
-    /// A texel as four `f32`s (one-channel formats fill `[v, 0, 0, 1]`; 8-bit ones are /255).
+    /// A texel as four `f32`s (one-channel formats fill `[v, 0, 0, 1]`; 8-bit ones are /255) —
+    /// `boyko_shaderdsl::pixfmt::decode_texel`, the one texel decoder.
     pub fn texel_f32(&self, x: u32, y: u32) -> [f32; 4] {
-        let t = self.at(x, y);
-        let f32_at = |i: usize| f32::from_le_bytes(t[i * 4..i * 4 + 4].try_into().expect("invariant: 4 bytes"));
-        let h_at = |i: usize| f16_to_f32(u16::from_le_bytes(t[i * 2..i * 2 + 2].try_into().expect("invariant: 2 bytes")));
-        match self.format {
-            VK_R8G8B8A8_UNORM | VK_B8G8R8A8_UNORM => self.rgba8(x, y).map(|c| f32::from(c) / 255.0),
-            VK_R16G16B16A16_SFLOAT => [h_at(0), h_at(1), h_at(2), h_at(3)],
-            VK_R32_SFLOAT | VK_D32_SFLOAT => [f32_at(0), 0.0, 0.0, 1.0],
-            VK_R32G32B32A32_SFLOAT => [f32_at(0), f32_at(1), f32_at(2), f32_at(3)],
-            f => panic!("texel_f32 on VkFormat {f}"),
-        }
+        boyko_shaderdsl::pixfmt::decode_texel(self.format, self.at(x, y))
+            .unwrap_or_else(|| panic!("texel_f32 on VkFormat {}", self.format))
     }
 
     /// A depth texel (`D32_SFLOAT`).

@@ -102,5 +102,12 @@ name = "emit_mesh_face"
 path = "src/bin/emit_mesh_face.rs"
 required-features = ["emit"]
 
+# Render wave PX0 (H3 Scope 5; px0/cut.md D-T2): the display oracle -- the host f32 instantiation
+# of post_final's traced body over a leg's dumps. EvalCf only, so no required feature (the Eval
+# path is the default build's).
+[[bin]]
+name = "post_eval"
+path = "src/bin/post_eval.rs"
+
 [lints]
 workspace = true

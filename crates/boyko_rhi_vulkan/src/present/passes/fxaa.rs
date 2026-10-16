@@ -7,7 +7,9 @@ use core::ptr;
 use crate::ffi::*;
 
 use super::super::frame_driver::Renderer;
+use super::super::gpu_zone::ZONE_POST_FXAA;
 use super::super::scene_types::AaActivation;
+use super::zone_arm::ZoneArm;
 use super::super::targets::GBufferTargets;
 use super::super::COLOR_SUBRESOURCE_RANGE;
 
@@ -32,7 +34,9 @@ impl Renderer<'_> {
     /// [`GBufferTargets::sync_gbuffer`]); `activation.pipeline` is live on this device and
     /// its layout matches `fxaa_set`'s (`scene.present_layout`) plus an 8-byte push range
     /// (FRAGMENT-only, `create_graphics_pipeline_fragment_push`); `present_extent` sizes `aa_out` (the extent
-    /// [`GBufferTargets::create`] allocated it at); `fi` is this frame's in-flight slot.
+    /// [`GBufferTargets::create`] allocated it at); `fi` is this frame's in-flight slot; `zone` is
+    /// the frame's [`ZoneArm`] (render wave PX0), whose reset/seal contract the caller's witness
+    /// upholds.
     pub(crate) unsafe fn record_fxaa(
         &self,
         cmd: VkCommandBuffer,
@@ -40,11 +44,15 @@ impl Renderer<'_> {
         activation: &AaActivation<'_>,
         present_extent: VkExtent2D,
         fi: usize,
+        zone: ZoneArm<'_>,
     ) {
         debug_assert!(
             present_extent.width > 0 && present_extent.height > 0,
             "invariant: aa_out is sized to a non-empty present_extent"
         );
+        // SAFETY: recording is open (this fn's contract), outside any rendering scope; `zone`'s
+        // contract (pool reset this frame, sealed after) is the caller's.
+        let zone_pair = unsafe { zone.begin(self.fns, cmd, ZONE_POST_FXAA) };
         let aa = targets
             .aa_out
             .as_ref()
@@ -205,5 +213,7 @@ impl Renderer<'_> {
                 (&to_shader_read as *const VkImageMemoryBarrier).cast(),
             );
         }
+        // SAFETY: as the begin above; `zone_pair` is the pair it returned for this zone.
+        unsafe { zone.end(self.fns, cmd, ZONE_POST_FXAA, zone_pair) };
     }
 }

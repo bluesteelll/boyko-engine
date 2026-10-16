@@ -613,7 +613,7 @@ pub use light_system::{
     GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightCollectSet, LightSeedSet,
     LightSeedState,
     LightTableGeneration, LightTableStaging, SetLightEnabledById, collect_lights, evict_light,
-    fold_light_table, fold_light_table_slotted, light_seed_state, primary_directional_dir,
+    fold_light_table, fold_light_table_slotted, light_seed_state, primary_directional_dir, table_has_sky,
     set_light_enabled_now, write_light_table,
 };
 pub use gbuffer_depth::{GBUFFER_T_MAX, assert_gbuffer_marcher_t_max_agree, mesh_view_t_norm};

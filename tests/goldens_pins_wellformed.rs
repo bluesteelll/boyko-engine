@@ -241,9 +241,10 @@ fn a_pin_that_names_its_own_dump_path_names_the_one_it_hashes() {
     // `BOYKO_HOST_DUMP`, the render lands somewhere else and the script either aborts on a missing
     // file or — with a stale artifact from an earlier run present — hashes the wrong image.
     //
-    // CONDITIONAL, and measured before it was written: 31 of the 34 pins name `BOYKO_HOST_DUMP` and
-    // all 31 agree (recounted 2026-09-18, after `deferred_sdf_casters` and `vb_mesh_shadows` were
-    // added; it was 29 of 32 before); three (`grand_showcase`, `deferred_sdf_only`,
+    // CONDITIONAL, and measured before it was written: 37 of the 40 pins name `BOYKO_HOST_DUMP` and
+    // all 37 agree (recounted at render wave PX0, which added the six AA reference pins, each with
+    // its own dump path; 31 of 34 on 2026-09-18, after `deferred_sdf_casters` and `vb_mesh_shadows`
+    // were added; 29 of 32 before); three (`grand_showcase`, `deferred_sdf_only`,
     // `deferred_mesh_only`) omit the key and let their fixture's own default path stand. Omission is
     // therefore legal and disagreement is not.
     let text = read_pins();
@@ -280,6 +281,117 @@ fn a_pin_that_names_its_own_dump_path_names_the_one_it_hashes() {
              first — which is either an abort or, with a stale file present, a PASS on an image \
              this run did not produce"
         );
+    }
+}
+
+/// Render wave PX0 (AD-20; `PINS.toml`'s tolerance schema block): every `[<pin>.tolerance]` table
+/// carries the whole schema — a `reason`, a `reference_<leg>` under `goldens/ref/` for every leg the
+/// pin's own section hashes, and each measured field as a number or `"PENDING"` — and belongs to a
+/// declared `[<pin>]`. An incomplete block is the "tolerance pin the sweep silently skips" (or
+/// judges against nothing) the tolerance-pin self-test exists to catch at the script.
+fn tolerance_defects(text: &str) -> Vec<String> {
+    const MEASURED: [&str; 5] =
+        ["max_delta", "max_changed_frac", "max_changed_frac_lit", "order_noise_steps", "max_delta_bound"];
+    let mut tables: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut table = String::new();
+    for raw in text.lines() {
+        let line = raw.trim_start_matches(UTF8_BOM).trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            table = line[1..line.len() - 1].to_string();
+            tables.entry(table.clone()).or_default();
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            tables.entry(table.clone()).or_default().insert(k.trim().to_string(), v.trim().trim_matches('"').to_string());
+        }
+    }
+    let mut out = Vec::new();
+    for (name, keys) in &tables {
+        let Some(pin) = name.strip_suffix(".tolerance") else { continue };
+        let Some(section) = tables.get(pin) else {
+            out.push(format!("[{name}] has no [{pin}] section"));
+            continue;
+        };
+        if keys.get("reason").is_none_or(|r| r.is_empty()) {
+            out.push(format!("[{name}] states no reason"));
+        }
+        for leg in ["software", "hwrt"] {
+            if !section.contains_key(&format!("sha256_{leg}")) && leg == "hwrt" {
+                continue;
+            }
+            match keys.get(&format!("reference_{leg}")) {
+                Some(r) if r.starts_with("goldens/ref/") && r.ends_with(".bmp") => {}
+                Some(r) => out.push(format!("[{name}] reference_{leg} = `{r}` is not a goldens/ref/*.bmp")),
+                None => out.push(format!("[{name}] has no reference_{leg}")),
+            }
+        }
+        for f in MEASURED {
+            match keys.get(f) {
+                Some(v) if v == "PENDING" || v.parse::<f64>().is_ok() => {}
+                Some(v) => out.push(format!("[{name}] {f} = `{v}` is neither a number nor PENDING")),
+                None => out.push(format!("[{name}] has no {f}")),
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn every_tolerance_block_is_complete() {
+    let bad = tolerance_defects(&read_pins());
+    assert!(bad.is_empty(), "goldens/PINS.toml tolerance blocks:\n{}", bad.join("\n"));
+}
+
+/// **The header's lines stay where the documents cite them** (`px0/cut.md` D-T3: "no existing line
+/// moves"; triage r1 W4). Five live citations name `goldens/PINS.toml:15` as the `PENDING`-sentinel
+/// rule (`crates/boyko_app/tests/vg_r0_reference_rig.rs`, `docs/VG-CAMPAIGN-CLAIM.toml`,
+/// `docs/VB-SV0-SDF-SHADOW-PLAN.md`, `docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md` twice), and UG-10 checks
+/// that a cited line exists, not what it says — so a header edit that grows the header reds here,
+/// and new prose goes to the end-of-file block instead.
+#[test]
+fn the_pending_rule_is_still_at_line_15() {
+    let text = read_pins();
+    let line = text.lines().nth(14).expect("invariant: PINS.toml has a line 15");
+    assert!(
+        line.starts_with("# A pin whose sha256_* is the literal \"PENDING\" is UNBLESSED"),
+        "goldens/PINS.toml:15 is `{line}`, not the PENDING-sentinel rule five documents cite there"
+    );
+}
+
+#[cfg(test)]
+mod tolerance_checker_is_not_vacuous {
+    use super::tolerance_defects;
+
+    const GOOD: &str = "[p]\nbmp = \"x\"\nsha256_software = \"PENDING\"\n\n[p.tolerance]\nreason = \"K2\"\n\
+                        reference_software = \"goldens/ref/p_software.bmp\"\nmax_delta = 2\nmax_changed_frac = 0.01\n\
+                        max_changed_frac_lit = PENDING\norder_noise_steps = 1\nmax_delta_bound = 6.5\n";
+
+    #[test]
+    fn a_complete_block_passes() {
+        assert_eq!(tolerance_defects(GOOD), Vec::<String>::new());
+    }
+
+    #[test]
+    fn each_omission_is_named() {
+        for (cut, want) in [
+            ("max_delta = 2\n", "has no max_delta"),
+            ("reason = \"K2\"\n", "states no reason"),
+            ("reference_software = \"goldens/ref/p_software.bmp\"\n", "has no reference_software"),
+        ] {
+            let text = GOOD.replace(cut, "");
+            assert!(tolerance_defects(&text).iter().any(|d| d.contains(want)), "{want}: {:?}", tolerance_defects(&text));
+        }
+        let wrong_dir = GOOD.replace("goldens/ref/p_software.bmp", "D:\\tmp\\p.bmp");
+        assert!(!tolerance_defects(&wrong_dir).is_empty());
+        let not_a_number = GOOD.replace("max_delta = 2", "max_delta = two");
+        assert!(!tolerance_defects(&not_a_number).is_empty());
+        let orphan = GOOD.replace("[p]\n", "[q]\n");
+        assert!(tolerance_defects(&orphan).iter().any(|d| d.contains("no [p] section")));
+        let hwrt = GOOD.replace("sha256_software", "sha256_hwrt = \"PENDING\"\nsha256_software");
+        assert!(tolerance_defects(&hwrt).iter().any(|d| d.contains("reference_hwrt")));
     }
 }
 

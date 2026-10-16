@@ -194,6 +194,11 @@ impl BarrierAccess {
     pub const TRANSFER_WRITE: BarrierAccess = BarrierAccess(0x0000_1000);
     /// `VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT` (graphics seam: Phase 6+).
     pub const COLOR_ATTACHMENT_WRITE: BarrierAccess = BarrierAccess(0x0000_0100);
+    /// `VK_ACCESS_COLOR_ATTACHMENT_READ_BIT` — the attachment read a `LoadOp::Load` and a blend's
+    /// destination term perform. A write made available before a pass that loads or blends the
+    /// attachment is visible to that read only with this bit in the barrier's destination scope
+    /// (render wave PX0's float-format probe: a transfer-uploaded background its blend arms read).
+    pub const COLOR_ATTACHMENT_READ: BarrierAccess = BarrierAccess(0x0000_0080);
     /// `VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT` (Phase-6 S0 rung 4).
     pub const DEPTH_STENCIL_ATTACHMENT_READ: BarrierAccess = BarrierAccess(0x0000_0200);
     /// `VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT` — the depth write the

@@ -82,14 +82,14 @@ pub(crate) struct ParticleDrawTargets {
 /// nothing at all in `forward.rs`. Threading any one of them through here would teach this module
 /// which path it is on. Two `Option`s and a `Copy` do not.
 ///
-/// # ARMING IS A CLAIM ABOUT THE CALLER, and [`Self::disarmed`] exists because one caller cannot
-/// make it
+/// # ARMING IS A CLAIM ABOUT THE CALLER
 ///
 /// A `vkCmdWriteTimestamp` is only meaningful against a query the frame has RESET, and its witness
 /// marks only reach a reader through the ring slot's one `seal`. Both of those are the PATH
 /// recorder's: `TsWitness::open`/`GbufWitness::open` record the reset at the frame top and their
-/// `finish` seals. A caller that has neither must pass [`Self::disarmed`] — see the `forward.rs`
-/// call site, which does and says why.
+/// `finish` seals. Render wave PX0 gave the last recorder without one (`forward.rs`) its
+/// `FrameWitness`, so every caller now arms through [`Self::from_scene`] and the `disarmed()`
+/// constructor that Forward needed was deleted with its last caller.
 ///
 /// **Neither half is prose-only any more.** The reset half is `debug_assert`ed inside
 /// [`GpuZoneRecorder::record_begin`] against the recorder's own `pool_clean` bit — placed there
@@ -101,7 +101,7 @@ pub(crate) struct ParticleDrawTargets {
 /// The stronger design — minting the arm from the witness itself, so the unarmed state is
 /// unrepresentable — was considered and NOT taken: `TsWitness` and `GbufWitness` are private to
 /// their own files, so the constructor would have to be `pub(crate)` on this type anyway and
-/// `forward.rs` (same module tree) could still call it. It would move the hole, not close it.
+/// any recorder in the same module tree could still call it. It would move the hole, not close it.
 #[derive(Clone, Copy)]
 pub(crate) struct ParticleZoneArm<'a> {
     /// The frame's zone recorder and the ring slot it opened, or `None` when this frame records no
@@ -124,17 +124,6 @@ impl<'a> ParticleZoneArm<'a> {
             zr: scene.gpu_zone,
             #[cfg(feature = "profiling-census")]
             cw: scene.vb_cmd_witness,
-        }
-    }
-
-    /// The arm for a path that opens no ring slot of its own: **no bracket, no census, no
-    /// command**, structurally rather than by a runtime predicate.
-    #[inline]
-    pub(crate) const fn disarmed() -> ParticleZoneArm<'a> {
-        ParticleZoneArm {
-            zr: None,
-            #[cfg(feature = "profiling-census")]
-            cw: None,
         }
     }
 }

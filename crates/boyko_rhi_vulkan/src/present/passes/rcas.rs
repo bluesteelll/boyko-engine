@@ -10,6 +10,7 @@ use crate::compute::RcasPush;
 use crate::ffi::*;
 
 use super::super::frame_driver::Renderer;
+use super::super::gpu_zone::ZONE_POST_CAS;
 use super::super::scene_types::{GBufferScene, RcasActivation};
 use super::super::targets::GBufferTargets;
 use super::super::COLOR_SUBRESOURCE_RANGE;
@@ -57,6 +58,12 @@ impl Renderer<'_> {
             present_extent.width > 0 && present_extent.height > 0,
             "invariant: taa_resolved/aa_out are sized to a non-empty present_extent"
         );
+        // Render wave PX0: `ZONE_POST_CAS` brackets the whole pass (barriers, bind, push,
+        // dispatch, barrier C).
+        let zone = super::zone_arm::ZoneArm::from_scene(scene);
+        // SAFETY: recording is open (this fn's contract), outside any rendering scope; the path
+        // recorder's witness reset this frame's pool and seals the slot after this pass.
+        let zone_pair = unsafe { zone.begin(self.fns, cmd, ZONE_POST_CAS) };
         let resolved = targets
             .taa_resolved
             .as_ref()
@@ -201,5 +208,7 @@ impl Renderer<'_> {
                 (&to_shader_read as *const VkImageMemoryBarrier).cast(),
             );
         }
+        // SAFETY: as the begin above; `zone_pair` is the pair it returned for this zone.
+        unsafe { zone.end(self.fns, cmd, ZONE_POST_CAS, zone_pair) };
     }
 }
