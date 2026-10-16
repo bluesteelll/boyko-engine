@@ -383,6 +383,42 @@ fn report_host_visible_fallback(size: u64) {
     }
 }
 
+/// RD6 / D-DS (critique W2): the debug-build winding check of PROGRAMMATIC geometry — a mesh
+/// registered through [`MeshAssetsExt::register_mesh`] / [`MeshAssetsVbExt::register_mesh_vb`]
+/// whose triangles are mostly wound clockwise for their own normals panics, naming the
+/// convention ([`crate::mesh_face`]: front = counter-clockwise by the right-hand rule).
+///
+/// Such a mesh renders inside-out once single-sided back faces are culled, and lights the wrong
+/// side of a double-sided one — under every material class it is a content bug. Code-authored
+/// geometry is the engine's own (built-ins, fixtures, examples) or the app's, whose author
+/// controls the winding, so the check fails loudly there. FILE content (the glb spawn path, the
+/// streamed asset loader) is counted instead (`GlbSpawnReport::winding_disagrees_primitives`):
+/// glTF normals are free attributes and a re-wind would change which side reference viewers
+/// flip. Release builds compile the check out.
+#[inline]
+pub fn assert_mesh_winding(vertices: &[Vertex], indices: &[u32]) {
+    #[cfg(debug_assertions)]
+    {
+        let census = crate::mesh_face::winding_census(vertices, indices);
+        if census.mostly_clockwise() {
+            mesh_winding_disagrees(census);
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = (vertices, indices);
+}
+
+#[cfg(debug_assertions)]
+#[cold]
+#[inline(never)]
+fn mesh_winding_disagrees(census: crate::mesh_face::WindingCensus) -> ! {
+    panic!(
+        "mesh_winding: a registered mesh is wound clockwise for its own normals ({} of {} judged          triangles disagree). The engine's front is the counter-clockwise side by the right-hand          rule (glTF); swap each triangle's 2nd and 3rd index (the provoking vertex and the          generated tangents are unchanged by that swap) — see boyko_render::mesh_face",
+        census.disagree,
+        census.agree + census.disagree
+    );
+}
+
 pub fn build_mesh_gpu(
     ctx: &VulkanContext,
     vertices: &[Vertex],
@@ -672,6 +708,7 @@ impl MeshAssetsExt for Assets<MeshGpu> {
         // ~20-call-site scope cut in `build_mesh_gpu`'s doc). Under a VB boot the slot is
         // back-filled at boot (`backfill_vb_geometry_slots`); a POST-boot caller that needs
         // a slot must use `MeshAssetsVbExt::register_mesh_vb` instead.
+        assert_mesh_winding(vertices, indices);
         let mesh = build_mesh_gpu(ctx, vertices, indices, None);
         MeshHandle(self.add(mesh).index())
     }
@@ -801,6 +838,7 @@ impl MeshAssetsVbExt for Assets<MeshGpu> {
         indices: &[u32],
         geometry_table: &mut MeshGeometryTable,
     ) -> MeshHandle {
+        assert_mesh_winding(vertices, indices);
         let mesh = build_mesh_gpu(ctx, vertices, indices, Some(geometry_table));
         MeshHandle(self.add(mesh).index())
     }
@@ -938,6 +976,27 @@ mod tests {
         let h = size * 0.5;
         assert_eq!(min, [-h, -h, -h]);
         assert_eq!(max, [h, h, h]);
+    }
+
+    /// RD6 W2: the built-ins pass the programmatic winding check.
+    #[test]
+    fn winding_check_accepts_the_built_ins() {
+        let (v, i) = cube_geometry(1.0);
+        assert_mesh_winding(&v, &i);
+        let (v, i) = plane_geometry(3.0);
+        assert_mesh_winding(&v, &i);
+    }
+
+    /// RD6 W2: a plane wound clockwise for its up normal (HEAD's `tests/common` `floor_plane`)
+    /// fails the programmatic winding check in a debug build.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "mesh_winding")]
+    fn winding_check_rejects_a_clockwise_mesh() {
+        let (mut v, _) = plane_geometry(2.0);
+        let clockwise = [0u32, 2, 1, 0, 3, 2];
+        v.iter_mut().for_each(|v| v.normal = [0.0, 1.0, 0.0]);
+        assert_mesh_winding(&v, &clockwise);
     }
 }
 

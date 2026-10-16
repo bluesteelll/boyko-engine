@@ -51,14 +51,14 @@
 
 use boyko_ecs::ecs::constants::pool_reserve_rows;
 use boyko_ecs::ecs::core::asset::{Assets, register_asset_layout};
-use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
+use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn};
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::iters::query::filter_enable::{Disabled, Enabled};
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 use boyko_ecs::ecs::core::schedule::system_config::SystemConfig;
 use boyko_ecs::ecs::core::system::{NonSendRes, Res, ResMut};
 use boyko_macros::Resource;
-use boyko_rhi::enums::IndexType;
+use boyko_rhi::enums::{IndexType, MESH_FACE_CLASS_COUNT, MESH_FACE_CLASS_SHIFT, mesh_face_class};
 use boyko_scene::render_caps::{MaterialHandle, MeshHandle, RenderEnabled};
 use bytemuck::{Pod, Zeroable};
 
@@ -68,6 +68,7 @@ use crate::instance_model::{InstanceModelCol, VbInstanceRow};
 use crate::material::{Material, MaterialTextures};
 use crate::mesh::MeshGpu;
 use crate::mesh_assets::MeshAssetsExt;
+use crate::mesh_face::mesh_face_bits;
 use crate::mesh_geometry_table::VB_GEOMETRY_RESERVED_SLOT;
 use crate::occlusion_marker::{OcclusionCulling, VB_INST_FLAG_OCCLUSION_CULLING};
 
@@ -99,6 +100,13 @@ pub struct DrawBatch {
     /// The number of instances of this mesh (`vkCmdDrawIndexed`'s `instance_count`) —
     /// the bucket's length, `ring[base_instance .. base_instance + instance_count]`.
     pub instance_count: u32,
+    /// RD6 / D-DS: this batch's mesh-face class — the
+    /// [`MESH_FACE_DOUBLE_SIDED`](boyko_rhi::enums::MESH_FACE_DOUBLE_SIDED) /
+    /// [`MESH_FACE_MIRRORED`](boyko_rhi::enums::MESH_FACE_MIRRORED) bits every instance of the
+    /// batch shares (`0` = single-sided, not mirrored — every pre-RD6 draw). The recorder selects
+    /// the batch's cull member through `CullMode::for_mesh_face(face, ..)` and ORs it into the
+    /// raster push word.
+    pub face: u32,
 }
 
 /// Asset-streaming plan F8+ (owner: material-drives-albedo-too): the per-instance
@@ -268,16 +276,33 @@ const _: () = assert!(
 /// `MAX_MESHES`/instance-count ceiling" property without a bespoke growth scheme.
 #[derive(Resource)]
 pub struct MeshRenderScratch {
-    /// `counts[m]` — the number of visible instances of mesh `m` (pass 1). Length ==
-    /// the per-mesh-lane length (≥ mesh count); `clear()` + re-fill with zeros.
+    /// `counts[k]` — the number of visible instances of bucket `k` (pass 1). RD6 / D-DS: a
+    /// bucket is a `(face class, mesh)` pair, `k = block · mesh_count + mesh_id`, where each face
+    /// class PRESENT this frame owns one `mesh_count` block (class 0 always block 0, a further
+    /// class the next block when its first row is counted — review W1). The lane length is
+    /// therefore (present classes) × the mesh count: a frame whose instances are all class 0
+    /// (every pre-RD6 scene) keys exactly `mesh_count` buckets, HEAD's per-mesh lane.
+    /// `clear()` + re-fill with zeros.
     counts: ScratchColumn<u32>,
-    /// `offsets[m]` — mesh `m`'s `base_instance` (the prefix-sum of `counts`). Reused.
+    /// RD6 / D-DS (review W1): the `mesh_count` the bucket lanes were last keyed with, so a
+    /// later index-aligned pass recovers a key's mesh as `key % key_mesh_count`.
+    key_mesh_count: usize,
+    /// `offsets[k]` — bucket `k`'s `base_instance` (the prefix-sum of `counts`). Reused.
     offsets: ScratchColumn<u32>,
-    /// `cursors[m]` — the scatter write-head within mesh `m`'s bucket (pass 2),
-    /// `0..counts[m]`. A separate lane so `offsets` stays the immutable bucket base.
+    /// `cursors[k]` — the scatter write-head within bucket `k` (pass 2),
+    /// `0..counts[k]`. A separate lane so `offsets` stays the immutable bucket base.
     cursors: ScratchColumn<u32>,
-    /// The emitted [`DrawBatch`]es (one per non-empty mesh), in mesh-id order;
-    /// `clear()` + sequential `push`, never a fresh allocation.
+    /// RD6 / D-DS (critique W4): `row_keys[r]` — the bucket key of the gather's `r`-th input row,
+    /// computed ONCE per row per frame by the count pass (the face class needs the row's material
+    /// and model determinant) and READ by every later index-aligned pass (the scatter, the
+    /// textured payload, the `hwrt` prev ring), which therefore never re-derive the class: one
+    /// sequential 4-byte read per row instead of a second material lookup and determinant.
+    /// Indexed by row ordinal (input order, every row — an excluded mesh's rows too).
+    /// `clear()` + push, backing reservation persists.
+    row_keys: ScratchColumn<u32>,
+    /// The emitted [`DrawBatch`]es — one per non-empty, resolvable `(face class, mesh)` bucket,
+    /// CLASS-MAJOR (every class-0 batch in mesh-id order, then each further class's, RD6 /
+    /// D-DS); `clear()` + sequential `push`, never a fresh allocation.
     pub batches: ScratchColumn<DrawBatch>,
     /// The UNIFIED contiguous instance ring (refined-B) — EVERY visible instance's
     /// 48-byte [`InstanceModelCol`], STATIC and interpolated alike, in one
@@ -449,6 +474,8 @@ impl Default for MeshRenderScratch {
             counts: ScratchColumn::new(u32_id, u32_rows),
             offsets: ScratchColumn::new(u32_id, u32_rows),
             cursors: ScratchColumn::new(u32_id, u32_rows),
+            key_mesh_count: 0,
+            row_keys: ScratchColumn::new(u32_id, u32_rows),
             batches: ScratchColumn::new(batch_id, batch_rows),
             ring: ScratchColumn::new(model_id, model_rows),
             mesh_ids: ScratchColumn::new(u32_id, u32_rows),
@@ -484,6 +511,19 @@ fn fit_len(col: &mut ScratchColumn<u32>, min_len: usize, fill: u32) {
     for _ in 0..min_len {
         view.push(fill);
     }
+}
+
+/// RD6 / D-DS (review W1): the `block_of` entry of a face class with no row this frame.
+const NO_FACE_BLOCK: u32 = u32::MAX;
+
+/// RD6 / D-DS (review W1): appends one zeroed `mesh_count` block to the count lane, for the first
+/// row of a further face class this frame. Out of line and cold: at most
+/// `MESH_FACE_CLASS_COUNT − 1` calls per gather, and none on an all-class-0 frame.
+#[cold]
+#[inline(never)]
+fn add_face_block(counts: &mut ScratchBuildView<'_, u32>, mesh_count: usize) {
+    let len = counts.len();
+    counts.resize(len + mesh_count, 0);
 }
 
 impl MeshRenderScratch {
@@ -541,9 +581,10 @@ impl MeshRenderScratch {
         }
     }
 
-    /// The number of distinct meshes with at least one visible instance this frame —
-    /// `batches.len()` after a [`gather_mixed_into`](Self::gather_mixed_into). The Principle-1
-    /// one-draw-per-mesh count.
+    /// The number of non-empty `(face class, mesh)` buckets this frame — `batches.len()` after a
+    /// [`gather_mixed_into`](Self::gather_mixed_into). On a frame whose instances are all face
+    /// class 0 this is the distinct-mesh count (the Principle-1 one-draw-per-mesh count); each
+    /// further face class a mesh's instances carry adds one draw for that mesh (RD6 / D-DS).
     #[inline]
     pub fn batch_count(&self) -> usize {
         self.batches.len()
@@ -686,6 +727,45 @@ impl MeshRenderScratch {
             ),
         >,
     {
+        self.gather_faced_into(mesh_count, meta, || {
+            iter_input().map(|(mesh_id, col, pair, material, occlusion_capable)| {
+                (mesh_id, col, pair, material, u32::from(occlusion_capable) * VB_INST_FLAG_OCCLUSION_CULLING)
+            })
+        });
+    }
+
+    /// RD6 / D-DS: [`gather_mixed_into`](Self::gather_mixed_into)'s core, with the 5th element
+    /// widened from the occlusion `bool` to the row's whole
+    /// [`VbInstanceRow::flags`](crate::instance_model::VbInstanceRow::flags) word — bit 0
+    /// [`VB_INST_FLAG_OCCLUSION_CULLING`], bits 2–3 the instance's mesh-face class
+    /// ([`mesh_face_bits`](crate::mesh_face::mesh_face_bits)). Every other contract is
+    /// `gather_mixed_into`'s (see its doc); `gather_mixed_into` is this function over a
+    /// class-0 input.
+    ///
+    /// # Class-major buckets (RD6 / D-DS)
+    ///
+    /// A bucket is a `(face class, mesh)` pair keyed `block · mesh_count + mesh_id`, one
+    /// `mesh_count` block per face class present this frame (review W1: an all-class-0 frame keys
+    /// and walks HEAD's `mesh_count` buckets, never four times as many), and the emitted batches
+    /// are CLASS-MAJOR in class order — every single-sided batch first (in mesh order), then
+    /// each face class's — and each carries its class in [`DrawBatch::face`]: a recorder binds at
+    /// most one pipeline member per class. A frame whose rows are all class 0 produces HEAD's
+    /// batches, bases and ring byte for byte. The flags word is scattered whole into
+    /// [`inst_flags`](Self::inst_flags) (the VB fetch reads its face bits).
+    pub fn gather_faced_into<'a, M, F, I>(&mut self, mesh_count: usize, meta: M, iter_input: F)
+    where
+        M: FnMut(u32) -> Option<(u32, IndexType)>,
+        F: Fn() -> I,
+        I: Iterator<
+            Item = (
+                u32,
+                &'a InstanceModelCol,
+                Option<&'a GpuTransform3D>,
+                PerInstanceMaterial,
+                u32,
+            ),
+        >,
+    {
         // Asset-streaming plan F8 §2.2 (finding 3): reset the per-frame PM
         // pipeline-selection flag BEFORE the scatter recomputes it below — a persistent
         // `Resource` field must not stay sticky-true after a material is removed.
@@ -768,8 +848,15 @@ impl MeshRenderScratch {
             let mut cursors_view = self.cursors.build_view();
             let cursors = cursors_view.as_mut_slice();
             let counts = self.counts.as_read_slice();
-            for (mesh_id, col, maybe_pair, final_material, occlusion_capable) in iter_input() {
-                let m = mesh_id as usize;
+            let row_keys = self.row_keys.as_read_slice();
+            for (row, (mesh_id, col, maybe_pair, final_material, flags)) in iter_input().enumerate() {
+                // RD6 / D-DS: the bucket the count pass keyed this row to (never re-derived).
+                let m = row_keys[row] as usize;
+                debug_assert_eq!(
+                    m % mesh_count.max(1),
+                    mesh_id as usize,
+                    "invariant: the scatter visits the count pass's rows in the count pass's order"
+                );
                 // FIX-C1 (asset-streaming plan F6): a non-resolvable mesh's instances
                 // are EXCLUDED from the ring/`mesh_ids` here — not scattered into a
                 // reserved-but-unused slot. `bucket_lanes_mixed` already zeroed this
@@ -803,10 +890,9 @@ impl MeshRenderScratch {
                 self.any_non_default_material |= final_material.id != 0;
                 // VG R3 piece 2 step P2-2: the flags lane + its ADD-reduce, fused into this
                 // same scatter with the SAME skip — no second walk over the input. Both the
-                // store and the fold are branchless: a `bool` multiply/add, never an `if`.
-                inst_flags[slot as usize] =
-                    u32::from(occlusion_capable) * VB_INST_FLAG_OCCLUSION_CULLING;
-                self.occlusion_instances += u32::from(occlusion_capable);
+                // store and the fold are branchless: a mask and an add, never an `if`.
+                inst_flags[slot as usize] = flags;
+                self.occlusion_instances += flags & VB_INST_FLAG_OCCLUSION_CULLING;
                 if let Some(pair) = maybe_pair {
                     pair_ring_view.push(*pair);
                     pair_out_slot_view.push(slot);
@@ -856,19 +942,24 @@ impl MeshRenderScratch {
     /// The count → resolve → prefix-sum → batch-emit core of the unified gather
     /// (Decision 7; asset-streaming plan F6 FIX-C1 adds the resolve step).
     ///
-    /// Fills `counts` (pass 1); then, per mesh (pass 2, AT MOST `mesh_count` calls
-    /// to `meta`, NEVER per-instance): resolves `meta(m)` for every mesh with a
-    /// non-zero count, and — on `None` — ZEROES `counts[m]` BEFORE the
-    /// prefix-sum runs, so a non-resolvable mesh contributes NOTHING to
+    /// Fills `counts` (pass 1) per `(face class, mesh)` bucket, `key = block · mesh_count +
+    /// mesh`, one `mesh_count` block per face class present this frame (RD6 / D-DS); then, per
+    /// bucket (pass 2, AT MOST one `meta` call per present class per mesh, NEVER per-instance):
+    /// resolves `meta(m)` for every bucket with a non-zero count, and — on `None` — ZEROES
+    /// `counts[key]` BEFORE the prefix-sum runs, so a non-resolvable mesh contributes NOTHING to
     /// `offsets`/`running` (its instances are excluded from the ring by
     /// construction, not merely un-batched — see
     /// [`gather_mixed_into`](Self::gather_mixed_into)'s scatter, which consults
-    /// `counts[m] == 0` per instance: the zeroing here IS the resolvability
-    /// signal, so no separate lane is needed). Fills `offsets` (each mesh's
+    /// `counts[key] == 0` per instance: the zeroing here IS the resolvability
+    /// signal, so no separate lane is needed). Fills `offsets` (each bucket's
     /// `base_instance`), zeroed `cursors` (the scatter write-heads the caller
-    /// advances), and `batches` (one [`DrawBatch`] per resolvable non-empty mesh,
-    /// mesh-id order). Returns `Σ instance_count` over RESOLVABLE meshes only —
-    /// the ring length the caller sizes its scatter to.
+    /// advances), and `batches` (one [`DrawBatch`] per resolvable non-empty bucket,
+    /// CLASS-MAJOR in face-class order, mesh-id order within a class). The order is the
+    /// emit loop's job alone: a block's index is the order its class first appeared in, so
+    /// walking blocks instead of classes would break the class order that
+    /// [`batch_casts_shadow`](crate::csm_caster::batch_casts_shadow)'s merge-walk relies on (review
+    /// r2 W1-r2). Returns `Σ instance_count` over RESOLVABLE buckets only — the ring length the
+    /// caller sizes its scatter to.
     ///
     /// `iter_input` is invoked ONCE here (the count pass); the caller invokes it a
     /// second time for the scatter. Only the small `mesh_id` key is touched — neither
@@ -890,7 +981,7 @@ impl MeshRenderScratch {
                 &'a InstanceModelCol,
                 Option<&'a GpuTransform3D>,
                 PerInstanceMaterial,
-                bool,
+                u32,
             ),
         >,
     {
@@ -899,31 +990,55 @@ impl MeshRenderScratch {
         // base_color payload) is IGNORED on this pass — only the scatter pass (below, in
         // `gather_mixed_into`) reads and scatters it. The 5th (the P2-2 occlusion capability)
         // is ignored here for the same reason: counting it on BOTH passes would double it. ---
+        // RD6 / D-DS: the lanes are keyed `(face class, mesh)` — one `mesh_count` BLOCK per face
+        // class PRESENT this frame (review W1), `key = block · mesh_count + mesh`. Class 0 always
+        // owns block 0, so an all-class-0 frame keys exactly HEAD's `mesh_count` per-mesh lanes;
+        // a further class takes the next block the first time one of its rows is counted (at
+        // most `MESH_FACE_CLASS_COUNT − 1` cold grows per frame). The count pass also records
+        // each row's key in `row_keys` (critique W4: the class is derived ONCE per row, here).
+        self.key_mesh_count = mesh_count;
+        let mut block_of = [NO_FACE_BLOCK; MESH_FACE_CLASS_COUNT];
+        block_of[0] = 0;
+        let mut blocks: u32 = 1;
         fit_len(&mut self.counts, mesh_count, 0);
         {
             let mut counts_view = self.counts.build_view();
-            let counts = counts_view.as_mut_slice();
-            for (mesh_id, _col, _pair, _material_id, _occlusion_capable) in iter_input() {
+            let mut counts = counts_view.as_mut_slice();
+            let mut keys_view = self.row_keys.build_view();
+            keys_view.clear();
+            for (mesh_id, _col, _pair, _material_id, flags) in iter_input() {
                 debug_assert!(
                     (mesh_id as usize) < mesh_count,
                     "invariant: a gathered mesh_id is in range of the registry"
                 );
-                counts[mesh_id as usize] += 1;
+                let class = mesh_face_class(flags) as usize;
+                let mut block = block_of[class];
+                if block == NO_FACE_BLOCK {
+                    block = blocks;
+                    block_of[class] = block;
+                    blocks += 1;
+                    add_face_block(&mut counts_view, mesh_count);
+                    counts = counts_view.as_mut_slice();
+                }
+                let key = block as usize * mesh_count + mesh_id as usize;
+                counts[key] += 1;
+                keys_view.push(key as u32);
             }
         }
+        let key_count = blocks as usize * mesh_count;
 
-        // --- Resolve + prefix-sum: offsets[m] = Σ counts[0..m] = mesh m's
-        // base_instance (over RESOLVABLE meshes only). `meta` is called ONCE per
-        // non-empty mesh (never per-instance, asset-streaming plan F6 FIX-C1) —
-        // `None` zeroes `counts[m]` BEFORE it feeds `running`/`offsets`, so a
-        // non-resolvable mesh's instances are excluded from the ring by
-        // construction (the zeroed `counts[m]` IS the scatter's per-instance
-        // exclusion signal — `counts[m] == 0`, no separate lane needed). Emits a
-        // DrawBatch per resolvable non-empty mesh (in mesh-id order) — the SAME
+        // --- Resolve + prefix-sum: offsets[key] = the instances of every bucket emitted before
+        // it (over RESOLVABLE buckets only, in the class-major order below) = bucket `key`'s
+        // base_instance. `meta` is called ONCE per non-empty bucket (never per-instance,
+        // asset-streaming plan F6 FIX-C1) — `None` zeroes `counts[key]` BEFORE it feeds
+        // `running`/`offsets`, so a non-resolvable mesh's instances are excluded from the ring by
+        // construction (the zeroed `counts[key]` IS the scatter's per-instance
+        // exclusion signal — `counts[key] == 0`, no separate lane needed). Emits a
+        // DrawBatch per resolvable non-empty bucket — the SAME
         // `meta` call drives both the batch emission and the exclusion, so there
         // is exactly one skip mechanism.
-        fit_len(&mut self.offsets, mesh_count, 0);
-        fit_len(&mut self.cursors, mesh_count, 0);
+        fit_len(&mut self.offsets, key_count, 0);
+        fit_len(&mut self.cursors, key_count, 0);
         self.batches.build_view().clear();
         let mut running: u32 = 0;
         // Disjoint field-projection borrows: `offsets`/`counts` (both `ScratchColumn<u32>`)
@@ -935,26 +1050,46 @@ impl MeshRenderScratch {
         let mut counts_view = self.counts.build_view();
         let counts = counts_view.as_mut_slice();
         let mut batches_view = self.batches.build_view();
-        for m in 0..mesh_count {
-            offsets[m] = running;
-            // A mesh with zero instances this frame needs no `meta` call — its
-            // resolvability is moot (nothing would be excluded either way).
-            let resolved = if counts[m] != 0 { meta(m as u32) } else { None };
-            if resolved.is_none() {
-                counts[m] = 0;
+        // Emission is class-major in CLASS order (not block order — a block's index is the
+        // order its class first appeared in): every present class's block, mesh by mesh, so the
+        // batches, bases and ring are those of a `(class, mesh)`-keyed lane whatever the row
+        // order. Every key in `[0, key_count)` belongs to exactly one present class, so every
+        // `offsets` slot is written. `meta` is called once per non-empty bucket (at most once
+        // per present class per mesh, never per instance).
+        for (class, &block) in block_of.iter().enumerate() {
+            if block == NO_FACE_BLOCK {
+                continue;
             }
-            let c = counts[m];
-            if let Some((index_count, index_type)) = resolved {
-                batches_view.push(DrawBatch {
-                    mesh_id: m as u32,
-                    index_count,
-                    index_type,
-                    base_instance: running,
-                    instance_count: c,
-                });
+            let face = (class as u32) << MESH_FACE_CLASS_SHIFT;
+            let block_base = block as usize * mesh_count;
+            let block_offsets = &mut offsets[block_base..block_base + mesh_count];
+            let block_counts = &mut counts[block_base..block_base + mesh_count];
+            for (m, (offset, count)) in block_offsets.iter_mut().zip(block_counts.iter_mut()).enumerate() {
+                *offset = running;
+                // A bucket with zero instances this frame needs no `meta` call — its
+                // resolvability is moot (nothing would be excluded either way).
+                let resolved = if *count != 0 { meta(m as u32) } else { None };
+                match resolved {
+                    Some((index_count, index_type)) => {
+                        batches_view.push(DrawBatch {
+                            mesh_id: m as u32,
+                            index_count,
+                            index_type,
+                            base_instance: running,
+                            instance_count: *count,
+                            face,
+                        });
+                        running += *count;
+                    }
+                    None => *count = 0,
+                }
             }
-            running += c;
         }
+        debug_assert_eq!(
+            block_of.iter().filter(|&&b| b != NO_FACE_BLOCK).count(),
+            blocks as usize,
+            "invariant: the emit walk visits every keyed block once"
+        );
         running
     }
 
@@ -999,10 +1134,11 @@ impl MeshRenderScratch {
         >,
     {
         let total = self.ring.len();
-        // A fresh cursor lane sized to the current mesh-lane length, reset to 0 (reuses the
-        // backing reservation — no per-frame alloc). `offsets.len()` is the mesh count the
-        // affine gather just fitted.
+        // A fresh cursor lane sized to the current bucket-lane length, reset to 0 (reuses the
+        // backing reservation — no per-frame alloc). `offsets.len()` is the bucket count the
+        // affine gather just keyed (one `mesh_count` block per face class present).
         fit_len(&mut self.prev_cursors, self.offsets.len(), 0);
+        let key_mesh_count = self.key_mesh_count;
 
         // Grow `prev_ring` to exactly `total` — same clear + fill-push equivalence as
         // `gather_mixed_into`'s `ring` grow (every slot is written once here, then
@@ -1021,8 +1157,15 @@ impl MeshRenderScratch {
             let mut cursors_view = self.prev_cursors.build_view();
             let cursors = cursors_view.as_mut_slice();
             let counts = self.counts.as_read_slice();
-            for (mesh_id, curr, maybe_prev) in iter_input() {
-                let m = mesh_id as usize;
+            let row_keys = self.row_keys.as_read_slice();
+            for (row, (mesh_id, curr, maybe_prev)) in iter_input().enumerate() {
+                // RD6 / D-DS: the count pass's key for this row — the same bucket `ring` used.
+                let m = row_keys[row] as usize;
+                debug_assert_eq!(
+                    m % key_mesh_count.max(1),
+                    mesh_id as usize,
+                    "invariant: this pass visits the count pass's rows in the count pass's order"
+                );
                 // FIX-C1 (asset-streaming plan F6): mirror `gather_mixed_into`'s skip
                 // EXACTLY — a non-resolvable mesh's instances never occupied a `ring`
                 // slot, so they must not occupy a `prev_ring` slot either. The
@@ -1094,9 +1237,10 @@ impl MeshRenderScratch {
         self.any_textured_material = false;
 
         let total = self.ring.len();
-        // A fresh cursor lane sized to the current mesh-lane length, reset to 0 —
+        // A fresh cursor lane sized to the current bucket-lane length, reset to 0 —
         // mirrors `gather_prev_ring_into`'s `prev_cursors` re-derivation exactly.
         fit_len(&mut self.material_tex_cursors, self.offsets.len(), 0);
+        let key_mesh_count = self.key_mesh_count;
 
         // Grow `material_tex` to exactly `total` — same clear + fill-push equivalence
         // as `gather_mixed_into`'s `ring`/`material_ids` grow.
@@ -1114,8 +1258,15 @@ impl MeshRenderScratch {
             let mut cursors_view = self.material_tex_cursors.build_view();
             let cursors = cursors_view.as_mut_slice();
             let counts = self.counts.as_read_slice();
-            for (mesh_id, material_id) in iter_input() {
-                let m = mesh_id as usize;
+            let row_keys = self.row_keys.as_read_slice();
+            for (row, (mesh_id, material_id)) in iter_input().enumerate() {
+                // RD6 / D-DS: the count pass's key for this row — the same bucket `ring` used.
+                let m = row_keys[row] as usize;
+                debug_assert_eq!(
+                    m % key_mesh_count.max(1),
+                    mesh_id as usize,
+                    "invariant: this pass visits the count pass's rows in the count pass's order"
+                );
                 // FIX-C1 (asset-streaming plan F6): mirror `gather_mixed_into`'s skip
                 // EXACTLY — see `gather_prev_ring_into`'s identical comment.
                 if counts[m] == 0 {
@@ -1354,7 +1505,10 @@ pub fn gather_mesh_draws(
     // hardcoded `Material::default()` guess.
     let default_base_color =
         material_table.get_by_index(0).map_or([0.8, 0.8, 0.8, 1.0], |m| m.gpu.base_color);
-    scratch.gather_mixed_into(
+    // RD6 / D-DS: the pinned default's `doubleSided`, read ONCE (the `id == 0` fast path and the
+    // stale substitution take it without a per-row lookup).
+    let default = (default_base_color, material_table.get_by_index(0).is_some_and(|m| m.double_sided));
+    scratch.gather_faced_into(
         mesh_count,
         // INVARIANT (asset-streaming plan F6 FIX-2): never dereference a non-Loaded
         // slot. `try_get` + `None` lets `gather_mixed_into` skip ONLY this bucket's
@@ -1374,22 +1528,24 @@ pub fn gather_mesh_draws(
                     // ONE guarded resolution, shared with the textured-payload scatter
                     // below (see `resolve_material_id`): the F8 OOB clamp AND the prereq
                     // (d) construction guard, so both index-aligned lanes ship the SAME id.
-                    let (id, base_color) = resolve_material_id(
-                        material_table,
-                        material_high_water,
-                        default_base_color,
-                        mat_h,
-                    );
+                    let (id, base_color, double_sided) =
+                        resolve_material_id(material_table, material_high_water, default, mat_h);
                     let material = PerInstanceMaterial { base_color, id, _pad: [0; 3] };
                     // VG R3 piece 2 step P2-2: PRESENCE is the whole datum, so the `Option<&ZST>`
-                    // collapses to a `bool` here and the shared gather core scatters/folds it.
-                    (h.0, col, pair, material, occ.is_some())
+                    // collapses to bit 0 of the row's flags word; RD6 / D-DS ORs the face class
+                    // (the material's `doubleSided`, the model's determinant sign) into bits 2-3.
+                    let flags = (u32::from(occ.is_some()) * VB_INST_FLAG_OCCLUSION_CULLING)
+                        | mesh_face_bits(double_sided, col);
+                    (h.0, col, pair, material, flags)
                 })
                 .chain(q_mat_stale.iter().map(move |(h, col, pair, _mat_h, occ)| {
-                    // Prereq (d): the stale material is substituted by the pinned default.
+                    // Prereq (d): the stale material is substituted by the pinned default — and
+                    // so is its face class (the caster gather keys the row the same way).
                     let material =
                         PerInstanceMaterial { base_color: default_base_color, id: 0, _pad: [0; 3] };
-                    (h.0, col, pair, material, occ.is_some())
+                    let flags = (u32::from(occ.is_some()) * VB_INST_FLAG_OCCLUSION_CULLING)
+                        | mesh_face_bits(default.1, col);
+                    (h.0, col, pair, material, flags)
                 }))
         },
     );
@@ -1414,12 +1570,8 @@ pub fn gather_mesh_draws(
                     // second, independently-written clamp. `PerInstanceMaterialTex::
                     // material_id` indexes the same `Materials` SSBO from the textured
                     // shaders, so a guard on one lane only is a per-instance disagreement.
-                    let (id, _base_color) = resolve_material_id(
-                        material_table,
-                        material_high_water,
-                        default_base_color,
-                        mat_h,
-                    );
+                    let (id, _base_color, _double_sided) =
+                        resolve_material_id(material_table, material_high_water, default, mat_h);
                     (h.0, id)
                 })
                 .chain(q_mat_stale.iter().map(|(h, _col, _pair, _mat_h, _occ)| (h.0, 0u32)))
@@ -1456,21 +1608,25 @@ pub fn gather_mesh_draws(
 /// `id == 0` (the pinned default — every all-default / golden scene) short-circuits the
 /// store lookup entirely (Principle 1). [`MaterialStale`] remains the GEN-mismatch guard:
 /// a REUSED slot resolves to the NEW tenant, which only the generation lane detects.
+///
+/// RD6 / D-DS: the resolved row's glTF `doubleSided` rides along (the third element) — the face
+/// class both gathers key on comes from the SAME guarded resolution, so a clamped / Loading /
+/// stale row is single- or double-sided exactly as the default it draws with (`default.1`).
 #[inline]
-fn resolve_material_id(
+pub(crate) fn resolve_material_id(
     material_table: &Assets<Material>,
     material_high_water: u32,
-    default_base_color: [f32; 4],
+    default: ([f32; 4], bool),
     mat_h: Option<&MaterialHandle>,
-) -> (u32, [f32; 4]) {
+) -> (u32, [f32; 4], bool) {
     let raw = mat_h.map_or(0u32, |m| u32::from(m.0));
     let clamped = if raw >= material_high_water { 0 } else { raw };
     if clamped == 0 {
-        return (0, default_base_color);
+        return (0, default.0, default.1);
     }
     match material_table.get_by_index(clamped) {
-        Some(m) => (clamped, m.gpu.base_color),
-        None => (0, default_base_color),
+        Some(m) => (clamped, m.gpu.base_color, m.double_sided),
+        None => (0, default.0, default.1),
     }
 }
 
@@ -1558,7 +1714,10 @@ pub fn gather_mesh_draws(
     // Principle 1 (F8+ reviewer M1/M2) — see the non-hwrt variant's comment above.
     let default_base_color =
         material_table.get_by_index(0).map_or([0.8, 0.8, 0.8, 1.0], |m| m.gpu.base_color);
-    scratch.gather_mixed_into(
+    // RD6 / D-DS: the pinned default's `doubleSided`, read ONCE (the `id == 0` fast path and the
+    // stale substitution take it without a per-row lookup).
+    let default = (default_base_color, material_table.get_by_index(0).is_some_and(|m| m.double_sided));
+    scratch.gather_faced_into(
         mesh_count,
         // INVARIANT (asset-streaming plan F6 FIX-2): never dereference a non-Loaded
         // slot — see the non-hwrt variant's comment above.
@@ -1573,20 +1732,20 @@ pub fn gather_mesh_draws(
                 .map(move |(h, col, pair, _prev, mat_h, occ)| {
                     // ONE guarded resolution shared with the textured scatter below —
                     // see the non-hwrt variant and `resolve_material_id`.
-                    let (id, base_color) = resolve_material_id(
-                        material_table,
-                        material_high_water,
-                        default_base_color,
-                        mat_h,
-                    );
+                    let (id, base_color, double_sided) =
+                        resolve_material_id(material_table, material_high_water, default, mat_h);
                     let material = PerInstanceMaterial { base_color, id, _pad: [0; 3] };
-                    // VG R3 piece 2 step P2-2 — see the non-hwrt variant's comment above.
-                    (h.0, col, pair, material, occ.is_some())
+                    // VG R3 piece 2 step P2-2 + RD6 / D-DS — see the non-hwrt variant's comment.
+                    let flags = (u32::from(occ.is_some()) * VB_INST_FLAG_OCCLUSION_CULLING)
+                        | mesh_face_bits(double_sided, col);
+                    (h.0, col, pair, material, flags)
                 })
                 .chain(q_mat_stale.iter().map(move |(h, col, pair, _prev, _mat_h, occ)| {
                     let material =
                         PerInstanceMaterial { base_color: default_base_color, id: 0, _pad: [0; 3] };
-                    (h.0, col, pair, material, occ.is_some())
+                    let flags = (u32::from(occ.is_some()) * VB_INST_FLAG_OCCLUSION_CULLING)
+                        | mesh_face_bits(default.1, col);
+                    (h.0, col, pair, material, flags)
                 }))
         },
     );
@@ -1608,12 +1767,8 @@ pub fn gather_mesh_draws(
                 .map(move |(h, _col, _pair, _prev, mat_h, _occ)| {
                     // THE SAME guarded resolution the primary lane ran — see the
                     // non-hwrt variant's comment and `resolve_material_id`.
-                    let (id, _base_color) = resolve_material_id(
-                        material_table,
-                        material_high_water,
-                        default_base_color,
-                        mat_h,
-                    );
+                    let (id, _base_color, _double_sided) =
+                        resolve_material_id(material_table, material_high_water, default, mat_h);
                     (h.0, id)
                 })
                 .chain(q_mat_stale.iter().map(|(h, _col, _pair, _prev, _mat_h, _occ)| (h.0, 0u32)))
@@ -2276,5 +2431,194 @@ mod tests {
             material_ids.iter().any(|m| m.id == 6),
             "mesh 2's surviving instance keeps its material id"
         );
+    }
+
+    // --- RD6 / D-DS: the class-major gather (H4) ---------------------------------------------
+
+    use boyko_rhi::enums::{MESH_FACE_BITS, MESH_FACE_DOUBLE_SIDED, MESH_FACE_MIRRORED};
+
+    /// A row of the faced gather: `(mesh, ordinal)` in the affine, `(mesh, face)` in the material
+    /// id (`100·mesh + face`), the flags word carrying `face`.
+    type FacedRow<'a> = (u32, &'a InstanceModelCol, Option<&'a GpuTransform3D>, PerInstanceMaterial, u32);
+
+    fn faced<'a>(mesh_id: u32, col: &'a InstanceModelCol, face: u32) -> FacedRow<'a> {
+        (mesh_id, col, None, pim(100 * mesh_id + face, [0.0; 4]), face)
+    }
+
+    /// H4: a mixed-class gather emits CLASS-MAJOR batches — every single-sided batch first (mesh
+    /// order), then each face class's — each batch carrying its class in `face`, with contiguous
+    /// prefix-sum bases.
+    #[test]
+    fn class_major_batches_carry_their_face() {
+        let (a0, a1, a2, b0, b1) = (affine(0, 0), affine(0, 1), affine(0, 2), affine(1, 0), affine(1, 1));
+        let ds = MESH_FACE_DOUBLE_SIDED;
+        let mi = MESH_FACE_MIRRORED;
+        let inputs = [faced(0, &a0, 0), faced(1, &b0, ds), faced(0, &a1, ds), faced(1, &b1, 0), faced(0, &a2, mi)];
+        let mut scratch = MeshRenderScratch::default();
+        scratch.gather_faced_into(2, meta, || inputs.iter().copied());
+        let got: Vec<(u32, u32, u32, u32)> = scratch
+            .batches
+            .as_read_slice()
+            .iter()
+            .map(|b| (b.mesh_id, b.face, b.base_instance, b.instance_count))
+            .collect();
+        assert_eq!(
+            got,
+            vec![(0, 0, 0, 1), (1, 0, 1, 1), (0, ds, 2, 1), (1, ds, 3, 1), (0, mi, 4, 1)],
+            "RED: the gather must split each mesh's instances by face class, class-major \
+             (mesh_id, face, base_instance, instance_count)"
+        );
+        assert_eq!(scratch.instance_count(), 5);
+    }
+
+    /// H4: an all-class-0 gather through the faced core is the mesh-only gather — batches, bases
+    /// and ring order equal a frozen expectation (HEAD's), so every pre-RD6 scene keeps its bytes.
+    #[test]
+    fn all_class_zero_gather_is_the_mesh_only_gather() {
+        let (a0, a1, b0, c0, c1) = (affine(0, 0), affine(0, 1), affine(1, 0), affine(2, 0), affine(2, 1));
+        let inputs = [faced(2, &c0, 0), faced(0, &a0, 0), faced(1, &b0, 0), faced(0, &a1, 0), faced(2, &c1, 0)];
+        let mut scratch = MeshRenderScratch::default();
+        scratch.gather_faced_into(3, meta, || inputs.iter().copied());
+        let batches: Vec<DrawBatch> = scratch.batches.as_read_slice().to_vec();
+        assert_eq!(
+            batches,
+            vec![
+                DrawBatch { mesh_id: 0, index_count: 6, index_type: IndexType::Uint16, base_instance: 0, instance_count: 2, face: 0 },
+                DrawBatch { mesh_id: 1, index_count: 12, index_type: IndexType::Uint32, base_instance: 2, instance_count: 1, face: 0 },
+                DrawBatch { mesh_id: 2, index_count: 18, index_type: IndexType::Uint16, base_instance: 3, instance_count: 2, face: 0 },
+            ]
+        );
+        assert_eq!(scratch.ring.as_read_slice(), &[a0, a1, b0, c0, c1], "the ring order is HEAD's");
+        assert_eq!(scratch.mesh_ids.as_read_slice(), &[0, 0, 1, 2, 2]);
+        assert!(scratch.inst_flags.as_read_slice().iter().all(|&f| f == 0), "class 0 sets no flag bit");
+    }
+
+    /// H4: with mixed classes every per-instance lane stays index-aligned with its batch — the
+    /// mesh id, the material payload (it encodes `(mesh, face)`), the flags word's face bits and
+    /// the textured payload all name the batch the slot belongs to — and each face class's
+    /// instance count reaches its batches.
+    #[test]
+    fn mixed_class_lanes_stay_index_aligned() {
+        let ds = MESH_FACE_DOUBLE_SIDED;
+        let mi = MESH_FACE_MIRRORED;
+        let cols: Vec<InstanceModelCol> = (0..8).map(|k| affine(k % 2, k)).collect();
+        let faces = [0, ds, mi, ds | mi, ds, 0, mi | ds, mi];
+        let inputs: Vec<FacedRow<'_>> = cols
+            .iter()
+            .zip(faces)
+            .map(|(c, f)| {
+                let m = c.rows[0][3] as u32;
+                (m, c, None, pim(100 * m + f, [0.0; 4]), f | VB_INST_FLAG_OCCLUSION_CULLING)
+            })
+            .collect();
+        let mut scratch = MeshRenderScratch::default();
+        scratch.gather_faced_into(2, meta, || inputs.iter().copied());
+        let mut materials = Assets::<Material>::with_reserved(1);
+        materials.add(Material::default());
+        scratch.gather_material_tex_into(&materials, [0.5; 4], 0.0, 0.5, || {
+            inputs.iter().map(|(m, _, _, pm, _)| (*m, pm.id))
+        });
+        let mut per_face = [0u32; 4];
+        for b in scratch.batches.as_read_slice() {
+            per_face[(b.face >> 2) as usize] += b.instance_count;
+        }
+        assert_eq!(per_face, [2, 2, 2, 2], "RED: each face class's instances must reach batches of that class");
+        for b in scratch.batches.as_read_slice() {
+            for slot in b.base_instance..b.base_instance + b.instance_count {
+                let i = slot as usize;
+                assert_eq!(scratch.mesh_ids.as_read_slice()[i], b.mesh_id, "mesh id lane at slot {slot}");
+                assert_eq!(scratch.material_ids.as_read_slice()[i].id, 100 * b.mesh_id + b.face, "material lane at slot {slot}");
+                assert_eq!(scratch.material_tex.as_read_slice()[i].material_id, 100 * b.mesh_id + b.face, "textured lane at slot {slot}");
+                assert_eq!(scratch.inst_flags.as_read_slice()[i] & MESH_FACE_BITS, b.face, "flags lane's face bits at slot {slot}");
+                assert_eq!(scratch.inst_flags.as_read_slice()[i] & VB_INST_FLAG_OCCLUSION_CULLING, 1, "flags lane keeps bit 0");
+                assert_eq!(scratch.ring.as_read_slice()[i].rows[0][3] as u32, b.mesh_id, "ring row's mesh at slot {slot}");
+            }
+        }
+        assert_eq!(scratch.occlusion_instances(), 8, "the occlusion fold reads bit 0 only");
+    }
+
+    /// RD6 / D-DS review W1: the bucket lanes span only the face classes PRESENT in the frame.
+    /// An all-class-0 frame keys `mesh_count` buckets (HEAD's per-mesh lanes, no 4× walk); each
+    /// further class present adds one `mesh_count` block. The batches stay class-major whatever
+    /// order the classes first appear in, with contiguous bases.
+    ///
+    /// Review r2 W1-r2: the last frame counts a higher class before lower ones, so its blocks'
+    /// first-appearance order differs from the class order. It is the only frame that fails when
+    /// the emit loop walks blocks instead of classes; the caster merge-walk
+    /// ([`batch_casts_shadow`](crate::csm_caster::batch_casts_shadow)) relies on class order.
+    #[test]
+    fn bucket_lanes_span_only_the_classes_present() {
+        const MESHES: usize = 64;
+        let ds = MESH_FACE_DOUBLE_SIDED;
+        let mi = MESH_FACE_MIRRORED;
+        let cols: Vec<InstanceModelCol> = (0..12).map(|k| affine(k * 5 % MESHES as u32, k)).collect();
+        let mut materials = Assets::<Material>::with_reserved(1);
+        materials.add(Material::default());
+        // (the faces of the 12 rows, the classes they cover)
+        let frames: [(&[u32], usize); 5] = [
+            (&[0; 12], 1),
+            (&[0, 0, ds | mi, 0, 0, ds | mi, 0, 0, 0, 0, 0, 0], 2),
+            // A non-zero class first: the lanes still hold the class-0 block plus one per class.
+            (&[mi, 0, mi, 0, mi, 0, mi, 0, mi, 0, mi, 0], 2),
+            (&[ds, mi, ds | mi, 0, ds, mi, ds | mi, 0, 0, 0, 0, 0], 4),
+            // A HIGHER class first: ds|mi (3) is counted before ds (1) and mi (2), so the blocks'
+            // first-appearance order (0, 3, 1, 2) is not the class order (0, 1, 2, 3).
+            (&[ds | mi, ds, mi, 0, ds | mi, ds, mi, 0, 0, 0, 0, 0], 4),
+        ];
+        let mut scratch = MeshRenderScratch::default();
+        for (faces, classes) in frames {
+            let inputs: Vec<FacedRow<'_>> =
+                cols.iter().zip(faces.iter().copied()).map(|(c, f)| faced(c.rows[0][3] as u32, c, f)).collect();
+            scratch.gather_faced_into(MESHES, meta, || inputs.iter().copied());
+            scratch.gather_material_tex_into(&materials, [0.5; 4], 0.0, 0.5, || {
+                inputs.iter().map(|(m, _, _, pm, _)| (*m, pm.id))
+            });
+            #[cfg(feature = "hwrt")]
+            scratch.gather_prev_ring_into(|| inputs.iter().map(|&(m, c, _, _, _)| (m, c, None)));
+            let lanes = classes * MESHES;
+            assert_eq!(
+                scratch.counts.len(),
+                lanes,
+                "RED (W1): {classes} face class(es) present must key {lanes} buckets, not {} \
+                 (faces {faces:?})",
+                scratch.counts.len()
+            );
+            assert_eq!(scratch.offsets.len(), lanes, "the offsets lane spans the present classes only");
+            assert_eq!(scratch.cursors.len(), lanes, "the cursor lane spans the present classes only");
+            assert_eq!(scratch.material_tex_cursors.len(), lanes, "the textured cursor lane spans the present classes only");
+            #[cfg(feature = "hwrt")]
+            assert_eq!(scratch.prev_cursors.len(), lanes, "the prev cursor lane spans the present classes only");
+
+            // The reference: one batch per non-empty (class, mesh), ascending, contiguous bases.
+            let mut want: Vec<(u32, u32, u32)> = Vec::new();
+            for class in 0..MESH_FACE_CLASS_COUNT as u32 {
+                for m in 0..MESHES as u32 {
+                    let face = class << MESH_FACE_CLASS_SHIFT;
+                    let n = inputs.iter().filter(|r| r.0 == m && r.4 == face).count() as u32;
+                    if n != 0 {
+                        want.push((face, m, n));
+                    }
+                }
+            }
+            let got: Vec<(u32, u32, u32)> =
+                scratch.batches.as_read_slice().iter().map(|b| (b.face, b.mesh_id, b.instance_count)).collect();
+            assert_eq!(got, want, "the batches are class-major (face, mesh, count) for faces {faces:?}");
+            let mut base = 0;
+            for b in scratch.batches.as_read_slice() {
+                assert_eq!(b.base_instance, base, "contiguous bases for faces {faces:?}");
+                base += b.instance_count;
+                for slot in b.base_instance..b.base_instance + b.instance_count {
+                    let i = slot as usize;
+                    assert_eq!(scratch.mesh_ids.as_read_slice()[i], b.mesh_id, "mesh id lane at slot {slot}");
+                    assert_eq!(scratch.inst_flags.as_read_slice()[i] & MESH_FACE_BITS, b.face, "face bits at slot {slot}");
+                    assert_eq!(
+                        scratch.material_tex.as_read_slice()[i].material_id,
+                        100 * b.mesh_id + b.face,
+                        "textured lane at slot {slot}"
+                    );
+                }
+            }
+            assert_eq!(base as usize, inputs.len(), "every row reaches one slot");
+        }
     }
 }

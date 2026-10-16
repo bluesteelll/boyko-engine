@@ -140,13 +140,14 @@ use boyko_physics::components::{
 };
 use boyko_physics::resources::{BroadphaseKind, PhysicsConfig};
 use boyko_fontbake::{AtlasKind, BakedFont, TtfFace, bake_font};
-use boyko_render::loaders::{GlbMeshLoader, ObjMeshLoader, PngTextureLoader};
+use boyko_render::loaders::glb_spawn::{GlbSpawnOptions, glb_scene_bounds, spawn_glb_scene};
+use boyko_render::loaders::{GlbMeshLoader, ObjMeshLoader};
 use boyko_render::mesh::Vertex;
 use boyko_render::mesh_data::MeshData;
 use boyko_render::texture_data::TextureData;
 use boyko_render::{
-    BindlessTextureTable, ColorSpace, Material, MaterialGpu, MaterialTextures, TextureAssetsExt,
-    TextureGpu, generate_tangents, load_material_folder, upload_texture_2d,
+    BindlessTextureTable, ColorSpace, Material, MaterialGpu, MaterialTextures, TextureGpu,
+    generate_tangents, load_material_folder, upload_texture_2d,
 };
 use boyko_scene::CameraSet;
 
@@ -1503,29 +1504,15 @@ fn spawn_showcase_models(
                 }
             },
         };
-        let mut scene = scene;
-        if scene.parts.is_empty() {
+        // ── One bounding box over ALL parts: the model is placed and collided as a whole,
+        //    so every part takes the SAME recentre (the spawn path's `recentre`) and the SAME
+        //    scale.
+        let Some((lo, hi)) = glb_scene_bounds(&scene) else {
             eprintln!("playground: {folder} decoded to no parts");
             continue;
-        }
-
-        // ── One bounding box over ALL parts: the model is placed and collided as a whole,
-        //    so every part must take the SAME recentre and the SAME scale.
-        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-        for part in &scene.parts {
-            let (plo, phi) = mesh_bounds(&part.mesh);
-            for axis in 0..3 {
-                lo[axis] = lo[axis].min(plo[axis]);
-                hi[axis] = hi[axis].max(phi[axis]);
-            }
-        }
+        };
         let raw_height = (hi[1] - lo[1]).max(1e-6);
         let scale = target_height / raw_height;
-        let centre = [
-            (hi[0] + lo[0]) * 0.5,
-            (hi[1] + lo[1]) * 0.5,
-            (hi[2] + lo[2]) * 0.5,
-        ];
         let half = Vec3::new(
             (hi[0] - lo[0]) * 0.5 * scale,
             (hi[1] - lo[1]) * 0.5 * scale,
@@ -1537,81 +1524,29 @@ fn spawn_showcase_models(
             scale: Vec3::new(scale, scale, scale),
         };
 
-        // ── The images, decoded ONCE each and shared by every material that names them.
-        //    `None` marks an image this engine cannot decode (JPEG today) — the material
-        //    then keeps its scalar factor for that channel.
-        let mut slots: Vec<Option<u32>> = Vec::with_capacity(scene.images.len());
-        let mut skipped_mimes: Vec<String> = Vec::new();
-        for (index, image) in scene.images.iter().enumerate() {
-            slots.push(upload_glb_image(
-                textures,
-                bindless,
-                ctx,
-                image,
-                glb_image_color_space(&scene, index),
-                &mut skipped_mimes,
-            ));
-        }
-        let textured = slots.iter().filter(|s| s.is_some()).count();
-
+        // ── The engine's glb spawn path (RD2 / R0a): the images (once per colour space), one
+        //    material per glTF material, one drawable per part with its route marker.
+        let report = spawn_glb_scene(
+            &scene,
+            commands,
+            meshes,
+            materials,
+            textures,
+            bindless,
+            ctx,
+            GlbSpawnOptions { transform, recentre: true, dilate_non_opaque_base: false, fallback_material },
+        );
         let tris: usize = scene.parts.iter().map(|p| p.mesh.indices.len() / 3).sum();
         let verts: usize = scene.parts.iter().map(|p| p.mesh.vertices.len()).sum();
         println!(
-            "playground: {folder} -> {} parts, {verts} verts, {tris} tris, {textured}/{} images decoded, \
-             height {raw_height:.2} -> {target_height:.2} m",
-            scene.parts.len(),
-            scene.images.len()
+            "playground: {folder} -> {} parts ({} opaque, {} masked, {} translucent), {verts} verts,              {tris} tris, {} image uploads, height {raw_height:.2} -> {target_height:.2} m",
+            report.entities, report.opaque, report.masked, report.translucent, report.images_uploaded,
         );
-        if !skipped_mimes.is_empty() {
-            skipped_mimes.sort_unstable();
-            skipped_mimes.dedup();
+        if report.images_undecodable > 0 {
             println!(
-                "playground: {folder} — {} image(s) left undecoded ({}); those channels use the \
-                 material factor",
-                scene.images.len() - textured,
-                skipped_mimes.join(", ")
+                "playground: {folder} — {} image upload(s) left undecoded (this engine decodes PNG                  only); those channels use the material factor",
+                report.images_undecodable
             );
-        }
-
-        // ── One drawable entity per PART, each with its own material.
-        for part in &mut scene.parts {
-            if part.mesh.indices.is_empty() {
-                continue;
-            }
-            recentre(&mut part.mesh, centre);
-            let mesh = meshes.register_mesh(ctx, &part.mesh.vertices, &part.mesh.indices);
-            meshes.pin(mesh.0);
-            let material = match part.material.and_then(|mi| scene.materials.get(mi)) {
-                Some(m) => {
-                    let handle = materials.add(Material::with_textures(
-                        MaterialGpu::new(
-                            m.base_color_factor,
-                            m.metallic,
-                            m.roughness,
-                            0.5,
-                            m.emissive_factor,
-                            0,
-                        ),
-                        MaterialTextures {
-                            albedo: m.base_color_image.and_then(|i| slots.get(i).copied().flatten()).unwrap_or(0),
-                            normal: m.normal_image.and_then(|i| slots.get(i).copied().flatten()).unwrap_or(0),
-                            metal_rough: m
-                                .metallic_roughness_image
-                                .and_then(|i| slots.get(i).copied().flatten())
-                                .unwrap_or(0),
-                            ao: m.occlusion_image.and_then(|i| slots.get(i).copied().flatten()).unwrap_or(0),
-                            emissive: m.emissive_image.and_then(|i| slots.get(i).copied().flatten()).unwrap_or(0),
-                        },
-                    ));
-                    let handle = MaterialHandle::from_handle(handle);
-                    materials.pin(u32::from(handle.0));
-                    handle
-                }
-                None => fallback_material,
-            };
-            let mut bundle = MeshBundle::new(mesh, transform);
-            bundle.material = material;
-            commands.spawn(bundle).insert(ShadowCaster);
         }
 
         // ── ONE physics body for the whole model: an immovable box around it. Separate from
@@ -1638,47 +1573,6 @@ fn spawn_showcase_models(
             },
         });
     }
-}
-
-/// The colour space a glTF image must be sampled in, decided by which SLOT names it.
-///
-/// glTF is explicit about this and getting it wrong is not subtle: base-colour and emissive
-/// are sRGB-encoded, while normal / metallic-roughness / occlusion are linear data. An
-/// image named by both kinds of slot (rare, and wrong in the file) resolves as sRGB.
-fn glb_image_color_space(scene: &boyko_render::loaders::glb::GlbScene, image: usize) -> ColorSpace {
-    let srgb = scene.materials.iter().any(|m| {
-        m.base_color_image == Some(image) || m.emissive_image == Some(image)
-    });
-    if srgb { ColorSpace::Srgb } else { ColorSpace::Linear }
-}
-
-/// Decodes ONE embedded glTF image and uploads it, returning its bindless slot.
-///
-/// `None` when the container is one this engine has no decoder for — the MIME string is
-/// pushed into `skipped` so the caller can say which, once, instead of per image.
-fn upload_glb_image(
-    textures: &mut Assets<TextureGpu>,
-    bindless: &mut BindlessTextureTable,
-    ctx: &boyko_rhi_vulkan::device::VulkanContext,
-    image: &boyko_render::loaders::glb::GlbImage,
-    color_space: ColorSpace,
-    skipped: &mut Vec<String>,
-) -> Option<u32> {
-    if image.bytes.is_empty() {
-        return None;
-    }
-    // PNG is the one container this engine decodes in-house (`boyko_image`). Anything else
-    // is named, not guessed at.
-    if !image.mime.eq_ignore_ascii_case("image/png") {
-        skipped.push(if image.mime.is_empty() { "<no mimeType>".to_string() } else { image.mime.clone() });
-        return None;
-    }
-    let mut data = PngTextureLoader::decode(&image.bytes)
-        .map_err(|e| eprintln!("playground: an embedded PNG failed to decode: {e:?}"))
-        .ok()?;
-    data.color_space = color_space;
-    let handle = textures.register_texture(ctx, bindless, &data);
-    Some(textures.texture(handle).bindless_slot)
 }
 
 /// Model-space AABB of a decoded mesh, as `(min, max)`.
@@ -1855,10 +1749,11 @@ fn uv_sphere(radius: f32, stacks: u32, slices: u32) -> (Vec<Vertex>, Vec<u32>) {
             let a = i * stride + j;
             let b = (i + 1) * stride + j;
             if i != 0 {
-                idx.extend_from_slice(&[a, b, a + 1]);
+                // RD6 / D-DS: counter-clockwise about the outward normal (the engine's front, glTF's).
+                idx.extend_from_slice(&[a, a + 1, b]);
             }
             if i != stacks - 1 {
-                idx.extend_from_slice(&[a + 1, b, b + 1]);
+                idx.extend_from_slice(&[a + 1, b + 1, b]);
             }
         }
     }

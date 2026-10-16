@@ -948,6 +948,13 @@ pub fn register_main_frame_systems(b: &mut ScheduleBuilder) {
     // between the two would draw one frame of an unstaged row.) It also keeps the stager off the
     // validate → gather chain.
     b.add_system(stage_material_edits).after(gather);
+    // RD2 / R0a (G3): the debug assertion that every drawable's route markers match its
+    // material's `route()` — a forgotten `reassign_route` after a route-defining edit fails here,
+    // in every debug run of this host. `.after_set(AssetValidateSet)`: the rows it reads are
+    // this frame's. Release builds compile the system out. Pinned by
+    // `tests/route_markers_check_is_wired.rs`.
+    #[cfg(debug_assertions)]
+    b.add_system(boyko_render::route::check_route_markers).after_set(boyko_render::AssetValidateSet);
 
     // ── Every render reader runs after its writer (R4-frame-order) ──────────────────────
     //

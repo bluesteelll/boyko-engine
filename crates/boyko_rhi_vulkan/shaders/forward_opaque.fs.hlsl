@@ -175,6 +175,37 @@ struct FaceTransform {
 
 #include "shadow_apply.hlsli"
 
+// --- RD6 / D-DS: the per-batch face word -------------------------------------------------------
+//
+// The fragment reads the SAME 88-byte push block the vertex stage declares (the pipeline's push
+// range is `VERTEX | FRAGMENT`): `use_model_matrix` is a bitfield — bit 0 the instanced arm,
+// bits 2-3 the batch's mesh-face class (`boyko_rhi::enums::MESH_FACE_*`), OR-ed in per batch by
+// the recorder. `mesh_face_flip` (generated from `boyko_shaderdsl::face`) negates the shading
+// normal of a double-sided material's back face (glTF 2.0 "Double Sided"); a single-sided batch
+// (no face bit — every draw before RD6) takes the select's untouched arm.
+struct PushConstants {
+    float4x4 view_proj;        // the VS's projection (unread here)
+    float4   cam_eye;          // the VS's eye (unread here; the Camera UBO carries it)
+    uint     base_instance;    // the VS's SSBO bucket base (unread here)
+    uint     use_model_matrix; // bit 0 the instanced arm; bits 2-3 the batch's mesh-face class
+};
+[[vk::push_constant]] PushConstants pc;
+
+// === GENERATED mesh_face_consts BEGIN === (boyko_shaderdsl::face)
+static const uint MESH_FACE_DOUBLE_SIDED_SHIFT = 2u;
+static const uint MESH_FACE_MIRRORED_SHIFT = 3u;
+static const uint MESH_FACE_DOUBLE_SIDED = 1u << MESH_FACE_DOUBLE_SIDED_SHIFT;
+static const uint MESH_FACE_MIRRORED = 1u << MESH_FACE_MIRRORED_SHIFT;
+// === GENERATED mesh_face_consts END ===
+
+// === GENERATED mesh_face_flip BEGIN === (boyko_shaderdsl::face)
+uint mesh_face_flip(uint front_ccw, uint face) {
+    uint mirrored = face >> MESH_FACE_MIRRORED_SHIFT;
+    uint hidden = (front_ccw ^ mirrored) ^ 1u;
+    return face >> MESH_FACE_DOUBLE_SIDED_SHIFT & hidden & 1u;
+}
+// === GENERATED mesh_face_flip END ===
+
 // --- Duplicated pure helpers (see the file header's "Duplicated (not shared)" note) --------
 
 // Karis "mobile" analytic environment BRDF approximation (no DFG LUT). VERBATIM copy of
@@ -213,8 +244,10 @@ struct PsIn {
 
 // NO `SV_Depth`: hardware reverse-Z from `forward_opaque.vs.hlsl`'s `SV_Position.z` stands
 // unmodified -- early-Z stays live (Decision 4). Single render target (`lit`, COLOR).
-float4 main(PsIn input) : SV_Target0 {
+float4 main(PsIn input, bool is_front : SV_IsFrontFace) : SV_Target0 {
     float3 n = normalize(input.normal);
+    // RD6 / D-DS: the FINAL shading normal of a double-sided back face is negated.
+    n = (mesh_face_flip((uint)is_front, pc.use_model_matrix) != 0u) ? -n : n;
     float3 P = input.world_pos;
     float3 v = normalize(cam_eye.xyz - P);
     float NoV = max(dot(n, v), 1e-4);

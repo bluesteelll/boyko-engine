@@ -47,19 +47,17 @@
 // FLAGS word @52 followed by an 8-byte pad @56, where the host previously carried a single
 // 12-byte pad @52.
 //
-// The `uint3 _pad` spelling is DELIBERATELY kept: at offset 52 it has the identical layout
-// with or without the split, and this header is `#include`d by four modules, each of which
-// would have to be re-DXC'd and re-pinned for a rename that buys no layout change. The datum
-// the rename would have carried is written here instead, because the reader who needs it is
-// piece 3's author — bit 0 of word @52 is "this instance's entity carries `OcclusionCulling`"
-// (bits 1..31 reserved, written zero). NOTHING in this file or its includers reads it as of
-// P2-2; piece 3 renames the field and is the first code to load it.
+// RD6 / D-DS renamed word @52 to `flags` (layout-identical to the former `uint3 _pad`'s first
+// lane; `vb_batch_cull` already spells it so) and is its first reader here: bit 0 is "this
+// instance's entity carries `OcclusionCulling`", bits 2-3 the mesh-face class (see the RD6 block
+// below), every other bit reserved and written zero.
 struct VbInstanceRow {
     float4 r0;
     float4 r1;
     float4 r2;
     uint   mesh_id;
-    uint3  _pad;
+    uint   flags;
+    uint2  _pad;
 };
 [[vk::binding(0, 0)]] StructuredBuffer<VbInstanceRow> gVbInstances;
 
@@ -515,6 +513,35 @@ static const float FACE_N_EPS2 = 1.0e-20;
 
 // The per-pixel result `vb_geom_fetch` reconstructs — the SAME per-fragment attribute set a
 // raster VS/FS pair would have interpolated for free (Decision 0's re-fetch trade-off).
+// --- RD6 / D-DS: the instance's face bits ----------------------------------------------------
+//
+// `VbInstanceRow::flags` bits 2-3 carry the instance's mesh-face class
+// (`boyko_rhi::enums::MESH_FACE_*`, bit 0 = occlusion culling). A double-sided instance's back
+// face is lit with the negated normal (glTF 2.0 "Double Sided"): `vb_geom_fetch` re-derives the
+// pixel's triangle facing from its own screen-space vertices (`vb_screen_front_ccw`, the Vulkan
+// area rule) and orients through `mesh_face_flip` — both generated from `boyko_shaderdsl::face`.
+// === GENERATED mesh_face_consts BEGIN === (boyko_shaderdsl::face)
+static const uint MESH_FACE_DOUBLE_SIDED_SHIFT = 2u;
+static const uint MESH_FACE_MIRRORED_SHIFT = 3u;
+static const uint MESH_FACE_DOUBLE_SIDED = 1u << MESH_FACE_DOUBLE_SIDED_SHIFT;
+static const uint MESH_FACE_MIRRORED = 1u << MESH_FACE_MIRRORED_SHIFT;
+// === GENERATED mesh_face_consts END ===
+
+// === GENERATED mesh_face_flip BEGIN === (boyko_shaderdsl::face)
+uint mesh_face_flip(uint front_ccw, uint face) {
+    uint mirrored = face >> MESH_FACE_MIRRORED_SHIFT;
+    uint hidden = (front_ccw ^ mirrored) ^ 1u;
+    return face >> MESH_FACE_DOUBLE_SIDED_SHIFT & hidden & 1u;
+}
+// === GENERATED mesh_face_flip END ===
+
+// === GENERATED vb_screen_front_ccw BEGIN === (boyko_shaderdsl::face)
+uint vb_screen_front_ccw(float3 vx, float3 vy) {
+    float area2 = vx.x * vy.y - vx.y * vy.x + (vx.y * vy.z - vx.z * vy.y) + (vx.z * vy.x - vx.x * vy.z);
+    return (area2 < 0.0) ? 1u : 0u;
+}
+// === GENERATED vb_screen_front_ccw END ===
+
 struct VbGeomFetchResult {
     float3 world_pos;
     float3 world_normal;
@@ -728,5 +755,20 @@ VbGeomFetchResult vb_geom_fetch(uint instance_id, uint raw_prim_id, float2 pixel
     result.tex_w = v0.tangent.w;
     result.uv_grad = vb_uv_grad(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(v0.uv.x, v1.uv.x, v2.uv.x), float3(v0.uv.y, v1.uv.y, v2.uv.y), w3);
 #endif
+    // RD6 / D-DS: a double-sided instance's authored back face is lit with the negated normal.
+    // GATED on the instance's own bit, `[branch]`: a single-sided pixel (every pixel before
+    // RD6) pays one AND and a coherent branch, never the facing math (the dark-cost rule this
+    // file's SV0 block records). Negating (N, T, w) together negates the final mapped normal:
+    // B = cross(N, T) * w turns into -B, and Gram-Schmidt commutes with the negation.
+    [branch] if ((inst.flags & MESH_FACE_DOUBLE_SIDED) != 0u) {
+        uint front_ccw = vb_screen_front_ccw(float3(sx0, sx1, sx2), float3(sy0, sy1, sy2));
+        if (mesh_face_flip(front_ccw, inst.flags) != 0u) {
+            result.world_normal = -result.world_normal;
+#ifdef TEXTURED
+            result.world_tangent = -result.world_tangent;
+            result.tex_w = -result.tex_w;
+#endif
+        }
+    }
     return result;
 }

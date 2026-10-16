@@ -24,6 +24,7 @@
 use core::ptr;
 
 use boyko_rhi::TimestampStage;
+use boyko_rhi::enums::MeshPassKind;
 
 #[cfg(feature = "hwrt")]
 use crate::compute::LOCAL_SIZE_X;
@@ -1389,11 +1390,24 @@ impl Renderer<'_> {
                 // `use_model_matrix == 1`; per caster batch the recorder re-pushes
                 // `base_instance` then `draw_indexed` reads that batch's bound vertex+index
                 // buffers. Begin/End bracket each cascade.
+                //
+                // RD6 / D-DS cull members (`scene.face_pipelines` `Some`): per batch the loop may bind
+                // another cull member of `caster_depth` (the `Front` member is `csm.pipeline`) and keeps binding sets and pushing through
+                // `csm.pipeline.layout`. Every member of a family is built by the family's ONE builder closure
+                // from the same `GraphicsPipelineDesc` except `cull_mode` (same modules, same set-layout
+                // objects, same push range and stages), so the member layouts are identically defined for
+                // every bound set and for push constants (Vulkan "Pipeline Layout Compatibility"): the
+                // bound sets and the pushed bytes survive the switch. Each member is created on this
+                // device at boot and destroyed exactly once, at the device-idle `CsmResources` teardown
+                // beside its family's existing pipeline, so it outlives every frame recorded here.
                 unsafe {
                     ts.cmd();
                     (self.fns.cmd_begin_rendering)(cmd, &csm_rendering);
                     ts.cmd();
                     (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, csm.pipeline.pipeline);
+                    // RD6 / D-DS: each caster batch binds its face class's member.
+                    let csm_members = scene.face_pipelines.map(|fp| fp.caster_depth);
+                    let mut bound_pipe = csm.pipeline.pipeline;
                     ts.cmd();
                     (self.fns.cmd_bind_descriptor_sets)(
                         cmd,
@@ -1423,6 +1437,14 @@ impl Renderer<'_> {
                             continue;
                         }
                         let base = batch.base_instance;
+                        if let Some(members) = csm_members {
+                            let member = members.for_face(batch.face, MeshPassKind::LightView);
+                            if member.pipeline != bound_pipe {
+                                ts.cmd();
+                                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, member.pipeline);
+                                bound_pipe = member.pipeline;
+                            }
+                        }
                         csm_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
                             ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
                             .copy_from_slice(&base.to_le_bytes());
@@ -1473,6 +1495,8 @@ impl Renderer<'_> {
             };
             let mut atlas_push = atlas_act.push;
             let mut bound_point: Option<bool> = None;
+            // RD6 / D-DS: the pipeline actually bound (a batch may switch to a cull member).
+            let mut bound_pipe = VkPipeline::NULL;
             for s in 0..active {
                 let is_point = atlas_act.face_is_point[s as usize];
                 let face_pipeline = if is_point { atlas_act.point_pipeline } else { atlas_act.pipeline };
@@ -1513,12 +1537,24 @@ impl Renderer<'_> {
                 // `view_proj` (+ the POINT `cam_eye` lane) + `use_model_matrix == 1`; per caster
                 // batch the recorder re-pushes `base_instance` then `draw_indexed` reads that
                 // batch's bound vertex+index buffers. Begin/End bracket each slot.
+                //
+                // RD6 / D-DS cull members (`scene.face_pipelines` `Some`): per batch the loop may bind
+                // another cull member of the slot's family (`caster_point` or `caster_depth`, whose `Front` member is the
+                // face-type pipeline) and keeps binding sets and pushing through
+                // `face_pipeline.layout`. Every member of a family is built by the family's ONE builder closure
+                // from the same `GraphicsPipelineDesc` except `cull_mode` (same modules, same set-layout
+                // objects, same push range and stages), so the member layouts are identically defined for
+                // every bound set and for push constants (Vulkan "Pipeline Layout Compatibility"): the
+                // bound sets and the pushed bytes survive the switch. Each member is created on this
+                // device at boot and destroyed exactly once, at the device-idle `CsmResources` teardown
+                // beside its family's existing pipeline, so it outlives every frame recorded here.
                 unsafe {
                     ts.cmd();
                     (self.fns.cmd_begin_rendering)(cmd, &atlas_rendering);
                     if bound_point != Some(is_point) {
                         ts.cmd();
                         (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, face_pipeline.pipeline);
+                        bound_pipe = face_pipeline.pipeline;
                         ts.cmd();
                         (self.fns.cmd_bind_descriptor_sets)(
                             cmd,
@@ -1545,11 +1581,22 @@ impl Renderer<'_> {
                     (self.fns.cmd_set_viewport)(cmd, 0, 1, &atlas_viewport);
                     ts.cmd();
                     (self.fns.cmd_set_scissor)(cmd, 0, 1, &atlas_area);
+                    // RD6 / D-DS: the slot's family members; each batch binds its face's member.
+                    let slot_members =
+                        scene.face_pipelines.map(|fp| if is_point { fp.caster_point } else { fp.caster_depth });
                     for batch in scene.mesh_draw {
                         if !batch.casts_shadow {
                             continue;
                         }
                         let base = batch.base_instance;
+                        if let Some(members) = slot_members {
+                            let member = members.for_face(batch.face, MeshPassKind::LightView);
+                            if member.pipeline != bound_pipe {
+                                ts.cmd();
+                                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, member.pipeline);
+                                bound_pipe = member.pipeline;
+                            }
+                        }
                         atlas_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
                             ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
                             .copy_from_slice(&base.to_le_bytes());
@@ -2532,12 +2579,22 @@ impl Renderer<'_> {
             // COLOR_ATTACHMENT_OPTIMAL) + the live `vb_depth` (`forward.depth[fi]`, REUSED verbatim)
             // view (now DEPTH_ATTACHMENT_OPTIMAL); `vb_raster_pipeline` (1-set, built against
             // `vb_layout0` — since rung R2d-4 its VS references `instances` @0, `visible_instances`
-            // @11 and the push, still a subset of what `vb_set0` binds) + the 88-byte VERTEX push
-            // range belong to this device (caller contract); `vb_set0[fi]` is a live descriptor set
-            // whose @11 entry is the survivor list the VS now loads from. The per-draw push writes
-            // bytes [80, 88) of that 88-byte range. `full_viewport`/`full_area` outlive the
-            // bracketed calls; each `DrawBatch`'s per-instance draw reads that batch's bound
-            // vertex+index buffers. Begin/End bracket the pass exactly.
+            // @11 and the push, still a subset of what `vb_set0` binds) + the 88-byte `VERTEX |
+            // FRAGMENT` push range belong to this device (caller contract); `vb_set0[fi]` is a live
+            // descriptor set whose @11 entry is the survivor list the VS now loads from. The per-draw
+            // push writes bytes [80, 88) of that 88-byte range, with exactly its stages.
+            // `full_viewport`/`full_area` outlive the bracketed calls; each `DrawBatch`'s per-instance
+            // draw reads that batch's bound vertex+index buffers. Begin/End bracket the pass exactly.
+            //
+            // RD6 / D-DS cull members (`scene.face_pipelines` `Some`): per batch the loop may bind
+            // another cull member of `vb_raster` (the `None` member is `vb_raster_pipeline`) and keeps binding sets and pushing through
+            // `vb_raster_pipeline.layout`. Every member of a family is built by the family's ONE builder closure
+            // from the same `GraphicsPipelineDesc` except `cull_mode` (same modules, same set-layout
+            // objects, same push range and stages), so the member layouts are identically defined for
+            // every bound set and for push constants (Vulkan "Pipeline Layout Compatibility"): the
+            // bound sets and the pushed bytes survive the switch. Each member is created on this
+            // device at boot and destroyed exactly once, at the device-idle `GpuSceneBundles` teardown
+            // beside its family's existing pipeline, so it outlives every frame recorded here.
             unsafe {
                 ts.cmd();
                 (self.fns.cmd_begin_rendering)(cmd, &vb_rendering);
@@ -2567,7 +2624,19 @@ impl Renderer<'_> {
                 (self.fns.cmd_set_viewport)(cmd, 0, 1, &full_viewport);
                 ts.cmd();
                 (self.fns.cmd_set_scissor)(cmd, 0, 1, &full_area);
+                let raster_members = scene.face_pipelines.map(|fp| fp.vb_raster);
+                let mut bound_pipe = vb_raster_pipeline.pipeline;
                 for (i, batch) in scene.mesh_draw.iter().enumerate() {
+                    // RD6 / D-DS: the batch's cull member (`vb_raster` needs no face bit in its push:
+                    // the id raster only rasterises; the fetch orients from `VbInstanceRow::flags`).
+                    if let Some(members) = raster_members {
+                        let member = members.for_face(batch.face, MeshPassKind::CameraView);
+                        if member.pipeline != bound_pipe {
+                            ts.cmd();
+                            (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, member.pipeline);
+                            bound_pipe = member.pipeline;
+                        }
+                    }
                     // ⚠️ Rung R2d-4: `i < batch_count` is LOAD-BEARING, and it is the RELEASE-path
                     // mechanism — not a debug check. The cull's dispatch covers exactly
                     // `[0, batch_count)` (the SAME hoisted local the descriptor fill and the
@@ -3088,6 +3157,16 @@ impl Renderer<'_> {
                 // `vb_cull_late (COMPUTE, SHADER_WRITE) → vb_raster_late (VERTEX, SHADER_READ)`
                 // edge `declare_vb_graph` derives from this pass's declared read.
                 // Begin/End bracket the pass exactly.
+                //
+                // RD6 / D-DS cull members (`scene.face_pipelines` `Some`): per batch the loop may bind
+                // another cull member of `vb_raster` (the `None` member is `vb_raster_pipeline`) and keeps binding sets and pushing through
+                // `vb_raster_pipeline.layout`. Every member of a family is built by the family's ONE builder closure
+                // from the same `GraphicsPipelineDesc` except `cull_mode` (same modules, same set-layout
+                // objects, same push range and stages), so the member layouts are identically defined for
+                // every bound set and for push constants (Vulkan "Pipeline Layout Compatibility"): the
+                // bound sets and the pushed bytes survive the switch. Each member is created on this
+                // device at boot and destroyed exactly once, at the device-idle `GpuSceneBundles` teardown
+                // beside its family's existing pipeline, so it outlives every frame recorded here.
                 unsafe {
                     ts.cmd();
                     (self.fns.cmd_begin_rendering)(cmd, &vb_rendering_late);
@@ -3117,7 +3196,19 @@ impl Renderer<'_> {
                     (self.fns.cmd_set_viewport)(cmd, 0, 1, &full_viewport);
                     ts.cmd();
                     (self.fns.cmd_set_scissor)(cmd, 0, 1, &full_area);
+                    let raster_members = scene.face_pipelines.map(|fp| fp.vb_raster);
+                    let mut bound_pipe = vb_raster_pipeline.pipeline;
                     for (i, batch) in scene.mesh_draw.iter().enumerate().take(batch_count) {
+                        // RD6 / D-DS: the batch's cull member (`vb_raster` needs no face bit in its push:
+                        // the id raster only rasterises; the fetch orients from `VbInstanceRow::flags`).
+                        if let Some(members) = raster_members {
+                            let member = members.for_face(batch.face, MeshPassKind::CameraView);
+                            if member.pipeline != bound_pipe {
+                                ts.cmd();
+                                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, member.pipeline);
+                                bound_pipe = member.pipeline;
+                            }
+                        }
                         // VG R3 piece 3 step P3-6: THE SURVIVOR-INDIRECTION BIT IS SET, and the
                         // region it names is written by the LATE CULL of this same frame —
                         // `vb_late_visible[base_instance .. base_instance + instanceCount)`, with
@@ -6172,6 +6263,7 @@ mod vb_cull_clamp_tests {
                 instance_count,
                 casts_shadow: true,
                 world_aabb: None,
+                face: 0,
             })
             .collect()
     }

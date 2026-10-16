@@ -166,5 +166,12 @@ criterion.workspace = true
 name = "ui_pack_sort"
 harness = false
 
+# RD6 / D-DS budget row: the production mesh gather's main-thread cost at N in
+# {1k, 10k, 100k} all-default drawables, before and after the face class joins the bucket key
+# (criterion median per build; the ceiling is derived in the RD6 cut's W4 addendum).
+[[bench]]
+name = "mesh_gather_face"
+harness = false
+
 [lints]
 workspace = true

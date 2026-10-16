@@ -193,7 +193,8 @@ pub fn uv_sphere(radius: f32, stacks: u32, slices: u32, color: [f32; 4]) -> (Vec
         for j in 0..slices {
             let a = i * stride + j;
             let b = (i + 1) * stride + j;
-            idx.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+            // RD6 / D-DS: counter-clockwise about the outward normal (the engine's front, glTF's).
+            idx.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
         }
     }
     generate_tangents(&mut verts, &idx);
@@ -338,6 +339,7 @@ pub fn batch_rejections(framing: &Framing) -> Vec<usize> {
                 index_type: boyko_rhi::IndexType::Uint32,
                 base_instance: (batch * BATCH_INSTANCES) as u32,
                 instance_count: BATCH_INSTANCES as u32,
+                face: 0,
             };
             boyko_render::frustum::batch_instance_count_after_cull(
                 &planes,
