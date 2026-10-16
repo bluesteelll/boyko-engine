@@ -2441,6 +2441,19 @@ impl ColoredSoftStepSolver {
         self.region_last
     }
 
+    /// SR (sr-policy S1): the last region's helper advances, the publishes its participants 1..
+    /// made (`RegionReport::helper_advances`). 0 under the shipped `SolvePolicy`, whose orchestrator
+    /// publishes every item, and 0 on an armed region and on one participant. Like
+    /// [`last_region_report`](Self::last_region_report) it is the LAST region's value, not a sum:
+    /// a step that opened no region leaves it as it was, so a reader pairs it with
+    /// [`region_dispatches`](Self::region_dispatches). The census getter behind the parity runner's
+    /// `helper_advances_per_step`.
+    #[doc(hidden)]
+    #[inline]
+    pub fn region_helper_advances(&self) -> u64 {
+        self.region_last.helper_advances
+    }
+
     /// SR, Miri: per stage kind, the blocks the helpers ran and the widest entry, over every region
     /// so far — the Miri legs' per-kind guard (critique W2). Natively it does not exist.
     #[cfg(miri)]
@@ -6441,6 +6454,17 @@ pub(crate) enum RegionRoute {
     Threads(u32),
 }
 
+/// SR: the region policy the solve runs, named once (sr-policy S1). Every site that depends on the
+/// policy names this alias: the claim-column sizing in the table builder, the `RegionFrame::new`
+/// contract in `solve_region`, the pool dispatch (`region_on_pool`) and the Miri `Threads` route.
+/// So the frame is always sized for the policy that runs it, where two spellings could diverge
+/// under a one-line edit and under-size the claim lines.
+///
+/// S1 is value-neutral: window SR (ruling 37, R7) found no successor policy eligible, so this
+/// stays the shipped `V2Policy`. Changing this line is the whole policy flip, and a flip re-takes
+/// the codegen receipt and CR-F1's gates.
+type SolvePolicy = V2Policy;
+
 /// SR: the solve region's frame and table, in the solver Resource's own columns (Principle 0;
 /// `02-SR-DESIGN.md` §1.1). The four line groups are four separate columns, never one merged
 /// one. Every column is grown serially before a region and never shrunk (phase A's carried W3
@@ -6453,7 +6477,7 @@ struct RegionColumns {
     done: ScratchColumn<RegionLine>,
     /// One receipt line per participant.
     receipts: ScratchColumn<RegionLine>,
-    /// One claim line per block of every published entry (`V2Policy`).
+    /// One claim line per block of every published entry (`SolvePolicy`).
     claims: ScratchColumn<RegionLine>,
     /// The stage table.
     entries: ScratchColumn<StageEntry>,
@@ -6609,7 +6633,7 @@ impl TableBuilder<'_, '_> {
         let color = u16::try_from(color).expect("invariant: the region path admits only colour indices a u16 names");
         let first_cut = u32::try_from(first_cut).expect("invariant: the cut column holds fewer than 2^32 boundaries");
         self.entries.push(StageEntry::new(kind, color, n, self.claims, first_cut));
-        self.claims += claim_lines::<V2Policy>(n, self.p);
+        self.claims += claim_lines::<SolvePolicy>(n, self.p);
     }
 
     /// Cuts rows `[0, rows)` into whole 8-row groups — `min(body_bpp · P, ⌈rows / body_rows⌉)`
@@ -7132,6 +7156,15 @@ impl RegionStages for SolveStages<'_> {
     }
 
     fn item_begin(&self, item: u32) {
+        // MD2 (ruling 32): counted here, not at `region_on_pool`'s `armed` test, because only an
+        // `ARMED = true` monomorph calls this hook: the count follows the monomorph that ran, so a
+        // selector that lies and a swapped pair of arms both move it. Item 0 begins once per region.
+        #[cfg(feature = "region-armed-counts")]
+        if item == 0 {
+            // Relaxed: a count; its reader runs after `Schedule::run` returns, and the run's join
+            // orders every region of the step before that read.
+            ARMED_REGION_DISPATCHES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         let e = self.item_entry(item);
         // SAFETY: the hooks run on participant 0 only (`RegionStages`' contract), so this is the
         //   one access to the slots, which `solve_region` keeps alive for the whole region.
@@ -7497,9 +7530,9 @@ impl ColoredSoftStepSolver {
         //     (`region.sync`, `.done`, `.receipts`, `.claims`), borrowed `&mut` here; no other frame
         //     or owner is ever handed them, and `region.epoch` is the counter created with them;
         //   * sized for the schedule: `build_region_table` grew them to this table — a done line per
-        //     entry, a receipt per participant, and `claim_lines::<V2Policy>` lines per published
-        //     entry from its `first_claim` — and the region below runs `V2Policy` with `p`
-        //     participants;
+        //     entry, a receipt per participant, and `claim_lines::<SolvePolicy>` lines per
+        //     published entry from its `first_claim` — and the region below runs `SolvePolicy`
+        //     with `p` participants;
         //   * the counter is the claim column's own: `region.epoch` starts at 0 with the column
         //     zeroed, is never reset, and every region advances it past every epoch it writes, so
         //     it is at or above every epoch the claim lines hold.
@@ -7507,9 +7540,9 @@ impl ColoredSoftStepSolver {
         #[cfg(all(test, miri))]
         let report = match route {
             RegionRoute::Threads(_) => Some(if armed {
-                boyko_threadpool::region_on_threads::<_, V2Policy, true>(frame, &stages)
+                boyko_threadpool::region_on_threads::<_, SolvePolicy, true>(frame, &stages)
             } else {
-                boyko_threadpool::region_on_threads::<_, V2Policy, false>(frame, &stages)
+                boyko_threadpool::region_on_threads::<_, SolvePolicy, false>(frame, &stages)
             }),
             RegionRoute::Pool => Self::region_on_pool(frame, &stages, armed),
         };
@@ -7604,12 +7637,31 @@ impl ColoredSoftStepSolver {
     fn region_on_pool(frame: RegionFrame<'_>, stages: &SolveStages<'_>, armed: bool) -> Option<RegionReport> {
         try_with_active_pool(move |pool| {
             if armed {
-                pool.region::<_, V2Policy, true>(frame, stages)
+                pool.region::<_, SolvePolicy, true>(frame, stages)
             } else {
-                pool.region::<_, V2Policy, false>(frame, stages)
+                pool.region::<_, SolvePolicy, false>(frame, stages)
             }
         })
     }
+}
+
+/// MD2: the solve regions this process has run as an `ARMED = true` monomorph.
+#[cfg(feature = "region-armed-counts")]
+static ARMED_REGION_DISPATCHES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// MD2 (ruling 32), test-only: how many solve regions this process has run as an `ARMED = true`
+/// monomorph, since the process started — one per such region, counted by the solver's
+/// `item_begin` hook on item 0, which only that monomorph calls. A disarmed step adds 0, an armed
+/// region step adds 1. Process-wide, so its gate (`tests/sr_region_armed_dispatch.rs`) is the only
+/// test in its process. Exists only with the `region-armed-counts` feature, which no crate of the
+/// workspace enables; without it the counting statement is not compiled.
+#[cfg(feature = "region-armed-counts")]
+#[doc(hidden)]
+#[inline]
+pub fn armed_region_dispatches() -> u64 {
+    // Relaxed: as the increment's.
+    ARMED_REGION_DISPATCHES.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 impl RigidSolver for ColoredSoftStepSolver {

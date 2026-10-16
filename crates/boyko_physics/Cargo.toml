@@ -85,6 +85,13 @@ bp-query-counts = []
 # the census epilogues of the pinned targets and the `jolt_parity_pyramid` runner's summary:
 # `cargo test -p boyko-physics --features narrowphase-counts --test narrowphase_census`.
 narrowphase-counts = []
+# sr-policy MD2 (orchestrator ruling 32, the SR-B close test's carry-over): a process-wide count of
+# the solve regions that ran an `ARMED = true` monomorph, taken in the solver's `item_begin` hook on
+# item 0 (`solver::colored::armed_region_dispatches`). OFF by default and enabled by no crate in the
+# workspace; with it off the counting statement does not exist. Its one consumer is
+# `tests/sr_region_armed_dispatch.rs`: `cargo test -p boyko-physics --features region-armed-counts
+# --test sr_region_armed_dispatch`.
+region-armed-counts = []
 
 [dev-dependencies]
 # Rung L8a: `boyko_log::probe`'s record observers, for the `#[cfg(test)] mod` blocks that assert
@@ -129,6 +136,16 @@ harness = false
 name = "profiling_bit_identity"
 path = "tests/profiling_bit_identity.rs"
 harness = false
+
+[[test]]
+# MD2: the `ARMED = true` region count follows the profiler's arm — 0 on every disarmed step, the
+# region count on every armed one. Its own process for `profiling_zone_counts`' reason (the arm
+# mask is process-wide, and the bind admits one world). `required-features`: a named run without
+# the counter is refused by cargo, so it can never read as a vacuous `running 0 tests`.
+name = "sr_region_armed_dispatch"
+path = "tests/sr_region_armed_dispatch.rs"
+harness = false
+required-features = ["region-armed-counts"]
 
 [[bench]]
 # O2 A/B: the grid broadphase vs the shipped all-pairs loop at {100, 1k, 10k}
