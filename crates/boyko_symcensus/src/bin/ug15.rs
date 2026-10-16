@@ -23,7 +23,14 @@
 //! ug15 map b capture --arm <label> --out <file>        # on a layout control branch
 //! ug15 map b diff --type <T> <arm1> <arm2>             # rewrites T's rows of ug15/maps/layout-map.tsv
 //! ug15 map c capture|check                             # ug15/maps/containment.tsv
+//! ug15 unit --retain <dir> [--controls <receipt>] [--out <file>]   # IB V11 (a)(b)(c)(e)(f), certified
+//! ug15 unit-compare <pre-receipt> <tip-receipt>        # IB V11 (d1)-(d4), the closed list
 //! ```
+//!
+//! The IB commands (`unit`, `unit-compare`; IB P0r) refuse an executable built from other sources
+//! than the tree holds (RED [stale instrument]): rebuild with `cargo build -p boyko-symcensus --bin
+//! ug15 --locked` before every run. `--retain` is absolute, outside the tree and the target dir, and
+//! empty or absent.
 //!
 //! Every command prints what it read and from where; a RED prints `RED [<kind>]: …` and exits 1.
 
@@ -44,6 +51,7 @@ use boyko_symcensus::source;
 use boyko_symcensus::red::{Red, RedKind, Result};
 use boyko_symcensus::snapshot::{self, Snapshot};
 use boyko_symcensus::tools;
+use boyko_symcensus::unit::{self, Receipt};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -215,6 +223,8 @@ fn run(args: &[String]) -> Result<()> {
         }
         "map" => map_cmd(args),
         "probe" => probe_cmd(args),
+        "unit" => unit_cmd(args),
+        "unit-compare" => unit_compare_cmd(args),
         other => Err(Red::new(RedKind::Usage, format!("unknown command `{other}`"))),
     }
 }
@@ -524,5 +534,50 @@ fn leg1(args: &[String]) -> Result<()> {
             emit(&text, None)
         }
         _ => Err(Red::new(RedKind::Usage, "leg1 census|deps [--write]")),
+    }
+}
+
+/// Writes `text` to `path` (creating its directory) and says so on stderr; the receipt itself is
+/// too long for the console, so stdout gets the `#` summary lines only.
+fn write_receipt(text: &str, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| Red::io(parent, &e))?;
+    }
+    std::fs::write(path, text).map_err(|e| Red::io(path, &e))?;
+    eprintln!("ug15: wrote {}", path.display());
+    Ok(())
+}
+
+fn unit_cmd(args: &[String]) -> Result<()> {
+    let ctx = Ctx::new(echo_stderr)?;
+    let retain = PathBuf::from(required(args, "--retain")?);
+    let controls = opt(args, "--controls").map(PathBuf::from);
+    let (text, verdict) = unit::unit(&ctx, &retain, controls.as_deref())?;
+    let out = opt(args, "--out").map_or_else(|| retain.join("unit-receipt.txt"), PathBuf::from);
+    write_receipt(&text, &out)?;
+    for l in text.lines().filter(|l| l.starts_with('#')) {
+        println!("{l}");
+    }
+    match &verdict {
+        Ok(()) => println!("ug15 unit: GREEN, certified ({})", out.display()),
+        Err(red) => println!("ug15 unit: {red}"),
+    }
+    verdict
+}
+
+fn unit_compare_cmd(args: &[String]) -> Result<()> {
+    let (Some(a), Some(b)) = (args.get(1), args.get(2)) else {
+        return Err(Red::new(RedKind::Usage, "unit-compare <pre-receipt> <tip-receipt>"));
+    };
+    let read = |p: &str| -> Result<Receipt> { Receipt::parse(&std::fs::read_to_string(p).map_err(|e| Red::io(Path::new(p), &e))?) };
+    let (pre, tip) = (read(a)?, read(b)?);
+    println!("ug15 unit-compare: pre {a} (key {}, {}), tip {b} (key {}, {})", pre.key, pre.certified, tip.key, tip.certified);
+    let report = unit::unit_compare(&pre, &tip);
+    print!("{}", report.text());
+    if report.green() {
+        println!("ug15 unit-compare: (d1)-(d4) GREEN");
+        Ok(())
+    } else {
+        Err(Red::new(RedKind::Mismatch, "V11 (d) RED: see the per-item verdicts above"))
     }
 }
