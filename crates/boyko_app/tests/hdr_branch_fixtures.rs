@@ -36,7 +36,8 @@
 //! are the device red-firsts of `light_sky` / `vb_classified` (red before the keys exist: "no key").
 //!
 //! Windowed-test conventions: the device drivers are ignored, `--test-threads=1`,
-//! `BOYKO_DISABLE_VALIDATION=1`.
+//! `BOYKO_DISABLE_VALIDATION=1`; the device leg (GL-PX0-F) is `-- --ignored --test-threads=1 --skip
+//! producer_matrix_over_premove` — the matrix is GL-H0's generator, not a check of this leg.
 
 #[path = "common/graph_receipt.rs"]
 mod graph_receipt;
@@ -629,8 +630,12 @@ fn producer_matrix(inputs: &[MatrixInput<'_>]) -> Result<String, Vec<String>> {
 
 /// **The matrix over GL-H0's pre-move set** (`BOYKO_PX0_PREMOVE_DIR`): every fixture (both
 /// variants) dumped into the dir, every pin receipt in it read, `producer_matrix.md` written.
+///
+/// A `generator`, not a device check (triage r1 W7): it is GL-H0 step 5, it writes an artifact,
+/// and without GL-H0's directory it cannot pass, so no device leg may sweep it in. A per-binary
+/// `-- --ignored` run (GL-PX0-F) names it out with `--skip producer_matrix_over_premove`.
 #[test]
-#[ignore = "gpu-windowed: PX0 producer matrix over GL-H0's pre-move dir (BOYKO_PX0_PREMOVE_DIR; runs every fixture); run with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
+#[ignore = "generator: PX0 GL-H0 step 5, the producer matrix over GL-H0's pre-move dir (BOYKO_PX0_PREMOVE_DIR; renders every fixture on a windowed GPU, writes producer_matrix.md); run with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
 fn producer_matrix_over_premove() {
     let Ok(dir) = std::env::var("BOYKO_PX0_PREMOVE_DIR") else {
         panic!("BOYKO_PX0_PREMOVE_DIR is unset: name GL-H0's pre-move dir");
