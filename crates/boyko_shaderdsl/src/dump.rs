@@ -16,10 +16,6 @@
 //!
 //! `no_std`, no allocation: a parse borrows the texels from the caller's bytes.
 
-// PX0-4a red-first: every body is a stub until PX0-4b, so the stubs' parameters, helpers and
-// imports are unused in this commit only.
-#![allow(unused_variables, unused_imports, dead_code)]
-
 use core::fmt;
 
 use crate::pixfmt::{FORMAT_BUFFER, texel_bytes};
@@ -82,7 +78,20 @@ pub enum DumpError {
 
 impl fmt::Display for DumpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!()
+        match *self {
+            DumpError::Short { len } => write!(f, "{len} bytes is shorter than the {HEADER_BYTES}-byte header"),
+            DumpError::BadMagic(m) => write!(f, "bad magic {m:#x}"),
+            DumpError::UnknownFormat(v) => write!(f, "VkFormat {v} has no decoder"),
+            DumpError::TexelBytes { format, header, known } => {
+                write!(f, "VkFormat {format} is {known} B/texel, the header says {header}")
+            }
+            DumpError::Length { want, got } => {
+                write!(f, "the header needs {want} texel bytes, the file holds {got}")
+            }
+            DumpError::BufferShape => {
+                write!(f, "a buffer dump must have height = layers = texel_bytes = 1")
+            }
+        }
     }
 }
 
@@ -90,19 +99,38 @@ impl DumpHeader {
     /// The texel count the header implies (`width · height · layers`).
     #[must_use]
     pub const fn texel_count(&self) -> u64 {
-        unimplemented!()
+        self.width as u64 * self.height as u64 * self.layers as u64
     }
 
     /// The 32 header bytes the recorder writes for this header (the fixtures' writer).
     #[must_use]
     pub fn to_bytes(&self) -> [u8; HEADER_BYTES] {
-        unimplemented!()
+        let words = [
+            DUMP_MAGIC,
+            self.format,
+            self.width,
+            self.height,
+            self.mip,
+            self.layers,
+            self.frame,
+            self.texel_bytes,
+        ];
+        let mut out = [0u8; HEADER_BYTES];
+        for (i, w) in words.iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        out
     }
 
     /// The bytes of texel `(x, y)` of `layer`, or `None` outside the extent.
     #[must_use]
     pub fn texel<'a>(&self, texels: &'a [u8], x: u32, y: u32, layer: u32) -> Option<&'a [u8]> {
-        unimplemented!()
+        if x >= self.width || y >= self.height || layer >= self.layers {
+            return None;
+        }
+        let tb = self.texel_bytes as usize;
+        let i = ((layer as usize * self.height as usize + y as usize) * self.width as usize + x as usize) * tb;
+        texels.get(i..i + tb)
     }
 }
 
@@ -112,8 +140,36 @@ impl DumpHeader {
 /// A short file, a bad magic, an unknown format, a texel size the format contradicts, a texel
 /// length that is not `width · height · layers · texel_bytes`, or a buffer dump off its contract.
 pub fn parse(bytes: &[u8]) -> Result<(DumpHeader, &[u8]), DumpError> {
-        unimplemented!()
+    if bytes.len() < HEADER_BYTES {
+        return Err(DumpError::Short { len: bytes.len() });
     }
+    let w = |i: usize| u32::from_le_bytes([bytes[i * 4], bytes[i * 4 + 1], bytes[i * 4 + 2], bytes[i * 4 + 3]]);
+    if w(0) != DUMP_MAGIC {
+        return Err(DumpError::BadMagic(w(0)));
+    }
+    let h = DumpHeader {
+        format: w(1),
+        width: w(2),
+        height: w(3),
+        mip: w(4),
+        layers: w(5),
+        frame: w(6),
+        texel_bytes: w(7),
+    };
+    let known = texel_bytes(h.format).ok_or(DumpError::UnknownFormat(h.format))?;
+    if known != h.texel_bytes {
+        return Err(DumpError::TexelBytes { format: h.format, header: h.texel_bytes, known });
+    }
+    if h.format == FORMAT_BUFFER && (h.height != 1 || h.layers != 1) {
+        return Err(DumpError::BufferShape);
+    }
+    let texels = &bytes[HEADER_BYTES..];
+    let want = h.texel_count() * u64::from(h.texel_bytes);
+    if texels.len() as u64 != want {
+        return Err(DumpError::Length { want, got: texels.len() as u64 });
+    }
+    Ok((h, texels))
+}
 
 #[cfg(test)]
 mod tests {

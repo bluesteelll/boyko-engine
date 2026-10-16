@@ -631,7 +631,7 @@ The shader-side alternative was rejected: the six sites would also test bit 16. 
 re-emits their `.spv` and adds ALU per light per pixel on armed frames. It also does not fix the
 class:
 
-- `GoldenLight::with_sdf_shadow()` (`goldens.rs:1371`) sets bit 16 without a slot.
+- `GoldenLight::with_sdf_shadow()` (`goldens.rs:1385`) sets bit 16 without a slot.
 - `light_table.hlsli:56` defines bit 16 as "this light casts an SDF shadow", not as "slotted".
 
 The vkval lane's commits are split into a pixel-neutral one and a pixel-changing one, and this fix

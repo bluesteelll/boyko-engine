@@ -1625,6 +1625,9 @@ pub const fn image_dump_texel_bytes(vk_format: i32) -> Option<u32> {
         | VK_FORMAT_B8G8R8A8_UNORM
         | VK_FORMAT_B8G8R8A8_SRGB
         | VK_FORMAT_R32_SFLOAT
+        // Render wave PX0: `lit`'s HDR format candidate; the reader (`boyko_shaderdsl::pixfmt`)
+        // decodes it, and `tests/dump_format_tables_agree.rs` holds the two tables equal.
+        | VK_FORMAT_B10G11R11_UFLOAT_PACK32
         | VK_FORMAT_D32_SFLOAT => Some(4),
         VK_FORMAT_R16G16B16A16_SFLOAT => Some(8),
         VK_FORMAT_R32G32B32A32_SFLOAT => Some(16),

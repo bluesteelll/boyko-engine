@@ -27,6 +27,10 @@ use boyko_sdf_math::{
 // surface never names the eDSL. The eDSL's own `SsaoParams` is aliased apart from the host
 // `compute::SsaoParams` imported below (same five fields, converted field-by-field).
 use boyko_shaderdsl::cf::EvalCf;
+// Render wave PX0 (OPEN-ITEMS #3): THE B10G11R11 decoder lives in `boyko_shaderdsl::pixfmt` (one
+// home for every dump reader, `post_eval` and `tools/golden_diff.py`'s pinned mirror); the goldens
+// re-export it so PX1a reads `goldens::unpack_b10g11r11` without a second body.
+pub use boyko_shaderdsl::pixfmt::unpack_b10g11r11;
 use boyko_shaderdsl::ssao::{SsaoParams as EdslSsaoParams, ssao_estimate_body_params};
 
 use crate::compute::{

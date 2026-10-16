@@ -43,10 +43,6 @@
 //! the largest finite code under `TowardZero` — the probe's device inputs stay at or below each
 //! channel's largest finite value, so a device's overflow rule never enters classification.
 
-// PX0-4a red-first: every body is a stub until PX0-4b, so the stubs' parameters, helpers and
-// imports are unused in this commit only.
-#![allow(unused_variables, unused_imports, dead_code)]
-
 use crate::half::f16_bits_to_f32;
 
 // ---- VkFormat codes ------------------------------------------------------------------------------
@@ -91,8 +87,20 @@ pub const DUMP_FORMATS: [u32; 10] = [
 /// The texel size of a dump `format`, or `None` for a format this module does not decode.
 #[must_use]
 pub const fn texel_bytes(format: u32) -> Option<u32> {
-        unimplemented!()
+    match format {
+        FORMAT_BUFFER => Some(1),
+        VK_FORMAT_R8G8B8A8_UNORM
+        | VK_FORMAT_R8G8B8A8_SRGB
+        | VK_FORMAT_B8G8R8A8_UNORM
+        | VK_FORMAT_B8G8R8A8_SRGB
+        | VK_FORMAT_R32_SFLOAT
+        | VK_FORMAT_B10G11R11_UFLOAT_PACK32
+        | VK_FORMAT_D32_SFLOAT => Some(4),
+        VK_FORMAT_R16G16B16A16_SFLOAT => Some(8),
+        VK_FORMAT_R32G32B32A32_SFLOAT => Some(16),
+        _ => None,
     }
+}
 
 /// One texel as four `f32`s: 8-bit formats are `code / 255` in `[r, g, b, a]` order (BGRA is
 /// reordered; an sRGB format's bytes are returned ENCODED, not linearised), binary16 is widened
@@ -100,8 +108,26 @@ pub const fn texel_bytes(format: u32) -> Option<u32> {
 /// buffer dump, an unknown format, or a slice that is not exactly one texel.
 #[must_use]
 pub fn decode_texel(format: u32, t: &[u8]) -> Option<[f32; 4]> {
-        unimplemented!()
+    if Some(t.len() as u32) != texel_bytes(format) {
+        return None;
     }
+    let u32_at = |i: usize| u32::from_le_bytes([t[i * 4], t[i * 4 + 1], t[i * 4 + 2], t[i * 4 + 3]]);
+    let f32_at = |i: usize| f32::from_bits(u32_at(i));
+    let h_at = |i: usize| f16_bits_to_f32(u32::from(u16::from_le_bytes([t[i * 2], t[i * 2 + 1]])));
+    let u8n = |b: u8| decode(Channel::Unorm8, u32::from(b));
+    Some(match format {
+        VK_FORMAT_R8G8B8A8_UNORM | VK_FORMAT_R8G8B8A8_SRGB => [u8n(t[0]), u8n(t[1]), u8n(t[2]), u8n(t[3])],
+        VK_FORMAT_B8G8R8A8_UNORM | VK_FORMAT_B8G8R8A8_SRGB => [u8n(t[2]), u8n(t[1]), u8n(t[0]), u8n(t[3])],
+        VK_FORMAT_R16G16B16A16_SFLOAT => [h_at(0), h_at(1), h_at(2), h_at(3)],
+        VK_FORMAT_R32_SFLOAT | VK_FORMAT_D32_SFLOAT => [f32_at(0), 0.0, 0.0, 1.0],
+        VK_FORMAT_R32G32B32A32_SFLOAT => [f32_at(0), f32_at(1), f32_at(2), f32_at(3)],
+        VK_FORMAT_B10G11R11_UFLOAT_PACK32 => {
+            let [r, g, b] = unpack_b10g11r11(u32_at(0));
+            [r, g, b, 1.0]
+        }
+        _ => return None,
+    })
+}
 
 // ---- Channel encodings -----------------------------------------------------------------------------
 
@@ -122,37 +148,53 @@ impl Channel {
     /// The stored mantissa bits (0 for UNORM8).
     #[must_use]
     pub const fn mantissa_bits(self) -> u32 {
-        unimplemented!()
+        match self {
+            Channel::Uf11 => 6,
+            Channel::Uf10 => 5,
+            Channel::F16 => 10,
+            Channel::Unorm8 => 0,
+        }
     }
 
     /// Whether the encoding carries a sign (binary16 only).
     #[must_use]
     pub const fn is_signed(self) -> bool {
-        unimplemented!()
+        matches!(self, Channel::F16)
     }
 
     /// The `+Inf` code of a float encoding (exponent all ones, mantissa 0); UNORM8 has none.
     #[must_use]
     pub const fn inf_code(self) -> Option<u32> {
-        unimplemented!()
+        match self {
+            Channel::Unorm8 => None,
+            _ => Some(31 << self.mantissa_bits()),
+        }
     }
 
     /// The largest finite code (UNORM8: 255).
     #[must_use]
     pub const fn max_finite_code(self) -> u32 {
-        unimplemented!()
+        match self.inf_code() {
+            Some(inf) => inf - 1,
+            None => 255,
+        }
     }
 
     /// The largest finite value: 65024 (UFLOAT11), 64512 (UFLOAT10), 65504 (binary16), 1 (UNORM8).
     #[must_use]
     pub const fn max_finite(self) -> f32 {
-        unimplemented!()
+        decode(self, self.max_finite_code())
     }
 
     /// The short spelling the vectors and `golden_diff.py` use (`uf11`, `uf10`, `f16`, `unorm8`).
     #[must_use]
     pub const fn spelling(self) -> &'static str {
-        unimplemented!()
+        match self {
+            Channel::Uf11 => "uf11",
+            Channel::Uf10 => "uf10",
+            Channel::F16 => "f16",
+            Channel::Unorm8 => "unorm8",
+        }
     }
 }
 
@@ -170,8 +212,8 @@ pub enum Rounding {
 
 /// `2^k` as an `f32` for `k` in the normal range (`-126..=127`) — exact.
 const fn pow2(k: i32) -> f32 {
-        unimplemented!()
-    }
+    f32::from_bits(((k + 127) as u32) << 23)
+}
 
 /// Encodes `x` into `ch` under `r`.
 ///
@@ -182,42 +224,135 @@ const fn pow2(k: i32) -> f32 {
 /// `x · 255` rounded (a NaN encodes 0).
 #[must_use]
 pub const fn encode(ch: Channel, x: f32, r: Rounding) -> u32 {
-        unimplemented!()
+    match ch {
+        Channel::Unorm8 => encode_unorm8(x, r),
+        _ => encode_float(x, ch.mantissa_bits(), ch.is_signed(), r),
     }
+}
 
 const fn encode_unorm8(x: f32, r: Rounding) -> u32 {
-        unimplemented!()
+    if x.is_nan() || x <= 0.0 {
+        return 0;
     }
+    if x >= 1.0 {
+        return 255;
+    }
+    let v = x * 255.0;
+    let t = v as u32;
+    let frac = v - t as f32;
+    match r {
+        Rounding::TowardZero => t,
+        Rounding::NearestEven => {
+            if frac > 0.5 || (frac == 0.5 && t & 1 == 1) {
+                t + 1
+            } else {
+                t
+            }
+        }
+    }
+}
 
 const fn encode_float(x: f32, m: u32, signed: bool, r: Rounding) -> u32 {
-        unimplemented!()
+    let bits = x.to_bits();
+    let neg = bits >> 31 != 0;
+    let exp = (bits >> 23) & 0xFF;
+    let man = bits & 0x007F_FFFF;
+    let inf = 31u32 << m;
+    let sign_bit = if signed { 1u32 << (m + 5) } else { 0 };
+    if exp == 0xFF && man != 0 {
+        return (if neg { sign_bit } else { 0 }) | inf | (1 << (m - 1));
     }
+    if neg && !signed {
+        return 0;
+    }
+    let s = if neg { sign_bit } else { 0 };
+    if exp == 0xFF {
+        return s | inf;
+    }
+    if exp == 0 && man == 0 {
+        return s;
+    }
+    // `x = sig · 2^(e − 23)` with `sig` the 24-bit significand (no implicit bit for an f32
+    // subnormal, whose exponent is −126).
+    let (sig, e) = if exp == 0 { (man, -126i32) } else { (man | 0x0080_0000, exp as i32 - 127) };
+    if e > 15 {
+        return s | match r {
+            Rounding::NearestEven => inf,
+            Rounding::TowardZero => inf - 1,
+        };
+    }
+    // The quantum is `2^(e − m)` in the normal range and `2^(−14 − m)` below it, so the code's
+    // mantissa-with-leading-bit is `sig >> sh`.
+    let sh = if e >= -14 { 23 - m as i32 } else { 23 - m as i32 + (-14 - e) };
+    let q = if sh >= 25 {
+        // `sig < 2^24 ≤ half`: below half of the smallest quantum under either mode.
+        0
+    } else {
+        let sh = sh as u32;
+        let t = sig >> sh;
+        match r {
+            Rounding::TowardZero => t,
+            Rounding::NearestEven => {
+                let rem = sig & ((1 << sh) - 1);
+                let half = 1 << (sh - 1);
+                if rem > half || (rem == half && t & 1 == 1) { t + 1 } else { t }
+            }
+        }
+    };
+    // A mantissa carry (`q == 2^(m+1)`) propagates into the exponent field on its own, and out of
+    // `e == 15` it lands exactly on the Inf code — the `NearestEven` overflow, for free.
+    let code = if e >= -14 { (((e + 15) as u32) << m) + q - (1 << m) } else { q };
+    s | code
+}
 
 /// Decodes a code of `ch` (exact).
 #[must_use]
 pub const fn decode(ch: Channel, code: u32) -> f32 {
-        unimplemented!()
+    match ch {
+        Channel::Unorm8 => (code & 0xFF) as f32 / 255.0,
+        _ => {
+            let m = ch.mantissa_bits();
+            let neg = ch.is_signed() && (code >> (m + 5)) & 1 == 1;
+            let e = (code >> m) & 0x1F;
+            let mb = code & ((1 << m) - 1);
+            let mag = if e == 0 {
+                mb as f32 * pow2(-14 - m as i32)
+            } else if e == 31 {
+                if mb == 0 { f32::INFINITY } else { f32::NAN }
+            } else {
+                f32::from_bits(((e + 112) << 23) | (mb << (23 - m)))
+            };
+            if neg { -mag } else { mag }
+        }
     }
+}
 
 /// Rounds `x` to the nearest value representable in `ch` under `r` (encode, then decode).
 #[must_use]
 pub const fn quantize(ch: Channel, x: f32, r: Rounding) -> f32 {
-        unimplemented!()
-    }
+    decode(ch, encode(ch, x, r))
+}
 
 /// Packs `[r, g, b]` into a B10G11R11 word (R bits 0..11, G bits 11..22, B bits 22..32), each
 /// channel rounded under `rounding`.
 #[must_use]
 pub const fn pack_b10g11r11(rgb: [f32; 3], rounding: Rounding) -> u32 {
-        unimplemented!()
-    }
+    let r = encode(Channel::Uf11, rgb[0], rounding);
+    let g = encode(Channel::Uf11, rgb[1], rounding);
+    let b = encode(Channel::Uf10, rgb[2], rounding);
+    r | (g << 11) | (b << 22)
+}
 
 /// Unpacks a B10G11R11 word to `[r, g, b]` (exact) — THE decoder of the format (the goldens
 /// re-export it; PX1a reuses it).
 #[must_use]
 pub const fn unpack_b10g11r11(word: u32) -> [f32; 3] {
-        unimplemented!()
-    }
+    [
+        decode(Channel::Uf11, word & 0x7FF),
+        decode(Channel::Uf11, (word >> 11) & 0x7FF),
+        decode(Channel::Uf10, (word >> 22) & 0x3FF),
+    ]
+}
 
 // ---- The format step -----------------------------------------------------------------------------
 
@@ -237,16 +372,40 @@ pub enum StepError {
 /// [`StepError::NonFinite`] for NaN / ±Inf / an overflowing value; [`StepError::Negative`] for a
 /// negative value on an unsigned encoding (`−0.0` is not negative here).
 pub const fn ordinal(ch: Channel, x: f32) -> Result<i32, StepError> {
-        unimplemented!()
+    if x.is_nan() || x.is_infinite() {
+        return Err(StepError::NonFinite);
     }
+    if !ch.is_signed() && x < 0.0 {
+        return Err(StepError::Negative);
+    }
+    let code = encode(ch, x, Rounding::NearestEven);
+    if let Some(inf) = ch.inf_code() {
+        let m = ch.mantissa_bits();
+        let mag = code & ((1 << (m + 5)) - 1);
+        if mag >= inf {
+            return Err(StepError::NonFinite);
+        }
+        let neg = ch.is_signed() && (code >> (m + 5)) & 1 == 1;
+        return Ok(if neg { -(mag as i32) } else { mag as i32 });
+    }
+    Ok(code as i32)
+}
 
 /// **THE format step**: how many representable values of `ch` separate `a` and `b`.
 ///
 /// # Errors
 /// As [`ordinal`], for either operand.
 pub const fn steps_between(ch: Channel, a: f32, b: f32) -> Result<u32, StepError> {
-        unimplemented!()
-    }
+    let oa = match ordinal(ch, a) {
+        Ok(o) => o,
+        Err(e) => return Err(e),
+    };
+    let ob = match ordinal(ch, b) {
+        Ok(o) => o,
+        Err(e) => return Err(e),
+    };
+    Ok(oa.abs_diff(ob))
+}
 
 /// `x` moved by `k` representable values of `ch` — toward `+∞` for `k > 0` on every value (a
 /// negative binary16 value moves toward zero), saturating at the encoding's finite ends.
@@ -254,20 +413,35 @@ pub const fn steps_between(ch: Channel, a: f32, b: f32) -> Result<u32, StepError
 /// # Errors
 /// As [`ordinal`].
 pub const fn step_by(ch: Channel, x: f32, k: i32) -> Result<f32, StepError> {
-        unimplemented!()
-    }
+    let o = match ordinal(ch, x) {
+        Ok(o) => o,
+        Err(e) => return Err(e),
+    };
+    let max = ch.max_finite_code() as i32;
+    let min = if ch.is_signed() { -max } else { 0 };
+    let t = o.saturating_add(k);
+    let t = if t > max {
+        max
+    } else if t < min {
+        min
+    } else {
+        t
+    };
+    let code = if t < 0 { (1 << (ch.mantissa_bits() + 5)) | (-t) as u32 } else { t as u32 };
+    Ok(decode(ch, code))
+}
 
 /// Whether a pixel is one `post::hdr_sanitize` zeroes: any channel non-finite (its exponent bits
 /// all ones). A step consumer walking a dump excludes such pixels by this predicate.
 #[must_use]
 pub const fn pixel_is_nonfinite(rgb: [f32; 3]) -> bool {
-        unimplemented!()
-    }
+    nonfinite_bits(rgb[0]) || nonfinite_bits(rgb[1]) || nonfinite_bits(rgb[2])
+}
 
 /// `(asuint(x) & F32_EXP_MASK) == F32_EXP_MASK` — `post::hdr_sanitize`'s per-channel test.
 const fn nonfinite_bits(x: f32) -> bool {
-        unimplemented!()
-    }
+    x.to_bits() & crate::post::F32_EXP_MASK == crate::post::F32_EXP_MASK
+}
 
 // ---- The rounding model family (H3 Scope 3) -------------------------------------------------------
 
@@ -295,7 +469,10 @@ impl Member {
     /// The member's rounding mode.
     #[must_use]
     pub const fn rounding(self) -> Rounding {
-        unimplemented!()
+        match self {
+            Member::N | Member::N16 | Member::Npre => Rounding::NearestEven,
+            Member::Z | Member::Z16 | Member::Zpre => Rounding::TowardZero,
+        }
     }
 
     /// The equivalence class the member belongs to on `target` for `path` — `Z16 ≡ Z` everywhere
@@ -303,27 +480,53 @@ impl Member {
     /// on a binary16 target, `Npre ≡ N` / `Zpre ≡ Z` on the single-write paths (no blend source).
     #[must_use]
     pub const fn class(self, target: Target, path: Path) -> PathClass {
-        unimplemented!()
+        let blend = path.is_blend();
+        match self {
+            Member::N => PathClass::N,
+            Member::Z | Member::Z16 => PathClass::Z,
+            Member::N16 => match target {
+                Target::B10G11R11 => PathClass::N16,
+                Target::Rgba16f => PathClass::N,
+            },
+            Member::Npre => if blend { PathClass::Npre } else { PathClass::N },
+            Member::Zpre => if blend { PathClass::Zpre } else { PathClass::Z },
+        }
     }
 
     /// The representative member of `c` (`None` for [`PathClass::Unmodelled`]).
     #[must_use]
     pub const fn of_class(c: PathClass) -> Option<Member> {
-        unimplemented!()
+        Some(match c {
+            PathClass::N => Member::N,
+            PathClass::N16 => Member::N16,
+            PathClass::Npre => Member::Npre,
+            PathClass::Z => Member::Z,
+            PathClass::Zpre => Member::Zpre,
+            PathClass::Unmodelled { .. } => return None,
+        })
     }
 
     /// One conversion of the f32 value `v` into `ch` under this member (the `pre` members convert
     /// like their base member when there is no blend source).
     #[must_use]
     pub const fn convert(self, ch: Channel, v: f32) -> u32 {
-        unimplemented!()
+        let r = self.rounding();
+        match self {
+            Member::N16 | Member::Z16 => encode(ch, quantize(Channel::F16, v, r), r),
+            _ => encode(ch, v, r),
+        }
     }
 
     /// The blend `ONE + ONE` into a target holding `dst` (a code of `ch`): `dst + src`, with the
     /// source pre-rounded to the format under the `pre` members. f32 arithmetic.
     #[must_use]
     pub const fn blend_add(self, ch: Channel, dst: u32, src: f32) -> u32 {
-        unimplemented!()
+        let d = decode(ch, dst);
+        let s = match self {
+            Member::Npre | Member::Zpre => quantize(ch, src, self.rounding()),
+            _ => src,
+        };
+        self.convert(ch, s + d)
     }
 
     /// The premultiplied over `ONE, ONE_MINUS_SRC_ALPHA` into a target holding `dst`:
@@ -331,7 +534,12 @@ impl Member {
     /// and the sum exact, so a device's FMA or factor precision cannot move a targeted input).
     #[must_use]
     pub const fn blend_over(self, ch: Channel, dst: u32, src: f32, alpha: f32) -> u32 {
-        unimplemented!()
+        let d = decode(ch, dst);
+        let s = match self {
+            Member::Npre | Member::Zpre => quantize(ch, src, self.rounding()),
+            _ => src,
+        };
+        self.convert(ch, s + d * (1.0 - alpha))
     }
 }
 
@@ -348,13 +556,19 @@ impl Target {
     /// The channels the probe classifies, `[r, g, b]`.
     #[must_use]
     pub const fn channels(self) -> [Channel; 3] {
-        unimplemented!()
+        match self {
+            Target::B10G11R11 => B10G11R11_CHANNELS,
+            Target::Rgba16f => [Channel::F16; 3],
+        }
     }
 
     /// The spelling the record uses (`b10g11r11`, `rgba16f`).
     #[must_use]
     pub const fn spelling(self) -> &'static str {
-        unimplemented!()
+        match self {
+            Target::B10G11R11 => "b10g11r11",
+            Target::Rgba16f => "rgba16f",
+        }
     }
 }
 
@@ -380,13 +594,19 @@ impl Path {
     /// Whether the path blends a source into the target.
     #[must_use]
     pub const fn is_blend(self) -> bool {
-        unimplemented!()
+        matches!(self, Path::BlendAdd | Path::BlendOver)
     }
 
     /// The spelling the record uses.
     #[must_use]
     pub const fn spelling(self) -> &'static str {
-        unimplemented!()
+        match self {
+            Path::Store => "store",
+            Path::Attachment => "attachment",
+            Path::BlendAdd => "blend_add",
+            Path::BlendOver => "blend_over",
+            Path::Clear => "clear",
+        }
     }
 }
 
@@ -416,7 +636,14 @@ impl PathClass {
     /// `Zpre`, `Unmodelled` (the error is spelled `Unmodelled:<ulp>` by [`Self::write_spelling`]).
     #[must_use]
     pub const fn name(self) -> &'static str {
-        unimplemented!()
+        match self {
+            PathClass::N => "N",
+            PathClass::N16 => "N16",
+            PathClass::Npre => "Npre",
+            PathClass::Z => "Z",
+            PathClass::Zpre => "Zpre",
+            PathClass::Unmodelled { .. } => "Unmodelled",
+        }
     }
 
     /// Writes the full spelling (`Unmodelled:<ulp>` with the ULP to three decimals).
@@ -424,13 +651,40 @@ impl PathClass {
     /// # Errors
     /// The writer's.
     pub fn write_spelling(self, w: &mut impl core::fmt::Write) -> core::fmt::Result {
-        unimplemented!()
+        match self {
+            PathClass::Unmodelled { max_err_milli_ulp } => {
+                write!(w, "Unmodelled:{}.{:03}", max_err_milli_ulp / 1000, max_err_milli_ulp % 1000)
+            }
+            c => w.write_str(c.name()),
+        }
     }
 
     /// Parses a spelling [`Self::write_spelling`] wrote.
     #[must_use]
     pub fn parse(s: &str) -> Option<PathClass> {
-        unimplemented!()
+        Some(match s {
+            "N" => PathClass::N,
+            "N16" => PathClass::N16,
+            "Npre" => PathClass::Npre,
+            "Z" => PathClass::Z,
+            "Zpre" => PathClass::Zpre,
+            _ => {
+                let ulp = s.strip_prefix("Unmodelled:")?;
+                let (int, frac) = ulp.split_once('.').unwrap_or((ulp, "0"));
+                if frac.len() > 3 || frac.is_empty() {
+                    return None;
+                }
+                let mut milli: u32 = int.parse::<u32>().ok()?.checked_mul(1000)?;
+                let scale = [100u32, 10, 1];
+                for (i, c) in frac.bytes().enumerate() {
+                    if !c.is_ascii_digit() {
+                        return None;
+                    }
+                    milli = milli.checked_add(u32::from(c - b'0') * scale[i])?;
+                }
+                PathClass::Unmodelled { max_err_milli_ulp: milli }
+            }
+        })
     }
 
     /// The per-conversion bound, in ULPs of `ch`, of a single write under this class (AD-19 (a), the
@@ -440,15 +694,37 @@ impl PathClass {
     /// base (a single write has no blend source).
     #[must_use]
     pub fn store_bound_ulp(self, ch: Channel) -> (f32, f32) {
-        unimplemented!()
+        match self {
+            PathClass::N | PathClass::Npre => (-0.5, 0.5),
+            PathClass::N16 => {
+                if ch == Channel::F16 {
+                    (-0.5, 0.5)
+                } else {
+                    let e = 0.5 + pow2(ch.mantissa_bits() as i32 - 11);
+                    (-e, e)
+                }
+            }
+            PathClass::Z | PathClass::Zpre => (-1.0, 0.0),
+            PathClass::Unmodelled { max_err_milli_ulp } => {
+                let e = max_err_milli_ulp as f32 / 1000.0;
+                (-e, e)
+            }
+        }
     }
 }
 
 /// The equivalence classes of `(target, path)` — the classes a device path can classify as.
 #[must_use]
 pub const fn classes_for(target: Target, path: Path) -> &'static [PathClass] {
-        unimplemented!()
+    match (target, path.is_blend()) {
+        (Target::B10G11R11, false) => &[PathClass::N, PathClass::N16, PathClass::Z],
+        (Target::B10G11R11, true) => {
+            &[PathClass::N, PathClass::N16, PathClass::Npre, PathClass::Z, PathClass::Zpre]
+        }
+        (Target::Rgba16f, false) => &[PathClass::N, PathClass::Z],
+        (Target::Rgba16f, true) => &[PathClass::N, PathClass::Npre, PathClass::Z, PathClass::Zpre],
     }
+}
 
 #[cfg(test)]
 mod tests {
