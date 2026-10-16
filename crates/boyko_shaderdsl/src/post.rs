@@ -66,8 +66,10 @@ use crate::scalar::FieldScalar;
 pub const HDR_MAX: f32 = 64512.0;
 
 /// The one string every generator emits into `[[vk::image_format(…)]]` on an HDR storage write.
-/// A PXe placeholder: PX0 re-values it if AD-1 takes RGBA16F; nothing emits it at PXe.
-pub const LIT_STORAGE_FORMAT: &str = "r11g11b10f";
+/// RGBA16F: PX0's lit-format decision took AD-1's escape (row 2 of
+/// `docs/measurements/2026-10-16-px0-lit-format-decision.md` §9, from the device arms). Nothing
+/// emits it before PX1a, so the change moves no shader.
+pub const LIT_STORAGE_FORMAT: &str = "rgba16f";
 
 /// The display storage image's format (`gDisplay`, the post_final output).
 pub const DISPLAY_STORAGE_FORMAT: &str = "rgba8";

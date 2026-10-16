@@ -2,9 +2,10 @@
 
 > Render wave PX0, `plan/H3-PX0-instruments-guards.md` Scope 3 / 3b with the binding amendments
 > (`04-AMENDMENTS-R6.md` rev-6.2 H3 row: the reported Punchy arm) and `px0/cut.md` §1.3 #2, #3, #6.
-> **Status: the classes, the content model, the expected table and the decision table are
-> pre-registered here at the model commit; §7 classification, §8 device arms and §9 decision are
-> pending GL-PX0-P** (the round-1 tester's device leg; PX0-14 fills them from its `probe.toml`).
+> **Status: decided at PX0-14.** The classes, the content model, the expected table and the
+> decision table were pre-registered at the model commit (`9572cefc`). §7 classification, §8 device
+> arms and §9 decision were filled at PX0-14 from GL-PX0-P's `probe.toml`, run on the probe commit
+> `5eda6c78`. **Decision: `lit` = RGBA16F, by row 2. Row 4 did not fire; Row 7 was not reached.**
 
 ## 1. Classes (OPEN-ITEMS #2; `critique_verify_r5.md` I1)
 
@@ -671,19 +672,272 @@ in every case, on both formats.
 
 ## 6. Integrity of the pre-registration (H3 rev 5, verify O7; `px0/critique.md` W2)
 
-- `<model>` = the commit that added this record and `crates/boyko_rhi_vulkan/tests/lit_format/` —
-  pending, filled at PX0-14.
-- `<probe>` = the commit GL-PX0-P ran on (`D:/tmp/render-orch/px0/gl/probe.commit`) — pending.
-- `<decision>` = PX0-14.
+- `<model>` = `9572cefcff519318e6b7903860c55fa73a9a8345`, the commit that added this record and
+  `crates/boyko_rhi_vulkan/tests/lit_format/`.
+- `<probe>` = `5eda6c7889366d1217fff45a6f786780713af4f1`, the commit GL-PX0-P ran on
+  (`D:/tmp/render-orch/px0/gl/probe.commit`).
+- `<decision>` = PX0-14, the commit that fills §§7–9. A commit cannot carry its own sha, so the
+  tester reads it from `git log`.
 - Printed at PX0-14 and re-run by the tester:
   - `git merge-base --is-ancestor <model> <probe>` → exit 0;
   - `git diff --exit-code <model> <decision> -- crates/boyko_rhi_vulkan/tests/lit_format crates/boyko_rhi_vulkan/tests/b10g11r11_chain_model.rs` → exit 0
     (the model's sources unchanged since the model commit — an edit of both the model and the
     pinned block after the run is red here, which the pin alone cannot be);
   - the `px0-expected` block at `<decision>` byte-equal to `git show <model>:docs/measurements/2026-10-16-px0-lit-format-decision.md`'s block.
+- Results at PX0-14, printed in its commit message: the ancestry check exits 0; the freeze diff
+  exits 0 (run on the tree that became the decision commit); the block is byte-equal to the
+  model commit's (md5 `6c308758191c262d249d98b6d6e04512` of the bytes between the two markers,
+  at both).
 
-## 7. Classification (pending GL-PX0-P)
+## 7. Classification (GL-PX0-P, probe `5eda6c78`)
 
-## 8. Device arms, both formats (pending GL-PX0-P)
+- **The run:** the orchestrator's GL-PX0-P (`px0/cut.md` §5) on `5eda6c78`, on an NVIDIA GeForce
+  RTX 3060 Laptop GPU (`probe.toml`'s `device`), with the validation layer off
+  (`BOYKO_DISABLE_VALIDATION=1`). `gl/probe.log` shows `running 1 test` and `1 passed` (78.12 s), and
+  `gl/probe_exit` reads `PROBE_EXIT=0`.
+- **The earlier attempt:** the round-1 run on `af9146ee` wrote nothing; it panicked on the probe's
+  push range (triage F1). The harness fixes F1, W1 and W3 landed before this run. The model did not
+  change (§6's freeze diff). The probe kernels (`crates/boyko_rhi_vulkan/shaders/px0_probe_*`) have
+  not changed since the commit that added them, `948975b2`.
 
-## 9. Decision (pending GL-PX0-P)
+| Path | B10G11R11 | RGBA16F |
+|---|---|---|
+| store | `Z` | `Z` |
+| attachment | `Z` | `Z` |
+| blend `ONE + ONE` | `Z` | `Unmodelled:1.000` |
+| blend premultiplied over | `Z` | `Unmodelled:1.000` |
+| clear | `Z` | `Z` |
+
+- **Every path got one class or `Unmodelled`.** None was ambiguous; the probe asserts that.
+- **B10G11R11 truncates on every path**, including the clear and both blends. Its single-write
+  bounds are one-sided, [−1, 0] ULP (§1).
+- **RGBA16F's store, attachment and clear truncate.** Neither blend matches any class of the family
+  (the candidates were `N`, `Npre`, `Z` and `Zpre`, §1). The largest error is 1.000 binary16 ULP, the
+  limit Vulkan allows when the result rounds to either neighbour. Bounds on those two paths are
+  therefore two-sided at 1.000 ULP.
+- **The constants:** `goldens::B10G11R11_ROUNDING` / `RGBA16F_ROUNDING` (order `[store, attachment,
+  blend_add, blend_over, clear]`) hold these classes. Derived bounds take their class from there;
+  nothing reads them before PX1a. The block below is GL-PX0-P's `[classes]` table, copied verbatim from `probe.toml`.
+  `goldens::tests::rounding_constants_match_the_record` keeps the constants equal to it, in both
+  directions.
+
+<!-- px0-rounding:begin -->
+```toml
+[classes]
+b10g11r11_store = "Z"
+b10g11r11_attachment = "Z"
+b10g11r11_blend_add = "Z"
+b10g11r11_blend_over = "Z"
+b10g11r11_clear = "Z"
+rgba16f_store = "Z"
+rgba16f_attachment = "Z"
+rgba16f_blend_add = "Unmodelled:1.000"
+rgba16f_blend_over = "Unmodelled:1.000"
+rgba16f_clear = "Z"
+```
+<!-- px0-rounding:end -->
+
+- **Observation, not a decision input:** `probe.toml` is byte-identical (md5
+  `ad125af1fa9928e07856790f84e5b3ed`) to the triage-r1 tester's scratch diagnostic
+  (`gl/probe_SCRATCH_diag.toml`, a run of an edited copy of the pre-F1 probe). So the W1 barrier fix
+  moved no output on this GPU.
+- **Not yet run:** W1's validation-on leg (`probe_valon`, `px0/fix_r1.md` device leg 2). Whether
+  sync-validation is live on this machine is unproven (`docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md`,
+  "P2-0 RUN — the sync-validation liveness probe, EXECUTED and INCONCLUSIVE"). The decision does not
+  read the two RGBA16F blend classes: rows 1–3 read B10G11R11's decisive paths, and row 4 judges the
+  device arms' numbers.
+
+## 8. Device arms, both formats
+
+These are `probe.toml`'s `arms`, one row per arm and target. The pass rule is §2's: both numbers at
+most 2 LSB (`lit_format::THRESHOLD_LSB`).
+
+- **agreement:** the fraction of the 4096 region pixels where the device dump equals, bit for bit,
+  the image the path's class simulates. It is `—` where the class is `Unmodelled`, which has no
+  member to simulate.
+- **model (§4) under the class:** §4's pinned row for the same arm, target and the class the
+  device's path classified as, so this column sets the pre-registration beside the run. It is `—`
+  where §4 has no such row (the `Unmodelled` RGBA16F blends).
+
+**Summary**
+- **B10G11R11 agreement:** 40 of the 42 decisive arms agree with their simulation on fewer than
+  99.9 % of pixels. The lowest is 0.020264, on `A1-S1 k64 fire bg0.18`; the two A3 arms agree on
+  1.000000.
+- **B10G11R11 verdicts:** 28 of the 42 decisive arms fail on the device: A1-S1 8 of 8, A1-S2 8 of 8,
+  A2 12 of 24, A3 0 of 2.
+- **RGBA16F verdicts:** 0 of the 42 decisive arms fail. The largest max |Δ| is 0.049 LSB (`A3 k4
+  grey bg0.18`), and the largest chroma is 0.009 LSB.
+- **Model vs device:** 62 arm × target rows have a pinned model row under the device's class (every
+  B10G11R11 row and RGBA16F's two A3 rows). All 62 have the same pass/fail verdict as the model. The
+  largest gap in AgX max |Δ| is 0.929 LSB (`A1-S1 k64 fire bg0.18`, B10G11R11).
+- **Punchy (rev-6.2 H3 row), reported and never decisive:** the host model publishes it in §4, on
+  `A1-S1 k64 grey bg0.18` on B10G11R11.
+  - Under `Z`, the class the device's blend `ONE + ONE` path classified as: 24.64 LSB max |Δ|,
+    14.99 LSB chroma.
+  - Under `N`: 2.18 / 2.75.
+  - The probe does not evaluate Punchy on device images, and §4 has no RGBA16F Punchy row. So the
+    format decided in §9 has no Punchy number of its own. P6's `CinematicPost` sign-off reads this
+    entry.
+
+**B10G11R11**
+
+| arm | class | agreement | AgX max\|Δ\| | AgX chroma | ACES-Hill max\|Δ\| | ACES-Hill chroma | model (§4) under the class: AgX max\|Δ\| / chroma | verdict (AgX) |
+|---|---|---|---|---|---|---|---|---|
+| A1-S1 k16 grey bg0 | Z | 0.721436 | 4.313 | 2.270 | 6.513 | 3.224 | 4.44 / 2.27 (FAIL) | FAIL |
+| A1-S1 k16 fire bg0 | Z | 0.487793 | 3.261 | 2.035 | 5.502 | 4.497 | 3.40 / 2.11 (FAIL) | FAIL |
+| A1-S1 k64 grey bg0 | Z | 0.282959 | 16.400 | 8.664 | 24.888 | 12.378 | 16.91 / 8.57 (FAIL) | FAIL |
+| A1-S1 k64 fire bg0 | Z | 0.065918 | 12.302 | 7.802 | 20.583 | 17.610 | 12.86 / 8.05 (FAIL) | FAIL |
+| A1-S2 k16 grey bg0 | Z | 0.718994 | 4.120 | 2.110 | 6.201 | 2.982 | 4.25 / 2.10 (FAIL) | FAIL |
+| A1-S2 k16 fire bg0 | Z | 0.509766 | 3.195 | 1.985 | 5.361 | 4.371 | 3.33 / 2.05 (FAIL) | FAIL |
+| A1-S2 k64 grey bg0 | Z | 0.338867 | 14.500 | 6.886 | 22.077 | 9.824 | 14.88 / 6.76 (FAIL) | FAIL |
+| A1-S2 k64 fire bg0 | Z | 0.116943 | 11.350 | 6.935 | 18.796 | 15.749 | 11.79 / 7.10 (FAIL) | FAIL |
+| A2 k16 grey0.05 a0.1 bg0 | Z | 0.738037 | 3.348 | 1.714 | 5.065 | 2.428 | 3.46 / 1.72 (FAIL) | FAIL |
+| A2 k16 grey0.2 a0.1 bg0 | Z | 0.749268 | 3.377 | 1.731 | 5.108 | 2.453 | 3.48 / 1.73 (FAIL) | FAIL |
+| A2 k16 grey0.5 a0.1 bg0 | Z | 0.695068 | 3.120 | 1.633 | 4.699 | 2.310 | 3.22 / 1.63 (FAIL) | FAIL |
+| A2 k16 grey0.05 a0.3 bg0 | Z | 0.858398 | 1.480 | 0.768 | 2.225 | 1.083 | 1.53 / 0.77 (pass) | pass |
+| A2 k16 grey0.2 a0.3 bg0 | Z | 0.853516 | 1.478 | 0.765 | 2.223 | 1.080 | 1.53 / 0.77 (pass) | pass |
+| A2 k16 grey0.5 a0.3 bg0 | Z | 0.856201 | 1.600 | 0.816 | 2.327 | 1.114 | 1.65 / 0.81 (pass) | pass |
+| A2 k64 grey0.05 a0.1 bg0 | Z | 0.565674 | 4.556 | 2.431 | 6.879 | 3.453 | 4.72 / 2.45 (FAIL) | FAIL |
+| A2 k64 grey0.2 a0.1 bg0 | Z | 0.574707 | 4.535 | 2.410 | 6.847 | 3.423 | 4.69 / 2.42 (FAIL) | FAIL |
+| A2 k64 grey0.5 a0.1 bg0 | Z | 0.652344 | 3.956 | 1.851 | 5.824 | 2.559 | 4.07 / 1.84 (FAIL) | FAIL |
+| A2 k64 grey0.05 a0.3 bg0 | Z | 0.840576 | 1.490 | 0.772 | 2.240 | 1.089 | 1.54 / 0.77 (pass) | pass |
+| A2 k64 grey0.2 a0.3 bg0 | Z | 0.855225 | 1.490 | 0.773 | 2.240 | 1.091 | 1.54 / 0.77 (pass) | pass |
+| A2 k64 grey0.5 a0.3 bg0 | Z | 0.850830 | 1.642 | 0.839 | 2.387 | 1.145 | 1.69 / 0.84 (pass) | pass |
+| A3 k4 grey bg0 | Z | 1.000000 | 1.200 | 0.603 | 1.774 | 0.834 | 1.20 / 0.60 (pass) | pass |
+| A3-blend k4 grey bg0 | Z | 0.935059 | 1.171 | 0.598 | 1.731 | 0.829 | 1.20 / 0.60 (pass) | Row 7 only |
+| A2-flat k64 grey0.05 a0.1 bg0 | Z | 0.798340 | 5.824 | 3.032 | 8.820 | 4.317 | 5.84 / 2.95 (reported) | reported |
+| A2-flat k64 grey0.2 a0.1 bg0 | Z | 0.801025 | 5.823 | 3.028 | 8.819 | 4.312 | 5.84 / 2.95 (reported) | reported |
+| A2-flat k64 grey0.5 a0.1 bg0 | Z | 0.863770 | 4.468 | 2.324 | 6.559 | 3.217 | 4.52 / 2.32 (reported) | reported |
+| A2-flat k64 grey0.05 a0.3 bg0 | Z | 0.625000 | 1.658 | 1.036 | 2.478 | 1.467 | 2.00 / 1.38 (reported) | reported |
+| A2-flat k64 grey0.2 a0.3 bg0 | Z | 0.642578 | 1.674 | 1.052 | 2.501 | 1.490 | 2.00 / 1.38 (reported) | reported |
+| A2-flat k64 grey0.5 a0.3 bg0 | Z | 1.000000 | 1.449 | 0.733 | 2.114 | 1.003 | 1.45 / 0.73 (reported) | reported |
+| A1-S1 k16 grey bg0.18 | Z | 0.710938 | 4.487 | 2.373 | 6.744 | 3.358 | 4.62 / 2.37 (FAIL) | FAIL |
+| A1-S1 k16 fire bg0.18 | Z | 0.433594 | 3.968 | 2.491 | 6.705 | 5.279 | 4.12 / 2.56 (FAIL) | FAIL |
+| A1-S1 k64 grey bg0.18 | Z | 0.243408 | 17.626 | 9.598 | 26.707 | 13.748 | 18.20 / 9.52 (FAIL) | FAIL |
+| A1-S1 k64 fire bg0.18 | Z | 0.020264 | 17.521 | 11.944 | 30.244 | 24.489 | 18.45 / 12.48 (FAIL) | FAIL |
+| A1-S2 k16 grey bg0.18 | Z | 0.712402 | 4.289 | 2.200 | 6.433 | 3.101 | 4.43 / 2.20 (FAIL) | FAIL |
+| A1-S2 k16 fire bg0.18 | Z | 0.453369 | 3.964 | 2.496 | 6.683 | 5.255 | 4.12 / 2.57 (FAIL) | FAIL |
+| A1-S2 k64 grey bg0.18 | Z | 0.299316 | 15.348 | 7.358 | 23.342 | 10.516 | 15.75 / 7.22 (FAIL) | FAIL |
+| A1-S2 k64 fire bg0.18 | Z | 0.071777 | 14.050 | 8.815 | 23.720 | 18.140 | 14.59 / 9.05 (FAIL) | FAIL |
+| A2 k16 grey0.05 a0.1 bg0.18 | Z | 0.584229 | 5.514 | 2.882 | 8.176 | 3.985 | 5.71 / 2.87 (FAIL) | FAIL |
+| A2 k16 grey0.2 a0.1 bg0.18 | Z | 0.647461 | 3.722 | 1.959 | 5.624 | 2.783 | 3.85 / 1.97 (FAIL) | FAIL |
+| A2 k16 grey0.5 a0.1 bg0.18 | Z | 0.676758 | 3.237 | 1.703 | 4.838 | 2.394 | 3.35 / 1.71 (FAIL) | FAIL |
+| A2 k16 grey0.05 a0.3 bg0.18 | Z | 0.846680 | 1.516 | 0.778 | 2.280 | 1.097 | 1.57 / 0.78 (pass) | pass |
+| A2 k16 grey0.2 a0.3 bg0.18 | Z | 0.853271 | 1.490 | 0.777 | 2.240 | 1.095 | 1.54 / 0.78 (pass) | pass |
+| A2 k16 grey0.5 a0.3 bg0.18 | Z | 0.855225 | 1.608 | 0.818 | 2.339 | 1.117 | 1.66 / 0.81 (pass) | pass |
+| A2 k64 grey0.05 a0.1 bg0.18 | Z | 0.566650 | 4.540 | 2.404 | 6.854 | 3.414 | 4.70 / 2.41 (FAIL) | FAIL |
+| A2 k64 grey0.2 a0.1 bg0.18 | Z | 0.568604 | 4.549 | 2.417 | 6.869 | 3.434 | 4.71 / 2.42 (FAIL) | FAIL |
+| A2 k64 grey0.5 a0.1 bg0.18 | Z | 0.633301 | 3.964 | 1.857 | 5.835 | 2.568 | 4.08 / 1.84 (FAIL) | FAIL |
+| A2 k64 grey0.05 a0.3 bg0.18 | Z | 0.854736 | 1.498 | 0.778 | 2.254 | 1.098 | 1.54 / 0.77 (pass) | pass |
+| A2 k64 grey0.2 a0.3 bg0.18 | Z | 0.846924 | 1.511 | 0.790 | 2.271 | 1.115 | 1.56 / 0.79 (pass) | pass |
+| A2 k64 grey0.5 a0.3 bg0.18 | Z | 0.851562 | 1.635 | 0.820 | 2.378 | 1.119 | 1.68 / 0.81 (pass) | pass |
+| A3 k4 grey bg0.18 | Z | 1.000000 | 1.582 | 0.798 | 2.372 | 1.122 | 1.58 / 0.80 (pass) | pass |
+| A3-blend k4 grey bg0.18 | Z | 0.863770 | 1.533 | 0.795 | 2.296 | 1.117 | 1.59 / 0.80 (pass) | Row 7 only |
+| A2-flat k64 grey0.05 a0.1 bg0.18 | Z | 1.000000 | 0.321 | 0.000 | 0.507 | 0.000 | 0.32 / 0.00 (reported) | reported |
+| A2-flat k64 grey0.2 a0.1 bg0.18 | Z | 0.678467 | 4.880 | 2.095 | 7.445 | 2.979 | 4.88 / 1.94 (reported) | reported |
+| A2-flat k64 grey0.5 a0.1 bg0.18 | Z | 0.906006 | 4.475 | 2.318 | 6.570 | 3.209 | 4.51 / 2.32 (reported) | reported |
+| A2-flat k64 grey0.05 a0.3 bg0.18 | Z | 1.000000 | 0.180 | 0.000 | 0.284 | 0.000 | 0.18 / 0.00 (reported) | reported |
+| A2-flat k64 grey0.2 a0.3 bg0.18 | Z | 0.597168 | 1.631 | 1.009 | 2.440 | 1.428 | 2.00 / 1.38 (reported) | reported |
+| A2-flat k64 grey0.5 a0.3 bg0.18 | Z | 1.000000 | 1.449 | 0.733 | 2.114 | 1.003 | 1.45 / 0.73 (reported) | reported |
+| U-eq k64 grey blend_add bg0 | Z | 1.000000 | 20.902 | 12.545 | 31.543 | 17.874 | 20.90 / 12.55 (reported) | reported |
+| U-eq k64 grey0.2 blend_over bg0 | Z | 1.000000 | 8.931 | 4.612 | 13.554 | 6.585 | 8.93 / 4.61 (reported) | reported |
+| U-near k64 grey blend_add bg0 | Z | 0.968750 | 20.866 | 12.984 | 31.443 | 18.532 | 20.87 / 12.97 (reported) | reported |
+| U-near k64 grey0.2 blend_over bg0 | Z | 0.843262 | 6.786 | 4.651 | 10.138 | 6.633 | 6.79 / 4.58 (reported) | reported |
+
+**RGBA16F**
+
+| arm | class | agreement | AgX max\|Δ\| | AgX chroma | ACES-Hill max\|Δ\| | ACES-Hill chroma | model (§4) under the class: AgX max\|Δ\| / chroma | verdict (AgX) |
+|---|---|---|---|---|---|---|---|---|
+| A1-S1 k16 grey bg0 | Unmodelled | — | 0.016 | 0.000 | 0.025 | 0.000 | — | pass |
+| A1-S1 k16 fire bg0 | Unmodelled | — | 0.018 | 0.008 | 0.029 | 0.019 | — | pass |
+| A1-S1 k64 grey bg0 | Unmodelled | — | 0.018 | 0.000 | 0.028 | 0.000 | — | pass |
+| A1-S1 k64 fire bg0 | Unmodelled | — | 0.018 | 0.009 | 0.030 | 0.019 | — | pass |
+| A1-S2 k16 grey bg0 | Unmodelled | — | 0.017 | 0.000 | 0.026 | 0.000 | — | pass |
+| A1-S2 k16 fire bg0 | Unmodelled | — | 0.017 | 0.009 | 0.027 | 0.020 | — | pass |
+| A1-S2 k64 grey bg0 | Unmodelled | — | 0.017 | 0.000 | 0.027 | 0.000 | — | pass |
+| A1-S2 k64 fire bg0 | Unmodelled | — | 0.017 | 0.009 | 0.028 | 0.020 | — | pass |
+| A2 k16 grey0.05 a0.1 bg0 | Unmodelled | — | 0.007 | 0.000 | 0.011 | 0.000 | — | pass |
+| A2 k16 grey0.2 a0.1 bg0 | Unmodelled | — | 0.006 | 0.000 | 0.009 | 0.000 | — | pass |
+| A2 k16 grey0.5 a0.1 bg0 | Unmodelled | — | 0.006 | 0.000 | 0.009 | 0.000 | — | pass |
+| A2 k16 grey0.05 a0.3 bg0 | Unmodelled | — | 0.001 | 0.000 | 0.001 | 0.000 | — | pass |
+| A2 k16 grey0.2 a0.3 bg0 | Unmodelled | — | 0.001 | 0.000 | 0.002 | 0.000 | — | pass |
+| A2 k16 grey0.5 a0.3 bg0 | Unmodelled | — | 0.001 | 0.000 | 0.001 | 0.000 | — | pass |
+| A2 k64 grey0.05 a0.1 bg0 | Unmodelled | — | 0.000 | 0.000 | 0.000 | 0.000 | — | pass |
+| A2 k64 grey0.2 a0.1 bg0 | Unmodelled | — | 0.000 | 0.000 | 0.001 | 0.000 | — | pass |
+| A2 k64 grey0.5 a0.1 bg0 | Unmodelled | — | 0.000 | 0.000 | 0.000 | 0.000 | — | pass |
+| A2 k64 grey0.05 a0.3 bg0 | Unmodelled | — | 0.001 | 0.000 | 0.001 | 0.000 | — | pass |
+| A2 k64 grey0.2 a0.3 bg0 | Unmodelled | — | 0.000 | 0.000 | 0.000 | 0.000 | — | pass |
+| A2 k64 grey0.5 a0.3 bg0 | Unmodelled | — | 0.001 | 0.000 | 0.001 | 0.000 | — | pass |
+| A3 k4 grey bg0 | Z | 0.999756 | 0.038 | 0.000 | 0.059 | 0.000 | 0.04 / 0.00 (pass) | pass |
+| A3-blend k4 grey bg0 | Unmodelled | — | 0.014 | 0.000 | 0.021 | 0.000 | — | Row 7 only |
+| A2-flat k64 grey0.05 a0.1 bg0 | Unmodelled | — | 0.005 | 0.000 | 0.009 | 0.000 | — | reported |
+| A2-flat k64 grey0.2 a0.1 bg0 | Unmodelled | — | 0.005 | 0.000 | 0.008 | 0.000 | — | reported |
+| A2-flat k64 grey0.5 a0.1 bg0 | Unmodelled | — | 0.000 | 0.000 | 0.001 | 0.000 | — | reported |
+| A2-flat k64 grey0.05 a0.3 bg0 | Unmodelled | — | 0.002 | 0.000 | 0.003 | 0.000 | — | reported |
+| A2-flat k64 grey0.2 a0.3 bg0 | Unmodelled | — | 0.002 | 0.000 | 0.003 | 0.000 | — | reported |
+| A2-flat k64 grey0.5 a0.3 bg0 | Unmodelled | — | 0.000 | 0.000 | 0.000 | 0.000 | — | reported |
+| A1-S1 k16 grey bg0.18 | Unmodelled | — | 0.016 | 0.000 | 0.025 | 0.000 | — | pass |
+| A1-S1 k16 fire bg0.18 | Unmodelled | — | 0.016 | 0.008 | 0.026 | 0.016 | — | pass |
+| A1-S1 k64 grey bg0.18 | Unmodelled | — | 0.018 | 0.000 | 0.028 | 0.000 | — | pass |
+| A1-S1 k64 fire bg0.18 | Unmodelled | — | 0.016 | 0.006 | 0.025 | 0.014 | — | pass |
+| A1-S2 k16 grey bg0.18 | Unmodelled | — | 0.015 | 0.000 | 0.024 | 0.000 | — | pass |
+| A1-S2 k16 fire bg0.18 | Unmodelled | — | 0.016 | 0.008 | 0.026 | 0.016 | — | pass |
+| A1-S2 k64 grey bg0.18 | Unmodelled | — | 0.017 | 0.000 | 0.027 | 0.000 | — | pass |
+| A1-S2 k64 fire bg0.18 | Unmodelled | — | 0.017 | 0.007 | 0.027 | 0.016 | — | pass |
+| A2 k16 grey0.05 a0.1 bg0.18 | Unmodelled | — | 0.010 | 0.000 | 0.016 | 0.000 | — | pass |
+| A2 k16 grey0.2 a0.1 bg0.18 | Unmodelled | — | 0.000 | 0.000 | 0.000 | 0.000 | — | pass |
+| A2 k16 grey0.5 a0.1 bg0.18 | Unmodelled | — | 0.004 | 0.000 | 0.005 | 0.000 | — | pass |
+| A2 k16 grey0.05 a0.3 bg0.18 | Unmodelled | — | 0.001 | 0.000 | 0.001 | 0.000 | — | pass |
+| A2 k16 grey0.2 a0.3 bg0.18 | Unmodelled | — | 0.000 | 0.000 | 0.000 | 0.000 | — | pass |
+| A2 k16 grey0.5 a0.3 bg0.18 | Unmodelled | — | 0.001 | 0.000 | 0.001 | 0.000 | — | pass |
+| A2 k64 grey0.05 a0.1 bg0.18 | Unmodelled | — | 0.001 | 0.000 | 0.001 | 0.000 | — | pass |
+| A2 k64 grey0.2 a0.1 bg0.18 | Unmodelled | — | 0.001 | 0.000 | 0.001 | 0.000 | — | pass |
+| A2 k64 grey0.5 a0.1 bg0.18 | Unmodelled | — | 0.001 | 0.000 | 0.001 | 0.000 | — | pass |
+| A2 k64 grey0.05 a0.3 bg0.18 | Unmodelled | — | 0.000 | 0.000 | 0.000 | 0.000 | — | pass |
+| A2 k64 grey0.2 a0.3 bg0.18 | Unmodelled | — | 0.001 | 0.000 | 0.001 | 0.000 | — | pass |
+| A2 k64 grey0.5 a0.3 bg0.18 | Unmodelled | — | 0.001 | 0.000 | 0.001 | 0.000 | — | pass |
+| A3 k4 grey bg0.18 | Z | 0.999756 | 0.049 | 0.000 | 0.077 | 0.000 | 0.05 / 0.00 (pass) | pass |
+| A3-blend k4 grey bg0.18 | Unmodelled | — | 0.001 | 0.000 | 0.002 | 0.000 | — | Row 7 only |
+| A2-flat k64 grey0.05 a0.1 bg0.18 | Unmodelled | — | 0.001 | 0.000 | 0.001 | 0.000 | — | reported |
+| A2-flat k64 grey0.2 a0.1 bg0.18 | Unmodelled | — | 0.009 | 0.000 | 0.014 | 0.000 | — | reported |
+| A2-flat k64 grey0.5 a0.1 bg0.18 | Unmodelled | — | 0.000 | 0.000 | 0.000 | 0.000 | — | reported |
+| A2-flat k64 grey0.05 a0.3 bg0.18 | Unmodelled | — | 0.002 | 0.000 | 0.003 | 0.000 | — | reported |
+| A2-flat k64 grey0.2 a0.3 bg0.18 | Unmodelled | — | 0.002 | 0.000 | 0.003 | 0.000 | — | reported |
+| A2-flat k64 grey0.5 a0.3 bg0.18 | Unmodelled | — | 0.000 | 0.000 | 0.000 | 0.000 | — | reported |
+| U-eq k64 grey blend_add bg0 | Unmodelled | — | 0.185 | 0.000 | 0.292 | 0.001 | — | reported |
+| U-eq k64 grey0.2 blend_over bg0 | Unmodelled | — | 0.154 | 0.000 | 0.243 | 0.000 | — | reported |
+| U-near k64 grey blend_add bg0 | Unmodelled | — | 0.002 | 0.000 | 0.003 | 0.000 | — | reported |
+| U-near k64 grey0.2 blend_over bg0 | Unmodelled | — | 0.063 | 0.000 | 0.099 | 0.000 | — | reported |
+
+## 9. Decision
+
+This applies §5's table row by row to §§7–8. The script is `D:/tmp/render-orch/px0/px0_14/decide.py`;
+it reads `probe.toml` and §4, and its output is `decision.txt` beside it. No threshold is derived
+here.
+
+1. **Classes of the decisive paths (B10G11R11):** blend `ONE + ONE` `Z`, blend premultiplied over
+   `Z`, store `Z`. Every decisive path has a class, so the case is row 1 or 2, not row 3.
+2. **Agreement:** 40 of the 42 decisive arms are below 99.9 % (§8). That is **row 2**: the device
+   arms decide.
+3. **Row 2's rule:** B10G11R11 only if every device decisive arm passes. 28 of the 42 fail (A1-S1,
+   A1-S2, A2), so **`lit` = RGBA16F**.
+4. **Row 7:** not reached. It applies only when RGBA16F is chosen because of A3 alone; here A1 and
+   A2 fail and A3 passes (0 of 2 fail). DS-ROW7 is not named.
+5. **Row 4, the escape's own check:** the outcome is RGBA16F, and 0 of the 42 RGBA16F decisive arms
+   fail. **Row 4 does not fire, and the wave continues.**
+6. **Rows 5 and 6:** row 5 is void (Q1 = yes). Row 6 covers a later change of the default curve.
+   The decided curve in §5 stays AgX.
+
+**One reading to state.** The table's "classes of the decisive paths" are read on B10G11R11, the
+format under test; RGBA16F is row 4's escape. The probe's `decide()` reads them the same way.
+Counting RGBA16F's two `Unmodelled` blends in rows 1–3 as well would select row 3. Rows 2 and 3 have
+the same "decided by" and `lit` cells, so the outcome is the same under either reading. The probe's
+own `[decision]` (`row = 2`, `lit = "rgba16f"`, `stop_the_wave = false`) matches this application.
+
+**Decision: `lit` = RGBA16F (`R16G16B16A16_SFLOAT`), by row 2.**
+
+What follows from it:
+- `boyko_shaderdsl::post::LIT_STORAGE_FORMAT` = `"rgba16f"` (PX0-14). Nothing emits the string
+  before PX1a, so no shader, `.spv` or golden moves at PX0.
+- Every budget that touches `lit` reads AD-1's escape column (`plan/01-DECISIONS.md` §3.1; `plan/00-INDEX.md`
+  cross-cutting rule (x)).

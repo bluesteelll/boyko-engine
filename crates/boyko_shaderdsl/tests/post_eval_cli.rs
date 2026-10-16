@@ -11,9 +11,10 @@
 //! - [`bound_equals_the_hand_joint_forward_difference`] — `bound --steps 2` against the joint
 //!   forward difference computed here.
 //!
-//! The scene is stored through B10G11R11 (`post::LIT_STORAGE_FORMAT`), so `bound` steps the shipped
-//! encoding. Every reference evaluates the traced body ([`post_final_eval`]) — the oracle `post_eval`
-//! instantiates — never a re-composition of its stages.
+//! The synthetic scene is a B10G11R11 dump, the coarser of the two `lit` formats PX0 weighed.
+//! `bound` steps whatever encoding the dump's header names, not `post::LIT_STORAGE_FORMAT`
+//! (RGBA16F since PX0-14). Every reference evaluates the traced body ([`post_final_eval`]) — the
+//! oracle `post_eval` instantiates — never a re-composition of its stages.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

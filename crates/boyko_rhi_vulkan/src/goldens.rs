@@ -31,6 +31,7 @@ use boyko_shaderdsl::cf::EvalCf;
 // home for every dump reader, `post_eval` and `tools/golden_diff.py`'s pinned mirror); the goldens
 // re-export it so PX1a reads `goldens::unpack_b10g11r11` without a second body.
 pub use boyko_shaderdsl::pixfmt::unpack_b10g11r11;
+use boyko_shaderdsl::pixfmt::PathClass;
 use boyko_shaderdsl::ssao::{SsaoParams as EdslSsaoParams, ssao_estimate_body_params};
 
 use crate::compute::{
@@ -46,6 +47,37 @@ use crate::compute::{
     SsaoParams, TILE_FLAG_EMPTY, TILE_SIZE, TileBound, composite_ray, depth_to_t,
     golden_f16_from_f32, pack_rgba, sdf_sphere,
 };
+
+/// How the device rounds a float written into a `B10G11R11_UFLOAT_PACK32` target, one class per
+/// path in [`boyko_shaderdsl::pixfmt::Path::ALL`]'s order `[store, attachment, blend_add,
+/// blend_over, clear]`. Measured by GL-PX0-P (`b10g11r11_rounding_probe`, probe commit
+/// `5eda6c78`, NVIDIA GeForce RTX 3060 Laptop GPU): every path truncates (`Z`).
+///
+/// This is a fact about the silicon, not a format verdict. It is the one place a derived bound
+/// takes its class from ([`PathClass::store_bound_ulp`] for the store, attachment and clear
+/// paths); nothing reads it before PX1a. Its source is §7 of
+/// `docs/measurements/2026-10-16-px0-lit-format-decision.md`, and
+/// `goldens::tests::rounding_constants_match_the_record` keeps the two equal.
+pub const B10G11R11_ROUNDING: [PathClass; 5] = [
+    PathClass::Z,
+    PathClass::Z,
+    PathClass::Z,
+    PathClass::Z,
+    PathClass::Z,
+];
+
+/// [`B10G11R11_ROUNDING`]'s twin for a `R16G16B16A16_SFLOAT` target (the `lit` format PX0 decided),
+/// from the same probe run. Store, attachment and clear truncate (`Z`). Neither blend matches any
+/// class of the family: the largest error is 1.000 binary16 ULP, the most Vulkan allows when the
+/// result rounds to either neighbour. Bounds on those two paths are therefore two-sided at that
+/// error.
+pub const RGBA16F_ROUNDING: [PathClass; 5] = [
+    PathClass::Z,
+    PathClass::Z,
+    PathClass::Unmodelled { max_err_milli_ulp: 1000 },
+    PathClass::Unmodelled { max_err_milli_ulp: 1000 },
+    PathClass::Z,
+];
 
 
 /// The CPU golden for step 0c: `out[i] == i*2 + 1` (the `write_pattern` shader).
@@ -5483,6 +5515,68 @@ mod tests {
             "P1-4: the degenerate-dims divergence is intentional (see \
              ClusterConfig::hier_group_count's own doc) -- if this now holds, the clamp \
              behavior changed and this pin must be re-reviewed, not deleted"
+        );
+    }
+
+    /// Render wave PX0 (`px0/cut.md` PX0-14): [`B10G11R11_ROUNDING`] / [`RGBA16F_ROUNDING`] equal
+    /// the classes the lit-format decision record publishes. The record's `px0-rounding` block is
+    /// GL-PX0-P's `[classes]` table copied verbatim from the probe's output. The match runs both
+    /// ways: every constant needs its line, and every line needs its constant (no extra, unknown
+    /// or duplicate key), so a constant edited without the record turns this red, and so does a
+    /// record edited without the constant.
+    #[test]
+    fn rounding_constants_match_the_record() {
+        use std::collections::BTreeMap;
+
+        use boyko_shaderdsl::pixfmt::{Path, Target};
+
+        const RECORD: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/measurements/2026-10-16-px0-lit-format-decision.md"
+        );
+        let text = std::fs::read_to_string(RECORD).unwrap_or_else(|e| panic!("{RECORD}: {e}"));
+        let (_, rest) = text.split_once("<!-- px0-rounding:begin -->").expect("the record has a px0-rounding block");
+        let (block, _) = rest.split_once("<!-- px0-rounding:end -->").expect("the px0-rounding block is closed");
+
+        let mut in_classes = false;
+        let mut lines: BTreeMap<String, String> = BTreeMap::new();
+        for raw in block.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with("```") {
+                continue;
+            }
+            if line.starts_with('[') {
+                assert_eq!(line, "[classes]", "the px0-rounding block holds the probe's [classes] table only");
+                in_classes = true;
+                continue;
+            }
+            assert!(in_classes, "a key before the [classes] header: {line:?}");
+            let (key, value) = line.split_once('=').unwrap_or_else(|| panic!("not a `key = \"value\"` line: {line:?}"));
+            let value = value.trim();
+            let value = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or_else(|| panic!("the value is not a quoted string: {line:?}"));
+            let previous = lines.insert(key.trim().to_owned(), value.to_owned());
+            assert!(previous.is_none(), "duplicate key {:?} in the record's px0-rounding block", key.trim());
+        }
+
+        let mut expected: BTreeMap<String, String> = BTreeMap::new();
+        for (target, constants) in [(Target::B10G11R11, &B10G11R11_ROUNDING), (Target::Rgba16f, &RGBA16F_ROUNDING)] {
+            for (path, class) in Path::ALL.iter().zip(constants.iter()) {
+                let mut spelling = String::new();
+                class.write_spelling(&mut spelling).expect("a String writes");
+                assert_eq!(
+                    PathClass::parse(&spelling),
+                    Some(*class),
+                    "the spelling {spelling:?} must parse back to the constant"
+                );
+                expected.insert(format!("{}_{}", target.spelling(), path.spelling()), spelling);
+            }
+        }
+        assert_eq!(
+            lines, expected,
+            "goldens::B10G11R11_ROUNDING / RGBA16F_ROUNDING (right) differ from the record's px0-rounding block (left)"
         );
     }
 }
