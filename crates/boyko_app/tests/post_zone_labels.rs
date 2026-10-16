@@ -32,7 +32,7 @@
 //! Windowed-test conventions: the device drivers are ignored, `--test-threads=1`,
 //! `BOYKO_DISABLE_VALIDATION=1` (the validation driver arms the layer for its own children).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use boyko_app::prelude::*;
@@ -513,41 +513,40 @@ fn post_zone_wr_worker() {
 // Driving the worker
 // ===============================================================================================
 
-/// The worker's artifact and merged output for one cell, or `None` when the device serves no
-/// timestamps (the zone leg cannot run there).
-fn run_cell(c: ZoneCell, validation_on: bool, profile_on: bool) -> Option<(Artifact, String)> {
-    let tag = c.word().replace(':', "_");
-    let mut path: PathBuf = std::env::temp_dir();
-    path.push(format!("boyko_px0_zones_{tag}.toml"));
-    let _ = std::fs::remove_file(&path);
-    let token = format!("px0-zones-{tag}");
+/// Every knob an operator's shell might carry that would change the scene, the cell or the stream —
+/// removed from the label child rather than assumed unset (`vb_sv0_produce_run_timing`'s reason).
+/// `BOYKO_WINDOW_FRAMES` is NOT one of them: the child's is [`FRAME_BACKSTOP`], set by
+/// [`worker_command`], never inherited and never removed (that precedent strips it; here a strip
+/// would undo the backstop — [`every_label_child_runs_under_the_frame_backstop`]).
+const STRIPPED_KNOBS: [&str; 11] = [
+    "BOYKO_HOST_DUMP",
+    "BOYKO_VB_BENCH",
+    "BOYKO_VB_CULL_READBACK",
+    "BOYKO_VB_PROBE",
+    "BOYKO_HZB_DUMP",
+    "BOYKO_AA",
+    "BOYKO_SSAO",
+    "BOYKO_GRAPH_RECEIPT",
+    "BOYKO_IMAGE_DUMP",
+    "BOYKO_VB_FORCE_CLASSIFIED",
+    "BOYKO_PX0_WR",
+];
 
+/// The label child for one cell, writing its artifact to `artifact` under run token `token` —
+/// built here, apart from [`run_cell`]'s spawn, so a host test reads the environment it carries.
+fn worker_command(c: ZoneCell, artifact: &Path, token: &str, validation_on: bool, profile_on: bool) -> Command {
+    let tag = c.word().replace(':', "_");
     let exe = std::env::current_exe().expect("invariant: the test binary knows its own path");
     let mut cmd = Command::new(exe);
     cmd.args([WORKER, "--ignored", "--exact", "--test-threads=1", "--nocapture"])
         .env(ENV_CELL, c.word())
         .env("BOYKO_VB_ZONE", "1")
-        .env("BOYKO_PROFILE_ARTIFACT", &path)
-        .env("BOYKO_PROFILE_RUN_TOKEN", &token)
+        .env("BOYKO_PROFILE_ARTIFACT", artifact)
+        .env("BOYKO_PROFILE_RUN_TOKEN", token)
         .env("BOYKO_PROFILE_WORKLOAD", format!("px0_{tag}"))
         .env("BOYKO_VB_BENCH_FRAMES", BENCH_FRAMES.to_string())
         .env("BOYKO_WINDOW_FRAMES", FRAME_BACKSTOP.to_string());
-    // Every knob an operator's shell might carry that would change the scene, the cell or the
-    // stream — removed rather than assumed unset (`vb_sv0_produce_run_timing`'s reason). The
-    // operator's `BOYKO_WINDOW_FRAMES` is replaced by [`FRAME_BACKSTOP`] above, never inherited.
-    for k in [
-        "BOYKO_HOST_DUMP",
-        "BOYKO_VB_BENCH",
-        "BOYKO_VB_CULL_READBACK",
-        "BOYKO_VB_PROBE",
-        "BOYKO_HZB_DUMP",
-        "BOYKO_AA",
-        "BOYKO_SSAO",
-        "BOYKO_GRAPH_RECEIPT",
-        "BOYKO_IMAGE_DUMP",
-        "BOYKO_VB_FORCE_CLASSIFIED",
-        "BOYKO_PX0_WR",
-    ] {
+    for k in STRIPPED_KNOBS {
         cmd.env_remove(k);
     }
     if validation_on {
@@ -563,8 +562,21 @@ fn run_cell(c: ZoneCell, validation_on: bool, profile_on: bool) -> Option<(Artif
     } else {
         cmd.env_remove("BOYKO_PROFILE_ON");
     }
+    cmd
+}
 
-    let out = cmd.output().expect("invariant: the PX0 zone worker spawns");
+/// The worker's artifact and merged output for one cell, or `None` when the device serves no
+/// timestamps (the zone leg cannot run there).
+fn run_cell(c: ZoneCell, validation_on: bool, profile_on: bool) -> Option<(Artifact, String)> {
+    let tag = c.word().replace(':', "_");
+    let mut path: PathBuf = std::env::temp_dir();
+    path.push(format!("boyko_px0_zones_{tag}.toml"));
+    let _ = std::fs::remove_file(&path);
+    let token = format!("px0-zones-{tag}");
+
+    let out = worker_command(c, &path, &token, validation_on, profile_on)
+        .output()
+        .expect("invariant: the PX0 zone worker spawns");
     let mut merged = String::from_utf8_lossy(&out.stdout).into_owned();
     merged.push_str(&String::from_utf8_lossy(&out.stderr));
     if merged.contains("no usable timestamps") {
@@ -810,10 +822,42 @@ fn check_expectations_reds_both_ways() {
     assert!(check_expectations(&torn, &t).is_err(), "a non-Measured Required row must red");
 }
 
-/// **A child stopped by the frame backstop is red, never a hang** (triage r1 RF-1): for every cell
-/// the backstop's verdict names a Required zone as absent — so a path whose frame witness never
-/// opens (Forward before PX0-2) reds GL-PX0-Z — and a cell that required nothing would be caught
-/// here rather than pass silently.
+/// **Every label child runs under the frame backstop** (triage r1 RF-1, r2 G3) — the hang cure is
+/// the child's environment, so it is read off the `Command` every driver spawns, for every cell and
+/// every driver mode: `BOYKO_WINDOW_FRAMES` is SET to [`FRAME_BACKSTOP`] and the exit window is
+/// armed. `get_envs` reports the LAST `env` / `env_remove` per key, so this reds both when the
+/// `.env` is deleted and when the strip list re-gains the variable (the base list and its cited
+/// precedent both strip it). Every [`STRIPPED_KNOBS`] entry is removed.
+#[test]
+fn every_label_child_runs_under_the_frame_backstop() {
+    let artifact = std::env::temp_dir().join("boyko_px0_zones_host_check.toml");
+    for c in CELLS {
+        for (validation_on, profile_on) in [(false, false), (true, false), (false, true)] {
+            let cmd = worker_command(c, &artifact, "px0-zones-host-check", validation_on, profile_on);
+            let env = |k: &str| {
+                cmd.get_envs()
+                    .find(|(n, _)| *n == std::ffi::OsStr::new(k))
+                    .map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+            };
+            let at = format!("[{}, validation {validation_on}, profile {profile_on}]", c.word());
+            assert_eq!(
+                env("BOYKO_WINDOW_FRAMES"),
+                Some(Some(FRAME_BACKSTOP.to_string())),
+                "{at} the child must run under the frame backstop (Some(None) = removed, None = inherited)"
+            );
+            assert_eq!(env("BOYKO_VB_ZONE"), Some(Some("1".to_owned())), "{at} the zone window must be armed");
+            for k in STRIPPED_KNOBS {
+                assert_eq!(env(k), Some(None), "{at} the operator knob {k} must be removed");
+            }
+        }
+    }
+}
+
+/// **The backstop's red names the cell's zones absent** (triage r1 RF-1): for every cell the
+/// verdict a child stopped by the backstop gets names a Required zone as absent — so a path whose
+/// frame witness never opens (Forward before PX0-2) reds GL-PX0-Z — and a cell that required
+/// nothing would be caught here rather than pass silently. This checks the verdict's TEXT; that the
+/// child is bounded at all is [`every_label_child_runs_under_the_frame_backstop`]'s.
 #[test]
 fn a_child_stopped_by_the_backstop_names_its_zones_absent() {
     for c in CELLS {
