@@ -4,8 +4,9 @@
 //!
 //! - [`eval_passes_the_display_its_words_made`] — a display the traced body made under a word set
 //!   passes `eval` under those words;
-//! - [`eval_floor_admits_the_far_neighbour_and_refuses_one_code_past_it`] — the display at the other
-//!   code the UNORM store may return passes, one code past it fails everywhere;
+//! - [`eval_floor_admits_the_far_neighbour_and_refuses_any_one_channel_past_the_pair`] — the display
+//!   at the other code the UNORM store may return passes; a display with one channel of every pixel
+//!   at the closest code outside that pair fails everywhere, for each channel in turn;
 //! - [`another_curve_word_fails_on_most_pixels`] — the same display under another tonemap word
 //!   fails on > 90 % of its pixels;
 //! - [`a_display_that_ignored_exposure_ratio_fails_where_it_is_not_one`] — and its control;
@@ -149,26 +150,27 @@ fn eval_passes_the_display_its_words_made() {
     assert!(text(&o).contains(&format!("{} pixels, 0 over their bound", W * H)), "{}", text(&o));
 }
 
-/// The display whose every channel is the code `pick` chooses for the body's value `v = 255·o` (`o`
-/// the traced body's output under `w`, unclamped; the product in f64, exact for an f32), with the
-/// smallest and largest per-channel distance over the frame in LSB, measured as `eval` measures it.
-fn display_picked(w: [u32; 8], scene: &[[f32; 4]], pick: impl Fn(f64) -> f64) -> (Vec<u8>, f64, f64) {
+/// The display whose channel `c` is the code `pick(c, v)` chooses for the body's value `v = 255·o`
+/// (`o` the traced body's output under `w`, unclamped; the product in f64, exact for an f32), with
+/// each channel's smallest and largest distance over the frame in LSB, measured as `eval` measures
+/// it.
+fn display_picked(w: [u32; 8], scene: &[[f32; 4]], pick: impl Fn(usize, f64) -> f64) -> (Vec<u8>, [f64; 3], [f64; 3]) {
     let p = eval_params(w);
     let tex = HostTex2::new(scene, W, H);
     let mut out = Vec::with_capacity((W * H * 4) as usize);
-    let (mut lo, mut hi) = (f64::INFINITY, 0.0f64);
+    let (mut lo, mut hi) = ([f64::INFINITY; 3], [0.0f64; 3]);
     for y in 0..H {
         for x in 0..W {
             let o = post_final_eval([x, y], &p, tex);
-            for &oc in &o[..3] {
+            for (c, &oc) in o[..3].iter().enumerate() {
                 let v = 255.0 * f64::from(oc);
                 assert!((0.0..=255.0).contains(&v), "PREMISE: the body's value {oc} at ({x}, {y}) is a display value");
-                let code = pick(v);
+                let code = pick(c, v);
                 assert!((0.0..=255.0).contains(&code), "PREMISE: code {code} for v = {v} is a byte");
                 let byte = code as u8;
                 let d = 255.0 * f64::from((f32::from(byte) / 255.0 - oc).abs());
-                lo = lo.min(d);
-                hi = hi.max(d);
+                lo[c] = lo[c].min(d);
+                hi[c] = hi[c].max(d);
                 out.push(byte);
             }
             out.push(255);
@@ -202,35 +204,68 @@ fn past_far_neighbour(v: f64) -> f64 {
     if (0.0..=255.0).contains(&c) { c } else { n - 2.0 * s }
 }
 
-/// **`eval`'s rounding floor is one display code** (triage r2 G2). The display at the OTHER code the
-/// float → UNORM store may return passes: every channel is under one code from the body, most of
-/// them more than half a code. The display one code past that neighbour fails on every pixel: every
-/// channel is at least 1.5 codes away. So a floor below the far display's largest distance reds
-/// here, and so does one at the past display's distances (16 LSB passed all five tests before).
-/// `eval`'s other terms are not a display's to pin: E0's OETF term is at most 1.3e-4 LSB, below 8-bit
-/// resolution (`post_eval.rs`'s unit tests pin it), and no row here is filtered.
+/// One code past the NEAREST code, on the side away from [`far_neighbour`]: `1 + |v − round(v)|`
+/// from `v`, in (1, 1.5] — the closest code outside the pair the store may return. Where that code
+/// would leave `[0, 255]`, or `v` is integral (both `v ± 1` are then exactly one code away, at the
+/// floor itself), [`past_far_neighbour`], at least 1.5 codes away.
+fn past_nearest(v: f64) -> f64 {
+    let n = v.round();
+    let c = if v > n { n - 1.0 } else { n + 1.0 };
+    if v != n && (0.0..=255.0).contains(&c) { c } else { past_far_neighbour(v) }
+}
+
+/// **`eval`'s rounding floor is one display code, to within a thousandth of a code** (triage r2 G2,
+/// r3 W1). The float → UNORM store may return either integer nearest the body's value, so the
+/// floor must admit the OTHER one and refuse every code outside that pair:
+///
+/// - the display at the other code ([`far_neighbour`]) passes. Its largest channel distance is the
+///   LOWER pin (0.9996 LSB on this scene): a floor below it, less that pixel's OETF term, reds;
+/// - three displays, one per channel, put THAT channel of every pixel at the closest code outside
+///   the pair ([`past_nearest`]) and the other two at the nearest code (at most half a code away).
+///   Each fails on every pixel. `eval` fails a pixel when ANY channel is over its bound, so each
+///   pixel's verdict is its deciding channel's alone, and the smallest deciding distance over the
+///   three displays is the UPPER pin (1.00041 LSB, red, on this scene): a floor at or above it,
+///   less that pixel's OETF term, passes a pixel and reds here — and so does an `eval` that skips a
+///   channel, whose display then passes outright.
+///
+/// So the floor is pinned to about [0.9996, 1.0004) LSB, and the premises hold both pins within
+/// 1e-3 LSB of 1. (A display with EVERY channel one code past the far neighbour decides each pixel
+/// by its largest distance; it pinned only [0.9996, 1.616) and passed a skipped channel.) E0's OETF
+/// term, at most 1.3e-4 LSB, is smaller than the margin by which these displays clear the floor,
+/// so `post_eval.rs`'s unit tests pin it, not a display; no row here is filtered.
 #[test]
-fn eval_floor_admits_the_far_neighbour_and_refuses_one_code_past_it() {
+fn eval_floor_admits_the_far_neighbour_and_refuses_any_one_channel_past_the_pair() {
     let dir = scratch("eval_floor");
     let w = words(post::TONEMAP_ACES, 1.0);
     let (scene, _) = fixture(&dir, w);
     let texels = scene_texels();
 
-    let (far, _, far_hi) = display_picked(w, &texels, far_neighbour);
-    assert!(far_hi < 1.0 && far_hi > 0.9, "PREMISE: the far display comes within 0.1 code of the floor: max {far_hi}");
+    let (far, _, far_hi) = display_picked(w, &texels, |_, v| far_neighbour(v));
+    let far_hi = far_hi.iter().copied().fold(0.0f64, f64::max);
+    assert!(far_hi < 1.0 && far_hi > 1.0 - 1e-3, "PREMISE: the far display comes within 1e-3 code of the floor: max {far_hi}");
     let far_path = dir.join("display_far.bin");
     write_dump(&far_path, pixfmt::VK_FORMAT_R8G8B8A8_UNORM, W, H, &far);
     let o = eval(w, &scene, &far_path);
     assert_eq!(o.status.code(), Some(0), "the other permitted code (up to {far_hi:.4} LSB) must pass: {}", text(&o));
     assert!(text(&o).contains(&format!("{} pixels, 0 over their bound", W * H)), "{}", text(&o));
 
-    let (past, past_lo, _) = display_picked(w, &texels, past_far_neighbour);
-    assert!(past_lo > 1.5 - 1e-4, "PREMISE: every channel is one code past the far neighbour: min {past_lo}");
-    let past_path = dir.join("display_past.bin");
-    write_dump(&past_path, pixfmt::VK_FORMAT_R8G8B8A8_UNORM, W, H, &past);
-    let o = eval(w, &scene, &past_path);
-    assert_eq!(o.status.code(), Some(1), "one code past the far neighbour (>= {past_lo:.4} LSB) must fail: {}", text(&o));
-    assert_eq!(failing_frac(&o), 1.0, "every pixel must fail: {}", text(&o));
+    let mut deciding_lo = f64::INFINITY;
+    for (c, channel) in ["red", "green", "blue"].into_iter().enumerate() {
+        let (past, lo, hi) = display_picked(w, &texels, |k, v| if k == c { past_nearest(v) } else { v.round() });
+        for k in (0..3).filter(|&k| k != c) {
+            assert!(hi[k] <= 0.5 + 1e-3, "PREMISE: [{channel}] channel {k} sits at the nearest code: max {}", hi[k]);
+        }
+        // 2e-4 is the unit tests' bound on E0's OETF term: past it, the floor alone decides.
+        assert!(lo[c] > 1.0 + 2e-4, "PREMISE: [{channel}] every deciding value is outside the pair, past the OETF term: min {}", lo[c]);
+        deciding_lo = deciding_lo.min(lo[c]);
+        let past_path = dir.join(format!("display_past_{channel}.bin"));
+        write_dump(&past_path, pixfmt::VK_FORMAT_R8G8B8A8_UNORM, W, H, &past);
+        let o = eval(w, &scene, &past_path);
+        assert_eq!(o.status.code(), Some(1), "[{channel}] one channel past the pair (>= {:.6} LSB) must fail: {}", lo[c], text(&o));
+        assert_eq!(failing_frac(&o), 1.0, "[{channel}] every pixel must fail on its {channel} channel: {}", text(&o));
+    }
+    assert!(deciding_lo < 1.0 + 1e-3, "PREMISE: a deciding channel comes within 1e-3 code of the floor: min {deciding_lo}");
+    eprintln!("eval's rounding floor pinned to [{far_hi:.6}, {deciding_lo:.6}) LSB, each end less its pixel's OETF term");
 }
 
 #[test]

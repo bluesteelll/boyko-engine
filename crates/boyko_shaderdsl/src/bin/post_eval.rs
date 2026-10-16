@@ -211,13 +211,17 @@ fn eval_px(px: [u32; 2], words: [u32; 8], rows: &[(&'static PostBinding, Loaded)
 
 /// The rounding floor of `eval`'s per-channel bound (D-T2's "1 LSB"), in display LSB. The
 /// float → UNORM store may return either integer nearest `255·o`, so a spec-compliant display sits
-/// under one code from the body's value; one code past that neighbour is at least 1.5 LSB away.
-/// `post_eval_cli.rs` pins the floor between the two (triage r2 G2).
+/// under one code from the body's value, and every other code is more than one code away.
+/// `post_eval_cli.rs` pins the floor to about [0.9996, 1.0004) LSB (triage r2 G2, r3 W1): below by
+/// the largest channel distance of the display at the other permitted code; above by the smallest
+/// distance of the displays that put ONE channel of every pixel at the closest code outside the
+/// pair (a pixel fails when any channel does, so only a one-channel display measures that channel).
 const ROUNDING_FLOOR_LSB: f64 = 1.0;
 
 /// `eval`'s bound for one channel whose body value is `o`: the rounding floor + E0's OETF term +
-/// the filter term. The OETF term is at most 1.3e-4 LSB over `o ∈ [0, 1]` — below what an 8-bit
-/// display can resolve — so it is pinned here, by the unit tests, not by a display.
+/// the filter term. The OETF term is at most 1.3e-4 LSB over `o ∈ [0, 1]`, smaller than the margin
+/// by which `post_eval_cli.rs`'s displays clear the floor, so it is pinned here, by the unit tests,
+/// not by a display.
 fn channel_bound(o: f32, filter: f64) -> f64 {
     ROUNDING_FLOOR_LSB + oetf_bound_lsb(o) + filter
 }
@@ -444,8 +448,9 @@ mod tests {
 
     /// **`eval`'s per-channel bound expression** (triage r2 G2): the rounding floor, E0's OETF term
     /// and the filter term, summed. The OETF term is in it (positive at `o = 1`, where it is
-    /// largest) and stays under 2e-4 LSB over `o ∈ [0, 1]`, below what an 8-bit display resolves,
-    /// so this is where it is pinned; the floor itself is pinned by displays (`post_eval_cli.rs`).
+    /// largest) and stays under 2e-4 LSB over `o ∈ [0, 1]`, smaller than the margin by which
+    /// `post_eval_cli.rs`'s displays clear the floor, so this is where it is pinned; the floor
+    /// itself is pinned by those displays.
     #[test]
     fn the_channel_bound_is_the_floor_plus_the_oetf_and_filter_terms() {
         let top = channel_bound(1.0, 0.0) - ROUNDING_FLOOR_LSB;
