@@ -4,6 +4,8 @@
 //!
 //! - [`eval_passes_the_display_its_words_made`] — a display the traced body made under a word set
 //!   passes `eval` under those words;
+//! - [`eval_floor_admits_the_far_neighbour_and_refuses_one_code_past_it`] — the display at the other
+//!   code the UNORM store may return passes, one code past it fails everywhere;
 //! - [`another_curve_word_fails_on_most_pixels`] — the same display under another tonemap word
 //!   fails on > 90 % of its pixels;
 //! - [`a_display_that_ignored_exposure_ratio_fails_where_it_is_not_one`] — and its control;
@@ -145,6 +147,90 @@ fn eval_passes_the_display_its_words_made() {
     let o = eval(w, &scene, &display);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     assert!(text(&o).contains(&format!("{} pixels, 0 over their bound", W * H)), "{}", text(&o));
+}
+
+/// The display whose every channel is the code `pick` chooses for the body's value `v = 255·o` (`o`
+/// the traced body's output under `w`, unclamped; the product in f64, exact for an f32), with the
+/// smallest and largest per-channel distance over the frame in LSB, measured as `eval` measures it.
+fn display_picked(w: [u32; 8], scene: &[[f32; 4]], pick: impl Fn(f64) -> f64) -> (Vec<u8>, f64, f64) {
+    let p = eval_params(w);
+    let tex = HostTex2::new(scene, W, H);
+    let mut out = Vec::with_capacity((W * H * 4) as usize);
+    let (mut lo, mut hi) = (f64::INFINITY, 0.0f64);
+    for y in 0..H {
+        for x in 0..W {
+            let o = post_final_eval([x, y], &p, tex);
+            for &oc in &o[..3] {
+                let v = 255.0 * f64::from(oc);
+                assert!((0.0..=255.0).contains(&v), "PREMISE: the body's value {oc} at ({x}, {y}) is a display value");
+                let code = pick(v);
+                assert!((0.0..=255.0).contains(&code), "PREMISE: code {code} for v = {v} is a byte");
+                let byte = code as u8;
+                let d = 255.0 * f64::from((f32::from(byte) / 255.0 - oc).abs());
+                lo = lo.min(d);
+                hi = hi.max(d);
+                out.push(byte);
+            }
+            out.push(255);
+        }
+    }
+    (out, lo, hi)
+}
+
+/// The integer nearest `v` that round-to-nearest does NOT pick — the other code Vulkan's float →
+/// UNORM conversion may return (it returns ONE OF the two integers nearest `v`;
+/// `hdr_branch_fixtures.rs`'s `constant8`, triage r1 F3) — and `v` itself when `v` is integral.
+fn far_neighbour(v: f64) -> f64 {
+    if v.round() == v.floor() { v.ceil() } else { v.floor() }
+}
+
+/// One code past [`far_neighbour`], away from the nearest code: `2 − |v − round(v)|` ≥ 1.5 LSB from
+/// `v`. Toward the range's interior when `v` is integral; mirrored (`2 + |v − round(v)|`) where it
+/// would leave `[0, 255]`.
+fn past_far_neighbour(v: f64) -> f64 {
+    let n = v.round();
+    let s = if v > n {
+        1.0
+    } else if v < n {
+        -1.0
+    } else if n < 128.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    let c = n + 2.0 * s;
+    if (0.0..=255.0).contains(&c) { c } else { n - 2.0 * s }
+}
+
+/// **`eval`'s rounding floor is one display code** (triage r2 G2). The display at the OTHER code the
+/// float → UNORM store may return passes: every channel is under one code from the body, most of
+/// them more than half a code. The display one code past that neighbour fails on every pixel: every
+/// channel is at least 1.5 codes away. So a floor below the far display's largest distance reds
+/// here, and so does one at the past display's distances (16 LSB passed all five tests before).
+/// `eval`'s other terms are not a display's to pin: E0's OETF term is at most 1.3e-4 LSB, below 8-bit
+/// resolution (`post_eval.rs`'s unit tests pin it), and no row here is filtered.
+#[test]
+fn eval_floor_admits_the_far_neighbour_and_refuses_one_code_past_it() {
+    let dir = scratch("eval_floor");
+    let w = words(post::TONEMAP_ACES, 1.0);
+    let (scene, _) = fixture(&dir, w);
+    let texels = scene_texels();
+
+    let (far, _, far_hi) = display_picked(w, &texels, far_neighbour);
+    assert!(far_hi < 1.0 && far_hi > 0.9, "PREMISE: the far display comes within 0.1 code of the floor: max {far_hi}");
+    let far_path = dir.join("display_far.bin");
+    write_dump(&far_path, pixfmt::VK_FORMAT_R8G8B8A8_UNORM, W, H, &far);
+    let o = eval(w, &scene, &far_path);
+    assert_eq!(o.status.code(), Some(0), "the other permitted code (up to {far_hi:.4} LSB) must pass: {}", text(&o));
+    assert!(text(&o).contains(&format!("{} pixels, 0 over their bound", W * H)), "{}", text(&o));
+
+    let (past, past_lo, _) = display_picked(w, &texels, past_far_neighbour);
+    assert!(past_lo > 1.5 - 1e-4, "PREMISE: every channel is one code past the far neighbour: min {past_lo}");
+    let past_path = dir.join("display_past.bin");
+    write_dump(&past_path, pixfmt::VK_FORMAT_R8G8B8A8_UNORM, W, H, &past);
+    let o = eval(w, &scene, &past_path);
+    assert_eq!(o.status.code(), Some(1), "one code past the far neighbour (>= {past_lo:.4} LSB) must fail: {}", text(&o));
+    assert_eq!(failing_frac(&o), 1.0, "every pixel must fail: {}", text(&o));
 }
 
 #[test]

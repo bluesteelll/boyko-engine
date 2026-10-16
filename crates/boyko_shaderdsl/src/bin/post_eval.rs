@@ -209,6 +209,19 @@ fn eval_px(px: [u32; 2], words: [u32; 8], rows: &[(&'static PostBinding, Loaded)
     cell.get()
 }
 
+/// The rounding floor of `eval`'s per-channel bound (D-T2's "1 LSB"), in display LSB. The
+/// float → UNORM store may return either integer nearest `255·o`, so a spec-compliant display sits
+/// under one code from the body's value; one code past that neighbour is at least 1.5 LSB away.
+/// `post_eval_cli.rs` pins the floor between the two (triage r2 G2).
+const ROUNDING_FLOOR_LSB: f64 = 1.0;
+
+/// `eval`'s bound for one channel whose body value is `o`: the rounding floor + E0's OETF term +
+/// the filter term. The OETF term is at most 1.3e-4 LSB over `o ∈ [0, 1]` — below what an 8-bit
+/// display can resolve — so it is pinned here, by the unit tests, not by a display.
+fn channel_bound(o: f32, filter: f64) -> f64 {
+    ROUNDING_FLOOR_LSB + oetf_bound_lsb(o) + filter
+}
+
 /// E0's bound on the OETF's `pow`, in display LSB, for a display value `o` (`x = o^(1/g)`).
 fn oetf_bound_lsb(o: f32) -> f64 {
     let g = f64::from(OETF_GAMMA_EXP);
@@ -264,7 +277,7 @@ fn cmd_eval(a: &Args) -> Result<(usize, usize, f64), String> {
             let mut bad = false;
             for c in 0..3 {
                 let d = 255.0 * f64::from((dev[c] - host[c]).abs());
-                let bound = 1.0 + oetf_bound_lsb(host[c]) + filter_term([x, y], a, &rows, host);
+                let bound = channel_bound(host[c], filter_term([x, y], a, &rows, host));
                 if d > bound {
                     bad = true;
                     worst = worst.max(d - bound);
@@ -427,6 +440,24 @@ mod tests {
         // The wrong unit, for contrast: the same bias applied in UV units moves the tap by 4 texels.
         let uv_unit = (sampled(t.with_subtexel_bias([e * w as f32, 0.0]), px)[0] - exact[0]).abs();
         assert!(uv_unit >= (shifted[0] - exact[0]).abs(), "a UV-unit bias admits the one-texel shift");
+    }
+
+    /// **`eval`'s per-channel bound expression** (triage r2 G2): the rounding floor, E0's OETF term
+    /// and the filter term, summed. The OETF term is in it (positive at `o = 1`, where it is
+    /// largest) and stays under 2e-4 LSB over `o ∈ [0, 1]`, below what an 8-bit display resolves,
+    /// so this is where it is pinned; the floor itself is pinned by displays (`post_eval_cli.rs`).
+    #[test]
+    fn the_channel_bound_is_the_floor_plus_the_oetf_and_filter_terms() {
+        let top = channel_bound(1.0, 0.0) - ROUNDING_FLOOR_LSB;
+        assert!(top > 1e-5, "E0's OETF term must be in the bound: {top} LSB at o = 1");
+        for i in 0..=1000 {
+            let o = i as f32 / 1000.0;
+            let t = channel_bound(o, 0.0) - ROUNDING_FLOOR_LSB;
+            assert!((0.0..2e-4).contains(&t), "the OETF term at o = {o} is {t} LSB, outside [0, 2e-4)");
+        }
+        assert_eq!(channel_bound(0.0, 0.0), ROUNDING_FLOOR_LSB, "no OETF term at o = 0");
+        let f = 0.375;
+        assert!((channel_bound(0.5, f) - channel_bound(0.5, 0.0) - f).abs() < 1e-12, "the filter term adds");
     }
 
     /// A zero bias is the unbiased path, bit for bit.
