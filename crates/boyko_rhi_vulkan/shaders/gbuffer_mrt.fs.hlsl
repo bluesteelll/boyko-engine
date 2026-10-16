@@ -208,7 +208,38 @@ float2 pack_material_id_ba(uint id) {
     // === GENERATED pack_material_id_ba END ===
 }
 
-PsOut main(PsIn input) {
+// --- RD6 / D-DS: the per-batch face word -------------------------------------------------------
+//
+// The fragment reads the SAME 88-byte push block the vertex stage declares (the pipeline's push
+// range is `VERTEX | FRAGMENT`): `use_model_matrix` is a bitfield — bit 0 the instanced arm,
+// bits 2-3 the batch's mesh-face class (`boyko_rhi::enums::MESH_FACE_*`), OR-ed in per batch by
+// the recorder. `mesh_face_flip` (generated from `boyko_shaderdsl::face`) negates the shading
+// normal of a double-sided material's back face (glTF 2.0 "Double Sided"); a single-sided batch
+// (no face bit — every draw before RD6) takes the select's untouched arm.
+struct PushConstants {
+    float4x4 view_proj;        // the VS's projection (unread here)
+    float4   cam_eye;          // the VS's eye + camera mode (unread here; forwarded as varyings)
+    uint     base_instance;    // the VS's SSBO bucket base (unread here)
+    uint     use_model_matrix; // bit 0 the instanced arm; bits 2-3 the batch's mesh-face class
+};
+[[vk::push_constant]] PushConstants pc;
+
+// === GENERATED mesh_face_consts BEGIN === (boyko_shaderdsl::face)
+static const uint MESH_FACE_DOUBLE_SIDED_SHIFT = 2u;
+static const uint MESH_FACE_MIRRORED_SHIFT = 3u;
+static const uint MESH_FACE_DOUBLE_SIDED = 1u << MESH_FACE_DOUBLE_SIDED_SHIFT;
+static const uint MESH_FACE_MIRRORED = 1u << MESH_FACE_MIRRORED_SHIFT;
+// === GENERATED mesh_face_consts END ===
+
+// === GENERATED mesh_face_flip BEGIN === (boyko_shaderdsl::face)
+uint mesh_face_flip(uint front_ccw, uint face) {
+    uint mirrored = face >> MESH_FACE_MIRRORED_SHIFT;
+    uint hidden = (front_ccw ^ mirrored) ^ 1u;
+    return face >> MESH_FACE_DOUBLE_SIDED_SHIFT & hidden & 1u;
+}
+// === GENERATED mesh_face_flip END ===
+
+PsOut main(PsIn input, bool is_front : SV_IsFrontFace) {
     PsOut output;
     // gAlbedo: RAW LINEAR base color (saturated to the UNORM range), alpha 1.
     // F8+ (owner: material-drives-albedo-too): the PER_INSTANCE_MATERIAL variant sources
@@ -273,6 +304,9 @@ PsOut main(PsIn input) {
         n = normalize(T * n_ts.x + B * n_ts.y + N * n_ts.z);
     }
 #endif
+    // RD6 / D-DS: the FINAL shading normal (after the TEXTURED TBN block) of a double-sided
+    // back face is negated before the encode.
+    n = (mesh_face_flip((uint)is_front, pc.use_model_matrix) != 0u) ? -n : n;
     float2 oct = oct_encode(n);
     // Asset-streaming plan F8: the PER_INSTANCE_MATERIAL variant packs the REAL
     // per-instance id (already CPU OOB-clamped, F8 §4.2); the base compile keeps the

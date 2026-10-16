@@ -732,13 +732,27 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # The orchestrator blesses the remaining leg via
 # `scripts\golden.ps1 -Pin vb_both_sdf_tex -Hwrt -Bless` AFTER the owner's visual sign-off.
 # Do NOT invent hashes.
+#
+# D-DS MOVED THESE BYTES BY 4 PIXELS AT 1/255 (render-wave lane u/render-rd2-rd6, RD6 commit D-3
+# d0407fc2; re-blessed 2026-10-15 on the msvc host, the cut's Q3 class). D-3 re-wound every clockwise
+# mesh fixture to the glTF convention -- the shared sv0_scene sphere mesh among them -- by swapping each
+# triangle's 2nd and 3rd index (the provoking vertex and the tangents are unchanged), so a few
+# fragments interpolate their attributes in the other vertex order and round one quantization step
+# differently. Bisected on the software leg (triage r1): 0dac974f renders the old bytes, d0407fc2
+# alone moves them, and neither 8d2496de (the facing leaves) nor 54c30a05 (the cull switch) nor the
+# fix-r1 gather change moves a byte. Re-blessed on that measurement, NOT on a visual check (AD-19's
+# per-pixel bound, <= 1 LSB and <= 0.1 % changed): 4 of 262144 px changed, delta histogram {1: 4},
+# at (354, 279), (380, 275), (7, 261), (360, 249) (x, y from the top). software 2f4de390 -> 6c3fcd4a.
+# Command, from D:\wt\render: scripts\golden.ps1 -Pin vb_both_sdf_tex -Bless. `sha256_hwrt` stays
+# PENDING (its first bless is the orchestrator's, after the owner's visual sign-off); the hwrt leg
+# rendered the same bytes as this software leg on the re-bless tree (6c3fcd4a).
 crate           = "boyko-app"
 test_binary     = "vb_both_sdf_tex"
 test_name       = "vb_both_sdf_tex_screenshot_dump"
 bmp             = "D:\\tmp\\vb_both_sdf_tex.bmp"
 width           = 512
 height          = 512
-sha256_software = "2f4de3909240bc737c8a696fa7a5e4cf161f1d320559a1f0b933362df9133970"
+sha256_software = "6c3fcd4ad5d6fb5b4f2e70e32a1d1949353ac548787bb9294c046397cd2fec2e"
 sha256_hwrt     = "PENDING"
 
 [vb_both_sdf_tex.env]
@@ -810,14 +824,27 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # relief this golden exists to prove. sha256_hwrt EQUALS sha256_software here: the scene has no
 # shadow receivers (no ground plane), so the ray backend has nothing to change -- kept as its own
 # pin so a future scene edit cannot silently drop the HW-RT leg's coverage.
+#
+# D-DS MOVED THESE BYTES BY 4 PIXELS AT 1/255 (render-wave lane u/render-rd2-rd6, RD6 commit D-3
+# d0407fc2; re-blessed 2026-10-15 on the msvc host, the cut's Q3 class). D-3 re-wound every clockwise
+# mesh fixture to the glTF convention -- the five-sphere scene's uv_sphere among them -- by swapping each
+# triangle's 2nd and 3rd index (the provoking vertex and the tangents are unchanged), so a few
+# fragments interpolate their attributes in the other vertex order and round one quantization step
+# differently. Bisected on the software leg (triage r1): 0dac974f renders the old bytes, d0407fc2
+# alone moves them, and neither 8d2496de (the facing leaves) nor 54c30a05 (the cull switch) nor the
+# fix-r1 gather change moves a byte. Re-blessed on that measurement, NOT on a visual check (AD-19's
+# per-pixel bound, <= 1 LSB and <= 0.1 % changed): 4 of 262144 px changed, delta histogram {1: 4},
+# at (354, 279), (380, 275), (7, 261), (360, 249) (x, y from the top). software 5d8f8854 -> a75167d1, hwrt 5d8f8854 -> a75167d1.
+# sha256_hwrt still EQUALS sha256_software (the same bytes on both legs, before and after). Commands,
+# from D:\wt\render: scripts\golden.ps1 -Pin vb_mesh_tex -Bless; scripts\golden.ps1 -Pin vb_mesh_tex -Hwrt -Bless.
 crate           = "boyko-app"
 test_binary     = "vb_mesh_tex"
 test_name       = "vb_mesh_tex_screenshot_dump"
 bmp             = "D:\\tmp\\vb_mesh_tex.bmp"
 width           = 512
 height          = 512
-sha256_software = "5d8f8854cfb123d14d04c2cc0977364714a1916e2314ccb9248956e6456092b6"
-sha256_hwrt     = "5d8f8854cfb123d14d04c2cc0977364714a1916e2314ccb9248956e6456092b6"
+sha256_software = "a75167d13f4acfd49695b0ae0625615b0fc212a5e0a754f8e0389a4ef0ceb297"
+sha256_hwrt     = "a75167d13f4acfd49695b0ae0625615b0fc212a5e0a754f8e0389a4ef0ceb297"
 
 [vb_mesh_tex.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1256,14 +1283,27 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # device, confirmed byte-identical to each other, and blessed to that ONE shared hash. The
 # sha256_* values below are the real bless output -- this file's only mechanically-checked
 # unblessed sentinel is the literal "PENDING", which they are not.
+#
+# D-DS MOVED THESE BYTES BY 1 PIXEL AT 1/255 (render-wave lane u/render-rd2-rd6, RD6 commit D-3
+# d0407fc2; re-blessed 2026-10-15 on the msvc host, the cut's Q3 class). D-3 re-wound every clockwise
+# mesh fixture to the glTF convention -- the five-sphere [vb_mesh] scene's uv_sphere among them -- by swapping each
+# triangle's 2nd and 3rd index (the provoking vertex and the tangents are unchanged), so a few
+# fragments interpolate their attributes in the other vertex order and round one quantization step
+# differently. Bisected on the software leg (triage r1): 0dac974f renders the old bytes, d0407fc2
+# alone moves them, and neither 8d2496de (the facing leaves) nor 54c30a05 (the cull switch) nor the
+# fix-r1 gather change moves a byte. Re-blessed on that measurement, NOT on a visual check (AD-19's
+# per-pixel bound, <= 1 LSB and <= 0.1 % changed): 1 of 262144 px changed, delta histogram {1: 1},
+# at (133, 277) (x, y from the top). software fb220ff3 -> 3b2896ed, hwrt fb220ff3 -> 3b2896ed.
+# sha256_hwrt still EQUALS sha256_software (the same bytes on both legs, before and after). Commands,
+# from D:\wt\render: scripts\golden.ps1 -Pin vb_mesh_froxel -Bless; scripts\golden.ps1 -Pin vb_mesh_froxel -Hwrt -Bless.
 crate           = "boyko-app"
 test_binary     = "vb_mesh_froxel"
 test_name       = "vb_mesh_froxel_screenshot_dump"
 bmp             = "D:\\tmp\\vb_mesh_froxel.bmp"
 width           = 512
 height          = 512
-sha256_software = "fb220ff30f16658e8efa165db2c822263253274a17006c5ecf66ad19414d86ba"
-sha256_hwrt     = "fb220ff30f16658e8efa165db2c822263253274a17006c5ecf66ad19414d86ba"
+sha256_software = "3b2896ed5e478832b2178a31cbdffe323103839432aff95038397ab1ced8fb06"
+sha256_hwrt     = "3b2896ed5e478832b2178a31cbdffe323103839432aff95038397ab1ced8fb06"
 
 [vb_mesh_froxel.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1298,14 +1338,27 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # device, confirmed byte-identical to each other, and blessed to that ONE shared hash. The
 # sha256_* values below are the real bless output -- this file's only mechanically-checked
 # unblessed sentinel is the literal "PENDING", which they are not.
+#
+# D-DS MOVED THESE BYTES BY 3 PIXELS AT 1/255 (render-wave lane u/render-rd2-rd6, RD6 commit D-3
+# d0407fc2; re-blessed 2026-10-15 on the msvc host, the cut's Q3 class). D-3 re-wound every clockwise
+# mesh fixture to the glTF convention -- the five-sphere scene's uv_sphere among them -- by swapping each
+# triangle's 2nd and 3rd index (the provoking vertex and the tangents are unchanged), so a few
+# fragments interpolate their attributes in the other vertex order and round one quantization step
+# differently. Bisected on the software leg (triage r1): 0dac974f renders the old bytes, d0407fc2
+# alone moves them, and neither 8d2496de (the facing leaves) nor 54c30a05 (the cull switch) nor the
+# fix-r1 gather change moves a byte. Re-blessed on that measurement, NOT on a visual check (AD-19's
+# per-pixel bound, <= 1 LSB and <= 0.1 % changed): 3 of 262144 px changed, delta histogram {1: 3},
+# at (182, 267), (37, 248), (435, 236) (x, y from the top). software 6d7ea00d -> 1c5d2fb4, hwrt 6d7ea00d -> 1c5d2fb4.
+# sha256_hwrt still EQUALS sha256_software (the same bytes on both legs, before and after). Commands,
+# from D:\wt\render: scripts\golden.ps1 -Pin vb_mesh_tex_froxel -Bless; scripts\golden.ps1 -Pin vb_mesh_tex_froxel -Hwrt -Bless.
 crate           = "boyko-app"
 test_binary     = "vb_mesh_tex_froxel"
 test_name       = "vb_mesh_tex_froxel_screenshot_dump"
 bmp             = "D:\\tmp\\vb_mesh_tex_froxel.bmp"
 width           = 512
 height          = 512
-sha256_software = "6d7ea00d35c8e77156cb1124d291edcd98209f5124878d7aa459feae81701c23"
-sha256_hwrt     = "6d7ea00d35c8e77156cb1124d291edcd98209f5124878d7aa459feae81701c23"
+sha256_software = "1c5d2fb436bd76e35d9c4c299f8c8cd619bd8b19331a76ffed215835814afd17"
+sha256_hwrt     = "1c5d2fb436bd76e35d9c4c299f8c8cd619bd8b19331a76ffed215835814afd17"
 
 [vb_mesh_tex_froxel.env]
 BOYKO_DISABLE_VALIDATION = "1"

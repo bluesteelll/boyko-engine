@@ -245,6 +245,10 @@ pub mod mesh_data;
 /// half of the per-batch draw cull, and the oracle its GPU half is compared against.
 pub mod frustum;
 pub mod mesh_draw;
+/// RD6 / D-DS: the per-instance mesh-face class ([`mesh_face_bits`](mesh_face::mesh_face_bits) —
+/// glTF `doubleSided` and the mirrored-transform bit) and the winding census against the
+/// counter-clockwise convention.
+pub mod mesh_face;
 /// HW-RT rung 3b + TAA W3 — the camera view-proj carry for temporal reprojection
 /// ([`MotionCam`](motion_cam::MotionCam) UBO + [`MotionCamState`](motion_cam::MotionCamState)
 /// persist Resource). Un-walled from `#[cfg(feature = "hwrt")]` (TAA W3): the resolve's
@@ -345,6 +349,10 @@ pub mod render3d_plugin;
 /// through, drained by [`retire_deferred_frees`](asset_refcount::retire_deferred_frees)
 /// on the same fence horizon as every other F6/F7 device-free.
 pub mod retired_gpu_buffers;
+/// RD2 / TRANSPARENCY R0a — the structural route markers
+/// ([`Translucent`](route::Translucent), [`AlphaMasked`](route::AlphaMasked)) the glb spawn path
+/// derives from [`Material::route`](material::Material::route).
+pub mod route;
 /// HW-RT Rung 3a Step 1 — the ECS-native shadow-denoise config
 /// ([`ShadowDenoiseConfig`](shadow_denoise_config::ShadowDenoiseConfig) +
 /// [`ResolvedShadowDenoise`](shadow_denoise_config::ResolvedShadowDenoise) Resources + the pure
@@ -611,8 +619,10 @@ pub use light_system::{
 pub use gbuffer_depth::{GBUFFER_T_MAX, assert_gbuffer_marcher_t_max_agree, mesh_view_t_norm};
 pub use loaders::{ObjMeshLoader, PngTextureLoader, RonMaterialLoader};
 pub use material::{
-    MATERIAL_FLAG_TEXTURED, MATERIAL_GPU_WORDS, Material, MaterialGpu, MaterialId, MaterialTextures,
+    AlphaMode, BlendClass, MATERIAL_FLAG_TEXTURED, MATERIAL_GPU_WORDS, Material, MaterialGpu,
+    MaterialId, MaterialRoute, MaterialTextures, MaterialX,
 };
+pub use route::{AlphaMasked, Translucent};
 pub use material_table::MaterialTable;
 pub use material_upload::{MATERIAL_ROW_BYTES, MaterialUploadStaging, stage_material_edits};
 pub use mesh::{MeshGpu, U16_INDEX_VERTEX_LIMIT, VERTEX_STRIDE as MESH_VERTEX_STRIDE, Vertex};

@@ -293,7 +293,8 @@ mod vb_lab {
 
     /// The index buffer for [`annex_vertices`].
     fn annex_indices() -> Vec<u32> {
-        vec![0, 1, 2]
+        // RD6 / D-DS: counter-clockwise about the up normal (the engine's front, glTF's).
+        vec![0, 2, 1]
     }
 
     /// The §8 R4 gate: BOTH scenes' generated fns are legal systems over the REAL engine API, and

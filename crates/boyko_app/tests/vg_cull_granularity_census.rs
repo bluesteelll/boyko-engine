@@ -238,6 +238,7 @@ fn build_arrangement(assets: &[PlacedAsset]) -> Arrangement {
             index_type: IndexType::Uint32,
             base_instance: base,
             instance_count: ring.len() as u32 - base,
+            face: 0,
         });
     }
     Arrangement { ring, batches, ring_slot, ring_asset }

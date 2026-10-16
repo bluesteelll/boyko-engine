@@ -341,6 +341,7 @@ mod tests {
             index_type: boyko_rhi::IndexType::Uint16,
             base_instance: base,
             instance_count: 1,
+            face: 0,
         };
 
         assert_eq!(
@@ -556,6 +557,7 @@ mod tests {
             index_type: boyko_rhi::IndexType::Uint16,
             base_instance: 0,
             instance_count: 3,
+            face: 0,
         };
         assert_eq!(
             batch_instance_count_after_cull(&planes, &batch, &ring, Some(UNIT_CUBE)),

@@ -176,11 +176,22 @@ enum Worker {
     /// RD1 (R0b): `Deferred × Both` with particles armed — the `LESS` merge pipeline and the
     /// `SHADER_READ_ONLY → DEPTH_ATTACHMENT` transition the merge now takes over from the draw.
     DeferredSdfParticles,
+    /// RD6 (D-DS): `Deferred × Mesh` with single-sided, double-sided, mirrored single-sided and
+    /// mirrored double-sided instances, all casting under the sun and the point / spot lights —
+    /// every camera-view and caster cull member bound mid-pass, and the fragment push read.
+    DdsDeferred,
+    /// RD6 (D-DS): the same scene on `Forward × Mesh`.
+    DdsForward,
+    /// RD6 (D-DS): the same scene on `ForwardPlus × Mesh` (the prepass and EQUAL members).
+    DdsForwardPlus,
+    /// RD6 (D-DS): the same scene on `VisibilityBuffer × Mesh` (the `vb_raster` members and the
+    /// fetch's face bits).
+    DdsVb,
 }
 
 impl Worker {
     /// Spawn order: the canary first, so a deaf oracle is the first line of the report.
-    const ALL: [Worker; 9] = [
+    const ALL: [Worker; 13] = [
         Worker::Canary,
         Worker::VbFroxel,
         Worker::ForwardBoth,
@@ -190,6 +201,10 @@ impl Worker {
         Worker::ForwardSdfParticles,
         Worker::VbSdfParticles,
         Worker::DeferredSdfParticles,
+        Worker::DdsDeferred,
+        Worker::DdsForward,
+        Worker::DdsForwardPlus,
+        Worker::DdsVb,
     ];
 
     /// The `#[test]` fn name the driver passes to `--exact`.
@@ -204,6 +219,10 @@ impl Worker {
             Worker::ForwardSdfParticles => "boot_validation_worker_forward_sdf_particles",
             Worker::VbSdfParticles => "boot_validation_worker_vb_sdf_particles",
             Worker::DeferredSdfParticles => "boot_validation_worker_deferred_sdf_particles",
+            Worker::DdsDeferred => "boot_validation_worker_dds_deferred",
+            Worker::DdsForward => "boot_validation_worker_dds_forward",
+            Worker::DdsForwardPlus => "boot_validation_worker_dds_forward_plus",
+            Worker::DdsVb => "boot_validation_worker_dds_vb",
         }
     }
 
@@ -339,6 +358,36 @@ fn shared_scene(
     spawn_camera(&mut commands);
 }
 
+/// RD6 (D-DS): the face classes on top of the shared scene — a double-sided card, a mirrored
+/// single-sided cube and a mirrored double-sided card, all casting — so every camera-view and
+/// caster cull member is bound in one frame (the shared scene's cubes are the single-sided class).
+#[allow(clippy::needless_pass_by_value)]
+fn dds_extras(
+    mut commands: Commands,
+    mut meshes: NonSendResMut<Assets<MeshGpu>>,
+    mut materials: ResMut<Assets<Material>>,
+    mut geo_table: NonSendResMut<MeshGeometryTableSlot>,
+    dev: NonSendRes<GpuDevice>,
+) {
+    let (card, cube) = match geo_table.0.as_mut() {
+        Some(table) => (meshes.plane_vb(dev.get(), 1.2, table), meshes.cube_vb(dev.get(), 0.8, table)),
+        None => (meshes.plane(dev.get(), 1.2), meshes.cube(dev.get(), 0.8)),
+    };
+    let mut ds = Material::new([0.7, 0.75, 0.8, 1.0], 0.0, 0.5, 0.5, [0.0; 3], 0);
+    ds.double_sided = true;
+    let ds = MaterialHandle::from_handle(materials.add(ds));
+    let upright = Quat::new(core::f32::consts::FRAC_1_SQRT_2, 0.0, 0.0, core::f32::consts::FRAC_1_SQRT_2);
+    let mirror = Vec3::new(-1.0, 1.0, 1.0);
+    let mut b = MeshBundle::new(card, Transform { translation: Vec3::new(-1.5, 1.0, 1.5), rotation: upright, scale: Vec3::ONE });
+    b.material = ds;
+    commands.spawn(b).insert(ShadowCaster);
+    let b = MeshBundle::new(cube, Transform { translation: Vec3::new(1.5, 0.6, 1.5), rotation: Quat::IDENTITY, scale: mirror });
+    commands.spawn(b).insert(ShadowCaster);
+    let mut b = MeshBundle::new(card, Transform { translation: Vec3::new(0.0, 1.0, 2.0), rotation: upright, scale: mirror });
+    b.material = ds;
+    commands.spawn(b).insert(ShadowCaster);
+}
+
 /// A UV sphere with tangents (`vb_mesh_tex_froxel.rs::uv_sphere`'s generator) — the textured
 /// material needs real UVs and tangents to drive the textured VB shade.
 fn uv_sphere(radius: f32, stacks: u32, slices: u32) -> (Vec<Vertex>, Vec<u32>) {
@@ -364,7 +413,8 @@ fn uv_sphere(radius: f32, stacks: u32, slices: u32) -> (Vec<Vertex>, Vec<u32>) {
         for j in 0..slices {
             let a = i * stride + j;
             let b = (i + 1) * stride + j;
-            idx.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+            // RD6 / D-DS: counter-clockwise about the outward normal (the engine's front, glTF's).
+            idx.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
         }
     }
     generate_tangents(&mut verts, &idx);
@@ -517,6 +567,10 @@ fn run_worker(worker: Worker) {
     if particles {
         app.add_startup_system(sdf_particle_extras);
     }
+    let dds = matches!(worker, Worker::DdsDeferred | Worker::DdsForward | Worker::DdsForwardPlus | Worker::DdsVb);
+    if dds {
+        app.add_startup_system(dds_extras);
+    }
     app.add_plugins(EnginePlugins::window(name, 320, 240));
     // Configuration is inserted AFTER `add_plugins`, so it overwrites the plugins' defaults.
     if worker != Worker::Canary {
@@ -544,6 +598,18 @@ fn run_worker(worker: Worker) {
         }
         Worker::DeferredSdfParticles => {
             app.insert_resource(RenderPathConfig { path: RenderPath::Deferred, legs: GeometryLegs::Both });
+        }
+        Worker::DdsDeferred => {
+            app.insert_resource(RenderPathConfig { path: RenderPath::Deferred, legs: GeometryLegs::Mesh });
+        }
+        Worker::DdsForward => {
+            app.insert_resource(RenderPathConfig { path: RenderPath::Forward, legs: GeometryLegs::Mesh });
+        }
+        Worker::DdsForwardPlus => {
+            app.insert_resource(RenderPathConfig { path: RenderPath::ForwardPlus, legs: GeometryLegs::Mesh });
+        }
+        Worker::DdsVb => {
+            app.insert_resource(RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Mesh });
         }
     }
     if particles {
@@ -641,6 +707,16 @@ fn run_worker(worker: Worker) {
                 "Deferred with both legs",
                 resolved.path == RenderPath::Deferred && resolved.sdf_leg && resolved.mesh_leg,
             ),
+            Worker::DdsDeferred => ("Deferred, mesh leg", resolved.path == RenderPath::Deferred && resolved.mesh_leg),
+            Worker::DdsForward => ("Forward, mesh leg", resolved.path == RenderPath::Forward && resolved.mesh_leg),
+            Worker::DdsForwardPlus => (
+                "ForwardPlus with the depth prepass",
+                resolved.path == RenderPath::ForwardPlus && resolved.needs_depth_prepass,
+            ),
+            Worker::DdsVb => (
+                "VisibilityBuffer with the VB geometry table",
+                resolved.path == RenderPath::VisibilityBuffer && resolved.vb_geometry_table,
+            ),
             Worker::Canary => unreachable!("invariant: the canary took the branch above"),
         };
         assert!(
@@ -713,6 +789,30 @@ fn boot_validation_worker_vb_sdf_particles() {
 #[ignore = "gpu-windowed: worker spawned by every_validated_boot_is_clean; returns at once unless BOYKO_BOOT_VALIDATION_DRIVEN is set"]
 fn boot_validation_worker_deferred_sdf_particles() {
     run_worker(Worker::DeferredSdfParticles);
+}
+
+#[test]
+#[ignore = "gpu-windowed: worker spawned by every_validated_boot_is_clean; returns at once unless BOYKO_BOOT_VALIDATION_DRIVEN is set"]
+fn boot_validation_worker_dds_deferred() {
+    run_worker(Worker::DdsDeferred);
+}
+
+#[test]
+#[ignore = "gpu-windowed: worker spawned by every_validated_boot_is_clean; returns at once unless BOYKO_BOOT_VALIDATION_DRIVEN is set"]
+fn boot_validation_worker_dds_forward() {
+    run_worker(Worker::DdsForward);
+}
+
+#[test]
+#[ignore = "gpu-windowed: worker spawned by every_validated_boot_is_clean; returns at once unless BOYKO_BOOT_VALIDATION_DRIVEN is set"]
+fn boot_validation_worker_dds_forward_plus() {
+    run_worker(Worker::DdsForwardPlus);
+}
+
+#[test]
+#[ignore = "gpu-windowed: worker spawned by every_validated_boot_is_clean; returns at once unless BOYKO_BOOT_VALIDATION_DRIVEN is set"]
+fn boot_validation_worker_dds_vb() {
+    run_worker(Worker::DdsVb);
 }
 
 // ===============================================================================================
@@ -858,10 +958,10 @@ fn tail(path: &Path) -> String {
     out
 }
 
-/// **The driver.** Spawns the canary, then the eight path workers, each in its own process with the
-/// validation layer armed, and asserts once over all nine outcomes.
+/// **The driver.** Spawns the canary, then the twelve path workers, each in its own process with the
+/// validation layer armed, and asserts once over all thirteen outcomes.
 #[test]
-#[ignore = "gpu-windowed: live GPU gate; the driver arms VK_LAYER_KHRONOS_validation itself and spawns nine windowed workers; run with --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU gate; the driver arms VK_LAYER_KHRONOS_validation itself and spawns thirteen windowed workers; run with --test-threads=1"]
 fn every_validated_boot_is_clean() {
     let cwd = std::env::current_dir().expect("invariant: the test process has a working directory");
     let settings = cwd.join(LAYER_SETTINGS_FILE);
