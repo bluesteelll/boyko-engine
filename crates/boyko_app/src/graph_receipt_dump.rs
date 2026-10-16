@@ -44,10 +44,16 @@ pub(crate) const DEFAULT_SETTLE_FRAMES: u32 = 30;
 /// The longest burst — `host_dump`'s `MAX_BURST`.
 pub(crate) const MAX_BURST: u32 = 256;
 
-/// The most pass names one `[[frame]]` record keeps (twice [`FRAME_GRAPH_CAPACITY`]'s `max_pass`);
+/// The most pass names one `[[frame]]` record keeps (above [`FRAME_GRAPH_CAPACITY`]'s `max_pass` —
+/// twice OBS's 64, one third over render wave PX0's 96, asserted below);
 /// a frame declaring more is recorded with `pass_count` past the kept names, so the truncation is
 /// visible in the file.
 pub(crate) const MAX_RECORD_PASSES: usize = 128;
+
+const _: () = assert!(
+    MAX_RECORD_PASSES >= FRAME_GRAPH_CAPACITY.max_pass,
+    "a [[frame]] record must keep every pass name a capacity-sized frame declares"
+);
 
 /// The receipt's schema. Bumped whenever a key changes meaning, so a stale parser fails loudly.
 const SCHEMA_VERSION: u32 = 1;

@@ -1313,13 +1313,16 @@ unsafe fn destroy_partial_frames(
 /// boot, replacing the literal `(48, 32, 192)`.
 ///
 /// A FIRST-FRAME ALLOCATION HINT, not a bound: a frame past it regrows an arena once (cold) and is
-/// never incorrect. `max_res` covers VB under `hwrt` with every tail armed (53 resources, 69
-/// mip-weighted `(ResId, mip)` entries with the 17-level HZB pyramid) with headroom; `max_pass`
-/// and `max_acc` double the parent's literal. The cost is a one-time boot reservation of roughly
-/// 50 KB across the arenas (the access-sized ones dominate: five access columns plus the image
-/// and buffer barrier arenas at `max_acc`). The `BOYKO_GRAPH_RECEIPT` instrument prints each
-/// declarator's high-water marks beside these numbers; if a receipt shows a mark past one of
-/// them, raise the constant to that mark plus headroom in the same commit.
+/// never incorrect. OBS sized it at `(96, 64, 384)` on VB under `hwrt` with every tail armed (53
+/// resources, 69 mip-weighted `(ResId, mip)` entries with the 17-level HZB pyramid). Render wave
+/// PX0 (AD-12) raises `max_res` to 128 and `max_pass` to 96 — the render wave's projected top,
+/// counted mip-weighted (`post_chain`'s 6 levels, the capped refraction chain's 6, the HZB
+/// levels) — so no frame of the wave regrows an arena cold; `max_acc` stays at 384. The raise
+/// costs about 2 KB more of the one-time boot reservation (the access-sized arenas, which
+/// dominate it, do not move). The `BOYKO_GRAPH_RECEIPT` instrument prints each declarator's
+/// high-water marks beside these numbers (`obs_graph_receipt`, and PX0's every-declarator
+/// max-config set `px0_capacity_receipt`); if a receipt shows a mark past one of them, raise the
+/// constant to that mark plus headroom in the same commit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FrameGraphCapacity {
     /// Resources (the per-resource arenas; the sync arenas are mip-weighted past it).
@@ -1332,7 +1335,7 @@ pub struct FrameGraphCapacity {
 
 /// The reserve every [`Renderer`] boots its frame graph with (see [`FrameGraphCapacity`]).
 pub const FRAME_GRAPH_CAPACITY: FrameGraphCapacity =
-    FrameGraphCapacity { max_res: 96, max_pass: 64, max_acc: 384 };
+    FrameGraphCapacity { max_res: 128, max_pass: 96, max_acc: 384 };
 
 // --- OBS (R): the `BOYKO_GRAPH_RECEIPT` capture ---------------------------------------------
 
