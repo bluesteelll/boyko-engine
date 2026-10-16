@@ -182,8 +182,13 @@ function Find-Python {
 }
 
 # --- (5) the verdict: SHA-256 compare / bless, or the tolerance branch ----------------------
-# A function so -CompareOnly reaches it without the build and the render. `exit` inside it ends
-# the script with the verdict's code.
+# Functions so -CompareOnly reaches them without the build and the render; `exit` ends the script
+# with the verdict's code. Exit-Pass is BOTH branches' PASS: under -ValidationOn a message = exit 3.
+function Exit-Pass([string]$what) {
+    Write-Host "[golden] PASS - $Pin/$leg $what." -ForegroundColor Green
+    if ($ValidationOn -and $valCount -gt 0) { Write-Host "[golden] ...but the -ValidationOn scan found $valCount message(s) - FAILING the audit." -ForegroundColor Red; exit 3 }
+    exit 0
+}
 function Complete-Pin {
     if ($pins.ContainsKey("$Pin.tolerance.max_delta")) {
         $ref = $pins["$Pin.tolerance.reference_$leg"]
@@ -203,7 +208,7 @@ function Complete-Pin {
         Invoke-Native -Exe $py.Exe -Args $pyArgs -WorkDir $repoRoot
         $rc = $LASTEXITCODE
         switch ($rc) {
-            0 { Write-Host "[golden] PASS - $Pin/$leg within its tolerance block." -ForegroundColor Green; exit 0 }
+            0 { Exit-Pass 'within its tolerance block' }
             1 { Write-Host "[golden] FAIL - $Pin/$leg past max_delta / max_changed_frac." -ForegroundColor Red; exit 1 }
             4 { Write-Host "[golden] DEFECT - $Pin/$leg past max_delta_bound: a race or a lost barrier, NEVER re-bless." -ForegroundColor Red; exit 4 }
             default { Write-Host "[golden] ERROR - golden_diff.py pin exited $rc for $Pin/$leg." -ForegroundColor Red; exit 2 }
@@ -246,12 +251,7 @@ function Complete-Pin {
         exit 2
     }
     if ($actual -eq $expected) {
-        Write-Host "[golden] PASS - $Pin/$leg byte-identical." -ForegroundColor Green
-        if ($ValidationOn -and $valCount -gt 0) {
-            Write-Host "[golden] ...but the -ValidationOn scan found $valCount message(s) - FAILING the audit." -ForegroundColor Red
-            exit 3
-        }
-        exit 0
+        Exit-Pass 'byte-identical'
     } else {
         Write-Host "[golden] FAIL - $Pin/$leg MISMATCH" -ForegroundColor Red
         Write-Host "  expected: $expected" -ForegroundColor Red
