@@ -450,6 +450,95 @@ mod tests {
         assert!(fetches(row) && !filtered(row));
     }
 
+    /// A row of each kind `POST_FINAL_BINDINGS` has none of yet (PX2+ adds them): only a synthetic
+    /// row reaches `binding`'s `Buf` and `Tex3` arms before then.
+    const BUF_ROW: PostBinding = PostBinding {
+        name: "tWords",
+        kind: PostBindingKind::Buf,
+        set: 0,
+        binding: 3,
+        image_format: None,
+        dump: DumpSource::Resource("t_words"),
+    };
+    const TEX3_ROW: PostBinding = PostBinding {
+        name: "tVolume",
+        kind: PostBindingKind::Tex3Linear,
+        set: 0,
+        binding: 4,
+        image_format: None,
+        dump: DumpSource::Resource("t_volume"),
+    };
+
+    /// Writes an OBSD dump (header + texel bytes, the recorder's layout) to a scratch file.
+    fn scratch_dump(name: &str, header: dump::DumpHeader, texels: &[u8]) -> String {
+        let p = std::env::temp_dir().join(format!("boyko_post_eval_unit_{}_{name}.bin", std::process::id()));
+        let mut bytes = header.to_bytes().to_vec();
+        bytes.extend_from_slice(texels);
+        std::fs::write(&p, bytes).expect("the temp dir is writable");
+        p.display().to_string()
+    }
+
+    /// **The `Buf` and `Tex3` resolver arms on synthetic dumps** (`px0/cut.md` PX0-8; triage r1 W2):
+    /// a word-buffer dump and a 2×2×2 volume dump, written as the recorder writes them, load
+    /// through `load_words` / `load_image` (each refusing the other's dump), and `binding`
+    /// resolves them to `EvalBinding::Buf` (the words, in order) and `EvalBinding::Tex3` (the
+    /// volume; the sub-texel bias applied to the named row only).
+    #[test]
+    fn the_buf_and_tex3_resolver_arms_on_synthetic_dumps() {
+        let words: [u32; 5] = [7, 0xDEAD_BEEF, 0, 1, u32::MAX];
+        let wbytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let buf = dump::DumpHeader {
+            format: pixfmt::FORMAT_BUFFER,
+            width: wbytes.len() as u32,
+            height: 1,
+            mip: 0,
+            layers: 1,
+            frame: 0,
+            texel_bytes: 1,
+        };
+        let buf_path = scratch_dump("words", buf, &wbytes);
+        // Texel (x, y, z) = [x + 2y + 4z, 0.5, 0.25 z, 1]: exact in f32, distinct per texel.
+        let vol: Vec<[f32; 4]> = (0..8u32).map(|i| [i as f32, 0.5, 0.25 * (i / 4) as f32, 1.0]).collect();
+        let vbytes: Vec<u8> = vol.iter().flat_map(|t| t.iter().flat_map(|c| c.to_le_bytes())).collect();
+        let vh = dump::DumpHeader {
+            format: pixfmt::VK_FORMAT_R32G32B32A32_SFLOAT,
+            width: 2,
+            height: 2,
+            mip: 0,
+            layers: 2,
+            frame: 0,
+            texel_bytes: 16,
+        };
+        let vol_path = scratch_dump("volume", vh, &vbytes);
+
+        assert!(load_words(&vol_path).err().is_some_and(|e| e.contains("not a word buffer dump")));
+        assert!(load_image(&buf_path).err().is_some_and(|e| e.contains("a buffer dump where an image was expected")));
+        let rows = vec![
+            (&BUF_ROW, Loaded::Words(load_words(&buf_path).expect("the word dump loads"))),
+            (&TEX3_ROW, Loaded::Image(load_image(&vol_path).expect("the volume dump loads"))),
+        ];
+        let _ = std::fs::remove_file(&buf_path);
+        let _ = std::fs::remove_file(&vol_path);
+
+        match binding(&rows, &BUF_ROW, None) {
+            EvalBinding::Buf(w) => assert_eq!(w, &words[..]),
+            other => panic!("a Buf row resolved to {other:?}"),
+        }
+        // A texel centre returns that texel; half a texel of bias on x lands midway to the next one.
+        let centre = |i: u32| [(0.5 + (i % 2) as f32) / 2.0, (0.5 + (i / 2 % 2) as f32) / 2.0, (0.5 + (i / 4) as f32) / 2.0];
+        let sample = |b: EvalBinding<'_>, uvw: [f32; 3]| match b {
+            EvalBinding::Tex3(t) => t.sample_linear(uvw),
+            other => panic!("a Tex3Linear row resolved to {other:?}"),
+        };
+        for i in 0..8 {
+            assert_eq!(sample(binding(&rows, &TEX3_ROW, None), centre(i)), vol[i as usize], "texel {i}");
+        }
+        let half = sample(binding(&rows, &TEX3_ROW, Some(("tVolume", [0.5, 0.0, 0.0]))), centre(4));
+        assert_eq!(half, [4.5, 0.5, 0.25, 1.0], "the bias moves the named row's taps");
+        let other = sample(binding(&rows, &TEX3_ROW, Some(("gScene", [0.5, 0.0, 0.0]))), centre(4));
+        assert_eq!(other, vol[4], "a bias naming another row leaves this one unbiased");
+    }
+
     /// The argument parser refuses a short word list and a malformed bind, by name.
     #[test]
     fn the_parser_names_its_errors() {
