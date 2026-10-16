@@ -566,8 +566,47 @@ dependencies = [
  "boyko-utils",
  "boyko_sdf_math",
  "criterion",
- "mimalloc",
  "proptest",
+]
+
+[[package]]
+name = "boyko-physics-parity"
+version = "0.1.0"
+dependencies = [
+ "boyko-app",
+ "boyko-diag",
+ "boyko-ecs",
+ "boyko-macros",
+ "boyko-physics",
+ "boyko-threadpool",
+ "mimalloc",
+]
+
+[[package]]
+name = "boyko-physics-probe"
+version = "0.1.0"
+dependencies = [
+ "boyko-app",
+ "boyko-diag",
+ "boyko-ecs",
+ "boyko-fontbake",
+ "boyko-input",
+ "boyko-log",
+ "boyko-macros",
+ "boyko-math",
+ "boyko-memory",
+ "boyko-physics",
+ "boyko-render",
+ "boyko-scene",
+ "boyko-serialize",
+ "boyko-threadpool",
+ "boyko-ui",
+ "boyko-utils",
+ "boyko_image",
+ "boyko_rhi",
+ "boyko_rhi_vulkan",
+ "boyko_sdf_math",
+ "boyko_shaderdsl",
 ]
 
 [[package]]

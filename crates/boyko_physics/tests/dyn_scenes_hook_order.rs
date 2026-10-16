@@ -5,7 +5,7 @@
 //!
 //! Every harness applies a step's events (kicks, launches) between the previous step's readout and
 //! the next step's `Instant::now()`, so the timed pair holds the engine's step and nothing else
-//! (`benches/jolt_parity_pyramid/dyn_scenes.rs`'s module doc; the record,
+//! (`crates/boyko_physics_parity/src/bin/jolt_parity_pyramid/dyn_scenes.rs`'s module doc; the record,
 //! `docs/physics/perf-campaign/levers/scenes/01-DESIGN.md`). Where the hook sits changes no bit of
 //! the simulation. Tester r1's mutant O3 moved `before_step` after `let t0`; it passed all 12
 //! structural checks of `gate/ours_gates.sh` and kept the pose pin. The move changes only the
@@ -60,8 +60,8 @@ struct Harness {
 }
 
 const OURS: Harness = Harness {
-    name: "ours (benches/jolt_parity_pyramid.rs)",
-    path: "benches/jolt_parity_pyramid.rs",
+    name: "ours (crates/boyko_physics_parity/src/bin/jolt_parity_pyramid.rs)",
+    path: "../boyko_physics_parity/src/bin/jolt_parity_pyramid.rs",
     header: "for step in 0..args.steps {",
     pre: "d.before_step(step, &mut rig);",
     start: "let t0 = Instant::now();",

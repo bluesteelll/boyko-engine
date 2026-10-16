@@ -8812,7 +8812,7 @@ NOT contain KE16 — `feat/ecs-native-storage` carried the parity harness but no
 harness and the shipped pool in one tree, and BOTH engines were then measured in ONE window.
 
 **Protocol.** Jolt v5.3.0 `PerformanceTest.exe` (built here, MinGW, LTO) and
-`crates/boyko_physics/benches/jolt_parity_pyramid.rs` — the same 1240-body pyramid transcribed index for
+`benches/jolt_parity_pyramid.rs` of `boyko-physics` (at this entry's `ca582e72`; the file at that path moved to `crates/boyko_physics_parity/src/bin/` with IB P0r) — the same 1240-body pyramid transcribed index for
 index — interleaved BY W (Jolt W=1, boyko W=1, Jolt W=2, …), three passes, every bench binary built before
 the window, a load receipt before and after every timed region, `rustc 1.98.1 (48a229cea)`,
 `available_parallelism = 16` (SMT on 8 physical cores — W=16 is not 16 cores, for either engine). Pass 1

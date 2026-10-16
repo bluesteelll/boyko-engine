@@ -41,6 +41,8 @@ crate	crates/profile_fixture	unscanned	profiling test fixture; nothing depends o
 crate	crates/profile_fixture_log	unscanned	profiling test fixture; nothing depends on it
 crate	tools/prof_decode	unscanned	offline profile decoder; every row is compile-time and nothing depends on it
 crate	crates/boyko_symcensus	unscanned	UG-15 instrument (B3); dev-only - tests/dev_only_edge.rs keeps it out of every shipped graph, and nothing but boyko-macros' dev edge depends on it; reclassified from pending by B3, the rung that makes it a member (W5)
+crate	crates/boyko_physics_parity	unscanned	the Jolt parity runner (one [[bin]], a benchmark harness moved out of boyko_physics by IB P0r); nothing depends on it
+crate	crates/boyko_physics_probe	unscanned	IB's game-shaped probe (one [[bin]], the V11/V9 game stand-in); nothing depends on it
 include	crates/boyko_diag/src/profile.rs	concat ! (env ! ("OUT_DIR") , "/profile_axis.rs")	a build-script file under OUT_DIR, generated from the profile axis; no source walk can see it
 third-party	crates/boyko_ecs	fixedbitset	FixedBitSet is a vocabulary head (heap words)
 third-party	crates/boyko_ecs	crossbeam-queue	ArrayQueue and SegQueue are vocabulary heads
@@ -52,7 +54,6 @@ third-party	crates/boyko_ecs	loom	cfg(loom) model-checker shim: never in a shipp
 third-party	crates/boyko_threadpool	crossbeam-deque	Injector, Worker and Stealer are vocabulary heads
 third-party	crates/boyko_threadpool	crossbeam-utils	CachePadded only: no heap type
 third-party	crates/boyko_threadpool	loom	cfg(loom) model-checker shim: never in a shipped build
-third-party	crates/boyko_physics	mimalloc	optional allocator shim (feature `mimalloc`)
 third-party	crates/boyko_fontbake	ttf-parser	parses borrowed font bytes: no heap type crosses into our code
 third-party	crates/boyko_input	windows-sys	raw Win32 FFI: no heap type
 third-party	crates/boyko_rhi_vulkan	windows-sys	raw Win32 FFI: no heap type
