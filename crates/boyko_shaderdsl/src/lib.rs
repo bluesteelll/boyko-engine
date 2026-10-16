@@ -63,6 +63,8 @@ pub mod cf;
 pub mod cubic_hit;
 pub mod decl;
 pub mod depth;
+// Render wave PX0: the OBSD dump file and the pixel encodings / format step (OPEN-ITEMS #3).
+pub mod dump;
 pub mod face;
 pub mod field;
 pub mod half;
@@ -71,6 +73,7 @@ pub mod marcher;
 pub mod normal;
 pub mod oct;
 pub mod pack;
+pub mod pixfmt;
 pub mod particle;
 pub mod particle_facets;
 pub mod post;
