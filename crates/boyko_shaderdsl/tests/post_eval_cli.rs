@@ -9,7 +9,8 @@
 //! - [`a_display_that_ignored_exposure_ratio_fails_where_it_is_not_one`] — and its control;
 //! - [`a_missing_binding_is_a_named_error`] — exit 2 naming the row, never a zero texture;
 //! - [`bound_equals_the_hand_joint_forward_difference`] — `bound --steps 2` against the joint
-//!   forward difference computed here.
+//!   forward difference computed here, under three curve words, two of whose maxima sit at a
+//!   mixed-sign pattern.
 //!
 //! The synthetic scene is a B10G11R11 dump, the coarser of the two `lit` formats PX0 weighed.
 //! `bound` steps whatever encoding the dump's header names, not `post::LIT_STORAGE_FORMAT`
@@ -192,20 +193,21 @@ fn a_missing_binding_is_a_named_error() {
     assert!(text(&o).contains(named), "{}", text(&o));
 }
 
-/// The joint forward difference at `±steps` format steps, by hand: per pixel, the eight channel
-/// sign patterns applied to the CENTRE texel together (the footprint at
-/// `POST_FINAL_TAP_RADIUS = 0`), the largest display change over the three channels, maximised over
-/// pixels and patterns. `channels` restricts which channels a pattern perturbs (all three is the
-/// joint bound; one is the non-joint variant the test proves it can tell apart).
-fn hand_bound(w: [u32; 8], scene: &[[f32; 4]], steps: i32, channels: usize) -> f64 {
+/// The joint forward difference at `±steps` format steps, by hand, PER SIGN PATTERN: for each of
+/// the eight channel sign patterns (bit `c` set = channel `c` up) applied to the CENTRE texel (the
+/// footprint at `POST_FINAL_TAP_RADIUS = 0`), the largest display change over the three channels,
+/// maximised over pixels. `bound` is the maximum over the eight. `channels` restricts which
+/// channels a pattern perturbs (all three is the joint bound; one is the non-joint variant the
+/// test proves it can tell apart).
+fn hand_patterns(w: [u32; 8], scene: &[[f32; 4]], steps: i32, channels: usize) -> [f64; 8] {
     let p = eval_params(w);
-    let mut worst = 0.0f64;
+    let mut per = [0.0f64; 8];
     for y in 0..H {
         for x in 0..W {
             let i = (y * W + x) as usize;
             let c0 = scene[i];
             let base = post_final_eval([x, y], &p, HostTex2::new(scene, W, H));
-            for pattern in 0..8u32 {
+            for (pattern, worst) in per.iter_mut().enumerate() {
                 let mut s = scene.to_vec();
                 for c in 0..channels {
                     let k = if (pattern >> c) & 1 == 1 { steps } else { -steps };
@@ -215,13 +217,24 @@ fn hand_bound(w: [u32; 8], scene: &[[f32; 4]], steps: i32, channels: usize) -> f
                 }
                 let v = post_final_eval([x, y], &p, HostTex2::new(&s, W, H));
                 for c in 0..3 {
-                    worst = worst.max(255.0 * f64::from((v[c] - base[c]).abs()));
+                    *worst = worst.max(255.0 * f64::from((v[c] - base[c]).abs()));
                 }
             }
         }
     }
-    worst
+    per
 }
+
+/// The word sets `bound` is checked under (ratio 1), and whether the set's maximum must sit at a
+/// MIXED-sign pattern — neither all-down (0) nor all-up (7). Under ACES the maximum on this scene is
+/// pattern 0, so that set alone cannot see a `bound` that stops enumerating the mixed patterns
+/// (triage r2 G1); under Neutral and Reinhard-Jodie it is mixed (patterns 2/3 and 4), and a
+/// uniform-sign-only `bound` would print 34 % and 24 % low.
+const BOUND_CASES: [(&str, u32, bool); 3] = [
+    ("aces", post::TONEMAP_ACES, false),
+    ("neutral", post::TONEMAP_NEUTRAL, true),
+    ("reinhard_jodie", post::TONEMAP_REINHARD_JODIE, true),
+];
 
 #[test]
 fn bound_equals_the_hand_joint_forward_difference() {
@@ -231,25 +244,38 @@ fn bound_equals_the_hand_joint_forward_difference() {
         "the hand difference below perturbs the centre texel only; a wider footprint (PX1b) extends it"
     );
     let dir = scratch("bound");
-    let w = words(post::TONEMAP_ACES, 1.0);
-    let (scene, _) = fixture(&dir, w);
+    let (scene, _) = fixture(&dir, words(post::TONEMAP_ACES, 1.0));
     let bind = format!("gScene={}", scene.display());
-    let o = run(&["bound", "--words", &words_arg(w), "--bind", &bind, "--steps", &STEPS.to_string()]);
-    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
-    let out = String::from_utf8_lossy(&o.stdout);
-    let cli: f64 = out
-        .trim()
-        .strip_prefix("max_delta_bound=")
-        .unwrap_or_else(|| panic!("no max_delta_bound line: {out}"))
-        .parse()
-        .expect("a number");
     let texels = scene_texels();
-    let joint = hand_bound(w, &texels, STEPS, 3);
-    let one_channel = hand_bound(w, &texels, STEPS, 1);
-    // Non-vacuity: two steps move the display, and the joint bound is not the one-channel one, so
-    // a `bound` that perturbed one channel would be told apart here.
-    assert!(joint > 0.5, "two B10G11R11 steps must move the display: {joint}");
-    assert!((joint - one_channel).abs() > 1e-3, "joint {joint} vs one channel {one_channel}");
-    // `bound` prints six decimals.
-    assert!((cli - joint).abs() <= 1e-6, "post_eval bound {cli} != the hand joint forward difference {joint}");
+    let max = |per: [f64; 8]| per.iter().copied().fold(0.0f64, f64::max);
+    for (name, mode, mixed) in BOUND_CASES {
+        let w = words(mode, 1.0);
+        let o = run(&["bound", "--words", &words_arg(w), "--bind", &bind, "--steps", &STEPS.to_string()]);
+        assert_eq!(o.status.code(), Some(0), "[{name}] {}", text(&o));
+        let out = String::from_utf8_lossy(&o.stdout);
+        let cli: f64 = out
+            .trim()
+            .strip_prefix("max_delta_bound=")
+            .unwrap_or_else(|| panic!("[{name}] no max_delta_bound line: {out}"))
+            .parse()
+            .expect("a number");
+        let per = hand_patterns(w, &texels, STEPS, 3);
+        let joint = max(per);
+        let one_channel = max(hand_patterns(w, &texels, STEPS, 1));
+        // Non-vacuity: two steps move the display, and the joint bound is not the one-channel one, so
+        // a `bound` that perturbed one channel would be told apart here.
+        assert!(joint > 0.5, "[{name}] two B10G11R11 steps must move the display: {joint}");
+        assert!((joint - one_channel).abs() > 1e-3, "[{name}] joint {joint} vs one channel {one_channel}");
+        // ... and where the set's maximum is mixed-sign, a `bound` restricted to the uniform-sign
+        // patterns (or to pattern 0) would be told apart too.
+        if mixed {
+            let uniform = per[0].max(per[7]);
+            assert!(
+                joint - uniform > 1e-3,
+                "[{name}] the maximum must sit at a mixed-sign pattern: per-pattern maxima {per:?}"
+            );
+        }
+        // `bound` prints six decimals.
+        assert!((cli - joint).abs() <= 1e-6, "[{name}] post_eval bound {cli} != the hand joint forward difference {joint}");
+    }
 }
