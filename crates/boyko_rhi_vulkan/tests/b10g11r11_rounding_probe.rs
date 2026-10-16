@@ -332,8 +332,12 @@ impl Rig<'_> {
                     _ => None,
                 };
                 let formats = [format_of(target)];
+                // A FRAGMENT-only push range: `fullscreen_sample.vs` declares no push block and the
+                // FS reads the whole range, so the push below names FRAGMENT alone, and
+                // `VUID-vkCmdPushConstants-offset-01796` needs the range to be exactly that (the
+                // default builder's `VERTEX | FRAGMENT` range made the push invalid — triage r1 F1).
                 let pipe = ctx
-                    .create_graphics_pipeline(&GraphicsPipelineDesc {
+                    .create_graphics_pipeline_fragment_push(&GraphicsPipelineDesc {
                         vertex_module: &vs,
                         vertex_entry: c"main",
                         fragment_module: &fs,
