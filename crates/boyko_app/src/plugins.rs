@@ -492,6 +492,11 @@ impl Plugin for EnginePlugins {
         // `LightingConfig::clusters_enabled = true` (the 0%-gate: the sync gate zeros the
         // header's cluster lane whenever that bit is off, regardless of these dims).
         app.insert_resource(ClusterConfig::default());
+        // Render wave PX1a (AD-6): `PostPlugin` owns `ResolvedPost` — the one pre-exposure the lit
+        // producers, the particles, the TAA history ratio and `post_final` read. Composed BEFORE
+        // `LightingPlugin` (whose `collect_lights` reads it); the readers' `after_set(PostPolicySet)`
+        // edges hold whatever the add-order, this placement only keeps the composition readable.
+        app.add_plugin(boyko_render::post::PostPlugin);
         app.add_plugin(LightingPlugin);
         app.add_plugin(SsaoPlugin);
         app.add_plugin(CsmPlugin);

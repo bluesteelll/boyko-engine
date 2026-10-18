@@ -141,6 +141,10 @@ pub mod particle_gate;
 /// plus the settle→capture driver behind `BOYKO_PARTICLE_READBACK_FRAME`.
 pub mod particle_readback;
 pub mod plugins;
+/// Render wave PX1a: the runner's read of `ResolvedPost` (`try_resource` + the
+/// [`ResolvedPost::from_config`](boyko_render::post::ResolvedPost::from_config) fallback) and the
+/// `post_final` constant buffer it fills, as pure functions.
+pub mod post_host;
 /// Profiling rung 7: the measurement artifact that replaces the stdout channel.
 pub mod profiling;
 pub mod prelude;

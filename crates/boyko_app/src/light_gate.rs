@@ -47,6 +47,74 @@ pub fn light_upload_due<const N: usize>(
     }
 }
 
+/// Which part of the light table a plan step touches: nothing, the 64-B header alone, or the
+/// whole table (header + rows).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightRegion {
+    /// Nothing.
+    None,
+    /// Bytes `[0, 64)` — the `LightHeaderGpu` (exposure, counts, the gate words).
+    Header,
+    /// The whole staged table.
+    Full,
+}
+
+/// One frame's light-table work (render wave PX1a, H4 Scope 7, arch W8 / perf O11): what to
+/// write into the fenced slot's staging, and what to copy from it into the device table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LightCopyPlan {
+    /// The staging write into the frame's slot.
+    pub staging: LightRegion,
+    /// The recorded staging → device-table copy.
+    pub copy: LightRegion,
+}
+
+/// Per in-flight slot: the row and header generations whose bytes that slot's staging holds.
+/// Seeded `u64::MAX` (not a generation), so every slot writes the whole table on its first frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LightSlotState<const N: usize> {
+    /// `LightTableGeneration` of the rows in each slot's staging.
+    pub staging_rows_gen: [u64; N],
+    /// `LightHeaderGeneration` of the header in each slot's staging.
+    pub staging_header_gen: [u64; N],
+}
+
+impl<const N: usize> LightSlotState<N> {
+    /// The boot seed: no slot holds a generation.
+    pub const BOOT: Self = Self { staging_rows_gen: [u64::MAX; N], staging_header_gen: [u64::MAX; N] };
+}
+
+/// The generations the DEVICE light table holds — advanced only after a frame that presented
+/// (`Ok(true)`), so a skipped or recreated frame leaves the record behind and the next presented
+/// frame copies what the device missed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LightDeviceState {
+    /// `LightTableGeneration` of the rows the device table holds.
+    pub device_rows_gen: u64,
+    /// `LightHeaderGeneration` of the header the device table holds.
+    pub device_header_gen: u64,
+}
+
+impl LightDeviceState {
+    /// The boot seed: the device table holds nothing the writer produced.
+    pub const BOOT: Self = Self { device_rows_gen: u64::MAX, device_header_gen: u64::MAX };
+}
+
+/// The light-table work for in-flight slot `slot` this frame, keyed on what the slot's staging
+/// and the device table last received — never on this frame's delta (a change staged on a frame
+/// the render skipped is still copied by the next presented frame). Records the slot's staging
+/// as current; the caller advances `device` after the frame presents.
+pub fn light_copy_plan<const N: usize>(
+    slots: &mut LightSlotState<N>,
+    slot: usize,
+    device: &LightDeviceState,
+    rows_gen: u64,
+    header_gen: u64,
+) -> LightCopyPlan {
+    let _ = (slots, slot, device, rows_gen, header_gen);
+    unimplemented!("PX1a C8: light_copy_plan")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

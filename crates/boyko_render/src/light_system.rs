@@ -70,6 +70,14 @@ pub(crate) static W2204_SITE: OnceSite = OnceSite::new();
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LightTableGeneration(pub u64);
 
+/// Render wave PX1a (H4 Scope 7, D-E4): the writer-side generation of the staged table's
+/// 64-B HEADER — bumped once per header-only rewrite (a change of the pre-exposure or of any
+/// other header word with no row change), so a ringed host can stage and copy the header alone.
+/// [`LightTableGeneration`] keeps its meaning: it bumps only on a rows rewrite (which rewrites the
+/// header too).
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LightHeaderGeneration(pub u64);
+
 /// The reused light-table staging scratch + the on-change dirty flag (Principle 0).
 ///
 /// `scratch` holds the contiguous `[LightHeaderGpu || GpuLight[]]` bytes the GPU table
