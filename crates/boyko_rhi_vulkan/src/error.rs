@@ -162,7 +162,10 @@ impl From<VulkanError> for RhiError {
                 | BootError::RequiredFeatureUnsupported(_)
                 // A device missing a subgroup property a committed shader relies on — external
                 // input, the same category.
-                | BootError::RequiredSubgroupPropertyUnsupported(_) => {
+                | BootError::RequiredSubgroupPropertyUnsupported(_)
+                // A device whose optimal tiling of a required format (PX1a: `lit`) lacks a bit
+                // the engine uses — external input, the same category.
+                | BootError::RequiredFormatMissing { .. } => {
                     RhiError::BackendError("vulkan boot failed")
                 }
                 BootError::VkError(_cmd, result) => match result {
