@@ -1,0 +1,4 @@
+# Render wave PX0 (AD-20): tolerance-mode reference BMPs are binary; no text normalisation may
+# touch them (a per-directory file, the tree's precedent - a root file would re-normalise every
+# checkout).
+*.bmp binary

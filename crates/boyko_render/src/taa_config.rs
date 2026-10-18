@@ -343,16 +343,18 @@ impl DisocclusionTest {
     }
 }
 
-/// A post-resolve sharpening pass [`TaaConfig`] may select. Only [`None`](Self::None) is wired
-/// — the shipped resolve writes `aa_out` directly, no sharpen pass. Declared, NOT wired this
-/// rung.
+/// A post-resolve sharpening pass [`TaaConfig`] may select. Both variants are wired: `None`
+/// (the default) has the resolve write `aa_out` directly; `Rcas` records the sharpen pass after
+/// the resolve (`boyko_rhi_vulkan`'s `passes/rcas.rs`), which runs FidelityFX CAS
+/// (`rcas.comp.hlsl`, strength [`TaaConfig::rcas_sharpness`]) — the variant's name is historical.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SharpenMode {
     /// No sharpen pass (the shipped shape). The DEFAULT.
     #[default]
     None,
-    /// AMD RCAS-style contrast-adaptive sharpen. Declared, NOT wired this rung.
+    /// The post-resolve contrast-adaptive sharpen: FidelityFX CAS (`rcas.comp.hlsl`), recorded
+    /// after the TAA resolve when TAA is the AA mode.
     Rcas,
 }
 

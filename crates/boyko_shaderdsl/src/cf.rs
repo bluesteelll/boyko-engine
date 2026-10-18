@@ -1486,18 +1486,31 @@ pub struct HostTex2<'a> {
     texels: &'a [[f32; 4]],
     w: u32,
     h: u32,
+    /// Render wave PX0 (`px0/cut.md` D-T4, `px0/critique.md` W4): a sub-texel offset, in TEXELS,
+    /// added per axis to the filter's texel-space coordinate `p = u·n − ½` inside
+    /// [`linear_axis`] — what `subTexelPrecisionBits` quantises. `0` from [`Self::new`] /
+    /// [`Self::EMPTY`], where the path is the unbiased one bit for bit (the add is skipped).
+    /// `load` ignores it.
+    bias: [f32; 2],
 }
 
 impl<'a> HostTex2<'a> {
     /// The 0×0 stand-in a disabled binding row resolves to: every read of it PANICS, so a body
     /// that reads a disabled resource is a red, never a silent zero (a 1×1 zero stand-in would
     /// answer `(0, 0)`).
-    pub const EMPTY: HostTex2<'static> = HostTex2 { texels: &[], w: 0, h: 0 };
+    pub const EMPTY: HostTex2<'static> = HostTex2 { texels: &[], w: 0, h: 0, bias: [0.0; 2] };
 
     /// Wraps `texels` (row-major) as a `w × h` image. Panics unless `texels.len() == w·h`.
     pub const fn new(texels: &'a [[f32; 4]], w: u32, h: u32) -> Self {
         assert!(texels.len() == w as usize * h as usize, "HostTex2: texels.len() != w * h");
-        HostTex2 { texels, w, h }
+        HostTex2 { texels, w, h, bias: [0.0; 2] }
+    }
+
+    /// Render wave PX0: this texture with `sample_linear`'s texel-space coordinate offset by
+    /// `bias` TEXELS per axis (`post_eval`'s filter term: `±2^-subTexelPrecisionBits`).
+    #[must_use]
+    pub const fn with_subtexel_bias(self, bias: [f32; 2]) -> Self {
+        HostTex2 { bias, ..self }
     }
 
     /// Width in texels.
@@ -1527,8 +1540,8 @@ impl<'a> HostTex2<'a> {
     /// Bilinear, clamp-to-edge, texel centres at `(i + ½)/n`, exact f32 weights.
     #[inline]
     pub fn sample_linear(&self, uv: [f32; 2]) -> [f32; 4] {
-        let (x0, x1, ax) = linear_axis(uv[0], self.w);
-        let (y0, y1, ay) = linear_axis(uv[1], self.h);
+        let (x0, x1, ax) = linear_axis(uv[0], self.w, self.bias[0]);
+        let (y0, y1, ay) = linear_axis(uv[1], self.h, self.bias[1]);
         let w = self.w as usize;
         let row = |y: usize| lerp4(self.texels[y * w + x0], self.texels[y * w + x1], ax);
         lerp4(row(y0), row(y1), ay)
@@ -1543,11 +1556,13 @@ pub struct HostTex3<'a> {
     w: u32,
     h: u32,
     d: u32,
+    /// Render wave PX0: [`HostTex2`]'s sub-texel bias, per axis, in texels.
+    bias: [f32; 3],
 }
 
 impl<'a> HostTex3<'a> {
     /// The 0×0×0 stand-in a disabled binding row resolves to: every read of it PANICS.
-    pub const EMPTY: HostTex3<'static> = HostTex3 { texels: &[], w: 0, h: 0, d: 0 };
+    pub const EMPTY: HostTex3<'static> = HostTex3 { texels: &[], w: 0, h: 0, d: 0, bias: [0.0; 3] };
 
     /// Wraps `texels` as a `w × h × d` volume. Panics unless `texels.len() == w·h·d`.
     pub const fn new(texels: &'a [[f32; 4]], w: u32, h: u32, d: u32) -> Self {
@@ -1555,15 +1570,22 @@ impl<'a> HostTex3<'a> {
             texels.len() == w as usize * h as usize * d as usize,
             "HostTex3: texels.len() != w * h * d"
         );
-        HostTex3 { texels, w, h, d }
+        HostTex3 { texels, w, h, d, bias: [0.0; 3] }
+    }
+
+    /// Render wave PX0: this texture with `sample_linear`'s texel-space coordinate offset by
+    /// `bias` TEXELS per axis.
+    #[must_use]
+    pub const fn with_subtexel_bias(self, bias: [f32; 3]) -> Self {
+        HostTex3 { bias, ..self }
     }
 
     /// Trilinear, clamp-to-edge, the [`HostTex2::sample_linear`] model per axis.
     #[inline]
     pub fn sample_linear(&self, uvw: [f32; 3]) -> [f32; 4] {
-        let (x0, x1, ax) = linear_axis(uvw[0], self.w);
-        let (y0, y1, ay) = linear_axis(uvw[1], self.h);
-        let (z0, z1, az) = linear_axis(uvw[2], self.d);
+        let (x0, x1, ax) = linear_axis(uvw[0], self.w, self.bias[0]);
+        let (y0, y1, ay) = linear_axis(uvw[1], self.h, self.bias[1]);
+        let (z0, z1, az) = linear_axis(uvw[2], self.d, self.bias[2]);
         let (w, h) = (self.w as usize, self.h as usize);
         let at = |x: usize, y: usize, z: usize| self.texels[(z * h + y) * w + x];
         let plane = |z: usize| {
@@ -1577,9 +1599,12 @@ impl<'a> HostTex3<'a> {
 /// the integers), its two taps `⌊p⌋`, `⌊p⌋ + 1` clamped to `[0, n − 1]`, and the upper tap's
 /// weight `p − ⌊p⌋`. Panics on an empty axis (a disabled stand-in has nothing to sample).
 #[inline]
-fn linear_axis(u: f32, n: u32) -> (usize, usize, f32) {
+fn linear_axis(u: f32, n: u32, bias: f32) -> (usize, usize, f32) {
     assert!(n > 0, "texture sample on an empty (disabled stand-in) texture");
     let p = u * n as f32 - 0.5;
+    // Render wave PX0: the sub-texel bias is in TEXELS, on `p`. Skipped at 0 so the unbiased path
+    // is the pre-PX0 one bit for bit (`p + 0.0` would turn a `−0.0` into `+0.0`).
+    let p = if bias == 0.0 { p } else { p + bias };
     let f = <EvalCf as Cf>::floor(p);
     let hi = i64::from(n) - 1;
     // `f` is integral; `as` saturates the (unreachable) out-of-`i64` range.

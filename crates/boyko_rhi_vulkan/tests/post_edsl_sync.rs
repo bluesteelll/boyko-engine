@@ -488,9 +488,10 @@ fn post_rs_has_no_backend_introspection() {
 }
 
 /// The `pub fn` names of `post.rs` an oracle must NOT call: every one but the traced body's entry
-/// points (`post_final_main`, `post_final_eval`) and the input readers (`eval_params`, `ubo_word`).
+/// points (`post_final_main`, `post_final_eval`) and the input readers (`eval_params`, `ubo_word`,
+/// and PX0's resource builder `eval_res`).
 fn stage_leaves(post: &str) -> Vec<String> {
-    const ENTRY: [&str; 4] = ["post_final_main", "post_final_eval", "eval_params", "ubo_word"];
+    const ENTRY: [&str; 5] = ["post_final_main", "post_final_eval", "eval_params", "ubo_word", "eval_res"];
     post.lines()
         .filter_map(|l| {
             // Top-level items only (an unindented `pub fn`): a method such as `PostStage::label` is
@@ -561,11 +562,13 @@ fn post_eval_calls_only_the_traced_body() {
             armed.push(f.display().to_string());
         }
     }
-    if armed.is_empty() {
-        eprintln!("post_eval census: NOT YET ARMED (PX0) — no non-test caller of the traced body yet");
-    } else {
-        eprintln!("post_eval census: ARMED over {armed:?}");
-    }
+    // REQUIRED-armed since render wave PX0 landed `post_eval` (the PXe cut's residual): a census
+    // that arms nothing proves nothing, so an empty set is red, never a note.
+    assert!(
+        armed.iter().any(|f| f.ends_with("post_eval.rs")),
+        "post_eval census: NOT ARMED — no `post_eval.rs` among the host callers of the traced body {armed:?}"
+    );
+    eprintln!("post_eval census: ARMED over {armed:?}");
 }
 
 #[test]

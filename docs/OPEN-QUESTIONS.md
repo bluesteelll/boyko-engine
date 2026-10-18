@@ -631,7 +631,7 @@ The shader-side alternative was rejected: the six sites would also test bit 16. 
 re-emits their `.spv` and adds ALU per light per pixel on armed frames. It also does not fix the
 class:
 
-- `GoldenLight::with_sdf_shadow()` (`goldens.rs:1371`) sets bit 16 without a slot.
+- `GoldenLight::with_sdf_shadow()` (`goldens.rs:1385`) sets bit 16 without a slot.
 - `light_table.hlsli:56` defines bit 16 as "this light casts an SDF shadow", not as "slotted".
 
 The vkval lane's commits are split into a pixel-neutral one and a pixel-changing one, and this fix
@@ -5386,7 +5386,7 @@ questions; L7 can gate the first and nothing gates the second.
 > **saying that a golden run's validation was disabled is the entire reason the code exists.**
 > Suppressing it there would deliberately rebuild the defect the 2026-08-06 entry below describes.
 >
-> 1. **No collision is possible.** `scripts/golden.ps1:253` scans with the literal pattern
+> 1. **No collision is possible.** `scripts/golden.ps1:390` scans with the literal pattern
 >    `\[vk-validation\]`. `boyko-E2101` cannot match it.
 > 2. **In a golden run the line does not exist at all.** Measured: **no host calls
 >    `boyko_log::lifecycle::boot` or `enable`** — the only callers anywhere are `boyko_log`'s own
@@ -11013,7 +11013,7 @@ wrong by the time they were re-measured here.** (i) The site count was **327**, 
 `g12c` ignore this rung just wrote is itself the 327th, so the figure moved *because of* the change
 it was describing, and it moved again for the same reason: EG2-R round 3's `g17` takes it to
 **328** (`grep -rn '#\[ignore' --include=*.rs crates/ | wc -l` → 328, re-measured at that round).
-It is **502** on the tree today (468 at `c2b37b98`, and render-wave RD6's D-4 adds thirty-two — the D-DS device drivers with their worker (twenty-four), the D-DS WR probe and its worker, the two device rows of `mesh_winding_registration`, and four `boot_validation_clean` workers — and RD6's triage-r1 fix adds two — the `hwrt` MV-family arms of `dds_backface`; 467 at `1831244d`, and render-wave E0's gpu-ignored device probe `e0_prims_match_host_within_vulkan_bounds` adds one; 465 at `0dac974f`, and render-wave RD3's C1 adds two — the RK-16 indirect-dispatch device cases; 442 at `410c30ef`, and render-wave RD1's C3 adds twenty-three — the G18, merge-receipt, mesh-depth and WR-probe drivers with their four workers, and three `boot_validation_clean` workers; 434 at `2993874b`, and the OBS lane's C6 adds eight — the image-dump and depth-dump drivers and their two workers; 423 at `6e8932be`, and the OBS lane's C5 adds eleven — the receipt and sink-product drivers and their two workers; 422 at `035ca0b9`, and release CI round 12's `workstation:` ignore on `G26`'s budget in `profiling_telemetry_stream` adds one; 421 at `d92fb63a`, and release CI round 10's `workstation:` ignore on `vg_r0_reference_rig` adds one; 417 at `16191fda`, and V2's J-T fidelity gate adds four; 401 at `2431c570`; A7 adds three, D-M0's `solo:` test one; 405 at `ba39571d`, DM1's eight windowed red-first gates add eight, its two D-3 grow-repoint gates two, and its grow-frame gate and timing instrument two) <!-- measure: tree-lines crates rs #[ignore = 502 -->, and that
+It is **554** on the tree today (502 at `1ada4666`, and render-wave PX0 adds fifty-two — PX0-1's nineteen zone-label drivers and workers, PX0-3's eight capacity drivers and their worker, PX0-4a's and PX0-5's two `generator:` tests, PX0-6's two device probes, PX0-10's two AA pin dumps, PX0-12's nineteen branch-fixture, receipt-key and producer-matrix drivers with their worker; 468 at `c2b37b98`, and render-wave RD6's D-4 adds thirty-two — the D-DS device drivers with their worker (twenty-four), the D-DS WR probe and its worker, the two device rows of `mesh_winding_registration`, and four `boot_validation_clean` workers — and RD6's triage-r1 fix adds two — the `hwrt` MV-family arms of `dds_backface`; 467 at `1831244d`, and render-wave E0's gpu-ignored device probe `e0_prims_match_host_within_vulkan_bounds` adds one; 465 at `0dac974f`, and render-wave RD3's C1 adds two — the RK-16 indirect-dispatch device cases; 442 at `410c30ef`, and render-wave RD1's C3 adds twenty-three — the G18, merge-receipt, mesh-depth and WR-probe drivers with their four workers, and three `boot_validation_clean` workers; 434 at `2993874b`, and the OBS lane's C6 adds eight — the image-dump and depth-dump drivers and their two workers; 423 at `6e8932be`, and the OBS lane's C5 adds eleven — the receipt and sink-product drivers and their two workers; 422 at `035ca0b9`, and release CI round 12's `workstation:` ignore on `G26`'s budget in `profiling_telemetry_stream` adds one; 421 at `d92fb63a`, and release CI round 10's `workstation:` ignore on `vg_r0_reference_rig` adds one; 417 at `16191fda`, and V2's J-T fidelity gate adds four; 401 at `2431c570`; A7 adds three, D-M0's `solo:` test one; 405 at `ba39571d`, DM1's eight windowed red-first gates add eight, its two D-3 grow-repoint gates two, and its grow-frame gate and timing instrument two) <!-- measure: tree-lines crates rs #[ignore = 554 -->, and that
 half is no longer prose: the round stamp keeps the historical sentence true, and the marker keeps
 the live one checkable — a paragraph whose whole subject is that a count rots should not carry one
 that nothing re-takes.

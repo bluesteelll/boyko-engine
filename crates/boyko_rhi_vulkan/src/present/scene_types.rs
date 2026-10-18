@@ -2294,6 +2294,12 @@ pub struct GBufferScene<'a> {
     /// staging→`light_table` copy + barrier; `false` records NOTHING (idle frame → zero
     /// cost, byte-identical command stream — the rung L0-r0 0%-gate).
     pub light_dirty: bool,
+    /// Render wave PX0 (D-F1): the frame's light table holds a SKY row in its no-`P` front block —
+    /// the resolve's own `has_sky` predicate (`deferred_pbr.hlsl`), decoded by
+    /// `boyko_render::LightTableStaging::sky_present` at fold time. Read ONLY by the graph
+    /// receipt's `[config]` capture (`light_sky`); it gates no command, so a harness that arms no
+    /// receipt may leave it `false`.
+    pub light_sky: bool,
     /// Dynamic-materials DM1 (design F1/F3): this frame's material-table upload — `Some` only
     /// on a frame that copies (frame 0, a table grow, the frame after a lost edit, or an edit
     /// frame). Each declarator then declares `material_table` as its LAST buffer and a

@@ -310,3 +310,36 @@ fn vb_mesh_tex_aa_screenshot_dump() {
     app.insert_resource(AaConfig { mode: aa_mode });
     app.run();
 }
+
+// ===============================================================================================
+// Render wave PX0 (H3 Scope 7; px0/cut.md D-A1): the AA REFERENCE pins
+// ===============================================================================================
+
+#[path = "common/aa_pin.rs"]
+mod aa_pin;
+
+/// **The FXAA / SMAA / SSAA reference pins on VisibilityBuffer** (`[vb_mesh_tex_{fxaa,smaa,ssaa}]`,
+/// PENDING until GL-H0's bless): [`vb_mesh_tex_screenshot_dump`]'s pinned frame — the textured
+/// five-sphere [`setup`], `VisibilityBuffer × Mesh`, 512² — with the AA mode REQUIRED from
+/// `BOYKO_AA` (`aa_pin::parse_aa_pin`). Unlike [`vb_mesh_tex_aa_screenshot_dump`] (an eval dump,
+/// "NOT a golden") it reads no `BOYKO_WIN` / `BOYKO_SOLO` / `BOYKO_PATH`.
+#[test]
+#[ignore = "gpu-windowed: the PX0 AA reference pin dump on VB (BOYKO_AA=fxaa|smaa|ssaa required); run through scripts/golden.ps1 with --test-threads=1"]
+fn vb_mesh_tex_aa_pin_dump() {
+    let pin = aa_pin::aa_pin_from_env();
+    let mut app = App::new();
+    app.add_plugins(aa_pin::plugins("boyko_engine vb mesh textured AA pin", 512, 512, pin));
+    app.add_startup_system(setup);
+    app.insert_resource(RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Mesh });
+    if let Some(cfg) = aa_pin::config(pin) {
+        app.insert_resource(cfg);
+    }
+    app.run();
+}
+
+/// The pin fn's env reading, host-side: an unset `BOYKO_AA` panics naming it.
+#[test]
+#[should_panic(expected = "BOYKO_AA")]
+fn an_aa_pin_without_boyko_aa_panics_naming_it() {
+    aa_pin::parse_aa_pin(None);
+}

@@ -65,7 +65,7 @@ fn first_absent(keys: &[&'static str]) -> Option<&'static str> {
 
 /// The VB golden pins (a) is measured over. Enumerated so the DOMAIN is machine-checked even
 /// though the hashes are not checked here.
-const VB_PINS: [&str; 20] = [
+const VB_PINS: [&str; 23] = [
     "vb_mesh",
     // VG R3 piece 1 step P1-2: `vb_mesh`'s scene, binary and test with `BOYKO_VG_HZB=1` arming the
     // depth pyramid. It belongs in this DOMAIN like any other VB pin, and it was measured the same
@@ -124,6 +124,16 @@ const VB_PINS: [&str; 20] = [
     // with the density census unarmed — 32c73274 on the software leg AND on the hwrt leg (vkval
     // round 3). No density row, for the structural reason recorded above.
     "vb_mesh_shadows",
+    // Render wave PX0 (H3 Scope 7; px0/cut.md D-A1, PX0-10): the three AA reference pins of
+    // `vb_mesh_tex`'s scene — FXAA, SMAA, SSAA through VisibilityBuffer x Mesh, the frames PX1a
+    // re-plumbs the AA passes under. Same DOMAIN, and listed in the SAME act as the pins (the
+    // `vb_occ_mixed` precedent above): all three ship `sha256_software = "PENDING"`, blessed at
+    // GL-H0 after the owner's visual check, so `golden.ps1` exits 2 on them until then and no
+    // unblessed leg reads as measured. Software leg only (no `sha256_hwrt` key). No density row,
+    // for the structural reason recorded above. (Missing from this list at PX0-10; triage r1 F4.)
+    "vb_mesh_tex_fxaa",
+    "vb_mesh_tex_smaa",
+    "vb_mesh_tex_ssaa",
 ];
 
 // ===============================================================================================

@@ -13,6 +13,7 @@ use core::ptr;
 use crate::ffi::*;
 
 use super::super::frame_driver::Renderer;
+use super::super::gpu_zone::ZONE_POST_TAA_RESOLVE;
 use super::super::scene_types::{GBufferScene, TaaActivation};
 use super::super::targets::GBufferTargets;
 use super::super::COLOR_SUBRESOURCE_RANGE;
@@ -96,6 +97,12 @@ impl Renderer<'_> {
         scene: &GBufferScene<'_>,
         fi: usize,
     ) {
+        // Render wave PX0: `ZONE_POST_TAA_RESOLVE` brackets this body — its own barriers, bind,
+        // push and dispatch; the graph-derived barriers the caller emitted are outside it.
+        let zone = super::zone_arm::ZoneArm::from_scene(scene);
+        // SAFETY: recording is open (this fn's contract), outside any rendering scope; the path
+        // recorder's witness reset this frame's pool and seals the slot after this body.
+        let zone_pair = unsafe { zone.begin(self.fns, cmd, ZONE_POST_TAA_RESOLVE) };
         let rcas_armed = scene.rcas.is_some();
         // TAA rung T3: the resolve's OWN write target this frame — `taa_resolved` (the RCAS
         // "ping", re-pointed at the resolve set's `gAaOut` @4 by `GBufferTargets::create`) when
@@ -225,5 +232,7 @@ impl Renderer<'_> {
                 );
             }
         }
+        // SAFETY: as the begin above; `zone_pair` is the pair it returned for this zone.
+        unsafe { zone.end(self.fns, cmd, ZONE_POST_TAA_RESOLVE, zone_pair) };
     }
 }

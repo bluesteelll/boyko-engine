@@ -1628,6 +1628,15 @@ impl Renderer<'_> {
         // →SHADER_READ_ONLY_OPTIMAL barriers-out, this pass's declared FRAGMENT reader are
         // actually consumed by `vb_resolve` below, not this pass — see `declare_vb_graph`) for
         // the "vb_sky" pass into `cmd`.
+        //
+        // Render wave PX0: `ZONE_FWD_VB_SKY` brackets the pass from its derived barriers through
+        // `cmd_end_rendering`.
+        let vb_sky_zone = super::zone_arm::ZoneArm::from_scene(scene);
+        // SAFETY: recording is open and no rendering scope is; `ts` reset this frame's pool at
+        // the frame top and seals the slot at `ts.finish()`.
+        let vb_sky_pair = unsafe {
+            vb_sky_zone.begin(self.fns, cmd, super::super::gpu_zone::ZONE_FWD_VB_SKY)
+        };
         ts.cmd();
         self.record_vb_pass(plan.vb_sky, cmd, targets, forward, vb, scene, fi);
 
@@ -1702,6 +1711,8 @@ impl Renderer<'_> {
             ts.cmd();
             (self.fns.cmd_end_rendering)(cmd);
         }
+        // SAFETY: as the begin above — the sky scope closed on the line before.
+        unsafe { vb_sky_zone.end(self.fns, cmd, super::super::gpu_zone::ZONE_FWD_VB_SKY, vb_sky_pair) };
 
         // === Passes `vb_raster` + `vb_resolve` — rung R10: recorded ONLY under `mesh_leg`
         // (a `VisibilityBuffer x Sdf` frame skips both — the Decision-0 geometry table they
@@ -4803,8 +4814,9 @@ impl Renderer<'_> {
         }
 
         // VB-SV0 DP6-0b: close `ZONE_VB_PRODUCE_RUN` — after ALL THREE lit-producer arms, and
-        // before `sdf_forward_march` below (which stays outside every bracket, on both legs of
-        // every `VB × Both` frame — see `ZONE_VB_GEO`'s enumerated residual).
+        // before `sdf_forward_march` below (which stays outside every VB-family bracket, on both
+        // legs of every `VB × Both` frame — see `ZONE_VB_GEO`'s enumerated residual; render wave
+        // PX0 brackets it under `ZONE_FWD_SDF_MARCH`).
         //
         // `produce_run_armed` is the SAME binding the begin site asserted, read a second time
         // rather than re-derived: the two halves of this bracket are gated by one word.
@@ -4857,6 +4869,15 @@ impl Renderer<'_> {
             // ->GENERAL barrier (+ the `vb_depth` DEPTH_ATTACHMENT_OPTIMAL->SHADER_READ_ONLY_OPTIMAL
             // barrier under `mesh_leg`, or the cascade/atlas/light_table producer barriers under
             // `!mesh_leg`) for the "sdf_forward_march" pass into `cmd`.
+            //
+            // Render wave PX0: `ZONE_FWD_SDF_MARCH` brackets the pass from its derived barriers
+            // through the dispatch (the id Forward's site shares).
+            let march_zone = super::zone_arm::ZoneArm::from_scene(scene);
+            // SAFETY: recording is open and no rendering scope is; `ts` reset this frame's pool
+            // at the frame top and seals the slot at `ts.finish()`.
+            let march_pair = unsafe {
+                march_zone.begin(self.fns, cmd, super::super::gpu_zone::ZONE_FWD_SDF_MARCH)
+            };
             ts.cmd();
             self.record_vb_pass(sdf_forward_pass, cmd, targets, forward, vb, scene, fi);
 
@@ -4953,6 +4974,10 @@ impl Renderer<'_> {
                 );
                 ts.cmd();
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            }
+            // SAFETY: as the begin above; `march_pair` is the pair it returned.
+            unsafe {
+                march_zone.end(self.fns, cmd, super::super::gpu_zone::ZONE_FWD_SDF_MARCH, march_pair);
             }
         }
 
@@ -5118,14 +5143,16 @@ impl Renderer<'_> {
                 // SHADER_READ_ONLY_OPTIMAL; `aa_out`/`fxaa_set` were built by `create()` under the
                 // same `scene.aa` that gates this branch; `present_extent` sizes `aa_out`.
                 ts.cmd();
-                unsafe { self.record_fxaa(cmd, targets, fxaa, present_extent, fi) };
+                let zone = super::zone_arm::ZoneArm::from_scene(scene);
+                unsafe { self.record_fxaa(cmd, targets, fxaa, present_extent, fi, zone) };
             } else if let Some(smaa) = scene.smaa.as_ref() {
                 // SAFETY: recording is open; `present_sample` above left `lit` in
                 // SHADER_READ_ONLY_OPTIMAL; `aa_out`/the SMAA edge/weight targets + the three
                 // `smaa_*_set` rings were built by `create()` under the same `scene.smaa` that
                 // gates this branch; `present_extent` sizes every SMAA target.
                 ts.cmd();
-                unsafe { self.record_smaa(cmd, targets, smaa, present_extent, fi) };
+                let zone = super::zone_arm::ZoneArm::from_scene(scene);
+                unsafe { self.record_smaa(cmd, targets, smaa, present_extent, fi, zone) };
             } else if let Some(ssaa) = scene.ssaa.as_ref() {
                 debug_assert!(targets.aa_out.is_some() && targets.downsample_set.is_some());
                 // SAFETY: recording is open; `present_sample` above left `lit` (the 2x ring) in
@@ -5133,7 +5160,8 @@ impl Renderer<'_> {
                 // under the same `scene.ssaa` that gates this branch, sized to the BOOT-FIXED
                 // `aa_extent` (NOT `present_extent`, which is 2x under SSAA).
                 ts.cmd();
-                unsafe { self.record_ssaa(cmd, targets, ssaa, aa_extent, fi) };
+                let zone = super::zone_arm::ZoneArm::from_scene(scene);
+                unsafe { self.record_ssaa(cmd, targets, ssaa, aa_extent, fi, zone) };
             } else {
                 // `aa_out.is_some()` with none of aa/smaa/ssaa matched ⇒ TAA is the reason
                 // (the four arms are mutually exclusive by construction); `record_taa_body`
@@ -5145,6 +5173,17 @@ impl Renderer<'_> {
                 );
             }
         }
+
+        // Render wave PX0: `ZONE_POST_PRESENT` brackets the present blit from the swapchain
+        // barrier through `cmd_end_rendering`; the census copy, the dumps and the present
+        // transition after it are outside the bracket.
+        let present_zone = super::zone_arm::ZoneArm::from_scene(scene);
+        // SAFETY: recording is open and no rendering scope is (the AA passes above closed
+        // theirs); `ts` reset this frame's pool at the frame top and seals the slot at
+        // `ts.finish()` below.
+        let present_pair = unsafe {
+            present_zone.begin(self.fns, cmd, super::super::gpu_zone::ZONE_POST_PRESENT)
+        };
 
         let to_color = VkImageMemoryBarrier {
             s_type: VkStructureType::ImageMemoryBarrier,
@@ -5246,6 +5285,10 @@ impl Renderer<'_> {
             (self.fns.cmd_draw)(cmd, 3, 1, 0, 0);
             ts.cmd();
             (self.fns.cmd_end_rendering)(cmd);
+        }
+        // SAFETY: as the begin above — the present scope closed on the line before.
+        unsafe {
+            present_zone.end(self.fns, cmd, super::super::gpu_zone::ZONE_POST_PRESENT, present_pair);
         }
 
         // === VG-R0 rung R0c: the ARMED density-census copy — `vb_id` → host-visible staging. ===
