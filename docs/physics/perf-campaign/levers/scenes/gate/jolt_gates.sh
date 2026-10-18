@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Dynamic parity scenes, C3: Jolt 5.6's dyn build (the parity patch v2), structural only - the timing
+# Dynamic parity scenes, C3: Jolt 5.6's dyn build (the parity patch v2, or v3 since lane SL-2b: v3's
+# sleeping-off arm is v2's, so every check below holds on both), structural only - the timing
 # column of Jolt's stat line and of -f's CSV is never read.
 # usage: jolt_gates.sh <PerformanceTest.exe> <outdir> [<repo> [<9b stdout with the v1 banner>]]
 #   <repo> (whose patch G1 applies) defaults to the git toplevel of this script's own checkout.
@@ -14,13 +15,16 @@
 #      runs for the work counts; the -t=1 pose and the stat line's hash = pins.json `jolt56.<P>`
 #      (pose_pin.py: the fixture's sha256, then the bytes; the one check against the committed pin
 #      rather than the run itself, triage r1 F2)
-#   G6 ApplyEvents is called before clock_start inside the step loop (the patched source)
+#   G6 ApplyEvents is called before clock_start inside the step loop (the patched source). The source is
+#      the tested exe's own: <CMAKE_HOME_DIRECTORY of the CMakeCache.txt beside the exe>/../PerformanceTest/
+#      PerformanceTest.cpp (lane SL-2b: the v3 build lives in its own tree, wt-v5.6.0-dyn3), else JOLT_SRC.
 # The manifest receipt (G2: driver.py's source_is_repo_patch) is run by the caller at the lane head.
 # Env: PROGRAMS (default "none kick shoot slide") narrows G5; JOLT_SRC points G6 at another source.
 # Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = no FAIL and the tally complete (9 + 11 per
 # program; the cross-W receipts read SAME/DIFFERS and never fail); 1 = red; 2 = could not run
 # (usage, an unknown program, an input missing: the exe, the patch, the clean v5.6.0 repository, the
-# 9b exe, the 9b banner, the G6 source; dyn_spec_ref.py failed), decided before the first check.
+# 9b exe, the 9b banner, the G6 source - no JOLT_SRC and no CMakeCache.txt with CMAKE_HOME_DIRECTORY
+# beside the exe is a missing G6 source; dyn_spec_ref.py failed), decided before the first check.
 set -u
 if [ $# -lt 2 ] || [ $# -gt 4 ]; then echo "usage: jolt_gates.sh <PerformanceTest.exe> <outdir> [<repo> [<9b stdout with the v1 banner>]]" >&2; exit 2; fi
 EXE=$1
@@ -37,7 +41,18 @@ else
 fi
 BANNER9B=${4:-D:/tmp/phys-orch/win9b/raw/V2-AB-p0_130001/001_r0_V2-jolt56_j56_W16/stdout.txt}
 PATCH=$REPO/crates/boyko_physics/benches/jolt_parity/pyramid_scene.patch
-SRC=${JOLT_SRC:-D:/tmp/jolt/wt-v5.6.0-dyn/PerformanceTest/PerformanceTest.cpp}
+if [ -n "${JOLT_SRC:-}" ]; then
+  SRC=$JOLT_SRC
+else
+  # The tested exe's own tree (a fallback to a fixed tree would check another build's source silently).
+  JHOME=
+  [ -f "$(dirname "$EXE")/CMakeCache.txt" ] && JHOME=$(sed -n 's/^CMAKE_HOME_DIRECTORY:[A-Z]*=//p' "$(dirname "$EXE")/CMakeCache.txt" | tr -d '\r' | head -1)
+  if [ -n "$JHOME" ]; then
+    SRC=$(dirname "$JHOME")/PerformanceTest/PerformanceTest.cpp
+  else
+    SRC="(the G6 source of $EXE: no CMakeCache.txt with CMAKE_HOME_DIRECTORY beside it; set JOLT_SRC)"
+  fi
+fi
 EXPECT_CHECKS=9 # G1 1 + G3 1 + G4 3 x 2 + G6 1, then 11 per program
 for P in ${PROGRAMS:-none kick shoot slide}; do
   case $P in none | kick | shoot | slide) ;; *) echo "jolt_gates.sh: unknown program '$P' (none kick shoot slide)" >&2; exit 2 ;; esac
