@@ -647,8 +647,14 @@
    "sha256": "5b0a1b60c23e3b34f6a16c3bf15ab4f591d3469d4805ad667dfa26cb06e5fb6b"
   },
   "jolt56-dyn": {
+   "path": "D:/tmp/jolt/build-v5.6.0-dyn3-dist/PerformanceTest.exe",
+   "sha256": "e8f4843915d230735705d205be3204a560f235684eb1e38b25553396de0f6dbe",
+   "note": "the parity patch v3 (lane SL-2b), tree D:/tmp/jolt/wt-v5.6.0-dyn3; every window-9c Jolt row, sleeping off and on (01-DESIGN.md sections 6, 10)"
+  },
+  "jolt56-dyn-v2": {
    "path": "D:/tmp/jolt/build-v5.6.0-dyn-dist/PerformanceTest.exe",
-   "sha256": "9df0990168bef31f6ba722ff6950b9b6bbfb5e9077a174d17c27c95eb0913a98"
+   "sha256": "9df0990168bef31f6ba722ff6950b9b6bbfb5e9077a174d17c27c95eb0913a98",
+   "note": "the parity patch v2 (lane DYN-SCENES), tree D:/tmp/jolt/wt-v5.6.0-dyn; kept untouched: windows LAND and SR bind it by path"
   }
  }
 }

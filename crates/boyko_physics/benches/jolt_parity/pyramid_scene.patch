@@ -2,10 +2,13 @@ boyko parity patch for Jolt's PerformanceTest (physics perf campaign, plan secti
 The v1 hunks apply with `git apply` to Jolt v5.3.0 and v5.6.0 (checked 2026-09-19); the v2 hunks, the dynamic parity
 scenes, are checked on v5.6.0 only (2026-10-06: the comparison is against Jolt 5.6 alone).
 Build recipe, flags and what each change is for: the header of crates/boyko_physics_parity/src/bin/jolt_parity_pyramid.rs, "Build (Jolt)".
+The v3 hunks (lane SL-2b, 2026-10-18: the dynamic scenes' sleeping arm for window 9c) are checked on v5.6.0 only.
 
   PyramidScene.h         damping 0 (boyko has no rigid-body damping); mAllowSleeping from SetAllowSleeping;
                          v2: namespace BoykoDyn (the programs, an independent C++ derivation of boyko's
                          dyn_spec.rs) and BoykoDynPyramidScene (J-T plus a program, events in ApplyEvents)
+                         v3: BoykoDynPyramidScene::SetAllowSleeping, so the replacing dyn scene's boxes and its
+                         projectiles follow -allow_sleep (v2 dropped it: the replaced scene ran every body awake)
   PerformanceTestScene.h SetAllowSleeping, false for every scene that does not support it;
                          v2: BoykoDynLog and ApplyEvents, called before each step's clock starts
   PerformanceTest.cpp    -no_pair_cache, -allow_sleep (+ an Active Bodies column in -f's CSV),
@@ -13,11 +16,14 @@ Build recipe, flags and what each change is for: the header of crates/boyko_phys
                          and one "boyko-parity-patch v1" line naming the options in force (unchanged by v2);
                          v2: -dyn=kick|shoot|slide, -sanity, -scene_dump=, -pose_out=, -spawn_pose_out=, a second
                          "boyko-parity-dyn v1" line printed only with them, Update's error flags kept and counted
+                         v3: -dyn, -sanity, -pose_out and -spawn_pose_out run with -allow_sleep (-scene_dump stays
+                         refused with it); under -allow_sleep the awake count after every step (untimed, after the
+                         clock stops), one "boyko-parity-sleep v1" line and, with -sanity, awake_<quality>_th<N>.csv
 
 git apply ignores this prose: the patch proper starts at the first file header below.
 
 diff --git a/PerformanceTest/PerformanceTest.cpp b/PerformanceTest/PerformanceTest.cpp
-index 5f241cf..4e2ddd0 100644
+index 5f241cf..632bcf9 100644
 --- a/PerformanceTest/PerformanceTest.cpp
 +++ b/PerformanceTest/PerformanceTest.cpp
 @@ -31,6 +31,7 @@ JPH_SUPPRESS_WARNINGS_STD_BEGIN
@@ -235,7 +241,7 @@ index 5f241cf..4e2ddd0 100644
  				  "-f: Record per frame timings\n"
  				  "-no_sleep: Disable sleeping\n"
 +				  "-no_pair_cache: Disable the body pair contact cache (boyko parity patch)\n"
-+				  "-allow_sleep: Let the Pyramid scene's bodies sleep (boyko parity patch)\n"
++				  "-allow_sleep: Let the Pyramid scene's bodies sleep (boyko parity patch); with -dyn its projectiles too, and with -sanity awake_<quality>_th<N>.csv (boyko parity patch v3)\n"
 +				  "-receipt: Write receipt_<quality>_th<N>.csv with manifolds, points, active bodies and top box y per frame (boyko parity patch)\n"
 +				  "-dyn=<kick|shoot|slide>: A dynamic parity scene on Pyramid, its events applied before each step's clock starts (boyko parity patch v2)\n"
 +				  "-sanity: Write sanity_<quality>_th<N>.csv (the dynamic scenes' bar) and statics_<quality>_th<N>.csv (boyko parity patch v2)\n"
@@ -244,7 +250,7 @@ index 5f241cf..4e2ddd0 100644
  				  "-rs: Record state\n"
  				  "-vs: Validate state\n"
  				  "-validate_hash=<hash>: Validate hash (return 0 if successful, 1 if failed)\n"
-@@ -231,6 +420,57 @@ int main(int argc, char** argv)
+@@ -231,6 +420,64 @@ int main(int argc, char** argv)
  	// Output scene we're running
  	Trace("Running scene: %s", scene->GetName());
  
@@ -266,9 +272,14 @@ index 5f241cf..4e2ddd0 100644
 +	BoykoDyn::EProgram dyn = BoykoDyn::EProgram::None;
 +	if (dyn_any)
 +	{
-+		if (strcmp(scene->GetName(), "Pyramid") != 0 || allow_sleep)
++		if (strcmp(scene->GetName(), "Pyramid") != 0)
 +		{
-+			Trace("-dyn, -sanity, -scene_dump, -pose_out and -spawn_pose_out run on the Pyramid scene without -allow_sleep only");
++			Trace("-dyn, -sanity, -scene_dump, -pose_out and -spawn_pose_out run on the Pyramid scene only");
++			return 1;
++		}
++		if (allow_sleep && scene_dump != nullptr) // boyko parity patch v3: the one canonical dump is written with sleeping off
++		{
++			Trace("-scene_dump writes the program's created values: run it without -allow_sleep (boyko's runner refuses --scene-dump with sleeping on too)");
 +			return 1;
 +		}
 +		if (specified_quality == -1 || specified_threads <= 0 || repeat != 1)
@@ -290,6 +301,8 @@ index 5f241cf..4e2ddd0 100644
 +				return 1;
 +			}
 +			scene = unique_ptr<PerformanceTestScene>(new BoykoDynPyramidScene(dyn));
++			if (allow_sleep) // boyko parity patch v3: the replacing scene inherits -allow_sleep, its boxes and its projectiles
++				scene->SetAllowSleeping(true);
 +		}
 +		if (max_iterations > BoykoDyn::Steps(dyn) || (scene_dump != nullptr && max_iterations != BoykoDyn::Steps(dyn)))
 +		{
@@ -302,7 +315,7 @@ index 5f241cf..4e2ddd0 100644
  	// Create temp allocator
  	TempAllocatorImpl temp_allocator(scene->GetTempAllocatorSizeMB() * 1024 * 1024);
  
-@@ -317,6 +557,19 @@ int main(int argc, char** argv)
+@@ -317,6 +564,19 @@ int main(int argc, char** argv)
  				PhysicsSystem physics_system;
  				physics_system.Init(scene->GetMaxBodies(), 0, scene->GetMaxBodyPairs(), scene->GetMaxContactConstraints(), broad_phase_layer_interface, object_vs_broadphase_layer_filter, object_vs_object_layer_filter);
  
@@ -322,7 +335,7 @@ index 5f241cf..4e2ddd0 100644
  				// Start test scene
  				scene->StartTest(physics_system, motion_quality);
  
-@@ -341,9 +594,96 @@ int main(int argc, char** argv)
+@@ -341,9 +601,96 @@ int main(int argc, char** argv)
  				// Optimize the broadphase to prevent an expensive first frame
  				physics_system.OptimizeBroadPhase();
  
@@ -419,7 +432,7 @@ index 5f241cf..4e2ddd0 100644
  			#ifdef JPH_DEBUG_RENDERER
  				// Open renderer output
  				ofstream renderer_file;
-@@ -358,7 +698,15 @@ int main(int argc, char** argv)
+@@ -358,7 +705,26 @@ int main(int argc, char** argv)
  				if (enable_per_frame_recording)
  				{
  					per_frame_file.open(("per_frame_" + tag + ".csv").c_str(), ofstream::out | ofstream::trunc);
@@ -433,10 +446,21 @@ index 5f241cf..4e2ddd0 100644
 +					receipt_file.open(("receipt_" + tag + ".csv").c_str(), ofstream::out | ofstream::trunc);
 +					receipt_file.precision(9); // enough digits to round-trip a float
 +					receipt_file << "Frame, Manifolds, Points, Active Bodies, Top Y" << endl;
++				}
++
++				// boyko parity patch v3 (-allow_sleep): the awake count's receipts, read every frame after the clock stops;
++				// with -sanity also awake_<tag>.csv (frame, active), beside sanity_<tag>.csv
++				int sleep_first_all_asleep = -1, sleep_asleep_frames = 0;
++				uint sleep_active_final = 0;
++				ofstream awake_file;
++				if (allow_sleep && dyn_sanity)
++				{
++					awake_file.open(("awake_" + tag + ".csv").c_str(), ofstream::out | ofstream::binary | ofstream::trunc);
++					awake_file << "frame,active\n";
  				}
  
  				ofstream record_state_file;
-@@ -376,6 +724,23 @@ int main(int argc, char** argv)
+@@ -376,6 +742,23 @@ int main(int argc, char** argv)
  					JPH_PROFILE_NEXTFRAME();
  					JPH_DET_LOG("Iteration: " << iterations);
  
@@ -460,7 +484,7 @@ index 5f241cf..4e2ddd0 100644
  					// Start measuring
  					chrono::high_resolution_clock::time_point clock_start = chrono::high_resolution_clock::now();
  
-@@ -383,7 +748,7 @@ int main(int argc, char** argv)
+@@ -383,7 +766,7 @@ int main(int argc, char** argv)
  					scene->UpdateTest(physics_system, temp_allocator, cDeltaTime);
  
  					// Do a physics step
@@ -469,7 +493,7 @@ index 5f241cf..4e2ddd0 100644
  
  					// Stop measuring
  					chrono::high_resolution_clock::time_point clock_end = chrono::high_resolution_clock::now();
-@@ -404,7 +769,36 @@ int main(int argc, char** argv)
+@@ -404,7 +787,51 @@ int main(int argc, char** argv)
  
  					// Record time taken this iteration
  					if (enable_per_frame_recording)
@@ -479,6 +503,21 @@ index 5f241cf..4e2ddd0 100644
 +							per_frame_file << iterations << ", " << (1.0e-6 * duration.count()) << ", " << physics_system.GetNumActiveBodies(EBodyType::RigidBody) << endl;
 +						else
 +							per_frame_file << iterations << ", " << (1.0e-6 * duration.count()) << endl;
++					}
++
++					// boyko parity patch v3 (-allow_sleep): the awake count after this step, untimed
++					if (allow_sleep)
++					{
++						uint active = physics_system.GetNumActiveBodies(EBodyType::RigidBody);
++						if (active == 0)
++						{
++							++sleep_asleep_frames;
++							if (sleep_first_all_asleep < 0)
++								sleep_first_all_asleep = int(iterations);
++						}
++						sleep_active_final = active;
++						if (awake_file.is_open())
++							awake_file << iterations << "," << active << "\n";
 +					}
 +
 +					// boyko parity patch v2: the step's engine errors (-dyn receipts line) and, under -sanity, the state after
@@ -507,7 +546,7 @@ index 5f241cf..4e2ddd0 100644
  
  					// Dump profile information every 100 iterations
  					if (enable_profiler && iterations % 100 == 0)
-@@ -456,6 +850,53 @@ int main(int argc, char** argv)
+@@ -456,6 +883,75 @@ int main(int argc, char** argv)
  				#endif // JPH_ENABLE_DETERMINISM_LOG
  				}
  
@@ -558,6 +597,28 @@ index 5f241cf..4e2ddd0 100644
 +						dyn_log.mLaunchesApplied > 0? dyn_log.mClearanceMin : -1.0, final_bodies);
 +				}
 +
++				// boyko parity patch v3 (-allow_sleep): the run's sleep receipts in one line; its prefix is not boyko-parity-dyn
++				// and its last field is a decimal, never 0x..., so the readers of the dyn lines and of the stat line's hash are unaffected
++				if (allow_sleep)
++				{
++					if (awake_file.is_open())
++						awake_file.close();
++					const BodyLockInterfaceNoLock &sbli = physics_system.GetBodyLockInterfaceNoLock();
++					BodyIDVector sleep_ids;
++					physics_system.GetBodies(sleep_ids);
++					int sleep_bodies = 0, sleep_may_sleep = 0;
++					for (BodyID id : sleep_ids)
++					{
++						BodyLockRead lock(sbli, id);
++						if (lock.GetBody().IsStatic())
++							continue;
++						++sleep_bodies;
++						sleep_may_sleep += lock.GetBody().GetAllowSleeping()? 1 : 0;
++					}
++					Trace("boyko-parity-sleep v1: program=%s, bodies=%d, may_sleep=%d, active_final=%u, first_all_asleep=%d, asleep_frames=%d",
++						BoykoDyn::Name(dyn), sleep_bodies, sleep_may_sleep, sleep_active_final, sleep_first_all_asleep, sleep_asleep_frames);
++				}
++
  				// Calculate hash of all positions and rotations of the bodies
  				uint64 hash = HashBytes(nullptr, 0); // Ensure we start with the proper seed
  				BodyInterface &bi = physics_system.GetBodyInterfaceNoLock();
@@ -604,7 +665,7 @@ index 99fe6f5..273c7fe 100644
  	virtual void			UpdateTest([[maybe_unused]] PhysicsSystem &inPhysicsSystem, [[maybe_unused]] TempAllocator &ioTempAllocator, [[maybe_unused]] float inDeltaTime) { }
  
 diff --git a/PerformanceTest/PyramidScene.h b/PerformanceTest/PyramidScene.h
-index 469b902..08f6aeb 100644
+index 469b902..c8c6418 100644
 --- a/PerformanceTest/PyramidScene.h
 +++ b/PerformanceTest/PyramidScene.h
 @@ -20,6 +20,13 @@ public:
@@ -621,7 +682,7 @@ index 469b902..08f6aeb 100644
  	virtual void			StartTest(PhysicsSystem &inPhysicsSystem, EMotionQuality inMotionQuality) override
  	{
  		BodyInterface &bi = inPhysicsSystem.GetBodyInterface();
-@@ -41,8 +48,349 @@ public:
+@@ -41,8 +48,357 @@ public:
  				{
  					RVec3 position(Real(-cPyramidHeight + cBoxSize * j + (i & 1? cHalfBoxSize : 0.0f)), Real(1.0f + (cBoxSize + cBoxSeparation) * i), Real(-cPyramidHeight + cBoxSize * k + (i & 1? cHalfBoxSize : 0.0f)));
  					BodyCreationSettings settings(box_shape, position, Quat::sIdentity(), EMotionType::Dynamic, Layers::MOVING);
@@ -850,6 +911,13 @@ index 469b902..08f6aeb 100644
 +public:
 +	explicit				BoykoDynPyramidScene(BoykoDyn::EProgram inProgram) : mProgram(inProgram) { }
 +
++	// boyko parity patch v3 (-allow_sleep with -dyn): the boxes (PyramidScene) and the projectiles may sleep
++	virtual bool			SetAllowSleeping(bool inAllowSleeping) override
++	{
++		mDynAllowSleeping = inAllowSleeping;
++		return PyramidScene::SetAllowSleeping(inAllowSleeping);
++	}
++
 +	virtual void			StartTest(PhysicsSystem &inPhysicsSystem, EMotionQuality inMotionQuality) override
 +	{
 +		PyramidScene::StartTest(inPhysicsSystem, inMotionQuality); // J-T exactly: the floor, then the 1240 boxes
@@ -940,7 +1008,7 @@ index 469b902..08f6aeb 100644
 +
 +			// The J-T box's settings (PyramidScene.h), with the launch velocity
 +			BodyCreationSettings settings(mProjectile, RVec3(p), Quat::sIdentity(), EMotionType::Dynamic, Layers::MOVING);
-+			settings.mAllowSleeping = false;
++			settings.mAllowSleeping = mDynAllowSleeping; // boyko parity patch v3: -allow_sleep (false without it, as in v2)
 +			settings.mLinearDamping = 0.0f;
 +			settings.mAngularDamping = 0.0f;
 +			settings.mLinearVelocity = v;
@@ -971,4 +1039,5 @@ index 469b902..08f6aeb 100644
 +	size_t					mNextKick = 0;
 +	size_t					mNextLaunch = 0;
 +	RefConst<Shape>			mProjectile;
++	bool					mDynAllowSleeping = false;			///< boyko parity patch v3: SetAllowSleeping, for the projectiles
  };
