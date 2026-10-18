@@ -2,11 +2,13 @@
 //! ruling 67 OQ4): **TAA under the post seam — a camera cut resets the history, and `display` is the
 //! accumulated image.**
 //!
-//! - **16 — the camera cut.** The worker switches the active camera at a fixed frame. The frame
-//!   after the switch must see `TaaState::frames_since_reset == 0` (the runner turned
-//!   `ResolvedPost::cut` into `TaaState::mark_reset`), and among the (D) `lit` / `taa_hist` frames
-//!   dumped around the switch, the cut frame's history equals its `lit` within one format step —
-//!   a replaced (fresh) history — while a blended frame does not.
+//! - **16 — the camera cut.** The worker switches the active camera at frame [`SWITCH_AT`]. The
+//!   runner must turn `ResolvedPost::cut` into `TaaState::mark_reset` on that same frame, so the
+//!   cut frame's resolve replaces the history. Read against `TaaState`'s contract ("the reset frame
+//!   itself counts as frame 1", `taa_state.rs`), the per-frame log pins it to the frame (see
+//!   [`cut_log_verdict`]), and among the (D) `lit` / `taa_hist` frames dumped around the switch,
+//!   exactly the cut frame [`SWITCH_AT`] holds a history equal to its `lit` within one format step
+//!   — a replaced (fresh) history — while every blended frame does not.
 //! - **18 — accumulation.** A static scene with high-contrast edges — one of them HDR, an emissive
 //!   bar at radiance 4.0 against a dark floor (ruling 67 OQ4: the HDR-space resolve differs from
 //!   the display-space one only there) — under TAA, one 16-frame (D) burst of `lit` (the jittered
@@ -272,8 +274,9 @@ fn px1a_taa_camera_switch_resets_the_history() {
             Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
         })
         .collect();
-    let after = rows.iter().find(|&&(f, _)| f == SWITCH_AT + 1).unwrap_or_else(|| panic!("no log row for frame {}", SWITCH_AT + 1));
-    assert_eq!(after.1, 0, "TAA reset flag unset on the frame after the active-camera switch (frames_since_reset = {})", after.1);
+    if let Err(e) = cut_log_verdict(&rows, SWITCH_AT) {
+        panic!("TAA reset flag unset on the active-camera switch: {e}");
+    }
 
     let lit = files_of(&dir, "lit");
     let hist = files_of(&dir, "taa_hist");
@@ -287,7 +290,43 @@ fn px1a_taa_camera_switch_resets_the_history() {
         })
         .map(|((f, _), _)| *f)
         .collect();
-    assert_eq!(fresh.len(), 1, "exactly one dumped frame (the cut) must hold a fresh history; fresh frames: {fresh:?}");
+    let cut_frame = u32::try_from(SWITCH_AT).expect("invariant: SWITCH_AT fits a dump frame number");
+    assert_eq!(fresh, [cut_frame], "exactly the cut frame {SWITCH_AT} must hold a fresh history; fresh frames: {fresh:?}");
+}
+
+/// Test 16's verdict over the cut worker's `frame frames_since_reset` log.
+///
+/// **Why these rows.** `log_taa_state` runs in the ECS schedule, BEFORE the runner's reset site
+/// (`mark_reset()` then `advance()`), so row `f` reads the state frame `f - 1` left, and
+/// `TaaState`'s contract makes the reset frame itself count as frame 1. The boot reset at frame 0
+/// therefore logs `0 0`, `1 1`, `2 2`, …; a cut applied on the switch frame `cut` (where the policy
+/// sees the new active camera) logs row `cut` = the pre-cut count (`row(cut - 1) + 1`) and row
+/// `cut + 1` = 1. A reset placed one frame late (after `advance()`) logs 0 at `cut + 1` and 1 at
+/// `cut + 2`; a missing one keeps counting — both are RED here. (Ruling 70 re-stated this oracle:
+/// the first one asked for 0 at `cut + 1`, which only the late reset satisfies.)
+///
+/// Checked: the log is gap-free from frame 0; row `cut` reads the pre-cut count; row `cut + 1`
+/// reads 1; and the only discontinuity after the boot reset (a row `f >= 2` that is not
+/// `row(f - 1) + 1`) is at `cut + 1` — exactly one reset in the run after the boot reset.
+fn cut_log_verdict(rows: &[(u64, u32)], cut: u64) -> Result<(), String> {
+    if rows.first().map(|r| r.0) != Some(0) || rows.windows(2).any(|w| w[1].0 != w[0].0 + 1) {
+        return Err(format!("the log is not one row per frame from frame 0: {:?}", rows.iter().map(|r| r.0).collect::<Vec<_>>()));
+    }
+    let row = |f: u64| rows.get(usize::try_from(f).ok()?).map(|r| r.1);
+    let (Some(before), Some(at), Some(after)) = (row(cut - 1), row(cut), row(cut + 1)) else {
+        return Err(format!("the log ends before frame {} ({} rows)", cut + 1, rows.len()));
+    };
+    if at != before + 1 {
+        return Err(format!("row {cut} = {at}, not the pre-cut count {} (a reset before the switch frame)", before + 1));
+    }
+    if after != 1 {
+        return Err(format!("row {} = {after}, not 1: the switch frame {cut} did not reset the history", cut + 1));
+    }
+    let resets: Vec<u64> = rows.windows(2).filter(|w| w[1].0 >= 2 && w[1].1 != w[0].1 + 1).map(|w| w[1].0).collect();
+    if resets != [cut + 1] {
+        return Err(format!("resets after the boot reset (rows that do not count on): {resets:?}, expected exactly [{}]", cut + 1));
+    }
+    Ok(())
 }
 
 /// `true` iff `taa_hist` equals `lit` at every texel within one binary16 step (a replaced
@@ -302,6 +341,41 @@ fn history_is_fresh(lit: &DumpFile, hist: &DumpFile) -> bool {
 }
 
 // ---- host checks of the verdicts (not ignored) -----------------------------------------------
+
+/// A 47-row cut-worker log (R0's length): the boot reset at frame 0, then the runner's reset at
+/// each frame of `resets_at` (`mark_reset` then `advance`), or one frame late (`advance` then
+/// `mark_reset`) when `late`.
+fn synthetic_cut_log(resets_at: &[u64], late: bool) -> Vec<(u64, u32)> {
+    let mut count = 0u32;
+    (0..47u64)
+        .map(|f| {
+            let row = (f, count);
+            if f == 0 || (!late && resets_at.contains(&f)) {
+                count = 1;
+            } else if late && resets_at.contains(&f) {
+                count = 0;
+            } else {
+                count += 1;
+            }
+            row
+        })
+        .collect()
+}
+
+#[test]
+fn the_cut_log_verdict_pins_the_reset_to_the_switch_frame() {
+    assert_eq!(synthetic_cut_log(&[], false)[..3], [(0, 0), (1, 1), (2, 2)], "the boot shape R0 logged");
+    assert_eq!(cut_log_verdict(&synthetic_cut_log(&[SWITCH_AT], false), SWITCH_AT), Ok(()));
+    assert!(cut_log_verdict(&synthetic_cut_log(&[], false), SWITCH_AT).is_err(), "no cut reset (R0's log) must red");
+    assert!(cut_log_verdict(&synthetic_cut_log(&[SWITCH_AT], true), SWITCH_AT).is_err(), "a reset after advance() must red");
+    assert!(cut_log_verdict(&synthetic_cut_log(&[SWITCH_AT - 1], false), SWITCH_AT).is_err(), "a reset one frame early must red");
+    assert!(cut_log_verdict(&synthetic_cut_log(&[SWITCH_AT + 1], false), SWITCH_AT).is_err(), "a reset one frame late must red");
+    let twice = synthetic_cut_log(&[SWITCH_AT, SWITCH_AT + 3], false);
+    assert!(cut_log_verdict(&twice, SWITCH_AT).is_err(), "a second reset after the cut must red");
+    let mut gap = synthetic_cut_log(&[SWITCH_AT], false);
+    gap.remove(10);
+    assert!(cut_log_verdict(&gap, SWITCH_AT).is_err(), "a missing row must red, never hide a reset");
+}
 
 #[test]
 fn the_accumulation_ratio_separates_a_resolved_display_from_a_jittered_one() {
