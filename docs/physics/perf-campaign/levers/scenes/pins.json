@@ -636,15 +636,15 @@
  "exes": {
   "rapier-dyn-simd8": {
    "path": "D:/tmp/rapier-parity/dyn/bin/rapier-parity-dyn-simd8.exe",
-   "sha256": "c71f747042688c9558aaee2bdb8a0e7bfaf79642cd99c25d8621acd8274ebfeb"
+   "sha256": "86a9c3fb7bf39d65b7dcad92798e473d1f9ef68ca13ca99b4c1fcd7a2912b814"
   },
   "rapier-dyn-simd4": {
    "path": "D:/tmp/rapier-parity/dyn/bin/rapier-parity-dyn-simd4.exe",
-   "sha256": "be272344cfe6336f6f8a9196cc769bdb13a8cb1bcd8b3d627039c2efe4355d70"
+   "sha256": "56e11db727da0cf38af15de43c11a4d8767bd482295971c687ddada6e3780807"
   },
   "rapier-dyn-block": {
    "path": "D:/tmp/rapier-parity/dyn/bin/rapier-parity-dyn-block.exe",
-   "sha256": "5b0a1b60c23e3b34f6a16c3bf15ab4f591d3469d4805ad667dfa26cb06e5fb6b"
+   "sha256": "a77ccb47c16d09d69e86b08f63abc50158023c4dbfe615bb09961967eff81de8"
   },
   "jolt56-dyn": {
    "path": "D:/tmp/jolt/build-v5.6.0-dyn3-dist/PerformanceTest.exe",
