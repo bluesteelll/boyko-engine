@@ -2283,6 +2283,16 @@ impl TargetsProfile {
 /// stretched; presented 1:1 in the swapchain's top-left like [`SampledComposite`].
 const GBUFFER_FORMAT: Format = Format::R8G8B8A8Unorm;
 
+/// Render wave PX1a (AD-1): the HDR scene colour's format — RGBA16F, PX0's decision
+/// (`docs/measurements/2026-10-16-px0-lit-format-decision.md`, row 2: AD-1's escape; the RTX 3060
+/// rounds `B10G11R11` toward zero on every path). The ONE Rust spelling: the device's REQUIRED
+/// format row, the `lit` ring and `lit_native` (created with it from the switch commit), and the
+/// lit attachments' pipeline state read it. Its twins are `shaders/lit_format.hlsli`'s
+/// `LIT_FORMAT_QUALIFIER` and `boyko_shaderdsl::post::LIT_STORAGE_FORMAT`;
+/// `tests/lit_format_census.rs` holds the three equal. Every format-dependent bound reads
+/// `goldens::LIT_ROUNDING`, selected from this constant.
+pub const LIT_FORMAT: Format = Format::R16G16B16A16Sfloat;
+
 /// The SMAA `edges` target format: `R8G8_UNORM` (R = west/left edge, G = north/top edge) — a
 /// Vulkan MANDATORY format with guaranteed `COLOR_ATTACHMENT_BIT` + `SAMPLED_IMAGE_FILTER_LINEAR_BIT`
 /// format-feature support (no fallback needed — W2's decision).

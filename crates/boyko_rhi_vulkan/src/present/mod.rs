@@ -88,7 +88,7 @@ pub use scene_types::{
 pub use scene_types::{ShadowVisActivation, TlasBuildActivation};
 pub use surface::Surface;
 pub use swapchain::{PresentModeConfig, Swapchain};
-pub use targets::{GBufferFrame, GBufferTargets};
+pub use targets::{GBufferFrame, GBufferTargets, LIT_FORMAT};
 
 /// The number of frames the [`Renderer`] keeps in flight (double-buffered CPU↔GPU
 /// overlap). Per-frame: an acquire semaphore + an in-flight fence; render-finished

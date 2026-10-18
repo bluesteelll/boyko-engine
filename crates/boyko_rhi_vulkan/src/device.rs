@@ -3135,7 +3135,7 @@ pub(crate) struct RequiredFormat {
 ///   format the engine cannot run without is checked instead of assumed.
 pub(crate) const REQUIRED_FORMATS: [RequiredFormat; 1] = [RequiredFormat {
     name: "lit: R16G16B16A16_SFLOAT",
-    vk_format: boyko_rhi::Format::R16G16B16A16Sfloat.as_i32(),
+    vk_format: crate::present::LIT_FORMAT.as_i32(),
     bits: VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
         | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
         | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT
@@ -3143,15 +3143,20 @@ pub(crate) const REQUIRED_FORMATS: [RequiredFormat; 1] = [RequiredFormat {
         | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT,
 }];
 
+// The lit row's name spells `LIT_FORMAT`; a flip of the constant must rename the row too.
+const _: () = assert!(
+    matches!(crate::present::LIT_FORMAT, boyko_rhi::Format::R16G16B16A16Sfloat),
+    "LIT_FORMAT moved: rename REQUIRED_FORMATS' lit row (and its bits) with it"
+);
+
 /// The first row of [`REQUIRED_FORMATS`] whose bits `optimal_features_of(row.vk_format)` does not
 /// hold, as `(row name, missing bits)`, else `None`. Pure over the query, so the refusal is
 /// host-testable without a device.
 fn missing_required_format(optimal_features_of: impl Fn(i32) -> VkFlags) -> Option<(&'static str, VkFlags)> {
-    // PX1a C1 (red-first): the refusal is not wired yet — the C3 body compares the bits.
-    for row in &REQUIRED_FORMATS {
-        let _ = (row.name, row.vk_format, row.bits, &optimal_features_of);
-    }
-    None
+    REQUIRED_FORMATS.iter().find_map(|row| {
+        let missing = row.bits & !optimal_features_of(row.vk_format);
+        (missing != 0).then_some((row.name, missing))
+    })
 }
 
 /// The `optimalTilingFeatures` of `vk_format` on `physical_device` — one
