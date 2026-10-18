@@ -5580,3 +5580,104 @@ mod tests {
         );
     }
 }
+
+/// Render wave PX1a test 3 (`plan/H4-PX1a-hdr-lit.md` Tests 3, PC-PX1a-24; `px1a/cut.md` C6): the hand
+/// ACES mirror [`aces_fitted`] equals `boyko_shaderdsl::post::aces_hill` on the Eval backend BIT-EXACTLY
+/// — the guard the oracle delegation (C9) rests on — and the OETF stage is compared through the
+/// SHADER's exponent: the mirror's own `1.0 / 2.2` is one ULP below `post::OETF_GAMMA_EXP`
+/// (`0x3EE8BA2F`, what DXC folds the producers' `1.0 / 2.2` to), so a whole-mirror bit-exact
+/// assertion would be red on correct code. That finding is pinned here too.
+#[cfg(test)]
+mod px1a_hand_mirror_tests {
+    use boyko_shaderdsl::cf::EvalCf;
+    use boyko_shaderdsl::half::f16_bits_to_f32;
+    use boyko_shaderdsl::post::{OETF_GAMMA_EXP, aces_hill, oetf_gamma22};
+
+    use super::{ACES_IN, ACES_OUT, aces_fitted, tonemap_and_oetf};
+
+    fn bits(v: [f32; 3]) -> [u32; 3] {
+        v.map(f32::to_bits)
+    }
+
+    /// Bit-equal, NaN against NaN of any payload (a non-finite input may reach either).
+    fn same(a: [f32; 3], b: [f32; 3]) -> bool {
+        a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
+    }
+
+    /// Every FINITE binary16 value — the `lit` store's domain at RGBA16F (a non-finite texel is a
+    /// fault every HDR reader sanitizes before any curve) — in each channel in turn, the other two
+    /// at fixed mid and hot values, and in all three at once.
+    #[test]
+    fn aces_mirror_equals_post_eval_on_every_binary16_value_in_each_channel() {
+        let mut checked = 0u32;
+        for h in 0..=u16::MAX {
+            let s = f16_bits_to_f32(u32::from(h));
+            if !s.is_finite() {
+                continue;
+            }
+            for v in [[s, 0.25, 4.0], [0.25, s, 4.0], [4.0, 0.25, s], [s, s, s]] {
+                let (m, e) = (aces_fitted(v), aces_hill::<EvalCf>(v));
+                assert!(same(m, e), "aces mirror {:x?} != post Eval {:x?} at {v:?}", bits(m), bits(e));
+                checked += 1;
+            }
+        }
+        // 65536 codes less the two signs' 1024 exponent-31 codes (±Inf, NaNs).
+        assert_eq!(checked, 4 * (65536 - 2 * 1024));
+    }
+
+    /// 10⁵ seeded triples spread log-uniformly over `[2⁻²⁴, 2¹⁶]` (xorshift64*; the seed is fixed).
+    #[test]
+    fn aces_mirror_equals_post_eval_on_seeded_triples() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let r = state.wrapping_mul(0x2545_F491_4F6C_DD1D);
+            // A log-uniform positive f32: exponent in [-24, 16), a random 23-bit mantissa.
+            let e = (r >> 40) % 40;
+            let m = (r & 0x7F_FFFF) as u32;
+            f32::from_bits(((e as u32 + 127 - 24) << 23) | m)
+        };
+        for _ in 0..100_000 {
+            let v = [next(), next(), next()];
+            let (m, e) = (aces_fitted(v), aces_hill::<EvalCf>(v));
+            assert!(same(m, e), "aces mirror {:x?} != post Eval {:x?} at {v:?}", bits(m), bits(e));
+        }
+    }
+
+    /// The finding: the mirror's OETF exponent is one ULP below the shader's.
+    #[test]
+    fn the_mirrors_oetf_exponent_is_one_ulp_below_the_shaders() {
+        assert_eq!(OETF_GAMMA_EXP.to_bits(), 0x3EE8_BA2F);
+        assert_eq!((1.0f32 / 2.2).to_bits() + 1, OETF_GAMMA_EXP.to_bits());
+    }
+
+    /// Through the shader's exponent, the mirror's tail equals the traced tail: ACES by the mirror,
+    /// then `pow(·, post::OETF_GAMMA_EXP)` == `oetf_gamma22::<EvalCf>(aces_hill)` bit-exactly. The
+    /// mirror's own `tonemap_and_oetf` (its `1.0 / 2.2`) is NOT — the delegation removes it.
+    #[test]
+    fn the_oetf_stage_matches_post_eval_through_the_shaders_exponent() {
+        let mut differs = 0u32;
+        for h in (0..=u16::MAX).step_by(7) {
+            let s = f16_bits_to_f32(u32::from(h));
+            if !s.is_finite() || s < 0.0 {
+                continue;
+            }
+            let v = [s, s * 0.5, s * 0.25];
+            let mirror = aces_fitted(v).map(|c| c.powf(OETF_GAMMA_EXP));
+            let traced = oetf_gamma22::<EvalCf>(aces_hill::<EvalCf>(v));
+            assert!(same(mirror, traced), "OETF stage {:x?} != {:x?} at {v:?}", bits(mirror), bits(traced));
+            differs += u32::from(!same(tonemap_and_oetf(v), traced));
+        }
+        assert!(differs > 0, "the mirror's 1.0/2.2 never moved a value: the exponent finding is vacuous here");
+    }
+
+    /// The two coefficient tables are the eDSL's, value for value (the bit-exact tests above would
+    /// also catch a drift; this names it).
+    #[test]
+    fn the_mirrors_aces_matrices_are_the_edsls() {
+        assert_eq!(ACES_IN, boyko_shaderdsl::post::ACES_IN);
+        assert_eq!(ACES_OUT, boyko_shaderdsl::post::ACES_OUT);
+    }
+}
