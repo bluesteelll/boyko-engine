@@ -28,6 +28,15 @@
 //!    A fn whose body calls into `boyko_shaderdsl::` is a delegate, not a hand decoder. Each
 //!    allow-listed residual must still exist (the list shrinks with the tree), and the matcher is
 //!    run against planted fixtures every run, so it cannot be vacuous.
+//! 5. **The pipeline census (orchestrator ruling 67 W2: close the class).** Every
+//!    `GraphicsPipelineDesc` the production render crates (`boyko_app/src`, `boyko_render/src`)
+//!    build is CLASSIFIED by `(file, fragment module)` in [`PIPELINE_TARGETS`] — the pipeline's
+//!    colour attachment is `lit`, `lit_native` or something else (stated). Every `lit` /
+//!    `lit_native` pipeline's `color_formats` is exactly `[LIT_FORMAT]`: a pipeline drawing into the
+//!    HDR scene colour under any other declared format is a dynamic-rendering format mismatch
+//!    (`VUID-vkCmdDraw-dynamicRenderingUnusedAttachments-08910`) that only a validation-ON worker on
+//!    that exact configuration would see. An unclassified pipeline is RED — a new pipeline is
+//!    classified in the commit that adds it, so the class cannot grow a seventh unchecked site.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -423,4 +432,172 @@ fn char_lit() -> char { '"' }
 fn after_char() -> f32 { 0.0 }
 "#;
     assert!(hand_decoders(clean).is_empty(), "{:?}", hand_decoders(clean));
+}
+
+// ---- 5. The pipeline census (ruling 67 W2) ---------------------------------------------------
+
+/// What a production graphics pipeline draws into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    /// The HDR scene colour `lit` — its `color_formats` must be `[LIT_FORMAT]`.
+    Lit,
+    /// `lit_native`, the SSAA downsample's output in `lit`'s format — `[LIT_FORMAT]` too.
+    LitNative,
+    /// Another attachment set (stated): not this census's class.
+    Other(&'static str),
+}
+
+/// Every production `GraphicsPipelineDesc`, by `(path suffix, fragment-module identifier)`.
+const PIPELINE_TARGETS: &[(&str, &str, Target)] = &[
+    ("boyko_app/src/gpu_scene/mod.rs", "fs", Target::Other("the G-buffer raster's three MRTs (albedo / normal / material)")),
+    ("boyko_app/src/gpu_scene/mod.rs", "pm_fs", Target::Other("the per-instance-material G-buffer raster's three MRTs")),
+    ("boyko_app/src/gpu_scene/mod.rs", "sample_fs", Target::Other("the present blit: the swapchain")),
+    ("boyko_app/src/gpu_scene/mod.rs", "fxaa_fs", Target::Other("FXAA: `aa_out` (display-referred RGBA8)")),
+    ("boyko_app/src/gpu_scene/mod.rs", "smaa_edge_fs", Target::Other("SMAA edges: `smaa_edges` (RG8)")),
+    ("boyko_app/src/gpu_scene/mod.rs", "smaa_weight_fs", Target::Other("SMAA weights: `smaa_weights` (RGBA8)")),
+    ("boyko_app/src/gpu_scene/mod.rs", "smaa_blend_fs", Target::Other("SMAA blend: `aa_out` (display-referred RGBA8)")),
+    ("boyko_app/src/gpu_scene/mod.rs", "ssaa_fs", Target::LitNative),
+    ("boyko_app/src/gpu_scene/mod.rs", "forward_fs", Target::Lit),
+    ("boyko_app/src/gpu_scene/mod.rs", "sky_fs", Target::Lit),
+    ("boyko_app/src/gpu_scene/mod.rs", "prepass_fs", Target::Other("the ForwardPlus depth prepass: depth only")),
+    ("boyko_app/src/gpu_scene/mod.rs", "forward_plus_fs", Target::Lit),
+    ("boyko_app/src/gpu_scene/mod.rs", "mv_fs", Target::Other("the motion-vector G-buffer raster: the MRTs + the MV target")),
+    ("boyko_app/src/gpu_scene/mod.rs", "mvpm_fs", Target::Other("the per-instance-material MV G-buffer raster")),
+    ("boyko_app/src/gpu_scene/mod.rs", "vb_raster_fs", Target::Other("the visibility-buffer raster: `vb_id` (RG32UI)")),
+    ("boyko_app/src/gpu_scene/mod.rs", "vb_sky_fs", Target::Lit),
+    ("boyko_app/src/gpu_scene/mod.rs", "tex_fs", Target::Other("the textured G-buffer raster's MRTs")),
+    ("boyko_app/src/gpu_scene/csm.rs", "depth_fs", Target::Other("the CSM cascades: depth only")),
+    ("boyko_app/src/gpu_scene/csm.rs", "point_depth_fs", Target::Other("the punctual atlas: depth only")),
+    ("boyko_app/src/gpu_scene/sdf_depth_merge.rs", "fs", Target::Other("the SDF depth merge: depth only")),
+    ("boyko_app/src/gpu_scene/particle.rs", "draw_fs", Target::Lit),
+    ("boyko_render/src/ui/resources.rs", "fragment_module", Target::Other("the UI pass: the UI / swapchain colour target")),
+];
+
+/// One `GraphicsPipelineDesc { .. }` literal: where, its fragment module, its `color_formats` list.
+#[derive(Debug)]
+struct PipelineSite {
+    file: String,
+    line: usize,
+    fragment: String,
+    color_formats: Vec<String>,
+}
+
+/// The index just past the bracket matching the `open` at `at` (`text[at] == open`).
+fn matching(text: &[u8], at: usize, open: u8, close: u8) -> usize {
+    let mut depth = 0usize;
+    for (i, &c) in text.iter().enumerate().skip(at) {
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return i + 1;
+            }
+        }
+    }
+    text.len()
+}
+
+/// Every `GraphicsPipelineDesc {` literal in `text` (comments and literals blanked first).
+fn pipeline_sites(file: &str, text: &str) -> Vec<PipelineSite> {
+    let clean = blank_comments_and_literals(text);
+    let b = clean.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(off) = clean[from..].find("GraphicsPipelineDesc {") {
+        let start = from + off;
+        let open = start + "GraphicsPipelineDesc ".len();
+        let end = matching(b, open, b'{', b'}');
+        let body = &clean[open..end];
+        let fragment = body
+            .find("fragment_module:")
+            .map(|i| {
+                body[i + "fragment_module:".len()..]
+                    .trim_start()
+                    .trim_start_matches('&')
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        let color_formats = body
+            .find("color_formats:")
+            .and_then(|i| body[i..].find('[').map(|j| i + j))
+            .map(|lb| {
+                let rb = matching(body.as_bytes(), lb, b'[', b']');
+                body[lb + 1..rb - 1].split(',').map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()).collect()
+            })
+            .unwrap_or_default();
+        out.push(PipelineSite { file: file.to_owned(), line: clean[..start].lines().count() + 1, fragment, color_formats });
+        from = end;
+    }
+    out
+}
+
+/// The census over a set of sites: every site classified, every `lit` / `lit_native` site naming
+/// exactly `[LIT_FORMAT]`, every table row present. `Ok(lit-class sites checked)` or the breaches.
+fn census(sites: &[PipelineSite]) -> Result<usize, Vec<String>> {
+    let mut breaches = Vec::new();
+    let mut lit_sites = 0;
+    for site in sites {
+        let row = PIPELINE_TARGETS.iter().find(|(f, frag, _)| site.file.ends_with(f) && site.fragment == *frag);
+        match row {
+            None => breaches.push(format!(
+                "{}:{} — an unclassified graphics pipeline (fragment module `{}`): add its row to PIPELINE_TARGETS",
+                site.file, site.line, site.fragment
+            )),
+            Some(&(_, _, Target::Lit | Target::LitNative)) => {
+                lit_sites += 1;
+                if site.color_formats != ["LIT_FORMAT"] {
+                    breaches.push(format!(
+                        "{}:{} — `{}` draws into lit / lit_native but declares color_formats {:?}, not [LIT_FORMAT]",
+                        site.file, site.line, site.fragment, site.color_formats
+                    ));
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    for (f, frag, _) in PIPELINE_TARGETS {
+        if !sites.iter().any(|s| s.file.ends_with(f) && s.fragment == *frag) {
+            breaches.push(format!("PIPELINE_TARGETS row ({f}, {frag}) names no pipeline on this tree: a stale row"));
+        }
+    }
+    if breaches.is_empty() { Ok(lit_sites) } else { Err(breaches) }
+}
+
+#[test]
+fn every_pipeline_drawing_into_lit_names_lit_format() {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    for dir in ["crates/boyko_app/src", "crates/boyko_render/src"] {
+        rust_files(&root.join(dir), &mut files);
+    }
+    let sites: Vec<PipelineSite> = files.iter().flat_map(|p| pipeline_sites(&rel(&root, p), &read(p))).collect();
+    let lit_rows = PIPELINE_TARGETS.iter().filter(|r| matches!(r.2, Target::Lit | Target::LitNative)).count();
+    assert!(lit_rows >= 6 && sites.len() >= PIPELINE_TARGETS.len(), "anti-vacuity: {} sites, {lit_rows} lit rows", sites.len());
+    match census(&sites) {
+        Ok(n) => assert_eq!(n, lit_rows, "every lit / lit_native row was checked against a site"),
+        Err(breaches) => panic!("the lit pipeline census is RED:\n{}", breaches.join("\n")),
+    }
+}
+
+#[test]
+fn the_pipeline_census_rejects_its_fixtures() {
+    let fixture = r#"
+fn boot() {
+    let a = GraphicsPipelineDesc { fragment_module: &forward_fs, color_formats: &[RASTER_COLOR_FORMAT], depth_format: None };
+    let b = GraphicsPipelineDesc { fragment_module: &ssaa_fs, color_formats: &[LIT_FORMAT] };
+    let c = GraphicsPipelineDesc { fragment_module: &brand_new_fs, color_formats: &[LIT_FORMAT] };
+}
+"#;
+    let sites = pipeline_sites("boyko_app/src/gpu_scene/mod.rs", fixture);
+    assert_eq!(sites.len(), 3, "{sites:?}");
+    assert_eq!(sites[0].color_formats, ["RASTER_COLOR_FORMAT"]);
+    let breaches = census(&sites).expect_err("the fixture must red");
+    let joined = breaches.join("\n");
+    assert!(joined.contains("`forward_fs` draws into lit"), "a lit site naming another format: {joined}");
+    assert!(!joined.contains("`ssaa_fs` draws"), "a lit_native site naming LIT_FORMAT passes: {joined}");
+    assert!(joined.contains("unclassified graphics pipeline (fragment module `brand_new_fs`)"), "{joined}");
+    assert!(joined.contains("(boyko_app/src/gpu_scene/mod.rs, sky_fs) names no pipeline"), "a stale row: {joined}");
 }
