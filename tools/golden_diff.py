@@ -3,11 +3,16 @@
 
 Stdlib only, Python >= 3.11 (``tomllib``). Subcommands:
 
-  compare A.bmp B.bmp [--max-delta N] [--max-changed-frac F] [--tiles K]
+  compare A.bmp B.bmp [--max-delta N] [--max-changed-frac F] [--tiles K] [--flat-tiles REF.bmp]
       Two BMPs (24/32-bpp BI_RGB, either row order, 24-bpp rows padded to 4 bytes): the max |Δ|
       per channel, the fraction of changed channel values, the K hottest 16x16 tiles. Exit 1 past
-      a given limit.
-  bound --bound hdr-transition --rounding CLASS [--format b10g11r11|rgba16f] PRE.bmp POST.bmp
+      a given limit. ``--flat-tiles`` grades only the 16x16 tiles (``--flat-tile-size``) of zero
+      variance in REF (render wave PX1a D-T1: GL-H1 classes 1 and 3).
+  bound --bound hdr-transition --rounding CLASS --format b10g11r11|rgba16f [--flat-tiles REF.bmp]
+        [--min-in-bound-frac F] PRE.bmp POST.bmp
+      ``--format`` is REQUIRED (PX1a D-T1: a default graded RGBA16F with B10G11R11's 16x wider ε).
+      ``--min-in-bound-frac`` passes when at least F of the graded channel values are in bound
+      (GL-H1 class 4); without it every one must be.
       AD-19's per-pixel bound for "this pixel went through one lit-format store before the same
       ACES-Hill + OETF tail" (ACES-Hill-specific: PX1a / PX1b). From the pre-move 8-bit value it
       inverts the OETF and the Hill fit in closed form, takes the Jacobian of OETF∘ACES at the
@@ -323,13 +328,41 @@ def write_bmp(path: str, w: int, h: int, rgb: list, bpp: int = 24) -> None:
         f.write(head + info + data)
 
 
-def compare_bmps(a: Bmp, b: Bmp, tile: int = 16):
+def flat_tile_mask(ref: Bmp, tile: int = 16):
+    """Per pixel, True iff its ``tile`` x ``tile`` tile of ``ref`` has zero variance (every pixel
+    equal) - GL-H1's flat tiles (render wave PX1a D-T1, classes 1 and 3)."""
+    flat = {}
+    for i, p in enumerate(ref.rgb):
+        key = ((i % ref.w) // tile, (i // ref.w) // tile)
+        first = flat.get(key)
+        if first is None:
+            flat[key] = p
+        elif first is not False and first != p:
+            flat[key] = False
+    return [flat[((i % ref.w) // tile, (i // ref.w) // tile)] is not False for i in range(ref.w * ref.h)]
+
+
+def load_mask(path, tile: int, w: int, h: int):
+    """The flat-tile mask of the REF BMP at ``path`` (None = every pixel), sized like the compared pair."""
+    if path is None:
+        return None
+    ref = read_bmp(path)
+    if (ref.w, ref.h) != (w, h):
+        raise ValueError(f"--flat-tiles reference is {ref.w}x{ref.h}, the compared images {w}x{h}")
+    return flat_tile_mask(ref, tile)
+
+
+def compare_bmps(a: Bmp, b: Bmp, tile: int = 16, mask=None):
     if (a.w, a.h) != (b.w, b.h):
         raise ValueError(f"extents differ: {a.w}x{a.h} vs {b.w}x{b.h}")
     max_d = [0, 0, 0]
     changed = 0
     tiles = {}
+    graded = 0
     for i, (pa, pb) in enumerate(zip(a.rgb, b.rgb)):
+        if mask is not None and not mask[i]:
+            continue
+        graded += 1
         for c in range(3):
             d = abs(pa[c] - pb[c])
             if d:
@@ -337,7 +370,7 @@ def compare_bmps(a: Bmp, b: Bmp, tile: int = 16):
                 max_d[c] = max(max_d[c], d)
                 key = ((i % a.w) // tile, (i // a.w) // tile)
                 tiles[key] = tiles.get(key, 0) + 1
-    frac = changed / (3 * a.w * a.h) if a.w * a.h else 0.0
+    frac = changed / (3 * graded) if graded else 0.0
     return max_d, frac, sorted(tiles.items(), key=lambda kv: -kv[1])
 
 
@@ -493,11 +526,13 @@ def receipt_words(receipt: dict):
 def cmd_compare(a):
     try:
         x, y = read_bmp(a.a), read_bmp(a.b)
-        max_d, frac, tiles = compare_bmps(x, y)
+        mask = load_mask(a.flat_tiles, a.flat_tile_size, x.w, x.h)
+        max_d, frac, tiles = compare_bmps(x, y, mask=mask)
     except (OSError, ValueError) as e:
         print(f"golden_diff compare: {e}", file=sys.stderr)
         return 2
-    print(f"max_delta r={max_d[0]} g={max_d[1]} b={max_d[2]} changed_frac={frac:.6f}")
+    scope = "all" if mask is None else f"flat_tiles={sum(mask)}px"
+    print(f"max_delta r={max_d[0]} g={max_d[1]} b={max_d[2]} changed_frac={frac:.6f} scope={scope}")
     for (tx, ty), n in tiles[: a.tiles]:
         print(f"tile ({tx},{ty}) changed={n}")
     if a.max_delta is not None and max(max_d) > a.max_delta:
@@ -514,23 +549,39 @@ def cmd_bound(a):
     try:
         pre, post = read_bmp(a.pre), read_bmp(a.post)
         class_epsilon(a.rounding, a.format)
+        if (pre.w, pre.h) != (post.w, post.h):
+            raise ValueError("extents differ")
+        mask = load_mask(a.flat_tiles, a.flat_tile_size, pre.w, pre.h)
     except (OSError, ValueError) as e:
         print(f"golden_diff bound: {e}", file=sys.stderr)
         return 2
-    if (pre.w, pre.h) != (post.w, post.h):
-        print("golden_diff bound: extents differ", file=sys.stderr)
+    if a.min_in_bound_frac is not None and not 0.0 <= a.min_in_bound_frac <= 1.0:
+        print("golden_diff bound: --min-in-bound-frac must lie in [0, 1]", file=sys.stderr)
         return 2
     fails = 0
+    graded = 0
     worst = 0.0
-    for p, q in zip(pre.rgb, post.rgb):
+    for i, (p, q) in enumerate(zip(pre.rgb, post.rgb)):
+        if mask is not None and not mask[i]:
+            continue
+        graded += 3
         b = pixel_bound(p, a.format, a.rounding)
         for c in range(3):
             d = abs(q[c] - p[c])
             if d > b[c]:
                 fails += 1
                 worst = max(worst, d - b[c])
-    n = pre.w * pre.h
-    print(f"bound hdr-transition rounding={a.rounding} format={a.format} failing_frac={fails / (3 * n):.6f} worst_excess={worst:.3f}")
+    if graded == 0:
+        print("golden_diff bound: no channel value graded (no flat tile in the reference)", file=sys.stderr)
+        return 2
+    in_frac = 1.0 - fails / graded
+    scope = "all" if mask is None else f"flat_tiles={graded // 3}px"
+    print(
+        f"bound hdr-transition rounding={a.rounding} format={a.format} failing_frac={fails / graded:.6f} "
+        f"in_bound_frac={in_frac:.6f} worst_excess={worst:.3f} scope={scope}"
+    )
+    if a.min_in_bound_frac is not None:
+        return 0 if in_frac >= a.min_in_bound_frac else 1
     return 1 if fails else 0
 
 
@@ -670,11 +721,17 @@ def main(argv=None) -> int:
     p.add_argument("--max-delta", type=int)
     p.add_argument("--max-changed-frac", type=float)
     p.add_argument("--tiles", type=int, default=8)
+    p.add_argument("--flat-tiles", help="REF.bmp: grade only the tiles of zero variance in REF")
+    p.add_argument("--flat-tile-size", type=int, default=16)
     p.set_defaults(fn=cmd_compare)
     p = sub.add_parser("bound")
     p.add_argument("--bound", required=True)
     p.add_argument("--rounding", required=True)
-    p.add_argument("--format", default="b10g11r11", choices=("b10g11r11", "rgba16f"))
+    # Required (render wave PX1a D-T1): a default grades one format's output with the other's epsilon.
+    p.add_argument("--format", required=True, choices=("b10g11r11", "rgba16f"))
+    p.add_argument("--flat-tiles", help="REF.bmp: grade only the tiles of zero variance in REF")
+    p.add_argument("--flat-tile-size", type=int, default=16)
+    p.add_argument("--min-in-bound-frac", type=float, help="pass when at least this fraction of channel values is in bound")
     p.add_argument("pre")
     p.add_argument("post")
     p.set_defaults(fn=cmd_bound)

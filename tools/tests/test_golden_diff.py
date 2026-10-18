@@ -110,7 +110,7 @@ class Bound(unittest.TestCase):
     def test_one_store_passes_under_n_and_z(self):
         for cls, mode in (("N", "ne"), ("Z", "tz")):
             a, b = self.pair(self.b10_store(mode))
-            self.assertEqual(gd.main(["bound", "--bound", "hdr-transition", "--rounding", cls, a, b]), 0, cls)
+            self.assertEqual(gd.main(["bound", "--bound", "hdr-transition", "--format", "b10g11r11", "--rounding", cls, a, b]), 0, cls)
 
     def test_the_tail_twice_fails_on_most_pixels(self):
         a, b = self.pair(lambda c: gd.tail(gd.tail(c)))
@@ -129,11 +129,73 @@ class Bound(unittest.TestCase):
         a, b = tmp("pre.bmp"), tmp("post.bmp")
         gd.write_bmp(a, self.w, self.h, pre)
         gd.write_bmp(b, self.w, self.h, post)
-        self.assertEqual(gd.main(["bound", "--bound", "hdr-transition", "--rounding", "N", a, b]), 1)
+        self.assertEqual(gd.main(["bound", "--bound", "hdr-transition", "--format", "b10g11r11", "--rounding", "N", a, b]), 1)
 
     def test_an_unknown_class_is_a_usage_error(self):
         a, b = self.pair(self.b10_store("ne"))
-        self.assertEqual(gd.main(["bound", "--bound", "hdr-transition", "--rounding", "Q", a, b]), 2)
+        self.assertEqual(gd.main(["bound", "--bound", "hdr-transition", "--format", "b10g11r11", "--rounding", "Q", a, b]), 2)
+
+
+class Flags(unittest.TestCase):
+    """Render wave PX1a D-T1 (ruling 67 W3): ``bound --format`` is required (its old default
+    ``b10g11r11`` grades RGBA16F with a 16x wider epsilon - a forgotten flag was a wrong green),
+    ``--flat-tiles REF.bmp`` restricts ``compare`` / ``bound`` to the tiles of zero variance in REF
+    (GL-H1 classes 1 and 3), and ``bound --min-in-bound-frac F`` passes when at least F of the
+    channel values are in bound (class 4). Red-first on the unmodified tool."""
+
+    def setUp(self):
+        # Two 16x16 tiles side by side: the left one flat in REF, the right one varied.
+        self.w, self.h = 32, 16
+        rnd = random.Random(23)
+        self.ref = [
+            (90, 120, 150) if (i % self.w) < 16 else (rnd.randrange(256), rnd.randrange(256), rnd.randrange(256))
+            for i in range(self.w * self.h)
+        ]
+        self.pre = [(100, 110, 120)] * (self.w * self.h)
+
+    def bmp(self, px, name):
+        p = tmp(name)
+        gd.write_bmp(p, self.w, self.h, px)
+        return p
+
+    def right_tile_moved(self):
+        return [p if (i % self.w) < 16 else (min(p[0] + 100, 255), p[1], p[2]) for i, p in enumerate(self.pre)]
+
+    def test_bound_requires_format(self):
+        a = self.bmp(self.pre, "pre.bmp")
+        with self.assertRaises(SystemExit) as cm:
+            gd.main(["bound", "--bound", "hdr-transition", "--rounding", "N", a, a])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_flat_tiles_restrict_the_bound(self):
+        ref, a, b = self.bmp(self.ref, "ref.bmp"), self.bmp(self.pre, "pre.bmp"), self.bmp(self.right_tile_moved(), "post.bmp")
+        base = ["bound", "--bound", "hdr-transition", "--format", "rgba16f", "--rounding", "Z"]
+        self.assertEqual(gd.main(base + [a, b]), 1, "the moved right tile fails everywhere")
+        self.assertEqual(gd.main(base + ["--flat-tiles", ref, a, b]), 0, "only REF's flat left tile is graded")
+
+    def test_flat_tiles_restrict_compare(self):
+        ref, a, b = self.bmp(self.ref, "ref.bmp"), self.bmp(self.pre, "pre.bmp"), self.bmp(self.right_tile_moved(), "post.bmp")
+        self.assertEqual(gd.main(["compare", "--max-delta", "0", a, b]), 1)
+        self.assertEqual(gd.main(["compare", "--max-delta", "0", "--flat-tiles", ref, a, b]), 0)
+
+    def test_min_in_bound_frac(self):
+        a = self.bmp(self.pre, "pre.bmp")
+        n = 3 * self.w * self.h
+
+        def moved(k):
+            px = list(self.pre)
+            for i in range(k):
+                r, g, b = px[i * 7]
+                px[i * 7] = (255, g, b)
+            return self.bmp(px, f"post{k}.bmp")
+
+        base = ["bound", "--bound", "hdr-transition", "--format", "rgba16f", "--rounding", "Z"]
+        few, many = moved(5), moved(20)
+        self.assertLess(5 / n, 0.005)
+        self.assertGreater(20 / n, 0.005)
+        self.assertEqual(gd.main(base + [a, few]), 1, "without the flag every channel must be in bound")
+        self.assertEqual(gd.main(base + ["--min-in-bound-frac", "0.995", a, few]), 0)
+        self.assertEqual(gd.main(base + ["--min-in-bound-frac", "0.995", a, many]), 1)
 
 
 class LitStep(unittest.TestCase):
