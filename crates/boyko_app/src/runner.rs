@@ -47,7 +47,7 @@ use boyko_render::{
     upload_instance_models, upload_light_table, upload_material_assets, upload_mesh_assets,
     backfill_vb_geometry_slots,
     upload_motion_cam_ring, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
-    upload_taa_ring, upload_texture_assets, upload_vb_instance_rows,
+    upload_post_final_ring, upload_taa_ring, upload_texture_assets, upload_vb_instance_rows,
 };
 #[cfg(all(windows, feature = "hwrt"))]
 use boyko_render::{
@@ -2251,6 +2251,33 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 }
             }
 
+            // 5d'. Render wave PX1a (D-G5): `post_final`'s constant buffer into the
+            //          renderer's `post_final.ubo[s]`, and the same eight words into the scene
+            //          (the ring seed of a (re)built target set, the receipt's `post_word*`).
+            //          TRANSITIONAL source until the `PostPlugin` commit: the tonemapper read from
+            //          `LightingConfig` through `try_resource` (a host composing no lighting
+            //          presents the default curve), exposure ratio 1.0, the extent `display` is
+            //          allocated at (`aa_extent`, the boot-fixed native extent).
+            let post_final_gpu = boyko_render::post::gpu::PostFinalGpu {
+                mode_words: (world.try_resource::<LightingConfig>().map_or(boyko_render::Tonemapper::default(), |c| c.tonemapper)
+                    as u32)
+                    << boyko_render::TONEMAP_MODE_SHIFT,
+                exposure_ratio: 1.0,
+                extent: [host.native_extent.0, host.native_extent.1],
+                _r: [0; 4],
+            };
+            if let Some(post_final_slot) = host.frame.post_final_ubo_slot(s) {
+                // SAFETY: `post_final_slot` is the renderer's `post_final.ubo[s]` — a live
+                // host-coherent `POST_FINAL_UBO_BYTES` (32 B, the bytes written) UNIFORM buffer
+                // minted by `GBufferTargets::create`, live until the targets are torn down
+                // (device-idle). The FENCED slot `s == token.slot()`: the borrowed
+                // `FrameWriteToken` proves this slot's in-flight fence was waited THIS frame (the
+                // previous occupant's `post_final` retired; the sibling frame binds the other slot).
+                unsafe {
+                    upload_post_final_ring(&token, post_final_slot, &post_final_gpu);
+                }
+            }
+
             // 6a. DrawBatch → GBufferMeshDraw: resolve each batch's mesh to its
             //     asset-table GPU buffers (the showcase's ~8070 conversion, driven
             //     by the ECS gather instead of a test-built list). R4:
@@ -2945,6 +2972,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 particle_inputs,
                 // Render wave RD1: the test-only merge disarm (`false` in every production run).
                 disarm_sdf_merge,
+                boyko_render::post_final_words(&post_final_gpu),
                 ctx,
             );
 

@@ -1252,6 +1252,13 @@ impl Renderer<'_> {
         // SAFETY: recording is open; `record_forward_pass` records the graph's derived
         // COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL barrier for the "present_sample" pass
         // into `cmd`.
+        // Render wave PX1a: the post seam's tail (`lit` → `display`, Forward arms no AA), then
+        // `present_sample` (`display` → SHADER_READ_ONLY_OPTIMAL for the blit).
+        self.record_forward_pass(plan.post.post_final, cmd, targets, forward, scene, fi);
+        // SAFETY: recording is open, outside any rendering scope; `post_final`'s derived barriers
+        // were just emitted through the Forward sink; `targets` were created for `scene`;
+        // `display` is `aa_extent` large, which is `present_extent` on Forward (no SSAA).
+        unsafe { self.record_post_final(cmd, targets, scene, present_extent, fi) };
         self.record_forward_pass(plan.present_sample, cmd, targets, forward, scene, fi);
 
         // Render wave PX0: `ZONE_POST_PRESENT` brackets the blit from the swapchain barrier
@@ -1364,13 +1371,16 @@ impl Renderer<'_> {
             let sources = [
                 (super::super::frame_driver::ImageDumpName::ForwardDepth, Some(&forward.depth[fi]), present_extent),
                 (super::super::frame_driver::ImageDumpName::Lit, Some(&targets.lit[fi]), present_extent),
+                (super::super::frame_driver::ImageDumpName::Display, Some(&targets.display), present_extent),
             ];
             // SAFETY: recording is open and no render scope is active (the blit's
             // `cmd_end_rendering` is above); `record_forward_pass` just recorded the dump pass's
-            // derived barriers, so each declared source is in its `plan.layouts` layout; both
-            // sources are THIS slot's ring images at `present_extent`, and both carry
-            // `TRANSFER_SRC` usage unconditionally (`ForwardTargets::build`'s depth, the `lit`
-            // ring); the requested staging meets the image-dump clause of this fn's `# Safety`.
+            // derived barriers, so each declared source is in its `plan.layouts` layout; the depth
+            // and `lit` sources are THIS slot's ring images at `present_extent` with `TRANSFER_SRC`
+            // usage unconditionally (`ForwardTargets::build`'s depth, the `lit` ring), `display`
+            // is the single image at `present_extent` (== `aa_extent` on Forward) with
+            // `TRANSFER_SRC` because the dump was armed at boot (`dump_usage`); the requested
+            // staging meets the image-dump clause of this fn's `# Safety`.
             unsafe { self.record_image_dump_copies(cmd, dump, &sources, scene.engine_frame_index) };
             if let Some(restore) = dump.restore {
                 self.record_forward_pass(restore, cmd, targets, forward, scene, fi);

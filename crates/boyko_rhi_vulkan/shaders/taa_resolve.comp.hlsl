@@ -100,8 +100,8 @@
 // R16G16B16A16_SFLOAT — RGB = accumulated color, A = confidence (see the module doc).
 [[vk::image_format("rgba16f")]] RWTexture2D<float4> gHistIn  : register(u2);
 [[vk::image_format("rgba16f")]] RWTexture2D<float4> gHistOut : register(u3);
-// binding 4 (WRITE): the final AA output `aa_out` (R8G8B8A8_UNORM) — the present-blit's input.
-[[vk::image_format("rgba8")]] RWTexture2D<float4> gAaOut : register(u4);
+// binding 4: none since render wave PX1a — the resolve's output is `gHistOut` alone, which the
+// post seam's `post_final` reads as its scene input (the old `gAaOut` display-referred copy retired).
 
 // binding 5: the TAA tunables UBO — byte-mirrors `boyko_render::aa_config::ResolvedTaa` (48 B,
 // std140: three vec4 slots), owner-retunable each frame (live). Grew 16 -> 48 B at rung T2
@@ -410,7 +410,6 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // `blend_factor == 1.0` (full replace), confidence seeded to 1.0. No NaN risk: `cur_lit`
         // is the resolve's own finite LDR output, un-combined with any division here.
         gHistOut[coord] = float4(cur_lit, 1.0);
-        gAaOut[coord] = float4(cur_lit, 1.0);
         return;
     }
 
@@ -517,5 +516,4 @@ void main(uint3 tid : SV_DispatchThreadID) {
     }
 
     gHistOut[coord] = float4(out_color, confidence);
-    gAaOut[coord] = float4(out_color, 1.0);
 }

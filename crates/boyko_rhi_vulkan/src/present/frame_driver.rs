@@ -1401,10 +1401,22 @@ pub const RECEIPT_CONFIG_KEYS: [&str; RECEIPT_CONFIG_LEN] = [
     // Render wave PX0 (D-F1): the classified VB producer and the light table's SKY row.
     "vb_classified",
     "light_sky",
+    // Render wave PX1a (D-O3, DS-H4 (c)): `post_final`'s eight constant-buffer words
+    // (`GBufferScene::post_final_words`), spelled here because no production crate of this lane
+    // depends on `boyko_shaderdsl`; `tests/post_final_wiring.rs` holds them equal to
+    // `boyko_shaderdsl::post::POST_FINAL_RECEIPT_KEYS`.
+    "post_word0",
+    "post_word1",
+    "post_word2",
+    "post_word3",
+    "post_word4",
+    "post_word5",
+    "post_word6",
+    "post_word7",
 ];
 
 /// How many `[config]` entries a receipt carries (the length of [`RECEIPT_CONFIG_KEYS`]).
-pub const RECEIPT_CONFIG_LEN: usize = 48;
+pub const RECEIPT_CONFIG_LEN: usize = 56;
 
 /// One frame's `[config]` values, index for index with [`RECEIPT_CONFIG_KEYS`] (`bool`s as 0/1).
 /// POD: a burst copies one per presented frame.
@@ -1436,6 +1448,7 @@ impl ReceiptConfig {
             (scene.path_vb_hwrt_shadow(), scene.tlas.is_some(), scene.shadow.is_some());
         #[cfg(not(feature = "hwrt"))]
         let (vb_hwrt_shadow, tlas, shadow_vis) = (false, false, false);
+        let w = scene.post_final_words;
         let values = [
             rp.path,
             rp.legs,
@@ -1490,6 +1503,14 @@ impl ReceiptConfig {
             u32::from(scene.hzb_dump_declared()),
             u32::from(scene.path_vb_fused() && scene.vb_use_classified),
             u32::from(scene.light_sky),
+            w[0],
+            w[1],
+            w[2],
+            w[3],
+            w[4],
+            w[5],
+            w[6],
+            w[7],
         ];
         Self { values }
     }
@@ -1582,15 +1603,32 @@ pub enum ImageDumpName {
     ForwardDepth = 4,
     /// VB `vb_depth` (D32 reverse-Z).
     VbDepth = 5,
+    /// Render wave PX1a: `display` — `post_final`'s `R8G8B8A8_UNORM` output (every path).
+    Display = 6,
+    /// Render wave PX1a: `lit_native` — the SSAA downsample's output in `lit`'s format (Deferred
+    /// and VB, under SSAA).
+    LitNative = 7,
 }
 
 /// How many [`ImageDumpName`]s exist.
-pub const IMAGE_DUMP_MAX: usize = 6;
+pub const IMAGE_DUMP_MAX: usize = 8;
+
+// `declare_image_dump` and `ImageDumpPlan` carry the requested names as the bits of a `u8`
+// (`1 << name`): a ninth name would overflow the shift (critique O3).
+const _: () = assert!(IMAGE_DUMP_MAX <= 8, "a dump name past bit 7 overflows the u8 name mask");
 
 impl ImageDumpName {
     /// Every name, index for index with `name as usize`.
-    pub const ALL: [Self; IMAGE_DUMP_MAX] =
-        [Self::DeferredDepth, Self::Viewt, Self::Lit, Self::TaaHist, Self::ForwardDepth, Self::VbDepth];
+    pub const ALL: [Self; IMAGE_DUMP_MAX] = [
+        Self::DeferredDepth,
+        Self::Viewt,
+        Self::Lit,
+        Self::TaaHist,
+        Self::ForwardDepth,
+        Self::VbDepth,
+        Self::Display,
+        Self::LitNative,
+    ];
 
     /// The literal graph name — the env word and the dump file's stem.
     pub const fn graph_name(self) -> &'static str {
@@ -1601,6 +1639,8 @@ impl ImageDumpName {
             Self::TaaHist => "taa_hist",
             Self::ForwardDepth => "forward_depth",
             Self::VbDepth => "vb_depth",
+            Self::Display => "display",
+            Self::LitNative => "lit_native",
         }
     }
 
@@ -1615,15 +1655,25 @@ impl ImageDumpName {
     }
 
     /// The bytes per texel the instrument sizes this name's staging for: 8 for `taa_hist`
-    /// (RGBA16F), 4 for every other name. The recorder re-bounds every copy against the texel
-    /// size of the image's actual format, so a format change can only skip a copy, never overrun.
+    /// (RGBA16F), `LIT_FORMAT`'s texel for `lit` and `lit_native` (render wave PX1a D-O2: derived
+    /// from the format, never a literal — a staging smaller than the image's texel makes the
+    /// recorder skip the copy, which would leave every (D) gate on `lit` vacuous), 4 for every
+    /// other name. The recorder re-bounds every copy against the texel size of the image's actual
+    /// format, so a format change can only skip a copy, never overrun.
     pub const fn staging_texel_bytes(self) -> u64 {
         match self {
             Self::TaaHist => 8,
+            Self::Lit | Self::LitNative => LIT_TEXEL_BYTES,
             _ => 4,
         }
     }
 }
+
+/// `LIT_FORMAT`'s texel size, as the image dump stages it.
+const LIT_TEXEL_BYTES: u64 = match image_dump_texel_bytes(super::targets::LIT_FORMAT.as_i32()) {
+    Some(b) => b as u64,
+    None => panic!("invariant: the image dump decodes LIT_FORMAT"),
+};
 
 /// The texel size of a `VkFormat` the image dump can copy, or `None` for a format it does not
 /// decode (the copy is then skipped and reported as not copied).

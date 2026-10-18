@@ -14,6 +14,7 @@ use boyko_render::{ResolvedDdgi, ResolvedRenderPath};
 use boyko_rhi::Format;
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::{VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM};
+use boyko_rhi_vulkan::present::LIT_FORMAT;
 use boyko_rhi_vulkan::swapchain::{
     FRAMES_IN_FLIGHT, GBufferFrame, Renderer, Surface, Swapchain, SwapchainError,
 };
@@ -339,8 +340,13 @@ const SSAA_VRAM_FRACTION_DEN: u64 = 2;
 /// `FRAMES_IN_FLIGHT`(2) = 66 B/px at NATIVE resolution, scaled by `scale²` (area) for
 /// the composite extent; `feature = "hwrt"` adds the RT ring cost (≈ 28 B/px × FIF(2)
 /// at native, same `scale²` scaling).
+///
+/// Render wave PX1a (D-H1, Q11): the 33 B/px count holds `lit` at 4 B/px; `lit` in `LIT_FORMAT`
+/// adds [`LIT_HDR_EXTRA_BYTES_PER_PX`] per FIF slot at the composite extent, and the post seam's
+/// two native singles add [`POST_SEAM_NATIVE_BYTES_PER_PX`] once at the native extent — both
+/// derived from the format constants, so a later format move moves the estimate with it.
 const fn ssaa_ring_bytes_estimate(native: (u32, u32), scale: u32) -> u64 {
-    const CORE_BYTES_PER_NATIVE_PX: u64 = 66;
+    const CORE_BYTES_PER_NATIVE_PX: u64 = 66 + LIT_HDR_EXTRA_BYTES_PER_PX * FRAMES_IN_FLIGHT as u64;
     #[cfg(feature = "hwrt")]
     const PER_NATIVE_PX: u64 = CORE_BYTES_PER_NATIVE_PX + 28;
     #[cfg(not(feature = "hwrt"))]
@@ -348,5 +354,23 @@ const fn ssaa_ring_bytes_estimate(native: (u32, u32), scale: u32) -> u64 {
 
     let native_px = native.0 as u64 * native.1 as u64;
     let scale_sq = (scale as u64) * (scale as u64);
-    native_px * scale_sq * PER_NATIVE_PX
+    native_px * scale_sq * PER_NATIVE_PX + native_px * POST_SEAM_NATIVE_BYTES_PER_PX
 }
+
+/// `LIT_FORMAT`'s texel size, as the image dump (the one texel table the renderer exports)
+/// states it.
+const LIT_TEXEL_BYTES: u64 = match boyko_rhi_vulkan::present::image_dump_texel_bytes(LIT_FORMAT.as_i32()) {
+    Some(b) => b as u64,
+    None => panic!("invariant: the texel table knows LIT_FORMAT"),
+};
+
+/// Render wave PX1a (D-H1): the per-composite-pixel bytes `lit` gains over the 4 B/px RGBA8 the
+/// core-ring count assumed, per FIF slot.
+const LIT_HDR_EXTRA_BYTES_PER_PX: u64 = LIT_TEXEL_BYTES - 4;
+
+/// Render wave PX1a (D-H1): the post seam's native singles under SSAA — `lit_native`
+/// (`LIT_FORMAT`) + `display` (`R8G8B8A8_UNORM`, 4 B).
+const POST_SEAM_NATIVE_BYTES_PER_PX: u64 = LIT_TEXEL_BYTES + 4;
+
+// The hand count (RGBA16F = 8 B, RGBA8 = 4 B): +4 B/px per lit slot, 8 + 4 = 12 B/px native.
+const _: () = assert!(LIT_HDR_EXTRA_BYTES_PER_PX == 4 && POST_SEAM_NATIVE_BYTES_PER_PX == 12);

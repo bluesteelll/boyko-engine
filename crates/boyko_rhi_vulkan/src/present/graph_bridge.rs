@@ -147,9 +147,12 @@ pub(crate) struct GbufferPassPlan {
     /// every other AA mode's `aa_out`). `Some` iff `scene.taa.is_some()` (the "member is Some
     /// iff its body is recorded" invariant).
     pub(crate) taa_resolve: Option<crate::framegraph::PassId>,
-    /// The always-present present-sample pass: only the `lit` GENERAL→SHADER_READ_ONLY
-    /// transition (site 5c). The swapchain WSI barriers stay hand-recorded.
+    /// The always-present present-sample pass: since render wave PX1a, `display`'s
+    /// GENERAL→SHADER_READ_ONLY transition for the present blit (site 5c). The swapchain WSI
+    /// barriers stay hand-recorded.
     pub(crate) present_sample: crate::framegraph::PassId,
+    /// Render wave PX1a: the post seam, declared before `present_sample`.
+    pub(crate) post: PostSeamPlan,
     /// Render wave RD1 (defect R0b): the SDF depth merge, declared IMMEDIATELY before
     /// `particle_draw` — `Some` iff [`GBufferScene::sdf_depth_merge`] is not `Absent`.
     pub(crate) sdf_depth_merge: Option<crate::framegraph::PassId>,
@@ -771,6 +774,8 @@ pub(crate) struct ForwardPassPlan {
     /// source layout). The swapchain WSI barriers stay hand-recorded, exactly like
     /// [`GbufferPassPlan::present_sample`].
     pub(crate) present_sample: crate::framegraph::PassId,
+    /// Render wave PX1a: the post seam (`post_final` only on Forward).
+    pub(crate) post: PostSeamPlan,
     /// Render wave RD1 (defect R0b): the SDF depth merge, declared IMMEDIATELY before
     /// `particle_draw` — `Some` iff [`GBufferScene::sdf_depth_merge`] is not `Absent`.
     pub(crate) sdf_depth_merge: Option<crate::framegraph::PassId>,
@@ -829,13 +834,16 @@ pub(crate) struct ForwardPassPlan {
 /// each leg (mirroring the TAA-append precedent immediately above), so every EARLIER ResId is
 /// byte-unchanged. No pass accesses them unless the SSAO à-trous chain's per-frame level count
 /// (`SsaoActivation::atrous_levels`) is `> 0` ⇒ byte-identical on the `N == 0` OFF path.
+///
+/// Render wave PX1a appends `display` + `lit_native` (D-G1), LAST, unconditionally — ResId 16/17
+/// (`not(hwrt)`) or 22/23 (`hwrt`). No pass names `lit_native` off SSAA.
 #[cfg(feature = "hwrt")]
-pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 22;
-/// See the `hwrt` variant: a `not(hwrt)` build keeps the count at 16 (11 base + `pbr` + TAA's
-/// `taa_hist`/`taa_hist_read` + the SSAO à-trous `ssao_ring_a`/`ssao_ring_b`, no shadow-vis
-/// targets, byte-unchanged on every ResId 0..10).
+pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 24;
+/// See the `hwrt` variant: a `not(hwrt)` build keeps the count at 18 (11 base + `pbr` + TAA's
+/// `taa_hist`/`taa_hist_read` + the SSAO à-trous `ssao_ring_a`/`ssao_ring_b` + PX1a's
+/// `display`/`lit_native`, no shadow-vis targets, byte-unchanged on every ResId 0..10).
 #[cfg(not(feature = "hwrt"))]
-pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 16;
+pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 18;
 
 /// The REAL [`BarrierSink`](crate::framegraph::BarrierSink) for the whole G-buffer
 /// frame (Steps 1c–1e): it resolves each derived barrier's logical `res` → the current
@@ -955,6 +963,135 @@ impl MaterialTableRes {
     fn read(self, g: &mut crate::framegraph::FrameGraph, stage: u32) {
         self.0.read(g, stage, VK_ACCESS_SHADER_READ_BIT);
     }
+}
+
+/// Render wave PX1a (D-G2, D-G3, D-G4): the post seam's passes as one declarator declared them —
+/// `[ssaa_downsample] → post_final → [cas]`, followed by the plan's own `present_sample`. Shared
+/// by the three plans because the three declarators declare the seam through one function,
+/// [`declare_post_seam`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PostSeamPlan {
+    /// The SSAA downsample (`lit` → `lit_native`), `Some` iff `scene.ssaa` is armed.
+    pub(crate) ssaa_downsample: Option<crate::framegraph::PassId>,
+    /// The tail dispatch (scene input → `display`), every frame.
+    pub(crate) post_final: crate::framegraph::PassId,
+    /// CAS (`display` → `aa_out`), `Some` iff `scene.rcas` is armed.
+    pub(crate) cas: Option<crate::framegraph::PassId>,
+}
+
+/// Render wave PX1a (D-G1): `display` — single, `FrameLocal`, seeded at
+/// `SHADER_READ_ONLY_OPTIMAL` for its readers (`present_sample`'s FRAGMENT read, the CAS COMPUTE
+/// read), widened with `TRANSFER` under the image dump. Declared LAST in each declarator's image
+/// block (an append moves no earlier `ResId`).
+fn declare_display(g: &mut crate::framegraph::FrameGraph, dump_widen: bool) -> crate::framegraph::SeededImage {
+    crate::framegraph::SeededImage::declare(
+        g,
+        "display",
+        crate::framegraph::ResSync::seeded_readers_at_layout(
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        ),
+        1,
+        crate::framegraph::SeedContent::FrameLocal,
+        dump_widen,
+    )
+}
+
+/// Render wave PX1a (D-G1): `lit_native` — single, `FrameLocal`, seeded at `GENERAL` for its one
+/// reader (`post_final`'s COMPUTE read). Declared on EVERY Deferred / VB frame right after
+/// `display` so the `ResId` order is fixed; no pass names it unless SSAA is armed, and its sink
+/// slot is `VkImage::NULL` then (inert — the `taa_hist` precedent).
+fn declare_lit_native(g: &mut crate::framegraph::FrameGraph, dump_widen: bool) -> crate::framegraph::SeededImage {
+    crate::framegraph::SeededImage::declare(
+        g,
+        "lit_native",
+        crate::framegraph::ResSync::seeded_readers_at_layout(
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        ),
+        1,
+        crate::framegraph::SeedContent::FrameLocal,
+        dump_widen,
+    )
+}
+
+/// Render wave PX1a (D-G2..D-G4): declares the post seam after the frame's last `lit` producer
+/// (the particle draw, the TAA resolve) and then `present_sample` — `[ssaa_downsample] →
+/// post_final → [cas] → present_sample`, the order every recorder records. Returns the seam and
+/// the `present_sample` pass.
+///
+/// - `ssaa_downsample` reads `lit` (FRAGMENT, `SHADER_READ_ONLY`) and initialises `lit_native` as
+///   its colour attachment (the recorder clears on load).
+/// - `post_final`'s FIRST declared access is its scene input — `POST_FINAL_BINDINGS`' one
+///   fetching row, `gScene` @0 (D-O1) — read at COMPUTE / `GENERAL` (`SampledImageAtGeneral`):
+///   `taa_hist` (`taa_hist_res`, the `[fi]` write slot) under TAA, `lit_native` under SSAA, `lit`
+///   otherwise; then the whole-extent storage write of `display`, its initialiser.
+/// - `cas` reads `display` as a STORAGE image at `GENERAL` (D-G3): declared before
+///   `present_sample`, so the graph orders `post_final`'s write before both readers.
+/// - `present_sample` reads `display` at FRAGMENT / `SHADER_READ_ONLY` — its last declared access
+///   on every configuration, so `display` ends every frame at its seed's layout. The FXAA / SMAA
+///   passes after it stay hand-recorded FRAGMENT reads inside that barrier's scope.
+fn declare_post_seam(
+    g: &mut crate::framegraph::FrameGraph,
+    scene: &GBufferScene<'_>,
+    lit: crate::framegraph::ResId,
+    taa_hist_res: Option<crate::framegraph::ResId>,
+    display: crate::framegraph::SeededImage,
+    lit_native: Option<crate::framegraph::SeededImage>,
+) -> (PostSeamPlan, crate::framegraph::PassId) {
+    use crate::framegraph::SubRange;
+    let ssaa_native = scene.ssaa.is_some().then(|| {
+        lit_native.expect("invariant: SSAA is armed only on a declarator that declares lit_native")
+    });
+    let ssaa_downsample = ssaa_native.map(|native| {
+        let p = g.add_pass("ssaa_downsample");
+        g.image_access(
+            lit,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            SubRange::COLOR,
+        );
+        native.init_attachment(
+            g,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            SubRange::COLOR,
+        );
+        p
+    });
+    let post_final = g.add_pass("post_final");
+    let (stage, access, layout) =
+        (VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+    match (scene.taa.is_some(), ssaa_native) {
+        (true, _) => g.image_access(
+            taa_hist_res.expect("invariant: TAA is armed only on a declarator that declares taa_hist"),
+            stage,
+            access,
+            layout,
+            SubRange::COLOR,
+        ),
+        (false, Some(native)) => native.read(g, stage, access, layout, SubRange::COLOR),
+        (false, None) => g.image_access(lit, stage, access, layout, SubRange::COLOR),
+    }
+    display.init_storage_full(g, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, SubRange::COLOR);
+    let cas = scene.rcas.is_some().then(|| {
+        let p = g.add_pass("cas");
+        display.read(g, stage, access, layout, SubRange::COLOR);
+        p
+    });
+    let present_sample = g.add_pass("present_sample");
+    display.read(
+        g,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        SubRange::COLOR,
+    );
+    (PostSeamPlan { ssaa_downsample, post_final, cas }, present_sample)
 }
 
 /// OBS (D, H0 Scope 6): the declared `image_dump` pass of a request frame — the names it copies
@@ -1219,6 +1356,11 @@ fn gbuffer_sink(
         // no pass names either ResId when `atrous_levels == 0`).
         slot!("ssao_ring_a", Ring, targets.ssao_ring_a.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
         slot!("ssao_ring_b", Ring, targets.ssao_ring_b.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        // Render wave PX1a: the post seam's two singles, appended LAST — one image both frames in
+        // flight share (ordered by their seeds). `lit_native` is `NULL` off SSAA (inert: no pass
+        // names its ResId then).
+        slot!("display", Single, targets.display.image),
+        slot!("lit_native", Single, targets.lit_native.as_ref().map_or(VkImage::NULL, |t| t.image)),
     ]);
     #[cfg(not(feature = "hwrt"))]
     let fixed = [
@@ -1293,6 +1435,8 @@ fn forward_sink(
         // Render wave RD1: the `gViewT` lane the VIEWT marcher writes and the SDF depth merge reads
         // — the core per-FIF ring every path allocates (`sdf_forward_set` binds it at @13).
         slot!("viewt", Ring, targets.viewt[fi].image),
+        // Render wave PX1a: `display`, LAST.
+        slot!("display", Single, targets.display.image),
     ]);
     let mut buffers = SinkFill::new(VkBuffer::NULL);
     buffers.push_all(&[
@@ -1393,6 +1537,10 @@ fn vb_sink(
         // allocated on a VB boot (`VbTargets::sdf_term`); with SV0 disarmed no pass names
         // its ResId, so the live handle is as inert as a NULL would be.
         slot!("sdf_term", Ring, vb.sdf_term[fi].image),
+        // Render wave PX1a: the post seam's two singles, LAST in both arms (the Deferred sink's
+        // own entries).
+        slot!("display", Single, targets.display.image),
+        slot!("lit_native", Single, targets.lit_native.as_ref().map_or(VkImage::NULL, |t| t.image)),
     ]);
     // Particles P0: the ten-buffer particle tail is appended by `vb_sink_buffers`, which
     // takes the unconditional prefix below and returns the full-length array. Every VB
@@ -1486,13 +1634,13 @@ fn vb_sink(
 const _: () = {
     #[cfg(feature = "hwrt")]
     assert!(
-        FRAMEGRAPH_IMAGE_COUNT == 22,
-        "hwrt: 11 base + pbr (textured-PBR T6a) + shadow_vis + shadow_vis2 + motion_vec + shadow_temporal_hist + temporal_out + shadow_temporal_hist_read + taa_hist + taa_hist_read + ssao_ring_a + ssao_ring_b"
+        FRAMEGRAPH_IMAGE_COUNT == 24,
+        "hwrt: 11 base + pbr (textured-PBR T6a) + shadow_vis + shadow_vis2 + motion_vec + shadow_temporal_hist + temporal_out + shadow_temporal_hist_read + taa_hist + taa_hist_read + ssao_ring_a + ssao_ring_b + display + lit_native"
     );
     #[cfg(not(feature = "hwrt"))]
     assert!(
-        FRAMEGRAPH_IMAGE_COUNT == 16,
-        "not(hwrt): the 11 base images + pbr (textured-PBR T6a) + taa_hist + taa_hist_read + ssao_ring_a + ssao_ring_b, no shadow-vis targets"
+        FRAMEGRAPH_IMAGE_COUNT == 18,
+        "not(hwrt): the 11 base images + pbr (textured-PBR T6a) + taa_hist + taa_hist_read + ssao_ring_a + ssao_ring_b + display + lit_native, no shadow-vis targets"
     );
 };
 
@@ -1695,7 +1843,7 @@ pub(crate) struct ForwardBarrierSink<'a> {
 /// [`ForwardBarrierSink::images`]'s doc for the fixed order. A PRIVATE, per-frame ResId space
 /// (Forward's `self.frame_graph` is fully `reset()` + re-declared every frame, so this constant
 /// has no relationship to [`FRAMEGRAPH_IMAGE_COUNT`] and never grows it).
-const FORWARD_IMAGE_COUNT: usize = 5;
+const FORWARD_IMAGE_COUNT: usize = 6;
 
 /// The length of [`ForwardBarrierSink::buffers`] — the five unconditional Forward buffers plus
 /// the [`PARTICLE_BUFFER_COUNT`] particle tail and the [`MATERIAL_TAIL_BUFFER_COUNT`] material
@@ -2136,6 +2284,10 @@ impl Renderer<'_> {
         // barriers on them ⇒ inert, byte-identical.
         let ssao_ring_a = g.add_image("ssao_ring_a");
         let ssao_ring_b = g.add_image("ssao_ring_b");
+        // Render wave PX1a (D-G1): the post seam's two singles, appended LAST (every earlier ResId
+        // unchanged; the buffers begin at the new `FRAMEGRAPH_IMAGE_COUNT`).
+        let display = declare_display(g, self.obs_dump_widen);
+        let lit_native = declare_lit_native(g, self.obs_dump_widen);
         // --- Buffers (ResId FRAMEGRAPH_IMAGE_COUNT..+4) — ALL single instances shared by both in-flight
         // frames (audit B-002). light_table/tiles/grid/index end their frame consumed
         // by a COMPUTE read (resolve / marcher), so a dirty-frame re-write must order
@@ -3174,8 +3326,8 @@ impl Renderer<'_> {
         // declares no pass ⇒ the graph routes ZERO barriers on `taa_hist`/`taa_hist_read` ⇒
         // byte-identical (the same "declared ahead of its first consumer" discipline
         // `shadow_vis`/`motion_vec` used between their ResId declaration rung and their first
-        // consuming pass). `aa_out`'s own barriers are hand-recorded in `record_taa` (it is not a
-        // framegraph-tracked resource — see [`FRAMEGRAPH_IMAGE_COUNT`]'s doc).
+        // consuming pass). Since render wave PX1a the resolve writes only `taa_hist`, which
+        // `post_final` reads as the scene input (`declare_post_seam`).
         let taa_resolve_pass = scene.taa.is_some().then(|| {
             let taa_resolve = g.add_pass("taa_resolve");
             // C2 fix: `lit` @0 is bound as a COMBINED_IMAGE_SAMPLER, whose descriptor records
@@ -3213,17 +3365,12 @@ impl Renderer<'_> {
             taa_resolve
         });
 
-        // Pass `present_sample` (site 5c): lit GENERAL→SHADER_READ_ONLY for the
-        // present-blit's FRAGMENT sample. The swapchain WSI barriers (sites 7/9) stay
-        // hand-recorded, so the swapchain image is NOT a graph resource here.
-        let present_sample = g.add_pass("present_sample");
-        g.image_access(
-            lit,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            VK_ACCESS_SHADER_READ_BIT,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            SubRange::COLOR,
-        );
+        // Render wave PX1a: the post seam, then pass `present_sample` (site 5c) — `display`
+        // GENERAL→SHADER_READ_ONLY for the present-blit's FRAGMENT sample. The swapchain WSI
+        // barriers (sites 7/9) stay hand-recorded, so the swapchain image is NOT a graph
+        // resource here.
+        let (post, present_sample) =
+            declare_post_seam(g, scene, lit, Some(taa_hist), display, Some(lit_native));
 
         // OBS (D, H0 Scope 6): the `image_dump` pass, LAST — on a `BOYKO_IMAGE_DUMP` request
         // frame only (`None` on every other frame of every run: no pass, no barrier).
@@ -3236,6 +3383,8 @@ impl Renderer<'_> {
                     (super::frame_driver::ImageDumpName::Viewt, viewt),
                     (super::frame_driver::ImageDumpName::Lit, lit),
                     (super::frame_driver::ImageDumpName::TaaHist, taa_hist),
+                    (super::frame_driver::ImageDumpName::Display, display.id()),
+                    (super::frame_driver::ImageDumpName::LitNative, lit_native.id()),
                 ],
             ),
             None => None,
@@ -3294,6 +3443,7 @@ impl Renderer<'_> {
             resolve,
             taa_resolve: taa_resolve_pass,
             present_sample,
+            post,
             sdf_depth_merge,
             particle: particle_plan,
             image_dump,
@@ -3355,12 +3505,15 @@ impl Renderer<'_> {
         // the VIEWT marcher writes it (an armed boot's SDF leg), so an unarmed frame derives no
         // barrier on it.
         let viewt = g.add_image("viewt");
+        // Render wave PX1a (D-G1): `display`, appended LAST (Forward has no SSAA, so no
+        // `lit_native`).
+        let display = declare_display(g, self.obs_dump_widen);
         // Code-review P2-2: pins the declared image count against `FORWARD_IMAGE_COUNT`
         // (`ForwardBarrierSink`'s doc) — a silent divergence here would offset every buffer ResId
         // (`res.index() - FORWARD_IMAGE_COUNT` in `ForwardBarrierSink::buffer_barriers`) without
         // any other compile-time signal.
         debug_assert_eq!(
-            viewt.index() + 1,
+            display.id().index() + 1,
             FORWARD_IMAGE_COUNT,
             "invariant: declare_forward_graph's image declarations must match FORWARD_IMAGE_COUNT"
         );
@@ -3778,14 +3931,9 @@ impl Renderer<'_> {
             ));
         }
 
-        let present_sample = g.add_pass("present_sample");
-        g.image_access(
-            lit,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            VK_ACCESS_SHADER_READ_BIT,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            SubRange::COLOR,
-        );
+        // Render wave PX1a: the post seam (`post_final` only — Forward arms no AA) and
+        // `present_sample` (`display` for the blit).
+        let (post, present_sample) = declare_post_seam(g, scene, lit, None, display, None);
 
         // OBS (D, H0 Scope 6): the `image_dump` pass, LAST — on a `BOYKO_IMAGE_DUMP` request
         // frame only (`None` on every other frame of every run: no pass, no barrier).
@@ -3796,6 +3944,7 @@ impl Renderer<'_> {
                 &[
                     (super::frame_driver::ImageDumpName::ForwardDepth, forward_depth),
                     (super::frame_driver::ImageDumpName::Lit, lit),
+                    (super::frame_driver::ImageDumpName::Display, display.id()),
                 ],
             ),
             None => None,
@@ -3837,6 +3986,7 @@ impl Renderer<'_> {
             forward_opaque,
             sdf_forward_march,
             present_sample,
+            post,
             sdf_depth_merge,
             particle: particle_plan,
             image_dump,
@@ -4317,6 +4467,8 @@ pub(crate) struct VbPassPlan {
     /// `sdf_forward_march` when it ran, else `vb_sky`). The swapchain WSI barriers stay
     /// hand-recorded, exactly like [`ForwardPassPlan::present_sample`].
     pub(crate) present_sample: crate::framegraph::PassId,
+    /// Render wave PX1a: the post seam, declared before `present_sample`.
+    pub(crate) post: PostSeamPlan,
     /// TAA-under-VB: the `vb_viewt` `gViewT`-producer compute pass
     /// (`viewt_from_depth_rz.comp.hlsl`) — reads `vb_depth` (COMPUTE/SHADER_READ_ONLY, the
     /// raster barrier-out), first-touch writes `viewt` (UNDEFINED→GENERAL). `Some` iff
@@ -4325,8 +4477,8 @@ pub(crate) struct VbPassPlan {
     pub(crate) viewt_from_depth: Option<crate::framegraph::PassId>,
     /// TAA-under-VB: the TAA history-resolve compute pass — the VB sibling of
     /// [`GbufferPassPlan::taa_resolve`], identical access list (`lit` CIS SHADER_READ_ONLY +
-    /// `viewt`/`taa_hist_read` GENERAL reads + `taa_hist` GENERAL write; `aa_out`/`taa_resolved`
-    /// hand-recorded in `record_taa`/`record_rcas`). `Some` iff `scene.taa.is_some()`.
+    /// `viewt`/`taa_hist_read` GENERAL reads + `taa_hist` GENERAL write; since render wave PX1a
+    /// `post_final` reads `taa_hist`). `Some` iff `scene.taa.is_some()`.
     pub(crate) taa_resolve: Option<crate::framegraph::PassId>,
     /// Render wave RD1 (defect R0b): the SDF depth merge, declared IMMEDIATELY before
     /// `particle_draw` — `Some` iff [`GBufferScene::sdf_depth_merge`] is not `Absent`.
@@ -4446,12 +4598,15 @@ const VB_BUFFER_COUNT: usize = 17 + PARTICLE_BUFFER_COUNT + MATERIAL_TAIL_BUFFER
 ///
 /// VG R3 piece 1 step P1-5 appends the HZB depth pyramid LAST in BOTH `cfg` arms — ResId 20
 /// under `hwrt`, ResId 14 without it — so every existing ResId is byte-unchanged.
+///
+/// Render wave PX1a appends `display` + `lit_native` LAST in both arms (ResId 22/23 under `hwrt`,
+/// 16/17 without).
 #[cfg(feature = "hwrt")]
-const VB_IMAGE_COUNT: usize = 22;
+const VB_IMAGE_COUNT: usize = 24;
 /// See the `hwrt` variant's doc: a `not(hwrt)` build keeps the count at 14 + the pyramid +
-/// the VB-SV0 term = 16.
+/// the VB-SV0 term + PX1a's `display` / `lit_native` = 18.
 #[cfg(not(feature = "hwrt"))]
-const VB_IMAGE_COUNT: usize = 16;
+const VB_IMAGE_COUNT: usize = 18;
 
 /// VG R3 piece 1 step P1-5: the HZB build passes' framegraph names, indexed by pass number.
 /// [`FrameGraph::add_pass`](crate::framegraph::FrameGraph::add_pass) takes a `&'static str`, so a
@@ -5024,14 +5179,17 @@ impl Renderer<'_> {
         // discard seed texels it fully overwrites; disarmed frames name no ResId and route zero
         // barriers, which is what keeps every pin byte-identical by construction).
         let sdf_term = g.add_image("sdf_term");
-        // ONE assert rather than the two `cfg`-split ones this step replaced: the TERM is the
-        // last image in BOTH arms (the pyramid was, until DP3b appended one more), so the former
-        // per-image invariants collapse into this single statement.
+        // Render wave PX1a (D-G1): the post seam's two singles, appended LAST in both arms.
+        let display = declare_display(g, self.obs_dump_widen);
+        let lit_native = declare_lit_native(g, self.obs_dump_widen);
+        // ONE assert rather than the two `cfg`-split ones DP3b replaced: `lit_native` is the last
+        // image in BOTH arms, so the per-image invariants collapse into this single statement.
         debug_assert_eq!(
-            sdf_term.index() + 1,
+            lit_native.id().index() + 1,
             VB_IMAGE_COUNT,
             "invariant: declare_vb_graph's image declarations must match VB_IMAGE_COUNT"
         );
+        debug_assert_eq!(sdf_term.index() + 3, VB_IMAGE_COUNT, "invariant: sdf_term precedes the post seam's two");
 
         // --- Buffers (light_table=0, vb_instance_ring=1, gclassify=2). `light_table`'s seed
         // stage is COMPUTE for the SAME P1-1 reason as `cascade`/`atlas` above (`vb_resolve` is
@@ -6914,8 +7072,8 @@ impl Renderer<'_> {
         // `vb_shade`/`sdf_forward_march`'s GENERAL write (or COLOR_ATTACHMENT→… out of a
         // sky-only frame) and `present_sample`'s later read finds `lit` already in layout;
         // `viewt`/`taa_hist_read` are STORAGE reads in GENERAL; `taa_hist` is the STORAGE write.
-        // `aa_out`/`taa_resolved` stay hand-recorded inside `record_taa`/`record_rcas` (not
-        // framegraph-tracked — the deferred precedent).
+        // Since render wave PX1a the resolve writes only `taa_hist`, which `post_final` reads
+        // (`declare_post_seam`).
         // Rung R9b revision of the Track-A TAA XOR: the strict XOR is KEPT VERBATIM for every
         // `!ssao` configuration (preserving the shipped VB TAA pins' exact producer schedule);
         // with the split's SSAO armed it degrades to "at least one producer, and on an
@@ -6991,18 +7149,11 @@ impl Renderer<'_> {
             p
         });
 
-        // Pass `present_sample`: `lit` → SHADER_READ_ONLY_OPTIMAL for the present-blit's FRAGMENT
-        // sample (C5, derived from the LAST `lit` producer; with TAA armed the `taa_resolve` read
-        // above already left `lit` in SHADER_READ_ONLY, so this derives no further barrier — the
-        // deferred precedent). The swapchain WSI barriers stay hand-recorded.
-        let present_sample = g.add_pass("present_sample");
-        g.image_access(
-            lit,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            VK_ACCESS_SHADER_READ_BIT,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            SubRange::COLOR,
-        );
+        // Render wave PX1a: the post seam, then pass `present_sample` (`display` →
+        // SHADER_READ_ONLY_OPTIMAL for the present-blit's FRAGMENT sample). The swapchain WSI
+        // barriers stay hand-recorded.
+        let (post, present_sample) =
+            declare_post_seam(g, scene, lit, Some(taa_hist), display, Some(lit_native));
 
         // ==== VG R3 piece 1 step P1-6 (plan §5, gate G8): the pyramid DUMP copy. ====
         //
@@ -7259,6 +7410,8 @@ impl Renderer<'_> {
                     (super::frame_driver::ImageDumpName::Viewt, viewt),
                     (super::frame_driver::ImageDumpName::Lit, lit),
                     (super::frame_driver::ImageDumpName::TaaHist, taa_hist),
+                    (super::frame_driver::ImageDumpName::Display, display.id()),
+                    (super::frame_driver::ImageDumpName::LitNative, lit_native.id()),
                 ],
             ),
             None => None,
@@ -7337,6 +7490,7 @@ impl Renderer<'_> {
             viewt_from_depth: vb_viewt_pre.or(vb_viewt),
             taa_resolve: taa_resolve_pass,
             present_sample,
+            post,
             sdf_depth_merge,
             particle: particle_plan,
             image_dump,

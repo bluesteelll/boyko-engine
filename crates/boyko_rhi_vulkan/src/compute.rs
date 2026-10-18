@@ -498,15 +498,24 @@ embed_spirv! {
 
 embed_spirv! {
     /// Anti-aliasing Stage 4 (TAA rung T3) — the post-resolve CONTRAST-ADAPTIVE SHARPEN SPIR-V
-    /// (`shaders/rcas.comp.hlsl`, AMD FidelityFX CAS). The `SharpenMode::Rcas` pass reads the
-    /// resolve's intermediate `taa_resolved` (the ping) and writes `aa_out` (the pong — the
-    /// present-blit's input, unchanged). Bound to its OWN 2-binding layout { @0 `gRcasIn` rgba8
-    /// STORAGE read (the resolved LDR color), @1 `gAaOut` rgba8 STORAGE write } + a 16-byte COMPUTE
+    /// (`shaders/rcas.comp.hlsl`, AMD FidelityFX CAS). Since render wave PX1a the
+    /// `SharpenMode::Rcas` pass reads `display` (`post_final`'s output) and writes `aa_out` (the
+    /// present-blit's input). Bound to its OWN 2-binding layout { @0 `gRcasIn` rgba8 STORAGE read
+    /// (`display`), @1 `gAaOut` rgba8 STORAGE write } + a 16-byte COMPUTE
     /// push range `{ uint img_w; uint img_h; float sharpness; uint _pad; }`. NOT recorded on
     /// `SharpenMode::None` (the default — the resolve writes `aa_out` directly, the structural
     /// 0%-gate). The const-asserted length is the anti-drift guard.
     RCAS_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/rcas.comp.spv")
+}
+
+embed_spirv! {
+    /// Render wave PX1a (D-S4): the TRANSITIONAL pass-through kernel `post_final` dispatches until
+    /// the switch commit — `display[px] = float4(gScene.Load(px).rgb, 1)` over the SAME three
+    /// bindings and `numthreads(8, 8, 1)` as the generated `post_final.comp`, so the plumbing
+    /// commit moves no pixel. Deleted, with its manifest row and sync line, when `lit` turns HDR.
+    POST_PASSTHROUGH_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/post_passthrough.comp.spv")
 }
 
 embed_spirv! {
@@ -1740,6 +1749,14 @@ pub fn taa_resolve_spirv() -> &'static [u32] {
 #[inline]
 pub fn rcas_spirv() -> &'static [u32] {
     RCAS_SPV.as_words()
+}
+
+/// Render wave PX1a (D-S4): the transitional `post_final` pass-through SPIR-V (see
+/// [`POST_PASSTHROUGH_SPV`]), bound at boot by `boyko_app::gpu_scene::GpuSceneBundles::boot` into
+/// the `post_final` pipeline and dispatched by `Renderer::record_post_final` on every frame.
+#[inline]
+pub fn post_passthrough_spirv() -> &'static [u32] {
+    POST_PASSTHROUGH_SPV.as_words()
 }
 
 /// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V as a `u32` word stream, ready for

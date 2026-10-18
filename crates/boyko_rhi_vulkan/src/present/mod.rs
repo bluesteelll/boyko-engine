@@ -78,7 +78,7 @@ pub use scene_types::{
     HZB_DUMP_SAMPLE_BYTES, HZB_DUMP_WORD_FLAGS, HZB_DUMP_WORD_FRAME_INDEX,
     HZB_PYRAMID_POISON, HzbDumpLayout, HzbPlan, InterpActivation,
     MAX_HZB_LEVELS, MaterialUploadProbe, MaterialUploadScene, MeshFacePipelines,
-    ParticleActivation, PunctualDepthActivation,
+    ParticleActivation, PostFinalActivation, PunctualDepthActivation,
     RcasActivation, ResolvedRenderPathGpu, SCENE_MVP_BYTES, SHADOW_SOURCE_SDF_SOFT_MARCH,
     SampledComposite, Scene, SdfDepthMergeActivation, SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation, UiPass,
     VB_CULL_OCC_ARMED, VB_CULL_OCC_FORCE_KEEP, VB_CULL_OCC_FORCE_LATE, VbCullUniform,
@@ -216,6 +216,13 @@ pub const TEMPORAL_SHADOW_UBO_BYTES: u64 = 16;
 /// `disocclusion_word`/`depth_tol` @32..48); the host writes `ResolvedTaa`'s 48 bytes into the
 /// fenced slot.
 pub const TAA_UBO_BYTES: u64 = 48;
+
+/// Render wave PX1a (D-G5): the byte size of `post_final`'s `PostFinal` UBO — the RHI-layer
+/// MIRROR of `boyko_render::post::gpu::PostFinalGpu` (32 B, std140; the `TAA_UBO_BYTES`
+/// pattern: the render crate sits above this one). The eight words are
+/// [`GBufferScene::post_final_words`].
+pub const POST_FINAL_UBO_BYTES: u64 = 32;
+const _: () = assert!(POST_FINAL_UBO_BYTES == 8 * 4, "post_final_words is the UBO, word for word");
 
 /// Anti-aliasing Stage 4 (TAA W5): the byte size of the TAA resolve's DEDICATED `MotionCam` UBO —
 /// the RHI-layer MIRROR of `boyko_render::MOTION_CAM_UBO_BYTES` (two `float4x4`, 128 B). A

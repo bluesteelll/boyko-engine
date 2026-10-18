@@ -357,6 +357,35 @@ oracle census (no non-test caller of the traced body re-composes a stage); every
 against fixtures it must reject. Host oracles: `boyko_shaderdsl/tests/{post_leaves,
 post_image_oracle, post_facets}.rs`.
 
+## `post_passthrough.comp.hlsl` — `post_final`'s TRANSITIONAL pass-through kernel (compute, render wave PX1a)
+
+Hand-written, **no `-D` axis**, **TRANSITIONAL**: `post_final` dispatches it between PX1a's plumbing
+commit (C5) and its switch commit (C7), which deletes the file, its `.spv`, this row and its sync line
+(D-S4). It shares `post_final.comp`'s three bindings and `numthreads`, so the same layout, set ring and
+dispatch serve both; it copies the scene input into `display` unchanged, so the plumbing commit moves no
+pixel (GL-PX1a-S2's byte-identity sweep).
+
+| Variant | `-D` | `.spv` | dxc `-T` | Notes |
+|---|---|---|---|---|
+| the only one | — | `post_passthrough.comp.spv` | `cs_6_0` | set 0 = `Texture2D<float4> gScene` @0 (`SampledImageAtGeneral`, `Load`) + `[[vk::image_format("rgba8")]] RWTexture2D<float4> gDisplay` @1 + `cbuffer PostFinal` @2 (only `extent` read); `[numthreads(8, 8, 1)]`; `gDisplay = float4(gScene.rgb, 1)` behind the extent guard. |
+
+Frozen recipe (the header pins it verbatim; no `-O`, no `-D`):
+`dxc.exe -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 post_passthrough.comp.hlsl`.
+*Byte gate:* `boyko_rhi_vulkan/tests/post_chain_spv_sync.rs`.
+
+## `taa_resolve.comp.hlsl` — the TAA temporal resolve (compute)
+
+One source, hand-written, **no `-D` axis**. Render wave PX1a (D-S5 step 1) retired its `gAaOut` @4
+display-referred copy: the resolve writes only `gHistOut` (`taa_hist[fi]`, RGBA16F), which `post_final`
+reads as its scene input; @4 is a binding hole in the layout.
+
+| Variant | `-D` | `.spv` | dxc `-T` | Notes |
+|---|---|---|---|---|
+| the only one | — | `taa_resolve.comp.spv` | `cs_6_0` | set 0 = `gLit` CIS @0, `gViewT` (`r32f`) @1, `gHistIn` / `gHistOut` (`rgba16f`) @2 / @3, the `ResolvedTaa` UBO @5, the camera UBO @6, the `MotionCam` UBO @7; a 4-byte `{ uint reset; }` push; `[numthreads(64, 1, 1)]`. |
+
+Frozen recipe: `dxc.exe -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 taa_resolve.comp.hlsl`.
+*Byte gate:* `boyko_rhi_vulkan/tests/post_chain_spv_sync.rs`.
+
 ## `px0_probe_store.comp.hlsl` — the float-format probe's compute kernel (compute, TEST-ONLY, render wave PX0)
 
 One HAND-WRITTEN source (test HLSL, not eDSL-owned: it computes nothing the host model mirrors beyond

@@ -3158,80 +3158,73 @@ impl Renderer<'_> {
             }
         }
 
+        let plan = *self
+            .gbuffer_pass_plan
+            .as_ref()
+            .expect("invariant: declare_frame_graph ran before record_gbuffer");
         if let Some(taa) = scene.taa.as_ref()
             && targets.taa_resolve_set.is_some()
         {
-            let taa_pass = self
-                .gbuffer_pass_plan
-                .as_ref()
-                .expect("invariant: declare_frame_graph ran before record_gbuffer")
+            let taa_pass = plan
                 .taa_resolve
                 .expect("invariant: scene.taa.is_some() ⇒ the taa_resolve pass was declared");
-            // SAFETY: recording is open; `aa_out`/`taa_hist`/`taa_resolve_set` were built by
-            // `create()` under the same `scene.taa` that gates this branch; `taa_pass` was
-            // declared this frame under the same gate (the invariant above).
+            // SAFETY: recording is open; `taa_hist`/`taa_resolve_set` were built by `create()`
+            // under the same `scene.taa` that gates this branch; `taa_pass` was declared this
+            // frame under the same gate (the invariant above).
             ts.cmd();
             unsafe { self.record_taa(cmd, targets, taa, taa_pass, scene, fi) };
+        }
 
-            // TAA rung T3: the post-resolve RCAS sharpen pass — recorded IMMEDIATELY after
-            // `record_taa` (resolve THEN rcas), still BEFORE `present_sample` below. Gated on
-            // `scene.rcas.is_some()` AND `targets.rcas_set.is_some()` (kept in lockstep by
-            // `GBufferTargets::create`, which itself only arms `taa_resolved`/`rcas_set` when
-            // `scene.rcas.is_some()`, which in turn requires `scene.taa.is_some()` — the SAME
-            // lockstep discipline `scene.taa`/`targets.taa_resolve_set` use above). `None` (the
-            // 0%-gate, `SharpenMode::None`) records nothing here — byte-identical to the
-            // pre-RCAS resolve.
+        // Render wave PX1a: the post seam — `[ssaa_downsample] → post_final → [cas]`, each
+        // pass's derived barriers emitted first, in declaration order (D-G4).
+        if let Some(pass) = plan.post.ssaa_downsample {
+            ts.cmd();
+            self.record_graph_pass(pass, cmd, targets, scene, fi);
+            let ssaa = scene.ssaa.as_ref().expect("invariant: the ssaa_downsample pass is declared iff scene.ssaa");
+            // SAFETY: recording is open, outside any rendering scope; the pass's derived barriers
+            // were just emitted (`lit[fi]` at SHADER_READ_ONLY, `lit_native` at
+            // COLOR_ATTACHMENT_OPTIMAL); `lit_native`/`downsample_set` were built by `create()`
+            // under the same `scene.ssaa`, `lit_native` at `aa_extent` (the BOOT-FIXED native
+            // size, NOT `present_extent`, which is 2× under SSAA).
+            ts.cmd();
+            let zone = super::zone_arm::ZoneArm::from_scene(scene);
+            unsafe { self.record_ssaa(cmd, targets, ssaa, aa_extent, fi, zone) };
+        }
+        ts.cmd();
+        self.record_graph_pass(plan.post.post_final, cmd, targets, scene, fi);
+        // SAFETY: recording is open, outside any rendering scope; `post_final`'s derived barriers
+        // were just emitted; `targets` were created for `scene`; `display` is `aa_extent` large.
+        ts.cmd();
+        unsafe { self.record_post_final(cmd, targets, scene, aa_extent, fi) };
+        if let Some(pass) = plan.post.cas {
+            ts.cmd();
+            self.record_graph_pass(pass, cmd, targets, scene, fi);
             if let Some(rcas) = scene.rcas.as_ref()
                 && targets.rcas_set.is_some()
             {
-                // SAFETY: recording is open; `record_taa` (just above) already wrote
-                // `taa_resolved[fi]`, leaving it in GENERAL; `taa_resolved`/`aa_out`/`rcas_set`
+                // SAFETY: recording is open; the `cas` pass's barriers (`post_final`'s `display`
+                // write → this COMPUTE read at GENERAL) were just emitted; `aa_out`/`rcas_set`
                 // were built by `create()` under the same `scene.rcas` that gates this branch;
-                // `present_extent` sizes both `taa_resolved` and `aa_out` (the SAME extent the
-                // resolve dispatched over).
+                // `present_extent` sizes `display` and `aa_out` (TAA arms no SSAA).
                 ts.cmd();
                 unsafe { self.record_rcas(cmd, targets, rcas, present_extent, scene, fi) };
             }
         }
 
-        // (5c) LIT: GENERAL → SHADER_READ_ONLY_OPTIMAL for the present-blit sample. The
-        // present now samples LIT (the resolve's output), NOT albedo (the deletion target
-        // of the old step-6 albedo→SHADER_READ_ONLY barrier — albedo stays GENERAL,
-        // consumed only by the resolve as a STORAGE-in-GENERAL load).
-        // The graph's "present_sample" pass (declaring `lit`
-        // FRAGMENT/SHADER_READ/SHADER_READ_ONLY) DRIVES this transition. The SWAPCHAIN WSI
-        // barriers below (sites 7/9) stay HAND-recorded — the acquired presentable image
-        // is not a graph resource here.
-        // SAFETY: recording is open; `record_graph_pass` records the graph's derived
-        // GENERAL→SHADER_READ_ONLY barrier for the "present_sample" pass into `cmd`,
-        // making the resolve's lit store available + visible to the present-blit's sample.
-        let present_sample = self
-            .gbuffer_pass_plan
-            .as_ref()
-            .expect("invariant: declare_frame_graph ran before record_gbuffer")
-            .present_sample;
+        // (5c) `present_sample`: since render wave PX1a, `display` GENERAL →
+        // SHADER_READ_ONLY_OPTIMAL for the present-blit sample (and the FXAA / SMAA reads below,
+        // FRAGMENT, inside the same barrier's scope). The SWAPCHAIN WSI barriers below (sites
+        // 7/9) stay HAND-recorded — the acquired presentable image is not a graph resource here.
         ts.cmd();
-        self.record_graph_pass(present_sample, cmd, targets, scene, fi);
+        self.record_graph_pass(plan.present_sample, cmd, targets, scene, fi);
 
-        // Anti-aliasing Stage 1 (FXAA) / Stage 2 (SMAA) / Stage 3 (SSAA). Stage 4 (TAA) was
-        // ALREADY recorded above (before `present_sample` — see that block's ordering comment).
-        // `sync_gbuffer` keeps `targets.aa_out.is_some() == (scene.aa.is_some() ||
-        // scene.smaa.is_some() || scene.ssaa.is_some() || scene.taa.is_some())` in lockstep (an
-        // arm-state change forces a fence-safe resync, exactly like an extent change), so these
-        // always agree within a frame. Gate on `aa_out` (what `present_set` follows) so any
-        // transient mismatch degrades to "present samples lit, no AA pass" — never a panic. RAW
-        // barriers on `aa_out` only (the DDGI-update/TLAS-build precedent); `lit` needs none
-        // (already SHADER_READ_ONLY_OPTIMAL from `present_sample` above). Consumes `lit` after
-        // the framegraph's last declared use — safe until a transient-aliasing allocator lands;
-        // exempt this site then. OFF (`aa_out` is `None`) records nothing. FXAA is checked
-        // FIRST (byte-identical to the committed Stage-1 dispatch); `scene.aa`/`scene.smaa`/
-        // `scene.ssaa`/`scene.taa` are mutually exclusive by construction (`debug_assert!` in
-        // `GBufferTargets::create`). SSAA uses `aa_extent` (the BOOT-FIXED native extent
-        // `aa_out` was actually allocated at), NOT `extent` (live, tracks window resizes) or
-        // `present_extent` (2× under SSAA) — the crux difference from FXAA/SMAA.
+        // Anti-aliasing Stage 1 (FXAA) / Stage 2 (SMAA): display-referred FRAGMENT passes over
+        // `display` → `aa_out`, hand-recorded after `present_sample` (RAW barriers on `aa_out`
+        // only). `sync_gbuffer` keeps `targets.aa_out.is_some() == (scene.aa || scene.smaa ||
+        // scene.rcas)` in lockstep; CAS ran above. OFF (`aa_out` is `None`) records nothing.
         if targets.aa_out.is_some() {
             if let Some(fxaa) = scene.aa.as_ref() {
-                // SAFETY: recording is open; `present_sample` above left `lit` in
+                // SAFETY: recording is open; `present_sample` above left `display` in
                 // SHADER_READ_ONLY_OPTIMAL; `aa_out`/`fxaa_set` were built by `create()`
                 // under the same `scene.aa` that gates this branch; `present_extent` sizes
                 // `aa_out`.
@@ -3239,36 +3232,20 @@ impl Renderer<'_> {
                 let zone = super::zone_arm::ZoneArm::from_scene(scene);
                 unsafe { self.record_fxaa(cmd, targets, fxaa, present_extent, fi, zone) };
             } else if let Some(smaa) = scene.smaa.as_ref() {
-                // SAFETY: recording is open; `present_sample` above left `lit` in
+                // SAFETY: recording is open; `present_sample` above left `display` in
                 // SHADER_READ_ONLY_OPTIMAL; `aa_out`/`smaa_edges`/`smaa_weights`/the three
                 // `smaa_*_set` rings were built by `create()` under the same `scene.smaa`
                 // that gates this branch; `present_extent` sizes every SMAA target.
                 ts.cmd();
                 let zone = super::zone_arm::ZoneArm::from_scene(scene);
                 unsafe { self.record_smaa(cmd, targets, smaa, present_extent, fi, zone) };
-            } else if let Some(ssaa) = scene.ssaa.as_ref() {
-                debug_assert!(targets.aa_out.is_some() && targets.downsample_set.is_some());
-                // SAFETY: recording is open; `present_sample` above left `lit` (the 2× ring)
-                // in SHADER_READ_ONLY_OPTIMAL; `aa_out`/`downsample_set` were built by
-                // `create()` under the same `scene.ssaa` that gates this branch, sized to
-                // `aa_extent` (the BOOT-FIXED native size, NOT `present_extent`, which is 2×
-                // under SSAA, and NOT the live `extent`, which tracks window resizes).
-                ts.cmd();
-                let zone = super::zone_arm::ZoneArm::from_scene(scene);
-                unsafe { self.record_ssaa(cmd, targets, ssaa, aa_extent, fi, zone) };
             } else {
-                // `aa_out.is_some()` with none of aa/smaa/ssaa matched ⇒ TAA is the reason
-                // (the four arms are mutually exclusive by construction); `record_taa` already
-                // ran above — nothing left to do here.
-                debug_assert!(
-                    scene.taa.is_some(),
-                    "invariant: aa_out is armed but none of aa/smaa/ssaa/taa matched"
-                );
+                debug_assert!(scene.rcas.is_some(), "invariant: aa_out is armed but none of aa/smaa/rcas is");
             }
         }
 
-        // === Pass C: present-blit the LIT image (the resolve's output, or `aa_out` when
-        // AA is armed) into the swapchain. ===
+        // === Pass C: present-blit `display` (`post_final`'s output, or `aa_out` when FXAA / SMAA
+        // / CAS is armed) into the swapchain. ===
 
         // Render wave PX0: `ZONE_POST_PRESENT` brackets Pass C from the swapchain barrier through
         // `cmd_end_rendering`; the image dump, the readback copy and the present transition are
@@ -3370,8 +3347,9 @@ impl Renderer<'_> {
         // attachment names the live swapchain `view` (now COLOR_ATTACHMENT_OPTIMAL);
         // dynamic rendering is enabled. The present pipeline + its bind-group layout
         // belong to this device (caller contract) and its declared color format equals
-        // the swapchain's (W2-b). The present set @fi binds `lit[fi]` (now
-        // SHADER_READ_ONLY_OPTIMAL — the SAME slot the resolve just wrote) + sampler at set 0;
+        // the swapchain's (W2-b). The present set @fi binds `display` (left
+        // SHADER_READ_ONLY_OPTIMAL by `present_sample`) or `aa_out[fi]` (left there by its AA
+        // pass) + sampler at set 0;
         // `blit_viewport`/`blit_scissor` outlive the bracketed calls; `draw(3, 1, 0, 0)`
         // is the `SV_VertexID` fullscreen triangle (no vertex buffer). Begin/End bracket
         // pass C exactly.
@@ -3422,12 +3400,15 @@ impl Renderer<'_> {
                 (super::super::frame_driver::ImageDumpName::Viewt, Some(&targets.viewt[fi]), present_extent),
                 (super::super::frame_driver::ImageDumpName::Lit, Some(&targets.lit[fi]), present_extent),
                 (super::super::frame_driver::ImageDumpName::TaaHist, targets.taa_hist.as_ref().map(|r| &r[fi]), aa_extent),
+                (super::super::frame_driver::ImageDumpName::Display, Some(&targets.display), aa_extent),
+                (super::super::frame_driver::ImageDumpName::LitNative, targets.lit_native.as_ref(), aa_extent),
             ];
             // SAFETY: recording is open and no render scope is active (the blit's
             // `cmd_end_rendering` is above); `record_graph_pass` just recorded the dump pass's
             // derived barriers, so each declared source is in its `plan.layouts` layout; every
-            // source is THIS slot's ring image (or the `[fi]` TAA write slot), created at
-            // `present_extent` (`taa_hist` at `aa_extent`) with `TRANSFER_SRC` usage because the
+            // source is THIS slot's ring image (or the `[fi]` TAA write slot, or the single
+            // `display` / `lit_native`), created at `present_extent` (`taa_hist`, `display`,
+            // `lit_native` at `aa_extent`) with `TRANSFER_SRC` usage because the
             // dump was armed at boot (`Renderer::arm_image_dump` → `sync_gbuffer`'s `dump_usage`);
             // the requested staging meets the image-dump clause of this fn's `# Safety`.
             ts.cmd();
