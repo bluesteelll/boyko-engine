@@ -1672,15 +1672,15 @@ BOYKO_PARTICLE_COLLIDE   = "1"
 # frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
 # unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
 # ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
-# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
-# it after the owner's visual check.
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. Blessed at GL-H0 step 6 (on
+# 72ee9f15) after the owner's visual sign-off of 2026-10-18 (orchestrator ruling 69).
 crate           = "boyko-app"
 test_binary     = "grand_showcase_2mat"
 test_name       = "grand_showcase_2mat_aa_pin_dump"
 bmp             = "D:\\tmp\\grand_showcase_2mat_fxaa.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "7378a82b527d9a2269d5370b1097c40446fcf07d8bf0f0dfceb0c99261d57605"
 
 [grand_showcase_2mat_fxaa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1694,15 +1694,15 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
 # unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
 # ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
-# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
-# it after the owner's visual check.
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. Blessed at GL-H0 step 6 (on
+# 72ee9f15) after the owner's visual sign-off of 2026-10-18 (orchestrator ruling 69).
 crate           = "boyko-app"
 test_binary     = "grand_showcase_2mat"
 test_name       = "grand_showcase_2mat_aa_pin_dump"
 bmp             = "D:\\tmp\\grand_showcase_2mat_smaa.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "d5aac76e98e783e2df27368fab22ccd7a88f8302f3e728850f9bf8a84ad0cb50"
 
 [grand_showcase_2mat_smaa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1716,15 +1716,15 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
 # unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
 # ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
-# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
-# it after the owner's visual check.
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. Blessed at GL-H0 step 6 (on
+# 72ee9f15) after the owner's visual sign-off of 2026-10-18 (orchestrator ruling 69).
 crate           = "boyko-app"
 test_binary     = "grand_showcase_2mat"
 test_name       = "grand_showcase_2mat_aa_pin_dump"
 bmp             = "D:\\tmp\\grand_showcase_2mat_ssaa.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "97ab74b0f81273199bcb0279549f7ab31c745018f3413761f46666a2bb3e86cf"
 
 [grand_showcase_2mat_ssaa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1738,15 +1738,15 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
 # unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
 # ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
-# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
-# it after the owner's visual check.
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. Blessed at GL-H0 step 6 (on
+# 72ee9f15) after the owner's visual sign-off of 2026-10-18 (orchestrator ruling 69).
 crate           = "boyko-app"
 test_binary     = "vb_mesh_tex"
 test_name       = "vb_mesh_tex_aa_pin_dump"
 bmp             = "D:\\tmp\\vb_mesh_tex_fxaa.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "080fc0c57d82ea3b8ea262f0e0214d821d98667ebb367f898ec298355df5ba9f"
 
 [vb_mesh_tex_fxaa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1760,15 +1760,15 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
 # unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
 # ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
-# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
-# it after the owner's visual check.
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. Blessed at GL-H0 step 6 (on
+# 72ee9f15) after the owner's visual sign-off of 2026-10-18 (orchestrator ruling 69).
 crate           = "boyko-app"
 test_binary     = "vb_mesh_tex"
 test_name       = "vb_mesh_tex_aa_pin_dump"
 bmp             = "D:\\tmp\\vb_mesh_tex_smaa.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "74f10015721f53bcfca01041163b1ac0496d12e54937d79a21dc8cce7828e4b5"
 
 [vb_mesh_tex_smaa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1782,15 +1782,15 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
 # unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
 # ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
-# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
-# it after the owner's visual check.
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. Blessed at GL-H0 step 6 (on
+# 72ee9f15) after the owner's visual sign-off of 2026-10-18 (orchestrator ruling 69).
 crate           = "boyko-app"
 test_binary     = "vb_mesh_tex"
 test_name       = "vb_mesh_tex_aa_pin_dump"
 bmp             = "D:\\tmp\\vb_mesh_tex_ssaa.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "847c05943cad987b744ebd455ee31c5f7fb3f2800c1d2bc4ad2f35c0e74708e3"
 
 [vb_mesh_tex_ssaa.env]
 BOYKO_DISABLE_VALIDATION = "1"
