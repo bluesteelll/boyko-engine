@@ -287,7 +287,7 @@ fn scene_luma(t: [f32; 4]) -> f64 {
 /// `img`'s per-texel `luma` box-reduced to `edge`², row-major. `img` must be square and a whole
 /// multiple of `edge`.
 fn reduced_luma(img: &DumpFile, edge: u32, luma: fn([f32; 4]) -> f64) -> Result<Vec<f64>, String> {
-    if img.width != img.height || img.width < edge || img.width % edge != 0 {
+    if img.width != img.height || img.width < edge || !img.width.is_multiple_of(edge) {
         return Err(format!("a {}x{} image is not a whole multiple of the {edge}^2 native extent", img.width, img.height));
     }
     let k = img.width / edge;
