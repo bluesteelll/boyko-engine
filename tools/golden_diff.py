@@ -4,7 +4,7 @@
 Stdlib only, Python >= 3.11 (``tomllib``). Subcommands:
 
   compare A.bmp B.bmp [--max-delta N] [--max-changed-frac F] [--tiles K] [--flat-tiles REF.bmp]
-        [--edge-margin K] [--min-graded N]
+        [--edge-margin K] [--min-graded N] [--scene-anchor ANCHOR.bmp]
       Two BMPs (24/32-bpp BI_RGB, either row order, 24-bpp rows padded to 4 bytes): the max |Δ|
       per channel, the fraction of changed channel values, the K hottest 16x16 tiles. Exit 1 past
       a given limit. ``--flat-tiles`` grades only the 16x16 tiles (``--flat-tile-size``) of zero
@@ -12,6 +12,9 @@ Stdlib only, Python >= 3.11 (``tomllib``). Subcommands:
       84): ``--edge-margin K`` drops the flat pixels within K px (Chebyshev) of an edge of REF - a
       non-flat tile, or a seam between flat tiles of different values; a run grading fewer than
       ``--min-graded N`` px - or none at all under ``--flat-tiles`` - exits 3, RED-vacuous, never 0.
+      ``--scene-anchor ANCHOR`` (ruling 85 (3)): B must depict ANCHOR's scene - the device receipts'
+      whole-scene check, Spearman's rho of the Rec. 709 luma of both frames box-reduced to 256^2,
+      at least 0.9; a blank B (a constant side reads rho 0) or a never-written one exits 1.
   bound --bound hdr-transition --rounding CLASS --format b10g11r11|rgba16f [--flat-tiles REF.bmp]
         [--min-in-bound-frac F] PRE.bmp POST.bmp
       ``--format`` is REQUIRED (PX1a D-T1: a default graded RGBA16F with B10G11R11's 16x wider ε).
@@ -37,8 +40,8 @@ Stdlib only, Python >= 3.11 (``tomllib``). Subcommands:
   vectors DIR
       Checks this file's mirrors against the Rust-generated vectors (tools/tests/vectors).
 
-Exit codes: 0 pass, 1 over a limit, 2 usage / input error, 3 RED-vacuous (``compare`` graded fewer
-px than its minimum), 4 over max_delta_bound.
+Exit codes: 0 pass, 1 over a limit (``compare --scene-anchor``: B's rho under 0.9), 2 usage / input
+error, 3 RED-vacuous (``compare`` graded fewer px than its minimum), 4 over max_delta_bound.
 """
 
 from __future__ import annotations
@@ -424,6 +427,87 @@ def compare_bmps(a: Bmp, b: Bmp, tile: int = 16, mask=None):
     return max_d, frac, sorted(tiles.items(), key=lambda kv: -kv[1])
 
 
+# ---- the scene anchor (crates/boyko_app/tests/px1a_graph_receipt.rs's whole-scene check mirror) ---
+# GL-H1 class 1 (ruling 85 (3)): the flat-tile form cannot tell a scene from no scene - two identical
+# blank frames pass it - so ``compare --scene-anchor ANCHOR`` also runs the device receipts' whole-
+# scene check on B with ANCHOR in the role of the scene: ``display_luma``, ``reduced_luma``,
+# ``ranks``, ``spearman`` and the bar of ``check_presents_the_whole_scene``. Its power premise
+# (``QUARTER_RHO_MAX``, the anchor's top-left quarter must not rank like the whole) is not mirrored:
+# what the anchor must reject is a blank or never-written B, which any non-constant anchor does (a
+# constant side reads rho 0), and vb_sdf_taa's pre-move anchor ranks 0.575 against its quarter - over
+# the device scene's 0.5 - so the premise would RED the pre-move pair ruling 85 (2) requires to pass.
+
+#: The device check's bar (``WHOLE_SCENE_RHO_MIN``): the least rank correlation of B with ANCHOR.
+WHOLE_SCENE_RHO_MIN = 0.9
+#: The extent both frames are box-reduced to: the device check's native extent (``OBS_WIN`` in
+#: crates/boyko_app/tests/common/graph_receipt.rs), the one its bar was measured at. The GL-H1 frames
+#: are 512^2, so their reduction is the device check's 2:1 box.
+SCENE_EDGE = 256
+
+#: ``pixfmt::decode`` of an UNORM8 code: an f32 quotient, so the device check's exact input.
+_UNORM8 = [to_f32(c / 255.0) for c in range(256)]
+
+
+def display_luma(p) -> float:
+    """Rec. 709 luminance of a display-referred 8-bit pixel (``display_luma``)."""
+    return 0.2126 * _UNORM8[p[0]] + 0.7152 * _UNORM8[p[1]] + 0.0722 * _UNORM8[p[2]]
+
+
+def reduced_luma(img: Bmp, edge: int) -> list:
+    """``img``'s per-pixel :func:`display_luma` box-reduced to ``edge``^2, row-major
+    (``reduced_luma``: ``img`` square and a whole multiple of ``edge``; the sums run in its order)."""
+    if img.w != img.h or img.w < edge or img.w % edge:
+        raise ValueError(f"a {img.w}x{img.h} image is not a whole multiple of the {edge}^2 scene extent")
+    k = img.w // edge
+    out = [0.0] * (edge * edge)
+    for y in range(img.h):
+        row, base = (y // k) * edge, y * img.w
+        for x in range(img.w):
+            out[row + x // k] += display_luma(img.rgb[base + x])
+    n = float(k * k)
+    return [v / n for v in out]
+
+
+def ranks(v: list) -> list:
+    """The ranks of ``v`` (0-based), ties at their average rank (``ranks``)."""
+    order = sorted(range(len(v)), key=lambda i: v[i])
+    out = [0.0] * len(v)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and v[order[j + 1]] == v[order[i]]:
+            j += 1
+        for o in order[i : j + 1]:
+            out[o] = (i + j) / 2.0
+        i = j + 1
+    return out
+
+
+def spearman(a: list, b: list) -> float:
+    """Spearman's rank correlation of ``a`` and ``b`` (equal lengths); 0 when either is constant
+    (``spearman``: a blank side carries no ranking, so it can never pass a bar)."""
+    ra, rb = ranks(a), ranks(b)
+    n = float(len(ra))
+    ma = mb = 0.0
+    for x, y in zip(ra, rb):
+        ma += x
+        mb += y
+    ma, mb = ma / n, mb / n
+    sab = saa = sbb = 0.0
+    for x, y in zip(ra, rb):
+        dx, dy = x - ma, y - mb
+        sab += dx * dy
+        saa += dx * dx
+        sbb += dy * dy
+    return 0.0 if saa == 0.0 or sbb == 0.0 else sab / math.sqrt(saa * sbb)
+
+
+def scene_anchor(frame: Bmp, anchor: Bmp, edge: int = SCENE_EDGE) -> float:
+    """``frame``'s rank correlation with ``anchor``, both reduced to ``edge``^2: ``frame`` depicts the
+    anchor's scene at ``>= WHOLE_SCENE_RHO_MIN``. Raises ``ValueError`` when an extent does not fit."""
+    return spearman(reduced_luma(frame, edge), reduced_luma(anchor, edge))
+
+
 # ---- OBSD dumps (crates/boyko_shaderdsl/src/dump.rs mirror) ---------------------------------
 
 
@@ -586,6 +670,8 @@ def cmd_compare(a):
         if mask is not None and a.edge_margin:
             mask = edge_margin_mask(read_bmp(a.flat_tiles), mask, a.edge_margin)
         max_d, frac, tiles = compare_bmps(x, y, mask=mask)
+        # SCENE_EDGE is read at call time (not a default argument), so the self-tests can shrink it.
+        rho = None if a.scene_anchor is None else scene_anchor(y, read_bmp(a.scene_anchor), SCENE_EDGE)
     except (OSError, ValueError) as e:
         print(f"golden_diff compare: {e}", file=sys.stderr)
         return 2
@@ -597,9 +683,16 @@ def cmd_compare(a):
     print(f"max_delta r={max_d[0]} g={max_d[1]} b={max_d[2]} changed_frac={frac:.6f} scope={scope}")
     for (tx, ty), n in tiles[: a.tiles]:
         print(f"tile ({tx},{ty}) changed={n}")
+    if rho is not None:
+        print(f"scene_anchor rho={rho:.4f} min={WHOLE_SCENE_RHO_MIN} edge={SCENE_EDGE}")
     if a.max_delta is not None and max(max_d) > a.max_delta:
         return 1
     if a.max_changed_frac is not None and frac > a.max_changed_frac:
+        return 1
+    # Ruling 85 (3): B must depict the anchor's scene - a blank or never-written B carries no
+    # ranking and reads rho 0.
+    if rho is not None and rho < WHOLE_SCENE_RHO_MIN:
+        print(f"golden_diff compare: B does not depict the scene anchor's scene - rank correlation {rho:.4f} < {WHOLE_SCENE_RHO_MIN}", file=sys.stderr)
         return 1
     # Ruling 84 (1b): a run that graded (almost) nothing is RED-vacuous, never green - an empty
     # flat-tile mask is always vacuous, `--min-graded` raises the floor.
@@ -814,6 +907,7 @@ def main(argv=None) -> int:
     p.add_argument("--flat-tile-size", type=int, default=16)
     p.add_argument("--edge-margin", type=int, help="K: grade only flat pixels farther than K px from any edge of REF (a non-flat tile or a flat|flat seam)")
     p.add_argument("--min-graded", type=int, help="N: grading fewer than N px is RED-vacuous (exit 3)")
+    p.add_argument("--scene-anchor", help="ANCHOR.bmp: B must rank like ANCHOR (the device receipts' whole-scene check)")
     p.set_defaults(fn=cmd_compare)
     p = sub.add_parser("bound")
     p.add_argument("--bound", required=True)

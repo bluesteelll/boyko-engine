@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -316,6 +317,112 @@ class ClassOneForm(unittest.TestCase):
         self.assertEqual(gd.main(["compare", "--flat-tiles", ref, "--edge-margin", "-1", ref, ref]), 2)
         self.assertEqual(gd.main(["compare", "--flat-tiles", ref, "--min-graded", "0", ref, ref]), 2)
 
+
+
+def scene(w, h):
+    """A grey scene with no symmetry: brightness grows with the distance to an off-centre point."""
+    cx, cy = 0.3 * w, 0.65 * h
+    return [(v, v, v) for y in range(h) for x in range(w) for v in [min(255, int(400.0 * ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5 / w))]]
+
+
+class SceneAnchor(unittest.TestCase):
+    """Ruling 85 (3): GL-H1 class 1 cannot tell a scene from no scene - two identical blank frames
+    pass the flat-tile form (review OQ1). ``compare --scene-anchor ANCHOR`` runs the device receipts'
+    whole-scene check (crates/boyko_app/tests/px1a_graph_receipt.rs) on B: B's Rec. 709 luma and
+    ANCHOR's, box-reduced to ``SCENE_EDGE``^2, rank alike at rho >= 0.9, or exit 1. The small
+    fixtures shrink ``SCENE_EDGE`` to 8 (16^2 frames, the device check's 2:1 box). Red-first on the
+    tool without the flag."""
+
+    EDGE = 8
+
+    def bmp(self, px, name, w=16):
+        p = tmp(name)
+        gd.write_bmp(p, w, len(px) // w, px)
+        return p
+
+    def anchored(self, frame, anchor, *flags):
+        with mock.patch.object(gd, "SCENE_EDGE", self.EDGE):
+            return gd.main(["compare", *flags, "--scene-anchor", anchor, frame, frame])
+
+    def test_spearman_mirrors_the_device_check(self):
+        self.assertEqual(gd.ranks([3.0, 1.0, 3.0, 2.0]), [2.5, 0.0, 2.5, 1.0], "0-based, ties at their average rank")
+        # Ranks a = [0, 1.5, 1.5, 3], b = [0, 2, 1, 3]: sab 4.5, saa 4.5, sbb 5 -> 3 / sqrt(10).
+        self.assertAlmostEqual(gd.spearman([1.0, 2.0, 2.0, 3.0], [1.0, 3.0, 2.0, 4.0]), 3.0 / 10.0**0.5, places=12)
+        v = [0.3, 0.1, 0.7, 0.2, 0.9]
+        self.assertEqual(gd.spearman(v, v), 1.0)
+        self.assertEqual(gd.spearman(v, [-x for x in v]), -1.0)
+        # The device check's MG guard: a constant side carries no ranking and reads 0 - read as 1,
+        # a blank frame would pass as the scene.
+        self.assertEqual(gd.spearman(v, [0.5] * 5), 0.0)
+        self.assertEqual(gd.spearman([0.5] * 5, v), 0.0)
+        self.assertEqual(gd.spearman([0.5] * 5, [0.5] * 5), 0.0)
+
+    def test_reduced_luma_is_the_box_average(self):
+        # Rec. 709 weights on pixfmt's f32 UNORM8 decode (51 / 255 is the f32 0.2, not the f64 one).
+        self.assertEqual([gd.display_luma(p) for p in ((255, 0, 0), (0, 255, 0), (0, 0, 255))], [0.2126, 0.7152, 0.0722])
+        self.assertEqual(gd.display_luma((51, 0, 0)), 0.2126 * 0.20000000298023224)
+        self.assertEqual(gd.display_luma((0, 0, 0)), 0.0)
+        px = [(0, 0, 0), (255, 255, 255), (51, 51, 51), (51, 51, 51)] * 2 + [(255, 0, 0)] * 8
+        img = gd.Bmp(4, 4, px)
+        got = gd.reduced_luma(img, 2)
+        lum = gd.display_luma
+        self.assertEqual(got[0], (lum(px[0]) + lum(px[1]) + lum(px[4]) + lum(px[5])) / 4.0)
+        self.assertEqual(got[1], (lum(px[2]) + lum(px[3]) + lum(px[6]) + lum(px[7])) / 4.0)
+        self.assertEqual(got[2:], [lum((255, 0, 0))] * 2)
+        self.assertEqual(gd.reduced_luma(img, 4), [lum(p) for p in px], "1:1 is the per-pixel luma")
+        for bad in (gd.Bmp(4, 2, px[:8]), gd.Bmp(4, 4, px)):
+            with self.assertRaises(ValueError):
+                gd.reduced_luma(bad, 3 if bad.h == 4 else 2)
+
+    def test_a_frame_of_the_anchors_scene_passes(self):
+        anchor = scene(16, 16)
+        a = self.bmp(anchor, "anchor.bmp")
+        self.assertEqual(gd.scene_anchor(gd.read_bmp(a), gd.read_bmp(a), self.EDGE), 1.0)
+        self.assertEqual(self.anchored(a, a), 0, "the anchor itself (the pre-move run)")
+        # A render of the same scene a step or two off on a quarter of its pixels (h1's rounding).
+        rnd = random.Random(41)
+        near = [(min(v + rnd.randrange(3), 255),) * 3 if rnd.random() < 0.25 else p for p in anchor for v in [p[0]]]
+        self.assertNotEqual(near, anchor)
+        self.assertEqual(self.anchored(self.bmp(near, "near.bmp"), a), 0)
+
+    def test_a_blank_or_never_written_frame_reds(self):
+        a = self.bmp(scene(16, 16), "anchor.bmp")
+        for name, px in (("black", [(0, 0, 0)] * 256), ("grey", [(128, 128, 128)] * 256)):
+            self.assertEqual(self.anchored(self.bmp(px, f"{name}.bmp"), a), 1, f"a blank {name} frame")
+        rnd = random.Random(43)
+        garbage = [(rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)) for _ in range(256)]
+        self.assertEqual(self.anchored(self.bmp(garbage, "garbage.bmp"), a), 1, "a never-written frame of garbage")
+        # The device check's own red case: the scene's top-left quarter, magnified to the frame.
+        anchor = scene(16, 16)
+        quarter = [anchor[(y // 2) * 16 + x // 2] for y in range(16) for x in range(16)]
+        self.assertEqual(self.anchored(self.bmp(quarter, "quarter.bmp"), a), 1, "the top-left quarter")
+        # A blank anchor (a never-written pre-move frame) passes nothing, not even itself.
+        blank = self.bmp([(0, 0, 0)] * 256, "blank.bmp")
+        self.assertEqual(self.anchored(a, blank), 1)
+        self.assertEqual(self.anchored(blank, blank), 1)
+        # The anchor judges B (class 1's TAA frame), not A (its AA-off reference).
+        with mock.patch.object(gd, "SCENE_EDGE", self.EDGE):
+            self.assertEqual(gd.main(["compare", "--scene-anchor", a, a, blank]), 1)
+            self.assertEqual(gd.main(["compare", "--scene-anchor", a, blank, a]), 0)
+
+    def test_two_identical_blank_frames_red_under_the_class_one_form(self):
+        # Review OQ1's construction at full size: two uniform 512^2 frames of one colour under the
+        # class-1 form pass it (the whole frame is one flat area); the scene anchor reds them,
+        # whether the anchor is a scene or blank as well.
+        w = 2 * gd.SCENE_EDGE
+        blank = self.bmp([(96, 96, 96)] * (w * w), "blank512.bmp", w)
+        form = ["compare", "--flat-tiles", blank, "--edge-margin", "2", "--min-graded", "57196", "--max-delta", "2"]
+        self.assertEqual(gd.main(form + [blank, blank]), 0, "the gap ruling 85 (3) closes")
+        self.assertEqual(gd.main(form + ["--scene-anchor", blank, blank, blank]), 1)
+        anchor = self.bmp(scene(w, w), "scene512.bmp", w)
+        self.assertEqual(gd.main(form + ["--scene-anchor", anchor, blank, blank]), 1)
+        self.assertEqual(gd.main(["compare", "--scene-anchor", anchor, anchor, anchor]), 0, "the scene itself at full size")
+
+    def test_a_misfit_frame_is_an_input_error(self):
+        a = self.bmp(scene(16, 16), "anchor.bmp")
+        self.assertEqual(self.anchored(self.bmp(scene(12, 12), "odd.bmp", 12), a), 2, "12^2 is no whole multiple of 8^2")
+        self.assertEqual(self.anchored(self.bmp(scene(16, 8), "wide.bmp"), a), 2, "not square")
+        self.assertEqual(self.anchored(a, self.bmp(scene(12, 12), "odd_anchor.bmp", 12)), 2)
 
 class LitStep(unittest.TestCase):
     def setUp(self):
