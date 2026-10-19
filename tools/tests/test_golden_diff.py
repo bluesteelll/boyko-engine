@@ -208,9 +208,15 @@ class ClassOneForm(unittest.TestCase):
 
     def setUp(self):
         # Three 16x16 tile columns x two tile rows. Column 0 is an object (non-flat: a texture);
-        # columns 1-2 are background, flat, with a silhouette seam at y = 16: the top background
-        # tiles are (90, 120, 150), the bottom ones (40, 60, 80) - both sides flat, the edge exactly
-        # on the tile border.
+        # columns 1-2 are background, flat, with two silhouette seams that end exactly on a tile
+        # border, both sides flat:
+        # - a HORIZONTAL seam at y = 15|16: the top background tiles are (90, 120, 150), the bottom
+        #   ones darker;
+        # - a VERTICAL seam at x = 31|32 in the bottom tile row: (40, 60, 80) left, (70, 90, 110)
+        #   right.
+        # The margin's column pass is the only one that sees the horizontal seam's value change and
+        # its row pass the only one that sees the vertical seam's (ruling 85 (1), review W1: with
+        # the horizontal seam alone, a row pass that compared the wrong pixels passed every test).
         self.w, self.h = 48, 32
         rnd = random.Random(31)
         self.ref = []
@@ -218,8 +224,10 @@ class ClassOneForm(unittest.TestCase):
             x, y = i % self.w, i // self.w
             if x < 16:
                 self.ref.append((rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)))
+            elif y < 16:
+                self.ref.append((90, 120, 150))
             else:
-                self.ref.append((90, 120, 150) if y < 16 else (40, 60, 80))
+                self.ref.append((40, 60, 80) if x < 32 else (70, 90, 110))
 
     def bmp(self, px, name):
         p = tmp(name)
@@ -245,10 +253,19 @@ class ClassOneForm(unittest.TestCase):
         self.assertEqual(self.run_compare(dilated, "--edge-margin", "1"), 0, "the column lies 1 px from the object tile")
 
     def test_a_seam_between_two_flat_tiles_is_an_edge(self):
-        # The silhouette that ends exactly on a tile border: both tiles flat, the edge between them.
+        # The silhouette that ends exactly on a tile border: both tiles flat, the edge between them
+        # (the horizontal seam, seen only by the margin's column pass).
         dilated = self.moved([(x, 15) for x in range(16, self.w)] + [(x, 16) for x in range(16, self.w)])
         self.assertEqual(self.run_compare(dilated, "--edge-margin", "0"), 1)
         self.assertEqual(self.run_compare(dilated, "--edge-margin", "1"), 0, "rows 15 and 16 lie 1 px from the other flat side")
+
+    def test_a_vertical_seam_between_two_flat_tiles_is_an_edge(self):
+        # The same silhouette turned 90 degrees: the vertical seam at x = 31|32 in the bottom tile
+        # row, seen only by the margin's row pass (review W1: a row pass reading row 0's pixels, or
+        # ignoring their values, graded these columns).
+        dilated = self.moved([(31, y) for y in range(16, self.h)] + [(32, y) for y in range(16, self.h)])
+        self.assertEqual(self.run_compare(dilated, "--edge-margin", "0"), 1)
+        self.assertEqual(self.run_compare(dilated, "--edge-margin", "1"), 0, "columns 31 and 32 lie 1 px from the other flat side")
 
     def test_the_margin_still_grades_the_interior(self):
         # A move 3 px or more from every edge (an exposure / history error in a flat region) is red
@@ -284,12 +301,14 @@ class ClassOneForm(unittest.TestCase):
         self.assertEqual(gd.main(["compare", "--flat-tiles", ref, "--max-delta", "2", "--edge-margin", "2", ref, ref]), 3)
 
     def test_min_graded_is_the_vacuity_floor(self):
-        # By hand at margin 2: the two background bands keep x 18..47 (30 columns; the object tile
-        # ends at x = 15, the frame border excludes nothing) x rows 0..13 and 18..31 (14 each, the
-        # seam is at 15|16) = 840 px.
+        # By hand at margin 2 (the object tile ends at x = 15, the horizontal seam is at y = 15|16,
+        # the vertical one at x = 31|32 below it, the frame border excludes nothing):
+        # - the top band keeps x 18..47 (30 columns) x rows 0..13 (14) = 420 px;
+        # - the bottom band keeps x 18..29 and 34..47 (12 + 14 columns) x rows 18..31 (14) = 364 px;
+        # 784 px in all.
         same = list(self.ref)
-        self.assertEqual(self.run_compare(same, "--edge-margin", "2", "--min-graded", "840"), 0)
-        self.assertEqual(self.run_compare(same, "--edge-margin", "2", "--min-graded", "841"), 3)
+        self.assertEqual(self.run_compare(same, "--edge-margin", "2", "--min-graded", "784"), 0)
+        self.assertEqual(self.run_compare(same, "--edge-margin", "2", "--min-graded", "785"), 3)
 
     def test_usage_errors(self):
         ref = self.bmp(self.ref, "aaoff.bmp")
