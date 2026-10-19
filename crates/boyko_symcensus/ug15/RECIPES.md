@@ -102,15 +102,44 @@ codegen one unit. Every IB build therefore passes `-C codegen-units=<n>`, where 
 effective value: its own `codegen-units`, or the nearest one up `inherits`, else rustc's
 non-incremental default of 16. After the build, the final unit's rustc line must carry that token
 exactly once, or twice when the profile sets it and cargo passes it as well. Every value must equal n,
-and the line must carry no `-C incremental`; anything else is RED. Under `release` this reproduces
-the plain `cargo build --release` `.text` byte for byte. That is V11 (c2), calibrated at IB P0r's
-RF-5a.
+and the line must carry no `-C incremental`; anything else is RED. On IB's two subjects under
+`release` this reproduced the plain `cargo build --release` `.text` byte for byte at IB P0r's RF-5a,
+and V11 (c2) re-checks it by bytes on every `unit` run. It is a per-subject proof, not a property of
+the flag: finding F2 below measured two subjects where the explicit value is not the shipped bytes.
+So the `ib` lane re-runs V11 (c2) on its own subjects at its base and STOPs if it is red (orchestrator
+ruling 77 (2), PC-PT1-11).
 
-**The UG-15 legs do not pass it (finding, owed decision).** Every leg above builds through the same
-`--emit=obj` with codegen-units unset, so each one censuses a codegen-units = 1 object, not the
-shipped codegen. `ug15 textcheck` compared two such builds. Its receipts stay valid as identity claims
-between two identically built trees. Whether to re-pin the legs on the shipped codegen or to state
-the scope is the orchestrator's decision (ruling 57 (2)).
+**The UG-15 legs' scope: codegen-units = 1 objects (orchestrator rulings 71 (4), 74 (A), 77 (1)).**
+Every leg above builds through the same `--emit=obj` with codegen-units unset, so each one censuses a
+codegen-units = 1 object, not the shipped codegen. Their pins and receipts are identity claims between
+two trees built identically at that codegen, never claims about the shipped image's bytes. This covers
+leg (2)'s frozen pins, leg (7)'s snapshots, `ug15 textcheck` (both of its sides are such builds), and
+B3's probe (iv) and PC-18 `.text` numbers (`receipts/b3/`).
+
+PHYS-TOOL-1 sampled the shipped-codegen question without editing this crate (K unchanged). A scratch
+driver over this library built each leg (2) subject once under `release` through IB's
+`Request::codegen_units` = 16, the profile's effective value, then ran leg (2)'s own `pins::check_with`
+on that object. It found two things:
+
+- **F1: the pins are codegen-specific bytes.** At the explicit 16, the claim holds on `clear`,
+  `boyko_demo` and `phase9_scheduler`, and differs on `swap_remove` (H-2's criterion harness bodies
+  move) and `query_dsl` (H-1's `EcsMaster::run_system::<…>` is inlined into `Bencher::iter`). All
+  five hold under the legs' own recipe on the same tree, so this is not drift since the capture.
+- **F2: an explicit `-C codegen-units=16` is not the shipped codegen.** On `boyko_demo` and `clear`
+  it does not reproduce the plain `cargo build --release` `.text` byte for byte. The explicit flag
+  itself causes this, not `--emit=obj`: on `boyko_demo`, `cargo rustc --release -- -C
+  codegen-units=16` without `--emit=obj` gives the leg's `.text` too.
+
+Their files: `docs/physics/perf-campaign/levers/tooling/01-PHYS-TOOL-1-RECORD.md` section 4 (the
+receipts' hashes, committed). The raw receipts are under `D:/tmp/phys-orch/phys-tool-1/`:
+`u4/leg2-<subject>-ship.txt`, `u4/base/`, `u4/repro/`, `u4/builds.txt`, `u4/img/`, `u4/d2/`, and the
+driver `driver/`.
+
+**Deferred (PC-PT1-10).** Answering the shipped-codegen question needs an instrument that builds the
+EXACT shipped recipe, with no explicit codegen-units flag, and compares two arms built that way. It joins the unified
+plan's F2 end-state gates (`docs/unification/UNIFIED-SYSTEM-PLAN-02-ORDER-OF-WORK.md`, Phase F). Until
+then no leg is re-pinned, and none claims the shipped bytes. `src/objbuild.rs`'s module docs still
+call this an owed decision, because editing them would change K (PC-PT1-12).
 
 **Certification (W13).** `unit` is certified by a control receipt `ug15-ib-controls v1` that names
 K. The receipt must be complete (not `partial`), and every required control must have its expected

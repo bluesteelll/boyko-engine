@@ -1,11 +1,11 @@
 # Physics tooling lane 1 (PHYS-TOOL-1): the record
 
-Orchestrator rulings 64 (4), 66, 57 (2) and 71 (4), the last AMENDED by ruling 74 (A). Value-neutral: no
-simulation value moved, no pin moved. Nothing was timed: every result below is an exit code, a count, a
-hash or a byte comparison.
+Orchestrator rulings 64 (4), 66, 57 (2) and 71 (4), the last AMENDED by ruling 74 (A); ruling 77 closed
+item (4). Value-neutral: no simulation value moved, no pin moved. Nothing was timed: every result below is
+an exit code, a count, a hash or a byte comparison.
 
 Branch `u/phys-tooling-1` from `integ/unified` `0bd689596565769e1d31a4c80e46591fe352938a`. Cut:
-`D:/tmp/phys-orch/phys-tool-1/cut.md` (its addendum carries ruling 74 verbatim); critique: `critique.md`;
+`D:/tmp/phys-orch/phys-tool-1/cut.md` (its addenda carry rulings 74 and 77 verbatim); critique: `critique.md`;
 implementation report: `impl.md`, all in that directory. Raw logs stay under
 `D:/tmp/phys-orch/phys-tool-1/` (`runs/`, `k/`, `red/`, `u4/`); this file carries the receipts.
 
@@ -14,9 +14,11 @@ implementation report: `impl.md`, all in that directory. Raw logs stay under
 | `627fec96` | (2) `sleep_gates.py` names an absent output in a FAIL row; (3) GATE-KIT.md's `sleep_gates.py` tally |
 | `71602537` | (1) the runner's counter oracle models L10's T4 release |
 | `0fe76d6c` | (5) PC-SL2B-1: the runner header names patch v3 / dyn3 and the sleeping-on rows |
-| this commit | the record; `scenes/01-DESIGN.md` section 10.9's PC-SL2B-1 marker |
+| `dff92ce4` | the record; `scenes/01-DESIGN.md` section 10.9's PC-SL2B-1 marker |
+| this commit | (4) closed by ruling 77: the UG-15 scope statement in `crates/boyko_symcensus/ug15/RECIPES.md`; the markers in `IB-budget/01-P0R-RECORD.md` (section 5, PC-P0R-8) and in the unified plan (03 section 6, 02 Phase F rung F2) |
 
-Item (4) STOPPED on two findings (section 4); the decision is the orchestrator's.
+Item (4) stopped on two findings (section 4). Ruling 77 closed it with the scope statement; the re-pin on
+the shipped codegen is deferred (PC-PT1-10).
 
 ## 1. Item (1): the runner's counter oracle with sleeping on (ruling 64 (4))
 
@@ -105,7 +107,7 @@ sleeping (`scenes/01-DESIGN.md` section 10), and "Build (Jolt)" carries the v3 h
 worktree and build (`e8f48439…`, `exes.jolt56-dyn`) for every 9c Jolt row, and v2 (`9df09901…`,
 `exes.jolt56-dyn-v2`) for LAND and SR.
 
-## 4. Item (4): UG-15 on the shipped codegen, narrowed by ruling 74 (A): STOPPED on two findings
+## 4. Item (4): UG-15 on the shipped codegen, narrowed by ruling 74 (A), closed by ruling 77
 
 **What ran.** A scratch driver over `boyko-symcensus`'s library, never an edit of the crate (K unchanged):
 `D:/tmp/phys-orch/phys-tool-1/driver/` (`src/main.rs` sha256 `56adce0b…`, the exe `273819aa…`; its lock
@@ -156,10 +158,28 @@ subjects by bytes on every run, so IB's gate is not misled; but ruling 57 (1)'s 
 UG-15 legs, would census a codegen that is not the shipped one on `boyko_demo` and `clear` (here it would
 also turn `swap_remove` and `query_dsl` red).
 
-**Not done, pending the orchestrator:** the UG-15 doc's scope statement (`ug15/RECIPES.md`, "IB V11
-commands"), the markers in `IB-budget/01-P0R-RECORD.md` section 5 and PC-P0R-8, and the plan's 03 / 02
-markers. The full re-pin stays deferred to the unified plan's F2 (ruling 74 (A)), and now needs a build that
-reproduces the shipped default by bytes before any pin is taken (PC-PT1-10).
+**Ruling 77 (the orchestrator's answer to the stop).**
+
+1. Item (4) closes with the scope statement in `crates/boyko_symcensus/ug15/RECIPES.md`, "The UG-15 legs'
+   scope". The legs census codegen-units = 1 objects, and their pins are identity claims between
+   identically built trees at that codegen. F1 and F2 are recorded there with their files. The
+   shipped-codegen question needs an instrument that builds the EXACT shipped recipe (no explicit
+   codegen-units flag) and compares two arms built that way. That is deferred to the unified plan's F2
+   end-state gates as PC-PT1-10, with both findings attached.
+2. F2 bears on ruling 57 (1)'s premise for IB, that an explicit effective value reproduces the shipped
+   bytes. IB's V11 (c2) byte gate stays the per-subject proof, and the `ib` lane re-runs it at its base
+   (PC-PT1-11). `RECIPES.md`'s "Codegen units" paragraph now says the RF-5a calibration is per subject.
+3. The markers (cut Q4, markers only), each a dated note (in the plan, inline, so no line shifts):
+   * `IB-budget/01-P0R-RECORD.md`: section 5 and PC-P0R-8;
+   * `UNIFIED-SYSTEM-PLAN-03-GATES.md` section 6: `:183` (probe (iv), the profile), `:188` (leg (7)'s
+     `.text` check) and `:205` (PC-18's `.text` numbers);
+   * `UNIFIED-SYSTEM-PLAN-02-ORDER-OF-WORK.md`, Phase F rung F2: PC-PT1-10 joins the end-state gates.
+
+   The counts at 03 `:24` and `:36`, 02 `:73` and `:82`, and 00 `:129` stay unmarked: nothing was
+   re-frozen, so the 42 frozen pins and the 6 recorded-absent pairs are unchanged.
+
+No file under `crates/boyko_symcensus/src/` or its `Cargo.toml` changed, so K is unchanged
+(`src/key.rs`: K covers `Cargo.toml` and `src/**`; `RECIPES.md` is outside it).
 
 ## 5. The gates (each commit's own in its message)
 
@@ -185,8 +205,18 @@ No file of `crates/boyko_physics`, `boyko_ecs`, `boyko_threadpool` or `boyko_mem
   2).
 * **PC-PT1-8 (trunk pin header).** P9's ledger last row on `0bd68959` is `PX0-8` (`5 7`), not `SR-B-C6`;
   the values are equal.
-* **PC-PT1-10 (UG-15, findings F1 and F2).** The orchestrator decides the scope statement and how a leg can
-  reach the shipped default codegen; the full re-pin is F2's (ruling 74 (A)).
+* **PC-PT1-10 (UG-15 on the shipped codegen; the unified plan's F2, ruling 77 (1)).** First an instrument that
+  builds each subject by the EXACT shipped recipe (no explicit `-C codegen-units`) and compares two arms
+  built that way; then the legs' re-pin, each moved pin re-derived under its own rule and declared.
+  Attached: F1 (section 4, the leg (2) pins at the explicit 16 differ on `swap_remove` and `query_dsl`)
+  and F2 (section 4, the explicit 16 is not the plain release `.text` on `boyko_demo` and `clear`).
+  Raw receipts: `D:/tmp/phys-orch/phys-tool-1/u4/` and `driver/`.
+* **PC-PT1-11 (the `ib` lane, IB P1-P4, the physics roadmap's P6; ruling 77 (2)).** At its base, before
+  it relies on IB's codegen-units field, re-run V11 (c2) on its own subjects (`ug15 unit`, RECIPES.md
+  "IB V11 commands"), and STOP if (c2) is red.
+* **PC-PT1-12 (`objbuild.rs`'s module docs).** They still read "recorded as an owed decision". This
+  lane does not edit the instrument (K would move). The next change that moves K anyway (IB P2,
+  PC-P0R-4) can update them to cite RECIPES.md's scope statement.
 
 ## 7. Quiet-window commands
 

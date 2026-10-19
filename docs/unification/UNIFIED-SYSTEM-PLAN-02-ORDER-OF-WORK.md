@@ -565,7 +565,7 @@ spatial index must be implemented as a kernel feature").
 | Rung | Scope |
 |---|---|
 | F1 | R6 (~~648~~ 860 rows at rev 5, ⚠ *2026-09-24, B1 PC-l; `RUNTIME-DATA-LEDGER.md:2402`*): diagnostics form, KF-09 / KF-10, B and X rows, by group |
-| F2 | UG-06 per crate when its ledger is ≤ 10 sites; UG-05 in every gate binary; UG-07 |
+| F2 | UG-06 per crate when its ledger is ≤ 10 sites; UG-05 in every gate binary; UG-07 ⚠ *2026-10-19, PHYS-TOOL-1 (rulings 71 (4), 74 (A), 77 (1)): and UG-15 on the shipped codegen, PC-PT1-10. First an instrument that builds each subject by the EXACT shipped recipe (no explicit codegen-units flag) and compares two arms built that way; then the legs' re-pin, each moved pin declared. Until then the legs census codegen-units = 1 objects (03 §6 `:183` marker; `crates/boyko_symcensus/ug15/RECIPES.md`, "The UG-15 legs' scope"). Findings F1 and F2: `docs/physics/perf-campaign/levers/tooling/01-PHYS-TOOL-1-RECORD.md` section 4.* |
 | F3 | KC-35 only if MQ-05 says build |
 | F4 | **The refactor campaign (Q-4; §5):** RF-0, RF-K1..K3, RF-L, RF-V, RF-R, RF-T, RF-E, RF-P, RF-A, RF-RE, RF-U, in §5's order, after [G] is re-derived on the post-F3 trunk. RF-V, RF-R and RF-T also wait for owner step O4. |
 
