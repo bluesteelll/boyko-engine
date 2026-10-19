@@ -5556,10 +5556,11 @@ pub fn m2_cell_is_dirty(cell: [u32; 3], dirty: &SdfEditAabb) -> bool {
 // writes ATTRIBUTES (gAlbedo = the unmultiplied base, gMaterial = (vis, 0, mask, 1)).
 // The fullscreen `deferred_pbr.comp` RESOLVE then computes `lit = mask ? base*vis : base`.
 // [`golden_marcher_attributes`] mirrors the marcher's per-pixel attribute output and
-// [`golden_deferred_resolve`] mirrors the resolve, modelling the EXACT GPU double
-// quantization (base RGB8 + vis R8, then a second pack of base8/255 * vis8/255). The
-// approximation-gate reference [`golden_composite_pixel_ex_omega_lit`] above is kept for
-// the inline-composite comparison.
+// [`golden_deferred_resolve`] mirrors the resolve, modelling the EXACT GPU attribute
+// quantization (base RGB8 + vis R8) and returning the scene-linear radiance the resolve
+// stores into the `LIT_FORMAT` `lit` (render wave PX1a; `goldens::golden_display` composes
+// `post_final`'s tail back). The approximation-gate reference
+// [`golden_composite_pixel_ex_omega_lit`] above is kept for the inline-composite comparison.
 // ===========================================================================
 
 

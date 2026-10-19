@@ -701,6 +701,27 @@ def check_vectors(directory: str) -> list:
                 if abs(gv - wv) > 4e-6 + 2e-5 * abs(wv):
                     bad.append(f"aces_hill.txt:{n}: {lhs} -> {w}, mirror gives {got}")
                     break
+    # Render wave PX1a (critique O6): `goldens::hdr_display_bound`, the Rust twin of `pixel_bound`, wrote
+    # these rows; both sides compute in f64 with the same constants and op order, printed to 6 decimals.
+    path = os.path.join(directory, "display_bound.txt")
+    if not os.path.exists(path):
+        bad.append("display_bound.txt: missing (the Rust generator writes it)")
+        return bad
+    rows = 0
+    with open(path, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            lhs, want = line.split(" -> ")
+            p = lhs.split()
+            w = [float(v) for v in want.split()]
+            got = pixel_bound(tuple(int(v) for v in p[3:6]), p[1], p[2])
+            rows += 1
+            if any(abs(gv - wv) > 1e-5 for gv, wv in zip(got, w)):
+                bad.append(f"display_bound.txt:{n}: {lhs} -> {w}, pixel_bound gives {got}")
+    if rows == 0:
+        bad.append("display_bound.txt: no rows")
     return bad
 
 

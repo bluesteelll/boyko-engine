@@ -74,7 +74,8 @@ use boyko_rhi::{
     TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use boyko_rhi_vulkan::compute::{B5_CAMERA_UBO_BYTES_M4, B5_CAMERA_UBO_BYTES_MESH_SDF, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, CompositePushConstants, csm_depth_fs_spirv, csm_depth_vs_spirv, punctual_depth_fs_spirv, punctual_depth_vs_spirv, EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GOLDEN_LIGHT_KIND_DIRECTIONAL, GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SPOT, INTERP_INSTANCES_PUSH_BYTES, interp_instances_spirv, LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET, MESH_SDF_PARAMS_OFFSET, MeshSdfParams, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera, encode_edit_list, deferred_pbr_spirv, composite_pixel_ray, DEFAULT_MARCHER_OMEGA, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z, sdf_gbuffer_composite_spirv, sdf_op, sdf_ssao_spirv_variant, sdf_tile_cull_spirv, tile_grid_extent, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH, viewt_from_depth_spirv};
-use boyko_rhi_vulkan::goldens::{GoldenLight, GoldenLightHeader, golden_deferred_resolve, golden_marcher_attributes, GoldenMaterial};
+use boyko_rhi_vulkan::goldens::{GoldenLight, GoldenLightHeader, LIT_ROUNDING, LIT_STORE_PATH, LIT_TARGET, golden_deferred_resolve, golden_display_packed, golden_marcher_attributes, hdr_display_bound, GoldenMaterial};
+use boyko_shaderdsl::post::TONEMAP_ACES;
 use boyko_rhi_vulkan::mesh_sdf_texture::MeshSdfTexture;
 use boyko_sdf_math::mesh_sdf::{BakeMesh, MeshSdfField};
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
@@ -1522,27 +1523,26 @@ fn readback_rgb(texel: [u8; 4], is_bgra: bool) -> [i32; 3] {
     }
 }
 
-/// `true` if a readback texel agrees with a golden packed `0xAABBGGRR` within
-/// `CHANNEL_TOL` per RGB channel (swapchain-byte-order-aware).
-fn readback_close(texel: [u8; 4], golden: u32, is_bgra: bool) -> bool {
-    let g = readback_rgb(texel, is_bgra);
-    let w = unpack_rgb(golden);
-    (0..3).all(|c| (g[c] - w[c]).abs() <= CHANNEL_TOL)
-}
-
-/// Asserts a readback texel agrees with a golden packed color (swapchain-order-aware).
-fn assert_readback_close(texel: [u8; 4], golden: u32, is_bgra: bool, label: &str) {
+/// Asserts a swapchain readback texel (display-referred: `post_final`'s output, presented) agrees
+/// with the display of the oracle's scene-linear radiance `want_lit` — `golden_display(want_lit,
+/// Aces)`, 8-bit — within AD-19's per-pixel bound `hdr_display_bound` for one `LIT_FORMAT` store
+/// under `LIT_ROUNDING` (render wave PX1a C9; it replaces the flat ±`CHANNEL_TOL`).
+fn assert_readback_displays(texel: [u8; 4], want_lit: [f32; 3], is_bgra: bool, label: &str) {
+    let want = unpack_rgb(golden_display_packed(want_lit, TONEMAP_ACES));
+    let want8 = want.map(|c| c as u8);
+    let bound = hdr_display_bound(want8, LIT_TARGET, LIT_ROUNDING[LIT_STORE_PATH]);
+    let got = readback_rgb(texel, is_bgra);
     assert!(
-        readback_close(texel, golden, is_bgra),
-        "{label}: readback {texel:02x?} (bgra={is_bgra}) != golden {golden:#010x} -> {:?} within +/-{CHANNEL_TOL}",
-        unpack_rgb(golden),
+        (0..3).all(|c| f64::from((got[c] - want[c]).abs()) <= bound[c]),
+        "{label}: readback {texel:02x?} (bgra={is_bgra}) -> {got:?} != golden_display({want_lit:?}) = {want:?}          within the per-pixel bound {bound:?}",
     );
 }
 
-/// `true` if two golden packed colors agree within `CHANNEL_TOL` per RGB channel.
-fn goldens_close(a: u32, b: u32) -> bool {
-    let x = unpack_rgb(a);
-    let y = unpack_rgb(b);
+/// `true` if the displays of two oracle radiances agree within `CHANNEL_TOL` per RGB channel (the
+/// discriminator texels must be apart on screen).
+fn goldens_close(a: [f32; 3], b: [f32; 3]) -> bool {
+    let x = unpack_rgb(golden_display_packed(a, TONEMAP_ACES));
+    let y = unpack_rgb(golden_display_packed(b, TONEMAP_ACES));
     (0..3).all(|c| (x[c] - y[c]).abs() <= CHANNEL_TOL)
 }
 
@@ -2954,9 +2954,9 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         let b_got = read_texel(bx, by);
         let d_got = read_texel(dx, dy);
 
-        assert_readback_close(a_got, a_want, is_bgra, "mesh-occludes-SDF texel (raster-PBR)");
-        assert_readback_close(b_got, b_want, is_bgra, "SDF texel (lit color)");
-        assert_readback_close(d_got, d_want, is_bgra, "background texel");
+        assert_readback_displays(a_got, a_want, is_bgra, "mesh-occludes-SDF texel (raster-PBR)");
+        assert_readback_displays(b_got, b_want, is_bgra, "SDF texel (lit color)");
+        assert_readback_displays(d_got, d_want, is_bgra, "background texel");
 
         // The occlusion actually changed the on-screen pixel: the mesh-occludes-SDF
         // texel and the SDF texel are BOTH over the sphere, yet must differ.

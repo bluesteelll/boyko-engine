@@ -93,12 +93,16 @@ use boyko_rhi_vulkan::goldens::{
     golden_deferred_resolve_table, golden_deferred_resolve_table_shadowed,
     golden_deferred_resolve_table_shadowed_ssao, golden_gbuffer, golden_marcher_attributes,
     golden_ssao_attributes, golden_ssao_atrous, golden_tile_bound,
+    // Render wave PX1a C9: the lit readback's format, its pixfmt decode, the radiance comparator and
+    // the shipped tail's display.
+    LIT_TEXEL_BYTES, golden_display_packed, lit_matches, lit_texel_rgb,
 };
 use boyko_rhi_vulkan::brick_atlas::{BrickAtlas, BrickClipmap};
 use boyko_rhi_vulkan::ddgi::DdgiAtlas;
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::memory::BoundBuffer;
-use boyko_rhi_vulkan::present::{AtrousStepRole, MAX_SSAO_ATROUS_LEVELS, ssao_atrous_step};
+use boyko_rhi_vulkan::present::{AtrousStepRole, LIT_FORMAT, MAX_SSAO_ATROUS_LEVELS, ssao_atrous_step};
+use boyko_shaderdsl::post::TONEMAP_ACES;
 use boyko_rhi_vulkan::rhi_impl::{
     ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanSampler,
 };
@@ -358,8 +362,11 @@ const PIXELS: u32 = SDF_IMG_W * SDF_IMG_H;
 /// `compute::M2_GRID_PARAMS_BYTES` (kept local to avoid widening the import for one const).
 const M2_GRID_PARAMS_BYTES_LOCAL: usize = B5_CAMERA_UBO_BYTES - M2_GRID_PARAMS_OFFSET;
 
-/// R8G8B8A8 ALBEDO readback byte size.
+/// A 4 B/px readback's byte size (the R8G8B8A8 gNormal, the R32 gViewT).
 const READBACK_BYTES: u64 = (PIXELS as u64) * 4;
+
+/// The `lit` readback's byte size: [`LIT_FORMAT`] texels (render wave PX1a — RGBA16F, 8 B/px).
+const LIT_READBACK_BYTES: u64 = (PIXELS as u64) * LIT_TEXEL_BYTES as u64;
 
 /// Per-channel tolerance on the packed-RGBA bytes (identical to rung 9/10): DXC
 /// `mad`/`fma` rounding + the float→UNORM store quantization make a bit-exact match
@@ -628,9 +635,43 @@ fn unpack_packed_rgb(packed: u32) -> [i32; 3] {
     ]
 }
 
-/// Splits an R8G8B8A8 readback texel's first three bytes into `[r, g, b]`.
-fn unpack_texel_rgb(rgba: &[u8]) -> [i32; 3] {
-    [rgba[0] as i32, rgba[1] as i32, rgba[2] as i32]
+/// The 8-bit display `post_final` shows for one `lit` readback texel ([`LIT_FORMAT`], one texel's
+/// bytes): decoded through `pixfmt` to scene-linear radiance, then [`display_rgb`]. Render wave PX1a
+/// C9: the GPU-vs-GPU and classification checks (holes, colour classes, darkening amounts) keep
+/// reasoning in display codes, on exactly the image the shipped tail shows.
+fn unpack_texel_rgb(lit_texel: &[u8]) -> [i32; 3] {
+    display_rgb(lit_texel_rgb(lit_texel))
+}
+
+/// `post_final`'s 8-bit display of a scene-linear radiance (ACES, exposure ratio 1 —
+/// `goldens::golden_display`), as `[r, g, b]` codes.
+fn display_rgb(radiance: [f32; 3]) -> [i32; 3] {
+    unpack_packed_rgb(golden_display_packed(radiance, TONEMAP_ACES))
+}
+
+/// The `lit` readback texel at `(px, py)` decoded to scene-linear radiance (`pixfmt`, DS-H4 (a)) —
+/// what the oracle comparisons read (render wave PX1a C9: radiance against the pre-tonemap oracle,
+/// [`lit_matches`]).
+fn lit_rgb(lit: &[u8], px: u32, py: u32) -> [f32; 3] {
+    let base = ((py * SDF_IMG_W + px) as usize) * LIT_TEXEL_BYTES;
+    lit_texel_rgb(&lit[base..base + LIT_TEXEL_BYTES])
+}
+
+/// Every texel of a `lit` readback as its display codes ([`unpack_texel_rgb`]), row-major.
+fn lit_display_texels(lit: &[u8]) -> Vec<[i32; 3]> {
+    lit.chunks_exact(LIT_TEXEL_BYTES).map(unpack_texel_rgb).collect()
+}
+
+/// The number of `lit` readback texels holding any non-zero RGB radiance (the "the device
+/// rendered something" probe).
+fn lit_nonzero_count(lit: &[u8]) -> usize {
+    lit.chunks_exact(LIT_TEXEL_BYTES).filter(|t| lit_texel_rgb(t).iter().any(|&c| c != 0.0)).count()
+}
+
+/// A `lit` readback as the RGBA8 image `post_final` would display (alpha 255) — what the owner-facing
+/// BMP dumps write (render wave PX1a: the readback itself is scene-linear `LIT_FORMAT`).
+fn lit_display_rgba(lit: &[u8]) -> Vec<u8> {
+    lit_display_texels(lit).iter().flat_map(|d| [d[0] as u8, d[1] as u8, d[2] as u8, 255]).collect()
 }
 
 /// `true` if a readback texel agrees with a packed golden within `CHANNEL_TOL`/channel.
@@ -1103,7 +1144,7 @@ fn run_gbuffer_hybrid_m4(
             width: SDF_IMG_W,
             height: SDF_IMG_H,
             depth: 1,
-            format: GBUFFER_FORMAT,
+            format: LIT_FORMAT,
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
@@ -1162,7 +1203,7 @@ fn run_gbuffer_hybrid_m4(
     // The readback buffer for the LIT image.
     let readback = device
         .create_buffer(&BufferDesc {
-            size: READBACK_BYTES,
+            size: LIT_READBACK_BYTES,
             usage: BufferUsage::TRANSFER_DST,
             location: MemoryLocation::HostVisibleCoherent,
         })
@@ -1838,12 +1879,12 @@ fn run_gbuffer_hybrid_m4(
     let dst_ptr = device
         .buffer_mapped_ptr(&readback)
         .expect("host-visible readback buffer is mapped");
-    let mut out = vec![0u8; READBACK_BYTES as usize];
-    // SAFETY: `dst_ptr` points to `READBACK_BYTES` mapped host-coherent bytes; a fence
+    let mut out = vec![0u8; LIT_READBACK_BYTES as usize];
+    // SAFETY: `dst_ptr` points to `LIT_READBACK_BYTES` mapped host-coherent bytes; a fence
     // wait preceded this read, so the GPU store + copy are complete + coherent; reading
-    // `READBACK_BYTES` bytes is in-bounds; `out` is a distinct allocation.
+    // `LIT_READBACK_BYTES` bytes is in-bounds; `out` is a distinct allocation.
     unsafe {
-        core::ptr::copy_nonoverlapping(dst_ptr.as_ptr(), out.as_mut_ptr(), READBACK_BYTES as usize);
+        core::ptr::copy_nonoverlapping(dst_ptr.as_ptr(), out.as_mut_ptr(), LIT_READBACK_BYTES as usize);
     }
 
     // Render P4b: optionally read back the per-tile cull buffer (binding 6). It is a
@@ -2147,7 +2188,20 @@ fn run_gbuffer_hybrid_ssao(
     let albedo = make_gbuf(ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT, "G-buffer albedo");
     let normal = make_gbuf(ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT, "G-buffer normal");
     let material = make_gbuf(ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT, "G-buffer material");
-    let lit = make_gbuf(ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC, "resolve lit image");
+    // Render wave PX1a: the resolve stores scene-linear radiance into a `LIT_FORMAT` image.
+    let lit = device
+        .create_texture(&TextureDesc {
+            width: SDF_IMG_W,
+            height: SDF_IMG_H,
+            depth: 1,
+            format: LIT_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+            array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
+        })
+        .expect("resolve lit image");
     let viewt = device
         .create_texture(&TextureDesc {
             width: SDF_IMG_W,
@@ -2181,10 +2235,10 @@ fn run_gbuffer_hybrid_ssao(
         .create_sampler(&SamplerDesc::default())
         .expect("depth sampler (ignored by .Load)");
 
-    // The readback buffers: LIT (4 B/px) + the raw SSAO factor (1 B/px).
+    // The readback buffers: LIT (`LIT_FORMAT`, 8 B/px) + the raw SSAO factor (1 B/px).
     let readback = device
         .create_buffer(&BufferDesc {
-            size: READBACK_BYTES,
+            size: LIT_READBACK_BYTES,
             usage: BufferUsage::TRANSFER_DST,
             location: MemoryLocation::HostVisibleCoherent,
         })
@@ -2781,12 +2835,12 @@ fn run_gbuffer_hybrid_ssao(
     queue.submit(&encoder, &fence).expect("submit");
     device.wait_fence(&fence, u64::MAX).expect("wait_fence");
 
-    let mut lit_out = vec![0u8; READBACK_BYTES as usize];
+    let mut lit_out = vec![0u8; LIT_READBACK_BYTES as usize];
     {
         let dst = device.buffer_mapped_ptr(&readback).expect("lit readback mapped");
-        // SAFETY: `dst` points to `READBACK_BYTES` mapped host-coherent bytes; the fence wait
+        // SAFETY: `dst` points to `LIT_READBACK_BYTES` mapped host-coherent bytes; the fence wait
         // preceded this read, so the copy is complete + coherent; `lit_out` is a distinct alloc.
-        unsafe { core::ptr::copy_nonoverlapping(dst.as_ptr(), lit_out.as_mut_ptr(), READBACK_BYTES as usize) };
+        unsafe { core::ptr::copy_nonoverlapping(dst.as_ptr(), lit_out.as_mut_ptr(), LIT_READBACK_BYTES as usize) };
     }
     let mut ssao_out = vec![0u8; PIXELS as usize];
     {
@@ -2953,11 +3007,11 @@ fn p1b_gbuffer_hybrid_matches_golden() {
         // conservative golden (±2/255 vs this) + the `Tiles`-buffer-vs-`golden_tile_bound`
         // agreement are the TESTER's GPU gates.
         let lit = run_gbuffer_hybrid(&ctx, &edits, false);
-        assert_eq!(lit.len(), READBACK_BYTES as usize);
+        assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
 
         let texel = |px: u32, py: u32| -> &[u8] {
-            let base = ((py * SDF_IMG_W + px) as usize) * 4;
-            &lit[base..base + 4]
+            let base = ((py * SDF_IMG_W + px) as usize) * LIT_TEXEL_BYTES;
+            &lit[base..base + LIT_TEXEL_BYTES]
         };
 
         // Whole-image deferred-oracle scan: each LIT texel within +/-2/255 of
@@ -3015,10 +3069,10 @@ fn p1b_gbuffer_hybrid_matches_golden() {
 // MUST show MESH_COLOR — D6) and the spirv-val / committed-.spv-freshness audit.
 // ===========================================================================================
 
-/// Splits an R8G8B8A8 readback into `[r, g, b]` for the texel at `(px, py)` (the low 3 bytes).
+/// The display codes ([`display_rgb`]) of the `lit` readback texel at `(px, py)` (the name predates
+/// the deferred split, when this readback was the albedo).
 fn albedo_rgb(albedo: &[u8], px: u32, py: u32) -> [i32; 3] {
-    let base = ((py * SDF_IMG_W + px) as usize) * 4;
-    unpack_texel_rgb(&albedo[base..base + 4])
+    display_rgb(lit_rgb(albedo, px, py))
 }
 
 /// Parses the `tiles_buffer` readback (`tile_count() * 16` bytes, std430 scalar) into the
@@ -3098,12 +3152,12 @@ fn p4b_cull_on_conservative_within_tol_of_cull_off() {
     for (name, edits) in p4b_scenes() {
         let off = run_gbuffer_hybrid(&ctx, &edits, false);
         let on = run_gbuffer_hybrid(&ctx, &edits, true);
-        assert_eq!(off.len(), READBACK_BYTES as usize, "[{name}] cull-OFF readback size");
-        assert_eq!(on.len(), READBACK_BYTES as usize, "[{name}] cull-ON readback size");
+        assert_eq!(off.len(), LIT_READBACK_BYTES as usize, "[{name}] cull-OFF readback size");
+        assert_eq!(on.len(), LIT_READBACK_BYTES as usize, "[{name}] cull-ON readback size");
 
         // Prove the device actually executed: the cull-OFF baseline must contain BOTH a
         // mesh/SDF lit texel AND a background texel (not a silent all-zero buffer).
-        let nonzero = off.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        let nonzero = lit_nonzero_count(&off);
         assert!(
             nonzero > 0,
             "[{name}] cull-OFF albedo is all-zero — the device did not render (silent skip?)"
@@ -3381,7 +3435,7 @@ fn p4b_cull_on_is_validation_clean() {
     // crater is the densest fixture (a CSG carve), so it exercises both the coarse trace and
     // the fine seeded march hardest. A clean return = validation-clean (asserted inside).
     let (albedo, tiles) = run_gbuffer_hybrid_ex(&ctx, &crater(), true, true, 1.0);
-    assert_eq!(albedo.len(), READBACK_BYTES as usize);
+    assert_eq!(albedo.len(), LIT_READBACK_BYTES as usize);
     let tiles = tiles.expect("read_tiles");
     let bounds = parse_tile_bounds(&tiles);
     let surface = bounds.iter().filter(|b| b.flags & TILE_FLAG_EMPTY == 0).count();
@@ -3448,11 +3502,11 @@ fn b1_gate6_gpu_omega_one_bit_identical_to_pre_b1() {
             // Two ω=1.0 runs must be byte-identical (deterministic).
             let a = run_gbuffer_hybrid_ex(&ctx, &edits, coarse, false, 1.0).0;
             let b = run_gbuffer_hybrid_ex(&ctx, &edits, coarse, false, 1.0).0;
-            assert_eq!(a.len(), READBACK_BYTES as usize, "[{name} cull={coarse}] readback size");
+            assert_eq!(a.len(), LIT_READBACK_BYTES as usize, "[{name} cull={coarse}] readback size");
             assert_eq!(a, b, "[{name} cull={coarse}] two ω=1.0 runs diverged — non-deterministic marcher");
 
             // Prove the device executed (not a silent all-zero buffer).
-            let nonzero = a.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+            let nonzero = lit_nonzero_count(&a);
             assert!(nonzero > 0, "[{name} cull={coarse}] ω=1.0 albedo all-zero — device did not render");
 
             // Each ω=1.0 LIT texel within ±2/255 of the ω=1 deferred PBR oracle. Lighting is
@@ -3481,7 +3535,7 @@ fn b1_gate7_gpu_overrelax_hit_miss_parity() {
     };
     for (name, edits) in p4b_scenes() {
         let base = run_gbuffer_hybrid_ex(&ctx, &edits, false, false, 1.0).0;
-        let base_hits = base.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        let base_hits = lit_nonzero_count(&base);
         assert!(base_hits > 0, "[{name}] ω=1 baseline all-zero — device did not render");
         for &omega in &[1.2_f32, 1.5, 1.9] {
             let over = run_gbuffer_hybrid_ex(&ctx, &edits, false, false, omega).0;
@@ -3521,8 +3575,8 @@ fn b1_gate8_gpu_omega_1_2_matches_matched_omega_host() {
     let omega = DEFAULT_MARCHER_OMEGA; // 1.2 — the production default
     for (name, edits) in p4b_scenes() {
         let lit = run_gbuffer_hybrid_ex(&ctx, &edits, false, false, omega).0;
-        assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
+        let nonzero = lit_nonzero_count(&lit);
         assert!(nonzero > 0, "[{name}] ω={omega} lit all-zero — device did not render");
         // The matched-ω deferred oracle: the host marches the IDENTICAL ω before the resolve.
         let (max_pass, max_arm1, sdf_lit_hits) =
@@ -3578,7 +3632,7 @@ fn b1_gate8c_bug_b1_hole_1_is_mesh_masked_on_gpu_harness() {
     // The mesh quad occludes the SDF here, so the host oracle picks its raster-PBR mesh arm.
     assert_eq!(attrs.mask, 1, "the mesh-covered hole pixel is the RASTER-PBR mesh (mask=1)");
     let (_, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
-    let mesh = unpack_packed_rgb(golden_deferred_resolve(attrs, rd, &materials));
+    let mesh = display_rgb(golden_deferred_resolve(attrs, rd, &materials));
     println!(
         "[BUG-B1-HOLE-1 GPU] ({px},{py}) mesh-covered: ω=1 {g1:?} ω=1.2 {g12:?} (raster-PBR mesh {mesh:?}) — hole MASKED by the mesh quad"
     );
@@ -3609,7 +3663,7 @@ fn b1_gate8c_bug_b1_hole_1_is_mesh_masked_on_gpu_harness() {
         1.0, 0, DEFAULT_LIGHT_DIR,
     );
     assert_eq!(sdf_attrs.mask, 1, "the un-masked pixel is an SDF-lit surface (mask=1)");
-    let sdf_lit = unpack_packed_rgb(golden_deferred_resolve(sdf_attrs, rd, &materials));
+    let sdf_lit = display_rgb(golden_deferred_resolve(sdf_attrs, rd, &materials));
     assert!(
         !(0..3).all(|c| (mesh[c] - sdf_lit[c]).abs() <= CHANNEL_TOL),
         "the masked mesh value ({mesh:?}) must DIFFER from the un-masked SDF-lit value \
@@ -3632,7 +3686,7 @@ fn b1_gate11_cull_on_omega_1_2_sync_validation_clean() {
         return;
     }
     let (albedo, tiles) = run_gbuffer_hybrid_ex(&ctx, &crater(), true, true, DEFAULT_MARCHER_OMEGA);
-    assert_eq!(albedo.len(), READBACK_BYTES as usize);
+    assert_eq!(albedo.len(), LIT_READBACK_BYTES as usize);
     let bounds = parse_tile_bounds(&tiles.expect("read_tiles"));
     let surface = bounds.iter().filter(|b| b.flags & TILE_FLAG_EMPTY == 0).count();
     assert!(surface > 0, "the coarse pass must have marked at least one surface tile");
@@ -3795,8 +3849,8 @@ fn a1g_gpu_shadows_ao_matches_host_lit_default_light() {
     let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
     for (name, edits) in p4b_scenes() {
         let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR).0;
-        assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
+        let nonzero = lit_nonzero_count(&lit);
         assert!(nonzero > 0, "[{name}] lit all-zero — device did not render");
         let (max_pass, max_arm1, sdf_lit_hits) =
             assert_lit_matches_deferred_golden(&lit, &edits, flags, DEFAULT_LIGHT_DIR, name);
@@ -3842,7 +3896,7 @@ fn a2g_gpu_shadows_only_and_ao_only_gate_independently() {
     for (name, edits) in p4b_scenes() {
         for flags in [LIGHTING_FLAG_SHADOWS, LIGHTING_FLAG_AO] {
             let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR).0;
-            let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+            let nonzero = lit_nonzero_count(&lit);
             assert!(nonzero > 0, "[{name} flags={flags}] lit all-zero — device did not render");
             let (max_pass, max_arm1, sdf_lit_hits) =
                 assert_lit_matches_deferred_golden(&lit, &edits, flags, DEFAULT_LIGHT_DIR, name);
@@ -3864,7 +3918,7 @@ fn a2g_gpu_shadows_only_and_ao_only_gate_independently() {
     let mut renders: [Option<Vec<u8>>; 2] = [None, None];
     for (slot, flags) in [LIGHTING_FLAG_SHADOWS, LIGHTING_FLAG_AO].into_iter().enumerate() {
         let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, light).0;
-        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        let nonzero = lit_nonzero_count(&lit);
         assert!(nonzero > 0, "[twin flags={flags}] lit all-zero — device did not render");
         let (_, _, sdf_lit_hits) =
             assert_lit_matches_deferred_golden(&lit, &edits, flags, light, "twin_self_shadow");
@@ -3873,10 +3927,10 @@ fn a2g_gpu_shadows_only_and_ao_only_gate_independently() {
     }
     let shadows = renders[0].as_ref().expect("SHADOWS render");
     let ao = renders[1].as_ref().expect("AO render");
-    let diff_px = shadows
-        .as_chunks::<4>().0.iter()
-        .zip(ao.as_chunks::<4>().0)
-        .filter(|(s, a)| (0..3).any(|c| (s[c] as i32 - a[c] as i32).abs() > LIT_CHANNEL_TOL))
+    let diff_px = lit_display_texels(shadows)
+        .iter()
+        .zip(&lit_display_texels(ao))
+        .filter(|(s, a)| (0..3).any(|c| (s[c] - a[c]).abs() > LIT_CHANNEL_TOL))
         .count();
     assert!(
         diff_px > 0,
@@ -3925,8 +3979,8 @@ fn a3g_nondefault_light_dir_shifts_shadows_mispack_catcher() {
     for (name, edits) in p4b_scenes() {
         let def = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR).0;
         let non = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, NONDEFAULT_LIGHT).0;
-        assert_eq!(def.len(), READBACK_BYTES as usize);
-        assert_eq!(non.len(), READBACK_BYTES as usize);
+        assert_eq!(def.len(), LIT_READBACK_BYTES as usize);
+        assert_eq!(non.len(), LIT_READBACK_BYTES as usize);
 
         // Count pixels whose shadow term shifted beyond the OFF tolerance. A correctly-packed
         // non-axis light re-aims the shadow march → self-occluded surface pixels change. A
@@ -3997,8 +4051,8 @@ fn a3g_nondefault_light_dir_matches_host_lit_literal() {
     let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
     for (name, edits) in p4b_scenes() {
         let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, NONDEFAULT_LIGHT).0;
-        assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
+        let nonzero = lit_nonzero_count(&lit);
         assert!(nonzero > 0, "[{name}] non-default-light lit all-zero — device did not render");
         // The LITERAL host-vs-GPU comparison with the SAME non-default light_dir, against the
         // deferred PBR oracle (the payoff).
@@ -4078,18 +4132,17 @@ fn a4g_cull_on_lighting_on_sync_validation_clean() {
     let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
     let (albedo, tiles) =
         run_gbuffer_hybrid_lit(&ctx, &crater(), true, true, DEFAULT_MARCHER_OMEGA, flags, DEFAULT_LIGHT_DIR);
-    assert_eq!(albedo.len(), READBACK_BYTES as usize);
+    assert_eq!(albedo.len(), LIT_READBACK_BYTES as usize);
     let bounds = parse_tile_bounds(&tiles.expect("read_tiles"));
     let surface = bounds.iter().filter(|b| b.flags & TILE_FLAG_EMPTY == 0).count();
     assert!(surface > 0, "the coarse pass must have marked at least one surface tile");
-    let sdf_hits = albedo
-        .as_chunks::<4>().0.iter()
-        .filter(|t| {
+    let sdf_hits = lit_display_texels(&albedo)
+        .iter()
+        .filter(|&&g| {
             let mesh = unpack_packed_rgb(pack_rgba(MESH_COLOR));
             let bg = packed_background();
-            let g = [t[0] as i32, t[1] as i32, t[2] as i32];
             let near = |r: [i32; 3]| (0..3).all(|c| (g[c] - r[c]).abs() <= CHANNEL_TOL);
-            !near(mesh) && !near(bg) && (t[0] != 0 || t[1] != 0 || t[2] != 0)
+            !near(mesh) && !near(bg) && g != [0, 0, 0]
         })
         .count();
     println!(
@@ -4241,8 +4294,9 @@ fn assert_lit_matches_deferred_golden_omega(
             // directional+sky BASE resolve (no point/spot, no view_t consumption), so the mesh
             // lit value is unchanged by the gViewT unlock — the equivalence stays GPU == host.
             let (_, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
-            let want = unpack_packed_rgb(golden_deferred_resolve(attrs, rd, &materials));
-            let got = albedo_rgb(lit, px, py);
+            let want_lit = golden_deferred_resolve(attrs, rd, &materials);
+            let got_lit = lit_rgb(lit, px, py);
+            let (want, got) = (display_rgb(want_lit), display_rgb(got_lit));
             let dmax = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
             // The arm the resolve actually takes: mask == 1 AND lighting ON is the only
             // double-quantized (non-pass-through) case; everything else passes through.
@@ -4255,7 +4309,7 @@ fn assert_lit_matches_deferred_golden_omega(
                     max_arm1 = dmax;
                 }
                 assert!(
-                    dmax <= DEFERRED_ARM1_TOL,
+                    lit_matches(got_lit, want_lit, DEFERRED_ARM1_TOL as u32),
                     "[{name}] ARM-1 (SDF-lit, flags={flags}) LIT texel ({px},{py}) got {got:?} \
                      want {want:?} (deferred oracle) exceeds ±{DEFERRED_ARM1_TOL}/255 (the \
                      double-quant bound); delta {dmax}"
@@ -4265,7 +4319,7 @@ fn assert_lit_matches_deferred_golden_omega(
                     max_pass = dmax;
                 }
                 assert!(
-                    dmax <= DEFERRED_PASSTHROUGH_HOST_TOL,
+                    lit_matches(got_lit, want_lit, DEFERRED_PASSTHROUGH_HOST_TOL as u32),
                     "[{name}] PASS-THROUGH (mask={}, flags={flags}) LIT texel ({px},{py}) got \
                      {got:?} want {want:?} (deferred oracle) exceeds the host-pack quant budget \
                      ±{DEFERRED_PASSTHROUGH_HOST_TOL}/255 (delta {dmax}) — the resolve must pass \
@@ -4336,7 +4390,7 @@ fn d1_host_marchers_agree_on_background_classification() {
                             // The intentional post-8e48f7f split: deferred paints the sky, inline
                             // stays flat. Byte-identity here would mean the deferred sky regressed.
                             let deferred =
-                                unpack_packed_rgb(golden_deferred_resolve(attrs, rd, &materials));
+                                display_rgb(golden_deferred_resolve(attrs, rd, &materials));
                             assert_ne!(
                                 deferred, inline,
                                 "[{name}/{lname}] at background ({px},{py}) the deferred oracle must \
@@ -4385,8 +4439,8 @@ fn d2g_passthrough_within_host_pack_budget() {
     };
     for (name, edits) in p4b_scenes() {
         let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR).0;
-        assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
+        let nonzero = lit_nonzero_count(&lit);
         assert!(nonzero > 0, "[{name}] LIT all-zero — device did not render");
         let (max_pass, max_arm1, sdf_lit_hits) =
             assert_lit_matches_deferred_golden(&lit, &edits, 0, DEFAULT_LIGHT_DIR, name);
@@ -4420,8 +4474,8 @@ fn d2g_resolve_passthrough_is_lighting_invariant() {
     for (name, edits) in p4b_scenes() {
         let off = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR).0;
         let on = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR).0;
-        assert_eq!(off.len(), READBACK_BYTES as usize);
-        assert_eq!(on.len(), READBACK_BYTES as usize);
+        assert_eq!(off.len(), LIT_READBACK_BYTES as usize);
+        assert_eq!(on.len(), LIT_READBACK_BYTES as usize);
 
         // The mask the resolve branches on (from the host attribute mirror): mask == 0 is the
         // pure pass-through set the lighting flags must NOT touch.
@@ -4478,9 +4532,9 @@ fn d3g_arm1_within_double_quant_bound_of_deferred_golden() {
     for (lname, light) in [("default", DEFAULT_LIGHT_DIR), ("nondefault", NONDEFAULT_LIGHT)] {
         for (name, edits) in p4b_scenes() {
             let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, light).0;
-            assert_eq!(lit.len(), READBACK_BYTES as usize);
+            assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
             let nonzero =
-                lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+                lit_nonzero_count(&lit);
             assert!(nonzero > 0, "[{name}/{lname}] LIT all-zero — device did not render");
             let (max_pass, max_arm1, sdf_lit_hits) =
                 assert_lit_matches_deferred_golden(&lit, &edits, flags, light, name);
@@ -4532,8 +4586,8 @@ fn l0a_degenerate_light_table_reproduces_constant_path_image() {
     let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
     for (name, edits) in p4b_scenes() {
         let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR).0;
-        assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
+        let nonzero = lit_nonzero_count(&lit);
         assert!(nonzero > 0, "[{name}] LIT all-zero — device did not render");
 
         // The whole-image diff vs the CONSTANT-path oracle = the L0a 0%-gate.
@@ -4637,10 +4691,11 @@ fn count_lit_table_outliers(
             );
             let (ro, rd) =
                 composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
-            let want = unpack_packed_rgb(golden_deferred_resolve_table(
+            let want_lit = golden_deferred_resolve_table(
                 attrs, ro, rd, &materials, header, lights,
-            ));
-            let got = albedo_rgb(lit, px, py);
+            );
+            let got_lit = lit_rgb(lit, px, py);
+            let (want, got) = (display_rgb(want_lit), display_rgb(got_lit));
             let dmax = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
             if attrs.mask == 1 {
                 sdf_lit_hits += 1;
@@ -4718,11 +4773,11 @@ fn host_count_shadowed_pixels(
             sdf_lit_px += 1;
             let (ro, rd) =
                 composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
-            let lit_shadowed = unpack_packed_rgb(golden_deferred_resolve_table_shadowed(
+            let lit_shadowed = display_rgb(golden_deferred_resolve_table_shadowed(
                 attrs, ro, rd, &materials, header, lights, &field,
             ));
             let lit_plain =
-                unpack_packed_rgb(golden_deferred_resolve_table(attrs, ro, rd, &materials, header, lights));
+                display_rgb(golden_deferred_resolve_table(attrs, ro, rd, &materials, header, lights));
             let dmax = (0..3).map(|c| (lit_shadowed[c] - lit_plain[c]).abs()).max().unwrap();
             if dmax >= SHADOW_PROOF_EPS {
                 shadowed_px += 1;
@@ -4758,10 +4813,11 @@ fn assert_lit_matches_table_shadowed_golden(
             );
             let (ro, rd) =
                 composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
-            let want = unpack_packed_rgb(golden_deferred_resolve_table_shadowed(
+            let want_lit = golden_deferred_resolve_table_shadowed(
                 attrs, ro, rd, &materials, header, lights, &field,
-            ));
-            let got = albedo_rgb(lit, px, py);
+            );
+            let got_lit = lit_rgb(lit, px, py);
+            let (want, got) = (display_rgb(want_lit), display_rgb(got_lit));
             let dmax = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
             if attrs.mask == 1 {
                 sdf_lit_hits += 1;
@@ -4770,8 +4826,8 @@ fn assert_lit_matches_table_shadowed_golden(
                 max_delta = dmax;
             }
             assert!(
-                dmax <= DEFERRED_ARM1_TOL,
-                "[{name}] P6 R1 multi-light LIT texel ({px},{py}) got {got:?} want {want:?} \
+                lit_matches(got_lit, want_lit, DEFERRED_ARM1_TOL as u32),
+                "[{name}] P6 R1 multi-light LIT texel ({px},{py}) got {got:?} want {want:?} (radiance {got_lit:?} vs {want_lit:?}) \
                  (shadowed table oracle) exceeds ±{DEFERRED_ARM1_TOL}/255 (delta {dmax})"
             );
         }
@@ -4813,10 +4869,11 @@ fn count_lit_table_shadowed_outliers(
             );
             let (ro, rd) =
                 composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
-            let want = unpack_packed_rgb(golden_deferred_resolve_table_shadowed(
+            let want_lit = golden_deferred_resolve_table_shadowed(
                 attrs, ro, rd, &materials, header, lights, &field,
-            ));
-            let got = albedo_rgb(lit, px, py);
+            );
+            let got_lit = lit_rgb(lit, px, py);
+            let (want, got) = (display_rgb(want_lit), display_rgb(got_lit));
             let dmax = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
             if attrs.mask == 1 {
                 sdf_lit_hits += 1;
@@ -4885,8 +4942,8 @@ fn l0b_zero_point_spot_table_reproduces_l0a_image() {
         let lit =
             run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE)
                 .0;
-        assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
+        let nonzero = lit_nonzero_count(&lit);
         assert!(nonzero > 0, "[{name}] L0b LIT all-zero — device did not render");
 
         // Same diff as the L0a 0%-gate: the gViewT addition must NOT perturb the image.
@@ -4929,8 +4986,8 @@ fn l0b_point_and_spot_match_the_table_oracle() {
     for (name, edits) in p4b_scenes() {
         let lit =
             run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
-        assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
+        let nonzero = lit_nonzero_count(&lit);
         assert!(nonzero > 0, "[{name}] L0b point/spot LIT all-zero — device did not render");
 
         let (max_delta, outliers, sdf_lit_hits) =
@@ -5064,8 +5121,8 @@ fn p6_r1_multi_light_sdf_shadows_match_oracle() {
     // resolve marches every extra flagged caster.
     let lit =
         run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
-    assert_eq!(lit.len(), READBACK_BYTES as usize);
-    let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+    assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
+    let nonzero = lit_nonzero_count(&lit);
     assert!(nonzero > 0, "P6 R1 multi-light LIT all-zero — device did not render");
 
     let (max_delta, sdf_lit_hits) = assert_lit_matches_table_shadowed_golden(
@@ -5532,7 +5589,7 @@ fn run_gbuffer_hybrid_lit_clustered(
             width: SDF_IMG_W,
             height: SDF_IMG_H,
             depth: 1,
-            format: GBUFFER_FORMAT,
+            format: LIT_FORMAT,
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
@@ -5579,7 +5636,7 @@ fn run_gbuffer_hybrid_lit_clustered(
 
     let readback = device
         .create_buffer(&BufferDesc {
-            size: READBACK_BYTES,
+            size: LIT_READBACK_BYTES,
             usage: BufferUsage::TRANSFER_DST,
             location: MemoryLocation::HostVisibleCoherent,
         })
@@ -6185,12 +6242,12 @@ fn run_gbuffer_hybrid_lit_clustered(
     let dst_ptr = device
         .buffer_mapped_ptr(&readback)
         .expect("host-visible readback buffer is mapped");
-    let mut out = vec![0u8; READBACK_BYTES as usize];
-    // SAFETY: `dst_ptr` points to `READBACK_BYTES` mapped host-coherent bytes; a fence wait
+    let mut out = vec![0u8; LIT_READBACK_BYTES as usize];
+    // SAFETY: `dst_ptr` points to `LIT_READBACK_BYTES` mapped host-coherent bytes; a fence wait
     // preceded this read, so the GPU store + copy are complete + coherent; reading
-    // `READBACK_BYTES` bytes is in-bounds; `out` is a distinct allocation.
+    // `LIT_READBACK_BYTES` bytes is in-bounds; `out` is a distinct allocation.
     unsafe {
-        core::ptr::copy_nonoverlapping(dst_ptr.as_ptr(), out.as_mut_ptr(), READBACK_BYTES as usize);
+        core::ptr::copy_nonoverlapping(dst_ptr.as_ptr(), out.as_mut_ptr(), LIT_READBACK_BYTES as usize);
     }
 
     // Read back the gViewT (R32_SFLOAT) lane as one f32 per pixel (row-major, the SAME
@@ -6369,11 +6426,12 @@ fn assert_lit_matches_clustered_golden(
                 attrs.view_t = viewt_px[i];
                 attrs.oct_rg = normal_oct[i];
             }
-            let want = unpack_packed_rgb(golden_deferred_resolve_clustered(
+            let want_lit = golden_deferred_resolve_clustered(
                 attrs, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, &materials, header,
                 lights, cfg, grid,
-            ));
-            let got = albedo_rgb(lit, px, py);
+            );
+            let got_lit = lit_rgb(lit, px, py);
+            let (want, got) = (display_rgb(want_lit), display_rgb(got_lit));
             let dmax = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
             if attrs.mask == 1 {
                 sdf_lit_hits += 1;
@@ -6382,8 +6440,8 @@ fn assert_lit_matches_clustered_golden(
                 max_delta = dmax;
             }
             assert!(
-                dmax <= DEFERRED_ARM1_TOL,
-                "[{name}] L1 clustered LIT texel ({px},{py}) got {got:?} want {want:?} (clustered \
+                lit_matches(got_lit, want_lit, DEFERRED_ARM1_TOL as u32),
+                "[{name}] L1 clustered LIT texel ({px},{py}) got {got:?} want {want:?} (radiance {got_lit:?} vs {want_lit:?}) (clustered \
                  oracle) exceeds ±{DEFERRED_ARM1_TOL}/255 (delta {dmax}) — the GPU cluster path \
                  diverged from the host brute-force-equal oracle"
             );
@@ -6429,8 +6487,8 @@ fn l1_clustered_resolve_matches_the_brute_force_image() {
     for (name, edits) in p4b_scenes() {
         let (lit, _grid_bytes, _index_bytes, viewt_px, normal_oct) =
             run_gbuffer_hybrid_lit_clustered(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, &cfg);
-        assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
+        let nonzero = lit_nonzero_count(&lit);
         assert!(nonzero > 0, "[{name}] L1 clustered LIT all-zero — device did not render");
 
         let (max_delta, sdf_lit_hits) =
@@ -6692,8 +6750,8 @@ fn sdf_m1_brick_offscreen_matches_golden_and_analytic() {
         let (lit_off, _) = run_gbuffer_hybrid_lit_table_brick(
             &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE, None, false,
         );
-        assert_eq!(lit_on.len(), READBACK_BYTES as usize);
-        assert_eq!(lit_off.len(), READBACK_BYTES as usize);
+        assert_eq!(lit_on.len(), LIT_READBACK_BYTES as usize);
+        assert_eq!(lit_off.len(), LIT_READBACK_BYTES as usize);
 
         // THE LOAD-BEARING GPU GATE: GPU brick-ON == GPU brick-OFF (analytic) within ±2/255.
         // Both runs go through the IDENTICAL deferred resolve + L0a lighting; only the
@@ -6706,9 +6764,9 @@ fn sdf_m1_brick_offscreen_matches_golden_and_analytic() {
         let mut diverged_px: Option<(u32, u32, [i32; 3], [i32; 3])> = None;
         for py in 0..SDF_IMG_H {
             for px in 0..SDF_IMG_W {
-                let base = ((py * SDF_IMG_W + px) as usize) * 4;
-                let gpu_on = unpack_texel_rgb(&lit_on[base..base + 4]);
-                let gpu_off = unpack_texel_rgb(&lit_off[base..base + 4]);
+                let base = ((py * SDF_IMG_W + px) as usize) * LIT_TEXEL_BYTES;
+                let gpu_on = unpack_texel_rgb(&lit_on[base..base + LIT_TEXEL_BYTES]);
+                let gpu_off = unpack_texel_rgb(&lit_off[base..base + LIT_TEXEL_BYTES]);
                 let d = (0..3).map(|ch| (gpu_on[ch] - gpu_off[ch]).abs()).max().unwrap();
                 if d > max_vs_off {
                     max_vs_off = d;
@@ -6886,7 +6944,7 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
         );
         let viewt_analytic = viewt_a_opt.expect("gViewT readback requested");
 
-        assert_eq!(lit_m2.len(), READBACK_BYTES as usize);
+        assert_eq!(lit_m2.len(), LIT_READBACK_BYTES as usize);
 
         // --- (a) THE M2 BRANCH ENGAGES: the M2 path TERMINATES the march at the cubic-validated
         // crossing, NOT the analytic SDF_EPS threshold, so the surface `t` it stores differs from
@@ -6917,9 +6975,9 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
             let mut m = 0i32;
             for py in 0..SDF_IMG_H {
                 for px in 0..SDF_IMG_W {
-                    let base = ((py * SDF_IMG_W + px) as usize) * 4;
-                    let a = unpack_texel_rgb(&lit_m2[base..base + 4]);
-                    let b = unpack_texel_rgb(&lit_analytic[base..base + 4]);
+                    let base = ((py * SDF_IMG_W + px) as usize) * LIT_TEXEL_BYTES;
+                    let a = unpack_texel_rgb(&lit_m2[base..base + LIT_TEXEL_BYTES]);
+                    let b = unpack_texel_rgb(&lit_analytic[base..base + LIT_TEXEL_BYTES]);
                     m = m.max((0..3).map(|ch| (a[ch] - b[ch]).abs()).max().unwrap());
                 }
             }
@@ -7384,7 +7442,7 @@ fn sdf_m4_clipmap_far_field_renders() {
         "M4 far-field EXACT-CSG VIOLATION: {csg_violations} clip-map hit(s) off the true surface \
          (|sdf(hit)| >= M2_CREASE_EPS={M2_CREASE_EPS}); worst |sdf(hit)| = {worst_resid:.5}"
     );
-    assert_eq!(lit_clip.len(), READBACK_BYTES as usize);
+    assert_eq!(lit_clip.len(), LIT_READBACK_BYTES as usize);
 
     assert_validation_clean(&ctx);
     // SAFETY: the render submit was fence-waited; the device is drained; `destroy` consumes the clip-map.
@@ -7420,7 +7478,7 @@ fn sdf_m4_clipmap_far_field_screenshot_dump() {
         Some(&clipmap),
     );
     let path = std::env::temp_dir().join("sdf_m4_clipmap_far_field.bmp");
-    write_bmp_rgba(&path, &lit, SDF_IMG_W, SDF_IMG_H);
+    write_bmp_rgba(&path, &lit_display_rgba(&lit), SDF_IMG_W, SDF_IMG_H);
     println!("M4 clip-map far-field screenshot written to {}", path.display());
     assert_validation_clean(&ctx);
     // SAFETY: the render submit was fence-waited; the device is drained; `destroy` consumes the clip-map.
@@ -7473,8 +7531,8 @@ fn p5_mesh_sdf_pbr_screenshot_dump() {
     // whole G-buffer (mesh + SDF) with Cook-Torrance.
     let lit =
         run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
-    assert_eq!(lit.len(), READBACK_BYTES as usize);
-    let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+    assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
+    let nonzero = lit_nonzero_count(&lit);
     assert!(nonzero > 0, "P5 mesh+SDF LIT all-zero — device did not render");
 
     // Spot-check: a mesh-covered pixel must now read a LIT (non-zero, non-MESH_COLOR) value.
@@ -7494,7 +7552,7 @@ fn p5_mesh_sdf_pbr_screenshot_dump() {
     let dir = std::path::Path::new("D:/tmp");
     std::fs::create_dir_all(dir).expect("create D:/tmp for the screenshot dump");
     let path = dir.join("p5_mesh_sdf.bmp");
-    write_bmp_rgba(&path, &lit, SDF_IMG_W, SDF_IMG_H);
+    write_bmp_rgba(&path, &lit_display_rgba(&lit), SDF_IMG_W, SDF_IMG_H);
     println!(
         "P5 mesh+SDF PBR screenshot written to {} (mesh pixel {mesh_px:?} = raster-PBR white, \
          not MESH_COLOR {old_mesh:?})",
@@ -7551,8 +7609,8 @@ fn p6_multilight_shadows_screenshot_dump() {
     // flagged point casters per pixel — the darkened valley band is the analytic SDF shadow.
     let lit =
         run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
-    assert_eq!(lit.len(), READBACK_BYTES as usize);
-    let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+    assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
+    let nonzero = lit_nonzero_count(&lit);
     assert!(nonzero > 0, "P6 R1 multi-light LIT all-zero — device did not render");
 
     // Native composite extent is 64×64; upscale 8× → 512×512 for the owner-facing screenshot.
@@ -7560,7 +7618,7 @@ fn p6_multilight_shadows_screenshot_dump() {
     let shot_w = SDF_IMG_W * SHOT_SCALE;
     let shot_h = SDF_IMG_H * SHOT_SCALE;
     debug_assert_eq!((shot_w, shot_h), (512, 512), "the dump must be 512×512");
-    let big = upscale_rgba_nn(&lit, SDF_IMG_W, SDF_IMG_H, SHOT_SCALE);
+    let big = upscale_rgba_nn(&lit_display_rgba(&lit), SDF_IMG_W, SDF_IMG_H, SHOT_SCALE);
 
     let dir = std::path::Path::new("D:/tmp");
     std::fs::create_dir_all(dir).expect("create D:/tmp for the screenshot dump");
@@ -7717,7 +7775,7 @@ fn check_ssao_combined_lit_matches_host_at_n(ctx: &VulkanContext, n: u32) {
         let (lit, _ssao) = run_gbuffer_hybrid_ssao(
             ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, SSAO_QUALITY_MEDIUM, n,
         );
-        assert_eq!(lit.len(), READBACK_BYTES as usize);
+        assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
 
         let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
         let field = |q: [f32; 3]| boyko_sdf_math::sdf_edit_list(&edits, q);
@@ -7749,10 +7807,11 @@ fn check_ssao_combined_lit_matches_host_at_n(ctx: &VulkanContext, n: u32) {
                 // à-trous passes, writing the result BACK into `gSsao` — the C1 endpoint
                 // solution), fed into the SSAO-aware resolve mirror.
                 let ao = filtered_ssao[idx] as f32 / 255.0;
-                let want = unpack_packed_rgb(golden_deferred_resolve_table_shadowed_ssao(
+                let want_lit = golden_deferred_resolve_table_shadowed_ssao(
                     attrs, ro, rd, &materials, &header, &lights, &field, ao,
-                ));
-                let got = albedo_rgb(&lit, px, py);
+                );
+                let got_lit = lit_rgb(&lit, px, py);
+                let (want, got) = (display_rgb(want_lit), display_rgb(got_lit));
                 let d = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
                 if attrs.mask == 1 {
                     lit_hits += 1;
@@ -7761,8 +7820,8 @@ fn check_ssao_combined_lit_matches_host_at_n(ctx: &VulkanContext, n: u32) {
                     max_delta = d;
                 }
                 assert!(
-                    d <= SSAO_LIT_TOL,
-                    "[n={n} {name}] SSAO combined LIT texel ({px},{py}) got {got:?} want {want:?} \
+                    lit_matches(got_lit, want_lit, SSAO_LIT_TOL as u32),
+                    "[n={n} {name}] SSAO combined LIT texel ({px},{py}) got {got:?} want {want:?} (radiance {got_lit:?} vs {want_lit:?}) \
                      (SSAO oracle) exceeds ±{SSAO_LIT_TOL}/255 (delta {d})"
                 );
             }
@@ -7892,7 +7951,7 @@ fn ssao_variants_match_host() {
             let (lit, _ssao_n) = run_gbuffer_hybrid_ssao(
                 &ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, quality, N,
             );
-            assert_eq!(lit.len(), READBACK_BYTES as usize, "[q{quality} {name}] LIT readback size");
+            assert_eq!(lit.len(), LIT_READBACK_BYTES as usize, "[q{quality} {name}] LIT readback size");
             let filtered_ssao = golden_ssao_atrous(
                 &raw_ssao, &gbuf, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, N,
             );
@@ -7904,19 +7963,20 @@ fn ssao_variants_match_host() {
                     let (ro, rd) =
                         composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
                     let ao = filtered_ssao[idx] as f32 / 255.0;
-                    let want = unpack_packed_rgb(golden_deferred_resolve_table_shadowed_ssao(
+                    let want_lit = golden_deferred_resolve_table_shadowed_ssao(
                         attrs, ro, rd, &materials, &header, &lights,
                         &|q: [f32; 3]| boyko_sdf_math::sdf_edit_list(&edits, q), ao,
-                    ));
-                    let got = albedo_rgb(&lit, px, py);
+                    );
+                    let got_lit = lit_rgb(&lit, px, py);
+                    let (want, got) = (display_rgb(want_lit), display_rgb(got_lit));
                     let d = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
                     if d > max_lit_delta {
                         max_lit_delta = d;
                     }
                     assert!(
-                        d <= SSAO_LIT_TOL,
+                        lit_matches(got_lit, want_lit, SSAO_LIT_TOL as u32),
                         "[q{quality} {name}] SSAO combined LIT texel ({px},{py}) got {got:?} want \
-                         {want:?} (variant SSAO oracle) exceeds ±{SSAO_LIT_TOL}/255 (delta {d})"
+                         {want:?} (radiance {got_lit:?} vs {want_lit:?}) (variant SSAO oracle) exceeds ±{SSAO_LIT_TOL}/255 (delta {d})"
                     );
                 }
             }
