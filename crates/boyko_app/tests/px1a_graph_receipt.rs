@@ -536,6 +536,23 @@ fn the_whole_scene_check_accepts_a_display_of_the_whole_scene() {
     }
 }
 
+/// PX1a test round 3 (MG): a blank `display` (every texel equal, e.g. one nobody wrote) carries no
+/// ranking. [`spearman`] reads a constant side as 0, so the check reds on it; were a constant side
+/// read as 1, a blank `display` would pass as the whole scene.
+#[test]
+fn the_whole_scene_check_rejects_a_blank_display() {
+    let lit = fixture_lit(2 * FIX_EDGE, radial);
+    // The native display a downsample feeds, and the composite-sized one the present minifies.
+    for edge in [FIX_EDGE, 2 * FIX_EDGE] {
+        let blank = fixture_display(edge, |_, _| 0.0);
+        let e = match check_presents_the_whole_scene(&lit, &blank, FIX_EDGE) {
+            Ok(rho) => panic!("a blank {edge}^2 display must red, it ranks at {rho}"),
+            Err(e) => e,
+        };
+        assert!(e.contains("does not depict the whole scene"), "{e}");
+    }
+}
+
 #[test]
 fn the_whole_scene_check_rejects_a_quarter_a_vacuous_run_and_a_powerless_scene() {
     let lit = fixture_lit(2 * FIX_EDGE, radial);
