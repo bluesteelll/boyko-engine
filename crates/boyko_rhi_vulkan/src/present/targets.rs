@@ -595,10 +595,10 @@ pub struct GBufferTargets {
     pub(crate) ddgi_update_set: Option<VulkanBindGroup>,
     /// The present-blit descriptor set RING (one per in-flight frame), each written ONCE
     /// against [`GBufferScene::present_layout`] (one COMBINED_IMAGE_SAMPLER pointing at
-    /// `lit[i]` + the scene's present sampler). NO per-frame update. RINGED so slot `i`'s
-    /// present set samples `lit[i]` — the SAME slot the resolve wrote this frame (the `lit`
-    /// ring made the single set stale: it would sample a sibling slot's image). The recorder
-    /// selects `present_set[self.frame_index]`.
+    /// `aa_out[i]` when a display-referred pass writes it — FXAA, SMAA, CAS — else at
+    /// [`Self::display`], render wave PX1a's `post_final` output, + the scene's present
+    /// sampler). NO per-frame update. RINGED so slot `i`'s present set samples the SAME `aa_out`
+    /// slot the AA pass wrote this frame. The recorder selects `present_set[self.frame_index]`.
     pub(crate) present_set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
     /// Render wave PX1a (D-G1): `display` — `post_final`'s output and the one display-referred
     /// image every later pass reads (the present blit, CAS, FXAA, SMAA). SINGLE (one image both

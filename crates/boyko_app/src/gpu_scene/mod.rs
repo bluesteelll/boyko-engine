@@ -2895,7 +2895,7 @@ impl GpuSceneBundles {
         // Reuses `sample_vs` + `present_layout` (the same single-CombinedImageSampler
         // shape FXAA uses) + `present_sampler` (NEAREST — the shader's `.Load` ignores
         // it, so no dedicated sampler is built). `color_formats[0]` is `lit_native`'s format
-        // (PX1a: the downsample target; RGBA8 until the switch); NO push constants (the 2×
+        // (PX1a: the downsample target, `LIT_FORMAT`); NO push constants (the 2×
         // ratio is compiled into the shader). Boot-time creation records no command / writes no pixel —
         // byte-identical to the golden regardless of this pipeline's existence.
         let ssaa_fs = RhiDevice::create_shader_module(device, ssaa_downsample_fs_spirv())

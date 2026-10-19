@@ -811,6 +811,9 @@ pub fn collect_lights(
 }
 
 /// [`collect_lights`]' rows rebuild: folds the enabled lights straight into the staging scratch.
+// The four light queries are `collect_lights`' own system params, borrowed whole (their spelled
+// types trip `type_complexity`, and a wrapper struct would only rename them); with the config,
+// the pre-exposure, the slot assignment and the staging that is eight arguments, each read once.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn rebuild_light_rows(
     all_directionals: &Query<(&DirectionalLight, IsEnabled<LightEnabled>)>,

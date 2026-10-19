@@ -53,7 +53,9 @@ fn report_post_plugin_absent_at(site: &OnceSite) {
     boyko_log::warn!(
         boyko_log::App,
         codes::W3012,
-        "no PostPlugin composed: the runner derives the frame's post settings (pre-exposure,          tonemapper) from LightingConfig through ResolvedPost::from_config, so camera cuts never          reset the TAA history"
+        "no PostPlugin composed: the runner derives the frame's post settings (pre-exposure, \
+         tonemapper) from LightingConfig through ResolvedPost::from_config, so camera cuts never \
+         reset the TAA history"
     );
 }
 
