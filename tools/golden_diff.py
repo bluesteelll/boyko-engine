@@ -60,6 +60,11 @@ its pin on the pre-move tree), never on the run it judges:
     construction); its pre-move pair passes at T = 8 with max |Δ| 0.
   - The anchor's bar 0.9 and extent 256^2 are the device check's (see the scene-anchor section);
     the pre-move pairs read rho 1.
+  - The anchor has no power on vb_sdf_taa (ruling 86, review W2): that scene is one small sphere
+    on a vertical sky gradient, so its ranks are nearly a function of y alone. A sky-only pair -
+    the sphere painted out of both the TAA-off and the TAA frame - passes this whole form at rho
+    0.966 (exit 0, both legs). vb_sdf_taa's scene identity rests on step 10, the owner's visual
+    sign-off (its row on the h1 sheet), and then on its C14 hash pin - not on this check.
 """
 
 from __future__ import annotations
@@ -450,10 +455,15 @@ def compare_bmps(a: Bmp, b: Bmp, tile: int = 16, mask=None):
 # blank frames pass it - so ``compare --scene-anchor ANCHOR`` also runs the device receipts' whole-
 # scene check on B with ANCHOR in the role of the scene: ``display_luma``, ``reduced_luma``,
 # ``ranks``, ``spearman`` and the bar of ``check_presents_the_whole_scene``. Its power premise
-# (``QUARTER_RHO_MAX``, the anchor's top-left quarter must not rank like the whole) is not mirrored:
-# what the anchor must reject is a blank or never-written B, which any non-constant anchor does (a
-# constant side reads rho 0), and vb_sdf_taa's pre-move anchor ranks 0.575 against its quarter - over
-# the device scene's 0.5 - so the premise would RED the pre-move pair ruling 85 (2) requires to pass.
+# (``QUARTER_RHO_MAX``, the anchor's top-left quarter must not rank like the whole) is not mirrored.
+# A blank or never-written B is rejected under any non-constant anchor (a constant side reads rho 0).
+# An object-free B is not always rejected: vb_sdf_taa's anchor - one small sphere on a vertical sky
+# gradient - ranks almost as a function of y, so a sky-only B (the sphere painted out) reads rho
+# 0.966 and passes, and a bare linear ramp 0.964; on the other six pins' software legs a ramp or an
+# object-free row-median frame reads at most 0.73 and reds (review W2). The premise would flag that
+# anchor (it ranks 0.575 against its quarter, over the device scene's 0.5) and so RED the pre-move
+# pair ruling 85 (2) requires to pass. Ruling 86 keeps the anchor as it is: on vb_sdf_taa the scene
+# identity rests on step 10, the owner's visual sign-off, and then on its C14 hash pin.
 
 #: The device check's bar (``WHOLE_SCENE_RHO_MIN``): the least rank correlation of B with ANCHOR.
 WHOLE_SCENE_RHO_MIN = 0.9
