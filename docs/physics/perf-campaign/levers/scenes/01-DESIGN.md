@@ -767,6 +767,10 @@ cannot run yet: no rows file, no `bin/` (its README lists what the 9c prep owes)
   v2 and names `build-v5.6.0-dyn-dist` as 9c's exe; its module doc says sleeping on is "never a parity row,
   since every engine runs the parity scenes awake". Both are stale since this lane (critique O3); doc-only,
   at the next lane that touches the runner. Meanwhile this section and `pins.json` are the authority.
+  ⚠ *2026-10-19: closed by lane PHYS-TOOL-1 at `0fe76d6c` (the runner's module doc and "Build (Jolt)" name
+  sleeping on as 9c's "on" arm, patch v3 and dyn3). The same lane's `71602537` fixes the runner's per-step
+  counter oracle for armed `--dyn` rows with sleeping on and `Sets`, which voided every strike that woke a
+  held pile (ruling 64 (4)): `levers/tooling/01-PHYS-TOOL-1-RECORD.md` section 1.*
 * **PC-SL2B-3:** the 9c prep owes `rows_9c.json` with section 15's on/off pairs (10.7's templates), the
   `rapier_dyn` validator re-cut for the rebuilt exes and the on rows (`rapierdyn_land.py` V4 exe pins, V5
   `config.can_sleep`, V8 `active_bodies`, V9 `--sleeping on`), the dyn pins from `sleeping_on`, `bin/` byte

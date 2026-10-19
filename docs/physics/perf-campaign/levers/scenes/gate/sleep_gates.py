@@ -40,7 +40,9 @@ Pins (absent under --record): per engine and program (and Rapier row) the W1 pos
   lane that moved either and did not re-derive `sleeping_on.ours` reads them red, naming the moved value and the
   re-pin command OURS_REPIN (critique W2; 01-DESIGN.md section 10.6). A missing section or fixture is a FAIL row.
 A determinism, identity or pin row whose outputs are absent FAILs (critique W1); only a W-independence receipt of an
-engine that promises none, and a liveness reading, are receipts.
+engine that promises none, and a liveness reading, are receipts. A pin row names every run directory it reads that
+left no out.txt / rc.txt (`absent output: ...`; --pins-from on an OUTDIR0 without a leg's runs gives one FAIL row per
+pin and the complete tally, lane PHYS-TOOL-1).
 
 --record skips the pin rows and writes OUTDIR/sleeping_on.json (the values; --write-fixtures also copies every W1
 pose to its fixture path: scenes/fixtures/{jolt56,ours}_on_<P>.pose, D:/tmp/rapier-parity/dyn/fixtures/<arm>/
@@ -509,16 +511,19 @@ def ours_stamp_problems(stamp, pins, anchor):
     return why
 
 
-def pin_verdict(entry, w1_pose, fixture_abs, hashes, hash_key):
-    """(ok, detail) of one pin row: the fixture's sha256, the W1 pose's bytes, every W's hash = per_w."""
+def pin_verdict(entry, w1_pose, fixture_abs, hashes, hash_key, absent=()):
+    """(ok, detail) of one pin row: the fixture's sha256, the W1 pose's bytes, every W's hash = per_w. Every run
+    directory in `absent` (a W run the row reads whose process left no out.txt / rc.txt) is named first, and FAILs
+    the row (PHYS-TOOL-1: before it, --pins-from on an OUTDIR without the W1 run raised in check_pose)."""
+    gone = ['absent output: %s (no out.txt/rc.txt)' % ', '.join(absent)] if absent else []
     if not isinstance(entry, dict):
-        return False, 'no pin'
+        return False, '; '.join(gone + ['no pin'])
     ok, det = pose_pin.check_pose(w1_pose, fixture_abs, entry.get('fixture_sha256') or '')
     per_w = entry.get('per_w') or {}
     bad = ['W%d %s != %s' % (w, hashes.get(w), per_w.get(str(w))) for w in WS if hashes.get(w) != per_w.get(str(w))]
     if hashes.get(1) != entry.get(hash_key):
         bad.append('W1 %s != %s %s' % (hashes.get(1), hash_key, entry.get(hash_key)))
-    return ok and not bad, '; '.join([det] + bad)
+    return ok and not bad and not gone, '; '.join(gone + [det] + bad)
 
 
 def p10_anchor(text):
@@ -708,22 +713,39 @@ def ours_leg(t, exe, out, res):
 # ── pins ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def read_results(out, legs):
-    """The per-W hashes and W1 poses of a finished run (this one, or --pins-from's)."""
+    """The per-W hashes and W1 poses of a finished run (this one, or --pins-from's). Each entry also keeps every
+    run's directory (`dirs`), so a pin row can name the runs that left no output (`absent_outputs`)."""
     res = {'jolt': {}, 'rapier': {}, 'ours': {}}
+
+    def entry(base, tags):
+        dirs = {tag: '%s/%s' % (base, tag) for tag, _, _ in tags}
+        return {'runs': {tag: load_run(d) for tag, d in dirs.items()}, 'dirs': dirs}
+
     for p in PROGRAMS:
         if 'jolt' in legs:
-            res['jolt'][p] = {'runs': {tag: load_run('%s/jolt/%s/%s' % (out, p, tag)) for tag, _, _ in JOLT_RUNS}}
+            res['jolt'][p] = entry('%s/jolt/%s' % (out, p), JOLT_RUNS)
         if 'ours' in legs:
-            res['ours'][p] = {'runs': {tag: load_run('%s/ours/%s/%s' % (out, p, tag)) for tag, _, _ in OURS_RUNS}}
+            res['ours'][p] = entry('%s/ours/%s' % (out, p), OURS_RUNS)
         if 'rapier' in legs:
             for rid in Q1_ROWS:
-                res['rapier'].setdefault(rid, {})[p] = {
-                    'runs': {tag: load_run('%s/rapier/%s/%s/%s' % (out, rid.replace('/', '__'), p, tag)) for tag, _, _ in RAPIER_RUNS}}
+                res['rapier'].setdefault(rid, {})[p] = entry('%s/rapier/%s/%s' % (out, rid.replace('/', '__'), p), RAPIER_RUNS)
     return res
 
 
+def w_tags(engine):
+    """{W: the run tag} of the runs a pin row reads."""
+    return {'jolt': {1: 't1', 2: 't2', 4: 't4', 8: 't8', 16: 't16'}}.get(engine, {1: 'W1', 2: 'W2', 4: 'W4', 8: 'W8', 16: 'W16'})
+
+
+def absent_outputs(engine, r):
+    """The directories of the runs a pin row reads whose process left no output (None from load_run), in W order;
+    an entry without `dirs` (this invocation's own runs, never None) names the tag."""
+    dirs = r.get('dirs') or {}
+    return [dirs.get(tag, tag) for _, tag in sorted(w_tags(engine).items()) if r['runs'].get(tag) is None]
+
+
 def hashes_of(engine, runs):
-    tags = {'jolt': {1: 't1', 2: 't2', 4: 't4', 8: 't8', 16: 't16'}}.get(engine, {1: 'W1', 2: 'W2', 4: 'W4', 8: 'W8', 16: 'W16'})
+    tags = w_tags(engine)
     out = {}
     for w, tag in tags.items():
         r = runs.get(tag)
@@ -747,14 +769,17 @@ def pin_rows(t, legs, res, pins, root, anchor):
             e = (so.get('jolt56') or {}).get(p)
             h, w1 = hashes_of('jolt', res['jolt'][p]['runs'])
             fx = root + '/' + e['fixture'] if isinstance(e, dict) and e.get('fixture') else ''
-            t.add('PIN jolt56 %s: W1 pose and per-W hashes = pins.json sleeping_on' % p, *pin_verdict(e, w1, fx, h, 'hash'))
+            gone = absent_outputs('jolt', res['jolt'][p])
+            t.add('PIN jolt56 %s: W1 pose and per-W hashes = pins.json sleeping_on' % p, *pin_verdict(e, w1, fx, h, 'hash', gone))
     if 'rapier' in legs:
         for rid in Q1_ROWS:
             for p in PROGRAMS:
                 e = ((so.get('rapier') or {}).get(rid) or {}).get(p)
                 h, w1 = hashes_of('rapier', res['rapier'][rid][p]['runs'])
                 fx = RP + '/' + e['fixture'] if isinstance(e, dict) and e.get('fixture') else ''
-                t.add('PIN rapier %s %s: W1 pose and per-W hashes = pins.json sleeping_on' % (rid, p), *pin_verdict(e, w1, fx, h, 'pose_hash'))
+                gone = absent_outputs('rapier', res['rapier'][rid][p])
+                t.add('PIN rapier %s %s: W1 pose and per-W hashes = pins.json sleeping_on' % (rid, p),
+                      *pin_verdict(e, w1, fx, h, 'pose_hash', gone))
     if 'ours' in legs:
         ob = so.get('ours') if isinstance(so.get('ours'), dict) else {}
         stale = ours_stamp_problems(ob.get('recorded_with'), pins, anchor) if ob else ['no sleeping_on.ours']
@@ -762,7 +787,7 @@ def pin_rows(t, legs, res, pins, root, anchor):
             e = ob.get(p)
             h, w1 = hashes_of('ours', res['ours'][p]['runs'])
             fx = root + '/' + e['fixture'] if isinstance(e, dict) and e.get('fixture') else ''
-            ok, det = pin_verdict(e, w1, fx, h, 'pose_hash')
+            ok, det = pin_verdict(e, w1, fx, h, 'pose_hash', absent_outputs('ours', res['ours'][p]))
             if stale:
                 ok, det = False, 'stale: %s; re-derive by 01-DESIGN.md section 10.6: %s (%s)' % ('; '.join(stale), OURS_REPIN, det)
             t.add('PIN ours %s: W1 pose and per-W hashes = pins.json sleeping_on (recorded_with current)' % p, ok, det)
@@ -927,6 +952,38 @@ def main(argv=None):
 
 # ── selftest: every check fed a real-shaped input (green) and a doctored one (red for its reason) ──────────────────────
 
+def guarded(fn):
+    """fn()'s value, or the exception it raised as a string: a raise is the case's FAIL, named, not the selftest's
+    crash (PHYS-TOOL-1's mutation M2a: check_pose raised on a None pose)."""
+    try:
+        return fn()
+    except Exception as ex:  # noqa: BLE001 - every raise is a red case
+        return 'raised %s: %s' % (type(ex).__name__, ex)
+
+
+def committed_on_pin(program):
+    """(the committed fixture's absolute path, its pinned sha256) of `sleeping_on.ours.<program>` in this checkout."""
+    root = pose_pin.REPO.replace('\\', '/')
+    e = json.load(open(root + '/' + PINS_REL, encoding='utf-8'))['sleeping_on']['ours'][program]
+    return root + '/' + e['fixture'], e['fixture_sha256']
+
+
+def absent_end_to_end():
+    """main() with --pins-from an empty OUTDIR0 (legs jolt,ours) in temp dirs: (exit, rows, every row a FAIL naming an
+    absent output, the tally line)."""
+    import contextlib
+    import io
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        os.makedirs(td + '/out0')
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main([td + '/out', '--pins-from', td + '/out0', '--legs', 'jolt,ours'])
+        rows = open(td + '/out/gates.tsv', encoding='utf-8').read().splitlines()
+    named = all(r.split('\t')[1] == 'FAIL' and 'absent output: ' in r for r in rows)
+    return rc, len(rows), named, buf.getvalue().splitlines()[-1]
+
+
 def selftest():
     cases = []
 
@@ -1044,7 +1101,18 @@ def selftest():
         case('pin: a wrong per_w hash is red', pin_verdict(dict(e, per_w=dict(e['per_w'], **{'8': '0xdead'})), ps, fx, hs, 'pose_hash')[0], False)
         case('pin: no pin is red', pin_verdict(None, ps, fx, hs, 'pose_hash')[0], False)
         case('pin: no pose is red', pin_verdict(e, td + '/absent.pose', fx, hs, 'pose_hash')[0], False)
-    pins = {'ours': {q: {'pose_hash': '0x%d' % i} for i, q in enumerate(PROGRAMS)}}
+        w1_dir = td + '/out0/ours/kick/W1'
+        got = guarded(lambda: pin_verdict(e, None, fx, {**hs, 1: None}, 'pose_hash', [w1_dir]))
+        case('pin: an absent W1 names its directory (PHYS-TOOL-1)',
+             (got[0], 'absent output: %s' % w1_dir in got[1]) if isinstance(got, tuple) else got, (False, True))
+    committed = guarded(lambda: committed_on_pin('kick'))
+    got = guarded(lambda: pose_pin.check_pose(None, *committed)) if isinstance(committed, tuple) else committed
+    case('check_pose: a None pose is a FAIL naming "no pose", never a raise (PHYS-TOOL-1)',
+         (got[0], 'no pose' in got[1]) if isinstance(got, tuple) else got, (False, True))
+    case('end to end: --pins-from an empty OUTDIR0, legs jolt,ours: exit 1, 8 FAIL rows naming the absent outputs, '
+         'the complete tally (PHYS-TOOL-1)', guarded(absent_end_to_end),
+         (1, 8, True, 'checks 8, pass 0, receipts 0, fail 8 (expected 8)'))
+    pins = {'ours':{q: {'pose_hash': '0x%d' % i} for i, q in enumerate(PROGRAMS)}}
     stamp = {'ours_off_pose_hash': {q: '0x%d' % i for i, q in enumerate(PROGRAMS)}, 'p10_JSonT500': '0xc637'}
     case('ours stamp: current', ours_stamp_problems(stamp, pins, '0xc637'), [])
     case('ours stamp: a moved off-arm pin is stale (W2)', bool(ours_stamp_problems(stamp, {'ours': dict(pins['ours'], kick={'pose_hash': '0x9'})}, '0xc637')), True)
