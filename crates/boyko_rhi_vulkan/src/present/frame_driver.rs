@@ -1052,11 +1052,12 @@ impl<'ctx> Renderer<'ctx> {
                     // render-path plan, rung R2: dispatches through `declare_frame_graph`,
                     // which selects the per-path declarator from `scene.resolved_render_path
                     // .path` (today: always the `Deferred` arm, `declare_deferred_graph`).
-                    this.declare_frame_graph(scene);
-
                     let targets = frame.targets.as_ref().expect(
                         "invariant: sync_gbuffer made the targets present before record",
                     );
+                    // Review r1 W1: the declaration reads THESE targets' TAA history, so a
+                    // degraded history declares (and the recorders record) the TAA-off frame.
+                    this.declare_frame_graph(scene, targets.taa_history_built());
 
                     // Multi-paradigm render-path plan, rung R4b-b: mirrors
                     // `declare_frame_graph`'s dispatch (`scene.path_is_forward()` is the SAME

@@ -3123,8 +3123,9 @@ impl Renderer<'_> {
         // (the framegraph's `taa_resolve` pass is declared in that exact position — see
         // `graph_bridge.rs`), the OPPOSITE ordering FXAA/SMAA/SSAA use (FRAGMENT graphics
         // pipelines reading `lit` AFTER the SHADER_READ_ONLY_OPTIMAL transition, below). Gated on
-        // `scene.taa.is_some()` AND `targets.taa_resolve_set.is_some()` (kept in lockstep by
-        // `GBufferTargets::create`) — `None` on every other `AaMode` records nothing here.
+        // the declared `taa_resolve` pass (TAA live: `scene.taa` AND
+        // `targets.taa_history_built()`) — every other `AaMode`, and a degraded history, records
+        // nothing here.
         // === Particles P0: the indirect billboard draw, recorded HERE — after the resolve wrote
         // `lit` and BEFORE the TAA resolve + present blit read it, the SAME position the
         // declarator declared the pass in. `depth[fi]` arrives at `SHADER_READ_ONLY_OPTIMAL` on
@@ -3177,15 +3178,15 @@ impl Renderer<'_> {
             .gbuffer_pass_plan
             .as_ref()
             .expect("invariant: declare_frame_graph ran before record_gbuffer");
-        if let Some(taa) = scene.taa.as_ref()
-            && targets.taa_resolve_set.is_some()
-        {
-            let taa_pass = plan
-                .taa_resolve
-                .expect("invariant: scene.taa.is_some() ⇒ the taa_resolve pass was declared");
-            // SAFETY: recording is open; `taa_hist`/`taa_resolve_set` were built by `create()`
-            // under the same `scene.taa` that gates this branch; `taa_pass` was declared this
-            // frame under the same gate (the invariant above).
+        // Review r1 W1: keyed on the DECLARED pass, so the recorder records exactly what the graph
+        // declared — `declare_taa_resolve` declares it only under live TAA (`PostSeamArms::taa`:
+        // `scene.taa` armed AND `targets.taa_history_built()`, read from these same targets).
+        if let Some(taa_pass) = plan.taa_resolve {
+            let taa = scene.taa.as_ref().expect("invariant: a declared taa_resolve pass implies an armed scene.taa");
+            debug_assert!(targets.taa_history_built(), "invariant: a declared taa_resolve pass implies a built TAA history");
+            // SAFETY: recording is open; `taa_pass` was declared this frame only under live TAA,
+            // whose predicate read `targets.taa_history_built()` of these targets, so
+            // `taa_hist`/`taa_resolve_set` were built by `create()` for this `scene`.
             ts.cmd();
             unsafe { self.record_taa(cmd, targets, taa, taa_pass, scene, fi) };
         }

@@ -28,13 +28,12 @@ impl Renderer<'_> {
     /// # Safety
     ///
     /// `cmd` must be recordable (recording open, within the caller's begin/end bracket);
-    /// `targets.taa_hist` / `targets.taa_resolve_set` must be `Some` (the caller gates on
-    /// `scene.taa.is_some() && targets.taa_resolve_set.is_some()`, kept in lockstep by
-    /// [`GBufferTargets::create`]); `activation.resolve_pipeline`'s layout matches
-    /// `taa_resolve_set`'s (7 bindings + a 4-byte COMPUTE push range); `fi` is this frame's
-    /// in-flight slot; the "taa_resolve" pass must be declared in [`Renderer::frame_graph`] (the
-    /// caller's `scene.taa.is_some()` gate implies `declare_deferred_graph` declared it — see
-    /// `graph_bridge.rs`).
+    /// `targets.taa_hist` / `targets.taa_resolve_set` must be `Some` (the caller gates on the
+    /// declared `taa_resolve` pass, which the declarator declares only under live TAA —
+    /// `scene.taa` armed AND [`GBufferTargets::taa_history_built`] of these targets, review r1
+    /// W1); `activation.resolve_pipeline`'s layout matches `taa_resolve_set`'s (7 bindings + a
+    /// 4-byte COMPUTE push range); `fi` is this frame's in-flight slot; `taa_pass` is the
+    /// "taa_resolve" pass declared this frame in [`Renderer::frame_graph`].
     pub(crate) unsafe fn record_taa(
         &self,
         cmd: VkCommandBuffer,

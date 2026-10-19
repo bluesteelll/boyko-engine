@@ -9709,14 +9709,18 @@ impl GBufferTargets {
         }
 
         // Render wave PX1a (D-G5): `post_final`'s rings, LAST — the set binds the scene input the
-        // AA mode selects, the declarators' own choice (`taa_hist[fi]` under TAA, `lit_native`
-        // under SSAA, `lit[fi]` otherwise), and `display`.
+        // AA mode selects, the declarators' own choice (`taa_hist[fi]` under live TAA,
+        // `lit_native` under SSAA, `lit[fi]` otherwise), and `display`. Review r1 W1: TAA is the
+        // declarators' LIVE predicate (`PostSeamArms`, over `taa_history_built`), so a degraded
+        // history binds `lit[fi]`, the input the TAA-off graph the declarators then declare reads.
         let built_post_final = {
+            let taa_live =
+                super::graph_bridge::PostSeamArms::from_scene(scene, targets.taa_history_built()).taa;
             let scene_in: [&VulkanTexture; FRAMES_IN_FLIGHT] = core::array::from_fn(|fi| {
-                match (scene.taa.is_some(), targets.taa_hist.as_ref(), targets.lit_native.as_ref()) {
-                    (true, Some(h), _) => &h[fi],
-                    (_, _, Some(n)) => n,
-                    _ => &targets.lit[fi],
+                match (targets.taa_hist.as_ref().filter(|_| taa_live), targets.lit_native.as_ref()) {
+                    (Some(h), _) => &h[fi],
+                    (None, Some(n)) => n,
+                    (None, None) => &targets.lit[fi],
                 }
             });
             Self::build_post_final_ring(ctx, scene, scene_in, &targets.display)
@@ -9747,6 +9751,16 @@ impl GBufferTargets {
         }
 
         Ok(targets)
+    }
+
+    /// Render wave PX1a (review r1 W1): whether [`Self::create`] built the TAA history ring AND
+    /// the resolve set that binds it. Both DEGRADE to `None` on a create or boot-clear failure
+    /// while the scene's TAA request stays armed; with the request this is the frame's TAA-live
+    /// predicate (`graph_bridge::PostSeamArms::new`), which the declarators, the recorders (through
+    /// the declared `taa_resolve` pass) and `post_final`'s descriptor ring all key on.
+    #[inline]
+    pub(crate) fn taa_history_built(&self) -> bool {
+        self.taa_hist.is_some() && self.taa_resolve_set.is_some()
     }
 
     /// Render wave PX1a (H4 Scope 3, test 12): the 8-byte host-visible `TRANSFER_SRC` buffer

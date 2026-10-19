@@ -5104,18 +5104,17 @@ impl Renderer<'_> {
         // and BEFORE the post seam (`record_gbuffer`'s TAA block, ported). The pass barriers are
         // emitted through the VB sink (`record_vb_pass` — VB's OWN ResId table), then the
         // graph-emit-free `record_taa_body` runs unchanged (path-portable). ===
-        if let Some(taa) = scene.taa.as_ref()
-            && targets.taa_resolve_set.is_some()
-        {
-            let taa_pass = plan
-                .taa_resolve
-                .expect("invariant: scene.taa.is_some() ⇒ the VB taa_resolve pass was declared");
+        // Review r1 W1: keyed on the DECLARED pass (`declare_taa_resolve` declares it only under
+        // live TAA — `scene.taa` armed AND `targets.taa_history_built()` of these same targets).
+        if let Some(taa_pass) = plan.taa_resolve {
+            let taa = scene.taa.as_ref().expect("invariant: a declared VB taa_resolve pass implies an armed scene.taa");
+            debug_assert!(targets.taa_history_built(), "invariant: a declared VB taa_resolve pass implies a built TAA history");
             ts.cmd();
             self.record_vb_pass(taa_pass, cmd, targets, forward, vb, scene, fi);
             // SAFETY: recording is open; the taa_resolve pass barriers were just emitted via
-            // the VB sink above (record_taa_body's caller contract); `taa_hist`/
-            // `taa_resolve_set` were built by `create()` under the same `scene.taa` that gates
-            // this branch.
+            // the VB sink above (record_taa_body's caller contract); the pass was declared this
+            // frame only under live TAA, whose predicate read `targets.taa_history_built()` of
+            // these targets, so `taa_hist`/`taa_resolve_set` were built by `create()`.
             ts.cmd();
             unsafe { self.record_taa_body(cmd, targets, taa, scene, fi) };
         }
