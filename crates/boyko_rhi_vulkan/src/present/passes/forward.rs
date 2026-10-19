@@ -78,7 +78,10 @@ impl Renderer<'_> {
     /// `cmd` must be recordable (waited free); `image`/`view` must belong to the swapchain image
     /// presented this frame; `scene`'s pipelines/buffers/samplers are live on this device;
     /// `targets`/`forward` were synced to `present_extent` (the SAME contract
-    /// [`record_gbuffer`](super::gbuffer)'s doc states, restricted to Forward's own images/sets).
+    /// [`record_gbuffer`](super::gbuffer)'s doc states, restricted to Forward's own images/sets)
+    /// and `aa_extent` — the BOOT-FIXED native extent `display` was allocated at, which is NOT
+    /// `present_extent` when the host armed SSAA's 2x composite at boot (Forward degrades the SSAA
+    /// pass but not the composite; review r1 W2).
     /// `extent` is the swapchain extent and governs ONLY the present-blit's clear render-area and
     /// the readback region; a `Some(readback)` buffer is host-visible and ≥ the swapchain image's
     /// (`extent`-sized) byte size. A pending image-dump request on `self` meets the image-dump
@@ -93,6 +96,7 @@ impl Renderer<'_> {
         view: VkImageView,
         extent: VkExtent2D,
         present_extent: VkExtent2D,
+        aa_extent: VkExtent2D,
         clear: [f32; 4],
         scene: &GBufferScene<'_>,
         targets: &GBufferTargets,
@@ -1260,20 +1264,18 @@ impl Renderer<'_> {
             }
         }
 
-        // === Present-blit `lit` into the swapchain — byte-for-byte port of `record_gbuffer`'s
-        // own Pass C (see this module's doc): the `present_sample` barrier (COLOR_ATTACHMENT_
-        // OPTIMAL → SHADER_READ_ONLY_OPTIMAL, C5-derived from `forward_opaque`'s producer access),
-        // then the swapchain blit, then the readback/present tail. ===
-        // SAFETY: recording is open; `record_forward_pass` records the graph's derived
-        // COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL barrier for the "present_sample" pass
-        // into `cmd`.
-        // Render wave PX1a: the post seam's tail (`lit` → `display`, Forward arms no AA), then
-        // `present_sample` (`display` → SHADER_READ_ONLY_OPTIMAL for the blit).
+        // === Present-blit `display` into the swapchain — byte-for-byte port of `record_gbuffer`'s
+        // own Pass C (see this module's doc). Render wave PX1a: the post seam's tail first
+        // (`post_final`, `lit` → `display`; Forward arms no AA), then the `present_sample` barrier
+        // (`display` GENERAL → SHADER_READ_ONLY_OPTIMAL, derived from `post_final`'s storage
+        // write), then the swapchain blit, then the readback/present tail. ===
         self.record_forward_pass(plan.post.post_final, cmd, targets, forward, scene, fi);
         // SAFETY: recording is open, outside any rendering scope; `post_final`'s derived barriers
         // were just emitted through the Forward sink; `targets` were created for `scene`;
-        // `display` is `aa_extent` large, which is `present_extent` on Forward (no SSAA).
-        unsafe { self.record_post_final(cmd, targets, scene, present_extent, fi) };
+        // `display` was allocated at `aa_extent` (`GBufferTargets::create`), the extent the
+        // dispatch covers — NOT `present_extent`, which is the 2x composite under a boot-armed
+        // SSAA that Forward degrades (review r1 W2).
+        unsafe { self.record_post_final(cmd, targets, scene, aa_extent, fi) };
         self.record_forward_pass(plan.present_sample, cmd, targets, forward, scene, fi);
 
         // Render wave PX0: `ZONE_POST_PRESENT` brackets the blit from the swapchain barrier
@@ -1354,8 +1356,8 @@ impl Renderer<'_> {
         // SAFETY: recording is open; `present_rendering` names the live swapchain `view` (now
         // COLOR_ATTACHMENT_OPTIMAL); dynamic rendering is enabled. `scene.present_pipeline` +
         // its bind-group layout belong to this device and its declared color format equals the
-        // swapchain's; `targets.present_set[fi]` binds `lit[fi]` (now SHADER_READ_ONLY_OPTIMAL —
-        // the SAME slot `forward_opaque` just wrote) + sampler at set 0; `blit_viewport`/
+        // swapchain's; `targets.present_set[fi]` binds `display` (left SHADER_READ_ONLY_OPTIMAL by
+        // `present_sample`, written by `post_final` above) + sampler at set 0; `blit_viewport`/
         // `blit_scissor` outlive the bracketed calls; `draw(3, 1, 0, 0)` is the `SV_VertexID`
         // fullscreen triangle. Begin/End bracket the pass exactly.
         unsafe {
@@ -1386,14 +1388,14 @@ impl Renderer<'_> {
             let sources = [
                 (super::super::frame_driver::ImageDumpName::ForwardDepth, Some(&forward.depth[fi]), present_extent),
                 (super::super::frame_driver::ImageDumpName::Lit, Some(&targets.lit[fi]), present_extent),
-                (super::super::frame_driver::ImageDumpName::Display, Some(&targets.display), present_extent),
+                (super::super::frame_driver::ImageDumpName::Display, Some(&targets.display), aa_extent),
             ];
             // SAFETY: recording is open and no render scope is active (the blit's
             // `cmd_end_rendering` is above); `record_forward_pass` just recorded the dump pass's
             // derived barriers, so each declared source is in its `plan.layouts` layout; the depth
             // and `lit` sources are THIS slot's ring images at `present_extent` with `TRANSFER_SRC`
             // usage unconditionally (`ForwardTargets::build`'s depth, the `lit` ring), `display`
-            // is the single image at `present_extent` (== `aa_extent` on Forward) with
+            // is the single image at `aa_extent` (the native extent, not the boot-SSAA composite) with
             // `TRANSFER_SRC` because the dump was armed at boot (`dump_usage`); the requested
             // staging meets the image-dump clause of this fn's `# Safety`.
             unsafe { self.record_image_dump_copies(cmd, dump, &sources, scene.engine_frame_index) };

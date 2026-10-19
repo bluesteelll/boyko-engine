@@ -910,13 +910,15 @@ impl<'ctx> Renderer<'ctx> {
     /// dispatched at (the clamped swapchain extent the caller sized `frame`'s targets
     /// + `scene.camera_uniform` + `scene.dispatch_group_count_x` to).
     ///
-    /// `aa_extent` (SSAA) is the BOOT-FIXED native extent `aa_out` is sized to under
-    /// `AaMode::Ssaa` (`host.native_extent`, NOT the live `width`/`height` — which track
-    /// window resizes while the swapchain-only resize contract leaves `aa_out` fixed,
-    /// exactly like `present_extent` already stays fixed under a resize). For
-    /// Off/Fxaa/Smaa this SHOULD equal `present_extent` (byte-identical to before SSAA
-    /// existed); the caller is responsible for that equality (this fn does not enforce
-    /// it, since `aa_extent` is read only when `scene.ssaa.is_some()`).
+    /// `aa_extent` is the BOOT-FIXED native extent (`host.native_extent`, NOT the live
+    /// `width`/`height` — which track window resizes while the swapchain-only resize contract
+    /// leaves these targets fixed, exactly like `present_extent` already stays fixed under a
+    /// resize). Since render wave PX1a it is read on EVERY frame of every path: `display` (and
+    /// `aa_out`, `lit_native`, `taa_hist`) is allocated at it, and every recorder dispatches
+    /// `post_final` and copies a `display` dump over it. It differs from `present_extent` (the
+    /// 2x composite) whenever the host armed SSAA at boot — on Deferred / VB under
+    /// `scene.ssaa`, and on Forward / ForwardPlus too, which degrade the SSAA pass but not the
+    /// boot-fixed composite (review r1 W2); otherwise the two are equal.
     ///
     /// `token` is this frame's [`FrameWriteToken`] (minted by
     /// [`wait_frame_in_flight`](Self::wait_frame_in_flight)), consumed BY VALUE:
@@ -1025,10 +1027,11 @@ impl<'ctx> Renderer<'ctx> {
                 // sibling slots. (The first call creates them.) The descriptor sets are
                 // written ONCE per composite extent.
                 |_this, frame| {
-                    // SSAA: `aa_out` is sized to the caller-supplied `aa_extent` (BOOT-FIXED
-                    // native, not `present_extent` — 2× under SSAA) — see
-                    // `GBufferTargets::sync_gbuffer`'s doc. For Off/Fxaa/Smaa,
-                    // `aa_extent == present_extent` (byte-identical to before SSAA existed).
+                    // `display` / `aa_out` / `lit_native` / `taa_hist` are sized to the
+                    // caller-supplied `aa_extent` (BOOT-FIXED native, not `present_extent` — the
+                    // 2× composite whenever the host armed SSAA at boot, Forward included) — see
+                    // `GBufferTargets::sync_gbuffer`'s doc. Without a boot-armed SSAA,
+                    // `aa_extent == present_extent`.
                     // Multi-paradigm render-path plan, rung R2: `TargetsProfile::from_scene`
                     // derives the (today: always-`DeferredFull`) profile the R3+ path-conditional
                     // allocation seam threads through.
@@ -1112,6 +1115,7 @@ impl<'ctx> Renderer<'ctx> {
                             view,
                             extent,
                             present_extent,
+                            aa_extent,
                             clear,
                             scene,
                             targets,
