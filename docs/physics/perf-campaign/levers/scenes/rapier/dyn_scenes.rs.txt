@@ -33,6 +33,12 @@ fn collider_of(w: &World, h: RigidBodyHandle) -> &Collider {
     &w.colliders[c]
 }
 
+/// Whether Rapier may put the body to sleep: `can_sleep(false)` sets both activation thresholds negative.
+pub fn may_sleep(b: &RigidBody) -> bool {
+    let a = b.activation();
+    a.normalized_linear_threshold >= 0.0 || a.angular_threshold >= 0.0
+}
+
 /// A cuboid collider's half-extents and border radius; NaN for another shape (the dump cannot match).
 fn cuboid(c: &Collider) -> ([f32; 3], f32) {
     if let Some(b) = c.shape().as_cuboid() {
@@ -135,6 +141,8 @@ pub struct DynRun {
     program: Program,
     events_on: bool,
     gyro: bool,
+    /// `--sleeping on` (SL-2b): every body, the projectiles included, may sleep.
+    sleeping: bool,
     kicks: Vec<KickEvent>,
     launches: Vec<Launch>,
     next_kick: usize,
@@ -145,7 +153,8 @@ pub struct DynRun {
     kicks_applied: usize,
     launches_applied: usize,
     readback_mismatches: usize,
-    /// Bodies whose gyroscopic setting is not the row's, or that may sleep (critique W3).
+    /// Bodies whose gyroscopic setting or sleep setting is not the row's (critique W3; SL-2b: with
+    /// `--sleeping on` every body must be allowed to sleep).
     bad_bodies: usize,
     clearance_min: f64,
     sanity: Option<Vec<SanityRow>>,
@@ -156,7 +165,16 @@ pub struct DynRun {
 
 impl DynRun {
     /// Reads the spawned world (before step 0).
-    pub fn new(w: &mut World, program: Program, events_on: bool, gyro: bool, steps: usize, sanity: bool, dump: bool) -> Self {
+    pub fn new(
+        w: &mut World,
+        program: Program,
+        events_on: bool,
+        gyro: bool,
+        steps: usize,
+        sanity: bool,
+        dump: bool,
+        sleeping: bool,
+    ) -> Self {
         let m0 = &w.bodies[w.boxes[0]].mass_properties().local_mprops;
         let box0 = (m0.inv_mass, m0.inv_principal_inertia.to_array());
         let g = w.gravity.to_array();
@@ -186,6 +204,7 @@ impl DynRun {
             program,
             events_on,
             gyro,
+            sleeping,
             kicks: if events_on && program == Program::Kick { spec::kick_program().to_vec() } else { Vec::new() },
             launches: if events_on && program == Program::Shoot { spec::shoot_program().to_vec() } else { Vec::new() },
             next_kick: 0,
@@ -209,11 +228,10 @@ impl DynRun {
         run
     }
 
-    /// A body that is not the row's: a gyroscopic setting other than the row's, or allowed to sleep.
+    /// A body that is not the row's: a gyroscopic setting or a sleep setting other than the row's.
     fn bad_body(&self, w: &World, h: RigidBodyHandle) -> bool {
         let b = &w.bodies[h];
-        let a = b.activation();
-        b.gyroscopic_forces_enabled() != self.gyro || a.normalized_linear_threshold >= 0.0 || a.angular_threshold >= 0.0
+        b.gyroscopic_forces_enabled() != self.gyro || may_sleep(b) != self.sleeping
     }
 
     fn push_row(&mut self, w: &World, state: usize) {
@@ -277,7 +295,7 @@ impl DynRun {
                 RigidBodyBuilder::dynamic()
                     .translation(Vector::from_array(p))
                     .linvel(Vector::from_array(v))
-                    .can_sleep(false)
+                    .can_sleep(self.sleeping)
                     .gyroscopic_forces_enabled(self.gyro),
             );
             w.colliders.insert_with_parent(
@@ -317,7 +335,7 @@ impl DynRun {
     /// the row's.
     pub fn void_reason(&self) -> Option<String> {
         if self.bad_bodies > 0 {
-            return Some(format!("dyn: {} bodies with another gyroscopic setting or allowed to sleep", self.bad_bodies));
+            return Some(format!("dyn: {} bodies with another gyroscopic setting or a sleep setting other than the row's", self.bad_bodies));
         }
         (self.readback_mismatches > 0)
             .then(|| format!("dyn: {} kicks read back a velocity other than v + dv", self.readback_mismatches))

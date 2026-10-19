@@ -382,7 +382,7 @@ a mutant before it was called green; the outputs are in `D:/tmp/phys-orch/dyn-sc
 | ours, W1 = every W (`fixtures/ours_<p>.pose`) | kick `0x5c27d4ede389f12a` (sha256 `91884a6c…`), shoot `0x49e2bf025baa5294` (`dea05a4e…`), slide `0xe627f35c282605ba` (`9107ceb3…`); S-LAND = the trunk's `docs/measurements/2026-09-30-v2-speculative/w8/J500.pose` (byte-equal) |
 | Jolt 5.6 dyn exe (`fixtures/jolt56_<p>.pose`, `-t=1`) | none `0xb8522b4e3fc62cfe` (`33a3d320…`), kick `0x63faa28ed77e1a89` (`b409997f…`), shoot `0xc989d89c28ecdd03` (`a7b98658…`), slide `0x781c433c5d8278f1` (`8d41c963…`) |
 | Rapier dyn fixtures | `pins.json` `rapier`: per ruling-22 row and program, the pose hash, the fixture path under `D:/tmp/rapier-parity/dyn/fixtures/<arm>/` and its sha256 |
-| exes | `pins.json` `exes`: Jolt dyn `9df09901…`; Rapier dyn simd8 `c71f7470…`, simd4 `be272344…`, block `5b0a1b60…` (rebuilt by fix r1 for the independent kick read-back; the C4 builds were `1d1f499f…`, `6e372558…`, `41e29ab5…`, and every fixture is unchanged) |
+| exes | `pins.json` `exes`: Jolt dyn `e8f48439…` (the parity patch v3, lane SL-2b, section 10.2; the v2 exe `9df09901…` stays as `jolt56-dyn-v2`, untouched); Rapier dyn simd8 `86a9c3fb…`, simd4 `56e11db7…`, block `a77ccb47…` (rebuilt by SL-2b with `--sleeping`, section 10.3; before them `c71f7470…`, `be272344…`, `5b0a1b60…`, rebuilt by fix r1 for the independent kick read-back; the C4 builds were `1d1f499f…`, `6e372558…`, `41e29ab5…`; every off-arm fixture is unchanged) |
 
 The Rapier `dyn/` sources are copied here as `rapier/*.txt` (`.txt` keeps them out of every Rust
 census; `-text`, so their bytes are the ones `dyn/bin/SOURCES.sha256` pins).
@@ -406,7 +406,7 @@ $R --scene jolt --dyn slide --workers W --steps 500 --window 0..500 --csv OUT.cs
 $R --scene jolt --workers W --steps 500 --csv OUT.csv --pose-out OUT.pose --expect-pose D:/wt/merge/docs/measurements/2026-09-30-v2-speculative/w8/J500.pose
 
 # Jolt 5.6: the dyn exe for EVERY Jolt row (ruling 22 Q5); a fresh working directory per process
-J=D:/tmp/jolt/build-v5.6.0-dyn-dist/PerformanceTest.exe   # sha256 9df09901... (SHA256SUMS beside it)
+J=D:/tmp/jolt/build-v5.6.0-dyn3-dist/PerformanceTest.exe  # sha256 e8f48439... (SHA256SUMS beside it): the patch v3, whose off arm is v2's (section 10.2)
 $J -s=Pyramid -dyn=kick  -q=Discrete -f -t=W -i=800 -pose_out=OUT.pose   # window [200,800)
 $J -s=Pyramid -dyn=shoot -q=Discrete -f -t=W -i=800 -pose_out=OUT.pose   # window [200,800)
 $J -s=Pyramid -dyn=slide -q=Discrete -f -t=W -i=500 -pose_out=OUT.pose   # window [0,500)
@@ -503,3 +503,285 @@ A row that fails a scene's bar is excluded from that scene's claim; for ours a f
   wider than the cut's `box` schema: critique W3's read-back fields.
 * The gate scripts are `rapier_gates.py` (not `.sh`) and `scene_receipts.py` (the three engines'
   work receipts side by side).
+
+## 10. The sleeping arms (lane SL-2b, 2026-10-18): window 9c's "on" rows
+
+Spec: `sl/design_r2.md` section 3.7 (SL-2b) and section 15 (window 9c: every scene with sleeping off AND
+on, ruling 25(d)). Branch `u/phys-sl-2b` from `56878b85`, trunk-synced to `72ee9f15`. Cut
+`D:/tmp/phys-orch/sl-2b/cut.md` (its addendum resolves the critique); implementation report
+`D:/tmp/phys-orch/sl-2b/impl.md`. No engine, runner or test source changed; nothing was timed.
+
+### 10.1 What "on" is, per engine
+
+| engine | the flag (every 9c row names its arm) | what may sleep | the per-step awake count | the run's sleep receipt |
+|---|---|---|---|---|
+| ours | `--sleeping on` / `--sleeping off` (no flagless row: 9C2 refuses one) | `PhysicsConfig::default()` with `sleeping: true` (SL-1, SL-2a), the colored solve | the CSV's `awake` column | the SUMMARY's `sleep` object; `frozen_v_max` must be a number equal to 0, else the row is void (section 15); `first_frozen_step` |
+| Jolt 5.6 | `-allow_sleep` on the dyn3 exe (parity patch v3) | Jolt's own sleeping (`mAllowSleeping` on every box and every projectile; Jolt's `PhysicsSettings` defaults) | `-f`'s third column `Active Bodies`; with `-sanity` also `awake_<quality>_th<N>.csv` (`frame,active`) | one line `boyko-parity-sleep v1: program=, bodies=, may_sleep=, active_final=, first_all_asleep=, asleep_frames=` |
+| Rapier 0.36 | `--sleeping on` on the rebuilt dyn arms | `can_sleep(true)` = `RigidBodyActivation::active()`, the library defaults, on every body, projectiles included | the CSV's last column `active_bodies` (`IslandManager::num_active_bodies` after the step) | the SUMMARY's `sleep` object (`can_sleep_bodies`, `bodies`, `active_min`, `active_max`, `first_all_asleep`, `asleep_steps`) and `config.can_sleep` true |
+
+A kick wakes its bodies in all three: ours by its wake rule, Jolt through `AddLinearVelocity` (5.6 activates
+a body whose new velocity is not near zero), Rapier through `set_linvel(.., true)`. `sleep_gates.py`'s
+JX6 / RX3 / OX2 read it: a kick on an all-asleep pile wakes at least its 62 boxes.
+
+**Conventions (PC-SL2B-4).** Jolt's and Rapier's `first_all_asleep` is the index of the first step after
+which nothing is active (Jolt writes a frame's row after that iteration's `Update`); ours'
+`first_frozen_step` is that index + 1 (S-SL0 REPORT, "Frame convention").
+
+**Refusal parity (PC-SL2B-5).** The scene dump is the program's created values, written with sleeping off:
+ours refuses `--scene-dump` with sleeping on (the runner's module doc), the Jolt patch v3 refuses
+`-scene_dump` with `-allow_sleep` (exit 1), the Rapier arms refuse `--scene-dump` with `--sleeping on`
+(exit 2). The may-sleep property of the on arm is carried by receipts instead: Jolt's `may_sleep = bodies`,
+Rapier's `can_sleep_bodies = bodies` and its inverted may-sleep void.
+
+### 10.2 Jolt 5.6: the parity patch v3
+
+`crates/boyko_physics/benches/jolt_parity/pyramid_scene.patch` (prose lines 1-4 unchanged; line 5 and the
+`v3:` table entries are new). Every hunk is inert without `-allow_sleep`:
+
+- **J-1** `-dyn`, `-sanity`, `-pose_out` and `-spawn_pose_out` run with `-allow_sleep` (v2 refused them:
+  `dyn-scenes/cut.md:467`); `-scene_dump` with `-allow_sleep` exits 1 (the refusal parity above).
+- **J-2 + J-3** the latent v2 defect: v2 set `-allow_sleep` on the Pyramid scene and then REPLACED it with
+  `BoykoDynPyramidScene`, whose flag was false, so lifting J-1 alone would have printed `allow_sleep=1` and
+  run every body awake. The replacing scene now inherits the flag (`BoykoDynPyramidScene::SetAllowSleeping`),
+  its boxes through `PyramidScene` and its projectiles through `mDynAllowSleeping`. The v1 `PyramidScene`
+  hunk is byte-identical.
+- **J-4** under `-allow_sleep`, `GetNumActiveBodies(EBodyType::RigidBody)` after every step, read after
+  `clock_end` (the timed pair is byte-identical to v2's: `sleep_gates.py` JX5); with `-sanity` it is also
+  written to `awake_<quality>_th<N>.csv`.
+- **J-5** one `boyko-parity-sleep v1:` line before the hash. Its prefix is not `boyko-parity-dyn` (the
+  drivers want no dyn line on a row without `dyn_program`) and its last field is a decimal, never `0x...`
+  (`jolt_gates.sh` reads the stat line's hash as the last hex at a line end).
+
+**The build.** A NEW worktree `D:/tmp/jolt/wt-v5.6.0-dyn3` (detached `e77f175` = v5.6.0, this patch
+applied) and build dir `D:/tmp/jolt/build-v5.6.0-dyn3-dist`, by the 9b recipe (the runner header "Build
+(Jolt)": WinLibs `c++` 16.1.0 r4, MinGW Makefiles, `Distribution`, LTO; `-j 2`). The v2 worktree, exe
+(`9df09901...`) and DLLs stay untouched: windows LAND and SR bind that exe by path with a sha256 pin
+(ruling 65 Q1). Provenance:
+
+- `git apply` of this patch to clean v5.6.0 reproduces the dyn3 tree byte for byte;
+- `driver.py manifest`: dyn3 `source_is_repo_patch` true; the cmake dicts of dyn3 and v2 differ only in
+  `CMAKE_HOME_DIRECTORY`; the DLLs are v2's;
+- the tree diff signatures: 9b's tree = the v1 patch, v2's tree = the `56878b85` patch, dyn3's = v3.
+
+| exe | sha256 | pins.json |
+|---|---|---|
+| dyn3 (v3) `D:/tmp/jolt/build-v5.6.0-dyn3-dist/PerformanceTest.exe` | `e8f4843915d230735705d205be3204a560f235684eb1e38b25553396de0f6dbe` | `exes.jolt56-dyn` |
+| v2 `D:/tmp/jolt/build-v5.6.0-dyn-dist/PerformanceTest.exe` | `9df0990168bef31f6ba722ff6950b9b6bbfb5e9077a174d17c27c95eb0913a98` | `exes.jolt56-dyn-v2` |
+| DLLs (both) | `libgcc_s_seh-1.dll` `4dfa2c0d...`, `libstdc++-6.dll` `a36c2e68...`, `libwinpthread-1.dll` `c29cbbe3...` | `SHA256SUMS` beside each exe |
+
+**The off arm is v2's.** `jolt_gates.sh` on dyn3: `checks 53, pass 49, fail 0` (4 SAME); J-T
+`0xb8522b4e3fc62cfe` at `-t=1/8` with 9b's banner, kick / shoot / slide = `pins.json` `jolt56.*`, every dump
+canonical. Its G6 now reads the tested exe's own source (`CMAKE_HOME_DIRECTORY` of the `CMakeCache.txt`
+beside the exe, else `JOLT_SRC`; neither = exit 2), so it names dyn3's lines (loop 740, ApplyEvents 750,
+clock_start 763, clock_end 772) and no longer reads v2's tree whatever exe it is given.
+
+**The S-SL0 bridge.** S-SL0 (`D:/tmp/phys-orch/sl/s-sl0/REPORT.md`) ran Jolt's J-T on arm on the 9b exe;
+9c runs every Jolt row on the dyn exe (ruling 22 Q5). On dyn3, `-s=Pyramid -q=Discrete -f -allow_sleep
+-receipt -i=1000` reproduces it at `-t=1` and `-t=8`: hash `0xf0d442ab7603221c`, the receipt CSV byte for
+byte (sha256 `c75a7a0b...`), the v1 banner (`sleep_gates.py` JX1, JX2, JX4).
+
+### 10.3 Rapier 0.36: `--sleeping on`
+
+The dyn/ crate `D:/tmp/rapier-parity/dyn` (outside the repository; byte copies `rapier/main.rs.txt` and
+`rapier/dyn_scenes.rs.txt`, pinned by `dyn/bin/SOURCES.sha256` and `rapier_gates.py` G1):
+
+- `--sleeping on|off` (default off; not a knob, so `config.knobs` is unchanged); `can_sleep(sleeping)` on
+  every box and projectile; the may-sleep void inverted (`bad_body`: a sleep setting other than the row's);
+- under on, the `--receipt` "every body awake" void is not applied (both forms), and neither are the
+  recount gate's constraint and contact counters: a sleeping island keeps its narrow-phase solver
+  manifolds while the solver builds none of their constraints (on J-T after step 133: 0 constraints
+  against 5386 stale manifolds). Only the pair counter is compared; the mismatch step counts stay in
+  `receipt_gates`. The on arm's `--receipt` work counts (`rows`, `Np`, `Nm`) therefore count those stale
+  manifolds: PC-SL2B-10;
+- under on, the CSV gains a last column `active_bodies` (read inside `rows.push`, after `let wall`:
+  `tests/dyn_scenes_hook_order.rs` keeps the timed pair three lines) and the SUMMARY a `sleep` object;
+  `config.can_sleep` follows the flag (off: the same `false` bytes);
+- `--scene-dump` with `--sleeping on` exits 2.
+
+**The rebuild** is `build_dyn.sh` unchanged (its frozen `RUSTFLAGS`, ruling 22 Q6; `JOBS=2`), offline,
+with rustc 1.98.1 `48a229cea`: the commit embedded in the previous dyn exes and in the frozen 9b exes alike
+(no toolchain drift). `bin/features_<arm>.txt` are byte-equal to the previous builds'.
+
+| arm | previous exe (kept in `D:/tmp/phys-orch/sl-2b/bin/rapier-v1/`) | rebuilt exe (`pins.json exes.rapier-dyn-<arm>`) |
+|---|---|---|
+| simd8 | `c71f7470...` | `86a9c3fb7bf39d65b7dcad92798e473d1f9ef68ca13ca99b4c1fcd7a2912b814` |
+| simd4 | `be272344...` | `56e11db727da0cf38af15de43c11a4d8767bd482295971c687ddada6e3780807` |
+| block | `5b0a1b60...` | `a77ccb47c16d09d69e86b08f63abc50158023c4dbfe615bb09961967eff81de8` |
+
+**The off arm held.** `rapier_gates.py --gate all` on the rebuilt exes: VERDICT GREEN exit_code 0, `checks 211, fail 0` on `b0444b9f` (kit `D:/tmp/phys-orch/sl-2b/k/rapier`): G1 the dyn sources and exes against the new pins with the freeze intact, G2 all 70 frozen J-T rows at W1 and W8 equal to their fixtures (140 runs), G3 every off-arm dyn pose pin and dump unchanged.
+
+**Rollback** (if this lane is abandoned, so the trunk's `rapier_gates.py` G1 stays green): copy
+`D:/tmp/phys-orch/sl-2b/bin/rapier-v1/{rapier-parity-dyn-*.exe, SHA256SUMS, SOURCES.sha256, features_*.txt}`
+back into `D:/tmp/rapier-parity/dyn/bin/` and `D:/tmp/phys-orch/sl-2b/bin/rapier-v1/src/{main,dyn_scenes}.rs`
+into `dyn/src/` (= the trunk's `rapier/*.txt` HEAD blobs: sha256 `985246ab...`, `e9f97673...`), then
+`sha256sum -c` both files. The `*_on.pose` fixtures under `dyn/fixtures/` are new files: no rollback
+needed.
+
+**Rapier rows are outside FROZEN-9b**: every claim on a Rapier on row reads "against the RP-F set"
+(ruling 13), on top of section 7's "against the ruling-22 set".
+
+### 10.4 The gate: `gate/sleep_gates.py`
+
+`python gate/sleep_gates.py OUTDIR --jolt <dyn3 exe> --ours <runner copy> [--rapier-dir DIR] [--legs
+jolt,rapier,ours] [--root DIR] [--record [--write-fixtures]] | OUTDIR --pins-from OUTDIR0 | --selftest`.
+Each engine's on arm on the four programs (none = J-T 500 steps, kick and shoot 800, slide 500), every process
+alone in a fresh directory, no timing column read. Expected 415 = Jolt 4 x 11 + 6, Rapier 8 rows x 4 x 9 + 3,
+ours 4 x 8 + 2, pins 4 + 32 + 4 (GATE-KIT.md). A determinism, identity or pin row whose outputs are absent
+FAILs, a receipt row included; the receipts are Jolt's and Rapier's cross-W readings (neither promises
+W-independence), Rapier's liveness, and Jolt's shoot/slide all-asleep frame (S-SL0 pre-registers none and
+kick only). Ours' W2/W4/W16 = W1 is PASS/FAIL (the engine's {1, N} promise).
+
+| run (kit dir `D:/tmp/phys-orch/sl-2b/k/`) | inputs | verdict | tally |
+|---|---|---|---|
+| `red_c1r2` (C1 red-first) | the parent's artefacts: Jolt v2 `9df09901`, the previous Rapier exes, ours `a76dda89` | exit 1 | `checks 415, pass 39, receipts 0, fail 376` (every row as predicted: cut.md addendum) |
+| `sleep_jolt` | `--legs jolt --record`, dyn3 | exit 0 | `checks 50, pass 44, receipts 6, fail 0` |
+| `sleep_rapier2` | `--legs rapier --record`, the rebuilt arms | exit 0 | `checks 291, pass 227, receipts 64, fail 0` |
+| `record` | all legs `--record --write-fixtures` (dyn3, the rebuilt arms, ours `a76dda89`) | exit 0 | `checks 375, pass 305, receipts 70, fail 0` |
+| `pins_green` | `--pins-from record/out` (the committed pins) | exit 0 | `checks 40, pass 40, receipts 0, fail 0` |
+
+Every value of the `record` run equals the leg runs' (Jolt, Rapier) and the red run's ours W1 poses: each engine's on arm is deterministic across processes. Per program (W1; every W of every engine printed the same hash, so `per_w` is one value per program: Jolt's and Rapier's cross-W receipts all read SAME):
+
+| program | Jolt 5.6: hash, first all-asleep frame, may_sleep / bodies | ours: pose hash, `first_frozen_step`, `frozen_v_max` | Rapier (8 rows): first all-asleep step, min..max |
+|---|---|---|---|
+| none | `0xf0d442ab7603221c`, 118, 1240 / 1240 | `0xc637a0517adabab7`, 147, 0 | 128..157 |
+| kick | `0xf766bfe067a7823`, 118, 1240 / 1240 | `0xca3161f209b56e41`, 147, 0 | 128..157 |
+| shoot | `0xb616bf65493b033c`, 118, 1300 / 1300 | `0x0a3bbe0a97f62147`, 147, 0 | 128..157 |
+| slide | `0x72371d30075255a9`, 404, 1240 / 1240 | `0x39656286b0c2c3cc`, 379, 0 | 396..490 (1 of 8 rows never all asleep) |
+
+### 10.5 The pins: `pins.json sleeping_on` and `fixtures/{jolt56,ours}_on_<p>.pose`
+
+Written by `sleep_gates.py ... --record --write-fixtures` (all legs, one run) and checked by the gate's pin
+rows: each W1 pose = its fixture (`pose_pin.check_pose`: the sha256, then the bytes) and every W's printed
+hash = `per_w`. The Rapier on fixtures live beside the off ones, `D:/tmp/rapier-parity/dyn/fixtures/<arm>/
+<row>_<p>_on.pose`.
+
+`recorded_with` of `sleeping_on.ours`: tree `b0444b9f`, runner `a76dda89`, off-arm pins none `0x441a568e91a4f9c9` / kick `0x5c27d4ede389f12a` / shoot `0x49e2bf025baa5294` / slide `0xe627f35c282605ba`, P10 JSonT500 `0xc637a0517adabab7`.
+
+| pin | none | kick | shoot | slide |
+|---|---|---|---|---|
+| `jolt56` (`fixtures/jolt56_on_<p>.pose`) | `0xf0d442ab7603221c` (`f1132e8b...`) | `0xf766bfe067a7823` (`5567c75d...`) | `0xb616bf65493b033c` (`f425f548...`) | `0x72371d30075255a9` (`0b57a48a...`) |
+| `ours` (`fixtures/ours_on_<p>.pose`) | `0xc637a0517adabab7` (`b8626bd9...`) | `0xca3161f209b56e41` (`8a23006d...`) | `0x0a3bbe0a97f62147` (`1ecec8ef...`) | `0x39656286b0c2c3cc` (`1fefcd73...`) |
+| `rapier` simd8/s1p7q2pd0+roff | `0x2f1cc9213bd0a5e5` | `0xa3756f80f7a94a97` | `0x9e41b73a81be644f` | `0x0cf0885d5b28ae3d` |
+| `rapier` simd8/s1p8q2pd0+roff | `0x7ff1d2b34bbfce91` | `0xe51ab72d9249a8f0` | `0x287dc314b14a5c82` | `0x69a97248b40064e4` |
+| `rapier` simd8/s1p9q2 | `0x1356b9179b3928c0` | `0x007e150f1adf0bba` | `0xe89f26d82465c168` | `0xacbec236a2832675` |
+| `rapier` simd4/s1p8q3pd0+roff | `0x4151cb8b12a8f2d3` | `0x19e6a3d337ff4bd6` | `0xb132fec823763828` | `0x0bd14985c0e9db73` |
+| `rapier` block/s1p4q3pd0+roff | `0xd3f707e64e781559` | `0xf3acc20c6df16ada` | `0x5e6f53726d474596` | `0xe6da3263f99aa0cd` |
+| `rapier` block/s1p5q2pd0+roff | `0x2b6525f223d475bd` | `0x6ba3270a5acd9274` | `0xd3783db063c6b9c2` | `0x71d0c67049b670fc` |
+| `rapier` block/s1p5q3pd0+roff | `0xe15dd91485740d2b` | `0x33bf2a0512604d77` | `0x153ac096cd68eda4` | `0xa7290e7410c16012` |
+| `rapier` simd8/D0 | `0x83f60bd345798552` | `0x17831d3c150bcc8a` | `0x17a42d3ffb54c7c1` | `0xe89774a8fb3509f5` |
+
+Every program's `per_w` holds one hash for W 1, 2, 4, 8 and 16 in every engine. The Rapier fixtures' sha256 are in `pins.json`.
+
+### 10.6 The re-pin rule of `sleeping_on.ours` (critique W2, ruling 65)
+
+Jolt's dyn3 exe and the rebuilt Rapier arms are frozen instruments: their on pins hold until 9c. Ours is
+not frozen (IB, the combined screen, CS and SL-V land before 9c; "IB changes the iteration budget, so it
+moves every trajectory, sleeping-on freeze steps included", `sl/design_r2.md` section 16). So
+`sleeping_on.ours.recorded_with` names the engine state the four ours on pins were recorded on: the tree
+(HEAD), the runner copy's sha256, the four off-arm pins `pins.json ours.<p>.pose_hash` (P11's values) and P10's
+sleeping-on J-T anchor `ANCHOR_REUSE_ON_SLEEP_ON` (`crates/boyko_physics/tests/v2_speculative_fidelity.rs`;
+ours' `none` on pin is that anchor's pose). The gate's four ours pin rows FAIL as **stale** when either named
+value differs in the tree under test, naming the moved value and the command below; a stale stamp is never a
+value regression of the lane that runs the gate.
+
+**The rule.** A lane that moves `pins.json ours.*` (P11) or P10's anchors, or any ours sleeping-on
+trajectory, re-derives `sleeping_on.ours` in the same commit and declares old/new:
+
+    python docs/physics/perf-campaign/levers/scenes/gate/sleep_gates.py OUT --legs ours --ours EXE --record --write-fixtures
+    # then pins.json sleeping_on.ours = OUT/sleeping_on.json "ours" (recorded_with included)
+    python docs/physics/perf-campaign/levers/scenes/gate/sleep_gates.py OUT2 --pins-from OUT --legs ours   # checks 4, pass 4
+
+The orchestrator's trunk pin header carries it beside P11 (PC-SL2B-9): `sleep_gates.py OUT --legs ours --ours
+EXE`, exit 0, `checks 38, pass 38, receipts 0, fail 0` (34 + the 4 ours pin rows).
+
+### 10.7 Window 9c: the on rows (written, not run)
+
+Section 7's protocol and rows are the OFF arm. Ruling 25(d) adds every scene with sleeping on; section 15
+of `sl/design_r2.md` pairs them. The commands of one on row, each in a fresh directory, each followed by
+`python $G/gate/dyn_sanity.py --final <program> OUT.pose` (a failure is VOID):
+
+```bash
+G=<the 9c checkout>/docs/physics/perf-campaign/levers/scenes; FX=$G/fixtures
+# ours: the 9c tip runner, a COPY with its sha256 (cargo build --locked --profile parity -p boyko-physics-parity --bin jolt_parity_pyramid);
+# every ours row names its arm: the off rows of section 7 gain --sleeping off (9C2 refuses a flagless row)
+$R --scene jolt --dyn kick  --sleeping on --workers W --steps 800 --window 200..800 --csv OUT.csv --pose-out OUT.pose --expect-pose $FX/ours_on_kick.pose
+$R --scene jolt --dyn shoot --sleeping on --workers W --steps 800 --window 200..800 --csv OUT.csv --pose-out OUT.pose --expect-pose $FX/ours_on_shoot.pose
+$R --scene jolt --dyn slide --sleeping on --workers W --steps 500 --window 0..500   --csv OUT.csv --pose-out OUT.pose --expect-pose $FX/ours_on_slide.pose
+$R --scene jolt             --sleeping on --workers W --steps 500 --window 100..500 --csv OUT.csv --pose-out OUT.pose --expect-pose $FX/ours_on_none.pose
+# each: void_steps 0, SUMMARY config.sleeping true and sleep.frozen_v_max == 0 (9C2); the CSV's `awake` = the per-step awake count.
+# The ours on fixtures hold for the engine state section 10.6 names: the 9c prep re-records them on the 9c tip runner (10.6's rule).
+
+# Jolt 5.6: the dyn3 exe for EVERY 9c Jolt row, off and on (sha256 = pins.json exes.jolt56-dyn)
+J=D:/tmp/jolt/build-v5.6.0-dyn3-dist/PerformanceTest.exe
+$J -s=Pyramid -dyn=kick  -allow_sleep -q=Discrete -f -t=W -i=800 -pose_out=OUT.pose
+$J -s=Pyramid -dyn=shoot -allow_sleep -q=Discrete -f -t=W -i=800 -pose_out=OUT.pose
+$J -s=Pyramid -dyn=slide -allow_sleep -q=Discrete -f -t=W -i=500 -pose_out=OUT.pose
+$J -s=Pyramid            -allow_sleep -q=Discrete -f -t=W -i=500 -pose_out=OUT.pose   # J-T: -pose_out is a dyn option, so its row names dyn_program "none" (critique W1)
+# each: exit 0; the v1 banner with allow_sleep=1, receipt=0; one boyko-parity-dyn v1 banner and one clean receipts line naming
+# the row's program (none included); one boyko-parity-sleep v1 line with may_sleep = bodies (9C1); the stat line's hash =
+# pins.json sleeping_on.jolt56.<p>.per_w[W]; cmp OUT.pose $FX/jolt56_on_<p>.pose; -f's `Active Bodies` = the per-step awake count.
+
+# Rapier 0.36: the rebuilt dyn arms, the ruling-22 rows; LABEL "against the RP-F set" (ruling 13)
+RD=D:/tmp/rapier-parity/dyn/bin/rapier-parity-dyn-<arm>.exe; FD=D:/tmp/rapier-parity/dyn/fixtures/<arm>
+$RD --dyn kick  --cfg rapier-default <row flags> --sleeping on --workers W --steps 800 --window 200..800 --csv OUT.csv --pose-out OUT.pose --expect-pose $FD/<row>_kick_on.pose
+$RD --dyn shoot --cfg rapier-default <row flags> --sleeping on --workers W --steps 800 --window 200..800 --csv OUT.csv --pose-out OUT.pose --expect-pose $FD/<row>_shoot_on.pose
+$RD --dyn slide --cfg rapier-default <row flags> --sleeping on --workers W --steps 500 --window 0..500   --csv OUT.csv --pose-out OUT.pose --expect-pose $FD/<row>_slide_on.pose
+$RD             --cfg rapier-default <row flags> --sleeping on --workers W --steps 500 --window 100..500 --csv OUT.csv --pose-out OUT.pose --expect-pose $FD/<row>_none_on.pose
+# each: SUMMARY void false, config.can_sleep true, sleep.can_sleep_bodies = bodies; the CSV's `active_bodies` = the per-step awake count.
+
+# Layout bridges (free, never a correction; only if a 9c number is compared with SR / LAND / 9b):
+#   J-T off on the v2 exe (build-v5.6.0-dyn-dist) adjacent to J-T off on $J, same W; section 7's Rapier bridge.
+```
+
+Row templates (9b's schema):
+
+```json
+{"id":"DYN-KICK-ON-ours","blocks":["DYN"],"kind":"runner","binaries":["tip"],"args":["--scene","jolt","--dyn","kick","--sleeping","on"],"workers":[1,2,4,8,16],"steps":800,"window":[200,800],"metric_windows":[[200,800]],"armed":false,"pose_ref":"scenes/ours_on_kick","sanity":"final"}
+{"id":"DYN-KICK-ON-jolt56","blocks":["DYN"],"kind":"jolt","binaries":["j56dyn3"],"args":["-s=Pyramid","-dyn=kick","-allow_sleep","-q=Discrete","-f"],"dyn_program":"kick","workers":[1,2,4,8,16],"steps":800,"metric_windows":[[200,800]],"jolt_hash":"<sleeping_on.jolt56.kick.per_w[W]>","pose_ref":"scenes/jolt56_on_kick","sanity":"final"}
+{"id":"DYN-JT-ON-jolt56","blocks":["DYN"],"kind":"jolt","binaries":["j56dyn3"],"args":["-s=Pyramid","-allow_sleep","-q=Discrete","-f"],"dyn_program":"none","workers":[1,2,4,8,16],"steps":500,"metric_windows":[[0,100],[100,500]],"jolt_hash":"<sleeping_on.jolt56.none.per_w[W]>","pose_ref":"scenes/jolt56_on_none","sanity":"final"}
+{"id":"DYN-KICK-ON-RX.<arm>.<row>","blocks":["DYN"],"kind":"rapier_dyn","binaries":["rd-<arm>"],"args":["--dyn","kick","--cfg","rapier-default","<row flags>","--sleeping","on"],"workers":[1,2,4,8,16],"steps":800,"metric_windows":[[200,800]],"pose_ref":{"rd-<arm>":"rapier-dyn/<arm>/<row>_kick_on"},"claim_label":"against the RP-F set (ruling 13)"}
+```
+
+The same for shoot (800, [200,800)), slide (500, [0,500)) and none. Section 7's OFF templates gain
+`"--sleeping","off"` (ours) and, for the J-T Jolt row that carries `-pose_out`, `"dyn_program":"none"`.
+
+### 10.8 The 9c driver copy: `D:/tmp/phys-orch/win9c/`
+
+`tools/window9c_run.py` = the landing window's `tools/window_land_run.py` (sha256 `8b864842...`) + ONLY:
+**9C0** the names (`rows_9c.json`, `rows_9c.extra.json`, `wait_idle_9c.ps1`, the dry-run banner,
+`import sleep9c as S9`); **9C1** `jolt_stats` records the sleep lines and `-f`'s `Active Bodies` column, and
+`validate_jolt`'s `allow_sleep=0` clause becomes `S9.jolt_sleep_problems` (an on row needs `allow_sleep=1`
+and one sleep line naming its program with `may_sleep = bodies`; an off row `allow_sleep=0` and none);
+**9C2** `validate_runner` ends with `S9.ours_sleep_problems` (the row names `--sleeping on|off`, the SUMMARY's
+`config.sleeping` equals it, and an on SUMMARY has `frozen_v_max == 0`). Written by `tools/mk9c.py` (exact
+replacements, the base sha256 pinned; `--check`). `tools/selftest_sleep9c.py`: `cases 87, pass 87`, on each of
+10.7's rows run once at W1 (`gate/real/`): the land driver refuses the real Jolt on rows ("patch banner")
+and accepts an ours on row doctored to `frozen_v_max 2.4e-6` (the red-first); the 9c copy accepts every
+real on and off row, refuses the doctored ones, the S-SL0 9b control on an on row (no sleep line) and a
+J-T on row without `dyn_program`; every changed line is tagged (a negative control is red). The copy
+cannot run yet: no rows file, no `bin/` (its README lists what the 9c prep owes).
+
+### 10.9 PC lines (record only)
+
+* **PC-SL2B-1:** the runner header "Build (Jolt)" (`jolt_parity_pyramid.rs` "Build (Jolt)") documents patch
+  v2 and names `build-v5.6.0-dyn-dist` as 9c's exe; its module doc says sleeping on is "never a parity row,
+  since every engine runs the parity scenes awake". Both are stale since this lane (critique O3); doc-only,
+  at the next lane that touches the runner. Meanwhile this section and `pins.json` are the authority.
+  ⚠ *2026-10-19: closed by lane PHYS-TOOL-1 at `0fe76d6c` (the runner's module doc and "Build (Jolt)" name
+  sleeping on as 9c's "on" arm, patch v3 and dyn3). The same lane's `71602537` fixes the runner's per-step
+  counter oracle for armed `--dyn` rows with sleeping on and `Sets`, which voided every strike that woke a
+  held pile (ruling 64 (4)): `levers/tooling/01-PHYS-TOOL-1-RECORD.md` section 1.*
+* **PC-SL2B-3:** the 9c prep owes `rows_9c.json` with section 15's on/off pairs (10.7's templates), the
+  `rapier_dyn` validator re-cut for the rebuilt exes and the on rows (`rapierdyn_land.py` V4 exe pins, V5
+  `config.can_sleep`, V8 `active_bodies`, V9 `--sleeping on`), the dyn pins from `sleeping_on`, `bin/` byte
+  copies, the kit/README rows, the asleep-tail comparison (`docs/MEASUREMENT-QUEUE.md`).
+* **PC-SL2B-6:** section 7 still names `D:/wt/merge` and the pre-P0r `cargo bench` runner command; the 9c
+  prep rewrites section 7.
+* **PC-SL2B-7:** the Rapier dyn exes were rebuilt with the same rustc as before (10.3); the off arm's
+  fixtures held, so section 7's bridge to 9b's frozen exes is unchanged.
+* **PC-SL2B-8:** keep `D:/wt/_targets/rapier-parity-dyn` and `D:/tmp/jolt/build-v5.6.0-dyn3-dist` (and the
+  dyn3 worktree) through 9c (`free_targets.py` keep file).
+* **PC-SL2B-9:** the orchestrator's trunk pin header gains 10.6's ours line beside P11.
+* **PC-SL2B-10:** Rapier's `--receipt` work counts on the on arm count the stale solver manifolds of
+  sleeping islands (10.3); 9c's on-arm work receipts need a sleep-aware recount (a manifold counts iff one
+  of its bodies is dynamic and awake) or Rapier's own counters. The 9c prep decides.

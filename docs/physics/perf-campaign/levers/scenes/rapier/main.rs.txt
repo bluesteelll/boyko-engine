@@ -9,13 +9,28 @@
 //! * `--dyn kick|shoot|slide`: a dynamic program on J-T (`src/spec.rs`, a byte copy of boyko's
 //!   `benches/jolt_parity_pyramid/dyn_spec.rs`; the glue is `src/dyn_scenes.rs`). Events are
 //!   applied between steps, before the step's `Instant::now()`; `--steps` defaults to the program's
-//!   length. Projectiles carry the row's gyroscopic setting and cannot sleep, like every J-T box.
+//!   length. Projectiles carry the row's gyroscopic setting and its sleep setting (`--sleeping`),
+//!   like every J-T box.
 //! * `--sanity PATH`: the shared sanity CSV (scored by boyko's `scenes/gate/dyn_sanity.py`) and the
 //!   static-pair receipts in the summary's `dyn` object. `--scene-dump PATH`: the canonical scene
 //!   dump, read back from the sets. Both structural: never in a timed row.
 //! * Scene identity (g1) expects the program's statics (1 for J-T, 6 for S-SHOOT / S-SLIDE), and the
 //!   `--receipt` sleep gate expects every body of the step awake (1240 for J-T, up to 1300 for
 //!   S-SHOOT): the J-T form of both is unchanged (critique W5).
+//! * `--sleeping on` (boyko lane SL-2b, window 9c's sleeping arm; default off): Rapier's library
+//!   sleep defaults (`can_sleep(true)`, i.e. `RigidBodyActivation::active()`) on every body, the
+//!   projectiles included; a kick wakes its body through `set_linvel(.., true)`. The `--receipt`
+//!   sleep gate is not applied then: the per-step awake count (`IslandManager::num_active_bodies`,
+//!   read after the timed pair) is the CSV's last column `active_bodies` and the SUMMARY's `sleep`
+//!   object (`can_sleep_bodies`, `bodies`, `active_min`, `active_max`, `first_all_asleep` = the
+//!   first step index after which no body is active, `asleep_steps`), and the dyn run's body check
+//!   is inverted (every body must be allowed to sleep). The `--receipt` recount gate keeps only its
+//!   pair count then: a sleeping island keeps its narrow-phase solver manifolds while the solver
+//!   builds none of their constraints, so the constraint and contact counters cannot equal a recount
+//!   over every manifold (their mismatch steps stay in `receipt_gates`; the work receipts `rows`,
+//!   `Np` and `Nm` of such a run count those stale manifolds too). `--scene-dump` is refused with
+//!   it. A sleeping-off run has no `sleep` key and no `active_bodies` column: its CSV and SUMMARY are
+//!   the previous ones but for the source hashes.
 //! * The SUMMARY gains `source_fnv1a64.spec_rs` / `dyn_scenes_rs` and, only for a dynamic run, a
 //!   `dyn` object; `RUNNER_ID` is the frozen one, so a J-T row's SUMMARY equals the frozen exe's but
 //!   for the source hashes, the exe and the timing keys. The exe's sha256 names it.
@@ -36,7 +51,8 @@
 //! removed by the parity patch), density 1 (Rapier's default: m = 8, the inverse mass 0.125 and
 //! inverse inertia 0.1875 boyko's runner writes), friction 0.2 and restitution 0 on every collider.
 //! Gravity (0, −9.81, 0), dt = 1/60, one step per frame, sleeping off (`can_sleep(false)` on every
-//! box), CCD off (`max_ccd_substeps = 0`, which disables Rapier's automatic fixed-collider CCD too).
+//! box; `--sleeping on` lifts it), CCD off (`max_ccd_substeps = 0`, which disables Rapier's
+//! automatic fixed-collider CCD too).
 //!
 //! Friction combine: every collider is `CoefficientCombineRule::Max`, boyko's rule, so the effective
 //! coefficient is max(0.2, 0.2) = 0.2. Jolt's √(0.2·0.2) and Rapier's default Average (0.2+0.2)/2
@@ -108,6 +124,7 @@
 //! --perturb B:AXIS[:DIR]         move box B's spawn coordinate AXIS (x|y|z) by one f32 ulp, DIR
 //!                                +1 (default) or -1: the F0 ensemble's BOYKO_F0_PERTURB, as a flag
 //! --label TEXT                   echoed into the summary
+//! --sleeping on|off              every body may sleep, Rapier's defaults (default off; lane SL-2b)
 //! ```
 //!
 //! # Knobs (rev 3): overrides applied on top of the `--cfg` base
@@ -148,8 +165,8 @@
 //! * The CSV always carries `pool_threads` (the rayon pool size read after each step, inside the
 //!   install, `--install loop`; 0 = not read, `--install step`), with or without `--receipt`.
 //! * Exit code: 0 ok; 2 bad flags or an unwritable file; 3 void (a receipt gate failed: scene
-//!   identity, pool size, the loop not on a pool worker, a sleeping body, a counter disagreeing
-//!   with the recount); 4 `--expect-pose` mismatch.
+//!   identity, pool size, the loop not on a pool worker, a sleeping body (sleeping off), a counter
+//!   disagreeing with the recount (sleeping on: the pair counter only)); 4 `--expect-pose` mismatch.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -380,6 +397,8 @@ struct Args {
     sanity: Option<PathBuf>,
     /// `--scene-dump PATH`.
     scene_dump: Option<PathBuf>,
+    /// `--sleeping on|off` (SL-2b): every body may sleep; off is the J-T rows' `can_sleep(false)`.
+    sleeping: bool,
     raw: Vec<String>,
 }
 
@@ -399,7 +418,7 @@ impl Args {
 const USAGE: &str = "usage: rapier-parity [--cfg rapier-default|matched] [--workers W] [--steps N] \
     [--window A..B] [--install loop|step] [--receipt] [--counters on|off] [--csv PATH] \
     [--pose-out PATH] [--spawn-pose-out PATH] [--expect-pose PATH] [--perturb B:x|y|z[:+1|-1]] [--label TEXT] \
-    [--dyn kick|shoot|slide] [--sanity PATH] [--scene-dump PATH]";
+    [--dyn kick|shoot|slide] [--sanity PATH] [--scene-dump PATH] [--sleeping on|off]";
 
 fn parse_num<T: std::str::FromStr>(flag: &str, v: Option<String>) -> Result<T, String> {
     let v = v.ok_or_else(|| format!("{flag} needs a value"))?;
@@ -554,6 +573,7 @@ fn parse_args() -> Result<Args, String> {
     let mut dyn_program = None;
     let mut sanity = None;
     let mut scene_dump = None;
+    let mut sleeping = false;
     while let Some(flag) = it.next() {
         match flag.as_str() {
             "--cfg" => {
@@ -613,6 +633,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--sanity" => sanity = Some(parse_path("--sanity", it.next())?),
             "--scene-dump" => scene_dump = Some(parse_path("--scene-dump", it.next())?),
+            "--sleeping" => sleeping = parse_onoff("--sleeping", it.next())?,
             "-h" | "--help" => return Err(USAGE.to_owned()),
             other => {
                 if !parse_knob(&mut knobs, other, &mut it)? {
@@ -620,6 +641,11 @@ fn parse_args() -> Result<Args, String> {
                 }
             }
         }
+    }
+    if sleeping && scene_dump.is_some() {
+        return Err("--scene-dump writes the program's created values: it runs with --sleeping off (boyko's \
+                    runner and the Jolt patch v3 refuse it with sleeping on too)"
+            .to_owned());
     }
     if workers == 0 {
         return Err("--workers must be >= 1".to_owned());
@@ -667,6 +693,7 @@ fn parse_args() -> Result<Args, String> {
         dyn_program,
         sanity,
         scene_dump,
+        sleeping,
         raw,
     })
 }
@@ -861,13 +888,15 @@ fn material(builder: ColliderBuilder) -> ColliderBuilder {
         .density(DENSITY)
 }
 
-/// Spawns the floor and the pyramid in boyko's spawn order (Jolt's placement loop).
+/// Spawns the floor and the pyramid in boyko's spawn order (Jolt's placement loop); every box may
+/// sleep iff `sleeping` (`--sleeping on`).
 fn spawn(
     cfg: CfgKind,
     knobs: &Knobs,
     gap: f32,
     perturb: Option<Perturb>,
     counters_enabled: bool,
+    sleeping: bool,
 ) -> Result<(World, Option<PerturbReceipt>), String> {
     let mut bodies = RigidBodySet::new();
     let mut colliders = ColliderSet::new();
@@ -897,7 +926,7 @@ fn spawn(
                 }
                 let body = RigidBodyBuilder::dynamic()
                     .translation(Vector::from_array(p))
-                    .can_sleep(false)
+                    .can_sleep(sleeping)
                     .gyroscopic_forces_enabled(gyro);
                 let h = bodies.insert(body);
                 colliders.insert_with_parent(
@@ -1105,6 +1134,8 @@ struct Row {
     counts: Option<Counts>,
     /// The dynamic bodies after the step (1240 on J-T): what the `--receipt` sleep gate expects awake.
     bodies: usize,
+    /// `IslandManager::num_active_bodies` after the step under `--sleeping on` (SL-2b), else 0.
+    active: u64,
 }
 
 /// Steps the world `args.steps` times through `step`, timing only the call. `pool_receipt` reads
@@ -1135,6 +1166,7 @@ fn drive<F: FnMut(&mut World)>(
             },
             counts: args.receipt.then(|| count(w)),
             bodies: w.boxes.len(),
+            active: if args.sleeping { w.islands.num_active_bodies() as u64 } else { 0 },
         });
         if let Some(d) = dyn_run.as_mut() {
             d.after_step(i, w);
@@ -1215,7 +1247,7 @@ fn friction_model_name(m: FrictionModel) -> &'static str {
     }
 }
 
-fn config_json(p: &IntegrationParameters, cfg: CfgKind, knobs: &Knobs, counters_enabled: bool) -> String {
+fn config_json(p: &IntegrationParameters, cfg: CfgKind, knobs: &Knobs, counters_enabled: bool, can_sleep: bool) -> String {
     format!(
         "{{\"dt\":{},\"substep_dt\":{},\"num_solver_iterations\":{},\"num_internal_pgs_iterations\":{},\
          \"num_internal_stabilization_iterations\":{},\"friction_model\":{},\"friction_in_bias_pass\":{},\
@@ -1225,7 +1257,7 @@ fn config_json(p: &IntegrationParameters, cfg: CfgKind, knobs: &Knobs, counters_
          \"normalized_allowed_linear_error\":{},\"normalized_max_linear_velocity\":{},\
          \"contact_clustering\":{},\"contact_recycling\":{},\"normalized_contact_recycle_distance\":{},\
          \"warmstart_joints\":{},\"max_ccd_substeps\":{},\"length_unit\":{},\"gyroscopic\":{},\
-         \"can_sleep\":false,\"density\":{},\"restitution\":{},\"linear_damping\":0,\"angular_damping\":0,\
+         \"can_sleep\":{},\"density\":{},\"restitution\":{},\"linear_damping\":0,\"angular_damping\":0,\
          \"bvh_optimization\":{},\"bvh_adaptive_margin\":{},\"knobs\":[{}],\
          \"counters_enabled\":{}}}",
         json_f32(p.dt),
@@ -1251,6 +1283,7 @@ fn config_json(p: &IntegrationParameters, cfg: CfgKind, knobs: &Knobs, counters_
         p.max_ccd_substeps,
         json_f32(p.length_unit),
         gyroscopic(cfg, knobs),
+        can_sleep,
         json_f32(DENSITY),
         json_f32(RESTITUTION),
         json_str(match bvh_strategy(knobs) {
@@ -1296,7 +1329,7 @@ fn counts_json(c: &Counts, div: f64) -> String {
     )
 }
 
-fn csv_text(rows: &[Row], receipt: bool) -> String {
+fn csv_text(rows: &[Row], receipt: bool, sleeping: bool) -> String {
     let mut s = String::with_capacity(rows.len() * if receipt { 160 } else { 28 } + 256);
     s.push_str("step,wall_ns,pool_threads");
     if receipt {
@@ -1305,6 +1338,9 @@ fn csv_text(rows: &[Row], receipt: bool) -> String {
              points,spec_points,spec_manifolds,floor_manifolds,floor_points,lateral_manifolds,\
              counter_pairs,counter_constraints,counter_contacts,rows,awake,top_y",
         );
+    }
+    if sleeping {
+        s.push_str(",active_bodies");
     }
     s.push('\n');
     for (i, r) in rows.iter().enumerate() {
@@ -1332,6 +1368,9 @@ fn csv_text(rows: &[Row], receipt: bool) -> String {
                 c.awake,
                 c.top_y,
             );
+        }
+        if sleeping {
+            let _ = write!(s, ",{}", r.active);
         }
         s.push('\n');
     }
@@ -1376,6 +1415,7 @@ fn main() -> ExitCode {
         args.gap,
         args.perturb,
         args.counters_enabled(),
+        args.sleeping,
     ) {
         Ok(w) => w,
         Err(e) => {
@@ -1415,6 +1455,7 @@ fn main() -> ExitCode {
             args.steps,
             args.sanity.is_some(),
             args.scene_dump.is_some(),
+            args.sleeping,
         )
     });
 
@@ -1520,18 +1561,22 @@ fn main() -> ExitCode {
     }
     if args.receipt {
         // J-T keeps the frozen test and message; a dynamic program wants every body of the step awake.
-        if args.dyn_program.is_none() {
+        // With --sleeping on (SL-2b) bodies sleep by design: the awake count is the `sleep` object.
+        if !args.sleeping && args.dyn_program.is_none() {
             if awake_min != PYRAMID_BODIES as u64 || awake_max != PYRAMID_BODIES as u64 {
                 voids.push(format!(
                     "sleep: awake bodies {awake_min}..{awake_max}, want {PYRAMID_BODIES} every step"
                 ));
             }
-        } else if asleep_steps > 0 {
+        } else if !args.sleeping && asleep_steps > 0 {
             voids.push(format!(
                 "sleep: {asleep_steps} steps with an awake count other than the step's bodies (awake {awake_min}..{awake_max})"
             ));
         }
-        if pairs_mismatch + constraints_mismatch + contacts_mismatch > 0 {
+        // With --sleeping on (SL-2b) a sleeping island keeps its solver manifolds and the solver builds
+        // no constraint for them: only the pair counter is comparable with the recount.
+        let solver_mismatch = if args.sleeping { 0 } else { constraints_mismatch + contacts_mismatch };
+        if pairs_mismatch + solver_mismatch > 0 {
             voids.push(format!(
                 "recount: steps where Rapier's counters disagree with the recount: pairs {pairs_mismatch}, \
                  constraints {constraints_mismatch}, contacts {contacts_mismatch}"
@@ -1577,7 +1622,7 @@ fn main() -> ExitCode {
         },
     };
     if let Some(path) = &args.csv
-        && let Err(e) = std::fs::write(path, csv_text(&rows, args.receipt))
+        && let Err(e) = std::fs::write(path, csv_text(&rows, args.receipt, args.sleeping))
     {
         eprintln!("rapier-parity: writing {}: {e}", path.display());
         exit = exit.max(EXIT_USAGE);
@@ -1592,6 +1637,23 @@ fn main() -> ExitCode {
                 ",\"dyn\":null".to_owned()
             }
         },
+    };
+
+    // --sleeping on (SL-2b): the awake count over the run, read after every step's timed pair; off: no key.
+    let sleep_json = if args.sleeping {
+        let can_sleep_bodies = world.boxes.iter().filter(|&&h| dyn_scenes::may_sleep(&world.bodies[h])).count();
+        let active_min = rows.iter().map(|r| r.active).min().unwrap_or(0);
+        let active_max = rows.iter().map(|r| r.active).max().unwrap_or(0);
+        let first_all_asleep = rows.iter().position(|r| r.active == 0);
+        let asleep_steps = rows.iter().filter(|r| r.active == 0).count();
+        format!(
+            ",\"sleep\":{{\"can_sleep_bodies\":{can_sleep_bodies},\"bodies\":{},\"active_min\":{active_min},\
+             \"active_max\":{active_max},\"first_all_asleep\":{},\"asleep_steps\":{asleep_steps}}}",
+            world.boxes.len(),
+            first_all_asleep.map_or_else(|| "null".to_owned(), |i| i.to_string()),
+        )
+    } else {
+        String::new()
     };
 
     // Summary.
@@ -1687,7 +1749,7 @@ fn main() -> ExitCode {
          \"constraints_mismatch_steps\":{constraints_mismatch},\"contacts_mismatch_steps\":{contacts_mismatch}}},\
          \"threads\":{{\"pool_threads_requested\":{},\"pool_threads_min\":{pool_min},\"pool_threads_max\":{pool_max},\
          \"install_receipt\":[{},{}],\"loop_on_pool_worker\":{loop_on_worker},\"logical_cores\":{logical_cores}}},\
-         \"void\":{},\"voids\":[{}]{dyn_json}}}",
+         \"void\":{},\"voids\":[{}]{dyn_json}{sleep_json}}}",
         json_str(RUNNER_ID),
         args.label.as_deref().map_or_else(|| "null".to_owned(), json_str),
         args.raw.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","),
@@ -1718,7 +1780,7 @@ fn main() -> ExitCode {
         args.workers,
         json_str(args.install.name()),
         json_str(args.cfg.name()),
-        config_json(&world.params, args.cfg, &args.knobs, world.pipeline.counters.enabled()),
+        config_json(&world.params, args.cfg, &args.knobs, world.pipeline.counters.enabled(), args.sleeping),
         id.dynamic_bodies,
         id.fixed_bodies,
         id.colliders,
