@@ -42,6 +42,24 @@ Stdlib only, Python >= 3.11 (``tomllib``). Subcommands:
 
 Exit codes: 0 pass, 1 over a limit (``compare --scene-anchor``: B's rho under 0.9), 2 usage / input
 error, 3 RED-vacuous (``compare`` graded fewer px than its minimum), 4 over max_delta_bound.
+
+GL-H1 class 1 (rulings 84, 85), per TAA pin x leg - AAOFF its TAA-off run, TAA its TAA frame, ANCHOR
+the pin's pre-move TAA frame (GL-H0's set); exit 0 required:
+
+  compare --flat-tiles AAOFF --flat-tile-size T --edge-margin 2 --min-graded N --max-delta 2
+          --scene-anchor ANCHOR AAOFF TAA
+
+Each parameter is derived on the 14 pre-move pairs (a pre-move TAA frame vs the TAA-off render of
+its pin on the pre-move tree), never on the run it judges:
+  - ``--edge-margin`` k = 2: the least margin at which every pre-move pair passes (at k = 1 the
+    RCAS pairs red: RCAS's over/undershoot reaches one pixel past TAA's dilation).
+  - Every leg but vb_sdf_taa: T = 16, N = 57196 = half of 114392, the least area a pre-move pair
+    grades at k = 2.
+  - vb_sdf_taa (ruling 85 (2)): T = 8, N_sdf = 6336 = half of 12672, its own pre-move area at k = 2
+    and T = 8. Its AA-off frame has no flat 16^2 tile, so at T = 16 it grades 0 px (RED-vacuous by
+    construction); its pre-move pair passes at T = 8 with max |Δ| 0.
+  - The anchor's bar 0.9 and extent 256^2 are the device check's (see the scene-anchor section);
+    the pre-move pairs read rho 1.
 """
 
 from __future__ import annotations
