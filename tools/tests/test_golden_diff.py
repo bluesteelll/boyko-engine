@@ -311,6 +311,28 @@ class ClassOneForm(unittest.TestCase):
         self.assertEqual(self.run_compare(same, "--edge-margin", "2", "--min-graded", "784"), 0)
         self.assertEqual(self.run_compare(same, "--edge-margin", "2", "--min-graded", "785"), 3)
 
+    def test_each_tile_row_reads_its_own_flat_mask(self):
+        # Ruling 86 (review W1): the class frame's flat mask is the same in both tile rows and its
+        # object tile is noise, whose neighbours never run equal - so a row pass that read row 0's
+        # mask, or no mask at all, passed every test above. This test's own frame: 2 x 2 tiles on
+        # a flat background; a shaded object fills the top-left tile's left half (x < 8), a
+        # silhouette that ends mid-tile, so that tile is not flat though its right half is the
+        # background's exact value. The tile under it is flat: the mask differs between the rows.
+        self.w, self.h = 32, 32
+        bg = (90, 120, 150)
+        self.ref = [(200 - 6 * y, 40 + 9 * x, 60) if x < 8 and y < 16 else bg for y in range(self.h) for x in range(self.w)]
+        # A tile that is not flat is never graded, even where its pixels run equal to the flat
+        # neighbour's (a row pass that ignores the mask grades (12, 8)).
+        self.assertEqual(self.run_compare(self.moved([(12, 8)]), "--edge-margin", "2"), 0)
+        # The flat tile under the object tile is graded from 3 px below it (a row pass that reads
+        # row 0's mask skips the whole tile).
+        self.assertEqual(self.run_compare(self.moved([(7, 24)]), "--edge-margin", "2"), 1)
+        # By hand at margin 2: x 18..31 (14 columns) of every row (32) = 448 px, plus x 0..17 (18
+        # columns) of rows 18..31 (14) = 252 px; 700 px in all.
+        same = list(self.ref)
+        self.assertEqual(self.run_compare(same, "--edge-margin", "2", "--min-graded", "700"), 0)
+        self.assertEqual(self.run_compare(same, "--edge-margin", "2", "--min-graded", "701"), 3)
+
     def test_usage_errors(self):
         ref = self.bmp(self.ref, "aaoff.bmp")
         self.assertEqual(gd.main(["compare", "--edge-margin", "1", ref, ref]), 2, "a margin needs --flat-tiles")
