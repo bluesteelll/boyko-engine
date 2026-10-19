@@ -383,6 +383,12 @@ fn px1a_receipt_worker() {
 }
 
 fn drive(path: RenderPath, aa: Aa) {
+    drive_expecting(path, aa, aa);
+}
+
+/// [`drive`] with the worker armed for `aa` and the seam checked against `seam` — the two differ
+/// where the path degrades the AA mode the host armed (Forward under a boot SSAA).
+fn drive_expecting(path: RenderPath, aa: Aa, seam: Aa) {
     let tag = format!("px1a_receipt_{}_{}", ObsArming::path_word(path), aa.word());
     let out = fresh_out(&format!("{tag}.toml"));
     let taa = matches!(aa, Aa::Taa | Aa::TaaCas);
@@ -400,7 +406,7 @@ fn drive(path: RenderPath, aa: Aa) {
     );
     let r = Receipt::load(&out);
     let particles = r.config("path_has_particles") == 1;
-    if let Err(e) = check_post_seam(&r, aa, particles) {
+    if let Err(e) = check_post_seam(&r, seam, particles) {
         panic!("{tag}: {e}");
     }
 }
@@ -487,4 +493,18 @@ fn px1a_receipt_forward_both() {
 #[ignore = "gpu-windowed: PX1a test 10, the post seam on ForwardPlus, mesh (spawns px1a_receipt_worker); run with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
 fn px1a_receipt_forwardplus_mesh() {
     drive(RenderPath::ForwardPlus, Aa::Off);
+}
+
+/// Review r1 W2: Forward under a boot-armed SSAA. The host fixes the 2x composite at boot
+/// (`with_ssaa_scale(2)`: `lit` is `present_extent` = 2x native) while Forward degrades the SSAA
+/// pass (`post_process_aa_supported`), so the seam is the AA-off seam and `display` is the native
+/// `aa_extent`. `post_final` must dispatch over `display`'s extent: the worker's debug build
+/// checks the dispatch extent against the UBO's native one (`record_post_final`'s
+/// `debug_assert_eq!`), so a Forward recorder dispatching at `present_extent` panics the worker on
+/// its first frame. (The check is a debug assertion: this driver has its power only in a
+/// debug-assertions test build, the default `cargo test` profile.)
+#[test]
+#[ignore = "gpu-windowed: PX1a review r1 W2, the post seam on Forward under a boot-armed SSAA (spawns px1a_receipt_worker); run with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
+fn px1a_receipt_forward_boot_ssaa() {
+    drive_expecting(RenderPath::Forward, Aa::Ssaa, Aa::Off);
 }
