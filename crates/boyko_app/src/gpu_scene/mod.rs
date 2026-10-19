@@ -47,7 +47,7 @@ use boyko_rhi_vulkan::compute::{
     gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
     gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, HZB_BUILD_PUSH_BYTES, hzb_build_spirv,
     interp_instances_spirv, punctual_depth_fs_spirv,
-    post_passthrough_spirv, punctual_depth_vs_spirv, rcas_spirv, sdf_forward_march_spirv, sdf_forward_march_sdfonly_spirv,
+    post_final_spirv, punctual_depth_vs_spirv, rcas_spirv, sdf_forward_march_spirv, sdf_forward_march_sdfonly_spirv,
     sdf_forward_march_sdfonly_viewt_spirv, sdf_forward_march_viewt_spirv,
     sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
     sdf_ssao_spirv_variant, smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv,
@@ -77,7 +77,7 @@ use boyko_rhi_vulkan::present::gpu_zone::{
     GPU_RING_DEPTH, GpuZoneRecorder, PairResult, QUERIES_PER_SLOT, RetireScratch, RetiredFrame,
 };
 use boyko_rhi_vulkan::present::{
-    CullMembers, HzbPlan, MeshFacePipelines, SdfDepthMergeActivation, VB_CULL_OCC_ARMED, VbOcclusionArm,
+    CullMembers, HzbPlan, LIT_FORMAT, MeshFacePipelines, SdfDepthMergeActivation, VB_CULL_OCC_ARMED, VbOcclusionArm,
 };
 use boyko_rhi_vulkan::present::transparent_depth::{
     TRANSPARENT_CLASS_PARTICLES, TransparentDepthCapability,
@@ -1216,9 +1216,9 @@ pub(crate) struct GpuSceneBundles {
     /// at set 0 — { `gRcasIn` STORAGE @0, `gAaOut` STORAGE @1 }. [`GBufferTargets`] writes a
     /// per-FIF `rcas_set` against it once per extent.
     rcas_layout: VulkanBindGroupLayout,
-    /// Render wave PX1a (D-G5): the `post_final` compute pipeline — the transitional
-    /// pass-through kernel (D-S4) until the switch commit — built UNCONDITIONALLY at boot: the
-    /// pass runs on every frame of every path.
+    /// Render wave PX1a (D-G5): the `post_final` compute pipeline (the generated
+    /// `post_final.comp`) — built UNCONDITIONALLY at boot: the pass runs on every frame of every
+    /// path.
     post_final_pipeline: ComputePipeline,
     /// Render wave PX1a (D-G5): its 3-binding layout — { `gScene` SAMPLED_IMAGE @0 (recorded at
     /// GENERAL), `gDisplay` STORAGE @1, the `PostFinal` UBO @2 } (`POST_FINAL_BINDINGS`).
@@ -2900,8 +2900,9 @@ impl GpuSceneBundles {
                 vertex_entry: c"main",
                 fragment_module: &ssaa_fs,
                 fragment_entry: c"main",
-                // `lit_native`'s format (R8G8B8A8_UNORM until the switch) — NOT `swap_format`.
-                color_formats: &[Format::R8G8B8A8Unorm],
+                // `lit_native`'s format, `LIT_FORMAT` (render wave PX1a; orchestrator ruling 67 W2:
+                // the sixth lit pipeline, `tests/lit_format_census.rs` section 5) — NOT `swap_format`.
+                color_formats: &[LIT_FORMAT],
                 depth_format: None,
                 topology: PrimitiveTopology::TriangleList,
                 vertex_layout: None,
@@ -3001,8 +3002,7 @@ impl GpuSceneBundles {
         // Render wave PX1a (D-G5): the `post_final` compute pipeline + its 3-binding layout
         // (`POST_FINAL_BINDINGS`: `gScene` SAMPLED_IMAGE @0 recorded at GENERAL, `gDisplay`
         // STORAGE @1, the `PostFinal` UBO @2). Built UNCONDITIONALLY — the pass
-        // runs every frame. The module is the transitional pass-through kernel (D-S4) until the
-        // switch commit binds the generated `post_final.comp`.
+        // runs every frame. The module is the generated `post_final.comp`.
         let post_final_layout = RhiDevice::create_bind_group_layout(
             device,
             &BindGroupLayoutDesc {
@@ -3014,7 +3014,7 @@ impl GpuSceneBundles {
             },
         )
         .expect("invariant: post_final bind-group layout create");
-        let post_final_cs = RhiDevice::create_shader_module(device, post_passthrough_spirv())
+        let post_final_cs = RhiDevice::create_shader_module(device, post_final_spirv())
             .expect("invariant: post_final compute shader module create");
         let post_final_pipeline = RhiDevice::create_compute_pipeline(
             device,
@@ -3509,7 +3509,7 @@ impl GpuSceneBundles {
                     fragment_entry: c"main",
                     // ONE color attachment (`lit`, reused from the Deferred allocation, C5) —
                     // unlike the 3/4-MRT Deferred raster pipelines.
-                    color_formats: &[RASTER_COLOR_FORMAT],
+                    color_formats: &[LIT_FORMAT],
                     // Forward's OWN reverse-Z depth image (a SEPARATE allocation from Deferred's
                     // custom-linear `depth` — Decision 4); the format is the SAME `D32Sfloat`.
                     depth_format: Some(Format::D32Sfloat),
@@ -3564,7 +3564,7 @@ impl GpuSceneBundles {
                 vertex_entry: c"main",
                 fragment_module: &sky_fs,
                 fragment_entry: c"main",
-                color_formats: &[RASTER_COLOR_FORMAT],
+                color_formats: &[LIT_FORMAT],
                 depth_format: Some(Format::D32Sfloat),
                 topology: PrimitiveTopology::TriangleList,
                 vertex_layout: None,
@@ -3646,7 +3646,7 @@ impl GpuSceneBundles {
                     vertex_entry: c"main",
                     fragment_module: &forward_plus_fs,
                     fragment_entry: c"main",
-                    color_formats: &[RASTER_COLOR_FORMAT],
+                    color_formats: &[LIT_FORMAT],
                     depth_format: Some(Format::D32Sfloat),
                     topology: PrimitiveTopology::TriangleList,
                     vertex_layout: Some(VertexBufferLayout {
@@ -4367,7 +4367,7 @@ impl GpuSceneBundles {
                 vertex_entry: c"main",
                 fragment_module: &vb_sky_fs,
                 fragment_entry: c"main",
-                color_formats: &[RASTER_COLOR_FORMAT],
+                color_formats: &[LIT_FORMAT],
                 depth_format: None,
                 topology: PrimitiveTopology::TriangleList,
                 vertex_layout: None,
@@ -7061,7 +7061,6 @@ impl GpuSceneBundles {
             taa: matches!(aa_mode, AaMode::Taa).then(|| TaaActivation {
                 resolve_pipeline: &self.taa_resolve_pipeline,
                 resolve_layout: &self.taa_resolve_layout,
-                color_formats: &[Format::R8G8B8A8Unorm],
                 linear_sampler: &self.taa_linear_sampler,
                 reset: taa_reset,
             }),

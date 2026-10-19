@@ -122,7 +122,7 @@ const COMPOSITE_H: u32 = 512;
 /// Render wave PX1a (D-G5): the harness's own `post_final` pipeline + its 3-binding layout
 /// (`gScene` SAMPLED_IMAGE @0 at GENERAL, `gDisplay` STORAGE @1, the `PostFinal` UBO @2) — the
 /// `GpuSceneBundles::boot` objects, built here because this harness builds every pipeline itself.
-/// The module is the transitional pass-through kernel until the switch commit.
+/// The module is the generated `post_final.comp` (`compute::post_final_spirv`).
 fn post_final_objects(device: &VulkanContext) -> (ComputePipeline, VulkanBindGroupLayout) {
     let layout = RhiDevice::create_bind_group_layout(
         device,
@@ -135,7 +135,7 @@ fn post_final_objects(device: &VulkanContext) -> (ComputePipeline, VulkanBindGro
         },
     )
     .expect("post_final bind-group layout");
-    let cs = RhiDevice::create_shader_module(device, boyko_rhi_vulkan::compute::post_passthrough_spirv())
+    let cs = RhiDevice::create_shader_module(device, boyko_rhi_vulkan::compute::post_final_spirv())
         .expect("post_final compute shader module");
     let pipeline = RhiDevice::create_compute_pipeline(
         device,

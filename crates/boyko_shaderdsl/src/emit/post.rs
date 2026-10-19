@@ -317,3 +317,100 @@ void main(uint3 dtid : SV_DispatchThreadID) {{
         main_fn = sentinel("post_final_main", &main_fn),
     )
 }
+
+// ---- Render wave PX1a: the HDR boundary spans (`px1a/cut.md` D-S2; orchestrator ruling 67 W5) ----
+
+/// A traced symbol's `static const` row: `(symbol, hlsl type, value text)`.
+type ConstRow = (&'static str, &'static str, String);
+
+/// Prints one `float3` leaf as a standalone HLSL function `float3 <name>(float3 <p0>[, …]) { return
+/// …; }`: the leaf is traced over [`Node::Vec3Param`]s named `params` and its value recorded as the
+/// one `return`. Returns the function text and the named constants it references.
+fn emit_vec3_leaf_fn(
+    name: &str,
+    params: &[&'static str],
+    leaf: impl FnOnce(&[Emit]) -> Emit,
+) -> (String, Vec<ConstRow>) {
+    let mut consts = Vec::new();
+    let body = emit_post_leaf(&[], &[], params, NO_VEC4_INPUTS, &[], || {
+        let args: Vec<Emit> = (0..params.len() as u32).map(|i| Emit(push(Node::Vec3Param(i)))).collect();
+        let value = leaf(&args);
+        record_stmt(Stmt::Return(value.0));
+        let symbols = NAMED_LITS.with(|n| n.borrow().clone());
+        consts = ARENA.with(|a| traced_constants(&a.borrow(), &symbols));
+    });
+    let sig: Vec<String> = params.iter().map(|p| format!("float3 {p}")).collect();
+    (format!("float3 {name}({}) {{\n{body}}}\n", sig.join(", ")), consts)
+}
+
+/// The constants of several traced functions, each symbol once, in first-reference order.
+fn const_block(sets: &[Vec<ConstRow>]) -> String {
+    let mut seen: Vec<&'static str> = Vec::new();
+    let mut out = String::new();
+    for (sym, ty, val) in sets.iter().flatten() {
+        if !seen.contains(sym) {
+            seen.push(*sym);
+            out.push_str(&format!("static const {ty} {sym} = {val};\n"));
+        }
+    }
+    out
+}
+
+/// The `post_hdr_boundary` span body: [`crate::post::hdr_sanitize`] and
+/// [`crate::post::hdr_history_guard`] printed as HLSL functions (`float3 hdr_sanitize(float3 c)`,
+/// `float3 hdr_history_guard(float3 hist, float3 cur)`), after the constants they reference. Spliced
+/// into `taa_resolve.comp.hlsl` (every `lit` tap, the history write) and `ssaa_downsample.fs.hlsl`
+/// (every tap of the HDR box) by `emit_post --splice`, so the two hand-written files' HDR boundary
+/// is the eDSL's — the SAME leaves `post_final`'s traced body inlines.
+pub fn emit_hlsl_post_hdr_boundary() -> String {
+    let (sanitize, c1) = emit_vec3_leaf_fn("hdr_sanitize", &["c"], |a| post::hdr_sanitize::<EmitCf>(a[0]));
+    let (guard, c2) =
+        emit_vec3_leaf_fn("hdr_history_guard", &["hist", "cur"], |a| post::hdr_history_guard::<EmitCf>(a[0], a[1]));
+    format!("{}\n{sanitize}\n{guard}", const_block(&[c1, c2]))
+}
+
+/// The `lit_store_saturate` span body: [`crate::post::lit_store_saturate`] printed as the HLSL
+/// function `float3 lit_store_saturate(float3 c)`, after `HDR_MAX`. Spliced into
+/// `shaders/lit_format.hlsli`, which every `lit` producer includes; every `lit` store passes
+/// through it (`tests/lit_store_clamp_census.rs` rule 3).
+pub fn emit_hlsl_lit_store_saturate() -> String {
+    let (f, c) = emit_vec3_leaf_fn("lit_store_saturate", &["c"], |a| post::lit_store_saturate::<EmitCf>(a[0]));
+    format!("{}\n{f}", const_block(&[c]))
+}
+
+/// One generated span inside a hand-written shader: `(file under boyko_rhi_vulkan/shaders, span
+/// name, the emitter's text)`.
+pub type PostSplice = (&'static str, &'static str, String);
+
+/// Every span `emit_post --splice` rewrites — the table the bin applies and
+/// `boyko_rhi_vulkan/tests/post_chain_spv_sync.rs` pins each committed span against.
+pub fn post_splices() -> [PostSplice; 3] {
+    [
+        ("lit_format.hlsli", "lit_store_saturate", emit_hlsl_lit_store_saturate()),
+        ("taa_resolve.comp.hlsl", "post_hdr_boundary", emit_hlsl_post_hdr_boundary()),
+        ("ssaa_downsample.fs.hlsl", "post_hdr_boundary", emit_hlsl_post_hdr_boundary()),
+    ]
+}
+
+/// `src` with the body of its ONE `// === GENERATED <name> BEGIN/END ===` span replaced by `body`;
+/// `Err` names a missing or repeated sentinel. The sentinels themselves are kept.
+pub fn splice_span(src: &str, name: &str, body: &str) -> Result<String, String> {
+    let begin = format!("// === GENERATED {name} BEGIN ===\n");
+    let end = format!("// === GENERATED {name} END ===\n");
+    let (Some(b), Some(e)) = (src.find(&begin), src.find(&end)) else {
+        return Err(format!("no `{}` / `{}` sentinel pair", begin.trim_end(), end.trim_end()));
+    };
+    if src.matches(&begin).count() != 1 || src.matches(&end).count() != 1 || e < b {
+        return Err(format!("the `{name}` span is not exactly one ordered sentinel pair"));
+    }
+    Ok(format!("{}{begin}{body}{}", &src[..b], &src[e..]))
+}
+
+/// The committed body of the ONE `<name>` span of `src`, or `None`.
+pub fn span_body<'a>(src: &'a str, name: &str) -> Option<&'a str> {
+    let begin = format!("// === GENERATED {name} BEGIN ===\n");
+    let end = format!("// === GENERATED {name} END ===\n");
+    let b = src.find(&begin)? + begin.len();
+    let e = src[b..].find(&end)? + b;
+    Some(&src[b..e])
+}

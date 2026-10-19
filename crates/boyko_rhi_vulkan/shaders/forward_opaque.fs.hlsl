@@ -86,6 +86,7 @@ static const float3 LIGHT_UP = float3(0.0, 1.0, 0.0);
 
 #include "pbr_lighting.hlsli"
 #include "light_table.hlsli"
+#include "lit_format.hlsli"
 
 // --- Set 0 (Forward core, §G): Camera / light table / material SSBO -----------------------
 //
@@ -463,11 +464,9 @@ float4 main(PsIn input, bool is_front : SV_IsFrontFace) : SV_Target0 {
         lit_direct += (bsdf.diffuse + bsdf.specular) * (NoL * punctual_shadow) * atten * L.color;
     }
 
-    // Same tail as the deferred resolve: exposure LAST on the linear accumulator, THEN the
-    // OWNER-SELECTED tonemap (`pbr_lighting.hlsli::tonemap_select`), THEN the manual gamma-2.2
-    // OETF (see `pbr_lighting.hlsli`'s "PBR P0-C" doc for why the OETF is manual, not hardware).
+    // The same store as the deferred resolve (render wave PX1a): exposure LAST on the linear
+    // accumulator, stored SCENE-LINEAR and bounded at HDR_MAX (`lit_format.hlsli`); `post_final`
+    // alone applies the tonemap and the OETF.
     float3 lit = (lit_direct + ambient + emissive) * H.exposure;
-    lit = tonemap_select(lit, load_tonemap_mode(LightBuf));
-    lit = pow(lit, OETF_GAMMA_EXP);
-    return float4(clamp(lit, 0.0, 1.0), 1.0);
+    return float4(lit_store_saturate(lit), 1.0);
 }

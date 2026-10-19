@@ -58,11 +58,14 @@ use super::super::scene_types::{
 use super::super::targets::{ForwardTargets, GBufferTargets, VB_CLASSIFY_MAX_MATERIAL_ROWS, VbTargets};
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
 
-/// The VB `lit` clear color — byte-identical to `record_forward`'s own `FORWARD_LIT_CLEAR`
-/// (`record_gbuffer`'s albedo clear, the marcher's `BACKGROUND` base). VB v1 has no SDF leg
-/// (mesh-only, `LegsCollapsedToMeshPreVbSdf` until R10) and paints the sky FIRST (`vb_sky`), so
-/// this clear is only ever visible transiently before `vb_sky` overwrites every pixel.
-const VB_LIT_CLEAR: [f32; 4] = [0.05, 0.05, 0.1, 1.0];
+/// The VB `lit` clear color — `record_forward`'s own `FORWARD_LIT_CLEAR`, i.e. the scene-linear
+/// [`LIT_BACKGROUND_SCENE`](super::super::targets::LIT_BACKGROUND_SCENE) (render wave PX1a D-S3,
+/// critique O5: one background spelling, not four). VB paints the sky FIRST (`vb_sky`), so this
+/// clear is only ever visible transiently before `vb_sky` overwrites every pixel.
+const VB_LIT_CLEAR: [f32; 4] = {
+    let c = super::super::targets::LIT_BACKGROUND_SCENE;
+    [c[0], c[1], c[2], 1.0]
+};
 
 /// The VB reverse-Z depth CLEAR (Decision 4): `0.0`, the "nothing drawn yet" sentinel — mirrors
 /// `record_forward`'s own `FORWARD_DEPTH_CLEAR` (paired with `VK_COMPARE_OP_GREATER`).

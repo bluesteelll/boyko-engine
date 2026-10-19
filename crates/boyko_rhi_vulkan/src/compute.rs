@@ -510,12 +510,15 @@ embed_spirv! {
 }
 
 embed_spirv! {
-    /// Render wave PX1a (D-S4): the TRANSITIONAL pass-through kernel `post_final` dispatches until
-    /// the switch commit — `display[px] = float4(gScene.Load(px).rgb, 1)` over the SAME three
-    /// bindings and `numthreads(8, 8, 1)` as the generated `post_final.comp`, so the plumbing
-    /// commit moves no pixel. Deleted, with its manifest row and sync line, when `lit` turns HDR.
-    POST_PASSTHROUGH_SPV,
-    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/post_passthrough.comp.spv")
+    /// Render wave PX1a: the post chain's final pass, `post_final` (`shaders/post_final.comp.hlsl`,
+    /// GENERATED WHOLE from `boyko_shaderdsl::post` — render wave PXe; `tests/post_edsl_sync.rs`
+    /// byte-gates both files). Per pixel: one fetch of the scene input (`taa_hist[fi]` under TAA,
+    /// `lit_native` under SSAA, `lit[fi]` otherwise), then `hdr_sanitize` → the exposure ratio →
+    /// the selected tonemap → the gamma OETF, stored to `display`. Three bindings
+    /// (`POST_FINAL_BINDINGS`: `gScene` @0, `gDisplay` @1, the 32-byte `PostFinal` UBO @2),
+    /// `numthreads(8, 8, 1)`.
+    POST_FINAL_COMP_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/post_final.comp.spv")
 }
 
 embed_spirv! {
@@ -1751,12 +1754,12 @@ pub fn rcas_spirv() -> &'static [u32] {
     RCAS_SPV.as_words()
 }
 
-/// Render wave PX1a (D-S4): the transitional `post_final` pass-through SPIR-V (see
-/// [`POST_PASSTHROUGH_SPV`]), bound at boot by `boyko_app::gpu_scene::GpuSceneBundles::boot` into
-/// the `post_final` pipeline and dispatched by `Renderer::record_post_final` on every frame.
+/// Render wave PX1a: the `post_final` SPIR-V (see [`POST_FINAL_COMP_SPV`]), bound at boot by
+/// `boyko_app::gpu_scene::GpuSceneBundles::boot` into the `post_final` pipeline and dispatched by
+/// `Renderer::record_post_final` on every frame.
 #[inline]
-pub fn post_passthrough_spirv() -> &'static [u32] {
-    POST_PASSTHROUGH_SPV.as_words()
+pub fn post_final_spirv() -> &'static [u32] {
+    POST_FINAL_COMP_SPV.as_words()
 }
 
 /// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V as a `u32` word stream, ready for
@@ -5909,7 +5912,8 @@ embed_spirv! {
     ///
     /// Its OWN set-0 vocabulary — `StructuredBuffer<ParticleRender>` @0 + the camera cbuffer @1,
     /// both `VERTEX` — NOT the compute vocabulary above; set 1 is the bindless table
-    /// [`PARTICLE_DRAW_FS_SPV`] samples. Takes [`PARTICLE_DRAW_PUSH_BYTES`] of `VERTEX` push, and
+    /// [`PARTICLE_DRAW_FS_SPV`] samples. Takes [`PARTICLE_DRAW_PUSH_BYTES`] of push
+    /// ([`PARTICLE_DRAW_PUSH_STAGES`], the block both stages declare), and
     /// reads the render buffer at `index_base + index_step * SV_InstanceID` because
     /// `firstInstance` MUST be 0 on this device.
     PARTICLE_DRAW_VS_SPV,
@@ -5923,7 +5927,9 @@ embed_spirv! {
     /// The blend is PIPELINE state ([`boyko_rhi::enums::BlendState::ADDITIVE`] with
     /// `depth_write = OFF`), never shader code. Binds set 1 only: `Texture2D gTextures[]` @0 and
     /// `SamplerState` @1 — the SAME layout object `gbuffer_mrt.fs.hlsl` binds — which is what
-    /// makes ONE draw cover every effect. Declares NO push range of its own.
+    /// makes ONE draw cover every effect. Declares the VS's push block and reads its last word,
+    /// `pre_exposure` (render wave PX1a E1: the colour is pre-exposed before the blend), so the
+    /// draw range is [`PARTICLE_DRAW_PUSH_STAGES`] = `VERTEX | FRAGMENT`.
     PARTICLE_DRAW_FS_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/particle_draw.fs.spv")
 }
@@ -5933,7 +5939,7 @@ embed_spirv! {
     /// DEFERRED path's only arm.
     ///
     /// Interface-identical to [`PARTICLE_DRAW_VS_SPV`] — the same two set-0 bindings, the same
-    /// [`PARTICLE_DRAW_PUSH_BYTES`] `VERTEX` range, so the SAME pipeline layout object serves both
+    /// [`PARTICLE_DRAW_PUSH_BYTES`] range, so the SAME pipeline layout object serves both
     /// (the `deferred_pbr_wrap` precedent). The delta is two extra interpolants: `eye_rel`
     /// (`cam_eye.xyz - world`, perspective-correct) and `cam_mode`, which
     /// [`PARTICLE_DRAW_DLIN_FS_SPV`] needs to write the depth buffer's own encode.
@@ -5947,8 +5953,8 @@ embed_spirv! {
     /// Writes `SV_Depth = (cam_mode > 0.5) ? length(eye_rel) / MESH_DEPTH_T_MAX : position.z` —
     /// term for term `gbuffer_mrt.fs.hlsl`'s own `SV_Depth`, because on Deferred that fragment IS
     /// what the depth buffer holds, and the particle VS's projective `SV_Position.z` is pinned to
-    /// 1.0 by the marcher matrix (`row2 == row3`). Same set-1 bindings and no push range, so the
-    /// layout is unchanged.
+    /// 1.0 by the marcher matrix (`row2 == row3`). Same set-1 bindings and the same push block as
+    /// [`PARTICLE_DRAW_FS_SPV`], so the layout is unchanged.
     ///
     /// COST: an `SV_Depth` write disables early-Z on this leg (see the shader header). The three
     /// reverse-Z paths bind [`PARTICLE_DRAW_FS_SPV`] and keep it.
@@ -6118,14 +6124,23 @@ pub fn particle_sort_key(pos: [f32; 3], cam_eye: [f32; 3]) -> u32 {
     PARTICLE_SORT_BINS - 1 - (t * bin_max + 0.5) as u32
 }
 
-/// Particles P0: `particle_draw.vs`'s `VERTEX`-stage push block — `{ float4x4 view_proj; uint
-/// index_base; int index_step }` (64 + 4 + 4).
+/// Particles P0: the particle draw's push block — `{ float4x4 view_proj; uint index_base; int
+/// index_step; float pre_exposure }` (64 + 4 + 4 + 4), declared by both `particle_draw` stages.
 ///
 /// A GRAPHICS range, entirely separate from the shared COMPUTE one, so it is bounded only by the
 /// device's own `maxPushConstantsSize` floor and not by [`PARTICLE_KICKOFF_PUSH_BYTES`]'s note.
 /// `(index_base, index_step) == (0, +1)` at P0 — the identity, i.e. a strictly sequential read of
-/// the render buffer with no indirection.
-pub const PARTICLE_DRAW_PUSH_BYTES: u32 = 72;
+/// the render buffer with no indirection. `pre_exposure` (render wave PX1a E1, bytes `[72, 76)`)
+/// is the frame's pre-exposure the FRAGMENT stage multiplies the particle colour by.
+pub const PARTICLE_DRAW_PUSH_BYTES: u32 = 76;
+
+/// The stages of the particle draw's push range: `VERTEX | FRAGMENT` — the VS reads the
+/// projection and the render index, the FS reads `pre_exposure` (render wave PX1a; orchestrator
+/// ruling 67 W1). A range that missed a stage declaring the block would leave that stage's reads
+/// undefined (`VUID-VkGraphicsPipelineCreateInfo-layout-07987`);
+/// `tests/particle_barrier_stream.rs` checks every `particle_draw*` module's push block against it.
+pub const PARTICLE_DRAW_PUSH_STAGES: u32 =
+    crate::ffi::VK_SHADER_STAGE_VERTEX_BIT | crate::ffi::VK_SHADER_STAGE_FRAGMENT_BIT;
 
 /// Particles P0: the `[numthreads(256,1,1)]` group edge of `particle_emit` and `particle_sim`
 /// (the research corpus's `THREADCOUNT_SIMULATION`).

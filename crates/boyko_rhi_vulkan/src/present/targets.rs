@@ -120,10 +120,11 @@ pub struct GBufferTargets {
     /// mask)` attribute, consumed by the deferred resolve (STORAGE, GENERAL — never sampled).
     /// RINGED (see [`Self::depth`]).
     pub(crate) material: [VulkanTexture; FRAMES_IN_FLIGHT],
-    /// The LIT storage image RING (R8G8B8A8): the deferred resolve's OUTPUT (STORAGE store);
-    /// also SAMPLED by the present-blit (pass C). The deferred split added it — the
-    /// present now samples THIS (not albedo). RINGED (see [`Self::depth`]); slot `i`'s
-    /// `present_set` @i binds `lit[i]`, so the present samples the slot the resolve just wrote.
+    /// The LIT storage image RING ([`LIT_FORMAT`], RGBA16F since render wave PX1a): the HDR scene
+    /// colour — every producer's pre-exposed SCENE-LINEAR radiance (the deferred resolve's STORAGE
+    /// store, Forward's colour attachment, the VB producers). `post_final` reads it (or its TAA /
+    /// SSAA successor) and writes the display-referred [`Self::display`]. RINGED (see
+    /// [`Self::depth`]).
     pub(crate) lit: [VulkanTexture; FRAMES_IN_FLIGHT],
     /// The Lighting-L0b `gViewT` lane RING (R32_SFLOAT STORAGE): the marcher stores the
     /// surface ray param `t`, the deferred resolve reads it (under `mask == 1`) to reconstruct
@@ -608,7 +609,7 @@ pub struct GBufferTargets {
     /// names, so frame 0's first derived barrier states a true `oldLayout`.
     pub(crate) display: VulkanTexture,
     /// Render wave PX1a (D-G1, D-G2): `lit_native` — the SSAA downsample's output in `lit`'s
-    /// format at the native `aa_extent`, `post_final`'s scene input under SSAA. SINGLE,
+    /// format ([`LIT_FORMAT`]) at the native `aa_extent`, `post_final`'s scene input under SSAA. SINGLE,
     /// `COLOR_ATTACHMENT | SAMPLED` (`| TRANSFER_SRC` under the image dump). `Some` iff SSAA is
     /// armed; boot-transitioned `UNDEFINED → GENERAL` (its seed's layout) in
     /// [`CoreImages::build`].
@@ -2285,12 +2286,23 @@ const GBUFFER_FORMAT: Format = Format::R8G8B8A8Unorm;
 /// Render wave PX1a (AD-1): the HDR scene colour's format — RGBA16F, PX0's decision
 /// (`docs/measurements/2026-10-16-px0-lit-format-decision.md`, row 2: AD-1's escape; the RTX 3060
 /// rounds `B10G11R11` toward zero on every path). The ONE Rust spelling: the device's REQUIRED
-/// format row, the `lit` ring and `lit_native` (created with it from the switch commit), and the
-/// lit attachments' pipeline state read it. Its twins are `shaders/lit_format.hlsli`'s
+/// format row, the `lit` ring and `lit_native`, and the lit attachments' pipeline state read it. Its twins are `shaders/lit_format.hlsli`'s
 /// `LIT_FORMAT_QUALIFIER` and `boyko_shaderdsl::post::LIT_STORAGE_FORMAT`;
 /// `tests/lit_format_census.rs` holds the three equal. Every format-dependent bound reads
 /// `goldens::LIT_ROUNDING`, selected from this constant.
 pub const LIT_FORMAT: Format = Format::R16G16B16A16Sfloat;
+
+/// Render wave PX1a (D-S3, AD-13; critique O2): the scene-linear BACKGROUND a pixel no producer
+/// covers holds — the Deferred no-SkyLight arm, Forward's sky without a SkyLight, Forward's
+/// `FORWARD_LIT_CLEAR` and VB's `VB_LIT_CLEAR` (invisible there: `vb_sky` paints every pixel, but
+/// one spelling, not four). Binary16-representable (so the RGBA16F store and clear are exact), and
+/// the value whose `post_final` display — `OETF(ACES_Hill(c))` — lands at the CENTRE of the 8-bit
+/// background the display-referred store wrote before PX1a: `(13, 13, 25)` on the blessing device
+/// (`|display · 255 − centre| ≤ 0.002` per channel), where the old `(0.05, 0.05, 0.1)` converted
+/// to 25 in blue (`0.1 · 255 = 25.5000004`, one of the two codes Vulkan's UNORM conversion allows).
+/// Its HLSL twin is `shaders/lit_format.hlsli`'s `LIT_BACKGROUND_SCENE`;
+/// `tests/hdr_fixtures.rs` (PX1a test 5) pins the value, its representability and the twin.
+pub const LIT_BACKGROUND_SCENE: [f32; 3] = [0.012_229_919, 0.011_886_597, 0.031_921_387];
 
 /// The SMAA `edges` target format: `R8G8_UNORM` (R = west/left edge, G = north/top edge) — a
 /// Vulkan MANDATORY format with guaranteed `COLOR_ATTACHMENT_BIT` + `SAMPLED_IMAGE_FILTER_LINEAR_BIT`
@@ -2991,8 +3003,9 @@ impl CoreImages {
         let material: [VulkanTexture; FRAMES_IN_FLIGHT] = material_slots
             .map(|s| s.expect("invariant: every material ring slot built before here"));
 
-        // LIT: the deferred resolve's STORAGE store output; also SAMPLED by the
-        // present-blit (pass C) and TRANSFER_SRC so an offscreen golden could read it back.
+        // LIT: the HDR scene colour in `LIT_FORMAT` (render wave PX1a) — the deferred resolve's
+        // STORAGE store output; also SAMPLED (TAA, SSAA, `post_final`) and TRANSFER_SRC so an
+        // offscreen golden could read it back.
         // Multi-paradigm render-path plan, rung R4b-b: ALSO `COLOR_ATTACHMENT` — Forward v1
         // reuses this SAME ring as `forward_opaque`'s color-attachment write target (Decision
         // 2's C5 per-path producer access, `ForwardTargets`'s doc: "full + additive
@@ -3003,9 +3016,10 @@ impl CoreImages {
         let mut lit_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for slot in lit_slots.iter_mut() {
-            match GBufferTargets::create_gbuffer_image(
+            match GBufferTargets::create_gbuffer_image_fmt(
                 ctx,
                 extent,
+                LIT_FORMAT,
                 ImageUsage::STORAGE
                     | ImageUsage::SAMPLED
                     | ImageUsage::TRANSFER_SRC
@@ -3105,9 +3119,10 @@ impl CoreImages {
             if !ssaa {
                 return Ok((display, None));
             }
-            match GBufferTargets::create_gbuffer_image(
+            match GBufferTargets::create_gbuffer_image_fmt(
                 ctx,
                 aa_extent,
+                LIT_FORMAT,
                 ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED | dump_transfer_src(dump_usage),
             ) {
                 Ok(native) => Ok((display, Some(native))),
@@ -7451,11 +7466,10 @@ impl GBufferTargets {
     }
 
     /// Anti-aliasing Stage 2 (W4 — Decision "left byte-for-byte untouched"): a
-    /// FORMAT-PARAMETERIZED sibling of [`Self::create_gbuffer_image`], used ONLY by
-    /// [`SmaaImages`] (the SMAA `edges`/`weights` targets need `R8G8_UNORM`/`R8G8B8A8_UNORM`
-    /// respectively — NOT the fixed [`GBUFFER_FORMAT`] `create_gbuffer_image` hardcodes). A
-    /// NEW standalone function, not a re-point of `create_gbuffer_image` — every existing
-    /// caller of `create_gbuffer_image` stays byte-for-byte unchanged.
+    /// FORMAT-PARAMETERIZED sibling of [`Self::create_gbuffer_image`], used by [`SmaaImages`]
+    /// (the SMAA `edges`/`weights` targets need `R8G8_UNORM`/`R8G8B8A8_UNORM` respectively —
+    /// NOT the fixed [`GBUFFER_FORMAT`] `create_gbuffer_image` hardcodes) and, since render wave
+    /// PX1a, by the `lit` ring and `lit_native` ([`LIT_FORMAT`]).
     fn create_gbuffer_image_fmt(
         ctx: &VulkanContext,
         extent: VkExtent2D,

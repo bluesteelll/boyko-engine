@@ -520,7 +520,7 @@ pub fn resolve_taa(cfg: &TaaConfig) -> ResolvedTaa {
         default_blend: cfg.default_blend,
         min_blend: cfg.min_blend,
         variance_gamma: cfg.variance_gamma,
-        _pad: 0.0,
+        pre_ratio_delta: 0.0,
         clamp_word: cfg.clamp.as_word(),
         clamp_space_word: cfg.clamp_space.as_word(),
         clip_word: cfg.clip.as_word(),
@@ -624,14 +624,14 @@ mod tests {
     /// `0` — a zeroed/never-resolved [`ResolvedTaa`] UBO must degrade to today's shipped
     /// behaviour, never a different clip/filter/blend arm (mirrors `CsmPcfKernel::Tent13 == 0`'s
     /// load-bearing discipline in `csm_config.rs`) — AND every scalar equals the shipped C1
-    /// tuning (`_pad`/`depth_tol` included, so nothing silently drifted).
+    /// tuning (`pre_ratio_delta`/`depth_tol` included, so nothing silently drifted).
     #[test]
     fn every_default_knob_resolves_to_mode_word_zero() {
         let resolved = resolve_taa(&TaaConfig::default());
         assert_eq!(resolved.default_blend, 0.1);
         assert_eq!(resolved.min_blend, 0.015);
         assert_eq!(resolved.variance_gamma, 1.0);
-        assert_eq!(resolved._pad, 0.0);
+        assert_eq!(resolved.pre_ratio_delta, 0.0);
         assert_eq!(resolved.clamp_word, 0);
         assert_eq!(resolved.clamp_space_word, 0);
         assert_eq!(resolved.clip_word, 0);
@@ -670,7 +670,7 @@ mod tests {
                 default_blend: 0.2,
                 min_blend: 0.03,
                 variance_gamma: 1.5,
-                _pad: 0.0,
+                pre_ratio_delta: 0.0,
                 clamp_word: ClampShape::MinMax.as_word(),
                 clamp_space_word: ClampSpace::YCoCg.as_word(),
                 clip_word: ClipMode::Clamp.as_word(),

@@ -47,12 +47,15 @@ use super::super::scene_types::{
 use super::super::targets::{ForwardTargets, GBufferTargets};
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
 
-/// The Forward `lit` clear color — byte-identical to `record_gbuffer`'s albedo clear
-/// (`gbuffer.rs`: `[0.05, 0.05, 0.1, 1.0]`, the marcher's `BACKGROUND` base,
-/// `sdf_gbuffer_composite.hlsl`). Forward v1 has no SDF leg (mesh-only), so this is purely a
-/// visual-parity choice — a mesh-only Deferred frame's uncovered pixels show the SAME
-/// background this constant reproduces.
-const FORWARD_LIT_CLEAR: [f32; 4] = [0.05, 0.05, 0.1, 1.0];
+/// The Forward `lit` clear color — the scene-linear background
+/// [`LIT_BACKGROUND_SCENE`](super::super::targets::LIT_BACKGROUND_SCENE) (render wave PX1a D-S3),
+/// the value the Deferred no-SkyLight arm and `forward_sky`'s fallback store, so an uncovered
+/// pixel shows the SAME background on every path after `post_final` (before PX1a this was the
+/// display-referred `[0.05, 0.05, 0.1]`, which `post_final` would tonemap to a different colour).
+const FORWARD_LIT_CLEAR: [f32; 4] = {
+    let c = super::super::targets::LIT_BACKGROUND_SCENE;
+    [c[0], c[1], c[2], 1.0]
+};
 
 /// The Forward reverse-Z depth CLEAR (Decision 4): `0.0` is the "nothing drawn yet" sentinel —
 /// farther than any real `depth ∈ (0, 1]` under `VK_COMPARE_OP_GREATER` (nearer fragment has

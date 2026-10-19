@@ -13,7 +13,7 @@ use super::super::gpu_zone::ZONE_POST_FINAL;
 use super::super::scene_types::GBufferScene;
 use super::super::targets::GBufferTargets;
 
-/// `post_final`'s `numthreads(8, 8, 1)` tile edge (the pass-through kernel shares it).
+/// `post_final`'s `numthreads(8, 8, 1)` tile edge (`post_final.comp.hlsl`).
 const POST_FINAL_TILE: u32 = 8;
 
 impl Renderer<'_> {

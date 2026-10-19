@@ -1227,16 +1227,12 @@ pub struct TaaActivation<'a> {
     /// from `gViewT`, never a `rayQuery` trace), mirroring [`AaActivation::pipeline`]'s
     /// always-built discipline.
     pub resolve_pipeline: &'a ComputePipeline,
-    /// The TAA resolve compute pipeline's bind-group LAYOUT — the DEDICATED 8-binding shape {
+    /// The TAA resolve compute pipeline's bind-group LAYOUT — the DEDICATED shape {
     /// `gLit` COMBINED_IMAGE_SAMPLER @0, `gViewT` STORAGE @1, `gHistIn` STORAGE @2, `gHistOut`
-    /// STORAGE @3, `gAaOut` STORAGE @4, the `ResolvedTaa` UBO @5, the camera UBO @6
-    /// (UNJITTERED — C1 cut), the `MotionCam` UBO @7 }. [`GBufferTargets`] writes a per-FIF
+    /// STORAGE @3, (no @4 since render wave PX1a: `gAaOut` retired), the `ResolvedTaa` UBO @5,
+    /// the camera UBO @6 (UNJITTERED — C1 cut), the `MotionCam` UBO @7 }. [`GBufferTargets`] writes a per-FIF
     /// `taa_resolve_set` against it once per extent (the SSAO `ssao_set` precedent).
     pub resolve_layout: &'a VulkanBindGroupLayout,
-    /// `[R8G8B8A8_UNORM]` — `aa_out`'s format, carried here (rather than hard-coded at the call
-    /// site) so a future format change has one source of truth, mirroring [`SmaaActivation`]'s
-    /// `color_formats`-shaped fields.
-    pub color_formats: &'a [Format],
     /// LINEAR/ClampToEdge sampler for the resolve's `lit` combined-image-sampler read (the same
     /// resolve→AA-input seam FXAA's `fxaa_set` binds `lit` through). DISTINCT boot object from
     /// [`AaActivation::sampler`]/[`SmaaActivation::sampler`].
@@ -1260,9 +1256,8 @@ pub struct TaaActivation<'a> {
 /// 3-binding layout `POST_FINAL_BINDINGS` prints: `gScene` @0 (`SAMPLED_IMAGE` recorded at
 /// `GENERAL` — the scene input, `taa_hist[fi]` under TAA, `lit_native` under SSAA, `lit[fi]`
 /// otherwise), `gDisplay` @1 (`STORAGE_IMAGE`, `display`), the `PostFinal` UBO @2. Built once in
-/// `GpuSceneBundles::boot`; the per-FIF UBO + set rings live in `GBufferTargets`. Until the
-/// switch commit the pipeline is the transitional pass-through kernel (`post_passthrough.comp`,
-/// D-S4: the same bindings, `display = gScene`); from it on, the generated `post_final.comp`.
+/// `GpuSceneBundles::boot`; the per-FIF UBO + set rings live in `GBufferTargets`. The module is
+/// the generated `post_final.comp` (`compute::post_final_spirv`).
 #[derive(Clone, Copy)]
 pub struct PostFinalActivation<'a> {
     /// The compute pipeline (`numthreads(8, 8, 1)`; a 4-byte push range the shader never reads).

@@ -7,9 +7,17 @@
 // # Additive is a PIPELINE state, not shader code
 //
 // The blend is `BlendState::ADDITIVE` on the pipeline (plan D7) with `depth_write = OFF` and
-// `depth_test = ON`, so opaque geometry still occludes. Additive is commutative and, under the
-// 8-bit saturation `lit` imposes, `sat(sat(x)+y) = min(1, x+y)` is order-independent -- which is
-// why P0 ships UNSORTED, provably (plan D10).
+// `depth_test = ON`, so opaque geometry still occludes. Additive is commutative, and since render
+// wave PX1a `lit` is RGBA16F with no saturation: a different draw order changes the sum only at
+// the rounding level, at most one binary16 ULP per add (the attachment's measured blend error,
+// `goldens::RGBA16F_ROUNDING`) -- which is why P0 ships UNSORTED (plan D10).
+//
+// # Pre-exposed like every `lit` producer (render wave PX1a E1)
+//
+// `lit` holds pre-exposed scene-linear radiance, so the particle's colour is multiplied by the
+// frame's pre-exposure (`pc.pre_exposure`, the push block's last word) before the blend, after the
+// texture modulate; alpha is untouched. Both blend classes then composite radiance in the scene's
+// own exposure.
 //
 // # Bindless, so ONE draw covers every effect
 //
@@ -64,9 +72,17 @@
 //
 //   Set 0 is the VERTEX half's (`p_render` @0, `Camera` @1) -- declared there, unread here.
 //
-// # Push constants
+// # Push constants (76 B, the SAME block the VS declares; the range is VERTEX | FRAGMENT)
 //
-//   NONE in this stage. The 72-byte range the VS declares is VERTEX-only.
+//   This stage reads only `pre_exposure` ([72,76)).
+
+struct ParticleDrawPush {
+    float4x4 view_proj;
+    uint     index_base;
+    int      index_step;
+    float    pre_exposure;
+};
+[[vk::push_constant]] ParticleDrawPush pc;
 
 [[vk::binding(0, 1)]] Texture2D gTextures[] : register(t0, space1);
 [[vk::binding(1, 1)]] SamplerState gTexSampler : register(s0, space1);
@@ -103,6 +119,7 @@ float4 main(VsOut input) : SV_Target {
     if (input.tex_index != 0u) {
         c = c * gTextures[NonUniformResourceIndex(input.tex_index)].Sample(gTexSampler, input.uv);
     }
+    c.rgb *= pc.pre_exposure;
 #ifdef DEPTH_LINEAR
     PsOut o;
     o.color = c;

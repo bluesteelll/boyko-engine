@@ -140,6 +140,34 @@ const SV0_DEFINE: &str = "VB_SV0_TERM=1";
 /// normalized text `git show <old rev>:<shader>` did. Nothing else about the revision matters.
 const PRE_DP6B_REV: &str = "c1caa422";
 
+/// The LATER rungs' declared edits to `vb_geo.comp.hlsl`'s flag-OFF program, each `(the
+/// pre-DP6b text, today's text, the rung and why)`. Applied to the `PRE_DP6B_REV` source before it
+/// is preprocessed, so the ADDITIVE side keeps measuring exactly DP6b's claim (the SV0 span adds
+/// nothing under the flag) while a rung that must change the base program says so HERE, by text,
+/// instead of re-pointing the revision (which would bless whatever else drifted with it).
+///
+/// Each row must match the pre-DP6b text exactly once and its replacement must appear in today's
+/// source exactly once; a stale row is RED, never skipped.
+const LATER_EDITS: &[(&str, &str, &str)] = &[(
+    "[[vk::image_format(\"rgba8\")]] RWTexture2D<float4> gLit : register(u6);",
+    "#include \"lit_format.hlsli\"\n[[vk::image_format(LIT_FORMAT_QUALIFIER)]] RWTexture2D<float4> gLit : register(u6);",
+    "render wave PX1a (the switch commit): `lit` is RGBA16F, and every `gLit` declaration names \
+     `lit_format.hlsli`'s `LIT_FORMAT_QUALIFIER` (`tests/lit_format_census.rs`) — this one is \
+     bound-but-unread, retyped so the bound view's format matches",
+)];
+
+/// `pre` with every [`LATER_EDITS`] row applied; panics on a stale row (see the table's doc).
+fn with_later_edits(pre: &str, cur: &str) -> String {
+    let cur = cur.replace("\r\n", "\n");
+    let mut out = pre.replace("\r\n", "\n");
+    for (old, new, why) in LATER_EDITS {
+        assert_eq!(out.matches(old).count(), 1, "stale LATER_EDITS row ({why}): the pre-DP6b text no longer holds it once");
+        assert_eq!(cur.matches(new).count(), 1, "stale LATER_EDITS row ({why}): today's source no longer holds its text once");
+        out = out.replacen(old, new, 1);
+    }
+    out
+}
+
 /// Locates the `dxc` executable: first the pinned Vulkan-SDK path (the repo's offline recipe), then
 /// `$VULKAN_SDK/Bin`, then `PATH`. Returns `None` if none resolve — the `cluster_cull_spv_sync.rs`
 /// idiom verbatim.
@@ -351,7 +379,7 @@ fn vb_geo_sv0_variant_is_additive_under_the_flag_and_non_empty_with_it() {
     let cur_src = std::fs::read_to_string(dir.join(VB_GEO_HLSL))
         .expect("invariant: vb_geo.comp.hlsl is the committed shader source");
 
-    let pre_path = materialize("vb_geo_preprocess_sync_pre.hlsl", &pre_src);
+    let pre_path = materialize("vb_geo_preprocess_sync_pre.hlsl", &with_later_edits(&pre_src, &cur_src));
     let cur_path = materialize("vb_geo_preprocess_sync_cur.hlsl", &cur_src);
 
     let pre = normalize_preprocessed(&preprocess(&dxc, &dir, &pre_path, &[], "vb_geo_pp_pre"));

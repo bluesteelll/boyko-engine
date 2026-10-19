@@ -2529,16 +2529,23 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                         0
                     };
 
-                    // The draw's 72-byte VERTEX push. Bytes [0,64) are the path's OWN
+                    // The draw's 76-byte VERTEX | FRAGMENT push. Bytes [0,64) are the path's OWN
                     // view-projection rows, taken from `mvp` rather than recomputed — the raster
                     // pass and the billboards must agree on the projection to the last bit, and
                     // two derivations of it would be two chances not to. `(index_base,
                     // index_step) == (0, +1)` is the P0 identity; rung P2's alpha class is the
-                    // only thing that ever makes them anything else.
+                    // only thing that ever makes them anything else. Bytes [72,76) are the
+                    // frame's pre-exposure the FS multiplies the particle colour by (render wave
+                    // PX1a E1: `lit` is pre-exposed scene-linear radiance). TRANSITIONAL source
+                    // until the `PostPlugin` commit (which reads `ResolvedPost::pre_exposure`):
+                    // `LightingConfig::exposure` through `try_resource`, 1.0 for a host composing
+                    // no lighting.
+                    let pre_exposure = world.try_resource::<LightingConfig>().map_or(1.0, |c| c.exposure);
                     let mut draw_push = [0u8; PARTICLE_DRAW_PUSH_BYTES as usize];
                     draw_push[..64].copy_from_slice(&mvp[..64]);
                     draw_push[64..68].copy_from_slice(&0u32.to_ne_bytes());
                     draw_push[68..72].copy_from_slice(&1i32.to_ne_bytes());
+                    draw_push[72..76].copy_from_slice(&pre_exposure.to_ne_bytes());
 
                     ParticleFrameInputs {
                         // The PARITY is the host's monotonic frame counter's low bit — the whole

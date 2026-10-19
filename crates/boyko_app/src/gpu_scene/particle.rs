@@ -661,10 +661,10 @@ impl ParticleGpuBundle {
             vertex_entry: c"main",
             fragment_module: &draw_fs,
             fragment_entry: c"main",
-            // Composited into `lit` (`R8G8B8A8_UNORM`), depth-tested against the path's
-            // own `D32_SFLOAT`. NO vertex layout: the four corners are generated from
-            // `SV_VertexID` and the six indices come from `quad_ib`.
-            color_formats: &[RASTER_COLOR_FORMAT],
+            // Composited into `lit` (`LIT_FORMAT`, the HDR scene colour since render wave PX1a),
+            // depth-tested against the path's own `D32_SFLOAT`. NO vertex layout: the four
+            // corners are generated from `SV_VertexID` and the six indices come from `quad_ib`.
+            color_formats: &[LIT_FORMAT],
             depth_format: Some(Format::D32Sfloat),
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: None,
@@ -1281,7 +1281,8 @@ pub(crate) fn particle_draw_spirv_for(deferred_path: bool) -> (&'static [u32], &
 /// view-projection rows, which BOTH classes must agree on to the last bit (they are one raster of
 /// one scene), and `[64,72)` carry the render-index affine the VS applies as
 /// `index_base + index_step * SV_InstanceID` — `(0, +1)` for additive and `(capacity - 1, -1)`
-/// here, the reverse walk of the far end the sim wrote this class into.
+/// here, the reverse walk of the far end the sim wrote this class into. `[72,76)`, the frame's
+/// pre-exposure (render wave PX1a E1), is the additive push's too.
 ///
 /// Derived rather than assembled: copying the matrix from the additive push makes the
 /// "one projection" property structural instead of a thing two call sites have to keep true.

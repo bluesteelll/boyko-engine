@@ -5,9 +5,10 @@
 //!
 //! One small scene per tail branch, each with a screen REGION where only that branch runs (the
 //! table in [`FIXTURES`]): a centre 32×32 on the object for a surface producer, the top-left 64×64
-//! for a background branch. Each region is read from the frame's `lit` image dump (RGBA8 at HEAD,
-//! `BOYKO_IMAGE_DUMP=lit`), or — for the SSAA box, whose output `aa_out` has no dump name — from
-//! the host dump BMP (`BOYKO_IMAGE_DUMP` and `BOYKO_HOST_DUMP` are exclusive).
+//! for a background branch. Each region is read from the frame's display-referred image dump —
+//! `lit` (RGBA8) before render wave PX1a, `display` since (`lit` is scene-linear RGBA16F there;
+//! `BOYKO_IMAGE_DUMP=lit,display`) — or, for the SSAA box, from the host dump BMP
+//! (`BOYKO_IMAGE_DUMP` and `BOYKO_HOST_DUMP` are exclusive).
 //!
 //! - **Constant branches** (`lit = base`, `BACKGROUND_BASE`, `FORWARD_LIT_CLEAR`): every texel of
 //!   the region is a UNORM conversion of the constant the spec permits — per channel one of the two

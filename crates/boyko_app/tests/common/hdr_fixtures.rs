@@ -1,5 +1,7 @@
 //! Render wave PX0 / PX1a — **the HDR branch fixtures, shared**: the fifteen PX0 branch fixtures
-//! (`FIXTURES`), their scene builder and worker body, and the capture of one fixture variant.
+//! (`FIXTURES`), their scene builder and worker body, and the capture of one fixture variant —
+//! its display-referred region ([`capture`]) or its scene-linear one ([`capture_scene`], PX1a
+//! test 11b).
 //! Extracted from `hdr_branch_fixtures.rs` (PX0's tests are the same tests, `px1a/cut.md` C4) so
 //! `px1a_hot_fixtures.rs` (PX1a tests 11b, 12, 15) drives the same scenes.
 //!
@@ -29,8 +31,11 @@ pub const WIN: u32 = 256;
 pub const SETTLE: u32 = 30;
 /// The hot radiance.
 pub const HOT_R: f32 = 2.0;
-/// The constant background every constant branch writes (`FORWARD_LIT_CLEAR`, `BACKGROUND_BASE`,
-/// the G-buffer albedo clear `lit = base` reads) — the same linear value on all three.
+/// The constant background every constant branch DISPLAYS — the display-referred value the three
+/// sites (`FORWARD_LIT_CLEAR`, `forward_sky`'s fallback, Deferred's no-SkyLight arm) stored before
+/// render wave PX1a. Since PX1a they store the scene-linear `LIT_BACKGROUND_SCENE`, whose
+/// `post_final` display is this value's 8-bit conversion (`boyko_rhi_vulkan/tests/hdr_fixtures.rs`,
+/// test 5), so the constant regions are read from `display`.
 pub const BACKGROUND: [f32; 3] = [0.05, 0.05, 0.1];
 
 // ===============================================================================================
@@ -240,10 +245,52 @@ pub fn fixture_worker_main(worker: &str) {
     assert!(frames > 0, "the frame loop never ran — RED, never a skip");
 }
 
-/// One fixture variant's capture: the region's texels and the receipt.
+/// One fixture variant's capture: the region's display-referred texels and the receipt.
 pub struct Capture {
     pub region: Vec<[u8; 3]>,
     pub receipt: Receipt,
+}
+
+/// One fixture variant's SCENE-LINEAR capture (render wave PX1a test 11b): the region's texels of
+/// the scene input `post_final` reads — `lit`, or `lit_native` under SSAA — and the receipt.
+pub struct SceneCapture {
+    pub region: Vec<[f32; 4]>,
+    pub receipt: Receipt,
+}
+
+/// The `(x, y)` of every texel of `f`'s region, row-major.
+fn region_texels(f: &Fixture) -> Vec<(u32, u32)> {
+    let (x0, y0, w, h) = f.region.rect();
+    (y0..y0 + h).flat_map(|y| (x0..x0 + w).map(move |x| (x, y))).collect()
+}
+
+/// Captures `f`'s scene input over its region: `BOYKO_IMAGE_DUMP=lit` (`lit_native` under SSAA,
+/// whose region is in native pixels — the window's), decoded to `f32` through `pixfmt`.
+pub fn capture_scene(worker: &str, f: &Fixture, hot: bool) -> SceneCapture {
+    let tag = format!("{}{}", f.name, if hot { "_hot" } else { "" });
+    let dir = fresh_out(&format!("px1a_scene_{tag}"));
+    std::fs::create_dir_all(&dir).expect("invariant: the temp dir accepts a subdirectory");
+    let receipt = dir.join("receipt.toml");
+    let scene = if f.ssaa { "lit_native" } else { "lit" };
+    let mut env = vec![
+        (ENV_FIXTURE, format!("{}{}", f.name, if hot { ":hot" } else { "" })),
+        ("BOYKO_GRAPH_RECEIPT", receipt.display().to_string()),
+        ("BOYKO_GRAPH_RECEIPT_SETTLE", SETTLE.to_string()),
+        ("BOYKO_WINDOW_FRAMES", (SETTLE + 40).to_string()),
+        ("BOYKO_IMAGE_DUMP", scene.to_owned()),
+        ("BOYKO_IMAGE_DUMP_PATH", dir.display().to_string()),
+        ("BOYKO_IMAGE_DUMP_SETTLE", SETTLE.to_string()),
+    ];
+    if f.classified {
+        env.push(("BOYKO_VB_FORCE_CLASSIFIED", "1".to_owned()));
+    }
+    run_worker(worker, &env, false);
+    let files = files_of(&dir, scene);
+    assert_eq!(files.len(), 1, "{tag}: one `{scene}` capture expected: {files:?}");
+    let d = DumpFile::load(&files[0].1);
+    assert_eq!((d.width, d.height), (WIN, WIN), "{tag}: `{scene}` is not at the window's extent");
+    let region = region_texels(f).into_iter().map(|(x, y)| d.texel_f32(x, y)).collect();
+    SceneCapture { region, receipt: Receipt::load(&receipt) }
 }
 
 pub fn capture(worker: &str, f: &Fixture, hot: bool, keep_in: Option<&Path>) -> Capture {
@@ -261,7 +308,9 @@ pub fn capture(worker: &str, f: &Fixture, hot: bool, keep_in: Option<&Path>) -> 
     if f.ssaa {
         env.push(("BOYKO_HOST_DUMP", bmp.display().to_string()));
     } else {
-        env.push(("BOYKO_IMAGE_DUMP", "lit".to_owned()));
+        // `display` is the display-referred image (`lit` is scene-linear since render wave PX1a);
+        // `lit` rides along for a `keep_in` copy.
+        env.push(("BOYKO_IMAGE_DUMP", "lit,display".to_owned()));
         env.push(("BOYKO_IMAGE_DUMP_PATH", dir.display().to_string()));
         env.push(("BOYKO_IMAGE_DUMP_SETTLE", SETTLE.to_string()));
     }
@@ -269,16 +318,15 @@ pub fn capture(worker: &str, f: &Fixture, hot: bool, keep_in: Option<&Path>) -> 
         env.push(("BOYKO_VB_FORCE_CLASSIFIED", "1".to_owned()));
     }
     run_worker(worker, &env, false);
-    let (x0, y0, w, h) = f.region.rect();
     let region = if f.ssaa {
         let px = read_bmp_rgb(&bmp);
-        (y0..y0 + h).flat_map(|y| (x0..x0 + w).map(move |x| (x, y))).map(|(x, y)| px[(y * WIN + x) as usize]).collect()
+        region_texels(f).into_iter().map(|(x, y)| px[(y * WIN + x) as usize]).collect()
     } else {
-        let files = files_of(&dir, "lit");
-        assert_eq!(files.len(), 1, "{tag}: one `lit` capture expected: {files:?}");
+        let files = files_of(&dir, "display");
+        assert_eq!(files.len(), 1, "{tag}: one `display` capture expected: {files:?}");
         let d = DumpFile::load(&files[0].1);
-        (y0..y0 + h)
-            .flat_map(|y| (x0..x0 + w).map(move |x| (x, y)))
+        region_texels(f)
+            .into_iter()
             .map(|(x, y)| {
                 let t = d.rgba8(x, y);
                 [t[0], t[1], t[2]]
@@ -290,6 +338,9 @@ pub fn capture(worker: &str, f: &Fixture, hot: bool, keep_in: Option<&Path>) -> 
         let _ = std::fs::copy(&receipt, keep.join(format!("fixture_{tag}.toml")));
         for (_, p) in files_of(&dir, "lit") {
             let _ = std::fs::copy(&p, keep.join(format!("fixture_{tag}_lit.bin")));
+        }
+        for (_, p) in files_of(&dir, "display") {
+            let _ = std::fs::copy(&p, keep.join(format!("fixture_{tag}_display.bin")));
         }
         if f.ssaa {
             let _ = std::fs::copy(&bmp, keep.join(format!("fixture_{tag}.bmp")));

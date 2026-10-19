@@ -50,8 +50,8 @@ fn collect_lights_and_resolve_taa_policy_read_this_frames_resolved_post() {
         let staged = app.world().resource::<LightTableStaging>().bytes();
         let word1 = f32::from_le_bytes(staged[4..8].try_into().expect("invariant: the header's word 1"));
         assert_eq!(word1, exposure, "frame {k}: collect_lights packed last frame's pre-exposure");
-        // `ResolvedTaa`'s offset-12 word: `_pad` until the switch commit names it `pre_ratio_delta`.
-        let delta = app.world().resource::<ResolvedTaa>()._pad;
+        // `ResolvedTaa`'s offset-12 word (named `pre_ratio_delta` at the switch commit).
+        let delta = app.world().resource::<ResolvedTaa>().pre_ratio_delta;
         assert_eq!(delta, exposure / before - 1.0, "frame {k}: resolve_taa_policy read last frame's ratio");
     }
 }
