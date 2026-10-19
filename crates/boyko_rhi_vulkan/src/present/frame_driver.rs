@@ -910,15 +910,17 @@ impl<'ctx> Renderer<'ctx> {
     /// dispatched at (the clamped swapchain extent the caller sized `frame`'s targets
     /// + `scene.camera_uniform` + `scene.dispatch_group_count_x` to).
     ///
-    /// `aa_extent` is the BOOT-FIXED native extent (`host.native_extent`, NOT the live
-    /// `width`/`height` — which track window resizes while the swapchain-only resize contract
-    /// leaves these targets fixed, exactly like `present_extent` already stays fixed under a
-    /// resize). Since render wave PX1a it is read on EVERY frame of every path: `display` (and
-    /// `aa_out`, `lit_native`, `taa_hist`) is allocated at it, and every recorder dispatches
-    /// `post_final` and copies a `display` dump over it. It differs from `present_extent` (the
-    /// 2x composite) whenever the host armed SSAA at boot — on Deferred / VB under
-    /// `scene.ssaa`, and on Forward / ForwardPlus too, which degrade the SSAA pass but not the
-    /// boot-fixed composite (review r1 W2); otherwise the two are equal.
+    /// `aa_extent` is the BOOT-FIXED extent `display` is allocated at (`WindowHost::display_extent`,
+    /// NOT the live `width`/`height` — which track window resizes while the swapchain-only resize
+    /// contract leaves these targets fixed, exactly like `present_extent` already stays fixed
+    /// under a resize). Since render wave PX1a it is read on EVERY frame of every path: `display`
+    /// (and `aa_out`, `lit_native`, `taa_hist`) is allocated at it, and every recorder dispatches
+    /// `post_final` and copies a `display` dump over it. It is the native extent, below
+    /// `present_extent` (the 2x composite), exactly on a frame that runs the SSAA downsample
+    /// (`scene.ssaa`: Deferred / VB under a boot-armed SSAA), and equals `present_extent` on every
+    /// other frame: `post_final` reads `lit` texel for texel, so on Forward / ForwardPlus, which
+    /// degrade the SSAA pass but keep the boot-fixed composite, a native `display` held the
+    /// scene's top-left quarter (review r2 R2-W1; `GBufferTargets::create` asserts the rule).
     ///
     /// `token` is this frame's [`FrameWriteToken`] (minted by
     /// [`wait_frame_in_flight`](Self::wait_frame_in_flight)), consumed BY VALUE:
@@ -1028,10 +1030,10 @@ impl<'ctx> Renderer<'ctx> {
                 // written ONCE per composite extent.
                 |_this, frame| {
                     // `display` / `aa_out` / `lit_native` / `taa_hist` are sized to the
-                    // caller-supplied `aa_extent` (BOOT-FIXED native, not `present_extent` — the
-                    // 2× composite whenever the host armed SSAA at boot, Forward included) — see
-                    // `GBufferTargets::sync_gbuffer`'s doc. Without a boot-armed SSAA,
-                    // `aa_extent == present_extent`.
+                    // caller-supplied `aa_extent` (BOOT-FIXED: native on a frame that runs the
+                    // SSAA downsample, where `present_extent` is the 2× composite, and
+                    // `== present_extent` on every other frame) — see
+                    // `GBufferTargets::sync_gbuffer`'s doc.
                     // Multi-paradigm render-path plan, rung R2: `TargetsProfile::from_scene`
                     // derives the (today: always-`DeferredFull`) profile the R3+ path-conditional
                     // allocation seam threads through.

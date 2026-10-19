@@ -1132,6 +1132,14 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         width: cw,
         height: ch,
     };
+    // Render wave PX1a (D-G1; review r2 R2-W1): the extent `display` is allocated at, boot-fixed —
+    // the renderer's `aa_extent` and the `post_final` UBO's extent, from ONE derivation so the two
+    // cannot disagree (`WindowHost::display_extent`).
+    let (dw, dh) = host.display_extent();
+    let aa_extent = VkExtent2D {
+        width: dw,
+        height: dh,
+    };
     // The env-gated frame dump (`BOYKO_HOST_DUMP` — the host's diagnostic /
     // owner-eval channel, see `host_dump`). `None` on the steady path.
     let mut dump = crate::host_dump::HostDump::from_env(host.swapchain.format());
@@ -2309,9 +2317,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             //          (the ring seed of a (re)built target set, the receipt's `post_word*`),
             //          from this frame's `ResolvedPost` (read once above): its tonemapper,
             //          exposure ratio 1.0 (the producers baked the pre-exposure into `lit`), the
-            //          extent `display` is allocated at (`aa_extent`, the boot-fixed native extent).
+            //          extent `display` is allocated at (`aa_extent`: native under SSAA, the
+            //          composite otherwise — `WindowHost::display_extent`).
             let post_final_gpu =
-                crate::post_host::post_final_gpu(&post, [host.native_extent.0, host.native_extent.1]);
+                crate::post_host::post_final_gpu(&post, [aa_extent.width, aa_extent.height]);
             if let Some(post_final_slot) = host.frame.post_final_ubo_slot(s) {
                 // SAFETY: `post_final_slot` is the renderer's `post_final.ubo[s]` — a live
                 // host-coherent `POST_FINAL_UBO_BYTES` (32 B, the bytes written) UNIFORM buffer
@@ -3042,9 +3051,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // `host.gpu` / the World's `Assets<MeshGpu>` / `MaterialTable`, all
             // outliving the call); `present_extent` == the composite extent the camera
             // push `count`, `dispatch_group_count_x`, and the G-buffer targets
-            // are sized to (all boot-fixed, plan D7); `aa_extent` == `host.native_extent`
-            // (boot-fixed, SSAA's `aa_out` size — see `render_gbuffer_frame`'s doc: it
-            // MUST stay boot-fixed, not the live window size, for the same resize-
+            // are sized to (all boot-fixed, plan D7); `aa_extent` == `host.display_extent()`
+            // (boot-fixed: `display`'s extent, native only on a frame that runs the SSAA
+            // downsample and `present_extent` on every other — see `render_gbuffer_frame`'s doc:
+            // it MUST stay boot-fixed, not the live window size, for the same resize-
             // invariance `present_extent` already has); a `Some(readback)` is the dump's
             // host-visible staging, sized to the current swapchain extent by
             // `HostDump::request` (`None` on the steady path); a `Some(vb_id_readback)` is the
@@ -3057,10 +3067,6 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // references it — `Schedule::request_slot` asserts it); the slot is read and reused
             // only after `DRAIN_FRAMES > FRAMES_IN_FLIGHT` presented frames, past this frame's
             // fence, and an unpresented frame (`Ok(false)`) passed `recreate`'s device-idle wait.
-            let aa_extent = VkExtent2D {
-                width: host.native_extent.0,
-                height: host.native_extent.1,
-            };
             // OBS (D): this frame's image-dump request — `Some` only on a capture frame of an
             // armed run — handed to the renderer for the render call below, which consumes it.
             if let Some(request) = image_dump.as_mut().and_then(|d| d.request(ctx, present_extent)) {

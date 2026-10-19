@@ -79,9 +79,10 @@ impl Renderer<'_> {
     /// presented this frame; `scene`'s pipelines/buffers/samplers are live on this device;
     /// `targets`/`forward` were synced to `present_extent` (the SAME contract
     /// [`record_gbuffer`](super::gbuffer)'s doc states, restricted to Forward's own images/sets)
-    /// and `aa_extent` — the BOOT-FIXED native extent `display` was allocated at, which is NOT
-    /// `present_extent` when the host armed SSAA's 2x composite at boot (Forward degrades the SSAA
-    /// pass but not the composite; review r1 W2).
+    /// and `aa_extent` — the BOOT-FIXED extent `display` was allocated at. Forward runs no SSAA
+    /// downsample, so it equals `present_extent` (the host keeps `display` at the composite on a
+    /// path that degrades a boot-armed SSAA, review r2 R2-W1; `GBufferTargets::create` asserts it);
+    /// the dispatch and the dump still name `display`'s own extent (review r1 W2).
     /// `extent` is the swapchain extent and governs ONLY the present-blit's clear render-area and
     /// the readback region; a `Some(readback)` buffer is host-visible and ≥ the swapchain image's
     /// (`extent`-sized) byte size. A pending image-dump request on `self` meets the image-dump
@@ -1273,8 +1274,9 @@ impl Renderer<'_> {
         // SAFETY: recording is open, outside any rendering scope; `post_final`'s derived barriers
         // were just emitted through the Forward sink; `targets` were created for `scene`;
         // `display` was allocated at `aa_extent` (`GBufferTargets::create`), the extent the
-        // dispatch covers — NOT `present_extent`, which is the 2x composite under a boot-armed
-        // SSAA that Forward degrades (review r1 W2).
+        // dispatch covers (review r1 W2); with no SSAA downsample on this path it is also
+        // `present_extent`, the extent of the `lit` the dispatch reads texel for texel, so
+        // `display` holds the whole scene (review r2 R2-W1).
         unsafe { self.record_post_final(cmd, targets, scene, aa_extent, fi) };
         self.record_forward_pass(plan.present_sample, cmd, targets, forward, scene, fi);
 
@@ -1395,7 +1397,7 @@ impl Renderer<'_> {
             // derived barriers, so each declared source is in its `plan.layouts` layout; the depth
             // and `lit` sources are THIS slot's ring images at `present_extent` with `TRANSFER_SRC`
             // usage unconditionally (`ForwardTargets::build`'s depth, the `lit` ring), `display`
-            // is the single image at `aa_extent` (the native extent, not the boot-SSAA composite) with
+            // is the single image at `aa_extent` (its allocation extent, `present_extent` on this path) with
             // `TRANSFER_SRC` because the dump was armed at boot (`dump_usage`); the requested
             // staging meets the image-dump clause of this fn's `# Safety`.
             unsafe { self.record_image_dump_copies(cmd, dump, &sources, scene.engine_frame_index) };

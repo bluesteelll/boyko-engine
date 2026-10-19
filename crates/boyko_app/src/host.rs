@@ -329,6 +329,26 @@ impl WindowHost {
             window,
         })
     }
+
+    /// Render wave PX1a (D-G1; review r2 R2-W1): the extent `display` is allocated at and
+    /// `post_final` dispatches over — the renderer's `aa_extent`, and the extent the `post_final`
+    /// UBO carries. Boot-fixed, like both extents it picks between.
+    ///
+    /// [`Self::native_extent`] only when the frame runs the SSAA downsample: the boot armed the
+    /// composite AND the resolved path records the post-process AA seam
+    /// (`ResolvedRenderPath::post_process_aa_supported`, the predicate `GpuSceneBundles::scene`
+    /// degrades `AaMode::Ssaa` on). Otherwise [`Self::composite_extent`]: `post_final` reads `lit`
+    /// texel for texel, so a native `display` on a path that degrades the boot SSAA (Forward /
+    /// ForwardPlus) held only the 2x scene's top-left quarter. At the composite it holds the whole
+    /// scene, and the present blit minifies it into the native window, as it minified `lit` before
+    /// PX1a.
+    pub(crate) fn display_extent(&self) -> (u32, u32) {
+        if self.ssaa_armed && self.resolved_render_path.post_process_aa_supported() {
+            self.native_extent
+        } else {
+            self.composite_extent
+        }
+    }
 }
 
 /// SSAA: the admitted render scales, per axis. The boot arming probe

@@ -604,8 +604,9 @@ pub struct GBufferTargets {
     /// image every later pass reads (the present blit, CAS, FXAA, SMAA). SINGLE (one image both
     /// frames in flight share, ordered by its frame-graph seed), `R8G8B8A8_UNORM`
     /// ([`GBUFFER_FORMAT`]), `STORAGE | SAMPLED` (`| TRANSFER_SRC` under the image dump), sized
-    /// at `aa_extent` (the native extent under SSAA, the composite otherwise). Boot-transitioned
-    /// `UNDEFINED → SHADER_READ_ONLY_OPTIMAL` in [`CoreImages::build`] — the layout its seed
+    /// at `aa_extent` (the native extent under SSAA — `scene.ssaa`, the frames that run the
+    /// downsample — and the composite otherwise, Forward under a boot-armed SSAA included).
+    /// Boot-transitioned `UNDEFINED → SHADER_READ_ONLY_OPTIMAL` in [`CoreImages::build`] — the layout its seed
     /// names, so frame 0's first derived barrier states a true `oldLayout`.
     pub(crate) display: VulkanTexture,
     /// Render wave PX1a (D-G1, D-G2): `lit_native` — the SSAA downsample's output in `lit`'s
@@ -8795,11 +8796,19 @@ impl GBufferTargets {
             "invariant: aa_imgs must arm/disarm in lockstep with (scene.aa || scene.smaa || scene.rcas)"
         );
         // SSAA-armed only: `lit_native` (the downsample's output and `post_final`'s input) exists
-        // at the native `aa_extent` — the crux invariant that keeps the present-blit's 1:1 crop
-        // of `display` from sampling a 2× (top-left-quarter-cropped) image.
+        // at the native `aa_extent`, so `post_final` reads a scene input at `display`'s extent.
         debug_assert!(
             scene.ssaa.is_none() || core.lit_native.is_some(),
             "invariant: scene.ssaa armed implies lit_native is built at aa_extent"
+        );
+        // Review r2 R2-W1: without the downsample `post_final` reads `lit` (or the TAA history)
+        // texel for texel over `display`'s extent, so `display` must be at `lit`'s. A native
+        // `display` beside a 2x `lit` (Forward under a boot-armed SSAA, which degrades the SSAA
+        // pass but keeps the composite) held the scene's top-left quarter. The host sizes
+        // `aa_extent` by the same rule (`WindowHost::display_extent`).
+        debug_assert!(
+            scene.ssaa.is_some() || (aa_extent.width == extent.width && aa_extent.height == extent.height),
+            "invariant: aa_extent equals the composite extent on a frame without the SSAA downsample"
         );
 
         // Anti-aliasing Stage 2: the SMAA `edges`/`weights` image rings, built ONLY when
@@ -9807,8 +9816,10 @@ impl GBufferTargets {
     /// vocabulary + present descriptor sets are re-written here — and ONLY here — so the
     /// per-frame recorder records no `vkUpdateDescriptorSets`.
     ///
-    /// `aa_extent` is the `aa_out` size — NATIVE under SSAA (`extent`, i.e. `present_extent`,
-    /// is 2× there), `== extent` for Off/Fxaa/Smaa. The resync predicate compares only
+    /// `aa_extent` is the size of `display` and the AA images — NATIVE under SSAA (`scene.ssaa`;
+    /// `extent`, i.e. `present_extent`, is 2× there), `== extent` on every other frame, a path
+    /// that degrades a boot-armed SSAA included ([`Self::create`] asserts it; review r2 R2-W1).
+    /// The resync predicate compares only
     /// `extent`/`aa_arm` (NOT a separate `aa_extent` compare): `aa_arm` already flips on every
     /// Off↔Ssaa transition (`AaArm::from_scene`), and both extents are boot-fixed together, so
     /// `aa_extent` cannot change without `aa_arm` changing too — a redundant size-compare would
