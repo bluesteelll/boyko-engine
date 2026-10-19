@@ -165,8 +165,14 @@
 //! equal to the recomputed slots, pairs, manifolds, points and C. C is recomputed by
 //! [`expected_np_chunks`], this runner's copy of the narrowphase's chunk rule, from the exported
 //! `NP_*` constants, the step's pair count, `--workers` and `parallel_narrowphase` — the lanes
-//! term included (lever ruling W1), so a narrowphase that dispatched on one worker voids the row. A step that differs is VOID: the CSV marks it, the summary names the first
-//! one, and the process exits 3. On the reference solver every in-solve zone must read zero.
+//! term included (lever ruling W1), so a narrowphase that dispatched on one worker voids the row.
+//! On a tree-path step (`Tree` above `brute_max_rows`) the tree's four spans open once each and
+//! its membership counters read `phys_bp_queried = N − m` and `phys_bp_members = m`, the values at
+//! their emission: [`expected_bp_counters`] takes `m` as the membership read after the step plus,
+//! on a `Sets` step, the sleeper rows L10's T4 released after the counters
+//! (`SleepSkipStats::released_rows`; a kick or a projectile that wakes a held pile releases them),
+//! and an `m` above N voids the step (PHYS-TOOL-1, ruling 64 (4)). A step that differs is VOID:
+//! the CSV marks it, the summary names the first one, and the process exits 3. On the reference solver every in-solve zone must read zero.
 //! A disarmed run must push nothing at all into any lane (the ring traffic over every lane and both
 //! regions is compared before and after), or it too is void.
 //!
@@ -373,7 +379,12 @@
 //!   summary's `config` carries `tree_brute_max_rows`, and `broadphase_tree` carries the tree
 //!   broadphase's cumulative `TreeDiag` after the last step (all zero unless the kind is `Tree`):
 //!   on J and R a `Tree` row reads `static_rebuilds 1`, `members 1`, `evictions 0`, and
-//!   `sleeper_rebuilds 0` (the structural receipts of gates G2 and G5).
+//!   `sleeper_rebuilds 0` (the structural receipts of gates G2 and G5). With L10's sleep sets
+//!   wired the readable lines include `sleep-skip (L10 C3b)`, `tree seam (L10 C3c)` and
+//!   `tree release (L10 T4): <n> steps released <r> sleeper rows after the broadphase's counters,
+//!   first at step <s> (<r0> rows)` (`none (0 rows)` without a release; `<s>` counts from 0, as
+//!   the VOID line does; `Sets` rows only): the counter oracle's `released` term (module docs,
+//!   "Per-step anti-vacuity"), stdout only, so no summary or CSV byte moves (PHYS-TOOL-1).
 //! * `--csv`: one row per step. Always `step, wall_ns, manifolds, pairs, top_y, awake`; armed also
 //!   `void, colors, wide_colors, waves, g_ns, u_ns, r_ns, sys_sum_ns, disp_lane, worker_lane_max`
 //!   and, per system and per physics zone, `<name>_ns` and `<name>_n` (counters: `<name>` is the
@@ -1629,6 +1640,10 @@ struct Shape {
     rows: u64,
     /// The tree broadphase's `|S| + |Z|` after the step.
     bp_members: u64,
+    /// Rows L10's T4 released from the tree's sleeper set this step, after the tree emitted its
+    /// counters (`SleepSkipStats::released_rows`); read by [`expected_bp_counters`] on `Sets`
+    /// steps only.
+    bp_released: u64,
     /// Its admissions and compactions this step.
     bp_rebuilds: u64,
     /// Whether it classed a Wide or Excluded row this step (never, on these scenes).
@@ -1697,6 +1712,7 @@ fn step_shape(
         points: manifolds.iter().map(|m| u64::from(m.count)).sum(),
         rows: world.resource::<SolverScratch>().bodies_len() as u64,
         bp_members: bp.members,
+        bp_released: u64::from(sleep_stats.released_rows),
         bp_rebuilds: (bp.static_rebuilds + bp.sleeper_rebuilds)
             - (bp_prev.static_rebuilds + bp_prev.sleeper_rebuilds),
         bp_kinds_moved: bp.wide_rows != bp_prev.wide_rows || bp.excluded_rows != bp_prev.excluded_rows,
@@ -2034,6 +2050,36 @@ impl S5Receipt {
     }
 }
 
+/// The tree broadphase's membership counters on a tree-path step, `(phys_bp_queried,
+/// phys_bp_members)`, from the step's `rows` and the membership read after the step.
+///
+/// The tree emits both at the end of its query and assembly, where every row is queried or a
+/// member (`q + m == N`: these scenes have no Wide or Excluded row). On a `Sets` step, L10's
+/// epilogue then runs inside the same broadphase system and T4 releases the rows it restored from
+/// the sleeper set (`members[Z] -= released`): the membership read after the step is the
+/// counters' `m` less `released`. Off `Sets` nothing leaves after the counters, and `released` is
+/// not read. `None` when the members exceed the rows, which the caller voids on a tree-path step
+/// (never a wrap).
+const fn expected_bp_counters(
+    rows: u64,
+    members_after: u64,
+    released: u64,
+    sets: bool,
+) -> Option<(u64, u64)> {
+    let members = if sets {
+        match members_after.checked_add(released) {
+            Some(m) => m,
+            None => return None,
+        }
+    } else {
+        members_after
+    };
+    match rows.checked_sub(members) {
+        Some(queried) => Some((queried, members)),
+        None => None,
+    }
+}
+
 /// Checks one armed step's per-zone sample counts and counter values against `shape`. Returns
 /// the first mismatch.
 fn check_step(
@@ -2142,8 +2188,22 @@ fn check_step(
     let threads = lanes as u64 + 1;
     let [h0, h1, h2, h3, h4] = shape.hist_colors;
     let [s0, s1, s2, s3, s4] = shape.hist_slots;
-    // On a tree-path step every row is queried or a member (`q + m == N`: these scenes have no
-    // Wide or Excluded row), so the queried value is `N − members`.
+    // On a tree-path step every row is queried or a member when the tree emits its counters
+    // (`q + m == N`: these scenes have no Wide or Excluded row). On a `Sets` step L10's T4 then
+    // releases the rows the epilogue restored, after the counters and before this runner reads
+    // the membership, so `m` = the members after the step + the released rows (PHYS-TOOL-1).
+    let (bp_queried, bp_members) =
+        match expected_bp_counters(shape.rows, shape.bp_members, shape.bp_released, sets) {
+            Some(qm) => qm,
+            None if tree_path => {
+                return Err(format!(
+                    "the tree's {} members after the step and {} released rows exceed the step's {} rows",
+                    shape.bp_members, shape.bp_released, shape.rows
+                ));
+            }
+            // Off the tree path both counters' expected samples are 0: their value is not read.
+            None => (0, 0),
+        };
     let expected_counters: [(&ZoneHandle, u64, Want); COUNTER_ZONE_COUNT] = [
         (&PHYS_SLOTS_WIDE, c, Want::Exact(shape.wide_slots)),
         (&PHYS_SLOTS_NARROW, c, Want::Exact(shape.narrow_slots)),
@@ -2152,8 +2212,8 @@ fn check_step(
         (&PHYS_NP_POINTS, 1, Want::Exact(shape.points)),
         (&PHYS_BP_PAIRS, 1, Want::Exact(shape.pairs)),
         (&PHYS_NP_CHUNKS, 1, Want::Exact(np_chunks)),
-        (&PHYS_BP_QUERIED, tp, Want::Exact(shape.rows - shape.bp_members)),
-        (&PHYS_BP_MEMBERS, tp, Want::Exact(shape.bp_members)),
+        (&PHYS_BP_QUERIED, tp, Want::Exact(bp_queried)),
+        (&PHYS_BP_MEMBERS, tp, Want::Exact(bp_members)),
         (&PHYS_BP_REBUILDS, tp, Want::Exact(shape.bp_rebuilds)),
         (&PHYS_NP_REUSED, 1, Want::Exact(cl.reused)),
         (&PHYS_NP_SEP_HITS, 1, Want::Exact(cl.sep_hits)),
@@ -2815,6 +2875,10 @@ fn run(args: &Args) -> ExitCode {
     // L10 C3c: the tree seam's witness (untimed): steps with a withheld pair, the most pairs
     // withheld, and the first step with every dynamic row held.
     let (mut withheld_steps, mut withheld_max, mut first_all_held) = (0u64, 0u32, None::<usize>);
+    // L10 T4 on `Sets` rows (untimed): steps on which the tree released sleeper rows after its
+    // counters, the rows released, and the first such step with its rows — the counter oracle's
+    // `released` term (`expected_bp_counters`, PHYS-TOOL-1).
+    let (mut release_steps, mut released_total, mut first_release) = (0u64, 0u64, None::<(usize, u32)>);
     // L9: the pair classes, per step. Read on every row whose EFFECTIVE config has reuse on, since
     // the void probe after the run reads them there whether or not the row named the flag, and on
     // every row that names `--contact-reuse` (the summary's `pair_classes`). A reuse-off row that
@@ -2898,6 +2962,11 @@ fn run(args: &Args) -> ExitCode {
             withheld_max = withheld_max.max(stats.withheld_pairs);
             if first_all_held.is_none() && held as usize == rig.boxes.len() {
                 first_all_held = Some(step + 1);
+            }
+            if structure.sets && stats.released_rows > 0 {
+                release_steps += 1;
+                released_total += u64::from(stats.released_rows);
+                first_release.get_or_insert((step, stats.released_rows));
             }
         }
         if read_classes {
@@ -3306,6 +3375,11 @@ fn run(args: &Args) -> ExitCode {
              sleepers at the end {}",
             rig.world.resource::<BroadphaseTree>().sleeper_members()
         );
+        println!(
+            "tree release (L10 T4): {release_steps} steps released {released_total} sleeper rows after \
+             the broadphase's counters, first at step {}",
+            first_release.map_or_else(|| "none (0 rows)".to_owned(), |(s, r)| format!("{s} ({r} rows)"))
+        );
     }
     if args.bp_kernel.is_some() {
         println!(
@@ -3480,10 +3554,67 @@ fn csv_text(
 
 #[cfg(test)]
 mod tests {
-    /// The no-`--scene` path, run by `cargo test` (libtest's harness since IB P0r). One test: the
-    /// profiler binds one world per process.
+    use super::expected_bp_counters;
+
+    /// The no-`--scene` path, run by `cargo test` (libtest's harness since IB P0r). The one test
+    /// that builds a world: the profiler binds one world per process.
     #[test]
     fn self_check() {
         assert!(super::self_check() == std::process::ExitCode::SUCCESS);
+    }
+
+    /// No release: the membership after the step is the counters' (the pre-PHYS-TOOL-1 formula),
+    /// on `Sets` rows and off them.
+    #[test]
+    fn bp_counters_without_a_release_are_n_minus_members() {
+        assert_eq!(expected_bp_counters(1241, 1, 0, true), Some((1240, 1)));
+        assert_eq!(expected_bp_counters(1241, 1, 0, false), Some((1240, 1)));
+        assert_eq!(expected_bp_counters(1241, 1241, 0, true), Some((0, 1241)));
+    }
+
+    /// The trunk's V2 parent voids, as recorded by B0c (D:/tmp/phys-orch/phys-tool-1/runs):
+    /// `--dyn kick` step 454 counted (q, m) = (1239, 2) of N = 1241 with 1 member after the step
+    /// (one row released); `--dyn shoot` step 258 counted (6, 1246) of N = 1252 with the 6 statics
+    /// after it (the 1240-box pile released). The parent's oracle, `N − members_after` (no release
+    /// term), rejects both; the release term accepts them.
+    #[test]
+    fn bp_counters_add_the_rows_t4_released_after_the_counters() {
+        let kick = Some((1239, 2));
+        assert_eq!(expected_bp_counters(1241, 1, 1, true), kick);
+        assert_ne!(expected_bp_counters(1241, 1, 0, true), kick, "the parent's oracle voided kick");
+        let shoot = Some((6, 1246));
+        assert_eq!(expected_bp_counters(1252, 6, 1240, true), shoot);
+        assert_ne!(expected_bp_counters(1252, 6, 0, true), shoot, "the parent's oracle voided shoot");
+    }
+
+    /// SCREEN-AM's push shape (`am/screen/screen/A3.md`: the step has 1241, the counter recorded 1):
+    /// the whole held pile released by the pusher's strike.
+    #[test]
+    fn bp_counters_of_a_whole_pile_release_query_the_awake_rows_only() {
+        let statics = 6;
+        assert_eq!(expected_bp_counters(1241 + statics, statics, 1240, true), Some((1, 1240 + statics)));
+    }
+
+    /// A miscount still voids: the release term moves the expectation by exactly `released`, so a
+    /// counter one row off (either way) still differs from it.
+    #[test]
+    fn bp_counters_a_wrong_count_still_differs() {
+        let (q, m) = expected_bp_counters(1241, 1, 1, true).expect("1 + 1 members of 1241 rows");
+        assert_ne!((q, m), (1238, 3));
+        assert_ne!((q, m), (1240, 1));
+    }
+
+    /// Off `Sets` the released rows are not read: a stale `released_rows` cannot move the oracle.
+    #[test]
+    fn bp_counters_off_sets_ignore_released() {
+        assert_eq!(expected_bp_counters(1241, 1, 1240, false), Some((1240, 1)));
+    }
+
+    /// More members than rows is `None` (the caller's VOID on a tree-path step), never a wrap.
+    #[test]
+    fn bp_counters_underflow_is_none() {
+        assert_eq!(expected_bp_counters(5, 6, 0, false), None);
+        assert_eq!(expected_bp_counters(10, 6, 5, true), None);
+        assert_eq!(expected_bp_counters(u64::MAX, u64::MAX, 1, true), None);
     }
 }
