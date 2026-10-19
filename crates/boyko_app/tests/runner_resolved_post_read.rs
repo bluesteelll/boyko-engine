@@ -92,8 +92,14 @@ fn the_runner_reads_resolved_post_only_through_try_resource() {
         .expect("invariant: the runner source is readable");
     let code: String = runner.lines().map(|l| l.split("//").next().unwrap_or("")).collect::<Vec<_>>().join("\n");
     let compact: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(!compact.contains("resource::<ResolvedPost>"), "the runner reads ResolvedPost through a panicking resource()");
-    assert!(!compact.contains("resource::<boyko_render::post::ResolvedPost>"), "the runner reads ResolvedPost through resource()");
+    // The panicking read is the METHOD `.resource::<…>` — the bare `resource::<ResolvedPost>` is also
+    // the tail of the required `try_resource::<ResolvedPost>`, so matching it alone could never pass
+    // (the C2 form of this census; corrected at C8, where the runner first reads the resource).
+    assert!(!compact.contains(".resource::<ResolvedPost>"), "the runner reads ResolvedPost through a panicking resource()");
+    assert!(
+        !compact.contains(".resource::<boyko_render::post::ResolvedPost>"),
+        "the runner reads ResolvedPost through resource()"
+    );
     assert_eq!(compact.matches("resolved_post_for_frame(").count(), 1, "the runner does not read ResolvedPost through post_host");
     assert!(compact.contains("try_resource::<ResolvedPost>") || compact.contains("try_resource::<boyko_render::post::ResolvedPost>"));
 }

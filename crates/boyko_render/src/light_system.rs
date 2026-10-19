@@ -36,6 +36,7 @@ use crate::light::{
     DirectionalLight, GpuLight, LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_MASK, LIGHT_KIND_SKY, LightEnabled,
     LightHeaderGpu, LightTableDirty, LightingConfig, MAX_LIGHTS, PointLight, SkyLight, SpotLight,
 };
+use crate::post::ResolvedPost;
 use crate::shadow_atlas::{PunctualSlotAssignment, SLOT_NONE, pack_atlas_slot};
 
 /// The byte size of the light SSBO's leading header region (`LightHeaderGpu`, 64 B).
@@ -57,16 +58,18 @@ pub(crate) static W2201_SITE: OnceSite = OnceSite::new();
 pub(crate) static W2204_SITE: OnceSite = OnceSite::new();
 
 /// The staged-light-table WRITE GENERATION (host plan D5) — a monotonic counter
-/// bumped by [`collect_lights`] exactly once per ACTUAL staging rewrite (the rebuild is
-/// `Changed` + [`LightTableDirty`]-gated, so a static frame never bumps it).
+/// bumped by [`collect_lights`] exactly once per ACTUAL rows rewrite (the rebuild is
+/// `Changed` + [`LightTableDirty`]-gated, so a static frame never bumps it). A change of the
+/// header alone bumps [`LightHeaderGeneration`] instead (render wave PX1a).
 ///
 /// # The host protocol (writer-side, deterministic)
 ///
-/// A ringed host keeps `light_uploaded_gen: [u64; FRAMES_IN_FLIGHT]` (seeded
-/// `u64::MAX`) and rewrites in-flight slot `s`'s staging iff
-/// `light_uploaded_gen[s] != generation` — so BOTH slots catch up over the two frames
-/// following a change and an unchanged frame writes nothing. `u64` never wraps in
-/// practice (2⁶⁴ rebuilds); `wrapping_add` documents the intent regardless.
+/// A ringed host keeps, per in-flight slot, the row and header generations its staging holds
+/// and, for the device table, the pair the last PRESENTED frame copied (seeded `u64::MAX`);
+/// `boyko_app::light_gate::light_copy_plan` turns the four into this frame's staging write and
+/// copy — `Full` when the rows lag, `Header` (64 B) when only the header lags, else nothing. An
+/// unchanged frame writes and copies nothing. `u64` never wraps in practice (2⁶⁴ rebuilds);
+/// `wrapping_add` documents the intent regardless.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LightTableGeneration(pub u64);
 
@@ -128,8 +131,9 @@ impl Default for LightTableStaging {
                 view.push(0u8);
             }
         }
-        // Seed with an empty default table (count 0, identity exposure) so a never-changed
-        // world still has a valid header to seed the device buffer with.
+        // Seed with an empty default table (count 0, identity exposure — the pre-exposure a
+        // consumer reads before the first policy run) so a never-changed world still has a valid
+        // header to seed the device buffer with.
         let used = write_light_table(
             scratch.build_view().as_mut_slice(),
             &[],
@@ -137,6 +141,7 @@ impl Default for LightTableStaging {
             &[],
             &[],
             &LightingConfig::default(),
+            ResolvedPost::default().pre_exposure,
         );
         Self { scratch, used_bytes: used, dirty: true, seeded: false, sky_present: false }
     }
@@ -192,6 +197,29 @@ impl LightTableStaging {
     pub fn sky_present(&self) -> bool {
         self.sky_present
     }
+
+    /// Render wave PX1a (H4 Scope 7, `px1a/cut.md` D-E4): the header-only rewrite. Rebuilds the
+    /// 64-B header from `cfg`, `pre_exposure` and the STAGED counts, compares it word for word
+    /// with the staged header, and rewrites bytes `[0, LIGHT_HEADER_BYTES)` only when they differ.
+    /// Returns whether it rewrote. The compare covers every header input — the pre-exposure, the
+    /// tonemapper and the sky / cluster / gate words of `cfg` — at the cost of one 64-B build and
+    /// sixteen word compares a frame; the rows are untouched.
+    fn refresh_header(&mut self, cfg: &LightingConfig, pre_exposure: f32) -> bool {
+        let staged = self.bytes();
+        let l0a_count = table_word(staged, L0A_COUNT_OFFSET).expect("invariant: the staging always holds its header");
+        let point_spot_count =
+            table_word(staged, POINT_SPOT_COUNT_OFFSET).expect("invariant: the staging always holds its header");
+        let header = LightHeaderGpu::new(l0a_count, point_spot_count, cfg, pre_exposure);
+        let lanes = [header.counts_exposure, header.sky_diffuse, header.sky_spec, header.cluster_params];
+        let unchanged =
+            lanes.as_flattened().iter().enumerate().all(|(k, w)| table_word(staged, 4 * k) == Some(w.to_bits()));
+        if unchanged {
+            return false;
+        }
+        write_pod(self.scratch.build_view().as_mut_slice(), 0, &header);
+        self.dirty = true;
+        true
+    }
 }
 
 /// Writes `[LightHeaderGpu || GpuLight[]]` into `dst`, returning the valid byte length.
@@ -203,7 +231,8 @@ impl LightTableStaging {
 /// `dst` is sized for the worst case (`Default` does this).
 ///
 /// Thin slice-wrapper over [`fold_light_table`]; the per-frame collection feeds the ECS
-/// query iterators to [`fold_light_table`] directly (no intermediate `Vec`).
+/// query iterators to [`fold_light_table`] directly (no intermediate `Vec`). `pre_exposure` is the
+/// header's word 1 ([`LightHeaderGpu::new`]).
 pub fn write_light_table(
     dst: &mut [u8],
     directionals: &[DirectionalLight],
@@ -211,6 +240,7 @@ pub fn write_light_table(
     points: &[PointLight],
     spots: &[SpotLight],
     cfg: &LightingConfig,
+    pre_exposure: f32,
 ) -> usize {
     fold_light_table(
         dst,
@@ -219,11 +249,16 @@ pub fn write_light_table(
         points.iter(),
         spots.iter(),
         cfg,
+        pre_exposure,
     )
 }
 
 /// Byte offset of the header's `l0a_count` word (`counts_exposure.z`).
 const L0A_COUNT_OFFSET: usize = core::mem::offset_of!(LightHeaderGpu, counts_exposure) + 2 * 4;
+/// Byte offset of the header's `point_spot_count` word (`counts_exposure.w`).
+const POINT_SPOT_COUNT_OFFSET: usize = core::mem::offset_of!(LightHeaderGpu, counts_exposure) + 3 * 4;
+// The header-only rewrite compares the header as sixteen consecutive words.
+const _: () = assert!(LIGHT_HEADER_BYTES == 16 * 4);
 /// Byte offset, within a row, of the `dir_kind` lane (`xyz` = direction, `w` = kind word).
 const DIR_KIND_OFFSET: usize = core::mem::offset_of!(GpuLight, dir_kind);
 /// Byte offset, within a row, of the kind word (`dir_kind.w`).
@@ -317,6 +352,7 @@ pub fn fold_light_table<'a>(
     points: impl Iterator<Item = &'a PointLight>,
     spots: impl Iterator<Item = &'a SpotLight>,
     cfg: &LightingConfig,
+    pre_exposure: f32,
 ) -> usize {
     // The un-slotted path: no punctual light carries an atlas base, so every point/spot row keeps
     // the kind word `from_point` / `from_spot` produce, whose slot field already holds `SLOT_NONE`
@@ -329,6 +365,7 @@ pub fn fold_light_table<'a>(
         points.map(|p| (SLOT_NONE, p)),
         spots.map(|s| (SLOT_NONE, s)),
         cfg,
+        pre_exposure,
     )
 }
 
@@ -366,6 +403,7 @@ pub fn fold_light_table_slotted<'a>(
     points: impl Iterator<Item = (u32, &'a PointLight)>,
     spots: impl Iterator<Item = (u32, &'a SpotLight)>,
     cfg: &LightingConfig,
+    pre_exposure: f32,
 ) -> usize {
     // The body starts after the header region; walk the iterators in table order,
     // converting + writing each light in place and counting the two header blocks.
@@ -376,7 +414,7 @@ pub fn fold_light_table_slotted<'a>(
     let mut l0a_count: u32 = 0;
     for d in directionals {
         if written == MAX_LIGHTS {
-            return finish_folded_overflow(dst, l0a_count, 0, off, cfg);
+            return finish_folded_overflow(dst, l0a_count, 0, off, cfg, pre_exposure);
         }
         write_pod(dst, off, &GpuLight::from_directional(d));
         off += GPU_LIGHT_BYTES;
@@ -385,7 +423,7 @@ pub fn fold_light_table_slotted<'a>(
     }
     for s in skies {
         if written == MAX_LIGHTS {
-            return finish_folded_overflow(dst, l0a_count, 0, off, cfg);
+            return finish_folded_overflow(dst, l0a_count, 0, off, cfg, pre_exposure);
         }
         write_pod(dst, off, &GpuLight::from_sky(s));
         off += GPU_LIGHT_BYTES;
@@ -403,7 +441,7 @@ pub fn fold_light_table_slotted<'a>(
             if dropped != 0 {
                 report_dropped_non_finite_lights(dropped);
             }
-            return finish_folded_overflow(dst, l0a_count, point_spot_count, off, cfg);
+            return finish_folded_overflow(dst, l0a_count, point_spot_count, off, cfg, pre_exposure);
         }
         if !punctual_row_is_cullable(p.position, p.range) {
             dropped += 1;
@@ -419,7 +457,7 @@ pub fn fold_light_table_slotted<'a>(
             if dropped != 0 {
                 report_dropped_non_finite_lights(dropped);
             }
-            return finish_folded_overflow(dst, l0a_count, point_spot_count, off, cfg);
+            return finish_folded_overflow(dst, l0a_count, point_spot_count, off, cfg, pre_exposure);
         }
         if !punctual_row_is_cullable(s.position, s.range) {
             dropped += 1;
@@ -438,7 +476,7 @@ pub fn fold_light_table_slotted<'a>(
         "invariant: live light count must not exceed MAX_LIGHTS"
     );
 
-    finish_folded(dst, l0a_count, point_spot_count, off, cfg)
+    finish_folded(dst, l0a_count, point_spot_count, off, cfg, pre_exposure)
 }
 
 /// `true` iff a punctual light's cull sphere is a well-defined one: a FINITE centre and a
@@ -557,8 +595,9 @@ fn finish_folded(
     point_spot_count: u32,
     off: usize,
     cfg: &LightingConfig,
+    pre_exposure: f32,
 ) -> usize {
-    let header = LightHeaderGpu::new(l0a_count, point_spot_count, cfg);
+    let header = LightHeaderGpu::new(l0a_count, point_spot_count, cfg, pre_exposure);
     write_pod(dst, 0, &header);
     off
 }
@@ -577,6 +616,7 @@ fn finish_folded_overflow(
     point_spot_count: u32,
     off: usize,
     cfg: &LightingConfig,
+    pre_exposure: f32,
 ) -> usize {
     if W2201_SITE.claim() {
         // WHAT THIS CANNOT SAY, and why it does not try. The ledger's row for this site asked for
@@ -596,7 +636,7 @@ fn finish_folded_overflow(
             l0a_count + point_spot_count
         );
     }
-    finish_folded(dst, l0a_count, point_spot_count, off, cfg)
+    finish_folded(dst, l0a_count, point_spot_count, off, cfg, pre_exposure)
 }
 
 /// Copies a `#[repr(C)]` POD's bytes into `dst` at `off`. The POD types are
@@ -691,10 +731,14 @@ pub struct LightSeedSet;
 
 /// The L0 collection system (Decision 4) — `Changed`-gated.
 ///
-/// On a frame where any light component or [`LightingConfig`] changed, folds the live
-/// lights into [`LightTableStaging`] and sets the dirty flag; an unchanged frame returns
-/// immediately (the static-scene fast path — zero work, zero allocation). The recorder
-/// consumes the dirty flag (rung L0-r0).
+/// On a frame where a light component changed (or [`LightTableDirty`] is set), folds the live
+/// lights into [`LightTableStaging`], sets the dirty flag and bumps [`LightTableGeneration`].
+/// Every frame it then rebuilds the 64-B header from [`LightingConfig`] and
+/// [`ResolvedPost::pre_exposure`] and, only when it differs from the staged one, rewrites the
+/// header ALONE and bumps [`LightHeaderGeneration`] (render wave PX1a, D-E4) — so a runtime
+/// exposure or config change reaches the GPU the same frame without a rows rewrite. A static frame
+/// costs one header build and a 64-B compare, and allocates nothing. Runs after
+/// [`PostPolicySet`](crate::post::PostPolicySet), so it packs THIS frame's pre-exposure.
 ///
 /// L0a resolves directionals + sky; the point/spot rows are collected here too (their
 /// resolve path is L0b) so the table is complete the moment L0b wires `gViewT`.
@@ -725,6 +769,8 @@ pub fn collect_lights(
     mut staging: ResMut<LightTableStaging>,
     mut dirty: ResMut<LightTableDirty>,
     mut generation: ResMut<LightTableGeneration>,
+    post: Res<ResolvedPost>,
+    mut header_generation: ResMut<LightHeaderGeneration>,
 ) {
     // Rebuild gate: rebuild iff a light component's Changed tick advanced OR the
     // structural `LightTableDirty` channel is set. Changed alone CANNOT see two events:
@@ -739,10 +785,43 @@ pub fn collect_lights(
         || changed_sky.iter().next().is_some()
         || changed_point.iter().next().is_some()
         || changed_spot.iter().next().is_some();
-    if !changed && !dirty.0 {
-        return;
+    if changed || dirty.0 {
+        rebuild_light_rows(
+            &all_directionals,
+            &all_skies,
+            &all_points,
+            &all_spots,
+            &cfg,
+            post.pre_exposure,
+            &assignment,
+            &mut staging,
+        );
+        // Consume the structural-change signal — always reached on every rebuild, so a set
+        // bit is never stranded (W2).
+        dirty.0 = false;
+        // Host plan D5: the writer-side deterministic generation — bumped exactly once per
+        // actual rows rewrite, so the host's per-slot compare is exact, never a hash.
+        generation.0 = generation.0.wrapping_add(1);
     }
+    // Render wave PX1a (D-E4): the header-only path. After a rebuild the fold has just written
+    // this exact header, so the compare is equal and only `LightTableGeneration` moved.
+    if staging.refresh_header(&cfg, post.pre_exposure) {
+        header_generation.0 = header_generation.0.wrapping_add(1);
+    }
+}
 
+/// [`collect_lights`]' rows rebuild: folds the enabled lights straight into the staging scratch.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn rebuild_light_rows(
+    all_directionals: &Query<(&DirectionalLight, IsEnabled<LightEnabled>)>,
+    all_skies: &Query<(&SkyLight, IsEnabled<LightEnabled>)>,
+    all_points: &Query<(&PointLight, IsEnabled<LightEnabled>)>,
+    all_spots: &Query<(&SpotLight, IsEnabled<LightEnabled>)>,
+    cfg: &LightingConfig,
+    pre_exposure: f32,
+    assignment: &PunctualSlotAssignment,
+    staging: &mut LightTableStaging,
+) {
     // Rebuild the full table from the live lights (the table is small — MAX_LIGHTS ≤
     // 1024 — so a full rebuild on change is cheaper than a delta map; Decision 4
     // trade-off). Fold the queries DIRECTLY into the preallocated scratch — the
@@ -757,8 +836,7 @@ pub fn collect_lights(
     // resolve is disabled — the empty handoff), so `fold_light_table_slotted` leaves that row's
     // kind word as `from_point` / `from_spot` built it, its slot field `SLOT_NONE`; a real base is
     // packed via `pack_atlas_slot` so the shader decodes the light's OWN cube/perspective base.
-    let assign = &*assignment;
-    let staging = &mut *staging;
+    let assign = assignment;
     // Disjoint field-projection borrow (mesh_draw.rs precedent): `scratch_view` borrows only
     // `staging.scratch`, so the plain `staging.used_bytes = used;` write below (a distinct
     // field) needs no explicit drop.
@@ -773,7 +851,8 @@ pub fn collect_lights(
         all_spots
             .iter_entities()
             .filter_map(|(id, (l, en))| en.then_some((assign.base_for(id), l))),
-        &cfg,
+        cfg,
+        pre_exposure,
     );
     staging.used_bytes = used;
     // Render wave PX0: the receipt's `light_sky`, decoded from the bytes just folded (the view's
@@ -781,13 +860,6 @@ pub fn collect_lights(
     drop(scratch_view);
     staging.sky_present = table_has_sky(staging.bytes());
     staging.dirty = true;
-    // Consume the structural-change signal — always reached on every rebuild, so a set
-    // bit is never stranded (W2).
-    dirty.0 = false;
-    // Host plan D5: the writer-side deterministic generation — bumped exactly once per
-    // actual staging rewrite (this line is reached only past the rebuild gate above),
-    // so the host's per-slot `light_uploaded_gen` compare is exact, never a hash.
-    generation.0 = generation.0.wrapping_add(1);
 }
 
 /// Cross-frame state for the light-seed pass ([`seed`](Self::seed)): the eight CACHED
@@ -1147,7 +1219,7 @@ mod tests {
     #[test]
     fn empty_table_is_header_only() {
         let mut scratch = vec![0u8; LIGHT_HEADER_BYTES + 4 * GPU_LIGHT_BYTES];
-        let used = write_light_table(&mut scratch, &[], &[], &[], &[], &LightingConfig::default());
+        let used = write_light_table(&mut scratch, &[], &[], &[], &[], &LightingConfig::default(), 1.0);
         assert_eq!(used, LIGHT_HEADER_BYTES);
         let h = read_header(&scratch);
         assert_eq!(h.light_count(), 0);
@@ -1162,7 +1234,7 @@ mod tests {
         let skies = [SkyLight::new([0.1, 0.1, 0.12], [0.1, 0.1, 0.12])];
         let pts = [PointLight::new([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 50.0, 5.0)];
         let mut scratch = vec![0u8; LIGHT_HEADER_BYTES + 8 * GPU_LIGHT_BYTES];
-        let used = write_light_table(&mut scratch, &dirs, &skies, &pts, &[], &LightingConfig::default());
+        let used = write_light_table(&mut scratch, &dirs, &skies, &pts, &[], &LightingConfig::default(), 1.0);
         assert_eq!(used, LIGHT_HEADER_BYTES + 3 * GPU_LIGHT_BYTES);
         let h = read_header(&scratch);
         assert_eq!(h.light_count(), 3);
@@ -1176,7 +1248,7 @@ mod tests {
         let skies = [SkyLight::new([0.2, 0.2, 0.2], [0.1, 0.1, 0.1])];
         let words = LIGHT_HEADER_WORDS + 2 * (GPU_LIGHT_BYTES / 4);
         let mut scratch = vec![0u8; words * 4];
-        write_light_table(&mut scratch, &dirs, &skies, &[], &[], &LightingConfig::default());
+        write_light_table(&mut scratch, &dirs, &skies, &[], &[], &LightingConfig::default(), 1.0);
         // element 0's kind tag is at word HEADER_WORDS + 3 (dir_kind.w).
         let kind0_off = (LIGHT_HEADER_WORDS + 3) * 4;
         let kind0 = u32::from_ne_bytes(scratch[kind0_off..kind0_off + 4].try_into().unwrap());
@@ -1223,6 +1295,7 @@ mod tests {
             pts.iter(),
             [].iter(),
             &LightingConfig::default(),
+            1.0,
         );
 
         // The returned length is exactly the full table (header + MAX_LIGHTS rows) — never
@@ -1267,6 +1340,7 @@ mod tests {
             pts.iter(),
             spots.iter(),
             &LightingConfig::default(),
+            1.0,
         );
 
         assert_eq!(used, WORST_CASE_CAP);
@@ -1326,6 +1400,7 @@ mod tests {
             core::iter::once((assign.base_for(point_ent), &pt)),
             core::iter::once((assign.base_for(spot_ent), &sp)),
             &LightingConfig::default(),
+            1.0,
         );
         assert_eq!(used, LIGHT_HEADER_BYTES + 2 * GPU_LIGHT_BYTES);
 
@@ -1366,6 +1441,7 @@ mod tests {
             core::iter::empty(),
             [(assign.base_for(winner), &sp_win), (assign.base_for(loser), &sp_lose)].into_iter(),
             &LightingConfig::default(),
+            1.0,
         );
 
         let win_kind = row_kind_word(&scratch, 0);
@@ -1443,6 +1519,7 @@ mod tests {
                 rows[..3].iter().zip(points.iter()).map(|(r, p)| (assign.base_for(r.0), p)),
                 rows[3..].iter().zip(spots.iter()).map(|(r, s)| (assign.base_for(r.0), s)),
                 &LightingConfig::default(),
+                1.0,
             );
             assert_eq!(used, LIGHT_HEADER_BYTES + rows.len() * GPU_LIGHT_BYTES, "mask {mask:#08b}: six rows");
 
@@ -1545,6 +1622,7 @@ mod tests {
             &[good_a, bad, good_b],
             &[],
             &LightingConfig::default(),
+            1.0,
         );
 
         assert_eq!(
@@ -1596,7 +1674,7 @@ mod tests {
         for bad in &bad_points {
             let mut scratch = vec![0u8; LIGHT_HEADER_BYTES + 8 * GPU_LIGHT_BYTES];
             let used =
-                write_light_table(&mut scratch, &[], &[], &[keep_pt, *bad], &[keep_sp], &cfg);
+                write_light_table(&mut scratch, &[], &[], &[keep_pt, *bad], &[keep_sp], &cfg, 1.0);
             assert_eq!(
                 used,
                 LIGHT_HEADER_BYTES + 2 * GPU_LIGHT_BYTES,
@@ -1607,7 +1685,7 @@ mod tests {
         for bad in &bad_spots {
             let mut scratch = vec![0u8; LIGHT_HEADER_BYTES + 8 * GPU_LIGHT_BYTES];
             let used =
-                write_light_table(&mut scratch, &[], &[], &[keep_pt], &[keep_sp, *bad], &cfg);
+                write_light_table(&mut scratch, &[], &[], &[keep_pt], &[keep_sp, *bad], &cfg, 1.0);
             assert_eq!(
                 used,
                 LIGHT_HEADER_BYTES + 2 * GPU_LIGHT_BYTES,
@@ -1669,7 +1747,7 @@ mod tests {
 
         let mut scratch =
             vec![0u8; LIGHT_HEADER_BYTES + (MAX_LIGHTS as usize + 2) * GPU_LIGHT_BYTES];
-        let used = write_light_table(&mut scratch, &[], &[], &points, &[], &cfg);
+        let used = write_light_table(&mut scratch, &[], &[], &points, &[], &cfg, 1.0);
 
         // The bad row is skipped WITHOUT advancing `written`, so all MAX_LIGHTS valid lights fit.
         assert_eq!(used, LIGHT_HEADER_BYTES + MAX_LIGHTS as usize * GPU_LIGHT_BYTES);
@@ -1684,7 +1762,7 @@ mod px0_light_sky {
 
     fn table(skies: &[SkyLight], dirs: &[DirectionalLight], points: &[PointLight]) -> Vec<u8> {
         let mut dst = vec![0u8; LIGHT_HEADER_BYTES + (MAX_LIGHTS as usize) * GPU_LIGHT_BYTES];
-        let used = write_light_table(&mut dst, dirs, skies, points, &[], &LightingConfig::default());
+        let used = write_light_table(&mut dst, dirs, skies, points, &[], &LightingConfig::default(), 1.0);
         dst.truncate(used);
         dst
     }
@@ -1760,6 +1838,7 @@ mod l8a_light_codes {
             points.iter().map(|p| (SLOT_NONE, p)),
             core::iter::empty::<(u32, &SpotLight)>(),
             &LightingConfig::default(),
+            1.0,
         )
     }
 

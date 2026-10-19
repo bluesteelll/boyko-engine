@@ -8,8 +8,13 @@
 //! - (D) `lit` (`lit_native` under SSAA) holds radiance **> 1.0** — at HEAD, whose `lit` is
 //!   display-referred RGBA8, it is ≤ 1.0 by construction;
 //! - (D) `display` is ≥ 254/255 in every channel;
-//! - along the ray from the core to the right, `display`'s luminance is a monotone shoulder (each
-//!   step at most 1 LSB above the previous one) until it leaves the highlight.
+//! - **the display shoulders it** (re-stated, ruling 79 F2): over the SHOULDER SAMPLES — every pixel
+//!   whose scene texel a tonemap and a hard clip display differently (≥ [`CLIP_GAP`] codes in some
+//!   channel: `OETF(ACES(lit))` against `OETF(saturate(lit))`) — `display` equals `post_final_eval`
+//!   of the scene texel within `post_eval`'s bound, and the samples cross the knee (some with `lit`
+//!   above 1.0, some below). The ray walk this replaced read 25 pixels that all sat at 255 (`lit` ≥
+//!   34 over the walk), so a hard clip passed it; on the shoulder samples a clip is ≥ [`CLIP_GAP`]
+//!   codes off by construction (mutation leg "hard clip instead of the tonemap").
 //!
 //! **11b — every producer stores above 1.0** (from the switch commit, C7). Each of PX0's HOT branch
 //! fixtures (`common/hdr_fixtures.rs`: one per `lit`-store producer — `deferred_pbr` surface and
@@ -46,7 +51,12 @@ use boyko_macros::Resource;
 use boyko_render::{AaConfig, AaMode, GeometryLegs, Material, RenderPath, RenderPathConfig};
 use boyko_rhi_vulkan::present::ImageDumpName;
 
+use boyko_render::light::LightingConfig;
+use boyko_render::post::ResolvedPost;
+use boyko_shaderdsl::cf::HostTex2;
 use boyko_shaderdsl::pixfmt::{Channel, steps_between};
+use boyko_shaderdsl::post::{OETF_GAMMA_EXP, eval_params, post_final_eval};
+use boyko_shaderdsl::prims_probe::vk_pow_bound;
 use graph_receipt::{fresh_out, run_worker};
 use hdr_fixtures::{Expect, HOT_R, Hot, capture_scene, fixture, fixture_worker_main};
 use image_dump::{DumpFile, files_of};
@@ -61,8 +71,12 @@ const SETTLE: u32 = 30;
 const SUN_LUX: f32 = 2.8 * 50.0;
 /// The sun's direction TO the light: up, right and toward the camera, so the highlight faces it.
 const SUN_DIR: [f32; 3] = [0.35, 0.55, 1.0];
-/// The steps of the shoulder walk.
-const SHOULDER_STEPS: u32 = 24;
+/// A shoulder sample: the tonemap and a hard clip display its scene texel at least this many codes
+/// apart in some channel (well above the eval bound's one code, so a clip cannot pass on it).
+const CLIP_GAP: f64 = 8.0;
+/// Test 11's anti-vacuity: the fewest shoulder samples, and the fewest on each side of `lit` = 1.0.
+const SHOULDER_MIN: usize = 64;
+const SHOULDER_SIDE_MIN: usize = 8;
 
 #[derive(Resource)]
 struct HotRes(&'static str);
@@ -135,28 +149,74 @@ fn sun_core(scene: &DumpFile) -> (u32, u32) {
     best
 }
 
-/// Test 11's display half: `display` at the core is ≥ 254 in every channel, and the walk to the
-/// right is a monotone shoulder (each step ≤ 1 LSB above the previous). `Err` names the failure.
-fn check_display_shoulder(display: &[[u8; 3]], width: u32, core: (u32, u32)) -> Result<(), String> {
-    let at = |x: u32| display[(core.1 * width + x) as usize];
-    let c = at(core.0);
+/// `post_eval`'s per-channel bound (`post_eval.rs` `channel_bound`, no filter row): one display code
+/// (the two 8-bit roundings) + E0's bound on the OETF's `pow` at the body value `o`.
+fn eval_bound_lsb(o: f32) -> f64 {
+    let g = f64::from(OETF_GAMMA_EXP);
+    let x = f64::from(o.max(0.0)).powf(1.0 / g);
+    let oetf = if x <= 0.0 { 0.0 } else { 255.0 * vk_pow_bound(x as f32, OETF_GAMMA_EXP, x.log2(), x.powf(g)) };
+    1.0 + oetf
+}
+
+/// The `post_final` words the runner uploads for the default config at `extent` (Aces, ratio 1).
+fn runner_post_words(extent: [u32; 2]) -> [u32; 8] {
+    let post = ResolvedPost::from_config(&LightingConfig::default());
+    boyko_render::post_final_words(&boyko_app::post_host::post_final_gpu(&post, extent))
+}
+
+/// Test 11's display half, over the scene image (`w × h` RGBA texels) and `display` (RGB codes):
+/// `display` at the core is ≥ 254 in every channel; and over the shoulder samples (module doc)
+/// `display` is `post_final_eval` of the scene texel within [`eval_bound_lsb`], with at least
+/// [`SHOULDER_MIN`] samples, [`SHOULDER_SIDE_MIN`] of them on each side of `lit` = 1.0. `Ok(samples)`
+/// or the failure, named.
+fn check_display_shoulder(
+    scene: &[[f32; 4]],
+    display: &[[u8; 3]],
+    (w, h): (u32, u32),
+    core: (u32, u32),
+) -> Result<usize, String> {
+    let c = display[(core.1 * w + core.0) as usize];
     if c.iter().any(|&v| v < 254) {
         return Err(format!("display at the sun core {core:?} is {c:?}, not >= 254/255"));
     }
-    let lum = |p: [u8; 3]| (2126 * u32::from(p[0]) + 7152 * u32::from(p[1]) + 722 * u32::from(p[2])) / 10000;
-    let mut prev = lum(c);
-    for step in 1..=SHOULDER_STEPS {
-        let x = core.0 + step;
-        if x >= width {
-            break;
+    let params = eval_params(runner_post_words([w, h]));
+    let tex = HostTex2::new(scene, w, h);
+    let clip_code = |x: f32| 255.0 * f64::from(x.clamp(0.0, 1.0)).powf(f64::from(OETF_GAMMA_EXP));
+    let (mut samples, mut above, mut below) = (0usize, 0usize, 0usize);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let o = post_final_eval([x, y], &params, tex);
+            if !(0..3).any(|k| (255.0 * f64::from(o[k]) - clip_code(scene[i][k])).abs() >= CLIP_GAP) {
+                continue;
+            }
+            samples += 1;
+            if scene[i][..3].iter().any(|&v| v > 1.0) {
+                above += 1;
+            } else {
+                below += 1;
+            }
+            for k in 0..3 {
+                let got = f64::from(display[i][k]);
+                if (255.0 * f64::from(o[k]) - got).abs() > eval_bound_lsb(o[k]) {
+                    return Err(format!(
+                        "display at ({x},{y}) ch{k} is {got}, the tonemap of lit {:.4} is {:.2} and a hard clip {:.2}: \
+                         the display does not shoulder the highlight",
+                        scene[i][k],
+                        255.0 * o[k],
+                        clip_code(scene[i][k])
+                    ));
+                }
+            }
         }
-        let v = lum(at(x));
-        if v > prev + 1 {
-            return Err(format!("display rises from {prev} to {v} at {step} px right of the core — no monotone shoulder"));
-        }
-        prev = v;
     }
-    Ok(())
+    if samples < SHOULDER_MIN || above < SHOULDER_SIDE_MIN || below < SHOULDER_SIDE_MIN {
+        return Err(format!(
+            "{samples} shoulder samples ({above} with lit above 1.0, {below} at or below), fewer than \
+             {SHOULDER_MIN} ({SHOULDER_SIDE_MIN} per side): the scene does not cross the tonemap's knee"
+        ));
+    }
+    Ok(samples)
 }
 
 fn drive_sun(ssaa: bool) {
@@ -198,8 +258,9 @@ fn drive_sun(ssaa: bool) {
             [p[0], p[1], p[2]]
         })
         .collect();
-    if let Err(e) = check_display_shoulder(&px, d.width, core) {
-        panic!("{tag}: {e}");
+    match check_display_shoulder(&texels(&scene), &px, (d.width, d.height), core) {
+        Ok(n) => println!("{tag}: {n} shoulder samples, display = the tonemap of {scene_name} on every one"),
+        Err(e) => panic!("{tag}: {e}"),
     }
 }
 
@@ -218,15 +279,40 @@ fn px1a_hot_sun_core_is_hdr_and_shoulders_under_ssaa() {
 // ---- host checks of the verdict (not ignored) ------------------------------------------------
 
 #[test]
-fn the_shoulder_check_reds_a_clipped_core_and_a_rising_ray() {
-    let w = 8u32;
-    let ramp: Vec<[u8; 3]> = (0..w).map(|x| [255 - 10 * x as u8; 3]).collect();
-    check_display_shoulder(&ramp, w, (0, 0)).expect("a falling ramp from white is a shoulder");
-    let dim: Vec<[u8; 3]> = (0..w).map(|_| [200u8; 3]).collect();
-    assert!(check_display_shoulder(&dim, w, (0, 0)).unwrap_err().contains("not >= 254"));
-    let mut bump = ramp.clone();
-    bump[4] = [250; 3];
-    assert!(check_display_shoulder(&bump, w, (0, 0)).unwrap_err().contains("no monotone shoulder"));
+fn the_shoulder_check_reds_a_hard_clip_and_a_dim_core() {
+    // A falloff from radiance 16 at the core (x = 0) to 0.01: it crosses the knee.
+    let (w, h) = (64u32, 4u32);
+    let scene: Vec<[f32; 4]> = (0..h)
+        .flat_map(|_| (0..w).map(|x| {
+            let v = 16.0 * 0.86f32.powi(x as i32) + 0.01;
+            [v, v * 0.95, v * 0.9, 1.0]
+        }))
+        .collect();
+    let params = eval_params(runner_post_words([w, h]));
+    let tex = HostTex2::new(&scene, w, h);
+    let q = |c: f64| c.round().clamp(0.0, 255.0) as u8;
+    let toned: Vec<[u8; 3]> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            let o = post_final_eval([x, y], &params, tex);
+            [q(255.0 * f64::from(o[0])), q(255.0 * f64::from(o[1])), q(255.0 * f64::from(o[2]))]
+        })
+        .collect();
+    let n = check_display_shoulder(&scene, &toned, (w, h), (0, 0)).expect("the tonemapped display shoulders");
+    assert!(n >= SHOULDER_MIN, "{n}");
+    // A hard clip instead of the tonemap: `OETF(saturate(lit))`.
+    let clipped: Vec<[u8; 3]> = scene
+        .iter()
+        .map(|t| [0, 1, 2].map(|k| q(255.0 * f64::from(t[k].clamp(0.0, 1.0)).powf(f64::from(OETF_GAMMA_EXP)))))
+        .collect();
+    assert!(check_display_shoulder(&scene, &clipped, (w, h), (0, 0)).unwrap_err().contains("does not shoulder"));
+    let mut dim = toned.clone();
+    dim[0] = [200; 3];
+    assert!(check_display_shoulder(&scene, &dim, (w, h), (0, 0)).unwrap_err().contains("not >= 254"));
+    // A scene that never leaves the clip's plateau has no shoulder to judge.
+    let flat = vec![[40.0f32, 40.0, 40.0, 1.0]; (w * h) as usize];
+    let white = vec![[255u8; 3]; (w * h) as usize];
+    assert!(check_display_shoulder(&flat, &white, (w, h), (0, 0)).unwrap_err().contains("knee"));
 }
 
 // ---- 11b: every producer stores above 1.0 (the switch commit) -----------------------------------
@@ -356,8 +442,18 @@ const PARTICLE_WIN: u32 = 256;
 /// A pixel is a particle pixel when the particle-on run exceeds the particle-off run there by this
 /// much luminance at exposure 1.0.
 const PARTICLE_MASK_LUMA: f32 = 0.05;
-/// Anti-vacuity: the fewest particle pixels the verdict needs (the lab's fan covers hundreds even
-/// at 256 px).
+/// Anti-vacuity: the fewest particle pixels the verdict needs.
+///
+/// **The margin (ruling 79 F4).** The C7 checkpoint measured **84** particle pixels against this
+/// floor (`gl/c7/check.md` F4); this doc's former "hundreds even at 256 px" was false. 84 is the
+/// lab's coverage at [`particle_scene::CAPTURE_FRAME`] scaled to this window: the lab measured 354
+/// saturated pixels at its 512-px pin window, and a quarter of the area leaves ~88 before the
+/// luminance mask. The count is not a sample of a distribution — the lab's clock takes exactly one
+/// substep per frame and `particle_emit` seeds its RNG with the frame index (`LabClockWitness`), so
+/// the same frame covers the same pixels every run. The floor is anti-vacuity only (a particle path
+/// that reached nothing): every counted pixel is an independent exact-halving check, so 64 needs no
+/// statistical headroom, and 1.3× of it absorbs a driver's rasterisation differences at the
+/// sprites' edges. A change of the window, the capture frame or the lab's fan restates this number.
 const MIN_PARTICLE_PIXELS: usize = 64;
 
 /// **THE 15 WORKER** — the particle lab scene at `BOYKO_PX1A_PARTICLE_EXPOSURE`.

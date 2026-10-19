@@ -40,11 +40,12 @@
 //! `shadow_apply.hlsli`'s `csm_pcf_disc` use) — NOT a `-D` shader variant, so this rung
 //! compiles to ONE `.spv`. Each field's doc states its wiring status.
 
-use boyko_macros::Resource;
+use boyko_macros::{Resource, SystemSet};
 
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 
 use crate::aa_config::ResolvedTaa;
+use crate::post::ResolvedPost;
 
 // ---- the knob enums (capability is structural: the shipped behaviour is each enum's #[default]) --
 
@@ -541,12 +542,22 @@ pub fn resolve_taa(cfg: &TaaConfig) -> ResolvedTaa {
 /// [`TaaConfig`] and writes the derived UBO carrier (the one-producer-per-field write
 /// discipline).
 //
+///
+/// Render wave PX1a (D-E2): also writes [`ResolvedTaa::pre_ratio_delta`] = `pre_ratio − 1` from
+/// THIS frame's [`ResolvedPost`] (it runs `.after_set(PostPolicySet)`), so the resolve rescales the
+/// history by the exposure ratio before the clip; `0` on frame 0, on a cut and at a steady exposure.
+//
 // `clippy::needless_pass_by_value`: `Res`/`ResMut` are by-value `SystemParam`s read/written
 // through reborrows — the same false-positive `resolve_shadow_denoise_policy` carries.
 #[allow(clippy::needless_pass_by_value)]
-pub fn resolve_taa_policy(cfg: Res<TaaConfig>, mut out: ResMut<ResolvedTaa>) {
-    *out = resolve_taa(&cfg);
+pub fn resolve_taa_policy(cfg: Res<TaaConfig>, post: Res<ResolvedPost>, mut out: ResMut<ResolvedTaa>) {
+    *out = ResolvedTaa { pre_ratio_delta: post.pre_ratio - 1.0, ..resolve_taa(&cfg) };
 }
+
+/// The set [`resolve_taa_policy`] runs in (render wave PX1a): `AaPlugin` orders it
+/// `.after_set(PostPolicySet)` so the TAA ratio is this frame's.
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TaaPolicySet;
 
 #[cfg(test)]
 mod tests {

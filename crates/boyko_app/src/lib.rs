@@ -124,9 +124,9 @@ mod graph_receipt_dump;
 #[cfg(windows)]
 mod image_dump;
 
-/// The host half of the light-table generation protocol (host plan D5/R4):
-/// the pure per-slot [`light_upload_due`](light_gate::light_upload_due) gate
-/// the runner drives its staging-ring rewrites with.
+/// The host half of the light-table generation protocol (host plan D5/R4, render wave PX1a): the
+/// pure [`light_copy_plan`](light_gate::light_copy_plan) the runner drives its staging-ring writes
+/// and device-table copies with.
 pub mod light_gate;
 /// Dynamic-materials DM1: the host half of the material upload protocol — the pure
 /// [`pm_ring_action`](material_gate::pm_ring_action) rule the runner keeps the

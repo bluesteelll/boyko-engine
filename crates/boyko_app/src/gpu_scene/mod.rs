@@ -125,6 +125,7 @@ use boyko_render::{
     SHADOW_DIM, SharpenMode, Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table,
     mesh_view_t_norm, pack_ddgi_update_ubo, upload_texture_2d_raw,
 };
+use boyko_render::post::ResolvedPost;
 #[cfg(feature = "hwrt")]
 use boyko_ecs::ecs::core::asset::Assets;
 #[cfg(feature = "hwrt")]
@@ -1945,8 +1946,8 @@ impl GpuSceneBundles {
         // staged table fits. Seeded with the EMPTY header (count 0 —
         // byte-identical to `LightTableStaging::default()`'s seed, the golden
         // empty-table anchor: zero lights, all word-7 gates 0): visible only to
-        // a world with no lights, since the host's `light_uploaded_gen`
-        // (`u64::MAX`) forces a first-frame upload of the real ECS table.
+        // a world with no lights, since the host's `light_slots` / `light_device`
+        // (`u64::MAX`) force a first-frame write and copy of the real ECS table.
         //
         // The staging is a RING, not a single instance (the R4 race pin): both
         // in-flight slots re-upload on the two consecutive frames after a
@@ -1954,8 +1955,12 @@ impl GpuSceneBundles {
         // N's still-in-flight recorded copy (host-write-vs-GPU-transfer-read).
         // Slot `s`'s staging is only read by frames occupying slot `s`, whose
         // fence the write token proves waited.
-        let empty_light_words =
-            pack_light_table(&LightHeaderGpu::new(0, 0, &LightingConfig::default()), &[]);
+        // Word 1 is the pre-exposure a consumer reads before the first policy run (render wave
+        // PX1a: `LightHeaderGpu::new` reads no exposure from the config).
+        let empty_light_words = pack_light_table(
+            &LightHeaderGpu::new(0, 0, &LightingConfig::default(), ResolvedPost::default().pre_exposure),
+            &[],
+        );
         let light_table = RhiDevice::create_buffer(
             device,
             &BufferDesc {

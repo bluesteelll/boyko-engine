@@ -1,6 +1,33 @@
-//! Render wave PX1a tests 16 and 18 (`plan/H4-PX1a-hdr-lit.md` Tests 16, 18; `px1a/cut.md` C4, C8;
-//! ruling 67 OQ4): **TAA under the post seam — a camera cut resets the history, and `display` is the
-//! accumulated image.**
+//! Render wave PX1a tests 13, 16 and 18 and the eval-post pin (`plan/H4-PX1a-hdr-lit.md` Tests 13,
+//! 16, 18; `px1a/cut.md` C4, C8; ruling 67 OQ3 / OQ4, ruling 72 (1)): **TAA under the post seam — an
+//! exposure change rescales the history, a camera cut resets it, and `display` is `post_final` of
+//! this frame's accumulated image.**
+//!
+//! - **13 — the exposure ramp** (C8). A converged static scene (a SkyLight, so every `lit` texel —
+//!   the background included — is pre-exposed radiance) under TAA with the PLAIN blend
+//!   (`TaaConfig::luma_weight` off: the Karis weight is not homogeneous in the radiance scale, so a
+//!   Karis resolve of a scaled scene is not the scaled resolve, and the statement would be red on
+//!   correct code). From frame [`RAMP_AT`] + 1, `LightingConfig::exposure` is multiplied by
+//!   [`RAMP_STEP`] per frame for [`RAMP_FRAMES`] frames — through `ResolvedPost`, the header-only
+//!   light rewrite and `ResolvedTaa::pre_ratio_delta`. A second run keeps the exposure at 1. Per ramp
+//!   frame `F` with `pre_F` read from the worker's `ResolvedPost` log (see [`ramp_verdict`]):
+//!   1. **the header path:** `Σ lit_ramp(F) / Σ lit_steady(F) = pre_F`;
+//!   2. **the history rescale:** over the HISTORY-BEARING pixels (the steady run's history differs
+//!      from its current `lit` by more than [`HISTORY_BEARING`], relative — elsewhere the variance
+//!      clip snaps any history to the current frame and cannot see a missing rescale),
+//!      `Σ taa_hist_ramp(F) / Σ taa_hist_steady(F) = pre_F`;
+//!
+//!   each within [`RAMP_REL_TOL`], curve-free. Sums, not texels: a binary16 history is an EMA
+//!   rounded every frame, and the two runs' roundings decorrelate once the ramp starts — over eight
+//!   frames a texel drifts by a few format steps either way (zero-mean), which a per-texel "two
+//!   steps" would read as a failure on correct code. Red: `pre_ratio_delta` forced 0 (statement 2);
+//!   the header-only path removed (statement 1).
+//! - **The eval-post pin** (ruling 72 (1), critic OQ3; C8). On every frame of the ramp run's burst,
+//!   `display` equals `post_final_eval` of the dumped `taa_hist` — the image THIS frame's resolve
+//!   wrote, `taa_hist[fi]` — pixel by pixel within `post_eval`'s bound (one display code + E0's
+//!   bound on the OETF's `pow`; the scene input is a `Load`, so no filter term). The ramp moves
+//!   the history by 25 % a frame, so a `post_final` reading `taa_hist[1 - fi]` (last frame's) is
+//!   red on most pixels; S2's binary16 fingerprint cannot see that lag on a converged history.
 //!
 //! - **16 — the camera cut.** The worker switches the active camera at frame [`SWITCH_AT`]. The
 //!   runner must turn `ResolvedPost::cut` into `TaaState::mark_reset` on that same frame, so the
@@ -48,10 +75,13 @@ use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_macros::Resource;
-use boyko_render::{AaConfig, AaMode, GeometryLegs, Material, RenderPath, RenderPathConfig, TaaState};
+use boyko_render::light::LightingConfig;
+use boyko_render::post::{PostPolicySet, ResolvedPost};
+use boyko_render::{AaConfig, AaMode, GeometryLegs, Material, RenderPath, RenderPathConfig, TaaConfig, TaaState};
 use boyko_rhi_vulkan::present::ImageDumpName;
 use boyko_shaderdsl::cf::HostTex2;
-use boyko_shaderdsl::post::{eval_params, post_final_eval, ubo_word};
+use boyko_shaderdsl::post::{OETF_GAMMA_EXP, eval_params, post_final_eval, ubo_word};
+use boyko_shaderdsl::prims_probe::vk_pow_bound;
 
 use graph_receipt::{fresh_out, run_worker};
 use image_dump::{DumpFile, files_of};
@@ -81,11 +111,30 @@ const HDR_EDGE_MIN: usize = 20;
 const RESOLVE_SPACE_MIN: f64 = 0.5;
 /// Rec. 709 luma weights — `taa_resolve.comp.hlsl`'s `luma`, the Karis weight's argument.
 const REC709: [f64; 3] = [0.2126, 0.7152, 0.0722];
+/// Test 13: the last frame at exposure 1 (the history has converged long before).
+const RAMP_AT: u64 = 60;
+/// Test 13: the ramp's length, in frames (H4 Tests 13: eight frames).
+const RAMP_FRAMES: u32 = 8;
+/// Test 13: the per-frame exposure factor (H4 Tests 13: × 1.25).
+const RAMP_STEP: f32 = 1.25;
+/// Test 13: the relative bound on a sum ratio — four binary16 steps (2^-8). The sums' rounding
+/// noise is zero-mean and averages over thousands of channel samples; a missing rescale or a
+/// missing header path moves the ratio by percents.
+const RAMP_REL_TOL: f64 = 1.0 / 256.0;
+/// Test 13: a history-bearing pixel's steady history differs from its steady `lit` by more than
+/// this, relative (16 binary16 steps): the history carries what the current frame does not.
+const HISTORY_BEARING: f64 = 1.0 / 64.0;
+/// Test 13's anti-vacuity: the fewest history-bearing pixels a frame may have.
+const BEARING_MIN: usize = 50;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Cut,
     Accumulate,
+    /// Test 13: the exposure ramps from frame [`RAMP_AT`] + 1.
+    Ramp,
+    /// Test 13: the same scene at exposure 1 throughout.
+    Steady,
 }
 
 #[derive(Resource)]
@@ -136,6 +185,11 @@ fn taa_setup(
         global: GlobalTransform::IDENTITY,
         light: DirectionalLight::new(dir, [1.0, 0.96, 0.90], 2.8),
     });
+    if matches!(mode.0, Mode::Ramp | Mode::Steady) {
+        // Test 13: with a SkyLight the background is pre-exposed sky radiance (the no-sky arm's
+        // constant is not), so the whole image scales with the exposure.
+        commands.spawn(SkyLight::new([0.38, 0.44, 0.55], [0.20, 0.20, 0.22]));
+    }
     cams.a = Some(commands.spawn(camera_rig(Vec3::new(0.0, 1.6, 5.0))).id());
     if mode.0 == Mode::Cut {
         let mut b = camera_rig(Vec3::new(2.5, 1.2, 4.0));
@@ -156,6 +210,23 @@ fn switch_camera(stats: Res<HostFrameStats>, cams: Res<Cameras>, mut q: Query<&m
     }
 }
 
+/// Test 13's ramp: `LightingConfig::exposure = RAMP_STEP^k`, `k` the frames past [`RAMP_AT`]
+/// (capped at [`RAMP_FRAMES`]). Ordered before `PostPolicySet`, so frame `F`'s policy reads it.
+#[allow(clippy::needless_pass_by_value)]
+fn ramp_exposure(stats: Res<HostFrameStats>, mut cfg: ResMut<LightingConfig>) {
+    let k = stats.frames.saturating_sub(RAMP_AT).min(u64::from(RAMP_FRAMES));
+    cfg.exposure = RAMP_STEP.powi(i32::try_from(k).expect("invariant: k <= RAMP_FRAMES"));
+}
+
+/// Test 13's log: one `frame pre_exposure_bits` line per frame — the value `ResolvedPost`
+/// carries THIS frame (ordered after `PostPolicySet`).
+#[allow(clippy::needless_pass_by_value)]
+fn log_pre_exposure(stats: Res<HostFrameStats>, post: Res<ResolvedPost>) {
+    let Ok(path) = std::env::var(ENV_LOG) else { return };
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).expect("invariant: the log is writable");
+    writeln!(f, "{} {}", stats.frames, post.pre_exposure.to_bits()).expect("invariant: the log accepts a line");
+}
+
 /// The cut worker's log: one `frame frames_since_reset` line per frame.
 #[allow(clippy::needless_pass_by_value)]
 fn log_taa_state(stats: Res<HostFrameStats>, taa: Res<TaaState>) {
@@ -164,7 +235,7 @@ fn log_taa_state(stats: Res<HostFrameStats>, taa: Res<TaaState>) {
     writeln!(f, "{} {}", stats.frames, taa.frames_since_reset).expect("invariant: the log accepts a line");
 }
 
-/// **THE WORKER** — `BOYKO_PX1A_TAA=cut|accumulate`.
+/// **THE WORKER** — `BOYKO_PX1A_TAA=cut|accumulate|ramp|steady`.
 #[test]
 #[ignore = "gpu-windowed: the PX1a TAA worker, spawned by the px1a_taa_accumulation drivers; run with --test-threads=1"]
 fn px1a_taa_worker() {
@@ -175,7 +246,9 @@ fn px1a_taa_worker() {
     let mode = match mode.trim() {
         "cut" => Mode::Cut,
         "accumulate" => Mode::Accumulate,
-        other => panic!("{ENV_MODE}={other} is not cut|accumulate"),
+        "ramp" => Mode::Ramp,
+        "steady" => Mode::Steady,
+        other => panic!("{ENV_MODE}={other} is not cut|accumulate|ramp|steady"),
     };
     let mut app = App::new();
     app.add_plugins(EnginePlugins::window("boyko_engine px1a taa", WIN, WIN));
@@ -185,8 +258,24 @@ fn px1a_taa_worker() {
     app.insert_resource(RenderPathConfig { path: RenderPath::Deferred, legs: GeometryLegs::Mesh });
     app.insert_resource(AaConfig { mode: AaMode::Taa });
     if mode == Mode::Cut {
-        app.add_systems(switch_camera);
+        // A camera controller joins `CameraSet::Control` (`CameraSet`'s doc): the switch is then
+        // ordered before the active-camera resolve AND `resolve_post_policy`, so the policy sees it
+        // on frame SWITCH_AT itself — the frame test 16's oracle names.
+        app.add_systems_cfg(|b| {
+            b.add_system(switch_camera).in_set(CameraSet::Control);
+        });
         app.add_systems(log_taa_state);
+    }
+    if matches!(mode, Mode::Ramp | Mode::Steady) {
+        app.insert_resource(TaaConfig { luma_weight: false, ..TaaConfig::default() });
+        app.add_systems_cfg(|b| {
+            b.add_system(log_pre_exposure).after_set(PostPolicySet);
+        });
+    }
+    if mode == Mode::Ramp {
+        app.add_systems_cfg(|b| {
+            b.add_system(ramp_exposure).before_set(PostPolicySet);
+        });
     }
     app.run();
     assert!(app.world().resource::<HostFrameStats>().frames > 0, "the frame loop never ran — RED, never a skip");
@@ -437,6 +526,220 @@ fn px1a_taa_camera_switch_resets_the_history() {
     assert_eq!(fresh, [cut_frame], "exactly the cut frame {SWITCH_AT} must hold a fresh history; fresh frames: {fresh:?}");
 }
 
+/// One test-13 worker run: its `ResolvedPost` log (`frame -> pre_exposure`) and its dumps of the
+/// burst, frame for frame.
+struct RampRun {
+    pre: Vec<(u64, f32)>,
+    lit: Vec<(u32, DumpFile)>,
+    hist: Vec<(u32, DumpFile)>,
+    display: Vec<(u32, DumpFile)>,
+}
+
+fn ramp_run(mode: &str) -> RampRun {
+    let dir = dump_dir(&format!("px1a_taa_{mode}"));
+    let log = dir.join("pre_exposure.log");
+    let settle = RAMP_AT + 1;
+    run_worker(
+        "px1a_taa_worker",
+        &[
+            (ENV_MODE, mode.to_owned()),
+            (ENV_LOG, log.display().to_string()),
+            ("BOYKO_IMAGE_DUMP", "lit,taa_hist,display".to_owned()),
+            ("BOYKO_IMAGE_DUMP_PATH", dir.display().to_string()),
+            ("BOYKO_IMAGE_DUMP_SETTLE", settle.to_string()),
+            ("BOYKO_IMAGE_DUMP_FRAMES", RAMP_FRAMES.to_string()),
+            ("BOYKO_WINDOW_FRAMES", (settle + u64::from(RAMP_FRAMES) + 10).to_string()),
+        ],
+        false,
+    );
+    let text = std::fs::read_to_string(&log).unwrap_or_else(|e| panic!("no ResolvedPost log at {} ({e})", log.display()));
+    let pre = text
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            Some((it.next()?.parse().ok()?, f32::from_bits(it.next()?.parse().ok()?)))
+        })
+        .collect();
+    let load = |name: &str| -> Vec<(u32, DumpFile)> {
+        let files: Vec<(u32, DumpFile)> = files_of(&dir, name).into_iter().map(|(f, p)| (f, DumpFile::load(&p))).collect();
+        assert_eq!(files.len(), RAMP_FRAMES as usize, "{mode}: a {RAMP_FRAMES}-frame burst of `{name}`");
+        files
+    };
+    RampRun { pre, lit: load("lit"), hist: load("taa_hist"), display: load("display") }
+}
+
+/// The sum of every texel's RGB over `pick`ed pixels (`None` = every pixel).
+fn rgb_sum(d: &DumpFile, pick: Option<&[(u32, u32)]>) -> f64 {
+    let px = |x: u32, y: u32| {
+        let t = d.texel_f32(x, y);
+        f64::from(t[0]) + f64::from(t[1]) + f64::from(t[2])
+    };
+    match pick {
+        Some(set) => set.iter().map(|&(x, y)| px(x, y)).sum(),
+        None => (0..d.height).flat_map(|y| (0..d.width).map(move |x| (x, y))).map(|(x, y)| px(x, y)).sum(),
+    }
+}
+
+/// The steady run's history-bearing pixels at one frame: some channel of its history differs from
+/// its current `lit` by more than [`HISTORY_BEARING`] of the larger of the two.
+fn history_bearing(lit: &DumpFile, hist: &DumpFile) -> Vec<(u32, u32)> {
+    (0..lit.height)
+        .flat_map(|y| (0..lit.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let (l, h) = (lit.texel_f32(x, y), hist.texel_f32(x, y));
+            (0..3).any(|c| {
+                let big = f64::from(l[c].abs().max(h[c].abs()));
+                big > 1e-3 && f64::from((h[c] - l[c]).abs()) > HISTORY_BEARING * big
+            })
+        })
+        .collect()
+}
+
+/// One ramp frame, reduced to what test 13 judges.
+#[derive(Clone, Copy, Debug)]
+struct RampFrame {
+    /// The dump frame.
+    frame: u32,
+    /// `ResolvedPost::pre_exposure` the ramp run logged for this frame.
+    pre: f32,
+    /// The same, logged by the steady run.
+    steady_pre: f32,
+    /// `Σ lit_ramp / Σ lit_steady` over every pixel.
+    lit_ratio: f64,
+    /// `Σ taa_hist_ramp / Σ taa_hist_steady` over the history-bearing pixels.
+    hist_ratio: f64,
+    /// How many history-bearing pixels the frame has.
+    bearing: usize,
+}
+
+/// Test 13's verdict. `Err` names the first failing frame and statement.
+fn ramp_verdict(frames: &[RampFrame]) -> Result<(), String> {
+    if frames.len() != RAMP_FRAMES as usize {
+        return Err(format!("{} ramp frames, expected {RAMP_FRAMES}", frames.len()));
+    }
+    for (k, f) in (1..).zip(frames) {
+        let want = RAMP_STEP.powi(k);
+        if f.pre != want || f.steady_pre != 1.0 {
+            return Err(format!(
+                "frame {}: ResolvedPost::pre_exposure = {} (steady run {}), expected {want} (the ramp's k = {k}): \
+                 the policy did not read this frame's exposure, or the dump frames are not the log's",
+                f.frame, f.pre, f.steady_pre
+            ));
+        }
+        let rel = |r: f64| (r / f64::from(f.pre) - 1.0).abs();
+        if rel(f.lit_ratio) > RAMP_REL_TOL {
+            return Err(format!(
+                "frame {}: sum lit_ramp / sum lit_steady = {:.5}, not pre = {} (within {RAMP_REL_TOL}): the pre-exposure \
+                 did not reach the producers this frame (the header-only light rewrite)",
+                f.frame, f.lit_ratio, f.pre
+            ));
+        }
+        if f.bearing < BEARING_MIN {
+            return Err(format!("frame {}: only {} history-bearing pixels (min {BEARING_MIN})", f.frame, f.bearing));
+        }
+        if rel(f.hist_ratio) > RAMP_REL_TOL {
+            return Err(format!(
+                "frame {}: over {} history-bearing pixels sum taa_hist_ramp / sum taa_hist_steady = {:.5}, not pre = {} \
+                 (within {RAMP_REL_TOL}): the history was not rescaled by the exposure ratio (pre_ratio_delta)",
+                f.frame, f.bearing, f.hist_ratio, f.pre
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "gpu-windowed: PX1a test 13, the exposure ramp through ResolvedPost (spawns px1a_taa_worker twice); run with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
+fn px1a_taa_exposure_ramp_rescales_the_history() {
+    let ramp = ramp_run("ramp");
+    let steady = ramp_run("steady");
+    let pre_of = |run: &RampRun, f: u32| {
+        run.pre.iter().find(|r| r.0 == u64::from(f)).map(|r| r.1).unwrap_or_else(|| panic!("no log row for frame {f}"))
+    };
+    let frames: Vec<RampFrame> = (0..RAMP_FRAMES as usize)
+        .map(|i| {
+            let f = ramp.lit[i].0;
+            for run in [&ramp, &steady] {
+                assert_eq!((run.lit[i].0, run.hist[i].0), (f, f), "the two runs' bursts cover the same frames");
+            }
+            let bearing = history_bearing(&steady.lit[i].1, &steady.hist[i].1);
+            let row = RampFrame {
+                frame: f,
+                pre: pre_of(&ramp, f),
+                steady_pre: pre_of(&steady, f),
+                lit_ratio: rgb_sum(&ramp.lit[i].1, None) / rgb_sum(&steady.lit[i].1, None),
+                hist_ratio: rgb_sum(&ramp.hist[i].1, Some(&bearing)) / rgb_sum(&steady.hist[i].1, Some(&bearing)),
+                bearing: bearing.len(),
+            };
+            eprintln!("px1a test 13: {row:?}");
+            row
+        })
+        .collect();
+    if let Err(e) = ramp_verdict(&frames) {
+        panic!("{e}");
+    }
+}
+
+/// `post_eval`'s per-channel bound (`post_eval.rs` `channel_bound`, no filter row): one display code
+/// (the two 8-bit roundings) + E0's bound on the OETF's `pow` at the body value `o`.
+fn eval_bound_lsb(o: f32) -> f64 {
+    let g = f64::from(OETF_GAMMA_EXP);
+    let x = f64::from(o.max(0.0)).powf(1.0 / g);
+    let oetf = if x <= 0.0 { 0.0 } else { 255.0 * vk_pow_bound(x as f32, OETF_GAMMA_EXP, x.log2(), x.powf(g)) };
+    1.0 + oetf
+}
+
+/// The eval-post comparison of one frame: `display` against `post_final_eval` of `scene` under
+/// `words`, every pixel. Returns the number of channel samples outside [`eval_bound_lsb`] and the
+/// first few, described.
+fn eval_post_mismatches(scene: &DumpFile, display: &DumpFile, words: [u32; 8]) -> (usize, Vec<String>) {
+    assert_eq!((scene.width, scene.height), (display.width, display.height), "display is the scene input's extent");
+    let texels: Vec<[f32; 4]> =
+        (0..scene.height).flat_map(|y| (0..scene.width).map(move |x| (x, y))).map(|(x, y)| scene.texel_f32(x, y)).collect();
+    let params = eval_params(words);
+    let tex = HostTex2::new(&texels, scene.width, scene.height);
+    let (mut bad, mut first) = (0usize, Vec::new());
+    for y in 0..scene.height {
+        for x in 0..scene.width {
+            let o = post_final_eval([x, y], &params, tex);
+            let d = display.rgba8(x, y);
+            for c in 0..3 {
+                let delta = (255.0 * f64::from(o[c]) - f64::from(d[c])).abs();
+                if delta > eval_bound_lsb(o[c]) {
+                    bad += 1;
+                    if first.len() < 4 {
+                        first.push(format!("({x},{y}) ch{c}: display {} vs eval {:.3}", d[c], 255.0 * o[c]));
+                    }
+                }
+            }
+        }
+    }
+    (bad, first)
+}
+
+/// The `post_final` words the runner uploads for this worker: the default tonemapper through
+/// `post_host::post_final_gpu` (ratio 1), the window's extent.
+fn runner_post_words() -> [u32; 8] {
+    let post = ResolvedPost::from_config(&LightingConfig::default());
+    boyko_render::post_final_words(&boyko_app::post_host::post_final_gpu(&post, [WIN, WIN]))
+}
+
+#[test]
+#[ignore = "gpu-windowed: PX1a eval-post pin, display == post_final_eval(taa_hist[fi]) on the ramp's TAA frames (spawns px1a_taa_worker); run with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
+fn px1a_taa_display_is_post_final_of_this_frames_history() {
+    let run = ramp_run("ramp");
+    let words = runner_post_words();
+    for ((f, hist), (fd, display)) in run.hist.iter().zip(&run.display) {
+        assert_eq!(f, fd, "the taa_hist and display bursts cover the same frames");
+        let (bad, first) = eval_post_mismatches(hist, display, words);
+        assert!(
+            bad == 0,
+            "frame {f}: {bad} display channel samples differ from post_final_eval(taa_hist[fi]) beyond one code + \
+             the OETF bound (first: {first:?}): post_final did not read this frame's history"
+        );
+    }
+}
+
 /// Test 16's verdict over the cut worker's `frame frames_since_reset` log.
 ///
 /// **Why these rows.** `log_taa_state` runs in the ECS schedule, BEFORE the runner's reset site
@@ -576,6 +879,76 @@ fn the_resolve_space_fraction_separates_a_pre_tonemap_resolve_from_a_display_spa
     assert!(hdr_edge_pixels(&ldr).is_err(), "a display-referred lit (RGBA8 until the switch) must red the premise");
     let clamped = synthetic_bar_edge(|c| c.map(|x| x.min(1.0)), |lit| steady(hdr_blend_of(lit), lit.len()));
     assert!(hdr_edge_pixels(&clamped).is_err(), "a lit clamped at 1.0 must red the premise");
+}
+
+/// A correct ramp frame `k` (1-based), with the given ratio errors.
+fn synthetic_ramp_frame(k: i32, lit_err: f64, hist_err: f64) -> RampFrame {
+    let pre = RAMP_STEP.powi(k);
+    RampFrame {
+        frame: u32::try_from(RAMP_AT).expect("invariant: fits") + k as u32,
+        pre,
+        steady_pre: 1.0,
+        lit_ratio: f64::from(pre) * (1.0 + lit_err),
+        hist_ratio: f64::from(pre) * (1.0 + hist_err),
+        bearing: 400,
+    }
+}
+
+#[test]
+fn the_ramp_verdict_reds_a_missing_header_path_and_a_missing_rescale() {
+    let ok: Vec<RampFrame> = (1..=RAMP_FRAMES as i32).map(|k| synthetic_ramp_frame(k, 1e-4, -1e-4)).collect();
+    assert_eq!(ramp_verdict(&ok), Ok(()));
+    // The header-only path removed: `lit` stays at exposure 1 while the policy ramps.
+    let no_header: Vec<RampFrame> =
+        ok.iter().map(|f| RampFrame { lit_ratio: 1.0, hist_ratio: 1.0, ..*f }).collect();
+    assert!(ramp_verdict(&no_header).unwrap_err().contains("header-only light rewrite"));
+    // `pre_ratio_delta` forced 0: the history lags the new scale (one step of 1.25 ≈ 20 % on the
+    // history-bearing pixels before the blend).
+    let no_rescale: Vec<RampFrame> = ok.iter().map(|f| RampFrame { hist_ratio: f.lit_ratio * 0.9, ..*f }).collect();
+    assert!(ramp_verdict(&no_rescale).unwrap_err().contains("pre_ratio_delta"));
+    // The policy a frame late (the ramp system unordered against `PostPolicySet`).
+    let late: Vec<RampFrame> = ok.iter().map(|f| RampFrame { pre: f.pre / RAMP_STEP, ..*f }).collect();
+    assert!(ramp_verdict(&late).unwrap_err().contains("this frame's exposure"));
+    let empty: Vec<RampFrame> = ok.iter().map(|f| RampFrame { bearing: 3, ..*f }).collect();
+    assert!(ramp_verdict(&empty).unwrap_err().contains("history-bearing"));
+}
+
+/// An RGBA16F / RGBA8 dump pair built in memory (the `OBSD` header `DumpFile::parse` reads).
+fn synthetic_dump(format: u32, w: u32, h: u32, texel: impl Fn(u32, u32) -> Vec<u8>) -> DumpFile {
+    let texel_bytes = if format == image_dump::VK_R16G16B16A16_SFLOAT { 8 } else { 4 };
+    let mut texels = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            texels.extend(texel(x, y));
+        }
+    }
+    DumpFile { format, width: w, height: h, mip: 0, layers: 1, frame: 0, texel_bytes, texels }
+}
+
+#[test]
+fn the_eval_post_comparison_separates_this_frames_history_from_last_frames() {
+    let (w, h) = (16u32, 8u32);
+    let radiance = |x: u32, y: u32| 0.02 + 0.3 * x as f32 + 0.1 * y as f32;
+    let f16 = |v: f32| u16::try_from(boyko_shaderdsl::half::f32_to_f16_bits(v)).expect("invariant: a binary16 code");
+    let hist_of = |scale: f32| {
+        synthetic_dump(image_dump::VK_R16G16B16A16_SFLOAT, w, h, |x, y| {
+            let v = f16(radiance(x, y) * scale);
+            [v, v, v, f16(1.0)].iter().flat_map(|b| b.to_le_bytes()).collect()
+        })
+    };
+    let words = runner_post_words();
+    let this = hist_of(1.0);
+    let texels: Vec<[f32; 4]> = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).map(|(x, y)| this.texel_f32(x, y)).collect();
+    let params = eval_params(words);
+    let display = synthetic_dump(image_dump::VK_R8G8B8A8_UNORM, w, h, |x, y| {
+        let o = post_final_eval([x, y], &params, HostTex2::new(&texels, w, h));
+        let q = |c: f32| (c * 255.0).round().clamp(0.0, 255.0) as u8;
+        vec![q(o[0]), q(o[1]), q(o[2]), 255]
+    });
+    assert_eq!(eval_post_mismatches(&this, &display, words).0, 0, "this frame's history, quantised: within the bound");
+    let last = hist_of(1.0 / RAMP_STEP);
+    let (bad, _) = eval_post_mismatches(&last, &display, words);
+    assert!(bad > (w * h) as usize, "last frame's history (1/1.25 of this one) must red on most samples: {bad}");
 }
 
 #[test]

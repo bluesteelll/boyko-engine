@@ -74,7 +74,7 @@ struct OtherArchetype;
 /// Folds the four slices into a worst-case-sized buffer and returns it trimmed to the valid bytes.
 fn table(dirs: &[DirectionalLight], skies: &[SkyLight], points: &[PointLight], spots: &[SpotLight]) -> Vec<u8> {
     let mut buf = vec![0u8; LIGHT_HEADER_BYTES + (MAX_LIGHTS as usize) * GPU_LIGHT_BYTES];
-    let used = write_light_table(&mut buf, dirs, skies, points, spots, &LightingConfig::default());
+    let used = write_light_table(&mut buf, dirs, skies, points, spots, &LightingConfig::default(), 1.0);
     buf.truncate(used);
     buf
 }

@@ -54,6 +54,7 @@ use boyko_render::instance_model::InstanceModelCol;
 use boyko_render::light::{LightingConfig, PointLight, SpotLight};
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::mesh_draw::PerInstanceMaterial;
+use boyko_render::post::PostPlugin;
 use boyko_render::shadow_atlas::PunctualSlotAssignment;
 use boyko_render::{
     CASTS_SHADOW_BIT, CastsPunctualShadow, CsmConfig, CsmCasterScratch, CsmPlugin, DirectionalLight,
@@ -150,6 +151,8 @@ fn header_bits_pass_arming_and_slots_agree_on_every_leg_set() {
     app.insert_resource(LightTableStaging::default());
     app.insert_resource(LightingConfig::default());
     app.add_plugins(LightingPlugin);
+    // Render wave PX1a: `collect_lights` reads `ResolvedPost`, owned by `PostPlugin`.
+    app.add_plugin(PostPlugin);
     app.add_plugin(CsmPlugin);
     app.add_plugin(ShadowAtlasPlugin);
     app.insert_resource(CsmCasterScratch::default());

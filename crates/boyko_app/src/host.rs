@@ -22,6 +22,7 @@ use boyko_rhi_vulkan::window::{Window, WindowError};
 use boyko_scene::FreeEntry;
 
 use crate::gpu_scene::{DrawListScratch, GpuSceneBundles};
+use crate::light_gate::{LightDeviceState, LightSlotState};
 use crate::runner::WindowDesc;
 
 /// A typed boot-chain failure — which link of the window → surface → swapchain
@@ -130,13 +131,15 @@ pub(crate) struct WindowHost {
     /// `ResolvedRenderPathGpu` the RHI dispatches its per-path declarator on. (This doc read
     /// "DEAD-BUT-THREADED at R1 (nothing reads it yet)" for as long as that was false.)
     pub(crate) resolved_render_path: ResolvedRenderPath,
-    /// Per-in-flight-slot record of the `LightTableGeneration` whose staged
-    /// bytes were last written into that slot's light staging (host plan D5/R4).
-    /// Seeded `u64::MAX` (≠ any real generation) so BOTH slots upload the real
-    /// ECS table on their first frames; thereafter slot `s` is rewritten iff
-    /// `light_uploaded_gen[s] != generation` (the deterministic writer-side
-    /// gate — see `crate::light_gate::light_upload_due`).
-    pub(crate) light_uploaded_gen: [u64; FRAMES_IN_FLIGHT],
+    /// Per in-flight slot, the `LightTableGeneration` / `LightHeaderGeneration` whose bytes that
+    /// slot's light staging holds (host plan D5/R4; render wave PX1a, D-E6). Seeded
+    /// [`LightSlotState::BOOT`] (`u64::MAX`, not a generation) so BOTH slots write the real ECS
+    /// table on their first frames — see [`crate::light_gate::light_copy_plan`].
+    pub(crate) light_slots: LightSlotState<FRAMES_IN_FLIGHT>,
+    /// The generations the DEVICE light table holds — advanced only after a frame that presented
+    /// (`Ok(true)`), so a minimized skip or an acquire-time `Ok(false)` leaves it behind and the
+    /// next presented frame copies what the device missed (DM1's skip-owes-full discipline).
+    pub(crate) light_device: LightDeviceState,
     /// SDFDDGI host-hook: the last `ResolvedDdgi` image written into the SINGLE binding-18
     /// grid UBO (`GpuSceneBundles::ddgi_ubo`) — the value gate for that write. Seeded
     /// `DISABLED`, which IS the buffer's zero boot seed, so the first ENABLED carrier differs
@@ -148,7 +151,7 @@ pub(crate) struct WindowHost {
     /// Particles P0: per-in-flight-slot record of the `ParticleEffectScratch::rows_gen()` whose
     /// baked bytes were last written into that slot's effect staging.
     ///
-    /// `light_uploaded_gen`'s twin, seeded `u64::MAX` for the same reason — BOTH slots upload the
+    /// The light staging record's twin (`light_slots`), seeded `u64::MAX` for the same reason — BOTH slots upload the
     /// real effect table on their first frames, which is what makes the device table defined at
     /// frame 0 without a separate boot upload path. The gate is
     /// [`crate::particle_gate::particle_effects_upload_due`]. Carried unconditionally (8 bytes on
@@ -299,7 +302,8 @@ impl WindowHost {
             resolved_render_path: ResolvedRenderPath::default(),
             // u64::MAX ≠ any real generation ⇒ both slots upload the ECS light
             // table on their first frames (host plan D5/R4).
-            light_uploaded_gen: [u64::MAX; FRAMES_IN_FLIGHT],
+            light_slots: LightSlotState::BOOT,
+            light_device: LightDeviceState::BOOT,
             // DISABLED == the b18 buffer's zero boot seed: the first enabled carrier differs
             // from it and is uploaded; a never-enabled run never writes the buffer at all.
             last_ddgi_grid: ResolvedDdgi::DISABLED,

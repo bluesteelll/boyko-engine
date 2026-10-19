@@ -610,8 +610,8 @@ pub use light::{
 };
 pub use light_policy::{CLUSTER_HI, CLUSTER_LO, LightStats, select_lighting_cull};
 pub use light_system::{
-    GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightCollectSet, LightSeedSet,
-    LightSeedState,
+    GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightCollectSet, LightHeaderGeneration,
+    LightSeedSet, LightSeedState,
     LightTableGeneration, LightTableStaging, SetLightEnabledById, collect_lights, evict_light,
     fold_light_table, fold_light_table_slotted, light_seed_state, primary_directional_dir, table_has_sky,
     set_light_enabled_now, write_light_table,
@@ -653,7 +653,7 @@ pub use aa_config::{
 pub use aa_plugin::AaPlugin;
 pub use taa_config::{
     BlendMode, ClampShape, ClampSpace, ClipMode, DisocclusionTest, HistoryFilter, JitterScope,
-    JitterSequence, MvSource, SharpenMode, TaaConfig, resolve_taa, resolve_taa_policy,
+    JitterSequence, MvSource, SharpenMode, TaaConfig, TaaPolicySet, resolve_taa, resolve_taa_policy,
 };
 pub use taa_jitter::{HALTON_8, JitterState, NdcJitter, advance_jitter, ndc_jitter};
 pub use taa_state::TaaState;

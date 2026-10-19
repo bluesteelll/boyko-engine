@@ -32,6 +32,7 @@ use boyko_render::light::{
 use boyko_render::light_plugin::LightingPlugin;
 use boyko_render::light_policy::LightStats;
 use boyko_render::light_system::{LightTableStaging, LIGHT_HEADER_BYTES};
+use boyko_render::post::PostPlugin;
 
 use boyko_scene::transform::{GlobalTransform, Transform};
 
@@ -47,7 +48,8 @@ pub fn as_bytes<T>(value: &T) -> &[u8] {
 }
 
 /// Builds an `App` with `LightingPlugin` (registers eviction hooks FIRST, before any
-/// light is archetyped) and the `LightTableStaging` staging resource.
+/// light is archetyped), `PostPlugin` (the owner of the `ResolvedPost` `collect_lights` reads —
+/// render wave PX1a) and the `LightTableStaging` staging resource.
 ///
 /// The caller MUST NOT spawn any light before this returns — see the module-level
 /// isolation note.
@@ -60,6 +62,10 @@ pub fn lighting_app() -> App {
     app.insert_resource(LightTableStaging::default());
     app.insert_resource(LightingConfig::default());
     app.add_plugins(LightingPlugin);
+    // Render wave PX1a (D-E2): `collect_lights` packs `ResolvedPost::pre_exposure`, whose single
+    // writer `PostPlugin` registers; it reads the `LightingConfig` inserted above. Added after
+    // `LightingPlugin`: the readers' set edges hold whatever the add-order.
+    app.add_plugins(PostPlugin);
     app
 }
 
