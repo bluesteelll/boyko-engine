@@ -196,8 +196,24 @@ fn traced_constants(arena: &[Node], symbols: &[&'static str]) -> Vec<(&'static s
         .collect()
 }
 
-/// Traces [`crate::post::post_final_main`] over [`EmitCf`] and returns `(body span, constants)`.
-fn trace_post_final_main() -> (String, Vec<(&'static str, &'static str, String)>) {
+/// Which `post_final` module [`emit_post_final_comp_with`] prints.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PostFinalTwin {
+    /// The committed module: the tonemapper is the runtime mode word, a `[branch]` dispatch over the
+    /// three curves ([`emit_post_final_comp`]).
+    Uber,
+    /// Render wave PX1a O6 (`boyko_rhi_vulkan/tests/post_final_occupancy.rs`, TEST-ONLY, never
+    /// committed): the same traced body with the mode word replaced by the ACES constant
+    /// (`TONEMAP_ACES << TONEMAP_MODE_SHIFT`), so DXC folds the dispatch to the ACES arm — the
+    /// "arms compiled out" twin whose driver statistics the occupancy row prints beside the uber
+    /// module's.
+    AcesOnly,
+}
+
+/// Traces [`crate::post::post_final_main`] over [`EmitCf`] and returns `(body span, constants)`;
+/// `twin` chooses whether the mode word is the UBO input ([`PostFinalTwin::Uber`]) or the ACES
+/// constant ([`PostFinalTwin::AcesOnly`]).
+fn trace_post_final_main(twin: PostFinalTwin) -> (String, Vec<(&'static str, &'static str, String)>) {
     let (floats, uints) = post_input_names();
     let float_in: Vec<&str> = floats.iter().map(String::as_str).collect();
     let uint_in: Vec<&str> = uints.iter().map(String::as_str).collect();
@@ -205,8 +221,14 @@ fn trace_post_final_main() -> (String, Vec<(&'static str, &'static str, String)>
     let mut consts = Vec::new();
     let span = emit_post_leaf(&float_in, &uint_in, NO_VEC_INPUTS, NO_VEC4_INPUTS, &res, || {
         let px = [Emit::uint_input(input_id(&uints, "px.x")), Emit::uint_input(input_id(&uints, "px.y"))];
+        let mode_words = match twin {
+            PostFinalTwin::Uber => Emit::uint_input(input_id(&uints, "mode_words")),
+            PostFinalTwin::AcesOnly => {
+                <EmitCf as Cf>::uint_lit(post::TONEMAP_ACES << post::TONEMAP_MODE_SHIFT)
+            }
+        };
         let params = PostParams::<EmitCf> {
-            mode_words: Emit::uint_input(input_id(&uints, "mode_words")),
+            mode_words,
             exposure_ratio: Emit::input(input_id(&floats, "exposure_ratio")),
             extent: [
                 Emit::uint_input(input_id(&uints, "extent.x")),
@@ -225,7 +247,7 @@ fn trace_post_final_main() -> (String, Vec<(&'static str, &'static str, String)>
 /// [`EmitCf`] — the whole per-pixel body: the one scene fetch, the four stage markers, the
 /// `[branch]` tonemapper dispatch, the OETF and the `float4` return.
 pub fn emit_hlsl_post_final_main() -> String {
-    trace_post_final_main().0
+    trace_post_final_main(PostFinalTwin::Uber).0
 }
 
 /// The `post_final_bindings` span: one declaration per [`crate::post::POST_FINAL_BINDINGS`] row, the
@@ -263,11 +285,12 @@ pub fn emit_hlsl_post_final_bindings() -> String {
 
 /// The `post_final_consts` span: a `static const` for every symbol the traced body references.
 pub fn emit_hlsl_post_final_consts() -> String {
-    trace_post_final_main()
-        .1
-        .iter()
-        .map(|(sym, ty, val)| format!("static const {ty} {sym} = {val};\n"))
-        .collect()
+    post_final_consts_text(&trace_post_final_main(PostFinalTwin::Uber).1)
+}
+
+/// The `post_final_consts` span text of a trace's constants.
+fn post_final_consts_text(consts: &[(&'static str, &'static str, String)]) -> String {
+    consts.iter().map(|(sym, ty, val)| format!("static const {ty} {sym} = {val};\n")).collect()
 }
 
 /// Wraps a generated span in its sentinel pair.
@@ -283,8 +306,22 @@ fn sentinel(name: &str, body: &str) -> String {
 ///
 /// The template lives HERE (not in the bin) so the sync test compares the whole committed file.
 pub fn emit_post_final_comp() -> String {
-    let main_fn = format!("float4 post_final_main(uint2 px) {{\n{}}}\n", emit_hlsl_post_final_main());
-    format!(
+    emit_post_final_comp_with(PostFinalTwin::Uber)
+}
+
+/// [`emit_post_final_comp`] for either twin: [`PostFinalTwin::Uber`] is the committed file, byte for
+/// byte; [`PostFinalTwin::AcesOnly`] is the TEST-ONLY O6 twin (`post_final_occupancy.rs` DXCs it at
+/// test time under the same frozen recipe; it is never committed), headed by one line that says so.
+pub fn emit_post_final_comp_with(twin: PostFinalTwin) -> String {
+    let (body, consts) = trace_post_final_main(twin);
+    let main_fn = format!("float4 post_final_main(uint2 px) {{\n{body}}}\n");
+    let twin_line = match twin {
+        PostFinalTwin::Uber => "",
+        PostFinalTwin::AcesOnly => {
+            "// TEST-ONLY O6 TWIN (PostFinalTwin::AcesOnly): the mode word is the ACES constant. Never committed.\n"
+        }
+    };
+    let file = format!(
         r#"// post_final.comp -- render wave PXe: the post chain's final pass, GENERATED WHOLE and not yet
 // wired (PX1a creates its pipeline). Per pixel: one scene fetch, then hdr_sanitize -> pre_ratio_apply
 // -> tonemap_select -> oetf_gamma22 (`boyko_shaderdsl::post`), stored to the display image.
@@ -313,9 +350,10 @@ void main(uint3 dtid : SV_DispatchThreadID) {{
 }}
 "#,
         bindings = sentinel("post_final_bindings", &emit_hlsl_post_final_bindings()),
-        consts = sentinel("post_final_consts", &emit_hlsl_post_final_consts()),
+        consts = sentinel("post_final_consts", &post_final_consts_text(&consts)),
         main_fn = sentinel("post_final_main", &main_fn),
-    )
+    );
+    format!("{twin_line}{file}")
 }
 
 // ---- Render wave PX1a: the HDR boundary spans (`px1a/cut.md` D-S2; orchestrator ruling 67 W5) ----
