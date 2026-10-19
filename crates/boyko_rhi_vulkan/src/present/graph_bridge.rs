@@ -1102,8 +1102,9 @@ pub(crate) struct ImageDumpPlan {
     /// The copy pass (`image_dump`), declared LAST.
     pub(crate) pass: crate::framegraph::PassId,
     /// The restore pass (`image_dump_restore`), declared after it iff a copied image is seeded at
-    /// a layout other than `GENERAL` — no production instance at OBS (PX1a's `display` is the
-    /// first); the host tests carry the shape.
+    /// a layout other than `GENERAL` / `UNDEFINED` ([`dump_copy_layout`]) — render wave PX1a's
+    /// `display` (FrameLocal, seeded at `SHADER_READ_ONLY_OPTIMAL`) is the production instance;
+    /// this file's `tests` drive it over the production declarations.
     pub(crate) restore: Option<crate::framegraph::PassId>,
     /// The names copied, as bits.
     pub(crate) names: u8,
@@ -1128,16 +1129,38 @@ fn touched_this_frame(g: &crate::framegraph::FrameGraph, res: crate::framegraph:
     })
 }
 
+/// The layout `image_dump` copies an image in, and whether `image_dump_restore` must read it
+/// back at its seed layout — decided by the SEED LAYOUT alone, the property the seeded-layout
+/// invariant ([`seeded_layout_violation`](crate::framegraph::seeded::seeded_layout_violation))
+/// checks on every image whatever its provenance bit: a FrameLocal image seeded at a layout
+/// (`display`, `lit_native`) must end its frame there exactly as a CrossFrame one (`taa_hist`)
+/// must (render wave PX1a, ruling 72 (2): keyed on `res_seeded`, both FrameLocal images ended a
+/// dump frame in `TRANSFER_SRC_OPTIMAL`).
+const fn dump_copy_layout(seed_layout: i32) -> (i32, bool) {
+    match seed_layout {
+        // A legal copy source: the end state is untouched.
+        VK_IMAGE_LAYOUT_GENERAL => (VK_IMAGE_LAYOUT_GENERAL, false),
+        // No layout to keep (a per-FIF ring slot, or a seed without a layout): the next first
+        // touch discards the content.
+        VK_IMAGE_LAYOUT_UNDEFINED => (VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, false),
+        _ => (VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, true),
+    }
+}
+
 /// OBS (D, H0 Scope 6): declares the `image_dump` pass LAST on a request frame — one `TRANSFER`
 /// read per requested name this declarator has and touched this frame (`None` when none of them
 /// qualifies). Called only on a request frame: every other frame of every run skips the call.
 ///
-/// - A seeded image whose frame-boundary layout is `GENERAL` (`taa_hist`) is copied AT `GENERAL`,
-///   a legal copy source, so its end state is untouched and the seeded-layout invariant holds.
-/// - Any other seeded image is copied at `TRANSFER_SRC_OPTIMAL` and `image_dump_restore` declares
-///   a READ back at its boundary layout, at a stage inside its seed (verify OQ2: a restore
-///   declared as a write would end a reader-seeded image's frame on a write).
-/// - A per-FIF ring slot (unseeded) needs no restore: its next first touch discards it.
+/// The copy layout and the restore read the seed layout only ([`dump_copy_layout`]), never the
+/// CrossFrame / FrameLocal provenance bit:
+/// - an image seeded at `GENERAL` (`taa_hist`, `lit_native`) is copied AT `GENERAL`, a legal copy
+///   source, so its end state is untouched and the seeded-layout invariant holds;
+/// - an image seeded at any other layout (`display`, at `SHADER_READ_ONLY_OPTIMAL`) is copied at
+///   `TRANSFER_SRC_OPTIMAL` and `image_dump_restore` declares a READ back at its seed layout, at a
+///   stage inside its seed (verify OQ2: a restore declared as a write would end a reader-seeded
+///   image's frame on a write);
+/// - an image without a seed layout (a per-FIF ring slot) needs no restore: its next first touch
+///   discards it.
 #[cold]
 #[inline(never)]
 fn declare_image_dump(
@@ -1165,13 +1188,8 @@ fn declare_image_dump(
         if names & (1 << name as u8) == 0 {
             continue;
         }
-        let seed = g.res_seed(res);
-        let layout = if g.res_seeded(res) && seed.layout == VK_IMAGE_LAYOUT_GENERAL {
-            VK_IMAGE_LAYOUT_GENERAL
-        } else {
-            needs_restore |= g.res_seeded(res) && seed.layout != VK_IMAGE_LAYOUT_UNDEFINED;
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-        };
+        let (layout, restore) = dump_copy_layout(g.res_seed(res).layout);
+        needs_restore |= restore;
         layouts[name as usize] = layout;
         g.image_access(res, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, layout, sub_of(name));
     }
@@ -1179,11 +1197,7 @@ fn declare_image_dump(
         let p = g.add_pass("image_dump_restore");
         for &(name, res) in sources {
             let seed = g.res_seed(res);
-            if names & (1 << name as u8) != 0
-                && layouts[name as usize] == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-                && g.res_seeded(res)
-                && seed.layout != VK_IMAGE_LAYOUT_UNDEFINED
-            {
+            if names & (1 << name as u8) != 0 && dump_copy_layout(seed.layout).1 {
                 let stages = seed_stages(seed);
                 // The lowest stage the seed names (a stage INSIDE it); FRAGMENT when it names none.
                 let stage = if stages == 0 { VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT } else { stages.isolate_lowest_one() };
@@ -7701,4 +7715,173 @@ fn vb_sink_buffers(
         buffers.push_all(&[slot!("material_table", Single, scene.material_table.buffer)]);
     }
     buffers
+}
+
+// Ruling 72 (2), U1: the image dump over the two FrameLocal images seeded at a layout. `display`
+// (seeded at `SHADER_READ_ONLY_OPTIMAL`) and `lit_native` (seeded at `GENERAL`) carry a seed
+// layout without the CrossFrame provenance bit, and the seeded-layout invariant
+// (`framegraph::seeded::seeded_layout_violation`) checks every image with a seed layout, whatever
+// that bit says. Each test drives the production declarations (`declare_display`,
+// `declare_lit_native`, `taa_hist`'s Deferred seed) and the production dump declarator over the
+// seam's accesses: one dumped seeded name per test first, because the invariant reports only the
+// FIRST violation (in `ResId` order, so `display` would mask `lit_native`), then every class
+// together.
+#[cfg(test)]
+mod tests {
+    use crate::ffi::{
+        VkBuffer, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+    };
+    use crate::framegraph::seeded::seeded_layout_violation;
+    use crate::framegraph::{FrameGraph, ResId, ResSync, SubRange};
+
+    use super::super::frame_driver::{ImageDumpName, ImageDumpRequest, IMAGE_DUMP_MAX};
+    use super::{declare_display, declare_image_dump, declare_lit_native, ImageDumpPlan};
+
+    const COMPUTE: u32 = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    const FRAGMENT: u32 = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    const SRO: i32 = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    /// The scene input the seam's `post_final` reads.
+    #[derive(Clone, Copy)]
+    enum Input {
+        /// `taa_hist`, the resolve's `[fi]` write slot.
+        Taa,
+        /// `lit_native`, the SSAA downsample's output.
+        Ssaa,
+    }
+
+    /// One compiled request frame and its dump plan.
+    struct Frame {
+        g: FrameGraph,
+        lit: ResId,
+        taa_hist: ResId,
+        display: ResId,
+        lit_native: ResId,
+        plan: ImageDumpPlan,
+    }
+
+    /// A request naming `names` (a non-null staging handle each; the declarator reads only that).
+    fn request(names: &[ImageDumpName]) -> ImageDumpRequest {
+        let mut r = ImageDumpRequest { staging: [VkBuffer::NULL; IMAGE_DUMP_MAX], capacity: [0; IMAGE_DUMP_MAX] };
+        for &n in names {
+            r.staging[n as usize] = VkBuffer(1 + n as u64);
+            r.capacity[n as usize] = 1;
+        }
+        r
+    }
+
+    /// One frame of `declare_post_seam`'s shape, dump-widened as every dump-armed renderer
+    /// declares it: `lit` (a per-FIF ring slot, unseeded) drawn; under TAA the resolve writes
+    /// `taa_hist` (CrossFrame, `GENERAL`) and `post_final` reads it, under SSAA the downsample
+    /// initialises `lit_native` and `post_final` reads it; `post_final` initialises `display` and
+    /// `present_sample` reads it at `SHADER_READ_ONLY`. Then the production dump of `names`, and
+    /// `compile` (whose debug build fires the seeded-layout invariant).
+    fn dump_frame(input: Input, names: &[ImageDumpName]) -> Frame {
+        let mut g = FrameGraph::with_capacity(8, 8, 32);
+        let lit = g.add_image("lit");
+        let taa_hist = g.add_image_seeded(
+            "taa_hist",
+            ResSync::seeded_readers_at_layout(VK_IMAGE_LAYOUT_GENERAL, COMPUTE, VK_ACCESS_SHADER_READ_BIT),
+        );
+        let display = declare_display(&mut g, true);
+        let lit_native = declare_lit_native(&mut g, true);
+        g.add_pass("draw");
+        g.image_access(
+            lit,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            SubRange::COLOR,
+        );
+        match input {
+            Input::Taa => {
+                g.add_pass("taa_resolve");
+                g.image_access(lit, COMPUTE, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
+                g.image_access(taa_hist, COMPUTE, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
+                g.add_pass("post_final");
+                g.image_access(taa_hist, COMPUTE, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
+            }
+            Input::Ssaa => {
+                g.add_pass("ssaa_downsample");
+                g.image_access(lit, FRAGMENT, VK_ACCESS_SHADER_READ_BIT, SRO, SubRange::COLOR);
+                lit_native.init_attachment(
+                    &mut g,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    SubRange::COLOR,
+                );
+                g.add_pass("post_final");
+                lit_native.read(&mut g, COMPUTE, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
+            }
+        }
+        display.init_storage_full(&mut g, COMPUTE, SubRange::COLOR);
+        g.add_pass("present_sample");
+        display.read(&mut g, FRAGMENT, VK_ACCESS_SHADER_READ_BIT, SRO, SubRange::COLOR);
+        let plan = declare_image_dump(
+            &mut g,
+            &request(names),
+            &[
+                (ImageDumpName::Lit, lit),
+                (ImageDumpName::TaaHist, taa_hist),
+                (ImageDumpName::Display, display.id()),
+                (ImageDumpName::LitNative, lit_native.id()),
+            ],
+        )
+        .expect("invariant: every requested name is touched this frame");
+        g.compile();
+        Frame { g, lit, taa_hist, display: display.id(), lit_native: lit_native.id(), plan }
+    }
+
+    /// The restore pass's accesses as `(resource, layout)`, empty when no restore was declared.
+    fn restored(f: &Frame) -> Vec<(ResId, i32)> {
+        f.plan.restore.map_or_else(Vec::new, |p| f.g.pass_accesses(p).map(|a| (a.res, a.layout)).collect())
+    }
+
+    /// Checked directly as well as by `compile`, so a release-profile run (where `compile`'s
+    /// check is compiled out) still checks it.
+    fn assert_every_seed_layout_holds(f: &Frame) {
+        assert_eq!(seeded_layout_violation(&f.g), None, "an image with a seed layout ends the frame outside it");
+    }
+
+    #[test]
+    fn a_dumped_display_is_copied_at_transfer_src_then_restored_to_its_seed_layout() {
+        let f = dump_frame(Input::Taa, &[ImageDumpName::Display]);
+        assert_every_seed_layout_holds(&f);
+        assert_eq!(f.plan.layouts[ImageDumpName::Display as usize], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        assert_eq!(restored(&f), [(f.display, SRO)], "the restore reads display back at its seed layout");
+        assert_eq!(f.g.resolved_layout(f.display), SRO);
+    }
+
+    #[test]
+    fn a_dumped_lit_native_is_copied_at_its_general_seed_layout() {
+        let f = dump_frame(Input::Ssaa, &[ImageDumpName::LitNative]);
+        assert_every_seed_layout_holds(&f);
+        assert_eq!(f.plan.layouts[ImageDumpName::LitNative as usize], VK_IMAGE_LAYOUT_GENERAL);
+        assert!(f.plan.restore.is_none(), "a GENERAL-seeded image needs no restore");
+        assert_eq!(f.g.resolved_layout(f.lit_native), VK_IMAGE_LAYOUT_GENERAL);
+    }
+
+    #[test]
+    fn every_dump_class_together_keeps_every_seed_layout() {
+        let taa = dump_frame(Input::Taa, &[ImageDumpName::Lit, ImageDumpName::TaaHist, ImageDumpName::Display]);
+        assert_every_seed_layout_holds(&taa);
+        let l = taa.plan.layouts;
+        assert_eq!(l[ImageDumpName::Lit as usize], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, "an unseeded ring slot");
+        assert_eq!(l[ImageDumpName::TaaHist as usize], VK_IMAGE_LAYOUT_GENERAL, "a CrossFrame GENERAL seed");
+        assert_eq!(restored(&taa), [(taa.display, SRO)], "only display is restored");
+        assert_eq!(taa.g.resolved_layout(taa.taa_hist), VK_IMAGE_LAYOUT_GENERAL);
+        assert_eq!(taa.g.resolved_layout(taa.lit), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+        let ssaa = dump_frame(Input::Ssaa, &[ImageDumpName::Lit, ImageDumpName::Display, ImageDumpName::LitNative]);
+        assert_every_seed_layout_holds(&ssaa);
+        assert_eq!(ssaa.plan.layouts[ImageDumpName::LitNative as usize], VK_IMAGE_LAYOUT_GENERAL);
+        assert_eq!(restored(&ssaa), [(ssaa.display, SRO)], "only display is restored");
+        assert_eq!(ssaa.g.resolved_layout(ssaa.display), SRO);
+        assert_eq!(ssaa.g.resolved_layout(ssaa.lit_native), VK_IMAGE_LAYOUT_GENERAL);
+    }
 }
