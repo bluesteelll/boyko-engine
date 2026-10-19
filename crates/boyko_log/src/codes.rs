@@ -1521,6 +1521,7 @@ mod tests {
             (b'W', 3009), // L8b -- an unrecognised environment override value (two sites)
             (b'E', 3010), // L8b -- a diagnostic dump could not be written (five sites)
             (b'E', 3011), // A6  -- a panic escaped a host-owned ECS entry point, process aborting
+            (b'W', 3012), // PX1a -- no PostPlugin composed, the runner derives the post settings
             (b'B', 9001), // L6  -- schedule cycle
             (b'B', 9002), // L6  -- set-hierarchy cycle
             (b'B', 9004), // L6  -- two ordered sets share a member
