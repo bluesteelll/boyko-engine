@@ -9,13 +9,27 @@
 //!   [`cut_log_verdict`]), and among the (D) `lit` / `taa_hist` frames dumped around the switch,
 //!   exactly the cut frame [`SWITCH_AT`] holds a history equal to its `lit` within one format step
 //!   — a replaced (fresh) history — while every blended frame does not.
-//! - **18 — accumulation.** A static scene with high-contrast edges — one of them HDR, an emissive
-//!   bar at radiance 4.0 against a dark floor (ruling 67 OQ4: the HDR-space resolve differs from
-//!   the display-space one only there) — under TAA, one 16-frame (D) burst of `lit` (the jittered
-//!   current frame) and `display`. Over the edge pixels (those whose `OETF(ACES(lit))` moves by more
-//!   than [`EDGE_STD`] across the burst) the mean frame-to-frame standard deviation of `display` is
-//!   at most half that of `OETF(ACES(lit))` computed here from the dumped `lit`. A `post_final` that
-//!   reads `lit` instead of `taa_hist` makes the ratio ≈ 1.
+//! - **18 — accumulation, pre-tonemap.** A static scene with high-contrast edges — one of them HDR,
+//!   an emissive bar at radiance 4.0 against a dark floor (ruling 67 OQ4: the HDR-space resolve
+//!   differs from the display-space one only there) — under TAA, one 16-frame (D) burst (two
+//!   periods of the 8-phase Halton jitter) of `lit` (the jittered current frame) and `display`.
+//!   Three statements, in this order (see [`PixelBurst`]):
+//!   1. **The HDR premise.** At least [`HDR_EDGE_MIN`] bar-edge pixels: `lit` above 1.0 in some
+//!      frame of the burst, and the tonemapped HDR blend more than [`HDR_GAP`] above the
+//!      display-space blend. An LDR `lit` (RGBA8 until the switch; a store clamped at 1.0) is RED
+//!      here, before any statement that would compare two spaces.
+//!   2. **Accumulation.** Over the edge pixels (those whose `OETF(ACES(lit))` moves by more than
+//!      [`EDGE_STD`] across the burst) the mean frame-to-frame standard deviation of `display` is
+//!      at most half that of `OETF(ACES(lit))` computed here from the dumped `lit`. A `post_final`
+//!      that reads `lit` instead of `taa_hist` makes the ratio ≈ 1. This ratio does not depend on
+//!      the history's converged mean, so it cannot tell the resolve's space (ruling 72 (3)).
+//!   3. **The resolve space** (ruling 72 (3)). Over the HDR bar-edge pixels, `display`'s burst mean
+//!      lies at least [`RESOLVE_SPACE_MIN`] of the way from the display-space blend (the burst mean
+//!      of `OETF(ACES(lit))`) to the HDR-blend-then-tonemap expectation (`OETF(ACES(·))`, through
+//!      `post_final_eval`, of the Karis-weighted burst mean of `lit` — the shipped resolve's blend
+//!      space). A host model of the shipped recurrence (blend `clamp(1 / confidence, 0.015, 0.1)`,
+//!      the Karis weight, 60 settle frames) at the bar edge puts the pre-tonemap resolve at 0.95, a
+//!      resolve done after the tonemap at -0.02 (plain blend) or -0.61 (Karis-weighted blend).
 //!
 //! Windowed-test conventions: the drivers are ignored, `--test-threads=1`,
 //! `BOYKO_DISABLE_VALIDATION=1`.
@@ -56,6 +70,17 @@ const SETTLE: u32 = 60;
 const BURST: u32 = 16;
 /// An edge pixel: the tonemapped `lit` moves by more than this (display units) across the burst.
 const EDGE_STD: f64 = 0.02;
+/// An HDR bar-edge pixel: the tonemapped HDR blend exceeds the display-space blend by more than
+/// this (display units). At the 4.0 bar's edge the gap is 0.07..0.20 for every partial coverage of
+/// the 8-phase jitter (host model), well above the 8-bit `display` step.
+const HDR_GAP: f64 = 0.05;
+/// Test 18's HDR premise: the bar's two vertical edges (~53 px tall at 256 px) give ~100 such pixels.
+const HDR_EDGE_MIN: usize = 20;
+/// Test 18's resolve-space bar, the midpoint between a display-space resolve (≤ 0) and the shipped
+/// pre-tonemap one (≈ 0.95).
+const RESOLVE_SPACE_MIN: f64 = 0.5;
+/// Rec. 709 luma weights — `taa_resolve.comp.hlsl`'s `luma`, the Karis weight's argument.
+const REC709: [f64; 3] = [0.2126, 0.7152, 0.0722];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -184,24 +209,138 @@ fn display_of(rgb: [f32; 3]) -> [f32; 3] {
     [o[0], o[1], o[2]]
 }
 
-/// Per pixel, the mean over channels of the standard deviation across `frames` of `f(texel)`.
-fn pixel_std(frames: &[DumpFile], f: impl Fn(&DumpFile, u32, u32) -> [f32; 3]) -> Vec<f64> {
-    let (w, h) = (frames[0].width, frames[0].height);
-    let n = frames.len() as f64;
+/// The mean over channels of the standard deviation across `vals`.
+fn std3(vals: &[[f32; 3]]) -> f64 {
+    let n = vals.len() as f64;
+    (0..3)
+        .map(|c| {
+            let mean = vals.iter().map(|v| f64::from(v[c])).sum::<f64>() / n;
+            (vals.iter().map(|v| (f64::from(v[c]) - mean).powi(2)).sum::<f64>() / n).sqrt()
+        })
+        .sum::<f64>()
+        / 3.0
+}
+
+/// The mean over channels.
+fn mean3(v: [f32; 3]) -> f64 {
+    (f64::from(v[0]) + f64::from(v[1]) + f64::from(v[2])) / 3.0
+}
+
+fn luma(c: [f64; 3]) -> f64 {
+    REC709[0] * c[0] + REC709[1] * c[1] + REC709[2] * c[2]
+}
+
+/// The shipped resolve's blend space (`taa_resolve.comp.hlsl`'s default arm,
+/// `TaaConfig::luma_weight` on): `w = c / (1 + luma(c))`.
+fn karis(c: [f64; 3]) -> [f64; 3] {
+    let k = 1.0 + luma(c);
+    c.map(|x| x / k)
+}
+
+/// The inverse the resolve applies after the blend: `w / max(1 - luma(w), 1e-4)`.
+fn karis_inv(w: [f64; 3]) -> [f64; 3] {
+    let k = (1.0 - luma(w)).max(1e-4);
+    w.map(|x| x / k)
+}
+
+/// One pixel's (D) burst, reduced to what test 18 reads.
+#[derive(Clone, Copy, Debug)]
+struct PixelBurst {
+    /// The frame-to-frame std of `OETF(ACES(lit))` (mean over channels).
+    lit_std: f64,
+    /// The frame-to-frame std of `display` (mean over channels).
+    display_std: f64,
+    /// The largest `lit` channel over the burst: an HDR texel exceeds 1.0.
+    lit_max: f32,
+    /// What a pre-tonemap resolve converges to, through `post_final`: `OETF(ACES(·))` of the
+    /// Karis-weighted burst mean of `lit` (mean over channels). The burst covers whole jitter
+    /// periods, and past ~10 frames the resolve's blend is `1 / confidence`, a running mean.
+    hdr_blend: f64,
+    /// What a resolve done in display space converges to: the burst mean of `OETF(ACES(lit))`
+    /// (mean over channels; a Karis-weighted display-space blend lands lower still).
+    display_blend: f64,
+    /// The burst mean of `display` (mean over channels).
+    display_mean: f64,
+}
+
+/// The per-channel mean of a burst.
+fn channel_mean(burst: impl Iterator<Item = [f64; 3]>) -> [f64; 3] {
+    let (mut sum, mut n) = ([0.0f64; 3], 0.0f64);
+    for c in burst {
+        for (acc, x) in sum.iter_mut().zip(c) {
+            *acc += x;
+        }
+        n += 1.0;
+    }
+    sum.map(|x| x / n)
+}
+
+/// `OETF(ACES(·))` of the Karis-weighted mean of a `lit` burst: the converged pre-tonemap
+/// resolve, displayed (`post_final` evaluates in f32).
+fn hdr_blend_of(lit: &[[f32; 3]]) -> [f32; 3] {
+    display_of(karis_inv(channel_mean(lit.iter().map(|c| karis(c.map(f64::from))))).map(|x| x as f32))
+}
+
+/// Reduces one pixel's `lit` and `display` bursts (equal length, frame for frame).
+fn pixel_burst(lit: &[[f32; 3]], display: &[[f32; 3]]) -> PixelBurst {
+    let n = lit.len() as f64;
+    let toned: Vec<[f32; 3]> = lit.iter().map(|&c| display_of(c)).collect();
+    PixelBurst {
+        lit_std: std3(&toned),
+        display_std: std3(display),
+        lit_max: lit.iter().flatten().copied().fold(f32::MIN, f32::max),
+        hdr_blend: mean3(hdr_blend_of(lit)),
+        display_blend: toned.iter().map(|&t| mean3(t)).sum::<f64>() / n,
+        display_mean: display.iter().map(|&t| mean3(t)).sum::<f64>() / display.len() as f64,
+    }
+}
+
+/// [`pixel_burst`] for every pixel of two dumped bursts of one extent.
+fn pixel_bursts(lit: &[DumpFile], display: &[DumpFile]) -> Vec<PixelBurst> {
+    let (w, h) = (lit[0].width, lit[0].height);
+    assert!(
+        lit.iter().chain(display).all(|d| (d.width, d.height) == (w, h)),
+        "lit and display share one extent (no SSAA in this scene)"
+    );
+    let rgb = |d: &DumpFile, x: u32, y: u32| {
+        let t = d.texel_f32(x, y);
+        [t[0], t[1], t[2]]
+    };
     let mut out = Vec::with_capacity((w * h) as usize);
     for y in 0..h {
         for x in 0..w {
-            let vals: Vec<[f32; 3]> = frames.iter().map(|d| f(d, x, y)).collect();
-            let mut s = 0.0;
-            for c in 0..3 {
-                let mean = vals.iter().map(|v| f64::from(v[c])).sum::<f64>() / n;
-                let var = vals.iter().map(|v| (f64::from(v[c]) - mean).powi(2)).sum::<f64>() / n;
-                s += var.sqrt();
-            }
-            out.push(s / 3.0);
+            let l: Vec<[f32; 3]> = lit.iter().map(|d| rgb(d, x, y)).collect();
+            let d: Vec<[f32; 3]> = display.iter().map(|d| rgb(d, x, y)).collect();
+            out.push(pixel_burst(&l, &d));
         }
     }
     out
+}
+
+/// Test 18's HDR premise: the HDR bar-edge pixels (`lit` above 1.0 in some frame, the
+/// tonemapped HDR blend more than [`HDR_GAP`] above the display-space blend), or the reason
+/// there are fewer than [`HDR_EDGE_MIN`].
+fn hdr_edge_pixels(px: &[PixelBurst]) -> Result<Vec<PixelBurst>, String> {
+    let edge: Vec<PixelBurst> =
+        px.iter().filter(|p| p.lit_max > 1.0 && p.hdr_blend - p.display_blend > HDR_GAP).copied().collect();
+    if edge.len() < HDR_EDGE_MIN {
+        let lit_max = px.iter().map(|p| p.lit_max).fold(f32::MIN, f32::max);
+        return Err(format!(
+            "only {} HDR bar-edge pixels (lit > 1.0 in some burst frame and OETF(ACES(Karis-mean lit)) - \
+             mean OETF(ACES(lit)) > {HDR_GAP}), fewer than {HDR_EDGE_MIN}: lit is not HDR at the 4.0 emissive \
+             bar (lit's max over the burst is {lit_max:.3})",
+            edge.len()
+        ));
+    }
+    Ok(edge)
+}
+
+/// Test 18's resolve-space fraction over the HDR bar-edge pixels: how far `display`'s burst mean
+/// sits from the display-space blend (0) toward the HDR-blend-then-tonemap expectation (1).
+fn resolve_space_fraction(edge: &[PixelBurst]) -> f64 {
+    let num: f64 = edge.iter().map(|p| p.display_mean - p.display_blend).sum();
+    let den: f64 = edge.iter().map(|p| p.hdr_blend - p.display_blend).sum();
+    num / den.max(f64::MIN_POSITIVE)
 }
 
 /// Test 18's verdict over two per-pixel std fields: `(edge pixels, display / tonemapped-lit ratio)`.
@@ -235,17 +374,21 @@ fn px1a_taa_display_is_the_accumulated_image() {
     let lit = load_burst(&dir, "lit");
     let display = load_burst(&dir, "display");
     assert_eq!((lit.len(), display.len()), (BURST as usize, BURST as usize), "a {BURST}-frame burst of lit and display");
-    let lit_std = pixel_std(&lit, |d, x, y| {
-        let t = d.texel_f32(x, y);
-        display_of([t[0], t[1], t[2]])
-    });
-    let display_std = pixel_std(&display, |d, x, y| {
-        let t = d.texel_f32(x, y);
-        [t[0], t[1], t[2]]
-    });
+    let px = pixel_bursts(&lit, &display);
+    let hdr_edge = hdr_edge_pixels(&px).unwrap_or_else(|e| panic!("{e}"));
+    let lit_std: Vec<f64> = px.iter().map(|p| p.lit_std).collect();
+    let display_std: Vec<f64> = px.iter().map(|p| p.display_std).collect();
     let (edges, ratio) = accumulation_ratio(&display_std, &lit_std);
     assert!(edges >= 50, "only {edges} edge pixels: the scene has no jittered edge to measure");
     assert!(ratio <= 0.5, "display's frame-to-frame std is {ratio:.3} x OETF(ACES(lit))'s over {edges} edge pixels: no accumulation");
+    let space = resolve_space_fraction(&hdr_edge);
+    assert!(
+        space >= RESOLVE_SPACE_MIN,
+        "display at the 4.0 bar's edge sits {space:.3} of the way from the display-space blend to the \
+         HDR-blend-then-tonemap expectation over {} pixels (bar {RESOLVE_SPACE_MIN}): the TAA resolve ran \
+         after the tonemap, not pre-tonemap",
+        hdr_edge.len()
+    );
 }
 
 #[test]
@@ -386,6 +529,53 @@ fn the_accumulation_ratio_separates_a_resolved_display_from_a_jittered_one() {
     assert!(ratio <= 0.5, "{ratio}");
     let (_, bypass) = accumulation_ratio(&lit_std, &lit_std);
     assert!(bypass > 0.5, "a display that IS the tonemapped lit must red: {bypass}");
+}
+
+/// A synthetic 4.0-bar edge: 12 pixels per coverage `k / 8` of the 8-phase jitter, `k` in 0..=8
+/// (the bar on `k` of every 8 frames, the floor otherwise; `lit` mapped through `lit_of`), each
+/// pixel's `display` burst produced from its `lit` burst by `resolve`.
+fn synthetic_bar_edge(
+    lit_of: impl Fn([f32; 3]) -> [f32; 3],
+    resolve: impl Fn(&[[f32; 3]]) -> Vec<[f32; 3]>,
+) -> Vec<PixelBurst> {
+    (0..=8u32)
+        .flat_map(|k| std::iter::repeat_n(k, 12))
+        .map(|k| {
+            let lit: Vec<[f32; 3]> =
+                (0..BURST).map(|f| lit_of(if f % 8 < k { [4.0; 3] } else { [0.0365; 3] })).collect();
+            pixel_burst(&lit, &resolve(&lit))
+        })
+        .collect()
+}
+
+#[test]
+fn the_resolve_space_fraction_separates_a_pre_tonemap_resolve_from_a_display_space_one() {
+    let hdr = |c: [f32; 3]| c;
+    let steady = |c: [f32; 3], n: usize| vec![c; n];
+    let pre_tonemap = synthetic_bar_edge(hdr, |lit| steady(hdr_blend_of(lit), lit.len()));
+    let edge = hdr_edge_pixels(&pre_tonemap).expect("the HDR bar edge has its pixels");
+    assert_eq!(edge.len(), 7 * 12, "every partial coverage is an HDR bar-edge pixel, no full one");
+    let f = resolve_space_fraction(&edge);
+    assert!(f >= RESOLVE_SPACE_MIN, "the converged pre-tonemap resolve must pass: {f}");
+
+    let toned = |lit: &[[f32; 3]]| lit.iter().map(|&c| display_of(c)).collect::<Vec<_>>();
+    let plain = synthetic_bar_edge(hdr, |lit| {
+        let m = channel_mean(toned(lit).into_iter().map(|t| t.map(f64::from))).map(|x| x as f32);
+        steady(m, lit.len())
+    });
+    let f = resolve_space_fraction(&hdr_edge_pixels(&plain).expect("the same lit"));
+    assert!(f < RESOLVE_SPACE_MIN, "a plain display-space blend must red: {f}");
+    let karis_display = synthetic_bar_edge(hdr, |lit| {
+        let w = channel_mean(toned(lit).into_iter().map(|t| karis(t.map(f64::from))));
+        steady(karis_inv(w).map(|x| x as f32), lit.len())
+    });
+    let f = resolve_space_fraction(&hdr_edge_pixels(&karis_display).expect("the same lit"));
+    assert!(f < RESOLVE_SPACE_MIN, "a Karis-weighted display-space blend must red: {f}");
+
+    let ldr = synthetic_bar_edge(display_of, |lit| lit.to_vec());
+    assert!(hdr_edge_pixels(&ldr).is_err(), "a display-referred lit (RGBA8 until the switch) must red the premise");
+    let clamped = synthetic_bar_edge(|c| c.map(|x| x.min(1.0)), |lit| steady(hdr_blend_of(lit), lit.len()));
+    assert!(hdr_edge_pixels(&clamped).is_err(), "a lit clamped at 1.0 must red the premise");
 }
 
 #[test]
