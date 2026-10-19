@@ -198,6 +198,106 @@ class Flags(unittest.TestCase):
         self.assertEqual(gd.main(base + ["--min-in-bound-frac", "0.995", a, many]), 1)
 
 
+class ClassOneForm(unittest.TestCase):
+    """Ruling 84 (1): GL-H1 class 1 (``compare --flat-tiles AAOFF --max-delta 2``) graded the flat
+    pixels on a tile border that TAA's silhouette dilation legitimately moves (red on the pre-move
+    tree too), and passed a leg whose AA-off frame has no flat tile at all (graded 0 px). The form
+    gains ``--edge-margin K`` (flat pixels within K px of an edge of AAOFF are not graded) and a
+    minimum graded area (``--min-graded N``; an empty mask is always vacuous): exit 3, never 0.
+    Red-first on the unmodified tool."""
+
+    def setUp(self):
+        # Three 16x16 tile columns x two tile rows. Column 0 is an object (non-flat: a texture);
+        # columns 1-2 are background, flat, with a silhouette seam at y = 16: the top background
+        # tiles are (90, 120, 150), the bottom ones (40, 60, 80) - both sides flat, the edge exactly
+        # on the tile border.
+        self.w, self.h = 48, 32
+        rnd = random.Random(31)
+        self.ref = []
+        for i in range(self.w * self.h):
+            x, y = i % self.w, i // self.w
+            if x < 16:
+                self.ref.append((rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)))
+            else:
+                self.ref.append((90, 120, 150) if y < 16 else (40, 60, 80))
+
+    def bmp(self, px, name):
+        p = tmp(name)
+        gd.write_bmp(p, self.w, self.h, px)
+        return p
+
+    def moved(self, pixels, by=30):
+        px = list(self.ref)
+        for x, y in pixels:
+            r, g, b = px[y * self.w + x]
+            px[y * self.w + x] = (min(r + by, 255), g, b)
+        return px
+
+    def run_compare(self, taa, *flags):
+        ref = self.bmp(self.ref, "aaoff.bmp")
+        return gd.main(["compare", "--flat-tiles", ref, "--max-delta", "2", *flags, ref, self.bmp(taa, "taa.bmp")])
+
+    def test_a_margin_of_zero_reds_a_dilated_edge(self):
+        # TAA dilates the object's silhouette one pixel into the flat background tile next to it.
+        dilated = self.moved([(16, y) for y in range(self.h)])
+        self.assertEqual(self.run_compare(dilated), 1, "no margin: the dilated column is graded")
+        self.assertEqual(self.run_compare(dilated, "--edge-margin", "0"), 1, "a margin of 0 is the flat mask itself")
+        self.assertEqual(self.run_compare(dilated, "--edge-margin", "1"), 0, "the column lies 1 px from the object tile")
+
+    def test_a_seam_between_two_flat_tiles_is_an_edge(self):
+        # The silhouette that ends exactly on a tile border: both tiles flat, the edge between them.
+        dilated = self.moved([(x, 15) for x in range(16, self.w)] + [(x, 16) for x in range(16, self.w)])
+        self.assertEqual(self.run_compare(dilated, "--edge-margin", "0"), 1)
+        self.assertEqual(self.run_compare(dilated, "--edge-margin", "1"), 0, "rows 15 and 16 lie 1 px from the other flat side")
+
+    def test_the_margin_still_grades_the_interior(self):
+        # A move 3 px or more from every edge (an exposure / history error in a flat region) is red
+        # whatever the margin that excuses the silhouettes.
+        interior = self.moved([(32, 7)])
+        self.assertEqual(self.run_compare(interior, "--edge-margin", "2"), 1)
+        # (32, 7)'s nearest differing pixel is (32, 16), 9 px away: graded up to a margin of 8.
+        self.assertEqual(self.run_compare(interior, "--edge-margin", "8"), 1)
+        self.assertEqual(self.run_compare(interior, "--edge-margin", "9"), 0)
+
+    def test_the_margin_is_the_chebyshev_window(self):
+        # edge_margin_mask against the brute-force definition: graded iff every pixel within
+        # Chebyshev k is flat and equal to it.
+        ref = gd.read_bmp(self.bmp(self.ref, "aaoff.bmp"))
+        flat = gd.flat_tile_mask(ref, 16)
+        for k in range(0, 5):
+            got = gd.edge_margin_mask(ref, flat, k)
+            for i in range(self.w * self.h):
+                x, y = i % self.w, i // self.w
+                want = flat[i] and all(
+                    flat[yy * self.w + xx] and ref.rgb[yy * self.w + xx] == ref.rgb[i]
+                    for yy in range(max(y - k, 0), min(y + k, self.h - 1) + 1)
+                    for xx in range(max(x - k, 0), min(x + k, self.w - 1) + 1)
+                )
+                self.assertEqual(got[i], want, f"k={k} pixel ({x}, {y})")
+
+    def test_an_all_edge_frame_is_red_vacuous(self):
+        # Every tile textured: no flat tile, nothing graded - identical images must still red.
+        rnd = random.Random(37)
+        noise = [(rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)) for _ in range(self.w * self.h)]
+        ref = self.bmp(noise, "noise.bmp")
+        self.assertEqual(gd.main(["compare", "--flat-tiles", ref, "--max-delta", "2", ref, ref]), 3)
+        self.assertEqual(gd.main(["compare", "--flat-tiles", ref, "--max-delta", "2", "--edge-margin", "2", ref, ref]), 3)
+
+    def test_min_graded_is_the_vacuity_floor(self):
+        # By hand at margin 2: the two background bands keep x 18..47 (30 columns; the object tile
+        # ends at x = 15, the frame border excludes nothing) x rows 0..13 and 18..31 (14 each, the
+        # seam is at 15|16) = 840 px.
+        same = list(self.ref)
+        self.assertEqual(self.run_compare(same, "--edge-margin", "2", "--min-graded", "840"), 0)
+        self.assertEqual(self.run_compare(same, "--edge-margin", "2", "--min-graded", "841"), 3)
+
+    def test_usage_errors(self):
+        ref = self.bmp(self.ref, "aaoff.bmp")
+        self.assertEqual(gd.main(["compare", "--edge-margin", "1", ref, ref]), 2, "a margin needs --flat-tiles")
+        self.assertEqual(gd.main(["compare", "--flat-tiles", ref, "--edge-margin", "-1", ref, ref]), 2)
+        self.assertEqual(gd.main(["compare", "--flat-tiles", ref, "--min-graded", "0", ref, ref]), 2)
+
+
 class LitStep(unittest.TestCase):
     def setUp(self):
         self.w, self.h = 8, 4

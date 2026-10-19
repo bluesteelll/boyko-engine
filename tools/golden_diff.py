@@ -4,10 +4,14 @@
 Stdlib only, Python >= 3.11 (``tomllib``). Subcommands:
 
   compare A.bmp B.bmp [--max-delta N] [--max-changed-frac F] [--tiles K] [--flat-tiles REF.bmp]
+        [--edge-margin K] [--min-graded N]
       Two BMPs (24/32-bpp BI_RGB, either row order, 24-bpp rows padded to 4 bytes): the max |Δ|
       per channel, the fraction of changed channel values, the K hottest 16x16 tiles. Exit 1 past
       a given limit. ``--flat-tiles`` grades only the 16x16 tiles (``--flat-tile-size``) of zero
-      variance in REF (render wave PX1a D-T1: GL-H1 classes 1 and 3).
+      variance in REF (render wave PX1a D-T1: GL-H1 classes 1 and 3). GL-H1 class 1's form (ruling
+      84): ``--edge-margin K`` drops the flat pixels within K px (Chebyshev) of an edge of REF - a
+      non-flat tile, or a seam between flat tiles of different values; a run grading fewer than
+      ``--min-graded N`` px - or none at all under ``--flat-tiles`` - exits 3, RED-vacuous, never 0.
   bound --bound hdr-transition --rounding CLASS --format b10g11r11|rgba16f [--flat-tiles REF.bmp]
         [--min-in-bound-frac F] PRE.bmp POST.bmp
       ``--format`` is REQUIRED (PX1a D-T1: a default graded RGBA16F with B10G11R11's 16x wider ε).
@@ -33,7 +37,8 @@ Stdlib only, Python >= 3.11 (``tomllib``). Subcommands:
   vectors DIR
       Checks this file's mirrors against the Rust-generated vectors (tools/tests/vectors).
 
-Exit codes: 0 pass, 1 over a limit, 2 usage / input error, 4 over max_delta_bound.
+Exit codes: 0 pass, 1 over a limit, 2 usage / input error, 3 RED-vacuous (``compare`` graded fewer
+px than its minimum), 4 over max_delta_bound.
 """
 
 from __future__ import annotations
@@ -352,6 +357,51 @@ def load_mask(path, tile: int, w: int, h: int):
     return flat_tile_mask(ref, tile)
 
 
+def edge_margin_mask(ref: Bmp, mask, k: int):
+    """``mask`` (``ref``'s flat-tile mask) minus every pixel within ``k`` px of an edge of ``ref``:
+    True iff every pixel at Chebyshev distance <= ``k`` lies in a flat tile AND equals this pixel
+    in ``ref`` (ruling 84 (1a), GL-H1 class 1: TAA legitimately moves the silhouette pixels on a
+    flat tile's border). An edge is a non-flat tile or a seam between two flat tiles of different
+    values - a silhouette that ends exactly on a tile border leaves both tiles flat. ``k = 0`` is
+    the mask itself; the frame's own border excludes nothing.
+
+    Separable and exact: the row pass marks the pixels whose run of equal flat pixels covers the
+    k columns either side, the column pass the pixels whose run of equal marked pixels covers the
+    k rows either side - each pass linear, whatever ``k``."""
+    if k < 0:
+        raise ValueError(f"the edge margin must be >= 0 (got {k})")
+    if k == 0:
+        return list(mask)
+    w, h, px = ref.w, ref.h, ref.rgb
+
+    def runs(n, ok, at):
+        """Per index of one line: does its run of equal ``ok`` values cover [i - k, i + k]?"""
+        out = [False] * n
+        i = 0
+        while i < n:
+            if not ok(i):
+                i += 1
+                continue
+            e = i
+            while e + 1 < n and ok(e + 1) and px[at(e + 1)] == px[at(i)]:
+                e += 1
+            for j in range(i, e + 1):
+                out[j] = i <= max(j - k, 0) and e >= min(j + k, n - 1)
+            i = e + 1
+        return out
+
+    row_ok = [False] * (w * h)
+    for y in range(h):
+        base = y * w
+        row_ok[base : base + w] = runs(w, lambda x: mask[base + x], lambda x: base + x)
+    out = [False] * (w * h)
+    for x in range(w):
+        col = runs(h, lambda y: row_ok[y * w + x], lambda y: y * w + x)
+        for y in range(h):
+            out[y * w + x] = col[y]
+    return out
+
+
 def compare_bmps(a: Bmp, b: Bmp, tile: int = 16, mask=None):
     if (a.w, a.h) != (b.w, b.h):
         raise ValueError(f"extents differ: {a.w}x{a.h} vs {b.w}x{b.h}")
@@ -524,14 +574,26 @@ def receipt_words(receipt: dict):
 
 
 def cmd_compare(a):
+    if a.edge_margin is not None and a.flat_tiles is None:
+        print("golden_diff compare: --edge-margin is a margin around the edges of the --flat-tiles reference; it needs --flat-tiles", file=sys.stderr)
+        return 2
+    if (a.edge_margin is not None and a.edge_margin < 0) or (a.min_graded is not None and a.min_graded < 1):
+        print("golden_diff compare: --edge-margin must be >= 0 and --min-graded >= 1", file=sys.stderr)
+        return 2
     try:
         x, y = read_bmp(a.a), read_bmp(a.b)
         mask = load_mask(a.flat_tiles, a.flat_tile_size, x.w, x.h)
+        if mask is not None and a.edge_margin:
+            mask = edge_margin_mask(read_bmp(a.flat_tiles), mask, a.edge_margin)
         max_d, frac, tiles = compare_bmps(x, y, mask=mask)
     except (OSError, ValueError) as e:
         print(f"golden_diff compare: {e}", file=sys.stderr)
         return 2
-    scope = "all" if mask is None else f"flat_tiles={sum(mask)}px"
+    graded = x.w * x.h if mask is None else sum(mask)
+    if mask is None:
+        scope = "all"
+    else:
+        scope = f"flat_tiles={graded}px" + ("" if a.edge_margin is None else f" edge_margin={a.edge_margin}")
     print(f"max_delta r={max_d[0]} g={max_d[1]} b={max_d[2]} changed_frac={frac:.6f} scope={scope}")
     for (tx, ty), n in tiles[: a.tiles]:
         print(f"tile ({tx},{ty}) changed={n}")
@@ -539,6 +601,12 @@ def cmd_compare(a):
         return 1
     if a.max_changed_frac is not None and frac > a.max_changed_frac:
         return 1
+    # Ruling 84 (1b): a run that graded (almost) nothing is RED-vacuous, never green - an empty
+    # flat-tile mask is always vacuous, `--min-graded` raises the floor.
+    floor = a.min_graded if a.min_graded is not None else (1 if mask is not None else 0)
+    if graded < floor:
+        print(f"golden_diff compare: RED-vacuous - graded {graded} px < the minimum graded area {floor} px", file=sys.stderr)
+        return 3
     return 0
 
 
@@ -744,6 +812,8 @@ def main(argv=None) -> int:
     p.add_argument("--tiles", type=int, default=8)
     p.add_argument("--flat-tiles", help="REF.bmp: grade only the tiles of zero variance in REF")
     p.add_argument("--flat-tile-size", type=int, default=16)
+    p.add_argument("--edge-margin", type=int, help="K: grade only flat pixels farther than K px from any edge of REF (a non-flat tile or a flat|flat seam)")
+    p.add_argument("--min-graded", type=int, help="N: grading fewer than N px is RED-vacuous (exit 3)")
     p.set_defaults(fn=cmd_compare)
     p = sub.add_parser("bound")
     p.add_argument("--bound", required=True)
