@@ -15,7 +15,8 @@ implementation report: `impl.md`, all in that directory. Raw logs stay under
 | `71602537` | (1) the runner's counter oracle models L10's T4 release |
 | `0fe76d6c` | (5) PC-SL2B-1: the runner header names patch v3 / dyn3 and the sleeping-on rows |
 | `dff92ce4` | the record; `scenes/01-DESIGN.md` section 10.9's PC-SL2B-1 marker |
-| this commit | (4) closed by ruling 77: the UG-15 scope statement in `crates/boyko_symcensus/ug15/RECIPES.md`; the markers in `IB-budget/01-P0R-RECORD.md` (section 5, PC-P0R-8) and in the unified plan (03 section 6, 02 Phase F rung F2) |
+| `138db54f` | (4) closed by ruling 77: the UG-15 scope statement in `crates/boyko_symcensus/ug15/RECIPES.md`; the markers in `IB-budget/01-P0R-RECORD.md` (section 5, PC-P0R-8) and in the unified plan (03 section 6, 02 Phase F rung F2) |
+| this commit | review r1 W1 (a) and W2: V11 (c2) and RF-5a byte-check the parity runner only (RECIPES.md "Codegen units", `01-P0R-RECORD.md` section 5 and PC-P0R-8, section 4 and PC-PT1-11 here; the probe is PC-PT1-13); F1's legs-recipe sentence names the three subjects re-run under it |
 
 Item (4) stopped on two findings (section 4). Ruling 77 closed it with the scope statement; the re-pin on
 the shipped codegen is deferred (PC-PT1-10).
@@ -153,10 +154,14 @@ codegen-units=16`, and two further builds isolate it: `cargo rustc --release -- 
 `.text` `eeea7f9e…`, and so does `-- --emit=obj -C codegen-units=16`. So the EXPLICIT flag, not
 `--emit=obj`, separates the leg object from the shipped default, although both say 16. A plausible cause
 (not verified here): rustc merges small codegen units only when the count is its default, not when the user
-states it. IB P0r's RF-5a found the explicit 16 equal to the plain release on the parity runner, and V11 (c2) re-checks its two
-subjects by bytes on every run, so IB's gate is not misled; but ruling 57 (1)'s field, generalised to the
-UG-15 legs, would census a codegen that is not the shipped one on `boyko_demo` and `clear` (here it would
-also turn `swap_remove` and `query_dsl` red).
+states it. IB P0r's RF-5a found the explicit 16 equal to the plain release on the parity runner, and V11 (c2)
+re-checks the runner by bytes on every `unit` run. Neither ever built a plain probe (`unit.rs`'s
+`plain_build` and `check_c2` take the runner only; RF-5a's re-run receipt, `ib-p0r/k/rf5r_receipt.txt`,
+retains one plain image, `plain-runner`),
+so IB's other subject, the probe, has no such proof: its `.text` at the explicit 16 has never been compared
+with a plain release probe (PC-PT1-13). Ruling 57 (1)'s field, generalised to the UG-15 legs, would census
+a codegen that is not the shipped one on `boyko_demo` and `clear` (here it would also turn `swap_remove`
+and `query_dsl` red).
 
 **Ruling 77 (the orchestrator's answer to the stop).**
 
@@ -212,11 +217,18 @@ No file of `crates/boyko_physics`, `boyko_ecs`, `boyko_threadpool` or `boyko_mem
   and F2 (section 4, the explicit 16 is not the plain release `.text` on `boyko_demo` and `clear`).
   Raw receipts: `D:/tmp/phys-orch/phys-tool-1/u4/` and `driver/`.
 * **PC-PT1-11 (the `ib` lane, IB P1-P4, the physics roadmap's P6; ruling 77 (2)).** At its base, before
-  it relies on IB's codegen-units field, re-run V11 (c2) on its own subjects (`ug15 unit`, RECIPES.md
-  "IB V11 commands"), and STOP if (c2) is red.
+  it relies on IB's codegen-units field, re-run V11 (c2) (`ug15 unit`, RECIPES.md "IB V11 commands"),
+  and STOP if (c2) is red. (c2) byte-checks the parity runner only; the probe is PC-PT1-13.
 * **PC-PT1-12 (`objbuild.rs`'s module docs).** They still read "recorded as an owed decision". This
   lane does not edit the instrument (K would move). The next change that moves K anyway (IB P2,
   PC-P0R-4) can update them to cite RECIPES.md's scope statement.
+* **PC-PT1-13 (the orchestrator, open; review r1 W1 (b)).** IB's probe (`physics_probe`) is a census subject
+  (IB V9 G-SYM (ii)) built at the explicit 16, and no receipt compares its `.text` with a plain release probe:
+  V11 (c2) and RF-5a checked the parity runner only, and `ug15 unit` cannot build a plain probe today. F2
+  shows the explicit 16 can differ from the shipped codegen on a final crate with a short source (`clear`,
+  a 15-line example; the probe's bin is 216 lines); whether the probe is in that class is unmeasured. A ruling decides whether PC-PT1-11 gains a probe-side `.text`
+  comparison (an instrument change, so K moves) or IB's probe census is scoped like the UG-15 legs.
+  Files: `D:/tmp/phys-orch/phys-tool-1/review_r1.md` (W1), `triage_r1.md` (W1).
 
 ## 7. Quiet-window commands
 
