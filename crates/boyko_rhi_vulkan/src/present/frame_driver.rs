@@ -102,6 +102,11 @@ pub struct Renderer<'ctx> {
     /// [`arm_image_dump`](Self::arm_image_dump) (boot, armed runs only); holds this frame's request
     /// and what the recorder copied. `None` in every shipped run: one branch per frame.
     pub(crate) image_dump: Option<ImageDumpArm>,
+    /// Render wave PX1a (H4 Scope 3, test 12): the engine frame (`GBufferScene::engine_frame_index`)
+    /// the test-only `test_nan_inject` pass is declared and recorded on — `Some` only after
+    /// [`arm_nan_inject`](Self::arm_nan_inject) (boot, the `inject_nan_lit` force key). `None` in
+    /// every shipped run: no pass, no `TRANSFER_DST` on `lit`, no source buffer.
+    pub(crate) nan_inject_at: Option<u32>,
 }
 
 impl<'ctx> Renderer<'ctx> {
@@ -270,7 +275,23 @@ impl<'ctx> Renderer<'ctx> {
             obs_dump_widen: false,
             receipt: None,
             image_dump: None,
+            nan_inject_at: None,
         })
+    }
+
+    /// Render wave PX1a (H4 Scope 3, test 12): arms the TEST-ONLY NaN injection — the targets
+    /// created from now on give `lit` `TRANSFER_DST` and build the 8-byte NaN source, and the
+    /// `test_nan_inject` pass is declared and recorded on engine frame `at_frame` only (after the
+    /// last `lit` producer, before the transparent slot). Cold — called once, before the first
+    /// frame (the targets are created on the first frame), only under the `inject_nan_lit` key.
+    #[cold]
+    #[inline(never)]
+    pub fn arm_nan_inject(&mut self, at_frame: u32) {
+        debug_assert_eq!(
+            self.submission_epoch, 0,
+            "invariant: the NaN injection is armed before the first frame creates the targets"
+        );
+        self.nan_inject_at = Some(at_frame);
     }
 
     /// OBS (D): arms the `BOYKO_IMAGE_DUMP` instrument — the boot decisions H0 Scope 6 names:
@@ -972,6 +993,9 @@ impl<'ctx> Renderer<'ctx> {
         // before the closure borrows `self`. No test sees this line: an unarmed run that passed
         // `true` would ship the usage bit with every gate green (see `dump_transfer_src`'s doc).
         let dump_usage = self.image_dump.is_some();
+        // Render wave PX1a (test 12): the armed-only `TRANSFER_DST` on `lit` and the NaN source,
+        // read here for the same reason (`false` on every shipped run).
+        let nan_inject_armed = self.nan_inject_at.is_some();
         // Thin adapter over the shared [`drive_frame`](Self::drive_frame) skeleton, with
         // `frame` (the G-buffer targets) threaded as the payload: pre-record syncs the
         // targets, the record body re-declares the whole-frame graph then records the
@@ -1015,7 +1039,7 @@ impl<'ctx> Renderer<'ctx> {
                         present_extent,
                         aa_extent,
                         TargetsProfile::from_scene(scene),
-                        dump_usage,
+                        super::targets::TargetsArming { dump_usage, nan_inject: nan_inject_armed },
                     )
                 },
                 |this, frame, cmd, image, view, extent| {

@@ -1199,6 +1199,16 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     if image_dump.is_some() {
         host.renderer.arm_image_dump();
     }
+    // Render wave PX1a (H4 Scope 3, test 12): the test-only `inject_nan_lit` key, read the
+    // `try_resource` way (absent on every shipping run, so nothing is armed) and armed before the
+    // first frame creates the targets.
+    if app
+        .world()
+        .try_resource::<crate::test_force::TestForce>()
+        .is_some_and(|f| f.contains(crate::test_force::TestForceKey::InjectNanLit))
+    {
+        host.renderer.arm_nan_inject(crate::test_force::INJECT_NAN_LIT_FRAME);
+    }
     // Automated-run frame cap (the `BOYKO_WIN_HIDDEN` companion, and the app-level
     // twin of `window_present_gbuffer`'s own `BOYKO_WINDOW_FRAMES`): `BOYKO_WINDOW_FRAMES=<n>`
     // bounds this loop to `n` iterations, then exits cleanly. Without it an

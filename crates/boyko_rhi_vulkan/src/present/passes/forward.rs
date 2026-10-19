@@ -1208,6 +1208,18 @@ impl Renderer<'_> {
             }
         }
 
+        // === Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY NaN injection — after every `lit` producer (and the depth merge)
+        // and before the particle draw, the declarator's position; recorded iff declared (the
+        // `inject_nan_lit` key's one frame, never a shipped run). ===
+        if let Some(pass) = plan.test_nan_inject {
+            self.record_forward_pass(pass, cmd, targets, forward, scene, fi);
+            // SAFETY: recording is open and outside any rendering scope (every scope above closed
+            // its own); the line above emitted the pass's derived barriers (`lit[fi]` at
+            // TRANSFER_DST_OPTIMAL after its producers' writes); the pass is declared only on a boot
+            // whose targets were built with the NaN arming; `fi` is this frame's slot.
+            unsafe { self.record_test_nan_inject(cmd, targets, fi) };
+        }
+
         // === Particles P0: the indirect billboard draw, after every `lit` producer
         // (`forward_opaque`, and `sdf_forward_march` where it ran) and before `present_sample` —
         // the declarator's own position. `forward.depth[fi]` is the path's depth image: under

@@ -156,6 +156,10 @@ pub(crate) struct GbufferPassPlan {
     /// Render wave RD1 (defect R0b): the SDF depth merge, declared IMMEDIATELY before
     /// `particle_draw` — `Some` iff [`GBufferScene::sdf_depth_merge`] is not `Absent`.
     pub(crate) sdf_depth_merge: Option<crate::framegraph::PassId>,
+    /// Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY `test_nan_inject` pass, declared after
+    /// the last `lit` producer (and the SDF depth merge) and before `particle_draw` — `Some` only on
+    /// the engine frame `Renderer::arm_nan_inject` named (never on a shipped run).
+    pub(crate) test_nan_inject: Option<crate::framegraph::PassId>,
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame
     /// (nothing declared at all — see [`ParticlePassPlan`]).
     pub(crate) particle: ParticlePassPlan,
@@ -579,6 +583,28 @@ fn declare_particle_compute(
     ParticlePassPlan { upload, kickoff, emit, sim, sort_hist, sort_scan, sort_scatter, draw: None }
 }
 
+/// Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY `test_nan_inject` pass — one
+/// `vkCmdCopyBufferToImage` of a `LIT_FORMAT` NaN texel (`targets::NAN_INJECT_TEXEL_BITS`) into
+/// `lit` at `targets::NAN_INJECT_TEXEL`. `lit` at `TRANSFER / TRANSFER_WRITE / TRANSFER_DST_OPTIMAL`:
+/// the graph derives the producer's `GENERAL` (or `COLOR_ATTACHMENT_OPTIMAL`) → `TRANSFER_DST`
+/// transition before it (content-preserving: the tracked layout is the old layout, never
+/// `UNDEFINED`) and the next reader's transition after it. The source buffer is host-written once
+/// at create and is not a graph resource (the submit's host-write visibility covers it).
+fn declare_test_nan_inject(
+    g: &mut crate::framegraph::FrameGraph,
+    lit: crate::framegraph::ResId,
+) -> crate::framegraph::PassId {
+    let p = g.add_pass("test_nan_inject");
+    g.image_access(
+        lit,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        crate::framegraph::SubRange::COLOR,
+    );
+    p
+}
+
 /// Particles P0: declares the indirect billboard draw, LATE — after the path's last `lit`
 /// producer and before `present_sample` (and before `taa_resolve` where that exists, which reads
 /// `lit` as this frame's final shaded colour).
@@ -779,6 +805,10 @@ pub(crate) struct ForwardPassPlan {
     /// Render wave RD1 (defect R0b): the SDF depth merge, declared IMMEDIATELY before
     /// `particle_draw` — `Some` iff [`GBufferScene::sdf_depth_merge`] is not `Absent`.
     pub(crate) sdf_depth_merge: Option<crate::framegraph::PassId>,
+    /// Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY `test_nan_inject` pass, declared after
+    /// the last `lit` producer (and the SDF depth merge) and before `particle_draw` — `Some` only on
+    /// the engine frame `Renderer::arm_nan_inject` named (never on a shipped run).
+    pub(crate) test_nan_inject: Option<crate::framegraph::PassId>,
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame.
     pub(crate) particle: ParticlePassPlan,
     /// OBS (D): the `image_dump` pass — declared LAST, on a `BOYKO_IMAGE_DUMP` request frame only
@@ -2107,6 +2137,9 @@ impl Renderer<'_> {
              (scene-assembly gate missed)"
         );
 
+        // Render wave PX1a (test 12): the TEST-ONLY NaN injection frame — `false` on every shipped
+        // run (`nan_inject_at` is `None` unless the `inject_nan_lit` key armed it at boot).
+        let nan_inject_now = self.nan_inject_at == Some(scene.engine_frame_index);
         let g = &mut self.frame_graph;
         g.reset();
 
@@ -3316,6 +3349,9 @@ impl Renderer<'_> {
         // `SHADER_READ_ONLY_OPTIMAL` (three pre-lit consumers read it), so this attachment-read
         // derives a real LAYOUT TRANSITION — the one path of the four where it does (D7). On an
         // RD1 merge frame the merge took that transition and this read derives a RAW barrier.
+        // Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY NaN injection — after every `lit`
+        // producer (and the depth merge), before the transparent slot; one frame, armed runs only.
+        let test_nan_inject = nan_inject_now.then(|| declare_test_nan_inject(g, lit));
         if let Some(ids) = particle_res {
             particle_plan.draw = Some(declare_particle_draw(
                 g,
@@ -3459,6 +3495,7 @@ impl Renderer<'_> {
             present_sample,
             post,
             sdf_depth_merge,
+            test_nan_inject,
             particle: particle_plan,
             image_dump,
         });
@@ -3494,6 +3531,9 @@ impl Renderer<'_> {
             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 
         self.gbuffer_pass_plan = None;
+        // Render wave PX1a (test 12): the TEST-ONLY NaN injection frame — `false` on every shipped
+        // run (`nan_inject_at` is `None` unless the `inject_nan_lit` key armed it at boot).
+        let nan_inject_now = self.nan_inject_at == Some(scene.engine_frame_index);
         let g = &mut self.frame_graph;
         g.reset();
 
@@ -3935,6 +3975,9 @@ impl Renderer<'_> {
         // an AVAILABILITY barrier is derived (no layout change); under `ForwardPlus` the froxel
         // opaque pass already declared exactly this stage/access/layout, so NOTHING is derived —
         // the one free path of the four (on an RD1 merge frame the merge's write makes it a RAW).
+        // Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY NaN injection — after every `lit`
+        // producer (and the depth merge), before the transparent slot; one frame, armed runs only.
+        let test_nan_inject = nan_inject_now.then(|| declare_test_nan_inject(g, lit));
         if let Some(ids) = particle_res {
             particle_plan.draw = Some(declare_particle_draw(
                 g,
@@ -4002,6 +4045,7 @@ impl Renderer<'_> {
             present_sample,
             post,
             sdf_depth_merge,
+            test_nan_inject,
             particle: particle_plan,
             image_dump,
         });
@@ -4497,6 +4541,10 @@ pub(crate) struct VbPassPlan {
     /// Render wave RD1 (defect R0b): the SDF depth merge, declared IMMEDIATELY before
     /// `particle_draw` — `Some` iff [`GBufferScene::sdf_depth_merge`] is not `Absent`.
     pub(crate) sdf_depth_merge: Option<crate::framegraph::PassId>,
+    /// Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY `test_nan_inject` pass, declared after
+    /// the last `lit` producer (and the SDF depth merge) and before `particle_draw` — `Some` only on
+    /// the engine frame `Renderer::arm_nan_inject` named (never on a shipped run).
+    pub(crate) test_nan_inject: Option<crate::framegraph::PassId>,
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame.
     pub(crate) particle: ParticlePassPlan,
     /// OBS (D): the `image_dump` pass — declared LAST, on a `BOYKO_IMAGE_DUMP` request frame only
@@ -4968,6 +5016,9 @@ impl Renderer<'_> {
 
         self.gbuffer_pass_plan = None;
         self.forward_pass_plan = None;
+        // Render wave PX1a (test 12): the TEST-ONLY NaN injection frame — `false` on every shipped
+        // run (`nan_inject_at` is `None` unless the `inject_nan_lit` key armed it at boot).
+        let nan_inject_now = self.nan_inject_at == Some(scene.engine_frame_index);
         let g = &mut self.frame_graph;
         g.reset();
 
@@ -7125,6 +7176,9 @@ impl Renderer<'_> {
         // barrier with no layout change — the Forward arm of D7's table, not Deferred's transition.
         // On VB x Sdf the RD1 merge above is `vb_depth`'s first writer (before RD1 this read took
         // the unwritten-transient assert in a dev build).
+        // Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY NaN injection — after every `lit`
+        // producer (and the depth merge), before the transparent slot; one frame, armed runs only.
+        let test_nan_inject = nan_inject_now.then(|| declare_test_nan_inject(g, lit));
         if let Some(ids) = particle_res {
             particle_plan.draw = Some(declare_particle_draw(
                 g,
@@ -7506,6 +7560,7 @@ impl Renderer<'_> {
             present_sample,
             post,
             sdf_depth_merge,
+            test_nan_inject,
             particle: particle_plan,
             image_dump,
         });

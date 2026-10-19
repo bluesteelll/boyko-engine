@@ -23,6 +23,7 @@ mod sdf_depth_merge;
 mod smaa;
 mod ssaa;
 mod taa;
+mod test_inject;
 // Render wave PX0: the zone arm every POST / FWD bracket records through, and Forward's frame
 // witness.
 mod zone_arm;

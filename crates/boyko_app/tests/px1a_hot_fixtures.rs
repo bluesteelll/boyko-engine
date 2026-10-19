@@ -33,6 +33,15 @@
 //! `goldens::RGBA16F_ROUNDING`). Red without the FS's `× pre_exposure` (mutation leg C7 (iv)): the
 //! particle's own radiance does not halve.
 //!
+//! **12 — NaN injection** (C11; H4 Tests 12, K8). PX0's `deferred_base` fixture under TAA, run twice
+//! through the fixture worker: once with the test-only `inject_nan_lit` force key — the
+//! `test_nan_inject` pass copies a binary16 NaN into `lit` at `present::NAN_INJECT_TEXEL` (inside the
+//! flat top-left background) on engine frame `test_force::INJECT_NAN_LIT_FRAME` — and once clean.
+//! Sixteen frames later (D) `taa_hist` holds no non-finite texel anywhere, the injection site
+//! included, and (D) `lit` and `taa_hist` equal the clean run's within one binary16 step per
+//! channel. Red on the mutated HDR tree (GL-PX1a-D, C11): `taa_resolve` without its K8 boundary
+//! (the `hdr_sanitize` taps AND the `hdr_history_guard` write) carries the NaN into the history.
+//!
 //! Windowed-test conventions: the drivers are ignored, `--test-threads=1`,
 //! `BOYKO_DISABLE_VALIDATION=1`.
 
@@ -58,7 +67,7 @@ use boyko_shaderdsl::pixfmt::{Channel, steps_between};
 use boyko_shaderdsl::post::{OETF_GAMMA_EXP, eval_params, post_final_eval};
 use boyko_shaderdsl::prims_probe::vk_pow_bound;
 use graph_receipt::{fresh_out, run_worker};
-use hdr_fixtures::{Expect, HOT_R, Hot, capture_scene, fixture, fixture_worker_main};
+use hdr_fixtures::{ENV_AA, ENV_FIXTURE, ENV_TEST_FORCE, Expect, HOT_R, Hot, capture_scene, fixture, fixture_worker_main};
 use image_dump::{DumpFile, files_of};
 
 /// The worker's knob: `sun` | `sun_ssaa`.
@@ -344,6 +353,122 @@ fn check_hot_scene(region: &[[f32; 4]], want: f32) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Test 12's dump frame: sixteen engine frames after the injection.
+const NAN_DUMP_FRAME: u32 = boyko_app::test_force::INJECT_NAN_LIT_FRAME + 16;
+
+/// One test-12 run of `deferred_base` under TAA, with `force` as the worker's `BOYKO_TEST_FORCE`:
+/// its `(lit, taa_hist)` dumps at [`NAN_DUMP_FRAME`].
+fn capture_nan(force: &str) -> (DumpFile, DumpFile) {
+    let tag = if force.is_empty() { "clean" } else { "inject" };
+    let dir = fresh_out(&format!("px1a_nan_{tag}"));
+    std::fs::create_dir_all(&dir).expect("invariant: the temp dir accepts a subdirectory");
+    let env = [
+        (ENV_FIXTURE, "deferred_base".to_owned()),
+        (ENV_AA, "taa".to_owned()),
+        (ENV_TEST_FORCE, force.to_owned()),
+        ("BOYKO_WINDOW_FRAMES", (NAN_DUMP_FRAME + 20).to_string()),
+        ("BOYKO_IMAGE_DUMP", "lit,taa_hist".to_owned()),
+        ("BOYKO_IMAGE_DUMP_PATH", dir.display().to_string()),
+        ("BOYKO_IMAGE_DUMP_SETTLE", NAN_DUMP_FRAME.to_string()),
+    ];
+    run_worker(FIXTURE_WORKER, &env, false);
+    let one = |name: &str| {
+        let files = files_of(&dir, name);
+        assert_eq!(files.len(), 1, "12 ({tag}): one `{name}` capture expected: {files:?}");
+        DumpFile::load(&files[0].1)
+    };
+    (one("lit"), one("taa_hist"))
+}
+
+/// Test 12's verdict over the injected run's and the clean run's `(lit, taa_hist)` at the same
+/// frame, at least sixteen frames after the injection: every `taa_hist` texel finite (the injection
+/// site included), and both images within one binary16 step of the clean run per channel. `Err`
+/// names the first failure.
+fn nan_verdict(inj: (&DumpFile, &DumpFile), clean: (&DumpFile, &DumpFile), inject_frame: u32) -> Result<(), String> {
+    for (d, name) in [(inj.0, "lit"), (inj.1, "taa_hist"), (clean.0, "clean lit"), (clean.1, "clean taa_hist")] {
+        if d.frame != inj.0.frame || d.frame < inject_frame + 16 {
+            return Err(format!(
+                "{name} was dumped at frame {}, not the common frame >= {} (the injection's + 16)",
+                d.frame,
+                inject_frame + 16
+            ));
+        }
+    }
+    let [x, y] = boyko_rhi_vulkan::present::NAN_INJECT_TEXEL;
+    let hist = inj.1;
+    for ty in 0..hist.height {
+        for tx in 0..hist.width {
+            let t = hist.texel_f32(tx, ty);
+            if t.iter().any(|c| !c.is_finite()) {
+                let site = if (tx, ty) == (x, y) { " (the injection site)" } else { "" };
+                return Err(format!("taa_hist ({tx},{ty}){site} holds a non-finite texel {t:?}: the NaN reached the history"));
+            }
+        }
+    }
+    for ((a, b), name) in [((inj.0, clean.0), "lit"), ((inj.1, clean.1), "taa_hist")] {
+        if (a.width, a.height) != (b.width, b.height) {
+            return Err(format!("{name}: the two runs' extents differ"));
+        }
+        for ty in 0..a.height {
+            for tx in 0..a.width {
+                let (p, q) = (a.texel_f32(tx, ty), b.texel_f32(tx, ty));
+                for c in 0..4 {
+                    match steps_between(Channel::F16, p[c], q[c]) {
+                        Ok(n) if n <= 1 => {}
+                        other => {
+                            return Err(format!(
+                                "{name} ({tx},{ty}) ch{c}: injected {} vs clean {} ({other:?} binary16 steps): the \
+                                 injection did not heal",
+                                p[c], q[c]
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "gpu-windowed: PX1a test 12, a NaN injected into lit under TAA never reaches the history and heals (spawns px1a_hot_fixture_worker twice, sets BOYKO_TEST_FORCE itself); run with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
+fn px1a_hot_nan_injection_never_reaches_the_history() {
+    let inj = capture_nan("inject_nan_lit");
+    let clean = capture_nan("");
+    let frame = boyko_app::test_force::INJECT_NAN_LIT_FRAME;
+    match nan_verdict((&inj.0, &inj.1), (&clean.0, &clean.1), frame) {
+        Ok(()) => println!("px1a test 12: no non-finite taa_hist texel at frame {}; lit and taa_hist equal the clean run", inj.0.frame),
+        Err(e) => panic!("12: {e}"),
+    }
+}
+
+fn synthetic_rgba16f(frame: u32, w: u32, h: u32, texel: impl Fn(u32, u32) -> [u16; 4]) -> DumpFile {
+    let mut texels = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            texels.extend(texel(x, y).iter().flat_map(|c| c.to_le_bytes()));
+        }
+    }
+    DumpFile { format: image_dump::VK_R16G16B16A16_SFLOAT, width: w, height: h, mip: 0, layers: 1, frame, texel_bytes: 8, texels }
+}
+
+#[test]
+fn the_nan_verdict_reds_a_nan_in_the_history_an_unhealed_texel_and_a_stale_frame() {
+    let one = 0x3C00u16;
+    let clean = synthetic_rgba16f(56, 16, 16, |_, _| [one, one, one, one]);
+    assert!(nan_verdict((&clean, &clean), (&clean, &clean), 40).is_ok(), "identical runs pass");
+    let next = synthetic_rgba16f(56, 16, 16, |x, _| [if x == 3 { one + 1 } else { one }, one, one, one]);
+    assert!(nan_verdict((&next, &next), (&clean, &clean), 40).is_ok(), "one binary16 step is inside");
+    let [nx, ny] = boyko_rhi_vulkan::present::NAN_INJECT_TEXEL;
+    let nan = synthetic_rgba16f(56, 16, 16, |x, y| if (x, y) == (nx, ny) { boyko_rhi_vulkan::present::NAN_INJECT_TEXEL_BITS } else { [one; 4] });
+    let e = nan_verdict((&clean, &nan), (&clean, &clean), 40).unwrap_err();
+    assert!(e.contains("the injection site") && e.contains("non-finite"), "{e}");
+    let off = synthetic_rgba16f(56, 16, 16, |x, y| if (x, y) == (nx, ny) { [0, 0, 0, one] } else { [one; 4] });
+    assert!(nan_verdict((&clean, &off), (&clean, &clean), 40).unwrap_err().contains("did not heal"));
+    let early = synthetic_rgba16f(50, 16, 16, |_, _| [one; 4]);
+    assert!(nan_verdict((&early, &early), (&early, &early), 40).unwrap_err().contains("common frame"));
 }
 
 fn drive_11b(name: &str) {

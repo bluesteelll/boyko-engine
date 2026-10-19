@@ -3102,6 +3102,21 @@ impl Renderer<'_> {
             }
         }
 
+        // === Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY NaN injection — after the resolve (and the depth merge)
+        // and before the particle draw, the declarator's position; recorded iff declared (the
+        // `inject_nan_lit` key's one frame, never a shipped run). ===
+        if let Some(pass) = self
+            .gbuffer_pass_plan
+            .as_ref()
+            .expect("invariant: declare_frame_graph ran before record_gbuffer").test_nan_inject {
+            self.record_graph_pass(pass, cmd, targets, scene, fi);
+            // SAFETY: recording is open and outside any rendering scope (every scope above closed
+            // its own); the line above emitted the pass's derived barriers (`lit[fi]` at
+            // TRANSFER_DST_OPTIMAL after its producers' writes); the pass is declared only on a boot
+            // whose targets were built with the NaN arming; `fi` is this frame's slot.
+            unsafe { self.record_test_nan_inject(cmd, targets, fi) };
+        }
+
         // Anti-aliasing Stage 4 (TAA W5): the temporal-resolve pass — recorded HERE, BEFORE
         // `present_sample`'s `lit` GENERAL→SHADER_READ_ONLY_OPTIMAL transition below. TAA is a
         // COMPUTE dispatch that reads `lit` at `GENERAL`, straight out of the resolve's write

@@ -19,6 +19,7 @@
 //!
 //! - `disarm_sdf_merge` (render wave RD1, defect R0b) — [`TestForceKey::DisarmSdfMerge`].
 //! - `srgb_swapchain` (render wave PX1a, D-P1) — [`TestForceKey::SrgbSwapchain`].
+//! - `inject_nan_lit` (render wave PX1a, H4 Scope 3 / test 12) — [`TestForceKey::InjectNanLit`].
 
 use boyko_macros::Resource;
 
@@ -36,13 +37,25 @@ pub enum TestForceKey {
     /// so the present blit's `srgb_eotf` variant is the one that runs. Read once, at boot, by the
     /// windowed runner; the shipping pick prefers `B8G8R8A8_UNORM`.
     SrgbSwapchain,
+    /// Render wave PX1a (H4 Scope 3, test 12): the test-only `test_nan_inject` pass writes a
+    /// binary16 NaN into `lit` at `present::NAN_INJECT_TEXEL` on engine frame
+    /// [`INJECT_NAN_LIT_FRAME`] only, after the last `lit` producer and before the transparent
+    /// slot, so the K8 boundary (`hdr_sanitize` on every HDR reader, TAA's history guard) is
+    /// exercised on a real frame. Armed at boot by the windowed runner (`Renderer::arm_nan_inject`):
+    /// only then does `lit` carry `TRANSFER_DST` and the 8-byte source buffer exist.
+    InjectNanLit,
 }
+
+/// The engine frame (`GBufferScene::engine_frame_index`) the `inject_nan_lit` key injects on —
+/// late enough that TAA's history has converged on a static scene (test 12 dumps 16 frames later).
+pub const INJECT_NAN_LIT_FRAME: u32 = 40;
 
 impl TestForceKey {
     /// Every key with its `BOYKO_TEST_FORCE` spelling; a key's bit is its index here.
     pub const ALL: &'static [(TestForceKey, &'static str)] = &[
         (TestForceKey::DisarmSdfMerge, "disarm_sdf_merge"),
         (TestForceKey::SrgbSwapchain, "srgb_swapchain"),
+        (TestForceKey::InjectNanLit, "inject_nan_lit"),
     ];
 
     /// This key's bit in [`TestForce`].
@@ -51,6 +64,7 @@ impl TestForceKey {
         match self {
             TestForceKey::DisarmSdfMerge => 1 << 0,
             TestForceKey::SrgbSwapchain => 1 << 1,
+            TestForceKey::InjectNanLit => 1 << 2,
         }
     }
 }

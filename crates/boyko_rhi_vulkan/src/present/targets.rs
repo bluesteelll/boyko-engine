@@ -619,6 +619,12 @@ pub struct GBufferTargets {
     /// ([`Self::create`] builds it last and fails the create otherwise); `Option` only so the
     /// create can assemble `Self` before building it and tear the whole set down on its failure.
     pub(crate) post_final: Option<PostFinalRing>,
+    /// Render wave PX1a (H4 Scope 3, test 12): the test-only `test_nan_inject` pass's 8-byte
+    /// source — one `LIT_FORMAT` texel, [`NAN_INJECT_TEXEL_BITS`] (a binary16 NaN in R), copied
+    /// into `lit[fi]` at [`NAN_INJECT_TEXEL`] on the injection frame. `Some` iff the
+    /// `inject_nan_lit` key was armed at boot ([`TargetsArming::nan_inject`]); `None` on every
+    /// production run (no buffer, and `lit` carries no `TRANSFER_DST`).
+    pub(crate) nan_inject_src: Option<BoundBuffer>,
     /// Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` compute pass's
     /// Set-0 vocabulary descriptor set RING (one per in-flight frame), written ONCE against
     /// [`GBufferScene::sdf_forward_march_layout`] — see [`DeferredSets::sdf_forward_set`]'s doc
@@ -2889,9 +2895,10 @@ impl CoreImages {
         extent: VkExtent2D,
         aa_extent: VkExtent2D,
         ssaa: bool,
-        dump_usage: bool,
+        arming: TargetsArming,
         merge_sampled: bool,
     ) -> Result<Self, SwapchainError> {
+        let dump_usage = arming.dump_usage;
         // SAFETY (shared by both closures): `ctx` is the live context each texture was created on;
         // none is referenced by any submission (the build phase, before any record/submit); each ring
         // slot is destroyed exactly once — a completed ring is consumed by value (`destroy_ring`), a
@@ -3023,7 +3030,8 @@ impl CoreImages {
                 ImageUsage::STORAGE
                     | ImageUsage::SAMPLED
                     | ImageUsage::TRANSFER_SRC
-                    | ImageUsage::COLOR_ATTACHMENT,
+                    | ImageUsage::COLOR_ATTACHMENT
+                    | nan_inject_transfer_dst(arming.nan_inject),
             ) {
                 Ok(t) => *slot = Some(t),
                 Err(e) => {
@@ -8612,8 +8620,9 @@ impl GBufferTargets {
         extent: VkExtent2D,
         aa_extent: VkExtent2D,
         profile: TargetsProfile,
-        dump_usage: bool,
+        arming: TargetsArming,
     ) -> Result<Self, SwapchainError> {
+        let dump_usage = arming.dump_usage;
         // Multi-paradigm render-path plan, rung R2: the threaded `profile` must match what
         // `scene.resolved_render_path` would derive directly — the SAME "declare/record can
         // never diverge" discipline `path_has_raster`/`path_has_marcher` enforce in
@@ -8714,7 +8723,7 @@ impl GBufferTargets {
             extent,
             aa_extent,
             scene.ssaa.is_some(),
-            dump_usage,
+            arming,
             scene.sdf_depth_merge.is_some(),
         )?;
 
@@ -9541,6 +9550,7 @@ impl GBufferTargets {
             display,
             lit_native,
             post_final: None,
+            nan_inject_src: None,
             aa_arm: AaArm::from_scene(scene),
             #[cfg(feature = "hwrt")]
             shadow_vis_resolve_set,
@@ -9721,7 +9731,59 @@ impl GBufferTargets {
             }
         }
 
+        // Render wave PX1a (H4 Scope 3, test 12): the test-only NaN source, LAST — only when the
+        // `inject_nan_lit` key was armed at boot.
+        if arming.nan_inject {
+            match Self::build_nan_inject_src(ctx) {
+                Ok(b) => targets.nan_inject_src = Some(b),
+                Err(e) => {
+                    // SAFETY: as the `post_final` arm above — every resource of `targets` was
+                    // created on `ctx` in this fn, no submission references it, `destroy` consumes
+                    // it once.
+                    unsafe { targets.destroy(ctx) };
+                    return Err(e);
+                }
+            }
+        }
+
         Ok(targets)
+    }
+
+    /// Render wave PX1a (H4 Scope 3, test 12): the 8-byte host-visible `TRANSFER_SRC` buffer
+    /// holding one `LIT_FORMAT` texel, [`NAN_INJECT_TEXEL_BITS`], written once here. Cold: built
+    /// only on a boot that armed the `inject_nan_lit` key.
+    #[cold]
+    #[inline(never)]
+    fn build_nan_inject_src(ctx: &VulkanContext) -> Result<BoundBuffer, SwapchainError> {
+        let texel: [u8; NAN_INJECT_SRC_BYTES as usize] = {
+            let w = NAN_INJECT_TEXEL_BITS;
+            let mut b = [0u8; NAN_INJECT_SRC_BYTES as usize];
+            let mut i = 0;
+            while i < 4 {
+                let le = w[i].to_le_bytes();
+                b[2 * i] = le[0];
+                b[2 * i + 1] = le[1];
+                i += 1;
+            }
+            b
+        };
+        let buf = RhiDevice::create_buffer(
+            ctx,
+            &BufferDesc {
+                size: NAN_INJECT_SRC_BYTES,
+                usage: BufferUsage::TRANSFER_SRC,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .map_err(SwapchainError::DepthImage)?;
+        let p = RhiDevice::buffer_mapped_ptr(ctx, &buf)
+            .expect("invariant: a HostVisibleCoherent buffer is persistently mapped");
+        // SAFETY: `p` is the host-coherent mapping of the freshly created `NAN_INJECT_SRC_BYTES`-byte
+        // buffer above; `texel` is a live local array of exactly that many bytes, a distinct
+        // allocation, so the copy is in-bounds and non-overlapping; no submission reads the buffer
+        // yet (it is not returned until after this write).
+        unsafe { core::ptr::copy_nonoverlapping(texel.as_ptr(), p.as_ptr(), texel.len()) };
+        Ok(buf)
     }
 
     /// Ensures the G-buffer images + descriptor sets exist and match `extent`,
@@ -9763,7 +9825,7 @@ impl GBufferTargets {
         extent: VkExtent2D,
         aa_extent: VkExtent2D,
         profile: TargetsProfile,
-        dump_usage: bool,
+        arming: TargetsArming,
     ) -> Result<(), SwapchainError> {
         if let Some(t) = targets.as_ref()
             && t.extent.width == extent.width
@@ -9787,7 +9849,7 @@ impl GBufferTargets {
 
         // Build the new targets BEFORE tearing down the old ones, so an allocation
         // failure leaves the previous (still-valid) targets in place.
-        let fresh = Self::create(ctx, scene, extent, aa_extent, profile, dump_usage)?;
+        let fresh = Self::create(ctx, scene, extent, aa_extent, profile, arming)?;
 
         // Asset-streaming plan F7 §5 (C1, review O1), widened by DM1 D-3: a SECONDARY
         // self-consistency net — every material-bearing ring `create` just built must be
@@ -9856,8 +9918,14 @@ impl GBufferTargets {
         // slots — every slot of every ring (and the single set) is drained. Rung 3a (`hwrt`) adds
         // the two `Option`-guarded shadow-vis image RINGS, drained before ssao (reverse acquisition).
         unsafe {
-            // Render wave PX1a: `post_final`'s set + UBO rings — the last acquisition of `create`,
-            // so destroyed first. `None` only on a create that failed while building it.
+            // Render wave PX1a (test 12): the NaN source — `create`'s last acquisition when the
+            // `inject_nan_lit` key is armed, so destroyed first. `None` on every production run.
+            if let Some(b) = self.nan_inject_src {
+                RhiDevice::destroy_buffer(ctx, b);
+            }
+            // Render wave PX1a: `post_final`'s set + UBO rings — the last acquisition of `create`
+            // (bar the test-only NaN source), so destroyed next. `None` only on a create that failed
+            // while building it.
             if let Some(r) = self.post_final {
                 for g in r.set {
                     RhiDevice::destroy_bind_group(ctx, g);
@@ -10389,6 +10457,41 @@ const fn dump_transfer_src(dump_usage: bool) -> ImageUsage {
     if dump_usage { ImageUsage::TRANSFER_SRC } else { ImageUsage::NONE }
 }
 
+/// The boot-time arming that shapes the targets' usage sets, threaded from
+/// [`Renderer::render_gbuffer_frame`] into [`GBufferTargets::sync_gbuffer`] / `create`. Both fields
+/// are `false` on every production run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) struct TargetsArming {
+    /// OBS (D): the image dump is armed (`TRANSFER_SRC` on the dumped targets, [`dump_transfer_src`]).
+    pub(crate) dump_usage: bool,
+    /// Render wave PX1a (test 12): the `inject_nan_lit` key is armed (`TRANSFER_DST` on `lit`,
+    /// [`nan_inject_transfer_dst`], and the 8-byte NaN source buffer).
+    pub(crate) nan_inject: bool,
+}
+
+/// Render wave PX1a (H4 Scope 3, test 12): the `lit` texel the test-only `test_nan_inject` pass
+/// overwrites — `(8, 8)`, inside every fixture's flat top-left background region.
+pub const NAN_INJECT_TEXEL: [u32; 2] = [8, 8];
+
+/// The injected `LIT_FORMAT` (RGBA16F) texel: a binary16 quiet NaN (`0x7E00`) in R, `1.0`
+/// (`0x3C00`) in G, B and A — 8 bytes (cut PC-PX1a-12).
+pub const NAN_INJECT_TEXEL_BITS: [u16; 4] = [0x7E00, 0x3C00, 0x3C00, 0x3C00];
+
+/// The NaN source buffer's size: one `LIT_FORMAT` texel.
+pub(crate) const NAN_INJECT_SRC_BYTES: u64 = 8;
+const _: () = assert!(
+    matches!(crate::present::image_dump_texel_bytes(LIT_FORMAT.as_i32()), Some(b) if b as u64 == NAN_INJECT_SRC_BYTES),
+    "the injected texel is exactly one LIT_FORMAT texel"
+);
+
+/// Render wave PX1a (H4 Scope 3, test 12): the `TRANSFER_DST` usage the `test_nan_inject` copy
+/// needs on `lit`, added ONLY on a boot that armed the `inject_nan_lit` key — the
+/// [`dump_transfer_src`] idiom, so a production boot creates `lit` with today's usage set (the
+/// zero-cost-off half of the NaN hook; `nan_inject_transfer_dst_adds_nothing_when_unarmed`).
+const fn nan_inject_transfer_dst(armed: bool) -> ImageUsage {
+    if armed { ImageUsage::TRANSFER_DST } else { ImageUsage::NONE }
+}
+
 /// Render wave RD1 (defect R0b): the `SAMPLED` usage the SDF depth merge's
 /// `SampledImageAtGeneral` read of `viewt` needs, added ONLY on a boot that armed a transparent
 /// consumer class (the activation exists) — the [`dump_transfer_src`] idiom, so an unarmed boot
@@ -10495,6 +10598,7 @@ mod tests {
             display: null_texture(),
             lit_native: None,
             post_final: None,
+            nan_inject_src: None,
             aa_arm: AaArm::Off,
             ddgi_update_set: None,
             present_set: bg_ring(),
@@ -10885,6 +10989,7 @@ mod tests {
             display: null_texture(),
             lit_native: None,
             post_final: None,
+            nan_inject_src: None,
             aa_arm: AaArm::Off,
             shadow_vis_resolve_set: shadow_vis_resolve.then(bg_ring),
             shadow_denoised_resolve_set: shadow_denoised_resolve.then(bg_ring),
@@ -11182,6 +11287,29 @@ mod tests {
     fn merge_viewt_sampled_adds_nothing_when_unarmed() {
         assert_eq!(merge_viewt_sampled(false), ImageUsage::NONE, "a default boot keeps viewt's usage set");
         assert_eq!(merge_viewt_sampled(true), ImageUsage::SAMPLED);
+    }
+
+    /// Render wave PX1a (test 12's zero cost off): `lit` gains `TRANSFER_DST` ONLY when the
+    /// `inject_nan_lit` key is armed, and a default arming arms nothing.
+    #[test]
+    fn nan_inject_transfer_dst_adds_nothing_when_unarmed() {
+        assert_eq!(nan_inject_transfer_dst(false), ImageUsage::NONE, "a production boot keeps lit's usage set");
+        assert_eq!(nan_inject_transfer_dst(true), ImageUsage::TRANSFER_DST);
+        assert_eq!(TargetsArming::default(), TargetsArming { dump_usage: false, nan_inject: false });
+    }
+
+    /// The injected texel is a binary16 NaN in R (exponent all ones, mantissa non-zero) and finite
+    /// elsewhere — decoded through `pixfmt` (DS-H4 (a)).
+    #[test]
+    fn the_injected_texel_is_a_binary16_nan_in_red_only() {
+        let mut bytes = [0u8; 8];
+        for (i, w) in NAN_INJECT_TEXEL_BITS.iter().enumerate() {
+            bytes[2 * i..2 * i + 2].copy_from_slice(&w.to_le_bytes());
+        }
+        let t = boyko_shaderdsl::pixfmt::decode_texel(LIT_FORMAT.as_i32() as u32, &bytes)
+            .expect("invariant: 8 bytes are one RGBA16F texel");
+        assert!(t[0].is_nan(), "R is a NaN: {t:?}");
+        assert_eq!([t[1], t[2], t[3]], [1.0, 1.0, 1.0]);
     }
 }
 

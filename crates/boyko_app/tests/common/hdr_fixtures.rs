@@ -23,6 +23,10 @@ use boyko_shaderdsl::post::{eval_params, post_final_eval};
 use super::graph_receipt::{Receipt, fresh_out, run_worker};
 use super::image_dump::{DumpFile, files_of};
 
+/// Render wave PX1a test 12: `taa` arms TAA on a non-SSAA fixture (default: AA off).
+pub const ENV_AA: &str = "BOYKO_PX1A_AA";
+/// The fixture convention's force-key variable, decoded by the worker (`boyko_app::test_force`).
+pub const ENV_TEST_FORCE: &str = "BOYKO_TEST_FORCE";
 /// The worker's fixture knob: `<name>` or `<name>:hot`.
 pub const ENV_FIXTURE: &str = "BOYKO_PX0_FIXTURE";
 /// The window edge every fixture renders at.
@@ -230,6 +234,11 @@ pub fn fixture_worker_main(worker: &str) {
     let plugins = EnginePlugins::window("boyko_engine px0 branch fixture", WIN, WIN);
     app.add_plugins(if f.ssaa { plugins.with_ssaa_scale(2) } else { plugins });
     app.insert_resource(FixtureRes(f, hot));
+    // Render wave PX1a test 12: the force keys (an unknown key refuses the boot) and the TAA knob.
+    let force = std::env::var(ENV_TEST_FORCE).unwrap_or_default();
+    app.insert_resource(boyko_app::test_force::parse(&force).unwrap_or_else(|e| panic!("{e}")));
+    let taa = std::env::var(ENV_AA).is_ok_and(|v| v == "taa");
+    assert!(!(taa && f.ssaa), "{ENV_AA}=taa on the SSAA fixture: one AA mode per boot");
     app.add_startup_system(fixture_setup);
     app.insert_resource(RenderPathConfig { path: f.path, legs: f.legs });
     if f.ssao {
@@ -238,7 +247,7 @@ pub fn fixture_worker_main(worker: &str) {
     if f.ssaa {
         // The runner arms SSAA itself from the boot scale; nothing else to insert.
     } else {
-        app.insert_resource(AaConfig { mode: AaMode::Off });
+        app.insert_resource(AaConfig { mode: if taa { AaMode::Taa } else { AaMode::Off } });
     }
     app.run();
     let frames = app.world().resource::<HostFrameStats>().frames;

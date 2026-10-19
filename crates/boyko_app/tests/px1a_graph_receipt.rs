@@ -130,6 +130,11 @@ fn check_post_seam(r: &Receipt, aa: Aa, particles: bool) -> Result<(), String> {
     let acc = accesses(r);
     let post = pass_index(&passes, "post_final").ok_or("no pass `post_final`")?;
     let present = pass_index(&passes, "present_sample").ok_or("no pass `present_sample`")?;
+    // Render wave PX1a C11 (zero cost off): the test-only NaN injection is never declared on a run
+    // without the `inject_nan_lit` force key (these drivers arm none).
+    if pass_index(&passes, "test_nan_inject").is_some() {
+        return Err("the test-only pass `test_nan_inject` is declared on a run without its force key".to_owned());
+    }
 
     // The bindings' order (D-O1).
     let mine: Vec<&AccessRow> = acc.iter().filter(|a| a.pass == post).collect();
@@ -330,6 +335,13 @@ fn the_seam_check_rejects_each_broken_frame() {
         true,
     );
     assert!(red(cas, Aa::Off).contains("`cas` pass"));
+    // C11: the test-only NaN injection declared on a production run (no force key armed).
+    let injected = fixture_receipt(
+        &["resolve", "test_nan_inject", "post_final", "present_sample"],
+        &[(2, 0, CS, 0x20, GENERAL), (2, 2, CS, 0x40, GENERAL), (3, 2, FS, 0x20, SRO)],
+        true,
+    );
+    assert!(red(injected, Aa::Off).contains("test_nan_inject"));
 }
 
 // ===============================================================================================
