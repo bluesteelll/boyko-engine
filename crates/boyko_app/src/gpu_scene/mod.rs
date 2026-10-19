@@ -41,13 +41,13 @@ use boyko_rhi_vulkan::compute::{
     deferred_pbr_wrap_spirv,
     depth_prepass_fs_spirv, depth_prepass_vs_spirv,
     encode_edit_list, forward_opaque_fs_spirv, forward_opaque_froxel_fs_spirv, forward_opaque_vs_spirv,
-    forward_sky_fs_spirv, forward_sky_vs_spirv, fullscreen_sample_fs_spirv,
+    forward_sky_fs_spirv, forward_sky_vs_spirv,
     fullscreen_sample_vs_spirv, fxaa_fs_spirv,
     gbuffer_mrt_fs_spirv,
     gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
     gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, HZB_BUILD_PUSH_BYTES, hzb_build_spirv,
     interp_instances_spirv, punctual_depth_fs_spirv,
-    post_final_spirv, punctual_depth_vs_spirv, rcas_spirv, sdf_forward_march_spirv, sdf_forward_march_sdfonly_spirv,
+    post_final_spirv, present_sample_fs_spirv, punctual_depth_vs_spirv, rcas_spirv, sdf_forward_march_spirv, sdf_forward_march_sdfonly_spirv,
     sdf_forward_march_sdfonly_viewt_spirv, sdf_forward_march_viewt_spirv,
     sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
     sdf_ssao_spirv_variant, smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv,
@@ -2681,7 +2681,9 @@ impl GpuSceneBundles {
         .expect("invariant: present-blit bind-group layout create");
         let sample_vs = RhiDevice::create_shader_module(device, fullscreen_sample_vs_spirv())
             .expect("invariant: fullscreen vertex shader module create");
-        let sample_fs = RhiDevice::create_shader_module(device, fullscreen_sample_fs_spirv())
+        // Render wave PX1a (D-P1): on an `*_SRGB` swapchain the module decodes the display image
+        // (`srgb_eotf`) before the hardware's encode on write; the plain sample otherwise.
+        let sample_fs = RhiDevice::create_shader_module(device, present_sample_fs_spirv(swap_format.as_i32()))
             .expect("invariant: fullscreen fragment shader module create");
         let present_pipeline = RhiDevice::create_graphics_pipeline(
             device,

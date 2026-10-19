@@ -625,7 +625,8 @@ pub fn oetf_gamma22<C: Cf>(c: C::Vec3f) -> C::Vec3f {
 
 /// The piecewise sRGB decode `c ≤ 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055)^2.4` — the inverse of
 /// the hardware's `*_SRGB` encode, for PX1a's swapchain fallback (NOT `pow(c, 2.2)`, which is ≈ 7
-/// LSB off at 0.1). Not called by the body at PXe.
+/// LSB off at 0.1). Not called by `post_final`'s body: `emit::emit_hlsl_srgb_eotf` splices it into
+/// the present blit's `SWAPCHAIN_SRGB` variant (`fullscreen_sample.fs.hlsl`, render wave PX1a D-P1).
 #[inline]
 pub fn srgb_eotf<C: Cf>(c: C::Vec3f) -> C::Vec3f {
     let lit = C::Scalar::lit;

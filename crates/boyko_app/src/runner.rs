@@ -253,7 +253,18 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
 
     // ── Boot: the window host chain (window → surface → swapchain → renderer
     // → the R3 G-buffer scene bundles at the boot-fixed composite extent).
-    let mut host = match WindowHost::boot(ctx, &desc) {
+    // Render wave PX1a (D-P1): the test-only `srgb_swapchain` key, read the `try_resource` way
+    // (absent on every shipping run ⇒ the production format pick).
+    let format_pick = if app
+        .world()
+        .try_resource::<crate::test_force::TestForce>()
+        .is_some_and(|f| f.contains(crate::test_force::TestForceKey::SrgbSwapchain))
+    {
+        boyko_rhi_vulkan::swapchain::SurfaceFormatPick::ForceSrgb
+    } else {
+        boyko_rhi_vulkan::swapchain::SurfaceFormatPick::Production
+    };
+    let mut host = match WindowHost::boot(ctx, &desc, format_pick) {
         Ok(h) => h,
         Err(e) => {
             crate::diag::report_boot_stage_failed("window host", &e);

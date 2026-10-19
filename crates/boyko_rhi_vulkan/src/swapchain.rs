@@ -11,10 +11,10 @@ pub use crate::present::{
     GBUFFER_PUSH_BYTES, GBufferFrame, GBufferMeshDraw, GBufferScene, GBufferTargets,
     InterpActivation, ParticleActivation, PostFinalActivation, PunctualDepthActivation, RcasActivation, Renderer,
     ResolvedRenderPathGpu, SCENE_MVP_BYTES, SampledComposite, Scene,
-    PresentModeConfig, SmaaActivation, SsaaActivation, SsaoActivation, Surface, Swapchain,
+    PresentModeConfig, SmaaActivation, SsaaActivation, SsaoActivation, Surface, SurfaceFormatPick, Swapchain,
     SwapchainError,
     TaaActivation, UiPass,
-    ViewtFromDepthActivation, ViewtFromVbDepthActivation,
+    ViewtFromDepthActivation, ViewtFromVbDepthActivation, swapchain_format_is_srgb,
 };
 #[cfg(feature = "hwrt")]
 pub use crate::present::{ShadowVisActivation, TlasBuildActivation};

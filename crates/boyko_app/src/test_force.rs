@@ -18,6 +18,7 @@
 //! consumer's plumbing in one commit:
 //!
 //! - `disarm_sdf_merge` (render wave RD1, defect R0b) — [`TestForceKey::DisarmSdfMerge`].
+//! - `srgb_swapchain` (render wave PX1a, D-P1) — [`TestForceKey::SrgbSwapchain`].
 
 use boyko_macros::Resource;
 
@@ -30,18 +31,26 @@ pub enum TestForceKey {
     /// pre-RD1 regime with a defined depth); every other path declares no merge. The renderer's
     /// transparent-depth order guard is silent under it, by name.
     DisarmSdfMerge,
+    /// Render wave PX1a (D-P1, test 17): the window host picks an 8-bit `*_SRGB` swapchain
+    /// (`SurfaceFormatPick::ForceSrgb`) — and refuses the boot when the surface advertises none —
+    /// so the present blit's `srgb_eotf` variant is the one that runs. Read once, at boot, by the
+    /// windowed runner; the shipping pick prefers `B8G8R8A8_UNORM`.
+    SrgbSwapchain,
 }
 
 impl TestForceKey {
     /// Every key with its `BOYKO_TEST_FORCE` spelling; a key's bit is its index here.
-    pub const ALL: &'static [(TestForceKey, &'static str)] =
-        &[(TestForceKey::DisarmSdfMerge, "disarm_sdf_merge")];
+    pub const ALL: &'static [(TestForceKey, &'static str)] = &[
+        (TestForceKey::DisarmSdfMerge, "disarm_sdf_merge"),
+        (TestForceKey::SrgbSwapchain, "srgb_swapchain"),
+    ];
 
     /// This key's bit in [`TestForce`].
     #[inline]
     pub const fn bit(self) -> u64 {
         match self {
             TestForceKey::DisarmSdfMerge => 1 << 0,
+            TestForceKey::SrgbSwapchain => 1 << 1,
         }
     }
 }

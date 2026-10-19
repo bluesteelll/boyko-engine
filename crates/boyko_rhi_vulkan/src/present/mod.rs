@@ -86,7 +86,7 @@ pub use scene_types::{
 };
 #[cfg(feature = "hwrt")]
 pub use scene_types::{ShadowVisActivation, TlasBuildActivation};
-pub use surface::Surface;
+pub use surface::{Surface, SurfaceFormatPick, choose_surface_format, swapchain_format_is_srgb};
 pub use swapchain::{PresentModeConfig, Swapchain};
 pub use targets::{GBufferFrame, GBufferTargets, LIT_BACKGROUND_SCENE, LIT_FORMAT};
 

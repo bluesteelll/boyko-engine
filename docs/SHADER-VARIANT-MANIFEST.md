@@ -395,6 +395,32 @@ is the eDSL's, spliced between `// === GENERATED post_hdr_boundary BEGIN/END ===
 Frozen recipe: `dxc.exe -spirv -T ps_6_0 -E main -fspv-target-env=vulkan1.3 ssaa_downsample.fs.hlsl`.
 *Byte gate:* `boyko_rhi_vulkan/tests/post_chain_spv_sync.rs` (the `.spv` and the spliced span).
 
+## `fullscreen_sample.fs.hlsl` — the present blit (raster, render wave PX1a D-P1)
+
+One source, hand-written; **one `-D` axis, `SWAPCHAIN_SRGB`** (default 0). The present blit samples the
+display-referred image (`post_final`'s `display`, or `aa_out` under FXAA / SMAA / CAS) into the
+swapchain. On an 8-bit `*_SRGB` swapchain the hardware encodes on write, so the `SWAPCHAIN_SRGB=1`
+variant returns `srgb_eotf(rgb)` first — the eDSL's piecewise sRGB decode (`boyko_shaderdsl::post::
+srgb_eotf`, spliced between `// === GENERATED srgb_eotf BEGIN/END ===` inside the `#if SWAPCHAIN_SRGB`
+arm by `emit_post --splice`; not `pow(c, 2.2)`, about 7 codes off at 0.1). The default arm is textually
+the pre-PX1a body, so `fullscreen_sample.fs.spv` did not move. The present pipeline is built per
+swapchain format and picks the module by `compute::present_sample_fs_spirv(format)`
+(`present::swapchain_format_is_srgb`) — a `.spv` variant, not a spec constant (cut D-P1: the graphics
+pipeline path has no specialization info; both are boot-time choices with an identical runtime).
+
+| Variant | `-D` | `.spv` | dxc `-T` | Notes |
+|---|---|---|---|---|
+| UNORM swapchain (default) | — | `fullscreen_sample.fs.spv` | `ps_6_0` | set 0 = one COMBINED_IMAGE_SAMPLER @0; `return g_tex.Sample(g_smp, uv)`; no push. Also the sample FS of `window_present_*` / `graphics_sample` / `ui_rect_swapchain_golden` harnesses. |
+| `*_SRGB` swapchain | `SWAPCHAIN_SRGB=1` | `fullscreen_sample_srgb.fs.spv` | `ps_6_0` | the same interface; `float4(srgb_eotf(c.rgb), c.a)` — three `Pow`s (one per channel). Selected only when the swapchain format is `B8G8R8A8_SRGB` / `R8G8B8A8_SRGB` (the production pick prefers `B8G8R8A8_UNORM`; the test-only `TestForce` key `srgb_swapchain` forces an sRGB format or refuses the boot). |
+
+Frozen recipes (the header pins both verbatim; no `-O`):
+`dxc.exe -spirv -T ps_6_0 -E main -fspv-target-env=vulkan1.3 fullscreen_sample.fs.hlsl`,
+`dxc.exe -spirv -T ps_6_0 -E main -fspv-target-env=vulkan1.3 -D SWAPCHAIN_SRGB=1 fullscreen_sample.fs.hlsl`.
+*Byte gate:* `boyko_rhi_vulkan/tests/post_chain_spv_sync.rs` (both `.spv` re-DXC'd, the spliced span
+against `emit::post_splices()`, the module chooser by format, the variant's three `Pow`s). *Device:*
+`boyko_app/tests/px1a_display_parity.rs` test 17 (the forced sRGB swapchain's readback equals the UNORM
+one within one code).
+
 ## `px0_probe_store.comp.hlsl` — the float-format probe's compute kernel (compute, TEST-ONLY, render wave PX0)
 
 One HAND-WRITTEN source (test HLSL, not eDSL-owned: it computes nothing the host model mirrors beyond

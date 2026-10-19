@@ -378,17 +378,30 @@ pub fn emit_hlsl_lit_store_saturate() -> String {
     format!("{}\n{f}", const_block(&[c]))
 }
 
+/// The `srgb_eotf` span body: [`crate::post::srgb_eotf`] printed as the HLSL function
+/// `float3 srgb_eotf(float3 c)` — the piecewise sRGB decode, the exact inverse of the hardware's
+/// `*_SRGB` encode. Spliced into `fullscreen_sample.fs.hlsl` inside its `#if SWAPCHAIN_SRGB` arm
+/// (render wave PX1a D-P1): the present blit's `fullscreen_sample_srgb.fs.spv` variant decodes the
+/// display-referred image before an `*_SRGB` swapchain encodes it on write, so the encoded bytes
+/// are the display's (never a double encode).
+pub fn emit_hlsl_srgb_eotf() -> String {
+    let (f, c) = emit_vec3_leaf_fn("srgb_eotf", &["c"], |a| post::srgb_eotf::<EmitCf>(a[0]));
+    format!("{}
+{f}", const_block(&[c]))
+}
+
 /// One generated span inside a hand-written shader: `(file under boyko_rhi_vulkan/shaders, span
 /// name, the emitter's text)`.
 pub type PostSplice = (&'static str, &'static str, String);
 
 /// Every span `emit_post --splice` rewrites — the table the bin applies and
 /// `boyko_rhi_vulkan/tests/post_chain_spv_sync.rs` pins each committed span against.
-pub fn post_splices() -> [PostSplice; 3] {
+pub fn post_splices() -> [PostSplice; 4] {
     [
         ("lit_format.hlsli", "lit_store_saturate", emit_hlsl_lit_store_saturate()),
         ("taa_resolve.comp.hlsl", "post_hdr_boundary", emit_hlsl_post_hdr_boundary()),
         ("ssaa_downsample.fs.hlsl", "post_hdr_boundary", emit_hlsl_post_hdr_boundary()),
+        ("fullscreen_sample.fs.hlsl", "srgb_eotf", emit_hlsl_srgb_eotf()),
     ]
 }
 

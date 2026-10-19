@@ -1,7 +1,8 @@
 //! Render wave PX1a (`px1a/cut.md` C5, D-S2, D-S4) — **the byte gate of the post chain's
 //! hand-written shaders**: each committed `.spv` is the re-DXC of its `.hlsl` under the frozen
-//! recipe (`-spirv -T <profile> -E main -fspv-target-env=vulkan1.3`, no `-O`, no `-D`; each
-//! source's header states it, and `docs/SHADER-VARIANT-MANIFEST.md` has its row).
+//! recipe (`-spirv -T <profile> -E main -fspv-target-env=vulkan1.3`, no `-O`; a `-D` only on the
+//! sRGB present variant; each source's header states it, and `docs/SHADER-VARIANT-MANIFEST.md` has
+//! its row).
 //!
 //! The post seam moves these sources across PX1a's commits (`taa_resolve` loses `gAaOut` at C5, the
 //! transitional pass-through kernel lived C5–C6, the HDR boundary splices land at C7, the sRGB
@@ -10,9 +11,14 @@
 //!
 //! It also pins every eDSL-owned span spliced into a hand-written shader (`px1a/cut.md` D-S2;
 //! orchestrator ruling 67 W5) to its emitter, `boyko_shaderdsl::emit::post_splices()`: the HDR
-//! boundary of `taa_resolve` / `ssaa_downsample` and `lit_format.hlsli`'s store bound. SKIPS with an `eprintln` when no `dxc` resolves — a skipped run is not a
-//! pass, and the lane's tester runs it on the workstation, where the pinned VulkanSDK 1.4.350.0 is
-//! installed.
+//! boundary of `taa_resolve` / `ssaa_downsample`, `lit_format.hlsli`'s store bound and the present
+//! blit's `srgb_eotf`. The re-DXC test SKIPS with an `eprintln` when no `dxc` resolves — a skipped
+//! run is not a pass, and the lane's tester runs it on the workstation, where the pinned VulkanSDK
+//! 1.4.350.0 is installed.
+//!
+//! C10 (D-P1) adds the `*_SRGB` swapchain arm's host gates: the present module is chosen by the
+//! swapchain format (an `*_SRGB` format must never get the UNORM module — the double encode), the
+//! test-only forced pick takes an sRGB format or refuses, and the variant carries the decode.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -20,16 +26,17 @@ use std::process::Command;
 mod child_guard;
 use child_guard::{BoundedRun, DXC_DEADLINE};
 
-/// `(source, profile, committed .spv)`.
-const SHADERS: [(&str, &str, &str); 8] = [
-    ("taa_resolve.comp.hlsl", "cs_6_0", "taa_resolve.comp.spv"),
-    ("rcas.comp.hlsl", "cs_6_0", "rcas.comp.spv"),
-    ("ssaa_downsample.fs.hlsl", "ps_6_0", "ssaa_downsample.fs.spv"),
-    ("fullscreen_sample.fs.hlsl", "ps_6_0", "fullscreen_sample.fs.spv"),
-    ("fxaa.fs.hlsl", "ps_6_0", "fxaa.fs.spv"),
-    ("smaa_edge.fs.hlsl", "ps_6_0", "smaa_edge.fs.spv"),
-    ("smaa_weight.fs.hlsl", "ps_6_0", "smaa_weight.fs.spv"),
-    ("smaa_blend.fs.hlsl", "ps_6_0", "smaa_blend.fs.spv"),
+/// `(source, profile, -D defines, committed .spv)`.
+const SHADERS: [(&str, &str, &[&str], &str); 9] = [
+    ("taa_resolve.comp.hlsl", "cs_6_0", &[], "taa_resolve.comp.spv"),
+    ("rcas.comp.hlsl", "cs_6_0", &[], "rcas.comp.spv"),
+    ("ssaa_downsample.fs.hlsl", "ps_6_0", &[], "ssaa_downsample.fs.spv"),
+    ("fullscreen_sample.fs.hlsl", "ps_6_0", &[], "fullscreen_sample.fs.spv"),
+    ("fullscreen_sample.fs.hlsl", "ps_6_0", &["SWAPCHAIN_SRGB=1"], "fullscreen_sample_srgb.fs.spv"),
+    ("fxaa.fs.hlsl", "ps_6_0", &[], "fxaa.fs.spv"),
+    ("smaa_edge.fs.hlsl", "ps_6_0", &[], "smaa_edge.fs.spv"),
+    ("smaa_weight.fs.hlsl", "ps_6_0", &[], "smaa_weight.fs.spv"),
+    ("smaa_blend.fs.hlsl", "ps_6_0", &[], "smaa_blend.fs.spv"),
 ];
 
 fn shaders_dir() -> PathBuf {
@@ -60,11 +67,14 @@ fn every_post_chain_spv_is_the_redxc_of_its_source() {
     };
     let dir = shaders_dir();
     let mut stale = Vec::new();
-    for (src, profile, spv) in SHADERS {
+    for (src, profile, defines, spv) in SHADERS {
         let out = child_guard::scratch_path(&format!("{spv}.redxc"));
-        let status = Command::new(&dxc)
-            .current_dir(&dir)
-            .args(["-spirv", "-T", profile, "-E", "main", "-fspv-target-env=vulkan1.3"])
+        let mut cmd = Command::new(&dxc);
+        cmd.current_dir(&dir).args(["-spirv", "-T", profile, "-E", "main", "-fspv-target-env=vulkan1.3"]);
+        for d in defines {
+            cmd.args(["-D", d]);
+        }
+        let status = cmd
             .arg(src)
             .arg("-Fo")
             .arg(&out)
@@ -81,11 +91,11 @@ fn every_post_chain_spv_is_the_redxc_of_its_source() {
     assert!(stale.is_empty(), "re-compile the post-chain shaders under their recipes:\n{}", stale.join("\n"));
 }
 
-/// The table names eight distinct `.spv`, each committed beside its source.
+/// The table names nine distinct `.spv`, each committed beside its source.
 #[test]
 fn the_shader_table_names_every_committed_spv() {
-    for (i, (src, _, spv)) in SHADERS.iter().enumerate() {
-        assert!(SHADERS[i + 1..].iter().all(|k| k.2 != *spv), "{spv} twice");
+    for (i, (src, _, _, spv)) in SHADERS.iter().enumerate() {
+        assert!(SHADERS[i + 1..].iter().all(|k| k.3 != *spv), "{spv} twice");
         assert!(shaders_dir().join(spv).exists(), "{spv} is not committed");
         assert!(shaders_dir().join(src).exists(), "{src} is not committed");
     }
@@ -143,4 +153,97 @@ fn the_hdr_boundary_is_called_where_the_cut_puts_it() {
     let ssaa = code("ssaa_downsample.fs.hlsl");
     assert_eq!(ssaa.matches("hdr_sanitize(g_lit.Load(").count(), 4, "ssaa_downsample: four sanitized taps");
     assert!(!ssaa.contains("pow("), "ssaa_downsample: no gamma decode / encode around a scene-linear box");
+}
+
+// ---- C10 (D-P1): the `*_SRGB` swapchain arm --------------------------------------------------------
+
+use boyko_rhi_vulkan::compute::{fullscreen_sample_fs_spirv, fullscreen_sample_srgb_fs_spirv, present_sample_fs_spirv};
+use boyko_rhi_vulkan::ffi::{
+    VK_COLOR_SPACE_SRGB_NONLINEAR_KHR, VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB,
+    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_UNDEFINED, VkSurfaceFormatKhr,
+};
+use boyko_rhi_vulkan::present::{SurfaceFormatPick, choose_surface_format, swapchain_format_is_srgb};
+
+/// `VK_FORMAT_A2B10G10R10_UNORM_PACK32` — a format neither pick prefers (a first-advertised fallback).
+const VK_FORMAT_A2B10G10R10_UNORM_PACK32: i32 = 64;
+
+/// The number of `GLSL.std.450 Pow` (`OpExtInst`, opcode 12, instruction 26) in a SPIR-V module.
+fn pow_count(words: &[u32]) -> usize {
+    let mut i = 5; // past the header
+    let mut n = 0;
+    while i < words.len() {
+        let (count, op) = ((words[i] >> 16) as usize, words[i] & 0xFFFF);
+        assert!(count > 0, "a zero-length SPIR-V instruction at word {i}");
+        if op == 12 && count >= 5 && words[i + 4] == 26 {
+            n += 1;
+        }
+        i += count;
+    }
+    n
+}
+
+/// THE C10 red-first: the present blit's module is chosen by the swapchain format — an `*_SRGB`
+/// swapchain gets the `srgb_eotf` decode variant (else the hardware's encode on write encodes the
+/// display image a second time, about +40 LSB in the mid-tones); a UNORM one the plain sample.
+#[test]
+fn an_srgb_swapchain_format_selects_the_srgb_present_module() {
+    for f in [VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_R8G8B8A8_SRGB] {
+        assert!(swapchain_format_is_srgb(f), "VkFormat {f} is an sRGB swapchain format");
+        let m = present_sample_fs_spirv(f);
+        assert!(
+            m != fullscreen_sample_fs_spirv(),
+            "VkFormat {f} (an *_SRGB swapchain) selects the UNORM present module: the display is encoded twice"
+        );
+        assert!(m == fullscreen_sample_srgb_fs_spirv(), "VkFormat {f} selects the srgb_eotf variant");
+    }
+    for f in [VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_A2B10G10R10_UNORM_PACK32] {
+        assert!(!swapchain_format_is_srgb(f), "VkFormat {f} is not an sRGB swapchain format");
+        assert!(present_sample_fs_spirv(f) == fullscreen_sample_fs_spirv(), "VkFormat {f} selects the plain sample");
+    }
+}
+
+fn sf(format: i32) -> VkSurfaceFormatKhr {
+    VkSurfaceFormatKhr { format, color_space: VK_COLOR_SPACE_SRGB_NONLINEAR_KHR }
+}
+
+/// The test seam (`TestForce` key `srgb_swapchain`): the forced pick takes `B8G8R8A8_SRGB`, else
+/// `R8G8B8A8_SRGB`, and REFUSES a surface with neither — so a fixture that forces the sRGB regime
+/// can never measure the UNORM one. The production pick is unchanged (UNORM first).
+#[test]
+fn the_forced_srgb_pick_takes_an_srgb_format_or_refuses() {
+    let nl = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    let all = [sf(VK_FORMAT_B8G8R8A8_UNORM), sf(VK_FORMAT_B8G8R8A8_SRGB), sf(VK_FORMAT_R8G8B8A8_SRGB)];
+    assert_eq!(choose_surface_format(&all, SurfaceFormatPick::Production), Some((VK_FORMAT_B8G8R8A8_UNORM, nl)));
+    assert_eq!(choose_surface_format(&all, SurfaceFormatPick::ForceSrgb), Some((VK_FORMAT_B8G8R8A8_SRGB, nl)));
+    let rgba = [sf(VK_FORMAT_R8G8B8A8_UNORM), sf(VK_FORMAT_R8G8B8A8_SRGB)];
+    assert_eq!(choose_surface_format(&rgba, SurfaceFormatPick::ForceSrgb), Some((VK_FORMAT_R8G8B8A8_SRGB, nl)));
+    let unorm_only = [sf(VK_FORMAT_A2B10G10R10_UNORM_PACK32), sf(VK_FORMAT_B8G8R8A8_UNORM)];
+    assert_eq!(choose_surface_format(&unorm_only, SurfaceFormatPick::ForceSrgb), None, "no sRGB format: refused");
+    assert_eq!(choose_surface_format(&unorm_only, SurfaceFormatPick::Production), Some((VK_FORMAT_B8G8R8A8_UNORM, nl)));
+    let fallback = [sf(VK_FORMAT_A2B10G10R10_UNORM_PACK32)];
+    assert_eq!(
+        choose_surface_format(&fallback, SurfaceFormatPick::Production),
+        Some((VK_FORMAT_A2B10G10R10_UNORM_PACK32, nl)),
+        "production falls back to the first advertised format"
+    );
+    let any = [VkSurfaceFormatKhr { format: VK_FORMAT_UNDEFINED, color_space: nl }];
+    assert_eq!(choose_surface_format(&any, SurfaceFormatPick::Production), Some((VK_FORMAT_B8G8R8A8_UNORM, nl)));
+    assert_eq!(choose_surface_format(&any, SurfaceFormatPick::ForceSrgb), Some((VK_FORMAT_B8G8R8A8_SRGB, nl)));
+    assert_eq!(choose_surface_format(&[], SurfaceFormatPick::Production), None);
+}
+
+/// The variant carries the decode and the default module does not: `srgb_eotf`'s three `Pow`s
+/// (one per channel) are in the sRGB module only, and the sRGB span sits inside the source's
+/// `#if SWAPCHAIN_SRGB` arm (so the default compile cannot pick it up).
+#[test]
+fn the_srgb_variant_carries_the_decode_and_the_default_module_does_not() {
+    assert_eq!(pow_count(fullscreen_sample_fs_spirv()), 0, "the default present module decodes nothing");
+    assert_eq!(pow_count(fullscreen_sample_srgb_fs_spirv()), 3, "srgb_eotf: one Pow per channel");
+    let src = std::fs::read_to_string(shaders_dir().join("fullscreen_sample.fs.hlsl"))
+        .expect("invariant: the source is committed")
+        .replace("\r\n", "\n");
+    let gate = src.find("#if SWAPCHAIN_SRGB\n").expect("the #if SWAPCHAIN_SRGB arm");
+    let span = src.find("// === GENERATED srgb_eotf BEGIN ===").expect("the srgb_eotf span");
+    let endif = src[gate..].find("#endif").map(|e| gate + e).expect("the arm's #endif");
+    assert!(gate < span && span < endif, "the srgb_eotf span sits inside the #if SWAPCHAIN_SRGB arm");
 }

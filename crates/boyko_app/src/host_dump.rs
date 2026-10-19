@@ -45,7 +45,7 @@ use std::io::Write as _;
 
 use boyko_rhi::{BufferDesc, BufferUsage, MemoryLocation, RhiDevice};
 use boyko_rhi_vulkan::device::VulkanContext;
-use boyko_rhi_vulkan::ffi::{VK_FORMAT_R8G8B8A8_UNORM, VkExtent2D};
+use boyko_rhi_vulkan::ffi::{VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, VkExtent2D};
 use boyko_rhi_vulkan::memory::BoundBuffer;
 
 /// Presented frames rendered before the first readback is requested —
@@ -286,9 +286,11 @@ pub(crate) struct HostDump {
 impl HostDump {
     /// Arms the dump iff `BOYKO_HOST_DUMP` is set (the value is the output
     /// path), reading `BOYKO_HOST_DUMP_FRAMES` / `BOYKO_HOST_DUMP_SETTLE` beside
-    /// it. `vk_format` is the swapchain's raw `VkFormat` — the host boot only
-    /// admits the two UNORM formats, so "not R8G8B8A8" means the readback bytes
-    /// are already BGRA (the BMP's native pixel order). Cold: called once
+    /// it. `vk_format` is the swapchain's raw `VkFormat` — the host boot admits
+    /// the two UNORM formats and (render wave PX1a D-P1) their two `*_SRGB`
+    /// twins, so "not R8G8B8A8_*" means the readback bytes are already BGRA (the
+    /// BMP's native pixel order). An `*_SRGB` swapchain's bytes are its encoded
+    /// texels — the display bytes the decode-then-encode present reproduces. Cold: called once
     /// before the frame loop. A malformed knob value is a warning and the
     /// default, never a panic (a diagnostic knob must not take the run down).
     pub(crate) fn from_env(vk_format: i32) -> Option<Self> {
@@ -375,7 +377,7 @@ impl HostDump {
                 staging: None,
                 extent: VkExtent2D { width: 0, height: 0 },
             }),
-            rgba_source: vk_format == VK_FORMAT_R8G8B8A8_UNORM,
+            rgba_source: vk_format == VK_FORMAT_R8G8B8A8_UNORM || vk_format == VK_FORMAT_R8G8B8A8_SRGB,
             scratch: Vec::new(),
             file_path: String::new(),
             line_buf: String::new(),

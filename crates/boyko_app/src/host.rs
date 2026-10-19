@@ -13,10 +13,12 @@
 use boyko_render::{ResolvedDdgi, ResolvedRenderPath};
 use boyko_rhi::Format;
 use boyko_rhi_vulkan::device::VulkanContext;
-use boyko_rhi_vulkan::ffi::{VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM};
+use boyko_rhi_vulkan::ffi::{
+    VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM,
+};
 use boyko_rhi_vulkan::present::LIT_FORMAT;
 use boyko_rhi_vulkan::swapchain::{
-    FRAMES_IN_FLIGHT, GBufferFrame, Renderer, Surface, Swapchain, SwapchainError,
+    FRAMES_IN_FLIGHT, GBufferFrame, Renderer, Surface, SurfaceFormatPick, Swapchain, SwapchainError,
 };
 use boyko_rhi_vulkan::window::{Window, WindowError};
 use boyko_scene::FreeEntry;
@@ -181,12 +183,17 @@ pub(crate) struct WindowHost {
 }
 
 /// Maps the swapchain's raw `VkFormat` to the basic-slice [`Format`] the
-/// present-blit pipeline declares, or `None` for an unsupported format (the
-/// SRGB variants have no basic-slice mapping — the boot fails typed).
+/// present-blit pipeline declares, or `None` for an unsupported format (the boot
+/// fails typed). Render wave PX1a (D-P1): the two 8-bit `*_SRGB` formats are
+/// admitted — the present pipeline then binds the `srgb_eotf` decode variant
+/// (`compute::present_sample_fs_spirv`), so the hardware's encode on write
+/// reproduces the display bytes instead of encoding them twice.
 fn swap_color_format(vk_format: i32) -> Option<Format> {
     match vk_format {
         f if f == VK_FORMAT_B8G8R8A8_UNORM => Some(Format::B8G8R8A8Unorm),
         f if f == VK_FORMAT_R8G8B8A8_UNORM => Some(Format::R8G8B8A8Unorm),
+        f if f == VK_FORMAT_B8G8R8A8_SRGB => Some(Format::B8G8R8A8Srgb),
+        f if f == VK_FORMAT_R8G8B8A8_SRGB => Some(Format::R8G8B8A8Srgb),
         _ => None,
     }
 }
@@ -212,9 +219,14 @@ impl WindowHost {
     /// A scene-resource create failure inside [`GpuSceneBundles::boot`] panics
     /// (`expect("invariant: ...")`): device OOM at scene-boot time is a setup
     /// failure by design, not a recoverable boot outcome.
+    ///
+    /// `format_pick` is [`SurfaceFormatPick::Production`] on every shipping boot;
+    /// the windowed runner passes [`SurfaceFormatPick::ForceSrgb`] only under the
+    /// test-only `TestForce` key `srgb_swapchain` (render wave PX1a test 17).
     pub(crate) fn boot(
         ctx: &'static VulkanContext,
         desc: &WindowDesc,
+        format_pick: SurfaceFormatPick,
     ) -> Result<Self, HostBootError> {
         let window =
             Window::open(desc.title, desc.width, desc.height).map_err(HostBootError::Window)?;
@@ -224,7 +236,7 @@ impl WindowHost {
         // `window` (and on this fn's error paths the surface local drops
         // before the window local), so the HWND/HINSTANCE are live for the
         // surface's whole lifetime.
-        let surface = unsafe { Surface::new(ctx, window.hinstance(), window.hwnd()) }
+        let surface = unsafe { Surface::with_format_pick(ctx, window.hinstance(), window.hwnd(), format_pick) }
             .map_err(HostBootError::Surface)?;
 
         let swapchain = Swapchain::new(ctx, &surface, window.width(), window.height())

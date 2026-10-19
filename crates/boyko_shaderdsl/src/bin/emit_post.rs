@@ -8,6 +8,7 @@
 //!   lit_format.hlsli          // === GENERATED lit_store_saturate ===  (every lit producer's store bound)
 //!   taa_resolve.comp.hlsl     // === GENERATED post_hdr_boundary ===   (hdr_sanitize, hdr_history_guard)
 //!   ssaa_downsample.fs.hlsl   // === GENERATED post_hdr_boundary ===
+//!   fullscreen_sample.fs.hlsl // === GENERATED srgb_eotf ===          (the *_SRGB present variant, D-P1)
 //! ```
 //!
 //! Run: `cargo run -p boyko_shaderdsl --features emit --bin emit_post [-- --splice]`

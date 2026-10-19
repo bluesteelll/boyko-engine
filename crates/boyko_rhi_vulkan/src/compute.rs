@@ -1356,6 +1356,16 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// Render wave PX1a (D-P1): the `*_SRGB` swapchain variant of the present blit's FS
+    /// (`shaders/fullscreen_sample.fs.hlsl` under `-D SWAPCHAIN_SRGB=1`): samples the
+    /// display-referred image and returns `srgb_eotf(rgb)` (the eDSL's piecewise sRGB decode,
+    /// spliced), so the swapchain's hardware encode on write reproduces the display bytes.
+    /// Selected by [`present_sample_fs_spirv`].
+    FULLSCREEN_SAMPLE_SRGB_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/fullscreen_sample_srgb.fs.spv")
+}
+
+embed_spirv! {
     /// FXAA 3.11 compact fragment SPIR-V (`shaders/fxaa.fs.hlsl`, three-source-validated
     /// against Lottes FXAA3_11 / Rodriguez compact form / Bevy's shipped `fxaa.wgsl`): a
     /// 12-tap edge-only luma post-process. Paired with [`fullscreen_sample_vs_spirv`] (the
@@ -2438,6 +2448,26 @@ pub fn fullscreen_sample_vs_spirv() -> &'static [u32] {
 #[inline]
 pub fn fullscreen_sample_fs_spirv() -> &'static [u32] {
     FULLSCREEN_SAMPLE_FS_SPV.as_words()
+}
+
+/// Render wave PX1a (D-P1): the committed `*_SRGB` present-blit fragment SPIR-V (see
+/// [`FULLSCREEN_SAMPLE_SRGB_FS_SPV`]) as a `u32` word stream.
+#[inline]
+pub fn fullscreen_sample_srgb_fs_spirv() -> &'static [u32] {
+    FULLSCREEN_SAMPLE_SRGB_FS_SPV.as_words()
+}
+
+/// Render wave PX1a (D-P1): the present blit's fragment module for a swapchain of raw `VkFormat`
+/// `swapchain_vk_format` — the `srgb_eotf` decode variant on an `*_SRGB` swapchain
+/// ([`crate::present::swapchain_format_is_srgb`]), whose hardware encodes on write; the plain
+/// sample on a UNORM one. Boot-time only (the present pipeline is built per swapchain format).
+#[inline]
+pub fn present_sample_fs_spirv(swapchain_vk_format: i32) -> &'static [u32] {
+    if crate::present::swapchain_format_is_srgb(swapchain_vk_format) {
+        fullscreen_sample_srgb_fs_spirv()
+    } else {
+        fullscreen_sample_fs_spirv()
+    }
 }
 
 /// The committed FXAA 3.11 compact fragment SPIR-V as a `u32` word stream, ready for
