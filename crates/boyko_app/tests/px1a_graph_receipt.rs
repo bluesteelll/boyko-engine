@@ -55,14 +55,16 @@ use image_dump::{DumpFile, VK_R8G8B8A8_UNORM, VK_R32G32B32A32_SFLOAT, encode, fi
 const ENV_AA: &str = "BOYKO_PX1A_AA";
 /// Frames before the receipt frame.
 const SETTLE: u32 = 30;
-/// [`check_presents_the_whole_scene`]'s bar: the least rank correlation between `display` and `lit`,
-/// both reduced to the native extent. Measured on the device at `6c163cf7` (triage r2,
-/// `scratch/tri2/analyze.out`): a whole-scene `display` ranks at 0.997-0.999 against the scene, a
-/// top-left-quarter one at -0.35.
+/// [`check_presents_the_whole_scene`]'s bar: the least rank correlation between `display` and the
+/// compressed `lit` ([`scene_luma`]), both reduced to the native extent. Measured on the OBS Forward
+/// scene (`render-orch/px1a/fix2/proto.py` over the device dumps): a `display` of the whole scene
+/// ranks at 0.999, the top-left-quarter `display` of `6c163cf7` at -0.31. (Against LINEAR `lit` the
+/// whole-scene `display` ranks at only 0.94: an average of tonemapped texels is not the tonemap of
+/// their linear average, and the edges of the scene rank differently.)
 const WHOLE_SCENE_RHO_MIN: f64 = 0.9;
 /// [`check_presents_the_whole_scene`]'s power premise: the most the scene's top-left quarter, read
 /// 1:1, may rank like the whole scene. Above it a quarter-reading `display` could pass the bar.
-/// Measured on the OBS Forward scene at `6c163cf7`: -0.35.
+/// Measured on the OBS Forward scene: -0.32.
 const QUARTER_RHO_MAX: f64 = 0.5;
 
 /// One configuration's AA arming.
@@ -266,15 +268,25 @@ fn check_post_seam(r: &Receipt, aa: Aa, particles: bool, display_edge: u32) -> R
 // The whole-scene check (review r2 R2-W1)
 // ===============================================================================================
 
-/// Rec. 709 luminance of a decoded texel; a non-finite channel reads as 0 (`hdr_sanitize`'s rule).
-fn luma(t: [f32; 4]) -> f64 {
-    let c = |v: f32| if v.is_finite() { f64::from(v) } else { 0.0 };
+/// Rec. 709 luminance of a decoded `display` texel (display-referred, `[0, 1]`).
+fn display_luma(t: [f32; 4]) -> f64 {
+    0.2126 * f64::from(t[0]) + 0.7152 * f64::from(t[1]) + 0.0722 * f64::from(t[2])
+}
+
+/// Rec. 709 luminance of a decoded `lit` texel after the per-channel compression `c / (1 + c)` — a
+/// monotone stand-in for the tonemap, so a box average of it ranks like a box average of `display`
+/// texels. A non-finite or negative channel reads as 0 (`hdr_sanitize`'s rule).
+fn scene_luma(t: [f32; 4]) -> f64 {
+    let c = |v: f32| {
+        let v = if v.is_finite() { f64::from(v).max(0.0) } else { 0.0 };
+        v / (1.0 + v)
+    };
     0.2126 * c(t[0]) + 0.7152 * c(t[1]) + 0.0722 * c(t[2])
 }
 
-/// `img`'s luminance box-reduced to `edge`², row-major. `img` must be square and a whole multiple
-/// of `edge`.
-fn reduced_luma(img: &DumpFile, edge: u32) -> Result<Vec<f64>, String> {
+/// `img`'s per-texel `luma` box-reduced to `edge`², row-major. `img` must be square and a whole
+/// multiple of `edge`.
+fn reduced_luma(img: &DumpFile, edge: u32, luma: fn([f32; 4]) -> f64) -> Result<Vec<f64>, String> {
     if img.width != img.height || img.width < edge || img.width % edge != 0 {
         return Err(format!("a {}x{} image is not a whole multiple of the {edge}^2 native extent", img.width, img.height));
     }
@@ -337,9 +349,10 @@ fn spearman(a: &[f64], b: &[f64]) -> f64 {
 ///   quarter could pass.
 /// - **The check:** `display`, box-reduced to `native`² (2:1 when it is the composite, 1:1 when it
 ///   is native), ranks like the whole scene at least [`WHOLE_SCENE_RHO_MIN`]. Rank correlation of
-///   luminance, because the tonemap and the OETF between `lit` and `display` are monotone; the
-///   reduction makes the check blind to the route `display` takes (a native `display` from a
-///   downsampled scene, or a composite one the present minifies).
+///   luminance, because the tonemap and the OETF between `lit` and `display` are monotone; `lit` is
+///   compressed per texel before its reduction ([`scene_luma`]) so both sides average display-like
+///   values. The reduction makes the check blind to the route `display` takes (a native `display`
+///   from a downsampled scene, or a composite one the present minifies).
 fn check_presents_the_whole_scene(lit: &DumpFile, display: &DumpFile, native: u32) -> Result<f64, String> {
     if (lit.width, lit.height) != (2 * native, 2 * native) {
         return Err(format!(
@@ -347,15 +360,16 @@ fn check_presents_the_whole_scene(lit: &DumpFile, display: &DumpFile, native: u3
             lit.width, lit.height
         ));
     }
-    let whole = reduced_luma(lit, native)?;
-    let quarter: Vec<f64> = (0..native).flat_map(|y| (0..native).map(move |x| (x, y))).map(|(x, y)| luma(lit.texel_f32(x, y))).collect();
+    let whole = reduced_luma(lit, native, scene_luma)?;
+    let quarter: Vec<f64> =
+        (0..native).flat_map(|y| (0..native).map(move |x| (x, y))).map(|(x, y)| scene_luma(lit.texel_f32(x, y))).collect();
     let quarter_rho = spearman(&quarter, &whole);
     if quarter_rho > QUARTER_RHO_MAX {
         return Err(format!(
             "the scene's top-left quarter ranks like the whole scene ({quarter_rho:.4} > {QUARTER_RHO_MAX}): the check has no power on it"
         ));
     }
-    let shown = reduced_luma(display, native)?;
+    let shown = reduced_luma(display, native, display_luma)?;
     let rho = spearman(&shown, &whole);
     if rho < WHOLE_SCENE_RHO_MIN {
         return Err(format!(
@@ -720,7 +734,7 @@ fn px1a_receipt_forward_boot_ssaa() {
 /// (the 2x composite) and `display` on one frame, and [`check_presents_the_whole_scene`] requires
 /// `display`, reduced to the native window, to depict the whole scene. A `display` at the native
 /// extent that `post_final` filled 1:1 from the 2x `lit` holds only the scene's top-left quarter,
-/// which the window then shows magnified 2x (rank correlation -0.35 at `6c163cf7`). Particles,
+/// which the window then shows magnified 2x (rank correlation -0.31 at `6c163cf7`). Particles,
 /// interpolation, DDGI and the material edit are off: one static frame.
 #[test]
 #[ignore = "gpu-windowed: PX1a review r2 R2-W1, Forward under a boot-armed SSAA presents the whole scene (spawns px1a_receipt_worker); run with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
