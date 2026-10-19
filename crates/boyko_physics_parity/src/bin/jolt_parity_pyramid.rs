@@ -68,8 +68,12 @@
 //! does not hold for it. Refused (exit 2) off `--scene jolt`, at another `--gap`, with
 //! `--threshold`, `--frozen-by` or `--solver reference`, and `--scene-dump` with sleeping on (the
 //! dump is the program's created values, which sleeping cannot change); every other flag composes
-//! with it. Sleeping on is accepted since lane SL's SL-2a: such a row is a structural screen of the
-//! sleeping arm (S-SL3), never a parity row, since every engine runs the parity scenes awake.
+//! with it. Sleeping on is accepted since lane SL's SL-2a (first a structural screen of the
+//! sleeping arm, S-SL3). Since SL-2b it is window 9c's "on" arm, a parity row: every engine runs
+//! each dynamic scene with its own sleeping off AND on, and every 9c row names its arm — ours
+//! `--sleeping on|off`, Jolt 5.6 `-allow_sleep` on the parity patch v3 build, Rapier 0.36
+//! `--sleeping on` (`docs/physics/perf-campaign/levers/scenes/01-DESIGN.md` section 10; the
+//! sleeping-on pins are `pins.json` `sleeping_on`, gated by `scenes/gate/sleep_gates.py`).
 //!
 //! * `--sanity PATH` (any `jolt` row, `--dyn` or not): one CSV row per state for the shared bar
 //!   `scenes/gate/dyn_sanity.py` scores (energies per unit box mass, bounds, speeds, the launch
@@ -461,8 +465,8 @@
 //!
 //! # Build (Jolt)
 //!
-//! `crates/boyko_physics/benches/jolt_parity/pyramid_scene.patch` applies to Jolt v5.3.0 and v5.6.0 alike (its v2 hunks
-//! are checked on v5.6.0 only: the comparison is against Jolt 5.6). It:
+//! `crates/boyko_physics/benches/jolt_parity/pyramid_scene.patch` applies to Jolt v5.3.0 and v5.6.0 alike (its v2 and v3
+//! hunks are checked on v5.6.0 only: the comparison is against Jolt 5.6). It:
 //!
 //! * sets `mLinearDamping = mAngularDamping = 0` in `PyramidScene.h` (H3);
 //! * adds `-no_pair_cache`: `PhysicsSettings::mUseBodyPairContactCache = false` (H10);
@@ -485,7 +489,14 @@
 //!   `boyko-parity-dyn receipts:` line are printed; the v1 line is byte-identical. Jolt ignores an
 //!   option it does not know, so a row must also require the v2 line (an old exe given `-dyn=` runs
 //!   J-T). `Update`'s `EPhysicsUpdateError` is kept (one return-value store in the timed pair) and
-//!   counted.
+//!   counted;
+//! * v3 (lane SL-2b, window 9c's sleeping arm; `docs/physics/perf-campaign/levers/scenes/01-DESIGN.md`
+//!   section 10.2), every hunk inert without `-allow_sleep`: J-1 `-dyn`, `-sanity`, `-pose_out` and
+//!   `-spawn_pose_out` run with `-allow_sleep` (v2 refused them), and `-scene_dump` with it exits 1;
+//!   J-2 + J-3 the replacing `BoykoDynPyramidScene` inherits the flag (v2 dropped it), its boxes
+//!   through `PyramidScene` and its projectiles too; J-4 `GetNumActiveBodies` after every step, read
+//!   after `clock_end` (the timed pair is v2's), and with `-sanity` written to
+//!   `awake_<quality>_th<N>.csv`; J-5 one `boyko-parity-sleep v1:` line before the hash.
 //!
 //! ```text
 //! # WinLibs MinGW-w64 (g++, POSIX threads, UCRT) first on PATH: its bin directory holds
@@ -511,7 +522,15 @@
 //! #   the same configure into D:/tmp/jolt/build-v5.6.0-dyn-dist with the WinLibs cmake.exe and
 //! #   -DCMAKE_C_COMPILER / -DCMAKE_CXX_COMPILER / -DCMAKE_MAKE_PROGRAM set to its gcc, c++ and
 //! #   mingw32-make (its CMakeCache equals build-v5.6.0-dist's option for option), the same build
-//! #   command and the same three DLLs. Window 9c runs every Jolt row on this exe.
+//! #   command and the same three DLLs (sha256 9df09901…, pins.json exes.jolt56-dyn-v2). Windows
+//! #   LAND and SR keep this exe by path and sha256; it is no longer 9c's.
+//! # Patch v3 (the sleeping arms, lane SL-2b): again its own worktree and build directory, by the
+//! # same recipe (-j 2), so v2's tree, exe and DLLs stay untouched (ruling 65 Q1):
+//! #   git -C D:/tmp/jolt/JoltPhysics worktree add --detach D:/tmp/jolt/wt-v5.6.0-dyn3 e77f175
+//! #   git -C D:/tmp/jolt/wt-v5.6.0-dyn3 apply <repo>/crates/boyko_physics/benches/jolt_parity/pyramid_scene.patch
+//! #   into D:/tmp/jolt/build-v5.6.0-dyn3-dist (sha256 e8f48439…, pins.json exes.jolt56-dyn), the
+//! #   DLLs v2's. Window 9c runs every Jolt row, off and on, on this exe; its off arm is v2's
+//! #   (`jolt_gates.sh` on dyn3: J-T and the kick / shoot / slide pins hold).
 //! ```
 //!
 //! The compiler installation is the one the 2026-09-10 binary's `CMakeCache.txt` names (g++ 16.1.0
