@@ -53,11 +53,13 @@ use crate::loaders::RonMaterialLoader;
 ///   metallic-roughness parameters packed into one lane. `flags` is reserved (0 in MVP-2).
 /// - `emissive` (off 32): `rgb` = LINEAR emissive radiance, `w` unused.
 ///
-/// All values are LINEAR. PBR P0-C: the deferred resolve (`deferred_pbr.hlsl`) Hill
-/// ACES-fits the exposed radiance THEN manually gamma-2.2 encodes it once, right before the
-/// single `gLit` store — `gLit` (R8G8B8A8_UNORM) and the swapchain (`pick_surface_format`
-/// prefers `*_UNORM` over `*_SRGB`) are linear UNORM end to end, so nothing downstream
-/// hardware-encodes sRGB and the OETF must be manual.
+/// All values are LINEAR. Since render wave PX1a every `lit` producer stores scene-linear
+/// radiance × the frame's pre-exposure (`ResolvedPost::pre_exposure`) into `lit`, which is
+/// RGBA16F (`LIT_FORMAT`) — no tonemap and no display clamp at any store (the store is bounded at
+/// `HDR_MAX` only, a NaN kept as a NaN). The ONE tonemap and the ONE manual gamma-2.2 OETF are
+/// `post_final`'s, which writes the display-referred `display` (R8G8B8A8_UNORM). The swapchain is
+/// UNORM by preference (`choose_surface_format`); on an `*_SRGB` swapchain the present blit decodes
+/// with `srgb_eotf` before the hardware encodes on write, so the OETF stays manual and single.
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialGpu {
