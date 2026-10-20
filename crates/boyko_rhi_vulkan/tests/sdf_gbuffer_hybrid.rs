@@ -874,10 +874,47 @@ fn run_gbuffer_hybrid_m2(
     // The single-level (M2) entry: no clip-map → `brick_levels = 1`, the level-0 atlas/grid bound at
     // every level slot (duplicates). The N-level (M4) sibling [`run_gbuffer_hybrid_m4`] passes a real
     // `BrickClipmap`. This wrapper keeps the M2/M3 call sites + byte output unchanged (the OFF/N=1 gate).
-    run_gbuffer_hybrid_m4(
+    let (lit, tiles, viewt, _gbuf) = run_gbuffer_hybrid_m4(
         ctx, edits, coarse_enabled, read_tiles, omega_in, lighting_flags, light_dir,
-        light_table_words, brick, brick_trilinear, read_viewt, m2_grid_default, None,
-    )
+        light_table_words, brick, brick_trilinear, read_viewt, m2_grid_default, None, false,
+    );
+    (lit, tiles, viewt)
+}
+
+/// [`run_gbuffer_hybrid_m4`]'s readbacks: `(lit, tiles?, gViewT?, G-buffer?)` — the optional lanes
+/// are `Some` only when their `read_*` flag asked for them.
+type HarnessReadbacks = (Vec<u8>, Option<Vec<u8>>, Option<Vec<f32>>, Option<DeviceGbuffer>);
+
+/// The device's own G-buffer, read back after the resolve (OPEN-ITEMS 15, the seam gate): the three
+/// RGBA8 attribute images and the `gViewT` lane, row-major `py * SDF_IMG_W + px`. Each RGBA8 image
+/// is `PIXELS * 4` bytes in the order the marcher stores them (`gAlbedo` = linear base,
+/// `gNormal` = oct RG + material id BA, `gMaterial` = shadow, ao, mask, 1).
+#[expect(dead_code, reason = "the seam gate (OI1516 C3) is the first reader of these lanes")]
+struct DeviceGbuffer {
+    albedo: Vec<u8>,
+    normal: Vec<u8>,
+    material: Vec<u8>,
+    view_t: Vec<f32>,
+}
+
+/// The seam harness (OPEN-ITEMS 15): [`run_gbuffer_hybrid_lit_table`]'s run (cull off, omega 1,
+/// no brick) that also reads the device's G-buffer back, so the attribute gate compares the
+/// device's own bytes and the resolve gate feeds them to the host resolve. The clustered L1 driver
+/// ([`run_gbuffer_hybrid_lit_clustered`]) is the precedent: it reads `gViewT` + `gNormal.rg` back
+/// for the same reason; this is the full-attribute form of that seam.
+#[expect(dead_code, reason = "the seam gate (OI1516 C3) is the first caller")]
+fn run_gbuffer_hybrid_lit_table_seam(
+    ctx: &VulkanContext,
+    edits: &[SdfEdit],
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+    light_table_words: &[u32],
+) -> (Vec<u8>, DeviceGbuffer) {
+    let (lit, _tiles, _viewt, gbuf) = run_gbuffer_hybrid_m4(
+        ctx, edits, false, false, 1.0, lighting_flags, light_dir, light_table_words, None, false,
+        false, true, None, true,
+    );
+    (lit, gbuf.expect("invariant: read_gbuffer = true returns the device G-buffer"))
 }
 
 /// The N-level (M4 clip-map) GPU harness (Slice C). Identical to the single-level M2 harness but binds
@@ -886,6 +923,11 @@ fn run_gbuffer_hybrid_m2(
 /// `brick_levels = BRICK_LEVELS` on the push. When `clipmap` is `None` it is the OFF/N=1 path (the
 /// level-0 single atlas/grid bound at every level slot, `brick_levels = 1`) — byte-identical to the
 /// pre-M4 M2 harness (the call sites that pass `None`).
+///
+/// `read_gbuffer` (OPEN-ITEMS 15) also copies `gAlbedo` / `gNormal` / `gMaterial` and `gViewT` back
+/// after the resolve and returns them as the fourth element. With it `false` the three attribute
+/// images keep their usages, no extra barrier or copy is recorded and the fourth element is `None`
+/// (the command stream is byte-identical to the harness before it; `read_viewt` is the precedent).
 #[allow(clippy::too_many_arguments)]
 fn run_gbuffer_hybrid_m4(
     ctx: &VulkanContext,
@@ -901,7 +943,8 @@ fn run_gbuffer_hybrid_m4(
     read_viewt: bool,
     m2_grid_default: bool,
     clipmap: Option<&BrickClipmap>,
-) -> (Vec<u8>, Option<Vec<u8>>, Option<Vec<f32>>) {
+    read_gbuffer: bool,
+) -> HarnessReadbacks {
     let device: &VulkanContext = ctx;
     let queue = ctx.rhi_queue();
 
@@ -1097,7 +1140,14 @@ fn run_gbuffer_hybrid_m4(
     // G-buffer producer (in the marcher's encoding, mask=1), so a yielded mesh pixel (r1)
     // has a real fragment to stand on. The marcher still STORES them in GENERAL; the
     // deferred resolve loads albedo/normal/material in GENERAL. The throwaway color
-    // attachment is DELETED (the MRT binds the three real images). ---
+    // attachment is DELETED (the MRT binds the three real images). OPEN-ITEMS 15: the seam gate
+    // reads all three back, so they gain `TRANSFER_SRC` ONLY when `read_gbuffer` (the OFF path keeps
+    // today's usages). ---
+    let gbuffer_usage = if read_gbuffer {
+        ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC
+    } else {
+        ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT
+    };
     let albedo = device
         .create_texture(&TextureDesc {
             width: SDF_IMG_W,
@@ -1105,7 +1155,7 @@ fn run_gbuffer_hybrid_m4(
             depth: 1,
             format: GBUFFER_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
+            usage: gbuffer_usage,
             array_layers: 1,
             mip_levels: 1,
             view_format: None,
@@ -1118,7 +1168,7 @@ fn run_gbuffer_hybrid_m4(
             depth: 1,
             format: GBUFFER_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
+            usage: gbuffer_usage,
             array_layers: 1,
             mip_levels: 1,
             view_format: None,
@@ -1131,7 +1181,7 @@ fn run_gbuffer_hybrid_m4(
             depth: 1,
             format: GBUFFER_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
+            usage: gbuffer_usage,
             array_layers: 1,
             mip_levels: 1,
             view_format: None,
@@ -1157,7 +1207,7 @@ fn run_gbuffer_hybrid_m4(
     // discriminator reads it back (the GPU's per-pixel surface `t`) for the EXACT-CSG residual
     // check + the hit-`t` agreement, so it gains `TRANSFER_SRC` ONLY when `read_viewt` (the OFF
     // byte-identity path keeps the STORAGE-only image + records no extra copy).
-    let viewt_usage = if read_viewt {
+    let viewt_usage = if read_viewt || read_gbuffer {
         ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC
     } else {
         ImageUsage::STORAGE
@@ -1215,11 +1265,23 @@ fn run_gbuffer_hybrid_m4(
     // unconditionally without a branch.
     let viewt_readback = device
         .create_buffer(&BufferDesc {
-            size: if read_viewt { (PIXELS as u64) * 4 } else { 4 },
+            size: if read_viewt || read_gbuffer { (PIXELS as u64) * 4 } else { 4 },
             usage: BufferUsage::TRANSFER_DST,
             location: MemoryLocation::HostVisibleCoherent,
         })
         .expect("host-visible gViewT readback buffer");
+    // OPEN-ITEMS 15: one readback buffer per RGBA8 attribute image (`gAlbedo`, `gNormal`,
+    // `gMaterial`, in that order), `PIXELS * 4` bytes each on the `read_gbuffer` path, a 4-byte
+    // placeholder otherwise (never copied into or read), so the teardown is unconditional.
+    let gbuffer_readback: [BoundBuffer; 3] = core::array::from_fn(|_| {
+        device
+            .create_buffer(&BufferDesc {
+                size: if read_gbuffer { READBACK_BYTES } else { 4 },
+                usage: BufferUsage::TRANSFER_DST,
+                location: MemoryLocation::HostVisibleCoherent,
+            })
+            .expect("host-visible G-buffer attribute readback buffer")
+    });
 
     // The quad vertex buffer.
     let vertices = quad_vertices();
@@ -1870,6 +1932,46 @@ fn run_gbuffer_hybrid_m4(
         );
     }
 
+    // --- OPEN-ITEMS 15: copy the device's own G-buffer back (the seam gate reads it). The marcher
+    // STORED the three attribute images in GENERAL and the resolve only READ them, so GENERAL ->
+    // TRANSFER_SRC behind the marcher's COMPUTE_SHADER write (the stage mask also orders the
+    // resolve's reads before the layout transition). `gViewT` rides the M2 copy above when
+    // `read_viewt`; otherwise it is copied here. Gated by `read_gbuffer`: the OFF path records none
+    // of it. ---
+    if read_gbuffer {
+        for (tex, dst) in [&albedo, &normal, &material].into_iter().zip(gbuffer_readback.iter()) {
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture: tex,
+                src_stage: BarrierStage::COMPUTE_SHADER,
+                dst_stage: BarrierStage::TRANSFER,
+                src_access: BarrierAccess::SHADER_WRITE,
+                dst_access: BarrierAccess::TRANSFER_READ,
+                old_layout: ImageLayout::General,
+                new_layout: ImageLayout::TransferSrcOptimal,
+                range: ImageSubresourceRange::COLOR,
+            });
+            encoder.copy_image_to_buffer(tex, ImageLayout::TransferSrcOptimal, dst, &regions);
+        }
+        if !read_viewt {
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture: &viewt,
+                src_stage: BarrierStage::COMPUTE_SHADER,
+                dst_stage: BarrierStage::TRANSFER,
+                src_access: BarrierAccess::SHADER_WRITE,
+                dst_access: BarrierAccess::TRANSFER_READ,
+                old_layout: ImageLayout::General,
+                new_layout: ImageLayout::TransferSrcOptimal,
+                range: ImageSubresourceRange::COLOR,
+            });
+            encoder.copy_image_to_buffer(
+                &viewt,
+                ImageLayout::TransferSrcOptimal,
+                &viewt_readback,
+                &regions,
+            );
+        }
+    }
+
     encoder.end().expect("end");
 
     queue.submit(&encoder, &fence).expect("submit");
@@ -1912,7 +2014,8 @@ fn run_gbuffer_hybrid_m4(
     // M2: optionally read back the gViewT surface-`t` f32 image (the GPU's per-pixel hit `t`,
     // `1.0e30` on a non-hit pixel). The buffer is HostVisibleCoherent + the fence wait preceded
     // this read, so the copy is complete + coherent.
-    let viewt_out: Option<Vec<f32>> = if read_viewt {
+    let viewt_copied = read_viewt || read_gbuffer;
+    let viewt_all: Option<Vec<f32>> = if viewt_copied {
         let viewt_ptr = device
             .buffer_mapped_ptr(&viewt_readback)
             .expect("host-visible gViewT readback buffer is mapped");
@@ -1931,6 +2034,36 @@ fn run_gbuffer_hybrid_m4(
     } else {
         None
     };
+
+    // OPEN-ITEMS 15: the device's G-buffer bytes (one `PIXELS * 4` RGBA8 image per buffer) and the
+    // `gViewT` lane copied with them.
+    let gbuffer_out = if read_gbuffer {
+        let read_rgba8 = |buf: &BoundBuffer| -> Vec<u8> {
+            let ptr = device
+                .buffer_mapped_ptr(buf)
+                .expect("host-visible G-buffer readback buffer is mapped");
+            let mut bytes = vec![0u8; READBACK_BYTES as usize];
+            // SAFETY: `ptr` is the persistent mapping of a HostVisibleCoherent buffer created with
+            // `READBACK_BYTES` (`PIXELS * 4`) bytes on the `read_gbuffer` path, valid until its
+            // `destroy_buffer` below. The copy into it was recorded before `encoder.end()` and the
+            // fence wait above completed it, so the bytes are written and visible. `bytes` is a
+            // fresh, distinct allocation of the same length, and no reference into the mapping is
+            // live, so the raw read aliases nothing.
+            unsafe {
+                core::ptr::copy_nonoverlapping(ptr.as_ptr(), bytes.as_mut_ptr(), READBACK_BYTES as usize);
+            }
+            bytes
+        };
+        Some(DeviceGbuffer {
+            albedo: read_rgba8(&gbuffer_readback[0]),
+            normal: read_rgba8(&gbuffer_readback[1]),
+            material: read_rgba8(&gbuffer_readback[2]),
+            view_t: viewt_all.clone().expect("invariant: read_gbuffer copies gViewT"),
+        })
+    } else {
+        None
+    };
+    let viewt_out = if read_viewt { viewt_all } else { None };
 
     assert_validation_clean(ctx);
 
@@ -1964,6 +2097,9 @@ fn run_gbuffer_hybrid_m4(
         device.destroy_buffer(vertex_buffer);
         device.destroy_buffer(readback);
         device.destroy_buffer(viewt_readback);
+        for buf in gbuffer_readback {
+            device.destroy_buffer(buf);
+        }
         device.destroy_sampler(sampler);
         device.destroy_texture(ssao);
         device.destroy_texture(viewt);
@@ -1983,7 +2119,7 @@ fn run_gbuffer_hybrid_m4(
         brick_atlas.destroy(device);
     }
 
-    (out, tiles_out, viewt_out)
+    (out, tiles_out, viewt_out, gbuffer_out)
 }
 
 /// The SSAO edge-avoiding à-trous denoise chain's per-run test resources
@@ -7345,9 +7481,9 @@ fn sdf_m4_clipmap_near_field_matches_single_level() {
         );
         let vt_single = vt_single_opt.expect("gViewT readback (single-level)");
 
-        let (lit_clip, _, vt_clip_opt) = run_gbuffer_hybrid_m4(
+        let (lit_clip, _, vt_clip_opt, _) = run_gbuffer_hybrid_m4(
             &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
-            Some((&grid, &cells)), true, true, true, Some(&clipmap),
+            Some((&grid, &cells)), true, true, true, Some(&clipmap), false,
         );
         let vt_clip = vt_clip_opt.expect("gViewT readback (clip-map)");
 
@@ -7403,9 +7539,9 @@ fn sdf_m4_clipmap_far_field_renders() {
     };
 
     // The clip-map render (brick_levels = 3): the far sphere is in level 1, so the clip-map renders it.
-    let (lit_clip, _, vt_clip_opt) = run_gbuffer_hybrid_m4(
+    let (lit_clip, _, vt_clip_opt, _) = run_gbuffer_hybrid_m4(
         &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
-        Some((&grid, &cells)), true, true, true, Some(&clipmap),
+        Some((&grid, &cells)), true, true, true, Some(&clipmap), false,
     );
     let vt_clip = vt_clip_opt.expect("gViewT readback (clip-map)");
 
@@ -7472,10 +7608,10 @@ fn sdf_m4_clipmap_far_field_screenshot_dump() {
         field.bump_gen();
         BrickClipmap::create(&ctx, &field, [0.0, 0.0, 0.0]).expect("M4 screenshot clip-map create")
     };
-    let (lit, _, _) = run_gbuffer_hybrid_m4(
+    let (lit, _, _, _) = run_gbuffer_hybrid_m4(
         &ctx, &edits, false, false, 1.0, LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
         DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE, Some((&grid, &cells)), true, false, true,
-        Some(&clipmap),
+        Some(&clipmap), false,
     );
     let path = std::env::temp_dir().join("sdf_m4_clipmap_far_field.bmp");
     write_bmp_rgba(&path, &lit_display_rgba(&lit), SDF_IMG_W, SDF_IMG_H);
