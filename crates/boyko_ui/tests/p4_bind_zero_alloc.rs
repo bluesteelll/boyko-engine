@@ -442,11 +442,14 @@ const DRIVER_TOUCH_CHILDREN: usize = 8;
 /// such a join. So without this the driver's `Local` could land in a pool's exact count, or in
 /// any window of a schedule that hands its pool a task.
 ///
-/// The pool has ONE worker, which has no sibling to steal from and so never pins: the only `Local`
-/// this can register is the driver's. The `install` body spins until that worker has taken the
-/// leader and pushed [`DRIVER_TOUCH_CHILDREN`] children onto its own deque, and the leader spins
-/// until they have run, so the driver's join finds the injector empty and the worker's deque full,
-/// and every child it runs it stole. Both spins are bounded by [`FIRST_TOUCH_WAIT`].
+/// Since ci-fix-1 the touch pool's `build()` registers its builder -- the driver -- and its one
+/// worker before it returns (`ThreadPoolBuilder::build`), so the touch counts two `Local`s, both
+/// from `build()`, and the forced steal registers none. The steal stays as the witness that the
+/// driver's join really probes a worker's deque: the `install` body spins until that worker has
+/// taken the leader and pushed [`DRIVER_TOUCH_CHILDREN`] children onto its own deque, and the
+/// leader spins until they have run, so the driver's join finds the injector empty and the
+/// worker's deque full, and every child it runs it stole. Both spins are bounded by
+/// [`FIRST_TOUCH_WAIT`].
 fn touch_driver_epoch_local() {
     let driver = std::thread::current().id();
     let pushed = AtomicBool::new(false);
@@ -491,10 +494,12 @@ fn touch_driver_epoch_local() {
         "driver touch: the driver ran none of the {DRIVER_TOUCH_CHILDREN} children on its \
          worker's deque — it never stole, so the touch cannot vouch for the driver's epoch Local"
     );
+    // ci-fix-1: 1 -> 2. Rule: a build registers its builder and every worker inside `build()`; the
+    // touch pool's builder is the driver and it has one worker, and the forced steal adds none.
     assert_eq!(
-        registered, 1,
-        "driver touch: {registered} epoch Locals registered; the one the touch exists for is the \
-         driver's, and a 1-worker pool's worker has no sibling to steal from"
+        registered, 2,
+        "driver touch: {registered} epoch Locals registered; the touch pool's build() registers \
+         its builder (the driver) and its one worker, and the forced steal registers none"
     );
 }
 
@@ -503,8 +508,8 @@ fn touch_driver_epoch_local() {
 ///
 /// * [`enrol`] is a boot barrier: every worker holds one of its tasks at the same moment, so every
 ///   worker has started (std's name copy on Windows is behind it), and each joins the census.
-/// * [`settle`]: every worker has gone idle since, so each has been through a steal sweep after
-///   its barrier task, which is where a worker registers its epoch `Local`.
+/// * [`settle`]: every worker has gone idle since. (Each worker's epoch `Local` is registered
+///   inside `build()` since ci-fix-1, so the count below is complete before the barrier.)
 /// * The count: one `Local` per worker since before the pool was built where a sweep probes an
 ///   empty sibling ([`IDLE_SWEEP_PINS`]), and never more than one per worker anywhere.
 ///

@@ -18,6 +18,9 @@
 //! Each arm runs on a FRESH thread, so its builder has no prior `Local`. One test in this binary,
 //! so the process-wide counters see no sibling test.
 //!
+//! Arm 3 drives arm 2's pool from a thread that did not build it, after
+//! `ThreadPool::register_thread`.
+//!
 //! RED-first (ci-fix-1 C2): on the tree before the fix, arm 1's first post-build assertion reads
 //! "build() registered 0 of 2 epoch participants".
 
@@ -282,6 +285,42 @@ fn arm_2() -> Arc<ThreadPool> {
     pool
 }
 
+/// Arm 3: a thread that did not build the pool registers through `register_thread` and then
+/// steals from it without a single epoch-sized acquisition.
+fn arm_3(pool: &ThreadPool) {
+    SUBJECT.with(|s| s.set(true));
+    let before = Sigs::now();
+    pool.register_thread();
+    let registered = Sigs::now().since(before);
+    assert_eq!(
+        registered.subject[LOCAL], 1,
+        "register_thread() must register the calling thread's Local: {registered:?}"
+    );
+    pool.register_thread();
+    assert_eq!(
+        Sigs::now().since(before).total(),
+        registered.total(),
+        "a second register_thread() must allocate nothing"
+    );
+    let (made, log, stolen) = window(|| {
+        let mut stolen = 0;
+        for _ in 0..64 {
+            stolen += driver_touch(pool, 8);
+            if stolen > 0 {
+                break;
+            }
+        }
+        stolen
+    });
+    assert!(stolen >= 1, "witness: the driver stole no child in 64 rounds, so the window proves nothing");
+    assert_eq!(
+        made.total(),
+        0,
+        "a registered non-builder driver's steals counted epoch-sized acquisitions          (this thread?, size, align): {log:?}"
+    );
+    println!("[arm 3] register_thread(): {registered:?}; driver-steal window: 0 epoch acquisitions");
+}
+
 #[test]
 fn a_build_registers_every_epoch_participant_and_no_window_sees_one() {
     let arm = |name: &'static str, f: Box<dyn FnOnce() + Send>| {
@@ -293,5 +332,5 @@ fn a_build_registers_every_epoch_participant_and_no_window_sees_one() {
     let (tx, rx) = std::sync::mpsc::channel();
     arm("arm-2", Box::new(move || tx.send(arm_2()).expect("send")));
     let pool = rx.recv().expect("arm 2 built a pool");
-    drop(pool);
+    arm("arm-3", Box::new(move || arm_3(&pool)));
 }
