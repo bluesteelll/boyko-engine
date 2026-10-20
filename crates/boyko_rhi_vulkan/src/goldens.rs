@@ -191,7 +191,11 @@ pub fn lit_store_excess(
 /// channel. The display arm is the pre-PX1a check unchanged; it carries what the count always
 /// budgeted (the host model's 8-bit attribute and shadow-march disagreements with the device), which
 /// in the HDR range exceeds any format bound (`px1a/impl.md` Part 7: a 7 % radiance divergence at a
-/// 2-code display delta on `p6_r1`'s twin spheres). `lsb = 0` is the pure format gate.
+/// 2-code display delta on `p6_r1`'s twin spheres). `lsb = 0` is the pure format gate. That 7 % is
+/// one gNormal code the device converted to the other neighbour (OPEN-ITEMS 15); the suites the
+/// G-buffer seam gate covers (`tests/sdf_gbuffer_hybrid.rs::collect_gbuffer_seam`) compare the
+/// device's own bytes and hold the resolve in radiance only, inside [`resolve_error_floor`]'s derived
+/// floor, so this display arm stays only for the suites not yet migrated (OPEN-ITEMS 18).
 pub fn lit_matches(got: [f32; 3], want: [f32; 3], lsb: u32) -> bool {
     let none = [0.0f32; 3];
     if lit_store_excess(got, want, LIT_TARGET, LIT_ROUNDING[LIT_STORE_PATH], none).iter().all(|&e| e <= 0.0) {
@@ -2214,9 +2218,12 @@ fn golden_sky_background(rd: [f32; 3], header: &GoldenLightHeader, lights: &[Gol
     Some(sky)
 }
 
-/// The per-pixel G-buffer attributes the PBR MVP-2 marcher writes, modelling the EXACT GPU
-/// UNORM pack so [`golden_deferred_resolve`] can re-decode them and run the host BRDF
-/// within ±2/255 of the GPU. On the mask == 0 arms (mesh / background / empty) `base_rgb`
+/// The per-pixel G-buffer attributes the PBR MVP-2 marcher writes, with the UNORM store modelled as
+/// round-half-up (`(x·255 + 0.5)`), so [`golden_deferred_resolve`] can re-decode them and run the
+/// host BRDF. Away from a .5 tie the device stores the same byte; at a tie it may store the other
+/// neighbour inside the D3D 0.6-ULP conversion window (settle E15: exact ties and fractions up to
+/// 0.056 above them stored low on the RTX 3060), which [`attribute_byte_verdict`] admits and the
+/// seam gate reports. On the mask == 0 arms (mesh / background / empty) `base_rgb`
 /// is the RAW quantized base — a table WITHOUT a SKY entry keeps the byte-identical
 /// pass-through of this field (the 0%-gate); with a SKY entry the resolve renders the
 /// procedural sky over it instead (see [`golden_deferred_resolve`]'s doc).
@@ -2388,7 +2395,8 @@ pub fn golden_marcher_attributes(
         }
     }
 
-    // Quantize a `[0,1]` scalar to a byte with the GPU UNORM store's `(x*255+0.5)` rounding.
+    // Quantize a `[0,1]` scalar to a byte, round-half-up (`(x*255+0.5)`): the D3D reference rule.
+    // The device may store the other neighbour inside its 0.6-ULP window (`attribute_byte_verdict`).
     let q8 = |x: f32| -> u8 { (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8 };
     // The R8G8B8 bytes a `pack_rgba` of `c` would store (low 3 bytes of `0xAABBGGRR`).
     let base_bytes = |c: [f32; 3]| -> [u8; 3] {
@@ -2470,9 +2478,11 @@ pub fn golden_marcher_attributes(
         //     Mirror that with `t_mesh` so the host oracle == the GPU on every equivalence golden.
         //
         // The harness quad is fronto-parallel (+Z); the GPU reads the raster normal back from
-        // gNormal and `oct_decode`s it, and the oct round-trip of (0,0,1) is EXACT, so the host
-        // normal == the GPU's decoded normal bit-for-bit. `P_mesh = ro + rd * t_mesh` mirrors the
-        // marcher's reconstruct.
+        // gNormal and `oct_decode`s it. (0,0,1) encodes to the exact .5 tie 127.5, which the host
+        // stores as 128 and this device as 127 (settle E15, every mesh texel), so the device's decoded
+        // normal is tilted ~0.011 rad from the host's (0,0,1): immaterial at NoL ~ 1 under the
+        // replayed oracle, and the seam gate reads the device's own bytes. `P_mesh = ro + rd *
+        // t_mesh` mirrors the marcher's reconstruct.
         let n = [0.0_f32, 0.0, 1.0];
         let oct = oct_encode(n);
         let p_mesh = [
