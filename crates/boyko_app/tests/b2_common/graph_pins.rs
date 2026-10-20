@@ -27,6 +27,13 @@
 //! app (b) Main 49, Fixed unchanged; the one name the measured lists gained is that system.
 //! Nothing else moved.
 //!
+//! Re-derived on `u/render-px1a` (render wave PX1a, commit C8 "PostPlugin and ResolvedPost"): that
+//! commit gives `boyko_render::post::PostPlugin` (composed by `EnginePlugins` since C2 `b0306227`,
+//! with an empty `build` until C8) its system, `boyko_render::post::resolve_post_policy`, the single
+//! writer of `ResolvedPost`, in BOTH apps. Measured on that commit's tree (msvc, dev profile,
+//! default features): app (a) Main 38, app (b) Main 50, Fixed unchanged; the one name the measured
+//! lists gained is that system. Nothing else moved.
+//!
 //! **Profiles.** The system exists only where `debug_assertions` is on (a release-profile build
 //! compiles it out), so it is pinned as [`MAIN_DEBUG_EXTRA`], folded in by [`main_a`] /
 //! [`main_b`] under `cfg!(debug_assertions)` — the same switch the registration is compiled
@@ -110,6 +117,7 @@ pub const MAIN_A: &[(&str, u32)] = &[
     ),
     ("boyko_render::particle_system::particle_pack_effects", 1),
     ("boyko_render::particle_system::particle_tick_emitters", 1),
+    ("boyko_render::post::resolve_post_policy", 1),
     ("boyko_render::ray_backend::resolve_ray_backend_system", 1),
     (
         "boyko_render::ray_shadow_config::resolve_ray_shadow_system",
@@ -174,6 +182,7 @@ pub const MAIN_B: &[(&str, u32)] = &[
     ),
     ("boyko_render::particle_system::particle_pack_effects", 1),
     ("boyko_render::particle_system::particle_tick_emitters", 1),
+    ("boyko_render::post::resolve_post_policy", 1),
     ("boyko_render::ray_backend::resolve_ray_backend_system", 1),
     (
         "boyko_render::ray_shadow_config::resolve_ray_shadow_system",

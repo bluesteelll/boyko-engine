@@ -28,11 +28,6 @@ use std::collections::BTreeSet;
 use boyko_rhi_vulkan::compute::{composite_pixel_ray, CompositeCamera, GOLDEN_ATLAS_SLOT_MASK, GOLDEN_ATLAS_SLOT_SHIFT, GOLDEN_SLOT_NONE, SDF_IMG_H, SDF_IMG_W};
 use boyko_rhi_vulkan::goldens::{golden_cluster_cull, golden_cluster_cull_hier, golden_cluster_index, golden_cluster_xy_tile, golden_cluster_z_slice, golden_deferred_resolve_clustered, golden_deferred_resolve_table, golden_froxel_aabb, golden_hier_groups_per_slice, golden_hier_thread_map, GoldenClusterConfig, GoldenLight, GoldenLightHeader, GoldenMaterial, MarcherAttributes, HIER_GROUP_THREADS};
 
-/// The ortho ray-gen the resolve uses: `ro=(0,0,2)`, `rd=(0,0,-1)`, so `view_z == view_t`
-/// and `P = ro + rd * view_t = (u*HE, v*HE, 2 - view_t)`.
-const RO: [f32; 3] = [0.0, 0.0, 2.0];
-const RD: [f32; 3] = [0.0, 0.0, -1.0];
-
 /// A cluster config whose exp-Z near/far span the ortho scene's view-z (= ray param `t`):
 /// surfaces sit near world z = 0 (camera at z = 2), so `t ≈ 2`. near=0.25, far=4.0 keeps the
 /// froxel slices concentrated over the scene's depth band.
@@ -664,7 +659,11 @@ fn cull_keeps_a_shadow_flagged_and_an_atlas_slotted_punctual() {
 #[test]
 fn clustered_resolve_off_is_byte_identical_to_brute_force() {
     // The L1 0%-gate: a header with clusters DISABLED makes `golden_deferred_resolve_clustered`
-    // delegate to the brute-force table resolve — byte-identical to L0b for every pixel.
+    // delegate to the brute-force table resolve — byte-identical to L0b for every pixel. Both are
+    // fed pixel (32, 32)'s ray: the clustered oracle derives it from the pixel, so the brute force
+    // takes the same one. (Render wave PX1a C9: before the re-aim this compared the fixed ray `(0,0,2)+t(0,0,-1)` against
+    // the pixel ray and passed only because both tonemapped to saturated white — a radiance near
+    // 478 at the point light; the scene-linear returns differ by 0.5 % there.)
     let c = cfg();
     let mats = materials();
     // clusters_enabled == false (plain L0 header).
@@ -676,7 +675,7 @@ fn clustered_resolve_off_is_byte_identical_to_brute_force() {
     let grid: Vec<Vec<u32>> = vec![Vec::new(); c.cluster_count() as usize]; // unused on OFF
     for &view_t in &[0.5_f32, 1.0, 1.5] {
         let attrs = lit_attrs(view_t);
-        let (ro, rd) = (RO, RD);
+        let (ro, rd) = composite_pixel_ray(32, 32, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
         let want = golden_deferred_resolve_table(attrs, ro, rd, &mats, &header, &lights);
         let got = golden_deferred_resolve_clustered(
             attrs, 32, 32, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, &mats, &header, &lights, &c,

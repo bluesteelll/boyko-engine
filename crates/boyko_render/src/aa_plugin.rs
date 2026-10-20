@@ -11,7 +11,8 @@ use boyko_ecs::ecs::core::app::{App, Plugin};
 
 use crate::aa_config::{AaConfig, ResolvedAa, ResolvedTaa, resolve_aa_policy};
 use crate::motion_cam::MotionCamState;
-use crate::taa_config::{TaaConfig, resolve_taa_policy};
+use crate::post::PostPolicySet;
+use crate::taa_config::{TaaConfig, TaaPolicySet, resolve_taa_policy};
 use crate::taa_jitter::JitterState;
 use crate::taa_state::TaaState;
 
@@ -67,8 +68,11 @@ impl Plugin for AaPlugin {
             b.add_system(resolve_aa_policy);
             // TAA rung C1: the missing `ResolvedTaa` single-writer (module doc). Reads
             // `TaaConfig`, writes `ResolvedTaa` — the same cold, once/frame shape as
-            // `resolve_aa_policy` above.
-            b.add_system(resolve_taa_policy);
+            // `resolve_aa_policy` above. Render wave PX1a (D-E2): it also reads `ResolvedPost`
+            // (the history's exposure ratio), so it runs after `PostPolicySet` — a set-to-set edge,
+            // add-order-independent. NO default `ResolvedPost` is inserted here: an `AaPlugin`
+            // world without `PostPlugin` panics naming it.
+            b.add_system(resolve_taa_policy).in_set(TaaPolicySet).after_set(PostPolicySet);
         });
     }
 

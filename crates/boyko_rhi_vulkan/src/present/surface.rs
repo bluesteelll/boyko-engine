@@ -46,6 +46,31 @@ impl<'ctx> Surface<'ctx> {
         hinstance: *mut core::ffi::c_void,
         hwnd: *mut core::ffi::c_void,
     ) -> Result<Self, SwapchainError> {
+        // SAFETY: the caller's contract on `hinstance` / `hwnd` is this fn's own, forwarded
+        // unchanged.
+        unsafe { Self::with_format_pick(ctx, hinstance, hwnd, SurfaceFormatPick::Production) }
+    }
+
+    /// [`Surface::new`] with an explicit colour-format rule (render wave PX1a D-P1): `pick` is
+    /// [`SurfaceFormatPick::Production`] on every shipping boot; the test-only
+    /// [`SurfaceFormatPick::ForceSrgb`] holds the `*_SRGB` swapchain regime a fixture compares
+    /// against the UNORM one (`TestForce` key `srgb_swapchain`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Surface::new`]; under [`SurfaceFormatPick::ForceSrgb`] a surface that advertises no
+    /// 8-bit `*_SRGB` format in `SRGB_NONLINEAR` is [`SwapchainError::NoSuitableFormat`].
+    ///
+    /// # Safety
+    ///
+    /// As [`Surface::new`]: `hwnd` / `hinstance` are a live Win32 window + its instance that
+    /// outlives the returned [`Surface`].
+    pub unsafe fn with_format_pick(
+        ctx: &'ctx VulkanContext,
+        hinstance: *mut core::ffi::c_void,
+        hwnd: *mut core::ffi::c_void,
+        pick: SurfaceFormatPick,
+    ) -> Result<Self, SwapchainError> {
         let surface_fns = ctx.surface_fns().ok_or(SwapchainError::NotWindowed)?;
 
         let ci = VkWin32SurfaceCreateInfoKhr {
@@ -100,7 +125,7 @@ impl<'ctx> Surface<'ctx> {
 
         // Pick a present-capable color format.
         let (format, color_space) =
-            match pick_surface_format(surface_fns, ctx.physical_device(), surface) {
+            match pick_surface_format(surface_fns, ctx.physical_device(), surface, pick) {
                 Ok(f) => f,
                 Err(e) => {
                     // SAFETY: the surface is created-but-unused; destroy it once.
@@ -154,14 +179,66 @@ impl Drop for Surface<'_> {
 // Surface-capability helpers.
 // ---------------------------------------------------------------------------
 
-/// Picks a surface format: prefer `B8G8R8A8_UNORM`/`_SRGB` (or RGBA equivalents)
-/// in SRGB_NONLINEAR space; else the first advertised format. The
-/// `current_extent == u32::MAX` special case (any extent) is `0xFFFFFFFF`; a
-/// single advertised `{UNDEFINED, SRGB_NONLINEAR}` means "any format".
+/// The swapchain colour-format rule [`Surface::with_format_pick`] applies (render wave PX1a D-P1).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SurfaceFormatPick {
+    /// The shipping rule: `B8G8R8A8_UNORM`, `B8G8R8A8_SRGB`, `R8G8B8A8_UNORM`, `R8G8B8A8_SRGB` in
+    /// `SRGB_NONLINEAR`, in that order; else the first advertised format.
+    Production,
+    /// TEST-ONLY (`TestForce` key `srgb_swapchain`): `B8G8R8A8_SRGB`, else `R8G8B8A8_SRGB`, in
+    /// `SRGB_NONLINEAR` — and nothing else. A surface without either refuses the pick
+    /// ([`SwapchainError::NoSuitableFormat`]), so a fixture that forces the sRGB regime can never
+    /// silently measure the UNORM one.
+    ForceSrgb,
+}
+
+/// `true` iff `vk_format` is one of the two 8-bit `*_SRGB` swapchain formats
+/// ([`SurfaceFormatPick`] can select): the hardware encodes on write, so the present blit must
+/// decode the display-referred image first (`compute::present_sample_fs_spirv`).
+#[inline]
+pub const fn swapchain_format_is_srgb(vk_format: i32) -> bool {
+    vk_format == VK_FORMAT_B8G8R8A8_SRGB || vk_format == VK_FORMAT_R8G8B8A8_SRGB
+}
+
+/// The pure surface-format choice over the advertised `formats` (no Vulkan call): `None` iff the
+/// list is empty, or `pick` is [`SurfaceFormatPick::ForceSrgb`] and no `*_SRGB` format is
+/// advertised in `SRGB_NONLINEAR`. A single `{UNDEFINED, …}` entry means "any format" — the
+/// production pick then takes `B8G8R8A8_UNORM`, the forced one `B8G8R8A8_SRGB`.
+pub fn choose_surface_format(formats: &[VkSurfaceFormatKhr], pick: SurfaceFormatPick) -> Option<(i32, i32)> {
+    const PRODUCTION: [i32; 4] =
+        [VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB];
+    const FORCE_SRGB: [i32; 2] = [VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_R8G8B8A8_SRGB];
+    let preferred: &[i32] = match pick {
+        SurfaceFormatPick::Production => &PRODUCTION,
+        SurfaceFormatPick::ForceSrgb => &FORCE_SRGB,
+    };
+    let first = formats.first()?;
+    // The "any format" sentinel: a single entry with format == UNDEFINED.
+    if formats.len() == 1 && first.format == VK_FORMAT_UNDEFINED {
+        return Some((preferred[0], VK_COLOR_SPACE_SRGB_NONLINEAR_KHR));
+    }
+    for &want in preferred {
+        if let Some(f) =
+            formats.iter().find(|f| f.format == want && f.color_space == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+        {
+            return Some((f.format, f.color_space));
+        }
+    }
+    match pick {
+        // Fall back to the first advertised format (always present + valid).
+        SurfaceFormatPick::Production => Some((first.format, first.color_space)),
+        SurfaceFormatPick::ForceSrgb => None,
+    }
+}
+
+/// Picks a surface format by [`choose_surface_format`] over the surface's advertised list. The
+/// `current_extent == u32::MAX` special case (any extent) is `0xFFFFFFFF`; a single advertised
+/// `{UNDEFINED, SRGB_NONLINEAR}` means "any format".
 pub(crate) fn pick_surface_format(
     fns: &SurfaceInstanceFns,
     physical_device: VkPhysicalDevice,
     surface: VkSurfaceKHR,
+    pick: SurfaceFormatPick,
 ) -> Result<(i32, i32), SwapchainError> {
     let mut count: u32 = 0;
     // SAFETY: live device + surface; count query with a null array.
@@ -190,28 +267,7 @@ pub(crate) fn pick_surface_format(
         ));
     }
     formats.truncate(count as usize);
-
-    // The "any format" sentinel: a single entry with format == UNDEFINED.
-    if formats.len() == 1 && formats[0].format == VK_FORMAT_UNDEFINED {
-        return Ok((VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR));
-    }
-
-    let preferred = [
-        VK_FORMAT_B8G8R8A8_UNORM,
-        VK_FORMAT_B8G8R8A8_SRGB,
-        VK_FORMAT_R8G8B8A8_UNORM,
-        VK_FORMAT_R8G8B8A8_SRGB,
-    ];
-    for &want in &preferred {
-        if let Some(f) = formats
-            .iter()
-            .find(|f| f.format == want && f.color_space == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
-        {
-            return Ok((f.format, f.color_space));
-        }
-    }
-    // Fall back to the first advertised format (always present + valid).
-    Ok((formats[0].format, formats[0].color_space))
+    choose_surface_format(&formats, pick).ok_or(SwapchainError::NoSuitableFormat)
 }
 
 /// Whether `want` (a `VkPresentModeKHR`) is advertised for the surface.

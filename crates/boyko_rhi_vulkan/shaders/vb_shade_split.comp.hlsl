@@ -190,7 +190,8 @@ struct MaterialGpu {
 Texture2D<uint2> gVbId : register(t5);
 
 // binding 6: the shared `lit` STORAGE image -- WRITE, this pass's own output.
-[[vk::image_format("rgba8")]] RWTexture2D<float4> gLit : register(u6);
+#include "lit_format.hlsli"
+[[vk::image_format(LIT_FORMAT_QUALIFIER)]] RWTexture2D<float4> gLit : register(u6);
 
 // binding 7: the packed classify buffer. Bound-but-unread -- split displaces classification
 // (Ã‚Â§0), but the descriptor stays declared for the ONE shared `vb_layout0` layout object.
@@ -600,10 +601,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
         lit_direct += (bsdf.diffuse + bsdf.specular) * (NoL * punctual_shadow) * atten * L.color;
     }
 
-    // Same tail as `forward_opaque.fs.hlsl` / the deferred resolve: exposure LAST, THEN the
-    // owner-selected tonemap, THEN the manual gamma-2.2 OETF.
+    // Render wave PX1a: `lit` holds pre-exposed SCENE-LINEAR radiance -- exposure is the last
+    // multiply, the store is bounded at HDR_MAX (`lit_format.hlsli`), and `post_final` alone
+    // applies the tonemap and the OETF.
     float3 lit = (lit_direct + ambient + emissive) * H.exposure;
-    lit = tonemap_select(lit, load_tonemap_mode(LightBuf));
-    lit = pow(lit, OETF_GAMMA_EXP);
-    gLit[uint2(px, py)] = float4(clamp(lit, 0.0, 1.0), 1.0);
+    gLit[uint2(px, py)] = float4(lit_store_saturate(lit), 1.0);
 }

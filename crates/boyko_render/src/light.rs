@@ -561,6 +561,11 @@ pub const TERMINATOR_SOFT_MASK: u32 = 0xFF;
 pub struct LightingConfig {
     /// Global exposure — the FINAL multiply on accumulated linear radiance. DEFAULT 1.0
     /// (`x * 1.0 == x` exact → 0%-gate byte-identical).
+    ///
+    /// An INPUT only (render wave PX1a, AD-6): `post::resolve_post_policy` reads it into
+    /// [`ResolvedPost::pre_exposure`](crate::post::ResolvedPost::pre_exposure), and every consumer
+    /// (the light header, the particle draw, the TAA history ratio) reads THAT value, so a runtime
+    /// change reaches the GPU the same frame. `tests/exposure_single_writer.rs` pins its readers.
     pub exposure: f32,
     /// Ambient hemisphere diffuse `rgb` (default = the resolve's old `SKY_DIFFUSE`).
     pub sky_diffuse: [f32; 3],
@@ -1405,8 +1410,10 @@ impl LightHeaderGpu {
     /// Builds the table header (Decision 3). `l0a_count` is the no-`P` front block
     /// (directionals + sky) and `point_spot_count` is the L0b block, so the array is
     /// laid out `[no-P front block || point/spot]` and
-    /// `light_count = l0a_count + point_spot_count`. `exposure` + `sky_*` come from
-    /// `cfg`. The L1 `cluster_params` lane is read verbatim from `cfg`'s derived
+    /// `light_count = l0a_count + point_spot_count`. Word 1 is `pre_exposure` — the frame's
+    /// [`ResolvedPost::pre_exposure`](crate::post::ResolvedPost::pre_exposure), the ONE value every
+    /// `lit` producer, the particle draw and the TAA ratio read (render wave PX1a, AD-6); this
+    /// constructor reads no exposure from `cfg`. `sky_*` come from `cfg`. The L1 `cluster_params` lane is read verbatim from `cfg`'s derived
     /// [`LightingConfig::cluster_z_scale`]/[`cluster_z_bias`](LightingConfig::cluster_z_bias)/
     /// [`cluster_packed_dims`](LightingConfig::cluster_packed_dims) — single-writer
     /// [`sync_cluster_light_gate`] keeps those `0.0`/`0.0`/`0` while
@@ -1420,8 +1427,8 @@ impl LightHeaderGpu {
     /// (`sky_spec.w`) carries [`LightingConfig::ssao_mode`] verbatim (a whole-word `0`/`1`,
     /// no packing — see that field's doc).
     #[inline]
-    pub fn new(l0a_count: u32, point_spot_count: u32, cfg: &LightingConfig) -> Self {
-        debug_assert!(cfg.exposure > 0.0 && cfg.exposure.is_finite(), "invariant: exposure > 0");
+    pub fn new(l0a_count: u32, point_spot_count: u32, cfg: &LightingConfig, pre_exposure: f32) -> Self {
+        debug_assert!(pre_exposure > 0.0 && pre_exposure.is_finite(), "invariant: pre_exposure > 0");
         let light_count = l0a_count + point_spot_count;
         debug_assert!(light_count <= MAX_LIGHTS, "invariant: light_count <= MAX_LIGHTS");
         debug_assert!(
@@ -1431,7 +1438,7 @@ impl LightHeaderGpu {
         Self {
             counts_exposure: [
                 f32::from_bits(light_count),
-                cfg.exposure,
+                pre_exposure,
                 f32::from_bits(l0a_count),
                 f32::from_bits(point_spot_count),
             ],
@@ -1498,8 +1505,9 @@ impl LightHeaderGpu {
         point_spot_count: u32,
         cfg: &LightingConfig,
         cluster: &ClusterConfig,
+        pre_exposure: f32,
     ) -> Self {
-        let mut header = Self::new(l0a_count, point_spot_count, cfg);
+        let mut header = Self::new(l0a_count, point_spot_count, cfg, pre_exposure);
         if cfg.clusters_enabled {
             header.pack_cluster_params(cluster);
         }
@@ -1774,14 +1782,14 @@ mod tests {
     fn header_word7_is_zero_for_default_config() {
         // The byte-identity anchor: a default config's header word 7 (sky_diffuse.w) is
         // exactly 0.0 bits — no shadow/GI gate, no tonemap mode.
-        let h = LightHeaderGpu::new(1, 0, &LightingConfig::default());
+        let h = LightHeaderGpu::new(1, 0, &LightingConfig::default(), 1.0);
         assert_eq!(h.sky_diffuse[3].to_bits(), 0);
     }
 
     #[test]
     fn tonemap_mode_bits_are_independent_of_the_shadow_gate_bits() {
         let cfg = LightingConfig { tonemapper: Tonemapper::Neutral, ..LightingConfig::default() };
-        let h = LightHeaderGpu::new(1, 0, &cfg);
+        let h = LightHeaderGpu::new(1, 0, &cfg, 1.0);
         let word7 = h.sky_diffuse[3].to_bits();
         assert_eq!(
             (word7 >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK,
@@ -1798,7 +1806,7 @@ mod tests {
             csm_shadows: true,
             ..LightingConfig::default()
         };
-        let h = LightHeaderGpu::new(1, 0, &cfg);
+        let h = LightHeaderGpu::new(1, 0, &cfg, 1.0);
         let word7 = h.sky_diffuse[3].to_bits();
         assert_eq!(
             (word7 >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK,
@@ -1816,7 +1824,7 @@ mod tests {
     #[test]
     fn terminator_softening_bits_are_independent_of_the_shadow_and_tonemap_bits() {
         let cfg = LightingConfig { terminator_softening: 0.2, ..LightingConfig::default() };
-        let h = LightHeaderGpu::new(1, 0, &cfg);
+        let h = LightHeaderGpu::new(1, 0, &cfg, 1.0);
         let word7 = h.sky_diffuse[3].to_bits();
         let expected = (0.2_f32 * 255.0).round() as u32;
         assert_eq!((word7 >> TERMINATOR_SOFT_SHIFT) & TERMINATOR_SOFT_MASK, expected);
@@ -1838,7 +1846,7 @@ mod tests {
             csm_shadows: true,
             ..LightingConfig::default()
         };
-        let h = LightHeaderGpu::new(1, 0, &cfg);
+        let h = LightHeaderGpu::new(1, 0, &cfg, 1.0);
         let word7 = h.sky_diffuse[3].to_bits();
         let expected = (0.2_f32 * 255.0).round() as u32;
         assert_eq!((word7 >> TERMINATOR_SOFT_SHIFT) & TERMINATOR_SOFT_MASK, expected);
@@ -1953,8 +1961,9 @@ mod tests {
 
     #[test]
     fn header_carries_exposure_and_split_counts() {
-        let cfg = LightingConfig { exposure: 2.5, ..Default::default() };
-        let h = LightHeaderGpu::new(3, 4, &cfg);
+        // Word 1 is the pre-exposure ARGUMENT (render wave PX1a): the config's exposure is not read.
+        let cfg = LightingConfig { exposure: 0.25, ..Default::default() };
+        let h = LightHeaderGpu::new(3, 4, &cfg, 2.5);
         assert_eq!(h.light_count(), 7);
         assert_eq!(h.l0a_count(), 3);
         assert_eq!(h.point_spot_count(), 4);
@@ -2030,8 +2039,8 @@ mod tests {
         // header is byte-identical to the plain L0 header (the L1 0%-gate anchor).
         let cfg = LightingConfig::default(); // clusters_enabled == false
         let cluster = ClusterConfig::default();
-        let l0 = LightHeaderGpu::new(2, 1, &cfg);
-        let l1 = LightHeaderGpu::new_clustered(2, 1, &cfg, &cluster);
+        let l0 = LightHeaderGpu::new(2, 1, &cfg, 1.0);
+        let l1 = LightHeaderGpu::new_clustered(2, 1, &cfg, &cluster, 1.0);
         assert_eq!(l0, l1);
         assert!(!l1.clusters_enabled());
         assert_eq!(l1.cluster_params, [0.0, 0.0, 0.0, 0.0]);
@@ -2041,7 +2050,7 @@ mod tests {
     fn clustered_header_on_carries_factors_and_dims() {
         let cfg = LightingConfig { clusters_enabled: true, ..Default::default() };
         let cluster = ClusterConfig::default();
-        let h = LightHeaderGpu::new_clustered(1, 0, &cfg, &cluster);
+        let h = LightHeaderGpu::new_clustered(1, 0, &cfg, &cluster, 1.0);
         assert!(h.clusters_enabled());
         assert_eq!(h.cluster_z_scale(), cluster.z_scale());
         assert_eq!(h.cluster_z_bias(), cluster.z_bias());
@@ -2091,10 +2100,10 @@ mod tests {
         app.world_mut().run_system(sync_cluster_light_gate);
 
         let synced_cfg = *app.world().resource::<LightingConfig>();
-        let got = LightHeaderGpu::new(2, 1, &synced_cfg);
+        let got = LightHeaderGpu::new(2, 1, &synced_cfg, 1.0);
 
         let direct_cfg = LightingConfig { clusters_enabled: true, ..LightingConfig::default() };
-        let want = LightHeaderGpu::new_clustered(2, 1, &direct_cfg, &cluster);
+        let want = LightHeaderGpu::new_clustered(2, 1, &direct_cfg, &cluster, 1.0);
         // Full-header equality (O3, code review): pins that the `new_clustered` ->
         // `pack_cluster_params` refactor (and `sync_cluster_light_gate`'s production path)
         // perturbs NOTHING outside the cluster lane — not just that lane in isolation.
@@ -2142,7 +2151,7 @@ mod tests {
         assert_eq!(synced_cfg.cluster_z_bias, 0.0);
         assert_eq!(synced_cfg.cluster_packed_dims, 0);
 
-        let h = LightHeaderGpu::new(2, 1, &synced_cfg);
+        let h = LightHeaderGpu::new(2, 1, &synced_cfg, 1.0);
         assert_eq!(h.cluster_params, [0.0, 0.0, 0.0, 0.0], "unarmed header stays the 0%-gate anchor");
     }
 
@@ -2196,7 +2205,7 @@ mod tests {
 
         // Word 15 (`clusters_enabled`) is STILL packed verbatim by `LightHeaderGpu::new` (that
         // bit is not this gate's concern) — the dims-only scoping is what this test pins.
-        let h = LightHeaderGpu::new(2, 1, &synced_cfg);
+        let h = LightHeaderGpu::new(2, 1, &synced_cfg, 1.0);
         assert_eq!(h.cluster_params, [0.0, 0.0, 0.0, f32::from_bits(1)]);
     }
 

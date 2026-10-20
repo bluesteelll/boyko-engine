@@ -12,6 +12,8 @@ mod gbuffer;
 // Particles P0: the `upload → kickoff → emit → sim` block and the indirect billboard draw, shared
 // verbatim by all three recorders (the barrier callback is what differs per path).
 mod particles;
+// Render wave PX1a: the post seam's tail dispatch (`display`), shared by all three path recorders.
+mod post_final;
 mod present_blit;
 mod rcas;
 mod scene;
@@ -21,6 +23,7 @@ mod sdf_depth_merge;
 mod smaa;
 mod ssaa;
 mod taa;
+mod test_inject;
 // Render wave PX0: the zone arm every POST / FWD bracket records through, and Forward's frame
 // witness.
 mod zone_arm;

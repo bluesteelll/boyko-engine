@@ -682,8 +682,14 @@ fn obs_edit_material(stats: Res<HostFrameStats>, edited: Res<EditedMaterial>, mu
 /// `light_cull = 0` on the other paths with it requested), particles, the interpolated body, and a
 /// material edited every frame.
 pub fn build_obs_app(title: &'static str, arming: ObsArming) -> App {
+    build_obs_app_with(EnginePlugins::window(title, OBS_WIN, OBS_WIN), arming)
+}
+
+/// [`build_obs_app`] over caller-built plugins — render wave PX1a's receipt drivers boot SSAA,
+/// which only `EnginePlugins::with_ssaa_scale` arms (the plugins must be `OBS_WIN` square).
+pub fn build_obs_app_with(plugins: EnginePlugins, arming: ObsArming) -> App {
     let mut app = App::new();
-    app.add_plugins(EnginePlugins::window(title, OBS_WIN, OBS_WIN));
+    app.add_plugins(plugins);
     app.insert_resource(ObsArmingRes(arming));
     app.insert_resource(EditedMaterial::default());
     app.add_startup_system(obs_setup);

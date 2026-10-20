@@ -1108,6 +1108,12 @@ codes! {
     // emit, `flush()`, print only on `NoConsumer` -- because its next statement ends the process.
     (3011, E, E3011, RatePolicy::Every, CodeStatus::Live,
         "A panic escaped an ECS entry point the windowed host owns, so the process is aborting"),
+    // ── render wave PX1a: the runner's read of the post settings ─────────────────────────────
+    // `Once`: the condition is a property of the composed plugin set, fixed for the process, and
+    // the runner meets it every frame -- a per-frame record would be the same sentence 60 times a
+    // second.
+    (3012, W, W3012, RatePolicy::Once,  CodeStatus::Live,
+        "No PostPlugin was composed, so the runner derives the post settings from LightingConfig"),
 
     (9001, B, B9001, RatePolicy::Every, CodeStatus::Live,
         "The schedule contains a cycle of systems"),
@@ -1515,6 +1521,7 @@ mod tests {
             (b'W', 3009), // L8b -- an unrecognised environment override value (two sites)
             (b'E', 3010), // L8b -- a diagnostic dump could not be written (five sites)
             (b'E', 3011), // A6  -- a panic escaped a host-owned ECS entry point, process aborting
+            (b'W', 3012), // PX1a -- no PostPlugin composed, the runner derives the post settings
             (b'B', 9001), // L6  -- schedule cycle
             (b'B', 9002), // L6  -- set-hierarchy cycle
             (b'B', 9004), // L6  -- two ordered sets share a member

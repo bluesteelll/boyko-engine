@@ -41,13 +41,13 @@ use boyko_rhi_vulkan::compute::{
     deferred_pbr_wrap_spirv,
     depth_prepass_fs_spirv, depth_prepass_vs_spirv,
     encode_edit_list, forward_opaque_fs_spirv, forward_opaque_froxel_fs_spirv, forward_opaque_vs_spirv,
-    forward_sky_fs_spirv, forward_sky_vs_spirv, fullscreen_sample_fs_spirv,
+    forward_sky_fs_spirv, forward_sky_vs_spirv,
     fullscreen_sample_vs_spirv, fxaa_fs_spirv,
     gbuffer_mrt_fs_spirv,
     gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
     gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, HZB_BUILD_PUSH_BYTES, hzb_build_spirv,
     interp_instances_spirv, punctual_depth_fs_spirv,
-    punctual_depth_vs_spirv, rcas_spirv, sdf_forward_march_spirv, sdf_forward_march_sdfonly_spirv,
+    post_final_spirv, present_sample_fs_spirv, punctual_depth_vs_spirv, rcas_spirv, sdf_forward_march_spirv, sdf_forward_march_sdfonly_spirv,
     sdf_forward_march_sdfonly_viewt_spirv, sdf_forward_march_viewt_spirv,
     sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
     sdf_ssao_spirv_variant, smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv,
@@ -77,7 +77,7 @@ use boyko_rhi_vulkan::present::gpu_zone::{
     GPU_RING_DEPTH, GpuZoneRecorder, PairResult, QUERIES_PER_SLOT, RetireScratch, RetiredFrame,
 };
 use boyko_rhi_vulkan::present::{
-    CullMembers, HzbPlan, MeshFacePipelines, SdfDepthMergeActivation, VB_CULL_OCC_ARMED, VbOcclusionArm,
+    CullMembers, HzbPlan, LIT_FORMAT, MeshFacePipelines, SdfDepthMergeActivation, VB_CULL_OCC_ARMED, VbOcclusionArm,
 };
 use boyko_rhi_vulkan::present::transparent_depth::{
     TRANSPARENT_CLASS_PARTICLES, TransparentDepthCapability,
@@ -90,7 +90,7 @@ use boyko_rhi_vulkan::rhi_impl::{
 use boyko_rhi_vulkan::swapchain::{
     AaActivation, ClusterCullHierDispatch, CsmDepthActivation, DdgiUpdateActivation,
     FRAMES_IN_FLIGHT, FrameWriteToken, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
-    GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation, RcasActivation,
+    GBufferMeshDraw, GBufferScene, InterpActivation, PostFinalActivation, PunctualDepthActivation, RcasActivation,
     ResolvedRenderPathGpu, SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation,
     ViewtFromDepthActivation, ViewtFromVbDepthActivation,
 };
@@ -125,6 +125,7 @@ use boyko_render::{
     SHADOW_DIM, SharpenMode, Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table,
     mesh_view_t_norm, pack_ddgi_update_ubo, upload_texture_2d_raw,
 };
+use boyko_render::post::ResolvedPost;
 #[cfg(feature = "hwrt")]
 use boyko_ecs::ecs::core::asset::Assets;
 #[cfg(feature = "hwrt")]
@@ -1198,10 +1199,10 @@ pub(crate) struct GpuSceneBundles {
     /// (`taa_resolve.comp`), built unconditionally at boot (like [`Self::ssaa_pipeline`]) —
     /// NOT hwrt-gated. Bound + dispatched by `record_taa` when `scene.taa.is_some()`.
     taa_resolve_pipeline: ComputePipeline,
-    /// Anti-aliasing Stage 4 (TAA W5): the DEDICATED 8-binding bind-group LAYOUT
+    /// Anti-aliasing Stage 4 (TAA W5): the DEDICATED 7-binding bind-group LAYOUT
     /// [`Self::taa_resolve_pipeline`] declares at set 0 — { `gLit` CIS @0, `gViewT` @1,
-    /// `gHistIn` @2, `gHistOut` @3, `gAaOut` @4 STORAGE images, the `ResolvedTaa` UBO @5, the
-    /// camera UBO @6, the `MotionCam` UBO @7 }. [`GBufferTargets`] writes a per-FIF
+    /// `gHistIn` @2, `gHistOut` @3 STORAGE images, the `ResolvedTaa` UBO @5, the camera UBO @6,
+    /// the `MotionCam` UBO @7 } (@4, the retired `gAaOut`, is a hole since render wave PX1a). [`GBufferTargets`] writes a per-FIF
     /// `taa_resolve_set` against it once per extent.
     taa_resolve_layout: VulkanBindGroupLayout,
     /// Anti-aliasing Stage 4 (TAA W5): the dedicated LINEAR/ClampToEdge sampler for the
@@ -1216,6 +1217,14 @@ pub(crate) struct GpuSceneBundles {
     /// at set 0 — { `gRcasIn` STORAGE @0, `gAaOut` STORAGE @1 }. [`GBufferTargets`] writes a
     /// per-FIF `rcas_set` against it once per extent.
     rcas_layout: VulkanBindGroupLayout,
+    /// Render wave PX1a (D-G5): the `post_final` compute pipeline (the generated
+    /// `post_final.comp`) — built UNCONDITIONALLY at boot: the pass runs on every frame of every
+    /// path.
+    post_final_pipeline: ComputePipeline,
+    /// Render wave PX1a (D-G5): its 3-binding layout — { `gScene` SAMPLED_IMAGE @0 (recorded at
+    /// GENERAL), `gDisplay` STORAGE @1, the `PostFinal` UBO @2 } (`POST_FINAL_BINDINGS`).
+    /// [`GBufferTargets`] writes the per-FIF `post_final` set against it once per extent.
+    post_final_layout: VulkanBindGroupLayout,
     // ── Render P7-Q2: SSAO (dormant → live) ───────────────────────────────────
     /// Render P7-Q2: the [`SSAO_QUALITY_COUNT`] pre-compiled SSAO quality-variant compute
     /// pipelines (`sdf_ssao_{low,medium,high}.comp`), built unconditionally at boot (like
@@ -1937,8 +1946,8 @@ impl GpuSceneBundles {
         // staged table fits. Seeded with the EMPTY header (count 0 —
         // byte-identical to `LightTableStaging::default()`'s seed, the golden
         // empty-table anchor: zero lights, all word-7 gates 0): visible only to
-        // a world with no lights, since the host's `light_uploaded_gen`
-        // (`u64::MAX`) forces a first-frame upload of the real ECS table.
+        // a world with no lights, since the host's `light_slots` / `light_device`
+        // (`u64::MAX`) force a first-frame write and copy of the real ECS table.
         //
         // The staging is a RING, not a single instance (the R4 race pin): both
         // in-flight slots re-upload on the two consecutive frames after a
@@ -1946,8 +1955,12 @@ impl GpuSceneBundles {
         // N's still-in-flight recorded copy (host-write-vs-GPU-transfer-read).
         // Slot `s`'s staging is only read by frames occupying slot `s`, whose
         // fence the write token proves waited.
-        let empty_light_words =
-            pack_light_table(&LightHeaderGpu::new(0, 0, &LightingConfig::default()), &[]);
+        // Word 1 is the pre-exposure a consumer reads before the first policy run (render wave
+        // PX1a: `LightHeaderGpu::new` reads no exposure from the config).
+        let empty_light_words = pack_light_table(
+            &LightHeaderGpu::new(0, 0, &LightingConfig::default(), ResolvedPost::default().pre_exposure),
+            &[],
+        );
         let light_table = RhiDevice::create_buffer(
             device,
             &BufferDesc {
@@ -2668,7 +2681,9 @@ impl GpuSceneBundles {
         .expect("invariant: present-blit bind-group layout create");
         let sample_vs = RhiDevice::create_shader_module(device, fullscreen_sample_vs_spirv())
             .expect("invariant: fullscreen vertex shader module create");
-        let sample_fs = RhiDevice::create_shader_module(device, fullscreen_sample_fs_spirv())
+        // Render wave PX1a (D-P1): on an `*_SRGB` swapchain the module decodes the display image
+        // (`srgb_eotf`) before the hardware's encode on write; the plain sample otherwise.
+        let sample_fs = RhiDevice::create_shader_module(device, present_sample_fs_spirv(swap_format.as_i32()))
             .expect("invariant: fullscreen fragment shader module create");
         let present_pipeline = RhiDevice::create_graphics_pipeline(
             device,
@@ -2879,9 +2894,9 @@ impl GpuSceneBundles {
         // (see `boyko_app::host::WindowHost`) can select it with no boot-time rebuild.
         // Reuses `sample_vs` + `present_layout` (the same single-CombinedImageSampler
         // shape FXAA uses) + `present_sampler` (NEAREST — the shader's `.Load` ignores
-        // it, so no dedicated sampler is built). `color_formats[0]` is `aa_out`'s format
-        // (`R8G8B8A8_UNORM`); NO push constants (the 2× ratio is compiled into the
-        // shader). Boot-time creation records no command / writes no pixel —
+        // it, so no dedicated sampler is built). `color_formats[0]` is `lit_native`'s format
+        // (PX1a: the downsample target, `LIT_FORMAT`); NO push constants (the 2×
+        // ratio is compiled into the shader). Boot-time creation records no command / writes no pixel —
         // byte-identical to the golden regardless of this pipeline's existence.
         let ssaa_fs = RhiDevice::create_shader_module(device, ssaa_downsample_fs_spirv())
             .expect("invariant: SSAA downsample fragment shader module create");
@@ -2892,8 +2907,9 @@ impl GpuSceneBundles {
                 vertex_entry: c"main",
                 fragment_module: &ssaa_fs,
                 fragment_entry: c"main",
-                // `aa_out`'s format (R8G8B8A8_UNORM) — NOT `swap_format`.
-                color_formats: &[Format::R8G8B8A8Unorm],
+                // `lit_native`'s format, `LIT_FORMAT` (render wave PX1a; orchestrator ruling 67 W2:
+                // the sixth lit pipeline, `tests/lit_format_census.rs` section 5) — NOT `swap_format`.
+                color_formats: &[LIT_FORMAT],
                 depth_format: None,
                 topology: PrimitiveTopology::TriangleList,
                 vertex_layout: None,
@@ -2907,9 +2923,9 @@ impl GpuSceneBundles {
         .expect("invariant: SSAA downsample graphics pipeline create");
 
         // Anti-aliasing Stage 4 (TAA W5): the temporal-resolve compute pipeline + its DEDICATED
-        // 8-binding layout { `gLit` COMBINED_IMAGE_SAMPLER @0, `gViewT` STORAGE @1, `gHistIn`
-        // STORAGE @2, `gHistOut` STORAGE @3, `gAaOut` STORAGE @4, the `ResolvedTaa` UBO @5, the
-        // camera UBO @6 (UNJITTERED — C1 cut), the `MotionCam` UBO @7 } + a 4-byte `{ uint reset;
+        // 7-binding layout { `gLit` COMBINED_IMAGE_SAMPLER @0, `gViewT` STORAGE @1, `gHistIn`
+        // STORAGE @2, `gHistOut` STORAGE @3, the `ResolvedTaa` UBO @5, the camera UBO @6
+        // (UNJITTERED — C1 cut), the `MotionCam` UBO @7; @4 retired by PX1a } + a 4-byte `{ uint reset;
         // }` push constant (`boyko_render::taa_state::TaaState`) + a DEDICATED LINEAR/ClampToEdge
         // sampler for the `gLit` tap. Built UNCONDITIONALLY here (like `fxaa_pipeline`/
         // `ssaa_pipeline` above) — TAA is NOT hwrt-gated (its motion vector reconstructs from
@@ -2936,7 +2952,6 @@ impl GpuSceneBundles {
                     BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
                     BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
                     BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
-                    BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
                     BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
                     BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
                     BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
@@ -2990,6 +3005,38 @@ impl GpuSceneBundles {
             },
         )
         .expect("invariant: RCAS compute pipeline create");
+
+        // Render wave PX1a (D-G5): the `post_final` compute pipeline + its 3-binding layout
+        // (`POST_FINAL_BINDINGS`: `gScene` SAMPLED_IMAGE @0 recorded at GENERAL, `gDisplay`
+        // STORAGE @1, the `PostFinal` UBO @2). Built UNCONDITIONALLY — the pass
+        // runs every frame. The module is the generated `post_final.comp`.
+        let post_final_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: post_final bind-group layout create");
+        let post_final_cs = RhiDevice::create_shader_module(device, post_final_spirv())
+            .expect("invariant: post_final compute shader module create");
+        let post_final_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &post_final_cs,
+                entry: c"main",
+                // The shader declares no push constant, but `create_compute_pipeline` REJECTS a
+                // 0-byte range: a declared-but-unread 4-byte COMPUTE range (the DDGI-update
+                // precedent).
+                push_constant_bytes: 4,
+                bind_group_layout: Some(&post_final_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: post_final compute pipeline create");
 
         // Render P7-Q2: the SSAO compute pass — 3 pre-compiled quality-variant pipelines
         // sharing ONE dedicated 5-binding layout, built UNCONDITIONALLY here (like
@@ -3293,6 +3340,7 @@ impl GpuSceneBundles {
             RhiDevice::destroy_shader_module(device, ssao_atrous_read8_cs);
             RhiDevice::destroy_shader_module(device, taa_resolve_cs);
             RhiDevice::destroy_shader_module(device, rcas_cs);
+            RhiDevice::destroy_shader_module(device, post_final_cs);
             RhiDevice::destroy_shader_module(device, ssao_cs_high);
             RhiDevice::destroy_shader_module(device, ssao_cs_medium);
             RhiDevice::destroy_shader_module(device, ssao_cs_low);
@@ -3468,7 +3516,7 @@ impl GpuSceneBundles {
                     fragment_entry: c"main",
                     // ONE color attachment (`lit`, reused from the Deferred allocation, C5) —
                     // unlike the 3/4-MRT Deferred raster pipelines.
-                    color_formats: &[RASTER_COLOR_FORMAT],
+                    color_formats: &[LIT_FORMAT],
                     // Forward's OWN reverse-Z depth image (a SEPARATE allocation from Deferred's
                     // custom-linear `depth` — Decision 4); the format is the SAME `D32Sfloat`.
                     depth_format: Some(Format::D32Sfloat),
@@ -3523,7 +3571,7 @@ impl GpuSceneBundles {
                 vertex_entry: c"main",
                 fragment_module: &sky_fs,
                 fragment_entry: c"main",
-                color_formats: &[RASTER_COLOR_FORMAT],
+                color_formats: &[LIT_FORMAT],
                 depth_format: Some(Format::D32Sfloat),
                 topology: PrimitiveTopology::TriangleList,
                 vertex_layout: None,
@@ -3605,7 +3653,7 @@ impl GpuSceneBundles {
                     vertex_entry: c"main",
                     fragment_module: &forward_plus_fs,
                     fragment_entry: c"main",
-                    color_formats: &[RASTER_COLOR_FORMAT],
+                    color_formats: &[LIT_FORMAT],
                     depth_format: Some(Format::D32Sfloat),
                     topology: PrimitiveTopology::TriangleList,
                     vertex_layout: Some(VertexBufferLayout {
@@ -4326,7 +4374,7 @@ impl GpuSceneBundles {
                 vertex_entry: c"main",
                 fragment_module: &vb_sky_fs,
                 fragment_entry: c"main",
-                color_formats: &[RASTER_COLOR_FORMAT],
+                color_formats: &[LIT_FORMAT],
                 depth_format: None,
                 topology: PrimitiveTopology::TriangleList,
                 vertex_layout: None,
@@ -4843,6 +4891,8 @@ impl GpuSceneBundles {
             taa_linear_sampler,
             rcas_pipeline,
             rcas_layout,
+            post_final_pipeline,
+            post_final_layout,
             ssao_pipelines,
             ssao_vb_pipelines,
             vb_ssao_layout,
@@ -6440,8 +6490,7 @@ impl GpuSceneBundles {
         // TAA rung T3: the owner-set post-resolve sharpen mode
         // (`boyko_render::taa_config::TaaConfig::sharpen`), threaded from `boyko_app::runner`
         // the SAME way `aa_mode`/`taa_reset` are. `SharpenMode::None` (the default) ⇒
-        // `GBufferScene::rcas == None` (the 0%-gate: no `taa_resolved`, no `rcas_set`, the
-        // resolve writes `aa_out` directly). `SharpenMode::Rcas` arms the RCAS activation below
+        // `GBufferScene::rcas == None` (the 0%-gate: no `aa_out`, no `rcas_set`, no `cas` pass). `SharpenMode::Rcas` arms the RCAS activation below
         // ONLY when `aa_mode == AaMode::Taa` ALSO holds — RCAS is a pure post-process over the
         // resolve's OWN output, never standalone (see [`RcasActivation`]'s doc).
         sharpen: SharpenMode,
@@ -6569,6 +6618,9 @@ impl GpuSceneBundles {
         // Render wave RD1 (defect R0b): `TestForce::disarm_sdf_merge`, read by the runner off a
         // Resource only a fixture inserts — `false` on every production run.
         disarm_sdf_merge: bool,
+        // Render wave PX1a (D-G5): this frame's `post_final` constant buffer as eight words —
+        // the runner's `PostFinalGpu`, also uploaded into the fenced ring slot.
+        post_final_words: [u32; 8],
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -7016,7 +7068,6 @@ impl GpuSceneBundles {
             taa: matches!(aa_mode, AaMode::Taa).then(|| TaaActivation {
                 resolve_pipeline: &self.taa_resolve_pipeline,
                 resolve_layout: &self.taa_resolve_layout,
-                color_formats: &[Format::R8G8B8A8Unorm],
                 linear_sampler: &self.taa_linear_sampler,
                 reset: taa_reset,
             }),
@@ -7031,6 +7082,8 @@ impl GpuSceneBundles {
                     rcas_layout: &self.rcas_layout,
                     sharpness: rcas_sharpness,
                 }),
+            post_final: PostFinalActivation { pipeline: &self.post_final_pipeline, layout: &self.post_final_layout },
+            post_final_words,
             mesh_draw,
             csm_cascade_texture: &self.csm.cascade,
             csm_compare_sampler: &self.csm.sampler,
@@ -8084,6 +8137,8 @@ impl GpuSceneBundles {
             // UNCONDITIONALLY at boot (like `taa_resolve_pipeline` above). Pipeline before layout.
             RhiDevice::destroy_compute_pipeline(ctx, self.rcas_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.rcas_layout);
+            RhiDevice::destroy_compute_pipeline(ctx, self.post_final_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.post_final_layout);
             // Render P7-Q2: the 3 SSAO pipelines share `ssao_layout` — pipelines before the
             // shared layout (reverse creation order), built UNCONDITIONALLY at boot (every
             // config incl. `SsaoQuality::Off`), like fxaa/smaa/ssaa/taa above.

@@ -120,10 +120,11 @@ pub struct GBufferTargets {
     /// mask)` attribute, consumed by the deferred resolve (STORAGE, GENERAL — never sampled).
     /// RINGED (see [`Self::depth`]).
     pub(crate) material: [VulkanTexture; FRAMES_IN_FLIGHT],
-    /// The LIT storage image RING (R8G8B8A8): the deferred resolve's OUTPUT (STORAGE store);
-    /// also SAMPLED by the present-blit (pass C). The deferred split added it — the
-    /// present now samples THIS (not albedo). RINGED (see [`Self::depth`]); slot `i`'s
-    /// `present_set` @i binds `lit[i]`, so the present samples the slot the resolve just wrote.
+    /// The LIT storage image RING ([`LIT_FORMAT`], RGBA16F since render wave PX1a): the HDR scene
+    /// colour — every producer's pre-exposed SCENE-LINEAR radiance (the deferred resolve's STORAGE
+    /// store, Forward's colour attachment, the VB producers). `post_final` reads it (or its TAA /
+    /// SSAA successor) and writes the display-referred [`Self::display`]. RINGED (see
+    /// [`Self::depth`]).
     pub(crate) lit: [VulkanTexture; FRAMES_IN_FLIGHT],
     /// The Lighting-L0b `gViewT` lane RING (R32_SFLOAT STORAGE): the marcher stores the
     /// surface ray param `t`, the deferred resolve reads it (under `mask == 1`) to reconstruct
@@ -410,24 +411,19 @@ pub struct GBufferTargets {
     /// Selected by [`crate::present::AtrousStepRole::Write8`]`{ in_ring: 1 }`. `None` in lock-step
     /// with [`Self::ssao_ring_a`].
     pub(crate) ssao_atrous_write8_from1_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
-    /// Anti-aliasing Stage 1/3: the FXAA/SSAA post-process OUTPUT image RING (one per
-    /// in-flight frame), `COLOR_ATTACHMENT | SAMPLED`, `R8G8B8A8_UNORM` (== [`GBUFFER_FORMAT`]).
-    /// `None` when AA is off ([`GBufferScene::aa`]/`smaa`/`ssaa` are all `None`), the
-    /// 0%-gate: `present_set` then samples `lit` and no AA pass is recorded.
-    ///
-    /// **Sizing**: `present_extent` for `Fxaa`/`Smaa` (== the FXAA/SMAA output resolution).
-    /// Under `Ssaa` it is instead sized to the NATIVE `aa_extent` — `present_extent` is 2×
-    /// under SSAA (the whole G-buffer/lit renders at 2×), and the downsample pass resolves
-    /// that 2× `lit` into this native `aa_out`, so the present-blit's unchanged 1:1 crop
-    /// samples native pixels directly (no top-left-quarter crop). Off/Fxaa/Smaa keep
-    /// `aa_extent == present_extent` (byte-identical sizing to before SSAA existed).
+    /// Anti-aliasing Stage 1/2 + TAA rung T3: the OUTPUT image RING (one per in-flight frame) of
+    /// the display-referred passes that run after `post_final` — FXAA, SMAA, CAS —
+    /// `COLOR_ATTACHMENT | SAMPLED | STORAGE`, `R8G8B8A8_UNORM` (== [`GBUFFER_FORMAT`]), sized at
+    /// `aa_extent`. `None` unless one of them is armed (render wave PX1a: SSAA writes
+    /// [`Self::lit_native`] and TAA only `taa_hist`), the 0%-gate: `present_set` then samples
+    /// [`Self::display`].
     ///
     /// `aa_out`/`fxaa_set`/`downsample_set` carry NO material table and NO acceleration
     /// structure — deliberately OUT of
     /// [`Self::material_set_rings`]/[`Self::tlas_accel_sets`] (F7/task#11 enumerations).
     pub(crate) aa_out: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 1: the FXAA INPUT descriptor set RING (one per in-flight frame),
-    /// each a single `CombinedImageSampler` binding `lit[i]` (never `aa_out`) + the LINEAR/
+    /// each a single `CombinedImageSampler` binding `display` (PX1a; never `aa_out`) + the LINEAR/
     /// ClampToEdge [`AaActivation::sampler`](crate::present::scene_types::AaActivation::sampler)
     /// against [`GBufferScene::present_layout`]. `None` when AA is off.
     pub(crate) fxaa_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
@@ -498,28 +494,13 @@ pub struct GBufferTargets {
     /// `taa_motion_cam_ubo[fi]`. `None` when TAA is off. The recorder selects
     /// `taa_resolve_set[self.frame_index]`.
     pub(crate) taa_resolve_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
-    /// TAA rung T3: the RCAS-intermediate STORAGE image ring `taa_resolved` (`R8G8B8A8_UNORM`
-    /// == [`GBUFFER_FORMAT`], `ImageUsage::STORAGE` only — never `SAMPLED`/`COLOR_ATTACHMENT`:
-    /// this image is NEVER read by a fragment shader nor a render-pass attachment, only ever a
-    /// compute STORAGE read/write). Sized to `aa_extent` (== `aa_out`'s size). `Some` iff
-    /// [`GBufferScene::rcas`] is armed: the TAA resolve's `gAaOut` @4 binding is re-pointed here
-    /// instead of [`Self::aa_out`] (see [`Self::build_taa_resolve_set`]'s call site in
-    /// [`Self::create`]), and [`crate::present::passes::rcas`]'s `gRcasIn` @0 reads it, writing
-    /// the FINAL sharpened result into [`Self::aa_out`] (the "ping" of the ping-pong —
-    /// `rcas.comp.hlsl`'s module doc). No boot-clear needed (unlike [`Self::taa_hist`]): the
-    /// resolve writes every dispatched pixel of `gAaOut` unconditionally each frame, so a fresh
-    /// image's undefined initial contents are never read (mirrors [`Self::aa_out`]'s own
-    /// always-fully-discarded UNDEFINED→GENERAL transition). `None` when RCAS is off (the
-    /// 0%-gate — `SharpenMode::None`, the default) — the resolve writes [`Self::aa_out`]
-    /// directly, byte-identical to the pre-RCAS resolve.
-    pub(crate) taa_resolved: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
-    /// TAA rung T3: the RCAS descriptor set RING (one 2-binding set per in-flight frame),
-    /// written ONCE against
+    /// TAA rung T3 / render wave PX1a (D-G3): the CAS (`SharpenMode::Rcas`) descriptor set RING
+    /// (one 2-binding set per in-flight frame), written ONCE against
     /// [`RcasActivation::rcas_layout`](crate::present::scene_types::RcasActivation::rcas_layout).
-    /// Slot `fi` binds `gRcasIn` @0 = [`Self::taa_resolved`]`[fi]` (the READ), `gAaOut` @1 =
-    /// [`Self::aa_out`]`[fi]` (the WRITE — the present-blit's input, unchanged). `None` when
-    /// RCAS is off, or when [`Self::taa_resolved`]/[`Self::aa_out`] failed to allocate. The
-    /// recorder selects `rcas_set[self.frame_index]`.
+    /// Slot `fi` binds `gRcasIn` @0 = [`Self::display`] (a STORAGE read at `GENERAL`, inside the
+    /// declared `cas` pass between `post_final` and `present_sample`), `gAaOut` @1 =
+    /// [`Self::aa_out`]`[fi]` (the WRITE — the present-blit's input). `None` when RCAS is off or
+    /// [`Self::aa_out`] failed to allocate. The recorder selects `rcas_set[self.frame_index]`.
     pub(crate) rcas_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Which AA mode ([`AaArm`]) was armed when these targets were built.
     /// [`GBufferTargets::sync_gbuffer`] compares this against `AaArm::from_scene(scene)` and
@@ -614,11 +595,37 @@ pub struct GBufferTargets {
     pub(crate) ddgi_update_set: Option<VulkanBindGroup>,
     /// The present-blit descriptor set RING (one per in-flight frame), each written ONCE
     /// against [`GBufferScene::present_layout`] (one COMBINED_IMAGE_SAMPLER pointing at
-    /// `lit[i]` + the scene's present sampler). NO per-frame update. RINGED so slot `i`'s
-    /// present set samples `lit[i]` — the SAME slot the resolve wrote this frame (the `lit`
-    /// ring made the single set stale: it would sample a sibling slot's image). The recorder
-    /// selects `present_set[self.frame_index]`.
+    /// `aa_out[i]` when a display-referred pass writes it — FXAA, SMAA, CAS — else at
+    /// [`Self::display`], render wave PX1a's `post_final` output, + the scene's present
+    /// sampler). NO per-frame update. RINGED so slot `i`'s present set samples the SAME `aa_out`
+    /// slot the AA pass wrote this frame. The recorder selects `present_set[self.frame_index]`.
     pub(crate) present_set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// Render wave PX1a (D-G1): `display` — `post_final`'s output and the one display-referred
+    /// image every later pass reads (the present blit, CAS, FXAA, SMAA). SINGLE (one image both
+    /// frames in flight share, ordered by its frame-graph seed), `R8G8B8A8_UNORM`
+    /// ([`GBUFFER_FORMAT`]), `STORAGE | SAMPLED` (`| TRANSFER_SRC` under the image dump), sized
+    /// at `aa_extent` (the native extent under SSAA — `scene.ssaa`, the frames that run the
+    /// downsample — and the composite otherwise, Forward under a boot-armed SSAA included).
+    /// Boot-transitioned `UNDEFINED → SHADER_READ_ONLY_OPTIMAL` in [`CoreImages::build`] — the layout its seed
+    /// names, so frame 0's first derived barrier states a true `oldLayout`.
+    pub(crate) display: VulkanTexture,
+    /// Render wave PX1a (D-G1, D-G2): `lit_native` — the SSAA downsample's output in `lit`'s
+    /// format ([`LIT_FORMAT`]) at the native `aa_extent`, `post_final`'s scene input under SSAA. SINGLE,
+    /// `COLOR_ATTACHMENT | SAMPLED` (`| TRANSFER_SRC` under the image dump). `Some` iff SSAA is
+    /// armed; boot-transitioned `UNDEFINED → GENERAL` (its seed's layout) in
+    /// [`CoreImages::build`].
+    pub(crate) lit_native: Option<VulkanTexture>,
+    /// Render wave PX1a (D-G5): `post_final`'s per-FIF UBO + descriptor-set rings — the
+    /// `taa_ubo` precedent. `Some` on every successfully created target set
+    /// ([`Self::create`] builds it last and fails the create otherwise); `Option` only so the
+    /// create can assemble `Self` before building it and tear the whole set down on its failure.
+    pub(crate) post_final: Option<PostFinalRing>,
+    /// Render wave PX1a (H4 Scope 3, test 12): the test-only `test_nan_inject` pass's 8-byte
+    /// source — one `LIT_FORMAT` texel, [`NAN_INJECT_TEXEL_BITS`] (a binary16 NaN in R), copied
+    /// into `lit[fi]` at [`NAN_INJECT_TEXEL`] on the injection frame. `Some` iff the
+    /// `inject_nan_lit` key was armed at boot ([`TargetsArming::nan_inject`]); `None` on every
+    /// production run (no buffer, and `lit` carries no `TRANSFER_DST`).
+    pub(crate) nan_inject_src: Option<BoundBuffer>,
     /// Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` compute pass's
     /// Set-0 vocabulary descriptor set RING (one per in-flight frame), written ONCE against
     /// [`GBufferScene::sdf_forward_march_layout`] — see [`DeferredSets::sdf_forward_set`]'s doc
@@ -2142,7 +2149,7 @@ pub(crate) enum AaArm {
         /// TAA rung T3: `scene.rcas.is_some()` — carried as PAYLOAD (not folded into a
         /// separate `AaArm` variant) for the SAME reason this enum exists at all (its own doc):
         /// a bare `Taa` variant cannot distinguish `SharpenMode::None` from `SharpenMode::Rcas`,
-        /// so a live Rcas on/off toggle (which allocates/frees [`GBufferTargets::taa_resolved`]/
+        /// so a live Rcas on/off toggle (which allocates/frees [`GBufferTargets::aa_out`]/
         /// `rcas_set`) would NOT trigger `sync_gbuffer`'s fence-safe rebuild without this field —
         /// exactly the "two different armed sub-states want different resources" bug this enum
         /// was invented to close (see the enum's own doc).
@@ -2282,6 +2289,27 @@ impl TargetsProfile {
 /// `GBUFFER_FORMAT`). The ALBEDO image is also `SAMPLED` (the present-blit) — never
 /// stretched; presented 1:1 in the swapchain's top-left like [`SampledComposite`].
 const GBUFFER_FORMAT: Format = Format::R8G8B8A8Unorm;
+
+/// Render wave PX1a (AD-1): the HDR scene colour's format — RGBA16F, PX0's decision
+/// (`docs/measurements/2026-10-16-px0-lit-format-decision.md`, row 2: AD-1's escape; the RTX 3060
+/// rounds `B10G11R11` toward zero on every path). The ONE Rust spelling: the device's REQUIRED
+/// format row, the `lit` ring and `lit_native`, and the lit attachments' pipeline state read it. Its twins are `shaders/lit_format.hlsli`'s
+/// `LIT_FORMAT_QUALIFIER` and `boyko_shaderdsl::post::LIT_STORAGE_FORMAT`;
+/// `tests/lit_format_census.rs` holds the three equal. Every format-dependent bound reads
+/// `goldens::LIT_ROUNDING`, selected from this constant.
+pub const LIT_FORMAT: Format = Format::R16G16B16A16Sfloat;
+
+/// Render wave PX1a (D-S3, AD-13; critique O2): the scene-linear BACKGROUND a pixel no producer
+/// covers holds — the Deferred no-SkyLight arm, Forward's sky without a SkyLight, Forward's
+/// `FORWARD_LIT_CLEAR` and VB's `VB_LIT_CLEAR` (invisible there: `vb_sky` paints every pixel, but
+/// one spelling, not four). Binary16-representable (so the RGBA16F store and clear are exact), and
+/// the value whose `post_final` display — `OETF(ACES_Hill(c))` — lands at the CENTRE of the 8-bit
+/// background the display-referred store wrote before PX1a: `(13, 13, 25)` on the blessing device
+/// (`|display · 255 − centre| ≤ 0.002` per channel), where the old `(0.05, 0.05, 0.1)` converted
+/// to 25 in blue (`0.1 · 255 = 25.5000004`, one of the two codes Vulkan's UNORM conversion allows).
+/// Its HLSL twin is `shaders/lit_format.hlsli`'s `LIT_BACKGROUND_SCENE`;
+/// `tests/hdr_fixtures.rs` (PX1a test 5) pins the value, its representability and the twin.
+pub const LIT_BACKGROUND_SCENE: [f32; 3] = [0.012_229_919, 0.011_886_597, 0.031_921_387];
 
 /// The SMAA `edges` target format: `R8G8_UNORM` (R = west/left edge, G = north/top edge) — a
 /// Vulkan MANDATORY format with guaranteed `COLOR_ATTACHMENT_BIT` + `SAMPLED_IMAGE_FILTER_LINEAR_BIT`
@@ -2831,7 +2859,20 @@ struct TaaResolveSets {
 /// failure, so the orchestrator only tears down the (fully-built) prior bundles. Flattened back into
 /// the [`GBufferTargets`] fields at `create` time, so `present/` readers keep the same `targets.<x>`
 /// paths.
+/// Render wave PX1a (D-G5): `post_final`'s per-FIF rings — the 32-byte `PostFinal` UBO
+/// (host-coherent; seeded from `GBufferScene::post_final_words` at build, rewritten by the host
+/// each frame through `boyko_render::upload_post_final_ring`) and the 3-binding set (`gScene` @0
+/// = the AA mode's scene input at `GENERAL`, `gDisplay` @1 = `display`, the UBO @2).
+pub(crate) struct PostFinalRing {
+    pub(crate) ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
+    pub(crate) set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+}
+
 struct CoreImages {
+    /// Render wave PX1a: `display` (see [`GBufferTargets::display`]).
+    display: VulkanTexture,
+    /// Render wave PX1a: `lit_native` (see [`GBufferTargets::lit_native`]).
+    lit_native: Option<VulkanTexture>,
     depth: [VulkanTexture; FRAMES_IN_FLIGHT],
     albedo: [VulkanTexture; FRAMES_IN_FLIGHT],
     normal: [VulkanTexture; FRAMES_IN_FLIGHT],
@@ -2853,9 +2894,12 @@ impl CoreImages {
     fn build(
         ctx: &VulkanContext,
         extent: VkExtent2D,
-        dump_usage: bool,
+        aa_extent: VkExtent2D,
+        ssaa: bool,
+        arming: TargetsArming,
         merge_sampled: bool,
     ) -> Result<Self, SwapchainError> {
+        let dump_usage = arming.dump_usage;
         // SAFETY (shared by both closures): `ctx` is the live context each texture was created on;
         // none is referenced by any submission (the build phase, before any record/submit); each ring
         // slot is destroyed exactly once — a completed ring is consumed by value (`destroy_ring`), a
@@ -2967,8 +3011,9 @@ impl CoreImages {
         let material: [VulkanTexture; FRAMES_IN_FLIGHT] = material_slots
             .map(|s| s.expect("invariant: every material ring slot built before here"));
 
-        // LIT: the deferred resolve's STORAGE store output; also SAMPLED by the
-        // present-blit (pass C) and TRANSFER_SRC so an offscreen golden could read it back.
+        // LIT: the HDR scene colour in `LIT_FORMAT` (render wave PX1a) — the deferred resolve's
+        // STORAGE store output; also SAMPLED (TAA, SSAA, `post_final`) and TRANSFER_SRC so an
+        // offscreen golden could read it back.
         // Multi-paradigm render-path plan, rung R4b-b: ALSO `COLOR_ATTACHMENT` — Forward v1
         // reuses this SAME ring as `forward_opaque`'s color-attachment write target (Decision
         // 2's C5 per-path producer access, `ForwardTargets`'s doc: "full + additive
@@ -2979,13 +3024,15 @@ impl CoreImages {
         let mut lit_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for slot in lit_slots.iter_mut() {
-            match GBufferTargets::create_gbuffer_image(
+            match GBufferTargets::create_gbuffer_image_fmt(
                 ctx,
                 extent,
+                LIT_FORMAT,
                 ImageUsage::STORAGE
                     | ImageUsage::SAMPLED
                     | ImageUsage::TRANSFER_SRC
-                    | ImageUsage::COLOR_ATTACHMENT,
+                    | ImageUsage::COLOR_ATTACHMENT
+                    | nan_inject_transfer_dst(arming.nan_inject),
             ) {
                 Ok(t) => *slot = Some(t),
                 Err(e) => {
@@ -3069,7 +3116,51 @@ impl CoreImages {
         let pbr: [VulkanTexture; FRAMES_IN_FLIGHT] =
             pbr_slots.map(|s| s.expect("invariant: every pbr ring slot built before here"));
 
-        Ok(Self { depth, albedo, normal, material, lit, viewt, ssao, pbr })
+        // Render wave PX1a (D-G1): the two post-seam singles, at `aa_extent`, then their boot
+        // layout initialisation. Built LAST so a failure here tears down the eight rings above
+        // through one `destroy` of the assembled bundle.
+        let post_singles = (|| -> Result<(VulkanTexture, Option<VulkanTexture>), SwapchainError> {
+            let display = GBufferTargets::create_gbuffer_image(
+                ctx,
+                aa_extent,
+                ImageUsage::STORAGE | ImageUsage::SAMPLED | dump_transfer_src(dump_usage),
+            )?;
+            if !ssaa {
+                return Ok((display, None));
+            }
+            match GBufferTargets::create_gbuffer_image_fmt(
+                ctx,
+                aa_extent,
+                LIT_FORMAT,
+                ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED | dump_transfer_src(dump_usage),
+            ) {
+                Ok(native) => Ok((display, Some(native))),
+                Err(e) => {
+                    // SAFETY: `display` was created on `ctx` just above and is referenced by no
+                    // submission (build phase); destroyed exactly once.
+                    unsafe { RhiDevice::destroy_texture(ctx, display) };
+                    Err(e)
+                }
+            }
+        })();
+        let (display, lit_native) = match post_singles {
+            Ok(p) => p,
+            Err(e) => {
+                for ring in [pbr, ssao, viewt, lit, material, normal, albedo, depth] {
+                    destroy_ring(ring);
+                }
+                return Err(e);
+            }
+        };
+        let core = Self { display, lit_native, depth, albedo, normal, material, lit, viewt, ssao, pbr };
+        if let Err(e) = GBufferTargets::boot_init_post_layouts(ctx, &core.display, core.lit_native.as_ref()) {
+            // SAFETY: every image of `core` was created on `ctx` above; the failed boot submit (if
+            // any) was fence-waited or never submitted, so nothing references them; each is
+            // destroyed exactly once.
+            unsafe { core.destroy(ctx) };
+            return Err(e);
+        }
+        Ok(core)
     }
 
     /// Tears down the eight image rings in reverse acquisition order (pbr → depth), consuming
@@ -3083,6 +3174,10 @@ impl CoreImages {
         // SAFETY: per the contract `ctx` is live and nothing references these textures; each was
         // created on `ctx` and is destroyed exactly once, in reverse acquisition order.
         unsafe {
+            if let Some(t) = self.lit_native {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+            RhiDevice::destroy_texture(ctx, self.display);
             for t in self.pbr {
                 RhiDevice::destroy_texture(ctx, t);
             }
@@ -4060,15 +4155,14 @@ impl DeferredSets {
         let aa_sampler = scene.aa.as_ref().map(|a| a.sampler);
         debug_assert_eq!(
             aa_out.is_some(),
-            scene.aa.is_some() || scene.smaa.is_some() || scene.ssaa.is_some() || scene.taa.is_some(),
-            "invariant: aa_out arms/disarms with (scene.aa || scene.smaa || scene.ssaa || scene.taa)"
+            scene.aa.is_some() || scene.smaa.is_some() || scene.rcas.is_some(),
+            "invariant: aa_out arms/disarms with (scene.aa || scene.smaa || scene.rcas)"
         );
 
         // The present-blit set RING, written ONCE here: slot `i` is one COMBINED_IMAGE_SAMPLER
-        // pointing at `aa_out[i]` when AA is armed, else `lit[i]` (the resolve's output for that
-        // slot) + the scene's present sampler (UNCHANGED — the `None` arm is line-exact with the
-        // pre-AA stream). RINGED so the present samples the SAME slot the resolve/FXAA wrote this
-        // frame (a single present set would go stale — it would sample a sibling slot's image).
+        // pointing at `aa_out[i]` when a display-referred pass writes it (FXAA, SMAA, CAS), else
+        // at `display` (render wave PX1a: `post_final`'s output) + the scene's present sampler.
+        // RINGED so the present samples the SAME `aa_out` slot the AA pass wrote this frame.
         // On a failure at slot `i`, the slots already built [0..i) plus every prior set ring
         // (vocab/resolve/cull/ssao/ddgi) MUST be destroyed (no leak).
         let mut present_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
@@ -4077,7 +4171,7 @@ impl DeferredSets {
             let entries = [BindGroupEntry::CombinedImage {
                 texture: match aa_out {
                     Some(a) => &a[slot],
-                    None => &core.lit[slot],
+                    None => &core.display,
                 },
                 sampler: scene.present_sampler,
             }];
@@ -5197,9 +5291,9 @@ impl DeferredSets {
                 let mut fxaa_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
                     [const { None }; FRAMES_IN_FLIGHT];
                 let mut failure: Option<crate::error::VulkanError> = None;
-                for (slot, dst) in fxaa_slots.iter_mut().enumerate() {
+                for dst in fxaa_slots.iter_mut() {
                     let entries =
-                        [BindGroupEntry::CombinedImage { texture: &core.lit[slot], sampler }];
+                        [BindGroupEntry::CombinedImage { texture: &core.display, sampler }];
                     let desc =
                         BindGroupDesc::<Vulkan> { layout: scene.present_layout, entries: &entries };
                     match RhiDevice::create_bind_group(ctx, &desc) {
@@ -5324,9 +5418,9 @@ impl DeferredSets {
                 let mut edge_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
                     [const { None }; FRAMES_IN_FLIGHT];
                 let mut failure: Option<crate::error::VulkanError> = None;
-                for (slot, dst) in edge_slots.iter_mut().enumerate() {
+                for dst in edge_slots.iter_mut() {
                     let entries = [BindGroupEntry::CombinedImage {
-                        texture: &core.lit[slot],
+                        texture: &core.display,
                         sampler: smaa.sampler,
                     }];
                     let desc = BindGroupDesc::<Vulkan> {
@@ -5561,14 +5655,14 @@ impl DeferredSets {
                     s.expect("invariant: every smaa weight ring slot built before reaching here")
                 });
 
-                // Pass 3 (blend): smaa.blend_layout, lit[i] + weights[i].
+                // Pass 3 (blend): smaa.blend_layout, display + weights[i] (render wave PX1a).
                 let mut blend_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
                     [const { None }; FRAMES_IN_FLIGHT];
                 let mut failure: Option<crate::error::VulkanError> = None;
                 for (slot, dst) in blend_slots.iter_mut().enumerate() {
                     let entries = [
                         BindGroupEntry::CombinedImage {
-                            texture: &core.lit[slot],
+                            texture: &core.display,
                             sampler: smaa.sampler,
                         },
                         BindGroupEntry::CombinedImage {
@@ -7381,11 +7475,10 @@ impl GBufferTargets {
     }
 
     /// Anti-aliasing Stage 2 (W4 — Decision "left byte-for-byte untouched"): a
-    /// FORMAT-PARAMETERIZED sibling of [`Self::create_gbuffer_image`], used ONLY by
-    /// [`SmaaImages`] (the SMAA `edges`/`weights` targets need `R8G8_UNORM`/`R8G8B8A8_UNORM`
-    /// respectively — NOT the fixed [`GBUFFER_FORMAT`] `create_gbuffer_image` hardcodes). A
-    /// NEW standalone function, not a re-point of `create_gbuffer_image` — every existing
-    /// caller of `create_gbuffer_image` stays byte-for-byte unchanged.
+    /// FORMAT-PARAMETERIZED sibling of [`Self::create_gbuffer_image`], used by [`SmaaImages`]
+    /// (the SMAA `edges`/`weights` targets need `R8G8_UNORM`/`R8G8B8A8_UNORM` respectively —
+    /// NOT the fixed [`GBUFFER_FORMAT`] `create_gbuffer_image` hardcodes) and, since render wave
+    /// PX1a, by the `lit` ring and `lit_native` ([`LIT_FORMAT`]).
     fn create_gbuffer_image_fmt(
         ctx: &VulkanContext,
         extent: VkExtent2D,
@@ -7823,35 +7916,73 @@ impl GBufferTargets {
         record
     }
 
-    /// TAA rung T3: builds the FIF-ringed `taa_resolved` RCAS-intermediate target, DEGRADING to
-    /// `None` (leak-safe) on any per-slot create failure — mirrors [`Self::build_taa_hist_ring`]'s
-    /// opt-in "recorded-not-fail-fast" policy (UNCONDITIONAL here — RCAS is not hwrt-gated). Built
-    /// ONLY when `scene.rcas.is_some()` (`SharpenMode::None`, the default, never calls this — the
-    /// 0%-gate). No boot-clear (unlike `taa_hist`): the resolve writes every dispatched pixel of
-    /// `gAaOut` unconditionally each frame it runs, so a fresh image's undefined initial contents
-    /// are never read (see [`GBufferTargets::taa_resolved`]'s field doc).
-    fn build_taa_resolved_ring(
+    /// Render wave PX1a (D-G1): the post seam's boot layout initialisation — ONE fence-waited
+    /// encoder that transitions `display` `UNDEFINED → SHADER_READ_ONLY_OPTIMAL` and (under SSAA)
+    /// `lit_native` `UNDEFINED → GENERAL`: the layouts their frame-graph seeds name. A seeded
+    /// resource starts each frame at its seed's layout, so without this frame 0's first derived
+    /// barrier would claim a false `oldLayout` (the class [`Self::boot_clear_taa_hist`] closed for
+    /// `taa_hist`). A transition only — both are `FrameLocal`, rebuilt every frame. Runs on every
+    /// (re)build, like that precedent; the encoder + fence are torn down here on every path.
+    fn boot_init_post_layouts(
         ctx: &VulkanContext,
-        extent: VkExtent2D,
-    ) -> Option<[VulkanTexture; FRAMES_IN_FLIGHT]> {
-        let mut slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
-            [const { None }; FRAMES_IN_FLIGHT];
-        for slot in slots.iter_mut() {
-            match Self::create_gbuffer_image(ctx, extent, ImageUsage::STORAGE) {
-                Ok(t) => *slot = Some(t),
-                Err(_) => {
-                    // SAFETY: each `Some` slot was created on `ctx` just above, is referenced by
-                    // no submission (build phase), and is destroyed exactly once (the `take`).
-                    for s in slots.iter_mut() {
-                        if let Some(t) = s.take() {
-                            unsafe { RhiDevice::destroy_texture(ctx, t) };
-                        }
-                    }
-                    return None;
-                }
+        display: &VulkanTexture,
+        lit_native: Option<&VulkanTexture>,
+    ) -> Result<(), SwapchainError> {
+        let mut encoder =
+            RhiDevice::create_command_encoder(ctx).map_err(SwapchainError::DepthImage)?;
+        let fence = match RhiDevice::create_fence(ctx, false) {
+            Ok(f) => f,
+            Err(e) => {
+                // SAFETY: `encoder` was just created on `ctx`, never submitted; destroy once.
+                unsafe { RhiDevice::destroy_command_encoder(ctx, encoder) };
+                return Err(SwapchainError::DepthImage(e));
             }
+        };
+        let range = ImageSubresourceRange {
+            aspect: ImageAspect::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        let record = (|| -> Result<(), SwapchainError> {
+            encoder.begin().map_err(SwapchainError::DepthImage)?;
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture: display,
+                src_stage: BarrierStage::TOP_OF_PIPE,
+                dst_stage: BarrierStage::FRAGMENT_SHADER | BarrierStage::COMPUTE_SHADER,
+                src_access: BarrierAccess::NONE,
+                dst_access: BarrierAccess::SHADER_READ,
+                old_layout: ImageLayout::Undefined,
+                new_layout: ImageLayout::ShaderReadOnlyOptimal,
+                range,
+            });
+            if let Some(native) = lit_native {
+                encoder.image_barrier(&ImageBarrierDesc {
+                    texture: native,
+                    src_stage: BarrierStage::TOP_OF_PIPE,
+                    dst_stage: BarrierStage::COMPUTE_SHADER,
+                    src_access: BarrierAccess::NONE,
+                    dst_access: BarrierAccess::SHADER_READ,
+                    old_layout: ImageLayout::Undefined,
+                    new_layout: ImageLayout::General,
+                    range,
+                });
+            }
+            encoder.end().map_err(SwapchainError::DepthImage)?;
+            let queue = ctx.rhi_queue();
+            queue.submit(&encoder, &fence).map_err(SwapchainError::DepthImage)?;
+            RhiDevice::wait_fence(ctx, &fence, u64::MAX).map_err(SwapchainError::DepthImage)?;
+            Ok(())
+        })();
+        // SAFETY: encoder/fence were created on `ctx`; the encoder's only submission (if any) is
+        // fence-waited above on the Ok path (or never submitted / faulted on an error path), and
+        // each is moved by value ⇒ destroyed exactly once.
+        unsafe {
+            RhiDevice::destroy_command_encoder(ctx, encoder);
+            RhiDevice::destroy_fence(ctx, fence);
         }
-        Some(slots.map(|s| s.expect("invariant: every taa_resolved ring slot built above")))
+        record
     }
 
     /// Anti-aliasing Stage 4 (TAA W5): builds the temporal-resolve descriptor set + its two OWN
@@ -7861,23 +7992,20 @@ impl GBufferTargets {
     /// Mirrors [`Self::build_shadow_temporal_sets`]'s shape (own UBO ring(s) + one set), built
     /// LAST in [`Self::create`] (after `taa_hist`, which it binds) and DEGRADES-TO-`None` on any
     /// failure (leak-safe, opt-in — UNCONDITIONAL here, unlike the hwrt-only temporal builder).
-    /// `None` when `scene.taa` is absent (the 0%-gate) or `taa_hist`/`aa_out` failed to allocate.
+    /// `None` when `scene.taa` is absent (the 0%-gate) or `taa_hist` failed to allocate.
     ///
-    /// TAA rung T3: `aa_out`'s param name is kept generic — the CALLER ([`Self::create`]) passes
-    /// whichever ring `gAaOut` @4 should bind THIS frame: [`GBufferTargets::taa_resolved`] when
-    /// `scene.rcas.is_some()` (RCAS armed — the resolve's output is an intermediate, re-pointed
-    /// here), else [`GBufferTargets::aa_out`] (the unchanged direct present-blit input). This fn's
-    /// OWN body is untouched by the repoint — it just binds whatever `aa_out` slice it is given.
+    /// Render wave PX1a (D-S5 step 1): the resolve writes only `taa_hist[fi]`; `post_final` reads
+    /// it as the scene input, so the old `gAaOut` @4 binding is gone (a binding hole in the
+    /// layout — legal).
     fn build_taa_resolve_set(
         ctx: &VulkanContext,
         scene: &GBufferScene<'_>,
         lit: &[VulkanTexture; FRAMES_IN_FLIGHT],
         viewt: &[VulkanTexture; FRAMES_IN_FLIGHT],
         taa_hist: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
-        aa_out: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
     ) -> Option<TaaResolveSets> {
-        let (taa, hist, out) = match (scene.taa.as_ref(), taa_hist, aa_out) {
-            (Some(t), Some(h), Some(o)) => (t, h, o),
+        let (taa, hist) = match (scene.taa.as_ref(), taa_hist) {
+            (Some(t), Some(h)) => (t, h),
             _ => return None,
         };
 
@@ -7970,12 +8098,13 @@ impl GBufferTargets {
         let motion_cam_ubo: [BoundBuffer; FRAMES_IN_FLIGHT] =
             mc_slots.map(|s| s.expect("invariant: every TAA MotionCam UBO ring slot built"));
 
-        // (3) The 8-binding resolve set ring. Slot `fi` binds `gLit` @0 = `lit[fi]` (+ the LINEAR
+        // (3) The 7-binding resolve set ring. Slot `fi` binds `gLit` @0 = `lit[fi]` (+ the LINEAR
         // sampler), `gViewT` @1 = `viewt[fi]`, `gHistIn` @2 = `taa_hist[1-fi]` (the cross-frame
         // READ — bound DIRECTLY, not framegraph-tracked), `gHistOut` @3 = `taa_hist[fi]` (the
-        // WRITE), `gAaOut` @4 = `aa_out[fi]`, the `ResolvedTaa` UBO @5 = `taa_ubo[fi]`, the camera
-        // UBO @6 = `scene.camera_ring[fi]` (UNJITTERED, C1 cut), the `MotionCam` UBO @7 =
-        // `motion_cam_ubo[fi]`. On a slot's failure, drain [0..slot) + both UBO rings.
+        // WRITE), the `ResolvedTaa` UBO @5 = `taa_ubo[fi]`, the camera UBO @6 =
+        // `scene.camera_ring[fi]` (UNJITTERED, C1 cut), the `MotionCam` UBO @7 =
+        // `motion_cam_ubo[fi]` (@4 is a hole since PX1a). On a slot's failure, drain [0..slot) +
+        // both UBO rings.
         let mut set_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for (slot, dst) in set_slots.iter_mut().enumerate() {
@@ -7985,7 +8114,6 @@ impl GBufferTargets {
                 BindGroupEntry::StorageImage { texture: &viewt[slot] },
                 BindGroupEntry::StorageImage { texture: &hist[prev] },
                 BindGroupEntry::StorageImage { texture: &hist[slot] },
-                BindGroupEntry::StorageImage { texture: &out[slot] },
                 BindGroupEntry::UniformBuffer { buffer: &taa_ubo[slot] },
                 BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
                 BindGroupEntry::UniformBuffer { buffer: &motion_cam_ubo[slot] },
@@ -8020,21 +8148,20 @@ impl GBufferTargets {
         Some(TaaResolveSets { taa_ubo, motion_cam_ubo, set })
     }
 
-    /// TAA rung T3: builds the RCAS descriptor set ring (2 STORAGE-image bindings, no UBO)
-    /// against [`RcasActivation::rcas_layout`] — `gRcasIn` @0 = `taa_resolved[fi]` (the
-    /// resolve's re-pointed intermediate write), `gAaOut` @1 = `aa_out[fi]` (the present-blit's
-    /// input, unchanged). Built LAST (after [`Self::build_taa_resolve_set`], which repoints the
-    /// resolve's OWN `gAaOut` at `taa_resolved` instead) and DEGRADES-TO-`None` on any failure
-    /// (leak-safe, opt-in — mirrors [`Self::build_taa_resolve_set`]'s per-slot drain). `None`
-    /// when `scene.rcas` is absent (the 0%-gate) or `taa_resolved`/`aa_out` failed to allocate.
+    /// TAA rung T3 / render wave PX1a (D-G3): builds the CAS descriptor set ring (2
+    /// STORAGE-image bindings, no UBO) against [`RcasActivation::rcas_layout`] — `gRcasIn` @0 =
+    /// `display` (`post_final`'s output, read at `GENERAL` in the declared `cas` pass), `gAaOut`
+    /// @1 = `aa_out[fi]` (the present-blit's input). DEGRADES-TO-`None` on any failure (leak-safe,
+    /// opt-in — mirrors [`Self::build_taa_resolve_set`]'s per-slot drain). `None` when
+    /// `scene.rcas` is absent (the 0%-gate) or `aa_out` failed to allocate.
     fn build_rcas_set(
         ctx: &VulkanContext,
         scene: &GBufferScene<'_>,
-        taa_resolved: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        display: &VulkanTexture,
         aa_out: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
     ) -> Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> {
-        let (rcas, resolved, out) = match (scene.rcas.as_ref(), taa_resolved, aa_out) {
-            (Some(r), Some(resolved), Some(out)) => (r, resolved, out),
+        let (rcas, out) = match (scene.rcas.as_ref(), aa_out) {
+            (Some(r), Some(out)) => (r, out),
             _ => return None,
         };
 
@@ -8042,7 +8169,7 @@ impl GBufferTargets {
             [const { None }; FRAMES_IN_FLIGHT];
         for (slot, dst) in slots.iter_mut().enumerate() {
             let entries = [
-                BindGroupEntry::StorageImage { texture: &resolved[slot] },
+                BindGroupEntry::StorageImage { texture: display },
                 BindGroupEntry::StorageImage { texture: &out[slot] },
             ];
             let desc = BindGroupDesc::<Vulkan> { layout: rcas.rcas_layout, entries: &entries };
@@ -8063,6 +8190,85 @@ impl GBufferTargets {
             }
         }
         Some(slots.map(|s| s.expect("invariant: every RCAS set slot built above")))
+    }
+
+    /// Render wave PX1a (D-G5): builds `post_final`'s per-FIF UBO ring (32 B host-coherent,
+    /// seeded with `scene.post_final_words` so frame 0 and a rebuild frame dispatch over the
+    /// right extent before the host's per-frame upload reaches the new ring) and its 3-binding
+    /// set ring — `gScene` @0 = `scene_in[fi]` (`SampledImageAtGeneral`), `gDisplay` @1 =
+    /// `display` (STORAGE), the UBO @2. NOT degradable: the pass is unconditional, so a failure
+    /// fails the create (leak-safe: everything built here is drained before the `Err`).
+    fn build_post_final_ring(
+        ctx: &VulkanContext,
+        scene: &GBufferScene<'_>,
+        scene_in: [&VulkanTexture; FRAMES_IN_FLIGHT],
+        display: &VulkanTexture,
+    ) -> Result<PostFinalRing, SwapchainError> {
+        let mut ubo_slots: [Option<BoundBuffer>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+        let mut set_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+        let drain = |ubo: &mut [Option<BoundBuffer>; FRAMES_IN_FLIGHT],
+                     sets: &mut [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT]| {
+            // SAFETY: every `Some` slot was created on `ctx` in this fn and is referenced by no
+            // submission (build phase); each is destroyed exactly once (the `take`).
+            unsafe {
+                for g in sets.iter_mut().filter_map(Option::take) {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+                for b in ubo.iter_mut().filter_map(Option::take) {
+                    RhiDevice::destroy_buffer(ctx, b);
+                }
+            }
+        };
+        for slot in 0..FRAMES_IN_FLIGHT {
+            let b = match RhiDevice::create_buffer(
+                ctx,
+                &BufferDesc {
+                    size: crate::present::POST_FINAL_UBO_BYTES,
+                    usage: BufferUsage::UNIFORM,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    drain(&mut ubo_slots, &mut set_slots);
+                    return Err(SwapchainError::DepthImage(e));
+                }
+            };
+            let p = RhiDevice::buffer_mapped_ptr(ctx, &b)
+                .expect("invariant: a HostVisibleCoherent buffer is persistently mapped");
+            // SAFETY: `p` is the host-coherent mapping of a freshly created
+            // `POST_FINAL_UBO_BYTES`-byte UNIFORM buffer (32 = the eight words, const-asserted
+            // beside the size); the source is a live `[u32; 8]` local, a distinct allocation, so
+            // the copy is in-bounds and non-overlapping; no submission reads the buffer yet.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    scene.post_final_words.as_ptr().cast::<u8>(),
+                    p.as_ptr(),
+                    crate::present::POST_FINAL_UBO_BYTES as usize,
+                );
+            }
+            ubo_slots[slot] = Some(b);
+        }
+        for slot in 0..FRAMES_IN_FLIGHT {
+            let ubo = ubo_slots[slot].as_ref().expect("invariant: every post_final UBO slot built above");
+            let entries = [
+                BindGroupEntry::SampledImageAtGeneral { texture: scene_in[slot] },
+                BindGroupEntry::StorageImage { texture: display },
+                BindGroupEntry::UniformBuffer { buffer: ubo },
+            ];
+            let desc = BindGroupDesc::<Vulkan> { layout: scene.post_final.layout, entries: &entries };
+            match RhiDevice::create_bind_group(ctx, &desc) {
+                Ok(g) => set_slots[slot] = Some(g),
+                Err(e) => {
+                    drain(&mut ubo_slots, &mut set_slots);
+                    return Err(SwapchainError::DepthImage(e));
+                }
+            }
+        }
+        Ok(PostFinalRing {
+            ubo: ubo_slots.map(|s| s.expect("invariant: every post_final UBO slot built above")),
+            set: set_slots.map(|s| s.expect("invariant: every post_final set slot built above")),
+        })
     }
 
     /// HW-RT Rung 3b: builds one FIF-ringed temporal denoise target, DEGRADING to `None` (leak-
@@ -8415,8 +8621,9 @@ impl GBufferTargets {
         extent: VkExtent2D,
         aa_extent: VkExtent2D,
         profile: TargetsProfile,
-        dump_usage: bool,
+        arming: TargetsArming,
     ) -> Result<Self, SwapchainError> {
+        let dump_usage = arming.dump_usage;
         // Multi-paradigm render-path plan, rung R2: the threaded `profile` must match what
         // `scene.resolved_render_path` would derive directly — the SAME "declare/record can
         // never diverge" discipline `path_has_raster`/`path_has_marcher` enforce in
@@ -8512,7 +8719,14 @@ impl GBufferTargets {
         // shadow-vis images → SSAO à-trous ring images → deferred sets → (hwrt) denoise sets → SSAO
         // à-trous sets → temporal images → mv set → temporal sets, so the render stays
         // byte-identical.
-        let core = CoreImages::build(ctx, extent, dump_usage, scene.sdf_depth_merge.is_some())?;
+        let core = CoreImages::build(
+            ctx,
+            extent,
+            aa_extent,
+            scene.ssaa.is_some(),
+            arming,
+            scene.sdf_depth_merge.is_some(),
+        )?;
 
         #[cfg(feature = "hwrt")]
         let shadow_vis_imgs = match ShadowVisImages::build(ctx, extent) {
@@ -8545,19 +8759,14 @@ impl GBufferTargets {
             }
         };
 
-        // Anti-aliasing campaign: the aa_out image ring, built ONLY when ANY of `scene.aa`
-        // (FXAA) / `scene.smaa` (SMAA) / `scene.ssaa` (SSAA) / `scene.taa` (TAA) is armed —
-        // `None` is the 0%-gate (no image, no fxaa_set/smaa/downsample sets, present samples
-        // `lit`). Built after the SSAO à-trous ring images (so its own Err arm destroys those +
-        // shadow-vis + core, mirroring the existing image-stage error weave). Sized to
-        // `aa_extent` — NATIVE under SSAA (`present_extent`, i.e. `extent`, is 2× there), `==
-        // extent` for Off/Fxaa/Smaa/Taa (byte-identical sizing to before SSAA existed). TAA's
-        // resolve writes `aa_out` directly (no dedicated FXAA/SMAA-style INPUT set — see
-        // `taa_hist` below).
-        let aa_armed = scene.aa.is_some()
-            || scene.smaa.is_some()
-            || scene.ssaa.is_some()
-            || scene.taa.is_some();
+        // Anti-aliasing campaign / render wave PX1a: the aa_out image ring — the output of the
+        // display-referred passes that run AFTER `post_final` — built ONLY when one of them is
+        // armed: `scene.aa` (FXAA), `scene.smaa` (SMAA) or `scene.rcas` (CAS). `None` is the
+        // 0%-gate (present samples `display`). SSAA and TAA no longer write it: the downsample
+        // writes `lit_native` and the resolve only `taa_hist`, both read by `post_final`. Built
+        // after the SSAO à-trous ring images (so its own Err arm destroys those + shadow-vis +
+        // core, mirroring the existing image-stage error weave). Sized to `aa_extent`.
+        let aa_armed = scene.aa.is_some() || scene.smaa.is_some() || scene.rcas.is_some();
         let aa_imgs: Option<AaImages> = if aa_armed {
             match AaImages::build(ctx, aa_extent) {
                 Ok(a) => Some(a),
@@ -8584,14 +8793,22 @@ impl GBufferTargets {
         debug_assert_eq!(
             aa_armed,
             aa_imgs.is_some(),
-            "invariant: aa_imgs must arm/disarm in lockstep with (scene.aa || scene.smaa || scene.ssaa || scene.taa)"
+            "invariant: aa_imgs must arm/disarm in lockstep with (scene.aa || scene.smaa || scene.rcas)"
         );
-        // SSAA-armed only: `aa_out`'s dims must equal the native `aa_extent`, not
-        // `present_extent` (`extent`) — this is the crux invariant that keeps the present-blit's
-        // unchanged 1:1 crop from sampling a 2× (top-left-quarter-cropped) image.
+        // SSAA-armed only: `lit_native` (the downsample's output and `post_final`'s input) exists
+        // at the native `aa_extent`, so `post_final` reads a scene input at `display`'s extent.
         debug_assert!(
-            scene.ssaa.is_none() || aa_imgs.is_some(),
-            "invariant: scene.ssaa armed implies aa_imgs is built at aa_extent"
+            scene.ssaa.is_none() || core.lit_native.is_some(),
+            "invariant: scene.ssaa armed implies lit_native is built at aa_extent"
+        );
+        // Review r2 R2-W1: without the downsample `post_final` reads `lit` (or the TAA history)
+        // texel for texel over `display`'s extent, so `display` must be at `lit`'s. A native
+        // `display` beside a 2x `lit` (Forward under a boot-armed SSAA, which degrades the SSAA
+        // pass but keeps the composite) held the scene's top-left quarter. The host sizes
+        // `aa_extent` by the same rule (`WindowHost::display_extent`).
+        debug_assert!(
+            scene.ssaa.is_some() || (aa_extent.width == extent.width && aa_extent.height == extent.height),
+            "invariant: aa_extent equals the composite extent on a frame without the SSAA downsample"
         );
 
         // Anti-aliasing Stage 2: the SMAA `edges`/`weights` image rings, built ONLY when
@@ -8828,7 +9045,7 @@ impl GBufferTargets {
 
         // Flatten the image + set bundles into the original local names so the remaining (infallible)
         // hwrt tail below + the `Self` construction stay byte-identical.
-        let CoreImages { depth, albedo, normal, material, lit, viewt, ssao, pbr } = core;
+        let CoreImages { display, lit_native, depth, albedo, normal, material, lit, viewt, ssao, pbr } = core;
         let aa_out: Option<[VulkanTexture; FRAMES_IN_FLIGHT]> = aa_imgs.map(|a| a.aa_out);
         let (smaa_edges, smaa_weights) = match smaa_imgs {
             Some(SmaaImages { edges, weights }) => (Some(edges), Some(weights)),
@@ -8985,38 +9202,21 @@ impl GBufferTargets {
             "invariant: GBufferScene::rcas armed implies GBufferScene::taa armed (RCAS runs \
              post-TAA-resolve, never standalone)"
         );
-        // TAA rung T3: the RCAS-intermediate `taa_resolved` ring, built right after `taa_hist`
-        // (both TAA-Stage-4-adjacent) so it exists BEFORE `build_taa_resolve_set` below needs to
-        // pick which ring the resolve's `gAaOut` @4 binds this frame. Gated on `scene.rcas.
-        // is_some()` — `None` (the 0%-gate, `SharpenMode::None`) never calls this.
-        let taa_resolved: Option<[VulkanTexture; FRAMES_IN_FLIGHT]> =
-            if scene.rcas.is_some() { Self::build_taa_resolved_ring(ctx, aa_extent) } else { None };
-
         // Anti-aliasing Stage 4 (TAA W5): the resolve's own tunables + DEDICATED `MotionCam` UBO
-        // rings + the 8-binding resolve set. Built LAST (after `taa_hist`/`aa_out`, which it
-        // binds) and DEGRADE-TO-NONE (opt-in, no dependents) — like the hwrt temporal sets, it
-        // needs no teardown weaving. `None` on the OFF path (TAA off, or `taa_hist`/`aa_out`
-        // failed to allocate) ⇒ byte-identical.
-        //
-        // TAA rung T3: `gAaOut` @4 is RE-POINTED at `taa_resolved` instead of `aa_out` whenever
-        // RCAS is armed (`record_rcas` then reads `taa_resolved` and writes the FINAL sharpened
-        // result into `aa_out` itself) — `resolve_gaaout_target` picks the right ring;
-        // `build_taa_resolve_set`'s own body is untouched (its `aa_out` param just binds
-        // whichever slice it is handed). `SharpenMode::None` (`scene.rcas.is_none()`) keeps
-        // `resolve_gaaout_target == aa_out.as_ref()` — byte-identical to the pre-RCAS resolve.
-        let resolve_gaaout_target =
-            if scene.rcas.is_some() { taa_resolved.as_ref() } else { aa_out.as_ref() };
+        // rings + the 7-binding resolve set. Built LAST (after `taa_hist`, which it binds) and
+        // DEGRADE-TO-NONE (opt-in, no dependents) — like the hwrt temporal sets, it needs no
+        // teardown weaving. `None` on the OFF path (TAA off, or `taa_hist` failed to allocate) ⇒
+        // byte-identical.
         let (taa_ubo, taa_motion_cam_ubo, taa_resolve_set) =
-            match Self::build_taa_resolve_set(ctx, scene, &lit, &viewt, taa_hist.as_ref(), resolve_gaaout_target) {
+            match Self::build_taa_resolve_set(ctx, scene, &lit, &viewt, taa_hist.as_ref()) {
                 Some(sets) => (Some(sets.taa_ubo), Some(sets.motion_cam_ubo), Some(sets.set)),
                 None => (None, None, None),
             };
 
-        // TAA rung T3: the RCAS descriptor set, built LAST (after `taa_resolve_set`, which
-        // repoints the resolve's own `gAaOut`) and DEGRADE-TO-NONE (opt-in, no dependents) — like
-        // the resolve set above, it needs no teardown weaving. `None` on the OFF path (RCAS off,
-        // or `taa_resolved`/`aa_out` failed to allocate) ⇒ byte-identical.
-        let rcas_set = Self::build_rcas_set(ctx, scene, taa_resolved.as_ref(), aa_out.as_ref());
+        // TAA rung T3 / render wave PX1a (D-G3): the CAS descriptor set (`display` → `aa_out`),
+        // DEGRADE-TO-NONE (opt-in, no dependents). `None` on the OFF path (RCAS off, or `aa_out`
+        // failed to allocate) ⇒ byte-identical.
+        let rcas_set = Self::build_rcas_set(ctx, scene, &display, aa_out.as_ref());
 
         // Rung R9b (docs/R9-VB-SPLIT-PLAN.md §4): the VB split's `thin_normal` ring — built in
         // the leak-safe DEGRADE-TO-NONE tail (the `taa_hist` discipline: each slot drains on a
@@ -9355,8 +9555,11 @@ impl GBufferTargets {
             taa_ubo,
             taa_motion_cam_ubo,
             taa_resolve_set,
-            taa_resolved,
             rcas_set,
+            display,
+            lit_native,
+            post_final: None,
+            nan_inject_src: None,
             aa_arm: AaArm::from_scene(scene),
             #[cfg(feature = "hwrt")]
             shadow_vis_resolve_set,
@@ -9514,7 +9717,96 @@ impl GBufferTargets {
                 Some(slots.map(|s| s.expect("invariant: every merge ring slot built before here")));
         }
 
+        // Render wave PX1a (D-G5): `post_final`'s rings, LAST — the set binds the scene input the
+        // AA mode selects, the declarators' own choice (`taa_hist[fi]` under live TAA,
+        // `lit_native` under SSAA, `lit[fi]` otherwise), and `display`. Review r1 W1: TAA is the
+        // declarators' LIVE predicate (`PostSeamArms`, over `taa_history_built`), so a degraded
+        // history binds `lit[fi]`, the input the TAA-off graph the declarators then declare reads.
+        let built_post_final = {
+            let taa_live =
+                super::graph_bridge::PostSeamArms::from_scene(scene, targets.taa_history_built()).taa;
+            let scene_in: [&VulkanTexture; FRAMES_IN_FLIGHT] = core::array::from_fn(|fi| {
+                match (targets.taa_hist.as_ref().filter(|_| taa_live), targets.lit_native.as_ref()) {
+                    (Some(h), _) => &h[fi],
+                    (None, Some(n)) => n,
+                    (None, None) => &targets.lit[fi],
+                }
+            });
+            Self::build_post_final_ring(ctx, scene, scene_in, &targets.display)
+        };
+        match built_post_final {
+            Ok(r) => targets.post_final = Some(r),
+            Err(e) => {
+                // SAFETY: every resource of `targets` was created on `ctx` in this fn and is
+                // referenced by no submission (build phase); `destroy` consumes it once.
+                unsafe { targets.destroy(ctx) };
+                return Err(e);
+            }
+        }
+
+        // Render wave PX1a (H4 Scope 3, test 12): the test-only NaN source, LAST — only when the
+        // `inject_nan_lit` key was armed at boot.
+        if arming.nan_inject {
+            match Self::build_nan_inject_src(ctx) {
+                Ok(b) => targets.nan_inject_src = Some(b),
+                Err(e) => {
+                    // SAFETY: as the `post_final` arm above — every resource of `targets` was
+                    // created on `ctx` in this fn, no submission references it, `destroy` consumes
+                    // it once.
+                    unsafe { targets.destroy(ctx) };
+                    return Err(e);
+                }
+            }
+        }
+
         Ok(targets)
+    }
+
+    /// Render wave PX1a (review r1 W1): whether [`Self::create`] built the TAA history ring AND
+    /// the resolve set that binds it. Both DEGRADE to `None` on a create or boot-clear failure
+    /// while the scene's TAA request stays armed; with the request this is the frame's TAA-live
+    /// predicate (`graph_bridge::PostSeamArms::new`), which the declarators, the recorders (through
+    /// the declared `taa_resolve` pass) and `post_final`'s descriptor ring all key on.
+    #[inline]
+    pub(crate) fn taa_history_built(&self) -> bool {
+        self.taa_hist.is_some() && self.taa_resolve_set.is_some()
+    }
+
+    /// Render wave PX1a (H4 Scope 3, test 12): the 8-byte host-visible `TRANSFER_SRC` buffer
+    /// holding one `LIT_FORMAT` texel, [`NAN_INJECT_TEXEL_BITS`], written once here. Cold: built
+    /// only on a boot that armed the `inject_nan_lit` key.
+    #[cold]
+    #[inline(never)]
+    fn build_nan_inject_src(ctx: &VulkanContext) -> Result<BoundBuffer, SwapchainError> {
+        let texel: [u8; NAN_INJECT_SRC_BYTES as usize] = {
+            let w = NAN_INJECT_TEXEL_BITS;
+            let mut b = [0u8; NAN_INJECT_SRC_BYTES as usize];
+            let mut i = 0;
+            while i < 4 {
+                let le = w[i].to_le_bytes();
+                b[2 * i] = le[0];
+                b[2 * i + 1] = le[1];
+                i += 1;
+            }
+            b
+        };
+        let buf = RhiDevice::create_buffer(
+            ctx,
+            &BufferDesc {
+                size: NAN_INJECT_SRC_BYTES,
+                usage: BufferUsage::TRANSFER_SRC,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .map_err(SwapchainError::DepthImage)?;
+        let p = RhiDevice::buffer_mapped_ptr(ctx, &buf)
+            .expect("invariant: a HostVisibleCoherent buffer is persistently mapped");
+        // SAFETY: `p` is the host-coherent mapping of the freshly created `NAN_INJECT_SRC_BYTES`-byte
+        // buffer above; `texel` is a live local array of exactly that many bytes, a distinct
+        // allocation, so the copy is in-bounds and non-overlapping; no submission reads the buffer
+        // yet (it is not returned until after this write).
+        unsafe { core::ptr::copy_nonoverlapping(texel.as_ptr(), p.as_ptr(), texel.len()) };
+        Ok(buf)
     }
 
     /// Ensures the G-buffer images + descriptor sets exist and match `extent`,
@@ -9524,8 +9816,10 @@ impl GBufferTargets {
     /// vocabulary + present descriptor sets are re-written here — and ONLY here — so the
     /// per-frame recorder records no `vkUpdateDescriptorSets`.
     ///
-    /// `aa_extent` is the `aa_out` size — NATIVE under SSAA (`extent`, i.e. `present_extent`,
-    /// is 2× there), `== extent` for Off/Fxaa/Smaa. The resync predicate compares only
+    /// `aa_extent` is the size of `display` and the AA images — NATIVE under SSAA (`scene.ssaa`;
+    /// `extent`, i.e. `present_extent`, is 2× there), `== extent` on every other frame, a path
+    /// that degrades a boot-armed SSAA included ([`Self::create`] asserts it; review r2 R2-W1).
+    /// The resync predicate compares only
     /// `extent`/`aa_arm` (NOT a separate `aa_extent` compare): `aa_arm` already flips on every
     /// Off↔Ssaa transition (`AaArm::from_scene`), and both extents are boot-fixed together, so
     /// `aa_extent` cannot change without `aa_arm` changing too — a redundant size-compare would
@@ -9556,7 +9850,7 @@ impl GBufferTargets {
         extent: VkExtent2D,
         aa_extent: VkExtent2D,
         profile: TargetsProfile,
-        dump_usage: bool,
+        arming: TargetsArming,
     ) -> Result<(), SwapchainError> {
         if let Some(t) = targets.as_ref()
             && t.extent.width == extent.width
@@ -9580,7 +9874,7 @@ impl GBufferTargets {
 
         // Build the new targets BEFORE tearing down the old ones, so an allocation
         // failure leaves the previous (still-valid) targets in place.
-        let fresh = Self::create(ctx, scene, extent, aa_extent, profile, dump_usage)?;
+        let fresh = Self::create(ctx, scene, extent, aa_extent, profile, arming)?;
 
         // Asset-streaming plan F7 §5 (C1, review O1), widened by DM1 D-3: a SECONDARY
         // self-consistency net — every material-bearing ring `create` just built must be
@@ -9649,6 +9943,22 @@ impl GBufferTargets {
         // slots — every slot of every ring (and the single set) is drained. Rung 3a (`hwrt`) adds
         // the two `Option`-guarded shadow-vis image RINGS, drained before ssao (reverse acquisition).
         unsafe {
+            // Render wave PX1a (test 12): the NaN source — `create`'s last acquisition when the
+            // `inject_nan_lit` key is armed, so destroyed first. `None` on every production run.
+            if let Some(b) = self.nan_inject_src {
+                RhiDevice::destroy_buffer(ctx, b);
+            }
+            // Render wave PX1a: `post_final`'s set + UBO rings — the last acquisition of `create`
+            // (bar the test-only NaN source), so destroyed next. `None` only on a create that failed
+            // while building it.
+            if let Some(r) = self.post_final {
+                for g in r.set {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+                for b in r.ubo {
+                    RhiDevice::destroy_buffer(ctx, b);
+                }
+            }
             // Render wave RD1: the SDF depth merge's set ring — acquired after the pyramid, the
             // last acquisition of `create`, so destroyed first. `None` on a default boot.
             if let Some(s) = self.sdf_depth_merge_set {
@@ -9664,9 +9974,9 @@ impl GBufferTargets {
             if let Some(h) = self.hzb {
                 h.destroy(ctx);
             }
-            // TAA rung T3: the RCAS descriptor set — acquired LAST (after `taa_resolved`/
-            // `aa_out`/`taa_resolve_set`), so destroyed FIRST here (before everything it reads
-            // from). `Option`-guarded (`None` unless `scene.rcas` was armed).
+            // TAA rung T3: the CAS descriptor set — acquired LAST (after `aa_out`/
+            // `taa_resolve_set`), so destroyed FIRST here (before everything it reads from).
+            // `Option`-guarded (`None` unless `scene.rcas` was armed).
             if let Some(s) = self.rcas_set {
                 for g in s {
                     RhiDevice::destroy_bind_group(ctx, g);
@@ -9688,15 +9998,6 @@ impl GBufferTargets {
             if let Some(r) = self.taa_ubo {
                 for b in r {
                     RhiDevice::destroy_buffer(ctx, b);
-                }
-            }
-            // TAA rung T3: the `taa_resolved` RCAS-intermediate ring — acquired AFTER `taa_hist`
-            // but BEFORE the resolve set/UBOs above (which bind it), so destroyed AFTER those
-            // (above) and BEFORE `taa_hist` (below) — reverse acquisition. `Option`-guarded
-            // (`None` unless `scene.rcas` was armed, or its ring failed to allocate).
-            if let Some(r) = self.taa_resolved {
-                for t in r {
-                    RhiDevice::destroy_texture(ctx, t);
                 }
             }
             // Anti-aliasing Stage 4 (TAA W4): the `taa_hist` history ring — the LAST IMAGE
@@ -9947,9 +10248,12 @@ impl GBufferTargets {
                     RhiDevice::destroy_texture(ctx, t);
                 }
             }
-            // The eight always-present G-buffer image RINGS (pbr → depth), via the `CoreImages`
-            // bundle's reverse-acquisition teardown.
+            // The eight always-present G-buffer image RINGS (pbr → depth) and the post seam's two
+            // singles (`display`, `lit_native`), via the `CoreImages` bundle's reverse-acquisition
+            // teardown.
             CoreImages {
+                display: self.display,
+                lit_native: self.lit_native,
                 depth: self.depth,
                 albedo: self.albedo,
                 normal: self.normal,
@@ -10117,6 +10421,14 @@ impl GBufferFrame {
             .map(|ring| &ring[slot])
     }
 
+    /// Render wave PX1a (D-G5): the fenced `post_final` UBO ring slot the host writes the frame's
+    /// `PostFinalGpu` into (the `post_final` set binds `ubo[fi]` @2). `None` until the targets are
+    /// first synced — frame 0, whose ring the create seeded from the scene's words.
+    #[inline]
+    pub fn post_final_ubo_slot(&self, slot: usize) -> Option<&BoundBuffer> {
+        self.targets.as_ref().and_then(|t| t.post_final.as_ref()).map(|r| &r.ubo[slot])
+    }
+
     /// Anti-aliasing Stage 4 (TAA W5): the fenced TAA tunables UBO ring slot the host memcpys
     /// boyko_render's `ResolvedTaa` into each frame (the resolve set binds
     /// `taa_ubo[fi]` @5). Returns `None` when the targets are not yet synced (frame 0) OR TAA is
@@ -10168,6 +10480,41 @@ impl GBufferFrame {
 /// bit moves no pixel, so no golden sees a leak.
 const fn dump_transfer_src(dump_usage: bool) -> ImageUsage {
     if dump_usage { ImageUsage::TRANSFER_SRC } else { ImageUsage::NONE }
+}
+
+/// The boot-time arming that shapes the targets' usage sets, threaded from
+/// [`Renderer::render_gbuffer_frame`] into [`GBufferTargets::sync_gbuffer`] / `create`. Both fields
+/// are `false` on every production run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) struct TargetsArming {
+    /// OBS (D): the image dump is armed (`TRANSFER_SRC` on the dumped targets, [`dump_transfer_src`]).
+    pub(crate) dump_usage: bool,
+    /// Render wave PX1a (test 12): the `inject_nan_lit` key is armed (`TRANSFER_DST` on `lit`,
+    /// [`nan_inject_transfer_dst`], and the 8-byte NaN source buffer).
+    pub(crate) nan_inject: bool,
+}
+
+/// Render wave PX1a (H4 Scope 3, test 12): the `lit` texel the test-only `test_nan_inject` pass
+/// overwrites — `(8, 8)`, inside every fixture's flat top-left background region.
+pub const NAN_INJECT_TEXEL: [u32; 2] = [8, 8];
+
+/// The injected `LIT_FORMAT` (RGBA16F) texel: a binary16 quiet NaN (`0x7E00`) in R, `1.0`
+/// (`0x3C00`) in G, B and A — 8 bytes (cut PC-PX1a-12).
+pub const NAN_INJECT_TEXEL_BITS: [u16; 4] = [0x7E00, 0x3C00, 0x3C00, 0x3C00];
+
+/// The NaN source buffer's size: one `LIT_FORMAT` texel.
+pub(crate) const NAN_INJECT_SRC_BYTES: u64 = 8;
+const _: () = assert!(
+    matches!(crate::present::image_dump_texel_bytes(LIT_FORMAT.as_i32()), Some(b) if b as u64 == NAN_INJECT_SRC_BYTES),
+    "the injected texel is exactly one LIT_FORMAT texel"
+);
+
+/// Render wave PX1a (H4 Scope 3, test 12): the `TRANSFER_DST` usage the `test_nan_inject` copy
+/// needs on `lit`, added ONLY on a boot that armed the `inject_nan_lit` key — the
+/// [`dump_transfer_src`] idiom, so a production boot creates `lit` with today's usage set (the
+/// zero-cost-off half of the NaN hook; `nan_inject_transfer_dst_adds_nothing_when_unarmed`).
+const fn nan_inject_transfer_dst(armed: bool) -> ImageUsage {
+    if armed { ImageUsage::TRANSFER_DST } else { ImageUsage::NONE }
 }
 
 /// Render wave RD1 (defect R0b): the `SAMPLED` usage the SDF depth merge's
@@ -10272,8 +10619,11 @@ mod tests {
             taa_ubo: None,
             taa_motion_cam_ubo: None,
             taa_resolve_set: None,
-            taa_resolved: None,
             rcas_set: None,
+            display: null_texture(),
+            lit_native: None,
+            post_final: None,
+            nan_inject_src: None,
             aa_arm: AaArm::Off,
             ddgi_update_set: None,
             present_set: bg_ring(),
@@ -10660,8 +11010,11 @@ mod tests {
             taa_ubo: None,
             taa_motion_cam_ubo: None,
             taa_resolve_set: None,
-            taa_resolved: None,
             rcas_set: None,
+            display: null_texture(),
+            lit_native: None,
+            post_final: None,
+            nan_inject_src: None,
             aa_arm: AaArm::Off,
             shadow_vis_resolve_set: shadow_vis_resolve.then(bg_ring),
             shadow_denoised_resolve_set: shadow_denoised_resolve.then(bg_ring),
@@ -10959,6 +11312,29 @@ mod tests {
     fn merge_viewt_sampled_adds_nothing_when_unarmed() {
         assert_eq!(merge_viewt_sampled(false), ImageUsage::NONE, "a default boot keeps viewt's usage set");
         assert_eq!(merge_viewt_sampled(true), ImageUsage::SAMPLED);
+    }
+
+    /// Render wave PX1a (test 12's zero cost off): `lit` gains `TRANSFER_DST` ONLY when the
+    /// `inject_nan_lit` key is armed, and a default arming arms nothing.
+    #[test]
+    fn nan_inject_transfer_dst_adds_nothing_when_unarmed() {
+        assert_eq!(nan_inject_transfer_dst(false), ImageUsage::NONE, "a production boot keeps lit's usage set");
+        assert_eq!(nan_inject_transfer_dst(true), ImageUsage::TRANSFER_DST);
+        assert_eq!(TargetsArming::default(), TargetsArming { dump_usage: false, nan_inject: false });
+    }
+
+    /// The injected texel is a binary16 NaN in R (exponent all ones, mantissa non-zero) and finite
+    /// elsewhere — decoded through `pixfmt` (DS-H4 (a)).
+    #[test]
+    fn the_injected_texel_is_a_binary16_nan_in_red_only() {
+        let mut bytes = [0u8; 8];
+        for (i, w) in NAN_INJECT_TEXEL_BITS.iter().enumerate() {
+            bytes[2 * i..2 * i + 2].copy_from_slice(&w.to_le_bytes());
+        }
+        let t = boyko_shaderdsl::pixfmt::decode_texel(LIT_FORMAT.as_i32() as u32, &bytes)
+            .expect("invariant: 8 bytes are one RGBA16F texel");
+        assert!(t[0].is_nan(), "R is a NaN: {t:?}");
+        assert_eq!([t[1], t[2], t[3]], [1.0, 1.0, 1.0]);
     }
 }
 

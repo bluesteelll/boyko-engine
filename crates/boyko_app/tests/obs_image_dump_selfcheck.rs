@@ -4,9 +4,13 @@
 //! instrument armed per run, and read what it wrote:
 //!
 //! - `obs_image_dump_lit_equals_host_dump`: a Deferred frame with AA off and a material edited
-//!   every frame (so neighbouring frames differ — a ring slot off by one is visible): the `lit`
-//!   dump equals the same frame's `BOYKO_HOST_DUMP` BMP texel for texel, channel order mapped. Two
-//!   runs, because the two instruments are exclusive per run.
+//!   every frame (so neighbouring frames differ — a ring slot off by one is visible): the
+//!   display-referred image equals the same frame's `BOYKO_HOST_DUMP` BMP texel for texel, channel
+//!   order mapped. Two runs, because the two instruments are exclusive per run. Since render wave
+//!   PX1a that image is `display` (`lit` is scene-linear RGBA16F), so the dump run captures
+//!   `lit,display`: `display` equals the host dump exactly, and `lit` — the ring the resolve wrote —
+//!   displays as that same frame through `post_final_eval` within one 8-bit step (the oracle's
+//!   transcendental tolerance; a wrong ring slot is a whole frame's material edit away).
 //! - `obs_image_dump_taa_hist_burst4`: TAA on, `taa_hist` dumped on 4 consecutive frames — four
 //!   files, consecutive frame indices, finite RGBA16F history. The worker is a debug build, so the
 //!   (P) seeded-layout invariant ran on every dump frame and stayed silent (the copy at `GENERAL`
@@ -181,7 +185,7 @@ fn obs_image_dump_lit_equals_host_dump() {
     run_worker(
         "obs_dump_worker",
         &with(deferred_env(false), &[
-            ("BOYKO_IMAGE_DUMP", "lit".to_owned()),
+            ("BOYKO_IMAGE_DUMP", "lit,display".to_owned()),
             ("BOYKO_IMAGE_DUMP_PATH", dir.display().to_string()),
             ("BOYKO_IMAGE_DUMP_SETTLE", SETTLE.to_string()),
         ]),
@@ -196,30 +200,71 @@ fn obs_image_dump_lit_equals_host_dump() {
         ]),
         false,
     );
-    let files = files_of(&dir, "lit");
-    assert_eq!(files.len(), 1, "one lit capture expected, found {files:?}");
-    let lit = DumpFile::load(&files[0].1);
+    let files = files_of(&dir, "display");
+    assert_eq!(files.len(), 1, "one display capture expected, found {files:?}");
+    let display = DumpFile::load(&files[0].1);
     let (bw, bh, host) = read_bmp(&bmp);
-    assert!(bw >= lit.width && bh >= lit.height, "the swapchain {bw}x{bh} is smaller than lit {}x{}", lit.width, lit.height);
+    assert!(
+        bw >= display.width && bh >= display.height,
+        "the swapchain {bw}x{bh} is smaller than display {}x{}",
+        display.width,
+        display.height
+    );
     let mut diffs = 0u64;
     let mut first = None;
-    for y in 0..lit.height {
-        for x in 0..lit.width {
+    for y in 0..display.height {
+        for x in 0..display.width {
             let d = ((y * bw + x) * 4) as usize;
             let want = [host[d], host[d + 1], host[d + 2]];
-            let got = lit.rgba8(x, y);
+            let got = display.rgba8(x, y);
             if [got[0], got[1], got[2]] != want {
                 diffs += 1;
                 first.get_or_insert((x, y, got, want));
             }
         }
     }
-    eprintln!("lit dump frame {} {}x{} vs host dump {bw}x{bh}: {diffs} differing texels", lit.frame, lit.width, lit.height);
+    eprintln!(
+        "display dump frame {} {}x{} vs host dump {bw}x{bh}: {diffs} differing texels",
+        display.frame, display.width, display.height
+    );
     assert_eq!(
         diffs, 0,
-        "the lit dump differs from the same frame's presented image in {diffs} texels (first at {first:?} as \
-         (x, y, dumped rgba, presented rgb)) — a wrong ring slot, row pitch or channel order"
+        "the display dump differs from the same frame's presented image in {diffs} texels (first at {first:?} as \
+         (x, y, dumped rgba, presented rgb)) — a wrong row pitch or channel order"
     );
+
+    // The `lit` ring slot: the same frame's scene-linear `lit`, displayed through the traced
+    // `post_final` body (ACES, exposure ratio 1 — the OBS scene's defaults), is `display`.
+    let files = files_of(&dir, "lit");
+    assert_eq!(files.len(), 1, "one lit capture expected, found {files:?}");
+    let lit = DumpFile::load(&files[0].1);
+    assert_eq!((lit.frame, lit.width, lit.height), (display.frame, display.width, display.height), "lit and display: one frame, one extent");
+    let mut words = [0u32; 8];
+    words[boyko_shaderdsl::post::ubo_word("exposure_ratio")] = 1.0f32.to_bits();
+    words[boyko_shaderdsl::post::ubo_word("extent")] = 1;
+    words[boyko_shaderdsl::post::ubo_word("extent") + 1] = 1;
+    let params = boyko_shaderdsl::post::eval_params(words);
+    let mut off = 0u64;
+    let mut worst = (0u8, (0, 0));
+    for y in 0..lit.height {
+        for x in 0..lit.width {
+            let texel = [lit.texel_f32(x, y)];
+            let o = boyko_shaderdsl::post::post_final_eval([0, 0], &params, boyko_shaderdsl::cf::HostTex2::new(&texel, 1, 1));
+            let shown = display.rgba8(x, y);
+            for (&v, &s) in o[..3].iter().zip(&shown[..3]) {
+                let want = (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                let d = want.abs_diff(s);
+                if d > worst.0 {
+                    worst = (d, (x, y));
+                }
+                if d > 1 {
+                    off += 1;
+                }
+            }
+        }
+    }
+    eprintln!("lit through post_final_eval vs display: worst {} LSB at {:?}, {off} channels above 1 LSB", worst.0, worst.1);
+    assert_eq!(off, 0, "the lit dump is not the frame display shows (worst {} LSB at {:?}) — a wrong ring slot", worst.0, worst.1);
 }
 
 #[test]

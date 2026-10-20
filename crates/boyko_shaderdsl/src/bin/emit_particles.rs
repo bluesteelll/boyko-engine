@@ -1353,8 +1353,8 @@ fn build_sort_hist() -> String {
 //
 // # THE SUBJECT IS THE ALPHA CLASS ONLY, and that is structural rather than an optimisation
 //
-// The additive class is COMMUTATIVE -- `ONE/ONE` under the 8-bit saturation `lit` imposes gives
-// `sat(sat(x) + y) = min(1, x + y)`, which is order-independent (plan D10, research fact R5) -- so
+// The additive class is COMMUTATIVE -- `ONE/ONE` into the float `lit` (RGBA16F since PX1a) is
+// order-free up to one binary16 ULP of rounding per add (plan D10, research fact R5) -- so
 // it needs no sort and is not given one. This pass never touches `p_render[0, additive.count)`.
 // The alpha class occupies `p_render[capacity - alpha.count, capacity)`, class-dense and
 // DESCENDING (rank `i` at `capacity - 1 - i`), which is what the sim's mirrored render index wrote.
@@ -1714,11 +1714,25 @@ fn vs_out_struct() -> &'static str {
      };\n"
 }
 
+/// The draw push block both stages declare — ONE printed text, so the VERTEX and FRAGMENT halves
+/// cannot disagree on an offset (`boyko_rhi_vulkan::compute::PARTICLE_DRAW_PUSH_BYTES` = 76; the
+/// pipeline's range is `VERTEX | FRAGMENT`, `compute::PARTICLE_DRAW_PUSH_STAGES`).
+fn draw_push_struct() -> &'static str {
+    "struct ParticleDrawPush {\n\
+     \x20   float4x4 view_proj;\n\
+     \x20   uint     index_base;\n\
+     \x20   int      index_step;\n\
+     \x20   float    pre_exposure;\n\
+     };\n\
+     [[vk::push_constant]] ParticleDrawPush pc;\n"
+}
+
 /// Assembles `particle_draw.vs.hlsl` — plan A5's vertex half: a sequential render-record read and
 /// the trig-free billboard expansion.
 fn build_draw_vs() -> String {
     let render_rec = particle_render_struct();
     let vs_out = vs_out_struct();
+    let push_struct = draw_push_struct();
     let corner = emit::emit_hlsl_particle_billboard_corner();
     format!(
         r#"// particle_draw.vs -- the GPU particle system's BILLBOARD EXPANSION
@@ -1771,19 +1785,14 @@ fn build_draw_vs() -> String {
 //   (1, *, ...)                                               the bindless texture set the
 //                                                             FRAGMENT half declares
 //
-// # Push constants (72 B, VERTEX stage; the graphics range is separate from the shared COMPUTE one)
+// # Push constants (76 B, VERTEX | FRAGMENT; the graphics range is separate from the shared COMPUTE one)
 //
-//   [0,64)   float4x4 view_proj   -- the path's own view-projection rows
-//   [64,68)  uint     index_base  -- 0 at P0 (additive); CAP-1 for P2's alpha slot
-//   [68,72)  int      index_step  -- +1 at P0 (additive); -1 for P2's alpha slot
+//   [0,64)   float4x4 view_proj     -- the path's own view-projection rows
+//   [64,68)  uint     index_base    -- 0 at P0 (additive); CAP-1 for P2's alpha slot
+//   [68,72)  int      index_step    -- +1 at P0 (additive); -1 for P2's alpha slot
+//   [72,76)  float    pre_exposure  -- render wave PX1a E1: the frame's pre-exposure, read by the FS
 
-struct ParticleDrawPush {{
-    float4x4 view_proj;
-    uint     index_base;
-    int      index_step;
-}};
-[[vk::push_constant]] ParticleDrawPush pc;
-
+{push_struct}
 {render_rec}
 [[vk::binding(0, 0)]] StructuredBuffer<ParticleRender> p_render : register(t0);
 
@@ -1865,6 +1874,7 @@ VsOut main(uint vid : SV_VertexID, uint iid : SV_InstanceID) {{
 /// composited additively by the pipeline's blend state.
 fn build_draw_fs() -> String {
     let vs_out = vs_out_struct();
+    let push_struct = draw_push_struct();
     format!(
         r#"// particle_draw.fs -- the GPU particle system's FRAGMENT half
 // (`docs/PARTICLES-PLAN.md` Rev 4, algorithm A5). Unlit, additive, bindless-textured.
@@ -1875,9 +1885,17 @@ fn build_draw_fs() -> String {
 // # Additive is a PIPELINE state, not shader code
 //
 // The blend is `BlendState::ADDITIVE` on the pipeline (plan D7) with `depth_write = OFF` and
-// `depth_test = ON`, so opaque geometry still occludes. Additive is commutative and, under the
-// 8-bit saturation `lit` imposes, `sat(sat(x)+y) = min(1, x+y)` is order-independent -- which is
-// why P0 ships UNSORTED, provably (plan D10).
+// `depth_test = ON`, so opaque geometry still occludes. Additive is commutative, and since render
+// wave PX1a `lit` is RGBA16F with no saturation: a different draw order changes the sum only at
+// the rounding level, at most one binary16 ULP per add (the attachment's measured blend error,
+// `goldens::RGBA16F_ROUNDING`) -- which is why P0 ships UNSORTED (plan D10).
+//
+// # Pre-exposed like every `lit` producer (render wave PX1a E1)
+//
+// `lit` holds pre-exposed scene-linear radiance, so the particle's colour is multiplied by the
+// frame's pre-exposure (`pc.pre_exposure`, the push block's last word) before the blend, after the
+// texture modulate; alpha is untouched. Both blend classes then composite radiance in the scene's
+// own exposure.
 //
 // # Bindless, so ONE draw covers every effect
 //
@@ -1932,10 +1950,11 @@ fn build_draw_fs() -> String {
 //
 //   Set 0 is the VERTEX half's (`p_render` @0, `Camera` @1) -- declared there, unread here.
 //
-// # Push constants
+// # Push constants (76 B, the SAME block the VS declares; the range is VERTEX | FRAGMENT)
 //
-//   NONE in this stage. The 72-byte range the VS declares is VERTEX-only.
+//   This stage reads only `pre_exposure` ([72,76)).
 
+{push_struct}
 [[vk::binding(0, 1)]] Texture2D gTextures[] : register(t0, space1);
 [[vk::binding(1, 1)]] SamplerState gTexSampler : register(s0, space1);
 
@@ -1961,6 +1980,7 @@ float4 main(VsOut input) : SV_Target {{
     if (input.tex_index != 0u) {{
         c = c * gTextures[NonUniformResourceIndex(input.tex_index)].Sample(gTexSampler, input.uv);
     }}
+    c.rgb *= pc.pre_exposure;
 #ifdef DEPTH_LINEAR
     PsOut o;
     o.color = c;

@@ -12,7 +12,8 @@
 //! This file boots NO Vulkan context — it is a pure host-math regression the developer
 //! runs as part of the non-GPU gate (the GPU golden runs separately on the 3060).
 
-use boyko_rhi_vulkan::compute::{pack_rgba, PBR_SKY_DIFFUSE};
+use boyko_rhi_vulkan::compute::PBR_SKY_DIFFUSE;
+use boyko_rhi_vulkan::present::LIT_BACKGROUND_SCENE;
 use boyko_rhi_vulkan::goldens::{golden_deferred_resolve, golden_deferred_resolve_table, GoldenLight, GoldenLightHeader, GoldenMaterial, MarcherAttributes};
 
 /// The ray origin passed on the L0a-only path: point/spot lights are absent, so the
@@ -31,10 +32,10 @@ fn degenerate_table(exposure: f32) -> (GoldenLightHeader, Vec<GoldenLight>) {
 }
 
 /// A table with NO sky light — a single directional in the L0a block, optionally one punctual.
-/// The mask == 0 background arm then takes its `pack_rgba(base)` pass-through branch (there is no
-/// SKY entry to paint), whatever the exposure or the punctual light: the resolve's
-/// `golden_sky_background(..).unwrap_or_else(|| pack_rgba(base))` returns `None` when the scanned
-/// L0a lights carry no `GOLDEN_LIGHT_KIND_SKY` entry.
+/// The mask == 0 background arm then stores the scene-linear background constant (there is no SKY
+/// entry to paint), whatever the exposure or the punctual light: the resolve's
+/// `golden_sky_background(..).unwrap_or(LIT_BACKGROUND_SCENE)` takes the constant when the scanned
+/// L0a lights carry no `GOLDEN_LIGHT_KIND_SKY` entry (render wave PX1a D-S3, ruling 67 W4).
 fn no_sky_table(exposure: f32, with_punctual: bool) -> (GoldenLightHeader, Vec<GoldenLight>) {
     let mut lights = vec![GoldenLight::directional([0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 1.0)];
     let punctual = if with_punctual { 1 } else { 0 };
@@ -104,7 +105,7 @@ fn degenerate_table_is_byte_identical_to_the_constant_path() {
                 let got = golden_deferred_resolve_table(a, RO_ZERO, rd, &mats, &header, &lights);
                 assert_eq!(
                     got, want,
-                    "L0a 0%-gate: table path 0x{got:08X} != constant path 0x{want:08X} \
+                    "L0a 0%-gate: table path {got:?} != constant path {want:?} \
                      (mask={}, shadow={}, ao={}, mat={mid})",
                     a.mask, a.shadow, a.ao
                 );
@@ -153,17 +154,19 @@ fn exposure_above_one_brightens_a_lit_pixel() {
     let (h2, l2) = degenerate_table(4.0);
     let base = golden_deferred_resolve_table(attrs, RO_ZERO, rd, &mats, &h1, &l1);
     let bright = golden_deferred_resolve_table(attrs, RO_ZERO, rd, &mats, &h2, &l2);
-    // A lit pixel below saturation gets brighter under exposure 4× (or clamps to white).
-    assert!(bright != base || base == 0x00FF_FFFF, "exposure must affect the lit pixel");
+    // Render wave PX1a: the oracle returns scene-linear radiance (no tonemap, no 8-bit clamp),
+    // so exposure 4× brightens every channel of a lit pixel.
+    assert!((0..3).all(|c| bright[c] > base[c]), "exposure must brighten the lit pixel: {base:?} -> {bright:?}");
 }
 
 #[test]
-fn mask_zero_renders_sky_when_present_else_passes_base_through() {
-    // The post-PBR (commit 8e48f7f) contract for the mask == 0 background arm, mirroring
-    // `deferred_pbr.hlsl`'s `if (has_sky) { sky } else { lit = base; }`:
-    //   * NO sky light in the scanned L0a block → pass `base` through UNCHANGED, invariant to
-    //     the directional/punctual lights AND to `header.exposure` (this arm consumes none of
-    //     them — `golden_sky_background` returns `None`, and `pack_rgba(base)` is unscaled).
+fn mask_zero_renders_sky_when_present_else_stores_the_background_constant() {
+    // The contract for the mask == 0 background arm, mirroring `deferred_pbr.hlsl`'s
+    // `if (has_sky) { sky } else { lit = LIT_BACKGROUND_SCENE; }` (render wave PX1a D-S3; before
+    // PX1a the else arm passed the 8-bit `base` through — ruling 67 W4 re-aims the oracle):
+    //   * NO sky light in the scanned L0a block → the scene-linear background constant, invariant
+    //     to `base`, the directional/punctual lights AND `header.exposure` (this arm consumes none
+    //     of them — `golden_sky_background` returns `None`, and the constant is unscaled).
     //   * a sky light present → paint the analytic sky (scaled by `header.exposure`), NOT `base`.
     //
     // This SUPERSEDES the pre-PBR `mask_zero_passes_base_through_under_any_table`, whose premise
@@ -181,26 +184,25 @@ fn mask_zero_renders_sky_when_present_else_passes_base_through() {
         view_t: 1.0e30,
     };
     let rd = [0.0, 0.0, -1.0];
-    // The exact bytes the no-sky arm produces: `pack_rgba(attrs.base_rgb / 255)` — computed the
-    // SAME way the resolve computes its `base`, so this is a byte-identity reference, not a proxy.
-    let base_linear = [
+    // The pre-PX1a pass-through (`base` decoded as the resolve decodes it), kept as the value the
+    // arm must NO LONGER return.
+    let base_passthrough = [
         attrs.base_rgb[0] as f32 / 255.0,
         attrs.base_rgb[1] as f32 / 255.0,
         attrs.base_rgb[2] as f32 / 255.0,
     ];
-    let base_passthrough = pack_rgba(base_linear);
 
-    // (1) No sky light: `base` passes through unchanged, whatever the exposure or punctual light.
+    // (1) No sky light: the background constant, whatever the exposure or punctual light.
     for exposure in [1.0_f32, 4.0, 7.0] {
         for &with_punctual in &[false, true] {
             let (header, lights) = no_sky_table(exposure, with_punctual);
             let got = golden_deferred_resolve_table(attrs, RO_ZERO, rd, &mats, &header, &lights);
             assert_eq!(
-                got, base_passthrough,
-                "mask == 0 with NO sky light must pass base through unchanged \
-                 (exposure={exposure}, punctual={with_punctual}): got 0x{got:08X} \
-                 != 0x{base_passthrough:08X}"
+                got, LIT_BACKGROUND_SCENE,
+                "mask == 0 with NO sky light must store the background constant \
+                 (exposure={exposure}, punctual={with_punctual}): got {got:?}"
             );
+            assert_ne!(got, base_passthrough, "the no-sky arm must not pass base through");
         }
     }
 
@@ -212,6 +214,6 @@ fn mask_zero_renders_sky_when_present_else_passes_base_through() {
     assert_ne!(
         sky, base_passthrough,
         "a sky light must paint the analytic sky over the mask == 0 arm, not pass base through \
-         (0x{sky:08X})"
+         ({sky:?})"
     );
 }

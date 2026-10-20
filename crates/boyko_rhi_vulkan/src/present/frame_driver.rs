@@ -102,6 +102,11 @@ pub struct Renderer<'ctx> {
     /// [`arm_image_dump`](Self::arm_image_dump) (boot, armed runs only); holds this frame's request
     /// and what the recorder copied. `None` in every shipped run: one branch per frame.
     pub(crate) image_dump: Option<ImageDumpArm>,
+    /// Render wave PX1a (H4 Scope 3, test 12): the engine frame (`GBufferScene::engine_frame_index`)
+    /// the test-only `test_nan_inject` pass is declared and recorded on — `Some` only after
+    /// [`arm_nan_inject`](Self::arm_nan_inject) (boot, the `inject_nan_lit` force key). `None` in
+    /// every shipped run: no pass, no `TRANSFER_DST` on `lit`, no source buffer.
+    pub(crate) nan_inject_at: Option<u32>,
 }
 
 impl<'ctx> Renderer<'ctx> {
@@ -270,7 +275,23 @@ impl<'ctx> Renderer<'ctx> {
             obs_dump_widen: false,
             receipt: None,
             image_dump: None,
+            nan_inject_at: None,
         })
+    }
+
+    /// Render wave PX1a (H4 Scope 3, test 12): arms the TEST-ONLY NaN injection — the targets
+    /// created from now on give `lit` `TRANSFER_DST` and build the 8-byte NaN source, and the
+    /// `test_nan_inject` pass is declared and recorded on engine frame `at_frame` only (after the
+    /// last `lit` producer, before the transparent slot). Cold — called once, before the first
+    /// frame (the targets are created on the first frame), only under the `inject_nan_lit` key.
+    #[cold]
+    #[inline(never)]
+    pub fn arm_nan_inject(&mut self, at_frame: u32) {
+        debug_assert_eq!(
+            self.submission_epoch, 0,
+            "invariant: the NaN injection is armed before the first frame creates the targets"
+        );
+        self.nan_inject_at = Some(at_frame);
     }
 
     /// OBS (D): arms the `BOYKO_IMAGE_DUMP` instrument — the boot decisions H0 Scope 6 names:
@@ -889,13 +910,17 @@ impl<'ctx> Renderer<'ctx> {
     /// dispatched at (the clamped swapchain extent the caller sized `frame`'s targets
     /// + `scene.camera_uniform` + `scene.dispatch_group_count_x` to).
     ///
-    /// `aa_extent` (SSAA) is the BOOT-FIXED native extent `aa_out` is sized to under
-    /// `AaMode::Ssaa` (`host.native_extent`, NOT the live `width`/`height` — which track
-    /// window resizes while the swapchain-only resize contract leaves `aa_out` fixed,
-    /// exactly like `present_extent` already stays fixed under a resize). For
-    /// Off/Fxaa/Smaa this SHOULD equal `present_extent` (byte-identical to before SSAA
-    /// existed); the caller is responsible for that equality (this fn does not enforce
-    /// it, since `aa_extent` is read only when `scene.ssaa.is_some()`).
+    /// `aa_extent` is the BOOT-FIXED extent `display` is allocated at (`WindowHost::display_extent`,
+    /// NOT the live `width`/`height` — which track window resizes while the swapchain-only resize
+    /// contract leaves these targets fixed, exactly like `present_extent` already stays fixed
+    /// under a resize). Since render wave PX1a it is read on EVERY frame of every path: `display`
+    /// (and `aa_out`, `lit_native`, `taa_hist`) is allocated at it, and every recorder dispatches
+    /// `post_final` and copies a `display` dump over it. It is the native extent, below
+    /// `present_extent` (the 2x composite), exactly on a frame that runs the SSAA downsample
+    /// (`scene.ssaa`: Deferred / VB under a boot-armed SSAA), and equals `present_extent` on every
+    /// other frame: `post_final` reads `lit` texel for texel, so on Forward / ForwardPlus, which
+    /// degrade the SSAA pass but keep the boot-fixed composite, a native `display` held the
+    /// scene's top-left quarter (review r2 R2-W1; `GBufferTargets::create` asserts the rule).
     ///
     /// `token` is this frame's [`FrameWriteToken`] (minted by
     /// [`wait_frame_in_flight`](Self::wait_frame_in_flight)), consumed BY VALUE:
@@ -972,6 +997,9 @@ impl<'ctx> Renderer<'ctx> {
         // before the closure borrows `self`. No test sees this line: an unarmed run that passed
         // `true` would ship the usage bit with every gate green (see `dump_transfer_src`'s doc).
         let dump_usage = self.image_dump.is_some();
+        // Render wave PX1a (test 12): the armed-only `TRANSFER_DST` on `lit` and the NaN source,
+        // read here for the same reason (`false` on every shipped run).
+        let nan_inject_armed = self.nan_inject_at.is_some();
         // Thin adapter over the shared [`drive_frame`](Self::drive_frame) skeleton, with
         // `frame` (the G-buffer targets) threaded as the payload: pre-record syncs the
         // targets, the record body re-declares the whole-frame graph then records the
@@ -1001,10 +1029,11 @@ impl<'ctx> Renderer<'ctx> {
                 // sibling slots. (The first call creates them.) The descriptor sets are
                 // written ONCE per composite extent.
                 |_this, frame| {
-                    // SSAA: `aa_out` is sized to the caller-supplied `aa_extent` (BOOT-FIXED
-                    // native, not `present_extent` — 2× under SSAA) — see
-                    // `GBufferTargets::sync_gbuffer`'s doc. For Off/Fxaa/Smaa,
-                    // `aa_extent == present_extent` (byte-identical to before SSAA existed).
+                    // `display` / `aa_out` / `lit_native` / `taa_hist` are sized to the
+                    // caller-supplied `aa_extent` (BOOT-FIXED: native on a frame that runs the
+                    // SSAA downsample, where `present_extent` is the 2× composite, and
+                    // `== present_extent` on every other frame) — see
+                    // `GBufferTargets::sync_gbuffer`'s doc.
                     // Multi-paradigm render-path plan, rung R2: `TargetsProfile::from_scene`
                     // derives the (today: always-`DeferredFull`) profile the R3+ path-conditional
                     // allocation seam threads through.
@@ -1015,7 +1044,7 @@ impl<'ctx> Renderer<'ctx> {
                         present_extent,
                         aa_extent,
                         TargetsProfile::from_scene(scene),
-                        dump_usage,
+                        super::targets::TargetsArming { dump_usage, nan_inject: nan_inject_armed },
                     )
                 },
                 |this, frame, cmd, image, view, extent| {
@@ -1028,11 +1057,12 @@ impl<'ctx> Renderer<'ctx> {
                     // render-path plan, rung R2: dispatches through `declare_frame_graph`,
                     // which selects the per-path declarator from `scene.resolved_render_path
                     // .path` (today: always the `Deferred` arm, `declare_deferred_graph`).
-                    this.declare_frame_graph(scene);
-
                     let targets = frame.targets.as_ref().expect(
                         "invariant: sync_gbuffer made the targets present before record",
                     );
+                    // Review r1 W1: the declaration reads THESE targets' TAA history, so a
+                    // degraded history declares (and the recorders record) the TAA-off frame.
+                    this.declare_frame_graph(scene, targets.taa_history_built());
 
                     // Multi-paradigm render-path plan, rung R4b-b: mirrors
                     // `declare_frame_graph`'s dispatch (`scene.path_is_forward()` is the SAME
@@ -1087,6 +1117,7 @@ impl<'ctx> Renderer<'ctx> {
                             view,
                             extent,
                             present_extent,
+                            aa_extent,
                             clear,
                             scene,
                             targets,
@@ -1401,10 +1432,22 @@ pub const RECEIPT_CONFIG_KEYS: [&str; RECEIPT_CONFIG_LEN] = [
     // Render wave PX0 (D-F1): the classified VB producer and the light table's SKY row.
     "vb_classified",
     "light_sky",
+    // Render wave PX1a (D-O3, DS-H4 (c)): `post_final`'s eight constant-buffer words
+    // (`GBufferScene::post_final_words`), spelled here because no production crate of this lane
+    // depends on `boyko_shaderdsl`; `tests/post_final_wiring.rs` holds them equal to
+    // `boyko_shaderdsl::post::POST_FINAL_RECEIPT_KEYS`.
+    "post_word0",
+    "post_word1",
+    "post_word2",
+    "post_word3",
+    "post_word4",
+    "post_word5",
+    "post_word6",
+    "post_word7",
 ];
 
 /// How many `[config]` entries a receipt carries (the length of [`RECEIPT_CONFIG_KEYS`]).
-pub const RECEIPT_CONFIG_LEN: usize = 48;
+pub const RECEIPT_CONFIG_LEN: usize = 56;
 
 /// One frame's `[config]` values, index for index with [`RECEIPT_CONFIG_KEYS`] (`bool`s as 0/1).
 /// POD: a burst copies one per presented frame.
@@ -1436,6 +1479,7 @@ impl ReceiptConfig {
             (scene.path_vb_hwrt_shadow(), scene.tlas.is_some(), scene.shadow.is_some());
         #[cfg(not(feature = "hwrt"))]
         let (vb_hwrt_shadow, tlas, shadow_vis) = (false, false, false);
+        let w = scene.post_final_words;
         let values = [
             rp.path,
             rp.legs,
@@ -1490,6 +1534,14 @@ impl ReceiptConfig {
             u32::from(scene.hzb_dump_declared()),
             u32::from(scene.path_vb_fused() && scene.vb_use_classified),
             u32::from(scene.light_sky),
+            w[0],
+            w[1],
+            w[2],
+            w[3],
+            w[4],
+            w[5],
+            w[6],
+            w[7],
         ];
         Self { values }
     }
@@ -1582,15 +1634,32 @@ pub enum ImageDumpName {
     ForwardDepth = 4,
     /// VB `vb_depth` (D32 reverse-Z).
     VbDepth = 5,
+    /// Render wave PX1a: `display` — `post_final`'s `R8G8B8A8_UNORM` output (every path).
+    Display = 6,
+    /// Render wave PX1a: `lit_native` — the SSAA downsample's output in `lit`'s format (Deferred
+    /// and VB, under SSAA).
+    LitNative = 7,
 }
 
 /// How many [`ImageDumpName`]s exist.
-pub const IMAGE_DUMP_MAX: usize = 6;
+pub const IMAGE_DUMP_MAX: usize = 8;
+
+// `declare_image_dump` and `ImageDumpPlan` carry the requested names as the bits of a `u8`
+// (`1 << name`): a ninth name would overflow the shift (critique O3).
+const _: () = assert!(IMAGE_DUMP_MAX <= 8, "a dump name past bit 7 overflows the u8 name mask");
 
 impl ImageDumpName {
     /// Every name, index for index with `name as usize`.
-    pub const ALL: [Self; IMAGE_DUMP_MAX] =
-        [Self::DeferredDepth, Self::Viewt, Self::Lit, Self::TaaHist, Self::ForwardDepth, Self::VbDepth];
+    pub const ALL: [Self; IMAGE_DUMP_MAX] = [
+        Self::DeferredDepth,
+        Self::Viewt,
+        Self::Lit,
+        Self::TaaHist,
+        Self::ForwardDepth,
+        Self::VbDepth,
+        Self::Display,
+        Self::LitNative,
+    ];
 
     /// The literal graph name — the env word and the dump file's stem.
     pub const fn graph_name(self) -> &'static str {
@@ -1601,6 +1670,8 @@ impl ImageDumpName {
             Self::TaaHist => "taa_hist",
             Self::ForwardDepth => "forward_depth",
             Self::VbDepth => "vb_depth",
+            Self::Display => "display",
+            Self::LitNative => "lit_native",
         }
     }
 
@@ -1615,15 +1686,25 @@ impl ImageDumpName {
     }
 
     /// The bytes per texel the instrument sizes this name's staging for: 8 for `taa_hist`
-    /// (RGBA16F), 4 for every other name. The recorder re-bounds every copy against the texel
-    /// size of the image's actual format, so a format change can only skip a copy, never overrun.
+    /// (RGBA16F), `LIT_FORMAT`'s texel for `lit` and `lit_native` (render wave PX1a D-O2: derived
+    /// from the format, never a literal — a staging smaller than the image's texel makes the
+    /// recorder skip the copy, which would leave every (D) gate on `lit` vacuous), 4 for every
+    /// other name. The recorder re-bounds every copy against the texel size of the image's actual
+    /// format, so a format change can only skip a copy, never overrun.
     pub const fn staging_texel_bytes(self) -> u64 {
         match self {
             Self::TaaHist => 8,
+            Self::Lit | Self::LitNative => LIT_TEXEL_BYTES,
             _ => 4,
         }
     }
 }
+
+/// `LIT_FORMAT`'s texel size, as the image dump stages it.
+const LIT_TEXEL_BYTES: u64 = match image_dump_texel_bytes(super::targets::LIT_FORMAT.as_i32()) {
+    Some(b) => b as u64,
+    None => panic!("invariant: the image dump decodes LIT_FORMAT"),
+};
 
 /// The texel size of a `VkFormat` the image dump can copy, or `None` for a format it does not
 /// decode (the copy is then skipped and reported as not copied).

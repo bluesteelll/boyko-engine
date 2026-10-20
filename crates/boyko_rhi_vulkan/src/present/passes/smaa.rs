@@ -25,7 +25,7 @@ impl Renderer<'_> {
     /// masks (`TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT` in, `COLOR_ATTACHMENT_OUTPUT→
     /// FRAGMENT_SHADER` out) on all 6 barriers.
     ///
-    /// `lit[fi]` needs NO barrier here (RAR; the `present_sample` graph pass recorded
+    /// `display` needs NO barrier here (RAR; the `present_sample` graph pass recorded
     /// immediately before this call already left it `SHADER_READ_ONLY_OPTIMAL`, and this
     /// pass's passes 1 + 3 read it). `area_tex`/`search_tex` need NO barrier (boot-permanent
     /// `SHADER_READ_ONLY_OPTIMAL`).
@@ -103,7 +103,7 @@ impl Renderer<'_> {
             extent: present_extent,
         };
 
-        // --- Pass 1: edge detection. lit[fi] -> edges[fi]. CLEAR (Decision 4 — the PS
+        // --- Pass 1: edge detection. display -> edges[fi]. CLEAR (Decision 4 — the PS
         // `discard`s non-edge texels, so an unwritten prior-frame texel must not leak into
         // pass 2's read). ---
         // SAFETY (the three PX0 brackets below): recording is open (this fn's contract), outside
@@ -144,7 +144,7 @@ impl Renderer<'_> {
         // SAFETY: recording is open; `edge_rendering`'s color attachment names the live
         // `edges[fi]` view (now COLOR_ATTACHMENT_OPTIMAL); dynamic rendering is enabled on
         // this device. `activation.edge_pipeline` + its layout (`scene.present_layout`)
-        // belong to this device (caller contract); `edge_set[fi]` binds `lit[fi]` (already
+        // belong to this device (caller contract); `edge_set[fi]` binds `display` (already
         // SHADER_READ_ONLY_OPTIMAL) + `activation.sampler` at set 0. `rt_metrics` covers the
         // pipeline's whole 16-byte push range and is pushed with its `push_stages`, the range's
         // own stage flags (VUID-01796).
@@ -270,7 +270,7 @@ impl Renderer<'_> {
         // `zone`'s pool-reset/seal contract is the caller's; an end takes its own begin's pair.
         let blend_pair = unsafe { zone.begin(self.fns, cmd, ZONE_POST_SMAA_BLEND) };
 
-        // --- Pass 3: neighborhood blending. lit[fi] + weights[fi] -> aa_out[fi]. DONT_CARE
+        // --- Pass 3: neighborhood blending. display + weights[fi] -> aa_out[fi]. DONT_CARE
         // (every texel is written unconditionally — the FXAA precedent). ---
         // SAFETY: same reasoning as `record_fxaa`'s single in-barrier, on the live
         // `aa_out[fi]` texture.
@@ -302,7 +302,7 @@ impl Renderer<'_> {
             p_stencil_attachment: ptr::null(),
         };
         // SAFETY: same reasoning as pass 1/2's render brackets; `blend_set[fi]` binds
-        // `lit[fi]` (SHADER_READ_ONLY_OPTIMAL, RAR) + `weights[fi]` (now
+        // `display` (SHADER_READ_ONLY_OPTIMAL, RAR) + `weights[fi]` (now
         // SHADER_READ_ONLY_OPTIMAL) + `activation.sampler` at set 0 of
         // `activation.blend_layout`.
         unsafe {

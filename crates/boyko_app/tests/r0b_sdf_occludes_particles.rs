@@ -37,7 +37,7 @@ mod r0b_scene;
 use boyko_render::{GeometryLegs, RenderPath};
 
 use graph_receipt::{fresh_out, run_worker};
-use image_dump::{DumpFile, VK_R8G8B8A8_UNORM, files_of};
+use image_dump::{DumpFile, VK_R16G16B16A16_SFLOAT, files_of};
 use r0b_scene::{
     ENV_EMIT, ENV_LEGS, ENV_PATH, ENV_TEST_FORCE, R0bArming, Rect, WIN, assert_r0b_resolved,
     build_r0b_app, control_window, occluded_window,
@@ -114,13 +114,14 @@ fn lit_of(path: RenderPath, legs: GeometryLegs, emit: &str, force: &str, tag: &s
     let files = files_of(&dir, "lit");
     assert_eq!(files.len(), 1, "one `lit` capture expected ({tag}): {files:?}");
     let d = DumpFile::load(&files[0].1);
-    assert_eq!((d.format, d.width, d.height), (VK_R8G8B8A8_UNORM, WIN, WIN), "the `lit` dump's header ({tag})");
+    // `lit` is the HDR scene colour since render wave PX1a (`LIT_FORMAT`, RGBA16F).
+    assert_eq!((d.format, d.width, d.height), (VK_R16G16B16A16_SFLOAT, WIN, WIN), "the `lit` dump's header ({tag})");
     d
 }
 
 /// How many pixels of `rect` differ between `a` and `b`.
 fn differing(a: &DumpFile, b: &DumpFile, rect: Rect) -> usize {
-    rect.pixels().filter(|&(x, y)| a.rgba8(x, y) != b.rgba8(x, y)).count()
+    rect.pixels().filter(|&(x, y)| a.texel_f32(x, y).map(f32::to_bits) != b.texel_f32(x, y).map(f32::to_bits)).count()
 }
 
 /// G18 on one path / leg set (the module doc's three runs and three clauses).

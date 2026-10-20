@@ -28,7 +28,7 @@ use boyko_rhi_vulkan::ffi::{
 use boyko_rhi_vulkan::framegraph::{FrameGraph, ResId, ResSync, SeedClass, SubRange};
 use boyko_rhi_vulkan::present::seed_class::{
     class_table_violation, declarator_name, ClassRule, SeedClassRow, SeedKind, DECLARATORS,
-    DECL_ALL, SEED_CLASS_TABLE,
+    DECL_ALL, LANDED_OFF_MAX_CONFIG, SEED_CLASS_TABLE,
 };
 
 /// One frame of `declarator` declaring `row`'s name through `declare`, written once (so the
@@ -251,7 +251,13 @@ fn rows_are_unique_per_declarator_and_wave_rows_cover_every_declarator() {
             a.name
         );
         assert_ne!(a.declarators & DECL_ALL, 0, "'{}': an empty declarator mask", a.name);
-        if !a.expect_present && a.owner != "HEAD" {
+        if LANDED_OFF_MAX_CONFIG.contains(&a.name) {
+            assert!(
+                !a.expect_present && a.seed_stages_min != 0,
+                "'{}': a landed row off the max config keeps expect_present false and names its stages",
+                a.name
+            );
+        } else if !a.expect_present && a.owner != "HEAD" {
             assert_eq!(a.declarators, DECL_ALL, "'{}': a pre-registered row carries the all-declarators mask", a.name);
         }
         for b in &SEED_CLASS_TABLE[i + 1..] {

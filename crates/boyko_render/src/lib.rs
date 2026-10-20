@@ -610,8 +610,8 @@ pub use light::{
 };
 pub use light_policy::{CLUSTER_HI, CLUSTER_LO, LightStats, select_lighting_cull};
 pub use light_system::{
-    GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightCollectSet, LightSeedSet,
-    LightSeedState,
+    GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightCollectSet, LightHeaderGeneration,
+    LightSeedSet, LightSeedState,
     LightTableGeneration, LightTableStaging, SetLightEnabledById, collect_lights, evict_light,
     fold_light_table, fold_light_table_slotted, light_seed_state, primary_directional_dir, table_has_sky,
     set_light_enabled_now, write_light_table,
@@ -653,7 +653,7 @@ pub use aa_config::{
 pub use aa_plugin::AaPlugin;
 pub use taa_config::{
     BlendMode, ClampShape, ClampSpace, ClipMode, DisocclusionTest, HistoryFilter, JitterScope,
-    JitterSequence, MvSource, SharpenMode, TaaConfig, resolve_taa, resolve_taa_policy,
+    JitterSequence, MvSource, SharpenMode, TaaConfig, TaaPolicySet, resolve_taa, resolve_taa_policy,
 };
 pub use taa_jitter::{HALTON_8, JitterState, NdcJitter, advance_jitter, ndc_jitter};
 pub use taa_state::TaaState;
@@ -676,8 +676,8 @@ pub use upload::{
     upload_atlas_ring, upload_camera_ring, upload_camera_ring_sheared, upload_csm_ring,
     upload_ddgi_grid, upload_instance_materials, upload_instance_materials_tex, upload_instance_models,
     upload_light_table, upload_material_rows, upload_pair_out_slot, upload_pair_ring, upload_particle_effects,
-    upload_particle_emit_requests, upload_ray_shadow_ring, upload_sdf_edit_list,
-    upload_shadow_denoise_ring, upload_taa_ring, upload_temporal_shadow_ring,
+    post_final_words, upload_particle_emit_requests, upload_post_final_ring, upload_ray_shadow_ring,
+    upload_sdf_edit_list, upload_shadow_denoise_ring, upload_taa_ring, upload_temporal_shadow_ring,
     upload_vb_instance_rows, zero_instance_materials,
 };
 // Lane fix/hwrt-shadow-ray-origin: the HOT per-frame tail of the HWRT `RayShadowUbo` (seed +

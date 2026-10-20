@@ -9,9 +9,10 @@ use crate::light::{DirectionalLight, LightTableDirty, PointLight, SkyLight, Spot
 use crate::light_policy::{LightStats, select_lighting_cull};
 use crate::light_reconcile::{LightReconcileSet, light_reconcile};
 use crate::light_system::{
-    LightCollectSet, LightSeedSet, LightTableGeneration, collect_lights, evict_light,
-    light_seed_state,
+    LightCollectSet, LightHeaderGeneration, LightSeedSet, LightTableGeneration, collect_lights,
+    evict_light, light_seed_state,
 };
+use crate::post::PostPolicySet;
 use crate::shadow_atlas::{PunctualResolveSet, PunctualSlotAssignment};
 
 /// Registers [`light_reconcile`] BEFORE
@@ -88,6 +89,12 @@ impl Plugin for LightingPlugin {
         // Host plan D5: the writer-side staging generation `collect_lights` bumps on
         // every actual rewrite; ringed hosts gate their per-slot staging writes on it.
         app.insert_resource(LightTableGeneration(0));
+        // Render wave PX1a (D-E4): its header-only twin, bumped when the staged 64-B header
+        // alone changed (the pre-exposure, the tonemapper, a gate word).
+        app.insert_resource(LightHeaderGeneration(0));
+        // NO `ResolvedPost` here: `collect_lights` reads it, and `PostPlugin` owns it. A lighting
+        // world without `PostPlugin` panics at its first update naming the resource, by design — a
+        // silent default would stop the configured exposure from ever reaching the GPU.
 
         // The entity-keyed punctual atlas-base handoff (Inc-1-GPU): its READER is
         // `collect_lights` (owned here), so this plugin guarantees the resource exists even in a
@@ -127,8 +134,16 @@ impl Plugin for LightingPlugin {
             // `boyko_app::plugins`) needs one so the header's cluster lane can never carry
             // `clusters_enabled=1` with stale/zero dims (an out-of-bounds `ClusterGrid` index on
             // the GPU — see `LightCollectSet`'s own doc).
-            let collect =
-                b.add_system(collect_lights).after_set(PunctualResolveSet).in_set(LightCollectSet).key();
+            //
+            // `.after_set(PostPolicySet)` (render wave PX1a, D-E2): the header packs THIS frame's
+            // `ResolvedPost::pre_exposure`; set-to-set, so it holds whatever the add-order of
+            // `PostPlugin` (pinned by `tests/post_plugin_order_probe.rs`).
+            let collect = b
+                .add_system(collect_lights)
+                .after_set(PunctualResolveSet)
+                .after_set(PostPolicySet)
+                .in_set(LightCollectSet)
+                .key();
             // `.in_set(LightReconcileSet)` is membership only, for the edges this plugin cannot
             // express by key: after propagation (the pose's writer, in `CameraPlugin`), and before
             // the pose's readers OUTSIDE this plugin (the CSM fit, the punctual atlas resolve).

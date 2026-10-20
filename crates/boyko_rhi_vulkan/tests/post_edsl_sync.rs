@@ -487,12 +487,22 @@ fn post_rs_has_no_backend_introspection() {
     }
 }
 
-/// The `pub fn` names of `post.rs` an oracle must NOT call: every one but the traced body's entry
-/// points (`post_final_main`, `post_final_eval`) and the input readers (`eval_params`, `ubo_word`,
-/// and PX0's resource builder `eval_res`).
+/// The `pub fn` names of `post.rs` an oracle must NOT call: the STAGES `post_final_main` composes —
+/// every `pub fn` its body calls, and every one those call, to a fixed point — never the traced
+/// body's entry points (`post_final_main`, `post_final_eval`) or the input readers (`eval_params`,
+/// `ubo_word`, and PX0's resource builder `eval_res`).
+///
+/// Render wave PX1a: `post.rs` also holds leaves that are NOT stages of `post_final` —
+/// `lit_store_saturate` (the producers' store bound, W5: what `lit` holds BEFORE `post_final`
+/// reads it), `hdr_history_guard` (TAA's history write) and `srgb_eotf` (the present blit's sRGB
+/// variant). A host oracle of `lit` (`goldens.rs`) mirrors the producers' store through the first
+/// and displays through `post_final_eval`; that composes no `post_final` stage, so the census
+/// takes the stage set from `post_final_main`'s own call graph rather than from every `pub fn`.
 fn stage_leaves(post: &str) -> Vec<String> {
     const ENTRY: [&str; 5] = ["post_final_main", "post_final_eval", "eval_params", "ubo_word", "eval_res"];
-    post.lines()
+    let post = post.replace("\r\n", "\n");
+    let all: Vec<String> = post
+        .lines()
         .filter_map(|l| {
             // Top-level items only (an unindented `pub fn`): a method such as `PostStage::label` is
             // not a stage.
@@ -500,7 +510,31 @@ fn stage_leaves(post: &str) -> Vec<String> {
             let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
             (!ENTRY.contains(&name.as_str())).then_some(name)
         })
-        .collect()
+        .collect();
+    let mut stages: Vec<String> = Vec::new();
+    let mut frontier = vec![fn_body(&post, "post_final_main")];
+    assert!(!frontier[0].is_empty(), "post.rs has no `post_final_main` body: the stage set is vacuous");
+    while let Some(body) = frontier.pop() {
+        for leaf in &all {
+            if !stages.contains(leaf) && reimplements_a_stage(body, core::slice::from_ref(leaf)).is_err() {
+                stages.push(leaf.clone());
+                frontier.push(fn_body(&post, leaf));
+            }
+        }
+    }
+    stages
+}
+
+/// The text of the top-level `fn <name>` of `post` (LF endings), from its signature to the `}` that
+/// closes it at column 0; empty when there is none.
+fn fn_body<'a>(post: &'a str, name: &str) -> &'a str {
+    let start = [format!("fn {name}<"), format!("fn {name}(")]
+        .iter()
+        .filter_map(|sig| post.find(sig.as_str()))
+        .min();
+    let Some(start) = start else { return "" };
+    let end = post[start..].find("\n}\n").map_or(post.len(), |e| start + e + 2);
+    &post[start..end]
 }
 
 /// `Err` when `text` (an oracle's source) CALLS a stage leaf — by any path (`post::aces_hill(`, a
@@ -598,6 +632,18 @@ fn the_censuses_reject_their_fixtures() {
     // naming only the traced entry point passes.
     let leaves = vec!["aces_hill".to_string(), "hdr_sanitize".to_string()];
     assert!(reimplements_a_stage("let o = post::aces_hill(c);", &leaves).is_err());
+    // PX1a: the stage set is `post_final_main`'s call graph — the curves (reached through
+    // `tonemap_select`), the sanitize and the OETF are in; the producers' store bound, TAA's history
+    // guard and the present's sRGB decode are not.
+    let stages = stage_leaves(&post_rs());
+    for s in ["hdr_sanitize", "pre_ratio_apply", "tonemap_select", "aces_hill", "khronos_pbr_neutral", "reinhard_jodie", "oetf_gamma22"] {
+        assert!(stages.iter().any(|l| l == s), "`{s}` is a stage of post_final_main: {stages:?}");
+    }
+    for s in ["lit_store_saturate", "hdr_history_guard", "srgb_eotf"] {
+        assert!(!stages.iter().any(|l| l == s), "`{s}` is not a stage of post_final_main: {stages:?}");
+    }
+    assert!(reimplements_a_stage("let l = lit_store_saturate::<EvalCf>(c); let o = post_final_eval(px, &p, t);", &stages).is_ok());
+    assert!(reimplements_a_stage("let l = lit_store_saturate::<EvalCf>(c); let o = reinhard_jodie::<EvalCf>(l);", &stages).is_err());
     assert!(reimplements_a_stage("use boyko_shaderdsl::post::*;\nlet o = aces_hill(c);", &leaves).is_err());
     assert!(reimplements_a_stage("let o = hdr_sanitize::<EvalCf>(c);", &leaves).is_err());
     assert!(reimplements_a_stage("let o = post_final_main::<EvalCf>(px, &p, &r, &cell); // not aces_hill_x(", &leaves).is_ok());

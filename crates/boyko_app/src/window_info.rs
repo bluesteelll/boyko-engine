@@ -36,10 +36,11 @@ pub struct HostFrameStats {
     /// Frames that reached the post-render publish step (presented or
     /// recreate-skipped — the loop's step 8).
     pub frames: u64,
-    /// Frames whose fenced slot's light staging was rewritten
-    /// (`light_uploaded_gen[s]` lagged `LightTableGeneration`). Under the D5
-    /// protocol this is `<= 2 + 2 × writer-side bumps`, and strictly less than
-    /// `frames` on any run longer than the catch-up window — the gating proof.
+    /// Frames whose fenced slot's light staging was written — `light_copy_plan`'s
+    /// `staging` was `Header` or `Full` (the slot lagged `LightHeaderGeneration` or
+    /// `LightTableGeneration`; render wave PX1a). This is `<= 2 + 2 × writer-side
+    /// bumps`, and strictly less than `frames` on any run longer than the catch-up
+    /// window — the gating proof.
     pub light_uploads: u64,
     /// Frames on which the cascade depth pass was armed
     /// (`GBufferScene::csm == Some` — `ResolvedCsm::depth_pass_armed`: a leg set with a

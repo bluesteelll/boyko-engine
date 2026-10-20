@@ -2178,14 +2178,16 @@ impl VulkanContext {
     /// Particles P0 (`docs/PARTICLES-PLAN.md` D7): builds the additive billboard draw pipeline —
     /// set 0 = `desc.bind_group_layout` (`{ StructuredBuffer<ParticleRender> @0, Camera cbuffer
     /// @1 }`, the VERTEX half's own vocabulary), set 1 = `set1_layout` (the shared bindless
-    /// `Texture2D[]` + sampler set the FRAGMENT half samples through), and a `VERTEX`-stage push
-    /// range of `desc.push_constant_bytes` — the 2-set shape
-    /// [`Self::create_graphics_pipeline_bindless`] already establishes.
+    /// `Texture2D[]` + sampler set the FRAGMENT half samples through), and a push range of
+    /// `desc.push_constant_bytes` over [`crate::compute::PARTICLE_DRAW_PUSH_STAGES`] — the 2-set
+    /// shape [`Self::create_graphics_pipeline_bindless`] already establishes.
     ///
-    /// The push range is VERTEX-only, not the default `VERTEX | FRAGMENT`, because only
-    /// `particle_draw.vs` declares the push block (`particle_draw.fs` reads none) and the recorder
-    /// pushes with [`VulkanGraphicsPipeline::push_stages`]; a range naming FRAGMENT too would make
-    /// that VERTEX push invalid (`VUID-vkCmdPushConstants-offset-01796`).
+    /// The push range is `VERTEX | FRAGMENT` (render wave PX1a; orchestrator ruling 67 W1): both
+    /// `particle_draw` stages declare the block — the VS reads the projection and the render index,
+    /// the FS the frame's `pre_exposure` — so a VERTEX-only range would leave the FS's read
+    /// uncovered (`VUID-VkGraphicsPipelineCreateInfo-layout-07987`). The recorder pushes with
+    /// [`VulkanGraphicsPipeline::push_stages`], so its push names the same two stages
+    /// (`VUID-vkCmdPushConstants-offset-01796`).
     ///
     /// # Why the compare op is a PARAMETER and the depth write is not
     ///
@@ -2214,7 +2216,7 @@ impl VulkanContext {
             Some(set1_layout),
             depth_compare,
             false,
-            VK_SHADER_STAGE_VERTEX_BIT,
+            crate::compute::PARTICLE_DRAW_PUSH_STAGES,
         )
     }
 

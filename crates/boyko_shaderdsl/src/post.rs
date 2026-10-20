@@ -433,25 +433,67 @@ fn from_channels<C: Cf>(c: [C::Scalar; 3]) -> C::Vec3f {
     C::vec3_from_scalars(c[0], c[1], c[2])
 }
 
-/// `finite(c) ? clamp(c, 0, HDR_MAX) : 0` for the WHOLE pixel: one non-finite channel kills all
-/// three. `finite(x)` is the exponent-bit test `(asuint(x) & F32_EXP_MASK) != F32_EXP_MASK`. The
-/// clamp also removes the negatives a Catmull-Rom history with a variance clip can produce. `max` /
-/// `min` only ever matter on finite values (a non-finite pixel is selected away).
+/// `true` iff some channel of `ch` is non-finite — the WHOLE-pixel test [`hdr_sanitize`] and
+/// [`hdr_history_guard`] share. `finite(x)` is the exponent-bit test `(asuint(x) & F32_EXP_MASK)
+/// != F32_EXP_MASK`.
 ///
 /// Branch-free on the device: `(asuint(x) & M) ^ M` is zero exactly for a non-finite channel, so
 /// the whole-pixel test is one unsigned `min` of the three words against zero — integer ops only.
 /// (A `||` of the three per-channel tests is a SHORT-CIRCUIT in HLSL; measured at PXe-5, DXC
 /// lowered it to two data-dependent branches per channel.)
 #[inline]
-pub fn hdr_sanitize<C: Cf>(c: C::Vec3f) -> C::Vec3f {
-    let ch = channels::<C>(c);
+fn any_nonfinite<C: Cf>(ch: [C::Scalar; 3]) -> <C::Scalar as FieldScalar>::Mask {
     let mask = || C::named_uint_val("F32_EXP_MASK", F32_EXP_MASK);
     let finite_word = |x: C::Scalar| C::uxor(C::and_u(C::asuint(x), mask()), mask());
     let lowest = C::umin(C::umin(finite_word(ch[0]), finite_word(ch[1])), finite_word(ch[2]));
-    let any_nonfinite = C::ueq(lowest, C::uint_lit(0));
+    C::ueq(lowest, C::uint_lit(0))
+}
+
+/// `finite(c) ? clamp(c, 0, HDR_MAX) : 0` for the WHOLE pixel: one non-finite channel kills all
+/// three (the whole-pixel test is [`any_nonfinite`]). The clamp also removes the negatives a
+/// Catmull-Rom history with a variance clip can produce. `max` / `min` only ever matter on finite
+/// values (a non-finite pixel is selected away).
+#[inline]
+pub fn hdr_sanitize<C: Cf>(c: C::Vec3f) -> C::Vec3f {
+    let ch = channels::<C>(c);
+    let bad = any_nonfinite::<C>(ch);
     let zero = C::Scalar::lit(0.0);
     let hdr_max = C::named_lit("HDR_MAX", HDR_MAX);
-    from_channels::<C>(ch.map(|x| C::select(any_nonfinite, zero, x.max(zero).min(hdr_max))))
+    from_channels::<C>(ch.map(|x| C::select(bad, zero, x.max(zero).min(hdr_max))))
+}
+
+/// The `lit` producers' store bound (render wave PX1a, orchestrator ruling 67 W5): per channel
+/// `c > HDR_MAX ? HDR_MAX : c`, applied to every `lit` store through ONE spelling (the generated
+/// `lit_store_saturate` span of `shaders/lit_format.hlsli`).
+///
+/// A narrowing float store may round an out-of-range finite value to +Inf (Vulkan,
+/// "Floating-Point Format Conversions"), and every HDR reader ([`hdr_sanitize`], TAA's history
+/// guard) reads a non-finite texel as a FAULT and zeroes the pixel — so an overflowing highlight
+/// would turn black. Bounding at `HDR_MAX` (binary16-representable) stores it as the brightest
+/// finite value instead. +Inf maps to `HDR_MAX` too.
+///
+/// **A NaN stays a NaN**, so K8's NaN-as-fault reading downstream is unchanged: the bound is a
+/// select on an ORDERED compare (`NaN > HDR_MAX` is false, so the select keeps `c`), never `min`,
+/// whose device lowering (`NMin`) returns the number when one operand is NaN. Not a display clamp:
+/// values in `(1, HDR_MAX]` pass unchanged.
+#[inline]
+pub fn lit_store_saturate<C: Cf>(c: C::Vec3f) -> C::Vec3f {
+    let hdr_max = C::named_lit("HDR_MAX", HDR_MAX);
+    from_channels::<C>(channels::<C>(c).map(|x| C::select(x.gt(hdr_max), hdr_max, x)))
+}
+
+/// TAA's history write guard (H4 Scope 5, rev 2 perf O6; `px1a/cut.md` D-S2): `finite(hist) ?
+/// max(hist, 0) : hdr_sanitize(cur)` for the WHOLE pixel. A Catmull-Rom history with a variance
+/// clip can go negative, and the RGBA16F history keeps the sign the old RGBA8 store clamped; a
+/// non-finite blend reseeds from the sanitized current sample instead of persisting. `max` only
+/// ever reads a finite value (a non-finite pixel takes the other arm).
+#[inline]
+pub fn hdr_history_guard<C: Cf>(hist: C::Vec3f, cur: C::Vec3f) -> C::Vec3f {
+    let h = channels::<C>(hist);
+    let bad = any_nonfinite::<C>(h);
+    let fresh = channels::<C>(hdr_sanitize::<C>(cur));
+    let zero = C::Scalar::lit(0.0);
+    from_channels::<C>(core::array::from_fn(|i| C::select(bad, fresh[i], h[i].max(zero))))
 }
 
 /// `h · r` — the exposure ratio `E / pre` (POSTFX §5.3 E2). One rounding per channel; an identity
@@ -583,7 +625,8 @@ pub fn oetf_gamma22<C: Cf>(c: C::Vec3f) -> C::Vec3f {
 
 /// The piecewise sRGB decode `c ≤ 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055)^2.4` — the inverse of
 /// the hardware's `*_SRGB` encode, for PX1a's swapchain fallback (NOT `pow(c, 2.2)`, which is ≈ 7
-/// LSB off at 0.1). Not called by the body at PXe.
+/// LSB off at 0.1). Not called by `post_final`'s body: `emit::emit_hlsl_srgb_eotf` splices it into
+/// the present blit's `SWAPCHAIN_SRGB` variant (`fullscreen_sample.fs.hlsl`, render wave PX1a D-P1).
 #[inline]
 pub fn srgb_eotf<C: Cf>(c: C::Vec3f) -> C::Vec3f {
     let lit = C::Scalar::lit;

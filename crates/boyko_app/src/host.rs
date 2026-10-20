@@ -13,14 +13,18 @@
 use boyko_render::{ResolvedDdgi, ResolvedRenderPath};
 use boyko_rhi::Format;
 use boyko_rhi_vulkan::device::VulkanContext;
-use boyko_rhi_vulkan::ffi::{VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM};
+use boyko_rhi_vulkan::ffi::{
+    VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM,
+};
+use boyko_rhi_vulkan::present::LIT_FORMAT;
 use boyko_rhi_vulkan::swapchain::{
-    FRAMES_IN_FLIGHT, GBufferFrame, Renderer, Surface, Swapchain, SwapchainError,
+    FRAMES_IN_FLIGHT, GBufferFrame, Renderer, Surface, SurfaceFormatPick, Swapchain, SwapchainError,
 };
 use boyko_rhi_vulkan::window::{Window, WindowError};
 use boyko_scene::FreeEntry;
 
 use crate::gpu_scene::{DrawListScratch, GpuSceneBundles};
+use crate::light_gate::{LightDeviceState, LightSlotState};
 use crate::runner::WindowDesc;
 
 /// A typed boot-chain failure — which link of the window → surface → swapchain
@@ -129,13 +133,15 @@ pub(crate) struct WindowHost {
     /// `ResolvedRenderPathGpu` the RHI dispatches its per-path declarator on. (This doc read
     /// "DEAD-BUT-THREADED at R1 (nothing reads it yet)" for as long as that was false.)
     pub(crate) resolved_render_path: ResolvedRenderPath,
-    /// Per-in-flight-slot record of the `LightTableGeneration` whose staged
-    /// bytes were last written into that slot's light staging (host plan D5/R4).
-    /// Seeded `u64::MAX` (≠ any real generation) so BOTH slots upload the real
-    /// ECS table on their first frames; thereafter slot `s` is rewritten iff
-    /// `light_uploaded_gen[s] != generation` (the deterministic writer-side
-    /// gate — see `crate::light_gate::light_upload_due`).
-    pub(crate) light_uploaded_gen: [u64; FRAMES_IN_FLIGHT],
+    /// Per in-flight slot, the `LightTableGeneration` / `LightHeaderGeneration` whose bytes that
+    /// slot's light staging holds (host plan D5/R4; render wave PX1a, D-E6). Seeded
+    /// [`LightSlotState::BOOT`] (`u64::MAX`, not a generation) so BOTH slots write the real ECS
+    /// table on their first frames — see [`crate::light_gate::light_copy_plan`].
+    pub(crate) light_slots: LightSlotState<FRAMES_IN_FLIGHT>,
+    /// The generations the DEVICE light table holds — advanced only after a frame that presented
+    /// (`Ok(true)`), so a minimized skip or an acquire-time `Ok(false)` leaves it behind and the
+    /// next presented frame copies what the device missed (DM1's skip-owes-full discipline).
+    pub(crate) light_device: LightDeviceState,
     /// SDFDDGI host-hook: the last `ResolvedDdgi` image written into the SINGLE binding-18
     /// grid UBO (`GpuSceneBundles::ddgi_ubo`) — the value gate for that write. Seeded
     /// `DISABLED`, which IS the buffer's zero boot seed, so the first ENABLED carrier differs
@@ -147,7 +153,7 @@ pub(crate) struct WindowHost {
     /// Particles P0: per-in-flight-slot record of the `ParticleEffectScratch::rows_gen()` whose
     /// baked bytes were last written into that slot's effect staging.
     ///
-    /// `light_uploaded_gen`'s twin, seeded `u64::MAX` for the same reason — BOTH slots upload the
+    /// The light staging record's twin (`light_slots`), seeded `u64::MAX` for the same reason — BOTH slots upload the
     /// real effect table on their first frames, which is what makes the device table defined at
     /// frame 0 without a separate boot upload path. The gate is
     /// [`crate::particle_gate::particle_effects_upload_due`]. Carried unconditionally (8 bytes on
@@ -177,12 +183,17 @@ pub(crate) struct WindowHost {
 }
 
 /// Maps the swapchain's raw `VkFormat` to the basic-slice [`Format`] the
-/// present-blit pipeline declares, or `None` for an unsupported format (the
-/// SRGB variants have no basic-slice mapping — the boot fails typed).
+/// present-blit pipeline declares, or `None` for an unsupported format (the boot
+/// fails typed). Render wave PX1a (D-P1): the two 8-bit `*_SRGB` formats are
+/// admitted — the present pipeline then binds the `srgb_eotf` decode variant
+/// (`compute::present_sample_fs_spirv`), so the hardware's encode on write
+/// reproduces the display bytes instead of encoding them twice.
 fn swap_color_format(vk_format: i32) -> Option<Format> {
     match vk_format {
         f if f == VK_FORMAT_B8G8R8A8_UNORM => Some(Format::B8G8R8A8Unorm),
         f if f == VK_FORMAT_R8G8B8A8_UNORM => Some(Format::R8G8B8A8Unorm),
+        f if f == VK_FORMAT_B8G8R8A8_SRGB => Some(Format::B8G8R8A8Srgb),
+        f if f == VK_FORMAT_R8G8B8A8_SRGB => Some(Format::R8G8B8A8Srgb),
         _ => None,
     }
 }
@@ -208,9 +219,14 @@ impl WindowHost {
     /// A scene-resource create failure inside [`GpuSceneBundles::boot`] panics
     /// (`expect("invariant: ...")`): device OOM at scene-boot time is a setup
     /// failure by design, not a recoverable boot outcome.
+    ///
+    /// `format_pick` is [`SurfaceFormatPick::Production`] on every shipping boot;
+    /// the windowed runner passes [`SurfaceFormatPick::ForceSrgb`] only under the
+    /// test-only `TestForce` key `srgb_swapchain` (render wave PX1a test 17).
     pub(crate) fn boot(
         ctx: &'static VulkanContext,
         desc: &WindowDesc,
+        format_pick: SurfaceFormatPick,
     ) -> Result<Self, HostBootError> {
         let window =
             Window::open(desc.title, desc.width, desc.height).map_err(HostBootError::Window)?;
@@ -220,7 +236,7 @@ impl WindowHost {
         // `window` (and on this fn's error paths the surface local drops
         // before the window local), so the HWND/HINSTANCE are live for the
         // surface's whole lifetime.
-        let surface = unsafe { Surface::new(ctx, window.hinstance(), window.hwnd()) }
+        let surface = unsafe { Surface::with_format_pick(ctx, window.hinstance(), window.hwnd(), format_pick) }
             .map_err(HostBootError::Surface)?;
 
         let swapchain = Swapchain::new(ctx, &surface, window.width(), window.height())
@@ -298,7 +314,8 @@ impl WindowHost {
             resolved_render_path: ResolvedRenderPath::default(),
             // u64::MAX ≠ any real generation ⇒ both slots upload the ECS light
             // table on their first frames (host plan D5/R4).
-            light_uploaded_gen: [u64::MAX; FRAMES_IN_FLIGHT],
+            light_slots: LightSlotState::BOOT,
+            light_device: LightDeviceState::BOOT,
             // DISABLED == the b18 buffer's zero boot seed: the first enabled carrier differs
             // from it and is uploaded; a never-enabled run never writes the buffer at all.
             last_ddgi_grid: ResolvedDdgi::DISABLED,
@@ -311,6 +328,26 @@ impl WindowHost {
             surface,
             window,
         })
+    }
+
+    /// Render wave PX1a (D-G1; review r2 R2-W1): the extent `display` is allocated at and
+    /// `post_final` dispatches over — the renderer's `aa_extent`, and the extent the `post_final`
+    /// UBO carries. Boot-fixed, like both extents it picks between.
+    ///
+    /// [`Self::native_extent`] only when the frame runs the SSAA downsample: the boot armed the
+    /// composite AND the resolved path records the post-process AA seam
+    /// (`ResolvedRenderPath::post_process_aa_supported`, the predicate `GpuSceneBundles::scene`
+    /// degrades `AaMode::Ssaa` on). Otherwise [`Self::composite_extent`]: `post_final` reads `lit`
+    /// texel for texel, so a native `display` on a path that degrades the boot SSAA (Forward /
+    /// ForwardPlus) held only the 2x scene's top-left quarter. At the composite it holds the whole
+    /// scene, and the present blit minifies it into the native window, as it minified `lit` before
+    /// PX1a.
+    pub(crate) fn display_extent(&self) -> (u32, u32) {
+        if self.ssaa_armed && self.resolved_render_path.post_process_aa_supported() {
+            self.native_extent
+        } else {
+            self.composite_extent
+        }
     }
 }
 
@@ -339,8 +376,13 @@ const SSAA_VRAM_FRACTION_DEN: u64 = 2;
 /// `FRAMES_IN_FLIGHT`(2) = 66 B/px at NATIVE resolution, scaled by `scale²` (area) for
 /// the composite extent; `feature = "hwrt"` adds the RT ring cost (≈ 28 B/px × FIF(2)
 /// at native, same `scale²` scaling).
+///
+/// Render wave PX1a (D-H1, Q11): the 33 B/px count holds `lit` at 4 B/px; `lit` in `LIT_FORMAT`
+/// adds [`LIT_HDR_EXTRA_BYTES_PER_PX`] per FIF slot at the composite extent, and the post seam's
+/// two native singles add [`POST_SEAM_NATIVE_BYTES_PER_PX`] once at the native extent — both
+/// derived from the format constants, so a later format move moves the estimate with it.
 const fn ssaa_ring_bytes_estimate(native: (u32, u32), scale: u32) -> u64 {
-    const CORE_BYTES_PER_NATIVE_PX: u64 = 66;
+    const CORE_BYTES_PER_NATIVE_PX: u64 = 66 + LIT_HDR_EXTRA_BYTES_PER_PX * FRAMES_IN_FLIGHT as u64;
     #[cfg(feature = "hwrt")]
     const PER_NATIVE_PX: u64 = CORE_BYTES_PER_NATIVE_PX + 28;
     #[cfg(not(feature = "hwrt"))]
@@ -348,5 +390,23 @@ const fn ssaa_ring_bytes_estimate(native: (u32, u32), scale: u32) -> u64 {
 
     let native_px = native.0 as u64 * native.1 as u64;
     let scale_sq = (scale as u64) * (scale as u64);
-    native_px * scale_sq * PER_NATIVE_PX
+    native_px * scale_sq * PER_NATIVE_PX + native_px * POST_SEAM_NATIVE_BYTES_PER_PX
 }
+
+/// `LIT_FORMAT`'s texel size, as the image dump (the one texel table the renderer exports)
+/// states it.
+const LIT_TEXEL_BYTES: u64 = match boyko_rhi_vulkan::present::image_dump_texel_bytes(LIT_FORMAT.as_i32()) {
+    Some(b) => b as u64,
+    None => panic!("invariant: the texel table knows LIT_FORMAT"),
+};
+
+/// Render wave PX1a (D-H1): the per-composite-pixel bytes `lit` gains over the 4 B/px RGBA8 the
+/// core-ring count assumed, per FIF slot.
+const LIT_HDR_EXTRA_BYTES_PER_PX: u64 = LIT_TEXEL_BYTES - 4;
+
+/// Render wave PX1a (D-H1): the post seam's native singles under SSAA — `lit_native`
+/// (`LIT_FORMAT`) + `display` (`R8G8B8A8_UNORM`, 4 B).
+const POST_SEAM_NATIVE_BYTES_PER_PX: u64 = LIT_TEXEL_BYTES + 4;
+
+// The hand count (RGBA16F = 8 B, RGBA8 = 4 B): +4 B/px per lit slot, 8 + 4 = 12 B/px native.
+const _: () = assert!(LIT_HDR_EXTRA_BYTES_PER_PX == 4 && POST_SEAM_NATIVE_BYTES_PER_PX == 12);
