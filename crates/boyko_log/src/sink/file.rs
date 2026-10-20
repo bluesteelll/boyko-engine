@@ -366,3 +366,9 @@ const _: () = {
 pub(crate) fn cap_report_spent() -> bool {
     CAP_REPORTED.has_fired()
 }
+
+/// Whether `W0112`'s once-per-process latch is spent, for the same reason as [`cap_report_spent`].
+#[cfg(test)]
+pub(crate) fn rotation_report_spent() -> bool {
+    ROTATE_REPORTED.has_fired()
+}

@@ -1315,8 +1315,8 @@ mod tests {
     // `sync_out::test_stall` reproduces that consumer on the sink thread.
 
     /// A threaded console + file session with the `log` target armed, so the census reaches both
-    /// sinks. Its drop disarms the stall, lets the sink thread exit, closes, and restores the
-    /// target, so a red here cannot poison the next test.
+    /// sinks. Its drop disarms the stall, lets the sink thread exit, closes, turns rotation back
+    /// off, and restores the target, so a red here cannot poison the next test.
     struct ThreadedFileSession {
         path: std::path::PathBuf,
         log_was: crate::target::TargetControl,
@@ -1370,6 +1370,7 @@ mod tests {
             crate::sync_out::test_stall::disarm();
             wait_for_exit(std::time::Duration::from_secs(5));
             close_sinks();
+            crate::sink::file::set_rotation(0, 0);
             crate::target::set_target_control(<crate::Log as crate::target::LogTarget>::ID, self.log_was);
             let _ = std::fs::remove_file(&self.path);
             reset();
@@ -1534,5 +1535,41 @@ mod tests {
             total - missing.len()
         );
         assert_eq!(state(), SinkState::Exited, "nothing else will publish `Exited` for a dead thread");
+    }
+
+    #[test]
+    fn a_stalled_exit_report_does_not_wait_on_an_in_pass_synchronous_report() {
+        // A sink thread can stall INSIDE a pass in a synchronous write of its own: the file sink
+        // reports its cap (`W0103`) and a lossy rotation (`W0112`) on the console channel while
+        // the pass delivers, under the role. It then holds stderr's lock, and a report written
+        // behind it on the exit path waits for as long as the console does not read (ci-fix-1,
+        // review r1 W1). Here the write is `W0112`: the next line rotates the file with `keep 0`,
+        // which deletes what the file held.
+        let _s = crate::drain_owner::test_serial();
+        let _session = ThreadedFileSession::start("in_pass_report", 0);
+        assert!(
+            !crate::sink::file::rotation_report_spent(),
+            "fixture: an earlier rotation spent the W0112 latch"
+        );
+        crate::sink::file::set_rotation(crate::sink::file::state().0 + 1, 0);
+        stall_the_sink_on_a_record();
+        let joined = shutdown();
+        assert_eq!(
+            shutdown_outcome(),
+            Some(ShutdownOutcome::StalledInsidePass),
+            "fixture: the sink thread must be stalled inside its pass, in the rotation report \
+             (joined {joined})"
+        );
+        assert!(
+            !await_exit(std::time::Duration::from_millis(50)),
+            "fixture: a sink thread stalled in its pass cannot exit"
+        );
+        let wrote = report_stalled_exit();
+        assert!(
+            !crate::sync_out::test_stall::gave_up(),
+            "report_stalled_exit returned only because the console stall gave up: it waited behind \
+             the sink thread's in-pass synchronous report (wrote {wrote})"
+        );
+        assert!(!wrote, "a report behind a stalled synchronous write must be refused, not written");
     }
 }
