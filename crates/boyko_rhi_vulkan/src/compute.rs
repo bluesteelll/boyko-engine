@@ -215,6 +215,12 @@ embed_spirv! {
     /// so the 41 `sdf_gbuffer_hybrid` goldens (no MDF scene) stay byte-exact → 155024 bytes (VulkanSDK
     /// 1.4.350.0 dxc; the +96 over 154928 is the `mesh_self_skip` self-shadow START-offset in
     /// `sdf_soft_shadow_mesh`, anti mesh-self-acne — see the shader's MESH_SELF_SHADOW_SKIP_VOXELS).
+    /// (Later lit-format work moved it to 155124.) OPEN-ITEMS 16 then gated the M2 hit on the
+    /// first-crossing certificate (`sdf_m2_certify.hlsli`: the generated `boyko_shaderdsl::range`
+    /// leaves, the edit-range fold and the certify-or-subdivide driver, inlined at the one M2 call
+    /// site; `m2_surface_hit` reports its cubic candidate; the per-ray latch) → 168152 bytes. The
+    /// `brick_trilinear == 0` path executes the same single branch as before (the certificate is dead
+    /// at run time when M2 is off; rule (xviii)'s register twin is `tests/marcher_occupancy.rs`).
     SDF_GBUFFER_COMPOSITE_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_gbuffer_composite.comp.spv")
 }
