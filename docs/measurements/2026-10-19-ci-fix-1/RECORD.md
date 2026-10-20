@@ -7,7 +7,7 @@ trunk sync 29739376 (PHYS-TOOL-1, no file of this lane).
 
 | item | red | class | fixed in |
 |---|---|---|---|
-| F1 | `log_host_editor`: "a threaded shutdown must join within its deadline" | the sink thread wrote the console (an external consumer) first and under the drain role; a stalled pipe starved the durable file, kept the role, and `shutdown` gave up without closing anything | `d1cf18f4` (red-first), `eb5dc569`, `589c31a7`, `41257568`; round 2: `93b6206c`, `87304470`, `aff09fe7` (red-first), `818537f9` |
+| F1 | `log_host_editor`: "a threaded shutdown must join within its deadline" | the sink thread wrote the console (an external consumer) first and under the drain role; a stalled pipe starved the durable file, kept the role, and `shutdown` gave up without closing anything | `d1cf18f4` (red-first), `eb5dc569`, `589c31a7`, `41257568`; round 2: `93b6206c`, `87304470`, `aff09fe7` (red-first), `818537f9`; round 3: `c67b0412` |
 | F2 | `narrowphase_carry`: a moved step 6 acquisitions against a fewest of 3 | a thread's FIRST crossbeam-epoch pin allocates its `Local` (and, process-first, `Global` and the queue sentinel) inside whatever frame its first steal lands in | `dd6685a8` (red-first), `eca7f277`, `c29e1bc4`, `11276668`, `c5a9427a` |
 | F3 | `view::tests::perspective_bridge_reproduces_legacy_push_constants`, Linux release, one ulp | one side's `tan` constant-folded by LLVM, the other computed by the C runtime's `tanf` | `07ac21e1` |
 
@@ -198,6 +198,25 @@ Residuals: R2c (the control test's 500 ms join cannot hold under Miri; boyko-log
 idle write cannot see a writer outside `sync_out` (an `eprintln!`), nor a third writer that steals inside the
 microseconds between its check and its write. `await_exit` does not read `SINK_DIED` (review r1 OQ1): a sink thread
 that dies during `Exiting` costs the 2 s grace and one misattributed report, never a loss or a hang (accepted).
+
+## Round 3 (tester r2 Y1, review r2 W-R2-1; triage r2)
+
+**Y1 (`c67b0412`).** Both round-2 tests of the stalled-exit report asserted only its refusal. An idle acquire that
+never succeeds, or a write that never leaves `WRITES_IN_FLIGHT`, passed every gate and left the report unwritten: the
+silent case ruling 76 (W3) forbids. A sink thread stalled in a durable write holds the drain role, not the
+synchronous channel, so there the report finds the channel idle and must be written. Two tests now gate that half:
+`sync_out`'s idle write is written on a free channel and again after a finished steal, with the in-flight count back
+to 0; and `report_stalled_exit` returns `true` on an idle channel. Test-only: no production line moves.
+
+| gate | predicted | observed |
+|---|---|---|
+| r3 Y1 mutant M3: the idle acquire returns `None` at once | both new tests red | red at `sync_out.rs:644` and `lifecycle.rs:1591` (lines at `c67b0412`; the mutant's own file reads `:645`, one line lower); the lib 100 passed, 2 failed (the two) |
+| r3 Y1 mutant M4: `InFlight::drop` does not decrement | both new tests red | "a finished write is still counted in flight: 3 of them" (`sync_out.rs:648`) and `lifecycle.rs:1591`; the lib 100 passed, 2 failed |
+| r3 Y1 mutant M5: `report_stalled_exit` returns `false` | the lifecycle test red, the `sync_out` test green | exactly that; the lib 101 passed, 1 failed |
+| r3 re-measure, boyko-log lib, default threads | 0 failures | release 150 of 150, debug 60 of 60, each run 102 of 102 |
+
+Residual: Y2 (the round-2 lifecycle test aborts a Windows Miri run of `boyko-log --lib` in the append-mode
+`CreateFileW` shim; a shim limit, not UB, and unreachable on the Linux Miri legs) is deferred with R2c.
 
 ## Quiet-window commands (the orchestrator's; cut section 7)
 
