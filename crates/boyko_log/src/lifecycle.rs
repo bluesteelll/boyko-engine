@@ -37,7 +37,7 @@
 //! progress when asked for and none when not.
 
 use core::fmt::Write as _;
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::site::LogSite;
 
@@ -696,6 +696,101 @@ pub fn flush() -> FlushResult {
     FlushResult::TimedOut
 }
 
+/// How the first [`shutdown`] of a session ended.
+///
+/// [`shutdown`] returns a `bool`, and its callers read it that way. The outcome says which way a
+/// `false` went, which is the difference between "the durable log is complete and only the console
+/// is behind" and "the durable log may lack its census" -- and a host on its exit path can act on
+/// the second only if it can tell the two apart.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ShutdownOutcome {
+    /// The resident sink thread's exit pass delivered everything within the bound, and the sinks
+    /// closed after it.
+    Joined = 1,
+    /// There was no resident sink thread: the calling thread ran the final pass and closed.
+    NoThread = 2,
+    /// The bound expired with the drain role FREE: the sink thread was outside a pass, blocked
+    /// writing its staged console lines to a consumer that stopped reading (or not scheduled at
+    /// all). The calling thread delivered the remaining records to the durable sinks -- file,
+    /// binary, ECS -- and closed them. Those records did not reach the console
+    /// ([`console_lines_skipped`]); the lines the sink thread had staged reach it when its
+    /// consumer reads again.
+    ClosedAfterStall = 3,
+    /// The bound expired with the drain role HELD: the sink is stalled inside a pass -- a durable
+    /// write (the disk, a filter driver), a render, or a staged console overflow, which is written
+    /// under the role. Nothing could be delivered safely, so the durable file lacks what that pass
+    /// had not reached, visibly: its census has no `LOG-CENSUS limiter` line. [`await_exit`] waits
+    /// longer and closes the sinks once the thread exits.
+    StalledInsidePass = 4,
+    /// The sink thread died -- it panicked -- before it could exit. Its unwind released the role,
+    /// so the calling thread delivered and closed as in
+    /// [`ClosedAfterStall`](Self::ClosedAfterStall); the panic itself was reported by the hook.
+    SinkDied = 5,
+}
+
+/// `0` until a shutdown has ended this session; then a [`ShutdownOutcome`] discriminant.
+///
+/// Written once per session, by the FIRST shutdown: a second call finds no thread to stop and
+/// would otherwise overwrite a stall with the `NoThread` it reads.
+static SHUTDOWN_OUTCOME: AtomicU8 = AtomicU8::new(0);
+
+/// Console lines a late close delivered to the durable sinks and not to the console.
+static CONSOLE_SKIPPED: AtomicU32 = AtomicU32::new(0);
+
+/// Record how this session's shutdown ended, unless an earlier call already did.
+fn record_outcome(outcome: ShutdownOutcome) {
+    // AcqRel on success: the outcome is published after everything the shutdown did, and a
+    // reader that sees it (`Acquire` below) sees those effects -- the closed sinks included.
+    let _ = SHUTDOWN_OUTCOME.compare_exchange(0, outcome as u8, Ordering::AcqRel, Ordering::Relaxed);
+}
+
+/// How this session's first [`shutdown`] ended, or `None` before one has.
+#[must_use]
+pub fn shutdown_outcome() -> Option<ShutdownOutcome> {
+    match SHUTDOWN_OUTCOME.load(Ordering::Acquire) {
+        1 => Some(ShutdownOutcome::Joined),
+        2 => Some(ShutdownOutcome::NoThread),
+        3 => Some(ShutdownOutcome::ClosedAfterStall),
+        4 => Some(ShutdownOutcome::StalledInsidePass),
+        5 => Some(ShutdownOutcome::SinkDied),
+        _ => None,
+    }
+}
+
+/// Console lines a late close delivered to the durable sinks only
+/// ([`ShutdownOutcome::ClosedAfterStall`]); cumulative over the process.
+#[must_use]
+pub fn console_lines_skipped() -> u32 {
+    CONSOLE_SKIPPED.load(Ordering::Relaxed)
+}
+
+/// After a [`shutdown`] that returned `false`, wait up to `bound` for the sink thread to exit,
+/// then close the sinks. Returns whether it exited.
+///
+/// For a host that can afford a longer wait than `shutdown`'s 500 ms, on its exit path: a console
+/// consumer that stalled for a second still receives the lines the sink thread had staged, and a
+/// thread stalled inside a pass ([`ShutdownOutcome::StalledInsidePass`]) still delivers its census
+/// to the durable file before the close. Returns `false` at once when no shutdown is in progress,
+/// because nothing would ever move the state.
+pub fn await_exit(bound: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + bound;
+    loop {
+        match state() {
+            SinkState::Exited => {
+                close_sinks();
+                return true;
+            }
+            SinkState::Exiting => {}
+            _ => return false,
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::yield_now();
+    }
+}
+
 /// Stop the sink thread and wait, bounded, for it to complete one final drain.
 ///
 /// **No join handle is kept, and that is deliberate**: a handle would have to live in a static
@@ -724,6 +819,7 @@ pub fn shutdown() -> bool {
         }
         close_sinks();
         SINK_STATE.store(SinkState::Exited as u8, Ordering::Release);
+        record_outcome(ShutdownOutcome::NoThread);
         return true;
     }
     SINK_STATE.store(SinkState::Exiting as u8, Ordering::Release);
@@ -734,10 +830,13 @@ pub fn shutdown() -> bool {
             // close only now. In the previous shape `close_out` closed the text file BEFORE that
             // pass, so the tail was delivered to a destination that no longer existed.
             close_sinks();
+            record_outcome(ShutdownOutcome::Joined);
             return true;
         }
         std::thread::yield_now();
     }
+    // The expired wait leaves the role with the sink thread: it is still inside a pass.
+    record_outcome(ShutdownOutcome::StalledInsidePass);
     false
 }
 
@@ -798,6 +897,7 @@ mod tests {
         // which is how "no thread was asked for, so no pass may have happened" started failing
         // deterministically the moment a sink-thread test was added beside it.
         SINK_PASSES.store(0, Ordering::Release);
+        SHUTDOWN_OUTCOME.store(0, Ordering::Release);
     }
 
     #[test]
@@ -991,5 +1091,191 @@ mod tests {
         disable();
         assert_eq!(state(), SinkState::Booted, "disable returns to Booted, not to NotBooted");
         reset();
+    }
+
+    // ── A console consumer that stops reading (ci-fix-1 F1) ─────────────────────────────────
+    //
+    // Master's push CI went red at `log_host_editor`'s join assertion when the runner's stderr
+    // pipe stopped being read for about a second during the census: the sink thread wrote the
+    // console FIRST, under the drain role, so every durable write queued behind the blocked line
+    // waited too, and `shutdown` gave up after 500 ms without closing anything -- the durable
+    // file lost its census.
+    // `sync_out::test_stall` reproduces that consumer on the sink thread.
+
+    /// A threaded console + file session with the `log` target armed, so the census reaches both
+    /// sinks. Its drop disarms the stall, lets the sink thread exit, closes, and restores the
+    /// target, so a red here cannot poison the next test.
+    struct ThreadedFileSession {
+        path: std::path::PathBuf,
+        log_was: crate::target::TargetControl,
+    }
+
+    impl ThreadedFileSession {
+        fn start(name: &str, file_cap_bytes: u64) -> Self {
+            reset();
+            // `boot` arms no target and `CONTROL` is `.bss`-Off, so without this the census rows
+            // would be refused at the gate and every assertion below would read the admission
+            // policy, not the stall.
+            let id = <crate::Log as crate::target::LogTarget>::ID;
+            let log_was = crate::target::target_control(id);
+            crate::target::set_target_control(
+                id,
+                crate::target::TargetControl::new(crate::GLOBAL_CEILING, 0, false),
+            );
+            let path = std::env::temp_dir()
+                .join(format!("boyko_lifecycle_{name}_{}.log", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            assert!(crate::sink::file::set_path(path.to_str().expect("a UTF-8 temp path")));
+            boot(LogConfig {
+                console: true,
+                sink_thread: true,
+                file: true,
+                file_cap_bytes,
+                ..LogConfig::default()
+            });
+            assert!(enable());
+            // The session header reaches the console before any test arms a stall.
+            assert_eq!(flush(), FlushResult::Flushed);
+            ThreadedFileSession { path, log_was }
+        }
+
+        fn text(&self) -> String {
+            std::fs::read_to_string(&self.path).unwrap_or_default()
+        }
+    }
+
+    impl Drop for ThreadedFileSession {
+        fn drop(&mut self) {
+            crate::sync_out::test_stall::disarm();
+            wait_for_exit(std::time::Duration::from_secs(5));
+            close_sinks();
+            crate::target::set_target_control(<crate::Log as crate::target::LogTarget>::ID, self.log_was);
+            let _ = std::fs::remove_file(&self.path);
+            reset();
+        }
+    }
+
+    /// A raw wait on `Exited`, without [`await_exit`]'s close, so a test can observe whether the
+    /// late close closed the file itself.
+    fn wait_for_exit(bound: std::time::Duration) {
+        let deadline = std::time::Instant::now() + bound;
+        while state() != SinkState::Exited && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+    }
+
+    /// The census rows `text` lacks: one `LOG-CENSUS target=<name> ` per target, then the limiter.
+    fn missing_census_rows(text: &str) -> (usize, Vec<String>) {
+        let mut want: Vec<String> = crate::target::targets()
+            .map(|(_, name)| format!("LOG-CENSUS target={name} "))
+            .collect();
+        want.push("LOG-CENSUS limiter ".to_owned());
+        let total = want.len();
+        (total, want.into_iter().filter(|row| !text.contains(row.as_str())).collect())
+    }
+
+    /// Emit one console-admitted record and wait until the sink thread is stalled writing it.
+    fn stall_the_sink_on_a_record() {
+        crate::sync_out::test_stall::arm();
+        crate::info!(crate::Log, "the record the stalled console is writing");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !crate::sync_out::test_stall::entered() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(crate::sync_out::test_stall::entered(), "fixture: the sink never reached the stalled write");
+    }
+
+    #[test]
+    fn a_threaded_console_session_delivers_the_whole_census_to_the_file() {
+        // The control: no stall, so the 500 ms join holds, and the file check below is shown able
+        // to read a complete census before the two stall tests rely on it.
+        let _s = crate::drain_owner::test_serial();
+        let session = ThreadedFileSession::start("control", 0);
+        assert!(shutdown(), "an unstalled threaded shutdown must join within its bound");
+        assert_eq!(shutdown_outcome(), Some(ShutdownOutcome::Joined));
+        let (total, missing) = missing_census_rows(&session.text());
+        assert!(missing.is_empty(), "the durable file lacks {} of {total} census rows: {missing:?}", missing.len());
+    }
+
+    #[test]
+    fn a_console_stalled_in_the_census_pass_costs_the_file_nothing() {
+        let _s = crate::drain_owner::test_serial();
+        let session = ThreadedFileSession::start("census_pass", 0);
+        crate::sync_out::test_stall::arm();
+        let joined = shutdown();
+        let (total, missing) = missing_census_rows(&session.text());
+        assert!(
+            missing.is_empty(),
+            "the durable file holds {} of {total} census rows after a console stall: missing {missing:?}",
+            total - missing.len()
+        );
+        assert_eq!(
+            shutdown_outcome(),
+            Some(ShutdownOutcome::ClosedAfterStall),
+            "an expired join with the role free must deliver and close (joined {joined})"
+        );
+        crate::sync_out::test_stall::disarm();
+        wait_for_exit(std::time::Duration::from_secs(5));
+        assert_eq!(state(), SinkState::Exited, "the sink thread must exit once its console drains");
+        // Only after `Exited`: the sink's exit pass takes `&mut` over the file cell, which this
+        // read would race.
+        assert!(!crate::sink::file::is_open(), "the late close must close the file it delivered to");
+    }
+
+    #[test]
+    fn a_console_stalled_in_an_earlier_pass_is_overtaken_by_the_late_close() {
+        let _s = crate::drain_owner::test_serial();
+        let session = ThreadedFileSession::start("earlier_pass", 0);
+        stall_the_sink_on_a_record();
+        let skipped_before = console_lines_skipped();
+        let joined = shutdown();
+        let (total, missing) = missing_census_rows(&session.text());
+        assert!(
+            missing.is_empty(),
+            "the durable file holds {} of {total} census rows after a console stall: missing {missing:?}",
+            total - missing.len()
+        );
+        assert_eq!(
+            shutdown_outcome(),
+            Some(ShutdownOutcome::ClosedAfterStall),
+            "an expired join with the role free must deliver and close (joined {joined})"
+        );
+        // The whole census went through the late pass, so none of it was written to the console.
+        assert!(
+            console_lines_skipped() - skipped_before >= total as u32,
+            "the late pass must count the console lines it did not write: {} for {total} census rows",
+            console_lines_skipped() - skipped_before
+        );
+        crate::sync_out::test_stall::disarm();
+        wait_for_exit(std::time::Duration::from_secs(5));
+        assert_eq!(state(), SinkState::Exited, "the sink thread must exit once its console drains");
+    }
+
+    #[test]
+    fn a_cap_crossed_in_the_late_pass_does_not_wait_on_the_stalled_console() {
+        // `file.rs` reports its cap through the synchronous channel, and the stalled sink thread
+        // holds stderr's lock: a late pass that reached that channel would wait on it without a
+        // bound. 1 KiB holds the header and the stalled record and not the census, so the late
+        // pass is the one that crosses the cap.
+        let _s = crate::drain_owner::test_serial();
+        let _session = ThreadedFileSession::start("cap", 1024);
+        stall_the_sink_on_a_record();
+        let suppressed_before = crate::sync_out::suppressed_writes();
+        let joined = shutdown();
+        assert!(
+            !crate::sync_out::test_stall::gave_up(),
+            "shutdown returned only because the console stall gave up: the late pass reached the \
+             synchronous channel and waited on the stalled console (joined {joined})"
+        );
+        assert_eq!(
+            shutdown_outcome(),
+            Some(ShutdownOutcome::ClosedAfterStall),
+            "an expired join with the role free must deliver and close (joined {joined})"
+        );
+        assert!(crate::sink::file::state().1, "fixture: the late pass must have crossed the 1 KiB cap");
+        assert!(
+            crate::sync_out::suppressed_writes() > suppressed_before,
+            "the cap report the late pass did not write must be counted"
+        );
     }
 }

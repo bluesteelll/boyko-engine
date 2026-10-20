@@ -176,6 +176,8 @@ pub fn write_oracle_line(prefix: &str, body: &str) -> Option<OutMode> {
     }
     let g = acquire();
     let mut err = std::io::stderr();
+    #[cfg(test)]
+    test_stall::hold_if_armed();
     // A re-entrant write is an inner frame of a line already in progress. The leading newline is
     // what stops it corrupting the START of the outer line, which is the property the golden
     // gate's line-start match consumes.
@@ -189,6 +191,81 @@ pub fn write_oracle_line(prefix: &str, body: &str) -> Option<OutMode> {
     // report a failure has nowhere left to go.
     let _ = err.flush();
     Some(g.mode())
+}
+
+/// Writes this channel refused because the calling thread was inside a late close.
+///
+/// A `shutdown` whose join expired delivers the remaining records to the durable sinks itself, on
+/// the calling thread, while the sink thread may still be blocked writing to a console consumer
+/// that stopped reading — and that thread holds stderr's lock while it is blocked. A write from
+/// the late close would wait on that lock without a bound, so the late close refuses the channel
+/// and counts what it refused. Read alongside
+/// [`shutdown_outcome`](crate::lifecycle::shutdown_outcome).
+static SUPPRESSED: AtomicU32 = AtomicU32::new(0);
+
+/// Synchronous writes refused inside a late close (see [`SUPPRESSED`]); `0` in every process
+/// whose shutdown joined.
+#[must_use]
+pub fn suppressed_writes() -> u32 {
+    SUPPRESSED.load(Ordering::Relaxed)
+}
+
+/// A console consumer that stops reading, modelled for the lifecycle tests.
+///
+/// Armed, it stalls the next synchronous write ON THE SINK THREAD (the thread named
+/// `boyko-log-sink`) exactly where a blocked `WriteFile` would: after the channel's guard is
+/// taken, holding stderr's lock, until disarmed. Another thread's stderr write then waits on that
+/// lock, as it would behind a full pipe. The stall gives up after `GIVE_UP_AFTER` and records that
+/// it did, so a test that would otherwise hang reds with a reason instead.
+#[cfg(test)]
+pub(crate) mod test_stall {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    static ENTERED: AtomicBool = AtomicBool::new(false);
+    static GAVE_UP: AtomicBool = AtomicBool::new(false);
+
+    /// The longest a stall waits to be disarmed.
+    const GIVE_UP_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+
+    pub(crate) fn arm() {
+        ENTERED.store(false, Ordering::Release);
+        GAVE_UP.store(false, Ordering::Release);
+        ARMED.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn disarm() {
+        ARMED.store(false, Ordering::Release);
+    }
+
+    /// Whether an armed stall has caught a sink-thread write.
+    pub(crate) fn entered() -> bool {
+        ENTERED.load(Ordering::Acquire)
+    }
+
+    /// Whether a stall waited out `GIVE_UP_AFTER`: nothing disarmed it, so the test that armed it
+    /// was itself waiting on the stalled console.
+    pub(crate) fn gave_up() -> bool {
+        GAVE_UP.load(Ordering::Acquire)
+    }
+
+    pub(super) fn hold_if_armed() {
+        if !ARMED.load(Ordering::Acquire)
+            || std::thread::current().name() != Some("boyko-log-sink")
+        {
+            return;
+        }
+        let _held = std::io::stderr().lock();
+        ENTERED.store(true, Ordering::Release);
+        let start = std::time::Instant::now();
+        while ARMED.load(Ordering::Acquire) {
+            if start.elapsed() >= GIVE_UP_AFTER {
+                GAVE_UP.store(true, Ordering::Release);
+                return;
+            }
+            std::thread::yield_now();
+        }
+    }
 }
 
 /// Turn the console destination on. Called from the enable path, never at process start.
