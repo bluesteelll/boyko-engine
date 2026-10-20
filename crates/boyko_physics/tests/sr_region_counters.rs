@@ -42,10 +42,13 @@
 //!   allocator: two allocations (the scope's shared frame and its first task chunk) for the one
 //!   scope the step opens, the region's — the fill is the region's stage 0 (SR commit 7) and SR's
 //!   flip retired S4's setup scope and the per-colour scopes — on twelve warmed steps.
-//!   Some steps add one allocation of the pool's own (its deque and epoch bookkeeping: the same
-//!   scene on the retired per-colour scopes read 28 and 29 alternating), so a step may read one
-//!   more, and the fewest must read exactly two: a per-step allocation in the region path lifts
-//!   them all.
+//!   Some steps add one allocation of the pool's own (the same scene on the retired per-colour
+//!   scopes read 28 and 29 alternating), so a step may read one more, and the fewest must read
+//!   exactly two: a per-step allocation in the region path lifts them all. The calling thread's
+//!   crossbeam-epoch registration is NOT that one: under a 4-CPU mask with three busy threads a
+//!   step read `(5, 1)` in 3 of 60 runs (the triage) and 2 of 60 (ci-fix-1's capture), and the +3
+//!   was the epoch `Global`, queue sentinel and `Local` of the calling thread, which built the pool. Since ci-fix-1 `ThreadPoolBuilder::build` registers its builder before
+//!   it returns, and a counted step that still makes an epoch-sized acquisition reds by name.
 //!
 //! Spins real thread pools (intractable under Miri), so `cfg(not(miri))`.
 
@@ -522,19 +525,36 @@ fn a_warmed_region_step_allocates_two_per_scope_it_opened() {
                 scratch.touched.reset(scratch.bodies().len());
                 let r0 = solver.region_dispatches();
                 let before = ALLOC.count();
+                let epoch_before = EPOCH_SIZED.with(Cell::get);
                 solver.solve_colored(&cfg(true), &manifolds, &graph, &mut scratch);
                 let allocs = ALLOC.count().wrapping_sub(before);
-                (allocs, solver.region_dispatches() - r0)
+                let epoch = EPOCH_SIZED.with(Cell::get).wrapping_sub(epoch_before);
+                (allocs, solver.region_dispatches() - r0, epoch)
             })
-            .collect()
-    });
+            .collect::<Vec<_>>()
+    })
+    .into_iter()
+    .enumerate()
+    .map(|(step, (allocs, regions, epoch))| {
+        // Before any count is read: an epoch-sized acquisition is the calling thread's first epoch
+        // touch, and the scope bound below would misread it as the region path's.
+        assert_eq!(
+            epoch, 0,
+            "warmed step {step}: {epoch} acquisition(s) of a crossbeam-epoch size (Global 640/128, \
+             queue sentinel or sealed-bag node 2072/8, Local 2304/128) on the counted thread: its \
+             first epoch touch, not the region. The pool registers its builder at build, so this \
+             thread did not build the pool or pushed a sealed bag."
+        );
+        (allocs, regions)
+    })
+    .collect();
     eprintln!("[SR] warmed region steps at W4 (allocs, regions): {steps:?}");
     for &(allocs, regions) in &steps {
         assert_eq!(regions, 1, "non-vacuity: every warmed step opened its region");
         let scopes = 2 * regions as usize;
-        // The pool's own deque and epoch bookkeeping adds one allocation on some steps, whatever
-        // the solve does (measured on this scene on the retired per-colour scopes: 28 and 29
-        // alternating).
+        // The pool's own bookkeeping adds one allocation on some steps, whatever the solve does
+        // (measured on this scene on the retired per-colour scopes: 28 and 29 alternating). Its
+        // epoch registration is not part of it since ci-fix-1: the guard above names that.
         assert!(
             (scopes..=scopes + 1).contains(&allocs),
             "a warmed region step allocates the shared frame and the first task chunk of the one \
@@ -558,6 +578,8 @@ use std::cell::Cell;
 
 thread_local! {
     static ALLOC_COUNT: Cell<usize> = const { Cell::new(0) };
+    /// This thread's acquisitions of a crossbeam-epoch size (640/128, 2072/8, 2304/128).
+    static EPOCH_SIZED: Cell<usize> = const { Cell::new(0) };
 }
 
 struct CountingAlloc;
@@ -573,6 +595,13 @@ fn bump_alloc_count() {
     let _ = ALLOC_COUNT.try_with(|c| c.set(c.get() + 1));
 }
 
+#[inline]
+fn note_epoch_sized(size: usize, align: usize) {
+    if matches!((size, align), (640, 128) | (2072, 8) | (2304, 128)) {
+        let _ = EPOCH_SIZED.try_with(|c| c.set(c.get() + 1));
+    }
+}
+
 // SAFETY: every call forwards verbatim to the platform `System` allocator with the same layout;
 //   the wrapper only bumps a thread-local counter (through `try_with`, which no-ops while TLS is
 //   initialising, so it never re-enters the allocator). `dealloc` is an unchanged pass-through, so
@@ -580,6 +609,7 @@ fn bump_alloc_count() {
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         bump_alloc_count();
+        note_epoch_sized(layout.size(), layout.align());
         // SAFETY: forwarded verbatim to the system allocator (same layout).
         unsafe { System.alloc(layout) }
     }
@@ -591,6 +621,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         bump_alloc_count();
+        note_epoch_sized(new_size, layout.align());
         // SAFETY: forwarded verbatim; `ptr` / `layout` come from this allocator.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
