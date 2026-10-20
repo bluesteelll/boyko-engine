@@ -104,6 +104,13 @@ pub fn drain_contended() -> u32 {
 /// holding their *own* mutex, which serializes each module against itself and neither against the
 /// other — six tests failed in a full run and every one of them passed alone. Two independent
 /// serialization domains over one global resource is not serialization.
+///
+/// **The resource is the whole pipeline, not only the token.** A resident sink thread drains every
+/// lane into every open sink, so a lib test takes this lock when it drains, spawns a sink thread,
+/// opens a sink, writes the `Log` target row, or puts a record into a lane another test may drain.
+/// Traced from saved failures (ci-fix-1, triage r1 R2a/R2b): a target test that wrote `Log`
+/// beside a lifecycle session cost that session's file its whole census, and a binary-sink test
+/// without the lock found another drain's anchors in its file.
 #[cfg(test)]
 #[allow(clippy::disallowed_types)]
 pub(crate) static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());

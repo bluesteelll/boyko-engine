@@ -1325,6 +1325,15 @@ mod tests {
     impl ThreadedFileSession {
         fn start(name: &str, file_cap_bytes: u64) -> Self {
             reset();
+            // Every lane emptied first. A lane test that ran earlier under the same lock leaves its
+            // records in the ring it released (a fill test leaves it full), and this session's sink
+            // thread would deliver them into the file: a 1 KiB cap crossed, and its once-per-process
+            // report spent, before the pass a test is about (ci-fix-1, triage r1 R2a).
+            {
+                let token = crate::drain_owner::try_claim()
+                    .expect("invariant: the test lock excludes every other consumer");
+                let _ = crate::lane::drain(&token, |_, _, _, _| {});
+            }
             // `boot` arms no target and `CONTROL` is `.bss`-Off, so without this the census rows
             // would be refused at the gate and every assertion below would read the admission
             // policy, not the stall.
@@ -1472,6 +1481,10 @@ mod tests {
         let _s = crate::drain_owner::test_serial();
         let _session = ThreadedFileSession::start("cap", 1024);
         stall_the_sink_on_a_record();
+        // The crossing must be the late pass's own. A pass before it that crossed the cap would
+        // leave the late pass nothing to report, and `W0103`'s latch is once per process.
+        assert!(!crate::sink::file::state().1, "fixture: a pass before the late one crossed the cap");
+        assert!(!crate::sink::file::cap_report_spent(), "fixture: an earlier crossing spent the W0103 latch");
         let suppressed_before = crate::sync_out::suppressed_writes();
         let joined = shutdown();
         assert!(

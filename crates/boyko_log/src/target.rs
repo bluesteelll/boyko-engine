@@ -1060,17 +1060,23 @@ pub fn dyn_registered() -> usize {
 mod tests {
     use super::*;
 
-    /// Ids this module writes to.
+    /// Ids this crate's lib tests write to, each with its one owner.
     ///
     /// `cargo test` runs these concurrently **in one process**, and `CONTROL` is process-global,
     /// so two tests sharing a row would make the suite flaky by construction — a defect this
     /// campaign has already shipped once and caught by measurement rather than by reading. No two
-    /// tests below write the same id, and `a_fresh_process_has_every_other_target_off` skips
-    /// exactly this list.
+    /// tests write the same id, and `a_fresh_process_has_every_other_target_off` skips exactly
+    /// this list.
+    ///
+    /// The list spans the crate, not this module. `Log` is the lifecycle fixtures' row: the census
+    /// is emitted on `Log`, so a threaded session arms it, and a test here that wrote it at the
+    /// same time cost that session's durable file its whole census (ci-fix-1, triage r1 R2a).
     const MUTATED: &[u16] = &[
-        1, // Log       -- set_target_level_preserves_the_sibling_fields
-        5, // Query     -- control_epoch_moves_on_every_change
-        7, // Events    -- writing_one_target_does_not_disturb_its_neighbours
+        1,  // Log       -- lifecycle::tests::ThreadedFileSession, under drain_owner::test_serial
+        5,  // Query     -- control_epoch_moves_on_every_change
+        7,  // Events    -- writing_one_target_does_not_disturb_its_neighbours
+        9,  // Serialize -- set_target_level_preserves_the_sibling_fields
+        21, // Fontbake  -- census::tests::a_silent_target_is_unproven_whether_armed_or_not
     ];
 
     #[test]
@@ -1109,7 +1115,7 @@ mod tests {
     fn a_fresh_process_has_every_other_target_off() {
         // The `.bss`-zero property, observed rather than asserted about the linker: nothing in
         // this crate runs at process start, so every byte a test has not written is still the
-        // loader's zero. The three rows this module writes are skipped BY ID -- see `MUTATED`.
+        // loader's zero. The rows the crate's lib tests write are skipped BY ID -- see `MUTATED`.
         for &id in ENGINE_TARGET_IDS {
             if MUTATED.contains(&id) {
                 continue;
@@ -1146,7 +1152,7 @@ mod tests {
 
     #[test]
     fn set_target_level_preserves_the_sibling_fields() {
-        let t = <Log as LogTarget>::ID;
+        let t = <Serialize as LogTarget>::ID;
         set_target_control(t, TargetControl::new(Level::Warn, 5, true));
         set_target_level(t, Level::Debug);
 
