@@ -13,7 +13,7 @@
 
 use boyko_app::EnginePlugins;
 use boyko_ecs::App;
-use boyko_log::lifecycle::{SinkState, state};
+use boyko_log::lifecycle::{ShutdownOutcome, SinkState, state};
 use boyko_log::preset::{LogRuntimePreset, ROTATE_AT_BYTES};
 
 #[test]
@@ -65,6 +65,47 @@ fn the_editor_row_is_applied_whole_including_rotation() {
         "the header must name the row the host applied: {text:?}"
     );
 
-    assert!(boyko_log::lifecycle::shutdown(), "a threaded shutdown must join within its deadline");
+    // THE CONTRACT THAT HOLDS WHATEVER THE RUNNER'S PIPE DOES (ci-fix-1). Master's push CI went red
+    // here when the runner's stderr was not read for about a second during the census: the join is
+    // a 500 ms bound on a write to an EXTERNAL consumer. What must hold is that the durable log is
+    // whole: a join, or a shutdown that delivered and closed the durable sinks itself past a stalled
+    // console (`ClosedAfterStall`), or one that recorded a stall inside a pass (`StalledInsidePass`)
+    // and is then waited out. The 500 ms bound stays pinned where stderr is not an external pipe:
+    // `boyko_log`'s console-off threaded lifecycle tests.
+    let joined = boyko_log::lifecycle::shutdown();
+    let outcome = boyko_log::lifecycle::shutdown_outcome();
+    assert!(
+        joined
+            || matches!(
+                outcome,
+                Some(ShutdownOutcome::ClosedAfterStall | ShutdownOutcome::StalledInsidePass)
+            ),
+        "a threaded shutdown must join within its deadline, or deliver and close the durable sinks \
+         itself when the console stalls, or record a stall inside a pass: joined {joined}, outcome \
+         {outcome:?}"
+    );
+    // Bounded: a consumer that stalled drains, and `await_exit` closes the sinks once the thread
+    // has exited.
+    let exited = joined || boyko_log::lifecycle::await_exit(std::time::Duration::from_secs(30));
+    assert!(
+        exited && state() == SinkState::Exited,
+        "the resident sink thread must exit once its console drains (joined {joined}, outcome \
+         {outcome:?}, state {:?})",
+        state()
+    );
+    // The WHOLE census is in the durable file: one row per target, then the limiter line, which
+    // the census emits last and unconditionally.
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    let mut missing: Vec<String> = boyko_log::target::targets()
+        .map(|(_, name)| format!("LOG-CENSUS target={name} "))
+        .filter(|row| !text.contains(row.as_str()))
+        .collect();
+    if !text.contains("LOG-CENSUS limiter ") {
+        missing.push("LOG-CENSUS limiter ".to_owned());
+    }
+    assert!(
+        missing.is_empty(),
+        "the durable log must hold the whole census (outcome {outcome:?}): missing {missing:?}"
+    );
     let _ = std::fs::remove_file(&file);
 }
