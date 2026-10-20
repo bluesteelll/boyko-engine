@@ -174,6 +174,9 @@ pub fn write_oracle_line(prefix: &str, body: &str) -> Option<OutMode> {
     if !CONSOLE_ENABLED.load(Ordering::Relaxed) {
         return None;
     }
+    if refused_here() {
+        return None;
+    }
     let g = acquire();
     let mut err = std::io::stderr();
     #[cfg(test)]
@@ -210,6 +213,67 @@ pub fn suppressed_writes() -> u32 {
     SUPPRESSED.load(Ordering::Relaxed)
 }
 
+thread_local! {
+    /// Set while THIS thread runs a late close ([`refuse_on_this_thread`]).
+    ///
+    /// Per thread, not process-wide: the refusal is about the late close's own writes, and a
+    /// panic message from another thread at the same moment must still reach the console.
+    static REFUSED_HERE: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Whether this thread is inside a late close; counts the refusal when it is.
+#[inline]
+fn refused_here() -> bool {
+    let refused = REFUSED_HERE.with(core::cell::Cell::get);
+    if refused {
+        SUPPRESSED.fetch_add(1, Ordering::Relaxed);
+    }
+    refused
+}
+
+/// Refuses this channel on the calling thread until dropped (see [`SUPPRESSED`]).
+pub(crate) struct RefuseGuard {
+    was: bool,
+}
+
+impl Drop for RefuseGuard {
+    fn drop(&mut self) {
+        REFUSED_HERE.with(|r| r.set(self.was));
+    }
+}
+
+/// Refuse the synchronous channel on the calling thread for the guard's lifetime.
+pub(crate) fn refuse_on_this_thread() -> RefuseGuard {
+    RefuseGuard { was: REFUSED_HERE.with(|r| r.replace(true)) }
+}
+
+/// Write a block of already-formatted, newline-terminated lines to every configured synchronous
+/// destination: one guard, one write, one flush.
+///
+/// The resident sink thread stages a pass's console lines and writes them here AFTER it has
+/// released the drain role (`lifecycle`'s `sink_loop`). A console consumer that stops reading then
+/// blocks this call and nothing else: the durable sinks already hold the pass, and a `shutdown`
+/// whose join expires can still claim the role and close them. The bytes are the ones
+/// [`write_oracle_line`] would have written line by line.
+pub(crate) fn write_oracle_block(block: &[u8]) -> Option<OutMode> {
+    if !CONSOLE_ENABLED.load(Ordering::Relaxed) || block.is_empty() {
+        return None;
+    }
+    if refused_here() {
+        return None;
+    }
+    let g = acquire();
+    let mut err = std::io::stderr();
+    #[cfg(test)]
+    test_stall::hold_if_armed();
+    if g.mode() == OutMode::Reentrant {
+        let _ = err.write_all(b"\n");
+    }
+    let _ = err.write_all(block);
+    let _ = err.flush();
+    Some(g.mode())
+}
+
 /// A console consumer that stops reading, modelled for the lifecycle tests.
 ///
 /// Armed, it stalls the next synchronous write ON THE SINK THREAD (the thread named
@@ -222,6 +286,7 @@ pub(crate) mod test_stall {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     static ARMED: AtomicBool = AtomicBool::new(false);
+    static PANIC: AtomicBool = AtomicBool::new(false);
     static ENTERED: AtomicBool = AtomicBool::new(false);
     static GAVE_UP: AtomicBool = AtomicBool::new(false);
 
@@ -231,11 +296,19 @@ pub(crate) mod test_stall {
     pub(crate) fn arm() {
         ENTERED.store(false, Ordering::Release);
         GAVE_UP.store(false, Ordering::Release);
+        PANIC.store(false, Ordering::Release);
         ARMED.store(true, Ordering::Release);
+    }
+
+    /// Arm a sink-thread write to PANIC instead of stalling: a sink thread that dies.
+    pub(crate) fn arm_panic() {
+        arm();
+        PANIC.store(true, Ordering::Release);
     }
 
     pub(crate) fn disarm() {
         ARMED.store(false, Ordering::Release);
+        PANIC.store(false, Ordering::Release);
     }
 
     /// Whether an armed stall has caught a sink-thread write.
@@ -254,6 +327,11 @@ pub(crate) mod test_stall {
             || std::thread::current().name() != Some("boyko-log-sink")
         {
             return;
+        }
+        if PANIC.swap(false, Ordering::AcqRel) {
+            ARMED.store(false, Ordering::Release);
+            ENTERED.store(true, Ordering::Release);
+            panic!("test_stall: the sink thread dies in a console write");
         }
         let _held = std::io::stderr().lock();
         ENTERED.store(true, Ordering::Release);
