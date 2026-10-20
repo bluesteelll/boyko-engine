@@ -96,6 +96,8 @@ use boyko_rhi_vulkan::goldens::{
     // Render wave PX1a C9: the lit readback's format, its pixfmt decode, the radiance comparator and
     // the shipped tail's display.
     LIT_TEXEL_BYTES, golden_display_packed, lit_matches, lit_texel_rgb,
+    // OPEN-ITEMS 15: the G-buffer seam oracle (the device's own bytes, at its own hit point).
+    DeviceGbufferTexel, golden_marcher_attributes_at, host_soft_shadow_ranged, oct_decode,
 };
 use boyko_rhi_vulkan::brick_atlas::{BrickAtlas, BrickClipmap};
 use boyko_rhi_vulkan::ddgi::DdgiAtlas;
@@ -889,12 +891,26 @@ type HarnessReadbacks = (Vec<u8>, Option<Vec<u8>>, Option<Vec<f32>>, Option<Devi
 /// RGBA8 attribute images and the `gViewT` lane, row-major `py * SDF_IMG_W + px`. Each RGBA8 image
 /// is `PIXELS * 4` bytes in the order the marcher stores them (`gAlbedo` = linear base,
 /// `gNormal` = oct RG + material id BA, `gMaterial` = shadow, ao, mask, 1).
-#[expect(dead_code, reason = "the seam gate (OI1516 C3) is the first reader of these lanes")]
 struct DeviceGbuffer {
     albedo: Vec<u8>,
     normal: Vec<u8>,
     material: Vec<u8>,
     view_t: Vec<f32>,
+}
+
+impl DeviceGbuffer {
+    /// The four lanes of the texel at `(px, py)`.
+    #[expect(dead_code, reason = "the seam gate (OI1516 C3) is the first reader of the device lanes")]
+    fn texel(&self, px: u32, py: u32) -> DeviceGbufferTexel {
+        let i = (py * SDF_IMG_W + px) as usize;
+        let rgba = |img: &[u8]| -> [u8; 4] { [img[4 * i], img[4 * i + 1], img[4 * i + 2], img[4 * i + 3]] };
+        DeviceGbufferTexel {
+            albedo: rgba(&self.albedo),
+            normal: rgba(&self.normal),
+            material: rgba(&self.material),
+            view_t: self.view_t[i],
+        }
+    }
 }
 
 /// The seam harness (OPEN-ITEMS 15): [`run_gbuffer_hybrid_lit_table`]'s run (cull off, omega 1,
@@ -5221,6 +5237,82 @@ fn p6_r1_oracle_produces_shadowed_pixels() {
     println!(
         "P6 R1 host non-vacuity: {shadowed_px} SHADOWED px (shadowed-vs-unshadowed oracle delta \
          ≥ 1) of {sdf_lit_px} SDF-lit px on the twin scene"
+    );
+}
+
+/// OPEN-ITEMS 15 — the host PIN at p6_r1 twin_spheres texel (41,17), the texel the item is about
+/// (a PIN, labelled so: it restates settle E15 / triage 15 §2 on the host; the acceptance is the
+/// device seam gate, `p6_r1_multi_light_sdf_shadows_match_oracle`). Three facts:
+/// - the host's pre-quantization `255·oct.x` is 98.538048 (`e15_bytes.csv:2225`), 0.038 above the
+///   .5 tie, so the host stores 99 where the device stored 98;
+/// - the host resolve fed the device's `[98, 192]` and stored through the measured Z class IS the
+///   device readback `[2.7519531, 2.4824219, 2.2128906]` bit for bit;
+/// - light A's soft-shadow visibility changes by less than 0.5 % between the two codes (the +7.3 %
+///   is the grazing NoL, not the shadow model).
+#[test]
+fn p6_r1_texel_41_17_host_pin() {
+    use boyko_shaderdsl::pixfmt::{Channel, Rounding, quantize};
+    let edits = p6_r1_twin_scene();
+    let (header, lights) = p6_r1_multi_light_table();
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let materials = host_material_table();
+    let (px, py) = (41u32, 17u32);
+    let md = expected_mesh_depth(px, py);
+    let attrs = golden_marcher_attributes(
+        &edits, &materials, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0, flags,
+        DEFAULT_LIGHT_DIR,
+    );
+    assert_eq!(attrs.mask, 1, "(41,17) is an SDF-lit texel");
+    assert_eq!(attrs.oct_rg, [99, 192], "the host replay stores [99, 192]");
+    let own = DeviceGbufferTexel {
+        albedo: [attrs.base_rgb[0], attrs.base_rgb[1], attrs.base_rgb[2], 255],
+        normal: [attrs.oct_rg[0], attrs.oct_rg[1], 0, 0],
+        material: [attrs.shadow, attrs.ao, 255, 255],
+        view_t: attrs.view_t,
+    };
+    let (_, pre) = golden_marcher_attributes_at(
+        &edits, &materials, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0, flags,
+        DEFAULT_LIGHT_DIR, &own,
+    );
+    let code = pre.oct[0] * 255.0;
+    assert_eq!(
+        code.to_bits(),
+        98.538_05_f32.to_bits(),
+        "the pre-quantization 255·oct.x at (41,17) is {code:.6}, not settle E15's 98.538048"
+    );
+    let (ro, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+    let field = |q: [f32; 3]| boyko_sdf_math::sdf_edit_list(&edits, q);
+    let device_bytes = MarcherAttributes { oct_rg: [98, 192], ..attrs };
+    let lit = golden_deferred_resolve_table_shadowed(device_bytes, ro, rd, &materials, &header, &lights, &field);
+    let stored = lit.map(|x| quantize(Channel::F16, x, Rounding::TowardZero));
+    let device = [2.751_953_1_f32, 2.482_421_9, 2.212_890_6];
+    assert_eq!(
+        stored.map(f32::to_bits),
+        device.map(f32::to_bits),
+        "the host resolve fed [98, 192], stored through Z, must be the device readback: got {stored:?}"
+    );
+    // Light A (table index 1): the ranged march toward it from the decoded normal of each code.
+    let pos_a = [lights[1].pos_range[0], lights[1].pos_range[1], lights[1].pos_range[2]];
+    let vis_a = |oct: [u8; 2]| {
+        let n = oct_decode([oct[0] as f32 / 255.0, oct[1] as f32 / 255.0]);
+        let p = [ro[0] + rd[0] * attrs.view_t, ro[1] + rd[1] * attrs.view_t, ro[2] + rd[2] * attrs.view_t];
+        let b = boyko_rhi_vulkan::compute::SHADOW_NORMAL_BIAS;
+        let pb = [p[0] + n[0] * b, p[1] + n[1] * b, p[2] + n[2] * b];
+        let to_l = [pos_a[0] - p[0], pos_a[1] - p[1], pos_a[2] - p[2]];
+        let dist = (to_l[0] * to_l[0] + to_l[1] * to_l[1] + to_l[2] * to_l[2]).sqrt();
+        let l = [to_l[0] / dist, to_l[1] / dist, to_l[2] / dist];
+        host_soft_shadow_ranged(pb, n, l, dist, &field)
+    };
+    let ratio = vis_a([98, 192]) / vis_a([99, 192]) - 1.0;
+    assert!(
+        (-0.005..=0.0).contains(&ratio),
+        "light A's visibility moves {:.3} % between the two codes — the shadow model, not the normal",
+        ratio * 100.0
+    );
+    println!(
+        "OI15 host pin (41,17): 255·oct.x = {code:.6}; resolve([98,192]) through Z = {stored:?} (the \
+         device readback); vis_A(98)/vis_A(99) - 1 = {:.3} %",
+        ratio * 100.0
     );
 }
 
