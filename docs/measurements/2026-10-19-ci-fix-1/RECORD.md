@@ -7,7 +7,7 @@ trunk sync 29739376 (PHYS-TOOL-1, no file of this lane).
 
 | item | red | class | fixed in |
 |---|---|---|---|
-| F1 | `log_host_editor`: "a threaded shutdown must join within its deadline" | the sink thread wrote the console (an external consumer) first and under the drain role; a stalled pipe starved the durable file, kept the role, and `shutdown` gave up without closing anything | `d1cf18f4` (red-first), `eb5dc569`, `589c31a7`, `41257568` |
+| F1 | `log_host_editor`: "a threaded shutdown must join within its deadline" | the sink thread wrote the console (an external consumer) first and under the drain role; a stalled pipe starved the durable file, kept the role, and `shutdown` gave up without closing anything | `d1cf18f4` (red-first), `eb5dc569`, `589c31a7`, `41257568`; round 2: `93b6206c`, `87304470`, `aff09fe7` (red-first), `818537f9` |
 | F2 | `narrowphase_carry`: a moved step 6 acquisitions against a fewest of 3 | a thread's FIRST crossbeam-epoch pin allocates its `Local` (and, process-first, `Global` and the queue sentinel) inside whatever frame its first steal lands in | `dd6685a8` (red-first), `eca7f277`, `c29e1bc4`, `11276668`, `c5a9427a` |
 | F3 | `view::tests::perspective_bridge_reproduces_legacy_push_constants`, Linux release, one ulp | one side's `tan` constant-folded by LLVM, the other computed by the C runtime's `tanf` | `07ac21e1` |
 
@@ -162,6 +162,42 @@ that never read an epoch size.
   (counted in `console_lines_skipped`).
 - At W4 a pool's `PoolInner::workers` slice is 640/128, the collector `Global`'s size (critique O4); the class gate
   asserts `Local`s only at W > 1, and the physics guards run at W1 or on one thread.
+
+## Round 2 (tester r1 R1 / R2, review r1 W1; triage r1)
+
+**R1 (`93b6206c`).** UG-02 was red at `6f528d39`: C7's `thread_local!` `REFUSED_HERE` had no ledger row. One tls
+row, form and class inherited from its sibling `sync_out::TOKEN_ANCHOR`, and the declared pins line `CI-FIX-1-R2`.
+
+**R2a (`87304470`, R2b folded in).** The five threaded lifecycle tests failed 13 of 150 release runs at the default
+thread count. Two isolation holes. (1) `target::tests::set_target_level_preserves_the_sibling_fields` wrote the `Log`
+row without the lock while a session had armed it for the census, which is emitted on `Log`. That test now owns
+`Serialize`, and `MUTATED` names every row the crate's lib tests write, each with its one owner. (2) An earlier lane
+test's records, left in the spare lane it released, reached a session's 1 KiB-capped file. They crossed the cap on
+the sink thread and spent `W0103`'s once-per-process latch. A session now drains every lane before it enables, and
+the cap test asserts as fixtures that the crossing is its late pass's own. The unlocked tests that put records where
+a session drains, or open a sink a drain writes to, take `drain_owner::test_serial`; its doc states the rule.
+
+**W1 (`aff09fe7` red-first, `818537f9` fix).** `report_stalled_exit` skipped its line only for the staged overflow.
+A console stalled on any other synchronous write the pass makes under the role (`W0103`, `W0112`, the un-laned
+fallback) hung the exit path in stderr's lock. The report now goes through `sync_out`'s idle write. That write never
+steals: it waits at most the channel's 50 ms deadline for `OUT_OWNER` to be free with no write in flight
+(`WRITES_IN_FLIGHT`, which also sees a writer that stole), and refuses otherwise. The overflow flag is gone.
+
+| gate | predicted | observed |
+|---|---|---|
+| r2 R1 UG-02 at the parent | red, 1 extra | `48 passed; 1 failed` (tester r1); at `93b6206c` 49 of 49 |
+| r2 R2a hole 2: the lane fill test, then the cap test, one thread, the session's lane discard removed | red at the fixture "a pass before the late one crossed the cap" | exactly that; the console shows `W0103` once and 409 residue lines (0 and 0 with the discard) |
+| r2 R2a hole 1: a scratch session beside a thread looping the old target-test body | on `Log` red, on `Serialize` green | "lacks 25 of 28 census rows (joined true)"; green |
+| r2 W1 the new lifecycle test at `aff09fe7` | red at its `gave_up` assertion after the 10 s stall bound | exactly that, both profiles, "(wrote true)" |
+| r2 W1 mutation: the idle acquire ignores `WRITES_IN_FLIGHT` | the stealer unit test red | red at its `gave_up` assertion after 10.05 s |
+| r2 re-measure, boyko-log lib, default threads | 0 failures | at `87304470`: release 150 of 150, debug 60 of 60; at `818537f9`: the same |
+
+Moved on purpose: UG-02 line `CI-FIX-1-R2` (1683 / 3026 / 1333, pool-utils-log 183; pool sites `5 7` unchanged).
+
+Residuals: R2c (the control test's 500 ms join cannot hold under Miri; boyko-log is in no Miri leg) is deferred. The
+idle write cannot see a writer outside `sync_out` (an `eprintln!`), nor a third writer that steals inside the
+microseconds between its check and its write. `await_exit` does not read `SINK_DIED` (review r1 OQ1): a sink thread
+that dies during `Exiting` costs the 2 s grace and one misattributed report, never a loss or a hang (accepted).
 
 ## Quiet-window commands (the orchestrator's; cut section 7)
 
