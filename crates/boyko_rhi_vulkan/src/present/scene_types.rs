@@ -1227,16 +1227,12 @@ pub struct TaaActivation<'a> {
     /// from `gViewT`, never a `rayQuery` trace), mirroring [`AaActivation::pipeline`]'s
     /// always-built discipline.
     pub resolve_pipeline: &'a ComputePipeline,
-    /// The TAA resolve compute pipeline's bind-group LAYOUT — the DEDICATED 8-binding shape {
+    /// The TAA resolve compute pipeline's bind-group LAYOUT — the DEDICATED shape {
     /// `gLit` COMBINED_IMAGE_SAMPLER @0, `gViewT` STORAGE @1, `gHistIn` STORAGE @2, `gHistOut`
-    /// STORAGE @3, `gAaOut` STORAGE @4, the `ResolvedTaa` UBO @5, the camera UBO @6
-    /// (UNJITTERED — C1 cut), the `MotionCam` UBO @7 }. [`GBufferTargets`] writes a per-FIF
+    /// STORAGE @3, (no @4 since render wave PX1a: `gAaOut` retired), the `ResolvedTaa` UBO @5,
+    /// the camera UBO @6 (UNJITTERED — C1 cut), the `MotionCam` UBO @7 }. [`GBufferTargets`] writes a per-FIF
     /// `taa_resolve_set` against it once per extent (the SSAO `ssao_set` precedent).
     pub resolve_layout: &'a VulkanBindGroupLayout,
-    /// `[R8G8B8A8_UNORM]` — `aa_out`'s format, carried here (rather than hard-coded at the call
-    /// site) so a future format change has one source of truth, mirroring [`SmaaActivation`]'s
-    /// `color_formats`-shaped fields.
-    pub color_formats: &'a [Format],
     /// LINEAR/ClampToEdge sampler for the resolve's `lit` combined-image-sampler read (the same
     /// resolve→AA-input seam FXAA's `fxaa_set` binds `lit` through). DISTINCT boot object from
     /// [`AaActivation::sampler`]/[`SmaaActivation::sampler`].
@@ -1250,13 +1246,26 @@ pub struct TaaActivation<'a> {
 }
 
 /// TAA rung T3: the post-resolve CONTRAST-ADAPTIVE SHARPEN (AMD FidelityFX CAS) pass activation
-/// (`rcas.comp` / [`crate::compute::rcas_spirv`]). `None` = OFF, the 0%-gate: no `taa_resolved`
-/// intermediate image, no `rcas_set`, the resolve writes `aa_out` directly (byte-identical to
-/// the pre-RCAS resolve — see `rcas.comp.hlsl`'s module doc for the full "aa_out ping-pong"
-/// placement rationale). `Some` REQUIRES [`GBufferScene::taa`] to ALSO be `Some` — RCAS is a
+/// (`rcas.comp` / [`crate::compute::rcas_spirv`]). `None` = OFF, the 0%-gate: no `aa_out`, no
+/// `rcas_set`, no `cas` pass. Since render wave PX1a (D-G3) CAS runs after `post_final`, in a
+/// declared `cas` pass reading `display` and writing `aa_out`, which the present blit samples. `Some` REQUIRES [`GBufferScene::taa`] to ALSO be `Some` — RCAS is a
 /// pure post-process over the resolve's OWN intermediate output, never a standalone pass
 /// (enforced by a `debug_assert!` in [`GBufferTargets::create`](crate::present::targets::GBufferTargets::create)).
 ///
+/// Render wave PX1a (D-G5): the `post_final` pass's boot objects — its compute pipeline and the
+/// 3-binding layout `POST_FINAL_BINDINGS` prints: `gScene` @0 (`SAMPLED_IMAGE` recorded at
+/// `GENERAL` — the scene input, `taa_hist[fi]` under TAA, `lit_native` under SSAA, `lit[fi]`
+/// otherwise), `gDisplay` @1 (`STORAGE_IMAGE`, `display`), the `PostFinal` UBO @2. Built once in
+/// `GpuSceneBundles::boot`; the per-FIF UBO + set rings live in `GBufferTargets`. The module is
+/// the generated `post_final.comp` (`compute::post_final_spirv`).
+#[derive(Clone, Copy)]
+pub struct PostFinalActivation<'a> {
+    /// The compute pipeline (`numthreads(8, 8, 1)`; a 4-byte push range the shader never reads).
+    pub pipeline: &'a ComputePipeline,
+    /// Its bind-group layout (the three bindings above).
+    pub layout: &'a VulkanBindGroupLayout,
+}
+
 /// `#[derive(Clone, Copy)]` — a bundle of borrows plus the `sharpness` scalar, mirroring
 /// [`TaaActivation`]'s own shape.
 #[derive(Clone, Copy)]
@@ -1268,8 +1277,8 @@ pub struct RcasActivation<'a> {
     /// runtime.
     pub rcas_pipeline: &'a ComputePipeline,
     /// The RCAS compute pipeline's bind-group LAYOUT — the DEDICATED 2-binding shape { `gRcasIn`
-    /// STORAGE @0 (`taa_resolved`, the READ — the resolve's re-pointed intermediate output),
-    /// `gAaOut` STORAGE @1 (`aa_out`, the WRITE — the present-blit's input, unchanged) }.
+    /// STORAGE @0 (`display`, the READ — `post_final`'s output, at GENERAL), `gAaOut` STORAGE @1
+    /// (`aa_out`, the WRITE — the present-blit's input) }.
     /// [`GBufferTargets`] writes a per-FIF `rcas_set` against it once per extent.
     pub rcas_layout: &'a VulkanBindGroupLayout,
     /// The owner-set `SharpenMode::Rcas` (boyko_render's) strength in
@@ -2633,6 +2642,17 @@ pub struct GBufferScene<'a> {
     /// OWN intermediate output); never armed standalone (enforced by a `debug_assert!` in
     /// [`GBufferTargets::create`](crate::present::targets::GBufferTargets::create)).
     pub rcas: Option<RcasActivation<'a>>,
+    /// Render wave PX1a (D-G5): the post seam's tail pass — UNCONDITIONAL, every path, every
+    /// frame (it is what writes `display`, the image the present blit and every display-referred
+    /// pass read). See [`PostFinalActivation`].
+    pub post_final: PostFinalActivation<'a>,
+    /// Render wave PX1a (D-G5, D-O3): `post_final`'s 32-byte constant buffer as eight words
+    /// (`boyko_render::post::gpu::PostFinalGpu`'s bytes: mode word, exposure ratio, the dispatch
+    /// extent, four reserved). The host computes it once per frame; it seeds both UBO ring slots
+    /// when the targets are (re)built (so frame 0 and a rebuild frame dispatch over the right
+    /// extent before the host's first per-frame upload reaches the new ring) and the receipt
+    /// records it as `post_word0..7`.
+    pub post_final_words: [u32; 8],
     /// Mesh foundation M3: the per-mesh instanced-arm draw BATCH LIST. An EMPTY slice
     /// (every pre-M2 scene) records the LEGACY pass-A draw — `vkCmdDraw(vertex_count, 1,
     /// 0, 0)` over [`Self::vertex_buffer`] binding [`Self::instance_bind_group`] (the

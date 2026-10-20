@@ -40,11 +40,12 @@
 //! `shadow_apply.hlsli`'s `csm_pcf_disc` use) — NOT a `-D` shader variant, so this rung
 //! compiles to ONE `.spv`. Each field's doc states its wiring status.
 
-use boyko_macros::Resource;
+use boyko_macros::{Resource, SystemSet};
 
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 
 use crate::aa_config::ResolvedTaa;
+use crate::post::ResolvedPost;
 
 // ---- the knob enums (capability is structural: the shipped behaviour is each enum's #[default]) --
 
@@ -520,7 +521,7 @@ pub fn resolve_taa(cfg: &TaaConfig) -> ResolvedTaa {
         default_blend: cfg.default_blend,
         min_blend: cfg.min_blend,
         variance_gamma: cfg.variance_gamma,
-        _pad: 0.0,
+        pre_ratio_delta: 0.0,
         clamp_word: cfg.clamp.as_word(),
         clamp_space_word: cfg.clamp_space.as_word(),
         clip_word: cfg.clip.as_word(),
@@ -541,12 +542,22 @@ pub fn resolve_taa(cfg: &TaaConfig) -> ResolvedTaa {
 /// [`TaaConfig`] and writes the derived UBO carrier (the one-producer-per-field write
 /// discipline).
 //
+///
+/// Render wave PX1a (D-E2): also writes [`ResolvedTaa::pre_ratio_delta`] = `pre_ratio − 1` from
+/// THIS frame's [`ResolvedPost`] (it runs `.after_set(PostPolicySet)`), so the resolve rescales the
+/// history by the exposure ratio before the clip; `0` on frame 0, on a cut and at a steady exposure.
+//
 // `clippy::needless_pass_by_value`: `Res`/`ResMut` are by-value `SystemParam`s read/written
 // through reborrows — the same false-positive `resolve_shadow_denoise_policy` carries.
 #[allow(clippy::needless_pass_by_value)]
-pub fn resolve_taa_policy(cfg: Res<TaaConfig>, mut out: ResMut<ResolvedTaa>) {
-    *out = resolve_taa(&cfg);
+pub fn resolve_taa_policy(cfg: Res<TaaConfig>, post: Res<ResolvedPost>, mut out: ResMut<ResolvedTaa>) {
+    *out = ResolvedTaa { pre_ratio_delta: post.pre_ratio - 1.0, ..resolve_taa(&cfg) };
 }
+
+/// The set [`resolve_taa_policy`] runs in (render wave PX1a): `AaPlugin` orders it
+/// `.after_set(PostPolicySet)` so the TAA ratio is this frame's.
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TaaPolicySet;
 
 #[cfg(test)]
 mod tests {
@@ -624,14 +635,14 @@ mod tests {
     /// `0` — a zeroed/never-resolved [`ResolvedTaa`] UBO must degrade to today's shipped
     /// behaviour, never a different clip/filter/blend arm (mirrors `CsmPcfKernel::Tent13 == 0`'s
     /// load-bearing discipline in `csm_config.rs`) — AND every scalar equals the shipped C1
-    /// tuning (`_pad`/`depth_tol` included, so nothing silently drifted).
+    /// tuning (`pre_ratio_delta`/`depth_tol` included, so nothing silently drifted).
     #[test]
     fn every_default_knob_resolves_to_mode_word_zero() {
         let resolved = resolve_taa(&TaaConfig::default());
         assert_eq!(resolved.default_blend, 0.1);
         assert_eq!(resolved.min_blend, 0.015);
         assert_eq!(resolved.variance_gamma, 1.0);
-        assert_eq!(resolved._pad, 0.0);
+        assert_eq!(resolved.pre_ratio_delta, 0.0);
         assert_eq!(resolved.clamp_word, 0);
         assert_eq!(resolved.clamp_space_word, 0);
         assert_eq!(resolved.clip_word, 0);
@@ -670,7 +681,7 @@ mod tests {
                 default_blend: 0.2,
                 min_blend: 0.03,
                 variance_gamma: 1.5,
-                _pad: 0.0,
+                pre_ratio_delta: 0.0,
                 clamp_word: ClampShape::MinMax.as_word(),
                 clamp_space_word: ClampSpace::YCoCg.as_word(),
                 clip_word: ClipMode::Clamp.as_word(),

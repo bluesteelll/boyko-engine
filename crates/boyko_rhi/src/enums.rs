@@ -1020,11 +1020,14 @@ impl BlendState {
     /// GPU particle system's P0 blend (`docs/PARTICLES-PLAN.md` D7/D10).
     ///
     /// Unlike the two alpha states above, this one is COMMUTATIVE, which is the whole
-    /// reason P0 ships its particles UNSORTED: under the 8-bit saturation of an LDR
-    /// target `sat(sat(x) + y) == min(1, x + y)`, so the composited result does not
-    /// depend on the order the instances retire in. The destination factor is `ONE`
-    /// rather than `ONE_MINUS_SRC_ALPHA` precisely so no term of the sum can attenuate
-    /// what was already there — an attenuating factor would re-introduce order
+    /// reason P0 ships its particles UNSORTED. Since render wave PX1a the target (`lit`)
+    /// is a FLOAT attachment (RGBA16F) with no saturation: the sum is commutative in exact
+    /// arithmetic, and a different retirement order changes the composited result only at
+    /// the rounding level — at most one ULP of the binary16 mantissa per add (the
+    /// attachment's measured blend error, `goldens::RGBA16F_ROUNDING`). (Before PX1a the
+    /// 8-bit saturation made it exact: `sat(sat(x) + y) == min(1, x + y)`.) The destination
+    /// factor is `ONE` rather than `ONE_MINUS_SRC_ALPHA` precisely so no term of the sum can
+    /// attenuate what was already there — an attenuating factor would re-introduce order
     /// dependence and with it the sort P0 does not have.
     ///
     /// The pipeline that uses it pairs it with `depth_test = ON` / `depth_write = OFF`,

@@ -16,8 +16,9 @@
 //! * the dump exists, decodes, and is the requested extent;
 //! * it is not a black frame (the failure mode a hash gate reports as a plain mismatch and a
 //!   screenshot reviewer reports as "the light is off");
-//! * the emitter's screen region holds at least [`MIN_PARTICLE_PIXELS`] near-white pixels — the
-//!   additive billboards actually reached `lit`. An armed subsystem whose sim never publishes
+//! * the emitter's screen region holds at least [`MIN_PARTICLE_PIXELS`] near-white pixels (at or
+//!   above [`display_white_floor`], the display code of white `lit` [`CORE_LIT`]) — the additive
+//!   billboards actually reached `lit`. An armed subsystem whose sim never publishes
 //!   `instanceCount`, or whose draw is declared and never recorded, renders a scene that is
 //!   otherwise perfectly fine, and no image hash can say WHICH of those two it was.
 //!
@@ -52,12 +53,53 @@
 
 mod particle_scene;
 
+use boyko_app::post_host::{post_final_gpu, resolved_post_for_frame};
+use boyko_render::light::LightingConfig;
+use boyko_render::post::ResolvedPost;
+use boyko_shaderdsl::cf::HostTex2;
+use boyko_shaderdsl::post::{eval_params, post_final_eval, ubo_word};
 use particle_scene::{CAPTURE_FRAME, LabClockWitness};
 
-/// Near-white floor for the "a particle landed here" test. The additive billboards carry
-/// `color_keys[0] == 0xFFFFFFFF` and no texture, so their cores saturate `lit`'s 8 bits; the
-/// sun-lit floor and the occluder quad sit well below this on all three channels at once.
-const WHITE_FLOOR: u8 = 240;
+/// The "a particle landed here" premise, stated on `lit`: a billboard pixel reaches at least this
+/// white radiance (per channel, in units of the frame's pre-exposure) and nothing else in the
+/// emitter's region does.
+///
+/// Render wave PX1a (ruling 84 (2)) re-stated it for the HDR display. Before PX1a the cores
+/// saturated the 8-bit `lit`, the display read 255, and a fixed display floor of 240 held. Since
+/// PX1a, `lit` is RGBA16F and `display` is `post_final`'s tonemap of it: the brightest cores read
+/// 239 / 241, and that floor rejected particles that were drawn. The premise lives on `lit` now:
+/// the lab effect is white in all four colour keys, untextured and ADDITIVE, and its fragment
+/// writes `colour · pre_exposure`. Every covered pixel therefore gains `pre_exposure · 1.0` on all
+/// three channels, so the fan reaches lit > 1.0 white over any background, whatever the overlap.
+const CORE_LIT: f32 = 1.0;
+
+/// The display floor of [`CORE_LIT`]: the code `post_final_eval` maps the white `lit` texel
+/// `pre_exposure · CORE_LIT` to under this run's resolved post settings (the words
+/// [`post_final_gpu`] uploads), quantised like the UNORM store, least channel. Under the fixture's
+/// defaults (ACES Hill, exposure 1) it is 205.
+///
+/// Measured on the PX1a display (ruling 84's runs, 512^2, frame 30): armed, 354
+/// (`particle_additive`) and 371 (`particle_sdf_collide`) fan pixels clear it, all of them at 210
+/// or above. With particles off (`BOYKO_PARTICLE_MODE=off`) none does: the brightest fan pixel's
+/// least channel is 195 / 181, so the sun-lit floor stays below lit 1.0 white on at least one
+/// channel. The occluder scene (`BOYKO_PARTICLE_OCCLUDER=1`, deferred and vb) reads 265 armed and
+/// 0 off (at most 181 / 195).
+fn display_white_floor(post: &ResolvedPost) -> u8 {
+    let gpu = post_final_gpu(post, [1, 1]);
+    let mut words = [0u32; 8];
+    words[ubo_word("mode_words")] = gpu.mode_words;
+    words[ubo_word("exposure_ratio")] = gpu.exposure_ratio.to_bits();
+    words[ubo_word("extent")] = 1;
+    words[ubo_word("extent") + 1] = 1;
+    let r = post.pre_exposure * CORE_LIT;
+    let texel = [[r, r, r, 1.0]];
+    let o = post_final_eval([0, 0], &eval_params(words), HostTex2::new(&texel, 1, 1));
+    [o[0], o[1], o[2]]
+        .map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+        .into_iter()
+        .min()
+        .expect("invariant: three channels")
+}
 
 /// The minimum count of near-white pixels inside the emitter's screen region for the run to count
 /// as "the particles reached `lit`".
@@ -123,18 +165,25 @@ fn particle_lab_screenshot_dump() {
     let image = particle_scene::read_bmp(&dump);
     let win = particle_scene::window_size();
     let nonblack = image.count_at_least(NONBLACK_FLOOR);
-    let white = image.count_white(WHITE_FLOOR);
+    let (post, _) = resolved_post_for_frame(
+        app.world().try_resource::<ResolvedPost>(),
+        app.world().try_resource::<LightingConfig>(),
+    );
+    let white_floor = display_white_floor(&post);
+    let white = image.count_white(white_floor);
     // The emitter sits on the view axis and the cone opens UPWARD, so the fan occupies the middle
     // horizontal third and everything above the emitter's own row. In top-down pixel coordinates
     // that is x in [1/6 w, 5/6 w) and y in [0, 3/4 h).
     let region = (win / 6, 0, win - win / 6, win * 3 / 4);
-    let white_in_fan = image.count_white_in(region.0, region.1, region.2, region.3, WHITE_FLOOR);
+    let white_in_fan = image.count_white_in(region.0, region.1, region.2, region.3, white_floor);
     let alpha_pixels = image.count_blue_dominant(ALPHA_BLUE_FLOOR, ALPHA_BLUE_MARGIN);
     println!(
         "particle_lab: dump={dump} {}x{} nonblack={nonblack} white={white} \
-         white_in_fan={white_in_fan} alpha_pixels={alpha_pixels} max_channel={} sha256={}",
+         white_in_fan={white_in_fan} white_floor={white_floor} (lit {CORE_LIT} x pre_exposure {}) \
+         alpha_pixels={alpha_pixels} max_channel={} sha256={}",
         image.width,
         image.height,
+        post.pre_exposure,
         image.max_channel(),
         particle_scene::sha256_file(&dump),
     );
@@ -168,8 +217,9 @@ fn particle_lab_screenshot_dump() {
     );
     assert!(
         white_in_fan >= MIN_PARTICLE_PIXELS,
-        "no particles reached `lit`: {white_in_fan} near-white pixels in the emitter's screen \
-         region, floor {MIN_PARTICLE_PIXELS}. The subsystem was ARMED, so this is the armed \
+        "no particles reached `lit`: {white_in_fan} pixels in the emitter's screen region at or \
+         above display {white_floor} (white lit {CORE_LIT} x pre-exposure), floor \
+         {MIN_PARTICLE_PIXELS}. The subsystem was ARMED, so this is the armed \
          pipeline failing silently.{}",
         if particle_scene::on_deferred_depth_encode_path() {
             "\n         THIS RUN IS ON THE DEFERRED PATH, whose depth buffer holds the G-buffer \

@@ -26,7 +26,9 @@
 //!   **all-declarators mask** [`DECL_ALL`] until the owning rung narrows it, in its own commit —
 //!   so a bare declaration on an unforeseen declarator cannot hide outside the mask.
 //! - The owning rung flips `expect_present` and fills `seed_stages_min` in the commit that
-//!   declares the resource. `seed_stages_min == 0` means "the owning rung fills it".
+//!   declares the resource. `seed_stages_min == 0` means "the owning rung fills it". A landed row
+//!   the census's max-config frame does not declare keeps `expect_present: false` and is named in
+//!   [`LANDED_OFF_MAX_CONFIG`].
 //! - `kind` is {image, buffer} only: a mip chain is an image (a mip count is a frame-dependent
 //!   shape — `hzb_pyramid` has one level on an HZB-off frame — not a class property).
 //!
@@ -145,6 +147,11 @@ const fn wave(
     }
 }
 
+/// A wave row its owning rung has landed: `FrameLocal` image, the narrowed mask and stages.
+const fn landed(name: &'static str, declarators: u8, min: u32, expect_present: bool) -> SeedClassRow {
+    SeedClassRow { declarators, seed_stages_min: min, expect_present, ..wave(name, "PX1a", SeedKind::Image, SeedClass::FrameLocal, min) }
+}
+
 use SeedClass::{CrossFrame as CF, FrameLocal as FL};
 use SeedKind::{Buffer as B, Image as I};
 
@@ -194,8 +201,13 @@ pub const SEED_CLASS_TABLE: &[SeedClassRow] = &[
     head("p_render_sorted", D | F | V, B, VERTEX, false),
     head("p_sort_bins", D | F | V, B, COMPUTE, true),
     // --- the wave (H0 rev-5 table; 04 §B H0 row) ---
-    wave("display", "PX1a", I, FL, 0),
-    wave("lit_native", "PX1a", I, FL, 0),
+    // Render wave PX1a (D-G1): the post seam's two single targets, landed — `display` on every
+    // declarator's every frame (`post_final` writes it, `present_sample` ends it at
+    // SHADER_READ_ONLY for the FRAGMENT blit and the COMPUTE CAS read before it); `lit_native`
+    // on Deferred and VB, written by the SSAA downsample and read by `post_final` at COMPUTE.
+    // `lit_native` stays off the census's max-config (TAA) frame, so `expect_present: false`.
+    landed("display", D | F | V, COMPUTE | FRAGMENT, true),
+    landed("lit_native", D | V, COMPUTE, false),
     wave("lit_prev", "R4", I, FL, 0),
     wave("scene_color_mips", "R4", I, FL, 0),
     wave("post_chain", "PX3", I, FL, 0),
@@ -215,6 +227,13 @@ pub const SEED_CLASS_TABLE: &[SeedClassRow] = &[
     wave("post_lut", "PX5", I, CF, 0),
     wave("exposure_state", "PX3", B, CF, 0),
 ];
+
+/// Rows their rung has LANDED — mask narrowed, `seed_stages_min` filled — that the census's
+/// max-config frame still does not declare, so `expect_present` stays `false` (render wave PX1a
+/// Q10: `lit_native` is SSAA-only and the max config is TAA). The pre-registration rule (the
+/// all-declarators mask while `expect_present` is false) does not apply to them; each must carry
+/// non-zero minimum stages, the mark of a landed row.
+pub const LANDED_OFF_MAX_CONFIG: &[&str] = &["lit_native"];
 
 /// The row `name` has for `declarator`, if any.
 pub fn row_for(name: &str, declarator: u8) -> Option<&'static SeedClassRow> {

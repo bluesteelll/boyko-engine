@@ -17,12 +17,12 @@ impl Renderer<'_> {
     /// Records the FXAA fullscreen pass into `cmd`: barrier `aa_out[fi]` (UNDEFINED →
     /// COLOR_ATTACHMENT_OPTIMAL), `vkCmdBeginRendering` (DONT_CARE load — the fullscreen
     /// triangle overwrites every texel), bind the FXAA pipeline + `fxaa_set[fi]` (INPUT =
-    /// `lit[fi]`, never `aa_out`) + dynamic viewport/scissor, push `rcp_frame`,
+    /// `display`, never `aa_out`) + dynamic viewport/scissor, push `rcp_frame`,
     /// `vkCmdDraw(3, 1, 0, 0)`, `vkCmdEndRendering`, then barrier `aa_out[fi]`
     /// (COLOR_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL) so the present-blit's sample
     /// (pass C, recorded right after this call) sees a valid, ordered read.
     ///
-    /// `lit[fi]` needs NO barrier here: the `present_sample` graph pass recorded
+    /// `display` needs NO barrier here: the `present_sample` graph pass recorded
     /// immediately before this call already left it in `SHADER_READ_ONLY_OPTIMAL`, and
     /// this pass's sample of it is a valid read-after-read.
     ///
@@ -144,7 +144,7 @@ impl Renderer<'_> {
         // SAFETY: recording is open; `rendering` is fully initialized — its color
         // attachment names the live `aa[fi]` view (now COLOR_ATTACHMENT_OPTIMAL);
         // dynamic rendering is enabled on this device. `activation.pipeline` + its layout
-        // belong to this device (caller contract); `set[fi]` binds `lit[fi]` (the FXAA
+        // belong to this device (caller contract); `set[fi]` binds `display` (the FXAA
         // INPUT, already SHADER_READ_ONLY_OPTIMAL) + the LINEAR sampler at set 0 of that
         // layout. `rcp_frame` is pushed with the pipeline's own `push_stages` (FRAGMENT — only
         // `fxaa.fs` reads the block) over the whole 8-byte range, as VUID-01796 requires.

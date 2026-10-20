@@ -213,7 +213,7 @@ pub fn resolve_aa_policy(cfg: Res<AaConfig>, mut resolved: ResMut<ResolvedAa>) {
 /// doc — the two are PINNED to each other).
 ///
 /// Grew 16 -> 48 B at rung T2 (`crate::taa_config`): the first vec4 (`default_blend`/
-/// `min_blend`/`variance_gamma`/`_pad`) is UNCHANGED from C1, byte-for-byte; the trailing two
+/// `min_blend`/`variance_gamma`/`pre_ratio_delta`) keeps C1's offsets; the trailing two
 /// vec4s are the eight T2 mode words/scalars [`resolve_taa`](crate::taa_config::resolve_taa)
 /// forwards from [`TaaConfig`](crate::taa_config::TaaConfig). [`resolve_taa_policy`](crate::taa_config::resolve_taa_policy)
 /// is the SINGLE writer (Principle 0: the UBO's source of truth lives in the engine's own
@@ -229,9 +229,11 @@ pub struct ResolvedTaa {
     pub min_blend: f32,
     /// The 3×3 neighborhood variance-clip AABB half-width scale (× σ, Salvi-style). Offset 8.
     pub variance_gamma: f32,
-    /// std140 padding (unread) — keeps the first 16-byte vec4 stride explicit (UNCHANGED from
-    /// C1). Offset 12.
-    pub _pad: f32,
+    /// The history's re-exposure, `pre_N / pre_{N-1} − 1` (render wave PX1a; offset 12, C1's
+    /// padding slot): the resolve scales the history by `1 + pre_ratio_delta` before the clip,
+    /// so an exposure change is not read as a disocclusion. `0` is the identity (a static
+    /// exposure, and a zeroed / never-resolved UBO).
+    pub pre_ratio_delta: f32,
 
     /// [`ClampShape`](crate::taa_config::ClampShape) mode word — the neighborhood bound shape.
     /// `0` (`Variance`, the shipped `mean ± γσ` AABB) is the shipped default — LOAD-BEARING (a

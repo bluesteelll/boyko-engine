@@ -6,8 +6,8 @@
 //
 // # THE SUBJECT IS THE ALPHA CLASS ONLY, and that is structural rather than an optimisation
 //
-// The additive class is COMMUTATIVE -- `ONE/ONE` under the 8-bit saturation `lit` imposes gives
-// `sat(sat(x) + y) = min(1, x + y)`, which is order-independent (plan D10, research fact R5) -- so
+// The additive class is COMMUTATIVE -- `ONE/ONE` into the float `lit` (RGBA16F since PX1a) is
+// order-free up to one binary16 ULP of rounding per add (plan D10, research fact R5) -- so
 // it needs no sort and is not given one. This pass never touches `p_render[0, additive.count)`.
 // The alpha class occupies `p_render[capacity - alpha.count, capacity)`, class-dense and
 // DESCENDING (rank `i` at `capacity - 1 - i`), which is what the sim's mirrored render index wrote.

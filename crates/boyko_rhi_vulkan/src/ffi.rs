@@ -1170,6 +1170,44 @@ const _: () = assert!(
     "COLOR_ATTACHMENT bit collides with the STORAGE_IMAGE / SAMPLED_IMAGE_FILTER_LINEAR bit"
 );
 
+/// `VkFormatFeatureFlagBits::VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT` — the OPTIMAL-tiling capability
+/// to be bound as a sampled image. Render wave PX1a: a bit of `lit`'s REQUIRED format row
+/// ([`crate::device::REQUIRED_FORMATS`]) — TAA and `post_final` read `lit` through a sampled bind.
+// vulkan_core.h: `VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT = 0x00000001`.
+pub const VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT: VkFlags = 0x0000_0001;
+
+/// `VkFormatFeatureFlagBits::VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT` — the OPTIMAL-tiling
+/// capability to be a BLENDED colour attachment. Render wave PX1a: a bit of `lit`'s REQUIRED format
+/// row — the particle draw blends additively into `lit`.
+// vulkan_core.h: `VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT = 0x00000100`.
+pub const VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT: VkFlags = 0x0000_0100;
+
+// Value guards for the two hand-typed PX1a format-feature bits (the discipline of the guards
+// above): the header value, a single set bit, and distinct from every bit they sit among.
+const _: () = assert!(
+    VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT == 0x1,
+    "VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT must equal the vulkan_core.h value 0x00000001"
+);
+const _: () = assert!(
+    VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT == 0x100,
+    "VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT must equal the vulkan_core.h value 0x00000100"
+);
+const _: () = assert!(
+    VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT.is_power_of_two()
+        && VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT.is_power_of_two(),
+    "a format-feature flag bit must be a single set bit (power of two)"
+);
+const _: () = assert!(
+    (VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+        | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT
+        | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT
+        | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
+        | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)
+        .count_ones()
+        == 5,
+    "the five format-feature bits PX1a's REQUIRED row names must be pairwise distinct"
+);
+
 /// `VkColorSpaceKHR::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` — the always-present space.
 pub const VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: i32 = 0;
 

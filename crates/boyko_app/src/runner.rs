@@ -27,7 +27,9 @@ use boyko_ecs::ecs::core::asset::{AssetPaths, AssetServer, AssetStaging, Assets}
 #[cfg(windows)]
 use boyko_input::{ButtonState, KeyCode, RawInputEvent};
 #[cfg(windows)]
-use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
+use boyko_render::light_system::{LIGHT_HEADER_BYTES, LightHeaderGeneration, LightTableGeneration, LightTableStaging};
+#[cfg(windows)]
+use boyko_render::post::ResolvedPost;
 // Read only by the `#[cfg(debug_assertions)]` textured-SDF guard in the frame loop, so a
 // release build would see this import as unused.
 #[cfg(all(windows, debug_assertions))]
@@ -47,7 +49,7 @@ use boyko_render::{
     upload_instance_models, upload_light_table, upload_material_assets, upload_mesh_assets,
     backfill_vb_geometry_slots,
     upload_motion_cam_ring, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
-    upload_taa_ring, upload_texture_assets, upload_vb_instance_rows,
+    upload_post_final_ring, upload_taa_ring, upload_texture_assets, upload_vb_instance_rows,
 };
 #[cfg(all(windows, feature = "hwrt"))]
 use boyko_render::{
@@ -77,7 +79,7 @@ use boyko_rhi_vulkan::compute::PARTICLE_DRAW_PUSH_BYTES;
 #[cfg(windows)]
 use crate::gpu_scene::{ParticleFrameInputs, ParticleFramePush};
 #[cfg(windows)]
-use crate::light_gate::light_upload_due;
+use crate::light_gate::{LightDeviceState, LightRegion, light_copy_plan};
 #[cfg(windows)]
 use crate::particle_gate::particle_effects_upload_due;
 // VG R3 piece 4 rung P4-4: the diagnostic regime, read live per frame beside `HzbConfig` and
@@ -251,7 +253,18 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
 
     // ── Boot: the window host chain (window → surface → swapchain → renderer
     // → the R3 G-buffer scene bundles at the boot-fixed composite extent).
-    let mut host = match WindowHost::boot(ctx, &desc) {
+    // Render wave PX1a (D-P1): the test-only `srgb_swapchain` key, read the `try_resource` way
+    // (absent on every shipping run ⇒ the production format pick).
+    let format_pick = if app
+        .world()
+        .try_resource::<crate::test_force::TestForce>()
+        .is_some_and(|f| f.contains(crate::test_force::TestForceKey::SrgbSwapchain))
+    {
+        boyko_rhi_vulkan::swapchain::SurfaceFormatPick::ForceSrgb
+    } else {
+        boyko_rhi_vulkan::swapchain::SurfaceFormatPick::Production
+    };
+    let mut host = match WindowHost::boot(ctx, &desc, format_pick) {
         Ok(h) => h,
         Err(e) => {
             crate::diag::report_boot_stage_failed("window host", &e);
@@ -1100,8 +1113,8 @@ fn ingest_captured(queue: &mut RawInputQueue, captured: CapturedMsg) {
 /// 5. token-typed uploads into slot `token.slot()`: the b5 camera block + the
 ///    instance-model ring (UNCONDITIONAL, plan D5) + the interpolation-pair ring
 ///    (UNCONDITIONAL, plan D5/R5) + the CSM cascade UBO (unconditional 336 B) +
-///    the light staging iff `light_uploaded_gen[s] != LightTableGeneration`
-///    (the D5 gate);
+///    the light staging + copy by `light_gate::light_copy_plan` (the D5 gate,
+///    PX1a's header-only region);
 /// 6. assemble `GBufferScene` on the stack (draw list from the gather output,
 ///    `casts_shadow` from the caster gather, `csm` armed on "fitted sun AND
 ///    live casters" — the `sync_csm_light_gate` predicate);
@@ -1118,6 +1131,14 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     let present_extent = VkExtent2D {
         width: cw,
         height: ch,
+    };
+    // Render wave PX1a (D-G1; review r2 R2-W1): the extent `display` is allocated at, boot-fixed —
+    // the renderer's `aa_extent` and the `post_final` UBO's extent, from ONE derivation so the two
+    // cannot disagree (`WindowHost::display_extent`).
+    let (dw, dh) = host.display_extent();
+    let aa_extent = VkExtent2D {
+        width: dw,
+        height: dh,
     };
     // The env-gated frame dump (`BOYKO_HOST_DUMP` — the host's diagnostic /
     // owner-eval channel, see `host_dump`). `None` on the steady path.
@@ -1185,6 +1206,16 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     };
     if image_dump.is_some() {
         host.renderer.arm_image_dump();
+    }
+    // Render wave PX1a (H4 Scope 3, test 12): the test-only `inject_nan_lit` key, read the
+    // `try_resource` way (absent on every shipping run, so nothing is armed) and armed before the
+    // first frame creates the targets.
+    if app
+        .world()
+        .try_resource::<crate::test_force::TestForce>()
+        .is_some_and(|f| f.contains(crate::test_force::TestForceKey::InjectNanLit))
+    {
+        host.renderer.arm_nan_inject(crate::test_force::INJECT_NAN_LIT_FRAME);
     }
     // Automated-run frame cap (the `BOYKO_WIN_HIDDEN` companion, and the app-level
     // twin of `window_present_gbuffer`'s own `BOYKO_WINDOW_FRAMES`): `BOYKO_WINDOW_FRAMES=<n>`
@@ -1694,11 +1725,25 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // disocclusion fallback). `TaaState::advance()` then runs every frame regardless of arm
         // state (cheap, cold — a checked-and-cleared flag, not a sticky one), consuming this
         // frame's reset bit into `taa_reset_flag` for `host.gpu.scene`'s `taa_reset` param below.
+        //
+        // Render wave PX1a (D-E5): the frame's resolved post settings -- the ONE read of
+        // `ResolvedPost` (`try_resource`, the runner's M1 convention; a host composing no
+        // `PostPlugin` gets `ResolvedPost::from_config` of its `LightingConfig` and one
+        // `boyko-W3012`). Its `cut` (an active-camera switch or a `CameraCut` request, seen by
+        // `resolve_post_policy` THIS frame) joins the reset predicate BEFORE `advance()`, so the
+        // cut frame's resolve replaces the history (`TaaState` keeps its single writer, here).
+        let (post, post_plugin_absent) = crate::post_host::resolved_post_for_frame(
+            app.world().try_resource::<ResolvedPost>(),
+            app.world().try_resource::<LightingConfig>(),
+        );
+        if post_plugin_absent {
+            crate::post_host::report_post_plugin_absent();
+        }
         let taa_was_armed = app.world().try_resource::<JitterState>().is_some_and(|j| j.armed);
         let mut taa_reset_flag = false;
         if let Some(taa_state) = app.world_mut().try_resource_mut::<TaaState>() {
             let extent_changed = taa_state.extent_changed(cw, ch);
-            if taa_armed_now && (!taa_was_armed || extent_changed) {
+            if taa_armed_now && (!taa_was_armed || extent_changed || post.cut != 0) {
                 taa_state.mark_reset();
             }
             taa_reset_flag = taa_state.advance();
@@ -1782,6 +1827,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         }
 
 
+        // Render wave PX1a (D-E6): the light table's two writer-side generations, read once -- the
+        // plan below keys this frame's staging write and copy on them, and the device record
+        // advances to them only if this frame presents.
+        let light_gens = (
+            app.world().resource::<LightTableGeneration>().0,
+            app.world().resource::<LightHeaderGeneration>().0,
+        );
         let mut draws = host.draw_scratch.take();
         let presented = {
             let world = app.world();
@@ -1958,23 +2010,28 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 }
             }
 
-            // 5c. The light staging into slot `s` — GEN-GATED (plan D5, R4):
-            //     rewritten only when this slot's uploaded generation lags the
-            //     writer-side `LightTableGeneration` (`collect_lights` bumps it
-            //     once per actual staged rewrite). The staging is a per-slot
-            //     RING: a single instance rewritten on frame N+1 would race
-            //     frame N's still-in-flight recorded staging→table copy (the
-            //     host-write-vs-GPU-transfer-read class); slot `s`'s buffer is
-            //     only read by slot-`s` frames, whose fence the token proves.
-            let generation = world.resource::<LightTableGeneration>().0;
-            let light_upload = if light_upload_due(&mut host.light_uploaded_gen, s, generation)
-            {
-                let staged = world.resource::<LightTableStaging>();
-                let bytes = staged.bytes();
+            // 5c. The light staging into slot `s` and the recorded copy — GEN-GATED (plan D5, R4;
+            //     render wave PX1a D-E6, `light_gate::light_copy_plan`): the slot's staging gets
+            //     the whole table when its rows lag `LightTableGeneration`, the 64-B header alone
+            //     when only its header lags `LightHeaderGeneration`, else nothing; the copy is
+            //     keyed on what the DEVICE table last received (advanced after a presented frame,
+            //     below), never on this frame's delta — so a change staged on a skipped frame is
+            //     still copied. The staging is a per-slot RING: a single instance rewritten on
+            //     frame N+1 would race frame N's still-in-flight recorded staging→table copy (the
+            //     host-write-vs-GPU-transfer-read class); slot `s`'s buffer is only read by
+            //     slot-`s` frames, whose fence the token proves.
+            let light_plan = light_copy_plan(&mut host.light_slots, s, &host.light_device, light_gens.0, light_gens.1);
+            let staged_light = world.resource::<LightTableStaging>().bytes();
+            let light_staging_bytes = match light_plan.staging {
+                LightRegion::None => None,
+                LightRegion::Header => Some(&staged_light[..LIGHT_HEADER_BYTES]),
+                LightRegion::Full => Some(staged_light),
+            };
+            if let Some(bytes) = light_staging_bytes {
                 // SAFETY: `host.gpu.light_staging[s]` — same provenance
                 // contract as the camera slot above (boot-minted at the full
                 // table capacity, live until teardown, the fenced slot
-                // `s == token.slot()`); `bytes` is the staging resource's own
+                // `s == token.slot()`); `bytes` is a prefix of the staging resource's own
                 // preallocated scratch, sized <= that same capacity.
                 unsafe {
                     upload_light_table(&token, &host.gpu.light_staging[s], bytes);
@@ -1987,9 +2044,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                             .expect("invariant: the staged table holds whole words"),
                     ));
                 }
-                Some(bytes.len() as u64)
-            } else {
-                None
+            }
+            // The recorders copy `[0, light_upload)` from slot `s`'s staging, which the plan has
+            // just made current whatever region it wrote.
+            let light_upload = match light_plan.copy {
+                LightRegion::None => None,
+                LightRegion::Header => Some(LIGHT_HEADER_BYTES as u64),
+                LightRegion::Full => Some(staged_light.len() as u64),
             };
             // R2: the Deferred marcher's sun — the staged table's primary directional, read EVERY
             // frame (not only on upload frames) from the same bytes the device table mirrors, so
@@ -2251,6 +2312,27 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 }
             }
 
+            // 5d'. Render wave PX1a (D-G5, D-E5): `post_final`'s constant buffer into the
+            //          renderer's `post_final.ubo[s]`, and the same eight words into the scene
+            //          (the ring seed of a (re)built target set, the receipt's `post_word*`),
+            //          from this frame's `ResolvedPost` (read once above): its tonemapper,
+            //          exposure ratio 1.0 (the producers baked the pre-exposure into `lit`), the
+            //          extent `display` is allocated at (`aa_extent`: native under SSAA, the
+            //          composite otherwise — `WindowHost::display_extent`).
+            let post_final_gpu =
+                crate::post_host::post_final_gpu(&post, [aa_extent.width, aa_extent.height]);
+            if let Some(post_final_slot) = host.frame.post_final_ubo_slot(s) {
+                // SAFETY: `post_final_slot` is the renderer's `post_final.ubo[s]` — a live
+                // host-coherent `POST_FINAL_UBO_BYTES` (32 B, the bytes written) UNIFORM buffer
+                // minted by `GBufferTargets::create`, live until the targets are torn down
+                // (device-idle). The FENCED slot `s == token.slot()`: the borrowed
+                // `FrameWriteToken` proves this slot's in-flight fence was waited THIS frame (the
+                // previous occupant's `post_final` retired; the sibling frame binds the other slot).
+                unsafe {
+                    upload_post_final_ring(&token, post_final_slot, &post_final_gpu);
+                }
+            }
+
             // 6a. DrawBatch → GBufferMeshDraw: resolve each batch's mesh to its
             //     asset-table GPU buffers (the showcase's ~8070 conversion, driven
             //     by the ECS gather instead of a test-built list). R4:
@@ -2502,16 +2584,21 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                         0
                     };
 
-                    // The draw's 72-byte VERTEX push. Bytes [0,64) are the path's OWN
+                    // The draw's 76-byte VERTEX | FRAGMENT push. Bytes [0,64) are the path's OWN
                     // view-projection rows, taken from `mvp` rather than recomputed — the raster
                     // pass and the billboards must agree on the projection to the last bit, and
                     // two derivations of it would be two chances not to. `(index_base,
                     // index_step) == (0, +1)` is the P0 identity; rung P2's alpha class is the
-                    // only thing that ever makes them anything else.
+                    // only thing that ever makes them anything else. Bytes [72,76) are the
+                    // frame's pre-exposure the FS multiplies the particle colour by (render wave
+                    // PX1a E1: `lit` is pre-exposed scene-linear radiance): this frame's
+                    // `ResolvedPost::pre_exposure`, the value the light header carries.
+                    let pre_exposure = post.pre_exposure;
                     let mut draw_push = [0u8; PARTICLE_DRAW_PUSH_BYTES as usize];
                     draw_push[..64].copy_from_slice(&mvp[..64]);
                     draw_push[64..68].copy_from_slice(&0u32.to_ne_bytes());
                     draw_push[68..72].copy_from_slice(&1i32.to_ne_bytes());
+                    draw_push[72..76].copy_from_slice(&pre_exposure.to_ne_bytes());
 
                     ParticleFrameInputs {
                         // The PARITY is the host's monotonic frame counter's low bit — the whole
@@ -2945,6 +3032,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 particle_inputs,
                 // Render wave RD1: the test-only merge disarm (`false` in every production run).
                 disarm_sdf_merge,
+                boyko_render::post_final_words(&post_final_gpu),
                 ctx,
             );
 
@@ -2963,9 +3051,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // `host.gpu` / the World's `Assets<MeshGpu>` / `MaterialTable`, all
             // outliving the call); `present_extent` == the composite extent the camera
             // push `count`, `dispatch_group_count_x`, and the G-buffer targets
-            // are sized to (all boot-fixed, plan D7); `aa_extent` == `host.native_extent`
-            // (boot-fixed, SSAA's `aa_out` size — see `render_gbuffer_frame`'s doc: it
-            // MUST stay boot-fixed, not the live window size, for the same resize-
+            // are sized to (all boot-fixed, plan D7); `aa_extent` == `host.display_extent()`
+            // (boot-fixed: `display`'s extent, native only on a frame that runs the SSAA
+            // downsample and `present_extent` on every other — see `render_gbuffer_frame`'s doc:
+            // it MUST stay boot-fixed, not the live window size, for the same resize-
             // invariance `present_extent` already has); a `Some(readback)` is the dump's
             // host-visible staging, sized to the current swapchain extent by
             // `HostDump::request` (`None` on the steady path); a `Some(vb_id_readback)` is the
@@ -2978,10 +3067,6 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // references it — `Schedule::request_slot` asserts it); the slot is read and reused
             // only after `DRAIN_FRAMES > FRAMES_IN_FLIGHT` presented frames, past this frame's
             // fence, and an unpresented frame (`Ok(false)`) passed `recreate`'s device-idle wait.
-            let aa_extent = VkExtent2D {
-                width: host.native_extent.0,
-                height: host.native_extent.1,
-            };
             // OBS (D): this frame's image-dump request — `Some` only on a capture frame of an
             // armed run — handed to the renderer for the render call below, which consumes it.
             if let Some(request) = image_dump.as_mut().and_then(|d| d.request(ctx, present_extent)) {
@@ -3050,6 +3135,12 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         host.draw_scratch.put(draws);
 
         let presented_ok = matches!(&presented, Ok(true));
+        // Render wave PX1a (D-E6): the device light table now holds this frame's generations --
+        // but only if the frame presented. A recreate (`Ok(false)`) leaves the record behind, so
+        // the next frame copies again (a redundant copy at worst, never a stale table).
+        if presented_ok {
+            host.light_device = LightDeviceState { device_rows_gen: light_gens.0, device_header_gen: light_gens.1 };
+        }
         // Dynamic-materials DM1 (cut C-4): a frame that planned a material copy and did not record
         // it (a recreate skip) owes the full image; a recorded frame owes nothing.
         host.material_full_image_pending =
@@ -3972,7 +4063,8 @@ unsafe fn destroy_host_gpu_chain(host: WindowHost, ctx: &VulkanContext) {
         ssaa_scale: _,
         native_extent: _,
         resolved_render_path: _,
-        light_uploaded_gen: _,
+        light_slots: _,
+        light_device: _,
         last_ddgi_grid: _,
         particle_effects_uploaded_gen: _,
         pm_ring_high_water: _,

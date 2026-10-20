@@ -3,11 +3,23 @@
 
 Stdlib only, Python >= 3.11 (``tomllib``). Subcommands:
 
-  compare A.bmp B.bmp [--max-delta N] [--max-changed-frac F] [--tiles K]
+  compare A.bmp B.bmp [--max-delta N] [--max-changed-frac F] [--tiles K] [--flat-tiles REF.bmp]
+        [--edge-margin K] [--min-graded N] [--scene-anchor ANCHOR.bmp]
       Two BMPs (24/32-bpp BI_RGB, either row order, 24-bpp rows padded to 4 bytes): the max |Δ|
       per channel, the fraction of changed channel values, the K hottest 16x16 tiles. Exit 1 past
-      a given limit.
-  bound --bound hdr-transition --rounding CLASS [--format b10g11r11|rgba16f] PRE.bmp POST.bmp
+      a given limit. ``--flat-tiles`` grades only the 16x16 tiles (``--flat-tile-size``) of zero
+      variance in REF (render wave PX1a D-T1: GL-H1 classes 1 and 3). GL-H1 class 1's form (ruling
+      84): ``--edge-margin K`` drops the flat pixels within K px (Chebyshev) of an edge of REF - a
+      non-flat tile, or a seam between flat tiles of different values; a run grading fewer than
+      ``--min-graded N`` px - or none at all under ``--flat-tiles`` - exits 3, RED-vacuous, never 0.
+      ``--scene-anchor ANCHOR`` (ruling 85 (3)): B must depict ANCHOR's scene - the device receipts'
+      whole-scene check, Spearman's rho of the Rec. 709 luma of both frames box-reduced to 256^2,
+      at least 0.9; a blank B (a constant side reads rho 0) or a never-written one exits 1.
+  bound --bound hdr-transition --rounding CLASS --format b10g11r11|rgba16f [--flat-tiles REF.bmp]
+        [--min-in-bound-frac F] PRE.bmp POST.bmp
+      ``--format`` is REQUIRED (PX1a D-T1: a default graded RGBA16F with B10G11R11's 16x wider ε).
+      ``--min-in-bound-frac`` passes when at least F of the graded channel values are in bound
+      (GL-H1 class 4); without it every one must be.
       AD-19's per-pixel bound for "this pixel went through one lit-format store before the same
       ACES-Hill + OETF tail" (ACES-Hill-specific: PX1a / PX1b). From the pre-move 8-bit value it
       inverts the OETF and the Hill fit in closed form, takes the Jacobian of OETF∘ACES at the
@@ -28,7 +40,31 @@ Stdlib only, Python >= 3.11 (``tomllib``). Subcommands:
   vectors DIR
       Checks this file's mirrors against the Rust-generated vectors (tools/tests/vectors).
 
-Exit codes: 0 pass, 1 over a limit, 2 usage / input error, 4 over max_delta_bound.
+Exit codes: 0 pass, 1 over a limit (``compare --scene-anchor``: B's rho under 0.9), 2 usage / input
+error, 3 RED-vacuous (``compare`` graded fewer px than its minimum), 4 over max_delta_bound.
+
+GL-H1 class 1 (rulings 84, 85), per TAA pin x leg - AAOFF its TAA-off run, TAA its TAA frame, ANCHOR
+the pin's pre-move TAA frame (GL-H0's set); exit 0 required:
+
+  compare --flat-tiles AAOFF --flat-tile-size T --edge-margin 2 --min-graded N --max-delta 2
+          --scene-anchor ANCHOR AAOFF TAA
+
+Each parameter is derived on the 14 pre-move pairs (a pre-move TAA frame vs the TAA-off render of
+its pin on the pre-move tree), never on the run it judges:
+  - ``--edge-margin`` k = 2: the least margin at which every pre-move pair passes (at k = 1 the
+    RCAS pairs red: RCAS's over/undershoot reaches one pixel past TAA's dilation).
+  - Every leg but vb_sdf_taa: T = 16, N = 57196 = half of 114392, the least area a pre-move pair
+    grades at k = 2.
+  - vb_sdf_taa (ruling 85 (2)): T = 8, N_sdf = 6336 = half of 12672, its own pre-move area at k = 2
+    and T = 8. Its AA-off frame has no flat 16^2 tile, so at T = 16 it grades 0 px (RED-vacuous by
+    construction); its pre-move pair passes at T = 8 with max |Δ| 0.
+  - The anchor's bar 0.9 and extent 256^2 are the device check's (see the scene-anchor section);
+    the pre-move pairs read rho 1.
+  - The anchor has no power on vb_sdf_taa (ruling 86, review W2): that scene is one small sphere
+    on a vertical sky gradient, so its ranks are nearly a function of y alone. A sky-only pair -
+    the sphere painted out of both the TAA-off and the TAA frame - passes this whole form at rho
+    0.966 (exit 0, both legs). vb_sdf_taa's scene identity rests on step 10, the owner's visual
+    sign-off (its row on the h1 sheet), and then on its C14 hash pin - not on this check.
 """
 
 from __future__ import annotations
@@ -323,13 +359,86 @@ def write_bmp(path: str, w: int, h: int, rgb: list, bpp: int = 24) -> None:
         f.write(head + info + data)
 
 
-def compare_bmps(a: Bmp, b: Bmp, tile: int = 16):
+def flat_tile_mask(ref: Bmp, tile: int = 16):
+    """Per pixel, True iff its ``tile`` x ``tile`` tile of ``ref`` has zero variance (every pixel
+    equal) - GL-H1's flat tiles (render wave PX1a D-T1, classes 1 and 3)."""
+    flat = {}
+    for i, p in enumerate(ref.rgb):
+        key = ((i % ref.w) // tile, (i // ref.w) // tile)
+        first = flat.get(key)
+        if first is None:
+            flat[key] = p
+        elif first is not False and first != p:
+            flat[key] = False
+    return [flat[((i % ref.w) // tile, (i // ref.w) // tile)] is not False for i in range(ref.w * ref.h)]
+
+
+def load_mask(path, tile: int, w: int, h: int):
+    """The flat-tile mask of the REF BMP at ``path`` (None = every pixel), sized like the compared pair."""
+    if path is None:
+        return None
+    ref = read_bmp(path)
+    if (ref.w, ref.h) != (w, h):
+        raise ValueError(f"--flat-tiles reference is {ref.w}x{ref.h}, the compared images {w}x{h}")
+    return flat_tile_mask(ref, tile)
+
+
+def edge_margin_mask(ref: Bmp, mask, k: int):
+    """``mask`` (``ref``'s flat-tile mask) minus every pixel within ``k`` px of an edge of ``ref``:
+    True iff every pixel at Chebyshev distance <= ``k`` lies in a flat tile AND equals this pixel
+    in ``ref`` (ruling 84 (1a), GL-H1 class 1: TAA legitimately moves the silhouette pixels on a
+    flat tile's border). An edge is a non-flat tile or a seam between two flat tiles of different
+    values - a silhouette that ends exactly on a tile border leaves both tiles flat. ``k = 0`` is
+    the mask itself; the frame's own border excludes nothing.
+
+    Separable and exact: the row pass marks the pixels whose run of equal flat pixels covers the
+    k columns either side, the column pass the pixels whose run of equal marked pixels covers the
+    k rows either side - each pass linear, whatever ``k``."""
+    if k < 0:
+        raise ValueError(f"the edge margin must be >= 0 (got {k})")
+    if k == 0:
+        return list(mask)
+    w, h, px = ref.w, ref.h, ref.rgb
+
+    def runs(n, ok, at):
+        """Per index of one line: does its run of equal ``ok`` values cover [i - k, i + k]?"""
+        out = [False] * n
+        i = 0
+        while i < n:
+            if not ok(i):
+                i += 1
+                continue
+            e = i
+            while e + 1 < n and ok(e + 1) and px[at(e + 1)] == px[at(i)]:
+                e += 1
+            for j in range(i, e + 1):
+                out[j] = i <= max(j - k, 0) and e >= min(j + k, n - 1)
+            i = e + 1
+        return out
+
+    row_ok = [False] * (w * h)
+    for y in range(h):
+        base = y * w
+        row_ok[base : base + w] = runs(w, lambda x: mask[base + x], lambda x: base + x)
+    out = [False] * (w * h)
+    for x in range(w):
+        col = runs(h, lambda y: row_ok[y * w + x], lambda y: y * w + x)
+        for y in range(h):
+            out[y * w + x] = col[y]
+    return out
+
+
+def compare_bmps(a: Bmp, b: Bmp, tile: int = 16, mask=None):
     if (a.w, a.h) != (b.w, b.h):
         raise ValueError(f"extents differ: {a.w}x{a.h} vs {b.w}x{b.h}")
     max_d = [0, 0, 0]
     changed = 0
     tiles = {}
+    graded = 0
     for i, (pa, pb) in enumerate(zip(a.rgb, b.rgb)):
+        if mask is not None and not mask[i]:
+            continue
+        graded += 1
         for c in range(3):
             d = abs(pa[c] - pb[c])
             if d:
@@ -337,8 +446,94 @@ def compare_bmps(a: Bmp, b: Bmp, tile: int = 16):
                 max_d[c] = max(max_d[c], d)
                 key = ((i % a.w) // tile, (i // a.w) // tile)
                 tiles[key] = tiles.get(key, 0) + 1
-    frac = changed / (3 * a.w * a.h) if a.w * a.h else 0.0
+    frac = changed / (3 * graded) if graded else 0.0
     return max_d, frac, sorted(tiles.items(), key=lambda kv: -kv[1])
+
+
+# ---- the scene anchor (crates/boyko_app/tests/px1a_graph_receipt.rs's whole-scene check mirror) ---
+# GL-H1 class 1 (ruling 85 (3)): the flat-tile form cannot tell a scene from no scene - two identical
+# blank frames pass it - so ``compare --scene-anchor ANCHOR`` also runs the device receipts' whole-
+# scene check on B with ANCHOR in the role of the scene: ``display_luma``, ``reduced_luma``,
+# ``ranks``, ``spearman`` and the bar of ``check_presents_the_whole_scene``. Its power premise
+# (``QUARTER_RHO_MAX``, the anchor's top-left quarter must not rank like the whole) is not mirrored.
+# A blank or never-written B is rejected under any non-constant anchor (a constant side reads rho 0).
+# An object-free B is not always rejected: vb_sdf_taa's anchor - one small sphere on a vertical sky
+# gradient - ranks almost as a function of y, so a sky-only B (the sphere painted out) reads rho
+# 0.966 and passes, and a bare linear ramp 0.964; on the other six pins' software legs a ramp or an
+# object-free row-median frame reads at most 0.73 and reds (review W2). The premise would flag that
+# anchor (it ranks 0.575 against its quarter, over the device scene's 0.5) and so RED the pre-move
+# pair ruling 85 (2) requires to pass. Ruling 86 keeps the anchor as it is: on vb_sdf_taa the scene
+# identity rests on step 10, the owner's visual sign-off, and then on its C14 hash pin.
+
+#: The device check's bar (``WHOLE_SCENE_RHO_MIN``): the least rank correlation of B with ANCHOR.
+WHOLE_SCENE_RHO_MIN = 0.9
+#: The extent both frames are box-reduced to: the device check's native extent (``OBS_WIN`` in
+#: crates/boyko_app/tests/common/graph_receipt.rs), the one its bar was measured at. The GL-H1 frames
+#: are 512^2, so their reduction is the device check's 2:1 box.
+SCENE_EDGE = 256
+
+#: ``pixfmt::decode`` of an UNORM8 code: an f32 quotient, so the device check's exact input.
+_UNORM8 = [to_f32(c / 255.0) for c in range(256)]
+
+
+def display_luma(p) -> float:
+    """Rec. 709 luminance of a display-referred 8-bit pixel (``display_luma``)."""
+    return 0.2126 * _UNORM8[p[0]] + 0.7152 * _UNORM8[p[1]] + 0.0722 * _UNORM8[p[2]]
+
+
+def reduced_luma(img: Bmp, edge: int) -> list:
+    """``img``'s per-pixel :func:`display_luma` box-reduced to ``edge``^2, row-major
+    (``reduced_luma``: ``img`` square and a whole multiple of ``edge``; the sums run in its order)."""
+    if img.w != img.h or img.w < edge or img.w % edge:
+        raise ValueError(f"a {img.w}x{img.h} image is not a whole multiple of the {edge}^2 scene extent")
+    k = img.w // edge
+    out = [0.0] * (edge * edge)
+    for y in range(img.h):
+        row, base = (y // k) * edge, y * img.w
+        for x in range(img.w):
+            out[row + x // k] += display_luma(img.rgb[base + x])
+    n = float(k * k)
+    return [v / n for v in out]
+
+
+def ranks(v: list) -> list:
+    """The ranks of ``v`` (0-based), ties at their average rank (``ranks``)."""
+    order = sorted(range(len(v)), key=lambda i: v[i])
+    out = [0.0] * len(v)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and v[order[j + 1]] == v[order[i]]:
+            j += 1
+        for o in order[i : j + 1]:
+            out[o] = (i + j) / 2.0
+        i = j + 1
+    return out
+
+
+def spearman(a: list, b: list) -> float:
+    """Spearman's rank correlation of ``a`` and ``b`` (equal lengths); 0 when either is constant
+    (``spearman``: a blank side carries no ranking, so it can never pass a bar)."""
+    ra, rb = ranks(a), ranks(b)
+    n = float(len(ra))
+    ma = mb = 0.0
+    for x, y in zip(ra, rb):
+        ma += x
+        mb += y
+    ma, mb = ma / n, mb / n
+    sab = saa = sbb = 0.0
+    for x, y in zip(ra, rb):
+        dx, dy = x - ma, y - mb
+        sab += dx * dy
+        saa += dx * dx
+        sbb += dy * dy
+    return 0.0 if saa == 0.0 or sbb == 0.0 else sab / math.sqrt(saa * sbb)
+
+
+def scene_anchor(frame: Bmp, anchor: Bmp, edge: int = SCENE_EDGE) -> float:
+    """``frame``'s rank correlation with ``anchor``, both reduced to ``edge``^2: ``frame`` depicts the
+    anchor's scene at ``>= WHOLE_SCENE_RHO_MIN``. Raises ``ValueError`` when an extent does not fit."""
+    return spearman(reduced_luma(frame, edge), reduced_luma(anchor, edge))
 
 
 # ---- OBSD dumps (crates/boyko_shaderdsl/src/dump.rs mirror) ---------------------------------
@@ -491,19 +686,48 @@ def receipt_words(receipt: dict):
 
 
 def cmd_compare(a):
+    if a.edge_margin is not None and a.flat_tiles is None:
+        print("golden_diff compare: --edge-margin is a margin around the edges of the --flat-tiles reference; it needs --flat-tiles", file=sys.stderr)
+        return 2
+    if (a.edge_margin is not None and a.edge_margin < 0) or (a.min_graded is not None and a.min_graded < 1):
+        print("golden_diff compare: --edge-margin must be >= 0 and --min-graded >= 1", file=sys.stderr)
+        return 2
     try:
         x, y = read_bmp(a.a), read_bmp(a.b)
-        max_d, frac, tiles = compare_bmps(x, y)
+        mask = load_mask(a.flat_tiles, a.flat_tile_size, x.w, x.h)
+        if mask is not None and a.edge_margin:
+            mask = edge_margin_mask(read_bmp(a.flat_tiles), mask, a.edge_margin)
+        max_d, frac, tiles = compare_bmps(x, y, mask=mask)
+        # SCENE_EDGE is read at call time (not a default argument), so the self-tests can shrink it.
+        rho = None if a.scene_anchor is None else scene_anchor(y, read_bmp(a.scene_anchor), SCENE_EDGE)
     except (OSError, ValueError) as e:
         print(f"golden_diff compare: {e}", file=sys.stderr)
         return 2
-    print(f"max_delta r={max_d[0]} g={max_d[1]} b={max_d[2]} changed_frac={frac:.6f}")
+    graded = x.w * x.h if mask is None else sum(mask)
+    if mask is None:
+        scope = "all"
+    else:
+        scope = f"flat_tiles={graded}px" + ("" if a.edge_margin is None else f" edge_margin={a.edge_margin}")
+    print(f"max_delta r={max_d[0]} g={max_d[1]} b={max_d[2]} changed_frac={frac:.6f} scope={scope}")
     for (tx, ty), n in tiles[: a.tiles]:
         print(f"tile ({tx},{ty}) changed={n}")
+    if rho is not None:
+        print(f"scene_anchor rho={rho:.4f} min={WHOLE_SCENE_RHO_MIN} edge={SCENE_EDGE}")
     if a.max_delta is not None and max(max_d) > a.max_delta:
         return 1
     if a.max_changed_frac is not None and frac > a.max_changed_frac:
         return 1
+    # Ruling 85 (3): B must depict the anchor's scene - a blank or never-written B carries no
+    # ranking and reads rho 0.
+    if rho is not None and rho < WHOLE_SCENE_RHO_MIN:
+        print(f"golden_diff compare: B does not depict the scene anchor's scene - rank correlation {rho:.4f} < {WHOLE_SCENE_RHO_MIN}", file=sys.stderr)
+        return 1
+    # Ruling 84 (1b): a run that graded (almost) nothing is RED-vacuous, never green - an empty
+    # flat-tile mask is always vacuous, `--min-graded` raises the floor.
+    floor = a.min_graded if a.min_graded is not None else (1 if mask is not None else 0)
+    if graded < floor:
+        print(f"golden_diff compare: RED-vacuous - graded {graded} px < the minimum graded area {floor} px", file=sys.stderr)
+        return 3
     return 0
 
 
@@ -514,23 +738,39 @@ def cmd_bound(a):
     try:
         pre, post = read_bmp(a.pre), read_bmp(a.post)
         class_epsilon(a.rounding, a.format)
+        if (pre.w, pre.h) != (post.w, post.h):
+            raise ValueError("extents differ")
+        mask = load_mask(a.flat_tiles, a.flat_tile_size, pre.w, pre.h)
     except (OSError, ValueError) as e:
         print(f"golden_diff bound: {e}", file=sys.stderr)
         return 2
-    if (pre.w, pre.h) != (post.w, post.h):
-        print("golden_diff bound: extents differ", file=sys.stderr)
+    if a.min_in_bound_frac is not None and not 0.0 <= a.min_in_bound_frac <= 1.0:
+        print("golden_diff bound: --min-in-bound-frac must lie in [0, 1]", file=sys.stderr)
         return 2
     fails = 0
+    graded = 0
     worst = 0.0
-    for p, q in zip(pre.rgb, post.rgb):
+    for i, (p, q) in enumerate(zip(pre.rgb, post.rgb)):
+        if mask is not None and not mask[i]:
+            continue
+        graded += 3
         b = pixel_bound(p, a.format, a.rounding)
         for c in range(3):
             d = abs(q[c] - p[c])
             if d > b[c]:
                 fails += 1
                 worst = max(worst, d - b[c])
-    n = pre.w * pre.h
-    print(f"bound hdr-transition rounding={a.rounding} format={a.format} failing_frac={fails / (3 * n):.6f} worst_excess={worst:.3f}")
+    if graded == 0:
+        print("golden_diff bound: no channel value graded (no flat tile in the reference)", file=sys.stderr)
+        return 2
+    in_frac = 1.0 - fails / graded
+    scope = "all" if mask is None else f"flat_tiles={graded // 3}px"
+    print(
+        f"bound hdr-transition rounding={a.rounding} format={a.format} failing_frac={fails / graded:.6f} "
+        f"in_bound_frac={in_frac:.6f} worst_excess={worst:.3f} scope={scope}"
+    )
+    if a.min_in_bound_frac is not None:
+        return 0 if in_frac >= a.min_in_bound_frac else 1
     return 1 if fails else 0
 
 
@@ -650,6 +890,27 @@ def check_vectors(directory: str) -> list:
                 if abs(gv - wv) > 4e-6 + 2e-5 * abs(wv):
                     bad.append(f"aces_hill.txt:{n}: {lhs} -> {w}, mirror gives {got}")
                     break
+    # Render wave PX1a (critique O6): `goldens::hdr_display_bound`, the Rust twin of `pixel_bound`, wrote
+    # these rows; both sides compute in f64 with the same constants and op order, printed to 6 decimals.
+    path = os.path.join(directory, "display_bound.txt")
+    if not os.path.exists(path):
+        bad.append("display_bound.txt: missing (the Rust generator writes it)")
+        return bad
+    rows = 0
+    with open(path, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            lhs, want = line.split(" -> ")
+            p = lhs.split()
+            w = [float(v) for v in want.split()]
+            got = pixel_bound(tuple(int(v) for v in p[3:6]), p[1], p[2])
+            rows += 1
+            if any(abs(gv - wv) > 1e-5 for gv, wv in zip(got, w)):
+                bad.append(f"display_bound.txt:{n}: {lhs} -> {w}, pixel_bound gives {got}")
+    if rows == 0:
+        bad.append("display_bound.txt: no rows")
     return bad
 
 
@@ -670,11 +931,20 @@ def main(argv=None) -> int:
     p.add_argument("--max-delta", type=int)
     p.add_argument("--max-changed-frac", type=float)
     p.add_argument("--tiles", type=int, default=8)
+    p.add_argument("--flat-tiles", help="REF.bmp: grade only the tiles of zero variance in REF")
+    p.add_argument("--flat-tile-size", type=int, default=16)
+    p.add_argument("--edge-margin", type=int, help="K: grade only flat pixels farther than K px from any edge of REF (a non-flat tile or a flat|flat seam)")
+    p.add_argument("--min-graded", type=int, help="N: grading fewer than N px is RED-vacuous (exit 3)")
+    p.add_argument("--scene-anchor", help="ANCHOR.bmp: B must rank like ANCHOR (the device receipts' whole-scene check)")
     p.set_defaults(fn=cmd_compare)
     p = sub.add_parser("bound")
     p.add_argument("--bound", required=True)
     p.add_argument("--rounding", required=True)
-    p.add_argument("--format", default="b10g11r11", choices=("b10g11r11", "rgba16f"))
+    # Required (render wave PX1a D-T1): a default grades one format's output with the other's epsilon.
+    p.add_argument("--format", required=True, choices=("b10g11r11", "rgba16f"))
+    p.add_argument("--flat-tiles", help="REF.bmp: grade only the tiles of zero variance in REF")
+    p.add_argument("--flat-tile-size", type=int, default=16)
+    p.add_argument("--min-in-bound-frac", type=float, help="pass when at least this fraction of channel values is in bound")
     p.add_argument("pre")
     p.add_argument("post")
     p.set_defaults(fn=cmd_bound)

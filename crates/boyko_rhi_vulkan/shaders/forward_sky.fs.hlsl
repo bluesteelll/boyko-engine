@@ -15,12 +15,10 @@
 // disc per DIRECTIONAL light (`SKY_SUN_EXPONENT`-power cosine kernel — the SAME duplicated-pure-
 // helper idiom `forward_opaque.fs.hlsl`'s own header documents for `env_brdf_approx`/
 // `sun_kernel`), lerp ground→sky along the ray's `LIGHT_UP` alignment, add the sun disc, apply
-// exposure, THEN the SAME tonemap + manual gamma OETF the lit path applies
-// (`pbr_lighting.hlsli::tonemap_select` + `OETF_GAMMA_EXP`). A scene with NO `SkyLight` entry
-// keeps the flat background base color (`deferred_pbr.hlsl`'s `base = albedo_texel.rgb` reads
-// the marcher/raster's OWN background-clear constant for an unwritten pixel — BYTE-IDENTICAL to
-// `forward.rs::FORWARD_LIT_CLEAR`'s rgb, so this shader hardcodes that SAME constant instead of
-// reading a nonexistent gAlbedo texel, the zero-behavior-change equivalent).
+// exposure, and store the SCENE-LINEAR result (render wave PX1a: `post_final` tonemaps it). A
+// scene with NO `SkyLight` entry stores `lit_format.hlsli`'s `LIT_BACKGROUND_SCENE` — the same
+// constant `deferred_pbr.hlsl`'s no-SkyLight arm stores and `forward.rs::FORWARD_LIT_CLEAR`
+// clears to.
 //
 // # Ray reconstruction under Forward (the ONE adaptation from the compute-dispatch original)
 //
@@ -62,6 +60,7 @@ static const float3 LIGHT_UP = float3(0.0, 1.0, 0.0);
 #include "pbr_lighting.hlsli"
 #include "light_table.hlsli"
 #include "ray_gen.hlsli"
+#include "lit_format.hlsli"
 
 [[vk::binding(2, 0)]] cbuffer Camera {
     uint   count;
@@ -82,11 +81,10 @@ static const uint IMG_H_DEFAULT = 64u;
 uint img_w() { return (img_w_raw != 0u) ? img_w_raw : IMG_W_DEFAULT; }
 uint img_h() { return (img_h_raw != 0u) ? img_h_raw : IMG_H_DEFAULT; }
 
-// The flat background-clear color (`forward.rs::FORWARD_LIT_CLEAR`'s rgb; byte-identical to the
-// marcher/raster's own `BACKGROUND` clear constant `sdf_gbuffer_composite.hlsl` uses) — the "no
-// SkyLight in this scene" fallback, VERBATIM equivalent of `deferred_pbr.hlsl`'s `base =
-// albedo_texel.rgb` (which reads that SAME constant back from an unwritten `gAlbedo` texel).
-static const float3 BACKGROUND_BASE = float3(0.05, 0.05, 0.1);
+// The "no SkyLight in this scene" fallback is `lit_format.hlsli`'s `LIT_BACKGROUND_SCENE`
+// (render wave PX1a D-S3): the scene-linear twin of `forward.rs::FORWARD_LIT_CLEAR`'s rgb and of
+// `deferred_pbr.hlsl`'s no-SkyLight arm, whose `post_final` display is the 8-bit background the
+// display-referred store wrote before PX1a.
 
 // PBR P1 sun-disc kernel exponent — VERBATIM copy of `deferred_pbr.hlsl::SKY_SUN_EXPONENT`
 // (a FIXED, moderate cosine-power exponent — the background is a flat environment element, not a
@@ -128,16 +126,14 @@ float4 main(float4 sv_position : SV_Position) : SV_Target0 {
     if (has_sky) {
         float3 sky = lerp(ground_color, sky_color, saturate(dot(rd_bg, LIGHT_UP) * 0.5 + 0.5));
         sky += sun_disc;
-        // O3: exposure is the FINAL multiply on the linear radiance, THEN the SAME tonemap +
-        // manual gamma OETF the lit path applies.
+        // O3: exposure is the FINAL multiply on the linear radiance (scene-linear store, render
+        // wave PX1a — `post_final` tonemaps it).
         sky *= H_bg.exposure;
-        sky = tonemap_select(sky, load_tonemap_mode(LightBuf));
-        sky = pow(sky, OETF_GAMMA_EXP);
         lit = sky;
     } else {
-        // No SkyLight in this scene's table — keep the flat background base color.
-        lit = BACKGROUND_BASE;
+        // No SkyLight in this scene's table — the scene-linear background constant.
+        lit = LIT_BACKGROUND_SCENE;
     }
 
-    return float4(clamp(lit, 0.0, 1.0), 1.0);
+    return float4(lit_store_saturate(lit), 1.0);
 }

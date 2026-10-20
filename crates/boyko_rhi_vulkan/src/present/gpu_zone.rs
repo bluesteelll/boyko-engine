@@ -620,9 +620,13 @@ pub const ZONE_POST_SSAA_DOWNSAMPLE: u16 = ZONE_BASE_POST + 6;
 /// UNDEFINED → COLOR barrier through `cmd_end_rendering`. The image-dump pass, the readback copy
 /// and the present transition after it are outside the bracket.
 pub const ZONE_POST_PRESENT: u16 = ZONE_BASE_POST + 7;
+/// Render wave PX1a (D-Z1): `post_final` — the post seam's tail dispatch (scene colour →
+/// `display`), every path. The graph-derived barriers the caller records before it are outside
+/// the bracket.
+pub const ZONE_POST_FINAL: u16 = ZONE_BASE_POST + 8;
 
 /// How many zone ids the POST family uses.
-pub const POST_ZONE_COUNT: u16 = 8;
+pub const POST_ZONE_COUNT: u16 = 9;
 
 // === The FWD family's three zone ids — render wave PX0. ===
 
@@ -851,6 +855,7 @@ pub const fn zone_begin_stage(zone: u16) -> TimestampStage {
                 | ZONE_POST_SMAA_BLEND
                 | ZONE_POST_SSAA_DOWNSAMPLE
                 | ZONE_POST_PRESENT
+                | ZONE_POST_FINAL
         )
         || matches!(zone, ZONE_FWD_OPAQUE | ZONE_FWD_SDF_MARCH | ZONE_FWD_VB_SKY)
     {
@@ -940,7 +945,8 @@ const _: () = {
             && bottoms(ZONE_POST_SMAA_WEIGHT)
             && bottoms(ZONE_POST_SMAA_BLEND)
             && bottoms(ZONE_POST_SSAA_DOWNSAMPLE)
-            && bottoms(ZONE_POST_PRESENT),
+            && bottoms(ZONE_POST_PRESENT)
+            && bottoms(ZONE_POST_FINAL),
         "the POST ids follow a producer or another bracket and open at BOTTOM_OF_PIPE"
     );
     assert!(

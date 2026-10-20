@@ -193,7 +193,8 @@ static const uint CAM_PERSPECTIVE = RAYGEN_CAM_PERSPECTIVE;
 // accesses on one image, boot-mutually-exclusive paths never contend). `[[vk::image_format]]`
 // pins the `OpTypeImage` format (`shaderStorageImageWriteWithoutFormat` is OFF at device
 // creation — the SAME M2/MRT precedent every other `RWTexture2D` in this shader family follows).
-[[vk::image_format("rgba8")]] RWTexture2D<float4> gLit : register(u4);
+#include "lit_format.hlsli"
+[[vk::image_format(LIT_FORMAT_QUALIFIER)]] RWTexture2D<float4> gLit : register(u4);
 
 // --- SDF brick-atlas M1/M2/M4 acceleration (VERBATIM copy from `sdf_gbuffer_composite.hlsl` —
 // see this file's header doc for the "wired to real resources, threaded OFF this rung" note) ---
@@ -1122,12 +1123,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
         lit_direct += (bsdf.diffuse + bsdf.specular) * (NoL * punctual_shadow) * atten * L.color;
     }
 
-    // Same tail as `forward_opaque.fs.hlsl` / the deferred resolve: exposure LAST, THEN the
-    // owner-selected tonemap, THEN the manual gamma-2.2 OETF.
+    // Render wave PX1a: `lit` holds pre-exposed SCENE-LINEAR radiance -- exposure is the last
+    // multiply, the store is bounded at HDR_MAX (`lit_format.hlsli`), and `post_final` alone
+    // applies the tonemap and the OETF.
     float3 lit = (lit_direct + ambient + emissive) * H.exposure;
-    lit = tonemap_select(lit, load_tonemap_mode(LightBuf));
-    lit = pow(lit, OETF_GAMMA_EXP);
-    gLit[uint2(px, py)] = float4(clamp(lit, 0.0, 1.0), 1.0);
+    gLit[uint2(px, py)] = float4(lit_store_saturate(lit), 1.0);
 #if VIEWT
     // The SDF-owned half of the exactly-once gViewT discipline: the marched ray parameter `t`
     // (the SAME euclidean metric the `t_mesh` decode above converts into — the TAA resolve

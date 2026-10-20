@@ -48,6 +48,7 @@ use crate::mesh_draw::{
 use crate::motion_cam::{MOTION_CAM_UBO_BYTES, MotionCam};
 // Particles P0: the two POD tables the gated per-frame uploads stage.
 use crate::particle::{EffectParamsGpu, EmitRequestGpu};
+use crate::post::gpu::PostFinalGpu;
 use crate::view::composite_from_view_sheared;
 
 /// [`upload_camera_ring`] with an optional TAA rung-C1 b5 camera-basis shear
@@ -1347,6 +1348,63 @@ pub unsafe fn upload_taa_ring(token: &FrameWriteToken, ring_slot: &BoundBuffer, 
             mapped.as_ptr(),
             RESOLVED_TAA_BYTES,
         );
+    }
+}
+
+/// Render wave PX1a (D-G5, D-O3): [`PostFinalGpu`] as the eight words `post_final`'s constant
+/// buffer holds — the `GBufferScene::post_final_words` the targets seed their ring with and the
+/// receipt records as `post_word0..7`. One conversion, so the uploaded bytes, the seeded bytes and
+/// the receipt's words cannot drift apart.
+#[inline]
+pub fn post_final_words(gpu: &PostFinalGpu) -> [u32; 8] {
+    [
+        gpu.mode_words,
+        gpu.exposure_ratio.to_bits(),
+        gpu.extent[0],
+        gpu.extent[1],
+        gpu._r[0],
+        gpu._r[1],
+        gpu._r[2],
+        gpu._r[3],
+    ]
+}
+
+/// Render wave PX1a (D-G5): copies the frame's [`PostFinalGpu`] (32 B, byte-identical to
+/// `post_final`'s `PostFinal` cbuffer) into ONE `post_final` UBO ring slot — [`upload_taa_ring`]'s
+/// shape. Uploaded every frame the ring exists (the runner gates the call on
+/// `GBufferFrame::post_final_ubo_slot`).
+///
+/// # Panics
+///
+/// Panics if `ring_slot.size` is smaller than 32 bytes: the memcpy would be out-of-bounds (UB), so
+/// the guard is a hard assert in every build.
+///
+/// # Safety
+///
+/// * `ring_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ring_slot.size` valid, persistently-mapped bytes.
+/// * `ring_slot` is the FENCED slot's buffer — the renderer's `post_final.ubo[token.slot()]`: the
+///   `post_final` dispatch of the slot's previous occupant retired behind the waited fence, and the
+///   sibling in-flight frame binds the OTHER ring slot.
+pub unsafe fn upload_post_final_ring(token: &FrameWriteToken, ring_slot: &BoundBuffer, gpu: &PostFinalGpu) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+    const BYTES: usize = core::mem::size_of::<PostFinalGpu>();
+    assert!(
+        ring_slot.size as usize >= BYTES,
+        "post_final UBO slot too small: {} bytes < the {BYTES}-byte PostFinalGpu mirror",
+        ring_slot.size
+    );
+    let mapped = ring_slot.mapped.expect("invariant: the post_final UBO slot is host-visible mapped");
+    // SAFETY: `gpu` is a live `#[repr(C)]` POD of exactly 32 bytes (size and field offsets
+    // const-asserted beside its definition) made of eight 4-byte scalars with no padding, so its
+    // raw bytes are defined. `mapped` targets >= `ring_slot.size >= BYTES` valid mapped
+    // host-coherent bytes (hard-asserted above). The borrowed `FrameWriteToken` + the slot-identity
+    // contract prove no in-flight dispatch reads this slot. The two regions are distinct
+    // allocations (no overlap).
+    unsafe {
+        core::ptr::copy_nonoverlapping((gpu as *const PostFinalGpu).cast::<u8>(), mapped.as_ptr(), BYTES);
     }
 }
 

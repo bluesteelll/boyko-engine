@@ -38,9 +38,9 @@
 # 8668b9c7 (2026-09-18: software 32/32 PASS at e3cebe2d's gnu-blessed values, msvc, RTX 3060) and
 # 54e186d9 (61/61 check-only, 34 software + 27 hwrt). No golden was re-blessed for the host switch;
 # every re-bless since is on msvc, for a RENDER cause its own section states (2026-09-18 0973eec2,
-# 2026-09-19 429b6698, 2026-09-21 0759d193). A mismatch is a render change until a gnu build of the
+# 2026-09-19 429b6698, 2026-09-21 0759d193; PX1a C14 on 031aae18: EVERY leg, the HDR lit, ruling 87 --
+# a digest a comment below quotes predates it). A mismatch is a render change until a gnu build of the
 # same pin shows otherwise -- and -Bless is still NOT the reflex: owner sign-off first, as above.
-#
 # Format is a flat, section-scoped TOML subset (see scripts\golden.ps1 :: Read-Pins).
 # `sha256_hwrt` may equal `sha256_software` (the HW-RT shadow path was made
 # byte-identical to software for this scene) or diverge â€” each leg is pinned on its
@@ -57,8 +57,8 @@ test_name       = "engine_grand_showcase_512_screenshot_dump"
 bmp             = "D:\\tmp\\engine_grand_showcase.bmp"
 width           = 512
 height          = 512
-sha256_software = "a5ad662d2a56efd973487fe49063824c6be841ad07009f5099c0992a491ec718"
-sha256_hwrt     = "a5ad662d2a56efd973487fe49063824c6be841ad07009f5099c0992a491ec718"
+sha256_software = "fe4b60af866926e8075722353a6f04090280f667df8bfe9dec67f2d2b3514fde"
+sha256_hwrt     = "fe4b60af866926e8075722353a6f04090280f667df8bfe9dec67f2d2b3514fde"
 
 # Env the pin was blessed under. golden.ps1 SETS these explicitly (never inherits) and
 # CLEARS BOYKO_FORCE_SOFTWARE, so a stray shell env cannot silently change the pipeline.
@@ -95,8 +95,8 @@ test_name       = "grand_showcase_2mat_screenshot_dump"
 bmp             = "D:\\tmp\\grand_showcase_2mat.bmp"
 width           = 512
 height          = 512
-sha256_software = "7e71e2a6435de9581a7218f62c5aa9db89ca6229a6aeea01751246791163ff9b"
-sha256_hwrt     = "7e71e2a6435de9581a7218f62c5aa9db89ca6229a6aeea01751246791163ff9b"
+sha256_software = "5694970b39a725b94fc875338432cbc3255e1f7ba82b501fbbb5691c351fd226"
+sha256_hwrt     = "5694970b39a725b94fc875338432cbc3255e1f7ba82b501fbbb5691c351fd226"
 
 [grand_showcase_2mat.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -128,8 +128,8 @@ test_name       = "engine_deferred_sdf_only_512_screenshot_dump"
 bmp             = "D:\\tmp\\deferred_sdf_only.bmp"
 width           = 512
 height          = 512
-sha256_software = "ffcc0ac6f70a6cdcd113e343ef2d65a9a3f8134478917f35bec73991d3d5515f"
-sha256_hwrt     = "ffcc0ac6f70a6cdcd113e343ef2d65a9a3f8134478917f35bec73991d3d5515f"
+sha256_software = "cf24ab80aa942f5cc8d586d5b683f5e139efd41ecd548e7f432efefb724d8b4e"
+sha256_hwrt     = "cf24ab80aa942f5cc8d586d5b683f5e139efd41ecd548e7f432efefb724d8b4e"
 
 [deferred_sdf_only.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -156,8 +156,8 @@ test_name       = "engine_deferred_mesh_only_512_screenshot_dump"
 bmp             = "D:\\tmp\\deferred_mesh_only.bmp"
 width           = 512
 height          = 512
-sha256_software = "65cb2004f3a8bcace12896cd2a5c4f959e2e7ae53d2f75f8b4ea21d9ee004ada"
-sha256_hwrt     = "65cb2004f3a8bcace12896cd2a5c4f959e2e7ae53d2f75f8b4ea21d9ee004ada"
+sha256_software = "0597fa34889681b42deacb62ed5179a9071268dcb6f9246759cb1f3c80ab826a"
+sha256_hwrt     = "0597fa34889681b42deacb62ed5179a9071268dcb6f9246759cb1f3c80ab826a"
 
 [deferred_mesh_only.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -195,8 +195,8 @@ test_name       = "forward_mesh_screenshot_dump"
 bmp             = "D:\\tmp\\forward_mesh.bmp"
 width           = 512
 height          = 512
-sha256_software = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
-sha256_hwrt     = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
+sha256_software = "8dfa85d60e6cd0306b026e7f593aaabaf7fde04129f5324a2be4a93ae98e3fd0"
+sha256_hwrt     = "8dfa85d60e6cd0306b026e7f593aaabaf7fde04129f5324a2be4a93ae98e3fd0"
 
 [forward_mesh.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -239,8 +239,8 @@ test_name       = "forwardplus_mesh_screenshot_dump"
 bmp             = "D:\\tmp\\forwardplus_mesh.bmp"
 width           = 512
 height          = 512
-sha256_software = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
-sha256_hwrt     = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
+sha256_software = "8dfa85d60e6cd0306b026e7f593aaabaf7fde04129f5324a2be4a93ae98e3fd0"
+sha256_hwrt     = "8dfa85d60e6cd0306b026e7f593aaabaf7fde04129f5324a2be4a93ae98e3fd0"
 
 [forwardplus_mesh.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -272,8 +272,8 @@ test_name       = "forward_both_screenshot_dump"
 bmp             = "D:\\tmp\\forward_both.bmp"
 width           = 512
 height          = 512
-sha256_software = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
-sha256_hwrt     = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
+sha256_software = "8dfa85d60e6cd0306b026e7f593aaabaf7fde04129f5324a2be4a93ae98e3fd0"
+sha256_hwrt     = "8dfa85d60e6cd0306b026e7f593aaabaf7fde04129f5324a2be4a93ae98e3fd0"
 
 [forward_both.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -303,8 +303,8 @@ test_name       = "sdf_forward_only_screenshot_dump"
 bmp             = "D:\\tmp\\sdf_forward_only.bmp"
 width           = 512
 height          = 512
-sha256_software = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858a17"
-sha256_hwrt     = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858a17"
+sha256_software = "633f356a4239fc04f993d9f6cdf5450233e2019da2415c893091c760d56f449f"
+sha256_hwrt     = "633f356a4239fc04f993d9f6cdf5450233e2019da2415c893091c760d56f449f"
 
 [sdf_forward_only.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -341,8 +341,8 @@ test_name       = "vb_mesh_screenshot_dump"
 bmp             = "D:\\tmp\\vb_mesh.bmp"
 width           = 512
 height          = 512
-sha256_software = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
-sha256_hwrt     = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+sha256_software = "575140a61895e9823fe441bdbc0fd69f4ff0e03a90ae6907492c54ce08fa5402"
+sha256_hwrt     = "575140a61895e9823fe441bdbc0fd69f4ff0e03a90ae6907492c54ce08fa5402"
 
 [vb_mesh.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -373,8 +373,8 @@ test_name       = "vb_mesh_screenshot_dump"
 bmp             = "D:\\tmp\\vb_mesh_hzb.bmp"
 width           = 512
 height          = 512
-sha256_software = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
-sha256_hwrt     = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+sha256_software = "575140a61895e9823fe441bdbc0fd69f4ff0e03a90ae6907492c54ce08fa5402"
+sha256_hwrt     = "575140a61895e9823fe441bdbc0fd69f4ff0e03a90ae6907492c54ce08fa5402"
 
 [vb_mesh_hzb.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -445,8 +445,8 @@ test_name       = "vb_mesh_screenshot_dump"
 bmp             = "D:\\tmp\\vb_occ_split.bmp"
 width           = 512
 height          = 512
-sha256_software = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
-sha256_hwrt     = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+sha256_software = "575140a61895e9823fe441bdbc0fd69f4ff0e03a90ae6907492c54ce08fa5402"
+sha256_hwrt     = "575140a61895e9823fe441bdbc0fd69f4ff0e03a90ae6907492c54ce08fa5402"
 
 [vb_occ_split.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -476,10 +476,10 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # same pixels AND the same counts. vb_occ_mixed puts four marked instances wholly inside a near
 # slab's silhouette (crates/boyko_app/tests/vb_occ_mixed_scene/mod.rs).
 #
-# ⚠️ SOFTWARE LEGS BLESSED, HWRT LEGS STILL "PENDING". The four sha256_software were blessed at
-# commit e160434 after a visual owner sign-off; the four sha256_hwrt are still the PENDING sentinel,
-# and golden.ps1's -Check reports a PENDING leg and exits 2 rather than passing -- the file header's
-# own documented way to ADD a leg by hand. NO sha256_* may be hand-edited on EITHER leg: blessing
+# ⚠️ BOTH LEGS BLESSED. The four sha256_software were first blessed at commit e160434 after a visual
+# owner sign-off; the four sha256_hwrt stayed the PENDING sentinel (golden.ps1 exits 2 on it) until
+# render wave PX1a's C14 (on 031aae18) blessed all eight legs at the HDR lit after the owner's visual
+# sign-off, each on its own `golden.ps1 [-Hwrt] -Bless` run. NO sha256_* may be hand-edited on EITHER leg: blessing
 # requires a VISUAL OWNER SIGN-OFF on the freshly-dumped BMP, nobody else may supply one, and a
 # hand-written hash converts a gate into a transcription.
 #
@@ -521,8 +521,8 @@ test_name       = "vb_mesh_screenshot_dump"
 bmp             = "D:\\tmp\\vb_occ_mixed_off.bmp"
 width           = 512
 height          = 512
-sha256_software = "85b7d3788130a8bb65f0b5b92ba86c71499bd7a4babe7d6900a711944d2913d9"
-sha256_hwrt     = "PENDING"
+sha256_software = "cc24106e1c418f7d4bff95e4200f4caf0aa79bdffc2c719a08894f0462c03944"
+sha256_hwrt     = "cc24106e1c418f7d4bff95e4200f4caf0aa79bdffc2c719a08894f0462c03944"
 
 [vb_occ_mixed_off.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -554,8 +554,8 @@ test_name       = "vb_mesh_screenshot_dump"
 bmp             = "D:\\tmp\\vb_occ_mixed_keep.bmp"
 width           = 512
 height          = 512
-sha256_software = "85b7d3788130a8bb65f0b5b92ba86c71499bd7a4babe7d6900a711944d2913d9"
-sha256_hwrt     = "PENDING"
+sha256_software = "cc24106e1c418f7d4bff95e4200f4caf0aa79bdffc2c719a08894f0462c03944"
+sha256_hwrt     = "cc24106e1c418f7d4bff95e4200f4caf0aa79bdffc2c719a08894f0462c03944"
 
 [vb_occ_mixed_keep.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -583,8 +583,8 @@ test_name       = "vb_mesh_screenshot_dump"
 bmp             = "D:\\tmp\\vb_occ_mixed.bmp"
 width           = 512
 height          = 512
-sha256_software = "85b7d3788130a8bb65f0b5b92ba86c71499bd7a4babe7d6900a711944d2913d9"
-sha256_hwrt     = "PENDING"
+sha256_software = "cc24106e1c418f7d4bff95e4200f4caf0aa79bdffc2c719a08894f0462c03944"
+sha256_hwrt     = "cc24106e1c418f7d4bff95e4200f4caf0aa79bdffc2c719a08894f0462c03944"
 
 [vb_occ_mixed.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -611,8 +611,8 @@ test_name       = "vb_mesh_screenshot_dump"
 bmp             = "D:\\tmp\\vb_occ_mixed_late.bmp"
 width           = 512
 height          = 512
-sha256_software = "85b7d3788130a8bb65f0b5b92ba86c71499bd7a4babe7d6900a711944d2913d9"
-sha256_hwrt     = "PENDING"
+sha256_software = "cc24106e1c418f7d4bff95e4200f4caf0aa79bdffc2c719a08894f0462c03944"
+sha256_hwrt     = "cc24106e1c418f7d4bff95e4200f4caf0aa79bdffc2c719a08894f0462c03944"
 
 [vb_occ_mixed_late.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -647,8 +647,8 @@ test_name       = "vb_both_screenshot_dump"
 bmp             = "D:\\tmp\\vb_both.bmp"
 width           = 512
 height          = 512
-sha256_software = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
-sha256_hwrt     = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+sha256_software = "575140a61895e9823fe441bdbc0fd69f4ff0e03a90ae6907492c54ce08fa5402"
+sha256_hwrt     = "575140a61895e9823fe441bdbc0fd69f4ff0e03a90ae6907492c54ce08fa5402"
 
 [vb_both.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -677,13 +677,13 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # construction. That difference proves nothing on its own -- S1's actual gate is the CPU coverage
 # oracle over this scene, not a frame diff.
 #
-# HALF-BLESSED, and the halves are not interchangeable. This header read "sha256_* are the literal
-# PENDING sentinel" after the software leg had been blessed, which invites the one edit that must
-# never happen here: re-blessing a leg that is already pinned. Only `sha256_hwrt` is PENDING.
-# `golden.ps1` exits 2 on it by design, so any gate quantified over this pin's hwrt leg is
-# vacuous until it is blessed -- do not read a green run as covering it.
-# The orchestrator blesses the remaining leg on a real windowed GPU device via
-# `scripts\golden.ps1 -Pin vb_both_sdf -Hwrt -Bless` AFTER the owner's visual sign-off.
+# BOTH LEGS BLESSED, each on its own run. The software leg was blessed first; `sha256_hwrt` stayed
+# the PENDING sentinel (golden.ps1 exits 2 on it by design, so any gate quantified over this pin's
+# hwrt leg was vacuous) until render wave PX1a's C14 (on 031aae18) first-blessed it at the HDR lit,
+# after the owner's visual sign-off, on a real windowed GPU device via
+# `scripts\golden.ps1 -Pin vb_both_sdf -Hwrt -Bless`; the software leg was re-blessed in the same
+# act (`-Bless`). A gate quantified over either leg covers it from that commit on.
+# A re-bless of either leg still needs the owner's visual sign-off on the freshly-dumped BMP.
 # Do NOT invent hashes.
 crate           = "boyko-app"
 test_binary     = "vb_both_sdf"
@@ -691,8 +691,8 @@ test_name       = "vb_both_sdf_screenshot_dump"
 bmp             = "D:\\tmp\\vb_both_sdf.bmp"
 width           = 512
 height          = 512
-sha256_software = "88522c5aaf5564a7c5257d102fd5ce2d1f75a6d528d8fc17c90ff438b5dc8fc1"
-sha256_hwrt     = "PENDING"
+sha256_software = "56bd7f4bd06218bd559a2e6aa62cdf6c15a17a12f1ab53dd5454c9940a679aa9"
+sha256_hwrt     = "56bd7f4bd06218bd559a2e6aa62cdf6c15a17a12f1ab53dd5454c9940a679aa9"
 
 [vb_both_sdf.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -727,10 +727,10 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # default folder, and the dump run prints the resolved bindless slots (0 = fallback) so a silent
 # fall back to the fallback texel cannot masquerade as a textured render.
 #
-# HALF-BLESSED, exactly as [vb_both_sdf] above -- see that pin's header for why the distinction
-# matters. Only `sha256_hwrt` is PENDING; the software leg is pinned and must not be re-blessed.
-# The orchestrator blesses the remaining leg via
-# `scripts\golden.ps1 -Pin vb_both_sdf_tex -Hwrt -Bless` AFTER the owner's visual sign-off.
+# BOTH LEGS BLESSED, exactly as [vb_both_sdf] above: `sha256_hwrt` stayed PENDING until render wave
+# PX1a's C14 (on 031aae18) first-blessed it at the HDR lit, after the owner's visual sign-off, via
+# `scripts\golden.ps1 -Pin vb_both_sdf_tex -Hwrt -Bless`; the software leg was re-blessed in the
+# same act (`-Bless`).
 # Do NOT invent hashes.
 #
 # D-DS MOVED THESE BYTES BY 4 PIXELS AT 1/255 (render-wave lane u/render-rd2-rd6, RD6 commit D-3
@@ -743,8 +743,8 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # fix-r1 gather change moves a byte. Re-blessed on that measurement, NOT on a visual check (AD-19's
 # per-pixel bound, <= 1 LSB and <= 0.1 % changed): 4 of 262144 px changed, delta histogram {1: 4},
 # at (354, 279), (380, 275), (7, 261), (360, 249) (x, y from the top). software 2f4de390 -> 6c3fcd4a.
-# Command, from D:\wt\render: scripts\golden.ps1 -Pin vb_both_sdf_tex -Bless. `sha256_hwrt` stays
-# PENDING (its first bless is the orchestrator's, after the owner's visual sign-off); the hwrt leg
+# Command, from D:\wt\render: scripts\golden.ps1 -Pin vb_both_sdf_tex -Bless. `sha256_hwrt` stayed
+# PENDING then (first-blessed at PX1a C14, above, after the owner's visual sign-off); the hwrt leg
 # rendered the same bytes as this software leg on the re-bless tree (6c3fcd4a).
 crate           = "boyko-app"
 test_binary     = "vb_both_sdf_tex"
@@ -752,8 +752,8 @@ test_name       = "vb_both_sdf_tex_screenshot_dump"
 bmp             = "D:\\tmp\\vb_both_sdf_tex.bmp"
 width           = 512
 height          = 512
-sha256_software = "6c3fcd4ad5d6fb5b4f2e70e32a1d1949353ac548787bb9294c046397cd2fec2e"
-sha256_hwrt     = "PENDING"
+sha256_software = "00d8e828ff3d39c3a18d167d0ea642f00afd404e56b438de2ee4952abff2fb29"
+sha256_hwrt     = "00d8e828ff3d39c3a18d167d0ea642f00afd404e56b438de2ee4952abff2fb29"
 
 [vb_both_sdf_tex.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -786,8 +786,8 @@ test_name       = "vb_sdf_only_screenshot_dump"
 bmp             = "D:\\tmp\\vb_sdf_only.bmp"
 width           = 512
 height          = 512
-sha256_software = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858a17"
-sha256_hwrt     = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858a17"
+sha256_software = "633f356a4239fc04f993d9f6cdf5450233e2019da2415c893091c760d56f449f"
+sha256_hwrt     = "633f356a4239fc04f993d9f6cdf5450233e2019da2415c893091c760d56f449f"
 
 [vb_sdf_only.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -843,8 +843,8 @@ test_name       = "vb_mesh_tex_screenshot_dump"
 bmp             = "D:\\tmp\\vb_mesh_tex.bmp"
 width           = 512
 height          = 512
-sha256_software = "a75167d13f4acfd49695b0ae0625615b0fc212a5e0a754f8e0389a4ef0ceb297"
-sha256_hwrt     = "a75167d13f4acfd49695b0ae0625615b0fc212a5e0a754f8e0389a4ef0ceb297"
+sha256_software = "e6f95cc6fcec2e5772714dca393a7a8104343146abee95e02226001e0f229109"
+sha256_hwrt     = "e6f95cc6fcec2e5772714dca393a7a8104343146abee95e02226001e0f229109"
 
 [vb_mesh_tex.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -962,8 +962,8 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\taa_armed.bmp"
 width           = 512
 height          = 512
-sha256_software = "b1e3b254835e8d445130d3d9a3ec3aa375ca5ea930220dfff0e5783833d95130"
-sha256_hwrt     = "6f6cb89ec4854d7587b1417e136127c09c5280881ea953bded1e507154a41bd4"
+sha256_software = "5f6cef1d2f1a711869e218a0327bf8634445137d35dbd3213904b9f3b622cc7b"
+sha256_hwrt     = "8c65331209d1042237de689b517dffd25b9c22020820ef9bad61bc7b488076fb"
 
 [taa_armed.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1050,8 +1050,8 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\taa_armed_basis.bmp"
 width           = 512
 height          = 512
-sha256_software = "53ba8049cf35b0ba5d0ebbfca941fdee2ea04697b45e073d24ae2661e81d3a29"
-sha256_hwrt     = "3af811ffd75b035c2b7c3c21474403a2fdf7e097ef5dbe38a9eef559242ac4be"
+sha256_software = "6c069eeeb59aa46ab83d0c6f72c61d3bbc944419e7ff2810f091667df633580a"
+sha256_hwrt     = "dacfc28197b3b48d33b7ccc25637b11b1b6f21e56f6c8e0245c73e2b057f047a"
 
 [taa_armed_basis.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1111,8 +1111,8 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\taa_rcas.bmp"
 width           = 512
 height          = 512
-sha256_software = "304adbfad32f7512162db15e03aec9a0cda5eb144b8521e86bf070ee5eb262d2"
-sha256_hwrt     = "cd1b86abdbcbbbf74d509f5cc100159b9c9de1da735dd96ba8ec1bd8e07d0e95"
+sha256_software = "b775ba8433142c52bc06e2a37cdbea7f55ac4cf6a1405620e78b099b95bf41c2"
+sha256_hwrt     = "4f5c3852c7d1d878846acc2ae4b220d093f7bf2def5d4cd676b08c3b64aded5c"
 
 [taa_rcas.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1178,8 +1178,8 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\vb_taa.bmp"
 width           = 512
 height          = 512
-sha256_software = "5be729a8f42834c2709bf511597eaf2baf43362bdda5fb90f8a3cb831e629899"
-sha256_hwrt     = "5be729a8f42834c2709bf511597eaf2baf43362bdda5fb90f8a3cb831e629899"
+sha256_software = "ab5991fc79f184a922ee9059f04e4ab86a432d9b9d4271d1b2180b8aa70aa818"
+sha256_hwrt     = "ab5991fc79f184a922ee9059f04e4ab86a432d9b9d4271d1b2180b8aa70aa818"
 
 [vb_taa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1221,8 +1221,8 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\vb_taa_rcas.bmp"
 width           = 512
 height          = 512
-sha256_software = "23d4d7e7969306b30eedfbf43997362d091e6a5caded27ec561228822b962fce"
-sha256_hwrt     = "23d4d7e7969306b30eedfbf43997362d091e6a5caded27ec561228822b962fce"
+sha256_software = "c2b0fedc2fc3b5645b922b6142da68f1840f44a5c378b0ccc9f115e674a5cf46"
+sha256_hwrt     = "c2b0fedc2fc3b5645b922b6142da68f1840f44a5c378b0ccc9f115e674a5cf46"
 
 [vb_taa_rcas.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1250,8 +1250,8 @@ test_name       = "vb_mesh_ssao_screenshot_dump"
 bmp             = "D:\\tmp\\vb_mesh_ssao.bmp"
 width           = 512
 height          = 512
-sha256_software = "85625a11684d4f2e40ee98510b840647546331b9fa0ba555499faf4109e8144f"
-sha256_hwrt     = "85625a11684d4f2e40ee98510b840647546331b9fa0ba555499faf4109e8144f"
+sha256_software = "3d895f70956d84f40c772d61c2bfb5e2b980ba404808295f9601c1ccdfa8e03d"
+sha256_hwrt     = "3d895f70956d84f40c772d61c2bfb5e2b980ba404808295f9601c1ccdfa8e03d"
 
 [vb_mesh_ssao.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1302,8 +1302,8 @@ test_name       = "vb_mesh_froxel_screenshot_dump"
 bmp             = "D:\\tmp\\vb_mesh_froxel.bmp"
 width           = 512
 height          = 512
-sha256_software = "3b2896ed5e478832b2178a31cbdffe323103839432aff95038397ab1ced8fb06"
-sha256_hwrt     = "3b2896ed5e478832b2178a31cbdffe323103839432aff95038397ab1ced8fb06"
+sha256_software = "fa1fb29538532d8521e288a4d2981867460285e74be901e88cfa5f82815b02dc"
+sha256_hwrt     = "fa1fb29538532d8521e288a4d2981867460285e74be901e88cfa5f82815b02dc"
 
 [vb_mesh_froxel.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1357,8 +1357,8 @@ test_name       = "vb_mesh_tex_froxel_screenshot_dump"
 bmp             = "D:\\tmp\\vb_mesh_tex_froxel.bmp"
 width           = 512
 height          = 512
-sha256_software = "1c5d2fb436bd76e35d9c4c299f8c8cd619bd8b19331a76ffed215835814afd17"
-sha256_hwrt     = "1c5d2fb436bd76e35d9c4c299f8c8cd619bd8b19331a76ffed215835814afd17"
+sha256_software = "73848f490cd314f7b666d893c1da0f70964b13b80de88a787a36ba4bf28e7e61"
+sha256_hwrt     = "73848f490cd314f7b666d893c1da0f70964b13b80de88a787a36ba4bf28e7e61"
 
 [vb_mesh_tex_froxel.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1413,8 +1413,8 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\vb_both_taa.bmp"
 width           = 512
 height          = 512
-sha256_software = "025830c5440d346364dda739209e1c123981f345ab5ddcea58c5b79f5e3e4e9a"
-sha256_hwrt     = "025830c5440d346364dda739209e1c123981f345ab5ddcea58c5b79f5e3e4e9a"
+sha256_software = "92b582766dd0887f81e9f7ef5bfd48475177e3914c7fd5716e0c735b3f813925"
+sha256_hwrt     = "92b582766dd0887f81e9f7ef5bfd48475177e3914c7fd5716e0c735b3f813925"
 
 [vb_both_taa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1455,8 +1455,8 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\vb_sdf_taa.bmp"
 width           = 512
 height          = 512
-sha256_software = "e4f88703874b5a8a4ba0c396c97c12dbeff0b7cc0ff3911714fdb8254f88d2f6"
-sha256_hwrt     = "e4f88703874b5a8a4ba0c396c97c12dbeff0b7cc0ff3911714fdb8254f88d2f6"
+sha256_software = "02773a40c4499572ac7b2ff1fbb71064da0b5042cac120e95131aa4543dd9f6d"
+sha256_hwrt     = "02773a40c4499572ac7b2ff1fbb71064da0b5042cac120e95131aa4543dd9f6d"
 
 [vb_sdf_taa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1496,8 +1496,8 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\deferred_sdf_casters.bmp"
 width           = 512
 height          = 512
-sha256_software = "ea6b1df8a1537f0c11368c891a3215bdebcdb5ca861b1c989613eb3f6c074df6"
-sha256_hwrt     = "ea6b1df8a1537f0c11368c891a3215bdebcdb5ca861b1c989613eb3f6c074df6"
+sha256_software = "bc31a4d8b6a4f327760c0b8c4648b9af23968589390c27a1e7e093848ac4cd3d"
+sha256_hwrt     = "bc31a4d8b6a4f327760c0b8c4648b9af23968589390c27a1e7e093848ac4cd3d"
 
 [deferred_sdf_casters.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1530,8 +1530,8 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\vb_mesh_shadows.bmp"
 width           = 512
 height          = 512
-sha256_software = "32c732749861865a425dadd3777e2b2e97adf59b307f7bcef3ea42d095506a23"
-sha256_hwrt     = "32c732749861865a425dadd3777e2b2e97adf59b307f7bcef3ea42d095506a23"
+sha256_software = "5995d26a4ddf5cb87b14c63c275e37cd7b840b9006d74cfb5156c44d2c58c40b"
+sha256_hwrt     = "5995d26a4ddf5cb87b14c63c275e37cd7b840b9006d74cfb5156c44d2c58c40b"
 
 [vb_mesh_shadows.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1548,12 +1548,12 @@ BOYKO_GEOMETRY_LEGS      = "mesh"
 # `lit` as additive billboards, captured at presented frame 30.
 #
 # NO INTER-PARTICLE OVERDRAW, and that is the pin's precondition, not a description. Additive
-# blending is commutative, but `lit` is 8-bit post-tonemap and saturates, so `sat(sat(a)+b)` is
-# order-free only while nothing clips. The fixture therefore emits ONE particle per frame at a
-# UNIFORM speed from a cone whose axis is rotated onto world +Y: every live particle has a distinct
-# age, hence a distinct radius, hence its own pixels. MEASURED at the capture: 30 particles, 354
-# saturated pixels, ~12 px each, shells ~7 px apart. Blend ORDER is therefore irrelevant to these
-# bytes and the pin is reproducible whatever order the sim's waves retire in.
+# blending is commutative, but each blend rounds its sum to `lit`'s RGBA16F (since PX1a; before it,
+# `lit` was 8-bit post-tonemap and saturated), so overlap is order-free only up to that rounding. The
+# fixture therefore emits ONE particle per frame at a UNIFORM speed from a cone whose axis is rotated
+# onto world +Y: every live particle has a distinct age, hence a distinct radius, hence its own
+# pixels. MEASURED at the capture: 30 particles, 354 white pixels, ~12 px each, shells ~7 px apart.
+# Blend ORDER is therefore irrelevant to these bytes, whatever order the sim's waves retire in.
 #
 # The clock is NOT the engine's. `Time` is inserted PAUSED at config time and the fixture drives
 # exactly one substep per frame from its own system, so the simulated instant is a function of the
@@ -1585,17 +1585,17 @@ test_name       = "particle_lab_screenshot_dump"
 bmp             = "D:\\tmp\\particle_additive.bmp"
 width           = 512
 height          = 512
-# PENDING owner visual sign-off, captured 2026-08-20 (three byte-identical runs). The value is the
-# real digest, not the unblessed sentinel, so -Check regressions are caught from today; what is
-# outstanding is the OWNER's look at the BMP, which is the only thing that can say the image is
-# RIGHT rather than merely stable.
-sha256_software = "f27d97acd104039e849ce5740f30bf89a5560bbba6822110eadaf0fdd023fc89"
-# The HW-RT leg was NOT run for this pin. The scene has no ray-traced content (no shadow casters,
-# no SDF, unlit particles), so the two legs are expected to agree -- but "expected" is not
-# "measured", and the sibling vb_* pins each blessed their hwrt leg on its own run. Seeded with the
-# mechanically-checked unblessed sentinel rather than a copy of the software digest, which would be
-# a claim nobody made.
-sha256_hwrt     = "PENDING"
+# Captured 2026-08-20 (three byte-identical runs); RE-BLESSED at render wave PX1a's C14 (on 031aae18)
+# at the HDR lit, after the OWNER's visual sign-off of the HDR frame (the sparks read slightly off
+# white; accepted). A HASH pin, not a tolerance block: GL-H1's class-2 probe rendered five runs
+# byte-identical in `lit`, in the display image and in the BMP.
+sha256_software = "1263b87481d646c01db24d5707649d4bd945ae811746bfe3b0d7abf02057fe6e"
+# The HW-RT leg was seeded with the PENDING sentinel rather than a copy of the software digest: the
+# scene has no ray-traced content (no shadow casters, no SDF, unlit particles), so the legs were
+# EXPECTED to agree, and "expected" is not "measured". It MEASURED equal to the software leg at
+# GL-H0 (pre-HDR) and again at GL-H1, and was first-blessed at PX1a C14 on its own `-Hwrt -Bless`
+# run, with the same sign-off and the same five-run probe -- measured, as the sibling vb_* pins were.
+sha256_hwrt     = "1263b87481d646c01db24d5707649d4bd945ae811746bfe3b0d7abf02057fe6e"
 
 [particle_additive.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1643,20 +1643,20 @@ test_name       = "particle_lab_screenshot_dump"
 bmp             = "D:\\tmp\\particle_sdf_collide.bmp"
 width           = 512
 height          = 512
-# PENDING owner visual sign-off, captured 2026-08-20 at 729f5ad6 (two byte-identical runs). The
-# value is the real digest, not the unblessed sentinel, so -Check regressions are caught; what is
-# outstanding is the OWNER's look at the BMP -- the only thing that can say the image is RIGHT
-# rather than merely stable and merely different from its control.
+# Captured 2026-08-20 at 729f5ad6 (two byte-identical runs); RE-BLESSED at render wave PX1a's C14
+# (on 031aae18) at the HDR lit, both legs, each on its own run, after the OWNER's visual sign-off of
+# the HDR frame. A HASH pin: GL-H1's class-2 probe rendered five runs byte-identical in `lit`, in the
+# display image and in the BMP. The R2 history below is the pre-HDR digest's.
 # LIGHT-TABLE R2 moved it by ONE pixel (lane fix/light-table-defects; re-pinned 2026-09-19 on the
 # msvc host, 729f5ad6 -> c6a055a1): (463, 385), 1 LSB brighter. This scene's sun is the old boot
 # constant (crates/boyko_app/tests/particle_scene/mod.rs, SUN_DIR), so the marcher's sun changed
 # only in its bits -- the rounding recorded in [taa_armed]. An A/B that pushed the raw constant
 # through the new path restored 729f5ad6. The re-pin carries that rounding; it is not the sign-off.
-sha256_software = "c6a055a1518ca4deef97dd942a1b3592ff68e471733643f417b6336135b23bc3"
+sha256_software = "d6ee7bb9265ed7a5551532f63ba38d4931c8c24652b3b54d7be77479bb5fc331"
 # The HW-RT leg was first run during R2's testing (2026-09-19): 729f5ad6 on the pre-R2 tree and
 # c6a055a1 after, equal to the software leg both times; this re-pin's own run rendered c6a055a1
-# again. Pinned from that run, with the same owner sign-off outstanding as the software leg.
-sha256_hwrt     = "c6a055a1518ca4deef97dd942a1b3592ff68e471733643f417b6336135b23bc3"
+# again. Pinned from that run; re-blessed at PX1a C14 with the software leg (above), equal to it.
+sha256_hwrt     = "d6ee7bb9265ed7a5551532f63ba38d4931c8c24652b3b54d7be77479bb5fc331"
 
 [particle_sdf_collide.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1672,15 +1672,15 @@ BOYKO_PARTICLE_COLLIDE   = "1"
 # frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
 # unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
 # ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
-# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
-# it after the owner's visual check.
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. Blessed at GL-H0 step 6 (on
+# 72ee9f15) after the owner's visual sign-off of 2026-10-18 (orchestrator ruling 69); re-blessed at PX1a C14 (on 031aae18) at the HDR lit.
 crate           = "boyko-app"
 test_binary     = "grand_showcase_2mat"
 test_name       = "grand_showcase_2mat_aa_pin_dump"
 bmp             = "D:\\tmp\\grand_showcase_2mat_fxaa.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "f414580b333ce2d765ddfb28c30fb532c8cdde95fd2c0ba2a6a844658820725d"
 
 [grand_showcase_2mat_fxaa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1694,15 +1694,15 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
 # unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
 # ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
-# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
-# it after the owner's visual check.
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. Blessed at GL-H0 step 6 (on
+# 72ee9f15) after the owner's visual sign-off of 2026-10-18 (orchestrator ruling 69); re-blessed at PX1a C14 (on 031aae18) at the HDR lit.
 crate           = "boyko-app"
 test_binary     = "grand_showcase_2mat"
 test_name       = "grand_showcase_2mat_aa_pin_dump"
 bmp             = "D:\\tmp\\grand_showcase_2mat_smaa.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "cbf05c27505aaf74c9853791ae7e8316347998377e9a1d892438ae380f5f6d50"
 
 [grand_showcase_2mat_smaa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1716,15 +1716,15 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
 # unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
 # ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
-# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
-# it after the owner's visual check.
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. Blessed at GL-H0 step 6 (on
+# 72ee9f15) after the owner's visual sign-off of 2026-10-18 (orchestrator ruling 69); re-blessed at PX1a C14 (on 031aae18) at the HDR lit.
 crate           = "boyko-app"
 test_binary     = "grand_showcase_2mat"
 test_name       = "grand_showcase_2mat_aa_pin_dump"
 bmp             = "D:\\tmp\\grand_showcase_2mat_ssaa.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "6f053b757a0df3d7c1de5b4eb364859961698486a9e3aac94d640fd700d3aab0"
 
 [grand_showcase_2mat_ssaa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1738,15 +1738,15 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
 # unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
 # ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
-# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
-# it after the owner's visual check.
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. Blessed at GL-H0 step 6 (on
+# 72ee9f15) after the owner's visual sign-off of 2026-10-18 (orchestrator ruling 69); re-blessed at PX1a C14 (on 031aae18) at the HDR lit.
 crate           = "boyko-app"
 test_binary     = "vb_mesh_tex"
 test_name       = "vb_mesh_tex_aa_pin_dump"
 bmp             = "D:\\tmp\\vb_mesh_tex_fxaa.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "2421c5432c5493fa496cab5f42065254345dc5c2a765c74459b38d69f1b17490"
 
 [vb_mesh_tex_fxaa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1760,15 +1760,15 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
 # unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
 # ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
-# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
-# it after the owner's visual check.
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. Blessed at GL-H0 step 6 (on
+# 72ee9f15) after the owner's visual sign-off of 2026-10-18 (orchestrator ruling 69); re-blessed at PX1a C14 (on 031aae18) at the HDR lit.
 crate           = "boyko-app"
 test_binary     = "vb_mesh_tex"
 test_name       = "vb_mesh_tex_aa_pin_dump"
 bmp             = "D:\\tmp\\vb_mesh_tex_smaa.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "5279f9426faabb30b8804a9f484a0f2aa5fd25e765930fd1e14d18048ffadbea"
 
 [vb_mesh_tex_smaa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1782,15 +1782,15 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # frame PX1a re-plumbs the AA passes under. The pin fn reads BOYKO_AA as REQUIRED and closed (an
 # unset or unknown value panics naming it - never an AA-off frame under this name). SOFTWARE LEG
 # ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
-# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. PENDING until GL-H0 blesses
-# it after the owner's visual check.
+# pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. Blessed at GL-H0 step 6 (on
+# 72ee9f15) after the owner's visual sign-off of 2026-10-18 (orchestrator ruling 69); re-blessed at PX1a C14 (on 031aae18) at the HDR lit.
 crate           = "boyko-app"
 test_binary     = "vb_mesh_tex"
 test_name       = "vb_mesh_tex_aa_pin_dump"
 bmp             = "D:\\tmp\\vb_mesh_tex_ssaa.bmp"
 width           = 512
 height          = 512
-sha256_software = "PENDING"
+sha256_software = "3284ee55e4c2df147ff69f815deb55717c7222202f07f641ac2af1e7e2102608"
 
 [vb_mesh_tex_ssaa.env]
 BOYKO_DISABLE_VALIDATION = "1"

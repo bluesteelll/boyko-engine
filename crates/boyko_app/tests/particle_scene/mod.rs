@@ -64,15 +64,15 @@
 //! # Why the scene is what it is (gate #16's no-overdraw constraint)
 //!
 //! The pin is only order-independent if no two billboards overlap — additive blending is
-//! commutative, but the 8-bit `lit` target saturates, and `sat(sat(a)+b)` is only order-free while
-//! nothing clips. The scene therefore emits **one particle per frame** at a UNIFORM speed from a
-//! cone whose axis points away from the view axis:
+//! commutative, but each blend rounds its sum to `lit`'s RGBA16F, so overlapping billboards sum
+//! order-free only up to that rounding. The scene therefore emits **one particle per frame** at a
+//! UNIFORM speed from a cone whose axis points away from the view axis:
 //!
 //! * one particle per frame ⇒ every live particle has a distinct age ⇒ a distinct radius;
 //! * `speed_min == speed_max` ⇒ radius is a function of age alone, so the live set is a series of
 //!   concentric shells [`LAB_SHELL_SPACING`] apart — 0.1 world units, ~7 px at the fixture's
 //!   camera (a 512 px window, `fov_y = 60°`, the fan ~6 units out ⇒ ~74 px/unit) against a ~3.7 px
-//!   sprite. MEASURED at the capture: 30 particles leaving 354 saturated pixels, ~12 px each,
+//!   sprite. MEASURED at the capture: 30 particles leaving 354 white pixels, ~12 px each,
 //!   i.e. the sprites are separated with room to spare;
 //! * the cone axis is the emitter's `+Z` rotated to world `+Y` ([`EMITTER_ROTATION`]), so no spawn
 //!   direction lies within 50° of the view axis and two particles on the same ray at different
@@ -81,7 +81,7 @@
 //!
 //! `size_keys` is flat and `color_keys[0]` is white: P0's shaders evaluate the SIZE ramp only and
 //! carry `color_keys[0]` for the particle's whole life, so a shrinking ramp would make the pin's
-//! sprites sub-pixel and a dim colour would land under the 2/255 floor `lit`'s 8 bits impose.
+//! sprites sub-pixel and a dim colour would fall under `particle_lab`'s white premise on `lit`.
 //!
 //! # Env knobs
 //!
@@ -638,8 +638,8 @@ pub fn lab_effect() -> ParticleEffect {
         collision_radius: if collides { LAB_COLLISION_RADIUS } else { 0.0 },
         restitution: if collides { LAB_RESTITUTION } else { 0.0 },
         friction: if collides { LAB_FRICTION } else { 0.0 },
-        // White-hot for the particle's whole life: P0 is spawn-passthrough on colour, and `lit` is
-        // 8-bit post-tonemap, so a dim key would land under the 2/255 additive floor.
+        // White-hot for the particle's whole life: P0 is spawn-passthrough on colour, and
+        // `particle_lab`'s premise is a white core on `lit` (`CORE_LIT`), which a dim key misses.
         color_keys: [0xFFFF_FFFF; 4],
         color_times: [0.0, 0.333_333_34, 0.666_666_7, 1.0],
         size_keys: [1.0; 4],

@@ -26,12 +26,17 @@ use boyko_sdf_math::{
 // feature (the optional DIRECT `boyko_shaderdsl` edge in `Cargo.toml`); the shipped `compute`
 // surface never names the eDSL. The eDSL's own `SsaoParams` is aliased apart from the host
 // `compute::SsaoParams` imported below (same five fields, converted field-by-field).
-use boyko_shaderdsl::cf::EvalCf;
+use boyko_rhi::Format;
+use boyko_shaderdsl::cf::{EvalCf, HostTex2};
 // Render wave PX0 (OPEN-ITEMS #3): THE B10G11R11 decoder lives in `boyko_shaderdsl::pixfmt` (one
 // home for every dump reader, `post_eval` and `tools/golden_diff.py`'s pinned mirror); the goldens
 // re-export it so PX1a reads `goldens::unpack_b10g11r11` without a second body.
 pub use boyko_shaderdsl::pixfmt::unpack_b10g11r11;
-use boyko_shaderdsl::pixfmt::PathClass;
+use boyko_shaderdsl::pixfmt::{Channel, PathClass, Target, decode_texel, texel_bytes};
+use boyko_shaderdsl::post::{
+    OETF_GAMMA_EXP, TONEMAP_ACES, TONEMAP_MODE_SHIFT, eval_params, lit_store_saturate, post_final_eval,
+    ubo_word,
+};
 use boyko_shaderdsl::ssao::{SsaoParams as EdslSsaoParams, ssao_estimate_body_params};
 
 use crate::compute::{
@@ -47,6 +52,7 @@ use crate::compute::{
     SsaoParams, TILE_FLAG_EMPTY, TILE_SIZE, TileBound, composite_ray, depth_to_t,
     golden_f16_from_f32, pack_rgba, sdf_sphere,
 };
+use crate::present::{LIT_BACKGROUND_SCENE, LIT_FORMAT};
 
 /// How the device rounds a float written into a `B10G11R11_UFLOAT_PACK32` target, one class per
 /// path in [`boyko_shaderdsl::pixfmt::Path::ALL`]'s order `[store, attachment, blend_add,
@@ -78,6 +84,250 @@ pub const RGBA16F_ROUNDING: [PathClass; 5] = [
     PathClass::Unmodelled { max_err_milli_ulp: 1000 },
     PathClass::Z,
 ];
+
+/// The rounding classes of the format `lit` is created with — the ONE place the K12 re-aim reads
+/// them from (render wave PX1a, `px1a/cut.md` DS-H4 (e): `B10G11R11_ROUNDING` is superseded by
+/// the format clause). Selected from [`LIT_FORMAT`], so a later format flip moves it.
+pub const LIT_ROUNDING: [PathClass; 5] = lit_rounding_for(LIT_FORMAT);
+
+/// [`LIT_FORMAT`]'s pixel-format target (its three colour channels' encodings).
+pub const LIT_TARGET: Target = lit_target_for(LIT_FORMAT);
+
+/// The index of the store path in a `[PathClass; 5]` table ([`boyko_shaderdsl::pixfmt::Path::ALL`]
+/// order `[store, attachment, blend_add, blend_over, clear]`). Every `lit` producer the K12 suites
+/// read stores through `imageStore` (compute) or a non-blended attachment write.
+pub const LIT_STORE_PATH: usize = 0;
+
+const fn lit_rounding_for(format: Format) -> [PathClass; 5] {
+    match format {
+        Format::R16G16B16A16Sfloat => RGBA16F_ROUNDING,
+        Format::B10G11R11UfloatPack32 => B10G11R11_ROUNDING,
+        _ => panic!("LIT_FORMAT has no measured rounding classes"),
+    }
+}
+
+const fn lit_target_for(format: Format) -> Target {
+    match format {
+        Format::R16G16B16A16Sfloat => Target::Rgba16f,
+        Format::B10G11R11UfloatPack32 => Target::B10G11R11,
+        _ => panic!("LIT_FORMAT is not an HDR pixel-format target"),
+    }
+}
+
+/// The producers' store, as the host oracles mirror it: `lit_store_saturate` (render wave PX1a,
+/// ruling 67 W5 — an overflow stores `HDR_MAX`, a NaN stays NaN) on the scene-linear radiance.
+/// The format's own rounding is NOT applied here; [`lit_matches`] bounds it.
+#[inline]
+pub fn lit_store(c: [f32; 3]) -> [f32; 3] {
+    lit_store_saturate::<EvalCf>(c)
+}
+
+/// `post_final`'s display for one scene-linear `lit` texel: the generated body itself
+/// ([`post_final_eval`]: `hdr_sanitize → pre_ratio_apply → tonemap_select → oetf_gamma22`) at
+/// exposure ratio 1 under the tonemapper `tonemap_mode` (`boyko_shaderdsl::post::TONEMAP_*`).
+/// The composition every display-referred consumer of a re-aimed oracle reads (render wave PX1a).
+pub fn golden_display(lit: [f32; 3], tonemap_mode: u32) -> [f32; 3] {
+    let mut words = [0u32; 8];
+    words[ubo_word("mode_words")] = tonemap_mode << TONEMAP_MODE_SHIFT;
+    words[ubo_word("exposure_ratio")] = 1.0f32.to_bits();
+    words[ubo_word("extent")] = 1;
+    words[ubo_word("extent") + 1] = 1;
+    let texel = [[lit[0], lit[1], lit[2], 1.0]];
+    let o = post_final_eval([0, 0], &eval_params(words), HostTex2::new(&texel, 1, 1));
+    [o[0], o[1], o[2]]
+}
+
+/// [`golden_display`] quantized the way `display` (RGBA8 UNORM) stores it, packed `0xAABBGGRR`
+/// ([`pack_rgba`]).
+#[inline]
+pub fn golden_display_packed(lit: [f32; 3], tonemap_mode: u32) -> u32 {
+    pack_rgba(golden_display(lit, tonemap_mode))
+}
+
+/// One step of `ch` at the magnitude of `x`: `2^(e - m)` for the binade `[2^e, 2^(e+1))` of `|x|`,
+/// the subnormal step `2^(-14 - m)` below the smallest normal `2^-14` (binary16, UFLOAT11 and
+/// UFLOAT10 share the 5-bit exponent bias 15), the top binade's step above it.
+fn format_step(ch: Channel, x: f32) -> f32 {
+    let a = x.abs();
+    let e = if a < f32::from_bits(0x3880_0000) {
+        -14
+    } else {
+        (((a.to_bits() >> 23) & 0xFF) as i32 - 127).min(15)
+    };
+    f32::from_bits(((e - ch.mantissa_bits() as i32 + 127) as u32) << 23)
+}
+
+/// How far, per channel, a device `lit` texel `got` sits OUTSIDE the interval the store of the
+/// exact radiance `want` may land in: `want + [lo, hi] · step(want)` from `class`'s single-write
+/// bound ([`PathClass::store_bound_ulp`] on `target`'s channel), widened by `floor[c]` on both
+/// sides. `<= 0.0` everywhere means inside; a non-finite `got` or `want` is `+inf`.
+pub fn lit_store_excess(
+    got: [f32; 3],
+    want: [f32; 3],
+    target: Target,
+    class: PathClass,
+    floor: [f32; 3],
+) -> [f32; 3] {
+    let chans = target.channels();
+    let mut out = [0.0f32; 3];
+    for c in 0..3 {
+        if !got[c].is_finite() || !want[c].is_finite() {
+            out[c] = f32::INFINITY;
+            continue;
+        }
+        let (lo, hi) = class.store_bound_ulp(chans[c]);
+        let step = format_step(chans[c], want[c]);
+        let below = want[c] + lo * step - floor[c] - got[c];
+        let above = got[c] - (want[c] + hi * step + floor[c]);
+        out[c] = below.max(above);
+    }
+    out
+}
+
+/// `true` when a device `lit` texel read back from [`LIT_FORMAT`] matches the oracle radiance
+/// `want` (render wave PX1a C9 — the K12 suites' comparator): inside [`LIT_ROUNDING`]'s store bound
+/// in radiance, or — the suite's existing allowance, kept in the unit it was set in — with
+/// `post_final`'s 8-bit displays of the two ([`golden_display_packed`], ACES) within `lsb` codes per
+/// channel. The display arm is the pre-PX1a check unchanged; it carries what the count always
+/// budgeted (the host model's 8-bit attribute and shadow-march disagreements with the device), which
+/// in the HDR range exceeds any format bound (`px1a/impl.md` Part 7: a 7 % radiance divergence at a
+/// 2-code display delta on `p6_r1`'s twin spheres). `lsb = 0` is the pure format gate.
+pub fn lit_matches(got: [f32; 3], want: [f32; 3], lsb: u32) -> bool {
+    let none = [0.0f32; 3];
+    if lit_store_excess(got, want, LIT_TARGET, LIT_ROUNDING[LIT_STORE_PATH], none).iter().all(|&e| e <= 0.0) {
+        return true;
+    }
+    if lsb == 0 || got.iter().chain(&want).any(|c| !c.is_finite()) {
+        return false;
+    }
+    let (g, w) = (golden_display_packed(got, TONEMAP_ACES), golden_display_packed(want, TONEMAP_ACES));
+    (0..3).all(|c| ((g >> (8 * c)) & 0xFF).abs_diff((w >> (8 * c)) & 0xFF) <= lsb)
+}
+
+/// Decodes one `lit` readback texel ([`LIT_FORMAT`], tightly packed) into its RGB radiance through
+/// `boyko_shaderdsl::pixfmt` — the one decoder (DS-H4 (a)).
+///
+/// # Panics
+/// If `texel` is not one [`LIT_FORMAT`] texel (a harness bug).
+pub fn lit_texel_rgb(texel: &[u8]) -> [f32; 3] {
+    let t = decode_texel(LIT_FORMAT.as_i32() as u32, texel)
+        .expect("invariant: one LIT_FORMAT texel of the format's size");
+    [t[0], t[1], t[2]]
+}
+
+/// [`LIT_FORMAT`]'s texel size in bytes (the readback stride).
+pub const LIT_TEXEL_BYTES: usize = match texel_bytes(LIT_FORMAT.as_i32() as u32) {
+    Some(b) => b as usize,
+    None => panic!("LIT_FORMAT has no pixfmt texel size"),
+};
+
+// ---- AD-19's per-pixel display bound (the Rust twin of `tools/golden_diff.py`'s `pixel_bound`) ----
+//
+// f64 throughout, every constant and op order as `golden_diff.py` spells them, so the two agree to
+// the vectors' print precision (`tools/tests/vectors/display_bound.txt`, pinned from both sides:
+// `goldens::tests::display_bound_vectors_are_in_sync` and `test_golden_diff.py`).
+
+const DB_ACES_IN: [[f64; 3]; 3] =
+    [[0.59719, 0.35458, 0.04823], [0.07600, 0.90834, 0.01566], [0.02840, 0.13383, 0.83777]];
+const DB_ACES_OUT: [[f64; 3]; 3] =
+    [[1.60475, -0.53108, -0.07367], [-0.10208, 1.10813, -0.00605], [-0.00327, -0.07276, 1.07602]];
+const DB_ACES_A: f64 = 0.0245786;
+const DB_ACES_B: f64 = 0.000090537;
+const DB_ACES_C: f64 = 0.983729;
+const DB_ACES_D: f64 = 0.432951;
+const DB_ACES_E: f64 = 0.238081;
+
+fn db_mat3(m: &[[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+    [
+        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+    ]
+}
+
+fn db_inv3(m: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let [[a, b, c], [d, e, f], [g, h, i]] = *m;
+    let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    [
+        [(e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det],
+        [(f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det],
+        [(d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det],
+    ]
+}
+
+fn db_oetf_exp() -> f64 {
+    f64::from(OETF_GAMMA_EXP)
+}
+
+fn db_tail(c: [f64; 3]) -> [f64; 3] {
+    let v = db_mat3(&DB_ACES_IN, c);
+    let q = v.map(|x| (x * (x + DB_ACES_A) - DB_ACES_B) / (x * (DB_ACES_C * x + DB_ACES_D) + DB_ACES_E));
+    db_mat3(&DB_ACES_OUT, q).map(|y| y.clamp(0.0, 1.0).max(0.0).powf(db_oetf_exp()))
+}
+
+fn db_curve_inverse(y: f64) -> f64 {
+    let a2 = 1.0 - y * DB_ACES_C;
+    let b1 = DB_ACES_A - y * DB_ACES_D;
+    let c0 = -(DB_ACES_B + y * DB_ACES_E);
+    if a2.abs() < 1e-12 {
+        return -c0 / b1;
+    }
+    let disc = (b1 * b1 - 4.0 * a2 * c0).max(0.0);
+    (-b1 + disc.sqrt()) / (2.0 * a2)
+}
+
+fn db_tail_inverse(d: [f64; 3]) -> [f64; 3] {
+    let lin = d.map(|v| v.max(0.0).powf(1.0 / db_oetf_exp()));
+    let y = db_mat3(&db_inv3(&DB_ACES_OUT), lin);
+    let v = y.map(|t| db_curve_inverse(t.clamp(0.0, 0.999_999)));
+    db_mat3(&db_inv3(&DB_ACES_IN), v)
+}
+
+fn db_jacobian(c: [f64; 3]) -> [[f64; 3]; 3] {
+    const H: f64 = 1e-4;
+    let mut j = [[0.0f64; 3]; 3];
+    for k in 0..3 {
+        let step = (c[k].abs() * H).max(1e-7);
+        let (mut lo, mut hi) = (c, c);
+        lo[k] = (c[k] - step).max(0.0);
+        hi[k] = c[k] + step;
+        let (tl, th) = (db_tail(lo), db_tail(hi));
+        for i in 0..3 {
+            j[i][k] = (th[i] - tl[i]) / (hi[k] - lo[k]);
+        }
+    }
+    j
+}
+
+/// AD-19's per-channel bound, in display codes, on how far `post_final`'s 8-bit display of a
+/// scene-linear radiance may move when that radiance passes through one store of `target` under
+/// `class`, around the display `display_8bit` (render wave PX1a C9; the Rust twin of
+/// `golden_diff.py`'s `pixel_bound`, held equal by the committed vectors — critique O6). For each
+/// bin edge `(p ± ½) / 255` the radiance under it is `tail⁻¹` (OETF and the ACES Hill fit, curve
+/// clamped below 1), and the bound is `255 · Σ_k |∂tail_i/∂c_k| · ε_k · |c_k|` (central differences,
+/// relative step 10⁻⁴), `ε_k` = `class`'s single-write bound in ULPs × `2^-m` of channel `k`; the
+/// larger edge, plus one code (the display's own 8-bit store).
+pub fn hdr_display_bound(display_8bit: [u8; 3], target: Target, class: PathClass) -> [f64; 3] {
+    let chans = target.channels();
+    let eps = [0, 1, 2].map(|k| {
+        let (lo, hi) = class.store_bound_ulp(chans[k]);
+        f64::from(lo.abs().max(hi.abs())) * f64::from(f32::from_bits((127 - chans[k].mantissa_bits()) << 23))
+    });
+    let mut best = [0.0f64; 3];
+    for corner in [-0.5f64, 0.5] {
+        let d = display_8bit.map(|p| ((f64::from(p) + corner) / 255.0).clamp(0.0, 1.0));
+        let c = db_tail_inverse(d);
+        let j = db_jacobian(c);
+        for i in 0..3 {
+            let mut sum = 0.0f64;
+            for k in 0..3 {
+                sum += j[i][k].abs() * eps[k] * c[k].abs();
+            }
+            best[i] = best[i].max(255.0 * sum);
+        }
+    }
+    best.map(|b| b + 1.0)
+}
 
 
 /// The CPU golden for step 0c: `out[i] == i*2 + 1` (the `write_pattern` shader).
@@ -1894,82 +2144,16 @@ pub(crate) fn sun_kernel(dir: [f32; 3], sun_dir: [f32; 3], alpha: f32) -> f32 {
     c.powf(sun_kernel_exponent(alpha))
 }
 
-/// The 3x3 matrices of the Stephen Hill ACES-fitted tonemap (PBR P0-C), byte-mirroring the
-/// resolve's `ACES_IN` — row-major as written, `mul(M, v)`-style (row i dotted with `v`).
-const ACES_IN: [[f32; 3]; 3] = [
-    [0.59719, 0.35458, 0.04823],
-    [0.07600, 0.90834, 0.01566],
-    [0.02840, 0.13383, 0.83777],
-];
-
-/// The output-side matrix of the Hill ACES fit (PBR P0-C), byte-mirroring the resolve's
-/// `ACES_OUT`.
-const ACES_OUT: [[f32; 3]; 3] = [
-    [1.60475, -0.53108, -0.07367],
-    [-0.10208, 1.10813, -0.00605],
-    [-0.00327, -0.07276, 1.07602],
-];
-
-/// `mul(m, v)` mirror (row-major `m`, row `i` dotted with `v`, accumulated in column order
-/// 0,1,2 — no reassociation) — the exact op-order the resolve's `aces_fitted` uses for both
-/// `ACES_IN` and `ACES_OUT`.
-#[inline]
-fn mat3_mul_vec3(m: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
-    [
-        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
-        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
-        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
-    ]
-}
-
-/// The Stephen Hill ACES-fitted filmic tonemap (PBR P0-C), byte-mirroring the resolve's
-/// `aces_fitted`: `c = mul(ACES_IN, c); a = c*(c+0.0245786)-0.000090537; b =
-/// c*(0.983729*c+0.432951)+0.238081; return saturate(mul(ACES_OUT, a/b));` — SAME op order,
-/// no reassociation.
-#[inline]
-pub(crate) fn aces_fitted(c: [f32; 3]) -> [f32; 3] {
-    let c = mat3_mul_vec3(&ACES_IN, c);
-    let a = [
-        c[0] * (c[0] + 0.0245786) - 0.000090537,
-        c[1] * (c[1] + 0.0245786) - 0.000090537,
-        c[2] * (c[2] + 0.0245786) - 0.000090537,
-    ];
-    let b = [
-        c[0] * (0.983729 * c[0] + 0.432_951) + 0.238081,
-        c[1] * (0.983729 * c[1] + 0.432_951) + 0.238081,
-        c[2] * (0.983729 * c[2] + 0.432_951) + 0.238081,
-    ];
-    let ratio = [a[0] / b[0], a[1] / b[1], a[2] / b[2]];
-    let out = mat3_mul_vec3(&ACES_OUT, ratio);
-    [out[0].clamp(0.0, 1.0), out[1].clamp(0.0, 1.0), out[2].clamp(0.0, 1.0)]
-}
-
-/// The resolve's OUTPUT stage (PBR P0-C): the Hill ACES-fitted tonemap applied to the
-/// exposed linear radiance, THEN the manual gamma-2.2 OETF (`gLit`/the swapchain are linear
-/// UNORM end to end — no hardware sRGB encode; see the resolve's `aces_fitted` doc comment for
-/// the OETF verification). Byte-mirrors `lit = aces_fitted(lit); lit = pow(lit, 1.0/2.2);`
-/// EXACTLY (same op order, same two-step sequence).
-#[inline]
-pub(crate) fn tonemap_and_oetf(lit: [f32; 3]) -> [f32; 3] {
-    const OETF_GAMMA_EXP: f32 = 1.0 / 2.2;
-    let t = aces_fitted(lit);
-    [
-        t[0].powf(OETF_GAMMA_EXP),
-        t[1].powf(OETF_GAMMA_EXP),
-        t[2].powf(OETF_GAMMA_EXP),
-    ]
-}
-
 /// The resolve's PROCEDURAL SKY BACKGROUND (mask == 0 pixels): mirrors the shader's
 /// background branch op-order EXACTLY — scan the light table's L0a front block for a SKY
 /// entry (`kind == Sky`, the SAME block the LIT arm's ambient loop reads) and fold in every
 /// DIRECTIONAL light's fixed-exponent sun disc (`pow(saturate(dot(rd, l)), SKY_SUN_EXPONENT)`,
 /// accumulated in TABLE order), then `sky = lerp(ground, sky, saturate(dot(rd, UP)*0.5+0.5));
 /// sky += sun_disc; sky *= header.exposure();` (the FINAL multiply, O3), then
-/// [`tonemap_and_oetf`]. Returns `None` when the table carries NO sky entry — the caller keeps
-/// the dark pass-through (a scene without a SkyLight has no sky to render), matching the
-/// shader's `has_sky` gate.
-fn golden_sky_background(rd: [f32; 3], header: &GoldenLightHeader, lights: &[GoldenLight]) -> Option<u32> {
+/// returns that SCENE-LINEAR radiance (render wave PX1a: `post_final` alone tonemaps). Returns
+/// `None` when the table carries NO sky entry — the caller stores [`LIT_BACKGROUND_SCENE`] (a scene
+/// without a SkyLight has no sky to render), matching the shader's `has_sky` gate.
+fn golden_sky_background(rd: [f32; 3], header: &GoldenLightHeader, lights: &[GoldenLight]) -> Option<[f32; 3]> {
     let count = header.l0a_count() as usize;
     let mut sky_color: Option<[f32; 3]> = None;
     let mut ground_color = [0.0_f32; 3];
@@ -1999,7 +2183,7 @@ fn golden_sky_background(rd: [f32; 3], header: &GoldenLightHeader, lights: &[Gol
         (ground_color[1] + (sky_color[1] - ground_color[1]) * hemi + sun_disc[1]) * exposure,
         (ground_color[2] + (sky_color[2] - ground_color[2]) * hemi + sun_disc[2]) * exposure,
     ];
-    Some(pack_rgba(tonemap_and_oetf(sky)))
+    Some(sky)
 }
 
 /// The per-pixel G-buffer attributes the PBR MVP-2 marcher writes, modelling the EXACT GPU
@@ -2907,14 +3091,15 @@ pub fn golden_ssao_atrous(
 
 /// The CPU mirror of the `deferred_pbr` RESOLVE (PBR MVP-2): given the marcher's
 /// [`MarcherAttributes`], the camera ray for the pixel, and the material table, returns
-/// the packed `0xAABBGGRR` LIT color the resolve stores.
+/// the SCENE-LINEAR radiance the resolve stores into `lit` (render wave PX1a: pre-tonemap, through
+/// the producers' [`lit_store`] bound; [`golden_display`] composes `post_final`'s tail back).
 ///
-/// Models the EXACT GPU double quantization: the attributes are already R8-quantized; the
+/// Models the EXACT GPU attribute quantization: the attributes are already R8-quantized; the
 /// resolve loads them back (UNORM decode), decodes the oct normal + 16-bit id, fetches
 /// `materials[id]`, and runs the SAME Cook-Torrance the resolve runs (GGX D + height-
 /// correlated Smith V + Schlick F + Lambert + EnvBRDFApprox ambient; shadow modulates the
 /// direct term. PBR metal fix: AO is DECOUPLED — diffuse ambient by `ao`, specular ambient
-/// by the roughness-aware [`specular_ao`]), then re-quantizes via [`pack_rgba`]. On the mask == 0 arms
+/// by the roughness-aware [`specular_ao`]), then stores through [`lit_store`]. On the mask == 0 arms
 /// it renders the PROCEDURAL SKY BACKGROUND along `rd` (the constant-path defaults — one
 /// directional + `ground == sky`, exposure 1.0 — reproduce
 /// [`golden_deferred_resolve_table`]'s background arm fed the degenerate 0%-gate table
@@ -2924,7 +3109,7 @@ pub fn golden_deferred_resolve(
     attrs: MarcherAttributes,
     rd: [f32; 3],
     materials: &[GoldenMaterial],
-) -> u32 {
+) -> [f32; 3] {
     golden_deferred_resolve_with_pbr(attrs, rd, materials, None)
 }
 
@@ -2942,7 +3127,7 @@ pub fn golden_deferred_resolve_with_pbr(
     rd: [f32; 3],
     materials: &[GoldenMaterial],
     gpbr: Option<[f32; 4]>,
-) -> u32 {
+) -> [f32; 3] {
     let base = [
         attrs.base_rgb[0] as f32 / 255.0,
         attrs.base_rgb[1] as f32 / 255.0,
@@ -2963,7 +3148,7 @@ pub fn golden_deferred_resolve_with_pbr(
             PBR_SKY_DIFFUSE[1] + PBR_LIGHT_COLOR[1] * sun_k,
             PBR_SKY_DIFFUSE[2] + PBR_LIGHT_COLOR[2] * sun_k,
         ];
-        return pack_rgba(tonemap_and_oetf(sky));
+        return lit_store(sky);
     }
 
     // Decode the world normal from the oct RG bytes (the SAME UNORM round-trip the GPU did).
@@ -3072,7 +3257,7 @@ pub fn golden_deferred_resolve_with_pbr(
 
         lit[c] = direct + ambient + emissive[c];
     }
-    pack_rgba(tonemap_and_oetf(lit))
+    lit_store(lit)
 }
 
 /// The host mirror of the resolve's Render P7 SSAO ambient-AO combine (`deferred_pbr.hlsl`):
@@ -3131,7 +3316,7 @@ pub fn golden_deferred_resolve_table(
     materials: &[GoldenMaterial],
     header: &GoldenLightHeader,
     lights: &[GoldenLight],
-) -> u32 {
+) -> [f32; 3] {
     // Render P7: delegate to the SSAO-aware variant with a no-op `ssao = 1.0`. On a
     // `ssao_mode() == 0` scene (every pre-P7 scene) the `ssao_combine` gate is never taken,
     // so `ao_final == attrs.ao` and the result is BYTE-IDENTICAL to the pre-P7 code path.
@@ -3156,7 +3341,7 @@ pub fn golden_deferred_resolve_table_ssao(
     header: &GoldenLightHeader,
     lights: &[GoldenLight],
     ssao: f32,
-) -> u32 {
+) -> [f32; 3] {
     let base = [
         attrs.base_rgb[0] as f32 / 255.0,
         attrs.base_rgb[1] as f32 / 255.0,
@@ -3164,9 +3349,10 @@ pub fn golden_deferred_resolve_table_ssao(
     ];
     if attrs.mask != 1 {
         // mesh / background / empty: render the PROCEDURAL SKY along the view ray (mirrors
-        // the resolve's background branch) when the table carries a SKY entry; otherwise
-        // keep the byte-identical dark pass-through (the 0%-gate: no SkyLight, no sky).
-        return golden_sky_background(rd, header, lights).unwrap_or_else(|| pack_rgba(base));
+        // the resolve's background branch) when the table carries a SKY entry; otherwise the
+        // scene-linear background constant the no-SkyLight arm stores (render wave PX1a D-S3,
+        // ruling 67 W4: `deferred_pbr.hlsl`'s `lit = LIT_BACKGROUND_SCENE`, not `base`).
+        return lit_store(golden_sky_background(rd, header, lights).unwrap_or(LIT_BACKGROUND_SCENE));
     }
 
     let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
@@ -3333,7 +3519,7 @@ pub fn golden_deferred_resolve_table_ssao(
     for c in 0..3 {
         lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
     }
-    pack_rgba(tonemap_and_oetf(lit))
+    lit_store(lit)
 }
 
 /// The P6 R1 MULTI-LIGHT SDF-shadow CPU mirror of the `deferred_pbr` resolve — the
@@ -3360,7 +3546,7 @@ pub fn golden_deferred_resolve_table_shadowed<F: Fn([f32; 3]) -> f32>(
     header: &GoldenLightHeader,
     lights: &[GoldenLight],
     field: &F,
-) -> u32 {
+) -> [f32; 3] {
     // Render P7: delegate to the SSAO-aware variant with a no-op `ssao = 1.0`. On a
     // `ssao_mode() == 0` scene the `ssao_combine` gate is never taken, so this is
     // BYTE-IDENTICAL to the pre-P7 multi-light shadow path.
@@ -3385,7 +3571,7 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
     lights: &[GoldenLight],
     field: &F,
     ssao: f32,
-) -> u32 {
+) -> [f32; 3] {
     let base = [
         attrs.base_rgb[0] as f32 / 255.0,
         attrs.base_rgb[1] as f32 / 255.0,
@@ -3393,9 +3579,10 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
     ];
     if attrs.mask != 1 {
         // mesh / background / empty: render the PROCEDURAL SKY along the view ray (mirrors
-        // the resolve's background branch) when the table carries a SKY entry; otherwise
-        // keep the byte-identical dark pass-through (the 0%-gate: no SkyLight, no sky).
-        return golden_sky_background(rd, header, lights).unwrap_or_else(|| pack_rgba(base));
+        // the resolve's background branch) when the table carries a SKY entry; otherwise the
+        // scene-linear background constant the no-SkyLight arm stores (render wave PX1a D-S3,
+        // ruling 67 W4: `deferred_pbr.hlsl`'s `lit = LIT_BACKGROUND_SCENE`, not `base`).
+        return lit_store(golden_sky_background(rd, header, lights).unwrap_or(LIT_BACKGROUND_SCENE));
     }
 
     let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
@@ -3584,7 +3771,7 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
     for c in 0..3 {
         lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
     }
-    pack_rgba(tonemap_and_oetf(lit))
+    lit_store(lit)
 }
 
 /// The host cluster-cull config (mirrors `boyko_render::light::ClusterConfig`). The vulkan
@@ -4161,7 +4348,7 @@ pub fn golden_deferred_resolve_clustered(
     lights: &[GoldenLight],
     cfg: &GoldenClusterConfig,
     grid: &[Vec<u32>],
-) -> u32 {
+) -> [f32; 3] {
     let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
     // L1 OFF (or a non-lit pixel): the flat brute-force path (the 0%-gate).
     if !header.clusters_enabled() || attrs.mask != 1 {
@@ -4323,7 +4510,7 @@ pub fn golden_deferred_resolve_clustered(
     for c in 0..3 {
         lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
     }
-    pack_rgba(tonemap_and_oetf(lit))
+    lit_store(lit)
 }
 
 /// The P6 R1 MULTI-LIGHT SDF-shadow CPU mirror of the L1 CLUSTERED `deferred_pbr` resolve —
@@ -4353,7 +4540,7 @@ pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
     cfg: &GoldenClusterConfig,
     grid: &[Vec<u32>],
     field: &F,
-) -> u32 {
+) -> [f32; 3] {
     let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
     // L1 OFF (or a non-lit pixel): the flat shadowed path.
     if !header.clusters_enabled() || attrs.mask != 1 {
@@ -4544,7 +4731,7 @@ pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
     for c in 0..3 {
         lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
     }
-    pack_rgba(tonemap_and_oetf(lit))
+    lit_store(lit)
 }
 
 /// Reconstructs the `(ray_origin, ray_dir)` for the coarse ray through tile
@@ -5578,5 +5765,154 @@ mod tests {
             lines, expected,
             "goldens::B10G11R11_ROUNDING / RGBA16F_ROUNDING (right) differ from the record's px0-rounding block (left)"
         );
+    }
+}
+
+/// Render wave PX1a C9 — the re-aimed oracles' host gates: the K12 comparator's class bound (shown
+/// able to fail: a planted 2⁻⁸ error is a wrong green under the B10G11R11 classes and red under
+/// [`LIT_ROUNDING`]), the no-SkyLight arm's constant (ruling 67 W4), and the display-bound vectors
+/// that hold [`hdr_display_bound`] and `golden_diff.py`'s `pixel_bound` together (critique O6).
+#[cfg(test)]
+mod px1a_reaim_tests {
+    use boyko_shaderdsl::pixfmt::{Channel, PathClass, Rounding, Target, quantize};
+
+    use super::{
+        B10G11R11_ROUNDING, GoldenLight, GoldenLightHeader, GoldenMaterial, LIT_BACKGROUND_SCENE,
+        LIT_ROUNDING, LIT_STORE_PATH, LIT_TARGET, MarcherAttributes, RGBA16F_ROUNDING,
+        golden_deferred_resolve_table, golden_deferred_resolve_table_shadowed, hdr_display_bound,
+        lit_matches, lit_store_excess,
+    };
+
+    #[test]
+    fn lit_rounding_is_the_lit_formats() {
+        assert_eq!(LIT_ROUNDING, RGBA16F_ROUNDING);
+        assert_eq!(LIT_TARGET, Target::Rgba16f);
+    }
+
+    /// The comparator's format part is the RGBA16F class: one exact-radiance store under `Z` (and a
+    /// radiance a hair below a representable value, which `Z` drops one step) is inside; a 2⁻⁸
+    /// relative error is inside the B10G11R11 classes' ε (a wrong green had the K12 re-aim read
+    /// `B10G11R11_ROUNDING`, DS-H4 (e)) and outside [`LIT_ROUNDING`]'s.
+    #[test]
+    fn a_two_to_minus_eight_error_is_green_under_b10g11r11_and_red_under_lit_rounding() {
+        let want = [16.0f32, 2.0, 0.5];
+        let planted = want.map(|w| w * (1.0 - 1.0 / 256.0));
+        let none = [0.0f32; 3];
+        let b10 = lit_store_excess(planted, want, Target::B10G11R11, B10G11R11_ROUNDING[LIT_STORE_PATH], none);
+        assert!(b10.iter().all(|&e| e <= 0.0), "B10G11R11's ε must hold the planted error (excess {b10:?})");
+        let lit = lit_store_excess(planted, want, LIT_TARGET, LIT_ROUNDING[LIT_STORE_PATH], none);
+        assert!(lit.iter().all(|&e| e > 0.0), "LIT_ROUNDING's ε must red the planted error (excess {lit:?})");
+
+        for w in [[1.3f32, 0.37, 7.1], [0.012, 0.000_03, 640.25], [2.5, 2.5, 2.5]] {
+            let z = w.map(|x| quantize(Channel::F16, x, Rounding::TowardZero));
+            assert!(lit_matches(z, w, 0), "the Z store of {w:?} ({z:?}) must match it at zero floor");
+            let hair = w.map(|x| quantize(Channel::F16, x * (1.0 - 1e-6), Rounding::TowardZero));
+            assert!(lit_matches(hair, w, 0), "a hair below {w:?} stores {hair:?}: one step, inside");
+            let two_steps = w.map(|x| {
+                let q = quantize(Channel::F16, x, Rounding::TowardZero);
+                q - 2.0 * (q - quantize(Channel::F16, q * (1.0 - 1e-6), Rounding::TowardZero))
+            });
+            assert!(!lit_matches(two_steps, w, 0), "two steps below {w:?} ({two_steps:?}) is outside");
+        }
+        assert!(!lit_matches([f32::NAN, 0.0, 0.0], [1.0, 0.0, 0.0], 2), "a NaN never matches");
+        // The display arm: `p6_r1`'s twin-sphere texel (41,17), device vs the shadowed table oracle —
+        // 7 % apart in radiance, two codes apart on screen (the pre-PX1a ±2 allowance holds it).
+        let (dev, oracle) = ([2.751_953_1f32, 2.482_421_9, 2.212_890_6], [2.564_775_7f32, 2.313_531_4, 2.062_287_3]);
+        assert!(!lit_matches(dev, oracle, 0), "7 % is outside every format bound");
+        assert!(!lit_matches(dev, oracle, 1), "two display codes are outside a one-code allowance");
+        assert!(lit_matches(dev, oracle, 2), "two display codes are inside the suite's ±2");
+    }
+
+    /// Ruling 67 W4: a table WITHOUT a SkyLight stores the scene-linear background constant on the
+    /// mask == 0 arm — not the 8-bit `base` it passed through before PX1a — in both table oracles.
+    #[test]
+    fn a_no_sky_table_stores_the_background_constant() {
+        let header = GoldenLightHeader::new(1, 0, 1.0);
+        let lights = [GoldenLight::directional([0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 1.0)];
+        let mats = [GoldenMaterial::default()];
+        let bg = MarcherAttributes {
+            base_rgb: [13, 13, 26],
+            oct_rg: [128, 128],
+            mat_id: 0,
+            shadow: 255,
+            ao: 255,
+            mask: 0,
+            view_t: 1.0e30,
+        };
+        let rd = [0.1, -0.2, -0.97];
+        assert_eq!(golden_deferred_resolve_table(bg, [0.0; 3], rd, &mats, &header, &lights), LIT_BACKGROUND_SCENE);
+        let field = |_q: [f32; 3]| 1.0f32;
+        assert_eq!(
+            golden_deferred_resolve_table_shadowed(bg, [0.0; 3], rd, &mats, &header, &lights, &field),
+            LIT_BACKGROUND_SCENE
+        );
+    }
+
+    const DISPLAY_BOUND_VECTORS: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/tests/vectors/display_bound.txt");
+
+    /// The vectors: every RGBA16F class a `lit` store can carry, over 32 display triples (16 grey,
+    /// 16 mixed), the bound printed to six decimals.
+    fn display_bound_vectors() -> String {
+        use std::fmt::Write as _;
+
+        const CODES: [u8; 16] = [0, 1, 3, 8, 13, 25, 40, 64, 100, 128, 160, 200, 230, 250, 254, 255];
+        let mut out = String::from(
+            "# hdr_display_bound (crates/boyko_rhi_vulkan/src/goldens.rs) == golden_diff.py pixel_bound.\n\
+             # Regenerate: cargo test -p boyko_rhi_vulkan --lib -- --ignored write_display_bound_vectors\n\
+             # bound <format> <class> <r8> <g8> <b8> -> <bound r> <bound g> <bound b>  (display codes)\n",
+        );
+        let classes = [PathClass::N, PathClass::Z, PathClass::Unmodelled { max_err_milli_ulp: 1000 }];
+        for class in classes {
+            let mut spelling = String::new();
+            class.write_spelling(&mut spelling).expect("a String write cannot fail");
+            let grey = CODES.iter().map(|&c| [c; 3]);
+            let mixed = (0..CODES.len()).map(|j| [CODES[j], CODES[(j * 5 + 3) % 16], CODES[(j * 11 + 7) % 16]]);
+            for p in grey.chain(mixed) {
+                let b = hdr_display_bound(p, Target::Rgba16f, class);
+                writeln!(
+                    out,
+                    "bound rgba16f {spelling} {} {} {} -> {:.6} {:.6} {:.6}",
+                    p[0], p[1], p[2], b[0], b[1], b[2]
+                )
+                .expect("a String write cannot fail");
+            }
+        }
+        out
+    }
+
+    /// Critique O6: [`hdr_display_bound`] and `golden_diff.py`'s `pixel_bound` cannot drift — this
+    /// side regenerates the committed vectors from the Rust (red when the Rust moves);
+    /// `tools/tests/test_golden_diff.py` replays them through the Python (red when it moves).
+    #[test]
+    fn display_bound_vectors_are_in_sync() {
+        let committed = std::fs::read_to_string(DISPLAY_BOUND_VECTORS)
+            .unwrap_or_else(|e| panic!("{DISPLAY_BOUND_VECTORS}: {e}"))
+            .replace("\r\n", "\n");
+        assert_eq!(
+            committed,
+            display_bound_vectors(),
+            "hdr_display_bound moved: regenerate tools/tests/vectors/display_bound.txt (write_display_bound_vectors) \
+             and re-run tools/tests/test_golden_diff.py"
+        );
+    }
+
+    #[test]
+    #[ignore = "generator: rewrites tools/tests/vectors/display_bound.txt after a deliberate change to hdr_display_bound"]
+    fn write_display_bound_vectors() {
+        std::fs::write(DISPLAY_BOUND_VECTORS, display_bound_vectors())
+            .unwrap_or_else(|e| panic!("{DISPLAY_BOUND_VECTORS}: {e}"));
+    }
+
+    /// The bound grows with the store's error class and is at least the display's own code.
+    #[test]
+    fn the_display_bound_orders_the_classes() {
+        for p in [[13u8, 13, 25], [128, 64, 200], [250, 250, 250]] {
+            let n = hdr_display_bound(p, Target::Rgba16f, PathClass::N);
+            let z = hdr_display_bound(p, Target::Rgba16f, PathClass::Z);
+            for c in 0..3 {
+                assert!(n[c] >= 1.0 && z[c] >= n[c], "{p:?}: N {n:?} Z {z:?}");
+            }
+        }
     }
 }

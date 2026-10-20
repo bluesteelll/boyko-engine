@@ -1,8 +1,8 @@
-//! `Renderer::record_rcas`: TAA rung T3 — the post-TAA-resolve CONTRAST-ADAPTIVE SHARPEN (AMD
-//! FidelityFX CAS) compute pass, recorded immediately after `record_taa` and BEFORE
-//! `present_sample`'s `lit` GENERAL→SHADER_READ_ONLY_OPTIMAL transition — see
-//! [`gbuffer`](super::gbuffer)'s record-site ordering comment and [`RcasActivation`]'s doc for
-//! the full "aa_out ping-pong" placement rationale (`rcas.comp.hlsl`'s module doc).
+//! `Renderer::record_rcas`: TAA rung T3 — the CONTRAST-ADAPTIVE SHARPEN (AMD FidelityFX CAS)
+//! compute pass. Since render wave PX1a (D-G3) it runs on `display`, AFTER `post_final` and
+//! BEFORE `present_sample`, inside the declared `cas` pass: it reads `display` as a STORAGE image
+//! at `GENERAL` (the caller's sink emits `post_final`'s write → this read) and writes `aa_out[fi]`,
+//! which the present blit samples. `rcas.comp.{hlsl,spv}` are unchanged.
 
 use core::ptr;
 
@@ -16,35 +16,27 @@ use super::super::targets::GBufferTargets;
 use super::super::COLOR_SUBRESOURCE_RANGE;
 
 impl Renderer<'_> {
-    /// Records the RCAS sharpen compute dispatch into `cmd`:
+    /// Records the CAS sharpen compute dispatch into `cmd`:
     ///
-    /// 1. Barrier A: `taa_resolved[fi]` GENERAL → GENERAL (COMPUTE_SHADER/SHADER_WRITE →
-    ///    COMPUTE_SHADER/SHADER_READ) — makes `record_taa`'s resolve write (left in GENERAL by
-    ///    ITS Barrier 1, which `record_taa` skips transitioning back out of when RCAS is armed)
-    ///    available + visible to this pass's `gRcasIn` read. NO layout change (both sides
-    ///    GENERAL): a same-layout execution+memory dependency, not the FRAGMENT-sample
-    ///    transition `record_taa`'s own Barrier 2 performs on the `SharpenMode::None` path.
-    /// 2. Barrier B: `aa_out[fi]` UNDEFINED → GENERAL — RCAS writes every dispatched pixel of
-    ///    `gAaOut` unconditionally, so UNDEFINED-discard is always valid (mirrors
-    ///    `record_taa`'s own Barrier 1 reasoning on `aa_out`/`taa_resolved`).
-    /// 3. Bind the RCAS pipeline + `rcas_set[fi]`; push the 16-byte [`RcasPush`] `{ img_w, img_h,
+    /// 1. Barrier B: `aa_out[fi]` UNDEFINED → GENERAL — CAS writes every dispatched pixel of
+    ///    `gAaOut` unconditionally, so UNDEFINED-discard is always valid.
+    /// 2. Bind the CAS pipeline + `rcas_set[fi]`; push the 16-byte [`RcasPush`] `{ img_w, img_h,
     ///    sharpness, 0 }` (the extent from `present_extent`, sharpness from
     ///    `activation.sharpness`); dispatch `scene.dispatch_group_count_x` groups
     ///    (`numthreads(64,1,1)`, the same 1D pixel grid the resolve/marcher use).
-    /// 4. Barrier C: `aa_out[fi]` GENERAL → SHADER_READ_ONLY_OPTIMAL — the present-blit's sample
-    ///    (recorded after this call, via the repointed `present_set`) sees a valid, ordered
-    ///    read. IDENTICAL to `record_taa`'s own Barrier 2 on the `SharpenMode::None` path.
+    /// 3. Barrier C: `aa_out[fi]` GENERAL → SHADER_READ_ONLY_OPTIMAL — the present-blit's sample
+    ///    (recorded after this call, via `present_set`) sees a valid, ordered read.
     ///
     /// # Safety
     ///
     /// `cmd` must be recordable (recording open, within the caller's begin/end bracket);
-    /// `targets.taa_resolved` / `targets.aa_out` / `targets.rcas_set` must be `Some` (the caller
-    /// gates on `scene.rcas.is_some() && targets.rcas_set.is_some()`, kept in lockstep by
+    /// `targets.aa_out` / `targets.rcas_set` must be `Some` (the caller gates on
+    /// `scene.rcas.is_some() && targets.rcas_set.is_some()`, kept in lockstep by
     /// [`GBufferTargets::create`]); `activation.rcas_pipeline`'s layout matches `rcas_set`'s (2
-    /// STORAGE bindings + a 16-byte COMPUTE push range); `present_extent` sizes both
-    /// `taa_resolved` and `aa_out`; `fi` is this frame's in-flight slot; `record_taa` must have
-    /// ALREADY run this frame (its resolve wrote `taa_resolved[fi]`, left in GENERAL by its own
-    /// Barrier 1, and skipped its own Barrier 2 — see that fn's doc).
+    /// STORAGE bindings + a 16-byte COMPUTE push range); `present_extent` sizes `display` and
+    /// `aa_out` (TAA arms no SSAA, so the two extents agree); `fi` is this frame's in-flight
+    /// slot; the caller has ALREADY emitted the frame's `cas` graph-pass barriers (`post_final`'s
+    /// `display` write → this COMPUTE read at `GENERAL`).
     pub(crate) unsafe fn record_rcas(
         &self,
         cmd: VkCommandBuffer,
@@ -56,7 +48,7 @@ impl Renderer<'_> {
     ) {
         debug_assert!(
             present_extent.width > 0 && present_extent.height > 0,
-            "invariant: taa_resolved/aa_out are sized to a non-empty present_extent"
+            "invariant: display/aa_out are sized to a non-empty present_extent"
         );
         // Render wave PX0: `ZONE_POST_CAS` brackets the whole pass (barriers, bind, push,
         // dispatch, barrier C).
@@ -64,50 +56,14 @@ impl Renderer<'_> {
         // SAFETY: recording is open (this fn's contract), outside any rendering scope; the path
         // recorder's witness reset this frame's pool and seals the slot after this pass.
         let zone_pair = unsafe { zone.begin(self.fns, cmd, ZONE_POST_CAS) };
-        let resolved = targets
-            .taa_resolved
+        let aa = targets
+            .aa_out
             .as_ref()
-            .expect("invariant: record gate (scene.rcas.is_some()) implies taa_resolved Some");
-        let aa = targets.aa_out.as_ref().expect(
-            "invariant: scene.rcas.is_some() implies scene.taa.is_some() implies aa_out Some",
-        );
+            .expect("invariant: scene.rcas.is_some() arms aa_out (GBufferTargets::create)");
         let set = targets
             .rcas_set
             .as_ref()
             .expect("invariant: armed scene.rcas implies rcas_set was built alongside it");
-
-        // --- Barrier A: taa_resolved[fi] GENERAL → GENERAL (resolve write → RCAS read). ---
-        let resolve_to_rcas_read = VkImageMemoryBarrier {
-            s_type: VkStructureType::ImageMemoryBarrier,
-            p_next: ptr::null(),
-            src_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
-            dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
-            old_layout: VK_IMAGE_LAYOUT_GENERAL,
-            new_layout: VK_IMAGE_LAYOUT_GENERAL,
-            src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-            dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-            image: resolved[fi].image,
-            subresource_range: COLOR_SUBRESOURCE_RANGE,
-        };
-        // SAFETY: recording is open (caller contract); one image barrier on the live
-        // `resolved[fi]` texture (built by `create()` when `scene.rcas` was armed);
-        // COMPUTE_SHADER→COMPUTE_SHADER with GENERAL→GENERAL is a same-layout
-        // execution+memory dependency (no transition, just ordering `record_taa`'s resolve write
-        // before this read); `&resolve_to_rcas_read` outlives the call.
-        unsafe {
-            (self.fns.cmd_pipeline_barrier)(
-                cmd,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                0,
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                1,
-                (&resolve_to_rcas_read as *const VkImageMemoryBarrier).cast(),
-            );
-        }
 
         // --- Barrier B: aa_out[fi] UNDEFINED → GENERAL (RCAS's STORAGE-image write). ---
         let to_general = VkImageMemoryBarrier {
@@ -146,8 +102,8 @@ impl Renderer<'_> {
         let push = RcasPush::new(present_extent.width, present_extent.height, activation.sharpness);
         let push_bytes = push.as_bytes();
         // SAFETY: recording is open; `activation.rcas_pipeline` + its 2-binding layout are live
-        // on this device (caller contract); `set[fi]` binds `gRcasIn` = `resolved[fi]`, `gAaOut`
-        // = `aa[fi]`; `scene.dispatch_group_count_x` covers `present_extent`'s pixel count (the
+        // on this device (caller contract); `set[fi]` binds `gRcasIn` = `display`, `gAaOut` =
+        // `aa[fi]`; `scene.dispatch_group_count_x` covers `present_extent`'s pixel count (the
         // SAME grid the resolve/marcher dispatch); `&set[fi].descriptor_set` is a single-element
         // local alive for the call; `push_bytes` is exactly `RCAS_PUSH_BYTES` (16) at offset 0.
         unsafe {

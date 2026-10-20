@@ -61,12 +61,10 @@
 //   appearance and must not be AO-darkened like matte paint. A 1-mul multi-scatter
 //   energy-compensation term (PBR P0-D) recovers the single-scatter GGX energy loss at high
 //   roughness, applied at every specular site (direct + ambient). No IBL texture, no LUT (MVP-2).
-//   OUTPUT: the accumulated linear radiance is exposure-scaled, then tonemapped by the
-//   SELECTED operator (`tonemap_select`, word-7 bits 8..11 — DEFAULT Hill ACES-fitted,
-//   hue-preserving highlight rolloff, PBR P0-C; Khronos PBR Neutral / Reinhard-Jodie are
-//   selectable via `LightingConfig::tonemapper`), then manually gamma-2.2 encoded (the
-//   gLit/swapchain chain is linear UNORM end to end — no hardware sRGB). The host oracle
-//   (`golden_deferred_resolve*` in goldens.rs) models this identically.
+//   OUTPUT (render wave PX1a): the accumulated linear radiance is exposure-scaled and stored
+//   SCENE-LINEAR into the RGBA16F `gLit`, bounded at HDR_MAX (`lit_format.hlsli`); the ONE
+//   tail pass `post_final` applies the SELECTED tonemap (`LightingConfig::tonemapper`) and the
+//   manual gamma OETF into `display`.
 //
 // Compiled offline (hermetic build — no SDK at `cargo build` time) with:
 //   dxc.exe -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 deferred_pbr.hlsl \
@@ -97,11 +95,13 @@
 static const float PI = 3.14159265358979323846;
 
 // bindings 0..3: the G-buffer + lit storage images. `[[vk::image_format("rgba8")]]` pins
-// each `OpTypeImage` to `Rgba8` to match the R8G8B8A8_UNORM views.
+// each G-buffer `OpTypeImage` to `Rgba8` to match the R8G8B8A8_UNORM views; `gLit` names
+// `LIT_FORMAT_QUALIFIER` (render wave PX1a: the HDR scene colour, `lit_format.hlsli`).
+#include "lit_format.hlsli"
 [[vk::image_format("rgba8")]] RWTexture2D<float4> gAlbedo   : register(u0);
 [[vk::image_format("rgba8")]] RWTexture2D<float4> gNormal   : register(u1);
 [[vk::image_format("rgba8")]] RWTexture2D<float4> gMaterial : register(u2);
-[[vk::image_format("rgba8")]] RWTexture2D<float4> gLit      : register(u3);
+[[vk::image_format(LIT_FORMAT_QUALIFIER)]] RWTexture2D<float4> gLit : register(u3);
 
 // binding 4: the material table (std430 MaterialGpu; mirrors boyko_render::MaterialGpu).
 //   off 0  : float4 base_color   rgb = linear base color, w = alpha/cutoff
@@ -792,10 +792,8 @@ float sscs_march(float3 P, float3 n, float3 l, float t_max, float NoL, uint px, 
     return saturate(1.0 - occlusion);
 }
 
-// Multi-paradigm render-path plan, rung R4b (Decision 3 extraction): the output-stage tonemap
-// operators (`aces_fitted`/`khronos_pbr_neutral`/`reinhard_jodie`/`tonemap_select` +
-// `ACES_IN`/`ACES_OUT`/`OETF_GAMMA_EXP`) moved to `pbr_lighting.hlsli` (already `#include`d
-// above) — the SAME curve every render path's final `lit` write now shares.
+// Render wave PX1a: no output-stage tonemap in this file — `lit` is scene-linear and the
+// generated `post_final.comp.hlsl` is the one tail every render path shares.
 
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
@@ -1469,9 +1467,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
 #endif
         }
 
-        // O3: exposure is the FINAL multiply on the accumulated LINEAR radiance, THEN the
-        // PBR P0-C filmic tonemap (hue-preserving highlight rolloff), THEN the manual gamma
-        // OETF (see `aces_fitted`'s doc comment for why the OETF is manual, not hardware).
+        // O3: exposure is the FINAL multiply on the accumulated LINEAR radiance. Render wave
+        // PX1a: `lit` stores it SCENE-LINEAR; `post_final` alone applies the tonemap and the OETF.
         // Textured-PBR T6a: the SOFTWARE arm sums the (possibly texture-modulated) local
         // `emissive`; the HWRT arm is CHARACTER-FOR-CHARACTER the pre-T6a line (no `emissive`
         // local exists under `HWRT` — the HWRT `.spv` is untouched by this rung).
@@ -1480,8 +1477,6 @@ void main(uint3 tid : SV_DispatchThreadID) {
 #else
         lit = (lit_direct + ambient + m.emissive.rgb) * H.exposure;
 #endif
-        lit = tonemap_select(lit, load_tonemap_mode(LightBuf));
-        lit = pow(lit, OETF_GAMMA_EXP);
     } else {
         // mesh / background / empty (mask == 0): render the PROCEDURAL SKY along the view
         // ray instead of the flat base pass-through, so the visible background matches the
@@ -1517,15 +1512,15 @@ void main(uint3 tid : SV_DispatchThreadID) {
         if (has_sky) {
             float3 sky = lerp(ground_color, sky_color, saturate(dot(rd_bg, LIGHT_UP) * 0.5 + 0.5));
             sky += sun_disc;
-            // O3: exposure is the FINAL multiply on the linear radiance, THEN the SAME
-            // tonemap + manual gamma OETF the lit path applies (`aces_fitted`'s doc comment).
+            // O3: exposure is the FINAL multiply on the linear radiance (scene-linear store,
+            // render wave PX1a — `post_final` tonemaps it like every other `lit` texel).
             sky *= H_bg.exposure;
-            sky = tonemap_select(sky, load_tonemap_mode(LightBuf));
-            sky = pow(sky, OETF_GAMMA_EXP);
             lit = sky;
         } else {
-            // No SkyLight in this scene's table — keep the dark pass-through byte-identical.
-            lit = base;
+            // No SkyLight in this scene's table — the dark background, as the scene-linear
+            // constant whose `post_final` display is the 8-bit value this arm stored before PX1a
+            // (`lit_format.hlsli`'s `LIT_BACKGROUND_SCENE`, render wave PX1a D-S3).
+            lit = LIT_BACKGROUND_SCENE;
         }
     }
 
@@ -1540,5 +1535,5 @@ void main(uint3 tid : SV_DispatchThreadID) {
     return;
 #endif
 
-    gLit[uint2(px, py)] = float4(clamp(lit, 0.0, 1.0), 1.0);
+    gLit[uint2(px, py)] = float4(lit_store_saturate(lit), 1.0);
 }
