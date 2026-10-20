@@ -3163,6 +3163,16 @@ fn two_spheres() -> Vec<SdfEdit> {
     ]
 }
 
+/// OPEN-ITEMS 16 (critique W4 (c)): a capsule on the device M2 path — a thin capsule (r 0.12, below
+/// `R_MIN`) in front of a box, so the shipped HLSL certificate's capsule rule runs where the
+/// reconstruction cannot follow the capsule.
+fn capsule_m2_scene() -> Vec<SdfEdit> {
+    vec![
+        SdfEdit::capsule([-0.45, -0.2, 0.75], [0.45, 0.25, 0.75], 0.12, sdf_op::UNION, 0.0),
+        SdfEdit::box_shape([0.0, 0.0, 0.0], [0.45, 0.45, 0.45], sdf_op::UNION, 0.0),
+    ]
+}
+
 fn smooth_union() -> Vec<SdfEdit> {
     vec![
         SdfEdit::sphere([-0.25, 0.0, 0.0], 0.35, sdf_op::UNION, 0.0),
@@ -7489,11 +7499,25 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
     // hit, against the analytic field crossing the GPU `t` reconstructs to (the EXACT-CSG residual
     // in (d) doubles as the host-vs-GPU `t` proof: both land within M2_CREASE_EPS of the true field).
     let mut any_scene_hit = false;
+    // Every scene is evaluated before any assertion (OPEN-ITEMS 16: box_csg and smooth_union were
+    // never reached while crater failed first), so one run reads every scene's verdict.
+    let mut failures: Vec<String> = Vec::new();
+    macro_rules! check {
+        ($cond:expr, $($fmt:tt)+) => {
+            if !$cond {
+                failures.push(format!($($fmt)+));
+            }
+        };
+    }
 
     for (name, edits) in [
         ("crater_csg", crater()),
         ("box_csg", box_csg()),
         ("smooth_union", smooth_union()),
+        // OPEN-ITEMS 16: check 16 D2's non-first-surface case and a capsule (critique W4 (c)) — the
+        // shipped certificate must refuse the big sphere behind the small one and keep the capsule.
+        ("two_spheres", two_spheres()),
+        ("capsule_csg", capsule_m2_scene()),
     ] {
         let (grid, cells) = bake_brick_grid(&edits);
 
@@ -7583,8 +7607,9 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
         // crossing, NOT the analytic SDF_EPS threshold, so the surface `t` it stores differs from
         // the analytic marcher's at the sub-epsilon level (and from the zeroed-grid run, which maps
         // no tile → folds analytic). LIT color is byte-identical by DESIGN (the exact-CSG contract:
-        // M2 lands on the SAME true surface; the committed `on_hit_set_equals_analytic_over_many_
-        // scenes` pins ON == analytic within ±1/255), so the DISCRIMINATING observable is `gViewT`,
+        // M2 lands on the SAME true surface — `compute::tests::m2_first_surface_tests`'
+        // `m2_on_first_surface_matches_analytic_over_many_scenes` pins M2-on == analytic on the
+        // host, the first crossing included), so the DISCRIMINATING observable is `gViewT`,
         // not the shaded color. We require the default-grid M2 `t` field to DIFFER from BOTH the
         // zeroed-grid run AND the analytic run on at least one shared hit pixel — proof the marcher
         // read the b5 M2GridParams tail and took the cubic branch. ---
@@ -7636,7 +7661,7 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
                  move it."
             )
         }).unwrap_or_else(|| "no host-divergent pixel captured".to_string());
-        assert!(
+        check!(
             a_vs_zero_px > 0 || a_vs_an_px > 0,
             "[{name}] (a) M2 branch DEAD: the M2-default gViewT `t` field is BIT-IDENTICAL to BOTH \
              the zeroed-grid run AND the analytic run (Δt max default-vs-zeroed {a_vs_zero_max:.2e}, \
@@ -7654,21 +7679,23 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
         // With the analytic accept now applying the SAME signed refine, both land ON the surface, so
         // brick and analytic agree to within `LIT_CHANNEL_TOL` (±3/255 — the brick cubic vs analytic
         // surface differs at the sub-pixel level, never gray-vs-black). A regression that reopens the
-        // overshoot would push `lit_a_max` to ~the gray magnitude and trip here.
-        assert!(
+        // overshoot would push `lit_a_max` to ~the gray magnitude and trip here; so would an M2 hit on
+        // a surface BEHIND the first one (OPEN-ITEMS 16: the crater's far wall at (39,22), 12/255,
+        // before the first-crossing certificate).
+        check!(
             lit_a_max <= LIT_CHANNEL_TOL,
             "[{name}] (a2) EXACT-CSG LIT MISMATCH: max |LIT_brick − LIT_analytic| = {lit_a_max}/255 \
              exceeds ±{LIT_CHANNEL_TOL}/255. The brick and analytic arms must land on the SAME true \
-             surface (exact-CSG) → near-identical LIT. A large delta means one arm accepted a hit \
-             OFF the surface (e.g. the B1 over-relaxation overshoot collapsing analytic shadow+AO to \
-             black) — the analytic accept-refine regressed."
+             surface → near-identical LIT. A large delta means one arm committed a DIFFERENT surface \
+             (the M2 first-crossing certificate regressed: `sdf_m2_certify.hlsli`) or accepted OFF \
+             the surface (the analytic accept-refine regressed)."
         );
 
         // --- (b) M2 ENGAGES THE CUBIC (not the analytic fold): the default-grid `t` field differs
         // from the zeroed-grid run on the SURFACE pixels (the zeroed grid degrades the M2 step to
         // the analytic fold). This isolates "the cubic ran" from "the trilinear gate is on but the
         // tile lookup yields nothing". ---
-        assert!(
+        check!(
             a_vs_zero_px > 0,
             "[{name}] (b) M2 cubic INERT: default-grid gViewT == zeroed-grid gViewT (Δt max \
              {a_vs_zero_max:.2e}) — the trilinear gate is on but the M2GridParams tile lookup found \
@@ -7728,24 +7755,24 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
         }
 
         // (c): the hit-sets must agree pixel-for-pixel (the GPU cubic == the host cubic).
-        assert!(
+        check!(
             hitset_mismatch.is_none(),
             "[{name}] (c) HOST-MIRROR HIT MISMATCH at {hitset_mismatch:?} (px, py, gpu_hit, \
              host_hit): the GPU `.Load` cubic disagrees with the host `decode_snorm8` cubic on the \
              hit/miss decision. gViewT corners diverged from the host fetch."
         );
         // (d): every GPU hit lands on the true analytic surface — exact CSG, 0 wrong-surface hits.
-        assert_eq!(
-            csg_violations, 0,
+        check!(
+            csg_violations == 0,
             "[{name}] (d) EXACT-CSG VIOLATION: {csg_violations} GPU M2 hit(s) off the true surface \
              (|sdf(hit)| >= M2_CREASE_EPS={M2_CREASE_EPS}). Worst: {worst_resid_px:?} (px, py, t, \
              resid). The residual fallback failed to land the hit on the field."
         );
-        assert_eq!(
-            gpu_hits, host_hits,
+        check!(
+            gpu_hits == host_hits,
             "[{name}] (c) HIT-COUNT MISMATCH: GPU {gpu_hits} vs host {host_hits} SDF hits"
         );
-        assert!(gpu_hits > 0, "[{name}] no GPU M2 hits — the SURFACE scene produced an empty image");
+        check!(gpu_hits > 0, "[{name}] no GPU M2 hits — the SURFACE scene produced an empty image");
         any_scene_hit = true;
 
         assert_validation_clean(&ctx);
@@ -7758,6 +7785,12 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
         );
     }
 
+    assert!(
+        failures.is_empty(),
+        "M2 device gate: {} failure(s) across the scenes:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
     assert!(any_scene_hit, "no scene produced an M2 surface hit — the discriminator proved nothing");
 }
 

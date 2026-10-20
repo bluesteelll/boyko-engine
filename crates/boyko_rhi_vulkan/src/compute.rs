@@ -4528,13 +4528,13 @@ pub const M2_GRID_PARAMS_OFFSET: usize = 80;
 /// candidate when the analytic residual exceeds [`M2_CREASE_EPS`] (mirror the shader's
 /// `M2_REFINE_ITERS`).
 #[cfg(any(test, feature = "goldens"))]
-pub(crate) const M2_REFINE_ITERS: u32 = 32; // BUG-B1-HOLE-4 ring fix (see the shader const) — host mirror
+pub(crate) const M2_REFINE_ITERS: u32 = 32; // the shared M2 / B1 refine budget (see the shader const) — host mirror
 
 /// The under-relaxation factor of the SIGNED M2 refine step (`rt += M2_REFINE_RELAX * d`). The refine
 /// is a unit-gradient SDF Newton step (`rt += d` is exact on a flat surface); under-relaxing damps
 /// overshoot oscillation at a CSG crease where the gradient is not unit. At `0.8` an inside candidate
 /// `~δ` deep converges in `~3` steps (`δ ≈ 0.048` near-field, `≈ 2^L·δ` at coarse clip-map level L) —
-/// well within [`M2_REFINE_ITERS`] (`8`). Mirrors the shader's `M2_REFINE_RELAX` bit-for-bit.
+/// well within [`M2_REFINE_ITERS`] (`32`). Mirrors the shader's `M2_REFINE_RELAX` bit-for-bit.
 #[cfg(any(test, feature = "goldens"))]
 pub(crate) const M2_REFINE_RELAX: f32 = 0.8;
 

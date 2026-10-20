@@ -1393,12 +1393,15 @@ impl HostM2Atlas {
 }
 
 /// M2 — the trilinear+JCGT-cubic SURFACE-brick golden. Identical to
-/// [`golden_composite_pixel_brick`] but the PRIMARY march runs the M2 SURFACE-brick path when
-/// `brick_trilinear == true`: at each march point inside the bounded M2 grid the atlas cubic
-/// ([`host_m2_surface_hit`]) is tried; a hit TERMINATES the march at the analytically-validated
-/// `t` (hit/normal/shade stay ANALYTIC — C1), and a no-crossing / cleared-refine falls through to
-/// the M1 step (empty-skip when `brick_enabled`, else the analytic fold). INDEPENDENT of
-/// `brick_enabled` (the two gates are orthogonal).
+/// [`golden_composite_pixel_brick`] but the PRIMARY march ([`golden_primary_hit_brick_m2`]) runs the
+/// M2 SURFACE-brick path when `brick_trilinear == true`: at each march point the M1 empty skip runs
+/// first (when `brick_enabled`), then, inside the bounded M2 grid, the atlas cubic
+/// ([`host_m2_surface_hit`]); a refine-converged hit whose first crossing is certified TERMINATES
+/// the march at the analytically-validated `t` (hit/normal/shade stay ANALYTIC — C1), and a
+/// no-crossing / cleared-refine / refused one falls through to the analytic fold. That is the
+/// shaders' order; before OPEN-ITEMS 16 the host tried M2 before the M1 skip (critique O4 of
+/// check 16: the same candidate, other call counts). INDEPENDENT of `brick_enabled` (the two
+/// gates are orthogonal).
 ///
 /// With `brick_trilinear == false` this delegates to [`golden_composite_pixel_brick`] —
 /// BYTE-IDENTICAL to the M1 golden (the M2 0%-gate). This is the bit-exact reference the GPU M2
