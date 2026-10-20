@@ -650,15 +650,19 @@ fn register_driver_epoch_local() {
         "E1: the driver ran none of the {DRIVER_TOUCH_CHILDREN} children on its worker's deque — \
          it never stole, so the touch cannot vouch for the driver's epoch Local"
     );
+    // ci-fix-1: 1 -> 2. Rule: a build registers its builder and every worker inside `build()`; the
+    // touch pool's builder is the driver and it has one worker, and the forced steal adds none.
     assert_eq!(
-        touched.epoch, 1,
-        "E1: the driver touch registered {} epoch Locals; the one it exists for is the driver's, \
-         and a 1-worker pool's worker has no sibling to steal from",
+        touched.epoch, 2,
+        "E1: the driver touch registered {} epoch Locals; the touch pool's build() registers its \
+         builder (the driver) and its one worker, and the forced steal registers none",
         touched.epoch
     );
     say!(
-        "\n[driver touch] the driver thread's epoch Local registered before any window: 1 Local, \
-         {stolen} of {DRIVER_TOUCH_CHILDREN} children stolen from the worker's deque"
+        "\n[driver touch] the driver thread's epoch Local registered before any window: {} Locals \
+         (the driver's and its touch pool's worker, both inside build()), {stolen} of \
+         {DRIVER_TOUCH_CHILDREN} children stolen from the worker's deque",
+        touched.epoch
     );
 }
 
