@@ -40,6 +40,7 @@ use boyko_shaderdsl::post::{
 use boyko_shaderdsl::ssao::{SsaoParams as EdslSsaoParams, ssao_estimate_body_params};
 
 use crate::compute::{
+    M2_CERT_EPS, M2_CERT_EVALS, M2_CERT_MIN_PIECE, M2_CERT_TAIL,
     ALPHA_MARGIN, AO_FALLOFF, AO_STEP, AO_STRENGTH, BRICK_CLASS_EMPTY_OUTSIDE, BrickLevelParams,
     CompositeCamera, DEFAULT_LIGHT_DIR, EPS_COARSE, FIELD_LIPSCHITZ_L, GOLDEN_ATLAS_SLOT_MASK, GOLDEN_ATLAS_SLOT_SHIFT,
     GOLDEN_LIGHT_FLAG_CASTS_SHADOW, GOLDEN_LIGHT_KIND_DIRECTIONAL, GOLDEN_LIGHT_KIND_MASK, GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SKY, GOLDEN_LIGHT_KIND_SPOT,
@@ -1069,14 +1070,15 @@ pub(crate) fn brick_aabb_span_world(
 /// the shader's refine loop bit-for-bit.
 pub(crate) fn host_m2_surface_hit(
     edits: &[SdfEdit],
+    atlas: Option<&HostM2Atlas>,
     ro: [f32; 3],
     rd: [f32; 3],
     t_world: f32,
     counts: Option<&mut M2EvalCounts>,
-) -> Option<f32> {
+) -> Option<(f32, f32)> {
     // The single-level M2 mirror delegates to the level-aware sibling at level-0 geometry
     // ([`BrickLevelParams::m2_near_field`]) — byte-identical to the pre-M4 hardcoded path.
-    host_m2_surface_hit_at(edits, &BrickLevelParams::m2_near_field(), ro, rd, t_world, counts)
+    host_m2_surface_hit_at(edits, &BrickLevelParams::m2_near_field(), atlas, ro, rd, t_world, counts)
 }
 
 /// What one host M2 march evaluated (OPEN-ITEMS 16, the price receipts of `oi1516/cut.md` D16-7):
@@ -1119,14 +1121,20 @@ impl M2EvalCounts {
 /// level's `M2_GRID_DIM³` grid containing `p = ro + rd * t_world`, bakes it at the level's geometry,
 /// solves the JCGT cubic, and validates analytically (the exact-CSG fallback, level-invariant). The
 /// host `select_level` picks `geo`; this mirrors the shader's per-level branch-ladder arm.
+///
+/// Returns `(hit_t, cand_t)`: the refined hit and the cubic candidate it was refined from (the
+/// first-crossing certificate's segment end — a forward walk `hit_t > cand_t` certified its own
+/// `[cand_t, hit_t)`). `atlas` (test-only) supplies the level's tiles pre-baked; `None` bakes the
+/// one tile the call needs, as before.
 pub(crate) fn host_m2_surface_hit_at(
     edits: &[SdfEdit],
     geo: &BrickLevelParams,
+    atlas: Option<&HostM2Atlas>,
     ro: [f32; 3],
     rd: [f32; 3],
     t_world: f32,
     mut counts: Option<&mut M2EvalCounts>,
-) -> Option<f32> {
+) -> Option<(f32, f32)> {
     let p = [
         ro[0] + rd[0] * t_world,
         ro[1] + rd[1] * t_world,
@@ -1163,9 +1171,15 @@ pub(crate) fn host_m2_surface_hit_at(
     // Bake THIS tile from the authority (the SAME data the level's GPU atlas holds for this cell), then
     // run the JCGT cubic in interior-voxel units (world → voxel: (world - cell_min) / voxel_size). The
     // cubic's local `t` is in WORLD units (rd is divided by voxel_size to keep the world-t metric).
-    let field = edits_field(edits);
-    let mut tile = [0i8; BRICK_VOXELS];
-    fill_brick(&field, cell_min, voxel_size, band_half, geo.c_max, &mut tile);
+    let mut baked = [0i8; BRICK_VOXELS];
+    let tile: &[i8; BRICK_VOXELS] = match atlas {
+        Some(a) => a.tile([tx, ty, tz]),
+        None => {
+            let field = edits_field(edits);
+            fill_brick(&field, cell_min, voxel_size, band_half, geo.c_max, &mut baked);
+            &baked
+        }
+    };
     let ro_v = [
         (p[0] - cell_min[0]) / voxel_size,
         (p[1] - cell_min[1]) / voxel_size,
@@ -1173,7 +1187,7 @@ pub(crate) fn host_m2_surface_hit_at(
     ];
     let rd_v = [rd[0] / voxel_size, rd[1] / voxel_size, rd[2] / voxel_size];
 
-    let local = brick_cubic_hit(&tile, ro_v, rd_v, t_enter, t_exit, band_half)?;
+    let local = brick_cubic_hit(tile, ro_v, rd_v, t_enter, t_exit, band_half)?;
 
     // The candidate world `t` (local is measured from `p`, in world units).
     let cand_t = t_world + local;
@@ -1201,10 +1215,7 @@ pub(crate) fn host_m2_surface_hit_at(
             c.refine_evals += 1;
         }
         if d.abs() < SDF_EPS {
-            if let Some(c) = counts.as_deref_mut() {
-                c.accepts += 1;
-            }
-            return Some(rt);
+            return Some((rt, cand_t));
         }
         // Split the under-relaxed step into a named value then add it (no FMA contraction), so the
         // shader's `step = M2_REFINE_RELAX * d; rt += step;` rounds bit-identically (two roundings).
@@ -1238,6 +1249,147 @@ pub(crate) fn edits_field(edits: &[SdfEdit]) -> SdfEditField {
     }
     field.bump_gen();
     field
+}
+
+/// One edit's `[value, slope]` at `p` along the unit `rd` — the certificate's per-edit leaf: the
+/// `f32` Eval instance of [`boyko_shaderdsl::range`]'s bodies, whose `Emit` instance is the GPU
+/// header's generated text (`sdf_m2_certify.hlsli`). The kind dispatch is the field's (`BOX`, then
+/// `CAPSULE`, else sphere).
+fn host_edit_value_slope(e: &SdfEdit, p: [f32; 3], rd: [f32; 3]) -> [f32; 2] {
+    use boyko_shaderdsl::range::{box_value_slope_body, capsule_value_slope_body, sphere_value_slope_body};
+    let c = [e.center[0], e.center[1], e.center[2]];
+    let prm = [e.params[0], e.params[1], e.params[2]];
+    if e.kind == boyko_sdf_math::sdf_kind::BOX {
+        debug_assert!(prm.iter().all(|h| *h >= 0.0), "invariant: a box's half-extents are >= 0 (the convexity contract)");
+        box_value_slope_body::<f32>(p, rd, c, prm)
+    } else if e.kind == boyko_sdf_math::sdf_kind::CAPSULE {
+        capsule_value_slope_body::<f32>(p, rd, c, prm, e.params[3])
+    } else {
+        sphere_value_slope_body::<f32>(p, rd, c, prm[0])
+    }
+}
+
+/// The certificate's `[lo, hi]` of the EXACT field on the ray segment `ro + rd·t`,
+/// `t ∈ [ta, tb]` (`oi1516/cut.md` D16-2): per edit the convex bound
+/// ([`boyko_shaderdsl::range::convex_seg_lo_body`]) and `max` of the end values, then the CSG fold
+/// on intervals — union / intersect pair `lo` with `lo`, subtract pairs `lo` with the subtrahend's
+/// `hi` (after its negation every op is monotone non-decreasing in each operand). An empty list is
+/// `FAR`, certified.
+pub(crate) fn host_field_range(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], ta: f32, tb: f32) -> (f32, f32) {
+    use boyko_shaderdsl::range::convex_seg_lo_body;
+    let n = edits.len().min(MAX_SDF_EDITS);
+    if n == 0 {
+        return (PBR_FAR, PBR_FAR);
+    }
+    let pa = [ro[0] + rd[0] * ta, ro[1] + rd[1] * ta, ro[2] + rd[2] * ta];
+    let pb = [ro[0] + rd[0] * tb, ro[1] + rd[1] * tb, ro[2] + rd[2] * tb];
+    let len = tb - ta;
+    let (mut lo, mut hi) = (PBR_FAR, PBR_FAR);
+    for (i, e) in edits.iter().take(n).enumerate() {
+        let a = host_edit_value_slope(e, pa, rd);
+        let b = host_edit_value_slope(e, pb, rd);
+        let lo_d = convex_seg_lo_body::<f32>(a[0], b[0], a[1], b[1], len);
+        let hi_d = <f32 as boyko_shaderdsl::FieldScalar>::max(a[0], b[0]);
+        debug_assert!(
+            lo_d <= a[0].min(b[0]) || lo_d.is_nan() || a[0].is_nan() || b[0].is_nan(),
+            "invariant: the convex bound never exceeds an end value"
+        );
+        if i == 0 {
+            lo = lo_d;
+            hi = hi_d;
+        } else if e.op == boyko_sdf_math::sdf_op::SUBTRACT {
+            let lo_next = boyko_sdf_math::combine(lo, hi_d, e.op, e.smoothness);
+            hi = boyko_sdf_math::combine(hi, lo_d, e.op, e.smoothness);
+            lo = lo_next;
+        } else {
+            lo = boyko_sdf_math::combine(lo, lo_d, e.op, e.smoothness);
+            hi = boyko_sdf_math::combine(hi, hi_d, e.op, e.smoothness);
+        }
+    }
+    (lo, hi)
+}
+
+/// [`host_field_range`]'s lower bound — the host mirror of the HLSL `field_range_lo`.
+pub(crate) fn host_field_range_lo(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], ta: f32, tb: f32) -> f32 {
+    host_field_range(edits, ro, rd, ta, tb).0
+}
+
+/// The M2 FIRST-CROSSING CERTIFICATE (`oi1516/cut.md` D16-1/D16-3, the host mirror of the HLSL
+/// `m2_first_crossing_certified`): `true` iff the exact field is proven above [`M2_CERT_EPS`] on
+/// `[a, goal]` — no crossing there. Certify-or-subdivide: the whole remaining segment first, a
+/// certified piece doubles the next, a refused piece halves; a piece shorter than
+/// [`M2_CERT_MIN_PIECE`] or [`M2_CERT_EVALS`] range evaluations refuses (sound either way: the
+/// analytic march takes the ray). `goal <= a` is certified with no evaluation.
+pub(crate) fn host_m2_first_crossing_certified(
+    edits: &[SdfEdit],
+    ro: [f32; 3],
+    rd: [f32; 3],
+    a: f32,
+    goal: f32,
+    mut counts: Option<&mut M2EvalCounts>,
+) -> bool {
+    use boyko_shaderdsl::FieldScalar;
+    let mut lo_t = a;
+    let mut step = goal - a;
+    for _ in 0..M2_CERT_EVALS {
+        if lo_t >= goal {
+            return true;
+        }
+        let hi_t = FieldScalar::min(lo_t + step, goal);
+        if let Some(c) = counts.as_deref_mut() {
+            c.range_evals += 1;
+        }
+        if host_field_range_lo(edits, ro, rd, lo_t, hi_t) > M2_CERT_EPS {
+            lo_t = hi_t;
+            step *= 2.0;
+        } else {
+            step *= 0.5;
+            if step < M2_CERT_MIN_PIECE {
+                return false;
+            }
+        }
+    }
+    lo_t >= goal
+}
+
+/// The certificate's segment end for a refined M2 hit: the candidate itself for a FORWARD walk
+/// (`hit_t > cand_t`: the walk's own under-relaxed sphere trace already proved `[cand_t, hit_t)`
+/// free, and `f(cand_t) >= EPS`), else `hit_t − M2_CERT_TAIL` (a backward walk or an immediate
+/// accept: the hit may sit up to `EPS` inside, so the crossing is somewhere in the tail).
+#[inline]
+pub(crate) fn m2_cert_goal(hit_t: f32, cand_t: f32) -> f32 {
+    if hit_t > cand_t { cand_t } else { hit_t - M2_CERT_TAIL }
+}
+
+/// One clip-map level's `M2_GRID_DIM³` atlas tiles baked once from the scene (test-only setup: the
+/// many-scene battery asks the host M2 mirror thousands of times per scene, and re-baking the tile
+/// per call is the cost; the bytes are the per-call bake's).
+pub struct HostM2Atlas {
+    tiles: Vec<[i8; BRICK_VOXELS]>,
+}
+
+impl HostM2Atlas {
+    /// Bakes every tile of the level `geo` from `edits`.
+    pub fn bake(edits: &[SdfEdit], geo: &BrickLevelParams) -> Self {
+        let field = edits_field(edits);
+        let dim = M2_GRID_DIM;
+        let mut tiles = vec![[0i8; BRICK_VOXELS]; (dim * dim * dim) as usize];
+        for tz in 0..dim {
+            for ty in 0..dim {
+                for tx in 0..dim {
+                    let i = ((tz * dim + ty) * dim + tx) as usize;
+                    fill_brick(&field, geo.cell_min([tx, ty, tz]), geo.voxel_size, geo.band_half, geo.c_max, &mut tiles[i]);
+                }
+            }
+        }
+        Self { tiles }
+    }
+
+    /// The baked tile of grid cell `cell`.
+    fn tile(&self, cell: [u32; 3]) -> &[i8; BRICK_VOXELS] {
+        let dim = M2_GRID_DIM;
+        &self.tiles[((cell[2] * dim + cell[1]) * dim + cell[0]) as usize]
+    }
 }
 
 /// M2 — the trilinear+JCGT-cubic SURFACE-brick golden. Identical to
@@ -1280,7 +1432,7 @@ pub fn golden_composite_pixel_brick_m2(
 
     let has_mesh = mesh_depth < MESH_DEPTH_CLEAR;
     let t_mesh = if has_mesh { depth_to_t(mesh_depth) } else { 1.0e30 };
-    let (hit, t) = golden_primary_hit_brick_m2(edits, t_mesh, ro, rd, omega, brick_enabled, grid, cells, None);
+    let (hit, t) = golden_primary_hit_brick_m2(edits, t_mesh, ro, rd, omega, brick_enabled, grid, cells, None, None).hit_t;
 
     let color = if hit && t < t_mesh {
         let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
@@ -1296,12 +1448,26 @@ pub fn golden_composite_pixel_brick_m2(
     pack_rgba(color)
 }
 
-/// The primary march of [`golden_composite_pixel_brick_m2`] (M2 on): `(hit, t)` for the ray
-/// `ro + rd·t` against a mesh at `t_mesh` (`1.0e30` = none), counting what it evaluates into
-/// `counts`. In the shaders' order: the M1 empty skip (when `brick_enabled`), then the M2
-/// SURFACE-brick step ([`host_m2_surface_hit`] — a hit TERMINATES the march at the analytically
-/// validated `t`), then the analytic fold with the B1 over-relaxation; the exhaustion re-march
-/// stays analytic (C1).
+/// What [`golden_primary_hit_brick_m2`]'s march ended with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct M2PrimaryHit {
+    /// `(hit, t)`.
+    pub hit_t: (bool, f32),
+    /// The certified M2 step committed the hit (else the analytic fold or a miss).
+    pub by_m2: bool,
+    /// Both the main march and the plain re-march ran out of iterations (a budget artifact).
+    pub exhausted: bool,
+}
+
+/// The primary march of [`golden_composite_pixel_brick_m2`] (M2 on) for the ray `ro + rd·t`
+/// against a mesh at `t_mesh` (`1.0e30` = none), counting what it evaluates into `counts`. In the
+/// shaders' order: the M1 empty skip (when `brick_enabled`), then the M2 SURFACE-brick step
+/// ([`host_m2_surface_hit`]) — a refine-converged hit commits ONLY when the first-crossing
+/// certificate ([`host_m2_first_crossing_certified`]) proves no crossing on `[a, goal]`, where `a`
+/// is the last point the march itself certified (`safe_t + sor_prev` past an over-relaxed step,
+/// else `t`; `oi1516/cut.md` D16-4) and `goal` is [`m2_cert_goal`]; a refused hit latches M2 off
+/// for the rest of the ray (D16-5) — then the analytic fold with the B1 over-relaxation; the
+/// exhaustion re-march stays analytic (C1). `atlas` pre-bakes the level-0 tiles (test setup).
 #[allow(clippy::too_many_arguments)]
 pub fn golden_primary_hit_brick_m2(
     edits: &[SdfEdit],
@@ -1312,12 +1478,15 @@ pub fn golden_primary_hit_brick_m2(
     brick_enabled: bool,
     grid: &PointerGrid,
     cells: &[u32],
+    atlas: Option<&HostM2Atlas>,
     mut counts: Option<&mut M2EvalCounts>,
-) -> (bool, f32) {
+) -> M2PrimaryHit {
     let mut t = 0.0_f32;
     let t_seed = t;
     let mut omega = omega; // [1.0, 1.99]; sor-fail latches it to 1.0
     let mut hit = false;
+    let mut by_m2 = false;
+    let mut m2_trust = true;
     let mut safe_t = 0.0_f32;
     let mut sor_prev = 0.0_f32;
     let mut sor_step_prev = 0.0_f32;
@@ -1346,14 +1515,29 @@ pub fn golden_primary_hit_brick_m2(
             continue; // skip the analytic fold this step
         }
 
-        // M2 SURFACE-brick path: try the atlas cubic at `p`. A hit terminates the march at the
-        // analytically-validated `t` (the hit/normal/shade stay analytic — C1); a no-crossing falls
-        // through to the analytic step.
-        if let Some(m2_hit_t) = host_m2_surface_hit(edits, ro, rd, t, counts.as_deref_mut()) {
-            hit = true;
-            exhausted = false; // M2 cubic+analytic-validated convergence
-            t = m2_hit_t;
-            break;
+        // M2 SURFACE-brick path: try the atlas cubic at `p`. A refine-converged hit that the
+        // first-crossing certificate proves FIRST terminates the march (the hit/normal/shade stay
+        // analytic — C1); a refused one latches M2 off for this ray; a no-crossing falls through.
+        if m2_trust {
+            if let Some((m2_hit_t, cand_t)) = host_m2_surface_hit(edits, atlas, ro, rd, t, counts.as_deref_mut()) {
+                let a = if omega > 1.0 && it > 0 { safe_t + sor_prev } else { t };
+                if host_m2_first_crossing_certified(edits, ro, rd, a, m2_cert_goal(m2_hit_t, cand_t), counts.as_deref_mut()) {
+                    if let Some(c) = counts.as_deref_mut() {
+                        c.accepts += 1;
+                    }
+                    hit = true;
+                    by_m2 = true;
+                    exhausted = false; // M2 cubic+analytic-validated, certified convergence
+                    t = m2_hit_t;
+                    break;
+                }
+                if let Some(c) = counts.as_deref_mut() {
+                    c.rejects += 1;
+                }
+                m2_trust = false;
+            }
+        } else if let Some(c) = counts.as_deref_mut() {
+            c.latch_skips += 1;
         }
 
         let d = sdf_edit_list(edits, p);
@@ -1410,8 +1594,10 @@ pub fn golden_primary_hit_brick_m2(
                 break;
             }
         }
+        // `exhausted` now reports the re-march's own budget: a ray neither pass resolved.
+        exhausted = !hit && t <= SDF_T_MAX && t < t_mesh;
     }
-    (hit, t)
+    M2PrimaryHit { hit_t: (hit, t), by_m2, exhausted }
 }
 
 /// The host mirror of the shader's `select_level` (M4 Slice C): the FINEST enclosing clip-map level
@@ -1505,6 +1691,7 @@ pub fn golden_composite_pixel_brick_m4(
     let t_seed = t;
     let mut omega = omega; // [1.0, 1.99]; sor-fail latches it to 1.0
     let mut hit = false;
+    let mut m2_trust = true;
     let mut safe_t = 0.0_f32;
     let mut sor_prev = 0.0_f32;
     let mut sor_step_prev = 0.0_f32;
@@ -1541,15 +1728,20 @@ pub fn golden_composite_pixel_brick_m4(
             continue; // skip the analytic fold this step
         }
 
-        // M2 SURFACE-brick path at the selected level: a hit terminates the march at the
-        // analytically-validated `t`. Mirrors the shader's per-level branch-ladder (lvl >= 0 arm).
-        if let Some(level) = lvl {
+        // M2 SURFACE-brick path at the selected level: a certified hit terminates the march at the
+        // analytically-validated `t`; a refused one latches M2 off for this ray (as the M2 golden).
+        // Mirrors the shader's per-level branch-ladder (lvl >= 0 arm).
+        if m2_trust && let Some(level) = lvl {
             let geo = BrickLevelParams::at_level_from_params(params, level);
-            if let Some(m4_hit_t) = host_m2_surface_hit_at(edits, &geo, ro, rd, t, None) {
-                hit = true;
-                exhausted = false; // M2 cubic+analytic-validated convergence
-                t = m4_hit_t;
-                break;
+            if let Some((m4_hit_t, cand_t)) = host_m2_surface_hit_at(edits, &geo, None, ro, rd, t, None) {
+                let a = if omega > 1.0 && it > 0 { safe_t + sor_prev } else { t };
+                if host_m2_first_crossing_certified(edits, ro, rd, a, m2_cert_goal(m4_hit_t, cand_t), None) {
+                    hit = true;
+                    exhausted = false; // M2 cubic+analytic-validated, certified convergence
+                    t = m4_hit_t;
+                    break;
+                }
+                m2_trust = false;
             }
         }
 

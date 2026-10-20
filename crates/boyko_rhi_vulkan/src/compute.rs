@@ -4532,6 +4532,29 @@ pub(crate) const M2_REFINE_ITERS: u32 = 32; // BUG-B1-HOLE-4 ring fix (see the s
 #[cfg(any(test, feature = "goldens"))]
 pub(crate) const M2_REFINE_RELAX: f32 = 0.8;
 
+/// The M2 first-crossing certificate's range-evaluation cap (OPEN-ITEMS 16; mirror the shader's
+/// `M2_CERT_EVALS`). A COST cap, not a correctness parameter: any value is sound, because a refused
+/// certificate hands the ray to the analytic march.
+#[cfg(any(test, feature = "goldens"))]
+pub const M2_CERT_EVALS: u32 = 8;
+
+/// The certificate's margin: a segment is crossing-free when its range lower bound exceeds this. It
+/// exceeds the f32 evaluation error of that bound (`64u·M`, `M <= 20` over the clip-map extent:
+/// `7.6e-5`) by 1.3x — soundness needs only `> 1x` (mirror the shader's `M2_CERT_EPS`).
+#[cfg(any(test, feature = "goldens"))]
+pub const M2_CERT_EPS: f32 = 1.0e-4;
+
+/// The certificate's resolution along the ray: a backward-walk or immediately-accepted M2 hit is
+/// certified up to `hit − M2_CERT_TAIL` (the hit may sit up to `EPS` inside, so its crossing lies in
+/// the tail); ruling 93 Q6 (mirror the shader's `M2_CERT_TAIL`).
+#[cfg(any(test, feature = "goldens"))]
+pub const M2_CERT_TAIL: f32 = 4.0 * SDF_EPS;
+
+/// The shortest piece the certificate subdivides to before it refuses (mirror the shader's
+/// `M2_CERT_MIN_PIECE`).
+#[cfg(any(test, feature = "goldens"))]
+pub const M2_CERT_MIN_PIECE: f32 = 0.5 * M2_CERT_TAIL;
+
 // The M2 grid constants pin the shader's static brick geometry (mirror the `.hlsl` `M2_*` consts):
 // a desync (e.g. a brick scale change) is a build error here, caught before the GPU runs.
 const _: () = assert!(M2_BRICK_WORLD == BRICK_INTERIOR as f32 * M2_VOXEL_SIZE);
