@@ -208,6 +208,16 @@ identically built trees. **Owed decision (orchestrator):** re-pin the legs on th
 state their scope. It is also recorded in `objbuild.rs`'s module docs ("`--emit=obj` and codegen
 units") and in `ug15/RECIPES.md` ("IB V11 commands").
 
+⚠ *2026-10-19, decided: ruling 71 (4), narrowed by ruling 74 (A), and closed by ruling 77 (1) at
+PHYS-TOOL-1. The legs keep their codegen-units = 1 recipe, and `ug15/RECIPES.md` states that scope
+("The UG-15 legs' scope") with the sampled check's findings F1 and F2. The re-pin on the shipped
+codegen is deferred to the unified plan's F2 end-state gates as PC-PT1-10
+(`docs/physics/perf-campaign/levers/tooling/01-PHYS-TOOL-1-RECORD.md` section 4). F2 bears on this
+lane's premise, ruling 57 (1)'s, that the explicit effective value reproduces the shipped bytes. It
+held on the parity runner (RF-5a, and V11 (c2) on every run; (c2) builds no plain probe, so the
+probe's `.text` is unchecked, PC-PT1-13), and it does not hold on `boyko_demo` or `clear`. V11 (c2)
+stays the runner's proof: the `ib` lane re-runs it at its base and STOPs if it is red (ruling 77 (2), PC-PT1-11).*
+
 ## 6. Red-first tallies (outputs in each commit message; files under `D:/tmp/phys-orch/ib-p0r/red/`)
 
 - **C1-C3.** RF-1a..h held their exact predictions (`red/rf1*.txt`). RF-2a: `running 0 tests` before
@@ -268,6 +278,10 @@ probe's `src\bin\physics_probe.rs` `running 0 tests`).
 - **PC-P0R-7 (CI blind spot, unchanged class).** The probe's windowed branch and both `boyko-app`
   entries are `cfg(windows)`, and CI's clippy runs on ubuntu, so the local msvc clippy is their only
   clippy.
-- **PC-P0R-8 (ruling 57 (2), owed).** §5: the UG-15 legs' codegen-units = 1 scope.
+- **PC-P0R-8 (ruling 57 (2), owed).** §5: the UG-15 legs' codegen-units = 1 scope. ⚠ *2026-10-19,
+  closed by ruling 77 (1) at PHYS-TOOL-1 (§5's marker). Three follow-ons remain: the deferred re-pin,
+  PC-PT1-10 (unified plan F2); PC-PT1-11 for the `ib` lane (IB P1-P4, the physics roadmap's P6):
+  re-run V11 (c2), which byte-checks the parity runner only, at its base, and STOP if it is red; and
+  PC-PT1-13 for the orchestrator: the probe's `.text` at the explicit value is unchecked.*
 - **PC-P0R-9 (continuity, ruling 55 Q12).** The optional P0R-CONT rows (PARENT vs TIP image, W ∈ {1, 8,
   16}) join the owed closed-app bench window; they need no window of their own (`ib-p0r/cut.md` §5).

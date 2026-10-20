@@ -96,7 +96,7 @@ In place, from the lane's worktree `${WT}`, quoting the exit code and the tally 
     bash ${WT}/docs/physics/perf-campaign/levers/scenes/gate/ours_gates.sh <exe> <out>            # checks 49, pass 49, fail 0
     bash ${WT}/docs/physics/perf-campaign/levers/scenes/gate/jolt_gates.sh <jolt dyn exe> <out>   # checks 53, pass 49, fail 0
     python ${WT}/docs/physics/perf-campaign/levers/scenes/gate/rapier_gates.py <out> --gate all   # checks 211, fail 0
-    python ${WT}/docs/physics/perf-campaign/levers/scenes/gate/sleep_gates.py <out> --jolt <jolt dyn3 exe> --ours <exe>   # checks 415, ..., fail 0
+    python ${WT}/docs/physics/perf-campaign/levers/scenes/gate/sleep_gates.py <out> --jolt <jolt dyn3 exe> --ours <exe>   # checks 415, pass 345, receipts 70, fail 0 (expected 415)
 
 Each `all.txt` reads both `neg ... exit=4 (want 4)` lines, `runs 264, pass 264, fail 0`,
 `checks 26, pass 26, fail 0`, `checks 17, pass 17, fail 0` and `ALL_DONE`. The l10 scripts are never run

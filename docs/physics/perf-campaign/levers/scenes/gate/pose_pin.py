@@ -36,14 +36,17 @@ def sha256_of(path):
 
 
 def check_pose(pose, fixture, fixture_sha256):
-    """(ok, detail): the fixture is the pinned bytes, and `pose` equals it byte for byte."""
+    """(ok, detail): the fixture is the pinned bytes, and `pose` equals it byte for byte. `pose` None (the run
+    left no output, e.g. sleep_gates.py --pins-from on an OUTDIR without that run) is a FAIL item, never a raise."""
     bad = []
     if not os.path.isfile(fixture):
         return False, 'no fixture at %s' % fixture
     got = sha256_of(fixture)
     if got != fixture_sha256:
         bad.append('fixture sha256 %s, pinned %s' % (got[:16], fixture_sha256[:16]))
-    if not os.path.isfile(pose):
+    if pose is None:
+        bad.append('no pose: the run left no output')
+    elif not os.path.isfile(pose):
         bad.append('no pose at %s' % pose)
     elif open(pose, 'rb').read() != open(fixture, 'rb').read():
         bad.append('pose differs from %s' % os.path.basename(fixture))
