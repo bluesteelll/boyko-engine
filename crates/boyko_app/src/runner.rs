@@ -1011,7 +1011,24 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // Last, after the teardown records are all emitted; symmetric with `boot`/`enable` living
     // in the plugin build. A host that wants to keep logging past `run` owns the lifecycle and
     // does not use this runner's exit.
-    let _ = boyko_log::lifecycle::shutdown();
+    //
+    // A FAILED JOIN IS NOT A SILENT ONE (ci-fix-1). `shutdown` waits 500 ms; past that it has
+    // closed the durable sinks itself when the drain role was free (`ClosedAfterStall`: the census
+    // is in the file, only the console is behind), or recorded a sink stalled inside a pass. On
+    // the exit path the host can wait longer: `await_exit` gives a stalled consumer the grace below
+    // and closes the sinks once the thread exits, and a thread still stalled inside a pass after it
+    // is reported. A console still stalled after the grace has no channel left to be told on.
+    if !boyko_log::lifecycle::shutdown() {
+        // Two seconds: nearly twice the longest console stall measured in CI (1.07 s, master's push
+        // run 38182709148), and short enough that a process whose output nobody reads still exits.
+        const HOST_LOG_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+        if !boyko_log::lifecycle::await_exit(HOST_LOG_EXIT_GRACE)
+            && boyko_log::lifecycle::shutdown_outcome()
+                == Some(boyko_log::lifecycle::ShutdownOutcome::StalledInsidePass)
+        {
+            let _ = boyko_log::lifecycle::report_stalled_exit();
+        }
+    }
 
     AppExit(true)
 }
