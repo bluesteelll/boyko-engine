@@ -13,8 +13,17 @@
 //! The bound is the fewest, not the same cycle's, because the unmoved steps are not all equal.
 //! Measured on this scene (2026-09-23, msvc): every step makes two acquisitions in release (256 B
 //! align 128 and 4096 B align 64; three in debug), and two of the six unmoved steps make one more,
-//! 1520 B align 8 — data-dependent and outside the narrowphase, which holds no heap container. The
-//! run is deterministic (one worker, a fixed scene and despawn order), so the counts repeat.
+//! 1520 B align 8 — data-dependent and outside the narrowphase, which holds no heap container: the
+//! `Injector` block crossbeam-deque allocates once per 63 pushes, periodic in the push count.
+//!
+//! The data path is deterministic (one worker, a fixed scene and despawn order), and since ci-fix-1
+//! so are the step's acquisitions. Before it, a thread's FIRST crossbeam-epoch pin landed in
+//! whichever step it happened to come in: master's push CI (run 38182709148) and 1 in 33 local runs
+//! counted a moved step at 6 against a fewest of 3, the +3 being the epoch `Global`, queue sentinel
+//! and the driver's `Local`. `ThreadPoolBuilder::build` now registers its builder and every worker
+//! before it returns, outside every counted step, and [`EPOCH_SIZED`] names any epoch-sized
+//! acquisition a counted step still makes, before the comparison below can misread it as the
+//! carry.
 //!
 //! Witnesses, so the equality cannot hold vacuously: the moved step built the jumper bitset
 //! (`Manifolds::pair_carry_jumper_builds` rose by one), the carry was never Reset, and carried
@@ -26,14 +35,15 @@
 //! records on both steps of every cycle.
 //!
 //! RED-first (C2's log): a `Vec::with_capacity` in the jumper build makes every moved step count
-//! one acquisition more.
+//! one acquisition more. The epoch guard's (ci-fix-1 C4): a 1-worker pool built inside a counted
+//! step reds with the guard's message, naming the new worker's `Local`, before any comparison.
 //!
 //! One test in this binary, so the process-wide counter sees no other test's traffic.
 
 #![cfg(not(miri))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use boyko_ecs::ecs::core::component::component::Component;
@@ -52,17 +62,47 @@ use boyko_physics::solver::DefaultRigidSolver;
 /// Heap acquisitions (`alloc`, `alloc_zeroed` through `alloc`, `realloc`) on every thread.
 static ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
 
+/// The crossbeam-epoch object sizes (crossbeam-epoch 0.9.21, x86_64): the collector's `Global`, the
+/// global queue's sentinel node (or a later sealed-bag node), and a thread's `Local`.
+///
+/// 640/128 is not crossbeam's alone (`PoolInner::workers` at W = 4, `PoolInner::injector_local` at
+/// W = 2): this test's pool has one worker and no counted step builds a pool, so here it names the
+/// collector.
+const EPOCH_SIGNATURES: [(usize, usize, &str); 3] = [
+    (640, 128, "Global 640/128"),
+    (2072, 8, "queue sentinel or sealed-bag node 2072/8"),
+    (2304, 128, "Local 2304/128"),
+];
+
+/// Acquisitions of an [`EPOCH_SIGNATURES`] size made while [`COUNTING`] was set, every thread.
+static EPOCH_SIZED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+/// Set while a counted step runs.
+static COUNTING: AtomicBool = AtomicBool::new(false);
+
+/// [`EPOCH_SIZED`]'s share of one acquisition.
+#[inline]
+fn note_epoch_sized(size: usize, align: usize) {
+    if COUNTING.load(Ordering::Relaxed)
+        && let Some(i) = EPOCH_SIGNATURES.iter().position(|&(s, a, _)| (s, a) == (size, align))
+    {
+        // Relaxed: read after the step's join, as `ACQUISITIONS` is.
+        EPOCH_SIZED[i].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// The counting allocator: `System`, plus one relaxed increment per acquisition.
 struct Counting;
 
 // SAFETY: every call forwards verbatim to the platform `System` allocator with the same layout
-// (and pointer, for `dealloc` / `realloc`); the wrapper only bumps an atomic counter, which never
-// allocates, so the allocator contract is exactly `System`'s.
+// (and pointer, for `dealloc` / `realloc`); the wrapper only reads and bumps atomic counters, which
+// never allocate, so the allocator contract is exactly `System`'s.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // Relaxed: a counter read after the measured step's join, which orders every worker's
         // increment before the read.
         ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+        note_epoch_sized(layout.size(), layout.align());
         // SAFETY: forwarded verbatim to the system allocator (same layout).
         unsafe { System.alloc(layout) }
     }
@@ -75,6 +115,7 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // Relaxed: as in `alloc`.
         ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+        note_epoch_sized(new_size, layout.align());
         // SAFETY: `ptr` / `layout` came from this allocator; `new_size` forwarded verbatim.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -173,10 +214,41 @@ fn spawn_pile(world: &mut EcsMaster) -> Vec<Entity> {
 }
 
 /// Heap acquisitions of one step, the step's carried-axis rejections and its reused pairs.
-fn counted_step(world: &mut EcsMaster, physics: &mut Schedule) -> (u64, usize, u64) {
+///
+/// RED, naming the class, when the step made an acquisition of an [`EPOCH_SIGNATURES`] size: that
+/// is a thread's first epoch touch, not the carry, and reading it as the carry is the misreading
+/// this guard exists to prevent.
+fn counted_step(
+    world: &mut EcsMaster,
+    physics: &mut Schedule,
+    (reuse, cycle, moved): (bool, usize, bool),
+) -> (u64, usize, u64) {
+    let epoch_before: [u64; 3] = core::array::from_fn(|i| EPOCH_SIZED[i].load(Ordering::Relaxed));
     let before = ACQUISITIONS.load(Ordering::Relaxed);
+    COUNTING.store(true, Ordering::Relaxed);
     physics.run(world);
+    COUNTING.store(false, Ordering::Relaxed);
     let acquisitions = ACQUISITIONS.load(Ordering::Relaxed) - before;
+    let epoch: [u64; 3] =
+        core::array::from_fn(|i| EPOCH_SIZED[i].load(Ordering::Relaxed) - epoch_before[i]);
+    let n: u64 = epoch.iter().sum();
+    if n > 0 {
+        let list: Vec<String> = EPOCH_SIGNATURES
+            .iter()
+            .zip(epoch)
+            .filter(|&(_, k)| k > 0)
+            .map(|(&(_, _, name), k)| format!("{k} x {name}"))
+            .collect();
+        panic!(
+            "contact_reuse {reuse}, cycle {cycle}, {} step: {n} acquisition(s) of a crossbeam-epoch \
+             size ({}) inside the counted step: a thread's first epoch touch (Collector 640/128, \
+             queue sentinel or sealed-bag node 2072/8, Local 2304/128), not the carry. The pool \
+             registers its participants at build, so this is a thread the pool did not build or a \
+             sealed-bag push.",
+            if moved { "moved" } else { "unmoved" },
+            list.join(", ")
+        );
+    }
     let m = world.resource::<Manifolds>();
     (acquisitions, m.separated_axis_hits(), m.pair_classes().reused)
 }
@@ -202,7 +274,8 @@ fn census(reuse: bool) {
 
     let mut rows = Vec::with_capacity(CYCLES);
     for cycle in 0..CYCLES {
-        let (unmoved, unmoved_hits, unmoved_reused) = counted_step(&mut world, &mut physics);
+        let (unmoved, unmoved_hits, unmoved_reused) =
+            counted_step(&mut world, &mut physics, (reuse, cycle, false));
         let builds = world.resource::<Manifolds>().pair_carry_jumper_builds();
         // A body in the middle of the spawn order: the tail body swap-moves into its row.
         let doomed = bodies.remove(bodies.len() / 2 - cycle);
@@ -210,7 +283,8 @@ fn census(reuse: bool) {
             world.delete_entity(doomed),
             "construction: a live body is despawnable"
         );
-        let (moved, moved_hits, moved_reused) = counted_step(&mut world, &mut physics);
+        let (moved, moved_hits, moved_reused) =
+            counted_step(&mut world, &mut physics, (reuse, cycle, true));
         let m = world.resource::<Manifolds>();
         rows.push((cycle, unmoved, moved, unmoved_hits, moved_hits));
         assert_eq!(
