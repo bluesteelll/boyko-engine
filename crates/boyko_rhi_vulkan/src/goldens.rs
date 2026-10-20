@@ -420,8 +420,9 @@ pub fn host_soft_shadow_ranged<F: Fn([f32; 3]) -> f32>(
 pub enum ShadowExit {
     /// `n · l <= SHADOW_NDOTL_EPS`: the surface faces away, visibility 0, no march.
     Facing,
-    /// A sample fell below `SHADOW_HIT_EPS` at this iteration: visibility 0.
-    Hit(u32),
+    /// A sample fell below `SHADOW_HIT_EPS`: visibility 0 (at whichever iteration — the value
+    /// does not depend on it).
+    Hit,
     /// The march left `t_max` after this iteration.
     Range(u32),
     /// The iteration budget ran out.
@@ -447,7 +448,7 @@ pub fn host_soft_shadow_ranged_ex<F: Fn([f32; 3]) -> f32>(
         let d = field(q);
         res = res.min(SHADOW_K * d / t);
         if d < SHADOW_HIT_EPS {
-            return (0.0, ShadowExit::Hit(it));
+            return (0.0, ShadowExit::Hit);
         }
         t += (d / FIELD_LIPSCHITZ_L).max(SHADOW_MINT_STEP);
         if t > t_max {
@@ -3662,8 +3663,9 @@ fn resolve_shadowed_impl<F: Fn([f32; 3]) -> f32, H: ResolveHooks>(
     });
 
     let v = [-rd[0], -rd[1], -rd[2]];
-    let nov0 = v_dot(n, v).max(1e-4);
-    let nov = hooks.site(site(K::NoV, pixel, 0), nov0, 6.0 * U);
+    // Every dot product's site sits BEFORE its clamp: a clamped value is not on the clamp's
+    // decision boundary, so perturbing it after the clamp would flip a gate that has margin.
+    let nov = hooks.site(site(K::NoV, pixel, 0), v_dot(n, v), 6.0 * U).max(1e-4);
     let shadow0 = attrs.shadow as f32 / 255.0;
     let shadow = hooks.site(site(K::ShadowDec, pixel, 0), shadow0, budget_rel(shadow0, 3.0));
     let ao0 = attrs.ao as f32 / 255.0;
@@ -3727,8 +3729,7 @@ fn resolve_shadowed_impl<F: Fn([f32; 3]) -> f32, H: ResolveHooks>(
             GOLDEN_LIGHT_KIND_DIRECTIONAL => {
                 let l0 = v_normalize([li.dir_kind[0], li.dir_kind[1], li.dir_kind[2]]);
                 let l: [f32; 3] = core::array::from_fn(|k| hooks.site(site(K::LightDir, j, k), l0[k], 22.0 * U));
-                let nol0 = v_dot(n, l).max(0.0);
-                let nol = hooks.site(site(K::NoL, j, 0), nol0, 6.0 * U);
+                let nol = hooks.site(site(K::NoL, j, 0), v_dot(n, l), 6.0 * U).max(0.0);
                 // The primary directional KEEPS gMaterial.r; an extra flagged directional
                 // marches with t_max = SDF_T_MAX. `vis` defaults to `shadow` (legacy).
                 let mut vis = shadow;
@@ -3748,10 +3749,8 @@ fn resolve_shadowed_impl<F: Fn([f32; 3]) -> f32, H: ResolveHooks>(
                 }
                 let h0 = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
                 let hvec: [f32; 3] = core::array::from_fn(|k| hooks.site(site(K::Half, j, k), h0[k], 25.0 * U));
-                let noh0 = v_dot(n, hvec).clamp(0.0, 1.0);
-                let noh = hooks.site(site(K::NoH, j, 0), noh0, 6.0 * U);
-                let loh0 = v_dot(l, hvec).clamp(0.0, 1.0);
-                let loh = hooks.site(site(K::LoH, j, 0), loh0, 6.0 * U);
+                let noh = hooks.site(site(K::NoH, j, 0), v_dot(n, hvec), 6.0 * U).clamp(0.0, 1.0);
+                let loh = hooks.site(site(K::LoH, j, 0), v_dot(l, hvec), 6.0 * U).clamp(0.0, 1.0);
                 let dg0 = d_ggx(noh, a);
                 let d_term = hooks.site(site(K::DTerm, j, 0), dg0, budget_rel(dg0, 14.0));
                 let vs0 = v_smith_ggx_correlated(nov, nol, a);
@@ -3829,8 +3828,7 @@ fn resolve_shadowed_impl<F: Fn([f32; 3]) -> f32, H: ResolveHooks>(
         });
         let wq0 = (d2 * d2) / (range2 * range2);
         let wq = hooks.site(site(K::WinQ, j, 0), wq0, budget_rel(wq0, 10.0));
-        let win0 = (1.0 - wq).clamp(0.0, 1.0);
-        let win = hooks.site(site(K::Win, j, 0), win0, 2.0 * U);
+        let win = hooks.site(site(K::Win, j, 0), 1.0 - wq, 2.0 * U).clamp(0.0, 1.0);
         let at0 = (1.0 / d2.max(1e-4)) * win * win;
         let mut atten = hooks.site(site(K::Atten, j, 0), at0, budget_rel(at0, 10.0));
         if kind == GOLDEN_LIGHT_KIND_SPOT {
@@ -3842,18 +3840,15 @@ fn resolve_shadowed_impl<F: Fn([f32; 3]) -> f32, H: ResolveHooks>(
             // The dot (6u) plus the device's spot-axis normalize (22u per component).
             let cos_a = hooks.site(site(K::CosA, j, 0), ca0, 28.0 * U);
             let denom = (cos_inner - cos_outer).max(1e-4);
-            let tt0 = ((cos_a - cos_outer) / denom).clamp(0.0, 1.0);
-            let tt = hooks.site(site(K::SpotT, j, 0), tt0, budget_rel(tt0, 8.0));
+            let tt0 = (cos_a - cos_outer) / denom;
+            let tt = hooks.site(site(K::SpotT, j, 0), tt0, budget_rel(tt0, 8.0)).clamp(0.0, 1.0);
             atten *= tt * tt;
         }
         let h0 = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
         let hvec: [f32; 3] = core::array::from_fn(|k| hooks.site(site(K::Half, j, k), h0[k], 25.0 * U));
-        let nol0 = v_dot(n, l).max(0.0);
-        let nol = hooks.site(site(K::NoL, j, 0), nol0, 6.0 * U);
-        let noh0 = v_dot(n, hvec).clamp(0.0, 1.0);
-        let noh = hooks.site(site(K::NoH, j, 0), noh0, 6.0 * U);
-        let loh0 = v_dot(l, hvec).clamp(0.0, 1.0);
-        let loh = hooks.site(site(K::LoH, j, 0), loh0, 6.0 * U);
+        let nol = hooks.site(site(K::NoL, j, 0), v_dot(n, l), 6.0 * U).max(0.0);
+        let noh = hooks.site(site(K::NoH, j, 0), v_dot(n, hvec), 6.0 * U).clamp(0.0, 1.0);
+        let loh = hooks.site(site(K::LoH, j, 0), v_dot(l, hvec), 6.0 * U).clamp(0.0, 1.0);
         let dg0 = d_ggx(noh, a);
         let d_term = hooks.site(site(K::DTerm, j, 0), dg0, budget_rel(dg0, 14.0));
         let vs0 = v_smith_ggx_correlated(nov, nol, a);
@@ -6110,6 +6105,8 @@ pub struct ResolveFloor {
     /// A discrete decision flips even under the unscaled budget: the texel is reported (checked by
     /// the display arm), never strict-passed.
     pub fragile: bool,
+    /// The first perturbation that flipped a decision unscaled (`None` = the march field offset).
+    pub fragile_cause: Option<Option<ResolveSite>>,
     /// The number of divergence sites perturbed (the field runs excluded).
     pub sites: usize,
     /// The trace's anti-vacuity (see [`ResolveTrace::sum_residual`]).
@@ -6156,10 +6153,12 @@ pub fn resolve_error_floor(
     let mut trace = ResolveTrace::default();
     let lit = resolve_shadowed_impl(attrs, ro, rd, materials, header, lights, &field, 1.0, &mut trace);
     let mut floor = [0.0_f32; 3];
-    let mut fragile = false;
-    let mut accumulate = |delta: Option<[f32; 3]>, worst: &mut [f32; 3]| match delta {
+    let mut fragile_cause: Option<Option<ResolveSite>> = None;
+    let mut accumulate = |delta: Option<[f32; 3]>, worst: &mut [f32; 3], cause: Option<ResolveSite>| match delta {
         Some(d) => (0..3).for_each(|c| worst[c] = worst[c].max(d[c])),
-        None => fragile = true,
+        None => {
+            fragile_cause.get_or_insert(cause);
+        }
     };
     for &(site, budget) in &trace.sites {
         if budget == 0.0 || !budget.is_finite() {
@@ -6176,7 +6175,7 @@ pub fn resolve_error_floor(
                 lit,
                 &trace.decisions,
             );
-            accumulate(delta, &mut worst);
+            accumulate(delta, &mut worst, Some(site));
         }
         (0..3).for_each(|c| floor[c] += worst[c]);
     }
@@ -6202,7 +6201,7 @@ pub fn resolve_error_floor(
             lit,
             &trace.decisions,
         );
-        accumulate(delta, &mut worst);
+        accumulate(delta, &mut worst, None);
     }
     for c in 0..3 {
         floor[c] += worst[c];
@@ -6212,7 +6211,14 @@ pub fn resolve_error_floor(
             + 2.0 * U * trace.lit_pre_store[c].abs()
             + f32::MIN_POSITIVE;
     }
-    ResolveFloor { lit, floor, fragile, sites: trace.sites.len(), trace_residual: trace.sum_residual() }
+    ResolveFloor {
+        lit,
+        floor,
+        fragile: fragile_cause.is_some(),
+        fragile_cause,
+        sites: trace.sites.len(),
+        trace_residual: trace.sum_residual(),
+    }
 }
 
 /// The scalar twin of [`perturbed_delta`] for a march: the change of `run(scale)`'s value against
