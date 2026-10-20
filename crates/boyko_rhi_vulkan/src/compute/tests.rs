@@ -1626,13 +1626,13 @@ mod m1_empty_skip_tests {
 
     /// A deterministic xorshift64* PRNG — the scene generator without a dep (mirrors
     /// the M0 brick GATE's generator so the two suites draw from the SAME family).
-    struct XorShift64(u64);
+    pub(super) struct XorShift64(u64);
 
     impl XorShift64 {
-        fn new(seed: u64) -> Self {
+        pub(super) fn new(seed: u64) -> Self {
             Self(seed ^ 0x9E37_79B9_7F4A_7C15)
         }
-        fn next_u64(&mut self) -> u64 {
+        pub(super) fn next_u64(&mut self) -> u64 {
             let mut x = self.0;
             x ^= x >> 12;
             x ^= x << 25;
@@ -1640,11 +1640,11 @@ mod m1_empty_skip_tests {
             self.0 = x;
             x.wrapping_mul(0x2545_F491_4F6C_DD1D)
         }
-        fn range(&mut self, lo: f32, hi: f32) -> f32 {
+        pub(super) fn range(&mut self, lo: f32, hi: f32) -> f32 {
             let frac = (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32;
             lo + frac * (hi - lo)
         }
-        fn below(&mut self, n: u32) -> u32 {
+        pub(super) fn below(&mut self, n: u32) -> u32 {
             (self.next_u64() % n as u64) as u32
         }
     }
@@ -1652,18 +1652,18 @@ mod m1_empty_skip_tests {
     /// The demo / golden "crater" CSG scene (base sphere minus a smaller sphere) — the
     /// SAME scene the rung-9/10 and B1 goldens use, so the M1 gates run against the
     /// production demo field, not only synthetic scenes.
-    fn crater() -> Vec<SdfEdit> {
+    pub(super) fn crater() -> Vec<SdfEdit> {
         vec![
             SdfEdit::sphere([0.0, 0.0, 0.0], 0.5, sdf_op::UNION, 0.0),
             SdfEdit::sphere([0.3, 0.0, 0.0], 0.35, sdf_op::SUBTRACT, 0.0),
         ]
     }
 
-    fn box_csg() -> Vec<SdfEdit> {
+    pub(super) fn box_csg() -> Vec<SdfEdit> {
         vec![SdfEdit::box_shape([0.0, 0.0, 0.0], [0.4, 0.4, 0.4], sdf_op::UNION, 0.0)]
     }
 
-    fn smooth_union() -> Vec<SdfEdit> {
+    pub(super) fn smooth_union() -> Vec<SdfEdit> {
         vec![
             SdfEdit::sphere([-0.25, 0.0, 0.0], 0.35, sdf_op::UNION, 0.0),
             SdfEdit::sphere([0.25, 0.0, 0.0], 0.35, sdf_op::UNION, 0.15),
@@ -1671,7 +1671,7 @@ mod m1_empty_skip_tests {
     }
 
     /// Builds an `SdfEditField` (the authority) from a slice of edits and bumps its gen.
-    fn field_of(edits: &[SdfEdit]) -> SdfEditField {
+    pub(super) fn field_of(edits: &[SdfEdit]) -> SdfEditField {
         let mut f = SdfEditField::new();
         for e in edits {
             assert!(f.push(*e), "scene must fit MAX_SDF_EDITS");
@@ -1683,7 +1683,7 @@ mod m1_empty_skip_tests {
     /// A random valid scene (1..=6 edits, first forced UNION, SPHERE/BOX, radii/half-
     /// extents >= 0.5, centers in [-2,2]³, UNION/SUBTRACT/INTERSECT, smoothness 0 or 0.15)
     /// returned as a `Vec<SdfEdit>` — the ON-vs-analytic gate's scene family.
-    fn random_scene(rng: &mut XorShift64) -> Vec<SdfEdit> {
+    pub(super) fn random_scene(rng: &mut XorShift64) -> Vec<SdfEdit> {
         let n = 1 + rng.below(6);
         let mut edits = Vec::with_capacity(n as usize);
         for i in 0..n {
@@ -1716,7 +1716,7 @@ mod m1_empty_skip_tests {
 
     /// The default near-field pointer grid baked from `field` — the SAME grid the GPU
     /// binds at binding 9 (origin/dims/brick_world the `FineMarcherPush` carries).
-    fn build_default_grid(field: &SdfEditField) -> (PointerGrid, Vec<u32>) {
+    pub(super) fn build_default_grid(field: &SdfEditField) -> (PointerGrid, Vec<u32>) {
         let grid = PointerGrid::default_near_field();
         let mut cells = vec![0u32; grid.cell_count()];
         build_pointer_grid(field, &grid, &mut cells);
@@ -1813,7 +1813,7 @@ mod m1_empty_skip_tests {
     /// A sparse-but-representative pixel battery across the 64×64 frame (corners, edges,
     /// center, and a diagonal sweep) — exercises HIT, MISS, and the sphere-edge grazing
     /// rays without folding the field on all 4096 pixels in the per-scene inner loops.
-    fn pixel_battery() -> Vec<(u32, u32)> {
+    pub(super) fn pixel_battery() -> Vec<(u32, u32)> {
         let mut v = Vec::new();
         let coords = [0u32, 1, 8, 16, 24, 31, 32, 40, 48, 56, 62, 63];
         for &py in &coords {
@@ -3263,5 +3263,73 @@ mod cluster_cull_push_validity_tests {
             aabb_min.is_finite() && aabb_max.is_finite(),
             "and the result is FINITE, so no device-side finiteness predicate can see the fault"
         );
+    }
+}
+
+
+// ===========================================================================
+// OPEN-ITEMS 16 — M2 commits the FIRST surface (`oi1516/cut.md` D16, C5/C7).
+//
+// C5: the host evaluation-count receipt (the price base: what the host M2 mirror evaluates per
+// scene, in the shaders' order — the M1 skip, then M2, then the fold).
+// ===========================================================================
+#[cfg(test)]
+mod m2_first_surface_tests {
+    use super::super::{CompositeCamera, SDF_IMG_H, SDF_IMG_W, SdfEdit, composite_ray, sdf_op};
+    use super::m1_empty_skip_tests::{box_csg, build_default_grid, crater, field_of, smooth_union};
+    use crate::goldens::{M2EvalCounts, golden_primary_hit_brick_m2};
+
+    /// `tests/sdf_gbuffer_hybrid.rs::two_spheres`: r 0.1 on a level-0 voxel-cell centre in front
+    /// of r 0.5 in the same brick (check 16 D2's budget-independent non-first-surface case).
+    pub(super) fn two_spheres() -> Vec<SdfEdit> {
+        vec![
+            SdfEdit::sphere([0.25, 0.25, 1.5], 0.1, sdf_op::UNION, 0.0),
+            SdfEdit::sphere([0.25, 0.25, 0.5], 0.5, sdf_op::UNION, 0.0),
+        ]
+    }
+
+    /// The four M2 scenes of the device M2 test and the cost probe.
+    pub(super) fn m2_scenes() -> [(&'static str, Vec<SdfEdit>); 4] {
+        [
+            ("crater_csg", crater()),
+            ("box_csg", box_csg()),
+            ("smooth_union", smooth_union()),
+            ("two_spheres", two_spheres()),
+        ]
+    }
+
+    /// The host M2 mirror's evaluation counts per scene over the full 64×64 ortho frame (no mesh,
+    /// omega 1, the M1 skip on — the device M2 test's configuration). Prints the receipt the price
+    /// statement reads; asserts only that M2 ran on every scene.
+    #[test]
+    fn m2_eval_counts_receipt() {
+        for (name, edits) in m2_scenes() {
+            let field = field_of(&edits);
+            let (grid, cells) = build_default_grid(&field);
+            let mut total = M2EvalCounts::default();
+            let mut hits = 0u32;
+            for py in 0..SDF_IMG_H {
+                for px in 0..SDF_IMG_W {
+                    let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                    let mut c = M2EvalCounts::default();
+                    let (hit, _) =
+                        golden_primary_hit_brick_m2(&edits, 1.0e30, ro, rd, 1.0, true, &grid, &cells, Some(&mut c));
+                    hits += u32::from(hit);
+                    total.add(&c);
+                }
+            }
+            println!(
+                "M2 receipt [{name}]: {hits} hits; calls {}, accepts {}, refine evals {}, range evals {}, \
+                 rejects {}, latch skips {}, fold evals {}",
+                total.calls,
+                total.accepts,
+                total.refine_evals,
+                total.range_evals,
+                total.rejects,
+                total.latch_skips,
+                total.fold_evals
+            );
+            assert!(total.calls > 0, "[{name}] the host M2 mirror never ran — the receipt is vacuous");
+        }
     }
 }

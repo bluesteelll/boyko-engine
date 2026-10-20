@@ -1067,10 +1067,50 @@ pub(crate) fn brick_aabb_span_world(
 /// a grazing silhouette point or a stalled hard crease falls to `None` → the analytic fold, which
 /// resolves the pixel EXACTLY as the OFF path (this erased the BUG-M2-RIM silhouette ring). Mirrors
 /// the shader's refine loop bit-for-bit.
-pub(crate) fn host_m2_surface_hit(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], t_world: f32) -> Option<f32> {
+pub(crate) fn host_m2_surface_hit(
+    edits: &[SdfEdit],
+    ro: [f32; 3],
+    rd: [f32; 3],
+    t_world: f32,
+    counts: Option<&mut M2EvalCounts>,
+) -> Option<f32> {
     // The single-level M2 mirror delegates to the level-aware sibling at level-0 geometry
     // ([`BrickLevelParams::m2_near_field`]) — byte-identical to the pre-M4 hardcoded path.
-    host_m2_surface_hit_at(edits, &BrickLevelParams::m2_near_field(), ro, rd, t_world)
+    host_m2_surface_hit_at(edits, &BrickLevelParams::m2_near_field(), ro, rd, t_world, counts)
+}
+
+/// What one host M2 march evaluated (OPEN-ITEMS 16, the price receipts of `oi1516/cut.md` D16-7):
+/// counted by the host mirror, so the counts describe the GPU's call order (the mirror runs the M1
+/// skip, then M2, then the fold, as the shaders do).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct M2EvalCounts {
+    /// `m2_surface_hit` calls (march points inside the M2 grid).
+    pub calls: u64,
+    /// Calls that committed a hit.
+    pub accepts: u64,
+    /// Exact-field evaluations of the signed refine.
+    pub refine_evals: u64,
+    /// Range evaluations of the first-crossing certificate.
+    pub range_evals: u64,
+    /// Refine-converged hits the certificate refused.
+    pub rejects: u64,
+    /// March points M2 skipped because the ray's certificate had failed (the per-ray latch).
+    pub latch_skips: u64,
+    /// Exact-field evaluations of the analytic fold and re-march.
+    pub fold_evals: u64,
+}
+
+impl M2EvalCounts {
+    /// Adds `other` field by field.
+    pub fn add(&mut self, other: &Self) {
+        self.calls += other.calls;
+        self.accepts += other.accepts;
+        self.refine_evals += other.refine_evals;
+        self.range_evals += other.range_evals;
+        self.rejects += other.rejects;
+        self.latch_skips += other.latch_skips;
+        self.fold_evals += other.fold_evals;
+    }
 }
 
 /// The level-aware host mirror of the shader's `m2_surface_hit` (M4 Slice C): identical to
@@ -1085,6 +1125,7 @@ pub(crate) fn host_m2_surface_hit_at(
     ro: [f32; 3],
     rd: [f32; 3],
     t_world: f32,
+    mut counts: Option<&mut M2EvalCounts>,
 ) -> Option<f32> {
     let p = [
         ro[0] + rd[0] * t_world,
@@ -1110,6 +1151,9 @@ pub(crate) fn host_m2_surface_hit_at(
     let tz = rel[2] as u32;
     if tx >= M2_GRID_DIM || ty >= M2_GRID_DIM || tz >= M2_GRID_DIM {
         return None;
+    }
+    if let Some(c) = counts.as_deref_mut() {
+        c.calls += 1;
     }
     let cell_min = geo.cell_min([tx, ty, tz]);
 
@@ -1153,7 +1197,13 @@ pub(crate) fn host_m2_surface_hit_at(
     for _ in 0..M2_REFINE_ITERS {
         let q = [ro[0] + rd[0] * rt, ro[1] + rd[1] * rt, ro[2] + rd[2] * rt];
         let d = sdf_edit_list(edits, q);
+        if let Some(c) = counts.as_deref_mut() {
+            c.refine_evals += 1;
+        }
         if d.abs() < SDF_EPS {
+            if let Some(c) = counts.as_deref_mut() {
+                c.accepts += 1;
+            }
             return Some(rt);
         }
         // Split the under-relaxed step into a named value then add it (no FMA contraction), so the
@@ -1230,7 +1280,40 @@ pub fn golden_composite_pixel_brick_m2(
 
     let has_mesh = mesh_depth < MESH_DEPTH_CLEAR;
     let t_mesh = if has_mesh { depth_to_t(mesh_depth) } else { 1.0e30 };
+    let (hit, t) = golden_primary_hit_brick_m2(edits, t_mesh, ro, rd, omega, brick_enabled, grid, cells, None);
 
+    let color = if hit && t < t_mesh {
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let n = sdf_edit_list_normal(edits, p);
+        host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, light_dir, lighting_flags, &|q| {
+            sdf_edit_list(edits, q)
+        })
+    } else if has_mesh {
+        MESH_COLOR
+    } else {
+        SDF_BACKGROUND
+    };
+    pack_rgba(color)
+}
+
+/// The primary march of [`golden_composite_pixel_brick_m2`] (M2 on): `(hit, t)` for the ray
+/// `ro + rd·t` against a mesh at `t_mesh` (`1.0e30` = none), counting what it evaluates into
+/// `counts`. In the shaders' order: the M1 empty skip (when `brick_enabled`), then the M2
+/// SURFACE-brick step ([`host_m2_surface_hit`] — a hit TERMINATES the march at the analytically
+/// validated `t`), then the analytic fold with the B1 over-relaxation; the exhaustion re-march
+/// stays analytic (C1).
+#[allow(clippy::too_many_arguments)]
+pub fn golden_primary_hit_brick_m2(
+    edits: &[SdfEdit],
+    t_mesh: f32,
+    ro: [f32; 3],
+    rd: [f32; 3],
+    omega: f32,
+    brick_enabled: bool,
+    grid: &PointerGrid,
+    cells: &[u32],
+    mut counts: Option<&mut M2EvalCounts>,
+) -> (bool, f32) {
     let mut t = 0.0_f32;
     let t_seed = t;
     let mut omega = omega; // [1.0, 1.99]; sor-fail latches it to 1.0
@@ -1246,19 +1329,10 @@ pub fn golden_composite_pixel_brick_m2(
         }
         let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
 
-        // M2 SURFACE-brick path: try the atlas cubic at `p`. A hit terminates the march at the
-        // analytically-validated `t` (the hit/normal/shade stay analytic — C1). INDEPENDENT of the
-        // M1 empty-skip below: the M2 step is taken FIRST (it owns the SURFACE cells the empty-skip
-        // never skips), and a no-crossing falls through to the M1 / analytic step.
-        if let Some(m2_hit_t) = host_m2_surface_hit(edits, ro, rd, t) {
-            hit = true;
-            exhausted = false; // M2 cubic+analytic-validated convergence
-            t = m2_hit_t;
-            break;
-        }
-
-        // M1 empty skip (when on): an EmptyOutside cell at `p` steps to the brick AABB exit. The
-        // SURFACE cells the M2 step owns are NOT EmptyOutside, so this only accelerates EMPTY space.
+        // M1 empty skip (when on): an EmptyOutside cell at `p` steps to the brick AABB exit — FIRST,
+        // as the shaders run it (`sdf_gbuffer_composite.hlsl`'s M1 block precedes the M2 block), so
+        // the host's M2 calls land on the same march points as the GPU's. The SURFACE cells the M2
+        // step owns are NOT EmptyOutside, so this only accelerates EMPTY space.
         if brick_enabled
             && let Some((class, cell_min)) = host_brick_cell(grid, cells, p)
             && class == BRICK_CLASS_EMPTY_OUTSIDE
@@ -1272,7 +1346,20 @@ pub fn golden_composite_pixel_brick_m2(
             continue; // skip the analytic fold this step
         }
 
+        // M2 SURFACE-brick path: try the atlas cubic at `p`. A hit terminates the march at the
+        // analytically-validated `t` (the hit/normal/shade stay analytic — C1); a no-crossing falls
+        // through to the analytic step.
+        if let Some(m2_hit_t) = host_m2_surface_hit(edits, ro, rd, t, counts.as_deref_mut()) {
+            hit = true;
+            exhausted = false; // M2 cubic+analytic-validated convergence
+            t = m2_hit_t;
+            break;
+        }
+
         let d = sdf_edit_list(edits, p);
+        if let Some(c) = counts.as_deref_mut() {
+            c.fold_evals += 1;
+        }
         if d < SDF_EPS {
             hit = true;
             exhausted = false; // converged
@@ -1311,6 +1398,9 @@ pub fn golden_composite_pixel_brick_m2(
             }
             let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
             let d = sdf_edit_list(edits, p);
+            if let Some(c) = counts.as_deref_mut() {
+                c.fold_evals += 1;
+            }
             if d < SDF_EPS {
                 hit = true;
                 break;
@@ -1321,19 +1411,7 @@ pub fn golden_composite_pixel_brick_m2(
             }
         }
     }
-
-    let color = if hit && t < t_mesh {
-        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
-        let n = sdf_edit_list_normal(edits, p);
-        host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, light_dir, lighting_flags, &|q| {
-            sdf_edit_list(edits, q)
-        })
-    } else if has_mesh {
-        MESH_COLOR
-    } else {
-        SDF_BACKGROUND
-    };
-    pack_rgba(color)
+    (hit, t)
 }
 
 /// The host mirror of the shader's `select_level` (M4 Slice C): the FINEST enclosing clip-map level
@@ -1442,19 +1520,7 @@ pub fn golden_composite_pixel_brick_m4(
         // ⇒ fold the analytic field, exactly as M2 does outside its single grid).
         let lvl = host_select_level(params, brick_levels, p);
 
-        // M2 SURFACE-brick path at the selected level: a hit terminates the march at the
-        // analytically-validated `t`. Mirrors the shader's per-level branch-ladder (lvl >= 0 arm).
-        if let Some(level) = lvl {
-            let geo = BrickLevelParams::at_level_from_params(params, level);
-            if let Some(m4_hit_t) = host_m2_surface_hit_at(edits, &geo, ro, rd, t) {
-                hit = true;
-                exhausted = false; // M2 cubic+analytic-validated convergence
-                t = m4_hit_t;
-                break;
-            }
-        }
-
-        // M1 empty skip (when on) at the selected level's EMPTY-SKIP grid: an EmptyOutside cell steps to
+        // M1 empty skip FIRST (the shaders' order: the M1 block precedes the M2 block), at the selected level's EMPTY-SKIP grid: an EmptyOutside cell steps to
         // the brick AABB exit. `level_grids[level]` is the empty-skip grid the GPU's `PointerGrid{level}`
         // holds — DISTINCT from the surface atlas grid the M2 step above reads (level 0's empty-skip is
         // the FINE `16³@0.5` near-field grid `pc.grid_*` carries, matching M2 bit-for-bit; coarse levels
@@ -1473,6 +1539,18 @@ pub fn golden_composite_pixel_brick_m4(
                 break;
             }
             continue; // skip the analytic fold this step
+        }
+
+        // M2 SURFACE-brick path at the selected level: a hit terminates the march at the
+        // analytically-validated `t`. Mirrors the shader's per-level branch-ladder (lvl >= 0 arm).
+        if let Some(level) = lvl {
+            let geo = BrickLevelParams::at_level_from_params(params, level);
+            if let Some(m4_hit_t) = host_m2_surface_hit_at(edits, &geo, ro, rd, t, None) {
+                hit = true;
+                exhausted = false; // M2 cubic+analytic-validated convergence
+                t = m4_hit_t;
+                break;
+            }
         }
 
         let d = sdf_edit_list(edits, p);

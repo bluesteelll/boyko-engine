@@ -48,9 +48,10 @@ use boyko_rhi::{
     BufferDesc, BufferImageCopy, BufferUsage, CompareOp, ComputePipelineDesc, DepthAttachment,
     DescriptorKind, Filter, Format,
     CullMode, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange,
-    ImageUsage, LoadOp, MemoryLocation, MipMode, PrimitiveTopology, RenderArea, RenderingAttachment,
-    RenderingDesc, RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc, ShaderStage, StoreOp,
-    TextureDesc, TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
+    ImageUsage, LoadOp, MemoryLocation, MipMode, PrimitiveTopology, QueryPoolDesc, RenderArea,
+    RenderingAttachment, RenderingDesc, RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc,
+    ShaderStage, StoreOp, TextureDesc, TextureDimension, TimestampStage, VertexAttribute,
+    VertexBufferLayout, VertexFormat, Viewport,
 };
 use boyko_rhi_vulkan::compute::{
     COMPOSITE_PUSH_CONSTANT_BYTES, CompositeCamera, CompositePushConstants, DEFAULT_LIGHT_DIR,
@@ -108,7 +109,7 @@ use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_rhi_vulkan::present::{AtrousStepRole, LIT_FORMAT, MAX_SSAO_ATROUS_LEVELS, ssao_atrous_step};
 use boyko_shaderdsl::post::TONEMAP_ACES;
 use boyko_rhi_vulkan::rhi_impl::{
-    ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanSampler,
+    ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanQueryPool, VulkanQueue, VulkanSampler,
 };
 use boyko_rhi_vulkan::texture::VulkanTexture;
 
@@ -878,16 +879,16 @@ fn run_gbuffer_hybrid_m2(
     // The single-level (M2) entry: no clip-map → `brick_levels = 1`, the level-0 atlas/grid bound at
     // every level slot (duplicates). The N-level (M4) sibling [`run_gbuffer_hybrid_m4`] passes a real
     // `BrickClipmap`. This wrapper keeps the M2/M3 call sites + byte output unchanged (the OFF/N=1 gate).
-    let (lit, tiles, viewt, _gbuf) = run_gbuffer_hybrid_m4(
+    let (lit, tiles, viewt, _gbuf, _ns) = run_gbuffer_hybrid_m4(
         ctx, edits, coarse_enabled, read_tiles, omega_in, lighting_flags, light_dir,
-        light_table_words, brick, brick_trilinear, read_viewt, m2_grid_default, None, false,
+        light_table_words, brick, brick_trilinear, read_viewt, m2_grid_default, None, false, 0,
     );
     (lit, tiles, viewt)
 }
 
-/// [`run_gbuffer_hybrid_m4`]'s readbacks: `(lit, tiles?, gViewT?, G-buffer?)` — the optional lanes
-/// are `Some` only when their `read_*` flag asked for them.
-type HarnessReadbacks = (Vec<u8>, Option<Vec<u8>>, Option<Vec<f32>>, Option<DeviceGbuffer>);
+/// [`run_gbuffer_hybrid_m4`]'s readbacks: `(lit, tiles?, gViewT?, G-buffer?, marcher ns?)` — the
+/// optional lanes are `Some` only when their `read_*` / `marcher_timing` argument asked for them.
+type HarnessReadbacks = (Vec<u8>, Option<Vec<u8>>, Option<Vec<f32>>, Option<DeviceGbuffer>, Option<Vec<f64>>);
 
 /// The device's own G-buffer, read back after the resolve (OPEN-ITEMS 15, the seam gate): the three
 /// RGBA8 attribute images and the `gViewT` lane, row-major `py * SDF_IMG_W + px`. Each RGBA8 image
@@ -926,9 +927,9 @@ fn run_gbuffer_hybrid_lit_table_seam(
     light_dir: [f32; 3],
     light_table_words: &[u32],
 ) -> (Vec<u8>, DeviceGbuffer) {
-    let (lit, _tiles, _viewt, gbuf) = run_gbuffer_hybrid_m4(
+    let (lit, _tiles, _viewt, gbuf, _ns) = run_gbuffer_hybrid_m4(
         ctx, edits, false, false, 1.0, lighting_flags, light_dir, light_table_words, None, false,
-        false, true, None, true,
+        false, true, None, true, 0,
     );
     (lit, gbuf.expect("invariant: read_gbuffer = true returns the device G-buffer"))
 }
@@ -944,6 +945,11 @@ fn run_gbuffer_hybrid_lit_table_seam(
 /// after the resolve and returns them as the fourth element. With it `false` the three attribute
 /// images keep their usages, no extra barrier or copy is recorded and the fourth element is `None`
 /// (the command stream is byte-identical to the harness before it; `read_viewt` is the precedent).
+///
+/// `marcher_timing > 0` (OPEN-ITEMS 16, the DIAGNOSTIC M2 cost probe) re-dispatches ONLY the marcher
+/// that many more times after the main submission, one fenced submission each, bracketed
+/// `TOP_OF_PIPE` .. `BOTTOM_OF_PIPE` by GPU timestamps (the HW-RT R0 pattern), and returns the
+/// per-dispatch nanoseconds as the fifth element; `0` records nothing extra.
 #[allow(clippy::too_many_arguments)]
 fn run_gbuffer_hybrid_m4(
     ctx: &VulkanContext,
@@ -960,6 +966,7 @@ fn run_gbuffer_hybrid_m4(
     m2_grid_default: bool,
     clipmap: Option<&BrickClipmap>,
     read_gbuffer: bool,
+    marcher_timing: u32,
 ) -> HarnessReadbacks {
     let device: &VulkanContext = ctx;
     let queue = ctx.rhi_queue();
@@ -1993,6 +2000,13 @@ fn run_gbuffer_hybrid_m4(
     queue.submit(&encoder, &fence).expect("submit");
     device.wait_fence(&fence, u64::MAX).expect("wait_fence");
 
+    // OPEN-ITEMS 16: the marcher-dispatch timing bracket (opt-in). Every image the marcher touches
+    // is still in the layout it reads / writes it in (GENERAL storage, SHADER_READ depth), so each
+    // timed submission is the bind + push + dispatch alone.
+    let marcher_ns = (marcher_timing > 0).then(|| {
+        time_marcher_dispatches(device, &queue, &compute, &bind_group, push.as_bytes(), marcher_timing)
+    });
+
     // Read back the LIT R8G8B8A8 bytes (the deferred resolve's output).
     let dst_ptr = device
         .buffer_mapped_ptr(&readback)
@@ -2135,7 +2149,57 @@ fn run_gbuffer_hybrid_m4(
         brick_atlas.destroy(device);
     }
 
-    (out, tiles_out, viewt_out, gbuffer_out)
+    (out, tiles_out, viewt_out, gbuffer_out, marcher_ns)
+}
+
+/// Re-dispatches the marcher `n` times, one fenced submission each, the dispatch bracketed
+/// `TOP_OF_PIPE` .. `BOTTOM_OF_PIPE` by a timestamp pair (the HW-RT R0 primitive), and returns the
+/// per-dispatch nanoseconds; a pair the device reports unavailable is skipped.
+fn time_marcher_dispatches(
+    device: &VulkanContext,
+    queue: &VulkanQueue,
+    compute: &ComputePipeline,
+    bind_group: &VulkanBindGroup,
+    push: &[u8],
+    n: u32,
+) -> Vec<f64> {
+    let period = device.device_caps().timestamp_period;
+    let pool: VulkanQueryPool = device.create_query_pool(&QueryPoolDesc { count: 2 }).expect("timestamp query pool");
+    let mut scratch = [0u64; 4];
+    let (mut begin, mut dur, mut available) = ([0u64; 1], [0u64; 1], [0u8; 1]);
+    let mut ns = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let fence = device.create_fence(false).expect("fence");
+        let mut encoder = device.create_command_encoder().expect("encoder");
+        encoder.begin().expect("begin");
+        encoder.reset_query_pool(&pool, 0, 2);
+        encoder.write_timestamp(&pool, TimestampStage::TopOfPipe, 0);
+        encoder.bind_compute_pipeline(compute);
+        encoder.bind_descriptor_set_compute(bind_group, compute);
+        encoder.push_compute_constants(compute, ShaderStage::COMPUTE, 0, push);
+        encoder.dispatch(group_count_x(), 1, 1);
+        encoder.write_timestamp(&pool, TimestampStage::BottomOfPipe, 1);
+        encoder.end().expect("end");
+        queue.submit(&encoder, &fence).expect("submit");
+        device.wait_fence(&fence, u64::MAX).expect("wait_fence");
+        device
+            .read_query_pool_pairs_available(&pool, 1, &mut scratch, &mut begin, &mut dur, &mut available)
+            .expect("read_query_pool_pairs_available");
+        if available[0] == 1 {
+            ns.push(dur[0] as f64 * f64::from(period));
+        }
+        // SAFETY: both were created on `device` and the submission that used them was fence-waited
+        // above, so neither is in use; each is destroyed exactly once.
+        unsafe {
+            device.destroy_command_encoder(encoder);
+            device.destroy_fence(fence);
+        }
+    }
+    // SAFETY: created on `device`; every submission writing it was fence-waited in the loop.
+    unsafe {
+        device.destroy_query_pool(pool);
+    }
+    ns
 }
 
 /// The SSAO edge-avoiding à-trous denoise chain's per-run test resources
@@ -3086,6 +3150,19 @@ fn box_csg() -> Vec<SdfEdit> {
 }
 
 /// A smooth-union scene (two spheres blended), exercising the smooth-min path.
+/// OPEN-ITEMS 16 (check 16 D2's budget-independent case): a sphere of r 0.1 centred on a level-0
+/// voxel-cell centre IN FRONT of a sphere of r 0.5 in the same brick. Every corner of the small
+/// sphere's cell stores a positive distance, so the trilinear reconstruction skips the small sphere
+/// and the cubic's first root lands on the big one — M2 converges there in ~3 contracting refine
+/// steps while the analytic march shows the small one (a non-first surface no refine budget or
+/// contraction guard can tell apart).
+fn two_spheres() -> Vec<SdfEdit> {
+    vec![
+        SdfEdit::sphere([0.25, 0.25, 1.5], 0.1, sdf_op::UNION, 0.0),
+        SdfEdit::sphere([0.25, 0.25, 0.5], 0.5, sdf_op::UNION, 0.0),
+    ]
+}
+
 fn smooth_union() -> Vec<SdfEdit> {
     vec![
         SdfEdit::sphere([-0.25, 0.0, 0.0], 0.35, sdf_op::UNION, 0.0),
@@ -7684,6 +7761,58 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
     assert!(any_scene_hit, "no scene produced an M2 surface hit — the discriminator proved nothing");
 }
 
+/// OPEN-ITEMS 16 — the DIAGNOSTIC cost probe of the deferred marcher dispatch with M2 off and on
+/// (`oi1516/cut.md` C5 / W16-1). For each M2 scene (crater, box, smooth union, two spheres) and each
+/// of M2 {off, on} it runs the M2 harness once, then re-dispatches the marcher alone 8 + 64 times
+/// with GPU timestamps around the dispatch only, and prints median / p10 / p90 ns of the 64. No
+/// assertion on any number: the orchestrator runs it A/B (the lane base vs the lane head) in a quiet
+/// window; inside a lane it only shows the probe runs.
+#[test]
+#[ignore = "gpu: DIAGNOSTIC timing probe of the deferred marcher dispatch, M2 off/on; the orchestrator runs it in a quiet window"]
+fn m2_marcher_cost_probe() {
+    const WARMUP: usize = 8;
+    const TIMED: usize = 64;
+    let Some(ctx) = boot_or_skip("m2_marcher_cost_probe") else {
+        return;
+    };
+    let caps = ctx.device_caps();
+    if !caps.timestamps_usable() {
+        println!(
+            "SKIP m2_marcher_cost_probe: GPU timestamps unusable (valid_bits={}, period={} ns/tick)",
+            caps.timestamp_valid_bits, caps.timestamp_period
+        );
+        return;
+    }
+    println!("m2_marcher_cost_probe on {} (period {} ns/tick)", ctx.device_name(), caps.timestamp_period);
+    for (name, edits) in [
+        ("crater_csg", crater()),
+        ("box_csg", box_csg()),
+        ("smooth_union", smooth_union()),
+        ("two_spheres", two_spheres()),
+    ] {
+        let (grid, cells) = bake_brick_grid(&edits);
+        for m2 in [false, true] {
+            let (_, _, _, _, ns) = run_gbuffer_hybrid_m4(
+                &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
+                Some((&grid, &cells)), m2, false, true, None, false, (WARMUP + TIMED) as u32,
+            );
+            let ns = ns.expect("invariant: marcher_timing > 0 returns the samples");
+            let mut timed: Vec<f64> = ns.into_iter().skip(WARMUP).collect();
+            timed.sort_by(f64::total_cmp);
+            let at = |q: f64| timed.get(((timed.len().max(1) - 1) as f64 * q).round() as usize).copied().unwrap_or(f64::NAN);
+            println!(
+                "[{name}] M2 {}: median {:.0} ns, p10 {:.0} ns, p90 {:.0} ns over {} timed dispatches",
+                if m2 { "on " } else { "off" },
+                at(0.5),
+                at(0.1),
+                at(0.9),
+                timed.len()
+            );
+        }
+    }
+    assert_validation_clean(&ctx);
+}
+
 // ===========================================================================================
 // SDF brick-atlas M4 (clip-map LOD, Slice C) — the N-level clip-map tests. The OFF/N=1 byte-identity
 // gates are CPU-RUNNABLE (host goldens); the engagement + far-field gates are `#[ignore]` RTX
@@ -7901,9 +8030,9 @@ fn sdf_m4_clipmap_near_field_matches_single_level() {
         );
         let vt_single = vt_single_opt.expect("gViewT readback (single-level)");
 
-        let (lit_clip, _, vt_clip_opt, _) = run_gbuffer_hybrid_m4(
+        let (lit_clip, _, vt_clip_opt, _, _) = run_gbuffer_hybrid_m4(
             &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
-            Some((&grid, &cells)), true, true, true, Some(&clipmap), false,
+            Some((&grid, &cells)), true, true, true, Some(&clipmap), false, 0,
         );
         let vt_clip = vt_clip_opt.expect("gViewT readback (clip-map)");
 
@@ -7959,9 +8088,9 @@ fn sdf_m4_clipmap_far_field_renders() {
     };
 
     // The clip-map render (brick_levels = 3): the far sphere is in level 1, so the clip-map renders it.
-    let (lit_clip, _, vt_clip_opt, _) = run_gbuffer_hybrid_m4(
+    let (lit_clip, _, vt_clip_opt, _, _) = run_gbuffer_hybrid_m4(
         &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
-        Some((&grid, &cells)), true, true, true, Some(&clipmap), false,
+        Some((&grid, &cells)), true, true, true, Some(&clipmap), false, 0,
     );
     let vt_clip = vt_clip_opt.expect("gViewT readback (clip-map)");
 
@@ -8028,10 +8157,10 @@ fn sdf_m4_clipmap_far_field_screenshot_dump() {
         field.bump_gen();
         BrickClipmap::create(&ctx, &field, [0.0, 0.0, 0.0]).expect("M4 screenshot clip-map create")
     };
-    let (lit, _, _, _) = run_gbuffer_hybrid_m4(
+    let (lit, _, _, _, _) = run_gbuffer_hybrid_m4(
         &ctx, &edits, false, false, 1.0, LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
         DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE, Some((&grid, &cells)), true, false, true,
-        Some(&clipmap), false,
+        Some(&clipmap), false, 0,
     );
     let path = std::env::temp_dir().join("sdf_m4_clipmap_far_field.bmp");
     write_bmp_rgba(&path, &lit_display_rgba(&lit), SDF_IMG_W, SDF_IMG_H);
