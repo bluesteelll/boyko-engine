@@ -139,20 +139,28 @@ pub(crate) struct GbufferPassPlan {
     pub(crate) shadow_temporal: Option<crate::framegraph::PassId>,
     /// The always-present deferred resolve pass.
     pub(crate) resolve: crate::framegraph::PassId,
-    /// Anti-aliasing Stage 4 (TAA W5): the temporal-resolve pass (`scene.taa.is_some()`).
+    /// Anti-aliasing Stage 4 (TAA W5): the temporal-resolve pass (TAA live, [`PostSeamArms::taa`]).
     /// Recorded AFTER the main resolve dispatch, BEFORE `present_sample` (it reads `lit` at
     /// `GENERAL`, straight out of the resolve's write — see `TaaActivation`'s "Compute, not
     /// graphics" doc). Reads `lit`/`viewt`/`taa_hist_read`, writes `taa_hist[fi]`; `aa_out`'s
     /// UNDEFINED→GENERAL→SHADER_READ_ONLY_OPTIMAL barriers are hand-recorded (untracked, like
-    /// every other AA mode's `aa_out`). `Some` iff `scene.taa.is_some()` (the "member is Some
-    /// iff its body is recorded" invariant).
+    /// every other AA mode's `aa_out`). `Some` iff TAA is live — the scene requests it AND the
+    /// targets built its history (review r1 W1) — and the recorder keys `record_taa` on this
+    /// member (the "member is Some iff its body is recorded" invariant).
     pub(crate) taa_resolve: Option<crate::framegraph::PassId>,
-    /// The always-present present-sample pass: only the `lit` GENERAL→SHADER_READ_ONLY
-    /// transition (site 5c). The swapchain WSI barriers stay hand-recorded.
+    /// The always-present present-sample pass: since render wave PX1a, `display`'s
+    /// GENERAL→SHADER_READ_ONLY transition for the present blit (site 5c). The swapchain WSI
+    /// barriers stay hand-recorded.
     pub(crate) present_sample: crate::framegraph::PassId,
+    /// Render wave PX1a: the post seam, declared before `present_sample`.
+    pub(crate) post: PostSeamPlan,
     /// Render wave RD1 (defect R0b): the SDF depth merge, declared IMMEDIATELY before
     /// `particle_draw` — `Some` iff [`GBufferScene::sdf_depth_merge`] is not `Absent`.
     pub(crate) sdf_depth_merge: Option<crate::framegraph::PassId>,
+    /// Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY `test_nan_inject` pass, declared after
+    /// the last `lit` producer (and the SDF depth merge) and before `particle_draw` — `Some` only on
+    /// the engine frame `Renderer::arm_nan_inject` named (never on a shipped run).
+    pub(crate) test_nan_inject: Option<crate::framegraph::PassId>,
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame
     /// (nothing declared at all — see [`ParticlePassPlan`]).
     pub(crate) particle: ParticlePassPlan,
@@ -576,6 +584,28 @@ fn declare_particle_compute(
     ParticlePassPlan { upload, kickoff, emit, sim, sort_hist, sort_scan, sort_scatter, draw: None }
 }
 
+/// Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY `test_nan_inject` pass — one
+/// `vkCmdCopyBufferToImage` of a `LIT_FORMAT` NaN texel (`targets::NAN_INJECT_TEXEL_BITS`) into
+/// `lit` at `targets::NAN_INJECT_TEXEL`. `lit` at `TRANSFER / TRANSFER_WRITE / TRANSFER_DST_OPTIMAL`:
+/// the graph derives the producer's `GENERAL` (or `COLOR_ATTACHMENT_OPTIMAL`) → `TRANSFER_DST`
+/// transition before it (content-preserving: the tracked layout is the old layout, never
+/// `UNDEFINED`) and the next reader's transition after it. The source buffer is host-written once
+/// at create and is not a graph resource (the submit's host-write visibility covers it).
+fn declare_test_nan_inject(
+    g: &mut crate::framegraph::FrameGraph,
+    lit: crate::framegraph::ResId,
+) -> crate::framegraph::PassId {
+    let p = g.add_pass("test_nan_inject");
+    g.image_access(
+        lit,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        crate::framegraph::SubRange::COLOR,
+    );
+    p
+}
+
 /// Particles P0: declares the indirect billboard draw, LATE — after the path's last `lit`
 /// producer and before `present_sample` (and before `taa_resolve` where that exists, which reads
 /// `lit` as this frame's final shaded colour).
@@ -771,9 +801,15 @@ pub(crate) struct ForwardPassPlan {
     /// source layout). The swapchain WSI barriers stay hand-recorded, exactly like
     /// [`GbufferPassPlan::present_sample`].
     pub(crate) present_sample: crate::framegraph::PassId,
+    /// Render wave PX1a: the post seam (`post_final` only on Forward).
+    pub(crate) post: PostSeamPlan,
     /// Render wave RD1 (defect R0b): the SDF depth merge, declared IMMEDIATELY before
     /// `particle_draw` — `Some` iff [`GBufferScene::sdf_depth_merge`] is not `Absent`.
     pub(crate) sdf_depth_merge: Option<crate::framegraph::PassId>,
+    /// Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY `test_nan_inject` pass, declared after
+    /// the last `lit` producer (and the SDF depth merge) and before `particle_draw` — `Some` only on
+    /// the engine frame `Renderer::arm_nan_inject` named (never on a shipped run).
+    pub(crate) test_nan_inject: Option<crate::framegraph::PassId>,
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame.
     pub(crate) particle: ParticlePassPlan,
     /// OBS (D): the `image_dump` pass — declared LAST, on a `BOYKO_IMAGE_DUMP` request frame only
@@ -829,13 +865,16 @@ pub(crate) struct ForwardPassPlan {
 /// each leg (mirroring the TAA-append precedent immediately above), so every EARLIER ResId is
 /// byte-unchanged. No pass accesses them unless the SSAO à-trous chain's per-frame level count
 /// (`SsaoActivation::atrous_levels`) is `> 0` ⇒ byte-identical on the `N == 0` OFF path.
+///
+/// Render wave PX1a appends `display` + `lit_native` (D-G1), LAST, unconditionally — ResId 16/17
+/// (`not(hwrt)`) or 22/23 (`hwrt`). No pass names `lit_native` off SSAA.
 #[cfg(feature = "hwrt")]
-pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 22;
-/// See the `hwrt` variant: a `not(hwrt)` build keeps the count at 16 (11 base + `pbr` + TAA's
-/// `taa_hist`/`taa_hist_read` + the SSAO à-trous `ssao_ring_a`/`ssao_ring_b`, no shadow-vis
-/// targets, byte-unchanged on every ResId 0..10).
+pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 24;
+/// See the `hwrt` variant: a `not(hwrt)` build keeps the count at 18 (11 base + `pbr` + TAA's
+/// `taa_hist`/`taa_hist_read` + the SSAO à-trous `ssao_ring_a`/`ssao_ring_b` + PX1a's
+/// `display`/`lit_native`, no shadow-vis targets, byte-unchanged on every ResId 0..10).
 #[cfg(not(feature = "hwrt"))]
-pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 16;
+pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 18;
 
 /// The REAL [`BarrierSink`](crate::framegraph::BarrierSink) for the whole G-buffer
 /// frame (Steps 1c–1e): it resolves each derived barrier's logical `res` → the current
@@ -957,6 +996,225 @@ impl MaterialTableRes {
     }
 }
 
+/// Render wave PX1a (D-G2, D-G3, D-G4): the post seam's passes as one declarator declared them —
+/// `[ssaa_downsample] → post_final → [cas]`, followed by the plan's own `present_sample`. Shared
+/// by the three plans because the three declarators declare the seam through one function,
+/// [`declare_post_seam`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PostSeamPlan {
+    /// The SSAA downsample (`lit` → `lit_native`), `Some` iff `scene.ssaa` is armed.
+    pub(crate) ssaa_downsample: Option<crate::framegraph::PassId>,
+    /// The tail dispatch (scene input → `display`), every frame.
+    pub(crate) post_final: crate::framegraph::PassId,
+    /// CAS (`display` → `aa_out`), `Some` iff `scene.rcas` is armed.
+    pub(crate) cas: Option<crate::framegraph::PassId>,
+}
+
+/// Render wave PX1a (review r1 W1): one frame's AA arming as the declarators key on it, derived
+/// ONCE per frame by [`Renderer::declare_frame_graph`] from the scene AND the targets the frame
+/// records into.
+///
+/// `taa` is TAA **live**, not TAA requested: `GBufferTargets::create` DEGRADES the history ring
+/// and the resolve set to `None` on a create or boot-clear failure (VRAM exhaustion at create,
+/// resize or an AA switch) while `scene.taa` stays armed, and the sink binds `taa_hist` /
+/// `taa_hist_read` to `VkImage::NULL` then. Keying the `taa_resolve` pass and `post_final`'s scene
+/// input on the request alone routed a RAW barrier naming that NULL slot into `post_final`
+/// (VUID-VkImageMemoryBarrier-image-parameter). On a live predicate a degraded frame declares,
+/// binds (`GBufferTargets::create`'s `post_final` ring) and records (the recorders key `record_taa`
+/// on the declared `taa_resolve` pass) exactly the TAA-off frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PostSeamArms {
+    /// TAA live: `taa_resolve` is declared and `post_final` reads `taa_hist`.
+    pub(crate) taa: bool,
+    /// `scene.ssaa`: `ssaa_downsample` is declared and `post_final` reads `lit_native`.
+    pub(crate) ssaa: bool,
+    /// `scene.rcas`: the `cas` pass is declared.
+    pub(crate) cas: bool,
+}
+
+impl PostSeamArms {
+    /// The arming of a frame whose scene requests TAA iff `taa_requested` and whose targets hold
+    /// a built TAA history iff `taa_history_built` (`GBufferTargets::taa_history_built`). TAA is
+    /// live only when both hold — the ONE TAA predicate of the declarators and of
+    /// `post_final`'s descriptor ring.
+    pub(crate) const fn new(taa_requested: bool, taa_history_built: bool, ssaa: bool, cas: bool) -> Self {
+        Self { taa: taa_requested && taa_history_built, ssaa, cas }
+    }
+
+    /// [`Self::new`] over `scene`'s arming.
+    pub(crate) fn from_scene(scene: &GBufferScene<'_>, taa_history_built: bool) -> Self {
+        Self::new(scene.taa.is_some(), taa_history_built, scene.ssaa.is_some(), scene.rcas.is_some())
+    }
+}
+
+/// Render wave PX1a (D-G1): `display` — single, `FrameLocal`, seeded at
+/// `SHADER_READ_ONLY_OPTIMAL` for its readers (`present_sample`'s FRAGMENT read, the CAS COMPUTE
+/// read), widened with `TRANSFER` under the image dump. Declared LAST in each declarator's image
+/// block (an append moves no earlier `ResId`).
+fn declare_display(g: &mut crate::framegraph::FrameGraph, dump_widen: bool) -> crate::framegraph::SeededImage {
+    crate::framegraph::SeededImage::declare(
+        g,
+        "display",
+        crate::framegraph::ResSync::seeded_readers_at_layout(
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        ),
+        1,
+        crate::framegraph::SeedContent::FrameLocal,
+        dump_widen,
+    )
+}
+
+/// Render wave PX1a (D-G1): `lit_native` — single, `FrameLocal`, seeded at `GENERAL` for its one
+/// reader (`post_final`'s COMPUTE read). Declared on EVERY Deferred / VB frame right after
+/// `display` so the `ResId` order is fixed; no pass names it unless SSAA is armed, and its sink
+/// slot is `VkImage::NULL` then (inert — the `taa_hist` precedent).
+fn declare_lit_native(g: &mut crate::framegraph::FrameGraph, dump_widen: bool) -> crate::framegraph::SeededImage {
+    crate::framegraph::SeededImage::declare(
+        g,
+        "lit_native",
+        crate::framegraph::ResSync::seeded_readers_at_layout(
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        ),
+        1,
+        crate::framegraph::SeedContent::FrameLocal,
+        dump_widen,
+    )
+}
+
+/// Anti-aliasing Stage 4 (TAA W5): the temporal-resolve pass, `Some` iff TAA is live
+/// ([`PostSeamArms::taa`]) — the Deferred and VisibilityBuffer declarators' one declaration of it,
+/// placed after the frame's last `lit` producer and before [`declare_post_seam`]. A frame without
+/// live TAA declares no pass, so the graph routes ZERO barriers on `taa_hist` / `taa_hist_read`
+/// (whose sink slots are `VkImage::NULL` when the history was not built).
+///
+/// - `lit` @0 is bound as a COMBINED_IMAGE_SAMPLER, whose descriptor records
+///   `SHADER_READ_ONLY_OPTIMAL` (the C2 fix): the graph leaves `lit` in THAT layout at the
+///   dispatch, so this read derives the transition out of the last producer's write (a
+///   recorded-vs-actual layout divergence is spec UB).
+/// - `viewt` (gViewT r32f) and `taa_hist_read` (gHistIn, the cross-frame history sibling) are
+///   STORAGE reads at `GENERAL`.
+/// - `taa_hist` (this frame's history slot) is the STORAGE write at `GENERAL`; since render wave
+///   PX1a it is the resolve's only output, and `post_final` reads it as the scene input.
+fn declare_taa_resolve(
+    g: &mut crate::framegraph::FrameGraph,
+    arms: PostSeamArms,
+    lit: crate::framegraph::ResId,
+    viewt: crate::framegraph::ResId,
+    taa_hist_read: crate::framegraph::ResId,
+    taa_hist: crate::framegraph::ResId,
+) -> Option<crate::framegraph::PassId> {
+    use crate::framegraph::SubRange;
+    arms.taa.then(|| {
+        let p = g.add_pass("taa_resolve");
+        g.image_access(
+            lit,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            SubRange::COLOR,
+        );
+        for c in [viewt, taa_hist_read] {
+            g.image_access(
+                c,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+        }
+        g.image_access(
+            taa_hist,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_GENERAL,
+            SubRange::COLOR,
+        );
+        p
+    })
+}
+
+/// Render wave PX1a (D-G2..D-G4): declares the post seam after the frame's last `lit` producer
+/// (the particle draw, the TAA resolve) and then `present_sample` — `[ssaa_downsample] →
+/// post_final → [cas] → present_sample`, the order every recorder records. Returns the seam and
+/// the `present_sample` pass. Keyed on `arms` alone (review r1 W1: TAA is the LIVE predicate,
+/// the one [`declare_taa_resolve`] keys on).
+///
+/// - `ssaa_downsample` reads `lit` (FRAGMENT, `SHADER_READ_ONLY`) and initialises `lit_native` as
+///   its colour attachment (the recorder clears on load).
+/// - `post_final`'s FIRST declared access is its scene input — `POST_FINAL_BINDINGS`' one
+///   fetching row, `gScene` @0 (D-O1) — read at COMPUTE / `GENERAL` (`SampledImageAtGeneral`):
+///   `taa_hist` (`taa_hist_res`, the `[fi]` write slot) under live TAA, `lit_native` under SSAA,
+///   `lit` otherwise; then the whole-extent storage write of `display`, its initialiser.
+/// - `cas` reads `display` as a STORAGE image at `GENERAL` (D-G3): declared before
+///   `present_sample`, so the graph orders `post_final`'s write before both readers.
+/// - `present_sample` reads `display` at FRAGMENT / `SHADER_READ_ONLY` — its last declared access
+///   on every configuration, so `display` ends every frame at its seed's layout. The FXAA / SMAA
+///   passes after it stay hand-recorded FRAGMENT reads inside that barrier's scope.
+fn declare_post_seam(
+    g: &mut crate::framegraph::FrameGraph,
+    arms: PostSeamArms,
+    lit: crate::framegraph::ResId,
+    taa_hist_res: Option<crate::framegraph::ResId>,
+    display: crate::framegraph::SeededImage,
+    lit_native: Option<crate::framegraph::SeededImage>,
+) -> (PostSeamPlan, crate::framegraph::PassId) {
+    use crate::framegraph::SubRange;
+    let ssaa_native = arms.ssaa.then(|| {
+        lit_native.expect("invariant: SSAA is armed only on a declarator that declares lit_native")
+    });
+    let ssaa_downsample = ssaa_native.map(|native| {
+        let p = g.add_pass("ssaa_downsample");
+        g.image_access(
+            lit,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            SubRange::COLOR,
+        );
+        native.init_attachment(
+            g,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            SubRange::COLOR,
+        );
+        p
+    });
+    let post_final = g.add_pass("post_final");
+    let (stage, access, layout) =
+        (VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+    match (arms.taa, ssaa_native) {
+        (true, _) => g.image_access(
+            taa_hist_res.expect("invariant: TAA is live only on a declarator that declares taa_hist"),
+            stage,
+            access,
+            layout,
+            SubRange::COLOR,
+        ),
+        (false, Some(native)) => native.read(g, stage, access, layout, SubRange::COLOR),
+        (false, None) => g.image_access(lit, stage, access, layout, SubRange::COLOR),
+    }
+    display.init_storage_full(g, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, SubRange::COLOR);
+    let cas = arms.cas.then(|| {
+        let p = g.add_pass("cas");
+        display.read(g, stage, access, layout, SubRange::COLOR);
+        p
+    });
+    let present_sample = g.add_pass("present_sample");
+    display.read(
+        g,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        SubRange::COLOR,
+    );
+    (PostSeamPlan { ssaa_downsample, post_final, cas }, present_sample)
+}
+
 /// OBS (D, H0 Scope 6): the declared `image_dump` pass of a request frame — the names it copies
 /// (bit `name as u8`), the layout each is copied at, and the optional restore pass that returns a
 /// non-`GENERAL` seeded image to its frame-boundary layout.
@@ -965,8 +1223,9 @@ pub(crate) struct ImageDumpPlan {
     /// The copy pass (`image_dump`), declared LAST.
     pub(crate) pass: crate::framegraph::PassId,
     /// The restore pass (`image_dump_restore`), declared after it iff a copied image is seeded at
-    /// a layout other than `GENERAL` — no production instance at OBS (PX1a's `display` is the
-    /// first); the host tests carry the shape.
+    /// a layout other than `GENERAL` / `UNDEFINED` ([`dump_copy_layout`]) — render wave PX1a's
+    /// `display` (FrameLocal, seeded at `SHADER_READ_ONLY_OPTIMAL`) is the production instance;
+    /// this file's `tests` drive it over the production declarations.
     pub(crate) restore: Option<crate::framegraph::PassId>,
     /// The names copied, as bits.
     pub(crate) names: u8,
@@ -991,16 +1250,38 @@ fn touched_this_frame(g: &crate::framegraph::FrameGraph, res: crate::framegraph:
     })
 }
 
+/// The layout `image_dump` copies an image in, and whether `image_dump_restore` must read it
+/// back at its seed layout — decided by the SEED LAYOUT alone, the property the seeded-layout
+/// invariant ([`seeded_layout_violation`](crate::framegraph::seeded::seeded_layout_violation))
+/// checks on every image whatever its provenance bit: a FrameLocal image seeded at a layout
+/// (`display`, `lit_native`) must end its frame there exactly as a CrossFrame one (`taa_hist`)
+/// must (render wave PX1a, ruling 72 (2): keyed on `res_seeded`, both FrameLocal images ended a
+/// dump frame in `TRANSFER_SRC_OPTIMAL`).
+const fn dump_copy_layout(seed_layout: i32) -> (i32, bool) {
+    match seed_layout {
+        // A legal copy source: the end state is untouched.
+        VK_IMAGE_LAYOUT_GENERAL => (VK_IMAGE_LAYOUT_GENERAL, false),
+        // No layout to keep (a per-FIF ring slot, or a seed without a layout): the next first
+        // touch discards the content.
+        VK_IMAGE_LAYOUT_UNDEFINED => (VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, false),
+        _ => (VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, true),
+    }
+}
+
 /// OBS (D, H0 Scope 6): declares the `image_dump` pass LAST on a request frame — one `TRANSFER`
 /// read per requested name this declarator has and touched this frame (`None` when none of them
 /// qualifies). Called only on a request frame: every other frame of every run skips the call.
 ///
-/// - A seeded image whose frame-boundary layout is `GENERAL` (`taa_hist`) is copied AT `GENERAL`,
-///   a legal copy source, so its end state is untouched and the seeded-layout invariant holds.
-/// - Any other seeded image is copied at `TRANSFER_SRC_OPTIMAL` and `image_dump_restore` declares
-///   a READ back at its boundary layout, at a stage inside its seed (verify OQ2: a restore
-///   declared as a write would end a reader-seeded image's frame on a write).
-/// - A per-FIF ring slot (unseeded) needs no restore: its next first touch discards it.
+/// The copy layout and the restore read the seed layout only ([`dump_copy_layout`]), never the
+/// CrossFrame / FrameLocal provenance bit:
+/// - an image seeded at `GENERAL` (`taa_hist`, `lit_native`) is copied AT `GENERAL`, a legal copy
+///   source, so its end state is untouched and the seeded-layout invariant holds;
+/// - an image seeded at any other layout (`display`, at `SHADER_READ_ONLY_OPTIMAL`) is copied at
+///   `TRANSFER_SRC_OPTIMAL` and `image_dump_restore` declares a READ back at its seed layout, at a
+///   stage inside its seed (verify OQ2: a restore declared as a write would end a reader-seeded
+///   image's frame on a write);
+/// - an image without a seed layout (a per-FIF ring slot) needs no restore: its next first touch
+///   discards it.
 #[cold]
 #[inline(never)]
 fn declare_image_dump(
@@ -1028,13 +1309,8 @@ fn declare_image_dump(
         if names & (1 << name as u8) == 0 {
             continue;
         }
-        let seed = g.res_seed(res);
-        let layout = if g.res_seeded(res) && seed.layout == VK_IMAGE_LAYOUT_GENERAL {
-            VK_IMAGE_LAYOUT_GENERAL
-        } else {
-            needs_restore |= g.res_seeded(res) && seed.layout != VK_IMAGE_LAYOUT_UNDEFINED;
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-        };
+        let (layout, restore) = dump_copy_layout(g.res_seed(res).layout);
+        needs_restore |= restore;
         layouts[name as usize] = layout;
         g.image_access(res, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, layout, sub_of(name));
     }
@@ -1042,11 +1318,7 @@ fn declare_image_dump(
         let p = g.add_pass("image_dump_restore");
         for &(name, res) in sources {
             let seed = g.res_seed(res);
-            if names & (1 << name as u8) != 0
-                && layouts[name as usize] == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-                && g.res_seeded(res)
-                && seed.layout != VK_IMAGE_LAYOUT_UNDEFINED
-            {
+            if names & (1 << name as u8) != 0 && dump_copy_layout(seed.layout).1 {
                 let stages = seed_stages(seed);
                 // The lowest stage the seed names (a stage INSIDE it); FRAGMENT when it names none.
                 let stage = if stages == 0 { VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT } else { stages.isolate_lowest_one() };
@@ -1219,6 +1491,11 @@ fn gbuffer_sink(
         // no pass names either ResId when `atrous_levels == 0`).
         slot!("ssao_ring_a", Ring, targets.ssao_ring_a.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
         slot!("ssao_ring_b", Ring, targets.ssao_ring_b.as_ref().map_or(VkImage::NULL, |r| r[fi].image)),
+        // Render wave PX1a: the post seam's two singles, appended LAST — one image both frames in
+        // flight share (ordered by their seeds). `lit_native` is `NULL` off SSAA (inert: no pass
+        // names its ResId then).
+        slot!("display", Single, targets.display.image),
+        slot!("lit_native", Single, targets.lit_native.as_ref().map_or(VkImage::NULL, |t| t.image)),
     ]);
     #[cfg(not(feature = "hwrt"))]
     let fixed = [
@@ -1293,6 +1570,8 @@ fn forward_sink(
         // Render wave RD1: the `gViewT` lane the VIEWT marcher writes and the SDF depth merge reads
         // — the core per-FIF ring every path allocates (`sdf_forward_set` binds it at @13).
         slot!("viewt", Ring, targets.viewt[fi].image),
+        // Render wave PX1a: `display`, LAST.
+        slot!("display", Single, targets.display.image),
     ]);
     let mut buffers = SinkFill::new(VkBuffer::NULL);
     buffers.push_all(&[
@@ -1393,6 +1672,10 @@ fn vb_sink(
         // allocated on a VB boot (`VbTargets::sdf_term`); with SV0 disarmed no pass names
         // its ResId, so the live handle is as inert as a NULL would be.
         slot!("sdf_term", Ring, vb.sdf_term[fi].image),
+        // Render wave PX1a: the post seam's two singles, LAST in both arms (the Deferred sink's
+        // own entries).
+        slot!("display", Single, targets.display.image),
+        slot!("lit_native", Single, targets.lit_native.as_ref().map_or(VkImage::NULL, |t| t.image)),
     ]);
     // Particles P0: the ten-buffer particle tail is appended by `vb_sink_buffers`, which
     // takes the unconditional prefix below and returns the full-length array. Every VB
@@ -1486,13 +1769,13 @@ fn vb_sink(
 const _: () = {
     #[cfg(feature = "hwrt")]
     assert!(
-        FRAMEGRAPH_IMAGE_COUNT == 22,
-        "hwrt: 11 base + pbr (textured-PBR T6a) + shadow_vis + shadow_vis2 + motion_vec + shadow_temporal_hist + temporal_out + shadow_temporal_hist_read + taa_hist + taa_hist_read + ssao_ring_a + ssao_ring_b"
+        FRAMEGRAPH_IMAGE_COUNT == 24,
+        "hwrt: 11 base + pbr (textured-PBR T6a) + shadow_vis + shadow_vis2 + motion_vec + shadow_temporal_hist + temporal_out + shadow_temporal_hist_read + taa_hist + taa_hist_read + ssao_ring_a + ssao_ring_b + display + lit_native"
     );
     #[cfg(not(feature = "hwrt"))]
     assert!(
-        FRAMEGRAPH_IMAGE_COUNT == 16,
-        "not(hwrt): the 11 base images + pbr (textured-PBR T6a) + taa_hist + taa_hist_read + ssao_ring_a + ssao_ring_b, no shadow-vis targets"
+        FRAMEGRAPH_IMAGE_COUNT == 18,
+        "not(hwrt): the 11 base images + pbr (textured-PBR T6a) + taa_hist + taa_hist_read + ssao_ring_a + ssao_ring_b + display + lit_native, no shadow-vis targets"
     );
 };
 
@@ -1695,7 +1978,7 @@ pub(crate) struct ForwardBarrierSink<'a> {
 /// [`ForwardBarrierSink::images`]'s doc for the fixed order. A PRIVATE, per-frame ResId space
 /// (Forward's `self.frame_graph` is fully `reset()` + re-declared every frame, so this constant
 /// has no relationship to [`FRAMEGRAPH_IMAGE_COUNT`] and never grows it).
-const FORWARD_IMAGE_COUNT: usize = 5;
+const FORWARD_IMAGE_COUNT: usize = 6;
 
 /// The length of [`ForwardBarrierSink::buffers`] — the five unconditional Forward buffers plus
 /// the [`PARTICLE_BUFFER_COUNT`] particle tail and the [`MATERIAL_TAIL_BUFFER_COUNT`] material
@@ -1842,22 +2125,27 @@ impl Renderer<'_> {
     /// resolver's `RenderPath` enum (`boyko_render::render_path_config::RenderPath` — a crate
     /// this one sits BELOW in the dependency graph, hence the plain-text reference rather than
     /// an intra-doc link) now reaches a real declarator.
-    pub(crate) fn declare_frame_graph(&mut self, scene: &GBufferScene<'_>) {
+    ///
+    /// `taa_history_built` is `GBufferTargets::taa_history_built` of the targets this frame
+    /// records into: with `scene` it derives the frame's [`PostSeamArms`] once, so a degraded TAA
+    /// history (review r1 W1) declares the TAA-off frame on every declarator.
+    pub(crate) fn declare_frame_graph(&mut self, scene: &GBufferScene<'_>, taa_history_built: bool) {
         // Render wave PX0 (D-Z4): the CPU zone over the whole declaration. `Dev` tier, so a
         // shipped build folds the site away; otherwise one `Acquire` load while unarmed.
         let _zone = boyko_diag::zone!(RENDER_DECLARE_FRAME_GRAPH);
+        let arms = PostSeamArms::from_scene(scene, taa_history_built);
         match scene.resolved_render_path.path {
             // RenderPath::Deferred == 0 (render_path_config.rs) — the only rung-landed path.
-            0 => self.declare_deferred_graph(scene),
+            0 => self.declare_deferred_graph(scene, arms),
             // RenderPath::Forward == 1 (rung R4b-b) / RenderPath::ForwardPlus == 2 (rung R5) —
             // ONE shared declarator (Decision 2); `declare_forward_graph` internally branches on
             // `GBufferScene::path_needs_depth_prepass`/`path_is_forward_plus` where the two paths
             // diverge (the depth prepass + EQUAL-depth + froxel-Set0 growth).
-            1 | 2 => self.declare_forward_graph(scene),
+            1 | 2 => self.declare_forward_graph(scene, arms),
             // RenderPath::VisibilityBuffer == 3 (rung R8): the FUSED v1 declarator
             // (`mesh_geo_shade_split == false` — SSAO/DDGI/shadow-denoise/TAA all structurally
             // capped off this rung, `cap_vb_v1_consumers`).
-            3 => self.declare_vb_graph(scene),
+            3 => self.declare_vb_graph(scene, arms),
             other => unreachable!(
                 "invariant: ResolvedRenderPathGpu::path is a RenderPath discriminant in 0..=3, got {other}"
             ),
@@ -1889,8 +2177,9 @@ impl Renderer<'_> {
     /// `raster`/`marcher` passes are now `Option`-gated on
     /// [`GBufferScene::path_has_raster`]/[`GBufferScene::path_has_marcher`] (O1 single
     /// predicate) — every OTHER declaration in this fn is byte-for-byte unchanged from the
-    /// pre-R2 `declare_gbuffer_graph`.
-    pub(crate) fn declare_deferred_graph(&mut self, scene: &GBufferScene<'_>) {
+    /// pre-R2 `declare_gbuffer_graph`. `arms` is the frame's [`PostSeamArms`] (TAA LIVE, not
+    /// requested), derived once by [`Self::declare_frame_graph`].
+    pub(crate) fn declare_deferred_graph(&mut self, scene: &GBufferScene<'_>, arms: PostSeamArms) {
         use crate::framegraph::{ResSync, SubRange};
 
         // The (EARLY|LATE)_FRAGMENT_TESTS stage pair the depth-write barriers use.
@@ -1945,6 +2234,9 @@ impl Renderer<'_> {
              (scene-assembly gate missed)"
         );
 
+        // Render wave PX1a (test 12): the TEST-ONLY NaN injection frame — `false` on every shipped
+        // run (`nan_inject_at` is `None` unless the `inject_nan_lit` key armed it at boot).
+        let nan_inject_now = self.nan_inject_at == Some(scene.engine_frame_index);
         let g = &mut self.frame_graph;
         g.reset();
 
@@ -2136,6 +2428,10 @@ impl Renderer<'_> {
         // barriers on them ⇒ inert, byte-identical.
         let ssao_ring_a = g.add_image("ssao_ring_a");
         let ssao_ring_b = g.add_image("ssao_ring_b");
+        // Render wave PX1a (D-G1): the post seam's two singles, appended LAST (every earlier ResId
+        // unchanged; the buffers begin at the new `FRAMEGRAPH_IMAGE_COUNT`).
+        let display = declare_display(g, self.obs_dump_widen);
+        let lit_native = declare_lit_native(g, self.obs_dump_widen);
         // --- Buffers (ResId FRAMEGRAPH_IMAGE_COUNT..+4) — ALL single instances shared by both in-flight
         // frames (audit B-002). light_table/tiles/grid/index end their frame consumed
         // by a COMPUTE read (resolve / marcher), so a dirty-frame re-write must order
@@ -3150,6 +3446,9 @@ impl Renderer<'_> {
         // `SHADER_READ_ONLY_OPTIMAL` (three pre-lit consumers read it), so this attachment-read
         // derives a real LAYOUT TRANSITION — the one path of the four where it does (D7). On an
         // RD1 merge frame the merge took that transition and this read derives a RAW barrier.
+        // Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY NaN injection — after every `lit`
+        // producer (and the depth merge), before the transparent slot; one frame, armed runs only.
+        let test_nan_inject = nan_inject_now.then(|| declare_test_nan_inject(g, lit));
         if let Some(ids) = particle_res {
             particle_plan.draw = Some(declare_particle_draw(
                 g,
@@ -3170,60 +3469,23 @@ impl Renderer<'_> {
         // not graphics" doc). Reads `lit` (this frame's shaded color) + `viewt` (the depth proxy
         // the MV reconstruction needs) + `taa_hist_read` (the cross-frame history sibling, C1-fix
         // shape — see the `taa_hist`/`taa_hist_read` declaration above); writes `taa_hist` (this
-        // frame's history slot). Gated on `scene.taa.is_some()` — `None` (OFF/FXAA/SMAA/SSAA)
-        // declares no pass ⇒ the graph routes ZERO barriers on `taa_hist`/`taa_hist_read` ⇒
-        // byte-identical (the same "declared ahead of its first consumer" discipline
-        // `shadow_vis`/`motion_vec` used between their ResId declaration rung and their first
-        // consuming pass). `aa_out`'s own barriers are hand-recorded in `record_taa` (it is not a
-        // framegraph-tracked resource — see [`FRAMEGRAPH_IMAGE_COUNT`]'s doc).
-        let taa_resolve_pass = scene.taa.is_some().then(|| {
-            let taa_resolve = g.add_pass("taa_resolve");
-            // C2 fix: `lit` @0 is bound as a COMBINED_IMAGE_SAMPLER, whose descriptor records
-            // SHADER_READ_ONLY_OPTIMAL (rhi_impl/device.rs) — the graph MUST leave `lit` in THAT
-            // layout at the dispatch, not GENERAL (a recorded-vs-actual layout divergence is
-            // spec-UB / a validation error). The deferred resolve wrote `lit` in GENERAL, so this
-            // read derives the GENERAL->SHADER_READ_ONLY transition BEFORE the taa_resolve dispatch;
-            // `present_sample`'s later `lit`->SHADER_READ read then finds it already in layout and
-            // derives no barrier (matching FXAA/SMAA/SSAA, which read `lit` at SHADER_READ_ONLY).
-            g.image_access(
-                lit,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                SubRange::COLOR,
-            );
-            // `viewt` (gViewT r32f) + `taa_hist_read` (gHistIn rgba16f) are bound as STORAGE images
-            // (RWTexture2D), read in GENERAL — unchanged.
-            for &c in &[viewt, taa_hist_read] {
-                g.image_access(
-                    c,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_ACCESS_SHADER_READ_BIT,
-                    VK_IMAGE_LAYOUT_GENERAL,
-                    SubRange::COLOR,
-                );
-            }
-            g.image_access(
-                taa_hist,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_WRITE_BIT,
-                VK_IMAGE_LAYOUT_GENERAL,
-                SubRange::COLOR,
-            );
-            taa_resolve
-        });
+        // frame's history slot). Gated on TAA LIVE (`arms.taa`, review r1 W1: the scene's request
+        // AND a built history) — `None` (OFF/FXAA/SMAA/SSAA, or a degraded history) declares no
+        // pass ⇒ the graph routes ZERO barriers on `taa_hist`/`taa_hist_read` ⇒ byte-identical
+        // (the same "declared ahead of its first consumer" discipline `shadow_vis`/`motion_vec`
+        // used between their ResId declaration rung and their first consuming pass). The access
+        // list (the C2 fix's `lit` read at SHADER_READ_ONLY_OPTIMAL among it) is
+        // `declare_taa_resolve`'s, shared with the VB declarator. Since render wave PX1a the
+        // resolve writes only `taa_hist`, which `post_final` reads as the scene input
+        // (`declare_post_seam`).
+        let taa_resolve_pass = declare_taa_resolve(g, arms, lit, viewt, taa_hist_read, taa_hist);
 
-        // Pass `present_sample` (site 5c): lit GENERAL→SHADER_READ_ONLY for the
-        // present-blit's FRAGMENT sample. The swapchain WSI barriers (sites 7/9) stay
-        // hand-recorded, so the swapchain image is NOT a graph resource here.
-        let present_sample = g.add_pass("present_sample");
-        g.image_access(
-            lit,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            VK_ACCESS_SHADER_READ_BIT,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            SubRange::COLOR,
-        );
+        // Render wave PX1a: the post seam, then pass `present_sample` (site 5c) — `display`
+        // GENERAL→SHADER_READ_ONLY for the present-blit's FRAGMENT sample. The swapchain WSI
+        // barriers (sites 7/9) stay hand-recorded, so the swapchain image is NOT a graph
+        // resource here.
+        let (post, present_sample) =
+            declare_post_seam(g, arms, lit, Some(taa_hist), display, Some(lit_native));
 
         // OBS (D, H0 Scope 6): the `image_dump` pass, LAST — on a `BOYKO_IMAGE_DUMP` request
         // frame only (`None` on every other frame of every run: no pass, no barrier).
@@ -3236,6 +3498,8 @@ impl Renderer<'_> {
                     (super::frame_driver::ImageDumpName::Viewt, viewt),
                     (super::frame_driver::ImageDumpName::Lit, lit),
                     (super::frame_driver::ImageDumpName::TaaHist, taa_hist),
+                    (super::frame_driver::ImageDumpName::Display, display.id()),
+                    (super::frame_driver::ImageDumpName::LitNative, lit_native.id()),
                 ],
             ),
             None => None,
@@ -3294,7 +3558,9 @@ impl Renderer<'_> {
             resolve,
             taa_resolve: taa_resolve_pass,
             present_sample,
+            post,
             sdf_depth_merge,
+            test_nan_inject,
             particle: particle_plan,
             image_dump,
         });
@@ -3323,13 +3589,16 @@ impl Renderer<'_> {
     /// need to precede `forward_opaque`, the shared reader); it is declared FIRST among the three
     /// here, mirroring the Deferred declarator's own placement (`raster → light_upload? → coarse?
     /// → marcher`).
-    pub(crate) fn declare_forward_graph(&mut self, scene: &GBufferScene<'_>) {
+    pub(crate) fn declare_forward_graph(&mut self, scene: &GBufferScene<'_>, arms: PostSeamArms) {
         use crate::framegraph::{ResSync, SubRange};
 
         const FRAG: u32 =
             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 
         self.gbuffer_pass_plan = None;
+        // Render wave PX1a (test 12): the TEST-ONLY NaN injection frame — `false` on every shipped
+        // run (`nan_inject_at` is `None` unless the `inject_nan_lit` key armed it at boot).
+        let nan_inject_now = self.nan_inject_at == Some(scene.engine_frame_index);
         let g = &mut self.frame_graph;
         g.reset();
 
@@ -3355,12 +3624,15 @@ impl Renderer<'_> {
         // the VIEWT marcher writes it (an armed boot's SDF leg), so an unarmed frame derives no
         // barrier on it.
         let viewt = g.add_image("viewt");
+        // Render wave PX1a (D-G1): `display`, appended LAST (Forward has no SSAA, so no
+        // `lit_native`).
+        let display = declare_display(g, self.obs_dump_widen);
         // Code-review P2-2: pins the declared image count against `FORWARD_IMAGE_COUNT`
         // (`ForwardBarrierSink`'s doc) — a silent divergence here would offset every buffer ResId
         // (`res.index() - FORWARD_IMAGE_COUNT` in `ForwardBarrierSink::buffer_barriers`) without
         // any other compile-time signal.
         debug_assert_eq!(
-            viewt.index() + 1,
+            display.id().index() + 1,
             FORWARD_IMAGE_COUNT,
             "invariant: declare_forward_graph's image declarations must match FORWARD_IMAGE_COUNT"
         );
@@ -3768,6 +4040,9 @@ impl Renderer<'_> {
         // an AVAILABILITY barrier is derived (no layout change); under `ForwardPlus` the froxel
         // opaque pass already declared exactly this stage/access/layout, so NOTHING is derived —
         // the one free path of the four (on an RD1 merge frame the merge's write makes it a RAW).
+        // Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY NaN injection — after every `lit`
+        // producer (and the depth merge), before the transparent slot; one frame, armed runs only.
+        let test_nan_inject = nan_inject_now.then(|| declare_test_nan_inject(g, lit));
         if let Some(ids) = particle_res {
             particle_plan.draw = Some(declare_particle_draw(
                 g,
@@ -3778,14 +4053,9 @@ impl Renderer<'_> {
             ));
         }
 
-        let present_sample = g.add_pass("present_sample");
-        g.image_access(
-            lit,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            VK_ACCESS_SHADER_READ_BIT,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            SubRange::COLOR,
-        );
+        // Render wave PX1a: the post seam (`post_final` only — Forward arms no AA) and
+        // `present_sample` (`display` for the blit).
+        let (post, present_sample) = declare_post_seam(g, arms, lit, None, display, None);
 
         // OBS (D, H0 Scope 6): the `image_dump` pass, LAST — on a `BOYKO_IMAGE_DUMP` request
         // frame only (`None` on every other frame of every run: no pass, no barrier).
@@ -3796,6 +4066,7 @@ impl Renderer<'_> {
                 &[
                     (super::frame_driver::ImageDumpName::ForwardDepth, forward_depth),
                     (super::frame_driver::ImageDumpName::Lit, lit),
+                    (super::frame_driver::ImageDumpName::Display, display.id()),
                 ],
             ),
             None => None,
@@ -3837,7 +4108,9 @@ impl Renderer<'_> {
             forward_opaque,
             sdf_forward_march,
             present_sample,
+            post,
             sdf_depth_merge,
+            test_nan_inject,
             particle: particle_plan,
             image_dump,
         });
@@ -4317,6 +4590,8 @@ pub(crate) struct VbPassPlan {
     /// `sdf_forward_march` when it ran, else `vb_sky`). The swapchain WSI barriers stay
     /// hand-recorded, exactly like [`ForwardPassPlan::present_sample`].
     pub(crate) present_sample: crate::framegraph::PassId,
+    /// Render wave PX1a: the post seam, declared before `present_sample`.
+    pub(crate) post: PostSeamPlan,
     /// TAA-under-VB: the `vb_viewt` `gViewT`-producer compute pass
     /// (`viewt_from_depth_rz.comp.hlsl`) — reads `vb_depth` (COMPUTE/SHADER_READ_ONLY, the
     /// raster barrier-out), first-touch writes `viewt` (UNDEFINED→GENERAL). `Some` iff
@@ -4325,12 +4600,17 @@ pub(crate) struct VbPassPlan {
     pub(crate) viewt_from_depth: Option<crate::framegraph::PassId>,
     /// TAA-under-VB: the TAA history-resolve compute pass — the VB sibling of
     /// [`GbufferPassPlan::taa_resolve`], identical access list (`lit` CIS SHADER_READ_ONLY +
-    /// `viewt`/`taa_hist_read` GENERAL reads + `taa_hist` GENERAL write; `aa_out`/`taa_resolved`
-    /// hand-recorded in `record_taa`/`record_rcas`). `Some` iff `scene.taa.is_some()`.
+    /// `viewt`/`taa_hist_read` GENERAL reads + `taa_hist` GENERAL write; since render wave PX1a
+    /// `post_final` reads `taa_hist`). `Some` iff TAA is live ([`PostSeamArms::taa`]); `record_vb`
+    /// keys its TAA block on this member.
     pub(crate) taa_resolve: Option<crate::framegraph::PassId>,
     /// Render wave RD1 (defect R0b): the SDF depth merge, declared IMMEDIATELY before
     /// `particle_draw` — `Some` iff [`GBufferScene::sdf_depth_merge`] is not `Absent`.
     pub(crate) sdf_depth_merge: Option<crate::framegraph::PassId>,
+    /// Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY `test_nan_inject` pass, declared after
+    /// the last `lit` producer (and the SDF depth merge) and before `particle_draw` — `Some` only on
+    /// the engine frame `Renderer::arm_nan_inject` named (never on a shipped run).
+    pub(crate) test_nan_inject: Option<crate::framegraph::PassId>,
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame.
     pub(crate) particle: ParticlePassPlan,
     /// OBS (D): the `image_dump` pass — declared LAST, on a `BOYKO_IMAGE_DUMP` request frame only
@@ -4446,12 +4726,15 @@ const VB_BUFFER_COUNT: usize = 17 + PARTICLE_BUFFER_COUNT + MATERIAL_TAIL_BUFFER
 ///
 /// VG R3 piece 1 step P1-5 appends the HZB depth pyramid LAST in BOTH `cfg` arms — ResId 20
 /// under `hwrt`, ResId 14 without it — so every existing ResId is byte-unchanged.
+///
+/// Render wave PX1a appends `display` + `lit_native` LAST in both arms (ResId 22/23 under `hwrt`,
+/// 16/17 without).
 #[cfg(feature = "hwrt")]
-const VB_IMAGE_COUNT: usize = 22;
+const VB_IMAGE_COUNT: usize = 24;
 /// See the `hwrt` variant's doc: a `not(hwrt)` build keeps the count at 14 + the pyramid +
-/// the VB-SV0 term = 16.
+/// the VB-SV0 term + PX1a's `display` / `lit_native` = 18.
 #[cfg(not(feature = "hwrt"))]
-const VB_IMAGE_COUNT: usize = 16;
+const VB_IMAGE_COUNT: usize = 18;
 
 /// VG R3 piece 1 step P1-5: the HZB build passes' framegraph names, indexed by pass number.
 /// [`FrameGraph::add_pass`](crate::framegraph::FrameGraph::add_pass) takes a `&'static str`, so a
@@ -4791,7 +5074,7 @@ impl Renderer<'_> {
     /// asserts below is preserved (the dump is declared last in the whole graph). The reorder lands
     /// in the one step where it is provably neutral — while the late scope still draws nothing —
     /// rather than in the step that arms a decision.
-    pub(crate) fn declare_vb_graph(&mut self, scene: &GBufferScene<'_>) {
+    pub(crate) fn declare_vb_graph(&mut self, scene: &GBufferScene<'_>, arms: PostSeamArms) {
         use crate::framegraph::{ResSync, SubRange};
 
         const FRAG: u32 =
@@ -4799,6 +5082,9 @@ impl Renderer<'_> {
 
         self.gbuffer_pass_plan = None;
         self.forward_pass_plan = None;
+        // Render wave PX1a (test 12): the TEST-ONLY NaN injection frame — `false` on every shipped
+        // run (`nan_inject_at` is `None` unless the `inject_nan_lit` key armed it at boot).
+        let nan_inject_now = self.nan_inject_at == Some(scene.engine_frame_index);
         let g = &mut self.frame_graph;
         g.reset();
 
@@ -5024,14 +5310,17 @@ impl Renderer<'_> {
         // discard seed texels it fully overwrites; disarmed frames name no ResId and route zero
         // barriers, which is what keeps every pin byte-identical by construction).
         let sdf_term = g.add_image("sdf_term");
-        // ONE assert rather than the two `cfg`-split ones this step replaced: the TERM is the
-        // last image in BOTH arms (the pyramid was, until DP3b appended one more), so the former
-        // per-image invariants collapse into this single statement.
+        // Render wave PX1a (D-G1): the post seam's two singles, appended LAST in both arms.
+        let display = declare_display(g, self.obs_dump_widen);
+        let lit_native = declare_lit_native(g, self.obs_dump_widen);
+        // ONE assert rather than the two `cfg`-split ones DP3b replaced: `lit_native` is the last
+        // image in BOTH arms, so the per-image invariants collapse into this single statement.
         debug_assert_eq!(
-            sdf_term.index() + 1,
+            lit_native.id().index() + 1,
             VB_IMAGE_COUNT,
             "invariant: declare_vb_graph's image declarations must match VB_IMAGE_COUNT"
         );
+        debug_assert_eq!(sdf_term.index() + 3, VB_IMAGE_COUNT, "invariant: sdf_term precedes the post seam's two");
 
         // --- Buffers (light_table=0, vb_instance_ring=1, gclassify=2). `light_table`'s seed
         // stage is COMPUTE for the SAME P1-1 reason as `cascade`/`atlas` above (`vb_resolve` is
@@ -6905,17 +7194,17 @@ impl Renderer<'_> {
             p
         });
 
-        // Pass `taa_resolve` (TAA-under-VB) — gated `scene.taa.is_some()`, declared AFTER every
-        // `lit` producer and BEFORE `present_sample` (the resolve must see this frame's final
-        // shaded color; `record_vb` records it in this exact order). The access list copies the
-        // DEFERRED declarator's own `taa_resolve` pass verbatim: `lit` @0 is a
+        // Pass `taa_resolve` (TAA-under-VB) — gated on TAA LIVE (`arms.taa`, review r1 W1),
+        // declared AFTER every `lit` producer and BEFORE `present_sample` (the resolve must see
+        // this frame's final shaded color; `record_vb` records it in this exact order). The access
+        // list is the DEFERRED declarator's own (`declare_taa_resolve`, shared): `lit` @0 is a
         // COMBINED_IMAGE_SAMPLER (descriptor records SHADER_READ_ONLY_OPTIMAL — the C2 fix), so
         // this read derives the GENERAL→SHADER_READ_ONLY transition out of `vb_resolve`/
         // `vb_shade`/`sdf_forward_march`'s GENERAL write (or COLOR_ATTACHMENT→… out of a
         // sky-only frame) and `present_sample`'s later read finds `lit` already in layout;
         // `viewt`/`taa_hist_read` are STORAGE reads in GENERAL; `taa_hist` is the STORAGE write.
-        // `aa_out`/`taa_resolved` stay hand-recorded inside `record_taa`/`record_rcas` (not
-        // framegraph-tracked — the deferred precedent).
+        // Since render wave PX1a the resolve writes only `taa_hist`, which `post_final` reads
+        // (`declare_post_seam`).
         // Rung R9b revision of the Track-A TAA XOR: the strict XOR is KEPT VERBATIM for every
         // `!ssao` configuration (preserving the shipped VB TAA pins' exact producer schedule);
         // with the split's SSAO armed it degrades to "at least one producer, and on an
@@ -6953,6 +7242,9 @@ impl Renderer<'_> {
         // barrier with no layout change — the Forward arm of D7's table, not Deferred's transition.
         // On VB x Sdf the RD1 merge above is `vb_depth`'s first writer (before RD1 this read took
         // the unwritten-transient assert in a dev build).
+        // Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY NaN injection — after every `lit`
+        // producer (and the depth merge), before the transparent slot; one frame, armed runs only.
+        let test_nan_inject = nan_inject_now.then(|| declare_test_nan_inject(g, lit));
         if let Some(ids) = particle_res {
             particle_plan.draw = Some(declare_particle_draw(
                 g,
@@ -6963,46 +7255,13 @@ impl Renderer<'_> {
             ));
         }
 
-        let taa_resolve_pass = scene.taa.is_some().then(|| {
-            let p = g.add_pass("taa_resolve");
-            g.image_access(
-                lit,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                SubRange::COLOR,
-            );
-            for &c in &[viewt, taa_hist_read] {
-                g.image_access(
-                    c,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_ACCESS_SHADER_READ_BIT,
-                    VK_IMAGE_LAYOUT_GENERAL,
-                    SubRange::COLOR,
-                );
-            }
-            g.image_access(
-                taa_hist,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_WRITE_BIT,
-                VK_IMAGE_LAYOUT_GENERAL,
-                SubRange::COLOR,
-            );
-            p
-        });
+        let taa_resolve_pass = declare_taa_resolve(g, arms, lit, viewt, taa_hist_read, taa_hist);
 
-        // Pass `present_sample`: `lit` → SHADER_READ_ONLY_OPTIMAL for the present-blit's FRAGMENT
-        // sample (C5, derived from the LAST `lit` producer; with TAA armed the `taa_resolve` read
-        // above already left `lit` in SHADER_READ_ONLY, so this derives no further barrier — the
-        // deferred precedent). The swapchain WSI barriers stay hand-recorded.
-        let present_sample = g.add_pass("present_sample");
-        g.image_access(
-            lit,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            VK_ACCESS_SHADER_READ_BIT,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            SubRange::COLOR,
-        );
+        // Render wave PX1a: the post seam, then pass `present_sample` (`display` →
+        // SHADER_READ_ONLY_OPTIMAL for the present-blit's FRAGMENT sample). The swapchain WSI
+        // barriers stay hand-recorded.
+        let (post, present_sample) =
+            declare_post_seam(g, arms, lit, Some(taa_hist), display, Some(lit_native));
 
         // ==== VG R3 piece 1 step P1-6 (plan §5, gate G8): the pyramid DUMP copy. ====
         //
@@ -7259,6 +7518,8 @@ impl Renderer<'_> {
                     (super::frame_driver::ImageDumpName::Viewt, viewt),
                     (super::frame_driver::ImageDumpName::Lit, lit),
                     (super::frame_driver::ImageDumpName::TaaHist, taa_hist),
+                    (super::frame_driver::ImageDumpName::Display, display.id()),
+                    (super::frame_driver::ImageDumpName::LitNative, lit_native.id()),
                 ],
             ),
             None => None,
@@ -7337,7 +7598,9 @@ impl Renderer<'_> {
             viewt_from_depth: vb_viewt_pre.or(vb_viewt),
             taa_resolve: taa_resolve_pass,
             present_sample,
+            post,
             sdf_depth_merge,
+            test_nan_inject,
             particle: particle_plan,
             image_dump,
         });
@@ -7547,4 +7810,255 @@ fn vb_sink_buffers(
         buffers.push_all(&[slot!("material_table", Single, scene.material_table.buffer)]);
     }
     buffers
+}
+
+// Ruling 72 (2), U1: the image dump over the two FrameLocal images seeded at a layout. `display`
+// (seeded at `SHADER_READ_ONLY_OPTIMAL`) and `lit_native` (seeded at `GENERAL`) carry a seed
+// layout without the CrossFrame provenance bit, and the seeded-layout invariant
+// (`framegraph::seeded::seeded_layout_violation`) checks every image with a seed layout, whatever
+// that bit says. Each test drives the production declarations (`declare_display`,
+// `declare_lit_native`, `taa_hist`'s Deferred seed) and the production dump declarator over the
+// seam's accesses: one dumped seeded name per test first, because the invariant reports only the
+// FIRST violation (in `ResId` order, so `display` would mask `lit_native`), then every class
+// together.
+#[cfg(test)]
+mod tests {
+    use crate::ffi::{
+        VkBuffer, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+    };
+    use crate::framegraph::seeded::seeded_layout_violation;
+    use crate::framegraph::{FrameGraph, PassId, ResId, ResSync, SubRange};
+
+    use super::super::frame_driver::{ImageDumpName, ImageDumpRequest, IMAGE_DUMP_MAX};
+    use super::{
+        declare_display, declare_image_dump, declare_lit_native, declare_post_seam, declare_taa_resolve,
+        ImageDumpPlan, PostSeamArms, PostSeamPlan,
+    };
+
+    const COMPUTE: u32 = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    const FRAGMENT: u32 = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    const SRO: i32 = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    /// The scene input the seam's `post_final` reads.
+    #[derive(Clone, Copy)]
+    enum Input {
+        /// `taa_hist`, the resolve's `[fi]` write slot.
+        Taa,
+        /// `lit_native`, the SSAA downsample's output.
+        Ssaa,
+    }
+
+    /// One compiled request frame and its dump plan.
+    struct Frame {
+        g: FrameGraph,
+        lit: ResId,
+        taa_hist: ResId,
+        display: ResId,
+        lit_native: ResId,
+        plan: ImageDumpPlan,
+    }
+
+    /// A request naming `names` (a non-null staging handle each; the declarator reads only that).
+    fn request(names: &[ImageDumpName]) -> ImageDumpRequest {
+        let mut r = ImageDumpRequest { staging: [VkBuffer::NULL; IMAGE_DUMP_MAX], capacity: [0; IMAGE_DUMP_MAX] };
+        for &n in names {
+            r.staging[n as usize] = VkBuffer(1 + n as u64);
+            r.capacity[n as usize] = 1;
+        }
+        r
+    }
+
+    /// One frame of `declare_post_seam`'s shape, dump-widened as every dump-armed renderer
+    /// declares it: `lit` (a per-FIF ring slot, unseeded) drawn; under TAA the resolve writes
+    /// `taa_hist` (CrossFrame, `GENERAL`) and `post_final` reads it, under SSAA the downsample
+    /// initialises `lit_native` and `post_final` reads it; `post_final` initialises `display` and
+    /// `present_sample` reads it at `SHADER_READ_ONLY`. Then the production dump of `names`, and
+    /// `compile` (whose debug build fires the seeded-layout invariant).
+    fn dump_frame(input: Input, names: &[ImageDumpName]) -> Frame {
+        let mut g = FrameGraph::with_capacity(8, 8, 32);
+        let lit = g.add_image("lit");
+        let taa_hist = g.add_image_seeded(
+            "taa_hist",
+            ResSync::seeded_readers_at_layout(VK_IMAGE_LAYOUT_GENERAL, COMPUTE, VK_ACCESS_SHADER_READ_BIT),
+        );
+        let display = declare_display(&mut g, true);
+        let lit_native = declare_lit_native(&mut g, true);
+        g.add_pass("draw");
+        g.image_access(
+            lit,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            SubRange::COLOR,
+        );
+        match input {
+            Input::Taa => {
+                g.add_pass("taa_resolve");
+                g.image_access(lit, COMPUTE, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
+                g.image_access(taa_hist, COMPUTE, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
+                g.add_pass("post_final");
+                g.image_access(taa_hist, COMPUTE, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
+            }
+            Input::Ssaa => {
+                g.add_pass("ssaa_downsample");
+                g.image_access(lit, FRAGMENT, VK_ACCESS_SHADER_READ_BIT, SRO, SubRange::COLOR);
+                lit_native.init_attachment(
+                    &mut g,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    SubRange::COLOR,
+                );
+                g.add_pass("post_final");
+                lit_native.read(&mut g, COMPUTE, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
+            }
+        }
+        display.init_storage_full(&mut g, COMPUTE, SubRange::COLOR);
+        g.add_pass("present_sample");
+        display.read(&mut g, FRAGMENT, VK_ACCESS_SHADER_READ_BIT, SRO, SubRange::COLOR);
+        let plan = declare_image_dump(
+            &mut g,
+            &request(names),
+            &[
+                (ImageDumpName::Lit, lit),
+                (ImageDumpName::TaaHist, taa_hist),
+                (ImageDumpName::Display, display.id()),
+                (ImageDumpName::LitNative, lit_native.id()),
+            ],
+        )
+        .expect("invariant: every requested name is touched this frame");
+        g.compile();
+        Frame { g, lit, taa_hist, display: display.id(), lit_native: lit_native.id(), plan }
+    }
+
+    /// The restore pass's accesses as `(resource, layout)`, empty when no restore was declared.
+    fn restored(f: &Frame) -> Vec<(ResId, i32)> {
+        f.plan.restore.map_or_else(Vec::new, |p| f.g.pass_accesses(p).map(|a| (a.res, a.layout)).collect())
+    }
+
+    /// Checked directly as well as by `compile`, so a release-profile run (where `compile`'s
+    /// check is compiled out) still checks it.
+    fn assert_every_seed_layout_holds(f: &Frame) {
+        assert_eq!(seeded_layout_violation(&f.g), None, "an image with a seed layout ends the frame outside it");
+    }
+
+    #[test]
+    fn a_dumped_display_is_copied_at_transfer_src_then_restored_to_its_seed_layout() {
+        let f = dump_frame(Input::Taa, &[ImageDumpName::Display]);
+        assert_every_seed_layout_holds(&f);
+        assert_eq!(f.plan.layouts[ImageDumpName::Display as usize], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        assert_eq!(restored(&f), [(f.display, SRO)], "the restore reads display back at its seed layout");
+        assert_eq!(f.g.resolved_layout(f.display), SRO);
+    }
+
+    #[test]
+    fn a_dumped_lit_native_is_copied_at_its_general_seed_layout() {
+        let f = dump_frame(Input::Ssaa, &[ImageDumpName::LitNative]);
+        assert_every_seed_layout_holds(&f);
+        assert_eq!(f.plan.layouts[ImageDumpName::LitNative as usize], VK_IMAGE_LAYOUT_GENERAL);
+        assert!(f.plan.restore.is_none(), "a GENERAL-seeded image needs no restore");
+        assert_eq!(f.g.resolved_layout(f.lit_native), VK_IMAGE_LAYOUT_GENERAL);
+    }
+
+    #[test]
+    fn every_dump_class_together_keeps_every_seed_layout() {
+        let taa = dump_frame(Input::Taa, &[ImageDumpName::Lit, ImageDumpName::TaaHist, ImageDumpName::Display]);
+        assert_every_seed_layout_holds(&taa);
+        let l = taa.plan.layouts;
+        assert_eq!(l[ImageDumpName::Lit as usize], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, "an unseeded ring slot");
+        assert_eq!(l[ImageDumpName::TaaHist as usize], VK_IMAGE_LAYOUT_GENERAL, "a CrossFrame GENERAL seed");
+        assert_eq!(restored(&taa), [(taa.display, SRO)], "only display is restored");
+        assert_eq!(taa.g.resolved_layout(taa.taa_hist), VK_IMAGE_LAYOUT_GENERAL);
+        assert_eq!(taa.g.resolved_layout(taa.lit), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+        let ssaa = dump_frame(Input::Ssaa, &[ImageDumpName::Lit, ImageDumpName::Display, ImageDumpName::LitNative]);
+        assert_every_seed_layout_holds(&ssaa);
+        assert_eq!(ssaa.plan.layouts[ImageDumpName::LitNative as usize], VK_IMAGE_LAYOUT_GENERAL);
+        assert_eq!(restored(&ssaa), [(ssaa.display, SRO)], "only display is restored");
+        assert_eq!(ssaa.g.resolved_layout(ssaa.display), SRO);
+        assert_eq!(ssaa.g.resolved_layout(ssaa.lit_native), VK_IMAGE_LAYOUT_GENERAL);
+    }
+
+    /// One frame of the Deferred / VB declarators' TAA tail through the PRODUCTION
+    /// [`declare_taa_resolve`] and [`declare_post_seam`] under `arms`: `taa_hist` /
+    /// `taa_hist_read` declared with the declarators' own seeds, a compute producer writing `lit`
+    /// and `viewt`, then the resolve and the seam, compiled.
+    struct SeamFrame {
+        g: FrameGraph,
+        lit: ResId,
+        taa_hist: ResId,
+        taa_hist_read: ResId,
+        taa_resolve: Option<PassId>,
+        post: PostSeamPlan,
+    }
+
+    fn seam_frame(arms: PostSeamArms) -> SeamFrame {
+        let mut g = FrameGraph::with_capacity(8, 8, 32);
+        let viewt = g.add_image("viewt");
+        let lit = g.add_image("lit");
+        let taa_hist = g.add_image_seeded(
+            "taa_hist",
+            ResSync::seeded_readers_at_layout(VK_IMAGE_LAYOUT_GENERAL, COMPUTE, VK_ACCESS_SHADER_READ_BIT),
+        );
+        let taa_hist_read = g.add_image_seeded(
+            "taa_hist_read",
+            ResSync::seeded_writer_at_layout(VK_IMAGE_LAYOUT_GENERAL, COMPUTE, VK_ACCESS_SHADER_WRITE_BIT),
+        );
+        let display = declare_display(&mut g, false);
+        let lit_native = declare_lit_native(&mut g, false);
+        g.add_pass("resolve");
+        g.image_access(lit, COMPUTE, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
+        g.image_access(viewt, COMPUTE, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
+        let taa_resolve = declare_taa_resolve(&mut g, arms, lit, viewt, taa_hist_read, taa_hist);
+        let (post, _present_sample) = declare_post_seam(&mut g, arms, lit, Some(taa_hist), display, Some(lit_native));
+        g.compile();
+        SeamFrame { g, lit, taa_hist, taa_hist_read, taa_resolve, post }
+    }
+
+    /// The derived image barriers of the whole frame naming `res`.
+    fn barriers_on(f: &SeamFrame, res: ResId) -> usize {
+        f.g.img_barriers().iter().filter(|b| b.res == res).count()
+    }
+
+    /// Review r1 W1: the scene requests TAA but `GBufferTargets::create` degraded its history
+    /// (`taa_history_built() == false`), so the sink binds `taa_hist` / `taa_hist_read` to
+    /// `VkImage::NULL`. TAA must not be live: no pass may touch either image, so no derived
+    /// barrier can name the NULL slots, and `post_final` reads `lit` exactly as on a TAA-off frame.
+    #[test]
+    fn a_requested_taa_without_a_built_history_routes_no_barrier_to_its_null_slots() {
+        let arms = PostSeamArms::new(true, false, false, false);
+        assert!(!arms.taa, "TAA is live although its history was not built");
+        let f = seam_frame(arms);
+        assert!(f.taa_resolve.is_none(), "taa_resolve is declared without a built history");
+        assert_eq!(barriers_on(&f, f.taa_hist), 0, "a derived barrier names taa_hist, a NULL slot");
+        assert_eq!(barriers_on(&f, f.taa_hist_read), 0, "a derived barrier names taa_hist_read, a NULL slot");
+        for p in 0..f.g.pass_count() {
+            let p = PassId(p as u16);
+            assert!(
+                f.g.pass_accesses(p).all(|a| a.res != f.taa_hist && a.res != f.taa_hist_read),
+                "pass `{}` accesses the TAA history although it was not built",
+                f.g.pass_name(p)
+            );
+        }
+        let scene_in = f.g.pass_accesses(f.post.post_final).next().expect("invariant: post_final declares its scene input");
+        assert_eq!((scene_in.res, scene_in.layout), (f.lit, VK_IMAGE_LAYOUT_GENERAL), "post_final does not read lit");
+    }
+
+    /// The live arm of the same predicate (non-vacuity): with the history built, the resolve is
+    /// declared and `post_final`'s first access reads `taa_hist`, behind a derived barrier.
+    #[test]
+    fn a_requested_taa_with_a_built_history_reads_the_history() {
+        let arms = PostSeamArms::new(true, true, false, false);
+        assert!(arms.taa);
+        let f = seam_frame(arms);
+        assert!(f.taa_resolve.is_some(), "live TAA declares no taa_resolve");
+        let scene_in = f.g.pass_accesses(f.post.post_final).next().expect("invariant: post_final declares its scene input");
+        assert_eq!(scene_in.res, f.taa_hist, "post_final does not read taa_hist under live TAA");
+        assert!(barriers_on(&f, f.taa_hist) > 0, "no derived barrier orders the resolve's taa_hist write before post_final");
+        assert!(!PostSeamArms::new(false, true, false, false).taa, "TAA is live without the scene's request");
+    }
 }

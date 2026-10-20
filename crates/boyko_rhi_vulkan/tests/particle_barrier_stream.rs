@@ -1447,7 +1447,7 @@ fn particle_push_bytes_do_not_widen_the_shared_compute_range() {
     }
     // The DRAW's range is a GRAPHICS one — separate from the shared COMPUTE range entirely — and
     // is bounded only by the 128-byte device floor.
-    assert_eq!(PARTICLE_DRAW_PUSH_BYTES, 72, "float4x4 + uint + int");
+    assert_eq!(PARTICLE_DRAW_PUSH_BYTES, 76, "float4x4 + uint + int + float (PX1a's pre_exposure)");
     // A `const` block: both operands are compile-time constants, so this is a BUILD-time claim
     // that happens to be re-stated in a test body — clippy is right that a runtime `assert!` on
     // two constants proves nothing at runtime.
@@ -1674,4 +1674,75 @@ fn the_sort_push_bytes_do_not_widen_the_shared_compute_range() {
     // The bin buffer is the two halves and nothing else; the host sizes the allocation from this.
     assert_eq!(PARTICLE_SORT_BINS_WORDS, 2 * PARTICLE_SORT_BINS);
     assert_eq!(PARTICLE_SORT_BINS, PARTICLE_LOCAL_SIZE, "one bin per lane, in all three modules");
+}
+
+/// Render wave PX1a (orchestrator ruling 67 W1): the particle draw's push range covers EVERY stage
+/// whose module declares the push block. Since PX1a the FRAGMENT stage reads the block's
+/// `pre_exposure` word, so a VERTEX-only range would leave the FS's read undefined
+/// (`VUID-VkGraphicsPipelineCreateInfo-layout-07987`) — a spec violation the owner's driver
+/// tolerates and no pixel gate sees. Read from the committed SPIR-V itself: each module's entry
+/// point names its stage, and an `OpVariable` in the `PushConstant` storage class is the block.
+#[test]
+fn particle_draw_push_range_covers_every_stage_declaring_the_block() {
+    use boyko_rhi_vulkan::compute::{
+        PARTICLE_DRAW_PUSH_STAGES, particle_draw_dlin_fs_spirv, particle_draw_dlin_vs_spirv,
+        particle_draw_fs_spirv, particle_draw_vs_spirv,
+    };
+    let modules: [(&str, &[u32]); 4] = [
+        ("particle_draw.vs", particle_draw_vs_spirv()),
+        ("particle_draw.fs", particle_draw_fs_spirv()),
+        ("particle_draw_dlin.vs", particle_draw_dlin_vs_spirv()),
+        ("particle_draw_dlin.fs", particle_draw_dlin_fs_spirv()),
+    ];
+    let mut declaring = 0u32;
+    for (name, words) in modules {
+        let (stage_bit, has_block) = spirv_stage_and_push_block(words);
+        if has_block {
+            declaring |= stage_bit;
+            assert_ne!(
+                PARTICLE_DRAW_PUSH_STAGES & stage_bit,
+                0,
+                "{name} declares the push block but PARTICLE_DRAW_PUSH_STAGES ({PARTICLE_DRAW_PUSH_STAGES:#x}) \
+                 does not name its stage ({stage_bit:#x})"
+            );
+        }
+    }
+    // Anti-vacuity: both stages declare the block (the FS since PX1a's pre_exposure), so the check
+    // above ran against each stage bit.
+    assert_eq!(
+        declaring,
+        boyko_rhi_vulkan::ffi::VK_SHADER_STAGE_VERTEX_BIT | boyko_rhi_vulkan::ffi::VK_SHADER_STAGE_FRAGMENT_BIT,
+        "the particle_draw modules' push-block stages"
+    );
+}
+
+/// `(the Vulkan stage bit of the module's one entry point, whether it declares a PushConstant
+/// variable)`, from the raw word stream (header 5 words, then `(word count << 16) | opcode`).
+fn spirv_stage_and_push_block(words: &[u32]) -> (u32, bool) {
+    const OP_ENTRY_POINT: u32 = 15;
+    const OP_VARIABLE: u32 = 59;
+    const STORAGE_PUSH_CONSTANT: u32 = 9;
+    const MODEL_VERTEX: u32 = 0;
+    const MODEL_FRAGMENT: u32 = 4;
+    assert_eq!(words.first(), Some(&0x0723_0203), "not a SPIR-V module");
+    let (mut stage, mut block) = (None, false);
+    let mut i = 5;
+    while i < words.len() {
+        let (count, op) = ((words[i] >> 16) as usize, words[i] & 0xFFFF);
+        assert!(count > 0 && i + count <= words.len(), "malformed instruction at word {i}");
+        match op {
+            OP_ENTRY_POINT => {
+                let bit = match words[i + 1] {
+                    MODEL_VERTEX => boyko_rhi_vulkan::ffi::VK_SHADER_STAGE_VERTEX_BIT,
+                    MODEL_FRAGMENT => boyko_rhi_vulkan::ffi::VK_SHADER_STAGE_FRAGMENT_BIT,
+                    m => panic!("unexpected execution model {m}"),
+                };
+                assert!(stage.replace(bit).is_none(), "one entry point per module");
+            }
+            OP_VARIABLE if words[i + 3] == STORAGE_PUSH_CONSTANT => block = true,
+            _ => {}
+        }
+        i += count;
+    }
+    (stage.expect("an entry point"), block)
 }

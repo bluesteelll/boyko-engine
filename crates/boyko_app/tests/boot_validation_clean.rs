@@ -68,9 +68,8 @@
 //! * Synchronization hazards: sync validation is measured dead on this machine.
 //! * Configurations it does not boot: particles OUTSIDE the three RD1 workers (Forward x Sdf,
 //!   VisibilityBuffer x Sdf and Deferred x Both, each with one alpha emitter behind an SDF sphere),
-//!   `--features hwrt`, SSAA, SSAO, and every TAA arm
-//!   but the one `deferred_taa` boots (Deferred, default `TaaConfig`): RCAS sharpening and TAA on
-//!   the VisibilityBuffer path are not booted.
+//!   `--features hwrt`, SSAO, SSAA on VisibilityBuffer, and every TAA arm but the three render wave
+//!   PX1a added beside `deferred_taa` (D-V1: `vb_taa`, `deferred_ssaa` at 2×, `deferred_taa_cas`).
 //! * That `deferred_taa` booted a TAA HISTORY. Its degrade witness is `JitterState.armed`, and
 //!   `taa_hist` degrades silently: if allocating it (or its boot clear) fails after TAA is armed,
 //!   the targets drop to no history (`build_and_clear_taa_hist` returns `None`) while
@@ -99,8 +98,8 @@ use boyko_render::{
     AaConfig, AaMode, BindlessTextureTable, ClusterConfig, EmitterActive, GeometryLegs, JitterState,
     LightingConfig, Material, MaterialGpu, MeshAssetsVbExt, MeshGeometryTableSlot,
     PARTICLE_BLEND_ALPHA, PARTICLE_SHAPE_CONE, ParticleConfig, ParticleEffect, ParticleEffectHandle,
-    ParticleEffectsExt, ParticleEmitter, ParticleMode, RenderPath, RenderPathConfig,
-    ResolvedRenderPath, TextureGpu, load_material_folder,
+    ParticleEffectsExt, ParticleEmitter, ParticleMode, RenderPath, RenderPathConfig, ResolvedAa,
+    ResolvedRenderPath, SharpenMode, TaaConfig, TextureGpu, load_material_folder,
 };
 use boyko_rhi::RhiDevice;
 use boyko_rhi_vulkan::debug::{ValidationLedgerSnapshot, validation_ledger};
@@ -187,11 +186,20 @@ enum Worker {
     /// RD6 (D-DS): the same scene on `VisibilityBuffer × Mesh` (the `vb_raster` members and the
     /// fetch's face bits).
     DdsVb,
+    /// Render wave PX1a (D-V1): `VisibilityBuffer × Mesh` with TAA — the VB resolve feeding the post
+    /// seam's `post_final` through `taa_hist` (the `SampledImageAtGeneral` scene input).
+    VbTaa,
+    /// Render wave PX1a (D-V1): Deferred with SSAA at 2× — the declared `ssaa_downsample` pass
+    /// (`lit` → `lit_native`, `loadOp = CLEAR`) and `post_final`'s GENERAL read of `lit_native`.
+    DeferredSsaa,
+    /// Render wave PX1a (D-V1): Deferred with TAA + CAS — the declared `cas` pass reading
+    /// `display` as a storage image at GENERAL between `post_final` and `present_sample`.
+    DeferredTaaCas,
 }
 
 impl Worker {
     /// Spawn order: the canary first, so a deaf oracle is the first line of the report.
-    const ALL: [Worker; 13] = [
+    const ALL: [Worker; 16] = [
         Worker::Canary,
         Worker::VbFroxel,
         Worker::ForwardBoth,
@@ -205,6 +213,9 @@ impl Worker {
         Worker::DdsForward,
         Worker::DdsForwardPlus,
         Worker::DdsVb,
+        Worker::VbTaa,
+        Worker::DeferredSsaa,
+        Worker::DeferredTaaCas,
     ];
 
     /// The `#[test]` fn name the driver passes to `--exact`.
@@ -223,6 +234,9 @@ impl Worker {
             Worker::DdsForward => "boot_validation_worker_dds_forward",
             Worker::DdsForwardPlus => "boot_validation_worker_dds_forward_plus",
             Worker::DdsVb => "boot_validation_worker_dds_vb",
+            Worker::VbTaa => "boot_validation_worker_vb_taa",
+            Worker::DeferredSsaa => "boot_validation_worker_deferred_ssaa",
+            Worker::DeferredTaaCas => "boot_validation_worker_deferred_taa_cas",
         }
     }
 
@@ -571,14 +585,19 @@ fn run_worker(worker: Worker) {
     if dds {
         app.add_startup_system(dds_extras);
     }
-    app.add_plugins(EnginePlugins::window(name, 320, 240));
+    // Render wave PX1a: SSAA is armed only by the plugin set's boot scale.
+    let plugins = EnginePlugins::window(name, 320, 240);
+    app.add_plugins(if worker == Worker::DeferredSsaa { plugins.with_ssaa_scale(2) } else { plugins });
     // Configuration is inserted AFTER `add_plugins`, so it overwrites the plugins' defaults.
     if worker != Worker::Canary {
         app.insert_resource(CsmConfig { cascade_count: 3, ..CsmConfig::default() });
         app.insert_resource(ShadowConfig { enabled: true, ..ShadowConfig::default() });
     }
     match worker {
-        Worker::Canary | Worker::DeferredSmaa | Worker::DeferredTaa => {}
+        Worker::Canary | Worker::DeferredSmaa | Worker::DeferredTaa | Worker::DeferredSsaa | Worker::DeferredTaaCas => {}
+        Worker::VbTaa => {
+            app.insert_resource(RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Mesh });
+        }
         Worker::VbFroxel => {
             app.insert_resource(RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Mesh });
             app.insert_resource(LightingConfig { clusters_enabled: true, ..LightingConfig::default() });
@@ -618,8 +637,14 @@ fn run_worker(worker: Worker) {
     if worker == Worker::DeferredSmaa {
         app.insert_resource(AaConfig { mode: AaMode::Smaa });
     }
-    if worker == Worker::DeferredTaa {
+    if matches!(worker, Worker::DeferredTaa | Worker::VbTaa | Worker::DeferredTaaCas) {
         app.insert_resource(AaConfig { mode: AaMode::Taa });
+    }
+    if worker == Worker::DeferredTaaCas {
+        app.insert_resource(TaaConfig { sharpen: SharpenMode::Rcas, ..TaaConfig::default() });
+    }
+    if worker == Worker::DeferredSsaa {
+        app.insert_resource(AaConfig { mode: AaMode::Ssaa });
     }
 
     app.run();
@@ -717,6 +742,24 @@ fn run_worker(worker: Worker) {
                 "VisibilityBuffer with the VB geometry table",
                 resolved.path == RenderPath::VisibilityBuffer && resolved.vb_geometry_table,
             ),
+            // Render wave PX1a (D-V1): the three post-seam configurations, each witnessed by the
+            // predicate that arms its scene activation.
+            Worker::VbTaa => (
+                "VisibilityBuffer with TAA armed",
+                resolved.path == RenderPath::VisibilityBuffer
+                    && app.world().try_resource::<JitterState>().is_some_and(|j| j.armed),
+            ),
+            Worker::DeferredSsaa => (
+                "Deferred with SSAA armed",
+                resolved.path == RenderPath::Deferred
+                    && app.world().try_resource::<ResolvedAa>().is_some_and(|a| a.mode == AaMode::Ssaa),
+            ),
+            Worker::DeferredTaaCas => (
+                "Deferred with TAA and CAS armed",
+                resolved.path == RenderPath::Deferred
+                    && app.world().try_resource::<JitterState>().is_some_and(|j| j.armed)
+                    && app.world().try_resource::<TaaConfig>().is_some_and(|t| t.sharpen == SharpenMode::Rcas),
+            ),
             Worker::Canary => unreachable!("invariant: the canary took the branch above"),
         };
         assert!(
@@ -813,6 +856,24 @@ fn boot_validation_worker_dds_forward_plus() {
 #[ignore = "gpu-windowed: worker spawned by every_validated_boot_is_clean; returns at once unless BOYKO_BOOT_VALIDATION_DRIVEN is set"]
 fn boot_validation_worker_dds_vb() {
     run_worker(Worker::DdsVb);
+}
+
+#[test]
+#[ignore = "gpu-windowed: worker spawned by every_validated_boot_is_clean; returns at once unless BOYKO_BOOT_VALIDATION_DRIVEN is set"]
+fn boot_validation_worker_vb_taa() {
+    run_worker(Worker::VbTaa);
+}
+
+#[test]
+#[ignore = "gpu-windowed: worker spawned by every_validated_boot_is_clean; returns at once unless BOYKO_BOOT_VALIDATION_DRIVEN is set"]
+fn boot_validation_worker_deferred_ssaa() {
+    run_worker(Worker::DeferredSsaa);
+}
+
+#[test]
+#[ignore = "gpu-windowed: worker spawned by every_validated_boot_is_clean; returns at once unless BOYKO_BOOT_VALIDATION_DRIVEN is set"]
+fn boot_validation_worker_deferred_taa_cas() {
+    run_worker(Worker::DeferredTaaCas);
 }
 
 // ===============================================================================================
@@ -959,9 +1020,9 @@ fn tail(path: &Path) -> String {
 }
 
 /// **The driver.** Spawns the canary, then the twelve path workers, each in its own process with the
-/// validation layer armed, and asserts once over all thirteen outcomes.
+/// validation layer armed, and asserts once over all sixteen outcomes.
 #[test]
-#[ignore = "gpu-windowed: live GPU gate; the driver arms VK_LAYER_KHRONOS_validation itself and spawns thirteen windowed workers; run with --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU gate; the driver arms VK_LAYER_KHRONOS_validation itself and spawns sixteen windowed workers; run with --test-threads=1"]
 fn every_validated_boot_is_clean() {
     let cwd = std::env::current_dir().expect("invariant: the test process has a working directory");
     let settings = cwd.join(LAYER_SETTINGS_FILE);

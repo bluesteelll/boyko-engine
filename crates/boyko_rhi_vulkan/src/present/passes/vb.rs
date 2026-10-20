@@ -58,11 +58,14 @@ use super::super::scene_types::{
 use super::super::targets::{ForwardTargets, GBufferTargets, VB_CLASSIFY_MAX_MATERIAL_ROWS, VbTargets};
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
 
-/// The VB `lit` clear color — byte-identical to `record_forward`'s own `FORWARD_LIT_CLEAR`
-/// (`record_gbuffer`'s albedo clear, the marcher's `BACKGROUND` base). VB v1 has no SDF leg
-/// (mesh-only, `LegsCollapsedToMeshPreVbSdf` until R10) and paints the sky FIRST (`vb_sky`), so
-/// this clear is only ever visible transiently before `vb_sky` overwrites every pixel.
-const VB_LIT_CLEAR: [f32; 4] = [0.05, 0.05, 0.1, 1.0];
+/// The VB `lit` clear color — `record_forward`'s own `FORWARD_LIT_CLEAR`, i.e. the scene-linear
+/// [`LIT_BACKGROUND_SCENE`](super::super::targets::LIT_BACKGROUND_SCENE) (render wave PX1a D-S3,
+/// critique O5: one background spelling, not four). VB paints the sky FIRST (`vb_sky`), so this
+/// clear is only ever visible transiently before `vb_sky` overwrites every pixel.
+const VB_LIT_CLEAR: [f32; 4] = {
+    let c = super::super::targets::LIT_BACKGROUND_SCENE;
+    [c[0], c[1], c[2], 1.0]
+};
 
 /// The VB reverse-Z depth CLEAR (Decision 4): `0.0`, the "nothing drawn yet" sentinel — mirrors
 /// `record_forward`'s own `FORWARD_DEPTH_CLEAR` (paired with `VK_COMPARE_OP_GREATER`).
@@ -5044,6 +5047,18 @@ impl Renderer<'_> {
             }
         }
 
+        // === Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY NaN injection — after every `lit` producer (and the depth merge)
+        // and before the particle draw, the declarator's position; recorded iff declared (the
+        // `inject_nan_lit` key's one frame, never a shipped run). ===
+        if let Some(pass) = plan.test_nan_inject {
+            self.record_vb_pass(pass, cmd, targets, forward, vb, scene, fi);
+            // SAFETY: recording is open and outside any rendering scope (every scope above closed
+            // its own); the line above emitted the pass's derived barriers (`lit[fi]` at
+            // TRANSFER_DST_OPTIMAL after its producers' writes); the pass is declared only on a boot
+            // whose targets were built with the NaN arming; `fi` is this frame's slot.
+            unsafe { self.record_test_nan_inject(cmd, targets, fi) };
+        }
+
         // === Particles P0: the indirect billboard draw, after every `lit` producer
         // (`vb_resolve`/`vb_shade`/`sdf_forward_march`/`vb_sky`) and before `taa_resolve` +
         // `present_sample` — the declarator's own position. `forward.depth[fi]` is VB's depth
@@ -5085,92 +5100,88 @@ impl Renderer<'_> {
             }
         }
 
-        // === TAA-under-VB: the temporal-resolve (+ RCAS) — recorded HERE, BEFORE
-        // `present_sample`'s `lit` GENERAL→SHADER_READ_ONLY transition (TAA is a COMPUTE
-        // dispatch whose own graph pass derives that transition out of the `lit` producer — the
-        // OPPOSITE ordering the FXAA/SMAA/SSAA fragment passes below use; `record_gbuffer`'s
-        // TAA block ordering, ported). The pass barriers are emitted through the VB sink
-        // (`record_vb_pass` — VB's OWN ResId table), then the graph-emit-free
-        // `record_taa_body`/`record_rcas` bodies run unchanged (both are path-portable). ===
-        if let Some(taa) = scene.taa.as_ref()
-            && targets.taa_resolve_set.is_some()
-        {
-            let taa_pass = plan
-                .taa_resolve
-                .expect("invariant: scene.taa.is_some() ⇒ the VB taa_resolve pass was declared");
+        // === TAA-under-VB: the temporal resolve — recorded HERE, after the last `lit` producer
+        // and BEFORE the post seam (`record_gbuffer`'s TAA block, ported). The pass barriers are
+        // emitted through the VB sink (`record_vb_pass` — VB's OWN ResId table), then the
+        // graph-emit-free `record_taa_body` runs unchanged (path-portable). ===
+        // Review r1 W1: keyed on the DECLARED pass (`declare_taa_resolve` declares it only under
+        // live TAA — `scene.taa` armed AND `targets.taa_history_built()` of these same targets).
+        if let Some(taa_pass) = plan.taa_resolve {
+            let taa = scene.taa.as_ref().expect("invariant: a declared VB taa_resolve pass implies an armed scene.taa");
+            debug_assert!(targets.taa_history_built(), "invariant: a declared VB taa_resolve pass implies a built TAA history");
             ts.cmd();
             self.record_vb_pass(taa_pass, cmd, targets, forward, vb, scene, fi);
             // SAFETY: recording is open; the taa_resolve pass barriers were just emitted via
-            // the VB sink above (record_taa_body's caller contract); `aa_out`/`taa_hist`/
-            // `taa_resolve_set` were built by `create()` under the same `scene.taa` that gates
-            // this branch.
+            // the VB sink above (record_taa_body's caller contract); the pass was declared this
+            // frame only under live TAA, whose predicate read `targets.taa_history_built()` of
+            // these targets, so `taa_hist`/`taa_resolve_set` were built by `create()`.
             ts.cmd();
             unsafe { self.record_taa_body(cmd, targets, taa, scene, fi) };
+        }
+
+        // Render wave PX1a: the post seam — `[ssaa_downsample] → post_final → [cas]`, each pass's
+        // barriers through the VB sink first, in declaration order (D-G4; `record_gbuffer`'s
+        // block, ported).
+        if let Some(pass) = plan.post.ssaa_downsample {
+            ts.cmd();
+            self.record_vb_pass(pass, cmd, targets, forward, vb, scene, fi);
+            let ssaa = scene.ssaa.as_ref().expect("invariant: the ssaa_downsample pass is declared iff scene.ssaa");
+            // SAFETY: recording is open, outside any rendering scope; the pass's derived barriers
+            // were just emitted (`lit[fi]` at SHADER_READ_ONLY, `lit_native` at
+            // COLOR_ATTACHMENT_OPTIMAL); `lit_native`/`downsample_set` were built by `create()`
+            // under the same `scene.ssaa`, `lit_native` at the BOOT-FIXED native `aa_extent`.
+            ts.cmd();
+            let zone = super::zone_arm::ZoneArm::from_scene(scene);
+            unsafe { self.record_ssaa(cmd, targets, ssaa, aa_extent, fi, zone) };
+        }
+        ts.cmd();
+        self.record_vb_pass(plan.post.post_final, cmd, targets, forward, vb, scene, fi);
+        // SAFETY: recording is open, outside any rendering scope; `post_final`'s derived barriers
+        // were just emitted through the VB sink; `targets` were created for `scene`; `display` is
+        // `aa_extent` large.
+        ts.cmd();
+        unsafe { self.record_post_final(cmd, targets, scene, aa_extent, fi) };
+        if let Some(pass) = plan.post.cas {
+            ts.cmd();
+            self.record_vb_pass(pass, cmd, targets, forward, vb, scene, fi);
             if let Some(rcas) = scene.rcas.as_ref()
                 && targets.rcas_set.is_some()
             {
-                // SAFETY: recording is open; `record_taa_body` (just above) already wrote
-                // `taa_resolved[fi]`, leaving it in GENERAL; `taa_resolved`/`aa_out`/`rcas_set`
-                // were built by `create()` under the same `scene.rcas` that gates this branch;
-                // `present_extent` sizes both (the SAME extent the resolve dispatched over).
+                // SAFETY: recording is open; the `cas` pass's barriers (`post_final`'s `display`
+                // write → this COMPUTE read at GENERAL) were just emitted; `aa_out`/`rcas_set`
+                // were built by `create()` under the same `scene.rcas`; `present_extent` sizes
+                // `display` and `aa_out` (TAA arms no SSAA).
                 ts.cmd();
                 unsafe { self.record_rcas(cmd, targets, rcas, present_extent, scene, fi) };
             }
         }
 
-        // === Present-blit `lit` into the swapchain — byte-for-byte port of `record_forward`'s
-        // own tail. ===
-        // SAFETY: recording is open; `record_vb_pass` records the graph's derived
-        // GENERAL→SHADER_READ_ONLY_OPTIMAL barrier for the "present_sample" pass into `cmd`
-        // (with TAA armed, the taa_resolve pass above already left `lit` in SHADER_READ_ONLY —
-        // this then derives no further barrier, the deferred precedent).
+        // === `present_sample`: `display` → SHADER_READ_ONLY_OPTIMAL for the present blit (and
+        // the FXAA / SMAA FRAGMENT reads below, inside the same barrier's scope). ===
         ts.cmd();
         self.record_vb_pass(plan.present_sample, cmd, targets, forward, vb, scene, fi);
 
-        // Anti-aliasing resolve (VB). When AA is armed, `sync_gbuffer` rewires `present_set` to
-        // sample `aa_out` (path-agnostic), but the FXAA/SMAA/SSAA dispatch used to live ONLY in
-        // `record_gbuffer` (Deferred) -- so under VB the resolved `lit` was never anti-aliased into
-        // `aa_out`, and the present-blit below sampled a never-written (black) image. Mirror
-        // `record_gbuffer`'s AA block verbatim: FXAA/SMAA read `present_extent`; SSAA reads the
-        // BOOT-FIXED `aa_extent` (`present_extent` is 2x under SSAA). TAA (VB × Mesh) was ALREADY
-        // recorded above (before `present_sample` -- the compute-vs-fragment ordering, see that
-        // block's comment), so the fall-through documents it exactly like `record_gbuffer`'s
-        // equivalent else. OFF (`aa_out` is `None`) records nothing -> the AA-off VB command
-        // stream is byte-identical to before this block existed.
+        // Anti-aliasing (VB): FXAA / SMAA over `display` → `aa_out`, hand-recorded after
+        // `present_sample` (`record_gbuffer`'s block, ported). CAS ran above; OFF (`aa_out` is
+        // `None`) records nothing.
         if targets.aa_out.is_some() {
             if let Some(fxaa) = scene.aa.as_ref() {
-                // SAFETY: recording is open; `present_sample` above left `lit` in
+                // SAFETY: recording is open; `present_sample` above left `display` in
                 // SHADER_READ_ONLY_OPTIMAL; `aa_out`/`fxaa_set` were built by `create()` under the
                 // same `scene.aa` that gates this branch; `present_extent` sizes `aa_out`.
                 ts.cmd();
                 let zone = super::zone_arm::ZoneArm::from_scene(scene);
                 unsafe { self.record_fxaa(cmd, targets, fxaa, present_extent, fi, zone) };
             } else if let Some(smaa) = scene.smaa.as_ref() {
-                // SAFETY: recording is open; `present_sample` above left `lit` in
+                // SAFETY: recording is open; `present_sample` above left `display` in
                 // SHADER_READ_ONLY_OPTIMAL; `aa_out`/the SMAA edge/weight targets + the three
                 // `smaa_*_set` rings were built by `create()` under the same `scene.smaa` that
                 // gates this branch; `present_extent` sizes every SMAA target.
                 ts.cmd();
                 let zone = super::zone_arm::ZoneArm::from_scene(scene);
                 unsafe { self.record_smaa(cmd, targets, smaa, present_extent, fi, zone) };
-            } else if let Some(ssaa) = scene.ssaa.as_ref() {
-                debug_assert!(targets.aa_out.is_some() && targets.downsample_set.is_some());
-                // SAFETY: recording is open; `present_sample` above left `lit` (the 2x ring) in
-                // SHADER_READ_ONLY_OPTIMAL; `aa_out`/`downsample_set` were built by `create()`
-                // under the same `scene.ssaa` that gates this branch, sized to the BOOT-FIXED
-                // `aa_extent` (NOT `present_extent`, which is 2x under SSAA).
-                ts.cmd();
-                let zone = super::zone_arm::ZoneArm::from_scene(scene);
-                unsafe { self.record_ssaa(cmd, targets, ssaa, aa_extent, fi, zone) };
             } else {
-                // `aa_out.is_some()` with none of aa/smaa/ssaa matched ⇒ TAA is the reason
-                // (the four arms are mutually exclusive by construction); `record_taa_body`
-                // already ran above (the TAA-under-VB block) — nothing left to do here, the
-                // SAME fall-through `record_gbuffer`'s equivalent else documents.
-                debug_assert!(
-                    scene.taa.is_some(),
-                    "invariant: VB aa_out armed but none of aa/smaa/ssaa/taa matched"
-                );
+                debug_assert!(scene.rcas.is_some(), "invariant: VB aa_out armed but none of aa/smaa/rcas is");
             }
         }
 
@@ -5622,13 +5633,16 @@ impl Renderer<'_> {
                 (super::super::frame_driver::ImageDumpName::Viewt, Some(&targets.viewt[fi]), present_extent),
                 (super::super::frame_driver::ImageDumpName::Lit, Some(&targets.lit[fi]), present_extent),
                 (super::super::frame_driver::ImageDumpName::TaaHist, targets.taa_hist.as_ref().map(|r| &r[fi]), aa_extent),
+                (super::super::frame_driver::ImageDumpName::Display, Some(&targets.display), aa_extent),
+                (super::super::frame_driver::ImageDumpName::LitNative, targets.lit_native.as_ref(), aa_extent),
             ];
             // SAFETY: recording is open and no render scope is active (the blit's
             // `cmd_end_rendering` is above); `record_vb_pass` just recorded the dump pass's
             // derived barriers, so each declared source is in its `plan.layouts` layout; every
-            // source is THIS slot's image (`taa_hist` the `[fi]` write slot) at `present_extent`
-            // (`taa_hist` at `aa_extent`), with `TRANSFER_SRC` usage — `vb_depth` and `lit`
-            // unconditionally, `viewt` / `taa_hist` because the dump was armed at boot
+            // source is THIS slot's image (`taa_hist` the `[fi]` write slot; `display` /
+            // `lit_native` the single post-seam images) at `present_extent` (`taa_hist`,
+            // `display`, `lit_native` at `aa_extent`), with `TRANSFER_SRC` usage — `vb_depth` and
+            // `lit` unconditionally, the rest because the dump was armed at boot
             // (`sync_gbuffer`'s `dump_usage`); the requested staging meets the image-dump clause of
             // this fn's `# Safety`.
             ts.cmd();

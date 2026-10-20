@@ -84,7 +84,8 @@
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main "-fspv-target-env=vulkan1.3" \
 //       taa_resolve.comp.hlsl -Fo taa_resolve.comp.spv
 
-// binding 0 (READ): the current frame's shaded LDR color `lit` (R8G8B8A8_UNORM), bound as a
+// binding 0 (READ): the current frame's `lit` — pre-exposed SCENE-LINEAR radiance in `LIT_FORMAT`
+// (RGBA16F since render wave PX1a; every tap below passes through `hdr_sanitize`), bound as a
 // COMBINED_IMAGE_SAMPLER — the SAME resolve→AA-input seam FXAA's `fxaa_set` binds `lit` through
 // (that transition to SHADER_READ_ONLY_OPTIMAL already exists structurally for every other AA
 // mode; TAA reuses it rather than introducing a new one). LINEAR sampler declared for shape-
@@ -100,20 +101,24 @@
 // R16G16B16A16_SFLOAT — RGB = accumulated color, A = confidence (see the module doc).
 [[vk::image_format("rgba16f")]] RWTexture2D<float4> gHistIn  : register(u2);
 [[vk::image_format("rgba16f")]] RWTexture2D<float4> gHistOut : register(u3);
-// binding 4 (WRITE): the final AA output `aa_out` (R8G8B8A8_UNORM) — the present-blit's input.
-[[vk::image_format("rgba8")]] RWTexture2D<float4> gAaOut : register(u4);
+// binding 4: none since render wave PX1a — the resolve's output is `gHistOut` alone, which the
+// post seam's `post_final` reads as its scene input (the old `gAaOut` display-referred copy retired).
 
 // binding 5: the TAA tunables UBO — byte-mirrors `boyko_render::aa_config::ResolvedTaa` (48 B,
 // std140: three vec4 slots), owner-retunable each frame (live). Grew 16 -> 48 B at rung T2
 // (`boyko_render::taa_config`) — the first vec4 (`default_blend`/`min_blend`/`variance_gamma`/
-// `_pad`) is UNCHANGED from C1; the trailing two vec4s are the T2 mode words. PINNED to
+// `pre_ratio_delta`, the `_pad` slot until PX1a) keeps C1's offsets; the trailing two vec4s are the
+// T2 mode words. PINNED to
 // `ResolvedTaa` — the two MUST byte-mirror field-for-field (a mismatch here silently reads
 // garbage tunables, not a compile error).
 //
 // `default_blend` is the feedback weight given to the CURRENT frame on the first accumulated
 // sample after a reset (a low-confidence blend, mostly replace); `min_blend` is the STEADY-STATE
 // floor (a converged/static view trusts history almost entirely); `variance_gamma` scales the
-// clip AABB half-width (× σ); `_pad` keeps the first 16-byte std140 stride explicit (unread).
+// clip AABB half-width (× σ); `pre_ratio_delta` (render wave PX1a, offset 12) is
+// `pre_N / pre_{N-1} - 1`, the history's re-exposure — the history is scaled by
+// `1 + pre_ratio_delta` before the clip, so an exposure change does not read as a disocclusion
+// (zero ⇒ the identity; `resolve_taa_policy` writes it).
 //
 // Every T2 mode word's ZERO value is the shipped v1 behaviour (see the module doc's "Rung T2"
 // section). `disocclusion_test`/`depth_tol` are carried but UNREAD this rung — see
@@ -122,7 +127,7 @@ cbuffer ResolvedTaa : register(b5) {
     float default_blend;   // feedback weight at confidence == 1 (just after a reset)
     float min_blend;       // steady-state feedback weight floor (confidence → ∞)
     float variance_gamma;  // clip AABB half-width scale (× σ)
-    float _pad;
+    float pre_ratio_delta;
 
     uint clamp_word;          // ClampShape: 0 Variance (default) / 1 Off / 2 MinMax
     uint clamp_space_word;    // ClampSpace: 0 Rgb (default) / 1 YCoCg
@@ -326,6 +331,24 @@ float luma(float3 c) {
     return dot(c, float3(0.2126, 0.7152, 0.0722));
 }
 
+// Render wave PX1a (`px1a/cut.md` D-S2, D-S5): the HDR boundary — `hdr_sanitize` (a non-finite
+// pixel reads as black, a finite one is clamped to `[0, HDR_MAX]`) on every `lit` tap, and
+// `hdr_history_guard` on the history write. GENERATED from `boyko_shaderdsl::post` by `cargo run
+// -p boyko_shaderdsl --features emit --bin emit_post -- --splice`, the SAME leaves `post_final`
+// traces; a hand-edit fails `tests/post_chain_spv_sync.rs`.
+// === GENERATED post_hdr_boundary BEGIN ===
+static const uint F32_EXP_MASK = 0x7F800000u;
+static const float HDR_MAX = 64512.0;
+
+float3 hdr_sanitize(float3 c) {
+    return float3(((min(min((asuint(c.x) & F32_EXP_MASK) ^ F32_EXP_MASK, (asuint(c.y) & F32_EXP_MASK) ^ F32_EXP_MASK), (asuint(c.z) & F32_EXP_MASK) ^ F32_EXP_MASK) == 0u) ? (0.0) : (min(max(c.x, 0.0), HDR_MAX))), ((min(min((asuint(c.x) & F32_EXP_MASK) ^ F32_EXP_MASK, (asuint(c.y) & F32_EXP_MASK) ^ F32_EXP_MASK), (asuint(c.z) & F32_EXP_MASK) ^ F32_EXP_MASK) == 0u) ? (0.0) : (min(max(c.y, 0.0), HDR_MAX))), ((min(min((asuint(c.x) & F32_EXP_MASK) ^ F32_EXP_MASK, (asuint(c.y) & F32_EXP_MASK) ^ F32_EXP_MASK), (asuint(c.z) & F32_EXP_MASK) ^ F32_EXP_MASK) == 0u) ? (0.0) : (min(max(c.z, 0.0), HDR_MAX))));
+}
+
+float3 hdr_history_guard(float3 hist, float3 cur) {
+    return float3(((min(min((asuint(hist.x) & F32_EXP_MASK) ^ F32_EXP_MASK, (asuint(hist.y) & F32_EXP_MASK) ^ F32_EXP_MASK), (asuint(hist.z) & F32_EXP_MASK) ^ F32_EXP_MASK) == 0u) ? (float3(((min(min((asuint(cur.x) & F32_EXP_MASK) ^ F32_EXP_MASK, (asuint(cur.y) & F32_EXP_MASK) ^ F32_EXP_MASK), (asuint(cur.z) & F32_EXP_MASK) ^ F32_EXP_MASK) == 0u) ? (0.0) : (min(max(cur.x, 0.0), HDR_MAX))), ((min(min((asuint(cur.x) & F32_EXP_MASK) ^ F32_EXP_MASK, (asuint(cur.y) & F32_EXP_MASK) ^ F32_EXP_MASK), (asuint(cur.z) & F32_EXP_MASK) ^ F32_EXP_MASK) == 0u) ? (0.0) : (min(max(cur.y, 0.0), HDR_MAX))), ((min(min((asuint(cur.x) & F32_EXP_MASK) ^ F32_EXP_MASK, (asuint(cur.y) & F32_EXP_MASK) ^ F32_EXP_MASK), (asuint(cur.z) & F32_EXP_MASK) ^ F32_EXP_MASK) == 0u) ? (0.0) : (min(max(cur.z, 0.0), HDR_MAX)))).x) : (max(hist.x, 0.0))), ((min(min((asuint(hist.x) & F32_EXP_MASK) ^ F32_EXP_MASK, (asuint(hist.y) & F32_EXP_MASK) ^ F32_EXP_MASK), (asuint(hist.z) & F32_EXP_MASK) ^ F32_EXP_MASK) == 0u) ? (float3(((min(min((asuint(cur.x) & F32_EXP_MASK) ^ F32_EXP_MASK, (asuint(cur.y) & F32_EXP_MASK) ^ F32_EXP_MASK), (asuint(cur.z) & F32_EXP_MASK) ^ F32_EXP_MASK) == 0u) ? (0.0) : (min(max(cur.x, 0.0), HDR_MAX))), ((min(min((asuint(cur.x) & F32_EXP_MASK) ^ F32_EXP_MASK, (asuint(cur.y) & F32_EXP_MASK) ^ F32_EXP_MASK), (asuint(cur.z) & F32_EXP_MASK) ^ F32_EXP_MASK) == 0u) ? (0.0) : (min(max(cur.y, 0.0), HDR_MAX))), ((min(min((asuint(cur.x) & F32_EXP_MASK) ^ F32_EXP_MASK, (asuint(cur.y) & F32_EXP_MASK) ^ F32_EXP_MASK), (asuint(cur.z) & F32_EXP_MASK) ^ F32_EXP_MASK) == 0u) ? (0.0) : (min(max(cur.z, 0.0), HDR_MAX)))).y) : (max(hist.y, 0.0))), ((min(min((asuint(hist.x) & F32_EXP_MASK) ^ F32_EXP_MASK, (asuint(hist.y) & F32_EXP_MASK) ^ F32_EXP_MASK), (asuint(hist.z) & F32_EXP_MASK) ^ F32_EXP_MASK) == 0u) ? (float3(((min(min((asuint(cur.x) & F32_EXP_MASK) ^ F32_EXP_MASK, (asuint(cur.y) & F32_EXP_MASK) ^ F32_EXP_MASK), (asuint(cur.z) & F32_EXP_MASK) ^ F32_EXP_MASK) == 0u) ? (0.0) : (min(max(cur.x, 0.0), HDR_MAX))), ((min(min((asuint(cur.x) & F32_EXP_MASK) ^ F32_EXP_MASK, (asuint(cur.y) & F32_EXP_MASK) ^ F32_EXP_MASK), (asuint(cur.z) & F32_EXP_MASK) ^ F32_EXP_MASK) == 0u) ? (0.0) : (min(max(cur.y, 0.0), HDR_MAX))), ((min(min((asuint(cur.x) & F32_EXP_MASK) ^ F32_EXP_MASK, (asuint(cur.y) & F32_EXP_MASK) ^ F32_EXP_MASK), (asuint(cur.z) & F32_EXP_MASK) ^ F32_EXP_MASK) == 0u) ? (0.0) : (min(max(cur.z, 0.0), HDR_MAX)))).z) : (max(hist.z, 0.0))));
+}
+// === GENERATED post_hdr_boundary END ===
+
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
     uint idx = tid.x;
@@ -339,7 +362,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     int3 coord3 = int3((int)px, (int)py, 0);
     int2 coord = int2((int)px, (int)py);
 
-    float3 cur_lit = gLit.Load(coord3).rgb;
+    float3 cur_lit = hdr_sanitize(gLit.Load(coord3).rgb);
     float view_t = gViewT.Load(coord);
     bool has_surface = view_t < VIEWT_BG;
 
@@ -407,10 +430,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
 
     if (reset_now) {
         // Disocclusion / off-screen / host-forced reset: the I5-style single-frame fallback —
-        // `blend_factor == 1.0` (full replace), confidence seeded to 1.0. No NaN risk: `cur_lit`
-        // is the resolve's own finite LDR output, un-combined with any division here.
+        // `blend_factor == 1.0` (full replace), confidence seeded to 1.0. `cur_lit` went through
+        // `hdr_sanitize` above, so a NaN / Inf `lit` texel seeds the history as black, never as a
+        // non-finite value later frames would blend.
         gHistOut[coord] = float4(cur_lit, 1.0);
-        gAaOut[coord] = float4(cur_lit, 1.0);
         return;
     }
 
@@ -424,6 +447,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
     } else {
         hist_raw = sample_history_catmull_rom(history_uv, w, h);
     }
+    // Render wave PX1a: the history was accumulated at last frame's pre-exposure; re-expose it to
+    // this frame's BEFORE the clip (`pre_ratio_delta == 0` ⇒ the identity).
+    hist_raw *= 1.0 + pre_ratio_delta;
 
     // --- 3×3 neighborhood moments of the CURRENT `lit` + the history clip (rung T2:
     // `ClampShape`/`ClampSpace`/`ClipMode`) -----------------------------------------------------
@@ -448,7 +474,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
             for (int ox = -1; ox <= 1; ++ox) {
                 int tx = clamp((int)px + ox, 0, (int)w - 1);
                 int ty = clamp((int)py + oy, 0, (int)h - 1);
-                float3 c = gLit.Load(int3(tx, ty, 0)).rgb;
+                float3 c = hdr_sanitize(gLit.Load(int3(tx, ty, 0)).rgb);
                 if (clamp_space_word == TAA_CLAMP_SPACE_YCOCG) {
                     c = rgb_to_ycocg(c);
                 }
@@ -516,6 +542,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
         out_color = blended_w / max(1.0 - luma(blended_w), 1e-4);
     }
 
-    gHistOut[coord] = float4(out_color, confidence);
-    gAaOut[coord] = float4(out_color, 1.0);
+    // The Catmull-Rom history and the variance clip can go negative and the Karis inverse can
+    // overflow; the RGBA16F history keeps both, so the write is guarded (render wave PX1a).
+    gHistOut[coord] = float4(hdr_history_guard(out_color, cur_lit), confidence);
 }

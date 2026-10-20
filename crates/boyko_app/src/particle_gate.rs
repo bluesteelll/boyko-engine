@@ -39,7 +39,9 @@
 /// first frames — which is what makes the effect table defined on frame 0 without a separate
 /// boot-time upload path.
 ///
-/// This is `light_upload_due`'s twin, deliberately a SEPARATE function rather than a shared
+/// This was `light_upload_due`'s twin; render wave PX1a replaced that with the device-keyed
+/// `light_gate::light_copy_plan` (the swapchain-recreate fix this function's FX1 successor,
+/// `particle_effects_copy_plan`, will mirror). It stays a SEPARATE function rather than a shared
 /// generic: the two protocols track different writers and must be able to diverge (the effect
 /// table's generation folds in the clock's timestep, the light table's does not) without one
 /// edit silently re-tuning both.

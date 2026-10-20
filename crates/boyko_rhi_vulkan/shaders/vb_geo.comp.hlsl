@@ -88,7 +88,7 @@
 //                                                                      requirement on it.
 //     t4   : StructuredBuffer<MaterialGpu>          Materials        READ (`.mrr.y` roughness)
 //     t5   : Texture2D<uint2>                       gVbId             READ (`.Load` unfiltered)
-//     u6   : RWTexture2D<float4> (rgba8)             gLit             bound-but-unread
+//     u6   : RWTexture2D<float4> (LIT_FORMAT)        gLit             bound-but-unread
 //     u7   : RWByteAddressBuffer                     gClassify         bound-but-unread
 //                                                                      (`vb_classify_common.hlsli`
 //                                                                       -- split displaces
@@ -241,7 +241,8 @@ Texture2D<uint2> gVbId : register(t5);
 
 // binding 6: the shared `lit` STORAGE image. Bound-but-unread (the R2 contract) -- this pass
 // never writes `lit`.
-[[vk::image_format("rgba8")]] RWTexture2D<float4> gLit : register(u6);
+#include "lit_format.hlsli"
+[[vk::image_format(LIT_FORMAT_QUALIFIER)]] RWTexture2D<float4> gLit : register(u6);
 
 // binding 7: the packed classify buffer (`vb_classify_common.hlsli`'s own declaration).
 // Bound-but-unread -- split displaces classification (Â§0), so this pass never touches it, but

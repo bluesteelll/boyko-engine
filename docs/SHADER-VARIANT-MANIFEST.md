@@ -89,7 +89,7 @@ a euclidean norm is not one).
 
 | Variant | `DL` | `.spv` | dxc `-T` | Interface delta vs base |
 |---|---|---|---|---|
-| base (reverse-Z paths) | — | `particle_draw.vs.spv` / `particle_draw.fs.spv` | `vs_6_0` / `ps_6_0` | hardware depth from the VS's projective `SV_Position.z`; the FS writes colour only, so **early-Z stays live**. Bound by Forward / ForwardPlus / VisibilityBuffer (`VK_COMPARE_OP_GREATER`). |
+| base (reverse-Z paths) | — | `particle_draw.vs.spv` / `particle_draw.fs.spv` | `vs_6_0` / `ps_6_0` | hardware depth from the VS's projective `SV_Position.z`; the FS writes colour only, so **early-Z stays live**. Bound by Forward / ForwardPlus / VisibilityBuffer (`VK_COMPARE_OP_GREATER`). Both stages declare the 76-B push block (render wave PX1a: `[72, 76)` = `pre_exposure`, read by the FS, which multiplies the colour by it before the blend), so the range is `VERTEX \| FRAGMENT` (`compute::PARTICLE_DRAW_PUSH_STAGES`; `particle_barrier_stream.rs` checks each module's push block against it). |
 | depth-linear (Deferred) | `1` | `particle_draw_dlin.vs.spv` / `particle_draw_dlin.fs.spv` | `vs_6_0` / `ps_6_0` | **no descriptor delta — the layout object is unchanged** (the `deferred_pbr_wrap` precedent): the VS forwards two extra interpolants (`eye_rel` = `cam_eye.xyz - world`, perspective-correct, and `cam_mode`) read from the ALREADY-BOUND camera UBO @1, and the FS gains `SV_Depth` = `(cam_mode > 0.5) ? length(eye_rel) / MESH_DEPTH_T_MAX : position.z` — term for term `gbuffer_mrt.fs.hlsl:327`. **COST 1: an `SV_Depth` write disables early-Z on this leg** (the value the test needs does not exist until the shader has run); accepted, and bounded by a fragment that is one modulate + at most one bindless sample. `depth_write` stays OFF, so nothing is stored. **COST 2 — a per-path DIVERGENCE: the encode's range is the particle FAR HORIZON here.** Beyond `MESH_DEPTH_T_MAX = 64` world units the quotient exceeds 1, the write clamps to `[0,1]`, and `LESS` then fails against anything stored (the 1.0 sky clear included) — so Deferred particles vanish at 64 units while the base rows carry them to the camera's far plane. Same horizon this path's raster meshes already have (same divisor); moving it means moving both sites and re-blessing every Deferred pin. |
 
 `DL` = `DEPTH_LINEAR`. Selection is **boot-frozen, once per process**: `particle_draw_spirv_for`
@@ -330,14 +330,18 @@ generator's output; the committed `.spv` is the re-DXC of its source (SKIPs with
 dxc resolves — **a skipped run is not a pass**); the `spirv-dis` lowering census (one instruction per op,
 no other extended instruction), whose census function is run against fixture mis-lowerings every run.
 
-## `post_final.comp.hlsl` — the post chain's final pass (compute, render wave PXe, NOT YET WIRED)
+## `post_final.comp.hlsl` — the post chain's final pass (compute, render wave PXe; wired at PX1a)
 
 One source, GENERATED WHOLE (`boyko_shaderdsl/src/bin/emit_post.rs`; the template is
 `boyko_shaderdsl::emit::emit_post_final_comp`), **no `-D` axis** (AD-1 removes the format axis; PX13
 would add `OUTPUT_PQ`; every on/off is a mode word). Its body is the trace of
 `boyko_shaderdsl::post::post_final_main` — the SAME function the host oracle (PX0's `post_eval`)
 evaluates over `EvalCf`; its declarations and constants are printed from `post::POST_FINAL_BINDINGS` /
-`POST_FINAL_UBO_LAYOUT` and from the symbols the trace references. PX1a creates its pipeline.
+`POST_FINAL_UBO_LAYOUT` and from the symbols the trace references. Since render wave PX1a's switch
+commit it is THE tail: `GpuSceneBundles::boot` builds its pipeline (`compute::post_final_spirv`) and
+every path dispatches it once per frame, after the last `lit` producer (its `.spv` did not move: the
+PX1a leaves `lit_store_saturate` / `hdr_history_guard` are new functions, and `hdr_sanitize`'s
+refactor onto a shared whole-pixel test traces to the same text).
 
 | Variant | `-D` | `.spv` | dxc `-T` | Notes |
 |---|---|---|---|---|
@@ -356,6 +360,66 @@ tables); the skeleton census; the stage trace (the `post_stage_*` declarations e
 oracle census (no non-test caller of the traced body re-composes a stage); every census also run
 against fixtures it must reject. Host oracles: `boyko_shaderdsl/tests/{post_leaves,
 post_image_oracle, post_facets}.rs`.
+
+## `taa_resolve.comp.hlsl` — the TAA temporal resolve (compute)
+
+One source, hand-written, **no `-D` axis**. Render wave PX1a (D-S5 step 1) retired its `gAaOut` @4
+display-referred copy: the resolve writes only `gHistOut` (`taa_hist[fi]`, RGBA16F), which `post_final`
+reads as its scene input; @4 is a binding hole in the layout. D-S5 step 2 (the switch commit): the
+resolve runs on scene-linear `lit` — every `lit` tap passes `hdr_sanitize`, the history is re-exposed by
+`1 + pre_ratio_delta` (`ResolvedTaa` offset 12, C1's padding slot; zero ⇒ the identity) before the
+clip, and the history write passes `hdr_history_guard`. The two leaves are the eDSL's
+(`boyko_shaderdsl::post`), spliced between `// === GENERATED post_hdr_boundary BEGIN/END ===` by
+`emit_post --splice`.
+
+| Variant | `-D` | `.spv` | dxc `-T` | Notes |
+|---|---|---|---|---|
+| the only one | — | `taa_resolve.comp.spv` | `cs_6_0` | set 0 = `gLit` CIS @0 (scene-linear `LIT_FORMAT`), `gViewT` (`r32f`) @1, `gHistIn` / `gHistOut` (`rgba16f`) @2 / @3, the `ResolvedTaa` UBO @5 (`pre_ratio_delta` @12), the camera UBO @6, the `MotionCam` UBO @7; a 4-byte `{ uint reset; }` push; `[numthreads(64, 1, 1)]`. |
+
+Frozen recipe: `dxc.exe -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 taa_resolve.comp.hlsl`.
+*Byte gate:* `boyko_rhi_vulkan/tests/post_chain_spv_sync.rs` (the `.spv`, and the spliced span against
+`emit::post_splices()`).
+
+## `ssaa_downsample.fs.hlsl` — the SSAA 2× box downsample (raster, render wave PX1a row)
+
+One source, hand-written, **no `-D` axis**. Since render wave PX1a it is a declared graph pass writing
+`lit_native` (`LIT_FORMAT`, native extent) as its colour attachment, and — `lit` being scene-linear —
+its box is the plain linear average `0.25 · Σ hdr_sanitize(tap)` (the display-referred `lit` needed a
+`pow 2.2` decode and `pow 1/2.2` encode around it); `post_final` tonemaps `lit_native`. `hdr_sanitize`
+is the eDSL's, spliced between `// === GENERATED post_hdr_boundary BEGIN/END ===`.
+
+| Variant | `-D` | `.spv` | dxc `-T` | Notes |
+|---|---|---|---|---|
+| the only one | — | `ssaa_downsample.fs.spv` | `ps_6_0` | set 0 = the 2× `lit` CIS @0 (`.Load` only; the sampler satisfies `present_layout`); no push; one `float4` colour output into `lit_native` (the pipeline's `color_formats = [LIT_FORMAT]`, `tests/lit_format_census.rs` section 5). |
+
+Frozen recipe: `dxc.exe -spirv -T ps_6_0 -E main -fspv-target-env=vulkan1.3 ssaa_downsample.fs.hlsl`.
+*Byte gate:* `boyko_rhi_vulkan/tests/post_chain_spv_sync.rs` (the `.spv` and the spliced span).
+
+## `fullscreen_sample.fs.hlsl` — the present blit (raster, render wave PX1a D-P1)
+
+One source, hand-written; **one `-D` axis, `SWAPCHAIN_SRGB`** (default 0). The present blit samples the
+display-referred image (`post_final`'s `display`, or `aa_out` under FXAA / SMAA / CAS) into the
+swapchain. On an 8-bit `*_SRGB` swapchain the hardware encodes on write, so the `SWAPCHAIN_SRGB=1`
+variant returns `srgb_eotf(rgb)` first — the eDSL's piecewise sRGB decode (`boyko_shaderdsl::post::
+srgb_eotf`, spliced between `// === GENERATED srgb_eotf BEGIN/END ===` inside the `#if SWAPCHAIN_SRGB`
+arm by `emit_post --splice`; not `pow(c, 2.2)`, about 7 codes off at 0.1). The default arm is textually
+the pre-PX1a body, so `fullscreen_sample.fs.spv` did not move. The present pipeline is built per
+swapchain format and picks the module by `compute::present_sample_fs_spirv(format)`
+(`present::swapchain_format_is_srgb`) — a `.spv` variant, not a spec constant (cut D-P1: the graphics
+pipeline path has no specialization info; both are boot-time choices with an identical runtime).
+
+| Variant | `-D` | `.spv` | dxc `-T` | Notes |
+|---|---|---|---|---|
+| UNORM swapchain (default) | — | `fullscreen_sample.fs.spv` | `ps_6_0` | set 0 = one COMBINED_IMAGE_SAMPLER @0; `return g_tex.Sample(g_smp, uv)`; no push. Also the sample FS of `window_present_*` / `graphics_sample` / `ui_rect_swapchain_golden` harnesses. |
+| `*_SRGB` swapchain | `SWAPCHAIN_SRGB=1` | `fullscreen_sample_srgb.fs.spv` | `ps_6_0` | the same interface; `float4(srgb_eotf(c.rgb), c.a)` — three `Pow`s (one per channel). Selected only when the swapchain format is `B8G8R8A8_SRGB` / `R8G8B8A8_SRGB` (the production pick prefers `B8G8R8A8_UNORM`; the test-only `TestForce` key `srgb_swapchain` forces an sRGB format or refuses the boot). |
+
+Frozen recipes (the header pins both verbatim; no `-O`):
+`dxc.exe -spirv -T ps_6_0 -E main -fspv-target-env=vulkan1.3 fullscreen_sample.fs.hlsl`,
+`dxc.exe -spirv -T ps_6_0 -E main -fspv-target-env=vulkan1.3 -D SWAPCHAIN_SRGB=1 fullscreen_sample.fs.hlsl`.
+*Byte gate:* `boyko_rhi_vulkan/tests/post_chain_spv_sync.rs` (both `.spv` re-DXC'd, the spliced span
+against `emit::post_splices()`, the module chooser by format, the variant's three `Pow`s). *Device:*
+`boyko_app/tests/px1a_display_parity.rs` test 17 (the forced sRGB swapchain's readback equals the UNORM
+one within one code).
 
 ## `px0_probe_store.comp.hlsl` — the float-format probe's compute kernel (compute, TEST-ONLY, render wave PX0)
 
@@ -918,6 +982,35 @@ appears; the rows below only changed bytes.
 
 `vb_raster.{vs,fs}` did **not** move: the id raster only rasterises, so its culling member is chosen
 by the recorder from `DrawBatch::face` and no face bit reaches it (see the `vb_raster` section above).
+
+## PX1a C7 — the switch: `lit` is RGBA16F (34 rows re-DXC'd, no new variant)
+
+Render wave PX1a's switch commit (`px1a/cut.md` C7) moved every `lit` producer from a display-referred
+RGBA8 store to pre-exposed SCENE-LINEAR radiance in `LIT_FORMAT` (RGBA16F): the tonemap + OETF tail and
+the `clamp(lit, 0, 1)` store left all seven producer store sites (`post_final` is the one tail), every
+store passes the eDSL's `lit_store_saturate` (`shaders/lit_format.hlsli`, orchestrator ruling 67 W5),
+every `gLit` storage declaration names `LIT_FORMAT_QUALIFIER`, the duplicate curves left
+`pbr_lighting.hlsli`, and the no-SkyLight background is the scene-linear `LIT_BACKGROUND_SCENE`. No `-D`
+appears and no row is added; the rows below only changed bytes (or, where stated, did not).
+
+| Source | Re-emitted `.spv` (bytes before → after) | What moved | Byte gate |
+|---|---|---|---|
+| `deferred_pbr.hlsl` | `deferred_pbr.comp.spv` 75,252 → 71,296; `deferred_pbr_wrap.comp.spv` 75,584 → 71,628; `deferred_pbr_hwrt.comp.spv` 68,732 → 64,852; `deferred_pbr_hwrt_vis.comp.spv` 10,132 (unmoved); `deferred_pbr_hwrt_denoised.comp.spv` 64,800 → 60,920; `deferred_pbr_hwrt_vis_mv.comp.spv` 11,108 (unmoved) | `gLit` retyped; the surface + sky tails and the store clamp removed; the no-SkyLight arm stores `LIT_BACKGROUND_SCENE`; the store through `lit_store_saturate` (the VIS rows return before the store) | `ddgi_probe_gi_sync.rs`, `sdf_field_edsl_sync.rs`, `ssao_atrous_edsl_sync.rs`, `vb_raster_geo_classify_spv_sync.rs` |
+| `forward_opaque.fs.hlsl` | `forward_opaque.fs.spv` 34,404 → 31,980; `forward_opaque_froxel.fs.spv` 36,820 → 34,428 | the tail and the return clamp removed; the return through `lit_store_saturate`; the attachment is `LIT_FORMAT` (pipeline state) | `mesh_face_edsl_sync.rs` |
+| `forward_sky.fs.hlsl` (also `vb_sky`) | `forward_sky.fs.spv` 7,576 → 5,104 | the sky tail and the return clamp removed; the fallback is `LIT_BACKGROUND_SCENE` | the census `lit_store_clamp_census.rs` (no sync gate names this stem) |
+| `sdf_forward_march.comp.hlsl` | `sdf_forward_march.comp.spv` 146,832 → 144,424; `sdf_forward_march_sdfonly.comp.spv` 146,336 → 143,928; `sdf_forward_march_viewt.comp.spv` 147,112 → 144,704; `sdf_forward_march_sdfonly_viewt.comp.spv` 146,572 → 144,164 | `gLit` retyped; the tail and the store clamp removed | `marcher_spv_sync.rs`, `sdf_depth_merge_edsl_sync.rs`, `sdf_field_edsl_sync.rs` |
+| `vb_resolve.comp.hlsl` / `vb_shade.comp.hlsl` | `vb_resolve.comp.spv` 49,304 → 46,896; `vb_resolve_froxel.comp.spv` 51,476 → 49,100; `vb_shade.comp.spv` 50,296 → 47,888; `vb_shade_tex.comp.spv` 57,592 → 55,272; `vb_shade_froxel.comp.spv` 52,468 → 50,092; `vb_shade_tex_froxel.comp.spv` 59,764 → 57,460 | `gLit` retyped; the tail and the store clamp removed (the two stores stay character-identical); `vb_shade`'s diagnostic magenta store unchanged | `vb_lit_producer_spv_sync.rs`, `vb_froxel_spv_sync.rs`, `mesh_face_edsl_sync.rs`, `sdf_field_edsl_sync.rs`, `vb_raster_geo_classify_spv_sync.rs` |
+| `vb_shade_split.comp.hlsl` | `vb_shade_split.comp.spv` 57,172 → 54,780; `vb_shade_split_tex.comp.spv` 64,468 → 62,148; `vb_shade_split_hwrt.comp.spv` 47,360 → 44,968; `vb_shade_split_tex_hwrt.comp.spv` 54,656 → 52,336 | as `vb_resolve` | `vb_lit_producer_spv_sync.rs`, `mesh_face_edsl_sync.rs`, `sdf_field_edsl_sync.rs`, `vb_raster_geo_classify_spv_sync.rs` |
+| `vb_geo.comp.hlsl` | `vb_geo.comp.spv` 16,596 → 16,596; `vb_geo_mv.comp.spv` 18,572 → 18,572; `vb_geo_sv0.comp.spv` 29,000 → 29,000 | `gLit` (bound-but-unread) retyped so the bound view's format matches — DXC keeps the declaration, so its `OpTypeImage` format word moves | `vb_raster_geo_classify_spv_sync.rs`, `vb_geo_preprocess_sync.rs` (its `LATER_EDITS` row states this edit), `mesh_face_edsl_sync.rs` |
+| `taa_resolve.comp.hlsl` | `taa_resolve.comp.spv` 21,396 → 30,236 | D-S5 step 2 (its section above) | `post_chain_spv_sync.rs` |
+| `ssaa_downsample.fs.hlsl` | `ssaa_downsample.fs.spv` 1,936 → 4,812 | the HDR box (its section above) | `post_chain_spv_sync.rs` |
+| `particle_draw.{vs,fs}.hlsl` (generated) | `particle_draw.vs.spv` 4,144 → 4,196; `particle_draw_dlin.vs.spv` 4,540 → 4,592; `particle_draw.fs.spv` 1,308 → 1,856; `particle_draw_dlin.fs.spv` 1,876 → 2,408 | the push block's `pre_exposure` word (both stages declare it); the FS multiplies the colour by it | `particle_edsl_sync.rs` |
+| `post_final.comp.hlsl` (generated) | `post_final.comp.spv` 6,516 (unmoved) | nothing: the PX1a leaves are new functions | `post_edsl_sync.rs` |
+
+`pbr_lighting.hlsli` lost `aces_fitted` / `khronos_pbr_neutral` / `reinhard_jodie` / `tonemap_select` /
+`OETF_GAMMA_EXP` (no producer calls them after the tail removal; `lit_store_clamp_census.rs` rule 1
+keeps `post_final.comp.hlsl` the only shader carrying a tail token). `post_passthrough.comp.{hlsl,spv}`
+(the transitional kernel of C5–C6) is deleted with its section and its `post_chain_spv_sync.rs` row.
 
 ## Why these stay N `.spv` (do NOT try to spec-const-collapse)
 

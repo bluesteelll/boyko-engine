@@ -47,12 +47,15 @@ use super::super::scene_types::{
 use super::super::targets::{ForwardTargets, GBufferTargets};
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
 
-/// The Forward `lit` clear color — byte-identical to `record_gbuffer`'s albedo clear
-/// (`gbuffer.rs`: `[0.05, 0.05, 0.1, 1.0]`, the marcher's `BACKGROUND` base,
-/// `sdf_gbuffer_composite.hlsl`). Forward v1 has no SDF leg (mesh-only), so this is purely a
-/// visual-parity choice — a mesh-only Deferred frame's uncovered pixels show the SAME
-/// background this constant reproduces.
-const FORWARD_LIT_CLEAR: [f32; 4] = [0.05, 0.05, 0.1, 1.0];
+/// The Forward `lit` clear color — the scene-linear background
+/// [`LIT_BACKGROUND_SCENE`](super::super::targets::LIT_BACKGROUND_SCENE) (render wave PX1a D-S3),
+/// the value the Deferred no-SkyLight arm and `forward_sky`'s fallback store, so an uncovered
+/// pixel shows the SAME background on every path after `post_final` (before PX1a this was the
+/// display-referred `[0.05, 0.05, 0.1]`, which `post_final` would tonemap to a different colour).
+const FORWARD_LIT_CLEAR: [f32; 4] = {
+    let c = super::super::targets::LIT_BACKGROUND_SCENE;
+    [c[0], c[1], c[2], 1.0]
+};
 
 /// The Forward reverse-Z depth CLEAR (Decision 4): `0.0` is the "nothing drawn yet" sentinel —
 /// farther than any real `depth ∈ (0, 1]` under `VK_COMPARE_OP_GREATER` (nearer fragment has
@@ -75,7 +78,11 @@ impl Renderer<'_> {
     /// `cmd` must be recordable (waited free); `image`/`view` must belong to the swapchain image
     /// presented this frame; `scene`'s pipelines/buffers/samplers are live on this device;
     /// `targets`/`forward` were synced to `present_extent` (the SAME contract
-    /// [`record_gbuffer`](super::gbuffer)'s doc states, restricted to Forward's own images/sets).
+    /// [`record_gbuffer`](super::gbuffer)'s doc states, restricted to Forward's own images/sets)
+    /// and `aa_extent` — the BOOT-FIXED extent `display` was allocated at. Forward runs no SSAA
+    /// downsample, so it equals `present_extent` (the host keeps `display` at the composite on a
+    /// path that degrades a boot-armed SSAA, review r2 R2-W1; `GBufferTargets::create` asserts it);
+    /// the dispatch and the dump still name `display`'s own extent (review r1 W2).
     /// `extent` is the swapchain extent and governs ONLY the present-blit's clear render-area and
     /// the readback region; a `Some(readback)` buffer is host-visible and ≥ the swapchain image's
     /// (`extent`-sized) byte size. A pending image-dump request on `self` meets the image-dump
@@ -90,6 +97,7 @@ impl Renderer<'_> {
         view: VkImageView,
         extent: VkExtent2D,
         present_extent: VkExtent2D,
+        aa_extent: VkExtent2D,
         clear: [f32; 4],
         scene: &GBufferScene<'_>,
         targets: &GBufferTargets,
@@ -1205,6 +1213,18 @@ impl Renderer<'_> {
             }
         }
 
+        // === Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY NaN injection — after every `lit` producer (and the depth merge)
+        // and before the particle draw, the declarator's position; recorded iff declared (the
+        // `inject_nan_lit` key's one frame, never a shipped run). ===
+        if let Some(pass) = plan.test_nan_inject {
+            self.record_forward_pass(pass, cmd, targets, forward, scene, fi);
+            // SAFETY: recording is open and outside any rendering scope (every scope above closed
+            // its own); the line above emitted the pass's derived barriers (`lit[fi]` at
+            // TRANSFER_DST_OPTIMAL after its producers' writes); the pass is declared only on a boot
+            // whose targets were built with the NaN arming; `fi` is this frame's slot.
+            unsafe { self.record_test_nan_inject(cmd, targets, fi) };
+        }
+
         // === Particles P0: the indirect billboard draw, after every `lit` producer
         // (`forward_opaque`, and `sdf_forward_march` where it ran) and before `present_sample` —
         // the declarator's own position. `forward.depth[fi]` is the path's depth image: under
@@ -1245,13 +1265,19 @@ impl Renderer<'_> {
             }
         }
 
-        // === Present-blit `lit` into the swapchain — byte-for-byte port of `record_gbuffer`'s
-        // own Pass C (see this module's doc): the `present_sample` barrier (COLOR_ATTACHMENT_
-        // OPTIMAL → SHADER_READ_ONLY_OPTIMAL, C5-derived from `forward_opaque`'s producer access),
-        // then the swapchain blit, then the readback/present tail. ===
-        // SAFETY: recording is open; `record_forward_pass` records the graph's derived
-        // COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL barrier for the "present_sample" pass
-        // into `cmd`.
+        // === Present-blit `display` into the swapchain — byte-for-byte port of `record_gbuffer`'s
+        // own Pass C (see this module's doc). Render wave PX1a: the post seam's tail first
+        // (`post_final`, `lit` → `display`; Forward arms no AA), then the `present_sample` barrier
+        // (`display` GENERAL → SHADER_READ_ONLY_OPTIMAL, derived from `post_final`'s storage
+        // write), then the swapchain blit, then the readback/present tail. ===
+        self.record_forward_pass(plan.post.post_final, cmd, targets, forward, scene, fi);
+        // SAFETY: recording is open, outside any rendering scope; `post_final`'s derived barriers
+        // were just emitted through the Forward sink; `targets` were created for `scene`;
+        // `display` was allocated at `aa_extent` (`GBufferTargets::create`), the extent the
+        // dispatch covers (review r1 W2); with no SSAA downsample on this path it is also
+        // `present_extent`, the extent of the `lit` the dispatch reads texel for texel, so
+        // `display` holds the whole scene (review r2 R2-W1).
+        unsafe { self.record_post_final(cmd, targets, scene, aa_extent, fi) };
         self.record_forward_pass(plan.present_sample, cmd, targets, forward, scene, fi);
 
         // Render wave PX0: `ZONE_POST_PRESENT` brackets the blit from the swapchain barrier
@@ -1332,8 +1358,8 @@ impl Renderer<'_> {
         // SAFETY: recording is open; `present_rendering` names the live swapchain `view` (now
         // COLOR_ATTACHMENT_OPTIMAL); dynamic rendering is enabled. `scene.present_pipeline` +
         // its bind-group layout belong to this device and its declared color format equals the
-        // swapchain's; `targets.present_set[fi]` binds `lit[fi]` (now SHADER_READ_ONLY_OPTIMAL —
-        // the SAME slot `forward_opaque` just wrote) + sampler at set 0; `blit_viewport`/
+        // swapchain's; `targets.present_set[fi]` binds `display` (left SHADER_READ_ONLY_OPTIMAL by
+        // `present_sample`, written by `post_final` above) + sampler at set 0; `blit_viewport`/
         // `blit_scissor` outlive the bracketed calls; `draw(3, 1, 0, 0)` is the `SV_VertexID`
         // fullscreen triangle. Begin/End bracket the pass exactly.
         unsafe {
@@ -1364,13 +1390,16 @@ impl Renderer<'_> {
             let sources = [
                 (super::super::frame_driver::ImageDumpName::ForwardDepth, Some(&forward.depth[fi]), present_extent),
                 (super::super::frame_driver::ImageDumpName::Lit, Some(&targets.lit[fi]), present_extent),
+                (super::super::frame_driver::ImageDumpName::Display, Some(&targets.display), aa_extent),
             ];
             // SAFETY: recording is open and no render scope is active (the blit's
             // `cmd_end_rendering` is above); `record_forward_pass` just recorded the dump pass's
-            // derived barriers, so each declared source is in its `plan.layouts` layout; both
-            // sources are THIS slot's ring images at `present_extent`, and both carry
-            // `TRANSFER_SRC` usage unconditionally (`ForwardTargets::build`'s depth, the `lit`
-            // ring); the requested staging meets the image-dump clause of this fn's `# Safety`.
+            // derived barriers, so each declared source is in its `plan.layouts` layout; the depth
+            // and `lit` sources are THIS slot's ring images at `present_extent` with `TRANSFER_SRC`
+            // usage unconditionally (`ForwardTargets::build`'s depth, the `lit` ring), `display`
+            // is the single image at `aa_extent` (its allocation extent, `present_extent` on this path) with
+            // `TRANSFER_SRC` because the dump was armed at boot (`dump_usage`); the requested
+            // staging meets the image-dump clause of this fn's `# Safety`.
             unsafe { self.record_image_dump_copies(cmd, dump, &sources, scene.engine_frame_index) };
             if let Some(restore) = dump.restore {
                 self.record_forward_pass(restore, cmd, targets, forward, scene, fi);

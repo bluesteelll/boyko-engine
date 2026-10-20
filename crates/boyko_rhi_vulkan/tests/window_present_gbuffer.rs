@@ -74,7 +74,8 @@ use boyko_rhi::{
     TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use boyko_rhi_vulkan::compute::{B5_CAMERA_UBO_BYTES_M4, B5_CAMERA_UBO_BYTES_MESH_SDF, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, CompositePushConstants, csm_depth_fs_spirv, csm_depth_vs_spirv, punctual_depth_fs_spirv, punctual_depth_vs_spirv, EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GOLDEN_LIGHT_KIND_DIRECTIONAL, GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SPOT, INTERP_INSTANCES_PUSH_BYTES, interp_instances_spirv, LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET, MESH_SDF_PARAMS_OFFSET, MeshSdfParams, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera, encode_edit_list, deferred_pbr_spirv, composite_pixel_ray, DEFAULT_MARCHER_OMEGA, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z, sdf_gbuffer_composite_spirv, sdf_op, sdf_ssao_spirv_variant, sdf_tile_cull_spirv, tile_grid_extent, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH, viewt_from_depth_spirv};
-use boyko_rhi_vulkan::goldens::{GoldenLight, GoldenLightHeader, golden_deferred_resolve, golden_marcher_attributes, GoldenMaterial};
+use boyko_rhi_vulkan::goldens::{GoldenLight, GoldenLightHeader, LIT_ROUNDING, LIT_STORE_PATH, LIT_TARGET, golden_deferred_resolve, golden_display_packed, golden_marcher_attributes, hdr_display_bound, GoldenMaterial};
+use boyko_shaderdsl::post::TONEMAP_ACES;
 use boyko_rhi_vulkan::mesh_sdf_texture::MeshSdfTexture;
 use boyko_sdf_math::mesh_sdf::{BakeMesh, MeshSdfField};
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
@@ -95,7 +96,7 @@ use boyko_rhi_vulkan::ffi::{
 use boyko_rhi_vulkan::swapchain::{
     BrickActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
     GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferFrame,
-    GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation, Renderer,
+    GBufferMeshDraw, GBufferScene, InterpActivation, PostFinalActivation, PunctualDepthActivation, Renderer,
     ResolvedRenderPathGpu, SsaoActivation, Surface, Swapchain,
     ViewtFromDepthActivation,
 };
@@ -118,6 +119,48 @@ use boyko_sdf_math::brick::{BRICK_LEVELS, PointerGrid};
 /// visible with margin and the occluding quad is clearly distinguishable.
 const COMPOSITE_W: u32 = 512;
 const COMPOSITE_H: u32 = 512;
+
+/// Render wave PX1a (D-G5): the harness's own `post_final` pipeline + its 3-binding layout
+/// (`gScene` SAMPLED_IMAGE @0 at GENERAL, `gDisplay` STORAGE @1, the `PostFinal` UBO @2) — the
+/// `GpuSceneBundles::boot` objects, built here because this harness builds every pipeline itself.
+/// The module is the generated `post_final.comp` (`compute::post_final_spirv`).
+fn post_final_objects(device: &VulkanContext) -> (ComputePipeline, VulkanBindGroupLayout) {
+    let layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc {
+            entries: &[
+                BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
+                BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+            ],
+        },
+    )
+    .expect("post_final bind-group layout");
+    let cs = RhiDevice::create_shader_module(device, boyko_rhi_vulkan::compute::post_final_spirv())
+        .expect("post_final compute shader module");
+    let pipeline = RhiDevice::create_compute_pipeline(
+        device,
+        &ComputePipelineDesc {
+            module: &cs,
+            entry: c"main",
+            // A declared-but-unread range: `create_compute_pipeline` rejects 0 bytes.
+            push_constant_bytes: 4,
+            bind_group_layout: Some(&layout),
+            spec_constants: &[],
+        },
+    )
+    .expect("post_final compute pipeline");
+    // SAFETY: `cs` was created on `device` just above and is no longer needed once its pipeline
+    // exists; destroyed exactly once; no GPU work references a shader module.
+    unsafe { RhiDevice::destroy_shader_module(device, cs) };
+    (pipeline, layout)
+}
+
+/// Render wave PX1a (D-G5): the eight `post_final` words over a `width × height` dispatch — the
+/// ACES mode word, exposure ratio 1.0, the extent (`PostFinalGpu`'s layout).
+const fn post_final_words_for(width: u32, height: u32) -> [u32; 8] {
+    [0, 0x3F80_0000, width, height, 0, 0, 0, 0]
+}
 
 /// The window's client size — the swapchain is created at the composite extent so the
 /// 1:1 top-left present fills the whole window. The WSI may clamp it wider/narrower.
@@ -1480,27 +1523,26 @@ fn readback_rgb(texel: [u8; 4], is_bgra: bool) -> [i32; 3] {
     }
 }
 
-/// `true` if a readback texel agrees with a golden packed `0xAABBGGRR` within
-/// `CHANNEL_TOL` per RGB channel (swapchain-byte-order-aware).
-fn readback_close(texel: [u8; 4], golden: u32, is_bgra: bool) -> bool {
-    let g = readback_rgb(texel, is_bgra);
-    let w = unpack_rgb(golden);
-    (0..3).all(|c| (g[c] - w[c]).abs() <= CHANNEL_TOL)
-}
-
-/// Asserts a readback texel agrees with a golden packed color (swapchain-order-aware).
-fn assert_readback_close(texel: [u8; 4], golden: u32, is_bgra: bool, label: &str) {
+/// Asserts a swapchain readback texel (display-referred: `post_final`'s output, presented) agrees
+/// with the display of the oracle's scene-linear radiance `want_lit` — `golden_display(want_lit,
+/// Aces)`, 8-bit — within AD-19's per-pixel bound `hdr_display_bound` for one `LIT_FORMAT` store
+/// under `LIT_ROUNDING` (render wave PX1a C9; it replaces the flat ±`CHANNEL_TOL`).
+fn assert_readback_displays(texel: [u8; 4], want_lit: [f32; 3], is_bgra: bool, label: &str) {
+    let want = unpack_rgb(golden_display_packed(want_lit, TONEMAP_ACES));
+    let want8 = want.map(|c| c as u8);
+    let bound = hdr_display_bound(want8, LIT_TARGET, LIT_ROUNDING[LIT_STORE_PATH]);
+    let got = readback_rgb(texel, is_bgra);
     assert!(
-        readback_close(texel, golden, is_bgra),
-        "{label}: readback {texel:02x?} (bgra={is_bgra}) != golden {golden:#010x} -> {:?} within +/-{CHANNEL_TOL}",
-        unpack_rgb(golden),
+        (0..3).all(|c| f64::from((got[c] - want[c]).abs()) <= bound[c]),
+        "{label}: readback {texel:02x?} (bgra={is_bgra}) -> {got:?} != golden_display({want_lit:?}) = {want:?}          within the per-pixel bound {bound:?}",
     );
 }
 
-/// `true` if two golden packed colors agree within `CHANNEL_TOL` per RGB channel.
-fn goldens_close(a: u32, b: u32) -> bool {
-    let x = unpack_rgb(a);
-    let y = unpack_rgb(b);
+/// `true` if the displays of two oracle radiances agree within `CHANNEL_TOL` per RGB channel (the
+/// discriminator texels must be apart on screen).
+fn goldens_close(a: [f32; 3], b: [f32; 3]) -> bool {
+    let x = unpack_rgb(golden_display_packed(a, TONEMAP_ACES));
+    let y = unpack_rgb(golden_display_packed(b, TONEMAP_ACES));
     (0..3).all(|c| (x[c] - y[c]).abs() <= CHANNEL_TOL)
 }
 
@@ -2269,6 +2311,10 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
     }
 
     let mvp = ortho_mvp_bytes();
+    // Render wave PX1a (D-G5): the harness builds its own `post_final` objects (the
+    // pass runs every frame); its words name the composite extent the renderer is called
+    // with (`aa_extent == present_extent` here).
+    let (post_final_pipeline, post_final_layout) = post_final_objects(device);
     let mut scene = GBufferScene {
         // Particles P0: disarmed in every windowed fixture — no ResId, no pass, no command.
         particle: None,
@@ -2488,6 +2534,8 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // AA Stage 4: OFF (the default) — NO TAA resolve pass recorded, `aa_out`/`taa_hist`
         // stay unallocated, byte-identical to the pre-TAA stream (the 0%-gate).
         taa: None,
+        post_final: PostFinalActivation { pipeline: &post_final_pipeline, layout: &post_final_layout },
+        post_final_words: post_final_words_for(COMPOSITE_W, COMPOSITE_H),
         rcas: None,
         // M3: the LEGACY merged draw (no instanced mesh — an EMPTY batch slice) —
         // `record_gbuffer` keeps `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the
@@ -2906,9 +2954,9 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         let b_got = read_texel(bx, by);
         let d_got = read_texel(dx, dy);
 
-        assert_readback_close(a_got, a_want, is_bgra, "mesh-occludes-SDF texel (raster-PBR)");
-        assert_readback_close(b_got, b_want, is_bgra, "SDF texel (lit color)");
-        assert_readback_close(d_got, d_want, is_bgra, "background texel");
+        assert_readback_displays(a_got, a_want, is_bgra, "mesh-occludes-SDF texel (raster-PBR)");
+        assert_readback_displays(b_got, b_want, is_bgra, "SDF texel (lit color)");
+        assert_readback_displays(d_got, d_want, is_bgra, "background texel");
 
         // The occlusion actually changed the on-screen pixel: the mesh-occludes-SDF
         // texel and the SDF texel are BOTH over the sphere, yet must differ.
@@ -2941,6 +2989,8 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         RhiDevice::destroy_bind_group_layout(device, present_layout);
         RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
         RhiDevice::destroy_bind_group_layout(device, resolve_layout);
+        RhiDevice::destroy_compute_pipeline(device, post_final_pipeline);
+        RhiDevice::destroy_bind_group_layout(device, post_final_layout);
         RhiDevice::destroy_compute_pipeline(device, marcher);
         RhiDevice::destroy_bind_group_layout(device, vocab_layout);
         RhiDevice::destroy_graphics_pipeline(device, raster_pipeline);
@@ -3407,6 +3457,10 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
     let csm = CsmSceneResources::create(device, &instance_layout);
 
     let mvp = ortho_mvp_bytes();
+    // Render wave PX1a (D-G5): the harness builds its own `post_final` objects (the
+    // pass runs every frame); its words name the composite extent the renderer is called
+    // with (`aa_extent == present_extent` here).
+    let (post_final_pipeline, post_final_layout) = post_final_objects(device);
     let mut scene = GBufferScene {
         // Particles P0: disarmed in every windowed fixture — no ResId, no pass, no command.
         particle: None,
@@ -3609,6 +3663,8 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // AA Stage 4: OFF (the default) — NO TAA resolve pass recorded, `aa_out`/`taa_hist`
         // stay unallocated, byte-identical to the pre-TAA stream (the 0%-gate).
         taa: None,
+        post_final: PostFinalActivation { pipeline: &post_final_pipeline, layout: &post_final_layout },
+        post_final_words: post_final_words_for(COMPOSITE_W, COMPOSITE_H),
         rcas: None,
         // M3: the LEGACY merged draw (no instanced mesh — an EMPTY batch slice) —
         // `record_gbuffer` keeps `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the
@@ -3918,6 +3974,8 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         RhiDevice::destroy_bind_group_layout(device, present_layout);
         RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
         RhiDevice::destroy_bind_group_layout(device, resolve_layout);
+        RhiDevice::destroy_compute_pipeline(device, post_final_pipeline);
+        RhiDevice::destroy_bind_group_layout(device, post_final_layout);
         RhiDevice::destroy_compute_pipeline(device, coarse_compute);
         RhiDevice::destroy_compute_pipeline(device, marcher);
         RhiDevice::destroy_bind_group_layout(device, vocab_layout);
@@ -8470,6 +8528,10 @@ fn run_showcase_body_ddgi(
         .unwrap_or_default();
 
     let mvp = cfg.mvp;
+    // Render wave PX1a (D-G5): the harness builds its own `post_final` objects (the
+    // pass runs every frame); its words name the composite extent the renderer is called
+    // with (`aa_extent == present_extent` here).
+    let (post_final_pipeline, post_final_layout) = post_final_objects(device);
     let scene = GBufferScene {
         // Particles P0: disarmed in every windowed fixture — no ResId, no pass, no command.
         particle: None,
@@ -8658,6 +8720,8 @@ fn run_showcase_body_ddgi(
         // AA Stage 4: OFF (the default) — NO TAA resolve pass recorded, `aa_out`/`taa_hist`
         // stay unallocated, byte-identical to the pre-TAA stream (the 0%-gate).
         taa: None,
+        post_final: PostFinalActivation { pipeline: &post_final_pipeline, layout: &post_final_layout },
+        post_final_words: post_final_words_for(COMPOSITE_W, COMPOSITE_H),
         rcas: None,
         mesh_draw: &mesh_draws,
         csm_cascade_texture: &csm.cascade,
@@ -8990,6 +9054,8 @@ fn run_showcase_body_ddgi(
         RhiDevice::destroy_bind_group_layout(device, ssao_layout);
         RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
         RhiDevice::destroy_bind_group_layout(device, resolve_layout);
+        RhiDevice::destroy_compute_pipeline(device, post_final_pipeline);
+        RhiDevice::destroy_bind_group_layout(device, post_final_layout);
         RhiDevice::destroy_compute_pipeline(device, marcher);
         RhiDevice::destroy_bind_group_layout(device, vocab_layout);
         RhiDevice::destroy_graphics_pipeline(device, raster_pipeline);
@@ -9745,6 +9811,10 @@ fn run_showcase_body(
         .unwrap_or_default();
 
     let mvp = cfg.mvp;
+    // Render wave PX1a (D-G5): the harness builds its own `post_final` objects (the
+    // pass runs every frame); its words name the composite extent the renderer is called
+    // with (`aa_extent == present_extent` here).
+    let (post_final_pipeline, post_final_layout) = post_final_objects(device);
     let mut scene = GBufferScene {
         // Particles P0: disarmed in every windowed fixture — no ResId, no pass, no command.
         particle: None,
@@ -9963,6 +10033,8 @@ fn run_showcase_body(
         // AA Stage 4: OFF (the default) — NO TAA resolve pass recorded, `aa_out`/`taa_hist`
         // stay unallocated, byte-identical to the pre-TAA stream (the 0%-gate).
         taa: None,
+        post_final: PostFinalActivation { pipeline: &post_final_pipeline, layout: &post_final_layout },
+        post_final_words: post_final_words_for(COMPOSITE_W, COMPOSITE_H),
         rcas: None,
         // M3: when the config carried instanced meshes, pass A runs the batch loop — one
         // INSTANCED INDEXED draw per registered mesh, each at its `base_instance` bucket
@@ -10251,6 +10323,8 @@ fn run_showcase_body(
             RhiDevice::destroy_bind_group_layout(device, viewt_from_depth_layout);
             RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
             RhiDevice::destroy_bind_group_layout(device, resolve_layout);
+            RhiDevice::destroy_compute_pipeline(device, post_final_pipeline);
+            RhiDevice::destroy_bind_group_layout(device, post_final_layout);
             RhiDevice::destroy_compute_pipeline(device, marcher);
             RhiDevice::destroy_bind_group_layout(device, vocab_layout);
             RhiDevice::destroy_graphics_pipeline(device, raster_pipeline);
@@ -10419,6 +10493,8 @@ fn run_showcase_body(
         RhiDevice::destroy_bind_group_layout(device, viewt_from_depth_layout);
         RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
         RhiDevice::destroy_bind_group_layout(device, resolve_layout);
+        RhiDevice::destroy_compute_pipeline(device, post_final_pipeline);
+        RhiDevice::destroy_bind_group_layout(device, post_final_layout);
         RhiDevice::destroy_compute_pipeline(device, marcher);
         RhiDevice::destroy_bind_group_layout(device, vocab_layout);
         RhiDevice::destroy_graphics_pipeline(device, raster_pipeline);

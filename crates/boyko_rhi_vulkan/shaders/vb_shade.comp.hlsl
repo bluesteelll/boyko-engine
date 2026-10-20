@@ -2,8 +2,9 @@
 // selectable `lit` producer at rung P2c (`Renderer::declare_vb_graph`/`record_vb`, host-selected
 // via `GBufferScene::vb_use_classified`). `vb_shade` -- the material-classified shading dispatch
 // ("The pipeline" step 5):
-// `vkCmdDispatch(G + present_material_count, 1, 1)` (a REGULAR dispatch, NOT
-// `vkCmdDispatchIndirect` -- the FFI lacks indirect dispatch, plan D2). Each group `g`:
+// `vkCmdDispatch(G + present_material_count, 1, 1)` (a REGULAR dispatch, plan D2: the group
+// count is the host's own `G + present_material_count`, so no indirect argument is needed --
+// the FFI's `vkCmdDispatchIndirect`, added since, is not taken here). Each group `g`:
 // `mat=group_to_mat[g]`; SENTINEL -> return; `slot=(g-gbase[mat])*64+(tid&63)`;
 // `slot>=counts[mat]` -> return; `idx=pixel_list[offsets[mat]+slot]`; `px=idx%w; py=idx/w`;
 // then the SAME shading tail `vb_resolve.comp.hlsl` runs.
@@ -14,7 +15,7 @@
 // tid-linear `idx=tid.x; px=idx%w; py=idx/w` computation becomes the classify-table lookup
 // above (`idx=cls_pixel(...)`; `px=idx%w; py=idx/w` -- the SAME two instructions,
 // `vb_resolve.comp.hlsl:214-215`). Every line from the `gVbId.Load` re-fetch onward (the
-// sentinel re-check, `vb_geom_fetch`, the PBR + `shadow_apply` shading, the tonemap tail,
+// sentinel re-check, `vb_geom_fetch`, the PBR + `shadow_apply` shading, the scene-linear store
 // `gLit[uint2(px,py)]=...`) is CHARACTER-IDENTICAL to `vb_resolve.comp.hlsl`'s own -- DO NOT
 // edit that span without also re-verifying `vb_resolve.comp.hlsl` line-for-line. Per-pixel
 // shading is independent of HOW a pixel's `(px,py)` was selected, so regrouping cannot change
@@ -147,7 +148,8 @@ struct MaterialGpu {
 Texture2D<uint2> gVbId : register(t5);
 
 // binding 6: the shared `lit` STORAGE image.
-[[vk::image_format("rgba8")]] RWTexture2D<float4> gLit : register(u6);
+#include "lit_format.hlsli"
+[[vk::image_format(LIT_FORMAT_QUALIFIER)]] RWTexture2D<float4> gLit : register(u6);
 
 // binding 7: the packed classify buffer -- P2a NEW binding (`vb_classify_common.hlsli`'s own
 // `[[vk::binding(7, 0)]]` declaration). Included AFTER `Camera` is declared above so
@@ -633,10 +635,9 @@ void main(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID) {
         lit_direct += (bsdf.diffuse + bsdf.specular) * (NoL * punctual_shadow) * atten * L.color;
     }
 
-    // Same tail as `forward_opaque.fs.hlsl` / the deferred resolve: exposure LAST, THEN the
-    // owner-selected tonemap, THEN the manual gamma-2.2 OETF.
+    // Render wave PX1a: `lit` holds pre-exposed SCENE-LINEAR radiance -- exposure is the last
+    // multiply, the store is bounded at HDR_MAX (`lit_format.hlsli`), and `post_final` alone
+    // applies the tonemap and the OETF.
     float3 lit = (lit_direct + ambient + emissive) * H.exposure;
-    lit = tonemap_select(lit, load_tonemap_mode(LightBuf));
-    lit = pow(lit, OETF_GAMMA_EXP);
-    gLit[uint2(px, py)] = float4(clamp(lit, 0.0, 1.0), 1.0);
+    gLit[uint2(px, py)] = float4(lit_store_saturate(lit), 1.0);
 }

@@ -47,7 +47,7 @@ use boyko_render::{
 use boyko_rhi_vulkan::present::gpu_zone::{
     FWD_ZONE_COUNT, POST_ZONE_COUNT, RENDER_DECLARE_FRAME_GRAPH, ZONE_BASE_FWD, ZONE_BASE_POST,
     ZONE_FWD_OPAQUE, ZONE_FWD_SDF_MARCH, ZONE_FWD_VB_SKY, ZONE_GBUF_DEFERRED_RESOLVE,
-    ZONE_POST_CAS, ZONE_POST_FXAA, ZONE_POST_PRESENT, ZONE_POST_SMAA_BLEND, ZONE_POST_SMAA_EDGE,
+    ZONE_POST_CAS, ZONE_POST_FINAL, ZONE_POST_FXAA, ZONE_POST_PRESENT, ZONE_POST_SMAA_BLEND, ZONE_POST_SMAA_EDGE,
     ZONE_POST_SMAA_WEIGHT, ZONE_POST_SSAA_DOWNSAMPLE, ZONE_POST_TAA_RESOLVE, ZONE_VB_RUN,
 };
 
@@ -269,6 +269,8 @@ fn table(c: ZoneCell) -> Vec<Cell> {
         },
         // Every path presents.
         Cell { zone: ZONE_POST_PRESENT, name: "post_present", expect: Expect::Required },
+        // Render wave PX1a (D-Z1): every path records the post seam's tail.
+        Cell { zone: ZONE_POST_FINAL, name: "post_final", expect: Expect::Required },
         Cell { zone: ZONE_FWD_OPAQUE, name: "fwd_opaque", expect: req(c.path.is_forward()) },
         Cell {
             zone: ZONE_FWD_SDF_MARCH,

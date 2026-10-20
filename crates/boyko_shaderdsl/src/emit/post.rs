@@ -196,8 +196,24 @@ fn traced_constants(arena: &[Node], symbols: &[&'static str]) -> Vec<(&'static s
         .collect()
 }
 
-/// Traces [`crate::post::post_final_main`] over [`EmitCf`] and returns `(body span, constants)`.
-fn trace_post_final_main() -> (String, Vec<(&'static str, &'static str, String)>) {
+/// Which `post_final` module [`emit_post_final_comp_with`] prints.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PostFinalTwin {
+    /// The committed module: the tonemapper is the runtime mode word, a `[branch]` dispatch over the
+    /// three curves ([`emit_post_final_comp`]).
+    Uber,
+    /// Render wave PX1a O6 (`boyko_rhi_vulkan/tests/post_final_occupancy.rs`, TEST-ONLY, never
+    /// committed): the same traced body with the mode word replaced by the ACES constant
+    /// (`TONEMAP_ACES << TONEMAP_MODE_SHIFT`), so DXC folds the dispatch to the ACES arm — the
+    /// "arms compiled out" twin whose driver statistics the occupancy row prints beside the uber
+    /// module's.
+    AcesOnly,
+}
+
+/// Traces [`crate::post::post_final_main`] over [`EmitCf`] and returns `(body span, constants)`;
+/// `twin` chooses whether the mode word is the UBO input ([`PostFinalTwin::Uber`]) or the ACES
+/// constant ([`PostFinalTwin::AcesOnly`]).
+fn trace_post_final_main(twin: PostFinalTwin) -> (String, Vec<(&'static str, &'static str, String)>) {
     let (floats, uints) = post_input_names();
     let float_in: Vec<&str> = floats.iter().map(String::as_str).collect();
     let uint_in: Vec<&str> = uints.iter().map(String::as_str).collect();
@@ -205,8 +221,14 @@ fn trace_post_final_main() -> (String, Vec<(&'static str, &'static str, String)>
     let mut consts = Vec::new();
     let span = emit_post_leaf(&float_in, &uint_in, NO_VEC_INPUTS, NO_VEC4_INPUTS, &res, || {
         let px = [Emit::uint_input(input_id(&uints, "px.x")), Emit::uint_input(input_id(&uints, "px.y"))];
+        let mode_words = match twin {
+            PostFinalTwin::Uber => Emit::uint_input(input_id(&uints, "mode_words")),
+            PostFinalTwin::AcesOnly => {
+                <EmitCf as Cf>::uint_lit(post::TONEMAP_ACES << post::TONEMAP_MODE_SHIFT)
+            }
+        };
         let params = PostParams::<EmitCf> {
-            mode_words: Emit::uint_input(input_id(&uints, "mode_words")),
+            mode_words,
             exposure_ratio: Emit::input(input_id(&floats, "exposure_ratio")),
             extent: [
                 Emit::uint_input(input_id(&uints, "extent.x")),
@@ -225,7 +247,7 @@ fn trace_post_final_main() -> (String, Vec<(&'static str, &'static str, String)>
 /// [`EmitCf`] — the whole per-pixel body: the one scene fetch, the four stage markers, the
 /// `[branch]` tonemapper dispatch, the OETF and the `float4` return.
 pub fn emit_hlsl_post_final_main() -> String {
-    trace_post_final_main().0
+    trace_post_final_main(PostFinalTwin::Uber).0
 }
 
 /// The `post_final_bindings` span: one declaration per [`crate::post::POST_FINAL_BINDINGS`] row, the
@@ -263,11 +285,12 @@ pub fn emit_hlsl_post_final_bindings() -> String {
 
 /// The `post_final_consts` span: a `static const` for every symbol the traced body references.
 pub fn emit_hlsl_post_final_consts() -> String {
-    trace_post_final_main()
-        .1
-        .iter()
-        .map(|(sym, ty, val)| format!("static const {ty} {sym} = {val};\n"))
-        .collect()
+    post_final_consts_text(&trace_post_final_main(PostFinalTwin::Uber).1)
+}
+
+/// The `post_final_consts` span text of a trace's constants.
+fn post_final_consts_text(consts: &[(&'static str, &'static str, String)]) -> String {
+    consts.iter().map(|(sym, ty, val)| format!("static const {ty} {sym} = {val};\n")).collect()
 }
 
 /// Wraps a generated span in its sentinel pair.
@@ -283,11 +306,25 @@ fn sentinel(name: &str, body: &str) -> String {
 ///
 /// The template lives HERE (not in the bin) so the sync test compares the whole committed file.
 pub fn emit_post_final_comp() -> String {
-    let main_fn = format!("float4 post_final_main(uint2 px) {{\n{}}}\n", emit_hlsl_post_final_main());
-    format!(
-        r#"// post_final.comp -- render wave PXe: the post chain's final pass, GENERATED WHOLE and not yet
-// wired (PX1a creates its pipeline). Per pixel: one scene fetch, then hdr_sanitize -> pre_ratio_apply
-// -> tonemap_select -> oetf_gamma22 (`boyko_shaderdsl::post`), stored to the display image.
+    emit_post_final_comp_with(PostFinalTwin::Uber)
+}
+
+/// [`emit_post_final_comp`] for either twin: [`PostFinalTwin::Uber`] is the committed file, byte for
+/// byte; [`PostFinalTwin::AcesOnly`] is the TEST-ONLY O6 twin (`post_final_occupancy.rs` DXCs it at
+/// test time under the same frozen recipe; it is never committed), headed by one line that says so.
+pub fn emit_post_final_comp_with(twin: PostFinalTwin) -> String {
+    let (body, consts) = trace_post_final_main(twin);
+    let main_fn = format!("float4 post_final_main(uint2 px) {{\n{body}}}\n");
+    let twin_line = match twin {
+        PostFinalTwin::Uber => "",
+        PostFinalTwin::AcesOnly => {
+            "// TEST-ONLY O6 TWIN (PostFinalTwin::AcesOnly): the mode word is the ACES constant. Never committed.\n"
+        }
+    };
+    let file = format!(
+        r#"// post_final.comp -- render wave PXe: the post chain's final pass, GENERATED WHOLE; wired since
+// render wave PX1a as every path's unconditional tail. Per pixel: one scene fetch, then hdr_sanitize
+// -> pre_ratio_apply -> tonemap_select -> oetf_gamma22 (`boyko_shaderdsl::post`), stored to `display`.
 //
 // GENERATED by `cargo run -p boyko_shaderdsl --features emit --bin emit_post`. The whole file is the
 // generator's output (`boyko_shaderdsl::emit::emit_post_final_comp`); a hand-edit fails
@@ -313,7 +350,118 @@ void main(uint3 dtid : SV_DispatchThreadID) {{
 }}
 "#,
         bindings = sentinel("post_final_bindings", &emit_hlsl_post_final_bindings()),
-        consts = sentinel("post_final_consts", &emit_hlsl_post_final_consts()),
+        consts = sentinel("post_final_consts", &post_final_consts_text(&consts)),
         main_fn = sentinel("post_final_main", &main_fn),
-    )
+    );
+    format!("{twin_line}{file}")
+}
+
+// ---- Render wave PX1a: the HDR boundary spans (`px1a/cut.md` D-S2; orchestrator ruling 67 W5) ----
+
+/// A traced symbol's `static const` row: `(symbol, hlsl type, value text)`.
+type ConstRow = (&'static str, &'static str, String);
+
+/// Prints one `float3` leaf as a standalone HLSL function `float3 <name>(float3 <p0>[, …]) { return
+/// …; }`: the leaf is traced over [`Node::Vec3Param`]s named `params` and its value recorded as the
+/// one `return`. Returns the function text and the named constants it references.
+fn emit_vec3_leaf_fn(
+    name: &str,
+    params: &[&'static str],
+    leaf: impl FnOnce(&[Emit]) -> Emit,
+) -> (String, Vec<ConstRow>) {
+    let mut consts = Vec::new();
+    let body = emit_post_leaf(&[], &[], params, NO_VEC4_INPUTS, &[], || {
+        let args: Vec<Emit> = (0..params.len() as u32).map(|i| Emit(push(Node::Vec3Param(i)))).collect();
+        let value = leaf(&args);
+        record_stmt(Stmt::Return(value.0));
+        let symbols = NAMED_LITS.with(|n| n.borrow().clone());
+        consts = ARENA.with(|a| traced_constants(&a.borrow(), &symbols));
+    });
+    let sig: Vec<String> = params.iter().map(|p| format!("float3 {p}")).collect();
+    (format!("float3 {name}({}) {{\n{body}}}\n", sig.join(", ")), consts)
+}
+
+/// The constants of several traced functions, each symbol once, in first-reference order.
+fn const_block(sets: &[Vec<ConstRow>]) -> String {
+    let mut seen: Vec<&'static str> = Vec::new();
+    let mut out = String::new();
+    for (sym, ty, val) in sets.iter().flatten() {
+        if !seen.contains(sym) {
+            seen.push(*sym);
+            out.push_str(&format!("static const {ty} {sym} = {val};\n"));
+        }
+    }
+    out
+}
+
+/// The `post_hdr_boundary` span body: [`crate::post::hdr_sanitize`] and
+/// [`crate::post::hdr_history_guard`] printed as HLSL functions (`float3 hdr_sanitize(float3 c)`,
+/// `float3 hdr_history_guard(float3 hist, float3 cur)`), after the constants they reference. Spliced
+/// into `taa_resolve.comp.hlsl` (every `lit` tap, the history write) and `ssaa_downsample.fs.hlsl`
+/// (every tap of the HDR box) by `emit_post --splice`, so the two hand-written files' HDR boundary
+/// is the eDSL's — the SAME leaves `post_final`'s traced body inlines.
+pub fn emit_hlsl_post_hdr_boundary() -> String {
+    let (sanitize, c1) = emit_vec3_leaf_fn("hdr_sanitize", &["c"], |a| post::hdr_sanitize::<EmitCf>(a[0]));
+    let (guard, c2) =
+        emit_vec3_leaf_fn("hdr_history_guard", &["hist", "cur"], |a| post::hdr_history_guard::<EmitCf>(a[0], a[1]));
+    format!("{}\n{sanitize}\n{guard}", const_block(&[c1, c2]))
+}
+
+/// The `lit_store_saturate` span body: [`crate::post::lit_store_saturate`] printed as the HLSL
+/// function `float3 lit_store_saturate(float3 c)`, after `HDR_MAX`. Spliced into
+/// `shaders/lit_format.hlsli`, which every `lit` producer includes; every `lit` store passes
+/// through it (`tests/lit_store_clamp_census.rs` rule 3).
+pub fn emit_hlsl_lit_store_saturate() -> String {
+    let (f, c) = emit_vec3_leaf_fn("lit_store_saturate", &["c"], |a| post::lit_store_saturate::<EmitCf>(a[0]));
+    format!("{}\n{f}", const_block(&[c]))
+}
+
+/// The `srgb_eotf` span body: [`crate::post::srgb_eotf`] printed as the HLSL function
+/// `float3 srgb_eotf(float3 c)` — the piecewise sRGB decode, the exact inverse of the hardware's
+/// `*_SRGB` encode. Spliced into `fullscreen_sample.fs.hlsl` inside its `#if SWAPCHAIN_SRGB` arm
+/// (render wave PX1a D-P1): the present blit's `fullscreen_sample_srgb.fs.spv` variant decodes the
+/// display-referred image before an `*_SRGB` swapchain encodes it on write, so the encoded bytes
+/// are the display's (never a double encode).
+pub fn emit_hlsl_srgb_eotf() -> String {
+    let (f, c) = emit_vec3_leaf_fn("srgb_eotf", &["c"], |a| post::srgb_eotf::<EmitCf>(a[0]));
+    format!("{}
+{f}", const_block(&[c]))
+}
+
+/// One generated span inside a hand-written shader: `(file under boyko_rhi_vulkan/shaders, span
+/// name, the emitter's text)`.
+pub type PostSplice = (&'static str, &'static str, String);
+
+/// Every span `emit_post --splice` rewrites — the table the bin applies and
+/// `boyko_rhi_vulkan/tests/post_chain_spv_sync.rs` pins each committed span against.
+pub fn post_splices() -> [PostSplice; 4] {
+    [
+        ("lit_format.hlsli", "lit_store_saturate", emit_hlsl_lit_store_saturate()),
+        ("taa_resolve.comp.hlsl", "post_hdr_boundary", emit_hlsl_post_hdr_boundary()),
+        ("ssaa_downsample.fs.hlsl", "post_hdr_boundary", emit_hlsl_post_hdr_boundary()),
+        ("fullscreen_sample.fs.hlsl", "srgb_eotf", emit_hlsl_srgb_eotf()),
+    ]
+}
+
+/// `src` with the body of its ONE `// === GENERATED <name> BEGIN/END ===` span replaced by `body`;
+/// `Err` names a missing or repeated sentinel. The sentinels themselves are kept.
+pub fn splice_span(src: &str, name: &str, body: &str) -> Result<String, String> {
+    let begin = format!("// === GENERATED {name} BEGIN ===\n");
+    let end = format!("// === GENERATED {name} END ===\n");
+    let (Some(b), Some(e)) = (src.find(&begin), src.find(&end)) else {
+        return Err(format!("no `{}` / `{}` sentinel pair", begin.trim_end(), end.trim_end()));
+    };
+    if src.matches(&begin).count() != 1 || src.matches(&end).count() != 1 || e < b {
+        return Err(format!("the `{name}` span is not exactly one ordered sentinel pair"));
+    }
+    Ok(format!("{}{begin}{body}{}", &src[..b], &src[e..]))
+}
+
+/// The committed body of the ONE `<name>` span of `src`, or `None`.
+pub fn span_body<'a>(src: &'a str, name: &str) -> Option<&'a str> {
+    let begin = format!("// === GENERATED {name} BEGIN ===\n");
+    let end = format!("// === GENERATED {name} END ===\n");
+    let b = src.find(&begin)? + begin.len();
+    let e = src[b..].find(&end)? + b;
+    Some(&src[b..e])
 }

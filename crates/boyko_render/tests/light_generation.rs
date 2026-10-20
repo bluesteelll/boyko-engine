@@ -1,9 +1,9 @@
 //! Host plan R4 / D5 — the `LightTableGeneration` bump-on-rewrite protocol:
 //! `collect_lights` bumps the generation exactly once per ACTUAL staging rewrite
 //! (spawn / toggle / gate flip), and an idle frame leaves it untouched — the
-//! writer-side determinism the ringed host's per-slot `light_uploaded_gen` compare
-//! relies on (the slot-catch-up half of the protocol is unit-tested host-side in
-//! `boyko_app::light_gate`).
+//! writer-side determinism the host's `light_copy_plan` compares rely on (each slot's
+//! staging generations and the device table's; the catch-up half of the protocol is
+//! unit-tested host-side in `boyko_app::light_gate`).
 //!
 //! SINGLE-TEST BINARY: this file's one `#[test]` adds `LightingPlugin` (which registers
 //! the process-global eviction hooks first) and then spawns lights. Do NOT co-locate a
@@ -28,9 +28,10 @@ fn generation_bumps_on_rewrite_and_holds_on_idle() {
     let mut app = common::lighting_app();
     app.finish();
 
-    // Boot anchor: LightingPlugin seeds generation 0 — the ringed host initializes
-    // `light_uploaded_gen` to u64::MAX, so even a never-rebuilt (light-less) world
-    // uploads its (empty) staged table into both slots on the first two frames.
+    // Boot anchor: LightingPlugin seeds generation 0 — the host seeds every slot's staging
+    // generations and the device table's with u64::MAX (`LightSlotState::BOOT`,
+    // `LightDeviceState::BOOT`), so even a never-rebuilt (light-less) world writes its (empty)
+    // staged table into each slot on its first frame and copies it to the device.
     assert_eq!(generation(&app), 0, "LightingPlugin seeds generation 0");
 
     // A light-less frame: collect_lights' rebuild gate (Changed OR dirty) is closed,

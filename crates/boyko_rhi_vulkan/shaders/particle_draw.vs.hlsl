@@ -48,16 +48,18 @@
 //   (1, *, ...)                                               the bindless texture set the
 //                                                             FRAGMENT half declares
 //
-// # Push constants (72 B, VERTEX stage; the graphics range is separate from the shared COMPUTE one)
+// # Push constants (76 B, VERTEX | FRAGMENT; the graphics range is separate from the shared COMPUTE one)
 //
-//   [0,64)   float4x4 view_proj   -- the path's own view-projection rows
-//   [64,68)  uint     index_base  -- 0 at P0 (additive); CAP-1 for P2's alpha slot
-//   [68,72)  int      index_step  -- +1 at P0 (additive); -1 for P2's alpha slot
+//   [0,64)   float4x4 view_proj     -- the path's own view-projection rows
+//   [64,68)  uint     index_base    -- 0 at P0 (additive); CAP-1 for P2's alpha slot
+//   [68,72)  int      index_step    -- +1 at P0 (additive); -1 for P2's alpha slot
+//   [72,76)  float    pre_exposure  -- render wave PX1a E1: the frame's pre-exposure, read by the FS
 
 struct ParticleDrawPush {
     float4x4 view_proj;
     uint     index_base;
     int      index_step;
+    float    pre_exposure;
 };
 [[vk::push_constant]] ParticleDrawPush pc;
 

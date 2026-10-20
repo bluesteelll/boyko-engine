@@ -81,6 +81,7 @@ use boyko_ecs::App;
 use boyko_ecs::ecs::core::asset::Assets;
 use boyko_render::light::DDGI_MODE_BIT;
 use boyko_render::light_system::LightTableStaging;
+use boyko_render::post::PostPlugin;
 use boyko_render::{
     ClusterConfig, CsmCasterScratch, CsmPlugin, DdgiConfig, DdgiPlugin, LightingConfig,
     LightingPlugin, Material, MaterialUploadStaging, MeshGpu, MeshRenderScratch, RenderPathFrozenConsumers,
@@ -105,6 +106,9 @@ fn production_subset_app() -> App {
     app.insert_resource(LightingConfig::default());
     app.insert_resource(ClusterConfig::default());
     app.add_plugin(LightingPlugin);
+    // Render wave PX1a: `collect_lights` reads `ResolvedPost`, owned by `PostPlugin`, which
+    // `EnginePlugins::build` composes before `LightingPlugin`.
+    app.add_plugin(PostPlugin);
     app.add_plugin(SsaoPlugin);
     app.add_plugin(CsmPlugin);
     app.add_plugin(ShadowAtlasPlugin);

@@ -153,6 +153,17 @@ pub enum BootError {
     /// refuses the whole boot, whether or not particles are armed on it — the same discipline as
     /// [`Self::RequiredFeatureUnsupported`].
     RequiredSubgroupPropertyUnsupported(&'static str),
+    /// Render wave PX1a (AD-1): the chosen GPU's OPTIMAL tiling of a format every boot creates
+    /// lacks a capability the engine uses — a row of `REQUIRED_FORMATS`, the single source for
+    /// the query and this refusal (`lit`, the HDR scene colour: sampled, storage, a blended colour
+    /// attachment, linearly filtered). Checked before `vkCreateDevice`, so a device without it
+    /// gets this named refusal instead of an image-create fault or an unblendable attachment.
+    RequiredFormatMissing {
+        /// The row's name (e.g. `"lit: R16G16B16A16_SFLOAT"`).
+        format: &'static str,
+        /// The row's `VkFormatFeatureFlags` bits the device does not advertise.
+        missing_bits: u32,
+    },
 }
 
 /// Bootstrap options for the instance.
@@ -3101,6 +3112,72 @@ fn missing_subgroup_support(supported_operations: VkFlags, supported_stages: VkF
         })
 }
 
+/// One image format every boot creates and the OPTIMAL-tiling capabilities the engine uses on it.
+/// Render wave PX1a (AD-1): a format is a device PROPERTY with no enable bit, so like
+/// [`RequiredSubgroupOperation`] the boot can only check it — and refuse.
+pub(crate) struct RequiredFormat {
+    /// The row's name — the [`BootError::RequiredFormatMissing`] payload.
+    pub(crate) name: &'static str,
+    /// The `VkFormat` queried with `vkGetPhysicalDeviceFormatProperties`.
+    pub(crate) vk_format: i32,
+    /// The `VkFormatFeatureFlags` the device's `optimalTilingFeatures` must hold.
+    pub(crate) bits: VkFlags,
+}
+
+/// The formats every boot checks before `vkCreateDevice` — the single source for the query and the
+/// refusal (the [`REQUIRED_CORE`] discipline).
+///
+/// * `lit` — the HDR scene colour (PX0 decided RGBA16F: `docs/measurements/2026-10-16-px0-lit-format-decision.md`).
+///   Sampled (TAA's combined sampler, `post_final`'s `gScene`), linearly filtered (TAA's bilinear
+///   history taps), storage (the compute producers' `gLit` store), a colour attachment (Forward, the
+///   sky, SSAA's `lit_native`) and BLENDED (the additive particle draw). All five are mandatory for
+///   `R16G16B16A16_SFLOAT` in Vulkan, so this row refuses no conformant device; it exists so the
+///   format the engine cannot run without is checked instead of assumed.
+pub(crate) const REQUIRED_FORMATS: [RequiredFormat; 1] = [RequiredFormat {
+    name: "lit: R16G16B16A16_SFLOAT",
+    vk_format: crate::present::LIT_FORMAT.as_i32(),
+    bits: VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+        | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
+        | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT
+        | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
+        | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT,
+}];
+
+// The lit row's name spells `LIT_FORMAT`; a flip of the constant must rename the row too.
+const _: () = assert!(
+    matches!(crate::present::LIT_FORMAT, boyko_rhi::Format::R16G16B16A16Sfloat),
+    "LIT_FORMAT moved: rename REQUIRED_FORMATS' lit row (and its bits) with it"
+);
+
+/// The first row of [`REQUIRED_FORMATS`] whose bits `optimal_features_of(row.vk_format)` does not
+/// hold, as `(row name, missing bits)`, else `None`. Pure over the query, so the refusal is
+/// host-testable without a device.
+fn missing_required_format(optimal_features_of: impl Fn(i32) -> VkFlags) -> Option<(&'static str, VkFlags)> {
+    REQUIRED_FORMATS.iter().find_map(|row| {
+        let missing = row.bits & !optimal_features_of(row.vk_format);
+        (missing != 0).then_some((row.name, missing))
+    })
+}
+
+/// The `optimalTilingFeatures` of `vk_format` on `physical_device` — one
+/// `vkGetPhysicalDeviceFormatProperties` call, a query only.
+fn query_optimal_tiling_features(fns: &InstanceFns, physical_device: VkPhysicalDevice, vk_format: i32) -> VkFlags {
+    let mut props = VkFormatProperties { linear_tiling_features: 0, optimal_tiling_features: 0, buffer_features: 0 };
+    // SAFETY: `physical_device` is the live physical device `create_device` was handed; `vk_format`
+    // is a row of `REQUIRED_FORMATS`, built from a `boyko_rhi::Format` discriminant, each of which
+    // equals a valid `VK_FORMAT_*` enumerant (`abi_guard.rs`); `&mut props` is a valid out-pointer
+    // for the `#[repr(C)]` `VkFormatProperties` the driver fully overwrites.
+    unsafe { (fns.get_physical_device_format_properties)(physical_device, vk_format, &mut props) };
+    props.optimal_tiling_features
+}
+
+/// The refusal for a [`REQUIRED_FORMATS`] row — an error path, kept out of `create_device`'s body.
+#[cold]
+#[inline(never)]
+fn required_format_missing(format: &'static str, missing_bits: VkFlags) -> BootError {
+    BootError::RequiredFormatMissing { format, missing_bits }
+}
+
 /// Reads `(supportedOperations, supportedStages)` of `VkPhysicalDeviceSubgroupProperties` with ONE
 /// `vkGetPhysicalDeviceProperties2` call. A query only: it chains nothing into `vkCreateDevice`
 /// and changes no device state.
@@ -3944,6 +4021,13 @@ fn create_device(
     if let Some(name) = missing_subgroup_support(subgroup_operations, subgroup_stages) {
         return Err(BootError::RequiredSubgroupPropertyUnsupported(name));
     }
+    // Render wave PX1a (AD-1): the formats every boot creates are PROPERTIES too — refused here,
+    // before any image exists, rather than at an image-create or a blended draw.
+    if let Some((format, missing_bits)) =
+        missing_required_format(|vk_format| query_optimal_tiling_features(fns, physical_device, vk_format))
+    {
+        return Err(required_format_missing(format, missing_bits));
+    }
 
     let priority: f32 = 1.0;
     let queue_info = VkDeviceQueueCreateInfo {
@@ -4732,5 +4816,76 @@ mod required_subgroup_tests {
                 row.name
             );
         }
+    }
+}
+
+/// Render wave PX1a test 1 (AD-1): the REQUIRED format table is the single source for the boot's
+/// format query and its refusal; these tests drive the pure check with fake per-format feature
+/// tables, so the refusal is pinned without a device.
+#[cfg(test)]
+mod required_format_tests {
+    use super::{REQUIRED_FORMATS, missing_required_format};
+    use crate::ffi::{
+        VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT,
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT,
+        VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT, VkFlags,
+    };
+
+    /// `VK_FORMAT_R16G16B16A16_SFLOAT` (vulkan_core.h) — `lit`'s format, PX0's decision.
+    const RGBA16F: i32 = 97;
+    const LIT_ROW: &str = "lit: R16G16B16A16_SFLOAT";
+    const ALL_LIT_BITS: VkFlags = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+        | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
+        | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT
+        | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
+        | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+
+    /// A fake device whose OPTIMAL tiling of RGBA16F holds `rgba16f_bits` and of every other
+    /// format holds nothing — so a check that queried the wrong format would refuse.
+    fn device_with(rgba16f_bits: VkFlags) -> impl Fn(i32) -> VkFlags {
+        move |vk_format| if vk_format == RGBA16F { rgba16f_bits } else { 0 }
+    }
+
+    #[test]
+    fn a_table_with_every_lit_bit_boots() {
+        assert_eq!(missing_required_format(device_with(ALL_LIT_BITS)), None);
+        assert_eq!(missing_required_format(device_with(VkFlags::MAX)), None);
+    }
+
+    #[test]
+    fn a_table_without_storage_image_is_refused_naming_the_lit_row() {
+        assert_eq!(
+            missing_required_format(device_with(ALL_LIT_BITS & !VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)),
+            Some((LIT_ROW, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)),
+            "a table without STORAGE_IMAGE booted"
+        );
+    }
+
+    #[test]
+    fn a_table_without_color_attachment_blend_is_refused_naming_the_lit_row() {
+        assert_eq!(
+            missing_required_format(device_with(ALL_LIT_BITS & !VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT)),
+            Some((LIT_ROW, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT)),
+            "a table without COLOR_ATTACHMENT_BLEND booted"
+        );
+    }
+
+    /// Every bit of the row, cleared alone, refuses with exactly that bit as the payload; two
+    /// cleared bits are both reported.
+    #[test]
+    fn clearing_any_lit_bit_refuses_with_exactly_the_missing_bits() {
+        for bit in (0..32).map(|s| 1u32 << s).filter(|b| ALL_LIT_BITS & b != 0) {
+            assert_eq!(missing_required_format(device_with(ALL_LIT_BITS & !bit)), Some((LIT_ROW, bit)), "bit {bit:#x}");
+        }
+        let two = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+        assert_eq!(missing_required_format(device_with(ALL_LIT_BITS & !two)), Some((LIT_ROW, two)));
+    }
+
+    /// The table, pinned to the spec's `VkFormat` / `VkFormatFeatureFlagBits` values rather than to
+    /// the constants that spell them.
+    #[test]
+    fn the_table_is_exactly_the_lit_row_on_rgba16f_with_its_five_bits() {
+        let rows: Vec<(&str, i32, u32)> = REQUIRED_FORMATS.iter().map(|r| (r.name, r.vk_format, r.bits)).collect();
+        assert_eq!(rows, [(LIT_ROW, RGBA16F, 0x1 | 0x2 | 0x80 | 0x100 | 0x1000)]);
     }
 }
