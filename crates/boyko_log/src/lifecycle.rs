@@ -418,13 +418,12 @@ impl ConsoleStage {
     }
 
     /// A pass rendered more console text than the stage holds: write what is staged now, under the
-    /// role -- the third way [`ShutdownOutcome::StalledInsidePass`] can arise.
+    /// role -- one of the synchronous writes a pass can stall in
+    /// ([`ShutdownOutcome::StalledInsidePass`]).
     #[cold]
     #[inline(never)]
     fn overflow(&mut self) {
-        OVERFLOW_WRITE_IN_FLIGHT.store(true, Ordering::Release);
         self.write_out();
-        OVERFLOW_WRITE_IN_FLIGHT.store(false, Ordering::Release);
     }
 
     /// Write and empty the stage. Called outside the role, after every pass.
@@ -436,17 +435,13 @@ impl ConsoleStage {
     }
 }
 
-/// Set while an overflowing pass writes its stage under the role. [`report_stalled_exit`] reads
-/// it: when it is set, the stalled consumer IS the console, and a report written there would wait
-/// behind the very write it is about.
-static OVERFLOW_WRITE_IN_FLIGHT: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
 /// One pass over every lane, under a role the caller already holds, routed per sink.
 ///
-/// Per record the order is file, binary, ECS, and the console LAST: each sink's own byte stream is
-/// what it always was, and only the order across sinks changed -- so whatever happens to the
-/// console's consumer, every durable sink already holds the record.
+/// Per record the order is file, binary, ECS, and the console LAST, so whatever happens to the
+/// console's consumer, every durable sink already holds the record. Each durable sink's byte
+/// stream is what it always was. The console's moved by one step: a report a durable sink writes
+/// to the synchronous channel while it takes a record (`W0103`, `W0112`) now precedes that
+/// record's line, and on the sink thread every line its pass staged.
 fn deliver(token: &crate::drain_owner::DrainToken, mut console: Console<'_>) -> crate::lane::DrainStats {
     // Sink lifecycle runs HERE, on the draining thread, before any record moves (L14). The
     // requesting thread posted a byte and returned; the `open` -- a syscall -- happens under the
@@ -854,11 +849,13 @@ pub enum ShutdownOutcome {
     /// ([`console_lines_skipped`]); the lines the sink thread had staged reach it when its
     /// consumer reads again.
     ClosedAfterStall = 3,
-    /// The bound expired with the drain role HELD: the sink is stalled inside a pass -- a durable
-    /// write (the disk, a filter driver), a render, or a staged console overflow, which is written
-    /// under the role. Nothing could be delivered safely, so the durable file lacks what that pass
-    /// had not reached, visibly: its census has no `LOG-CENSUS limiter` line. [`await_exit`] waits
-    /// longer and closes the sinks once the thread exits.
+    /// The bound expired with the drain role HELD: the sink is stalled inside a pass -- in a
+    /// durable write (the disk, a filter driver), a render, or a synchronous console write the
+    /// pass makes under the role: a staged overflow, the file sink's cap (`W0103`) or
+    /// rotation-loss (`W0112`) report, an un-laned fallback line. Nothing could be delivered
+    /// safely, so the durable file lacks what that pass had not reached, visibly: its census has no
+    /// `LOG-CENSUS limiter` line. [`await_exit`] waits longer and closes the sinks once the thread
+    /// exits.
     StalledInsidePass = 4,
     /// The sink thread died -- it panicked -- before it could exit. Its unwind released the role,
     /// so the calling thread delivered and closed as in
@@ -1028,17 +1025,17 @@ fn close_after_expiry() -> ShutdownOutcome {
 /// [`await_exit`] grace ([`ShutdownOutcome::StalledInsidePass`]): the durable log may lack its
 /// census, and this line is the only place left to say so.
 ///
-/// Returns whether the line was written. It is NOT written when the stalled write is the console
-/// itself (a staged overflow written under the role): the report would wait behind the write it is
-/// about, and on a consumer that never reads again that is a hang on the exit path. The outcome
+/// Returns whether the line was written. It is NOT written when the synchronous channel stays
+/// busy past its 50 ms acquire deadline. A pass can stall IN a synchronous write -- any of those
+/// [`ShutdownOutcome::StalledInsidePass`] lists -- and then its thread holds stderr's lock for as
+/// long as the console does not read; a report that waited there would hang the exit path it is
+/// on. So the report never steals the channel, and the test is on the channel, not on the cause: a
+/// synchronous write added to the pass later is covered without a flag of its own. The outcome
 /// stays readable either way.
 #[cold]
 #[inline(never)]
 pub fn report_stalled_exit() -> bool {
-    if OVERFLOW_WRITE_IN_FLIGHT.load(Ordering::Acquire) {
-        return false;
-    }
-    crate::sync_out::write_oracle_line(
+    crate::sync_out::write_oracle_line_if_idle(
         "boyko-log: ",
         "shutdown: the sink thread is still stalled inside a drain pass; the durable log may lack \
          its census (no `LOG-CENSUS limiter` line)",

@@ -177,7 +177,35 @@ pub fn write_oracle_line(prefix: &str, body: &str) -> Option<OutMode> {
     if refused_here() {
         return None;
     }
-    let g = acquire();
+    write_line_with(acquire(), prefix, body)
+}
+
+/// [`write_oracle_line`] for a report about a stalled consumer: written only if the channel goes
+/// idle within [`ACQUIRE_DEADLINE`], and never through a steal.
+///
+/// A thread stalled writing to the console holds this channel AND stderr's own lock for as long
+/// as its consumer does not read. [`write_oracle_line`] would wait out the deadline, steal, and
+/// then wait on stderr's lock without a bound. That holds whatever the stalled write was -- a
+/// sink pass's staged lines or its overflow, the file sink's cap or rotation report, an un-laned
+/// fallback line -- so the test is on the channel, not on the cause.
+///
+/// Returns `None` when nothing was written, which includes a channel still busy at the deadline.
+/// A writer outside this module (an `eprintln!`) takes stderr's lock without this channel, and is
+/// invisible here.
+pub(crate) fn write_oracle_line_if_idle(prefix: &str, body: &str) -> Option<OutMode> {
+    if !CONSOLE_ENABLED.load(Ordering::Relaxed) {
+        return None;
+    }
+    if refused_here() {
+        return None;
+    }
+    write_line_with(acquire_idle()?, prefix, body)
+}
+
+/// One line under a guard the caller obtained: the write itself, counted in [`WRITES_IN_FLIGHT`].
+fn write_line_with(g: OutGuard, prefix: &str, body: &str) -> Option<OutMode> {
+    // A local drops before the parameter `g`: the count falls before `g` releases.
+    let _writing = InFlight::enter();
     let mut err = std::io::stderr();
     #[cfg(test)]
     test_stall::hold_if_armed();
@@ -194,6 +222,72 @@ pub fn write_oracle_line(prefix: &str, body: &str) -> Option<OutMode> {
     // report a failure has nowhere left to go.
     let _ = err.flush();
     Some(g.mode())
+}
+
+/// Synchronous writes between their acquire and their flush, in every [`OutMode`].
+///
+/// `OUT_OWNER` alone cannot see a writer that STOLE the channel: once the thread it stole from
+/// releases, the owner slot reads free while the stealer may still be blocked in its write,
+/// holding stderr's lock. [`acquire_idle`] reads this as well.
+static WRITES_IN_FLIGHT: AtomicU32 = AtomicU32::new(0);
+
+/// One write counted in [`WRITES_IN_FLIGHT`] for the guard's lifetime, unwinding included.
+struct InFlight;
+
+impl InFlight {
+    fn enter() -> InFlight {
+        // Relaxed: nothing is published through the increment. A stealer's increment has no edge
+        // to `acquire_idle` to be ordered by; that race is stated there.
+        WRITES_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+        InFlight
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        // Release: pairs with the Acquire load in `acquire_idle`, through the writer's own
+        // `OutGuard` release when it held the channel (the guard drops after this).
+        WRITES_IN_FLIGHT.fetch_sub(1, Ordering::Release);
+    }
+}
+
+/// [`acquire`] without the steal: `None` if the channel is still busy at [`ACQUIRE_DEADLINE`] --
+/// held by another thread, or being written by one that stole it.
+///
+/// A caller already inside a write of its own on this thread is refused too: its own token is in
+/// the slot, and this never re-enters.
+///
+/// What it cannot close: a writer that has been waiting out the deadline on a previous owner can
+/// steal between the check below and this caller's write, and block in front of it. That takes a
+/// third writer, and a deadline that expires inside the microseconds this caller needs.
+fn acquire_idle() -> Option<OutGuard> {
+    let me = my_token();
+    let start = std::time::Instant::now();
+    let mut spins = 0u32;
+    loop {
+        if OUT_OWNER
+            .compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            let held = OutGuard { mode: OutMode::Held };
+            // Acquire: pairs with the Release in `InFlight::drop`. A writer that HELD the channel
+            // decremented before its guard's Release freed the slot this CAS just read, so what
+            // this load can still find is a writer that stole.
+            if WRITES_IN_FLIGHT.load(Ordering::Acquire) == 0 {
+                return Some(held);
+            }
+            drop(held);
+        }
+        if start.elapsed() >= ACQUIRE_DEADLINE {
+            return None;
+        }
+        if spins < 64 {
+            std::hint::spin_loop();
+            spins += 1;
+        } else {
+            std::thread::yield_now();
+        }
+    }
 }
 
 /// Writes this channel refused because the calling thread was inside a late close.
@@ -263,6 +357,8 @@ pub(crate) fn write_oracle_block(block: &[u8]) -> Option<OutMode> {
         return None;
     }
     let g = acquire();
+    // Declared after `g`, so it drops first: the count falls before `g` releases.
+    let _writing = InFlight::enter();
     let mut err = std::io::stderr();
     #[cfg(test)]
     test_stall::hold_if_armed();
@@ -473,5 +569,48 @@ mod tests {
         assert_eq!(write_oracle_line("boyko: ", "nothing should be written"), None);
         assert_eq!(OUT_OWNER.load(Ordering::Relaxed), 0, "a no-op must not acquire");
         set_console_enabled(was);
+    }
+
+    #[test]
+    fn an_idle_write_never_waits_on_a_writer_that_stole_the_channel() {
+        // A stealer does not own `OUT_OWNER`. Once the thread it stole from releases, the slot
+        // reads free while the stealer is still blocked in its write, holding stderr's lock; only
+        // `WRITES_IN_FLIGHT` still sees it (ci-fix-1, review r1 W1).
+        let _s = crate::drain_owner::test_serial();
+        let was = CONSOLE_ENABLED.load(Ordering::Relaxed);
+        set_console_enabled(true);
+        let held = acquire();
+        assert_eq!(held.mode(), OutMode::Held, "fixture: the channel must start free");
+        // Disarmed on every exit, a red included: a stall left armed would catch the next test's
+        // sink thread.
+        struct Disarm;
+        impl Drop for Disarm {
+            fn drop(&mut self) {
+                test_stall::disarm();
+            }
+        }
+        test_stall::arm();
+        let _disarm = Disarm;
+        // `test_stall` stalls only a thread named like the sink thread.
+        let stealer = std::thread::Builder::new()
+            .name("boyko-log-sink".into())
+            .spawn(|| write_oracle_line("boyko-log-test: ", "a writer that stole the channel"))
+            .expect("fixture: the stealer thread spawns");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !test_stall::entered() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(test_stall::entered(), "fixture: the stealer never reached its write");
+        drop(held);
+
+        let idle = write_oracle_line_if_idle("boyko-log-test: ", "must not be written");
+        let gave_up = test_stall::gave_up();
+        test_stall::disarm();
+        let stolen = stealer.join().expect("fixture: the stealer thread panicked");
+        set_console_enabled(was);
+
+        assert_eq!(stolen, Some(OutMode::Stolen), "fixture: the stalled writer must have stolen");
+        assert!(!gave_up, "the idle write waited on the stealer's stalled write until it gave up");
+        assert_eq!(idle, None, "an idle write must refuse while a stealer is still writing");
     }
 }
