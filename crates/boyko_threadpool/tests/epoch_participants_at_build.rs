@@ -316,7 +316,8 @@ fn arm_3(pool: &ThreadPool) {
     assert_eq!(
         made.total(),
         0,
-        "a registered non-builder driver's steals counted epoch-sized acquisitions          (this thread?, size, align): {log:?}"
+        "a registered non-builder driver's steals counted epoch-sized acquisitions \
+         (this thread?, size, align): {log:?}"
     );
     println!("[arm 3] register_thread(): {registered:?}; driver-steal window: 0 epoch acquisitions");
 }
