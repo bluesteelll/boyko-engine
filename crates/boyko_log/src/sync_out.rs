@@ -613,4 +613,40 @@ mod tests {
         assert!(!gave_up, "the idle write waited on the stealer's stalled write until it gave up");
         assert_eq!(idle, None, "an idle write must refuse while a stealer is still writing");
     }
+
+    #[test]
+    fn an_idle_write_is_written_once_every_earlier_write_has_finished() {
+        // The positive half of the test above. The stalled-exit report rides this write, and a
+        // refusal-only gate stays green under an idle acquire that never succeeds, or under a
+        // write that never leaves `WRITES_IN_FLIGHT` -- a report never written either way
+        // (ci-fix-1, triage r2 Y1). Every earlier write here has finished, one of them by
+        // stealing, so the channel is idle and each must have un-counted itself.
+        let _s = crate::drain_owner::test_serial();
+        let was = CONSOLE_ENABLED.load(Ordering::Relaxed);
+        set_console_enabled(true);
+        let first = write_oracle_line_if_idle("boyko-log-test: ", "an idle write on a free channel");
+        let plain = write_oracle_line("boyko-log-test: ", "a write that held the channel");
+        // Held until the writer below has been joined, so it can finish only by stealing.
+        let held = acquire();
+        let held_mode = held.mode();
+        let stolen = std::thread::spawn(|| {
+            write_oracle_line("boyko-log-test: ", "a write that stole the channel")
+        })
+        .join()
+        .expect("fixture: the stealer thread panicked");
+        drop(held);
+        // Relaxed: the join already orders the stealer's decrement before this load.
+        let in_flight = WRITES_IN_FLIGHT.load(Ordering::Relaxed);
+        let after = write_oracle_line_if_idle("boyko-log-test: ", "an idle write after a steal");
+        let owner = OUT_OWNER.load(Ordering::Relaxed);
+        set_console_enabled(was);
+
+        assert_eq!(first, Some(OutMode::Held), "an idle write on a free channel must be written");
+        assert_eq!(plain, Some(OutMode::Held), "fixture: the plain write must hold the channel");
+        assert_eq!(held_mode, OutMode::Held, "fixture: the test thread must hold the channel");
+        assert_eq!(stolen, Some(OutMode::Stolen), "fixture: the writer behind a held channel must steal");
+        assert_eq!(in_flight, 0, "a finished write is still counted in flight: {in_flight} of them");
+        assert_eq!(after, Some(OutMode::Held), "an idle write after a finished steal must be written");
+        assert_eq!(owner, 0, "the idle write must free the channel it took");
+    }
 }

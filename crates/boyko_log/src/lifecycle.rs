@@ -1569,4 +1569,25 @@ mod tests {
         );
         assert!(!wrote, "a report behind a stalled synchronous write must be refused, not written");
     }
+
+    #[test]
+    fn a_stalled_exit_report_on_an_idle_channel_is_written() {
+        // The other half of the test above (ruling 76 W3: never silently). A sink thread stalled in
+        // a DURABLE write holds the drain role, not the synchronous channel, so the report finds
+        // the channel idle and must be written. The report reads none of the sink's state, so an
+        // idle channel is the whole fixture: no session and no stall (ci-fix-1, triage r2 Y1). The
+        // write before it has finished and must have left the channel idle.
+        let _s = crate::drain_owner::test_serial();
+        crate::sync_out::set_console_enabled(true);
+        let before = crate::sync_out::write_oracle_line("boyko-log-test: ", "a finished write before the report");
+        let wrote = report_stalled_exit();
+        // `reset`'s value, which every test here starts from and leaves behind.
+        crate::sync_out::set_console_enabled(false);
+        assert_eq!(
+            before,
+            Some(crate::sync_out::OutMode::Held),
+            "fixture: the earlier write must hold the channel"
+        );
+        assert!(wrote, "a stalled-exit report on an idle channel must be written, never silently dropped");
+    }
 }
