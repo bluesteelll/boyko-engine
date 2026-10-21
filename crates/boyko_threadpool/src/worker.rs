@@ -821,6 +821,28 @@ impl XorShift64Star {
     }
 }
 
+/// Make the calling thread a crossbeam-epoch participant, through `probe`.
+///
+/// The same fact [`STEAL_EMPTY_GATE`] is built on: `Stealer::steal` pins BEFORE it
+/// tests for emptiness, and a thread's first pin registers its epoch `Local`. Going
+/// through a stealer rather than calling `crossbeam_epoch::pin` registers in exactly
+/// the collector the pool's deques use, with no dependency of this crate's own that
+/// could resolve to a second collector. On a thread that is already registered it
+/// pins and unpins, and allocates nothing.
+///
+/// `probe` must be a deque nothing pushes to -- the pool's private probe
+/// (`PoolInner::epoch_probe`), whose `Worker` end no longer exists -- so the steal
+/// can only answer `Empty` and can never take a task. Cold: build time and
+/// `ThreadPool::register_thread` only.
+#[cold]
+pub(crate) fn register_epoch_participant(probe: &crossbeam_deque::Stealer<Task>) {
+    let probed = probe.steal();
+    debug_assert!(
+        matches!(probed, Steal::Empty),
+        "invariant: the epoch probe is a deque nothing pushes to"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

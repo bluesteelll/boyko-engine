@@ -359,3 +359,16 @@ const _: () = {
     // than through `RATE` — which is what `Once` means, and what `crate::rate` refuses to do.
     let _ = W0103;
 };
+
+/// Whether `W0103`'s once-per-process latch is spent: a lib test about a cap crossing asserts it is
+/// not, so its green cannot depend on which test crossed a cap first.
+#[cfg(test)]
+pub(crate) fn cap_report_spent() -> bool {
+    CAP_REPORTED.has_fired()
+}
+
+/// Whether `W0112`'s once-per-process latch is spent, for the same reason as [`cap_report_spent`].
+#[cfg(test)]
+pub(crate) fn rotation_report_spent() -> bool {
+    ROTATE_REPORTED.has_fired()
+}
