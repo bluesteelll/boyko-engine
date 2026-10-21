@@ -3497,22 +3497,24 @@ pub type PfnVkDestroyPipelineLayout = unsafe extern "system" fn(
     p_allocator: *const c_void,
 );
 
-/// `PFN_vkCreateComputePipelines`. `pipeline_cache` is null for Slice 0;
-/// `create_info_count` pipelines are written into `p_pipelines`.
+/// `PFN_vkCreateComputePipelines`. `pipeline_cache` is the context's one cache (BOOT-1 F-A;
+/// `VK_NULL_HANDLE` under `BOYKO_PIPELINE_CACHE=off`); `create_info_count` pipelines are written
+/// into `p_pipelines`. `VkPipelineCache` is `repr(transparent)` over `u64`, so the retype from the
+/// former `u64` parameter is ABI-identical.
 pub type PfnVkCreateComputePipelines = unsafe extern "system" fn(
     device: VkDevice,
-    pipeline_cache: u64,
+    pipeline_cache: VkPipelineCache,
     create_info_count: u32,
     p_create_infos: *const VkComputePipelineCreateInfo,
     p_allocator: *const c_void,
     p_pipelines: *mut VkPipeline,
 ) -> i32;
 
-/// `PFN_vkCreateGraphicsPipelines` (Phase-6 S0 rung 2). `pipeline_cache` is null;
-/// `create_info_count` pipelines are written into `p_pipelines`.
+/// `PFN_vkCreateGraphicsPipelines` (Phase-6 S0 rung 2). `pipeline_cache` as for
+/// [`PfnVkCreateComputePipelines`]; `create_info_count` pipelines are written into `p_pipelines`.
 pub type PfnVkCreateGraphicsPipelines = unsafe extern "system" fn(
     device: VkDevice,
-    pipeline_cache: u64,
+    pipeline_cache: VkPipelineCache,
     create_info_count: u32,
     p_create_infos: *const VkGraphicsPipelineCreateInfo,
     p_allocator: *const c_void,

@@ -11,6 +11,7 @@
 use super::*;
 
 use core::ffi::c_void;
+use core::panic::Location;
 use core::ptr::{self, NonNull};
 
 use boyko_rhi::{
@@ -23,6 +24,7 @@ use crate::compute::ComputeError;
 use crate::device::{DeviceFns, VulkanContext};
 use crate::error::VulkanError;
 use crate::memory::BoundBuffer;
+use crate::pipeline_cache::PipelineKind;
 use crate::texture::{VulkanTexture, VulkanTextureView};
 
 impl RhiDevice<Vulkan> for VulkanContext {
@@ -722,6 +724,9 @@ impl RhiDevice<Vulkan> for VulkanContext {
         };
     }
 
+    // BOOT-1 F-A: `#[track_caller]` on every creation entry point, so the telemetry's top-N names
+    // the scene line that asked for the pipeline (`Location::caller()` at the record below).
+    #[track_caller]
     fn create_compute_pipeline(
         &self,
         desc: &ComputePipelineDesc<Vulkan>,
@@ -846,9 +851,12 @@ impl RhiDevice<Vulkan> for VulkanContext {
             p_name: desc.entry.as_ptr(),
             p_specialization_info: p_spec.cast(),
         };
+        // BOOT-1 F-A: the creation feedback (output-only; one stage, VUID-...-06566).
+        let mut feedback = CreationFeedback::<1>::new();
+        let feedback_info = feedback.chain();
         let cp_info = VkComputePipelineCreateInfo {
             s_type: VkStructureType::ComputePipelineCreateInfo,
-            p_next: ptr::null(),
+            p_next: (&raw const feedback_info).cast(),
             flags: 0,
             stage,
             layout: pipeline_layout,
@@ -856,7 +864,9 @@ impl RhiDevice<Vulkan> for VulkanContext {
             base_pipeline_index: -1,
         };
         let mut pipeline = VkPipeline::NULL;
-        // SAFETY: `device` is live; null pipeline cache (`0`) is valid; one
+        // SAFETY: `device` is live; the pipeline cache is the context's own (internally
+        // synchronized) or `VK_NULL_HANDLE`, both valid; the `pNext` creation-feedback chain points
+        // at the `feedback` stack local, alive for the call and written only by the driver; one
         // create-info is fully initialized, referencing the live shader module +
         // the chosen `pipeline_layout` (the device-shared fixed layout or the
         // just-created dedicated one); `&mut pipeline` is a valid out-pointer for the
@@ -865,7 +875,7 @@ impl RhiDevice<Vulkan> for VulkanContext {
         let raw = unsafe {
             (self.device_fns().create_compute_pipelines)(
                 self.device(),
-                0,
+                self.pipeline_cache(),
                 1,
                 &cp_info,
                 ptr::null(),
@@ -892,6 +902,7 @@ impl RhiDevice<Vulkan> for VulkanContext {
                 result,
             )));
         }
+        self.record_pipeline_creation(PipelineKind::Compute, &feedback.pipeline, Location::caller());
         Ok(ComputePipeline {
             pipeline,
             layout: pipeline_layout,
@@ -916,6 +927,7 @@ impl RhiDevice<Vulkan> for VulkanContext {
         };
     }
 
+    #[track_caller]
     fn create_graphics_pipeline(
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
@@ -926,7 +938,7 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // depth_write: true` here reuses the IDENTICAL code path (not merely a `None`-gated
         // branch) every pre-T6c/pre-R4b-b caller took — byte-identical
         // `VkPipelineLayoutCreateInfo`/depth-stencil state by construction.
-        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_LESS, true, GRAPHICS_PUSH_STAGES_DEFAULT)
+        self.build_graphics_pipeline(Location::caller(), desc, None, VK_COMPARE_OP_LESS, true, GRAPHICS_PUSH_STAGES_DEFAULT)
     }
 
     unsafe fn destroy_graphics_pipeline(&self, pipeline: VulkanGraphicsPipeline) {
@@ -1631,6 +1643,7 @@ impl VulkanContext {
     /// [`VulkanGraphicsPipeline::push_stages`].
     fn build_graphics_pipeline(
         &self,
+        site: &'static Location<'static>,
         desc: &GraphicsPipelineDesc<Vulkan>,
         set1: Option<VkDescriptorSetLayout>,
         depth_compare: i32,
@@ -2023,9 +2036,14 @@ impl VulkanContext {
         for (slot, fmt) in color_formats.iter_mut().zip(desc.color_formats.iter()) {
             *slot = fmt.as_i32();
         }
+        // BOOT-1 F-A: the creation feedback (output-only), chained behind the rendering info; one
+        // slot per shader stage, sized FROM `stages` so the count always equals `stageCount`
+        // (VUID-VkGraphicsPipelineCreateInfo-pipelineStageCreationFeedbackCount-06594).
+        let mut feedback = CreationFeedback::matching(&stages);
+        let feedback_info = feedback.chain();
         let rendering_info = VkPipelineRenderingCreateInfo {
             s_type: VkStructureType::PipelineRenderingCreateInfo,
-            p_next: ptr::null(),
+            p_next: (&raw const feedback_info).cast(),
             view_mask: 0,
             color_attachment_count: color_attachment_count as u32,
             // CSM Increment 0: null the format array for the depth-only path
@@ -2064,7 +2082,9 @@ impl VulkanContext {
         };
 
         let mut pipeline = VkPipeline::NULL;
-        // SAFETY: `device` is live; null pipeline cache (`0`) is valid; one
+        // SAFETY: `device` is live; the pipeline cache is the context's own (internally
+        // synchronized) or `VK_NULL_HANDLE`, both valid; the `pNext` creation-feedback chain points
+        // at the `feedback` stack local, alive for the call and written only by the driver; one
         // fully-initialized `VkGraphicsPipelineCreateInfo` references the live
         // `layout` (which references the `push_range` local for `has_push`, alive for
         // this whole fn), the two live caller-owned shader modules (via `stages`,
@@ -2098,7 +2118,7 @@ impl VulkanContext {
         // `abi_guard.rs`; the cross-check against the bound rendering scope is the
         // caller's contract (encoded in `GraphicsPipelineDesc`↔`RenderingDesc`).
         let raw = unsafe {
-            (fns.create_graphics_pipelines)(device, 0, 1, &gp_info, ptr::null(), &mut pipeline)
+            (fns.create_graphics_pipelines)(device, self.pipeline_cache(), 1, &gp_info, ptr::null(), &mut pipeline)
         };
         let result = VkResult::from_raw(raw);
         if !result.is_success() {
@@ -2113,6 +2133,7 @@ impl VulkanContext {
             return Err(VulkanError::Vk("vkCreateGraphicsPipelines", result));
         }
 
+        self.record_pipeline_creation(PipelineKind::Graphics, &feedback.pipeline, site);
         Ok(VulkanGraphicsPipeline {
             pipeline,
             layout,
@@ -2129,12 +2150,14 @@ impl VulkanContext {
     /// one of its existing construction sites across the workspace (other gbuffer/CSM/UI/test
     /// pipelines) needs no edit and takes the untouched [`Self::build_graphics_pipeline`]`(desc,
     /// None)` path via `RhiDevice::create_graphics_pipeline`.
+    #[track_caller]
     pub fn create_graphics_pipeline_bindless(
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
         set1_layout: VkDescriptorSetLayout,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
         self.build_graphics_pipeline(
+            Location::caller(),
             desc,
             Some(set1_layout),
             VK_COMPARE_OP_LESS,
@@ -2161,12 +2184,14 @@ impl VulkanContext {
     /// [`Self::create_graphics_pipeline_bindless`] precedent): `boyko_rhi::GraphicsPipelineDesc`
     /// itself is UNCHANGED (no new field), so every pre-existing pipeline construction site
     /// across the workspace needs no edit.
+    #[track_caller]
     pub fn create_graphics_pipeline_forward(
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
         set1_layout: VkDescriptorSetLayout,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
         self.build_graphics_pipeline(
+            Location::caller(),
             desc,
             Some(set1_layout),
             VK_COMPARE_OP_GREATER,
@@ -2205,6 +2230,7 @@ impl VulkanContext {
     /// opaque geometry still occludes the billboards. Making it a knob would let a caller
     /// construct the one combination — additive with depth writes — that this plan's
     /// "P0 ships unsorted, provably" argument does not survive.
+    #[track_caller]
     pub fn create_graphics_pipeline_particle(
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
@@ -2212,6 +2238,7 @@ impl VulkanContext {
         depth_compare: i32,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
         self.build_graphics_pipeline(
+            Location::caller(),
             desc,
             Some(set1_layout),
             depth_compare,
@@ -2231,6 +2258,7 @@ impl VulkanContext {
     /// requires a push to name every stage of each range it overlaps — so a default
     /// `VERTEX | FRAGMENT` range would make their FRAGMENT push invalid, and widening the push
     /// instead would declare a VERTEX read no shader makes.
+    #[track_caller]
     pub fn create_graphics_pipeline_fragment_push(
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
@@ -2239,7 +2267,7 @@ impl VulkanContext {
             desc.push_constant_bytes > 0,
             "invariant: a FRAGMENT-push pipeline declares a push range"
         );
-        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_LESS, true, VK_SHADER_STAGE_FRAGMENT_BIT)
+        self.build_graphics_pipeline(Location::caller(), desc, None, VK_COMPARE_OP_LESS, true, VK_SHADER_STAGE_FRAGMENT_BIT)
     }
 
     /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): builds the `depth_prepass`
@@ -2253,11 +2281,12 @@ impl VulkanContext {
     /// `VK_COMPARE_OP_GREATER` (Decision 4, hardware reverse-Z) with depth WRITE ON: this pass
     /// is `forward_opaque`'s sole depth producer under `ForwardPlus`, committing the final
     /// per-pixel depth before any color work runs.
+    #[track_caller]
     pub fn create_graphics_pipeline_forward_prepass(
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
-        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_GREATER, true, GRAPHICS_PUSH_STAGES_DEFAULT)
+        self.build_graphics_pipeline(Location::caller(), desc, None, VK_COMPARE_OP_GREATER, true, GRAPHICS_PUSH_STAGES_DEFAULT)
     }
 
     /// Builds the Forward sky BACKGROUND pipeline (`forward_sky.{vs,fs}.hlsl`): a 1-set pipeline
@@ -2273,6 +2302,7 @@ impl VulkanContext {
     /// second rendering scope per frame.
     ///
     /// `desc.depth_format` must therefore be `Some` — the scope's own depth format.
+    #[track_caller]
     pub fn create_graphics_pipeline_forward_sky(
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
@@ -2281,7 +2311,7 @@ impl VulkanContext {
             desc.depth_format.is_some(),
             "invariant: the sky pipeline declares the forward scope's depth format (VUID-08914)"
         );
-        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_ALWAYS, false, GRAPHICS_PUSH_STAGES_DEFAULT)
+        self.build_graphics_pipeline(Location::caller(), desc, None, VK_COMPARE_OP_ALWAYS, false, GRAPHICS_PUSH_STAGES_DEFAULT)
     }
 
     /// Multi-paradigm render-path plan, rung R8: builds the `vb_raster` mesh id-raster pipeline
@@ -2298,11 +2328,12 @@ impl VulkanContext {
     /// differ only in which pass's caller supplies a non-empty `color_formats`) — a SEPARATE,
     /// precisely-named wrapper rather than reusing the prepass one so a reader is never misled
     /// by a "prepass"-named builder producing `vb_raster_pipeline`.
+    #[track_caller]
     pub fn create_graphics_pipeline_vb_raster(
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
-        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_GREATER, true, GRAPHICS_PUSH_STAGES_DEFAULT)
+        self.build_graphics_pipeline(Location::caller(), desc, None, VK_COMPARE_OP_GREATER, true, GRAPHICS_PUSH_STAGES_DEFAULT)
     }
 
     /// Render wave RD1 (defect R0b): builds the SDF DEPTH-MERGE pipeline — DEPTH-ONLY
@@ -2318,6 +2349,7 @@ impl VulkanContext {
     /// rule. No existing builder pairs a caller-chosen compare op with a depth write and a
     /// FRAGMENT push range, and reusing a `_forward_prepass` / `_vb_raster` builder for it would be
     /// the misnaming [`Self::create_graphics_pipeline_vb_raster`]'s doc warns against.
+    #[track_caller]
     pub fn create_graphics_pipeline_depth_merge(
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
@@ -2327,7 +2359,7 @@ impl VulkanContext {
             desc.color_formats.is_empty() && desc.depth_format.is_some(),
             "invariant: the SDF depth merge is a depth-only pipeline"
         );
-        self.build_graphics_pipeline(desc, None, depth_compare, true, VK_SHADER_STAGE_FRAGMENT_BIT)
+        self.build_graphics_pipeline(Location::caller(), desc, None, depth_compare, true, VK_SHADER_STAGE_FRAGMENT_BIT)
     }
 
     /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): builds the `forward_opaque`
@@ -2345,12 +2377,14 @@ impl VulkanContext {
     /// treats two structurally-identical-but-distinct `VkDescriptorSetLayout` handles as
     /// pipeline/descriptor-set INCOMPATIBLE — never two separate layout objects for one
     /// descriptor set).
+    #[track_caller]
     pub fn create_graphics_pipeline_forward_plus(
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
         set1_layout: VkDescriptorSetLayout,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
         self.build_graphics_pipeline(
+            Location::caller(),
             desc,
             Some(set1_layout),
             VK_COMPARE_OP_EQUAL,
@@ -2381,6 +2415,7 @@ impl VulkanContext {
     /// `COMPUTE` in its `stageFlags` (VUID-VkComputePipelineCreateInfo-layout-07988). A layout
     /// shared with a graphics pipeline therefore carries `FRAGMENT | COMPUTE`, as
     /// `GBufferScene::forward_layout1` does.
+    #[track_caller]
     pub fn create_compute_pipeline_forward(
         &self,
         desc: &ComputePipelineDesc<Vulkan>,
@@ -2440,9 +2475,12 @@ impl VulkanContext {
             p_name: desc.entry.as_ptr(),
             p_specialization_info: ptr::null(),
         };
+        // BOOT-1 F-A: the creation feedback (output-only; one stage, VUID-...-06566).
+        let mut feedback = CreationFeedback::<1>::new();
+        let feedback_info = feedback.chain();
         let cp_info = VkComputePipelineCreateInfo {
             s_type: VkStructureType::ComputePipelineCreateInfo,
-            p_next: ptr::null(),
+            p_next: (&raw const feedback_info).cast(),
             flags: 0,
             stage,
             layout: pipeline_layout,
@@ -2450,14 +2488,16 @@ impl VulkanContext {
             base_pipeline_index: -1,
         };
         let mut pipeline = VkPipeline::NULL;
-        // SAFETY: `self.device()` is live; null pipeline cache (`0`) is valid; one create-info is
+        // SAFETY: `self.device()` is live; the pipeline cache is the context's own (internally
+        // synchronized) or `VK_NULL_HANDLE`, both valid; the `pNext` creation-feedback chain points
+        // at the `feedback` stack local, alive for the call and written only by the driver; one create-info is
         // fully initialized, referencing the live shader module + the just-created dedicated
         // `pipeline_layout`; `&mut pipeline` is a valid out-pointer for the single pipeline; NULL
         // allocator. The module is owned by the caller's `VulkanShaderModule`, alive for this call.
         let raw = unsafe {
             (self.device_fns().create_compute_pipelines)(
                 self.device(),
-                0,
+                self.pipeline_cache(),
                 1,
                 &cp_info,
                 ptr::null(),
@@ -2478,6 +2518,7 @@ impl VulkanContext {
             };
             return Err(VulkanError::from(ComputeError::VkError("vkCreateComputePipelines", result)));
         }
+        self.record_pipeline_creation(PipelineKind::Compute, &feedback.pipeline, Location::caller());
         Ok(ComputePipeline { pipeline, layout: pipeline_layout, owns_layout: true })
     }
 
@@ -2494,6 +2535,7 @@ impl VulkanContext {
     /// `COMPUTE` in its `stageFlags` (VUID-VkComputePipelineCreateInfo-layout-07988) — the
     /// Forward-family shadow set is shared with graphics pipelines and carries
     /// `FRAGMENT | COMPUTE` for exactly this reason.
+    #[track_caller]
     pub fn create_compute_pipeline_vb(
         &self,
         desc: &ComputePipelineDesc<Vulkan>,
@@ -2555,9 +2597,12 @@ impl VulkanContext {
             p_name: desc.entry.as_ptr(),
             p_specialization_info: ptr::null(),
         };
+        // BOOT-1 F-A: the creation feedback (output-only; one stage, VUID-...-06566).
+        let mut feedback = CreationFeedback::<1>::new();
+        let feedback_info = feedback.chain();
         let cp_info = VkComputePipelineCreateInfo {
             s_type: VkStructureType::ComputePipelineCreateInfo,
-            p_next: ptr::null(),
+            p_next: (&raw const feedback_info).cast(),
             flags: 0,
             stage,
             layout: pipeline_layout,
@@ -2565,14 +2610,16 @@ impl VulkanContext {
             base_pipeline_index: -1,
         };
         let mut pipeline = VkPipeline::NULL;
-        // SAFETY: `self.device()` is live; null pipeline cache (`0`) is valid; one create-info is
+        // SAFETY: `self.device()` is live; the pipeline cache is the context's own (internally
+        // synchronized) or `VK_NULL_HANDLE`, both valid; the `pNext` creation-feedback chain points
+        // at the `feedback` stack local, alive for the call and written only by the driver; one create-info is
         // fully initialized, referencing the live shader module + the just-created dedicated
         // `pipeline_layout`; `&mut pipeline` is a valid out-pointer for the single pipeline; NULL
         // allocator. The module is owned by the caller's `VulkanShaderModule`, alive for this call.
         let raw = unsafe {
             (self.device_fns().create_compute_pipelines)(
                 self.device(),
-                0,
+                self.pipeline_cache(),
                 1,
                 &cp_info,
                 ptr::null(),
@@ -2593,6 +2640,7 @@ impl VulkanContext {
             };
             return Err(VulkanError::from(ComputeError::VkError("vkCreateComputePipelines", result)));
         }
+        self.record_pipeline_creation(PipelineKind::Compute, &feedback.pipeline, Location::caller());
         Ok(ComputePipeline { pipeline, layout: pipeline_layout, owns_layout: true })
     }
 
@@ -2615,6 +2663,7 @@ impl VulkanContext {
     /// **Contract on `set1_layout`:** every binding of `set1_layout` the shader reads must include
     /// `COMPUTE` in its `stageFlags` (VUID-VkComputePipelineCreateInfo-layout-07988), as for
     /// [`Self::create_compute_pipeline_vb`].
+    #[track_caller]
     pub fn create_compute_pipeline_vb_textured(
         &self,
         desc: &ComputePipelineDesc<Vulkan>,
@@ -2677,9 +2726,12 @@ impl VulkanContext {
             p_name: desc.entry.as_ptr(),
             p_specialization_info: ptr::null(),
         };
+        // BOOT-1 F-A: the creation feedback (output-only; one stage, VUID-...-06566).
+        let mut feedback = CreationFeedback::<1>::new();
+        let feedback_info = feedback.chain();
         let cp_info = VkComputePipelineCreateInfo {
             s_type: VkStructureType::ComputePipelineCreateInfo,
-            p_next: ptr::null(),
+            p_next: (&raw const feedback_info).cast(),
             flags: 0,
             stage,
             layout: pipeline_layout,
@@ -2687,14 +2739,16 @@ impl VulkanContext {
             base_pipeline_index: -1,
         };
         let mut pipeline = VkPipeline::NULL;
-        // SAFETY: `self.device()` is live; null pipeline cache (`0`) is valid; one create-info is
+        // SAFETY: `self.device()` is live; the pipeline cache is the context's own (internally
+        // synchronized) or `VK_NULL_HANDLE`, both valid; the `pNext` creation-feedback chain points
+        // at the `feedback` stack local, alive for the call and written only by the driver; one create-info is
         // fully initialized, referencing the live shader module + the just-created dedicated
         // `pipeline_layout`; `&mut pipeline` is a valid out-pointer for the single pipeline; NULL
         // allocator. The module is owned by the caller's `VulkanShaderModule`, alive for this call.
         let raw = unsafe {
             (self.device_fns().create_compute_pipelines)(
                 self.device(),
-                0,
+                self.pipeline_cache(),
                 1,
                 &cp_info,
                 ptr::null(),
@@ -2715,6 +2769,41 @@ impl VulkanContext {
             };
             return Err(VulkanError::from(ComputeError::VkError("vkCreateComputePipelines", result)));
         }
+        self.record_pipeline_creation(PipelineKind::Compute, &feedback.pipeline, Location::caller());
         Ok(ComputePipeline { pipeline, layout: pipeline_layout, owns_layout: true })
+    }
+}
+
+/// BOOT-1 F-A: the `VkPipelineCreationFeedback` slots one create chains — the whole-pipeline
+/// feedback and one per shader stage. A stack local of the create site, declared before the info
+/// [`Self::chain`] returns (which points into it), so it outlives the `vkCreate*Pipelines` call.
+struct CreationFeedback<const STAGES: usize> {
+    pipeline: VkPipelineCreationFeedback,
+    stages: [VkPipelineCreationFeedback; STAGES],
+}
+
+impl<const STAGES: usize> CreationFeedback<STAGES> {
+    fn new() -> Self {
+        Self {
+            pipeline: VkPipelineCreationFeedback::default(),
+            stages: [VkPipelineCreationFeedback::default(); STAGES],
+        }
+    }
+
+    /// One slot per entry of `stages` — the graphics create's shader-stage array.
+    fn matching<T>(_stages: &[T; STAGES]) -> Self {
+        Self::new()
+    }
+
+    /// The `VkPipelineCreationFeedbackCreateInfo` pointing the driver at these slots. The raw
+    /// pointers carry no borrow: the caller keeps `self` in place and alive for the create call.
+    fn chain(&mut self) -> VkPipelineCreationFeedbackCreateInfo {
+        VkPipelineCreationFeedbackCreateInfo {
+            s_type: VkStructureType::PipelineCreationFeedbackCreateInfo,
+            p_next: ptr::null(),
+            p_pipeline_creation_feedback: &raw mut self.pipeline,
+            pipeline_stage_creation_feedback_count: STAGES as u32,
+            p_pipeline_stage_creation_feedbacks: self.stages.as_mut_ptr(),
+        }
     }
 }

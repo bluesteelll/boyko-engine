@@ -39,6 +39,10 @@ use boyko_log::codes::{E2101, OnceSite, W2102};
 use crate::debug::{self, DebugMessengerState};
 use crate::ffi::*;
 use crate::memory::{BlockPool, DeviceLocalBlock, HostVisibleBlock};
+use crate::pipeline_cache::{
+    self, CacheLoad, CacheSave, DeviceIdentity, PipelineCachePolicy, PipelineCacheStore,
+    PipelineCreationStats, PipelineKind, SaveError,
+};
 use crate::rhi_impl::ComputeLayouts;
 
 /// Capacity of the device's shared host-visible block backing
@@ -591,6 +595,11 @@ pub struct DeviceFns {
     pub destroy_pipeline_layout: PfnVkDestroyPipelineLayout,
     pub create_compute_pipelines: PfnVkCreateComputePipelines,
     pub destroy_pipeline: PfnVkDestroyPipeline,
+    /// `vkCreatePipelineCache` / `vkDestroyPipelineCache` / `vkGetPipelineCacheData` — BOOT-1
+    /// F-A's one cache per context (Vulkan 1.0 core, always present).
+    pub create_pipeline_cache: PfnVkCreatePipelineCache,
+    pub destroy_pipeline_cache: PfnVkDestroyPipelineCache,
+    pub get_pipeline_cache_data: PfnVkGetPipelineCacheData,
     pub create_descriptor_pool: PfnVkCreateDescriptorPool,
     pub destroy_descriptor_pool: PfnVkDestroyDescriptorPool,
     pub allocate_descriptor_sets: PfnVkAllocateDescriptorSets,
@@ -801,6 +810,20 @@ pub struct VulkanContext {
     /// `DeviceCaps::storage_buffer_array_non_uniform_indexing_ok`'s "device/context config
     /// already reaches every call site" channel, one layer up).
     vb_geometry_table_armed: OnceCell<bool>,
+    /// BOOT-1 F-A: the context's ONE `VkPipelineCache`, passed at every `vkCreate*Pipelines` call
+    /// (`rhi_impl/device.rs`'s five sites) with no branch. `VK_NULL_HANDLE` under
+    /// `BOYKO_PIPELINE_CACHE=off` (the pre-BOOT-1 driver path) or when its creation failed. A
+    /// device child: destroyed in `Drop` BEFORE `vkDestroyDevice`. Created without
+    /// `EXTERNALLY_SYNCHRONIZED_BIT`, so the driver synchronizes its use internally.
+    pipeline_cache: VkPipelineCache,
+    /// Where the cache persists — `Some` only under [`PipelineCachePolicy::Persisted`].
+    /// Immutable after boot.
+    pipeline_cache_store: Option<PipelineCacheStore>,
+    /// What boot did with the cache (the telemetry line's `[cold: ...]` / `[warm: ...]`).
+    pipeline_cache_load: CacheLoad,
+    /// The creation-feedback counters, updated after every create on the owning thread. A `Cell`
+    /// of a `Copy` POD: the context is already `!Sync`.
+    pipeline_stats: Cell<PipelineCreationStats>,
 }
 
 /// The retained OWNING pointer behind [`VulkanContext::boot_singleton`] /
@@ -819,7 +842,23 @@ impl VulkanContext {
     ///
     /// Returns a [`BootError`] (never panics) on any loader / driver / GPU
     /// absence so the caller can skip gracefully on a GPU-less machine.
+    ///
+    /// The context gets an empty, in-memory pipeline cache that is never persisted (BOOT-1 F-A:
+    /// [`PipelineCachePolicy::Ephemeral`]), so every context exercises the create path the product
+    /// uses. `BOYKO_PIPELINE_CACHE=off` creates none.
+    ///
+    /// # Panics
+    ///
+    /// If `BOYKO_PIPELINE_CACHE` holds anything but `on` or `off`.
     pub fn boot(config: InstanceConfig) -> Result<Self, BootError> {
+        Self::boot_with_policy(config, PipelineCachePolicy::Ephemeral)
+    }
+
+    /// The one boot body behind [`Self::boot`] and [`Self::boot_singleton`]. The
+    /// `BOYKO_PIPELINE_CACHE` switch is read here, once per boot and before anything is created,
+    /// so a bad value panics without leaking a device.
+    fn boot_with_policy(config: InstanceConfig, policy: PipelineCachePolicy) -> Result<Self, BootError> {
+        let policy = policy.with_switch(pipeline_cache::switch_from_env());
         // --- 0. Validation escape hatch. ---
         // Normalize `enable_validation` to its EFFECTIVE value ONCE, at the single
         // entry point, before `config` (passed BY VALUE / `Copy`) flows into
@@ -907,6 +946,7 @@ impl VulkanContext {
             instance,
             get_instance_proc_addr,
             config,
+            policy,
         );
         match result {
             Ok(ctx) => Ok(ctx),
@@ -1063,6 +1103,7 @@ impl VulkanContext {
         instance: VkInstance,
         gipa: PfnVkGetInstanceProcAddr,
         config: InstanceConfig,
+        policy: PipelineCachePolicy,
     ) -> Result<Self, (BootError, InstanceFns)> {
         let instance_fns = match load_instance_fns(gipa, instance, config) {
             Ok(f) => f,
@@ -1268,6 +1309,18 @@ impl VulkanContext {
         // a valid out-pointer for one `VkQueue`.
         unsafe { (device_fns.get_device_queue)(device, queue_family_index, 0, &mut queue) };
 
+        // BOOT-1 F-A: the context's one pipeline cache, keyed by the identity the Vulkan cache
+        // header itself carries (vendor, device, `pipelineCacheUUID`) plus the driver version —
+        // never by build (check I2).
+        let identity = DeviceIdentity {
+            vendor_id: device_props.vendor_id,
+            device_id: device_props.device_id,
+            driver_version: device_props.driver_version,
+            pipeline_cache_uuid: device_props.pipeline_cache_uuid,
+        };
+        let (pipeline_cache, pipeline_cache_store, pipeline_cache_load) =
+            create_pipeline_cache(&device_fns, device, policy, identity);
+
         // HW-RT rung R2a-1: when `feature="hwrt"` AND the device advertised + enabled ray
         // query, resolve the AS command table + populate the RT caps (`ray_query`,
         // `as_scratch_align`). `create_device` only appends the 3 RT extensions when the
@@ -1328,6 +1381,10 @@ impl VulkanContext {
             #[cfg(feature = "hwrt")]
             accel_fns,
             vb_geometry_table_armed: OnceCell::new(),
+            pipeline_cache,
+            pipeline_cache_store,
+            pipeline_cache_load,
+            pipeline_stats: Cell::new(PipelineCreationStats::default()),
         })
     }
 
@@ -1422,6 +1479,124 @@ impl VulkanContext {
     #[inline]
     pub fn device_fns(&self) -> &DeviceFns {
         &self.device_fns
+    }
+
+    /// BOOT-1 F-A: the context's one `VkPipelineCache` every `vkCreate*Pipelines` call passes —
+    /// `VK_NULL_HANDLE` under `BOYKO_PIPELINE_CACHE=off` or when its creation failed.
+    #[inline]
+    pub fn pipeline_cache(&self) -> VkPipelineCache {
+        self.pipeline_cache
+    }
+
+    /// BOOT-1 F-A: what this context's boot did with the pipeline cache.
+    #[inline]
+    pub fn pipeline_cache_load(&self) -> CacheLoad {
+        self.pipeline_cache_load
+    }
+
+    /// BOOT-1 F-A: the creation-feedback counters of every pipeline this context created.
+    #[inline]
+    pub fn pipeline_stats(&self) -> PipelineCreationStats {
+        self.pipeline_stats.get()
+    }
+
+    /// BOOT-1 F-A: saves the pipeline cache to its per-user file iff anything missed since the
+    /// last save, and returns what it did. Called by the runner after boot (every boot pipeline
+    /// exists) and by [`Self::destroy_singleton`] at clean shutdown.
+    ///
+    /// - Not persisted (off, ephemeral, or no handle): [`CacheSave::NotPersisted`] — a no-op on a
+    ///   `VK_NULL_HANDLE` cache (critique W3).
+    /// - Nothing missed: [`CacheSave::Clean`], no file write (a warm boot writes nothing).
+    /// - Otherwise `vkGetPipelineCacheData` (two-call, `VK_INCOMPLETE` retried once), seal, write
+    ///   a temp file and rename it over the file. A payload over the cap removes the file.
+    ///
+    /// Either way the crash-loop sentinel is cleared: boot got past every use of a loaded blob.
+    ///
+    /// Must run on the owning thread with no pipeline creation in flight (the context is `!Sync`,
+    /// and both callers run at quiescent points).
+    pub fn persist_pipeline_cache(&self) -> CacheSave {
+        let Some(store) = &self.pipeline_cache_store else {
+            return CacheSave::NotPersisted;
+        };
+        store.clear_sentinel();
+        if self.pipeline_cache.is_null() {
+            return CacheSave::NotPersisted;
+        }
+        let mut stats = self.pipeline_stats.get();
+        if stats.misses_since_save == 0 {
+            return CacheSave::Clean;
+        }
+        let start = std::time::Instant::now();
+        let saved = match self.read_pipeline_cache_file(store) {
+            Ok(mut file) => pipeline_cache::save_file(store, &mut file, start),
+            Err(e) => CacheSave::Failed(e),
+        };
+        if matches!(saved, CacheSave::Saved { .. }) {
+            stats.misses_since_save = 0;
+            self.pipeline_stats.set(stats);
+        }
+        saved
+    }
+
+    /// Reads the cache back as a whole file: [`pipeline_cache::HEADER_SIZE`] zero bytes (the
+    /// header slot `save_file` seals in place), then the payload exactly as the driver returned it.
+    fn read_pipeline_cache_file(&self, store: &PipelineCacheStore) -> Result<Vec<u8>, SaveError> {
+        // `VK_INCOMPLETE` means the cache grew between the size query and the read; retry once.
+        for _ in 0..2 {
+            let mut size = 0usize;
+            // SAFETY: `device` and `pipeline_cache` are live and owned by this context; `&mut size`
+            // is a valid out-pointer and the null data pointer asks for the size only. The caller
+            // runs on the owning thread with no create in flight, so the cache is not in use.
+            let raw = unsafe {
+                (self.device_fns.get_pipeline_cache_data)(
+                    self.device,
+                    self.pipeline_cache,
+                    &mut size,
+                    ptr::null_mut(),
+                )
+            };
+            if !VkResult::from_raw(raw).is_success() {
+                return Err(SaveError::GetData);
+            }
+            if size as u64 > pipeline_cache::PAYLOAD_CAP {
+                store.remove();
+                return Err(SaveError::OverCap);
+            }
+            let mut file = vec![0u8; pipeline_cache::HEADER_SIZE + size];
+            let mut written = size;
+            // SAFETY: as above; `file[HEADER_SIZE..]` is `size` writable bytes and `written` says so;
+            // the driver writes at most `written` bytes and stores the count it wrote back into it.
+            let raw = unsafe {
+                (self.device_fns.get_pipeline_cache_data)(
+                    self.device,
+                    self.pipeline_cache,
+                    &mut written,
+                    file[pipeline_cache::HEADER_SIZE..].as_mut_ptr().cast::<c_void>(),
+                )
+            };
+            match VkResult::from_raw(raw) {
+                VkResult::SUCCESS => {
+                    file.truncate(pipeline_cache::HEADER_SIZE + written.min(size));
+                    return Ok(file);
+                }
+                VkResult::INCOMPLETE => continue,
+                _ => return Err(SaveError::GetData),
+            }
+        }
+        Err(SaveError::GetData)
+    }
+
+    /// Records one creation's `VkPipelineCreationFeedback` — called by every create site right
+    /// after a successful `vkCreate*Pipelines`, on the owning thread.
+    pub(crate) fn record_pipeline_creation(
+        &self,
+        kind: PipelineKind,
+        feedback: &VkPipelineCreationFeedback,
+        site: &'static core::panic::Location<'static>,
+    ) {
+        let mut stats = self.pipeline_stats.get();
+        stats.record(kind, feedback.flags, feedback.duration, site);
+        self.pipeline_stats.set(stats);
     }
 
     /// HW-RT rung R2a-1: the resolved acceleration-structure command table, or `None` when
@@ -1707,6 +1882,13 @@ impl Drop for VulkanContext {
             // context is dropped, and `vkDestroyDevice` below would otherwise
             // wait-idle the device anyway.
             unsafe { layouts.destroy(self.device, &self.device_fns) };
+        }
+        if !self.pipeline_cache.is_null() {
+            // SAFETY: `pipeline_cache` was created on `self.device` in `boot_with_instance` and is
+            // destroyed exactly once, here, before `vkDestroyDevice` (it is a device child).
+            // `&mut self` externally synchronizes it, and no create is in flight: every create
+            // site runs on the owning thread and returns before this drop can run.
+            unsafe { (self.device_fns.destroy_pipeline_cache)(self.device, self.pipeline_cache, ptr::null()) };
         }
         unsafe {
             (self.device_fns.destroy_device)(self.device, ptr::null());
@@ -2069,6 +2251,75 @@ unsafe extern "system" fn noop_get_device_proc_addr(
     None
 }
 
+/// BOOT-1 F-A: creates a context's one pipeline cache under `policy` and returns the handle
+/// (`VK_NULL_HANDLE` when off or when creation failed), the store (persisted policies only) and the
+/// load outcome.
+///
+/// A persisted policy reads and validates the file once ([`PipelineCacheStore::load`]); only a
+/// validated payload is handed to the driver, and the crash-loop sentinel is armed right before it
+/// (ruling 91 Q3). A driver that refuses the validated data gets one retry with no initial data, so
+/// the cache stays persisted and the next save rewrites the file (critique W3); the sentinel is
+/// cleared at once in that case, because no loaded data is in use any more.
+fn create_pipeline_cache(
+    fns: &DeviceFns,
+    device: VkDevice,
+    policy: PipelineCachePolicy,
+    identity: DeviceIdentity,
+) -> (VkPipelineCache, Option<PipelineCacheStore>, CacheLoad) {
+    let (store, load, file) = match policy {
+        PipelineCachePolicy::Off => return (VkPipelineCache::NULL, None, CacheLoad::Off),
+        PipelineCachePolicy::Ephemeral => (None, CacheLoad::Ephemeral, Vec::new()),
+        PipelineCachePolicy::Persisted { dir } => {
+            let store = PipelineCacheStore::new(&dir, identity);
+            let (load, file) = store.load();
+            (Some(store), load, file)
+        }
+    };
+    let initial = match load {
+        CacheLoad::Loaded { .. } => Some(&file[pipeline_cache::HEADER_SIZE..]),
+        _ => None,
+    };
+    if initial.is_some()
+        && let Some(store) = &store
+    {
+        store.arm_sentinel();
+    }
+    let (handle, load) =
+        pipeline_cache::create_with_fallback(load, initial, |data| vk_create_pipeline_cache(fns, device, data));
+    if initial.is_some()
+        && !matches!(load, CacheLoad::Loaded { .. })
+        && let Some(store) = &store
+    {
+        store.clear_sentinel();
+    }
+    (handle.unwrap_or(VkPipelineCache::NULL), store, load)
+}
+
+/// One `vkCreatePipelineCache` call, with `data` as the initial data (or none).
+fn vk_create_pipeline_cache(fns: &DeviceFns, device: VkDevice, data: Option<&[u8]>) -> Option<VkPipelineCache> {
+    let (size, bytes) = match data {
+        Some(d) => (d.len(), d.as_ptr().cast::<c_void>()),
+        None => (0, ptr::null()),
+    };
+    let info = VkPipelineCacheCreateInfo {
+        s_type: VkStructureType::PipelineCacheCreateInfo,
+        p_next: ptr::null(),
+        flags: 0,
+        initial_data_size: size,
+        p_initial_data: bytes,
+    };
+    let mut cache = VkPipelineCache::NULL;
+    // SAFETY: `device` is the live device just created; `info` is fully initialised; when `data`
+    // is `Some`, `p_initial_data` / `initial_data_size` are exactly that slice, which the caller
+    // keeps alive for the call, and the bytes passed `pipeline_cache::validate` (size, hash, outer
+    // identity and the inner `VkPipelineCacheHeaderVersionOne`), so they are what a previous
+    // `vkGetPipelineCacheData` returned for this device and driver (VUID-00768 / VUID-00769);
+    // with `None` the size is 0 and the pointer null. `&mut cache` is a valid out-pointer; NULL
+    // allocator.
+    let raw = unsafe { (fns.create_pipeline_cache)(device, &info, ptr::null(), &mut cache) };
+    (VkResult::from_raw(raw).is_success() && !cache.is_null()).then_some(cache)
+}
+
 fn load_device_fns(
     gdpa: PfnVkGetDeviceProcAddr,
     device: VkDevice,
@@ -2138,6 +2389,9 @@ fn load_device_fns(
                 c"vkCreateComputePipelines",
             )?,
             destroy_pipeline: load_device_command(gdpa, device, c"vkDestroyPipeline")?,
+            create_pipeline_cache: load_device_command(gdpa, device, c"vkCreatePipelineCache")?,
+            destroy_pipeline_cache: load_device_command(gdpa, device, c"vkDestroyPipelineCache")?,
+            get_pipeline_cache_data: load_device_command(gdpa, device, c"vkGetPipelineCacheData")?,
             create_descriptor_pool: load_device_command(gdpa, device, c"vkCreateDescriptorPool")?,
             destroy_descriptor_pool: load_device_command(
                 gdpa,
