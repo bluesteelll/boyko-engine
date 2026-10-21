@@ -3802,4 +3802,114 @@ mod m2_first_surface_tests {
              for exactly 3 (sphere, box, capsule) — a new kind needs its rule (boyko_shaderdsl::range) first"
         );
     }
+
+    // ── OI1516 round 1 (triage W1): the certificate's start point under over-relaxation ─────
+    //
+    // D16-4: past an over-relaxed step the march's current `t` is NOT certified — the overlap check
+    // of that step runs at the fold, after the M2 block — so the certificate starts at the last point
+    // the march did certify, `safe_t + sor_prev`. Every other gate runs at omega 1, where the two
+    // starts coincide (the `a = t` mutant is equivalent there); this one runs at omega 1.6.
+
+    use crate::goldens::{golden_primary_hit_brick_m4, host_m2_surface_hit};
+
+    /// The over-relaxation of the start-point gate (the harnesses clamp omega to `[1, 1.99]`).
+    const W1_OMEGA: f32 = 1.6;
+
+    /// D16-4's scene: a thin plate (half-thickness 0.1, near face z = 1.0) across the whole ortho
+    /// frame, and a sphere (r 1.2, front cap z = 0.2) behind it. From the camera (z = 2) the first
+    /// fold sees the plate at `d0 = 1.0`; at omega 1.6 the step lands at z = 0.4 — past the plate,
+    /// outside both edits — in the M2 brick z ∈ [0, 2], whose cubic finds the sphere ahead on every
+    /// ray with `x² + y² < 0.44`. `tests/sdf_gbuffer_hybrid.rs::jumped_plate` is the device copy.
+    fn jumped_plate() -> Vec<SdfEdit> {
+        vec![
+            SdfEdit::box_shape([0.0, 0.0, 0.9], [1.5, 1.5, 0.1], sdf_op::UNION, 0.0),
+            SdfEdit::sphere([0.0, 0.0, -1.0], 1.2, sdf_op::UNION, 0.0),
+        ]
+    }
+
+    /// W1: on [`jumped_plate`] at omega 1.6 both host mirrors (M2 and the M4 N = 1 ray march) must
+    /// commit the plate on every pixel — "M2 == analytic" ([`m2_pixel_verdict`]) — while the scene
+    /// provably exercises the start point: on the centre ray, replayed here from the field alone,
+    /// the over-relaxed step jumps the plate, M2 at the landing refines onto the sphere, and the
+    /// certificate ACCEPTS that hit from the landing `t` (the `a = t` mutant commits it) but
+    /// REFUSES it from `safe_t + sor_prev = d0`. Over the frame the M2 mirror's witness count
+    /// (`M2EvalCounts::start_point_refusals`) must be non-zero.
+    #[test]
+    fn m2_overrelaxed_start_point_refuses_a_hit_behind_a_jumped_plate() {
+        let edits = jumped_plate();
+        let at = |ro: [f32; 3], rd: [f32; 3], t: f32| [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+
+        // The premise on the centre ray, from the field alone (independent of either mirror's `a`).
+        let (ro, rd) = composite_ray(32, 32, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+        let d0 = sdf_edit_list(&edits, ro);
+        assert!((d0 - 1.0).abs() < 1.0e-5, "the first fold sees the plate at 1.0, got {d0}");
+        let t1 = d0 * W1_OMEGA; // the mirrors' `step_len = d * omega; t += step_len` from t = 0
+        let landing = at(ro, rd, t1);
+        assert!(
+            landing[2] < 0.8 && sdf_edit_list(&edits, landing) > SDF_EPS,
+            "the over-relaxed step must land past the plate (back face z = 0.8), outside every edit: {landing:?}"
+        );
+        let (m2_hit_t, cand_t) = host_m2_surface_hit(&edits, None, ro, rd, t1, None)
+            .expect("premise: M2 at the landing refines onto the sphere ahead");
+        assert!(
+            m2_hit_t > t1 && edit_distance(&edits[1], at(ro, rd, m2_hit_t)).abs() < SDF_EPS,
+            "premise: the landing's M2 hit is the sphere behind the plate, got t {m2_hit_t}"
+        );
+        let goal = m2_cert_goal(m2_hit_t, cand_t);
+        assert!(
+            host_m2_first_crossing_certified(&edits, ro, rd, t1, goal, None),
+            "premise: the certificate from the landing `t` accepts the sphere — without it the gate cannot see `a = t`"
+        );
+        assert!(
+            !host_m2_first_crossing_certified(&edits, ro, rd, d0, goal, None),
+            "D16-4: the certificate from `safe_t + sor_prev` = {d0} must refuse the sphere behind the plate"
+        );
+
+        // Both mirrors, every pixel.
+        let field = field_of(&edits);
+        let (grid, cells) = build_default_grid(&field);
+        let atlas = HostM2Atlas::bake(&edits, &BrickLevelParams::m2_near_field());
+        let params = M4GridParams::near_field_only();
+        let level_grids = [(grid, cells.as_slice())];
+        let mut m2_tally = Tally::default();
+        let mut m4_tally = Tally::default();
+        let mut keystone = Vec::new();
+        let mut witnesses = 0u32;
+        let mut plate_misses = Vec::new();
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                let mut c = M2EvalCounts::default();
+                let m2 = golden_primary_hit_brick_m2(
+                    &edits, 1.0e30, ro, rd, W1_OMEGA, false, &grid, &cells, Some(&atlas), Some(&mut c),
+                );
+                let m4 = golden_primary_hit_brick_m4(&edits, 1.0e30, ro, rd, W1_OMEGA, false, 1, &params, &level_grids);
+                witnesses += u32::from(c.start_point_refusals > 0);
+                m2_tally.add("jumped_plate M2", px, py, &edits, m2);
+                m4_tally.add("jumped_plate M4", px, py, &edits, m4);
+                for (name, h) in [("M2", m2), ("M4", m4)] {
+                    let on_plate = h.hit_t.0 && edit_distance(&edits[0], at(ro, rd, h.hit_t.1)).abs() < SDF_EPS;
+                    if !on_plate && plate_misses.len() < 8 {
+                        plate_misses.push(format!("{name} ({px},{py}) {h:?}"));
+                    }
+                }
+                if m4 != m2 && keystone.len() < 8 {
+                    keystone.push(format!("({px},{py}) M2 {m2:?} vs M4 {m4:?}"));
+                }
+            }
+        }
+        println!(
+            "W1 jumped_plate at omega {W1_OMEGA}: M2 {m2_tally:?}; M4 {m4_tally:?}; {witnesses} pixel(s) where the \
+             start point refused a hit the landing `t` would commit"
+        );
+        assert!(m2_tally.violations.is_empty(), "W1: the M2 mirror committed a non-first surface: {:?}", m2_tally.violations);
+        assert!(m4_tally.violations.is_empty(), "W1: the M4 mirror committed a non-first surface: {:?}", m4_tally.violations);
+        assert!(plate_misses.is_empty(), "W1: a mirror's hit is not on the plate (the first surface): {plate_misses:?}");
+        assert!(
+            m2_tally.budget == 0 && m2_tally.near_miss == 0 && m4_tally.budget == 0 && m4_tally.near_miss == 0,
+            "W1: the scene is clean — no budget artifact or near-miss is expected (M2 {m2_tally:?}, M4 {m4_tally:?})"
+        );
+        assert!(keystone.is_empty(), "W1: the M4 ray march at N = 1 must equal the M2 one: {keystone:?}");
+        assert!(witnesses > 0, "W1: no pixel exercises the start point — the gate cannot see `a = t`");
+    }
 }

@@ -1100,6 +1100,11 @@ pub struct M2EvalCounts {
     pub latch_skips: u64,
     /// Exact-field evaluations of the analytic fold and re-march.
     pub fold_evals: u64,
+    /// Of `rejects`: the refusals a certificate started at the march's current `t` would have
+    /// ACCEPTED — the hits only the over-relaxed start point `safe_t + sor_prev` refuses
+    /// (`oi1516/cut.md` D16-4). A witness, not a cost: its probe certificate is not counted in
+    /// `range_evals`.
+    pub start_point_refusals: u64,
 }
 
 impl M2EvalCounts {
@@ -1112,6 +1117,7 @@ impl M2EvalCounts {
         self.rejects += other.rejects;
         self.latch_skips += other.latch_skips;
         self.fold_evals += other.fold_evals;
+        self.start_point_refusals += other.start_point_refusals;
     }
 }
 
@@ -1536,6 +1542,11 @@ pub fn golden_primary_hit_brick_m2(
                 }
                 if let Some(c) = counts.as_deref_mut() {
                     c.rejects += 1;
+                    // The D16-4 witness: would the naive start `t` have certified this hit?
+                    let goal = m2_cert_goal(m2_hit_t, cand_t);
+                    if a < t && host_m2_first_crossing_certified(edits, ro, rd, t, goal, None) {
+                        c.start_point_refusals += 1;
+                    }
                 }
                 m2_trust = false;
             }
@@ -1690,10 +1701,52 @@ pub fn golden_composite_pixel_brick_m4(
     let has_mesh = mesh_depth < MESH_DEPTH_CLEAR;
     let t_mesh = if has_mesh { depth_to_t(mesh_depth) } else { 1.0e30 };
 
+    let (hit, t) = golden_primary_hit_brick_m4(
+        edits, t_mesh, ro, rd, omega, brick_enabled, brick_levels, params, level_grids,
+    )
+    .hit_t;
+
+    let color = if hit && t < t_mesh {
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let n = sdf_edit_list_normal(edits, p);
+        host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, light_dir, lighting_flags, &|q| {
+            sdf_edit_list(edits, q)
+        })
+    } else if has_mesh {
+        MESH_COLOR
+    } else {
+        SDF_BACKGROUND
+    };
+    pack_rgba(color)
+}
+
+/// The primary march of [`golden_composite_pixel_brick_m4`] (M2 on) for the ray `ro + rd·t`
+/// against a mesh at `t_mesh` (`1.0e30` = none): per march point the finest enclosing level
+/// ([`host_select_level`]), the M1 empty skip at that level's grid (when `brick_enabled`), then the
+/// M2 SURFACE-brick step at that level ([`host_m2_surface_hit_at`]) whose refine-converged hit
+/// commits only when the first-crossing certificate proves `[a, goal]` free — `a` the last point
+/// the march itself certified (`safe_t + sor_prev` past an over-relaxed step, else `t`;
+/// `oi1516/cut.md` D16-4) — and a refused one latches M2 off for the ray; then the analytic fold
+/// with the B1 over-relaxation; the exhaustion re-march stays analytic (C1). The ray-level form of
+/// the M4 mirror, as [`golden_primary_hit_brick_m2`] is of the M2 one (OI1516 round 1: the gate of
+/// the start point reads its `t` and `by_m2`).
+#[allow(clippy::too_many_arguments)]
+pub fn golden_primary_hit_brick_m4(
+    edits: &[SdfEdit],
+    t_mesh: f32,
+    ro: [f32; 3],
+    rd: [f32; 3],
+    omega: f32,
+    brick_enabled: bool,
+    brick_levels: u32,
+    params: &M4GridParams,
+    level_grids: &[(PointerGrid, &[u32])],
+) -> M2PrimaryHit {
     let mut t = 0.0_f32;
     let t_seed = t;
     let mut omega = omega; // [1.0, 1.99]; sor-fail latches it to 1.0
     let mut hit = false;
+    let mut by_m2 = false;
     let mut m2_trust = true;
     let mut safe_t = 0.0_f32;
     let mut sor_prev = 0.0_f32;
@@ -1740,6 +1793,7 @@ pub fn golden_composite_pixel_brick_m4(
                 let a = if omega > 1.0 && it > 0 { safe_t + sor_prev } else { t };
                 if host_m2_first_crossing_certified(edits, ro, rd, a, m2_cert_goal(m4_hit_t, cand_t), None) {
                     hit = true;
+                    by_m2 = true;
                     exhausted = false; // M2 cubic+analytic-validated, certified convergence
                     t = m4_hit_t;
                     break;
@@ -1796,20 +1850,10 @@ pub fn golden_composite_pixel_brick_m4(
                 break;
             }
         }
+        // `exhausted` now reports the re-march's own budget: a ray neither pass resolved.
+        exhausted = !hit && t <= SDF_T_MAX && t < t_mesh;
     }
-
-    let color = if hit && t < t_mesh {
-        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
-        let n = sdf_edit_list_normal(edits, p);
-        host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, light_dir, lighting_flags, &|q| {
-            sdf_edit_list(edits, q)
-        })
-    } else if has_mesh {
-        MESH_COLOR
-    } else {
-        SDF_BACKGROUND
-    };
-    pack_rgba(color)
+    M2PrimaryHit { hit_t: (hit, t), by_m2, exhausted }
 }
 
 /// A host material-table element mirroring `boyko_render::material::MaterialGpu` (3

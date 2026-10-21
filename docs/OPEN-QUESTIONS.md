@@ -616,7 +616,7 @@ The R1 fix design took this as an architecture call. The fix is **host-side**: a
 punctual row is born `SLOT_NONE`.
 
 - `GpuLight::from_point` / `from_spot` (`crates/boyko_render/src/light.rs`) and their golden
-  mirrors `GoldenLight::point` / `spot` (`crates/boyko_rhi_vulkan/src/goldens.rs:1909`, `:1927`)
+  mirrors `GoldenLight::point` / `spot` (`crates/boyko_rhi_vulkan/src/goldens.rs:1953`, `:1971`)
   build the kind word with `SLOT_NONE` already in the slot field.
 - `slot_pack` (`crates/boyko_render/src/light_system.rs:451`) keeps its guard, and it only ever
   writes a real assignment over that field.
@@ -631,7 +631,7 @@ The shader-side alternative was rejected: the six sites would also test bit 16. 
 re-emits their `.spv` and adds ALU per light per pixel on armed frames. It also does not fix the
 class:
 
-- `GoldenLight::with_sdf_shadow()` (`goldens.rs:1972`) sets bit 16 without a slot.
+- `GoldenLight::with_sdf_shadow()` (`goldens.rs:2016`) sets bit 16 without a slot.
 - `light_table.hlsli:56` defines bit 16 as "this light casts an SDF shadow", not as "slotted".
 
 The vkval lane's commits are split into a pixel-neutral one and a pixel-changing one, and this fix
