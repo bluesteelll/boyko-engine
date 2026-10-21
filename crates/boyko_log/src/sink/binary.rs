@@ -891,8 +891,15 @@ mod tests {
     /// Safe as a unit test in this binary specifically: nothing else in `boyko_log`'s lib tests
     /// opens the binary sink -- `request.rs` has no `#[test]` at all and this module had none until
     /// now -- so `ANCHOR_TICKS` and the file are this test's alone. Checked, not assumed.
+    ///
+    /// Opening it is not the only way in, though: a resident sink thread delivers every record it
+    /// drains to an open binary sink, so a drain running beside this one wrote anchors of its own
+    /// into this file (`[base, far, far - 500]` then two ticks below `base`, ci-fix-1 triage r1
+    /// R2b). Hence the process-wide test lock, which every test that drains or spawns a sink
+    /// thread holds.
     #[test]
     fn a_delta_that_would_overflow_or_go_backwards_re_anchors_instead() {
+        let _serial = crate::drain_owner::test_serial();
         let path = std::env::temp_dir().join("boyko_reanchor_unit.blog");
         let _ = std::fs::remove_file(&path);
         assert!(set_path(path.to_str().expect("a UTF-8 temp path")));

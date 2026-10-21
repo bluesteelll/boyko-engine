@@ -1002,8 +1002,8 @@ const DRIVER_TOUCH_CHILDREN: usize = 8;
 /// any of section A's windows, as a first touch [`warmed_pool`] cannot see.
 ///
 /// The construction makes the first probe certain. The pool has ONE worker,
-/// which has no sibling to steal from and so never pins: the only `Local` the
-/// touch can register is the driver's. The `install` body runs on the driver
+/// whose `build()` registers it and its builder -- the driver -- since ci-fix-1,
+/// so the touch counts two `Local`s and its forced steal none. The `install` body runs on the driver
 /// and spins until that worker has taken the leader off the injector and pushed
 /// [`DRIVER_TOUCH_CHILDREN`] children onto its own deque; the leader spins
 /// until they have run. So the driver's join finds the injector empty and the
@@ -1053,14 +1053,16 @@ fn register_driver_epoch_local() {
         "driver touch: the driver ran none of the {DRIVER_TOUCH_CHILDREN} children on its \
          worker's deque — it never stole, so the touch cannot vouch for the driver's epoch Local"
     );
+    // ci-fix-1: 1 -> 2. Rule: a build registers its builder and every worker inside `build()`.
     assert_eq!(
-        registered, 1,
-        "driver touch: {registered} epoch Locals registered; the one the touch exists for is \
-         the driver's, and a 1-worker pool's worker has no sibling to steal from"
+        registered, 2,
+        "driver touch: {registered} epoch Locals registered; the touch pool's build() registers \
+         its builder (the driver) and its one worker, and the forced steal registers none"
     );
     say!(
-        "[driver touch] the driver thread's epoch Local registered before section A: 1 Local, \
-         {stolen} of {DRIVER_TOUCH_CHILDREN} children stolen from the worker's deque"
+        "[driver touch] the driver thread's epoch Local registered before section A: {registered} \
+         Locals (the driver's and its touch pool's worker, both inside build()), {stolen} of \
+         {DRIVER_TOUCH_CHILDREN} children stolen from the worker's deque"
     );
 }
 
@@ -1166,8 +1168,8 @@ fn first_touch_round(p: &ThreadPool, workers: usize) {
 /// * The epoch count: one `Local` per worker since before the pool was built,
 ///   forced with [`first_touch_round`] when the warm-up did not get there.
 ///   [`register_driver_epoch_local`] has already taken the driver's out of the
-///   count. A 1-worker pool's worker has no sibling to steal from and never
-///   registers one, so its target is 0.
+///   count. Since ci-fix-1 `build()` registers every worker, a 1-worker pool's
+///   included, so the target is `workers` and the forcing loop runs no round.
 fn warmed_pool(workers: usize) -> Arc<ThreadPool> {
     let base = epoch_locals();
     let p = pool(workers);
@@ -1181,7 +1183,8 @@ fn warmed_pool(workers: usize) -> Arc<ThreadPool> {
         });
     }
     boot_barrier(&p, workers);
-    let want = if workers >= 2 { workers as u64 } else { 0 };
+    // ci-fix-1: `if workers >= 2 { workers } else { 0 }` -> `workers` (a build registers every worker).
+    let want = workers as u64;
     let mut rounds = 0usize;
     while epoch_locals() - base < want {
         assert!(

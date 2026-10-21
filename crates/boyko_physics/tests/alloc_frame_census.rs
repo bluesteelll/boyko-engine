@@ -687,9 +687,11 @@
 //!   acquisitions (see "Coverage boundary").
 //! * `OTHER` = everything that is not a dispatch object, and in steady state it
 //!   is exactly one site: crossbeam-epoch's `Collector::register`, the
-//!   thread-local `LocalHandle` a pool thread creates on its FIRST steal
-//!   (2304 B, align 128). Once per thread, front-loaded, absent from the second
-//!   half of a 4096-frame run — a setup cost that lands in a frame.
+//!   thread-local `LocalHandle` a pool thread creates on its FIRST pin
+//!   (2304 B, align 128). Once per thread. Since ci-fix-1 `ThreadPoolBuilder::build`
+//!   registers its builder and every worker before it returns, so a pool's own
+//!   threads no longer take it inside a frame; the allowances below stay upper
+//!   bounds.
 //! * `realloc` = ZERO in every scene since EM2′. It used to be
 //!   `EntityMaster::free_entity_ids` growing under `CommandQueue::apply` ->
 //!   `EcsMaster::delete_entity`, and that growth was unbounded: `Commands::spawn`
@@ -3245,7 +3247,9 @@ impl Pin {
     /// of the worker name for `SetThreadDescription`, 13 Apps in 832, captured
     /// by stack) and because one census window measured THREE on a 2-worker
     /// pool whose third object is still unnamed (see "Open" in the header).
-    /// Measured worst: 3 against this allowance of 4.
+    /// Measured worst: 3 against this allowance of 4. Since ci-fix-1 the pool's
+    /// threads register at `build()`, so the `Local` share can only fall; the
+    /// bound is kept, not tightened.
     fn first_touch(&self) -> u64 {
         2 * self.workers
     }
