@@ -9269,7 +9269,7 @@ the last lines of `[vb_mesh.env]` and `[vb_mesh_hzb.env]`; old 307 and 340 are t
 **Defect 3 - repaired, and its class searched rather than its instance.** `:1548`'s four <!-- doc-anchor-ignore -->
 `golden.ps1` numbers are in the table. `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1538`'s `:2110-2122` -> <!-- doc-anchor-ignore -->
 `:2122-2134` and `:2187-2193` -> `:2199-2205`: the last-numbered-antecedent rule gives them <!-- doc-anchor-ignore -->
-`ffi.rs:1665`, but `ffi.rs` 2187-2193 is `VkDescriptorSetVariableDescriptorCountAllocateInfo`; by <!-- doc-anchor-ignore -->
+`ffi.rs` 1665, but `ffi.rs` 2187-2193 is `VkDescriptorSetVariableDescriptorCountAllocateInfo`; by <!-- doc-anchor-ignore -->
 content they are `device.rs`. The rule mis-assigned them; the text was never ambiguous to a reader.
 `w2_pass3_suspects.py` then lists every bare token the rule gives to a non-lane numbered mention
 while a lane mention stands before it: 19 distinct tokens, each read. 16 are not lane citations
