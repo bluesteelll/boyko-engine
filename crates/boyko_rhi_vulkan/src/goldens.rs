@@ -6297,8 +6297,10 @@ pub struct ResolveTrace {
     pub decisions: Vec<Decision>,
     /// The lit radiance before the store.
     pub lit_pre_store: [f32; 3],
-    /// The exposure the sum was scaled by.
-    pub exposure: f32,
+    /// The pre-exposure the sum was scaled by: the light header's exposure word (`H.exposure` in
+    /// the shaders), named apart from `LightingConfig::exposure` so the single-writer census
+    /// (`boyko_render/tests/exposure_single_writer.rs`) keeps reading a field read as a config read.
+    pub pre_exposure: f32,
 }
 
 impl ResolveTrace {
@@ -6309,7 +6311,7 @@ impl ResolveTrace {
         core::array::from_fn(|c| {
             let sum: f32 = self.terms[c].iter().sum();
             let abs: f32 = self.terms[c].iter().map(|t| t.abs()).sum();
-            ((sum * self.exposure - self.lit_pre_store[c]).abs(), abs * self.exposure)
+            ((sum * self.pre_exposure - self.lit_pre_store[c]).abs(), abs * self.pre_exposure)
         })
     }
 }
@@ -6327,7 +6329,7 @@ impl ResolveHooks for ResolveTrace {
     }
     fn pre_store(&mut self, lit: [f32; 3], exposure: f32) {
         self.lit_pre_store = lit;
-        self.exposure = exposure;
+        self.pre_exposure = exposure;
     }
 }
 
@@ -6490,7 +6492,7 @@ pub fn resolve_error_floor(
         floor[c] += worst[c];
         let n_terms = trace.terms[c].len() as f32;
         let abs_terms: f32 = trace.terms[c].iter().map(|t| t.abs()).sum();
-        floor[c] += 2.0 * U * (8.0 + n_terms) * abs_terms * trace.exposure.abs()
+        floor[c] += 2.0 * U * (8.0 + n_terms) * abs_terms * trace.pre_exposure.abs()
             + 2.0 * U * trace.lit_pre_store[c].abs()
             + f32::MIN_POSITIVE;
     }
