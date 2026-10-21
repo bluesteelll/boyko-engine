@@ -767,7 +767,14 @@ mod tests {
     #[test]
     fn perspective_bridge_reproduces_legacy_push_constants() {
         let (global, projection) = forward_perspective_camera();
-        let view = ViewUniform::from_camera(global, projection);
+        // BOTH sides reach `tan` at run time, through the same C-runtime symbol on the same f32.
+        // Left to the optimiser, the release build folded one side's `tan(fov / 2)` at compile
+        // time and called `tanf` on the other, so the pin compared the compiler's constant folder
+        // against the platform's libm: UCRT agrees with the fold at this input, glibc is one ulp
+        // away (0.5773503 against 0.57735026, `cam_forward.w`), and Linux release red. `view` is
+        // opaque rather than `projection` because the inlined `perspective` reads `view.fov_y`,
+        // the value nearest the tan.
+        let view = core::hint::black_box(ViewUniform::from_camera(global, projection));
 
         let bridged = composite_perspective_from_view(&view, 64, 64);
         let legacy = CompositePushConstants::perspective(
@@ -775,7 +782,7 @@ mod tests {
             [0.0, 0.0, -1.0],
             [1.0, 0.0, 0.0],
             [0.0, 1.0, 0.0],
-            FRAC_PI_3,
+            core::hint::black_box(FRAC_PI_3),
             64,
             64,
         );

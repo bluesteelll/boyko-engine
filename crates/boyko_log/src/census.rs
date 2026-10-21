@@ -425,6 +425,10 @@ mod tests {
     /// CENSUS reading the counter -- the macro's own wiring is `tests/l8a_rate_policy_wired.rs`.
     #[test]
     fn the_census_prints_what_the_rate_limiter_refused() {
+        // The process-wide test lock, because `print` below EMITS: while a lifecycle session has
+        // `Log` armed, these rows would reach the lanes its sink thread delivers into that
+        // session's capped file (ci-fix-1, triage r1 R2a).
+        let _s = crate::drain_owner::test_serial();
         fn suppressed_in_line() -> u64 {
             let mut buf = [0u8; 96];
             let n = render_limiter(&mut buf);

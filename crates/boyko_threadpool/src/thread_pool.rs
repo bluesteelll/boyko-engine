@@ -156,6 +156,13 @@ pub struct PoolInner {
     /// Worker count (cold; written once at construction). Lives here (O1) so
     /// a worker holding `&PoolInner` can read it.
     pub(crate) worker_count: u32,
+
+    /// The pool's private epoch probe (cold; read by [`ThreadPool::register_thread`]
+    /// only): a stealer over a deque whose `Worker` end was dropped in `build`, so
+    /// nothing can ever push to it and every steal on it answers `Empty`. It exists
+    /// to make a thread a crossbeam-epoch participant without touching a deque that
+    /// holds tasks -- a probe of a WORKER's deque can take a live task.
+    pub(crate) epoch_probe: Stealer<Task>,
 }
 
 impl PoolInner {
@@ -442,6 +449,24 @@ impl ThreadPool {
         self.inner.idle.load(Ordering::Acquire)
     }
 
+    /// Make the calling thread a crossbeam-epoch participant of this pool, now.
+    ///
+    /// Setup API, for a thread that drives a pool it did not build -- an editor
+    /// tool thread, a render thread, a test helper. [`ThreadPoolBuilder::build`]
+    /// already registers its builder and every worker, so the shipped driver,
+    /// which is the builder, never needs this. Unregistered, a driver registers
+    /// on its first steal instead, which allocates crossbeam-epoch's per-thread
+    /// `Local` (and, on the process's first registration, the collector's
+    /// `Global` and queue sentinel) inside whatever frame that steal lands in.
+    ///
+    /// Safe to call at any time and any number of times: it probes the pool's
+    /// private, never-pushed deque, so it can never take a task, and on a thread
+    /// that is already registered it allocates nothing.
+    #[inline]
+    pub fn register_thread(&self) {
+        crate::worker::register_epoch_participant(&self.inner.epoch_probe);
+    }
+
     /// Read the active pool for the current thread (the one set by the
     /// most recent [`ThreadPool::install`] on this thread). Returns
     /// `None` when no pool is attached.
@@ -689,6 +714,22 @@ impl ThreadPoolBuilder {
         }
         let stealers: Arc<[Stealer<Task>]> = stealers.into();
 
+        // EPOCH PARTICIPANTS ARE REGISTERED HERE, at build, and not on a thread's
+        // first steal (ci-fix-1 F2). crossbeam-deque's `Stealer::steal` pins before
+        // it tests for emptiness, and a thread's first pin registers its epoch
+        // `Local` (2304 B) plus, on the process's first, the collector's `Global`
+        // (640 B) and its queue sentinel (2072 B). Left to the first steal, those
+        // allocations landed in whichever frame the steal happened to come in:
+        // master's push CI counted them inside one measured physics step
+        // (`narrowphase_carry`). The probe is a deque nothing can push to (its
+        // `Worker` end is dropped right here), so registering through it can never
+        // take a task, and it registers in exactly the collector the pool's deques
+        // pin, whatever crossbeam version is resolved.
+        let epoch_probe: Stealer<Task> = Worker::<Task>::new_fifo().stealer();
+        // The builder first, before any spawn, so the process-first objects are the
+        // builder's, deterministically.
+        crate::worker::register_epoch_participant(&epoch_probe);
+
         let mut injector_local_vec: Vec<CachePadded<Injector<Task>>> =
             Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
@@ -710,8 +751,15 @@ impl ThreadPoolBuilder {
         // Alternative considered: pre-create `WorkerHandle`s with bogus
         // Thread handles and patch them later. Rejected because Thread
         // doesn't expose a no-op constructor.
-        let bootstrap: Arc<std::sync::Mutex<Option<Arc<PoolInner>>>> =
-            Arc::new(std::sync::Mutex::new(None));
+        //
+        // Since ci-fix-1 the handshake runs both ways: each worker first registers
+        // its epoch `Local` and signals boot, and `build` waits for all of them
+        // before it publishes. A pool is therefore fully registered when `build`
+        // returns, so no frame of the caller's counts a worker's first touch. There
+        // is no cycle: a worker waits for the published state only after it has
+        // signalled.
+        let bootstrap: Arc<std::sync::Mutex<Bootstrap>> =
+            Arc::new(std::sync::Mutex::new(Bootstrap { inner: None, booted: 0, failed: false }));
         let bootstrap_cvar: Arc<std::sync::Condvar> = Arc::new(std::sync::Condvar::new());
 
         let mut handles: Vec<JoinHandle<()>> = Vec::with_capacity(worker_count);
@@ -725,6 +773,7 @@ impl ThreadPoolBuilder {
         for (worker_id, deque) in deques.into_iter().enumerate() {
             let bootstrap_cl = Arc::clone(&bootstrap);
             let cvar_cl = Arc::clone(&bootstrap_cvar);
+            let probe_cl = epoch_probe.clone();
             let name = format!("{name_prefix}-{worker_id}");
 
             let mut builder = thread::Builder::new().name(name);
@@ -734,17 +783,22 @@ impl ThreadPoolBuilder {
 
             let join = builder
                 .spawn(move || {
-                    // Wait for the parent to publish the Arc<PoolInner>.
+                    let mut boot = BootSignal {
+                        bootstrap: &bootstrap_cl,
+                        cvar: &cvar_cl,
+                        signalled: false,
+                    };
+                    crate::worker::register_epoch_participant(&probe_cl);
+                    drop(probe_cl);
+                    // Signal boot, then wait for the parent to publish the Arc<PoolInner>.
                     let inner = {
-                        let mut guard = bootstrap_cl
-                            .lock()
-                            .expect("invariant: bootstrap mutex never poisoned");
-                        while guard.is_none() {
+                        let mut guard = boot.signal();
+                        while guard.inner.is_none() {
                             guard = cvar_cl
                                 .wait(guard)
                                 .expect("invariant: bootstrap condvar never poisoned");
                         }
-                        Arc::clone(guard.as_ref().expect("invariant: just-checked Some"))
+                        Arc::clone(guard.inner.as_ref().expect("invariant: just-checked Some"))
                     };
                     worker_main(inner, worker_id as u32, deque);
                 })
@@ -752,6 +806,23 @@ impl ThreadPoolBuilder {
 
             thread_handles.push(join.thread().clone());
             handles.push(join);
+        }
+
+        // Every worker has registered its epoch `Local` before `build` returns.
+        {
+            let mut guard = bootstrap
+                .lock()
+                .expect("invariant: bootstrap mutex never poisoned");
+            while guard.booted < worker_count {
+                guard = bootstrap_cvar
+                    .wait(guard)
+                    .expect("invariant: bootstrap condvar never poisoned");
+            }
+            assert!(
+                !guard.failed,
+                "invariant: a pool worker unwound before it booted, so the pool would be short a worker"
+            );
+            debug_assert_eq!(guard.booted, worker_count, "invariant: each worker signals boot once");
         }
 
         let workers: Arc<[CachePadded<WorkerHandle>]> = thread_handles
@@ -775,6 +846,7 @@ impl ThreadPoolBuilder {
             active_scopes: CachePadded::new(AtomicUsize::new(0)),
             shutdown: CachePadded::new(AtomicBool::new(false)),
             worker_count: worker_count as u32,
+            epoch_probe,
         });
 
         // Publish the inner state to the waiting workers.
@@ -782,7 +854,7 @@ impl ThreadPoolBuilder {
             let mut guard = bootstrap
                 .lock()
                 .expect("invariant: bootstrap mutex never poisoned");
-            *guard = Some(Arc::clone(&inner));
+            guard.inner = Some(Arc::clone(&inner));
         }
         bootstrap_cvar.notify_all();
 
@@ -797,6 +869,61 @@ impl ThreadPoolBuilder {
             inner,
             join_handles: std::sync::Mutex::new(Some(join_handles)),
         })
+    }
+}
+
+/// What [`ThreadPoolBuilder::build`] and its workers share until every worker has
+/// booted: the published state, and the boot count `build` waits on.
+struct Bootstrap {
+    /// `None` until every worker has booted; then the state the workers run on.
+    inner: Option<Arc<PoolInner>>,
+    /// Workers that have signalled boot, each after registering its epoch `Local`.
+    booted: usize,
+    /// A worker unwound before it signalled, so the pool would be short a worker.
+    failed: bool,
+}
+
+/// A worker's boot signal, sent exactly once: by [`signal`](Self::signal) after
+/// the worker has registered, or by `Drop` if it unwinds first, so `build` can
+/// never wait forever for a worker that died.
+// The `Mutex` is the bootstrap's own (`ThreadPoolBuilder::build`): boot-time
+// plumbing, never touched once `build` has returned.
+#[allow(clippy::disallowed_types)]
+struct BootSignal<'a> {
+    bootstrap: &'a std::sync::Mutex<Bootstrap>,
+    cvar: &'a std::sync::Condvar,
+    signalled: bool,
+}
+
+// The same boot-time `Mutex` as the struct above.
+#[allow(clippy::disallowed_types)]
+impl<'a> BootSignal<'a> {
+    /// Count this worker as booted and wake `build`; returns the held lock, on
+    /// which the worker then waits for the published state.
+    fn signal(&mut self) -> std::sync::MutexGuard<'a, Bootstrap> {
+        let mut guard = self
+            .bootstrap
+            .lock()
+            .expect("invariant: bootstrap mutex never poisoned");
+        guard.booted += 1;
+        self.signalled = true;
+        self.cvar.notify_all();
+        guard
+    }
+}
+
+impl Drop for BootSignal<'_> {
+    fn drop(&mut self) {
+        if !self.signalled {
+            // Poisoned or not, the count must move, or `build` waits forever.
+            let mut guard = self
+                .bootstrap
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.booted += 1;
+            guard.failed = true;
+            self.cvar.notify_all();
+        }
     }
 }
 
@@ -849,5 +976,52 @@ mod tests {
     #[test]
     fn current_pool_is_none_outside_install() {
         assert!(ThreadPool::current_pool().is_none());
+    }
+
+    #[test]
+    fn register_thread_never_takes_a_task() {
+        // `register_thread` is public and callable at any time, so it must not probe a deque that
+        // can hold work: a stolen scoped task that is dropped unrun leaves its scope's join
+        // waiting forever. The scene holds worker 0's deque full while the call is made; every
+        // child must still run. The pool runs on a helper thread so that a red is a bounded wait,
+        // not a hang of the test binary.
+        const CHILDREN: u32 = 16;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let pool = ThreadPoolBuilder::new().num_threads(1).build();
+            let ran = AtomicU32::new(0);
+            let pushed = AtomicBool::new(false);
+            let go = AtomicBool::new(false);
+            let (p, ran_r, pushed_r, go_r) = (&*pool, &ran, &pushed, &go);
+            p.install(|s| {
+                s.spawn(move || {
+                    p.scope(|inner| {
+                        for _ in 0..CHILDREN {
+                            inner.spawn(move || {
+                                ran_r.fetch_add(1, Ordering::Relaxed);
+                            });
+                        }
+                        pushed_r.store(true, Ordering::Release);
+                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                        while !go_r.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                            core::hint::spin_loop();
+                        }
+                    });
+                });
+                // Acquire: pairs with the leader's Release, made after its pushes. From here worker
+                // 0 holds the children on its own deque and spins.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while !pushed.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                    core::hint::spin_loop();
+                }
+                p.register_thread();
+                go.store(true, Ordering::Release);
+            });
+            let _ = tx.send(ran.load(Ordering::Acquire));
+        });
+        let ran = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("register_thread() took a task off a worker's deque: its scope never completed");
+        assert_eq!(ran, CHILDREN, "every child on worker 0's deque must run");
     }
 }

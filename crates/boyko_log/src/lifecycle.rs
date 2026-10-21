@@ -37,7 +37,7 @@
 //! progress when asked for and none when not.
 
 use core::fmt::Write as _;
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::site::LogSite;
 
@@ -273,6 +273,23 @@ pub fn sink_passes() -> u8 {
     SINK_PASSES.load(Ordering::Acquire)
 }
 
+/// Set by the sink thread's unwind: it died without publishing `Exited`.
+static SINK_DIED: AtomicU8 = AtomicU8::new(0);
+
+/// Records a sink thread that unwinds, so an expired [`shutdown`] can name it
+/// ([`ShutdownOutcome::SinkDied`]) instead of reading a dead thread as a stalled one.
+struct SinkDeathWatch;
+
+impl Drop for SinkDeathWatch {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            // Release: the unwind has already dropped the drain token (a later local of
+            // `sink_loop`), so a shutdown that reads this with `Acquire` finds the role free.
+            SINK_DIED.store(1, Ordering::Release);
+        }
+    }
+}
+
 /// The sink loop: claim the role, drain, park, repeat until asked to stop.
 ///
 /// # The park is adaptive, and the reason is not battery life
@@ -285,12 +302,33 @@ pub fn sink_passes() -> u8 {
 /// **It refuses rather than steals.** If another consumer holds the role — a manual `drain()`, the
 /// scheduled ECS drain — this pass does nothing and tries again later. Stealing would create the
 /// second consumer the token exists to prevent.
+///
+/// # The console is written last, and outside the role
+///
+/// The console is the one destination with an EXTERNAL consumer: a pipe a parent process may stop
+/// reading. The pass therefore stages its console lines and writes them only after the durable
+/// sinks hold the pass and the role is released. A consumer that stalls then blocks this thread
+/// in that write and nothing else: no durable write waits behind it, and a [`shutdown`] whose join
+/// expires can claim the role and close the sinks itself. MEASURED in master's push CI: with the
+/// console first and under the role, a one-second pause of the runner's pipe during the census
+/// cost the durable file every census row after the stalled line.
 fn sink_loop() {
+    let _death = SinkDeathWatch;
+    // The thread's own stack, for the thread's whole life: no static, no sharing.
+    let mut stage = ConsoleStage::new();
     let mut idle: u32 = 0;
     loop {
         let asked_to_stop = SINK_RUNNING.load(Ordering::Acquire) == 0;
 
-        let moved = drain_once().is_some_and(|stats| stats.records > 0);
+        let moved = match crate::drain_owner::try_claim() {
+            Some(token) => {
+                let stats = deliver(&token, Console::Stage(&mut stage));
+                drop(token);
+                stats.records > 0
+            }
+            None => false,
+        };
+        stage.write_out();
 
         SINK_PASSES.fetch_add(1, Ordering::Release);
 
@@ -325,6 +363,86 @@ fn sink_loop() {
 /// which is precisely the question the seam's one-frame bound is an answer to.
 pub fn drain_once() -> Option<crate::lane::DrainStats> {
     let token = crate::drain_owner::try_claim()?;
+    Some(deliver(&token, Console::Direct))
+}
+
+/// How a pass delivers its console lines.
+enum Console<'a> {
+    /// Each line straight to the synchronous channel, in record order -- [`drain_once`]'s callers.
+    Direct,
+    /// Into the sink thread's stage, written once the pass has released the role.
+    Stage(&'a mut ConsoleStage),
+    /// Not at all, counted in [`console_lines_skipped`]: a late close, whose console is the
+    /// consumer that stalled.
+    Skip,
+}
+
+/// Rendered console text one sink pass stages before writing it.
+///
+/// 16 KiB is the census (about 3.4 KiB) four times over; a pass that renders more than that writes
+/// the stage under the role and carries on (`ConsoleStage::overflow`), which is the pre-staging
+/// behaviour for that pass.
+const CONSOLE_STAGE_BYTES: usize = 16 * 1024;
+
+/// The line prefix every ring-borne console line carries.
+const CONSOLE_PREFIX: &str = "boyko-log ";
+
+// One rendered line (prefix, body, newline) always fits an empty stage, so an overflow only ever has
+// to write the stage.
+const _: () = assert!(CONSOLE_PREFIX.len() + crate::record::MAX_RENDERED_BYTES < CONSOLE_STAGE_BYTES);
+
+/// The sink thread's console lines for one pass, on that thread's stack.
+struct ConsoleStage {
+    buf: [u8; CONSOLE_STAGE_BYTES],
+    len: usize,
+}
+
+impl ConsoleStage {
+    const fn new() -> ConsoleStage {
+        ConsoleStage { buf: [0; CONSOLE_STAGE_BYTES], len: 0 }
+    }
+
+    /// Stage `prefix body \n`: the bytes [`crate::sync_out::write_oracle_line`] would write.
+    fn push(&mut self, prefix: &str, body: &str) {
+        let need = prefix.len() + body.len() + 1;
+        if self.len + need > CONSOLE_STAGE_BYTES {
+            self.overflow();
+        }
+        let start = self.len;
+        let mid = start + prefix.len();
+        let end = mid + body.len();
+        self.buf[start..mid].copy_from_slice(prefix.as_bytes());
+        self.buf[mid..end].copy_from_slice(body.as_bytes());
+        self.buf[end] = b'\n';
+        self.len = end + 1;
+    }
+
+    /// A pass rendered more console text than the stage holds: write what is staged now, under the
+    /// role -- one of the synchronous writes a pass can stall in
+    /// ([`ShutdownOutcome::StalledInsidePass`]).
+    #[cold]
+    #[inline(never)]
+    fn overflow(&mut self) {
+        self.write_out();
+    }
+
+    /// Write and empty the stage. Called outside the role, after every pass.
+    fn write_out(&mut self) {
+        if self.len != 0 {
+            let _ = crate::sync_out::write_oracle_block(&self.buf[..self.len]);
+            self.len = 0;
+        }
+    }
+}
+
+/// One pass over every lane, under a role the caller already holds, routed per sink.
+///
+/// Per record the order is file, binary, ECS, and the console LAST, so whatever happens to the
+/// console's consumer, every durable sink already holds the record. Each durable sink's byte
+/// stream is what it always was. The console's moved by one step: a report a durable sink writes
+/// to the synchronous channel while it takes a record (`W0103`, `W0112`) now precedes that
+/// record's line, and on the sink thread every line its pass staged.
+fn deliver(token: &crate::drain_owner::DrainToken, mut console: Console<'_>) -> crate::lane::DrainStats {
     // Sink lifecycle runs HERE, on the draining thread, before any record moves (L14). The
     // requesting thread posted a byte and returned; the `open` -- a syscall -- happens under the
     // token, which is the process-wide proof that nobody else is writing into the sink being
@@ -333,7 +451,7 @@ pub fn drain_once() -> Option<crate::lane::DrainStats> {
     // Before the records and not after: a file opened by this pass must receive this pass's
     // output. Starting one pass late is what an operator typing `open` and finding an empty file
     // would report as a bug.
-    crate::sink::request::pump(&token, FILE_CAP.load(Ordering::Relaxed));
+    crate::sink::request::pump(token, FILE_CAP.load(Ordering::Relaxed));
     let to_ecs = ecs_ring_enabled();
     // Snapshotted so the report below carries THIS PASS's refusals. A report of the running total
     // would restate the same thousands every pass, and a reader could not tell a storm that has
@@ -342,7 +460,7 @@ pub fn drain_once() -> Option<crate::lane::DrainStats> {
     // ONE buffer for the whole pass, hoisted out of the per-record closure: `MAX_RENDERED_BYTES`
     // of stack zeroed once instead of once per record.
     let mut line = crate::record::DspBuf::<{ crate::record::MAX_RENDERED_BYTES }>::new();
-    let stats = crate::lane::drain(&token, |site, _tsc, flags, payload| {
+    let stats = crate::lane::drain(token, |site, _tsc, flags, payload| {
         // A dynamic record carries its target ahead of its values, because a `dyn_*!` site has
         // none at compile time (L10-B). The site's own `target` field is the discriminant, so the
         // split is done once here and everything below reads the resolved pair.
@@ -373,11 +491,8 @@ pub fn drain_once() -> Option<crate::lane::DrainStats> {
                     && site.level <= crate::sink::slot::floor(slot)
             }
         };
-        if admits(crate::sink::slot::SLOT_CONSOLE) {
-            crate::sync_out::write_oracle_line("boyko-log ", text);
-        }
         if admits(crate::sink::slot::SLOT_FILE) {
-            crate::sink::file::write_line(&token, text.as_bytes());
+            crate::sink::file::write_line(token, text.as_bytes());
         }
         // The BINARY sink takes the record BEFORE rendering would matter to it: it writes the
         // payload verbatim and names the site by a dictionary id, which is the entire reason the
@@ -385,7 +500,7 @@ pub fn drain_once() -> Option<crate::lane::DrainStats> {
         // clock -- a second clock read here would put a different time in the two files for one
         // record, and a reader correlating them would find a skew that never happened.
         if admits(crate::sink::slot::SLOT_BINARY) {
-            crate::sink::binary::write_record(&token, site, _tsc, flags, payload);
+            crate::sink::binary::write_record(token, site, _tsc, flags, payload);
         }
         // Counted once per record, HERE and not per destination: `delivered` answers "did this
         // target ever produce anything", and a record that reached two sinks did not happen twice.
@@ -411,14 +526,28 @@ pub fn drain_once() -> Option<crate::lane::DrainStats> {
                 code: site.code,
                 flags,
             };
-            crate::sink::ecs::push(&token, meta, text.as_bytes());
+            crate::sink::ecs::push(token, meta, text.as_bytes());
+        }
+        // THE CONSOLE LAST (see `sink_loop`): every durable sink above already holds this record.
+        // The route is matched here and nowhere else, behind the slot test, so a console-off
+        // preset never reaches the match.
+        if admits(crate::sink::slot::SLOT_CONSOLE) {
+            match &mut console {
+                Console::Direct => {
+                    crate::sync_out::write_oracle_line(CONSOLE_PREFIX, text);
+                }
+                Console::Stage(stage) => stage.push(CONSOLE_PREFIX, text),
+                Console::Skip => {
+                    CONSOLE_SKIPPED.fetch_add(1, Ordering::Relaxed);
+                }
+            }
         }
     });
     let (lost_after, bytes_after) = crate::sink::ecs::lost();
     if lost_after > lost_before {
         crate::sink::ecs::report_overflow(lost_after - lost_before, bytes_after - bytes_before);
     }
-    Some(stats)
+    stats
 }
 
 /// Render one record: `LEVEL [boyko-Cnnnn ]file:line message`.
@@ -556,9 +685,12 @@ pub fn enable() -> bool {
     // runtime preset and ceiling -- and `preset::header` had no caller at all until this line: the
     // function existed, the rung was reported half-shipped, and nothing printed anything.
     crate::preset::header(boot_preset_recorded());
+    // A new session: its shutdown has not ended yet.
+    SHUTDOWN_OUTCOME.store(0, Ordering::Release);
     if WANT_SINK.load(Ordering::Relaxed) != 0 {
         SINK_RUNNING.store(1, Ordering::Release);
         SINK_PASSES.store(0, Ordering::Release);
+        SINK_DIED.store(0, Ordering::Release);
         std::thread::Builder::new()
             .name("boyko-log-sink".into())
             .spawn(sink_loop)
@@ -696,6 +828,103 @@ pub fn flush() -> FlushResult {
     FlushResult::TimedOut
 }
 
+/// How the first [`shutdown`] of a session ended.
+///
+/// [`shutdown`] returns a `bool`, and its callers read it that way. The outcome says which way a
+/// `false` went, which is the difference between "the durable log is complete and only the console
+/// is behind" and "the durable log may lack its census" -- and a host on its exit path can act on
+/// the second only if it can tell the two apart.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ShutdownOutcome {
+    /// The resident sink thread's exit pass delivered everything within the bound, and the sinks
+    /// closed after it.
+    Joined = 1,
+    /// There was no resident sink thread: the calling thread ran the final pass and closed.
+    NoThread = 2,
+    /// The bound expired with the drain role FREE: the sink thread was outside a pass, blocked
+    /// writing its staged console lines to a consumer that stopped reading (or not scheduled at
+    /// all). The calling thread delivered the remaining records to the durable sinks -- file,
+    /// binary, ECS -- and closed them. Those records did not reach the console
+    /// ([`console_lines_skipped`]); the lines the sink thread had staged reach it when its
+    /// consumer reads again.
+    ClosedAfterStall = 3,
+    /// The bound expired with the drain role HELD: the sink is stalled inside a pass -- in a
+    /// durable write (the disk, a filter driver), a render, or a synchronous console write the
+    /// pass makes under the role: a staged overflow, the file sink's cap (`W0103`) or
+    /// rotation-loss (`W0112`) report, an un-laned fallback line. Nothing could be delivered
+    /// safely, so the durable file lacks what that pass had not reached, visibly: its census has no
+    /// `LOG-CENSUS limiter` line. [`await_exit`] waits longer and closes the sinks once the thread
+    /// exits.
+    StalledInsidePass = 4,
+    /// The sink thread died -- it panicked -- before it could exit. Its unwind released the role,
+    /// so the calling thread delivered and closed as in
+    /// [`ClosedAfterStall`](Self::ClosedAfterStall); the panic itself was reported by the hook.
+    SinkDied = 5,
+}
+
+/// `0` until a shutdown has ended this session; then a [`ShutdownOutcome`] discriminant.
+///
+/// Written once per session, by the FIRST shutdown: a second call finds no thread to stop and
+/// would otherwise overwrite a stall with the `NoThread` it reads.
+static SHUTDOWN_OUTCOME: AtomicU8 = AtomicU8::new(0);
+
+/// Console lines a late close delivered to the durable sinks and not to the console.
+static CONSOLE_SKIPPED: AtomicU32 = AtomicU32::new(0);
+
+/// Record how this session's shutdown ended, unless an earlier call already did.
+fn record_outcome(outcome: ShutdownOutcome) {
+    // AcqRel on success: the outcome is published after everything the shutdown did, and a
+    // reader that sees it (`Acquire` below) sees those effects -- the closed sinks included.
+    let _ = SHUTDOWN_OUTCOME.compare_exchange(0, outcome as u8, Ordering::AcqRel, Ordering::Relaxed);
+}
+
+/// How this session's first [`shutdown`] ended, or `None` before one has.
+#[must_use]
+pub fn shutdown_outcome() -> Option<ShutdownOutcome> {
+    match SHUTDOWN_OUTCOME.load(Ordering::Acquire) {
+        1 => Some(ShutdownOutcome::Joined),
+        2 => Some(ShutdownOutcome::NoThread),
+        3 => Some(ShutdownOutcome::ClosedAfterStall),
+        4 => Some(ShutdownOutcome::StalledInsidePass),
+        5 => Some(ShutdownOutcome::SinkDied),
+        _ => None,
+    }
+}
+
+/// Console lines a late close delivered to the durable sinks only
+/// ([`ShutdownOutcome::ClosedAfterStall`]); cumulative over the process.
+#[must_use]
+pub fn console_lines_skipped() -> u32 {
+    CONSOLE_SKIPPED.load(Ordering::Relaxed)
+}
+
+/// After a [`shutdown`] that returned `false`, wait up to `bound` for the sink thread to exit,
+/// then close the sinks. Returns whether it exited.
+///
+/// For a host that can afford a longer wait than `shutdown`'s 500 ms, on its exit path: a console
+/// consumer that stalled for a second still receives the lines the sink thread had staged, and a
+/// thread stalled inside a pass ([`ShutdownOutcome::StalledInsidePass`]) still delivers its census
+/// to the durable file before the close. Returns `false` at once when no shutdown is in progress,
+/// because nothing would ever move the state.
+pub fn await_exit(bound: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + bound;
+    loop {
+        match state() {
+            SinkState::Exited => {
+                close_sinks();
+                return true;
+            }
+            SinkState::Exiting => {}
+            _ => return false,
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::yield_now();
+    }
+}
+
 /// Stop the sink thread and wait, bounded, for it to complete one final drain.
 ///
 /// **No join handle is kept, and that is deliberate**: a handle would have to live in a static
@@ -705,7 +934,9 @@ pub fn flush() -> FlushResult {
 /// that died before it got there.
 ///
 /// Returns `false` if the wait expired, which is a defect signal rather than an error to handle:
-/// the caller is on its way out either way.
+/// the caller is on its way out either way. **An expired wait does not give up silently**: it
+/// closes the durable sinks itself when the drain role is free, and records what it did either way
+/// ([`shutdown_outcome`]); a host that can wait longer calls [`await_exit`].
 pub fn shutdown() -> bool {
     // THE CENSUS FIRST, while the state is still `Enabled` and emission is still admitted. It is
     // ring-borne now, so the order is "emit, then deliver, then close" in BOTH arms: the summary
@@ -724,6 +955,7 @@ pub fn shutdown() -> bool {
         }
         close_sinks();
         SINK_STATE.store(SinkState::Exited as u8, Ordering::Release);
+        record_outcome(ShutdownOutcome::NoThread);
         return true;
     }
     SINK_STATE.store(SinkState::Exiting as u8, Ordering::Release);
@@ -734,11 +966,81 @@ pub fn shutdown() -> bool {
             // close only now. In the previous shape `close_out` closed the text file BEFORE that
             // pass, so the tail was delivered to a destination that no longer existed.
             close_sinks();
+            record_outcome(ShutdownOutcome::Joined);
             return true;
+        }
+        // Acquire: pairs with the Release in `SinkDeathWatch::drop`. A dead thread will never
+        // publish `Exited`, so waiting out the bound for it would only delay the close.
+        if SINK_DIED.load(Ordering::Acquire) != 0 {
+            break;
         }
         std::thread::yield_now();
     }
-    false
+    let outcome = close_after_expiry();
+    record_outcome(outcome);
+    outcome == ShutdownOutcome::Joined
+}
+
+/// What an expired [`shutdown`] does instead of giving up: deliver and close when it can, and say
+/// which of the two cases it was.
+///
+/// - **The role is free**: the sink thread is outside a pass -- under [`sink_loop`]'s shape,
+///   blocked writing its staged console lines to a consumer that stopped reading, which is the CI
+///   case -- or dead. This thread delivers what the lanes still hold, the census included, to every
+///   durable sink and closes them, under the one claim. The console is skipped: it is the consumer
+///   that stalled. The synchronous channel is refused for the same reason: the stalled sink thread
+///   holds stderr's lock, so a sink's own report (the file cap, a lossy rotation) would wait on it
+///   without a bound.
+/// - **The role is held**: the sink is stalled inside a pass, and nothing can be written safely.
+///   Recorded, not hidden.
+#[cold]
+#[inline(never)]
+fn close_after_expiry() -> ShutdownOutcome {
+    if state() == SinkState::Exited {
+        // The exit pass finished just past the bound.
+        close_sinks();
+        return ShutdownOutcome::Joined;
+    }
+    let Some(token) = crate::drain_owner::try_claim() else {
+        return ShutdownOutcome::StalledInsidePass;
+    };
+    // Acquire: pairs with `SinkDeathWatch::drop`'s Release.
+    let died = SINK_DIED.load(Ordering::Acquire) != 0;
+    {
+        let _refused = crate::sync_out::refuse_on_this_thread();
+        let _ = deliver(&token, Console::Skip);
+        close_sinks_with(&token);
+    }
+    drop(token);
+    if died {
+        // Nothing else will ever publish it: the thread that would have is gone.
+        SINK_STATE.store(SinkState::Exited as u8, Ordering::Release);
+        ShutdownOutcome::SinkDied
+    } else {
+        ShutdownOutcome::ClosedAfterStall
+    }
+}
+
+/// Report, on the synchronous channel, a sink thread still stalled inside a pass after a host's
+/// [`await_exit`] grace ([`ShutdownOutcome::StalledInsidePass`]): the durable log may lack its
+/// census, and this line is the only place left to say so.
+///
+/// Returns whether the line was written. It is NOT written when the synchronous channel stays
+/// busy past its 50 ms acquire deadline. A pass can stall IN a synchronous write -- any of those
+/// [`ShutdownOutcome::StalledInsidePass`] lists -- and then its thread holds stderr's lock for as
+/// long as the console does not read; a report that waited there would hang the exit path it is
+/// on. So the report never steals the channel, and the test is on the channel, not on the cause: a
+/// synchronous write added to the pass later is covered without a flag of its own. The outcome
+/// stays readable either way.
+#[cold]
+#[inline(never)]
+pub fn report_stalled_exit() -> bool {
+    crate::sync_out::write_oracle_line_if_idle(
+        "boyko-log: ",
+        "shutdown: the sink thread is still stalled inside a drain pass; the durable log may lack \
+         its census (no `LOG-CENSUS limiter` line)",
+    )
+    .is_some()
 }
 
 /// Print the census and close the file, if this process ever opened one.
@@ -762,11 +1064,16 @@ fn close_out() {
 /// close at all, only the request-ring route a host had to know to ask for.
 fn close_sinks() {
     if let Some(token) = crate::drain_owner::try_claim() {
-        if crate::sink::file::is_open() {
-            crate::sink::file::close(&token);
-        }
-        crate::sink::binary::close(&token);
+        close_sinks_with(&token);
     }
+}
+
+/// [`close_sinks`] under a role the caller already holds -- the late close's single claim.
+fn close_sinks_with(token: &crate::drain_owner::DrainToken) {
+    if crate::sink::file::is_open() {
+        crate::sink::file::close(token);
+    }
+    crate::sink::binary::close(token);
 }
 
 /// Turn diagnostics off again for a session that no longer wants them.
@@ -798,6 +1105,8 @@ mod tests {
         // which is how "no thread was asked for, so no pass may have happened" started failing
         // deterministically the moment a sink-thread test was added beside it.
         SINK_PASSES.store(0, Ordering::Release);
+        SHUTDOWN_OUTCOME.store(0, Ordering::Release);
+        SINK_DIED.store(0, Ordering::Release);
     }
 
     #[test]
@@ -991,5 +1300,294 @@ mod tests {
         disable();
         assert_eq!(state(), SinkState::Booted, "disable returns to Booted, not to NotBooted");
         reset();
+    }
+
+    // ── A console consumer that stops reading (ci-fix-1 F1) ─────────────────────────────────
+    //
+    // Master's push CI went red at `log_host_editor`'s join assertion when the runner's stderr
+    // pipe stopped being read for about a second during the census: the sink thread wrote the
+    // console FIRST, under the drain role, so every durable write queued behind the blocked line
+    // waited too, and `shutdown` gave up after 500 ms without closing anything -- the durable
+    // file lost its census.
+    // `sync_out::test_stall` reproduces that consumer on the sink thread.
+
+    /// A threaded console + file session with the `log` target armed, so the census reaches both
+    /// sinks. Its drop disarms the stall, lets the sink thread exit, closes, turns rotation back
+    /// off, and restores the target, so a red here cannot poison the next test.
+    struct ThreadedFileSession {
+        path: std::path::PathBuf,
+        log_was: crate::target::TargetControl,
+    }
+
+    impl ThreadedFileSession {
+        fn start(name: &str, file_cap_bytes: u64) -> Self {
+            reset();
+            // Every lane emptied first. A lane test that ran earlier under the same lock leaves its
+            // records in the ring it released (a fill test leaves it full), and this session's sink
+            // thread would deliver them into the file: a 1 KiB cap crossed, and its once-per-process
+            // report spent, before the pass a test is about (ci-fix-1, triage r1 R2a).
+            {
+                let token = crate::drain_owner::try_claim()
+                    .expect("invariant: the test lock excludes every other consumer");
+                let _ = crate::lane::drain(&token, |_, _, _, _| {});
+            }
+            // `boot` arms no target and `CONTROL` is `.bss`-Off, so without this the census rows
+            // would be refused at the gate and every assertion below would read the admission
+            // policy, not the stall.
+            let id = <crate::Log as crate::target::LogTarget>::ID;
+            let log_was = crate::target::target_control(id);
+            crate::target::set_target_control(
+                id,
+                crate::target::TargetControl::new(crate::GLOBAL_CEILING, 0, false),
+            );
+            let path = std::env::temp_dir()
+                .join(format!("boyko_lifecycle_{name}_{}.log", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            assert!(crate::sink::file::set_path(path.to_str().expect("a UTF-8 temp path")));
+            boot(LogConfig {
+                console: true,
+                sink_thread: true,
+                file: true,
+                file_cap_bytes,
+                ..LogConfig::default()
+            });
+            assert!(enable());
+            // The session header reaches the console before any test arms a stall.
+            assert_eq!(flush(), FlushResult::Flushed);
+            ThreadedFileSession { path, log_was }
+        }
+
+        fn text(&self) -> String {
+            std::fs::read_to_string(&self.path).unwrap_or_default()
+        }
+    }
+
+    impl Drop for ThreadedFileSession {
+        fn drop(&mut self) {
+            crate::sync_out::test_stall::disarm();
+            wait_for_exit(std::time::Duration::from_secs(5));
+            close_sinks();
+            crate::sink::file::set_rotation(0, 0);
+            crate::target::set_target_control(<crate::Log as crate::target::LogTarget>::ID, self.log_was);
+            let _ = std::fs::remove_file(&self.path);
+            reset();
+        }
+    }
+
+    /// A raw wait on `Exited`, without [`await_exit`]'s close, so a test can observe whether the
+    /// late close closed the file itself.
+    fn wait_for_exit(bound: std::time::Duration) {
+        let deadline = std::time::Instant::now() + bound;
+        while state() != SinkState::Exited && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+    }
+
+    /// The census rows `text` lacks: one `LOG-CENSUS target=<name> ` per target, then the limiter.
+    fn missing_census_rows(text: &str) -> (usize, Vec<String>) {
+        let mut want: Vec<String> = crate::target::targets()
+            .map(|(_, name)| format!("LOG-CENSUS target={name} "))
+            .collect();
+        want.push("LOG-CENSUS limiter ".to_owned());
+        let total = want.len();
+        (total, want.into_iter().filter(|row| !text.contains(row.as_str())).collect())
+    }
+
+    /// Emit one console-admitted record and wait until the sink thread is stalled writing it.
+    fn stall_the_sink_on_a_record() {
+        crate::sync_out::test_stall::arm();
+        crate::info!(crate::Log, "the record the stalled console is writing");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !crate::sync_out::test_stall::entered() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(crate::sync_out::test_stall::entered(), "fixture: the sink never reached the stalled write");
+    }
+
+    #[test]
+    fn a_threaded_console_session_delivers_the_whole_census_to_the_file() {
+        // The control: no stall, so the 500 ms join holds, and the file check below is shown able
+        // to read a complete census before the two stall tests rely on it.
+        let _s = crate::drain_owner::test_serial();
+        let session = ThreadedFileSession::start("control", 0);
+        assert!(shutdown(), "an unstalled threaded shutdown must join within its bound");
+        assert_eq!(shutdown_outcome(), Some(ShutdownOutcome::Joined));
+        let (total, missing) = missing_census_rows(&session.text());
+        assert!(missing.is_empty(), "the durable file lacks {} of {total} census rows: {missing:?}", missing.len());
+    }
+
+    #[test]
+    fn a_console_stalled_in_the_census_pass_costs_the_file_nothing() {
+        let _s = crate::drain_owner::test_serial();
+        let session = ThreadedFileSession::start("census_pass", 0);
+        crate::sync_out::test_stall::arm();
+        let joined = shutdown();
+        let (total, missing) = missing_census_rows(&session.text());
+        assert!(
+            missing.is_empty(),
+            "the durable file holds {} of {total} census rows after a console stall: missing {missing:?}",
+            total - missing.len()
+        );
+        assert_eq!(
+            shutdown_outcome(),
+            Some(ShutdownOutcome::ClosedAfterStall),
+            "an expired join with the role free must deliver and close (joined {joined})"
+        );
+        crate::sync_out::test_stall::disarm();
+        wait_for_exit(std::time::Duration::from_secs(5));
+        assert_eq!(state(), SinkState::Exited, "the sink thread must exit once its console drains");
+        // Only after `Exited`: the sink's exit pass takes `&mut` over the file cell, which this
+        // read would race.
+        assert!(!crate::sink::file::is_open(), "the late close must close the file it delivered to");
+    }
+
+    #[test]
+    fn a_console_stalled_in_an_earlier_pass_is_overtaken_by_the_late_close() {
+        let _s = crate::drain_owner::test_serial();
+        let session = ThreadedFileSession::start("earlier_pass", 0);
+        stall_the_sink_on_a_record();
+        let skipped_before = console_lines_skipped();
+        let joined = shutdown();
+        let (total, missing) = missing_census_rows(&session.text());
+        assert!(
+            missing.is_empty(),
+            "the durable file holds {} of {total} census rows after a console stall: missing {missing:?}",
+            total - missing.len()
+        );
+        assert_eq!(
+            shutdown_outcome(),
+            Some(ShutdownOutcome::ClosedAfterStall),
+            "an expired join with the role free must deliver and close (joined {joined})"
+        );
+        // The whole census went through the late pass, so none of it was written to the console.
+        assert!(
+            console_lines_skipped() - skipped_before >= total as u32,
+            "the late pass must count the console lines it did not write: {} for {total} census rows",
+            console_lines_skipped() - skipped_before
+        );
+        crate::sync_out::test_stall::disarm();
+        wait_for_exit(std::time::Duration::from_secs(5));
+        assert_eq!(state(), SinkState::Exited, "the sink thread must exit once its console drains");
+    }
+
+    #[test]
+    fn a_cap_crossed_in_the_late_pass_does_not_wait_on_the_stalled_console() {
+        // `file.rs` reports its cap through the synchronous channel, and the stalled sink thread
+        // holds stderr's lock: a late pass that reached that channel would wait on it without a
+        // bound. 1 KiB holds the header and the stalled record and not the census, so the late
+        // pass is the one that crosses the cap.
+        let _s = crate::drain_owner::test_serial();
+        let _session = ThreadedFileSession::start("cap", 1024);
+        stall_the_sink_on_a_record();
+        // The crossing must be the late pass's own. A pass before it that crossed the cap would
+        // leave the late pass nothing to report, and `W0103`'s latch is once per process.
+        assert!(!crate::sink::file::state().1, "fixture: a pass before the late one crossed the cap");
+        assert!(!crate::sink::file::cap_report_spent(), "fixture: an earlier crossing spent the W0103 latch");
+        let suppressed_before = crate::sync_out::suppressed_writes();
+        let joined = shutdown();
+        assert!(
+            !crate::sync_out::test_stall::gave_up(),
+            "shutdown returned only because the console stall gave up: the late pass reached the \
+             synchronous channel and waited on the stalled console (joined {joined})"
+        );
+        assert_eq!(
+            shutdown_outcome(),
+            Some(ShutdownOutcome::ClosedAfterStall),
+            "an expired join with the role free must deliver and close (joined {joined})"
+        );
+        assert!(crate::sink::file::state().1, "fixture: the late pass must have crossed the 1 KiB cap");
+        assert!(
+            crate::sync_out::suppressed_writes() > suppressed_before,
+            "the cap report the late pass did not write must be counted"
+        );
+    }
+
+    #[test]
+    fn a_sink_thread_that_died_is_named_and_its_census_still_reaches_the_file() {
+        // A dead thread releases the role on its unwind and never publishes `Exited`, so an
+        // expired join finds the role free exactly as it does behind a stalled console. Naming
+        // that `ClosedAfterStall` would send a reader to look for a console that never stalled.
+        let _s = crate::drain_owner::test_serial();
+        let session = ThreadedFileSession::start("died", 0);
+        crate::sync_out::test_stall::arm_panic();
+        crate::info!(crate::Log, "the record the dying sink thread is writing");
+        // Until the unwind is over, not merely begun: the panic hook flushes first (bounded at 2 s,
+        // and on this thread nothing can complete a pass), and the role is released only after.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while SINK_DIED.load(Ordering::Acquire) == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_ne!(SINK_DIED.load(Ordering::Acquire), 0, "fixture: the sink thread did not die");
+        let joined = shutdown();
+        assert_eq!(
+            shutdown_outcome(),
+            Some(ShutdownOutcome::SinkDied),
+            "a sink thread that panicked must be named, not read as a stall (joined {joined})"
+        );
+        let (total, missing) = missing_census_rows(&session.text());
+        assert!(
+            missing.is_empty(),
+            "the durable file holds {} of {total} census rows after the sink thread died: \
+             missing {missing:?}",
+            total - missing.len()
+        );
+        assert_eq!(state(), SinkState::Exited, "nothing else will publish `Exited` for a dead thread");
+    }
+
+    #[test]
+    fn a_stalled_exit_report_does_not_wait_on_an_in_pass_synchronous_report() {
+        // A sink thread can stall INSIDE a pass in a synchronous write of its own: the file sink
+        // reports its cap (`W0103`) and a lossy rotation (`W0112`) on the console channel while
+        // the pass delivers, under the role. It then holds stderr's lock, and a report written
+        // behind it on the exit path waits for as long as the console does not read (ci-fix-1,
+        // review r1 W1). Here the write is `W0112`: the next line rotates the file with `keep 0`,
+        // which deletes what the file held.
+        let _s = crate::drain_owner::test_serial();
+        let _session = ThreadedFileSession::start("in_pass_report", 0);
+        assert!(
+            !crate::sink::file::rotation_report_spent(),
+            "fixture: an earlier rotation spent the W0112 latch"
+        );
+        crate::sink::file::set_rotation(crate::sink::file::state().0 + 1, 0);
+        stall_the_sink_on_a_record();
+        let joined = shutdown();
+        assert_eq!(
+            shutdown_outcome(),
+            Some(ShutdownOutcome::StalledInsidePass),
+            "fixture: the sink thread must be stalled inside its pass, in the rotation report \
+             (joined {joined})"
+        );
+        assert!(
+            !await_exit(std::time::Duration::from_millis(50)),
+            "fixture: a sink thread stalled in its pass cannot exit"
+        );
+        let wrote = report_stalled_exit();
+        assert!(
+            !crate::sync_out::test_stall::gave_up(),
+            "report_stalled_exit returned only because the console stall gave up: it waited behind \
+             the sink thread's in-pass synchronous report (wrote {wrote})"
+        );
+        assert!(!wrote, "a report behind a stalled synchronous write must be refused, not written");
+    }
+
+    #[test]
+    fn a_stalled_exit_report_on_an_idle_channel_is_written() {
+        // The other half of the test above (ruling 76 W3: never silently). A sink thread stalled in
+        // a DURABLE write holds the drain role, not the synchronous channel, so the report finds
+        // the channel idle and must be written. The report reads none of the sink's state, so an
+        // idle channel is the whole fixture: no session and no stall (ci-fix-1, triage r2 Y1). The
+        // write before it has finished and must have left the channel idle.
+        let _s = crate::drain_owner::test_serial();
+        crate::sync_out::set_console_enabled(true);
+        let before = crate::sync_out::write_oracle_line("boyko-log-test: ", "a finished write before the report");
+        let wrote = report_stalled_exit();
+        // `reset`'s value, which every test here starts from and leaves behind.
+        crate::sync_out::set_console_enabled(false);
+        assert_eq!(
+            before,
+            Some(crate::sync_out::OutMode::Held),
+            "fixture: the earlier write must hold the channel"
+        );
+        assert!(wrote, "a stalled-exit report on an idle channel must be written, never silently dropped");
     }
 }

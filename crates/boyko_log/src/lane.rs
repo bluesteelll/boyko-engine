@@ -912,6 +912,11 @@ mod tests {
         // A thread that never claimed a lane. `Info` is counted as unclaimed; `Error` takes the
         // synchronous channel instead of being dropped, which is the property that makes a
         // lane-exhausted harness unable to lose a severe record.
+        //
+        // The process-wide test lock, like `on_own_lane`: when a spare lane is free, the record
+        // below lands in a ring every drain walks, and a drain test or a lifecycle session running
+        // beside this one would take it for its own (ci-fix-1, triage r1 R2a/R2b).
+        let _serial = crate::drain_owner::test_serial();
         std::thread::spawn(|| {
             assert_eq!(boyko_diag::lane::lane(), LANE_UNCLAIMED);
             // No lane is claimed here, so `resolve()` will attempt one; force the exhausted path
