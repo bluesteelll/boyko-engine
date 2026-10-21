@@ -101,6 +101,8 @@ use boyko_rhi_vulkan::goldens::{
     ByteVerdict, DeviceGbufferTexel, LIT_ROUNDING, LIT_STORE_PATH, LIT_TARGET, MarcherArm,
     MarcherPrequant, ResolveFloor, ResolveSite, attribute_byte_verdict, fragile_bit, golden_marcher_attributes_at,
     host_soft_shadow_ranged, lit_store_excess, oct_decode, resolve_error_floor, W_CONV,
+    // OPEN-ITEMS 16, triage r1 W1: the host M2 ray march and its start-point witness count.
+    HostM2Atlas, M2EvalCounts, golden_primary_hit_brick_m2,
 };
 use boyko_rhi_vulkan::brick_atlas::{BrickAtlas, BrickClipmap};
 use boyko_rhi_vulkan::ddgi::DdgiAtlas;
@@ -3170,6 +3172,17 @@ fn capsule_m2_scene() -> Vec<SdfEdit> {
     vec![
         SdfEdit::capsule([-0.45, -0.2, 0.75], [0.45, 0.25, 0.75], 0.12, sdf_op::UNION, 0.0),
         SdfEdit::box_shape([0.0, 0.0, 0.0], [0.45, 0.45, 0.45], sdf_op::UNION, 0.0),
+    ]
+}
+
+/// OPEN-ITEMS 16, triage r1 W1 (`oi1516/cut.md` D16-4): a thin plate (half-thickness 0.1, near face
+/// z = 1.0) across the whole ortho frame and a sphere (r 1.2, front cap z = 0.2) behind it — the
+/// first over-relaxed step at omega 1.6 jumps the plate. The device copy of
+/// `compute::tests::m2_first_surface_tests::jumped_plate`.
+fn jumped_plate() -> Vec<SdfEdit> {
+    vec![
+        SdfEdit::box_shape([0.0, 0.0, 0.9], [1.5, 1.5, 0.1], sdf_op::UNION, 0.0),
+        SdfEdit::sphere([0.0, 0.0, -1.0], 1.2, sdf_op::UNION, 0.0),
     ]
 }
 
@@ -7792,6 +7805,118 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
         failures.join("\n")
     );
     assert!(any_scene_hit, "no scene produced an M2 surface hit — the discriminator proved nothing");
+}
+
+/// OPEN-ITEMS 16, triage r1 W1 — the device row of the certificate's START POINT under
+/// over-relaxation (`oi1516/cut.md` D16-4). Every other device M2 run pushes omega 1, where the
+/// deferred marcher's `m2_a = (omega > 1.0 && it > 0u) ? safe_t + sor_prev : t` is `t` and the
+/// naive `m2_a = t` is an equivalent mutant. Here, on [`jumped_plate`] at omega 1.6 with the M1
+/// skip off: the first over-relaxed step jumps the plate and lands where the M2 cubic refines onto
+/// the sphere behind it; the certificate must refuse that hit (its segment from `safe_t +
+/// sor_prev` crosses the plate), the latch leaves the ray to the analytic march, and its overlap
+/// check retreats onto the plate. Gate: on every pure-SDF pixel the M2-on `gViewT` hit lies on the
+/// plate (the first surface) and within `W1_T_TOL` of the M2-off (analytic) run's hit at the same
+/// omega. The host M2 mirror's witness count (`M2EvalCounts::start_point_refusals`) names the
+/// pixels where only the start point stands between the march and the sphere; it must be non-zero,
+/// and the M2 branch must have run on the device at this omega (some pixel's `gViewT` differs
+/// between the runs: M2 commits the plate from its cubic where no sphere lies ahead).
+///
+/// Run on the RTX: `cargo test -p boyko_rhi_vulkan --test sdf_gbuffer_hybrid \
+///   sdf_m2_overrelaxed_start_point_offscreen -- --ignored --nocapture --test-threads=1`
+#[test]
+#[ignore = "gpu: GPU offscreen gate — requires a Vulkan device (the owner's RTX); OI16 D16-4 start point at omega 1.6; run with --ignored"]
+fn sdf_m2_overrelaxed_start_point_offscreen() {
+    /// The over-relaxation (the harness clamps omega to `[1, 1.99]`).
+    const OMEGA: f32 = 1.6;
+    /// Both runs land on the plate's head-on face (|cos| = 1 on the ortho rays): each accepts
+    /// `|d| < EPS` (0.001), and an M2 commit may sit up to `M2_CERT_TAIL` from the crossing, so the
+    /// same-surface hits differ by at most `2 EPS + M2_CERT_TAIL`. The sphere behind the plate is
+    /// 0.8 further.
+    const W1_T_TOL: f32 = 2.0 * 0.001 + boyko_rhi_vulkan::compute::M2_CERT_TAIL;
+
+    let Some(ctx) = boot_or_skip("sdf_m2_overrelaxed_start_point_offscreen") else {
+        return;
+    };
+    println!("Vulkan device: {}", ctx.device_name());
+    let edits = jumped_plate();
+
+    // The host witnesses (M1 off, as the device runs below).
+    let (grid, cells) = bake_brick_grid(&edits);
+    let atlas = HostM2Atlas::bake(&edits, &boyko_rhi_vulkan::compute::BrickLevelParams::m2_near_field());
+    let mut witnesses: Vec<(u32, u32)> = Vec::new();
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            if mesh_covers_pixel(px, py) {
+                continue;
+            }
+            let (ro, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+            let mut c = M2EvalCounts::default();
+            let _ = golden_primary_hit_brick_m2(
+                &edits, 1.0e30, ro, rd, OMEGA, false, &grid, &cells, Some(&atlas), Some(&mut c),
+            );
+            if c.start_point_refusals > 0 {
+                witnesses.push((px, py));
+            }
+        }
+    }
+
+    // M2 on and M2 off (the analytic marcher), both at omega 1.6, M1 off, gViewT read back.
+    let (_, _, viewt_on) = run_gbuffer_hybrid_m2(
+        &ctx, &edits, false, false, OMEGA, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE, None, true, true, true,
+    );
+    let viewt_on = viewt_on.expect("gViewT readback requested");
+    let (_, _, viewt_off) = run_gbuffer_hybrid_m2(
+        &ctx, &edits, false, false, OMEGA, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE, None, false, true, true,
+    );
+    let viewt_off = viewt_off.expect("gViewT readback requested");
+
+    let mut failures: Vec<String> = Vec::new();
+    let (mut checked, mut engaged, mut worst) = (0u32, 0u32, 0.0f32);
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            if mesh_covers_pixel(px, py) {
+                continue;
+            }
+            checked += 1;
+            let i = (py * SDF_IMG_W + px) as usize;
+            let (t_on, t_off) = (viewt_on[i], viewt_off[i]);
+            engaged += u32::from(t_on.to_bits() != t_off.to_bits());
+            let (ro, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+            let plate = |t: f32| {
+                boyko_sdf_math::edit_distance(&edits[0], [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t]).abs()
+            };
+            let ok = gpu_is_hit(&viewt_on, px, py)
+                && gpu_is_hit(&viewt_off, px, py)
+                && plate(t_on) < M2_CREASE_EPS
+                && plate(t_off) < M2_CREASE_EPS
+                && (t_on - t_off).abs() <= W1_T_TOL;
+            if gpu_is_hit(&viewt_on, px, py) && gpu_is_hit(&viewt_off, px, py) {
+                worst = worst.max((t_on - t_off).abs());
+            }
+            if !ok && failures.len() < 8 {
+                failures.push(format!(
+                    "({px},{py}) M2-on t {t_on} (|plate| {}) vs analytic t {t_off} (|plate| {}); witness {}",
+                    plate(t_on),
+                    plate(t_off),
+                    witnesses.contains(&(px, py))
+                ));
+            }
+        }
+    }
+    println!(
+        "W1 device jumped_plate at omega {OMEGA}: {checked} pure-SDF px, {} host witness px, {engaged} px where \
+         M2-on gViewT differs from analytic (max |dt| {worst:.5}, tol {W1_T_TOL})",
+        witnesses.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "W1: the M2-on deferred marcher did not commit the plate (the first surface) at omega {OMEGA} — the \
+         certificate's start point (`sdf_gbuffer_composite.hlsl` `m2_a`) let M2 commit the sphere behind the \
+         jumped plate: {failures:?}"
+    );
+    assert!(!witnesses.is_empty(), "W1: no host witness pixel — the scene does not exercise the start point");
+    assert!(engaged > 0, "W1: the M2-on run equals the analytic run bit for bit — the M2 branch never ran at omega {OMEGA}");
+    assert_validation_clean(&ctx);
 }
 
 /// OPEN-ITEMS 16 — the DIAGNOSTIC cost probe of the deferred marcher dispatch with M2 off and on
