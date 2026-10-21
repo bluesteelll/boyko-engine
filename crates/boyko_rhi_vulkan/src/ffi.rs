@@ -203,6 +203,21 @@ pub mod os {
         pub fn GetModuleHandleW(lpModuleName: *const u16) -> *mut c_void;
     }
 
+    // SAFETY: matches the Win64 gdi32 ABI: `GetStockObject(int)` returns an HGDIOBJ (an opaque
+    // handle, `*mut c_void`; NULL on failure). gdi32 is linked by the `#[link]` attribute; no Cargo
+    // change (BOOT-1 F1).
+    #[link(name = "gdi32")]
+    unsafe extern "system" {
+        pub fn GetStockObject(i: i32) -> *mut c_void;
+    }
+
+    /// `BLACK_BRUSH` for `GetStockObject` — the class background brush (BOOT-1 F1: a dark window
+    /// from the first moment, never the default white).
+    pub const BLACK_BRUSH: i32 = 4;
+
+    /// `SW_HIDE` for `ShowWindow` — a close during boot hides the window at once (BOOT-1 F4).
+    pub const SW_HIDE: i32 = 0;
+
     // --- Win32 message / style / show constants used by the window. ---
 
     /// `WM_DESTROY`.

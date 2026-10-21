@@ -279,6 +279,16 @@ impl Window {
         // call. A null return is tolerated (the OS falls back to a default).
         let cursor = unsafe { os::LoadCursorW(core::ptr::null_mut(), os::IDC_ARROW as *const u16) };
 
+        // BOOT-1 F1: the class background is the stock black brush, so `WM_ERASEBKGND` (handled
+        // by `DefWindowProcW` with the class brush, delivered synchronously by `UpdateWindow`
+        // below) paints the client area dark from the first moment instead of leaving it to DWM's
+        // white until the first present. A stock object is process-shared and never deleted by
+        // us; deleting one "is not necessary (but it is not harmful)" (MS, `GetStockObject`), so
+        // the class-brush deletion at `UnregisterClassW` is harmless too.
+        // SAFETY: `GetStockObject(BLACK_BRUSH)` takes a predefined index and returns a shared
+        // stock handle (or null, which makes the class paint nothing — the pre-F1 behaviour).
+        let background = unsafe { os::GetStockObject(os::BLACK_BRUSH) };
+
         let class = os::WNDCLASSEXW {
             cb_size: core::mem::size_of::<os::WNDCLASSEXW>() as u32,
             style: os::CS_HREDRAW | os::CS_VREDRAW,
@@ -288,15 +298,15 @@ impl Window {
             h_instance: hinstance,
             h_icon: core::ptr::null_mut(),
             h_cursor: cursor,
-            hbr_background: core::ptr::null_mut(),
+            hbr_background: background,
             lpsz_menu_name: core::ptr::null(),
             lpsz_class_name: class_name.as_ptr(),
             h_icon_sm: core::ptr::null_mut(),
         };
         // SAFETY: `class` is a fully-initialized `#[repr(C)]` `WNDCLASSEXW` whose
         // `cb_size` is its own size and whose pointer members (`class_name`,
-        // `hinstance`, `cursor`) outlive the call; `RegisterClassExW` returns a
-        // non-zero atom on success, 0 on failure.
+        // `hinstance`, `cursor`, the stock `background` brush) outlive the call;
+        // `RegisterClassExW` returns a non-zero atom on success, 0 on failure.
         let class_atom = unsafe { os::RegisterClassExW(&class) };
         if class_atom == 0 {
             return Err(WindowError::ClassRegistrationFailed);
