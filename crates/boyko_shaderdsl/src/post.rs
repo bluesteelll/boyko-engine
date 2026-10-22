@@ -93,6 +93,19 @@ pub const TONEMAP_NEUTRAL: u32 = 1;
 /// Tonemapper word: Reinhard-Jodie.
 pub const TONEMAP_REINHARD_JODIE: u32 = 2;
 
+/// Mode-word bit 1 (render wave PX1b, H5): the RCAS sharpen stage runs this frame. Bit 0 stays
+/// reserved (H2 rev 2 removed the sanitize bit); bits `TONEMAP_MODE_SHIFT..+4` are the tonemapper.
+pub const POST_MODE_SHARPEN: u32 = 1 << 1;
+
+/// FSR 1's `FSR_RCAS_LIMIT` (`ffx_fsr1.h`): the lobe never sharpens past `−(0.25 − 1/16)`, which
+/// keeps `4·lobe + 1 ≥ 0.25` (the resolve's denominator) away from zero.
+pub const RCAS_LIMIT: f32 = 0.25 - 1.0 / 16.0;
+
+/// FSR 2's `FSR2_TONEMAP_EPSILON` (`ffx_fsr2_common.h`, `1 / FP16_MAX`): the floor of
+/// [`tonemap_reversible_inverse`]'s `1 − max3(y)`, so a sharpened value at or above 1 inverts to a
+/// finite `≤ 65504·y` instead of dividing by zero.
+pub const RCAS_INV_EPS: f32 = 1.0 / 65504.0;
+
 /// The f32 exponent-field mask: a value is finite iff `(asuint(x) & F32_EXP_MASK) != F32_EXP_MASK`.
 /// An integer test on the bit pattern, so a NotNaN / NotInf-assuming compiler cannot fold it away
 /// (as it may `x == x`).
@@ -501,6 +514,41 @@ pub fn hdr_history_guard<C: Cf>(hist: C::Vec3f, cur: C::Vec3f) -> C::Vec3f {
 #[inline]
 pub fn pre_ratio_apply<C: Cf>(h: C::Vec3f, r: C::Scalar) -> C::Vec3f {
     C::vec3_mul_scalar(h, r)
+}
+
+// ---- Render wave PX1b: FSR 1 RCAS in FSR 2's reversible space -----------------------------------
+
+/// FSR 2's `Tonemap` (`ffx_fsr2_common.h`): `y = c · rcp(1 + max3(c))`, the reversible map that
+/// brings a sanitized HDR colour into `[0, 1)` for RCAS, whose lobe solves for the clip of a
+/// `[0, 1]` signal.
+#[inline]
+pub fn tonemap_reversible<C: Cf>(c: C::Vec3f) -> C::Vec3f {
+    let _ = c;
+    unimplemented!("render wave PX1b C2: tonemap_reversible")
+}
+
+/// FSR 2's `InverseTonemap` (`ffx_fsr2_common.h`): `x = y · rcp(max(1 − max3(y), RCAS_INV_EPS))`,
+/// the inverse of [`tonemap_reversible`].
+#[inline]
+pub fn tonemap_reversible_inverse<C: Cf>(y: C::Vec3f) -> C::Vec3f {
+    let _ = y;
+    unimplemented!("render wave PX1b C2: tonemap_reversible_inverse")
+}
+
+/// FSR 1's `FsrRcasF` lobe (32-bit, no `FSR_RCAS_DENOISE`) over the cross `b` (above), `d` (left),
+/// `e` (centre), `f` (right), `h` (below), in reversible space, times `con`.
+#[inline]
+pub fn rcas_lobe<C: Cf>(b: C::Vec3f, d: C::Vec3f, e: C::Vec3f, f: C::Vec3f, h: C::Vec3f, con: C::Scalar) -> C::Scalar {
+    let _ = (b, d, e, f, h, con);
+    unimplemented!("render wave PX1b C2: rcas_lobe")
+}
+
+/// FSR 1's `FsrRcasF` resolve: `(lobe·b + lobe·d + lobe·h + lobe·f + e) · rcp(4·lobe + 1)` per
+/// channel, in FSR 1's operand order.
+#[inline]
+pub fn rcas_resolve<C: Cf>(lobe: C::Scalar, b: C::Vec3f, d: C::Vec3f, e: C::Vec3f, f: C::Vec3f, h: C::Vec3f) -> C::Vec3f {
+    let _ = (lobe, b, d, e, f, h);
+    unimplemented!("render wave PX1b C2: rcas_resolve")
 }
 
 /// `mul(m, v)` with row `i` dotted in column order 0, 1, 2, left-associated — the op order of the
