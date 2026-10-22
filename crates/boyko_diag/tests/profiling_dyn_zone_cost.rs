@@ -435,6 +435,10 @@ fn source(file: &str) -> &'static str {
 /// Anti-vacuity: every listed item must be found exactly once, and the positive control —
 /// `register_zone`, the one function that PUBLISHES into the registry — must name it, or the
 /// scanner is reading nothing.
+///
+/// Its bound: the scan reads the text of the [`EMISSION_ITEMS`] themselves, one level deep, so a
+/// dereference moved into a helper that one of them calls is outside it. Today the listed bodies
+/// call nothing that reaches the registry; a helper added on that path joins the list.
 #[test]
 fn g17_no_emission_item_names_the_registry() {
     let control = item_body(source("dyn_registry.rs"), "pub fn register_zone(")
