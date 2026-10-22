@@ -47,8 +47,8 @@ CI; the row names the files every run, so the deviation stays visible.
 
 STATUSES: PASS, FAIL, NOT-RUNNABLE (the row's reason), SKIPPED (not selected: names the flag),
 COVERED (another row covers it: names the row and the computed reason). Exit 0 = no FAIL, 1 = some
-FAIL, 2 = mirror drift, a failed preflight, or the mirror itself failed (its self-test, an error in
-this script). "PARTIAL MIRROR" is printed whenever a row was SKIPPED.
+FAIL, 2 = mirror drift, a failed preflight, a refused --log-dir, or the mirror itself failed (its
+self-test, an error in this script). "PARTIAL MIRROR" is printed whenever a row was SKIPPED.
 
 MACHINE GUARDS: rows run one at a time; before each, free commit >= --min-free-commit-gb (waits in
 2-minute slices up to 60 min, then FAILs the row) and free disk >= --min-free-disk-gb (else exit 2);
@@ -59,7 +59,7 @@ run stops (exit 2); a row past its wall budget has ONLY its own process tree kil
 Usage (the caller's environment carries RUSTUP_TOOLCHAIN, PATH, CARGO_BUILD_JOBS, TMP; the caller
 takes any machine-wide lock):
 
-    python tools/ci_mirror.py --log-dir <dir> [--host-target-dir <dir>] [--heavy]
+    python tools/ci_mirror.py --log-dir <a fresh dir> [--host-target-dir <dir>] [--heavy]
         [--linux --linux-target-dir <dir>] [--only a,b] [--skip a,b] [--list] [--self-test]
         [--fap-target-dir <dir>] [--min-free-commit-gb 6] [--min-free-disk-gb 15]
         [--row-timeout-min 120] [--heavy-row-timeout-min 480]
@@ -70,15 +70,20 @@ Files in --log-dir: PID, progress.tsv (one line per finished row), summary.tsv, 
 code), one log per row, and dead_items.tsv (every never-used / unused / unfulfilled-expectation
 diagnostic of the Linux rows: leg, file:line, message).
 
-A RUN'S FILES ARE ITS OWN. A run's first writes, before the self-test and before anything else in it
-can fail, are DONE = `running`, PID, progress.tsv's header and an empty summary.tsv and
-dead_items.tsv. Its last write is DONE = the exit code, also when it stops on a drift, a failed
-self-test or an error in this script. So a run has ended when DONE holds an integer, and only then
-are summary.tsv and dead_items.tsv its verdict; `running` beside a dead PID is a run that was killed
-or crashed, with no verdict. A --log-dir may therefore be re-used: besides the above, a row's log is
-truncated at the row's first write in a run, so a verdict never reads an earlier run's output (a row
-this run does not reach keeps its old log, and no line of summary.tsv points at it). The self-test
-drives both through the run's own code (`Mirror.run`, `report`, `run_in_log_dir`).
+A FRESH LOG DIR PER RUN (orchestrator ruling 103). A run refuses a --log-dir that exists and is not
+an empty directory: exit 2 with a message on stderr, before it writes anything. So every file in a
+log dir is one run's, and no earlier run's DONE, summary.tsv, dead_items.tsv, PID or row log is read
+as this run's. A run's first writes, before the self-test and before anything else in it can fail,
+are DONE = `running`, PID, progress.tsv's header and an empty summary.tsv and dead_items.tsv. Its
+last write is DONE = the exit code, also when it stops on a drift, a failed self-test or an error in
+this script. So a run has ended when DONE holds an integer, and only then are summary.tsv and
+dead_items.tsv its verdict. A waiter launches the run into a dir that does not exist yet and keeps
+the PID it launched (`Start-Process -PassThru`), not the PID file: a run that argparse rejects, or
+that is refused, writes no file at all, and a refused run leaves a re-used dir's earlier files as
+they were, so the fresh dir is the waiter's half of the contract. That process gone with no integer
+in DONE is a failure; `running` beside a dead PID is a run that was killed or crashed, with no
+verdict. --list and --self-test neither read nor write a --log-dir. The self-test drives all of this
+through the run's own code (`Mirror.run`, `report`, `run_in_log_dir`) and through `main` itself.
 """
 
 from __future__ import annotations
@@ -494,7 +499,26 @@ FAP_SCAN_CASES = (
 )
 
 
+_SELF_TEST_ACTIVE = False
+
+
 def self_test() -> list[str]:
+    """Every self-test failure; empty when the mirror may read ci.yml.
+
+    A case goes through `main()` and must stop at the refusal of its --log-dir. If it reached
+    `mirror_main` instead, the self-test would be entered again: that is reported as a failure at
+    once rather than recursed into (each level would start the row-log children again)."""
+    global _SELF_TEST_ACTIVE
+    if _SELF_TEST_ACTIVE:
+        return ["the self-test was re-entered: a case through main() reached mirror_main instead of its refusal"]
+    _SELF_TEST_ACTIVE = True
+    try:
+        return _self_test_cases()
+    finally:
+        _SELF_TEST_ACTIVE = False
+
+
+def _self_test_cases() -> list[str]:
     failures: list[str] = []
     try:
         got = parse_yaml(SELF_TEST_YAML)
@@ -550,7 +574,7 @@ def self_test() -> list[str]:
                 failures.append("a `host-heavy` row is not opted in by --heavy alone")
         elif default is not None:
             failures.append(f"a `{kind}` row is skipped by default: {default!r}")
-    failures += log_dir_reuse_failures()
+    failures += log_dir_failures()
     for src, want, what in FAP_SCAN_CASES:
         got = fap_readers_in(src, "x.rs")
         if got != want:
@@ -781,9 +805,9 @@ def free_commit_gb() -> float | None:
 
 class RowLogs:
     """The row logs one run writes, all through `Mirror.run`. A row's verdict, warning summaries and
-    dead items are read back from its whole log, so the first open of a log in a run truncates it: a
-    re-used --log-dir never feeds an earlier run's output into this run's table. Later opens in the
-    same run (a row's next step) append."""
+    dead items are read back from its whole log, so the first open of a log in a run truncates it
+    and later opens in the same run (a row's next step) append: a log holds this run's output only,
+    whatever a file of that name held before (a run's log dir is a fresh one besides)."""
 
     def __init__(self) -> None:
         self.started: set[Path] = set()
@@ -1440,10 +1464,25 @@ DONE_IN_FLIGHT = "running"
 PROGRESS_HEADER = "id\tkind\tstatus\texit\tseconds\tdisk_free_gb\tdetail\n"
 
 
+def log_dir_refusal(log_dir: Path) -> str | None:
+    """Why a run must not write into `log_dir`, or None. A run's log dir does not exist yet or is an
+    empty directory (ruling 103), so every file in it is that run's."""
+    if not log_dir.exists():
+        return None
+    if not log_dir.is_dir():
+        return "it exists and is not a directory"
+    try:
+        if next(log_dir.iterdir(), None) is not None:
+            return "it is not empty (an earlier run's files would sit beside this run's)"
+    except OSError as e:
+        return f"it cannot be listed ({e})"
+    return None
+
+
 def begin_run(log_dir: Path) -> None:
     """A run's first writes. DONE goes first: from here until `run_in_log_dir`'s last write it holds
-    no exit code, so an earlier run's DONE, summary.tsv and dead_items.tsv are never read as this
-    run's, whatever stops it (a drift, a failed self-test, an error, a kill by PID, a crash)."""
+    no exit code, so a waiter never reads a run in flight, or one that stopped without a verdict (a
+    kill by PID, a crash), as ended."""
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / "DONE").write_text(DONE_IN_FLIGHT, encoding="utf-8")
     (log_dir / "PID").write_text(str(os.getpid()), encoding="utf-8")
@@ -1455,8 +1494,17 @@ def begin_run(log_dir: Path) -> None:
 
 
 def run_in_log_dir(log_dir: Path, body: Callable[[], int]) -> int:
-    """`body` (the self-test, the ci.yml read and the rows) as one run of `log_dir`: `begin_run`
+    """`body` (the self-test, the ci.yml read and the rows) as one run of `log_dir`. A `log_dir` that
+    exists and is not an empty directory is refused: exit 2, nothing written. Then `begin_run`
     first, DONE = the exit code last. A drift, or an error in this script, is exit 2 and no verdict."""
+    why = log_dir_refusal(log_dir)
+    if why is not None:
+        print(
+            f"ci-mirror: refusing --log-dir {log_dir}: {why}. Every run needs a fresh log dir, one that"
+            " does not exist yet or an empty directory (exit 2, nothing written)",
+            file=sys.stderr,
+        )
+        return 2
     begin_run(log_dir)
     code = 2
     try:
@@ -1470,29 +1518,34 @@ def run_in_log_dir(log_dir: Path, body: Callable[[], int]) -> int:
     return code
 
 
-def _fixture_unit() -> Unit:
-    job = Job("row", "row", "windows-latest", {}, None, None, [], [], False)
-    return Unit("row", job, None, Row("row", "script", ""))
+def _fixture_unit(uid: str = "row") -> Unit:
+    job = Job(uid, uid, "windows-latest", {}, None, None, [], [], False)
+    return Unit(uid, job, None, Row(uid, "script", ""))
 
 
-def log_dir_reuse_failures() -> list[str]:
-    """Runs that re-use one --log-dir, through the run's own code: `Mirror.run` (the one writer of a
-    row log) with real children, `report`, and `dispatch` (all of `main` but the argument parser).
-    An earlier run's output is never read as a later run's: not a row's dead items (review r1 W1),
-    and not DONE, summary.tsv, dead_items.tsv or PID, while a run is in flight or after one that stops
-    without a verdict (review r2 W2)."""
+def log_dir_failures() -> list[str]:
+    """A run's files in --log-dir, through the run's own code: `Mirror.run` (the one writer of a row
+    log) with real children, `report`, `dispatch` (all of `main` but the argument parser), and `main`
+    itself. A run refuses a log dir that exists and is not an empty directory and writes nothing
+    there (ruling 103). In a fresh one, DONE reads `running` from the run's start (review r2 W2) and
+    the exit code at its end: 0 for a green run, 1 when a row FAILs, 2 when the run stops without a
+    verdict (test r3 G1, G2)."""
     failures: list[str] = []
-    unit = _fixture_unit()
+    unit, failing = _fixture_unit("row"), _fixture_unit("row-fail")
     try:
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            d = Path(tmp)
-            args = build_parser().parse_args(["--log-dir", tmp, "--min-free-disk-gb", "0", "--min-free-commit-gb", "0"])
+            root = Path(tmp)
+
+            def args_for(d: Path) -> argparse.Namespace:
+                return build_parser().parse_args(["--log-dir", str(d), "--min-free-disk-gb", "0", "--min-free-commit-gb", "0"])
+
             # Each run's first step reports a dead item and its second step is clean: a log appended
             # across runs and a log truncated between a row's steps both change what a run reads.
-            log = d / "row.log"
+            rows = root / "rows"
+            log = rows / "row.log"
             read: list[list[str]] = []
             for item in ("A", "B"):
-                m = Mirror.without_ci_yml(args, [unit])
+                m = Mirror.without_ci_yml(args_for(rows), [unit])
                 for code in (f"print('error: static `{item}` is never used'); print('  --> {item}.rs:1:1')", "print('clean')"):
                     m.run([sys.executable, "-I", "-c", code], m.base_env(), log, 0)
                 m.collect_dead("row", m.read(log))
@@ -1503,17 +1556,43 @@ def log_dir_reuse_failures() -> list[str]:
                     " (an earlier run's output, or a row's earlier step, decides a verdict)"
                 )
 
-            def files() -> tuple[str | None, ...]:
+            def files(d: Path) -> tuple[str | None, ...]:
                 return tuple(
                     (d / n).read_text(encoding="utf-8") if (d / n).exists() else None
                     for n in ("DONE", "summary.tsv", "dead_items.tsv")
                 )
 
-            def green() -> int:
-                m = Mirror.without_ci_yml(args, [unit])
+            def contents(p: Path) -> object:
+                if p.is_file():
+                    return p.read_bytes()
+                return sorted((q.relative_to(p).as_posix(), q.read_bytes()) for q in p.rglob("*") if q.is_file())
+
+            def green(a: argparse.Namespace) -> int:
+                m = Mirror.without_ci_yml(a, [unit])
                 m.results[unit.id] = Result("PASS", 0)
                 m.dead = [("row", "a.rs:1", "the green run's item")]
                 return m.report()
+
+            def red(a: argparse.Namespace) -> int:
+                m = Mirror.without_ci_yml(a, [unit, failing])
+                m.results[unit.id] = Result("PASS", 0)
+                m.results[failing.id] = Result("FAIL", 1)
+                return m.report()
+
+            # The green run is also the positive control of every case below, and its dir is the
+            # earlier run's dir the refusal is tried on.
+            earlier = root / "green"
+            rc = dispatch(args_for(earlier), green)
+            done, summary, dead = files(earlier)
+            if rc != 0 or done != "0" or "\tPASS\t" not in (summary or "") or "green run's item" not in (dead or ""):
+                failures.append(f"log-dir fixture: a green run returned {rc} and left DONE={done!r} without its PASS table and dead item (the fixture is vacuous)")
+                return failures
+
+            # Exit 1 = a FAIL blocks the merge, and DONE holds the same 1 for a detached waiter.
+            rc = dispatch(args_for(root / "red"), red)
+            done, summary, _ = files(root / "red")
+            if rc != 1 or done != "1" or "\tFAIL\t" not in (summary or ""):
+                failures.append(f"a run with a FAIL row returns {rc} and leaves DONE={done!r}, want 1 and '1' (a FAIL would read as no FAIL)")
 
             def drift() -> int:
                 raise Drift("fixture")
@@ -1521,40 +1600,63 @@ def log_dir_reuse_failures() -> list[str]:
             def error() -> int:
                 raise RuntimeError("fixture")
 
-            for what, stop in (
+            for i, (what, stop) in enumerate((
                 ("a drift", drift),
                 ("exit 2 before ci.yml is read (a failed self-test)", lambda: 2),
                 ("an error in the mirror", error),
-            ):
-                done, summary, dead = files() if dispatch(args, lambda _: green()) == 0 else (None, None, None)
-                if done != "0" or "\tPASS\t" not in (summary or "") or "green run's item" not in (dead or ""):
-                    failures.append(f"log-dir fixture: a green run left DONE={done!r} without its PASS table and dead item (the fixture is vacuous)")
-                    break
-                # An earlier run's process, gone: a waiter must see this run's PID from its start.
-                (d / "PID").write_text("0", encoding="utf-8")
+            )):
+                d = root / f"stop{i}"
                 seen: list[tuple[str | None, ...]] = []
 
-                def body(_args, stop: Callable[[], int] = stop) -> int:
-                    seen.append((*files(), (d / "PID").read_text(encoding="utf-8")))
+                def body(_a, d: Path = d, seen: list = seen, stop: Callable[[], int] = stop) -> int:
+                    pid = (d / "PID").read_text(encoding="utf-8") if (d / "PID").exists() else None
+                    seen.append((*files(d), pid))
                     return stop()
 
                 try:
-                    rc: int | str = dispatch(args, body)
+                    rc_or_why: int | str = dispatch(args_for(d), body)
                 except Exception as e:
                     # A run that lets an error escape leaves DONE without an exit code: this case's failure.
-                    rc = f"an escaped {type(e).__name__}"
-                after = files()
-                if seen != [(DONE_IN_FLIGHT, "", "", str(os.getpid()))]:
+                    rc_or_why = f"an escaped {type(e).__name__}"
+                after = files(d)
+                # The documented word as a literal, not DONE_IN_FLIGHT: the constant changed to an
+                # integer would read as an ended run, and a fixture comparing it with itself stays green.
+                if seen != [("running", "", "", str(os.getpid()))]:
                     snapshot = repr(seen[0] if seen else None)[:160]
                     failures.append(
-                        f"log-dir re-use: a run in flight shows (DONE, summary.tsv, dead_items.tsv, PID) = {snapshot},"
-                        f" want ({DONE_IN_FLIGHT!r}, '', '', this PID) (an earlier run's verdict is served)"
+                        f"log dir: a run in flight shows (DONE, summary.tsv, dead_items.tsv, PID) = {snapshot},"
+                        " want ('running', '', '', this PID) (a waiter would read the run as ended)"
                     )
-                if rc != 2 or after != ("2", "", ""):
+                if rc_or_why != 2 or after != ("2", "", ""):
                     failures.append(
-                        f"log-dir re-use: a run that ends on {what} returns {rc} and leaves (DONE, summary.tsv,"
+                        f"log dir: a run that ends on {what} returns {rc_or_why} and leaves (DONE, summary.tsv,"
                         f" dead_items.tsv) = {repr(after)[:160]}, want 2 and ('2', '', '')"
                     )
+
+            # Through main() itself, so its route through dispatch is pinned with the refusal: exit 2,
+            # the refusal on stderr, and not one byte written.
+            a_file = root / "a-file"
+            a_file.write_text("not a directory", encoding="utf-8")
+            for what, target in (("a dir that holds an earlier run's files", earlier), ("a path that is a file", a_file)):
+                before = contents(target)
+                with contextlib.redirect_stderr(io.StringIO()) as err:
+                    try:
+                        rc_or_why = main(["--log-dir", str(target)])
+                    except (Exception, SystemExit) as e:
+                        rc_or_why = f"an escaped {type(e).__name__}"
+                if rc_or_why != 2 or "refusing --log-dir" not in err.getvalue() or contents(target) != before:
+                    failures.append(
+                        f"main() with --log-dir = {what} returns {rc_or_why}, refusal printed:"
+                        f" {'refusing --log-dir' in err.getvalue()}, unchanged: {contents(target) == before};"
+                        " want 2, the refusal and nothing written (an earlier run's files would be read as this run's)"
+                    )
+
+            # An empty directory is a fresh log dir.
+            empty = root / "empty"
+            empty.mkdir()
+            rc = dispatch(args_for(empty), green)
+            if rc != 0 or files(empty)[0] != "0":
+                failures.append(f"an empty --log-dir is refused or not run: returns {rc}, DONE={files(empty)[0]!r}, want 0 and '0'")
     except (OSError, Drift) as e:
         failures.append(f"log-dir fixture raised: {e}")
     return failures
@@ -1702,7 +1804,7 @@ def mirror_main(args) -> int:
             print(f"  - {f}", file=sys.stderr)
         return 2
     if args.self_test:
-        print("ci-mirror self-test OK: the YAML reader, the table parser, the scanners and a re-used --log-dir.")
+        print("ci-mirror self-test OK: the YAML reader, the table parser, the scanners and a run's --log-dir.")
         return 0
 
     ci_yml = Path(args.ci_yml).resolve() if args.ci_yml else DEFAULT_CI_YML
@@ -1719,8 +1821,9 @@ def mirror_main(args) -> int:
 
 
 def dispatch(args, body: Callable[[argparse.Namespace], int]) -> int:
-    """`body(args)` as a run of --log-dir when it is one, so its files there are its own from before
-    the self-test on (`begin_run`); --list and --self-test write nothing into a --log-dir."""
+    """`body(args)` as a run of --log-dir when it is one (`run_in_log_dir`: refused unless the dir
+    is fresh, then its files are its own from before the self-test on); --list and --self-test
+    neither read nor write a --log-dir."""
     if args.log_dir and not (args.list or args.self_test):
         return run_in_log_dir(Path(args.log_dir).resolve(), lambda: body(args))
     try:

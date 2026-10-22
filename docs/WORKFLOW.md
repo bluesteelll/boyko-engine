@@ -310,7 +310,7 @@ owner's yes. `--linux` is for a host where the ban is lifted;
 quietly go back to building for Linux.
 
 ```text
-python tools/ci_mirror.py --log-dir <scratch dir> [--host-target-dir <dir>] [--heavy]
+python tools/ci_mirror.py --log-dir <a fresh scratch dir> [--host-target-dir <dir>] [--heavy]
        [--linux --linux-target-dir <dir>] [--only a,b] [--skip a,b] [--list] [--self-test]
        [--fap-target-dir <dir>] [--min-free-commit-gb 6] [--min-free-disk-gb 15] [--row-timeout-min 120]
 ```
@@ -322,17 +322,22 @@ in every child, so nothing is ever downloaded behind the caller. `--host-target-
 `CARGO_TARGET_DIR`. `--log-dir` is required, so nothing is written into a worktree; it gets `PID`,
 `progress.tsv` (one line per finished row, with the free disk after it), `summary.tsv`, `DONE`, one log per
 row and `dead_items.tsv` (every never-used / unused / unfulfilled-expectation diagnostic of the Linux rows:
-the F4 class list; empty without `--linux`). **A run's files are its own.** Its first writes, before the
-self-test and before anything else in it can fail, are `DONE` = `running`, `PID`, `progress.tsv`'s header
-and an empty `summary.tsv` and `dead_items.tsv`; its last write is `DONE` = the exit code, also when it
-stops on a drift, a failed self-test or an error in the script. So a run has ended when `DONE` holds an
-integer, and only then are `summary.tsv` and `dead_items.tsv` its verdict; `running` beside a dead `PID` is a
-run that was killed or crashed, with no verdict (a waiter reads `DONE`'s content, not its existence). A
-`--log-dir` may therefore be re-used: besides the above, a row's log is truncated at the row's first write
-in a run, so no verdict or dead item is read from an earlier run (a row this run does not reach keeps its
-old log, and `summary.tsv` does not point at it). The script's self-test drives both through the run's own
-code. Exit 0 = no FAIL, 1 = a FAIL, 2 = the mirror cannot read `ci.yml`, its table no longer matches it, a
-preflight or machine guard stopped the run, or the mirror itself failed (its self-test, an error).
+the F4 class list; empty without `--linux`). **A fresh log dir per run** (ruling 103). A run refuses a
+`--log-dir` that exists and is not an empty directory: exit 2 with a message, before it writes anything. So
+every file in a log dir is one run's, and no earlier run's `DONE`, `summary.tsv`, `dead_items.tsv`, `PID` or
+row log is read as this run's. A run's first writes, before the self-test and before anything else in it can
+fail, are `DONE` = `running`, `PID`, `progress.tsv`'s header and an empty `summary.tsv` and
+`dead_items.tsv`; its last write is `DONE` = the exit code, also when it stops on a drift, a failed self-test
+or an error in the script. So a run has ended when `DONE` holds an integer, and only then are `summary.tsv`
+and `dead_items.tsv` its verdict (a waiter reads `DONE`'s content, not its existence). **The waiter** launches
+the run into a dir that does not exist yet and keeps the PID it launched (`Start-Process -PassThru`), not the
+`PID` file: a run that argparse rejects, or that is refused, writes no file at all, and a refused run leaves a
+re-used dir's earlier files as they were, so the fresh dir is the waiter's half of the contract. That process
+gone with no integer in `DONE` is a failure; `running` beside a dead `PID` is a run that was killed or
+crashed, with no verdict. `--list` and `--self-test` neither read nor write a `--log-dir`. The script's
+self-test drives all of this through the run's own code and through its `main`. Exit 0 = no FAIL, 1 = a
+FAIL, 2 = the mirror cannot read `ci.yml`, its table no longer matches it, a preflight or machine guard
+stopped the run, the `--log-dir` was refused, or the mirror itself failed (its self-test, an error).
 
 **What each row runs** is read from `ci.yml` at run time, never re-listed; the script's JOB TABLE only
 says HOW (one row per job, or per matrix leg, with a kind), and each adapter asserts the shape it reads,
