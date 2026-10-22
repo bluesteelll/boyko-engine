@@ -80,6 +80,8 @@ pub mod post;
 pub mod prims_probe;
 pub mod probe_blend;
 pub mod probe_march;
+// OPEN-ITEMS 16: the M2 first-crossing certificate's range math.
+pub mod range;
 pub mod refine;
 pub mod remarch;
 pub mod scalar;

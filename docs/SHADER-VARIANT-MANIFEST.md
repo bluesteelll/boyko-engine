@@ -1012,6 +1012,23 @@ appears and no row is added; the rows below only changed bytes (or, where stated
 keeps `post_final.comp.hlsl` the only shader carrying a tail token). `post_passthrough.comp.{hlsl,spv}`
 (the transitional kernel of C5–C6) is deleted with its section and its `post_chain_spv_sync.rs` row.
 
+## OI16 — the M2 first-crossing certificate (5 rows re-DXC'd, no new variant)
+
+Render-wave lane OI1516 (OPEN-ITEMS 16, `oi1516/cut.md` C8) gated both marchers' M2 SURFACE-brick hit on
+a first-crossing certificate: the new header `sdf_m2_certify.hlsli` (its per-edit value + slope and
+the convex segment bound are generated from `boyko_shaderdsl::range` between the `// === GENERATED
+m2_cert_leaves BEGIN/END ===` sentinels; the edit-range fold and the driver are hand-written),
+included once by each marcher after its `EPS`; `m2_surface_hit` gained an `out float cand_out`; the
+call site certifies from the march's last certified point and latches M2 off for the ray on a
+refusal. No `-D` appears in a shipped recipe and no row is added: `M2_CERTIFY` (default 1) is set to
+0 ONLY by the rule-(xviii) register twin `tests/marcher_occupancy.rs` compiles at test time, never
+committed. The rows below only changed bytes (VulkanSDK 1.4.350.0 `dxc`, each header's recipe).
+
+| Source | Re-emitted `.spv` (bytes before → after) | What moved | Byte gate |
+|---|---|---|---|
+| `sdf_gbuffer_composite.hlsl` | `sdf_gbuffer_composite.comp.spv` 155,124 → 168,152 | the certificate, the candidate out-param, the latch and the start point (`safe_t + sor_prev` past an over-relaxed step) | `marcher_spv_sync.rs`, `sdf_field_edsl_sync.rs` |
+| `sdf_forward_march.comp.hlsl` | `sdf_forward_march.comp.spv` 144,424 → 157,200; `sdf_forward_march_sdfonly.comp.spv` 143,928 → 156,704; `sdf_forward_march_viewt.comp.spv` 144,704 → 157,480; `sdf_forward_march_sdfonly_viewt.comp.spv` 144,164 → 156,940 | the same, at omega 1 (the start point is the march's `t`) | `marcher_spv_sync.rs`, `sdf_depth_merge_edsl_sync.rs`, `sdf_field_edsl_sync.rs` |
+
 ## Why these stay N `.spv` (do NOT try to spec-const-collapse)
 
 A specialization constant is resolved at *pipeline-create* and can only change a **value** (a loop bound,
