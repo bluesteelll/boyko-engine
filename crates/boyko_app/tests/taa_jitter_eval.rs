@@ -477,10 +477,11 @@ fn taa_jitter_eval_screenshot_dump() {
         _ => TaaConfig::default().jitter_scope,
     };
 
-    // Rung T3's post-resolve sharpen knob. `rcas` arms the RCAS ping-pong pass (requires
-    // `BOYKO_AA=taa`); unset renders the engine default (`SharpenMode::None` — no sharpen pass,
-    // the structural 0%-gate), per the `BOYKO_AA` / `BOYKO_TAA_SCOPE` convention above.
-    // `BOYKO_TAA_SHARPNESS=<f32>` overrides the strength (default 0.25).
+    // The sharpen knob. `rcas` arms `post_final`'s RCAS stage (render wave PX1b: the mode word's
+    // sharpen bit; takes effect only with `BOYKO_AA=taa`); unset renders the engine default
+    // (`SharpenMode::None` — the stage's branch is never taken), per the `BOYKO_AA` /
+    // `BOYKO_TAA_SCOPE` convention above. `BOYKO_TAA_SHARPNESS=<f32>` overrides the strength
+    // (default 0.25, FSR 2's `sharpness`).
     let sharpen = match std::env::var("BOYKO_TAA_SHARPEN").ok().as_deref() {
         Some("rcas") => SharpenMode::Rcas,
         Some("none") => SharpenMode::None,

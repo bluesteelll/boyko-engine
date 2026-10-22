@@ -996,18 +996,17 @@ impl MaterialTableRes {
     }
 }
 
-/// Render wave PX1a (D-G2, D-G3, D-G4): the post seam's passes as one declarator declared them —
-/// `[ssaa_downsample] → post_final → [cas]`, followed by the plan's own `present_sample`. Shared
-/// by the three plans because the three declarators declare the seam through one function,
-/// [`declare_post_seam`].
+/// Render wave PX1a (D-G2, D-G4): the post seam's passes as one declarator declared them —
+/// `[ssaa_downsample] → post_final`, followed by the plan's own `present_sample`. Shared by the
+/// three plans because the three declarators declare the seam through one function,
+/// [`declare_post_seam`]. (Render wave PX1b retired PX1a D-G3's `cas` pass: the sharpen is
+/// `post_final`'s RCAS stage, behind its mode word's `POST_MODE_SHARPEN` bit.)
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PostSeamPlan {
     /// The SSAA downsample (`lit` → `lit_native`), `Some` iff `scene.ssaa` is armed.
     pub(crate) ssaa_downsample: Option<crate::framegraph::PassId>,
     /// The tail dispatch (scene input → `display`), every frame.
     pub(crate) post_final: crate::framegraph::PassId,
-    /// CAS (`display` → `aa_out`), `Some` iff `scene.rcas` is armed.
-    pub(crate) cas: Option<crate::framegraph::PassId>,
 }
 
 /// Render wave PX1a (review r1 W1): one frame's AA arming as the declarators key on it, derived
@@ -1028,8 +1027,6 @@ pub(crate) struct PostSeamArms {
     pub(crate) taa: bool,
     /// `scene.ssaa`: `ssaa_downsample` is declared and `post_final` reads `lit_native`.
     pub(crate) ssaa: bool,
-    /// `scene.rcas`: the `cas` pass is declared.
-    pub(crate) cas: bool,
 }
 
 impl PostSeamArms {
@@ -1037,20 +1034,23 @@ impl PostSeamArms {
     /// a built TAA history iff `taa_history_built` (`GBufferTargets::taa_history_built`). TAA is
     /// live only when both hold — the ONE TAA predicate of the declarators and of
     /// `post_final`'s descriptor ring.
-    pub(crate) const fn new(taa_requested: bool, taa_history_built: bool, ssaa: bool, cas: bool) -> Self {
-        Self { taa: taa_requested && taa_history_built, ssaa, cas }
+    pub(crate) const fn new(taa_requested: bool, taa_history_built: bool, ssaa: bool) -> Self {
+        Self { taa: taa_requested && taa_history_built, ssaa }
     }
 
     /// [`Self::new`] over `scene`'s arming.
     pub(crate) fn from_scene(scene: &GBufferScene<'_>, taa_history_built: bool) -> Self {
-        Self::new(scene.taa.is_some(), taa_history_built, scene.ssaa.is_some(), scene.rcas.is_some())
+        Self::new(scene.taa.is_some(), taa_history_built, scene.ssaa.is_some())
     }
 }
 
 /// Render wave PX1a (D-G1): `display` — single, `FrameLocal`, seeded at
-/// `SHADER_READ_ONLY_OPTIMAL` for its readers (`present_sample`'s FRAGMENT read, the CAS COMPUTE
-/// read), widened with `TRANSFER` under the image dump. Declared LAST in each declarator's image
-/// block (an append moves no earlier `ResId`).
+/// `SHADER_READ_ONLY_OPTIMAL` for its readers (`present_sample`'s FRAGMENT read), widened with
+/// `TRANSFER` under the image dump. Declared LAST in each declarator's image block (an append moves
+/// no earlier `ResId`). The seed keeps `COMPUTE` beside `FRAGMENT` (render wave PX1b D-R13, ruling
+/// 94 Q6): the retired CAS pass's COMPUTE read is gone, but a superset is sound under OBS's ⊆
+/// check and keeps every frame's first `display` barrier — and every barrier-stream pin — as it
+/// was.
 fn declare_display(g: &mut crate::framegraph::FrameGraph, dump_widen: bool) -> crate::framegraph::SeededImage {
     crate::framegraph::SeededImage::declare(
         g,
@@ -1137,20 +1137,20 @@ fn declare_taa_resolve(
     })
 }
 
-/// Render wave PX1a (D-G2..D-G4): declares the post seam after the frame's last `lit` producer
+/// Render wave PX1a (D-G2, D-G4): declares the post seam after the frame's last `lit` producer
 /// (the particle draw, the TAA resolve) and then `present_sample` — `[ssaa_downsample] →
-/// post_final → [cas] → present_sample`, the order every recorder records. Returns the seam and
-/// the `present_sample` pass. Keyed on `arms` alone (review r1 W1: TAA is the LIVE predicate,
-/// the one [`declare_taa_resolve`] keys on).
+/// post_final → present_sample`, the order every recorder records. Returns the seam and the
+/// `present_sample` pass. Keyed on `arms` alone (review r1 W1: TAA is the LIVE predicate, the one
+/// [`declare_taa_resolve`] keys on).
 ///
 /// - `ssaa_downsample` reads `lit` (FRAGMENT, `SHADER_READ_ONLY`) and initialises `lit_native` as
 ///   its colour attachment (the recorder clears on load).
 /// - `post_final`'s FIRST declared access is its scene input — `POST_FINAL_BINDINGS`' one
 ///   fetching row, `gScene` @0 (D-O1) — read at COMPUTE / `GENERAL` (`SampledImageAtGeneral`):
 ///   `taa_hist` (`taa_hist_res`, the `[fi]` write slot) under live TAA, `lit_native` under SSAA,
-///   `lit` otherwise; then the whole-extent storage write of `display`, its initialiser.
-/// - `cas` reads `display` as a STORAGE image at `GENERAL` (D-G3): declared before
-///   `present_sample`, so the graph orders `post_final`'s write before both readers.
+///   `lit` otherwise; then the whole-extent storage write of `display`, its initialiser. Under the
+///   sharpen bit (render wave PX1b) the scene read is RCAS's five-tap cross of the SAME image —
+///   neighbours of one subresource, ordered by the same barrier (the whole `COLOR` subrange).
 /// - `present_sample` reads `display` at FRAGMENT / `SHADER_READ_ONLY` — its last declared access
 ///   on every configuration, so `display` ends every frame at its seed's layout. The FXAA / SMAA
 ///   passes after it stay hand-recorded FRAGMENT reads inside that barrier's scope.
@@ -1199,11 +1199,6 @@ fn declare_post_seam(
         (false, None) => g.image_access(lit, stage, access, layout, SubRange::COLOR),
     }
     display.init_storage_full(g, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, SubRange::COLOR);
-    let cas = arms.cas.then(|| {
-        let p = g.add_pass("cas");
-        display.read(g, stage, access, layout, SubRange::COLOR);
-        p
-    });
     let present_sample = g.add_pass("present_sample");
     display.read(
         g,
@@ -1212,7 +1207,7 @@ fn declare_post_seam(
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         SubRange::COLOR,
     );
-    (PostSeamPlan { ssaa_downsample, post_final, cas }, present_sample)
+    (PostSeamPlan { ssaa_downsample, post_final }, present_sample)
 }
 
 /// OBS (D, H0 Scope 6): the declared `image_dump` pass of a request frame — the names it copies
@@ -8030,7 +8025,7 @@ mod tests {
     /// barrier can name the NULL slots, and `post_final` reads `lit` exactly as on a TAA-off frame.
     #[test]
     fn a_requested_taa_without_a_built_history_routes_no_barrier_to_its_null_slots() {
-        let arms = PostSeamArms::new(true, false, false, false);
+        let arms = PostSeamArms::new(true, false, false);
         assert!(!arms.taa, "TAA is live although its history was not built");
         let f = seam_frame(arms);
         assert!(f.taa_resolve.is_none(), "taa_resolve is declared without a built history");
@@ -8052,13 +8047,13 @@ mod tests {
     /// declared and `post_final`'s first access reads `taa_hist`, behind a derived barrier.
     #[test]
     fn a_requested_taa_with_a_built_history_reads_the_history() {
-        let arms = PostSeamArms::new(true, true, false, false);
+        let arms = PostSeamArms::new(true, true, false);
         assert!(arms.taa);
         let f = seam_frame(arms);
         assert!(f.taa_resolve.is_some(), "live TAA declares no taa_resolve");
         let scene_in = f.g.pass_accesses(f.post.post_final).next().expect("invariant: post_final declares its scene input");
         assert_eq!(scene_in.res, f.taa_hist, "post_final does not read taa_hist under live TAA");
         assert!(barriers_on(&f, f.taa_hist) > 0, "no derived barrier orders the resolve's taa_hist write before post_final");
-        assert!(!PostSeamArms::new(false, true, false, false).taa, "TAA is live without the scene's request");
+        assert!(!PostSeamArms::new(false, true, false).taa, "TAA is live without the scene's request");
     }
 }

@@ -365,6 +365,12 @@ post_image_oracle, post_facets}.rs`. *Render wave PX1b:* the RCAS stage moved th
 test time, never committed — 1 `OpImageFetch` against 5; on a device exposing
 `VK_KHR_pipeline_executable_properties` the register delta ≤ 8 and equal occupancy, rule (xviii)).
 
+**Render wave PX1b — `rcas.comp.{hlsl,spv}` retired.** The CAS pass (`rcas.comp.hlsl`, FidelityFX CAS on
+`display` → `aa_out` in a declared `cas` pass; it never had a row here) is deleted with
+`present/passes/rcas.rs` and its `post_chain_spv_sync.rs` row: `SharpenMode::Rcas` is `post_final`'s RCAS
+stage (the row above), `aa_out` arms only under FXAA / SMAA, and its zone id 81 is retired
+(`gpu_zone::ZONE_POST_RETIRED`).
+
 ## `taa_resolve.comp.hlsl` — the TAA temporal resolve (compute)
 
 One source, hand-written, **no `-D` axis**. Render wave PX1a (D-S5 step 1) retired its `gAaOut` @4
@@ -402,7 +408,7 @@ Frozen recipe: `dxc.exe -spirv -T ps_6_0 -E main -fspv-target-env=vulkan1.3 ssaa
 ## `fullscreen_sample.fs.hlsl` — the present blit (raster, render wave PX1a D-P1)
 
 One source, hand-written; **one `-D` axis, `SWAPCHAIN_SRGB`** (default 0). The present blit samples the
-display-referred image (`post_final`'s `display`, or `aa_out` under FXAA / SMAA / CAS) into the
+display-referred image (`post_final`'s `display`, or `aa_out` under FXAA / SMAA) into the
 swapchain. On an 8-bit `*_SRGB` swapchain the hardware encodes on write, so the `SWAPCHAIN_SRGB=1`
 variant returns `srgb_eotf(rgb)` first — the eDSL's piecewise sRGB decode (`boyko_shaderdsl::post::
 srgb_eotf`, spliced between `// === GENERATED srgb_eotf BEGIN/END ===` inside the `#if SWAPCHAIN_SRGB`

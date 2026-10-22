@@ -203,7 +203,8 @@ pub const SEED_CLASS_TABLE: &[SeedClassRow] = &[
     // --- the wave (H0 rev-5 table; 04 §B H0 row) ---
     // Render wave PX1a (D-G1): the post seam's two single targets, landed — `display` on every
     // declarator's every frame (`post_final` writes it, `present_sample` ends it at
-    // SHADER_READ_ONLY for the FRAGMENT blit and the COMPUTE CAS read before it); `lit_native`
+    // SHADER_READ_ONLY for the FRAGMENT blit; the seed keeps COMPUTE for the CAS read render wave
+    // PX1b retired — a sound superset that keeps every barrier stream, D-R13); `lit_native`
     // on Deferred and VB, written by the SSAA downsample and read by `post_final` at COMPUTE.
     // `lit_native` stays off the census's max-config (TAA) frame, so `expect_present: false`.
     landed("display", D | F | V, COMPUTE | FRAGMENT, true),

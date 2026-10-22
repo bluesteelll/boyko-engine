@@ -411,12 +411,12 @@ pub struct GBufferTargets {
     /// Selected by [`crate::present::AtrousStepRole::Write8`]`{ in_ring: 1 }`. `None` in lock-step
     /// with [`Self::ssao_ring_a`].
     pub(crate) ssao_atrous_write8_from1_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
-    /// Anti-aliasing Stage 1/2 + TAA rung T3: the OUTPUT image RING (one per in-flight frame) of
-    /// the display-referred passes that run after `post_final` — FXAA, SMAA, CAS —
+    /// Anti-aliasing Stage 1/2: the OUTPUT image RING (one per in-flight frame) of the
+    /// display-referred passes that run after `post_final` — FXAA, SMAA —
     /// `COLOR_ATTACHMENT | SAMPLED | STORAGE`, `R8G8B8A8_UNORM` (== [`GBUFFER_FORMAT`]), sized at
-    /// `aa_extent`. `None` unless one of them is armed (render wave PX1a: SSAA writes
-    /// [`Self::lit_native`] and TAA only `taa_hist`), the 0%-gate: `present_set` then samples
-    /// [`Self::display`].
+    /// `aa_extent`. `None` unless one of them is armed (`AaArm::wants_aa_out`; render wave PX1a:
+    /// SSAA writes [`Self::lit_native`] and TAA only `taa_hist`; render wave PX1b: TAA's sharpen is
+    /// `post_final`'s RCAS stage), the 0%-gate: `present_set` then samples [`Self::display`].
     ///
     /// `aa_out`/`fxaa_set`/`downsample_set` carry NO material table and NO acceleration
     /// structure — deliberately OUT of
@@ -494,14 +494,6 @@ pub struct GBufferTargets {
     /// `taa_motion_cam_ubo[fi]`. `None` when TAA is off. The recorder selects
     /// `taa_resolve_set[self.frame_index]`.
     pub(crate) taa_resolve_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
-    /// TAA rung T3 / render wave PX1a (D-G3): the CAS (`SharpenMode::Rcas`) descriptor set RING
-    /// (one 2-binding set per in-flight frame), written ONCE against
-    /// [`RcasActivation::rcas_layout`](crate::present::scene_types::RcasActivation::rcas_layout).
-    /// Slot `fi` binds `gRcasIn` @0 = [`Self::display`] (a STORAGE read at `GENERAL`, inside the
-    /// declared `cas` pass between `post_final` and `present_sample`), `gAaOut` @1 =
-    /// [`Self::aa_out`]`[fi]` (the WRITE — the present-blit's input). `None` when RCAS is off or
-    /// [`Self::aa_out`] failed to allocate. The recorder selects `rcas_set[self.frame_index]`.
-    pub(crate) rcas_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Which AA mode ([`AaArm`]) was armed when these targets were built.
     /// [`GBufferTargets::sync_gbuffer`] compares this against `AaArm::from_scene(scene)` and
     /// forces the same fence-safe rebuild an extent change triggers on a mismatch — a live,
@@ -595,13 +587,13 @@ pub struct GBufferTargets {
     pub(crate) ddgi_update_set: Option<VulkanBindGroup>,
     /// The present-blit descriptor set RING (one per in-flight frame), each written ONCE
     /// against [`GBufferScene::present_layout`] (one COMBINED_IMAGE_SAMPLER pointing at
-    /// `aa_out[i]` when a display-referred pass writes it — FXAA, SMAA, CAS — else at
+    /// `aa_out[i]` when a display-referred pass writes it — FXAA, SMAA — else at
     /// [`Self::display`], render wave PX1a's `post_final` output, + the scene's present
     /// sampler). NO per-frame update. RINGED so slot `i`'s present set samples the SAME `aa_out`
     /// slot the AA pass wrote this frame. The recorder selects `present_set[self.frame_index]`.
     pub(crate) present_set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
     /// Render wave PX1a (D-G1): `display` — `post_final`'s output and the one display-referred
-    /// image every later pass reads (the present blit, CAS, FXAA, SMAA). SINGLE (one image both
+    /// image every later pass reads (the present blit, FXAA, SMAA). SINGLE (one image both
     /// frames in flight share, ordered by its frame-graph seed), `R8G8B8A8_UNORM`
     /// ([`GBUFFER_FORMAT`]), `STORAGE | SAMPLED` (`| TRANSFER_SRC` under the image dump), sized
     /// at `aa_extent` (the native extent under SSAA — `scene.ssaa`, the frames that run the
@@ -2144,17 +2136,10 @@ pub(crate) enum AaArm {
     /// (`aa_extent == extent`, like `Fxaa`/`Smaa`) but ADDITIONALLY allocates the
     /// [`GBufferTargets::taa_hist`] cross-frame history ring — an arm-state flip into/out of
     /// `Taa` therefore forces the same fence-safe rebuild an extent change triggers, exactly
-    /// like every other `AaArm` transition.
-    Taa {
-        /// TAA rung T3: `scene.rcas.is_some()` — carried as PAYLOAD (not folded into a
-        /// separate `AaArm` variant) for the SAME reason this enum exists at all (its own doc):
-        /// a bare `Taa` variant cannot distinguish `SharpenMode::None` from `SharpenMode::Rcas`,
-        /// so a live Rcas on/off toggle (which allocates/frees [`GBufferTargets::aa_out`]/
-        /// `rcas_set`) would NOT trigger `sync_gbuffer`'s fence-safe rebuild without this field —
-        /// exactly the "two different armed sub-states want different resources" bug this enum
-        /// was invented to close (see the enum's own doc).
-        rcas: bool,
-    },
+    /// like every other `AaArm` transition. Render wave PX1b: no payload — `SharpenMode::Rcas` is
+    /// `post_final`'s mode-word stage, which owns no resource, so a live sharpen toggle needs no
+    /// rebuild (the retired CAS pass's `aa_out` and set ring were what the T3 payload tracked).
+    Taa,
 }
 
 impl AaArm {
@@ -2167,12 +2152,21 @@ impl AaArm {
         } else if scene.ssaa.is_some() {
             AaArm::Ssaa
         } else if scene.taa.is_some() {
-            AaArm::Taa { rcas: scene.rcas.is_some() }
+            AaArm::Taa
         } else if scene.aa.is_some() {
             AaArm::Fxaa
         } else {
             AaArm::Off
         }
+    }
+
+    /// Render wave PX1b (`px1b/cut.md` D-R12): whether this arm runs a display-referred pass AFTER
+    /// `post_final` — FXAA or SMAA, whose output `aa_out` the present blit then samples. The ONE
+    /// predicate the `aa_out` arming site and both of its lockstep asserts read; every other arm
+    /// presents `display` (TAA's sharpen is `post_final`'s own stage since PX1b).
+    #[inline]
+    pub(crate) const fn wants_aa_out(self) -> bool {
+        matches!(self, AaArm::Fxaa | AaArm::Smaa)
     }
 }
 
@@ -4148,19 +4142,18 @@ impl DeferredSets {
 
         // Anti-aliasing Stage 1: the sampler [`AaActivation`](crate::present::scene_types::AaActivation)
         // carries, or `None` on the OFF path. `aa_sampler` is FXAA-only (feeds the `fxaa_set`
-        // builder below); it is `None` under SMAA/SSAA/TAA even though `aa_out` is `Some` (their
-        // final target). Lockstep invariant: `aa_out` arms iff ONE of the four post-process
-        // modes is armed — `scene.aa` (FXAA) XOR `scene.smaa` (SMAA) XOR `scene.ssaa` (SSAA) XOR
-        // `scene.taa` (TAA) — all four routing through the same `aa_imgs` gate.
+        // builder below); it is `None` under SMAA. Lockstep invariant (render wave PX1b D-R12):
+        // `aa_out` arms iff a display-referred pass runs after `post_final` —
+        // `AaArm::wants_aa_out`, FXAA or SMAA.
         let aa_sampler = scene.aa.as_ref().map(|a| a.sampler);
         debug_assert_eq!(
             aa_out.is_some(),
-            scene.aa.is_some() || scene.smaa.is_some() || scene.rcas.is_some(),
-            "invariant: aa_out arms/disarms with (scene.aa || scene.smaa || scene.rcas)"
+            AaArm::from_scene(scene).wants_aa_out(),
+            "invariant: aa_out arms/disarms with AaArm::wants_aa_out (FXAA or SMAA)"
         );
 
         // The present-blit set RING, written ONCE here: slot `i` is one COMBINED_IMAGE_SAMPLER
-        // pointing at `aa_out[i]` when a display-referred pass writes it (FXAA, SMAA, CAS), else
+        // pointing at `aa_out[i]` when a display-referred pass writes it (FXAA, SMAA), else
         // at `display` (render wave PX1a: `post_final`'s output) + the scene's present sampler.
         // RINGED so the present samples the SAME `aa_out` slot the AA pass wrote this frame.
         // On a failure at slot `i`, the slots already built [0..i) plus every prior set ring
@@ -8148,50 +8141,6 @@ impl GBufferTargets {
         Some(TaaResolveSets { taa_ubo, motion_cam_ubo, set })
     }
 
-    /// TAA rung T3 / render wave PX1a (D-G3): builds the CAS descriptor set ring (2
-    /// STORAGE-image bindings, no UBO) against [`RcasActivation::rcas_layout`] — `gRcasIn` @0 =
-    /// `display` (`post_final`'s output, read at `GENERAL` in the declared `cas` pass), `gAaOut`
-    /// @1 = `aa_out[fi]` (the present-blit's input). DEGRADES-TO-`None` on any failure (leak-safe,
-    /// opt-in — mirrors [`Self::build_taa_resolve_set`]'s per-slot drain). `None` when
-    /// `scene.rcas` is absent (the 0%-gate) or `aa_out` failed to allocate.
-    fn build_rcas_set(
-        ctx: &VulkanContext,
-        scene: &GBufferScene<'_>,
-        display: &VulkanTexture,
-        aa_out: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
-    ) -> Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> {
-        let (rcas, out) = match (scene.rcas.as_ref(), aa_out) {
-            (Some(r), Some(out)) => (r, out),
-            _ => return None,
-        };
-
-        let mut slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
-            [const { None }; FRAMES_IN_FLIGHT];
-        for (slot, dst) in slots.iter_mut().enumerate() {
-            let entries = [
-                BindGroupEntry::StorageImage { texture: display },
-                BindGroupEntry::StorageImage { texture: &out[slot] },
-            ];
-            let desc = BindGroupDesc::<Vulkan> { layout: rcas.rcas_layout, entries: &entries };
-            match RhiDevice::create_bind_group(ctx, &desc) {
-                Ok(g) => *dst = Some(g),
-                Err(_) => {
-                    // SAFETY: the [0..slot) RCAS set slots were created on `ctx`, never
-                    // submitted; destroy each once (reverse acquisition within this ring).
-                    unsafe {
-                        for s in slots.iter_mut() {
-                            if let Some(g) = s.take() {
-                                RhiDevice::destroy_bind_group(ctx, g);
-                            }
-                        }
-                    }
-                    return None;
-                }
-            }
-        }
-        Some(slots.map(|s| s.expect("invariant: every RCAS set slot built above")))
-    }
-
     /// Render wave PX1a (D-G5): builds `post_final`'s per-FIF UBO ring (32 B host-coherent,
     /// seeded with `scene.post_final_words` so frame 0 and a rebuild frame dispatch over the
     /// right extent before the host's per-frame upload reaches the new ring) and its 3-binding
@@ -8761,12 +8710,13 @@ impl GBufferTargets {
 
         // Anti-aliasing campaign / render wave PX1a: the aa_out image ring — the output of the
         // display-referred passes that run AFTER `post_final` — built ONLY when one of them is
-        // armed: `scene.aa` (FXAA), `scene.smaa` (SMAA) or `scene.rcas` (CAS). `None` is the
-        // 0%-gate (present samples `display`). SSAA and TAA no longer write it: the downsample
+        // armed: `scene.aa` (FXAA) or `scene.smaa` (SMAA), `AaArm::wants_aa_out` (render wave
+        // PX1b D-R12: TAA's sharpen is `post_final`'s own stage, so TAA never arms it). `None` is
+        // the 0%-gate (present samples `display`). SSAA and TAA do not write it: the downsample
         // writes `lit_native` and the resolve only `taa_hist`, both read by `post_final`. Built
         // after the SSAO à-trous ring images (so its own Err arm destroys those + shadow-vis +
         // core, mirroring the existing image-stage error weave). Sized to `aa_extent`.
-        let aa_armed = scene.aa.is_some() || scene.smaa.is_some() || scene.rcas.is_some();
+        let aa_armed = AaArm::from_scene(scene).wants_aa_out();
         let aa_imgs: Option<AaImages> = if aa_armed {
             match AaImages::build(ctx, aa_extent) {
                 Ok(a) => Some(a),
@@ -8793,7 +8743,7 @@ impl GBufferTargets {
         debug_assert_eq!(
             aa_armed,
             aa_imgs.is_some(),
-            "invariant: aa_imgs must arm/disarm in lockstep with (scene.aa || scene.smaa || scene.rcas)"
+            "invariant: aa_imgs must arm/disarm in lockstep with AaArm::wants_aa_out (FXAA or SMAA)"
         );
         // SSAA-armed only: `lit_native` (the downsample's output and `post_final`'s input) exists
         // at the native `aa_extent`, so `post_final` reads a scene input at `display`'s extent.
@@ -9192,16 +9142,6 @@ impl GBufferTargets {
         let taa_hist: Option<[VulkanTexture; FRAMES_IN_FLIGHT]> =
             if scene.taa.is_some() { Self::build_and_clear_taa_hist(ctx, aa_extent, dump_usage) } else { None };
 
-        // TAA rung T3: `GBufferScene::rcas` is a pure post-process over the resolve's OWN
-        // output — it can never be armed without the resolve itself (`GBufferScene::taa`)
-        // being armed too (the scene-assembly seam, `boyko_app::gpu_scene`, ANDs the two at the
-        // arm site). This debug_assert makes that lockstep explicit at the ONE place every
-        // `GBufferScene` flows through before its targets are built.
-        debug_assert!(
-            scene.rcas.is_none() || scene.taa.is_some(),
-            "invariant: GBufferScene::rcas armed implies GBufferScene::taa armed (RCAS runs \
-             post-TAA-resolve, never standalone)"
-        );
         // Anti-aliasing Stage 4 (TAA W5): the resolve's own tunables + DEDICATED `MotionCam` UBO
         // rings + the 7-binding resolve set. Built LAST (after `taa_hist`, which it binds) and
         // DEGRADE-TO-NONE (opt-in, no dependents) — like the hwrt temporal sets, it needs no
@@ -9212,11 +9152,6 @@ impl GBufferTargets {
                 Some(sets) => (Some(sets.taa_ubo), Some(sets.motion_cam_ubo), Some(sets.set)),
                 None => (None, None, None),
             };
-
-        // TAA rung T3 / render wave PX1a (D-G3): the CAS descriptor set (`display` → `aa_out`),
-        // DEGRADE-TO-NONE (opt-in, no dependents). `None` on the OFF path (RCAS off, or `aa_out`
-        // failed to allocate) ⇒ byte-identical.
-        let rcas_set = Self::build_rcas_set(ctx, scene, &display, aa_out.as_ref());
 
         // Rung R9b (docs/R9-VB-SPLIT-PLAN.md §4): the VB split's `thin_normal` ring — built in
         // the leak-safe DEGRADE-TO-NONE tail (the `taa_hist` discipline: each slot drains on a
@@ -9555,7 +9490,6 @@ impl GBufferTargets {
             taa_ubo,
             taa_motion_cam_ubo,
             taa_resolve_set,
-            rcas_set,
             display,
             lit_native,
             post_final: None,
@@ -9973,14 +9907,6 @@ impl GBufferTargets {
             // RULE).
             if let Some(h) = self.hzb {
                 h.destroy(ctx);
-            }
-            // TAA rung T3: the CAS descriptor set — acquired LAST (after `aa_out`/
-            // `taa_resolve_set`), so destroyed FIRST here (before everything it reads from).
-            // `Option`-guarded (`None` unless `scene.rcas` was armed).
-            if let Some(s) = self.rcas_set {
-                for g in s {
-                    RhiDevice::destroy_bind_group(ctx, g);
-                }
             }
             // Anti-aliasing Stage 4 (TAA W5): the resolve set + its two UBO rings — acquired LAST
             // (after `taa_hist`, in `build_taa_resolve_set`), so destroyed FIRST here (before the
@@ -10533,6 +10459,18 @@ mod tests {
     use super::*;
     use crate::texture::MAX_TEXTURE_LAYERS;
 
+    /// Render wave PX1b (`px1b/cut.md` D-R12): `aa_out` arms only for a display-referred pass after
+    /// `post_final` — FXAA or SMAA — and never under TAA (its sharpen is `post_final`'s RCAS stage
+    /// since PX1b), SSAA or Off, which present `display`.
+    #[test]
+    fn aa_out_arms_only_for_display_referred_passes() {
+        assert!(AaArm::Fxaa.wants_aa_out(), "FXAA writes aa_out");
+        assert!(AaArm::Smaa.wants_aa_out(), "SMAA writes aa_out");
+        assert!(!AaArm::Taa.wants_aa_out(), "TAA, sharpened or not, presents display");
+        assert!(!AaArm::Ssaa.wants_aa_out(), "SSAA presents display (the downsample writes lit_native)");
+        assert!(!AaArm::Off.wants_aa_out(), "Off presents display");
+    }
+
     /// A device-inert `VulkanTexture` — every handle field is `VK_NULL_HANDLE`
     /// (the `dummy_mesh_gpu`/`BoundBuffer::NULL` idiom `asset_streaming_f5_
     /// validation.rs` established), so building a full `GBufferTargets` value in
@@ -10619,7 +10557,6 @@ mod tests {
             taa_ubo: None,
             taa_motion_cam_ubo: None,
             taa_resolve_set: None,
-            rcas_set: None,
             display: null_texture(),
             lit_native: None,
             post_final: None,
@@ -11010,7 +10947,6 @@ mod tests {
             taa_ubo: None,
             taa_motion_cam_ubo: None,
             taa_resolve_set: None,
-            rcas_set: None,
             display: null_texture(),
             lit_native: None,
             post_final: None,

@@ -47,7 +47,7 @@ use boyko_render::{
 use boyko_rhi_vulkan::present::gpu_zone::{
     FWD_ZONE_COUNT, POST_ZONE_COUNT, RENDER_DECLARE_FRAME_GRAPH, ZONE_BASE_FWD, ZONE_BASE_POST,
     ZONE_FWD_OPAQUE, ZONE_FWD_SDF_MARCH, ZONE_FWD_VB_SKY, ZONE_GBUF_DEFERRED_RESOLVE,
-    ZONE_POST_CAS, ZONE_POST_FINAL, ZONE_POST_FXAA, ZONE_POST_PRESENT, ZONE_POST_SMAA_BLEND, ZONE_POST_SMAA_EDGE,
+    ZONE_POST_FINAL, ZONE_POST_RETIRED, ZONE_POST_FXAA, ZONE_POST_PRESENT, ZONE_POST_SMAA_BLEND, ZONE_POST_SMAA_EDGE,
     ZONE_POST_SMAA_WEIGHT, ZONE_POST_SSAA_DOWNSAMPLE, ZONE_POST_TAA_RESOLVE, ZONE_VB_RUN,
 };
 
@@ -259,7 +259,7 @@ fn table(c: ZoneCell) -> Vec<Cell> {
         Cell { zone: ZONE_POST_TAA_RESOLVE, name: "post_taa_resolve", expect: req(taa) },
         // Render wave PX1b (D-R14): the CAS pass is retired — the sharpen is `post_final`'s RCAS
         // stage (zone 88), so no cell may bracket id 81.
-        Cell { zone: ZONE_POST_CAS, name: "post_cas", expect: Expect::Forbidden },
+        Cell { zone: ZONE_POST_RETIRED[0], name: "post_cas", expect: Expect::Forbidden },
         Cell { zone: ZONE_POST_FXAA, name: "post_fxaa", expect: req(post && c.aa == AaCell::Fxaa) },
         Cell { zone: ZONE_POST_SMAA_EDGE, name: "post_smaa_edge", expect: req(post && c.aa == AaCell::Smaa) },
         Cell { zone: ZONE_POST_SMAA_WEIGHT, name: "post_smaa_weight", expect: req(post && c.aa == AaCell::Smaa) },
@@ -756,9 +756,9 @@ fn zones_cpu_declare_frame_graph() {
 // The host half — no GPU
 // ===============================================================================================
 
-/// The POST ids a retired pass held (render wave PX1b D-R14: `ZONE_POST_CAS`, 81) — Forbidden in
-/// every cell, so exempt from "Required in some cell".
-const RETIRED: [u16; 1] = [ZONE_POST_CAS];
+/// The POST ids a retired pass held (render wave PX1b D-R14: `ZONE_POST_RETIRED`, the CAS pass's
+/// 81) — Forbidden in every cell, so exempt from "Required in some cell".
+const RETIRED: [u16; 1] = ZONE_POST_RETIRED;
 
 /// **Every POST and FWD id has exactly one row in every cell's table, and every live one is
 /// Required in at least one cell** — red when a family grows an id the gate does not name, or when
@@ -829,7 +829,7 @@ fn check_expectations_reds_both_ways() {
     let e = check_expectations(&missing, &t).expect_err("a missing Required zone must red");
     assert!(e.contains("84") && e.contains("absent"), "{e}");
     let mut extra = exact.clone();
-    extra.push(measured(ZONE_POST_CAS));
+    extra.push(measured(ZONE_POST_RETIRED[0]));
     let e = check_expectations(&extra, &t).expect_err("a Forbidden zone present must red");
     assert!(e.contains("81") && e.contains("Forbidden"), "{e}");
     let mut torn = exact;

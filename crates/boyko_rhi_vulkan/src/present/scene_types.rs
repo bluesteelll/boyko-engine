@@ -1245,13 +1245,6 @@ pub struct TaaActivation<'a> {
     pub reset: bool,
 }
 
-/// TAA rung T3: the post-resolve CONTRAST-ADAPTIVE SHARPEN (AMD FidelityFX CAS) pass activation
-/// (`rcas.comp` / [`crate::compute::rcas_spirv`]). `None` = OFF, the 0%-gate: no `aa_out`, no
-/// `rcas_set`, no `cas` pass. Since render wave PX1a (D-G3) CAS runs after `post_final`, in a
-/// declared `cas` pass reading `display` and writing `aa_out`, which the present blit samples. `Some` REQUIRES [`GBufferScene::taa`] to ALSO be `Some` — RCAS is a
-/// pure post-process over the resolve's OWN intermediate output, never a standalone pass
-/// (enforced by a `debug_assert!` in [`GBufferTargets::create`](crate::present::targets::GBufferTargets::create)).
-///
 /// Render wave PX1a (D-G5): the `post_final` pass's boot objects — its compute pipeline and the
 /// 3-binding layout `POST_FINAL_BINDINGS` prints: `gScene` @0 (`SAMPLED_IMAGE` recorded at
 /// `GENERAL` — the scene input, `taa_hist[fi]` under TAA, `lit_native` under SSAA, `lit[fi]`
@@ -1264,28 +1257,6 @@ pub struct PostFinalActivation<'a> {
     pub pipeline: &'a ComputePipeline,
     /// Its bind-group layout (the three bindings above).
     pub layout: &'a VulkanBindGroupLayout,
-}
-
-/// `#[derive(Clone, Copy)]` — a bundle of borrows plus the `sharpness` scalar, mirroring
-/// [`TaaActivation`]'s own shape.
-#[derive(Clone, Copy)]
-pub struct RcasActivation<'a> {
-    /// The RCAS compute pipeline (`rcas.comp` / [`crate::compute::rcas_spirv`]): its layout
-    /// declares [`Self::rcas_layout`] at `set 0` + a 16-byte `RcasPush` (`crate::compute::
-    /// RcasPush`) COMPUTE push range. Built UNCONDITIONALLY at boot (mirroring
-    /// [`TaaActivation::resolve_pipeline`]'s always-built discipline) so the mode can flip at
-    /// runtime.
-    pub rcas_pipeline: &'a ComputePipeline,
-    /// The RCAS compute pipeline's bind-group LAYOUT — the DEDICATED 2-binding shape { `gRcasIn`
-    /// STORAGE @0 (`display`, the READ — `post_final`'s output, at GENERAL), `gAaOut` STORAGE @1
-    /// (`aa_out`, the WRITE — the present-blit's input) }.
-    /// [`GBufferTargets`] writes a per-FIF `rcas_set` against it once per extent.
-    pub rcas_layout: &'a VulkanBindGroupLayout,
-    /// The owner-set `SharpenMode::Rcas` (boyko_render's) strength in
-    /// `[0, 1]` (`boyko_render::taa_config::TaaConfig::rcas_sharpness`), pushed verbatim as
-    /// `RcasPush::sharpness`. `0` = mild (peak `-1/8`), `1` = strong (peak `-1/5`), per the
-    /// FidelityFX CAS sharpness mapping `rcas.comp.hlsl` implements.
-    pub sharpness: f32,
 }
 
 /// Render wave PX1b (`px1b/cut.md` D-R15): bit 1 of `post_final`'s mode word
@@ -2642,19 +2613,14 @@ pub struct GBufferScene<'a> {
     /// converged-static-validated, but in-motion quality (ghosting, disocclusion) is owner-gated,
     /// not yet visually blessed.
     pub taa: Option<TaaActivation<'a>>,
-    /// TAA rung T3: the post-resolve RCAS sharpen pass activation. `None` = OFF, the
-    /// 0%-gate — see [`RcasActivation`]'s doc. REQUIRES [`Self::taa`] to also be `Some`
-    /// (`SharpenMode::Rcas` is meaningless without `AaMode::Taa` — RCAS reads the resolve's
-    /// OWN intermediate output); never armed standalone (enforced by a `debug_assert!` in
-    /// [`GBufferTargets::create`](crate::present::targets::GBufferTargets::create)).
-    pub rcas: Option<RcasActivation<'a>>,
     /// Render wave PX1a (D-G5): the post seam's tail pass — UNCONDITIONAL, every path, every
     /// frame (it is what writes `display`, the image the present blit and every display-referred
     /// pass read). See [`PostFinalActivation`].
     pub post_final: PostFinalActivation<'a>,
     /// Render wave PX1a (D-G5, D-O3): `post_final`'s 32-byte constant buffer as eight words
     /// (`boyko_render::post::gpu::PostFinalGpu`'s bytes: mode word, exposure ratio, the dispatch
-    /// extent, four reserved). The host computes it once per frame; it seeds both UBO ring slots
+    /// extent, the RCAS `sharpness` word (render wave PX1b; read only under the mode word's
+    /// [`POST_MODE_SHARPEN`]), three reserved). The host computes it once per frame; it seeds both UBO ring slots
     /// when the targets are (re)built (so frame 0 and a rebuild frame dispatch over the right
     /// extent before the host's first per-frame upload reaches the new ring) and the receipt
     /// records it as `post_word0..7`.

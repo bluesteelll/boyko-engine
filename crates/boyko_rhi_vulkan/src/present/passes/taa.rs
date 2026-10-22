@@ -4,8 +4,9 @@
 //! not graphics" doc.
 //!
 //! Render wave PX1a (D-S5 step 1): the resolve writes only `taa_hist[fi]`; `post_final` reads it
-//! as the scene input and CAS (TAA rung T3) runs after `post_final` on `display`, so this body
-//! records no hand barrier — every image it touches is frame-graph tracked.
+//! as the scene input (render wave PX1b: under the sharpen bit, its RCAS stage reads the five-tap
+//! cross of the same image), so this body records no hand barrier — every image it touches is
+//! frame-graph tracked.
 
 use core::ptr;
 

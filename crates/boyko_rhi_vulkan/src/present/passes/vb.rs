@@ -5119,9 +5119,10 @@ impl Renderer<'_> {
             unsafe { self.record_taa_body(cmd, targets, taa, scene, fi) };
         }
 
-        // Render wave PX1a: the post seam — `[ssaa_downsample] → post_final → [cas]`, each pass's
-        // barriers through the VB sink first, in declaration order (D-G4; `record_gbuffer`'s
-        // block, ported).
+        // Render wave PX1a: the post seam — `[ssaa_downsample] → post_final`, each pass's barriers
+        // through the VB sink first, in declaration order (D-G4; `record_gbuffer`'s block,
+        // ported). Render wave PX1b: the sharpen is `post_final`'s RCAS stage (the CAS pass is
+        // retired).
         if let Some(pass) = plan.post.ssaa_downsample {
             ts.cmd();
             self.record_vb_pass(pass, cmd, targets, forward, vb, scene, fi);
@@ -5141,20 +5142,6 @@ impl Renderer<'_> {
         // `aa_extent` large.
         ts.cmd();
         unsafe { self.record_post_final(cmd, targets, scene, aa_extent, fi) };
-        if let Some(pass) = plan.post.cas {
-            ts.cmd();
-            self.record_vb_pass(pass, cmd, targets, forward, vb, scene, fi);
-            if let Some(rcas) = scene.rcas.as_ref()
-                && targets.rcas_set.is_some()
-            {
-                // SAFETY: recording is open; the `cas` pass's barriers (`post_final`'s `display`
-                // write → this COMPUTE read at GENERAL) were just emitted; `aa_out`/`rcas_set`
-                // were built by `create()` under the same `scene.rcas`; `present_extent` sizes
-                // `display` and `aa_out` (TAA arms no SSAA).
-                ts.cmd();
-                unsafe { self.record_rcas(cmd, targets, rcas, present_extent, scene, fi) };
-            }
-        }
 
         // === `present_sample`: `display` → SHADER_READ_ONLY_OPTIMAL for the present blit (and
         // the FXAA / SMAA FRAGMENT reads below, inside the same barrier's scope). ===
@@ -5162,8 +5149,8 @@ impl Renderer<'_> {
         self.record_vb_pass(plan.present_sample, cmd, targets, forward, vb, scene, fi);
 
         // Anti-aliasing (VB): FXAA / SMAA over `display` → `aa_out`, hand-recorded after
-        // `present_sample` (`record_gbuffer`'s block, ported). CAS ran above; OFF (`aa_out` is
-        // `None`) records nothing.
+        // `present_sample` (`record_gbuffer`'s block, ported). OFF (`aa_out` is `None`) records
+        // nothing.
         if targets.aa_out.is_some() {
             if let Some(fxaa) = scene.aa.as_ref() {
                 // SAFETY: recording is open; `present_sample` above left `display` in
@@ -5181,7 +5168,7 @@ impl Renderer<'_> {
                 let zone = super::zone_arm::ZoneArm::from_scene(scene);
                 unsafe { self.record_smaa(cmd, targets, smaa, present_extent, fi, zone) };
             } else {
-                debug_assert!(scene.rcas.is_some(), "invariant: VB aa_out armed but none of aa/smaa/rcas is");
+                debug_assert!(false, "invariant: VB aa_out is armed only under FXAA / SMAA");
             }
         }
 
