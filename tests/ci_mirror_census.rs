@@ -22,6 +22,14 @@
 //!   `|`, each `id | kind | note`.
 //!
 //! Adding a job to ci.yml = one row in that table. This test names the row to add.
+//!
+//! # No Linux build by default (ruling 101)
+//!
+//! The owner banned Linux builds on the dev host (2026-10-22, orchestrator ruling 101): GitHub CI
+//! covers the Linux jobs, and the mirror's `linux` and `linux-compile-only` rows run only with
+//! `--linux`; without it they are SKIPPED "not run: owner ban (ruling 101) - GitHub CI covers them".
+//! [`the_linux_rows_run_only_when_asked`] pins the script's `OPT_IN` table, which its `select()`
+//! reads, so a default merge check cannot quietly start building for Linux again.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -43,7 +51,15 @@ const KINDS_NEEDING_A_NOTE: [&str; 3] = ["linux-compile-only", "host-heavy", "no
 /// A note shorter than this is not a reason.
 const NOTE_MIN: usize = 40;
 
-/// Floors, not counts: ci.yml had 17 jobs and the table 19 rows when this census landed. A floor
+/// Kinds that run only when their flag is passed, with the flag. Every Linux kind is behind
+/// `--linux` (ruling 101). `tools/ci_mirror.py`'s one-line `OPT_IN` must say the same.
+const OPT_IN: [(&str, &str); 3] = [
+    ("linux", "--linux"),
+    ("linux-compile-only", "--linux"),
+    ("host-heavy", "--heavy"),
+];
+
+/// Floors, not counts: ci.yml had 17 jobs and the table 18 rows when this census landed. A floor
 /// cannot stop the job set from shrinking; it stops a reader that sees nothing from passing.
 const MIN_JOBS: usize = 17;
 const MIN_ROWS: usize = 17;
@@ -354,6 +370,42 @@ fn the_mirror_table_rows_are_well_formed() {
     assert!(
         errors.is_empty(),
         "malformed JOB TABLE rows:\n  {}",
+        errors.join("\n  ")
+    );
+}
+
+/// Ruling 101: nothing is built for Linux unless asked. Every Linux kind is opt-in behind
+/// `--linux`, and the script's `OPT_IN` table (what its `select()` reads) is this census's.
+#[test]
+fn the_linux_rows_run_only_when_asked() {
+    let mut errors: Vec<String> = Vec::new();
+    for kind in KINDS.iter().filter(|k| k.starts_with("linux")) {
+        if !OPT_IN.contains(&(*kind, "--linux")) {
+            errors.push(format!(
+                "kind `{kind}` builds for Linux and is not behind `--linux` in this census's OPT_IN \
+                 (owner ban, ruling 101)"
+            ));
+        }
+    }
+    let script = repo_file("tools/ci_mirror.py");
+    let line = script
+        .lines()
+        .find(|l| l.starts_with("OPT_IN = {"))
+        .expect("tools/ci_mirror.py has a one-line `OPT_IN = {` table");
+    let quoted: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
+    let script_opt_in: Vec<(&str, &str)> = quoted
+        .chunks(2)
+        .map(|pair| (pair[0], pair.get(1).copied().unwrap_or_default()))
+        .collect();
+    if script_opt_in != OPT_IN {
+        errors.push(format!(
+            "tools/ci_mirror.py's OPT_IN {script_opt_in:?} differs from this census's {OPT_IN:?}: a \
+             Linux row must run only with --linux (owner ban, ruling 101) -- edit both, or neither"
+        ));
+    }
+    assert!(
+        errors.is_empty(),
+        "the CI mirror's opt-in table:\n  {}",
         errors.join("\n  ")
     );
 }

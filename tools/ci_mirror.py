@@ -7,16 +7,23 @@ Why it exists (orchestrator ruling 96, 2026-10-22). GitHub CI run 39663719484 on
 reports as dead (`crates/boyko_app/src/post_host.rs`) and two allows `scripts/check_hotpath_exceptions.py`
 had no rows for. Both jobs run on `ubuntu-latest`; every lane check ran on Windows only.
 
+NO LINUX BUILD BY DEFAULT (the owner, 2026-10-22: "build nothing for Linux"; orchestrator ruling
+101). The `linux` and `linux-compile-only` rows run only with `--linux`; without it each is SKIPPED
+"not run: owner ban (ruling 101) - GitHub CI covers them", neither a pass nor a red, and the
+Linux side is verified by GitHub CI. `--linux` is for a host where the ban is lifted; the OPT_IN
+table below is what `select()` reads, and `tests/ci_mirror_census.rs` pins it.
+
 WHAT RUNS, by the row's kind in the JOB TABLE below (one row per ci.yml job, or per matrix leg):
 
   script              the job's `python3 <script>` line, with `python3` replaced by this interpreter.
-  linux               the job's cargo line(s) as a CROSS CHECK: `--target x86_64-unknown-linux-gnu
-                      --keep-going` added, the CI's RUSTFLAGS from the yml (the one place this script
-                      sets RUSTFLAGS), in `--linux-target-dir` (a matrix job's own `CARGO_TARGET_DIR`
-                      becomes a sub-directory of it). `feature-legs` runs the yml's own derivation
-                      step (its Python, verbatim but for one asserted `--manifest-path`) and checks
-                      every derived leg.
-  linux-compile-only  the compile half of a job whose other half (a link, a run) needs Linux.
+  linux               only with --linux: the job's cargo line(s) as a CROSS CHECK: `--target
+                      x86_64-unknown-linux-gnu --keep-going` added, the CI's RUSTFLAGS from the yml
+                      (the one place this script sets RUSTFLAGS), in `--linux-target-dir` (a matrix
+                      job's own `CARGO_TARGET_DIR` becomes a sub-directory of it). `feature-legs` runs
+                      the yml's own derivation step (its Python, verbatim but for one asserted
+                      `--manifest-path`) and checks every derived leg.
+  linux-compile-only  only with --linux: the compile half of a job whose other half (a link, a run)
+                      needs Linux.
   host                the job's `run:` blocks verbatim in Git Bash, in `--host-target-dir`.
   host-heavy          as `host`, but only with `--heavy` (hours, a workspace test run).
   not-runnable        printed as NOT-RUNNABLE with the row's reason.
@@ -51,10 +58,12 @@ run stops (exit 2); a row past its wall budget has ONLY its own process tree kil
 Usage (the caller's environment carries RUSTUP_TOOLCHAIN, PATH, CARGO_BUILD_JOBS, TMP; the caller
 takes any machine-wide lock):
 
-    python tools/ci_mirror.py --linux-target-dir D:/wt/_targets/linux-check --log-dir <dir>
-        [--host-target-dir <dir>] [--heavy] [--only a,b] [--skip a,b] [--list] [--self-test]
+    python tools/ci_mirror.py --log-dir <dir> [--host-target-dir <dir>] [--heavy]
+        [--linux --linux-target-dir <dir>] [--only a,b] [--skip a,b] [--list] [--self-test]
         [--fap-target-dir <dir>] [--min-free-commit-gb 6] [--min-free-disk-gb 15]
         [--row-timeout-min 120] [--heavy-row-timeout-min 480]
+
+--linux-target-dir is read only with --linux; without --linux nothing is built for Linux.
 
 Files in --log-dir: PID, progress.tsv (one line per finished row), summary.tsv, DONE (the exit
 code), one log per row, and dead_items.tsv (every never-used / unused / unfulfilled-expectation
@@ -96,6 +105,22 @@ CROSS_UNBUILDABLE = {
 KINDS = ("script", "linux", "linux-compile-only", "host", "host-heavy", "not-runnable")
 KINDS_NEEDING_A_NOTE = ("linux-compile-only", "host-heavy", "not-runnable")
 NOTE_MIN = 40
+
+# Kinds that run only when their flag is passed, else SKIPPED with the flag's reason. One line, read
+# by `tests/ci_mirror_census.rs`: every Linux kind stays behind `--linux` (ruling 101).
+OPT_IN = {"linux": "--linux", "linux-compile-only": "--linux", "host-heavy": "--heavy"}
+OPT_IN_REASON = {
+    "--linux": "not run: owner ban (ruling 101) - GitHub CI covers them (--linux opts in)",
+    "--heavy": "host-heavy: run with --heavy",
+}
+
+
+def opt_in_skip(kind: str, passed: dict[str, bool]) -> str | None:
+    """The SKIPPED reason of a row of `kind` when its opt-in flag is not in `passed`, else None."""
+    flag = OPT_IN.get(kind)
+    if flag is None or passed.get(flag, False):
+        return None
+    return OPT_IN_REASON[flag]
 
 # The actions a job may use. Anything else is a step this script cannot reproduce: exit 2.
 KNOWN_ACTIONS = re.compile(r"^(actions/checkout@v4|dtolnay/rust-toolchain@[0-9A-Za-z.\-]+|Swatinem/rust-cache@v2)$")
@@ -500,6 +525,18 @@ def self_test() -> list[str]:
             failures.append(f"derive-step fixture: {docs!r} {code!r}")
     except Drift as e:
         failures.append(f"derive-step fixture raised (an empty heredoc must parse): {e}")
+    for kind in KINDS:
+        default = opt_in_skip(kind, {})
+        if kind.startswith("linux"):
+            if not default or "owner ban (ruling 101)" not in default:
+                failures.append(f"a `{kind}` row runs without --linux (ruling 101): reason {default!r}")
+            if opt_in_skip(kind, {"--linux": True}) is not None or opt_in_skip(kind, {"--heavy": True}) is None:
+                failures.append(f"a `{kind}` row is not opted in by --linux alone")
+        elif kind == "host-heavy":
+            if default is None or opt_in_skip(kind, {"--heavy": True}) is not None or opt_in_skip(kind, {"--linux": True}) is None:
+                failures.append("a `host-heavy` row is not opted in by --heavy alone")
+        elif default is not None:
+            failures.append(f"a `{kind}` row is skipped by default: {default!r}")
     try:
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "row.log"
@@ -777,7 +814,8 @@ class Mirror:
             raise Drift("the JOB TABLE is malformed:\n  " + "\n  ".join(errors))
         self.units = build_units(self.jobs, rows)
         self.log_dir: Path | None = Path(args.log_dir).resolve() if args.log_dir else None
-        self.linux_dir = Path(args.linux_target_dir).resolve() if args.linux_target_dir else None
+        # Without --linux no row builds for Linux, so the directory is not read either (ruling 101).
+        self.linux_dir = Path(args.linux_target_dir).resolve() if args.linux and args.linux_target_dir else None
         host = args.host_target_dir or os.environ.get("CARGO_TARGET_DIR")
         self.host_dir = Path(host).resolve() if host else None
         self.cargo = None
@@ -1245,14 +1283,16 @@ class Mirror:
         unknown = sorted((only | skip) - known)
         if unknown:
             raise Drift(f"--only/--skip name {unknown}, which are no job or leg of ci.yml")
+        passed = {"--linux": self.args.linux, "--heavy": self.args.heavy}
         selected, skipped = [], {}
         for u in self.units:
+            gated = opt_in_skip(u.row.kind, passed)
             if only and u.id not in only and u.job.id not in only:
                 skipped[u.id] = "not in --only"
             elif u.id in skip or u.job.id in skip:
                 skipped[u.id] = "in --skip"
-            elif u.row.kind == "host-heavy" and not self.args.heavy:
-                skipped[u.id] = "host-heavy: run with --heavy"
+            elif gated is not None:
+                skipped[u.id] = gated
             else:
                 selected.append(u)
         return selected, skipped
@@ -1365,7 +1405,8 @@ class Mirror:
     def list(self) -> int:
         print("JOB TABLE (tools/ci_mirror.py) against", self.ci_yml)
         for u in self.units:
-            print(f"  {u.id:<28} {u.row.kind:<20} {u.job.runs_on:<16} {u.row.note[:70]}")
+            gate = OPT_IN.get(u.row.kind, "")
+            print(f"  {u.id:<28} {u.row.kind:<20} {gate:<8} {u.job.runs_on:<16} {u.row.note[:70]}")
         if self.args.no_cargo:
             return 0
         self.cargo = shutil.which("cargo", path=os.environ.get("PATH"))
@@ -1496,6 +1537,11 @@ def main() -> int:
     ap.add_argument("--log-dir")
     ap.add_argument("--host-target-dir")
     ap.add_argument("--heavy", action="store_true")
+    ap.add_argument(
+        "--linux",
+        action="store_true",
+        help="run the Linux cross-check rows; banned on the dev host (owner, 2026-10-22, ruling 101)",
+    )
     ap.add_argument("--only")
     ap.add_argument("--skip")
     ap.add_argument("--list", action="store_true")
