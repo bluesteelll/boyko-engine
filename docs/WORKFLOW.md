@@ -313,7 +313,9 @@ in every child, so nothing is ever downloaded behind the caller. `--host-target-
 `CARGO_TARGET_DIR`. `--log-dir` is required, so nothing is written into a worktree; it gets `PID`,
 `progress.tsv` (one line per finished row, with the free disk after it), `summary.tsv`, `DONE` (the exit
 code), one log per row and `dead_items.tsv` (every never-used / unused / unfulfilled-expectation diagnostic
-of the Linux rows: the F4 class list). Exit 0 = no FAIL, 1 = a FAIL, 2 = the mirror cannot read `ci.yml`,
+of the Linux rows: the F4 class list). A `--log-dir` may be re-used: a row's log is truncated at the row's
+first write in a run, so no verdict or dead item is read from an earlier run (a row this run does not reach
+keeps its old log, and `summary.tsv` does not point at it). Exit 0 = no FAIL, 1 = a FAIL, 2 = the mirror cannot read `ci.yml`,
 its table no longer matches it, or a preflight or machine guard stopped the run.
 
 **What each row runs** is read from `ci.yml` at run time, never re-listed; the script's JOB TABLE only

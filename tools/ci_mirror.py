@@ -58,7 +58,9 @@ takes any machine-wide lock):
 
 Files in --log-dir: PID, progress.tsv (one line per finished row), summary.tsv, DONE (the exit
 code), one log per row, and dead_items.tsv (every never-used / unused / unfulfilled-expectation
-diagnostic of the Linux rows: leg, file:line, message).
+diagnostic of the Linux rows: leg, file:line, message). A --log-dir may be re-used: a row's log is
+truncated at the row's first write in a run, so a verdict never reads an earlier run's output (a row
+this run does not reach keeps its old log, and no line of summary.tsv points at it).
 """
 
 from __future__ import annotations
@@ -498,6 +500,18 @@ def self_test() -> list[str]:
             failures.append(f"derive-step fixture: {docs!r} {code!r}")
     except Drift as e:
         failures.append(f"derive-step fixture raised (an empty heredoc must parse): {e}")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "row.log"
+            for text in (b"run 1: error: static `X` is never used\n", b"run 2: clean\n"):
+                logs = RowLogs()
+                for chunk in (text, b"step 2\n"):
+                    with logs.open(log) as f:
+                        f.write(chunk)
+            if log.read_bytes() != b"run 2: clean\nstep 2\n":
+                failures.append(f"row logs: a second run read back {log.read_bytes()!r} (an earlier run's output leaks into its verdict)")
+    except OSError as e:
+        failures.append(f"row logs fixture raised: {e}")
     for src, want, what in FAP_SCAN_CASES:
         got = fap_readers_in(src, "x.rs")
         if got != want:
@@ -726,6 +740,23 @@ def free_commit_gb() -> float | None:
     return status.ullAvailPageFile / 2**30
 
 
+class RowLogs:
+    """The row logs one run writes. A row's verdict, warning summaries and dead items are read back
+    from its whole log, so the first open of a log in a run truncates it: a re-used --log-dir never
+    feeds an earlier run's output into this run's table. Later opens in the same run (a row's next
+    step) append."""
+
+    def __init__(self) -> None:
+        self.started: set[Path] = set()
+
+    def open(self, log: Path):
+        log.parent.mkdir(parents=True, exist_ok=True)
+        key = log.resolve()
+        mode = "ab" if key in self.started else "wb"
+        self.started.add(key)
+        return open(log, mode)
+
+
 @dataclass
 class Result:
     status: str
@@ -751,6 +782,7 @@ class Mirror:
         self.host_dir = Path(host).resolve() if host else None
         self.cargo = None
         self.bash = None
+        self.row_logs = RowLogs()
         self.results: dict[str, Result] = {}
         self.dead: list[tuple[str, str, str]] = []
         # Set when a row was killed for disk space: the run stops after that row (exit 2).
@@ -783,9 +815,8 @@ class Mirror:
     # --- process ----------------------------------------------------------------------------------
 
     def run(self, argv: list[str], env: dict, log: Path, timeout_min: float) -> tuple[int, float]:
-        log.parent.mkdir(parents=True, exist_ok=True)
         start = time.monotonic()
-        with open(log, "ab") as out:
+        with self.row_logs.open(log) as out:
             out.write(f"\n$ {' '.join(argv)}\n".encode())
             out.flush()
             proc = subprocess.Popen(argv, cwd=REPO, env=env, stdout=out, stderr=subprocess.STDOUT)
@@ -991,8 +1022,7 @@ class Mirror:
             (workdir / name).write_text(body, encoding="utf-8", newline="\n")
         (workdir / "derive.py").write_text(code, encoding="utf-8", newline="\n")
         env = self.base_env()
-        log.parent.mkdir(parents=True, exist_ok=True)
-        with open(log, "ab") as out:
+        with self.row_logs.open(log) as out:
             out.write(b"\n$ <the derive step's python>\n")
             out.flush()
             rc = subprocess.run([sys.executable, "derive.py"], cwd=workdir, env=env, stdout=out, stderr=subprocess.STDOUT).returncode
