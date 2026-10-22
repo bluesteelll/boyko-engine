@@ -20,7 +20,11 @@ prefix.
 | `74f3b8dd` | C4: one `VkPipelineCache` per context at all five create sites, with creation feedback | a second create of the same pipeline is an application-cache hit at every site |
 | `16ce7185` | C5: the per-user persisted cache and the `boot:` telemetry line | a second boot hits every pipeline, also from a copied exe (check I2) |
 | `ef1f73ba` | C6: the boot pump and the deferred close (F4) | never hung during boot, a close during boot hides at once, a long startup system can pump through the seam |
-| this commit | C7: feature rows, gap C9, this record | — |
+| `fe7792a8` | C7: feature rows, gap C9, this record | — |
+| `890abc53` | trunk sync over oi1516 (`35c5384c`) | the shared registries re-derived (ruling 98 (4)): the `#[ignore]` count 626, BOOT-1's ug02 pins re-chained on OI1516-R1 |
+| `80e78796` | round 1, F3 + F4: the boot pump's quit check, the drop-disarm gate | below |
+| `8fe67b39` | round 1, W1 + F1: the crash sentinel is an OS lock; the sentinel test is serialised | below |
+| this commit | round 1: this section | — |
 
 F-E (C8) was **not built**: FE-0 missed its threshold (below).
 
@@ -100,6 +104,34 @@ longer.
 The third repetition alone was faster at every N and gives 0.42. A quiet-window repeat of `tools/fe0.sh` is
 therefore the only thing that could reopen F-E, and only by an orchestrator decision; the rule above stands as
 measured.
+
+## Round 1: the confirmed findings (test r1, review r1, triage r1)
+
+Four findings were confirmed. Each was fixed as a follow-up commit and shown red first. Receipts are in
+`D:/tmp/boot-orch/boot1/fx1/logs/`, each quoted with its sha256 prefix.
+
+| finding | fix | red | green |
+|---|---|---|---|
+| **W1** (review, Important): the crash sentinel read a live concurrent boot as a crash. The file is per GPU and user, so the second boot deleted the warm file and reported a false crash | the sentinel is an exclusive OS lock (`File::try_lock`) held by a `SentinelGuard`; its file is truncated, never deleted. Armed AND lockable = the owner died. Armed and locked = a live boot, which is not a crash | `live_owner_sentinel_neither_discards_nor_reports` at `890abc53`: `left: CrashGuard, right: Loaded { bytes: 544 }` (`1742682b`) | green; the whole lib at `--test-threads=1` and `=4` (twice); `pipeline_cache_persist` 5 and `boot_pipeline_cache` 4 on the device (`27b34ca5`) |
+| **F1** (test): `boyko_rhi_vulkan --lib` red. The sentinel test emitted a `RhiVulkan` record outside the observe lock, and W2104's `observed()` delta counted it | the test holds `observe_lock`, drains its record, and counts its own report on its own thread (`watch_any`) | the triple at `890abc53`: W2104 `left: 2, right: 1` (`d400925e`) | the triple and the whole lib, green |
+| **F3** (test): `boot_pump_reposts_wm_quit` could be hidden by any message posted after the pump. `WM_QUIT` is generated only once no posted message is left, whatever the filter | the test posts one on purpose and drains like the frame loop (`PM_REMOVE`, dispatch, bounded) until `WM_QUIT` | the old check after the late post (`3f33597a`) | green |
+| **F4** (test): nothing gated `Window::drop` disarming the boot pump | `dropping_an_armed_window_disarms_the_boot_pump` (`solo:`) | mutant T5, Drop keeps the pump armed (`d8afb379`) | green |
+
+Each mutant was red and then restored by content:
+- **W3**, the drain swallows `WM_QUIT`: `boot_pump_reposts_wm_quit` reads `left: None, right: Some(7)` (`d8afb379`).
+- **M-F1**, the sentinel test without its drain: the triple is red again (`0cd53131`).
+- **M-clear**, `SentinelGuard::clear` as a no-op: `a cleared sentinel is no crash: CrashGuard` (`c51a56d2`).
+- **M-W1a**, liveness ignored: the live-owner test is red (`44403b09`).
+- **M-W1b**, an armed body never counts: the dead-owner test reads `left: Loaded, right: CrashGuard` (`3ebfccc9`).
+
+The device gate `second_boot_hits_every_pipeline` covers the guard across processes. Child 2 loads the file and
+arms the sentinel, and its boot-end save clears it. Child 2b then loads the file again with every pipeline a hit.
+If the guard leaked, child 2b would read a crash instead.
+
+**The limit, stated.** Windows releases a dead process's locks asynchronously: "the time it takes ... depends upon
+available system resources" (`LockFileEx`). A boot that races that release reads a live owner and loads the file
+unguarded. The boot after it reads the crash, so a bad blob can cost one extra crash, never a loop. A second
+concurrent boot runs unguarded under the first one's guard, which covers the same blob.
 
 ## Pending: the quiet-window rows (orchestrator; cut section 5)
 
