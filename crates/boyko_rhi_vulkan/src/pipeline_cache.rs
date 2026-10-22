@@ -541,8 +541,15 @@ impl PipelineCacheStore {
     /// its body set to this process's id (non-empty = armed; the id is for a human, never compared).
     ///
     /// `None` when another live boot holds the sentinel: that is a concurrent boot, and this one
-    /// runs unguarded because the holder's guard already covers the same blob. Also `None` when the
-    /// file cannot be created, locked or written (best effort: a failure only disarms the guard).
+    /// runs unguarded. The holder's guard records only the holder's own death and ends at the
+    /// holder's boot end, so if this boot dies with the blob in the driver, nothing records it and
+    /// the file survives. The blob is then loaded once more; the first guarded boot it kills leaves
+    /// the record, and the boot after that discards the file: at most one extra crash, never a
+    /// loop. The exception is a launch pattern in which every boot the blob kills runs unguarded
+    /// (two apps on one GPU always started together, the victim inside the other's armed window;
+    /// review r2 O1); launching the victim alone ends it. Also `None` when the file cannot be
+    /// created, locked or written (best effort: a failure only disarms the guard).
+    ///
     /// The body is truncated before the write, so the record of a boot that died after this boot's
     /// [`Self::load`] is overwritten. This boot hands the driver that same blob, so if the blob is
     /// what killed that boot, this boot's own record catches it.
