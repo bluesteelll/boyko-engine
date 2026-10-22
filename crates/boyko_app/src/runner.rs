@@ -2336,8 +2336,15 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             //          exposure ratio 1.0 (the producers baked the pre-exposure into `lit`), the
             //          extent `display` is allocated at (`aa_extent`: native under SSAA, the
             //          composite otherwise — `WindowHost::display_extent`).
-            let post_final_gpu =
-                crate::post_host::post_final_gpu(&post, [aa_extent.width, aa_extent.height]);
+            // Render wave PX1b (D-R8): the sharpen word — RCAS's `con` iff TAA is armed this frame
+            // (`taa_armed_now`, the single TAA predicate) and the owner chose `SharpenMode::Rcas`,
+            // read off `TaaConfig` (never `ResolvedTaa`: the T3 rule) — sets the mode word's
+            // `POST_MODE_SHARPEN` bit and the `sharpness` word. A live toggle is this word alone.
+            let sharpen = crate::post_host::post_sharpen(taa_armed_now, world.try_resource::<TaaConfig>());
+            let post_final_gpu = crate::post_host::with_rcas(
+                crate::post_host::post_final_gpu(&post, [aa_extent.width, aa_extent.height]),
+                sharpen,
+            );
             if let Some(post_final_slot) = host.frame.post_final_ubo_slot(s) {
                 // SAFETY: `post_final_slot` is the renderer's `post_final.ubo[s]` — a live
                 // host-coherent `POST_FINAL_UBO_BYTES` (32 B, the bytes written) UNIFORM buffer
@@ -2990,7 +2997,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 terminator_wrap,
                 aa_mode,
                 taa_reset_flag,
-                resolved_taa_config.sharpen,
+                // Render wave PX1b (D-R11): the CAS pass is disarmed — `SharpenMode::Rcas` runs
+                // `post_final`'s RCAS stage through the sharpen word (5d').
+                boyko_render::SharpenMode::None,
                 resolved_taa_config.rcas_sharpness,
                 ssao_variant,
                 ssao_atrous_levels,

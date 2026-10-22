@@ -78,7 +78,7 @@ pub use scene_types::{
     HZB_DUMP_SAMPLE_BYTES, HZB_DUMP_WORD_FLAGS, HZB_DUMP_WORD_FRAME_INDEX,
     HZB_PYRAMID_POISON, HzbDumpLayout, HzbPlan, InterpActivation,
     MAX_HZB_LEVELS, MaterialUploadProbe, MaterialUploadScene, MeshFacePipelines,
-    ParticleActivation, PostFinalActivation, PunctualDepthActivation,
+    POST_MODE_SHARPEN, ParticleActivation, PostFinalActivation, PunctualDepthActivation,
     RcasActivation, ResolvedRenderPathGpu, SCENE_MVP_BYTES, SHADOW_SOURCE_SDF_SOFT_MARCH,
     SampledComposite, Scene, SdfDepthMergeActivation, SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation, UiPass,
     VB_CULL_OCC_ARMED, VB_CULL_OCC_FORCE_KEEP, VB_CULL_OCC_FORCE_LATE, VbCullUniform,

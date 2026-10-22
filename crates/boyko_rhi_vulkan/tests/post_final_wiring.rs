@@ -11,14 +11,15 @@
 //!   `LIT_FORMAT` (RGBA16F: 8 B) — a 4-B staging would make the recorder skip every `lit` copy
 //!   once the format moves, and every (D) gate on `lit` would read "not copied".
 //! - **The seed rows.** `display` is FrameLocal on every declarator, present on every max-config
-//!   frame, seeded with `FRAGMENT | COMPUTE` readers (present / FXAA / SMAA, CAS and `post_final`);
+//!   frame, seeded with `FRAGMENT | COMPUTE` readers (present / FXAA / SMAA and `post_final`; the
+//!   COMPUTE bit outlived the CAS read render wave PX1b retired — a sound superset, D-R13);
 //!   `lit_native` is FrameLocal on Deferred and VB only (Forward has no SSAA), registered but not
 //!   expected on the census's max config (TAA), seeded with its `COMPUTE` reader (`post_final`).
 
 use boyko_rhi_vulkan::ffi::{VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT};
 use boyko_rhi_vulkan::framegraph::SeedClass;
 use boyko_rhi_vulkan::present::seed_class::{self, DECL_DEFERRED, DECL_FORWARD, DECL_VB, SeedKind};
-use boyko_rhi_vulkan::present::{IMAGE_DUMP_MAX, ImageDumpName, RECEIPT_CONFIG_KEYS};
+use boyko_rhi_vulkan::present::{IMAGE_DUMP_MAX, ImageDumpName, POST_MODE_SHARPEN, RECEIPT_CONFIG_KEYS};
 use boyko_shaderdsl::post::POST_FINAL_RECEIPT_KEYS;
 
 /// `R16G16B16A16_SFLOAT`'s texel size — `LIT_FORMAT` (PX0's decision).
@@ -36,6 +37,13 @@ fn the_receipt_config_ends_with_post_finals_words() {
     sorted.sort_unstable();
     sorted.dedup();
     assert_eq!(sorted.len(), keys.len(), "a [config] key is spelled twice");
+}
+
+/// Render wave PX1b (D-R15): the receipt's `rcas` key reads the mode word's sharpen bit through
+/// the RHI's own spelling of it, which must be the eDSL's.
+#[test]
+fn the_sharpen_bit_is_the_edsls() {
+    assert_eq!(POST_MODE_SHARPEN, boyko_shaderdsl::post::POST_MODE_SHARPEN, "present::POST_MODE_SHARPEN drifted from the eDSL's");
 }
 
 #[test]

@@ -1288,6 +1288,12 @@ pub struct RcasActivation<'a> {
     pub sharpness: f32,
 }
 
+/// Render wave PX1b (`px1b/cut.md` D-R15): bit 1 of `post_final`'s mode word
+/// ([`GBufferScene::post_final_words`]`[0]`) — the RCAS sharpen stage runs this frame.
+/// `boyko_rhi_vulkan` has no production edge to the eDSL, so the bit is spelled here;
+/// `tests/post_final_wiring.rs` pins it to `boyko_shaderdsl::post::POST_MODE_SHARPEN`.
+pub const POST_MODE_SHARPEN: u32 = 1 << 1;
+
 /// HW-RT rung 3a: the spatial (à-trous) RT soft-shadow DENOISE pass activation threaded into
 /// [`GBufferScene::shadow`] to turn the denoise pipeline ON. Mirrors [`SsaoActivation`]'s
 /// borrow-bundle shape: a `Copy` bundle of caller-owned pipeline/layout borrows plus the
@@ -4049,6 +4055,14 @@ pub struct ParticleActivation<'a> {
 }
 
 impl GBufferScene<'_> {
+    /// Render wave PX1b (D-R15): whether this frame's `post_final` runs its RCAS stage — read off
+    /// the mode word the frame uploads ([`Self::post_final_words`]`[0]`'s [`POST_MODE_SHARPEN`]),
+    /// the graph receipt's `rcas` key ("RCAS ran this frame").
+    #[inline]
+    pub fn post_rcas(&self) -> bool {
+        self.post_final_words[0] & POST_MODE_SHARPEN != 0
+    }
+
     /// Particles P0 (plan gate #6) — the SINGLE source of "does this frame declare and record the
     /// particle passes".
     ///

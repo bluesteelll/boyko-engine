@@ -11,8 +11,8 @@
 use boyko_log::codes::{self, OnceSite};
 use boyko_render::light::{LightingConfig, TONEMAP_MODE_SHIFT};
 use boyko_render::post::ResolvedPost;
-use boyko_render::post::gpu::PostFinalGpu;
-use boyko_render::taa_config::TaaConfig;
+use boyko_render::post::gpu::{POST_MODE_SHARPEN, PostFinalGpu};
+use boyko_render::taa_config::{SharpenMode, TaaConfig};
 
 /// `boyko-W3012`'s latch: the fallback is reported once per process, not once per frame.
 static W3012_SITE: OnceSite = OnceSite::new();
@@ -51,8 +51,10 @@ pub const fn post_final_gpu(post: &ResolvedPost, extent: [u32; 2]) -> PostFinalG
 /// `AaPlugin` (no `TaaConfig`) never sharpens. Pure and `Copy`: no allocation per frame.
 #[inline]
 pub fn post_sharpen(taa_armed: bool, cfg: Option<&TaaConfig>) -> Option<f32> {
-    let _ = (taa_armed, cfg);
-    unimplemented!("render wave PX1b C4: post_sharpen")
+    match cfg {
+        Some(c) if taa_armed && c.sharpen == SharpenMode::Rcas => Some(c.rcas_con()),
+        _ => None,
+    }
 }
 
 /// Render wave PX1b (D-R8): `gpu` with the sharpen stage armed at `con` — the mode word's
@@ -60,8 +62,10 @@ pub fn post_sharpen(taa_armed: bool, cfg: Option<&TaaConfig>) -> Option<f32> {
 /// `SharpenMode` toggle is therefore one UBO word: no target rebuild, no TAA history reset.
 #[inline]
 pub const fn with_rcas(gpu: PostFinalGpu, con: Option<f32>) -> PostFinalGpu {
-    let _ = (gpu, con);
-    panic!("not implemented: render wave PX1b C4: with_rcas")
+    match con {
+        Some(sharpness) => PostFinalGpu { mode_words: gpu.mode_words | POST_MODE_SHARPEN, sharpness, ..gpu },
+        None => gpu,
+    }
 }
 
 /// Reports `boyko-W3012` (`post_plugin_absent`) once per process: the runner found no
