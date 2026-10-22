@@ -48,9 +48,10 @@ use boyko_rhi::{
     BufferDesc, BufferImageCopy, BufferUsage, CompareOp, ComputePipelineDesc, DepthAttachment,
     DescriptorKind, Filter, Format,
     CullMode, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange,
-    ImageUsage, LoadOp, MemoryLocation, MipMode, PrimitiveTopology, RenderArea, RenderingAttachment,
-    RenderingDesc, RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc, ShaderStage, StoreOp,
-    TextureDesc, TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
+    ImageUsage, LoadOp, MemoryLocation, MipMode, PrimitiveTopology, QueryPoolDesc, RenderArea,
+    RenderingAttachment, RenderingDesc, RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc,
+    ShaderStage, StoreOp, TextureDesc, TextureDimension, TimestampStage, VertexAttribute,
+    VertexBufferLayout, VertexFormat, Viewport,
 };
 use boyko_rhi_vulkan::compute::{
     COMPOSITE_PUSH_CONSTANT_BYTES, CompositeCamera, CompositePushConstants, DEFAULT_LIGHT_DIR,
@@ -96,6 +97,12 @@ use boyko_rhi_vulkan::goldens::{
     // Render wave PX1a C9: the lit readback's format, its pixfmt decode, the radiance comparator and
     // the shipped tail's display.
     LIT_TEXEL_BYTES, golden_display_packed, lit_matches, lit_texel_rgb,
+    // OPEN-ITEMS 15: the G-buffer seam oracle (the device's own bytes, at its own hit point).
+    ByteVerdict, DeviceGbufferTexel, LIT_ROUNDING, LIT_STORE_PATH, LIT_TARGET, MarcherArm,
+    MarcherPrequant, ResolveFloor, ResolveSite, attribute_byte_verdict, fragile_bit, golden_marcher_attributes_at,
+    host_soft_shadow_ranged, lit_store_excess, oct_decode, resolve_error_floor, W_CONV,
+    // OPEN-ITEMS 16, triage r1 W1: the host M2 ray march and its start-point witness count.
+    HostM2Atlas, M2EvalCounts, golden_primary_hit_brick_m2,
 };
 use boyko_rhi_vulkan::brick_atlas::{BrickAtlas, BrickClipmap};
 use boyko_rhi_vulkan::ddgi::DdgiAtlas;
@@ -104,7 +111,7 @@ use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_rhi_vulkan::present::{AtrousStepRole, LIT_FORMAT, MAX_SSAO_ATROUS_LEVELS, ssao_atrous_step};
 use boyko_shaderdsl::post::TONEMAP_ACES;
 use boyko_rhi_vulkan::rhi_impl::{
-    ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanSampler,
+    ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanQueryPool, VulkanQueue, VulkanSampler,
 };
 use boyko_rhi_vulkan::texture::VulkanTexture;
 
@@ -874,10 +881,59 @@ fn run_gbuffer_hybrid_m2(
     // The single-level (M2) entry: no clip-map → `brick_levels = 1`, the level-0 atlas/grid bound at
     // every level slot (duplicates). The N-level (M4) sibling [`run_gbuffer_hybrid_m4`] passes a real
     // `BrickClipmap`. This wrapper keeps the M2/M3 call sites + byte output unchanged (the OFF/N=1 gate).
-    run_gbuffer_hybrid_m4(
+    let (lit, tiles, viewt, _gbuf, _ns) = run_gbuffer_hybrid_m4(
         ctx, edits, coarse_enabled, read_tiles, omega_in, lighting_flags, light_dir,
-        light_table_words, brick, brick_trilinear, read_viewt, m2_grid_default, None,
-    )
+        light_table_words, brick, brick_trilinear, read_viewt, m2_grid_default, None, false, 0,
+    );
+    (lit, tiles, viewt)
+}
+
+/// [`run_gbuffer_hybrid_m4`]'s readbacks: `(lit, tiles?, gViewT?, G-buffer?, marcher ns?)` — the
+/// optional lanes are `Some` only when their `read_*` / `marcher_timing` argument asked for them.
+type HarnessReadbacks = (Vec<u8>, Option<Vec<u8>>, Option<Vec<f32>>, Option<DeviceGbuffer>, Option<Vec<f64>>);
+
+/// The device's own G-buffer, read back after the resolve (OPEN-ITEMS 15, the seam gate): the three
+/// RGBA8 attribute images and the `gViewT` lane, row-major `py * SDF_IMG_W + px`. Each RGBA8 image
+/// is `PIXELS * 4` bytes in the order the marcher stores them (`gAlbedo` = linear base,
+/// `gNormal` = oct RG + material id BA, `gMaterial` = shadow, ao, mask, 1).
+struct DeviceGbuffer {
+    albedo: Vec<u8>,
+    normal: Vec<u8>,
+    material: Vec<u8>,
+    view_t: Vec<f32>,
+}
+
+impl DeviceGbuffer {
+    /// The four lanes of the texel at `(px, py)`.
+    fn texel(&self, px: u32, py: u32) -> DeviceGbufferTexel {
+        let i = (py * SDF_IMG_W + px) as usize;
+        let rgba = |img: &[u8]| -> [u8; 4] { [img[4 * i], img[4 * i + 1], img[4 * i + 2], img[4 * i + 3]] };
+        DeviceGbufferTexel {
+            albedo: rgba(&self.albedo),
+            normal: rgba(&self.normal),
+            material: rgba(&self.material),
+            view_t: self.view_t[i],
+        }
+    }
+}
+
+/// The seam harness (OPEN-ITEMS 15): [`run_gbuffer_hybrid_lit_table`]'s run (cull off, omega 1,
+/// no brick) that also reads the device's G-buffer back, so the attribute gate compares the
+/// device's own bytes and the resolve gate feeds them to the host resolve. The clustered L1 driver
+/// ([`run_gbuffer_hybrid_lit_clustered`]) is the precedent: it reads `gViewT` + `gNormal.rg` back
+/// for the same reason; this is the full-attribute form of that seam.
+fn run_gbuffer_hybrid_lit_table_seam(
+    ctx: &VulkanContext,
+    edits: &[SdfEdit],
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+    light_table_words: &[u32],
+) -> (Vec<u8>, DeviceGbuffer) {
+    let (lit, _tiles, _viewt, gbuf, _ns) = run_gbuffer_hybrid_m4(
+        ctx, edits, false, false, 1.0, lighting_flags, light_dir, light_table_words, None, false,
+        false, true, None, true, 0,
+    );
+    (lit, gbuf.expect("invariant: read_gbuffer = true returns the device G-buffer"))
 }
 
 /// The N-level (M4 clip-map) GPU harness (Slice C). Identical to the single-level M2 harness but binds
@@ -886,6 +942,16 @@ fn run_gbuffer_hybrid_m2(
 /// `brick_levels = BRICK_LEVELS` on the push. When `clipmap` is `None` it is the OFF/N=1 path (the
 /// level-0 single atlas/grid bound at every level slot, `brick_levels = 1`) — byte-identical to the
 /// pre-M4 M2 harness (the call sites that pass `None`).
+///
+/// `read_gbuffer` (OPEN-ITEMS 15) also copies `gAlbedo` / `gNormal` / `gMaterial` and `gViewT` back
+/// after the resolve and returns them as the fourth element. With it `false` the three attribute
+/// images keep their usages, no extra barrier or copy is recorded and the fourth element is `None`
+/// (the command stream is byte-identical to the harness before it; `read_viewt` is the precedent).
+///
+/// `marcher_timing > 0` (OPEN-ITEMS 16, the DIAGNOSTIC M2 cost probe) re-dispatches ONLY the marcher
+/// that many more times after the main submission, one fenced submission each, bracketed
+/// `TOP_OF_PIPE` .. `BOTTOM_OF_PIPE` by GPU timestamps (the HW-RT R0 pattern), and returns the
+/// per-dispatch nanoseconds as the fifth element; `0` records nothing extra.
 #[allow(clippy::too_many_arguments)]
 fn run_gbuffer_hybrid_m4(
     ctx: &VulkanContext,
@@ -901,7 +967,9 @@ fn run_gbuffer_hybrid_m4(
     read_viewt: bool,
     m2_grid_default: bool,
     clipmap: Option<&BrickClipmap>,
-) -> (Vec<u8>, Option<Vec<u8>>, Option<Vec<f32>>) {
+    read_gbuffer: bool,
+    marcher_timing: u32,
+) -> HarnessReadbacks {
     let device: &VulkanContext = ctx;
     let queue = ctx.rhi_queue();
 
@@ -1097,7 +1165,14 @@ fn run_gbuffer_hybrid_m4(
     // G-buffer producer (in the marcher's encoding, mask=1), so a yielded mesh pixel (r1)
     // has a real fragment to stand on. The marcher still STORES them in GENERAL; the
     // deferred resolve loads albedo/normal/material in GENERAL. The throwaway color
-    // attachment is DELETED (the MRT binds the three real images). ---
+    // attachment is DELETED (the MRT binds the three real images). OPEN-ITEMS 15: the seam gate
+    // reads all three back, so they gain `TRANSFER_SRC` ONLY when `read_gbuffer` (the OFF path keeps
+    // today's usages). ---
+    let gbuffer_usage = if read_gbuffer {
+        ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC
+    } else {
+        ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT
+    };
     let albedo = device
         .create_texture(&TextureDesc {
             width: SDF_IMG_W,
@@ -1105,7 +1180,7 @@ fn run_gbuffer_hybrid_m4(
             depth: 1,
             format: GBUFFER_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
+            usage: gbuffer_usage,
             array_layers: 1,
             mip_levels: 1,
             view_format: None,
@@ -1118,7 +1193,7 @@ fn run_gbuffer_hybrid_m4(
             depth: 1,
             format: GBUFFER_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
+            usage: gbuffer_usage,
             array_layers: 1,
             mip_levels: 1,
             view_format: None,
@@ -1131,7 +1206,7 @@ fn run_gbuffer_hybrid_m4(
             depth: 1,
             format: GBUFFER_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
+            usage: gbuffer_usage,
             array_layers: 1,
             mip_levels: 1,
             view_format: None,
@@ -1157,7 +1232,7 @@ fn run_gbuffer_hybrid_m4(
     // discriminator reads it back (the GPU's per-pixel surface `t`) for the EXACT-CSG residual
     // check + the hit-`t` agreement, so it gains `TRANSFER_SRC` ONLY when `read_viewt` (the OFF
     // byte-identity path keeps the STORAGE-only image + records no extra copy).
-    let viewt_usage = if read_viewt {
+    let viewt_usage = if read_viewt || read_gbuffer {
         ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC
     } else {
         ImageUsage::STORAGE
@@ -1215,11 +1290,23 @@ fn run_gbuffer_hybrid_m4(
     // unconditionally without a branch.
     let viewt_readback = device
         .create_buffer(&BufferDesc {
-            size: if read_viewt { (PIXELS as u64) * 4 } else { 4 },
+            size: if read_viewt || read_gbuffer { (PIXELS as u64) * 4 } else { 4 },
             usage: BufferUsage::TRANSFER_DST,
             location: MemoryLocation::HostVisibleCoherent,
         })
         .expect("host-visible gViewT readback buffer");
+    // OPEN-ITEMS 15: one readback buffer per RGBA8 attribute image (`gAlbedo`, `gNormal`,
+    // `gMaterial`, in that order), `PIXELS * 4` bytes each on the `read_gbuffer` path, a 4-byte
+    // placeholder otherwise (never copied into or read), so the teardown is unconditional.
+    let gbuffer_readback: [BoundBuffer; 3] = core::array::from_fn(|_| {
+        device
+            .create_buffer(&BufferDesc {
+                size: if read_gbuffer { READBACK_BYTES } else { 4 },
+                usage: BufferUsage::TRANSFER_DST,
+                location: MemoryLocation::HostVisibleCoherent,
+            })
+            .expect("host-visible G-buffer attribute readback buffer")
+    });
 
     // The quad vertex buffer.
     let vertices = quad_vertices();
@@ -1870,10 +1957,57 @@ fn run_gbuffer_hybrid_m4(
         );
     }
 
+    // --- OPEN-ITEMS 15: copy the device's own G-buffer back (the seam gate reads it). The marcher
+    // STORED the three attribute images in GENERAL and the resolve only READ them, so GENERAL ->
+    // TRANSFER_SRC behind the marcher's COMPUTE_SHADER write (the stage mask also orders the
+    // resolve's reads before the layout transition). `gViewT` rides the M2 copy above when
+    // `read_viewt`; otherwise it is copied here. Gated by `read_gbuffer`: the OFF path records none
+    // of it. ---
+    if read_gbuffer {
+        for (tex, dst) in [&albedo, &normal, &material].into_iter().zip(gbuffer_readback.iter()) {
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture: tex,
+                src_stage: BarrierStage::COMPUTE_SHADER,
+                dst_stage: BarrierStage::TRANSFER,
+                src_access: BarrierAccess::SHADER_WRITE,
+                dst_access: BarrierAccess::TRANSFER_READ,
+                old_layout: ImageLayout::General,
+                new_layout: ImageLayout::TransferSrcOptimal,
+                range: ImageSubresourceRange::COLOR,
+            });
+            encoder.copy_image_to_buffer(tex, ImageLayout::TransferSrcOptimal, dst, &regions);
+        }
+        if !read_viewt {
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture: &viewt,
+                src_stage: BarrierStage::COMPUTE_SHADER,
+                dst_stage: BarrierStage::TRANSFER,
+                src_access: BarrierAccess::SHADER_WRITE,
+                dst_access: BarrierAccess::TRANSFER_READ,
+                old_layout: ImageLayout::General,
+                new_layout: ImageLayout::TransferSrcOptimal,
+                range: ImageSubresourceRange::COLOR,
+            });
+            encoder.copy_image_to_buffer(
+                &viewt,
+                ImageLayout::TransferSrcOptimal,
+                &viewt_readback,
+                &regions,
+            );
+        }
+    }
+
     encoder.end().expect("end");
 
     queue.submit(&encoder, &fence).expect("submit");
     device.wait_fence(&fence, u64::MAX).expect("wait_fence");
+
+    // OPEN-ITEMS 16: the marcher-dispatch timing bracket (opt-in). Every image the marcher touches
+    // is still in the layout it reads / writes it in (GENERAL storage, SHADER_READ depth), so each
+    // timed submission is the bind + push + dispatch alone.
+    let marcher_ns = (marcher_timing > 0).then(|| {
+        time_marcher_dispatches(device, &queue, &compute, &bind_group, push.as_bytes(), marcher_timing)
+    });
 
     // Read back the LIT R8G8B8A8 bytes (the deferred resolve's output).
     let dst_ptr = device
@@ -1912,7 +2046,8 @@ fn run_gbuffer_hybrid_m4(
     // M2: optionally read back the gViewT surface-`t` f32 image (the GPU's per-pixel hit `t`,
     // `1.0e30` on a non-hit pixel). The buffer is HostVisibleCoherent + the fence wait preceded
     // this read, so the copy is complete + coherent.
-    let viewt_out: Option<Vec<f32>> = if read_viewt {
+    let viewt_copied = read_viewt || read_gbuffer;
+    let viewt_all: Option<Vec<f32>> = if viewt_copied {
         let viewt_ptr = device
             .buffer_mapped_ptr(&viewt_readback)
             .expect("host-visible gViewT readback buffer is mapped");
@@ -1931,6 +2066,36 @@ fn run_gbuffer_hybrid_m4(
     } else {
         None
     };
+
+    // OPEN-ITEMS 15: the device's G-buffer bytes (one `PIXELS * 4` RGBA8 image per buffer) and the
+    // `gViewT` lane copied with them.
+    let gbuffer_out = if read_gbuffer {
+        let read_rgba8 = |buf: &BoundBuffer| -> Vec<u8> {
+            let ptr = device
+                .buffer_mapped_ptr(buf)
+                .expect("host-visible G-buffer readback buffer is mapped");
+            let mut bytes = vec![0u8; READBACK_BYTES as usize];
+            // SAFETY: `ptr` is the persistent mapping of a HostVisibleCoherent buffer created with
+            // `READBACK_BYTES` (`PIXELS * 4`) bytes on the `read_gbuffer` path, valid until its
+            // `destroy_buffer` below. The copy into it was recorded before `encoder.end()` and the
+            // fence wait above completed it, so the bytes are written and visible. `bytes` is a
+            // fresh, distinct allocation of the same length, and no reference into the mapping is
+            // live, so the raw read aliases nothing.
+            unsafe {
+                core::ptr::copy_nonoverlapping(ptr.as_ptr(), bytes.as_mut_ptr(), READBACK_BYTES as usize);
+            }
+            bytes
+        };
+        Some(DeviceGbuffer {
+            albedo: read_rgba8(&gbuffer_readback[0]),
+            normal: read_rgba8(&gbuffer_readback[1]),
+            material: read_rgba8(&gbuffer_readback[2]),
+            view_t: viewt_all.clone().expect("invariant: read_gbuffer copies gViewT"),
+        })
+    } else {
+        None
+    };
+    let viewt_out = if read_viewt { viewt_all } else { None };
 
     assert_validation_clean(ctx);
 
@@ -1964,6 +2129,9 @@ fn run_gbuffer_hybrid_m4(
         device.destroy_buffer(vertex_buffer);
         device.destroy_buffer(readback);
         device.destroy_buffer(viewt_readback);
+        for buf in gbuffer_readback {
+            device.destroy_buffer(buf);
+        }
         device.destroy_sampler(sampler);
         device.destroy_texture(ssao);
         device.destroy_texture(viewt);
@@ -1983,7 +2151,57 @@ fn run_gbuffer_hybrid_m4(
         brick_atlas.destroy(device);
     }
 
-    (out, tiles_out, viewt_out)
+    (out, tiles_out, viewt_out, gbuffer_out, marcher_ns)
+}
+
+/// Re-dispatches the marcher `n` times, one fenced submission each, the dispatch bracketed
+/// `TOP_OF_PIPE` .. `BOTTOM_OF_PIPE` by a timestamp pair (the HW-RT R0 primitive), and returns the
+/// per-dispatch nanoseconds; a pair the device reports unavailable is skipped.
+fn time_marcher_dispatches(
+    device: &VulkanContext,
+    queue: &VulkanQueue,
+    compute: &ComputePipeline,
+    bind_group: &VulkanBindGroup,
+    push: &[u8],
+    n: u32,
+) -> Vec<f64> {
+    let period = device.device_caps().timestamp_period;
+    let pool: VulkanQueryPool = device.create_query_pool(&QueryPoolDesc { count: 2 }).expect("timestamp query pool");
+    let mut scratch = [0u64; 4];
+    let (mut begin, mut dur, mut available) = ([0u64; 1], [0u64; 1], [0u8; 1]);
+    let mut ns = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let fence = device.create_fence(false).expect("fence");
+        let mut encoder = device.create_command_encoder().expect("encoder");
+        encoder.begin().expect("begin");
+        encoder.reset_query_pool(&pool, 0, 2);
+        encoder.write_timestamp(&pool, TimestampStage::TopOfPipe, 0);
+        encoder.bind_compute_pipeline(compute);
+        encoder.bind_descriptor_set_compute(bind_group, compute);
+        encoder.push_compute_constants(compute, ShaderStage::COMPUTE, 0, push);
+        encoder.dispatch(group_count_x(), 1, 1);
+        encoder.write_timestamp(&pool, TimestampStage::BottomOfPipe, 1);
+        encoder.end().expect("end");
+        queue.submit(&encoder, &fence).expect("submit");
+        device.wait_fence(&fence, u64::MAX).expect("wait_fence");
+        device
+            .read_query_pool_pairs_available(&pool, 1, &mut scratch, &mut begin, &mut dur, &mut available)
+            .expect("read_query_pool_pairs_available");
+        if available[0] == 1 {
+            ns.push(dur[0] as f64 * f64::from(period));
+        }
+        // SAFETY: both were created on `device` and the submission that used them was fence-waited
+        // above, so neither is in use; each is destroyed exactly once.
+        unsafe {
+            device.destroy_command_encoder(encoder);
+            device.destroy_fence(fence);
+        }
+    }
+    // SAFETY: created on `device`; every submission writing it was fence-waited in the loop.
+    unsafe {
+        device.destroy_query_pool(pool);
+    }
+    ns
 }
 
 /// The SSAO edge-avoiding à-trous denoise chain's per-run test resources
@@ -2934,6 +3152,40 @@ fn box_csg() -> Vec<SdfEdit> {
 }
 
 /// A smooth-union scene (two spheres blended), exercising the smooth-min path.
+/// OPEN-ITEMS 16 (check 16 D2's budget-independent case): a sphere of r 0.1 centred on a level-0
+/// voxel-cell centre IN FRONT of a sphere of r 0.5 in the same brick. Every corner of the small
+/// sphere's cell stores a positive distance, so the trilinear reconstruction skips the small sphere
+/// and the cubic's first root lands on the big one — M2 converges there in ~3 contracting refine
+/// steps while the analytic march shows the small one (a non-first surface no refine budget or
+/// contraction guard can tell apart).
+fn two_spheres() -> Vec<SdfEdit> {
+    vec![
+        SdfEdit::sphere([0.25, 0.25, 1.5], 0.1, sdf_op::UNION, 0.0),
+        SdfEdit::sphere([0.25, 0.25, 0.5], 0.5, sdf_op::UNION, 0.0),
+    ]
+}
+
+/// OPEN-ITEMS 16 (critique W4 (c)): a capsule on the device M2 path — a thin capsule (r 0.12, below
+/// `R_MIN`) in front of a box, so the shipped HLSL certificate's capsule rule runs where the
+/// reconstruction cannot follow the capsule.
+fn capsule_m2_scene() -> Vec<SdfEdit> {
+    vec![
+        SdfEdit::capsule([-0.45, -0.2, 0.75], [0.45, 0.25, 0.75], 0.12, sdf_op::UNION, 0.0),
+        SdfEdit::box_shape([0.0, 0.0, 0.0], [0.45, 0.45, 0.45], sdf_op::UNION, 0.0),
+    ]
+}
+
+/// OPEN-ITEMS 16, triage r1 W1 (`oi1516/cut.md` D16-4): a thin plate (half-thickness 0.1, near face
+/// z = 1.0) across the whole ortho frame and a sphere (r 1.2, front cap z = 0.2) behind it — the
+/// first over-relaxed step at omega 1.6 jumps the plate. The device copy of
+/// `compute::tests::m2_first_surface_tests::jumped_plate`.
+fn jumped_plate() -> Vec<SdfEdit> {
+    vec![
+        SdfEdit::box_shape([0.0, 0.0, 0.9], [1.5, 1.5, 0.1], sdf_op::UNION, 0.0),
+        SdfEdit::sphere([0.0, 0.0, -1.0], 1.2, sdf_op::UNION, 0.0),
+    ]
+}
+
 fn smooth_union() -> Vec<SdfEdit> {
     vec![
         SdfEdit::sphere([-0.25, 0.0, 0.0], 0.35, sdf_op::UNION, 0.0),
@@ -4653,62 +4905,312 @@ fn pack_light_table(header: &GoldenLightHeader, lights: &[GoldenLight]) -> Vec<u
     words
 }
 
-/// The specular-ULP-tolerant, outlier-COUNTING L0b table gate: the SAME per-texel
-/// GPU-vs-[`golden_deferred_resolve_table`] diff a hard ±tol assert would run, but COUNTS the
-/// texels exceeding
-/// ±[`DEFERRED_ARM1_TOL`] instead of hard-asserting each, returning
-/// `(max_delta, outliers, sdf_lit_hits)`.
-///
-/// Why a count for the L0b point/spot fixture: term-by-term the shader's !HWRT resolve
-/// (`deferred_pbr.hlsl` + `pbr_lighting.hlsli`) and this host oracle are expression-identical
-/// (co-authored in commit 8e48f7f; the later eDSL extraction into `pbr_lighting.hlsli` is a
-/// documented, git-verified VERBATIM move — no math change). The only divergence is the GPU's
-/// `pow`/`exp2` transcendentals (SPIR-V GLSL.std.450, run on hardware ALUs) not being
-/// bit-identical to Rust's libm. At a CONVERGED specular highlight on the smoothest body
-/// (smooth_union's continuous smooth-min normal field) — `sun_kernel` exponent ≈30 plus three
-/// `F_Schlick` `pow⁵` lobes (directional + point + spot) stacking near a near-white peak — a
-/// few-ULP input gap is amplified through the tonemap's steep near-white region just past
-/// ±2/255. That is a THIN PEAK (a real BRDF/tonemap divergence would span a 2-D REGION), so the
-/// caller bounds the count tightly; crater / box stay within ±1-2 with ZERO outliers.
-fn count_lit_table_outliers(
+// ============================================================================
+// OPEN-ITEMS 15 — the G-buffer SEAM gate (`oi1516/cut.md` D15-1..D15-6).
+//
+// The p6_r1 multi-light, p6_r1 single (a) and L0b suites compare the device in two halves split at
+// the G-buffer: the ATTRIBUTE gate (every device G-buffer byte against the host's pre-quantization
+// value at the device's own hit point, one code allowed only inside the conversion window — rule G
+// checks `gViewT`), and the RESOLVE gate (the host resolve fed the DEVICE's bytes, in radiance only,
+// inside the floor derived from the device-host precision budget, `goldens::resolve_error_floor`).
+// A fragile texel (a decision within its own bound) is listed and held to the display arm
+// (`lit_matches(.., DEFERRED_ARM1_TOL)`), never silently passed. The clustered L1 golden
+// (`assert_lit_matches_clustered_golden`) is the precedent: it already fed the device's `gViewT`
+// and `gNormal.rg` to its oracle; this gate is that seam for every attribute, with both halves
+// gated. OPEN-ITEMS 18 migrates the remaining K12 suites onto it.
+// ============================================================================
+
+/// One producer arm's byte tally in a [`SeamReport`].
+#[derive(Clone, Copy, Debug, Default)]
+struct ByteTally {
+    exact: u64,
+    tie_flip: u64,
+    mismatch: u64,
+    fragile: u64,
+}
+
+/// One rule-G failure of the seam gate: `gViewT` off the host's surface / ray `t`.
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code, reason = "read through the Debug print of the gate's failure message")]
+struct ViewTFailure {
+    px: u32,
+    py: u32,
+    device_t: f32,
+    host_t: f32,
+    allowance: f32,
+    /// `|sdf(p_dev)|` (the SDF arm's on-surface residual).
+    residual: f32,
+}
+
+/// One strict failure of the seam's resolve gate.
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code, reason = "read through the Debug print of the gate's failure message")]
+struct StrictFail {
+    px: u32,
+    py: u32,
+    got: [f32; 3],
+    want: [f32; 3],
+    floor: [f32; 3],
+}
+
+/// Everything the seam gate saw, collected before any assertion (so one run reads every class).
+#[derive(Debug, Default)]
+struct SeamReport {
+    /// Per arm: `[sdf, mesh, background]`.
+    tally: [ByteTally; 3],
+    /// Every `TieFlip` byte: `(px, py, lane, device byte, host value in codes)`.
+    tie_flips: Vec<(u32, u32, &'static str, u8, f32)>,
+    /// Every `Mismatch` byte (same shape).
+    mismatches: Vec<(u32, u32, &'static str, u8, f32)>,
+    /// Rule G failures.
+    view_t_failures: Vec<ViewTFailure>,
+    /// Non-fragile lit texels outside the strict resolve gate.
+    strict_fails: Vec<StrictFail>,
+    /// Fragile texels (any decision on its boundary), in raster order.
+    fragile_texels: Vec<(u32, u32)>,
+    /// Why the texels were fragile: `[attribute decision, resolve site, resolve march field]`.
+    fragile_why: [u64; 3],
+    /// The first resolve site that made a texel fragile, if any.
+    first_fragile_site: Option<(u32, u32, ResolveSite)>,
+    /// Fragile texels outside the display arm too.
+    fragile_display_fails: Vec<(u32, u32)>,
+    /// Lit (mask 1) texels the resolve gate checked strictly.
+    strict_texels: u64,
+    /// The largest strict excess seen (`<= 0` when green).
+    max_excess: f32,
+    /// The largest floor relative to the radiance on a strict texel.
+    max_rel_floor: f32,
+}
+
+impl SeamReport {
+    fn print(&self, name: &str) {
+        let arms = ["SDF", "MESH", "BG"];
+        for (arm, t) in arms.iter().zip(self.tally.iter()) {
+            println!(
+                "[{name}] seam attribute {arm}: {} Exact, {} TieFlip, {} Mismatch, {} fragile",
+                t.exact, t.tie_flip, t.mismatch, t.fragile
+            );
+        }
+        println!(
+            "[{name}] seam resolve: {} strict texels, {} strict fails, max excess {:e}, max floor/lit \
+             {:e}; {} fragile texels ({} outside the display arm; by attribute / resolve site / march \
+             field {:?}, first site {:?}); {} gViewT failures",
+            self.strict_texels,
+            self.strict_fails.len(),
+            self.max_excess,
+            self.max_rel_floor,
+            self.fragile_texels.len(),
+            self.fragile_display_fails.len(),
+            self.fragile_why,
+            self.first_fragile_site,
+            self.view_t_failures.len()
+        );
+    }
+
+    /// The gate: no attribute byte outside its window, `gViewT` inside rule G, no strict resolve
+    /// failure and no fragile texel outside the display arm. Asserted after the whole image was
+    /// collected.
+    fn assert_clean(&self, name: &str) {
+        assert!(
+            self.mismatches.is_empty(),
+            "[{name}] seam ATTRIBUTE gate: {} device G-buffer byte(s) outside the conversion window \
+             (first: {:?}) — a device byte the host model cannot reach (a producer regression, or a \
+             device outside the D3D 0.6-ULP rule: a finding, not a window to widen)",
+            self.mismatches.len(),
+            self.mismatches.first()
+        );
+        assert!(
+            self.view_t_failures.is_empty(),
+            "[{name}] seam rule G: {} gViewT lane(s) off the host's surface / ray t (first: {:?}) — \
+             the marcher stopped on another surface or off it",
+            self.view_t_failures.len(),
+            self.view_t_failures.first()
+        );
+        assert!(
+            self.strict_fails.is_empty(),
+            "[{name}] seam RESOLVE gate: {} non-fragile texel(s) outside the derived floor (first: \
+             {:?}) — the device resolve and the host resolve fed the SAME bytes differ by more than \
+             their arithmetic can",
+            self.strict_fails.len(),
+            self.strict_fails.first()
+        );
+        assert!(
+            self.fragile_display_fails.is_empty(),
+            "[{name}] seam: {} fragile texel(s) outside the display arm ±{DEFERRED_ARM1_TOL} (first: \
+             {:?})",
+            self.fragile_display_fails.len(),
+            self.fragile_display_fails.first()
+        );
+        assert!(self.strict_texels > 0, "[{name}] seam resolve gate checked no lit texel — vacuous");
+    }
+}
+
+/// The device texel's lanes checked against the host's pre-quantization values, appended to
+/// `report`. Returns whether any lane of this texel is fragile.
+fn seam_attribute_lanes(
+    report: &mut SeamReport,
+    px: u32,
+    py: u32,
+    dev: &DeviceGbufferTexel,
+    pre: &MarcherPrequant,
+) -> bool {
+    let arm = match pre.arm {
+        MarcherArm::Sdf => 0,
+        MarcherArm::Mesh => 1,
+        MarcherArm::Background => 2,
+    };
+    let fragile_any = pre.fragile != 0;
+    let mut tally = report.tally[arm];
+    let mut byte = |lane: &'static str, got: u8, x: f32, w_in: f32, fragile: bool| {
+        if fragile {
+            tally.fragile += 1;
+            return;
+        }
+        match attribute_byte_verdict(got, x, w_in) {
+            ByteVerdict::Exact => tally.exact += 1,
+            ByteVerdict::TieFlip { .. } => {
+                tally.tie_flip += 1;
+                report.tie_flips.push((px, py, lane, got, 255.0 * x.clamp(0.0, 1.0)));
+            }
+            ByteVerdict::Mismatch => {
+                tally.mismatch += 1;
+                report.mismatches.push((px, py, lane, got, 255.0 * x.clamp(0.0, 1.0)));
+            }
+        }
+    };
+    let exact = |want: u8| f32::from(want) / 255.0;
+    for (c, lane) in ["albedo.r", "albedo.g", "albedo.b"].into_iter().enumerate() {
+        byte(lane, dev.albedo[c], pre.base[c], 0.0, false);
+    }
+    byte("albedo.a", dev.albedo[3], 1.0, 0.0, false);
+    let fold = pre.fragile & fragile_bit::OCT_FOLD != 0;
+    byte("normal.r", dev.normal[0], pre.oct[0], pre.w_in_oct[0], fold);
+    byte("normal.g", dev.normal[1], pre.oct[1], pre.w_in_oct[1], fold);
+    let mat_fragile = pre.fragile & fragile_bit::MAT_ID != 0;
+    if pre.arm == MarcherArm::Background {
+        // The marcher's neutral defaults: material id 0, unread.
+        byte("normal.b", dev.normal[2], 0.0, 0.0, false);
+        byte("normal.a", dev.normal[3], 0.0, 0.0, false);
+    } else {
+        byte("normal.b", dev.normal[2], exact((pre.mat_id & 0xFF) as u8), 0.0, mat_fragile);
+        byte("normal.a", dev.normal[3], exact((pre.mat_id >> 8) as u8), 0.0, mat_fragile);
+    }
+    let shadow_fragile = pre.fragile & fragile_bit::SHADOW != 0;
+    byte("material.r", dev.material[0], pre.shadow, pre.w_in_shadow, shadow_fragile);
+    byte("material.g", dev.material[1], pre.ao, pre.w_in_ao, false);
+    byte("material.b", dev.material[2], exact(pre.mask_byte), 0.0, false);
+    byte("material.a", dev.material[3], 1.0, 0.0, false);
+    report.tally[arm] = tally;
+
+    // Rule G (`gViewT`).
+    let t = dev.view_t;
+    let ok = match pre.arm {
+        MarcherArm::Background => t.to_bits() == 1.0e30_f32.to_bits(),
+        MarcherArm::Sdf => {
+            pre.on_surface_residual < pre.on_surface_bound && (t - pre.host_view_t).abs() <= pre.view_t_bound
+        }
+        MarcherArm::Mesh => t.is_finite() && (t - pre.host_view_t).abs() <= pre.view_t_bound,
+    };
+    if !ok {
+        report.view_t_failures.push(ViewTFailure {
+            px,
+            py,
+            device_t: t,
+            host_t: pre.host_view_t,
+            allowance: pre.view_t_bound,
+            residual: pre.on_surface_residual,
+        });
+    }
+    fragile_any
+}
+
+/// The resolve gate at one texel: the host resolve fed `attrs`, its floor, and the per-channel
+/// excess of the device radiance `got` over the format bound widened by that floor (`<= 0` inside).
+#[allow(clippy::too_many_arguments)]
+fn seam_resolve_texel(
+    got: [f32; 3],
+    attrs: MarcherAttributes,
+    px: u32,
+    py: u32,
+    edits: &[SdfEdit],
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+) -> (ResolveFloor, [f32; 3]) {
+    let materials = host_material_table();
+    let (ro, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+    let floor = resolve_error_floor(attrs, ro, rd, &materials, header, lights, edits);
+    let excess = lit_store_excess(got, floor.lit, LIT_TARGET, LIT_ROUNDING[LIT_STORE_PATH], floor.floor);
+    (floor, excess)
+}
+
+/// The seam gate over the whole image: the attribute gate on every texel, the resolve gate fed the
+/// device's bytes on every texel (radiance only — no display arm on a non-fragile texel). Collects;
+/// the caller asserts ([`SeamReport::assert_clean`]).
+#[allow(clippy::too_many_arguments)]
+fn collect_gbuffer_seam(
     lit: &[u8],
+    gbuf: &DeviceGbuffer,
     edits: &[SdfEdit],
     flags: u32,
     light_dir: [f32; 3],
     header: &GoldenLightHeader,
     lights: &[GoldenLight],
-) -> (i32, u64, u64) {
-    let mut max_delta = 0i32;
-    let mut outliers = 0u64;
-    let mut sdf_lit_hits = 0u64;
+) -> SeamReport {
     let materials = host_material_table();
+    let mut report = SeamReport::default();
     for py in 0..SDF_IMG_H {
         for px in 0..SDF_IMG_W {
-            let md = expected_mesh_depth(px, py);
-            let attrs = golden_marcher_attributes(
-                edits, &materials, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
-                flags, light_dir,
+            let dev = gbuf.texel(px, py);
+            let (_, pre) = golden_marcher_attributes_at(
+                edits, &materials, expected_mesh_depth(px, py), px, py, SDF_IMG_W, SDF_IMG_H,
+                CompositeCamera::Ortho, 1.0, flags, light_dir, &dev,
             );
-            let (ro, rd) =
-                composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
-            let want_lit = golden_deferred_resolve_table(
-                attrs, ro, rd, &materials, header, lights,
-            );
-            let got_lit = lit_rgb(lit, px, py);
-            let (want, got) = (display_rgb(want_lit), display_rgb(got_lit));
-            let dmax = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
+            let attr_fragile = seam_attribute_lanes(&mut report, px, py, &dev, &pre);
+            let attrs = MarcherAttributes::from_device(&dev);
+            let got = lit_rgb(lit, px, py);
+            let (floor, excess) = seam_resolve_texel(got, attrs, px, py, edits, header, lights);
+            if floor.fragile || attr_fragile {
+                report.fragile_texels.push((px, py));
+                match floor.fragile_cause {
+                    Some(Some(site)) => {
+                        report.fragile_why[1] += 1;
+                        report.first_fragile_site.get_or_insert((px, py, site));
+                    }
+                    Some(None) => report.fragile_why[2] += 1,
+                    None => report.fragile_why[0] += 1,
+                }
+                if !lit_matches(got, floor.lit, DEFERRED_ARM1_TOL as u32) {
+                    report.fragile_display_fails.push((px, py));
+                }
+                continue;
+            }
             if attrs.mask == 1 {
-                sdf_lit_hits += 1;
+                report.strict_texels += 1;
+                for c in 0..3 {
+                    if floor.lit[c] != 0.0 {
+                        report.max_rel_floor = report.max_rel_floor.max(floor.floor[c] / floor.lit[c].abs());
+                    }
+                }
             }
-            if dmax > max_delta {
-                max_delta = dmax;
-            }
-            if dmax > DEFERRED_ARM1_TOL {
-                outliers += 1;
+            let worst = excess.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            report.max_excess = report.max_excess.max(worst);
+            if worst > 0.0 {
+                report.strict_fails.push(StrictFail { px, py, got, want: floor.lit, floor: floor.floor });
             }
         }
     }
-    (max_delta, outliers, sdf_lit_hits)
+    report
+}
+
+/// D15-2's must-reject twins at one texel: a planted byte the window must call `Mismatch`.
+fn assert_planted_byte_mismatches(dev: u8, x: f32, w_in: f32, what: &str) {
+    assert_eq!(
+        attribute_byte_verdict(dev, x, w_in),
+        ByteVerdict::Mismatch,
+        "{what}: the planted byte {dev} (host value {:.4} codes, w_in {w_in:.4}) is NOT a Mismatch — \
+         the attribute window cannot fail",
+        255.0 * x.clamp(0.0, 1.0)
+    );
 }
 
 // ============================================================================
@@ -4787,57 +5289,10 @@ fn host_count_shadowed_pixels(
     (shadowed_px, sdf_lit_px)
 }
 
-/// Diffs the whole GPU LIT readback (the multi-light `shadow_mode == 1` NON-CLUSTERED resolve)
-/// against the host `golden_deferred_resolve_table_shadowed` per texel, within ±2/255 (the
-/// deferred double-quant budget), feeding the SHADOWED oracle the FROZEN `sdf_edit_list` field
-/// closure. Returns the max delta + the SDF-lit pixel count.
-fn assert_lit_matches_table_shadowed_golden(
-    lit: &[u8],
-    edits: &[SdfEdit],
-    flags: u32,
-    light_dir: [f32; 3],
-    header: &GoldenLightHeader,
-    lights: &[GoldenLight],
-    name: &str,
-) -> (i32, u64) {
-    let mut max_delta = 0i32;
-    let mut sdf_lit_hits = 0u64;
-    let materials = host_material_table();
-    let field = |q: [f32; 3]| boyko_sdf_math::sdf_edit_list(edits, q);
-    for py in 0..SDF_IMG_H {
-        for px in 0..SDF_IMG_W {
-            let md = expected_mesh_depth(px, py);
-            let attrs = golden_marcher_attributes(
-                edits, &materials, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
-                flags, light_dir,
-            );
-            let (ro, rd) =
-                composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
-            let want_lit = golden_deferred_resolve_table_shadowed(
-                attrs, ro, rd, &materials, header, lights, &field,
-            );
-            let got_lit = lit_rgb(lit, px, py);
-            let (want, got) = (display_rgb(want_lit), display_rgb(got_lit));
-            let dmax = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
-            if attrs.mask == 1 {
-                sdf_lit_hits += 1;
-            }
-            if dmax > max_delta {
-                max_delta = dmax;
-            }
-            assert!(
-                lit_matches(got_lit, want_lit, DEFERRED_ARM1_TOL as u32),
-                "[{name}] P6 R1 multi-light LIT texel ({px},{py}) got {got:?} want {want:?} (radiance {got_lit:?} vs {want_lit:?}) \
-                 (shadowed table oracle) exceeds ±{DEFERRED_ARM1_TOL}/255 (delta {dmax})"
-            );
-        }
-    }
-    (max_delta, sdf_lit_hits)
-}
-
-/// The dominant-N-cap variant of [`assert_lit_matches_table_shadowed_golden`]: the SAME per-texel
-/// GPU-vs-shadowed-oracle diff, but instead of hard-asserting EVERY texel within `±DEFERRED_ARM1_
-/// TOL` it COUNTS the texels that exceed it and returns `(max_delta, outlier_count, sdf_lit_hits)`.
+/// The dominant-N-cap fixture's display-arm count (it stays on the replayed oracle until OPEN-ITEMS
+/// 18 moves it onto the seam gate): the per-texel GPU-vs-shadowed-oracle diff in display codes,
+/// COUNTING the texels beyond `±DEFERRED_ARM1_TOL` and returning `(max_delta, outlier_count,
+/// sdf_lit_hits)`.
 ///
 /// Why a count, not a hard per-texel assert, for the cap fixture: the dominant-N cap counts a
 /// caster toward the per-pixel march budget only when `nol > SHADOW_NDOTL_EPS` (== 0). At the lit
@@ -4962,8 +5417,18 @@ fn l0b_zero_point_spot_table_reproduces_l0a_image() {
 }
 
 /// L0b point + spot golden: a table with a directional + a point light + a spot light at
-/// known world positions, resolved via the gViewT `P` reconstruction, must match the host
-/// `golden_deferred_resolve_table` within ±2/255 on every texel.
+/// known world positions, resolved via the gViewT `P` reconstruction, compared through the
+/// OPEN-ITEMS 15 SEAM gate ([`collect_gbuffer_seam`]): the device's G-buffer bytes against the host's
+/// pre-quantization values at the device's own hit point, and the host table resolve (the shadowed
+/// body at `shadow_mode` 0, equal bit for bit — `goldens::oi15_seam_tests`) fed the device's bytes
+/// against the device's radiance inside the derived floor.
+///
+/// The former "specular ULP outlier" budget (one smooth_union texel at Δ5 display codes, bounded by a
+/// count) is gone: by the precision budget a GGX / `pow` ULP gap moves `D` by about `1e-4` relative
+/// and the sun kernel by about `2e-5`, far below a display code, while one oct code at a converged
+/// peak (`a² = 0.0625`) moves `D` by about 24 %. So the outlier was an INPUT (a G-buffer byte) the
+/// replayed oracle re-quantized differently; fed the device's bytes it is strict (`oi1516/cut.md`
+/// D15-6 O3 — a red here with the device's bytes refutes that reasoning).
 #[test]
 fn l0b_point_and_spot_match_the_table_oracle() {
     let Some(ctx) = boot_render_or_skip("l0b_point_and_spot_match_the_table_oracle") else {
@@ -4983,44 +5448,23 @@ fn l0b_point_and_spot_match_the_table_oracle() {
     ];
     let table = pack_light_table(&header, &lights);
 
+    let mut reports = Vec::new();
     for (name, edits) in p4b_scenes() {
-        let lit =
-            run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
+        let (lit, gbuf) = run_gbuffer_hybrid_lit_table_seam(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table);
         assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
         let nonzero = lit_nonzero_count(&lit);
         assert!(nonzero > 0, "[{name}] L0b point/spot LIT all-zero — device did not render");
-
-        let (max_delta, outliers, sdf_lit_hits) =
-            count_lit_table_outliers(&lit, &edits, flags, DEFAULT_LIGHT_DIR, &header, &lights);
-        assert!(
-            sdf_lit_hits > 0,
-            "[{name}] L0b point/spot: no SDF-lit pixel — the gate is vacuous"
-        );
-        // The shader and host BRDF/tonemap math are expression-identical (see
-        // `count_lit_table_outliers`' doc), so the only divergence is GPU `pow`/`exp2` ULP at a
-        // converged specular peak — a THIN PEAK on smooth_union, ZERO outliers on crater / box.
-        // Bound the count tightly (a real BRDF divergence spans a 2-D region); the bulk agreement
-        // is the SAME ±DEFERRED_ARM1_TOL the hard-asserting L0a / shadow fixtures hold.
-        // Observed on the RTX 3060 (the only runner — CI skips this GPU test): smooth_union has
-        // exactly 1 outlier at delta 5; crater / box have 0 outliers (max 2 / 1). A single
-        // isolated peak is the ULP signature; the bounds carry a small margin for cross-driver
-        // ULP nudges while staying FAR below a real BRDF/tonemap regression, which manifests as a
-        // 2-D region (many outliers) or a large max (a formula error).
-        const L0B_SPECULAR_ULP_OUTLIERS: u64 = 3;
-        const L0B_SPECULAR_ULP_MAX: i32 = 8;
-        assert!(
-            outliers <= L0B_SPECULAR_ULP_OUTLIERS && max_delta <= L0B_SPECULAR_ULP_MAX,
-            "[{name}] L0b point/spot: {outliers} texels exceed ±{DEFERRED_ARM1_TOL}/255 (max delta \
-             {max_delta}) — beyond the specular-peak GPU-pow-ULP boundary (≤ \
-             {L0B_SPECULAR_ULP_OUTLIERS} texels, ≤ {L0B_SPECULAR_ULP_MAX}/255); a real BRDF/tonemap \
-             divergence spans a 2-D region, not a converged highlight"
-        );
-        println!(
-            "[{name}] L0b point/spot (gViewT P-reconstruction == table oracle): max delta \
-             {max_delta}/255, {outliers} specular-ULP outliers (tol ±{DEFERRED_ARM1_TOL}); \
-             {sdf_lit_hits} SDF-lit px"
-        );
+        let report = collect_gbuffer_seam(&lit, &gbuf, &edits, flags, DEFAULT_LIGHT_DIR, &header, &lights);
+        report.print(name);
+        let oct_flips: Vec<_> = report.tie_flips.iter().filter(|f| f.2.starts_with("normal")).take(8).collect();
+        println!("[{name}] first oct TieFlips: {oct_flips:?}");
+        reports.push((name, report));
     }
+    // Collect every scene before asserting (each scene's verdict is read on one run).
+    for (name, report) in &reports {
+        report.assert_clean(name);
+    }
+    assert_validation_clean(&ctx);
 }
 
 /// P6 R1 host NON-VACUITY pre-flight (CPU-only, no GPU): the multi-light shadowed scene's
@@ -5088,13 +5532,93 @@ fn p6_r1_oracle_produces_shadowed_pixels() {
     );
 }
 
-/// P6 R1 GPU golden: the multi-light SDF-shadow NON-CLUSTERED resolve on hardware. An SDF
-/// occluder (the `crater` body) + two shadow-flagged POINT lights (`with_sdf_shadow()`) +
-/// `header.with_shadow_mode(1)` on a NON-CLUSTERED header. The GPU LIT readback must match the
-/// host `golden_deferred_resolve_table_shadowed` (fed the FROZEN `sdf_edit_list` field) within
-/// ±2/255 per texel. NON-VACUITY: the host oracle is first asserted to produce ≥1 SHADOWED
-/// pixel (the shadowed-vs-unshadowed oracle diverges), so the test meaningfully exercises the
-/// per-caster `sdf_soft_shadow_ranged` march on the device.
+/// OPEN-ITEMS 15 — the host PIN at p6_r1 twin_spheres texel (41,17), the texel the item is about
+/// (a PIN, labelled so: it restates settle E15 / triage 15 §2 on the host; the acceptance is the
+/// device seam gate, `p6_r1_multi_light_sdf_shadows_match_oracle`). Three facts:
+/// - the host's pre-quantization `255·oct.x` is 98.538048 (`e15_bytes.csv:2225`), 0.038 above the
+///   .5 tie, so the host stores 99 where the device stored 98;
+/// - the host resolve fed the device's `[98, 192]` and stored through the measured Z class IS the
+///   device readback `[2.7519531, 2.4824219, 2.2128906]` bit for bit;
+/// - light A's soft-shadow visibility changes by less than 0.5 % between the two codes (the +7.3 %
+///   is the grazing NoL, not the shadow model).
+#[test]
+fn p6_r1_texel_41_17_host_pin() {
+    use boyko_shaderdsl::pixfmt::{Channel, Rounding, quantize};
+    let edits = p6_r1_twin_scene();
+    let (header, lights) = p6_r1_multi_light_table();
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let materials = host_material_table();
+    let (px, py) = (41u32, 17u32);
+    let md = expected_mesh_depth(px, py);
+    let attrs = golden_marcher_attributes(
+        &edits, &materials, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0, flags,
+        DEFAULT_LIGHT_DIR,
+    );
+    assert_eq!(attrs.mask, 1, "(41,17) is an SDF-lit texel");
+    assert_eq!(attrs.oct_rg, [99, 192], "the host replay stores [99, 192]");
+    let own = DeviceGbufferTexel {
+        albedo: [attrs.base_rgb[0], attrs.base_rgb[1], attrs.base_rgb[2], 255],
+        normal: [attrs.oct_rg[0], attrs.oct_rg[1], 0, 0],
+        material: [attrs.shadow, attrs.ao, 255, 255],
+        view_t: attrs.view_t,
+    };
+    let (_, pre) = golden_marcher_attributes_at(
+        &edits, &materials, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0, flags,
+        DEFAULT_LIGHT_DIR, &own,
+    );
+    let code = pre.oct[0] * 255.0;
+    assert_eq!(
+        code.to_bits(),
+        98.538_05_f32.to_bits(),
+        "the pre-quantization 255·oct.x at (41,17) is {code:.6}, not settle E15's 98.538048"
+    );
+    let (ro, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+    let field = |q: [f32; 3]| boyko_sdf_math::sdf_edit_list(&edits, q);
+    let device_bytes = MarcherAttributes { oct_rg: [98, 192], ..attrs };
+    let lit = golden_deferred_resolve_table_shadowed(device_bytes, ro, rd, &materials, &header, &lights, &field);
+    let stored = lit.map(|x| quantize(Channel::F16, x, Rounding::TowardZero));
+    let device = [2.751_953_1_f32, 2.482_421_9, 2.212_890_6];
+    assert_eq!(
+        stored.map(f32::to_bits),
+        device.map(f32::to_bits),
+        "the host resolve fed [98, 192], stored through Z, must be the device readback: got {stored:?}"
+    );
+    // Light A (table index 1): the ranged march toward it from the decoded normal of each code.
+    let pos_a = [lights[1].pos_range[0], lights[1].pos_range[1], lights[1].pos_range[2]];
+    let vis_a = |oct: [u8; 2]| {
+        let n = oct_decode([oct[0] as f32 / 255.0, oct[1] as f32 / 255.0]);
+        let p = [ro[0] + rd[0] * attrs.view_t, ro[1] + rd[1] * attrs.view_t, ro[2] + rd[2] * attrs.view_t];
+        let b = boyko_rhi_vulkan::compute::SHADOW_NORMAL_BIAS;
+        let pb = [p[0] + n[0] * b, p[1] + n[1] * b, p[2] + n[2] * b];
+        let to_l = [pos_a[0] - p[0], pos_a[1] - p[1], pos_a[2] - p[2]];
+        let dist = (to_l[0] * to_l[0] + to_l[1] * to_l[1] + to_l[2] * to_l[2]).sqrt();
+        let l = [to_l[0] / dist, to_l[1] / dist, to_l[2] / dist];
+        host_soft_shadow_ranged(pb, n, l, dist, &field)
+    };
+    let ratio = vis_a([98, 192]) / vis_a([99, 192]) - 1.0;
+    assert!(
+        (-0.005..=0.0).contains(&ratio),
+        "light A's visibility moves {:.3} % between the two codes — the shadow model, not the normal",
+        ratio * 100.0
+    );
+    println!(
+        "OI15 host pin (41,17): 255·oct.x = {code:.6}; resolve([98,192]) through Z = {stored:?} (the \
+         device readback); vis_A(98)/vis_A(99) - 1 = {:.3} %",
+        ratio * 100.0
+    );
+}
+
+/// P6 R1 GPU golden: the multi-light SDF-shadow NON-CLUSTERED resolve on hardware — the twin
+/// spheres ([`p6_r1_twin_scene`]) + two shadow-flagged POINT casters + `header.with_shadow_mode(1)`
+/// on a NON-CLUSTERED header, compared through the OPEN-ITEMS 15 SEAM gate (the acceptance of the
+/// item, RF15-A): the device's G-buffer bytes against the host's pre-quantization values at the
+/// device's own hit point (one code only inside the conversion window), and the host shadowed
+/// resolve fed the DEVICE's bytes against the device's radiance inside the derived floor. At
+/// (41,17) the device stored gNormal.R = 98 where the host replay stores 99 (settle E15): the gate
+/// reports that byte as a `TieFlip` and the resolve fed 98 must match the device; a shadow-march
+/// defect would red there (fed `[99, 192]` the host gives 2.5648 against the device's 2.7520).
+/// NON-VACUITY: the host oracle is first asserted to produce ≥1 SHADOWED pixel. The must-reject
+/// twins plant a 97 at (41,17).R and a one-code flip at a non-tie byte: both must be `Mismatch`.
 #[test]
 fn p6_r1_multi_light_sdf_shadows_match_oracle() {
     let Some(ctx) = boot_render_or_skip("p6_r1_multi_light_sdf_shadows_match_oracle") else {
@@ -5116,24 +5640,159 @@ fn p6_r1_multi_light_sdf_shadows_match_oracle() {
          not exercise shadowing; retune `p6_r1_multi_light_table()`"
     );
 
-    // The NON-CLUSTERED resolve path (`run_gbuffer_hybrid_lit_table`, clusters_enabled == false
-    // since the header's cluster_params == 0): the marcher writes the primary `gMaterial.r`, the
-    // resolve marches every extra flagged caster.
-    let lit =
-        run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
+    // The NON-CLUSTERED resolve path (clusters_enabled == false since the header's cluster_params
+    // == 0): the marcher writes the primary `gMaterial.r`, the resolve marches every extra flagged
+    // caster. The seam harness reads the device's G-buffer back.
+    let (lit, gbuf) = run_gbuffer_hybrid_lit_table_seam(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table);
     assert_eq!(lit.len(), LIT_READBACK_BYTES as usize);
     let nonzero = lit_nonzero_count(&lit);
     assert!(nonzero > 0, "P6 R1 multi-light LIT all-zero — device did not render");
 
-    let (max_delta, sdf_lit_hits) = assert_lit_matches_table_shadowed_golden(
-        &lit, &edits, flags, DEFAULT_LIGHT_DIR, &header, &lights, "twin_spheres",
+    let report = collect_gbuffer_seam(&lit, &gbuf, &edits, flags, DEFAULT_LIGHT_DIR, &header, &lights);
+    report.print("twin_spheres");
+
+    // RF15-A's record at the texel the item is about (device-specific: printed, not asserted).
+    let materials = host_material_table();
+    let pre_at = |px: u32, py: u32| -> MarcherPrequant {
+        golden_marcher_attributes_at(
+            &edits, &materials, expected_mesh_depth(px, py), px, py, SDF_IMG_W, SDF_IMG_H,
+            CompositeCamera::Ortho, 1.0, flags, DEFAULT_LIGHT_DIR, &gbuf.texel(px, py),
+        )
+        .1
+    };
+    let pre_41_17 = pre_at(41, 17);
+    let dev_41_17 = gbuf.texel(41, 17);
+    println!(
+        "[twin_spheres] (41,17): device gNormal {:?} vs host c = ({:.4}, {:.4}) (w_in {:?}) -> {:?} / {:?}; \
+         device lit {:?}",
+        dev_41_17.normal,
+        255.0 * pre_41_17.oct[0],
+        255.0 * pre_41_17.oct[1],
+        pre_41_17.w_in_oct,
+        attribute_byte_verdict(dev_41_17.normal[0], pre_41_17.oct[0], pre_41_17.w_in_oct[0]),
+        attribute_byte_verdict(dev_41_17.normal[1], pre_41_17.oct[1], pre_41_17.w_in_oct[1]),
+        lit_rgb(&lit, 41, 17),
     );
-    assert!(sdf_lit_hits > 0, "P6 R1: no SDF-lit pixel — the gate is vacuous");
+
+    // D15-2's must-reject twins: the window must be able to fail.
+    // (1) A planted 97 at (41,17).R: 1.54 codes from 98.538.
+    assert_planted_byte_mismatches(97, pre_41_17.oct[0], pre_41_17.w_in_oct[0], "(41,17).R = 97");
+    // (2) A one-code flip at a NON-tie byte: the first lit SDF oct byte (raster order) whose flip
+    // lands beyond the window by more than 0.1 code.
+    let mut planted = None;
+    'search: for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            let pre = pre_at(px, py);
+            if pre.arm != MarcherArm::Sdf || pre.fragile != 0 {
+                continue;
+            }
+            for k in 0..2 {
+                let c = 255.0 * pre.oct[k];
+                let host = (c + 0.5) as u8;
+                for flip in [host.wrapping_sub(1), host.wrapping_add(1)] {
+                    if (f32::from(flip) - c).abs() > 0.5 + W_CONV + pre.w_in_oct[k] + 0.1 {
+                        planted = Some((px, py, k, flip, pre));
+                        break 'search;
+                    }
+                }
+            }
+        }
+    }
+    let (ppx, ppy, pk, pflip, ppre) = planted
+        .expect("no lit SDF oct byte admits a non-tie flip beyond the window — the planted twin is vacuous");
+    assert_planted_byte_mismatches(pflip, ppre.oct[pk], ppre.w_in_oct[pk], "the planted non-tie flip");
+    let mut planted_texel = gbuf.texel(ppx, ppy);
+    planted_texel.normal[pk] = pflip;
+    let (planted_floor, planted_excess) = seam_resolve_texel(
+        lit_rgb(&lit, ppx, ppy),
+        MarcherAttributes::from_device(&planted_texel),
+        ppx,
+        ppy,
+        &edits,
+        &header,
+        &lights,
+    );
+    println!(
+        "[twin_spheres] planted non-tie flip at ({ppx},{ppy}) lane {pk}: {pflip} vs c = {:.4} -> Mismatch; \
+         the resolve fed it: excess {planted_excess:?} (floor {:?}, fragile {})",
+        255.0 * ppre.oct[pk],
+        planted_floor.floor,
+        planted_floor.fragile
+    );
+
+    report.assert_clean("twin_spheres");
     println!(
         "P6 R1 multi-light SDF shadows (shadow_mode==1, NON-CLUSTERED, 2 flagged point casters) \
-         == shadowed table oracle: max delta {max_delta}/255 (tol {DEFERRED_ARM1_TOL}); \
-         {sdf_lit_hits} SDF-lit px, {shadowed_px}/{sdf_lit_px} host-SHADOWED px"
+         == the seam gate; {shadowed_px}/{sdf_lit_px} host-SHADOWED px"
     );
+    assert_validation_clean(&ctx);
+}
+
+/// RF15-B (`oi1516/cut.md` D15-5, critique W5): the OLD structure — the host REPLAY's re-quantized
+/// attributes — under the new strict resolve gate. On a device whose G-buffer conversion moved a
+/// byte the radiance is sensitive to, the replay must be REJECTED: that is the RED-before of the
+/// seam, restated on this tree. Whether such a byte exists is a property of the device (settle E15:
+/// this RTX stores exact .5 ties and fractions just above them low; a device implementing the D3D
+/// reference rule exactly would store the host's bytes), so the assertion is conditional on the
+/// attribute gate's own observation: when no device byte differs from the replay's with a radiance
+/// effect above the floor, the test prints that the RED-before is vacuous on this device. The first
+/// reject is printed (predicted: (0,0), a MESH texel, gNormal [127,127] vs [128,128]; restricted to
+/// SDF texels, (41,17)), never asserted.
+#[test]
+fn p6_r1_replay_attributes_fail_the_strict_resolve_gate() {
+    let Some(ctx) = boot_render_or_skip("p6_r1_replay_attributes_fail_the_strict_resolve_gate") else {
+        return;
+    };
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let (header, lights) = p6_r1_multi_light_table();
+    let table = pack_light_table(&header, &lights);
+    let edits = p6_r1_twin_scene();
+    let (lit, gbuf) = run_gbuffer_hybrid_lit_table_seam(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table);
+    let materials = host_material_table();
+    let mut rejects = 0u64;
+    let mut first_reject: Option<(u32, u32, MarcherArm)> = None;
+    let mut first_sdf_reject: Option<(u32, u32)> = None;
+    let mut consequential: Option<(u32, u32)> = None;
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            let dev = gbuf.texel(px, py);
+            let (replay, pre) = golden_marcher_attributes_at(
+                &edits, &materials, expected_mesh_depth(px, py), px, py, SDF_IMG_W, SDF_IMG_H,
+                CompositeCamera::Ortho, 1.0, flags, DEFAULT_LIGHT_DIR, &dev,
+            );
+            let device_attrs = MarcherAttributes::from_device(&dev);
+            let got = lit_rgb(&lit, px, py);
+            let (dev_floor, _) = seam_resolve_texel(got, device_attrs, px, py, &edits, &header, &lights);
+            let (rep_floor, rep_excess) = seam_resolve_texel(got, replay, px, py, &edits, &header, &lights);
+            if rep_floor.fragile || dev_floor.fragile {
+                continue;
+            }
+            let differs = (0..3).any(|c| (rep_floor.lit[c] - dev_floor.lit[c]).abs() > dev_floor.floor[c]);
+            if differs && consequential.is_none() {
+                consequential = Some((px, py));
+            }
+            if rep_excess.iter().any(|&e| e > 0.0) {
+                rejects += 1;
+                first_reject.get_or_insert((px, py, pre.arm));
+                if pre.arm == MarcherArm::Sdf {
+                    first_sdf_reject.get_or_insert((px, py));
+                }
+            }
+        }
+    }
+    println!(
+        "RF15-B: the replayed attributes under the strict resolve gate: {rejects} reject(s); first \
+         {first_reject:?} (predicted (0,0) MESH), first SDF {first_sdf_reject:?} (predicted (41,17)); \
+         first device byte with a radiance effect above the floor: {consequential:?}"
+    );
+    match consequential {
+        Some(at) => assert!(
+            rejects > 0,
+            "RF15-B: the device moved a byte the radiance is sensitive to (first at {at:?}), yet the \
+             replayed attributes pass the strict gate — the seam's RED-before does not hold"
+        ),
+        None => println!("RF15-B: no device flip with a radiance effect: RED-before vacuous on this device"),
+    }
     assert_validation_clean(&ctx);
 }
 
@@ -5180,17 +5839,14 @@ fn p6_r1_single_point_light_gets_sdf_shadow() {
              sparse acne speckle (or the occlusion no longer happens)"
         );
 
+        // The OPEN-ITEMS 15 seam gate (as the multi-light fixture): the device's own bytes, the
+        // host resolve fed them.
         let table = pack_light_table(&header, &lights);
-        let lit =
-            run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
-        let (max_delta, sdf_lit_hits) = assert_lit_matches_table_shadowed_golden(
-            &lit, &edits, flags, DEFAULT_LIGHT_DIR, &header, &lights, "single_point",
-        );
-        assert!(sdf_lit_hits > 0, "single-point R1: no SDF-lit pixel");
-        println!(
-            "P6 R1 single point caster == shadowed oracle: max delta {max_delta}/255 \
-             (tol {DEFERRED_ARM1_TOL}); {shadowed_px} host-SHADOWED px"
-        );
+        let (lit, gbuf) = run_gbuffer_hybrid_lit_table_seam(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table);
+        let report = collect_gbuffer_seam(&lit, &gbuf, &edits, flags, DEFAULT_LIGHT_DIR, &header, &lights);
+        report.print("single_point");
+        report.assert_clean("single_point");
+        println!("P6 R1 single point caster == the seam gate; {shadowed_px} host-SHADOWED px");
     }
 
     // --- (b) The dominant-N cap: flag (MAX + 2) point casters; the oracle + GPU both cap the
@@ -6856,11 +7512,25 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
     // hit, against the analytic field crossing the GPU `t` reconstructs to (the EXACT-CSG residual
     // in (d) doubles as the host-vs-GPU `t` proof: both land within M2_CREASE_EPS of the true field).
     let mut any_scene_hit = false;
+    // Every scene is evaluated before any assertion (OPEN-ITEMS 16: box_csg and smooth_union were
+    // never reached while crater failed first), so one run reads every scene's verdict.
+    let mut failures: Vec<String> = Vec::new();
+    macro_rules! check {
+        ($cond:expr, $($fmt:tt)+) => {
+            if !$cond {
+                failures.push(format!($($fmt)+));
+            }
+        };
+    }
 
     for (name, edits) in [
         ("crater_csg", crater()),
         ("box_csg", box_csg()),
         ("smooth_union", smooth_union()),
+        // OPEN-ITEMS 16: check 16 D2's non-first-surface case and a capsule (critique W4 (c)) — the
+        // shipped certificate must refuse the big sphere behind the small one and keep the capsule.
+        ("two_spheres", two_spheres()),
+        ("capsule_csg", capsule_m2_scene()),
     ] {
         let (grid, cells) = bake_brick_grid(&edits);
 
@@ -6950,8 +7620,9 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
         // crossing, NOT the analytic SDF_EPS threshold, so the surface `t` it stores differs from
         // the analytic marcher's at the sub-epsilon level (and from the zeroed-grid run, which maps
         // no tile → folds analytic). LIT color is byte-identical by DESIGN (the exact-CSG contract:
-        // M2 lands on the SAME true surface; the committed `on_hit_set_equals_analytic_over_many_
-        // scenes` pins ON == analytic within ±1/255), so the DISCRIMINATING observable is `gViewT`,
+        // M2 lands on the SAME true surface — `compute::tests::m2_first_surface_tests`'
+        // `m2_on_first_surface_matches_analytic_over_many_scenes` pins M2-on == analytic on the
+        // host, the first crossing included), so the DISCRIMINATING observable is `gViewT`,
         // not the shaded color. We require the default-grid M2 `t` field to DIFFER from BOTH the
         // zeroed-grid run AND the analytic run on at least one shared hit pixel — proof the marcher
         // read the b5 M2GridParams tail and took the cubic branch. ---
@@ -7003,7 +7674,7 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
                  move it."
             )
         }).unwrap_or_else(|| "no host-divergent pixel captured".to_string());
-        assert!(
+        check!(
             a_vs_zero_px > 0 || a_vs_an_px > 0,
             "[{name}] (a) M2 branch DEAD: the M2-default gViewT `t` field is BIT-IDENTICAL to BOTH \
              the zeroed-grid run AND the analytic run (Δt max default-vs-zeroed {a_vs_zero_max:.2e}, \
@@ -7021,21 +7692,23 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
         // With the analytic accept now applying the SAME signed refine, both land ON the surface, so
         // brick and analytic agree to within `LIT_CHANNEL_TOL` (±3/255 — the brick cubic vs analytic
         // surface differs at the sub-pixel level, never gray-vs-black). A regression that reopens the
-        // overshoot would push `lit_a_max` to ~the gray magnitude and trip here.
-        assert!(
+        // overshoot would push `lit_a_max` to ~the gray magnitude and trip here; so would an M2 hit on
+        // a surface BEHIND the first one (OPEN-ITEMS 16: the crater's far wall at (39,22), 12/255,
+        // before the first-crossing certificate).
+        check!(
             lit_a_max <= LIT_CHANNEL_TOL,
             "[{name}] (a2) EXACT-CSG LIT MISMATCH: max |LIT_brick − LIT_analytic| = {lit_a_max}/255 \
              exceeds ±{LIT_CHANNEL_TOL}/255. The brick and analytic arms must land on the SAME true \
-             surface (exact-CSG) → near-identical LIT. A large delta means one arm accepted a hit \
-             OFF the surface (e.g. the B1 over-relaxation overshoot collapsing analytic shadow+AO to \
-             black) — the analytic accept-refine regressed."
+             surface → near-identical LIT. A large delta means one arm committed a DIFFERENT surface \
+             (the M2 first-crossing certificate regressed: `sdf_m2_certify.hlsli`) or accepted OFF \
+             the surface (the analytic accept-refine regressed)."
         );
 
         // --- (b) M2 ENGAGES THE CUBIC (not the analytic fold): the default-grid `t` field differs
         // from the zeroed-grid run on the SURFACE pixels (the zeroed grid degrades the M2 step to
         // the analytic fold). This isolates "the cubic ran" from "the trilinear gate is on but the
         // tile lookup yields nothing". ---
-        assert!(
+        check!(
             a_vs_zero_px > 0,
             "[{name}] (b) M2 cubic INERT: default-grid gViewT == zeroed-grid gViewT (Δt max \
              {a_vs_zero_max:.2e}) — the trilinear gate is on but the M2GridParams tile lookup found \
@@ -7095,24 +7768,24 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
         }
 
         // (c): the hit-sets must agree pixel-for-pixel (the GPU cubic == the host cubic).
-        assert!(
+        check!(
             hitset_mismatch.is_none(),
             "[{name}] (c) HOST-MIRROR HIT MISMATCH at {hitset_mismatch:?} (px, py, gpu_hit, \
              host_hit): the GPU `.Load` cubic disagrees with the host `decode_snorm8` cubic on the \
              hit/miss decision. gViewT corners diverged from the host fetch."
         );
         // (d): every GPU hit lands on the true analytic surface — exact CSG, 0 wrong-surface hits.
-        assert_eq!(
-            csg_violations, 0,
+        check!(
+            csg_violations == 0,
             "[{name}] (d) EXACT-CSG VIOLATION: {csg_violations} GPU M2 hit(s) off the true surface \
              (|sdf(hit)| >= M2_CREASE_EPS={M2_CREASE_EPS}). Worst: {worst_resid_px:?} (px, py, t, \
              resid). The residual fallback failed to land the hit on the field."
         );
-        assert_eq!(
-            gpu_hits, host_hits,
+        check!(
+            gpu_hits == host_hits,
             "[{name}] (c) HIT-COUNT MISMATCH: GPU {gpu_hits} vs host {host_hits} SDF hits"
         );
-        assert!(gpu_hits > 0, "[{name}] no GPU M2 hits — the SURFACE scene produced an empty image");
+        check!(gpu_hits > 0, "[{name}] no GPU M2 hits — the SURFACE scene produced an empty image");
         any_scene_hit = true;
 
         assert_validation_clean(&ctx);
@@ -7125,7 +7798,177 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
         );
     }
 
+    assert!(
+        failures.is_empty(),
+        "M2 device gate: {} failure(s) across the scenes:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
     assert!(any_scene_hit, "no scene produced an M2 surface hit — the discriminator proved nothing");
+}
+
+/// OPEN-ITEMS 16, triage r1 W1 — the device row of the certificate's START POINT under
+/// over-relaxation (`oi1516/cut.md` D16-4). Every other device M2 run pushes omega 1, where the
+/// deferred marcher's `m2_a = (omega > 1.0 && it > 0u) ? safe_t + sor_prev : t` is `t` and the
+/// naive `m2_a = t` is an equivalent mutant. Here, on [`jumped_plate`] at omega 1.6 with the M1
+/// skip off: the first over-relaxed step jumps the plate and lands where the M2 cubic refines onto
+/// the sphere behind it; the certificate must refuse that hit (its segment from `safe_t +
+/// sor_prev` crosses the plate), the latch leaves the ray to the analytic march, and its overlap
+/// check retreats onto the plate. Gate: on every pure-SDF pixel the M2-on `gViewT` hit lies on the
+/// plate (the first surface) and within `W1_T_TOL` of the M2-off (analytic) run's hit at the same
+/// omega. The host M2 mirror's witness count (`M2EvalCounts::start_point_refusals`) names the
+/// pixels where only the start point stands between the march and the sphere; it must be non-zero,
+/// and the M2 branch must have run on the device at this omega (some pixel's `gViewT` differs
+/// between the runs: M2 commits the plate from its cubic where no sphere lies ahead).
+///
+/// Run on the RTX: `cargo test -p boyko_rhi_vulkan --test sdf_gbuffer_hybrid \
+///   sdf_m2_overrelaxed_start_point_offscreen -- --ignored --nocapture --test-threads=1`
+#[test]
+#[ignore = "gpu: GPU offscreen gate — requires a Vulkan device (the owner's RTX); OI16 D16-4 start point at omega 1.6; run with --ignored"]
+fn sdf_m2_overrelaxed_start_point_offscreen() {
+    /// The over-relaxation (the harness clamps omega to `[1, 1.99]`).
+    const OMEGA: f32 = 1.6;
+    /// Both runs land on the plate's head-on face (|cos| = 1 on the ortho rays): each accepts
+    /// `|d| < EPS` (0.001), and an M2 commit may sit up to `M2_CERT_TAIL` from the crossing, so the
+    /// same-surface hits differ by at most `2 EPS + M2_CERT_TAIL`. The sphere behind the plate is
+    /// 0.8 further.
+    const W1_T_TOL: f32 = 2.0 * 0.001 + boyko_rhi_vulkan::compute::M2_CERT_TAIL;
+
+    let Some(ctx) = boot_or_skip("sdf_m2_overrelaxed_start_point_offscreen") else {
+        return;
+    };
+    println!("Vulkan device: {}", ctx.device_name());
+    let edits = jumped_plate();
+
+    // The host witnesses (M1 off, as the device runs below).
+    let (grid, cells) = bake_brick_grid(&edits);
+    let atlas = HostM2Atlas::bake(&edits, &boyko_rhi_vulkan::compute::BrickLevelParams::m2_near_field());
+    let mut witnesses: Vec<(u32, u32)> = Vec::new();
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            if mesh_covers_pixel(px, py) {
+                continue;
+            }
+            let (ro, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+            let mut c = M2EvalCounts::default();
+            let _ = golden_primary_hit_brick_m2(
+                &edits, 1.0e30, ro, rd, OMEGA, false, &grid, &cells, Some(&atlas), Some(&mut c),
+            );
+            if c.start_point_refusals > 0 {
+                witnesses.push((px, py));
+            }
+        }
+    }
+
+    // M2 on and M2 off (the analytic marcher), both at omega 1.6, M1 off, gViewT read back.
+    let (_, _, viewt_on) = run_gbuffer_hybrid_m2(
+        &ctx, &edits, false, false, OMEGA, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE, None, true, true, true,
+    );
+    let viewt_on = viewt_on.expect("gViewT readback requested");
+    let (_, _, viewt_off) = run_gbuffer_hybrid_m2(
+        &ctx, &edits, false, false, OMEGA, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE, None, false, true, true,
+    );
+    let viewt_off = viewt_off.expect("gViewT readback requested");
+
+    let mut failures: Vec<String> = Vec::new();
+    let (mut checked, mut engaged, mut worst) = (0u32, 0u32, 0.0f32);
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            if mesh_covers_pixel(px, py) {
+                continue;
+            }
+            checked += 1;
+            let i = (py * SDF_IMG_W + px) as usize;
+            let (t_on, t_off) = (viewt_on[i], viewt_off[i]);
+            engaged += u32::from(t_on.to_bits() != t_off.to_bits());
+            let (ro, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+            let plate = |t: f32| {
+                boyko_sdf_math::edit_distance(&edits[0], [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t]).abs()
+            };
+            let ok = gpu_is_hit(&viewt_on, px, py)
+                && gpu_is_hit(&viewt_off, px, py)
+                && plate(t_on) < M2_CREASE_EPS
+                && plate(t_off) < M2_CREASE_EPS
+                && (t_on - t_off).abs() <= W1_T_TOL;
+            if gpu_is_hit(&viewt_on, px, py) && gpu_is_hit(&viewt_off, px, py) {
+                worst = worst.max((t_on - t_off).abs());
+            }
+            if !ok && failures.len() < 8 {
+                failures.push(format!(
+                    "({px},{py}) M2-on t {t_on} (|plate| {}) vs analytic t {t_off} (|plate| {}); witness {}",
+                    plate(t_on),
+                    plate(t_off),
+                    witnesses.contains(&(px, py))
+                ));
+            }
+        }
+    }
+    println!(
+        "W1 device jumped_plate at omega {OMEGA}: {checked} pure-SDF px, {} host witness px, {engaged} px where \
+         M2-on gViewT differs from analytic (max |dt| {worst:.5}, tol {W1_T_TOL})",
+        witnesses.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "W1: the M2-on deferred marcher did not commit the plate (the first surface) at omega {OMEGA} — the \
+         certificate's start point (`sdf_gbuffer_composite.hlsl` `m2_a`) let M2 commit the sphere behind the \
+         jumped plate: {failures:?}"
+    );
+    assert!(!witnesses.is_empty(), "W1: no host witness pixel — the scene does not exercise the start point");
+    assert!(engaged > 0, "W1: the M2-on run equals the analytic run bit for bit — the M2 branch never ran at omega {OMEGA}");
+    assert_validation_clean(&ctx);
+}
+
+/// OPEN-ITEMS 16 — the DIAGNOSTIC cost probe of the deferred marcher dispatch with M2 off and on
+/// (`oi1516/cut.md` C5 / W16-1). For each M2 scene (crater, box, smooth union, two spheres) and each
+/// of M2 {off, on} it runs the M2 harness once, then re-dispatches the marcher alone 8 + 64 times
+/// with GPU timestamps around the dispatch only, and prints median / p10 / p90 ns of the 64. No
+/// assertion on any number: the orchestrator runs it A/B (the lane base vs the lane head) in a quiet
+/// window; inside a lane it only shows the probe runs.
+#[test]
+#[ignore = "gpu: DIAGNOSTIC timing probe of the deferred marcher dispatch, M2 off/on; the orchestrator runs it in a quiet window"]
+fn m2_marcher_cost_probe() {
+    const WARMUP: usize = 8;
+    const TIMED: usize = 64;
+    let Some(ctx) = boot_or_skip("m2_marcher_cost_probe") else {
+        return;
+    };
+    let caps = ctx.device_caps();
+    if !caps.timestamps_usable() {
+        println!(
+            "SKIP m2_marcher_cost_probe: GPU timestamps unusable (valid_bits={}, period={} ns/tick)",
+            caps.timestamp_valid_bits, caps.timestamp_period
+        );
+        return;
+    }
+    println!("m2_marcher_cost_probe on {} (period {} ns/tick)", ctx.device_name(), caps.timestamp_period);
+    for (name, edits) in [
+        ("crater_csg", crater()),
+        ("box_csg", box_csg()),
+        ("smooth_union", smooth_union()),
+        ("two_spheres", two_spheres()),
+    ] {
+        let (grid, cells) = bake_brick_grid(&edits);
+        for m2 in [false, true] {
+            let (_, _, _, _, ns) = run_gbuffer_hybrid_m4(
+                &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
+                Some((&grid, &cells)), m2, false, true, None, false, (WARMUP + TIMED) as u32,
+            );
+            let ns = ns.expect("invariant: marcher_timing > 0 returns the samples");
+            let mut timed: Vec<f64> = ns.into_iter().skip(WARMUP).collect();
+            timed.sort_by(f64::total_cmp);
+            let at = |q: f64| timed.get(((timed.len().max(1) - 1) as f64 * q).round() as usize).copied().unwrap_or(f64::NAN);
+            println!(
+                "[{name}] M2 {}: median {:.0} ns, p10 {:.0} ns, p90 {:.0} ns over {} timed dispatches",
+                if m2 { "on " } else { "off" },
+                at(0.5),
+                at(0.1),
+                at(0.9),
+                timed.len()
+            );
+        }
+    }
+    assert_validation_clean(&ctx);
 }
 
 // ===========================================================================================
@@ -7345,9 +8188,9 @@ fn sdf_m4_clipmap_near_field_matches_single_level() {
         );
         let vt_single = vt_single_opt.expect("gViewT readback (single-level)");
 
-        let (lit_clip, _, vt_clip_opt) = run_gbuffer_hybrid_m4(
+        let (lit_clip, _, vt_clip_opt, _, _) = run_gbuffer_hybrid_m4(
             &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
-            Some((&grid, &cells)), true, true, true, Some(&clipmap),
+            Some((&grid, &cells)), true, true, true, Some(&clipmap), false, 0,
         );
         let vt_clip = vt_clip_opt.expect("gViewT readback (clip-map)");
 
@@ -7403,9 +8246,9 @@ fn sdf_m4_clipmap_far_field_renders() {
     };
 
     // The clip-map render (brick_levels = 3): the far sphere is in level 1, so the clip-map renders it.
-    let (lit_clip, _, vt_clip_opt) = run_gbuffer_hybrid_m4(
+    let (lit_clip, _, vt_clip_opt, _, _) = run_gbuffer_hybrid_m4(
         &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
-        Some((&grid, &cells)), true, true, true, Some(&clipmap),
+        Some((&grid, &cells)), true, true, true, Some(&clipmap), false, 0,
     );
     let vt_clip = vt_clip_opt.expect("gViewT readback (clip-map)");
 
@@ -7472,10 +8315,10 @@ fn sdf_m4_clipmap_far_field_screenshot_dump() {
         field.bump_gen();
         BrickClipmap::create(&ctx, &field, [0.0, 0.0, 0.0]).expect("M4 screenshot clip-map create")
     };
-    let (lit, _, _) = run_gbuffer_hybrid_m4(
+    let (lit, _, _, _, _) = run_gbuffer_hybrid_m4(
         &ctx, &edits, false, false, 1.0, LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
         DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE, Some((&grid, &cells)), true, false, true,
-        Some(&clipmap),
+        Some(&clipmap), false, 0,
     );
     let path = std::env::temp_dir().join("sdf_m4_clipmap_far_field.bmp");
     write_bmp_rgba(&path, &lit_display_rgba(&lit), SDF_IMG_W, SDF_IMG_H);

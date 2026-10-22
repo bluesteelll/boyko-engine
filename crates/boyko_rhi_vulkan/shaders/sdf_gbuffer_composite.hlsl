@@ -819,18 +819,22 @@ static const float M2_CREASE_EPS     = 0.0192;
 // candidate, used to settle a crease/divergence onto the EXACT field from EITHER side (the
 // exact-CSG fallback). The signed step pulls an inside candidate (`d < 0`, the EPSILON_Q down-bias)
 // BACK toward the surface; a forward-only step could not.
-// BUG-B1-HOLE-4 (the off-center-sphere dark-ring fix): an over-relaxed step (omega > 1) can land
-// DEEP inside the surface, so the accept-refine must walk a large signed distance back ONTO the
-// surface. The under-relaxed step converges at rate |1 - M2_REFINE_RELAX*cos(incidence)|, which is
-// slow at oblique incidences — 8 iters left the hit still inside on a ~30-deg-incidence band of an
-// off-center/distant sphere, so sdf_soft_shadow/sdf_ao sampled INSIDE the field -> shadow==ao==0 ->
-// a black RING. 32 iters settle it (the loop breaks early on |sdf| < EPS, so the common shallow case
-// pays nothing — only deep overshoots use the extra budget). Mirrors the host + eDSL M2_REFINE_ITERS.
+// The budget is SHARED by the M2 refine and the B1 accept-refine. History: 8 -> 32 came with the
+// BUG-B1-HOLE-4 dark ring, when an over-relaxed accept refined from the overshot (inside) point; the
+// retreat to `safe_t` (the last OUTSIDE probe) that fixed the ring makes a budget shortfall leave
+// the hit OUTSIDE, not inside, so 32 is no longer what keeps the ring away. It still settles the
+// omega > 1 goldens' bytes: a forward walk from `sor_prev` to EPS takes up to
+// log(sor_prev/EPS)/log(1/(1 - 0.8cos)) steps (26 at cos 0.2, sor_prev 0.1). The M2 refine's budget
+// is not a correctness parameter: `sdf_m2_certify.hlsli` certifies the first crossing whatever the
+// walk length (OPEN-ITEMS 16). Mirrors the host + eDSL M2_REFINE_ITERS.
 static const uint  M2_REFINE_ITERS   = 32u;
 // The under-relaxation factor of the signed refine step (`rt += M2_REFINE_RELAX * d`). `rt += d` is
 // the exact unit-gradient SDF Newton step; under-relaxing damps overshoot at a CSG crease. Mirrors
 // the host `M2_REFINE_RELAX` bit-for-bit.
 static const float M2_REFINE_RELAX   = 0.8;
+
+// OPEN-ITEMS 16: the M2 first-crossing certificate (`EPS` and `sdf_field.hlsli` are in scope above).
+#include "sdf_m2_certify.hlsli"
 
 // Decodes one R8_SNORM code (a normalized float in [-1,1] from the hardware texel fetch) to a world
 // distance. The NEAREST `SampleLevel` returns the hardware-decoded SNORM value at the EXACT texel
@@ -1263,8 +1267,9 @@ float m2_brick_cubic_hit(Texture3D<float> atlas, SamplerState atlas_smp,
 // branch-ladder passes `m2_levels[L]` + `BrickAtlas{L}`/`BrickSampler{L}`). At N=1 the caller passes
 // `m2_levels[0]` + the M2 resources, so this is byte-identical to the pre-M4 M2 surface-hit.
 bool m2_surface_hit(M4Level lvl, Texture3D<float> atlas, SamplerState atlas_smp,
-                    float3 ro, float3 rd, float t_world, out float hit_t) {
+                    float3 ro, float3 rd, float t_world, out float hit_t, out float cand_out) {
     hit_t = t_world;
+    cand_out = t_world;
     float3 origin = lvl.origin_brick_world.xyz;
     float brick_world = lvl.origin_brick_world.w;
     uint3 dims = (uint3)lvl.dims_atlas_dim.xyz;
@@ -1326,6 +1331,7 @@ bool m2_surface_hit(M4Level lvl, Texture3D<float> atlas, SamplerState atlas_smp,
     // the NEAREST point-sampled cubic (`m2_corner` reads s10 directly), so the s10 sampler — and the
     // binding-10 combined descriptor — is GENUINELY referenced (no keep-alive hack needed).
     float cand_t = t_world + local;
+    cand_out = cand_t; // OPEN-ITEMS 16: the certificate's segment end (a forward walk certified the rest)
 
     // ANALYTIC-RESIDUAL FALLBACK (the exact-CSG guarantee): a SIGNED, under-relaxed sphere-trace from
     // the cubic candidate onto the EXACT field decides BOTH whether this is a hit and where `hit_t`
@@ -1531,6 +1537,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // === GENERATED b1_decl_exhausted BEGIN ===
     bool exhausted = true;
     // === GENERATED b1_decl_exhausted END ===
+    // OPEN-ITEMS 16: the per-ray M2 latch — a refused first-crossing certificate leaves the rest of
+    // the ray to the analytic march (at most one failed certificate per ray).
+    bool m2_trust = true;
     [loop]
     for (uint it = 0u; it < MAX_IT; ++it) {
         // The mesh occludes the SDF from this distance onward — stop marching (the mesh-occlusion
@@ -1609,6 +1618,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // THROUGH to the M1 analytic fold below (so a brick the cubic clears is still marched
         // exactly). INDEPENDENT of `brick_enabled` (the M1 empty-skip can be OFF here). ---
         if (pc.brick_trilinear != 0u) {
+            if (m2_trust) {
             // M4 clip-map LOD: pick the finest enclosing level for `p`, then dispatch the surface-hit
             // to THAT level's atlas/grid via the STATIC branch-ladder (HLSL can't dynamically index the
             // N separate resources). `lvl < 0` → `p` is outside every active level → skip the brick
@@ -1618,23 +1628,33 @@ void main(uint3 tid : SV_DispatchThreadID) {
             int lvl = select_level(p);
             if (lvl >= 0) {
                 float m2_hit_t;
+                float m2_cand_t;
                 bool m2_hit;
                 if (lvl == 0) {
-                    m2_hit = m2_surface_hit(m2_levels[0], BrickAtlas,  BrickSampler,  ro, rd, t, m2_hit_t);
+                    m2_hit = m2_surface_hit(m2_levels[0], BrickAtlas,  BrickSampler,  ro, rd, t, m2_hit_t, m2_cand_t);
                 } else if (lvl == 1) {
-                    m2_hit = m2_surface_hit(m2_levels[1], BrickAtlas1, BrickSampler1, ro, rd, t, m2_hit_t);
+                    m2_hit = m2_surface_hit(m2_levels[1], BrickAtlas1, BrickSampler1, ro, rd, t, m2_hit_t, m2_cand_t);
                 } else {
-                    m2_hit = m2_surface_hit(m2_levels[2], BrickAtlas2, BrickSampler2, ro, rd, t, m2_hit_t);
+                    m2_hit = m2_surface_hit(m2_levels[2], BrickAtlas2, BrickSampler2, ro, rd, t, m2_hit_t, m2_cand_t);
                 }
                 if (m2_hit) {
-                    hit = true;
-                    exhausted = false;       // M2 cubic+analytic-validated convergence
-                    t = m2_hit_t;
-                    break;
+                    // OPEN-ITEMS 16: commit only a FIRST crossing — certified from the last point the
+                    // march itself certified (`safe_t + sor_prev` past an over-relaxed step: the overlap
+                    // check of the step to `t` runs after this block), else latch M2 off for the ray.
+                    float m2_a = (omega > 1.0 && it > 0u) ? safe_t + sor_prev : t;
+                    if (m2_first_crossing_certified(ro, rd, m2_a, m2_cert_goal(m2_hit_t, m2_cand_t))) {
+                        hit = true;
+                        exhausted = false;   // M2 cubic+analytic-validated, certified convergence
+                        t = m2_hit_t;
+                        break;
+                    }
+                    m2_trust = false;
                 }
             }
-            // else: no level / no cubic crossing in this brick (or the refine cleared it) → fall through
-            // to the analytic `sdf(p)` step, exactly as M1 marches a SURFACE brick.
+            // else: no level / no cubic crossing in this brick (or the refine cleared it, or the
+            // certificate refused it) → fall through to the analytic `sdf(p)` step, exactly as M1
+            // marches a SURFACE brick.
+            }
         }
 
         // The analytic fold's distance sample — single-sourced from

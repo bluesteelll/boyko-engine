@@ -8,7 +8,7 @@
 // polynomial smooth-min/-max (`smin`/`smax`/`combine`), the edit-list field `sdf`,
 // and the central-difference gradient `sdf_normal`. Nothing here was reordered or
 // edited — the source is character-identical to the region it was cut from so DXC
-// emits byte-identical field-eval SPIR-V ops and the host golden stays byte-exact.
+// emits byte-identical field-eval SPIR-V ops (the host field's twin: see the contract below).
 //
 // # INCLUDE CONTRACT (precondition)
 //
@@ -19,15 +19,15 @@
 //
 // # DETERMINISM CONTRACT (INVIOLABLE — the P4 invariant)
 //
-// The scalar field eval below is byte-shared across the entire engine:
-//   * the GPU marcher (`sdf_gbuffer_composite.hlsl` / `sdf_depth_composite.hlsl`),
-//   * the host golden mirror `golden_composite_pixel_ex` (compute.rs),
-//   * the CPU physics evaluator `boyko_sdf_math::sdf_edit_list`,
-//   * every future FIELD-CONSUMER (the P4b coarse cone-trace cull, B1 over-relaxation,
-//     A1 cone-trace shadows, A2 ambient occlusion, P9 brick backend).
-// Therefore: NO fast-math, NO reordered/contracted FMA, NO `rsqrt`/`rcp`, NO FP16.
-// Plain IEEE ops only. Any divergence here breaks the golden-image gate AND the
-// render<->physics geometric agreement.
+// The scalar field eval below is shared by the GPU marchers, the host golden mirror, the CPU
+// physics evaluator (`boyko_sdf_math::sdf_edit_list`) and every FIELD-CONSUMER (P4b, B1, A1/A2, P9).
+// Authoring rule: NO fast-math, NO FP16, NO `rsqrt`/`rcp`, the host's operand order. The device
+// field still lies only WITHIN the Vulkan precision envelope of the host f32 field (`length` and
+// `sqrt` inherit `inversesqrt` + a division; no fusion guarantee without NoContraction), so every
+// byte gate on its outputs takes its window from that envelope (`goldens::field_error_bound`). The
+// 8-bit G-buffer store is a separate conversion (D3D 0.6 ULP; Vulkan: either neighbour). Settle E15
+// read 69 of 1600 SDF oct bytes one code low, all <= 0.056 above a .5 tie, exact ties low: the
+// conversion's pattern (no device f32 was read, so that is the pattern, not a measurement).
 //
 // # The stable gateway
 //
