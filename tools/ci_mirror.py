@@ -422,6 +422,37 @@ SELF_TEST_EXPECTED = {
     },
 }
 
+# The force-alloc-panic COVERED rule counts readers of `cfg(force_alloc_panic)`: code whose meaning
+# the flag changes. (source, the `file:line` readers it must report, what the case is.)
+FAP_SCAN_CASES = (
+    ("#[cfg(force_alloc_panic)]\nfn f() {}", ["x.rs:1"], "a cfg attribute"),
+    ("#[cfg(all(\n    test,\n    force_alloc_panic,\n))]\nfn f() {}", ["x.rs:3"], "a cfg predicate split over lines"),
+    ("fn f() -> bool { cfg!(force_alloc_panic) }", ["x.rs:1"], "a cfg! macro"),
+    ("#[cfg_attr(not(force_alloc_panic), ignore)]\nfn f() {}", ["x.rs:1"], "a cfg_attr predicate"),
+    ("#[cfg_attr(test, cfg_attr(\n    force_alloc_panic, ignore))]\nfn f() {}", ["x.rs:2"], "a nested cfg_attr"),
+    (
+        "fn f<'a>(s: &'a str) -> char { '\"' }\n#[cfg(force_alloc_panic)]\nfn g() {}",
+        ["x.rs:2"],
+        "a lifetime, and a char literal that holds a quote",
+    ),
+    ('let s = "a \\" quote"; #[cfg(force_alloc_panic)] fn g() {}', ["x.rs:1"], "an escaped quote in a string"),
+    (
+        '#[ignore = "workstation: read 0.46 vs 0.41 ns/iter in its force_alloc_panic leg"]\nfn f() {}',
+        [],
+        "an ignore reason (a string literal)",
+    ),
+    ('const S: &str = "#[cfg(force_alloc_panic)]";', [], "a cfg predicate inside a string literal"),
+    ('const S: &str = r#"cfg!(force_alloc_panic) "quoted""#;', [], "a raw string"),
+    ('#[cfg_attr(test, doc = "force_alloc_panic")]\nfn f() {}', [], "a cfg_attr's attribute string"),
+    (
+        "// #[cfg(force_alloc_panic)]\n/// cfg!(force_alloc_panic)\n/* cfg(force_alloc_panic) /* nested */ cfg(force_alloc_panic) */\nfn f() {}",
+        [],
+        "line, doc and nested block comments",
+    ),
+    ("--cfg force_alloc_panic in prose", [], "a `--cfg` mention"),
+    ("let force_alloc_panic = 1;", [], "an identifier outside a cfg predicate"),
+)
+
 
 def self_test() -> list[str]:
     failures: list[str] = []
@@ -467,10 +498,10 @@ def self_test() -> list[str]:
             failures.append(f"derive-step fixture: {docs!r} {code!r}")
     except Drift as e:
         failures.append(f"derive-step fixture raised (an empty heredoc must parse): {e}")
-    if fap_readers_in("--cfg force_alloc_panic in prose", "x.rs"):
-        failures.append("force_alloc_panic reader scan counts a `--cfg` mention")
-    if not fap_readers_in("#[cfg(force_alloc_panic)]\nfn f() {}", "x.rs"):
-        failures.append("force_alloc_panic reader scan misses a cfg attribute")
+    for src, want, what in FAP_SCAN_CASES:
+        got = fap_readers_in(src, "x.rs")
+        if got != want:
+            failures.append(f"force_alloc_panic reader scan, {what}: got {got}, want {want}")
     return failures
 
 
@@ -1098,12 +1129,22 @@ class Mirror:
             return "the job's cargo line is not the `test` job's release line"
         readers = []
         for p in REPO.rglob("*.rs"):
-            if "target" in p.relative_to(REPO).parts[:1]:
+            rel = p.relative_to(REPO)
+            if "target" in rel.parts[:1]:
                 continue
-            readers += fap_readers_in(p.read_text(encoding="utf-8", errors="replace"), str(p.relative_to(REPO)))
+            readers += fap_readers_in(p.read_text(encoding="utf-8", errors="replace"), rel.as_posix())
         if readers:
-            return f"`force_alloc_panic` is read in code: {readers[:3]}"
+            return f"cfg(force_alloc_panic) is read in code: {readers[:3]}"
         return None
+
+    def fap_rule_note(self) -> str:
+        """The COVERED rule's state for a run that SKIPS the row. A source scan is cheap, so the
+        default tier evaluates it too: an edit that breaks the rule shows at every merge check, not
+        only hours into a --heavy run."""
+        reason = self.fap_rule()
+        if reason is None:
+            return "COVERED rule holds (test:release covers it under --heavy)"
+        return f"COVERED rule BROKEN ({reason}): under --heavy this row needs --fap-target-dir"
 
     # --- preflight ----------------------------------------------------------------------------------
 
@@ -1199,7 +1240,10 @@ class Mirror:
         sel_ids = {u.id for u in selected}
         for u in self.units:
             if u.id in skipped:
-                self.results[u.id] = Result("SKIPPED", detail=skipped[u.id])
+                detail = skipped[u.id]
+                if u.job.id == "force-alloc-panic":
+                    detail += "; " + self.fap_rule_note()
+                self.results[u.id] = Result("SKIPPED", detail=detail)
                 continue
             log = self.log_dir / (u.id.replace(":", "_") + ".log")
             kind = u.row.kind
@@ -1329,15 +1373,90 @@ def split_derive_step(derive: str) -> tuple[dict[str, str], str]:
     return heredocs, py.group(1)
 
 
+_LEX_START = re.compile(r"""//|/\*|["'bcr]""")
+_RAW_STR_OPEN = re.compile(r'[bc]?r(#*)"')
+_CHAR_LIT = re.compile(r"b?'(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]{1,8}\}|[^\r\n])|[^\\'\r\n])'")
+_CFG_OPEN = re.compile(r"(?<![A-Za-z0-9_])(cfg_attr|cfg)\s*(?:!\s*)?\(")
+_FAP = re.compile(r"\bforce_alloc_panic\b")
+
+
+def rust_code_only(text: str) -> str:
+    """`text` with every comment, string literal and char literal blanked to spaces, newlines kept.
+
+    A scan over the result sees code only, at the original line numbers. Raw strings (`r#"…"#`,
+    `br"…"`, `cr"…"`), escapes, nested block comments and a char literal that holds a quote (`'"'`)
+    are handled; a lifetime (`'a`) is code and stays.
+    """
+    out = list(text)
+    n = len(text)
+    i = 0
+    while (m0 := _LEX_START.search(text, i)) is not None:
+        i = m0.start()
+        c = text[i]
+        # A `b` / `c` / `r` opens a literal only as a prefix, never inside an identifier.
+        prefix = c in "bcr" and not (i > 0 and (text[i - 1].isalnum() or text[i - 1] == "_"))
+        end = None
+        if c == "/" and text[i + 1] == "/":
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+        elif c == "/":
+            depth, end = 1, i + 2
+            while end < n and depth:
+                if text.startswith("/*", end):
+                    depth, end = depth + 1, end + 2
+                elif text.startswith("*/", end):
+                    depth, end = depth - 1, end + 2
+                else:
+                    end += 1
+        elif prefix and (raw := _RAW_STR_OPEN.match(text, i)) is not None:
+            close = '"' + raw.group(1)
+            k = text.find(close, raw.end())
+            end = n if k < 0 else k + len(close)
+        elif c == '"' or (prefix and text.startswith(('b"', 'c"'), i)):
+            end = text.index('"', i) + 1
+            while end < n and text[end] != '"':
+                end += 2 if text[end] == "\\" else 1
+            end = min(end + 1, n)
+        elif c == "'" or (c == "b" and prefix and text.startswith("b'", i)):
+            lit = _CHAR_LIT.match(text, i)
+            end = lit.end() if lit else None
+        if end is None:
+            i += 1
+            continue
+        for k in range(i, end):
+            if out[k] != "\n":
+                out[k] = " "
+        i = end
+    return "".join(out)
+
+
 def fap_readers_in(text: str, rel: str) -> list[str]:
-    """Code (not comments, not a `--cfg` mention) that names `force_alloc_panic`."""
-    out = []
-    for n, line in enumerate(text.splitlines(), 1):
-        code = line.split("//", 1)[0]
-        for m in re.finditer(r"\bforce_alloc_panic\b", code):
-            if code[: m.start()].rstrip().endswith("--cfg"):
-                continue
-            out.append(f"{rel}:{n}")
+    """`rel:line` of every `cfg` predicate that names `force_alloc_panic`.
+
+    A predicate is the argument of `#[cfg(…)]` or `cfg!(…)`, or the first argument of
+    `#[cfg_attr(…)]`; nested ones and ones split over lines count. A comment, a string literal (an
+    `#[ignore = "…"]` reason), a `--cfg` mention and a bare identifier are not readers: the COVERED
+    rule is about code whose meaning the flag changes.
+    """
+    if "force_alloc_panic" not in text:
+        return []
+    code = rust_code_only(text)
+    out: list[str] = []
+    for m in _CFG_OPEN.finditer(code):
+        depth, j, stop = 1, m.end(), None
+        while j < len(code) and depth:
+            ch = code[j]
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            elif ch == "," and depth == 1 and stop is None and m.group(1) == "cfg_attr":
+                stop = j
+            j += 1
+        for f in _FAP.finditer(code, m.end(), j if stop is None else stop):
+            where = f"{rel}:{code.count(chr(10), 0, f.start()) + 1}"
+            if where not in out:
+                out.append(where)
     return out
 
 

@@ -332,7 +332,11 @@ so a reshaped job exits 2 ("adapter cannot read job X") instead of being skipped
 Statuses: PASS, FAIL, NOT-RUNNABLE (the reason), SKIPPED (not selected: the flag is named; the summary then
 says **PARTIAL MIRROR**), COVERED (another row covers it: `force-alloc-panic` is COVERED by `test:release`
 while no `.rs` reads `cfg(force_alloc_panic)` and the job's `RUSTFLAGS` differ from the top level by that
-flag alone; the rule is re-checked on every run). **Not runnable on this host:** the run half of both
+flag alone). A reader is a `cfg(…)`, `cfg!(…)` or `cfg_attr(…)` predicate that names the flag, nested or
+split over lines; a comment, a string literal (an `#[ignore = "…"]` reason) or a bare identifier is not, and
+the script's self-test pins both sides. The rule is evaluated on every run, the default tier included: there
+the row is SKIPPED and its detail says whether the rule holds, so an edit that breaks it shows at every
+merge check, not hours into a `--heavy` run. **Not runnable on this host:** the run half of both
 `test-linux` legs (no Linux runtime, no WSL), the link half of `bench-compile` (no Linux linker or glibc),
 and the cross build of the two `bench-alloc` feature legs (`libmimalloc-sys`'s build script needs an
 `x86_64-linux-gnu-gcc`), which are checked natively on msvc instead.
