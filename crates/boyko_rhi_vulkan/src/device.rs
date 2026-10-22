@@ -41,7 +41,7 @@ use crate::ffi::*;
 use crate::memory::{BlockPool, DeviceLocalBlock, HostVisibleBlock};
 use crate::pipeline_cache::{
     self, CacheLoad, CacheSave, DeviceIdentity, PipelineCachePolicy, PipelineCacheStore,
-    PipelineCreationStats, PipelineKind, SaveError,
+    PipelineCreationStats, PipelineKind, SaveError, SentinelGuard,
 };
 use crate::rhi_impl::ComputeLayouts;
 
@@ -819,6 +819,10 @@ pub struct VulkanContext {
     /// Where the cache persists — `Some` only under [`PipelineCachePolicy::Persisted`].
     /// Immutable after boot.
     pipeline_cache_store: Option<PipelineCacheStore>,
+    /// The crash-loop guard a loaded blob armed at boot (review r1 W1): `Some` from
+    /// `create_pipeline_cache` until the first [`Self::persist_pipeline_cache`] clears it. A `Cell`
+    /// because that clear runs through `&self`; the context is already `!Sync`.
+    pipeline_cache_guard: Cell<Option<SentinelGuard>>,
     /// What boot did with the cache (the telemetry line's `[cold: ...]` / `[warm: ...]`).
     pipeline_cache_load: CacheLoad,
     /// The creation-feedback counters, updated after every create on the owning thread. A `Cell`
@@ -1337,7 +1341,7 @@ impl VulkanContext {
             driver_version: device_props.driver_version,
             pipeline_cache_uuid: device_props.pipeline_cache_uuid,
         };
-        let (pipeline_cache, pipeline_cache_store, pipeline_cache_load) =
+        let (pipeline_cache, pipeline_cache_store, pipeline_cache_guard, pipeline_cache_load) =
             create_pipeline_cache(&device_fns, device, policy, identity);
 
         // HW-RT rung R2a-1: when `feature="hwrt"` AND the device advertised + enabled ray
@@ -1402,6 +1406,7 @@ impl VulkanContext {
             vb_geometry_table_armed: OnceCell::new(),
             pipeline_cache,
             pipeline_cache_store,
+            pipeline_cache_guard: Cell::new(pipeline_cache_guard),
             pipeline_cache_load,
             pipeline_stats: Cell::new(PipelineCreationStats::default()),
         })
@@ -1529,7 +1534,8 @@ impl VulkanContext {
     /// - Otherwise `vkGetPipelineCacheData` (two-call, `VK_INCOMPLETE` retried once), seal, write
     ///   a temp file and rename it over the file. A payload over the cap removes the file.
     ///
-    /// Either way the crash-loop sentinel is cleared: boot got past every use of a loaded blob.
+    /// Either way the crash-loop guard (if this boot armed one) is cleared: boot got past every use
+    /// of a loaded blob.
     ///
     /// Must run on the owning thread with no pipeline creation in flight (the context is `!Sync`,
     /// and both callers run at quiescent points).
@@ -1537,7 +1543,9 @@ impl VulkanContext {
         let Some(store) = &self.pipeline_cache_store else {
             return CacheSave::NotPersisted;
         };
-        store.clear_sentinel();
+        if let Some(guard) = self.pipeline_cache_guard.take() {
+            guard.clear();
+        }
         if self.pipeline_cache.is_null() {
             return CacheSave::NotPersisted;
         }
@@ -2271,22 +2279,23 @@ unsafe extern "system" fn noop_get_device_proc_addr(
 }
 
 /// BOOT-1 F-A: creates a context's one pipeline cache under `policy` and returns the handle
-/// (`VK_NULL_HANDLE` when off or when creation failed), the store (persisted policies only) and the
-/// load outcome.
+/// (`VK_NULL_HANDLE` when off or when creation failed), the store (persisted policies only), the
+/// crash-loop guard (a loaded blob only) and the load outcome.
 ///
 /// A persisted policy reads and validates the file once ([`PipelineCacheStore::load`]); only a
 /// validated payload is handed to the driver, and the crash-loop sentinel is armed right before it
-/// (ruling 91 Q3). A driver that refuses the validated data gets one retry with no initial data, so
-/// the cache stays persisted and the next save rewrites the file (critique W3); the sentinel is
+/// (ruling 91 Q3). The guard is `None` when a concurrent live boot already holds the sentinel
+/// (review r1 W1). A driver that refuses the validated data gets one retry with no initial data, so
+/// the cache stays persisted and the next save rewrites the file (critique W3); the guard is
 /// cleared at once in that case, because no loaded data is in use any more.
 fn create_pipeline_cache(
     fns: &DeviceFns,
     device: VkDevice,
     policy: PipelineCachePolicy,
     identity: DeviceIdentity,
-) -> (VkPipelineCache, Option<PipelineCacheStore>, CacheLoad) {
+) -> (VkPipelineCache, Option<PipelineCacheStore>, Option<SentinelGuard>, CacheLoad) {
     let (store, load, file) = match policy {
-        PipelineCachePolicy::Off => return (VkPipelineCache::NULL, None, CacheLoad::Off),
+        PipelineCachePolicy::Off => return (VkPipelineCache::NULL, None, None, CacheLoad::Off),
         PipelineCachePolicy::Ephemeral => (None, CacheLoad::Ephemeral, Vec::new()),
         PipelineCachePolicy::Persisted { dir } => {
             let store = PipelineCacheStore::new(&dir, identity);
@@ -2298,20 +2307,18 @@ fn create_pipeline_cache(
         CacheLoad::Loaded { .. } => Some(&file[pipeline_cache::HEADER_SIZE..]),
         _ => None,
     };
-    if initial.is_some()
-        && let Some(store) = &store
-    {
-        store.arm_sentinel();
-    }
+    let mut guard = match (&store, initial) {
+        (Some(store), Some(_)) => store.arm_sentinel(),
+        _ => None,
+    };
     let (handle, load) =
         pipeline_cache::create_with_fallback(load, initial, |data| vk_create_pipeline_cache(fns, device, data));
-    if initial.is_some()
-        && !matches!(load, CacheLoad::Loaded { .. })
-        && let Some(store) = &store
+    if !matches!(load, CacheLoad::Loaded { .. })
+        && let Some(guard) = guard.take()
     {
-        store.clear_sentinel();
+        guard.clear();
     }
-    (handle.unwrap_or(VkPipelineCache::NULL), store, load)
+    (handle.unwrap_or(VkPipelineCache::NULL), store, guard, load)
 }
 
 /// One `vkCreatePipelineCache` call, with `data` as the initial data (or none).

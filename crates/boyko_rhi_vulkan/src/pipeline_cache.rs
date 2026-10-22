@@ -36,11 +36,31 @@
 //! reject a foreign blob there. The exe, the build and the profile are never part of the key: the
 //! SPIR-V is `include_bytes!`-embedded, so a Rust-only rebuild leaves every create-info unchanged and
 //! a `cargo run` after a Rust edit stays warm.
+//!
+//! # The crash-loop guard (ruling 91 Q3; review r1 W1)
+//!
+//! A boot that hands a loaded blob to the driver first arms `<name>.loading` and holds an exclusive
+//! OS lock on it ([`std::fs::File::try_lock`]: `LockFileEx` on Windows, `flock` on Unix) until boot
+//! got past every use of the blob ([`SentinelGuard`]). The next boot reads the sentinel under the
+//! same lock:
+//!
+//! - armed and lockable: the owner's handle closed without a clear, so the process died with the
+//!   blob in the driver. The file is discarded and the cache starts empty.
+//! - armed and locked: a live concurrent boot. The file is per GPU and user, so an editor beside a
+//!   game shares it. That is not a crash, and the file loads as usual.
+//!
+//! The OS drops a lock when its handle closes, and a dying process closes every handle it owns
+//! (`LockFileEx`: "If a process terminates with a portion of a file locked or closes a file that has
+//! outstanding locks, the locks are unlocked by the operating system"; `flock(2)`: the lock is
+//! released when every descriptor of the open file description is closed). So liveness needs no
+//! pid, and a recycled pid cannot pass for a live owner. The sentinel is truncated, never deleted,
+//! so one file object carries both the lock and the armed flag. That is the persistent-lock-file
+//! shape Cargo's `.package-cache` lock uses.
 
 use core::panic::Location;
 use std::ffi::OsString;
 use std::fs;
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -129,8 +149,9 @@ pub enum CacheLoad {
     },
     /// Persisted, and the file was rejected: the cache starts empty.
     Rejected(Reject),
-    /// Persisted, and the previous boot died with a blob handed to the driver (the crash-loop
-    /// sentinel was present): the file was discarded and the cache starts empty.
+    /// Persisted, and a previous boot died with a blob handed to the driver (the crash-loop
+    /// sentinel was armed and no live process held it): the file was discarded and the cache
+    /// starts empty.
     CrashGuard,
     /// Persisted, the file validated, but the driver refused it: the cache was re-created empty
     /// and the next save rewrites the file (critique W3; zeux / Roblox recover the same way).
@@ -447,13 +468,12 @@ impl PipelineCacheStore {
     /// Reads and validates the file once. Returns the outcome and, for [`CacheLoad::Loaded`], the
     /// whole file (its payload is `[HEADER_SIZE..]`); an empty `Vec` otherwise.
     ///
-    /// A crash sentinel left by a previous boot (ruling 91 Q3) wins over everything: that boot died
-    /// after handing this file to the driver, so the file is deleted, the sentinel with it, and the
-    /// cache starts empty — one bad blob cannot brick every boot.
+    /// A sentinel armed by a boot that died (ruling 91 Q3) wins over everything: the file is
+    /// deleted, the sentinel disarmed, and the cache starts empty — one bad blob cannot brick every
+    /// boot. A sentinel a live boot holds is a concurrent boot, not a crash (review r1 W1): the
+    /// file loads as usual (`take_crash` below).
     pub fn load(&self) -> (CacheLoad, Vec<u8>) {
-        if self.sentinel.exists() {
-            let _ = fs::remove_file(&self.path);
-            let _ = fs::remove_file(&self.sentinel);
+        if self.take_crash() {
             report_crash_guard(&self.path);
             return (CacheLoad::CrashGuard, Vec::new());
         }
@@ -489,15 +509,58 @@ impl PipelineCacheStore {
         }
     }
 
-    /// Writes the crash sentinel, right before a loaded blob is handed to the driver. Best effort:
-    /// a failure only disarms the guard.
-    pub fn arm_sentinel(&self) {
-        let _ = fs::write(&self.sentinel, std::process::id().to_le_bytes());
+    /// Whether the sentinel records a boot that died with the blob in the driver, consuming the
+    /// record if so. That is: armed (non-empty) AND lockable, so its owner's handle is closed. Under
+    /// that lock the cache file is deleted and the sentinel disarmed, so exactly one boot reads the
+    /// crash.
+    ///
+    /// Not a crash:
+    /// - no sentinel, or an empty (cleared) one;
+    /// - one another process holds (`WouldBlock`: a concurrent boot, review r1 W1);
+    /// - one that cannot be opened or locked (the guard is best effort, as in
+    ///   [`Self::arm_sentinel`]).
+    ///
+    /// Windows releases a dead process's locks asynchronously ("the time it takes for the operating
+    /// system to unlock these locks depends upon available system resources", `LockFileEx`). A boot
+    /// that races that release reads a live owner and loads the file, and the boot after it reads
+    /// the crash.
+    fn take_crash(&self) -> bool {
+        let Ok(file) = fs::OpenOptions::new().read(true).write(true).open(&self.sentinel) else {
+            return false;
+        };
+        if file.try_lock().is_err() || !file.metadata().is_ok_and(|m| m.len() > 0) {
+            return false;
+        }
+        let _ = fs::remove_file(&self.path);
+        let _ = file.set_len(0);
+        true
     }
 
-    /// Removes the crash sentinel once boot got past every use of the loaded blob.
-    pub fn clear_sentinel(&self) {
-        let _ = fs::remove_file(&self.sentinel);
+    /// Arms the crash sentinel right before a loaded blob is handed to the driver, and returns the
+    /// [`SentinelGuard`] holding it: the sentinel file is created if absent, locked exclusively, and
+    /// its body set to this process's id (non-empty = armed; the id is for a human, never compared).
+    ///
+    /// `None` when another live boot holds the sentinel: that is a concurrent boot, and this one
+    /// runs unguarded because the holder's guard already covers the same blob. Also `None` when the
+    /// file cannot be created, locked or written (best effort: a failure only disarms the guard).
+    /// The body is truncated before the write, so the record of a boot that died after this boot's
+    /// [`Self::load`] is overwritten. This boot hands the driver that same blob, so if the blob is
+    /// what killed that boot, this boot's own record catches it.
+    #[must_use = "dropping the guard without `clear` leaves the sentinel armed: the next boot reads a crash"]
+    pub fn arm_sentinel(&self) -> Option<SentinelGuard> {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.sentinel)
+            .ok()?;
+        file.try_lock().ok()?;
+        if file.set_len(0).and_then(|()| (&file).write_all(&std::process::id().to_le_bytes())).is_err() {
+            let _ = file.set_len(0);
+            return None;
+        }
+        Some(SentinelGuard { file })
     }
 
     /// Atomically replaces the cache file with `file` (a whole sealed file): write
@@ -546,6 +609,30 @@ impl PipelineCacheStore {
                 let _ = fs::remove_file(entry.path());
             }
         }
+    }
+}
+
+/// One boot's hold on the crash-loop sentinel: an exclusive OS lock on `<name>.loading`, whose body
+/// is non-empty while armed. Taken by [`PipelineCacheStore::arm_sentinel`] right before a loaded blob
+/// reaches the driver. Released by [`Self::clear`] once boot got past every use of it.
+///
+/// The lock is the liveness signal (see the module docs): the OS drops it when this handle closes,
+/// and a dying process closes every handle it owns. Dropping a guard without [`Self::clear`] is
+/// therefore what a crash does: the lock goes, the body stays armed, and the next boot discards the
+/// file.
+#[derive(Debug)]
+pub struct SentinelGuard {
+    file: fs::File,
+}
+
+impl SentinelGuard {
+    /// Disarms the sentinel through the still-locked handle (truncates its body to empty), then
+    /// releases the lock by closing the handle. Truncated rather than deleted: a delete would let
+    /// another boot lock a new file under the same name while this one still held the old one.
+    /// Best effort: a failed truncate leaves the sentinel armed, so the next boot starts cold. That
+    /// costs a warm boot, never a crash loop.
+    pub fn clear(self) {
+        let _ = self.file.set_len(0);
     }
 }
 
@@ -715,7 +802,10 @@ mod tests {
 
     use super::*;
 
+    use boyko_log::probe::{first_message, watch_any, watched};
     use proptest::prelude::*;
+
+    use crate::log_probe::{arm, drain, observe_lock};
 
     fn id() -> DeviceIdentity {
         DeviceIdentity {
@@ -963,29 +1053,87 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Ruling 91 Q3: a sentinel left by a boot that died with the blob in the driver discards the
-    /// file, and the boot starts empty; the next boot is a plain cold one.
+    /// Ruling 91 Q3, review r1 W1: a sentinel armed by a boot that DIED discards the file, reports once
+    /// and starts empty; the crash is consumed, so the boot after is a plain cold one. The guard is
+    /// dropped without `clear`, which is what the OS does to a dead process's handles: the lock goes
+    /// and the armed body stays.
+    ///
+    /// The report is a `RhiVulkan` record, and this binary's `observed()` deltas count every one, so
+    /// the test holds the observe lock and drains its record before releasing it (triage r1 F1;
+    /// `boyko_log::probe`'s header). Without that, the W2104 observer read `left: 2, right: 1`.
     #[test]
     #[cfg_attr(miri, ignore = "miri-unsupported: filesystem under isolation")]
     fn crash_sentinel_discards_the_file_and_starts_empty() {
+        let _observe = observe_lock();
+        arm();
         let dir = scratch_dir("sentinel");
         let store = PipelineCacheStore::new(&dir, id());
         let mut scratch = Vec::new();
         assert!(matches!(save_payload(&store, &payload(512), &mut scratch), CacheSave::Saved { .. }));
         assert!(matches!(store.load().0, CacheLoad::Loaded { .. }), "the saved file loads");
         // A boot arms the sentinel before handing the blob over, then dies.
-        store.arm_sentinel();
+        drop(store.arm_sentinel().expect("an unheld sentinel arms"));
+        watch_any();
         let (load, bytes) = store.load();
-        assert_eq!(load, CacheLoad::CrashGuard, "the sentinel wins over a valid file");
+        drain();
+        assert_eq!(load, CacheLoad::CrashGuard, "a dead owner's sentinel wins over a valid file");
         assert!(bytes.is_empty(), "nothing is handed to the driver after a crash");
         assert!(!store.path().exists(), "the file is discarded");
-        assert!(!store.sentinel_path().exists(), "the sentinel is consumed");
-        assert_eq!(store.load().0, CacheLoad::Absent, "the boot after is a plain cold one");
-        // A boot that finishes clears its sentinel, and its file loads again.
+        assert_eq!(watched(), 1, "the crash is reported once");
+        assert!(first_message().contains("the previous boot died"), "{}", first_message());
+        assert_eq!(store.load().0, CacheLoad::Absent, "the crash is consumed: the boot after is a plain cold one");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A boot that gets past every use of its blob clears the sentinel, and its file loads again.
+    /// While one boot holds the sentinel, a second gets no guard of its own: it runs unguarded under
+    /// the holder's. Holds the observe lock because a broken clear would report a crash (F1's class).
+    #[test]
+    #[cfg_attr(miri, ignore = "miri-unsupported: filesystem under isolation")]
+    fn a_cleared_sentinel_is_no_crash_and_a_held_one_arms_once() {
+        let _observe = observe_lock();
+        let dir = scratch_dir("sentinel_clear");
+        let store = PipelineCacheStore::new(&dir, id());
+        let mut scratch = Vec::new();
         assert!(matches!(save_payload(&store, &payload(512), &mut scratch), CacheSave::Saved { .. }));
-        store.arm_sentinel();
-        store.clear_sentinel();
-        assert!(matches!(store.load().0, CacheLoad::Loaded { .. }));
+        let guard = store.arm_sentinel().expect("an unheld sentinel arms");
+        assert!(store.arm_sentinel().is_none(), "a held sentinel gives a concurrent boot no second guard");
+        guard.clear();
+        let after_clear = store.load().0;
+        store.arm_sentinel().expect("a cleared sentinel arms again").clear();
+        let after_rearm = store.load().0;
+        drain();
+        assert!(matches!(after_clear, CacheLoad::Loaded { .. }), "a cleared sentinel is no crash: {after_clear:?}");
+        assert!(matches!(after_rearm, CacheLoad::Loaded { .. }), "a re-armed, cleared one neither: {after_rearm:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Review W1: a sentinel whose owner is still alive is a concurrent boot (an editor and a game, two
+    /// apps on one GPU), not a crash. The second boot loads the file like any warm boot: nothing is
+    /// discarded, nothing is reported, and the live boot's guard stays where it is.
+    #[test]
+    #[cfg_attr(miri, ignore = "miri-unsupported: filesystem under isolation")]
+    fn live_owner_sentinel_neither_discards_nor_reports() {
+        let _observe = observe_lock();
+        arm();
+        let dir = scratch_dir("sentinel_live");
+        let store = PipelineCacheStore::new(&dir, id());
+        let mut scratch = Vec::new();
+        assert!(matches!(save_payload(&store, &payload(512), &mut scratch), CacheSave::Saved { .. }));
+        // Boot A armed the sentinel and is still running: it holds the guard.
+        let boot_a = store.arm_sentinel();
+        watch_any();
+        let (load, bytes) = store.load();
+        drain();
+        assert_eq!(
+            load,
+            CacheLoad::Loaded { bytes: (VK_HEADER_SIZE + 512) as u64 },
+            "boot B, concurrent with a live boot A, must load the file, not treat A as a crash"
+        );
+        assert_eq!(bytes.len(), HEADER_SIZE + VK_HEADER_SIZE + 512, "the whole file is handed over");
+        assert!(store.path().exists(), "a live boot's file is never discarded");
+        assert_eq!(watched(), 0, "a live owner is not a crash, so nothing is reported: {}", first_message());
+        drop(boot_a);
         let _ = fs::remove_dir_all(&dir);
     }
 
