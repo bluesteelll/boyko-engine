@@ -537,6 +537,14 @@ must print `running 1 test` and pass (measured 2026-10-11: 10 of 10, reduce p95 
 run 6's 4-vCPU runner read 270 us for a reduce whose fastest run is 56 us on the dev host, and a
 busy dev host reds it too, which is why no CI job may sweep it in. Every leg runs the gate's
 ratios on the fastest of 32 runs, `g26_the_reduce_dominates_and_scales_with_the_quantile_count`.
+Since 2026-10-22 (ci-fix-2, F7) a third site: `profiling_dyn_zone_cost`'s
+`the_dynamic_gate_beats_the_registry_dereference_it_replaced`, `G17`'s timing A/B (the shipped
+`arm_bit` gate against a registry dereference, at about 0.4 ns/iter on both legs). CI run 39663719484
+read it red in one release leg and green in the other; its property is gated in every leg by
+`g17_the_emission_gate_reads_the_handle_not_the_registry` and `g17_no_emission_item_names_the_registry`.
+It runs on a quiet dev host in release: `cargo test --release -p boyko-diag --test
+profiling_dyn_zone_cost -- --ignored --exact the_dynamic_gate_beats_the_registry_dereference_it_replaced`
+must print `running 1 test`; its printed ratio is a reading, not a verdict.
 
 **No leg: `generator`, `deferred`, `flaky`** (`rg -n '^[^/]*ignore = "(generator|deferred|flaky):'
 -g '*.rs'`, 27 at `7d5a0015`). They must not be swept into a leg. *Generators* assert nothing
