@@ -40,6 +40,7 @@ use boyko_shaderdsl::post::{
 use boyko_shaderdsl::ssao::{SsaoParams as EdslSsaoParams, ssao_estimate_body_params};
 
 use crate::compute::{
+    M2_CERT_EPS, M2_CERT_EVALS, M2_CERT_MIN_PIECE, M2_CERT_TAIL,
     ALPHA_MARGIN, AO_FALLOFF, AO_STEP, AO_STRENGTH, BRICK_CLASS_EMPTY_OUTSIDE, BrickLevelParams,
     CompositeCamera, DEFAULT_LIGHT_DIR, EPS_COARSE, FIELD_LIPSCHITZ_L, GOLDEN_ATLAS_SLOT_MASK, GOLDEN_ATLAS_SLOT_SHIFT,
     GOLDEN_LIGHT_FLAG_CASTS_SHADOW, GOLDEN_LIGHT_KIND_DIRECTIONAL, GOLDEN_LIGHT_KIND_MASK, GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SKY, GOLDEN_LIGHT_KIND_SPOT,
@@ -191,7 +192,11 @@ pub fn lit_store_excess(
 /// channel. The display arm is the pre-PX1a check unchanged; it carries what the count always
 /// budgeted (the host model's 8-bit attribute and shadow-march disagreements with the device), which
 /// in the HDR range exceeds any format bound (`px1a/impl.md` Part 7: a 7 % radiance divergence at a
-/// 2-code display delta on `p6_r1`'s twin spheres). `lsb = 0` is the pure format gate.
+/// 2-code display delta on `p6_r1`'s twin spheres). `lsb = 0` is the pure format gate. That 7 % is
+/// one gNormal code the device converted to the other neighbour (OPEN-ITEMS 15); the suites the
+/// G-buffer seam gate covers (`tests/sdf_gbuffer_hybrid.rs::collect_gbuffer_seam`) compare the
+/// device's own bytes and hold the resolve in radiance only, inside [`resolve_error_floor`]'s derived
+/// floor, so this display arm stays only for the suites not yet migrated (OPEN-ITEMS 18).
 pub fn lit_matches(got: [f32; 3], want: [f32; 3], lsb: u32) -> bool {
     let none = [0.0f32; 3];
     if lit_store_excess(got, want, LIT_TARGET, LIT_ROUNDING[LIT_STORE_PATH], none).iter().all(|&e| e <= 0.0) {
@@ -410,24 +415,52 @@ pub fn host_soft_shadow_ranged<F: Fn([f32; 3]) -> f32>(
     t_max: f32,
     field: &F,
 ) -> f32 {
+    host_soft_shadow_ranged_ex(p, n, l, t_max, field).0
+}
+
+/// How a [`host_soft_shadow_ranged_ex`] march ended — its discrete decisions, which the seam
+/// oracle (OPEN-ITEMS 15) compares between the unperturbed and a perturbed march to tell a smooth
+/// visibility from one sitting on a decision boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShadowExit {
+    /// `n · l <= SHADOW_NDOTL_EPS`: the surface faces away, visibility 0, no march.
+    Facing,
+    /// A sample fell below `SHADOW_HIT_EPS`: visibility 0 (at whichever iteration — the value
+    /// does not depend on it).
+    Hit,
+    /// The march left `t_max` after this iteration.
+    Range(u32),
+    /// The iteration budget ran out.
+    Budget,
+}
+
+/// [`host_soft_shadow_ranged`] that also reports how the march ended. The visibility is the same
+/// value bit for bit (the body is the one march; the plain function returns `.0`).
+pub fn host_soft_shadow_ranged_ex<F: Fn([f32; 3]) -> f32>(
+    p: [f32; 3],
+    n: [f32; 3],
+    l: [f32; 3],
+    t_max: f32,
+    field: &F,
+) -> (f32, ShadowExit) {
     if v_dot(n, l) <= SHADOW_NDOTL_EPS {
-        return 0.0;
+        return (0.0, ShadowExit::Facing);
     }
     let mut res = 1.0_f32;
     let mut t = SHADOW_MINT;
-    for _ in 0..SDF_MAX_IT {
+    for it in 0..SDF_MAX_IT {
         let q = [p[0] + l[0] * t, p[1] + l[1] * t, p[2] + l[2] * t];
         let d = field(q);
         res = res.min(SHADOW_K * d / t);
         if d < SHADOW_HIT_EPS {
-            return 0.0;
+            return (0.0, ShadowExit::Hit);
         }
         t += (d / FIELD_LIPSCHITZ_L).max(SHADOW_MINT_STEP);
         if t > t_max {
-            break;
+            return (res.clamp(0.0, 1.0), ShadowExit::Range(it));
         }
     }
-    res.clamp(0.0, 1.0)
+    (res.clamp(0.0, 1.0), ShadowExit::Budget)
 }
 
 /// The A2 host mirror of `sdf_ao`: a 5-tap ambient-occlusion estimate marching the
@@ -1035,10 +1068,57 @@ pub(crate) fn brick_aabb_span_world(
 /// a grazing silhouette point or a stalled hard crease falls to `None` → the analytic fold, which
 /// resolves the pixel EXACTLY as the OFF path (this erased the BUG-M2-RIM silhouette ring). Mirrors
 /// the shader's refine loop bit-for-bit.
-pub(crate) fn host_m2_surface_hit(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], t_world: f32) -> Option<f32> {
+pub(crate) fn host_m2_surface_hit(
+    edits: &[SdfEdit],
+    atlas: Option<&HostM2Atlas>,
+    ro: [f32; 3],
+    rd: [f32; 3],
+    t_world: f32,
+    counts: Option<&mut M2EvalCounts>,
+) -> Option<(f32, f32)> {
     // The single-level M2 mirror delegates to the level-aware sibling at level-0 geometry
     // ([`BrickLevelParams::m2_near_field`]) — byte-identical to the pre-M4 hardcoded path.
-    host_m2_surface_hit_at(edits, &BrickLevelParams::m2_near_field(), ro, rd, t_world)
+    host_m2_surface_hit_at(edits, &BrickLevelParams::m2_near_field(), atlas, ro, rd, t_world, counts)
+}
+
+/// What one host M2 march evaluated (OPEN-ITEMS 16, the price receipts of `oi1516/cut.md` D16-7):
+/// counted by the host mirror, so the counts describe the GPU's call order (the mirror runs the M1
+/// skip, then M2, then the fold, as the shaders do).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct M2EvalCounts {
+    /// `m2_surface_hit` calls (march points inside the M2 grid).
+    pub calls: u64,
+    /// Calls that committed a hit.
+    pub accepts: u64,
+    /// Exact-field evaluations of the signed refine.
+    pub refine_evals: u64,
+    /// Range evaluations of the first-crossing certificate.
+    pub range_evals: u64,
+    /// Refine-converged hits the certificate refused.
+    pub rejects: u64,
+    /// March points M2 skipped because the ray's certificate had failed (the per-ray latch).
+    pub latch_skips: u64,
+    /// Exact-field evaluations of the analytic fold and re-march.
+    pub fold_evals: u64,
+    /// Of `rejects`: the refusals a certificate started at the march's current `t` would have
+    /// ACCEPTED — the hits only the over-relaxed start point `safe_t + sor_prev` refuses
+    /// (`oi1516/cut.md` D16-4). A witness, not a cost: its probe certificate is not counted in
+    /// `range_evals`.
+    pub start_point_refusals: u64,
+}
+
+impl M2EvalCounts {
+    /// Adds `other` field by field.
+    pub fn add(&mut self, other: &Self) {
+        self.calls += other.calls;
+        self.accepts += other.accepts;
+        self.refine_evals += other.refine_evals;
+        self.range_evals += other.range_evals;
+        self.rejects += other.rejects;
+        self.latch_skips += other.latch_skips;
+        self.fold_evals += other.fold_evals;
+        self.start_point_refusals += other.start_point_refusals;
+    }
 }
 
 /// The level-aware host mirror of the shader's `m2_surface_hit` (M4 Slice C): identical to
@@ -1047,13 +1127,20 @@ pub(crate) fn host_m2_surface_hit(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3],
 /// level's `M2_GRID_DIM³` grid containing `p = ro + rd * t_world`, bakes it at the level's geometry,
 /// solves the JCGT cubic, and validates analytically (the exact-CSG fallback, level-invariant). The
 /// host `select_level` picks `geo`; this mirrors the shader's per-level branch-ladder arm.
+///
+/// Returns `(hit_t, cand_t)`: the refined hit and the cubic candidate it was refined from (the
+/// first-crossing certificate's segment end — a forward walk `hit_t > cand_t` certified its own
+/// `[cand_t, hit_t)`). `atlas` (test-only) supplies the level's tiles pre-baked; `None` bakes the
+/// one tile the call needs, as before.
 pub(crate) fn host_m2_surface_hit_at(
     edits: &[SdfEdit],
     geo: &BrickLevelParams,
+    atlas: Option<&HostM2Atlas>,
     ro: [f32; 3],
     rd: [f32; 3],
     t_world: f32,
-) -> Option<f32> {
+    mut counts: Option<&mut M2EvalCounts>,
+) -> Option<(f32, f32)> {
     let p = [
         ro[0] + rd[0] * t_world,
         ro[1] + rd[1] * t_world,
@@ -1079,6 +1166,9 @@ pub(crate) fn host_m2_surface_hit_at(
     if tx >= M2_GRID_DIM || ty >= M2_GRID_DIM || tz >= M2_GRID_DIM {
         return None;
     }
+    if let Some(c) = counts.as_deref_mut() {
+        c.calls += 1;
+    }
     let cell_min = geo.cell_min([tx, ty, tz]);
 
     // Clip the world ray to the brick AABB.
@@ -1087,9 +1177,15 @@ pub(crate) fn host_m2_surface_hit_at(
     // Bake THIS tile from the authority (the SAME data the level's GPU atlas holds for this cell), then
     // run the JCGT cubic in interior-voxel units (world → voxel: (world - cell_min) / voxel_size). The
     // cubic's local `t` is in WORLD units (rd is divided by voxel_size to keep the world-t metric).
-    let field = edits_field(edits);
-    let mut tile = [0i8; BRICK_VOXELS];
-    fill_brick(&field, cell_min, voxel_size, band_half, geo.c_max, &mut tile);
+    let mut baked = [0i8; BRICK_VOXELS];
+    let tile: &[i8; BRICK_VOXELS] = match atlas {
+        Some(a) => a.tile([tx, ty, tz]),
+        None => {
+            let field = edits_field(edits);
+            fill_brick(&field, cell_min, voxel_size, band_half, geo.c_max, &mut baked);
+            &baked
+        }
+    };
     let ro_v = [
         (p[0] - cell_min[0]) / voxel_size,
         (p[1] - cell_min[1]) / voxel_size,
@@ -1097,7 +1193,7 @@ pub(crate) fn host_m2_surface_hit_at(
     ];
     let rd_v = [rd[0] / voxel_size, rd[1] / voxel_size, rd[2] / voxel_size];
 
-    let local = brick_cubic_hit(&tile, ro_v, rd_v, t_enter, t_exit, band_half)?;
+    let local = brick_cubic_hit(tile, ro_v, rd_v, t_enter, t_exit, band_half)?;
 
     // The candidate world `t` (local is measured from `p`, in world units).
     let cand_t = t_world + local;
@@ -1121,8 +1217,11 @@ pub(crate) fn host_m2_surface_hit_at(
     for _ in 0..M2_REFINE_ITERS {
         let q = [ro[0] + rd[0] * rt, ro[1] + rd[1] * rt, ro[2] + rd[2] * rt];
         let d = sdf_edit_list(edits, q);
+        if let Some(c) = counts.as_deref_mut() {
+            c.refine_evals += 1;
+        }
         if d.abs() < SDF_EPS {
-            return Some(rt);
+            return Some((rt, cand_t));
         }
         // Split the under-relaxed step into a named value then add it (no FMA contraction), so the
         // shader's `step = M2_REFINE_RELAX * d; rt += step;` rounds bit-identically (two roundings).
@@ -1158,13 +1257,157 @@ pub(crate) fn edits_field(edits: &[SdfEdit]) -> SdfEditField {
     field
 }
 
+/// One edit's `[value, slope]` at `p` along the unit `rd` — the certificate's per-edit leaf: the
+/// `f32` Eval instance of [`boyko_shaderdsl::range`]'s bodies, whose `Emit` instance is the GPU
+/// header's generated text (`sdf_m2_certify.hlsli`). The kind dispatch is the field's (`BOX`, then
+/// `CAPSULE`, else sphere).
+fn host_edit_value_slope(e: &SdfEdit, p: [f32; 3], rd: [f32; 3]) -> [f32; 2] {
+    use boyko_shaderdsl::range::{box_value_slope_body, capsule_value_slope_body, sphere_value_slope_body};
+    let c = [e.center[0], e.center[1], e.center[2]];
+    let prm = [e.params[0], e.params[1], e.params[2]];
+    if e.kind == boyko_sdf_math::sdf_kind::BOX {
+        debug_assert!(prm.iter().all(|h| *h >= 0.0), "invariant: a box's half-extents are >= 0 (the convexity contract)");
+        box_value_slope_body::<f32>(p, rd, c, prm)
+    } else if e.kind == boyko_sdf_math::sdf_kind::CAPSULE {
+        capsule_value_slope_body::<f32>(p, rd, c, prm, e.params[3])
+    } else {
+        sphere_value_slope_body::<f32>(p, rd, c, prm[0])
+    }
+}
+
+/// The certificate's `[lo, hi]` of the EXACT field on the ray segment `ro + rd·t`,
+/// `t ∈ [ta, tb]` (`oi1516/cut.md` D16-2): per edit the convex bound
+/// ([`boyko_shaderdsl::range::convex_seg_lo_body`]) and `max` of the end values, then the CSG fold
+/// on intervals — union / intersect pair `lo` with `lo`, subtract pairs `lo` with the subtrahend's
+/// `hi` (after its negation every op is monotone non-decreasing in each operand). An empty list is
+/// `FAR`, certified.
+pub(crate) fn host_field_range(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], ta: f32, tb: f32) -> (f32, f32) {
+    use boyko_shaderdsl::range::convex_seg_lo_body;
+    let n = edits.len().min(MAX_SDF_EDITS);
+    if n == 0 {
+        return (PBR_FAR, PBR_FAR);
+    }
+    let pa = [ro[0] + rd[0] * ta, ro[1] + rd[1] * ta, ro[2] + rd[2] * ta];
+    let pb = [ro[0] + rd[0] * tb, ro[1] + rd[1] * tb, ro[2] + rd[2] * tb];
+    let len = tb - ta;
+    let (mut lo, mut hi) = (PBR_FAR, PBR_FAR);
+    for (i, e) in edits.iter().take(n).enumerate() {
+        let a = host_edit_value_slope(e, pa, rd);
+        let b = host_edit_value_slope(e, pb, rd);
+        let lo_d = convex_seg_lo_body::<f32>(a[0], b[0], a[1], b[1], len);
+        let hi_d = <f32 as boyko_shaderdsl::FieldScalar>::max(a[0], b[0]);
+        debug_assert!(
+            lo_d <= a[0].min(b[0]) || lo_d.is_nan() || a[0].is_nan() || b[0].is_nan(),
+            "invariant: the convex bound never exceeds an end value"
+        );
+        if i == 0 {
+            lo = lo_d;
+            hi = hi_d;
+        } else if e.op == boyko_sdf_math::sdf_op::SUBTRACT {
+            let lo_next = boyko_sdf_math::combine(lo, hi_d, e.op, e.smoothness);
+            hi = boyko_sdf_math::combine(hi, lo_d, e.op, e.smoothness);
+            lo = lo_next;
+        } else {
+            lo = boyko_sdf_math::combine(lo, lo_d, e.op, e.smoothness);
+            hi = boyko_sdf_math::combine(hi, hi_d, e.op, e.smoothness);
+        }
+    }
+    (lo, hi)
+}
+
+/// [`host_field_range`]'s lower bound — the host mirror of the HLSL `field_range_lo`.
+pub(crate) fn host_field_range_lo(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], ta: f32, tb: f32) -> f32 {
+    host_field_range(edits, ro, rd, ta, tb).0
+}
+
+/// The M2 FIRST-CROSSING CERTIFICATE (`oi1516/cut.md` D16-1/D16-3, the host mirror of the HLSL
+/// `m2_first_crossing_certified`): `true` iff the exact field is proven above [`M2_CERT_EPS`] on
+/// `[a, goal]` — no crossing there. Certify-or-subdivide: the whole remaining segment first, a
+/// certified piece doubles the next, a refused piece halves; a piece shorter than
+/// [`M2_CERT_MIN_PIECE`] or [`M2_CERT_EVALS`] range evaluations refuses (sound either way: the
+/// analytic march takes the ray). `goal <= a` is certified with no evaluation.
+pub(crate) fn host_m2_first_crossing_certified(
+    edits: &[SdfEdit],
+    ro: [f32; 3],
+    rd: [f32; 3],
+    a: f32,
+    goal: f32,
+    mut counts: Option<&mut M2EvalCounts>,
+) -> bool {
+    use boyko_shaderdsl::FieldScalar;
+    let mut lo_t = a;
+    let mut step = goal - a;
+    for _ in 0..M2_CERT_EVALS {
+        if lo_t >= goal {
+            return true;
+        }
+        let hi_t = FieldScalar::min(lo_t + step, goal);
+        if let Some(c) = counts.as_deref_mut() {
+            c.range_evals += 1;
+        }
+        if host_field_range_lo(edits, ro, rd, lo_t, hi_t) > M2_CERT_EPS {
+            lo_t = hi_t;
+            step *= 2.0;
+        } else {
+            step *= 0.5;
+            if step < M2_CERT_MIN_PIECE {
+                return false;
+            }
+        }
+    }
+    lo_t >= goal
+}
+
+/// The certificate's segment end for a refined M2 hit: the candidate itself for a FORWARD walk
+/// (`hit_t > cand_t`: the walk's own under-relaxed sphere trace already proved `[cand_t, hit_t)`
+/// free, and `f(cand_t) >= EPS`), else `hit_t − M2_CERT_TAIL` (a backward walk or an immediate
+/// accept: the hit may sit up to `EPS` inside, so the crossing is somewhere in the tail).
+#[inline]
+pub(crate) fn m2_cert_goal(hit_t: f32, cand_t: f32) -> f32 {
+    if hit_t > cand_t { cand_t } else { hit_t - M2_CERT_TAIL }
+}
+
+/// One clip-map level's `M2_GRID_DIM³` atlas tiles baked once from the scene (test-only setup: the
+/// many-scene battery asks the host M2 mirror thousands of times per scene, and re-baking the tile
+/// per call is the cost; the bytes are the per-call bake's).
+pub struct HostM2Atlas {
+    tiles: Vec<[i8; BRICK_VOXELS]>,
+}
+
+impl HostM2Atlas {
+    /// Bakes every tile of the level `geo` from `edits`.
+    pub fn bake(edits: &[SdfEdit], geo: &BrickLevelParams) -> Self {
+        let field = edits_field(edits);
+        let dim = M2_GRID_DIM;
+        let mut tiles = vec![[0i8; BRICK_VOXELS]; (dim * dim * dim) as usize];
+        for tz in 0..dim {
+            for ty in 0..dim {
+                for tx in 0..dim {
+                    let i = ((tz * dim + ty) * dim + tx) as usize;
+                    fill_brick(&field, geo.cell_min([tx, ty, tz]), geo.voxel_size, geo.band_half, geo.c_max, &mut tiles[i]);
+                }
+            }
+        }
+        Self { tiles }
+    }
+
+    /// The baked tile of grid cell `cell`.
+    fn tile(&self, cell: [u32; 3]) -> &[i8; BRICK_VOXELS] {
+        let dim = M2_GRID_DIM;
+        &self.tiles[((cell[2] * dim + cell[1]) * dim + cell[0]) as usize]
+    }
+}
+
 /// M2 — the trilinear+JCGT-cubic SURFACE-brick golden. Identical to
-/// [`golden_composite_pixel_brick`] but the PRIMARY march runs the M2 SURFACE-brick path when
-/// `brick_trilinear == true`: at each march point inside the bounded M2 grid the atlas cubic
-/// ([`host_m2_surface_hit`]) is tried; a hit TERMINATES the march at the analytically-validated
-/// `t` (hit/normal/shade stay ANALYTIC — C1), and a no-crossing / cleared-refine falls through to
-/// the M1 step (empty-skip when `brick_enabled`, else the analytic fold). INDEPENDENT of
-/// `brick_enabled` (the two gates are orthogonal).
+/// [`golden_composite_pixel_brick`] but the PRIMARY march ([`golden_primary_hit_brick_m2`]) runs the
+/// M2 SURFACE-brick path when `brick_trilinear == true`: at each march point the M1 empty skip runs
+/// first (when `brick_enabled`), then, inside the bounded M2 grid, the atlas cubic
+/// ([`host_m2_surface_hit`]); a refine-converged hit whose first crossing is certified TERMINATES
+/// the march at the analytically-validated `t` (hit/normal/shade stay ANALYTIC — C1), and a
+/// no-crossing / cleared-refine / refused one falls through to the analytic fold. That is the
+/// shaders' order; before OPEN-ITEMS 16 the host tried M2 before the M1 skip (critique O4 of
+/// check 16: the same candidate, other call counts). INDEPENDENT of `brick_enabled` (the two
+/// gates are orthogonal).
 ///
 /// With `brick_trilinear == false` this delegates to [`golden_composite_pixel_brick`] —
 /// BYTE-IDENTICAL to the M1 golden (the M2 0%-gate). This is the bit-exact reference the GPU M2
@@ -1198,11 +1441,61 @@ pub fn golden_composite_pixel_brick_m2(
 
     let has_mesh = mesh_depth < MESH_DEPTH_CLEAR;
     let t_mesh = if has_mesh { depth_to_t(mesh_depth) } else { 1.0e30 };
+    let (hit, t) = golden_primary_hit_brick_m2(edits, t_mesh, ro, rd, omega, brick_enabled, grid, cells, None, None).hit_t;
 
+    let color = if hit && t < t_mesh {
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let n = sdf_edit_list_normal(edits, p);
+        host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, light_dir, lighting_flags, &|q| {
+            sdf_edit_list(edits, q)
+        })
+    } else if has_mesh {
+        MESH_COLOR
+    } else {
+        SDF_BACKGROUND
+    };
+    pack_rgba(color)
+}
+
+/// What [`golden_primary_hit_brick_m2`]'s march ended with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct M2PrimaryHit {
+    /// `(hit, t)`.
+    pub hit_t: (bool, f32),
+    /// The certified M2 step committed the hit (else the analytic fold or a miss).
+    pub by_m2: bool,
+    /// Both the main march and the plain re-march ran out of iterations (a budget artifact).
+    pub exhausted: bool,
+}
+
+/// The primary march of [`golden_composite_pixel_brick_m2`] (M2 on) for the ray `ro + rd·t`
+/// against a mesh at `t_mesh` (`1.0e30` = none), counting what it evaluates into `counts`. In the
+/// shaders' order: the M1 empty skip (when `brick_enabled`), then the M2 SURFACE-brick step
+/// ([`host_m2_surface_hit`]) — a refine-converged hit commits ONLY when the first-crossing
+/// certificate ([`host_m2_first_crossing_certified`]) proves no crossing on `[a, goal]`, where `a`
+/// is the last point the march itself certified (`safe_t + sor_prev` past an over-relaxed step,
+/// else `t`; `oi1516/cut.md` D16-4) and `goal` is [`m2_cert_goal`]; a refused hit latches M2 off
+/// for the rest of the ray (D16-5) — then the analytic fold with the B1 over-relaxation; the
+/// exhaustion re-march stays analytic (C1). `atlas` pre-bakes the level-0 tiles (test setup).
+#[allow(clippy::too_many_arguments)]
+pub fn golden_primary_hit_brick_m2(
+    edits: &[SdfEdit],
+    t_mesh: f32,
+    ro: [f32; 3],
+    rd: [f32; 3],
+    omega: f32,
+    brick_enabled: bool,
+    grid: &PointerGrid,
+    cells: &[u32],
+    atlas: Option<&HostM2Atlas>,
+    mut counts: Option<&mut M2EvalCounts>,
+) -> M2PrimaryHit {
     let mut t = 0.0_f32;
     let t_seed = t;
     let mut omega = omega; // [1.0, 1.99]; sor-fail latches it to 1.0
     let mut hit = false;
+    let mut by_m2 = false;
+    let mut m2_trust = true;
     let mut safe_t = 0.0_f32;
     let mut sor_prev = 0.0_f32;
     let mut sor_step_prev = 0.0_f32;
@@ -1214,19 +1507,10 @@ pub fn golden_composite_pixel_brick_m2(
         }
         let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
 
-        // M2 SURFACE-brick path: try the atlas cubic at `p`. A hit terminates the march at the
-        // analytically-validated `t` (the hit/normal/shade stay analytic — C1). INDEPENDENT of the
-        // M1 empty-skip below: the M2 step is taken FIRST (it owns the SURFACE cells the empty-skip
-        // never skips), and a no-crossing falls through to the M1 / analytic step.
-        if let Some(m2_hit_t) = host_m2_surface_hit(edits, ro, rd, t) {
-            hit = true;
-            exhausted = false; // M2 cubic+analytic-validated convergence
-            t = m2_hit_t;
-            break;
-        }
-
-        // M1 empty skip (when on): an EmptyOutside cell at `p` steps to the brick AABB exit. The
-        // SURFACE cells the M2 step owns are NOT EmptyOutside, so this only accelerates EMPTY space.
+        // M1 empty skip (when on): an EmptyOutside cell at `p` steps to the brick AABB exit — FIRST,
+        // as the shaders run it (`sdf_gbuffer_composite.hlsl`'s M1 block precedes the M2 block), so
+        // the host's M2 calls land on the same march points as the GPU's. The SURFACE cells the M2
+        // step owns are NOT EmptyOutside, so this only accelerates EMPTY space.
         if brick_enabled
             && let Some((class, cell_min)) = host_brick_cell(grid, cells, p)
             && class == BRICK_CLASS_EMPTY_OUTSIDE
@@ -1240,7 +1524,40 @@ pub fn golden_composite_pixel_brick_m2(
             continue; // skip the analytic fold this step
         }
 
+        // M2 SURFACE-brick path: try the atlas cubic at `p`. A refine-converged hit that the
+        // first-crossing certificate proves FIRST terminates the march (the hit/normal/shade stay
+        // analytic — C1); a refused one latches M2 off for this ray; a no-crossing falls through.
+        if m2_trust {
+            if let Some((m2_hit_t, cand_t)) = host_m2_surface_hit(edits, atlas, ro, rd, t, counts.as_deref_mut()) {
+                let a = if omega > 1.0 && it > 0 { safe_t + sor_prev } else { t };
+                if host_m2_first_crossing_certified(edits, ro, rd, a, m2_cert_goal(m2_hit_t, cand_t), counts.as_deref_mut()) {
+                    if let Some(c) = counts.as_deref_mut() {
+                        c.accepts += 1;
+                    }
+                    hit = true;
+                    by_m2 = true;
+                    exhausted = false; // M2 cubic+analytic-validated, certified convergence
+                    t = m2_hit_t;
+                    break;
+                }
+                if let Some(c) = counts.as_deref_mut() {
+                    c.rejects += 1;
+                    // The D16-4 witness: would the naive start `t` have certified this hit?
+                    let goal = m2_cert_goal(m2_hit_t, cand_t);
+                    if a < t && host_m2_first_crossing_certified(edits, ro, rd, t, goal, None) {
+                        c.start_point_refusals += 1;
+                    }
+                }
+                m2_trust = false;
+            }
+        } else if let Some(c) = counts.as_deref_mut() {
+            c.latch_skips += 1;
+        }
+
         let d = sdf_edit_list(edits, p);
+        if let Some(c) = counts.as_deref_mut() {
+            c.fold_evals += 1;
+        }
         if d < SDF_EPS {
             hit = true;
             exhausted = false; // converged
@@ -1279,6 +1596,9 @@ pub fn golden_composite_pixel_brick_m2(
             }
             let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
             let d = sdf_edit_list(edits, p);
+            if let Some(c) = counts.as_deref_mut() {
+                c.fold_evals += 1;
+            }
             if d < SDF_EPS {
                 hit = true;
                 break;
@@ -1288,20 +1608,10 @@ pub fn golden_composite_pixel_brick_m2(
                 break;
             }
         }
+        // `exhausted` now reports the re-march's own budget: a ray neither pass resolved.
+        exhausted = !hit && t <= SDF_T_MAX && t < t_mesh;
     }
-
-    let color = if hit && t < t_mesh {
-        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
-        let n = sdf_edit_list_normal(edits, p);
-        host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, light_dir, lighting_flags, &|q| {
-            sdf_edit_list(edits, q)
-        })
-    } else if has_mesh {
-        MESH_COLOR
-    } else {
-        SDF_BACKGROUND
-    };
-    pack_rgba(color)
+    M2PrimaryHit { hit_t: (hit, t), by_m2, exhausted }
 }
 
 /// The host mirror of the shader's `select_level` (M4 Slice C): the FINEST enclosing clip-map level
@@ -1391,10 +1701,53 @@ pub fn golden_composite_pixel_brick_m4(
     let has_mesh = mesh_depth < MESH_DEPTH_CLEAR;
     let t_mesh = if has_mesh { depth_to_t(mesh_depth) } else { 1.0e30 };
 
+    let (hit, t) = golden_primary_hit_brick_m4(
+        edits, t_mesh, ro, rd, omega, brick_enabled, brick_levels, params, level_grids,
+    )
+    .hit_t;
+
+    let color = if hit && t < t_mesh {
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let n = sdf_edit_list_normal(edits, p);
+        host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, light_dir, lighting_flags, &|q| {
+            sdf_edit_list(edits, q)
+        })
+    } else if has_mesh {
+        MESH_COLOR
+    } else {
+        SDF_BACKGROUND
+    };
+    pack_rgba(color)
+}
+
+/// The primary march of [`golden_composite_pixel_brick_m4`] (M2 on) for the ray `ro + rd·t`
+/// against a mesh at `t_mesh` (`1.0e30` = none): per march point the finest enclosing level
+/// ([`host_select_level`]), the M1 empty skip at that level's grid (when `brick_enabled`), then the
+/// M2 SURFACE-brick step at that level ([`host_m2_surface_hit_at`]) whose refine-converged hit
+/// commits only when the first-crossing certificate proves `[a, goal]` free — `a` the last point
+/// the march itself certified (`safe_t + sor_prev` past an over-relaxed step, else `t`;
+/// `oi1516/cut.md` D16-4) — and a refused one latches M2 off for the ray; then the analytic fold
+/// with the B1 over-relaxation; the exhaustion re-march stays analytic (C1). The ray-level form of
+/// the M4 mirror, as [`golden_primary_hit_brick_m2`] is of the M2 one (OI1516 round 1: the gate of
+/// the start point reads its `t` and `by_m2`).
+#[allow(clippy::too_many_arguments)]
+pub fn golden_primary_hit_brick_m4(
+    edits: &[SdfEdit],
+    t_mesh: f32,
+    ro: [f32; 3],
+    rd: [f32; 3],
+    omega: f32,
+    brick_enabled: bool,
+    brick_levels: u32,
+    params: &M4GridParams,
+    level_grids: &[(PointerGrid, &[u32])],
+) -> M2PrimaryHit {
     let mut t = 0.0_f32;
     let t_seed = t;
     let mut omega = omega; // [1.0, 1.99]; sor-fail latches it to 1.0
     let mut hit = false;
+    let mut by_m2 = false;
+    let mut m2_trust = true;
     let mut safe_t = 0.0_f32;
     let mut sor_prev = 0.0_f32;
     let mut sor_step_prev = 0.0_f32;
@@ -1410,19 +1763,7 @@ pub fn golden_composite_pixel_brick_m4(
         // ⇒ fold the analytic field, exactly as M2 does outside its single grid).
         let lvl = host_select_level(params, brick_levels, p);
 
-        // M2 SURFACE-brick path at the selected level: a hit terminates the march at the
-        // analytically-validated `t`. Mirrors the shader's per-level branch-ladder (lvl >= 0 arm).
-        if let Some(level) = lvl {
-            let geo = BrickLevelParams::at_level_from_params(params, level);
-            if let Some(m4_hit_t) = host_m2_surface_hit_at(edits, &geo, ro, rd, t) {
-                hit = true;
-                exhausted = false; // M2 cubic+analytic-validated convergence
-                t = m4_hit_t;
-                break;
-            }
-        }
-
-        // M1 empty skip (when on) at the selected level's EMPTY-SKIP grid: an EmptyOutside cell steps to
+        // M1 empty skip FIRST (the shaders' order: the M1 block precedes the M2 block), at the selected level's EMPTY-SKIP grid: an EmptyOutside cell steps to
         // the brick AABB exit. `level_grids[level]` is the empty-skip grid the GPU's `PointerGrid{level}`
         // holds — DISTINCT from the surface atlas grid the M2 step above reads (level 0's empty-skip is
         // the FINE `16³@0.5` near-field grid `pc.grid_*` carries, matching M2 bit-for-bit; coarse levels
@@ -1441,6 +1782,24 @@ pub fn golden_composite_pixel_brick_m4(
                 break;
             }
             continue; // skip the analytic fold this step
+        }
+
+        // M2 SURFACE-brick path at the selected level: a certified hit terminates the march at the
+        // analytically-validated `t`; a refused one latches M2 off for this ray (as the M2 golden).
+        // Mirrors the shader's per-level branch-ladder (lvl >= 0 arm).
+        if m2_trust && let Some(level) = lvl {
+            let geo = BrickLevelParams::at_level_from_params(params, level);
+            if let Some((m4_hit_t, cand_t)) = host_m2_surface_hit_at(edits, &geo, None, ro, rd, t, None) {
+                let a = if omega > 1.0 && it > 0 { safe_t + sor_prev } else { t };
+                if host_m2_first_crossing_certified(edits, ro, rd, a, m2_cert_goal(m4_hit_t, cand_t), None) {
+                    hit = true;
+                    by_m2 = true;
+                    exhausted = false; // M2 cubic+analytic-validated, certified convergence
+                    t = m4_hit_t;
+                    break;
+                }
+                m2_trust = false;
+            }
         }
 
         let d = sdf_edit_list(edits, p);
@@ -1491,20 +1850,10 @@ pub fn golden_composite_pixel_brick_m4(
                 break;
             }
         }
+        // `exhausted` now reports the re-march's own budget: a ray neither pass resolved.
+        exhausted = !hit && t <= SDF_T_MAX && t < t_mesh;
     }
-
-    let color = if hit && t < t_mesh {
-        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
-        let n = sdf_edit_list_normal(edits, p);
-        host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, light_dir, lighting_flags, &|q| {
-            sdf_edit_list(edits, q)
-        })
-    } else if has_mesh {
-        MESH_COLOR
-    } else {
-        SDF_BACKGROUND
-    };
-    pack_rgba(color)
+    M2PrimaryHit { hit_t: (hit, t), by_m2, exhausted }
 }
 
 /// A host material-table element mirroring `boyko_render::material::MaterialGpu` (3
@@ -2186,9 +2535,12 @@ fn golden_sky_background(rd: [f32; 3], header: &GoldenLightHeader, lights: &[Gol
     Some(sky)
 }
 
-/// The per-pixel G-buffer attributes the PBR MVP-2 marcher writes, modelling the EXACT GPU
-/// UNORM pack so [`golden_deferred_resolve`] can re-decode them and run the host BRDF
-/// within ±2/255 of the GPU. On the mask == 0 arms (mesh / background / empty) `base_rgb`
+/// The per-pixel G-buffer attributes the PBR MVP-2 marcher writes, with the UNORM store modelled as
+/// round-half-up (`(x·255 + 0.5)`), so [`golden_deferred_resolve`] can re-decode them and run the
+/// host BRDF. Away from a .5 tie the device stores the same byte; at a tie it may store the other
+/// neighbour inside the D3D 0.6-ULP conversion window (settle E15: exact ties and fractions up to
+/// 0.056 above them stored low on the RTX 3060), which [`attribute_byte_verdict`] admits and the
+/// seam gate reports. On the mask == 0 arms (mesh / background / empty) `base_rgb`
 /// is the RAW quantized base — a table WITHOUT a SKY entry keeps the byte-identical
 /// pass-through of this field (the 0%-gate); with a SKY entry the resolve renders the
 /// procedural sky over it instead (see [`golden_deferred_resolve`]'s doc).
@@ -2360,7 +2712,8 @@ pub fn golden_marcher_attributes(
         }
     }
 
-    // Quantize a `[0,1]` scalar to a byte with the GPU UNORM store's `(x*255+0.5)` rounding.
+    // Quantize a `[0,1]` scalar to a byte, round-half-up (`(x*255+0.5)`): the D3D reference rule.
+    // The device may store the other neighbour inside its 0.6-ULP window (`attribute_byte_verdict`).
     let q8 = |x: f32| -> u8 { (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8 };
     // The R8G8B8 bytes a `pack_rgba` of `c` would store (low 3 bytes of `0xAABBGGRR`).
     let base_bytes = |c: [f32; 3]| -> [u8; 3] {
@@ -2442,9 +2795,11 @@ pub fn golden_marcher_attributes(
         //     Mirror that with `t_mesh` so the host oracle == the GPU on every equivalence golden.
         //
         // The harness quad is fronto-parallel (+Z); the GPU reads the raster normal back from
-        // gNormal and `oct_decode`s it, and the oct round-trip of (0,0,1) is EXACT, so the host
-        // normal == the GPU's decoded normal bit-for-bit. `P_mesh = ro + rd * t_mesh` mirrors the
-        // marcher's reconstruct.
+        // gNormal and `oct_decode`s it. (0,0,1) encodes to the exact .5 tie 127.5, which the host
+        // stores as 128 and this device as 127 (settle E15, every mesh texel), so the device's decoded
+        // normal is tilted ~0.011 rad from the host's (0,0,1): immaterial at NoL ~ 1 under the
+        // replayed oracle, and the seam gate reads the device's own bytes. `P_mesh = ro + rd *
+        // t_mesh` mirrors the marcher's reconstruct.
         let n = [0.0_f32, 0.0, 1.0];
         let oct = oct_encode(n);
         let p_mesh = [
@@ -3572,7 +3927,32 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
     field: &F,
     ssao: f32,
 ) -> [f32; 3] {
-    let base = [
+    resolve_shadowed_impl(attrs, ro, rd, materials, header, lights, field, ssao, &mut NoResolveHooks)
+}
+
+/// The ONE body of the shadowed table resolve: [`golden_deferred_resolve_table_shadowed_ssao`]
+/// runs it with [`NoResolveHooks`] (every site returns its value unchanged, so the result is bit
+/// for bit the resolve before OPEN-ITEMS 15), and the seam oracle ([`resolve_error_floor`],
+/// [`golden_deferred_resolve_table_shadowed_traced`]) runs it with hooks that see every
+/// device-host divergence site with its first-order budget, every additive term of the lit sum and
+/// every discrete decision.
+#[allow(clippy::too_many_arguments)]
+fn resolve_shadowed_impl<F: Fn([f32; 3]) -> f32, H: ResolveHooks>(
+    attrs: MarcherAttributes,
+    ro: [f32; 3],
+    rd: [f32; 3],
+    materials: &[GoldenMaterial],
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+    field: &F,
+    ssao: f32,
+    hooks: &mut H,
+) -> [f32; 3] {
+    use SiteKind as K;
+    let site = |kind: SiteKind, light: usize, comp: usize| ResolveSite { kind, light, comp };
+    let pixel = usize::MAX;
+
+    let base0 = [
         attrs.base_rgb[0] as f32 / 255.0,
         attrs.base_rgb[1] as f32 / 255.0,
         attrs.base_rgb[2] as f32 / 255.0,
@@ -3582,10 +3962,14 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
         // the resolve's background branch) when the table carries a SKY entry; otherwise the
         // scene-linear background constant the no-SkyLight arm stores (render wave PX1a D-S3,
         // ruling 67 W4: `deferred_pbr.hlsl`'s `lit = LIT_BACKGROUND_SCENE`, not `base`).
+        hooks.decision(Decision::Background);
         return lit_store(golden_sky_background(rd, header, lights).unwrap_or(LIT_BACKGROUND_SCENE));
     }
+    let base: [f32; 3] =
+        core::array::from_fn(|c| hooks.site(site(K::Base, pixel, c), base0[c], budget_rel(base0[c], 3.0)));
 
-    let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
+    let n0 = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
+    let n: [f32; 3] = core::array::from_fn(|k| hooks.site(site(K::Normal, pixel, k), n0[k], 30.0 * U));
     let mat = materials
         .get(attrs.mat_id as usize)
         .copied()
@@ -3596,47 +3980,63 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
     let reflectance = mat.mrr[2];
     let a = roughness * roughness;
     let dielectric_f0 = 0.16 * reflectance * reflectance;
-    let f0 = [
-        dielectric_f0 + (base[0] - dielectric_f0) * metallic,
-        dielectric_f0 + (base[1] - dielectric_f0) * metallic,
-        dielectric_f0 + (base[2] - dielectric_f0) * metallic,
-    ];
-    let diffuse_color = [
-        base[0] * (1.0 - metallic),
-        base[1] * (1.0 - metallic),
-        base[2] * (1.0 - metallic),
-    ];
+    let f0: [f32; 3] = core::array::from_fn(|c| {
+        let x = dielectric_f0 + (base[c] - dielectric_f0) * metallic;
+        hooks.site(site(K::F0, pixel, c), x, budget_rel(x, 6.0))
+    });
+    let diffuse_color: [f32; 3] = core::array::from_fn(|c| {
+        let x = base[c] * (1.0 - metallic);
+        hooks.site(site(K::Diffuse, pixel, c), x, budget_rel(x, 4.0))
+    });
 
     let v = [-rd[0], -rd[1], -rd[2]];
-    let nov = v_dot(n, v).max(1e-4);
-    let shadow = attrs.shadow as f32 / 255.0;
-    let ao = attrs.ao as f32 / 255.0;
+    // Every dot product's site sits BEFORE its clamp: a clamped value is not on the clamp's
+    // decision boundary, so perturbing it after the clamp would flip a gate that has margin.
+    let nov = hooks.site(site(K::NoV, pixel, 0), v_dot(n, v), 6.0 * U).max(1e-4);
+    let shadow0 = attrs.shadow as f32 / 255.0;
+    let shadow = hooks.site(site(K::ShadowDec, pixel, 0), shadow0, budget_rel(shadow0, 3.0));
+    let ao0 = attrs.ao as f32 / 255.0;
+    let ao = hooks.site(site(K::AoDec, pixel, 0), ao0, budget_rel(ao0, 3.0));
     // Render P7: the SSAO combine (host mirror of the resolve's structural `if`). On a
     // `ssao_mode() == 0` scene `ao_final == ao` (the 0%-gate).
     let ao_final = ssao_combine(header.ssao_mode(), ao, attrs.view_t, ssao);
     let pi = core::f32::consts::PI;
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
-    let hemi = v_dot(n, UP) * 0.5 + 0.5;
+    let hemi0 = v_dot(n, UP) * 0.5 + 0.5;
+    let hemi = hooks.site(site(K::Hemi, pixel, 0), hemi0, 2.0 * U);
     // PBR P0-D: the SAME per-pixel term the resolve hoists before its light loop, reused at
     // every specular site below (direct directional/point/spot + sky ambient).
-    let dfg_v = env_brdf_approx(roughness, nov);
-    let energy_comp = multi_scatter_energy_comp(dfg_v, f0);
+    let dfg0 = env_brdf_approx(roughness, nov);
+    // The device's `exp2(-9.28 * NoV)` (its argument rounded once, then scaled by the fit's 1.04)
+    // plus ~8 roundings of the Karis fit's arithmetic, on both lanes.
+    let dfg_exp2 = {
+        let y = -9.28 * nov;
+        1.04 * budget_exp2(y, 2.0 * U * y.abs()) * y.exp2()
+    };
+    let dfg_v = [
+        hooks.site(site(K::Dfg, pixel, 0), dfg0[0], dfg_exp2 + 16.0 * U * dfg0[0].abs()),
+        hooks.site(site(K::Dfg, pixel, 1), dfg0[1], dfg_exp2 + 16.0 * U * dfg0[1].abs()),
+    ];
+    let energy0 = multi_scatter_energy_comp(dfg_v, f0);
+    let energy_comp: [f32; 3] =
+        core::array::from_fn(|c| hooks.site(site(K::Energy, pixel, c), energy0[c], budget_rel(energy0[c], 12.0)));
     // PBR P1: the reflection vector, hoisted ONCE (mirrors the resolve's hoisted `R`) — feeds
     // BOTH the sky-gradient ambient specular below AND the per-directional HDR sun-disc term.
     // reflect(-v, n) == reflect(rd, n) since v == -rd (double negation is exact).
-    let r = v_reflect(rd, n);
+    let r0 = v_reflect(rd, n);
+    let r: [f32; 3] = core::array::from_fn(|k| hooks.site(site(K::Refl, pixel, k), r0[k], 8.0 * U));
     // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
     // `specular_ao`'s doc) and reused at every ambient-specular site below.
-    let spec_ao = specular_ao(nov, roughness, ao_final);
+    let spec_ao0 = specular_ao(nov, roughness, ao_final);
+    let spec_ao = hooks.site(site(K::SpecAo, pixel, 0), spec_ao0, budget_spec_ao(nov, roughness, ao_final));
 
     // P6 R1: the shadow_mode gate + the surface world position `P` (hoisted, mirroring the
     // shader) + the dominant-N march counter.
     let multi_light = header.shadow_mode() != 0;
-    let p = [
-        ro[0] + rd[0] * attrs.view_t,
-        ro[1] + rd[1] * attrs.view_t,
-        ro[2] + rd[2] * attrs.view_t,
-    ];
+    let p: [f32; 3] = core::array::from_fn(|k| {
+        let x = ro[k] + rd[k] * attrs.view_t;
+        hooks.site(site(K::Pos, pixel, k), x, 3.0 * U * (ro[k].abs() + (rd[k] * attrs.view_t).abs()))
+    });
     // Normal-offset start bias for the per-light ranged shadow march: lift the origin off
     // the surface so grazing rays clear it (mirrors the resolve's
     // `sdf_soft_shadow_ranged(P + n*SHADOW_NORMAL_BIAS, n, l, t_max)`).
@@ -3651,11 +4051,12 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
     let mut ambient = [0.0_f32; 3];
     let mut primary_dir_seen = false;
     let count = header.l0a_count() as usize;
-    for li in lights.iter().take(count) {
+    for (j, li) in lights.iter().take(count).enumerate() {
         match li.kind() {
             GOLDEN_LIGHT_KIND_DIRECTIONAL => {
-                let l = v_normalize([li.dir_kind[0], li.dir_kind[1], li.dir_kind[2]]);
-                let nol = v_dot(n, l).max(0.0);
+                let l0 = v_normalize([li.dir_kind[0], li.dir_kind[1], li.dir_kind[2]]);
+                let l: [f32; 3] = core::array::from_fn(|k| hooks.site(site(K::LightDir, j, k), l0[k], 22.0 * U));
+                let nol = hooks.site(site(K::NoL, j, 0), v_dot(n, l), 6.0 * U).max(0.0);
                 // The primary directional KEEPS gMaterial.r; an extra flagged directional
                 // marches with t_max = SDF_T_MAX. `vis` defaults to `shadow` (legacy).
                 let mut vis = shadow;
@@ -3666,27 +4067,39 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
                     && marched < MAX_SDF_SHADOW_CASTERS_PER_PIXEL
                     && nol > SHADOW_NDOTL_EPS
                 {
-                    vis = host_soft_shadow_ranged(pb, n, l, SDF_T_MAX, field);
+                    let (v0, exit) = host_soft_shadow_ranged_ex(pb, n, l, SDF_T_MAX, field);
+                    hooks.decision(Decision::March(j, exit));
+                    vis = hooks.site(site(K::Vis, j, 0), v0, budget_rel(v0, 8.0));
                     marched += 1;
+                } else if multi_light && li.casts_sdf_shadow() {
+                    hooks.decision(Decision::Unmarched(j));
                 }
-                let hvec = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
-                let noh = v_dot(n, hvec).clamp(0.0, 1.0);
-                let loh = v_dot(l, hvec).clamp(0.0, 1.0);
-                let d_term = d_ggx(noh, a);
-                let v_term = v_smith_ggx_correlated(nov, nol, a);
-                let f_term = f_schlick(loh, f0);
+                let h0 = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
+                let hvec: [f32; 3] = core::array::from_fn(|k| hooks.site(site(K::Half, j, k), h0[k], 25.0 * U));
+                let noh = hooks.site(site(K::NoH, j, 0), v_dot(n, hvec), 6.0 * U).clamp(0.0, 1.0);
+                let loh = hooks.site(site(K::LoH, j, 0), v_dot(l, hvec), 6.0 * U).clamp(0.0, 1.0);
+                let dg0 = d_ggx(noh, a);
+                let d_term = hooks.site(site(K::DTerm, j, 0), dg0, budget_rel(dg0, 14.0));
+                let vs0 = v_smith_ggx_correlated(nov, nol, a);
+                let v_term = hooks.site(site(K::VTerm, j, 0), vs0, budget_rel(vs0, 30.0));
+                let f_term = schlick_sites(hooks, j, loh, f0);
                 // PBR P1: the HDR sun-disc kernel for THIS directional light, sampled along
                 // `r` (not `l`) — the analytic environment's bright-sun response.
-                let sun_k = sun_kernel(r, l, a);
+                let sun0 = sun_kernel(r, l, a);
+                let sun_k = hooks.site(site(K::SunK, j, 0), sun0, budget_sun_kernel(r, l, a, sun0));
                 for c in 0..3 {
                     let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
                     let diff = diffuse_color[c] * (1.0 / pi);
-                    lit_direct[c] += (diff + spec) * (nol * vis) * li.color_cone[c];
+                    let term = (diff + spec) * (nol * vis) * li.color_cone[c];
+                    hooks.term(c, term);
+                    lit_direct[c] += term;
                     // PBR P1: a SECOND, roughness-widened specular response from this SAME
                     // light, added to the ambient — NOT shadow-modulated (AO-gated only,
                     // mirroring the sky ambient specular's own AO gate below).
                     let sun_spec = (f0[c] * dfg_v[0] + dfg_v[1]) * li.color_cone[c] * sun_k * energy_comp[c] * SUN_ENV_WEIGHT;
-                    ambient[c] += sun_spec * spec_ao;
+                    let amb = sun_spec * spec_ao;
+                    hooks.term(c, amb);
+                    ambient[c] += amb;
                 }
             }
             GOLDEN_LIGHT_KIND_SKY => {
@@ -3699,13 +4112,16 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
                 // PBR metal fix: steepen the reflected hemisphere (smoothstep) so a metal
                 // sweeps a real bright-cap -> dark-belly gradient instead of a flat mid-tone.
                 // The DIFFUSE `hemi` above stays LINEAR — only the specular lobe steepens.
-                let refl_hemi = refl_hemi_lin * refl_hemi_lin * (3.0 - 2.0 * refl_hemi_lin);
+                let rh0 = refl_hemi_lin * refl_hemi_lin * (3.0 - 2.0 * refl_hemi_lin);
+                let refl_hemi = hooks.site(site(K::ReflHemi, j, 0), rh0, 8.0 * U);
                 for c in 0..3 {
                     let hemi_c = ground[c] + (sky[c] - ground[c]) * hemi;
                     let refl_c = ground[c] + (sky[c] - ground[c]) * refl_hemi;
                     let spec_ambient = (f0[c] * dfg_v[0] + dfg_v[1]) * refl_c * energy_comp[c];
                     let diff_ambient = diffuse_color[c] * hemi_c;
-                    ambient[c] += diff_ambient * ao_final + spec_ambient * spec_ao;
+                    let amb = diff_ambient * ao_final + spec_ambient * spec_ao;
+                    hooks.term(c, amb);
+                    ambient[c] += amb;
                 }
             }
             _ => {}
@@ -3715,7 +4131,7 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
     // L0b point/spot block (flat) with the per-caster ranged march.
     let l0a = header.l0a_count() as usize;
     let total = header.light_count() as usize;
-    for li in lights.iter().take(total).skip(l0a) {
+    for (j, li) in lights.iter().enumerate().take(total).skip(l0a) {
         let kind = li.kind();
         if kind != GOLDEN_LIGHT_KIND_POINT && kind != GOLDEN_LIGHT_KIND_SPOT {
             continue;
@@ -3723,30 +4139,48 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
         let pos = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
         let range = li.pos_range[3];
         let to_l = [pos[0] - p[0], pos[1] - p[1], pos[2] - p[2]];
-        let d2 = v_dot(to_l, to_l);
+        let d2_0 = v_dot(to_l, to_l);
+        let d2 = hooks.site(site(K::D2, j, 0), d2_0, budget_rel(d2_0, 6.0));
         let range2 = range * range;
         if d2 > range2 {
+            hooks.decision(Decision::Culled(j));
             continue;
         }
-        let inv_d = 1.0 / d2.max(1e-8).sqrt();
-        let l = [to_l[0] * inv_d, to_l[1] * inv_d, to_l[2] * inv_d];
-        let win = (1.0 - (d2 * d2) / (range2 * range2)).clamp(0.0, 1.0);
-        let mut atten = (1.0 / d2.max(1e-4)) * win * win;
+        // The device's `rsqrt` against the host's `1 / sqrt` (`deferred_pbr.hlsl:1376`).
+        let inv_d0 = 1.0 / d2.max(1e-8).sqrt();
+        let inv_d = hooks.site(site(K::InvD, j, 0), inv_d0, budget_rel(inv_d0, 6.0));
+        let l: [f32; 3] = core::array::from_fn(|k| {
+            let x = to_l[k] * inv_d;
+            hooks.site(site(K::ToLight, j, k), x, budget_rel(x, 3.0))
+        });
+        let wq0 = (d2 * d2) / (range2 * range2);
+        let wq = hooks.site(site(K::WinQ, j, 0), wq0, budget_rel(wq0, 10.0));
+        let win = hooks.site(site(K::Win, j, 0), 1.0 - wq, 2.0 * U).clamp(0.0, 1.0);
+        let at0 = (1.0 / d2.max(1e-4)) * win * win;
+        let mut atten = hooks.site(site(K::Atten, j, 0), at0, budget_rel(at0, 10.0));
         if kind == GOLDEN_LIGHT_KIND_SPOT {
+            // O2 cone falloff (mirrors the shader): cos between -l and the spot axis,
+            // smoothstepped between the outer and inner cone cosines, squared.
             let (cos_inner, cos_outer) = golden_unpack_cones(li.color_cone[3]);
             let spot_dir = v_normalize([li.dir_kind[0], li.dir_kind[1], li.dir_kind[2]]);
-            let cos_a = v_dot([-l[0], -l[1], -l[2]], spot_dir);
+            let ca0 = v_dot([-l[0], -l[1], -l[2]], spot_dir);
+            // The dot (6u) plus the device's spot-axis normalize (22u per component).
+            let cos_a = hooks.site(site(K::CosA, j, 0), ca0, 28.0 * U);
             let denom = (cos_inner - cos_outer).max(1e-4);
-            let tt = ((cos_a - cos_outer) / denom).clamp(0.0, 1.0);
+            let tt0 = (cos_a - cos_outer) / denom;
+            let tt = hooks.site(site(K::SpotT, j, 0), tt0, budget_rel(tt0, 8.0)).clamp(0.0, 1.0);
             atten *= tt * tt;
         }
-        let hvec = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
-        let nol = v_dot(n, l).max(0.0);
-        let noh = v_dot(n, hvec).clamp(0.0, 1.0);
-        let loh = v_dot(l, hvec).clamp(0.0, 1.0);
-        let d_term = d_ggx(noh, a);
-        let v_term = v_smith_ggx_correlated(nov, nol, a);
-        let f_term = f_schlick(loh, f0);
+        let h0 = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
+        let hvec: [f32; 3] = core::array::from_fn(|k| hooks.site(site(K::Half, j, k), h0[k], 25.0 * U));
+        let nol = hooks.site(site(K::NoL, j, 0), v_dot(n, l), 6.0 * U).max(0.0);
+        let noh = hooks.site(site(K::NoH, j, 0), v_dot(n, hvec), 6.0 * U).clamp(0.0, 1.0);
+        let loh = hooks.site(site(K::LoH, j, 0), v_dot(l, hvec), 6.0 * U).clamp(0.0, 1.0);
+        let dg0 = d_ggx(noh, a);
+        let d_term = hooks.site(site(K::DTerm, j, 0), dg0, budget_rel(dg0, 14.0));
+        let vs0 = v_smith_ggx_correlated(nov, nol, a);
+        let v_term = hooks.site(site(K::VTerm, j, 0), vs0, budget_rel(vs0, 30.0));
+        let f_term = schlick_sites(hooks, j, loh, f0);
         // `vis` defaults to `shadow` (legacy L0b modulation); a flagged caster marches with
         // t_max = the light DISTANCE (`sqrt(d2)`).
         let mut vis = shadow;
@@ -3755,22 +4189,31 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
             && marched < MAX_SDF_SHADOW_CASTERS_PER_PIXEL
             && nol > SHADOW_NDOTL_EPS
         {
-            let t_max = d2.sqrt();
-            vis = host_soft_shadow_ranged(pb, n, l, t_max, field);
+            let tm0 = d2.sqrt();
+            let t_max = hooks.site(site(K::TMax, j, 0), tm0, budget_rel(tm0, 10.0));
+            let (v0, exit) = host_soft_shadow_ranged_ex(pb, n, l, t_max, field);
+            hooks.decision(Decision::March(j, exit));
+            vis = hooks.site(site(K::Vis, j, 0), v0, budget_rel(v0, 8.0));
             marched += 1;
+        } else if multi_light && li.casts_sdf_shadow() {
+            hooks.decision(Decision::Unmarched(j));
         }
         for c in 0..3 {
             let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
             let diff = diffuse_color[c] * (1.0 / pi);
-            lit_direct[c] += (diff + spec) * (nol * vis) * atten * li.color_cone[c];
+            let term = (diff + spec) * (nol * vis) * atten * li.color_cone[c];
+            hooks.term(c, term);
+            lit_direct[c] += term;
         }
     }
 
     let exposure = header.exposure();
     let mut lit = [0.0_f32; 3];
     for c in 0..3 {
+        hooks.term(c, mat.emissive[c]);
         lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
     }
+    hooks.pre_store(lit, exposure);
     lit_store(lit)
 }
 
@@ -5497,6 +5940,1122 @@ pub fn probe_sample(
     [sum_irr[0] * inv, sum_irr[1] * inv, sum_irr[2] * inv]
 }
 
+// =================================================================================================
+// OPEN-ITEMS 15 — the G-buffer SEAM oracle (`oi1516/cut.md` D15-1..D15-4).
+//
+// The p6_r1 / L0b suites used to compare the device's lit radiance against a host REPLAY of the
+// whole pipeline (marcher + resolve). At a grazing NoL a single gNormal byte the device converts
+// to the other neighbouring UNORM code (settle E15: (41,17).R = 98 on the device, 99 on the host,
+// the host's pre-quantization value 98.538) moved the radiance by 7.3 %, which no format-level
+// tolerance can carry. The seam splits the comparison where the conversion happens:
+//
+// 1. the ATTRIBUTE gate: every device G-buffer byte against the host's pre-quantization value at
+//    the device's OWN hit point ([`golden_marcher_attributes_at`]), one code allowed only inside
+//    the conversion window ([`attribute_byte_verdict`]);
+// 2. the RESOLVE gate: the host resolve fed the device's bytes ([`MarcherAttributes::from_device`])
+//    against the device's radiance, inside a floor DERIVED from the device-host precision budget
+//    of the remaining arithmetic ([`resolve_error_floor`]).
+//
+// Every budget below is a first-order device-host bound (Higham, "Accuracy and Stability of
+// Numerical Algorithms", ch. 3): the Vulkan "Precision and Operation of SPIR-V Instructions" table
+// for the device op plus the host's own rounding, in units of the binary32 unit roundoff
+// [`F32_UNIT_ROUNDOFF`]. The bounds are propagated through the ONE oracle body by perturbing each
+// divergence site by its budget (scaled up by [`SEAM_PERTURB_SCALE`] so the change clears f32
+// noise, then divided back out) — the first-order sensitivity of the result to that site — and
+// summed over the sites. No number here is fitted to a device readback (ruling 81(c)).
+// =================================================================================================
+
+/// The binary32 unit roundoff `u = 2^-24`. One ULP of `x` is at most `2u·|x|`.
+pub const F32_UNIT_ROUNDOFF: f32 = 1.0 / 16_777_216.0;
+
+const U: f32 = F32_UNIT_ROUNDOFF;
+
+/// The FLOAT→UNORM conversion window beyond the half-code of exact rounding, in codes.
+///
+/// Microsoft "Data Conversion Rules" (FLOAT → UNORM): "any value within
+/// `D3D11_FLOAT32_TO_INTEGER_TOLERANCE_IN_ULP` Unit-Last-Place of a representable target format
+/// value is permitted to map to that value", with the constant `0.6f` (Windows SDK 10.0.26100.0,
+/// `um/d3d11.h:650`). So a device byte may sit up to 0.6 code from the exact value `255·x`, i.e.
+/// 0.1 beyond the 0.5 that round-to-nearest allows. The rule covers typed UAV stores, render-target
+/// writes and clears alike. It is a contract of D3D-conformant hardware: Vulkan alone permits
+/// either neighbouring code. A device byte outside it is a finding, not a tolerance to widen
+/// (ruling 93 Q4).
+pub const W_CONV: f32 = 0.1;
+
+/// The factor every first-order budget is scaled by before it perturbs the oracle body (the change
+/// is divided back out). A budget of a few `u` alone moves an f32 result by less than its own
+/// rounding; 64 lifts it clear while every smooth term stays in its linear regime. When a scaled
+/// perturbation flips a discrete decision the next rung of [`PERTURB_LADDER`] is tried; a decision
+/// that flips even unscaled is FRAGILE.
+pub const SEAM_PERTURB_SCALE: f32 = 64.0;
+
+/// The scales a perturbation is retried at, largest first, ending at the unscaled budget.
+const PERTURB_LADDER: [f32; 4] = [SEAM_PERTURB_SCALE, 16.0, 4.0, 1.0];
+
+/// The fragile bits of a [`MarcherPrequant`]: a discrete decision whose margin is within its own
+/// device-host bound, so the device may legitimately have taken the other branch.
+pub mod fragile_bit {
+    /// The A1 primary-shadow march (facing gate, hit / range exit) sits on a decision boundary.
+    pub const SHADOW: u32 = 1;
+    /// The material id argmin's two nearest edits with DIFFERENT ids are within `2·ε_field`.
+    pub const MAT_ID: u32 = 2;
+    /// The primary march's accept step sits on its decision boundary (`gViewT` may be one step
+    /// apart).
+    pub const VIEW_T: u32 = 4;
+    /// The oct encoding's `nz < 0` fold is within the normal's bound (the oct bytes may jump).
+    pub const OCT_FOLD: u32 = 8;
+}
+
+/// One texel of the device's G-buffer as read back: the three RGBA8 attribute images and the
+/// `gViewT` lane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeviceGbufferTexel {
+    /// gAlbedo RGBA8 (linear base, 1).
+    pub albedo: [u8; 4],
+    /// gNormal RGBA8 (oct normal RG, material id low / high byte BA).
+    pub normal: [u8; 4],
+    /// gMaterial RGBA8 (shadow, ao, mask, 1).
+    pub material: [u8; 4],
+    /// gViewT R32F (the surface ray `t`; `1.0e30` on background).
+    pub view_t: f32,
+}
+
+impl MarcherAttributes {
+    /// The attributes the device resolve reads from `t` — the resolve gate feeds these to the host
+    /// resolve so the comparison carries no replayed byte.
+    ///
+    /// # Panics
+    /// If the mask byte is neither 0 nor 255: the marcher and the raster store the mask as exactly
+    /// 0.0 or 1.0, so any other byte is a harness or producer bug.
+    pub fn from_device(t: &DeviceGbufferTexel) -> Self {
+        let mask = match t.material[2] {
+            0 => 0,
+            255 => 1,
+            b => panic!("invariant: the G-buffer mask byte is 0 or 255, got {b}"),
+        };
+        Self {
+            base_rgb: [t.albedo[0], t.albedo[1], t.albedo[2]],
+            oct_rg: [t.normal[0], t.normal[1]],
+            mat_id: u16::from(t.normal[2]) | (u16::from(t.normal[3]) << 8),
+            shadow: t.material[0],
+            ao: t.material[1],
+            mask,
+            view_t: t.view_t,
+        }
+    }
+}
+
+/// The verdict of one device UNORM8 byte against the host's pre-quantization value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ByteVerdict {
+    /// The device byte equals the host's round-half-up code.
+    Exact,
+    /// The device byte is the other neighbouring code, inside the conversion window; `margin` is
+    /// how far inside, in codes.
+    TieFlip {
+        /// The distance to the window's edge, in codes.
+        margin: f32,
+    },
+    /// Outside the window: the gate fails.
+    Mismatch,
+}
+
+/// Classifies the device byte `dev` against the host's pre-quantization value `x` (in `[0, 1]`
+/// before the clamp). With `c = 255·clamp(x, 0, 1)`: [`ByteVerdict::Exact`] when `dev` is the
+/// host's `(c + 0.5) as u8`; [`ByteVerdict::TieFlip`] when `|dev − c| <= 0.5 + W_CONV + w_in`;
+/// [`ByteVerdict::Mismatch`] otherwise. `w_in` is the device-host bound on `c` itself (codes) —
+/// the device evaluates `x` in f32 with its own op realisation.
+pub fn attribute_byte_verdict(dev: u8, x: f32, w_in: f32) -> ByteVerdict {
+    let c = x.clamp(0.0, 1.0) * 255.0;
+    if dev == (c + 0.5) as u8 {
+        return ByteVerdict::Exact;
+    }
+    let window = 0.5 + W_CONV + w_in;
+    let off = (f32::from(dev) - c).abs();
+    if off <= window {
+        ByteVerdict::TieFlip { margin: window - off }
+    } else {
+        ByteVerdict::Mismatch
+    }
+}
+
+/// The first-order bound on |device field − host field| at `p` (both binary32): per primitive the
+/// Vulkan budget of its ops plus the host's rounding — sphere `16u·|p−c| + 2u·r`, box
+/// `16u·|max(q,0)| + 4u·(|p−c| + |h|)`, capsule `24u·(|pa| + |ba|) + 2u·r` (`length` inherits
+/// `sqrt` = `1/inversesqrt` and a 3-term dot) — then the CSG fold: min / max / smin are 1-Lipschitz
+/// in the sup norm, so the fold carries `max` of its operands' bounds, and each smooth combine adds
+/// its own `12u·(|a| + |b| + k)`.
+pub fn field_error_bound(edits: &[SdfEdit], p: [f32; 3]) -> f32 {
+    let mut acc = 0.0_f32;
+    let mut eps = 0.0_f32;
+    for (i, e) in edits.iter().take(MAX_SDF_EDITS).enumerate() {
+        let d = edit_distance(e, p);
+        let e_prim = primitive_error_bound(e, p);
+        if i == 0 {
+            acc = d;
+            eps = e_prim;
+            continue;
+        }
+        let k = e.smoothness;
+        let e_comb = if k > 0.0 { 12.0 * U * (acc.abs() + d.abs() + k) } else { 0.0 };
+        eps = eps.max(e_prim) + e_comb;
+        acc = boyko_sdf_math::combine(acc, d, e.op, k);
+    }
+    eps
+}
+
+/// One primitive's device-host bound (see [`field_error_bound`]).
+fn primitive_error_bound(e: &SdfEdit, p: [f32; 3]) -> f32 {
+    let c = [e.center[0], e.center[1], e.center[2]];
+    let params = [e.params[0], e.params[1], e.params[2]];
+    if e.kind == boyko_sdf_math::sdf_kind::BOX {
+        let pc = v_sub(p, c);
+        let q = [pc[0].abs() - params[0], pc[1].abs() - params[1], pc[2].abs() - params[2]];
+        let outside = v_len([q[0].max(0.0), q[1].max(0.0), q[2].max(0.0)]);
+        16.0 * U * outside + 4.0 * U * (v_len(pc) + v_len(params))
+    } else if e.kind == boyko_sdf_math::sdf_kind::CAPSULE {
+        let pa = v_sub(p, c);
+        let ba = v_sub(params, c);
+        24.0 * U * (v_len(pa) + v_len(ba)) + 2.0 * U * e.params[3].abs()
+    } else {
+        16.0 * U * v_len(v_sub(p, c)) + 2.0 * U * params[0].abs()
+    }
+}
+
+/// The device-host bound a march sample at `q` (field value `d`, march origin `origin`) carries:
+/// the field's own [`field_error_bound`], the step's rounding (`4u·|d|`: the step `d / L` and the
+/// `t +=` add, expressed as the field error that would move the step as much) and the sample
+/// position's rounding (`q = o + l·t`, `4u·(|q| + |q − o|)`, through the field's Lipschitz bound).
+fn seam_field_budget(edits: &[SdfEdit], q: [f32; 3], origin: [f32; 3], d: f32) -> f32 {
+    field_error_bound(edits, q)
+        + 4.0 * U * d.abs()
+        + FIELD_LIPSCHITZ_L * 4.0 * U * (v_len(q) + v_len(v_sub(q, origin)))
+}
+
+/// `k` units of roundoff relative to `|x|`, as an absolute budget.
+#[inline]
+fn budget_rel(x: f32, k: f32) -> f32 {
+    k * U * x.abs()
+}
+
+/// The relative device-host error of `exp2(y)` given the absolute error `dy` already in `y`:
+/// Vulkan `3 + 2|y|` ULP (`(6 + 4|y|)u`) plus the host's own rounding, plus `ln 2·dy`.
+fn budget_exp2(y: f32, dy: f32) -> f32 {
+    (8.0 + 4.0 * y.abs()) * U + core::f32::consts::LN_2 * dy
+}
+
+/// The absolute device-host error of `log2(x)`: Vulkan `2^-21` absolute inside `[0.5, 2]`, 3 ULP
+/// outside, plus the host's rounding.
+fn budget_log2(x: f32) -> f32 {
+    let lg = x.log2().abs();
+    if (0.5..=2.0).contains(&x) {
+        1.0 / 2_097_152.0 + 2.0 * U * lg
+    } else {
+        8.0 * U * lg
+    }
+}
+
+/// The relative device-host error of `pow(x, y)`, which Vulkan inherits from `exp2(y·log2 x)`:
+/// `Δ(y·log2 x) = |y|·Δlog2 x + 2u·|y·log2 x|`, then the `exp2` row. `0` where the result is `0`
+/// (`x <= 0`).
+fn budget_pow(x: f32, y: f32) -> f32 {
+    if x.is_nan() || x <= 0.0 || !x.is_finite() {
+        return 0.0;
+    }
+    let z = y * x.log2();
+    let dz = y.abs() * budget_log2(x) + 2.0 * U * z.abs();
+    let b = budget_exp2(z, dz);
+    if b.is_finite() { b } else { 0.0 }
+}
+
+/// The absolute device-host bound on [`specular_ao`]: its `pow`, its exponent's `exp2` (through
+/// `∂pow/∂e = pow·ln x`), the `NoV + ao` add (through `∂pow/∂x = e·pow/x`) and the `− 1 + ao`
+/// tail; the final `saturate` is 1-Lipschitz.
+fn budget_spec_ao(nov: f32, roughness: f32, ao: f32) -> f32 {
+    let e_arg = -16.0 * roughness - 1.0;
+    let e = e_arg.exp2();
+    let rho_e = budget_exp2(e_arg, 4.0 * U * e_arg.abs());
+    let x = nov + ao;
+    if x <= 0.0 {
+        return 4.0 * U;
+    }
+    let pw = x.powf(e);
+    pw * (budget_pow(x, e) + rho_e * e * x.ln().abs() + 2.0 * U * e) + 4.0 * U * (1.0 + ao)
+}
+
+/// The absolute device-host bound on [`sun_kernel`] `pow(saturate(dot(r, l)), e(α))`: the `pow`,
+/// the exponent's division (`10u` relative, through `∂/∂e = k·ln c`) and the dot's own rounding
+/// (`6u` absolute, through `∂/∂c = e·k/c`); `r` and `l` are sites of their own.
+fn budget_sun_kernel(r: [f32; 3], l: [f32; 3], alpha: f32, k: f32) -> f32 {
+    let c = v_dot(r, l).clamp(0.0, 1.0);
+    if c <= 0.0 || k == 0.0 {
+        return 0.0;
+    }
+    let e = sun_kernel_exponent(alpha);
+    k * (budget_pow(c, e) + 10.0 * U * e * c.ln().abs() + 6.0 * U * e / c)
+}
+
+/// The Schlick Fresnel at one light, each channel a site: the `pow(1 − LoH, 5)`'s budget through
+/// `(1 − f0)` plus the lerp's own roundings.
+fn schlick_sites<H: ResolveHooks>(hooks: &mut H, light: usize, loh: f32, f0: [f32; 3]) -> [f32; 3] {
+    let f = f_schlick(loh, f0);
+    let x = 1.0 - loh;
+    let pw = x.powf(5.0);
+    let rho = budget_pow(x, 5.0);
+    core::array::from_fn(|c| {
+        hooks.site(
+            ResolveSite { kind: SiteKind::FTerm, light, comp: c },
+            f[c],
+            (1.0 - f0[c]).abs() * pw * rho + budget_rel(f[c], 6.0),
+        )
+    })
+}
+
+/// What a seam-resolve divergence site computes (see [`ResolveSite`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SiteKind {
+    /// gAlbedo decode (`byte / 255`).
+    Base,
+    /// The oct-decoded normal (a component).
+    Normal,
+    /// The metallic f0 lerp.
+    F0,
+    /// The diffuse colour.
+    Diffuse,
+    /// `max(dot(n, v), 1e-4)`.
+    NoV,
+    /// gMaterial.r decode.
+    ShadowDec,
+    /// gMaterial.g decode.
+    AoDec,
+    /// The diffuse hemisphere factor.
+    Hemi,
+    /// The Karis environment BRDF (a lane).
+    Dfg,
+    /// The multi-scatter energy compensation (a channel).
+    Energy,
+    /// The reflection vector (a component).
+    Refl,
+    /// The specular occlusion.
+    SpecAo,
+    /// The surface position from `gViewT` (a component).
+    Pos,
+    /// A directional light's normalized direction (a component).
+    LightDir,
+    /// `max(dot(n, l), 0)`.
+    NoL,
+    /// A ranged shadow march's visibility (its `K·d/t` division and clamp; the march's field and
+    /// position errors are the field perturbation's).
+    Vis,
+    /// The half vector (a component).
+    Half,
+    /// `dot(n, h)`.
+    NoH,
+    /// `dot(l, h)`.
+    LoH,
+    /// The GGX NDF.
+    DTerm,
+    /// The Smith visibility.
+    VTerm,
+    /// The Schlick Fresnel (a channel).
+    FTerm,
+    /// The HDR sun-disc kernel.
+    SunK,
+    /// The sky's reflected-hemisphere smoothstep.
+    ReflHemi,
+    /// A punctual light's squared distance.
+    D2,
+    /// The device's `rsqrt(d2)` against the host's `1 / sqrt(d2)`.
+    InvD,
+    /// A punctual light's unit direction (a component).
+    ToLight,
+    /// The range window's quotient `d2² / range2²`.
+    WinQ,
+    /// The range window.
+    Win,
+    /// The distance attenuation.
+    Atten,
+    /// A spot's cone cosine.
+    CosA,
+    /// A spot's smoothstep factor.
+    SpotT,
+    /// A punctual caster's march bound `sqrt(d2)`.
+    TMax,
+}
+
+/// One device-host divergence site of the seam resolve: what it computes, for which light
+/// (`usize::MAX` = per pixel) and which component.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolveSite {
+    /// What the site computes.
+    pub kind: SiteKind,
+    /// The light-table index (`usize::MAX` for a per-pixel site).
+    pub light: usize,
+    /// The vector component / colour channel (0 for a scalar).
+    pub comp: usize,
+}
+
+/// One discrete decision of the seam resolve, in evaluation order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    /// The texel took the mask == 0 background arm.
+    Background,
+    /// Light `0` was marched and its march ended so.
+    March(usize, ShadowExit),
+    /// Light `0` is a flagged caster the cap or the NoL gate left unmarched.
+    Unmarched(usize),
+    /// Light `0` was range-culled.
+    Culled(usize),
+}
+
+/// The seam resolve's observation points (see [`resolve_shadowed_impl`]). Every method defaults to
+/// the identity / a no-op, which is what the plain resolve runs.
+trait ResolveHooks {
+    /// A device-host divergence site computing `x` with the absolute first-order budget `budget`;
+    /// returns the value the body continues with.
+    fn site(&mut self, _site: ResolveSite, x: f32, _budget: f32) -> f32 {
+        x
+    }
+    /// One additive term of the lit sum, channel `c` (before the exposure).
+    fn term(&mut self, _c: usize, _x: f32) {}
+    /// One discrete decision.
+    fn decision(&mut self, _d: Decision) {}
+    /// The lit radiance before the store, and the exposure it was scaled by.
+    fn pre_store(&mut self, _lit: [f32; 3], _exposure: f32) {}
+}
+
+/// The plain resolve's hooks: every site is the identity.
+struct NoResolveHooks;
+
+impl ResolveHooks for NoResolveHooks {}
+
+/// What one seam-resolve evaluation recorded: every site it passed (with its budget), every
+/// additive term per channel, every decision, and the pre-store radiance.
+#[derive(Clone, Debug, Default)]
+pub struct ResolveTrace {
+    /// Every divergence site, in evaluation order, with its absolute budget.
+    pub sites: Vec<(ResolveSite, f32)>,
+    /// The additive terms of the lit sum, per channel (before the exposure).
+    pub terms: [Vec<f32>; 3],
+    /// Every discrete decision, in evaluation order.
+    pub decisions: Vec<Decision>,
+    /// The lit radiance before the store.
+    pub lit_pre_store: [f32; 3],
+    /// The pre-exposure the sum was scaled by: the light header's exposure word (`H.exposure` in
+    /// the shaders), named apart from `LightingConfig::exposure` so the single-writer census
+    /// (`boyko_render/tests/exposure_single_writer.rs`) keeps reading a field read as a config read.
+    pub pre_exposure: f32,
+}
+
+impl ResolveTrace {
+    /// Per channel: `(|Σ terms · exposure − lit|, Σ|terms| · exposure)`. The anti-vacuity of the
+    /// trace: the residual must be within `4u` of the second (a term the trace missed would leave
+    /// the floor blind to it). `(0, 0)` on the background arm (no terms).
+    pub fn sum_residual(&self) -> [(f32, f32); 3] {
+        core::array::from_fn(|c| {
+            let sum: f32 = self.terms[c].iter().sum();
+            let abs: f32 = self.terms[c].iter().map(|t| t.abs()).sum();
+            ((sum * self.pre_exposure - self.lit_pre_store[c]).abs(), abs * self.pre_exposure)
+        })
+    }
+}
+
+impl ResolveHooks for ResolveTrace {
+    fn site(&mut self, site: ResolveSite, x: f32, budget: f32) -> f32 {
+        self.sites.push((site, budget));
+        x
+    }
+    fn term(&mut self, c: usize, x: f32) {
+        self.terms[c].push(x);
+    }
+    fn decision(&mut self, d: Decision) {
+        self.decisions.push(d);
+    }
+    fn pre_store(&mut self, lit: [f32; 3], exposure: f32) {
+        self.lit_pre_store = lit;
+        self.pre_exposure = exposure;
+    }
+}
+
+/// Perturbs ONE site by `delta · budget` and records the decisions.
+struct PerturbHooks {
+    target: ResolveSite,
+    delta: f32,
+    decisions: Vec<Decision>,
+}
+
+impl ResolveHooks for PerturbHooks {
+    fn site(&mut self, site: ResolveSite, x: f32, budget: f32) -> f32 {
+        if site == self.target { x + self.delta * budget } else { x }
+    }
+    fn decision(&mut self, d: Decision) {
+        self.decisions.push(d);
+    }
+}
+
+/// Records the decisions only (the field-perturbation runs).
+#[derive(Default)]
+struct DecisionHooks {
+    decisions: Vec<Decision>,
+}
+
+impl ResolveHooks for DecisionHooks {
+    fn decision(&mut self, d: Decision) {
+        self.decisions.push(d);
+    }
+}
+
+/// [`golden_deferred_resolve_table_shadowed`] (no SSAO), recording into `trace` every site, term
+/// and decision of the evaluation. The returned radiance is the untraced oracle's bit for bit (the
+/// ONE body, [`resolve_shadowed_impl`]).
+#[allow(clippy::too_many_arguments)]
+pub fn golden_deferred_resolve_table_shadowed_traced<F: Fn([f32; 3]) -> f32>(
+    attrs: MarcherAttributes,
+    ro: [f32; 3],
+    rd: [f32; 3],
+    materials: &[GoldenMaterial],
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+    field: &F,
+    trace: &mut ResolveTrace,
+) -> [f32; 3] {
+    resolve_shadowed_impl(attrs, ro, rd, materials, header, lights, field, 1.0, trace)
+}
+
+/// The resolve gate's floor at one texel (OPEN-ITEMS 15, D15-3/D15-4).
+#[derive(Clone, Debug)]
+pub struct ResolveFloor {
+    /// The host resolve's radiance (the `want` of the gate), bit for bit
+    /// [`golden_deferred_resolve_table_shadowed`] on the same inputs.
+    pub lit: [f32; 3],
+    /// The per-channel device-host floor in radiance, `>= 2^-126` (an absolute floor, never a
+    /// relative one on 0).
+    pub floor: [f32; 3],
+    /// A discrete decision flips even under the unscaled budget: the texel is reported (checked by
+    /// the display arm), never strict-passed.
+    pub fragile: bool,
+    /// The first perturbation that flipped a decision unscaled (`None` = the march field offset).
+    pub fragile_cause: Option<Option<ResolveSite>>,
+    /// The number of divergence sites perturbed (the field runs excluded).
+    pub sites: usize,
+    /// The trace's anti-vacuity (see [`ResolveTrace::sum_residual`]).
+    pub trace_residual: [(f32, f32); 3],
+}
+
+/// The first-order change of `run(scale)` against `base`, per channel, divided by `scale`, at the
+/// largest [`PERTURB_LADDER`] scale that keeps every decision of `base_decisions`; `None` when even
+/// the unscaled perturbation flips one.
+fn perturbed_delta(
+    run: impl Fn(f32) -> ([f32; 3], Vec<Decision>),
+    base: [f32; 3],
+    base_decisions: &[Decision],
+) -> Option<[f32; 3]> {
+    for scale in PERTURB_LADDER {
+        let (lit, decisions) = run(scale);
+        if decisions == base_decisions {
+            return Some(core::array::from_fn(|c| (lit[c] - base[c]).abs() / scale));
+        }
+    }
+    None
+}
+
+/// The resolve gate's floor at one texel, for the host resolve fed `attrs` (the device's bytes):
+/// the sum over every divergence site of its first-order effect (both signs, the larger), plus the
+/// ranged shadow marches' field and position errors (the field perturbed by
+/// [`seam_field_budget`], both signs), plus every additive term's product and sum roundings
+/// (`2u·(8 + n_terms)·Σ|terms|`), the exposure multiply and the absolute `2^-126`. The texel is
+/// FRAGILE when a perturbation flips a decision even unscaled.
+///
+/// The floor comes from the one oracle body ([`resolve_shadowed_impl`]): no BRDF term is
+/// re-derived here.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_error_floor(
+    attrs: MarcherAttributes,
+    ro: [f32; 3],
+    rd: [f32; 3],
+    materials: &[GoldenMaterial],
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+    edits: &[SdfEdit],
+) -> ResolveFloor {
+    let field = |q: [f32; 3]| sdf_edit_list(edits, q);
+    let mut trace = ResolveTrace::default();
+    let lit = resolve_shadowed_impl(attrs, ro, rd, materials, header, lights, &field, 1.0, &mut trace);
+    let mut floor = [0.0_f32; 3];
+    let mut fragile_cause: Option<Option<ResolveSite>> = None;
+    let mut accumulate = |delta: Option<[f32; 3]>, worst: &mut [f32; 3], cause: Option<ResolveSite>| match delta {
+        Some(d) => (0..3).for_each(|c| worst[c] = worst[c].max(d[c])),
+        None => {
+            fragile_cause.get_or_insert(cause);
+        }
+    };
+    for &(site, budget) in &trace.sites {
+        if budget == 0.0 || !budget.is_finite() {
+            continue;
+        }
+        let mut worst = [0.0_f32; 3];
+        for sign in [1.0_f32, -1.0] {
+            let delta = perturbed_delta(
+                |scale| {
+                    let mut hooks = PerturbHooks { target: site, delta: sign * scale, decisions: Vec::new() };
+                    let l = resolve_shadowed_impl(attrs, ro, rd, materials, header, lights, &field, 1.0, &mut hooks);
+                    (l, hooks.decisions)
+                },
+                lit,
+                &trace.decisions,
+            );
+            accumulate(delta, &mut worst, Some(site));
+        }
+        (0..3).for_each(|c| floor[c] += worst[c]);
+    }
+    // The ranged marches' own field and sample-position errors: the field offset by its budget
+    // everywhere (both signs) — the uniform sign maximizes the sample-sequence drift.
+    let p_world = [
+        ro[0] + rd[0] * attrs.view_t,
+        ro[1] + rd[1] * attrs.view_t,
+        ro[2] + rd[2] * attrs.view_t,
+    ];
+    let mut worst = [0.0_f32; 3];
+    for sign in [1.0_f32, -1.0] {
+        let delta = perturbed_delta(
+            |scale| {
+                let shifted = |q: [f32; 3]| {
+                    let d = sdf_edit_list(edits, q);
+                    d + sign * scale * seam_field_budget(edits, q, p_world, d)
+                };
+                let mut hooks = DecisionHooks::default();
+                let l = resolve_shadowed_impl(attrs, ro, rd, materials, header, lights, &shifted, 1.0, &mut hooks);
+                (l, hooks.decisions)
+            },
+            lit,
+            &trace.decisions,
+        );
+        accumulate(delta, &mut worst, None);
+    }
+    for c in 0..3 {
+        floor[c] += worst[c];
+        let n_terms = trace.terms[c].len() as f32;
+        let abs_terms: f32 = trace.terms[c].iter().map(|t| t.abs()).sum();
+        floor[c] += 2.0 * U * (8.0 + n_terms) * abs_terms * trace.pre_exposure.abs()
+            + 2.0 * U * trace.lit_pre_store[c].abs()
+            + f32::MIN_POSITIVE;
+    }
+    ResolveFloor {
+        lit,
+        floor,
+        fragile: fragile_cause.is_some(),
+        fragile_cause,
+        sites: trace.sites.len(),
+        trace_residual: trace.sum_residual(),
+    }
+}
+
+/// The scalar twin of [`perturbed_delta`] for a march: the change of `run(scale)`'s value against
+/// `base` divided by `scale`, at the largest scale whose exit equals `base_exit`; `None` when even
+/// the unscaled perturbation changes the exit.
+fn march_delta(run: impl Fn(f32) -> (f32, ShadowExit), base: f32, base_exit: ShadowExit) -> Option<f32> {
+    for scale in PERTURB_LADDER {
+        let (v, exit) = run(scale);
+        if exit == base_exit {
+            return Some((v - base).abs() / scale);
+        }
+    }
+    None
+}
+
+/// The A1 / ranged shadow march at `p` toward `l` with its first-order device-host bound:
+/// `(vis, e_vis, fragile)`. `e_p` / `e_n` / `e_l` are per-component absolute bounds on the start
+/// point, the normal and the light direction. The bound sums the march's sensitivity to the field
+/// (offset by [`seam_field_budget`], both signs), to each start-point and light-direction component
+/// (both signs), and the `K·d/t` division (8u). FRAGILE when the facing gate's margin is within
+/// its bound or a perturbation changes the march's exit even unscaled. `vis` is
+/// [`host_soft_shadow_ranged`]'s bit for bit.
+#[allow(clippy::too_many_arguments)]
+pub fn host_soft_shadow_ranged_bound(
+    p: [f32; 3],
+    e_p: f32,
+    n: [f32; 3],
+    e_n: f32,
+    l: [f32; 3],
+    e_l: f32,
+    t_max: f32,
+    edits: &[SdfEdit],
+) -> (f32, f32, bool) {
+    let field = |q: [f32; 3]| sdf_edit_list(edits, q);
+    let (vis, exit) = host_soft_shadow_ranged_ex(p, n, l, t_max, &field);
+    let nl = v_dot(n, l);
+    let e_nl = (0..3).map(|k| e_n * l[k].abs() + n[k].abs() * e_l).sum::<f32>() + 6.0 * U;
+    let mut fragile = (nl - SHADOW_NDOTL_EPS).abs() <= e_nl;
+    let mut e_vis = 0.0_f32;
+    let mut add = |d: Option<f32>, worst: &mut f32| match d {
+        Some(x) => *worst = worst.max(x),
+        None => fragile = true,
+    };
+    // The field + sample positions.
+    let mut worst = 0.0_f32;
+    for sign in [1.0_f32, -1.0] {
+        let d = march_delta(
+            |scale| {
+                let shifted = |q: [f32; 3]| {
+                    let d = sdf_edit_list(edits, q);
+                    d + sign * scale * seam_field_budget(edits, q, p, d)
+                };
+                host_soft_shadow_ranged_ex(p, n, l, t_max, &shifted)
+            },
+            vis,
+            exit,
+        );
+        add(d, &mut worst);
+    }
+    e_vis += worst;
+    // The start point and the direction, a component at a time.
+    for (bound, is_dir) in [(e_p, false), (e_l, true)] {
+        if bound == 0.0 {
+            continue;
+        }
+        for k in 0..3 {
+            let mut worst = 0.0_f32;
+            for sign in [1.0_f32, -1.0] {
+                let d = march_delta(
+                    |scale| {
+                        let (mut pp, mut ll) = (p, l);
+                        if is_dir {
+                            ll[k] += sign * scale * bound;
+                        } else {
+                            pp[k] += sign * scale * bound;
+                        }
+                        host_soft_shadow_ranged_ex(pp, n, ll, t_max, &field)
+                    },
+                    vis,
+                    exit,
+                );
+                add(d, &mut worst);
+            }
+            e_vis += worst;
+        }
+    }
+    (vis, e_vis + 8.0 * U * vis, fragile)
+}
+
+/// The A2 AO at `p` along `n` with its first-order device-host bound `(ao, e_ao)`: its sensitivity
+/// to the field (offset by its budget at each tap, both signs), to each start-point and normal
+/// component (both signs), the device's `pow(AO_FALLOFF, i)` weights and the accumulation's
+/// roundings; the final clamp is 1-Lipschitz. `ao` is [`host_ao`]'s bit for bit.
+pub fn host_ao_bound(p: [f32; 3], e_p: f32, n: [f32; 3], e_n: f32, edits: &[SdfEdit]) -> (f32, f32) {
+    let field = |q: [f32; 3]| sdf_edit_list(edits, q);
+    let ao = host_ao(p, n, &field);
+    let s = SEAM_PERTURB_SCALE;
+    let mut e = 0.0_f32;
+    for sign in [1.0_f32, -1.0] {
+        let shifted = |q: [f32; 3]| {
+            let d = sdf_edit_list(edits, q);
+            d + sign * s * seam_field_budget(edits, q, p, d)
+        };
+        e = e.max((host_ao(p, n, &shifted) - ao).abs() / s);
+    }
+    for (bound, is_n) in [(e_p, false), (e_n, true)] {
+        for k in 0..3 {
+            let mut worst = 0.0_f32;
+            for sign in [1.0_f32, -1.0] {
+                let (mut pp, mut nn) = (p, n);
+                if is_n {
+                    nn[k] += sign * s * bound;
+                } else {
+                    pp[k] += sign * s * bound;
+                }
+                worst = worst.max((host_ao(pp, nn, &field) - ao).abs() / s);
+            }
+            e += worst;
+        }
+    }
+    let mut weighted = 0.0_f32;
+    for i in 1..=5u32 {
+        let h = (i as f32) * AO_STEP;
+        let q = [p[0] + n[0] * h, p[1] + n[1] * h, p[2] + n[2] * h];
+        let w = AO_FALLOFF.powi(i as i32);
+        let term = (h - field(q)) * w;
+        e += term.abs() * AO_STRENGTH * budget_pow(AO_FALLOFF, i as f32);
+        weighted += term.abs();
+    }
+    (ao, e + 2.0 * U * 10.0 * AO_STRENGTH * weighted + 2.0 * U)
+}
+
+/// The f64 normal of [`sdf_edit_list_normal`] from its six taps
+/// `[+x, −x, +y, −y, +z, −z]`, normalized (no degenerate guard: the seam reads surface points).
+fn normal_from_taps_f64(t: &[f64; 6]) -> [f64; 3] {
+    let n = [t[0] - t[1], t[2] - t[3], t[4] - t[5]];
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    [n[0] / len, n[1] / len, n[2] / len]
+}
+
+/// [`oct_encode`] in f64, scaled to codes (`255·e`).
+fn oct_codes_f64(n: [f64; 3]) -> [f64; 2] {
+    let inv_l1 = 1.0 / (n[0].abs() + n[1].abs() + n[2].abs());
+    let (nx, ny, nz) = (n[0] * inv_l1, n[1] * inv_l1, n[2] * inv_l1);
+    let (mut ex, mut ey) = (nx, ny);
+    if nz < 0.0 {
+        let sx = if nx >= 0.0 { 1.0 } else { -1.0 };
+        let sy = if ny >= 0.0 { 1.0 } else { -1.0 };
+        ex = (1.0 - ny.abs()) * sx;
+        ey = (1.0 - nx.abs()) * sy;
+    }
+    [255.0 * (ex * 0.5 + 0.5), 255.0 * (ey * 0.5 + 0.5)]
+}
+
+/// The device-host bounds of the SDF normal at `p` from its six central-difference taps: the oct
+/// codes' (`255·oct`, in codes) and the unit normal's components'. Each is
+/// `Σ_i |∂·/∂tap_i| · ε(tap_i)` (f64 forward differences on the taps; `ε` = [`field_error_bound`]
+/// plus the tap position's rounding through the field's Lipschitz bound), plus the device's own
+/// normalize (`sqrt` + division, 16u) and oct-encode (division + 4 roundings, 10u) on top of the
+/// host's (10u), 40u in all, through the codes' unit scale (255) or the components' (1).
+fn normal_tap_bounds(edits: &[SdfEdit], p: [f32; 3]) -> ([f32; 2], [f32; 3]) {
+    let h = SDF_GRAD_H;
+    let pos = [
+        [p[0] + h, p[1], p[2]],
+        [p[0] - h, p[1], p[2]],
+        [p[0], p[1] + h, p[2]],
+        [p[0], p[1] - h, p[2]],
+        [p[0], p[1], p[2] + h],
+        [p[0], p[1], p[2] - h],
+    ];
+    let taps: [f64; 6] = core::array::from_fn(|i| f64::from(sdf_edit_list(edits, pos[i])));
+    let eps: [f64; 6] = core::array::from_fn(|i| {
+        f64::from(field_error_bound(edits, pos[i]) + FIELD_LIPSCHITZ_L * 2.0 * U * v_len(pos[i]))
+    });
+    let n0 = normal_from_taps_f64(&taps);
+    let c0 = oct_codes_f64(n0);
+    let mut w_oct = [0.0_f64; 2];
+    let mut e_n = [0.0_f64; 3];
+    for i in 0..6 {
+        let step = taps[i].abs().max(1e-6) * 1e-6;
+        let mut t = taps;
+        t[i] += step;
+        let n1 = normal_from_taps_f64(&t);
+        let c1 = oct_codes_f64(n1);
+        for ch in 0..2 {
+            w_oct[ch] += ((c1[ch] - c0[ch]) / step).abs() * eps[i];
+        }
+        for k in 0..3 {
+            e_n[k] += ((n1[k] - n0[k]) / step).abs() * eps[i];
+        }
+    }
+    let ops = 40.0 * f64::from(U);
+    (
+        [(w_oct[0] + 255.0 * ops) as f32, (w_oct[1] + 255.0 * ops) as f32],
+        [(e_n[0] + ops) as f32, (e_n[1] + ops) as f32, (e_n[2] + ops) as f32],
+    )
+}
+
+/// Which producer arm the host replay put a texel on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarcherArm {
+    /// The marcher's SDF-lit arm (an SDF hit in front of any mesh).
+    Sdf,
+    /// The raster-owned mesh arm (mask 1 from the raster, gMaterial.rg from the marcher).
+    Mesh,
+    /// Background / empty (mask 0).
+    Background,
+}
+
+/// The host's pre-quantization G-buffer values at one texel, evaluated at the DEVICE's own surface
+/// point and inputs, with the device-host bound of each (OPEN-ITEMS 15, D15-2).
+#[derive(Clone, Copy, Debug)]
+pub struct MarcherPrequant {
+    /// The arm the host replay took.
+    pub arm: MarcherArm,
+    /// gAlbedo RGB before quantization (the linear base, `[0,1]` after the store's clamp).
+    pub base: [f32; 3],
+    /// gNormal RG before quantization (the oct normal in `[0,1]`).
+    pub oct: [f32; 2],
+    /// The material id at the device point (gNormal BA).
+    pub mat_id: u16,
+    /// gMaterial.r before quantization.
+    pub shadow: f32,
+    /// gMaterial.g before quantization.
+    pub ao: f32,
+    /// gMaterial.b (the mask byte the producer stores, 0 or 255).
+    pub mask_byte: u8,
+    /// The oct codes' bound (codes).
+    pub w_in_oct: [f32; 2],
+    /// gMaterial.r's bound (codes).
+    pub w_in_shadow: f32,
+    /// gMaterial.g's bound (codes).
+    pub w_in_ao: f32,
+    /// The [`fragile_bit`] set.
+    pub fragile: u32,
+    /// The host replay's own `gViewT`.
+    pub host_view_t: f32,
+    /// The allowance on `|device gViewT − host gViewT|` (rule G); `0` on the background arm, whose
+    /// sentinel must match exactly.
+    pub view_t_bound: f32,
+    /// The device point's `|sdf|` must be below this (the device stopped on the host's accept band);
+    /// only read on the SDF arm.
+    pub on_surface_bound: f32,
+    /// `|sdf_edit_list(p_dev)|` at the device point (the SDF arm), else 0.
+    pub on_surface_residual: f32,
+}
+
+/// The host primary march of [`golden_marcher_attributes`] over an arbitrary field (the seam's
+/// `gViewT` bound perturbs the field): `(hit, t, accept_iter, last_step)`, where `accept_iter`
+/// identifies the discrete exit (the iteration of the accept / escape, `u32::MAX` for a re-march)
+/// and `last_step` is the step taken just before it.
+fn host_primary_march<F: Fn([f32; 3]) -> f32>(
+    field: &F,
+    ro: [f32; 3],
+    rd: [f32; 3],
+    t_mesh: f32,
+    omega: f32,
+) -> (bool, f32, u32, f32) {
+    let mut t = 0.0_f32;
+    let t_seed = t;
+    let mut omega = omega;
+    let mut hit = false;
+    let mut safe_t = 0.0_f32;
+    let mut sor_prev = 0.0_f32;
+    let mut sor_step_prev = 0.0_f32;
+    let mut exhausted = true;
+    let mut exit_it = u32::MAX;
+    let mut last_step = 0.0_f32;
+    for it in 0..SDF_MAX_IT {
+        if t >= t_mesh {
+            exhausted = false;
+            exit_it = it;
+            break;
+        }
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let d = field(p);
+        if d < SDF_EPS {
+            hit = true;
+            exhausted = false;
+            exit_it = it;
+            if d < 0.0 {
+                t = safe_t;
+            }
+            for _ri in 0..M2_REFINE_ITERS {
+                let q = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+                let rd_ = field(q);
+                if rd_.abs() < SDF_EPS {
+                    break;
+                }
+                let step = M2_REFINE_RELAX * rd_;
+                t += step;
+            }
+            break;
+        }
+        if omega > 1.0 {
+            let step_len = d * omega;
+            if it > 0 && sor_prev + d < FIELD_LIPSCHITZ_L * sor_step_prev {
+                t = safe_t + sor_prev;
+                omega = 1.0;
+                continue;
+            }
+            safe_t = t;
+            sor_prev = d;
+            sor_step_prev = step_len;
+            t += step_len;
+            last_step = step_len;
+        } else {
+            t += d;
+            last_step = d;
+        }
+        if t > SDF_T_MAX {
+            exhausted = false;
+            exit_it = it;
+            break;
+        }
+    }
+    if exhausted {
+        t = t_seed;
+        hit = false;
+        for _it2 in 0..SDF_MAX_IT {
+            if t >= t_mesh {
+                break;
+            }
+            let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+            let d = field(p);
+            if d < SDF_EPS {
+                hit = true;
+                break;
+            }
+            t += d;
+            last_step = d;
+            if t > SDF_T_MAX {
+                break;
+            }
+        }
+    }
+    (hit, t, exit_it, last_step)
+}
+
+/// The host replay of the marcher at one texel ([`golden_marcher_attributes`], unchanged — the
+/// first element is that function's result) and the seam's pre-quantization values evaluated at the
+/// DEVICE's own inputs `device` (its `gViewT` point; on the raster-owned mesh arm also its stored
+/// mesh normal, which the marcher's mesh shadow / AO read back) with their device-host bounds.
+///
+/// Rule G (`gViewT`): the SDF arm's device point must lie on the host's accept band
+/// (`|sdf| < EPS + ε_field`) and its `t` within [`MarcherPrequant::view_t_bound`] of the host's —
+/// the same program at omega 1, so the bound is the march's first-order sensitivity to the field
+/// (both signs), widened by the last step when the accept decision is fragile; the mesh arm's `t`
+/// within the raster depth's bound (the vertex transform, viewport and interpolation as f32 ops,
+/// `16u·(1 + depth)`, through `T_MAX`); the background's sentinel exactly.
+#[allow(clippy::too_many_arguments)]
+pub fn golden_marcher_attributes_at(
+    edits: &[SdfEdit],
+    materials: &[GoldenMaterial],
+    mesh_depth: f32,
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    omega: f32,
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+    device: &DeviceGbufferTexel,
+) -> (MarcherAttributes, MarcherPrequant) {
+    let attrs = golden_marcher_attributes(
+        edits, materials, mesh_depth, px, py, img_w, img_h, camera, omega, lighting_flags, light_dir,
+    );
+    let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
+    let has_mesh = mesh_depth < MESH_DEPTH_CLEAR;
+    let t_mesh = if has_mesh { depth_to_t(mesh_depth) } else { 1.0e30 };
+    let arm = if attrs.mask == 0 {
+        MarcherArm::Background
+    } else if has_mesh && attrs.view_t == t_mesh {
+        MarcherArm::Mesh
+    } else {
+        MarcherArm::Sdf
+    };
+    let mut pre = MarcherPrequant {
+        arm,
+        base: SDF_BACKGROUND,
+        oct: [0.5, 0.5],
+        mat_id: 0,
+        shadow: 1.0,
+        ao: 1.0,
+        mask_byte: 0,
+        w_in_oct: [0.0; 2],
+        w_in_shadow: 0.0,
+        w_in_ao: 0.0,
+        fragile: 0,
+        host_view_t: attrs.view_t,
+        view_t_bound: 0.0,
+        on_surface_bound: 0.0,
+        on_surface_residual: 0.0,
+    };
+    if arm == MarcherArm::Background {
+        return (attrs, pre);
+    }
+
+    let t_dev = device.view_t;
+    let p = [ro[0] + rd[0] * t_dev, ro[1] + rd[1] * t_dev, ro[2] + rd[2] * t_dev];
+    // The device computed its own `p` from the same `t`: one rounding per op per component.
+    let e_pos = 3.0 * U * (v_len(ro) + (t_dev * v_len(rd)).abs());
+    let (n, e_n, w_oct) = if arm == MarcherArm::Sdf {
+        let n = sdf_edit_list_normal(edits, p);
+        let (w_oct, e_n3) = normal_tap_bounds(edits, p);
+        (n, e_n3[0].max(e_n3[1]).max(e_n3[2]), w_oct)
+    } else {
+        // The raster's normal as the device stored it; the marcher's mesh shadow / AO decode it.
+        let n = oct_decode([device.normal[0] as f32 / 255.0, device.normal[1] as f32 / 255.0]);
+        (n, 30.0 * U, [0.0; 2])
+    };
+    pre.mask_byte = 255;
+    pre.w_in_oct = w_oct;
+    if arm == MarcherArm::Sdf {
+        let mat_id = pick_material_id(edits, p);
+        pre.mat_id = mat_id;
+        let mat = materials.get(mat_id as usize).copied().unwrap_or_default();
+        pre.base = [mat.base_color[0], mat.base_color[1], mat.base_color[2]];
+        pre.oct = oct_encode(n);
+        // The argmin's margin: the nearest edit carrying a DIFFERENT id than the picked one must be
+        // more than twice the field bound farther, or the device may pick the other id.
+        let eps = field_error_bound(edits, p);
+        let id_of = |e: &SdfEdit| (e.center[3].to_bits() & 0xFFFF) as u16;
+        let best_d = edits
+            .iter()
+            .take(MAX_SDF_EDITS)
+            .filter(|e| id_of(e) == mat_id)
+            .map(|e| edit_distance(e, p).abs())
+            .fold(f32::INFINITY, f32::min);
+        let other_d = edits
+            .iter()
+            .take(MAX_SDF_EDITS)
+            .filter(|e| id_of(e) != mat_id)
+            .map(|e| edit_distance(e, p).abs())
+            .fold(f32::INFINITY, f32::min);
+        if other_d - best_d <= 2.0 * eps {
+            pre.fragile |= fragile_bit::MAT_ID;
+        }
+        let nz_l1 = n[2] / (n[0].abs() + n[1].abs() + n[2].abs());
+        if nz_l1.abs() <= 3.0 * e_n {
+            pre.fragile |= fragile_bit::OCT_FOLD;
+        }
+        // Rule G on the SDF arm: the device point on the accept band, its `t` near the host's.
+        pre.on_surface_residual = sdf_edit_list(edits, p).abs();
+        pre.on_surface_bound = SDF_EPS + eps + FIELD_LIPSCHITZ_L * e_pos;
+        let field = |q: [f32; 3]| sdf_edit_list(edits, q);
+        let (_, t0, exit0, last0) = host_primary_march(&field, ro, rd, t_mesh, omega);
+        let mut t_bound = 0.0_f32;
+        let mut accept_fragile = false;
+        for sign in [1.0_f32, -1.0] {
+            let mut found = None;
+            for scale in PERTURB_LADDER {
+                let shifted = |q: [f32; 3]| {
+                    let d = sdf_edit_list(edits, q);
+                    d + sign * scale * seam_field_budget(edits, q, ro, d)
+                };
+                let (_, t1, exit1, _) = host_primary_march(&shifted, ro, rd, t_mesh, omega);
+                if exit1 == exit0 {
+                    found = Some((t1 - t0).abs() / scale);
+                    break;
+                }
+            }
+            match found {
+                Some(dt) => t_bound = t_bound.max(dt),
+                None => accept_fragile = true,
+            }
+        }
+        // The accept refine's own residual band, and the `t` it walked, at f32 resolution.
+        t_bound += 4.0 * U * t0.abs();
+        if accept_fragile {
+            pre.fragile |= fragile_bit::VIEW_T;
+            t_bound += last0.abs() + SDF_EPS;
+        }
+        pre.view_t_bound = t_bound;
+    } else {
+        pre.base = MESH_RASTER_ALBEDO;
+        pre.oct = oct_encode([0.0, 0.0, 1.0]);
+        pre.view_t_bound = SDF_T_MAX * 16.0 * U * (1.0 + mesh_depth.abs()) + 2.0 * U * t_mesh.abs();
+    }
+
+    if lighting_flags != 0 {
+        let l = v_normalize(light_dir);
+        let e_l = 22.0 * U;
+        if lighting_flags & LIGHTING_FLAG_SHADOWS != 0 {
+            let pb = [
+                p[0] + n[0] * SHADOW_NORMAL_BIAS,
+                p[1] + n[1] * SHADOW_NORMAL_BIAS,
+                p[2] + n[2] * SHADOW_NORMAL_BIAS,
+            ];
+            let e_pb = e_pos + SHADOW_NORMAL_BIAS * e_n + 2.0 * U * v_len(pb);
+            let (vis, e_vis, fragile) =
+                host_soft_shadow_ranged_bound(pb, e_pb, n, e_n, l, e_l, SDF_T_MAX, edits);
+            pre.shadow = vis.clamp(0.0, 1.0);
+            pre.w_in_shadow = 255.0 * e_vis;
+            if fragile {
+                pre.fragile |= fragile_bit::SHADOW;
+            }
+        }
+        if lighting_flags & LIGHTING_FLAG_AO != 0 {
+            let (ao, e_ao) = host_ao_bound(p, e_pos, n, e_n, edits);
+            pre.ao = ao.clamp(0.0, 1.0);
+            pre.w_in_ao = 255.0 * e_ao;
+        }
+    }
+    (attrs, pre)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5912,6 +7471,314 @@ mod px1a_reaim_tests {
             let z = hdr_display_bound(p, Target::Rgba16f, PathClass::Z);
             for c in 0..3 {
                 assert!(n[c] >= 1.0 && z[c] >= n[c], "{p:?}: N {n:?} Z {z:?}");
+            }
+        }
+    }
+}
+
+/// OPEN-ITEMS 15 (`oi1516/cut.md` C2) — the seam oracle's host gates: the byte-verdict truth table
+/// (its window can fail), the bound marches and the traced resolve as bit-exact mirrors of the
+/// plain oracles, the trace's anti-vacuity, and the L0b pre-check (the unshadowed table oracle is
+/// the shadowed one at `shadow_mode` 0).
+#[cfg(test)]
+mod oi15_seam_tests {
+    use super::*;
+    use boyko_sdf_math::sdf_op;
+
+    fn twin() -> Vec<SdfEdit> {
+        vec![
+            SdfEdit::sphere([-0.5, 0.0, 0.0], 0.55, sdf_op::UNION, 0.0),
+            SdfEdit::sphere([0.5, 0.0, 0.0], 0.55, sdf_op::UNION, 0.0),
+        ]
+    }
+
+    fn crater() -> Vec<SdfEdit> {
+        vec![
+            SdfEdit::sphere([0.0, 0.0, 0.0], 0.5, sdf_op::UNION, 0.0),
+            SdfEdit::sphere([0.3, 0.0, 0.0], 0.35, sdf_op::SUBTRACT, 0.0),
+        ]
+    }
+
+    fn box_csg() -> Vec<SdfEdit> {
+        vec![SdfEdit::box_shape([0.0, 0.0, 0.0], [0.4, 0.4, 0.4], sdf_op::UNION, 0.0)]
+    }
+
+    fn smooth_union() -> Vec<SdfEdit> {
+        vec![
+            SdfEdit::sphere([-0.25, 0.0, 0.0], 0.35, sdf_op::UNION, 0.0),
+            SdfEdit::sphere([0.25, 0.0, 0.0], 0.35, sdf_op::UNION, 0.15),
+        ]
+    }
+
+    fn capsule_scene() -> Vec<SdfEdit> {
+        vec![
+            SdfEdit::capsule([-0.4, -0.2, 0.0], [0.4, 0.2, 0.1], 0.25, sdf_op::UNION, 0.0),
+            SdfEdit::sphere([0.1, 0.0, 0.2], 0.2, sdf_op::SUBTRACT, 0.1),
+        ]
+    }
+
+    /// `p6_r1_multi_light_table` (tests/sdf_gbuffer_hybrid.rs): a primary directional and two
+    /// shadow-flagged points.
+    fn p6_lights() -> (GoldenLightHeader, Vec<GoldenLight>) {
+        let header = GoldenLightHeader::new(1, 2, 1.0).with_shadow_mode(1);
+        let lights = vec![
+            GoldenLight::directional([0.2, 0.2, 1.0], [0.4, 0.4, 0.4], 1.0),
+            GoldenLight::point([-0.8, -0.3, 0.9], [1.0, 0.9, 0.8], 6500.0, 7.0).with_sdf_shadow(),
+            GoldenLight::point([0.8, -0.3, 0.9], [0.8, 0.9, 1.0], 6500.0, 7.0).with_sdf_shadow(),
+        ];
+        (header, lights)
+    }
+
+    /// `l0b_point_and_spot_match_the_table_oracle`'s table (unshadowed, `shadow_mode` 0).
+    fn l0b_lights() -> (GoldenLightHeader, Vec<GoldenLight>) {
+        let header = GoldenLightHeader::new(1, 2, 1.0);
+        let lights = vec![
+            GoldenLight::directional([0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 1.0),
+            GoldenLight::point([0.0, 0.0, 1.5], [1.0, 0.9, 0.8], 4000.0, 6.0),
+            GoldenLight::spot([0.4, 0.4, 1.5], [0.0, 0.0, 1.0], [0.8, 0.9, 1.0], 6000.0, 6.0, 20.0, 35.0),
+        ];
+        (header, lights)
+    }
+
+    fn materials() -> [GoldenMaterial; 1] {
+        [GoldenMaterial::default()]
+    }
+
+    const FLAGS: u32 = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+
+    /// Every 3rd pixel of the 64×64 ortho frame (no mesh): `(px, py, attrs)`.
+    fn texels(edits: &[SdfEdit]) -> Vec<(u32, u32, MarcherAttributes)> {
+        let mats = materials();
+        let mut out = Vec::new();
+        for py in (0..SDF_IMG_H).step_by(3) {
+            for px in (0..SDF_IMG_W).step_by(3) {
+                let attrs = golden_marcher_attributes(
+                    edits, &mats, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
+                    FLAGS, DEFAULT_LIGHT_DIR,
+                );
+                out.push((px, py, attrs));
+            }
+        }
+        out
+    }
+
+    /// A deterministic xorshift64* stream (no dependency), `[lo, hi)` floats.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self, lo: f32, hi: f32) -> f32 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            let frac = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40) as f32 / (1u64 << 24) as f32;
+            lo + frac * (hi - lo)
+        }
+        fn unit(&mut self) -> [f32; 3] {
+            v_normalize([self.next(-1.0, 1.0), self.next(-1.0, 1.0), self.next(-1.0, 1.0)])
+        }
+    }
+
+    #[test]
+    fn byte_verdict_truth_table() {
+        let x_41_17 = 98.538_05_f32 / 255.0;
+        assert_eq!(attribute_byte_verdict(99, x_41_17, 0.0), ByteVerdict::Exact);
+        assert!(matches!(attribute_byte_verdict(98, x_41_17, 0.0), ByteVerdict::TieFlip { .. }), "the device's 98");
+        assert_eq!(attribute_byte_verdict(97, x_41_17, 0.0), ByteVerdict::Mismatch, "a planted 97 is 1.54 codes off");
+        // A non-tie flip: c = 124.05, the device one code up is 0.95 away — outside 0.5 + W_CONV.
+        // With W_CONV = 0.5 it would be inside (the window's own must-fail twin).
+        let x_124 = 124.05_f32 / 255.0;
+        assert_eq!(attribute_byte_verdict(124, x_124, 0.0), ByteVerdict::Exact);
+        assert_eq!(attribute_byte_verdict(125, x_124, 0.0), ByteVerdict::Mismatch);
+        // The exact .5 tie (the mesh / background oct and the background's 25.5): either neighbour.
+        assert_eq!(attribute_byte_verdict(128, 0.5, 0.0), ByteVerdict::Exact);
+        assert!(matches!(attribute_byte_verdict(127, 0.5, 0.0), ByteVerdict::TieFlip { .. }));
+        assert_eq!(attribute_byte_verdict(126, 0.5, 0.0), ByteVerdict::Mismatch);
+        // The input bound widens the window by exactly its value.
+        assert!(matches!(attribute_byte_verdict(97, x_41_17, 1.0), ByteVerdict::TieFlip { .. }));
+        assert_eq!(attribute_byte_verdict(96, x_41_17, 1.0), ByteVerdict::Mismatch);
+        // The clamp: a value past 1 stores 255; 254 is a full code off.
+        assert_eq!(attribute_byte_verdict(255, 1.3, 0.0), ByteVerdict::Exact);
+        assert_eq!(attribute_byte_verdict(254, 1.3, 0.0), ByteVerdict::Mismatch);
+    }
+
+    #[test]
+    fn from_device_reads_every_lane() {
+        let t = DeviceGbufferTexel {
+            albedo: [204, 205, 206, 255],
+            normal: [98, 192, 0x34, 0x12],
+            material: [250, 240, 255, 255],
+            view_t: 1.761_967_7,
+        };
+        let a = MarcherAttributes::from_device(&t);
+        assert_eq!(a.base_rgb, [204, 205, 206]);
+        assert_eq!(a.oct_rg, [98, 192]);
+        assert_eq!(a.mat_id, 0x1234);
+        assert_eq!((a.shadow, a.ao, a.mask), (250, 240, 1));
+        assert_eq!(a.view_t.to_bits(), t.view_t.to_bits());
+        let bg = MarcherAttributes::from_device(&DeviceGbufferTexel { material: [255, 255, 0, 255], ..t });
+        assert_eq!(bg.mask, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "mask byte")]
+    fn from_device_rejects_a_mask_byte_between_the_arms() {
+        let _ = MarcherAttributes::from_device(&DeviceGbufferTexel {
+            albedo: [0; 4],
+            normal: [0; 4],
+            material: [0, 0, 128, 255],
+            view_t: 0.0,
+        });
+    }
+
+    /// C2 (i): the bound marches return the plain marches' values bit for bit, and the A1 march
+    /// is the ranged one at `SDF_T_MAX`, over the fixtures' surface texels and 200 random rays.
+    #[test]
+    fn bound_marches_mirror_the_plain_marches() {
+        let scenes = [twin(), crater(), box_csg(), smooth_union(), capsule_scene()];
+        let (_, p6) = p6_lights();
+        let mut checked = 0u32;
+        let mut check = |edits: &[SdfEdit], p: [f32; 3], n: [f32; 3], l: [f32; 3], t_max: f32| {
+            let field = |q: [f32; 3]| sdf_edit_list(edits, q);
+            let a1 = host_soft_shadow(p, n, l, &field);
+            let ranged = host_soft_shadow_ranged(p, n, l, SDF_T_MAX, &field);
+            assert_eq!(a1.to_bits(), ranged.to_bits(), "A1 == ranged(SDF_T_MAX) at p={p:?} n={n:?} l={l:?}");
+            let plain = host_soft_shadow_ranged(p, n, l, t_max, &field);
+            let (bound, e, _) = host_soft_shadow_ranged_bound(p, 1e-6, n, 1e-6, l, 1e-6, t_max, edits);
+            assert_eq!(bound.to_bits(), plain.to_bits(), "bound march value at p={p:?} l={l:?} t_max={t_max}");
+            assert!(e.is_finite() && e >= 0.0, "a finite, non-negative visibility bound, got {e}");
+            let (ao_b, e_ao) = host_ao_bound(p, 1e-6, n, 1e-6, edits);
+            assert_eq!(ao_b.to_bits(), host_ao(p, n, &field).to_bits(), "bound AO value at p={p:?}");
+            assert!(e_ao.is_finite() && e_ao >= 0.0);
+            checked += 1;
+        };
+        for edits in &scenes {
+            for (px, py, attrs) in texels(edits) {
+                if attrs.mask != 1 {
+                    continue;
+                }
+                let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                let p = [ro[0] + rd[0] * attrs.view_t, ro[1] + rd[1] * attrs.view_t, ro[2] + rd[2] * attrs.view_t];
+                let n = sdf_edit_list_normal(edits, p);
+                let pb = [p[0] + n[0] * SHADOW_NORMAL_BIAS, p[1] + n[1] * SHADOW_NORMAL_BIAS, p[2] + n[2] * SHADOW_NORMAL_BIAS];
+                check(edits, pb, n, v_normalize(DEFAULT_LIGHT_DIR), SDF_T_MAX);
+                for light in p6.iter().skip(1) {
+                    let pos = [light.pos_range[0], light.pos_range[1], light.pos_range[2]];
+                    let to_l = v_sub(pos, p);
+                    check(edits, pb, n, v_normalize(to_l), v_len(to_l));
+                }
+            }
+        }
+        let mut rng = Rng(0x0151_6A5E_ED00_0001);
+        for i in 0..200 {
+            let edits = &scenes[i % scenes.len()];
+            let p = [rng.next(-1.2, 1.2), rng.next(-1.2, 1.2), rng.next(-1.2, 1.2)];
+            check(edits, p, rng.unit(), rng.unit(), rng.next(0.2, SDF_T_MAX));
+        }
+        assert!(checked > 400, "the mirror gate must see the fixtures' surfaces and the random rays ({checked})");
+    }
+
+    /// C2 (ii): the traced resolve and the floor's own evaluation are the plain shadowed oracle bit
+    /// for bit, and the trace's terms sum to the radiance (its anti-vacuity: a term the trace
+    /// missed would leave the floor blind to it).
+    #[test]
+    fn traced_resolve_equals_untraced_and_its_terms_sum_to_the_radiance() {
+        let mats = materials();
+        let mut lit_texels = 0u32;
+        for (edits, (header, lights)) in [(twin(), p6_lights()), (crater(), l0b_lights()), (smooth_union(), l0b_lights())] {
+            let field = |q: [f32; 3]| sdf_edit_list(&edits, q);
+            for (px, py, attrs) in texels(&edits) {
+                let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                let want = golden_deferred_resolve_table_shadowed(attrs, ro, rd, &mats, &header, &lights, &field);
+                let mut trace = ResolveTrace::default();
+                let got = golden_deferred_resolve_table_shadowed_traced(
+                    attrs, ro, rd, &mats, &header, &lights, &field, &mut trace,
+                );
+                assert_eq!(got.map(f32::to_bits), want.map(f32::to_bits), "traced != untraced at ({px},{py})");
+                if attrs.mask != 1 {
+                    continue;
+                }
+                lit_texels += 1;
+                for (c, (resid, abs)) in trace.sum_residual().into_iter().enumerate() {
+                    assert!(
+                        resid <= 4.0 * U * abs + f32::MIN_POSITIVE,
+                        "the trace's terms miss part of the radiance at ({px},{py}) ch {c}: residual \
+                         {resid:e} > 4u·Σ|terms| = {:e}",
+                        4.0 * U * abs
+                    );
+                }
+                assert!(!trace.sites.is_empty(), "a lit texel passes divergence sites");
+            }
+        }
+        assert!(lit_texels > 200, "the anti-vacuity must see lit texels ({lit_texels})");
+        // The floor runs the same body: its radiance is the oracle's.
+        let edits = twin();
+        let (header, lights) = p6_lights();
+        let field = |q: [f32; 3]| sdf_edit_list(&edits, q);
+        for (px, py, attrs) in texels(&edits).into_iter().filter(|t| t.2.mask == 1).take(40) {
+            let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+            let want = golden_deferred_resolve_table_shadowed(attrs, ro, rd, &mats, &header, &lights, &field);
+            let f = resolve_error_floor(attrs, ro, rd, &mats, &header, &lights, &edits);
+            assert_eq!(f.lit.map(f32::to_bits), want.map(f32::to_bits));
+            assert!(f.floor.iter().all(|x| x.is_finite() && *x >= f32::MIN_POSITIVE), "{:?}", f.floor);
+            assert!(f.sites > 20, "a lit p6_r1 texel has its sites ({})", f.sites);
+        }
+    }
+
+    /// C2 (iv), the L0b pre-check: the unshadowed table oracle L0b used is the shadowed oracle at
+    /// `shadow_mode` 0 bit for bit, so L0b's seam gate reuses the traced shadowed body (no third
+    /// formula).
+    #[test]
+    fn l0b_table_oracle_is_the_shadowed_one_at_shadow_mode_0() {
+        let mats = materials();
+        let (header, lights) = l0b_lights();
+        assert_eq!(header.shadow_mode(), 0);
+        let mut n = 0u32;
+        for edits in [crater(), box_csg(), smooth_union()] {
+            let field = |q: [f32; 3]| sdf_edit_list(&edits, q);
+            for (px, py, attrs) in texels(&edits) {
+                let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                let plain = golden_deferred_resolve_table(attrs, ro, rd, &mats, &header, &lights);
+                let shadowed = golden_deferred_resolve_table_shadowed(attrs, ro, rd, &mats, &header, &lights, &field);
+                assert_eq!(plain.map(f32::to_bits), shadowed.map(f32::to_bits), "({px},{py})");
+                n += 1;
+            }
+        }
+        assert!(n > 1000);
+    }
+
+    /// Critique O6: the seam's replay half IS `golden_marcher_attributes` (the old function is
+    /// unchanged and `golden_marcher_attributes_at` calls it), and the primary march the `gViewT`
+    /// bound perturbs lands on the replay's own `t` bit for bit.
+    #[test]
+    fn marcher_attributes_at_keeps_the_replay_and_its_march_mirrors_it() {
+        let mats = materials();
+        for edits in [twin(), crater(), smooth_union()] {
+            for omega in [1.0_f32, crate::compute::DEFAULT_MARCHER_OMEGA] {
+                for (px, py, attrs) in texels(&edits) {
+                    let own = DeviceGbufferTexel {
+                        albedo: [attrs.base_rgb[0], attrs.base_rgb[1], attrs.base_rgb[2], 255],
+                        normal: [attrs.oct_rg[0], attrs.oct_rg[1], 0, 0],
+                        material: [attrs.shadow, attrs.ao, attrs.mask * 255, 255],
+                        view_t: attrs.view_t,
+                    };
+                    let replay = golden_marcher_attributes(
+                        &edits, &mats, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+                        omega, FLAGS, DEFAULT_LIGHT_DIR,
+                    );
+                    let (at, pre) = golden_marcher_attributes_at(
+                        &edits, &mats, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+                        omega, FLAGS, DEFAULT_LIGHT_DIR, &own,
+                    );
+                    assert_eq!(at, replay, "({px},{py}) omega {omega}");
+                    if pre.arm == MarcherArm::Sdf {
+                        let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                        let field = |q: [f32; 3]| sdf_edit_list(&edits, q);
+                        let (hit, t, _, _) = host_primary_march(&field, ro, rd, 1.0e30, omega);
+                        assert!(hit);
+                        assert_eq!(t.to_bits(), replay.view_t.to_bits(), "({px},{py}) omega {omega}");
+                    }
+                }
             }
         }
     }

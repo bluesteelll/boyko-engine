@@ -717,11 +717,15 @@ float m2_brick_cubic_hit(Texture3D<float> atlas, SamplerState atlas_smp,
     // === GENERATED m2_brick_cubic_hit END ===
 }
 
+// OPEN-ITEMS 16: the M2 first-crossing certificate (`EPS` and `sdf_field.hlsli` are in scope above).
+#include "sdf_m2_certify.hlsli"
+
 // The M2 SURFACE-brick step (VERBATIM copy of `sdf_gbuffer_composite.hlsl`'s `m2_surface_hit`
 // including its GENERATED analytic-residual signed-refine tail).
 bool m2_surface_hit(M4Level lvl, Texture3D<float> atlas, SamplerState atlas_smp,
-                    float3 ro, float3 rd, float t_world, out float hit_t) {
+                    float3 ro, float3 rd, float t_world, out float hit_t, out float cand_out) {
     hit_t = t_world;
+    cand_out = t_world;
     float3 origin = lvl.origin_brick_world.xyz;
     float brick_world = lvl.origin_brick_world.w;
     uint3 dims = (uint3)lvl.dims_atlas_dim.xyz;
@@ -763,6 +767,7 @@ bool m2_surface_hit(M4Level lvl, Texture3D<float> atlas, SamplerState atlas_smp,
     }
 
     float cand_t = t_world + local;
+    cand_out = cand_t; // OPEN-ITEMS 16: the certificate's segment end (a forward walk certified the rest)
 
     // === GENERATED m2_surface_hit_refine BEGIN ===
     float rt = cand_t;
@@ -913,6 +918,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // over-relaxation is NOT copied this rung — see this file's header doc).
     float t = 0.0;
     bool hit = false;
+    bool m2_trust = true; // OPEN-ITEMS 16: the per-ray M2 latch (a refused certificate)
     [loop]
     for (uint it = 0u; it < MAX_IT; ++it) {
         if (t >= t_mesh) {
@@ -953,22 +959,29 @@ void main(uint3 tid : SV_DispatchThreadID) {
         }
 
         if (pc.brick_trilinear != 0u) {
+            if (m2_trust) {
             int lvl = select_level(p);
             if (lvl >= 0) {
                 float m2_hit_t;
+                float m2_cand_t;
                 bool m2_hit;
                 if (lvl == 0) {
-                    m2_hit = m2_surface_hit(m2_levels[0], BrickAtlas,  BrickSampler,  ro, rd, t, m2_hit_t);
+                    m2_hit = m2_surface_hit(m2_levels[0], BrickAtlas,  BrickSampler,  ro, rd, t, m2_hit_t, m2_cand_t);
                 } else if (lvl == 1) {
-                    m2_hit = m2_surface_hit(m2_levels[1], BrickAtlas1, BrickSampler1, ro, rd, t, m2_hit_t);
+                    m2_hit = m2_surface_hit(m2_levels[1], BrickAtlas1, BrickSampler1, ro, rd, t, m2_hit_t, m2_cand_t);
                 } else {
-                    m2_hit = m2_surface_hit(m2_levels[2], BrickAtlas2, BrickSampler2, ro, rd, t, m2_hit_t);
+                    m2_hit = m2_surface_hit(m2_levels[2], BrickAtlas2, BrickSampler2, ro, rd, t, m2_hit_t, m2_cand_t);
                 }
                 if (m2_hit) {
-                    hit = true;
-                    t = m2_hit_t;
-                    break;
+                    // OPEN-ITEMS 16: a FIRST crossing only (the plain march certified [0, t]).
+                    if (m2_first_crossing_certified(ro, rd, t, m2_cert_goal(m2_hit_t, m2_cand_t))) {
+                        hit = true;
+                        t = m2_hit_t;
+                        break;
+                    }
+                    m2_trust = false;
                 }
+            }
             }
         }
 

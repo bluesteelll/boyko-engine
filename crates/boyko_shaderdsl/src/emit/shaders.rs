@@ -3348,3 +3348,127 @@ static const uint UI_SLOT_MASK      = 0x{mask:X}u;
         mask = (1u32 << l.slot_bits) - 1,
     )
 }
+
+// ---- The M2 FIRST-CROSSING CERTIFICATE leaves (OPEN-ITEMS 16) ---------------------------------
+//
+// `crate::range`'s four generic bodies, traced over the `Emit` backend into the full HLSL
+// functions `sdf_m2_certify.hlsli` splices between its `// === GENERATED m2_cert_leaves
+// BEGIN/END ===` sentinels (the `emit_field` bin prints them in that order). The edit loop, the
+// kind / op dispatch and the subdivision driver around them stay hand-written in the header.
+
+/// [`trace_named`] for a leaf returning TWO values, printed as `return float2(a, b);`.
+fn trace_named_vec2<F: FnOnce(&[Emit]) -> [Emit; 2]>(float_names: &[&str], body: F) -> String {
+    let names = Names {
+        float_in: float_names,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: NO_VEC_INPUTS,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: NO_NAMED_LITS,
+        vars: NO_VARS,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+    ARENA.with(|a| a.borrow_mut().clear());
+    let mut floats = Vec::with_capacity(float_names.len());
+    for i in 0..float_names.len() {
+        floats.push(Emit::input(i as u32));
+    }
+    let result = body(&floats);
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let (mut out, temps) = emit_temps(&arena, names);
+        let r = |id: u32| operand_str(&arena, names, &temps, id, OperandPos::Root);
+        out.push_str(&format!("    return float2({}, {});\n", r(result[0].0), r(result[1].0)));
+        out
+    })
+}
+
+/// The `float3` parameter `name` spelled as its three traced scalar inputs (`name.x` …).
+fn vec3_names(name: &str) -> [String; 3] {
+    [format!("{name}.x"), format!("{name}.y"), format!("{name}.z")]
+}
+
+/// Generates the HLSL `convex_seg_lo(va, vb, sa, sb, len)` — the convex segment lower bound — by
+/// tracing [`crate::range::convex_seg_lo_body`] over the `Emit` backend. Spliced into
+/// `crates/boyko_rhi_vulkan/shaders/sdf_m2_certify.hlsli`; the `sdf_field_edsl_sync` test pins it.
+pub fn emit_hlsl_convex_seg_lo() -> String {
+    use crate::range;
+
+    let body = trace_named(&["va", "vb", "sa", "sb", "len"], NO_UINT_INPUTS, |f, _u| {
+        range::convex_seg_lo_body::<Emit>(f[0], f[1], f[2], f[3], f[4])
+    });
+    format!("float convex_seg_lo(float va, float vb, float sa, float sb, float len) {{\n{body}}}\n")
+}
+
+/// Generates the HLSL `m2_cert_sphere(p, rd, c, r)` — a sphere edit's `float2(value, slope)` — by
+/// tracing [`crate::range::sphere_value_slope_body`] over the `Emit` backend.
+pub fn emit_hlsl_m2_cert_sphere() -> String {
+    use crate::range;
+
+    let names: Vec<String> = [vec3_names("p"), vec3_names("rd"), vec3_names("c")]
+        .concat()
+        .into_iter()
+        .chain(["r".to_string()])
+        .collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let body = trace_named_vec2(&refs, |f| {
+        range::sphere_value_slope_body::<Emit>([f[0], f[1], f[2]], [f[3], f[4], f[5]], [f[6], f[7], f[8]], f[9])
+    });
+    format!("float2 m2_cert_sphere(float3 p, float3 rd, float3 c, float r) {{\n{body}}}\n")
+}
+
+/// Generates the HLSL `m2_cert_box(p, rd, c, h)` — an axis-aligned box edit's
+/// `float2(value, slope)` — by tracing [`crate::range::box_value_slope_body`] over the `Emit`
+/// backend.
+pub fn emit_hlsl_m2_cert_box() -> String {
+    use crate::range;
+
+    let names: Vec<String> = [vec3_names("p"), vec3_names("rd"), vec3_names("c"), vec3_names("h")].concat();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let body = trace_named_vec2(&refs, |f| {
+        range::box_value_slope_body::<Emit>(
+            [f[0], f[1], f[2]],
+            [f[3], f[4], f[5]],
+            [f[6], f[7], f[8]],
+            [f[9], f[10], f[11]],
+        )
+    });
+    format!("float2 m2_cert_box(float3 p, float3 rd, float3 c, float3 h) {{\n{body}}}\n")
+}
+
+/// Generates the HLSL `m2_cert_capsule(p, rd, a, b, r)` — a capsule edit's
+/// `float2(value, slope)` — by tracing [`crate::range::capsule_value_slope_body`] over the `Emit`
+/// backend.
+pub fn emit_hlsl_m2_cert_capsule() -> String {
+    use crate::range;
+
+    let names: Vec<String> = [vec3_names("p"), vec3_names("rd"), vec3_names("a"), vec3_names("b")]
+        .concat()
+        .into_iter()
+        .chain(["r".to_string()])
+        .collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let body = trace_named_vec2(&refs, |f| {
+        range::capsule_value_slope_body::<Emit>(
+            [f[0], f[1], f[2]],
+            [f[3], f[4], f[5]],
+            [f[6], f[7], f[8]],
+            [f[9], f[10], f[11]],
+            f[12],
+        )
+    });
+    format!("float2 m2_cert_capsule(float3 p, float3 rd, float3 a, float3 b, float r) {{\n{body}}}\n")
+}
+
+/// The four certificate leaves in the order `sdf_m2_certify.hlsli` holds them between its
+/// `// === GENERATED m2_cert_leaves BEGIN/END ===` sentinels, one blank line apart.
+pub fn emit_hlsl_m2_cert_leaves() -> String {
+    [emit_hlsl_m2_cert_sphere(), emit_hlsl_m2_cert_box(), emit_hlsl_m2_cert_capsule(), emit_hlsl_convex_seg_lo()]
+        .join("\n")
+}

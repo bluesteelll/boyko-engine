@@ -1626,13 +1626,13 @@ mod m1_empty_skip_tests {
 
     /// A deterministic xorshift64* PRNG — the scene generator without a dep (mirrors
     /// the M0 brick GATE's generator so the two suites draw from the SAME family).
-    struct XorShift64(u64);
+    pub(super) struct XorShift64(u64);
 
     impl XorShift64 {
-        fn new(seed: u64) -> Self {
+        pub(super) fn new(seed: u64) -> Self {
             Self(seed ^ 0x9E37_79B9_7F4A_7C15)
         }
-        fn next_u64(&mut self) -> u64 {
+        pub(super) fn next_u64(&mut self) -> u64 {
             let mut x = self.0;
             x ^= x >> 12;
             x ^= x << 25;
@@ -1640,11 +1640,11 @@ mod m1_empty_skip_tests {
             self.0 = x;
             x.wrapping_mul(0x2545_F491_4F6C_DD1D)
         }
-        fn range(&mut self, lo: f32, hi: f32) -> f32 {
+        pub(super) fn range(&mut self, lo: f32, hi: f32) -> f32 {
             let frac = (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32;
             lo + frac * (hi - lo)
         }
-        fn below(&mut self, n: u32) -> u32 {
+        pub(super) fn below(&mut self, n: u32) -> u32 {
             (self.next_u64() % n as u64) as u32
         }
     }
@@ -1652,18 +1652,18 @@ mod m1_empty_skip_tests {
     /// The demo / golden "crater" CSG scene (base sphere minus a smaller sphere) — the
     /// SAME scene the rung-9/10 and B1 goldens use, so the M1 gates run against the
     /// production demo field, not only synthetic scenes.
-    fn crater() -> Vec<SdfEdit> {
+    pub(super) fn crater() -> Vec<SdfEdit> {
         vec![
             SdfEdit::sphere([0.0, 0.0, 0.0], 0.5, sdf_op::UNION, 0.0),
             SdfEdit::sphere([0.3, 0.0, 0.0], 0.35, sdf_op::SUBTRACT, 0.0),
         ]
     }
 
-    fn box_csg() -> Vec<SdfEdit> {
+    pub(super) fn box_csg() -> Vec<SdfEdit> {
         vec![SdfEdit::box_shape([0.0, 0.0, 0.0], [0.4, 0.4, 0.4], sdf_op::UNION, 0.0)]
     }
 
-    fn smooth_union() -> Vec<SdfEdit> {
+    pub(super) fn smooth_union() -> Vec<SdfEdit> {
         vec![
             SdfEdit::sphere([-0.25, 0.0, 0.0], 0.35, sdf_op::UNION, 0.0),
             SdfEdit::sphere([0.25, 0.0, 0.0], 0.35, sdf_op::UNION, 0.15),
@@ -1671,7 +1671,7 @@ mod m1_empty_skip_tests {
     }
 
     /// Builds an `SdfEditField` (the authority) from a slice of edits and bumps its gen.
-    fn field_of(edits: &[SdfEdit]) -> SdfEditField {
+    pub(super) fn field_of(edits: &[SdfEdit]) -> SdfEditField {
         let mut f = SdfEditField::new();
         for e in edits {
             assert!(f.push(*e), "scene must fit MAX_SDF_EDITS");
@@ -1683,7 +1683,7 @@ mod m1_empty_skip_tests {
     /// A random valid scene (1..=6 edits, first forced UNION, SPHERE/BOX, radii/half-
     /// extents >= 0.5, centers in [-2,2]³, UNION/SUBTRACT/INTERSECT, smoothness 0 or 0.15)
     /// returned as a `Vec<SdfEdit>` — the ON-vs-analytic gate's scene family.
-    fn random_scene(rng: &mut XorShift64) -> Vec<SdfEdit> {
+    pub(super) fn random_scene(rng: &mut XorShift64) -> Vec<SdfEdit> {
         let n = 1 + rng.below(6);
         let mut edits = Vec::with_capacity(n as usize);
         for i in 0..n {
@@ -1716,7 +1716,7 @@ mod m1_empty_skip_tests {
 
     /// The default near-field pointer grid baked from `field` — the SAME grid the GPU
     /// binds at binding 9 (origin/dims/brick_world the `FineMarcherPush` carries).
-    fn build_default_grid(field: &SdfEditField) -> (PointerGrid, Vec<u32>) {
+    pub(super) fn build_default_grid(field: &SdfEditField) -> (PointerGrid, Vec<u32>) {
         let grid = PointerGrid::default_near_field();
         let mut cells = vec![0u32; grid.cell_count()];
         build_pointer_grid(field, &grid, &mut cells);
@@ -1813,7 +1813,7 @@ mod m1_empty_skip_tests {
     /// A sparse-but-representative pixel battery across the 64×64 frame (corners, edges,
     /// center, and a diagonal sweep) — exercises HIT, MISS, and the sphere-edge grazing
     /// rays without folding the field on all 4096 pixels in the per-scene inner loops.
-    fn pixel_battery() -> Vec<(u32, u32)> {
+    pub(super) fn pixel_battery() -> Vec<(u32, u32)> {
         let mut v = Vec::new();
         let coords = [0u32, 1, 8, 16, 24, 31, 32, 40, 48, 56, 62, 63];
         for &py in &coords {
@@ -3263,5 +3263,653 @@ mod cluster_cull_push_validity_tests {
             aabb_min.is_finite() && aabb_max.is_finite(),
             "and the result is FINITE, so no device-side finiteness predicate can see the fault"
         );
+    }
+}
+
+
+// ===========================================================================
+// OPEN-ITEMS 16 — M2 commits the FIRST surface (`oi1516/cut.md` D16, C5/C7).
+//
+// C5: the host evaluation-count receipt (the price base: what the host M2 mirror evaluates per
+// scene, in the shaders' order — the M1 skip, then M2, then the fold).
+// C7: the class gates — the seeded refine (a), the two-sphere case (b), the demo scenes (c), the
+// 600-scene battery (d) and the range bound's soundness + kind census (e).
+// ===========================================================================
+#[cfg(test)]
+mod m2_first_surface_tests {
+    use super::super::{CompositeCamera, SDF_IMG_H, SDF_IMG_W, SdfEdit, composite_ray, sdf_op};
+    use super::m1_empty_skip_tests::{box_csg, build_default_grid, crater, field_of, smooth_union};
+    use crate::goldens::{M2EvalCounts, golden_primary_hit_brick_m2};
+
+    /// `tests/sdf_gbuffer_hybrid.rs::two_spheres`: r 0.1 on a level-0 voxel-cell centre in front
+    /// of r 0.5 in the same brick (check 16 D2's budget-independent non-first-surface case).
+    pub(super) fn two_spheres() -> Vec<SdfEdit> {
+        vec![
+            SdfEdit::sphere([0.25, 0.25, 1.5], 0.1, sdf_op::UNION, 0.0),
+            SdfEdit::sphere([0.25, 0.25, 0.5], 0.5, sdf_op::UNION, 0.0),
+        ]
+    }
+
+    /// The four M2 scenes of the device M2 test and the cost probe.
+    pub(super) fn m2_scenes() -> [(&'static str, Vec<SdfEdit>); 4] {
+        [
+            ("crater_csg", crater()),
+            ("box_csg", box_csg()),
+            ("smooth_union", smooth_union()),
+            ("two_spheres", two_spheres()),
+        ]
+    }
+
+    /// The host M2 mirror's evaluation counts per scene over the full 64×64 ortho frame (no mesh,
+    /// omega 1, the M1 skip on — the device M2 test's configuration). Prints the receipt the price
+    /// statement reads; asserts only that M2 ran on every scene.
+    #[test]
+    fn m2_eval_counts_receipt() {
+        for (name, edits) in m2_scenes() {
+            let field = field_of(&edits);
+            let (grid, cells) = build_default_grid(&field);
+            let mut total = M2EvalCounts::default();
+            let mut hits = 0u32;
+            for py in 0..SDF_IMG_H {
+                for px in 0..SDF_IMG_W {
+                    let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                    let mut c = M2EvalCounts::default();
+                    let (hit, _) = golden_primary_hit_brick_m2(
+                        &edits, 1.0e30, ro, rd, 1.0, true, &grid, &cells, None, Some(&mut c),
+                    )
+                    .hit_t;
+                    hits += u32::from(hit);
+                    total.add(&c);
+                }
+            }
+            println!(
+                "M2 receipt [{name}]: {hits} hits; calls {}, accepts {}, refine evals {}, range evals {}, \
+                 rejects {}, latch skips {}, fold evals {}",
+                total.calls,
+                total.accepts,
+                total.refine_evals,
+                total.range_evals,
+                total.rejects,
+                total.latch_skips,
+                total.fold_evals
+            );
+            assert!(total.calls > 0, "[{name}] the host M2 mirror never ran — the receipt is vacuous");
+        }
+    }
+
+    // ── C7: the class gates — M2 commits the FIRST surface ─────────────────
+
+    use super::super::{
+        BrickLevelParams, DEFAULT_LIGHT_DIR, M2_CERT_EPS, M2_CERT_TAIL, M2_REFINE_ITERS, M2_REFINE_RELAX,
+        M4GridParams, MESH_DEPTH_CLEAR, SDF_EPS, SDF_T_MAX, sdf_edit_list,
+    };
+    use super::m1_empty_skip_tests::{XorShift64, pixel_battery, random_scene};
+    use crate::goldens::{
+        HostM2Atlas, M2PrimaryHit, golden_composite_pixel_brick_m4, host_field_range,
+        host_m2_first_crossing_certified, m2_cert_goal,
+    };
+    use boyko_sdf_math::brick::PointerGrid;
+    use boyko_sdf_math::{edit_distance, sdf_edit_list_normal, sdf_kind};
+
+    /// The f32 evaluation error of a certificate range bound over this scene family (`64u·M`,
+    /// `M <= 20`): the margin [`M2_CERT_EPS`] is set above (`compute.rs`).
+    const RANGE_EVAL_ERR: f32 = 64.0 * (1.0 / 16_777_216.0) * 20.0;
+
+    /// The near-miss classifier's accept band: half of what the certificate's margin leaves after
+    /// the evaluation error, so a point the fine trace accepts is a real crossing (or within it).
+    const FINE_EPS: f32 = 0.5 * (M2_CERT_EPS - RANGE_EVAL_ERR);
+
+    /// A cap the fine trace never reaches on a real crossing or a clean pass (asserted).
+    const FINE_MAX_IT: u32 = 1 << 17;
+
+    /// The independent analytic reference: a plain sphere trace from `t = 0` with the marcher's
+    /// accept band `SDF_EPS`, and a non-binding cap far above the marcher's (`(hit, t, capped)`).
+    fn oracle_march(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3]) -> (bool, f32, bool) {
+        let mut t = 0.0_f32;
+        for _ in 0..4096 {
+            let d = sdf_edit_list(edits, [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t]);
+            if d < SDF_EPS {
+                return (true, t, false);
+            }
+            t += d;
+            if t > SDF_T_MAX {
+                return (false, t, false);
+            }
+        }
+        (false, t, true)
+    }
+
+    /// Whether the exact field CROSSES zero near `t` along the ray (as opposed to a near-miss whose
+    /// minimum stays positive): a fine sphere trace from `t − span` with the accept band
+    /// [`FINE_EPS`] accepts within `[t − span, t + span]`. A real crossing there is always found (a
+    /// sphere trace never steps past one); a near-miss with its minimum above `FINE_EPS` is passed.
+    fn crossing_near(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], t: f32, span: f32) -> bool {
+        let mut s = (t - span).max(0.0);
+        for _ in 0..FINE_MAX_IT {
+            let d = sdf_edit_list(edits, [ro[0] + rd[0] * s, ro[1] + rd[1] * s, ro[2] + rd[2] * s]);
+            if d < FINE_EPS {
+                return s <= t + span;
+            }
+            s += d;
+            if s > t + span {
+                return false;
+            }
+        }
+        panic!("the fine near-miss trace hit its cap {FINE_MAX_IT} at t {t} — the classifier is not resolved");
+    }
+
+    /// The edit nearest the surface at `p` and its margin to the next one (`|edit_distance|`).
+    fn nearest_edit(edits: &[SdfEdit], p: [f32; 3]) -> (usize, f32) {
+        let mut d: Vec<(f32, usize)> = edits.iter().enumerate().map(|(i, e)| (edit_distance(e, p).abs(), i)).collect();
+        d.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let margin = if d.len() > 1 { d[1].0 - d[0].0 } else { f32::INFINITY };
+        (d[0].1, margin)
+    }
+
+    /// One pixel's verdict of the "M2 == analytic" property.
+    #[derive(Debug)]
+    enum PixelVerdict {
+        Agree,
+        /// The production march (main + re-march) ran out of iterations: a budget artifact (the M1
+        /// battery's classification), excluded and counted.
+        Budget,
+        /// The two disagree only at a NEAR-MISS (the exact field along the ray does not cross
+        /// zero where one of them accepted): outside the class, counted.
+        NearMiss,
+        Violation(String),
+    }
+
+    /// The per-pixel property (`oi1516/cut.md` C7 (d), with the critique-W2/W3 rules stated
+    /// before any run): the M2-on production march and the independent analytic oracle agree on
+    /// hit / miss, and on a hit land on the same surface (the same nearest edit, unless the
+    /// oracle's two nearest edits are within `2·EPS` — a CSG crease) within
+    /// `2·EPS / |n·rd| + M2_CERT_TAIL` of each other. A disagreement that is a near-miss (no zero
+    /// crossing of the exact field where one side accepted) is outside the class; a production
+    /// budget exhaustion is a budget artifact.
+    fn m2_pixel_verdict(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], m2: M2PrimaryHit) -> PixelVerdict {
+        let (an_hit, an_t, capped) = oracle_march(edits, ro, rd);
+        assert!(!capped, "the oracle's non-binding cap was reached at ro {ro:?}");
+        if m2.exhausted {
+            return PixelVerdict::Budget;
+        }
+        let (m2_hit, m2_t) = m2.hit_t;
+        let at = |t: f32| [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let span = 2.0 * M2_CERT_TAIL;
+        match (m2_hit, an_hit) {
+            (false, false) => PixelVerdict::Agree,
+            (true, false) => {
+                if crossing_near(edits, ro, rd, m2_t, span) {
+                    PixelVerdict::Violation(format!("M2 hit a real crossing at t {m2_t} the oracle missed"))
+                } else {
+                    PixelVerdict::NearMiss
+                }
+            }
+            (false, true) => {
+                if crossing_near(edits, ro, rd, an_t, span) {
+                    PixelVerdict::Violation(format!("the production march missed the oracle's crossing at t {an_t}"))
+                } else {
+                    PixelVerdict::NearMiss
+                }
+            }
+            (true, true) => {
+                let (e_m2, _) = nearest_edit(edits, at(m2_t));
+                let (e_an, margin) = nearest_edit(edits, at(an_t));
+                let n = sdf_edit_list_normal(edits, at(an_t));
+                let cos = (n[0] * rd[0] + n[1] * rd[1] + n[2] * rd[2]).abs().max(1e-6);
+                let same_surface = e_m2 == e_an || margin <= 2.0 * SDF_EPS;
+                let close = (m2_t - an_t).abs() <= 2.0 * SDF_EPS / cos + M2_CERT_TAIL;
+                if same_surface && close {
+                    return PixelVerdict::Agree;
+                }
+                // The earlier of the two accepted something: a real crossing there means the later
+                // one committed a non-first surface.
+                let (first_t, later) = if m2_t > an_t { (an_t, "M2") } else { (m2_t, "the oracle") };
+                if crossing_near(edits, ro, rd, first_t, span) {
+                    PixelVerdict::Violation(format!(
+                        "{later} committed t {} behind a real crossing at t {first_t} (M2 t {m2_t} edit {e_m2}, \
+                         oracle t {an_t} edit {e_an}, cos {cos:.4}, by_m2 {})",
+                        m2_t.max(an_t),
+                        m2.by_m2
+                    ))
+                } else {
+                    PixelVerdict::NearMiss
+                }
+            }
+        }
+    }
+
+    /// The tally of [`m2_pixel_verdict`] over a set of rays.
+    #[derive(Debug, Default)]
+    struct Tally {
+        rays: u64,
+        by_m2: u64,
+        budget: u64,
+        near_miss: u64,
+        violations: Vec<String>,
+    }
+
+    impl Tally {
+        fn add(&mut self, label: &str, px: u32, py: u32, edits: &[SdfEdit], m2: M2PrimaryHit) {
+            let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+            self.rays += 1;
+            self.by_m2 += u64::from(m2.by_m2);
+            match m2_pixel_verdict(edits, ro, rd, m2) {
+                PixelVerdict::Agree => {}
+                PixelVerdict::Budget => self.budget += 1,
+                PixelVerdict::NearMiss => self.near_miss += 1,
+                PixelVerdict::Violation(why) => {
+                    if self.violations.len() < 8 {
+                        self.violations.push(format!("[{label}] ({px},{py}) {why}; edits {edits:?}"));
+                    } else {
+                        self.violations.push(String::new());
+                    }
+                }
+            }
+        }
+    }
+
+    /// The production M2-on march at pixel `(px, py)` (ortho, no mesh, omega 1, the M1 skip on).
+    fn m2_march(edits: &[SdfEdit], grid: &PointerGrid, cells: &[u32], atlas: Option<&HostM2Atlas>, px: u32, py: u32) -> M2PrimaryHit {
+        let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+        golden_primary_hit_brick_m2(edits, 1.0e30, ro, rd, 1.0, true, grid, cells, atlas, None)
+    }
+
+    /// (a) The seeded refine of the triage's trace: ray (39,22) of the crater, the cubic candidate
+    /// at z = −0.0222 (`t = 2.0222`). The generated signed refine walks forward from it with `|d|`
+    /// STRICTLY DECREASING all the way onto the FAR wall (`t ≈ 2.17213`) — a contraction guard
+    /// ("|d| must shrink", the triage's fix A) accepts it. The M2 accept rule (the refine + the
+    /// first-crossing certificate from the march's first M2 point, `a = 1e-4`) must NOT commit it:
+    /// the segment before the candidate crosses the front shell (`t ≈ 1.6716`).
+    #[test]
+    fn m2_accept_rule_rejects_the_far_wall_from_a_contracting_seed() {
+        let edits = crater();
+        let (ro, rd) = composite_ray(39, 22, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+        let field = |q: [f32; 3]| sdf_edit_list(&edits, q);
+        let at = |t: f32| [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let seed = 2.0222_f32;
+        let (mut rt, mut last, mut steps) = (seed, f32::INFINITY, 0usize);
+        loop {
+            let d = field(at(rt));
+            if d.abs() < SDF_EPS {
+                break;
+            }
+            assert!(d.abs() < last, "the walk is NOT contracting at step {steps} (|d| {} after {last})", d.abs());
+            last = d.abs();
+            let step = M2_REFINE_RELAX * d;
+            rt += step;
+            steps += 1;
+            assert!(steps <= M2_REFINE_ITERS as usize, "the walk did not converge within the budget");
+        }
+        let hit_out = std::cell::Cell::new(seed);
+        let ret_out = std::cell::Cell::new(false);
+        boyko_shaderdsl::surface::m2_surface_hit_refine_body::<boyko_shaderdsl::EvalCf, _>(
+            ro, rd, seed, &field, &hit_out, &ret_out,
+        );
+        assert!(ret_out.get(), "the generated refine converges from the seed");
+        let hit_t = hit_out.get();
+        assert!((hit_t - 2.17213).abs() < 1.0e-4, "the refine lands on the far wall, got t {hit_t}");
+        let (an_hit, an_t, _) = oracle_march(&edits, ro, rd);
+        assert!(an_hit && (an_t - 1.671_628).abs() < 2.0e-3, "the first surface is the front shell, got {an_t}");
+        assert!(
+            !host_m2_first_crossing_certified(&edits, ro, rd, 1.0e-4, m2_cert_goal(hit_t, seed), None),
+            "the M2 accept rule COMMITTED the far wall at t {hit_t} behind the front shell at t {an_t}"
+        );
+        println!("(a) ray (39,22): a {steps}-step contracting walk to the far wall t {hit_t}; the certificate refuses it");
+    }
+
+    /// (b) Check 16 D2's budget-independent case: the r 0.1 sphere in front of the r 0.5 one. Every
+    /// pixel of the M2-on golden march against the analytic oracle.
+    #[test]
+    fn m2_two_sphere_first_surface() {
+        let edits = two_spheres();
+        let field = field_of(&edits);
+        let (grid, cells) = build_default_grid(&field);
+        let mut tally = Tally::default();
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                tally.add("two_spheres", px, py, &edits, m2_march(&edits, &grid, &cells, None, px, py));
+            }
+        }
+        println!("(b) two_spheres: {tally:?}");
+        assert!(tally.violations.is_empty(), "(b) M2 committed a non-first surface: {:?}", tally.violations);
+        assert!(tally.by_m2 > 0, "(b) M2 never committed a hit — the scene does not exercise it");
+    }
+
+    /// (c) The demo scenes, every pixel: crater (incl. the triage's (39,22) / (39,41)), box,
+    /// smooth union, two spheres — and the crater over the M4 three-level clip-map (its M2 steps
+    /// carry the same certificate).
+    #[test]
+    fn m2_first_surface_demo_scenes() {
+        for (name, edits) in m2_scenes() {
+            let field = field_of(&edits);
+            let (grid, cells) = build_default_grid(&field);
+            let atlas = HostM2Atlas::bake(&edits, &BrickLevelParams::m2_near_field());
+            let mut tally = Tally::default();
+            for py in 0..SDF_IMG_H {
+                for px in 0..SDF_IMG_W {
+                    tally.add(name, px, py, &edits, m2_march(&edits, &grid, &cells, Some(&atlas), px, py));
+                }
+            }
+            println!("(c) {name}: {tally:?}");
+            assert!(tally.violations.is_empty(), "(c) [{name}] M2 committed a non-first surface: {:?}", tally.violations);
+        }
+        // The crater at the triage's two pixels, explicitly.
+        let edits = crater();
+        let field = field_of(&edits);
+        let (grid, cells) = build_default_grid(&field);
+        for (px, py) in [(39u32, 22u32), (39, 41)] {
+            let m2 = m2_march(&edits, &grid, &cells, None, px, py);
+            let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+            let (_, an_t, _) = oracle_march(&edits, ro, rd);
+            assert!(
+                m2.hit_t.0 && (m2.hit_t.1 - an_t).abs() < 0.01,
+                "(c) crater ({px},{py}): M2 t {} vs the first surface {an_t} (the far wall is 2.17213)",
+                m2.hit_t.1
+            );
+        }
+        // The crater over the M4 three-level clip-map: hit / miss of the M4 golden (M2 at every
+        // level, the per-level empty-skip grids of `tests/sdf_gbuffer_hybrid.rs::
+        // bake_clipmap_host_grids`) against the analytic oracle, by the packed background colour
+        // (the goldens' `SDF_BACKGROUND`, spelled as the device test's `packed_background`).
+        let params = M4GridParams::camera_centered([0.0, 0.0, 2.0]);
+        let level_grids: Vec<(PointerGrid, Vec<u32>)> = (0..boyko_sdf_math::brick::BRICK_LEVELS)
+            .map(|level| {
+                let grid = if level == 0 {
+                    PointerGrid::default_near_field()
+                } else {
+                    let geo = BrickLevelParams::at_level_from_params(&params, level);
+                    PointerGrid {
+                        origin: geo.origin,
+                        dims: [boyko_sdf_math::brick::M2_GRID_DIM; 3],
+                        brick_world: geo.brick_world,
+                    }
+                };
+                let mut cells = vec![0u32; grid.cell_count()];
+                boyko_sdf_math::brick::build_pointer_grid(&field, &grid, &mut cells);
+                (grid, cells)
+            })
+            .collect();
+        let refs: Vec<(PointerGrid, &[u32])> = level_grids.iter().map(|(g, c)| (*g, c.as_slice())).collect();
+        let bg = super::super::pack_rgba([0.05, 0.05, 0.1]);
+        let mut mismatches = Vec::new();
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                let m4 = golden_composite_pixel_brick_m4(
+                    &edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0, 0,
+                    DEFAULT_LIGHT_DIR, true, true, boyko_sdf_math::brick::BRICK_LEVELS as u32, &params, &refs,
+                );
+                let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                let (an_hit, an_t, _) = oracle_march(&edits, ro, rd);
+                if (m4 != bg) != an_hit && crossing_near(&edits, ro, rd, an_t, 2.0 * M2_CERT_TAIL) {
+                    mismatches.push((px, py));
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "(c) crater over M4: hit / miss off the analytic oracle at {mismatches:?}");
+    }
+
+    /// The out-of-contract generators the reconstruction cannot follow (critique W3): sub-`R_MIN`
+    /// spheres and capsules, thin-shell subtracts, a small primitive just in front of a larger
+    /// surface in the camera's direction (+z), each in the M2 grid's near field.
+    fn out_of_contract_scene(rng: &mut XorShift64) -> Vec<SdfEdit> {
+        let c = [rng.range(-1.2, 1.2), rng.range(-1.2, 1.2), rng.range(-1.2, 1.2)];
+        match rng.below(5) {
+            // A small sphere in front of a big one (check 16 D2's shape, randomized).
+            0 => {
+                let r = rng.range(0.05, 0.3);
+                let big = rng.range(0.4, 0.9);
+                vec![
+                    SdfEdit::sphere([c[0], c[1], c[2] + big + r + rng.range(0.02, 0.6)], r, sdf_op::UNION, 0.0),
+                    SdfEdit::sphere(c, big, sdf_op::UNION, 0.0),
+                ]
+            }
+            // A sub-R_MIN subtractor biting a sphere (the crater's shape, randomized).
+            1 => {
+                let big = rng.range(0.4, 0.9);
+                let r = rng.range(0.1, 0.45);
+                let off = [rng.range(-0.6, 0.6), rng.range(-0.6, 0.6), rng.range(0.0, 0.6)];
+                vec![
+                    SdfEdit::sphere(c, big, sdf_op::UNION, 0.0),
+                    SdfEdit::sphere([c[0] + off[0], c[1] + off[1], c[2] + off[2]], r, sdf_op::SUBTRACT, 0.0),
+                ]
+            }
+            // A thin shell: a sphere minus a slightly smaller concentric one (and a cut to see in).
+            2 => {
+                let big = rng.range(0.4, 0.9);
+                let shell = rng.range(0.02, 0.12);
+                vec![
+                    SdfEdit::sphere(c, big, sdf_op::UNION, 0.0),
+                    SdfEdit::sphere(c, big - shell, sdf_op::SUBTRACT, 0.0),
+                    SdfEdit::box_shape([c[0], c[1], c[2] + big], [big, big, big * 0.5], sdf_op::SUBTRACT, 0.0),
+                ]
+            }
+            // A thin capsule in front of a box.
+            3 => {
+                let r = rng.range(0.03, 0.25);
+                let h = [rng.range(0.3, 0.8), rng.range(0.3, 0.8), rng.range(0.3, 0.8)];
+                let z = c[2] + h[2] + r + rng.range(0.02, 0.5);
+                vec![
+                    SdfEdit::capsule([c[0] - 0.4, c[1] - 0.3, z], [c[0] + 0.4, c[1] + 0.3, z], r, sdf_op::UNION, 0.0),
+                    SdfEdit::box_shape(c, h, sdf_op::UNION, if rng.below(2) == 0 { 0.0 } else { 0.1 }),
+                ]
+            }
+            // A capsule-and-sphere mix with smooth and intersect ops.
+            _ => {
+                let r = rng.range(0.05, 0.6);
+                vec![
+                    SdfEdit::sphere(c, rng.range(0.3, 0.9), sdf_op::UNION, 0.0),
+                    SdfEdit::capsule(
+                        [c[0] + rng.range(-0.8, 0.8), c[1] + rng.range(-0.8, 0.8), c[2] + rng.range(-0.3, 0.8)],
+                        [c[0] + rng.range(-0.8, 0.8), c[1] + rng.range(-0.8, 0.8), c[2] + rng.range(-0.3, 0.8)],
+                        r,
+                        match rng.below(3) {
+                            0 => sdf_op::UNION,
+                            1 => sdf_op::SUBTRACT,
+                            _ => sdf_op::INTERSECT,
+                        },
+                        if rng.below(2) == 0 { 0.0 } else { 0.12 },
+                    ),
+                ]
+            }
+        }
+    }
+
+    /// (d) THE CLASS GATE: over 600 random scenes — every second one from the out-of-contract
+    /// generators — and the M1 battery plus the triage's two pixels, "M2 == analytic" per pixel
+    /// ([`m2_pixel_verdict`]).
+    #[test]
+    #[ignore = "slow: the 600-scene M2 battery runs past 30 s in a debug build (ruling 93 Q7); run with --ignored"]
+    fn m2_on_first_surface_matches_analytic_over_many_scenes() {
+        const SCENES: u64 = 600;
+        let mut battery = pixel_battery();
+        battery.extend([(39, 22), (39, 41)]);
+        let mut tally = Tally::default();
+        let mut out_of_contract = 0u64;
+        for seed in 0..SCENES {
+            let mut rng = XorShift64::new(0x0516_0000 + seed);
+            let edits = if seed % 2 == 1 {
+                out_of_contract += 1;
+                out_of_contract_scene(&mut rng)
+            } else {
+                random_scene(&mut rng)
+            };
+            let field = field_of(&edits);
+            let (grid, cells) = build_default_grid(&field);
+            let atlas = HostM2Atlas::bake(&edits, &BrickLevelParams::m2_near_field());
+            for &(px, py) in &battery {
+                tally.add(&format!("seed {seed}"), px, py, &edits, m2_march(&edits, &grid, &cells, Some(&atlas), px, py));
+            }
+        }
+        println!("(d) {SCENES} scenes ({out_of_contract} out-of-contract): {tally:?}");
+        assert!(tally.by_m2 > 1000, "(d) the battery barely exercises M2 ({} commits)", tally.by_m2);
+        assert!(
+            tally.violations.is_empty(),
+            "(d) M2 committed a non-first surface on {} ray(s): {:?}",
+            tally.violations.len(),
+            &tally.violations[..tally.violations.len().min(8)]
+        );
+    }
+
+    /// (e) The range bound is SOUND: on random segments of the scene family (both generators,
+    /// every kind and op, hard and smooth), `lo <= min` and `hi >= max` of the exact field over
+    /// 4096 dense samples, within the bound's f32 evaluation error; and the census: every
+    /// `KIND_*` / `OP_*` / smooth combination occurs, and the shader still declares exactly the 3
+    /// kinds this bound has a rule for.
+    #[test]
+    fn field_range_lo_bounds_the_field() {
+        let mut seen = [[[false; 2]; 3]; 3]; // [kind][op][smooth]
+        let mut checked = 0u32;
+        for seed in 0..300u64 {
+            let mut rng = XorShift64::new(0xE5E5_0000 + seed);
+            let edits = if seed % 2 == 0 { random_scene(&mut rng) } else { out_of_contract_scene(&mut rng) };
+            for (i, e) in edits.iter().enumerate() {
+                let op = if i == 0 { sdf_op::UNION } else { e.op };
+                seen[e.kind as usize][op as usize][usize::from(e.smoothness > 0.0)] = true;
+            }
+            for _ in 0..8 {
+                let ro = [rng.range(-3.0, 3.0), rng.range(-3.0, 3.0), rng.range(-3.0, 3.0)];
+                let d = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+                let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-3);
+                let rd = [d[0] / l, d[1] / l, d[2] / l];
+                let ta = rng.range(0.0, 2.0);
+                let tb = ta + rng.range(0.001, 4.0);
+                let (lo, hi) = host_field_range(&edits, ro, rd, ta, tb);
+                let (mut min, mut max) = (f32::INFINITY, f32::NEG_INFINITY);
+                for k in 0..=4096 {
+                    let t = ta + (tb - ta) * k as f32 / 4096.0;
+                    let f = sdf_edit_list(&edits, [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t]);
+                    min = min.min(f);
+                    max = max.max(f);
+                }
+                assert!(lo <= min + RANGE_EVAL_ERR, "lo {lo} above the sampled min {min} on {edits:?} [{ta}, {tb}]");
+                assert!(hi >= max - RANGE_EVAL_ERR, "hi {hi} below the sampled max {max} on {edits:?} [{ta}, {tb}]");
+                checked += 1;
+            }
+        }
+        assert!(checked >= 2400);
+        for kind in [sdf_kind::SPHERE, sdf_kind::BOX, sdf_kind::CAPSULE] {
+            for op in [sdf_op::UNION, sdf_op::SUBTRACT, sdf_op::INTERSECT] {
+                for (smooth, drawn) in seen[kind as usize][op as usize].iter().enumerate() {
+                    assert!(*drawn, "the family never drew kind {kind} op {op} smooth {smooth}");
+                }
+            }
+        }
+        let field_hlsli = include_str!("../../shaders/sdf_field.hlsli");
+        let kinds = field_hlsli.lines().filter(|l| l.trim_start().starts_with("static const uint KIND_")).count();
+        assert_eq!(
+            kinds, 3,
+            "sdf_field.hlsli declares {kinds} primitive kinds; the M2 certificate's range bound has a convex rule \
+             for exactly 3 (sphere, box, capsule) — a new kind needs its rule (boyko_shaderdsl::range) first"
+        );
+    }
+
+    // ── OI1516 round 1 (triage W1): the certificate's start point under over-relaxation ─────
+    //
+    // D16-4: past an over-relaxed step the march's current `t` is NOT certified — the overlap check
+    // of that step runs at the fold, after the M2 block — so the certificate starts at the last point
+    // the march did certify, `safe_t + sor_prev`. Every other gate runs at omega 1, where the two
+    // starts coincide (the `a = t` mutant is equivalent there); this one runs at omega 1.6.
+
+    use crate::goldens::{golden_primary_hit_brick_m4, host_m2_surface_hit};
+
+    /// The over-relaxation of the start-point gate (the harnesses clamp omega to `[1, 1.99]`).
+    const W1_OMEGA: f32 = 1.6;
+
+    /// D16-4's scene: a thin plate (half-thickness 0.1, near face z = 1.0) across the whole ortho
+    /// frame, and a sphere (r 1.2, front cap z = 0.2) behind it. From the camera (z = 2) the first
+    /// fold sees the plate at `d0 = 1.0`; at omega 1.6 the step lands at z = 0.4 — past the plate,
+    /// outside both edits — in the M2 brick z ∈ [0, 2], whose cubic finds the sphere ahead on every
+    /// ray with `x² + y² < 0.44`. `tests/sdf_gbuffer_hybrid.rs::jumped_plate` is the device copy.
+    fn jumped_plate() -> Vec<SdfEdit> {
+        vec![
+            SdfEdit::box_shape([0.0, 0.0, 0.9], [1.5, 1.5, 0.1], sdf_op::UNION, 0.0),
+            SdfEdit::sphere([0.0, 0.0, -1.0], 1.2, sdf_op::UNION, 0.0),
+        ]
+    }
+
+    /// W1: on [`jumped_plate`] at omega 1.6 both host mirrors (M2 and the M4 N = 1 ray march) must
+    /// commit the plate on every pixel — "M2 == analytic" ([`m2_pixel_verdict`]) — while the scene
+    /// provably exercises the start point: on the centre ray, replayed here from the field alone,
+    /// the over-relaxed step jumps the plate, M2 at the landing refines onto the sphere, and the
+    /// certificate ACCEPTS that hit from the landing `t` (the `a = t` mutant commits it) but
+    /// REFUSES it from `safe_t + sor_prev = d0`. Over the frame the M2 mirror's witness count
+    /// (`M2EvalCounts::start_point_refusals`) must be non-zero.
+    #[test]
+    fn m2_overrelaxed_start_point_refuses_a_hit_behind_a_jumped_plate() {
+        let edits = jumped_plate();
+        let at = |ro: [f32; 3], rd: [f32; 3], t: f32| [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+
+        // The premise on the centre ray, from the field alone (independent of either mirror's `a`).
+        let (ro, rd) = composite_ray(32, 32, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+        let d0 = sdf_edit_list(&edits, ro);
+        assert!((d0 - 1.0).abs() < 1.0e-5, "the first fold sees the plate at 1.0, got {d0}");
+        let t1 = d0 * W1_OMEGA; // the mirrors' `step_len = d * omega; t += step_len` from t = 0
+        let landing = at(ro, rd, t1);
+        assert!(
+            landing[2] < 0.8 && sdf_edit_list(&edits, landing) > SDF_EPS,
+            "the over-relaxed step must land past the plate (back face z = 0.8), outside every edit: {landing:?}"
+        );
+        let (m2_hit_t, cand_t) = host_m2_surface_hit(&edits, None, ro, rd, t1, None)
+            .expect("premise: M2 at the landing refines onto the sphere ahead");
+        assert!(
+            m2_hit_t > t1 && edit_distance(&edits[1], at(ro, rd, m2_hit_t)).abs() < SDF_EPS,
+            "premise: the landing's M2 hit is the sphere behind the plate, got t {m2_hit_t}"
+        );
+        let goal = m2_cert_goal(m2_hit_t, cand_t);
+        assert!(
+            host_m2_first_crossing_certified(&edits, ro, rd, t1, goal, None),
+            "premise: the certificate from the landing `t` accepts the sphere — without it the gate cannot see `a = t`"
+        );
+        assert!(
+            !host_m2_first_crossing_certified(&edits, ro, rd, d0, goal, None),
+            "D16-4: the certificate from `safe_t + sor_prev` = {d0} must refuse the sphere behind the plate"
+        );
+
+        // Both mirrors, every pixel.
+        let field = field_of(&edits);
+        let (grid, cells) = build_default_grid(&field);
+        let atlas = HostM2Atlas::bake(&edits, &BrickLevelParams::m2_near_field());
+        let params = M4GridParams::near_field_only();
+        let level_grids = [(grid, cells.as_slice())];
+        let mut m2_tally = Tally::default();
+        let mut m4_tally = Tally::default();
+        let mut keystone = Vec::new();
+        let mut witnesses = 0u32;
+        let mut plate_misses = Vec::new();
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                let mut c = M2EvalCounts::default();
+                let m2 = golden_primary_hit_brick_m2(
+                    &edits, 1.0e30, ro, rd, W1_OMEGA, false, &grid, &cells, Some(&atlas), Some(&mut c),
+                );
+                let m4 = golden_primary_hit_brick_m4(&edits, 1.0e30, ro, rd, W1_OMEGA, false, 1, &params, &level_grids);
+                witnesses += u32::from(c.start_point_refusals > 0);
+                m2_tally.add("jumped_plate M2", px, py, &edits, m2);
+                m4_tally.add("jumped_plate M4", px, py, &edits, m4);
+                for (name, h) in [("M2", m2), ("M4", m4)] {
+                    let on_plate = h.hit_t.0 && edit_distance(&edits[0], at(ro, rd, h.hit_t.1)).abs() < SDF_EPS;
+                    if !on_plate && plate_misses.len() < 8 {
+                        plate_misses.push(format!("{name} ({px},{py}) {h:?}"));
+                    }
+                }
+                if m4 != m2 && keystone.len() < 8 {
+                    keystone.push(format!("({px},{py}) M2 {m2:?} vs M4 {m4:?}"));
+                }
+            }
+        }
+        println!(
+            "W1 jumped_plate at omega {W1_OMEGA}: M2 {m2_tally:?}; M4 {m4_tally:?}; {witnesses} pixel(s) where the \
+             start point refused a hit the landing `t` would commit"
+        );
+        assert!(m2_tally.violations.is_empty(), "W1: the M2 mirror committed a non-first surface: {:?}", m2_tally.violations);
+        assert!(m4_tally.violations.is_empty(), "W1: the M4 mirror committed a non-first surface: {:?}", m4_tally.violations);
+        assert!(plate_misses.is_empty(), "W1: a mirror's hit is not on the plate (the first surface): {plate_misses:?}");
+        assert!(
+            m2_tally.budget == 0 && m2_tally.near_miss == 0 && m4_tally.budget == 0 && m4_tally.near_miss == 0,
+            "W1: the scene is clean — no budget artifact or near-miss is expected (M2 {m2_tally:?}, M4 {m4_tally:?})"
+        );
+        assert!(keystone.is_empty(), "W1: the M4 ray march at N = 1 must equal the M2 one: {keystone:?}");
+        assert!(witnesses > 0, "W1: no pixel exercises the start point — the gate cannot see `a = t`");
     }
 }

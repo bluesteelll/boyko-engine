@@ -2897,3 +2897,114 @@ fn b1_marcher_fold_d_threads_field_seam() {
         assert_bits(d, h, &format!("fold_d-sweep-p{p:?}"));
     }
 }
+
+// ======================================================================
+// OPEN-ITEMS 16 — the M2 first-crossing certificate's range leaves
+// (`boyko_shaderdsl::range`). FROZEN literal twins of the four bodies as they
+// shipped (the generic bodies are the host certificate's Eval AND the GPU
+// header's generated text), swept: a reordered op in a leaf turns these red.
+// ======================================================================
+
+fn frozen_sign_or_one(x: f32) -> f32 {
+    if x >= 0.0 { 1.0 } else { -1.0 }
+}
+
+fn frozen_convex_seg_lo(va: f32, vb: f32, sa: f32, sb: f32, len: f32) -> f32 {
+    let gap = frozen_min(sa - sb, -1.0e-30);
+    let x = frozen_min(frozen_max((vb - va - sb * len) / gap, 0.0), len);
+    let tangent = va + sa * x;
+    let lo = if sa >= 0.0 {
+        va
+    } else if sb <= 0.0 {
+        vb
+    } else {
+        tangent
+    };
+    frozen_min(frozen_min(lo, va), vb)
+}
+
+fn frozen_sphere_value_slope(p: [f32; 3], rd: [f32; 3], c: [f32; 3], r: f32) -> [f32; 2] {
+    let q = frozen_v_sub(p, c);
+    let len = frozen_v_len(q);
+    [len - r, frozen_v_dot(q, rd) / frozen_max(len, 1.0e-30)]
+}
+
+fn frozen_box_value_slope(p: [f32; 3], rd: [f32; 3], c: [f32; 3], h: [f32; 3]) -> [f32; 2] {
+    let pc = frozen_v_sub(p, c);
+    let q = frozen_v_sub(frozen_v_abs(pc), h);
+    let m = frozen_v_max0(q);
+    let len = frozen_v_len(m);
+    let q_max = frozen_max(q[0], frozen_max(q[1], q[2]));
+    let value = len + frozen_min(q_max, 0.0);
+    let s = [frozen_sign_or_one(pc[0]), frozen_sign_or_one(pc[1]), frozen_sign_or_one(pc[2])];
+    let num = s[0] * m[0] * rd[0] + s[1] * m[1] * rd[1] + s[2] * m[2] * rd[2];
+    let outside = num / frozen_max(len, 1.0e-30);
+    let inside = if q[0] >= frozen_max(q[1], q[2]) {
+        s[0] * rd[0]
+    } else if q[1] >= q[2] {
+        s[1] * rd[1]
+    } else {
+        s[2] * rd[2]
+    };
+    [value, if len > 0.0 { outside } else { inside }]
+}
+
+fn frozen_capsule_value_slope(p: [f32; 3], rd: [f32; 3], a: [f32; 3], b: [f32; 3], r: f32) -> [f32; 2] {
+    let pa = frozen_v_sub(p, a);
+    let ba = frozen_v_sub(b, a);
+    let denom = frozen_max(frozen_v_dot(ba, ba), FROZEN_CAPSULE_DENOM_EPS);
+    let h = (frozen_v_dot(pa, ba) / denom).clamp(0.0, 1.0);
+    let w = frozen_v_sub(pa, frozen_v_scale(ba, h));
+    let len = frozen_v_len(w);
+    [len - r, frozen_v_dot(w, rd) / frozen_max(len, 1.0e-30)]
+}
+
+#[test]
+fn m2_cert_convex_seg_lo_random_sweep_byte_identical() {
+    use boyko_shaderdsl::range::convex_seg_lo_body;
+    let mut lcg = Lcg::new(0x0516_C0DE_5E61_0001);
+    for i in 0..50_000 {
+        let (va, vb, sa, sb, len) =
+            (lcg.next_f32(4.0), lcg.next_f32(4.0), lcg.next_f32(2.0), lcg.next_f32(2.0), lcg.next_f32(6.0));
+        assert_bits(
+            convex_seg_lo_body::<f32>(va, vb, sa, sb, len),
+            frozen_convex_seg_lo(va, vb, sa, sb, len),
+            &format!("convex_seg_lo #{i} ({va}, {vb}, {sa}, {sb}, {len})"),
+        );
+    }
+    // Every slope-sign arm, explicitly: sa >= 0; sb <= 0; the tangent crossing; the degenerate gap.
+    for (va, vb, sa, sb, len) in
+        [(0.5, 0.9, 0.2, 0.6, 1.0), (0.9, 0.5, -0.6, -0.2, 1.0), (0.35, 0.35, -1.0, 1.0, 1.0), (0.2, 0.3, -0.0, 0.0, 2.0)]
+    {
+        assert_bits(
+            convex_seg_lo_body::<f32>(va, vb, sa, sb, len),
+            frozen_convex_seg_lo(va, vb, sa, sb, len),
+            "convex_seg_lo arm",
+        );
+    }
+}
+
+#[test]
+fn m2_cert_value_slope_leaves_random_sweep_byte_identical() {
+    use boyko_shaderdsl::range::{box_value_slope_body, capsule_value_slope_body, sphere_value_slope_body};
+    let mut lcg = Lcg::new(0x0516_C0DE_5E61_0002);
+    let v3 = |lcg: &mut Lcg, r: f32| [lcg.next_f32(r), lcg.next_f32(r), lcg.next_f32(r)];
+    for i in 0..30_000 {
+        let p = v3(&mut lcg, 3.0);
+        let rd = v3(&mut lcg, 1.0);
+        let c = v3(&mut lcg, 2.0);
+        let h = v3(&mut lcg, 1.0);
+        let b = v3(&mut lcg, 2.0);
+        let r = lcg.next_f32(1.0);
+        let ctx = format!("#{i} p={p:?} rd={rd:?} c={c:?} h={h:?} b={b:?} r={r}");
+        let pairs = [
+            (sphere_value_slope_body::<f32>(p, rd, c, r), frozen_sphere_value_slope(p, rd, c, r)),
+            (box_value_slope_body::<f32>(p, rd, c, h), frozen_box_value_slope(p, rd, c, h)),
+            (capsule_value_slope_body::<f32>(p, rd, c, b, r), frozen_capsule_value_slope(p, rd, c, b, r)),
+        ];
+        for (k, (got, want)) in pairs.into_iter().enumerate() {
+            assert_bits(got[0], want[0], &format!("kind {k} value {ctx}"));
+            assert_bits(got[1], want[1], &format!("kind {k} slope {ctx}"));
+        }
+    }
+}
