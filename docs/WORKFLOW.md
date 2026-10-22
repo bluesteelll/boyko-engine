@@ -320,13 +320,19 @@ the lane's usual environment and under the heavy lock. `RUSTUP_TOOLCHAIN` is req
 `rustc -V` is the yml's pin, e.g. `stable-x86_64-pc-windows-msvc`); the script sets `RUSTUP_AUTO_INSTALL=0`
 in every child, so nothing is ever downloaded behind the caller. `--host-target-dir` defaults to
 `CARGO_TARGET_DIR`. `--log-dir` is required, so nothing is written into a worktree; it gets `PID`,
-`progress.tsv` (one line per finished row, with the free disk after it), `summary.tsv`, `DONE` (the exit
-code), one log per row and `dead_items.tsv` (every never-used / unused / unfulfilled-expectation diagnostic
-of the Linux rows: the F4 class list; empty without `--linux`). A `--log-dir` may be re-used: a row's log is
-truncated at the row's first write in a run, so no verdict or dead item is read from an earlier run (a row
-this run does not reach keeps its old log, and `summary.tsv` does not point at it). Exit 0 = no FAIL,
-1 = a FAIL, 2 = the mirror cannot read `ci.yml`, its table no longer matches it, or a preflight or machine
-guard stopped the run.
+`progress.tsv` (one line per finished row, with the free disk after it), `summary.tsv`, `DONE`, one log per
+row and `dead_items.tsv` (every never-used / unused / unfulfilled-expectation diagnostic of the Linux rows:
+the F4 class list; empty without `--linux`). **A run's files are its own.** Its first writes, before the
+self-test and before anything else in it can fail, are `DONE` = `running`, `PID`, `progress.tsv`'s header
+and an empty `summary.tsv` and `dead_items.tsv`; its last write is `DONE` = the exit code, also when it
+stops on a drift, a failed self-test or an error in the script. So a run has ended when `DONE` holds an
+integer, and only then are `summary.tsv` and `dead_items.tsv` its verdict; `running` beside a dead `PID` is a
+run that was killed or crashed, with no verdict (a waiter reads `DONE`'s content, not its existence). A
+`--log-dir` may therefore be re-used: besides the above, a row's log is truncated at the row's first write
+in a run, so no verdict or dead item is read from an earlier run (a row this run does not reach keeps its
+old log, and `summary.tsv` does not point at it). The script's self-test drives both through the run's own
+code. Exit 0 = no FAIL, 1 = a FAIL, 2 = the mirror cannot read `ci.yml`, its table no longer matches it, a
+preflight or machine guard stopped the run, or the mirror itself failed (its self-test, an error).
 
 **What each row runs** is read from `ci.yml` at run time, never re-listed; the script's JOB TABLE only
 says HOW (one row per job, or per matrix leg, with a kind), and each adapter asserts the shape it reads,
