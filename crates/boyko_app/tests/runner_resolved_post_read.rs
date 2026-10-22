@@ -80,7 +80,8 @@ fn post_final_gpu_packs_the_tonemapper_a_unit_ratio_and_the_extent() {
                 mode_words: (cfg.tonemapper as u32) << TONEMAP_MODE_SHIFT,
                 exposure_ratio: 1.0,
                 extent: [640, 360],
-                _r: [0; 4],
+                sharpness: 0.0,
+                _r: [0; 3],
             }
         );
     }

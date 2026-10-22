@@ -31,10 +31,17 @@ pub fn resolved_post_for_frame(
 
 /// The `post_final` constant buffer for `post` at the dispatch `extent` (`display`'s size): the
 /// tonemapper in the mode word at `TONEMAP_MODE_SHIFT`, an exposure ratio of exactly `1.0` (the
-/// producers already baked `pre_exposure` into `lit`; PX3's auto-exposure moves it), the extent.
+/// producers already baked `pre_exposure` into `lit`; PX3's auto-exposure moves it), the extent,
+/// and the sharpen stage off (no `POST_MODE_SHARPEN` bit, `sharpness` 0 — render wave PX1b).
 #[inline]
 pub const fn post_final_gpu(post: &ResolvedPost, extent: [u32; 2]) -> PostFinalGpu {
-    PostFinalGpu { mode_words: post.tonemapper << TONEMAP_MODE_SHIFT, exposure_ratio: 1.0, extent, _r: [0; 4] }
+    PostFinalGpu {
+        mode_words: post.tonemapper << TONEMAP_MODE_SHIFT,
+        exposure_ratio: 1.0,
+        extent,
+        sharpness: 0.0,
+        _r: [0; 3],
+    }
 }
 
 /// Reports `boyko-W3012` (`post_plugin_absent`) once per process: the runner found no

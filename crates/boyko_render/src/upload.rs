@@ -1362,10 +1362,10 @@ pub fn post_final_words(gpu: &PostFinalGpu) -> [u32; 8] {
         gpu.exposure_ratio.to_bits(),
         gpu.extent[0],
         gpu.extent[1],
+        gpu.sharpness.to_bits(),
         gpu._r[0],
         gpu._r[1],
         gpu._r[2],
-        gpu._r[3],
     ]
 }
 

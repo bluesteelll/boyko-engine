@@ -2251,8 +2251,12 @@ impl Cf for EvalCf {
         a as f32
     }
     #[inline]
-    fn usub(_a: u32, _b: u32) -> u32 {
-        unreachable!("Cf::usub is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    fn usub(a: u32, b: u32) -> u32 {
+        // Concrete since render wave PX1b (`px1b/cut.md` D-R6, O10): RCAS's border clamp
+        // `min(x - 1u, x)` IS oracle-swept over EvalCf and relies on `0u - 1u` wrapping to
+        // `0xFFFFFFFF` (SPIR-V's modular `OpISub`), so Eval wraps too — never a debug-build overflow
+        // panic. `m2_brick_cubic_hit_body`, the first caller, still never runs on Eval.
+        a.wrapping_sub(b)
     }
     #[inline]
     fn umin(a: u32, b: u32) -> u32 {

@@ -520,9 +520,11 @@ embed_spirv! {
     /// GENERATED WHOLE from `boyko_shaderdsl::post` — render wave PXe; `tests/post_edsl_sync.rs`
     /// byte-gates both files). Per pixel: one fetch of the scene input (`taa_hist[fi]` under TAA,
     /// `lit_native` under SSAA, `lit[fi]` otherwise), then `hdr_sanitize` → the exposure ratio →
-    /// the selected tonemap → the gamma OETF, stored to `display`. Three bindings
-    /// (`POST_FINAL_BINDINGS`: `gScene` @0, `gDisplay` @1, the 32-byte `PostFinal` UBO @2),
-    /// `numthreads(8, 8, 1)`.
+    /// (render wave PX1b, only under the mode word's `POST_MODE_SHARPEN` bit, a `[branch]`) FSR 1
+    /// RCAS over the border-clamped cross — four more fetches of the same image, in FSR 2's
+    /// reversible space, at the `sharpness` word's `con` → the selected tonemap → the gamma OETF,
+    /// stored to `display`. Three bindings (`POST_FINAL_BINDINGS`: `gScene` @0, `gDisplay` @1, the
+    /// 32-byte `PostFinal` UBO @2), `numthreads(8, 8, 1)`.
     POST_FINAL_COMP_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/post_final.comp.spv")
 }

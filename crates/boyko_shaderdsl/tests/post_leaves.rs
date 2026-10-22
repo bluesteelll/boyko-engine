@@ -377,10 +377,12 @@ fn rcas_is_the_identity_on_a_flat_cross() {
 
 #[test]
 fn eval_params_reads_the_ubo_words() {
-    // The words as `PostFinalGpu` lays them out: mode_words@0, exposure_ratio@4, extent@8.
-    let words = [0x0000_0200u32, 0.5f32.to_bits(), 1920, 1080, 0xDEAD_0001, 0xDEAD_0002, 0xDEAD_0003, 0xDEAD_0004];
+    // The words as `PostFinalGpu` lays them out: mode_words@0, exposure_ratio@4, extent@8,
+    // sharpness@16 (render wave PX1b; the three reserved words after it are read by no one).
+    let words = [0x0000_0200u32, 0.5f32.to_bits(), 1920, 1080, 0.375f32.to_bits(), 0xDEAD_0002, 0xDEAD_0003, 0xDEAD_0004];
     let p = eval_params(words);
     assert_eq!(p.mode_words, 0x0000_0200, "mode_words is word 0");
     assert_eq!(p.exposure_ratio.to_bits(), 0.5f32.to_bits(), "exposure_ratio is word 1");
     assert_eq!(p.extent, [1920, 1080], "extent is words 2..4");
+    assert_eq!(p.sharpness.to_bits(), 0.375f32.to_bits(), "sharpness is word 4");
 }
