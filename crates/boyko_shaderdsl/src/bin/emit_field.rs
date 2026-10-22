@@ -310,4 +310,12 @@ fn main() {
     // `boyko_render::InstanceModelCol::from_global` for the interpolated TRS).
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_transform_interp());
+    // OPEN-ITEMS 16 — the M2 FIRST-CROSSING CERTIFICATE's generated leaves (`m2_cert_sphere`,
+    // `m2_cert_box`, `m2_cert_capsule`: one edit's `float2(value, slope)` along the ray;
+    // `convex_seg_lo`: the convex segment lower bound), generated from `boyko_shaderdsl::range` over
+    // the `Emit` backend. Spliced between the `// === GENERATED m2_cert_leaves BEGIN/END ===`
+    // sentinels in `sdf_m2_certify.hlsli` (the edit loop, the kind / op dispatch and the subdivision
+    // driver around them stay hand-written). The host certificate is the same bodies' `f32` Eval.
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_m2_cert_leaves());
 }
