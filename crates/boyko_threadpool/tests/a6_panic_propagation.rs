@@ -23,6 +23,35 @@
 //! re-execute this test binary as a child and watch the child instead — an abort in-process would
 //! take every other test in the binary down with it and report nothing.
 //!
+//! # The child watchdog judges the scope's time, not the runtime's or the OS's (ci-fix-2, F6)
+//!
+//! Two phases of a child's life are not the pool's work, and the old 10 s wall clock charged both
+//! to it:
+//!
+//! - **The panic hook.** A child that panics a second time while unwinding (`panic_count >= 2`:
+//!   the W1 and drop-bomb children) gets a FULL backtrace from std's default hook whatever
+//!   `RUST_BACKTRACE` says, and on Windows that is dbghelp symbolisation. CI run 39663719484 killed
+//!   both such children at the old 10 s wall clock with their stderr ending at `stack backtrace:`
+//!   and nothing after it.
+//! - **The exit after the documented abort.** A detached task's panic ends in
+//!   `worker::abort_on_task_panic`: the `boyko-E0201` line, then `std::process::abort()`, which on
+//!   Windows is a fail-fast that the OS's error reporting holds while it writes its report. Measured
+//!   on the dev host (2026-10-22, 198 aborting children, before and after ci-fix-1, idle and
+//!   loaded): median 2.9 s, maximum 33 s from the `boyko-E0201` line to the exit.
+//!
+//! So every child wraps its panic hook in two stdout markers ([`child_enter`]), and
+//! [`run_child_with`] runs the 10 s [`DEADLINE`] only on the time after the child's first line,
+//! outside hook episodes and before the abort decision. Separate bounds end every other shape: no
+//! first line ([`Budget::startup_cap`]), one hook episode ([`Budget::hook_cap`]), all of them
+//! together, which is a panic loop ([`Budget::hook_total_cap`]), the abort decision to the exit
+//! ([`Budget::abort_cap`]), and the whole run ([`Budget::wall_cap`]). A scope that never drains
+//! makes no hook call and prints no abort decision, so it is still BLOCKED after 10 s of work time,
+//! exactly as before. The `run_child_*` controls prove each bound.
+//!
+//! Every child is also spawned with `_NT_SYMBOL_PATH` and `_NT_ALT_SYMBOL_PATH` removed, so a
+//! forced backtrace symbolises from the local PDB and never waits on a symbol server a runner's
+//! environment may name.
+//!
 //! # What makes each test red
 //!
 //! Stated per test in its doc comment. The controls ([`watchdog_reports_a_returning_scope`],
@@ -31,12 +60,15 @@
 //! "returned", "panicked" and — by construction of [`watch`] — "neither".
 
 use std::any::Any;
-use std::io::Read;
+use std::collections::VecDeque;
+use std::ffi::OsStr;
+use std::io::{BufRead, BufReader, Read};
 use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{RecvTimeoutError, channel};
+use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
@@ -437,51 +469,457 @@ fn dispatcher_side_scope_task_panic_resumes_on_owner() {
 /// Selects the child half of a re-executed test; its value names the scenario.
 const CHILD_ENV: &str = "BOYKO_A6_POOL_CHILD";
 
+/// What a child's panic hook prints to stdout before the hook it wraps runs. The parent's work
+/// clock stops here.
+const HOOK_ENTER: &str = "A6-HOOK-ENTER";
+
+/// What a child's panic hook prints after the hook it wraps returned, followed by the episode's
+/// length in microseconds as the CHILD measured it. The parent's work clock resumes here.
+const HOOK_EXIT: &str = "A6-HOOK-EXIT";
+
+/// Harness controls only: the child's panic hook sleeps this many milliseconds before the hook it
+/// wraps. [`run_child_with`] removes it from every child it is not passed to.
+const HOOK_STALL_ENV: &str = "BOYKO_A6_HOOK_STALL_MS";
+
+/// How much of each child stream the parent keeps from the start, and again from the end. A child
+/// that panics in a loop must fill neither the parent's memory nor its failure message.
+const STREAM_KEEP: usize = 128 * 1024;
+
+/// The variables dbghelp's `SymInitialize` reads for its symbol search path when the caller passes
+/// none, as std's backtrace does. A symbol server named in either would put network fetches inside
+/// a child's forced backtrace, so [`child_command`] removes both from every child.
+const SYMBOL_PATH_ENV: [&str; 2] = ["_NT_SYMBOL_PATH", "_NT_ALT_SYMBOL_PATH"];
+
+/// The prefix of the line `worker::abort_on_task_panic` prints before it aborts the process (its
+/// `NoConsumer` fallback: every child runs with `BOYKO_LOG` removed). The parent's work clock stops
+/// for good at a stderr line that carries it.
+fn abort_decision_tag() -> String {
+    format!("boyko-E{:04}", boyko_log::codes::E0201.number())
+}
+
+/// The bound a child crossed when the watchdog killed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    /// No line on either stream within [`Budget::startup_cap`] of the spawn.
+    Startup,
+    /// The scope's own time, outside every panic-hook episode and before any abort decision,
+    /// passed [`Budget::work`].
+    Work,
+    /// One panic-hook episode passed [`Budget::hook_cap`].
+    Hook,
+    /// All panic-hook episodes together passed [`Budget::hook_total_cap`]: a panic loop.
+    HookTotal,
+    /// The child printed its abort decision ([`abort_decision_tag`]) and was still alive
+    /// [`Budget::abort_cap`] later.
+    Abort,
+    /// Spawn to now passed [`Budget::wall_cap`].
+    Wall,
+}
+
+/// The bounds one child runs under.
+#[derive(Clone, Copy, Debug)]
+struct Budget {
+    /// Work time: wall time after the child's first line, outside panic-hook episodes and before
+    /// the abort decision.
+    work: Duration,
+    /// One panic-hook episode.
+    hook_cap: Duration,
+    /// Every panic-hook episode together.
+    hook_total_cap: Duration,
+    /// The abort decision to the exit.
+    abort_cap: Duration,
+    /// Spawn to the child's first line.
+    startup_cap: Duration,
+    /// Spawn to exit, whatever the time was spent on.
+    wall_cap: Duration,
+}
+
+impl Budget {
+    /// What every scenario runs under. The work budget is [`DEADLINE`], unchanged. The caps are
+    /// generous because a forced full backtrace on a loaded runner, and the OS's report of a
+    /// fail-fast exit (33 s at the most in the dev host's 198 measured aborts), are slow, not stuck;
+    /// each of them still ends a stuck child.
+    const DEFAULT: Budget = Budget {
+        work: DEADLINE,
+        hook_cap: Duration::from_secs(120),
+        hook_total_cap: Duration::from_secs(240),
+        abort_cap: Duration::from_secs(120),
+        startup_cap: Duration::from_secs(60),
+        wall_cap: Duration::from_secs(300),
+    };
+
+    /// The first bound `clocks` has crossed at `now`, if any.
+    fn crossed(&self, clocks: &Clocks, spawned: Instant, now: Instant) -> Option<Phase> {
+        if !clocks.started && now - spawned >= self.startup_cap {
+            return Some(Phase::Startup);
+        }
+        if let Some(decided) = clocks.abort_start {
+            // Terminal: the child has decided to end the process, and only the time that takes is
+            // judged from here (the work and hook clocks no longer move).
+            if now - decided >= self.abort_cap {
+                return Some(Phase::Abort);
+            }
+        } else {
+            if clocks.work >= self.work {
+                return Some(Phase::Work);
+            }
+            if let Some(episode) = clocks.episode_start
+                && now - episode >= self.hook_cap
+            {
+                return Some(Phase::Hook);
+            }
+            if clocks.hook >= self.hook_total_cap {
+                return Some(Phase::HookTotal);
+            }
+        }
+        if now - spawned >= self.wall_cap {
+            return Some(Phase::Wall);
+        }
+        None
+    }
+}
+
 /// What the parent observed of one child run.
 struct ChildRun {
-    /// `None` when the child had to be killed at the deadline.
+    /// `None` when the watchdog had to kill the child; [`ChildRun::blocked`] says why.
     success: Option<bool>,
     stdout: String,
     stderr: String,
+    /// The bound the child crossed, when it was killed.
+    blocked: Option<Phase>,
+    /// The parent's work clock at the end.
+    work: Duration,
+    /// The parent's hook clock at the end: every panic-hook episode together.
+    hook: Duration,
+    /// From the child's abort decision to its exit (or its kill); `None` when it printed none.
+    abort: Option<Duration>,
+    /// Each completed hook episode as the CHILD measured it (the [`HOOK_EXIT`] markers).
+    child_hooks: Vec<Duration>,
+    /// The bounds the child ran under.
+    budget: Budget,
 }
 
-/// Re-executes this test binary running exactly `test_name` with `CHILD_ENV=scenario`, and waits
-/// for it for at most [`DEADLINE`], killing it past that.
+impl ChildRun {
+    /// The watchdog's verdict for a failure message: the bound and every clock.
+    fn watchdog(&self) -> String {
+        format!(
+            "BLOCKED in phase {:?}: work {:.1?} of a {:.1?} budget, hook {:.1?} over {} completed \
+             episode(s), abort decision to end {:.1?} (caps: episode {:.0?}, total {:.0?}, abort \
+             {:.0?}, wall {:.0?})",
+            self.blocked,
+            self.work,
+            self.budget.work,
+            self.hook,
+            self.child_hooks.len(),
+            self.abort,
+            self.budget.hook_cap,
+            self.budget.hook_total_cap,
+            self.budget.abort_cap,
+            self.budget.wall_cap
+        )
+    }
+}
+
+/// Which child stream a line came from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stream {
+    Out,
+    Err,
+}
+
+/// One line as a reader thread saw it (terminator included), or `None` at the stream's end.
+struct Line {
+    stream: Stream,
+    at: Instant,
+    bytes: Option<Vec<u8>>,
+}
+
+/// The watchdog's clocks, advanced line by line.
+struct Clocks {
+    /// The child has printed its first line; work time counts from here.
+    started: bool,
+    /// Open panic-hook episodes (threads that panic together nest).
+    depth: u32,
+    /// Where the clocks stand.
+    since: Instant,
+    /// The child's end (its exit seen, or its kill): no clock moves past it.
+    until: Option<Instant>,
+    work: Duration,
+    hook: Duration,
+    /// When the current outermost hook episode began.
+    episode_start: Option<Instant>,
+    /// When the child printed its abort decision; from here every span is the abort's.
+    abort_start: Option<Instant>,
+    /// [`abort_decision_tag`], computed once per child.
+    abort_tag: String,
+    child_hooks: Vec<Duration>,
+}
+
+impl Clocks {
+    fn new(spawned: Instant) -> Self {
+        Clocks {
+            started: false,
+            depth: 0,
+            since: spawned,
+            until: None,
+            work: Duration::ZERO,
+            hook: Duration::ZERO,
+            episode_start: None,
+            abort_start: None,
+            abort_tag: abort_decision_tag(),
+            child_hooks: Vec::new(),
+        }
+    }
+
+    /// Charge the time from where the clocks stand to `to` to work or to the hook. Nothing is
+    /// charged after the abort decision: that time is judged as a whole, from `abort_start`.
+    fn advance(&mut self, to: Instant) {
+        let to = self.until.map_or(to, |end| to.min(end)).max(self.since);
+        let span = to - self.since;
+        if self.abort_start.is_none() {
+            if self.depth > 0 {
+                self.hook += span;
+            } else if self.started {
+                self.work += span;
+            }
+        }
+        self.since = to;
+    }
+
+    /// The child ended at `at`: charge the last span, and stop every clock there.
+    fn end(&mut self, at: Instant) {
+        self.advance(at);
+        self.until = Some(self.since);
+    }
+
+    /// A line the child printed at `at`. Only stdout carries the hook markers; libtest may prefix
+    /// the first one with its `test <name> ... ` text, so a marker is matched at the line's end.
+    /// Only stderr carries the abort decision; it is matched anywhere in the line, because another
+    /// thread's unterminated stderr text may precede it.
+    fn line(&mut self, at: Instant, stream: Stream, bytes: &[u8]) {
+        self.advance(at);
+        self.started = true;
+        let text = String::from_utf8_lossy(bytes);
+        let text = text.trim_end();
+        if stream == Stream::Err {
+            if self.abort_start.is_none() && text.contains(self.abort_tag.as_str()) {
+                self.abort_start = Some(self.since);
+            }
+            return;
+        }
+        if text.ends_with(HOOK_ENTER) {
+            if self.depth == 0 {
+                self.episode_start = Some(self.since);
+            }
+            self.depth += 1;
+        } else if let Some((_, micros)) = text.rsplit_once(HOOK_EXIT) {
+            self.depth = self.depth.saturating_sub(1);
+            if self.depth == 0 {
+                self.episode_start = None;
+            }
+            if let Ok(micros) = micros.trim().parse::<u64>() {
+                self.child_hooks.push(Duration::from_micros(micros));
+            }
+        }
+    }
+}
+
+/// A stream as the parent keeps it: the first [`STREAM_KEEP`] bytes and the last, by line.
+#[derive(Default)]
+struct Kept {
+    head: Vec<u8>,
+    tail: VecDeque<Vec<u8>>,
+    tail_bytes: usize,
+    dropped: usize,
+}
+
+impl Kept {
+    fn push(&mut self, line: Vec<u8>) {
+        if self.tail.is_empty() && self.head.len() < STREAM_KEEP {
+            self.head.extend_from_slice(&line);
+            return;
+        }
+        self.tail_bytes += line.len();
+        self.tail.push_back(line);
+        while self.tail_bytes > STREAM_KEEP {
+            let Some(old) = self.tail.pop_front() else { break };
+            self.tail_bytes -= old.len();
+            self.dropped += old.len();
+        }
+    }
+
+    fn into_string(self) -> String {
+        let mut out = self.head;
+        if self.dropped > 0 {
+            let note = format!("\n[a6 harness: {} bytes dropped here]\n", self.dropped);
+            out.extend_from_slice(note.as_bytes());
+        }
+        for line in self.tail {
+            out.extend_from_slice(&line);
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+}
+
+/// Reads `pipe` line by line WHILE the child runs, stamping each line on arrival. Draining while
+/// the child runs also means a child can never block on a full pipe, which a parent that reads only
+/// after exit allowed (a full backtrace can pass the pipe's buffer).
+fn spawn_reader(stream: Stream, pipe: impl Read + Send + 'static, tx: Sender<Line>) {
+    std::thread::Builder::new()
+        .name("a6-child-reader".to_owned())
+        .spawn(move || {
+            let mut reader = BufReader::new(pipe);
+            loop {
+                let mut bytes = Vec::new();
+                let read = reader.read_until(b'\n', &mut bytes);
+                let at = Instant::now();
+                let end = !matches!(read, Ok(n) if n > 0);
+                let line = Line { stream, at, bytes: (!end).then_some(bytes) };
+                if tx.send(line).is_err() || end {
+                    return;
+                }
+            }
+        })
+        .expect("test setup: spawn a child-stream reader");
+}
+
+/// [`run_child_with`] under [`Budget::DEFAULT`].
 fn run_child(test_name: &str, scenario: &str) -> ChildRun {
-    let exe = std::env::current_exe().expect("test setup: this test binary's own path");
-    let mut child = Command::new(exe)
+    run_child_with(test_name, scenario, Budget::DEFAULT, &[])
+}
+
+/// The command that re-executes `exe` running exactly `test_name` with `CHILD_ENV=scenario` and
+/// `env`. The symbol-path removal comes last, so no caller's `env` can hand a child a symbol server.
+fn child_command(exe: &Path, test_name: &str, scenario: &str, env: &[(&str, &str)]) -> Command {
+    let mut command = Command::new(exe);
+    command
         .args(["--exact", test_name, "--nocapture", "--test-threads", "1"])
         .env(CHILD_ENV, scenario)
         // The default logging configuration, in which the abort sites' `NoConsumer` fallback
         // lines are the observable.
         .env_remove("BOYKO_LOG")
+        .env_remove(HOOK_STALL_ENV)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    for key in SYMBOL_PATH_ENV {
+        command.env_remove(key);
+    }
+    command
+}
+
+/// Re-executes this test binary running exactly `test_name` with `CHILD_ENV=scenario` and `env`,
+/// and watches it under `budget`, killing it at the first bound it crosses.
+fn run_child_with(test_name: &str, scenario: &str, budget: Budget, env: &[(&str, &str)]) -> ChildRun {
+    let exe = std::env::current_exe().expect("test setup: this test binary's own path");
+    let mut child = child_command(&exe, test_name, scenario, env)
         .spawn()
         .expect("test setup: re-exec of this test binary");
+    let spawned = Instant::now();
 
-    let start = Instant::now();
-    let success = loop {
-        match child.try_wait().expect("test setup: poll the child") {
-            Some(status) => break Some(status.success()),
-            None if start.elapsed() >= DEADLINE => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
+    let (tx, rx) = channel();
+    spawn_reader(Stream::Out, child.stdout.take().expect("test setup: piped stdout"), tx.clone());
+    spawn_reader(Stream::Err, child.stderr.take().expect("test setup: piped stderr"), tx);
+
+    let mut clocks = Clocks::new(spawned);
+    let (mut out, mut err) = (Kept::default(), Kept::default());
+    // Returns whether the line was a stream's end.
+    let mut take = |line: Line, clocks: &mut Clocks| match line.bytes {
+        None => true,
+        Some(bytes) => {
+            clocks.line(line.at, line.stream, &bytes);
+            match line.stream {
+                Stream::Out => out.push(bytes),
+                Stream::Err => err.push(bytes),
             }
-            None => std::thread::sleep(POLL),
+            false
         }
     };
+    let mut open = 2;
 
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    if let Some(mut s) = child.stdout.take() {
-        let _ = s.read_to_string(&mut stdout);
+    let mut blocked = None;
+    let success = loop {
+        while let Ok(line) = rx.try_recv() {
+            if take(line, &mut clocks) {
+                open -= 1;
+            }
+        }
+        if let Some(status) = child.try_wait().expect("test setup: poll the child") {
+            clocks.end(Instant::now());
+            break Some(status.success());
+        }
+        let now = Instant::now();
+        clocks.advance(now);
+        blocked = budget.crossed(&clocks, spawned, now);
+        if blocked.is_some() {
+            clocks.end(now);
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(POLL);
+    };
+
+    // The child is gone, so both pipes reach their end; a bound keeps a stray inheritor of a pipe
+    // from stalling the parent. Lines read now still count as markers (an abort decision printed
+    // just before the exit is often read after it), but every clock already stopped at the end.
+    let drain_until = Instant::now() + Duration::from_secs(5);
+    while open > 0 {
+        match rx.recv_timeout(drain_until.saturating_duration_since(Instant::now())) {
+            Ok(line) => {
+                if take(line, &mut clocks) {
+                    open -= 1;
+                }
+            }
+            Err(_) => break,
+        }
     }
-    if let Some(mut s) = child.stderr.take() {
-        let _ = s.read_to_string(&mut stderr);
+    let ended =clocks.until.expect("invariant: the watch loop ends the clocks before it breaks");
+    ChildRun {
+        success,
+        stdout: out.into_string(),
+        stderr: err.into_string(),
+        blocked,
+        work: clocks.work,
+        hook: clocks.hook,
+        abort: clocks.abort_start.map(|decided| ended.saturating_duration_since(decided)),
+        child_hooks: clocks.child_hooks,
+        budget,
     }
-    ChildRun { success, stdout, stderr }
+}
+
+/// The first call of every child branch: wraps the panic hook in [`HOOK_ENTER`] / [`HOOK_EXIT`]
+/// so the parent can tell the hook's time from the scope's.
+///
+/// The markers go to STDOUT, one `write_all` each under std's re-entrant stdout lock, so they never
+/// interleave inside the default hook's stderr text. An abort inside the hook leaves an ENTER with
+/// no EXIT, and the process exit ends the watch. The stall knob is read here, once, not inside the
+/// hook.
+fn child_enter() {
+    let stall = std::env::var(HOOK_STALL_ENV)
+        .ok()
+        .and_then(|ms| ms.parse::<u64>().ok())
+        .map(Duration::from_millis);
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let start = Instant::now();
+        hook_marker(HOOK_ENTER);
+        if let Some(stall) = stall {
+            std::thread::sleep(stall);
+        }
+        previous(info);
+        hook_marker(&format!("{HOOK_EXIT} {}", start.elapsed().as_micros()));
+    }));
+}
+
+/// One marker line on stdout, flushed.
+fn hook_marker(line: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(format!("{line}\n").as_bytes());
+    let _ = out.flush();
 }
 
 /// Prints a child marker and flushes, so it survives a following abort.
@@ -507,6 +945,383 @@ fn wait_for(flag: &AtomicBool) -> bool {
     true
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Controls — the child watchdog (ci-fix-2, F6)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Never returns: the child stays alive, doing nothing, until the parent kills it.
+fn park_forever() -> ! {
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// Prints an abort decision the way `worker::abort_on_task_panic` does when no log consumer is
+/// installed: one stderr line that starts with [`abort_decision_tag`].
+fn print_abort_decision() {
+    eprintln!(
+        "{}: a6 harness control: an abort decision, printed the way the pool's backstop prints it",
+        abort_decision_tag()
+    );
+}
+
+/// Child half of the `hook-stall` scenario: one ordinary (count-1) panic, caught, with the hook
+/// stalled by [`HOOK_STALL_ENV`]; then the child finishes.
+fn child_hook_stall() {
+    child_enter();
+    child_mark("CHILD-HOOK-STALL-START");
+    let caught = catch_unwind::<_, ()>(|| panic_any(A6Marker(90)));
+    child_mark(if caught.is_err() { "CHILD-HOOK-STALL-DONE" } else { "CHILD-HOOK-STALL-NO-PANIC" });
+}
+
+const SLOW_HOOK_TEST: &str = "run_child_does_not_charge_a_slow_panic_hook_to_the_scope";
+
+/// CONTROL. A child whose panic hook takes 3 s, longer than this run's whole 2 s work budget, and
+/// that then finishes, must be reported as FINISHED: the hook's time is not the scope's.
+///
+/// This is the shape CI run 39663719484 hit (a forced full backtrace on a loaded runner), injected
+/// by the stall knob. Red under the old wall-clock watchdog: killed at 2 s with stdout ending at
+/// `A6-HOOK-ENTER`.
+#[cfg_attr(
+    miri,
+    ignore = "miri-unsupported: child process: re-executes this test binary, which Miri does not support. Runs natively."
+)]
+#[test]
+fn run_child_does_not_charge_a_slow_panic_hook_to_the_scope() {
+    if std::env::var(CHILD_ENV).as_deref() == Ok("hook-stall") {
+        return child_hook_stall();
+    }
+    let budget = Budget {
+        work: Duration::from_secs(2),
+        hook_cap: Duration::from_secs(30),
+        ..Budget::DEFAULT
+    };
+    let run = run_child_with(SLOW_HOOK_TEST, "hook-stall", budget, &[(HOOK_STALL_ENV, "3000")]);
+    assert_eq!(
+        run.blocked,
+        None,
+        "a 3 s panic hook was charged to the scope's 2 s work budget: {}.\nstdout:\n{}\nstderr:\n{}",
+        run.watchdog(),
+        run.stdout,
+        run.stderr
+    );
+    assert_eq!(
+        run.success,
+        Some(true),
+        "the child must finish and exit 0 -- stdout:\n{}\nstderr:\n{}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        run.stdout.contains("CHILD-HOOK-STALL-DONE"),
+        "the child never reached its end -- stdout:\n{}",
+        run.stdout
+    );
+    // The child's own clock: deterministic, it slept that long inside the hook.
+    assert!(
+        run.child_hooks.iter().any(|d| *d >= Duration::from_millis(3000)),
+        "fixture: no hook episode of >= 3 s by the child's own clock ({:?}), so the stall knob did \
+         not reach the hook",
+        run.child_hooks
+    );
+    // The parent's clock, with 0.5 s of margin for a reader thread's wake-up latency.
+    assert!(
+        run.hook >= Duration::from_millis(2500),
+        "the parent charged only {:?} to the hook for a 3 s stall: the episode markers were not read \
+         as an episode",
+        run.hook
+    );
+}
+
+const BLOCKED_TEST: &str = "run_child_reports_a_child_blocked_outside_its_hook";
+
+/// CONTROL. A child whose scope never drains, with no panic at all, must be reported BLOCKED in the
+/// `Work` phase once its work budget is spent: the watchdog still catches the hang it exists for.
+#[cfg_attr(
+    miri,
+    ignore = "miri-unsupported: child process: re-executes this test binary, which Miri does not support. Runs natively."
+)]
+#[test]
+fn run_child_reports_a_child_blocked_outside_its_hook() {
+    if std::env::var(CHILD_ENV).as_deref() == Ok("blocked") {
+        child_enter();
+        let pool = ThreadPoolBuilder::new().num_threads(1).build();
+        let never = AtomicBool::new(false);
+        child_mark("CHILD-BLOCKED-START");
+        pool.install(|scope| {
+            scope.spawn(|| {
+                while !never.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+            });
+        });
+        child_mark("CHILD-BLOCKED-RETURNED");
+        return;
+    }
+    let budget = Budget { work: Duration::from_secs(2), ..Budget::DEFAULT };
+    let run = run_child_with(BLOCKED_TEST, "blocked", budget, &[]);
+    assert_eq!(
+        run.blocked,
+        Some(Phase::Work),
+        "a scope that never drains must be BLOCKED in the work phase; the watchdog said {}.\n\
+         stdout:\n{}\nstderr:\n{}",
+        run.watchdog(),
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        run.stdout.contains("CHILD-BLOCKED-START"),
+        "fixture: the child never started its scope -- stdout:\n{}",
+        run.stdout
+    );
+    assert_eq!(run.hook, Duration::ZERO, "no panic happened, so no time is the hook's");
+}
+
+const STUCK_HOOK_TEST: &str = "run_child_reports_a_child_stuck_inside_its_panic_hook";
+
+/// CONTROL. A child stuck inside its panic hook past the episode cap must be reported BLOCKED in
+/// the `Hook` phase: the time the work clock does not count is still bounded.
+#[cfg_attr(
+    miri,
+    ignore = "miri-unsupported: child process: re-executes this test binary, which Miri does not support. Runs natively."
+)]
+#[test]
+fn run_child_reports_a_child_stuck_inside_its_panic_hook() {
+    if std::env::var(CHILD_ENV).as_deref() == Ok("hook-stall") {
+        return child_hook_stall();
+    }
+    let budget = Budget { hook_cap: Duration::from_secs(2), ..Budget::DEFAULT };
+    let run = run_child_with(STUCK_HOOK_TEST, "hook-stall", budget, &[(HOOK_STALL_ENV, "5000")]);
+    assert_eq!(
+        run.blocked,
+        Some(Phase::Hook),
+        "a 5 s hook episode must cross a 2 s episode cap; the watchdog said {}.\nstdout:\n{}\n\
+         stderr:\n{}",
+        run.watchdog(),
+        run.stdout,
+        run.stderr
+    );
+}
+
+const HOOK_LOOP_TEST: &str = "run_child_reports_a_child_that_panics_in_a_loop";
+
+/// CONTROL. A child that panics again and again, each panic a short hook episode, spends almost no
+/// time outside its hook, so its work clock barely moves. It must be reported BLOCKED in the
+/// `HookTotal` phase within its ceiling — the shape a per-episode cap alone would let run for hours.
+#[cfg_attr(
+    miri,
+    ignore = "miri-unsupported: child process: re-executes this test binary, which Miri does not support. Runs natively."
+)]
+#[test]
+fn run_child_reports_a_child_that_panics_in_a_loop() {
+    if std::env::var(CHILD_ENV).as_deref() == Ok("hook-loop") {
+        child_enter();
+        child_mark("CHILD-HOOK-LOOP-START");
+        loop {
+            let _ = catch_unwind::<_, ()>(|| panic_any(A6Marker(91)));
+        }
+    }
+    let budget = Budget {
+        hook_total_cap: Duration::from_secs(2),
+        wall_cap: Duration::from_secs(20),
+        ..Budget::DEFAULT
+    };
+    let run = run_child_with(HOOK_LOOP_TEST, "hook-loop", budget, &[(HOOK_STALL_ENV, "50")]);
+    assert_eq!(
+        run.blocked,
+        Some(Phase::HookTotal),
+        "a child panicking in a loop must cross the 2 s total hook cap; the watchdog said {}.\n\
+         stdout:\n{}\nstderr:\n{}",
+        run.watchdog(),
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        run.child_hooks.len() >= 2,
+        "fixture: the loop completed {} hook episodes",
+        run.child_hooks.len()
+    );
+}
+
+const SLOW_ABORT_TEST: &str = "run_child_does_not_charge_a_slow_exit_after_the_abort_decision_to_the_scope";
+
+/// The exit code of the abort-decision controls' children. Not `std::process::abort()`: the
+/// property is the time from the decision to the exit, and a real fail-fast would add an OS crash
+/// report and a dump per run to what the control injects.
+const ABORT_CONTROL_EXIT: i32 = 3;
+
+/// CONTROL. A child that prints its abort decision and then takes 3 s to exit, longer than this
+/// run's whole 2 s work budget, must be reported as ENDED, not BLOCKED: the time from the decision
+/// to the exit is not the scope's.
+///
+/// This is the shape the dev host reproduces (2026-10-22): an aborting child held for seconds by
+/// the OS's error reporting after `boyko-E0201`, and BLOCKED by the old 10 s wall clock. Red under
+/// the old wall-clock watchdog, and under a watchdog that judges only the hook (killed in `Work`
+/// at 2 s).
+#[cfg_attr(
+    miri,
+    ignore = "miri-unsupported: child process: re-executes this test binary, which Miri does not support. Runs natively."
+)]
+#[test]
+fn run_child_does_not_charge_a_slow_exit_after_the_abort_decision_to_the_scope() {
+    if std::env::var(CHILD_ENV).as_deref() == Ok("abort-slow") {
+        child_enter();
+        child_mark("CHILD-ABORT-SLOW-START");
+        print_abort_decision();
+        std::thread::sleep(Duration::from_millis(3000));
+        std::process::exit(ABORT_CONTROL_EXIT);
+    }
+    let budget = Budget {
+        work: Duration::from_secs(2),
+        abort_cap: Duration::from_secs(30),
+        ..Budget::DEFAULT
+    };
+    let run = run_child_with(SLOW_ABORT_TEST, "abort-slow", budget, &[]);
+    assert_eq!(
+        run.blocked,
+        None,
+        "a 3 s exit after the abort decision was charged to the scope's 2 s work budget: {}.\n\
+         stdout:\n{}\nstderr:\n{}",
+        run.watchdog(),
+        run.stdout,
+        run.stderr
+    );
+    assert_eq!(
+        run.success,
+        Some(false),
+        "the child must end by its own non-zero exit -- stdout:\n{}\nstderr:\n{}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        run.stdout.contains("CHILD-ABORT-SLOW-START"),
+        "fixture: the child never ran its scenario -- stdout:\n{}",
+        run.stdout
+    );
+    let abort = run.abort.unwrap_or_else(|| {
+        panic!(
+            "the child printed an abort decision, and the watchdog never read it as one: {}.\n\
+             stderr:\n{}",
+            run.watchdog(),
+            run.stderr
+        )
+    });
+    // The parent's clock, with 0.5 s of margin for a reader thread's wake-up latency.
+    assert!(
+        abort >= Duration::from_millis(2500),
+        "the parent charged only {abort:?} to the abort for a 3 s wait after the decision"
+    );
+}
+
+const STUCK_ABORT_TEST: &str = "run_child_reports_a_child_stuck_after_its_abort_decision";
+
+/// CONTROL, the first of the two that prove the abort bound can fail. A child that prints its abort
+/// decision and then never exits must be reported BLOCKED in the `Abort` phase at its cap, and not
+/// before: a 2 s work budget beside a 4 s abort cap tells the two apart.
+#[cfg_attr(
+    miri,
+    ignore = "miri-unsupported: child process: re-executes this test binary, which Miri does not support. Runs natively."
+)]
+#[test]
+fn run_child_reports_a_child_stuck_after_its_abort_decision() {
+    if std::env::var(CHILD_ENV).as_deref() == Ok("abort-stuck") {
+        child_enter();
+        child_mark("CHILD-ABORT-STUCK-START");
+        print_abort_decision();
+        park_forever();
+    }
+    let budget = Budget {
+        work: Duration::from_secs(2),
+        abort_cap: Duration::from_secs(4),
+        ..Budget::DEFAULT
+    };
+    let run = run_child_with(STUCK_ABORT_TEST, "abort-stuck", budget, &[]);
+    assert_eq!(
+        run.blocked,
+        Some(Phase::Abort),
+        "a child alive 4 s after its abort decision must cross the 4 s abort cap; the watchdog said \
+         {}.\nstdout:\n{}\nstderr:\n{}",
+        run.watchdog(),
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        run.stdout.contains("CHILD-ABORT-STUCK-START"),
+        "fixture: the child never ran its scenario -- stdout:\n{}",
+        run.stdout
+    );
+}
+
+const BLOCKED_BEFORE_ABORT_TEST: &str = "run_child_reports_a_child_blocked_before_its_abort_decision";
+
+/// CONTROL, the second of the two. A child whose task panicked (one hook episode, as a detached
+/// task's panic makes) and that then blocks without ever printing the abort decision must be
+/// reported BLOCKED in the `Work` phase: neither the panic nor its hook opens the abort phase.
+#[cfg_attr(
+    miri,
+    ignore = "miri-unsupported: child process: re-executes this test binary, which Miri does not support. Runs natively."
+)]
+#[test]
+fn run_child_reports_a_child_blocked_before_its_abort_decision() {
+    if std::env::var(CHILD_ENV).as_deref() == Ok("abort-blocked") {
+        child_enter();
+        child_mark("CHILD-ABORT-BLOCKED-START");
+        let caught = catch_unwind::<_, ()>(|| panic_any(A6Marker(92)));
+        child_mark(if caught.is_err() {
+            "CHILD-ABORT-BLOCKED-PANICKED"
+        } else {
+            "CHILD-ABORT-BLOCKED-NO-PANIC"
+        });
+        park_forever();
+    }
+    let budget = Budget {
+        work: Duration::from_secs(2),
+        abort_cap: Duration::from_secs(4),
+        ..Budget::DEFAULT
+    };
+    let run = run_child_with(BLOCKED_BEFORE_ABORT_TEST, "abort-blocked", budget, &[]);
+    assert_eq!(
+        run.blocked,
+        Some(Phase::Work),
+        "a child blocked before its abort decision must be BLOCKED in the work phase; the watchdog \
+         said {}.\nstdout:\n{}\nstderr:\n{}",
+        run.watchdog(),
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        run.stdout.contains("CHILD-ABORT-BLOCKED-PANICKED"),
+        "fixture: the child's panic never happened, so no hook episode preceded the block -- \
+         stdout:\n{}",
+        run.stdout
+    );
+    assert_eq!(run.abort, None, "the child printed no abort decision, so no time is the abort's");
+    assert_eq!(run.child_hooks.len(), 1, "fixture: exactly one hook episode, the task's panic");
+}
+
+/// CONTROL. Every child is launched with both symbol-path variables REMOVED from its environment,
+/// even when a caller passes them: a forced backtrace in a child symbolises from the local PDB and
+/// never waits on a symbol server a runner's environment names.
+#[cfg_attr(
+    miri,
+    ignore = "miri-unsupported: on Windows a `Command`'s environment keys are ordered by `CompareStringOrdinal`, a foreign call Miri does not support; the command serves only the child-process tests Miri skips. Runs natively."
+)]
+#[test]
+fn run_child_launches_children_without_a_symbol_server_path() {
+    let poisoned: Vec<(&str, &str)> =
+        SYMBOL_PATH_ENV.iter().map(|key| (*key, "srv*https://symbols.invalid")).collect();
+    let command = child_command(Path::new("a6-child"), "a6-test", "a6-scenario", &poisoned);
+    for key in SYMBOL_PATH_ENV {
+        let removed = command.get_envs().any(|(k, v)| k == OsStr::new(key) && v.is_none());
+        assert!(
+            removed,
+            "`{key}` is not removed from the child's environment, so a forced backtrace in a child \
+             may wait on the symbol server it names -- the child's explicit environment: {:?}",
+            command.get_envs().collect::<Vec<_>>()
+        );
+    }
+}
+
 const DETACHED_TEST: &str = "detached_spawn_panic_does_not_block_pool_shutdown";
 const DETACHED_MESSAGE: &str = "A6 detached task panic";
 
@@ -525,6 +1340,7 @@ const DETACHED_MESSAGE: &str = "A6 detached task panic";
 fn detached_spawn_panic_does_not_block_pool_shutdown() {
     if std::env::var(CHILD_ENV).as_deref() == Ok("detached") {
         // ── CHILD ──
+        child_enter();
         let pool = ThreadPoolBuilder::new().num_threads(2).build();
         let reached = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&reached);
@@ -548,9 +1364,11 @@ fn detached_spawn_panic_does_not_block_pool_shutdown() {
     let run = run_child(DETACHED_TEST, "detached");
     let Some(success) = run.success else {
         panic!(
-            "WATCHDOG: the child was still alive {DEADLINE:?} after a detached task panicked -- \
-             pool shutdown is BLOCKED (defect A6).\nstdout:\n{}\nstderr:\n{}",
-            run.stdout, run.stderr
+            "WATCHDOG: {} -- after a detached task panicked, pool shutdown is BLOCKED (defect \
+             A6).\nstdout:\n{}\nstderr:\n{}",
+            run.watchdog(),
+            run.stdout,
+            run.stderr
         );
     };
     assert!(
@@ -604,6 +1422,15 @@ fn detached_spawn_panic_does_not_block_pool_shutdown() {
             run.stdout,
             run.stderr
         );
+        // The watchdog must have read that same line as the abort decision, or the time the OS
+        // takes to end an aborting process is charged to the scope (ci-fix-2, F6).
+        assert!(
+            run.abort.is_some(),
+            "the child printed `{expected}`, and the watchdog never read it as the abort decision: \
+             {}.\nstderr:\n{}",
+            run.watchdog(),
+            run.stderr
+        );
     }
 }
 
@@ -628,6 +1455,7 @@ const DOUBLE_TEST: &str = "owner_and_task_panicking_together_resume_on_owner_wit
 fn owner_and_task_panicking_together_resume_on_owner_without_abort() {
     if std::env::var(CHILD_ENV).as_deref() == Ok("double") {
         // ── CHILD ──
+        child_enter();
         let pool = pool();
         let task_panicked = AtomicBool::new(false);
         let caught = catch_unwind(AssertUnwindSafe(|| {
@@ -656,9 +1484,10 @@ fn owner_and_task_panicking_together_resume_on_owner_without_abort() {
     let run = run_child(DOUBLE_TEST, "double");
     let Some(success) = run.success else {
         panic!(
-            "WATCHDOG: the child was still alive {DEADLINE:?} after the owner and a task both \
-             panicked -- BLOCKED.\nstdout:\n{}\nstderr:\n{}",
-            run.stdout, run.stderr
+            "WATCHDOG: {} -- after the owner and a task both panicked.\nstdout:\n{}\nstderr:\n{}",
+            run.watchdog(),
+            run.stdout,
+            run.stderr
         );
     };
     assert!(
@@ -908,6 +1737,7 @@ fn assert_cleanup_stage(run: &ChildRun, label: &str, message_part: &str) {
 fn a_payload_that_panics_on_drop_does_not_block_the_scope() {
     if std::env::var(CHILD_ENV).as_deref() == Ok("bomb") {
         // ── CHILD ──
+        child_enter();
         let pool = pool();
         // Raise the pool target's ceiling, or the records below are never constructed and the
         // probe counts zero for the wrong reason (`BOYKO_LOG` is unset in the child).
@@ -947,9 +1777,11 @@ fn a_payload_that_panics_on_drop_does_not_block_the_scope() {
     let run = run_child(BOMB_TEST, "bomb");
     let Some(success) = run.success else {
         panic!(
-            "WATCHDOG: the child was still alive {DEADLINE:?} after drop-panicking payloads -- the \
-             scope is BLOCKED.\nstdout:\n{}\nstderr:\n{}",
-            run.stdout, run.stderr
+            "WATCHDOG: {} -- after drop-panicking payloads, the scope is BLOCKED.\nstdout:\n{}\n\
+             stderr:\n{}",
+            run.watchdog(),
+            run.stdout,
+            run.stderr
         );
     };
     assert!(
@@ -1052,6 +1884,7 @@ fn d3_pool() -> Arc<ThreadPool> {
 
 /// Child half, scenario `d3-worker`: the lone WORKER runs the detached bomb.
 fn d3_child_on_worker() {
+    child_enter();
     let pool = d3_pool();
     let bomb_started = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&bomb_started);
@@ -1081,6 +1914,7 @@ fn d3_child_on_worker() {
 /// Child half, scenario `d3-join`: the lone worker is held inside a scoped task, so the detached
 /// bomb can only be run by the scope's own join, on the thread that called `install`.
 fn d3_child_on_join() {
+    child_enter();
     let pool = d3_pool();
     let blocker_started = Arc::new(AtomicBool::new(false));
     let release = Arc::new(AtomicBool::new(false));
@@ -1123,9 +1957,11 @@ fn d3_child_on_join() {
 fn assert_d3_child(run: &ChildRun, scenario: &str, on_worker: bool, survived: &[(&str, &str)]) {
     let Some(success) = run.success else {
         panic!(
-            "{scenario}: WATCHDOG: the child was still alive {DEADLINE:?} after a detached task \
-             panicked with a drop-panicking payload -- BLOCKED.\nstdout:\n{}\nstderr:\n{}",
-            run.stdout, run.stderr
+            "{scenario}: WATCHDOG: {} -- after a detached task panicked with a drop-panicking \
+             payload.\nstdout:\n{}\nstderr:\n{}",
+            run.watchdog(),
+            run.stdout,
+            run.stderr
         );
     };
     assert!(
@@ -1175,6 +2011,15 @@ fn assert_d3_child(run: &ChildRun, scenario: &str, on_worker: bool, survived: &[
         "{scenario}: the child died without the `{expected}` abort line on stderr -- not the \
          documented abort.\nstdout:\n{}\nstderr:\n{}",
         run.stdout,
+        run.stderr
+    );
+    // The watchdog must have read that same line as the abort decision, or the time the OS takes
+    // to end an aborting process is charged to the scope (ci-fix-2, F6).
+    assert!(
+        run.abort.is_some(),
+        "{scenario}: the child printed `{expected}`, and the watchdog never read it as the abort \
+         decision: {}.\nstderr:\n{}",
+        run.watchdog(),
         run.stderr
     );
 }
@@ -1274,6 +2119,7 @@ const W1_INNER: u32 = 61;
 /// That inner scope's closure returned normally, so its owner is not panicking even though
 /// `std::thread::panicking()` is true on the thread.
 fn w1_child() {
+    child_enter();
     let pool = ThreadPoolBuilder::new().num_threads(1).build();
     // Raise the pool target's ceiling, or the E0202 record is never constructed and the probe
     // counts zero for the wrong reason (`BOYKO_LOG` is unset in the child).
@@ -1373,8 +2219,10 @@ fn a_scope_closed_during_another_scopes_unwind_still_resumes_its_task_panic() {
     let run = run_child(W1_TEST, "w1");
     let Some(success) = run.success else {
         panic!(
-            "WATCHDOG: the W1 child was still alive {DEADLINE:?} -- BLOCKED.\nstdout:\n{}\nstderr:\n{}",
-            run.stdout, run.stderr
+            "WATCHDOG: the W1 child is {}.\nstdout:\n{}\nstderr:\n{}",
+            run.watchdog(),
+            run.stdout,
+            run.stderr
         );
     };
     assert!(
