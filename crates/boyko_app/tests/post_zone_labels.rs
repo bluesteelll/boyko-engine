@@ -257,7 +257,9 @@ fn table(c: ZoneCell) -> Vec<Cell> {
     let taa = post && matches!(c.aa, AaCell::Taa | AaCell::TaaCas);
     vec![
         Cell { zone: ZONE_POST_TAA_RESOLVE, name: "post_taa_resolve", expect: req(taa) },
-        Cell { zone: ZONE_POST_CAS, name: "post_cas", expect: req(post && c.aa == AaCell::TaaCas) },
+        // Render wave PX1b (D-R14): the CAS pass is retired — the sharpen is `post_final`'s RCAS
+        // stage (zone 88), so no cell may bracket id 81.
+        Cell { zone: ZONE_POST_CAS, name: "post_cas", expect: Expect::Forbidden },
         Cell { zone: ZONE_POST_FXAA, name: "post_fxaa", expect: req(post && c.aa == AaCell::Fxaa) },
         Cell { zone: ZONE_POST_SMAA_EDGE, name: "post_smaa_edge", expect: req(post && c.aa == AaCell::Smaa) },
         Cell { zone: ZONE_POST_SMAA_WEIGHT, name: "post_smaa_weight", expect: req(post && c.aa == AaCell::Smaa) },
@@ -754,9 +756,13 @@ fn zones_cpu_declare_frame_graph() {
 // The host half — no GPU
 // ===============================================================================================
 
-/// **Every POST and FWD id has exactly one row in every cell's table, and every one is Required
-/// in at least one cell** — red when a family grows an id the gate does not name, or when no cell
-/// would ever observe a bracket.
+/// The POST ids a retired pass held (render wave PX1b D-R14: `ZONE_POST_CAS`, 81) — Forbidden in
+/// every cell, so exempt from "Required in some cell".
+const RETIRED: [u16; 1] = [ZONE_POST_CAS];
+
+/// **Every POST and FWD id has exactly one row in every cell's table, and every live one is
+/// Required in at least one cell** — red when a family grows an id the gate does not name, or when
+/// no cell would ever observe a bracket. A RETIRED id is Forbidden in every cell instead.
 #[test]
 fn expectation_table_names_every_post_and_fwd_id() {
     let ids: Vec<u16> = (ZONE_BASE_POST..ZONE_BASE_POST + POST_ZONE_COUNT)
@@ -778,6 +784,13 @@ fn expectation_table_names_every_post_and_fwd_id() {
         }
     }
     for id in &ids {
+        if RETIRED.contains(id) {
+            assert!(
+                CELLS.iter().all(|c| table(*c).iter().any(|r| r.zone == *id && r.expect == Expect::Forbidden)),
+                "the retired zone {id} must be Forbidden in every cell"
+            );
+            continue;
+        }
         assert!(
             CELLS.iter().any(|c| table(*c).iter().any(|r| r.zone == *id && r.expect == Expect::Required)),
             "zone {id} is Required in no cell, so no driver can observe its bracket"
