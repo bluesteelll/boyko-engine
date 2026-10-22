@@ -903,6 +903,7 @@ impl RhiDevice<Vulkan> for VulkanContext {
             )));
         }
         self.record_pipeline_creation(PipelineKind::Compute, &feedback.pipeline, Location::caller());
+        crate::window::pump_boot_after_create();
         Ok(ComputePipeline {
             pipeline,
             layout: pipeline_layout,
@@ -1001,6 +1002,10 @@ impl RhiDevice<Vulkan> for VulkanContext {
         if !result.is_success() {
             return Err(VulkanError::Vk("vkWaitForFences", result));
         }
+        // BOOT-1 F4: every one-shot upload waits here, so a boot (or a startup system uploading
+        // asset by asset) is pumped per wait. Disarmed — every frame-loop call — this is one TLS
+        // load and one predictable branch next to a blocking fence wait.
+        crate::window::pump_boot_after_wait();
         Ok(())
     }
 
@@ -2134,6 +2139,7 @@ impl VulkanContext {
         }
 
         self.record_pipeline_creation(PipelineKind::Graphics, &feedback.pipeline, site);
+        crate::window::pump_boot_after_create();
         Ok(VulkanGraphicsPipeline {
             pipeline,
             layout,
@@ -2519,6 +2525,7 @@ impl VulkanContext {
             return Err(VulkanError::from(ComputeError::VkError("vkCreateComputePipelines", result)));
         }
         self.record_pipeline_creation(PipelineKind::Compute, &feedback.pipeline, Location::caller());
+        crate::window::pump_boot_after_create();
         Ok(ComputePipeline { pipeline, layout: pipeline_layout, owns_layout: true })
     }
 
@@ -2641,6 +2648,7 @@ impl VulkanContext {
             return Err(VulkanError::from(ComputeError::VkError("vkCreateComputePipelines", result)));
         }
         self.record_pipeline_creation(PipelineKind::Compute, &feedback.pipeline, Location::caller());
+        crate::window::pump_boot_after_create();
         Ok(ComputePipeline { pipeline, layout: pipeline_layout, owns_layout: true })
     }
 
@@ -2770,6 +2778,7 @@ impl VulkanContext {
             return Err(VulkanError::from(ComputeError::VkError("vkCreateComputePipelines", result)));
         }
         self.record_pipeline_creation(PipelineKind::Compute, &feedback.pipeline, Location::caller());
+        crate::window::pump_boot_after_create();
         Ok(ComputePipeline { pipeline, layout: pipeline_layout, owns_layout: true })
     }
 }

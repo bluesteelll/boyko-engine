@@ -91,6 +91,20 @@ pub struct HostBootStats {
     pub startup_ns: u64,
     /// Wall time from the runner's entry to this record, nanoseconds.
     pub boot_ns: u64,
+    /// Boot-pump drains at the runner's stage boundaries and through the startup seam
+    /// (`boyko_app::pump_boot_messages`).
+    pub stage_pumps: u32,
+    /// Boot-pump drains after a pipeline creation — equal to [`Self::pipelines`] when every
+    /// create site ticks.
+    pub create_pumps: u32,
+    /// Boot-pump drains after a one-shot fence wait.
+    pub wait_pumps: u32,
+    /// The longest stretch the window went unpumped, from being shown to the frame loop,
+    /// nanoseconds.
+    pub max_unpumped_ns: u64,
+    /// A close arrived during boot: the window was hidden at once and the run exited at the next
+    /// boot boundary, with no frame.
+    pub close_requested: bool,
 }
 
 /// How many host-pool sub-allocations one run can ask [`HostTeardownStats`] to watch.

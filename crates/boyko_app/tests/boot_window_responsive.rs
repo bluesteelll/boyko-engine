@@ -41,6 +41,12 @@ use boyko_app::prelude::*;
 const CHILD_MARKER: &str = "BOYKO_BOOT1_OBSERVE_CHILD";
 /// The variable carrying the worker's window title (unique per parent process).
 const TITLE_VAR: &str = "BOYKO_BOOT1_TITLE";
+/// Set: the worker adds a startup system that keeps the CPU busy for [`STARTUP_BUSY`], pumping
+/// through `boyko_app::pump_boot_messages` every [`STARTUP_PUMP_EVERY`] (the I1 seam).
+const STARTUP_BUSY_VAR: &str = "BOYKO_BOOT1_STARTUP_BUSY";
+/// Longer than the OS's 5 s hung threshold, so an unpumped stretch of it cannot pass.
+const STARTUP_BUSY: Duration = Duration::from_secs(6);
+const STARTUP_PUMP_EVERY: Duration = Duration::from_millis(100);
 /// The observer's sampling period.
 const SAMPLE_PERIOD: Duration = Duration::from_millis(20);
 /// The whole run's budget: boot + 30 frames + teardown.
@@ -203,6 +209,20 @@ fn room(mut commands: Commands, mut meshes: NonSendResMut<Assets<MeshGpu>>, dev:
     });
 }
 
+/// A startup system that is one long CPU stretch, pumping the window through the public seam
+/// between its work items (what a game's asset-heavy `setup` does after BOOT-1).
+fn busy_startup() {
+    let end = Instant::now() + STARTUP_BUSY;
+    let mut next = Instant::now() + STARTUP_PUMP_EVERY;
+    while Instant::now() < end {
+        if Instant::now() >= next {
+            boyko_app::pump_boot_messages();
+            next += STARTUP_PUMP_EVERY;
+        }
+        core::hint::spin_loop();
+    }
+}
+
 #[test]
 #[ignore = "gpu-windowed: worker spawned by the boot_window_responsive observer tests; returns at once unless BOYKO_BOOT1_OBSERVE_CHILD is set"]
 fn boot_window_child() {
@@ -217,6 +237,9 @@ fn boot_window_child() {
     );
     let mut app = App::new();
     app.add_startup_system(room);
+    if std::env::var_os(STARTUP_BUSY_VAR).is_some() {
+        app.add_startup_system(busy_startup);
+    }
     app.add_plugins(EnginePlugins::window(title, 640, 480));
     app.insert_resource(CsmConfig { cascade_count: 3, ..CsmConfig::default() });
     let exit = app.run();
@@ -534,6 +557,8 @@ fn sample(t: f64, hwnd: Hwnd, ghost: Hwnd, capture: &mut Option<Capture>) -> Sam
 enum Mode {
     Observe,
     CloseAtFirstVisible,
+    /// [`Mode::Observe`] with the worker's busy startup system.
+    StartupBusy,
 }
 
 fn out_dir() -> PathBuf {
@@ -579,6 +604,9 @@ fn observe(name: &str, mode: Mode) -> Run {
         .env("BOYKO_PIPELINE_CACHE", "off")
         .env("BOYKO_WINDOW_FRAMES", "30")
         .env("BOYKO_DISABLE_VALIDATION", "1");
+    if mode == Mode::StartupBusy {
+        cmd.env(STARTUP_BUSY_VAR, "1");
+    }
 
     let t0 = Instant::now();
     let mut child = cmd.spawn().expect("invariant: the test binary can spawn itself");
@@ -792,6 +820,26 @@ fn close_during_boot_hides_at_once_and_exits_clean() {
         run.child_frames(),
         Some(0),
         "a close during boot must reach no frame (the worker's BOOT1-CHILD line)\n{}",
+        run.timeline()
+    );
+}
+
+/// I1 (BOOT-1 D-F4b): a startup system that runs one 6 s CPU stretch keeps the window responsive
+/// when it pumps through `boyko_app::pump_boot_messages` between work items. Machine-independent:
+/// the 6 s are in the test, not in the driver, so a no-op seam reds at about 5 s.
+#[test]
+#[ignore = "gpu-windowed: spawns a visible windowed worker and observes it from outside; needs an interactive desktop, BOYKO_WIN_HIDDEN unset, --test-threads=1"]
+fn startup_system_pumping_through_the_seam_never_hangs() {
+    let run = observe("startup_seam", Mode::StartupBusy);
+    assert_observed(&run, "startup_seam");
+    let hung = run.samples.iter().filter(|s| s.hung).count();
+    let ghosts = run.samples.iter().filter(|s| s.ghost).count();
+    assert!(
+        hung == 0 && ghosts == 0 && run.probe_timeouts == 0 && run.probe_max_ms < PROBE_RED_MS,
+        "HUNG DURING STARTUP: {hung} IsHungAppWindow samples, {ghosts} ghost samples, {} WM_NULL \
+         timeouts, max round trip {} ms\n{}",
+        run.probe_timeouts,
+        run.probe_max_ms,
         run.timeline()
     );
 }

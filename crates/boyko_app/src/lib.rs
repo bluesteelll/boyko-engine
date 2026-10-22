@@ -159,6 +159,7 @@ pub mod test_force;
 // silently filing it under the engine's.
 boyko_diag::profiling_partition!(Engine);
 
+pub use boyko_rhi_vulkan::window::pump_boot_messages;
 pub use device::GpuDevice;
 pub use fly::{FlyAction, FlyCameraPlugin, fly_default_map};
 pub use occlusion_force::OcclusionForce;

@@ -92,14 +92,17 @@ fn boot_cache_child() {
         CacheLoad::CreateFailed => "CreateFailed",
     };
     println!(
-        "\nBOOT1-STATS sampled={} pipelines={} hits={} invalid={} saved={} load={load} created_total={} teardown_sampled={}",
+        "\nBOOT1-STATS sampled={} pipelines={} hits={} invalid={} saved={} load={load} created_total={} teardown_sampled={} create_pumps={} wait_pumps={} stage_pumps={}",
         boot.sampled,
         boot.pipelines,
         boot.cache_hits,
         boot.feedback_invalid,
         saved,
         teardown.pipelines_created_total,
-        teardown.sampled
+        teardown.sampled,
+        boot.create_pumps,
+        boot.wait_pumps,
+        boot.stage_pumps
     );
     let _ = std::io::stdout().flush();
 }
@@ -114,6 +117,9 @@ struct Stats {
     saved: u64,
     load: String,
     created_total: u32,
+    create_pumps: u32,
+    wait_pumps: u32,
+    stage_pumps: u32,
     raw: String,
 }
 
@@ -133,6 +139,9 @@ fn parse(stdout: &str) -> Option<Stats> {
         saved: field(line, "saved").parse().ok()?,
         load: field(line, "load").to_string(),
         created_total: field(line, "created_total").parse().ok()?,
+        create_pumps: field(line, "create_pumps").parse().ok()?,
+        wait_pumps: field(line, "wait_pumps").parse().ok()?,
+        stage_pumps: field(line, "stage_pumps").parse().ok()?,
         raw: line.to_string(),
     })
 }
@@ -267,5 +276,14 @@ fn frame_loop_creates_no_pipeline() {
         s.raw
     );
     assert_eq!(s.invalid, 0, "every creation reported VALID feedback: {}", s.raw);
+    // BOOT-1 F4, exact per mechanism (critique W2): every create site ticks the boot pump once per
+    // pipeline, so one site without its tick cannot hide behind the stage and wait pumps.
+    assert_eq!(
+        s.create_pumps, s.pipelines,
+        "the boot pump ticked after {} of {} pipeline creations: {}",
+        s.create_pumps, s.pipelines, s.raw
+    );
+    assert!(s.wait_pumps > 0, "the boot's one-shot uploads pumped after their fence waits: {}", s.raw);
+    assert!(s.stage_pumps >= 5, "P1 + the four P3 boundaries pumped: {}", s.raw);
     let _ = std::fs::remove_dir_all(&root);
 }

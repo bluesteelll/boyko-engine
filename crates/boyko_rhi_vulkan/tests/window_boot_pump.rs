@@ -1,4 +1,5 @@
-//! BOOT-1 window tests that need a desktop but no GPU: the dark class brush (F1).
+//! BOOT-1 window tests that need a desktop but no GPU: the dark class brush (F1), and the boot
+//! pump's thread-local seam and deferred close (F4).
 //!
 //! Every test opens a real Win32 window on the test thread, so the binary runs one test at a time:
 //! `cargo test -p boyko_rhi_vulkan --test window_boot_pump -- --ignored --test-threads=1`.
@@ -7,14 +8,41 @@
 
 use core::ffi::c_void;
 
-use boyko_rhi_vulkan::window::Window;
+use boyko_rhi_vulkan::window::{Window, pump_boot_messages};
 
 // SAFETY: signatures match the Win64 user32 / gdi32 ABI (HWND / HGDIOBJ are opaque pointers;
 // `GetClassLongPtrW` returns a `ULONG_PTR`).
 #[link(name = "user32")]
 unsafe extern "system" {
     fn GetClassLongPtrW(hwnd: *mut c_void, index: i32) -> usize;
+    fn IsWindow(hwnd: *mut c_void) -> i32;
+    fn IsWindowVisible(hwnd: *mut c_void) -> i32;
+    fn ShowWindow(hwnd: *mut c_void, cmd: i32) -> i32;
+    fn PostMessageW(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -> i32;
+    fn PeekMessageW(msg: *mut Msg, hwnd: *mut c_void, min: u32, max: u32, remove: u32) -> i32;
+    fn PostQuitMessage(code: i32);
 }
+
+/// `MSG`, as `PeekMessageW` writes it (Win64: 48 bytes).
+#[repr(C)]
+#[derive(Default)]
+struct Msg {
+    hwnd: usize,
+    message: u32,
+    wparam: usize,
+    lparam: isize,
+    time: u32,
+    pt: [i32; 2],
+    private: u32,
+}
+const _: () = assert!(core::mem::size_of::<Msg>() == 48);
+
+const WM_CLOSE: u32 = 0x0010;
+const WM_QUIT: u32 = 0x0012;
+const WM_USER: u32 = 0x0400;
+const PM_NOREMOVE: u32 = 0x0000;
+const PM_REMOVE: u32 = 0x0001;
+const SW_SHOW: i32 = 5;
 // SAFETY: as above.
 #[link(name = "gdi32")]
 unsafe extern "system" {
@@ -40,4 +68,64 @@ fn class_background_is_the_stock_black_brush() {
         "the window class background is {brush:#x}, not the stock black brush {black:#x}: \
          a null brush leaves the client area to DWM's white until the first present"
     );
+}
+
+/// F4: during boot, `WM_CLOSE` hides the window at once and is reported, while the `HWND` stays
+/// valid (the surface is live mid-boot); after `end_boot` a close destroys the window as before.
+#[test]
+#[ignore = "solo: opens a real Win32 window on the test thread and posts WM_CLOSE to it; run with --test-threads=1"]
+fn close_during_boot_is_deferred_and_hides() {
+    let window = Window::open("boyko boot1 deferred close", 64, 64).expect("a desktop session can open a window");
+    let hwnd = window.hwnd();
+    // SAFETY: `hwnd` is the live window just opened (shown even under BOYKO_WIN_HIDDEN, so the hide
+    // is observable).
+    unsafe { ShowWindow(hwnd, SW_SHOW) };
+    window.begin_boot();
+    // SAFETY: a posted message with no pointer payload to the live window.
+    unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+    pump_boot_messages();
+    assert!(window.close_requested(), "the close during boot is reported");
+    // SAFETY: message-free queries on a window handle.
+    let (alive, visible) = unsafe { (IsWindow(hwnd) != 0, IsWindowVisible(hwnd) != 0) };
+    assert!(alive, "the HWND survives a close during boot (the surface still needs it)");
+    assert!(!visible, "the window is hidden at once");
+    let report = window.end_boot();
+    assert!(report.close_requested, "end_boot reports the deferred close");
+    assert_eq!(report.stage_pumps, 1, "one pump through the public seam");
+    // SAFETY: as above.
+    unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+    assert!(!window.pump_events(), "after end_boot a close destroys the window as before");
+}
+
+/// F4: unarmed, the seam drains nothing — a posted message stays queued for the frame loop.
+#[test]
+#[ignore = "solo: opens a real Win32 window on the test thread; run with --test-threads=1"]
+fn boot_pump_is_inert_when_unarmed() {
+    let window = Window::open("boyko boot1 inert pump", 64, 64).expect("a desktop session can open a window");
+    let hwnd = window.hwnd();
+    // SAFETY: as above.
+    unsafe { PostMessageW(hwnd, WM_USER + 7, 0, 0) };
+    pump_boot_messages();
+    let mut msg = Msg::default();
+    // SAFETY: a valid `MSG` out-pointer; the filter names exactly the posted message.
+    let queued = unsafe { PeekMessageW(&mut msg, hwnd, WM_USER + 7, WM_USER + 7, PM_REMOVE) } != 0;
+    assert!(queued, "an unarmed boot pump must not drain the queue");
+    drop(window);
+}
+
+/// F4: a `WM_QUIT` met while draining is re-posted, so the frame loop's `pump_events` still sees it.
+#[test]
+#[ignore = "solo: opens a real Win32 window on the test thread; run with --test-threads=1"]
+fn boot_pump_reposts_wm_quit() {
+    let window = Window::open("boyko boot1 quit repost", 64, 64).expect("a desktop session can open a window");
+    window.begin_boot();
+    // SAFETY: a parameterless OS call on this thread.
+    unsafe { PostQuitMessage(7) };
+    pump_boot_messages();
+    let mut msg = Msg::default();
+    // SAFETY: a valid `MSG` out-pointer; the filter names exactly `WM_QUIT`.
+    let quit = unsafe { PeekMessageW(&mut msg, core::ptr::null_mut(), WM_QUIT, WM_QUIT, PM_NOREMOVE) } != 0;
+    assert!(quit && msg.wparam == 7, "the boot pump swallowed WM_QUIT (or changed its code)");
+    let _ = window.end_boot();
+    drop(window);
 }
