@@ -165,5 +165,6 @@ pub use occlusion_force::OcclusionForce;
 pub use plugins::EnginePlugins;
 pub use timer_resolution::TimerResolutionGuard;
 pub use window_info::{
-    HOST_TEARDOWN_WATCH_SLOTS, HostAllocationWatch, HostFrameStats, HostTeardownStats, WindowInfo,
+    HOST_TEARDOWN_WATCH_SLOTS, HostAllocationWatch, HostBootStats, HostFrameStats, HostTeardownStats,
+    WindowInfo,
 };

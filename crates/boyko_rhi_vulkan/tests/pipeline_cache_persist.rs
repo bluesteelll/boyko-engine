@@ -8,7 +8,8 @@
 //!
 //! Run: `cargo test -p boyko_rhi_vulkan --test pipeline_cache_persist -- --ignored --test-threads=1`
 //! with `BOYKO_DISABLE_VALIDATION=1`. Single-threaded: the singleton tests and the env switch test
-//! share process state.
+//! share process state. The persisted tests write only under the temp dir (`TMP`), never the per-user
+//! cache.
 
 use core::slice;
 
@@ -18,7 +19,9 @@ use boyko_rhi::{
 };
 use boyko_rhi_vulkan::compute::write_pattern_spirv;
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
-use boyko_rhi_vulkan::pipeline_cache::{CacheLoad, PipelineCreationStats};
+use boyko_rhi_vulkan::pipeline_cache::{
+    self, CacheLoad, CacheSave, DeviceIdentity, PipelineCachePolicy, PipelineCreationStats, Reject,
+};
 
 /// A 4-byte-aligned SPIR-V blob wrapper (the `graphics_triangle.rs` idiom).
 #[repr(C, align(4))]
@@ -228,4 +231,111 @@ fn stats_count_every_creation() {
             site.line()
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// C5: the persisted cache across two boots, and the file rejections on a real device.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+fn scratch_dir(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("boyko_pc_device_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    d
+}
+
+/// One persisted singleton boot under `dir`: creates every site once, then destroys the singleton
+/// (which saves). Returns (load, stats, save), or `None` when no device exists.
+fn persisted_boot(dir: &std::path::Path) -> Option<(CacheLoad, PipelineCreationStats, CacheSave)> {
+    let (load, stats) = {
+        let ctx = match VulkanContext::boot_singleton(
+            headless(),
+            PipelineCachePolicy::Persisted { dir: dir.to_path_buf() },
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("SKIP: no Vulkan device ({e:?})");
+                return None;
+            }
+        };
+        for site in SITES {
+            create_once(ctx, site);
+        }
+        (ctx.pipeline_cache_load(), ctx.pipeline_stats())
+    };
+    // SAFETY: the `boot_singleton` above succeeded and is still live; nothing was submitted, so
+    // the device is idle; the only `&'static` it returned went out of scope with the block above.
+    let saved = unsafe { VulkanContext::destroy_singleton() };
+    Some((load, stats, saved))
+}
+
+#[test]
+#[ignore = "gpu: needs a Vulkan device; run with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
+fn warm_boot_hits_every_pipeline() {
+    let dir = scratch_dir("warm");
+    let Some((load, stats, saved)) = persisted_boot(&dir) else { return };
+    assert_eq!(load, CacheLoad::Absent, "boot A: no file yet");
+    assert_eq!(stats.hits, 0, "boot A: every create misses an empty cache");
+    assert!(matches!(saved, CacheSave::Saved { bytes, .. } if bytes > 96), "boot A saves: {saved:?}");
+
+    let (load, stats, saved) = persisted_boot(&dir).expect("the device booted a moment ago");
+    assert!(matches!(load, CacheLoad::Loaded { bytes } if bytes > 32), "boot B loads the file: {load:?}");
+    assert_eq!(
+        stats.hits,
+        stats.total(),
+        "boot B: every pipeline must come out of the loaded cache ({} of {} hit)",
+        stats.hits,
+        stats.total()
+    );
+    assert_eq!(saved, CacheSave::Clean, "a warm boot writes nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore = "gpu: needs a Vulkan device; run with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
+fn foreign_or_corrupt_file_is_rejected_then_rewritten() {
+    let dir = scratch_dir("reject");
+    let Some((_, _, saved)) = persisted_boot(&dir) else { return };
+    assert!(matches!(saved, CacheSave::Saved { .. }), "the seed boot saves: {saved:?}");
+    let file = std::fs::read_dir(&dir)
+        .expect("invariant: the seed boot created the directory")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "vkpc"))
+        .expect("the seed boot wrote one .vkpc file");
+    let good = std::fs::read(&file).expect("invariant: the file is readable");
+    // The device identity the seed recorded, read back from the file's own header.
+    let id = DeviceIdentity {
+        vendor_id: u32::from_le_bytes(good[32..36].try_into().expect("4 bytes")),
+        device_id: u32::from_le_bytes(good[36..40].try_into().expect("4 bytes")),
+        driver_version: u32::from_le_bytes(good[40..44].try_into().expect("4 bytes")),
+        pipeline_cache_uuid: good[48..64].try_into().expect("16 bytes"),
+    };
+    assert!(pipeline_cache::validate(&good, &id).is_ok(), "the seed file validates");
+
+    let mut half = good.clone();
+    half.truncate(good.len() / 2);
+    let mut flipped = good.clone();
+    let last = flipped.len() - 1;
+    flipped[last] ^= 0x01;
+    let mut foreign_driver = good.clone();
+    let driver = id.driver_version.wrapping_add(1);
+    foreign_driver[40..44].copy_from_slice(&driver.to_le_bytes());
+    let garbage: Vec<u8> = (0..4096u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+    let cases: [(&str, Vec<u8>, CacheLoad); 5] = [
+        ("truncated to half", half, CacheLoad::Rejected(Reject::SizeMismatch)),
+        ("one payload byte flipped", flipped, CacheLoad::Rejected(Reject::HashMismatch)),
+        ("driver_version + 1", foreign_driver, CacheLoad::Rejected(Reject::ForeignDriver)),
+        ("4 KiB garbage", garbage, CacheLoad::Rejected(Reject::BadMagic)),
+        ("empty file", Vec::new(), CacheLoad::Rejected(Reject::TooSmall)),
+    ];
+    for (what, bytes, want) in cases {
+        std::fs::write(&file, &bytes).expect("invariant: the scratch file is writable");
+        let (load, stats, saved) = persisted_boot(&dir).expect("the device booted a moment ago");
+        assert_eq!(load, want, "{what}: the boot must reject the file");
+        assert_eq!(stats.hits, 0, "{what}: a rejected file seeds nothing");
+        assert!(matches!(saved, CacheSave::Saved { .. }), "{what}: the boot rewrites the file: {saved:?}");
+        let rewritten = std::fs::read(&file).expect("invariant: the rewritten file is readable");
+        assert!(pipeline_cache::validate(&rewritten, &id).is_ok(), "{what}: the rewritten file validates");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

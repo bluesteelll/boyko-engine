@@ -62,4 +62,6 @@ pub use boyko_input::KeyCode;
 pub use crate::device::GpuDevice;
 pub use crate::fly::{FlyAction, FlyCameraPlugin};
 pub use crate::plugins::EnginePlugins;
-pub use crate::window_info::{HostAllocationWatch, HostFrameStats, HostTeardownStats, WindowInfo};
+pub use crate::window_info::{
+    HostAllocationWatch, HostBootStats, HostFrameStats, HostTeardownStats, WindowInfo,
+};

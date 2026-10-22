@@ -979,6 +979,10 @@ impl VulkanContext {
     /// mechanics live HERE, next to the type they manage — the host
     /// (`boyko_app`) only calls this pair.
     ///
+    /// `cache` is the pipeline-cache policy (BOOT-1 F-A): the windowed runner passes
+    /// [`PipelineCachePolicy::per_user_from_env`], so the cache is loaded from and saved to the
+    /// per-user file; `BOYKO_PIPELINE_CACHE=off` overrides any policy.
+    ///
     /// # Errors
     ///
     /// - [`VulkanError::Boot`](crate::error::VulkanError::Boot) on any loader /
@@ -991,6 +995,7 @@ impl VulkanContext {
     ///   returning).
     pub fn boot_singleton(
         config: InstanceConfig,
+        cache: PipelineCachePolicy,
     ) -> Result<&'static VulkanContext, crate::error::VulkanError> {
         // Advisory fast-fail so a contract-violating second boot does not
         // create (and immediately destroy) a whole second device. The
@@ -1000,7 +1005,7 @@ impl VulkanContext {
             return Err(crate::error::VulkanError::SingletonAlreadyBooted);
         }
 
-        let ctx = Self::boot(config)?;
+        let ctx = Self::boot_with_policy(config, cache)?;
         let raw = Box::into_raw(Box::new(ctx));
 
         // Publish the owning pointer. Release on success: whoever observes
@@ -1037,6 +1042,10 @@ impl VulkanContext {
     /// debug messenger, and frees the loader (the normal [`Drop`] path), then
     /// releases the pinned allocation.
     ///
+    /// First it saves the pipeline cache if anything missed since the last save (BOOT-1 F-A: the
+    /// clean-shutdown save, so every runner exit path keeps the pipelines it compiled) and returns
+    /// what that did. Not `#[must_use]`: a caller with nothing to report ignores it.
+    ///
     /// PARAMLESS by soundness necessity (review P0): the owning raw pointer is
     /// retained in the private [`SINGLETON`] static at boot. A `&'static`
     /// downgraded from `Box::leak`'s `&'static mut` loses the
@@ -1065,7 +1074,7 @@ impl VulkanContext {
     ///   evicted, no copy stashed in any live structure) — reference validity,
     ///   not merely "no deref": the `'static` is a documented fiction this
     ///   call ends, and any surviving reference would dangle.
-    pub unsafe fn destroy_singleton() {
+    pub unsafe fn destroy_singleton() -> CacheSave {
         // AcqRel: the Acquire half matches the Release success ordering of the
         // CAS in `boot_singleton` (this thread observes the fully-initialized
         // context before dropping it); the Release half orders the
@@ -1077,6 +1086,15 @@ impl VulkanContext {
                  (boot_singleton never succeeded, or destroy_singleton ran twice)"
             );
         }
+        // SAFETY: `raw` is the live, fully-initialised context `boot_singleton` published (the
+        // swap above observed it non-null, with Acquire). `&*raw` is a fresh shared reborrow of
+        // the owning raw pointer that ends at the end of this statement, BEFORE `Box::from_raw`
+        // below: under Stacked Borrows its tag is popped by the box's later unique use, under Tree
+        // Borrows the child is disabled by the parent's later write, and no protector applies
+        // (it is not a function parameter). The device is idle per this fn's contract, so no
+        // create is in flight while `persist_pipeline_cache` reads the cache back; the `Cell`
+        // write inside it goes through `UnsafeCell`.
+        let saved = unsafe { &*raw }.persist_pipeline_cache();
         // SAFETY: `raw` is the exact pointer `boot_singleton`'s `Box::into_raw`
         // stashed in `SINGLETON` (correct provenance + layout for
         // `Box::from_raw`); the swap-to-null above guarantees no other call
@@ -1086,6 +1104,7 @@ impl VulkanContext {
         // teardown: device → messenger → instance → loader) cannot double-free
         // or invalidate a live borrow.
         drop(unsafe { Box::from_raw(raw) });
+        saved
     }
 
     /// Continues the boot once the instance exists. On error it returns the
@@ -4498,6 +4517,7 @@ mod tests {
 
     use super::{InstanceConfig, VulkanContext, validation_requested};
     use crate::error::VulkanError;
+    use crate::pipeline_cache::PipelineCachePolicy;
     use crate::log_probe::{arm, drain, observe_lock, observed};
 
     /// Serializes the two tests that interact through PROCESS-GLOBAL state:
@@ -4541,7 +4561,7 @@ mod tests {
         // `destroy_singleton` runs — the destroy contract is that no reference
         // obtained from `boot_singleton` exists any more.
         {
-            let ctx = match VulkanContext::boot_singleton(config) {
+            let ctx = match VulkanContext::boot_singleton(config, PipelineCachePolicy::Ephemeral) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!(
@@ -4567,7 +4587,7 @@ mod tests {
             // second device (so nothing leaks in this test).
             assert!(
                 matches!(
-                    VulkanContext::boot_singleton(config),
+                    VulkanContext::boot_singleton(config, PipelineCachePolicy::Ephemeral),
                     Err(VulkanError::SingletonAlreadyBooted)
                 ),
                 "a second boot_singleton while live must return SingletonAlreadyBooted"
