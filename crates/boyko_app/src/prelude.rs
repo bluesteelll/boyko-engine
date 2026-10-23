@@ -59,7 +59,10 @@ pub use boyko_scene::{
 // for authoring bindings / reading the input snapshot.
 pub use boyko_input::KeyCode;
 
+pub use boyko_rhi_vulkan::window::pump_boot_messages;
 pub use crate::device::GpuDevice;
 pub use crate::fly::{FlyAction, FlyCameraPlugin};
 pub use crate::plugins::EnginePlugins;
-pub use crate::window_info::{HostAllocationWatch, HostFrameStats, HostTeardownStats, WindowInfo};
+pub use crate::window_info::{
+    HostAllocationWatch, HostBootStats, HostFrameStats, HostTeardownStats, WindowInfo,
+};

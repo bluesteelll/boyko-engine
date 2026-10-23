@@ -159,11 +159,13 @@ pub mod test_force;
 // silently filing it under the engine's.
 boyko_diag::profiling_partition!(Engine);
 
+pub use boyko_rhi_vulkan::window::pump_boot_messages;
 pub use device::GpuDevice;
 pub use fly::{FlyAction, FlyCameraPlugin, fly_default_map};
 pub use occlusion_force::OcclusionForce;
 pub use plugins::EnginePlugins;
 pub use timer_resolution::TimerResolutionGuard;
 pub use window_info::{
-    HOST_TEARDOWN_WATCH_SLOTS, HostAllocationWatch, HostFrameStats, HostTeardownStats, WindowInfo,
+    HOST_TEARDOWN_WATCH_SLOTS, HostAllocationWatch, HostBootStats, HostFrameStats, HostTeardownStats,
+    WindowInfo,
 };

@@ -988,7 +988,7 @@ translations — so it cannot rasterize a multi-asset corpus or place a rotated 
 resolution. R0c gate (c) is therefore scoped to the fixture, explicitly.
 
 **The extent must be asserted, not assumed.** This engine's render extent is a real OS window
-client area ([`window.rs`](../crates/boyko_rhi_vulkan/src/window.rs):252, `AdjustWindowRectEx` at `:310~`), and OS clamping is *already* a
+client area ([`window.rs`](../crates/boyko_rhi_vulkan/src/window.rs):284, `AdjustWindowRectEx` at `:352~`), and OS clamping is *already* a
 recorded hazard here at 512² — [`sv0_deferred_term_bench.rs`](../crates/boyko_app/tests/sv0_deferred_term_bench.rs):297~-299 checks it, because *"an
 OS-clamped window would silently measure a different per-pixel workload."* A display that clamps
 1440p and 2160p produces three plausible rows and a **fabricated curve**, and every conclusion
@@ -2481,8 +2481,8 @@ same three constants, moved twice in one day by two different deletions), and th
 contradiction is direct evidence that the older block was never re-verified ·
 `crates/boyko_render/src/ui/mod.rs:97` (`FRAMES_IN_FLIGHT = 2`) ·
 `crates/boyko_render/src/mesh_draw.rs:81-98` (`DrawBatch`) ·
-`crates/boyko_rhi_vulkan/src/window.rs:252` (`Window::open`), `:310~` (`AdjustWindowRectEx`),
-`:342~-352` (`BOYKO_WIN_HIDDEN` — hidden, but still created at the requested size).
+`crates/boyko_rhi_vulkan/src/window.rs:284` (`Window::open`), `:352~` (`AdjustWindowRectEx`),
+`:384~-394` (`BOYKO_WIN_HIDDEN` — hidden, but still created at the requested size).
 
 > **§12's opening sentence — *"Every line below was opened or grepped while writing this
 > revision"* — was FALSE in Rev 2**, systematically, across the whole Timing block. It is the

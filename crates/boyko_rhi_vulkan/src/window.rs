@@ -43,6 +43,22 @@
 //! Vulkan surface borrows the `HWND`/`HINSTANCE` and MUST be destroyed before the
 //! window (the caller orders this — see the integration test / example).
 //!
+//! # The boot pump (BOOT-1 F4)
+//!
+//! Between [`Window::begin_boot`] and [`Window::end_boot`] the calling thread's message queue is
+//! drained at every boot stage boundary and after every pipeline creation and one-shot fence wait
+//! ([`pump_boot_messages`] and the crate's two internal ticks), so a multi-second boot never goes
+//! "(Not Responding)" and the window moves and closes. A Win32 message queue is per THREAD, so the
+//! pump state is a `thread_local!`: armed for the thread that owns the window by construction, and
+//! inert on every other thread (a worker can never pump the owner's queue). Disarmed, a tick is
+//! one TLS load and one predictable branch. A close during boot is deferred: the window is hidden at
+//! once and [`Window::close_requested`] reports it, so the host unwinds at its next boundary while
+//! the `HWND` stays valid for the live surface.
+//!
+//! Reentrancy: a pump runs inside RHI calls. That is sound because `window_proc` touches nothing
+//! but the per-window ring (through its raw pointer) and `DefWindowProcW` — it never calls into the
+//! RHI, the ECS or user code, so nothing can be re-entered.
+//!
 //! # Non-Windows
 //!
 //! On non-Windows targets [`Window::open`] returns
@@ -50,7 +66,12 @@
 //! (the XCB/Wayland arm is added when Linux on-screen is first targeted).
 
 #[cfg(windows)]
+use core::cell::Cell;
+#[cfg(windows)]
 use core::ffi::c_void;
+use std::time::Duration;
+#[cfg(windows)]
+use std::time::Instant;
 
 /// Capacity of the per-window captured-input ring (I6/I6b). A power of two for a
 /// branchless wrap; 1024 comfortably absorbs a single frame's input burst (it
@@ -127,6 +148,12 @@ struct InputRing {
     /// `tail - head`, kept explicit so a full ring is distinguishable from empty
     /// without sacrificing a slot.
     len: usize,
+    /// BOOT-1 F4: while set (between [`Window::begin_boot`] and [`Window::end_boot`]),
+    /// `window_proc`'s `WM_CLOSE` arm hides the window and sets [`Self::close_requested`] instead
+    /// of destroying it — the surface and swapchain are live mid-boot.
+    defer_close: bool,
+    /// BOOT-1 F4: a close arrived while [`Self::defer_close`] was set.
+    close_requested: bool,
     /// Count of drop-oldest evictions since the last drain (debug observability).
     dropped: usize,
     /// Set by `window_proc`'s `WM_DESTROY` arm (through the `GWLP_USERDATA`
@@ -156,6 +183,8 @@ impl InputRing {
             len: 0,
             dropped: 0,
             closed: false,
+            defer_close: false,
+            close_requested: false,
         }
     }
 
@@ -240,6 +269,9 @@ pub struct Window {
     /// reclaims the box via `Box::from_raw`. The pointer is never null after a
     /// successful `open`.
     input_ring: *mut InputRing,
+    /// BOOT-1 F4: when the window was shown (or created, if hidden) — the boot pump's first gap
+    /// starts here.
+    shown_at: Instant,
 }
 
 #[cfg(windows)]
@@ -279,6 +311,16 @@ impl Window {
         // call. A null return is tolerated (the OS falls back to a default).
         let cursor = unsafe { os::LoadCursorW(core::ptr::null_mut(), os::IDC_ARROW as *const u16) };
 
+        // BOOT-1 F1: the class background is the stock black brush, so `WM_ERASEBKGND` (handled
+        // by `DefWindowProcW` with the class brush, delivered synchronously by `UpdateWindow`
+        // below) paints the client area dark from the first moment instead of leaving it to DWM's
+        // white until the first present. A stock object is process-shared and never deleted by
+        // us; deleting one "is not necessary (but it is not harmful)" (MS, `GetStockObject`), so
+        // the class-brush deletion at `UnregisterClassW` is harmless too.
+        // SAFETY: `GetStockObject(BLACK_BRUSH)` takes a predefined index and returns a shared
+        // stock handle (or null, which makes the class paint nothing — the pre-F1 behaviour).
+        let background = unsafe { os::GetStockObject(os::BLACK_BRUSH) };
+
         let class = os::WNDCLASSEXW {
             cb_size: core::mem::size_of::<os::WNDCLASSEXW>() as u32,
             style: os::CS_HREDRAW | os::CS_VREDRAW,
@@ -288,15 +330,15 @@ impl Window {
             h_instance: hinstance,
             h_icon: core::ptr::null_mut(),
             h_cursor: cursor,
-            hbr_background: core::ptr::null_mut(),
+            hbr_background: background,
             lpsz_menu_name: core::ptr::null(),
             lpsz_class_name: class_name.as_ptr(),
             h_icon_sm: core::ptr::null_mut(),
         };
         // SAFETY: `class` is a fully-initialized `#[repr(C)]` `WNDCLASSEXW` whose
         // `cb_size` is its own size and whose pointer members (`class_name`,
-        // `hinstance`, `cursor`) outlive the call; `RegisterClassExW` returns a
-        // non-zero atom on success, 0 on failure.
+        // `hinstance`, `cursor`, the stock `background` brush) outlive the call;
+        // `RegisterClassExW` returns a non-zero atom on success, 0 on failure.
         let class_atom = unsafe { os::RegisterClassExW(&class) };
         if class_atom == 0 {
             return Err(WindowError::ClassRegistrationFailed);
@@ -357,6 +399,7 @@ impl Window {
                 os::UpdateWindow(hwnd);
             }
         }
+        let shown_at = Instant::now();
 
         // I6: allocate the captured-input ring on the heap (stable address) and
         // install its pointer into the window's `GWLP_USERDATA` slot so the
@@ -403,6 +446,7 @@ impl Window {
             width,
             height,
             input_ring,
+            shown_at,
         };
         window.refresh_size();
         Ok(window)
@@ -494,6 +538,52 @@ impl Window {
         }
     }
 
+    /// BOOT-1 F4: arms the boot pump for the calling thread (which must own this window) and defers
+    /// a close until [`Self::end_boot`]: from here on, [`pump_boot_messages`] and the crate's
+    /// creation / fence-wait ticks drain this thread's queue. The first unpumped gap is measured
+    /// from when the window was shown.
+    pub fn begin_boot(&self) {
+        // SAFETY: `input_ring` is the live box `open` installed (freed only in `Drop`); a
+        // same-thread raw field write with no `&mut InputRing` alive (this is not inside a
+        // dispatch, and `drain_input` takes `&mut self`). The `&self` borrow covers the pointer,
+        // not the pointee.
+        unsafe { (*self.input_ring).defer_close = true };
+        BOOT_PUMP.with(|c| {
+            c.set(BootPumpState { owner: self.input_ring, last: Some(self.shown_at), ..BootPumpState::DISARMED })
+        });
+        BOOT_PUMP_ARMED.with(|c| c.set(true));
+    }
+
+    /// BOOT-1 F4: whether a close arrived during boot (the window is already hidden).
+    pub fn close_requested(&self) -> bool {
+        // SAFETY: as in `begin_boot` — a same-thread raw field read of the live ring.
+        unsafe { (*self.input_ring).close_requested }
+    }
+
+    /// BOOT-1 F4: disarms the boot pump (if this window armed it), restores `WM_CLOSE`'s normal
+    /// meaning, and reports what the pump did. The last gap runs up to this call.
+    pub fn end_boot(&self) -> BootPumpReport {
+        let st = BOOT_PUMP.with(Cell::get);
+        let mut report = BootPumpReport::default();
+        if BOOT_PUMP_ARMED.with(Cell::get) && st.owner == self.input_ring {
+            let tail = st.last.map_or(Duration::ZERO, |t| Instant::now().saturating_duration_since(t));
+            report = BootPumpReport {
+                stage_pumps: st.stage,
+                create_pumps: st.create,
+                wait_pumps: st.wait,
+                max_unpumped: st.max_gap.max(tail),
+                close_requested: false,
+            };
+            disarm_boot_pump();
+        }
+        // SAFETY: as in `begin_boot` — same-thread raw field accesses of the live ring.
+        unsafe {
+            (*self.input_ring).defer_close = false;
+            report.close_requested = (*self.input_ring).close_requested;
+        }
+        report
+    }
+
     /// Drains every input message captured since the last call, invoking `sink`
     /// for each in FIFO order (I6/I6b).
     ///
@@ -530,6 +620,12 @@ impl Window {
 impl Drop for Window {
     fn drop(&mut self) {
         use crate::ffi::os;
+        // BOOT-1 F4: no path (a boot panic, an early unwind) can leave the pump armed for a window
+        // that no longer exists. `try_with`: a window dropped during thread teardown.
+        let armed_by_this = BOOT_PUMP.try_with(Cell::get).is_ok_and(|st| st.owner == self.input_ring);
+        if armed_by_this {
+            disarm_boot_pump();
+        }
         // Was the HWND already destroyed by the user-close path? `window_proc`'s
         // `WM_CLOSE` arm destroys the window immediately (its `WM_DESTROY` set the
         // ring's `closed` flag), so calling `DestroyWindow` again HERE would hand
@@ -617,6 +713,26 @@ unsafe extern "system" fn window_proc(
     use crate::ffi::os;
     match msg {
         os::WM_CLOSE => {
+            // BOOT-1 F4: during boot the close is deferred — hide at once, report it, keep the
+            // HWND (the surface and swapchain are live mid-boot).
+            // SAFETY: `hwnd` is the OS-supplied live window; its `GWLP_USERDATA` slot holds 0 or
+            // the live ring `open` installed (freed only by `Window::drop`, after this dispatch
+            // returns).
+            let ptr = unsafe { os::GetWindowLongPtrW(hwnd, os::GWLP_USERDATA) } as *mut InputRing;
+            // SAFETY: non-null => the live ring (above). A raw field read on the pump thread,
+            // inside the dispatch, with no reference into the ring alive: `drain_input` never
+            // overlaps a dispatch, and `capture`'s `&mut` ends inside its own call.
+            if !ptr.is_null() && unsafe { (*ptr).defer_close } {
+                // SAFETY: as the read above — a raw field write through the same live pointer,
+                // finished before `ShowWindow`, so no reference into the ring is live across it.
+                unsafe { (*ptr).close_requested = true };
+                // SAFETY: `hwnd` is the live window. `ShowWindow` sends its messages (show,
+                // position, activation / focus changes) synchronously into this procedure; every
+                // arm reaches the ring only through the `GWLP_USERDATA` raw pointer, and
+                // `capture`'s borrow ends inside that nested call, so nothing aliases.
+                unsafe { os::ShowWindow(hwnd, os::SW_HIDE) };
+                return 0;
+            }
             // SAFETY: `hwnd` is the OS-supplied live window; destroying it on
             // close drives the `WM_DESTROY` path below.
             unsafe { os::DestroyWindow(hwnd) };
@@ -754,6 +870,203 @@ unsafe fn read_raw_mouse_delta(hrawinput: *mut c_void) -> Option<(i32, i32)> {
     // union members the driver did not touch.
     let mouse = unsafe { core::ptr::addr_of!((*base).data.mouse).read() };
     Some((mouse.lLastX, mouse.lLastY))
+}
+
+// ─── BOOT-1 F4: the boot pump ────────────────────────────────────────────────────────────────
+
+/// What the boot pump did between [`Window::begin_boot`] and [`Window::end_boot`], counted per
+/// mechanism so each can be gated exactly (critique W2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BootPumpReport {
+    /// Pumps at stage boundaries and through the public seam [`pump_boot_messages`].
+    pub stage_pumps: u32,
+    /// Pumps right after a pipeline creation — one per `vkCreate*Pipelines` while armed.
+    pub create_pumps: u32,
+    /// Pumps right after a one-shot fence wait (`RhiDevice::wait_fence`).
+    pub wait_pumps: u32,
+    /// The longest stretch with no pump, from the window being shown up to `end_boot`.
+    pub max_unpumped: Duration,
+    /// A close arrived (and was deferred) during boot.
+    pub close_requested: bool,
+}
+
+impl BootPumpReport {
+    /// Every pump, all mechanisms.
+    #[inline]
+    pub fn pumps(&self) -> u32 {
+        self.stage_pumps + self.create_pumps + self.wait_pumps
+    }
+}
+
+/// This thread's boot-pump record. Plain scalars of OS boot state, published into the ECS by the
+/// runner at boot end (`HostBootStats`): no side data system.
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct BootPumpState {
+    /// The ring of the window that armed the pump (its identity for `end_boot` / `Drop`).
+    owner: *mut InputRing,
+    stage: u32,
+    create: u32,
+    wait: u32,
+    /// The end of the last pump (the window's show time before the first).
+    last: Option<Instant>,
+    max_gap: Duration,
+}
+
+#[cfg(windows)]
+impl BootPumpState {
+    const DISARMED: Self = Self {
+        owner: core::ptr::null_mut(),
+        stage: 0,
+        create: 0,
+        wait: 0,
+        last: None,
+        max_gap: Duration::ZERO,
+    };
+}
+
+#[cfg(windows)]
+thread_local! {
+    /// Whether this thread's boot pump is armed — the disarmed path reads only this.
+    static BOOT_PUMP_ARMED: Cell<bool> = const { Cell::new(false) };
+    static BOOT_PUMP: Cell<BootPumpState> = const { Cell::new(BootPumpState::DISARMED) };
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+enum PumpKind {
+    Stage,
+    Create,
+    Wait,
+}
+
+#[cfg(windows)]
+fn disarm_boot_pump() {
+    BOOT_PUMP_ARMED.with(|c| c.set(false));
+    BOOT_PUMP.with(|c| c.set(BootPumpState::DISARMED));
+}
+
+/// BOOT-1 F4: the boot pump's public seam. Drains this thread's message queue if
+/// [`Window::begin_boot`] armed it on this thread; a no-op otherwise (every frame-loop call, every
+/// other thread, every non-Windows target). The runner calls it at its boot stage boundaries; a
+/// startup system may call it between its own work items to keep the window responsive.
+#[cfg(windows)]
+pub fn pump_boot_messages() {
+    boot_pump(PumpKind::Stage);
+}
+
+/// The tick after a pipeline creation (`rhi_impl`'s five create sites).
+#[cfg(windows)]
+pub(crate) fn pump_boot_after_create() {
+    boot_pump(PumpKind::Create);
+}
+
+/// The tick after a one-shot fence wait (`RhiDevice::wait_fence`).
+#[cfg(windows)]
+pub(crate) fn pump_boot_after_wait() {
+    boot_pump(PumpKind::Wait);
+}
+
+/// Whether this thread's boot pump is armed (the runner's `debug_assert!` at frame-loop entry).
+#[cfg(windows)]
+pub fn boot_pump_is_armed() -> bool {
+    BOOT_PUMP_ARMED.with(Cell::get)
+}
+
+#[cfg(windows)]
+#[inline]
+fn boot_pump(kind: PumpKind) {
+    if BOOT_PUMP_ARMED.with(Cell::get) {
+        boot_pump_armed(kind);
+    }
+}
+
+#[cfg(windows)]
+#[inline(never)]
+fn boot_pump_armed(kind: PumpKind) {
+    let now = Instant::now();
+    let mut st = BOOT_PUMP.with(Cell::get);
+    if let Some(last) = st.last {
+        st.max_gap = st.max_gap.max(now.saturating_duration_since(last));
+    }
+    match kind {
+        PumpKind::Stage => st.stage = st.stage.saturating_add(1),
+        PumpKind::Create => st.create = st.create.saturating_add(1),
+        PumpKind::Wait => st.wait = st.wait.saturating_add(1),
+    }
+    BOOT_PUMP.with(|c| c.set(st));
+    drain_thread_queue();
+    // A modal move/size loop inside the drain is pumped time, not an unpumped gap.
+    BOOT_PUMP.with(|c| {
+        let mut s = c.get();
+        s.last = Some(Instant::now());
+        c.set(s);
+    });
+}
+
+/// BOOT-1 F4: drains this thread's message queue unconditionally — once before the window exists
+/// (it resets the thread's 5 s hung clock after the device boot, so the window is never born hung).
+#[cfg(windows)]
+pub fn pump_thread_messages() {
+    drain_thread_queue();
+}
+
+/// The one drain: `PeekMessageW` / `TranslateMessage` / `DispatchMessageW` until empty. A
+/// `WM_QUIT` met while draining is re-posted and ends the drain, so the frame loop's
+/// [`Window::pump_events`] still sees it (re-posting and peeking on would retrieve it forever).
+#[cfg(windows)]
+fn drain_thread_queue() {
+    use crate::ffi::os;
+    let mut msg = os::MSG {
+        hwnd: core::ptr::null_mut(),
+        message: 0,
+        w_param: 0,
+        l_param: 0,
+        time: 0,
+        pt: os::POINT::default(),
+        l_private: 0,
+    };
+    loop {
+        // SAFETY: as in `Window::pump_events`: a valid `MSG` out-pointer, a null `hWnd` filter for
+        // this thread's queue, `PM_REMOVE`.
+        let got = unsafe { os::PeekMessageW(&mut msg, core::ptr::null_mut(), 0, 0, os::PM_REMOVE) };
+        if got == 0 {
+            return;
+        }
+        if msg.message == os::WM_QUIT {
+            // SAFETY: a parameterless OS call setting this thread's quit flag again.
+            unsafe { os::PostQuitMessage(msg.w_param as i32) };
+            return;
+        }
+        // SAFETY: `&msg` is the just-retrieved message; translate + dispatch route it to its
+        // window procedure (read-only borrows of `msg`).
+        unsafe {
+            os::TranslateMessage(&msg);
+            os::DispatchMessageW(&msg);
+        }
+    }
+}
+
+/// Non-Windows: there is no window to pump.
+#[cfg(not(windows))]
+pub fn pump_boot_messages() {}
+
+/// Non-Windows: there is no window to pump.
+#[cfg(not(windows))]
+pub(crate) fn pump_boot_after_create() {}
+
+/// Non-Windows: there is no window to pump.
+#[cfg(not(windows))]
+pub(crate) fn pump_boot_after_wait() {}
+
+/// Non-Windows: there is no window to pump.
+#[cfg(not(windows))]
+pub fn pump_thread_messages() {}
+
+/// Non-Windows: the pump is never armed.
+#[cfg(not(windows))]
+pub fn boot_pump_is_armed() -> bool {
+    false
 }
 
 /// Encodes a `&str` as a NUL-terminated UTF-16 vector for the wide Win32 APIs.

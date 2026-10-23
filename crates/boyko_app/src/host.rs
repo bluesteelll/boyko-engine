@@ -228,6 +228,10 @@ impl WindowHost {
         desc: &WindowDesc,
         format_pick: SurfaceFormatPick,
     ) -> Result<Self, HostBootError> {
+        // BOOT-1 F4, P0: drain this thread's queue before the window exists, so the thread's 5 s
+        // hung clock restarts after the multi-second device boot and the window is never born
+        // "(Not Responding)".
+        boyko_rhi_vulkan::window::pump_thread_messages();
         let window =
             Window::open(desc.title, desc.width, desc.height).map_err(HostBootError::Window)?;
 
@@ -247,6 +251,13 @@ impl WindowHost {
 
         let renderer =
             Renderer::new(ctx, &surface, &swapchain).map_err(HostBootError::Renderer)?;
+
+        // BOOT-1 F4, P1: arm the boot pump and pump once. Not earlier, deliberately: a minimize or
+        // resize between the surface caps and `Swapchain::new` would hit a zero extent or move the
+        // boot-fixed composite extent off the swapchain's. From here on a resize is the frame
+        // loop's OUT_OF_DATE path and a minimize its zero-extent skip; a close is deferred.
+        window.begin_boot();
+        boyko_rhi_vulkan::window::pump_boot_messages();
 
         // Plan D7: the composite extent is boot-fixed from the ACTUAL client
         // size the window came up at.
