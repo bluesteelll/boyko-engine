@@ -3,7 +3,8 @@
 //! PX1a, `px1a/cut.md` D-S2):
 //!
 //! ```text
-//! post_final.comp.hlsl      the traced post_final_main body + the declarations from the tables
+//! post_final.comp.hlsl            the traced post_final_main body + the declarations from the tables
+//! post_final_nosharpen.comp.hlsl  the same body with the sharpen bit masked off (render wave PXt)
 //! --splice:
 //!   lit_format.hlsli          // === GENERATED lit_store_saturate ===  (every lit producer's store bound)
 //!   taa_resolve.comp.hlsl     // === GENERATED post_hdr_boundary ===   (hdr_sanitize, hdr_history_guard)
@@ -13,8 +14,11 @@
 //!
 //! Run: `cargo run -p boyko_shaderdsl --features emit --bin emit_post [-- --splice]`
 //!
-//! One source, ONE artifact, no `-D` axis (every on/off is a mode word). DXC the file with the
-//! frozen recipe pinned in its header and commit the `.spv`.
+//! One traced body, TWO generated modules, no `-D` axis: `post_final.comp` (the frames whose mode
+//! word sets the sharpen bit) and `post_final_nosharpen.comp` (the same body with the bit masked
+//! off, so DXC folds RCAS away — render wave PXt, OPEN-ITEMS 19; the host picks one per frame).
+//! Every other on/off is a mode word. DXC each file with the frozen recipe pinned in its header and
+//! commit both `.spv`.
 //! `boyko_rhi_vulkan/tests/post_edsl_sync.rs` pins the committed `.hlsl` to this template, the
 //! committed `.spv` to a fresh re-DXC of its source, and the module's structure (the OETF `Pow`s,
 //! the `[branch]` RCAS stage and dispatch, the fetch structure — the scene texel once, RCAS's four
@@ -55,9 +59,13 @@ fn main() {
         splice();
         return;
     }
-    let out = shaders_dir().join("post_final.comp.hlsl");
-    let text = emit::emit_post_final_comp();
-    std::fs::write(&out, &text)
-        .unwrap_or_else(|e| panic!("invariant: failed to write {} : {e}", out.display()));
-    println!("wrote {} ({} bytes)", out.display(), text.len());
+    for (file, text) in [
+        ("post_final.comp.hlsl", emit::emit_post_final_comp()),
+        ("post_final_nosharpen.comp.hlsl", emit::emit_post_final_nosharpen_comp()),
+    ] {
+        let out = shaders_dir().join(file);
+        std::fs::write(&out, &text)
+            .unwrap_or_else(|e| panic!("invariant: failed to write {} : {e}", out.display()));
+        println!("wrote {} ({} bytes)", out.display(), text.len());
+    }
 }

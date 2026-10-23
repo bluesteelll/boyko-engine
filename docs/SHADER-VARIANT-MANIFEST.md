@@ -334,7 +334,8 @@ no other extended instruction), whose census function is run against fixture mis
 
 One source, GENERATED WHOLE (`boyko_shaderdsl/src/bin/emit_post.rs`; the template is
 `boyko_shaderdsl::emit::emit_post_final_comp`), **no `-D` axis** (AD-1 removes the format axis; PX13
-would add `OUTPUT_PQ`; every on/off is a mode word). Its body is the trace of
+would add `OUTPUT_PQ`; every on/off is a mode word). Since render wave PXt a frame binds it only when
+its mode word SETS the sharpen bit; the frames that clear it bind the sharpen-off module below. Its body is the trace of
 `boyko_shaderdsl::post::post_final_main` — the SAME function the host oracle (PX0's `post_eval`)
 evaluates over `EvalCf`; its declarations and constants are printed from `post::POST_FINAL_BINDINGS` /
 `POST_FINAL_UBO_LAYOUT` and from the symbols the trace references. Since render wave PX1a's switch
@@ -365,11 +366,47 @@ post_image_oracle, post_facets}.rs`. *Render wave PX1b:* the RCAS stage moved th
 (`boyko_rhi_vulkan/tests/post_final_occupancy.rs`: the mode word masked by `~POST_MODE_SHARPEN`, DXC'd at
 test time, never committed — 1 `OpImageFetch` against 5; on a device exposing
 `VK_KHR_pipeline_executable_properties` the register delta ≤ 8 and equal occupancy, rule (xviii)).
-*Render wave PXt:* the AgX arm (tonemapper word 3) moved the `.spv` 14,104 → 17,076 bytes; its
+PX1b measured that gate red — 36 registers against the twin's 18 with the bit clear (OPEN-ITEMS 19) —
+so render wave PXt ships the twin's body as its own module (`post_final_nosharpen.comp`, below) and
+re-aims the gate at what a sharpen-off frame binds. *Render wave PXt:* the AgX arm (tonemapper word 3) moved the `.spv` 14,104 → 17,076 bytes; its
 register cost on every path that does not run it (ACES Hill, Neutral, Reinhard-Jodie) is GATED by
 the same rule's twin with the arm compiled out (`post_final_occupancy.rs`: the generated text's AgX
 dispatch test made `if (false)` at test time — the `-D <BODY>=0` of a generated module; anti-vacuity
 `Log2` 3 → 0, `Pow` 6 → 3, one `DontFlatten` fewer).
+
+## `post_final_nosharpen.comp.hlsl` — `post_final`'s sharpen-off module (compute, render wave PXt)
+
+GENERATED WHOLE by the same `emit_post` (`boyko_shaderdsl::emit::emit_post_final_nosharpen_comp`,
+`PostFinalTwin::NoSharpen`), **no `-D`**: the same traced `post_final_main` body with the mode word
+masked by `~POST_MODE_SHARPEN` — the PX1b `NoRcas` twin's mask — so DXC folds the RCAS branch away
+(OPEN-ITEMS 19). Selected per frame by `PostFinalActivation::pipeline_for` when the mode word's sharpen
+bit is clear (every frame without TAA's sharpen); `GpuSceneBundles::boot` builds its pipeline from
+`compute::post_final_spirv_for(false)` beside `post_final.comp`'s, against the same set layout and
+4-byte push range, so one per-FIF set ring serves both.
+
+| Variant | `-D` | `.spv` | dxc `-T` | Notes |
+|---|---|---|---|---|
+| the only one | — | `post_final_nosharpen.comp.spv` | `cs_6_0` | `post_final.comp`'s set 0, `cbuffer` and `[numthreads(8, 8, 1)]`, the same skeleton. Per pixel: ONE `OpImageFetch` (the scene texel), before every selection; the three-level tonemapper dispatch as three `DontFlatten` selections (the sharpen stage is folded away); the OETF's three `Pow` on `OETF_GAMMA_EXP`, AgX's three `Log2` (on the `1e-10` floor's `max`) and three `Pow` on 2.2, inside the dispatch. 9,532 bytes. |
+
+Frozen recipe (the header pins it verbatim; no `-O`, no `-D`):
+`dxc.exe -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 post_final_nosharpen.comp.hlsl`.
+
+*Byte gate:* `boyko_rhi_vulkan/tests/post_edsl_sync.rs` §7 — the whole committed source IS the
+generator's output (and declares `post_final.comp`'s bindings); the committed `.spv` is the re-DXC of
+its source (SKIPs without dxc — **a skipped run is not a pass**); its `spirv-dis` censuses (the `Pow` /
+`Log2` / `Exp2` counts, three `DontFlatten`, no `float3` `OpSelect`, one fetch before every selection,
+AgX's placement, the binding decorations); the stage trace and the skeleton census.
+*Identity with the register twin:* `boyko_rhi_vulkan/tests/post_final_occupancy.rs` —
+`the_sharpen_off_module_is_the_body_without_rcas` (1 `OpImageFetch` against the RCAS module's 5, one
+`DontFlatten` fewer: the anti-vacuity) and `the_committed_sharpen_off_module_is_the_no_rcas_twin` (the
+test-time `NoRcas` DXC equals this module once the debug-only instructions are dropped). Once both hold,
+the `gpu-cap` register gate re-aimed at this module compares the twin with itself: it reds only where
+those host tests red, so it is not an independent measurement of "zero cost when off" (`pxt/critique.md`
+O3).
+*Scaling (PX3-PX8, `pxt/critique.md` open question 1):* a later runtime-gated `post_final` stage whose
+rule (xviii) twin reds would make this one module per gated-stage combination (`PostFinalTwin` → a
+stage mask, `2^k` boot pipelines); that rung decides between such a module set and a
+specialization-constant facet, with numbers — PXt's two modules are not a precedent for either.
 
 **Render wave PX1b — `rcas.comp.{hlsl,spv}` retired.** The CAS pass (`rcas.comp.hlsl`, FidelityFX CAS on
 `display` → `aa_out` in a declared `cas` pass; it never had a row here) is deleted with

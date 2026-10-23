@@ -59,9 +59,14 @@
 //!   only where (b) does (critique O3): it is not an independent measurement of "zero cost when
 //!   off" — (a) and (b) are, and the gate stays as the device-side row of rule (xviii).
 //! - `the_agx_twin_compiles_the_arm_away` (host) and `post_final_agx_arm_registers_agree`
-//!   (`gpu-cap:`): rule (xviii) on the AgX arm (critique W3) — every shipped module against itself
-//!   with the arm compiled out (the generated text's AgX dispatch test made `if (false)`, the
-//!   `-D <BODY>=0` of a generated module), anti-vacuity on the arm's `Log2` / `Pow` / `DontFlatten`.
+//!   (`gpu-cap:`): rule (xviii) on the AgX arm (critique W3) — both shipped modules (the sharpen-off
+//!   default row and the RCAS heaviest) against themselves with the arm compiled out (the generated
+//!   text's AgX dispatch test made `if (false)`, the `-D <BODY>=0` of a generated module),
+//!   anti-vacuity on the arm's `Log2` / `Pow` / `DontFlatten`.
+//! - Recorded, not gated (`gpu-cap:`): `post_final_sharpen_on_and_off_modules_report_their_registers`
+//!   (the cost when the sharpen is on) and
+//!   `post_final_sharpen_off_and_agx_only_twin_report_their_register_footprint` (O6 re-aimed at the
+//!   default curve's path; its host anti-vacuity is `the_agx_only_twin_compiles_the_other_arms_away`).
 //!
 //! # Usage
 //!
@@ -886,9 +891,17 @@ fn agx_arm_anti_vacuity(shipped: &[u32], twin: &[u32]) -> Result<(), String> {
 }
 
 /// The shipped `post_final` modules that carry the AgX arm, each with its generated source and its
-/// committed SPIR-V: `(label, source, spirv)`.
+/// committed SPIR-V: `(label, source, spirv)` — rule (xviii)'s "default row and heaviest" of the
+/// shared row: the sharpen-off module (most frames) and the RCAS module.
 fn agx_rows() -> Vec<(&'static str, String, &'static [u32])> {
-    vec![("post_final (committed)", boyko_shaderdsl::emit::emit_post_final_comp(), post_final_spirv())]
+    vec![
+        ("post_final (committed)", boyko_shaderdsl::emit::emit_post_final_comp(), post_final_spirv_for(true)),
+        (
+            "post_final_nosharpen (committed)",
+            boyko_shaderdsl::emit::emit_post_final_nosharpen_comp(),
+            post_final_spirv_for(false),
+        ),
+    ]
 }
 
 /// **Render wave PXt — the AgX arm's twin is the shipped module with the arm compiled out** (host;
@@ -955,6 +968,93 @@ fn post_final_agx_arm_registers_agree() {
         }
     }
     assert!(red.is_empty(), "GATE red: {}", red.join("; "));
+}
+
+/// **Render wave PXt — the O6 row re-aimed** (`pxt/cut.md` D-O4 (d)): the `AgxOnly` twin (the mode
+/// word the AgX constant, the sharpen bit clear) is the sharpen-off module with the other three
+/// arms compiled out — the dispatch folded to AgX's arm (its three `Log2` kept, no `DontFlatten`
+/// left) and different bytes. SKIPS without `dxc`.
+#[test]
+fn the_agx_only_twin_compiles_the_other_arms_away() {
+    let twin_text = emit_post_final_comp_with(PostFinalTwin::AgxOnly);
+    assert!(twin_text.starts_with("// TEST-ONLY O6 TWIN (PostFinalTwin::AgxOnly)"), "the twin says what it is");
+    let Some(dxc) = find_dxc() else {
+        eprintln!("SKIP post_final_occupancy: no dxc resolves on this host — a skipped run is NOT a pass");
+        return;
+    };
+    let twin = compile_twin_of(&dxc, PostFinalTwin::AgxOnly, "post_final_agx_only");
+    let off = post_final_spirv_for(false);
+    assert!(twin.as_slice() != off, "the AgxOnly twin's SPIR-V equals the sharpen-off module: the two columns would be one kernel");
+    assert_eq!(dont_flatten_count(&twin), 0, "the AgxOnly twin keeps a DontFlatten selection: the dispatch was not folded");
+    assert_eq!(glsl_ext_count(&twin, GLSL_LOG2), 3, "the AgxOnly twin must keep AgX's three Log2 (the arm it folds to)");
+    eprintln!(
+        "post_final_occupancy: DontFlatten sharpen-off {}, agx_only twin {}; SPIR-V words {} vs {}",
+        dont_flatten_count(off),
+        dont_flatten_count(&twin),
+        off.len(),
+        twin.len()
+    );
+}
+
+/// Prints two modules' driver statistics side by side and asserts the mechanical conditions under
+/// which the columns mean anything (both compiled, each reported statistics, the statistic NAMES
+/// agree). RECORDED, NOT GATED — no threshold, no register count is asserted.
+fn record_pair(title: &str, probe: &VulkanProbe, modules: &[(&'static str, &[u32]); 2]) {
+    let reports = probe.measure(modules);
+    println!("\n=== {title} (recorded, not gated) ===");
+    println!("device: {}", probe.device_name);
+    for r in &reports {
+        println!("\n[{}] {} SPIR-V words, executable \"{}\", subgroupSize {}", r.label, r.spirv_words, r.executable_name, r.subgroup_size);
+        for (name, value) in &r.stats {
+            println!("    {name:.<44} {value}");
+        }
+    }
+    assert_eq!(reports.len(), 2, "both modules must have compiled");
+    for r in &reports {
+        assert!(!r.stats.is_empty(), "[{}] the driver returned no statistics — the CAPTURE_STATISTICS bit did not take effect", r.label);
+    }
+    let names_of = |r: &ModuleReport| -> Vec<String> {
+        let mut n: Vec<String> = r.stats.iter().map(|(k, _)| k.clone()).collect();
+        n.sort();
+        n
+    };
+    assert_eq!(names_of(&reports[1]), names_of(&reports[0]), "the two modules report different statistic SETS — the columns are not comparable");
+}
+
+/// **Render wave PXt — the cost when the sharpen is on** (`pxt/cut.md` D-O4 (d)): the RCAS module
+/// beside the sharpen-off module. See [`record_pair`].
+#[test]
+#[ignore = "gpu-cap: needs a real GPU exposing VK_KHR_pipeline_executable_properties; PXt OPEN-ITEMS 19, post_final's sharpen-on and sharpen-off modules' register footprint (recorded, not gated); run with --nocapture"]
+fn post_final_sharpen_on_and_off_modules_report_their_registers() {
+    let Some(probe) = VulkanProbe::open() else {
+        return;
+    };
+    record_pair(
+        "post_final sharpen-on vs sharpen-off modules (PXt, OPEN-ITEMS 19)",
+        &probe,
+        &[("sharpen-on (post_final)", post_final_spirv_for(true)), ("sharpen-off (post_final_nosharpen)", post_final_spirv_for(false))],
+    );
+}
+
+/// **Render wave PXt — the O6 row on the default curve's path** (`pxt/cut.md` D-O4 (d)): the
+/// sharpen-off module beside its `AgxOnly` twin — the runtime dispatch's register cost where AgX
+/// runs. The PX1a `AcesOnly` row stays for continuity. See [`record_pair`].
+#[test]
+#[ignore = "gpu-cap: needs a real GPU exposing VK_KHR_pipeline_executable_properties and the pinned dxc; PXt O6, post_final's sharpen-off module vs its AgxOnly twin (recorded, not gated); run with --nocapture"]
+fn post_final_sharpen_off_and_agx_only_twin_report_their_register_footprint() {
+    let Some(dxc) = find_dxc() else {
+        eprintln!("SKIP post_final_occupancy: no dxc resolves on this host — a skipped run is NOT a pass");
+        return;
+    };
+    let twin = compile_twin_of(&dxc, PostFinalTwin::AgxOnly, "post_final_agx_only");
+    let Some(probe) = VulkanProbe::open() else {
+        return;
+    };
+    record_pair(
+        "post_final O6 on the default curve: sharpen-off module vs AgxOnly twin (PXt)",
+        &probe,
+        &[("sharpen-off (committed)", post_final_spirv_for(false)), ("agx_only (twin)", twin.as_slice())],
+    );
 }
 
 /// The twin is the committed body with the dispatch compiled out: the generator prints the same

@@ -1252,14 +1252,30 @@ pub struct TaaActivation<'a> {
 /// 3-binding layout `POST_FINAL_BINDINGS` prints: `gScene` @0 (`SAMPLED_IMAGE` recorded at
 /// `GENERAL` — the scene input, `taa_hist[fi]` under TAA, `lit_native` under SSAA, `lit[fi]`
 /// otherwise), `gDisplay` @1 (`STORAGE_IMAGE`, `display`), the `PostFinal` UBO @2. Built once in
-/// `GpuSceneBundles::boot`; the per-FIF UBO + set rings live in `GBufferTargets`. The module is
-/// the generated `post_final.comp` (`compute::post_final_spirv`).
+/// `GpuSceneBundles::boot`; the per-FIF UBO + set rings live in `GBufferTargets`. Since render wave
+/// PXt (OPEN-ITEMS 19) two pipelines, one per generated module (`compute::post_final_spirv_for`):
+/// a frame binds [`Self::pipeline_for`] its mode word's sharpen bit.
 #[derive(Clone, Copy)]
 pub struct PostFinalActivation<'a> {
-    /// The compute pipeline (`numthreads(8, 8, 1)`; a 4-byte push range the shader never reads).
+    /// The pipeline a frame whose mode word SETS the sharpen bit binds (`post_final.comp`, RCAS
+    /// inside; `numthreads(8, 8, 1)`; a 4-byte push range the shader never reads).
     pub pipeline: &'a ComputePipeline,
-    /// Its bind-group layout (the three bindings above).
+    /// Render wave PXt (OPEN-ITEMS 19): the pipeline a frame whose mode word CLEARS the sharpen bit
+    /// binds (`post_final_nosharpen.comp`, the same body with RCAS compiled out). Built against the
+    /// same set layout with the same 4-byte push range, so the two pipelines' layouts are
+    /// compatible and one per-FIF set ring serves both.
+    pub pipeline_nosharpen: &'a ComputePipeline,
+    /// Their bind-group layout (the three bindings above).
     pub layout: &'a VulkanBindGroupLayout,
+}
+
+impl<'a> PostFinalActivation<'a> {
+    /// The pipeline a frame binds: [`Self::pipeline`] when its mode word sets the sharpen bit
+    /// (`sharpen`, [`GBufferScene::post_rcas`]), else [`Self::pipeline_nosharpen`].
+    #[inline]
+    pub const fn pipeline_for(&self, sharpen: bool) -> &'a ComputePipeline {
+        if sharpen { self.pipeline } else { self.pipeline_nosharpen }
+    }
 }
 
 /// Render wave PX1b (`px1b/cut.md` D-R15): bit 1 of `post_final`'s mode word
@@ -4616,7 +4632,27 @@ pub struct PunctualDepthActivation<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HzbPlan, MAX_HZB_LEVELS, VbCullUniform};
+    use boyko_rhi::DescriptorKind;
+
+    use super::{HzbPlan, MAX_HZB_LEVELS, PostFinalActivation, VbCullUniform};
+    use crate::ffi::{VkDescriptorSetLayout, VkPipeline, VkPipelineLayout};
+    use crate::rhi_impl::{BindGroupLayoutBinding, ComputePipeline, VulkanBindGroupLayout};
+
+    /// Render wave PXt (OPEN-ITEMS 19, `pxt/cut.md` D-O4 (e)): a frame whose mode word sets the
+    /// sharpen bit binds the RCAS module's pipeline, a frame that clears it the sharpen-off one.
+    #[test]
+    fn post_final_pipeline_for_follows_the_sharpen_bit() {
+        let pipe = |h: u64| ComputePipeline { pipeline: VkPipeline(h), layout: VkPipelineLayout(h + 100), owns_layout: true };
+        let (rcas, nosharpen) = (pipe(1), pipe(2));
+        let layout = VulkanBindGroupLayout {
+            set_layout: VkDescriptorSetLayout(7),
+            entries: [BindGroupLayoutBinding { binding: 0, kind: DescriptorKind::UniformBuffer }; _],
+            entry_count: 1,
+        };
+        let act = PostFinalActivation { pipeline: &rcas, pipeline_nosharpen: &nosharpen, layout: &layout };
+        assert_eq!(act.pipeline_for(true).pipeline.0, 1, "a sharpen-on frame must bind the RCAS module's pipeline");
+        assert_eq!(act.pipeline_for(false).pipeline.0, 2, "a sharpen-off frame must bind the sharpen-off module's pipeline");
+    }
 
     /// A push buffer whose element `e` (the `e`-th `f32`, i.e. bytes `[4e, 4e + 4)`) holds the value
     /// `e as f32` — so every one of the sixteen matrix slots is distinguishable from every other and
