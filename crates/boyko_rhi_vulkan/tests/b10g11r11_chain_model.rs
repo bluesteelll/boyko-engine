@@ -212,11 +212,13 @@ fn the_format_decision_curve_is_the_shipping_default() {
     );
 }
 
-/// The curve the record decided under: the value of its `decided_curve = "<curve>"` line.
+/// The curve the record decided under: the value of its `decided_curve = "<curve>"` line, which the
+/// record writes as a back-ticked Markdown code span (`` `decided_curve = "agx"` ``) — so the
+/// back-ticks are stripped with the whitespace.
 fn decided_curve(record: &str) -> Option<&str> {
     record
         .lines()
-        .find_map(|l| l.trim().strip_prefix("decided_curve = \""))
+        .find_map(|l| l.trim().trim_matches('`').strip_prefix("decided_curve = \""))
         .and_then(|v| v.strip_suffix('"'))
 }
 
