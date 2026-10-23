@@ -32,13 +32,25 @@
 //! [`luma_weight`](TaaConfig::luma_weight), [`history_filter`](TaaConfig::history_filter),
 //! [`disocclusion`](TaaConfig::disocclusion), and [`depth_tol`](TaaConfig::depth_tol) — every
 //! one of `taa_resolve.comp.hlsl`'s decision points EXCEPT `mv_source` (needs a new texture
-//! binding, rung D2) and `sharpen` (needs an `aa_out` ping-pong, rung T3), which stay inert.
+//! binding, rung D2), which stays inert.
 //! `disocclusion`/`depth_tol` are forwarded into the UBO but stay UNREAD by the shader this
 //! rung too — see [`DisocclusionTest`]'s doc for why (a depth-based test needs a binding this
 //! resolve does not have). Every T2 mode word branches through `taa_resolve.comp.hlsl` via
 //! wave-uniform runtime `if`s (the SAME idiom `deferred_pbr.hlsl`'s `shadow_mode` and
 //! `shadow_apply.hlsli`'s `csm_pcf_disc` use) — NOT a `-D` shader variant, so this rung
 //! compiles to ONE `.spv`. Each field's doc states its wiring status.
+//!
+//! # The sharpen is a `post_final` stage, not a resolve knob (render wave PX1b)
+//!
+//! [`sharpen`](TaaConfig::sharpen) and [`rcas_sharpness`](TaaConfig::rcas_sharpness) are WIRED,
+//! but not through the resolve: [`SharpenMode::Rcas`] arms the AMD FidelityFX FSR 1 RCAS stage of
+//! `post_final` — bit 1 (`POST_MODE_SHARPEN`) of its mode word plus its `sharpness` word, which
+//! carries [`TaaConfig::rcas_con`] — over the frame's scene input `taa_hist[fi]`. The runner reads
+//! both fields straight off this config each frame (`boyko_app::post_host::post_sharpen` /
+//! `with_rcas`) and sets the bit only on a frame TAA is armed (`taa_armed_now`), so
+//! [`resolve_taa`] leaves them out of the [`ResolvedTaa`] UBO and a live toggle is one UBO word.
+//! `sharpen` defaults to [`SharpenMode::None`]; `rcas_sharpness` defaults to `0.78` (the owner's
+//! strength, signed off at PX1b's GL-H2 review).
 
 use boyko_macros::{Resource, SystemSet};
 
@@ -524,7 +536,10 @@ impl TaaConfig {
 /// [`clip`](TaaConfig::clip), [`blend`](TaaConfig::blend),
 /// [`luma_weight`](TaaConfig::luma_weight), [`history_filter`](TaaConfig::history_filter),
 /// [`disocclusion`](TaaConfig::disocclusion), [`depth_tol`](TaaConfig::depth_tol)); `mv_source`
-/// and `sharpen` stay unforwarded (their own future rungs, D2/T3 — see the module doc).
+/// stays unforwarded (its own future rung, D2 — see the module doc). `sharpen` and
+/// `rcas_sharpness` are unforwarded by design: they drive `post_final`'s RCAS stage, whose
+/// `POST_MODE_SHARPEN` bit and `sharpness` word the runner sets straight off [`TaaConfig`] on a
+/// TAA-armed frame (see the module doc's PX1b section), never through this UBO.
 ///
 /// `luma_weight` is forwarded INVERTED (`disable_luma_weight = !luma_weight`): the shipped
 /// default is `true` (apply the weight), so the UBO word must read `0` at the default to keep

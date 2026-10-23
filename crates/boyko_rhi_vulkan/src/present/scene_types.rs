@@ -1187,15 +1187,18 @@ pub struct SsaaActivation<'a> {
 /// threaded into [`GBufferScene::taa`] to turn the TAA seam ON. Mirrors [`SmaaActivation`]'s
 /// borrow-bundle shape: a `Copy` bundle of caller-owned layout/format/sampler borrows.
 ///
-/// `None` on [`GBufferScene::taa`] is the OFF path (the DEFAULT — the 0%-gate): no `aa_out`
-/// target, no `taa_hist` history ring, the present-blit samples `lit` directly, no resolve pass
-/// recorded. `Some` arms the seam: [`GBufferTargets`] allocates `aa_out` + `taa_hist` + the
-/// resolve's own `taa_ubo`/`taa_motion_cam_ubo` rings + `taa_resolve_set`,
+/// `None` on [`GBufferScene::taa`] is the OFF path (the DEFAULT — the 0%-gate): no `taa_hist`
+/// history ring, no resolve pass recorded. `Some` arms the seam: [`GBufferTargets`] allocates
+/// `taa_hist` + the resolve's own `taa_ubo`/`taa_motion_cam_ubo` rings + `taa_resolve_set`,
 /// [`GBufferTargets::sync_gbuffer`] treats an arm-state change exactly like an extent change, and
 /// `crate::present::passes::gbuffer`'s `record_taa` dispatches [`Self::resolve_pipeline`] at the
-/// resolve→present seam, writing both `taa_hist[fi]` and `aa_out` directly (no dedicated
+/// resolve→present seam, writing only `taa_hist[fi]` (no dedicated
 /// FXAA/SMAA-style INPUT descriptor set: the resolve set binds `lit`/`viewt`/`taa_hist`/the
-/// tunables + camera + `MotionCam` UBOs itself). Mutually exclusive with [`GBufferScene::aa`] /
+/// tunables + camera + `MotionCam` UBOs itself). Since render wave PX1a `post_final` reads
+/// `taa_hist[fi]` as its scene input (render wave PX1b: under the mode word's sharpen bit, its
+/// RCAS stage reads the five-tap cross of the same image) and the present blit samples
+/// `display`; TAA arms no `aa_out` either way (only FXAA / SMAA do, `AaArm::wants_aa_out`).
+/// Mutually exclusive with [`GBufferScene::aa`] /
 /// [`GBufferScene::smaa`] / [`GBufferScene::ssaa`] (`debug_assert!` — see [`SsaaActivation`]'s
 /// doc for the same pattern).
 ///
@@ -2601,9 +2604,9 @@ pub struct GBufferScene<'a> {
     /// resolution is a boot commitment, not a per-frame choice.
     pub ssaa: Option<SsaaActivation<'a>>,
     /// Anti-aliasing Stage 4: the TAA temporal-resolve pass activation. `None` = OFF, the
-    /// 0%-gate (`aa_out`/`taa_hist` stay unallocated, the present-blit samples `lit` directly, no
-    /// resolve pass recorded). `Some` arms the seam (see [`TaaActivation`]'s doc for the full
-    /// shape). Mutually exclusive with [`Self::aa`] / [`Self::smaa`] / [`Self::ssaa`]
+    /// 0%-gate (`taa_hist` stays unallocated, no resolve pass recorded; TAA arms no `aa_out`
+    /// either way — only FXAA / SMAA do). `Some` arms the seam (see [`TaaActivation`]'s doc for
+    /// the full shape). Mutually exclusive with [`Self::aa`] / [`Self::smaa`] / [`Self::ssaa`]
     /// (`debug_assert!` — see [`SsaaActivation`]'s doc for the same pattern). Native resolution
     /// like `aa`/`smaa` (NOT render-scaled, unlike `ssaa`) — a live per-frame toggle.
     ///

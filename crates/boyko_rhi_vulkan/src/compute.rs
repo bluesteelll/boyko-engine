@@ -482,12 +482,14 @@ embed_spirv! {
     /// Anti-aliasing Stage 4 (TAA) — the temporal-resolve reproject+accumulate SPIR-V
     /// (`shaders/taa_resolve.comp.hlsl`, Option B). Modeled on [`SHADOW_TEMPORAL_SPV`]'s
     /// algorithm (reproject → neighborhood clamp → confidence-adaptive feedback →
-    /// disocclusion reset), generalized scalar→RGB. Bound to its OWN 8-binding layout {
+    /// disocclusion reset), generalized scalar→RGB. Bound to its OWN 7-binding layout {
     /// @0 `gLit` COMBINED_IMAGE_SAMPLER (current LDR color), @1 `gViewT` r32f read (the depth
     /// proxy the camera-only MV ray marches by), @2 `gHistIn` rgba16f read (`taa_hist[1-fi]`,
-    /// the framegraph's C1-fix read-sibling), @3 `gHistOut` rgba16f write (`taa_hist[fi]`), @4
-    /// `gAaOut` rgba8 write (the present-blit's input), @5 the `ResolvedTaa` tunables UBO (16
-    /// B), @6 the shared 80-byte Camera UBO (UNJITTERED — C1 cut), @7 the `MotionCam` UBO
+    /// the framegraph's C1-fix read-sibling), @3 `gHistOut` rgba16f write (`taa_hist[fi]` — the
+    /// resolve's only output since render wave PX1a, `post_final`'s scene input and, under its
+    /// sharpen bit, the image its RCAS stage reads; @4, the retired `gAaOut`, is a hole), @5 the
+    /// `ResolvedTaa` tunables UBO (48 B since rung T2), @6 the shared 80-byte Camera UBO
+    /// (UNJITTERED — C1 cut), @7 the `MotionCam` UBO
     /// (`boyko_render::motion_cam`, 128 B) } + a 4-byte `{ uint reset; }` push constant
     /// (`boyko_render::taa_state::TaaState`). NOT `hwrt`-gated (TAA works on the pure-software
     /// leg — its motion vector is reconstructed from `gViewT`, never a `rayQuery` trace).
@@ -1739,7 +1741,7 @@ pub fn shadow_temporal_spirv() -> &'static [u32] {
 
 /// Anti-aliasing Stage 4 (TAA) — the temporal-resolve SPIR-V as a `u32` word stream, ready for
 /// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Bound to its
-/// own 8-binding layout (see [`TAA_RESOLVE_SPV`]'s doc for the full binding contract). NOT
+/// own 7-binding layout (see [`TAA_RESOLVE_SPV`]'s doc for the full binding contract). NOT
 /// `hwrt`-gated. Bound at boot (W5) by `boyko_app::gpu_scene::GpuSceneBundles::boot` into
 /// `taa_resolve_pipeline`, dispatched by `crate::present::passes::taa::Renderer::record_taa`
 /// when `GBufferScene::taa.is_some()`.

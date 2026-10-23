@@ -484,12 +484,13 @@ pub struct GBufferTargets {
     /// `motion_cam_ubo` (see [`TaaActivation`](crate::present::scene_types::TaaActivation)'s "why
     /// a dedicated ring" doc). `None` when TAA is off.
     pub(crate) taa_motion_cam_ubo: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
-    /// Anti-aliasing Stage 4 (TAA W5): the temporal-resolve descriptor set RING (one 8-binding set
+    /// Anti-aliasing Stage 4 (TAA W5): the temporal-resolve descriptor set RING (one 7-binding set
     /// per in-flight frame), written ONCE against
     /// [`TaaActivation::resolve_layout`](crate::present::scene_types::TaaActivation::resolve_layout).
     /// Slot `fi` binds `gLit` @0 = `lit[fi]` (+ the LINEAR sampler), `gViewT` @1 = `viewt[fi]`,
     /// `gHistIn` @2 = `taa_hist[1-fi]` (the cross-frame READ), `gHistOut` @3 = `taa_hist[fi]` (the
-    /// WRITE), `gAaOut` @4 = `aa_out[fi]`, the `ResolvedTaa` UBO @5 = `taa_ubo[fi]`, the camera
+    /// WRITE), no @4 (the retired `gAaOut`, a hole since render wave PX1a — TAA arms no `aa_out`),
+    /// the `ResolvedTaa` UBO @5 = `taa_ubo[fi]`, the camera
     /// UBO @6 = `scene.camera_ring[fi]` (UNJITTERED), the `MotionCam` UBO @7 =
     /// `taa_motion_cam_ubo[fi]`. `None` when TAA is off. The recorder selects
     /// `taa_resolve_set[self.frame_index]`.
@@ -2832,7 +2833,7 @@ struct ShadowTemporalSets {
 }
 
 /// Anti-aliasing Stage 4 (TAA W5): the bundle [`GBufferTargets::build_taa_resolve_set`] returns —
-/// the tunables UBO ring, the DEDICATED `MotionCam` UBO ring, and the 8-binding resolve set ring.
+/// the tunables UBO ring, the DEDICATED `MotionCam` UBO ring, and the 7-binding resolve set ring.
 /// Moved field-by-field into the [`GBufferTargets`] `Option`s at `create` time.
 struct TaaResolveSets {
     /// The `ResolvedTaa` tunables UBO ring (48 B `HostVisibleCoherent` per FIF slot, zero-seeded;
@@ -2841,8 +2842,8 @@ struct TaaResolveSets {
     /// The DEDICATED `MotionCam` UBO ring (128 B `HostVisibleCoherent` per FIF slot, zero-seeded)
     /// — SEPARATE from the hwrt mesh-shadow `motion_cam_ubo` (see `TaaActivation`'s doc).
     motion_cam_ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
-    /// The 8-binding resolve set ring (`gLit`/`gViewT`/`gHistIn`/`gHistOut`/`gAaOut` + the tunables
-    /// + camera + `MotionCam` UBOs).
+    /// The 7-binding resolve set ring (`gLit`/`gViewT`/`gHistIn`/`gHistOut` + the tunables
+    /// + camera + `MotionCam` UBOs; @4, the retired `gAaOut`, is a hole since render wave PX1a).
     set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
 }
 

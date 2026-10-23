@@ -717,8 +717,10 @@ fn zones_vb_both_off() {
 }
 
 /// **The validation-on driver** — three cells that exercise the three structural changes
-/// (Deferred's TAA + CAS brackets, VB's SMAA partition, Forward's new frame witness) with the
-/// layer armed; each child asserts the ledger clean in-process and the labels hold.
+/// (Deferred's TAA + sharpen brackets, VB's SMAA partition, Forward's new frame witness) with the
+/// layer armed; each child asserts the ledger clean in-process and the labels hold. Since render
+/// wave PX1b the Deferred cell's sharpen is `post_final`'s RCAS stage, bracketed by
+/// `post_final`'s own zone — no CAS pass, its id Forbidden.
 #[test]
 #[ignore = "gpu-windowed: PX0 zone-label driver with the validation layer armed in each child; run with --test-threads=1"]
 fn zones_validation_on() {

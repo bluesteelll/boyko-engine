@@ -142,9 +142,11 @@ pub(crate) struct GbufferPassPlan {
     /// Anti-aliasing Stage 4 (TAA W5): the temporal-resolve pass (TAA live, [`PostSeamArms::taa`]).
     /// Recorded AFTER the main resolve dispatch, BEFORE `present_sample` (it reads `lit` at
     /// `GENERAL`, straight out of the resolve's write — see `TaaActivation`'s "Compute, not
-    /// graphics" doc). Reads `lit`/`viewt`/`taa_hist_read`, writes `taa_hist[fi]`; `aa_out`'s
-    /// UNDEFINED→GENERAL→SHADER_READ_ONLY_OPTIMAL barriers are hand-recorded (untracked, like
-    /// every other AA mode's `aa_out`). `Some` iff TAA is live — the scene requests it AND the
+    /// graphics" doc). Reads `lit`/`viewt`/`taa_hist_read`, writes `taa_hist[fi]` — since render
+    /// wave PX1a its only output, which `post_final` reads as the scene input (render wave PX1b:
+    /// under the sharpen bit, its RCAS stage reads the five-tap cross of the same image). TAA arms
+    /// no `aa_out` (only FXAA / SMAA do), so the pass hand-records no barrier: every image it
+    /// touches is graph-tracked. `Some` iff TAA is live — the scene requests it AND the
     /// targets built its history (review r1 W1) — and the recorder keys `record_taa` on this
     /// member (the "member is Some iff its body is recorded" invariant).
     pub(crate) taa_resolve: Option<crate::framegraph::PassId>,

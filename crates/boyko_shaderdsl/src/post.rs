@@ -158,8 +158,8 @@ const SRGB_GAMMA: f32 = 2.4;
 // ---- The stage trace ----------------------------------------------------------------------------
 
 /// One stage of [`post_final_main`], in the documented order of POSTFX §5. A later rung adds its
-/// variant (RCAS, bloom, LUT, dither / grain / vignette), its [`POST_FINAL_STAGE_ORDER`] row and
-/// one [`stage3`] call.
+/// variant (bloom, LUT, dither / grain / vignette — as render wave PX1b added
+/// [`Rcas`](Self::Rcas)), its [`POST_FINAL_STAGE_ORDER`] row and one [`stage3`] call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PostStage {
     /// The whole-pixel non-finite kill plus the `[0, HDR_MAX]` clamp ([`hdr_sanitize`]).
