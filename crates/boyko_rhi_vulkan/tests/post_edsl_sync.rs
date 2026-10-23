@@ -8,14 +8,18 @@
 //!    resolves is NOT a pass).
 //! 3. **SPIR-V censuses** (`spirv-dis` of the committed module): exactly three `GLSL.std.450 Pow`
 //!    whose exponent is the `OETF_GAMMA_EXP` constant and no `Exp2`/`Log2` (the OETF cannot be
-//!    rewritten into `exp2(y·log2 x)`); the tonemapper dispatch is a REAL branch (`DontFlatten`
-//!    selection merges, no `float3` `OpSelect` anywhere — the leaves are per-channel scalar code, so
-//!    a `v3float` select can only come from an if-converted dispatch); exactly one `OpImageFetch`
-//!    (the scene texel is fetched once); the declared bindings and the UBO member offsets are the
-//!    tables'.
+//!    rewritten into `exp2(y·log2 x)`; RCAS's strength is a host-computed `con`, so the pixel adds
+//!    no transcendental); the RCAS stage and the tonemapper dispatch are REAL branches (three
+//!    `DontFlatten` selection merges, no `float3` `OpSelect` anywhere — the leaves are per-channel
+//!    scalar code, so a `v3float` select can only come from an if-converted branch); exactly five
+//!    `OpImageFetch` — the scene texel once, before the sharpen selection, and RCAS's four ring taps
+//!    INSIDE it (render wave PX1b D-R10 (2): the sharpen-off path fetches once); the declared
+//!    bindings and the UBO member offsets are the tables'.
 //! 4. **Structure** — the skeleton outside the sentinels holds no fetch, no resource index but the
 //!    one `gDisplay[…]` store, one `post_final_main` call and no arithmetic (H2 test 7); the HLSL
-//!    declarations equal `POST_FINAL_BINDINGS` row for row (8a).
+//!    declarations equal `POST_FINAL_BINDINGS` row for row (8a); and (4b, render wave PX1b) no
+//!    division in the body runs on into `*` / `/` — the printer spells a multiplicative divisor flat,
+//!    so such a chain may not compute what the trace (and every host oracle) computes.
 //! 5. **The stage trace (OPEN-ITEMS item 4, part a)** — the emitted body's `post_stage_*`
 //!    declarations, which the trace itself produces, equal `POST_FINAL_STAGE_ORDER` (9a), and each
 //!    stage feeds the next (9b): its identifier is read after its declaration and at or before the
@@ -250,15 +254,45 @@ fn branch_census(dis: &str) -> (usize, usize) {
 fn tonemap_dispatch_is_a_real_branch() {
     let Some(dis) = disassembly("tonemap_dispatch_is_a_real_branch") else { return };
     let (dont_flatten, v3_selects) = branch_census(&dis);
-    assert_eq!(dont_flatten, 2, "the two-level tonemapper dispatch must be two DontFlatten selections (`[branch]`)");
-    assert_eq!(v3_selects, 0, "a float3 OpSelect means the dispatch was if-converted (every curve evaluated per pixel)");
+    assert_eq!(
+        dont_flatten, 3,
+        "the RCAS stage and the two-level tonemapper dispatch must be three DontFlatten selections (`[branch]`)"
+    );
+    assert_eq!(v3_selects, 0, "a float3 OpSelect means a branch was if-converted (every arm evaluated per pixel)");
+}
+
+/// `(fetches before the first DontFlatten selection, fetches between its OpBranchConditional and its
+/// merge label, fetches after it)` of a disassembly — `None` when it has no DontFlatten selection.
+fn fetch_structure(dis: &str) -> Option<(usize, usize, usize)> {
+    let lines = token_lines(dis);
+    let is_fetch = |t: &Vec<&str>| t.len() >= 3 && t[1] == "=" && t[2] == "OpImageFetch";
+    let header = lines.iter().position(|t| t.first() == Some(&"OpSelectionMerge") && t.last() == Some(&"DontFlatten"))?;
+    let merge = lines[header][1];
+    let end = lines.iter().position(|t| t.len() == 3 && t[0] == merge && t[1] == "=" && t[2] == "OpLabel")?;
+    let before = lines[..header].iter().filter(|t| is_fetch(t)).count();
+    let inside = lines[header..end].iter().filter(|t| is_fetch(t)).count();
+    let after = lines[end..].iter().filter(|t| is_fetch(t)).count();
+    Some((before, inside, after))
+}
+
+/// `Err(reason)` unless the module fetches the scene texel once before the sharpen selection, RCAS's
+/// four ring taps inside it, and nothing after it (render wave PX1b D-R10 (2)).
+fn check_fetch_structure(dis: &str) -> Result<(), String> {
+    match fetch_structure(dis) {
+        Some((1, 4, 0)) => Ok(()),
+        Some(s) => Err(format!(
+            "OpImageFetch (before, inside, after) the first DontFlatten selection = {s:?}, not (1, 4, 0): the sharpen-off path must fetch once"
+        )),
+        None => Err("no DontFlatten selection: the sharpen stage is not a real branch".to_string()),
+    }
 }
 
 #[test]
-fn the_scene_is_fetched_once() {
-    let Some(dis) = disassembly("the_scene_is_fetched_once") else { return };
-    let fetches = token_lines(&dis).iter().filter(|t| t.len() >= 3 && t[1] == "=" && t[2] == "OpImageFetch").count();
-    assert_eq!(fetches, 1, "post_final must fetch its scene texel exactly once (8 B/px + 1 fetch)");
+fn the_cross_is_fetched_inside_the_sharpen_branch() {
+    let Some(dis) = disassembly("the_cross_is_fetched_inside_the_sharpen_branch") else { return };
+    if let Err(why) = check_fetch_structure(&dis) {
+        panic!("{why}");
+    }
 }
 
 /// `%name -> (set, binding)` of every decorated variable of a disassembly.
@@ -376,7 +410,100 @@ fn skeleton_holds_no_fetch_and_one_call() {
     }
 }
 
-// ---- 5. The stage trace (OPEN-ITEMS item 4) --------------------------------------------------------------
+// ---- 4b. The printed association (render wave PX1b) ------------------------------------------------------
+
+/// The end of the whole group that opens at `s[i]` (`open`), nesting included.
+fn group_end(s: &[u8], mut i: usize, open: u8, close: u8) -> usize {
+    let mut depth = 0usize;
+    while i < s.len() {
+        if s[i] == open {
+            depth += 1;
+        } else if s[i] == close {
+            depth -= 1;
+            if depth == 0 {
+                return i + 1;
+            }
+        }
+        i += 1;
+    }
+    i
+}
+
+/// The end of the one operand that starts at byte `i` of `s` (after spaces): an optional unary `-`,
+/// then a parenthesised group, or an identifier / literal (a float's `e-5` exponent included) with an
+/// optional call's argument list, then any `[index]` suffixes.
+fn operand_end(s: &[u8], mut i: usize) -> usize {
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'.';
+    while s.get(i) == Some(&b' ') {
+        i += 1;
+    }
+    if s.get(i) == Some(&b'-') {
+        i += 1;
+    }
+    if s.get(i) == Some(&b'(') {
+        i = group_end(s, i, b'(', b')');
+    } else {
+        let start = i;
+        while i < s.len() && word(s[i]) {
+            i += 1;
+            let exponent = s[start].is_ascii_digit() && matches!(s[i - 1], b'e' | b'E');
+            if exponent && matches!(s.get(i), Some(b'-' | b'+')) {
+                i += 1;
+            }
+        }
+        if s.get(i) == Some(&b'(') {
+            i = group_end(s, i, b'(', b')');
+        }
+    }
+    while s.get(i) == Some(&b'[') {
+        i = group_end(s, i, b'[', b']');
+    }
+    i
+}
+
+/// The divisions of a body whose right operand runs on into another `*` or `/` (`a / b * c`,
+/// `a / b / c`), as `line <n>: <statement>`.
+///
+/// The printer spells a multiplicative child of a `/` flat (`Node::Div` prints both operands at
+/// `OperandPos::MulSide`, where a `*` / `/` node takes no parentheses), so `a.div(b.mul(c))` and
+/// `a.div(b).mul(c)` both print `a / b * c` — which HLSL reads as the second. The text cannot say
+/// which one the trace meant, so the body never spells such a chain: a product or quotient divisor,
+/// and a quotient that feeds a multiplicative operator, are materialised as named temps. Render wave
+/// PX1b found the hazard live: RCAS's `hitMin = min(mn4, e) / (4·mx4)` printed `-min(…) / 4.0 * t22`,
+/// i.e. `(−min / 4)·mx4` on the device, while Eval (every host oracle) computed the quotient.
+fn flat_division_chains(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (n, line) in body.lines().enumerate() {
+        let code = line.split_once("//").map_or(line, |(c, _)| c);
+        let s = code.as_bytes();
+        for (k, w) in s.windows(3).enumerate() {
+            if w != b" / " {
+                continue;
+            }
+            let mut j = operand_end(s, k + 3);
+            while s.get(j) == Some(&b' ') {
+                j += 1;
+            }
+            if matches!(s.get(j), Some(b'*' | b'/')) {
+                out.push(format!("line {}: {}", n + 1, code.trim()));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn no_division_runs_on_into_a_product() {
+    let body = boyko_shaderdsl::emit::emit_hlsl_post_final_main();
+    let chains = flat_division_chains(&body);
+    assert!(
+        chains.is_empty(),
+        "post_final_main spells a division whose right operand runs on into `*` / `/` — HLSL reads it \
+         left-associated, while the trace may have meant the divisor as one group; materialise it: {chains:#?}"
+    );
+}
+
+// ---- 5. The stage trace (OPEN-ITEMS item 4)--------------------------------------------------------------
 
 /// The statements of a body span, one per line, trimmed.
 fn statements(body: &str) -> Vec<&str> {
@@ -639,6 +766,43 @@ fn the_censuses_reject_their_fixtures() {
     for s in ["hdr_sanitize", "pre_ratio_apply", "tonemap_select", "aces_hill", "khronos_pbr_neutral", "reinhard_jodie", "oetf_gamma22"] {
         assert!(stages.iter().any(|l| l == s), "`{s}` is a stage of post_final_main: {stages:?}");
     }
+    // Render wave PX1b (critique O2): the RCAS stage is a top-level `pub fn`, so its leaves are in the
+    // set too — an oracle that re-composes the sharpen stage is flagged like one that re-composes a
+    // curve.
+    for s in ["rcas_stage", "tonemap_reversible", "tonemap_reversible_inverse", "rcas_lobe", "rcas_resolve"] {
+        assert!(stages.iter().any(|l| l == s), "`{s}` is a stage of post_final_main: {stages:?}");
+    }
+    assert!(reimplements_a_stage("let l = rcas_lobe::<EvalCf>(b, d, e, f, h, con);", &stages).is_err());
+    // The fetch-structure census (PX1b D-R10 (2)): the scene fetched once before the sharpen
+    // selection and the cross inside it; a flattened RCAS (five fetches before any selection), a
+    // body without the cross and one that fetches after the selection are each red.
+    let fetch = |id: u32| format!("%{id} = OpImageFetch %v4float %img %c{id} Lod %int_0\n");
+    let selection = "OpSelectionMerge %90 DontFlatten\nOpBranchConditional %cond %90 %91\n%91 = OpLabel\n";
+    let merged = "OpBranch %90\n%90 = OpLabel\nOpSelectionMerge %95 DontFlatten\nOpBranchConditional %t %93 %94\n%95 = OpLabel\n";
+    let good = format!("{}{selection}{}{}{}{}{merged}", fetch(1), fetch(2), fetch(3), fetch(4), fetch(5));
+    assert_eq!(check_fetch_structure(&good), Ok(()));
+    let flattened = format!("{}{}{}{}{}{merged}", fetch(1), fetch(2), fetch(3), fetch(4), fetch(5));
+    assert!(check_fetch_structure(&flattened).is_err(), "five fetches before the first DontFlatten selection must be red");
+    let crossless = format!("{}{selection}{merged}", fetch(1));
+    assert!(check_fetch_structure(&crossless).is_err(), "a body without the cross must be red");
+    let late = format!("{}{selection}{}{}{}{merged}{}", fetch(1), fetch(2), fetch(3), fetch(4), fetch(5));
+    assert!(check_fetch_structure(&late).is_err(), "a tap fetched after the sharpen selection must be red");
+    assert!(check_fetch_structure("%1 = OpImageFetch %v4float %img %c Lod %int_0\n").is_err(), "no DontFlatten selection must be red");
+    // The printed-association census (PX1b): a product or quotient run on after a divisor is red,
+    // whatever the divisor's shape; a materialised or parenthesised divisor and a division ended by
+    // `+` / `,` / `)` / `;` pass.
+    for red in [
+        "float t23 = max(((t22 > 0.0) ? ((-min(t21, e.x) / 4.0 * t22)) : (-0.25)), h);",
+        "float t = a / b / c;",
+        "float t = x.y / f(a, b) * c[2];",
+        "float t = 1.0 / (4.0 * l + 1.0) * w;",
+        "float t = a / 1.5e-5 * c;",
+    ] {
+        assert_eq!(flat_division_chains(red).len(), 1, "`{red}` must be red");
+    }
+    let flat_ok = "float t = -min(a, b) / t4;\nfloat u = (1.0 - m) / (4.0 * n - 4.0);\nfloat v = max(a / b, c) * (d / e);\n\
+                   float w = a * b / c + 1.0 / d; // a / b * c in a comment\n";
+    assert_eq!(flat_division_chains(flat_ok), Vec::<String>::new(), "grouped divisors must pass");
     for s in ["lit_store_saturate", "hdr_history_guard", "srgb_eotf"] {
         assert!(!stages.iter().any(|l| l == s), "`{s}` is not a stage of post_final_main: {stages:?}");
     }

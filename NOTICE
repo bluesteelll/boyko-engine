@@ -8,6 +8,8 @@ license text:
 - SMAA shaders and lookup textures (MIT): Jorge Jimenez, Jose I. Echevarria,
   Belen Masia, Fernando Navarro, Diego Gutierrez
 - An FXAA shader adapted from Rendu (MIT): Simon Rodriguez
+- AMD FidelityFX FSR 1 RCAS and FSR 2 reversible-tonemap functions (MIT):
+  Advanced Micro Devices, Inc.
 - Jolt Physics-derived benchmark material (MIT): Jorrit Rouwe
 - vis-network 9.1.9 (Apache-2.0 OR MIT): Almende B.V. and visjs contributors
 - mermaid (MIT): Knut Sveidqvist and contributors — documentation site only

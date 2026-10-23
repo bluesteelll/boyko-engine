@@ -12,14 +12,26 @@
 //! - [`a_display_that_ignored_exposure_ratio_fails_where_it_is_not_one`] — and its control;
 //! - [`a_missing_binding_is_a_named_error`] — exit 2 naming the row, never a zero texture;
 //! - [`bound_equals_the_hand_joint_forward_difference`] — `bound --steps 2` against the joint
-//!   forward difference computed here, under four word sets: the three curve words at exposure
-//!   ratio 1, two of whose maxima sit at a mixed-sign pattern, and ACES at ratio 2, whose maximum
-//!   is the all-up pattern alone.
+//!   forward difference computed here, under five word sets: the three curve words at exposure
+//!   ratio 1, two of whose maxima sit at a mixed-sign pattern, ACES at ratio 2, whose maximum is the
+//!   centre's all-up perturbation alone, and (render wave PX1b) ACES under the sharpen bit, whose
+//!   maximum is one (pattern, configuration) pair alone.
+//!
+//! **Radius 1 (render wave PX1b, critique W1).** `bound` perturbs the whole in-bounds 3×3
+//! footprint under every sign pattern in two configurations — the footprint moving one way, or the
+//! centre against the ring — so the hand enumerates the same sixteen pairs. On a body that reads
+//! only the centre, `(p, centre opposite)` IS `(!p, same sign)`: the sharpen-off rows' pins are
+//! restated over classes closed under that alias, and only the sharpen-on row can tell the
+//! configuration (and the footprint) from the pattern. Its pin was measured on the f64 reference
+//! before any body ran RCAS ([`the_sharpen_bound_row_argmax_holds_on_the_f64_reference`]).
 //!
 //! The synthetic scene is a B10G11R11 dump, the coarser of the two `lit` formats PX0 weighed.
 //! `bound` steps whatever encoding the dump's header names, not `post::LIT_STORAGE_FORMAT`
 //! (RGBA16F since PX0-14). Every reference evaluates the traced body ([`post_final_eval`]) — the
-//! oracle `post_eval` instantiates — never a re-composition of its stages.
+//! oracle `post_eval` instantiates — never a re-composition of its stages (the one f64 test names
+//! its own reference).
+
+mod post_f64;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -28,6 +40,7 @@ use boyko_shaderdsl::cf::HostTex2;
 use boyko_shaderdsl::dump::DumpHeader;
 use boyko_shaderdsl::pixfmt::{self, Rounding};
 use boyko_shaderdsl::post::{self, eval_params, post_final_eval};
+use post_f64::{Cross, Tracked, oetf_exponent, rcas_stage_f64, sanitize_f64, tonemap_f64};
 
 /// The synthetic frame's extent.
 const W: u32 = 16;
@@ -315,31 +328,69 @@ fn a_missing_binding_is_a_named_error() {
     assert!(text(&o).contains(named), "{}", text(&o));
 }
 
-/// The joint forward difference at `±steps` format steps, by hand, PER SIGN PATTERN: for each of
-/// the eight channel sign patterns (bit `c` set = channel `c` up) applied to the CENTRE texel (the
-/// footprint at `POST_FINAL_TAP_RADIUS = 0`), the largest display change over the three channels,
-/// maximised over pixels. `bound` is the maximum over the eight. `channels` restricts which
-/// channels a pattern perturbs (all three is the joint bound; one is the non-joint variant the
-/// test proves it can tell apart).
-fn hand_patterns(w: [u32; 8], scene: &[[f32; 4]], steps: i32, channels: usize) -> [f64; 8] {
-    let p = eval_params(w);
-    let mut per = [0.0f64; 8];
+/// Which texels a hand perturbation moves.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Footprint {
+    /// The in-bounds `(2·POST_FINAL_TAP_RADIUS + 1)²` square around the pixel — `bound`'s own.
+    Joint,
+    /// The centre texel alone: the reference of a `bound` that perturbs only the centre.
+    CentreOnly,
+}
+
+/// Per-(pattern, configuration) maxima: `[pattern][0]` the footprint moving with the pattern's
+/// signs, `[pattern][1]` the centre against the ring.
+type Pairs = [[f64; 2]; 8];
+
+/// The joint forward difference at `±steps` format steps, by hand, PER (sign pattern,
+/// configuration) PAIR — `post_eval bound`'s enumeration (`post_eval.rs` `cmd_bound`): for each of
+/// the eight channel sign patterns (bit `c` set = channel `c` up) and each configuration (the
+/// footprint moving with the pattern; the centre moving against it), every texel of `footprint`
+/// stepped, the largest display change at the pixel over the three channels, maximised over pixels.
+/// `bound` is the maximum over the sixteen. `channels` restricts which channels a pattern perturbs
+/// (all three is the joint bound; one is the non-joint variant the test proves it can tell apart).
+/// `display` evaluates the pixel (the traced body, or the f64 reference); `radius` is the
+/// footprint's (`bound` reads `post::POST_FINAL_TAP_RADIUS`).
+fn hand_pairs(
+    display: impl Fn(&[[f32; 4]], u32, u32) -> [f64; 3],
+    scene: &[[f32; 4]],
+    steps: i32,
+    channels: usize,
+    footprint: Footprint,
+    radius: u32,
+) -> Pairs {
+    let r = i64::from(radius);
+    let mut per = [[0.0f64; 2]; 8];
     for y in 0..H {
         for x in 0..W {
-            let i = (y * W + x) as usize;
-            let c0 = scene[i];
-            let base = post_final_eval([x, y], &p, HostTex2::new(scene, W, H));
-            for (pattern, worst) in per.iter_mut().enumerate() {
-                let mut s = scene.to_vec();
-                for c in 0..channels {
-                    let k = if (pattern >> c) & 1 == 1 { steps } else { -steps };
-                    if let Ok(v) = pixfmt::step_by(pixfmt::B10G11R11_CHANNELS[c], c0[c], k) {
-                        s[i][c] = v;
+            let base = display(scene, x, y);
+            let mut foot: Vec<(usize, bool)> = Vec::new();
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    let (tx, ty) = (i64::from(x) + dx, i64::from(y) + dy);
+                    let centre = dx == 0 && dy == 0;
+                    let inside = tx >= 0 && ty >= 0 && tx < i64::from(W) && ty < i64::from(H);
+                    if inside && (centre || footprint == Footprint::Joint) {
+                        foot.push(((ty as u32 * W + tx as u32) as usize, centre));
                     }
                 }
-                let v = post_final_eval([x, y], &p, HostTex2::new(&s, W, H));
-                for c in 0..3 {
-                    *worst = worst.max(255.0 * f64::from((v[c] - base[c]).abs()));
+            }
+            for (pattern, row) in per.iter_mut().enumerate() {
+                for (config, worst) in row.iter_mut().enumerate() {
+                    let centre_opposite = config == 1;
+                    let mut s = scene.to_vec();
+                    for &(i, is_centre) in &foot {
+                        for c in 0..channels {
+                            let up = (pattern >> c) & 1 == 1;
+                            let k = if up != (centre_opposite && is_centre) { steps } else { -steps };
+                            if let Ok(v) = pixfmt::step_by(pixfmt::B10G11R11_CHANNELS[c], scene[i][c], k) {
+                                s[i][c] = v;
+                            }
+                        }
+                    }
+                    let v = display(&s, x, y);
+                    for c in 0..3 {
+                        *worst = worst.max(255.0 * (v[c] - base[c]).abs());
+                    }
                 }
             }
         }
@@ -347,46 +398,144 @@ fn hand_patterns(w: [u32; 8], scene: &[[f32; 4]], steps: i32, channels: usize) -
     per
 }
 
-/// Where a word set's per-pattern maximum must sit on this scene, so a `bound` that skips that
-/// pattern prints low and is told apart from the hand difference.
-#[derive(Clone, Copy)]
+/// The traced body's display value at `(x, y)` under `w`.
+fn body_display(w: [u32; 8]) -> impl Fn(&[[f32; 4]], u32, u32) -> [f64; 3] {
+    let p = eval_params(w);
+    move |scene: &[[f32; 4]], x: u32, y: u32| -> [f64; 3] {
+        let o = post_final_eval([x, y], &p, HostTex2::new(scene, W, H));
+        [o[0], o[1], o[2]].map(f64::from)
+    }
+}
+
+/// The largest of a pair table.
+fn max_pairs(per: &Pairs) -> f64 {
+    per.iter().flatten().copied().fold(0.0f64, f64::max)
+}
+
+/// The largest over the pairs `keep` selects.
+fn max_where(per: &Pairs, keep: impl Fn(usize, bool) -> bool) -> f64 {
+    let mut m = 0.0f64;
+    for (pattern, row) in per.iter().enumerate() {
+        for (config, v) in row.iter().enumerate() {
+            if keep(pattern, config == 1) {
+                m = m.max(*v);
+            }
+        }
+    }
+    m
+}
+
+/// Where a word set's per-pair maximum must sit on this scene, so a `bound` that skips that pair (or
+/// that class of pairs) prints low and is told apart from the hand difference.
+#[derive(Clone, Copy, Debug)]
 enum Argmax {
     /// No constraint.
     Any,
-    /// A MIXED-sign pattern — neither all-down (0) nor all-up (7) — by more than 1e-3 LSB over
-    /// both (triage r2 G1).
+    /// A MIXED-sign pattern (1..=6, either configuration) by more than 1e-3 LSB over both uniform
+    /// patterns (0 and 7, either configuration) (triage r2 G1). Both classes are closed under the
+    /// centre-only alias `(p, centre opposite) = (!p, same sign)`, so the pin keeps its radius-0
+    /// meaning on a sharpen-off row.
     Mixed,
-    /// The all-up pattern (7) alone, by more than 1e-3 LSB over every other (triage r3 W2).
-    AllUpAlone,
+    /// The centre's all-up perturbation — `(7, same sign)` and its alias `(0, centre opposite)`,
+    /// EQUAL on a body that reads only the centre — alone, by more than 1e-3 LSB over the other 14
+    /// pairs (triage r3 W2's row, restated at radius 1, where the alias is enumerated too).
+    CentreAllUpAlone,
+    /// One (pattern, configuration) pair alone, by more than 1e-3 LSB over the other 15 (critique
+    /// W1): only a body that reads the ring tells a configuration from a pattern.
+    PairAlone { pattern: usize, centre_opposite: bool },
 }
 
-/// The word sets `bound` is checked under: (name, curve word, exposure ratio, where the maximum
-/// sits). Under ACES at ratio 1 the maximum on this scene is pattern 0, so that set alone cannot see
-/// a `bound` that stops enumerating the mixed patterns; under Neutral and Reinhard-Jodie it is mixed
-/// (patterns 2/3 and 4), and a uniform-sign-only `bound` would print 34 % and 24 % low. Under ACES
-/// at ratio 2 it is pattern 7 alone (by 0.0149 LSB), so a `bound` that enumerates `0..7` — the
-/// off-by-one that drops the all-up pattern — prints the second-largest pattern's maximum instead.
-const BOUND_CASES: [(&str, u32, f32, Argmax); 4] = [
-    ("aces", post::TONEMAP_ACES, 1.0, Argmax::Any),
-    ("neutral", post::TONEMAP_NEUTRAL, 1.0, Argmax::Mixed),
-    ("reinhard_jodie", post::TONEMAP_REINHARD_JODIE, 1.0, Argmax::Mixed),
-    ("aces_ratio2", post::TONEMAP_ACES, 2.0, Argmax::AllUpAlone),
+/// One word set `bound` is checked under.
+#[derive(Clone, Copy, Debug)]
+struct BoundCase {
+    name: &'static str,
+    mode: u32,
+    ratio: f32,
+    /// RCAS's `con` under the sharpen bit, or `None` for a sharpen-off row.
+    sharpen: Option<f32>,
+    argmax: Argmax,
+}
+
+/// The `sharpness` word's index (byte offset 16; `post::ubo_word("sharpness")` since PX1b C2, which
+/// the bound test asserts).
+const SHARPNESS_WORD: usize = 4;
+
+/// The eight `PostFinalGpu` words of a [`BoundCase`].
+fn case_words(case: &BoundCase) -> [u32; 8] {
+    let mut w = words(case.mode, case.ratio);
+    if let Some(con) = case.sharpen {
+        w[post::ubo_word("mode_words")] |= post::POST_MODE_SHARPEN;
+        w[SHARPNESS_WORD] = con.to_bits();
+    }
+    w
+}
+
+/// The word sets `bound` is checked under. Under ACES at ratio 1 the maximum on this scene is
+/// pattern 0, so that set alone cannot see a `bound` that stops enumerating the mixed patterns; under
+/// Neutral and Reinhard-Jodie it is mixed (patterns 2/3 and 4), and a uniform-sign-only `bound` would
+/// print 34 % and 24 % low. Under ACES at ratio 2 it is the centre's all-up perturbation alone (by
+/// 0.0149 LSB). At radius 1 an off-by-one `0..7` still reaches that maximum on a sharpen-off row
+/// through its alias `(0, centre opposite)`, and a `bound` that drops the centre-opposite
+/// configuration or perturbs only the centre is exact there too — so the sharpen-on row carries
+/// those three pins: its maximum is the pair `(7, centre opposite)` alone (measured on the f64
+/// reference), and its joint footprint moves the display more than its centre alone.
+const BOUND_CASES: [BoundCase; 5] = [
+    BoundCase { name: "aces", mode: post::TONEMAP_ACES, ratio: 1.0, sharpen: None, argmax: Argmax::Any },
+    BoundCase { name: "neutral", mode: post::TONEMAP_NEUTRAL, ratio: 1.0, sharpen: None, argmax: Argmax::Mixed },
+    BoundCase { name: "reinhard_jodie", mode: post::TONEMAP_REINHARD_JODIE, ratio: 1.0, sharpen: None, argmax: Argmax::Mixed },
+    BoundCase { name: "aces_ratio2", mode: post::TONEMAP_ACES, ratio: 2.0, sharpen: None, argmax: Argmax::CentreAllUpAlone },
+    BoundCase {
+        name: "aces_rcas",
+        mode: post::TONEMAP_ACES,
+        ratio: 1.0,
+        sharpen: Some(1.0),
+        argmax: Argmax::PairAlone { pattern: 7, centre_opposite: true },
+    },
 ];
+
+/// The pins of `argmax` on a pair table, as `Err(why)`.
+fn check_argmax(name: &str, argmax: Argmax, per: &Pairs) -> Result<(), String> {
+    let joint = max_pairs(per);
+    let (margin, what) = match argmax {
+        Argmax::Any => return Ok(()),
+        Argmax::Mixed => (joint - max_where(per, |p, _| p == 0 || p == 7), "a mixed-sign pattern".to_string()),
+        Argmax::CentreAllUpAlone => {
+            if per[7][0] != per[0][1] {
+                return Err(format!("[{name}] PREMISE: a centre-only body cannot tell (7, same) from (0, opposite): {per:?}"));
+            }
+            let others = max_where(per, |p, opp| !((p == 7 && !opp) || (p == 0 && opp)));
+            (per[7][0] - others, "the centre's all-up perturbation alone".to_string())
+        }
+        Argmax::PairAlone { pattern, centre_opposite } => {
+            let others = max_where(per, |p, opp| !(p == pattern && opp == centre_opposite));
+            (
+                per[pattern][usize::from(centre_opposite)] - others,
+                format!("({pattern}, centre opposite = {centre_opposite}) alone"),
+            )
+        }
+    };
+    if margin > 1e-3 {
+        Ok(())
+    } else {
+        Err(format!("[{name}] the maximum must sit at {what} (margin {margin:.6} LSB): per-pair maxima {per:?}"))
+    }
+}
 
 #[test]
 fn bound_equals_the_hand_joint_forward_difference() {
     assert_eq!(
         post::POST_FINAL_TAP_RADIUS,
-        0,
-        "the hand difference below perturbs the centre texel only; a wider footprint (PX1b) extends it"
+        1,
+        "the hand difference below enumerates bound's radius-1 footprint (PX1b's RCAS cross, DS-H5)"
     );
+    assert_eq!(post::ubo_word("sharpness"), SHARPNESS_WORD, "the sharpness word the sharpen row writes");
     let dir = scratch("bound");
     let (scene, _) = fixture(&dir, words(post::TONEMAP_ACES, 1.0));
     let bind = format!("gScene={}", scene.display());
     let texels = scene_texels();
-    let max = |per: [f64; 8]| per.iter().copied().fold(0.0f64, f64::max);
-    for (name, mode, ratio, argmax) in BOUND_CASES {
-        let w = words(mode, ratio);
+    for case in BOUND_CASES {
+        let name = case.name;
+        let w = case_words(&case);
         let o = run(&["bound", "--words", &words_arg(w), "--bind", &bind, "--steps", &STEPS.to_string()]);
         assert_eq!(o.status.code(), Some(0), "[{name}] {}", text(&o));
         let out = String::from_utf8_lossy(&o.stdout);
@@ -396,34 +545,69 @@ fn bound_equals_the_hand_joint_forward_difference() {
             .unwrap_or_else(|| panic!("[{name}] no max_delta_bound line: {out}"))
             .parse()
             .expect("a number");
-        let per = hand_patterns(w, &texels, STEPS, 3);
-        let joint = max(per);
-        let one_channel = max(hand_patterns(w, &texels, STEPS, 1));
+        let per = hand_pairs(body_display(w), &texels, STEPS, 3, Footprint::Joint, post::POST_FINAL_TAP_RADIUS);
+        let joint = max_pairs(&per);
+        let one_channel = max_pairs(&hand_pairs(body_display(w), &texels, STEPS, 1, Footprint::Joint, post::POST_FINAL_TAP_RADIUS));
         // Non-vacuity: two steps move the display, and the joint bound is not the one-channel one, so
         // a `bound` that perturbed one channel would be told apart here.
         assert!(joint > 0.5, "[{name}] two B10G11R11 steps must move the display: {joint}");
         assert!((joint - one_channel).abs() > 1e-3, "[{name}] joint {joint} vs one channel {one_channel}");
-        // ... and where the set's maximum is pinned to a pattern, a `bound` that skips it would be
-        // told apart too: a mixed-sign maximum against one restricted to the uniform-sign patterns
-        // (or to pattern 0), the all-up maximum against one that stops at pattern 6.
-        match argmax {
-            Argmax::Any => {}
-            Argmax::Mixed => {
-                let uniform = per[0].max(per[7]);
-                assert!(
-                    joint - uniform > 1e-3,
-                    "[{name}] the maximum must sit at a mixed-sign pattern: per-pattern maxima {per:?}"
-                );
-            }
-            Argmax::AllUpAlone => {
-                let others = per[..7].iter().copied().fold(0.0f64, f64::max);
-                assert!(
-                    per[7] - others > 1e-3,
-                    "[{name}] the maximum must sit at the all-up pattern alone: per-pattern maxima {per:?}"
-                );
-            }
+        // ... and where the set's maximum is pinned, a `bound` that skips it would be told apart too.
+        if let Err(why) = check_argmax(name, case.argmax, &per) {
+            panic!("{why}");
+        }
+        if case.sharpen.is_some() {
+            // A `bound` that perturbs only the centre prints the centre-only maximum.
+            let centre = max_pairs(&hand_pairs(body_display(w), &texels, STEPS, 3, Footprint::CentreOnly, post::POST_FINAL_TAP_RADIUS));
+            assert!(joint - centre > 1e-3, "[{name}] the joint footprint must move the display more than the centre alone: joint {joint}, centre {centre}");
         }
         // `bound` prints six decimals.
         assert!((cli - joint).abs() <= 1e-6, "[{name}] post_eval bound {cli} != the hand joint forward difference {joint}");
+    }
+}
+
+/// The documented composition's display value at `(x, y)` in f64 (`post_f64`): sanitize → ratio →
+/// (under the sharpen bit) the RCAS stage on the edge-clamped cross → the curve → the OETF.
+fn f64_display(w: [u32; 8]) -> impl Fn(&[[f32; 4]], u32, u32) -> [f64; 3] {
+    let mode = w[post::ubo_word("mode_words")];
+    let ratio = f32::from_bits(w[post::ubo_word("exposure_ratio")]);
+    let con = f32::from_bits(w[SHARPNESS_WORD]);
+    let sharpen = mode & post::POST_MODE_SHARPEN != 0;
+    move |scene: &[[f32; 4]], x: u32, y: u32| -> [f64; 3] {
+        let at = |tx: u32, ty: u32| {
+            let t = scene[(ty * W + tx) as usize];
+            sanitize_f64([t[0], t[1], t[2]])
+        };
+        let lin = if sharpen {
+            let cross = Cross {
+                b: at(x, y.saturating_sub(1)),
+                d: at(x.saturating_sub(1), y),
+                e: at(x, y),
+                f: at((x + 1).min(W - 1), y),
+                h: at(x, (y + 1).min(H - 1)),
+            };
+            rcas_stage_f64(cross, ratio, con)
+        } else {
+            at(x, y).map(|v| Tracked::exact(v).mul(Tracked::exact(ratio)))
+        };
+        tonemap_f64(mode, lin).map(|t| t.v.max(0.0).powf(oetf_exponent()))
+    }
+}
+
+/// Critique Q3: the sharpen-on row's pins are measured on the f64 reference — independent of any
+/// body — so they were not chosen after the fact. Green before the body implements RCAS.
+#[test]
+fn the_sharpen_bound_row_argmax_holds_on_the_f64_reference() {
+    let texels = scene_texels();
+    for case in BOUND_CASES.iter().filter(|c| c.sharpen.is_some()) {
+        let w = case_words(case);
+        // Radius 1: the RCAS cross's footprint (DS-H5), whatever `POST_FINAL_TAP_RADIUS` says yet.
+        let per = hand_pairs(f64_display(w), &texels, STEPS, 3, Footprint::Joint, 1);
+        let centre = max_pairs(&hand_pairs(f64_display(w), &texels, STEPS, 3, Footprint::CentreOnly, 1));
+        eprintln!("[{}] f64 per-pair maxima (LSB) {per:?}; centre only {centre}", case.name);
+        if let Err(why) = check_argmax(case.name, case.argmax, &per) {
+            panic!("on the f64 reference: {why}");
+        }
+        assert!(max_pairs(&per) - centre > 1e-3, "[{}] on the f64 reference the joint footprint must beat the centre alone", case.name);
     }
 }

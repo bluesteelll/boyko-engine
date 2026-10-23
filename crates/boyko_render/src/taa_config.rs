@@ -32,13 +32,26 @@
 //! [`luma_weight`](TaaConfig::luma_weight), [`history_filter`](TaaConfig::history_filter),
 //! [`disocclusion`](TaaConfig::disocclusion), and [`depth_tol`](TaaConfig::depth_tol) — every
 //! one of `taa_resolve.comp.hlsl`'s decision points EXCEPT `mv_source` (needs a new texture
-//! binding, rung D2) and `sharpen` (needs an `aa_out` ping-pong, rung T3), which stay inert.
+//! binding, rung D2), which stays inert.
 //! `disocclusion`/`depth_tol` are forwarded into the UBO but stay UNREAD by the shader this
 //! rung too — see [`DisocclusionTest`]'s doc for why (a depth-based test needs a binding this
 //! resolve does not have). Every T2 mode word branches through `taa_resolve.comp.hlsl` via
 //! wave-uniform runtime `if`s (the SAME idiom `deferred_pbr.hlsl`'s `shadow_mode` and
 //! `shadow_apply.hlsli`'s `csm_pcf_disc` use) — NOT a `-D` shader variant, so this rung
 //! compiles to ONE `.spv`. Each field's doc states its wiring status.
+//!
+//! # The sharpen is a `post_final` stage, not a resolve knob (render wave PX1b)
+//!
+//! [`sharpen`](TaaConfig::sharpen) and [`rcas_sharpness`](TaaConfig::rcas_sharpness) are WIRED,
+//! but not through the resolve: [`SharpenMode::Rcas`] arms the AMD FidelityFX FSR 1 RCAS stage of
+//! `post_final` — bit 1 (`POST_MODE_SHARPEN`) of its mode word plus its `sharpness` word, which
+//! carries [`TaaConfig::rcas_con`] — over the frame's scene input `taa_hist[fi]`. The runner reads
+//! both fields straight off this config each frame (`boyko_app::post_host::post_sharpen` /
+//! `with_rcas`) and sets the bit only on a frame TAA is armed (`taa_armed_now`), so
+//! [`resolve_taa`] leaves them out of the [`ResolvedTaa`] UBO. A live toggle changes the mode bit
+//! and the strength word — no target rebuild, no TAA history reset.
+//! `sharpen` defaults to [`SharpenMode::None`]; `rcas_sharpness` defaults to `0.78` (the owner's
+//! strength, signed off at PX1b's GL-H2 review).
 
 use boyko_macros::{Resource, SystemSet};
 
@@ -344,18 +357,21 @@ impl DisocclusionTest {
     }
 }
 
-/// A post-resolve sharpening pass [`TaaConfig`] may select. Both variants are wired: `None`
-/// (the default) has the resolve write `aa_out` directly; `Rcas` records the sharpen pass after
-/// the resolve (`boyko_rhi_vulkan`'s `passes/rcas.rs`), which runs FidelityFX CAS
-/// (`rcas.comp.hlsl`, strength [`TaaConfig::rcas_sharpness`]) — the variant's name is historical.
+/// The sharpen [`TaaConfig`] may select. Since render wave PX1b it is a STAGE of `post_final`, not
+/// a pass: `Rcas` sets bit 1 (`POST_MODE_SHARPEN`) of `post_final`'s mode word and its `sharpness`
+/// word ([`TaaConfig::rcas_con`]), and the pass runs AMD FidelityFX FSR 1 RCAS over the 5-tap cross
+/// of the frame's scene input (`taa_hist[fi]`) in FSR 2's reversible space `c / (1 + max3(c))`,
+/// inverted before the tonemap curve (`boyko_shaderdsl::post::rcas_stage`). TAA-only: the bit is set
+/// iff TAA is armed this frame. A live toggle changes the mode bit and the strength word — no
+/// target rebuild, no history reset.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SharpenMode {
-    /// No sharpen pass (the shipped shape). The DEFAULT.
+    /// No sharpen (the shipped shape): `post_final` fetches its scene texel once. The DEFAULT.
     #[default]
     None,
-    /// The post-resolve contrast-adaptive sharpen: FidelityFX CAS (`rcas.comp.hlsl`), recorded
-    /// after the TAA resolve when TAA is the AA mode.
+    /// FSR 1 RCAS inside `post_final` (render wave PX1b), at [`TaaConfig::rcas_sharpness`]'s strength,
+    /// when TAA is the AA mode.
     Rcas,
 }
 
@@ -437,14 +453,16 @@ pub struct TaaConfig {
     /// (`shadow_temporal.comp.hlsl`'s `depth_swap` test uses the identical relative-tolerance
     /// shape this field would parameterize).
     pub depth_tol: f32,
-    /// A post-resolve sharpen pass — see [`SharpenMode`]. Default [`SharpenMode::None`] (the
-    /// shipped resolve has no sharpen pass).
+    /// The sharpen `post_final` runs under TAA — see [`SharpenMode`]. Default
+    /// [`SharpenMode::None`] (no sharpen).
     pub sharpen: SharpenMode,
-    /// The [`SharpenMode::Rcas`] strength in `[0, 1]`, forwarded to the RCAS pass as a PUSH
-    /// constant (NOT the `ResolvedTaa` UBO — it is host-read at record time, so it does NOT affect
-    /// the 48-byte UBO byte-mirror). `0` = mild (peak `-1/8`), `1` = strong (peak `-1/5`), per the
-    /// FidelityFX CAS sharpness mapping in `rcas.comp.hlsl`. Inert unless [`sharpen`](Self::sharpen)
-    /// is [`SharpenMode::Rcas`]. Default `0.25` (a mild starting point the owner retunes by eye).
+    /// The [`SharpenMode::Rcas`] strength in `[0, 1]`: `0` = mild, `1` = strong (FSR 1's maximum),
+    /// FSR 2's own `sharpness` parameter. The runner reads it off this config (NOT the `ResolvedTaa`
+    /// UBO, whose 48-byte mirror it does not touch) and `post_final`'s `sharpness` word carries its
+    /// [`rcas_con`](Self::rcas_con). Inert unless [`sharpen`](Self::sharpen) is
+    /// [`SharpenMode::Rcas`]. Default `0.78` (0.44 stops, `con ≈ 0.737`): the owner's look, signed off at
+    /// PX1b's GL-H2 review as the retired CAS pass's — FSR 1's lobe clamp `0.1875·con ≈ 0.138` is that
+    /// pass's default peak, `1/7.25`.
     pub rcas_sharpness: f32,
 }
 
@@ -481,7 +499,7 @@ impl Default for TaaConfig {
             disocclusion: DisocclusionTest::OffScreenOnly,
             depth_tol: 0.02,
             sharpen: SharpenMode::None,
-            rcas_sharpness: 0.25,
+            rcas_sharpness: 0.78,
         }
     }
 }
@@ -497,6 +515,17 @@ impl TaaConfig {
     pub const fn basis_shear_enabled(&self) -> bool {
         matches!(self.jitter_scope, JitterScope::RasterAndBasis)
     }
+
+    /// Render wave PX1b (`px1b/cut.md` D-R7): RCAS's `con` — the linear lobe scale `post_final`'s
+    /// `sharpness` word carries — from [`Self::rcas_sharpness`] by FSR 2's own remap: `s` clamped to
+    /// `[0, 1]` (NaN reads as 0), `stops = 2·(1 − s)` (`ffx_fsr2.cpp`: `sharpenessRemapped = -2 ·
+    /// sharpness + 2`), `con = 2^−stops` (FSR 1's `FsrRcasCon`), evaluated in f64 and rounded once to
+    /// an f32 in `[0.25, 1]`. Host-side, once per frame: the pixel never evaluates a transcendental.
+    #[inline]
+    pub fn rcas_con(&self) -> f32 {
+        let s = if self.rcas_sharpness.is_nan() { 0.0 } else { f64::from(self.rcas_sharpness).clamp(0.0, 1.0) };
+        (-2.0 * (1.0 - s)).exp2() as f32
+    }
 }
 
 // ---- the resolve decision (pure — mirrors resolve_shadow_denoise) ---------------------------
@@ -509,7 +538,10 @@ impl TaaConfig {
 /// [`clip`](TaaConfig::clip), [`blend`](TaaConfig::blend),
 /// [`luma_weight`](TaaConfig::luma_weight), [`history_filter`](TaaConfig::history_filter),
 /// [`disocclusion`](TaaConfig::disocclusion), [`depth_tol`](TaaConfig::depth_tol)); `mv_source`
-/// and `sharpen` stay unforwarded (their own future rungs, D2/T3 — see the module doc).
+/// stays unforwarded (its own future rung, D2 — see the module doc). `sharpen` and
+/// `rcas_sharpness` are unforwarded by design: they drive `post_final`'s RCAS stage, whose
+/// `POST_MODE_SHARPEN` bit and `sharpness` word the runner sets straight off [`TaaConfig`] on a
+/// TAA-armed frame (see the module doc's PX1b section), never through this UBO.
 ///
 /// `luma_weight` is forwarded INVERTED (`disable_luma_weight = !luma_weight`): the shipped
 /// default is `true` (apply the weight), so the UBO word must read `0` at the default to keep
@@ -589,7 +621,12 @@ mod tests {
         assert_eq!(cfg.disocclusion, DisocclusionTest::OffScreenOnly);
         assert_eq!(cfg.depth_tol, 0.02);
         assert_eq!(cfg.sharpen, SharpenMode::None);
-        assert_eq!(cfg.rcas_sharpness, 0.25);
+        assert_eq!(cfg.rcas_sharpness, 0.78, "the owner's strength: the retired CAS pass's look (PX1b GL-H2)");
+        assert_eq!(
+            cfg.rcas_con().to_bits(),
+            0x3F3C_B4DA,
+            "the default's con (0.44 stops, ~0.737): the bits of post_final's `sharpness` word, the receipt's post_word4"
+        );
         assert!(
             cfg.basis_shear_enabled(),
             "the shear is opt-OUT: a world that arms Taa and sets nothing else gets it"
@@ -699,6 +736,23 @@ mod tests {
     #[test]
     fn default_resolved_matches_resolving_the_default_config() {
         assert_eq!(ResolvedTaa::default(), resolve_taa(&TaaConfig::default()));
+    }
+
+    /// Render wave PX1b (D-R7): FSR 2's remap — the ends, the midpoint, monotone between, and the
+    /// domain clamped (NaN reads as the mildest).
+    #[test]
+    fn rcas_con_is_fsr2s_remap() {
+        let con = |s: f32| TaaConfig { rcas_sharpness: s, ..TaaConfig::default() }.rcas_con();
+        assert_eq!(con(1.0), 1.0, "sharpness 1 is FSR 1's maximum, 0 stops");
+        assert_eq!(con(0.0), 0.25, "sharpness 0 is 2 stops");
+        assert_eq!(con(0.5), 0.5, "sharpness 0.5 is 1 stop");
+        assert_eq!(con(f32::NAN), 0.25, "NaN reads as 0");
+        assert_eq!(con(1.5), 1.0, "above 1 clamps to 1");
+        assert_eq!(con(-0.5), 0.25, "below 0 clamps to 0");
+        assert_eq!(con(0.25), (-1.5f64).exp2() as f32, "sharpness 0.25 is 1.5 stops");
+        let grid: Vec<f32> = (0..=100).map(|k| con(k as f32 / 100.0)).collect();
+        assert!(grid.windows(2).all(|w| w[0] < w[1]), "con is strictly increasing in the sharpness: {grid:?}");
+        assert!(grid.iter().all(|c| (0.25..=1.0).contains(c)), "con stays in [0.25, 1]");
     }
 
     /// Layout pin (rung T2): the UBO grew 16 -> 48 B (three std140 vec4 slots) — also

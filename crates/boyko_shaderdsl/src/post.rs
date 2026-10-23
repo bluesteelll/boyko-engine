@@ -45,8 +45,9 @@
 //! - **The tonemapper dispatch is a real branch** (`if_else_branch`, printed `[branch]`): the mode
 //!   word is a UBO word, wave-uniform, so a branch costs no divergence, while an if-converted
 //!   dispatch would evaluate every curve per pixel.
-//! - **One scene fetch**: the texel is materialised once (`post_scene`) — an un-materialised fetch
-//!   would be printed at every use.
+//! - **Every fetch is materialised once**: the scene texel (`post_scene`) and, under the sharpen
+//!   bit, RCAS's four ring taps (`post_rcas_{b,d,f,h}`) — an un-materialised fetch would be printed
+//!   at every use.
 //!
 //! # Zero cost when off
 //!
@@ -92,6 +93,19 @@ pub const TONEMAP_ACES: u32 = 0;
 pub const TONEMAP_NEUTRAL: u32 = 1;
 /// Tonemapper word: Reinhard-Jodie.
 pub const TONEMAP_REINHARD_JODIE: u32 = 2;
+
+/// Mode-word bit 1 (render wave PX1b, H5): the RCAS sharpen stage runs this frame. Bit 0 stays
+/// reserved (H2 rev 2 removed the sanitize bit); bits `TONEMAP_MODE_SHIFT..+4` are the tonemapper.
+pub const POST_MODE_SHARPEN: u32 = 1 << 1;
+
+/// FSR 1's `FSR_RCAS_LIMIT` (`ffx_fsr1.h`): the lobe never sharpens past `−(0.25 − 1/16)`, which
+/// keeps `4·lobe + 1 ≥ 0.25` (the resolve's denominator) away from zero.
+pub const RCAS_LIMIT: f32 = 0.25 - 1.0 / 16.0;
+
+/// FSR 2's `FSR2_TONEMAP_EPSILON` (`ffx_fsr2_common.h`, `1 / FP16_MAX`): the floor of
+/// [`tonemap_reversible_inverse`]'s `1 − max3(y)`, so a sharpened value at or above 1 inverts to a
+/// finite `≤ 65504·y` instead of dividing by zero.
+pub const RCAS_INV_EPS: f32 = 1.0 / 65504.0;
 
 /// The f32 exponent-field mask: a value is finite iff `(asuint(x) & F32_EXP_MASK) != F32_EXP_MASK`.
 /// An integer test on the bit pattern, so a NotNaN / NotInf-assuming compiler cannot fold it away
@@ -144,14 +158,17 @@ const SRGB_GAMMA: f32 = 2.4;
 // ---- The stage trace ----------------------------------------------------------------------------
 
 /// One stage of [`post_final_main`], in the documented order of POSTFX §5. A later rung adds its
-/// variant (RCAS, bloom, LUT, dither / grain / vignette), its [`POST_FINAL_STAGE_ORDER`] row and
-/// one [`stage3`] call.
+/// variant (bloom, LUT, dither / grain / vignette — as render wave PX1b added
+/// [`Rcas`](Self::Rcas)), its [`POST_FINAL_STAGE_ORDER`] row and one [`stage3`] call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PostStage {
     /// The whole-pixel non-finite kill plus the `[0, HDR_MAX]` clamp ([`hdr_sanitize`]).
     HdrSanitize,
     /// The exposure ratio `E / pre` ([`pre_ratio_apply`]; exactly 1.0 until PX3).
     PreRatio,
+    /// Render wave PX1b: FSR 1 RCAS in FSR 2's reversible space under the sharpen bit, the identity
+    /// without it ([`rcas_stage`]).
+    Rcas,
     /// The tonemap curve the mode word selects ([`tonemap_select`]).
     Tonemap,
     /// The manual gamma-2.2 OETF ([`oetf_gamma22`]).
@@ -165,6 +182,7 @@ impl PostStage {
         match self {
             PostStage::HdrSanitize => "post_stage_hdr_sanitize",
             PostStage::PreRatio => "post_stage_pre_ratio",
+            PostStage::Rcas => "post_stage_rcas",
             PostStage::Tonemap => "post_stage_tonemap",
             PostStage::Oetf => "post_stage_oetf",
         }
@@ -175,7 +193,7 @@ impl PostStage {
 /// composite (PX4) → `tonemap_select` → LUT (PX5) → `oetf_gamma22` → dither / grain / vignette
 /// (PX6)), stated independently of the body; the stage-order gate holds the two to each other.
 pub const POST_FINAL_STAGE_ORDER: &[PostStage] =
-    &[PostStage::HdrSanitize, PostStage::PreRatio, PostStage::Tonemap, PostStage::Oetf];
+    &[PostStage::HdrSanitize, PostStage::PreRatio, PostStage::Rcas, PostStage::Tonemap, PostStage::Oetf];
 
 /// Passes a stage's result through its marker: a named `float3 <label>` local on Emit, the
 /// identity on Eval.
@@ -298,7 +316,7 @@ pub const POST_FINAL_UBO_LAYOUT: &[PostUboField] = &[
     PostUboField { name: "mode_words", offset: 0, kind: PostUboKind::U32 },
     PostUboField { name: "exposure_ratio", offset: 4, kind: PostUboKind::F32 },
     PostUboField { name: "extent", offset: 8, kind: PostUboKind::Uint2 },
-    PostUboField { name: "_r0", offset: 16, kind: PostUboKind::U32 },
+    PostUboField { name: "sharpness", offset: 16, kind: PostUboKind::F32 },
     PostUboField { name: "_r1", offset: 20, kind: PostUboKind::U32 },
     PostUboField { name: "_r2", offset: 24, kind: PostUboKind::U32 },
     PostUboField { name: "_r3", offset: 28, kind: PostUboKind::U32 },
@@ -339,6 +357,7 @@ pub const fn ubo_word(name: &str) -> usize {
 const MODE_WORDS_WORD: usize = ubo_word("mode_words");
 const EXPOSURE_RATIO_WORD: usize = ubo_word("exposure_ratio");
 const EXTENT_WORD: usize = ubo_word("extent");
+const SHARPNESS_WORD: usize = ubo_word("sharpness");
 
 const _: () = assert!(POST_FINAL_UBO_BYTES as usize == 8 * 4);
 const _: () = assert!(EXTENT_WORD + 1 < POST_FINAL_UBO_BYTES as usize / 4);
@@ -350,8 +369,12 @@ pub struct PostParams<C: Cf> {
     pub mode_words: C::Uint,
     /// `E / pre`, exactly 1.0 until PX3.
     pub exposure_ratio: C::Scalar,
-    /// The dispatch extent (read by the skeleton's guard; carried so the body sees one input set).
+    /// The dispatch extent (read by the skeleton's guard, and by RCAS's border clamp — the scene
+    /// input's own extent on every path).
     pub extent: [C::Uint; 2],
+    /// Render wave PX1b: RCAS's `con`, the linear lobe scale in `[0.25, 1]`
+    /// (`TaaConfig::rcas_con`); read only under [`POST_MODE_SHARPEN`].
+    pub sharpness: C::Scalar,
 }
 
 /// The Eval [`PostParams`] from the receipt's raw `PostFinalGpu` words, each read at the word
@@ -363,14 +386,15 @@ pub fn eval_params(words: [u32; 8]) -> PostParams<EvalCf> {
         mode_words: words[MODE_WORDS_WORD],
         exposure_ratio: f32::from_bits(words[EXPOSURE_RATIO_WORD]),
         extent: [words[EXTENT_WORD], words[EXTENT_WORD + 1]],
+        sharpness: f32::from_bits(words[SHARPNESS_WORD]),
     }
 }
 
 /// Render wave PX0 (`px0/cut.md` D-T4): `post_final`'s per-pass texel-footprint radius — the
-/// neighbourhood the body reads around a pixel through `gScene`. `0` while the body only `Load`s
-/// its own pixel; PX1b sets it to 1 with RCAS (DS-H5). `post_eval bound` perturbs that footprint
-/// jointly (verify r5 O2).
-pub const POST_FINAL_TAP_RADIUS: u32 = 0;
+/// neighbourhood the body reads around a pixel through `gScene`. `1` since render wave PX1b (DS-H5):
+/// under the sharpen bit RCAS reads the cross `(x, y ± 1)`, `(x ± 1, y)`. `post_eval bound` perturbs
+/// that footprint jointly — its `(2·r + 1)²` square ⊇ the cross (verify r5 O2).
+pub const POST_FINAL_TAP_RADIUS: u32 = 1;
 
 /// Render wave PX0: the graph receipt's `[config]` keys of the eight `PostFinalGpu` words, in word
 /// order — single-sourced for PX1a's receipt writer and `tools/golden_diff.py eval-post`.
@@ -501,6 +525,139 @@ pub fn hdr_history_guard<C: Cf>(hist: C::Vec3f, cur: C::Vec3f) -> C::Vec3f {
 #[inline]
 pub fn pre_ratio_apply<C: Cf>(h: C::Vec3f, r: C::Scalar) -> C::Vec3f {
     C::vec3_mul_scalar(h, r)
+}
+
+// ---- Render wave PX1b: FSR 1 RCAS in FSR 2's reversible space -----------------------------------
+
+/// `max(x, max(y, z))` — FSR's `AMax3F1` (exact; the order matters only for a NaN, which the
+/// sanitized taps never carry).
+#[inline]
+fn max3<C: Cf>(c: [C::Scalar; 3]) -> C::Scalar {
+    c[0].max(c[1].max(c[2]))
+}
+
+/// FSR 2's `Tonemap` (`ffx_fsr2_common.h`): `y = c · rcp(1 + max3(c))`, the reversible map that
+/// brings a sanitized HDR colour into `[0, 1)` for RCAS, whose lobe solves for where a `[0, 1]`
+/// signal would clip (`ffx_fsr1.h`). `max3`, not luma: `c / (1 + luma)` maps saturated blue
+/// `(0, 0, 10)` to `5.8` in blue, outside `[0, 1]`, where `hitMax`'s sign flips (`px1b/cut.md` D-R1).
+/// `rcp(v)` is the exact `1 / v` — one division per tap instead of three.
+///
+/// **Round-trip domain** (critique O4): with [`tonemap_reversible_inverse`] it round-trips while the
+/// wrap's INPUT keeps `max3 ≤ 1/RCAS_INV_EPS − 1 = 65503` — the sanitized `c ≤ HDR_MAX` at a unit
+/// exposure ratio, which is RCAS's input until PX3 (the wrap reads `c · ratio`). Past it the inverse
+/// saturates at `≈ 65504 · y`: finite, not the input.
+#[inline]
+pub fn tonemap_reversible<C: Cf>(c: C::Vec3f) -> C::Vec3f {
+    let lit = C::Scalar::lit;
+    let ch = channels::<C>(c);
+    let w = C::temp(lit(1.0).div(lit(1.0).add(max3::<C>(ch))));
+    from_channels::<C>(ch.map(|v| v.mul(w)))
+}
+
+/// FSR 2's `InverseTonemap` (`ffx_fsr2_common.h`): `x = y · rcp(max(1 − max3(y), RCAS_INV_EPS))`,
+/// the inverse of [`tonemap_reversible`]. The floor keeps a sharpened value at or above 1 finite.
+#[inline]
+pub fn tonemap_reversible_inverse<C: Cf>(y: C::Vec3f) -> C::Vec3f {
+    let lit = C::Scalar::lit;
+    let ch = channels::<C>(y);
+    let eps = C::named_lit("RCAS_INV_EPS", RCAS_INV_EPS);
+    let w = C::temp(lit(1.0).div(lit(1.0).sub(max3::<C>(ch)).max(eps)));
+    from_channels::<C>(ch.map(|v| v.mul(w)))
+}
+
+/// FSR 1's `FsrRcasF` lobe (32-bit, no `FSR_RCAS_DENOISE`, FSR 1's default) over the cross `b`
+/// (above), `d` (left), `e` (centre), `f` (right), `h` (below), in reversible space, times `con`:
+/// per channel `mn4 = min(min3(b, d, f), h)`, `mx4 = max(max3(b, d, f), h)`, `hitMin = min(mn4, e) /
+/// (4·mx4)`, `hitMax = (1 − max(mx4, e)) / (4·mn4 − 4)`, `lobe_c = max(−hitMin, hitMax)`; then
+/// `max(−RCAS_LIMIT, min(max3(lobe_r, lobe_g, lobe_b), 0)) · con`. Exact divisions where FSR 1 uses
+/// its approximate reciprocal (one formula on host and device).
+///
+/// **No NaN is ever produced** (`px1b/cut.md` D-R3): an all-black ring channel (`mx4 = 0`) makes FSR
+/// 1's `hitMin` `0·rcp(0)`, which FSR 1 survives only through `NMax`'s NaN rule — not dependable in a
+/// module that declares no `SignedZeroInfNanPreserve`. So `−hitMin` is a select: `mx4 > 0 ?
+/// −min(mn4, e) / (4·mx4) : −0.25`. Equivalent: `mx4 = 0 ⇒ mn4 = 0 ⇒ hitMax = −(1 − e)/4 ∈ [−0.25,
+/// 0]`, so `max(−0.25, hitMax) = hitMax`, FSR 1's result; elsewhere `0 ≤ hitMin ≤ 0.25`. `4·mn4 − 4 <
+/// 0` since reversible space keeps `mn4 < 1`.
+#[inline]
+pub fn rcas_lobe<C: Cf>(b: C::Vec3f, d: C::Vec3f, e: C::Vec3f, f: C::Vec3f, h: C::Vec3f, con: C::Scalar) -> C::Scalar {
+    let lit = C::Scalar::lit;
+    let (b, d, e, f, h) = (channels::<C>(b), channels::<C>(d), channels::<C>(e), channels::<C>(f), channels::<C>(h));
+    let lobes: [C::Scalar; 3] = core::array::from_fn(|c| {
+        let mn4 = C::temp(b[c].min(d[c].min(f[c])).min(h[c]));
+        let mx4 = C::temp(b[c].max(d[c].max(f[c])).max(h[c]));
+        // Materialised: the printer spells a product divisor flat, and HLSL reads `a / 4.0 * m` as
+        // `(a / 4.0) · m` (`post_edsl_sync`'s `no_division_runs_on_into_a_product`).
+        let four_mx4 = C::temp(lit(4.0).mul(mx4));
+        let neg_hit_min = C::select(mx4.gt(lit(0.0)), mn4.min(e[c]).div(four_mx4).neg(), lit(-0.25));
+        let hit_max = lit(1.0).sub(mx4.max(e[c])).div(lit(4.0).mul(mn4).sub(lit(4.0)));
+        C::temp(neg_hit_min.max(hit_max))
+    });
+    let limit = C::named_lit("RCAS_LIMIT", RCAS_LIMIT);
+    C::temp(limit.neg().max(max3::<C>(lobes).min(lit(0.0))).mul(con))
+}
+
+/// FSR 1's `FsrRcasF` resolve: `(lobe·b + lobe·d + lobe·h + lobe·f + e) · rcp(4·lobe + 1)` per
+/// channel, in FSR 1's operand order — one reciprocal (`4·lobe + 1 ≥ 1 − 4·RCAS_LIMIT = 0.25`),
+/// three multiplies by it.
+#[inline]
+pub fn rcas_resolve<C: Cf>(lobe: C::Scalar, b: C::Vec3f, d: C::Vec3f, e: C::Vec3f, f: C::Vec3f, h: C::Vec3f) -> C::Vec3f {
+    let lit = C::Scalar::lit;
+    let (b, d, e, f, h) = (channels::<C>(b), channels::<C>(d), channels::<C>(e), channels::<C>(f), channels::<C>(h));
+    let rcp = C::temp(lit(1.0).div(lit(4.0).mul(lobe).add(lit(1.0))));
+    from_channels::<C>(core::array::from_fn(|c| {
+        lobe.mul(b[c]).add(lobe.mul(d[c])).add(lobe.mul(h[c])).add(lobe.mul(f[c])).add(e[c]).mul(rcp)
+    }))
+}
+
+/// Render wave PX1b — the RCAS stage (`px1b/cut.md` D-R4, D-R6): `centre` (the pixel's sanitized,
+/// ratio-scaled value, `post_stage_pre_ratio`) when the mode word's [`POST_MODE_SHARPEN`] bit is
+/// clear; under it, FSR 1 RCAS in FSR 2's reversible space over the cross. A REAL branch: the bit is
+/// a UBO word, wave-uniform, so the sharpen-off path runs one scalar test and a branch.
+///
+/// The four ring taps are fetched through [`Cf::tex2_load`] at the border-clamped coordinates
+/// `x − 1 → min(x − 1u, x)` (the `uint` subtract wraps `0 − 1` to `0xFFFFFFFF`, so `min` lands on
+/// 0), `x + 1 → min(x + 1u, extent.x − 1u)`, the same for `y` — `extent` is the dispatch extent,
+/// the scene input's own on every path (a mismatch is the Eval `Load`'s named bounds panic, never a
+/// silent read). Each tap is materialised once and passes [`hdr_sanitize`] and [`pre_ratio_apply`]
+/// like the centre (a NaN neighbour is a black tap, never a NaN lobe), then [`tonemap_reversible`];
+/// the centre is the shared `post_stage_pre_ratio`. Declares the body-level `post_rcas*` locals,
+/// so it is called once.
+#[inline]
+pub fn rcas_stage<C: Cf>(px: [C::Uint; 2], p: &PostParams<C>, r: &PostRes<'_, C>, centre: C::Vec3f) -> C::Vec3f {
+    let out = C::decl_var_vec3("post_rcas", centre);
+    let off = C::ueq(
+        C::and_u(p.mode_words, C::named_uint_val("POST_MODE_SHARPEN", POST_MODE_SHARPEN)),
+        C::uint_lit(0),
+    );
+    let _ = C::if_else_branch(
+        off,
+        || Flow::Continue(()),
+        || {
+            let one = C::uint_lit(1);
+            let [x, y] = px;
+            let xm = C::umin(C::usub(x, one), x);
+            let xp = C::umin(C::uadd(x, one), C::usub(p.extent[0], one));
+            let ym = C::umin(C::usub(y, one), y);
+            let yp = C::umin(C::uadd(y, one), C::usub(p.extent[1], one));
+            let fetch = |name: &'static str, tx: C::Uint, ty: C::Uint| {
+                C::temp_vec4(name, C::tex2_load(r.scene, C::int_from_uint(tx), C::int_from_uint(ty)))
+            };
+            let taps = [fetch("post_rcas_b", x, ym), fetch("post_rcas_d", xm, y), fetch("post_rcas_f", xp, y), fetch("post_rcas_h", x, yp)];
+            let lin_names = ["post_rcas_b_lin", "post_rcas_d_lin", "post_rcas_f_lin", "post_rcas_h_lin"];
+            let y_names = ["post_rcas_b_y", "post_rcas_d_y", "post_rcas_f_y", "post_rcas_h_y"];
+            let ring: [C::Vec3f; 4] = core::array::from_fn(|k| {
+                let lin = C::temp_vec3(lin_names[k], pre_ratio_apply::<C>(hdr_sanitize::<C>(C::vec4_xyz(taps[k])), p.exposure_ratio));
+                C::temp_vec3(y_names[k], tonemap_reversible::<C>(lin))
+            });
+            let [b, d, f, h] = ring;
+            let e = C::temp_vec3("post_rcas_e_y", tonemap_reversible::<C>(centre));
+            let lobe = rcas_lobe::<C>(b, d, e, f, h, p.sharpness);
+            let sharpened = C::temp_vec3("post_rcas_y", rcas_resolve::<C>(lobe, b, d, e, f, h));
+            C::set_var_vec3(&out, tonemap_reversible_inverse::<C>(sharpened));
+            Flow::Continue(())
+        },
+    );
+    C::get_var_vec3(&out)
 }
 
 /// `mul(m, v)` with row `i` dotted in column order 0, 1, 2, left-associated — the op order of the
@@ -642,9 +799,10 @@ pub fn srgb_eotf<C: Cf>(c: C::Vec3f) -> C::Vec3f {
 // ---- The traced main body -------------------------------------------------------------------------------
 
 /// `post_final`'s whole per-pixel body: fetch the scene texel at `px` once, then
-/// `hdr_sanitize → pre_ratio_apply → tonemap_select → oetf_gamma22`, each stage through its
-/// [`stage3`] marker, returning `(o, 1)` through `ret_out`. Its fetch is the resource facet
-/// `tex2_load`, a real image read on Eval, so the oracle and the shader run one function.
+/// `hdr_sanitize → pre_ratio_apply → rcas_stage → tonemap_select → oetf_gamma22`, each stage
+/// through its [`stage3`] marker, returning `(o, 1)` through `ret_out`. Its fetches are the
+/// resource facet `tex2_load`, real image reads on Eval, so the oracle and the shader run one
+/// function; the RCAS stage's four ring fetches run only under [`POST_MODE_SHARPEN`].
 #[inline]
 pub fn post_final_main<C: Cf>(
     px: [C::Uint; 2],
@@ -658,6 +816,7 @@ pub fn post_final_main<C: Cf>(
     );
     let s = stage3::<C>(PostStage::HdrSanitize, hdr_sanitize::<C>(C::vec4_xyz(scene)));
     let s = stage3::<C>(PostStage::PreRatio, pre_ratio_apply::<C>(s, p.exposure_ratio));
+    let s = stage3::<C>(PostStage::Rcas, rcas_stage::<C>(px, p, r, s));
     let s = stage3::<C>(PostStage::Tonemap, tonemap_select::<C>(s, tonemapper::<C>(p.mode_words)));
     let s = stage3::<C>(PostStage::Oetf, oetf_gamma22::<C>(s));
     let o = channels::<C>(s);

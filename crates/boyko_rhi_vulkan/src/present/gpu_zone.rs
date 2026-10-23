@@ -145,11 +145,12 @@ pub const ZONE_BASE_PARTICLE: u16 = 3 * ZONE_FAMILY_WIDTH;
 /// that path's own passes in the artifact on exactly the frames where both are recorded.
 pub const ZONE_BASE_TRANSPARENT: u16 = 4 * ZONE_FAMILY_WIDTH;
 /// Render wave PX0: base for the POST family — the anti-aliasing / sharpen / present passes that
-/// run after the lit producers (TAA resolve, CAS, FXAA, SMAA's three sub-passes, the SSAA
-/// downsample, the present blit).
+/// run after the lit producers (TAA resolve, FXAA, SMAA's three sub-passes, the SSAA downsample,
+/// the present blit, `post_final`; the CAS pass's id 81 is retired since render wave PX1b,
+/// [`ZONE_POST_RETIRED`]).
 ///
 /// The SIXTH family. `4 × W` is RD1's ([`ZONE_BASE_TRANSPARENT`]), so POST starts at `5 × W`.
-/// It gets a base of its own for the particle family's reason: TAA/CAS/FXAA/SMAA/SSAA are
+/// It gets a base of its own for the particle family's reason: TAA/FXAA/SMAA/SSAA are
 /// recorded by both the Deferred and the VisibilityBuffer recorders (the present blit by all
 /// three), so an id borrowed from one path's family would be indistinguishable from that path's
 /// own passes on exactly the frames where both are recorded.
@@ -603,9 +604,11 @@ pub const TRANSPARENT_ZONE_COUNT: u16 = 1;
 /// Render wave PX0: the TAA resolve dispatch — `record_taa_body`'s bind → push → dispatch. The
 /// graph-derived barriers the CALLER records before the body are OUTSIDE this bracket.
 pub const ZONE_POST_TAA_RESOLVE: u16 = ZONE_BASE_POST;
-/// Render wave PX0: the post-resolve sharpen (`SharpenMode::Rcas`, which runs FidelityFX CAS) —
-/// `record_rcas`'s barriers, bind, push and dispatch.
-pub const ZONE_POST_CAS: u16 = ZONE_BASE_POST + 1;
+/// Render wave PX1b (`px1b/cut.md` D-R14): the POST ids of retired passes — `ZONE_BASE_POST + 1`,
+/// PX0's `ZONE_POST_CAS` (the CAS pass; `SharpenMode::Rcas` is `post_final`'s RCAS stage now, timed
+/// inside [`ZONE_POST_FINAL`]). Never re-minted: an artifact's id keeps one meaning across the
+/// trees that wrote it. [`POST_ZONE_COUNT`] stays the id RANGE.
+pub const ZONE_POST_RETIRED: [u16; 1] = [ZONE_BASE_POST + 1];
 /// Render wave PX0: the FXAA pass — `record_fxaa`'s barriers, bind, push and dispatch.
 pub const ZONE_POST_FXAA: u16 = ZONE_BASE_POST + 2;
 /// Render wave PX0: SMAA's edge-detection sub-pass, its barriers included.
@@ -674,6 +677,31 @@ const _: () = assert!(
     POST_ZONE_COUNT <= ZONE_FAMILY_WIDTH,
     "the POST family no longer fits its reserved zone-id range"
 );
+/// Render wave PX1b (D-R14): no live POST id is a retired one, and every retired id lies inside the
+/// family's range.
+const _: () = {
+    let live = [
+        ZONE_POST_TAA_RESOLVE,
+        ZONE_POST_FXAA,
+        ZONE_POST_SMAA_EDGE,
+        ZONE_POST_SMAA_WEIGHT,
+        ZONE_POST_SMAA_BLEND,
+        ZONE_POST_SSAA_DOWNSAMPLE,
+        ZONE_POST_PRESENT,
+        ZONE_POST_FINAL,
+    ];
+    let mut r = 0;
+    while r < ZONE_POST_RETIRED.len() {
+        let id = ZONE_POST_RETIRED[r];
+        assert!(id >= ZONE_BASE_POST && id < ZONE_BASE_POST + POST_ZONE_COUNT, "a retired POST id outside the family");
+        let mut l = 0;
+        while l < live.len() {
+            assert!(live[l] != id, "a live POST zone re-mints a retired id");
+            l += 1;
+        }
+        r += 1;
+    }
+};
 const _: () = assert!(
     FWD_ZONE_COUNT <= ZONE_FAMILY_WIDTH,
     "the FWD family no longer fits its reserved zone-id range"
@@ -842,13 +870,12 @@ pub const fn zone_begin_stage(zone: u16) -> TimestampStage {
             ZONE_PARTICLE_KICKOFF | ZONE_PARTICLE_EMIT | ZONE_PARTICLE_SIM | ZONE_PARTICLE_DRAW
         )
         || matches!(zone, ZONE_SDF_DEPTH_MERGE)
-        // Render wave PX0: the eleven POST / FWD ids, by NAME for the particle family's reason —
-        // each follows a lit producer or another bracket, so a `TOP` begin absorbs the drain
-        // ahead of it (id 51's measured rule).
+        // Render wave PX0: the POST / FWD ids, by NAME for the particle family's reason — each
+        // follows a lit producer or another bracket, so a `TOP` begin absorbs the drain ahead of
+        // it (id 51's measured rule). PX1b retired id 81 (`ZONE_POST_RETIRED`).
         || matches!(
             zone,
             ZONE_POST_TAA_RESOLVE
-                | ZONE_POST_CAS
                 | ZONE_POST_FXAA
                 | ZONE_POST_SMAA_EDGE
                 | ZONE_POST_SMAA_WEIGHT
@@ -939,7 +966,6 @@ const _: () = {
     // Render wave PX0: the POST and FWD families, id by id.
     assert!(
         bottoms(ZONE_POST_TAA_RESOLVE)
-            && bottoms(ZONE_POST_CAS)
             && bottoms(ZONE_POST_FXAA)
             && bottoms(ZONE_POST_SMAA_EDGE)
             && bottoms(ZONE_POST_SMAA_WEIGHT)

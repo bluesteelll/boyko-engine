@@ -345,7 +345,7 @@ refactor onto a shared whole-pixel test traces to the same text).
 
 | Variant | `-D` | `.spv` | dxc `-T` | Notes |
 |---|---|---|---|---|
-| the only one | — | `post_final.comp.spv` | `cs_6_0` | set 0 = `Texture2D<float4> gScene` @0 (`SampledImageAtGeneral`, `Load`; path-dependent: `lit` / `taa_hist[fi]` / `lit_native`) + `[[vk::image_format("rgba8")]] RWTexture2D<float4> gDisplay` @1 + `cbuffer PostFinal` @2 (32 B std140: `mode_words`, `exposure_ratio`, `uint2 extent`, four reserved words — `boyko_render::post::gpu::PostFinalGpu`). `[numthreads(8, 8, 1)]`; the skeleton is only the extent guard, one `post_final_main` call and the store. Per pixel: ONE `OpImageFetch`; the whole-pixel sanitize as integer ops (no branch); the tonemapper dispatch as two `[branch]` (`DontFlatten`) selections; the OETF as three `GLSL.std.450 Pow` on `OETF_GAMMA_EXP = 0x3EE8BA2F` (the value DXC folds the producers' `1.0 / 2.2` to). Measured at PXe (DXC 1.4.350): every HLSL 2021 ternary of the leaves lowers to a short branch + `OpPhi` (0 `OpSelect` in the module); `[flatten]` instead of `[branch]` prints `Flatten` merges and dropping it `None` merges, neither if-converts. |
+| the only one | — | `post_final.comp.spv` | `cs_6_0` | set 0 = `Texture2D<float4> gScene` @0 (`SampledImageAtGeneral`, `Load`; path-dependent: `lit` / `taa_hist[fi]` / `lit_native`) + `[[vk::image_format("rgba8")]] RWTexture2D<float4> gDisplay` @1 + `cbuffer PostFinal` @2 (32 B std140: `mode_words` — the tonemapper at bits 8..11 and, since render wave PX1b, `POST_MODE_SHARPEN` = bit 1 —, `exposure_ratio`, `uint2 extent`, `float sharpness` (PX1b: RCAS's `con`, read only under the bit), three reserved words — `boyko_render::post::gpu::PostFinalGpu`). `[numthreads(8, 8, 1)]`; the skeleton is only the extent guard, one `post_final_main` call and the store. Per pixel: ONE `OpImageFetch` with the sharpen bit clear, FIVE with it set (PX1b: the RCAS stage's four ring taps, border-clamped in the body, inside its `[branch]` selection); the whole-pixel sanitize as integer ops (no branch); the RCAS stage and the two-level tonemapper dispatch as three `[branch]` (`DontFlatten`) selections; the OETF as three `GLSL.std.450 Pow` on `OETF_GAMMA_EXP = 0x3EE8BA2F` (the value DXC folds the producers' `1.0 / 2.2` to). Measured at PXe (DXC 1.4.350): every HLSL 2021 ternary of the leaves lowers to a short branch + `OpPhi` (0 `OpSelect` in the module); `[flatten]` instead of `[branch]` prints `Flatten` merges and dropping it `None` merges, neither if-converts. |
 
 Frozen recipe (the header pins it verbatim; no `-O`, no `-D`):
 `dxc.exe -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 post_final.comp.hlsl`.
@@ -353,13 +353,23 @@ Frozen recipe (the header pins it verbatim; no `-O`, no `-D`):
 *Byte gate:* `boyko_rhi_vulkan/tests/post_edsl_sync.rs` — the whole committed source IS the generator's
 output and each generated span the printer's; the committed `.spv` is the re-DXC of its source (SKIPs
 with an `eprintln` when no dxc resolves — **a skipped run is not a pass**); the `spirv-dis` censuses
-(three OETF `Pow`s on the gamma constant and no `Exp2`/`Log2`; two `DontFlatten` dispatch merges and no
-`float3` `OpSelect`; one `OpImageFetch`; the declared bindings and the UBO member offsets equal the
-tables); the skeleton census; the stage trace (the `post_stage_*` declarations equal
+(three OETF `Pow`s on the gamma constant and no `Exp2`/`Log2`; three `DontFlatten` merges — the RCAS
+stage and the dispatch — and no `float3` `OpSelect`; five `OpImageFetch`, one before the sharpen selection
+and four inside it; the declared bindings and the UBO member offsets equal the tables); the skeleton census; the stage trace (the `post_stage_*` declarations equal
 `POST_FINAL_STAGE_ORDER` and chain into each other); `post.rs` free of backend introspection; the
 oracle census (no non-test caller of the traced body re-composes a stage); every census also run
 against fixtures it must reject. Host oracles: `boyko_shaderdsl/tests/{post_leaves,
-post_image_oracle, post_facets}.rs`.
+post_image_oracle, post_facets}.rs`. *Render wave PX1b:* the RCAS stage moved the `.spv` 6,516 →
+14,104 bytes; its zero cost when the bit is clear is GATED by the `NoRcas` register twin
+(`boyko_rhi_vulkan/tests/post_final_occupancy.rs`: the mode word masked by `~POST_MODE_SHARPEN`, DXC'd at
+test time, never committed — 1 `OpImageFetch` against 5; on a device exposing
+`VK_KHR_pipeline_executable_properties` the register delta ≤ 8 and equal occupancy, rule (xviii)).
+
+**Render wave PX1b — `rcas.comp.{hlsl,spv}` retired.** The CAS pass (`rcas.comp.hlsl`, FidelityFX CAS on
+`display` → `aa_out` in a declared `cas` pass; it never had a row here) is deleted with
+`present/passes/rcas.rs` and its `post_chain_spv_sync.rs` row: `SharpenMode::Rcas` is `post_final`'s RCAS
+stage (the row above), `aa_out` arms only under FXAA / SMAA, and its zone id 81 is retired
+(`gpu_zone::ZONE_POST_RETIRED`).
 
 ## `taa_resolve.comp.hlsl` — the TAA temporal resolve (compute)
 
@@ -398,7 +408,7 @@ Frozen recipe: `dxc.exe -spirv -T ps_6_0 -E main -fspv-target-env=vulkan1.3 ssaa
 ## `fullscreen_sample.fs.hlsl` — the present blit (raster, render wave PX1a D-P1)
 
 One source, hand-written; **one `-D` axis, `SWAPCHAIN_SRGB`** (default 0). The present blit samples the
-display-referred image (`post_final`'s `display`, or `aa_out` under FXAA / SMAA / CAS) into the
+display-referred image (`post_final`'s `display`, or `aa_out` under FXAA / SMAA) into the
 swapchain. On an 8-bit `*_SRGB` swapchain the hardware encodes on write, so the `SWAPCHAIN_SRGB=1`
 variant returns `srgb_eotf(rgb)` first — the eDSL's piecewise sRGB decode (`boyko_shaderdsl::post::
 srgb_eotf`, spliced between `// === GENERATED srgb_eotf BEGIN/END ===` inside the `#if SWAPCHAIN_SRGB`

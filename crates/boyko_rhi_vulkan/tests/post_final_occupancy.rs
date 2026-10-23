@@ -24,6 +24,28 @@
 //! submission) is `particle_sim_occupancy.rs`'s, adapted to `post_final`'s set-0 layout — the
 //! engine's own device does not enable the extension, and must not (see that file's doc for why).
 //!
+//! Since render wave PX1b the `AcesOnly` twin's literal word also clears the sharpen bit, so its
+//! column is "the tonemapper arms AND the RCAS stage compiled out" (critique O5).
+//!
+//! # Render wave PX1b — the register twin, GATED (`px1b/cut.md` D-R10 (3), ruling 94 Q7, rule (xviii))
+//!
+//! The RCAS stage is runtime-gated code in a shared row (the one `post_final` every path runs), so
+//! its zero cost when off is a GATE, not a record: `PostFinalTwin::NoRcas` traces the same body
+//! with the mode word masked by `!POST_MODE_SHARPEN`, so DXC folds the sharpen branch away (the
+//! tonemapper stays the runtime word).
+//!
+//! - `the_no_rcas_twin_compiles_the_sharpen_branch_away` (host; SKIPS without `dxc` — a skipped
+//!   run is not a pass): the anti-vacuity — the twin's bytes differ from the committed module, it
+//!   carries ONE `OpImageFetch` against the uber module's five and one `DontFlatten` selection fewer.
+//! - `post_final_uber_and_no_rcas_twin_registers_agree` (`gpu-cap:`): rule (xviii)'s thresholds —
+//!   the statistic NAMES agree, every register statistic of the uber module is at most
+//!   [`REGISTER_DELTA_MAX`] above the twin's, every occupancy statistic is equal where reported; no
+//!   absolute count. It re-checks the anti-vacuity itself, and it PANICS where it cannot measure
+//!   (no `dxc`, no loader, no device exposing the extension, no register statistic): a gated row
+//!   that skipped is red, never green (critique W2 item 3). A red row is a PX1b defect fixed as the
+//!   next render rung, rule (xviii)'s "no revert, no merge hold"; its priced escape is a second
+//!   `post_final` pipeline chosen per frame by the host.
+//!
 //! # Usage
 //!
 //! ```text
@@ -515,10 +537,14 @@ fn find_dxc() -> Option<PathBuf> {
 /// The `PostFinalTwin::AcesOnly` twin, DXC'd under `post_final.comp.hlsl`'s frozen recipe
 /// (`-spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3`, no `-O`, no `-D`) into a scratch file.
 fn compile_twin(dxc: &PathBuf) -> Vec<u32> {
-    let hlsl = child_guard::scratch_path("post_final_aces_only.comp.hlsl");
-    let spv = child_guard::scratch_path("post_final_aces_only.comp.spv");
-    std::fs::write(&hlsl, emit_post_final_comp_with(PostFinalTwin::AcesOnly))
-        .expect("invariant: the scratch dir accepts the twin's source");
+    compile_twin_of(dxc, PostFinalTwin::AcesOnly, "post_final_aces_only")
+}
+
+/// `twin`, DXC'd under the frozen recipe into scratch files named after `stem`.
+fn compile_twin_of(dxc: &PathBuf, twin: PostFinalTwin, stem: &str) -> Vec<u32> {
+    let hlsl = child_guard::scratch_path(&format!("{stem}.comp.hlsl"));
+    let spv = child_guard::scratch_path(&format!("{stem}.comp.spv"));
+    std::fs::write(&hlsl, emit_post_final_comp_with(twin)).expect("invariant: the scratch dir accepts the twin's source");
     let status = Command::new(dxc)
         .args(["-spirv", "-T", "cs_6_0", "-E", "main", "-fspv-target-env=vulkan1.3"])
         .arg(&hlsl)
@@ -526,7 +552,7 @@ fn compile_twin(dxc: &PathBuf) -> Vec<u32> {
         .arg(&spv)
         .status_within(DXC_DEADLINE)
         .expect("invariant: dxc was located and must run");
-    assert!(status.success(), "dxc failed on the AcesOnly twin under post_final's frozen recipe");
+    assert!(status.success(), "dxc failed on the {twin:?} twin under post_final's frozen recipe");
     let bytes = std::fs::read(&spv).expect("invariant: dxc wrote the twin's .spv");
     let _ = std::fs::remove_file(&hlsl);
     let _ = std::fs::remove_file(&spv);
@@ -549,6 +575,166 @@ fn dont_flatten_count(words: &[u32]) -> usize {
         i += count;
     }
     n
+}
+
+/// The `OpImageFetch` (opcode 95) instructions of a SPIR-V module.
+fn image_fetch_count(words: &[u32]) -> usize {
+    let mut i = 5; // past the header
+    let mut n = 0;
+    while i < words.len() {
+        let (count, op) = ((words[i] >> 16) as usize, words[i] & 0xFFFF);
+        assert!(count > 0, "a zero-length SPIR-V instruction at word {i}");
+        n += usize::from(op == 95);
+        i += count;
+    }
+    n
+}
+
+/// Render wave PX1b — how far a register statistic of the uber module may exceed the `NoRcas`
+/// twin's (rule (xviii); `00-INDEX.md` §10).
+const REGISTER_DELTA_MAX: f64 = 8.0;
+
+/// `Err(why)` unless `twin` is the committed `uber` module with the sharpen branch compiled out:
+/// different bytes, ONE `OpImageFetch` against five, one `DontFlatten` selection fewer.
+fn no_rcas_anti_vacuity(uber: &[u32], twin: &[u32]) -> Result<(), String> {
+    if twin == uber {
+        return Err("the NoRcas twin's SPIR-V equals the committed module: the two columns would be one kernel".to_string());
+    }
+    let (uf, tf) = (image_fetch_count(uber), image_fetch_count(twin));
+    if (uf, tf) != (5, 1) {
+        return Err(format!("OpImageFetch: uber {uf}, NoRcas twin {tf} (want 5 and 1): the sharpen branch was not compiled out"));
+    }
+    let (ud, td) = (dont_flatten_count(uber), dont_flatten_count(twin));
+    if td + 1 != ud {
+        return Err(format!("DontFlatten selections: uber {ud}, NoRcas twin {td} (want exactly one fewer)"));
+    }
+    Ok(())
+}
+
+/// The NoRcas twin is the committed body with the sharpen stage compiled out. SKIPS without `dxc`.
+#[test]
+fn the_no_rcas_twin_compiles_the_sharpen_branch_away() {
+    let uber_text = emit_post_final_comp_with(PostFinalTwin::Uber);
+    let twin_text = emit_post_final_comp_with(PostFinalTwin::NoRcas);
+    assert_ne!(twin_text, uber_text, "the NoRcas twin must differ from the committed template");
+    assert!(twin_text.starts_with("// TEST-ONLY REGISTER TWIN"), "the twin says what it is");
+    assert!(twin_text.contains("uint post_mode_words = mode_words & 4294967293u;"), "the twin masks the sharpen bit off the runtime word");
+    let Some(dxc) = find_dxc() else {
+        eprintln!("SKIP post_final_occupancy: no dxc resolves on this host — a skipped run is NOT a pass");
+        return;
+    };
+    let twin = compile_twin_of(&dxc, PostFinalTwin::NoRcas, "post_final_no_rcas");
+    let uber = post_final_spirv();
+    if let Err(why) = no_rcas_anti_vacuity(uber, &twin) {
+        panic!("{why}");
+    }
+    // The red-first twin: the uber body itself (no mask) keeps the five fetches, so the check above
+    // cannot pass on a twin that did not fold.
+    assert!(no_rcas_anti_vacuity(uber, uber).is_err(), "the anti-vacuity must reject the unmasked module");
+    eprintln!(
+        "post_final_occupancy: OpImageFetch uber {}, no_rcas twin {}; DontFlatten {} vs {}; SPIR-V words {} vs {}",
+        image_fetch_count(uber),
+        image_fetch_count(&twin),
+        dont_flatten_count(uber),
+        dont_flatten_count(&twin),
+        uber.len(),
+        twin.len()
+    );
+}
+
+/// A statistic's numeric value (`None` for a boolean).
+fn stat_number(v: &StatValue) -> Option<f64> {
+    match *v {
+        StatValue::Bool(_) => None,
+        StatValue::I64(x) => Some(x as f64),
+        StatValue::U64(x) => Some(x as f64),
+        StatValue::F64(x) => Some(x),
+    }
+}
+
+/// Rule (xviii)'s thresholds on two reports (the uber module, its NoRcas twin): `Err(why)` when the
+/// statistic names differ, when no statistic names a register count (the row could not measure),
+/// when a register statistic of the uber module exceeds the twin's by more than
+/// [`REGISTER_DELTA_MAX`], or when an occupancy statistic differs. No absolute count is asserted.
+fn registers_agree(uber: &[(String, StatValue)], twin: &[(String, StatValue)]) -> Result<String, String> {
+    let names = |r: &[(String, StatValue)]| {
+        let mut n: Vec<String> = r.iter().map(|(k, _)| k.clone()).collect();
+        n.sort();
+        n
+    };
+    if names(uber) != names(twin) {
+        return Err(format!("the statistic sets differ: uber {:?}, twin {:?}", names(uber), names(twin)));
+    }
+    let mut seen_register = false;
+    let mut report = Vec::new();
+    for (name, uv) in uber {
+        let lower = name.to_ascii_lowercase();
+        let tv = &twin.iter().find(|(k, _)| k == name).expect("invariant: the name sets are equal").1;
+        if lower.contains("register") {
+            let (Some(u), Some(t)) = (stat_number(uv), stat_number(tv)) else {
+                return Err(format!("`{name}` is not a number on both modules ({uv} / {tv})"));
+            };
+            seen_register = true;
+            report.push(format!("{name}: uber {u}, twin {t}, delta {}", u - t));
+            if u - t > REGISTER_DELTA_MAX {
+                return Err(format!("`{name}`: the uber module uses {u}, the NoRcas twin {t} — delta {} > {REGISTER_DELTA_MAX}", u - t));
+            }
+        } else if lower.contains("occupancy") {
+            report.push(format!("{name}: uber {uv}, twin {tv}"));
+            if stat_number(uv) != stat_number(tv) {
+                return Err(format!("`{name}`: the uber module's {uv} differs from the NoRcas twin's {tv}"));
+            }
+        }
+    }
+    if !seen_register {
+        return Err(format!("no statistic names a register count ({:?}): the row cannot gate", names(uber)));
+    }
+    Ok(report.join("; "))
+}
+
+/// **Render wave PX1b — the register twin, GATED.** See the module doc.
+#[test]
+#[ignore = "gpu-cap: needs a real GPU exposing VK_KHR_pipeline_executable_properties and the pinned dxc; PX1b D-R10 (3), the post_final register twin GATED by rule (xviii) (a run that cannot measure panics); run with --nocapture"]
+fn post_final_uber_and_no_rcas_twin_registers_agree() {
+    let dxc = find_dxc().expect("GATE post_final_occupancy: no dxc resolves on this host — the gated row cannot measure, so it is red");
+    let twin = compile_twin_of(&dxc, PostFinalTwin::NoRcas, "post_final_no_rcas");
+    let uber = post_final_spirv();
+    if let Err(why) = no_rcas_anti_vacuity(uber, &twin) {
+        panic!("{why}");
+    }
+    let probe = VulkanProbe::open()
+        .expect("GATE post_final_occupancy: the probe could not open a device with VK_KHR_pipeline_executable_properties (the SKIP line above says why) — the gated row cannot measure, so it is red");
+    let reports = probe.measure(&[("uber (committed)", uber), ("no_rcas (twin)", twin.as_slice())]);
+    println!("\n=== post_final register twin (PX1b D-R10 (3), GATED by rule (xviii)) ===");
+    println!("device: {}", probe.device_name);
+    for r in &reports {
+        println!("\n[{}] {} SPIR-V words, executable \"{}\", subgroupSize {}", r.label, r.spirv_words, r.executable_name, r.subgroup_size);
+        for (name, value) in &r.stats {
+            println!("    {name:.<44} {value}");
+        }
+    }
+    assert_eq!(reports.len(), 2, "both modules must have compiled");
+    for r in &reports {
+        assert!(!r.stats.is_empty(), "[{}] the driver returned no statistics — the CAPTURE_STATISTICS bit did not take effect", r.label);
+    }
+    match registers_agree(&reports[0].stats, &reports[1].stats) {
+        Ok(summary) => println!("\nGATE green: {summary}"),
+        Err(why) => panic!("GATE red: {why}"),
+    }
+}
+
+/// The gate's comparator reds on each breach it exists for, every run (host; no GPU).
+#[test]
+fn the_register_gate_rejects_its_fixtures() {
+    let row = |pairs: &[(&str, u64)]| -> Vec<(String, StatValue)> { pairs.iter().map(|&(k, v)| (k.to_string(), StatValue::U64(v))).collect() };
+    let uber = row(&[("Register Count", 40), ("Occupancy", 16), ("Binary Size", 900)]);
+    assert!(registers_agree(&uber, &row(&[("Register Count", 32), ("Occupancy", 16), ("Binary Size", 700)])).is_ok(), "a delta of 8 is within the rule");
+    assert!(registers_agree(&uber, &row(&[("Register Count", 31), ("Occupancy", 16), ("Binary Size", 700)])).is_err(), "a delta of 9 is red");
+    assert!(registers_agree(&uber, &row(&[("Register Count", 40), ("Occupancy", 24), ("Binary Size", 900)])).is_err(), "an occupancy change is red");
+    assert!(registers_agree(&uber, &row(&[("Register Count", 40), ("Binary Size", 900)])).is_err(), "a different statistic set is red");
+    let blind = row(&[("Binary Size", 900)]);
+    assert!(registers_agree(&blind, &blind).is_err(), "a report with no register statistic cannot gate, so it is red");
+    assert!(registers_agree(&row(&[("Register Count", 24)]), &row(&[("Register Count", 40)])).is_ok(), "the uber module using FEWER registers is not a cost");
 }
 
 /// The twin is the committed body with the dispatch compiled out: the generator prints the same

@@ -15,7 +15,6 @@ mod particles;
 // Render wave PX1a: the post seam's tail dispatch (`display`), shared by all three path recorders.
 mod post_final;
 mod present_blit;
-mod rcas;
 mod scene;
 // Render wave RD1 (defect R0b): the SDF depth merge, recorded immediately before the particle draw
 // by all three path recorders (the barrier callback is what differs per path).

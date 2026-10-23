@@ -3191,8 +3191,9 @@ impl Renderer<'_> {
             unsafe { self.record_taa(cmd, targets, taa, taa_pass, scene, fi) };
         }
 
-        // Render wave PX1a: the post seam — `[ssaa_downsample] → post_final → [cas]`, each
-        // pass's derived barriers emitted first, in declaration order (D-G4).
+        // Render wave PX1a: the post seam — `[ssaa_downsample] → post_final`, each pass's derived
+        // barriers emitted first, in declaration order (D-G4). Render wave PX1b: the sharpen is
+        // `post_final`'s RCAS stage (the CAS pass is retired).
         if let Some(pass) = plan.post.ssaa_downsample {
             ts.cmd();
             self.record_graph_pass(pass, cmd, targets, scene, fi);
@@ -3212,20 +3213,6 @@ impl Renderer<'_> {
         // were just emitted; `targets` were created for `scene`; `display` is `aa_extent` large.
         ts.cmd();
         unsafe { self.record_post_final(cmd, targets, scene, aa_extent, fi) };
-        if let Some(pass) = plan.post.cas {
-            ts.cmd();
-            self.record_graph_pass(pass, cmd, targets, scene, fi);
-            if let Some(rcas) = scene.rcas.as_ref()
-                && targets.rcas_set.is_some()
-            {
-                // SAFETY: recording is open; the `cas` pass's barriers (`post_final`'s `display`
-                // write → this COMPUTE read at GENERAL) were just emitted; `aa_out`/`rcas_set`
-                // were built by `create()` under the same `scene.rcas` that gates this branch;
-                // `present_extent` sizes `display` and `aa_out` (TAA arms no SSAA).
-                ts.cmd();
-                unsafe { self.record_rcas(cmd, targets, rcas, present_extent, scene, fi) };
-            }
-        }
 
         // (5c) `present_sample`: since render wave PX1a, `display` GENERAL →
         // SHADER_READ_ONLY_OPTIMAL for the present-blit sample (and the FXAA / SMAA reads below,
@@ -3236,8 +3223,8 @@ impl Renderer<'_> {
 
         // Anti-aliasing Stage 1 (FXAA) / Stage 2 (SMAA): display-referred FRAGMENT passes over
         // `display` → `aa_out`, hand-recorded after `present_sample` (RAW barriers on `aa_out`
-        // only). `sync_gbuffer` keeps `targets.aa_out.is_some() == (scene.aa || scene.smaa ||
-        // scene.rcas)` in lockstep; CAS ran above. OFF (`aa_out` is `None`) records nothing.
+        // only). `sync_gbuffer` keeps `targets.aa_out.is_some() == AaArm::wants_aa_out` (FXAA or
+        // SMAA, render wave PX1b D-R12) in lockstep. OFF (`aa_out` is `None`) records nothing.
         if targets.aa_out.is_some() {
             if let Some(fxaa) = scene.aa.as_ref() {
                 // SAFETY: recording is open; `present_sample` above left `display` in
@@ -3256,12 +3243,12 @@ impl Renderer<'_> {
                 let zone = super::zone_arm::ZoneArm::from_scene(scene);
                 unsafe { self.record_smaa(cmd, targets, smaa, present_extent, fi, zone) };
             } else {
-                debug_assert!(scene.rcas.is_some(), "invariant: aa_out is armed but none of aa/smaa/rcas is");
+                debug_assert!(false, "invariant: aa_out is armed only under FXAA / SMAA");
             }
         }
 
         // === Pass C: present-blit `display` (`post_final`'s output, or `aa_out` when FXAA / SMAA
-        // / CAS is armed) into the swapchain. ===
+        // is armed) into the swapchain. ===
 
         // Render wave PX0: `ZONE_POST_PRESENT` brackets Pass C from the swapchain barrier through
         // `cmd_end_rendering`; the image dump, the readback copy and the present transition are

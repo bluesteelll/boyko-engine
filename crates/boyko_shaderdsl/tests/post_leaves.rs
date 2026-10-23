@@ -7,15 +7,25 @@
 //! correct `aces_hill` near its numerator root (`v ≈ 3.25·10⁻³`, where the output cancels to ≈ 0).
 //! A transcription error in a matrix entry or a rational coefficient moves the leaf by far more
 //! than that bound (≈ `10⁻⁶` relative); the run prints each leaf's worst `|err| / tol`.
+//!
+//! Render wave PX1b (`px1b/cut.md` D-T1, PC-PX1b-3): the RCAS leaves (`rcas_lobe` + `rcas_resolve`)
+//! against the f64 transcription of FSR 1's `FsrRcasF`, in reversible space, on H5's step fixtures
+//! and 10⁴ seeded crosses; the body's NaN guard against the LITERAL FSR 1 on all-black ring channels;
+//! FSR 2's reversible pair round trip; and RCAS's identity on a flat cross — each under the same
+//! running bound plus `2⁻¹²⁶`, not a fixed ULP count.
 
 mod post_f64;
 
 use boyko_shaderdsl::cf::EvalCf;
 use boyko_shaderdsl::post::{
     aces_hill, eval_params, hdr_sanitize, khronos_pbr_neutral, oetf_gamma22, pre_ratio_apply,
-    reinhard_jodie, srgb_eotf, tonemap_select,
+    rcas_lobe, rcas_resolve, reinhard_jodie, srgb_eotf, tonemap_reversible, tonemap_reversible_inverse,
+    tonemap_select,
 };
-use post_f64::{FLOOR, Tracked, aces_f64, neutral_f64, reinhard_jodie_f64, srgb_oetf_f64, ulp32};
+use post_f64::{
+    Cross, FLOOR, Tracked, aces_f64, neutral_f64, rcas_f64, rcas_fsr1_literal, rcas_lobe_f64,
+    reinhard_jodie_f64, reversible_f64, reversible_inverse_f64, srgb_oetf_f64, ulp32,
+};
 
 /// The bound's safety factor (the image oracle's `k`).
 const K: f64 = 4.0;
@@ -191,12 +201,189 @@ fn pre_ratio_apply_scales() {
     }
 }
 
+// ---- Render wave PX1b: RCAS ------------------------------------------------------------------------
+
+/// The `con` values swept: FSR 1's maximum, one stop, 1.5 stops (`rcas_sharpness = 0.25`, ≈ 0.354),
+/// FSR 2's mildest (2 stops) and none. The default `rcas_sharpness = 0.78` (`con ≈ 0.737`) lies between
+/// the first two.
+const CONS: [f32; 5] = [1.0, 0.5, 0.354, 0.25, 0.0];
+
+/// The Eval RCAS of a reversible-space cross: `(lobe, pixel)`.
+fn rcas_eval(x: Cross<[f32; 3]>, con: f32) -> (f32, [f32; 3]) {
+    let lobe = rcas_lobe::<EvalCf>(x.b, x.d, x.e, x.f, x.h, con);
+    (lobe, rcas_resolve::<EvalCf>(lobe, x.b, x.d, x.e, x.f, x.h))
+}
+
+/// The cross whose tap `k` (0 = b, 1 = d, 2 = e, 3 = f, 4 = h) is `taps[k]`.
+fn cross(taps: [[f32; 3]; 5]) -> Cross<[f32; 3]> {
+    Cross { b: taps[0], d: taps[1], e: taps[2], f: taps[3], h: taps[4] }
+}
+
+/// H5's step fixtures in reversible space — every assignment of a step's two levels to the five taps
+/// (`0.3 | 0.6` and `0.1 | 0.9`, grey and per channel, so the step edge on either side, the
+/// 3-dark/1-bright cross and its inverse, and the flat crosses are all in) — then 10⁴ seeded crosses
+/// over `[0, 1 − 2⁻¹²]` (reversible space never reaches 1: `y ≤ 64512/64513`).
+fn rcas_crosses() -> Vec<Cross<[f32; 3]>> {
+    let mut v = Vec::new();
+    for (lo, hi) in [(0.3f32, 0.6f32), (0.1, 0.9)] {
+        for mask in 0..32u32 {
+            let level = |k: u32| if (mask >> k) & 1 == 1 { hi } else { lo };
+            v.push(cross(core::array::from_fn(|k| [level(k as u32); 3])));
+            // The same step on one channel only (the lobe is the channels' max).
+            v.push(cross(core::array::from_fn(|k| [level(k as u32), 0.5, 0.2])));
+        }
+    }
+    let mut rng = Rng(0x1B_5C01);
+    let top = 1.0 - 1.0 / 4096.0;
+    for _ in 0..10_000 {
+        v.push(cross(core::array::from_fn(|_| core::array::from_fn(|_| (rng.unit() * top) as f32))));
+    }
+    v
+}
+
+/// `|got − want| ≤ K·b + 2⁻¹²⁶` per channel, collecting at most six failures.
+fn check3(what: &str, got: [f32; 3], want: [Tracked; 3], worst: &mut f64, bad: &mut Vec<String>) {
+    for ch in 0..3 {
+        let err = (f64::from(got[ch]) - want[ch].v).abs();
+        let tol = K * want[ch].b + FLOOR;
+        *worst = worst.max(err / tol);
+        let within = err <= tol;
+        if !within && bad.len() < 6 {
+            bad.push(format!("{what}[{ch}] = {:e}, f64 {:e}, |err| {err:e} > tol {tol:e}", got[ch], want[ch].v));
+        }
+    }
+}
+
+#[test]
+fn rcas_matches_f64_fsr1_on_the_step_fixtures() {
+    let mut worst = 0.0f64;
+    let mut bad: Vec<String> = Vec::new();
+    for x in rcas_crosses() {
+        for con in CONS {
+            let (lobe, got) = rcas_eval(x, con);
+            let xt = x.map(|t| t.map(Tracked::exact));
+            let want_lobe = rcas_lobe_f64(xt, Tracked::exact(con));
+            let err = (f64::from(lobe) - want_lobe.v).abs();
+            let tol = K * want_lobe.b + FLOOR;
+            worst = worst.max(err / tol);
+            let within = err <= tol;
+            if !within && bad.len() < 6 {
+                bad.push(format!("rcas_lobe({x:?}, {con}) = {lobe:e}, f64 {:e}, |err| {err:e} > tol {tol:e}", want_lobe.v));
+            }
+            check3(&format!("rcas({x:?}, {con})"), got, rcas_f64(xt, Tracked::exact(con)), &mut worst, &mut bad);
+        }
+    }
+    eprintln!("rcas: worst |err|/tol = {worst:.4}");
+    assert!(bad.is_empty(), "the RCAS leaves disagree with FSR 1's FsrRcasF in f64:\n{}", bad.join("\n"));
+}
+
+#[test]
+fn rcas_lobe_on_a_black_ring_equals_fsr1() {
+    // `px1b/cut.md` D-R3: an all-black ring channel (mx4 = 0) is FSR 1's `hitMin = 0·rcp(0)`, a NaN
+    // FSR 1 survives only through `max`'s NaN rule; the body guards it with a select instead. The
+    // reference here is FSR 1 LITERALLY, NaN and all, so the guard is checked, not assumed.
+    let mut rng = Rng(0x1B_5C02);
+    let mut cases: Vec<Cross<[f32; 3]>> = Vec::new();
+    for centre in [0.0f32, 0.25, 0.5, 0.9] {
+        cases.push(cross([[0.0; 3], [0.0; 3], [centre; 3], [0.0; 3], [0.0; 3]]));
+        for ch in 0..3 {
+            let mut taps: [[f32; 3]; 5] = core::array::from_fn(|_| core::array::from_fn(|_| (rng.unit() * 0.99) as f32));
+            for (k, t) in taps.iter_mut().enumerate() {
+                t[ch] = if k == 2 { centre } else { 0.0 };
+            }
+            cases.push(cross(taps));
+        }
+    }
+    let mut worst = 0.0f64;
+    let mut bad: Vec<String> = Vec::new();
+    for x in cases {
+        for con in CONS {
+            let (lobe, got) = rcas_eval(x, con);
+            let (want_lobe, want, nan_hit_min) = rcas_fsr1_literal(x.map(|t| t.map(f64::from)), f64::from(con));
+            assert!(nan_hit_min, "PREMISE: {x:?} drives FSR 1's hitMin through 0·rcp(0)");
+            assert!(lobe.is_finite() && got.iter().all(|v| v.is_finite()), "the body produced a non-finite value on {x:?}: lobe {lobe}, {got:?}");
+            // The tolerance is the running bound of the same cross (`Tracked`, whose lazy arm is the
+            // literal result); the VALUE compared is FSR 1's own.
+            let xt = x.map(|t| t.map(Tracked::exact));
+            let bound_lobe = rcas_lobe_f64(xt, Tracked::exact(con));
+            let tol = K * bound_lobe.b + FLOOR;
+            let err = (f64::from(lobe) - want_lobe).abs();
+            worst = worst.max(err / tol);
+            if err > tol && bad.len() < 6 {
+                bad.push(format!("rcas_lobe({x:?}, {con}) = {lobe:e}, FSR 1 {want_lobe:e}, |err| {err:e} > tol {tol:e}"));
+            }
+            let bound = rcas_f64(xt, Tracked::exact(con));
+            let literal: [Tracked; 3] = core::array::from_fn(|c| Tracked { v: want[c], b: bound[c].b });
+            check3(&format!("rcas({x:?}, {con}) vs literal FSR 1"), got, literal, &mut worst, &mut bad);
+        }
+    }
+    eprintln!("rcas black ring: worst |err|/tol = {worst:.4}");
+    assert!(bad.is_empty(), "the guarded lobe is not FSR 1's on an all-black ring channel:\n{}", bad.join("\n"));
+}
+
+#[test]
+fn tonemap_reversible_round_trips() {
+    // FSR 2's pair, both ways. Forward then inverse over the sanitized domain [0, HDR_MAX]: the
+    // inverse's floor `1 − max3(y) ≥ 1/(1 + 64512) > RCAS_INV_EPS` is never reached there (the
+    // round-trip domain of the wrap's INPUT is [0, 1/RCAS_INV_EPS − 1 = 65503]). Inverse then forward
+    // over [0, 1 − RCAS_INV_EPS].
+    let mut rng = Rng(0x1B_5C03);
+    let mut worst = 0.0f64;
+    let mut bad: Vec<String> = Vec::new();
+    let mut hdr: Vec<[f32; 3]> = (0..20_000).map(|_| core::array::from_fn(|_| rng.log2_range(-20.0, 15.977))).collect();
+    hdr.extend([[0.0; 3], [64512.0; 3], [64512.0, 0.0, 1.0], [0.0, 0.0, 10.0]]);
+    for c in hdr {
+        let got = tonemap_reversible_inverse::<EvalCf>(tonemap_reversible::<EvalCf>(c));
+        let want = reversible_inverse_f64(reversible_f64(c.map(Tracked::exact)));
+        for ch in 0..3 {
+            assert!((want[ch].v - f64::from(c[ch])).abs() <= 1e-9 * f64::from(c[ch]).max(1.0), "PREMISE: the f64 pair round-trips {c:?}");
+        }
+        check3(&format!("inverse(forward({c:?}))"), got, want, &mut worst, &mut bad);
+    }
+    let top = 1.0 - 1.0 / 65504.0;
+    let mut ys: Vec<[f32; 3]> = (0..20_000).map(|_| core::array::from_fn(|_| (rng.unit() * top) as f32)).collect();
+    ys.extend([[0.0; 3], [top as f32; 3], [top as f32, 0.0, 0.5]]);
+    for y in ys {
+        let got = tonemap_reversible::<EvalCf>(tonemap_reversible_inverse::<EvalCf>(y));
+        let want = reversible_f64(reversible_inverse_f64(y.map(Tracked::exact)));
+        check3(&format!("forward(inverse({y:?}))"), got, want, &mut worst, &mut bad);
+    }
+    eprintln!("tonemap_reversible pair: worst |err|/tol = {worst:.4}");
+    assert!(bad.is_empty(), "FSR 2's reversible pair does not round-trip within its bound:\n{}", bad.join("\n"));
+}
+
+#[test]
+fn rcas_is_the_identity_on_a_flat_cross() {
+    // On a flat cross RCAS is the identity (`(e + 4·lobe·e) / (4·lobe + 1) = e`), but NOT because the
+    // lobe vanishes: hitMin = 1/4 and hitMax = −1/4 there, so the lobe sits at its clamp −0.1875·con.
+    let mut rng = Rng(0x1B_5C04);
+    let mut worst = 0.0f64;
+    let mut bad: Vec<String> = Vec::new();
+    let mut levels: Vec<[f32; 3]> = (0..=64).map(|k| [k as f32 / 65.0; 3]).collect();
+    levels.extend((0..2000).map(|_| core::array::from_fn(|_| (rng.unit() * 0.999) as f32)));
+    for e in levels {
+        let x = cross([e; 5]);
+        for con in CONS {
+            let (lobe, got) = rcas_eval(x, con);
+            assert_eq!(lobe.to_bits(), (-0.1875f32 * con).to_bits(), "the flat lobe of {e:?} at con {con} is {lobe}, not the clamp −0.1875·con");
+            let want = e.map(|v| Tracked { v: f64::from(v), b: 0.0 });
+            let bound = rcas_f64(x.map(|t| t.map(Tracked::exact)), Tracked::exact(con));
+            let want: [Tracked; 3] = core::array::from_fn(|c| Tracked { b: bound[c].b, ..want[c] });
+            check3(&format!("rcas(flat {e:?}, {con})"), got, want, &mut worst, &mut bad);
+        }
+    }
+    eprintln!("rcas flat: worst |err|/tol = {worst:.4}");
+    assert!(bad.is_empty(), "RCAS is not the identity on a flat cross:\n{}", bad.join("\n"));
+}
+
 #[test]
 fn eval_params_reads_the_ubo_words() {
-    // The words as `PostFinalGpu` lays them out: mode_words@0, exposure_ratio@4, extent@8.
-    let words = [0x0000_0200u32, 0.5f32.to_bits(), 1920, 1080, 0xDEAD_0001, 0xDEAD_0002, 0xDEAD_0003, 0xDEAD_0004];
+    // The words as `PostFinalGpu` lays them out: mode_words@0, exposure_ratio@4, extent@8,
+    // sharpness@16 (render wave PX1b; the three reserved words after it are read by no one).
+    let words = [0x0000_0200u32, 0.5f32.to_bits(), 1920, 1080, 0.375f32.to_bits(), 0xDEAD_0002, 0xDEAD_0003, 0xDEAD_0004];
     let p = eval_params(words);
     assert_eq!(p.mode_words, 0x0000_0200, "mode_words is word 0");
     assert_eq!(p.exposure_ratio.to_bits(), 0.5f32.to_bits(), "exposure_ratio is word 1");
     assert_eq!(p.extent, [1920, 1080], "extent is words 2..4");
+    assert_eq!(p.sharpness.to_bits(), 0.375f32.to_bits(), "sharpness is word 4");
 }

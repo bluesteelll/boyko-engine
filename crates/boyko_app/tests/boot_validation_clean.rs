@@ -69,7 +69,8 @@
 //! * Configurations it does not boot: particles OUTSIDE the three RD1 workers (Forward x Sdf,
 //!   VisibilityBuffer x Sdf and Deferred x Both, each with one alpha emitter behind an SDF sphere),
 //!   `--features hwrt`, SSAO, SSAA on VisibilityBuffer, and every TAA arm but the three render wave
-//!   PX1a added beside `deferred_taa` (D-V1: `vb_taa`, `deferred_ssaa` at 2×, `deferred_taa_cas`).
+//!   PX1a added beside `deferred_taa` (D-V1: `vb_taa`, `deferred_ssaa` at 2×, `deferred_taa_cas`)
+//!   and the one render wave PX1b added (D-V1: `vb_taa_rcas`).
 //! * That `deferred_taa` booted a TAA HISTORY. Its degrade witness is `JitterState.armed`, and
 //!   `taa_hist` degrades silently: if allocating it (or its boot clear) fails after TAA is armed,
 //!   the targets drop to no history (`build_and_clear_taa_hist` returns `None`) while
@@ -193,13 +194,19 @@ enum Worker {
     /// (`lit` → `lit_native`, `loadOp = CLEAR`) and `post_final`'s GENERAL read of `lit_native`.
     DeferredSsaa,
     /// Render wave PX1a (D-V1): Deferred with TAA + CAS — the declared `cas` pass reading
-    /// `display` as a storage image at GENERAL between `post_final` and `present_sample`.
+    /// `display` as a storage image at GENERAL between `post_final` and `present_sample`. Since
+    /// render wave PX1b (D-V1): `SharpenMode::Rcas` is `post_final`'s fused RCAS stage, so this
+    /// worker validates the five-tap read of `taa_hist[fi]` through the `SampledImageAtGeneral`
+    /// binding at GENERAL (the pool's frame-boundary layout, AD-15).
     DeferredTaaCas,
+    /// Render wave PX1b (D-V1): `VisibilityBuffer × Mesh` with TAA and `SharpenMode::Rcas` — the
+    /// fused RCAS read of `taa_hist[fi]` on the VB path (`vb_taa` stays sharpen-off).
+    VbTaaRcas,
 }
 
 impl Worker {
     /// Spawn order: the canary first, so a deaf oracle is the first line of the report.
-    const ALL: [Worker; 16] = [
+    const ALL: [Worker; 17] = [
         Worker::Canary,
         Worker::VbFroxel,
         Worker::ForwardBoth,
@@ -216,6 +223,7 @@ impl Worker {
         Worker::VbTaa,
         Worker::DeferredSsaa,
         Worker::DeferredTaaCas,
+        Worker::VbTaaRcas,
     ];
 
     /// The `#[test]` fn name the driver passes to `--exact`.
@@ -237,6 +245,7 @@ impl Worker {
             Worker::VbTaa => "boot_validation_worker_vb_taa",
             Worker::DeferredSsaa => "boot_validation_worker_deferred_ssaa",
             Worker::DeferredTaaCas => "boot_validation_worker_deferred_taa_cas",
+            Worker::VbTaaRcas => "boot_validation_worker_vb_taa_rcas",
         }
     }
 
@@ -595,7 +604,7 @@ fn run_worker(worker: Worker) {
     }
     match worker {
         Worker::Canary | Worker::DeferredSmaa | Worker::DeferredTaa | Worker::DeferredSsaa | Worker::DeferredTaaCas => {}
-        Worker::VbTaa => {
+        Worker::VbTaa | Worker::VbTaaRcas => {
             app.insert_resource(RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Mesh });
         }
         Worker::VbFroxel => {
@@ -637,10 +646,10 @@ fn run_worker(worker: Worker) {
     if worker == Worker::DeferredSmaa {
         app.insert_resource(AaConfig { mode: AaMode::Smaa });
     }
-    if matches!(worker, Worker::DeferredTaa | Worker::VbTaa | Worker::DeferredTaaCas) {
+    if matches!(worker, Worker::DeferredTaa | Worker::VbTaa | Worker::DeferredTaaCas | Worker::VbTaaRcas) {
         app.insert_resource(AaConfig { mode: AaMode::Taa });
     }
-    if worker == Worker::DeferredTaaCas {
+    if matches!(worker, Worker::DeferredTaaCas | Worker::VbTaaRcas) {
         app.insert_resource(TaaConfig { sharpen: SharpenMode::Rcas, ..TaaConfig::default() });
     }
     if worker == Worker::DeferredSsaa {
@@ -760,6 +769,13 @@ fn run_worker(worker: Worker) {
                     && app.world().try_resource::<JitterState>().is_some_and(|j| j.armed)
                     && app.world().try_resource::<TaaConfig>().is_some_and(|t| t.sharpen == SharpenMode::Rcas),
             ),
+            // Render wave PX1b (D-V1).
+            Worker::VbTaaRcas => (
+                "VB with TAA armed and SharpenMode::Rcas",
+                resolved.path == RenderPath::VisibilityBuffer
+                    && app.world().try_resource::<JitterState>().is_some_and(|j| j.armed)
+                    && app.world().try_resource::<TaaConfig>().is_some_and(|t| t.sharpen == SharpenMode::Rcas),
+            ),
             Worker::Canary => unreachable!("invariant: the canary took the branch above"),
         };
         assert!(
@@ -874,6 +890,12 @@ fn boot_validation_worker_deferred_ssaa() {
 #[ignore = "gpu-windowed: worker spawned by every_validated_boot_is_clean; returns at once unless BOYKO_BOOT_VALIDATION_DRIVEN is set"]
 fn boot_validation_worker_deferred_taa_cas() {
     run_worker(Worker::DeferredTaaCas);
+}
+
+#[test]
+#[ignore = "gpu-windowed: worker spawned by every_validated_boot_is_clean; returns at once unless BOYKO_BOOT_VALIDATION_DRIVEN is set"]
+fn boot_validation_worker_vb_taa_rcas() {
+    run_worker(Worker::VbTaaRcas);
 }
 
 // ===============================================================================================

@@ -11,6 +11,7 @@
 //!   read of the 0×0 disabled-row stand-in PANIC (always on, not a `debug_assert!`): an Eval `Load`
 //!   that silently clamped would hide a body without its border clamp, and a flattened `y·w + x` at
 //!   `x = w` would silently read the next row.
+//! - **`usub` on Eval** (render wave PX1b) — the modular `uint` subtract RCAS's border clamp reads.
 //! - **Emit** (`feature = "emit"`) — each facet's exact HLSL spelling.
 
 use boyko_shaderdsl::cf::{Cf, EvalCf, HostTex2, HostTex3};
@@ -174,6 +175,16 @@ fn tex2_load_negative_coordinate_panics() {
 fn tex2_load_on_the_disabled_stand_in_panics() {
     // A disabled binding row resolves to the 0×0 stand-in: ANY read of it is a red.
     let _ = <EvalCf as Cf>::tex2_load(HostTex2::EMPTY, 0, 0);
+}
+
+#[test]
+fn eval_usub_wraps_like_hlsls_isub() {
+    // Render wave PX1b (`px1b/cut.md` D-R6, O10): RCAS's border clamp `min(x − 1u, x)` relies on
+    // `0u − 1u` wrapping to `0xFFFFFFFF` (SPIR-V's modular `OpISub`), so Eval must wrap too — never a
+    // debug-build overflow panic, never a saturating 0 (which would hide a missing clamp).
+    assert_eq!(<EvalCf as Cf>::usub(0, 1), u32::MAX, "0u - 1u wraps");
+    assert_eq!(<EvalCf as Cf>::usub(7, 3), 4, "an in-range uint subtract");
+    assert_eq!(<EvalCf as Cf>::umin(<EvalCf as Cf>::usub(0, 1), 0), 0, "the clamp's left edge: min(0u - 1u, 0u) = 0");
 }
 
 #[cfg(feature = "emit")]

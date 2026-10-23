@@ -15,12 +15,14 @@
 //!   pass) is `present_sample`'s FRAGMENT read at that layout;
 //! - **the order**: `post_final` follows every `lit` producer (`taa_resolve` under TAA,
 //!   `ssaa_downsample` under SSAA, `particle_draw` when particles run) and precedes `present_sample`;
-//!   the CAS sharpen is a declared `cas` pass between them iff it is armed, reading `display` at
-//!   `COMPUTE / GENERAL` (D-G3); under SSAA `ssaa_downsample` writes `lit_native` as a colour
-//!   attachment;
+//!   no frame declares a `cas` pass — render wave PX1b (`px1b/cut.md` D-T3): the sharpen is
+//!   `post_final`'s RCAS stage behind the mode word's `POST_MODE_SHARPEN` bit, and the CAS pass is
+//!   retired; under SSAA `ssaa_downsample` writes `lit_native` as a colour attachment;
 //! - **`[config]` carries the frame's `PostFinalGpu`** under `post::POST_FINAL_RECEIPT_KEYS` (D-O3):
 //!   an exposure ratio of exactly 1.0 and the dispatch extent — `display`'s extent, the native one
-//!   only on a frame that runs the SSAA downsample (D-G1).
+//!   only on a frame that runs the SSAA downsample (D-G1); and (PX1b) under TAA + sharpen `rcas = 1`,
+//!   `post_word0` carrying `POST_MODE_SHARPEN` and `post_word4` (RCAS's `con`) in `[0.25, 1]`, while
+//!   every other frame has `rcas = 0` and the bit clear.
 //!
 //! One driver reads images instead of the receipt (review r2 R2-W1): on Forward under a boot-armed
 //! SSAA it dumps `lit` and `display` and requires [`check_presents_the_whole_scene`] — `display`,
@@ -43,7 +45,7 @@ use boyko_rhi_vulkan::ffi::{
     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 };
-use boyko_shaderdsl::post::POST_FINAL_RECEIPT_KEYS;
+use boyko_shaderdsl::post::{POST_FINAL_RECEIPT_KEYS, POST_MODE_SHARPEN};
 
 use graph_receipt::{
     ENV_DDGI, ENV_INTERP, ENV_PARTICLES, ENV_PATH, ENV_TAA, ENV_UPLOAD, OBS_WIN, ObsArming, Receipt,
@@ -217,23 +219,9 @@ fn check_post_seam(r: &Receipt, aa: Aa, particles: bool, display_edge: u32) -> R
             return Err(format!("`{p}` is declared after post_final"));
         }
     }
-    let cas = pass_index(&passes, "cas");
-    match (aa, cas) {
-        (Aa::TaaCas, None) => return Err("TAA + CAS declares no `cas` pass".to_owned()),
-        (Aa::TaaCas, Some(c)) => {
-            if !(post < c && c < present) {
-                return Err("`cas` is not between post_final and present_sample".to_owned());
-            }
-            let read = acc
-                .iter()
-                .find(|a| a.pass == c && a.res == display.index)
-                .ok_or("`cas` does not read display")?;
-            if read.stage != u64::from(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT) || read.layout != i64::from(VK_IMAGE_LAYOUT_GENERAL) {
-                return Err(format!("`cas` reads display as {read:?}, not a COMPUTE read at GENERAL"));
-            }
-        }
-        (_, Some(_)) => return Err(format!("a `cas` pass on a {aa:?} frame")),
-        (_, None) => {}
+    // Render wave PX1b (D-T3): the sharpen is `post_final`'s RCAS stage; no frame declares `cas`.
+    if pass_index(&passes, "cas").is_some() {
+        return Err(format!("a `cas` pass on a {aa:?} frame"));
     }
     if aa == Aa::Ssaa {
         let ds = pass_index(&passes, "ssaa_downsample").ok_or("no pass `ssaa_downsample`")?;
@@ -260,6 +248,25 @@ fn check_post_seam(r: &Receipt, aa: Aa, particles: bool, display_edge: u32) -> R
     let (w, h) = (r.config(POST_FINAL_RECEIPT_KEYS[2]), r.config(POST_FINAL_RECEIPT_KEYS[3]));
     if w != u64::from(display_edge) || h != u64::from(display_edge) {
         return Err(format!("[config] post_word2/3 (extent) = {w}x{h}, not the {display_edge}^2 display"));
+    }
+    // Render wave PX1b (D-T3, D-R15): the sharpen is the mode word's bit 1 and the `sharpness` word,
+    // and the receipt's `rcas` key says whether the bit was set.
+    let rcas = cfg.get("rcas").ok_or("[config] has no `rcas`")?;
+    let w0 = r.config(POST_FINAL_RECEIPT_KEYS[0]);
+    let bit = w0 & u64::from(POST_MODE_SHARPEN) != 0;
+    if aa == Aa::TaaCas {
+        if rcas != "1" {
+            return Err(format!("[config] rcas = {rcas} on a TAA + sharpen frame, not 1"));
+        }
+        if !bit {
+            return Err(format!("[config] post_word0 = {w0:#x} lacks POST_MODE_SHARPEN on a TAA + sharpen frame"));
+        }
+        let con = f32::from_bits(u32::try_from(r.config(POST_FINAL_RECEIPT_KEYS[4])).map_err(|e| e.to_string())?);
+        if !(0.25..=1.0).contains(&con) {
+            return Err(format!("[config] post_word4 (sharpness) = {con}, not RCAS's con in [0.25, 1]"));
+        }
+    } else if bit || rcas != "0" {
+        return Err(format!("[config] post_word0 = {w0:#x}, rcas = {rcas} on a {aa:?} frame: the sharpen bit is set without TAA + sharpen"));
     }
     Ok(())
 }
@@ -392,12 +399,18 @@ const CS: u64 = 0x800;
 const FS: u64 = 0x80;
 
 /// A receipt with resources `lit` (0), `taa_hist` (1), `display` (2) and the given passes /
-/// accesses `(pass, res, stage, access, layout)`.
+/// accesses `(pass, res, stage, access, layout)`, sharpen off.
 fn fixture_receipt(passes: &[&str], accesses: &[(u64, u64, u64, u64, i64)], post_words: bool) -> Receipt {
-    let mut t = String::from("schema_version = 1\n\n[config]\npath = 0\n");
-    if post_words {
+    fixture_receipt_with(passes, accesses, post_words.then_some((0, 0)), 0)
+}
+
+/// [`fixture_receipt`] with `post_word0` / `post_word4` (`words`, `None` = no post words) and the
+/// `rcas` key given.
+fn fixture_receipt_with(passes: &[&str], accesses: &[(u64, u64, u64, u64, i64)], words: Option<(u32, u32)>, rcas: u32) -> Receipt {
+    let mut t = format!("schema_version = 1\n\n[config]\npath = 0\nrcas = {rcas}\n");
+    if let Some((w0, w4)) = words {
         t.push_str(&format!(
-            "post_word0 = 0\npost_word1 = {}\npost_word2 = {OBS_WIN}\npost_word3 = {OBS_WIN}\npost_word4 = 0\npost_word5 = 0\npost_word6 = 0\npost_word7 = 0\n",
+            "post_word0 = {w0}\npost_word1 = {}\npost_word2 = {OBS_WIN}\npost_word3 = {OBS_WIN}\npost_word4 = {w4}\npost_word5 = 0\npost_word6 = 0\npost_word7 = 0\n",
             1.0f32.to_bits()
         ));
     }
@@ -437,6 +450,14 @@ fn the_seam_check_accepts_a_correct_frame() {
         true,
     );
     check_post_seam(&taa, Aa::Taa, false, OBS_WIN).expect("a correct TAA frame");
+    // Render wave PX1b: TAA + sharpen — no `cas` pass, `rcas = 1`, the bit and RCAS's `con`.
+    let sharpened = fixture_receipt_with(
+        &["resolve", "taa_resolve", "post_final", "present_sample"],
+        &[(1, 1, CS, 0x40, GENERAL), (2, 1, CS, 0x20, GENERAL), (2, 2, CS, 0x40, GENERAL), (3, 2, FS, 0x20, SRO)],
+        Some((POST_MODE_SHARPEN, 0.354f32.to_bits())),
+        1,
+    );
+    check_post_seam(&sharpened, Aa::TaaCas, false, OBS_WIN).expect("a correct TAA + sharpen frame");
 }
 
 #[test]
@@ -474,6 +495,26 @@ fn the_seam_check_rejects_each_broken_frame() {
         true,
     );
     assert!(red(cas, Aa::Off).contains("`cas` pass"));
+    // Render wave PX1b: the retired CAS pass on a TAA + sharpen frame, the bit missing under TAA +
+    // sharpen, the bit set without it, and a `con` outside FSR 2's remap.
+    let taa_passes = ["resolve", "taa_resolve", "post_final", "present_sample"];
+    let taa_access = [(1, 1, CS, 0x40, GENERAL), (2, 1, CS, 0x20, GENERAL), (2, 2, CS, 0x40, GENERAL), (3, 2, FS, 0x20, SRO)];
+    let con = 0.354f32.to_bits();
+    let retired = fixture_receipt_with(
+        &["resolve", "taa_resolve", "post_final", "cas", "present_sample"],
+        &[(1, 1, CS, 0x40, GENERAL), (2, 1, CS, 0x20, GENERAL), (2, 2, CS, 0x40, GENERAL), (3, 2, CS, 0x20, GENERAL), (4, 2, FS, 0x20, SRO)],
+        Some((POST_MODE_SHARPEN, con)),
+        1,
+    );
+    assert!(red(retired, Aa::TaaCas).contains("a `cas` pass on a TaaCas frame"));
+    let bitless = fixture_receipt_with(&taa_passes, &taa_access, Some((0, con)), 1);
+    assert!(red(bitless, Aa::TaaCas).contains("lacks POST_MODE_SHARPEN"));
+    let stray = fixture_receipt_with(&taa_passes, &taa_access, Some((POST_MODE_SHARPEN, con)), 1);
+    assert!(red(stray, Aa::Taa).contains("without TAA + sharpen"));
+    let weak = fixture_receipt_with(&taa_passes, &taa_access, Some((POST_MODE_SHARPEN, 0.1f32.to_bits())), 1);
+    assert!(red(weak, Aa::TaaCas).contains("post_word4"));
+    let unreported = fixture_receipt_with(&taa_passes, &taa_access, Some((POST_MODE_SHARPEN, con)), 0);
+    assert!(red(unreported, Aa::TaaCas).contains("rcas = 0"));
     // C11: the test-only NaN injection declared on a production run (no force key armed).
     let injected = fixture_receipt(
         &["resolve", "test_nan_inject", "post_final", "present_sample"],

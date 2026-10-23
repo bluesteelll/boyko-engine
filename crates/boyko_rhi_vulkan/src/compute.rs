@@ -482,12 +482,14 @@ embed_spirv! {
     /// Anti-aliasing Stage 4 (TAA) — the temporal-resolve reproject+accumulate SPIR-V
     /// (`shaders/taa_resolve.comp.hlsl`, Option B). Modeled on [`SHADOW_TEMPORAL_SPV`]'s
     /// algorithm (reproject → neighborhood clamp → confidence-adaptive feedback →
-    /// disocclusion reset), generalized scalar→RGB. Bound to its OWN 8-binding layout {
+    /// disocclusion reset), generalized scalar→RGB. Bound to its OWN 7-binding layout {
     /// @0 `gLit` COMBINED_IMAGE_SAMPLER (current LDR color), @1 `gViewT` r32f read (the depth
     /// proxy the camera-only MV ray marches by), @2 `gHistIn` rgba16f read (`taa_hist[1-fi]`,
-    /// the framegraph's C1-fix read-sibling), @3 `gHistOut` rgba16f write (`taa_hist[fi]`), @4
-    /// `gAaOut` rgba8 write (the present-blit's input), @5 the `ResolvedTaa` tunables UBO (16
-    /// B), @6 the shared 80-byte Camera UBO (UNJITTERED — C1 cut), @7 the `MotionCam` UBO
+    /// the framegraph's C1-fix read-sibling), @3 `gHistOut` rgba16f write (`taa_hist[fi]` — the
+    /// resolve's only output since render wave PX1a, `post_final`'s scene input and, under its
+    /// sharpen bit, the image its RCAS stage reads; @4, the retired `gAaOut`, is a hole), @5 the
+    /// `ResolvedTaa` tunables UBO (48 B since rung T2), @6 the shared 80-byte Camera UBO
+    /// (UNJITTERED — C1 cut), @7 the `MotionCam` UBO
     /// (`boyko_render::motion_cam`, 128 B) } + a 4-byte `{ uint reset; }` push constant
     /// (`boyko_render::taa_state::TaaState`). NOT `hwrt`-gated (TAA works on the pure-software
     /// leg — its motion vector is reconstructed from `gViewT`, never a `rayQuery` trace).
@@ -503,26 +505,15 @@ embed_spirv! {
 }
 
 embed_spirv! {
-    /// Anti-aliasing Stage 4 (TAA rung T3) — the post-resolve CONTRAST-ADAPTIVE SHARPEN SPIR-V
-    /// (`shaders/rcas.comp.hlsl`, AMD FidelityFX CAS). Since render wave PX1a the
-    /// `SharpenMode::Rcas` pass reads `display` (`post_final`'s output) and writes `aa_out` (the
-    /// present-blit's input). Bound to its OWN 2-binding layout { @0 `gRcasIn` rgba8 STORAGE read
-    /// (`display`), @1 `gAaOut` rgba8 STORAGE write } + a 16-byte COMPUTE
-    /// push range `{ uint img_w; uint img_h; float sharpness; uint _pad; }`. NOT recorded on
-    /// `SharpenMode::None` (the default — the resolve writes `aa_out` directly, the structural
-    /// 0%-gate). The const-asserted length is the anti-drift guard.
-    RCAS_SPV,
-    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/rcas.comp.spv")
-}
-
-embed_spirv! {
     /// Render wave PX1a: the post chain's final pass, `post_final` (`shaders/post_final.comp.hlsl`,
     /// GENERATED WHOLE from `boyko_shaderdsl::post` — render wave PXe; `tests/post_edsl_sync.rs`
     /// byte-gates both files). Per pixel: one fetch of the scene input (`taa_hist[fi]` under TAA,
     /// `lit_native` under SSAA, `lit[fi]` otherwise), then `hdr_sanitize` → the exposure ratio →
-    /// the selected tonemap → the gamma OETF, stored to `display`. Three bindings
-    /// (`POST_FINAL_BINDINGS`: `gScene` @0, `gDisplay` @1, the 32-byte `PostFinal` UBO @2),
-    /// `numthreads(8, 8, 1)`.
+    /// (render wave PX1b, only under the mode word's `POST_MODE_SHARPEN` bit, a `[branch]`) FSR 1
+    /// RCAS over the border-clamped cross — four more fetches of the same image, in FSR 2's
+    /// reversible space, at the `sharpness` word's `con` → the selected tonemap → the gamma OETF,
+    /// stored to `display`. Three bindings (`POST_FINAL_BINDINGS`: `gScene` @0, `gDisplay` @1, the
+    /// 32-byte `PostFinal` UBO @2), `numthreads(8, 8, 1)`.
     POST_FINAL_COMP_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/post_final.comp.spv")
 }
@@ -1750,24 +1741,13 @@ pub fn shadow_temporal_spirv() -> &'static [u32] {
 
 /// Anti-aliasing Stage 4 (TAA) — the temporal-resolve SPIR-V as a `u32` word stream, ready for
 /// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Bound to its
-/// own 8-binding layout (see [`TAA_RESOLVE_SPV`]'s doc for the full binding contract). NOT
+/// own 7-binding layout (see [`TAA_RESOLVE_SPV`]'s doc for the full binding contract). NOT
 /// `hwrt`-gated. Bound at boot (W5) by `boyko_app::gpu_scene::GpuSceneBundles::boot` into
 /// `taa_resolve_pipeline`, dispatched by `crate::present::passes::taa::Renderer::record_taa`
 /// when `GBufferScene::taa.is_some()`.
 #[inline]
 pub fn taa_resolve_spirv() -> &'static [u32] {
     TAA_RESOLVE_SPV.as_words()
-}
-
-/// The TAA rung T3 CONTRAST-ADAPTIVE SHARPEN (AMD FidelityFX CAS) compute SPIR-V, for
-/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Bound to its
-/// own 2-binding layout + a 16-byte COMPUTE push range (see [`RCAS_SPV`]'s doc for the full
-/// binding contract). NOT `hwrt`-gated. Bound at boot by `boyko_app::gpu_scene` into the
-/// `rcas_pipeline`, dispatched by `crate::present::passes::rcas::Renderer::record_rcas` when
-/// `GBufferScene`'s `SharpenMode::Rcas` is armed.
-#[inline]
-pub fn rcas_spirv() -> &'static [u32] {
-    RCAS_SPV.as_words()
 }
 
 /// Render wave PX1a: the `post_final` SPIR-V (see [`POST_FINAL_COMP_SPV`]), bound at boot by
@@ -4282,59 +4262,6 @@ impl ViewtFromDepthRzPush {
     #[inline]
     pub const fn new(img_w: u32, img_h: u32, view_z_a: f32, view_z_b: f32) -> Self {
         Self { img_w, img_h, view_z_a, view_z_b }
-    }
-
-    /// Re-views the push constants as their raw 16-byte slice for `push_constants`.
-    #[inline]
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` fields (all `Copy`, every
-        // offset + the 16-byte total pinned by the const-asserts above, no uninit padding),
-        // so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern.
-        // The `&self` borrow keeps the struct alive for the slice's lifetime; read-only.
-        unsafe {
-            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
-        }
-    }
-}
-
-/// TAA rung T3: the post-resolve RCAS sharpen compute pass's OWN push constant
-/// (`shaders/rcas.comp.hlsl`) — mirrors [`ClusterCullPush`]'s `#[repr(C)]`, 16-byte,
-/// const-asserted-offset shape. Unlike the resolve, RCAS binds no camera UBO (a pure
-/// image-space kernel — see `rcas.comp.hlsl`'s module doc), so the runtime extent rides the
-/// push alongside the owner-set sharpness:
-///
-///   offset  0 : u32  img_w      runtime extent width  (0 => the shader's `IMG_W_DEFAULT`)
-///   offset  4 : u32  img_h      runtime extent height (0 => the shader's `IMG_H_DEFAULT`)
-///   offset  8 : f32  sharpness  `[0, 1]`: 0 = mild (peak `-1/8`), 1 = strong (peak `-1/5`)
-///   offset 12 : u32  _pad       keeps the range a round 16 bytes; unread
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RcasPush {
-    /// Render extent width — the dispatch bounds `idx < img_w * img_h`.
-    pub img_w: u32,
-    /// Render extent height.
-    pub img_h: u32,
-    /// The owner-set `SharpenMode::Rcas` (boyko_render's) strength in
-    /// `[0, 1]` (`boyko_render::taa_config::TaaConfig::rcas_sharpness`).
-    pub sharpness: f32,
-    /// Padding to a round 16-byte push range; unread by the shader.
-    pub _pad: u32,
-}
-
-/// Byte size of [`RcasPush`] — the RCAS pipeline's declared COMPUTE push range (16 B).
-pub const RCAS_PUSH_BYTES: u32 = core::mem::size_of::<RcasPush>() as u32;
-
-const _: () = assert!(core::mem::offset_of!(RcasPush, img_w) == 0);
-const _: () = assert!(core::mem::offset_of!(RcasPush, img_h) == 4);
-const _: () = assert!(core::mem::offset_of!(RcasPush, sharpness) == 8);
-const _: () = assert!(core::mem::offset_of!(RcasPush, _pad) == 12);
-const _: () = assert!(RCAS_PUSH_BYTES == 16, "RcasPush must be 16 bytes");
-
-impl RcasPush {
-    /// Builds the push from the runtime extent + the owner-set sharpness.
-    #[inline]
-    pub const fn new(img_w: u32, img_h: u32, sharpness: f32) -> Self {
-        Self { img_w, img_h, sharpness, _pad: 0 }
     }
 
     /// Re-views the push constants as their raw 16-byte slice for `push_constants`.

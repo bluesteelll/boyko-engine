@@ -17,7 +17,9 @@
 //! frozen recipe pinned in its header and commit the `.spv`.
 //! `boyko_rhi_vulkan/tests/post_edsl_sync.rs` pins the committed `.hlsl` to this template, the
 //! committed `.spv` to a fresh re-DXC of its source, and the module's structure (the OETF `Pow`s,
-//! the `[branch]` dispatch, the one fetch, the declared bindings, the stage trace).
+//! the `[branch]` RCAS stage and dispatch, the fetch structure — the scene texel once, RCAS's four
+//! ring taps inside the sharpen branch (render wave PX1b) — the declared bindings, the stage
+//! trace).
 //! `boyko_rhi_vulkan/tests/post_chain_spv_sync.rs` pins every spliced span to
 //! `emit::post_splices()` and each spliced shader's `.spv` to its re-DXC.
 //!

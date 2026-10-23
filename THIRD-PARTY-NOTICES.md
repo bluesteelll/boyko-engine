@@ -94,6 +94,84 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## AMD FidelityFX FSR 1 RCAS and FSR 2 reversible tonemap
+
+- **Files:** the items named below, not the rest of each file, which is this project's own.
+  - `crates/boyko_shaderdsl/src/post.rs`: the constants `RCAS_LIMIT` (FSR 1's `FSR_RCAS_LIMIT`)
+    and `RCAS_INV_EPS` (FSR 2's `FSR2_TONEMAP_EPSILON`); the leaves `tonemap_reversible` and
+    `tonemap_reversible_inverse` (FSR 2's `Tonemap` and `InverseTonemap`); the leaves `rcas_lobe`
+    and `rcas_resolve` (FSR 1's `FsrRcasF`)
+  - `crates/boyko_rhi_vulkan/shaders/post_final.comp.hlsl`, generated from those leaves by
+    `emit_post`, and `crates/boyko_rhi_vulkan/shaders/post_final.comp.spv`, compiled from it
+  - `crates/boyko_render/src/taa_config.rs`: `TaaConfig::rcas_con` (FSR 2's sharpness remap in
+    `ffx_fsr2.cpp` and FSR 1's `FsrRcasCon`)
+  - `crates/boyko_shaderdsl/tests/post_f64/mod.rs`: the f64 test oracle's RCAS and reversible-pair
+    functions and their constants
+- **Upstream:**
+  - FSR 1: <https://github.com/GPUOpen-Effects/FidelityFX-FSR> (`ffx-fsr/ffx_fsr1.h`)
+  - FSR 2: <https://github.com/GPUOpen-Effects/FidelityFX-FSR2>
+    (`src/ffx-fsr2-api/shaders/ffx_fsr2_common.h` and `src/ffx-fsr2-api/ffx_fsr2.cpp`)
+
+  The functions are transcribed into the shader eDSL's Rust and into f64 test code. They keep the
+  upstream operand order and the upstream constants. No upstream source file is present in this
+  repository.
+- **License:** MIT
+- **Copyright:**
+  - Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved. (FSR 1)
+  - Copyright (c) 2022-2023 Advanced Micro Devices, Inc. All rights reserved. (FSR 2)
+
+Full license text of FSR 1 (`license.txt`,
+<https://github.com/GPUOpen-Effects/FidelityFX-FSR/blob/master/license.txt>):
+
+```text
+Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
+Full license text of FSR 2 (`LICENSE.txt`,
+<https://github.com/GPUOpen-Effects/FidelityFX-FSR2/blob/master/LICENSE.txt>):
+
+```text
+FidelityFX Super Resolution 2.2
+=================================
+Copyright (c) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
 ## Jolt Physics-derived material
 
 - **Files:**
@@ -616,8 +694,6 @@ which forbid distributing them under any other licence.
 The items below carry no license obligation: they are re-derivations, numeric data or
 algorithms, credited as sources.
 
-- **AMD FidelityFX CAS** (Contrast-Adaptive Sharpening, MIT, Advanced Micro Devices):
-  `crates/boyko_rhi_vulkan/shaders/rcas.comp.hlsl` is a simplified re-derivation, not a copy.
 - **Stephen Hill's ACES fit**, with the coefficients as published in MJP's BakingLab (MIT): the
   `ACES_IN` / `ACES_OUT` matrices and `aces_fitted` in
   `crates/boyko_rhi_vulkan/shaders/pbr_lighting.hlsli`, mirrored by the host oracle in

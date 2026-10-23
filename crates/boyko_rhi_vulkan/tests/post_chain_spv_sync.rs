@@ -27,9 +27,8 @@ mod child_guard;
 use child_guard::{BoundedRun, DXC_DEADLINE};
 
 /// `(source, profile, -D defines, committed .spv)`.
-const SHADERS: [(&str, &str, &[&str], &str); 9] = [
+const SHADERS: [(&str, &str, &[&str], &str); 8] = [
     ("taa_resolve.comp.hlsl", "cs_6_0", &[], "taa_resolve.comp.spv"),
-    ("rcas.comp.hlsl", "cs_6_0", &[], "rcas.comp.spv"),
     ("ssaa_downsample.fs.hlsl", "ps_6_0", &[], "ssaa_downsample.fs.spv"),
     ("fullscreen_sample.fs.hlsl", "ps_6_0", &[], "fullscreen_sample.fs.spv"),
     ("fullscreen_sample.fs.hlsl", "ps_6_0", &["SWAPCHAIN_SRGB=1"], "fullscreen_sample_srgb.fs.spv"),

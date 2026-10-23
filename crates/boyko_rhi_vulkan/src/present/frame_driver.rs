@@ -1380,7 +1380,8 @@ pub const FRAME_GRAPH_CAPACITY: FrameGraphCapacity =
 /// here claimed they did; render wave PX0 corrected it). SkyLight presence is `light_sky` (PX0,
 /// D-F1): the frame's light table holds a SKY row in its front block, the resolve's own `has_sky`
 /// predicate. `vb_classified` (PX0) is `path_vb_fused() ∧ vb_use_classified` — the `vb_shade` vs
-/// `vb_resolve` producer choice.
+/// `vb_resolve` producer choice. `rcas` (render wave PX1b, D-R15) is "RCAS ran this frame": the
+/// mode word's sharpen bit (`GBufferScene::post_rcas`) — the retired CAS pass's activation before.
 pub const RECEIPT_CONFIG_KEYS: [&str; RECEIPT_CONFIG_LEN] = [
     "path",
     "legs",
@@ -1511,7 +1512,7 @@ impl ReceiptConfig {
             u32::from(scene.aa.is_some()),
             u32::from(scene.smaa.is_some()),
             u32::from(scene.ssaa.is_some()),
-            u32::from(scene.rcas.is_some()),
+            u32::from(scene.post_rcas()),
             u32::from(scene.hzb.is_some()),
             u32::from(tlas),
             u32::from(shadow_vis),
