@@ -21,8 +21,12 @@
 //!   evaluates the same traced body, so it cannot see a composition error it shares.
 //! - **(b) acutance (Deferred)** — the mean AND the median per-row 10–90 % width across the HDR edge
 //!   (and, separately, the LDR edge) are strictly smaller with sharpen on than off. Premises: the
-//!   two runs' `taa_hist` bursts are byte-equal (RCAS never feeds the history) and every sharpen-off
-//!   width is at least 1 px (there is an edge to sharpen).
+//!   two runs' `taa_hist` bursts are byte-equal (RCAS never feeds the history) and at least
+//!   [`ROWS_MIN`] sharpen-off rows of each edge are a ramp, at least [`RAMP_MIN_PX`] wide (there is
+//!   an edge to sharpen). Not every row: the bars' edges step across the pixel grid, and a row the
+//!   converged history resolves to a one-pixel step measures 0.8 px — the 10–90 % width of a hard
+//!   step, which RCAS can only overshoot (at PX1b's C5: 29 of the HDR edge's 56 rows, 13 of the LDR
+//!   edge's 56, the first at 0.873 px). The two statistics still span every row.
 //!
 //! The bound is spelled here as `px1a_taa_accumulation.rs` spells it (the PX1a eval-post pin's
 //! precedent: `post_eval.rs` `channel_bound` with no filter row, the scene input being a `Load`);
@@ -76,6 +80,10 @@ const EDGE_MIN: usize = 100;
 const ROWS_MIN: usize = 10;
 /// (b): an edge row's plateaus must differ by at least this many display codes.
 const STEP_MIN: f64 = 40.0;
+/// (b): a sharpen-off row at least this wide is a ramp — its edge spans more than one pixel, so RCAS
+/// has a slope to steepen. A row resolved to a one-pixel step measures 0.8 px (both crossings fall in
+/// its one pixel interval), and RCAS narrows it only by overshooting it.
+const RAMP_MIN_PX: f64 = 1.0;
 
 /// One worker configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -392,11 +400,20 @@ fn check_acutance(on: &Run, off: &Run) -> Result<String, String> {
         if w_on.len() < ROWS_MIN || w_off.len() < ROWS_MIN {
             return Err(format!("PREMISE: the {name} edge spans {} / {} rows (min {ROWS_MIN})", w_on.len(), w_off.len()));
         }
-        if let Some(thin) = w_off.iter().find(|w| **w < 1.0) {
-            return Err(format!("PREMISE: a sharpen-off {name} edge row is {thin:.3} px wide (< 1 px): no edge to sharpen"));
+        let ramps = w_off.iter().filter(|w| **w >= RAMP_MIN_PX).count();
+        if ramps < ROWS_MIN {
+            return Err(format!(
+                "PREMISE: only {ramps} of the {} sharpen-off {name} edge rows are a ramp (>= {RAMP_MIN_PX} px, min {ROWS_MIN}): \
+                 no edge to sharpen",
+                w_off.len()
+            ));
         }
         let ((mean_on, med_on), (mean_off, med_off)) = (mean_median(&w_on), mean_median(&w_off));
-        report.push(format!("{name}: mean {mean_on:.3} vs {mean_off:.3} px, median {med_on:.3} vs {med_off:.3} px"));
+        report.push(format!(
+            "{name}: mean {mean_on:.3} vs {mean_off:.3} px, median {med_on:.3} vs {med_off:.3} px ({ramps} of {} sharpen-off \
+             rows a ramp)",
+            w_off.len()
+        ));
         if !(mean_on < mean_off && med_on < med_off) {
             return Err(format!(
                 "the {name} edge is not sharper with sharpen on: 10-90 % width mean {mean_on:.3} vs {mean_off:.3} px, median \
@@ -449,10 +466,15 @@ fn the_eval_bound_is_one_code_plus_the_oetf_term() {
 
 /// A synthetic RGBA8 display whose every row is `row(x)` (codes).
 fn synthetic_display(row: impl Fn(u32) -> f64) -> DumpFile {
+    synthetic_frame(|x, _| row(x))
+}
+
+/// A synthetic RGBA8 display whose pixel `(x, y)` is `px(x, y)` (codes).
+fn synthetic_frame(px: impl Fn(u32, u32) -> f64) -> DumpFile {
     let mut t = Vec::with_capacity((WIN * WIN * 4) as usize);
-    for _ in 0..WIN {
+    for y in 0..WIN {
         for x in 0..WIN {
-            let c = row(x).round().clamp(0.0, 255.0) as u8;
+            let c = px(x, y).round().clamp(0.0, 255.0) as u8;
             t.extend_from_slice(&[c, c, c, 255]);
         }
     }
@@ -476,4 +498,33 @@ fn the_edge_width_measures_a_ramp_and_sees_a_sharper_one() {
     assert!(mh < ms, "the 3-px ramp ({mh:.3}) must measure narrower than the 6-px one ({ms:.3})");
     let flat = synthetic_display(|_| 90.0);
     assert!(edge_widths(&flat, 0, WIN / 2).is_empty(), "a flat row has no edge");
+}
+
+/// (b)'s premise and verdict on synthetic frames, both edges alike. A one-pixel step measures 0.8 px.
+/// A staircase — even rows such a step, odd rows a ramp: the device scene's shape, which an every-row
+/// 1 px bound rejected — passes the premise, and narrowing its ramps passes the check; the same frame
+/// unchanged (sharpening silently off, W1 / W2) fails the check; a frame of steps only fails the premise.
+#[test]
+fn the_acutance_check_takes_a_staircase_edge_and_rejects_an_unsharpened_one() {
+    // One rising edge per half: the LDR window [0, WIN/2) and the HDR window [WIN/2, WIN).
+    let edge = |x: u32, y: u32, ramp: f64| {
+        let at = if x < WIN / 2 { 64.0 } else { 192.0 };
+        if y.is_multiple_of(2) { ramp_edge(x, at - 0.5, 1.0, 40.0, 200.0) } else { ramp_edge(x, at, ramp, 40.0, 200.0) }
+    };
+    let run = |ramp: f64, steps_only: bool| Run {
+        hist: Vec::new(),
+        display: vec![(SETTLE, synthetic_frame(|x, y| edge(x, if steps_only { 0 } else { y }, ramp)))],
+        words: [0; 8],
+        rcas_key: 0,
+    };
+    let step = synthetic_display(|x| ramp_edge(x, 63.5, 1.0, 40.0, 200.0));
+    let w = edge_widths(&step, 0, WIN / 2);
+    assert!(w.len() == WIN as usize && w.iter().all(|v| (v - 0.8).abs() < 1e-9), "a one-pixel step measures 0.8 px: {w:?}");
+    let off = run(6.0, false);
+    let report = check_acutance(&run(3.0, false), &off).unwrap_or_else(|e| panic!("a staircase whose ramps narrow: {e}"));
+    assert!(report.contains("128 of 256 sharpen-off rows a ramp"), "{report}");
+    let same = check_acutance(&run(6.0, false), &off).expect_err("an unchanged frame is not sharper");
+    assert!(same.contains("is not sharper with sharpen on"), "{same}");
+    let steps = check_acutance(&run(3.0, true), &run(6.0, true)).expect_err("an edge of steps only has nothing to sharpen");
+    assert!(steps.starts_with("PREMISE: only 0 of the 256"), "{steps}");
 }
