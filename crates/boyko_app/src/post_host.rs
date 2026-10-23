@@ -14,6 +14,7 @@ use boyko_render::post::ResolvedPost;
 use boyko_render::post::gpu::PostFinalGpu;
 
 /// `boyko-W3012`'s latch: the fallback is reported once per process, not once per frame.
+#[cfg(windows)]
 static W3012_SITE: OnceSite = OnceSite::new();
 
 /// The frame's resolved post settings and whether the [`ResolvedPost::from_config`] fallback was
@@ -39,6 +40,7 @@ pub const fn post_final_gpu(post: &ResolvedPost, extent: [u32; 2]) -> PostFinalG
 
 /// Reports `boyko-W3012` (`post_plugin_absent`) once per process: the runner found no
 /// `ResolvedPost` and derived the frame's post settings from `LightingConfig`.
+#[cfg(windows)]
 #[cold]
 #[inline(never)]
 pub(crate) fn report_post_plugin_absent() {
@@ -46,6 +48,23 @@ pub(crate) fn report_post_plugin_absent() {
 }
 
 /// [`report_post_plugin_absent`] on an explicit latch (the unit test's own).
+#[cfg_attr(
+    not(windows),
+    expect(
+        dead_code,
+        reason = "compiled on every host so the W3012 unit test runs everywhere; its one \
+                  production caller is `report_post_plugin_absent`, which only the Windows frame \
+                  loop calls"
+    )
+)]
+#[cfg_attr(
+    all(not(windows), test),
+    allow(
+        unfulfilled_lint_expectations,
+        reason = "the unit test below calls it on every host (a POSITIVE `test` predicate, as \
+                  `tests/production_reachability_census.rs` requires)"
+    )
+)]
 fn report_post_plugin_absent_at(site: &OnceSite) {
     if !site.claim() {
         return;
