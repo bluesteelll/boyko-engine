@@ -75,12 +75,14 @@ use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_macros::Resource;
-use boyko_render::light::LightingConfig;
+use boyko_render::light::{LightingConfig, Tonemapper};
 use boyko_render::post::{PostPolicySet, ResolvedPost};
 use boyko_render::{AaConfig, AaMode, GeometryLegs, Material, RenderPath, RenderPathConfig, TaaConfig, TaaState};
 use boyko_rhi_vulkan::present::ImageDumpName;
 use boyko_shaderdsl::cf::HostTex2;
-use boyko_shaderdsl::post::{OETF_GAMMA_EXP, eval_params, post_final_eval, ubo_word};
+use boyko_shaderdsl::post::{
+    OETF_GAMMA_EXP, TONEMAP_ACES, TONEMAP_MODE_MASK, TONEMAP_MODE_SHIFT, eval_params, post_final_eval, ubo_word,
+};
 use boyko_shaderdsl::prims_probe::vk_pow_bound;
 
 use graph_receipt::{fresh_out, run_worker};
@@ -88,6 +90,11 @@ use image_dump::{DumpFile, files_of};
 
 /// The worker's mode (`cut` | `accumulate`).
 const ENV_MODE: &str = "BOYKO_PX1A_TAA";
+/// Render wave PXt (`pxt/cut.md` D-G2): the curve this binary's display oracle ([`display_of`]) and
+/// thresholds ([`HDR_GAP`], [`HDR_EDGE_MIN`]) are calibrated under. Its subject is TAA accumulation,
+/// not the look, so the worker, [`runner_post_words`] and [`display_of`] all name it instead of
+/// reading the engine default (AgX since PXt).
+const CURVE: Tonemapper = Tonemapper::Aces;
 /// Where the cut worker writes its per-frame `TaaState` log.
 const ENV_LOG: &str = "BOYKO_PX1A_TAA_LOG";
 /// The window edge.
@@ -255,6 +262,7 @@ fn px1a_taa_worker() {
     app.insert_resource(ModeRes(mode));
     app.insert_resource(Cameras::default());
     app.add_startup_system(taa_setup);
+    app.add_startup_system(apply_curve);
     app.insert_resource(RenderPathConfig { path: RenderPath::Deferred, legs: GeometryLegs::Mesh });
     app.insert_resource(AaConfig { mode: AaMode::Taa });
     if mode == Mode::Cut {
@@ -281,15 +289,22 @@ fn px1a_taa_worker() {
     assert!(app.world().resource::<HostFrameStats>().frames > 0, "the frame loop never ran — RED, never a skip");
 }
 
+/// [`CURVE`] on the plugin-inserted `LightingConfig` (every other field at its default).
+#[allow(clippy::needless_pass_by_value)]
+fn apply_curve(mut cfg: ResMut<LightingConfig>) {
+    cfg.tonemapper = CURVE;
+}
+
 fn dump_dir(tag: &str) -> PathBuf {
     let dir = fresh_out(tag);
     std::fs::create_dir_all(&dir).expect("invariant: the temp dir accepts a subdirectory");
     dir
 }
 
-/// `OETF(ACES(c))` of one channel through the traced `post_final` body (ACES Hill, ratio 1).
+/// `OETF(ACES(c))` of one channel through the traced `post_final` body ([`CURVE`], ratio 1).
 fn display_of(rgb: [f32; 3]) -> [f32; 3] {
     let mut words = [0u32; 8];
+    words[ubo_word("mode_words")] = (CURVE as u32) << TONEMAP_MODE_SHIFT;
     words[ubo_word("exposure_ratio")] = 1.0f32.to_bits();
     words[ubo_word("extent")] = 1;
     words[ubo_word("extent") + 1] = 1;
@@ -717,10 +732,10 @@ fn eval_post_mismatches(scene: &DumpFile, display: &DumpFile, words: [u32; 8]) -
     (bad, first)
 }
 
-/// The `post_final` words the runner uploads for this worker: the default tonemapper through
+/// The `post_final` words the runner uploads for this worker: [`CURVE`] (the worker sets it) through
 /// `post_host::post_final_gpu` (ratio 1), the window's extent.
 fn runner_post_words() -> [u32; 8] {
-    let post = ResolvedPost::from_config(&LightingConfig::default());
+    let post = ResolvedPost::from_config(&LightingConfig { tonemapper: CURVE, ..LightingConfig::default() });
     boyko_render::post_final_words(&boyko_app::post_host::post_final_gpu(&post, [WIN, WIN]))
 }
 
@@ -949,6 +964,14 @@ fn the_eval_post_comparison_separates_this_frames_history_from_last_frames() {
     let last = hist_of(1.0 / RAMP_STEP);
     let (bad, _) = eval_post_mismatches(&last, &display, words);
     assert!(bad > (w * h) as usize, "last frame's history (1/1.25 of this one) must red on most samples: {bad}");
+}
+
+/// Render wave PXt (D-G2): the words this binary's device pins compare against name ACES whatever
+/// the engine default is — the thresholds were calibrated under it.
+#[test]
+fn the_runner_words_name_the_curve_this_binary_is_calibrated_under() {
+    let mode = (runner_post_words()[ubo_word("mode_words")] >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK;
+    assert_eq!(mode, TONEMAP_ACES, "runner_post_words names tonemap word {mode}, not ACES: the oracle and thresholds are ACES-calibrated");
 }
 
 #[test]

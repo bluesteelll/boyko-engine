@@ -168,6 +168,26 @@ const fn post_final_words_for(width: u32, height: u32) -> [u32; 8] {
     [0, 0x3F80_0000, width, height, 0, 0, 0, 0]
 }
 
+/// Render wave PXt (`pxt/cut.md` D-G1): the showcase dumps' REVIEW-ONLY tonemap word —
+/// `BOYKO_REVIEW_TONEMAP=agx` renders the owner's AgX side-by-side panel; unset (every pin run)
+/// keeps this harness's explicit ACES word, so its pins never move with the engine default.
+const ENV_REVIEW_TONEMAP: &str = "BOYKO_REVIEW_TONEMAP";
+
+/// [`post_final_words_for`] with [`ENV_REVIEW_TONEMAP`]'s word, if set.
+///
+/// # Panics
+/// On a value other than `agx`, naming it.
+fn showcase_post_final_words(width: u32, height: u32) -> [u32; 8] {
+    use boyko_shaderdsl::post::{TONEMAP_AGX, TONEMAP_MODE_SHIFT};
+    let mut words = post_final_words_for(width, height);
+    match std::env::var(ENV_REVIEW_TONEMAP) {
+        Err(_) => {}
+        Ok(v) if v == "agx" => words[0] |= TONEMAP_AGX << TONEMAP_MODE_SHIFT,
+        Ok(other) => panic!("{ENV_REVIEW_TONEMAP}={other} is not `agx` (unset keeps the harness's ACES word)"),
+    }
+    words
+}
+
 /// The window's client size — the swapchain is created at the composite extent so the
 /// 1:1 top-left present fills the whole window. The WSI may clamp it wider/narrower.
 const WIDTH: u32 = COMPOSITE_W;
@@ -10056,7 +10076,7 @@ fn run_showcase_body(
             pipeline_nosharpen: &post_final_pipeline_nosharpen,
             layout: &post_final_layout,
         },
-        post_final_words: post_final_words_for(COMPOSITE_W, COMPOSITE_H),
+        post_final_words: showcase_post_final_words(COMPOSITE_W, COMPOSITE_H),
         // M3: when the config carried instanced meshes, pass A runs the batch loop — one
         // INSTANCED INDEXED draw per registered mesh, each at its `base_instance` bucket
         // (the `use_model_matrix == 1` arm — `cfg.mvp` set its byte 84). Every legacy scene
