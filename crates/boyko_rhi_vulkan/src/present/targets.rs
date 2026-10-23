@@ -3383,8 +3383,9 @@ impl SsaoAtrousImages {
     }
 }
 
-/// Anti-aliasing Stage 1/2/3: the FXAA/SMAA/SSAA output image RING (`aa_out`), built right
-/// after [`CoreImages`] iff any of `scene.aa`/`scene.smaa`/`scene.ssaa` is armed.
+/// Anti-aliasing Stage 1/2: the FXAA/SMAA output image RING (`aa_out`), built right after
+/// [`CoreImages`] iff the frame's `AaArm` is `Fxaa` or `Smaa` (`AaArm::wants_aa_out`). SSAA and
+/// TAA never arm it: the SSAA downsample writes `lit_native` and the TAA resolve only `taa_hist`.
 /// UNCONDITIONAL (both feature legs — unlike [`ShadowVisImages`], AA is not `hwrt`-only). A
 /// one-field bundle (mirroring [`ShadowVisImages`]'s shape) so [`GBufferTargets::create`] can
 /// `?`-propagate a build failure with a self-contained error path.
@@ -3393,25 +3394,27 @@ struct AaImages {
 }
 
 impl AaImages {
-    /// Allocates the `aa_out` ring at `aa_extent`: `COLOR_ATTACHMENT | SAMPLED`,
+    /// Allocates the `aa_out` ring at `aa_extent`: `COLOR_ATTACHMENT | SAMPLED | STORAGE`,
     /// [`GBUFFER_FORMAT`] (`R8G8B8A8_UNORM`) — the FXAA/SMAA-blend pass's full-screen-triangle
-    /// render target (or the SSAA downsample's), later sampled by the present-blit.
-    /// `aa_extent` is `present_extent` for Fxaa/Smaa, but the NATIVE extent for Ssaa (where
-    /// `present_extent` is 2×) — the caller ([`GBufferTargets::create`]) picks the right value;
-    /// this is the single point where `aa_out`'s size is materialized. On a mid-ring failure
-    /// the partial ring is drained (reverse acquisition); the orchestrator owns the prior
-    /// [`CoreImages`], which it tears down on this method's `Err`.
+    /// render target, later sampled by the present-blit. Called only under FXAA or SMAA
+    /// (`AaArm::wants_aa_out`); the SSAA downsample writes `lit_native`, never `aa_out`.
+    /// `aa_extent` is `present_extent` for Fxaa/Smaa — the caller ([`GBufferTargets::create`])
+    /// picks the value; this is the single point where `aa_out`'s size is materialized. On a
+    /// mid-ring failure the partial ring is drained (reverse acquisition); the orchestrator owns
+    /// the prior [`CoreImages`], which it tears down on this method's `Err`.
     fn build(ctx: &VulkanContext, aa_extent: VkExtent2D) -> Result<Self, SwapchainError> {
         let mut slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
         for slot in slots.iter_mut() {
             match GBufferTargets::create_gbuffer_image(
                 ctx,
                 aa_extent,
-                // COLOR_ATTACHMENT (FXAA/SMAA/SSAA write it via a fragment pass) | SAMPLED (the
-                // present-blit samples it) | STORAGE (the TAA compute resolve `.Store`s into it as
-                // a UAV — C1 fix: a UAV store on an image without STORAGE usage is device-lost UB).
+                // COLOR_ATTACHMENT (its only writers are the FXAA and SMAA-blend fragment passes)
+                // | SAMPLED (the present-blit samples it) | STORAGE: no pass binds `aa_out` as a
+                // storage image any more — the TAA resolve's `gAaOut` @4 is a hole, and render
+                // wave PX1b retired the CAS compute pass, the last pass that stored into it. The
+                // bit is kept unchanged pending a measured decision (an OPEN-ITEMS entry).
                 // R8G8B8A8_UNORM is a Vulkan-mandatory STORAGE_IMAGE format, so the extra bit
-                // cannot fault; the added usage does not change the FXAA/SMAA/SSAA rendered pixels.
+                // cannot fault; the added usage does not change the FXAA/SMAA rendered pixels.
                 ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED | ImageUsage::STORAGE,
             ) {
                 Ok(t) => *slot = Some(t),

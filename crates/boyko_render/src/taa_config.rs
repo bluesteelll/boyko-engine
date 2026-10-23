@@ -48,7 +48,8 @@
 //! carries [`TaaConfig::rcas_con`] — over the frame's scene input `taa_hist[fi]`. The runner reads
 //! both fields straight off this config each frame (`boyko_app::post_host::post_sharpen` /
 //! `with_rcas`) and sets the bit only on a frame TAA is armed (`taa_armed_now`), so
-//! [`resolve_taa`] leaves them out of the [`ResolvedTaa`] UBO and a live toggle is one UBO word.
+//! [`resolve_taa`] leaves them out of the [`ResolvedTaa`] UBO. A live toggle changes the mode bit
+//! and the strength word — no target rebuild, no TAA history reset.
 //! `sharpen` defaults to [`SharpenMode::None`]; `rcas_sharpness` defaults to `0.78` (the owner's
 //! strength, signed off at PX1b's GL-H2 review).
 
@@ -361,7 +362,8 @@ impl DisocclusionTest {
 /// word ([`TaaConfig::rcas_con`]), and the pass runs AMD FidelityFX FSR 1 RCAS over the 5-tap cross
 /// of the frame's scene input (`taa_hist[fi]`) in FSR 2's reversible space `c / (1 + max3(c))`,
 /// inverted before the tonemap curve (`boyko_shaderdsl::post::rcas_stage`). TAA-only: the bit is set
-/// iff TAA is armed this frame. A live toggle is one UBO word — no target rebuild, no history reset.
+/// iff TAA is armed this frame. A live toggle changes the mode bit and the strength word — no
+/// target rebuild, no history reset.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SharpenMode {

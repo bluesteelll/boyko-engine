@@ -60,7 +60,8 @@ pub fn post_sharpen(taa_armed: bool, cfg: Option<&TaaConfig>) -> Option<f32> {
 
 /// Render wave PX1b (D-R8): `gpu` with the sharpen stage armed at `con` — the mode word's
 /// `POST_MODE_SHARPEN` bit and the `sharpness` word — or unchanged for `None`. A live
-/// `SharpenMode` toggle is therefore one UBO word: no target rebuild, no TAA history reset.
+/// `SharpenMode` toggle therefore changes the mode bit and the strength word (`sharpness`: `0.0`
+/// off, `con` on): no target rebuild, no TAA history reset.
 #[inline]
 pub const fn with_rcas(gpu: PostFinalGpu, con: Option<f32>) -> PostFinalGpu {
     match con {
