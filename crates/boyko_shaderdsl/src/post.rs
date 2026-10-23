@@ -93,6 +93,8 @@ pub const TONEMAP_ACES: u32 = 0;
 pub const TONEMAP_NEUTRAL: u32 = 1;
 /// Tonemapper word: Reinhard-Jodie.
 pub const TONEMAP_REINHARD_JODIE: u32 = 2;
+/// Tonemapper word: AgX (render wave PXt) — three.js's AgX on Blender's Rec.2020 base ([`agx`]).
+pub const TONEMAP_AGX: u32 = 3;
 
 /// Mode-word bit 1 (render wave PX1b, H5): the RCAS sharpen stage runs this frame. Bit 0 stays
 /// reserved (H2 rev 2 removed the sanitize bit); bits `TONEMAP_MODE_SHIFT..+4` are the tonemapper.
@@ -726,6 +728,14 @@ pub fn reinhard_jodie<C: Cf>(c: C::Vec3f) -> C::Vec3f {
         let tv = C::temp(v.div(lit(1.0).add(v)));
         v.div(lit(1.0).add(l)).lerp(tv, tv).clamp01()
     }))
+}
+
+/// AgX (render wave PXt): three.js's `AgXToneMapping` on Blender's Rec.2020 base. Linear Rec.709 in,
+/// linear Rec.709 in `[0, 1]` out.
+#[inline]
+pub fn agx<C: Cf>(c: C::Vec3f) -> C::Vec3f {
+    let _ = c;
+    unimplemented!("render wave PXt C2: the AgX leaf")
 }
 
 /// The tonemapper word: `(mode_words >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK`, materialised once.

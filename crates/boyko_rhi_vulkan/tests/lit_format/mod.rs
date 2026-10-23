@@ -30,9 +30,11 @@
 
 #![allow(dead_code)] // the chain model and the probe each use a subset
 
-pub mod agx_f64;
 #[path = "../../../boyko_shaderdsl/tests/post_f64/mod.rs"]
 pub mod post_f64;
+// Render wave PXt (DS-H6): `post_f64` includes `agx_f64.rs` by path (the AgX leaf's host reference),
+// so this model reaches the same module through it — one load of the file per crate.
+pub use post_f64::agx_f64;
 
 use boyko_shaderdsl::pixfmt::{Channel, Member, Path, PathClass, Rounding, Target, decode, encode};
 
