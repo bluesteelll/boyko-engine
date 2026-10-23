@@ -35,7 +35,8 @@ fn main() {
 # fn setup() {}
 ```
 
-The SMAA shaders and lookup textures are third-party code under the MIT license; see
+The SMAA shaders and lookup textures are third-party code under the MIT license. So is the RCAS
+sharpen, transcribed from AMD FidelityFX FSR 1 together with FSR 2's reversible tonemap. See
 `THIRD-PARTY-NOTICES.md` in the repository root.
 
 ## Supersampling (SSAA)
@@ -62,8 +63,11 @@ TAA spreads the cost of supersampling over time:
 2. The resolve reprojects the previous result (the history) with the camera's motion, samples it
    with a Catmull-Rom filter, clips it against the current frame's local colour range (variance
    clipping), and blends it with the new frame.
-3. Optionally, an RCAS pass (contrast-adaptive sharpening, after AMD FidelityFX CAS) restores
-   detail the blend softened.
+3. Optionally, RCAS (AMD FidelityFX FSR 1's robust contrast-adaptive sharpening) restores detail
+   the blend softened. It is not a separate pass: it is a stage of `post_final`, the full-screen
+   pass that also tonemaps the frame. RCAS reads a 5-tap cross of the TAA output and works in FSR
+   2's reversible space, `c / (1 + max3(c))`, which it undoes before the tonemap curve. Switching
+   it on or off changes one uniform word; no render target is rebuilt and the history is kept.
 
 `TaaConfig` exposes the tunable parts:
 
@@ -74,7 +78,7 @@ TAA spreads the cost of supersampling over time:
 | `default_blend`, `min_blend`, `blend` | `0.1`, `0.015`, confidence-adaptive | How much of the new frame enters the history. |
 | `luma_weight` | `true` | Weights samples by inverse luminance, so one bright sample cannot dominate. |
 | `history_filter` | Catmull-Rom | The history reconstruction filter. |
-| `sharpen`, `rcas_sharpness` | `None`, `0.25` | `SharpenMode::Rcas` adds the sharpen pass at that strength. |
+| `sharpen`, `rcas_sharpness` | `None`, `0.78` | `SharpenMode::Rcas` turns on the RCAS stage while TAA is the AA mode. `rcas_sharpness` runs from `0` (mild) to `1` (FSR 1's maximum) and maps to RCAS's lobe scale by FSR 2's remap, `2^-(2·(1 − s))`. |
 
 Limits of the current TAA:
 
@@ -97,8 +101,9 @@ See [Render Paths & Visibility Buffer](render-paths.md).
 ## Trying the modes
 
 `scripts\run-vb-lab.ps1` starts the `vb_lab` example, which reads `BOYKO_AA` (`off`, `fxaa`,
-`smaa`, `taa`) and `BOYKO_TAA_SHARPEN=none`. Rendering has no frame-time benchmark, so this page
-does not rank the modes by cost; their pass counts above are the structural difference.
+`smaa`, `taa`) and `BOYKO_TAA_SHARPEN` (`rcas`, the example's default, or `none`). Rendering has
+no frame-time benchmark, so this page does not rank the modes by cost; their pass counts above are
+the structural difference.
 
 ## See also
 
