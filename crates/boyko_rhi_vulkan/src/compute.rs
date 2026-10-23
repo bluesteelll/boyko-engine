@@ -1758,6 +1758,14 @@ pub fn post_final_spirv() -> &'static [u32] {
     POST_FINAL_COMP_SPV.as_words()
 }
 
+/// Render wave PXt (OPEN-ITEMS 19): the `post_final` module a frame binds, chosen by its mode word's
+/// `POST_MODE_SHARPEN` bit (`sharpen`). Both values return the RCAS module ([`post_final_spirv`])
+/// until the sharpen-off module lands.
+#[inline]
+pub fn post_final_spirv_for(_sharpen: bool) -> &'static [u32] {
+    post_final_spirv()
+}
+
 /// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V as a `u32` word stream, ready for
 /// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
 ///
