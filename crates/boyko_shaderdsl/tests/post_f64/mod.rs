@@ -119,7 +119,18 @@ impl Tracked {
     /// # Panics
     /// Where `v − b ≤ 0`: the input may then be 0, where `log2` has no bound.
     pub fn log2(self) -> Self {
-        let lo = self.v - self.b;
+        self.log2_above(0.0)
+    }
+
+    /// [`Tracked::log2`] of an input the f32 evaluation never lets below `lower` (the output of a
+    /// `max(·, lower)`): the derivative is taken over `[max(v − b, lower), v + b]`, so a floored input
+    /// whose own bound reaches past the floor — a mis-composed reference's negative channel — keeps a
+    /// finite bound.
+    ///
+    /// # Panics
+    /// Where that interval reaches 0.
+    pub fn log2_above(self, lower: f64) -> Self {
+        let lo = (self.v - self.b).max(lower);
         assert!(lo > 0.0, "log2 of {self:?}: the input is within its own bound of 0 — the reference cannot bound this row");
         let r = self.v.log2();
         Tracked { v: r, b: self.b / (lo * core::f64::consts::LN_2) + 2.0 * ulp32(r) + FLOOR }
@@ -245,12 +256,13 @@ pub fn reinhard_jodie_f64(c: [Tracked; 3]) -> [Tracked; 3] {
     })
 }
 
-/// The tonemapper the word's bits 8..11 select: 1 Neutral, 2 Reinhard-Jodie, everything else ACES
-/// (the resolve's documented fallback).
+/// The tonemapper the word's bits 8..11 select: 1 Neutral, 2 Reinhard-Jodie, 3 AgX (render wave
+/// PXt), everything else ACES (the resolve's documented fallback).
 pub fn tonemap_f64(mode_words: u32, c: [Tracked; 3]) -> [Tracked; 3] {
     match (mode_words >> 8) & 0xF {
         1 => neutral_f64(c),
         2 => reinhard_jodie_f64(c),
+        3 => agx_tracked(c),
         _ => aces_f64(c),
     }
 }
@@ -470,10 +482,12 @@ pub fn agx_tracked_with(c: [Tracked; 3], poly: &[f64; 7]) -> [Tracked; 3] {
     use agx_f64::{AGX_INSET, AGX_MAX_EV, AGX_MIN_EV, AGX_OUTSET, REC2020_TO_SRGB, SRGB_TO_REC2020};
     let fused = mat3_mul(&rows_of(&AGX_INSET), &rows_of(&SRGB_TO_REC2020));
     let floor = Tracked::konst(1e-10);
+    // The f32 evaluation reads `max(ci, f32(1e-10))`, never below the f32 floor.
+    let floor_f32 = f64::from(1.0e-10_f32);
     let min_ev = Tracked::konst(AGX_MIN_EV);
     let inv_range = Tracked::konst(1.0 / (AGX_MAX_EV - AGX_MIN_EV));
     let p = mat3(&fused, c).map(|ci| {
-        let x = ci.max(floor).log2().sub(min_ev).mul(inv_range).saturate();
+        let x = ci.max(floor).log2_above(floor_f32).sub(min_ev).mul(inv_range).saturate();
         poly[1..].iter().fold(Tracked::konst(poly[0]), |acc, &k| acc.mul(x).add(Tracked::konst(k)))
     });
     let lin = mat3(&rows_of(&AGX_OUTSET), p).map(|d| d.max(Tracked::konst(0.0)).powf(AGX_LINEARIZE_EXP));

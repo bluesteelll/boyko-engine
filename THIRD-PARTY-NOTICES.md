@@ -179,6 +179,8 @@ THE SOFTWARE.
     Rec.709 → Rec.2020 matrices it is multiplied from, `AGX_OUT`, `REC2020_TO_REC709`,
     `AGX_LOG_FLOOR`, `AGX_MIN_EV`, `AGX_EV_INV_RANGE` and the two log bounds it is computed from,
     `AGX_POLY`, `AGX_LINEARIZE_EXP`) and the leaf `agx`
+  - `crates/boyko_rhi_vulkan/shaders/post_final.comp.hlsl`, generated from that leaf by
+    `emit_post`, and `crates/boyko_rhi_vulkan/shaders/post_final.comp.spv`, compiled from it
   - `crates/boyko_rhi_vulkan/tests/lit_format/agx_f64.rs`: the f64 test transcription of three.js's
     `AgXToneMapping` and of Filament's `agxLook` (Punchy), with their constants
   - `crates/boyko_shaderdsl/tests/post_f64/mod.rs`: `AGX_POLY`, `AGX_LINEARIZE_EXP` and

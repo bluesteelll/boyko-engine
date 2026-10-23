@@ -860,30 +860,42 @@ pub fn tonemapper<C: Cf>(mode_words: C::Uint) -> C::Uint {
     )
 }
 
-/// The tonemap curve `mode` selects — Neutral (1), Reinhard-Jodie (2), else ACES (0 and every
-/// unknown word, the resolve's fallback). A REAL branch (`[branch]`): the word is wave-uniform, so
-/// only the selected curve runs. Declares the body-level `post_tonemapped`, so it is called once.
+/// The tonemap curve `mode` selects — AgX (3), Neutral (1), Reinhard-Jodie (2), else ACES (0 and
+/// every unknown word, the resolve's fallback). A REAL branch (`[branch]`): the word is
+/// wave-uniform, so only the selected curve runs — AgX's three `log2` and three `pow` are issued
+/// only under word 3. AgX is tested first (render wave PXt, `pxt/cut.md` D-A4), so its path takes
+/// one scalar compare. Declares the body-level `post_tonemapped`, so it is called once.
 #[inline]
 pub fn tonemap_select<C: Cf>(c: C::Vec3f, mode: C::Uint) -> C::Vec3f {
     let out = C::decl_var_vec3("post_tonemapped", c);
-    let neutral = C::ueq(mode, C::named_uint_val("TONEMAP_NEUTRAL", TONEMAP_NEUTRAL));
+    let agx_word = C::ueq(mode, C::named_uint_val("TONEMAP_AGX", TONEMAP_AGX));
     let _ = C::if_else_branch(
-        neutral,
+        agx_word,
         || {
-            C::set_var_vec3(&out, khronos_pbr_neutral::<C>(c));
+            C::set_var_vec3(&out, agx::<C>(c));
             Flow::Continue(())
         },
         || {
-            let jodie = C::ueq(mode, C::named_uint_val("TONEMAP_REINHARD_JODIE", TONEMAP_REINHARD_JODIE));
+            let neutral = C::ueq(mode, C::named_uint_val("TONEMAP_NEUTRAL", TONEMAP_NEUTRAL));
             C::if_else_branch(
-                jodie,
+                neutral,
                 || {
-                    C::set_var_vec3(&out, reinhard_jodie::<C>(c));
+                    C::set_var_vec3(&out, khronos_pbr_neutral::<C>(c));
                     Flow::Continue(())
                 },
                 || {
-                    C::set_var_vec3(&out, aces_hill::<C>(c));
-                    Flow::Continue(())
+                    let jodie = C::ueq(mode, C::named_uint_val("TONEMAP_REINHARD_JODIE", TONEMAP_REINHARD_JODIE));
+                    C::if_else_branch(
+                        jodie,
+                        || {
+                            C::set_var_vec3(&out, reinhard_jodie::<C>(c));
+                            Flow::Continue(())
+                        },
+                        || {
+                            C::set_var_vec3(&out, aces_hill::<C>(c));
+                            Flow::Continue(())
+                        },
+                    )
                 },
             )
         },
