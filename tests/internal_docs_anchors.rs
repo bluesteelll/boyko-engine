@@ -2579,10 +2579,10 @@ fn a_struck_anchor_is_not_a_claim_and_an_unstruck_one_still_is() {
 
 #[test]
 fn internal_docs_cite_paths_that_exist() {
-    let scans = scan_all();
+    let scans = scan_all_cached();
     let mut report = String::new();
 
-    for (doc, scan) in &scans {
+    for (doc, scan) in scans {
         // Printed so the module doc's counts stay re-derivable from the gate itself
         // (`cargo test ... -- --nocapture`) rather than being folklore copied between commits.
         println!(
@@ -2620,10 +2620,10 @@ fn internal_docs_cite_paths_that_exist() {
 
 #[test]
 fn internal_docs_line_anchors_land_on_definitions() {
-    let scans = scan_all();
+    let scans = scan_all_cached();
     let mut report = String::new();
 
-    for (doc, scan) in &scans {
+    for (doc, scan) in scans {
         println!(
             "docs/{doc}: {} anchor(s) checked, {} stale",
             scan.anchors,
@@ -2998,11 +2998,11 @@ fn planned_paths_are_reported_and_pinned() {
         ("gaia/PENDING-SYNTAX-PLAN.md", 0),
     ];
 
-    let scans = scan_all();
+    let scans = scan_all_cached();
     let mut report = String::new();
     let mut stale = String::new();
 
-    for (doc, scan) in &scans {
+    for (doc, scan) in scans {
         let n = scan.planned_paths.len();
         let want = PLANNED_EXACT
             .iter()
@@ -3100,11 +3100,11 @@ fn unbindable_fragments_are_reported_and_pinned() {
         ("gaia/PENDING-SYNTAX-PLAN.md", 0),
     ];
 
-    let scans = scan_all();
+    let scans = scan_all_cached();
     let mut report = String::new();
     let mut failed = false;
 
-    for (doc, scan) in &scans {
+    for (doc, scan) in scans {
         let n = scan.unbindable.len();
         let cap = UNBINDABLE_MAX
             .iter()
@@ -3207,11 +3207,11 @@ fn waivers_that_were_not_needed_are_reported_and_pinned() {
         ("gaia/PENDING-SYNTAX-PLAN.md", 0),
     ];
 
-    let scans = scan_all();
+    let scans = scan_all_cached();
     let mut report = String::new();
     let mut failed = false;
 
-    for (doc, scan) in &scans {
+    for (doc, scan) in scans {
         let n = scan.over_waived.len();
         let cap = OVER_WAIVED_MAX
             .iter()
@@ -3286,12 +3286,12 @@ fn doc_to_doc_anchors_carry_the_text_they_quote() {
     ///   answers "where are these words", never "what should this anchor say".**
     const KNOWN_STALE: &[(&str, usize, &str, usize, usize)] = &[];
 
-    let scans = scan_all();
+    let scans = scan_all_cached();
     let mut report = String::new();
     let mut failed = false;
     let mut matched = vec![false; KNOWN_STALE.len()];
 
-    for (doc, scan) in &scans {
+    for (doc, scan) in scans {
         // The DENOMINATOR is printed first, and that ordering is the point: `UNQUOTED_MAX`
         // publishes only the un-checkable count, which reads as a residue until it is set beside
         // the total it is a share of.
@@ -3387,11 +3387,11 @@ fn doc_to_doc_anchors_without_a_quotation_are_pinned() {
         ("gaia/PENDING-SYNTAX-PLAN.md", 0),
     ];
 
-    let scans = scan_all();
+    let scans = scan_all_cached();
     let mut report = String::new();
     let mut failed = false;
 
-    for (doc, scan) in &scans {
+    for (doc, scan) in scans {
         let n = scan.doc_unquoted.len();
         let cap = UNQUOTED_MAX
             .iter()
@@ -3464,11 +3464,11 @@ fn aliases_that_inherit_a_binding_are_reported_and_pinned() {
         ("gaia/PENDING-SYNTAX-PLAN.md", 0),
     ];
 
-    let scans = scan_all();
+    let scans = scan_all_cached();
     let mut report = String::new();
     let mut failed = false;
 
-    for (doc, scan) in &scans {
+    for (doc, scan) in scans {
         let n = scan.alias_bound.len();
         let cap = ALIAS_BOUND_MAX
             .iter()
@@ -3580,11 +3580,11 @@ fn anchor_ignore_markers_are_reported_and_pinned() {
         ("gaia/PENDING-SYNTAX-PLAN.md", 0),
     ];
 
-    let scans = scan_all();
+    let scans = scan_all_cached();
     let mut report = String::new();
     let mut failed = false;
 
-    for (doc, scan) in &scans {
+    for (doc, scan) in scans {
         let n = scan.ignored_lines.len();
         let cap = IGNORE_MARKER_MAX
             .iter()
@@ -3746,11 +3746,11 @@ fn continuations_do_not_inherit_a_document_across_a_line_boundary() {
     /// not examined at all, so a non-zero row would be coverage lost, not a smell tolerated.
     const CROSS_LINE_DOC_MAX: usize = 0;
 
-    let scans = scan_all();
+    let scans = scan_all_cached();
     let mut report = String::new();
     let mut total_src = 0usize;
 
-    for (doc, scan) in &scans {
+    for (doc, scan) in scans {
         total_src += scan.cross_line_src;
         println!(
             "docs/{doc}: {} continuation(s) inherit a document across a line (cap \
@@ -3875,10 +3875,10 @@ fn continuations_do_not_inherit_a_document_across_a_line_boundary() {
 /// the previous audit round named as where the next hole would be.
 #[test]
 fn doc_to_doc_anchors_whose_words_are_at_their_own_numbers_are_reported() {
-    let scans = scan_all();
+    let scans = scan_all_cached();
     let mut report = String::new();
 
-    for (doc, scan) in &scans {
+    for (doc, scan) in scans {
         println!(
             "docs/{doc}: {} doc-to-doc anchor(s) whose words sit at their own numbers in THIS \
              document (cap 0)",
@@ -4030,10 +4030,10 @@ fn ignore_markers_are_measured_by_what_they_silence() {
         ("gaia/PENDING-SYNTAX-PLAN.md", 0),
     ];
 
-    let scans = scan_all();
+    let scans = scan_all_cached();
     let mut report = String::new();
 
-    for (doc, scan) in &scans {
+    for (doc, scan) in scans {
         let n = scan.silenced.len();
         let want = SILENCED_EXACT
             .iter()
@@ -6189,7 +6189,7 @@ fn every_capped_ledger_says_whether_its_population_is_live_or_empty() {
         ("over_waived", |s| s.over_waived.len()),
     ];
 
-    let scans = scan_all();
+    let scans = scan_all_cached();
     let docs = scans.len();
     let mut rows = 0usize;
     let mut empty_rows = 0usize;
@@ -6687,4 +6687,19 @@ fn figures_this_file_writes_about_the_tree_are_re_derived() {
          counts over the marker corpus itself — so they are re-derived here instead. Re-take the \
          figure and write the new one; do not adjust this test to agree with the prose.\n{report}"
     );
+}
+
+/// Every gated document's scan, taken once per test process and shared by the tests that read it.
+///
+/// `scan_all` rebuilds the whole corpus on every call, and each test that reads the corpus called
+/// it, so one run of this binary scanned every gated document once per such test — the bulk of its
+/// wall time in a debug build. Sharing one scan gives up no check: nothing in this binary writes a
+/// file, so every caller is handed the map it would have built itself. A scan that panics leaves
+/// the cell empty, and the next caller scans again and fails on its own.
+///
+/// Appended here, and each caller changed on its own line, because documents cite this file by
+/// line number: an edit that shifted the lines above would turn correct citations stale.
+fn scan_all_cached() -> &'static BTreeMap<&'static str, DocScan> {
+    static SCANS: std::sync::OnceLock<BTreeMap<&'static str, DocScan>> = std::sync::OnceLock::new();
+    SCANS.get_or_init(scan_all)
 }
