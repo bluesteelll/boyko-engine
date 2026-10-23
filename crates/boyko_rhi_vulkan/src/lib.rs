@@ -136,6 +136,8 @@ pub mod geometry_bindless;
 pub(crate) mod log_probe;
 pub mod memory;
 pub mod mesh_sdf_texture;
+/// BOOT-1 F-A: the persisted `VkPipelineCache` (file format, validation, policy, atomic save).
+pub mod pipeline_cache;
 pub mod present;
 pub mod rhi_impl;
 /// Test-only: Gate B, the device-free census of every committed `.spv`'s SPIR-V capabilities

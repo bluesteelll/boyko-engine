@@ -1,8 +1,9 @@
 //! [`WindowInfo`] — the world-resident window-size snapshot (host plan D7) —
-//! and the runner's two host probes beside it: [`HostFrameStats`], per frame (R4),
-//! and [`HostTeardownStats`], once per run after teardown.
+//! and the runner's three host probes beside it: [`HostBootStats`], once per boot (BOOT-1),
+//! [`HostFrameStats`], per frame (R4), and [`HostTeardownStats`], once per run after teardown.
 
 use boyko_macros::Resource;
+use boyko_rhi_vulkan::pipeline_cache::{CacheLoad, CacheSave};
 
 /// The window's client size as observed by the host, in physical pixels.
 ///
@@ -62,6 +63,50 @@ pub struct HostFrameStats {
     pub interp_armed_frames: u64,
 }
 
+/// What the windowed runner's boot did — written once, right before the frame loop (or on the
+/// early exit of a close during boot), and never again (BOOT-1). The numbers of the one boot
+/// telemetry line, as data: device tests assert the pipeline cache and the boot pump through it.
+/// Not consumed by any engine system.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HostBootStats {
+    /// `true` once the runner wrote the record — a record that reads `false` measured nothing.
+    pub sampled: bool,
+    /// Pipelines created by the boot (compute + graphics).
+    pub pipelines: u32,
+    /// Compute pipelines created by the boot.
+    pub compute: u32,
+    /// Graphics pipelines created by the boot.
+    pub graphics: u32,
+    /// Creations the driver reported as application pipeline-cache hits.
+    pub cache_hits: u32,
+    /// Creations whose feedback came back without the VALID bit.
+    pub feedback_invalid: u32,
+    /// The driver-reported creation time, summed, nanoseconds.
+    pub driver_ns: u64,
+    /// What boot did with the pipeline cache file.
+    pub cache_load: CacheLoad,
+    /// What the boot-end save did.
+    pub saved: CacheSave,
+    /// Wall time of `App::finish` (the startup systems), nanoseconds.
+    pub startup_ns: u64,
+    /// Wall time from the runner's entry to this record, nanoseconds.
+    pub boot_ns: u64,
+    /// Boot-pump drains at the runner's stage boundaries and through the startup seam
+    /// (`boyko_app::pump_boot_messages`).
+    pub stage_pumps: u32,
+    /// Boot-pump drains after a pipeline creation — equal to [`Self::pipelines`] when every
+    /// create site ticks.
+    pub create_pumps: u32,
+    /// Boot-pump drains after a one-shot fence wait.
+    pub wait_pumps: u32,
+    /// The longest stretch the window went unpumped, from being shown to the frame loop,
+    /// nanoseconds.
+    pub max_unpumped_ns: u64,
+    /// A close arrived during boot: the window was hidden at once and the run exited at the next
+    /// boot boundary, with no frame.
+    pub close_requested: bool,
+}
+
 /// How many host-pool sub-allocations one run can ask [`HostTeardownStats`] to watch.
 pub const HOST_TEARDOWN_WATCH_SLOTS: usize = 4;
 
@@ -105,4 +150,7 @@ pub struct HostTeardownStats {
     pub persistent_descriptor_pools_live: u32,
     /// Host-pool sub-allocations checked at the sample; entries with a `None` key are skipped.
     pub watch: [HostAllocationWatch; HOST_TEARDOWN_WATCH_SLOTS],
+    /// Every pipeline the context created over the whole run (BOOT-1). Equal to
+    /// [`HostBootStats::pipelines`] exactly when the frame loop created none.
+    pub pipelines_created_total: u32,
 }

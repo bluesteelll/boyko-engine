@@ -238,12 +238,17 @@ where
 /// Absent the variable the boot is byte-identical to before.
 #[cfg(windows)]
 pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
+    // BOOT-1: the boot telemetry's origin.
+    let boot_start = Instant::now();
     // ── Boot: the device singleton (plan D2 step 1). ─────────────────────────
     let config = InstanceConfig {
         enable_validation: std::env::var_os("BOYKO_ENABLE_VALIDATION").is_some(),
         windowed: true,
     };
-    let ctx = match VulkanContext::boot_singleton(config) {
+    // BOOT-1 F-A: the per-user persisted pipeline cache (`BOYKO_PIPELINE_CACHE_DIR` overrides the
+    // directory; `BOYKO_PIPELINE_CACHE=off` disables it).
+    let cache_policy = boyko_rhi_vulkan::pipeline_cache::PipelineCachePolicy::per_user_from_env();
+    let ctx = match VulkanContext::boot_singleton(config, cache_policy) {
         Ok(c) => c,
         Err(e) => {
             crate::diag::report_boot_stage_failed("vulkan device", &e);
@@ -279,6 +284,25 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
             return AppExit(true);
         }
     };
+
+    // BOOT-1 F4, P3: a stage boundary. A close requested during the host boot (the window is
+    // already hidden) unwinds here in the existing failure shape — no `report_boot_stage_failed`,
+    // a user close is not an error.
+    boyko_rhi_vulkan::window::pump_boot_messages();
+    if host.window.close_requested() {
+        let pump = host.window.end_boot();
+        record_boot_stats(app, ctx, boot_start, 0, pump);
+        let _ = boyko_log::lifecycle::flush();
+        // SAFETY: as the bindless failure branch below — `host` was booted on `ctx`, nothing was
+        // submitted past the boot's own fence-waited uploads, no World resident references a
+        // host/device resource, `destroy_host_gpu_chain` waits the device idle first, and no
+        // `&'static VulkanContext` survives past `destroy_singleton`.
+        unsafe {
+            destroy_host_gpu_chain(host, ctx);
+            VulkanContext::destroy_singleton();
+        }
+        return AppExit(true);
+    }
 
     // Textured-PBR rung T6c (fix, post-review): create the bindless texture-array
     // descriptor set (T4) HERE — immediately after the host boots, BEFORE any World
@@ -320,6 +344,21 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
             return AppExit(true);
         }
     };
+
+    // BOOT-1 F4, P3: the bindless table's boundary — the same unwind, the table first.
+    boyko_rhi_vulkan::window::pump_boot_messages();
+    if host.window.close_requested() {
+        let pump = host.window.end_boot();
+        record_boot_stats(app, ctx, boot_start, 0, pump);
+        let _ = boyko_log::lifecycle::flush();
+        bindless_texture_table.destroy(ctx);
+        // SAFETY: as the branch above.
+        unsafe {
+            destroy_host_gpu_chain(host, ctx);
+            VulkanContext::destroy_singleton();
+        }
+        return AppExit(true);
+    }
 
     // ── World residents BEFORE `finish()` so the startup one-shots drain WITH
     // the device present (plan D2 step 4 / D6). The GPU handles are NonSend:
@@ -728,7 +767,16 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         app.world_mut().insert_resource(AppExit(false));
     }
 
+    let startup_start = Instant::now();
     guarded_finish(app);
+    // BOOT-1: the startup systems' share of the boot, for the telemetry line.
+    let startup_ns = startup_start.elapsed().as_nanos() as u64;
+    // BOOT-1 F4, P3: after the startup systems. A close from here on skips the frame loop and
+    // runs the normal teardown (it needs `finish`'s plugin resources).
+    boyko_rhi_vulkan::window::pump_boot_messages();
+    if host.window.close_requested() {
+        app.world_mut().insert_resource(AppExit(true));
+    }
 
     // SSAA (AA campaign Stage 3, C1): resolution is a BOOT COMMITMENT — when the host
     // armed the 2× composite extent (`WindowHost::boot`'s device-capability probe), the
@@ -960,6 +1008,20 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         .non_send_resource_mut::<MaterialTable>()
         .boot_seed(&material_assets, ctx);
     app.world_mut().insert_resource(material_assets);
+
+    // BOOT-1 F-A / F4: boot is over — every boot pipeline exists. The last P3 pump, then disarm
+    // the pump (the frame loop pumps itself), save the cache iff anything missed, and emit the one
+    // telemetry line and `HostBootStats`.
+    boyko_rhi_vulkan::window::pump_boot_messages();
+    let pump = host.window.end_boot();
+    if pump.close_requested {
+        app.world_mut().insert_resource(AppExit(true));
+    }
+    record_boot_stats(app, ctx, boot_start, startup_ns, pump);
+    debug_assert!(
+        !boyko_rhi_vulkan::window::boot_pump_is_armed(),
+        "invariant: the boot pump is disarmed before the frame loop"
+    );
 
     // A startup-requested exit is honored (plan D6): skip the loop, tear down.
     // BOTH frame-loop exits (normal Escape/close/AppExit AND a terminal render
@@ -4281,6 +4343,90 @@ fn record_teardown_stats(app: &mut App, ctx: &VulkanContext) {
     stats.host_allocations_live = u32::try_from(host_live).unwrap_or(u32::MAX);
     stats.device_allocations_live = u32::try_from(device_live).unwrap_or(u32::MAX);
     stats.persistent_descriptor_pools_live = pools_live;
+    stats.pipelines_created_total = ctx.pipeline_stats().total();
+}
+
+/// BOOT-1: the end of boot — saves the pipeline cache iff anything missed
+/// (`VulkanContext::persist_pipeline_cache`), writes [`crate::window_info::HostBootStats`] and emits
+/// the ONE boot telemetry line (`boyko_log::info!(App, ..)`), e.g.
+/// `boot: 59 pipelines (24 compute, 35 graphics), driver 5532 ms, cache hits 0/59 [cold: file
+/// absent], saved 2.41 MiB in 9 ms; startup systems 3 ms; window pumped 118x (59 after creates, 12
+/// after waits), longest unpumped 580 ms; top: 581 ms mod.rs:2242 C | ...`.
+///
+/// Once per boot, never per frame; the two pre-formatted spans keep the line within the log
+/// record's argument and string limits.
+#[cfg(windows)]
+#[cold]
+#[inline(never)]
+fn record_boot_stats(
+    app: &mut App,
+    ctx: &VulkanContext,
+    boot_start: Instant,
+    startup_ns: u64,
+    pump: boyko_rhi_vulkan::window::BootPumpReport,
+) {
+    use boyko_rhi_vulkan::pipeline_cache::{CacheSave, PipelineKind};
+    use std::fmt::Write as _;
+
+    let saved = ctx.persist_pipeline_cache();
+    let stats = ctx.pipeline_stats();
+    let boot = crate::window_info::HostBootStats {
+        sampled: true,
+        pipelines: stats.total(),
+        compute: stats.compute,
+        graphics: stats.graphics,
+        cache_hits: stats.hits,
+        feedback_invalid: stats.feedback_invalid,
+        driver_ns: stats.driver_ns,
+        cache_load: ctx.pipeline_cache_load(),
+        saved,
+        startup_ns,
+        boot_ns: boot_start.elapsed().as_nanos() as u64,
+        stage_pumps: pump.stage_pumps,
+        create_pumps: pump.create_pumps,
+        wait_pumps: pump.wait_pumps,
+        max_unpumped_ns: pump.max_unpumped.as_nanos() as u64,
+        close_requested: pump.close_requested,
+    };
+    app.world_mut().insert_resource(boot);
+
+    let mut cache = String::with_capacity(128);
+    let _ = write!(cache, "hits {}/{} [{}], ", boot.cache_hits, boot.pipelines, boot.cache_load.label());
+    let _ = match saved {
+        CacheSave::Saved { bytes, nanos } => write!(
+            cache,
+            "saved {:.2} MiB in {} ms",
+            bytes as f64 / (1024.0 * 1024.0),
+            nanos / 1_000_000
+        ),
+        CacheSave::Clean => write!(cache, "nothing to save"),
+        CacheSave::NotPersisted => write!(cache, "not persisted"),
+        CacheSave::Failed(e) => write!(cache, "save failed ({e:?})"),
+    };
+    let mut top = String::with_capacity(256);
+    for entry in stats.top.iter().filter(|e| e.ns > 0) {
+        let (file, line) = entry.site.map_or(("?", 0), |s| {
+            (s.file().rsplit(['/', '\\']).next().unwrap_or("?"), s.line())
+        });
+        let kind = if entry.kind == PipelineKind::Compute { 'C' } else { 'G' };
+        let sep = if top.is_empty() { "" } else { " | " };
+        let _ = write!(top, "{sep}{} ms {file}:{line} {kind}", entry.ns / 1_000_000);
+    }
+    boyko_log::info!(
+        boyko_log::App,
+        "boot: {} pipelines ({} compute, {} graphics), driver {} ms, cache {}; startup systems {} ms; window pumped {}x ({} after creates, {} after waits), longest unpumped {} ms; top: {}",
+        boot.pipelines,
+        boot.compute,
+        boot.graphics,
+        boot.driver_ns / 1_000_000,
+        cache.as_str(),
+        startup_ns / 1_000_000,
+        pump.pumps(),
+        pump.create_pumps,
+        pump.wait_pumps,
+        boot.max_unpumped_ns / 1_000_000,
+        top.as_str()
+    );
 }
 
 #[cfg(test)]
