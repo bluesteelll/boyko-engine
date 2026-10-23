@@ -542,9 +542,15 @@ fn compile_twin(dxc: &PathBuf) -> Vec<u32> {
 
 /// `twin`, DXC'd under the frozen recipe into scratch files named after `stem`.
 fn compile_twin_of(dxc: &PathBuf, twin: PostFinalTwin, stem: &str) -> Vec<u32> {
+    compile_source(dxc, &emit_post_final_comp_with(twin), stem)
+}
+
+/// `source` (a whole `post_final` module), DXC'd under the frozen recipe into scratch files named
+/// after `stem`.
+fn compile_source(dxc: &PathBuf, source: &str, stem: &str) -> Vec<u32> {
     let hlsl = child_guard::scratch_path(&format!("{stem}.comp.hlsl"));
     let spv = child_guard::scratch_path(&format!("{stem}.comp.spv"));
-    std::fs::write(&hlsl, emit_post_final_comp_with(twin)).expect("invariant: the scratch dir accepts the twin's source");
+    std::fs::write(&hlsl, source).expect("invariant: the scratch dir accepts the twin's source");
     let status = Command::new(dxc)
         .args(["-spirv", "-T", "cs_6_0", "-E", "main", "-fspv-target-env=vulkan1.3"])
         .arg(&hlsl)
@@ -552,7 +558,7 @@ fn compile_twin_of(dxc: &PathBuf, twin: PostFinalTwin, stem: &str) -> Vec<u32> {
         .arg(&spv)
         .status_within(DXC_DEADLINE)
         .expect("invariant: dxc was located and must run");
-    assert!(status.success(), "dxc failed on the {twin:?} twin under post_final's frozen recipe");
+    assert!(status.success(), "dxc failed on the `{stem}` twin under post_final's frozen recipe");
     let bytes = std::fs::read(&spv).expect("invariant: dxc wrote the twin's .spv");
     let _ = std::fs::remove_file(&hlsl);
     let _ = std::fs::remove_file(&spv);
@@ -652,10 +658,11 @@ fn stat_number(v: &StatValue) -> Option<f64> {
     }
 }
 
-/// Rule (xviii)'s thresholds on two reports (the uber module, its NoRcas twin): `Err(why)` when the
-/// statistic names differ, when no statistic names a register count (the row could not measure),
-/// when a register statistic of the uber module exceeds the twin's by more than
-/// [`REGISTER_DELTA_MAX`], or when an occupancy statistic differs. No absolute count is asserted.
+/// Rule (xviii)'s thresholds on two reports (a shipped module, its register twin with one
+/// runtime-gated body compiled out): `Err(why)` when the statistic names differ, when no statistic
+/// names a register count (the row could not measure), when a register statistic of the shipped
+/// module exceeds the twin's by more than [`REGISTER_DELTA_MAX`], or when an occupancy statistic
+/// differs. No absolute count is asserted.
 fn registers_agree(uber: &[(String, StatValue)], twin: &[(String, StatValue)]) -> Result<String, String> {
     let names = |r: &[(String, StatValue)]| {
         let mut n: Vec<String> = r.iter().map(|(k, _)| k.clone()).collect();
@@ -677,12 +684,12 @@ fn registers_agree(uber: &[(String, StatValue)], twin: &[(String, StatValue)]) -
             seen_register = true;
             report.push(format!("{name}: uber {u}, twin {t}, delta {}", u - t));
             if u - t > REGISTER_DELTA_MAX {
-                return Err(format!("`{name}`: the uber module uses {u}, the NoRcas twin {t} — delta {} > {REGISTER_DELTA_MAX}", u - t));
+                return Err(format!("`{name}`: the shipped module uses {u}, the twin {t} — delta {} > {REGISTER_DELTA_MAX}", u - t));
             }
         } else if lower.contains("occupancy") {
             report.push(format!("{name}: uber {uv}, twin {tv}"));
             if stat_number(uv) != stat_number(tv) {
-                return Err(format!("`{name}`: the uber module's {uv} differs from the NoRcas twin's {tv}"));
+                return Err(format!("`{name}`: the shipped module's {uv} differs from the twin's {tv}"));
             }
         }
     }
@@ -735,6 +742,146 @@ fn the_register_gate_rejects_its_fixtures() {
     let blind = row(&[("Binary Size", 900)]);
     assert!(registers_agree(&blind, &blind).is_err(), "a report with no register statistic cannot gate, so it is red");
     assert!(registers_agree(&row(&[("Register Count", 24)]), &row(&[("Register Count", 40)])).is_ok(), "the uber module using FEWER registers is not a cost");
+}
+
+// ---- Render wave PXt — the AgX arm's register twin (rule (xviii); `pxt/critique.md` W3) -----------
+
+/// The AgX dispatch test as the generator prints it (`post::tonemap_select`'s first arm).
+const AGX_DISPATCH_TEST: &str = "if (post_tonemap_mode == TONEMAP_AGX) {";
+
+/// `GLSL.std.450 Pow`.
+const GLSL_POW: u32 = 26;
+/// `GLSL.std.450 Log2`.
+const GLSL_LOG2: u32 = 30;
+
+/// Rule (xviii)'s `-D <BODY>=0` for a GENERATED module (the printer has no preprocessor node): the
+/// module's text with its AgX dispatch test made `if (false)`, so DXC folds the AgX arm away while
+/// the other arms keep reading the runtime word. `Err` unless the test occurs exactly once.
+fn without_the_agx_arm(text: &str) -> Result<String, String> {
+    match text.matches(AGX_DISPATCH_TEST).count() {
+        1 => Ok(text.replacen(AGX_DISPATCH_TEST, "if (false) {", 1)),
+        n => Err(format!(
+            "the AgX dispatch test `{AGX_DISPATCH_TEST}` occurs {n} times in the module (want 1): there is no AgX arm to compile out"
+        )),
+    }
+}
+
+/// The `GLSL.std.450` extended instructions numbered `inst` in a SPIR-V module.
+fn glsl_ext_count(words: &[u32], inst: u32) -> usize {
+    let mut glsl = None;
+    let mut i = 5; // past the header
+    let mut n = 0;
+    while i < words.len() {
+        let (count, op) = ((words[i] >> 16) as usize, words[i] & 0xFFFF);
+        assert!(count > 0, "a zero-length SPIR-V instruction at word {i}");
+        if op == 11 && count >= 3 {
+            // OpExtInstImport: <result id> <name, NUL-terminated, little-endian words>.
+            let name: Vec<u8> = words[i + 2..i + count].iter().flat_map(|w| w.to_le_bytes()).take_while(|b| *b != 0).collect();
+            if name == b"GLSL.std.450" {
+                glsl = Some(words[i + 1]);
+            }
+        } else if op == 12 && count >= 5 && Some(words[i + 3]) == glsl && words[i + 4] == inst {
+            // OpExtInst: <type> <result> <set> <instruction> <operands...>.
+            n += 1;
+        }
+        i += count;
+    }
+    n
+}
+
+/// `Err(why)` unless `twin` is `shipped` with the AgX arm compiled out — rule (xviii)'s anti-vacuity
+/// on the arm's named marker ops: different bytes; `GLSL.std.450 Log2` 3 → 0 (the arm's three
+/// `log2`, the module's only ones); `Pow` exactly three fewer (the arm's `pow(·, 2.2)`; the OETF's
+/// three stay); one `DontFlatten` selection fewer (the arm's dispatch level).
+fn agx_arm_anti_vacuity(shipped: &[u32], twin: &[u32]) -> Result<(), String> {
+    if twin == shipped {
+        return Err("the AgX twin's SPIR-V equals the shipped module: the two columns would be one kernel".to_string());
+    }
+    let (sl, tl) = (glsl_ext_count(shipped, GLSL_LOG2), glsl_ext_count(twin, GLSL_LOG2));
+    if (sl, tl) != (3, 0) {
+        return Err(format!("GLSL.std.450 Log2: shipped {sl}, AgX twin {tl} (want 3 and 0): the AgX arm was not compiled out"));
+    }
+    let (sp, tp) = (glsl_ext_count(shipped, GLSL_POW), glsl_ext_count(twin, GLSL_POW));
+    if sp != tp + 3 {
+        return Err(format!("GLSL.std.450 Pow: shipped {sp}, AgX twin {tp} (want exactly three fewer)"));
+    }
+    let (sd, td) = (dont_flatten_count(shipped), dont_flatten_count(twin));
+    if td + 1 != sd {
+        return Err(format!("DontFlatten selections: shipped {sd}, AgX twin {td} (want exactly one fewer)"));
+    }
+    Ok(())
+}
+
+/// The shipped `post_final` modules that carry the AgX arm, each with its generated source and its
+/// committed SPIR-V: `(label, source, spirv)`.
+fn agx_rows() -> Vec<(&'static str, String, &'static [u32])> {
+    vec![("post_final (committed)", boyko_shaderdsl::emit::emit_post_final_comp(), post_final_spirv())]
+}
+
+/// **Render wave PXt — the AgX arm's twin is the shipped module with the arm compiled out** (host;
+/// the substitution is checked without `dxc`, the compiled twin SKIPS without it — a skipped run is
+/// not a pass). Red-first: the shipped module itself, as its own twin, is rejected.
+#[test]
+fn the_agx_twin_compiles_the_arm_away() {
+    for (label, source, shipped) in agx_rows() {
+        let twin_text = without_the_agx_arm(&source).unwrap_or_else(|why| panic!("{label}: {why}"));
+        let Some(dxc) = find_dxc() else {
+            eprintln!("SKIP post_final_occupancy: no dxc resolves on this host — a skipped run is NOT a pass");
+            return;
+        };
+        let twin = compile_source(&dxc, &twin_text, "post_final_no_agx");
+        if let Err(why) = agx_arm_anti_vacuity(shipped, &twin) {
+            panic!("{label}: {why}");
+        }
+        assert!(agx_arm_anti_vacuity(shipped, shipped).is_err(), "{label}: the anti-vacuity must reject the shipped module as its own twin");
+        eprintln!(
+            "post_final_occupancy: {label}: Log2 {} vs {}, Pow {} vs {}, DontFlatten {} vs {} (shipped vs no_agx twin)",
+            glsl_ext_count(shipped, GLSL_LOG2),
+            glsl_ext_count(&twin, GLSL_LOG2),
+            glsl_ext_count(shipped, GLSL_POW),
+            glsl_ext_count(&twin, GLSL_POW),
+            dont_flatten_count(shipped),
+            dont_flatten_count(&twin)
+        );
+    }
+}
+
+/// **Render wave PXt — the AgX arm's register twin, GATED by rule (xviii)** (`pxt/critique.md` W3):
+/// every shipped module against itself with the AgX arm compiled out — the arm's register cost on
+/// every path that does not run it (ACES Hill, Neutral, Reinhard-Jodie). Panics where it cannot
+/// measure.
+#[test]
+#[ignore = "gpu-cap: needs a real GPU exposing VK_KHR_pipeline_executable_properties and the pinned dxc; PXt rule (xviii), the AgX arm's register twin GATED (a run that cannot measure panics); run with --nocapture"]
+fn post_final_agx_arm_registers_agree() {
+    let dxc = find_dxc().expect("GATE post_final_occupancy: no dxc resolves on this host — the gated row cannot measure, so it is red");
+    let probe = VulkanProbe::open()
+        .expect("GATE post_final_occupancy: the probe could not open a device with VK_KHR_pipeline_executable_properties (the SKIP line above says why) — the gated row cannot measure, so it is red");
+    println!("\n=== post_final AgX arm register twin (PXt, GATED by rule (xviii)) ===");
+    println!("device: {}", probe.device_name);
+    let mut red = Vec::new();
+    for (label, source, shipped) in agx_rows() {
+        let twin_text = without_the_agx_arm(&source).unwrap_or_else(|why| panic!("GATE red: {label}: {why}"));
+        let twin = compile_source(&dxc, &twin_text, "post_final_no_agx");
+        if let Err(why) = agx_arm_anti_vacuity(shipped, &twin) {
+            panic!("GATE red: {label}: {why}");
+        }
+        let reports = probe.measure(&[(label, shipped), ("no_agx (twin)", twin.as_slice())]);
+        for r in &reports {
+            println!("\n[{}] {} SPIR-V words, executable \"{}\", subgroupSize {}", r.label, r.spirv_words, r.executable_name, r.subgroup_size);
+            for (name, value) in &r.stats {
+                println!("    {name:.<44} {value}");
+            }
+        }
+        assert_eq!(reports.len(), 2, "{label}: both modules must have compiled");
+        for r in &reports {
+            assert!(!r.stats.is_empty(), "[{}] the driver returned no statistics — the CAPTURE_STATISTICS bit did not take effect", r.label);
+        }
+        match registers_agree(&reports[0].stats, &reports[1].stats) {
+            Ok(summary) => println!("\nGATE green ({label}): {summary}"),
+            Err(why) => red.push(format!("{label}: {why}")),
+        }
+    }
+    assert!(red.is_empty(), "GATE red: {}", red.join("; "));
 }
 
 /// The twin is the committed body with the dispatch compiled out: the generator prints the same

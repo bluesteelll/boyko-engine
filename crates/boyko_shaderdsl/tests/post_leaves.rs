@@ -123,10 +123,11 @@ fn reinhard_jodie_matches_f64() {
 fn tonemap_select_equals_each_curve() {
     // Word -> the curve it must dispatch to, bit for bit (the dispatch adds no arithmetic). Word 7
     // is unknown and falls back to ACES; the high-bit noise checks the field extraction.
-    let cases: [(u32, Leaf, &str); 4] = [
+    let cases: [(u32, Leaf, &str); 5] = [
         (0, aces_hill::<EvalCf>, "aces_hill"),
         (1, khronos_pbr_neutral::<EvalCf>, "khronos_pbr_neutral"),
         (2, reinhard_jodie::<EvalCf>, "reinhard_jodie"),
+        (3, agx::<EvalCf>, "agx"),
         (7, aces_hill::<EvalCf>, "aces_hill (unknown word 7)"),
     ];
     for (word, curve, name) in cases {
@@ -398,8 +399,8 @@ fn eval_params_reads_the_ubo_words() {
 
 // ---- Render wave PXt: AgX ---------------------------------------------------------------------------
 
-/// `tone_curve.md` §4's colours: mid-grey, a pure red light ×10, the fire colour `(1, 0.35, 0.08)`
-/// ×1 and ×10.
+/// The colours of `tone_curve.md` §4: mid-grey, a pure red light ×10, and the fire colour
+/// (1, 0.35, 0.08) ×1 and ×10.
 const SECTION_4_COLOURS: [[f32; 3]; 4] = [[0.18; 3], [10.0, 0.0, 0.0], [1.0, 0.35, 0.08], [10.0, 3.5, 0.8]];
 
 /// AgX's inputs (`pxt/cut.md` D-T1): the curve-leaf domain, 10⁵ colours with each channel

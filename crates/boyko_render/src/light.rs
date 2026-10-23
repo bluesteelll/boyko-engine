@@ -513,8 +513,15 @@ pub enum Tonemapper {
     Aces = 0,
     /// Khronos PBR Neutral — LUT-free, hue-preserving, gentle toe (no shadow crush).
     Neutral = 1,
-    /// Reinhard-Jodie — cheap hybrid luminance/per-channel, hue-preserving.
+    /// Reinhard-Jodie — cheap: per channel, the luminance Reinhard `v / (1 + l)` blended toward the
+    /// per-channel `v / (1 + v)` by that channel's own value. NOT hue-preserving: the per-channel
+    /// term shifts the hue of bright saturated colours.
     ReinhardJodie = 2,
+    /// AgX (render wave PXt) — three.js's formulation of Blender's AgX: a log-encoded sigmoid on a
+    /// Rec.2020 base between an inset and an outset matrix, so a bright saturated colour whitens
+    /// with little hue skew. Mid-grey `0.18` maps to `≈ 0.2145` linear (display code 127, against
+    /// ACES Hill's 92).
+    AgX = 3,
 }
 
 /// Word-7 sub-field for the tonemap mode: bits 8..11 (4 bits, 16 operators).

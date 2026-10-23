@@ -40,8 +40,8 @@ const _: () = assert!(core::mem::offset_of!(PostFinalGpu, _r) == 20);
 #[cfg(test)]
 mod tests {
     use boyko_shaderdsl::post::{
-        POST_FINAL_UBO_BYTES, POST_FINAL_UBO_LAYOUT, PostUboKind, TONEMAP_ACES, TONEMAP_MODE_MASK,
-        TONEMAP_MODE_SHIFT, TONEMAP_NEUTRAL, TONEMAP_REINHARD_JODIE,
+        POST_FINAL_UBO_BYTES, POST_FINAL_UBO_LAYOUT, PostUboKind, TONEMAP_ACES, TONEMAP_AGX,
+        TONEMAP_MODE_MASK, TONEMAP_MODE_SHIFT, TONEMAP_NEUTRAL, TONEMAP_REINHARD_JODIE,
     };
 
     use super::{POST_MODE_SHARPEN, PostFinalGpu};
@@ -78,13 +78,21 @@ mod tests {
         assert_eq!(size_of::<PostFinalGpu>(), POST_FINAL_UBO_BYTES as usize, "PostFinalGpu's size");
     }
 
+    /// Every `Tonemapper` variant's wire value is the eDSL word its dispatch reads. The `match` is
+    /// exhaustive, so a variant without an eDSL word fails to compile here (render wave PXt).
     #[test]
     fn tonemap_word_agrees_with_the_light_header() {
         assert_eq!(TONEMAP_MODE_SHIFT, light::TONEMAP_MODE_SHIFT, "the tonemapper field's shift");
         assert_eq!(TONEMAP_MODE_MASK, light::TONEMAP_MODE_MASK, "the tonemapper field's mask");
-        assert_eq!(TONEMAP_ACES, Tonemapper::Aces as u32, "ACES's word");
-        assert_eq!(TONEMAP_NEUTRAL, Tonemapper::Neutral as u32, "Neutral's word");
-        assert_eq!(TONEMAP_REINHARD_JODIE, Tonemapper::ReinhardJodie as u32, "Reinhard-Jodie's word");
+        for curve in [Tonemapper::Aces, Tonemapper::Neutral, Tonemapper::ReinhardJodie, Tonemapper::AgX] {
+            let word = match curve {
+                Tonemapper::Aces => TONEMAP_ACES,
+                Tonemapper::Neutral => TONEMAP_NEUTRAL,
+                Tonemapper::ReinhardJodie => TONEMAP_REINHARD_JODIE,
+                Tonemapper::AgX => TONEMAP_AGX,
+            };
+            assert_eq!(word, curve as u32, "{curve:?}'s word");
+        }
     }
 
     /// Render wave PX1b (D-R8): the host's sharpen bit is the eDSL's, and it stays clear of the

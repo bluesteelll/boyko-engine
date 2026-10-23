@@ -1,12 +1,16 @@
 //! Render wave PX1a — **the display parity of the tail** (`px1a/cut.md` C10; plan H4 Tests 14, 17, 20):
 //!
 //! - **Test 14 — tonemapper parity.** A 256-plateau HDR ramp (the emissive grid below: plateau `k`
-//!   holds `2^(-9 + 13·k/255)`, 0.002 … 16) under `Aces`, `Neutral` and `ReinhardJodie`: per pixel,
-//!   the `display` dump equals `post_final_eval` (`boyko_shaderdsl::post`, the eDSL body the shader is
-//!   generated from) of the dumped `lit` under the receipt's own `PostFinalGpu` words, within
-//!   `post_eval`'s bound (one display code + E0's bound on the OETF's `pow`). The receipt's tonemap
-//!   word must name the requested curve, so a runner that ignores the config cannot pass on ACES.
-//!   Neutral and Reinhard-Jodie had no host mirror before PX1a.
+//!   holds `2^(-9 + 13·k/255)`, 0.002 … 16) under `Aces`, `Neutral`, `ReinhardJodie` and (render
+//!   wave PXt) `AgX`: per pixel, the `display` dump equals `post_final_eval`
+//!   (`boyko_shaderdsl::post`, the eDSL body the shader is generated from) of the dumped `lit` under
+//!   the receipt's own `PostFinalGpu` words, within `post_eval`'s bound (one display code + E0's
+//!   bound on the OETF's `pow`). The receipt's tonemap word must name the requested curve, so a
+//!   runner that ignores the config cannot pass on ACES. Neutral and Reinhard-Jodie had no host
+//!   mirror before PX1a. Anti-vacuity (`pxt/cut.md` D-T4): display == eval holds even when a curve's
+//!   arm is missing from BOTH the shader and the eDSL (each falls back to ACES for an unknown word),
+//!   so for every curve but ACES the display must also differ by more than one code from the eval
+//!   under the ACES word on at least half of the plateaus — the arm ran.
 //! - **Test 17 — the `*_SRGB` swapchain** (D-P1). The same grid under ACES is presented twice — on
 //!   the production (UNORM) swapchain and on a forced `B8G8R8A8_SRGB` one (`TestForce` key
 //!   `srgb_swapchain`, which REFUSES the boot on a surface without an sRGB format, so the forced run
@@ -17,11 +21,12 @@
 //! - **Test 20 — the dark-gradient banding report** (K3; recorded, NOT gated). A SkyLight-only
 //!   scene (sky `0.02`, ground `0`) through a 90° camera stores a smooth vertical radiance ramp
 //!   ≈ 0.003 … 0.017; along the centre column the report prints the longest run of equal 8-bit
-//!   `display` codes inside 1–5 % of white (codes 3 … 13) under the default tonemapper — the number
-//!   the PX6 dither decision reads. Its one assertion is anti-vacuity (the window holds a ramp).
+//!   `display` codes inside 1–5 % of white (codes 3 … 13) under ACES Hill, named explicitly (its
+//!   worker word is `aces`, whatever the engine default; PX6 re-aims the report) — the number the
+//!   PX6 dither decision reads. Its one assertion is anti-vacuity (the window holds a ramp).
 //!
 //! The drivers spawn this binary's `px1a_display_worker` (`BOYKO_PX1A_DISPLAY=<grid|dark>:<aces|
-//! neutral|jodie>`). Test 17's driver sets `BOYKO_TEST_FORCE` on each worker itself (empty for the
+//! neutral|jodie|agx>`). Test 17's driver sets `BOYKO_TEST_FORCE` on each worker itself (empty for the
 //! UNORM run, `srgb_swapchain` for the sRGB run) — do NOT set it in the leg's environment. Test 20
 //! prints its row: run it with `--nocapture`.
 //!
@@ -95,7 +100,8 @@ fn parse_tonemapper(word: &str) -> Tonemapper {
         "aces" => Tonemapper::Aces,
         "neutral" => Tonemapper::Neutral,
         "jodie" => Tonemapper::ReinhardJodie,
-        other => panic!("{ENV_SCENE}: `{other}` is not aces|neutral|jodie"),
+        "agx" => Tonemapper::AgX,
+        other => panic!("{ENV_SCENE}: `{other}` is not aces|neutral|jodie|agx"),
     }
 }
 
@@ -276,6 +282,41 @@ fn eval_post_mismatches(scene: &DumpFile, display: &DumpFile, words: [u32; 8]) -
     (bad, first)
 }
 
+/// Render wave PXt (`pxt/cut.md` D-T4) — Test 14's anti-vacuity for a non-ACES curve: `(plateaus whose
+/// display differs by more than one code from post_final_eval(lit) under `words` with the ACES
+/// tonemap word, plateaus)`, a plateau being one distinct positive `lit` radiance (red channel).
+fn plateaus_off_aces(scene: &DumpFile, display: &DumpFile, words: [u32; 8]) -> (usize, usize) {
+    let field = TONEMAP_MODE_MASK << TONEMAP_MODE_SHIFT;
+    let mut aces = words;
+    aces[0] = (aces[0] & !field) | ((Tonemapper::Aces as u32) << TONEMAP_MODE_SHIFT);
+    let texels: Vec<[f32; 4]> =
+        (0..scene.height).flat_map(|y| (0..scene.width).map(move |x| (x, y))).map(|(x, y)| scene.texel_f32(x, y)).collect();
+    let params = eval_params(aces);
+    let tex = HostTex2::new(&texels, scene.width, scene.height);
+    let mut moved: Vec<(u32, bool)> = Vec::new();
+    for y in 0..scene.height {
+        for x in 0..scene.width {
+            let r = texels[(y * scene.width + x) as usize][0];
+            if r <= 0.0 {
+                continue;
+            }
+            let o = post_final_eval([x, y], &params, tex);
+            let d = display.rgba8(x, y);
+            let off = (0..3).any(|c| (255.0 * f64::from(o[c]) - f64::from(d[c])).abs() > 1.0);
+            moved.push((r.to_bits(), off));
+        }
+    }
+    moved.sort_unstable();
+    let mut plateaus: Vec<(u32, bool)> = Vec::new();
+    for (bits, off) in moved {
+        match plateaus.last_mut() {
+            Some(last) if last.0 == bits => last.1 |= off,
+            _ => plateaus.push((bits, off)),
+        }
+    }
+    (plateaus.iter().filter(|p| p.1).count(), plateaus.len())
+}
+
 /// The receipt's `[config]` `post_word0..7` — the `PostFinalGpu` words the frame's `post_final` read.
 fn receipt_post_words(r: &Receipt) -> [u32; 8] {
     core::array::from_fn(|i| u32::try_from(r.config(&format!("post_word{i}"))).expect("invariant: a 32-bit post word"))
@@ -362,9 +403,15 @@ fn banding_report(column: &[u8]) -> (usize, usize, usize) {
 // ===============================================================================================
 
 #[test]
-#[ignore = "gpu-windowed: PX1a test 14, display == post_final_eval(lit) under Aces / Neutral / ReinhardJodie on a 256-plateau HDR ramp (spawns px1a_display_worker); run with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
+#[ignore = "gpu-windowed: PX1a test 14, display == post_final_eval(lit) under Aces / Neutral / ReinhardJodie / AgX on a 256-plateau HDR ramp, each non-ACES curve off the ACES display (spawns px1a_display_worker); run with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
 fn px1a_display_tonemapper_parity() {
-    for (curve, tm) in [("aces", Tonemapper::Aces), ("neutral", Tonemapper::Neutral), ("jodie", Tonemapper::ReinhardJodie)] {
+    let curves = [
+        ("aces", Tonemapper::Aces),
+        ("neutral", Tonemapper::Neutral),
+        ("jodie", Tonemapper::ReinhardJodie),
+        ("agx", Tonemapper::AgX),
+    ];
+    for (curve, tm) in curves {
         let (lit, display, receipt) = capture_dumps("grid", curve);
         let words = receipt_post_words(&receipt);
         let mode = (words[0] >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK;
@@ -380,6 +427,15 @@ fn px1a_display_tonemapper_parity() {
             "{curve}: {bad} display channel samples differ from post_final_eval(lit) beyond one code + the OETF bound \
              (first: {first:?}): the device's post_final is not the eDSL's {tm:?} body"
         );
+        if tm != Tonemapper::Aces {
+            let (off, total) = plateaus_off_aces(&lit, &display, words);
+            assert!(
+                2 * off >= total,
+                "{curve}: the display equals the ACES display on {} of {total} plateaus — the {tm:?} arm did not run",
+                total - off
+            );
+            println!("px1a test 14: {curve}: off the ACES display on {off} of {total} plateaus");
+        }
         println!("px1a test 14: {curve}: {plateaus} radiances in [{lo:.5}, {hi:.3}], display == post_final_eval(lit)");
     }
 }
