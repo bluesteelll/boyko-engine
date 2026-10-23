@@ -15,7 +15,9 @@
 //! - [`flat_stall_equals_s_over_2a`] — K3's A2-flat stall;
 //! - [`n_family_passes_and_z_family_fails_a1s1_k64`] — the model separates the families on the
 //!   arm the decision is tightest on;
-//! - [`the_format_decision_curve_is_the_shipping_default`] — D-P4's tripwire (verify r5 O1).
+//! - [`the_format_decision_curve_is_the_shipping_default`] — D-P4's tripwire (verify r5 O1);
+//! - [`the_record_names_agx_as_its_decided_curve`] — the tripwire's record parse reads the real
+//!   record (render wave PXt).
 //!
 //! [`write_expected_block`] (`generator:`) rewrites the record's block from this tree's model.
 
@@ -203,14 +205,30 @@ fn the_format_decision_curve_is_the_shipping_default() {
         return;
     }
     let record = record_text();
-    let decided = record
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("decided_curve = \""))
-        .and_then(|v| v.strip_suffix('"'))
-        .unwrap_or_else(|| panic!("{RECORD} names no `decided_curve`"));
+    let decided = decided_curve(&record).unwrap_or_else(|| panic!("{RECORD} names no `decided_curve`"));
     assert_eq!(
         default, decided,
         "the shipping default curve changed after PX0: H3 row 6 re-runs the content arms and the pinned model under the new curve before the change merges"
+    );
+}
+
+/// The curve the record decided under: the value of its `decided_curve = "<curve>"` line.
+fn decided_curve(record: &str) -> Option<&str> {
+    record
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("decided_curve = \""))
+        .and_then(|v| v.strip_suffix('"'))
+}
+
+/// Render wave PXt (`pxt/critique.md` C1): the tripwire's parse finds the decided curve on the REAL
+/// record, so its live branch (once `post.rs` carries an AgX word) compares the default with the
+/// record's curve instead of panicking that the record names none.
+#[test]
+fn the_record_names_agx_as_its_decided_curve() {
+    assert_eq!(
+        decided_curve(&record_text()),
+        Some("agx"),
+        "{RECORD}: the tripwire cannot read the record's `decided_curve` line"
     );
 }
 
