@@ -172,6 +172,62 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
+## AgX tone-mapping constants (three.js, Filament)
+
+- **Files:** the items named below, not the rest of each file, which is this project's own.
+  - `crates/boyko_shaderdsl/src/post.rs`: the AgX constants (`AGX_IN` and the inset and
+    Rec.709 → Rec.2020 matrices it is multiplied from, `AGX_OUT`, `REC2020_TO_REC709`,
+    `AGX_LOG_FLOOR`, `AGX_MIN_EV`, `AGX_EV_INV_RANGE` and the two log bounds it is computed from,
+    `AGX_POLY`, `AGX_LINEARIZE_EXP`) and the leaf `agx`
+  - `crates/boyko_rhi_vulkan/tests/lit_format/agx_f64.rs`: the f64 test transcription of three.js's
+    `AgXToneMapping` and of Filament's `agxLook` (Punchy), with their constants
+  - `crates/boyko_shaderdsl/tests/post_f64/mod.rs`: `AGX_POLY`, `AGX_LINEARIZE_EXP` and
+    `agx_tracked`, the f64 test oracle's AgX in the leaf's operation order
+- **Upstream:**
+  - three.js: <https://github.com/mrdoob/three.js>
+    (`src/renderers/shaders/ShaderChunk/tonemapping_pars_fragment.glsl.js`, `AgXToneMapping`), which
+    credits Filament's implementation (<https://github.com/google/filament/pull/7236>)
+  - Filament: <https://github.com/google/filament> (`filament/src/ToneMapper.cpp`, the AgX tone
+    mapper and its looks)
+
+  The constants are numeric data, transcribed into the shader eDSL's Rust and into f64 test code;
+  the matrices are transposed from three.js's GLSL columns into rows. No upstream source file is
+  present in this repository.
+- **License:** MIT (three.js); Apache-2.0 (Filament)
+- **Copyright:**
+  - Copyright © 2010-2026 three.js authors (three.js)
+  - Copyright (C) 2021 The Android Open Source Project (Filament, `filament/src/ToneMapper.cpp`)
+
+Full license text of three.js (`LICENSE`, <https://github.com/mrdoob/three.js/blob/dev/LICENSE>):
+
+```text
+The MIT License
+
+Copyright © 2010-2026 three.js authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
+Filament is licensed under the Apache License, Version 2.0; its full text is this repository's
+`LICENSE`. Filament's repository root ships no `NOTICE` file (checked 2026-10-23), so there is no
+upstream NOTICE text to carry.
+
 ## Jolt Physics-derived material
 
 - **Files:**
