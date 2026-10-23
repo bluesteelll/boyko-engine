@@ -203,6 +203,21 @@ pub mod os {
         pub fn GetModuleHandleW(lpModuleName: *const u16) -> *mut c_void;
     }
 
+    // SAFETY: matches the Win64 gdi32 ABI: `GetStockObject(int)` returns an HGDIOBJ (an opaque
+    // handle, `*mut c_void`; NULL on failure). gdi32 is linked by the `#[link]` attribute; no Cargo
+    // change (BOOT-1 F1).
+    #[link(name = "gdi32")]
+    unsafe extern "system" {
+        pub fn GetStockObject(i: i32) -> *mut c_void;
+    }
+
+    /// `BLACK_BRUSH` for `GetStockObject` — the class background brush (BOOT-1 F1: a dark window
+    /// from the first moment, never the default white).
+    pub const BLACK_BRUSH: i32 = 4;
+
+    /// `SW_HIDE` for `ShowWindow` — a close during boot hides the window at once (BOOT-1 F4).
+    pub const SW_HIDE: i32 = 0;
+
     // --- Win32 message / style / show constants used by the window. ---
 
     /// `WM_DESTROY`.
@@ -420,6 +435,14 @@ non_dispatchable_handle!(
     VkSampler
 );
 
+// --- BOOT-1 F-A pipeline-cache handle (non-dispatchable). ---
+
+non_dispatchable_handle!(
+    /// `VkPipelineCache` — the driver's compiled-pipeline cache, one per context (BOOT-1 F-A),
+    /// passed at every `vkCreate*Pipelines` call and persisted per user.
+    VkPipelineCache
+);
+
 // ---------------------------------------------------------------------------
 // VkResult.
 // ---------------------------------------------------------------------------
@@ -614,6 +637,12 @@ pub enum VkStructureType {
     /// `VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO =
     /// 1000161003`.
     DescriptorSetVariableDescriptorCountAllocateInfo = 1_000_161_003,
+    /// `VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO` (BOOT-1 F-A). vulkan_core.h: 17.
+    PipelineCacheCreateInfo = 17,
+    /// `VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO` (BOOT-1 F-A; Vulkan 1.3 core,
+    /// promoted from `VK_EXT_pipeline_creation_feedback`, extension 193). vulkan_core.h:
+    /// `1000192000`.
+    PipelineCreationFeedbackCreateInfo = 1_000_192_000,
 }
 
 // ---------------------------------------------------------------------------
@@ -2135,6 +2164,42 @@ pub struct VkPipelineRenderingCreateInfo {
     pub stencil_attachment_format: i32,
 }
 
+/// `VkPipelineCacheCreateInfo` — read BY the driver in `vkCreatePipelineCache` (BOOT-1 F-A).
+/// `p_initial_data` / `initial_data_size` are a payload a previous `vkGetPipelineCacheData`
+/// returned (VUID-VkPipelineCacheCreateInfo-initialDataSize-00768/00769), or null / 0.
+#[repr(C)]
+pub struct VkPipelineCacheCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    /// `VkPipelineCacheCreateFlags` — 0: the cache is internally synchronized.
+    pub flags: VkFlags,
+    pub initial_data_size: usize,
+    pub p_initial_data: *const c_void,
+}
+
+/// `VkPipelineCreationFeedback` — written BY the driver through a
+/// [`VkPipelineCreationFeedbackCreateInfo`] (BOOT-1 F-A; Vulkan 1.3 core).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct VkPipelineCreationFeedback {
+    /// `VkPipelineCreationFeedbackFlags`: `VALID` 0x1, `APPLICATION_PIPELINE_CACHE_HIT` 0x2,
+    /// `BASE_PIPELINE_ACCELERATION` 0x4.
+    pub flags: VkFlags,
+    /// Nanoseconds the creation took, valid only with the `VALID` bit.
+    pub duration: u64,
+}
+
+/// `VkPipelineCreationFeedbackCreateInfo` — chained into a compute or graphics create-info's
+/// `pNext`; output-only (the driver writes the pointed-to feedback, reads nothing else).
+#[repr(C)]
+pub struct VkPipelineCreationFeedbackCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub p_pipeline_creation_feedback: *mut VkPipelineCreationFeedback,
+    pub pipeline_stage_creation_feedback_count: u32,
+    pub p_pipeline_stage_creation_feedbacks: *mut VkPipelineCreationFeedback,
+}
+
 /// `VkGraphicsPipelineCreateInfo` — the top-level graphics-pipeline create-info.
 /// `p_next` chains the [`VkPipelineRenderingCreateInfo`]; `render_pass` is
 /// `VK_NULL_HANDLE` and `subpass` is `0` (dynamic rendering, OQ-6). Tessellation +
@@ -3196,6 +3261,15 @@ const _: () = assert!(core::mem::size_of::<VkPipelineRenderingCreateInfo>() == 4
 const _: () = assert!(core::mem::align_of::<VkPipelineRenderingCreateInfo>() == 8);
 const _: () = assert!(core::mem::size_of::<VkGraphicsPipelineCreateInfo>() == 144);
 const _: () = assert!(core::mem::align_of::<VkGraphicsPipelineCreateInfo>() == 8);
+// BOOT-1 F-A: the pipeline-cache create-info (read BY the driver) and the creation feedback pair
+// (written BY the driver): the LP64 footprints of vulkan_core.h.
+const _: () = assert!(core::mem::size_of::<VkPipelineCacheCreateInfo>() == 40);
+const _: () = assert!(core::mem::align_of::<VkPipelineCacheCreateInfo>() == 8);
+const _: () = assert!(core::mem::size_of::<VkPipelineCreationFeedback>() == 16);
+const _: () = assert!(core::mem::align_of::<VkPipelineCreationFeedback>() == 8);
+const _: () = assert!(core::mem::size_of::<VkPipelineCreationFeedbackCreateInfo>() == 40);
+const _: () = assert!(core::mem::align_of::<VkPipelineCreationFeedbackCreateInfo>() == 8);
+const _: () = assert!(core::mem::size_of::<VkPipelineCache>() == 8);
 
 // ---------------------------------------------------------------------------
 // Function-pointer typedefs — the loader fills these in at runtime.
@@ -3423,26 +3497,53 @@ pub type PfnVkDestroyPipelineLayout = unsafe extern "system" fn(
     p_allocator: *const c_void,
 );
 
-/// `PFN_vkCreateComputePipelines`. `pipeline_cache` is null for Slice 0;
-/// `create_info_count` pipelines are written into `p_pipelines`.
+/// `PFN_vkCreateComputePipelines`. `pipeline_cache` is the context's one cache (BOOT-1 F-A;
+/// `VK_NULL_HANDLE` under `BOYKO_PIPELINE_CACHE=off`); `create_info_count` pipelines are written
+/// into `p_pipelines`. `VkPipelineCache` is `repr(transparent)` over `u64`, so the retype from the
+/// former `u64` parameter is ABI-identical.
 pub type PfnVkCreateComputePipelines = unsafe extern "system" fn(
     device: VkDevice,
-    pipeline_cache: u64,
+    pipeline_cache: VkPipelineCache,
     create_info_count: u32,
     p_create_infos: *const VkComputePipelineCreateInfo,
     p_allocator: *const c_void,
     p_pipelines: *mut VkPipeline,
 ) -> i32;
 
-/// `PFN_vkCreateGraphicsPipelines` (Phase-6 S0 rung 2). `pipeline_cache` is null;
-/// `create_info_count` pipelines are written into `p_pipelines`.
+/// `PFN_vkCreateGraphicsPipelines` (Phase-6 S0 rung 2). `pipeline_cache` as for
+/// [`PfnVkCreateComputePipelines`]; `create_info_count` pipelines are written into `p_pipelines`.
 pub type PfnVkCreateGraphicsPipelines = unsafe extern "system" fn(
     device: VkDevice,
-    pipeline_cache: u64,
+    pipeline_cache: VkPipelineCache,
     create_info_count: u32,
     p_create_infos: *const VkGraphicsPipelineCreateInfo,
     p_allocator: *const c_void,
     p_pipelines: *mut VkPipeline,
+) -> i32;
+
+/// `PFN_vkCreatePipelineCache` (BOOT-1 F-A).
+pub type PfnVkCreatePipelineCache = unsafe extern "system" fn(
+    device: VkDevice,
+    p_create_info: *const VkPipelineCacheCreateInfo,
+    p_allocator: *const c_void,
+    p_pipeline_cache: *mut VkPipelineCache,
+) -> i32;
+
+/// `PFN_vkDestroyPipelineCache` (BOOT-1 F-A).
+pub type PfnVkDestroyPipelineCache = unsafe extern "system" fn(
+    device: VkDevice,
+    pipeline_cache: VkPipelineCache,
+    p_allocator: *const c_void,
+);
+
+/// `PFN_vkGetPipelineCacheData` (BOOT-1 F-A): the two-call idiom — a null `p_data` writes the
+/// size; a non-null one writes up to `*p_data_size` bytes and returns `VK_INCOMPLETE` if that is
+/// fewer than the cache holds.
+pub type PfnVkGetPipelineCacheData = unsafe extern "system" fn(
+    device: VkDevice,
+    pipeline_cache: VkPipelineCache,
+    p_data_size: *mut usize,
+    p_data: *mut c_void,
 ) -> i32;
 
 /// `PFN_vkDestroyPipeline`.
