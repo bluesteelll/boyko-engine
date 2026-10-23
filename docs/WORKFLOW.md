@@ -11,7 +11,8 @@ freeze. Only relative link targets were re-based from the repository root to `do
 feature-axis heading was raised one level. Where a passage restates a rule, the shortened rule in
 CLAUDE.md is authoritative. Numbers are as measured on the dates they carry and are not re-derived
 here. A cross-reference that leaves its section ("the four commands above", "rather than only here")
-points into CLAUDE.md as it stood before the move.
+points into CLAUDE.md as it stood before the move. Merge check — the CI mirror was written for this file
+by ci-fix-2 (2026-10-22).
 
 ## Build-command flags
 
@@ -289,6 +290,117 @@ two crates, not in the gate. MEASURED 2026-10-09 from a Windows host with
 stable `check` of its packages), except the two `bench-alloc` legs that host cannot build. That
 measurement is a compile, not a run of any test.
 
+## Merge check — the CI mirror
+
+**Why.** GitHub CI run 39663719484 on `integ/unified` `97900f68` failed 13 of 23 jobs on two defects no
+merge check could see: items only the Linux target reports as dead (`crates/boyko_app/src/post_host.rs`,
+reached only from the `#[cfg(windows)]` frame loop) and two `#[allow(clippy::disallowed_types)]` that
+`scripts/check_hotpath_exceptions.py` had no rows for. Both jobs run on `ubuntu-latest`; every lane check
+ran on Windows only (orchestrator ruling 96). So every merge check also runs
+[`tools/ci_mirror.py`](../tools/ci_mirror.py): every job of `.github/workflows/ci.yml` that this host can
+run, run here, with a PASS / FAIL / NOT-RUNNABLE table. A FAIL blocks the merge like a red test.
+
+**No Linux build on the dev host (ruling 101).** The owner banned every Linux build on this machine
+(2026-10-22: "build nothing for Linux"). So the mirror's `linux` and `linux-compile-only` rows run only with
+`--linux`, and the standard call passes neither it nor `--linux-target-dir`: each of those rows is SKIPPED
+"not run: owner ban (ruling 101) - GitHub CI covers them", which is neither a pass nor a red. The Linux
+side of a merge is verified by GitHub CI on the lane's branch, which the orchestrator dispatches with the
+owner's yes. `--linux` is for a host where the ban is lifted;
+[`tests/ci_mirror_census.rs`](../tests/ci_mirror_census.rs) pins the opt-in table, so the default cannot
+quietly go back to building for Linux.
+
+```text
+python tools/ci_mirror.py --log-dir <a fresh scratch dir> [--host-target-dir <dir>] [--heavy]
+       [--linux --linux-target-dir <dir>] [--only a,b] [--skip a,b] [--list] [--self-test]
+       [--fap-target-dir <dir>] [--min-free-commit-gb 6] [--min-free-disk-gb 15] [--row-timeout-min 120]
+```
+
+Run it from the worktree under check (it reads that tree's `ci.yml`, and refuses to run without one), with
+the lane's usual environment and under the heavy lock. `RUSTUP_TOOLCHAIN` is required (the toolchain whose
+`rustc -V` is the yml's pin, e.g. `stable-x86_64-pc-windows-msvc`); the script sets `RUSTUP_AUTO_INSTALL=0`
+in every child, so nothing is ever downloaded behind the caller. `--host-target-dir` defaults to
+`CARGO_TARGET_DIR`. `--log-dir` is required, so nothing is written into a worktree; it gets `PID`,
+`progress.tsv` (one line per finished row, with the free disk after it), `summary.tsv`, `DONE`, one log per
+row and `dead_items.tsv` (every never-used / unused / unfulfilled-expectation diagnostic of the Linux rows:
+the F4 class list; empty without `--linux`). **A fresh log dir per run** (ruling 103). A run refuses a
+`--log-dir` that exists and is not an empty directory: exit 2 with a message, before it writes anything. So
+every file in a log dir is one run's, and no earlier run's `DONE`, `summary.tsv`, `dead_items.tsv`, `PID` or
+row log is read as this run's. A run's first writes, before the self-test and before anything else in it can
+fail, are `DONE` = `running`, `PID`, `progress.tsv`'s header and an empty `summary.tsv` and
+`dead_items.tsv`; its last write is `DONE` = the exit code, also when it stops on a drift, a failed self-test
+or an error in the script. So a run has ended when `DONE` holds an integer, and only then are `summary.tsv`
+and `dead_items.tsv` its verdict (a waiter reads `DONE`'s content, not its existence). **The waiter** launches
+the run into a dir that does not exist yet and keeps the PID it launched (`Start-Process -PassThru`), not the
+`PID` file: a run that argparse rejects, or that is refused, writes no file at all, and a refused run leaves a
+re-used dir's earlier files as they were, so the fresh dir is the waiter's half of the contract. That process
+gone with no integer in `DONE` is a failure; `running` beside a dead `PID` is a run that was killed or
+crashed, with no verdict. `--list` and `--self-test` neither read nor write a `--log-dir`. The script's
+self-test drives all of this through the run's own code and through its `main`. Exit 0 = no FAIL, 1 = a
+FAIL, 2 = the mirror cannot read `ci.yml`, its table no longer matches it, a preflight or machine guard
+stopped the run, the `--log-dir` was refused, or the mirror itself failed (its self-test, an error).
+
+**What each row runs** is read from `ci.yml` at run time, never re-listed; the script's JOB TABLE only
+says HOW (one row per job, or per matrix leg, with a kind), and each adapter asserts the shape it reads,
+so a reshaped job exits 2 ("adapter cannot read job X") instead of being skipped:
+
+| kind | runs here | rows (today) |
+|---|---|---|
+| `script` | the job's `python3 <script>` line | `hot-path-exceptions`, `doc-contracts` |
+| `linux` | only with `--linux` (ruling 101): a cross check, the job's cargo line with `--target x86_64-unknown-linux-gnu --keep-going` and the CI's `RUSTFLAGS`, in `--linux-target-dir` (a matrix job's own `CARGO_TARGET_DIR`, e.g. `target-editor`, becomes a sub-directory) | `check`, `clippy`, `profile-legs` (4 legs), `feature-legs` (the yml's own derivation step, then every derived leg) |
+| `linux-compile-only` | only with `--linux` (ruling 101): the compile half of a job whose other half needs Linux | `bench-compile` (`check --profile bench --lib --bins --benches`: a bench build links), `test-linux:release` (`check --release`: the only Linux check of the `cfg(not(debug_assertions))` set) |
+| `host` | the job's `run:` blocks verbatim in Git Bash | `profile-census`, `reflect-on` (2 legs), `reflect-census`, `feature-count-tests`, `miri`, `loom` |
+| `host-heavy` | as `host`, only with `--heavy` | `test` (2 legs), `reflect-dogfood`, `force-alloc-panic` |
+| `not-runnable` | nothing; the row's reason is printed | `test-linux:debug` (its compile half is the `check` row's selection, which the mirror verifies on every run) |
+
+Statuses: PASS, FAIL, NOT-RUNNABLE (the reason), SKIPPED (not selected: the flag is named, `--heavy`, or
+`--linux` with the owner ban; the summary then says **PARTIAL MIRROR**), COVERED (another row covers it: `force-alloc-panic` is COVERED by `test:release`
+while no `.rs` reads `cfg(force_alloc_panic)` and the job's `RUSTFLAGS` differ from the top level by that
+flag alone). A reader is a `cfg(…)`, `cfg!(…)` or `cfg_attr(…)` predicate that names the flag, nested or
+split over lines; a comment, a string literal (an `#[ignore = "…"]` reason) or a bare identifier is not, and
+the script's self-test pins both sides. The rule is evaluated on every run, the default tier included: there
+the row is SKIPPED and its detail says whether the rule holds, so an edit that breaks it shows at every
+merge check, not hours into a `--heavy` run. **Not runnable on this host:** the run half of both
+`test-linux` legs (no Linux runtime, no WSL), the link half of `bench-compile` (no Linux linker or glibc),
+and the cross build of the two `bench-alloc` feature legs (`libmimalloc-sys`'s build script needs an
+`x86_64-linux-gnu-gcc`), which are checked natively on msvc instead.
+
+**`RUSTFLAGS`, the one exception.** Only the Linux rows (with `--linux`) get it, from the yml, and only with `--target`, so it
+reaches only that triple's artifacts in their own directory (ruling 96). Host rows never see `RUSTFLAGS`; CI's
+`-D warnings` is emulated by failing a row whose output has cargo's `` warning: `<pkg>` (<target>) generated N
+warning(s) `` summary (`(manifest)` excepted, it does not fail CI either); the Linux rows get the same check,
+because with `--target` the flags do not reach build scripts and proc macros. `loom`'s first step gets the
+job's flags through the per-target key `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS` in
+`<host dir>/ci-mirror-loom` (the loom recipe, never `build.rustflags`). `miri` is not CI-exact and says so on
+every run: the config's `target-cpu=x86-64-v3` reaches the host build, so Miri interprets `boyko_ecs`'s AVX2
+arms here and the scalar arms on CI (Cargo joins a per-target key with the config's flags, so only `RUSTFLAGS`
+could remove one).
+
+**Tiers, cost and disk.** The default tier (every row but `host-heavy` and, since ruling 101, the Linux
+rows) is the merge check of every lane.
+`--heavy` adds two workspace test runs and the dogfood build: hours, for the final merge to master or a lane
+that touches the threadpool's or `boyko_diag`'s timing tests; there `test:debug` is the lane's CI-exact
+workspace run. Measured 2026-10-22 on the dev host with `CARGO_BUILD_JOBS=2` (ci-fix-2), before ruling 101,
+when the default tier still held the Linux rows: that tier from an empty `linux-check` took about 40 min.
+Each Linux row took 2 to 2.5 min cold (`check`,
+`clippy`, `test-linux:release`, `bench-compile`, and every profile leg in its own `target-<profile>`
+directory), `feature-legs` 11 min (its 24 cross legs and the two native substitutes), and the host rows
+13 min on a warm host target dir (7 of them `loom`'s first build in `ci-mirror-loom`). After an edit to
+`boyko_app`, every Linux row together took 3 min. Disk, read as the drop in free space per row (the
+`disk_free_gb` column; never a `du` over a shared target dir): about 6 GB for the Linux rows (3.4 of it
+`feature-legs`; every other row 0.1 to 0.3 GB, one profile leg 1.0) and about 1.4 GB in the host dir.
+
+**Machine guards.** Rows run one at a time. Before each: free commit ≥ `--min-free-commit-gb` (waits in
+2-minute slices up to 60 min), free disk ≥ `--min-free-disk-gb`; the disk floor is re-read every 30 s during a
+row, which is killed (its own process tree only, `taskkill /T /F /PID`) and the run stopped (exit 2) when it
+crosses the floor; a row past `--row-timeout-min` is killed the same way and FAILs.
+
+**It cannot rot.** [`tests/ci_mirror_census.rs`](../tests/ci_mirror_census.rs) runs in every ordinary
+`cargo test --workspace` and fails when a `ci.yml` job or matrix leg has no row, when a row names no job,
+when a row is malformed, or when the script's `OPT_IN` table lets a Linux kind run without `--linux`; the
+script exits 2 on the same drift and on any job shape its adapter cannot read.
+**Adding a job to `ci.yml` = one row in the JOB TABLE of `tools/ci_mirror.py`**; the census names the row to
+add.
+
 ## Ignored suite
 
 The four commands above run **none** of the `#[ignore]`d tests.
@@ -455,6 +567,14 @@ must print `running 1 test` and pass (measured 2026-10-11: 10 of 10, reduce p95 
 run 6's 4-vCPU runner read 270 us for a reduce whose fastest run is 56 us on the dev host, and a
 busy dev host reds it too, which is why no CI job may sweep it in. Every leg runs the gate's
 ratios on the fastest of 32 runs, `g26_the_reduce_dominates_and_scales_with_the_quantile_count`.
+Since 2026-10-22 (ci-fix-2, F7) a third site: `profiling_dyn_zone_cost`'s
+`the_dynamic_gate_beats_the_registry_dereference_it_replaced`, `G17`'s timing A/B (the shipped
+`arm_bit` gate against a registry dereference, at about 0.4 ns/iter on both legs). CI run 39663719484
+read it red in one release leg and green in the other; its property is gated in every leg by
+`g17_the_emission_gate_reads_the_handle_not_the_registry` and `g17_no_emission_item_names_the_registry`.
+It runs on a quiet dev host in release: `cargo test --release -p boyko-diag --test
+profiling_dyn_zone_cost -- --ignored --exact the_dynamic_gate_beats_the_registry_dereference_it_replaced`
+must print `running 1 test`; its printed ratio is a reading, not a verdict.
 
 **No leg: `generator`, `deferred`, `flaky`** (`rg -n '^[^/]*ignore = "(generator|deferred|flaky):'
 -g '*.rs'`, 27 at `7d5a0015`). They must not be swept into a leg. *Generators* assert nothing

@@ -743,8 +743,8 @@ impl ThreadPoolBuilder {
         // `Arc<PoolInner>`. The classical trick: spawn threads that block on
         // a one-shot handshake; the parent constructs the `Arc<PoolInner>`,
         // then publishes it. We use a `Once`-style handshake via
-        // `Arc<Mutex<Option<Arc<PoolInner>>>>` + `Condvar`; the Condvar
-        // notify happens-after the `*guard = Some(...)` store and
+        // `Arc<Mutex<Bootstrap>>` + `Condvar`; the Condvar notify
+        // happens-after the `guard.inner = Some(...)` store and
         // happens-before each worker's wake, so the published `Arc<PoolInner>`
         // is visible to every worker without any extra atomic ordering.
         //
@@ -895,8 +895,6 @@ struct BootSignal<'a> {
     signalled: bool,
 }
 
-// The same boot-time `Mutex` as the struct above.
-#[allow(clippy::disallowed_types)]
 impl<'a> BootSignal<'a> {
     /// Count this worker as booted and wake `build`; returns the held lock, on
     /// which the worker then waits for the published state.
