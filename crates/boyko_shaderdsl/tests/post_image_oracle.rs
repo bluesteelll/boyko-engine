@@ -298,7 +298,8 @@ const SHARPEN_BIT: u32 = 1 << 1;
 const SHARPNESS_WORD: usize = 4;
 /// The sharpened words' exposure ratios.
 const RCAS_RATIOS: [f32; 2] = [1.0, 2.0];
-/// RCAS's `con` values: FSR 1's maximum, one stop, the default (`rcas_sharpness = 0.25`), the mildest.
+/// RCAS's `con` values: FSR 1's maximum, one stop, 1.5 stops (`rcas_sharpness = 0.25`), the mildest. The
+/// default `rcas_sharpness = 0.78` (`con ≈ 0.737`) lies between the first two.
 const RCAS_CONS: [f32; 4] = [1.0, 0.5, 0.354, 0.25];
 
 /// The RCAS fixture: a 64×64 image whose ring (x or y at 0 or 63) carries distinct colours, and whose

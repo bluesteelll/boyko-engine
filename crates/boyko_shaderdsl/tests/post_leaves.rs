@@ -203,8 +203,9 @@ fn pre_ratio_apply_scales() {
 
 // ---- Render wave PX1b: RCAS ------------------------------------------------------------------------
 
-/// The `con` values swept: FSR 1's maximum, one stop, the default `rcas_sharpness = 0.25` (1.5 stops,
-/// ≈ 0.354), FSR 2's mildest (2 stops) and none.
+/// The `con` values swept: FSR 1's maximum, one stop, 1.5 stops (`rcas_sharpness = 0.25`, ≈ 0.354),
+/// FSR 2's mildest (2 stops) and none. The default `rcas_sharpness = 0.78` (`con ≈ 0.737`) lies between
+/// the first two.
 const CONS: [f32; 5] = [1.0, 0.5, 0.354, 0.25, 0.0];
 
 /// The Eval RCAS of a reversible-space cross: `(lobe, pixel)`.

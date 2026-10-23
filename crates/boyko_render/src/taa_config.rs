@@ -446,7 +446,9 @@ pub struct TaaConfig {
     /// FSR 2's own `sharpness` parameter. The runner reads it off this config (NOT the `ResolvedTaa`
     /// UBO, whose 48-byte mirror it does not touch) and `post_final`'s `sharpness` word carries its
     /// [`rcas_con`](Self::rcas_con). Inert unless [`sharpen`](Self::sharpen) is
-    /// [`SharpenMode::Rcas`]. Default `0.25` (1.5 stops, `con ≈ 0.354`; its look is the owner's).
+    /// [`SharpenMode::Rcas`]. Default `0.78` (0.44 stops, `con ≈ 0.737`): the owner's look, signed off at
+    /// PX1b's GL-H2 review as the retired CAS pass's — FSR 1's lobe clamp `0.1875·con ≈ 0.138` is that
+    /// pass's default peak, `1/7.25`.
     pub rcas_sharpness: f32,
 }
 
@@ -483,7 +485,7 @@ impl Default for TaaConfig {
             disocclusion: DisocclusionTest::OffScreenOnly,
             depth_tol: 0.02,
             sharpen: SharpenMode::None,
-            rcas_sharpness: 0.25,
+            rcas_sharpness: 0.78,
         }
     }
 }
@@ -602,7 +604,12 @@ mod tests {
         assert_eq!(cfg.disocclusion, DisocclusionTest::OffScreenOnly);
         assert_eq!(cfg.depth_tol, 0.02);
         assert_eq!(cfg.sharpen, SharpenMode::None);
-        assert_eq!(cfg.rcas_sharpness, 0.25);
+        assert_eq!(cfg.rcas_sharpness, 0.78, "the owner's strength: the retired CAS pass's look (PX1b GL-H2)");
+        assert_eq!(
+            cfg.rcas_con().to_bits(),
+            0x3F3C_B4DA,
+            "the default's con (0.44 stops, ~0.737): the bits of post_final's `sharpness` word, the receipt's post_word4"
+        );
         assert!(
             cfg.basis_shear_enabled(),
             "the shear is opt-OUT: a world that arms Taa and sets nothing else gets it"
@@ -725,7 +732,7 @@ mod tests {
         assert_eq!(con(f32::NAN), 0.25, "NaN reads as 0");
         assert_eq!(con(1.5), 1.0, "above 1 clamps to 1");
         assert_eq!(con(-0.5), 0.25, "below 0 clamps to 0");
-        assert_eq!(con(0.25), (-1.5f64).exp2() as f32, "the default 0.25 is 1.5 stops");
+        assert_eq!(con(0.25), (-1.5f64).exp2() as f32, "sharpness 0.25 is 1.5 stops");
         let grid: Vec<f32> = (0..=100).map(|k| con(k as f32 / 100.0)).collect();
         assert!(grid.windows(2).all(|w| w[0] < w[1]), "con is strictly increasing in the sharpness: {grid:?}");
         assert!(grid.iter().all(|c| (0.25..=1.0).contains(c)), "con stays in [0.25, 1]");

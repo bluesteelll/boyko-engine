@@ -481,7 +481,7 @@ fn taa_jitter_eval_screenshot_dump() {
     // sharpen bit; takes effect only with `BOYKO_AA=taa`); unset renders the engine default
     // (`SharpenMode::None` — the stage's branch is never taken), per the `BOYKO_AA` /
     // `BOYKO_TAA_SCOPE` convention above. `BOYKO_TAA_SHARPNESS=<f32>` overrides the strength
-    // (default 0.25, FSR 2's `sharpness`).
+    // (default `TaaConfig::default().rcas_sharpness`, 0.78; FSR 2's `sharpness`).
     let sharpen = match std::env::var("BOYKO_TAA_SHARPEN").ok().as_deref() {
         Some("rcas") => SharpenMode::Rcas,
         Some("none") => SharpenMode::None,
