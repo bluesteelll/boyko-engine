@@ -101,7 +101,9 @@ use boyko_rhi_vulkan::goldens::{
     ByteVerdict, DeviceGbufferTexel, LIT_ROUNDING, LIT_STORE_PATH, LIT_TARGET, MarcherArm,
     MarcherPrequant, ResolveFloor, ResolveSite, GNORMAL_OCT_MAX, attribute_code_verdict, fragile_bit,
     golden_marcher_attributes_at,
-    host_soft_shadow_ranged, lit_store_excess, oct_decode, resolve_error_floor, W_CONV,
+    // IBL1 P1 review r1 W1: the must-reject twins' fixed plants (an 8-bit code at the gNormal width).
+    GNORMAL_OCT_MAX_CODE, oct_codes_from_oct8, quantize_oct,
+    host_soft_shadow_ranged, lit_store_excess, oct_decode, resolve_error_floor,
     // OPEN-ITEMS 16, triage r1 W1: the host M2 ray march and its start-point witness count.
     HostM2Atlas, M2EvalCounts, golden_primary_hit_brick_m2,
 };
@@ -5223,15 +5225,22 @@ fn assert_planted_oct_mismatches(dev: u16, x: f32, w_in: f32, what: &str) {
     );
 }
 
-/// The nearest gNormal code beyond the attribute window around the host value `x` (window
-/// `0.5 + W_CONV + w_in` codes), on the side `below` names: the smallest planted error the
-/// window must reject. At oct8 that was a one-code flip; at oct16 the device-host bound `w_in`
-/// spans more than one code, so the twin is placed by the window, not by a fixed offset.
-fn code_beyond_window(x: f32, w_in: f32, below: bool) -> u16 {
-    let c = GNORMAL_OCT_MAX * x.clamp(0.0, 1.0);
-    let window = 0.5 + W_CONV + w_in;
-    let code = if below { (c - window).floor() - 1.0 } else { (c + window).ceil() + 1.0 };
-    code.clamp(0.0, GNORMAL_OCT_MAX) as u16
+/// One step of the pre-IBL1 8-bit oct store, in gNormal codes (257 at oct16, 1 at oct8): the
+/// FIXED distance the second must-reject twin plants at. A twin placed BY the window
+/// (`c ± (0.5 + W_CONV + w_in) ± 1`, IBL1 P1 round 0) is a `Mismatch` for every `w_in`, so a
+/// blow-up of `w_in` in `normal_tap_bounds` or of `W_CONV` stayed green (review r1 W1). Planted
+/// one 8-bit step off the host's code, the twin reds as soon as the window at its lane spans that
+/// step, the least the oct16 seam must reject: a window that admits a one-step error cannot tell
+/// the oct16 store from the oct8 one it replaced.
+const OCT8_STEP_CODES: u16 = oct_codes_from_oct8([1, 0])[0];
+
+/// The gNormal code one [`OCT8_STEP_CODES`] away from the host's own code for the lane value `x`:
+/// above it, unless that leaves the UNORM range, else below it.
+fn code_one_oct8_step_off(x: f32) -> u16 {
+    let host = quantize_oct(x);
+    host.checked_add(OCT8_STEP_CODES)
+        .filter(|&c| u32::from(c) <= GNORMAL_OCT_MAX_CODE)
+        .unwrap_or(host - OCT8_STEP_CODES)
 }
 
 // ============================================================================
@@ -5650,8 +5659,10 @@ fn p6_r1_texel_41_17_oct8_history_pin() {
 /// now the history pin `p6_r1_texel_41_17_oct8_history_pin`); since IBL1 P1 gNormal is oct16 and
 /// the texel's `65535·oct.x` ≈ 25,324.28 is no tie, so the gate is predicted to report it inside the
 /// window (no `TieFlip` from a tie). NON-VACUITY: the host oracle is first asserted to produce ≥1
-/// SHADOWED pixel. The must-reject twins plant, at (41,17).R and at the first non-fragile lit SDF oct
-/// lane (raster order), the nearest code beyond the attribute window: both must be `Mismatch`.
+/// SHADOWED pixel. The must-reject twins plant codes at FIXED distances, never derived from the
+/// window they test: at (41,17).R the oct8 history's 97 at the current width, and at lane 0 of the
+/// first non-fragile lit SDF texel (raster order) the code one 8-bit step (`OCT8_STEP_CODES`) off
+/// the host's own; both must be `Mismatch`, so a window that widens past either distance reds.
 #[test]
 fn p6_r1_multi_light_sdf_shadows_match_oracle() {
     let Some(ctx) = boot_render_or_skip("p6_r1_multi_light_sdf_shadows_match_oracle") else {
@@ -5707,30 +5718,40 @@ fn p6_r1_multi_light_sdf_shadows_match_oracle() {
         lit_rgb(&lit, 41, 17),
     );
 
-    // D15-2's must-reject twins: the window must be able to fail.
-    // (1) At (41,17).R, the nearest code below the window (at oct8 this was the planted 97).
-    let below_41_17 = code_beyond_window(pre_41_17.oct[0], pre_41_17.w_in_oct[0], true);
-    assert_planted_oct_mismatches(below_41_17, pre_41_17.oct[0], pre_41_17.w_in_oct[0], "(41,17).R below the window");
-    // (2) The first non-fragile lit SDF oct lane (raster order), planted just above its window.
+    // D15-2's must-reject twins: the window must be able to fail. Each twin is planted at a FIXED
+    // distance from the host value, never derived from the window it tests (review r1 W1).
+    // (1) At (41,17).R, the history's planted 97 at the current width: 97 at oct8 (1.54 codes below
+    //     98.538), 97·257 = 24,929 at oct16 (≈ 395 codes below c ≈ 25,324.28).
+    let plant_41_17 = oct_codes_from_oct8([97, 0])[0];
+    let verdict_41_17 =
+        attribute_code_verdict(plant_41_17, pre_41_17.oct[0], pre_41_17.w_in_oct[0], GNORMAL_OCT_MAX);
+    // (2) The first non-fragile lit SDF texel (raster order), lane 0 planted one 8-bit step
+    //     (`OCT8_STEP_CODES`) off the host's own code.
     let mut planted = None;
     'search: for py in 0..SDF_IMG_H {
         for px in 0..SDF_IMG_W {
             let pre = pre_at(px, py);
-            if pre.arm != MarcherArm::Sdf || pre.fragile != 0 {
-                continue;
-            }
-            for k in 0..2 {
-                let flip = code_beyond_window(pre.oct[k], pre.w_in_oct[k], false);
-                if f32::from(flip) - GNORMAL_OCT_MAX * pre.oct[k] > 0.5 + W_CONV + pre.w_in_oct[k] + 0.1 {
-                    planted = Some((px, py, k, flip, pre));
-                    break 'search;
-                }
+            if pre.arm == MarcherArm::Sdf && pre.fragile == 0 {
+                planted = Some((px, py, pre));
+                break 'search;
             }
         }
     }
-    let (ppx, ppy, pk, pflip, ppre) = planted
-        .expect("no lit SDF oct lane admits a code beyond the window — the planted twin is vacuous");
-    assert_planted_oct_mismatches(pflip, ppre.oct[pk], ppre.w_in_oct[pk], "the planted beyond-window code");
+    let (ppx, ppy, ppre) = planted.expect("the twin scene has no non-fragile lit SDF texel — the planted twin is vacuous");
+    let pk = 0;
+    let pflip = code_one_oct8_step_off(ppre.oct[pk]);
+    let planted_verdict = attribute_code_verdict(pflip, ppre.oct[pk], ppre.w_in_oct[pk], GNORMAL_OCT_MAX);
+    // Both verdicts are printed before either is asserted, so a red shows both twins.
+    println!(
+        "[twin_spheres] twin (1) (41,17).R: planted {plant_41_17} vs c = {:.4} (w_in {:.4}) -> {verdict_41_17:?}; \
+         twin (2) ({ppx},{ppy}) lane {pk}: planted {pflip} vs c = {:.4} (w_in {:.4}) -> {planted_verdict:?}",
+        GNORMAL_OCT_MAX * pre_41_17.oct[0],
+        pre_41_17.w_in_oct[0],
+        GNORMAL_OCT_MAX * ppre.oct[pk],
+        ppre.w_in_oct[pk],
+    );
+    assert_planted_oct_mismatches(plant_41_17, pre_41_17.oct[0], pre_41_17.w_in_oct[0], "(41,17).R = the oct8 history's 97");
+    assert_planted_oct_mismatches(pflip, ppre.oct[pk], ppre.w_in_oct[pk], "the planted one-oct8-step code");
     let mut planted_texel = gbuf.texel(ppx, ppy);
     planted_texel.normal[pk] = pflip;
     let (planted_floor, planted_excess) = seam_resolve_texel(
@@ -5743,7 +5764,7 @@ fn p6_r1_multi_light_sdf_shadows_match_oracle() {
         &lights,
     );
     println!(
-        "[twin_spheres] planted beyond-window code at ({ppx},{ppy}) lane {pk}: {pflip} vs c = {:.4} -> Mismatch; \
+        "[twin_spheres] planted one-oct8-step code at ({ppx},{ppy}) lane {pk}: {pflip} vs c = {:.4} -> Mismatch; \
          the resolve fed it: excess {planted_excess:?} (floor {:?}, fragile {})",
         GNORMAL_OCT_MAX * ppre.oct[pk],
         planted_floor.floor,
