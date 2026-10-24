@@ -797,6 +797,9 @@ match its view, so each chain dispatches its own module through its own pipeline
 | base (Deferred) | — | `shadow_atrous.comp.spv` | `cs_6_0` | @2 `gNormal` `rg16` / `float2` (`ShadowVisActivation::atrous_pipeline`) |
 | VB_THIN (VB split) | `1` | `shadow_atrous_vb.comp.spv` | `cs_6_0` | @2 `gThinNormal` `rgba8` / `float4` (`ShadowVisActivation::atrous_pipeline_thin`); the module is the pre-P1 `shadow_atrous.comp.spv` code, the variable's `OpName` aside (`spirv-dis` diff: one line) |
 
+Both rows share the filter body, so a body edit must be re-DXC'd under BOTH header recipe lines:
+`shadow_atrous_spv_sync.rs` re-compiles each row and fails on a stale module, naming every stale row.
+
 ## `sdf_mesh_shadow.comp.hlsl` — the VB SDF-on-mesh shadow + contact-AO prepass (compute)
 
 The VB-SV0 dedicated pass (plan Rev 10, `RENDER-PARITY-PLAN.md` §3.2 Option B): per covered pixel
@@ -1134,12 +1137,12 @@ reads `gThinNormal`, untouched).
 | `gbuffer_mrt.fs.hlsl` | `gbuffer_mrt.fs` 3,132 → 3,080; `_mv` 3,612 → 3,544; `_pm` 3,400 → 3,348; `_mvpm` 3,880 → 3,812; `_tex` 6,944 → 6,892 | `SV_Target1` is `float2` (the oct normal); `albedo.a = id_ba.x`, `material.a = id_ba.y` | `gbuffer_mrt_fs_spv_sync.rs` |
 | `sdf_gbuffer_composite.hlsl` | 168,152 → 168,124 | `gNormal` `rg16` / `float2`; the id lanes; the neutral background id 0; the mesh arm writes `gMaterial` only under `lighting_flags != 0`, keeping the raster's `.a` (id high byte) | `marcher_spv_sync.rs` |
 | `deferred_pbr.hlsl` | `deferred_pbr` 71,296 → 71,372; `_wrap` 71,628 → 71,704; `_hwrt` 64,852 → 64,928; `_hwrt_denoised` 60,920, `_hwrt_vis` 10,132 and `_hwrt_vis_mv` 11,108 (sizes equal, bytes moved: the `gNormal` image type) | `gNormal` `rg16` / `float2`; the id from `albedo_texel.a` / `material_texel.a` | `cluster_grid_read_bound.rs` |
-| `shadow_atrous.comp.hlsl` | `shadow_atrous` 59,700 → 59,624; **new** `shadow_atrous_vb` 59,704 | base `gNormal` `rg16` / `float2`; the `VB_THIN` row above | `gnormal_precision.rs` (`gnormal_slot_spirv_formats`) |
+| `shadow_atrous.comp.hlsl` | `shadow_atrous` 59,700 → 59,624; **new** `shadow_atrous_vb` 59,704 | base `gNormal` `rg16` / `float2`; the `VB_THIN` row above | `shadow_atrous_spv_sync.rs` (both rows; added in review r1 W2 — before it neither module had one, the base not even on trunk) |
 | `sdf_ssao_{low,medium,high}.comp.hlsl` | `sdf_ssao_low` 38,148 → 38,224; `_medium` 47,680 → 47,756; `_high` 238,752 → 238,828; `sdf_ssao_vb_*` byte-identical | the base `gNormal` `rg16` / `float2` | `ssao_edsl_sync.rs` |
 
 `gnormal_precision.rs` pins the layout on every side: the HLSL declarations and stores (T-N4), the
-committed modules' declared formats against `GNORMAL_FORMAT` / `VB_THIN_NORMAL_FORMAT` (T-N6), and the
-Rust bind / record side of the shared à-trous (T-N7). `lit_format_census.rs` classifies the five mesh-MRT
+committed modules' declared formats against `GNORMAL_FORMAT` / `VB_THIN_NORMAL_FORMAT` (T-N6; a format census,
+not a byte gate), and the Rust bind / record side of the shared à-trous (T-N7). `lit_format_census.rs` classifies the five mesh-MRT
 pipelines: their `color_formats` must name `GBUFFER_MRT_COLOR_FORMATS`, the array the rings are created from.
 
 ## Why these stay N `.spv` (do NOT try to spec-const-collapse)
