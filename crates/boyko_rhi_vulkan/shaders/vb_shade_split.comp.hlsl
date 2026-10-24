@@ -23,8 +23,8 @@
 // mesh-XOR-SDF duality, every VB pixel already IS the mesh case, so `ao_final` starts at the
 // SAME Deferred-mesh-pixel constant `1.0` `vb_resolve.comp.hlsl`'s own comment documents, then
 // combines the SSAO gather's r8 lane when armed (`min(1.0, ssao_blurred)`). `spec_ao`
-// (Filament SpecularAO_Lagarde) is the SAME formula, verbatim, already present in
-// `vb_resolve.comp.hlsl`'s tail -- decoupling diffuse-AO from specular-AO needs no new math,
+// (Filament SpecularAO_Lagarde) is the SAME shared `spec_ao_lagarde` (`pbr_lighting.hlsli`)
+// `vb_resolve.comp.hlsl`'s tail calls -- decoupling diffuse-AO from specular-AO needs no new math,
 // only a non-constant `ao_final` input. `ssao_mode == 0` (every split-without-SSAO config: the
 // R9c DDGI-only / R9d Temporal-only residuals) never reads `gSsao` -- byte-identical to the v1
 // fused baseline (the 0%-gate).
@@ -482,7 +482,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
         ao_final = min(ao_final, sv0_term.g);
     }
 #endif
-    float spec_ao = saturate(pow(NoV + ao_final, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao_final);
+    float spec_ao = spec_ao_lagarde(NoV, ao_final, a);
 
     LightHeader H = load_light_header(LightBuf);
     uint csm_mode = load_csm_mode(LightBuf);

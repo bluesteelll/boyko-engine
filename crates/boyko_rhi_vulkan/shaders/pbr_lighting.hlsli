@@ -36,6 +36,12 @@
 // resolve; render wave PX1a deleted them (the tail is `post_final`'s alone — see the end of this
 // file).
 //
+// SSAOM (F2) hoisted the decoupled specular occlusion here (`spec_ao_lagarde`): the six lit
+// producers (`deferred_pbr`, `forward_opaque`, `vb_resolve`, `vb_shade`, `vb_shade_split`,
+// `sdf_forward_march`) each carried their own copy of Lagarde's formula, all fed the PERCEPTUAL
+// roughness; they now call this one function with the GGX alpha. Its host twin is
+// `goldens::specular_ao` (`tests/spec_ao_alpha.rs` pins the body text and the census).
+//
 // # INCLUDE CONTRACT (precondition)
 //
 // `static const float PI` MUST be declared in the including TU BEFORE this header is
@@ -134,6 +140,18 @@ PbrDirectTerms eval_pbr_direct_bsdf(Surface s, float3 v, float3 l, float NoL) {
     r.specular = (D * V) * F * s.energy_comp; // PBR P0-D: multi-scatter energy comp
     r.diffuse = s.diffuse_color * (1.0 / PI);
     return r;
+}
+
+// spec_ao_lagarde — the decoupled specular occlusion (PBR metal fix; Lagarde & de Rousiers 2014,
+// Filament `SpecularAO_Lagarde`, Bevy `specular_occlusion`): the visibility cone of a lobe whose
+// width follows the GGX ALPHA `a = roughness^2` — the argument Filament, Bevy and Frostbite pass.
+// A smooth surface under mild AO keeps its ambient specular (NoV 0.7, ao 0.85, roughness 0.18:
+// 1.0 — the perceptual roughness gave 0.880, the AO-darkened-metal look this replaced), a rough
+// or deeply occluded one is darkened, and a grazing occluded pixel (NoV + ao < 1) darkens
+// further. `ao == 1` returns exactly 1 under any exponent. Computed ONCE per pixel by the caller
+// and reused at every ambient-specular site. Host twin: `goldens::specular_ao`.
+float spec_ao_lagarde(float NoV, float ao, float a) {
+    return saturate(pow(NoV + ao, exp2(-16.0 * a - 1.0)) - 1.0 + ao);
 }
 
 // eval_pbr_ambient_hemi — the sky/ground hemisphere ambient term (PBR P0-B / the PBR

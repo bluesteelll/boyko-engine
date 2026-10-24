@@ -18,7 +18,8 @@
 //!
 //! Inputs, in order of fidelity to the GPU golden:
 //!   1. the three P4b ORTHO scenes at the golden 64x64 extent under ALL three quality presets
-//!      (the exact `ssao_variants_match_host` inputs);
+//!      (the exact `ssao_variants_match_host` inputs), plus the deep bowl of
+//!      `ssao_darkens_a_concavity` — the scene with REAL occlusion past the HBAO+ angle bias;
 //!   2. synthetic ORTHO fixtures that reach every pixel — border rows/columns (the
 //!      `reconstruct` bounds fallback), a checkerboard mask (the non-lit-tap skip in every
 //!      neighbourhood), a single-lit seam, and an all-non-lit image (the early return);
@@ -88,6 +89,23 @@ fn smooth_union() -> Vec<SdfEdit> {
 /// The three P4b scenes in the GPU golden's order, tagged for the failure message.
 fn p4b_scenes() -> [(&'static str, Vec<SdfEdit>); 3] {
     [("crater_csg", crater()), ("box_csg", box_csg()), ("smooth_union", smooth_union())]
+}
+
+/// The DEEP front-facing bowl of `tests/sdf_gbuffer_hybrid.rs`'s `ssao_darkens_a_concavity` (a
+/// large sphere with a smaller sphere SUBTRACTED toward the camera): the scene whose occlusion
+/// is REAL, so it is the one the occluded-pixel controls below stand on.
+///
+/// SSAOM F3: the three P4b scenes carry no occlusion the HBAO+ angle bias lets through. Before
+/// the bias they read as "occluded" at 2352-2607 of their ~2600 lit pixels, every one of them at
+/// a sub-bias false horizon (the oct8 normal error over a convex or flat surface): min AO 249/255,
+/// none below 0.85. With `SSAO_ANGLE_BIAS = 0.1` they are exactly 1.0 everywhere, so a control
+/// that needs an occluded pixel cannot stand on them; this bowl keeps ~100 pixels below 0.85
+/// under every preset (min 25 / 33 / 52 of 255 at Low / Medium / High).
+fn deep_bowl() -> Vec<SdfEdit> {
+    vec![
+        SdfEdit::sphere([0.0, 0.0, 0.0], 0.55, sdf_op::UNION, 0.0),
+        SdfEdit::sphere([0.0, 0.0, 0.45], 0.40, sdf_op::SUBTRACT, 0.0),
+    ]
 }
 
 /// Whether pixel `(px, py)`'s orthographic ray passes through the mesh quad footprint.
@@ -252,10 +270,15 @@ fn images_differ<O: Fn(u32, u32, &SsaoParams) -> f32>(
 
 #[test]
 fn derived_matches_hand_mirror_over_p4b_scenes_all_presets() {
-    // The GPU golden's exact inputs: 3 scenes x 3 presets x 64x64. Controls: every scene has
-    // lit pixels, and every (scene, preset) has at least one occluded pixel — otherwise the
-    // horizon path was never compared.
-    for (scene, edits) in p4b_scenes() {
+    // The GPU golden's exact inputs: 3 scenes x 3 presets x 64x64, plus the deep bowl (the
+    // same extent, camera and G-buffer path). Controls: every scene has lit pixels, and the
+    // bowl has at least one occluded pixel under every preset — otherwise the horizon path was
+    // never compared. The P4b scenes carry no occlusion past the angle bias (see `deep_bowl`),
+    // so the occluded-pixel control stands on the bowl alone.
+    let mut scenes: Vec<(&str, Vec<SdfEdit>, bool)> =
+        p4b_scenes().into_iter().map(|(scene, edits)| (scene, edits, false)).collect();
+    scenes.push(("deep_bowl", deep_bowl(), true));
+    for (scene, edits, expect_occluded) in scenes {
         let gbuf = p4b_gbuffer(&edits);
         for (quality, params) in presets() {
             let tag = format!("p4b {scene} / {quality}");
@@ -263,7 +286,7 @@ fn derived_matches_hand_mirror_over_p4b_scenes_all_presets() {
                 assert_bit_equal_all_pixels(&gbuf, CompositeCamera::Ortho, params, &tag);
             assert!(lit > 0, "[{tag}] control: the scene lit no pixel — nothing was compared");
             assert!(
-                occluded > 0,
+                !expect_occluded || occluded > 0,
                 "[{tag}] control: no pixel is occluded — the horizon path was never compared"
             );
             println!("[{tag}] bit-identical over {} px: lit = {lit}, occluded = {occluded}",
@@ -333,10 +356,12 @@ fn derived_matches_hand_mirror_under_perspective_camera() {
 #[test]
 fn presets_are_distinguishable_by_both_oracles() {
     // The permanent control that the `params` plumbing is LIVE in BOTH oracles: on the
-    // crater scene, Low vs Medium and Medium vs High must differ at some pixel for the hand
+    // deep bowl, Low vs Medium and Medium vs High must differ at some pixel for the hand
     // mirror AND, separately, for the derived oracle. A derived oracle that silently used the
-    // Medium consts would pass the Medium leg of the equivalence test and fail here.
-    let gbuf = p4b_gbuffer(&crater());
+    // Medium consts would pass the Medium leg of the equivalence test and fail here. (The
+    // crater scene stood here until SSAOM: its every difference was a sub-bias false horizon,
+    // and under the angle bias all three presets render it as exactly 1.0 — see `deep_bowl`.)
+    let gbuf = p4b_gbuffer(&deep_bowl());
     let hand = |px: u32, py: u32, params: &SsaoParams| {
         golden_ssao_attributes(&gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, params)
     };
@@ -398,7 +423,7 @@ fn derived_matches_hand_mirror_under_off_table_params() {
     // Fixtures with real occlusion under BOTH camera arms, so the horizon path (the only
     // consumer of `radius`/`eps`) and the complement (the only consumer of `strength`) are
     // both exercised at off-table scalars.
-    let p4b = p4b_gbuffer(&crater());
+    let p4b = p4b_gbuffer(&deep_bowl());
     let crevice = crevice_gbuffer();
     let perspective = CompositeCamera::Perspective {
         eye: [0.0, 0.0, 3.0],
@@ -409,7 +434,7 @@ fn derived_matches_hand_mirror_under_off_table_params() {
         aspect: 1.0,
     };
     let cases: [(&str, &[MarcherAttributes], CompositeCamera); 3] = [
-        ("p4b crater_csg ortho", &p4b, CompositeCamera::Ortho),
+        ("p4b deep_bowl ortho", &p4b, CompositeCamera::Ortho),
         ("crevice ortho", &crevice, CompositeCamera::Ortho),
         ("crevice perspective", &crevice, perspective),
     ];

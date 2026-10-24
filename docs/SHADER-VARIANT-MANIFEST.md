@@ -815,7 +815,9 @@ one belongs to this file:
   `emit_ssao_variants` bin) re-emits the base text with ONLY the `static const SSAO_*` tuning header
   swapped, producing three committed sources `sdf_ssao_{low,medium,high}.comp.hlsl`. That is the
   "perf-justified, kept as 3 files" family the intro excludes — the `[unroll]` bounds must be
-  compile-time literals.
+  compile-time literals. Since SSAOM the swapped header is 8 `static const SSAO_*` lines: the six
+  per-preset scalars plus `SSAO_ANGLE_BIAS` / `SSAO_ANGLE_SCALE`, the same value in every quality
+  (the bias bound is a property of the mesh and the normal encoding, not of the tap budget).
 * The **`VB_THIN`** axis IS a `-D`, and it belongs here: it DELETES a binding and renumbers the
   rest, which no specialization constant can do. Each of the three quality `.hlsl` is DXC'd twice —
   bare, and with `-D VB_THIN=1` — so 3 sources become 6 `.spv`.
@@ -1081,6 +1083,30 @@ committed. The rows below only changed bytes (VulkanSDK 1.4.350.0 `dxc`, each he
 |---|---|---|---|
 | `sdf_gbuffer_composite.hlsl` | `sdf_gbuffer_composite.comp.spv` 155,124 → 168,152 | the certificate, the candidate out-param, the latch and the start point (`safe_t + sor_prev` past an over-relaxed step) | `marcher_spv_sync.rs`, `sdf_field_edsl_sync.rs` |
 | `sdf_forward_march.comp.hlsl` | `sdf_forward_march.comp.spv` 144,424 → 157,200; `sdf_forward_march_sdfonly.comp.spv` 143,928 → 156,704; `sdf_forward_march_viewt.comp.spv` 144,704 → 157,480; `sdf_forward_march_sdfonly_viewt.comp.spv` 144,164 → 156,940 | the same, at omega 1 (the start point is the march's `t`) | `marcher_spv_sync.rs`, `sdf_depth_merge_edsl_sync.rs`, `sdf_field_edsl_sync.rs` |
+
+## SSAOM — spec-AO α and the SSAO angle bias (26 rows re-DXC'd, no new variant)
+
+Render-wave bug lane SSAOM (`ssaom/cut.md` C2, C3) changed two shading leaves; no `-D` and no row is
+added. **F3:** the eDSL-generated `ssao_horizon_step` span subtracts HBAO+'s angle bias
+(`elev = max(dot/len - SSAO_ANGLE_BIAS, 0)`, `boyko_shaderdsl::ssao::SSAO_ANGLE_BIAS = 0.1`) and the
+hand-written `occ → ao` fold carries `SSAO_STRENGTH * SSAO_ANGLE_SCALE` (`1/(1 - bias)`); the tuning
+header gained the two constants, re-emitted into the three quality sources by `emit_ssao_variants`.
+DXC folds the scale into the existing strength-over-slices constant, so the only added instruction is
+one `OpFSub` per tap (Low / Medium / High: +12 / +16 / +96), base and `VB_THIN` alike. **F2:** the
+six lit producers' inline Lagarde specular occlusion became one shared `spec_ao_lagarde` in
+`pbr_lighting.hlsli`, fed the GGX alpha `a` instead of the perceptual roughness — an operand swap
+(`OpFMul %float_n16` reads `a`), every size unchanged. The rows below only changed bytes (VulkanSDK
+1.4.350.0 `dxc`, each header's recipe).
+
+| Source | Re-emitted `.spv` (bytes before → after) | What moved | Byte gate |
+|---|---|---|---|
+| `sdf_ssao_{low,medium,high}.comp.hlsl` (3 sources → 6 blobs) | `sdf_ssao_low` 37,892 → 38,148; `sdf_ssao_medium` 47,344 → 47,680; `sdf_ssao_high` 236,816 → 238,752; `sdf_ssao_vb_low` 35,744 → 36,000; `sdf_ssao_vb_medium` 44,556 → 44,892; `sdf_ssao_vb_high` 221,228 → 223,164 | the span's `- SSAO_ANGLE_BIAS`, the fold's `* SSAO_ANGLE_SCALE` (folded: High's `occ` multiplier 0.3125 → 0.347222239), +1 `OpConstant` (0.1) | `ssao_edsl_sync.rs` |
+| `deferred_pbr.hlsl` | 4 moved, sizes equal: `deferred_pbr` 71,296; `deferred_pbr_wrap` 71,628; `deferred_pbr_hwrt` 64,852; `deferred_pbr_hwrt_denoised` 60,920. `deferred_pbr_hwrt_vis{,_mv}` re-DXC'd byte-identical (SHADOW_STAGE=1 returns before lighting) | `spec_ao_lagarde(NoV, ao_final, a)` | `cluster_grid_read_bound.rs` |
+| `forward_opaque.fs.hlsl` | `forward_opaque.fs` 31,980; `forward_opaque_froxel.fs` 34,428 (sizes equal) | the same | `cluster_grid_read_bound.rs` |
+| `vb_resolve.comp.hlsl` / `vb_shade.comp.hlsl` | `vb_resolve` 46,896; `vb_resolve_froxel` 49,100; `vb_shade` 47,888; `vb_shade_tex` 55,272; `vb_shade_froxel` 50,092; `vb_shade_tex_froxel` 57,460 (sizes equal) | the same | `vb_lit_producer_spv_sync.rs`, `vb_froxel_spv_sync.rs` |
+| `vb_shade_split.comp.hlsl` | `vb_shade_split` 54,780; `_tex` 62,148; `_hwrt` 44,968; `_tex_hwrt` 52,336 (sizes equal) | the same | `vb_lit_producer_spv_sync.rs` |
+| `sdf_forward_march.comp.hlsl` | `sdf_forward_march` 157,200; `_sdfonly` 156,704; `_viewt` 157,480; `_sdfonly_viewt` 156,940 (sizes equal) | the same | `marcher_spv_sync.rs` |
+| `forward_sky.fs.hlsl` | `forward_sky.fs` 5,104 — re-DXC'd byte-identical (`cmp`): it includes `pbr_lighting.hlsli` but never calls the new function | nothing | none names it — the manual `cmp` is the record |
 
 ## Why these stay N `.spv` (do NOT try to spec-const-collapse)
 

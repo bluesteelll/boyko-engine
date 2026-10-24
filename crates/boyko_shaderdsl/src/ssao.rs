@@ -9,7 +9,9 @@
 //! horizon-MAX reducer (NOT the GTAO arc integral): it needs only `dot` / `max` / `sqrt` /
 //! `div`, so the host oracle is BIT-COMPARABLE (no `sin`/`cos`/`acos` transcendental ULP
 //! gap, no `fract` integer-boundary discontinuity). See `docs/RENDER-P7-SSAO-PLAN.md`
-//! ("Chosen algorithm").
+//! ("Chosen algorithm"). Each tap's elevation carries HBAO+'s angle bias ([`SSAO_ANGLE_BIAS`],
+//! rescaled once in the complement by [`SSAO_ANGLE_SCALE`]), so the facets of a smooth-shaded
+//! mesh raise no false horizon (SSAOM F3).
 //!
 //! # ZERO new eDSL leaves
 //!
@@ -70,7 +72,8 @@ pub const SSAO_SLICES: usize = 2;
 pub const SSAO_STEPS: usize = 4;
 
 /// The occlusion strength multiplier (`SSAO_STRENGTH`) — scales the mean per-slice horizon
-/// cosine before the `ao = 1 - strength*occ` complement. Spelled SYMBOLICALLY (`SSAO_STRENGTH`).
+/// cosine before the `ao = 1 - strength*SSAO_ANGLE_SCALE*occ` complement. Spelled SYMBOLICALLY
+/// (`SSAO_STRENGTH`).
 /// Held at 2.5 (the precision-safe value GPU↔host agree on within ±6/255). The screen-space SSAO
 /// is the SECONDARY AO path now — for mesh-vs-mesh contact where no SDF field exists; for
 /// SDF-occludes-mesh the marcher's ANALYTIC `sdf_ao` (noise-free by construction) is the clean
@@ -79,8 +82,34 @@ pub const SSAO_STEPS: usize = 4;
 pub const SSAO_STRENGTH: f32 = 2.5;
 
 /// The `length(delta)` divide-by-zero guard (`SSAO_EPS`) — `elev = max(dot(delta,N) /
-/// max(length(delta), SSAO_EPS), 0)`. Spelled SYMBOLICALLY (`SSAO_EPS`).
+/// max(length(delta), SSAO_EPS) - SSAO_ANGLE_BIAS, 0)`. Spelled SYMBOLICALLY (`SSAO_EPS`).
 pub const SSAO_EPS: f32 = 1.0e-4;
+
+/// The HBAO+ angle bias (`SSAO_ANGLE_BIAS`, NVIDIA's `NDotVBias`, default 0.1) — subtracted from
+/// every tap's elevation sine before the non-negative clamp, so a neighbour must rise MORE than
+/// `asin(0.1)` = 5.74° above the center's tangent plane to raise a horizon. HBAO+ documents it as
+/// the knob that hides low-tessellation artifacts: on a smooth-shaded mesh the center normal `N`
+/// is the INTERPOLATED vertex normal while the neighbours lie on the FLAT facet, so a same-facet
+/// tap rises above `N`'s tangent plane by up to `sin(tau) + ε_oct8` (`tau` the interpolated-vs-
+/// facet normal angle; a tap on another facet of a convex mesh lies below the center facet's
+/// plane and rises less). Without the bias that false elevation darkens the AO in a pattern
+/// locked to the facets (SSAOM F3: the 64-slice showcase sphere, `uv_sphere(1.0, 48, 64)`, bound
+/// 0.059 + 0.0164 = 0.075). The value depends on the mesh: `vb_mesh_ssao`'s
+/// `uv_sphere(0.62, 28, 40)` bounds at 0.113, so faint vertex residuals can remain there. Spelled
+/// SYMBOLICALLY (`SSAO_ANGLE_BIAS`); one value for every preset (the bound is a property of the
+/// mesh and the normal encoding, not of the tap budget).
+pub const SSAO_ANGLE_BIAS: f32 = 0.1;
+
+/// The bias complement (`SSAO_ANGLE_SCALE = 1 / (1 - SSAO_ANGLE_BIAS)`, NVIDIA's
+/// `AOMultiplier`) — folded ONCE into the `occ → ao` complement (`1 - SSAO_STRENGTH *
+/// SSAO_ANGLE_SCALE * occ / SSAO_SLICES_F`), so a fully-raised horizon (`elev = 1`, a vertical
+/// wall) keeps exactly its unbiased occlusion: `(1 - B) * S` rounds to 1.0. The scale is positive,
+/// so it commutes with the horizon `max` and the slice sum, and `SSAO_STRENGTH * SSAO_ANGLE_SCALE`
+/// is a product of two `static const`s left-associated ahead of `occ` — DXC folds it, zero
+/// per-pixel instructions (a per-tap rescale would cost one FMUL per tap). Spelled SYMBOLICALLY
+/// (`SSAO_ANGLE_SCALE`); the glue header prints its value as `1.1111112`, which parses back to
+/// the same `f32`.
+pub const SSAO_ANGLE_SCALE: f32 = 1.0 / (1.0 - SSAO_ANGLE_BIAS);
 
 /// One SSAO QUALITY PRESET — the per-variant tuning the Render P7-Q2 PRE-COMPILED `.spv`
 /// variants (Mechanism C) BAKE as `static const` so every `[unroll]` slice/step loop stays
@@ -187,15 +216,18 @@ impl SsaoQuality {
 /// Renders the per-variant SSAO `static const` tuning header — the GLUE block that BAKES one
 /// [`SsaoParams`] preset into the `.hlsl` (Render P7-Q2 Mechanism C). This is the ONLY text
 /// that varies between the pre-compiled variants: the eDSL-generated horizon-step span spells
-/// `SSAO_RADIUS`/`SSAO_EPS` symbolically and is byte-identical across all variants, and the
-/// `[unroll]` slice/step loops read `SSAO_SLICES`/`SSAO_STEPS` from this header.
+/// `SSAO_RADIUS`/`SSAO_EPS`/`SSAO_ANGLE_BIAS` symbolically and is byte-identical across all
+/// variants, and the `[unroll]` slice/step loops read `SSAO_SLICES`/`SSAO_STEPS` from this header.
 ///
-/// The block is byte-identical to the committed `sdf_ssao.comp.hlsl:110-115` when `p ==
-/// SSAO_PRESETS[1]` (Medium) — that exact reproduction is the no-op proof the byte-identity
-/// loop asserts. The float spellings match the committed literals: `radius`/`strength` print
-/// via the default `f32` `Display` (`0.5` / `2.5`), `eps` prints as `1.0e-4`, and the slice
-/// count emits both the `uint` (`Nu`) and the `SSAO_SLICES_F` float (`N.0`) the `occ / N`
-/// divisor reads. Counts are integers, so they spell exactly (`2u`/`3u`/`4u`/`6u`).
+/// The block is 8 lines, `SSAO_RADIUS` through `SSAO_ANGLE_SCALE`, byte-identical to the committed
+/// `sdf_ssao.comp.hlsl` tuning block when `p == SSAO_PRESETS[1]` (Medium) — that exact
+/// reproduction is the no-op proof the byte-identity loop asserts. The float spellings match the
+/// committed literals: `radius`/`strength` print via the default `f32` `Display` (`0.5` / `2.5`),
+/// `eps` prints as `1.0e-4`, and the slice count emits both the `uint` (`Nu`) and the
+/// `SSAO_SLICES_F` float (`N.0`) the `occ / N` divisor reads. Counts are integers, so they spell
+/// exactly (`2u`/`3u`/`4u`/`6u`). The last two lines are the module constants [`SSAO_ANGLE_BIAS`]
+/// (`0.1`) and [`SSAO_ANGLE_SCALE`] (`1.1111112`), the same in every variant; both spellings
+/// parse back to the exact `f32` bits.
 pub fn ssao_glue_header(p: &SsaoParams) -> String {
     // The `eps` is spelled `1.0e-4` (the committed literal), NOT the `f32` `Display`
     // `0.0001`: the presets all share `1.0e-4`, so a fixed spelling reproduces the committed
@@ -207,13 +239,17 @@ pub fn ssao_glue_header(p: &SsaoParams) -> String {
     let radius = fmt_hlsl_f32(p.radius);
     let strength = fmt_hlsl_f32(p.strength);
     let slices_f = fmt_hlsl_f32(p.slices as f32);
+    let angle_bias = fmt_hlsl_f32(SSAO_ANGLE_BIAS);
+    let angle_scale = fmt_hlsl_f32(SSAO_ANGLE_SCALE);
     format!(
         "static const float SSAO_RADIUS   = {radius};     // world-space sampling radius\n\
          static const uint  SSAO_SLICES   = {slices}u;      // rotated screen-space slices\n\
          static const float SSAO_SLICES_F = {slices_f};     // the slice count as a float (the `occ / N` divisor)\n\
          static const uint  SSAO_STEPS    = {steps}u;      // forward steps per half-slice\n\
          static const float SSAO_STRENGTH = {strength};     // occlusion strength multiplier\n\
-         static const float SSAO_EPS      = 1.0e-4;  // length(delta) divide-by-zero guard\n",
+         static const float SSAO_EPS      = 1.0e-4;  // length(delta) divide-by-zero guard\n\
+         static const float SSAO_ANGLE_BIAS  = {angle_bias};        // HBAO+ angle bias: an elevation sine below it raises no horizon\n\
+         static const float SSAO_ANGLE_SCALE = {angle_scale};  // 1 / (1 - SSAO_ANGLE_BIAS): a vertical wall keeps its full occlusion\n",
         slices = p.slices,
         steps = p.steps,
     )
@@ -237,11 +273,11 @@ const SSAO_HEADER_FIRST_LINE: &str = "static const float SSAO_RADIUS";
 
 /// The last line of the committed SSAO `static const` tuning block — the anchor
 /// [`variant_hlsl`] swaps TO (inclusive). The base shader carries exactly one such line.
-const SSAO_HEADER_LAST_LINE: &str = "static const float SSAO_EPS";
+const SSAO_HEADER_LAST_LINE: &str = "static const float SSAO_ANGLE_SCALE";
 
 /// Produces ONE quality variant's complete `.hlsl` from the committed base SSAO shader text
-/// by swapping ONLY the `static const SSAO_*` tuning header (the 6 lines from `SSAO_RADIUS`
-/// through `SSAO_EPS`) for the per-preset header ([`ssao_glue_header`]). Everything else —
+/// by swapping ONLY the `static const SSAO_*` tuning header (the 8 lines from `SSAO_RADIUS`
+/// through `SSAO_ANGLE_SCALE`) for the per-preset header ([`ssao_glue_header`]). Everything else —
 /// the eDSL-GENERATED horizon-step span, the forward neighbour reconstruct, the rotation/
 /// step-phase dither, the `[unroll]` slice/step loops (which read the swapped `SSAO_SLICES`/
 /// `SSAO_STEPS`), and the `occ → ao` fold — is carried VERBATIM from `base`.
@@ -278,7 +314,8 @@ pub fn variant_hlsl(base: &str, params: SsaoParams) -> String {
         .find('\n')
         .map(|off| last_start + off + 1) // include the '\n'
         .expect(
-            "invariant: the SSAO_EPS header line must be newline-terminated in the base shader",
+            "invariant: the SSAO_ANGLE_SCALE header line must be newline-terminated in the base \
+             shader",
         );
 
     let mut header = ssao_glue_header(&params);
@@ -300,17 +337,21 @@ pub fn variant_hlsl(base: &str, params: SsaoParams) -> String {
 ///
 /// The HBAO horizon step (the plan's `ssao_horizon_step`) measures the neighbour's
 /// ELEVATION ABOVE THE SURFACE TANGENT PLANE (the sine of the elevation angle against the
-/// center normal `N`), clamped to non-negative so only neighbours ABOVE the tangent occlude:
+/// center normal `N`), less the HBAO+ angle bias, clamped to non-negative so only neighbours
+/// MORE than the bias above the tangent occlude:
 ///   `delta     = P' - P`
 ///   `falloff   = clamp01(1 - dot(delta,delta) / (R*R))`   (the range gate)
-///   `elev      = max(dot(delta, N) / max(length(delta), SSAO_EPS), 0.0)`
+///   `elev      = max(dot(delta, N) / max(length(delta), SSAO_EPS) - SSAO_ANGLE_BIAS, 0.0)`
 ///   `hc        = max(hc, elev * falloff)`
 ///
-/// A flat surface (`delta ⊥ N` → `elev = 0`) raises NO horizon (`hc = 0` → AO = 1.0); a
-/// crevice (neighbours rising above the tangent toward the camera → `dot(delta, N) > 0`)
-/// raises `elev > 0` → AO < 1. `dot` is INLINE (`delta.x*N.x + ...`); `length =
-/// sqrt(dot(delta,delta))`. Returns the updated `hc` value (a `Scalar`) — the slice body
-/// threads it through the steps.
+/// A flat surface (`delta ⊥ N` → `elev = 0`) raises NO horizon (`hc = 0` → AO = 1.0), and
+/// neither does a same-facet neighbour of a smooth-shaded mesh, whose false elevation (the
+/// interpolated-vs-facet normal tilt) stays below [`SSAO_ANGLE_BIAS`]; a crevice (neighbours
+/// rising above the tangent toward the camera → `dot(delta, N) > 0`) raises `elev > 0` → AO < 1.
+/// The `1 / (1 - bias)` rescale that restores a vertical wall's full occlusion is NOT applied
+/// here, per tap: it is folded once into the estimate's complement ([`SSAO_ANGLE_SCALE`]). `dot`
+/// is INLINE (`delta.x*N.x + ...`); `length = sqrt(dot(delta,delta))`. Returns the updated `hc`
+/// value (a `Scalar`) — the slice body threads it through the steps.
 ///
 /// GOLDEN-EDSL P0: the preset-taking form. `params.radius` / `params.eps` are the two scalars
 /// this tap reads; they are fed as the VALUE side of the `SSAO_RADIUS` / `SSAO_EPS` named
@@ -349,14 +390,16 @@ pub fn ssao_horizon_step_body_params<C: Cf>(
         .add(dy.mul(C::vec3_y(n)))
         .add(dz.mul(C::vec3_z(n)));
 
-    // float elev = max(dot(delta, N) / max(sqrt(d2), SSAO_EPS), 0.0);  the sine of the
-    // elevation above the tangent plane, clamped non-negative so neighbours BELOW the
-    // tangent do not occlude. `length(delta) = sqrt(d2)` reuses the `d2` temp so the host/GPU
-    // sqrt operand is bit-identical, NOT a recomputed component sum.
+    // float elev = max(dot(delta, N) / max(sqrt(d2), SSAO_EPS) - SSAO_ANGLE_BIAS, 0.0);  the
+    // sine of the elevation above the tangent plane less the HBAO+ angle bias, clamped
+    // non-negative so neighbours BELOW (or less than the bias above) the tangent do not
+    // occlude. `length(delta) = sqrt(d2)` reuses the `d2` temp so the host/GPU sqrt operand is
+    // bit-identical, NOT a recomputed component sum.
     let eps = C::named_lit("SSAO_EPS", params.eps);
+    let angle_bias = C::named_lit("SSAO_ANGLE_BIAS", SSAO_ANGLE_BIAS);
     let elev = C::temp_float(
         "elev",
-        dn.div(d2.sqrt().max(eps)).max(C::Scalar::lit(0.0)),
+        dn.div(d2.sqrt().max(eps)).sub(angle_bias).max(C::Scalar::lit(0.0)),
     );
 
     // hc = max(hc, elev * falloff);  (the running horizon max; the slice body owns the
@@ -463,8 +506,14 @@ pub fn ssao_slice_body<C: Cf, T: Fn(C::Iv, bool) -> C::Vec3f>(
 ///
 /// The plan's `ssao_estimate`:
 ///   `occ = Σ_slices ssao_slice(...)`
-///   `ao  = clamp01(1 - SSAO_STRENGTH * occ / SSAO_SLICES)`
+///   `ao  = clamp01(1 - SSAO_STRENGTH * SSAO_ANGLE_SCALE * occ / SSAO_SLICES)`
 ///   `ao  = ao * ao`   (the integer self-mul strength power, NOT `pow`)
+///
+/// `SSAO_ANGLE_SCALE` (`1 / (1 - SSAO_ANGLE_BIAS)`) is HBAO+'s `AOMultiplier`: the per-tap
+/// elevation is biased down by [`SSAO_ANGLE_BIAS`], and this one constant factor scales the
+/// summed horizons back, so a fully-raised horizon keeps its unbiased occlusion. It stands
+/// left-associated with `SSAO_STRENGTH` (`(S * SC) * occ`), the SAME association the HLSL fold
+/// and the host hand mirror spell, so the three stay bit-identical.
 ///
 /// `tap(s, step, sign)` returns the forward-reconstructed neighbour `P'` for that slice's
 /// step (the hand-written seam folds the slice's screen DIRECTION into the neighbour-pixel
@@ -507,13 +556,14 @@ where
         Flow::Continue(())
     });
 
-    // float ao = clamp(1.0 - SSAO_STRENGTH * occ / SSAO_SLICES_F, 0.0, 1.0);
+    // float ao = clamp(1.0 - SSAO_STRENGTH * SSAO_ANGLE_SCALE * occ / SSAO_SLICES_F, 0.0, 1.0);
     let strength = C::named_lit("SSAO_STRENGTH", params.strength);
+    let angle_scale = C::named_lit("SSAO_ANGLE_SCALE", SSAO_ANGLE_SCALE);
     let slices = C::named_lit("SSAO_SLICES_F", params.slices as f32);
     let ao = C::temp_float(
         "ao",
         C::Scalar::lit(1.0)
-            .sub(strength.mul(C::get_var(&occ)).div(slices))
+            .sub(strength.mul(angle_scale).mul(C::get_var(&occ)).div(slices))
             .clamp01(),
     );
 
@@ -921,6 +971,87 @@ mod tests {
             ao > 0.999,
             "a flat surface (delta perpendicular to N) must leave AO ~= 1.0, got ao = {ao}"
         );
+    }
+
+    #[test]
+    fn an_elevation_below_the_angle_bias_raises_no_horizon() {
+        // Every tap rises at elevation sine 0.08 (< SSAO_ANGLE_BIAS = 0.1) inside the radius —
+        // the false elevation a same-facet neighbour of a smooth-shaded mesh shows. The bias
+        // removes it: no horizon, `ao == 1.0` exactly.
+        let tap = |_s: usize, step: usize, sign: bool| -> [f32; 3] {
+            let d = 0.06 * (step as f32 + 1.0);
+            let along = d * (1.0f32 - 0.08 * 0.08).sqrt();
+            let x = if sign { -along } else { along };
+            [x, 0.0, d * 0.08]
+        };
+        let ao = estimate(tap);
+        assert_eq!(
+            ao, 1.0,
+            "a tap elevation (sine 0.08) below the angle bias {SSAO_ANGLE_BIAS} must raise no \
+             horizon, got ao = {ao}"
+        );
+    }
+
+    #[test]
+    fn a_vertical_wall_keeps_its_unbiased_occlusion() {
+        // Every tap sits straight above the center (elevation sine 1.0) at distance 0.47, so the
+        // falloff is `1 - 0.47^2 / 0.5^2` and the biased horizon is `(1 - B) * falloff`. The
+        // complement's `SSAO_ANGLE_SCALE = 1 / (1 - B)` must restore the bias-free occlusion:
+        // `clamp01(1 - STRENGTH * 2 * falloff)^2` (two half-slices per slice, every slice alike).
+        const D: f32 = 0.47;
+        let ao = estimate(|_s, _step, _sign| [0.0, 0.0, D]);
+        let falloff = 1.0 - D * D / (SSAO_RADIUS * SSAO_RADIUS);
+        let unbiased = (1.0 - SSAO_STRENGTH * 2.0 * falloff).clamp(0.0, 1.0);
+        let expected = unbiased * unbiased;
+        assert!(
+            expected > 0.05 && expected < 0.95,
+            "fixture: the expected AO {expected} must sit inside (0, 1), not on a clamp"
+        );
+        assert!(
+            (ao - expected).abs() < 1.0e-6,
+            "a fully-raised horizon must keep its unbiased occlusion {expected} (the angle scale \
+             must undo the bias), got ao = {ao}"
+        );
+    }
+
+    #[test]
+    fn the_angle_scale_is_the_bias_complement() {
+        // The constant is the exact `f32` complement of the bias, and undoes it: `(1 - B) * S`
+        // rounds to 1.0.
+        assert_eq!(
+            SSAO_ANGLE_SCALE.to_bits(),
+            (1.0f32 / (1.0f32 - SSAO_ANGLE_BIAS)).to_bits(),
+            "SSAO_ANGLE_SCALE must be the f32 value of 1 / (1 - SSAO_ANGLE_BIAS)"
+        );
+        assert_eq!((1.0 - SSAO_ANGLE_BIAS) * SSAO_ANGLE_SCALE, 1.0);
+
+        // The glue header spells both; each spelling must parse back to the same bits, or the
+        // `.spv` would bake a different value than the host oracle evaluates.
+        let header = ssao_glue_header(&SsaoQuality::High.params());
+        for (name, value) in [
+            ("SSAO_ANGLE_BIAS", SSAO_ANGLE_BIAS),
+            ("SSAO_ANGLE_SCALE", SSAO_ANGLE_SCALE),
+        ] {
+            let decl = format!("static const float {name} ");
+            let line = header
+                .lines()
+                .find(|l| l.starts_with(&decl))
+                .unwrap_or_else(|| panic!("the glue header must declare `{name}`:\n{header}"));
+            let literal = line
+                .split('=')
+                .nth(1)
+                .and_then(|rhs| rhs.split(';').next())
+                .map(str::trim)
+                .unwrap_or_else(|| panic!("`{name}` line without a literal: {line}"));
+            let parsed: f32 = literal
+                .parse()
+                .unwrap_or_else(|e| panic!("`{name}` literal `{literal}` does not parse: {e}"));
+            assert_eq!(
+                parsed.to_bits(),
+                value.to_bits(),
+                "the header spelling `{literal}` of `{name}` must round-trip to {value}"
+            );
+        }
     }
 
     #[test]

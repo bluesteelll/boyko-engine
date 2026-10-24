@@ -290,8 +290,8 @@ float4 main(PsIn input, bool is_front : SV_IsFrontFace) : SV_Target0 {
     // (a depth+normal prepass, Decision 8) changes ONLY this one local.
     float ao_final = 1.0;
     // PBR metal fix: decoupled specular occlusion (Filament SpecularAO_Lagarde), hoisted once
-    // per pixel -- byte-identical formula to the deferred resolve's `spec_ao`.
-    float spec_ao = saturate(pow(NoV + ao_final, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao_final);
+    // per pixel -- the SAME shared `spec_ao_lagarde` (GGX alpha) the deferred resolve calls.
+    float spec_ao = spec_ao_lagarde(NoV, ao_final, a);
 
     LightHeader H = load_light_header(LightBuf);
     uint csm_mode = load_csm_mode(LightBuf);

@@ -15,14 +15,28 @@
 // For each of `SSAO_SLICES` rotated screen-space slices, march `SSAO_STEPS` forward-
 // projected neighbour taps in each of the two half-slices, tracking the maximum neighbour
 // ELEVATION ABOVE THE SURFACE TANGENT PLANE `hc` (the sine of the elevation against the
-// center surface normal N, clamped non-negative); fold the two half-slice maxes into a
-// per-slice occlusion, sum over slices, and complement: `ao = clamp01(1 - SSAO_STRENGTH *
-// occ / SSAO_SLICES)` then `ao = ao*ao`. The horizon step needs only `dot`/`max`/`sqrt`/
-// `div` — NO `sin`/`cos`/`acos` (GTAO's arc integral, which has an irreducible GPU↔CPU
-// transcendental ULP gap) and NO `fract` rotation (an integer-boundary discontinuity under
-// FMA). A flat lit surface (delta perpendicular to N) raises NO horizon (AO = 1.0); a
-// crevice (neighbours rising above the tangent) does. The horizon-step MATH is the
-// eDSL-GENERATED span (see the sentinels below).
+// center surface normal N, less the HBAO+ angle bias `SSAO_ANGLE_BIAS`, clamped
+// non-negative); fold the two half-slice maxes into a per-slice occlusion, sum over slices,
+// and complement: `ao = clamp01(1 - SSAO_STRENGTH * SSAO_ANGLE_SCALE * occ / SSAO_SLICES)`
+// then `ao = ao*ao`. The horizon step needs only `dot`/`max`/`sqrt`/`div` — NO
+// `sin`/`cos`/`acos` (GTAO's arc integral, which has an irreducible GPU↔CPU transcendental
+// ULP gap) and NO `fract` rotation (an integer-boundary discontinuity under FMA). A flat lit
+// surface (delta perpendicular to N) raises NO horizon (AO = 1.0); a crevice (neighbours
+// rising above the tangent) does. The horizon-step MATH is the eDSL-GENERATED span (see the
+// sentinels below).
+//
+// # The angle bias (HBAO+ `NDotVBias`, SSAOM F3)
+//
+// On a smooth-shaded mesh `N` is the INTERPOLATED vertex normal, while the neighbours lie on
+// the FLAT facet: a same-facet tap rises above N's tangent plane by up to sin(tau) + the oct8
+// normal error (tau = the interpolated-vs-facet normal angle; on a convex mesh a tap on
+// another facet lies below the center facet's plane and rises less). Unbiased, those taps
+// darkened the AO in a pattern locked to the facets (the owner's 64-slice gold sphere showed
+// regular vertical stripes). Each tap's elevation sine is therefore reduced by
+// `SSAO_ANGLE_BIAS` (0.1, NVIDIA's documented default — "hide low-tessellation artifacts")
+// before the non-negative clamp, and the complement is rescaled once by `SSAO_ANGLE_SCALE =
+// 1/(1 - SSAO_ANGLE_BIAS)` (NVIDIA's AOMultiplier) so a fully-raised horizon keeps its
+// unbiased occlusion. Both live in the tuning header (`boyko_shaderdsl::ssao` owns the values).
 //
 // # The eDSL-generated span (single-source — `boyko_shaderdsl::ssao`)
 //
@@ -181,6 +195,8 @@ static const float SSAO_SLICES_F = 8.0;     // the slice count as a float (the `
 static const uint  SSAO_STEPS    = 6u;      // forward steps per half-slice
 static const float SSAO_STRENGTH = 2.5;     // occlusion strength multiplier
 static const float SSAO_EPS      = 1.0e-4;  // length(delta) divide-by-zero guard
+static const float SSAO_ANGLE_BIAS  = 0.1;        // HBAO+ angle bias: an elevation sine below it raises no horizon
+static const float SSAO_ANGLE_SCALE = 1.1111112;  // 1 / (1 - SSAO_ANGLE_BIAS): a vertical wall keeps its full occlusion
 
 // The mesh/SDF G-buffer sentinel (mirror the marcher's gViewT `1.0e30` background sentinel).
 static const float SSAO_VIEWT_BG = 1.0e30;
@@ -462,7 +478,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                     float d2 = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
                     float r2 = SSAO_RADIUS * SSAO_RADIUS;
                     float falloff = clamp(1.0 - d2 / r2, 0.0, 1.0);
-                    float elev = max((delta.x * n.x + delta.y * n.y + delta.z * n.z) / max(sqrt(d2), SSAO_EPS), 0.0);
+                    float elev = max((delta.x * n.x + delta.y * n.y + delta.z * n.z) / max(sqrt(d2), SSAO_EPS) - SSAO_ANGLE_BIAS, 0.0);
                     hc = max(hc, elev * falloff);
                     // === GENERATED ssao_horizon_step END ===
                 }
@@ -506,7 +522,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                     float d2 = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
                     float r2 = SSAO_RADIUS * SSAO_RADIUS;
                     float falloff = clamp(1.0 - d2 / r2, 0.0, 1.0);
-                    float elev = max((delta.x * n.x + delta.y * n.y + delta.z * n.z) / max(sqrt(d2), SSAO_EPS), 0.0);
+                    float elev = max((delta.x * n.x + delta.y * n.y + delta.z * n.z) / max(sqrt(d2), SSAO_EPS) - SSAO_ANGLE_BIAS, 0.0);
                     hc = max(hc, elev * falloff);
                     // === GENERATED ssao_horizon_step END ===
                 }
@@ -518,7 +534,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
 
         // The final occlusion complement (the eDSL `ssao_estimate` tail, mirrored): the mean
         // per-slice horizon cosine scaled by strength, complemented to an AO factor, squared.
-        float ao = clamp(1.0 - SSAO_STRENGTH * occ / SSAO_SLICES_F, 0.0, 1.0);
+        // `SSAO_ANGLE_SCALE` (1 / (1 - SSAO_ANGLE_BIAS), HBAO+'s AOMultiplier) undoes the per-tap
+        // angle bias for a fully-raised horizon; `SSAO_STRENGTH * SSAO_ANGLE_SCALE` stands first,
+        // a product of two constants DXC folds (no per-pixel instruction).
+        float ao = clamp(1.0 - SSAO_STRENGTH * SSAO_ANGLE_SCALE * occ / SSAO_SLICES_F, 0.0, 1.0);
         ao_out = ao * ao;
     }
 

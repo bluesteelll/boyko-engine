@@ -51,14 +51,34 @@
 # no-op (god-file split, embed_spirv!, gated-OFF path, host-Rust render diff) MUST keep
 # this byte-identical (Tier-0). Host-Rust diffs never pass through DXC FP-lowering, so
 # they are never eligible for any perceptual relaxation.
+#
+# SSAOM F2 MOVED THESE BYTES BY 159 PIXELS AT 1/255 (render bug lane u/render-ssao-metal, F2
+# c7d8db76; re-blessed 2026-10-24 on the msvc host, on the trunk sync 380081ea; rulings 116 + 120).
+# F2: specular occlusion takes the GGX alpha = roughness^2 instead of the perceptual roughness --
+# one spec_ao_lagarde(NoV, ao, a) in pbr_lighting.hlsli for every lit producer. It moves a pixel
+# only where ao_final < 1, per pixel in the sign of (NoV + ao_final - 1): here the Deferred A2
+# SDF-march AO between the two SDF spheres (0.2 apart) and at their floor contact. F3 (the SSAO
+# angle bias, e4f78cc6) moves only an SSAO-arming leg, and this pin arms none. This harness leg
+# keeps its explicit ACES word (window_present_gbuffer; PXt C10), so the Neutral default of ruling
+# 116 does not reach it: the new bytes equal the lane's pre-Neutral checkpoint sweep on 9c8c43fb.
+# Re-blessed on ruling 120's pre-signed numbers (max |d| <= 1), not on a visual check: 159 of 262144
+# px changed (0.0607 %), delta histogram {1: 159}, 86 brighter / 73 darker, bbox x 86-238, y 266-368
+# (from the top). software fe4b60af -> e7e25456, hwrt fe4b60af -> e7e25456; sha256_hwrt still EQUALS
+# sha256_software. Command, from D:\wt\render: the values were set BY HAND from the sweep's
+# new_hashes.tsv (D:/tmp/render-orch/ssaom/merge/sweep.md), not with scripts\golden.ps1 -Bless,
+# which deletes this shared BMP; each is the sha256 of D:\tmp\engine_grand_showcase.bmp, hashed
+# (mtime-checked) right after PIN_TREE=D:/wt/render python -I
+# D:/tmp/render-orch/px1b/scratch/pin_by_hand.py grand_showcase <software|hwrt> <out.bmp>
+# CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc (window_present_gbuffer ignores BOYKO_HOST_DUMP and writes
+# the shared file).
 crate           = "boyko_rhi_vulkan"
 test_binary     = "window_present_gbuffer"
 test_name       = "engine_grand_showcase_512_screenshot_dump"
 bmp             = "D:\\tmp\\engine_grand_showcase.bmp"
 width           = 512
 height          = 512
-sha256_software = "fe4b60af866926e8075722353a6f04090280f667df8bfe9dec67f2d2b3514fde"
-sha256_hwrt     = "fe4b60af866926e8075722353a6f04090280f667df8bfe9dec67f2d2b3514fde"
+sha256_software = "e7e25456a48d82e55343bdc65581370a4b2a7155a4d3e0d787966641ed91c6a0"
+sha256_hwrt     = "e7e25456a48d82e55343bdc65581370a4b2a7155a4d3e0d787966641ed91c6a0"
 
 # Env the pin was blessed under. golden.ps1 SETS these explicitly (never inherits) and
 # CLEARS BOYKO_FORCE_SOFTWARE, so a stray shell env cannot silently change the pipeline.
@@ -123,14 +143,34 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # SDF spheres remain, composited by the byte-UNCHANGED marcher against the new
 # mesh_depth_neutral_clear pass's far-plane depth. Re-render + re-bless after the P1 scene-
 # assembly gate fix landed (do NOT hand-edit sha256_*).
+#
+# SSAOM F2 MOVED THESE BYTES BY 67 PIXELS AT <= 2/255 (render bug lane u/render-ssao-metal, F2
+# c7d8db76; re-blessed 2026-10-24 on the msvc host, on the trunk sync 380081ea; rulings 116 + 120).
+# F2: specular occlusion takes the GGX alpha = roughness^2 instead of the perceptual roughness --
+# one spec_ao_lagarde(NoV, ao, a) in pbr_lighting.hlsli for every lit producer. It moves a pixel
+# only where ao_final < 1, per pixel in the sign of (NoV + ao_final - 1): here the Deferred A2
+# SDF-march AO between the two SDF spheres (the mesh leg is off). F3 (the SSAO angle bias, e4f78cc6)
+# moves only an SSAO-arming leg, and this pin arms none. This harness leg keeps its explicit ACES
+# word (window_present_gbuffer; PXt C10), so the Neutral default of ruling 116 does not reach it:
+# the new bytes equal the lane's pre-Neutral checkpoint sweep on 9c8c43fb. Re-blessed on ruling
+# 120's pre-signed numbers (max |d| <= 3 and <= 0.2 % of pixels changed), not on a visual check: 67
+# of 262144 px changed (0.0256 %), delta histogram {1: 66, 2: 1}, 51 brighter / 16 darker, bbox x
+# 134-182, y 266-315 (from the top). software cf24ab80 -> 477c36c5, hwrt cf24ab80 -> 477c36c5;
+# sha256_hwrt still EQUALS sha256_software. Command, from D:\wt\render: the values were set BY HAND
+# from the sweep's new_hashes.tsv (D:/tmp/render-orch/ssaom/merge/sweep.md), not with
+# scripts\golden.ps1 -Bless, which deletes this shared BMP; each is the sha256 of
+# D:\tmp\deferred_sdf_only.bmp, hashed (mtime-checked) right after PIN_TREE=D:/wt/render python -I
+# D:/tmp/render-orch/px1b/scratch/pin_by_hand.py deferred_sdf_only <software|hwrt> <out.bmp>
+# CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc (window_present_gbuffer ignores BOYKO_HOST_DUMP and writes
+# the shared file).
 crate           = "boyko_rhi_vulkan"
 test_binary     = "window_present_gbuffer"
 test_name       = "engine_deferred_sdf_only_512_screenshot_dump"
 bmp             = "D:\\tmp\\deferred_sdf_only.bmp"
 width           = 512
 height          = 512
-sha256_software = "cf24ab80aa942f5cc8d586d5b683f5e139efd41ecd548e7f432efefb724d8b4e"
-sha256_hwrt     = "cf24ab80aa942f5cc8d586d5b683f5e139efd41ecd548e7f432efefb724d8b4e"
+sha256_software = "477c36c5d142ef98b2310f727ccb09605673cade2eb4c4947017be381ca92770"
+sha256_hwrt     = "477c36c5d142ef98b2310f727ccb09605673cade2eb4c4947017be381ca92770"
 
 [deferred_sdf_only.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -973,15 +1013,36 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # hwrt_shadow_origin_consecutive_frames} (gpu-windowed, --features hwrt) -- red on the tree before
 # the fix (band-F delta 42.1 LSB / 29,951 px; max phase pair 97,853 px; max consecutive-frame
 # change 95,748 px), green after (0.236 LSB / 0 px; 0 px; 0 px).
+#
+# SSAOM F2 MOVED THESE BYTES BY 410-414 PIXELS AT 1/255, MOSTLY DARKER (render bug lane
+# u/render-ssao-metal, F2 c7d8db76; re-blessed 2026-10-24 on the msvc host under the Khronos PBR
+# Neutral default, on the trunk sync 380081ea; rulings 116 + 120). F2: specular occlusion takes the
+# GGX alpha = roughness^2 instead of the perceptual roughness -- one spec_ao_lagarde(NoV, ao, a) in
+# pbr_lighting.hlsli for every lit producer. It moves a pixel only where ao_final < 1, per pixel in
+# the sign of (NoV + ao_final - 1): here the SDF-occludes-mesh A2 AO where the SDF sphere meets the
+# mesh floor, carried by TAA. The contact pixels sit on the grazing floor under the occluder, where
+# NoV + ao_final < 1, so the Lagarde cone darkens them by design (the SSAOM cut's sign rule) --
+# mostly darker is not a defect. F3 (the SSAO angle bias, e4f78cc6) moves only an SSAO-arming leg,
+# and this pin arms none. Re-blessed on ruling 120's pre-signed numbers (max |d| <= 3 and <= 0.2 %
+# of pixels changed), not on a visual check -- software: 410 of 262144 px changed (0.1564 %), delta
+# histogram {1: 410}, 34 brighter / 376 darker; hwrt: 414 of 262144 px changed (0.1579 %), delta
+# histogram {1: 414}, 36 brighter / 378 darker; both legs inside x 172-253, y 197-287 (from the
+# top). software 92bf66a1 -> 154af3ce, hwrt 6c96177a -> ce5ca482; sha256_hwrt still DIVERGES from
+# sha256_software, and these bytes still differ from [taa_armed_basis]'s, so the shear is still
+# live. Command, from D:\wt\render: the values were set BY HAND from the sweep's new_hashes.tsv
+# (D:/tmp/render-orch/ssaom/merge/sweep.md), not with scripts\golden.ps1 -Bless; each is the sha256
+# of the BMP that PIN_TREE=D:/wt/render python -I D:/tmp/render-orch/px1b/scratch/pin_by_hand.py
+# taa_armed <software|hwrt> <out.bmp> CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered.
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\taa_armed.bmp"
 width           = 512
 height          = 512
-# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5.
-sha256_software = "92bf66a1b2c60578f3ce25a66a306df26e2cef4827ef915b2c31c2674202ba23"
-sha256_hwrt     = "6c96177a670f7cd9c00415bc92c459c8cd18ba3d9d4bb909a6feb7c0d8bd1372"
+# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5. Superseded by SSAOM C5 (next line): those frames hash to the old values, software 92bf66a1 and hwrt 6c96177a.
+# Re-blessed (both legs) at render bug lane SSAOM C5 6f0c8a3e under the Khronos PBR Neutral default (rulings 116 + 120): the sweep's frames, rendered on the trunk sync 380081ea (D:/tmp/render-orch/ssaom/merge/sweep/A/taa_armed_software.bmp, B/taa_armed_hwrt.bmp).
+sha256_software = "154af3ce60af65a9eaf7d6e271d29416a5c4ac38df20a58791a8bc0a81241aaf"
+sha256_hwrt     = "ce5ca482aff98934eca9a40f0592df2b6ef097f2c709d98f2b68e58c11af741b"
 
 [taa_armed.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1062,15 +1123,36 @@ BOYKO_TAA_SCOPE          = "raster"
 # 107 px darker by > 30 LSB, all within the legs' intrinsic difference -- 96 px on the contact-shadow
 # line at the right cube's wall base (x 422-452, y 196-201; in the old pin and on the TAA-off frame)
 # plus 11 px in the penumbra strip (x 162-183, y 203-315). Same gates as [taa_armed].
+#
+# SSAOM F2 MOVED THESE BYTES BY 438-440 PIXELS AT 1/255, MOSTLY DARKER (render bug lane
+# u/render-ssao-metal, F2 c7d8db76; re-blessed 2026-10-24 on the msvc host under the Khronos PBR
+# Neutral default, on the trunk sync 380081ea; rulings 116 + 120). F2: specular occlusion takes the
+# GGX alpha = roughness^2 instead of the perceptual roughness -- one spec_ao_lagarde(NoV, ao, a) in
+# pbr_lighting.hlsli for every lit producer. It moves a pixel only where ao_final < 1, per pixel in
+# the sign of (NoV + ao_final - 1): here the SDF-occludes-mesh A2 AO where the SDF sphere meets the
+# mesh floor, carried by TAA. The contact pixels sit on the grazing floor under the occluder, where
+# NoV + ao_final < 1, so the Lagarde cone darkens them by design (the SSAOM cut's sign rule) --
+# mostly darker is not a defect. F3 (the SSAO angle bias, e4f78cc6) moves only an SSAO-arming leg,
+# and this pin arms none. Re-blessed on ruling 120's pre-signed numbers (max |d| <= 3 and <= 0.2 %
+# of pixels changed), not on a visual check -- software: 438 of 262144 px changed (0.1671 %), delta
+# histogram {1: 438}, 36 brighter / 402 darker; hwrt: 440 of 262144 px changed (0.1678 %), delta
+# histogram {1: 440}, 36 brighter / 404 darker; both legs inside x 143-255, y 196-287 (from the
+# top). software 0fff8ec9 -> 456edff4, hwrt de322954 -> d25cd02c; sha256_hwrt still DIVERGES from
+# sha256_software, and these bytes still differ from [taa_armed]'s, so the shear is still live.
+# Command, from D:\wt\render: the values were set BY HAND from the sweep's new_hashes.tsv
+# (D:/tmp/render-orch/ssaom/merge/sweep.md), not with scripts\golden.ps1 -Bless; each is the sha256
+# of the BMP that PIN_TREE=D:/wt/render python -I D:/tmp/render-orch/px1b/scratch/pin_by_hand.py
+# taa_armed_basis <software|hwrt> <out.bmp> CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered.
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\taa_armed_basis.bmp"
 width           = 512
 height          = 512
-# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5.
-sha256_software = "0fff8ec987d6e0d21c900c4468717408b6784db5478abb9703c71f44bd52be0a"
-sha256_hwrt     = "de3229549c952fc80b8b1a26aaed488f4714a44177cd97ffbc4367d4410b1af8"
+# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5. Superseded by SSAOM C5 (next line): those frames hash to the old values, software 0fff8ec9 and hwrt de322954.
+# Re-blessed (both legs) at render bug lane SSAOM C5 6f0c8a3e under the Khronos PBR Neutral default (rulings 116 + 120): the sweep's frames, rendered on the trunk sync 380081ea (D:/tmp/render-orch/ssaom/merge/sweep/A/taa_armed_basis_software.bmp, B/taa_armed_basis_hwrt.bmp).
+sha256_software = "456edff417d43a15faefb35817bfeab6e09f6cb3f6acc6652aea4d69ad26383a"
+sha256_hwrt     = "d25cd02c1d3d55e37786afc1f1f6da543e12397b895571887267228ba72b9454"
 
 [taa_armed_basis.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1124,15 +1206,37 @@ BOYKO_WIN                = "512"
 # 98 px on the contact-shadow line at the right cube's wall base (x 422-453, y 196-201; in the old
 # pin and on the TAA-off frame) plus 22 px in the RCAS-widened penumbra strip (x 162-188,
 # y 203-315). Same gates as [taa_armed].
+#
+# SSAOM F2 MOVED THESE BYTES BY 471-473 PIXELS AT 1/255, MOSTLY DARKER (render bug lane
+# u/render-ssao-metal, F2 c7d8db76; re-blessed 2026-10-24 on the msvc host under the Khronos PBR
+# Neutral default, on the trunk sync 380081ea; rulings 116 + 120). F2: specular occlusion takes the
+# GGX alpha = roughness^2 instead of the perceptual roughness -- one spec_ao_lagarde(NoV, ao, a) in
+# pbr_lighting.hlsli for every lit producer. It moves a pixel only where ao_final < 1, per pixel in
+# the sign of (NoV + ao_final - 1): here the SDF-occludes-mesh A2 AO where the SDF sphere meets the
+# mesh floor, carried by TAA and sharpened by RCAS. The contact pixels sit on the grazing floor
+# under the occluder, where NoV + ao_final < 1, so the Lagarde cone darkens them by design (the
+# SSAOM cut's sign rule) -- mostly darker is not a defect. F3 (the SSAO angle bias, e4f78cc6) moves
+# only an SSAO-arming leg, and this pin arms none. Re-blessed on ruling 120's pre-signed numbers
+# (max |d| <= 3 and <= 0.2 % of pixels changed), not on a visual check -- software: 471 of 262144 px
+# changed (0.1797 %), delta histogram {1: 471}, 71 brighter / 400 darker; hwrt: 473 of 262144 px
+# changed (0.1804 %), delta histogram {1: 473}, 68 brighter / 405 darker; both legs inside x
+# 149-255, y 195-287 (from the top). software cfe988f4 -> bcb40748, hwrt ab7e62a2 -> 72959155;
+# sha256_hwrt still DIVERGES from sha256_software, and these bytes still differ from
+# [taa_armed_basis]'s, so RCAS still runs. Command, from D:\wt\render: the values were set BY HAND
+# from the sweep's new_hashes.tsv (D:/tmp/render-orch/ssaom/merge/sweep.md), not with
+# scripts\golden.ps1 -Bless; each is the sha256 of the BMP that PIN_TREE=D:/wt/render python -I
+# D:/tmp/render-orch/px1b/scratch/pin_by_hand.py taa_rcas <software|hwrt> <out.bmp>
+# CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered.
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\taa_rcas.bmp"
 width           = 512
 height          = 512
-# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5.
-sha256_software = "cfe988f4e0680bdc78cc7d57101e8f00b6c4bcb3567569b634bf1c295a79f1fb"
-sha256_hwrt     = "ab7e62a2892149edad224bc98c4db1532c9177343596db46d6efdbd1bc03786c"
+# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5. Superseded by SSAOM C5 (next line): those frames hash to the old values, software cfe988f4 and hwrt ab7e62a2.
+# Re-blessed (both legs) at render bug lane SSAOM C5 6f0c8a3e under the Khronos PBR Neutral default (rulings 116 + 120): the sweep's frames, rendered on the trunk sync 380081ea (D:/tmp/render-orch/ssaom/merge/sweep/A/taa_rcas_software.bmp, B/taa_rcas_hwrt.bmp).
+sha256_software = "bcb407481775736b9c1e8823ec95255b26991ea398d6a5036467c66147beac8f"
+sha256_hwrt     = "72959155c152fec9b1f917859c2ae0bce934af86cee9f0a77f24108f20cf9a14"
 
 [taa_rcas.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1266,15 +1370,35 @@ BOYKO_GEOMETRY_LEGS      = "mesh"
 # geometric interpolated normal differs from the deferred mapped-normal gather by design).
 # The pin run itself exercises every new declare/record parity debug_assert (dev-profile build).
 # sha256_hwrt EQUALS sha256_software on this scene (each leg blessed on its own run).
+#
+# SSAOM F2 + F3 MOVED THESE BYTES BY 18333 PIXELS AT <= 3/255, MOSTLY BRIGHTER (render bug lane
+# u/render-ssao-metal, F3 e4f78cc6 + F2 c7d8db76; re-blessed 2026-10-24 on the msvc host under the
+# Khronos PBR Neutral default, on the trunk sync 380081ea; rulings 116 + 120). F3: the SSAO trace
+# subtracts HBAO+'s angle bias (SSAO_ANGLE_BIAS) from every traced step and scales the estimate by
+# its 1/(1-b) complement (SSAO_ANGLE_SCALE), so the five tessellated spheres stop occluding
+# themselves at their own facets (the false facet horizon); the real occlusion between neighbouring
+# spheres stays, slightly weaker. F2: specular occlusion takes the GGX alpha = roughness^2 instead
+# of the perceptual roughness -- one spec_ao_lagarde(NoV, ao, a) in pbr_lighting.hlsli for every lit
+# producer. It moves a pixel only where ao_final < 1, per pixel in the sign of (NoV + ao_final - 1);
+# SSAO puts ao_final < 1 across the spheres. Re-blessed on ruling 120's pre-signed numbers (mostly
+# brighter, max |d| <= 8), not on a visual check: 18333 of 262144 px changed (6.9935 %), delta
+# histogram {1: 14617, 2: 3637, 3: 79}, 18308 brighter / 20 darker, bbox x 2-509, y 211-293 (from
+# the top); the lane's pre-Neutral checkpoint on 9c8c43fb measured 18774 px at up to 6. software
+# bd2a1cd0 -> fb578c08, hwrt bd2a1cd0 -> fb578c08; sha256_hwrt still EQUALS sha256_software.
+# Command, from D:\wt\render: the values were set BY HAND from the sweep's new_hashes.tsv
+# (D:/tmp/render-orch/ssaom/merge/sweep.md), not with scripts\golden.ps1 -Bless; each is the sha256
+# of the BMP that PIN_TREE=D:/wt/render python -I D:/tmp/render-orch/px1b/scratch/pin_by_hand.py
+# vb_mesh_ssao <software|hwrt> <out.bmp> CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered.
 crate           = "boyko-app"
 test_binary     = "vb_mesh_ssao"
 test_name       = "vb_mesh_ssao_screenshot_dump"
 bmp             = "D:\\tmp\\vb_mesh_ssao.bmp"
 width           = 512
 height          = 512
-# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5.
-sha256_software = "bd2a1cd0f0a6eb109169bec78778e583ea6c4c2a637316f6e7a6b90d6420c219"
-sha256_hwrt     = "bd2a1cd0f0a6eb109169bec78778e583ea6c4c2a637316f6e7a6b90d6420c219"
+# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5. Superseded by SSAOM C5 (next line): those frames hash to the old values, software bd2a1cd0 and hwrt bd2a1cd0.
+# Re-blessed (both legs) at render bug lane SSAOM C5 6f0c8a3e under the Khronos PBR Neutral default (rulings 116 + 120): the sweep's frames, rendered on the trunk sync 380081ea (D:/tmp/render-orch/ssaom/merge/sweep/A/vb_mesh_ssao_software.bmp, B/vb_mesh_ssao_hwrt.bmp).
+sha256_software = "fb578c088640ea69dbe86989cb47d8abe768d20769951f948d0764502d8278e6"
+sha256_hwrt     = "fb578c088640ea69dbe86989cb47d8abe768d20769951f948d0764502d8278e6"
 
 [vb_mesh_ssao.env]
 BOYKO_DISABLE_VALIDATION = "1"

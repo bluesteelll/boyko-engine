@@ -56,8 +56,8 @@
 //   its surroundings, not a flat tint; the smoothstep gives it a real bright-cap/dark-belly
 //   split instead of a flat mid-tone) + a hemisphere diffuse ambient sampled along N. AO is
 //   DECOUPLED (the PBR metal fix): diffuse ambient is modulated by the A2 AO (`ao_final`),
-//   ambient SPECULAR by a separate roughness-aware `spec_ao` (Filament SpecularAO_Lagarde,
-//   ~1 for smooth/metal) — a metal's diffuse is 0, so its ambient specular IS its entire
+//   ambient SPECULAR by a separate `spec_ao` (`spec_ao_lagarde`, fed the GGX alpha; 1 for a
+//   smooth surface under mild AO) — a metal's diffuse is 0, so its ambient specular IS its entire
 //   appearance and must not be AO-darkened like matte paint. A 1-mul multi-scatter
 //   energy-compensation term (PBR P0-D) recovers the single-scatter GGX energy loss at high
 //   roughness, applied at every specular site (direct + ambient). No IBL texture, no LUT (MVP-2).
@@ -994,14 +994,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
             // === GENERATED ssao_blur_combine END ===
         }
 
-        // PBR metal fix: decoupled specular occlusion (Filament SpecularAO_Lagarde ==
-        // Bevy deferred `specular_occlusion`), hoisted ONCE per pixel (NoV + roughness +
-        // ao_final only) and reused at every ambient-specular site below. Diffuse AO
-        // (ao_final) darkens Lambert ambient correctly, but a metal has diffuse == 0 — its
-        // ambient SPECULAR is its ENTIRE appearance, so multiplying that by ao_final reads
-        // as "AO-darkened matte paint", not metal. `spec_ao` stays ~1 for smooth/metal
-        // surfaces and only gently occludes rough+cavity, matching every competitor's split.
-        float spec_ao = saturate(pow(NoV + ao_final, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao_final);
+        // PBR metal fix: decoupled specular occlusion (`spec_ao_lagarde`, `pbr_lighting.hlsli` —
+        // Filament SpecularAO_Lagarde == Bevy `specular_occlusion`), fed the GGX alpha `a` as
+        // Filament/Bevy/Frostbite feed it, hoisted ONCE per pixel and reused at every
+        // ambient-specular site below. Diffuse AO (ao_final) darkens Lambert ambient correctly,
+        // but a metal has diffuse == 0 — its ambient SPECULAR is its ENTIRE appearance, so a
+        // mild AO dip must not pass through to it: `spec_ao` is 1 for a smooth surface under
+        // mild AO, occludes rough+cavity, and darkens the grazing occluded cone (NoV + ao < 1).
+        float spec_ao = spec_ao_lagarde(NoV, ao_final, a);
 
         float3 lit_direct = float3(0.0, 0.0, 0.0);
         float3 ambient = float3(0.0, 0.0, 0.0);
