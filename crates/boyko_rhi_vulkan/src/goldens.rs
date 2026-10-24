@@ -2460,18 +2460,23 @@ pub(crate) fn multi_scatter_energy_comp(dfg: [f32; 2], f0: [f32; 3]) -> [f32; 3]
     ]
 }
 
-/// PBR metal fix: decoupled specular occlusion (mirrors the resolve's hoisted `spec_ao`
-/// term — Filament `SpecularAO_Lagarde` == Bevy deferred `specular_occlusion`):
-/// `saturate(pow(NoV + ao, exp2(-16*roughness - 1)) - 1 + ao)`. Diffuse AO (`ao`/`ao_final`)
-/// correctly darkens Lambert ambient, but a metal has `diffuse == 0` — its ambient SPECULAR
-/// is its ENTIRE appearance, so multiplying that by diffuse AO reads as "AO-darkened matte
-/// paint", not metal. `spec_ao` stays ~1 for smooth/metal surfaces and only gently occludes
-/// rough+cavity surfaces, matching every competitor's diffuse/specular AO split. Computed
-/// ONCE per pixel by the caller (NoV + roughness + ao only) and reused at every ambient-
-/// specular site.
+/// PBR metal fix: decoupled specular occlusion — the host twin of `pbr_lighting.hlsli`'s
+/// `spec_ao_lagarde` (Lagarde's cone approximation, Filament `SpecularAO_Lagarde` == Bevy
+/// `specular_occlusion`): `saturate(pow(NoV + ao, exp2(-16*alpha - 1)) - 1 + ao)`, fed the GGX
+/// ALPHA (`roughness^2`), as Filament, Bevy and Frostbite feed it (SSAOM F2: the perceptual
+/// roughness made the exponent far too small, so a polished metal passed most of a mild AO dip
+/// straight through — NoV 0.7, ao 0.85, roughness 0.18 gave 0.880, alpha gives 1.0). Diffuse AO
+/// (`ao`/`ao_final`) correctly darkens Lambert ambient, but a metal has `diffuse == 0` — its
+/// ambient SPECULAR is its ENTIRE appearance, so multiplying that by diffuse AO reads as
+/// "AO-darkened matte paint", not metal. `spec_ao` saturates to 1 wherever `pow(NoV + ao, e) >=
+/// 2 - ao` (a smooth surface under mild AO), occludes rough and cavity surfaces, and darkens
+/// grazing occluded pixels (`NoV + ao < 1`, the Lagarde cone). `ao == 1` gives exactly 1 under
+/// any exponent. Computed ONCE per pixel by the caller (NoV + alpha + ao
+/// only) and reused at every ambient-specular site. The shader body is pinned to this formula by
+/// `tests/spec_ao_alpha.rs`: edit both or neither.
 #[inline]
-pub(crate) fn specular_ao(nov: f32, roughness: f32, ao: f32) -> f32 {
-    let exponent = (-16.0 * roughness - 1.0).exp2();
+pub(crate) fn specular_ao(nov: f32, alpha: f32, ao: f32) -> f32 {
+    let exponent = (-16.0 * alpha - 1.0).exp2();
     ((nov + ao).powf(exponent) - 1.0 + ao).clamp(0.0, 1.0)
 }
 
@@ -3589,7 +3594,7 @@ pub fn golden_deferred_resolve_with_pbr(
     let pi = core::f32::consts::PI;
     // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
     // `specular_ao`'s doc) and reused at both ambient-specular sites below.
-    let spec_ao = specular_ao(nov, roughness, ao);
+    let spec_ao = specular_ao(nov, a, ao);
     let mut lit = [0.0_f32; 3];
     for c in 0..3 {
         let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
@@ -3765,7 +3770,7 @@ pub fn golden_deferred_resolve_table_ssao(
     let r = v_reflect(rd, n);
     // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
     // `specular_ao`'s doc) and reused at every ambient-specular site below.
-    let spec_ao = specular_ao(nov, roughness, ao_final);
+    let spec_ao = specular_ao(nov, a, ao_final);
 
     let mut lit_direct = [0.0_f32; 3];
     let mut ambient = [0.0_f32; 3];
@@ -4037,8 +4042,8 @@ fn resolve_shadowed_impl<F: Fn([f32; 3]) -> f32, H: ResolveHooks>(
     let r: [f32; 3] = core::array::from_fn(|k| hooks.site(site(K::Refl, pixel, k), r0[k], 8.0 * U));
     // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
     // `specular_ao`'s doc) and reused at every ambient-specular site below.
-    let spec_ao0 = specular_ao(nov, roughness, ao_final);
-    let spec_ao = hooks.site(site(K::SpecAo, pixel, 0), spec_ao0, budget_spec_ao(nov, roughness, ao_final));
+    let spec_ao0 = specular_ao(nov, a, ao_final);
+    let spec_ao = hooks.site(site(K::SpecAo, pixel, 0), spec_ao0, budget_spec_ao(nov, a, ao_final));
 
     // P6 R1: the shadow_mode gate + the surface world position `P` (hoisted, mirroring the
     // shader) + the dominant-N march counter.
@@ -4852,7 +4857,7 @@ pub fn golden_deferred_resolve_clustered(
     let r = v_reflect(rd, n);
     // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
     // `specular_ao`'s doc) and reused at every ambient-specular site below.
-    let spec_ao = specular_ao(nov, roughness, ao);
+    let spec_ao = specular_ao(nov, a, ao);
 
     // The no-`P` front block (directionals + sky) is GLOBAL — identical to the table resolve.
     let mut lit_direct = [0.0_f32; 3];
@@ -5044,7 +5049,7 @@ pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
     let r = v_reflect(rd, n);
     // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
     // `specular_ao`'s doc) and reused at every ambient-specular site below.
-    let spec_ao = specular_ao(nov, roughness, ao);
+    let spec_ao = specular_ao(nov, a, ao);
 
     let multi_light = header.shadow_mode() != 0;
     let p = [
@@ -6180,9 +6185,9 @@ fn budget_pow(x: f32, y: f32) -> f32 {
 
 /// The absolute device-host bound on [`specular_ao`]: its `pow`, its exponent's `exp2` (through
 /// `∂pow/∂e = pow·ln x`), the `NoV + ao` add (through `∂pow/∂x = e·pow/x`) and the `− 1 + ao`
-/// tail; the final `saturate` is 1-Lipschitz.
-fn budget_spec_ao(nov: f32, roughness: f32, ao: f32) -> f32 {
-    let e_arg = -16.0 * roughness - 1.0;
+/// tail; the final `saturate` is 1-Lipschitz. `alpha` is the GGX alpha [`specular_ao`] is fed.
+fn budget_spec_ao(nov: f32, alpha: f32, ao: f32) -> f32 {
+    let e_arg = -16.0 * alpha - 1.0;
     let e = e_arg.exp2();
     let rho_e = budget_exp2(e_arg, 4.0 * U * e_arg.abs());
     let x = nov + ao;

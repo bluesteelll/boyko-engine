@@ -1052,7 +1052,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // v1 scope cut (mirrors `forward_opaque.fs.hlsl`'s own "no SSAO/DDGI consumer" note): no
     // SDF-side AO term is applied this rung — `ao_final` stays the Forward v1 mesh-leg constant.
     float ao_final = 1.0;
-    float spec_ao = saturate(pow(NoV + ao_final, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao_final);
+    float spec_ao = spec_ao_lagarde(NoV, ao_final, a);
 
     LightHeader H = load_light_header(LightBuf);
     uint csm_mode = load_csm_mode(LightBuf);
