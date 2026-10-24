@@ -65,8 +65,9 @@
 //!   anti-vacuity on the arm's `Log2` / `Pow` / `DontFlatten`.
 //! - Recorded, not gated (`gpu-cap:`): `post_final_sharpen_on_and_off_modules_report_their_registers`
 //!   (the cost when the sharpen is on) and
-//!   `post_final_sharpen_off_and_agx_only_twin_report_their_register_footprint` (O6 re-aimed at the
-//!   default curve's path; its host anti-vacuity is `the_agx_only_twin_compiles_the_other_arms_away`).
+//!   `post_final_sharpen_off_and_agx_only_twin_report_their_register_footprint` (O6 on AgX's path,
+//!   the default curve's from PXt's C8 until ruling 116 made Neutral the default; its host
+//!   anti-vacuity is `the_agx_only_twin_compiles_the_other_arms_away`).
 //!
 //! # Usage
 //!
@@ -1036,9 +1037,10 @@ fn post_final_sharpen_on_and_off_modules_report_their_registers() {
     );
 }
 
-/// **Render wave PXt — the O6 row on the default curve's path** (`pxt/cut.md` D-O4 (d)): the
-/// sharpen-off module beside its `AgxOnly` twin — the runtime dispatch's register cost where AgX
-/// runs. The PX1a `AcesOnly` row stays for continuity. See [`record_pair`].
+/// **Render wave PXt — the O6 row on AgX's path** (`pxt/cut.md` D-O4 (d); the default curve's path
+/// from C8 until ruling 116 made Khronos PBR Neutral the default): the sharpen-off module beside its
+/// `AgxOnly` twin — the runtime dispatch's register cost where AgX runs. The PX1a `AcesOnly` row
+/// stays for continuity. See [`record_pair`].
 #[test]
 #[ignore = "gpu-cap: needs a real GPU exposing VK_KHR_pipeline_executable_properties and the pinned dxc; PXt O6, post_final's sharpen-off module vs its AgxOnly twin (recorded, not gated); run with --nocapture"]
 fn post_final_sharpen_off_and_agx_only_twin_report_their_register_footprint() {
@@ -1051,7 +1053,7 @@ fn post_final_sharpen_off_and_agx_only_twin_report_their_register_footprint() {
         return;
     };
     record_pair(
-        "post_final O6 on the default curve: sharpen-off module vs AgxOnly twin (PXt)",
+        "post_final O6 on AgX's path: sharpen-off module vs AgxOnly twin (PXt)",
         &probe,
         &[("sharpen-off (committed)", post_final_spirv_for(false)), ("agx_only (twin)", twin.as_slice())],
     );

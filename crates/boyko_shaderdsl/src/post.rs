@@ -88,14 +88,15 @@ pub const TONEMAP_MODE_SHIFT: u32 = 8;
 /// The tonemapper field's mask (4 bits, 16 operators).
 pub const TONEMAP_MODE_MASK: u32 = 0xF;
 /// Tonemapper word: Stephen Hill's ACES fit (the fallback of every unknown word; the engine
-/// default is [`TONEMAP_AGX`] since render wave PXt).
+/// default is [`TONEMAP_NEUTRAL`] since render wave PXt).
 pub const TONEMAP_ACES: u32 = 0;
-/// Tonemapper word: Khronos PBR Neutral.
+/// Tonemapper word: Khronos PBR Neutral — the engine default
+/// (`boyko_render::light::Tonemapper::default()`, render wave PXt, ruling 116).
 pub const TONEMAP_NEUTRAL: u32 = 1;
 /// Tonemapper word: Reinhard-Jodie.
 pub const TONEMAP_REINHARD_JODIE: u32 = 2;
-/// Tonemapper word: AgX (render wave PXt) — three.js's AgX on Blender's Rec.2020 base ([`agx`]); the
-/// engine default (`boyko_render::light::Tonemapper::default()`).
+/// Tonemapper word: AgX (render wave PXt) — three.js's AgX on Blender's Rec.2020 base ([`agx`]);
+/// selectable.
 pub const TONEMAP_AGX: u32 = 3;
 
 /// Mode-word bit 1 (render wave PX1b, H5): the RCAS sharpen stage runs this frame. Bit 0 stays

@@ -169,21 +169,23 @@ const fn post_final_words_for(width: u32, height: u32) -> [u32; 8] {
 }
 
 /// Render wave PXt (`pxt/cut.md` D-G1): the showcase dumps' REVIEW-ONLY tonemap word —
-/// `BOYKO_REVIEW_TONEMAP=agx` renders the owner's AgX side-by-side panel; unset (every pin run)
-/// keeps this harness's explicit ACES word, so its pins never move with the engine default.
+/// `BOYKO_REVIEW_TONEMAP=neutral` renders the owner's side-by-side panel under the engine default
+/// (Khronos PBR Neutral, ruling 116), `=agx` the AgX panel; unset (every pin run) keeps this
+/// harness's explicit ACES word, so its pins never move with the engine default.
 const ENV_REVIEW_TONEMAP: &str = "BOYKO_REVIEW_TONEMAP";
 
 /// [`post_final_words_for`] with [`ENV_REVIEW_TONEMAP`]'s word, if set.
 ///
 /// # Panics
-/// On a value other than `agx`, naming it.
+/// On a value other than `neutral` or `agx`, naming it.
 fn showcase_post_final_words(width: u32, height: u32) -> [u32; 8] {
-    use boyko_shaderdsl::post::{TONEMAP_AGX, TONEMAP_MODE_SHIFT};
+    use boyko_shaderdsl::post::{TONEMAP_AGX, TONEMAP_MODE_SHIFT, TONEMAP_NEUTRAL};
     let mut words = post_final_words_for(width, height);
     match std::env::var(ENV_REVIEW_TONEMAP) {
         Err(_) => {}
+        Ok(v) if v == "neutral" => words[0] |= TONEMAP_NEUTRAL << TONEMAP_MODE_SHIFT,
         Ok(v) if v == "agx" => words[0] |= TONEMAP_AGX << TONEMAP_MODE_SHIFT,
-        Ok(other) => panic!("{ENV_REVIEW_TONEMAP}={other} is not `agx` (unset keeps the harness's ACES word)"),
+        Ok(other) => panic!("{ENV_REVIEW_TONEMAP}={other} is not `neutral` or `agx` (unset keeps the harness's ACES word)"),
     }
     words
 }

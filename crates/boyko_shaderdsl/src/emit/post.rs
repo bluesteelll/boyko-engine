@@ -225,8 +225,9 @@ pub enum PostFinalTwin {
     NoRcas,
     /// Render wave PXt O6 re-aimed (`post_final_occupancy.rs`, TEST-ONLY, never committed): the mode
     /// word replaced by the AgX constant with the sharpen bit clear (`TONEMAP_AGX <<
-    /// TONEMAP_MODE_SHIFT`), so DXC folds the dispatch to the AgX arm and the RCAS branch away — the
-    /// default curve's path with the other arms compiled out, recorded beside the sharpen-off module.
+    /// TONEMAP_MODE_SHIFT`), so DXC folds the dispatch to the AgX arm and the RCAS branch away — AgX's
+    /// path with the other arms compiled out (the default curve's path from PXt's C8 until ruling 116
+    /// made Neutral the default), recorded beside the sharpen-off module.
     AgxOnly,
 }
 

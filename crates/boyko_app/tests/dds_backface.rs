@@ -229,8 +229,8 @@ fn f16_ulp(x: f32) -> f32 {
 
 /// The `post_final` parameters of a D-DS frame. The scene's `LightingConfig` differs from the
 /// default only in its sky terms (`dds_scene::build_dds_app_sized`), which `post_final` does not
-/// read. The default's tonemapper (AgX since render wave PXt) and `post_final_gpu`'s unit exposure
-/// ratio are therefore the frame's.
+/// read. The default's tonemapper (Khronos PBR Neutral since render wave PXt) and
+/// `post_final_gpu`'s unit exposure ratio are therefore the frame's.
 fn display_params() -> PostParams<EvalCf> {
     let gpu = post_final_gpu(&ResolvedPost::from_config(&LightingConfig::default()), [1, 1]);
     let mut words = [0u32; 8];

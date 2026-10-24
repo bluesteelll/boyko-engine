@@ -16,8 +16,10 @@
 //! - [`n_family_passes_and_z_family_fails_a1s1_k64`] — the model separates the families on the
 //!   arm the decision is tightest on;
 //! - [`the_format_decision_curve_is_the_shipping_default`] — D-P4's tripwire (verify r5 O1);
-//! - [`the_record_names_agx_as_its_decided_curve`] — the tripwire's record parse reads the real
-//!   record (render wave PXt).
+//! - [`the_record_names_neutral_as_its_decided_curve`] — the tripwire's record parse reads the real
+//!   record (render wave PXt);
+//! - [`the_decided_curve_keeps_the_decided_format`] — row 6: the record's decided curve passes the
+//!   content rule on RGBA16F (render wave PXt, ruling 116).
 //!
 //! [`write_expected_block`] (`generator:`) rewrites the record's block from this tree's model.
 
@@ -222,15 +224,95 @@ fn decided_curve(record: &str) -> Option<&str> {
         .and_then(|v| v.strip_suffix('"'))
 }
 
-/// Render wave PXt (`pxt/critique.md` C1): the tripwire's parse finds the decided curve on the REAL
-/// record, so its live branch (once `post.rs` carries an AgX word) compares the default with the
-/// record's curve instead of panicking that the record names none.
+/// Render wave PXt (`pxt/critique.md` C1; ruling 116 amended the record's curve to Khronos PBR
+/// Neutral, its §10): the tripwire's parse finds the decided curve on the REAL record, so its live
+/// branch (once `post.rs` carries an AgX word) compares the default with the record's curve instead
+/// of panicking that the record names none.
 #[test]
-fn the_record_names_agx_as_its_decided_curve() {
+fn the_record_names_neutral_as_its_decided_curve() {
     assert_eq!(
         decided_curve(&record_text()),
-        Some("agx"),
+        Some("neutral"),
         "{RECORD}: the tripwire cannot read the record's `decided_curve` line"
+    );
+}
+
+/// **Row 6 — the decided curve keeps the decided format** (render wave PXt, ruling 116; the
+/// record's §10). The record's `decided_curve` names a curve this model evaluates, and every
+/// decisive content arm passes §2's rule under it on RGBA16F — the format PX0 decided — under EVERY
+/// modelled class of the arm's path: the device classified RGBA16F's store as `Z` and its blends as
+/// `Unmodelled:1.000`, so no single class stands for the blends. B10G11R11's numbers under its
+/// device class (`Z` on every path) are printed beside them for the record, never asserted.
+/// `--nocapture` prints the table the record's §10 quotes.
+#[test]
+fn the_decided_curve_keeps_the_decided_format() {
+    let record = record_text();
+    let decided = decided_curve(&record).unwrap_or_else(|| panic!("{RECORD} names no `decided_curve`"));
+    let curve = Curve::from_decided(decided)
+        .unwrap_or_else(|| panic!("{RECORD}: `decided_curve = \"{decided}\"` names no curve of the content model"));
+    let n = curve.name();
+    println!(
+        "| arm | RGBA16F `Z`: {n} max\\|Δ\\| (channel, placement) | {n} chroma | RGBA16F, every modelled class: worst max\\|Δ\\| / chroma | verdict ({n}, RGBA16F) | B10G11R11 `Z`: {n} max\\|Δ\\| / chroma | B10G11R11 `Z` (record only) |"
+    );
+    println!("|---|---|---|---|---|---|---|");
+    let ch = ["r", "g", "b"];
+    let (mut fails, mut b10_fails, mut arms) = (Vec::new(), 0usize, 0usize);
+    let (mut worst_delta, mut worst_chroma) = (0.0f64, 0.0f64);
+    for arm in lit_format::arms().into_iter().filter(|a| a.family.decisive()) {
+        arms += 1;
+        let ex = exact(&arm, Target::Rgba16f);
+        let disp = exact_display(curve, &ex);
+        let mut z = None;
+        let (mut arm_delta, mut arm_chroma, mut arm_passes) = (0.0f64, 0.0f64, true);
+        for class in classes_for(Target::Rgba16f, arm.path) {
+            let member = Member::of_class(*class).expect("invariant: a modelled class");
+            let m = metric(curve, &decode_image(&simulate(&arm, Target::Rgba16f, member), Target::Rgba16f), &disp);
+            arm_delta = arm_delta.max(m.max_delta);
+            arm_chroma = arm_chroma.max(m.chroma);
+            arm_passes &= m.passes();
+            if *class == PathClass::Z {
+                z = Some(m);
+            }
+        }
+        let z = z.expect("invariant: every RGBA16F path has a `Z` class");
+        worst_delta = worst_delta.max(arm_delta);
+        worst_chroma = worst_chroma.max(arm_chroma);
+        if !arm_passes {
+            fails.push(arm.label());
+        }
+        let b10_ex = exact(&arm, Target::B10G11R11);
+        let b10 = metric(
+            curve,
+            &decode_image(&simulate(&arm, Target::B10G11R11, Member::Z), Target::B10G11R11),
+            &exact_display(curve, &b10_ex),
+        );
+        if !b10.passes() {
+            b10_fails += 1;
+        }
+        println!(
+            "| {} | {:.3} ({}, j={}) | {:.3} | {:.3} / {:.3} | {} | {:.3} / {:.3} | {} |",
+            arm.label(),
+            z.max_delta,
+            ch[z.at.0],
+            z.at.1,
+            z.chroma,
+            arm_delta,
+            arm_chroma,
+            if arm_passes { "pass" } else { "FAIL" },
+            b10.max_delta,
+            b10.chroma,
+            if b10.passes() { "pass" } else { "FAIL" }
+        );
+    }
+    println!(
+        "\n{n}: RGBA16F {} of {arms} decisive arms fail under every modelled class (worst max|Δ| {worst_delta:.3}, worst chroma {worst_chroma:.3} LSB; threshold {} LSB); B10G11R11 under `Z`: {b10_fails} of {arms} fail (record only)",
+        fails.len(),
+        lit_format::THRESHOLD_LSB
+    );
+    assert_eq!(arms, 42, "the decisive arm set changed: the record's rule reads 42 decisive arms per format");
+    assert!(
+        fails.is_empty(),
+        "{RECORD} row 6: the decided curve {n} fails the content rule on RGBA16F on {fails:?} — the late escape with AD-1's re-bless, not a keep"
     );
 }
 

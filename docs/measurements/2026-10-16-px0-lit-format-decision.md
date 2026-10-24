@@ -668,7 +668,9 @@ in every case, on both formats.
 | 6 | — (a later default-curve change) | — | the content arms and this model re-run under the new curve before the change merges (`the_format_decision_curve_is_the_shipping_default` is the tripwire) | a pass keeps the format; a fail ⇒ the late escape with AD-1's re-bless |
 | 7 | rows 1–3 would choose RGBA16F **because of A3 alone** (A1 and A2 pass) | — | **A3-blend** (A3's sequences through the premultiplied-over blend), judged under the blend-over path's class | A3-blend passes ⇒ **B10G11R11**, and V2 `fog_apply` / R7 `oit_composite` are bound to the premultiplied-over raster route (**DS-ROW7**, for the orchestrator); A3-blend fails ⇒ **RGBA16F** |
 
-`decided_curve = "agx"`
+`decided_curve = "neutral"`
+
+*Amended 2026-10-24 (render wave PXt, ruling 116; §10): PX0 decided under `"agx"`; the shipping default is now Khronos PBR Neutral, and §10 re-runs row 6 under it.*
 
 ## 6. Integrity of the pre-registration (H3 rev 5, verify O7; `px0/critique.md` W2)
 
@@ -941,3 +943,118 @@ What follows from it:
   before PX1a, so no shader, `.spv` or golden moves at PX0.
 - Every budget that touches `lit` reads AD-1's escape column (`plan/01-DECISIONS.md` §3.1; `plan/00-INDEX.md`
   cross-cutting rule (x)).
+
+## 10. Amendment, 2026-10-24: the default curve is Khronos PBR Neutral (render wave PXt, ruling 116)
+
+Ruling 116 (the orchestrator on the owner's delegation, 2026-10-24) makes Khronos PBR Neutral the
+shipping default tone curve (`boyko_render::light::Tonemapper::Neutral`, tonemap word 1), not AgX.
+AgX (word 3) and ACES Hill (word 0) stay selectable. PX0 decided `lit` under AgX (§2's `D`, and
+§5's `decided_curve` until this amendment), so §5's row 6 applies: the content arms and this model
+re-run under the new curve before the change merges.
+
+§§1–9 stand as written, with one exception: §5's `decided_curve` line now reads `"neutral"`. The
+D-P4 tripwire (`the_format_decision_curve_is_the_shipping_default`) compares that line with
+`Tonemapper::default()`. The pre-registered `px0-expected` block is unchanged (md5
+`6c308758191c262d249d98b6d6e04512` of the bytes between its markers, as in §6).
+
+**What was re-run.** The host content model of §2 and §4 (`crates/boyko_rhi_vulkan/tests/lit_format/`)
+with `D` = Khronos PBR Neutral, followed by the same OETF `pow(x, 1/2.2)`, ×255, unquantised.
+Everything else is §2's: the arms, their seeds, the region, the background codes, the placements
+`j ∈ [−8, 4]` and the 2-LSB rule. The curve is `post_f64::neutral_f64` (`lit_format::Curve::Neutral`),
+the independent `f64` transcription of the KhronosGroup/ToneMapping README.
+
+The device arms were not re-run. The probe keeps no `lit` images, only its per-arm numbers (§8), so
+a device re-run would need the probe on the device with a Neutral column.
+
+**How an arm is judged.**
+- **RGBA16F** (the format §9 decided): an arm passes only if it passes under every modelled class
+  of its path. For A3's store those are `N` and `Z`; for the blends, `N`, `Npre`, `Z` and `Zpre`.
+  The device classified RGBA16F's store as `Z` and both blends as `Unmodelled:1.000` (§7), so no
+  single class stands for the blends.
+- **B10G11R11** under `Z`, its device class on every path: reported for the record only. It is
+  not a decision input, because §9 rejected B10G11R11 on the device arms.
+
+**The gate and the command.** `b10g11r11_chain_model::the_decided_curve_keeps_the_decided_format`
+is a host test and is not ignored. It reads §5's `decided_curve`, maps it to the model's curve,
+asserts that every decisive RGBA16F arm passes, and prints the table below:
+
+```text
+cargo test -p boyko_rhi_vulkan --test b10g11r11_chain_model --locked the_decided_curve_keeps_the_decided_format -- --exact --nocapture
+```
+
+**Cross-check of the gate's arithmetic.** Run against the record before this amendment
+(`decided_curve = "agx"`), the same test reproduces §4's pinned AgX rows:
+
+| arm | value | the gate under AgX | §4 |
+|---|---|---|---|
+| `A1-S1 k64 grey bg0` | RGBA16F `Z` max\|Δ\| | 0.531 | 0.53 |
+| `A1-S1 k64 grey bg0` | B10G11R11 `Z` max\|Δ\| / chroma | 16.907 / 8.573 | 16.91 / 8.57 |
+| `A2 k16 grey0.05 a0.1 bg0` | RGBA16F worst class (`Zpre`) max\|Δ\| | 0.126 | 0.13 |
+| `A2 k16 grey0.05 a0.1 bg0` | B10G11R11 `Z` max\|Δ\| / chroma | 3.457 / 1.715 | 3.46 / 1.72 |
+
+Under AgX the gate counts 0 of 42 RGBA16F failures (worst 0.656 / 0.336 LSB) and 28 of 42
+B10G11R11 `Z` failures. §8 measured the same 28 of 42 on the device.
+
+**Result under Neutral.**
+- **RGBA16F:** 0 of 42 decisive arms fail under every modelled class. The worst max|Δ| is
+  1.163 LSB (`A1-S1 k64 grey bg0`) and the worst chroma 0.631 LSB (`A1-S1 k64 fire bg0.18`),
+  against a 2-LSB threshold. The margin is smaller than AgX's (0.656 / 0.336 LSB): Neutral is the
+  identity between its toe and its shoulder, while AgX's log encoding compresses the error there.
+- **B10G11R11 under `Z`** (record only): 42 of 42 fail, both A3 arms included (2.434 and 3.272 LSB
+  max|Δ|). Under AgX 28 of 42 failed, so the choice against B10G11R11 is firmer under Neutral.
+- **Row 6's verdict: a pass. `lit` stays RGBA16F.** This record calls for no late escape and no
+  re-bless.
+
+| arm | RGBA16F `Z`: Neutral max\|Δ\| (channel, placement) | Neutral chroma | RGBA16F, every modelled class: worst max\|Δ\| / chroma | verdict (Neutral, RGBA16F) | B10G11R11 `Z`: Neutral max\|Δ\| / chroma | B10G11R11 `Z` (record only) |
+|---|---|---|---|---|---|---|
+| A1-S1 k16 grey bg0 | 0.279 (r, j=-2) | 0.000 | 0.280 / 0.000 | pass | 9.823 / 5.251 | FAIL |
+| A1-S1 k16 fire bg0 | 0.280 (r, j=-2) | 0.154 | 0.280 / 0.154 | pass | 5.257 / 4.096 | FAIL |
+| A1-S1 k64 grey bg0 | 1.162 (r, j=-2) | 0.000 | 1.163 / 0.000 | pass | 37.242 / 20.078 | FAIL |
+| A1-S1 k64 fire bg0 | 1.160 (r, j=-2) | 0.595 | 1.161 / 0.595 | pass | 19.136 / 15.959 | FAIL |
+| A1-S2 k16 grey bg0 | 0.250 (r, j=-2) | 0.000 | 0.251 / 0.000 | pass | 8.915 / 4.875 | FAIL |
+| A1-S2 k16 fire bg0 | 0.253 (r, j=-2) | 0.153 | 0.254 / 0.154 | pass | 5.108 / 3.974 | FAIL |
+| A1-S2 k64 grey bg0 | 1.084 (r, j=-2) | 0.000 | 1.084 / 0.000 | pass | 32.450 / 15.889 | FAIL |
+| A1-S2 k64 fire bg0 | 1.087 (r, j=-2) | 0.592 | 1.087 / 0.592 | pass | 17.781 / 14.363 | FAIL |
+| A2 k16 grey0.05 a0.1 bg0 | 0.237 (r, j=4) | 0.000 | 0.271 / 0.000 | pass | 7.419 / 3.647 | FAIL |
+| A2 k16 grey0.2 a0.1 bg0 | 0.238 (r, j=2) | 0.000 | 0.273 / 0.000 | pass | 7.454 / 4.159 | FAIL |
+| A2 k16 grey0.5 a0.1 bg0 | 0.189 (r, j=1) | 0.000 | 0.219 / 0.000 | pass | 6.946 / 3.767 | FAIL |
+| A2 k16 grey0.05 a0.3 bg0 | 0.091 (r, j=4) | 0.000 | 0.120 / 0.000 | pass | 3.237 / 1.762 | FAIL |
+| A2 k16 grey0.2 a0.3 bg0 | 0.091 (r, j=2) | 0.000 | 0.120 / 0.000 | pass | 3.240 / 1.785 | FAIL |
+| A2 k16 grey0.5 a0.3 bg0 | 0.105 (r, j=0) | 0.000 | 0.135 / 0.000 | pass | 3.173 / 1.941 | FAIL |
+| A2 k64 grey0.05 a0.1 bg0 | 0.292 (r, j=4) | 0.000 | 0.326 / 0.000 | pass | 10.491 / 5.564 | FAIL |
+| A2 k64 grey0.2 a0.1 bg0 | 0.290 (r, j=2) | 0.000 | 0.323 / 0.000 | pass | 10.406 / 5.602 | FAIL |
+| A2 k64 grey0.5 a0.1 bg0 | 0.313 (r, j=0) | 0.000 | 0.343 / 0.000 | pass | 7.740 / 4.441 | FAIL |
+| A2 k64 grey0.05 a0.3 bg0 | 0.091 (r, j=4) | 0.000 | 0.122 / 0.000 | pass | 3.268 / 1.769 | FAIL |
+| A2 k64 grey0.2 a0.3 bg0 | 0.092 (r, j=2) | 0.000 | 0.121 / 0.000 | pass | 3.261 / 1.791 | FAIL |
+| A2 k64 grey0.5 a0.3 bg0 | 0.107 (r, j=0) | 0.000 | 0.138 / 0.000 | pass | 3.267 / 2.011 | FAIL |
+| A3 k4 grey bg0 | 0.071 (r, j=3) | 0.000 | 0.071 / 0.000 | pass | 2.434 / 1.422 | FAIL |
+| A1-S1 k16 grey bg0.18 | 0.253 (r, j=-3) | 0.000 | 0.253 / 0.000 | pass | 9.792 / 5.521 | FAIL |
+| A1-S1 k16 fire bg0.18 | 0.249 (r, j=-2) | 0.163 | 0.250 / 0.163 | pass | 6.371 / 4.690 | FAIL |
+| A1-S1 k64 grey bg0.18 | 0.986 (r, j=-2) | 0.000 | 0.986 / 0.000 | pass | 39.790 / 22.027 | FAIL |
+| A1-S1 k64 fire bg0.18 | 0.988 (r, j=-2) | 0.631 | 0.988 / 0.631 | pass | 30.538 / 22.773 | FAIL |
+| A1-S2 k16 grey bg0.18 | 0.255 (r, j=-3) | 0.000 | 0.256 / 0.000 | pass | 9.038 / 5.079 | FAIL |
+| A1-S2 k16 fire bg0.18 | 0.247 (r, j=-3) | 0.159 | 0.249 / 0.159 | pass | 6.344 / 4.672 | FAIL |
+| A1-S2 k64 grey bg0.18 | 0.976 (r, j=-3) | 0.000 | 0.976 / 0.000 | pass | 33.903 / 16.783 | FAIL |
+| A1-S2 k64 fire bg0.18 | 0.979 (r, j=-2) | 0.623 | 0.979 / 0.624 | pass | 22.110 / 16.778 | FAIL |
+| A2 k16 grey0.05 a0.1 bg0.18 | 0.366 (r, j=3) | 0.000 | 0.385 / 0.000 | pass | 11.645 / 6.926 | FAIL |
+| A2 k16 grey0.2 a0.1 bg0.18 | 0.248 (r, j=2) | 0.000 | 0.276 / 0.000 | pass | 8.597 / 4.575 | FAIL |
+| A2 k16 grey0.5 a0.1 bg0.18 | 0.187 (r, j=0) | 0.000 | 0.214 / 0.000 | pass | 6.729 / 4.037 | FAIL |
+| A2 k16 grey0.05 a0.3 bg0.18 | 0.093 (r, j=4) | 0.000 | 0.123 / 0.000 | pass | 3.318 / 1.802 | FAIL |
+| A2 k16 grey0.2 a0.3 bg0.18 | 0.091 (r, j=2) | 0.000 | 0.122 / 0.000 | pass | 3.264 / 1.798 | FAIL |
+| A2 k16 grey0.5 a0.3 bg0.18 | 0.104 (r, j=0) | 0.000 | 0.136 / 0.000 | pass | 3.194 / 1.958 | FAIL |
+| A2 k64 grey0.05 a0.1 bg0.18 | 0.288 (r, j=4) | 0.000 | 0.321 / 0.000 | pass | 10.406 / 5.507 | FAIL |
+| A2 k64 grey0.2 a0.1 bg0.18 | 0.291 (r, j=2) | 0.000 | 0.325 / 0.000 | pass | 10.454 / 5.616 | FAIL |
+| A2 k64 grey0.5 a0.1 bg0.18 | 0.315 (r, j=0) | 0.000 | 0.347 / 0.000 | pass | 7.763 / 4.443 | FAIL |
+| A2 k64 grey0.05 a0.3 bg0.18 | 0.092 (r, j=4) | 0.000 | 0.123 / 0.000 | pass | 3.281 / 1.774 | FAIL |
+| A2 k64 grey0.2 a0.3 bg0.18 | 0.092 (r, j=2) | 0.000 | 0.122 / 0.000 | pass | 3.314 / 1.823 | FAIL |
+| A2 k64 grey0.5 a0.3 bg0.18 | 0.108 (r, j=0) | 0.000 | 0.139 / 0.000 | pass | 3.247 / 1.958 | FAIL |
+| A3 k4 grey bg0.18 | 0.088 (r, j=2) | 0.000 | 0.088 / 0.000 | pass | 3.272 / 1.845 | FAIL |
+
+**The tripwire, red before the flip.** The batch ran on render wave PXt's C8b tree with
+`Tonemapper`'s `#[default]` still on AgX. The logs are `D:/tmp/render-orch/pxt/neutral/logs/red_chain_*.log`.
+- Against this record (`decided_curve = "neutral"`): `the_format_decision_curve_is_the_shipping_default`
+  FAILED with `left: "agx"`, `right: "neutral"`.
+- Against the record before this amendment (`"agx"`): the tripwire passed, and the re-aimed parse test
+  `the_record_names_neutral_as_its_decided_curve` FAILED with `left: Some("agx")`, `right: Some("neutral")`.
+
+Both pass on the commit that moves `#[default]` to `Neutral` (render wave PXt C8b).

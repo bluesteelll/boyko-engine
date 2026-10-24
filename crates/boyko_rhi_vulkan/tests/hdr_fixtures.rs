@@ -22,8 +22,9 @@
 //!
 //! **Render wave PXt.** [`LIT_BACKGROUND_SCENE`] is PX1a's inversion through ACES Hill, and stays:
 //! re-inverting it through AgX would move `lit` on every background pixel at the flip
-//! (`pxt/cut.md` D-F4). Under the AgX default the fallback background displays brighter;
-//! `the_fallback_background_under_the_default_curve` prints its codes for the review legend.
+//! (`pxt/cut.md` D-F4). Under any other default curve (Khronos PBR Neutral since ruling 116) the
+//! fallback background displays other codes; `the_fallback_background_under_the_default_curve`
+//! prints them for the review legend.
 
 use boyko_rhi_vulkan::present::LIT_BACKGROUND_SCENE;
 use boyko_shaderdsl::cf::{EvalCf, HostTex2};

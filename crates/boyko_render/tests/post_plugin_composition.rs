@@ -120,8 +120,11 @@ fn the_policy_step_cuts_on_a_camera_change_and_on_a_request_and_carries_the_rati
     let f9 = f8.next(&cfg, None, false);
     assert_eq!(f9.cut, 0, "no camera, steady");
 
-    let neutral = LightingConfig { tonemapper: Tonemapper::Neutral, ..cfg };
-    assert_eq!(f9.next(&neutral, None, false).tonemapper, Tonemapper::Neutral as u32);
+    // A curve other than the default's (render wave PXt, ruling 116: the default is Khronos PBR
+    // Neutral), so a step that kept the default's word instead of reading the config's is red.
+    let jodie = LightingConfig { tonemapper: Tonemapper::ReinhardJodie, ..cfg };
+    assert_ne!(jodie.tonemapper, cfg.tonemapper, "PREMISE: the config names a curve other than the default's");
+    assert_eq!(f9.next(&jodie, None, false).tonemapper, Tonemapper::ReinhardJodie as u32);
 }
 
 // ---- 6: the composed world -------------------------------------------------------------------

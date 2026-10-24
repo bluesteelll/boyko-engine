@@ -329,23 +329,26 @@ pub fn decode_image(img: &[[u32; 3]], target: Target) -> Vec<[f64; 3]> {
 /// The curve the metric reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Curve {
-    /// AgX (the shipping default PXt makes it) — decisive.
+    /// AgX — the curve PX0 decided under (the pre-registered table's verdict column).
     Agx,
     /// AgX with Filament's Punchy look — reported, never decisive.
     AgxPunchy,
     /// Hill ACES (`post_f64::aces_f64`) — reported beside AgX (K9 reads it).
     AcesHill,
+    /// Khronos PBR Neutral (`post_f64::neutral_f64`) — the shipping default since render wave PXt's
+    /// ruling 116; the record's row 6 re-runs the content arms under it.
+    Neutral,
 }
 
 impl Curve {
     /// The display value of a linear colour: the curve, then the OETF, ×255, unquantised.
     pub fn display(self, c: [f64; 3]) -> [f64; 3] {
+        let exact = |v| post_f64::Tracked { v, b: 0.0 };
         let t = match self {
             Curve::Agx => agx_f64::agx_f64(c, AgxLook::Base),
             Curve::AgxPunchy => agx_f64::agx_f64(c, AgxLook::Punchy),
-            Curve::AcesHill => {
-                post_f64::aces_f64(c.map(|v| post_f64::Tracked { v, b: 0.0 })).map(|t| t.v)
-            }
+            Curve::AcesHill => post_f64::aces_f64(c.map(exact)).map(|t| t.v),
+            Curve::Neutral => post_f64::neutral_f64(c.map(exact)).map(|t| t.v),
         };
         t.map(|v| 255.0 * agx_f64::oetf_f64(v))
     }
@@ -356,6 +359,18 @@ impl Curve {
             Curve::Agx => "AgX",
             Curve::AgxPunchy => "AgX-Punchy",
             Curve::AcesHill => "ACES-Hill",
+            Curve::Neutral => "Neutral",
+        }
+    }
+
+    /// The curve a record's `decided_curve` value names (`Tonemapper`'s `Debug` name, lower case),
+    /// or `None` for a name this model has no curve for.
+    pub fn from_decided(name: &str) -> Option<Curve> {
+        match name {
+            "agx" => Some(Curve::Agx),
+            "aces" => Some(Curve::AcesHill),
+            "neutral" => Some(Curve::Neutral),
+            _ => None,
         }
     }
 }

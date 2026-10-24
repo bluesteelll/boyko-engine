@@ -93,7 +93,7 @@ const ENV_MODE: &str = "BOYKO_PX1A_TAA";
 /// Render wave PXt (`pxt/cut.md` D-G2): the curve this binary's display oracle ([`display_of`]) and
 /// thresholds ([`HDR_GAP`], [`HDR_EDGE_MIN`]) are calibrated under. Its subject is TAA accumulation,
 /// not the look, so the worker, [`runner_post_words`] and [`display_of`] all name it instead of
-/// reading the engine default (AgX since PXt).
+/// reading the engine default (Khronos PBR Neutral since PXt's ruling 116).
 const CURVE: Tonemapper = Tonemapper::Aces;
 /// Where the cut worker writes its per-frame `TaaState` log.
 const ENV_LOG: &str = "BOYKO_PX1A_TAA_LOG";
