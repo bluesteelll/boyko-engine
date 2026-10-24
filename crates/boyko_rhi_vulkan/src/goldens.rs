@@ -1251,7 +1251,10 @@ pub(crate) fn host_m2_surface_hit_at(
 pub(crate) fn edits_field(edits: &[SdfEdit]) -> SdfEditField {
     let mut field = SdfEditField::new();
     for e in edits {
-        debug_assert!(field.push(*e), "golden M2 scene must fit MAX_SDF_EDITS");
+        // The push stays outside the assert: inside a `debug_assert!` it is compiled out of a
+        // release build, which left this oracle's field empty (every M2 golden then saw no edits).
+        let pushed = field.push(*e);
+        assert!(pushed, "invariant: golden M2 scene must fit MAX_SDF_EDITS");
     }
     field.bump_gen();
     field
