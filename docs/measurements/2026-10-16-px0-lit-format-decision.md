@@ -952,9 +952,10 @@ AgX (word 3) and ACES Hill (word 0) stay selectable. PX0 decided `lit` under AgX
 §5's `decided_curve` until this amendment), so §5's row 6 applies: the content arms and this model
 re-run under the new curve before the change merges.
 
-§§1–9 stand as written, with one exception: §5's `decided_curve` line now reads `"neutral"`. The
-D-P4 tripwire (`the_format_decision_curve_is_the_shipping_default`) compares that line with
-`Tonemapper::default()`. The pre-registered `px0-expected` block is unchanged (md5
+§§1–9 stand as written, with two exceptions: §5's `decided_curve` line now reads `"neutral"`, with
+an amendment note under it, and §9's item 6 points here (*(amended by §10, ruling 116)*). The D-P4
+tripwire (`the_format_decision_curve_is_the_shipping_default`) compares the `decided_curve` line
+with `Tonemapper::default()`. The pre-registered `px0-expected` block is unchanged (md5
 `6c308758191c262d249d98b6d6e04512` of the bytes between its markers, as in §6).
 
 **What was re-run.** The host content model of §2 and §4 (`crates/boyko_rhi_vulkan/tests/lit_format/`)
