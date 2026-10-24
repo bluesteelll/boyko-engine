@@ -5162,6 +5162,43 @@ mod required_format_tests {
         assert_eq!(missing_required_format(device_with(ALL_LIT_BITS & !two)), Some((LIT_ROW, two)));
     }
 
+    /// `VK_FORMAT_R16G16_UNORM` (vulkan_core.h) — `gNormal`'s format since IBL1 P1.
+    const RG16_UNORM: i32 = 77;
+    const GNORMAL_ROW: &str = "gNormal: R16G16_UNORM";
+    /// The two capabilities the engine uses on `gNormal`: the composite's store and the mesh
+    /// raster's MRT@1.
+    const ALL_GNORMAL_BITS: VkFlags = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+
+    /// A fake device holding `rgba16f_bits` on RGBA16F, `rg16_bits` on RG16_UNORM and nothing on any
+    /// other format.
+    fn device_with_rows(rgba16f_bits: VkFlags, rg16_bits: VkFlags) -> impl Fn(i32) -> VkFlags {
+        move |vk_format| match vk_format {
+            RGBA16F => rgba16f_bits,
+            RG16_UNORM => rg16_bits,
+            _ => 0,
+        }
+    }
+
+    /// IBL1 P1 T-N5: a device without `R16G16_UNORM` STORAGE or COLOR_ATTACHMENT under OPTIMAL
+    /// tiling is refused by name, with exactly the missing bits; a device with both boots. Both bits
+    /// are probed because the spec's mandatory table does not promise the colour attachment.
+    #[test]
+    fn gbuffer_normal_format_row_is_required() {
+        for bit in [VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT] {
+            assert_eq!(
+                missing_required_format(device_with_rows(ALL_LIT_BITS, ALL_GNORMAL_BITS & !bit)),
+                Some((GNORMAL_ROW, bit)),
+                "a device without bit {bit:#x} on R16G16_UNORM booted"
+            );
+        }
+        assert_eq!(
+            missing_required_format(device_with_rows(ALL_LIT_BITS, 0)),
+            Some((GNORMAL_ROW, ALL_GNORMAL_BITS)),
+            "a device with no R16G16_UNORM optimal-tiling support booted"
+        );
+        assert_eq!(missing_required_format(device_with_rows(ALL_LIT_BITS, ALL_GNORMAL_BITS)), None);
+    }
+
     /// The table, pinned to the spec's `VkFormat` / `VkFormatFeatureFlagBits` values rather than to
     /// the constants that spell them.
     #[test]

@@ -37,6 +37,12 @@
 //!    (`VUID-vkCmdDraw-dynamicRenderingUnusedAttachments-08910`) that only a validation-ON worker on
 //!    that exact configuration would see. An unclassified pipeline is RED — a new pipeline is
 //!    classified in the commit that adds it, so the class cannot grow a seventh unchecked site.
+//!    **IBL1 P1 (critique W4) adds the G-buffer MRT class:** every mesh-raster pipeline drawing
+//!    into the albedo / normal / material MRTs spells its `color_formats` through
+//!    `GBUFFER_MRT_COLOR_FORMATS` (or `gbuffer_mrt_color_formats_with(..)` for a 4th slot), the
+//!    array the rings are created from, so a pipeline slot left at another format than its
+//!    attachment (the `gNormal` RG16 switch) reds here instead of only on a validation-ON
+//!    Deferred × TEXTURED frame.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -443,14 +449,17 @@ enum Target {
     Lit,
     /// `lit_native`, the SSAA downsample's output in `lit`'s format — `[LIT_FORMAT]` too.
     LitNative,
+    /// The mesh-raster G-buffer MRTs (IBL1 P1): `color_formats` is `GBUFFER_MRT_COLOR_FORMATS`, or
+    /// `gbuffer_mrt_color_formats_with(..)` when the pipeline adds a 4th slot (stated).
+    GbufferMrt(&'static str),
     /// Another attachment set (stated): not this census's class.
     Other(&'static str),
 }
 
 /// Every production `GraphicsPipelineDesc`, by `(path suffix, fragment-module identifier)`.
 const PIPELINE_TARGETS: &[(&str, &str, Target)] = &[
-    ("boyko_app/src/gpu_scene/mod.rs", "fs", Target::Other("the G-buffer raster's three MRTs (albedo / normal / material)")),
-    ("boyko_app/src/gpu_scene/mod.rs", "pm_fs", Target::Other("the per-instance-material G-buffer raster's three MRTs")),
+    ("boyko_app/src/gpu_scene/mod.rs", "fs", Target::GbufferMrt("the G-buffer raster's three MRTs (albedo / normal / material)")),
+    ("boyko_app/src/gpu_scene/mod.rs", "pm_fs", Target::GbufferMrt("the per-instance-material G-buffer raster's three MRTs")),
     ("boyko_app/src/gpu_scene/mod.rs", "sample_fs", Target::Other("the present blit: the swapchain")),
     ("boyko_app/src/gpu_scene/mod.rs", "fxaa_fs", Target::Other("FXAA: `aa_out` (display-referred RGBA8)")),
     ("boyko_app/src/gpu_scene/mod.rs", "smaa_edge_fs", Target::Other("SMAA edges: `smaa_edges` (RG8)")),
@@ -461,11 +470,11 @@ const PIPELINE_TARGETS: &[(&str, &str, Target)] = &[
     ("boyko_app/src/gpu_scene/mod.rs", "sky_fs", Target::Lit),
     ("boyko_app/src/gpu_scene/mod.rs", "prepass_fs", Target::Other("the ForwardPlus depth prepass: depth only")),
     ("boyko_app/src/gpu_scene/mod.rs", "forward_plus_fs", Target::Lit),
-    ("boyko_app/src/gpu_scene/mod.rs", "mv_fs", Target::Other("the motion-vector G-buffer raster: the MRTs + the MV target")),
-    ("boyko_app/src/gpu_scene/mod.rs", "mvpm_fs", Target::Other("the per-instance-material MV G-buffer raster")),
+    ("boyko_app/src/gpu_scene/mod.rs", "mv_fs", Target::GbufferMrt("the motion-vector G-buffer raster: the MRTs + the MV target")),
+    ("boyko_app/src/gpu_scene/mod.rs", "mvpm_fs", Target::GbufferMrt("the per-instance-material MV G-buffer raster")),
     ("boyko_app/src/gpu_scene/mod.rs", "vb_raster_fs", Target::Other("the visibility-buffer raster: `vb_id` (RG32UI)")),
     ("boyko_app/src/gpu_scene/mod.rs", "vb_sky_fs", Target::Lit),
-    ("boyko_app/src/gpu_scene/mod.rs", "tex_fs", Target::Other("the textured G-buffer raster's MRTs")),
+    ("boyko_app/src/gpu_scene/mod.rs", "tex_fs", Target::GbufferMrt("the textured G-buffer raster's MRTs")),
     ("boyko_app/src/gpu_scene/csm.rs", "depth_fs", Target::Other("the CSM cascades: depth only")),
     ("boyko_app/src/gpu_scene/csm.rs", "point_depth_fs", Target::Other("the punctual atlas: depth only")),
     ("boyko_app/src/gpu_scene/sdf_depth_merge.rs", "fs", Target::Other("the SDF depth merge: depth only")),
@@ -522,10 +531,33 @@ fn pipeline_sites(file: &str, text: &str) -> Vec<PipelineSite> {
             .unwrap_or_default();
         let color_formats = body
             .find("color_formats:")
-            .and_then(|i| body[i..].find('[').map(|j| i + j))
-            .map(|lb| {
-                let rb = matching(body.as_bytes(), lb, b'[', b']');
-                body[lb + 1..rb - 1].split(',').map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()).collect()
+            .map(|i| {
+                let value = body[i + "color_formats:".len()..].trim_start().trim_start_matches('&');
+                if value.starts_with('[') {
+                    let lb = body.len() - value.len();
+                    let rb = matching(body.as_bytes(), lb, b'[', b']');
+                    body[lb + 1..rb - 1].split(',').map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()).collect()
+                } else {
+                    // A named array or a call (`GBUFFER_MRT_COLOR_FORMATS`, `gbuffer_mrt_color_formats_with(..)`):
+                    // the expression up to the field's top-level comma, as one entry.
+                    let mut depth = 0usize;
+                    let end = value
+                        .char_indices()
+                        .find(|&(_, c)| match c {
+                            '(' | '[' => {
+                                depth += 1;
+                                false
+                            }
+                            ')' | ']' => {
+                                depth = depth.saturating_sub(1);
+                                false
+                            }
+                            ',' | '}' => depth == 0,
+                            _ => false,
+                        })
+                        .map_or(value.len(), |(k, _)| k);
+                    vec![value[..end].split_whitespace().collect::<String>()]
+                }
             })
             .unwrap_or_default();
         out.push(PipelineSite { file: file.to_owned(), line: clean[..start].lines().count() + 1, fragment, color_formats });
@@ -551,6 +583,18 @@ fn census(sites: &[PipelineSite]) -> Result<usize, Vec<String>> {
                 if site.color_formats != ["LIT_FORMAT"] {
                     breaches.push(format!(
                         "{}:{} — `{}` draws into lit / lit_native but declares color_formats {:?}, not [LIT_FORMAT]",
+                        site.file, site.line, site.fragment, site.color_formats
+                    ));
+                }
+            }
+            Some(&(_, _, Target::GbufferMrt(_))) => {
+                let named = match site.color_formats.as_slice() {
+                    [one] => one == "GBUFFER_MRT_COLOR_FORMATS" || one.starts_with("gbuffer_mrt_color_formats_with("),
+                    _ => false,
+                };
+                if !named {
+                    breaches.push(format!(
+                        "{}:{} — `{}` draws into the G-buffer MRTs but declares color_formats {:?}, not GBUFFER_MRT_COLOR_FORMATS / gbuffer_mrt_color_formats_with(..)",
                         site.file, site.line, site.fragment, site.color_formats
                     ));
                 }
@@ -589,15 +633,22 @@ fn boot() {
     let a = GraphicsPipelineDesc { fragment_module: &forward_fs, color_formats: &[RASTER_COLOR_FORMAT], depth_format: None };
     let b = GraphicsPipelineDesc { fragment_module: &ssaa_fs, color_formats: &[LIT_FORMAT] };
     let c = GraphicsPipelineDesc { fragment_module: &brand_new_fs, color_formats: &[LIT_FORMAT] };
+    let d = GraphicsPipelineDesc { fragment_module: &fs, color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT] };
+    let e = GraphicsPipelineDesc { fragment_module: &mv_fs, color_formats: &gbuffer_mrt_color_formats_with(Format::R16G16Sfloat), depth_format: None };
+    let f = GraphicsPipelineDesc { fragment_module: &pm_fs, color_formats: &GBUFFER_MRT_COLOR_FORMATS, depth_format: None };
 }
 "#;
     let sites = pipeline_sites("boyko_app/src/gpu_scene/mod.rs", fixture);
-    assert_eq!(sites.len(), 3, "{sites:?}");
+    assert_eq!(sites.len(), 6, "{sites:?}");
+    assert_eq!(sites[4].color_formats, ["gbuffer_mrt_color_formats_with(Format::R16G16Sfloat)"]);
+    assert_eq!(sites[5].color_formats, ["GBUFFER_MRT_COLOR_FORMATS"]);
     assert_eq!(sites[0].color_formats, ["RASTER_COLOR_FORMAT"]);
     let breaches = census(&sites).expect_err("the fixture must red");
     let joined = breaches.join("\n");
     assert!(joined.contains("`forward_fs` draws into lit"), "a lit site naming another format: {joined}");
     assert!(!joined.contains("`ssaa_fs` draws"), "a lit_native site naming LIT_FORMAT passes: {joined}");
     assert!(joined.contains("unclassified graphics pipeline (fragment module `brand_new_fs`)"), "{joined}");
+    assert!(joined.contains("`fs` draws into the G-buffer MRTs"), "an MRT site spelling its own formats: {joined}");
+    assert!(!joined.contains("`mv_fs` draws") && !joined.contains("`pm_fs` draws"), "the named MRT sites pass: {joined}");
     assert!(joined.contains("(boyko_app/src/gpu_scene/mod.rs, sky_fs) names no pipeline"), "a stale row: {joined}");
 }

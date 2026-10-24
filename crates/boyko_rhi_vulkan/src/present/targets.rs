@@ -2285,6 +2285,29 @@ impl TargetsProfile {
 /// stretched; presented 1:1 in the swapchain's top-left like [`SampledComposite`].
 const GBUFFER_FORMAT: Format = Format::R8G8B8A8Unorm;
 
+/// IBL1 P1: the Deferred G-buffer NORMAL image's format (`gNormal`, MRT@1 of the mesh raster, the
+/// composite's store target, read by the resolve, the Deferred SSAO and the hwrt à-trous). The ONE
+/// Rust spelling: the normal ring, [`GBUFFER_MRT_COLOR_FORMATS`] and every harness read it.
+pub const GNORMAL_FORMAT: Format = GBUFFER_FORMAT;
+
+/// IBL1 P1: the VisibilityBuffer split's thin-aux normal (`thin_normal`, `vb_geo`'s `gThinNormal`)
+/// format. A different image from [`GNORMAL_FORMAT`]: the shaders that read it declare
+/// `gThinNormal` with this format, never `gNormal`.
+pub const VB_THIN_NORMAL_FORMAT: Format = GBUFFER_FORMAT;
+
+/// IBL1 P1: the mesh-raster MRT colour formats, slot for slot — `[gAlbedo, gNormal, gMaterial]`. The
+/// ring creates and every mesh-MRT pipeline's `color_formats` read this one array, so an attachment
+/// and its pipeline slot cannot disagree.
+pub const GBUFFER_MRT_COLOR_FORMATS: [Format; 3] = [GBUFFER_FORMAT, GNORMAL_FORMAT, GBUFFER_FORMAT];
+
+/// [`GBUFFER_MRT_COLOR_FORMATS`] plus a 4th MRT slot (`motion_vec` on the MV variants, `gPbr` on the
+/// TEXTURED one).
+#[must_use]
+pub const fn gbuffer_mrt_color_formats_with(extra: Format) -> [Format; 4] {
+    let [albedo, normal, material] = GBUFFER_MRT_COLOR_FORMATS;
+    [albedo, normal, material, extra]
+}
+
 /// Render wave PX1a (AD-1): the HDR scene colour's format — RGBA16F, PX0's decision
 /// (`docs/measurements/2026-10-16-px0-lit-format-decision.md`, row 2: AD-1's escape; the RTX 3060
 /// rounds `B10G11R11` toward zero on every path). The ONE Rust spelling: the device's REQUIRED
