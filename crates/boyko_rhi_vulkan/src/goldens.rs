@@ -2870,10 +2870,12 @@ pub fn golden_marcher_attributes(
 /// TANGENT PLANE (NO `sin`/`cos`/`acos`, NO `fract` — bit-comparable to the GPU):
 ///   `delta   = P' - P`
 ///   `falloff = clamp01(1 - dot(delta,delta) / (R*R))`   (the squared-distance range gate)
-///   `elev    = max(dot(delta, N) / max(length(delta), SSAO_EPS), 0.0)`
+///   `elev    = max(dot(delta, N) / max(length(delta), SSAO_EPS) - SSAO_ANGLE_BIAS, 0.0)`
 ///   `hc      = max(hc, elev * falloff)`
-/// A flat surface (`delta ⊥ N` → `elev = 0`) raises no horizon (AO = 1); a crevice
-/// (neighbours rising above the tangent → `dot(delta,N) > 0`) does (AO < 1). `dot` is INLINE
+/// A flat surface (`delta ⊥ N` → `elev = 0`) raises no horizon (AO = 1), and neither does a
+/// same-facet tap of a smooth-shaded mesh, whose false elevation stays below the HBAO+ angle
+/// bias (`boyko_shaderdsl::ssao::SSAO_ANGLE_BIAS`, read from the eDSL — one source for the
+/// value); a crevice (neighbours rising above the tangent → `dot(delta,N) > 0`) does (AO < 1). `dot` is INLINE
 /// component-reads + mul/add; `length = sqrt(dot(delta,delta))`.
 ///
 /// Render P7-Q2: `params` carries the active variant's `radius`/`eps` (the only two scalars this tap
@@ -2893,11 +2895,12 @@ pub fn ssao_horizon_step(hc: f32, p: [f32; 3], pp: [f32; 3], n: [f32; 3], params
     let falloff = (1.0 - d2 / r2).clamp(0.0, 1.0);
     // dot(delta, N) (INLINE) — the unnormalized elevation against the center surface normal.
     let dn = delta[0] * n[0] + delta[1] * n[1] + delta[2] * n[2];
-    // float elev = max(dot(delta, N) / max(sqrt(d2), SSAO_EPS), 0.0);  the sine of the
-    // elevation above the tangent, clamped non-negative (neighbours below the tangent do not
-    // occlude). `length(delta) = sqrt(d2)` reuses the `d2` value so the sqrt operand is
-    // bit-identical to the GPU.
-    let elev = (dn / d2.sqrt().max(params.eps)).max(0.0);
+    // float elev = max(dot(delta, N) / max(sqrt(d2), SSAO_EPS) - SSAO_ANGLE_BIAS, 0.0);  the
+    // sine of the elevation above the tangent less the HBAO+ angle bias, clamped non-negative
+    // (neighbours below, or less than the bias above, the tangent do not occlude).
+    // `length(delta) = sqrt(d2)` reuses the `d2` value so the sqrt operand is bit-identical to
+    // the GPU.
+    let elev = (dn / d2.sqrt().max(params.eps) - boyko_shaderdsl::ssao::SSAO_ANGLE_BIAS).max(0.0);
     // hc = max(hc, elev * falloff);
     hc.max(elev * falloff)
 }
@@ -3152,7 +3155,11 @@ pub fn golden_ssao_attributes(
     // The final occlusion complement (the eDSL `ssao_estimate` tail): the mean per-slice
     // horizon cosine scaled by strength, complemented, then squared (the integer self-mul). The
     // `occ / N` divisor reads `params.slices as f32` (the `SSAO_SLICES_F` the variant bakes).
-    let ao = (1.0 - params.strength * occ / params.slices as f32).clamp(0.0, 1.0);
+    // `SSAO_ANGLE_SCALE` (`1 / (1 - SSAO_ANGLE_BIAS)`, read from the eDSL) undoes the per-tap
+    // angle bias for a fully-raised horizon; it is left-associated with the strength, the SAME
+    // `(S * SC) * occ / N` order the shader and the eDSL spell.
+    let ao = (1.0 - params.strength * boyko_shaderdsl::ssao::SSAO_ANGLE_SCALE * occ / params.slices as f32)
+        .clamp(0.0, 1.0);
     ao * ao
 }
 
@@ -3162,7 +3169,7 @@ pub fn golden_ssao_attributes(
 /// `boyko_shaderdsl::ssao::ssao_estimate_body_params::<EvalCf>` — the SAME generic body
 /// `emit_hlsl_ssao` traces into the GENERATED span of `sdf_ssao.comp.hlsl` — instantiated over
 /// `f32`. The eDSL owns the slice loop, the two half-slice step loops, the per-tap horizon
-/// step, the `1 - strength*occ/slices` complement, `clamp01`, and the `ao*ao` square; `params`
+/// step, the `1 - strength*SSAO_ANGLE_SCALE*occ/slices` complement, `clamp01`, and the `ao*ao` square; `params`
 /// selects the variant exactly as the hand mirror's `params` does.
 ///
 /// What remains hand-written here is the SEAM the shader also writes by hand (its `main()`

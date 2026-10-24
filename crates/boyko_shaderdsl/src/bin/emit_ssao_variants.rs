@@ -5,8 +5,8 @@
 //! variant by binding its pipeline, NEVER a dynamic loop bound).
 //!
 //! The variants are single-sourced from the committed base `sdf_ssao.comp.hlsl`: this bin
-//! reads the base, swaps ONLY its `static const SSAO_*` tuning header (the 6 lines from
-//! `SSAO_RADIUS` through `SSAO_EPS`) for the per-preset header
+//! reads the base, swaps ONLY its `static const SSAO_*` tuning header (the 8 lines from
+//! `SSAO_RADIUS` through `SSAO_ANGLE_SCALE`) for the per-preset header
 //! ([`boyko_shaderdsl::ssao::ssao_glue_header`]), and writes the variant next to the base.
 //! The eDSL-GENERATED horizon-step span and ALL hand-written glue (the forward neighbour
 //! reconstruct, the rotation/step-phase dither, the `occ → ao` fold) are carried VERBATIM
