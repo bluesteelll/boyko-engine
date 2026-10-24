@@ -99,7 +99,8 @@ use boyko_rhi_vulkan::goldens::{
     LIT_TEXEL_BYTES, golden_display_packed, lit_matches, lit_texel_rgb,
     // OPEN-ITEMS 15: the G-buffer seam oracle (the device's own bytes, at its own hit point).
     ByteVerdict, DeviceGbufferTexel, LIT_ROUNDING, LIT_STORE_PATH, LIT_TARGET, MarcherArm,
-    MarcherPrequant, ResolveFloor, ResolveSite, attribute_byte_verdict, fragile_bit, golden_marcher_attributes_at,
+    MarcherPrequant, ResolveFloor, ResolveSite, GNORMAL_OCT_MAX, attribute_code_verdict, fragile_bit,
+    golden_marcher_attributes_at,
     host_soft_shadow_ranged, lit_store_excess, oct_decode, resolve_error_floor, W_CONV,
     // OPEN-ITEMS 16, triage r1 W1: the host M2 ray march and its start-point witness count.
     HostM2Atlas, M2EvalCounts, golden_primary_hit_brick_m2,
@@ -108,7 +109,9 @@ use boyko_rhi_vulkan::brick_atlas::{BrickAtlas, BrickClipmap};
 use boyko_rhi_vulkan::ddgi::DdgiAtlas;
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::memory::BoundBuffer;
-use boyko_rhi_vulkan::present::{AtrousStepRole, LIT_FORMAT, MAX_SSAO_ATROUS_LEVELS, ssao_atrous_step};
+use boyko_rhi_vulkan::present::{
+    AtrousStepRole, GBUFFER_MRT_COLOR_FORMATS, LIT_FORMAT, MAX_SSAO_ATROUS_LEVELS, ssao_atrous_step,
+};
 use boyko_shaderdsl::post::TONEMAP_ACES;
 use boyko_rhi_vulkan::rhi_impl::{
     ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanQueryPool, VulkanQueue, VulkanSampler,
@@ -385,9 +388,9 @@ const CHANNEL_TOL: i32 = 2;
 /// decoded as "no mesh"). Must equal [`MESH_DEPTH_CLEAR`].
 const DEPTH_CLEAR: f32 = MESH_DEPTH_CLEAR;
 
-/// The G-buffer color format (albedo / normal / material): `R8G8B8A8_UNORM`, the
-/// STORAGE-image store target whose support the [`DeviceCaps`] boot fail-fast asserts.
-const GBUFFER_FORMAT: Format = Format::R8G8B8A8Unorm;
+// The G-buffer formats are the recorder's own: `GBUFFER_MRT_COLOR_FORMATS` = [albedo, normal,
+// material] (IBL1 P1: the normal is `GNORMAL_FORMAT`, R16G16_UNORM), the STORAGE / colour-attachment
+// targets whose support the boot checks.
 
 const VERTEX_STRIDE: u32 = core::mem::size_of::<Vertex>() as u32;
 const _: () = assert!(VERTEX_STRIDE == 40, "Vertex must be tightly packed at 40 bytes");
@@ -458,7 +461,7 @@ static MRT_VS_SPV: SpirvBlob<4480> = SpirvBlob(*include_bytes!(concat!(
 /// writes albedo/normal/material as 3 MRT in the marcher's exact encoding (mask=1) + the
 /// marcher-aligned `SV_Depth`, with the eDSL-spliced `oct_encode` / `pack_material_id_ba`
 /// (guarded by `gbuffer_mrt_edsl_sync.rs`).
-static MRT_FS_SPV: SpirvBlob<3132> = SpirvBlob(*include_bytes!(concat!(
+static MRT_FS_SPV: SpirvBlob<3080> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/gbuffer_mrt.fs.spv"
 )));
@@ -893,9 +896,10 @@ fn run_gbuffer_hybrid_m2(
 type HarnessReadbacks = (Vec<u8>, Option<Vec<u8>>, Option<Vec<f32>>, Option<DeviceGbuffer>, Option<Vec<f64>>);
 
 /// The device's own G-buffer, read back after the resolve (OPEN-ITEMS 15, the seam gate): the three
-/// RGBA8 attribute images and the `gViewT` lane, row-major `py * SDF_IMG_W + px`. Each RGBA8 image
-/// is `PIXELS * 4` bytes in the order the marcher stores them (`gAlbedo` = linear base,
-/// `gNormal` = oct RG + material id BA, `gMaterial` = shadow, ao, mask, 1).
+/// attribute images and the `gViewT` lane, row-major `py * SDF_IMG_W + px`. Each image is
+/// `PIXELS * 4` bytes in the order the marcher stores them (`gAlbedo` RGBA8 = linear base + material
+/// id low byte, `gNormal` R16G16_UNORM = the oct16 normal as two little-endian `u16`, `gMaterial`
+/// RGBA8 = shadow, ao, mask, material id high byte — IBL1 P1).
 struct DeviceGbuffer {
     albedo: Vec<u8>,
     normal: Vec<u8>,
@@ -908,9 +912,10 @@ impl DeviceGbuffer {
     fn texel(&self, px: u32, py: u32) -> DeviceGbufferTexel {
         let i = (py * SDF_IMG_W + px) as usize;
         let rgba = |img: &[u8]| -> [u8; 4] { [img[4 * i], img[4 * i + 1], img[4 * i + 2], img[4 * i + 3]] };
+        let n = rgba(&self.normal);
         DeviceGbufferTexel {
             albedo: rgba(&self.albedo),
-            normal: rgba(&self.normal),
+            normal: [u16::from_le_bytes([n[0], n[1]]), u16::from_le_bytes([n[2], n[3]])],
             material: rgba(&self.material),
             view_t: self.view_t[i],
         }
@@ -1178,7 +1183,7 @@ fn run_gbuffer_hybrid_m4(
             width: SDF_IMG_W,
             height: SDF_IMG_H,
             depth: 1,
-            format: GBUFFER_FORMAT,
+            format: GBUFFER_MRT_COLOR_FORMATS[0],
             dimension: TextureDimension::D2,
             usage: gbuffer_usage,
             array_layers: 1,
@@ -1191,7 +1196,7 @@ fn run_gbuffer_hybrid_m4(
             width: SDF_IMG_W,
             height: SDF_IMG_H,
             depth: 1,
-            format: GBUFFER_FORMAT,
+            format: GBUFFER_MRT_COLOR_FORMATS[1],
             dimension: TextureDimension::D2,
             usage: gbuffer_usage,
             array_layers: 1,
@@ -1204,7 +1209,7 @@ fn run_gbuffer_hybrid_m4(
             width: SDF_IMG_W,
             height: SDF_IMG_H,
             depth: 1,
-            format: GBUFFER_FORMAT,
+            format: GBUFFER_MRT_COLOR_FORMATS[2],
             dimension: TextureDimension::D2,
             usage: gbuffer_usage,
             array_layers: 1,
@@ -1373,7 +1378,7 @@ fn run_gbuffer_hybrid_m4(
             fragment_entry: c"main",
             // Render P5-r0: 3 MRT color formats = the G-buffer RGBA8 lanes (albedo@0,
             // normal@1, material@2). The builder auto-derives 3 opaque blend states.
-            color_formats: &[GBUFFER_FORMAT, GBUFFER_FORMAT, GBUFFER_FORMAT],
+            color_formats: &GBUFFER_MRT_COLOR_FORMATS,
             depth_format: Some(Format::D32Sfloat),
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: Some(VertexBufferLayout {
@@ -2388,13 +2393,13 @@ fn run_gbuffer_hybrid_ssao(
             view_format: None,
         })
         .expect("offscreen depth texture (sampled)");
-    let make_gbuf = |usage: ImageUsage, label: &str| {
+    let make_gbuf = |format: Format, usage: ImageUsage, label: &str| {
         device
             .create_texture(&TextureDesc {
                 width: SDF_IMG_W,
                 height: SDF_IMG_H,
                 depth: 1,
-                format: GBUFFER_FORMAT,
+                format,
                 dimension: TextureDimension::D2,
                 usage,
                 array_layers: 1,
@@ -2403,9 +2408,10 @@ fn run_gbuffer_hybrid_ssao(
             })
             .unwrap_or_else(|e| panic!("{label}: {e:?}"))
     };
-    let albedo = make_gbuf(ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT, "G-buffer albedo");
-    let normal = make_gbuf(ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT, "G-buffer normal");
-    let material = make_gbuf(ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT, "G-buffer material");
+    let [albedo_format, normal_format, material_format] = GBUFFER_MRT_COLOR_FORMATS;
+    let albedo = make_gbuf(albedo_format, ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT, "G-buffer albedo");
+    let normal = make_gbuf(normal_format, ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT, "G-buffer normal");
+    let material = make_gbuf(material_format, ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT, "G-buffer material");
     // Render wave PX1a: the resolve stores scene-linear radiance into a `LIT_FORMAT` image.
     let lit = device
         .create_texture(&TextureDesc {
@@ -2517,7 +2523,7 @@ fn run_gbuffer_hybrid_ssao(
             vertex_entry: c"main",
             fragment_module: &fs,
             fragment_entry: c"main",
-            color_formats: &[GBUFFER_FORMAT, GBUFFER_FORMAT, GBUFFER_FORMAT],
+            color_formats: &GBUFFER_MRT_COLOR_FORMATS,
             depth_format: Some(Format::D32Sfloat),
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: Some(VertexBufferLayout { stride: VERTEX_STRIDE, attributes: &attributes }),
@@ -4958,10 +4964,11 @@ struct StrictFail {
 struct SeamReport {
     /// Per arm: `[sdf, mesh, background]`.
     tally: [ByteTally; 3],
-    /// Every `TieFlip` byte: `(px, py, lane, device byte, host value in codes)`.
-    tie_flips: Vec<(u32, u32, &'static str, u8, f32)>,
-    /// Every `Mismatch` byte (same shape).
-    mismatches: Vec<(u32, u32, &'static str, u8, f32)>,
+    /// Every `TieFlip` code: `(px, py, lane, device code, host value in that lane's codes)` (the
+    /// RGBA8 lanes in bytes, the gNormal lanes in `GNORMAL_OCT_BITS` codes — IBL1 P1).
+    tie_flips: Vec<(u32, u32, &'static str, u16, f32)>,
+    /// Every `Mismatch` code (same shape).
+    mismatches: Vec<(u32, u32, &'static str, u16, f32)>,
     /// Rule G failures.
     view_t_failures: Vec<ViewTFailure>,
     /// Non-fragile lit texels outside the strict resolve gate.
@@ -5061,45 +5068,47 @@ fn seam_attribute_lanes(
     };
     let fragile_any = pre.fragile != 0;
     let mut tally = report.tally[arm];
-    let mut byte = |lane: &'static str, got: u8, x: f32, w_in: f32, fragile: bool| {
+    // One lane: `got` against the host value `x` at the lane's UNORM width `code_max` (255 for the
+    // RGBA8 lanes, `GNORMAL_OCT_MAX` for the gNormal oct codes since IBL1 P1).
+    let mut code = |lane: &'static str, got: u16, x: f32, w_in: f32, code_max: f32, fragile: bool| {
         if fragile {
             tally.fragile += 1;
             return;
         }
-        match attribute_byte_verdict(got, x, w_in) {
+        match attribute_code_verdict(got, x, w_in, code_max) {
             ByteVerdict::Exact => tally.exact += 1,
             ByteVerdict::TieFlip { .. } => {
                 tally.tie_flip += 1;
-                report.tie_flips.push((px, py, lane, got, 255.0 * x.clamp(0.0, 1.0)));
+                report.tie_flips.push((px, py, lane, got, code_max * x.clamp(0.0, 1.0)));
             }
             ByteVerdict::Mismatch => {
                 tally.mismatch += 1;
-                report.mismatches.push((px, py, lane, got, 255.0 * x.clamp(0.0, 1.0)));
+                report.mismatches.push((px, py, lane, got, code_max * x.clamp(0.0, 1.0)));
             }
         }
     };
+    const B8: f32 = 255.0;
     let exact = |want: u8| f32::from(want) / 255.0;
     for (c, lane) in ["albedo.r", "albedo.g", "albedo.b"].into_iter().enumerate() {
-        byte(lane, dev.albedo[c], pre.base[c], 0.0, false);
+        code(lane, u16::from(dev.albedo[c]), pre.base[c], 0.0, B8, false);
     }
-    byte("albedo.a", dev.albedo[3], 1.0, 0.0, false);
     let fold = pre.fragile & fragile_bit::OCT_FOLD != 0;
-    byte("normal.r", dev.normal[0], pre.oct[0], pre.w_in_oct[0], fold);
-    byte("normal.g", dev.normal[1], pre.oct[1], pre.w_in_oct[1], fold);
+    code("normal.r", dev.normal[0], pre.oct[0], pre.w_in_oct[0], GNORMAL_OCT_MAX, fold);
+    code("normal.g", dev.normal[1], pre.oct[1], pre.w_in_oct[1], GNORMAL_OCT_MAX, fold);
+    // IBL1 P1: the 16-bit material id rides gAlbedo.A (low byte) and gMaterial.A (high byte).
     let mat_fragile = pre.fragile & fragile_bit::MAT_ID != 0;
     if pre.arm == MarcherArm::Background {
         // The marcher's neutral defaults: material id 0, unread.
-        byte("normal.b", dev.normal[2], 0.0, 0.0, false);
-        byte("normal.a", dev.normal[3], 0.0, 0.0, false);
+        code("albedo.a", u16::from(dev.albedo[3]), 0.0, 0.0, B8, false);
+        code("material.a", u16::from(dev.material[3]), 0.0, 0.0, B8, false);
     } else {
-        byte("normal.b", dev.normal[2], exact((pre.mat_id & 0xFF) as u8), 0.0, mat_fragile);
-        byte("normal.a", dev.normal[3], exact((pre.mat_id >> 8) as u8), 0.0, mat_fragile);
+        code("albedo.a", u16::from(dev.albedo[3]), exact((pre.mat_id & 0xFF) as u8), 0.0, B8, mat_fragile);
+        code("material.a", u16::from(dev.material[3]), exact((pre.mat_id >> 8) as u8), 0.0, B8, mat_fragile);
     }
     let shadow_fragile = pre.fragile & fragile_bit::SHADOW != 0;
-    byte("material.r", dev.material[0], pre.shadow, pre.w_in_shadow, shadow_fragile);
-    byte("material.g", dev.material[1], pre.ao, pre.w_in_ao, false);
-    byte("material.b", dev.material[2], exact(pre.mask_byte), 0.0, false);
-    byte("material.a", dev.material[3], 1.0, 0.0, false);
+    code("material.r", u16::from(dev.material[0]), pre.shadow, pre.w_in_shadow, B8, shadow_fragile);
+    code("material.g", u16::from(dev.material[1]), pre.ao, pre.w_in_ao, B8, false);
+    code("material.b", u16::from(dev.material[2]), exact(pre.mask_byte), 0.0, B8, false);
     report.tally[arm] = tally;
 
     // Rule G (`gViewT`).
@@ -5202,15 +5211,27 @@ fn collect_gbuffer_seam(
     report
 }
 
-/// D15-2's must-reject twins at one texel: a planted byte the window must call `Mismatch`.
-fn assert_planted_byte_mismatches(dev: u8, x: f32, w_in: f32, what: &str) {
+/// D15-2's must-reject twins at one texel: a planted gNormal code the window must call `Mismatch`
+/// (IBL1 P1: at the `GNORMAL_OCT_BITS` width).
+fn assert_planted_oct_mismatches(dev: u16, x: f32, w_in: f32, what: &str) {
     assert_eq!(
-        attribute_byte_verdict(dev, x, w_in),
+        attribute_code_verdict(dev, x, w_in, GNORMAL_OCT_MAX),
         ByteVerdict::Mismatch,
-        "{what}: the planted byte {dev} (host value {:.4} codes, w_in {w_in:.4}) is NOT a Mismatch — \
+        "{what}: the planted code {dev} (host value {:.4} codes, w_in {w_in:.4}) is NOT a Mismatch — \
          the attribute window cannot fail",
-        255.0 * x.clamp(0.0, 1.0)
+        GNORMAL_OCT_MAX * x.clamp(0.0, 1.0)
     );
+}
+
+/// The nearest gNormal code beyond the attribute window around the host value `x` (window
+/// `0.5 + W_CONV + w_in` codes), on the side `below` names: the smallest planted error the
+/// window must reject. At oct8 that was a one-code flip; at oct16 the device-host bound `w_in`
+/// spans more than one code, so the twin is placed by the window, not by a fixed offset.
+fn code_beyond_window(x: f32, w_in: f32, below: bool) -> u16 {
+    let c = GNORMAL_OCT_MAX * x.clamp(0.0, 1.0);
+    let window = 0.5 + W_CONV + w_in;
+    let code = if below { (c - window).floor() - 1.0 } else { (c + window).ceil() + 1.0 };
+    code.clamp(0.0, GNORMAL_OCT_MAX) as u16
 }
 
 // ============================================================================
@@ -5534,15 +5555,20 @@ fn p6_r1_oracle_produces_shadowed_pixels() {
 
 /// OPEN-ITEMS 15 — the host PIN at p6_r1 twin_spheres texel (41,17), the texel the item is about
 /// (a PIN, labelled so: it restates settle E15 / triage 15 §2 on the host; the acceptance is the
-/// device seam gate, `p6_r1_multi_light_sdf_shadows_match_oracle`). Three facts:
+/// device seam gate, `p6_r1_multi_light_sdf_shadows_match_oracle`). HISTORY since IBL1 P1: the
+/// gNormal it was about stored the oct normal at 8 bits; it is now R16G16_UNORM, so the facts are
+/// kept at an EXPLICIT 8-bit quantizer, independent of `GNORMAL_FORMAT`. Three facts:
 /// - the host's pre-quantization `255·oct.x` is 98.538048 (`e15_bytes.csv:2225`), 0.038 above the
 ///   .5 tie, so the host stores 99 where the device stored 98;
-/// - the host resolve fed the device's `[98, 192]` and stored through the measured Z class IS the
-///   device readback `[2.7519531, 2.4824219, 2.2128906]` bit for bit;
+/// - the host resolve fed the device's 8-bit `[98, 192]` and stored through the measured Z class IS
+///   the device readback `[2.7519531, 2.4824219, 2.2128906]` bit for bit;
 /// - light A's soft-shadow visibility changes by less than 0.5 % between the two codes (the +7.3 %
 ///   is the grazing NoL, not the shadow model).
+///
+/// At 16 bits the same texel's `65535·oct.x` is ≈ 25,324.28 — no tie, so the device seam gate is
+/// predicted to report it `Exact` (or inside the window), not a `TieFlip`.
 #[test]
-fn p6_r1_texel_41_17_host_pin() {
+fn p6_r1_texel_41_17_oct8_history_pin() {
     use boyko_shaderdsl::pixfmt::{Channel, Rounding, quantize};
     let edits = p6_r1_twin_scene();
     let (header, lights) = p6_r1_multi_light_table();
@@ -5555,11 +5581,10 @@ fn p6_r1_texel_41_17_host_pin() {
         DEFAULT_LIGHT_DIR,
     );
     assert_eq!(attrs.mask, 1, "(41,17) is an SDF-lit texel");
-    assert_eq!(attrs.oct_rg, [99, 192], "the host replay stores [99, 192]");
     let own = DeviceGbufferTexel {
-        albedo: [attrs.base_rgb[0], attrs.base_rgb[1], attrs.base_rgb[2], 255],
-        normal: [attrs.oct_rg[0], attrs.oct_rg[1], 0, 0],
-        material: [attrs.shadow, attrs.ao, 255, 255],
+        albedo: [attrs.base_rgb[0], attrs.base_rgb[1], attrs.base_rgb[2], (attrs.mat_id & 0xFF) as u8],
+        normal: attrs.oct_rg,
+        material: [attrs.shadow, attrs.ao, 255, (attrs.mat_id >> 8) as u8],
         view_t: attrs.view_t,
     };
     let (_, pre) = golden_marcher_attributes_at(
@@ -5572,9 +5597,16 @@ fn p6_r1_texel_41_17_host_pin() {
         98.538_05_f32.to_bits(),
         "the pre-quantization 255·oct.x at (41,17) is {code:.6}, not settle E15's 98.538048"
     );
+    // The explicit 8-bit store (round-half-up) the history is about.
+    let oct8 = pre.oct.map(|x| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+    assert_eq!(oct8, [99, 192], "the host's 8-bit store at (41,17) is [99, 192]");
+    // An 8-bit code fed through the current gNormal width: `c·m/255` is an exact integer at 8 and
+    // 16 bits (m/255 = 1 or 257), and `code/m` then rounds the same rational as `c/255`, so the
+    // decoded normal is the 8-bit one bit for bit.
+    let oct8_codes = |c: [u8; 2]| c.map(|b| (u32::from(b) * GNORMAL_OCT_MAX as u32 / 255) as u16);
     let (ro, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
     let field = |q: [f32; 3]| boyko_sdf_math::sdf_edit_list(&edits, q);
-    let device_bytes = MarcherAttributes { oct_rg: [98, 192], ..attrs };
+    let device_bytes = MarcherAttributes { oct_rg: oct8_codes([98, 192]), ..attrs };
     let lit = golden_deferred_resolve_table_shadowed(device_bytes, ro, rd, &materials, &header, &lights, &field);
     let stored = lit.map(|x| quantize(Channel::F16, x, Rounding::TowardZero));
     let device = [2.751_953_1_f32, 2.482_421_9, 2.212_890_6];
@@ -5614,11 +5646,12 @@ fn p6_r1_texel_41_17_host_pin() {
 /// item, RF15-A): the device's G-buffer bytes against the host's pre-quantization values at the
 /// device's own hit point (one code only inside the conversion window), and the host shadowed
 /// resolve fed the DEVICE's bytes against the device's radiance inside the derived floor. At
-/// (41,17) the device stored gNormal.R = 98 where the host replay stores 99 (settle E15): the gate
-/// reports that byte as a `TieFlip` and the resolve fed 98 must match the device; a shadow-march
-/// defect would red there (fed `[99, 192]` the host gives 2.5648 against the device's 2.7520).
-/// NON-VACUITY: the host oracle is first asserted to produce ≥1 SHADOWED pixel. The must-reject
-/// twins plant a 97 at (41,17).R and a one-code flip at a non-tie byte: both must be `Mismatch`.
+/// (41,17) the device stored the 8-bit gNormal.R = 98 where the host replay stored 99 (settle E15,
+/// now the history pin `p6_r1_texel_41_17_oct8_history_pin`); since IBL1 P1 gNormal is oct16 and
+/// the texel's `65535·oct.x` ≈ 25,324.28 is no tie, so the gate is predicted to report it inside the
+/// window (no `TieFlip` from a tie). NON-VACUITY: the host oracle is first asserted to produce ≥1
+/// SHADOWED pixel. The must-reject twins plant, at (41,17).R and at the first non-fragile lit SDF oct
+/// lane (raster order), the nearest code beyond the attribute window: both must be `Mismatch`.
 #[test]
 fn p6_r1_multi_light_sdf_shadows_match_oracle() {
     let Some(ctx) = boot_render_or_skip("p6_r1_multi_light_sdf_shadows_match_oracle") else {
@@ -5666,19 +5699,19 @@ fn p6_r1_multi_light_sdf_shadows_match_oracle() {
         "[twin_spheres] (41,17): device gNormal {:?} vs host c = ({:.4}, {:.4}) (w_in {:?}) -> {:?} / {:?}; \
          device lit {:?}",
         dev_41_17.normal,
-        255.0 * pre_41_17.oct[0],
-        255.0 * pre_41_17.oct[1],
+        GNORMAL_OCT_MAX * pre_41_17.oct[0],
+        GNORMAL_OCT_MAX * pre_41_17.oct[1],
         pre_41_17.w_in_oct,
-        attribute_byte_verdict(dev_41_17.normal[0], pre_41_17.oct[0], pre_41_17.w_in_oct[0]),
-        attribute_byte_verdict(dev_41_17.normal[1], pre_41_17.oct[1], pre_41_17.w_in_oct[1]),
+        attribute_code_verdict(dev_41_17.normal[0], pre_41_17.oct[0], pre_41_17.w_in_oct[0], GNORMAL_OCT_MAX),
+        attribute_code_verdict(dev_41_17.normal[1], pre_41_17.oct[1], pre_41_17.w_in_oct[1], GNORMAL_OCT_MAX),
         lit_rgb(&lit, 41, 17),
     );
 
     // D15-2's must-reject twins: the window must be able to fail.
-    // (1) A planted 97 at (41,17).R: 1.54 codes from 98.538.
-    assert_planted_byte_mismatches(97, pre_41_17.oct[0], pre_41_17.w_in_oct[0], "(41,17).R = 97");
-    // (2) A one-code flip at a NON-tie byte: the first lit SDF oct byte (raster order) whose flip
-    // lands beyond the window by more than 0.1 code.
+    // (1) At (41,17).R, the nearest code below the window (at oct8 this was the planted 97).
+    let below_41_17 = code_beyond_window(pre_41_17.oct[0], pre_41_17.w_in_oct[0], true);
+    assert_planted_oct_mismatches(below_41_17, pre_41_17.oct[0], pre_41_17.w_in_oct[0], "(41,17).R below the window");
+    // (2) The first non-fragile lit SDF oct lane (raster order), planted just above its window.
     let mut planted = None;
     'search: for py in 0..SDF_IMG_H {
         for px in 0..SDF_IMG_W {
@@ -5687,20 +5720,17 @@ fn p6_r1_multi_light_sdf_shadows_match_oracle() {
                 continue;
             }
             for k in 0..2 {
-                let c = 255.0 * pre.oct[k];
-                let host = (c + 0.5) as u8;
-                for flip in [host.wrapping_sub(1), host.wrapping_add(1)] {
-                    if (f32::from(flip) - c).abs() > 0.5 + W_CONV + pre.w_in_oct[k] + 0.1 {
-                        planted = Some((px, py, k, flip, pre));
-                        break 'search;
-                    }
+                let flip = code_beyond_window(pre.oct[k], pre.w_in_oct[k], false);
+                if f32::from(flip) - GNORMAL_OCT_MAX * pre.oct[k] > 0.5 + W_CONV + pre.w_in_oct[k] + 0.1 {
+                    planted = Some((px, py, k, flip, pre));
+                    break 'search;
                 }
             }
         }
     }
     let (ppx, ppy, pk, pflip, ppre) = planted
-        .expect("no lit SDF oct byte admits a non-tie flip beyond the window — the planted twin is vacuous");
-    assert_planted_byte_mismatches(pflip, ppre.oct[pk], ppre.w_in_oct[pk], "the planted non-tie flip");
+        .expect("no lit SDF oct lane admits a code beyond the window — the planted twin is vacuous");
+    assert_planted_oct_mismatches(pflip, ppre.oct[pk], ppre.w_in_oct[pk], "the planted beyond-window code");
     let mut planted_texel = gbuf.texel(ppx, ppy);
     planted_texel.normal[pk] = pflip;
     let (planted_floor, planted_excess) = seam_resolve_texel(
@@ -5713,9 +5743,9 @@ fn p6_r1_multi_light_sdf_shadows_match_oracle() {
         &lights,
     );
     println!(
-        "[twin_spheres] planted non-tie flip at ({ppx},{ppy}) lane {pk}: {pflip} vs c = {:.4} -> Mismatch; \
+        "[twin_spheres] planted beyond-window code at ({ppx},{ppy}) lane {pk}: {pflip} vs c = {:.4} -> Mismatch; \
          the resolve fed it: excess {planted_excess:?} (floor {:?}, fragile {})",
-        255.0 * ppre.oct[pk],
+        GNORMAL_OCT_MAX * ppre.oct[pk],
         planted_floor.floor,
         planted_floor.fragile
     );
@@ -5736,8 +5766,9 @@ fn p6_r1_multi_light_sdf_shadows_match_oracle() {
 /// reference rule exactly would store the host's bytes), so the assertion is conditional on the
 /// attribute gate's own observation: when no device byte differs from the replay's with a radiance
 /// effect above the floor, the test prints that the RED-before is vacuous on this device. The first
-/// reject is printed (predicted: (0,0), a MESH texel, gNormal [127,127] vs [128,128]; restricted to
-/// SDF texels, (41,17)), never asserted.
+/// reject is printed (predicted at oct8: (0,0), a MESH texel, gNormal [127,127] vs [128,128];
+/// restricted to SDF texels, (41,17); at oct16 since IBL1 P1 the mesh tie is [32767,32767] vs
+/// [32768,32768], ≈ 4e-5 rad, and may fall under the floor), never asserted.
 #[test]
 fn p6_r1_replay_attributes_fail_the_strict_resolve_gate() {
     let Some(ctx) = boot_render_or_skip("p6_r1_replay_attributes_fail_the_strict_resolve_gate") else {
@@ -5971,7 +6002,7 @@ fn l1_index_list_cap(cfg: &GoldenClusterConfig) -> u32 {
 /// The L1 clustered driver's readbacks: `(lit_rgba8, cluster_grid, light_index, gViewT_per_px,
 /// gNormal_oct_rg_per_px)`. The last two isolate the resolve under test — the golden feeds the
 /// GPU's REAL surface depth + normal into the host oracle instead of an independent CPU march.
-type ClusteredDriverReadbacks = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<f32>, Vec<[u8; 2]>);
+type ClusteredDriverReadbacks = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<f32>, Vec<[u16; 2]>);
 
 /// Records + submits the FULL Lighting-L1 clustered path in ONE fenced submit and returns
 /// `(lit_bytes, cluster_grid_bytes)`: identical to [`run_gbuffer_hybrid_lit_table`] up to the
@@ -6202,7 +6233,7 @@ fn run_gbuffer_hybrid_lit_clustered(
             width: SDF_IMG_W,
             height: SDF_IMG_H,
             depth: 1,
-            format: GBUFFER_FORMAT,
+            format: GBUFFER_MRT_COLOR_FORMATS[0],
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
             array_layers: 1,
@@ -6215,7 +6246,7 @@ fn run_gbuffer_hybrid_lit_clustered(
             width: SDF_IMG_W,
             height: SDF_IMG_H,
             depth: 1,
-            format: GBUFFER_FORMAT,
+            format: GBUFFER_MRT_COLOR_FORMATS[1],
             dimension: TextureDimension::D2,
             // TRANSFER_SRC so the oct-encoded gNormal lane can be read back: the L1 resolve golden
             // also overrides the oracle's `attrs.oct_rg` with the GPU's REAL stored normal bytes
@@ -6232,7 +6263,7 @@ fn run_gbuffer_hybrid_lit_clustered(
             width: SDF_IMG_W,
             height: SDF_IMG_H,
             depth: 1,
-            format: GBUFFER_FORMAT,
+            format: GBUFFER_MRT_COLOR_FORMATS[2],
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
             array_layers: 1,
@@ -6307,8 +6338,9 @@ fn run_gbuffer_hybrid_lit_clustered(
             location: MemoryLocation::HostVisibleCoherent,
         })
         .expect("host-visible gViewT readback buffer");
-    // The gNormal (RGBA8) readback: R8G8 = the oct-encoded normal, B8/A8 = the 16-bit id. The L1
-    // resolve golden overrides the oracle's `attrs.oct_rg` with the GPU's R8G8 so the oracle's
+    // The gNormal (R16G16_UNORM since IBL1 P1) readback: the two oct codes (the id rides gAlbedo.A /
+    // gMaterial.A). The L1
+    // resolve golden overrides the oracle's `attrs.oct_rg` with the GPU's oct codes so the oracle's
     // oct decode is bit-identical to the GPU resolve's — the residual FP gap is the normal.
     let normal_readback = device
         .create_buffer(&BufferDesc {
@@ -6376,7 +6408,7 @@ fn run_gbuffer_hybrid_lit_clustered(
             fragment_module: &fs,
             fragment_entry: c"main",
             // Render P5-r0: 3 MRT color formats = the G-buffer RGBA8 lanes.
-            color_formats: &[GBUFFER_FORMAT, GBUFFER_FORMAT, GBUFFER_FORMAT],
+            color_formats: &GBUFFER_MRT_COLOR_FORMATS,
             depth_format: Some(Format::D32Sfloat),
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: Some(VertexBufferLayout {
@@ -6924,7 +6956,7 @@ fn run_gbuffer_hybrid_lit_clustered(
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
 
-    // Read back the gNormal (RGBA8) lane: the per-pixel R8G8 oct-encoded normal bytes (row-major,
+    // Read back the gNormal (R16G16_UNORM) lane: the per-pixel oct codes (row-major,
     // same order). The L1 resolve golden overrides the oracle's `attrs.oct_rg` with these so the
     // oct decode is bit-identical to the GPU resolve's gNormal load.
     let normal_ptr = device
@@ -6937,9 +6969,10 @@ fn run_gbuffer_hybrid_lit_clustered(
     unsafe {
         core::ptr::copy_nonoverlapping(normal_ptr.as_ptr(), normal_bytes.as_mut_ptr(), READBACK_BYTES as usize);
     }
-    let normal_oct: Vec<[u8; 2]> = normal_bytes
+    // IBL1 P1: gNormal is R16G16_UNORM — two little-endian u16 oct codes per texel.
+    let normal_oct: Vec<[u16; 2]> = normal_bytes
         .as_chunks::<4>().0.iter()
-        .map(|c| [c[0], c[1]])
+        .map(|c| [u16::from_le_bytes([c[0], c[1]]), u16::from_le_bytes([c[2], c[3]])])
         .collect();
 
     // Read back the ClusterGrid occupancy ({offset, count} per froxel). It is a
@@ -7044,7 +7077,7 @@ fn run_gbuffer_hybrid_lit_clustered(
 /// plus the matching `gNormal` gap) is amplified to white by this scene's pathologically
 /// close+intense lights (atten ≈ 1/d²). The marcher is validated separately (the rung-8..11
 /// goldens), so to isolate the RESOLVE under test we OVERRIDE both `attrs.view_t` (with the GPU's
-/// `gViewT` lane, `viewt_px`) and `attrs.oct_rg` (with the GPU's stored `gNormal` R8G8 bytes,
+/// `gViewT` lane, `viewt_px`) and `attrs.oct_rg` (with the GPU's stored `gNormal` codes,
 /// `normal_oct`) before calling the oracle. Both sides then reconstruct the SAME
 /// `P = ro + rd * gViewT_gpu` (and the SAME froxel z-slice) and decode the SAME normal, leaving
 /// only the resolve's own arithmetic under test. Returns the max delta + the SDF-lit
@@ -7060,7 +7093,7 @@ fn assert_lit_matches_clustered_golden(
     cfg: &GoldenClusterConfig,
     grid: &[Vec<u32>],
     viewt_px: &[f32],
-    normal_oct: &[[u8; 2]],
+    normal_oct: &[[u16; 2]],
     name: &str,
 ) -> (i32, u64) {
     let mut max_delta = 0i32;

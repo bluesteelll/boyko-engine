@@ -43,7 +43,9 @@
 //
 //   binding 0 : RWTexture2D<float2> (STORAGE, rg16)     — gVisIn  (READ; the ping visibility)
 //   binding 1 : RWTexture2D<float2> (STORAGE, rg16)     — gVisOut (WRITE; the pong visibility)
-//   binding 2 : RWTexture2D<float4> (STORAGE, rgba8)    — gNormal (READ; oct + material id)
+//   binding 2 : the normal the edge-stop reads (READ) — per chain, see "Two normals" below:
+//               RWTexture2D<float2> (STORAGE, rg16) gNormal (the Deferred oct16 normal), or
+//               RWTexture2D<float4> (STORAGE, rgba8) gThinNormal (VB_THIN: `vb_geo`'s thin aux)
 //   binding 3 : RWTexture2D<float>  (STORAGE, r32f)     — gViewT  (READ; surface ray param t)
 //   binding 4 : cbuffer ResolvedShadowDenoise (UNIFORM) — sigma_z / sigma_n (16 B)
 //   binding 5 : cbuffer Camera (UNIFORM)                — the 80-byte extent/camera block
@@ -53,9 +55,22 @@
 // pinned `rg16` — the single pin matches the bound view on every level, whichever ring is the READ
 // (even ⇒ shadow_vis, odd ⇒ shadow_vis2) and whichever is the WRITE (the other).
 //
+// # Two normals, two modules (IBL1 P1, critique C1)
+//
+// This filter serves two chains whose normal images differ in format. The Deferred chain binds
+// the G-buffer's `gNormal` (R16G16_UNORM oct16 since IBL1 P1); the VisibilityBuffer split binds
+// `vb_geo`'s `thin_normal` (R8G8B8A8_UNORM, oct RG + roughness BA) at the SAME slot, on the SAME
+// 6-binding layout. A storage image's declared `OpTypeImage` format must match the bound view, so
+// each chain gets its own module: the base declares `gNormal` (`rg16`), `-D VB_THIN=1` declares
+// `gThinNormal` (`rgba8`) and builds `shadow_atrous_vb.comp.spv`, which the VB recorder dispatches
+// through its own pipeline on the shared layout. The filter body is identical text either way
+// (`ATROUS_NORMAL` names the declared image).
+//
 // Compiled offline (hermetic — no SDK at `cargo build` time) with:
 //   dxc -spirv -T cs_6_0 -E main "-fspv-target-env=vulkan1.3" \
 //       shadow_atrous.comp.hlsl -Fo shadow_atrous.comp.spv
+//   dxc -spirv -T cs_6_0 -E main -D VB_THIN=1 "-fspv-target-env=vulkan1.3" \
+//       shadow_atrous.comp.hlsl -Fo shadow_atrous_vb.comp.spv
 
 // bindings 0..1: the ping/pong visibility images. gVisIn is read (the previous level's output — the
 // raw VIS image at level 0); gVisOut is written. BOTH ping-pong rings (`shadow_vis` + `shadow_vis2`)
@@ -64,8 +79,15 @@
 // every parity (even ⇒ read shadow_vis / write shadow_vis2, odd ⇒ the reverse).
 [[vk::image_format("rg16")]] RWTexture2D<float2> gVisIn  : register(u0);
 [[vk::image_format("rg16")]] RWTexture2D<float2> gVisOut : register(u1);
-// bindings 2..3: the G-buffer lanes the edge-stops read (the marcher's store views, in GENERAL).
-[[vk::image_format("rgba8")]] RWTexture2D<float4> gNormal : register(u2);
+// bindings 2..3: the lanes the edge-stops read (the producers' store views, in GENERAL). Binding 2
+// is the chain's own normal image (see "Two normals, two modules" above).
+#if VB_THIN
+[[vk::image_format("rgba8")]] RWTexture2D<float4> gThinNormal : register(u2);
+#define ATROUS_NORMAL gThinNormal
+#else
+[[vk::image_format("rg16")]]  RWTexture2D<float2> gNormal : register(u2);
+#define ATROUS_NORMAL gNormal
+#endif
 [[vk::image_format("r32f")]]  RWTexture2D<float>  gViewT  : register(u3);
 
 // binding 4: the edge-stop scalars UBO — byte-mirrors `boyko_render::ResolvedShadowDenoise` (16 B,
@@ -126,7 +148,7 @@ static const float ATROUS_W_EPS = 1.0e-4;
 static const float ATROUS_H[5] = { 0.0625, 0.25, 0.375, 0.25, 0.0625 };
 
 // --- Octahedral decode (BYTE-IDENTICAL to the resolve's `oct_decode` in deferred_pbr.hlsl; the
-// inverse of the marcher's oct_encode). gNormal.rg carries the octahedral normal; the normal
+// inverse of the marcher's oct_encode). The normal image's RG carries the octahedral normal; the normal
 // edge-stop measures `dot(n_tap, n_center)`.
 float3 oct_decode(float2 e) {
     e = e * 2.0 - 1.0;                          // [0,1] -> [-1,1]
@@ -165,7 +187,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float2 center_vis = gVisIn.Load(coord);
     float  vis_c      = center_vis.r;
     float  valid_c    = center_vis.g;
-    float3 n_c        = oct_decode(gNormal.Load(coord).rg);
+    float3 n_c        = oct_decode(ATROUS_NORMAL.Load(coord).rg);
     float  view_t_c   = gViewT.Load(coord);
     float  z_c        = linear_view_z(px, py, w, h, view_t_c);
 
@@ -187,7 +209,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
             float2 tap_vis = gVisIn.Load(tcoord);
             float  vis_t   = tap_vis.r;
             float  valid_t = tap_vis.g;
-            float3 n_t     = oct_decode(gNormal.Load(tcoord).rg);
+            float3 n_t     = oct_decode(ATROUS_NORMAL.Load(tcoord).rg);
             float  view_t  = gViewT.Load(tcoord);
             float  z_t     = linear_view_z((uint)tx, (uint)ty, w, h, view_t);
 

@@ -44,9 +44,10 @@
 //               is the storage image.
 //   binding 1 : Texture2D<float> (SAMPLED) — the mesh depth (DEPTH-aspect view of the
 //               D32_SFLOAT image), fetched with `.Load` (OpImageFetch, no sampler).
-//   binding 2 : RWTexture2D<float4> (STORAGE, rgba8) — albedo (the UNMULTIPLIED base).
-//   binding 3 : RWTexture2D<float4> (STORAGE, rgba8) — world normal (unread this incr.).
-//   binding 4 : RWTexture2D<float4> (STORAGE, rgba8) — material (r=vis, b=mask, a=1).
+//   binding 2 : RWTexture2D<float4> (STORAGE, rgba8) — albedo (base RGB, id low byte A).
+//   binding 3 : RWTexture2D<float2> (STORAGE, rg16)  — the oct16 world normal (IBL1 P1).
+//   binding 4 : RWTexture2D<float4> (STORAGE, rgba8) — material (shadow, ao, mask, id high
+//               byte A).
 //   binding 5 : cbuffer Camera (UNIFORM) — the 80-byte extent/camera block, written
 //               ONCE at setup (NOT per-frame). This replaces the rung-10 push
 //               constant: the vocabulary pipeline uses a DEDICATED layout, so the
@@ -87,8 +88,8 @@
 // # The `[[vk::image_format("rgba8")]]` qualifier (REQUIRED)
 //
 // `shaderStorageImageWriteWithoutFormat` is NOT enabled at device creation, so each
-// `RWTexture2D<float4>` must declare an explicit SPIR-V `OpTypeImage` format matching
-// its R8G8B8A8_UNORM view — without it DXC defaults to `Rgba32f`, which the validation
+// storage image must declare an explicit SPIR-V `OpTypeImage` format matching its view
+// (R8G8B8A8_UNORM; R16G16_UNORM for gNormal) — without it DXC defaults to `Rgba32f`, which the validation
 // layer flags as a storage-image format mismatch (the store would be undefined). This
 // mirrors the P1a `sdf_editlist_storage_image.hlsl` pattern.
 //
@@ -121,11 +122,12 @@ StructuredBuffer<uint> Buf : register(t0); // binding 0: edit-list header (READ-
 // so no sampler is consumed — the descriptor is a plain SAMPLED_IMAGE.
 Texture2D<float> gDepth : register(t1);
 
-// bindings 2..4: the MRT G-buffer STORAGE IMAGES. `[[vk::image_format("rgba8")]]`
-// pins each `OpTypeImage` to `Rgba8` so it matches the R8G8B8A8_UNORM views (see the
-// header note — shaderStorageImageWriteWithoutFormat is OFF).
+// bindings 2..4: the MRT G-buffer STORAGE IMAGES, each `[[vk::image_format]]` pinned to its
+// view (see the header note — shaderStorageImageWriteWithoutFormat is OFF): `Rgba8` for the
+// R8G8B8A8_UNORM albedo / material, `Rg16` for the R16G16_UNORM oct16 normal (IBL1 P1). The
+// 16-bit material id rides the albedo / material alpha lanes (low / high byte).
 [[vk::image_format("rgba8")]] RWTexture2D<float4> gAlbedo   : register(u2);
-[[vk::image_format("rgba8")]] RWTexture2D<float4> gNormal   : register(u3);
+[[vk::image_format("rg16")]]  RWTexture2D<float2> gNormal   : register(u3);
 [[vk::image_format("rgba8")]] RWTexture2D<float4> gMaterial : register(u4);
 
 // Camera modes selected by `cam.camera_mode`. ORTHO is the golden-frozen path; the
@@ -624,7 +626,7 @@ float sdf_soft_shadow_mesh(float3 p, float3 n, float3 L) {
 
 // Octahedral normal DECODE (the inverse of `oct_encode`; BYTE-IDENTICAL to the resolve's
 // `oct_decode` in deferred_pbr.hlsl and the SSAO pass). Render P7-r2 reads the RASTER mesh
-// normal back from gNormal.RG for a mesh-owned pixel so the SDF can cast its analytic
+// normal back from gNormal for a mesh-owned pixel so the SDF can cast its analytic
 // soft-shadow + AO onto the mesh surface (the noise-free replacement for screen-space SSAO).
 float3 oct_decode(float2 e) {
     e = e * 2.0 - 1.0;                          // [0,1] -> [-1,1]
@@ -644,9 +646,9 @@ float3 oct_decode(float2 e) {
 // hard-union nearest-surface rule (PBR plan Decision 4 / OQ-5). The field is untouched.
 
 // Octahedral-encode a unit normal `n` into [0,1]^2 (Cigolle et al. / Meyer survey). The
-// resolve decodes it via `oct_decode`. ~16-bit angular precision when stored in RG16, but
-// stored here in the RG channels of the RGBA8 gNormal target (MVP-2 keeps the existing
-// RGBA8 G-buffer; the BA channels carry the material id). Plain ops; off the frozen field.
+// resolve decodes it via `oct_decode`. Stored in the R16G16_UNORM gNormal target (IBL1 P1:
+// ~0.0013° mean / 0.0037° max angular error, against oct8's 0.34° / 0.95°). Plain ops; off
+// the frozen field.
 float2 oct_encode(float3 n) {
     // === GENERATED oct_encode BEGIN === (boyko_shaderdsl::oct::oct_encode_body)
     n = n / (abs(n.x) + abs(n.y) + abs(n.z));
@@ -658,9 +660,10 @@ float2 oct_encode(float3 n) {
     // === GENERATED oct_encode END ===
 }
 
-// Pack a 16-bit material id into the B + A channels of an RGBA8 texel: low byte -> B,
-// high byte -> A, each as a normalized [0,1] UNORM value (byte/255). The resolve
-// reconstructs `id = round(b*255) | (round(a*255) << 8)`. 16 bits = 65 536 materials.
+// Pack a 16-bit material id into two UNORM8 lanes: low byte -> .x (stored in gAlbedo.A),
+// high byte -> .y (stored in gMaterial.A — IBL1 P1), each as a normalized [0,1] UNORM value
+// (byte/255). The resolve reconstructs `id = round(albedo.a*255) | (round(material.a*255) << 8)`.
+// 16 bits = 65 536 materials.
 float2 pack_material_id_ba(uint id) {
     // === GENERATED pack_material_id_ba BEGIN === (boyko_shaderdsl::pack::pack_material_id_ba_body)
     uint lo = id & 255u;
@@ -1476,7 +1479,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
             // PBR MVP-2 (mask == 0 arms): write the base background color to gAlbedo and
             // gMaterial = (shadow = 1, ao = 1, mask = 0, 1). mask == 0 makes the resolve
             // PASS THE BASE THROUGH byte-identically (no PBR, no material fetch) — the
-            // 0%-gate for background / empty. gNormal is neutral (unread when mask==0).
+            // 0%-gate for background / empty. gNormal is neutral and the id lanes hold id 0
+            // (both unread when mask==0).
             //
             // Render P5-r2: the OWNERSHIP gate (Site A), symmetric with Site B. An EMPTY
             // tile has NO SDF surface in front, so `own_pixel == !has_mesh` here: a
@@ -1487,9 +1491,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
             // no-mesh scene `has_mesh` is always false, so the attributes are written exactly
             // as before (the marcher's old `empty_color = BACKGROUND` arm) — byte-identical.
             if (!has_mesh) {
-                gAlbedo[uint2(px, py)] = float4(clamp(BACKGROUND, 0.0, 1.0), 1.0);
-                gNormal[uint2(px, py)] = float4(0.5, 0.5, 0.0, 0.0);   // neutral oct, id = 0
-                gMaterial[uint2(px, py)] = float4(1.0, 1.0, 0.0, 1.0); // shadow=1, ao=1, mask=0
+                gAlbedo[uint2(px, py)] = float4(clamp(BACKGROUND, 0.0, 1.0), 0.0); // id lo = 0
+                gNormal[uint2(px, py)] = float2(0.5, 0.5);                           // neutral oct
+                gMaterial[uint2(px, py)] = float4(1.0, 1.0, 0.0, 0.0); // shadow=1, ao=1, mask=0, id hi = 0
             }
             // Lighting L0b (C2) / Decision 3 + Render P7/P5-r1b UNLOCK: this EMPTY-tile
             // early-return is a SEPARATE terminal exit BEFORE the final block, so gViewT must be
@@ -1790,10 +1794,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
     //   * gAlbedo  = RAW LINEAR base color. SDF hit: `materials[id].base_color.rgb`
     //                (the picked edit's material, NO Lambert/shadow/ao baked in). Mesh /
     //                background: the flat MESH_COLOR / BACKGROUND constant (mask == 0).
-    //   * gNormal  = (oct.x, oct.y, matid_lo, matid_hi): the octahedral-encoded world
-    //                normal in RG + the 16-bit picked material id packed into BA. SDF hit
-    //                only; neutral on the mask == 0 arms (unread by the resolve there).
-    //   * gMaterial= (shadow, ao, mask, 1): the A1 soft-shadow visibility (R), the A2 AO
+    //   * gNormal  = oct: the octahedral-encoded world normal (R16G16_UNORM, IBL1 P1). SDF
+    //                hit only; neutral on the mask == 0 arms (unread by the resolve there).
+    //   * id lanes = the 16-bit picked material id: low byte in gAlbedo.A, high byte in
+    //                gMaterial.A (id 0 on the mask == 0 arms).
+    //   * gMaterial= (shadow, ao, mask, id_hi): the A1 soft-shadow visibility (R), the A2 AO
     //                factor (G), and the SDF-lit selector (B). The resolve modulates the
     //                DIRECT term by shadow and the AMBIENT term by ao when mask == 1, and
     //                passes gAlbedo through unchanged when mask == 0 (mesh/bg 0%-gate).
@@ -1843,8 +1848,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
         }
 
         mask = 1.0;                              // SDF-LIT (the resolve runs Cook-Torrance)
-        oct = oct_encode(n);                       // octahedral normal -> gNormal.RG
-        id_ba = pack_material_id_ba(mat_id);     // 16-bit material id -> gNormal.BA
+        oct = oct_encode(n);                       // octahedral normal -> gNormal (RG16)
+        id_ba = pack_material_id_ba(mat_id);     // 16-bit material id -> gAlbedo.A / gMaterial.A
     } else if (has_mesh) {
         base = MESH_COLOR;                         // mesh arm: mask = 0 (resolve pass-through)
     } else {
@@ -1862,14 +1867,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // is byte-identical to pre-P5. (Decision 1 / the 4-state table.)
     bool own_pixel = !has_mesh || (hit && t < t_mesh);
 
-    // PBR MVP-2 WRITES, gated by ownership (Decision 2). The resolve reads gNormal (oct +
-    // id), gAlbedo (raw base), and gMaterial (shadow, ao, mask), fetches `materials[id]`,
+    // PBR MVP-2 WRITES, gated by ownership (Decision 2). The resolve reads gNormal (oct),
+    // gAlbedo (raw base + id lo), and gMaterial (shadow, ao, mask + id hi), fetches `materials[id]`,
     // and runs Cook-Torrance. On `!own_pixel` the three ATTRIBUTE lanes are skipped — the
     // raster's fragment is the single producer for this texel.
     if (own_pixel) {
-        gAlbedo[uint2(px, py)] = float4(clamp(base, 0.0, 1.0), 1.0);
-        gNormal[uint2(px, py)] = float4(oct.x, oct.y, id_ba.x, id_ba.y);
-        gMaterial[uint2(px, py)] = float4(shadow, ao, mask, 1.0);
+        gAlbedo[uint2(px, py)] = float4(clamp(base, 0.0, 1.0), id_ba.x);
+        gNormal[uint2(px, py)] = oct;
+        gMaterial[uint2(px, py)] = float4(shadow, ao, mask, id_ba.y);
     } else if (has_mesh) {
         // Render P7-r2: the SDF casts a CLEAN ANALYTIC soft shadow + contact AO onto the RASTER
         // mesh — noise-free by construction (the marcher's own sdf_soft_shadow/sdf_ao over the
@@ -1878,11 +1883,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // applies R -> the primary directional (the CAST SHADOW) and G -> the ambient (the CONTACT
         // AO), with mask staying the raster's 1.0. Reads the raster mesh normal back from the
         // already-bound gNormal (no new descriptor; the raster->marcher barrier makes it visible).
-        // Gated by `lighting_flags` — the 0%-gate: flags == 0 writes (1,1,1,1), byte-identical to
-        // the raster's (shadow=1, ao=1, mask=1) default this branch would otherwise leave standing.
-        float mesh_shadow = 1.0;
-        float mesh_ao = 1.0;
+        // Gated by `lighting_flags` — the 0%-gate: with flags == 0 nothing is written and the
+        // raster's (shadow=1, ao=1, mask=1, id_hi) texel stands. IBL1 P1: gMaterial.A carries the
+        // raster's material-id high byte, so the store below reads it back and keeps it (a
+        // read-modify-write of this pixel only; the frame graph already declares RW here).
         if (pc.lighting_flags != 0u) {
+            float mesh_shadow = 1.0;
+            float mesh_ao = 1.0;
             float3 P_mesh = ro + rd * t_mesh;
             float3 N_mesh = oct_decode(gNormal[uint2(px, py)].rg);
             float3 light = normalize(pc.light_dir);
@@ -1900,8 +1907,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
             if (pc.lighting_flags & LIGHTING_FLAG_AO) {
                 mesh_ao = sdf_ao(P_mesh, N_mesh);
             }
+            float id_hi = gMaterial[uint2(px, py)].a;
+            gMaterial[uint2(px, py)] = float4(mesh_shadow, mesh_ao, 1.0, id_hi);
         }
-        gMaterial[uint2(px, py)] = float4(mesh_shadow, mesh_ao, 1.0, 1.0);
     }
     // Lighting L0b (C2) / Decision 3 + Render P7/P5-r1b UNLOCK: gViewT is the third + last
     // terminal write site and is ALWAYS written (the exactly-once contract is structurally

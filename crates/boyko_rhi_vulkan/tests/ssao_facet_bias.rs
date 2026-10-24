@@ -15,7 +15,8 @@
 //! traced from, instantiated over `f32`, behind the device's exact tap seam (the pixel-radius
 //! clamp, the Hilbert+R2 dither, the slice rotation, the forward reconstruct). The G-buffer is
 //! ray-cast here from the showcase's own sphere (`uv_sphere(1.0, 48, 64)`), with the producers'
-//! 8-bit octahedral normal store.
+//! COARSEST octahedral normal store, 8-bit: the VB split's thin normal still stores oct8, the
+//! Deferred gNormal stores oct16 since IBL1 P1 (finer, so the oct8 fixture bounds both gathers).
 //!
 //! The tests:
 //!   * [`the_fixture_tilt_is_inside_the_hbao_plus_margin`] — fixture validity: the largest
@@ -39,8 +40,8 @@ use boyko_rhi_vulkan::goldens::{MarcherAttributes, golden_ssao_attributes_derive
 use boyko_shaderdsl::cf::EvalCf;
 use boyko_shaderdsl::oct::oct_encode_body;
 
-/// The largest angular error of the producers' 8-bit octahedral normal store, as a sine (the
-/// SSAOM research measured 0.942° at most, sin = 0.0164; rounded up).
+/// The largest angular error of the producers' coarsest (8-bit, the VB thin normal) octahedral
+/// normal store, as a sine (the SSAOM research measured 0.942° at most, sin = 0.0164; rounded up).
 const OCT8_MAX_SIN_ERROR: f32 = 0.0165;
 
 /// HBAO+'s documented angle-bias default — the value the fixture tilt must clear.
@@ -282,8 +283,9 @@ fn cast_floor(ro: [f32; 3], rd: [f32; 3]) -> Option<Hit> {
     })
 }
 
-/// The producers' 8-bit octahedral normal store: the eDSL `oct_encode` (the body the HLSL
-/// `oct_encode` is spliced from), then the UNORM8 round-half-up.
+/// The producers' coarsest (8-bit) octahedral normal store: the eDSL `oct_encode` (the body the
+/// HLSL `oct_encode` is spliced from), then the UNORM8 round-half-up; fed to the G-buffer model
+/// through `oct_codes_from_oct8`, which keeps that 8-bit normal bit for bit.
 fn oct8(n: [f32; 3]) -> [u8; 2] {
     let ret = Cell::new([0.0f32; 2]);
     let _ = oct_encode_body::<EvalCf>(n, &ret);
@@ -309,7 +311,7 @@ fn build_gbuffer(
 ) -> GBuffer {
     let background = MarcherAttributes {
         base_rgb: [0, 0, 0],
-        oct_rg: [128, 128],
+        oct_rg: boyko_rhi_vulkan::goldens::oct_codes_from_oct8([128, 128]),
         mat_id: 0,
         shadow: 255,
         ao: 255,
@@ -331,7 +333,7 @@ fn build_gbuffer(
             attrs.push(match hit {
                 Some(hit) => MarcherAttributes {
                     base_rgb: [200, 200, 200],
-                    oct_rg: oct8(hit.n),
+                    oct_rg: boyko_rhi_vulkan::goldens::oct_codes_from_oct8(oct8(hit.n)),
                     mat_id: 0,
                     shadow: 255,
                     ao: 255,

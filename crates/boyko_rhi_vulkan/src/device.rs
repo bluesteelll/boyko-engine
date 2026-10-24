@@ -272,7 +272,8 @@ pub struct DeviceCaps {
     pub viewt_storage_format_ok: bool,
     /// Whether `R8G8B8A8_UNORM` supports `COLOR_ATTACHMENT` under OPTIMAL tiling (Render
     /// P5-r0: the mesh raster pass A writes the G-buffer color images as MRT color
-    /// attachments). Always `true` on a booted context — boot fails with
+    /// attachments — albedo / material; the `R16G16_UNORM` normal is a `REQUIRED_FORMATS` row
+    /// since IBL1 P1). Always `true` on a booted context — boot fails with
     /// [`BootError::GbufferColorAttachmentFormatUnsupported`] otherwise.
     pub gbuffer_color_attachment_format_ok: bool,
     /// Whether `R8_UNORM` supports `STORAGE_IMAGE` under OPTIMAL tiling (Render P7: the SSAO
@@ -1234,7 +1235,8 @@ impl VulkanContext {
         if !device_caps.viewt_storage_format_ok {
             fail!(BootError::ViewtStorageFormatUnsupported);
         }
-        // Render P5-r0: the mesh raster pass A writes the R8G8B8A8_UNORM G-buffer images as
+        // Render P5-r0: the mesh raster pass A writes the R8G8B8A8_UNORM G-buffer images (albedo /
+        // material; the R16G16_UNORM normal is a REQUIRED_FORMATS row, IBL1 P1) as
         // MRT COLOR attachments — fail-fast here (mirroring the storage checks) so the
         // producer can never device-lost on an unsupported usage. RGBA8_UNORM
         // color-attachment renderability is mandatory in Vulkan (core-guaranteed on the RTX).
@@ -3430,10 +3432,16 @@ pub(crate) const REQUIRED_FORMATS: [RequiredFormat; 2] = [
     },
     RequiredFormat {
         name: "gNormal: R16G16_UNORM",
-        vk_format: boyko_rhi::Format::R16G16Unorm.as_i32(),
+        vk_format: crate::present::GNORMAL_FORMAT.as_i32(),
         bits: VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
     },
 ];
+
+// The gNormal row's name spells `GNORMAL_FORMAT`; a flip of the constant must rename the row too.
+const _: () = assert!(
+    matches!(crate::present::GNORMAL_FORMAT, boyko_rhi::Format::R16G16Unorm),
+    "GNORMAL_FORMAT moved: rename REQUIRED_FORMATS' gNormal row (and its bits) with it"
+);
 
 // The lit row's name spells `LIT_FORMAT`; a flip of the constant must rename the row too.
 const _: () = assert!(

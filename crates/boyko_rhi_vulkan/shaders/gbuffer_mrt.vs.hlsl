@@ -63,7 +63,8 @@
 // `-D PER_INSTANCE_MATERIAL=1`): reads a per-instance material PAYLOAD SSBO (binding 1,
 // VERTEX) at the SAME `pc.base_instance + instance_id` index the model-matrix arm
 // already uses, and forwards it flat (`nointerpolation`) to the fragment: the id, which
-// packs into `gNormal.BA` instead of the compile-time default id (unchanged from F8),
+// packs into the id lanes (`gNormal.BA` at F8; `gAlbedo.A` / `gMaterial.A` since IBL1 P1)
+// instead of the compile-time default id (unchanged from F8),
 // and (F8+, owner: material-drives-albedo-too) the material's `base_color`, which the
 // PM fragment sources `gAlbedo` from instead of the mesh vertex color. EVERYTHING new
 // is gated under `#ifdef PER_INSTANCE_MATERIAL`, so the base (no-define) compile is

@@ -2641,7 +2641,7 @@ mod ssao_resolve_combine_tests {
                 for &view_t in &[2.5_f32, 1.0e30] {
                     v.push(MarcherAttributes {
                         base_rgb: [180, 120, 90],
-                        oct_rg: [200, 60],
+                        oct_rg: crate::goldens::oct_codes_from_oct8([200, 60]),
                         mat_id: 0,
                         shadow: 200,
                         ao,
@@ -2726,7 +2726,7 @@ mod ssao_resolve_combine_tests {
         let rd = [0.1, 0.05, -0.99];
         let attrs = MarcherAttributes {
             base_rgb: [180, 120, 90],
-            oct_rg: [200, 60],
+            oct_rg: crate::goldens::oct_codes_from_oct8([200, 60]),
             mat_id: 0,
             shadow: 255,
             ao: 255,
@@ -2784,7 +2784,7 @@ mod ssao_gather_tests {
                 let (lit, view_t) = field(px as i32, py as i32);
                 gbuf.push(MarcherAttributes {
                     base_rgb: [0, 0, 0],
-                    oct_rg: OCT_RG,
+                    oct_rg: crate::goldens::oct_codes_from_oct8(OCT_RG),
                     mat_id: 0,
                     shadow: 255,
                     ao: 255,
@@ -3041,7 +3041,7 @@ mod ssao_atrous_tests {
                 ssao.push(byte);
                 gbuf.push(MarcherAttributes {
                     base_rgb: [0, 0, 0],
-                    oct_rg: [128, 128],
+                    oct_rg: crate::goldens::oct_codes_from_oct8([128, 128]),
                     mat_id: 0,
                     shadow: 255,
                     ao: 255,

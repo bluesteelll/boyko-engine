@@ -27,7 +27,7 @@ const RD: [f32; 3] = [0.0, 0.0, -1.0];
 fn lit_attrs(view_t: f32) -> MarcherAttributes {
     MarcherAttributes {
         base_rgb: [200, 200, 200],
-        oct_rg: [128, 128], // oct (0.5, 0.5) -> +Z normal
+        oct_rg: boyko_rhi_vulkan::goldens::oct_codes_from_oct8([128, 128]), // oct (0.5, 0.5) -> +Z normal
         mat_id: 0,
         shadow: 255,
         ao: 255,

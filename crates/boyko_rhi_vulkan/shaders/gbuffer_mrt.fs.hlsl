@@ -6,11 +6,16 @@
 // first-class (full Cook-Torrance, identical to an SDF pixel). After r1's ownership
 // gate the marcher YIELDS mesh-owned pixels and this fragment stands.
 //
-//   SV_Target0 (gAlbedo,   R8G8B8A8_UNORM): float4(saturate(base), 1) — RAW LINEAR base.
-//   SV_Target1 (gNormal,   R8G8B8A8_UNORM): (oct.x, oct.y, id_ba.x, id_ba.y) — the
-//     octahedral world normal in RG + the 16-bit material id in BA.
-//   SV_Target2 (gMaterial, R8G8B8A8_UNORM): float4(1, 1, 1, 1) — shadow = ao = 1,
-//     mask = 1 (SDF-lit selector ON), alpha 1.
+//   SV_Target0 (gAlbedo,   R8G8B8A8_UNORM): float4(saturate(base), id_ba.x) — RAW LINEAR
+//     base + the 16-bit material id's LOW byte in A.
+//   SV_Target1 (gNormal,   R16G16_UNORM): oct — the octahedral world normal, 16 bits per
+//     channel (IBL1 P1, verify M1: the 8-bit oct normal stepped every polished highlight).
+//   SV_Target2 (gMaterial, R8G8B8A8_UNORM): float4(1, 1, 1, id_ba.y) — shadow = ao = 1,
+//     mask = 1 (SDF-lit selector ON), the material id's HIGH byte in A.
+//
+// IBL1 P1 moved the id out of gNormal's BA lanes into the two alpha lanes no shader read
+// before, so every variant below was re-DXC'd (the manifest's IBL1 P1 section); each
+// "byte-frozen" note in this header dates from its own rung.
 //
 // OQ-r0-B: `base` = interpolated LINEAR vertex color; the mesh material id is the default
 // `0` (the default material). No material-table fetch / texturing (a charted follow-up).
@@ -44,7 +49,7 @@
 // Asset-streaming plan F8 PER_INSTANCE_MATERIAL variant (opt-in, compiled with
 // `-D PER_INSTANCE_MATERIAL=1`): reads the flat per-instance `mat_id` varying the VS
 // forwards and packs IT (instead of the compile-time `DEFAULT_MESH_MATERIAL_ID`) into
-// `gNormal.BA`. The WHOLE `id_ba` statement is under `#ifdef/#else/#endif`, with the
+// the id lanes (`gAlbedo.A` / `gMaterial.A` since IBL1 P1). The WHOLE `id_ba` statement is under `#ifdef/#else/#endif`, with the
 // `#else` arm CHARACTER-FOR-CHARACTER the base line, so the base (no-`-D`) compile
 // emits the identical token stream there — the `gbuffer_mrt.fs.spv` golden is untouched
 // (mirrors the MOTION_VECTORS discipline above; the two variants are mutually
@@ -144,7 +149,7 @@ struct PsIn {
 
 struct PsOut {
     float4 albedo   : SV_Target0;  // -> gAlbedo
-    float4 normal   : SV_Target1;  // -> gNormal
+    float2 normal   : SV_Target1;  // -> gNormal (R16G16_UNORM, IBL1 P1)
     float4 material : SV_Target2;  // -> gMaterial
 #ifdef MOTION_VECTORS
     float2 motion_vec : SV_Target3; // -> motion_vec (R16G16_SFLOAT) Δuv, prev - cur
@@ -196,10 +201,11 @@ float2 oct_encode(float3 n) {
     // === GENERATED oct_encode END ===
 }
 
-// Pack a 16-bit material id into the B + A channels of an RGBA8 texel (low byte -> B,
-// high byte -> A). The BODY is eDSL-single-sourced
+// Pack a 16-bit material id into two UNORM8 lanes (low byte -> .x, stored in gAlbedo.A;
+// high byte -> .y, stored in gMaterial.A — IBL1 P1). The BODY is eDSL-single-sourced
 // (boyko_shaderdsl::pack::pack_material_id_ba_body); the resolve reconstructs
-// `id = round(b*255) | (round(a*255) << 8)`. Spliced verbatim from the marcher's span.
+// `id = round(albedo.a*255) | (round(material.a*255) << 8)`. Spliced verbatim from the
+// marcher's span.
 float2 pack_material_id_ba(uint id) {
     // === GENERATED pack_material_id_ba BEGIN === (boyko_shaderdsl::pack::pack_material_id_ba_body)
     uint lo = id & 255u;
@@ -241,7 +247,22 @@ uint mesh_face_flip(uint front_ccw, uint face) {
 
 PsOut main(PsIn input, bool is_front : SV_IsFrontFace) {
     PsOut output;
-    // gAlbedo: RAW LINEAR base color (saturated to the UNORM range), alpha 1.
+    // The 16-bit material id as two UNORM8 lanes (low byte -> .x, high byte -> .y). IBL1 P1:
+    // they ride the alpha lanes of gAlbedo (.x) and gMaterial (.y) — no shader reads either
+    // alpha otherwise — so gNormal carries a 16-bit-per-channel oct normal. Asset-streaming
+    // plan F8: the PER_INSTANCE_MATERIAL variant packs the REAL per-instance id (already CPU
+    // OOB-clamped, F8 §4.2); T6c's TEXTURED variant its material's id; the base compile the
+    // compile-time default.
+#ifdef TEXTURED
+    float2 id_ba = pack_material_id_ba(input.tex_mat_id);
+#else
+#ifdef PER_INSTANCE_MATERIAL
+    float2 id_ba = pack_material_id_ba(input.mat_id);
+#else
+    float2 id_ba = pack_material_id_ba(DEFAULT_MESH_MATERIAL_ID);
+#endif
+#endif
+    // gAlbedo: RAW LINEAR base color (saturated to the UNORM range), the id's low byte in A.
     // F8+ (owner: material-drives-albedo-too): the PER_INSTANCE_MATERIAL variant sources
     // it from the per-instance material's `base_color` instead of the mesh vertex color,
     // so a material genuinely controls what the mesh looks like (not just `mrr`). The
@@ -263,15 +284,15 @@ PsOut main(PsIn input, bool is_front : SV_IsFrontFace) {
     float3 tex_albedo_out = (input.tex_albedo != 0u)
         ? albedo_tex_rgb * input.tex_base_color.rgb
         : input.tex_base_color.rgb;
-    output.albedo = float4(saturate(tex_albedo_out), 1.0);
+    output.albedo = float4(saturate(tex_albedo_out), id_ba.x);
 #else
 #ifdef PER_INSTANCE_MATERIAL
-    output.albedo = float4(saturate(input.mat_albedo), 1.0);
+    output.albedo = float4(saturate(input.mat_albedo), id_ba.x);
 #else
-    output.albedo = float4(saturate(input.color.rgb), 1.0);
+    output.albedo = float4(saturate(input.color.rgb), id_ba.x);
 #endif
 #endif
-    // gNormal: the octahedral world normal in RG + the packed 16-bit material id in BA.
+    // gNormal: the octahedral world normal, 16 bits per channel (R16G16_UNORM).
     float3 n = normalize(input.normal);
 #ifdef TEXTURED
     // Tangent-space normal mapping (T6c plan Decision 3): renormalize the interpolated
@@ -308,24 +329,10 @@ PsOut main(PsIn input, bool is_front : SV_IsFrontFace) {
     // back face is negated before the encode.
     n = (mesh_face_flip((uint)is_front, pc.use_model_matrix) != 0u) ? -n : n;
     float2 oct = oct_encode(n);
-    // Asset-streaming plan F8: the PER_INSTANCE_MATERIAL variant packs the REAL
-    // per-instance id (already CPU OOB-clamped, F8 §4.2); the base compile keeps the
-    // compile-time default (the `#else` arm is CHARACTER-FOR-CHARACTER the pre-F8 line —
-    // the frozen-base guarantee by construction, F8 §3.2). T6c: the SAME wrap discipline as
-    // gAlbedo above — the inner block is byte-UNMODIFIED.
-#ifdef TEXTURED
-    float2 id_ba = pack_material_id_ba(input.tex_mat_id);
-#else
-#ifdef PER_INSTANCE_MATERIAL
-    float2 id_ba = pack_material_id_ba(input.mat_id);
-#else
-    float2 id_ba = pack_material_id_ba(DEFAULT_MESH_MATERIAL_ID);
-#endif
-#endif
-    output.normal = float4(oct.x, oct.y, id_ba.x, id_ba.y);
-    // gMaterial: shadow = 1, ao = 1, mask = 1 (SDF-lit -> Cook-Torrance in the resolve).
-    // Analytic mesh shadow/AO via the SDF march is a charted follow-up, NOT P5.
-    output.material = float4(1.0, 1.0, 1.0, 1.0);
+    output.normal = oct;
+    // gMaterial: shadow = 1, ao = 1, mask = 1 (SDF-lit -> Cook-Torrance in the resolve), the
+    // id's high byte in A. Analytic mesh shadow/AO via the SDF march is the composite's job.
+    output.material = float4(1.0, 1.0, 1.0, id_ba.y);
 #ifdef TEXTURED
     // gPbr (T6c plan Decision 5): [metallic, roughness, AO-modulation,
     // emissive-luminance-modulation]. glTF channel convention for the packed metal-rough

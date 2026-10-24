@@ -158,7 +158,7 @@ fn synthetic_gbuffer<F: Fn(i32, i32) -> (bool, f32)>(field: F) -> Vec<MarcherAtt
             let (lit, view_t) = field(px as i32, py as i32);
             gbuf.push(MarcherAttributes {
                 base_rgb: [0, 0, 0],
-                oct_rg: OCT_RG,
+                oct_rg: boyko_rhi_vulkan::goldens::oct_codes_from_oct8(OCT_RG),
                 mat_id: 0,
                 shadow: 255,
                 ao: 255,

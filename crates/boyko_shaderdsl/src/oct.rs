@@ -2,7 +2,8 @@
 //! lands the mutable `float3`/`float2` locals + the `float2` component ops).
 //!
 //! `oct_encode` (`sdf_gbuffer_composite.hlsl:507`) folds a UNIT normal `n` into a `[0,1]^2`
-//! octahedral pair stored in the RG channels of the RGBA8 `gNormal` target (the resolve decodes it via
+//! octahedral pair stored in the R16G16_UNORM `gNormal` target (IBL1 P1; the RG channels of an RGBA8
+//! target before) (the resolve decodes it via
 //! `oct_decode`). This module authors the BODY ONCE over the control-flow axis `C: Cf`, between the
 //! `// === GENERATED oct_encode BEGIN/END ===` sentinels INSIDE `oct_encode`; the hand-written
 //! signature `float2 oct_encode(float3 n) {` + the closing `}` stay un-generated (framing (b)).

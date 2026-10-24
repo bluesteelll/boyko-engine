@@ -55,7 +55,7 @@ fn sweep_attrs() -> Vec<MarcherAttributes> {
                 for &(ox, oy) in &[(128u8, 128u8), (200u8, 60u8), (10u8, 240u8)] {
                     v.push(MarcherAttributes {
                         base_rgb: [180, 120, 90],
-                        oct_rg: [ox, oy],
+                        oct_rg: boyko_rhi_vulkan::goldens::oct_codes_from_oct8([ox, oy]),
                         mat_id: 0,
                         shadow,
                         ao,
@@ -123,7 +123,7 @@ fn exposure_is_identity_at_one() {
     let mats = materials();
     let attrs = MarcherAttributes {
         base_rgb: [200, 150, 100],
-        oct_rg: [140, 120],
+        oct_rg: boyko_rhi_vulkan::goldens::oct_codes_from_oct8([140, 120]),
         mat_id: 0,
         shadow: 255,
         ao: 255,
@@ -142,7 +142,7 @@ fn exposure_above_one_brightens_a_lit_pixel() {
     let mats = materials();
     let attrs = MarcherAttributes {
         base_rgb: [200, 150, 100],
-        oct_rg: [140, 120],
+        oct_rg: boyko_rhi_vulkan::goldens::oct_codes_from_oct8([140, 120]),
         mat_id: 0,
         shadow: 255,
         ao: 255,
@@ -176,7 +176,7 @@ fn mask_zero_renders_sky_when_present_else_stores_the_background_constant() {
     let mats = materials();
     let attrs = MarcherAttributes {
         base_rgb: [33, 77, 211],
-        oct_rg: [128, 128],
+        oct_rg: boyko_rhi_vulkan::goldens::oct_codes_from_oct8([128, 128]),
         mat_id: 0,
         shadow: 0,
         ao: 0,

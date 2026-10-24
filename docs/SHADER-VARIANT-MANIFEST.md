@@ -67,7 +67,7 @@ reason their `OpArrayLength` census row is 0.*
 |---|---|---|---|---|
 | base | — | — | `gbuffer_mrt.vs.spv` / `gbuffer_mrt.fs.spv` | 3 MRT attachments (albedo / normal+id / material). |
 | motion | `1` | — | `gbuffer_mrt_mv.vs.spv` / `gbuffer_mrt_mv.fs.spv` | **+ a 4th MRT** carrying per-pixel Δuv (prev-instance ring @1 + `MotionCam` UBO @2); static instance+camera ⇒ (0,0). |
-| material | — | `1` | `gbuffer_mrt_pm.vs.spv` / `gbuffer_mrt_pm.fs.spv` | per-instance material PAYLOAD SSBO @1 (VERTEX) — `gAlbedo` sources the material's `base_color`, `gNormal.BA` packs the real material id; no 4th MRT. |
+| material | — | `1` | `gbuffer_mrt_pm.vs.spv` / `gbuffer_mrt_pm.fs.spv` | per-instance material PAYLOAD SSBO @1 (VERTEX) — `gAlbedo` sources the material's `base_color`, the id lanes (`gAlbedo.A` / `gMaterial.A` since IBL1 P1; `gNormal.BA` before) pack the real material id; no 4th MRT. |
 | motion + material (F8-mv) | `1` | `1` | `gbuffer_mrt_mvpm.vs.spv` / `gbuffer_mrt_mvpm.fs.spv` | both deltas above, combined: the 4th MRT Δuv AND the material-driven albedo/id. The nested `#if defined(MOTION_VECTORS)` inside the `PER_INSTANCE_MATERIAL` block moves `instance_materials` from binding 1 → binding 3 (bindings 1/2 stay `prev_instances`/`MotionCam`) to resolve the collision — the `motion`/`material` rows' own `.spv` are untouched by this move (the `#else` arm is byte-identical to their source). |
 
 Reachability note: all four rows are independently reachable (`motion`/`material` are each opt-in
@@ -782,10 +782,20 @@ adds pipeline members, not a variant axis. The facing bits travel in `VbInstance
 ## Shadow-denoise compute (separate shaders, not `-D` variants of the resolve)
 
 These are distinct `.hlsl`, listed here for the temporal/spatial pipeline picture, not because they are
-`-D` variants: `shadow_atrous.comp` (spatial edge-stopping à-trous over `gShadowVis`) and
+`-D` variants of the resolve: `shadow_atrous.comp` (spatial edge-stopping à-trous over `gShadowVis`) and
 `shadow_temporal.comp` (reproject + variance-clamp + accumulate against the cross-frame history pool).
 The mode matrix (None / Spatial / Temporal / Both) is a **host** selection of which of these passes run
 between the VIS producer and the DENOISED consumer — see `BOYKO_SHADOW_DENOISE`.
+
+`shadow_atrous.comp.hlsl` has ONE interface axis since IBL1 P1 (critique C1): it serves the Deferred
+chain, which binds the G-buffer's R16G16_UNORM `gNormal` at @2, and the VB split, which binds `vb_geo`'s
+R8G8B8A8_UNORM `thin_normal` there, on the same 6-binding layout. A storage image's declared format must
+match its view, so each chain dispatches its own module through its own pipeline:
+
+| Variant | `-D VB_THIN` | `.spv` | dxc `-T` | Interface |
+|---|---|---|---|---|
+| base (Deferred) | — | `shadow_atrous.comp.spv` | `cs_6_0` | @2 `gNormal` `rg16` / `float2` (`ShadowVisActivation::atrous_pipeline`) |
+| VB_THIN (VB split) | `1` | `shadow_atrous_vb.comp.spv` | `cs_6_0` | @2 `gThinNormal` `rgba8` / `float4` (`ShadowVisActivation::atrous_pipeline_thin`); the module is the pre-P1 `shadow_atrous.comp.spv` code, the variable's `OpName` aside (`spirv-dis` diff: one line) |
 
 ## `sdf_mesh_shadow.comp.hlsl` — the VB SDF-on-mesh shadow + contact-AO prepass (compute)
 
@@ -1107,6 +1117,30 @@ six lit producers' inline Lagarde specular occlusion became one shared `spec_ao_
 | `vb_shade_split.comp.hlsl` | `vb_shade_split` 54,780; `_tex` 62,148; `_hwrt` 44,968; `_tex_hwrt` 52,336 (sizes equal) | the same | `vb_lit_producer_spv_sync.rs` |
 | `sdf_forward_march.comp.hlsl` | `sdf_forward_march` 157,200; `_sdfonly` 156,704; `_viewt` 157,480; `_sdfonly_viewt` 156,940 (sizes equal) | the same | `marcher_spv_sync.rs` |
 | `forward_sky.fs.hlsl` | `forward_sky.fs` 5,104 — re-DXC'd byte-identical (`cmp`): it includes `pbr_lighting.hlsli` but never calls the new function | nothing | none names it — the manual `cmp` is the record |
+
+## IBL1 P1 — gNormal RG16 (16 rows re-DXC'd, one new row)
+
+Render-wave lane IBL1 P1 (`ibl1/cut.md` §1.1 D-P1, verify M1) moved the Deferred G-buffer normal from the
+RG lanes of an `R8G8B8A8_UNORM` image to its own `R16G16_UNORM` (`GNORMAL_FORMAT`): oct16, ≈ 0.0013° mean /
+0.0037° max against oct8's 0.34° / 0.95°. The 16-bit material id moved to the two alpha lanes no shader
+read before (`gAlbedo.A` = low byte, `gMaterial.A` = high byte), so every normal access stays 4 B/px. Every
+writer and reader of `gNormal` re-DXC'd under its header's recipe (VulkanSDK 1.4.350.0 `dxc`); no eDSL
+leaf changed (`oct_encode` / `oct_decode` / `pack_material_id_ba` keep their bodies, only where their
+outputs are stored moved). The three `sdf_ssao_vb_*` modules re-DXC'd byte-identical (their `VB_THIN` arm
+reads `gThinNormal`, untouched).
+
+| Source | Re-emitted `.spv` (bytes before → after) | What moved | Byte gate |
+|---|---|---|---|
+| `gbuffer_mrt.fs.hlsl` | `gbuffer_mrt.fs` 3,132 → 3,080; `_mv` 3,612 → 3,544; `_pm` 3,400 → 3,348; `_mvpm` 3,880 → 3,812; `_tex` 6,944 → 6,892 | `SV_Target1` is `float2` (the oct normal); `albedo.a = id_ba.x`, `material.a = id_ba.y` | `gbuffer_mrt_fs_spv_sync.rs` |
+| `sdf_gbuffer_composite.hlsl` | 168,152 → 168,124 | `gNormal` `rg16` / `float2`; the id lanes; the neutral background id 0; the mesh arm writes `gMaterial` only under `lighting_flags != 0`, keeping the raster's `.a` (id high byte) | `marcher_spv_sync.rs` |
+| `deferred_pbr.hlsl` | `deferred_pbr` 71,296 → 71,372; `_wrap` 71,628 → 71,704; `_hwrt` 64,852 → 64,928; `_hwrt_denoised` 60,920, `_hwrt_vis` 10,132 and `_hwrt_vis_mv` 11,108 (sizes equal, bytes moved: the `gNormal` image type) | `gNormal` `rg16` / `float2`; the id from `albedo_texel.a` / `material_texel.a` | `cluster_grid_read_bound.rs` |
+| `shadow_atrous.comp.hlsl` | `shadow_atrous` 59,700 → 59,624; **new** `shadow_atrous_vb` 59,704 | base `gNormal` `rg16` / `float2`; the `VB_THIN` row above | `gnormal_precision.rs` (`gnormal_slot_spirv_formats`) |
+| `sdf_ssao_{low,medium,high}.comp.hlsl` | `sdf_ssao_low` 38,148 → 38,224; `_medium` 47,680 → 47,756; `_high` 238,752 → 238,828; `sdf_ssao_vb_*` byte-identical | the base `gNormal` `rg16` / `float2` | `ssao_edsl_sync.rs` |
+
+`gnormal_precision.rs` pins the layout on every side: the HLSL declarations and stores (T-N4), the
+committed modules' declared formats against `GNORMAL_FORMAT` / `VB_THIN_NORMAL_FORMAT` (T-N6), and the
+Rust bind / record side of the shared à-trous (T-N7). `lit_format_census.rs` classifies the five mesh-MRT
+pipelines: their `color_formats` must name `GBUFFER_MRT_COLOR_FORMATS`, the array the rings are created from.
 
 ## Why these stay N `.spv` (do NOT try to spec-const-collapse)
 

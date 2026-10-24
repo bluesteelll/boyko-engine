@@ -132,7 +132,7 @@ pub struct PerInstanceMaterial {
     /// `Assets<Material>` at gather time — the PM fragment's `gAlbedo` source.
     /// Offset 0.
     pub base_color: [f32; 4],
-    /// The OOB-clamped material slot (F8 §4.2) — packed into `gNormal.BA` by the PM
+    /// The OOB-clamped material slot (F8 §4.2) — packed into the G-buffer id lanes (`gAlbedo.A` / `gMaterial.A`, IBL1 P1) by the PM
     /// fragment shader, unchanged from F8. Offset 16.
     pub id: u32,
     /// Pads the element to a 32-byte stride (a whole `float4` lane) — unused, always
@@ -349,7 +349,7 @@ pub struct MeshRenderScratch {
     /// [`upload_instance_materials`](crate::upload::upload_instance_materials) into the
     /// FIF-ringed instance-material SSBO the `PER_INSTANCE_MATERIAL` gbuffer VS indexes
     /// as `instance_materials[base_instance + SV_InstanceID]` — the VS forwards both the
-    /// id (packed into `gNormal.BA`) and `base_color` (the PM fragment's `gAlbedo`
+    /// id (packed into the G-buffer id lanes) and `base_color` (the PM fragment's `gAlbedo`
     /// source) to the fragment. Host-side scratch; the BASE raster path never reads it.
     /// `clear()` + scatter, backing reservation persists.
     pub material_ids: ScratchColumn<PerInstanceMaterial>,

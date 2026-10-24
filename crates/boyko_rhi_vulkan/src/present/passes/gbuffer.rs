@@ -714,12 +714,15 @@ impl Renderer<'_> {
         // G-buffer, so a pixel with NO mesh fragment holds the cleared neutral, which the
         // marcher (owning that pixel) overwrites anyway — making the no-mesh 0%-gate
         // trivial AND a depth-failed/missed mesh fragment fall back to a valid mask=0
-        // neutral. The clears pass through the SAME float→UNORM8 `round(c*255)` quantizer
-        // the marcher store uses; 0.05/0.10/0.5/1.0/0.0 are all exact, so the cleared
-        // neutral is bit-identical to a marcher-written neutral.
-        //   albedo  clear = (BACKGROUND.rgb, 1.0)  — the marcher's background base.
-        //   normal  clear = (0.5, 0.5, 0.0, 0.0)   — neutral oct + id=0.
-        //   material clear = (1.0, 1.0, 0.0, 1.0)  — shadow=1, ao=1, mask=0, 1.
+        // neutral. The clears pass through the SAME float→UNORM `round(c*m)` quantizer
+        // the marcher store uses; 0.05/0.10/0.5/1.0/0.0 are all exact (0.5 is the UNORM tie on
+        // either format, the same tie the marcher's 0.5 store meets), so the cleared neutral is
+        // bit-identical to a marcher-written neutral. IBL1 P1: the normal is R16G16_UNORM (its
+        // clear's B/A are discarded) and the material id rides the albedo / material alpha
+        // lanes, so the neutral id 0 is the two 0.0 alphas.
+        //   albedo  clear = (BACKGROUND.rgb, 0.0)  — the marcher's background base, id lo 0.
+        //   normal  clear = (0.5, 0.5, 0.0, 0.0)   — neutral oct.
+        //   material clear = (1.0, 1.0, 0.0, 0.0)  — shadow=1, ao=1, mask=0, id hi 0.
         // These MUST equal the marcher's background-arm constants (sdf_gbuffer_composite.hlsl:
         // BACKGROUND = (0.05, 0.05, 0.1); the Site-A/B mask=0 neutrals).
         let albedo_attachment = VkRenderingAttachmentInfo {
@@ -734,7 +737,7 @@ impl Renderer<'_> {
             store_op: VK_ATTACHMENT_STORE_OP_STORE,
             clear_value: VkClearValue {
                 color: VkClearColorValue {
-                    float32: [0.05, 0.05, 0.1, 1.0],
+                    float32: [0.05, 0.05, 0.1, 0.0],
                 },
             },
         };
@@ -766,7 +769,7 @@ impl Renderer<'_> {
             store_op: VK_ATTACHMENT_STORE_OP_STORE,
             clear_value: VkClearValue {
                 color: VkClearColorValue {
-                    float32: [1.0, 1.0, 0.0, 1.0],
+                    float32: [1.0, 1.0, 0.0, 0.0],
                 },
             },
         };
