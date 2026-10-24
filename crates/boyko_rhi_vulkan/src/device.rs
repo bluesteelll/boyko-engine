@@ -160,7 +160,8 @@ pub enum BootError {
     /// Render wave PX1a (AD-1): the chosen GPU's OPTIMAL tiling of a format every boot creates
     /// lacks a capability the engine uses — a row of `REQUIRED_FORMATS`, the single source for
     /// the query and this refusal (`lit`, the HDR scene colour: sampled, storage, a blended colour
-    /// attachment, linearly filtered). Checked before `vkCreateDevice`, so a device without it
+    /// attachment, linearly filtered; IBL1 P1's `gNormal`: storage and a colour attachment).
+    /// Checked before `vkCreateDevice`, so a device without it
     /// gets this named refusal instead of an image-create fault or an unblendable attachment.
     RequiredFormatMissing {
         /// The row's name (e.g. `"lit: R16G16B16A16_SFLOAT"`).
@@ -3413,15 +3414,26 @@ pub(crate) struct RequiredFormat {
 ///   sky, SSAA's `lit_native`) and BLENDED (the additive particle draw). All five are mandatory for
 ///   `R16G16B16A16_SFLOAT` in Vulkan, so this row refuses no conformant device; it exists so the
 ///   format the engine cannot run without is checked instead of assumed.
-pub(crate) const REQUIRED_FORMATS: [RequiredFormat; 1] = [RequiredFormat {
-    name: "lit: R16G16B16A16_SFLOAT",
-    vk_format: crate::present::LIT_FORMAT.as_i32(),
-    bits: VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
-        | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
-        | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT
-        | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
-        | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT,
-}];
+/// * `gNormal` — the Deferred G-buffer normal (IBL1 P1: oct16 in `R16G16_UNORM`, verify M1). Storage
+///   (the composite's store, the resolve / SSAO / à-trous loads) and a colour attachment (the mesh
+///   raster's MRT@1). Neither bit is in the spec's mandatory table for this format, so both are
+///   probed; every Vulkan 1.3 desktop part advertises them.
+pub(crate) const REQUIRED_FORMATS: [RequiredFormat; 2] = [
+    RequiredFormat {
+        name: "lit: R16G16B16A16_SFLOAT",
+        vk_format: crate::present::LIT_FORMAT.as_i32(),
+        bits: VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+            | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
+            | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT
+            | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
+            | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT,
+    },
+    RequiredFormat {
+        name: "gNormal: R16G16_UNORM",
+        vk_format: boyko_rhi::Format::R16G16Unorm.as_i32(),
+        bits: VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
+    },
+];
 
 // The lit row's name spells `LIT_FORMAT`; a flip of the constant must rename the row too.
 const _: () = assert!(
@@ -5121,10 +5133,11 @@ mod required_format_tests {
         | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
         | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
 
-    /// A fake device whose OPTIMAL tiling of RGBA16F holds `rgba16f_bits` and of every other
-    /// format holds nothing — so a check that queried the wrong format would refuse.
+    /// A fake device whose OPTIMAL tiling of RGBA16F holds `rgba16f_bits`, of RG16_UNORM exactly the
+    /// `gNormal` row's bits, and of every other format nothing — so a check that queried the wrong
+    /// format would refuse, and the lit-row tests stay about the lit row.
     fn device_with(rgba16f_bits: VkFlags) -> impl Fn(i32) -> VkFlags {
-        move |vk_format| if vk_format == RGBA16F { rgba16f_bits } else { 0 }
+        device_with_rows(rgba16f_bits, ALL_GNORMAL_BITS)
     }
 
     #[test]
@@ -5202,8 +5215,11 @@ mod required_format_tests {
     /// The table, pinned to the spec's `VkFormat` / `VkFormatFeatureFlagBits` values rather than to
     /// the constants that spell them.
     #[test]
-    fn the_table_is_exactly_the_lit_row_on_rgba16f_with_its_five_bits() {
+    fn the_table_is_exactly_the_lit_and_gnormal_rows_with_their_bits() {
         let rows: Vec<(&str, i32, u32)> = REQUIRED_FORMATS.iter().map(|r| (r.name, r.vk_format, r.bits)).collect();
-        assert_eq!(rows, [(LIT_ROW, RGBA16F, 0x1 | 0x2 | 0x80 | 0x100 | 0x1000)]);
+        assert_eq!(
+            rows,
+            [(LIT_ROW, RGBA16F, 0x1 | 0x2 | 0x80 | 0x100 | 0x1000), (GNORMAL_ROW, RG16_UNORM, 0x2 | 0x80)]
+        );
     }
 }
